@@ -1,0 +1,12 @@
+--- a/Platform/Star2LtePkg/Drivers/Star2LteUfsHcDxe/Star2LteUfsHcDxe.c
++++ b/Platform/Star2LtePkg/Drivers/Star2LteUfsHcDxe/Star2LteUfsHcDxe.c
+@@ -3247,7 +3247,8 @@
+       UINT8  Op = MmioRead8 ((UINTN)Ucd + 16u);
+       if ((Op == 0x28u) || (Op == 0x88u)) {
+         UfsHcDiagSet (17, MmioRead32 ((UINTN)Ucd + 16u));
+-        UfsHcDiagSet (18, MmioRead32 ((UINTN)Ucd + 22u));
++        UfsHcDiagSet (18, (UINT32)MmioRead16 ((UINTN)Ucd + 22u) |   // Starbite: Ucd+22 is not
++                          ((UINT32)MmioRead16 ((UINTN)Ucd + 24u) << 16));  // 4-byte aligned
+         //
+         // *** CYCLE 77: capture the LIVE READ's EDTL + PRDT ENTRY at RING time (freshly built by EDK2,
+         // CORRECT slot - unlike the cycle-76 stuck-poll which caught a zeroed/abandoned retry). DW7 is

@@ -1,0 +1,20 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
+@@ -139,7 +139,7 @@
+ // flushes, and a tight bootloop is impossible (>10 s/iteration; Download mode always escapes).
+ //
+ #ifndef STAR2LTE_AUTO_RECOVERY
+-#define STAR2LTE_AUTO_RECOVERY          1
++#define STAR2LTE_AUTO_RECOVERY          0   /* Starbite: stay on the panel, no TWRP divert */
+ #endif
+ #ifndef STAR2LTE_AUTO_RECOVERY_DELAY_S
+ #define STAR2LTE_AUTO_RECOVERY_DELAY_S  10
+@@ -181,7 +181,7 @@
+ // the only thing it can ever do is land in recovery, which is the lifeline partition.
+ //
+ #ifndef STAR2LTE_BOOT_ATTEMPT_WATCHDOG
+-#define STAR2LTE_BOOT_ATTEMPT_WATCHDOG  1
++#define STAR2LTE_BOOT_ATTEMPT_WATCHDOG  0   /* Starbite: multi-boot phone, no attempt budget */
+ #endif
+ 
+ //

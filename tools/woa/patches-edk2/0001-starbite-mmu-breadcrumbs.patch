@@ -1,0 +1,400 @@
+diff --git a/ArmPkg/Library/ArmGenericTimerPhyCounterLib/ArmGenericTimerPhyCounterLib.c b/ArmPkg/Library/ArmGenericTimerPhyCounterLib/ArmGenericTimerPhyCounterLib.c
+index fbbecdc5..3343bb40 100644
+--- a/ArmPkg/Library/ArmGenericTimerPhyCounterLib/ArmGenericTimerPhyCounterLib.c
++++ b/ArmPkg/Library/ArmGenericTimerPhyCounterLib/ArmGenericTimerPhyCounterLib.c
+@@ -59,7 +59,11 @@ ArmGenericTimerGetTimerFreq (
+   VOID
+   )
+ {
+-  return ArmReadCntFrq ();
++  UINTN  Freq;
++
++  // Starbite/woa: Exynos 9810 S-Boot leaves CNTFRQ_EL0 = 0; the counter runs at 26 MHz.
++  Freq = ArmReadCntFrq ();
++  return (Freq != 0) ? Freq : 26000000;
+ }
+ 
+ UINTN
+diff --git a/ArmPkg/Library/ArmGenericTimerVirtCounterLib/ArmGenericTimerVirtCounterLib.c b/ArmPkg/Library/ArmGenericTimerVirtCounterLib/ArmGenericTimerVirtCounterLib.c
+index 893125a1..65d0e41b 100644
+--- a/ArmPkg/Library/ArmGenericTimerVirtCounterLib/ArmGenericTimerVirtCounterLib.c
++++ b/ArmPkg/Library/ArmGenericTimerVirtCounterLib/ArmGenericTimerVirtCounterLib.c
+@@ -59,7 +59,11 @@ ArmGenericTimerGetTimerFreq (
+   VOID
+   )
+ {
+-  return ArmReadCntFrq ();
++  UINTN  Freq;
++
++  // Starbite/woa: Exynos 9810 S-Boot leaves CNTFRQ_EL0 = 0; the counter runs at 26 MHz.
++  Freq = ArmReadCntFrq ();
++  return (Freq != 0) ? Freq : 26000000;
+ }
+ 
+ UINTN
+diff --git a/ArmPlatformPkg/MemoryInitPei/MemoryInitPeiLib.c b/ArmPlatformPkg/MemoryInitPei/MemoryInitPeiLib.c
+index d6a6ffe7..5976424a 100644
+--- a/ArmPlatformPkg/MemoryInitPei/MemoryInitPeiLib.c
++++ b/ArmPlatformPkg/MemoryInitPei/MemoryInitPeiLib.c
+@@ -15,6 +15,69 @@
+ #include <Library/MemoryAllocationLib.h>
+ #include <Library/PcdLib.h>
+ 
++/* Starbite: breadcrumb into the ramoops pmsg ring (0xFED14000, "DBGC"),
++   read from TWRP /sys/fs/pstore/pmsg-ramoops-0. Physical == virtual here. */
++static inline void StarbiteCrumb (char C)
++{
++  volatile unsigned int   *W = (volatile unsigned int *)(unsigned long)0xFED14000UL;
++  volatile unsigned char  *B = (volatile unsigned char *)(unsigned long)0xFED14000UL;
++  unsigned int            S;
++  if (W[0] != 0x43474244u) { W[0] = 0x43474244u; W[1] = 0u; W[2] = 0u; }
++  S = W[2];
++  if (S < 0x3F00u) { B[12u + S] = (unsigned char)C; W[2] = S + 1u; }
++  __asm__ __volatile__ ("dsb sy" ::: "memory");
++}
++
++/* Starbite: catch-all exception vectors for the MMU bring-up. Any exception
++   logs "X" + ESR, ELR, FAR, SPSR into the pmsg ring, then parks the CPU. */
++static void StarbiteHex (unsigned long V)
++{
++  int I;
++  for (I = 60; I >= 0; I -= 4) {
++    StarbiteCrumb ("0123456789abcdef"[(V >> I) & 15]);
++  }
++}
++
++void StarbiteFault (unsigned long Esr, unsigned long Elr, unsigned long Far, unsigned long Spsr)
++{
++  StarbiteCrumb ('\n'); StarbiteCrumb ('X');
++  StarbiteCrumb (' '); StarbiteHex (Esr);
++  StarbiteCrumb (' '); StarbiteHex (Elr);
++  StarbiteCrumb (' '); StarbiteHex (Far);
++  StarbiteCrumb (' '); StarbiteHex (Spsr);
++  StarbiteCrumb ('\n');
++  for (;;) {
++    __asm__ __volatile__ ("wfe");
++  }
++}
++
++__asm__ (
++  ".text\n"
++  ".balign 2048\n"
++  ".globl StarbiteVectors\n"
++  "StarbiteVectors:\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  ".balign 128\n b StarbiteVecEntry\n"
++  "StarbiteVecEntry:\n"
++  " mrs x0, esr_el1\n mrs x1, elr_el1\n mrs x2, far_el1\n mrs x3, spsr_el1\n"
++  " b StarbiteFault\n"
++);
++extern char StarbiteVectors[];
++
+ VOID
+ BuildMemoryTypeInformationHob (
+   VOID
+@@ -201,7 +264,11 @@ MemoryPeim (
+   }
+ 
+   // Build Memory Allocation Hob
++  StarbiteCrumb ('M');
++  __asm__ __volatile__ ("msr vbar_el1, %0\n isb" : : "r" (StarbiteVectors) : "memory");
++  StarbiteCrumb ('V');
+   InitMmu (MemoryTable);
++  StarbiteCrumb ('N');
+ 
+   if (FeaturePcdGet (PcdPrePiProduceMemoryTypeInformationHob)) {
+     // Optional feature that helps prevent EFI memory map fragmentation.
+diff --git a/MdeModulePkg/Bus/Ufs/UfsPassThruDxe/UfsPassThruHci.c b/MdeModulePkg/Bus/Ufs/UfsPassThruDxe/UfsPassThruHci.c
+index a6799400..d9bb1e68 100644
+--- a/MdeModulePkg/Bus/Ufs/UfsPassThruDxe/UfsPassThruHci.c
++++ b/MdeModulePkg/Bus/Ufs/UfsPassThruDxe/UfsPassThruHci.c
+@@ -10,6 +10,27 @@
+ 
+ #include "UfsPassThru.h"
+ 
++//
++// Starbite/woa: Exynos UFS (PRDT_BYTE_GRAN, FMP) command descriptor layout.
++//
++#define STARBITE_UCD_RESP_OFF  0x400
++#define STARBITE_UCD_PRDT_OFF  0x800
++#define STARBITE_PRD_SIZE      128
++#define STARBITE_RESP_LEN      0x400   // the whole response area, like Linux ALIGNED_UPIU_SIZE
++//
++// Exynos UFS: 4 KiB per PRDT entry (Linux caps the segment size for FMP), and PrdtL
++// is a 16-bit byte count, so one command moves at most 511 entries.
++//
++#undef  UFS_MAX_DATA_LEN_PER_PRD
++#define UFS_MAX_DATA_LEN_PER_PRD  0x1000
++//
++// At most 512 KiB per command: Star2LteUfsHcDxe's WC bounce buffer (UFS_BOUNCE_BYTES).
++// Bigger transfers fall through to its cached DMA path, which stalls the HS burst
++// ("A19 FALL why=04", seen loading a 1 MiB Shell.efi). Also below the 16-bit PrdtL
++// limit of (0xFFFF / 128) entries.
++//
++#define STARBITE_MAX_XFER      0x80000
++
+ /**
+   Read 32bits data from specified UFS MMIO register.
+ 
+@@ -406,14 +427,16 @@ UfsInitUtpPrdt (
+   PrdtNumber   = (UINTN)DivU64x32 ((UINT64)BufferSize + UFS_MAX_DATA_LEN_PER_PRD - 1, UFS_MAX_DATA_LEN_PER_PRD);
+ 
+   for (PrdtIndex = 0; PrdtIndex < PrdtNumber; PrdtIndex++) {
++    UTP_TR_PRD  *Entry = (UTP_TR_PRD *)((UINT8 *)Prdt + PrdtIndex * STARBITE_PRD_SIZE);
++
+     if (RemainingLen < UFS_MAX_DATA_LEN_PER_PRD) {
+-      Prdt[PrdtIndex].DbCount = (UINT32)RemainingLen - 1;
++      Entry->DbCount = (UINT32)RemainingLen - 1;
+     } else {
+-      Prdt[PrdtIndex].DbCount = UFS_MAX_DATA_LEN_PER_PRD - 1;
++      Entry->DbCount = UFS_MAX_DATA_LEN_PER_PRD - 1;
+     }
+ 
+-    Prdt[PrdtIndex].DbAddr  = (UINT32)RShiftU64 ((UINT64)(UINTN)Remaining, 2);
+-    Prdt[PrdtIndex].DbAddrU = (UINT32)RShiftU64 ((UINT64)(UINTN)Remaining, 32);
++    Entry->DbAddr  = (UINT32)RShiftU64 ((UINT64)(UINTN)Remaining, 2);
++    Entry->DbAddrU = (UINT32)RShiftU64 ((UINT64)(UINTN)Remaining, 32);
+     RemainingLen           -= UFS_MAX_DATA_LEN_PER_PRD;
+     Remaining              += UFS_MAX_DATA_LEN_PER_PRD;
+   }
+@@ -525,7 +548,17 @@ UfsCreateScsiCommandDesc (
+ 
+   PrdtNumber = (UINTN)DivU64x32 ((UINT64)DataLen + UFS_MAX_DATA_LEN_PER_PRD - 1, UFS_MAX_DATA_LEN_PER_PRD);
+ 
+-  TotalLen = ROUNDUP8 (sizeof (UTP_COMMAND_UPIU)) + ROUNDUP8 (sizeof (UTP_RESPONSE_UPIU)) + PrdtNumber * sizeof (UTP_TR_PRD);
++  if (DataLen > STARBITE_MAX_XFER) {
++    if (DataDirection == UfsDataIn) {
++      Packet->InTransferLength = STARBITE_MAX_XFER;
++    } else {
++      Packet->OutTransferLength = STARBITE_MAX_XFER;
++    }
++
++    return EFI_BAD_BUFFER_SIZE;
++  }
++
++  TotalLen = STARBITE_UCD_PRDT_OFF + PrdtNumber * STARBITE_PRD_SIZE;
+ 
+   Status = UfsAllocateAlignCommonBuffer (Private, TotalLen, CmdDescHost, &CmdDescPhyAddr, CmdDescMapping);
+   if (EFI_ERROR (Status)) {
+@@ -547,10 +580,10 @@ UfsCreateScsiCommandDesc (
+   Trd->Ocs    = UFS_HC_TRD_OCS_INIT_VALUE;
+   Trd->UcdBa  = (UINT32)RShiftU64 ((UINT64)CmdDescPhyAddr, 7);
+   Trd->UcdBaU = (UINT32)RShiftU64 ((UINT64)CmdDescPhyAddr, 32);
+-  Trd->RuL    = (UINT16)DivU64x32 ((UINT64)ROUNDUP8 (sizeof (UTP_RESPONSE_UPIU)), sizeof (UINT32));
+-  Trd->RuO    = (UINT16)DivU64x32 ((UINT64)ROUNDUP8 (sizeof (UTP_COMMAND_UPIU)), sizeof (UINT32));
+-  Trd->PrdtL  = (UINT16)PrdtNumber;
+-  Trd->PrdtO  = (UINT16)DivU64x32 ((UINT64)(ROUNDUP8 (sizeof (UTP_COMMAND_UPIU)) + ROUNDUP8 (sizeof (UTP_RESPONSE_UPIU))), sizeof (UINT32));
++  Trd->RuL    = STARBITE_RESP_LEN;
++  Trd->RuO    = STARBITE_UCD_RESP_OFF;
++  Trd->PrdtL  = (UINT16)(PrdtNumber * STARBITE_PRD_SIZE);
++  Trd->PrdtO  = STARBITE_UCD_PRDT_OFF;
+   return EFI_SUCCESS;
+ }
+ 
+@@ -603,9 +636,13 @@ UfsCreateDMCommandDesc (
+       return EFI_INVALID_PARAMETER;
+     }
+ 
+-    TotalLen = ROUNDUP8 (sizeof (UTP_QUERY_REQ_UPIU)) + ROUNDUP8 (sizeof (UTP_QUERY_RESP_UPIU)) + ROUNDUP8 (DataSize);
++    if (ROUNDUP8 (sizeof (UTP_QUERY_REQ_UPIU)) + ROUNDUP8 (DataSize) > STARBITE_UCD_RESP_OFF) {
++      return EFI_INVALID_PARAMETER;
++    }
++
++    TotalLen = STARBITE_UCD_RESP_OFF + STARBITE_RESP_LEN;
+   } else {
+-    TotalLen = ROUNDUP8 (sizeof (UTP_QUERY_REQ_UPIU)) + ROUNDUP8 (sizeof (UTP_QUERY_RESP_UPIU));
++    TotalLen = STARBITE_UCD_RESP_OFF + STARBITE_RESP_LEN;
+   }
+ 
+   Status = UfsAllocateAlignCommonBuffer (Private, TotalLen, CmdDescHost, &CmdDescPhyAddr, CmdDescMapping);
+@@ -640,11 +677,11 @@ UfsCreateDMCommandDesc (
+   Trd->UcdBa  = (UINT32)RShiftU64 ((UINT64)CmdDescPhyAddr, 7);
+   Trd->UcdBaU = (UINT32)RShiftU64 ((UINT64)CmdDescPhyAddr, 32);
+   if (Opcode == UtpQueryFuncOpcodeWrDesc) {
+-    Trd->RuL = (UINT16)DivU64x32 ((UINT64)ROUNDUP8 (sizeof (UTP_QUERY_RESP_UPIU)), sizeof (UINT32));
+-    Trd->RuO = (UINT16)DivU64x32 ((UINT64)ROUNDUP8 (sizeof (UTP_QUERY_REQ_UPIU)) + ROUNDUP8 (DataSize), sizeof (UINT32));
++    Trd->RuL = STARBITE_RESP_LEN;
++    Trd->RuO = STARBITE_UCD_RESP_OFF;
+   } else {
+-    Trd->RuL = (UINT16)DivU64x32 ((UINT64)ROUNDUP8 (sizeof (UTP_QUERY_RESP_UPIU)) + ROUNDUP8 (DataSize), sizeof (UINT32));
+-    Trd->RuO = (UINT16)DivU64x32 ((UINT64)ROUNDUP8 (sizeof (UTP_QUERY_REQ_UPIU)), sizeof (UINT32));
++    Trd->RuL = STARBITE_RESP_LEN;
++    Trd->RuO = STARBITE_UCD_RESP_OFF;
+   }
+ 
+   // UFS DM Command, PRDT Length must be Zero.
+@@ -681,7 +718,7 @@ UfsCreateNopCommandDesc (
+ 
+   ASSERT ((Private != NULL) && (Trd != NULL));
+ 
+-  TotalLen = ROUNDUP8 (sizeof (UTP_NOP_OUT_UPIU)) + ROUNDUP8 (sizeof (UTP_NOP_IN_UPIU));
++  TotalLen = STARBITE_UCD_RESP_OFF + STARBITE_RESP_LEN;
+   Status   = UfsAllocateAlignCommonBuffer (Private, TotalLen, CmdDescHost, &CmdDescPhyAddr, CmdDescMapping);
+   if (EFI_ERROR (Status)) {
+     return Status;
+@@ -701,8 +738,8 @@ UfsCreateNopCommandDesc (
+   Trd->Ocs    = UFS_HC_TRD_OCS_INIT_VALUE;
+   Trd->UcdBa  = (UINT32)RShiftU64 ((UINT64)CmdDescPhyAddr, 7);
+   Trd->UcdBaU = (UINT32)RShiftU64 ((UINT64)CmdDescPhyAddr, 32);
+-  Trd->RuL    = (UINT16)DivU64x32 ((UINT64)ROUNDUP8 (sizeof (UTP_NOP_IN_UPIU)), sizeof (UINT32));
+-  Trd->RuO    = (UINT16)DivU64x32 ((UINT64)ROUNDUP8 (sizeof (UTP_NOP_OUT_UPIU)), sizeof (UINT32));
++  Trd->RuL    = STARBITE_RESP_LEN;
++  Trd->RuO    = STARBITE_UCD_RESP_OFF;
+ 
+   return EFI_SUCCESS;
+ }
+@@ -931,9 +968,9 @@ UfsSendDmRequestRetry (
+   }
+ 
+   UfsHc     = Private->UfsHostController;
+-  QueryResp = (UTP_QUERY_RESP_UPIU *)((UINT8 *)CmdDescHost + Trd->RuO * sizeof (UINT32));
++  QueryResp = (UTP_QUERY_RESP_UPIU *)((UINT8 *)CmdDescHost + Trd->RuO);
+   ASSERT (QueryResp != NULL);
+-  CmdDescSize = Trd->RuO * sizeof (UINT32) + Trd->RuL * sizeof (UINT32);
++  CmdDescSize = Trd->RuO + Trd->RuL;
+ 
+   //
+   // Start to execute the transfer request.
+@@ -1285,9 +1322,9 @@ UfsExecNopCmds (
+   // Check the transfer request result.
+   //
+   UfsHc     = Private->UfsHostController;
+-  NopInUpiu = (UTP_NOP_IN_UPIU *)((UINT8 *)CmdDescHost + Trd->RuO * sizeof (UINT32));
++  NopInUpiu = (UTP_NOP_IN_UPIU *)((UINT8 *)CmdDescHost + Trd->RuO);
+   ASSERT (NopInUpiu != NULL);
+-  CmdDescSize = Trd->RuO * sizeof (UINT32) + Trd->RuL * sizeof (UINT32);
++  CmdDescSize = Trd->RuO + Trd->RuL;
+ 
+   //
+   // Start to execute the transfer request.
+@@ -1460,7 +1497,7 @@ UfsPrepareDataTransferBuffer (
+   //
+   // Fill PRDT table of Command UPIU for executed SCSI cmd.
+   //
+-  PrdtBase = (UTP_TR_PRD *)((UINT8 *)TransReq->CmdDescHost + ROUNDUP8 (sizeof (UTP_COMMAND_UPIU)) + ROUNDUP8 (sizeof (UTP_RESPONSE_UPIU)));
++  PrdtBase = (UTP_TR_PRD *)((UINT8 *)TransReq->CmdDescHost + STARBITE_UCD_PRDT_OFF);
+   ASSERT (PrdtBase != NULL);
+   UfsInitUtpPrdt (PrdtBase, (VOID *)(UINTN)DataBufPhyAddr, DataLen);
+ 
+@@ -1542,7 +1579,7 @@ UfsExecScsiCmds (
+     return Status;
+   }
+ 
+-  TransReq->CmdDescSize = TransReq->Trd->PrdtO * sizeof (UINT32) + TransReq->Trd->PrdtL * sizeof (UTP_TR_PRD);
++  TransReq->CmdDescSize = TransReq->Trd->PrdtO + TransReq->Trd->PrdtL;
+ 
+   Status = UfsPrepareDataTransferBuffer (Private, TransReq);
+   if (EFI_ERROR (Status)) {
+@@ -1582,7 +1619,7 @@ UfsExecScsiCmds (
+   //
+   // Get sense data if exists
+   //
+-  Response = (UTP_RESPONSE_UPIU *)((UINT8 *)TransReq->CmdDescHost + TransReq->Trd->RuO * sizeof (UINT32));
++  Response = (UTP_RESPONSE_UPIU *)((UINT8 *)TransReq->CmdDescHost + TransReq->Trd->RuO);
+   ASSERT (Response != NULL);
+   SenseDataLen = Response->SenseDataLen;
+   SwapLittleEndianToBigEndian ((UINT8 *)&SenseDataLen, sizeof (UINT16));
+@@ -2355,7 +2392,7 @@ ProcessAsyncTaskList (
+         //
+         // Get sense data if exists
+         //
+-        Response = (UTP_RESPONSE_UPIU *)((UINT8 *)TransReq->CmdDescHost + TransReq->Trd->RuO * sizeof (UINT32));
++        Response = (UTP_RESPONSE_UPIU *)((UINT8 *)TransReq->CmdDescHost + TransReq->Trd->RuO);
+         ASSERT (Response != NULL);
+         SenseDataLen = Response->SenseDataLen;
+         SwapLittleEndianToBigEndian ((UINT8 *)&SenseDataLen, sizeof (UINT16));
+diff --git a/UefiCpuPkg/Library/ArmMmuLib/AArch64/ArmMmuLibCore.c b/UefiCpuPkg/Library/ArmMmuLib/AArch64/ArmMmuLibCore.c
+index 7d81c588..af171b5f 100644
+--- a/UefiCpuPkg/Library/ArmMmuLib/AArch64/ArmMmuLibCore.c
++++ b/UefiCpuPkg/Library/ArmMmuLib/AArch64/ArmMmuLibCore.c
+@@ -31,6 +31,19 @@
+ #include <Library/HobLib.h>
+ #include "ArmMmuLibInternal.h"
+ 
++/* Starbite: breadcrumb into the ramoops pmsg ring (0xFED14000, "DBGC"),
++   read from TWRP /sys/fs/pstore/pmsg-ramoops-0. Physical == virtual here. */
++static inline void StarbiteCrumb (char C)
++{
++  volatile unsigned int   *W = (volatile unsigned int *)(unsigned long)0xFED14000UL;
++  volatile unsigned char  *B = (volatile unsigned char *)(unsigned long)0xFED14000UL;
++  unsigned int            S;
++  if (W[0] != 0x43474244u) { W[0] = 0x43474244u; W[1] = 0u; W[2] = 0u; }
++  S = W[2];
++  if (S < 0x3F00u) { B[12u + S] = (unsigned char)C; W[2] = S + 1u; }
++  __asm__ __volatile__ ("dsb sy" ::: "memory");
++}
++
+ STATIC  ARM_REPLACE_LIVE_TRANSLATION_ENTRY  mReplaceLiveEntryFunc = ArmReplaceLiveTranslationEntry;
+ 
+ /**
+@@ -725,6 +738,7 @@ ArmConfigureMmu (
+   UINT64      TCR;
+   EFI_STATUS  Status;
+ 
++  StarbiteCrumb ('1');
+   ASSERT (ArmReadCurrentEL () < AARCH64_EL3);
+   if (ArmReadCurrentEL () == AARCH64_EL3) {
+     return EFI_UNSUPPORTED;
+@@ -829,9 +843,11 @@ ArmConfigureMmu (
+ 
+   // Set TCR
+   ArmSetTCR (TCR);
++  StarbiteCrumb ('2');
+ 
+   // Allocate pages for translation table
+   TranslationTable = AllocatePages (1);
++  StarbiteCrumb ('3');
+   if (TranslationTable == NULL) {
+     return EFI_OUT_OF_RESOURCES;
+   }
+@@ -856,8 +872,10 @@ ArmConfigureMmu (
+   }
+ 
+   ZeroMem (TranslationTable, RootTableEntryCount * sizeof (UINT64));
++  StarbiteCrumb ('4');
+ 
+   while (MemoryTable->Length != 0) {
++    StarbiteCrumb ('r');
+     Status = FillTranslationTable (TranslationTable, MemoryTable, ArmLpa2Enabled ());
+     if (EFI_ERROR (Status)) {
+       goto FreeTranslationTable;
+@@ -878,6 +896,7 @@ ArmConfigureMmu (
+     MAIR_ATTR (TT_ATTR_INDX_MEMORY_WRITE_THROUGH, MAIR_ATTR_NORMAL_MEMORY_WRITE_THROUGH) |
+     MAIR_ATTR (TT_ATTR_INDX_MEMORY_WRITE_BACK, MAIR_ATTR_NORMAL_MEMORY_WRITE_BACK)
+     );
++  StarbiteCrumb ('5');
+ 
+   if ((TCR & TCR_IPS_MASK) == TCR_IPS_4PB) {
+     ArmSetTTBR0 (
+@@ -888,14 +907,17 @@ ArmConfigureMmu (
+   } else {
+     ArmSetTTBR0 (TranslationTable);
+   }
++  StarbiteCrumb ('6');
+ 
+   if (!ArmMmuEnabled ()) {
+     ArmDisableAlignmentCheck ();
+     ArmEnableStackAlignmentCheck ();
+     ArmEnableInstructionCache ();
+     ArmEnableDataCache ();
++    StarbiteCrumb ('7');
+ 
+     ArmEnableMmu ();
++    StarbiteCrumb ('8');
+   }
+ 
+   return EFI_SUCCESS;

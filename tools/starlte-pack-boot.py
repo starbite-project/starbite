@@ -13,6 +13,7 @@ its header addresses, cmdline, os_version and DTBH are kept; only the kernel
 
   info TEMPLATE
   pack TEMPLATE IMAGE OUT [--append PAYLOAD] [--ramdisk R] [--cmdline S]
+  kernel BOOTIMG OUT      (write the kernel slot, e.g. the woa UEFI's bootshim + FD)
 """
 import argparse
 import hashlib
@@ -124,6 +125,14 @@ def pack(args):
     print(f"sha256 {hashlib.sha256(out).hexdigest()}")
 
 
+def kernel(args):
+    k = parse(Path(args.boot).read_bytes())["kernel"]
+    if not image_header(k):
+        raise SystemExit(f"{args.boot}: kernel slot is not an arm64 Image")
+    Path(args.out).write_bytes(k)
+    print(f"{args.out}: {len(k)} bytes")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -136,8 +145,11 @@ def main():
     p.add_argument("--append")
     p.add_argument("--ramdisk")
     p.add_argument("--cmdline")
+    k = sub.add_parser("kernel")
+    k.add_argument("boot")
+    k.add_argument("out")
     args = ap.parse_args()
-    info(args.template) if args.cmd == "info" else pack(args)
+    {"info": lambda: info(args.template), "pack": lambda: pack(args), "kernel": lambda: kernel(args)}[args.cmd]()
 
 
 if __name__ == "__main__":

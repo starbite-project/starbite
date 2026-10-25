@@ -1,0 +1,13 @@
+--- a/Platform/Star2LtePkg/Star2LtePkg.dsc	2026-10-25 23:05:21
++++ b/Platform/Star2LtePkg/Star2LtePkg.dsc	2026-10-25 23:05:22
+@@ -153,6 +153,10 @@
+   TpmMeasurementLib|MdeModulePkg/Library/TpmMeasurementLibNull/TpmMeasurementLibNull.inf
+ 
+ [LibraryClasses.common.SEC]
++  # Starbite: SEC/PEI runs with the MMU off, where every access is Device
++  # memory and BaseMemoryLibOptDxe's DC ZVA takes an alignment fault (seen on
++  # starlte: ESR 0x96000061 at dc zva while ArmConfigureMmu zeroes a table).
++  BaseMemoryLib|MdePkg/Library/BaseMemoryLib/BaseMemoryLib.inf
+   # PeilessSec (combined SEC+PEI) flow — replaces the removed ArmPlatformPkg/PrePi
+   PrePiLib|EmbeddedPkg/Library/PrePiLib/PrePiLib.inf
+   HobLib|EmbeddedPkg/Library/PrePiHobLib/PrePiHobLib.inf

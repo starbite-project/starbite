@@ -124,11 +124,26 @@ static uintptr_t fail(volatile uint64_t *log, int64_t step, const char *why)
  * the BOOT ramdisk (tools/brand, tools/make-xnu-boot.sh SPLASH=):
  *   "SBOVRLAY" u32 n, n x { u32 x, y, w, h; w*h u32 0xAARRGGBB }: blended over
  *     S-Boot's own boot logo, which stays on screen (overlay.mjs);
+ *   "SBOVRRLE": the same overlay run-length encoded (tools/brand/rle.py):
+ *     u32 n, n x { u32 x, y, w, h, runs; runs x { u32 length, 0xAARRGGBB } };
  *   "SBSPLASH" u32 w, h + RGB565: a full-screen picture (splash.mjs).
  * The boot menu and the loader's status lines then go in the gap under
  * Samsung's logo.
  */
 static uint64_t splash_start, splash_end;
+
+static uint32_t
+blend(uint32_t s, uint32_t d)
+{
+    uint32_t a = s >> 24, o = 0xff000000U;
+    if (a == 255)
+        d = 0;
+    for (unsigned sh = 0; sh < 24; sh += 8) {
+        uint32_t c = (((s >> sh) & 255U) * a + ((d >> sh) & 255U) * (255U - a)) / 255U;
+        o |= c << sh;
+    }
+    return o;
+}
 
 static int
 star_splash_draw(void)
@@ -138,7 +153,35 @@ star_splash_draw(void)
         return 0;
     const volatile uint32_t *h = (const volatile uint32_t *)(uintptr_t)start;
     volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
-    if (h[0] == 0x564f4253U && h[1] == 0x59414c52U) {           /* "SBOVRLAY" */
+    if (h[0] == 0x564f4253U && h[1] == 0x454c5252U) {           /* "SBOVRRLE" */
+        uint32_t n = h[2];
+        const volatile uint32_t *q = h + 3;
+        for (uint32_t r = 0; r < n && r < 16; r++) {
+            if ((uintptr_t)(q + 5) > end)
+                return 0;
+            uint32_t x = q[0], y = q[1], w = q[2], ht = q[3], runs = q[4];
+            q += 5;
+            if ((uintptr_t)(q + 2 * (uint64_t)runs) > end || x + w > STAR_FB_WIDTH ||
+                y + ht > STAR_FB_HEIGHT)
+                return 0;
+            uint64_t i = 0, total = (uint64_t)w * ht;
+            for (uint32_t k = 0; k < runs; k++) {
+                uint32_t length = q[0], s = q[1];
+                q += 2;
+                if (length > total - i)
+                    return 0;
+                if (s >> 24 == 0) {
+                    i += length;
+                    continue;
+                }
+                for (; length; --length, ++i) {
+                    volatile uint32_t *p = fb + (uint64_t)(y + i / w) * STAR_FB_WIDTH + x + i % w;
+                    *p = blend(s, *p);
+                }
+            }
+        }
+        star_fb_row_base(23);
+    } else if (h[0] == 0x564f4253U && h[1] == 0x59414c52U) {    /* "SBOVRLAY" */
         uint32_t n = h[2];
         const volatile uint32_t *q = h + 3;
         for (uint32_t r = 0; r < n && r < 16; r++) {
@@ -150,15 +193,9 @@ star_splash_draw(void)
             for (uint32_t yy = 0; yy < ht; yy++) {
                 volatile uint32_t *row = fb + (uint64_t)(y + yy) * STAR_FB_WIDTH + x;
                 for (uint32_t xx = 0; xx < w; xx++) {
-                    uint32_t s = *q++, a = s >> 24;
-                    if (a == 0)
-                        continue;
-                    uint32_t d = a == 255 ? 0 : row[xx], o = 0xff000000U;
-                    for (unsigned sh = 0; sh < 24; sh += 8) {
-                        uint32_t c = (((s >> sh) & 255U) * a + ((d >> sh) & 255U) * (255U - a)) / 255U;
-                        o |= c << sh;
-                    }
-                    row[xx] = o;
+                    uint32_t s = *q++;
+                    if (s >> 24)
+                        row[xx] = blend(s, row[xx]);
                 }
             }
         }
@@ -206,11 +243,16 @@ star_overlay_redraw(void)
  * +4096. It is copied to the XNU window's 2 MiB-aligned base + text_offset
  * (Documentation/arm64/booting.txt) and entered with x0 = S-Boot's FDT.
  * S-Boot's initrd is our overlay, so /chosen's initrd is emptied first.
+ *
+ * Bundles (tools/linux-bundle.py) follow each other after the payload: a
+ * 4 KiB page with u64 magic + u64 size, the data, padding to 4 KiB.
  */
 #define LINUX_BASE RAM_BASE
+#define BUNDLE_LINUX 0x2158554e494c4253ULL   /* "SBLINUX!" */
+#define BUNDLE_UEFI  0x2121494645554253ULL   /* "SBUEFI!!" */
 static uintptr_t
-star_linux(volatile uint64_t *log, uintptr_t fdt, const struct payload *p, uint64_t length,
-    uintptr_t rd_start, uintptr_t rd_end)
+find_bundle(const struct payload *p, uintptr_t rd_start, uintptr_t rd_end, uint64_t magic,
+    uint64_t *size)
 {
     uint64_t end = __builtin_offsetof(struct payload, segs) + p->nsegs * sizeof(struct payload_seg);
     if (p->adt_off + p->adt_size > end)
@@ -219,13 +261,28 @@ star_linux(volatile uint64_t *log, uintptr_t fdt, const struct payload *p, uint6
         if (p->segs[i].file_off + p->segs[i].file_size > end)
             end = p->segs[i].file_off + p->segs[i].file_size;
     uintptr_t b = align_page(rd_start + end);
-    while (b + PAGE_SIZE < rd_end && *(volatile uint64_t *)b != 0x2158554e494c4253ULL)  /* "SBLINUX!" */
-        b += PAGE_SIZE;
-    if (b + PAGE_SIZE >= rd_end)
+    while (b + PAGE_SIZE < rd_end) {
+        uint64_t m = *(volatile uint64_t *)b, s = *(volatile uint64_t *)(b + 8);
+        if ((m != BUNDLE_LINUX && m != BUNDLE_UEFI) || s > rd_end - b - PAGE_SIZE)
+            return 0;
+        if (m == magic) {
+            *size = s;
+            return b + PAGE_SIZE;
+        }
+        b = align_page(b + PAGE_SIZE + s);
+    }
+    return 0;
+}
+
+static uintptr_t
+star_linux(volatile uint64_t *log, uintptr_t fdt, const struct payload *p, uint64_t length,
+    uintptr_t rd_start, uintptr_t rd_end)
+{
+    uint64_t size;
+    uintptr_t img = find_bundle(p, rd_start, rd_end, BUNDLE_LINUX, &size);
+    if (!img)
         return fail(log, -20, "NO LINUX KIOSK KERNEL");
-    uint64_t size = *(volatile uint64_t *)(b + 8);
-    uintptr_t img = b + PAGE_SIZE;
-    if (size < 64 || size > rd_end - img || *(volatile uint32_t *)(img + 56) != 0x644d5241U)
+    if (size < 64 || *(volatile uint32_t *)(img + 56) != 0x644d5241U)
         return fail(log, -21, "BAD KIOSK KERNEL");
     uint64_t text_offset = *(volatile uint64_t *)(img + 8);
     uint64_t image_size = *(volatile uint64_t *)(img + 16);
@@ -251,6 +308,96 @@ star_linux(volatile uint64_t *log, uintptr_t fdt, const struct payload *p, uint6
     clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
     __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
     return dst;
+}
+
+/*
+ * Windows 11: the exynos9810-woa UEFI (BOOT kernel of its release image:
+ * edk2-msm style bootshim + EDK2 FD) in an "SBUEFI!!" bundle. The bootshim
+ * is position independent and copies the FD to 0x90000000 itself, so it is
+ * entered where it lies, as S-Boot would enter it (x0 = FDT, MMU off).
+ *
+ * The woa BDS keeps a boot-attempt counter ("BAT1" magic + count at
+ * 0xFED17F10, in the exynos_ss log page, survives warm resets) and sends the
+ * third unacknowledged Windows boot straight to TWRP; the same page above the
+ * pmsg ring (0xFED17F0C..0xFED18000) holds its other cross-reset latches (UFS
+ * crash, APM probe, RAM status, KiSystemStartup). Every boot through this
+ * menu is a deliberate one, so the page is cleared like a cold boot.
+ */
+#define UEFI_LATCH_PAGE 0xFED17F0CUL   /* ring data ends at 0xFED1400C + 0x3F00 */
+#define UEFI_LATCH_END  0xFED18000UL
+
+/*
+ * Append to the ramoops pmsg ring (exynos_ss log_pstore 0xFED10000: dmesg
+ * 16 KiB, then pmsg 16 KiB at 0xFED14000; header u32 "DBGC", start, size),
+ * the ring the woa UEFI also writes, so TWRP shows both in
+ * /sys/fs/pstore/pmsg-ramoops-0 on the next boot.
+ */
+#define PMSG_BASE 0xFED14000UL
+#define PMSG_DATA 0x3F00U   /* the woa UEFI's flood cap: keeps clear of its latches */
+static void
+pmsg_put(const char *s)
+{
+    volatile uint32_t *h = (volatile uint32_t *)PMSG_BASE;
+    volatile uint8_t *d = (volatile uint8_t *)(PMSG_BASE + 12);
+    if (h[0] != 0x43474244U || h[1] >= PMSG_DATA || h[2] > PMSG_DATA) {
+        h[0] = 0x43474244U;                                     /* "DBGC" */
+        h[1] = 0;
+        h[2] = 0;
+    }
+    for (; *s; ++s) {
+        uint32_t start = h[1];
+        d[start] = (uint8_t)*s;
+        h[1] = (start + 1) % PMSG_DATA;
+        if (h[2] < PMSG_DATA)
+            h[2] = h[2] + 1;
+    }
+    clean_bytes(PMSG_BASE, PMSG_BASE + 16384);
+}
+
+static void
+pmsg_hex(uint64_t v)
+{
+    char b[19];
+    b[0] = '0';
+    b[1] = 'x';
+    for (int i = 0; i < 16; ++i)
+        b[2 + i] = "0123456789abcdef"[(v >> (60 - 4 * i)) & 15];
+    b[18] = 0;
+    pmsg_put(b);
+}
+
+static uintptr_t
+star_uefi(volatile uint64_t *log, uintptr_t fdt, const struct payload *p,
+    uintptr_t rd_start, uintptr_t rd_end)
+{
+    uint64_t size;
+    uintptr_t img = find_bundle(p, rd_start, rd_end, BUNDLE_UEFI, &size);
+    if (!img)
+        return fail(log, -30, "NO WINDOWS UEFI");
+    if (size < 64 || *(volatile uint32_t *)(img + 56) != 0x644d5241U)
+        return fail(log, -31, "BAD WINDOWS UEFI");
+    /* The FD lands at 0x90000000..0x90700000: the bundle must not be there. */
+    if (img + size > 0x90000000UL)
+        return fail(log, -32, "UEFI BUNDLE TOO HIGH");
+    star_fb_hex(1, "UEFI AT", img);
+    /* Empty ring: everything after the marker is this UEFI run's trace. */
+    ((volatile uint32_t *)PMSG_BASE)[0] = 0;
+    pmsg_put("STARBITE: entering UEFI at ");
+    pmsg_hex(img);
+    pmsg_put(" size ");
+    pmsg_hex(size);
+    pmsg_put(" fdt ");
+    pmsg_hex(fdt);
+    pmsg_put("\n");
+    zero_bytes(UEFI_LATCH_PAGE, UEFI_LATCH_END - UEFI_LATCH_PAGE);
+    clean_bytes(UEFI_LATCH_PAGE, UEFI_LATCH_END);
+    star_fb_restore((uint32_t)log[77]);
+    log[10] = 0x200;
+    log[15] = img;
+    log[17] = fdt;
+    clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+    __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
+    return img;
 }
 
 /* Returns entry PA or zero. Status stays in the log page at LOG_BASE. */
@@ -317,6 +464,8 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
             return 0;
         if (pick == 2)
             return star_linux(log, fdt, p, length, rd_start, rd_end);
+        if (pick == 3)
+            return star_uefi(log, fdt, p, rd_start, rd_end);
     }
     star_fb_text(0, "PROJECT STARBITE");
     star_fb_text(1, "");

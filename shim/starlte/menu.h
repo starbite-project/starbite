@@ -9,10 +9,11 @@ struct star_info {
 };
 
 /*
- * Boot menu under Samsung's logo: iOS (Starbite), Linux kiosk, Recovery
- * (TWRP), Download mode, Starbite Engineer. Returns 1 to boot iOS with
- * `cmdline` (edited in place by Engineer mode), 2 for the Linux kiosk
- * Linux; Recovery and Download reboot from here.
+ * Boot menu under Samsung's logo: iOS (Starbite), Linux kiosk, Windows 11,
+ * Recovery (TWRP), Starbite Engineer (which also has Download mode). Returns
+ * 1 to boot iOS with `cmdline` (edited in place by Engineer mode), 2 for the
+ * Linux kiosk Linux, 3 for the Windows UEFI; Recovery and Download reboot
+ * from here.
  */
 int star_menu(const struct star_info *in, char *cmdline, unsigned len);
 

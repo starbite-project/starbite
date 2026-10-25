@@ -170,3 +170,105 @@ Press (Oct 2026) on HackiOS: iphonesoft.fr, decrypt.co.
 2. XNU verbose text on the panel; persistent log readable from TWRP.
 3. UFS (read-only first), root fs, launchd.
 4. Touch (likely S6SY761 / `sec_ts` over HSI2C — confirm from the DT), then SpringBoard.
+
+## Windows 11 multi-boot plan (2026-10-25, research only, nothing flashed)
+
+Goal: boot menu with iOS 16, Linux kiosk, Windows 11 ARM64 (and Android 16 later) on this S9 (starlte).
+Reference: `ref/exynos9810-woa` (v0.1.0), which is for the **S9+ (star2lte, SM-G965F) only**.
+
+Facts that shape the plan:
+- woa UEFI = bootshim + 7 MiB EDK2 FD run at 0x90000000, flashed **instead of** our loader on BOOT. To keep the
+  menu, our loader must chainload the FD (copy to 0x90000000, jump) as it does the kiosk Linux. **BOOT is 55 MiB
+  and `out/xnu-boot-kiosk.img` is already 50 MB** -> the FD does not fit until the kiosk kernel shrinks
+  (26.7 MB raw Image: compress it or trim the config).
+- Each UEFI build patches the Windows boot loader and kernel in memory for **one exact build** (22621/22631.2428
+  or .7582/.7584). The current Microsoft ARM64 ISO (24H2+) will not boot; 23H2 media at one of those builds is
+  needed (UUP dump).
+- woa writes NTFS over **all of USERDATA** (GPT GUID addressed from the BCD), ESP on CACHE, second copy on SYSTEM.
+  Here USERDATA holds the iOS root (0..16 GiB) and the kiosk root (+17 GiB, 1.15 GiB), CACHE is only 12 MiB
+  (S9+ docs say 600 MiB) and SYSTEM is needed for Android 16 later. -> **USERDATA has to be split in the GPT**:
+  keep USERDATA's start and name (iOS `ufsroot=USERDATA` and kiosk +17 GiB keep working), shrink it to ~19 GiB,
+  add WINESP (FAT32, 4 KiB sectors, ~256 MiB), WINDOWS (NTFS) and a reserve for Android 16 data.
+  USERDATA now: sda25, 4 KiB blocks 1698432 + 13917563 (53.09 GiB). Samsung's PIT keeps the old layout: never
+  flash USERDATA by name from Download mode after this (we already use TWRP).
+- S9 vs S9+: same SoC, UFS host, HSI2C, S6SY761 touch, 1440x2960 at 0xcc000000, GIC, PSCI. Different: RAM
+  (3.7 GB seen here vs 6 GB; the default 711 MiB / deployed 1357 MiB stages sit below 0xBC800000, the 4 GiB-bank
+  stage must stay off), disk geometry (`PartitionMap.cs` DiskBytes/WindowsOffset are star2lte values), board
+  GPIOs/keys, ACPI DSDT. Port = a StarLtePkg copy of Star2LtePkg plus installer geometry.
+- The Windows image step (DISM, VHDX, bcdboot) needs Windows: a Windows 11 ARM VM on this Mac or the laptop.
+  The UEFI builds with EDK2 + clang (could be done on the Mac).
+
+Order: W1 star2lte UEFI chainloaded from the menu (BOOT only, known-good image as fallback) -> W2 StarLtePkg
+(RAM map, geometry) to the UEFI boot menu with UFS -> W3 GPT split (backup GPT + EFS first) -> W4 build a 22631
+image for the WINDOWS geometry, copy via TWRP -> W5 first boot, OOBE. Android 16 later: SYSTEM/VENDOR/ODM + the
+reserve partition.
+- 2026-10-25: **W1 reached — S9+ UEFI runs on the S9 from the boot menu.** Menu row WINDOWS 11 (Download mode
+  moved into Starbite Engineer) enters the v0.1.0 star2lte-uefi-22621.7582 bootshim+FD from an "SBUEFI!!" bundle
+  (`tools/woa/get-uefi.sh`, `UEFI=build/woa/uefi-22621.7582.bin tools/make-xnu-boot.sh`). Phone showed the
+  star2lte UEFI text, "no bootable device", then an automatic reboot (expected: no Windows yet). Room on BOOT:
+  overlay RLE (`tools/brand/rle.py`, 6.6 MB -> 0.72 MB, `SPLASH=build/brand/overlay.rle`), kiosk kernel without
+  camera/MFC/vision/NFC (`tools/kiosk/build-kernel.sh`; knox/modem/SSP are link dependencies). Image
+  `out/xnu-boot-windows.img` 51.4 MB of 57.7 MB; fallback `out/xnu-boot-kiosk.img`.
+- 2026-10-25: **W2 analysis — the star2lte UEFI needs no hardware changes for starlte.** Built it from source in
+  lima (`tools/woa/build-uefi.sh`): edk2 master 2938b830 (2026-06-19, after DefaultExceptionHandlerLib was merged,
+  before GptLib), clang 18 CLANGDWARF; FD strings match the v0.1.0 release except its DEBUG_CLANGPDB path. Checked
+  against device/dtb/starlte.dts: DRAM (PEI 0x90000000..0xBC800000, DXE adds 0xC0080000..0xCC000000 and
+  0xCD044000..0xE0000000) avoids every S9 fixed carve-out (rkp/tima handled in the map, seclog 0xC0000000, modem
+  0xF0000000+, abox, secure_camera 0xE1900000, exynos_ss 0xFDA00000); touch = S6SY761 @0x48 on HSI2C 0x104B0000
+  (IRQ 436) with GPA1.0 (IRQ 76) exactly as in the DSDT; pstore at 0xFED10000 on both. BDS has no partition
+  names/GUIDs hard-coded (stock PartitionDxe + FAT), so a new WINESP works. Open: whether UFS high-LBA reads work
+  on this unit (read the UEFI's pmsg log in TWRP after a WINDOWS 11 boot).
+- 2026-10-25: **W2 blocked — the v0.1.0 star2lte UEFI is unreliable on this S9.** Only the first run (W1) reached
+  BDS. Later runs, read from TWRP's /sys/fs/pstore/pmsg-ramoops-0 (ramoops pmsg 0xFED14000, header "DBGC"
+  sig/start/size; loader now appends "STARBITE: entering UEFI ..." there before the handoff): either dies in SEC
+  right after the unpublished breadcrumbs "P V W X Y S $ T U" (before ArmPlatformInitialize's 'C'), or gets
+  through PEI and ACPI install (=ACPIINST/=GTDTPATCH) and dies in DXE dispatch after 16 driver starts (next in FDF
+  order: Star2LteRamManagerDxe, UFS). Both modes also happen with the release image flashed straight to BOOT
+  (no Starbite loader), so it is not the chainload. Ruled out: woa boot-attempt counter (BAT1 @0xFED17F10, loader
+  now clears 0xFED17F0C..0xFED18000 before every handoff), FAT test volume on CACHE, bank-1 RAM (S9 /proc/iomem:
+  80000000-bc7fffff, c0000000-dfffffff, e1900000-ff7fffff, 880000000-8ffffffff). Resets carry INF2 0x12345678 /
+  INF3 0x12345674 (same values as the woa recovery divert and our menu's RECOVERY). The release has
+  instrumentation not in the published source (provenance "WORKTREE" hashes); our source build
+  (tools/woa/build-uefi.sh, CLANGPDB, edk2 2938b830) hangs on the phone before drawing. Traces kept in
+  build/woa/pstore-*.bin. Test ESP tool: tools/woa/ufs-test.sh (CACHE backed up/restored).
+- 2026-10-25: **W2 reached — our own source build of the woa UEFI boots on starlte to BDS** ("no bootable
+  device. Connect UFS/USB", stays on the panel: patches/0001 turns the TWRP diverts off). Debugged through the
+  pmsg ring (loader resets it and writes "STARBITE: entering UEFI ..." before the handoff; edk2 breadcrumbs,
+  catch-all EL1 vectors logging "X ESR ELR FAR SPSR", and patches/0003 mirroring all DEBUG output into the ring,
+  newest 16 KiB kept). Fixes, all from source (tools/woa/build-uefi.sh, CLANGPDB, edk2 2938b830 + patches-edk2):
+  1. SEC/PEI must not use BaseMemoryLibOptDxe: its ZeroMem `dc zva` takes an alignment fault with the MMU off
+     (ESR 0x96000061 at PeilessSec+0x13c8 zeroing a page table) -> patches/0002 (SEC BaseMemoryLib).
+  2. CNTFRQ_EL0 = 0 from S-Boot: TimerDxe programmed a zero period and the first tick stormed forever right after
+     the Timer arch protocol install. Re-created the woa team's unpublished edk2 edit (ArmGenericTimerGetTimerFreq
+     falls back to 26 MHz) -> patches-edk2/gen-cntfrq.py.
+  The v0.1.0 release's flakiness on this unit is not explained yet (its winload patching is build-specific, so
+  our build must eventually match a Windows build too). Side note: stretches of the ring show bit-5/6 flips
+  (something else writes the exynos_ss log page at times).
+
+## HANDOFF (2026-10-25 23:30) — where W2 stands, how to continue
+
+State: BOOT = out/xnu-boot-src11.img (menu: iOS / Linux kiosk / WINDOWS 11 / TWRP / Engineer). WINDOWS 11 boots
+OUR source UEFI (tools/woa/build-uefi.sh DEBUG -> build/woa/Star2LtePkg.fd, paired with the v0.1.0 release's
+480-byte bootshim: build/woa/starbite-uefi.bin; then `UEFI=build/woa/starbite-uefi.bin` + the usual
+CMDLINE/ADTFLAGS=--scale2/SPLASH=build/brand/overlay.rle/LINUX=build/linux-bundle/Image for tools/make-xnu-boot.sh;
+flash with tools/twrp-flash-boot.sh from TWRP). CACHE holds the disk-test ESP (EFI Shell + startup.nsh,
+tools/woa/ufs-test.sh install|results|restore; original CACHE in build/woa/cache-backup.img — restore when done).
+Windows 22631.7584 ARM64 ISO is built inside the UTM VM "Starbite Windows" (Downloads\22631.7584_..._convert).
+
+Debug loop: user picks WINDOWS 11, firmware runs, user goes back to TWRP (Power+VolDown, RECOVERY); read
+`adb exec-out cat /sys/fs/pstore/pmsg-ramoops-0` (raw copies: build/woa/pstore-*.bin; newest = pstore-src11.bin). Loader writes "STARBITE: entering UEFI" first; edk2 DEBUG (errors+warnings) and the BDS "=..."
+markers follow. The ring sometimes shows bit-5/6 flips (other writers); harmless.
+
+Fixes so far (all reproducible): firmware patches tools/woa/patches/0001 (no TWRP diverts) 0002 (SEC plain
+BaseMemoryLib, no dc zva) 0003 (DEBUG->pstore ring, errors+warnings, ASSERT print) 0004 (aligned UFS diag read);
+edk2 patch tools/woa/patches-edk2/0001-*.patch generated by regen.sh from gen-crumbs/gen-vectors/gen-cntfrq
+(26 MHz CNTFRQ fallback)/gen-ufs (Exynos byte-granular UTRD, resp 0x400, PRDT 0x800, 128-byte PRDT entries of
+4 KiB, RuL 0x400, <=512 KiB per command = the UFS driver's WC bounce buffer). edk2 in lima ~/work/edk2 @2938b830.
+
+Result chain: UFS init OK, whole disk seen (LastBlock 0xEE47FF), both GPTs valid, partitions enumerated, FAT on
+CACHE mounted (=FATSCAN p15 ...r0F, =WINFS fs=01), boot option \efi\boot\bootaa64.efi registered and tried; the
+shell load failed with ACCESS_DENIED (=BMBOOTRET st=E000f) after "A19 FALL why=04 len=104000" (1 MiB read bigger
+than the 512 KiB bounce). src11 caps commands at 512 KiB: "A19 FALL" is gone (all reads use the 512 KiB WC bounce @0x97f80000, A19 BNC=97f80000 sz=080000), FAT mounts and =BMBOOT n=01 tries the shell, but it still returns =BMBOOTRET st=E000f (EFI_ACCESS_DENIED) plus "ASSERT_EFI_ERROR (Not Found)" in BdsDxe BmDriverHealth.c(551). So the read size was not the cause. NEXT: find who returns ACCESS_DENIED for the image: check the PlatformBootManagerLib boot path around RegisterWindowsBootOption / EfiBootManagerBoot (~line 7181) and any LoadImage/StartImage hooks or image-hash allowlist (the woa UEFI only accepts its exact winload/kernel builds), SecurityStubDxe/DxeSecurityManagementLib, and whether the read data is correct (compare a file's bytes). Quick test idea: patch the platform to boot the shell even if not a Windows image, or log LoadImage status.
+After the shell test works: W3 (split USERDATA: keep USERDATA start/name ~19 GiB, WINESP FAT32 4K ~256 MiB,
+WINDOWS NTFS ~26 GiB, ~8 GiB reserve for Android 16), W4 (build image in the VM from the 22631.7584 ISO with the
+woa installer's flow, our geometry), W5 first boot. Nothing has been committed since 43878ae — commit soon.

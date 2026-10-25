@@ -15,13 +15,17 @@ limactl shell starbite -- sh "$PWD/shim/starlte/build.sh" >/dev/null
 # ADTFLAGS=--scale2 for the scaled iPhone XR canvas (with sweetfb_scale boot-args).
 python3 tools/mkadt_starlte.py ${ADTFLAGS:-} out/starlte.adt
 python3 ref/ios-herolte/tools/mkpayload.py "$kernel" out/starlte.adt out/payload.bin --cmdline "$CMDLINE"
+# SPLASH=build/brand/overlay.rle (tools/brand/rle.py; .bin works too, 6 MB more):
 # SPLASH=build/brand/splash.bin: Project Starbite boot splash in the
 # ramdisk slot (tools/brand/splash.mjs + to-rgb565.py), drawn by the loader.
-# LINUX=build/linux-bundle/Image: a second Linux kernel, appended after the
-# SWEETXNU payload (tools/linux-bundle.py, xnu_boot.c star_linux).
+# LINUX=build/linux-bundle/Image: a second Linux kernel, and
+# UEFI=build/woa/uefi-22621.7582.bin: the Windows UEFI (tools/woa/get-uefi.sh),
+# appended after the SWEETXNU payload (tools/linux-bundle.py, xnu_boot.c
+# star_linux / star_uefi).
 append=out/payload.bin
-if [ -n "${LINUX:-}" ]; then
-    python3 tools/linux-bundle.py out/payload.bin "$LINUX" out/payload-linux.bin
+if [ -n "${LINUX:-}${UEFI:-}" ]; then
+    python3 tools/linux-bundle.py out/payload.bin out/payload-linux.bin \
+        ${LINUX:+--linux "$LINUX"} ${UEFI:+--uefi "$UEFI"}
     append=out/payload-linux.bin
 fi
 python3 tools/starlte-pack-boot.py pack device/twrp-3.7.0_9-0-starlte.img \
