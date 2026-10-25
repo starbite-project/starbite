@@ -1,0 +1,40 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
+@@ -1950,6 +1950,37 @@
+     }
+ 
+     Images++;
++    //
++    // Starbite: list every PE image the scan sees (base, size, export name) - on the S9 the
++    // handoff found 0x1c images but no ntoskrnl (=NTPATCH n=00 cf=00 i=1c, pstore-win4).
++    //
++    {
++      UINT32  Lfa = *(volatile UINT32 *)(UINTN)(Base + 0x3Cu);
++      UINT32  Exp = *(volatile UINT32 *)(UINTN)(Base + Lfa + 0x88u);   // DataDirectory[0].VirtualAddress
++      UINTN   Ni;
++
++      BdsPramStr ("\n=PE b=");
++      BdsPramHex ((UINT32)Base, 8);
++      BdsPramStr (" s=");
++      BdsPramHex ((UINT32)ImageSize, 8);
++      BdsPramStr (" m=");
++      BdsPramHex (*(volatile UINT16 *)(UINTN)(Base + Lfa + 0x04u), 4);
++      BdsPramStr (" x=");
++      BdsPramHex (Exp, 8);
++      if ((Exp != 0) && (Exp + 0x10u < ImageSize)) {
++        UINT32  NameRva = *(volatile UINT32 *)(UINTN)(Base + Exp + 0x0Cu);
++
++        BdsPramByte (' ');
++        for (Ni = 0; (Ni < 16u) && (NameRva != 0) && (NameRva + Ni < ImageSize); Ni++) {
++          UINT8  C = *(volatile UINT8 *)(UINTN)(Base + NameRva + Ni);
++
++          if ((C < 0x20u) || (C > 0x7Eu)) {
++            break;
++          }
++          BdsPramByte (C);
++        }
++      }
++    }
+     if (!Star2LteGetNtosLayout (Base, ImageSize, &Layout)) {
+       //
+       // Warm boots can leave stale PE headers whose claimed image range

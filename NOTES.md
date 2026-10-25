@@ -340,3 +340,9 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   final query, not ExitBootServices. Same pattern every boot: first pra 0x90ffa8a0 (< ra 0x90ffc768), loop pra
   0x910b50a0 (> ra), final pra 0x90fc53d8 (< ra). patches/0007 (renamed final-map-query) now requires a loop
   query before the final one (size gate kept loose at 0x4000). BOOT = src15.
+- 2026-10-26 00:53: **W5 try 4 (src15) — handoff at the right query, ntoskrnl not found** (pstore-win4.bin):
+  =AF0 at the final query (pra 0x90fc53d8, out=0x1470), =STLBI0..2, =CFQ0 0, but `=NTPATCH n=00 cf=00 i=1c`
+  (woa reference: n=05 cf=04 i=26 b=92400000): the DRAM scan 0x90000000..0xBC800000 saw 0x1c PE images and
+  none validated as ntoskrnl, so the kernel got no CNTFRQ patch. Last entry =HANDOFF minimal, no =EBSENTER.
+  winload allocated 0x92400000 (0x400 pages) and 0x92800000 / 0x931f1000 (0x9f1 pages each) before the
+  query. patches/0008 lists every scanned PE (=PE b s m x name). BOOT = src16.
