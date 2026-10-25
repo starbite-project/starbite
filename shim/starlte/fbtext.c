@@ -68,6 +68,16 @@ uint32_t star_fb_enable(void)
     return before;
 }
 
+/* Put back S-Boot's DECON trigger mode (star_fb_enable's return value):
+ * Linux's display power domain cannot switch off under a free-running
+ * HW trigger, and its DPU driver then faults. */
+void star_fb_restore(uint32_t before)
+{
+    volatile uint32_t *trig = (volatile uint32_t *)(DECON_F + HW_SW_TRIG_CONTROL);
+    *trig = before;
+    __asm__ volatile("dsb sy" : : : "memory");
+}
+
 static const uint8_t *glyph_for(char ch)
 {
     if (ch >= 'a' && ch <= 'z') ch -= 'a' - 'A';

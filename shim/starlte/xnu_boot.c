@@ -242,6 +242,8 @@ star_linux(volatile uint64_t *log, uintptr_t fdt, const struct payload *p, uint6
     if (fdt_chosen_u64(fdt, "linux,initrd-start", &start))
         (void)fdt_chosen_set_u64(fdt, "linux,initrd-end", start);
     clean_bytes(fdt, fdt + (2UL << 20));
+    /* Last screen write: hand the display back as S-Boot left it. */
+    star_fb_restore((uint32_t)log[77]);
     log[10] = 0x100;
     log[15] = dst;
     log[17] = fdt;              /* xnu_boot.S passes log[17] in x0 */
