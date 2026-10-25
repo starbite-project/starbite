@@ -1,0 +1,24 @@
+# Lima VM for the build: Ubuntu 24.04 ARM64 on Apple's Virtualization.framework.
+# limactl start --name=starbite vm/starbite.yaml ; limactl shell starbite
+base: template://ubuntu-24.04
+vmType: vz
+arch: aarch64
+cpus: 8
+memory: 10GiB
+disk: 70GiB
+# Only the project folder: a "~" mount (Lima default) would shadow it read-only.
+mounts:
+  - location: "~/project-starbite"
+    writable: true
+mountType: virtiofs
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -e
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y build-essential git curl wget clang lld llvm python3 python3-pip perl xz-utils \
+        liblz4-dev lz4 qemu-system-arm qemu-efi-aarch64 device-tree-compiler hfsprogs fuse3 \
+        libfuse3-dev cmake zlib1g-dev libbz2-dev libattr1-dev libssl-dev bison flex bc cpio \
+        android-sdk-libsparse-utils unzip zstd file

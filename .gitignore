@@ -1,0 +1,10 @@
+*.img
+*.ipsw
+backup/
+build/
+device/
+dtb/
+ios*/
+ref/
+shim/*/out/
+out/
