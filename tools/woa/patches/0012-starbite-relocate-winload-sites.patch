@@ -1,0 +1,207 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
+@@ -1433,6 +1433,19 @@
+   }
+   return FALSE;
+ }
++
++//
++// Starbite: the winload patch sites are absolute addresses from star2lte, where winload.efi
++// (22621.7582, SizeOfImage 0x266000) loads at 0x912D4000 ("loaded = objdump - 0xEED2C000").
++// On the S9 the same binary loads at 0x90FB6000 (pstore-win8: =PE winload.sys), so none of
++// the checked sites matched (=WPHY? 5f206d6f, no =WTLBI) and the unchecked writes (T-sites,
++// cave, MicrovisorMode) hit other memory. SB_WL() relocates them by the measured load delta.
++//
++#define STARBITE_WINLOAD_STAR2LTE_BASE  0x00000000912D4000ULL
++#define STARBITE_WINLOAD_SIZE           0x00266000u
++STATIC INT64    mStarbiteWlDelta;
++STATIC BOOLEAN  mStarbiteWlOk;
++#define SB_WL(a)  ((UINT64)(a) + (UINT64)mStarbiteWlDelta)
+ #define STAR2LTE_PE_SIGNATURE     0x00004550u
+ #define STAR2LTE_PE_MACHINE_ARM64 0xAA64u
+ #define STAR2LTE_PE32_PLUS_MAGIC  0x020Bu
+@@ -2244,10 +2257,10 @@
+   UINT32           TraceStub[20];
+ 
+   Site  = (volatile UINT32 *)(UINTN)SiteAddress;
+-  CaveI = 0x0000000091489800ULL + (SiteIdx * 0x80u);
++  CaveI = SB_WL (0x0000000091489800ULL) + (SiteIdx * 0x80u);
+ 
+   if (SiteIdx == STAR2LTE_RECOVERY_RESET_TRACE_SITE) {
+-    CaveI = 0x0000000091489C00ULL;
++    CaveI = SB_WL (0x0000000091489C00ULL);
+     Cave  = (volatile UINT32 *)(UINTN)CaveI;
+     for (Wj = 0; Wj < sizeof (RecoveryResetStubTemplate) / sizeof (RecoveryResetStubTemplate[0]); Wj++) {
+       RecoveryResetStub[Wj] = RecoveryResetStubTemplate[Wj];
+@@ -2266,7 +2279,7 @@
+   }
+ 
+   if (SiteIdx == 6u) {
+-    CaveI = 0x0000000091489C00ULL;
++    CaveI = SB_WL (0x0000000091489C00ULL);
+     Cave  = (volatile UINT32 *)(UINTN)CaveI;
+     for (Wj = 0; Wj < sizeof (T6JumpDumpStub) / sizeof (T6JumpDumpStub[0]); Wj++) {
+       Cave[Wj] = T6JumpDumpStub[Wj];
+@@ -2368,7 +2381,7 @@
+   EFI_STATUS       Status;
+   UINTN            Wk;
+ 
+-  StubBase = 0x0000000091489000ULL;   // cave page base (already RO-cleared for the T-slots)
++  StubBase = SB_WL (0x0000000091489000ULL);   // cave page base (already RO-cleared for the T-slots)
+   Cave     = (volatile UINT32 *)(UINTN)StubBase;
+ 
+   if (PramPtScratch == 0) {
+@@ -2403,11 +2416,42 @@
+   // end_stub (Wk == 202): rejoin the switch at 0x912d50a8 -- after the stub re-executes
+   // displaced dsb+isb from 0x912d50a0/0x912d50a4. The stub's 'b end_stub' lands here.
+   //
+-  Cave[Wk] = Star2LteBranchInstruction (StubBase + (Wk * sizeof (UINT32)), 0x00000000912D50A8ULL);
++  Cave[Wk] = Star2LteBranchInstruction (StubBase + (Wk * sizeof (UINT32)), SB_WL (0x00000000912D50A8ULL));
+   Star2LteFlushPatchedInstruction (StubBase + (Wk * sizeof (UINT32)));
+ }
+ 
+ //
++// Starbite: find winload's image from an address inside it (the GetMemoryMap hook's caller)
++// and set mStarbiteWlDelta. Only the exact star2lte binary (SizeOfImage 0x266000) is accepted.
++//
++STATIC
++VOID
++StarbiteFindWinload (
++  IN UINT64  Ra
++  )
++{
++  UINT64  P;
++  UINTN   Size;
++
++  mStarbiteWlOk = FALSE;
++  for (P = Ra & ~(UINT64)EFI_PAGE_MASK; (P >= 0x0000000090000000ULL) && (P + 0x00400000ULL > Ra); P -= EFI_PAGE_SIZE) {
++    if (Star2LteGetPeImageSize (P, &Size) && (P + Size > Ra)) {
++      BdsPramStr ("\n=WLBASE b=");
++      BdsPramHex ((UINT32)P, 8);
++      BdsPramStr (" s=");
++      BdsPramHex ((UINT32)Size, 8);
++      if (Size == STARBITE_WINLOAD_SIZE) {
++        mStarbiteWlDelta = (INT64)(P - STARBITE_WINLOAD_STAR2LTE_BASE);
++        mStarbiteWlOk    = TRUE;
++        BdsPramStr (" ok");
++      }
++      return;
++    }
++  }
++  BdsPramStr ("\n=WLBASE none");
++}
++
++//
+ // ext#7: inject an MMU-ON 'tlbi vmalle1' at a chosen site via a detour. winload's real
+ // address-space switch (fn @0x912d5080, called by 'bl 0x180001080' @0x913c1668) flushes with
+ // 'tlbi vmalle1' while the MMU is OFF (between the SCTLR_EL1 disable/enable) -- the Samsung
+@@ -2691,6 +2735,10 @@
+   // =T<n> trail shows how far winload gets in ONE boot; the last =T<n> is the last
+   // handoff return point reached before the hang. Stubs live in a cave at 0x91489800.
+   //
++  if (!mStarbiteWlOk) {
++    BdsPramStr ("\n=WT nowinload");   // Starbite: never write star2lte addresses blind
++    return;
++  }
+   MemAttr = NULL;
+   Status  = gBS->LocateProtocol (&gEfiMemoryAttributeProtocolGuid, NULL, (VOID **)&MemAttr);
+   if (EFI_ERROR (Status) || (MemAttr == NULL)) {
+@@ -2708,13 +2756,13 @@
+   {
+     UINT64  Rp;
+ 
+-    for (Rp = 0x00000000912E4000ULL; Rp <= 0x0000000091313000ULL; Rp += EFI_PAGE_SIZE) {
++    for (Rp = SB_WL (0x00000000912E4000ULL); Rp <= SB_WL (0x0000000091313000ULL); Rp += EFI_PAGE_SIZE) {
+       MemAttr->ClearMemoryAttributes (MemAttr, Rp, EFI_PAGE_SIZE, EFI_MEMORY_RO);
+     }
+     BdsPramStr ("\n=ROCLR");
+   }
+ 
+-  CaveBase = 0x0000000091489800ULL;
++  CaveBase = SB_WL (0x0000000091489800ULL);
+   Status   = MemAttr->ClearMemoryAttributes (MemAttr, CaveBase & ~(UINT64)EFI_PAGE_MASK, EFI_PAGE_SIZE, EFI_MEMORY_RO | EFI_MEMORY_RP);
+   if (EFI_ERROR (Status)) {
+     BdsPramStr ("\n=WT nocave");
+@@ -2726,12 +2774,12 @@
+       continue;
+     }
+ 
+-    Status = MemAttr->ClearMemoryAttributes (MemAttr, Sites[SiteIdx] & ~(UINT64)EFI_PAGE_MASK, EFI_PAGE_SIZE, EFI_MEMORY_RO | EFI_MEMORY_RP);
++    Status = MemAttr->ClearMemoryAttributes (MemAttr, SB_WL (Sites[SiteIdx]) & ~(UINT64)EFI_PAGE_MASK, EFI_PAGE_SIZE, EFI_MEMORY_RO | EFI_MEMORY_RP);
+     if (EFI_ERROR (Status)) {
+       continue;
+     }
+ 
+-    Star2LteInstallTTraceSite (Sites[SiteIdx], SiteIdx);
++    Star2LteInstallTTraceSite (SB_WL (Sites[SiteIdx]), SiteIdx);
+   }
+ 
+   //
+@@ -2762,11 +2810,11 @@
+     for (TlbiIdx = 0; TlbiIdx < sizeof (TlbiSites) / sizeof (TlbiSites[0]); TlbiIdx++) {
+       // Ensure the tlbi site's page is writable (the bulk RO-clear above only covers
+       // 0x912e4000..0x91313000; the switch-routine site @0x912d50c8 is outside that).
+-      MemAttr->ClearMemoryAttributes (MemAttr, TlbiSites[TlbiIdx] & ~(UINT64)EFI_PAGE_MASK, EFI_PAGE_SIZE, EFI_MEMORY_RO | EFI_MEMORY_RP);
+-      TlbiSite = (volatile UINT32 *)(UINTN)TlbiSites[TlbiIdx];
++      MemAttr->ClearMemoryAttributes (MemAttr, SB_WL (TlbiSites[TlbiIdx]) & ~(UINT64)EFI_PAGE_MASK, EFI_PAGE_SIZE, EFI_MEMORY_RO | EFI_MEMORY_RP);
++      TlbiSite = (volatile UINT32 *)(UINTN)SB_WL (TlbiSites[TlbiIdx]);
+       if ((*TlbiSite == 0xD5088708u) || (*TlbiSite == 0xD508871Fu) || (*TlbiSite == 0xD50887A1u)) { // tlbi vmalle1 (Rt=8/31) or vale1,x1
+         *TlbiSite = 0xD503201Fu;      // nop
+-        Star2LteFlushPatchedInstruction (TlbiSites[TlbiIdx]);
++        Star2LteFlushPatchedInstruction (SB_WL (TlbiSites[TlbiIdx]));
+         BdsPramStr ("\n=WTLBI");
+         BdsPramHex ((UINT32)TlbiIdx, 1);
+       }
+@@ -2794,12 +2842,12 @@
+     {
+       volatile UINT32  *SwEntry;
+ 
+-      MemAttr->ClearMemoryAttributes (MemAttr, 0x00000000912D50A0ULL & ~(UINT64)EFI_PAGE_MASK, EFI_PAGE_SIZE, EFI_MEMORY_RO | EFI_MEMORY_RP);
+-      SwEntry = (volatile UINT32 *)(UINTN)0x00000000912D50A0ULL;
++      MemAttr->ClearMemoryAttributes (MemAttr, SB_WL (0x00000000912D50A0ULL) & ~(UINT64)EFI_PAGE_MASK, EFI_PAGE_SIZE, EFI_MEMORY_RO | EFI_MEMORY_RP);
++      SwEntry = (volatile UINT32 *)(UINTN)SB_WL (0x00000000912D50A0ULL);
+       if (*SwEntry == 0xD5033F9Fu) { // dsb sy (first insn after winload disables MMU)
+         Star2LteInstallTtbrDumpStub ();
+-        *SwEntry = Star2LteBranchInstruction (0x00000000912D50A0ULL, 0x0000000091489000ULL); // b <MMU-off physical TTBR probe>
+-        Star2LteFlushPatchedInstruction (0x00000000912D50A0ULL);
++        *SwEntry = Star2LteBranchInstruction (SB_WL (0x00000000912D50A0ULL), SB_WL (0x0000000091489000ULL)); // b <MMU-off physical TTBR probe>
++        Star2LteFlushPatchedInstruction (SB_WL (0x00000000912D50A0ULL));
+         BdsPramStr ("\n=WPHY");
+       } else {
+         BdsPramStr ("\n=WPHY? ");
+@@ -2807,22 +2855,22 @@
+       }
+     }
+ 
+-    MicrovisorMode = (volatile UINT32 *)(UINTN)0x0000000091504C80ULL;
++    MicrovisorMode = (volatile UINT32 *)(UINTN)SB_WL (0x0000000091504C80ULL);
+     *MicrovisorMode = 1u;
+     __asm__ __volatile__ ("dsb sy" ::: "memory");
+     BdsPramStr ("\n=WMODE1");
+ 
+-    BrkSite = (volatile UINT32 *)(UINTN)0x00000000912E4644ULL;
++    BrkSite = (volatile UINT32 *)(UINTN)SB_WL (0x00000000912E4644ULL);
+     if (*BrkSite == 0xD43E0080u) { // brk #0xf004
+       *BrkSite = 0x14000007u;      // b 0x912e4660
+-      Star2LteFlushPatchedInstruction (0x00000000912E4644ULL);
++      Star2LteFlushPatchedInstruction (SB_WL (0x00000000912E4644ULL));
+       BdsPramStr ("\n=WBRK");
+     }
+ 
+-    BrkSite = (volatile UINT32 *)(UINTN)0x0000000091312A30ULL;
++    BrkSite = (volatile UINT32 *)(UINTN)SB_WL (0x0000000091312A30ULL);
+     if (*BrkSite == 0xD43E0060u) { // brk #0xf003
+       *BrkSite = 0x14000001u;      // b 0x91312a34
+-      Star2LteFlushPatchedInstruction (0x0000000091312A30ULL);
++      Star2LteFlushPatchedInstruction (SB_WL (0x0000000091312A30ULL));
+       BdsPramStr ("\n=WBRK3");
+     }
+   }
+@@ -5019,6 +5067,7 @@
+       // Keep this handoff minimal. Anything added here runs while winload is
+       // mid-transition, so it can only ever reduce reliability.
+       //
++      StarbiteFindWinload (CallerRa);
+       Star2LtePatchNtosCntfrqInMemory ();
+       Star2LtePatchWinloadTimers ();
+       BdsPramStr ("\n=HANDOFF minimal");

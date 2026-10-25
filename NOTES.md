@@ -360,3 +360,12 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   =NTCFQ b=de4e2000 n=03, =NTCMP n=01, =NTPATCH n=04 cf=03 (woa reference n=05 cf=04), =STLBI0..2, =HANDOFF
   minimal is still the last entry, no =EBSENTER. patches/0011 turns on the after-handoff AFG>/AFG</AFRET
   GetMemoryMap traces (compiled out with FALSE &&). BOOT = src19.
+- 2026-10-26 01:06: **W5 try 8 (src19) — winload's patch sites are star2lte absolute addresses**
+  (pstore-win8.bin): the handoff returns (=AFRET) and then winload makes no boot-service call (no AFG/AFL/EBS)
+  and the 3 s =HB heartbeat stops (IRQs off). Star2LtePatchWinloadTimers patches fixed addresses
+  0x912D50A0..0x91504C80 = star2lte's winload base 0x912D4000 ("objdump - 0xEED2C000"); on the S9 winload.sys
+  (same binary, SizeOfImage 0x266000) loads at 0x90FB6000. So the MMU-off `tlbi vmalle1` @+0x10C8 was never
+  NOPed (no =WTLBI, =WPHY? 5f206d6f), and the unchecked writes (T-sites, cave @+0x1B5800, MicrovisorMode
+  @+0x230C80) went to other memory. patches/0012: StarbiteFindWinload walks back from the GetMemoryMap caller
+  to winload's PE header (needs size 0x266000), SB_WL() relocates every site, no winload writes without it
+  (=WLBASE b= s= ok / =WT nowinload). BOOT = src20.
