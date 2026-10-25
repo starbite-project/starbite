@@ -1,0 +1,14 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
+@@ -4847,7 +4847,10 @@
+     STATIC BOOLEAN  mFinalDumped = FALSE;
+ 
+     if (!mFinalDumped && (InSize == 0) && (Status == EFI_BUFFER_TOO_SMALL) &&
+-        (MemoryMapSize != NULL) && (*MemoryMapSize <= 0xC00u) &&
++        // Starbite: was <= 0xC00 (star2lte's map size). The S9's final map is 0x1410 bytes
++        // (pstore-win2: bt0e3 out=00001410), so the handoff below never ran and winload hung
++        // unpatched at the logo.
++        (MemoryMapSize != NULL) && (*MemoryMapSize <= 0x4000u) &&
+         (mStar2LteTraceEvents >= STAR2LTE_LATE_ALLOC_TRACE_EVENT) &&
+         (mStar2LteLastFramePra != 0) && (mStar2LteLastFramePra < CallerRa)) {
+       UINT64      ParentMap;

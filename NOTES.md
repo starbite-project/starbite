@@ -329,3 +329,8 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   The Windows UFS driver resets the ring when it starts; the ring held only firmware trace -> the kernel never
   reached boot drivers (woa's own note at the =HANDOFF code: "full firmware trace but zero UFSINIT", ~half of
   boots, retry boots). patches/0006 makes BdsPramByte wrap like 0003 (newest kept). BOOT = src13.
+- 2026-10-26 00:46: **W5 try 2 — same hang, cause found.** With 0006 the ring kept the tail (pstore-win2.bin):
+  last event bt0e3 = winload's final zero-size GetMemoryMap (pra 0x90fc53d8 < ra 0x90ffc768) returning
+  out=0x1410. The handoff (=AF0 / Star2LtePatchNtosCntfrqInMemory + Star2LtePatchWinloadTimers, "=HANDOFF
+  minimal") is gated on *MemoryMapSize <= 0xC00 (star2lte's size), so on the S9 it never ran and winload hung
+  unpatched. patches/0007 raises the gate to 0x4000. BOOT = src14.
