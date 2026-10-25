@@ -1718,10 +1718,19 @@ index e01c124..580b538 100644
  	 SCTLR_SA0_ENABLED | SCTLR_SA_ENABLED | SCTLR_C_ENABLED | SCTLR_M_ENABLED |        \
  	 SCTLR_CSEH_DEFAULT | SCTLR_DSSBS_DEFAULT |                                        \
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index 00b0198..379e262 100644
+index 00b0198..f10693f 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -890,6 +890,12 @@ common_start:
+@@ -523,7 +523,7 @@ LEXT(start_first_cpu)
+ 	str		x11, [x10]
+ 	dsb		sy
+ 	/* XNU-owned green entry block on the Exynos DECON scanout buffer. */
+-	MOV64	x10, (A5XELTE_FB_PA+88*A5XELTE_FB_STRIDE+960)
++	MOV64	x10, (A5XELTE_CONSOLE_PA+88*A5XELTE_FB_STRIDE+960)
+ 	MOV64	x11, 0xff00ff00
+ 	mov		x12, #21
+ 	mov		x15, #A5XELTE_FB_STRIDE
+@@ -890,10 +890,16 @@ common_start:
  	MOV64   x0, SCTLR_EL1_DEFAULT
  	MSR_SCTLR_EL1_X0
  	isb		sy
@@ -1734,16 +1743,66 @@ index 00b0198..379e262 100644
  
  #if defined(A5XELTE)
  	/* Blue block: the 4 KiB MMU is active and the framebuffer alias works. */
+-	MOV64	x10, (A5XELTE_FB_PA+120*A5XELTE_FB_STRIDE+960)
++	MOV64	x10, (A5XELTE_CONSOLE_PA+120*A5XELTE_FB_STRIDE+960)
+ 	MOV64	x11, 0xff0000ff
+ 	mov		x12, #21
+ 	mov		x15, #A5XELTE_FB_STRIDE
+@@ -937,7 +943,7 @@ La5_mmu_pixel:
+ 
+ #if defined(A5XELTE)
+ 	/* fp_enabled: write directly to the DECON scanout alias. */
+-	MOV64	x10, (A5XELTE_FB_PA+152*A5XELTE_FB_STRIDE+960)
++	MOV64	x10, (A5XELTE_CONSOLE_PA+152*A5XELTE_FB_STRIDE+960)
+ 	MOV64	x11, 0xff00ffff
+ 	mov	x12, #21
+ 	mov	x15, #A5XELTE_FB_STRIDE
+@@ -972,7 +978,7 @@ La5_fp_enabled_pixel:
+ 
+ #if defined(A5XELTE)
+ 	/* tunables_done: write directly to the DECON scanout alias. */
+-	MOV64	x10, (A5XELTE_FB_PA+184*A5XELTE_FB_STRIDE+960)
++	MOV64	x10, (A5XELTE_CONSOLE_PA+184*A5XELTE_FB_STRIDE+960)
+ 	MOV64	x11, 0xffff00ff
+ 	mov	x12, #21
+ 	mov	x15, #A5XELTE_FB_STRIDE
+@@ -1019,7 +1025,7 @@ La5_tunables_done_pixel:
+ 
+ #if defined(A5XELTE)
+ 	/* arm_init_jump: write directly to the DECON scanout alias. */
+-	MOV64	x10, (A5XELTE_FB_PA+216*A5XELTE_FB_STRIDE+960)
++	MOV64	x10, (A5XELTE_CONSOLE_PA+216*A5XELTE_FB_STRIDE+960)
+ 	MOV64	x11, 0xffffff00
+ 	mov	x12, #21
+ 	mov	x15, #A5XELTE_FB_STRIDE
+@@ -1104,7 +1110,7 @@ arm_init_tramp:
+ La5_draw_text:
+ 	adrp	x3, EXT(iso_font)@page
+ 	add	x3, x3, EXT(iso_font)@pageoff
+-	MOV64	x4, A5XELTE_FB_PA
++	MOV64	x4, A5XELTE_CONSOLE_PA
+ 	mov	x5, #A5XELTE_FB_STRIDE
+ 	madd	x4, x2, x5, x4
+ 	add	x4, x4, x1, lsl #2
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
-index d6bd6a4..b637001 100644
+index d6bd6a4..159b966 100644
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
+@@ -12,7 +12,7 @@
+ #include <kern/misc_protos.h>
+ 
+ /* The bootstrap TTBR0 maps DECON scanout VA=PA until arm_vm_init. */
+-#define A5_FB ((volatile uint32_t *)(uintptr_t)A5XELTE_FB_PA)
++#define A5_FB ((volatile uint32_t *)(uintptr_t)A5XELTE_CONSOLE_PA)
+ #define A5_STRIDE (A5XELTE_FB_STRIDE / 4u)
+ #define A5_SCALE ((unsigned int)A5XELTE_FB_TEXT_SCALE)
+ #define A5_ROW_HEIGHT (16u * A5_SCALE)
 @@ -44,7 +44,7 @@ sweet_early_putc(char c)
  	}
  	if (c == '\n' || a5_col >= A5_COLS) {
  		a5_col = 0;
 -		a5_row = (a5_row + 1) % (A5XELTE_FB_HEIGHT / A5_ROW_HEIGHT);
-+		a5_row = (a5_row + 1) % (A5XELTE_CONSOLE_HEIGHT / A5_ROW_HEIGHT);
++		a5_row = (a5_row + 1) % ((A5XELTE_CONSOLE_HEIGHT - A5XELTE_CONSOLE_TOP) / A5_ROW_HEIGHT);
  		a5_clear_row();
  		if (c == '\n') {
  			return;
@@ -1792,10 +1851,10 @@ index 76d70b9..edd08c6 100644
  		arm_saved_state_t *ss = find_user_regs(thread);
  		char line[400];
 diff --git a/pexpert/pexpert/arm64/A5XELTE.h b/pexpert/pexpert/arm64/A5XELTE.h
-index 8f9c8a2..2bad31b 100644
+index 8f9c8a2..9e15cc6 100644
 --- a/pexpert/pexpert/arm64/A5XELTE.h
 +++ b/pexpert/pexpert/arm64/A5XELTE.h
-@@ -10,7 +10,29 @@
+@@ -10,7 +10,31 @@
  #define SWEET                         1
  
  /* Firmware scanout buffer and the earliest XNU marker (physical). */
@@ -1816,8 +1875,10 @@ index 8f9c8a2..2bad31b 100644
 +#define A5XELTE_FB_BLOCKS             9     /* 2 MiB VA=PA bootstrap blocks (16.3 MiB) */
 +#define A5XELTE_FB_TEXT_SCALE         3
 +#define A5XELTE_FB_DOT_PITCH          458   /* iPhone X userland density */
-+/* The boot console stops above the Project Starbite bottom band
-+ * the loader draws at the bottom (tools/brand/overlay.mjs BAND_TOP). */
++/* The boot console runs between the Project Starbite header and the
++ * bottom status card the loader draws (tools/brand/overlay.mjs HEADER_H,
++ * BAND_TOP), so both stay on screen through the kernel boot. */
++#define A5XELTE_CONSOLE_TOP           640
 +#define A5XELTE_CONSOLE_HEIGHT        1880
 +/* Log page below the XNU window 0x92000000; the vendor logs end at 0x9179c000. */
 +#define A5XELTE_MARKER_PA             0x91fff100
@@ -1826,13 +1887,18 @@ index 8f9c8a2..2bad31b 100644
  /* Galaxy S7 SM-G930F: S-Boot leaves DECON_F scanning out this buffer. */
  #define HEROLTE                       1
  /* Logical 0..3: Cortex-A53 "Apollo" MPIDR 0x100..0x103 (boot cluster);
-@@ -39,6 +61,10 @@
+@@ -39,6 +63,15 @@
  #define A5XELTE_BOOT_MPIDR            0x0
  #endif
  
 +#ifndef A5XELTE_CONSOLE_HEIGHT
 +#define A5XELTE_CONSOLE_HEIGHT        A5XELTE_FB_HEIGHT
 +#endif
++#ifndef A5XELTE_CONSOLE_TOP
++#define A5XELTE_CONSOLE_TOP           0
++#endif
++/* Physical start of the console rows. */
++#define A5XELTE_CONSOLE_PA            (A5XELTE_FB_PA + A5XELTE_CONSOLE_TOP * A5XELTE_FB_STRIDE)
 +
  #define ARM_ARCH_TIMER
  #define __ARM_ARCH__                  8

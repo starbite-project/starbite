@@ -48,6 +48,14 @@ static const struct glyph font[] = {
     {'U',{17,17,17,17,17,17,14}}, {'V',{17,17,17,17,17,10,4}},
     {'W',{17,17,17,21,21,21,10}}, {'X',{17,17,10,4,10,17,17}},
     {'Y',{17,17,10,4,4,4,4}}, {'Z',{31,1,2,4,8,16,31}},
+    /* Boot menu and Starbite Engineer. */
+    {'(',{2,4,8,8,8,4,2}}, {')',{8,4,2,2,2,4,8}},
+    {'/',{1,1,2,4,8,16,16}}, {'>',{8,4,2,1,2,4,8}},
+    {'<',{2,4,8,16,8,4,2}}, {',',{0,0,0,0,12,4,8}},
+    {'+',{0,4,4,31,4,4,0}}, {'%',{24,25,2,4,8,19,3}},
+    {'_',{0,0,0,0,0,0,31}}, {'*',{0,4,21,14,21,4,0}},
+    {'!',{4,4,4,4,4,0,4}}, {'[',{14,8,8,8,8,8,14}},
+    {']',{14,2,2,2,2,2,14}}, {'#',{10,10,31,10,31,10,10}},
 };
 
 uint32_t star_fb_enable(void)
@@ -75,6 +83,20 @@ void star_fb_fill(uint32_t pixel)
         fb[i] = pixel;
 }
 
+void star_fb_fill_rows(unsigned y0, unsigned y1, uint32_t pixel)
+{
+    volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
+    for (unsigned y = y0; y < y1 && y < STAR_FB_HEIGHT; ++y)
+        for (unsigned x = 0; x < STAR_FB_WIDTH; ++x)
+            fb[y * STAR_FB_WIDTH + x] = pixel;
+}
+
+/* Panel y of a text row's top edge. */
+unsigned star_fb_row_y(unsigned row)
+{
+    return TOP + (row + row_base) * CELL_H;
+}
+
 static void fill_row(unsigned row, uint32_t pixel)
 {
     volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
@@ -86,10 +108,15 @@ static void fill_row(unsigned row, uint32_t pixel)
 
 void star_fb_text(unsigned row, const char *s)
 {
+    star_fb_text_c(row, s, 0xffffffffU, 0xff000000U);
+}
+
+void star_fb_text_c(unsigned row, const char *s, uint32_t fg, uint32_t bg)
+{
     volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
     unsigned top = TOP + (row + row_base) * CELL_H + 2U * SCALE;
     if (top + 7U * SCALE >= STAR_FB_HEIGHT) return;
-    fill_row(row, 0xff000000U);
+    fill_row(row, bg);
     for (unsigned col = 0; s[col] && LEFT + (col + 1U) * CELL_W <= STAR_FB_WIDTH; ++col) {
         const uint8_t *g = glyph_for(s[col]);
         for (unsigned y = 0; y < 7; ++y)
@@ -98,7 +125,7 @@ void star_fb_text(unsigned row, const char *s)
                 for (unsigned sy = 0; sy < SCALE; ++sy)
                     for (unsigned sx = 0; sx < SCALE; ++sx)
                         fb[(top + y * SCALE + sy) * STAR_FB_WIDTH +
-                           LEFT + col * CELL_W + x * SCALE + sx] = 0xffffffffU;
+                           LEFT + col * CELL_W + x * SCALE + sx] = fg;
             }
     }
 }

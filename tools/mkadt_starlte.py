@@ -22,7 +22,8 @@ DRAM_SIZE = 0x1d800000      # 472 MiB, ends at the RKP region 0xaf800000
 SOC_BASE = 0x10000000       # arm-io ranges base; child regs are relative
 FB_BASE, FB_WIDTH, FB_HEIGHT = 0xcc000000, 1440, 2960
 TIMEBASE = 26000000         # CNTFRQ_EL0 is 0 at handoff; OSCCLK is 26 MHz
-CONSOLE_HEIGHT = 1880         # boot console rows end above the bottom band
+CONSOLE_TOP = 640             # boot console rows start below the Starbite header
+CONSOLE_HEIGHT = 1880         # ... and end above the bottom status card
 LITTLE_CORES = 4            # Cortex-A55 cluster; cpus=N boot-arg limits what starts
 
 
@@ -133,11 +134,13 @@ def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False):
     ]))
     # pe_serial.c looks this node up by name for the kprintf console.
     root.children.append(mkadt.node('a5xelte-fbcon', [
-        ('reg', mkadt.u64(FB_BASE, FB_WIDTH * FB_HEIGHT * 4)),
+        # Console rows between the loader's header and bottom card.
+        ('reg', mkadt.u64(FB_BASE + CONSOLE_TOP * FB_WIDTH * 4,
+                          FB_WIDTH * (CONSOLE_HEIGHT - CONSOLE_TOP) * 4)),
         ('width', mkadt.u32(FB_WIDTH)),
         # The console stops above the loader's bottom band (tools/brand
         # overlay.mjs BAND_TOP), which then stays up through the kernel boot.
-        ('height', mkadt.u32(CONSOLE_HEIGHT)),
+        ('height', mkadt.u32(CONSOLE_HEIGHT - CONSOLE_TOP)),
         ('stride', mkadt.u32(FB_WIDTH * 4)),
     ]))
     return root

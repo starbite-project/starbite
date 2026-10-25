@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include "../fdt.h"
 #include "fbtext.h"
+#include "menu.h"
 
 #define LOG_BASE 0x91fff000UL
 #define RAM_BASE 0x92000000UL
@@ -124,15 +125,16 @@ static uintptr_t fail(volatile uint64_t *log, int64_t step, const char *why)
  *   "SBOVRLAY" u32 n, n x { u32 x, y, w, h; w*h u32 0xAARRGGBB }: blended over
  *     S-Boot's own boot logo, which stays on screen (overlay.mjs);
  *   "SBSPLASH" u32 w, h + RGB565: a full-screen picture (splash.mjs).
- * The loader's status lines then go in the gap under Samsung's logo.
+ * The boot menu and the loader's status lines then go in the gap under
+ * Samsung's logo.
  */
-#define SPLASH_HOLD_S 1U
+static uint64_t splash_start, splash_end;
+
 static int
-star_splash(uintptr_t fdt)
+star_splash_draw(void)
 {
-    uint64_t start = 0, end = 0;
-    if (!fdt || (fdt & 7) || !fdt_chosen_u64(fdt, "linux,initrd-start", &start) ||
-        !fdt_chosen_u64(fdt, "linux,initrd-end", &end) || end <= start + 16)
+    uint64_t start = splash_start, end = splash_end;
+    if (end <= start + 16)
         return 0;
     const volatile uint32_t *h = (const volatile uint32_t *)(uintptr_t)start;
     volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
@@ -179,82 +181,31 @@ star_splash(uintptr_t fdt)
     } else {
         return 0;
     }
-    uint64_t freq, t0;
-    __asm__ volatile("mrs %0, cntfrq_el0" : "=r" (freq));
-    if (!freq)
-        freq = 26000000U;
-    t0 = counter();
-    while ((counter() - t0) / freq < SPLASH_HOLD_S)
-        ;
     return 1;
 }
 
-/*
- * Boot confirmation on the branded screen: Volume Up boots iOS, Volume Down
- * reboots to Download mode (returning 0 takes xnu_boot.S's failure path,
- * which requests Download mode). Keys are the S9's ALIVE GPIOs, active low
- * (starlte DTB gpio_keys; a5xelte_keys.c STARLTE): GPA0 DAT 0x14050024 bit 3
- * Volume Up, bit 4 Volume Down. Keys still held from the boot key combo
- * must be released first.
- */
-#define ALIVE_GPA0_DAT 0x14050024UL
-static unsigned
-star_keys(void)        /* bit 0 Volume Up, bit 1 Volume Down; 1 = pressed */
-{
-    uint32_t d = *(volatile uint32_t *)ALIVE_GPA0_DAT;
-    return (unsigned)(!((d >> 3) & 1U)) | (unsigned)(!((d >> 4) & 1U)) << 1;
-}
-
-static void
-star_wait_ms(unsigned ms)
-{
-    uint64_t freq, t0;
-    __asm__ volatile("mrs %0, cntfrq_el0" : "=r" (freq));
-    if (!freq)
-        freq = 26000000U;
-    t0 = counter();
-    while ((counter() - t0) < freq / 1000U * ms)
-        ;
-}
-
-/* Returns 1 to boot iOS, 0 for Download mode. */
 static int
-star_confirm(void)
+star_splash(uintptr_t fdt)
 {
-    star_fb_text(0, "VOLUME UP     BOOT IOS");
-    star_fb_text(1, "VOLUME DOWN   DOWNLOAD MODE");
-    star_fb_text(2, "");
-    star_fb_text(3, "");
-    while (star_keys())
-        star_wait_ms(20);
-    for (;;) {
-        unsigned k = star_keys();
-        if (k) {
-            star_wait_ms(40);
-            if (star_keys() == k) {
-                while (star_keys())
-                    star_wait_ms(20);
-                if (k & 1U)
-                    return 1;
-                return 0;
-            }
-        }
-        star_wait_ms(10);
-    }
+    if (!fdt || (fdt & 7) || !fdt_chosen_u64(fdt, "linux,initrd-start", &splash_start) ||
+        !fdt_chosen_u64(fdt, "linux,initrd-end", &splash_end))
+        return 0;
+    return star_splash_draw();
+}
+
+void
+star_overlay_redraw(void)
+{
+    (void)star_splash_draw();
 }
 
 /* Returns entry PA or zero. Status stays in the log page at LOG_BASE. */
 uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)
 {
     uint64_t rd_start, rd_end;
+    static char cmdline[BOOT_LINE_LENGTH];
     log[77] = star_fb_enable();
-    if (star_splash(fdt) && !star_confirm()) {
-        star_fb_text(0, "DOWNLOAD MODE");
-        star_fb_text(1, "");
-        return 0;
-    }
-    star_fb_text(0, "PROJECT STARBITE X STARBITE");
-    star_fb_text(1, "");
+    int branded = star_splash(fdt);
     if (el != 4)
         return fail(log, -10, "NOT EL1");
     if (sctlr & 1)
@@ -291,6 +242,27 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
         !p->mem_size || p->mem_size > window_end - p->phys_base ||
         p->entry_va < p->virt_base || p->kernel_end < p->virt_base)
         return fail(log, -3, "PAYLOAD RAM OUTSIDE WINDOW");
+    for (unsigned i = 0; i < BOOT_LINE_LENGTH; ++i)
+        cmdline[i] = p->cmdline[i];
+    cmdline[BOOT_LINE_LENGTH - 1] = 0;
+    /* The boot menu (and Starbite Engineer) on the branded screen; XNU RAM
+     * is still free here, for Engineer's RAM test. */
+    if (branded) {
+        struct star_info in;
+        in.el = el;
+        in.sctlr = sctlr;
+        in.fdt = fdt;
+        in.rd_start = rd_start;
+        in.rd_end = rd_end;
+        in.phys_base = p->phys_base;
+        in.mem_size = p->mem_size;
+        in.entry_va = p->entry_va;
+        in.nsegs = p->nsegs;
+        if (!star_menu(&in, cmdline, BOOT_LINE_LENGTH))
+            return 0;
+    }
+    star_fb_text(0, "PROJECT STARBITE");
+    star_fb_text(1, "");
     star_fb_hex(2, "RAM BASE", p->phys_base);
     log[13] = p->phys_base;
     log[14] = p->mem_size;
@@ -328,7 +300,7 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
     ba->deviceTreeP = p->virt_base + (adt_pa - p->phys_base);
     ba->deviceTreeLength = (uint32_t)p->adt_size;
     for (unsigned i = 0; i < BOOT_LINE_LENGTH; ++i)
-        ba->CommandLine[i] = p->cmdline[i];
+        ba->CommandLine[i] = cmdline[i];
     ba->memSizeActual = p->mem_size;
     clean_bytes(adt_pa, ba_pa + PAGE_SIZE);
 
