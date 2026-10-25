@@ -1,0 +1,34 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
+@@ -401,19 +401,24 @@
+     mBdsTeeBuf[mBdsTeeLen++] = Ch;
+   }
+ 
+-  if (PW[0] != 0x43474244u) {
++  if ((PW[0] != 0x43474244u) || (PW[1] >= 0x3F00u) || (PW[2] > 0x3F00u)) {
+     PW[0] = 0x43474244u; PW[1] = 0; PW[2] = 0;
+   }
+-  PS = PW[2];
+   //
+-  // Linear cap (v11 form): write only while the ring has room and leave the
+-  // ramoops `start` field at 0. Reverted from the circular variant pending a
+-  // bisect of the v11 -> v12 Windows-logo hang.
++  // Starbite: wrap like the DEBUG mirror (patches/0003 StarbiteRingWrite) so the
++  // NEWEST trace survives. The linear cap filled the ring during winload's
++  // variable reads and dropped everything from its final GetMemoryMap onwards
++  // (=HANDOFF, ExitBootServices, the kernel) on the first Windows boot.
+   //
+-  if (PS < 0x3F00u) {
+-    PB[12u + PS] = Ch;
++  if (PW[2] < 0x3F00u) {
++    PS    = PW[2];
+     PW[2] = PS + 1u;
++    PW[1] = (PS + 1u) % 0x3F00u;
++  } else {
++    PS    = PW[1];
++    PW[1] = (PS + 1u) % 0x3F00u;
+   }
++  PB[12u + PS] = Ch;
+ 
+ #if STAR2LTE_USB_DEBUG_MODE == STAR2LTE_USB_DEBUG_HID
+   Star2LteUsbDebugWriteByte (Ch);

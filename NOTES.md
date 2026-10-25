@@ -321,3 +321,11 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   streams (now adb push to /tmp + local dd); adb calls inside `while read` ate the run list (fd 3 now, plus a
   coverage check). TWRP mounts both read-only: EFI\Boot\bootaa64.efi, EFI\Microsoft\Boot\{bootmgfw.efi,BCD},
   \Windows, Panther\unattend.xml. BOOT unchanged (src12). Next W5: pick WINDOWS 11.
+- 2026-10-26 00:40: **W5 try 1 — Windows logo, no spinner, hang** (forced reset after several minutes). HUD:
+  "gmm 5 000000E3 0000046A 00000DFE" = last trace tag gmm, trace event 0xE3, block-read seq 0x46A, alloc seq
+  0xDFE. bootmgfw loaded/started, winload ran (variables, CI policy, 1.8 MB load, GOP), last ring entry bt0ad
+  "gmm>" (3rd late GetMemoryMap, caller 0x910b50a0) cut mid-line: woa's BdsPramByte has a LINEAR 0x3F00 cap and
+  the ring was full (pstore-win1.bin = 16128 bytes), so ~54 later events (=HANDOFF minimal, EBS) were dropped.
+  The Windows UFS driver resets the ring when it starts; the ring held only firmware trace -> the kernel never
+  reached boot drivers (woa's own note at the =HANDOFF code: "full firmware trace but zero UFSINIT", ~half of
+  boots, retry boots). patches/0006 makes BdsPramByte wrap like 0003 (newest kept). BOOT = src13.
