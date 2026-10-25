@@ -369,3 +369,15 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   @+0x230C80) went to other memory. patches/0012: StarbiteFindWinload walks back from the GetMemoryMap caller
   to winload's PE header (needs size 0x266000), SB_WL() relocates every site, no winload writes without it
   (=WLBASE b= s= ok / =WT nowinload). BOOT = src20.
+- 2026-10-26 01:10: **W5 try 9 (src20) — ROOT CAUSE: our winload is a different build than the woa source's
+  hard-coded winload patch sites.** src20 relocated correctly (=WLBASE b=90fb6000 s=00266000 ok) but =WPHY?
+  927df084: the switch-entry site read the wrong instruction. Pulled the live winload.efi (sha 0454c483... =
+  firmware.json 22621.7582) to build/woa/win-bin/. Analysis: Star2LtePatchWinloadTimers' Sites[] are star2lte
+  absolute addresses; switch leaf is dsb sy @0x912D50A0 + tlbi vmalle1 @0x912D50C8 (gap 0x28). In OUR winload
+  the only dsb+tlbi(gap 0x28) pair is RVA 0x10b4/0x10dc -> implied base 0x912D3FEC, NOT page-aligned => NOT the
+  same binary layout. So the woa firmware source hard-codes a DIFFERENT winload build's offsets (ntoskrnl patch
+  still worked because it scans for `mrs cntfrq_el0`, not fixed RVAs; NTPATCH n=04 cf=03). winload RVAs found in
+  build/woa/win-bin/winload.efi: .text 0x1000, switch leaf dsb 0x10b4 / tlbi(31) 0x10dc, ImageBase 0x180000000,
+  SizeOfImage 0x266000. Two ways forward: (A) re-derive all winload sites (switch dsb/tlbi, T0-T6 trace sites,
+  cave page, MicrovisorMode, brk f003/f004) by PATTERN from our winload.efi and feed real RVAs; (B) build the
+  Windows image to the exact build the woa source targets. (A) keeps 7584 and is the plan. BOOT still = src20.
