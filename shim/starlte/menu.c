@@ -871,5 +871,8 @@ int star_menu(const struct star_info *in, char *cmdline, unsigned len)
     star_fb_row_base(MENU_ROW_BASE);
     for (unsigned r = 0; r < 5; ++r)
         star_fb_text(r, "");
+    /* The Starbite card belongs to the boot selector only: clear it
+     * (overlay.mjs BAND_TOP .. the footer) before iOS boots. */
+    star_fb_fill_rows(1880, 2500, C_BLACK);
     return 1;
 }
