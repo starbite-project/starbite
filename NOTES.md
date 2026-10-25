@@ -285,3 +285,19 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   labels fail because the shell's echo takes them as flags.) CACHE restored afterwards. The BmDriverHealth(551)
   "Not Found" ASSERT is non-fatal. Windows: the UTM VM "Starbite Windows" has finished building the 22631.7584
   image too. Next: W3 GPT split (back up GPT + EFS first), then W4 copy the image to WINDOWS/WINESP.
+- 2026-10-25 23:45: **W3 prepared, nothing written.** Backup backup/20261025-233855 (backup-starlte.sh: EFS,
+  CPEFS, PARAM, UP_PARAM, BOOT, RECOVERY, DTB, DTBO, RADIO, KEYSTORAGE, PERSISTENT, STEADY, OMR + raw primary/
+  backup GPT of sda..sde). Measured: iOS HFS+ "HX" = exactly 16 GiB (9.43 used), kiosk ext4 at +17 GiB =
+  1.148 GiB -> ends at 18.15 GiB. sda GPT: header size 512, 128 entries at LBA 2, usable 6..0xEE47FA.
+  tools/woa/gpt-split.sh gen builds the new GPT offline (lima losetup 4K + sgdisk) -> build/woa/gpt-new:
+  25 USERDATA 1698432..6679295 (19 GiB, same start/name/GUID 3502F564-...), 26 WINESP 256 MiB EF00
+  (D84E28FA-6593-407F-B843-D2DB04378402), 27 WINDOWS 25.8 GiB (1FB16851-063B-4D98-9CE9-49EF71D08603),
+  28 A16DATA 8 GiB (CBC93D1E-...). Entries 1-24, disk GUID, protective MBR byte-identical; CRCs valid.
+  `apply` writes both copies from TWRP and reads them back. W4's BCD must use the WINDOWS/WINESP GUIDs
+  above, not woa's PartitionMap.cs ones (those are star2lte's).
+- 2026-10-25 23:50: **W3 done — GPT split applied.** `gpt-split.sh apply` wrote both copies, read-back identical;
+  after a reboot to TWRP the kernel shows sda25 USERDATA / sda26 WINESP / sda27 WINDOWS / sda28 A16DATA at the
+  planned starts and sizes (by-name links present). iOS HFS+ header unchanged; kiosk ext4 `e2fsck -fn` clean.
+  Restore path: backup/20261025-233855/gpt-sda-{primary,backup}.bin (dd to LBA 0 and 15615995).
+  Next W4: format WINESP (FAT32, 4K) and WINDOWS (NTFS), apply the 22631.7584 image from the VM, bcdboot with the
+  GUIDs above.
