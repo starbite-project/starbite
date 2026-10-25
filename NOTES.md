@@ -352,3 +352,7 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   hive). The scan only covered PEI DRAM 0x90000000..0xBC800000; winload's big LoaderCode allocations here go to
   Star2LteRamManagerDxe's banks (e.g. 0x103d pages at 0xde4e2000). patches/0009 scans 0xC0080000..0xCC000000
   and 0xCD044000..0xE0000000 too and lists only images >= 1 MiB. BOOT = src17.
+- 2026-10-26 00:58: **W5 try 6 (src17) — ntoskrnl found, still unpatched** (pstore-win6.bin): =NTID
+  b=de4e2000 e=009d8xa0 c=005d7e00 (kernel in the DXE bank), but =NTCMP n=00 / =NTPATCH n=00 cf=00: every patch
+  site is gated on Star2LteLooksLikeCodePtr, also hard-wired to 0x90000000..0xBC800000. patches/0010 makes it
+  accept the mStarbiteNtosScan banks. BOOT = src18.

@@ -1,0 +1,16 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
+@@ -1507,7 +1507,12 @@
+   IN UINT64  Address
+   )
+ {
+-  return (BOOLEAN)((Address >= 0x0000000090000000ULL) && (Address < 0x00000000BC800000ULL) && ((Address & 0x3ULL) == 0));
++  //
++  // Starbite: any RAM bank the ntoskrnl scan covers (mStarbiteNtosScan), not only PEI DRAM:
++  // on the S9 the kernel sits at 0xDE4E2000 and every patch site there was rejected
++  // (pstore-win6: =NTID b=de4e2000 but =NTCMP n=00, =NTPATCH n=00 cf=00).
++  //
++  return (BOOLEAN)(StarbiteInNtosScan (Address, Address + sizeof (UINT32)) && ((Address & 0x3ULL) == 0));
+ }
+ 
+ STATIC
