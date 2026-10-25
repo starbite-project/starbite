@@ -346,3 +346,9 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   none validated as ntoskrnl, so the kernel got no CNTFRQ patch. Last entry =HANDOFF minimal, no =EBSENTER.
   winload allocated 0x92400000 (0x400 pages) and 0x92800000 / 0x931f1000 (0x9f1 pages each) before the
   query. patches/0008 lists every scanned PE (=PE b s m x name). BOOT = src16.
+- 2026-10-26 00:56: **W5 try 5 (src16) — PE list** (pstore-win5.bin): the scan saw only small images (boot
+  drivers 0x9198xxxx..0x91bxxxxx, 0x926d1000, 0x9270d000, DXE drivers 0xbbdxxxxx..0xbbfxxxxx, all <= 0x72000);
+  nothing at 0x92400000, and the 0x9f1-page blocks at 0x92800000/0x931f1000 are not PE (likely the SYSTEM
+  hive). The scan only covered PEI DRAM 0x90000000..0xBC800000; winload's big LoaderCode allocations here go to
+  Star2LteRamManagerDxe's banks (e.g. 0x103d pages at 0xde4e2000). patches/0009 scans 0xC0080000..0xCC000000
+  and 0xCD044000..0xE0000000 too and lists only images >= 1 MiB. BOOT = src17.

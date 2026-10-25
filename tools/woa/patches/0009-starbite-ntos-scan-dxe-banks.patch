@@ -1,0 +1,82 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
+@@ -1406,6 +1406,33 @@
+ #define STAR2LTE_NTOS_SCAN_BASE   0x0000000090000000ULL
+ #define STAR2LTE_NTOS_SCAN_LIMIT  0x00000000BC800000ULL
+ #define STAR2LTE_NTOS_MAX_IMAGE_SIZE  0x08000000u
++//
++// Starbite: the ntoskrnl scan covered only PEI DRAM (0x90000000..0xBC800000), where star2lte's
++// winload put the kernel (0x92400000). On the S9 the kernel is elsewhere (pstore-win5: 0x1c images
++// listed, all <= 0x72000 bytes), so also scan the two banks Star2LteRamManagerDxe adds.
++//
++STATIC CONST UINT64  mStarbiteNtosScan[][2] = {
++  { 0x0000000090000000ULL, 0x00000000BC800000ULL },
++  { 0x00000000C0080000ULL, 0x00000000CC000000ULL },
++  { 0x00000000CD044000ULL, 0x00000000E0000000ULL },
++};
++
++STATIC
++BOOLEAN
++StarbiteInNtosScan (
++  IN UINT64  Base,
++  IN UINT64  End
++  )
++{
++  UINTN  Index;
++
++  for (Index = 0; Index < ARRAY_SIZE (mStarbiteNtosScan); Index++) {
++    if ((Base >= mStarbiteNtosScan[Index][0]) && (End <= mStarbiteNtosScan[Index][1]) && (Base < End)) {
++      return TRUE;
++    }
++  }
++  return FALSE;
++}
+ #define STAR2LTE_PE_SIGNATURE     0x00004550u
+ #define STAR2LTE_PE_MACHINE_ARM64 0xAA64u
+ #define STAR2LTE_PE32_PLUS_MAGIC  0x020Bu
+@@ -1878,7 +1905,7 @@
+   UINT32  SizeOfImage;
+   UINT64  ImageEnd;
+ 
+-  if ((ImageSize == NULL) || !Star2LteLooksLikeDramPtr (Base)) {
++  if ((ImageSize == NULL) || !StarbiteInNtosScan (Base, Base + EFI_PAGE_SIZE)) {
+     return FALSE;
+   }
+ 
+@@ -1909,7 +1936,7 @@
+   }
+ 
+   ImageEnd = Base + ALIGN_VALUE ((UINTN)SizeOfImage, EFI_PAGE_SIZE);
+-  if ((ImageEnd <= Base) || (ImageEnd > STAR2LTE_NTOS_SCAN_LIMIT)) {
++  if (!StarbiteInNtosScan (Base, ImageEnd)) {
+     return FALSE;
+   }
+ 
+@@ -1944,7 +1971,8 @@
+     *CntfrqPatched = 0;
+   }
+ 
+-  for (Base = STAR2LTE_NTOS_SCAN_BASE; (Base + EFI_PAGE_SIZE) <= STAR2LTE_NTOS_SCAN_LIMIT; Base += EFI_PAGE_SIZE) {
++  for (UINTN R = 0; R < ARRAY_SIZE (mStarbiteNtosScan); R++)
++  for (Base = mStarbiteNtosScan[R][0]; (Base + EFI_PAGE_SIZE) <= mStarbiteNtosScan[R][1]; Base += EFI_PAGE_SIZE) {
+     if (!Star2LteGetPeImageSize (Base, &ImageSize)) {
+       continue;
+     }
+@@ -1959,6 +1987,9 @@
+       UINT32  Exp = *(volatile UINT32 *)(UINTN)(Base + Lfa + 0x88u);   // DataDirectory[0].VirtualAddress
+       UINTN   Ni;
+ 
++      if (ImageSize < 0x100000u) {
++        goto StarbitePeListed;
++      }
+       BdsPramStr ("\n=PE b=");
+       BdsPramHex ((UINT32)Base, 8);
+       BdsPramStr (" s=");
+@@ -1981,6 +2012,7 @@
+         }
+       }
+     }
++StarbitePeListed:
+     if (!Star2LteGetNtosLayout (Base, ImageSize, &Layout)) {
+       //
+       // Warm boots can leave stale PE headers whose claimed image range
