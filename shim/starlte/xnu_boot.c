@@ -126,14 +126,14 @@ static uintptr_t fail(volatile uint64_t *log, int64_t step, const char *why)
  *   "SBSPLASH" u32 w, h + RGB565: a full-screen picture (splash.mjs).
  * The loader's status lines then go in the gap under Samsung's logo.
  */
-#define SPLASH_HOLD_S 4U
-static void
+#define SPLASH_HOLD_S 1U
+static int
 star_splash(uintptr_t fdt)
 {
     uint64_t start = 0, end = 0;
     if (!fdt || (fdt & 7) || !fdt_chosen_u64(fdt, "linux,initrd-start", &start) ||
         !fdt_chosen_u64(fdt, "linux,initrd-end", &end) || end <= start + 16)
-        return;
+        return 0;
     const volatile uint32_t *h = (const volatile uint32_t *)(uintptr_t)start;
     volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
     if (h[0] == 0x564f4253U && h[1] == 0x59414c52U) {           /* "SBOVRLAY" */
@@ -144,7 +144,7 @@ star_splash(uintptr_t fdt)
             q += 4;
             if ((uintptr_t)(q + (uint64_t)w * ht) > end || x + w > STAR_FB_WIDTH ||
                 y + ht > STAR_FB_HEIGHT)
-                return;
+                return 0;
             for (uint32_t yy = 0; yy < ht; yy++) {
                 volatile uint32_t *row = fb + (uint64_t)(y + yy) * STAR_FB_WIDTH + x;
                 for (uint32_t xx = 0; xx < w; xx++) {
@@ -164,7 +164,7 @@ star_splash(uintptr_t fdt)
     } else if (h[0] == 0x50534253U && h[1] == 0x4853414cU) {   /* "SBSPLASH" */
         uint32_t w = h[2], ht = h[3];
         if (w != STAR_FB_WIDTH || ht != STAR_FB_HEIGHT || end - start < 16 + (uint64_t)w * ht * 2)
-            return;
+            return 0;
         const volatile uint32_t *px = (const volatile uint32_t *)(uintptr_t)(start + 16);
         for (uint32_t i = 0; i < w * ht / 2; i++) {
             uint32_t two = px[i];
@@ -177,7 +177,7 @@ star_splash(uintptr_t fdt)
         }
         star_fb_row_base(38);
     } else {
-        return;
+        return 0;
     }
     uint64_t freq, t0;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r" (freq));
@@ -186,6 +186,61 @@ star_splash(uintptr_t fdt)
     t0 = counter();
     while ((counter() - t0) / freq < SPLASH_HOLD_S)
         ;
+    return 1;
+}
+
+/*
+ * Boot confirmation on the branded screen: Volume Up boots iOS, Volume Down
+ * reboots to Download mode (returning 0 takes xnu_boot.S's failure path,
+ * which requests Download mode). Keys are the S9's ALIVE GPIOs, active low
+ * (starlte DTB gpio_keys; a5xelte_keys.c STARLTE): GPA0 DAT 0x14050024 bit 3
+ * Volume Up, bit 4 Volume Down. Keys still held from the boot key combo
+ * must be released first.
+ */
+#define ALIVE_GPA0_DAT 0x14050024UL
+static unsigned
+star_keys(void)        /* bit 0 Volume Up, bit 1 Volume Down; 1 = pressed */
+{
+    uint32_t d = *(volatile uint32_t *)ALIVE_GPA0_DAT;
+    return (unsigned)(!((d >> 3) & 1U)) | (unsigned)(!((d >> 4) & 1U)) << 1;
+}
+
+static void
+star_wait_ms(unsigned ms)
+{
+    uint64_t freq, t0;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r" (freq));
+    if (!freq)
+        freq = 26000000U;
+    t0 = counter();
+    while ((counter() - t0) < freq / 1000U * ms)
+        ;
+}
+
+/* Returns 1 to boot iOS, 0 for Download mode. */
+static int
+star_confirm(void)
+{
+    star_fb_text(0, "VOLUME UP     BOOT IOS");
+    star_fb_text(1, "VOLUME DOWN   DOWNLOAD MODE");
+    star_fb_text(2, "");
+    star_fb_text(3, "");
+    while (star_keys())
+        star_wait_ms(20);
+    for (;;) {
+        unsigned k = star_keys();
+        if (k) {
+            star_wait_ms(40);
+            if (star_keys() == k) {
+                while (star_keys())
+                    star_wait_ms(20);
+                if (k & 1U)
+                    return 1;
+                return 0;
+            }
+        }
+        star_wait_ms(10);
+    }
 }
 
 /* Returns entry PA or zero. Status stays in the log page at LOG_BASE. */
@@ -193,8 +248,13 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
 {
     uint64_t rd_start, rd_end;
     log[77] = star_fb_enable();
-    star_splash(fdt);
+    if (star_splash(fdt) && !star_confirm()) {
+        star_fb_text(0, "DOWNLOAD MODE");
+        star_fb_text(1, "");
+        return 0;
+    }
     star_fb_text(0, "PROJECT STARBITE X STARBITE");
+    star_fb_text(1, "");
     if (el != 4)
         return fail(log, -10, "NOT EL1");
     if (sctlr & 1)
