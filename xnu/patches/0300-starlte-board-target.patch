@@ -594,10 +594,10 @@ index 0000000..cf1a1e5
 +#endif /* ARM64_BOARD_CONFIG_STARLTE */
 diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
 new file mode 100644
-index 0000000..ed14778
+index 0000000..7b91096
 --- /dev/null
 +++ b/bsd/dev/starlte_touch.c
-@@ -0,0 +1,659 @@
+@@ -0,0 +1,664 @@
 +/*
 + * STARLTE (Galaxy S9 SM-G960F, Exynos 9810) touchscreen: Samsung S6SY761
 + * ("sec,sec_ts", fw y761_star1) at 0x48 on HSI2C 0x104B0000 (USI03,
@@ -883,6 +883,11 @@ index 0000000..ed14778
 +		                           1053000, 949000, 832000, 715000, 598000, 455000 };
 +	uint32_t want = 0;
 +	PE_parse_boot_argn("starfreq", &want, sizeof(want));
++	/* FREQ_GET on channel 0 answered 0 kHz on the S9: the channel or the
++	 * command is not the right one. Send nothing unless asked. */
++	if (!want) {
++		return;
++	}
 +	uint32_t c = acpm_find(0);
 +	if (!c) {
 +		printf("STARLTE DVFS: no ACPM channel 0\n");
@@ -1458,10 +1463,29 @@ index b269868..007d9bd 100644
  	/* cpu_start() discards PE_cpu_start's return; do not silently carry on. */
  	if (rc != 0) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 3dc6d44..781968d 100644
+index 3dc6d44..9f3a4a4 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -605,6 +605,58 @@ AppleCLCD::scaledCopy(uintptr_t src, uint32_t srcRowBytes, int32_t dx, int32_t d
+@@ -267,6 +267,18 @@ AppleCLCD::start(IOService *provider)
+ 	fSurface = sweet_surface_create_physical(fPhys, fScaled ? fLogicalW : fWidth,
+ 	    fScaled ? fLogicalH : fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+ 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	/* Scaled, the default surface covers only the logical rows (1792 of
++	 * 2960): scaledCopy() writes the whole panel, so it needs a mapping of
++	 * all of it, or the lower rows go past the end (black lower third and
++	 * stray writes, seen on the S9). */
++	if (fScaled && fSurface != NULL) {
++		SweetSurface *panel = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes,
++		    SWEET_FB_FORMAT_BGRA);
++		fPixels = panel != NULL ? panel->kernelAddress() : 0;
++		IOLog("SWEET FB: scaled: panel mapping %ux%u for the scaler\n", fWidth, fHeight);
++	}
++#endif
+ 	fWorkLoop = IOWorkLoop::workLoop();
+ 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
+ 		IOLog("SWEET FB: setup failed\n");
+@@ -605,6 +617,58 @@ AppleCLCD::scaledCopy(uintptr_t src, uint32_t srcRowBytes, int32_t dx, int32_t d
      int32_t w, int32_t h)
  {
  	static uint16_t column[2048];
