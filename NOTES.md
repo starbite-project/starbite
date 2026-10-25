@@ -356,3 +356,7 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   b=de4e2000 e=009d8xa0 c=005d7e00 (kernel in the DXE bank), but =NTCMP n=00 / =NTPATCH n=00 cf=00: every patch
   site is gated on Star2LteLooksLikeCodePtr, also hard-wired to 0x90000000..0xBC800000. patches/0010 makes it
   accept the mStarbiteNtosScan banks. BOOT = src18.
+- 2026-10-26 01:00: **W5 try 7 (src18) — ntoskrnl patched, still stops after the handoff** (pstore-win7.bin):
+  =NTCFQ b=de4e2000 n=03, =NTCMP n=01, =NTPATCH n=04 cf=03 (woa reference n=05 cf=04), =STLBI0..2, =HANDOFF
+  minimal is still the last entry, no =EBSENTER. patches/0011 turns on the after-handoff AFG>/AFG</AFRET
+  GetMemoryMap traces (compiled out with FALSE &&). BOOT = src19.

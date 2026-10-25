@@ -1,0 +1,29 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
+@@ -4841,7 +4841,7 @@
+     BdsPramStr (" daif=");
+     BdsPramHex ((UINT32)Star2LteReadDaif (), 4);
+   }
+-  if (FALSE && Star2LteAfterFinalTraceBegin ("AFG>")) {
++  if (Star2LteAfterFinalTraceBegin ("AFG>")) {   // Starbite: on (0011), the post-handoff window was blind
+     BdsPramStr (" in=");
+     BdsPramHex ((UINT32)InSize, 8);
+     BdsPramStr (" buf=");
+@@ -4868,7 +4868,7 @@
+       }
+     }
+   }
+-  if (FALSE && Star2LteAfterFinalTraceBegin ("AFG<")) {
++  if (Star2LteAfterFinalTraceBegin ("AFG<")) {   // Starbite: on (0011)
+     BdsPramStr (" out=");
+     BdsPramHex ((MemoryMapSize != NULL) ? (UINT32)*MemoryMapSize : 0u, 8);
+     BdsPramStr (" key=");
+@@ -5026,7 +5026,7 @@
+     }
+   }
+ 
+-  if (FALSE && mStar2LteAfterFinalProbe && (InSize == 0) && (Status == EFI_BUFFER_TOO_SMALL)) {
++  if (mStar2LteAfterFinalProbe && (InSize == 0) && (Status == EFI_BUFFER_TOO_SMALL)) {   // Starbite: on (0011)
+     BdsPramStr ("\n=AFRET ra=");
+     BdsPramHex64 (CallerRa, 16);
+     BdsPramStr (" pra=");
