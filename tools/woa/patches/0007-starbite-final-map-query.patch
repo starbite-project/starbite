@@ -1,0 +1,28 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
+@@ -4845,9 +4845,23 @@
+   //
+   {
+     STATIC BOOLEAN  mFinalDumped = FALSE;
++    STATIC BOOLEAN  mSawLoopQuery = FALSE;
+ 
+-    if (!mFinalDumped && (InSize == 0) && (Status == EFI_BUFFER_TOO_SMALL) &&
+-        (MemoryMapSize != NULL) && (*MemoryMapSize <= 0xC00u) &&
++    //
++    // Starbite: star2lte told winload's final zero-size query apart by map size (<= 0xC00).
++    // On the S9 every late map is larger (0x1380..0x1410), so that gate never fired
++    // (pstore-win2: winload hung unpatched after its final query) and size alone also admits
++    // winload's FIRST late query (pstore-win3: handoff at out=0x1380, winload died early).
++    // Late queries seen on every S9 boot, by parent return address (pra) vs ra 0x90ffc768:
++    //   first  pra 0x90ffa8a0 (< ra), loop pra 0x910b50a0 (> ra, several), final pra 0x90fc53d8 (< ra)
++    // so the final one is the first pra < ra query AFTER a loop (pra > ra) query.
++    //
++    if ((InSize == 0) && (Status == EFI_BUFFER_TOO_SMALL) && (mStar2LteTraceEvents >= STAR2LTE_LATE_ALLOC_TRACE_EVENT) &&
++        (mStar2LteLastFramePra > CallerRa)) {
++      mSawLoopQuery = TRUE;
++    }
++    if (!mFinalDumped && mSawLoopQuery && (InSize == 0) && (Status == EFI_BUFFER_TOO_SMALL) &&
++        (MemoryMapSize != NULL) && (*MemoryMapSize <= 0x4000u) &&
+         (mStar2LteTraceEvents >= STAR2LTE_LATE_ALLOC_TRACE_EVENT) &&
+         (mStar2LteLastFramePra != 0) && (mStar2LteLastFramePra < CallerRa)) {
+       UINT64      ParentMap;

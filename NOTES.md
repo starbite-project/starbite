@@ -334,3 +334,9 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   out=0x1410. The handoff (=AF0 / Star2LtePatchNtosCntfrqInMemory + Star2LtePatchWinloadTimers, "=HANDOFF
   minimal") is gated on *MemoryMapSize <= 0xC00 (star2lte's size), so on the S9 it never ran and winload hung
   unpatched. patches/0007 raises the gate to 0x4000. BOOT = src14.
+- 2026-10-26 00:50: **W5 try 3 (src14) — handoff fired too early, hang sooner** (pstore-win3.bin): =AF0 at
+  winload's FIRST late zero-size query (out=0x1380, pra 0x90ffa8a0), =STLBI0..2 =CFQ0 =HANDOFF minimal, then
+  winload kept allocating and died at bt0bd. Neither try reached =EBSENTER, so the patches must go in at the
+  final query, not ExitBootServices. Same pattern every boot: first pra 0x90ffa8a0 (< ra 0x90ffc768), loop pra
+  0x910b50a0 (> ra), final pra 0x90fc53d8 (< ra). patches/0007 (renamed final-map-query) now requires a loop
+  query before the final one (size gate kept loose at 0x4000). BOOT = src15.
