@@ -36,7 +36,7 @@ static uintptr_t skip_str(uintptr_t p)
 	return p + 1;
 }
 
-int fdt_chosen_u64(uintptr_t fdt, const char *prop, uint64_t *out)
+static int chosen_prop(uintptr_t fdt, const char *prop, uint64_t *out, const uint64_t *set)
 {
 	if (!fdt || be32(fdt) != FDT_MAGIC)
 		return 0;
@@ -64,12 +64,18 @@ int fdt_chosen_u64(uintptr_t fdt, const char *prop, uint64_t *out)
 			uint32_t len = be32(p), nameoff = be32(p + 4);
 			uintptr_t val = p + 8;
 			if (in_chosen && streq((const char *)(strings + nameoff), prop)) {
-				if (len == 4)
-					*out = be32(val);
-				else if (len == 8)
-					*out = (uint64_t)be32(val) << 32 | be32(val + 4);
-				else
+				if (len != 4 && len != 8)
 					return 0;
+				if (set) {
+					volatile uint32_t *w = (volatile uint32_t *)val;
+					if (len == 4)
+						w[0] = __builtin_bswap32((uint32_t)*set);
+					else {
+						w[0] = __builtin_bswap32((uint32_t)(*set >> 32));
+						w[1] = __builtin_bswap32((uint32_t)*set);
+					}
+				}
+				*out = len == 4 ? be32(val) : (uint64_t)be32(val) << 32 | be32(val + 4);
 				return 1;
 			}
 			p = align4(val + len);
@@ -81,4 +87,15 @@ int fdt_chosen_u64(uintptr_t fdt, const char *prop, uint64_t *out)
 			return 0;
 		}
 	}
+}
+
+int fdt_chosen_u64(uintptr_t fdt, const char *prop, uint64_t *out)
+{
+	return chosen_prop(fdt, prop, out, 0);
+}
+
+int fdt_chosen_set_u64(uintptr_t fdt, const char *prop, uint64_t value)
+{
+	uint64_t now;
+	return chosen_prop(fdt, prop, &now, &value);
 }

@@ -53,7 +53,10 @@ zero_log:
     ldr x13, =0x91fff000
     cbz x0, fail
     mov x16, x0
-    ldr x0, [x13, #136]       /* boot_args physical address (log[17]) */
+    ldr x0, [x13, #136]       /* boot_args (XNU) or FDT (Linux): log[17] */
+    mov x1, xzr               /* arm64 Linux boot protocol: x1-x3 zero */
+    mov x2, xzr
+    mov x3, xzr
     /* C cleaned the copied ranges and the log. XNU's entry needs MMU off. */
     mrs x14, sctlr_el1
     bic x14, x14, #1

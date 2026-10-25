@@ -199,6 +199,58 @@ star_overlay_redraw(void)
     (void)star_splash_draw();
 }
 
+/*
+ * Linux kiosk: a Linux arm64 Image (tools/kiosk, Exynos9810-LTS 4.9
+ * kernel with its initramfs built in) appended after the SWEETXNU payload as
+ * a 4 KiB-aligned "SBLINUX!" bundle: u64 magic, u64 Image size, Image at
+ * +4096. It is copied to the XNU window's 2 MiB-aligned base + text_offset
+ * (Documentation/arm64/booting.txt) and entered with x0 = S-Boot's FDT.
+ * S-Boot's initrd is our overlay, so /chosen's initrd is emptied first.
+ */
+#define LINUX_BASE RAM_BASE
+static uintptr_t
+star_linux(volatile uint64_t *log, uintptr_t fdt, const struct payload *p, uint64_t length,
+    uintptr_t rd_start, uintptr_t rd_end)
+{
+    uint64_t end = __builtin_offsetof(struct payload, segs) + p->nsegs * sizeof(struct payload_seg);
+    if (p->adt_off + p->adt_size > end)
+        end = p->adt_off + p->adt_size;
+    for (uint32_t i = 0; i < p->nsegs; ++i)
+        if (p->segs[i].file_off + p->segs[i].file_size > end)
+            end = p->segs[i].file_off + p->segs[i].file_size;
+    uintptr_t b = align_page(rd_start + end);
+    while (b + PAGE_SIZE < rd_end && *(volatile uint64_t *)b != 0x21584e494c424253ULL)  /* "SBLINUX!" */
+        b += PAGE_SIZE;
+    if (b + PAGE_SIZE >= rd_end)
+        return fail(log, -20, "NO LINUX KIOSK KERNEL");
+    uint64_t size = *(volatile uint64_t *)(b + 8);
+    uintptr_t img = b + PAGE_SIZE;
+    if (size < 64 || size > rd_end - img || *(volatile uint32_t *)(img + 56) != 0x644d5241U)
+        return fail(log, -21, "BAD KIOSK KERNEL");
+    uint64_t text_offset = *(volatile uint64_t *)(img + 8);
+    uint64_t image_size = *(volatile uint64_t *)(img + 16);
+    if (!image_size)
+        image_size = size;
+    uintptr_t dst = LINUX_BASE + text_offset;
+    if (text_offset >= (2UL << 20) || dst + image_size > RAM_END)
+        return fail(log, -22, "KIOSK KERNEL TOO LARGE");
+    star_fb_hex(1, "LINUX AT", dst);
+    copy_bytes(dst, img, size);
+    zero_bytes(dst + size, image_size > size ? image_size - size : 0);
+    clean_bytes(dst, dst + image_size);
+    uint64_t start;
+    if (fdt_chosen_u64(fdt, "linux,initrd-start", &start))
+        (void)fdt_chosen_set_u64(fdt, "linux,initrd-end", start);
+    clean_bytes(fdt, fdt + (2UL << 20));
+    log[10] = 0x100;
+    log[15] = dst;
+    log[17] = fdt;              /* xnu_boot.S passes log[17] in x0 */
+    (void)length;
+    clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+    __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
+    return dst;
+}
+
 /* Returns entry PA or zero. Status stays in the log page at LOG_BASE. */
 uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)
 {
@@ -258,8 +310,11 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
         in.mem_size = p->mem_size;
         in.entry_va = p->entry_va;
         in.nsegs = p->nsegs;
-        if (!star_menu(&in, cmdline, BOOT_LINE_LENGTH))
+        int pick = star_menu(&in, cmdline, BOOT_LINE_LENGTH);
+        if (!pick)
             return 0;
+        if (pick == 2)
+            return star_linux(log, fdt, p, length, rd_start, rd_end);
     }
     star_fb_text(0, "PROJECT STARBITE");
     star_fb_text(1, "");

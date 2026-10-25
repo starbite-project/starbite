@@ -17,6 +17,13 @@ python3 tools/mkadt_starlte.py ${ADTFLAGS:-} out/starlte.adt
 python3 ref/ios-herolte/tools/mkpayload.py "$kernel" out/starlte.adt out/payload.bin --cmdline "$CMDLINE"
 # SPLASH=build/brand/splash.bin: Project Starbite boot splash in the
 # ramdisk slot (tools/brand/splash.mjs + to-rgb565.py), drawn by the loader.
+# LINUX=build/linux-bundle/Image: a second Linux kernel, appended after the
+# SWEETXNU payload (tools/linux-bundle.py, xnu_boot.c star_linux).
+append=out/payload.bin
+if [ -n "${LINUX:-}" ]; then
+    python3 tools/linux-bundle.py out/payload.bin "$LINUX" out/payload-linux.bin
+    append=out/payload-linux.bin
+fi
 python3 tools/starlte-pack-boot.py pack device/twrp-3.7.0_9-0-starlte.img \
-    shim/starlte/out/xnu_boot.Image out/xnu-boot.img --append out/payload.bin \
+    shim/starlte/out/xnu_boot.Image out/xnu-boot.img --append "$append" \
     ${SPLASH:+--ramdisk "$SPLASH"}

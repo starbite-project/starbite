@@ -840,7 +840,8 @@ static int engineer(const struct star_info *in, char *cmdline, unsigned len)
 
 /* ---- boot menu -------------------------------------------------------- */
 
-/* In the gap under Samsung's logo: overlay row_base 23, rows 0-4. */
+/* In the gap under Samsung's logo: overlay row_base 23, rows 0-4
+ * (no room left for a key hint: Volume moves, Power selects). */
 #define MENU_ROW_BASE 23U
 
 int star_menu(const struct star_info *in, char *cmdline, unsigned len)
@@ -850,16 +851,20 @@ int star_menu(const struct star_info *in, char *cmdline, unsigned len)
     for (;;) {
         star_fb_row_base(MENU_ROW_BASE);
         item(0, "IOS 16 (STARBITE)", C_WHITE);
-        item(1, "RECOVERY (TWRP)", C_WHITE);
-        item(2, "DOWNLOAD MODE", C_WHITE);
-        item(3, "STARBITE ENGINEER", C_GOLD);
-        star_fb_text_c(4, "VOL: MOVE   POWER: SELECT", C_MUTED, C_BLACK);
-        sel = choose(0, 4, sel);
+        item(1, "LINUX KIOSK", C_GOLD);
+        item(2, "RECOVERY (TWRP)", C_WHITE);
+        item(3, "DOWNLOAD MODE", C_WHITE);
+        item(4, "STARBITE ENGINEER", C_GOLD);
+        sel = choose(0, 5, sel);
         if (sel == 0) {
             break;
-        } else if (sel == 1 || sel == 2) {
-            star_fb_text(4, sel == 1 ? "REBOOTING TO RECOVERY" : "REBOOTING TO DOWNLOAD MODE");
-            reboot(sel == 1 ? INFORM_RECOVERY : INFORM_DOWNLOAD);
+        } else if (sel == 1) {
+            /* Linux kiosk (xnu_boot.c star_linux); the card can stay. */
+            star_fb_text_c(sel, "> STARTING THE LINUX KIOSK", C_WHITE, C_BLUE);
+            return 2;
+        } else if (sel == 2 || sel == 3) {
+            star_fb_text(sel, sel == 2 ? "> REBOOTING TO RECOVERY" : "> REBOOTING TO DOWNLOAD MODE");
+            reboot(sel == 2 ? INFORM_RECOVERY : INFORM_DOWNLOAD);
         } else {
             int boot = engineer(in, cmdline, len);
             star_fb_fill(C_BLACK);
