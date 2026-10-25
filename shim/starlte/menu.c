@@ -14,8 +14,7 @@
  * regulators with the kernel's own safety checks (touch rails).
  * No pointer tables here: the Image must have no absolute relocations.
  */
-#include "menu.h"
-#include "fbtext.h"
+#include "eng.h"
 
 #define ALIVE_GPA0_DAT 0x14050024UL
 #define ALIVE_GPA2_DAT 0x14050064UL
@@ -23,49 +22,39 @@
 #define INFORM_DOWNLOAD 0x12345671U
 #define INFORM_RECOVERY 0x12345674U
 
-#define K_UP 1U
-#define K_DOWN 2U
-#define K_BIXBY 4U
-#define K_POWER 8U
-#define K_SELECT (K_BIXBY | K_POWER)
-
-#define C_WHITE 0xffffffffU
-#define C_BLACK 0xff000000U
-#define C_BLUE 0xff2a5bf0U      /* Starbite mark gradient */
-#define C_MUTED 0xffb1bad3U
-#define C_GOLD 0xffffd43bU
-#define C_RED 0xffff4d4dU
-#define C_GREEN 0xff3ddc84U
+/* Keys, colours, row layout and the ACPM/PMIC constants, and struct sb,
+ * now live in eng.h so eng_hw.c shares them. The helpers below are no longer
+ * static for the same reason. */
 
 /* ---- time, keys, reboot ------------------------------------------------ */
 
-static uint64_t ticks(void)
+uint64_t ticks(void)
 {
     uint64_t v;
     __asm__ volatile("isb; mrs %0, cntpct_el0" : "=r" (v));
     return v;
 }
 
-static uint64_t freq(void)
+uint64_t freq(void)
 {
     uint64_t f;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r" (f));
     return f ? f : 26000000U;   /* S-Boot leaves CNTFRQ 0; the timer is 26 MHz */
 }
 
-static void wait_us(uint64_t us)
+void wait_us(uint64_t us)
 {
     uint64_t t0 = ticks(), n = freq() / 1000000U * us;
     while (ticks() - t0 < n)
         ;
 }
 
-static void wait_ms(unsigned ms)
+void wait_ms(unsigned ms)
 {
     wait_us((uint64_t)ms * 1000U);
 }
 
-static unsigned keys(void)
+unsigned keys(void)
 {
     uint32_t a = *(volatile uint32_t *)ALIVE_GPA0_DAT;
     uint32_t b = *(volatile uint32_t *)ALIVE_GPA2_DAT;
@@ -74,7 +63,7 @@ static unsigned keys(void)
 }
 
 /* One debounced press, returned once every key is released again. */
-static unsigned key_wait(void)
+unsigned key_wait(void)
 {
     while (keys())
         wait_ms(20);
@@ -106,29 +95,27 @@ static void reboot(uint32_t inform3)
 
 /* ---- text ------------------------------------------------------------ */
 
-struct sb { char b[STAR_FB_COLS + 2]; unsigned n; };
-
-static void sb_init(struct sb *s)
+void sb_init(struct sb *s)
 {
     s->n = 0;
     s->b[0] = 0;
 }
 
-static void sb_s(struct sb *s, const char *t)
+void sb_s(struct sb *s, const char *t)
 {
     while (*t && s->n < STAR_FB_COLS)
         s->b[s->n++] = *t++;
     s->b[s->n] = 0;
 }
 
-static void sb_c(struct sb *s, char c)
+void sb_c(struct sb *s, char c)
 {
     if (s->n < STAR_FB_COLS)
         s->b[s->n++] = c;
     s->b[s->n] = 0;
 }
 
-static void sb_hex(struct sb *s, uint64_t v, unsigned digits)
+void sb_hex(struct sb *s, uint64_t v, unsigned digits)
 {
     sb_s(s, "0X");
     for (int sh = (int)digits * 4 - 4; sh >= 0; sh -= 4) {
@@ -137,7 +124,7 @@ static void sb_hex(struct sb *s, uint64_t v, unsigned digits)
     }
 }
 
-static void sb_dec(struct sb *s, uint64_t v)
+void sb_dec(struct sb *s, uint64_t v)
 {
     char t[24];
     unsigned n = 0;
@@ -150,7 +137,7 @@ static void sb_dec(struct sb *s, uint64_t v)
 }
 
 /* "label value" in one row. */
-static void row_hex(unsigned row, const char *label, uint64_t v, unsigned digits)
+void row_hex(unsigned row, const char *label, uint64_t v, unsigned digits)
 {
     struct sb s;
     sb_init(&s);
@@ -160,7 +147,7 @@ static void row_hex(unsigned row, const char *label, uint64_t v, unsigned digits
     star_fb_text(row, s.b);
 }
 
-static void row_dec(unsigned row, const char *label, uint64_t v, const char *unit)
+void row_dec(unsigned row, const char *label, uint64_t v, const char *unit)
 {
     struct sb s;
     sb_init(&s);
@@ -173,11 +160,11 @@ static void row_dec(unsigned row, const char *label, uint64_t v, const char *uni
 
 /* ---- menus ----------------------------------------------------------- */
 
-#define MAX_ITEMS 10
+#define MAX_ITEMS 16
 static char items[MAX_ITEMS][STAR_FB_COLS + 2];
 static uint32_t item_fg[MAX_ITEMS];
 
-static void item(unsigned i, const char *s, uint32_t fg)
+void item(unsigned i, const char *s, uint32_t fg)
 {
     unsigned n = 0;
     while (s[n] && n < STAR_FB_COLS - 2) {
@@ -201,7 +188,7 @@ static void draw_item(unsigned row, unsigned i, int selected)
 }
 
 /* Items 0..n-1 at rows row0..; Volume moves, Power/Bixby picks. */
-static unsigned choose(unsigned row0, unsigned n, unsigned sel)
+unsigned choose(unsigned row0, unsigned n, unsigned sel)
 {
     for (unsigned i = 0; i < n; ++i)
         draw_item(row0 + i, i, i == sel);
@@ -222,7 +209,7 @@ static unsigned choose(unsigned row0, unsigned n, unsigned sel)
 
 /* ---- boot-args ------------------------------------------------------- */
 
-static unsigned slen(const char *s)
+unsigned slen(const char *s)
 {
     unsigned n = 0;
     while (s[n])
@@ -239,7 +226,7 @@ static int tok_is(const char *t, unsigned n, const char *key)
     return !key[i] && (i == n || t[i] == '=');
 }
 
-static const char *arg_find(const char *c, const char *key, unsigned *len)
+const char *arg_find(const char *c, const char *key, unsigned *len)
 {
     for (const char *p = c; *p;) {
         while (*p == ' ')
@@ -257,7 +244,7 @@ static const char *arg_find(const char *c, const char *key, unsigned *len)
 }
 
 /* Remove every `key` / `key=...` token. */
-static void arg_del(char *c, const char *key)
+void arg_del(char *c, const char *key)
 {
     char *w = c;
     for (const char *p = c; *p;) {
@@ -278,7 +265,7 @@ static void arg_del(char *c, const char *key)
 }
 
 /* Replace `key` with `key=val` (val 0: the bare flag). */
-static void arg_set(char *c, unsigned len, const char *key, const char *val)
+void arg_set(char *c, unsigned len, const char *key, const char *val)
 {
     arg_del(c, key);
     unsigned n = slen(c), need = 1 + slen(key) + (val ? 1 + slen(val) : 0);
@@ -297,7 +284,7 @@ static void arg_set(char *c, unsigned len, const char *key, const char *val)
 }
 
 /* Decimal value of `key=N`, or dflt. */
-static unsigned arg_num(const char *c, const char *key, unsigned dflt)
+unsigned arg_num(const char *c, const char *key, unsigned dflt)
 {
     unsigned n;
     const char *t = arg_find(c, key, &n);
@@ -316,7 +303,7 @@ static struct {
     int multi, smpprobe;                /* risky */
 } opt;
 
-static void opt_load(const char *c)
+void opt_load(const char *c)
 {
     unsigned n;
     opt.cpus = arg_num(c, "cpus", 1);
@@ -362,18 +349,12 @@ static void opt_apply(char *c, unsigned len)
 
 /* ---- ACPM / PMIC (as bsd/dev/starlte_touch.c) ------------------------ */
 
-#define ACPM_MBOX 0x14100000UL
-#define ACPM_SRAM 0x02039000UL
-#define ACPM_SRAM_SIZE 0x30000U
-#define ACPM_INITDATA 0x7f00U
-#define ACPM_PMIC_CH 2U
-
-static uint32_t ard(uint32_t off)
+uint32_t ard(uint32_t off)
 {
     return *(volatile uint32_t *)(ACPM_SRAM + off);
 }
 
-static void awr(uint32_t off, uint32_t v)
+void awr(uint32_t off, uint32_t v)
 {
     *(volatile uint32_t *)(ACPM_SRAM + off) = v;
 }
@@ -381,7 +362,7 @@ static void awr(uint32_t off, uint32_t v)
 static uint32_t acpm_seq;
 
 /* SRAM offset of channel id's descriptor, or 0. */
-static uint32_t acpm_find(uint32_t id)
+uint32_t acpm_find(uint32_t id)
 {
     uint32_t chans = ard(ACPM_INITDATA + 0x08), ap_max = ard(ACPM_INITDATA + 0x18);
     if (!ap_max || ap_max > 32 || chans >= ACPM_SRAM_SIZE - ap_max * 0x48)
@@ -396,7 +377,7 @@ static uint32_t acpm_find(uint32_t id)
     return 0;
 }
 
-static int acpm_send(uint32_t c, uint32_t id, uint32_t cmd[4])
+int acpm_send(uint32_t c, uint32_t id, uint32_t cmd[4])
 {
     uint32_t qlen = ard(c + 0x34), esz = ard(c + 0x38);
     uint32_t tx_rear = ard(c + 0x10), tx_front = ard(c + 0x14), tx_base = ard(c + 0x18);
@@ -441,7 +422,7 @@ static int acpm_send(uint32_t c, uint32_t id, uint32_t cmd[4])
     return 0;
 }
 
-static int pmic_read(uint32_t type, uint32_t reg, uint8_t *val)
+int pmic_read(uint32_t type, uint32_t reg, uint8_t *val)
 {
     uint32_t c = acpm_find(ACPM_PMIC_CH), cmd[4];
     cmd[0] = (type & 0xfU) << 8 | (reg & 0xffU);
@@ -452,7 +433,7 @@ static int pmic_read(uint32_t type, uint32_t reg, uint8_t *val)
     return 1;
 }
 
-static int pmic_write(uint32_t type, uint32_t reg, uint8_t val)
+int pmic_write(uint32_t type, uint32_t reg, uint8_t val)
 {
     uint32_t c = acpm_find(ACPM_PMIC_CH), cmd[4];
     cmd[0] = (type & 0xfU) << 8 | (reg & 0xffU);
@@ -462,7 +443,7 @@ static int pmic_write(uint32_t type, uint32_t reg, uint8_t val)
 }
 
 /* "LDO43 0XF0 ON 3.000 V": S2MPS18 LDO CTRL, bits 7:6 enable, 5:0 25 mV steps. */
-static void row_ldo(unsigned row, const char *name, int ok, uint8_t v, unsigned base_mv)
+void row_ldo(unsigned row, const char *name, int ok, uint8_t v, unsigned base_mv)
 {
     struct sb s;
     sb_init(&s);
@@ -487,11 +468,7 @@ static void row_ldo(unsigned row, const char *name, int ok, uint8_t v, unsigned 
 
 /* ---- Engineer pages --------------------------------------------------- */
 
-#define ROW_TITLE 3U
-#define ROW_BODY 5U
-#define ROW_HINT 43U
-
-static void page(const char *title, const char *hint)
+void page(const char *title, const char *hint)
 {
     star_fb_fill(C_BLACK);
     star_fb_text_c(0, "STARBITE ENGINEER", C_WHITE, C_BLUE);
@@ -500,10 +477,7 @@ static void page(const char *title, const char *hint)
     star_fb_text_c(ROW_HINT, hint, C_MUTED, C_BLACK);
 }
 
-#define HINT_MENU "VOL: MOVE   POWER: SELECT"
-#define HINT_BACK "PRESS POWER TO GO BACK"
-
-static void wait_select(void)
+void wait_select(void)
 {
     while (!(key_wait() & K_SELECT))
         ;
@@ -703,7 +677,7 @@ static void diagnostics(const struct star_info *in, const char *cmdline)
     }
 }
 
-static void label(unsigned i, const char *name, const char *value, uint32_t fg)
+void label(unsigned i, const char *name, const char *value, uint32_t fg)
 {
     struct sb s;
     sb_init(&s);
@@ -738,7 +712,7 @@ static void boot_options(void)
 }
 
 /* Second press of Power arms a risky item; Volume cancels. */
-static int confirm(const char *what)
+int confirm(const char *what)
 {
     star_fb_text_c(ROW_BODY + 9, what, C_GOLD, C_BLACK);
     star_fb_text_c(ROW_BODY + 10, "POWER AGAIN: DO IT   VOL: CANCEL", C_RED, C_BLACK);
@@ -812,28 +786,31 @@ static int engineer(const struct star_info *in, char *cmdline, unsigned len)
     for (;;) {
         page("MAIN MENU", HINT_MENU);
         item(0, "DIAGNOSTICS", C_WHITE);
-        item(1, "BOOT OPTIONS", C_WHITE);
-        item(2, "RISKY EXPERIMENTS", C_GOLD);
-        item(3, "BOOT IOS WITH THESE SETTINGS", C_GREEN);
-        item(4, "BACK TO BOOT MENU", C_MUTED);
-        item(5, "REBOOT TO RECOVERY (TWRP)", C_MUTED);
-        item(6, "REBOOT TO DOWNLOAD MODE", C_MUTED);
-        sel = choose(ROW_BODY, 7, sel);
+        item(1, "HARDWARE (LOW LEVEL)", C_GOLD);
+        item(2, "BOOT OPTIONS", C_WHITE);
+        item(3, "RISKY EXPERIMENTS", C_GOLD);
+        item(4, "BOOT IOS WITH THESE SETTINGS", C_GREEN);
+        item(5, "BACK TO BOOT MENU", C_MUTED);
+        item(6, "REBOOT TO RECOVERY (TWRP)", C_MUTED);
+        item(7, "REBOOT TO DOWNLOAD MODE", C_MUTED);
+        sel = choose(ROW_BODY, 8, sel);
         if (sel == 0) {
             diagnostics(in, cmdline);
         } else if (sel == 1) {
-            boot_options();
+            eng_hardware(in, cmdline, len);
         } else if (sel == 2) {
-            risky();
+            boot_options();
         } else if (sel == 3) {
+            risky();
+        } else if (sel == 4) {
             opt_apply(cmdline, len);
             return 1;
-        } else if (sel == 4) {
+        } else if (sel == 5) {
             return 0;
         } else {
             star_fb_fill(C_BLACK);
-            star_fb_text(ROW_BODY, sel == 5 ? "REBOOTING TO RECOVERY" : "REBOOTING TO DOWNLOAD MODE");
-            reboot(sel == 5 ? INFORM_RECOVERY : INFORM_DOWNLOAD);
+            star_fb_text(ROW_BODY, sel == 6 ? "REBOOTING TO RECOVERY" : "REBOOTING TO DOWNLOAD MODE");
+            reboot(sel == 6 ? INFORM_RECOVERY : INFORM_DOWNLOAD);
         }
     }
 }
