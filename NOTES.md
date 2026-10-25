@@ -272,3 +272,16 @@ than the 512 KiB bounce). src11 caps commands at 512 KiB: "A19 FALL" is gone (al
 After the shell test works: W3 (split USERDATA: keep USERDATA start/name ~19 GiB, WINESP FAT32 4K ~256 MiB,
 WINDOWS NTFS ~26 GiB, ~8 GiB reserve for Android 16), W4 (build image in the VM from the 22631.7584 ISO with the
 woa installer's flow, our geometry), W5 first boot. Nothing has been committed since 43878ae — commit soon.
+- 2026-10-25 23:35: **ACCESS_DENIED found:** DxeCore LoadImage -> SecurityStubDxe Defer3rdPartyImageLoad denies
+  every non-FV image until EndOfDxe is signalled, and the woa PlatformBootManagerLib never signals it (no
+  security handler, no hash allowlist involved). patches/0005 signals gEfiEndOfDxeEventGroupGuid at the end of
+  PlatformBootManagerBeforeConsole (as ArmVirtPkg does), marker "=ENDOFDXE". BOOT = out/xnu-boot-src12.img
+  (same CMDLINE/ADTFLAGS/SPLASH/LINUX as src11). Expect the EFI Shell disk test to run; log -> pstore-src12.bin.
+- 2026-10-25 23:40: **W2 done — the EFI Shell runs from UFS.** src12 (patches/0005): =ENDOFDXE, LoadImage of
+  \EFI\BOOT\BOOTAA64.EFI st=S0000 (1 MiB file), startup.nsh ran to "done" and wrote results.txt on CACHE
+  (build/woa/ufstest-results.txt; pmsg build/woa/pstore-src12.bin). Map shows all 25 LU0 partitions + LU1..LU4/
+  0xC4. Whole-disk BlockIo reads at LBA 0, 2, 0x19EA80, 0x5DEA80, 0xEE47FF (backup GPT) are byte-identical to
+  TWRP `dd` of /dev/block/sda. (Partition reads beyond their size fail as expected; the script's `echo ----`
+  labels fail because the shell's echo takes them as flags.) CACHE restored afterwards. The BmDriverHealth(551)
+  "Not Found" ASSERT is non-fatal. Windows: the UTM VM "Starbite Windows" has finished building the 22631.7584
+  image too. Next: W3 GPT split (back up GPT + EFS first), then W4 copy the image to WINDOWS/WINESP.

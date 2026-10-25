@@ -1,0 +1,35 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
+@@ -47,6 +47,7 @@
+ #include <Protocol/AcpiSystemDescriptionTable.h>
+ #include <Protocol/AcpiTable.h>
+ #include <Protocol/PartitionInfo.h>
++#include <Guid/EventGroup.h>
+ #include <Guid/Acpi.h>
+ #include <Guid/FileInfo.h>
+ #include <Guid/FileSystemInfo.h>
+@@ -9827,6 +9828,14 @@
+   Star2LtePmuProbeAfter ();
+   BDS_DPUT ('M');   // DIAG: PMU probe returned (only on allocation failure)
+ #endif
++  //
++  // Starbite: signal EndOfDxe like ArmVirtPkg's PlatformBootManagerLib. Until
++  // it is signalled SecurityStubDxe's Defer3rdPartyImageLoad refuses every
++  // image not from an FV with EFI_ACCESS_DENIED (the ESP's BOOTAA64.EFI /
++  // bootmgfw.efi: =BMBOOTRET st=E000f).
++  //
++  EfiEventGroupSignal (&gEfiEndOfDxeEventGroupGuid);
++  BdsPramStr ("\n=ENDOFDXE");
+ }
+ 
+ VOID
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+@@ -54,6 +54,7 @@
+   gEfiPartitionInfoProtocolGuid            ## CONSUMES
+ 
+ [Guids]
++  gEfiEndOfDxeEventGroupGuid
+   gEfiAcpi10TableGuid
+   gEfiAcpi20TableGuid
+   gEfiFileSystemInfoGuid
