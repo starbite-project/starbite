@@ -66,7 +66,7 @@ index 9576d7d..7142831 100644
  static uint16_t
  a5_keys_sample(void)
 diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
-index 9b46983..9d97b57 100644
+index 9b46983..af10100 100644
 --- a/bsd/dev/herolte_ufs.c
 +++ b/bsd/dev/herolte_ufs.c
 @@ -58,10 +58,19 @@ extern int hz;
@@ -337,7 +337,7 @@ index 9b46983..9d97b57 100644
  	ufs_wr(REG_IS, ufs_rd(REG_IS));
  	ufs_wr(REG_UTRLRSR, 0);
  	uint64_t list = su.dma_pa + DMA_UTRL;
-@@ -693,11 +836,36 @@ herolte_log_thread(__unused void *arg, __unused wait_result_t wr)
+@@ -693,11 +836,38 @@ herolte_log_thread(__unused void *arg, __unused wait_result_t wr)
  	}
  }
  
@@ -351,6 +351,8 @@ index 9b46983..9d97b57 100644
 +		(void)tsleep(&chan, PZERO, "ufshb", 15 * hz);
 +		printf("HEROLTE UFS: hb %d: %llu cmds, last lba 0x%llx, busy 0x%x, dbr 0x%x\n",
 +		    i, su.ncmds, su.last_lba, su.busy, ufs_rd(REG_UTRLDBR));
++		extern void starlte_brand_banner(bool full);
++		starlte_brand_banner(false);
 +	}
 +}
 +#endif
@@ -374,7 +376,7 @@ index 9b46983..9d97b57 100644
  	PE_parse_boot_argn("herolog", &on, sizeof(on));
  	if (!on || !su.writable || su.nblocks < 2 * (1 + (4u << 20) / UFS_BLOCK)) {
  		return;
-@@ -709,6 +877,55 @@ herolte_log_start(void)
+@@ -709,6 +879,55 @@ herolte_log_start(void)
  	sweet_sample_start();
  }
  
@@ -430,7 +432,7 @@ index 9b46983..9d97b57 100644
  static int
  herolte_ufs_init(void)
  {
-@@ -758,6 +975,16 @@ herolte_ufs_init(void)
+@@ -758,6 +977,16 @@ herolte_ufs_init(void)
  		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
  		}
  	}
@@ -449,10 +451,10 @@ index 9b46983..9d97b57 100644
  	}
 diff --git a/bsd/dev/starlte_smp.c b/bsd/dev/starlte_smp.c
 new file mode 100644
-index 0000000..fd6403a
+index 0000000..cf1a1e5
 --- /dev/null
 +++ b/bsd/dev/starlte_smp.c
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,137 @@
 +/*
 + * STARLTE (Galaxy S9, Exynos 9810) secondary-CPU survey, boot-arg
 + * starsmpprobe=1 only. The starlte DTB lists the Cortex-A55 cores as reg
@@ -474,6 +476,23 @@ index 0000000..fd6403a
 +
 +extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 +void starlte_smp_probe(void);
++void starlte_brand_banner(bool full);
++
++/* Project Starbite: the console's banner (ASCII only). */
++void
++starlte_brand_banner(bool full)
++{
++	if (!full) {
++		printf("[ PROJECT STARBITE ]\n");
++		return;
++	}
++	printf("==========================================================================\n");
++	printf("  PROJECT STARBITE - iOS 16 on a Galaxy S9 (starlte, with a bite out of it)\n");
++	printf("  Open source - experimental, no warranty\n");
++	printf("  Kernel: XNU (APSL-2.0) with Starbite patches\n");
++	printf("  Use at your own risk.\n");
++	printf("==========================================================================\n");
++}
 +
 +static uint64_t
 +st_smc(uint64_t fid, uint64_t a1, uint64_t a2, uint64_t a3)
@@ -1548,10 +1567,10 @@ index 61aaef9..46dc119 100644
  	setProperty("SurfaceHeight", (unsigned long long)(113 << 16), 32);
  #else
 diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
-index 10449ab..97642dd 100644
+index 10449ab..2ef45db 100644
 --- a/iokit/bsddev/IOKitBSDInit.cpp
 +++ b/iokit/bsddev/IOKitBSDInit.cpp
-@@ -771,7 +771,39 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+@@ -771,7 +771,43 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
  		}
  	}
  
@@ -1560,6 +1579,10 @@ index 10449ab..97642dd 100644
 +	/* Exynos 9810: GPIO keys with S9 pins (a5xelte_keys.c) and the
 +	 * S6SY761 touch driver (starlte_touch.c); no S7 PMIC/GPU code.
 +	 * Boot-arg ufsprobe=1: read-only UFS host state and LUN 0 GPT. */
++	{
++		extern void starlte_brand_banner(bool full);
++		starlte_brand_banner(true);
++	}
 +	a5xelte_keys_init();
 +	{
 +		extern void starlte_touch_probe(void);

@@ -15,5 +15,8 @@ limactl shell starbite -- sh "$PWD/shim/starlte/build.sh" >/dev/null
 # ADTFLAGS=--scale2 for the scaled iPhone XR canvas (with sweetfb_scale boot-args).
 python3 tools/mkadt_starlte.py ${ADTFLAGS:-} out/starlte.adt
 python3 ref/ios-herolte/tools/mkpayload.py "$kernel" out/starlte.adt out/payload.bin --cmdline "$CMDLINE"
+# SPLASH=build/brand/splash.bin: Project Starbite boot splash in the
+# ramdisk slot (tools/brand/splash.mjs + to-rgb565.py), drawn by the loader.
 python3 tools/starlte-pack-boot.py pack device/twrp-3.7.0_9-0-starlte.img \
-    shim/starlte/out/xnu_boot.Image out/xnu-boot.img --append out/payload.bin
+    shim/starlte/out/xnu_boot.Image out/xnu-boot.img --append out/payload.bin \
+    ${SPLASH:+--ramdisk "$SPLASH"}

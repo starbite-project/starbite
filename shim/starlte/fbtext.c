@@ -15,6 +15,14 @@
 #define CELL_H (10U * SCALE)
 #define LEFT 36U
 #define TOP 200U
+/* First text row; star_fb_row_base() moves it below a boot splash. */
+static unsigned row_base;
+
+void
+star_fb_row_base(unsigned row)
+{
+    row_base = row;
+}
 
 /* The same compact 5x7 font as the a5xelte display console. */
 struct glyph { char ch; uint8_t rows[7]; };
@@ -70,7 +78,7 @@ void star_fb_fill(uint32_t pixel)
 static void fill_row(unsigned row, uint32_t pixel)
 {
     volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
-    unsigned top = TOP + row * CELL_H;
+    unsigned top = TOP + (row + row_base) * CELL_H;
     for (unsigned y = top; y < top + CELL_H && y < STAR_FB_HEIGHT; ++y)
         for (unsigned x = 0; x < STAR_FB_WIDTH; ++x)
             fb[y * STAR_FB_WIDTH + x] = pixel;
@@ -79,7 +87,7 @@ static void fill_row(unsigned row, uint32_t pixel)
 void star_fb_text(unsigned row, const char *s)
 {
     volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
-    unsigned top = TOP + row * CELL_H + 2U * SCALE;
+    unsigned top = TOP + (row + row_base) * CELL_H + 2U * SCALE;
     if (top + 7U * SCALE >= STAR_FB_HEIGHT) return;
     fill_row(row, 0xff000000U);
     for (unsigned col = 0; s[col] && LEFT + (col + 1U) * CELL_W <= STAR_FB_WIDTH; ++col) {

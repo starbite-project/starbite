@@ -118,12 +118,54 @@ static uintptr_t fail(volatile uint64_t *log, int64_t step, const char *why)
     return 0;
 }
 
+/*
+ * Project Starbite boot splash (developed by the Starbite project): when the
+ * BOOT ramdisk is "SBSPLASH" u32 w, u32 h + RGB565 pixels (tools/brand,
+ * tools/make-xnu-boot.sh SPLASH=), draw it full screen, hold it, and move
+ * the loader's status lines below its artwork. Any other ramdisk is ignored.
+ */
+#define SPLASH_HOLD_S 4U
+static void
+star_splash(uintptr_t fdt)
+{
+    uint64_t start = 0, end = 0;
+    if (!fdt || (fdt & 7) || !fdt_chosen_u64(fdt, "linux,initrd-start", &start) ||
+        !fdt_chosen_u64(fdt, "linux,initrd-end", &end) || end <= start + 16)
+        return;
+    const volatile uint32_t *h = (const volatile uint32_t *)(uintptr_t)start;
+    if (h[0] != 0x50534253U || h[1] != 0x4853414cU)     /* "SBSPLASH" */
+        return;
+    uint32_t w = h[2], ht = h[3];
+    if (w != STAR_FB_WIDTH || ht != STAR_FB_HEIGHT || end - start < 16 + (uint64_t)w * ht * 2)
+        return;
+    const volatile uint32_t *px = (const volatile uint32_t *)(uintptr_t)(start + 16);
+    volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
+    for (uint32_t i = 0; i < w * ht / 2; i++) {
+        uint32_t two = px[i];
+        for (unsigned k = 0; k < 2; k++) {
+            uint32_t p = (two >> (16 * k)) & 0xffffU;
+            uint32_t r = (p >> 11) & 31U, g = (p >> 5) & 63U, b = p & 31U;
+            fb[2 * i + k] = 0xff000000U | (r << 19 | (r >> 2) << 16) |
+                (g << 10 | (g >> 4) << 8) | (b << 3 | b >> 2);
+        }
+    }
+    star_fb_row_base(38);
+    uint64_t freq, t0;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r" (freq));
+    if (!freq)
+        freq = 26000000U;
+    t0 = counter();
+    while ((counter() - t0) / freq < SPLASH_HOLD_S)
+        ;
+}
+
 /* Returns entry PA or zero. Status stays in the log page at LOG_BASE. */
 uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)
 {
     uint64_t rd_start, rd_end;
     log[77] = star_fb_enable();
-    star_fb_text(0, "STARLTE XNU LOADER");
+    star_splash(fdt);
+    star_fb_text(0, "PROJECT STARBITE X STARBITE");
     if (el != 4)
         return fail(log, -10, "NOT EL1");
     if (sctlr & 1)
