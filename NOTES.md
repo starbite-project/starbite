@@ -301,3 +301,23 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   Restore path: backup/20261025-233855/gpt-sda-{primary,backup}.bin (dd to LBA 0 and 15615995).
   Next W4: format WINESP (FAT32, 4K) and WINDOWS (NTFS), apply the 22631.7584 image from the VM, bcdboot with the
   GUIDs above.
+- 2026-10-26 00:10: **W4 — Windows image built and being written.** WINESP grown to 512 MiB (256 MiB is under
+  FAT32's 65525 clusters at 4 KiB): USERDATA now 1698432..6613759 (18.75 GiB), WINESP 6613760..6744831
+  {b3babc53-99be-42c7-b0c1-c1df6350e566}, WINDOWS 6744832..13518591 {923ecef4-5f78-46b6-b695-2aede847e27c},
+  A16DATA {bafcb27c-...}; disk GUID {52444e41-494f-2044-4d4d-43204449534b} (same as star2lte).
+  VM build: tools/woa/vm-build-image.sh -> tools/woa/vm/build-image.ps1 (UTM guest agent as SYSTEM; utmctl exec
+  does not wait, so scripts log to C:\sb and the host polls). No Hyper-V on ARM -> 4Kn dynamic VHDX via
+  virtdisk CreateVirtualDisk v2; ESP/NTFS at the phone's exact byte offsets; Stock profile: Pro index 1, woa
+  drivers.zip (Hsi2c/Ufs/S6SY761 /ForceUnsigned), unattend (user starbite, no password, autologon, 275 DPI,
+  FLE Standard Time), bcdboot, woa BCD settings (testsigning, numproc 4, ...) + GPT-qualified devices on our
+  GUIDs. winload.efi/ntoskrnl.exe 10.0.22621.7582, sha256 0454c483.../75481a55... = firmware.json 22621.7582
+  exactly. Windows volume 13.86 GiB used. VHDX (15.1 GB) to the Mac over vmnet: VM curl -T to a PUT receiver on
+  192.168.64.1 (230 MiB/s; the guest agent does 0.35 MB/s). qemu 8.2 refuses the 4Kn VHDX (ENOTSUP), so
+  tools/woa/vhdx.py reads it; tools/woa/write-windows.sh streams payload blocks over adb exec-in, zero-fills
+  the rest on the phone, sha256 per 256 MiB piece. (TWRP sh arithmetic is 32-bit: do byte math on the Mac.)
+- 2026-10-26 00:30: **W4 done — Windows 22631.7584 written to the phone.** write-windows.sh: WINESP 64 MiB
+  payload + 448 MiB zeros, WINDOWS 14268 MiB payload + 12192 MiB zeros, every 256 MiB piece sha256-checked,
+  boot sectors and NTFS backup boot sector re-checked. Bugs fixed on the way: adb exec-in drops the tail of long
+  streams (now adb push to /tmp + local dd); adb calls inside `while read` ate the run list (fd 3 now, plus a
+  coverage check). TWRP mounts both read-only: EFI\Boot\bootaa64.efi, EFI\Microsoft\Boot\{bootmgfw.efi,BCD},
+  \Windows, Panther\unattend.xml. BOOT unchanged (src12). Next W5: pick WINDOWS 11.

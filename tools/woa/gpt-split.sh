@@ -6,9 +6,10 @@
 #   tools/woa/gpt-split.sh apply           (phone in TWRP) write build/woa/gpt-new to sda,
 #                                          read it back, compare
 # Layout (4 KiB blocks, new partitions 1 MiB aligned):
-#   25 USERDATA  1698432..6679295   19 GiB + 512 KiB; same start, name, GUID: iOS root 0..16 GiB,
+#   25 USERDATA  1698432..6613759   18.75 GiB; same start, name, GUID: iOS root 0..16 GiB,
 #                                   kiosk ext4 +17 GiB (1.15 GiB) stay where they are
-#   26 WINESP    6679296..6744831   256 MiB, EFI System type, FAT32 4K sectors (W4)
+#   26 WINESP    6613760..6744831   512 MiB, EFI System type, FAT32 4K sectors (W4; 256 MiB
+#                                   is under FAT32's 65525 clusters at 4 KiB)
 #   27 WINDOWS   6744832..13518591  25.84 GiB, basic data, NTFS (W4)
 #   28 A16DATA   13518592..15615994 8.0 GiB reserve for Android 16 data
 set -euo pipefail
@@ -31,8 +32,8 @@ gen)
         sgdisk -v \$lo | tail -2
         guid=\$(sgdisk -i 25 \$lo | sed -n 's/^Partition unique GUID: //p')
         sgdisk -d 25 \
-            -n 25:1698432:6679295   -t 25:EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 -c 25:USERDATA -u 25:\$guid \
-            -n 26:6679296:6744831   -t 26:C12A7328-F81F-11D2-BA4B-00A0C93EC93B -c 26:WINESP \
+            -n 25:1698432:6613759   -t 25:EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 -c 25:USERDATA -u 25:\$guid \
+            -n 26:6613760:6744831   -t 26:C12A7328-F81F-11D2-BA4B-00A0C93EC93B -c 26:WINESP \
             -n 27:6744832:13518591  -t 27:EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 -c 27:WINDOWS \
             -n 28:13518592:15615994 -t 28:EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 -c 28:A16DATA \
             \$lo >/dev/null
