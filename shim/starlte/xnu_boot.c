@@ -119,10 +119,12 @@ static uintptr_t fail(volatile uint64_t *log, int64_t step, const char *why)
 }
 
 /*
- * Project Starbite boot splash (developed by the Starbite project): when the
- * BOOT ramdisk is "SBSPLASH" u32 w, u32 h + RGB565 pixels (tools/brand,
- * tools/make-xnu-boot.sh SPLASH=), draw it full screen, hold it, and move
- * the loader's status lines below its artwork. Any other ramdisk is ignored.
+ * Project Starbite boot branding (developed by the Starbite project), from
+ * the BOOT ramdisk (tools/brand, tools/make-xnu-boot.sh SPLASH=):
+ *   "SBOVRLAY" u32 n, n x { u32 x, y, w, h; w*h u32 0xAARRGGBB }: blended over
+ *     S-Boot's own boot logo, which stays on screen (overlay.mjs);
+ *   "SBSPLASH" u32 w, h + RGB565: a full-screen picture (splash.mjs).
+ * The loader's status lines then go in the gap under Samsung's logo.
  */
 #define SPLASH_HOLD_S 4U
 static void
@@ -133,23 +135,50 @@ star_splash(uintptr_t fdt)
         !fdt_chosen_u64(fdt, "linux,initrd-end", &end) || end <= start + 16)
         return;
     const volatile uint32_t *h = (const volatile uint32_t *)(uintptr_t)start;
-    if (h[0] != 0x50534253U || h[1] != 0x4853414cU)     /* "SBSPLASH" */
-        return;
-    uint32_t w = h[2], ht = h[3];
-    if (w != STAR_FB_WIDTH || ht != STAR_FB_HEIGHT || end - start < 16 + (uint64_t)w * ht * 2)
-        return;
-    const volatile uint32_t *px = (const volatile uint32_t *)(uintptr_t)(start + 16);
     volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
-    for (uint32_t i = 0; i < w * ht / 2; i++) {
-        uint32_t two = px[i];
-        for (unsigned k = 0; k < 2; k++) {
-            uint32_t p = (two >> (16 * k)) & 0xffffU;
-            uint32_t r = (p >> 11) & 31U, g = (p >> 5) & 63U, b = p & 31U;
-            fb[2 * i + k] = 0xff000000U | (r << 19 | (r >> 2) << 16) |
-                (g << 10 | (g >> 4) << 8) | (b << 3 | b >> 2);
+    if (h[0] == 0x564f4253U && h[1] == 0x59414c52U) {           /* "SBOVRLAY" */
+        uint32_t n = h[2];
+        const volatile uint32_t *q = h + 3;
+        for (uint32_t r = 0; r < n && r < 16; r++) {
+            uint32_t x = q[0], y = q[1], w = q[2], ht = q[3];
+            q += 4;
+            if ((uintptr_t)(q + (uint64_t)w * ht) > end || x + w > STAR_FB_WIDTH ||
+                y + ht > STAR_FB_HEIGHT)
+                return;
+            for (uint32_t yy = 0; yy < ht; yy++) {
+                volatile uint32_t *row = fb + (uint64_t)(y + yy) * STAR_FB_WIDTH + x;
+                for (uint32_t xx = 0; xx < w; xx++) {
+                    uint32_t s = *q++, a = s >> 24;
+                    if (a == 0)
+                        continue;
+                    uint32_t d = a == 255 ? 0 : row[xx], o = 0xff000000U;
+                    for (unsigned sh = 0; sh < 24; sh += 8) {
+                        uint32_t c = (((s >> sh) & 255U) * a + ((d >> sh) & 255U) * (255U - a)) / 255U;
+                        o |= c << sh;
+                    }
+                    row[xx] = o;
+                }
+            }
         }
+        star_fb_row_base(23);
+    } else if (h[0] == 0x50534253U && h[1] == 0x4853414cU) {   /* "SBSPLASH" */
+        uint32_t w = h[2], ht = h[3];
+        if (w != STAR_FB_WIDTH || ht != STAR_FB_HEIGHT || end - start < 16 + (uint64_t)w * ht * 2)
+            return;
+        const volatile uint32_t *px = (const volatile uint32_t *)(uintptr_t)(start + 16);
+        for (uint32_t i = 0; i < w * ht / 2; i++) {
+            uint32_t two = px[i];
+            for (unsigned k = 0; k < 2; k++) {
+                uint32_t p = (two >> (16 * k)) & 0xffffU;
+                uint32_t r = (p >> 11) & 31U, g = (p >> 5) & 63U, b = p & 31U;
+                fb[2 * i + k] = 0xff000000U | (r << 19 | (r >> 2) << 16) |
+                    (g << 10 | (g >> 4) << 8) | (b << 3 | b >> 2);
+            }
+        }
+        star_fb_row_base(38);
+    } else {
+        return;
     }
-    star_fb_row_base(38);
     uint64_t freq, t0;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r" (freq));
     if (!freq)

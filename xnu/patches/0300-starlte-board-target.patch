@@ -594,10 +594,10 @@ index 0000000..cf1a1e5
 +#endif /* ARM64_BOARD_CONFIG_STARLTE */
 diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
 new file mode 100644
-index 0000000..7b91096
+index 0000000..c45c0f0
 --- /dev/null
 +++ b/bsd/dev/starlte_touch.c
-@@ -0,0 +1,664 @@
+@@ -0,0 +1,667 @@
 +/*
 + * STARLTE (Galaxy S9 SM-G960F, Exynos 9810) touchscreen: Samsung S6SY761
 + * ("sec,sec_ts", fw y761_star1) at 0x48 on HSI2C 0x104B0000 (USI03,
@@ -957,7 +957,10 @@ index 0000000..7b91096
 +		printf("STARLTE ACPM: LDO35 voltage %#x unexpected, not touching\n", l35 & 0x3fu);
 +		return false;
 +	}
-+	if ((l43 & 0x3fu) != 0x30u && (l43 & 0x3fu) != 0) {
++	/* tsp_avdd is 3.0 V (0x30) in the DTB. Once the S9 came up with 0x3c
++	 * (3.3 V) programmed: within the S6SY761's AVDD range, so re-program the
++	 * DTB's 3.0 V rather than give up; anything outside 2.8-3.3 V is left. */
++	if ((l43 & 0x3fu) != 0 && ((l43 & 0x3fu) < 0x28u || (l43 & 0x3fu) > 0x3cu)) {
 +		printf("STARLTE ACPM: LDO43 voltage %#x unexpected, not touching\n", l43 & 0x3fu);
 +		return false;
 +	}
@@ -1731,6 +1734,19 @@ index 00b0198..379e262 100644
  
  #if defined(A5XELTE)
  	/* Blue block: the 4 KiB MMU is active and the framebuffer alias works. */
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index d6bd6a4..b637001 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -44,7 +44,7 @@ sweet_early_putc(char c)
+ 	}
+ 	if (c == '\n' || a5_col >= A5_COLS) {
+ 		a5_col = 0;
+-		a5_row = (a5_row + 1) % (A5XELTE_FB_HEIGHT / A5_ROW_HEIGHT);
++		a5_row = (a5_row + 1) % (A5XELTE_CONSOLE_HEIGHT / A5_ROW_HEIGHT);
+ 		a5_clear_row();
+ 		if (c == '\n') {
+ 			return;
 diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 index 76d70b9..edd08c6 100644
 --- a/osfmk/kern/exception.c
@@ -1776,10 +1792,10 @@ index 76d70b9..edd08c6 100644
  		arm_saved_state_t *ss = find_user_regs(thread);
  		char line[400];
 diff --git a/pexpert/pexpert/arm64/A5XELTE.h b/pexpert/pexpert/arm64/A5XELTE.h
-index 8f9c8a2..4ae868d 100644
+index 8f9c8a2..2bad31b 100644
 --- a/pexpert/pexpert/arm64/A5XELTE.h
 +++ b/pexpert/pexpert/arm64/A5XELTE.h
-@@ -10,7 +10,26 @@
+@@ -10,7 +10,29 @@
  #define SWEET                         1
  
  /* Firmware scanout buffer and the earliest XNU marker (physical). */
@@ -1800,6 +1816,9 @@ index 8f9c8a2..4ae868d 100644
 +#define A5XELTE_FB_BLOCKS             9     /* 2 MiB VA=PA bootstrap blocks (16.3 MiB) */
 +#define A5XELTE_FB_TEXT_SCALE         3
 +#define A5XELTE_FB_DOT_PITCH          458   /* iPhone X userland density */
++/* The boot console stops above the Project Starbite bottom band
++ * the loader draws at the bottom (tools/brand/overlay.mjs BAND_TOP). */
++#define A5XELTE_CONSOLE_HEIGHT        1880
 +/* Log page below the XNU window 0x92000000; the vendor logs end at 0x9179c000. */
 +#define A5XELTE_MARKER_PA             0x91fff100
 +#define A5XELTE_BOOT_MPIDR            0x0
@@ -1807,3 +1826,14 @@ index 8f9c8a2..4ae868d 100644
  /* Galaxy S7 SM-G930F: S-Boot leaves DECON_F scanning out this buffer. */
  #define HEROLTE                       1
  /* Logical 0..3: Cortex-A53 "Apollo" MPIDR 0x100..0x103 (boot cluster);
+@@ -39,6 +61,10 @@
+ #define A5XELTE_BOOT_MPIDR            0x0
+ #endif
+ 
++#ifndef A5XELTE_CONSOLE_HEIGHT
++#define A5XELTE_CONSOLE_HEIGHT        A5XELTE_FB_HEIGHT
++#endif
++
+ #define ARM_ARCH_TIMER
+ #define __ARM_ARCH__                  8
+ #define __ARM_VMSA__                  8

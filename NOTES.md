@@ -107,6 +107,14 @@ this file records what was actually found, and corrections to the brief.
   faster, Control Center works); Settings shows iPhone X, iOS 16.7.16; some UI says "iPad" (identity props).
   Kernel image `out/xnu-boot-smp4.img`. Still slow overall: single-block UFS, CPU rendering at 1440x2960,
   unknown CPU clock, no big cores.
+- 2026-10-25: scaled canvas (`ADTFLAGS=--scale2`, sweetfb_scale=1 lw=828 lh=1792): much faster UI. Bug found:
+  the scaler wrote 2960 rows through the 1792-row default-surface mapping (black lower third, glitches) ->
+  separate full-panel mapping. 4 CPUs confirmed in log (cpu1-3 came alive). DVFS: FREQ_GET on ACPM ch 0 gave
+  0 kHz -> opt-in only (`starfreq=`); the PMU cycle measurement printed nonsense (to redo).
+- 2026-10-25: **Project Starbite branding** (commit 9ba3e8c+): loader splash from BOOT's ramdisk
+  (`tools/brand/splash.mjs` -> `to-rgb565.py`, `SPLASH=build/brand/splash.bin tools/make-xnu-boot.sh`),
+  console banner. Images: `out/xnu-boot-branded.img`; revert = `git revert` + flash
+  `out/xnu-boot-pre-branding.img` (tag `pre-branding`).
 - Local kernel builds: `tools/build-xnu-local.sh` (Xcode 15.4 + KDK 13.5 22G74, darwin-xnu-build pinned like
   the fork's CI): full build 128 s.
 
