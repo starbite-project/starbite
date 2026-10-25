@@ -219,7 +219,7 @@ star_linux(volatile uint64_t *log, uintptr_t fdt, const struct payload *p, uint6
         if (p->segs[i].file_off + p->segs[i].file_size > end)
             end = p->segs[i].file_off + p->segs[i].file_size;
     uintptr_t b = align_page(rd_start + end);
-    while (b + PAGE_SIZE < rd_end && *(volatile uint64_t *)b != 0x21584e494c424253ULL)  /* "SBLINUX!" */
+    while (b + PAGE_SIZE < rd_end && *(volatile uint64_t *)b != 0x2158554e494c4253ULL)  /* "SBLINUX!" */
         b += PAGE_SIZE;
     if (b + PAGE_SIZE >= rd_end)
         return fail(log, -20, "NO LINUX KIOSK KERNEL");
