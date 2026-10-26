@@ -832,3 +832,6 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   stat -t; TWRP's clock is 2018 so find -mtime is useless on this volume.)
   NEXT: src35 = stage 2 (+0xE3700000+0xC900000, ~1.4 GiB, above the S9+ release's 1357 MiB) to rule memory
   out completely.
+- 2026-10-26 19:45: src35 = stage 2 (bank-1 ranges + 0xE3700000+0xC900000, all as boot-services data):
+  build/woa/starbite-uefi-src35.bin (sha eed85ec4...), BOOT = out/xnu-boot-src35.img (sha bfb4a906...), flashed.
+  Expect the witness at ~1407 MiB.
