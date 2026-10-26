@@ -404,9 +404,25 @@ star_uefi(volatile uint64_t *log, uintptr_t fdt, const struct payload *p,
 /*
  * Cross-reset words a Windows run leaves in the latch page, logged before
  * star_uefi() clears it: boot-attempt counter (7F10/14), UFS driver crash
- * latch + 'WATL' guard (7F40/44), RAM_STATUS (7F60), KiSystemStartup
- * progress (7F80) and the Windows handoff marker (7FB0).
+ * latch + 'WATL' guard (7F40/44), RAM_STATUS / unattend token (7F60), the
+ * witness's usable-page count (7F80) and the Windows handoff marker (7FB0).
+ * Then the UFS driver's normal-boot-reason record 'NRM1' (7F18: magic,
+ * phase 1=init 2=stop, INFORM2/INFORM3/SYSIP_DAT0 before and after, checksum,
+ * 'PMOK') and its Windows witness 'WWR1' (7F70: magic, active procs, max
+ * procs, groups, pages lo/hi, range count, flags, tick, checksum). Both are
+ * written by Exynos9810Ufs.sys and survive TWRP; a phase-2 NRM1 proves an
+ * orderly Windows restart went through the driver's SRB shutdown path.
  */
+static void
+pmsg_hex32(uint32_t v)
+{
+    char b[9];
+    for (int i = 0; i < 8; ++i)
+        b[i] = "0123456789abcdef"[(v >> (28 - 4 * i)) & 15];
+    b[8] = 0;
+    pmsg_put(b);
+}
+
 static void
 star_dump_latches(void)
 {
@@ -420,7 +436,17 @@ star_dump_latches(void)
     pmsg_put(" wdt");
     for (unsigned i = 0; i < 3; ++i) {
         pmsg_put(" ");
-        pmsg_hex(*(volatile uint32_t *)(0xFED13800UL + 4 * i));
+        pmsg_hex32(*(volatile uint32_t *)(0xFED13800UL + 4 * i));
+    }
+    pmsg_put(" nrm");
+    for (unsigned i = 0; i < 10; ++i) {
+        pmsg_put(" ");
+        pmsg_hex32(*(volatile uint32_t *)(0xFED17F18UL + 4 * i));
+    }
+    pmsg_put(" wit");
+    for (unsigned i = 0; i < 10; ++i) {
+        pmsg_put(" ");
+        pmsg_hex32(*(volatile uint32_t *)(0xFED17F70UL + 4 * i));
     }
     pmsg_put("\n");
 }

@@ -723,3 +723,36 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   timeout (STAR2LTE_EBS_HW_WATCHDOG=0), so the way forward is the buildable track: make OUR DXE set reach the
   kernel (src31 = +DxeCore/UFS next; bisect from src32 otherwise).
   (Replies touching Windows-side internals keep getting stopped by the session safety classifier.)
+- 2026-10-26 18:35 (wall clock; the W5 entries above are stamped ~4.5 h ahead): **the ~60 s reset is a
+  SOFTWARE reset, not the watchdog.** User saw "Restarting" under the spinner right after the setup dialog;
+  and the reference project's prebuilt TWRP module tools/twrp-winre/modules/rwd1_evidence_reader.ko (read-only,
+  built for exactly this TWRP kernel 4.9.118-g36e6ddff22b9) loads on our S9 TWRP and reads the retained PRAM
+  records: PMU RST_STAT = 0x20000000 SWRESET (a cluster-0 watchdog reset would be 0x01000000). The last two
+  commits' watchdog theory is withdrawn: the driver (9.0.0.1, 2026-09-16, DriverStore
+  exynos9810ufs.inf_arm64_56a2e6f01fbd68bc; it has NRM1/WWR1/RWD1/UFSSRBSHUT) treats the RWD1 record at
+  0xFED13D80 as the authoritative ownership record, and the release firmware never writes it (all 0xFF), so
+  the driver sets NoPetReason=WATCHDOG_INVALID and never un-masks the cluster-0 WDT reset at the PMU
+  (UfsWdtTakeFirmwareBridgeOwnership needs Rwd1Owned); the firmware-armed 'ARM1'/'FWA1' record is a legacy
+  mirror. Other records: P3 'SMP1' gen 0xa55e3013 seq 5 state 0x60 PREBRANCH (not acked), no 'UAR1' unattend
+  token, witness 'WWR1': 4/4 CPUs, 1 group, **usable memory 181966 pages = 710 MiB in 11 ranges** -- so the
+  "KiSystemStartup progress latch 0x2c6ce at 7F80" in the earlier entries was the witness's page count.
+  The pmsg ring (15330 B) sits at the 0x3F00 cap after 78 =UFSWRIT records: anything the driver wrote at
+  the end of the run (=UFSSRBSHUT/=UFSREBOOT) is lost, so "no =UFSBUGCHECK BC=" proves nothing either.
+  Windows side (TWRP mount.ntfs -o ro of sda27 works): Panther\setupact.log is one run, "Setup Phase = 4",
+  ends right after "SysprepSession::CreateSession ... Specialize.xml"; Panther\UnattendGC\setuperr.log:
+  "[windeploy.exe] Setup.exe failed, returning exit code [0x1f]" / "Failure occured during online
+  installation; cannot complete at this time [0x8007001F]". So setup.exe dies at the start of the specialize
+  pass with a generic failure, windeploy shows the "restarted unexpectedly" dialog, and Windows restarts
+  itself (the driver's init already set INFORM3 for the next boot; TWRP vs menu depends on the exit path).
+  No Setup\Scripts, no project user-mode components on the disk; unattend.xml = 6 DPI reg commands + OOBE
+  skips + autologon "starbite". The S9+ flow runs winre-actions.sh prepare-boot from TWRP before every
+  Windows boot (clear MISC, rwd1_ack, zero RWD1/P3 records) -- our stock TWRP does none of it, but with
+  RWD1 unwritten that only matters for the P3 record.
+  TOOLS: tools/woa/twrp-postmortem.sh NAME (module + pmsg -> build/woa/postmortem-NAME/, decoded);
+  evidence of this run in build/woa/postmortem-src32-run3/. Shim (src32c, out/xnu-boot-src32c.img, sha
+  0ddcc3cc...) now also dumps the driver's 'NRM1' normal-boot record (7F18: phase 2 = an orderly SRB shutdown
+  went through the driver) and the 'WWR1' witness at every boot, 32-bit words. Flashed; menu boot next.
+  PROCEDURE per run: menu -> WINDOWS 11 -> wait for the reset -> in TWRP run tools/woa/twrp-postmortem.sh.
+  OPEN: why setup.exe fails (0x1f) at specialize start on the S9 while the S9+ installs with the same
+  firmware+driver. S9-specific inputs: 710 MiB visible RAM (vs the S9+), display/touch (no touch in the
+  dialog), DT/ACPI. The Windows-internals part stays out of this transcript (safety classifier).
