@@ -124,6 +124,23 @@ boot_sd() {
 	# Starbite owns the USB gadget (ECM + ACM, 172.16.42.1; postmarketOS's
 	# unudhcpd.usb0 serves the Mac): usb-signaller would tear it down.
 	rm -f /newroot/etc/runlevels/default/usb-signaller
+	# reboot-linux for the running system (postmarketOS has no devmem):
+	# this initramfs's busybox plus the one-shot flag, then a clean reboot.
+	mkdir -p /newroot/usr/local/lib/starbite /newroot/usr/local/sbin
+	cp /bin/busybox /newroot/usr/local/lib/starbite/busybox
+	cat > /newroot/usr/local/sbin/reboot-linux <<'EOF3'
+#!/bin/sh
+# Reboot into Linux again via the Starbite menu's one-shot flag ("menu": stop there).
+B=/usr/local/lib/starbite/busybox
+if [ "$1" != menu ]; then
+	$B devmem 0xFED17FE0 32 0x454e4253
+	$B devmem 0xFED17FE4 32 0x584c5458
+fi
+$B devmem 0x1406080c 32 0x12345670
+sync
+exec reboot
+EOF3
+	chmod 755 /newroot/usr/local/sbin/reboot-linux
 	mount --move /sd /newroot/media/starbite-sd || return 17
 	printf '\033[2J\033[H'
 	echo "  PROJECT STARBITE"

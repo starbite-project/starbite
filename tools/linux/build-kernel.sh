@@ -31,7 +31,10 @@ grep -q 'exynos9810-starlte.dts' "$WORK/scripts/build/build71.sh"
 
 python3 "$PROJ/tools/linux/patch-mainline.py" "$BUILD/src/mainline"
 
-export INIT=boot UFS=1 GADGET=configfs
+# GPU = Mali-G72 node (Panfrost), DECON = their KMS scanout driver (takes over
+# from the bootloader framebuffer), WLAN = BCM4361 over PCIe with the phone's
+# own firmware built in (identical to this S9's vendor files: build/kiosk).
+export INIT=boot UFS=1 GADGET=configfs GPU=1 DECON=1 WLAN=1
 export DIST="$WORK/dist"
 export BOOT_CMDLINE="${BOOT_CMDLINE:-console=ramoops-1 console=tty0 loglevel=7 panic=10 earlycon=s9pram keep_bootcon maxcpus=8 s9p_late_ramlog s9p_vendor_m3_defaults}"
 # microSD (Starbite): DW MSHC with the Exynos glue, fixed rails, FAT/exFAT

@@ -1160,3 +1160,13 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   live /dev nodes once, reboot fixed it); busybox setsid does not wait; long commands need phone.py's
   3600 s timeout. TWRP's 4.9 kernel mounts the image only ro,noload (newer ext4 features).
   BOOT out/xnu-boot-linux6.img (sha 21d95cf2...). Next: GPU (Panfrost) + DECON scanout, Wi-Fi, keys.
+- 2026-10-27: **Linux milestone 4: GPU, display, Wi-Fi.** build-kernel.sh now builds with GPU=1 DECON=1 WLAN=1:
+  Panfrost on the Mali-G72 (id 0x6221 r0p1, shader_present 0x5771777, 572 MHz; "no regulator (mali)" is
+  expected, BUCK via ACPM), s9p-decon KMS takes over the bootloader framebuffer (window 5, command mode),
+  KWin holds card2 (exynos/DECON) + renderD128 (panfrost) with Mesa 26.2 gallium = Plasma renders on the
+  GPU. Wi-Fi: PCIe Gen1 x1 link, BCM4361/5 (14e4:441f) brcmfmac firmware 13.50.28 built in (the S9+
+  port's files are byte-identical to this S9's vendor files in build/linux-bundle/firmware, nvram r02a_b2),
+  wlan0 managed by NetworkManager. Root from the Mac while pmOS runs: tools/linux/pmos-root.sh (SSH +
+  doas, PIN from build/linux/pmos-login.txt answered by expect); the store/BOOT writers take
+  PHONE_RUN=tools/linux/pmos-root.sh. The init installs /usr/local/sbin/reboot-linux (+ its busybox,
+  for devmem) into the system so pmOS can reboot straight back into Linux.

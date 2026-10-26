@@ -7,7 +7,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 img=${1:-build/linux/sbstore.img}
-P=tools/linux/phone.py
+# PHONE_RUN=tools/linux/pmos-root.sh when postmarketOS runs (root via doas)
+P=${PHONE_RUN:-tools/linux/phone.py}
 want=$(shasum -a 256 "$img" | cut -c1-64)
 size=$(stat -f %z "$img")
 blocks=$(( (size + 4095) / 4096 ))
