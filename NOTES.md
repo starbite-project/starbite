@@ -381,3 +381,37 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   SizeOfImage 0x266000. Two ways forward: (A) re-derive all winload sites (switch dsb/tlbi, T0-T6 trace sites,
   cave page, MicrovisorMode, brk f003/f004) by PATTERN from our winload.efi and feed real RVAs; (B) build the
   Windows image to the exact build the woa source targets. (A) keeps 7584 and is the plan. BOOT still = src20.
+- 2026-10-26 01:33: **W5 try 10 (src21) — path (A), minimal: NOP only the switch tlbi, found by PATTERN.**
+  Disassembled build/woa/win-bin/winload.efi (Apple objdump, coff-arm64; .text RVA 0x1000, ImageBase
+  0x180000000). Confirmed try 9: our build's address-space switch leaf is shifted vs star2lte (mrs
+  SCTLR_EL1 @RVA 0x1094, msr-off @0x10b0, dsb sy @0x10b4, MMU-off `tlbi vmalle1` @0x10dc = d508871f,
+  msr-on SCTLR_EL1,x3 @0x10e8), so star2lte's hard-coded Sites[]/TlbiSites/cave/MicrovisorMode/brk RVAs
+  are all wrong and try 8 wrote them into live winload memory. KEY FINDING: `tlbi vmalle1` occurs only
+  6x in winload; the switch one is the **unique** one followed by `dsb sy; isb; msr SCTLR_EL1,x3`
+  (d5033f9f d5033fdf d5181003) — a bulletproof pattern. `brk #0xf003/#0xf004` are winload's generic
+  fastfail macro (hundreds each) -> star2lte's two specific brk sites are NOT pattern-findable and were
+  almost certainly scribbling wrong memory; dropped. patches/0013: gate the whole star2lte abs-addr block
+  off (mStarbiteLegacySites=FALSE; kept compiled so no -Werror unused-fn), and pattern-scan winload's own
+  .text for the switch tlbi and NOP it (the one load-bearing fix per woa ckpt 006: "NOPing the MMU-off
+  tlbi alone advances winload past the switch"). New markers: =WLSW b=<base> rva=<rva> =WLNOP (expect
+  b=90fb6000 rva=0010dc), or =WLSW? notfound. ntoskrnl CNTFRQ patch (scan-based, try 7 n=04 cf=03) and the
+  hyp self-tests (=STLBI/=CFQ/=BC) unchanged. src21 built (DEBUG FD 7 MiB) and packed with src20's exact
+  boot-args/ADT/splash/kiosk kernel (only the FD differs; verified by diff — remaining out-of-FD deltas
+  are just the ADT random-seed and the boot-image header digest). BOOT = out/xnu-boot-src21.img
+  (sha256 2ee6b7bf...). Debug loop unchanged: pick WINDOWS 11, back to TWRP, read pstore (pstore-win9.bin
+  next). Expect =WLSW ... =WLNOP then winload to get PAST the switch (try 8 hung here, =AFRET + IRQs off).
+  If it still hangs at =HANDOFF: the ext#7 model (NOP alone -> stale TLB -> page-walker fault) is real and
+  needs the MMU-ON reflush injected in the leaf tail (RVA 0x10e0..0x10f0), next try. Fallback: src20.
+- 2026-10-26 01:37: **W5 try 10 RESULT (pstore-win9.bin) — path (A) MECHANISM PROVEN; NOP-alone still hangs.**
+  src21 on the phone (user picked WINDOWS 11, hung as before, forced TWRP; I auto-pulled the ring). Tail
+  (bit-5/6 flips from other writers, decoded): =WLBASE b=90fb6000 s=00266000 ok; =NTPATCH n=04 cf=03 (ntos
+  CNTFRQ, unchanged); self-tests =STLBI0/1/2 =CFQ0 0; then **=WLSW b=90fb6000 rva=0010dc =WLNOP** — the
+  switch tlbi was found at exactly RVA 0x10dc on OUR build and NOPed (try 8 never did: it wrote star2lte's
+  wrong address). =WTRACE n=00, =HANDOFF minimal, =AFRET, then winload's final zero-size GetMemoryMap
+  (pra 0x90fc53d8, daif=0200 IRQs masked) and the ring goes dark — **same hang as try 8, but now we KNOW the
+  NOP actually happened.** Heartbeat (=HB) stops => EBS was reached; the hang is post-ExitBootServices where
+  our boot-service traces can't see. Conclusion: NOPing the MMU-off tlbi alone is insufficient (confirms woa
+  ext#7: NOP skips the essential flush -> stale TLB -> post-switch page-walk faults). NEXT (src22): keep the
+  NOP and ALSO inject an MMU-ON `tlbi vmalle1` inline in the switch leaf tail (our leaf: msr SCTLR_EL1,x3
+  @0x10e8 re-enables MMU, then redundant `adr x4;br x4` @0x10f4/0x10f8 jump to `ret` @0x10fc -> overwrite
+  that pair with `tlbi vmalle1; dsb sy`, falling through to ret). Pattern-anchored off the same switch match.

@@ -1,0 +1,70 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c	2026-10-26 01:26:28
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c	2026-10-26 01:29:26
+@@ -2480,6 +2480,7 @@
+   )
+ {
+   STATIC BOOLEAN                 mDone;
++  STATIC BOOLEAN                 mStarbiteLegacySites = FALSE;  // src21: star2lte abs-addr sites off (wrong winload build)
+   EFI_MEMORY_ATTRIBUTE_PROTOCOL  *MemAttr;
+   EFI_STATUS                     Status;
+   STATIC CONST UINT64            Sites[] = {
+@@ -2747,6 +2748,51 @@
+   }
+ 
+   //
++  // Starbite W5 try 10 (src21) -- PATTERN-FOUND winload fix (path A from try 9). The star2lte
++  // winload patch sites are a DIFFERENT winload build's absolute addresses: here the
++  // address-space switch leaf's dsb/tlbi pair is at RVA 0x10b4/0x10dc, not star2lte's
++  // 0x10a0/0x10c8, and the T-trace/brk/MicrovisorMode RVAs are wrong too (try 8 scribbled live
++  // winload memory). All of that is gated off (mStarbiteLegacySites=FALSE). The one load-bearing
++  // fix (woa ckpt 006: "NOPing the MMU-off tlbi alone advances winload past the switch") is found
++  // in winload's OWN .text by pattern: the switch leaf re-enables the MMU right after its flush,
++  // so the switch tlbi vmalle1 is the unique one followed by
++  //   dsb sy ; isb ; msr SCTLR_EL1, x3   (0xd5033f9f, 0xd5033fdf, 0xd5181003)
++  // (verified offline: only 1 of winload's 6 tlbi vmalle1 matches). NOP it -- the hyp cannot
++  // emulate the MMU-off whole-TLB flush, which hung winload at =AFRET (IRQs off) in try 8.
++  //
++  {
++    UINT64   WlBase = SB_WL (STARBITE_WINLOAD_STAR2LTE_BASE);   // winload's real load base
++    UINT64   WlP;
++    BOOLEAN  WlHit = FALSE;
++
++    for (WlP = WlBase + 0x1000ULL; WlP + 0x10ULL <= WlBase + STARBITE_WINLOAD_SIZE; WlP += 4ULL) {
++      volatile UINT32  *WlI = (volatile UINT32 *)(UINTN)WlP;
++
++      if (((WlI[0] == 0xD508871Fu) || (WlI[0] == 0xD5088708u)) &&   // tlbi vmalle1 (Rt=31/8)
++          (WlI[1] == 0xD5033F9Fu) &&                                // dsb sy
++          (WlI[2] == 0xD5033FDFu) &&                                // isb
++          (WlI[3] == 0xD5181003u))                                  // msr SCTLR_EL1, x3 (re-enable MMU)
++      {
++        BdsPramStr ("\n=WLSW b=");
++        BdsPramHex ((UINT32)WlBase, 8);
++        BdsPramStr (" rva=");
++        BdsPramHex ((UINT32)(WlP - WlBase), 6);
++        MemAttr->ClearMemoryAttributes (MemAttr, WlP & ~(UINT64)EFI_PAGE_MASK, EFI_PAGE_SIZE, EFI_MEMORY_RO | EFI_MEMORY_RP);
++        *WlI = 0xD503201Fu;      // nop
++        Star2LteFlushPatchedInstruction (WlP);
++        BdsPramStr (" =WLNOP");
++        WlHit = TRUE;
++        break;
++      }
++    }
++
++    if (!WlHit) {
++      BdsPramStr ("\n=WLSW? notfound");
++    }
++  }
++
++  if (mStarbiteLegacySites) {
++  //
+   // TEST: winload only reached 0x912e5724 when the software STEP WINDOW was enabled;
+   // with it off it hangs BEFORE the handoff fn (no =T0). The step window's lasting
+   // side effect is clearing RO on winload's 0x91312xxx handoff pages (0x91311000,
+@@ -2874,6 +2920,7 @@
+       BdsPramStr ("\n=WBRK3");
+     }
+   }
++  }
+ 
+   BdsPramStr ("\n=WTRACE n=00");
+ }
