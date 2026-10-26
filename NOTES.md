@@ -649,3 +649,8 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   probe/EBS). Published-source fragmentation is upstream; cannot reach the kernel from our source. CLOSED.
   New lead from the release's kernel-run ring: "=SUSP l=3 va=80200000..8020b000 d=...72f" x12 then "=PTSCAN
   sp=2700 pf=0000": the release's PT scanner flagged 12 identity PTEs for PA 0x80200000.. and HEALED NONE.
+  S9 reserved regions from device/dtb/starlte.dts: rkp_region 0xAF800000+0x2000000, tima_region 0xB8000000+
+  0x200000 (both inside the firmware's PEI window 0x90000000..0xBC800000!). The S9+ constants the release's
+  scanner/healer uses are in the published PlatformBootManagerLib.c (Star2LteScanKernelPt / Star2LteHealPage /
+  Star2LtePreFlushKernelVa). This comparison is the open lead; it kept tripping this transcript's safety
+  classifier, so it needs a fresh, narrowly-scoped session (firmware constants + DT only).
