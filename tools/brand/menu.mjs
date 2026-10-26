@@ -6,9 +6,9 @@
  * y ~1199..1575; "Powered by android" ~2664..2834 is covered by our footer).
  *
  *   top     header (Starbite mark + name, model) and the boot list:
- *           iOS 16, Windows 11, Android and Linux (dimmed: not installed);
- *           under it the Bixby service selector: Recovery | Download
- *   middle  Samsung's splash, untouched
+ *           iOS 16, Windows 11, Android and Linux (dimmed: not installed)
+ *   middle  Samsung's splash, untouched; right under it the Bixby service
+ *           selector: Recovery | Download
  *   bottom  the Starbite card: Volume Down past the last OS selects it and
  *           Power boots Linux kiosk; footer "Powered by Starbite"
  *
@@ -48,10 +48,11 @@ const MONO = 'Menlo';
 export const LAYOUT = {
   header: { y: 70, h: 150 },
   label: { y: 236, h: 40 },
-  rows: { x: 70, w: W - 140, y0: 290, h: 136, stride: 150 },
-  service: { y: 896, h: 40 },                       // "SERVICE · BIXBY" label
-  chips: { y: 944, h: 124, x0: 70, w: 630, gap: 40 },
-  card: { x: 100, y: 1700, w: 1240, h: 560 },     // the Starbite card (from overlay.png)
+  rows: { x: 70, w: W - 140, y0: 300, h: 140, stride: 172 },   // 4 OS rows, end ~956
+  // Under Samsung's splash ("Secured by Knox" ends ~1575):
+  service: { y: 1606, h: 40 },                      // "SERVICE · BIXBY" label
+  chips: { y: 1652, h: 120, x0: 70, w: 630, gap: 40 },
+  card: { x: 100, y: 1838, w: 1240, h: 560 },     // the Starbite card (from overlay.png); sprite ends ~2490
   cardSrcY: 1920,                                   // where overlay.mjs drew it
   footerY: 2500,
 };

@@ -25,3 +25,5 @@ void star_overlay_redraw(void);
  * returns how many it drew (0 without assets, -1 if malformed). */
 int star_menu_assets(void);
 int star_sprite(unsigned id);
+/* Rectangle of the first sprite with this id; 0 if there is none. */
+int star_sprite_rect(unsigned id, unsigned *x, unsigned *y, unsigned *w, unsigned *h);

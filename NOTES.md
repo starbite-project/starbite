@@ -1057,3 +1057,13 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   with INFORM3 0x12345671); Bixby HELD 0.7 s = Engineer only (key_event). Only changed sprites are redrawn.
   Previews build/brand/menu-preview.png / menu-preview-alt.png (PREVIEW=alt). BOOT = out/xnu-boot-menu6.img
   (sha b264c20b...), flashed.
+- 2026-10-27 02:45: **Boot menu v7**: service selector moved under Samsung's splash (label y 1606, chips 1652),
+  OS rows y0 300 stride 172 h 140, card y 1838 (sprite 1816..2490). TOUCH in the loader: menu.c port of
+  bsd/dev/starlte_touch.c (ACPM LDO35/LDO43 with the same voltage checks, CMU_PERIC0 gates, SYSREG USI03 I2C
+  mode, GPP1-4/5 mux, HSI2C 0x104B0000 timing, S6SY761 BOOT_STATUS 0x20 / PANEL_INFO / SENSE_ON /
+  CLEAR_EVENT_STACK, READ_ONE_EVENT on GPA1-0 INT low); a tap = finger 0 lifted within 80 px of where it went
+  down; first tap focuses, second tap starts; hit boxes from star_sprite_rect() (xnu_boot.c); the event stack
+  is cleared before handing over; any bring-up failure = keys only. Card clear + status row base now come
+  from the card sprite rect. Bug fixed before it bit: the screen save at 0x92000000 overlapped Engineer's RAM
+  test (0x92000000 + 16 MiB) -> moved to 0x94000000. BOOT flashed: out/xnu-boot-menu7.img (41aa6546..., save
+  at 0x92000000); fixed image out/xnu-boot-menu7b.img for the next flash.

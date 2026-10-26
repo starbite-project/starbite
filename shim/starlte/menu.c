@@ -461,6 +461,218 @@ static int pmic_write(uint32_t type, uint32_t reg, uint8_t val)
     return c && acpm_send(c, ACPM_PMIC_CH, cmd) && !(cmd[1] >> 24);
 }
 
+/* ---- touch: S6SY761 on HSI2C (port of bsd/dev/starlte_touch.c) -------- */
+
+/*
+ * Samsung S6SY761 at 0x48 on HSI2C 0x104B0000 (USI03; pins GPP1-4/5
+ * function 2), INT on GPA1-0 active low (starlte DTB). Same bring-up as the
+ * iOS driver: tsp_io/tsp_avdd (S2MPS18 LDO35/LDO43) on through ACPM with the
+ * same voltage checks, CMU_PERIC0 gates, SYSREG_PERIC0 USI mode, pin mux,
+ * then BOOT_STATUS 0x55 (0x20 = application), PANEL_INFO 0x23, SENSE_ON 0x10,
+ * CLEAR_EVENT_STACK 0x62, READ_ONE_EVENT 0x60 (8 bytes: EID [1:0] 0 =
+ * coordinate, TID [5:2] - 1, state [7:6] 1 press / 2 move / 3 release,
+ * x = b1 << 4 | b3 >> 4, y = b2 << 4 | b3 & 0xf). Any failure leaves the menu
+ * on the keys alone.
+ */
+#define TP_CMU 0x10400000UL
+#define TP_SYSREG 0x10411000UL
+#define TP_GPIO 0x10430000UL
+#define TP_I2C 0x104b0000UL
+#define TP_ALIVE 0x14050000UL
+#define TP_ADDR 0x48U
+
+static int tp_ok;
+static unsigned tp_max_x = 4096, tp_max_y = 4096;
+
+static uint32_t mrd(uintptr_t a)
+{
+    uint32_t v = *(volatile uint32_t *)a;
+    __asm__ volatile("dmb oshld" : : : "memory");
+    return v;
+}
+
+static void mwr(uintptr_t a, uint32_t v)
+{
+    __asm__ volatile("dmb oshst" : : : "memory");
+    *(volatile uint32_t *)a = v;
+}
+
+static int tp_power(void)
+{
+    uint8_t id = 0, l35 = 0, l43 = 0;
+    if (!pmic_read(0, 0x00, &id) || !pmic_read(1, 0x6c, &l35) || !pmic_read(1, 0x74, &l43))
+        return 0;
+    if ((l35 & 0x3fU) != 0x2cU && (l35 & 0x3fU) != 0)
+        return 0;
+    if ((l43 & 0x3fU) != 0 && ((l43 & 0x3fU) < 0x28U || (l43 & 0x3fU) > 0x3cU))
+        return 0;
+    if ((l35 & 0xc0U) == 0xc0U && (l43 & 0xc0U) == 0xc0U)
+        return 1;
+    return pmic_write(1, 0x6c, 0xec) && pmic_write(1, 0x74, 0xf0);
+}
+
+static void tp_platform(void)
+{
+    static const uint32_t gates[4] = { 0x2018, 0x206c, 0x20dc, 0x20e0 };
+    for (unsigned i = 0; i < 4; ++i)
+        mwr(TP_CMU + gates[i], mrd(TP_CMU + gates[i]) | 0x00300000U);
+    mwr(TP_CMU + 0x3038, mrd(TP_CMU + 0x3038) | 0x3U);
+    mwr(TP_SYSREG + 0x1c, 0x4U);
+    mwr(TP_GPIO + 0x20, (mrd(TP_GPIO + 0x20) & ~0x00ff0000U) | 0x00220000U);
+    mwr(TP_GPIO + 0x28, mrd(TP_GPIO + 0x28) & ~0x00ff0000U);
+    mwr(TP_GPIO + 0x2c, mrd(TP_GPIO + 0x2c) & ~0x00ff0000U);
+    __asm__ volatile("dsb sy" : : : "memory");
+}
+
+static void tp_bus(void)
+{
+    mwr(TP_I2C + 0x20, 0);
+    mwr(TP_I2C + 0xc4, 0);
+    mwr(TP_I2C + 0x00, mrd(TP_I2C + 0x00) | 0x80000000U);
+    mwr(TP_I2C + 0x00, mrd(TP_I2C + 0x00) & ~0x80000000U);
+    mwr(TP_I2C + 0x68, (mrd(TP_I2C + 0x68) & ~0x00ff0000U) | (0x21U << 16));
+    mwr(TP_I2C + 0x64, (mrd(TP_I2C + 0x64) & ~0x000000ffU) | 0xe0U);
+    mwr(TP_I2C + 0x60, (mrd(TP_I2C + 0x60) & ~0x00ff0000U) | (0xf0U << 16));
+    mwr(TP_I2C + 0x00, 0x8U);
+    mwr(TP_I2C + 0x08, 0x00ffffffU);
+    mwr(TP_I2C + 0x48, mrd(TP_I2C + 0x48) & ~0x80000000U);
+    mwr(TP_I2C + 0x40, mrd(TP_I2C + 0x40) | 0x80000000U);
+    mwr(TP_I2C + 0x24, mrd(TP_I2C + 0x24) & 0xfffU);
+}
+
+/* One message with STOP, count <= 32 (st_message). */
+static int tp_message(int receive, uint8_t *bytes, unsigned count)
+{
+    int xfer_done = 0;
+    unsigned done = 0;
+    if (!count || count > 32)
+        return 0;
+    tp_bus();
+    unsigned trig = count < 8 ? count : 8;
+    mwr(TP_I2C + 0x04, 3U | (trig << 4) | (trig << 16));
+    mwr(TP_I2C + 0x70, TP_ADDR << 10);
+    mwr(TP_I2C + 0x00, 0x8U | (receive ? 0x40U : 0x80U));
+    mwr(TP_I2C + 0x20, 0x80U);
+    mwr(TP_I2C + 0x44, count | (receive ? 0x10000U : 0) | 0x20000U);
+    mwr(TP_I2C + 0x44, mrd(TP_I2C + 0x44) | 0x80000000U);
+    for (unsigned us = 0; us < 50000; ++us) {
+        uint32_t irq = mrd(TP_I2C + 0x24);
+        if (irq)
+            mwr(TP_I2C + 0x24, irq);
+        if (irq & 0xf00U)
+            break;
+        if (irq & 0x80U)
+            xfer_done = 1;
+        if (receive) {
+            while (done < count && !(mrd(TP_I2C + 0x30) & (1U << 24)))
+                bytes[done++] = (uint8_t)mrd(TP_I2C + 0x38);
+        } else {
+            while (done < count && !(mrd(TP_I2C + 0x30) & (1U << 7)))
+                mwr(TP_I2C + 0x34, bytes[done++]);
+        }
+        if (done == count && (xfer_done || receive)) {
+            mwr(TP_I2C + 0x20, 0);
+            for (unsigned n = 0; n < 10000; ++n) {
+                if (!(mrd(TP_I2C + 0x50) & (1U << 17)))
+                    return 1;
+                wait_us(1);
+            }
+            break;
+        }
+        wait_us(1);
+    }
+    mwr(TP_I2C + 0x20, 0);
+    tp_bus();
+    return 0;
+}
+
+static int tp_read(uint8_t reg, uint8_t *data, unsigned len, unsigned tries)
+{
+    for (unsigned a = 0; a < tries; ++a) {
+        if (a)
+            wait_us(200);
+        if (tp_message(0, &reg, 1) && tp_message(1, data, len))
+            return 1;
+    }
+    return 0;
+}
+
+static int tp_cmd(uint8_t reg)
+{
+    for (unsigned a = 0; a < 10; ++a) {
+        if (a)
+            wait_us(200);
+        if (tp_message(0, &reg, 1))
+            return 1;
+    }
+    return 0;
+}
+
+static void tp_init(void)
+{
+    uint8_t b[12];
+    tp_ok = 0;
+    if (!tp_power())
+        return;
+    wait_ms(150);                   /* supplies up, the S6SY761 boots its firmware */
+    tp_platform();
+    tp_bus();
+    if (!tp_read(0x55, b, 1, 10) || b[0] != 0x20)
+        return;
+    if (tp_read(0x23, b, 11, 10)) {
+        unsigned mx = (unsigned)b[0] << 8 | b[1], my = (unsigned)b[2] << 8 | b[3];
+        if (mx >= 1000 && my >= 1000) {
+            tp_max_x = mx;
+            tp_max_y = my;
+        }
+    }
+    if (!tp_cmd(0x10))
+        return;
+    wait_ms(20);
+    (void)tp_cmd(0x62);
+    tp_ok = 1;
+}
+
+/* Drain events; returns 1 on a tap (a finger lifted near where it went down)
+ * with its panel coordinates. Only the first finger counts. */
+static int tp_down, tp_x0, tp_y0, tp_x, tp_y;
+
+static int tp_tap(int *x, int *y)
+{
+    uint8_t e[8];
+    int tap = 0;
+    if (!tp_ok || (mrd(TP_ALIVE + 0x44) & 1U))
+        return 0;
+    for (unsigned n = 0; n < 16; ++n) {
+        if (!tp_read(0x60, e, 8, 3) || e[0] == 0)
+            break;
+        if ((e[0] & 0x3U) != 0)
+            continue;
+        int tid = (int)((e[0] >> 2) & 0xfU) - 1;
+        unsigned state = e[0] >> 6;
+        if (tid != 0)
+            continue;
+        unsigned rx = (unsigned)e[1] << 4 | e[3] >> 4;
+        unsigned ry = (unsigned)e[2] << 4 | (e[3] & 0xfU);
+        tp_x = (int)((uint64_t)rx * STAR_FB_WIDTH / tp_max_x);
+        tp_y = (int)((uint64_t)ry * STAR_FB_HEIGHT / tp_max_y);
+        if (state == 1) {
+            tp_down = 1;
+            tp_x0 = tp_x;
+            tp_y0 = tp_y;
+        } else if (state == 3 && tp_down) {
+            tp_down = 0;
+            int dx = tp_x - tp_x0, dy = tp_y - tp_y0;
+            if (dx > -80 && dx < 80 && dy > -80 && dy < 80) {
+                *x = tp_x;
+                *y = tp_y;
+                tap = 1;
+            }
+        }
+    }
+    return tap;
+}
+
 /* "LDO43 0XF0 ON 3.000 V": S2MPS18 LDO CTRL, bits 7:6 enable, 5:0 25 mV steps. */
 static void row_ldo(unsigned row, const char *name, int ok, uint8_t v, unsigned base_mv)
 {
@@ -859,7 +1071,8 @@ static int engineer(const struct star_info *in, char *cmdline, unsigned len)
  *             to the OS list.
  * Power starts whatever has focus. Holding Bixby (0.7 s) opens Starbite
  * Engineer and nothing else; the whole screen (Samsung's logo included) is
- * saved first and put back after.
+ * saved first and put back after. Touch: tap an entry to focus it, tap it
+ * again to start it (hit boxes = the sprites' own rectangles).
  */
 #define V5_SPRITE(item, st) (16U + 8U * (item) + (st))
 #define V5_CARD 5U
@@ -867,12 +1080,11 @@ static int engineer(const struct star_info *in, char *cmdline, unsigned len)
 #define V5_DOWNLOAD 6U
 #define V5_HOLD_MS 700U
 #define K_BIXBY_HOLD 16U
-/* Free at menu time: the payload must end below RAM_BASE (0x92000000) and
- * nothing is copied anywhere until a choice is made. 17 MiB. */
-#define SCREEN_SAVE 0x92000000UL
-/* y range of the Starbite card sprite (menu.mjs LAYOUT.card - pad .. + label). */
-#define V5_CARD_Y0 1678U
-#define V5_CARD_Y1 2350U
+#define K_TAP 32U
+/* Free at menu time: the payload must end below RAM_BASE (0x92000000), the
+ * Engineer RAM test uses 0x92000000 + 16 MiB, and nothing is copied anywhere
+ * until a choice is made (the woa FD lands at 0x90000000 only after). 17 MiB. */
+#define SCREEN_SAVE 0x94000000UL
 
 static const unsigned char v5_os[3] = { 0, 1, V5_CARD };
 static const unsigned char v5_svc[2] = { V5_RECOVERY, V5_DOWNLOAD };
@@ -885,9 +1097,9 @@ static void screen_copy(uintptr_t dst, uintptr_t src)
         d[i] = s[i];
 }
 
-/* One debounced press; Bixby held for V5_HOLD_MS reports K_BIXBY_HOLD at
- * once (the hold's release is waited for by the next key_wait()). */
-static unsigned key_event(void)
+/* One debounced press or a tap; Bixby held for V5_HOLD_MS reports
+ * K_BIXBY_HOLD at once (the next wait lets go of it first). */
+static unsigned input_event(int *tx, int *ty)
 {
     while (keys())
         wait_ms(20);
@@ -909,8 +1121,24 @@ static unsigned key_event(void)
                 wait_ms(20);
             return k;
         }
+        if (tp_tap(tx, ty))
+            return K_TAP;
         wait_ms(10);
     }
+}
+
+/* Item under a tap (state-0 sprite rectangle), or -1. Disabled rows (2, 3)
+ * do not count. */
+static int v5_hit(int x, int y)
+{
+    static const unsigned char items[5] = { 0, 1, 4, 5, 6 };
+    for (unsigned i = 0; i < 5; ++i) {
+        unsigned rx, ry, rw, rh;
+        if (star_sprite_rect(16U + 8U * items[i], &rx, &ry, &rw, &rh) &&
+            x >= (int)rx && x < (int)(rx + rw) && y >= (int)ry && y < (int)(ry + rh))
+            return items[i];
+    }
+    return -1;
 }
 
 struct v5 { unsigned svc_focus, os, svc; };
@@ -941,19 +1169,42 @@ static void v5_draw(const struct v5 *m)
  * and the loader's status lines go where it was. */
 static void v5_starting(unsigned item)
 {
+    unsigned x, y, w, h;
     v5_put(item, 2);
-    if (item != V5_CARD) {
-        star_fb_fill_rows(V5_CARD_Y0, V5_CARD_Y1, C_BLACK);
-        star_fb_row_base(25);
+    if (item != V5_CARD && star_sprite_rect(V5_SPRITE(V5_CARD, 0), &x, &y, &w, &h)) {
+        star_fb_fill_rows(y, y + h, C_BLACK);
+        star_fb_row_base((y + 59U - 200U) / 60U);   /* fbtext TOP 200, rows 60 px */
     }
+    if (tp_ok)
+        (void)tp_cmd(0x62);                         /* hand over an empty event stack */
 }
 
 static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
 {
     struct v5 m = { 0, 0, 0 };
     v5_draw(&m);
+    tp_init();
     for (;;) {
-        unsigned k = key_event();
+        int tx = 0, ty = 0;
+        unsigned k = input_event(&tx, &ty);
+        if (k == K_TAP) {
+            int hit = v5_hit(tx, ty);
+            if (hit < 0)
+                continue;
+            int svc = hit == (int)V5_RECOVERY || hit == (int)V5_DOWNLOAD;
+            unsigned idx = svc ? (hit == (int)V5_DOWNLOAD) : (hit == 0 ? 0U : hit == 1 ? 1U : 2U);
+            if ((unsigned)svc == m.svc_focus && idx == (svc ? m.svc : m.os)) {
+                k = K_POWER;                        /* second tap starts it */
+            } else {
+                m.svc_focus = (unsigned)svc;
+                if (svc)
+                    m.svc = idx;
+                else
+                    m.os = idx;
+                v5_draw(&m);
+                continue;
+            }
+        }
         if (k == K_BIXBY_HOLD) {
             screen_copy(SCREEN_SAVE, STAR_FB_BASE);
             int boot = engineer(in, cmdline, len);

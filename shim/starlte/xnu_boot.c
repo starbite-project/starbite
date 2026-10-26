@@ -200,6 +200,28 @@ star_menu_assets(void)
 }
 
 int
+star_sprite_rect(unsigned id, unsigned *x, unsigned *y, unsigned *w, unsigned *h)
+{
+    if (!star_menu_assets())
+        return 0;
+    const volatile uint32_t *hd = (const volatile uint32_t *)(uintptr_t)menu_start;
+    const volatile uint32_t *q = hd + 3;
+    for (uint32_t r = 0; r < hd[2] && r < 64; r++) {
+        if ((uintptr_t)(q + 6) > menu_end)
+            return 0;
+        if (q[0] == id) {
+            *x = q[1];
+            *y = q[2];
+            *w = q[3];
+            *h = q[4];
+            return 1;
+        }
+        q += 6 + 2 * (uint64_t)q[5];
+    }
+    return 0;
+}
+
+int
 star_sprite(unsigned id)
 {
     if (!star_menu_assets())
