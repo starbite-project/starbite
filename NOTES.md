@@ -631,3 +631,10 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   to the original (numproc 4). The transcript's safety classifier has now stopped several replies that went into
   Windows-kernel internals; further work stays on the firmware side (ACPI/DT S9 vs S9+, memory map) and on
   reproducing the reported S9 setup exactly.
+- 2026-10-26 19:50: 6 GB theory dead: PlatformMemoryMapLib/RamManagerDxe only publish 0x90000000+0x2C800000,
+  0xC0080000+0xBF80000, 0xCD044000+0x12FBC000 -- all inside the S9's RAM. (RamManager's 'RAM2' status at 7F60
+  is absent after release runs: the release's RamManager differs from the published one; not pursued.)
+  LOOSE END: src27 (0001,0002,0005 only) was built but never flashed. Repacked with the current shim (TPIDRRO
+  fix + latch dump): out/xnu-boot-src27.img (sha b782e961...), flashed. If it reaches =EBSENTER we have a
+  BUILDABLE firmware that reaches the kernel -> enable the published STAR2LTE_INSTALL_KE_TRACE (kernel-startup
+  progress code latched at 0xFED17F80, read by the next boot's dump) = firmware-side kernel progress.
