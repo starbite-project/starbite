@@ -705,3 +705,8 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   (B3=12345674) by design. The mid-boot black flash = display handover. Test: just boot Windows again (src32
   stays), time spinner->reset, see if the ring's write count / latch attempt byte advance. src31 packed
   (out/xnu-boot-src31.img, sha a9e10c8c...) for the buildability track later.
+- 2026-10-26 22:15: ***** WINDOWS SETUP GUI ON THE S9 ***** 2nd src32 boot: spinner ~1 min, then the "Install
+  Windows -- The computer restarted unexpectedly or encountered an unexpected error" dialog (user photo), a bit
+  later a reset to the MENU (not TWRP this time). So: kernel, basic display, win32k/user-mode setup all run.
+  The dialog = setup's interrupted-phase state from run 1's reset. Open: what resets the phone ~60-70 s after
+  the spinner every run (watchdog?).
