@@ -171,8 +171,7 @@ function rowSvg(it, state) {
   const sel = state === 1 || state === 2;
   const op = state === 3 ? 0.32 : sel || state === 4 ? 1 : 0.8;
   const pill = sel
-    ? `<rect x="2" y="2" width="${w - 4}" height="${h - 4}" rx="36" fill="${ACCENT}" fill-opacity="0.07" stroke="${ACCENT}" stroke-opacity="0.55" stroke-width="3"/>` +
-      star(w - 64 - 30, 24, 30, ACCENT)
+    ? `<rect x="2" y="2" width="${w - 4}" height="${h - 4}" rx="36" fill="${ACCENT}" fill-opacity="0.07" stroke="${ACCENT}" stroke-opacity="0.55" stroke-width="3"/>`
     : state === 4
       ? `<rect x="2" y="2" width="${w - 4}" height="${h - 4}" rx="36" fill="none" stroke="${LINE}" stroke-width="3"/>`
       : '';
@@ -180,7 +179,7 @@ function rowSvg(it, state) {
   const meta = state === 2 ? 'starting…' : state === 3 ? 'not installed' : it.meta;
   return pill + `<g opacity="${op}">${it.icon(ix, iy, ic)}</g>` +
     text(it.name, { x: ix + ic + 40, y: h / 2 + 21, size: 60, weight: sel ? 400 : 300, fill: sel ? INK : DIM, opacity: state === 3 ? 0.45 : 1 }) +
-    text(meta, { x: w - 64 - (sel ? 46 : 0), y: h / 2 + 13, size: 36, weight: 300, fill: state === 2 ? ACCENT : sel ? DIM : FAINT, anchor: 'end', opacity: state === 3 ? 0.7 : 1 });
+    text(meta, { x: w - 64, y: h / 2 + 13, size: 36, weight: 300, fill: state === 2 ? ACCENT : sel ? DIM : FAINT, anchor: 'end', opacity: state === 3 ? 0.7 : 1 });
 }
 
 // chip state: 0 normal, 1 selected, 2 starting

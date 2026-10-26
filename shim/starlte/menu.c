@@ -1140,7 +1140,8 @@ static int v5_linux, v5_android;
 
 static int v5_avail(unsigned item)
 {
-    return item == 2 ? v5_android : item == 3 ? v5_linux : 1;
+    /* The bottom card is blank: Kiosk starts from EngineerMode. */
+    return item == 2 ? v5_android : item == 3 ? v5_linux : item != V5_CARD;
 }
 
 static unsigned v5_step(unsigned os, int dir)
@@ -1185,7 +1186,7 @@ static void v5_put(unsigned item, unsigned st)
 static void v5_draw(const struct v5 *m)
 {
     for (unsigned i = 0; i < 5; ++i)
-        v5_put(v5_os[i], !v5_avail(v5_os[i]) ? 3U : i != m->os ? 0U : m->svc_focus ? 4U : 1U);
+        v5_put(v5_os[i], v5_os[i] == V5_CARD ? 0U : !v5_avail(v5_os[i]) ? 3U : i != m->os ? 0U : m->svc_focus ? 4U : 1U);
     v5_put(7, 0);
     v5_put(8, 0);
     for (unsigned i = 0; i < 2; ++i)
