@@ -1012,3 +1012,4 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   (iOS 1 GiB payload, sha 6177269a...), flashed. Fallback test: out/xnu-boot-rtc-identity.img (release RTC
   re-added unchanged; isolates the repack tool). RTC is UTC: Windows needs
   HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation RealTimeIsUniversal=1 (DWORD) for local time.
+- 2026-10-27 00:35: **src38: Windows shows the correct date/time** (PMIC-seeded RTC works). Step 3 (storage safety + clock) DONE. BOOT = out/xnu-boot-src38.img (iOS bank2 1 GiB, Windows 3.4 GB + S9 fence + real clock, kiosk).
