@@ -333,6 +333,8 @@ star_linux(volatile uint64_t *log, uintptr_t fdt, const struct payload *p, uint6
  * /sys/fs/pstore/pmsg-ramoops-0 on the next boot.
  */
 #define PMSG_BASE 0xFED14000UL
+#define RWD1_BASE 0xFED13D80UL   /* drivers/include/Rwd1Constants.h */
+#define P3_BASE   0xFED13E80UL   /* SMP1 startup record, 128 bytes */
 #define PMSG_DATA 0x3F00U   /* the woa UEFI's flood cap: keeps clear of its latches */
 static void
 pmsg_put(const char *s)
@@ -366,6 +368,8 @@ pmsg_hex(uint64_t v)
     pmsg_put(b);
 }
 
+static void star_rwd1_arm(void);
+
 static uintptr_t
 star_uefi(volatile uint64_t *log, uintptr_t fdt, const struct payload *p,
     uintptr_t rd_start, uintptr_t rd_end)
@@ -391,6 +395,7 @@ star_uefi(volatile uint64_t *log, uintptr_t fdt, const struct payload *p,
     pmsg_put("\n");
     zero_bytes(UEFI_LATCH_PAGE, UEFI_LATCH_END - UEFI_LATCH_PAGE);
     clean_bytes(UEFI_LATCH_PAGE, UEFI_LATCH_END);
+    star_rwd1_arm();
     star_fb_restore((uint32_t)log[77]);
     log[10] = 0x200;
     log[15] = img;
@@ -448,7 +453,84 @@ star_dump_latches(void)
         pmsg_put(" ");
         pmsg_hex32(*(volatile uint32_t *)(0xFED17F70UL + 4 * i));
     }
+    pmsg_put(" rwd1");
+    for (unsigned i = 0; i < 17; ++i) {
+        pmsg_put(" ");
+        pmsg_hex32(*(volatile uint32_t *)(RWD1_BASE + 4 * i));
+    }
+    pmsg_put(" p3");
+    for (unsigned i = 0; i < 8; ++i) {
+        pmsg_put(" ");
+        pmsg_hex32(*(volatile uint32_t *)(P3_BASE + 4 * i));
+    }
     pmsg_put("\n");
+}
+
+/*
+ * Firmware<->Windows watchdog/startup handshake, done here because our
+ * bootshim + PeilessSec replace the release's, which do it on the S9+:
+ *  - the release bootshim (disassembled, 480 B) writes the RWD1 record at
+ *    0xFED13D80 as BOOTSHIM_ARMED (uncommitted), sets the entry cookie 'VALY'
+ *    at +0x40 and clears PMU INFORM2/INFORM3/SYSIP_DAT0; the release SEC then
+ *    commits it as SEC_ACTIVE, and the release DXE/BDS/EBS stages and finally
+ *    Exynos9810Ufs.sys (UfsRwd1TakeOwnership: From must be SEC..EBS, record
+ *    structurally valid) carry it to WINDOWS_OWNED, after which the driver
+ *    takes over the firmware-armed hardware watchdog and acknowledges P3.
+ *    Without RWD1 the driver sets NoPetReason=WATCHDOG_INVALID and does none
+ *    of that (observed: RWD1 all 0xFF, P3 stuck at PREBRANCH).
+ *  - the S9+ installer (BootRouteService) zeroes the P3 'SMP1' record at
+ *    0xFED13E80 before every boot; a stale one is left by the previous run.
+ * Record format and checksum: drivers/include/Rwd1Constants.h and
+ * UfsRwd1CommitLocked/UfsRwd1StructurallyValid in Exynos9810Ufs.c.
+ */
+static void
+star_rwd1_arm(void)
+{
+    volatile uint32_t *r = (volatile uint32_t *)RWD1_BASE;
+    volatile uint32_t *p3 = (volatile uint32_t *)P3_BASE;
+    volatile uint32_t *pmu = (volatile uint32_t *)0x14060000UL;
+    uint32_t w[16];
+    uint32_t acc = 0xA5A55A5AU;                 /* RWD1_CHECKSUM_SEED */
+
+    for (unsigned i = 0; i < 32; ++i)
+        p3[i] = 0;
+    pmu[0x808 / 4] = 0;                         /* INFORM2 */
+    pmu[0x80C / 4] = 0;                         /* INFORM3 */
+    pmu[0x810 / 4] = 0;                         /* SYSIP_DAT0 */
+
+    w[0] = 0x31445752U;                         /* 'RWD1' */
+    w[1] = (0x40U << 16) | 1U;                  /* RWD1_VERSION_LENGTH */
+    w[2] = 1;                                   /* generation */
+    w[3] = ~w[2];
+    w[4] = 0x20;                                /* RWD1_STATE_SEC_ACTIVE */
+    w[5] = 2;                                   /* RWD1_OWNER_SEC */
+    w[6] = 2;                                   /* RWD1_PHASE_SEC_ENTRY */
+    w[7] = 0;                                   /* RWD1_REASON_NONE */
+    w[8] = pmu[0x404 / 4];                      /* RST_STAT */
+    w[9] = 0;                                   /* detail */
+    w[10] = 0;                                  /* heartbeat */
+    w[11] = ~w[10];
+    for (unsigned i = 0; i < 12; ++i)
+        acc ^= w[i];
+    w[12] = acc;
+    w[13] = ~acc;
+    w[14] = 0x21445752U;                        /* RWD1_COMMIT_MAGIC */
+    w[15] = ~w[14];
+
+    /* Commit order of UfsRwd1CommitLocked: commit word cleared first, body,
+     * then the inverted commit, then the commit word. */
+    r[14] = 0;
+    __asm__ volatile("dsb sy" : : : "memory");
+    for (unsigned i = 0; i < 14; ++i)
+        r[i] = w[i];
+    __asm__ volatile("dsb sy" : : : "memory");
+    r[15] = w[15];
+    __asm__ volatile("dsb sy" : : : "memory");
+    r[14] = w[14];
+    r[16] = 0x594C4156U;                        /* RWD1_ENTRY_COOKIE_VALUE 'VALY' */
+    __asm__ volatile("dsb sy" : : : "memory");
+    clean_bytes(RWD1_BASE, P3_BASE + 0x80);
+    pmsg_put("STARBITE: rwd1 SEC_ACTIVE gen 1, p3 cleared\n");
 }
 
 uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)

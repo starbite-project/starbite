@@ -835,3 +835,30 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
 - 2026-10-26 19:45: src35 = stage 2 (bank-1 ranges + 0xE3700000+0xC900000, all as boot-services data):
   build/woa/starbite-uefi-src35.bin (sha eed85ec4...), BOOT = out/xnu-boot-src35.img (sha bfb4a906...), flashed.
   Expect the witness at ~1407 MiB.
+- 2026-10-26 20:00: src35 (stage 2): witness 1407 MiB / 14 ranges (> the S9+ release's 1357), setup dialog
+  unchanged -> **memory ruled out**. Bugcheck ruled out properly: the driver RESERVES its bugcheck slot at the
+  ring start at registration (UfsRegisterBugcheckCapture) and the callback overwrites that slot; it still
+  reads "=UFSBUGCHECK ARMED=1" after every run (not lost to the write flood).
+  Driver write fence (Exynos9810Ufs.h, published source): writable LBA 68736..15615994 minus 1195136..1526911
+  and 1680512..1697151 (S9+ partition numbers). Our S9 WINESP sda26 = LBA 6613760..6744831 and WINDOWS
+  sda27 = 6744832..13518591 are inside and not refused (so this is not the setup failure), BUT on the S9 the
+  fence also leaves USERDATA sda25 (1698432..6613759) and A16DATA sda28 (13518592..15615994) writable, and the
+  refused ranges cut through S9 SYSTEM/VENDOR/ODM/CACHE at the wrong places. Note for later.
+  **ROOT-CAUSE CANDIDATE: the RWD1/P3 handshake.** Disassembled the release bootshim (480 B; ours 384 B):
+  it (1) writes RWD1 @0xFED13D80 = 'RWD1', state 0x10 BOOTSHIM_ARMED, owner 1, phase 1, commit word cleared,
+  entry cookie 'VALY' @+0x40, and clears PMU INFORM2/3/SYSIP_DAT0 -- only if the old record is empty/0xFF or
+  ended in CONTROLLED_STOP/RECOVERY_PENDING/TWRP_ACK (else leaves the stale record for the stale-owner route);
+  (2) unmasks the cluster-0 WDT reset in PMU 0x14060408/40C (bit 24) and arms WDT 0x10050000 with
+  WTDAT/WTCNT=0xFFF5, WTCON=0xFF39; then copies the FD. Ours does neither. The driver needs a COMMITTED,
+  structurally valid record (version 0x00400001, gen/~gen, heartbeat/~hb, checksum = 0xA5A55A5A ^ words
+  0..11 and its inverse, commit 0x21445752 + inverse) in state SEC..EBS to take ownership; only then does it
+  take over the firmware-armed WDT (unmasks PMU reset, pets it) and ACK P3 (PREBRANCH -> WINDOWS_ACK). On
+  our phone RWD1 was all 0xFF every run -> NoPetReason=WATCHDOG_INVALID, P3 stuck PREBRANCH one-shot-armed,
+  seq 5 for every run (stale, never rewritten). The release SEC (commits SEC_ACTIVE) is what we replaced.
+  src36 = src35 firmware + shim star_rwd1_arm() in star_uefi(): zero P3 (what BootRouteService does before
+  every S9+ boot), clear PMU INFORM2/3/SYSIP_DAT0, write a committed RWD1 = SEC_ACTIVE (0x20) owner SEC (2)
+  phase SEC_ENTRY (2) gen 1, RST_STAT in word 8, cookie 'VALY'; verified host-side against the driver's
+  validity rule. The shim's boot dump now also prints the previous RWD1 (17 words) and P3 head (8 words).
+  BOOT = out/xnu-boot-src36.img (sha 1af81a23...), flashed. After the run read RWD1 state/owner/phase/
+  reason/heartbeat (post-mortem) -- it shows how far the chain got (0x30 DXE, 0x40 BDS, 0x50 EBS, 0x60
+  WINDOWS_OWNED, heartbeat = driver pets). A hard WDT reset would show RST_STAT bit 0x01000000.
