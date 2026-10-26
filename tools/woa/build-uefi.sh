@@ -39,8 +39,11 @@ limactl shell starbite -- bash -c "
 "
 # The virtiofs mount is read-only from the guest (lima 2.x/vz), so copy the
 # outputs out through the shell instead of writing to the mount.
-limactl shell starbite -- cat "/home/$(limactl shell starbite -- whoami </dev/null)/work/edk2/Build/Star2LtePkg/${target}_CLANGPDB/FV/STAR2LTE_UEFI.fd" </dev/null > build/woa/Star2LtePkg.fd
+rm -f build/woa/Star2LtePkg.fd build/woa/bootshim.bin build/woa/starbite-uefi.bin
+limactl shell starbite -- bash -lc "cat ~/work/edk2/Build/Star2LtePkg/${target}_CLANGPDB/FV/STAR2LTE_UEFI.fd" </dev/null > build/woa/Star2LtePkg.fd
 limactl shell starbite -- cat /tmp/bootshim.bin </dev/null > build/woa/bootshim.bin
-[ "$(stat -f %z build/woa/Star2LtePkg.fd)" -gt 1000000 ] || { echo "FD copy failed"; exit 1; }
+[ "$(stat -f %z build/woa/Star2LtePkg.fd)" -gt 1000000 ] || { echo "FD copy failed" >&2; exit 1; }
+[ "$(stat -f %z build/woa/bootshim.bin)" -gt 100 ] || { echo "bootshim copy failed" >&2; exit 1; }
 cat build/woa/bootshim.bin build/woa/Star2LtePkg.fd > build/woa/starbite-uefi.bin
+echo "starbite-uefi.bin: $(stat -f %z build/woa/starbite-uefi.bin) bytes, sha256 $(shasum -a 256 build/woa/starbite-uefi.bin | cut -c1-16)"
 ls -l build/woa/Star2LtePkg.fd build/woa/starbite-uefi.bin

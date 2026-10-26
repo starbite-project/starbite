@@ -638,3 +638,7 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   fix + latch dump): out/xnu-boot-src27.img (sha b782e961...), flashed. If it reaches =EBSENTER we have a
   BUILDABLE firmware that reaches the kernel -> enable the published STAR2LTE_INSTALL_KE_TRACE (kernel-startup
   progress code latched at 0xFED17F80, read by the next boot's dump) = firmware-side kernel progress.
+- 2026-10-26 20:05: "src27" test was INVALID: build-uefi.sh's copy-out used /home/$(whoami) (guest home is
+  dev.guest) -> 0-byte FD -> script exit 1 swallowed by `| tail` -> cp took the 09:41 starbite-uefi.bin
+  (= src25). Ring confirms (=WLSW/=HANDOFF/=AFRET, LOCP freeze). build-uefi.sh now removes stale outputs first,
+  copies via `bash -lc cat ~/...`, checks sizes, prints the output sha. Never pipe the build into tail.
