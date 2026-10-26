@@ -1067,3 +1067,22 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   from the card sprite rect. Bug fixed before it bit: the screen save at 0x92000000 overlapped Engineer's RAM
   test (0x92000000 + 16 MiB) -> moved to 0x94000000. BOOT flashed: out/xnu-boot-menu7.img (41aa6546..., save
   at 0x92000000); fixed image out/xnu-boot-menu7b.img for the next flash.
+- 2026-10-27 03:10: **EngineerMode 1.0** (shim/starlte/em.c + ui.c), MediaTek-EngineerMode look in Holo Dark:
+  status bar (PMIC RTC clock), action bar with app icon (sprites 200-204), scrolling tab strip DEVICE /
+  HARDWARE TESTING / POWER / STORAGE / OS / LOG AND DEBUGGING / TOOLS, list rows, Holo AlertDialogs, nav bar.
+  Text = Roboto/Menlo glyph atlas "SBFONT01" (tools/brand/em-font.py) appended to the menu sprites
+  (ramdisk build/brand/menu-em.sbm); missing atlas = old Engineer. Keys: Volume move, Power select, Bixby back
+  (top level: next tab), Bixby hold leave; touch: tap, drag, swipe tabs, Back/Home/Recents.
+  Pages: device info from S-Boot bootargs (fdt_chosen_raw), CHIPID + CPU ID registers + caches, DRAM banks
+  (fdt_memory_banks) + carve-outs, reset reason (PMU + PMIC), core map, TMU temperatures (TOP 0x10070000 /
+  SUB 0x10074000, eFuse trim, build/em-research-thermal-clocks.md), PLL clocks (A55/M3/G3D/MIF/SHARED, power
+  checked first), RAM pattern + bandwidth tests, panel info, display/touch/keys tests, RTC, timer;
+  MAX77705 battery + charger on HSI2C 0x14360000 (USI_CMGP03; timing snapshotted from S-Boot, repeated start,
+  read only: build/em-research-battery.md); PMIC LDO table + dump, touch rails; UFS host registers,
+  partitions; iOS / Windows (RWD1, P3, witness, NRM1 decoded) / Kiosk pages, iOS boot options; pmsg log,
+  retained records, command lines, live registers; reboot / recovery / download / power off (PMU +0x330C
+  PS_HOLD bit 8), register peek (hex keypad, whitelisted blocks, unknown blocks and every write behind a
+  dialog), about. Not yet: UFS device/health/speed/sector viewer (needs a UFS query path in the loader), core
+  bring-up test, brightness. Build: -fno-tree-switch-conversion added (GCC turned string switches into
+  pointer tables = ABS64). Menu: hint sprite (item 7, tap = Engineer), card y 1872, screen save 0x94000000.
+  BOOT flashed: out/xnu-boot-em1.img (sha adf9b527...).

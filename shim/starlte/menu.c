@@ -16,17 +16,10 @@
  */
 #include "menu.h"
 #include "fbtext.h"
+#include "hw.h"
 
 #define ALIVE_GPA0_DAT 0x14050024UL
 #define ALIVE_GPA2_DAT 0x14050064UL
-#define PMU_BASE 0x14060000UL
-#define INFORM_DOWNLOAD 0x12345671U
-#define INFORM_RECOVERY 0x12345674U
-
-#define K_UP 1U
-#define K_DOWN 2U
-#define K_BIXBY 4U
-#define K_POWER 8U
 #define K_SELECT (K_BIXBY | K_POWER)
 
 #define C_WHITE 0xffffffffU
@@ -310,11 +303,7 @@ static unsigned arg_num(const char *c, const char *key, unsigned dflt)
     return v;
 }
 
-static struct {
-    unsigned cpus;
-    int rw, verbose, touch, touchpwr;   /* boot options */
-    int multi, smpprobe;                /* risky */
-} opt;
+struct star_opt opt;
 
 static void opt_load(const char *c)
 {
@@ -334,8 +323,9 @@ static void opt_apply(char *c, unsigned len)
     num[0] = (char)('0' + opt.cpus);
     num[1] = 0;
     arg_set(c, len, "cpus", num);
-    /* Multi-block UFS corrupted reads twice: never let it write the root. */
-    int rw = opt.rw && !opt.multi;
+    /* Multi-block UFS with 16-byte PRDT entries and the 9810 vs_hci offsets
+     * is proven (2026-10-27): it no longer forces a read-only root. */
+    int rw = opt.rw;
     arg_set(c, len, "ufsrw", rw ? "1" : "0");
     arg_set(c, len, "rootrw", rw ? "1" : "0");
     if (opt.verbose)
@@ -633,39 +623,49 @@ static void tp_init(void)
     tp_ok = 1;
 }
 
-/* Drain events; returns 1 on a tap (a finger lifted near where it went down)
- * with its panel coordinates. Only the first finger counts. */
-static int tp_down, tp_x0, tp_y0, tp_x, tp_y;
-
-static int tp_tap(int *x, int *y)
+/* One finger-0 event: *st 1 down, 2 move, 3 up, with panel coordinates.
+ * Returns 0 when INT is high or the stack is empty. */
+static int tp_event(int *st, int *x, int *y)
 {
     uint8_t e[8];
-    int tap = 0;
     if (!tp_ok || (mrd(TP_ALIVE + 0x44) & 1U))
         return 0;
     for (unsigned n = 0; n < 16; ++n) {
         if (!tp_read(0x60, e, 8, 3) || e[0] == 0)
-            break;
+            return 0;
         if ((e[0] & 0x3U) != 0)
             continue;
         int tid = (int)((e[0] >> 2) & 0xfU) - 1;
         unsigned state = e[0] >> 6;
-        if (tid != 0)
+        if (tid != 0 || state < 1)
             continue;
         unsigned rx = (unsigned)e[1] << 4 | e[3] >> 4;
         unsigned ry = (unsigned)e[2] << 4 | (e[3] & 0xfU);
-        tp_x = (int)((uint64_t)rx * STAR_FB_WIDTH / tp_max_x);
-        tp_y = (int)((uint64_t)ry * STAR_FB_HEIGHT / tp_max_y);
-        if (state == 1) {
+        *x = (int)((uint64_t)rx * STAR_FB_WIDTH / tp_max_x);
+        *y = (int)((uint64_t)ry * STAR_FB_HEIGHT / tp_max_y);
+        *st = (int)state;
+        return 1;
+    }
+    return 0;
+}
+
+/* Returns 1 on a tap (finger 0 lifted within 80 px of where it went down). */
+static int tp_down, tp_x0, tp_y0;
+
+static int tp_tap(int *x, int *y)
+{
+    int st, ex, ey, tap = 0;
+    while (tp_event(&st, &ex, &ey)) {
+        if (st == 1) {
             tp_down = 1;
-            tp_x0 = tp_x;
-            tp_y0 = tp_y;
-        } else if (state == 3 && tp_down) {
+            tp_x0 = ex;
+            tp_y0 = ey;
+        } else if (st == 3 && tp_down) {
             tp_down = 0;
-            int dx = tp_x - tp_x0, dy = tp_y - tp_y0;
+            int dx = ex - tp_x0, dy = ey - tp_y0;
             if (dx > -80 && dx < 80 && dy > -80 && dy < 80) {
-                *x = tp_x;
-                *y = tp_y;
+                *x = ex;
+                *y = ey;
                 tap = 1;
             }
         }
@@ -1131,8 +1131,8 @@ static unsigned input_event(int *tx, int *ty)
  * do not count. */
 static int v5_hit(int x, int y)
 {
-    static const unsigned char items[5] = { 0, 1, 4, 5, 6 };
-    for (unsigned i = 0; i < 5; ++i) {
+    static const unsigned char items[6] = { 0, 1, 4, 5, 6, 7 };
+    for (unsigned i = 0; i < 6; ++i) {
         unsigned rx, ry, rw, rh;
         if (star_sprite_rect(16U + 8U * items[i], &rx, &ry, &rw, &rh) &&
             x >= (int)rx && x < (int)(rx + rw) && y >= (int)ry && y < (int)(ry + rh))
@@ -1145,7 +1145,7 @@ struct v5 { unsigned svc_focus, os, svc; };
 
 /* Last drawn state per item (0xff = not drawn yet): only changes are drawn,
  * the Starbite card alone is ~0.9 Mpx. */
-static unsigned char v5_shown[7] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+static unsigned char v5_shown[8] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 
 static void v5_put(unsigned item, unsigned st)
 {
@@ -1161,6 +1161,7 @@ static void v5_draw(const struct v5 *m)
         v5_put(v5_os[i], i != m->os ? 0U : m->svc_focus ? 4U : 1U);
     v5_put(2, 3);
     v5_put(3, 3);
+    v5_put(7, 0);
     for (unsigned i = 0; i < 2; ++i)
         v5_put(v5_svc[i], m->svc_focus && i == m->svc ? 1U : 0U);
 }
@@ -1191,6 +1192,11 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
             int hit = v5_hit(tx, ty);
             if (hit < 0)
                 continue;
+            if (hit == 7)
+                k = K_BIXBY_HOLD;                   /* the Engineer hint */
+        }
+        if (k == K_TAP) {
+            int hit = v5_hit(tx, ty);
             int svc = hit == (int)V5_RECOVERY || hit == (int)V5_DOWNLOAD;
             unsigned idx = svc ? (hit == (int)V5_DOWNLOAD) : (hit == 0 ? 0U : hit == 1 ? 1U : 2U);
             if ((unsigned)svc == m.svc_focus && idx == (svc ? m.svc : m.os)) {
@@ -1207,7 +1213,8 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
         }
         if (k == K_BIXBY_HOLD) {
             screen_copy(SCREEN_SAVE, STAR_FB_BASE);
-            int boot = engineer(in, cmdline, len);
+            uint64_t fs, fe;
+            int boot = star_font_blob(&fs, &fe) ? em_main(in, cmdline, len) : engineer(in, cmdline, len);
             screen_copy(STAR_FB_BASE, SCREEN_SAVE);
             star_fb_row_base(36);
             if (boot) {
@@ -1292,4 +1299,53 @@ int star_menu(const struct star_info *in, char *cmdline, unsigned len)
      * (overlay.mjs BAND_TOP .. the footer) before iOS boots. */
     star_fb_fill_rows(1880, 2500, C_BLACK);
     return 1;
+}
+
+/* ---- exported helpers (hw.h) ------------------------------------------- */
+
+uint64_t hw_ticks(void) { return ticks(); }
+uint64_t hw_freq(void) { return freq(); }
+void hw_wait_us(uint64_t us) { wait_us(us); }
+void hw_wait_ms(unsigned ms) { wait_ms(ms); }
+unsigned hw_keys(void) { return keys(); }
+void hw_reboot(uint32_t inform3) { reboot(inform3); }
+int hw_pmic_read(uint32_t type, uint32_t reg, uint8_t *val) { return pmic_read(type, reg, val); }
+int hw_pmic_write(uint32_t type, uint32_t reg, uint8_t val) { return pmic_write(type, reg, val); }
+void hw_opt_load(const char *cmdline) { opt_load(cmdline); }
+void hw_opt_apply(char *cmdline, unsigned len) { opt_apply(cmdline, len); }
+int hw_tp_ok(void) { return tp_ok; }
+void hw_tp_start(void) { if (!tp_ok) tp_init(); }
+int hw_tp_event(int *st, int *x, int *y) { return tp_event(st, x, y); }
+int hw_tp_read(uint8_t reg, uint8_t *data, unsigned len) { return tp_ok && tp_read(reg, data, len, 5); }
+void hw_tp_max(unsigned *mx, unsigned *my) { *mx = tp_max_x; *my = tp_max_y; }
+void hw_tp_clear(void) { if (tp_ok) (void)tp_cmd(0x62); }
+
+int hw_acpm_build(char out[25])
+{
+    if (!acpm_find(ACPM_PMIC_CH)) {
+        out[0] = 0;
+        return 0;
+    }
+    for (unsigned i = 0; i < 24; i += 4) {
+        uint32_t w = ard(ACPM_INITDATA + 0x60 + i);
+        for (unsigned b = 0; b < 4; ++b) {
+            char c = (char)(w >> (8 * b));
+            out[i + b] = (c >= 32 && c < 127) ? c : '.';
+        }
+    }
+    out[24] = 0;
+    return 1;
+}
+
+int hw_touch_rails(uint8_t *l35, uint8_t *l43)
+{
+    if (!pmic_read(1, 0x6c, l35) || !pmic_read(1, 0x74, l43))
+        return -1;
+    if (((*l35 & 0x3fU) != 0x2cU && (*l35 & 0x3fU) != 0) ||
+        ((*l43 & 0x3fU) != 0 && ((*l43 & 0x3fU) < 0x28U || (*l43 & 0x3fU) > 0x3cU)))
+        return 0;
+    int ok = pmic_write(1, 0x6c, 0xec) && pmic_write(1, 0x74, 0xf0);
+    (void)pmic_read(1, 0x6c, l35);
+    (void)pmic_read(1, 0x74, l43);
+    return ok ? 1 : -1;
 }

@@ -17,7 +17,7 @@
  * u32 count, then per sprite u32 id, x, y, w, h, runs, runs x { u32 length,
  * u32 0xAARRGGBB } (row-major). Sprite ids: 0 = base (drawn once),
  * 16 + 8 * item + state; items 0 iOS, 1 Windows, 2 Android, 3 Linux,
- * 4 Recovery chip, 5 Starbite card, 6 Download chip; states 0 normal,
+ * 4 Recovery chip, 5 Starbite card, 6 Download chip, 7 Engineer hint; states 0 normal,
  * 1 selected, 2 starting, 3 disabled, 4 selected but inactive (the other
  * selector has focus). Also writes build/brand/menu-preview.png.
  *
@@ -52,7 +52,8 @@ export const LAYOUT = {
   // Under Samsung's splash ("Secured by Knox" ends ~1575):
   service: { y: 1606, h: 40 },                      // "SERVICE · BIXBY" label
   chips: { y: 1652, h: 120, x0: 70, w: 630, gap: 40 },
-  card: { x: 100, y: 1838, w: 1240, h: 560 },     // the Starbite card (from overlay.png); sprite ends ~2490
+  card: { x: 100, y: 1872, w: 1240, h: 560 },     // the Starbite card (from overlay.png); sprite ends ~2524 (over the footer's black top)
+  hint: { y: 2866, h: 64, w: 760 },                // "HOLD BIXBY · ENGINEER MODE", under the footer; tap opens it
   cardSrcY: 1920,                                   // where overlay.mjs drew it
   footerY: 2500,
 };
@@ -260,6 +261,30 @@ CHIPS.forEach((c, k) => {
   sprite(0, 0, fy, W, fh, f);
 }
 
+// Engineer hint (item 7): under "Powered by Starbite", tappable.
+{
+  const hn = LAYOUT.hint;
+  const body = text('HOLD BIXBY  ·  ENGINEER MODE', { x: hn.w / 2, y: 42, size: 28, family: MONO, fill: DIM, anchor: 'middle', spacing: 3 });
+  sprite(SID(7, 0), (W - hn.w) / 2, hn.y, hn.w, hn.h, render(hn.w, hn.h, body));
+}
+
+// ---- EngineerMode chrome (ids 200+, opaque on their bar colours: shim/starlte/ui.h) ----
+export const EM = { STATUS: '#000000', BAR: '#212121', NAV: '#000000', HOLO: '#33b5e5' };
+{
+  const app = 120;
+  const appIcon =
+    `<rect x="4" y="4" width="${app - 8}" height="${app - 8}" rx="22" fill="#2c2c2c"/>` +
+    icon('si-android.svg', 16, 18, app - 32, { fill: '#a4c639' }) +
+    icon('lucide-wrench.svg', app - 58, app - 58, 50, { stroke: EM.HOLO });
+  const onBar = (w, h, body) => render(w, h, `<rect width="${w}" height="${h}" fill="${EM.BAR}"/>` + body);
+  sprite(200, 0, 0, app, app, onBar(app, app, appIcon));
+  sprite(201, 0, 0, 56, 96, onBar(56, 96, icon('lucide-chevron-left.svg', -4, 20, 60, { stroke: '#ffffff' })));
+  const nav = 104;
+  sprite(202, 0, 0, nav, nav, render(nav, nav, icon('lucide-undo-2.svg', 14, 14, 76, { stroke: '#e8e8e8' })));
+  sprite(203, 0, 0, nav, nav, render(nav, nav, icon('lucide-house.svg', 14, 14, 76, { stroke: '#e8e8e8' })));
+  sprite(204, 0, 0, nav, nav, render(nav, nav, icon('lucide-copy.svg', 14, 14, 76, { stroke: '#e8e8e8' })));
+}
+
 // ---- write -------------------------------------------------------------------
 let size = 12;
 for (const s of sprites) size += 24 + 8 * s.runs.length;
@@ -282,8 +307,8 @@ console.log(`build/brand/menu.sbm: ${sprites.length} sprites, ${buf.length} byte
   const lpng = decodePng(svgPng(`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${W}" height="${H}"><rect width="${W}" height="${H}" fill="#000"/><image x="180" y="1144" width="1079" height="1747" xlink:href="data:image/jpeg;base64,${readFileSync(logo).toString('base64')}"/></svg>`));
   for (let i = 0; i < W * H; i++) fb[i] = (0xff000000 | (lpng.px[i * 4] << 16) | (lpng.px[i * 4 + 1] << 8) | lpng.px[i * 4 + 2]) >>> 0;
   const sel = process.env.PREVIEW === 'alt'
-    ? [SID(0, 4), SID(1, 0), SID(2, 3), SID(3, 3), SID(4, 1), SID(6, 0), SID(5, 0)]
-    : [SID(0, 1), SID(1, 0), SID(2, 3), SID(3, 3), SID(4, 0), SID(6, 0), SID(5, 0)];
+    ? [SID(0, 4), SID(1, 0), SID(2, 3), SID(3, 3), SID(4, 1), SID(6, 0), SID(5, 0), SID(7, 0)]
+    : [SID(0, 1), SID(1, 0), SID(2, 3), SID(3, 3), SID(4, 0), SID(6, 0), SID(5, 0), SID(7, 0)];
   const want = (id) => id === 0 || sel.includes(id);
   for (const s of sprites) if (want(s.id))
     for (let y = 0; y < s.h; y++) for (let x = 0; x < s.w; x++) fb[(s.y + y) * W + s.x + x] = s.px[y * s.w + x];

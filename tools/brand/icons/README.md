@@ -5,4 +5,6 @@ Icons used by tools/brand/menu.mjs (boot menu v5), fetched 2026-10-27:
   trademarks of their owners; used here to label the boot targets.
 - tux.svg: Tux by Larry Ewing (lewing@isc.tamu.edu) made with The GIMP, via Wikimedia Commons
   (https://upload.wikimedia.org/wikipedia/commons/3/35/Tux.svg). Use requires this credit.
-- lucide-wrench.svg, lucide-download.svg, lucide-life-buoy.svg: lucide-static 0.400.0, ISC licence.
+- lucide-wrench.svg, lucide-download.svg, lucide-life-buoy.svg, lucide-undo-2.svg, lucide-house.svg,
+  lucide-copy.svg, lucide-chevron-left.svg: lucide-static 0.400.0, ISC licence.
+- fonts/ (tools/brand/fonts): Roboto v2.138, Apache 2.0 (LICENSE.txt), from googlefonts/roboto via jsDelivr.

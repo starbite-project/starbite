@@ -8,7 +8,7 @@ set -eu
 cd "$(dirname "$0")"
 : "${CROSS:=}"   # native gcc in the aarch64 VM; set aarch64-linux-gnu- elsewhere
 mkdir -p out
-CFLAGS="-c -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie -nostdlib -fno-asynchronous-unwind-tables -fno-jump-tables -mgeneral-regs-only -mstrict-align -mcpu=cortex-a53 -Wall -Wextra -Werror"
+CFLAGS="-c -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie -nostdlib -fno-asynchronous-unwind-tables -fno-jump-tables -fno-tree-switch-conversion -mgeneral-regs-only -mstrict-align -mcpu=cortex-a53 -Wall -Wextra -Werror"
 
 image() {
     name=$1; shift
@@ -38,4 +38,4 @@ PY
 }
 
 image probe probe.S probe.c fbtext.c ../fdt.c
-image xnu_boot xnu_boot.S xnu_boot.c menu.c fbtext.c ../fdt.c
+image xnu_boot xnu_boot.S xnu_boot.c menu.c ui.c em.c fbtext.c ../fdt.c

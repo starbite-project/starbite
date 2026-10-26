@@ -14,6 +14,7 @@
 #include "../fdt.h"
 #include "fbtext.h"
 #include "menu.h"
+#include "hw.h"
 
 #define LOG_BASE 0x91fff000UL
 #define RAM_BASE 0x92000000UL
@@ -152,7 +153,17 @@ blend(uint32_t s, uint32_t d)
 /* Draw every SBMENU01 sprite with this id (opaque copy). Returns how many
  * were drawn, or -1 if the blob is malformed. */
 static int
+sprite_walk_at(uint64_t start, uint64_t end, uint32_t want, int ox, int oy, int at);
+
+static int
 sprite_walk(uint64_t start, uint64_t end, uint32_t want)
+{
+    return sprite_walk_at(start, end, want, 0, 0, 0);
+}
+
+/* As sprite_walk; with at != 0 the sprite goes to (ox, oy) instead. */
+static int
+sprite_walk_at(uint64_t start, uint64_t end, uint32_t want, int ox, int oy, int at)
 {
     const volatile uint32_t *h = (const volatile uint32_t *)(uintptr_t)start;
     volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
@@ -167,6 +178,12 @@ sprite_walk(uint64_t start, uint64_t end, uint32_t want)
         if (!w || (uintptr_t)(q + 2 * (uint64_t)runs) > end || x + w > STAR_FB_WIDTH ||
             y + ht > STAR_FB_HEIGHT)
             return -1;
+        if (id == want && at) {
+            if (ox < 0 || oy < 0 || (uint32_t)ox + w > STAR_FB_WIDTH || (uint32_t)oy + ht > STAR_FB_HEIGHT)
+                return -1;
+            x = (uint32_t)ox;
+            y = (uint32_t)oy;
+        }
         if (id == want) {
             uint64_t left = (uint64_t)w * ht;
             uint32_t px = 0;
@@ -197,6 +214,35 @@ int
 star_menu_assets(void)
 {
     return menu_end > menu_start;
+}
+
+int
+star_sprite_at(unsigned id, int x, int y)
+{
+    if (!star_menu_assets())
+        return 0;
+    return sprite_walk_at(menu_start, menu_end, id, x, y, 1);
+}
+
+/* The EngineerMode glyph atlas ("SBFONT01", tools/brand/em-font.py) follows
+ * the SBMENU01 sprites in the same ramdisk blob. */
+int
+star_font_blob(uint64_t *start, uint64_t *end)
+{
+    if (!star_menu_assets())
+        return 0;
+    const volatile uint32_t *hd = (const volatile uint32_t *)(uintptr_t)menu_start;
+    const volatile uint32_t *q = hd + 3;
+    for (uint32_t r = 0; r < hd[2]; r++) {
+        if ((uintptr_t)(q + 6) > menu_end)
+            return 0;
+        q += 6 + 2 * (uint64_t)q[5];
+    }
+    if ((uintptr_t)(q + 3) > menu_end || q[0] != 0x4f464253U || q[1] != 0x3130544eU)   /* "SBFONT01" */
+        return 0;
+    *start = (uintptr_t)q;
+    *end = menu_end;
+    return 1;
 }
 
 int
@@ -365,6 +411,16 @@ find_bundle(const struct payload *p, uintptr_t rd_start, uintptr_t rd_end, uint6
         b = align_page(b + PAGE_SIZE + s);
     }
     return 0;
+}
+
+uint64_t
+star_bundle(const struct star_info *in, int linux_not_uefi, uint64_t *size)
+{
+    *size = 0;
+    if (!in || in->rd_end <= in->rd_start)
+        return 0;
+    return find_bundle((const struct payload *)(uintptr_t)in->rd_start, in->rd_start, in->rd_end,
+                       linux_not_uefi ? BUNDLE_LINUX : BUNDLE_UEFI, size);
 }
 
 static uintptr_t

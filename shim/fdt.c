@@ -99,3 +99,99 @@ int fdt_chosen_set_u64(uintptr_t fdt, const char *prop, uint64_t value)
 	uint64_t now;
 	return chosen_prop(fdt, prop, &now, &value);
 }
+
+/*
+ * Raw value of a /chosen property (e.g. "bootargs", S-Boot's command line):
+ * *val = address inside the FDT, *len = length in bytes. Returns 0 if absent.
+ */
+int fdt_chosen_raw(uintptr_t fdt, const char *prop, uintptr_t *val, uint32_t *len)
+{
+	if (!fdt || be32(fdt) != FDT_MAGIC)
+		return 0;
+	uintptr_t p = fdt + be32(fdt + 8);
+	uintptr_t strings = fdt + be32(fdt + 12);
+	int depth = 0, in_chosen = 0;
+	for (;;) {
+		uint32_t tok = be32(p);
+		p += 4;
+		if (tok == FDT_BEGIN_NODE) {
+			depth++;
+			in_chosen = depth == 2 && streq((const char *)p, "chosen");
+			p = align4(skip_str(p));
+		} else if (tok == FDT_END_NODE) {
+			if (in_chosen)
+				return 0;
+			depth--;
+		} else if (tok == FDT_PROP) {
+			uint32_t l = be32(p), nameoff = be32(p + 4);
+			if (in_chosen && streq((const char *)(strings + nameoff), prop)) {
+				*val = p + 8;
+				*len = l;
+				return 1;
+			}
+			p = align4(p + 8 + l);
+		} else if (tok != FDT_NOP) {
+			return 0;
+		}
+	}
+}
+
+static int prefix(const char *s, const char *pre)
+{
+	while (*pre)
+		if (*s++ != *pre++)
+			return 0;
+	return 1;
+}
+
+/*
+ * DRAM banks from every top-level node named "memory" / "memory@..." (S-Boot
+ * adds them at boot), using the root #address-cells / #size-cells. Returns the
+ * number of banks stored (at most max).
+ */
+int fdt_memory_banks(uintptr_t fdt, uint64_t *base, uint64_t *size, int max)
+{
+	if (!fdt || be32(fdt) != FDT_MAGIC)
+		return 0;
+	uintptr_t p = fdt + be32(fdt + 8);
+	uintptr_t strings = fdt + be32(fdt + 12);
+	int depth = 0, in_mem = 0, n = 0;
+	uint32_t ac = 2, sc = 1;
+	for (;;) {
+		uint32_t tok = be32(p);
+		p += 4;
+		if (tok == FDT_BEGIN_NODE) {
+			depth++;
+			in_mem = depth == 2 && prefix((const char *)p, "memory") &&
+			    (((const char *)p)[6] == 0 || ((const char *)p)[6] == '@');
+			p = align4(skip_str(p));
+		} else if (tok == FDT_END_NODE) {
+			if (depth == 2)
+				in_mem = 0;
+			if (--depth == 0)
+				return n;
+		} else if (tok == FDT_PROP) {
+			uint32_t l = be32(p), nameoff = be32(p + 4);
+			const char *name = (const char *)(strings + nameoff);
+			uintptr_t v = p + 8;
+			if (depth == 1 && l == 4 && streq(name, "#address-cells"))
+				ac = be32(v);
+			else if (depth == 1 && l == 4 && streq(name, "#size-cells"))
+				sc = be32(v);
+			else if (in_mem && streq(name, "reg") && ac >= 1 && ac <= 2 && sc >= 1 && sc <= 2) {
+				uint32_t step = 4 * (ac + sc);
+				for (uint32_t o = 0; o + step <= l && n < max; o += step) {
+					uint64_t b = ac == 2 ? (uint64_t)be32(v + o) << 32 | be32(v + o + 4) : be32(v + o);
+					uintptr_t s0 = v + o + 4 * ac;
+					uint64_t s = sc == 2 ? (uint64_t)be32(s0) << 32 | be32(s0 + 4) : be32(s0);
+					base[n] = b;
+					size[n] = s;
+					n++;
+				}
+			}
+			p = align4(v + l);
+		} else if (tok != FDT_NOP) {
+			return n;
+		}
+	}
+}
