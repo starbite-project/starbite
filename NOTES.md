@@ -642,3 +642,6 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   dev.guest) -> 0-byte FD -> script exit 1 swallowed by `| tail` -> cp took the 09:41 starbite-uefi.bin
   (= src25). Ring confirms (=WLSW/=HANDOFF/=AFRET, LOCP freeze). build-uefi.sh now removes stale outputs first,
   copies via `bash -lc cat ~/...`, checks sizes, prints the output sha. Never pipe the build into tail.
+- 2026-10-26 20:15: src27 REAL build (FD sha b55bbdb2..., fw tree verified free of 0011-0013 code): patches
+  0001,0002,0005 only. BOOT = out/xnu-boot-src27.img. Question: does the map stay small enough for winload's
+  final probe (src26 fragmented to 0x1410..0x1500; release max 0x1080)?
