@@ -1033,3 +1033,4 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   need its UEFI's DESCTYPE 3; the woa UEFI's A98 notes ran 512 KiB multi-entry reads on DESCTYPE 0 with 16-byte
   entries. Test 2: prdt_stride 16 (0300 updated). BOOT = out/xnu-boot-ufsmulti16.img (sha 3840b26a...).
   Note: a failed multi command still kills the host for the rest of the boot (panic at root mount).
+- 2026-10-27 01:40: **iOS multi-block storage WORKS** with 16-byte PRDT entries (DESCTYPE 0) + Linux vs_hci at the real 9810 offsets: self-test MATCH, iOS boots and is "so much faster" (user). BOOT = out/xnu-boot-ufsmulti16.img (ufsmulti=1 in the cmdline). Step 4 DONE.
