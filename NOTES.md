@@ -1100,3 +1100,7 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   partition). Boot menu: hold Vol+ and Vol- 0.7 s = power off (hw_power_off: PS_HOLD, a cable reboots),
   hint sprite item 8 next to the Engineer hint (item 7). BOOT flashed: out/xnu-boot-em2.img (sha 5513a9a6...).
   BOOT partition is 55 MiB and this image is 53.9 MB: further OSes must load from storage.
+  Brightness page (build/em-research-brightness.md): S-Boot's AOR-only sequence F0 5A 5A / B1 hi lo / F7 03 /
+  F0 A5 A5 as DCS long writes on DSIM 0x16080000 (payload then header, wait PH empty <= 50 ms, retry once,
+  always relock), AOR clamped 0x000C..0x0BA3; panel ID via DCS read 0x04. Flashed out/xnu-boot-em3.img
+  (sha e69d9ab8...) instead of em2.

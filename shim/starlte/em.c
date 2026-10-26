@@ -3205,6 +3205,198 @@ static void sector_screen(void)
     }
 }
 
+/* ---- panel brightness (S6E3HA8 AOR, as S-Boot does it) ----------------------
+ * build/em-research-brightness.md. S-Boot dims this panel with AOR only:
+ * F0 5A 5A (level-2 key), B1 hi lo (AOR), F7 03 (commit), F0 A5 A5, all DCS
+ * long writes (0x39) through DSIM 0x16080000: payload FIFO first, then the
+ * header, then wait for the header FIFO to drain. Never sends gamma, ELVSS,
+ * voltages, POC/MTP writes, sleep or display off. The next OS re-inits the
+ * panel, so the setting lasts until then.
+ */
+#define DSIM 0x16080000UL
+#define DSIM_INTSRC (DSIM + 0x50)
+#define DSIM_PKTHDR (DSIM + 0x58)
+#define DSIM_PAYLOAD (DSIM + 0x5c)
+#define DSIM_RXFIFO (DSIM + 0x60)
+#define DSIM_FIFOCTRL (DSIM + 0x68)
+#define DSIM_PH_EMPTY (1U << 28)
+#define DSIM_RX_DONE (1U << 18)
+
+static uint32_t panel_aor = 0x0440;     /* S-Boot's normal level, assumed */
+
+static int dsim_ready(void)
+{
+    return (rd(DSIM + 0x20) & (1U << 20)) && !(rd(DSIM + 0x4c) & (1U << 18));
+}
+
+static void dsim_hdr(uint32_t id, uint32_t d0, uint32_t d1, uint32_t bta)
+{
+    uint32_t v = rd(DSIM_PKTHDR) & 0xfe000000U;
+    wr(DSIM_PKTHDR, v | (bta << 24) | ((d1 & 0xffU) << 16) | ((d0 & 0xffU) << 8) | id);
+}
+
+static int dsim_wait(void)
+{
+    for (unsigned t = 0; t < 50000; t += 10) {
+        uint32_t s = rd(DSIM_INTSRC), f = rd(DSIM_FIFOCTRL);
+        if ((s & DSIM_PH_EMPTY) || ((f & (1U << 10)) && !((f >> 16) & 0x3fU))) {
+            wr(DSIM_INTSRC, DSIM_PH_EMPTY);
+            return 0;
+        }
+        hw_wait_us(10);
+    }
+    return -1;
+}
+
+static int dcs_long(const uint8_t *b, uint32_t n)
+{
+    if (((rd(DSIM_FIFOCTRL) >> 16) & 0x3fU) && dsim_wait())
+        return -1;
+    wr(DSIM_INTSRC, DSIM_PH_EMPTY);
+    for (uint32_t i = 0; i < n; i += 4) {
+        uint32_t w = 0;
+        for (uint32_t k = 0; k < 4 && i + k < n; ++k)
+            w |= (uint32_t)b[i + k] << (8 * k);
+        wr(DSIM_PAYLOAD, w);
+    }
+    dsim_hdr(0x39, n & 0xffU, n >> 8, 0);
+    return dsim_wait();
+}
+
+static int panel_set_aor(uint32_t aor)
+{
+    if (!dsim_ready())
+        return -1;
+    if (aor < 0x000c)
+        aor = 0x000c;
+    if (aor > 0x0ba3)
+        aor = 0x0ba3;
+    const uint8_t key_on[3] = { 0xf0, 0x5a, 0x5a };
+    const uint8_t commit[2] = { 0xf7, 0x03 };
+    const uint8_t key_off[3] = { 0xf0, 0xa5, 0xa5 };
+    const uint8_t b1[3] = { 0xb1, (uint8_t)(aor >> 8), (uint8_t)aor };
+    int r = 0;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        r = dcs_long(key_on, 3);
+        if (!r)
+            r = dcs_long(b1, 3);
+        if (!r)
+            r = dcs_long(commit, 2);
+        (void)dcs_long(key_off, 3);             /* always lock again */
+        if (!r)
+            break;
+        hw_wait_ms(20);
+    }
+    if (!r)
+        panel_aor = aor;
+    return r;
+}
+
+/* DCS read 0x04 (panel ID, 3 bytes; S-Boot read 91 04 44): bytes, or < 0. */
+static int panel_read_id(uint8_t out[3])
+{
+    if (!dsim_ready())
+        return -1;
+    for (int g = 0; g < 64 && !(rd(DSIM_FIFOCTRL) & (1U << 12)); ++g)
+        (void)rd(DSIM_RXFIFO);
+    wr(DSIM_INTSRC, DSIM_RX_DONE | DSIM_PH_EMPTY);
+    dsim_hdr(0x37, 3, 0, 0);
+    if (dsim_wait())
+        return -1;
+    wr(DSIM_INTSRC, DSIM_RX_DONE);
+    dsim_hdr(0x06, 0x04, 0, 1);
+    for (unsigned t = 0; !(rd(DSIM_INTSRC) & DSIM_RX_DONE); t += 10) {
+        if (t > 100000)
+            return -1;
+        hw_wait_us(10);
+    }
+    wr(DSIM_INTSRC, DSIM_RX_DONE | DSIM_PH_EMPTY);
+    for (int g = 0; g < 64 && !(rd(DSIM_FIFOCTRL) & (1U << 12)); ++g) {
+        uint32_t w = rd(DSIM_RXFIFO);
+        switch (w & 0xffU) {
+        case 0x1c: {
+            uint32_t wc = (w >> 8) & 0xffffU, d = rd(DSIM_RXFIFO);
+            out[0] = (uint8_t)d;
+            out[1] = (uint8_t)(d >> 8);
+            out[2] = (uint8_t)(d >> 16);
+            for (uint32_t i = 4; i < wc; i += 4)
+                (void)rd(DSIM_RXFIFO);
+            return 3;
+        }
+        case 0x21:
+            out[0] = (uint8_t)(w >> 8);
+            return 1;
+        case 0x22:
+            out[0] = (uint8_t)(w >> 8);
+            out[1] = (uint8_t)(w >> 16);
+            return 2;
+        case 0x02:
+            return -2;
+        default:
+            break;
+        }
+    }
+    return -1;
+}
+
+static uint32_t bright_aor(int i)
+{
+    switch (i) {
+    case 0: return 0x000c;
+    case 1: return 0x0200;
+    case 2: return 0x0440;
+    case 3: return 0x0800;
+    case 4: return 0x0b7c;
+    default: return 0x0ba3;
+    }
+}
+
+static int bright_msg;          /* 0 none, 1 ok, -1 failed, 2 id read */
+static uint8_t bright_id[3];
+static int bright_idn;
+
+static void build_bright(void)
+{
+    struct ub u;
+    int ok = dsim_ready();
+    for (int i = 0; i < 6; ++i) {
+        ub_init(&u);
+        ub_s(&u, "AOR ");
+        ub_hex(&u, bright_aor(i), 4);
+        if (i == 2)
+            ub_s(&u, "  (S-Boot normal)");
+        row_add(i == 0 ? "Maximum" : i == 1 ? "Bright (~83 %)" : i == 2 ? "Normal (~64 %)" : i == 3 ? "Dim (~31 %)" :
+                i == 4 ? "Very dim (~4 %)" : "Darkest (~2 %)",
+                u.b, (ok ? 0 : R_DIS) | R_CHECK | (panel_aor == bright_aor(i) ? R_ON : 0));
+    }
+    ub_init(&u);
+    if (bright_idn > 0) {
+        ub_s(&u, "read: ");
+        for (int i = 0; i < bright_idn; ++i) {
+            ub_hexn(&u, bright_id[i], 2);
+            ub_c(&u, ' ');
+        }
+        ub_s(&u, bright_idn == 3 && bright_id[0] == 0x91 ? "(S6E3HA8)" : "");
+    } else {
+        ub_s(&u, bright_idn < 0 ? "read failed" : "DCS read 0x04 (S-Boot read 91 04 44)");
+    }
+    row_add("Read panel ID", u.b, ok ? 0 : R_DIS);
+    row_add(ok ? (bright_msg < 0 ? "Last write: no answer from DSIM" : "Lasts until an OS starts") : "DSI link not in command mode",
+            "AOR only, like S-Boot: no gamma or voltage writes", R_DIS);
+}
+
+static int act_bright(int i)
+{
+    if (i < 6) {
+        bright_msg = panel_set_aor(bright_aor(i)) ? -1 : 1;
+    } else if (i == 6) {
+        bright_idn = panel_read_id(bright_id);
+        if (bright_idn == 0)
+            bright_idn = -1;
+    }
+    return 0;
+}
+
 static void power_off(void)
 {
     ui_clip(0, UI_H);
@@ -3342,7 +3534,7 @@ static void fill_panel(void)
     ub_init(&u);
     ub_size(&u, (uint64_t)STAR_FB_WIDTH * STAR_FB_HEIGHT * 4U);
     kv_add("Size", u.b);
-    kv_add("Brightness", "set by S-Boot; DSI control coming");
+    kv_add("Brightness", "Hardware Testing > Brightness (AOR)");
 }
 
 /* ---- register peek ----------------------------------------------------------- */
@@ -3583,6 +3775,7 @@ static void build_tab(int t)
         row_add("Memory bandwidth", "read, write, copy", 0);
         row_add("Display panel", "panel, resolution, framebuffer", 0);
         row_add("Display test", "colour fields, gradient, checkerboard, grid", 0);
+        row_add("Brightness", "panel AOR via DSI, panel ID", 0);
         row_add("Touch screen", "S6SY761: paint test, controller info", 0);
         row_add("Keys", "live key states", 0);
         row_add("Real-time clock", "S2MPS18 RTC, live", 0);
@@ -3645,10 +3838,11 @@ static void open_item(int t, int i)
     case 0x15: run_bw(); break;
     case 0x16: info_screen("Display panel", fill_panel, 0); break;
     case 0x17: test_display(); break;
-    case 0x18: test_touch(); break;
-    case 0x19: test_keys(); break;
-    case 0x1a: info_screen("Real-time clock", fill_rtc, 500); break;
-    case 0x1b:
+    case 0x18: list_screen("Brightness", build_bright, act_bright); break;
+    case 0x19: test_touch(); break;
+    case 0x1a: test_keys(); break;
+    case 0x1b: info_screen("Real-time clock", fill_rtc, 500); break;
+    case 0x1c:
         measure_timer();
         info_screen("Timer", fill_timer, 500);
         break;
