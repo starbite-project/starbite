@@ -166,6 +166,22 @@ static void rtc_read(struct rtc *r)
     r->ok = r->s < 60 && r->mi < 60 && r->h < 24 && r->d >= 1 && r->d <= 31 && r->mo >= 1 && r->mo <= 12;
 }
 
+/* PMIC RTC as Unix time (UTC), for Linux (xnu_boot.c star_linux_store). */
+int em_rtc_epoch(uint64_t *epoch)
+{
+    struct rtc r;
+    rtc_read(&r);
+    if (!r.ok)
+        return 0;
+    /* days from civil (Howard Hinnant), year >= 2000 */
+    unsigned y = r.y - (r.mo <= 2), era = y / 400, yoe = y - era * 400;
+    unsigned doy = (153 * (r.mo + (r.mo > 2 ? -3 : 9)) + 2) / 5 + r.d - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    uint64_t days = (uint64_t)era * 146097 + doe - 719468;
+    *epoch = days * 86400 + r.h * 3600 + r.mi * 60 + r.s;
+    return 1;
+}
+
 /* ---- chrome ------------------------------------------------------------- */
 
 static int cur_tab;

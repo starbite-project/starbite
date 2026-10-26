@@ -566,6 +566,11 @@ star_linux_store(volatile uint64_t *log)
         return fail(log, -42, "LINUX DTB TOO LARGE");
     if (store_load(&dtb, LINUX_DTB))
         return fail(log, -43, "LINUX DTB READ OR CRC FAILED");
+    /* Wall clock for Linux (no RTC driver there): the DTB carries a u64
+     * placeholder /chosen/starbite,rtc-epoch; tools/linux/init reads it. */
+    uint64_t now;
+    if (em_rtc_epoch(&now))
+        (void)fdt_chosen_set_u64(LINUX_DTB, "starbite,rtc-epoch", now);
     if (ufs_read(img.lba, 1) || u8le(UFS_BUF + 56, 4) != 0x644d5241U)
         return fail(log, -44, "BAD LINUX IMAGE");
     uint64_t text_offset = u8le(UFS_BUF + 8, 8), image_size = u8le(UFS_BUF + 16, 8);

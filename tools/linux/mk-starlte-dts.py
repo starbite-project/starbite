@@ -36,6 +36,9 @@ sub('compatible = "samsung,star2lte", "samsung,exynos9810";',
 sub('''		      <0x8 0x80000000 0x80000000>,
 		      <0x9 0x00000000 0x80000000>;''',
     '''		      <0x8 0x80000000 0x80000000>;''')
+# The loader writes the S2MPS18 RTC time (UTC) here; tools/linux/init sets
+# the clock from it (no RTC driver in this kernel).
+sub('bootargs = "', 'starbite,rtc-epoch = /bits/ 64 <0>;\n\t\tbootargs = "')
 sub('charge-full-design-microamp-hours = <3500000>;', 'charge-full-design-microamp-hours = <3000000>;')
 sub('energy-full-design-microwatt-hours = <13480000>;', 'energy-full-design-microwatt-hours = <11550000>;')
 if 'star2lte' in s.replace('star2lte_eur', ''):

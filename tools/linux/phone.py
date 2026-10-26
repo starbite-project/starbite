@@ -15,7 +15,7 @@ IAC, DONT, DO, WONT, WILL, SB, SE = 255, 254, 253, 252, 251, 250, 240
 
 
 class Shell:
-    def __init__(self, timeout=30):
+    def __init__(self, timeout=3600):
         self.s = socket.create_connection((HOST, PORT), timeout=10)
         self.s.settimeout(timeout)
         self.buf = b''

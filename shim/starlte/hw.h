@@ -65,3 +65,5 @@ int star_store_has(const char *name);
 /* em.c: EngineerMode. Returns 1 to boot iOS with the (edited) cmdline, 0 to
  * go back to the boot menu. */
 int em_main(const struct star_info *in, char *cmdline, unsigned len);
+/* em.c: the S2MPS18 RTC as Unix time (UTC); 0 if unreadable. */
+int em_rtc_epoch(uint64_t *epoch);

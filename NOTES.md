@@ -1139,3 +1139,24 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   (write the store / BOOT from Linux: http fetch, checks, only sda + that partition writable for the dd,
   readback), reboot-linux in the initramfs (one-shot u64 "SBNEXTLX" at 0xFED17FE0, the menu boots Linux).
   BOOT out/xnu-boot-linux3.img (sha 7f1d5283...).
+- 2026-10-27: **Linux milestone 3: postmarketOS (edge, Plasma Mobile, OpenRC) boots from the microSD.**
+  Root = /starbite-linux.img (8 GiB ext4, label starbite_root) on the card's exFAT next to the user's
+  backups (exFAT was dirty-flagged only: fsck.exfat -n clean). Built ON THE PHONE (Mac disk too full for
+  pmbootstrap in lima: the VM disk does not shrink on fstrim): bring-up Linux runs apk.static 3.0.8
+  (hash checked against an HTTPS copy) through tools/linux/http-proxy.py on 172.16.42.2:3128;
+  tools/linux/phone-prep.sh = clock, apk.static, keys (pmbootstrap's pmb/data/keys; apk treats
+  --keys-dir as inside --root, so keys go to <root>/etc/apk/keys), RAM tools root (e2fsprogs,
+  exfatprogs). 1017 packages, 2.2 GB; + openssh-server dnsmasq doas. tools/linux/pmos-setup.sh (chroot):
+  user uid 10000 (tinydm autologin UID) in audio/input/netdev/plugdev/video/wheel/feedbackd/seat, root
+  locked, PIN in build/linux/pmos-login.txt (git-ignored), SSH key build/linux/ssh/starbite_ed25519,
+  doas for wheel, NM leaves usb0 alone, udev UDISKS_IGNORE for sd* (internal UFS), deviceinfo.
+  tools/linux/init: Vol down = stay in the bring-up shell; else exFAT rw -> loop0 -> ext4 rw ->
+  exFAT moved to /media/starbite-sd -> rm default/usb-signaller (it tears down our ECM+ACM gadget;
+  pmOS's unudhcpd.usb0 serves the Mac) -> switch_root /sbin/init. Clock: loader writes the S2MPS18 RTC
+  (UTC) as u64 /chosen/starbite,rtc-epoch into the DTB it passes (em_rtc_epoch); a RAM handover failed
+  because ramoops zaps 0xFED10000-0xFED18000 at boot (the one-shot flag survives: Linux writes it just
+  before rebooting). SD: card power-cycled by the loader (LDO31 seen at vsel 0x30 off after a forced
+  reset; accepted range now 2.7-3.3 V). Lessons: never rm -rf a dir with a bind mount inside (wiped
+  live /dev nodes once, reboot fixed it); busybox setsid does not wait; long commands need phone.py's
+  3600 s timeout. TWRP's 4.9 kernel mounts the image only ro,noload (newer ext4 features).
+  BOOT out/xnu-boot-linux6.img (sha 21d95cf2...). Next: GPU (Panfrost) + DECON scanout, Wi-Fi, keys.

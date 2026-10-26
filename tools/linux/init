@@ -17,6 +17,15 @@ mount -t tmpfs tmpfs /run
 mount -t tmpfs tmpfs /tmp
 
 exec </dev/null >/dev/tty0 2>&1
+
+# Wall clock from the loader (no RTC driver here): /chosen/starbite,rtc-epoch,
+# a u64 the loader writes from the S2MPS18 RTC (UTC) into the DTB it passes.
+# (Not RAM: ramoops wipes its whole area, where the boot flag lives, at boot.)
+E=/proc/device-tree/chosen/starbite,rtc-epoch
+if [ -r "$E" ]; then
+	t=$(hexdump -v -e '1/1 "%02x"' "$E")
+	[ -n "$t" ] && [ "$t" != 0000000000000000 ] && date -u -s "@$((0x$t))" >/dev/null 2>&1
+fi
 printf '\033[2J\033[H\033[?25l'
 
 # ---- internal storage stays read-only --------------------------------------
@@ -90,6 +99,45 @@ EOF
 usb_up
 USB=$?
 
+# ---- postmarketOS from the microSD ---------------------------------------------
+# Root = /starbite-linux.img (ext4) on the card's exFAT, loop-mounted. The exFAT
+# mount moves into the new root (/media/starbite-sd): it backs the image and
+# must stay mounted. Vol down held here = stay in this bring-up shell.
+ROOTIMG=starbite-linux.img
+boot_sd() {
+	dat=$(devmem 0x14050024 32)                     # GPA0 DAT, Vol down = bit 4, active low
+	[ $((dat & 0x10)) -eq 0 ] && return 10
+	i=0
+	while [ ! -b /dev/mmcblk0p1 ] && [ $i -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
+	[ -b /dev/mmcblk0p1 ] || return 11
+	mkdir -p /sd /newroot
+	mount -t exfat -o rw,noatime /dev/mmcblk0p1 /sd || return 12
+	if [ ! -f /sd/$ROOTIMG ]; then umount /sd; return 13; fi
+	losetup /dev/loop0 /sd/$ROOTIMG || { umount /sd; return 14; }
+	if ! mount -t ext4 -o rw,noatime /dev/loop0 /newroot; then
+		losetup -d /dev/loop0; umount /sd; return 15
+	fi
+	if [ ! -x /newroot/sbin/init ] && [ ! -L /newroot/sbin/init ]; then
+		umount /newroot; losetup -d /dev/loop0; umount /sd; return 16
+	fi
+	mkdir -p /newroot/media/starbite-sd 2>/dev/null
+	# Starbite owns the USB gadget (ECM + ACM, 172.16.42.1; postmarketOS's
+	# unudhcpd.usb0 serves the Mac): usb-signaller would tear it down.
+	rm -f /newroot/etc/runlevels/default/usb-signaller
+	mount --move /sd /newroot/media/starbite-sd || return 17
+	printf '\033[2J\033[H'
+	echo "  PROJECT STARBITE"
+	echo "  starting postmarketOS from the microSD ..."
+	killall telnetd 2>/dev/null                     # udhcpd keeps serving the Mac
+	umount /tmp /run 2>/dev/null
+	mount --move /dev /newroot/dev
+	mount --move /proc /newroot/proc
+	mount --move /sys /newroot/sys
+	exec switch_root /newroot /sbin/init
+}
+boot_sd
+SD=$?
+
 # ---- report -----------------------------------------------------------------
 val() { [ -r "$1" ] && cat "$1" 2>/dev/null || echo "-"; }
 report() {
@@ -120,6 +168,13 @@ report() {
 	1) echo "  USB            no configfs gadget support" ;;
 	2) echo "  USB            no device controller (UDC)" ;;
 	*) echo "  USB            gadget setup failed ($USB)" ;;
+	esac
+	echo ""
+	case $SD in
+	10) echo "  postmarketOS    skipped (Vol down held)" ;;
+	11) echo "  postmarketOS    no microSD card" ;;
+	13) echo "  postmarketOS    no $ROOTIMG on the card" ;;
+	*) echo "  postmarketOS    could not start ($SD)" ;;
 	esac
 	echo ""
 	echo "  Hold Power + Vol down to leave."
