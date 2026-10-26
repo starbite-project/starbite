@@ -944,3 +944,5 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   the src36 shim (RWD1 commit): build/woa/starbite-uefi-src37.bin (sha b67c41de...), BOOT =
   out/xnu-boot-src37.img (sha 681b25c2...), flashed. Fallback: out/xnu-boot-src36.img. Setup is finished, so a
   failed test boot no longer poisons the install. Expect ~3.4 GiB in Windows (Task Manager / witness).
+- 2026-10-26 22:20: **src37 (RAM stage 3): Windows boots, Task Manager reports 3.4 GB** (was 1.4 GB). The 2 GiB
+  high bank works as boot-services data like the low banks. BOOT stays src37.
