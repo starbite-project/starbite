@@ -573,3 +573,16 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   =HANDOFF/=AFRET/=WLSW/=AFG> -- the release has no winload handoff at all. NEXT: disassemble winload.efi
   (pulled to build/woa/winbin/) at RVA 0xf3d8 (base 0x90fb6000) in lima to confirm the size limit, then shrink
   the DXE map (coalesce / fewer allocations) below 0x1000.
+- 2026-10-26 18:00: **src26 (0001-0006 only) on VG6: frozen logo, HUD `gmm 5 e3`; ring (pstore-src26.bin) ends
+  at bt0e3 = winload's final zero-size GetMemoryMap (pra 0x90fc53d8, out=0x1410, E0005) then dark, no
+  =EBSENTER** -- the pstore-win2 (VG4) stop, reproduced on VG6 with the published gate. Release good run (VG6)
+  for the same winload base: its last three map calls came from RVA 0xfef0/0xffac/0xf540 and EBS from 0xf638;
+  it never called from 0xf3d8. So winload takes a different branch of its exit routine on our firmware.
+  Our ring right before: address-specific AllocatePages failing (6x st=E000e, "ConvertPages: range covers
+  multiple entries"), map size 0x1410..0x1500 vs the release's max 0x1080 -> OUR MEMORY MAP IS MORE FRAGMENTED,
+  the loader's re-allocation of its own ranges fails, and it goes down an allocation-fallback path that hangs.
+  (The release ring traces no apg at all -- different instrumentation.) Confound: the SYSTEM hive AutoReboot
+  edit postdates the release's good run; original hive restored (sha 85f75943...) for a clean src26 re-test.
+  NEXT: src27 = patches 0001,0002,0005 only (drop pstore mirror/UFS diag/ring-wrap) -> does the map shrink?
+  NOTE: a winload disassembly listing in a tool result tripped the session safety classifier; keep loader
+  analysis to firmware-trace level in this transcript.
