@@ -1,0 +1,38 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c	2026-10-26 09:39:41
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c	2026-10-26 09:40:02
+@@ -2537,6 +2537,18 @@
+   mDone = TRUE;
+ 
+   //
++  // Starbite W5 try 14 (src25): the ext55-62 hyp self-tests below WRITE TCR_EL1/TTBR1_EL1
++  // (EPD1=0, IPS=48, AS=1, A1=1, a live 16-bit ASID) and issue tlbi in winload's LIVE pre-EBS
++  // handoff, then restore. The woa author's 2026-08-08 reliability note warns this exact
++  // "writing TTBRs underneath a running winload" makes boot intermittent -- "roughly half of all
++  // boots stop at the Windows logo before the kernel starts" -- which is our exact symptom
++  // (frozen logo, =AFRET then dark, =EBSENTER never reached in any boot). Gate the whole battery
++  // OFF to test a MINIMAL handoff (ntos CNTFRQ patch + the winload switch tlbi NOP only).
++  //
++  STATIC BOOLEAN  mStarbiteHypProbe = FALSE;
++
++  if (mStarbiteHypProbe) {
++  //
+   // ---- EL1 TLBI SELF-TEST (ext#6) ------------------------------------------------
+   // We run at EL1 (measured: =VBAR0 el=04). CORE QUESTION: does the Samsung uH/RKP hyp
+   // @EL2 trap-and-HANG our EL1 TLBI (HCR_EL2.TTLB), or does it emulate+return? This runs
+@@ -2726,6 +2738,7 @@
+   BdsPramStr ("\n=BC0");
+   __asm__ __volatile__ ("dsb ish\n\ttlbi vmalle1is\n\tdsb ish\n\tisb" ::: "memory");
+   BdsPramStr ("=BC1");
++  }  // if (mStarbiteHypProbe) -- src25: hyp self-tests gated off (see note at mDone)
+ 
+   //
+   // PASSTHROUGH TRACER (the CNTVCT->CNTPCT patch is REMOVED - it broke winload BEFORE
+@@ -2812,7 +2825,7 @@
+         // faulted at/before the switch. This is a one-shot diagnostic: it does NOT boot Windows
+         // (the leaf halts). Set FALSE to restore the try-11 =WLNOP/=WLMON boot path.
+         //
+-        STATIC CONST BOOLEAN  mStarbitePaintDiag = TRUE;
++        STATIC CONST BOOLEAN  mStarbitePaintDiag = FALSE;  // src25: back to the NOP boot path
+ 
+         if (mStarbitePaintDiag) {
+           STATIC CONST UINT32  Paint[9] = {

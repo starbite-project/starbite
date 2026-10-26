@@ -489,3 +489,14 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   =EBSENTER / =EBSOK (or the screen advances past the frozen logo) => the self-tests were the wall, breakthrough;
   if it still hangs at =AFRET => try a pure passthrough (NOP also off) next. BOOT = out/xnu-boot-src24.img
   (diagnostic).
+- 2026-10-26 09:50: **W5 try 14 (src25) RESULT -- minimal handoff (hyp self-tests gated off, NOP boot path):
+  still frozen at the Windows logo**; on-screen HUD last line `locp 000000e4 0000047a 00000e1b` (same event 0xe4
+  locp that precedes =WLSW in the ring; the HUD is simply not redrawn after the handoff). So the self-tests were
+  NOT the wall either. STEP BACK after tries 8-14: the wall has not moved once; every try only ruled out a
+  candidate. Firm facts: winload has never reached =EBSENTER on this unit in any config. woa's own
+  docs/installer/validation.md: UEFI images are MATCHED per Windows build; "other builds get the nearest one and
+  may stop at the Samsung logo" -- our exact symptom -- and try 9 showed the ref/ source's winload patch sites
+  are for a different winload build than ours (22621.7582). Also woa is validated on SM-G965F (S9+) only.
+  Untested since Windows was installed: the v0.1.0 RELEASE UEFI built for exactly 22621.7582
+  (build/woa/uefi-22621.7582.bin) against the installed Windows. That one boot discriminates "our source build
+  doesn't match the Windows build" from "S9 hardware/S9+-only". BOOT = out/xnu-boot-src25.img.
