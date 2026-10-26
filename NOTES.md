@@ -1086,3 +1086,17 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   bring-up test, brightness. Build: -fno-tree-switch-conversion added (GCC turned string switches into
   pointer tables = ABS64). Menu: hint sprite (item 7, tap = Engineer), card y 1872, screen save 0x94000000.
   BOOT flashed: out/xnu-boot-em1.img (sha adf9b527...).
+- 2026-10-27: **EngineerMode 1.1**. SoC and CPU page reset the phone: the loader runs at EL1 with S-Boot's
+  VBAR, so any trapped system register read (ID/cache ID regs, likely HCR_EL2.TID2/TID3 from a hypervisor)
+  went to S-Boot's vectors and reset. EngineerMode now installs its own table (em_vec.S em_vectors: sync =
+  record ESR/ELR/FAR in em_fault + skip the instruction; SError counted) and restores S-Boot's VBAR on exit;
+  SAFE_MRS / probe32 show "trapped, ESR ..." instead. Register peek reads through probe32 (*FAULT** words).
+  Core map corrected: A55 MPIDR 0x81000N00 (MT, Aff1 = core), PSCI targets 1..3; M3 PSCI 0x100..0x103.
+  New: core bring-up test (PSCI CPU_ON -> em_core_entry records MPIDR/EL per Aff2*4+Aff1 slot -> CPU_OFF;
+  parked cores offer a reboot), UFS from the loader (port of herolte_ufs.c, read only: our list at
+  0x96000000, AHIT 0, W-LUN TUR/SSU, INQUIRY, QUERY READ DESCRIPTOR device/string/geometry/unit/health,
+  READ(10)), live GPT partitions, 16 MiB speed test (4 KiB commands, then 16 x 16-byte PRDT with vs_hci
+  set as iOS does, verified first, registers restored), sector viewer (hex + ASCII, +-1/+-256, jump to
+  partition). Boot menu: hold Vol+ and Vol- 0.7 s = power off (hw_power_off: PS_HOLD, a cable reboots),
+  hint sprite item 8 next to the Engineer hint (item 7). BOOT flashed: out/xnu-boot-em2.img (sha 5513a9a6...).
+  BOOT partition is 55 MiB and this image is 53.9 MB: further OSes must load from storage.

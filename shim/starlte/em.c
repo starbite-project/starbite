@@ -780,38 +780,89 @@ static void fill_device_info(void)
     kv_add("EngineerMode", "1.0");
 }
 
+/* ---- trapped reads (em_vec.S) ---------------------------------------------- */
+
+extern char em_vectors[], em_core_entry[];
+extern uint64_t em_fault[6], em_core_box[32];
+#define EMF ((volatile uint64_t *)em_fault)
+
+/* System register read that survives a trap: 1 = read, 0 = trapped. */
+#define SAFE_MRS(reg, out)                                                  \
+    ({                                                                      \
+        uint64_t _c = EMF[3], _v;                                           \
+        __asm__ volatile("mov %0, xzr\n\tmrs %0, " #reg : "=&r"(_v) : : "memory"); \
+        *(out) = _v;                                                        \
+        EMF[3] == _c;                                                       \
+    })
+
+/* 32-bit load that survives a synchronous abort: 1 = read, 0 = faulted. */
+static int probe32(uintptr_t a, uint32_t *v)
+{
+    uint64_t c = EMF[3];
+    uint32_t x;
+    __asm__ volatile("mov %w0, wzr\n\tldr %w0, [%1]\n\tdsb sy" : "=&r"(x) : "r"(a) : "memory");
+    *v = x;
+    return EMF[3] == c;
+}
+
+static void kv_trap(const char *k)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "trapped, ESR ");
+    ub_hex(&u, EMF[0], 8);
+    kv_addc(k, u.b, UI_ORANGE);
+}
+
+static void kv_sysreg(const char *k, int ok, uint64_t v)
+{
+    if (ok)
+        kv_hex(k, v, 16);
+    else
+        kv_trap(k);
+}
+
 /* CHIPID block 0x10000000: PRO_ID at +0x0, unique ID at +0x14 / +0x18. */
 static void fill_soc(void)
 {
-    uint64_t midr, mpidr, cel, isar0, pfr0, mmfr0, ctr, clidr, cntfrq;
+    uint64_t midr, mpidr, cel, isar0 = 0, pfr0 = 0, mmfr0 = 0, ctr = 0, clidr = 0, cntfrq;
     __asm__ volatile("mrs %0, midr_el1" : "=r"(midr));
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
     __asm__ volatile("mrs %0, CurrentEL" : "=r"(cel));
-    __asm__ volatile("mrs %0, id_aa64isar0_el1" : "=r"(isar0));
-    __asm__ volatile("mrs %0, id_aa64pfr0_el1" : "=r"(pfr0));
-    __asm__ volatile("mrs %0, id_aa64mmfr0_el1" : "=r"(mmfr0));
-    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
-    __asm__ volatile("mrs %0, clidr_el1" : "=r"(clidr));
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(cntfrq));
-    uint32_t pro = *(volatile uint32_t *)0x10000000UL;
-    uint32_t u0 = *(volatile uint32_t *)0x10000014UL, u1 = *(volatile uint32_t *)0x10000018UL;
+    int ok_isar = SAFE_MRS(id_aa64isar0_el1, &isar0);
+    int ok_pfr = SAFE_MRS(id_aa64pfr0_el1, &pfr0);
+    int ok_mmfr = SAFE_MRS(id_aa64mmfr0_el1, &mmfr0);
+    int ok_ctr = SAFE_MRS(ctr_el0, &ctr);
+    int ok_clidr = SAFE_MRS(clidr_el1, &clidr);
+    uint32_t pro = 0, u0 = 0, u1 = 0;
+    int ok_pro = probe32(0x10000000UL, &pro);
+    int ok_uid = probe32(0x10000014UL, &u0) && probe32(0x10000018UL, &u1);
     struct ub u;
 
     kv_hdr("SYSTEM ON CHIP");
     kv_add("SoC", "Samsung Exynos 9810 (10 nm LPP)");
-    kv_hex("CHIPID PRO_ID", pro, 8);
-    ub_init(&u);
-    ub_s(&u, "product ");
-    ub_hexn(&u, pro >> 12, 5);
-    ub_s(&u, ", rev ");
-    ub_dec(&u, (pro >> 4) & 0xfU);
-    ub_c(&u, '.');
-    ub_dec(&u, pro & 0xfU);
-    kv_add("Decoded", u.b);
-    ub_init(&u);
-    ub_hexn(&u, u1 & 0xffffU, 4);
-    ub_hexn(&u, u0, 8);
-    kv_add("Unique ID", u.b);
+    if (ok_pro) {
+        kv_hex("CHIPID PRO_ID", pro, 8);
+        ub_init(&u);
+        ub_s(&u, "product ");
+        ub_hexn(&u, pro >> 12, 5);
+        ub_s(&u, ", rev ");
+        ub_dec(&u, (pro >> 4) & 0xfU);
+        ub_c(&u, '.');
+        ub_dec(&u, pro & 0xfU);
+        kv_add("Decoded", u.b);
+    } else {
+        kv_trap("CHIPID PRO_ID");
+    }
+    if (ok_uid) {
+        ub_init(&u);
+        ub_hexn(&u, u1 & 0xffffU, 4);
+        ub_hexn(&u, u0, 8);
+        kv_add("Unique ID", u.b);
+    } else {
+        kv_trap("Unique ID");
+    }
     kv_add("CPU cores", "4x Mongoose M3 + 4x Cortex-A55");
     kv_add("GPU", "Mali-G72 MP18");
 
@@ -832,48 +883,75 @@ static void fill_soc(void)
     kv_hex("MIDR_EL1", midr, 8);
     kv_hex("MPIDR_EL1", mpidr, 8);
     kv_dec("Exception level", (cel >> 2) & 3U, 0);
-    kv_hex("ID_AA64ISAR0", isar0, 16);
-    ub_init(&u);
-    if ((isar0 >> 4) & 0xfU)
-        ub_s(&u, "AES ");
-    if ((isar0 >> 8) & 0xfU)
-        ub_s(&u, "SHA1 ");
-    if ((isar0 >> 12) & 0xfU)
-        ub_s(&u, "SHA2 ");
-    if ((isar0 >> 16) & 0xfU)
-        ub_s(&u, "CRC32 ");
-    if ((isar0 >> 20) & 0xfU)
-        ub_s(&u, "LSE ");
-    if ((isar0 >> 28) & 0xfU)
-        ub_s(&u, "RDM ");
-    if ((isar0 >> 44) & 0xfU)
-        ub_s(&u, "DotProd");
-    kv_add("ISA extensions", u.b);
-    ub_init(&u);
-    ub_s(&u, (((pfr0 >> 8) & 0xfU) ? "EL2 " : "no-EL2 "));
-    ub_s(&u, (((pfr0 >> 12) & 0xfU) ? "EL3 " : ""));
-    ub_s(&u, (((pfr0 >> 16) & 0xfU) == 0xf) ? "no-FP" : "FP");
-    ub_s(&u, (((pfr0 >> 20) & 0xfU) == 0xf) ? " no-SIMD" : " SIMD");
-    kv_add("Features", u.b);
-    static const unsigned char pa[7] = { 32, 36, 40, 42, 44, 48, 52 };
-    unsigned par = (unsigned)mmfr0 & 0xfU;
-    kv_dec("Physical address bits", par < 7 ? pa[par] : 0, 0);
-    kv_dec("D-cache line", 4U << ((ctr >> 16) & 0xfU), " bytes");
-    for (unsigned lvl = 0; lvl < 3; ++lvl) {
+    kv_dec("CNTFRQ_EL0", cntfrq, cntfrq ? " Hz" : " (S-Boot left 0; 26 MHz)");
+
+    kv_hdr("ID REGISTERS");
+    kv_sysreg("ID_AA64ISAR0_EL1", ok_isar, isar0);
+    if (ok_isar) {
+        ub_init(&u);
+        if ((isar0 >> 4) & 0xfU)
+            ub_s(&u, "AES ");
+        if ((isar0 >> 8) & 0xfU)
+            ub_s(&u, "SHA1 ");
+        if ((isar0 >> 12) & 0xfU)
+            ub_s(&u, "SHA2 ");
+        if ((isar0 >> 16) & 0xfU)
+            ub_s(&u, "CRC32 ");
+        if ((isar0 >> 20) & 0xfU)
+            ub_s(&u, "LSE ");
+        if ((isar0 >> 28) & 0xfU)
+            ub_s(&u, "RDM ");
+        if ((isar0 >> 44) & 0xfU)
+            ub_s(&u, "DotProd");
+        kv_add("ISA extensions", u.b);
+    }
+    kv_sysreg("ID_AA64PFR0_EL1", ok_pfr, pfr0);
+    if (ok_pfr) {
+        ub_init(&u);
+        ub_s(&u, (((pfr0 >> 8) & 0xfU) ? "EL2 " : "no-EL2 "));
+        ub_s(&u, (((pfr0 >> 12) & 0xfU) ? "EL3 " : ""));
+        ub_s(&u, (((pfr0 >> 16) & 0xfU) == 0xf) ? "no-FP" : "FP");
+        ub_s(&u, (((pfr0 >> 20) & 0xfU) == 0xf) ? " no-SIMD" : " SIMD");
+        kv_add("Features", u.b);
+    }
+    kv_sysreg("ID_AA64MMFR0_EL1", ok_mmfr, mmfr0);
+    if (ok_mmfr) {
+        static const unsigned char pa[7] = { 32, 36, 40, 42, 44, 48, 52 };
+        unsigned par = (unsigned)mmfr0 & 0xfU;
+        kv_dec("Physical address bits", par < 7 ? pa[par] : 0, 0);
+    }
+    kv_sysreg("CTR_EL0", ok_ctr, ctr);
+    if (ok_ctr)
+        kv_dec("D-cache line", 4U << ((ctr >> 16) & 0xfU), " bytes");
+    kv_sysreg("CLIDR_EL1", ok_clidr, clidr);
+
+    kv_hdr("CACHES");
+    for (unsigned lvl = 0; ok_clidr && lvl < 3; ++lvl) {
         unsigned ty = (unsigned)(clidr >> (3 * lvl)) & 7U;
         if (!ty)
             break;
-        uint64_t sel = (uint64_t)lvl << 1, ccs;
-        __asm__ volatile("msr csselr_el1, %1; isb; mrs %0, ccsidr_el1" : "=r"(ccs) : "r"(sel));
+        uint64_t sel = (uint64_t)lvl << 1, ccs = 0, c = EMF[3];
+        __asm__ volatile("mov %0, xzr\n\tmsr csselr_el1, %1\n\tisb\n\tmrs %0, ccsidr_el1"
+                         : "=&r"(ccs) : "r"(sel) : "memory");
+        const char *name = lvl == 0 ? "L1 D-cache" : lvl == 1 ? "L2 cache" : "L3 cache";
+        if (EMF[3] != c) {
+            kv_trap(name);
+            continue;
+        }
         uint64_t line = 16ULL << (ccs & 7U), ways = ((ccs >> 3) & 0x3ffU) + 1, sets = ((ccs >> 13) & 0x7fffU) + 1;
         ub_init(&u);
         ub_size(&u, line * ways * sets);
         ub_s(&u, ", ");
         ub_dec(&u, ways);
         ub_s(&u, "-way");
-        kv_add(lvl == 0 ? "L1 D-cache" : lvl == 1 ? "L2 cache" : "L3 cache", u.b);
+        kv_add(name, u.b);
     }
-    kv_dec("CNTFRQ_EL0", cntfrq, cntfrq ? " Hz" : " (S-Boot left 0; 26 MHz)");
+    if (EMF[3]) {
+        kv_hdr("TRAPS (CAUGHT BY ENGINEERMODE)");
+        kv_dec("Count", EMF[3], 0);
+        kv_hex("Last ESR", EMF[0], 8);
+        kv_hex("Last ELR", EMF[1], 16);
+    }
 }
 
 static void fill_memory(void)
@@ -900,6 +978,7 @@ static void fill_memory(void)
     kv_add("RAM test area", "0x092000000 + 16 MiB");
     kv_add("Screen save", "0x094000000 + 17 MiB");
     kv_add("Windows UEFI (FD)", "0x090000000 + 7 MiB");
+    kv_add("UFS DMA (EngineerMode)", "0x096000000 + 1 MiB");
     if (E.in) {
         ub_init(&u);
         ub_hex(&u, E.in->phys_base, 9);
@@ -980,28 +1059,27 @@ static void fill_cpu(void)
     kv_hdr("CLUSTERS");
     kv_add("Cluster 0", "4x Cortex-A55, up to 1.95 GHz");
     kv_add("Cluster 1", "4x Mongoose M3, up to 2.7 GHz");
-    kv_hdr("CORE MAP");
+    kv_hdr("CORE MAP (MPIDR: MT, AFF2 CLUSTER, AFF1 CORE)");
     for (unsigned c = 0; c < 8; ++c) {
         struct ub k, v;
+        uint64_t aff = 0x81000000ULL | (c < 4 ? 0 : 0x10000U) | ((uint64_t)(c & 3U) << 8);
         ub_init(&k);
         ub_s(&k, "cpu");
         ub_dec(&k, c);
         ub_s(&k, c < 4 ? "  A55" : "  M3");
         ub_init(&v);
-        ub_s(&v, "MPIDR ");
-        uint64_t aff = c < 4 ? c : 0x100U + (c - 4U);
-        ub_hex(&v, aff, 4);
-        if ((mpidr & 0xffffU) == aff)
-            ub_s(&v, "  running here");
-        else
-            ub_s(&v, "  parked");
-        kv_addc(k.b, v.b, (mpidr & 0xffffU) == aff ? UI_GREEN : UI_TEXT2);
+        ub_hex(&v, aff, 8);
+        ub_s(&v, c < 4 ? "  PSCI " : "  PSCI ");
+        ub_hex(&v, c < 4 ? c : 0x100U + (c - 4U), 3);
+        int here = (mpidr & 0xffffffU) == (aff & 0xffffffU);
+        ub_s(&v, here ? "  running here" : "");
+        kv_addc(k.b, v.b, here ? UI_GREEN : UI_TEXT2);
     }
     kv_hdr("NOTES");
     kv_add("Bootloader", "single core, MMU off");
-    kv_add("iOS", "cpu0-3 (A55) via PSCI 0.1");
+    kv_add("iOS", "cpu0-3 (A55) via PSCI CPU_ON 1-3");
     kv_add("Windows", "4 cores (numproc 4)");
-    kv_add("Mongoose M3", "not brought up yet");
+    kv_add("M3 MPIDR", "expected value; see the bring-up test");
 }
 
 /* Fullscreen colour fields; tap or Power: next, Bixby: leave. */
@@ -1991,20 +2069,6 @@ static void fill_ufs(void)
     kv_add("Device descriptor", "coming: needs a UFS driver here");
 }
 
-static void fill_partitions(void)
-{
-    kv_hdr("LU0 GPT (4 KiB BLOCKS, AS SET UP BY STARBITE)");
-    kv_add("sda3  EFS", "4096 .. 9215  (IMEI, RF cal)");
-    kv_add("sda10 BOOT", "19458 .. 33537  (this loader)");
-    kv_add("sda11 RECOVERY", "33538 .. 50175  (TWRP)");
-    kv_add("sda18 SYSTEM", "68736 .. 1313919");
-    kv_add("sda19 VENDOR", "1313920 .. 1499519");
-    kv_add("sda25 USERDATA", "1698432 .. 6613759  (iOS + Kiosk)");
-    kv_add("sda26 WINESP", "6613760 .. 6744831  (FAT32)");
-    kv_add("sda27 WINDOWS", "6744832 .. 13518591  (NTFS)");
-    kv_add("sda28 A16DATA", "13518592 .. 15615994  (Android)");
-    kv_add("Disk", "15616000 blocks = 59.6 GiB");
-}
 
 /* ======================================================================= */
 /* OS                                                                         */
@@ -2308,19 +2372,846 @@ static void fill_regs(void)
 /* OTHERS                                                                     */
 /* ======================================================================= */
 
+/* ---- core bring-up test (PSCI 0.1 via SMC, starlte DTB /psci) ------------ */
+
+#define BOX ((volatile uint64_t *)em_core_box)
+
+static int64_t psci_call(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
+{
+    register uint64_t x0 __asm__("x0") = fn;
+    register uint64_t x1 __asm__("x1") = a1;
+    register uint64_t x2 __asm__("x2") = a2;
+    register uint64_t x3 __asm__("x3") = a3;
+    __asm__ volatile("smc #0"
+                     : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
+                     :
+                     : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+                       "x16", "x17", "memory");
+    return (int64_t)x0;
+}
+
+static struct core_result {
+    int64_t ret;
+    int slot;
+    uint64_t mpidr, el, state;
+    uint32_t ms;
+} cores[7];
+static int cores_done;
+
+/* PSCI targets: A55 cpu1-3 = 1..3 (measured 2026-10-25), M3 = DTB reg 0x100..0x103. */
+static uint64_t core_target(unsigned i)
+{
+    return i < 3 ? i + 1U : 0x100U + (i - 3U);
+}
+
+static const char *psci_err(int64_t r)
+{
+    switch (r) {
+    case 0: return "SUCCESS";
+    case -1: return "NOT_SUPPORTED";
+    case -2: return "INVALID_PARAMETERS";
+    case -3: return "DENIED";
+    case -4: return "ALREADY_ON";
+    case -5: return "ON_PENDING";
+    case -6: return "INTERNAL_FAILURE";
+    case -9: return "INVALID_ADDRESS";
+    default: return "?";
+    }
+}
+
+static void fill_cores(void)
+{
+    struct ub k, v;
+    if (!cores_done) {
+        kv_add("Status", "not run");
+        return;
+    }
+    unsigned up = 0;
+    for (unsigned i = 0; i < 7; ++i)
+        up += cores[i].slot >= 0;
+    ub_init(&v);
+    ub_dec(&v, up + 1U);
+    ub_s(&v, " / 8");
+    kv_big("cores answered (cpu0 = this one)", v.b);
+    kv_hdr("PER CORE: CPU_ON, CHECK-IN, CPU_OFF");
+    kv_addc("cpu0 A55", "boot core, running EngineerMode", UI_GREEN);
+    for (unsigned i = 0; i < 7; ++i) {
+        const struct core_result *c = &cores[i];
+        ub_init(&k);
+        ub_s(&k, "cpu");
+        ub_dec(&k, i + 1U);
+        ub_s(&k, i < 3 ? " A55  PSCI " : " M3  PSCI ");
+        ub_hex(&k, core_target(i), 3);
+        ub_init(&v);
+        if (c->ret) {
+            ub_s(&v, "CPU_ON ");
+            ub_s(&v, psci_err(c->ret));
+            kv_addc(k.b, v.b, UI_RED);
+        } else if (c->slot < 0) {
+            ub_s(&v, "CPU_ON ok, no check-in in 1 s");
+            kv_addc(k.b, v.b, UI_ORANGE);
+        } else {
+            ub_s(&v, "up in ");
+            ub_dec(&v, c->ms);
+            ub_s(&v, " ms, MPIDR ");
+            ub_hex(&v, c->mpidr, 8);
+            ub_s(&v, ", EL");
+            ub_dec(&v, (c->el >> 2) & 3U);
+            ub_s(&v, c->state == 2 ? ", PARKED" : ", off again");
+            kv_addc(k.b, v.b, c->state == 2 ? UI_ORANGE : UI_GREEN);
+        }
+    }
+    kv_hdr("NOTES");
+    kv_add("Entry", "em_vec.S em_core_entry (MMU off)");
+    kv_add("Parked core", "CPU_OFF returned: reboot before an OS");
+}
+
+static void run_cores(void)
+{
+    for (unsigned i = 0; i < 32; ++i)
+        BOX[i] = 0;
+    __asm__ volatile("dsb sy" : : : "memory");
+    draw_status();
+    draw_bar("Core bring-up test", 1);
+    draw_nav();
+    for (unsigned i = 0; i < 7; ++i) {
+        struct core_result *c = &cores[i];
+        uint64_t before[8];
+        for (unsigned s = 0; s < 8; ++s)
+            before[s] = BOX[s * 4];
+        nkv = 0;
+        kv_hdr("RUNNING");
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "CPU_ON ");
+        ub_hex(&u, core_target(i), 3);
+        kv_add("Starting", u.b);
+        draw_kv(PAGE_Y0, NAV_Y, 0);
+        c->slot = -1;
+        c->state = 0;
+        uint64_t t0 = hw_ticks();
+        c->ret = psci_call(0xc4000003U, core_target(i), (uint64_t)(uintptr_t)em_core_entry, 0);
+        if (c->ret)
+            continue;
+        for (unsigned ms = 0; ms < 1000 && c->slot < 0; ms += 1) {
+            for (unsigned s = 0; s < 8; ++s)
+                if (BOX[s * 4] != before[s]) {
+                    c->slot = (int)s;
+                    break;
+                }
+            if (c->slot < 0)
+                hw_wait_ms(1);
+        }
+        c->ms = (uint32_t)((hw_ticks() - t0) * 1000U / hw_freq());
+        if (c->slot >= 0) {
+            hw_wait_ms(50);
+            c->mpidr = BOX[c->slot * 4 + 1];
+            c->el = BOX[c->slot * 4 + 2];
+            c->state = BOX[c->slot * 4];
+        }
+    }
+    cores_done = 1;
+    info_screen("Core bring-up test", fill_cores, 0);
+    int parked = 0;
+    for (unsigned i = 0; i < 7; ++i)
+        parked |= cores[i].slot >= 0 && cores[i].state == 2;
+    if (parked && !E.home && dialog("Core parked", "A core did not power off.", "Reboot before starting an OS.", "REBOOT"))
+        hw_reboot(INFORM_NORMAL);
+}
+
+/* ---- UFS: commands from the loader (port of herolte_ufs.c, read only) ------
+ * S-Boot leaves the host running with its own request list. Like the iOS
+ * driver: polled, auto-hibernate off, our list in slot 0, device woken with
+ * TEST UNIT READY / START STOP UNIT on the device W-LUN. MMU off = no cache
+ * maintenance. Only READ(10), INQUIRY, TEST UNIT READY, START STOP UNIT and
+ * QUERY READ DESCRIPTOR are ever sent: nothing here writes the flash.
+ * DMA memory at 0x96000000 (free at menu time, above the screen save).
+ */
+#define UFS 0x11120000UL
+#define UFS_NEXUS (UFS + 0x1140)
+#define U_DMA 0x96000000UL
+#define U_UTRL (U_DMA)
+#define U_UCD (U_DMA + 0x1000)
+#define U_RESP (U_UCD + 512)
+#define U_PRDT (U_UCD + 1024)
+#define U_BUF (U_DMA + 0x4000)
+#define U_BUF_SIZE (1U << 20)
+
+static int ufs_state;           /* 0 untouched, 1 ready, -1 failed */
+static int ufs_why;             /* failure step */
+static uint8_t ufs_tag, ufs_lun;
+static unsigned ufs_multi;      /* blocks per command: 1, or 16 with vs_hci set */
+static uint32_t ufs_ocs, ufs_resp, ufs_status, ufs_qresp;
+
+static void u8w(uintptr_t a, uint8_t v)
+{
+    *(volatile uint8_t *)a = v;
+}
+
+static uint8_t u8r(uintptr_t a)
+{
+    return *(volatile uint8_t *)a;
+}
+
+static void u_zero(uintptr_t a, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i += 8)
+        *(volatile uint64_t *)(a + i) = 0;
+}
+
+/* Run the UPIU at U_UCD in slot 0. dd: 0 none, 2 device to memory; len bytes
+ * into U_BUF in 4 KiB PRDT entries (16 bytes each). 0 on success. */
+static int ufs_ring(unsigned dd, uint32_t len, int scsi)
+{
+    volatile uint32_t *d = (volatile uint32_t *)U_UTRL;
+    d[0] = (1U << 28) | (dd << 25) | (1U << 24);
+    d[1] = 0;
+    d[2] = 0x0f;
+    d[3] = 0;
+    d[4] = (uint32_t)U_UCD;
+    d[5] = 0;
+    d[6] = 512U << 16 | 512U;
+    d[7] = 0;
+    if (len) {
+        uint32_t n = 0;
+        for (uint32_t done = 0; done < len; done += 4096U, ++n) {
+            volatile uint32_t *e = (volatile uint32_t *)(U_PRDT + 16U * n);
+            uint32_t chunk = len - done < 4096U ? len - done : 4096U;
+            e[0] = (uint32_t)(U_BUF + done);
+            e[1] = 0;
+            e[2] = 0;
+            e[3] = (chunk - 1U) & 0x3ffffU;
+        }
+        d[7] = 1024U << 16 | (n * 16U);
+    }
+    __asm__ volatile("dsb sy" : : : "memory");
+    wr(UFS_NEXUS, scsi ? rd(UFS_NEXUS) | 1U : rd(UFS_NEXUS) & ~1U);
+    wr(UFS + 0x58, 1);
+    uint64_t t0 = hw_ticks(), lim = hw_freq() * 2U;
+    while (rd(UFS + 0x58) & 1U) {
+        if (hw_ticks() - t0 > lim) {
+            wr(UFS + 0x5c, 1U);
+            ufs_ocs = 0xff;
+            return -1;
+        }
+    }
+    __asm__ volatile("dsb sy" : : : "memory");
+    wr(UFS + 0x20, rd(UFS + 0x20));
+    ufs_ocs = d[2] & 0xffU;
+    ufs_resp = u8r(U_RESP);
+    ufs_status = u8r(U_RESP + 7);
+    ufs_qresp = u8r(U_RESP + 6);
+    return ufs_ocs ? -2 : 0;
+}
+
+/* SCSI command to ufs_lun; len bytes in (dd 2) into U_BUF. */
+static int ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len)
+{
+    u_zero(U_UCD, 1024);
+    u8w(U_UCD + 0, 0x01);
+    u8w(U_UCD + 1, len ? 0x40 : 0x00);
+    u8w(U_UCD + 2, ufs_lun);
+    u8w(U_UCD + 3, ++ufs_tag);
+    u8w(U_UCD + 12, (uint8_t)(len >> 24));
+    u8w(U_UCD + 13, (uint8_t)(len >> 16));
+    u8w(U_UCD + 14, (uint8_t)(len >> 8));
+    u8w(U_UCD + 15, (uint8_t)len);
+    for (unsigned i = 0; i < cdb_len; ++i)
+        u8w(U_UCD + 16 + i, cdb[i]);
+    int r = ufs_ring(len ? 2U : 0U, len, 1);
+    if (r)
+        return r;
+    return (ufs_resp != 0x21 || ufs_qresp || ufs_status) ? -3 : 0;
+}
+
+/* QUERY REQUEST: READ DESCRIPTOR idn/index; descriptor bytes copied to out. */
+static int ufs_desc(uint8_t idn, uint8_t index, uint8_t *out, unsigned cap)
+{
+    u_zero(U_UCD, 1024);
+    u8w(U_UCD + 0, 0x16);
+    u8w(U_UCD + 3, ++ufs_tag);
+    u8w(U_UCD + 5, 0x01);           /* standard read request */
+    u8w(U_UCD + 12, 0x01);          /* READ DESCRIPTOR */
+    u8w(U_UCD + 13, idn);
+    u8w(U_UCD + 14, index);
+    u8w(U_UCD + 18, 0);
+    u8w(U_UCD + 19, 0xff);          /* up to 255 bytes */
+    int r = ufs_ring(0, 0, 0);
+    if (r)
+        return r;
+    if (ufs_resp != 0x36 || ufs_qresp)
+        return -3;
+    unsigned n = (unsigned)u8r(U_RESP + 10) << 8 | u8r(U_RESP + 11);
+    if (n > cap)
+        n = cap;
+    for (unsigned i = 0; i < cap; ++i)
+        out[i] = i < n ? u8r(U_RESP + 32 + i) : 0;
+    return (int)n;
+}
+
+static int ufs_read(uint64_t lba, uint32_t count)
+{
+    uint8_t cdb[10] = { 0x28, 0, (uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8),
+                        (uint8_t)lba, 0, (uint8_t)(count >> 8), (uint8_t)count, 0 };
+    return ufs_scsi(cdb, sizeof(cdb), count * 4096U);
+}
+
+static int ufs_up(void)
+{
+    if (ufs_state)
+        return ufs_state > 0;
+    uint32_t hcs = rd(UFS + 0x30);
+    ufs_state = -1;
+    if (!(hcs & 1U) || !(hcs & 2U)) {
+        ufs_why = 1;
+        return 0;
+    }
+    if (rd(UFS + 0x58)) {
+        ufs_why = 2;
+        return 0;
+    }
+    u_zero(U_DMA, 0x4000);
+    wr(UFS + 0x24, 0);              /* polled */
+    wr(UFS + 0x18, 0);              /* auto-hibernate off (woa Star2LteUfsHcDxe) */
+    wr(UFS + 0x20, rd(UFS + 0x20));
+    wr(UFS + 0x60, 0);
+    wr(UFS + 0x50, (uint32_t)U_UTRL);
+    wr(UFS + 0x54, 0);
+    wr(UFS + 0x60, 1);
+    if (rd(UFS + 0x50) != (uint32_t)U_UTRL || !(rd(UFS + 0x60) & 1U)) {
+        ufs_why = 3;
+        return 0;
+    }
+    static const uint8_t tur[6] = { 0 };
+    static const uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x10, 0 };
+    ufs_lun = 0xd0;                 /* device W-LUN */
+    for (int i = 0; i < 3 && ufs_scsi(tur, 6, 0); ++i)
+        ;
+    for (int i = 0; i < 3 && ufs_scsi(ssu, 6, 0); ++i)
+        ;
+    ufs_lun = 0;
+    int r = -1;
+    for (int i = 0; i < 3 && (r = ufs_scsi(tur, 6, 0)); ++i)
+        ;
+    if (r) {
+        ufs_why = 4;
+        return 0;
+    }
+    ufs_multi = 1;
+    ufs_state = 1;
+    return 1;
+}
+
+static void kv_ufs_fail(void)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, ufs_why == 1 ? "host not ready" : ufs_why == 2 ? "S-Boot request outstanding" :
+             ufs_why == 3 ? "host refused our request list" : "device did not answer");
+    kv_addc("UFS", u.b, UI_RED);
+    ub_init(&u);
+    ub_s(&u, "OCS ");
+    ub_hex(&u, ufs_ocs, 2);
+    ub_s(&u, "  UPIU ");
+    ub_hex(&u, ufs_resp, 2);
+    ub_s(&u, "  status ");
+    ub_hex(&u, ufs_status, 2);
+    kv_add("Last command", u.b);
+}
+
+/* UTF-16BE string descriptor to ASCII; hex if unprintable. */
+static void ufs_string(uint8_t index, struct ub *u)
+{
+    uint8_t d[256];
+    int n = ufs_desc(0x05, index, d, sizeof(d));
+    if (n < 2) {
+        ub_s(u, "?");
+        return;
+    }
+    unsigned len = d[0] < (unsigned)n ? d[0] : (unsigned)n, printable = 1;
+    for (unsigned i = 2; i + 1 < len; i += 2)
+        if (d[i] || d[i + 1] < 32 || d[i + 1] > 126)
+            printable = 0;
+    for (unsigned i = 2; i + 1 < len && u->n < 60; i += 2) {
+        if (printable)
+            ub_c(u, (char)d[i + 1]);
+        else
+            ub_hexn(u, (uint64_t)d[i] << 8 | d[i + 1], 4);
+    }
+    while (printable && u->n && u->b[u->n - 1] == ' ')
+        u->b[--u->n] = 0;
+}
+
+static uint64_t be64(const uint8_t *p)
+{
+    uint64_t v = 0;
+    for (unsigned i = 0; i < 8; ++i)
+        v = v << 8 | p[i];
+    return v;
+}
+
+static const char *life_text(unsigned v)
+{
+    switch (v) {
+    case 0x00: return "not reported";
+    case 0x01: return "0-10 % used";
+    case 0x02: return "10-20 % used";
+    case 0x03: return "20-30 % used";
+    case 0x04: return "30-40 % used";
+    case 0x05: return "40-50 % used";
+    case 0x06: return "50-60 % used";
+    case 0x07: return "60-70 % used";
+    case 0x08: return "70-80 % used";
+    case 0x09: return "80-90 % used";
+    case 0x0a: return "90-100 % used";
+    case 0x0b: return "EXCEEDED rated life";
+    default: return "?";
+    }
+}
+
+static void fill_ufs_dev(void)
+{
+    struct ub u;
+    uint8_t d[256];
+    if (!ufs_up()) {
+        kv_ufs_fail();
+        return;
+    }
+    kv_hdr("SCSI INQUIRY (LU0)");
+    static const uint8_t inq[6] = { 0x12, 0, 0, 0, 36, 0 };
+    if (!ufs_scsi(inq, 6, 36)) {
+        char s[20];
+        for (unsigned i = 0; i < 8; ++i)
+            s[i] = (char)u8r(U_BUF + 8 + i);
+        s[8] = 0;
+        kv_add("Vendor", s);
+        for (unsigned i = 0; i < 16; ++i)
+            s[i] = (char)u8r(U_BUF + 16 + i);
+        s[16] = 0;
+        kv_add("Product", s);
+        for (unsigned i = 0; i < 4; ++i)
+            s[i] = (char)u8r(U_BUF + 32 + i);
+        s[4] = 0;
+        kv_add("Firmware revision", s);
+    } else {
+        kv_ufs_fail();
+    }
+    kv_hdr("DEVICE DESCRIPTOR");
+    if (ufs_desc(0x00, 0, d, sizeof(d)) >= 0x2b) {
+        ub_init(&u);
+        ub_s(&u, "UFS ");
+        ub_dec(&u, d[0x10]);
+        ub_c(&u, '.');
+        ub_dec(&u, d[0x11] >> 4);
+        kv_add("Specification", u.b);
+        uint16_t mid = (uint16_t)(d[0x18] << 8 | d[0x19]);
+        ub_init(&u);
+        ub_hex(&u, mid, 4);
+        ub_s(&u, mid == 0x01ce ? "  Samsung" : mid == 0x0198 ? "  Toshiba" : mid == 0x01ad ? "  SK hynix" :
+                 mid == 0x012c ? "  Micron" : "");
+        kv_add("Manufacturer ID", u.b);
+        ub_init(&u);
+        ufs_string(d[0x15], &u);
+        kv_add("Product name", u.b);
+        ub_init(&u);
+        ufs_string(d[0x2a], &u);
+        kv_add("Product revision", u.b);
+        ub_init(&u);
+        ufs_string(d[0x16], &u);
+        kv_add("Serial", u.b);
+        kv_hex("Manufacture date", (uint64_t)d[0x12] << 8 | d[0x13], 4);
+        kv_dec("Logical units", d[0x06], 0);
+        kv_dec("Queue depth", d[0x21], 0);
+        kv_hex("Device version", (uint64_t)d[0x22] << 8 | d[0x23], 4);
+    } else {
+        kv_ufs_fail();
+    }
+    kv_hdr("GEOMETRY");
+    if (ufs_desc(0x07, 0, d, sizeof(d)) >= 12) {
+        ub_init(&u);
+        ub_size(&u, be64(d + 4) * 512U);
+        kv_add("Raw capacity", u.b);
+    }
+    if (ufs_desc(0x02, 0, d, sizeof(d)) >= 0x13) {
+        ub_init(&u);
+        ub_size(&u, be64(d + 0x0b) << d[0x0a]);
+        ub_s(&u, ", ");
+        ub_dec(&u, 1U << d[0x0a]);
+        ub_s(&u, "-byte blocks");
+        kv_add("LU0", u.b);
+    }
+    kv_hdr("HEALTH (UFS 2.1 DESCRIPTOR 0x09)");
+    if (ufs_desc(0x09, 0, d, sizeof(d)) >= 5) {
+        unsigned eol = d[2];
+        kv_addc("Reserved blocks (pre-EOL)", eol == 1 ? "normal" : eol == 2 ? "WARNING: 80 % consumed" :
+                                             eol == 3 ? "URGENT: 90 % consumed" : "not reported",
+                eol == 1 ? UI_GREEN : eol >= 2 ? UI_RED : UI_TEXT2);
+        kv_addc("Wear, type A (SLC)", life_text(d[3]), d[3] >= 0x09 ? UI_ORANGE : UI_TEXT);
+        kv_addc("Wear, type B (MLC/TLC)", life_text(d[4]), d[4] >= 0x09 ? UI_ORANGE : UI_TEXT);
+    } else {
+        kv_addc("Health", "descriptor not supported", UI_TEXT3);
+    }
+}
+
+/* ---- GPT on LU0 ------------------------------------------------------------- */
+
+#define MAX_GPT 48
+static char gpt_name[MAX_GPT][24];
+static uint64_t gpt_first[MAX_GPT], gpt_last[MAX_GPT];
+static int gpt_n = -1;
+
+static uint64_t le64(uintptr_t p)
+{
+    uint64_t v = 0;
+    for (unsigned i = 8; i; --i)
+        v = v << 8 | u8r(p + i - 1);
+    return v;
+}
+
+static int gpt_load(void)
+{
+    if (gpt_n >= 0)
+        return gpt_n;
+    if (!ufs_up() || ufs_read(1, 1))
+        return -1;
+    if (le64(U_BUF) != 0x5452415020494645ULL)          /* "EFI PART" */
+        return -1;
+    uint64_t ent = le64(U_BUF + 72);
+    uint32_t num = (uint32_t)le64(U_BUF + 80), esz = (uint32_t)(le64(U_BUF + 84) & 0xffffffffU);
+    if (esz != 128 || num > 128)
+        return -1;
+    uint32_t blocks = (num * 128U + 4095U) / 4096U;
+    if (ufs_read(ent, blocks))
+        return -1;
+    gpt_n = 0;
+    for (uint32_t i = 0; i < num && gpt_n < MAX_GPT; ++i) {
+        uintptr_t e = U_BUF + 128U * i;
+        if (!le64(e) && !le64(e + 8))
+            continue;
+        unsigned k = 0;
+        for (unsigned c = 0; c < 23; ++c) {
+            uint8_t ch = u8r(e + 56 + 2 * c);
+            if (!ch)
+                break;
+            gpt_name[gpt_n][k++] = (char)ch;
+        }
+        gpt_name[gpt_n][k] = 0;
+        gpt_first[gpt_n] = le64(e + 32);
+        gpt_last[gpt_n] = le64(e + 40);
+        ++gpt_n;
+    }
+    return gpt_n;
+}
+
+static void fill_partitions(void)
+{
+    struct ub k, v;
+    if (gpt_load() < 0) {
+        if (ufs_state < 0)
+            kv_ufs_fail();
+        else
+            kv_addc("GPT", "not readable", UI_RED);
+        return;
+    }
+    kv_hdr("LU0 GPT, LIVE (4 KIB BLOCKS)");
+    uint64_t total = 0;
+    for (int i = 0; i < gpt_n; ++i) {
+        uint64_t n = gpt_last[i] - gpt_first[i] + 1;
+        total += n;
+        ub_init(&k);
+        ub_s(&k, "sda");
+        ub_dec(&k, (uint64_t)i + 1U);
+        ub_s(&k, "  ");
+        ub_s(&k, gpt_name[i]);
+        ub_init(&v);
+        ub_size(&v, n * 4096U);
+        ub_s(&v, "  @ ");
+        ub_dec(&v, gpt_first[i]);
+        const char *g = gpt_name[i];
+        int mine = (g[0] == 'W' && g[1] == 'I' && g[2] == 'N') || (g[0] == 'A' && g[1] == '1' && g[2] == '6') ||
+                   (g[0] == 'U' && g[1] == 'S' && g[2] == 'E' && g[3] == 'R') || (g[0] == 'B' && g[1] == 'O' && g[2] == 'O' && g[3] == 'T');
+        kv_addc(k.b, v.b, mine ? UI_HOLO : UI_TEXT);
+    }
+    ub_init(&v);
+    ub_size(&v, total * 4096U);
+    kv_add("Partitioned", v.b);
+    kv_hdr("STARBITE");
+    kv_add("BOOT", "this loader + iOS + Windows UEFI");
+    kv_add("USERDATA", "iOS root + Linux kiosk");
+    kv_add("WINESP / WINDOWS", "Windows 11");
+    kv_add("A16DATA", "Android (later)");
+}
+
+/* ---- speed test --------------------------------------------------------------- */
+
+static uint64_t sp_single, sp_multi;
+static int sp_done, sp_multi_ok;
+static uint64_t sp_lba;
+
+static void fill_speed(void)
+{
+    struct ub u;
+    if (!sp_done) {
+        kv_ufs_fail();
+        return;
+    }
+    ub_init(&u);
+    ub_dec(&u, sp_multi_ok ? sp_multi : sp_single);
+    ub_s(&u, " MB/s");
+    kv_big(sp_multi_ok ? "sequential read, 64 KiB commands" : "sequential read, 4 KiB commands", u.b);
+    kv_hdr("16 MIB FROM SYSTEM, READ ONLY");
+    ub_init(&u);
+    ub_dec(&u, sp_single);
+    ub_s(&u, " MB/s");
+    kv_add("4 KiB per command (S-Boot host state)", u.b);
+    ub_init(&u);
+    if (sp_multi_ok) {
+        ub_dec(&u, sp_multi);
+        ub_s(&u, " MB/s");
+    } else {
+        ub_s(&u, "self-test failed: skipped");
+    }
+    kv_addc("64 KiB per command (16 x 16-byte PRDT)", u.b, sp_multi_ok ? UI_TEXT : UI_ORANGE);
+    kv_dec("Start block", sp_lba, 0);
+    kv_hdr("NOTE");
+    kv_add("Polled, one command at a time", "iOS uses 64 KiB commands");
+}
+
+static int bufs_equal(uintptr_t a, uintptr_t b, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i += 8)
+        if (*(volatile uint64_t *)(a + i) != *(volatile uint64_t *)(b + i))
+            return 0;
+    return 1;
+}
+
+static void run_speed(void)
+{
+    const uint32_t total = 4096;                    /* 16 MiB in 4 KiB blocks */
+    sp_done = 0;
+    sp_multi_ok = 0;
+    if (!ufs_up()) {
+        info_screen("Speed test", fill_speed, 0);
+        return;
+    }
+    sp_lba = 68736;                                 /* SYSTEM (ext4), any readable range */
+    if (gpt_load() > 0)
+        for (int i = 0; i < gpt_n; ++i)
+            if (gpt_name[i][0] == 'S' && gpt_name[i][1] == 'Y' && gpt_name[i][2] == 'S')
+                sp_lba = gpt_first[i];
+    draw_status();
+    draw_bar("Speed test", 1);
+    draw_nav();
+    nkv = 0;
+    kv_hdr("RUNNING");
+    kv_add("Pass", "4 KiB commands, then 64 KiB");
+    draw_kv(PAGE_Y0, NAV_Y, 0);
+    uint64_t t0 = hw_ticks();
+    for (uint32_t i = 0; i < total; ++i)
+        if (ufs_read(sp_lba + i, 1)) {
+            info_screen("Speed test", fill_speed, 0);
+            return;
+        }
+    uint64_t dt = hw_ticks() - t0;
+    sp_single = dt ? (uint64_t)total * 4096U * hw_freq() / dt / 1000000U : 0;
+    sp_done = 1;
+
+    /* 16-block commands as iOS does (starlte_ufs_pick_stride): verify first. */
+    uint32_t tx0 = rd(UFS + 0x1100), rx0 = rd(UFS + 0x1104), ro0 = rd(UFS + 0x1160), ax0 = rd(UFS + 0x116c);
+    const uintptr_t ref = U_BUF + (512U << 10);
+    int ok = !ufs_read(sp_lba, 16);
+    for (uint32_t i = 0; ok && i < 16U * 4096U; i += 8)
+        *(volatile uint64_t *)(ref + i) = *(volatile uint64_t *)(U_BUF + i);
+    wr(UFS + 0x1100, 0x8000000cU);
+    wr(UFS + 0x1104, 0x8000000cU);
+    wr(UFS + 0x1160, 0xaU);
+    wr(UFS + 0x116c, 0x98000003U);
+    if (ok) {
+        u_zero(U_BUF, 16U * 4096U);
+        ok = !ufs_read(sp_lba, 16) && bufs_equal(U_BUF, ref, 16U * 4096U);
+    }
+    if (ok) {
+        t0 = hw_ticks();
+        for (uint32_t i = 0; ok && i < total; i += 16)
+            ok = !ufs_read(sp_lba + i, 16);
+        dt = hw_ticks() - t0;
+        sp_multi = dt ? (uint64_t)total * 4096U * hw_freq() / dt / 1000000U : 0;
+        sp_multi_ok = ok;
+    }
+    wr(UFS + 0x1100, tx0);
+    wr(UFS + 0x1104, rx0);
+    wr(UFS + 0x1160, ro0);
+    wr(UFS + 0x116c, ax0);
+    info_screen("Speed test", fill_speed, 0);
+}
+
+/* ---- sector viewer -------------------------------------------------------------- */
+
+static uint64_t sv_lba = 1;
+static int sv_err;
+
+static void sv_load(void)
+{
+    struct ub u;
+    tv_reset();
+    sv_err = !ufs_up() || ufs_read(sv_lba, 1);
+    if (sv_err) {
+        ub_init(&u);
+        ub_s(&u, "Read failed: OCS ");
+        ub_hex(&u, ufs_ocs, 2);
+        ub_s(&u, " UPIU ");
+        ub_hex(&u, ufs_resp, 2);
+        ub_s(&u, " status ");
+        ub_hex(&u, ufs_status, 2);
+        tv_line(u.b);
+        tv_line("(protected range? S-Boot's UFSP regions stay as they are)");
+        return;
+    }
+    for (unsigned o = 0; o < 4096; o += 16) {
+        ub_init(&u);
+        ub_hexn(&u, o, 3);
+        ub_s(&u, "  ");
+        for (unsigned i = 0; i < 16; ++i) {
+            ub_hexn(&u, u8r(U_BUF + o + i), 2);
+            ub_c(&u, i == 7 ? '-' : ' ');
+        }
+        ub_c(&u, ' ');
+        for (unsigned i = 0; i < 16; ++i) {
+            uint8_t c = u8r(U_BUF + o + i);
+            ub_c(&u, c >= 32 && c < 127 ? (char)c : '.');
+        }
+        tv_line(u.b);
+    }
+}
+
+#define SV_BTN_Y PAGE_Y0
+#define SV_BTN_H 150
+
+static void sv_head(void)
+{
+    struct ub u;
+    ui_clip(0, UI_H);
+    ui_fill(0, SV_BTN_Y, UI_W, SV_BTN_H, UI_BG);
+    static const int bx[4] = { 0, 300, 840, 1140 };
+    for (int b = 0; b < 4; ++b) {
+        int w = b == 1 || b == 2 ? 296 : 296;
+        ui_fill(bx[b] + 4, SV_BTN_Y + 8, w, SV_BTN_H - 16, UI_BAR);
+        ui_text_c(F_TAB, bx[b] + 4 + w / 2, SV_BTN_Y + 92, b == 0 ? UI_LEFT " -1" : b == 1 ? "-256" : b == 2 ? "+256" : "+1 " UI_RIGHT,
+                  UI_HOLO, UI_BAR);
+    }
+    ub_init(&u);
+    ub_dec(&u, sv_lba);
+    ui_text_c(F_TITLE, UI_W / 2, SV_BTN_Y + 82, u.b, sv_err ? UI_RED : UI_TEXT, UI_BG);
+    ub_init(&u);
+    ub_s(&u, "block ");
+    const char *part = "";
+    for (int i = 0; i < gpt_n; ++i)
+        if (sv_lba >= gpt_first[i] && sv_lba <= gpt_last[i])
+            part = gpt_name[i];
+    ub_s(&u, part[0] ? part : "LU0");
+    ui_text_c(F_SMALL, UI_W / 2, SV_BTN_Y + 132, u.b, UI_TEXT2, UI_BG);
+}
+
+static void build_sv_parts(void)
+{
+    row_add("GPT header", "block 1", 0);
+    for (int i = 0; i < gpt_n && nrows < MAX_ROWS; ++i) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "block ");
+        ub_dec(&u, gpt_first[i]);
+        row_add(gpt_name[i], u.b, 0);
+    }
+}
+
+static int act_sv_parts(int i)
+{
+    sv_lba = i == 0 ? 1 : gpt_first[i - 1];
+    return 1;
+}
+
+static void sector_screen(void)
+{
+    const int lh = 46, y0 = SV_BTN_Y + SV_BTN_H, view = NAV_Y - y0;
+    int scroll = 0;
+    (void)gpt_load();
+    sv_load();
+    for (int redraw = 1;;) {
+        if (redraw) {
+            draw_status();
+            draw_bar("Sector viewer", 1);
+            draw_nav();
+            sv_head();
+            draw_tv(y0, NAV_Y, scroll);
+            redraw = 0;
+        }
+        struct ev e;
+        int old = scroll, move = 0;
+        ev_wait(&e, 0);
+        if (e.type == EV_BACK)
+            return;
+        if (e.type == EV_HOME) {
+            E.home = 1;
+            return;
+        }
+        if (e.type == EV_SELECT) {
+            move = 1;
+        } else if (e.type == EV_TAP) {
+            int c = chrome_tap(&e, 1);
+            if (c == 1 || c == 3)
+                return;
+            if (c == 2) {
+                E.home = 1;
+                return;
+            }
+            if (e.y >= SV_BTN_Y && e.y < y0) {
+                if (e.x < 300)
+                    move = -1;
+                else if (e.x < 600)
+                    move = -256;
+                else if (e.x >= 1140)
+                    move = 1;
+                else if (e.x >= 840)
+                    move = 256;
+                else if (gpt_n > 0) {
+                    list_screen("Go to partition", build_sv_parts, act_sv_parts);
+                    if (E.home)
+                        return;
+                    sv_load();
+                    scroll = 0;
+                    redraw = 1;
+                }
+            }
+        } else if (e.type == EV_DOWN) {
+            scroll += view - lh * 2;
+        } else if (e.type == EV_UP) {
+            scroll -= view - lh * 2;
+        } else if (e.type == EV_DRAG) {
+            scroll -= e.d;
+        }
+        if (move) {
+            if (move < 0 && (uint64_t)-move > sv_lba)
+                sv_lba = 0;
+            else
+                sv_lba = (uint64_t)((int64_t)sv_lba + move);
+            sv_load();
+            scroll = 0;
+            redraw = 1;
+            continue;
+        }
+        scroll = clamp_scroll(scroll, tv_n * lh + lh, view);
+        if (scroll != old)
+            draw_tv(y0, NAV_Y, scroll);
+    }
+}
+
 static void power_off(void)
 {
     ui_clip(0, UI_H);
     ui_fill(0, 0, UI_W, UI_H, UI_BLACK);
     ui_text_c(F_TITLE, UI_W / 2, 1440, "Powering off" UI_ELLIPSIS, UI_HOLO, UI_BLACK);
     ui_text_c(F_SMALL, UI_W / 2, 1540, "release all keys", UI_TEXT2, UI_BLACK);
-    hw_tp_clear();
-    while (hw_keys())
-        hw_wait_ms(20);
-    hw_wait_ms(300);
-    /* PS_HOLD low (exynos-reboot.c exynos_power_off: PMU +0x330C bit 8) */
-    wr(PMU_BASE + 0x330c, rd(PMU_BASE + 0x330c) & ~0x100U);
-    hw_wait_ms(3000);
+    hw_power_off();
     /* Still here: a cable keeps the PMIC on (Samsung reboots to LP charging). */
     ui_fill(0, 1380, UI_W, 200, UI_BLACK);
     ui_text_c(F_BODY, UI_W / 2, 1440, "Still powered (charger connected?)", UI_ORANGE, UI_BLACK);
@@ -2518,8 +3409,11 @@ static void peek_draw(uint64_t addr, const char *ent, int wmode, int unlocked)
         ub_hexn(&u, a, 9);
         ub_s(&u, ": ");
         for (unsigned w = 0; w < 4; ++w) {
-            if (ok && (peek_safe(a) || unlocked))
-                ub_hexn(&u, *(volatile uint32_t *)(uintptr_t)(a + 4U * w), 8);
+            uint32_t word;
+            if (ok && (peek_safe(a) || unlocked) && probe32((uintptr_t)(a + 4U * w), &word))
+                ub_hexn(&u, word, 8);
+            else if (ok && (peek_safe(a) || unlocked))
+                ub_s(&u, "*FAULT**");
             else
                 ub_s(&u, "--------");
             ub_c(&u, ' ');
@@ -2614,7 +3508,7 @@ static void peek_screen(void)
                 addr = v & ~3ULL;
                 unlocked = 0;
             } else if (!peek_safe(addr & ~0xfULL)) {
-                if (dialog("Unknown block", "Reading may hang the phone.", "Hold Power + Vol down to reset.", "READ"))
+                if (dialog("Unknown block", "Aborts are caught; a bus hang is not.", "Hold Power + Vol down to reset.", "READ"))
                     unlocked = 1;
                 draw_status();
                 draw_bar("Register peek", 1);
@@ -2684,7 +3578,7 @@ static void build_tab(int t)
         row_add("CPU", "clusters and core map", 0);
         row_add("Temperatures", "TMU: big, little, GPU, ISP (live)", 0);
         row_add("Clocks", "CPU, GPU, memory and bus PLLs (live)", 0);
-        row_add("Core bring-up test", "PSCI CPU_ON per core: next build", R_DIS);
+        row_add("Core bring-up test", "PSCI CPU_ON each core, then CPU_OFF", R_WARN);
         row_add("Memory test", "16 MiB pattern test", 0);
         row_add("Memory bandwidth", "read, write, copy", 0);
         row_add("Display panel", "panel, resolution, framebuffer", 0);
@@ -2702,10 +3596,10 @@ static void build_tab(int t)
         break;
     case 3:
         row_add("UFS host controller", "UFSHCI 2.1 + Exynos vs_hci, live", 0);
-        row_add("Partitions", "LU0 layout with sizes", 0);
-        row_add("UFS device and health", "model, firmware, wear: next build", R_DIS);
-        row_add("Speed test", "sequential read: next build", R_DIS);
-        row_add("Sector viewer", "raw LU0 blocks: next build", R_DIS);
+        row_add("Partitions", "live GPT: every partition with size", 0);
+        row_add("UFS device and health", "model, firmware, capacity, wear", 0);
+        row_add("Speed test", "16 MiB sequential read (read only)", 0);
+        row_add("Sector viewer", "raw LU0 blocks, hex + ASCII", 0);
         break;
     case 4:
         row_add("iOS 16", "XNU 8796, 1 GiB, boot-args", 0);
@@ -2740,6 +3634,10 @@ static void open_item(int t, int i)
     case 0x10: info_screen("CPU", fill_cpu, 0); break;
     case 0x11: info_screen("Temperatures", fill_thermal, 1000); break;
     case 0x12: info_screen("Clocks", fill_clocks, 2000); break;
+    case 0x13:
+        if (dialog("Core bring-up test", "Start each core, then turn it off.", "Reboot after it if a core parks.", "RUN"))
+            run_cores();
+        break;
     case 0x14:
         if (dialog("Memory test", "Test 16 MiB at 0x92000000?", "Takes a few seconds.", "RUN"))
             run_ram();
@@ -2760,6 +3658,9 @@ static void open_item(int t, int i)
     case 0x23: touch_rails(); break;
     case 0x30: info_screen("UFS host controller", fill_ufs, 1000); break;
     case 0x31: info_screen("Partitions", fill_partitions, 0); break;
+    case 0x32: info_screen("UFS device and health", fill_ufs_dev, 0); break;
+    case 0x33: run_speed(); break;
+    case 0x34: sector_screen(); break;
     case 0x40: info_screen("iOS 16", fill_ios, 0); break;
     case 0x41: list_screen("iOS boot options", build_ios_opts, act_ios_opts); break;
     case 0x42: info_screen("Windows 11", fill_windows, 0); break;
@@ -2813,10 +3714,23 @@ static void draw_top(int focus, int scroll)
     draw_nav();
 }
 
+static int em_run(const struct star_info *in, char *cmdline, unsigned len);
+
+/* S-Boot's vectors reset the phone on any trap: use em_vec.S while inside. */
 int em_main(const struct star_info *in, char *cmdline, unsigned len)
 {
+    uint64_t old, mine = (uint64_t)(uintptr_t)em_vectors;
     if (!ui_init())
         return 0;
+    __asm__ volatile("mrs %0, vbar_el1" : "=r"(old));
+    __asm__ volatile("msr vbar_el1, %0\n\tisb" : : "r"(mine) : "memory");
+    int r = em_run(in, cmdline, len);
+    __asm__ volatile("msr vbar_el1, %0\n\tisb" : : "r"(old) : "memory");
+    return r;
+}
+
+static int em_run(const struct star_info *in, char *cmdline, unsigned len)
+{
     E.in = in;
     E.cmd = cmdline;
     E.len = len;

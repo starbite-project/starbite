@@ -24,6 +24,7 @@ void hw_wait_us(uint64_t us);
 void hw_wait_ms(unsigned ms);
 unsigned hw_keys(void);
 void hw_reboot(uint32_t inform3);
+void hw_power_off(void);       /* returns only if the phone stayed on */
 
 /* S2MPS18 through ACPM (type 0 TOP, 1 PMIC, 2 RTC). */
 int hw_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);

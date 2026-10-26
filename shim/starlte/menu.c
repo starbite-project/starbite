@@ -1081,6 +1081,7 @@ static int engineer(const struct star_info *in, char *cmdline, unsigned len)
 #define V5_HOLD_MS 700U
 #define K_BIXBY_HOLD 16U
 #define K_TAP 32U
+#define K_VOL_HOLD 64U      /* both volume keys held V5_HOLD_MS: power off */
 /* Free at menu time: the payload must end below RAM_BASE (0x92000000), the
  * Engineer RAM test uses 0x92000000 + 16 MiB, and nothing is copied anywhere
  * until a choice is made (the woa FD lands at 0x90000000 only after). 17 MiB. */
@@ -1098,7 +1099,8 @@ static void screen_copy(uintptr_t dst, uintptr_t src)
 }
 
 /* One debounced press or a tap; Bixby held for V5_HOLD_MS reports
- * K_BIXBY_HOLD at once (the next wait lets go of it first). */
+ * K_BIXBY_HOLD at once (the next wait lets go of it first), and so do both
+ * volume keys held together (K_VOL_HOLD). */
 static unsigned input_event(int *tx, int *ty)
 {
     while (keys())
@@ -1117,8 +1119,13 @@ static unsigned input_event(int *tx, int *ty)
                 }
                 return K_BIXBY_HOLD;
             }
-            while (keys())
+            unsigned both = 0, now;
+            while ((now = keys())) {
+                both = (now & (K_UP | K_DOWN)) == (K_UP | K_DOWN) ? both + 20U : 0;
+                if (both >= V5_HOLD_MS)
+                    return K_VOL_HOLD;
                 wait_ms(20);
+            }
             return k;
         }
         if (tp_tap(tx, ty))
@@ -1145,7 +1152,7 @@ struct v5 { unsigned svc_focus, os, svc; };
 
 /* Last drawn state per item (0xff = not drawn yet): only changes are drawn,
  * the Starbite card alone is ~0.9 Mpx. */
-static unsigned char v5_shown[8] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+static unsigned char v5_shown[9] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 
 static void v5_put(unsigned item, unsigned st)
 {
@@ -1162,6 +1169,7 @@ static void v5_draw(const struct v5 *m)
     v5_put(2, 3);
     v5_put(3, 3);
     v5_put(7, 0);
+    v5_put(8, 0);
     for (unsigned i = 0; i < 2; ++i)
         v5_put(v5_svc[i], m->svc_focus && i == m->svc ? 1U : 0U);
 }
@@ -1210,6 +1218,16 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
                 v5_draw(&m);
                 continue;
             }
+        }
+        if (k == K_VOL_HOLD) {
+            star_fb_fill(C_BLACK);
+            star_fb_row_base(22);
+            star_fb_text_c(0, "POWERING OFF", C_WHITE, C_BLACK);
+            hw_power_off();
+            star_fb_text_c(1, "STILL ON: CHARGER CONNECTED?", C_MUTED, C_BLACK);
+            star_fb_text_c(2, "REBOOTING", C_MUTED, C_BLACK);
+            wait_ms(1500);
+            reboot(INFORM_NORMAL);
         }
         if (k == K_BIXBY_HOLD) {
             screen_copy(SCREEN_SAVE, STAR_FB_BASE);
@@ -1309,6 +1327,20 @@ void hw_wait_us(uint64_t us) { wait_us(us); }
 void hw_wait_ms(unsigned ms) { wait_ms(ms); }
 unsigned hw_keys(void) { return keys(); }
 void hw_reboot(uint32_t inform3) { reboot(inform3); }
+
+/* PS_HOLD low (exynos-reboot.c exynos_power_off: PMU +0x330C bit 8). With a
+ * cable in, the PMIC keeps the phone on: returns after 3 s, the caller
+ * reboots. */
+void hw_power_off(void)
+{
+    if (tp_ok)
+        (void)tp_cmd(0x62);
+    while (keys())
+        wait_ms(20);
+    wait_ms(300);
+    mwr(PMU_BASE + 0x330c, mrd(PMU_BASE + 0x330c) & ~0x100U);
+    wait_ms(3000);
+}
 int hw_pmic_read(uint32_t type, uint32_t reg, uint8_t *val) { return pmic_read(type, reg, val); }
 int hw_pmic_write(uint32_t type, uint32_t reg, uint8_t val) { return pmic_write(type, reg, val); }
 void hw_opt_load(const char *cmdline) { opt_load(cmdline); }
