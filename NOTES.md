@@ -996,3 +996,4 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   Exynos9810Ufs-s9fence-signed.sys 2d6c64ff, sign/ key+cert}. Installed over DriverStore\FileRepository\
   exynos9810ufs.inf_arm64_56a2e6f01fbd68bc\Exynos9810Ufs.sys via ntfs-3g rw (volume was clean). Test: boot
   Windows; if INACCESSIBLE_BOOT_DEVICE, restore the original from build/woa/ufs-sys.
+- 2026-10-27 00:00: **S9-fenced, re-signed Exynos9810Ufs.sys boots Windows** (testsigning accepts the Starbite self-signed cert). Storage safety done.
