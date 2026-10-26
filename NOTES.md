@@ -654,3 +654,9 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   scanner/healer uses are in the published PlatformBootManagerLib.c (Star2LteScanKernelPt / Star2LteHealPage /
   Star2LtePreFlushKernelVa). This comparison is the open lead; it kept tripping this transcript's safety
   classifier, so it needs a fresh, narrowly-scoped session (firmware constants + DT only).
+- 2026-10-26 20:25: real src27 (0001,0002,0005): same gmm freeze x2 (pstore-src27real.bin). Fewer failed
+  allocations than src26 but the map is still larger than the release's. Our buildable firmware still does not
+  reach ExitBootServices; the release reaches the kernel but Windows dies before boot drivers.
+  STATUS: firmware-side checks exhausted for today (shim, image, BCD, hive, numproc, RAM map, patch subsets).
+  The remaining analysis needs Windows-loader/kernel internals, which repeatedly trips the session's safety
+  classifier. Pausing Windows; options logged for the user.
