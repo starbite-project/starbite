@@ -162,7 +162,7 @@ const ITEMS = [
   // Android: the vendor 4.9 kernel + ramdisk from the UFS OS store; state 3 until installed.
   { name: 'Android 17', meta: 'LineageOS 24.0 · Linux 4.9', row: 0, icon: (x, y, s) => icon('si-android.svg', x, y, s, { fill: '#3ddc84' }), optional: true },
   // Linux: mainline 7.1 from the UFS OS store; state 3 when the store has no kernel.
-  { name: 'Linux', meta: 'postmarketOS · Linux 7.1', row: 2, icon: (x, y, s) => icon('tux.svg', x, y - s * 0.06, s * 1.12), optional: true },
+  { name: 'Linux 7.1', meta: 'postmarketOS · Alpine edge', row: 2, icon: (x, y, s) => icon('tux.svg', x, y - s * 0.06, s * 1.12), optional: true },
 ];
 
 // row state: 0 normal, 1 selected, 2 starting, 3 disabled, 4 selected but inactive
