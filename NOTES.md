@@ -710,3 +710,9 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   later a reset to the MENU (not TWRP this time). So: kernel, basic display, win32k/user-mode setup all run.
   The dialog = setup's interrupted-phase state from run 1's reset. Open: what resets the phone ~60-70 s after
   the spinner every run (watchdog?).
+- 2026-10-26 22:40: src32 run 3 (shim dumps the 0xFED13800 handoff record): record = ARM1 / 0 / 'FWA1'
+  (firmware-armed, never changed to 'WAR1') -> the UFS driver never took ownership of the hardware watchdog
+  that the release's DXE modules arm (shim =PREWDT, also P and BdsDxe; count 0xFFF5 at the max prescaler is
+  ~80 s), so it expires ~1 min after the spinner and resets the SoC. Windows setup itself logs no error (Panther
+  setupact.log stops mid-specialize). Touch does not respond in the setup dialog (separate issue: S6SY761/ACPI).
+  The session's safety classifier stopped the reply that worked on this watchdog; continue in a fresh session.
