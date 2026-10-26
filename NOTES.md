@@ -618,3 +618,11 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   so: shim now logs "STARBITE: latches 7f<10,14,40,44,60,80,b0>" at the START of every boot (before the menu).
   BOOT = out/xnu-boot-rel7582-latch.img (sha 3ed9d7e9...). Procedure: WINDOWS 11 -> wait for the hang/reset ->
   at OUR MENU pick REBOOT TO RECOVERY -> read the ring.
+- 2026-10-26 19:20: **Latch dump** (pstore-latch1.bin; written by the shim on the boot BEFORE the user's run, so it
+  reflects the direct-boot Windows run + a TWRP boot): 7F10 "BAT1", 7F14 1, **7F40/44 = 0/0 (UFS driver never
+  initialized: it writes its latch + ring notes in its init right after mapping the PRAM page)**, 7F60 0, 7F80 0,
+  **7FB0 "KEP1" (firmware's Windows-handoff marker)**. => the kernel dies BEFORE boot-start drivers load.
+  The page survives TWRP (clean values, no log text). After a Windows death the reset goes STRAIGHT to TWRP (the
+  release sets the recovery boot reason), so: TWRP Reboot->System -> our menu (dump) -> REBOOT TO RECOVERY.
+  Test: BCD numproc 4 -> 1 (one 8-byte value at file 0x409c of EFI/Microsoft/Boot/BCD; hive clean, seq 41/41;
+  original backup/20261026-bcd/BCD, patched build/woa/bcd/BCD-numproc1 sha 2c125e8e...).
