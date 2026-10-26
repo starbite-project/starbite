@@ -883,3 +883,19 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   verified the on-disk cluster == pulled hive block, wrote one cluster, readback ok, whole-file sha via
   ntfs-3g = patched copy (378ba51c...). Backup: backup/20261026-win-hives/SYSTEM-seq93-childcompletion1
   (70c8d2ba...). BOOT stays src36. Next run: fresh Panther\setupact.log shows how far specialize gets.
+- 2026-10-26 20:40: ChildCompletion reset -> setup.exe really ran phase 4 again and hit a NEW error: "Windows
+  Setup experienced an unexpected error" (user); force reset. Panther\setuperr.log: "CreateSetupBlackboard:
+  Failed to create/open Setup black board path is [C:\Windows\Panther\SetupInfo] GLE is [8]" (8 =
+  ERROR_NOT_ENOUGH_MEMORY, i.e. the blackboard store no longer parses). Next to it sits
+  setupinfo.4d53424c4b425244.spl ("MSBLKBRD" in hex) -- the first run opened the blackboard fine and got to
+  specialize; eight hard-reset runs since have left it torn. The interrupted state is not limited to one
+  flag, so: REDEPLOY the image instead of more surgery. The VM-built disk starbite-win.vhdx (15137243136 B,
+  sha 8755e0de...) is on the phone's SD card (exfat-fuse /dev/block/mmcblk0p1 /external_sd); the Mac has
+  13 GiB free, so the copy runs ON THE PHONE: tools/woa/redeploy-from-sd.py pulls only the VHDX headers/
+  region table/metadata/BAT into a local sparse copy (build/woa/vhdx-sd/), maps every 32 MiB block of
+  WINESP/WINDOWS (451 blocks present, 1456 absent; copy 14332 MiB, zero 12640 MiB) and emits a TWRP script
+  that checks the card sha, dd's each present block card->partition, zero-fills the rest, and verifies each
+  copied range card vs partition by sha256 on the device. Geometry matches build/woa/gpt-new. Running now
+  (nohup /tmp/redeploy.sh, log /tmp/redeploy.log). After it: fresh first boot on src36 (RWD1/P3 handshake,
+  1407 MiB) = the real test of specialize. Note the ESP is rewritten too (image's own BCD) and the image's
+  SYSTEM hive has AutoReboot at its default.
