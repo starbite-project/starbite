@@ -521,3 +521,11 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   SD card: wiped, one exFAT volume "STARBITE" (mount in TWRP: exfat-fuse /dev/block/mmcblk0p1 /external_sd);
   holds starbite-win.vhdx (sha256 in build/woa/starbite-win.vhdx.sha256; removed from the Mac).
   Next: re-test out/xnu-boot-rel7582.img (release 22621.7582 UEFI died in SEC on VG4).
+- 2026-10-26 16:20: **VG6 + release 22621.7582 UEFI (xnu-boot-rel7582.img): reaches the Windows kernel.**
+  pstore-vg6-rel-pmsg-ramoops-0.bin: release UEFI SEC now passes (P V W X Y S $ U Q C E D ...), DXE (=ACPIINST,
+  =GTDTPATCH, =PSCI2, =BATT, =PARK), winload GetMemoryMap loop bt049..bt04e, =EBSENTER .. =EBSOK, =NTPATCH n=08,
+  =P2F/=PSR/=SWR/=SWA -> kernel. User: Windows logo, a few s later blue/white glitch at the top of the screen,
+  then reset; next UEFI boot's recovery divert -> TWRP. No Minidump/MEMORY.DMP. => the VG4->VG6 S-Boot update was
+  the difference for SEC; the remaining failure is a post-handoff bugcheck. Set CrashControl\AutoReboot 1->0 in
+  the offline SYSTEM hive (one byte at file 0x4faeac; original in backup/20261026-win-hives/SYSTEM) so the
+  bugcheck screen stays up to read the stop code.
