@@ -844,10 +844,99 @@ static int engineer(const struct star_info *in, char *cmdline, unsigned len)
  * (no room left for a key hint: Volume moves, Power selects). */
 #define MENU_ROW_BASE 23U
 
+/* ---- boot menu v5 (sprites around Samsung's logo) --------------------- */
+
+/*
+ * tools/brand/menu.mjs: items 0 iOS, 1 Windows, 2 Android and 3 Linux (shown
+ * dimmed: not installed), 4 Recovery, 5 the Starbite card (boots Starbite
+ * Kiosk). Sprite id 16 + 4 * item + state; state 0 normal, 1 selected,
+ * 2 starting, 3 disabled. Volume moves over 0, 1, 4, 5; Power boots; Bixby
+ * opens Starbite Engineer, with the whole screen (Samsung's logo included)
+ * saved first and put back after.
+ */
+#define V5_SPRITE(item, st) (16U + 4U * (item) + (st))
+#define V5_ITEMS 6U
+#define V5_CARD 5U
+/* Free at menu time: the payload must end below RAM_BASE (0x92000000) and
+ * nothing is copied anywhere until a choice is made. 17 MiB. */
+#define SCREEN_SAVE 0x92000000UL
+/* y range of the Starbite card sprite (menu.mjs LAYOUT.card - pad .. + label). */
+#define V5_CARD_Y0 1678U
+#define V5_CARD_Y1 2350U
+
+static const unsigned char v5_order[4] = { 0, 1, 4, 5 };
+
+static void screen_copy(uintptr_t dst, uintptr_t src)
+{
+    volatile uint64_t *d = (volatile uint64_t *)dst;
+    const volatile uint64_t *s = (const volatile uint64_t *)src;
+    for (uint64_t i = 0; i < (uint64_t)STAR_FB_WIDTH * STAR_FB_HEIGHT / 2; ++i)
+        d[i] = s[i];
+}
+
+static void v5_draw_all(unsigned sel_item)
+{
+    for (unsigned i = 0; i < V5_ITEMS; ++i)
+        (void)star_sprite(V5_SPRITE(i, (i == 2 || i == 3) ? 3U : (i == sel_item ? 1U : 0U)));
+}
+
+/* The chosen row says "starting"; the card leaves unless it was the pick,
+ * and the loader's status lines go where it was. */
+static void v5_starting(unsigned item)
+{
+    (void)star_sprite(V5_SPRITE(item, 2));
+    if (item != V5_CARD) {
+        star_fb_fill_rows(V5_CARD_Y0, V5_CARD_Y1, C_BLACK);
+        star_fb_row_base(25);
+    }
+}
+
+static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
+{
+    unsigned pos = 0;
+    v5_draw_all(v5_order[pos]);
+    for (;;) {
+        unsigned k = key_wait(), old = pos;
+        if (k & K_BIXBY) {
+            screen_copy(SCREEN_SAVE, STAR_FB_BASE);
+            int boot = engineer(in, cmdline, len);
+            screen_copy(STAR_FB_BASE, SCREEN_SAVE);
+            star_fb_row_base(36);
+            if (boot) {
+                v5_draw_all(0);
+                v5_starting(0);
+                return 1;
+            }
+            continue;
+        }
+        if (k & K_POWER) {
+            unsigned item = v5_order[pos];
+            v5_starting(item);
+            if (item == 0)
+                return 1;
+            if (item == 1)
+                return 3;
+            if (item == V5_CARD)
+                return 2;
+            reboot(INFORM_RECOVERY);
+        }
+        if (k & K_UP)
+            pos = pos ? pos - 1 : 3;
+        else if (k & K_DOWN)
+            pos = (pos + 1) % 4;
+        if (pos != old) {
+            (void)star_sprite(V5_SPRITE(v5_order[old], 0));
+            (void)star_sprite(V5_SPRITE(v5_order[pos], 1));
+        }
+    }
+}
+
 int star_menu(const struct star_info *in, char *cmdline, unsigned len)
 {
     unsigned sel = 0;
     opt_load(cmdline);
+    if (star_menu_assets() > 0)
+        return menu_v5(in, cmdline, len);
     for (;;) {
         star_fb_row_base(MENU_ROW_BASE);
         item(0, "IOS 16 (STARBITE)", C_WHITE);

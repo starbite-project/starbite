@@ -1034,3 +1034,17 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   entries. Test 2: prdt_stride 16 (0300 updated). BOOT = out/xnu-boot-ufsmulti16.img (sha 3840b26a...).
   Note: a failed multi command still kills the host for the rest of the boot (panic at root mount).
 - 2026-10-27 01:40: **iOS multi-block storage WORKS** with 16-byte PRDT entries (DESCTYPE 0) + Linux vs_hci at the real 9810 offsets: self-test MATCH, iOS boots and is "so much faster" (user). BOOT = out/xnu-boot-ufsmulti16.img (ufsmulti=1 in the cmdline). Step 4 DONE.
+- 2026-10-27 02:00: **Boot menu v5 (step 5, visuals).** User concept (~/Downloads/Starbite.html): rows with OS
+  icons drawn AROUND Samsung's real splash, Starbite card below instead of a Kiosk row (select it with the
+  volume keys, Power boots it). Samsung's logo.jpg (UP_PARAM sda5 tar, 1079x1747) is drawn 1:1 by S-Boot at
+  x 180, y ~1144: SAMSUNG/Galaxy S9/Knox at y ~1199..1575 (consistent with the old menu rows at 1580 "under the
+  logo" and the old footer covering "Powered by android" from 2500). tools/brand/menu.mjs (rsvg-convert,
+  Avenir Next + Menlo, own icons: apple, Windows tiles, Android head, Tux, recovery arrow) -> build/brand/
+  menu.sbm "SBMENU01" (17 opaque RLE sprites, 1.58 MB; base header/label/footer id 0, rows 16+4*item+state)
+  + build/brand/menu-preview.png. Layout: header 70..220, BOOT label 236, rows y 290 + 150*i (iOS, Windows,
+  Android dim, Linux dim, Recovery), card 1678..2350 (normal / gold ring + PRESS POWER / starting), footer from
+  2500 (Powered by Starbite, from overlay.png). Loader: xnu_boot.c sprite_walk/star_sprite + SBMENU01 branch
+  (draws id 0, text row base 36); menu.c menu_v5 (order 0,1,4,5; Power boots; Bixby = Engineer with the full
+  framebuffer saved at 0x92000000 and restored after; starting sprite; card cleared and status rows at base 25
+  unless the card was picked); old text menu stays as the fallback. BOOT = out/xnu-boot-menu5.img (sha
+  4528c998..., ramdisk = menu.sbm, payload = ufsmulti16), flashed. Touch input next.

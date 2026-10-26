@@ -127,7 +127,10 @@ static uintptr_t fail(volatile uint64_t *log, int64_t step, const char *why)
  *     S-Boot's own boot logo, which stays on screen (overlay.mjs);
  *   "SBOVRRLE": the same overlay run-length encoded (tools/brand/rle.py):
  *     u32 n, n x { u32 x, y, w, h, runs; runs x { u32 length, 0xAARRGGBB } };
- *   "SBSPLASH" u32 w, h + RGB565: a full-screen picture (splash.mjs).
+ *   "SBSPLASH" u32 w, h + RGB565: a full-screen picture (splash.mjs);
+ *   "SBMENU01" u32 n, n x { u32 id, x, y, w, h, runs; runs x { u32 length,
+ *     u32 0xAARRGGBB } }: opaque sprites for the v5 boot menu (menu.mjs),
+ *     id 0 = drawn at once, others drawn by menu.c through star_sprite().
  * The boot menu and the loader's status lines then go in the gap under
  * Samsung's logo.
  */
@@ -146,6 +149,64 @@ blend(uint32_t s, uint32_t d)
     return o;
 }
 
+/* Draw every SBMENU01 sprite with this id (opaque copy). Returns how many
+ * were drawn, or -1 if the blob is malformed. */
+static int
+sprite_walk(uint64_t start, uint64_t end, uint32_t want)
+{
+    const volatile uint32_t *h = (const volatile uint32_t *)(uintptr_t)start;
+    volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
+    uint32_t n = h[2];
+    const volatile uint32_t *q = h + 3;
+    int drawn = 0;
+    for (uint32_t r = 0; r < n && r < 64; r++) {
+        if ((uintptr_t)(q + 6) > end)
+            return -1;
+        uint32_t id = q[0], x = q[1], y = q[2], w = q[3], ht = q[4], runs = q[5];
+        q += 6;
+        if (!w || (uintptr_t)(q + 2 * (uint64_t)runs) > end || x + w > STAR_FB_WIDTH ||
+            y + ht > STAR_FB_HEIGHT)
+            return -1;
+        if (id == want) {
+            uint64_t left = (uint64_t)w * ht;
+            uint32_t px = 0;
+            volatile uint32_t *row = fb + (uint64_t)y * STAR_FB_WIDTH + x;
+            for (uint32_t k = 0; k < runs; k++) {
+                uint32_t length = q[2 * k], c = q[2 * k + 1];
+                if (length > left)
+                    return -1;
+                left -= length;
+                for (; length; --length) {
+                    row[px] = c;
+                    if (++px == w) {
+                        px = 0;
+                        row += STAR_FB_WIDTH;
+                    }
+                }
+            }
+            drawn++;
+        }
+        q += 2 * (uint64_t)runs;
+    }
+    return drawn;
+}
+
+static uint64_t menu_start, menu_end;
+
+int
+star_menu_assets(void)
+{
+    return menu_end > menu_start;
+}
+
+int
+star_sprite(unsigned id)
+{
+    if (!star_menu_assets())
+        return 0;
+    return sprite_walk(menu_start, menu_end, id);
+}
+
 static int
 star_splash_draw(void)
 {
@@ -154,6 +215,15 @@ star_splash_draw(void)
         return 0;
     const volatile uint32_t *h = (const volatile uint32_t *)(uintptr_t)start;
     volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
+    if (h[0] == 0x454d4253U && h[1] == 0x3130554eU) {           /* "SBMENU01" */
+        if (sprite_walk(start, end, 0xffffffffU) < 0)
+            return 0;
+        menu_start = start;
+        menu_end = end;
+        (void)sprite_walk(start, end, 0);
+        star_fb_row_base(36);
+        return 1;
+    }
     if (h[0] == 0x564f4253U && h[1] == 0x454c5252U) {           /* "SBOVRRLE" */
         uint32_t n = h[2];
         const volatile uint32_t *q = h + 3;

@@ -19,3 +19,9 @@ int star_menu(const struct star_info *in, char *cmdline, unsigned len);
 
 /* xnu_boot.c: draw the Starbite overlay again (over black). */
 void star_overlay_redraw(void);
+
+/* xnu_boot.c: the v5 menu's sprites ("SBMENU01" in the BOOT ramdisk slot,
+ * tools/brand/menu.mjs). star_sprite draws every sprite with that id and
+ * returns how many it drew (0 without assets, -1 if malformed). */
+int star_menu_assets(void);
+int star_sprite(unsigned id);
