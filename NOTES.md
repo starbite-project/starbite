@@ -935,3 +935,12 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   interrupted run (ChildCompletion=1, torn blackboard) -> redeploy.
   Open items: RTC (clock frozen at 2026-08-05 14:29 every boot), RAM stage 3 (2 GiB high bank), the UFS
   driver's S9+ write fence leaves S9 USERDATA (sda25) and A16DATA (sda28) writable from Windows.
+- 2026-10-26 22:10: iOS status recap for the plan: XNU gets a fixed 472 MiB window (0x92000000..0xAF800000,
+  tools/mkadt_starlte.py), single-block UFS (~12 MB/s), 4 A55. Today's map makes the 2 GiB high bank
+  (0x880000000, contiguous; Apple's own A-series DRAM also sits at 0x8_0000_0000) the natural new home for
+  XNU; the woa UFS driver source shows the full host re-init needed for multi-block PRDT. Queued after Windows
+  RAM.
+  **src37 = RAM stage 3** (stage 2 + 0x880000000+0x80000000, all as boot-services data), same patch set and
+  the src36 shim (RWD1 commit): build/woa/starbite-uefi-src37.bin (sha b67c41de...), BOOT =
+  out/xnu-boot-src37.img (sha 681b25c2...), flashed. Fallback: out/xnu-boot-src36.img. Setup is finished, so a
+  failed test boot no longer poisons the install. Expect ~3.4 GiB in Windows (Task Manager / witness).
