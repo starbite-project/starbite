@@ -862,3 +862,24 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   BOOT = out/xnu-boot-src36.img (sha 1af81a23...), flashed. After the run read RWD1 state/owner/phase/
   reason/heartbeat (post-mortem) -- it shows how far the chain got (0x30 DXE, 0x40 BDS, 0x50 EBS, 0x60
   WINDOWS_OWNED, heartbeat = driver pets). A hard WDT reset would show RST_STAT bit 0x01000000.
+- 2026-10-26 20:20: **src36: the whole firmware<->driver handshake now works like the S9+**, setup dialog
+  unchanged. Post-mortem (postmortem-src36-run1): RWD1 gen 1 state 0x60 WINDOWS_OWNED owner 6 (Windows UFS)
+  phase 0x0A WINDOWS_RUNNING reason 0 detail 48 (=WdtPets) heartbeat 49, cookie 'VALY'; low-WDT record
+  'ARM1'/0/'WAR1' (driver took over the watchdog); P3 SMP1 seq 6 state 0x70 WINDOWS_ACK, one-shot cleared;
+  witness tick 48, 1407 MiB. Run ended at the MENU, RST_STAT SWRESET (not the WDT): ~48 s after the driver
+  started, with the dialog up. => firmware side is done; the failure is Windows setup's own state.
+  **Setup state (tools/woa/hive.py, read-only regf reader) HKLM\SYSTEM\Setup: SetupType 2, SystemSetupIn
+  Progress 1, OOBEInProgress 1, SetupPhase 4, CmdLine oobe\windeploy.exe, SetupShutdownRequired 1,
+  Status\SysprepStatus\GeneralizationState 4, Status\ChildCompletion\setup.exe = 1.** setup.exe sets 1 when it
+  starts and 3 when it completes; finding 1 at start = "restarted unexpectedly" dialog + exit 0x1f. So every
+  run since the FIRST src32 run (interrupted mid-specialize back when the platform was broken) just replays the
+  stale flag; specialize has never been retried. Windeploy log (UnattendGC\setupact.log) now 8 launches, one
+  "Process exited with exit code [0x1f] ... Flushing registry ... exiting" block; the others' tails were lost
+  to the resets (no clean shutdown; ntfs-3g says the volume is unclean). No winevt logs exist at all.
+  FIX: ChildCompletion\setup.exe 1 -> 0 (fresh specialize, like a first boot; the community workaround is 3 =
+  skip). The volume is unclean so ntfs-3g refuses rw; patched the 4 KiB hive cluster RAW instead:
+  tools/woa/ntfs-locate.py (read-only MFT walk over adb dd; fixups use a 512-byte stride on this 4K-sector
+  volume) -> SYSTEM runs [(2153578,1728),(2158094,128)], file 0x26e65c -> partition byte 0x20ded865c;
+  verified the on-disk cluster == pulled hive block, wrote one cluster, readback ok, whole-file sha via
+  ntfs-3g = patched copy (378ba51c...). Backup: backup/20261026-win-hives/SYSTEM-seq93-childcompletion1
+  (70c8d2ba...). BOOT stays src36. Next run: fresh Panther\setupact.log shows how far specialize gets.
