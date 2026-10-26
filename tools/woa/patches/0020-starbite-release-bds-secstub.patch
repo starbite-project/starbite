@@ -1,0 +1,29 @@
+Starbite: use the v0.1.0 release's BdsDxe (+7 KB vs the published source;
+after the PSCI EL2 shim's =PREWDT our BDS stalls after two pool allocations
+while the release's goes on polling with Stall() and boots) and its custom
+SecurityStubDxe (5.7 KB vs 26 KB). Binary FILE DRIVER entries from
+build/woa/relmods, same GUIDs. Applies on top of 0019.
+--- a/Platform/Star2LtePkg/Star2LtePkg.fdf
++++ b/Platform/Star2LtePkg/Star2LtePkg.fdf
+@@ -108,5 +108,9 @@
+   INF ArmPkg/Drivers/TimerDxe/TimerDxe.inf
+   INF MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
+-  INF MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
++  FILE DRIVER = f80697e9-7fd6-4665-8646-88e33ef71dfc {
++    SECTION DXE_DEPEX = /Users/dev/project-starbite/build/woa/relmods/SecurityStubDxe/depex.bin
++    SECTION PE32 = /Users/dev/project-starbite/build/woa/relmods/SecurityStubDxe/pe32.efi
++    SECTION UI = "SecurityStubDxe"
++  }
+   INF MdeModulePkg/Universal/Metronome/Metronome.inf
+   INF MdeModulePkg/Universal/ResetSystemRuntimeDxe/ResetSystemRuntimeDxe.inf
+@@ -190,5 +190,9 @@
+   # --- BDS: finds and launches the Windows Boot Manager ---
+   #
+-  INF MdeModulePkg/Universal/BdsDxe/BdsDxe.inf
++  FILE DRIVER = 6d33944a-ec75-4855-a54d-809c75241f6c {
++    SECTION DXE_DEPEX = /Users/dev/project-starbite/build/woa/relmods/BdsDxe/depex.bin
++    SECTION PE32 = /Users/dev/project-starbite/build/woa/relmods/BdsDxe/pe32.efi
++    SECTION UI = "BdsDxe"
++  }
+   # Optional, deferred until the Shell/UiApp library tail is wired (not required
+   # to launch bootmgfw.efi):

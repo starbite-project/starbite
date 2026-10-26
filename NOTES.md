@@ -675,3 +675,12 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
 - 2026-10-26 20:55: src28 (no RamManager): still the gmm freeze (pstore-src28.bin). The small map alone is not
   it. src29 (+0019: release's P / PsciEl2ShimStage0Proven / RuntimeFrequency / 98100003 transplanted; verified
   36 modules) flashed, sha 63e2fd0b....
+- 2026-10-26 21:10: **src29 (release modules transplanted): new stop -- HUD "APL", before the Windows logo.**
+  Ring (pstore-src29.bin): the PSCI EL2 shim runs IDENTICALLY to the release (=PSCI2 start .. stage0=
+  EXTERNAL-PASS .. INSTALL0/1 .. hcr=80080002 .. selftest=7fffc .. verdict=SHIM-UNVERIFIED, =PREWDT ARMED --
+  =PREWDT is printed by the shim, not by any source). After it: release BDS does stall> loops (1 ms x2, 50 ms
+  x2, ...) and goes on to =LFCR/FAT/bootmgfw; OUR BDS does two apl and never calls a boot service again while
+  =HB heartbeats keep ticking (36 s). => the release's BdsDxe (+7 KB) carries the post-shim code path.
+  patches/0020 = transplant the release's BdsDxe (6d33944a-...) and SecurityStubDxe (f80697e9-..., 5.7 KB).
+  src30 = 0001,0002,0005,0018,0019,0020 (building). Untransplanted release files left: DxeCore (-4 KB),
+  UfsPassThruDxe (+2 KB), 6e89af20 freeform (all 0xFF padding, 2.8 KB), ~512 B deltas in 6 stock modules.
