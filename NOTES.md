@@ -538,3 +538,8 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   0x12e0 and uses `dc zva` (faults with MMU off, = our patches/0002). Patched 0x12e0 `mrs x5, dczid_el0`
   (d53b00e5) -> `mov x5, #0x10` (d2800205): DZP set -> plain-store loop. build/woa/uefi-22621.7582-nozva.bin,
   BOOT = out/xnu-boot-rel7582-nozva.img (sha256 064ee781...).
+- 2026-10-26 17:00: rel7582-nozva: SEC death, identical ring (pstore-vg6-nozva.bin) -> the release's SEC death
+  is NOT the dc-zva fault; hypothesis dropped. Entry addresses so far: 0x82a19000 (died x2+5), 0x829e1000 (the
+  one success), 0x829a1000 (died) -- S-Boot's placement of the boot image varies between runs; 3 samples, no
+  conclusion. Pivot: every src build so far ran on VG4 only, and the stage they stalled at (pre-=EBSENTER) is the
+  stage VG6 unblocked for the release. Testing src25 (minimal handoff, SEC passes reliably) on VG6 as-is.
