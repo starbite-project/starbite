@@ -1087,7 +1087,7 @@ static int engineer(const struct star_info *in, char *cmdline, unsigned len)
  * until a choice is made (the woa FD lands at 0x90000000 only after). 17 MiB. */
 #define SCREEN_SAVE 0x94000000UL
 
-static const unsigned char v5_os[5] = { 0, 1, 2, 3, V5_CARD };   /* iOS, Windows, Android, Linux, card */
+static const unsigned char v5_os[5] = { 2, 0, 3, 1, V5_CARD };   /* top to bottom: Android, iOS, Linux, Windows, card */
 static const unsigned char v5_svc[2] = { V5_RECOVERY, V5_DOWNLOAD };
 
 static void screen_copy(uintptr_t dst, uintptr_t src)
@@ -1211,6 +1211,8 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
     struct v5 m = { 0, 0, 0 };
     v5_linux = star_store_has("linux.image");
     v5_android = star_store_has("android.kernel");
+    while (!v5_avail(v5_os[m.os]))                  /* start on the first installed OS */
+        ++m.os;
     /* One-shot "boot Linux next" from Linux itself (tools/linux/reboot-linux):
      * u64 "SBNEXTLX" in the retained page above the pmsg ring, cleared here. */
     volatile uint64_t *next = (volatile uint64_t *)0xFED17FE0UL;
@@ -1218,7 +1220,7 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
         *next = 0;
         __asm__ volatile("dsb sy" : : : "memory");
         if (v5_linux) {
-            m.os = 3;
+            m.os = 2;                               /* Linux's place in v5_os */
             v5_draw(&m);
             v5_starting(3);
             return 4;
@@ -1239,7 +1241,12 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
         if (k == K_TAP) {
             int hit = v5_hit(tx, ty);
             int svc = hit == (int)V5_RECOVERY || hit == (int)V5_DOWNLOAD;
-            unsigned idx = svc ? (hit == (int)V5_DOWNLOAD) : (hit == (int)V5_CARD ? 4U : (unsigned)hit);
+            unsigned idx = 0;
+            if (svc)
+                idx = hit == (int)V5_DOWNLOAD;
+            else
+                while (idx < 4 && v5_os[idx] != (unsigned)hit)
+                    ++idx;
             if ((unsigned)svc == m.svc_focus && idx == (svc ? m.svc : m.os)) {
                 k = K_POWER;                        /* second tap starts it */
             } else {
@@ -1268,12 +1275,15 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
             int boot = star_font_blob(&fs, &fe) ? em_main(in, cmdline, len) : engineer(in, cmdline, len);
             screen_copy(STAR_FB_BASE, SCREEN_SAVE);
             star_fb_row_base(36);
-            if (boot) {
+            if (boot) {                             /* the menu's pick: 1 iOS, 2 Kiosk, 3 Windows, 4 Linux, 5 Android */
+                unsigned item = boot == 1 ? 0U : boot == 3 ? 1U : boot == 5 ? 2U : boot == 4 ? 3U : V5_CARD;
                 m.svc_focus = 0;
                 m.os = 0;
+                while (m.os < 4 && v5_os[m.os] != item)
+                    ++m.os;
                 v5_draw(&m);
-                v5_starting(0);
-                return 1;
+                v5_starting(item);
+                return boot;
             }
             continue;
         }

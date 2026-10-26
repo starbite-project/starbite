@@ -1195,3 +1195,13 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   /firmware/android fstab node, which would override the ramdisk fstab in Android 17's first stage):
   every OS now gets LineageOS's DTB from S-Boot - iOS/Windows/Kiosk still to be re-checked.
   BOOT out/xnu-boot-android1.img (sha 36a97223...), store 7afe504c....
+- 2026-10-27: **Boot menu v8, "Starred Wordmark" brand** (build/brand/wordmark: ink #eef1f6, accent #6fb3ff,
+  line #2c313b, Outfit 200/300/500, curved 4-point star). tools/brand/fonts/Outfit-wght.ttf (OFL) through a
+  private fontconfig (fonts/fonts.conf, FONTCONFIG_FILE for rsvg-convert), measure.py (Pillow) for exact
+  wordmark widths. Header "starbite" + star, rows reordered Android, iOS, Linux, Windows (ITEMS[].row;
+  item ids unchanged; menu.c v5_os {2,0,3,1,card}), uniform labels "<OS version> | <flavour> ·
+  <kernel/build>", own footer "powered by starbite" (overlay.png now only supplies the Starbite card).
+  EngineerMode 1.2: OS tab Android 17 / iOS 16 / iOS boot options / Linux / Windows 11 / Kiosk / OS store /
+  Start an OS; live partition filesystem probe (fs_kind: ext4 label, f2fs, HFS+, NTFS, FAT32), store listing
+  (star_store_entry), em_main returns the menu pick (1 iOS, 2 Kiosk, 3 Windows, 4 Linux, 5 Android).
+  BOOT out/xnu-boot-menu8.img (sha 0565e508...), 54.35 MB of 55 MiB.

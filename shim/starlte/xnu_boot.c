@@ -528,6 +528,26 @@ int star_store_has(const char *name)
     return store_open() && store_find(name, &e);
 }
 
+/* Entry i of the OS store for EngineerMode: name (24 bytes), size, CRC32.
+ * Returns the entry count (0: no store), or -1 past the end; *lba = the
+ * store's first block on LU0. */
+int star_store_entry(int i, char name[24], uint64_t *size, uint32_t *crc, uint64_t *lba)
+{
+    if (!store_open())
+        return 0;
+    uint32_t n = (uint32_t)u8le(UFS_BUF + 12, 4);
+    *lba = store_lba;
+    if (i < 0 || (uint32_t)i >= n || i >= 63)
+        return -1;
+    uintptr_t p = UFS_BUF + 64 + 64U * (uint32_t)i;
+    for (unsigned k = 0; k < 24; ++k)
+        name[k] = (char)*(volatile uint8_t *)(p + k);
+    name[23] = 0;
+    *size = u8le(p + 32, 8);
+    *crc = (uint32_t)u8le(p + 40, 4);
+    return (int)n;
+}
+
 /* CRC32 (IEEE, reflected) with the ARMv8 CRC32 instructions. */
 __attribute__((target("+crc"))) static uint32_t crc32_mem(uintptr_t p, uint64_t n)
 {

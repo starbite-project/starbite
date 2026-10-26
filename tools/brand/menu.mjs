@@ -41,9 +41,26 @@ const out = join(project, 'build/brand');
 mkdirSync(out, { recursive: true });
 
 const W = 1440;
-const INK = '#eef1f6', DIM = '#8a93a3', FAINT = '#3a404c', CORAL = '#6fb3ff', GOLD = '#ffd43b', AMBER = '#ffb547';
-const SANS = 'Avenir Next';
+// Starred Wordmark (build/brand/wordmark, the brand reference): ink #eef1f6, accent #6fb3ff,
+// line #2c313b, Outfit 200/300/500. Sprites stay on pure black (Samsung's splash ground).
+const INK = '#eef1f6', DIM = '#8a93a3', FAINT = '#4a5160', LINE = '#2c313b', ACCENT = '#6fb3ff', CORAL = ACCENT,
+  GOLD = '#ffd43b', AMBER = '#ffb547';
+const SANS = 'Outfit';
 const MONO = 'Menlo';
+// The brand star (4 points, curved), 200 x 200 box.
+const STAR = 'M100 8 C110 80 120 90 192 100 C120 110 110 120 100 192 C90 120 80 110 8 100 C80 90 90 80 100 8Z';
+const star = (x, y, size, fill) =>
+  `<path transform="translate(${x} ${y}) scale(${size / 200})" d="${STAR}" fill="${fill}"/>`;
+/** Advance width of s in Outfit at size/weight (tools/brand/measure.py, the real font). */
+const measure = (s, size, weight) =>
+  parseFloat(execFileSync(join(project, 'build/venv/bin/python'), [join(here, 'measure.py'), s, String(size), String(weight)]).toString());
+/** The wordmark: "starbite" in Outfit 200 with the accent star at its top right; (x, baseline). */
+function wordmark(x, y, size, { fill = INK, accent = ACCENT, anchor = 'start' } = {}) {
+  const w = measure('starbite', size, 200), st = size * 0.33, gap = size * 0.06;
+  const x0 = anchor === 'middle' ? x - (w + gap + st) / 2 : anchor === 'end' ? x - (w + gap + st) : x;
+  return text('starbite', { x: x0, y, size, weight: 200, fill, spacing: -size * 0.01 }) +
+    star(x0 + w + gap, y - size * 0.80, st, accent);
+}
 
 // ---- layout -------------------------------------------------------------
 export const LAYOUT = {
@@ -99,7 +116,11 @@ function decodePng(buf) {
   return { w, h, px };
 }
 
-const svgPng = (svg) => execFileSync('rsvg-convert', ['-f', 'png'], { input: svg, maxBuffer: 1 << 28 });
+// Outfit comes from tools/brand/fonts through a private fontconfig (nothing installed system-wide).
+const svgPng = (svg) => execFileSync('rsvg-convert', ['-f', 'png'], {
+  input: svg, maxBuffer: 1 << 28,
+  env: { ...process.env, FONTCONFIG_FILE: join(here, 'fonts/fonts.conf') },
+});
 
 /** Render an SVG of w x h and flatten it over black: Uint32Array 0xffRRGGBB. */
 function render(w, h, body) {
@@ -133,13 +154,15 @@ function icon(f, x, y, size, { fill, stroke } = {}) {
   return `<svg x="${x}" y="${y}" width="${size}" height="${size}" viewBox="${vb}" preserveAspectRatio="xMidYMid meet"><g ${paint}>${inner}</g></svg>`;
 }
 
+// Item ids are what the loader acts on (shim/starlte/menu.c v5_os); `row` is where each sits:
+// Android, iOS, Linux, Windows. Labels: "<OS version>" | "<flavour> · <kernel or build>".
 const ITEMS = [
-  { name: 'iOS 16', meta: '16.7.16 · XNU 8796', icon: (x, y, s) => icon('si-apple.svg', x, y, s, { fill: '#ffffff' }) },
-  { name: 'Windows 11', meta: '23H2 · ARM64', icon: (x, y, s) => icon('si-windows11.svg', x, y, s, { fill: '#0078d4' }) },
+  { name: 'iOS 16', meta: '16.7.16 · XNU 8796', row: 1, icon: (x, y, s) => icon('si-apple.svg', x, y, s, { fill: '#ffffff' }) },
+  { name: 'Windows 11', meta: '23H2 · NT 22631', row: 3, icon: (x, y, s) => icon('si-windows11.svg', x, y, s, { fill: '#0078d4' }) },
   // Android: the vendor 4.9 kernel + ramdisk from the UFS OS store; state 3 until installed.
-  { name: 'Android', meta: 'Android 16', icon: (x, y, s) => icon('si-android.svg', x, y, s, { fill: '#3ddc84' }), optional: true },
+  { name: 'Android 17', meta: 'LineageOS 24.0 · Linux 4.9', row: 0, icon: (x, y, s) => icon('si-android.svg', x, y, s, { fill: '#3ddc84' }), optional: true },
   // Linux: mainline 7.1 from the UFS OS store; state 3 when the store has no kernel.
-  { name: 'Linux', meta: 'mainline 7.1', icon: (x, y, s) => icon('tux.svg', x, y - s * 0.06, s * 1.12), optional: true },
+  { name: 'Linux', meta: 'postmarketOS · Linux 7.1', row: 2, icon: (x, y, s) => icon('tux.svg', x, y - s * 0.06, s * 1.12), optional: true },
 ];
 
 // row state: 0 normal, 1 selected, 2 starting, 3 disabled, 4 selected but inactive
@@ -148,15 +171,16 @@ function rowSvg(it, state) {
   const sel = state === 1 || state === 2;
   const op = state === 3 ? 0.32 : sel || state === 4 ? 1 : 0.8;
   const pill = sel
-    ? `<rect x="2" y="2" width="${w - 4}" height="${h - 4}" rx="${(h - 4) / 2}" fill="#ffffff" fill-opacity="0.075" stroke="#ffffff" stroke-opacity="0.14" stroke-width="3"/>`
+    ? `<rect x="2" y="2" width="${w - 4}" height="${h - 4}" rx="36" fill="${ACCENT}" fill-opacity="0.07" stroke="${ACCENT}" stroke-opacity="0.55" stroke-width="3"/>` +
+      star(w - 64 - 30, 24, 30, ACCENT)
     : state === 4
-      ? `<rect x="2" y="2" width="${w - 4}" height="${h - 4}" rx="${(h - 4) / 2}" fill="none" stroke="#ffffff" stroke-opacity="0.09" stroke-width="3"/>`
+      ? `<rect x="2" y="2" width="${w - 4}" height="${h - 4}" rx="36" fill="none" stroke="${LINE}" stroke-width="3"/>`
       : '';
   const ic = 76, ix = 52, iy = (h - ic) / 2;
   const meta = state === 2 ? 'starting…' : state === 3 ? 'not installed' : it.meta;
   return pill + `<g opacity="${op}">${it.icon(ix, iy, ic)}</g>` +
-    text(it.name, { x: ix + ic + 40, y: h / 2 + 21, size: 60, weight: sel ? 600 : 500, fill: sel ? INK : DIM, opacity: state === 3 ? 0.45 : 1 }) +
-    text(meta, { x: w - 64, y: h / 2 + 13, size: 34, family: MONO, fill: state === 2 ? CORAL : sel ? DIM : FAINT, anchor: 'end', opacity: state === 3 ? 0.7 : 1 });
+    text(it.name, { x: ix + ic + 40, y: h / 2 + 21, size: 60, weight: sel ? 400 : 300, fill: sel ? INK : DIM, opacity: state === 3 ? 0.45 : 1 }) +
+    text(meta, { x: w - 64 - (sel ? 46 : 0), y: h / 2 + 13, size: 36, weight: 300, fill: state === 2 ? ACCENT : sel ? DIM : FAINT, anchor: 'end', opacity: state === 3 ? 0.7 : 1 });
 }
 
 // chip state: 0 normal, 1 selected, 2 starting
@@ -170,8 +194,8 @@ function chipSvg(c, state) {
   const box = `<rect x="3" y="3" width="${w - 6}" height="${h - 6}" rx="36" fill="${on ? c.accent : '#ffffff'}" fill-opacity="${on ? 0.1 : 0}" stroke="${on ? c.accent : FAINT}" stroke-width="${on ? 4 : 3}"/>`;
   const ic = 60;
   return box + c.icon(44, (h - ic) / 2, ic, on ? c.accent : DIM) +
-    text(c.name, { x: 44 + ic + 30, y: 56, size: 46, weight: on ? 600 : 500, fill: on ? INK : DIM }) +
-    text(state === 2 ? 'rebooting…' : c.meta, { x: 44 + ic + 30, y: 96, size: 28, family: MONO, fill: on ? (state === 2 ? c.accent : DIM) : FAINT });
+    text(c.name, { x: 44 + ic + 30, y: 56, size: 46, weight: on ? 400 : 300, fill: on ? INK : DIM }) +
+    text(state === 2 ? 'rebooting…' : c.meta, { x: 44 + ic + 30, y: 96, size: 30, weight: 300, fill: on ? (state === 2 ? c.accent : DIM) : FAINT });
 }
 
 // ---- RLE sprites -------------------------------------------------------------
@@ -189,19 +213,17 @@ function sprite(id, x, y, w, h, px) {
 // Base: header + label.
 {
   const { y, h } = LAYOUT.header;
-  const mark = 96;
   const body =
-    starbiteMark(70, (h - mark) / 2, mark, 'hd') +
-    text('Starbite', { x: 70 + mark + 32, y: h / 2 + 24, size: 72, weight: 600, fill: INK, spacing: -1 }) +
-    text('SM-G960F · starlte', { x: W - 70, y: h / 2 + 12, size: 32, family: MONO, fill: DIM, anchor: 'end' });
+    wordmark(74, h / 2 + 34, 104) +
+    text('Galaxy S9 · SM-G960F', { x: W - 74, y: h / 2 + 14, size: 36, weight: 300, fill: DIM, anchor: 'end' });
   sprite(0, 0, y, W, h, render(W, h, body));
   const l = LAYOUT.label;
-  const lb = text('BOOT', { x: 74, y: 30, size: 28, family: MONO, fill: DIM, spacing: 7 }) +
-    `<rect x="190" y="18" width="${W - 260}" height="2" fill="${FAINT}"/>`;
+  const lb = text('BOOT', { x: 74, y: 30, size: 28, weight: 500, fill: DIM, spacing: 7 }) +
+    `<rect x="190" y="18" width="${W - 260}" height="2" fill="${LINE}"/>`;
   sprite(0, 0, l.y, W, l.h, render(W, l.h, lb));
   const sv = LAYOUT.service;
-  const sl = text('SERVICE · BIXBY', { x: 74, y: 30, size: 28, family: MONO, fill: DIM, spacing: 7 }) +
-    `<rect x="470" y="18" width="${W - 540}" height="2" fill="${FAINT}"/>`;
+  const sl = text('SERVICE · BIXBY', { x: 74, y: 30, size: 28, weight: 500, fill: DIM, spacing: 7 }) +
+    `<rect x="440" y="18" width="${W - 510}" height="2" fill="${LINE}"/>`;
   sprite(0, 0, sv.y, W, sv.h, render(W, sv.h, sl));
 }
 
@@ -209,7 +231,7 @@ function sprite(id, x, y, w, h, px) {
 const SID = (item, state) => 16 + 8 * item + state;
 ITEMS.forEach((it, i) => {
   const r = LAYOUT.rows;
-  const y = r.y0 + i * r.stride;
+  const y = r.y0 + it.row * r.stride;
   const states = it.disabled ? [3] : it.optional ? [0, 1, 2, 3, 4] : [0, 1, 2, 4];
   for (const st of states) sprite(SID(i, st), r.x, y, r.w, r.h, render(r.w, r.h, rowSvg(it, st)));
 });
@@ -247,7 +269,7 @@ CHIPS.forEach((c, k) => {
     return o;
   };
   const ring = `<rect x="6" y="6" width="${sw - 12}" height="${c.h + 2 * pad - 12}" rx="56" fill="none" stroke="${GOLD}" stroke-width="7"/>`;
-  const label = (s, fill) => text(s, { x: sw / 2, y: c.h + 2 * pad + 50, size: 34, family: MONO, fill, anchor: 'middle', spacing: 2 });
+  const label = (s, fill) => text(s, { x: sw / 2, y: c.h + 2 * pad + 50, size: 36, weight: 400, fill, anchor: 'middle', spacing: 2 });
   const x = c.x - pad, y = c.y - pad;
   const dimRing = `<rect x="6" y="6" width="${sw - 12}" height="${c.h + 2 * pad - 12}" rx="56" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="5"/>`;
   sprite(SID(5, 0), x, y, sw, sh, overlayOn(''));
@@ -255,20 +277,17 @@ CHIPS.forEach((c, k) => {
   sprite(SID(5, 2), x, y, sw, sh, overlayOn(ring + label('STARTING THE LINUX KIOSK…', CORAL)));
   sprite(SID(5, 4), x, y, sw, sh, overlayOn(dimRing));
 
-  // Footer (Powered by Starbite) from overlay.png, over Samsung's "Powered by android".
+  // Footer over Samsung's "Powered by android": "powered by" + the wordmark.
   const fy = LAYOUT.footerY, fh = ov.h - fy;
-  const f = new Uint32Array(W * fh);
-  for (let i = 0; i < W * fh; i++) {
-    const s = (fy * ov.w + i) * 4, a = ov.px[s + 3] / 255;
-    f[i] = (0xff000000 | (Math.round(ov.px[s] * a) << 16) | (Math.round(ov.px[s + 1] * a) << 8) | Math.round(ov.px[s + 2] * a)) >>> 0;
-  }
-  sprite(0, 0, fy, W, fh, f);
+  sprite(0, 0, fy, W, fh, render(W, fh,
+    text('powered by', { x: W / 2, y: 200, size: 44, weight: 300, fill: DIM, anchor: 'middle', spacing: 1 }) +
+    wordmark(W / 2, 330, 118, { anchor: 'middle' })));
 }
 
 // Hints under "Powered by Starbite": Engineer (item 7, tappable) and power off (item 8).
 {
   const hn = LAYOUT.hint;
-  const hint = (s) => text(s, { x: hn.w / 2, y: 42, size: 26, family: MONO, fill: DIM, anchor: 'middle', spacing: 2 });
+  const hint = (s) => text(s, { x: hn.w / 2, y: 42, size: 28, weight: 300, fill: DIM, anchor: 'middle', spacing: 2 });
   sprite(SID(7, 0), W / 2 - hn.w - 20, hn.y, hn.w, hn.h, render(hn.w, hn.h, hint('HOLD BIXBY  ·  ENGINEER MODE')));
   sprite(SID(8, 0), W / 2 + 20, hn.y, hn.w, hn.h, render(hn.w, hn.h, hint('HOLD VOL+ & VOL−  ·  POWER OFF')));
 }
@@ -312,8 +331,8 @@ console.log(`build/brand/menu.sbm: ${sprites.length} sprites, ${buf.length} byte
   const lpng = decodePng(svgPng(`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${W}" height="${H}"><rect width="${W}" height="${H}" fill="#000"/><image x="180" y="1144" width="1079" height="1747" xlink:href="data:image/jpeg;base64,${readFileSync(logo).toString('base64')}"/></svg>`));
   for (let i = 0; i < W * H; i++) fb[i] = (0xff000000 | (lpng.px[i * 4] << 16) | (lpng.px[i * 4 + 1] << 8) | lpng.px[i * 4 + 2]) >>> 0;
   const sel = process.env.PREVIEW === 'alt'
-    ? [SID(0, 4), SID(1, 0), SID(2, 3), SID(3, 3), SID(4, 1), SID(6, 0), SID(5, 0), SID(7, 0), SID(8, 0)]
-    : [SID(0, 1), SID(1, 0), SID(2, 3), SID(3, 3), SID(4, 0), SID(6, 0), SID(5, 0), SID(7, 0), SID(8, 0)];
+    ? [SID(2, 4), SID(0, 0), SID(1, 0), SID(3, 0), SID(4, 1), SID(6, 0), SID(5, 0), SID(7, 0), SID(8, 0)]
+    : [SID(2, 1), SID(0, 0), SID(1, 0), SID(3, 0), SID(4, 0), SID(6, 0), SID(5, 0), SID(7, 0), SID(8, 0)];
   const want = (id) => id === 0 || sel.includes(id);
   for (const s of sprites) if (want(s.id))
     for (let y = 0; y < s.h; y++) for (let x = 0; x < s.w; x++) fb[(s.y + y) * W + s.x + x] = s.px[y * s.w + x];

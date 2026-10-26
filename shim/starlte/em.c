@@ -793,8 +793,8 @@ static void fill_device_info(void)
     kv_arg("PMIC info", "pmic_info");
     kv_arg("CCIC info", "ccic_info");
     kv_hdr("STARBITE");
-    kv_add("Boot menu", "v7 (sprites + touch)");
-    kv_add("EngineerMode", "1.0");
+    kv_add("Boot menu", "v8 (Starred Wordmark, touch)");
+    kv_add("EngineerMode", "1.2");
 }
 
 /* ---- trapped reads (em_vec.S) ---------------------------------------------- */
@@ -2254,6 +2254,154 @@ static void fill_kiosk(void)
     kv_add("Sponsor", "none");
 }
 
+static void fs_kind(uint64_t lba, struct ub *u);   /* STORAGE section */
+
+/* Store entries whose name starts with prefix, as rows "name  size  crc". */
+static void kv_store(const char *prefix)
+{
+    char name[24];
+    uint64_t size, lba;
+    uint32_t crc;
+    int n = star_store_entry(0, name, &size, &crc, &lba), shown = 0;
+    for (int i = 0; i < n; ++i) {
+        if (star_store_entry(i, name, &size, &crc, &lba) < 0)
+            break;
+        unsigned k = 0;
+        while (prefix[k] && name[k] == prefix[k])
+            ++k;
+        if (prefix[k])
+            continue;
+        struct ub v;
+        ub_init(&v);
+        ub_size(&v, size);
+        ub_s(&v, "  crc ");
+        ub_hexn(&v, crc, 8);
+        kv_add(name, v.b);
+        ++shown;
+    }
+    if (!shown)
+        kv_addc("OS store", n ? "no entries for this OS" : "no store on USERDATA", UI_RED);
+}
+
+/* Partition row: size and the filesystem found on it, live. */
+static void kv_part(const char *label, const char *gpt, const char *role)
+{
+    uint64_t first, last;
+    struct ub v;
+    ub_init(&v);
+    if (!gpt_find(gpt, &first, &last)) {
+        kv_addc(label, "no such partition", UI_RED);
+        return;
+    }
+    ub_size(&v, (last - first + 1) * 4096U);
+    ub_s(&v, "  ");
+    fs_kind(first, &v);
+    if (role) {
+        ub_s(&v, "  ");
+        ub_s(&v, role);
+    }
+    kv_add(label, v.b);
+}
+
+static void fill_android(void)
+{
+    kv_hdr("ANDROID 17 " UI_DOT " LINEAGEOS 24.0");
+    kv_add("Build", "lineage-24.0-20261025 unofficial (krazey90)");
+    kv_add("Kernel", "Samsung Linux 4.9.337, first-stage init");
+    kv_add("Device tree", "LineageOS DTBH in BOOT, S-Boot fixups");
+    kv_add("Boot path", "loader: kernel + ramdisk from the OS store");
+    kv_hdr("OS STORE (LIVE)");
+    kv_store("android.");
+    kv_hdr("PARTITIONS (LIVE)");
+    kv_part("SYSTEM", "SYSTEM", "/system");
+    kv_part("VENDOR", "VENDOR", "/vendor");
+    kv_part("ODM", "ODM", "/metadata");
+    kv_part("A16DATA", "A16DATA", "/data");
+    kv_hdr("PROTECTIONS");
+    kv_addc("/data", "A16DATA (vendor + ramdisk fstab, sepolicy)", UI_GREEN);
+    kv_addc("TWRP /data", "A16DATA: recovery wipes cannot reach USERDATA", UI_GREEN);
+    kv_addc("Updater", "removed: its OTA zips would write BOOT", UI_GREEN);
+    kv_add("USERDATA", "never mounted by Android");
+}
+
+static void fill_linux(void)
+{
+    kv_hdr("LINUX 7.1 " UI_DOT " POSTMARKETOS EDGE");
+    kv_add("Kernel", "mainline 7.1 + Exynos 9810 port drivers");
+    kv_add("Desktop", "Plasma Mobile, OpenRC");
+    kv_add("Root", "microSD: /starbite-linux.img (ext4, 8 GiB)");
+    kv_add("GPU", "Mali-G72 MC18 via Panfrost (Mesa)");
+    kv_add("Display", "s9p-decon KMS, 60 Hz");
+    kv_add("Wi-Fi", "BCM4361 via brcmfmac (PCIe)");
+    kv_add("CPUs", "8 cores: 4x Cortex-A55 + 4x Mongoose M3");
+    kv_add("USB", "network 172.16.42.1: SSH (telnet in rescue)");
+    kv_add("Rescue", "hold Vol down while Linux starts");
+    kv_add("Internal UFS", "read-only under Linux");
+    kv_hdr("OS STORE (LIVE)");
+    kv_store("linux.");
+}
+
+static void fill_store(void)
+{
+    char name[24];
+    uint64_t size, lba, used = 4096;
+    uint32_t crc;
+    struct ub v;
+    int n = star_store_entry(0, name, &size, &crc, &lba);
+    kv_hdr("SBSTORE1 " UI_DOT " USERDATA +16 GIB (LIVE)");
+    if (!n) {
+        kv_addc("Store", "not found", UI_RED);
+        return;
+    }
+    kv_dec("First block (LU0)", lba, 0);
+    kv_dec("Entries", (uint64_t)n, 0);
+    kv_hdr("ENTRIES");
+    for (int i = 0; i < n; ++i) {
+        if (star_store_entry(i, name, &size, &crc, &lba) < 0)
+            break;
+        ub_init(&v);
+        ub_size(&v, size);
+        ub_s(&v, "  crc ");
+        ub_hexn(&v, crc, 8);
+        kv_add(name, v.b);
+        used += (size + 4095U) & ~4095ULL;
+    }
+    kv_hdr("SPACE");
+    ub_init(&v);
+    ub_size(&v, used);
+    ub_s(&v, " of 1 GiB");
+    kv_add("Used", v.b);
+    kv_add("Written by", "TWRP or Linux, checked readback");
+}
+
+/* Start an OS straight from EngineerMode: E.boot = the boot menu's pick. */
+static int start_avail[5];
+
+static void build_start(void)
+{
+    start_avail[0] = star_store_has("android.kernel");
+    start_avail[2] = star_store_has("linux.image");
+    start_avail[1] = start_avail[3] = start_avail[4] = 1;
+    row_add("Android 17", "LineageOS 24.0", start_avail[0] ? 0 : R_DIS);
+    row_add("iOS 16", "with the current boot options", 0);
+    row_add("Linux", "postmarketOS", start_avail[2] ? 0 : R_DIS);
+    row_add("Windows 11", "23H2", 0);
+    row_add("Linux kiosk", "Linux kiosk", 0);
+}
+
+static int act_start(int i)
+{
+    static const unsigned char pick[5] = { 5, 1, 4, 3, 2 };
+    if (i < 0 || i > 4 || !start_avail[i])
+        return 0;
+    if (!dialog("Start", rows[i].t, "Leaves EngineerMode.", "START"))
+        return 0;
+    if (pick[i] == 1)
+        hw_opt_apply(E.cmd, E.len);
+    E.boot = pick[i];
+    return 1;
+}
+
 /* ======================================================================= */
 /* LOG AND DEBUGGING                                                          */
 /* ======================================================================= */
@@ -2688,6 +2836,40 @@ static void fill_ufs_dev(void)
     }
 }
 
+/* What sits at LU0 block lba (superblock magics), e.g. "ext4 \"vendor\"". */
+static void fs_kind(uint64_t lba, struct ub *u)
+{
+    if (ufs_read(lba, 1)) {
+        ub_s(u, "unreadable");
+        return;
+    }
+    const uintptr_t b = UFS_BUF;
+    uint32_t f2 = (uint32_t)u8r(b + 1024) | (uint32_t)u8r(b + 1025) << 8 | (uint32_t)u8r(b + 1026) << 16 |
+                  (uint32_t)u8r(b + 1027) << 24;
+    if (u8r(b + 1080) == 0x53 && u8r(b + 1081) == 0xef) {
+        ub_s(u, "ext4");
+        if (u8r(b + 1144)) {
+            ub_s(u, " \"");
+            for (unsigned i = 0; i < 16 && u8r(b + 1144 + i); ++i)
+                ub_c(u, (char)u8r(b + 1144 + i));
+            ub_c(u, '"');
+        }
+    } else if (f2 == 0xf2f52010U) {
+        ub_s(u, "f2fs");
+    } else if (u8r(b + 1024) == 'H' && (u8r(b + 1025) == '+' || u8r(b + 1025) == 'X')) {
+        ub_s(u, "HFS+ (iOS)");
+    } else if (u8r(b + 3) == 'N' && u8r(b + 4) == 'T' && u8r(b + 5) == 'F' && u8r(b + 6) == 'S') {
+        ub_s(u, "NTFS");
+    } else if (u8r(b + 82) == 'F' && u8r(b + 83) == 'A' && u8r(b + 84) == 'T') {
+        ub_s(u, "FAT32");
+    } else {
+        int zero = 1;
+        for (unsigned i = 0; i < 4096 && zero; i += 8)
+            zero = !*(volatile uint64_t *)(b + i);
+        ub_s(u, zero ? "empty" : "raw data");
+    }
+}
+
 static void fill_partitions(void)
 {
     struct ub k, v;
@@ -2710,21 +2892,27 @@ static void fill_partitions(void)
         ub_s(&k, gpt_name[i]);
         ub_init(&v);
         ub_size(&v, n * 4096U);
-        ub_s(&v, "  @ ");
-        ub_dec(&v, gpt_first[i]);
+        ub_s(&v, "  ");
+        fs_kind(gpt_first[i], &v);
         const char *g = gpt_name[i];
         int mine = (g[0] == 'W' && g[1] == 'I' && g[2] == 'N') || (g[0] == 'A' && g[1] == '1' && g[2] == '6') ||
-                   (g[0] == 'U' && g[1] == 'S' && g[2] == 'E' && g[3] == 'R') || (g[0] == 'B' && g[1] == 'O' && g[2] == 'O' && g[3] == 'T');
+                   (g[0] == 'U' && g[1] == 'S' && g[2] == 'E' && g[3] == 'R') || (g[0] == 'B' && g[1] == 'O' && g[2] == 'O' && g[3] == 'T') ||
+                   (g[0] == 'S' && g[1] == 'Y' && g[2] == 'S') || (g[0] == 'V' && g[1] == 'E' && g[2] == 'N') ||
+                   (g[0] == 'O' && g[1] == 'D' && g[2] == 'M') || (g[0] == 'R' && g[1] == 'E' && g[2] == 'C');
         kv_addc(k.b, v.b, mine ? UI_HOLO : UI_TEXT);
     }
     ub_init(&v);
     ub_size(&v, total * 4096U);
     kv_add("Partitioned", v.b);
     kv_hdr("STARBITE");
-    kv_add("BOOT", "this loader + iOS + Windows UEFI");
-    kv_add("USERDATA", "iOS root + Linux kiosk");
+    kv_add("BOOT", "this loader + iOS payload + Windows UEFI");
+    kv_add("RECOVERY", "TWRP 3.7.0 (/data = A16DATA)");
+    kv_add("USERDATA", "iOS root, OS store (+16 GiB), Kiosk (+17 GiB)");
+    kv_add("SYSTEM / VENDOR", "Android 17 (LineageOS 24.0)");
+    kv_add("ODM", "Android /metadata");
+    kv_add("A16DATA", "Android /data (f2fs)");
     kv_add("WINESP / WINDOWS", "Windows 11");
-    kv_add("A16DATA", "Android (later)");
+    kv_add("microSD", "postmarketOS root (image file)");
 }
 
 /* ---- speed test --------------------------------------------------------------- */
@@ -3504,7 +3692,7 @@ static void peek_screen(void)
 
 static void fill_about(void)
 {
-    kv_big("Starbite EngineerMode", "1.0");
+    kv_big("Starbite EngineerMode", "1.2");
     kv_hdr("ABOUT");
     kv_add("Platform", "Galaxy S9 SM-G960F, Exynos 9810");
     kv_add("Runs in", "the Starbite loader (EL1, MMU off)");
@@ -3580,12 +3768,14 @@ static void build_tab(int t)
         row_add("Sector viewer", "raw LU0 blocks, hex + ASCII", 0);
         break;
     case 4:
+        row_add("Android 17", "LineageOS 24.0: store, partitions, safety", 0);
         row_add("iOS 16", "XNU 8796, 1 GiB, boot-args", 0);
         row_add("iOS boot options", "multi-block, flags, boot iOS", 0);
+        row_add("Linux", "postmarketOS on mainline 7.1", 0);
         row_add("Windows 11", "firmware, RAM stage, last run report", 0);
         row_add("Linux kiosk", "Linux kiosk", 0);
-        row_add("Android", "not installed", R_DIS);
-        row_add("Linux", "not installed", R_DIS);
+        row_add("OS store", "kernels on UFS: entries, sizes, CRCs", 0);
+        row_add("Start an OS", "boot any installed system now", 0);
         break;
     case 5:
         row_add("Boot log", "pmsg ring at 0xFED14000", 0);
@@ -3640,10 +3830,14 @@ static void open_item(int t, int i)
     case 0x32: info_screen("UFS device and health", fill_ufs_dev, 0); break;
     case 0x33: run_speed(); break;
     case 0x34: sector_screen(); break;
-    case 0x40: info_screen("iOS 16", fill_ios, 0); break;
-    case 0x41: list_screen("iOS boot options", build_ios_opts, act_ios_opts); break;
-    case 0x42: info_screen("Windows 11", fill_windows, 0); break;
-    case 0x43: info_screen("Linux kiosk", fill_kiosk, 0); break;
+    case 0x40: info_screen("Android 17", fill_android, 0); break;
+    case 0x41: info_screen("iOS 16", fill_ios, 0); break;
+    case 0x42: list_screen("iOS boot options", build_ios_opts, act_ios_opts); break;
+    case 0x43: info_screen("Linux", fill_linux, 0); break;
+    case 0x44: info_screen("Windows 11", fill_windows, 0); break;
+    case 0x45: info_screen("Linux kiosk", fill_kiosk, 0); break;
+    case 0x46: info_screen("OS store", fill_store, 0); break;
+    case 0x47: list_screen("Start an OS", build_start, act_start); break;
     case 0x50: show_pmsg(); break;
     case 0x51: show_records(); break;
     case 0x52: show_cmdline(); break;
@@ -3795,7 +3989,7 @@ static int em_run(const struct star_info *in, char *cmdline, unsigned len)
             redraw = 1;
         }
         if (E.boot)
-            return 1;
+            return E.boot;
         if (E.home) {
             hw_tp_clear();
             while (hw_keys())
