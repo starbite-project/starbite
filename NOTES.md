@@ -560,3 +560,16 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   The virtiofs mount is READ-ONLY from the guest in this lima -> build-uefi.sh's cp silently failed and
   the first "src26" flash was src25's FD again (sha 7a0e17d8..., ignore). build-uefi.sh now copies the FD and
   bootshim out via `limactl shell cat`. src26 = patches 0001-0006 only (published pre-EBS gate intact).
+- 2026-10-26 18:00: **src26 (0001-0006 only) on VG6: frozen logo, HUD last event `gmm`; ring
+  (pstore-vg6-src26.bin) ends at winload's FINAL size probe (bt0e2/e3: pra=0x90fc53d8, in=0 -> out=0x1410,
+  E0005) then dark, no =EBSENTER. Event-for-event IDENTICAL to pstore-win2 (VG4, pre-0007): VG6 changed nothing
+  for our build; and dropping the handoff didn't either (so the handoff was never the wall -- it was 0007's
+  attempt at this same hang). RELEASE (VG6, reached the kernel): the same 0x90fc53d8 probe at bt047 returns
+  out=0x0f00 and winload CONTINUES (loop queries, 0x90fc5ef0/5fac in=0/0x3000, 0x90fc5540 in=0x2000 S0000,
+  =EBSENTER). Our DXE memory map is ~25 descriptors larger throughout (loop out=0x14a0/0x1500 vs 0x1020;
+  probe 0x1410 vs 0x0f00; "ConvertPages: range covers multiple entries" in our ring). Hypothesis: winload's
+  probe caller can't take a map > 0x1000 (one page). Release FV decompressed (uefi-22621.7582-dxefv.bin, LZMA
+  section of FFS @0xe1e0): contains =EBSENTER/=GMMF/=NTPATCH/=STLBI/=CFQ/=WTRACE/=AF0/=KCTXV but NO
+  =HANDOFF/=AFRET/=WLSW/=AFG> -- the release has no winload handoff at all. NEXT: disassemble winload.efi
+  (pulled to build/woa/winbin/) at RVA 0xf3d8 (base 0x90fb6000) in lima to confirm the size limit, then shrink
+  the DXE map (coalesce / fewer allocations) below 0x1000.
