@@ -57,6 +57,12 @@ zero_log:
     mov x1, xzr               /* arm64 Linux boot protocol: x1-x3 zero */
     mov x2, xzr
     mov x3, xzr
+    /*
+     * edk2 PeilessSec reads TPIDRRO_EL0 as the Firmware Handoff transfer-list
+     * base even when x1 has no TL signature, and dereferences any nonzero
+     * value. S-Boot leaves it stale, so the woa UEFI died in SEC on some boots.
+     */
+    msr tpidrro_el0, xzr
     /* C cleaned the copied ranges and the log. XNU's entry needs MMU off. */
     mrs x14, sctlr_el1
     bic x14, x14, #1

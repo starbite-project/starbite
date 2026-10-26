@@ -586,3 +586,12 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   NEXT: src27 = patches 0001,0002,0005 only (drop pstore mirror/UFS diag/ring-wrap) -> does the map shrink?
   NOTE: a winload disassembly listing in a tool result tripped the session safety classifier; keep loader
   analysis to firmware-trace level in this transcript.
+- 2026-10-26 18:20: src26 re-run with the ORIGINAL hive: same gmm freeze -> the AutoReboot edit is cleared.
+  Next src26 run froze AT THE MENU: ring (pstore-src26b.bin) = "X 96000004 ELR 90004d0c FAR a341b040" =
+  data abort in PeilessSec TransferListCheckHeader. **ROOT CAUSE of the woa UEFI's intermittent SEC deaths:**
+  edk2 PeilessSec ModuleEntryPoint only writes TPIDRRO_EL0 when x1 == TL signature 0x14a0fb10b, but always
+  `mrs x2, TPIDRRO_EL0` and passes it to SecMain as TransferListBaseAddr; nonzero -> TransferListCheckHeader
+  dereferences it. S-Boot leaves TPIDRRO_EL0 stale (varies per boot) -> "sometimes dies right after U".
+  (So the nozva/dc-zva theory for the release was wrong.) FIX in our shim: xnu_boot.S zeroes TPIDRRO_EL0
+  next to x1-x3 before `br x16` (shim built in lima ~/shimbuild, copied out; old Image in
+  build/xnu_boot.Image.pre-tpidrro). Test: release UEFI (unmodified) + fixed shim = out/xnu-boot-rel7582-tpz.img.
