@@ -977,3 +977,22 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   Root cause of the >= 1.5 GiB misalignment is open (later: find which allocation hands out a PT page whose
   4-PTE group straddles; with 1 GiB that path apparently is not hit).
 - 2026-10-26 23:25: **iOS boots with 1 GiB in the second bank** (out/xnu-boot-ios-bank2-1g.img, was 472 MiB); user: home screen, "does feel smoother". This image is the new baseline for all three OSes (iOS bank2 1 GiB, Windows src37 3.4 GB, kiosk unchanged).
+- 2026-10-26 23:45: **Step 3 (storage safety + clock), part 1.**
+  CLOCK: the firmware uses edk2 VirtualRealTimeClockLib (Star2LtePkg.dsc) = saved epoch variable or the BUILD
+  time + uptime; no persistent variable store -> Windows wakes up at the release build time (2026-08-05 14:29)
+  every boot. The real clock is the PMIC RTC ("s2mp-rtc", rtc0 in TWRP): running, but was 2018-01-02 (never
+  set). Set it from TWRP: date -u -s @<host epoch>; hwclock -w -u -> 2026-10-26 19:51:08 UTC (= host). Part 2 =
+  a RealTimeClockLib on the PMIC RTC over SPEEDY in our firmware (register map research running).
+  STORAGE FENCE: installed Exynos9810Ufs.sys 9.0.0.1 keeps the published fence values as u64 literal-pool data
+  in .text (file 0x3ef0 gpt_backup 15615995, 0x3ef8 protA_last 1526911, 0x3f00 protA_first 1195136, 0x3f08
+  fence_first 68736, 0x3f10 protB_last 1697151, 0x3f18 protB_first 1680512; also 0x32d0/0x32d4 fence pair for
+  diagnostics only). Gate fn at VA 0x140004a3c (x2=lba, w3=count): GPT guard (lba<=5 or end>=backup), then
+  lba<=protA_last -> refuse if end>=protA_first else allow if lba>=fence_first; else lba>protB_last -> allow,
+  else refuse if end>=protB_first else allow if lba>=fence_first. On the S9 that allowed SYSTEM parts,
+  USERDATA (iOS/kiosk), A16DATA. S9 values: protA_first 0, protA_last 6613759, protB_last 0xFFFF..., protB_first
+  13518592 => writable exactly WINESP+WINDOWS (6613760..13518591); modelled per partition incl. straddles.
+  Re-signed with a self-signed "Starbite Test Signing" cert (osslsigncode, sha256; the original is self-signed
+  "S9 WoA Test Signing", testsigning on). Files: build/woa/ufs-sys/{Exynos9810Ufs.sys original 3448e0ef,
+  Exynos9810Ufs-s9fence-signed.sys 2d6c64ff, sign/ key+cert}. Installed over DriverStore\FileRepository\
+  exynos9810ufs.inf_arm64_56a2e6f01fbd68bc\Exynos9810Ufs.sys via ntfs-3g rw (volume was clean). Test: boot
+  Windows; if INACCESSIBLE_BOOT_DEVICE, restore the original from build/woa/ufs-sys.
