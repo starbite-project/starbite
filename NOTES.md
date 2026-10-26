@@ -1025,3 +1025,11 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   command, restores all four on mismatch; STARLTE_MULTI 32 -> 16. Kernel 17 s incremental (previous kernel:
   out/kernel.development.starlte.pre-ufsmulti). BOOT = out/xnu-boot-ufsmulti.img (iOS 1 GiB + ufsmulti=1,
   src38 Windows, kiosk; sha ebac754c...), flashed. Fallback: out/xnu-boot-src38.img.
+- 2026-10-27 01:20: ufsmulti test 1 (webcam photo): S-Boot vs_hci (real offsets) = tx 0xc rx 0xc nexus 0xffff
+  reorder 0xa axidma 0x18000003 (granule/reorder/burst already Linux-like); after programming tx 0x8000000c rx
+  0xc (RX bit31 does not stick) axidma 0x98000003: single-block 0/0 same; 16 x 128-byte entries: OCS 0 but
+  data DIFFER; registers restored; next READ(10) OCS 0xf -> ufsroot0 unavailable panic. Reading: entry size is
+  set by the FMP DESCTYPE (secure-only): S-Boot leaves 0 = standard 16-byte entries; Windows' 128-byte entries
+  need its UEFI's DESCTYPE 3; the woa UEFI's A98 notes ran 512 KiB multi-entry reads on DESCTYPE 0 with 16-byte
+  entries. Test 2: prdt_stride 16 (0300 updated). BOOT = out/xnu-boot-ufsmulti16.img (sha 3840b26a...).
+  Note: a failed multi command still kills the host for the rest of the boot (panic at root mount).
