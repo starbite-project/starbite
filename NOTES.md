@@ -672,3 +672,6 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   patches/0018 = drop RamManagerDxe (release-like map: bank 0 only). patches/0019 = transplant the 4 modules as
   binary FILE DRIVER entries (same GUIDs/sections, after the UFS host driver). src28 = 0001,0002,0005,0018
   (sha ebadfdfa..., flashed). src29 = + 0019 (building).
+- 2026-10-26 20:55: src28 (no RamManager): still the gmm freeze (pstore-src28.bin). The small map alone is not
+  it. src29 (+0019: release's P / PsciEl2ShimStage0Proven / RuntimeFrequency / 98100003 transplanted; verified
+  36 modules) flashed, sha 63e2fd0b....
