@@ -946,3 +946,14 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   failed test boot no longer poisons the install. Expect ~3.4 GiB in Windows (Task Manager / witness).
 - 2026-10-26 22:20: **src37 (RAM stage 3): Windows boots, Task Manager reports 3.4 GB** (was 1.4 GB). The 2 GiB
   high bank works as boot-services data like the low banks. BOOT stays src37.
+- 2026-10-26 22:35: post-mortem after the stage-3 run (postmortem-src37-run1) is unreadable: the shim's own dump
+  at the following menu boot already shows bit-decayed values ('WATL' 0x5741544C -> 0x45404040, WWR1 magic ->
+  0x00420015, RWD1 magic -> 0x00040410). A normal Windows RESTART now goes through the release ResetSystem =
+  PSCI SYSTEM_RESET = cold reset, and DRAM partly decays. The retained records only survive crashes and the
+  driver's own PMU SWRESET routes; Task Manager is the confirmation for stage 3 (3.4 GB).
+  iOS GPU (correction to the earlier plan): non-Apple GPU acceleration under iOS exists (hackiosx.dev):
+  HackiOS (POCO X5 Pro) and ios-topaz (Redmi Note 12, 2026-10-22) run Mesa freedreno behind CoreAnimation's
+  OpenGL ES renderer (whole UI on the GPU, Metal for apps not yet); Pixel 4 / UniXNU use Metal->Vulkan on
+  Turnip. Mali-G72 analogue: Mesa Panfrost (GLES 3.1, Bifrost v6) in the same GL ES slot + an XNU Mali kernel
+  driver (power/clocks, MMU address spaces, job chains, IRQs) modelled on Linux panfrost + Samsung mali_kbase
+  in our downstream kernel.
