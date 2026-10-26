@@ -598,6 +598,77 @@ star_linux_store(volatile uint64_t *log)
 }
 
 /*
+ * Android from the store: "android.kernel" (arm64 Image, Samsung 4.9) at
+ * RAM_BASE + text_offset like the Kiosk kernel, "android.ramdisk" (first
+ * stage init) at ANDROID_RD, and S-Boot's own FDT (the stock DTB it loaded,
+ * with its androidboot.* bootargs) copied to ANDROID_FDT with
+ * "android.cmdline" appended and /chosen linux,initrd-* pointing at the
+ * ramdisk. The display goes back as S-Boot left it: the vendor kernel
+ * initialises DECON itself.
+ */
+#define ANDROID_RD  0xa8000000UL
+#define ANDROID_FDT 0xad000000UL                /* up to LINUX_DTB */
+
+static uintptr_t
+star_android_store(volatile uint64_t *log, uintptr_t fdt)
+{
+    struct store_ent img, rd, cl;
+    static char cmdline[1024];
+    star_fb_text(1, "LOADING ANDROID FROM UFS");
+    if (!ufs_up())
+        return fail(log, -50, "UFS NOT READY");
+    if (!store_open() || !store_find("android.kernel", &img) || !store_find("android.ramdisk", &rd))
+        return fail(log, -51, "NO ANDROID IN THE OS STORE");
+    cmdline[0] = 0;
+    if (store_find("android.cmdline", &cl) && cl.size < sizeof(cmdline) - 1) {
+        if (store_load(&cl, UFS_BUF + (512U << 10)))
+            return fail(log, -52, "ANDROID CMDLINE READ OR CRC FAILED");
+        for (uint32_t i = 0; i < cl.size; ++i) {
+            char c = *(volatile char *)(UFS_BUF + (512U << 10) + i);
+            cmdline[i] = (c == '\n' || c == '\r') ? ' ' : c;
+        }
+        cmdline[cl.size] = 0;
+    }
+    if (rd.size > LINUX_DTB - ANDROID_RD - (16UL << 20))
+        return fail(log, -53, "ANDROID RAMDISK TOO LARGE");
+    if (store_load(&rd, ANDROID_RD))
+        return fail(log, -54, "ANDROID RAMDISK READ OR CRC FAILED");
+    if (ufs_read(img.lba, 1) || u8le(UFS_BUF + 56, 4) != 0x644d5241U)
+        return fail(log, -55, "BAD ANDROID KERNEL");
+    uint64_t text_offset = u8le(UFS_BUF + 8, 8), image_size = u8le(UFS_BUF + 16, 8);
+    if (image_size < img.size)
+        image_size = img.size;
+    uintptr_t dst = LINUX_BASE + text_offset;
+    if (text_offset >= (2UL << 20) || dst + image_size > ANDROID_RD)
+        return fail(log, -56, "ANDROID KERNEL TOO LARGE");
+    star_fb_hex(2, "ANDROID AT", dst);
+    int r = store_load(&img, dst);
+    if (r)
+        return fail(log, -57, r == -2 ? "ANDROID KERNEL CRC MISMATCH" : "ANDROID KERNEL READ FAILED");
+    uint32_t fsize = cmdline[0] ? fdt_copy_append_bootargs(fdt, ANDROID_FDT, LINUX_DTB - ANDROID_FDT, cmdline) : 0;
+    if (!fsize) {
+        uint32_t total = __builtin_bswap32(*(volatile uint32_t *)(fdt + 4));
+        if (cmdline[0] || total > LINUX_DTB - ANDROID_FDT)
+            return fail(log, -58, "ANDROID FDT FAILED");
+        copy_bytes(ANDROID_FDT, fdt, total);
+        fsize = total;
+    }
+    if (!fdt_chosen_set_u64(ANDROID_FDT, "linux,initrd-start", ANDROID_RD) ||
+        !fdt_chosen_set_u64(ANDROID_FDT, "linux,initrd-end", ANDROID_RD + rd.size))
+        return fail(log, -59, "NO INITRD PROPERTIES IN FDT");
+    clean_bytes(dst, dst + image_size);
+    clean_bytes(ANDROID_RD, ANDROID_RD + rd.size);
+    clean_bytes(ANDROID_FDT, ANDROID_FDT + fsize);
+    star_fb_restore((uint32_t)log[77]);
+    log[10] = 0x500;
+    log[15] = dst;
+    log[17] = ANDROID_FDT;
+    clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+    __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
+    return dst;
+}
+
+/*
  * Windows 11: the exynos9810-woa UEFI (BOOT kernel of its release image:
  * edk2-msm style bootshim + EDK2 FD) in an "SBUEFI!!" bundle. The bootshim
  * is position independent and copies the FD to 0x90000000 itself, so it is
@@ -888,6 +959,8 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
             return star_uefi(log, fdt, p, rd_start, rd_end);
         if (pick == 4)
             return star_linux_store(log);
+        if (pick == 5)
+            return star_android_store(log, fdt);
     }
     star_fb_text(0, "PROJECT STARBITE");
     star_fb_text(1, "");

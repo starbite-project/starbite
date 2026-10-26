@@ -136,7 +136,8 @@ function icon(f, x, y, size, { fill, stroke } = {}) {
 const ITEMS = [
   { name: 'iOS 16', meta: '16.7.16 · XNU 8796', icon: (x, y, s) => icon('si-apple.svg', x, y, s, { fill: '#ffffff' }) },
   { name: 'Windows 11', meta: '23H2 · ARM64', icon: (x, y, s) => icon('si-windows11.svg', x, y, s, { fill: '#0078d4' }) },
-  { name: 'Android', meta: 'not installed', icon: (x, y, s) => icon('si-android.svg', x, y, s, { fill: '#3ddc84' }), disabled: true },
+  // Android: the vendor 4.9 kernel + ramdisk from the UFS OS store; state 3 until installed.
+  { name: 'Android', meta: 'Android 16', icon: (x, y, s) => icon('si-android.svg', x, y, s, { fill: '#3ddc84' }), optional: true },
   // Linux: mainline 7.1 from the UFS OS store; state 3 when the store has no kernel.
   { name: 'Linux', meta: 'mainline 7.1', icon: (x, y, s) => icon('tux.svg', x, y - s * 0.06, s * 1.12), optional: true },
 ];

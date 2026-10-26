@@ -1178,3 +1178,20 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   devfreq (simple_ondemand, 260/455/572 MHz) sat at 260 MHz 99.8 % of the time. Test: userspace
   governor at 572 MHz (36 C idle) - not persistent yet. App start is also bound by the microSD
   (22.6 MB/s, high speed; UHS needs the 1.8 V switch on LDO2).
+- 2026-10-27: **Android 17 (LineageOS 24.0, krazey90 unofficial, 2026-10-25) installed** (research:
+  build/android-research.md). Zip md5 740fb095...; never flashed (it writes BOOT). Unpacked in lima
+  (tools/android/sdat2img.py): SYSTEM 4561305600 B (Updater app removed: its OTAs are install zips that
+  write BOOT), VENDOR 681574400 B with /data -> by-name/A16DATA in etc/fstab.samsungexynos9810 and
+  (userdata|USERDATA|A16DATA) -> userdata_block_device in vendor_file_contexts (sed dropped the
+  security.selinux xattrs; restored from the original image byte for byte), ramdisk fstab edited too.
+  ODM formatted ext4 "metadata" (Android 17's /metadata; mke2fs as the maintainer's sideload zip).
+  A16DATA: f2fs built in lima (mkfs.f2fs -g android -O encrypt,quota,project_quota,extra_attr,casefold
+  -C utf8 -l data) and written raw. All writes from TWRP, each verified by sha256 readback. RECOVERY =
+  TWRP 3.7.0 with /data = A16DATA (tools/android/twrp-a16data.py; out/twrp-3.7.0-a16data.img sha
+  94e2d5ed...): Android-triggered wipes can no longer reach USERDATA. Loader: star_android_store (store
+  android.kernel 38 MB at 0x92080000, android.ramdisk at 0xA8000000, S-Boot's FDT copied to 0xAD000000
+  with android.cmdline appended via fdt_copy_append_bootargs and /chosen initrd set), menu Android row
+  (item 2, pick 5). BOOT now packed on LineageOS's boot.img header + DTBH (its DT has no
+  /firmware/android fstab node, which would override the ramdisk fstab in Android 17's first stage):
+  every OS now gets LineageOS's DTB from S-Boot - iOS/Windows/Kiosk still to be re-checked.
+  BOOT out/xnu-boot-android1.img (sha 36a97223...), store 7afe504c....

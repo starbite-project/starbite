@@ -1087,7 +1087,7 @@ static int engineer(const struct star_info *in, char *cmdline, unsigned len)
  * until a choice is made (the woa FD lands at 0x90000000 only after). 17 MiB. */
 #define SCREEN_SAVE 0x94000000UL
 
-static const unsigned char v5_os[4] = { 0, 1, 3, V5_CARD };   /* iOS, Windows, Linux, card */
+static const unsigned char v5_os[5] = { 0, 1, 2, 3, V5_CARD };   /* iOS, Windows, Android, Linux, card */
 static const unsigned char v5_svc[2] = { V5_RECOVERY, V5_DOWNLOAD };
 
 static void screen_copy(uintptr_t dst, uintptr_t src)
@@ -1134,24 +1134,30 @@ static unsigned input_event(int *tx, int *ty)
     }
 }
 
-/* Linux (item 3) is selectable only when the OS store holds a kernel. */
-static int v5_linux;
+/* Android (item 2) and Linux (item 3) are selectable only when the OS store
+ * holds their kernel. */
+static int v5_linux, v5_android;
+
+static int v5_avail(unsigned item)
+{
+    return item == 2 ? v5_android : item == 3 ? v5_linux : 1;
+}
 
 static unsigned v5_step(unsigned os, int dir)
 {
     do
-        os = (os + 4U + (unsigned)dir) % 4U;
-    while (os == 2 && !v5_linux);
+        os = (os + 5U + (unsigned)dir) % 5U;
+    while (!v5_avail(v5_os[os]));
     return os;
 }
 
-/* Item under a tap (state-0 sprite rectangle), or -1. Disabled rows (2; 3 without Linux)
+/* Item under a tap (state-0 sprite rectangle), or -1. Rows whose OS is not installed (v5_avail)
  * do not count. */
 static int v5_hit(int x, int y)
 {
-    static const unsigned char items[7] = { 0, 1, 3, 4, 5, 6, 7 };
-    for (unsigned i = 0; i < 7; ++i) {
-        if (items[i] == 3 && !v5_linux)
+    static const unsigned char items[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+    for (unsigned i = 0; i < 8; ++i) {
+        if (!v5_avail(items[i]))
             continue;
         unsigned rx, ry, rw, rh;
         if (star_sprite_rect(16U + 8U * items[i], &rx, &ry, &rw, &rh) &&
@@ -1178,9 +1184,8 @@ static void v5_put(unsigned item, unsigned st)
 
 static void v5_draw(const struct v5 *m)
 {
-    for (unsigned i = 0; i < 4; ++i)
-        v5_put(v5_os[i], v5_os[i] == 3 && !v5_linux ? 3U : i != m->os ? 0U : m->svc_focus ? 4U : 1U);
-    v5_put(2, 3);
+    for (unsigned i = 0; i < 5; ++i)
+        v5_put(v5_os[i], !v5_avail(v5_os[i]) ? 3U : i != m->os ? 0U : m->svc_focus ? 4U : 1U);
     v5_put(7, 0);
     v5_put(8, 0);
     for (unsigned i = 0; i < 2; ++i)
@@ -1205,6 +1210,7 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
 {
     struct v5 m = { 0, 0, 0 };
     v5_linux = star_store_has("linux.image");
+    v5_android = star_store_has("android.kernel");
     /* One-shot "boot Linux next" from Linux itself (tools/linux/reboot-linux):
      * u64 "SBNEXTLX" in the retained page above the pmsg ring, cleared here. */
     volatile uint64_t *next = (volatile uint64_t *)0xFED17FE0UL;
@@ -1212,7 +1218,7 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
         *next = 0;
         __asm__ volatile("dsb sy" : : : "memory");
         if (v5_linux) {
-            m.os = 2;
+            m.os = 3;
             v5_draw(&m);
             v5_starting(3);
             return 4;
@@ -1233,7 +1239,7 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
         if (k == K_TAP) {
             int hit = v5_hit(tx, ty);
             int svc = hit == (int)V5_RECOVERY || hit == (int)V5_DOWNLOAD;
-            unsigned idx = svc ? (hit == (int)V5_DOWNLOAD) : (hit == 0 ? 0U : hit == 1 ? 1U : hit == 3 ? 2U : 3U);
+            unsigned idx = svc ? (hit == (int)V5_DOWNLOAD) : (hit == (int)V5_CARD ? 4U : (unsigned)hit);
             if ((unsigned)svc == m.svc_focus && idx == (svc ? m.svc : m.os)) {
                 k = K_POWER;                        /* second tap starts it */
             } else {
@@ -1282,6 +1288,8 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
                 return 2;
             if (item == 3)
                 return 4;
+            if (item == 2)
+                return 5;
             reboot(item == V5_DOWNLOAD ? INFORM_DOWNLOAD : INFORM_RECOVERY);
         }
         if (k & K_BIXBY) {

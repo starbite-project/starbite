@@ -195,3 +195,105 @@ int fdt_memory_banks(uintptr_t fdt, uint64_t *base, uint64_t *size, int max)
 		}
 	}
 }
+
+static void be32w(uintptr_t a, uint32_t v)
+{
+	*(volatile uint32_t *)a = __builtin_bswap32(v);
+}
+
+static void copy8(uintptr_t dst, uintptr_t src, uint32_t n)
+{
+	for (uint32_t i = 0; i < n; ++i)
+		*(volatile uint8_t *)(dst + i) = *(volatile uint8_t *)(src + i);
+}
+
+/*
+ * Copy the FDT at fdt to out (cap bytes) with " extra" appended to
+ * /chosen/bootargs: header and reserve map verbatim, the structure block
+ * rebuilt with the longer property, then the strings block. Returns the new
+ * total size, 0 on failure (no bootargs, no room, bad blob).
+ */
+uint32_t fdt_copy_append_bootargs(uintptr_t fdt, uintptr_t out, uint32_t cap, const char *extra)
+{
+	if (!fdt || be32(fdt) != FDT_MAGIC)
+		return 0;
+	uint32_t off_struct = be32(fdt + 8), off_strings = be32(fdt + 12);
+	uint32_t size_strings = be32(fdt + 32);
+	uint32_t elen = 0;
+	while (extra[elen])
+		elen++;
+	if (off_struct > cap)
+		return 0;
+	copy8(out, fdt, off_struct);
+	uintptr_t p = fdt + off_struct, strings = fdt + off_strings, q = out + off_struct;
+	uintptr_t qend = out + cap;
+	int depth = 0, in_chosen = 0, done = 0;
+	for (;;) {
+		if (q + 16 > qend)
+			return 0;
+		uint32_t tok = be32(p);
+		if (tok == FDT_BEGIN_NODE) {
+			uintptr_t name = p + 4, next = align4(skip_str(name));
+			depth++;
+			in_chosen = depth == 2 && streq((const char *)name, "chosen");
+			if (q + (next - p) > qend)
+				return 0;
+			copy8(q, p, (uint32_t)(next - p));
+			q += next - p;
+			p = next;
+		} else if (tok == FDT_END_NODE) {
+			depth--;
+			in_chosen = 0;
+			be32w(q, tok);
+			q += 4;
+			p += 4;
+		} else if (tok == FDT_PROP) {
+			uint32_t len = be32(p + 4), nameoff = be32(p + 8);
+			uintptr_t val = p + 12, next = align4(val + len);
+			if (in_chosen && !done && streq((const char *)(strings + nameoff), "bootargs") && len) {
+				/* old string without its NUL, " ", extra, NUL */
+				uint32_t old = len - 1, nlen = old + 1 + elen + 1;
+				if (q + 12 + nlen + 4 > qend)
+					return 0;
+				be32w(q, FDT_PROP);
+				be32w(q + 4, nlen);
+				be32w(q + 8, nameoff);
+				copy8(q + 12, val, old);
+				*(volatile uint8_t *)(q + 12 + old) = ' ';
+				copy8(q + 12 + old + 1, (uintptr_t)extra, elen);
+				*(volatile uint8_t *)(q + 12 + nlen - 1) = 0;
+				uintptr_t qn = align4(q + 12 + nlen);
+				for (uintptr_t z = q + 12 + nlen; z < qn; ++z)
+					*(volatile uint8_t *)z = 0;
+				q = qn;
+				done = 1;
+			} else {
+				if (q + (next - p) > qend)
+					return 0;
+				copy8(q, p, (uint32_t)(next - p));
+				q += next - p;
+			}
+			p = next;
+		} else if (tok == FDT_NOP) {
+			p += 4;
+		} else if (tok == FDT_END) {
+			be32w(q, tok);
+			q += 4;
+			break;
+		} else {
+			return 0;
+		}
+	}
+	if (!done)
+		return 0;
+	uint32_t new_struct = (uint32_t)(q - (out + off_struct));
+	uint32_t new_strings = (uint32_t)(q - out);
+	if (q + size_strings > qend)
+		return 0;
+	copy8(q, strings, size_strings);
+	uint32_t total = new_strings + size_strings;
+	be32w(out + 4, total);			/* totalsize */
+	be32w(out + 12, new_strings);		/* off_dt_strings */
+	be32w(out + 36, new_struct);		/* size_dt_struct */
+	return total;
+}
