@@ -512,3 +512,12 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   Also: host disk filled (116 MB free) -> lima guest disk writes failed (today's sshd "Input/output error"s);
   pruned out/xnu-boot-src1..23 (1.2 GB free now). lima guest no longer boots (sshd never up) -- needs repair or
   re-create before any source rebuild.
+- 2026-10-26 15:50: **S-Boot updated VG4 -> G960FXXUHFVG6** (XXV, CL23733677). Firmware via Bifrost 2.1.4
+  (FUS now uses an obfuscated auth scheme; samloader keys are dead). BL tar.md5 checksum covers the tar + build-info
+  text (first 2744400 bytes). Flashed from macOS with Heimdall: BOOTLOADER, CM, PARAM, UP_PARAM, KEYSTORAGE
+  (a second Heimdall session after print-pit fails -> re-enter Download mode). VG4 rollback copy:
+  backup/20261026-vg4-bootluns (raw UFS LUNs sdb=sboot VG4, sde=cm VG4, sdc, sdd). TWRP and BOOT untouched;
+  ro.boot.bootloader=G960FXXUHFVG6, warranty_bit=1, verifiedbootstate=orange.
+  SD card: wiped, one exFAT volume "STARBITE" (mount in TWRP: exfat-fuse /dev/block/mmcblk0p1 /external_sd);
+  holds starbite-win.vhdx (sha256 in build/woa/starbite-win.vhdx.sha256; removed from the Mac).
+  Next: re-test out/xnu-boot-rel7582.img (release 22621.7582 UEFI died in SEC on VG4).
