@@ -924,3 +924,14 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   Known gaps: RAM (stage 3 high bank not yet tried), RTC fixed, no Wi-Fi/audio/battery/cellular drivers,
   display is the firmware framebuffer (no GPU driver exists for Mali on Windows), and the UFS driver's
   S9+-numbered write fence leaves Android USERDATA (sda25) and A16DATA (sda28) WRITABLE from Windows.
+- 2026-10-26 21:50: ********** WINDOWS 11 DESKTOP ON THE GALAXY S9 (SM-G960F) ********** Clean first boot (fresh
+  image from the SD-card VHDX, BOOT = src36: our bootshim + PeilessSec with RAM stage 2 as boot-services data
+  (1407 MiB) + the release 22621.7582 DXE volume + shim RWD1 SEC_ACTIVE commit / P3 clear): Getting devices
+  ready -> Getting ready (~30+ min) -> Windows' own restart -> landed at our menu -> WINDOWS 11 -> login
+  screen "starbite" -> "Getting things ready for you" -> DESKTOP. TOUCH WORKS (S6SY761). User photo: Windows 11
+  Pro desktop, taskbar, clock 8/5/2026 2:54 PM (the fixed firmware clock). Recipe = this BOOT image + an
+  uninterrupted first boot. Root causes found today: RAM map (bank 0 only -> stage 1/2 as BS data), missing
+  RWD1/P3 handshake (release bootshim+SEC replaced by ours), and setup state poisoned by the first
+  interrupted run (ChildCompletion=1, torn blackboard) -> redeploy.
+  Open items: RTC (clock frozen at 2026-08-05 14:29 every boot), RAM stage 3 (2 GiB high bank), the UFS
+  driver's S9+ write fence leaves S9 USERDATA (sda25) and A16DATA (sda28) writable from Windows.
