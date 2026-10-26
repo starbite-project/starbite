@@ -997,3 +997,18 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   exynos9810ufs.inf_arm64_56a2e6f01fbd68bc\Exynos9810Ufs.sys via ntfs-3g rw (volume was clean). Test: boot
   Windows; if INACCESSIBLE_BOOT_DEVICE, restore the original from build/woa/ufs-sys.
 - 2026-10-27 00:00: **S9-fenced, re-signed Exynos9810Ufs.sys boots Windows** (testsigning accepts the Starbite self-signed cert). Storage safety done.
+- 2026-10-27 00:20: **Clock part 2: PMIC-seeded firmware RTC (src38).** Research (build/woa/rtc-research.md, agent;
+  sources vutung2311/starlte + LineageOS exynos9810 kernels): S2MPS18 RTC = SPEEDY device 0x2 (TOP 0, PMIC 1,
+  RTC 2), regs CTRL 0x00 (bit1 24 h), UPDATE 0x02 (bit0 RUDR latch, bit1 WUDR, keep bit3 + high bits), SEC..YEAR
+  0x05..0x0B binary (year-2000), command word ((slave<<8|reg)<<7)|BIT19[|BIT20]. APM shares the bus at runtime
+  and the firmware ignores the SPEEDY semaphore -> read ONCE at boot. patches/0023-starbite-pmic-rtc:
+  Star2LtePmicRtcLib = edk2 VirtualRealTimeClockLib whose fallback epoch is the PMIC time (two latched reads
+  must agree, >= BUILD_EPOCH, CTRL binary+24 h) instead of BUILD_EPOCH; runtime = seed + CNTPCT, SetTime only
+  in the (volatile) variable. tools/woa/dxe-replace.py: unpack the release DXE volume (LZMA), turn a module
+  into an FFS pad file in place (--kill), append new FFS files in the 3+ MiB free space at their alignment
+  (--add), recompress with the VM's edk2 LzmaCompress (verified round trip), rebuild the outer file, splice
+  with our SEC/PEI. src38 = src37 patch set + 0023 at stage 3, release RealTimeClockRuntimeDxe (b336f62d,
+  0x3054) killed, ours (0x3654) added: build/woa/starbite-uefi-src38.bin, BOOT = out/xnu-boot-src38.img
+  (iOS 1 GiB payload, sha 6177269a...), flashed. Fallback test: out/xnu-boot-rtc-identity.img (release RTC
+  re-added unchanged; isolates the repack tool). RTC is UTC: Windows needs
+  HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation RealTimeIsUniversal=1 (DWORD) for local time.
