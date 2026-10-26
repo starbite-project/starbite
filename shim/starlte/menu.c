@@ -848,15 +848,25 @@ static int engineer(const struct star_info *in, char *cmdline, unsigned len)
 
 /*
  * tools/brand/menu.mjs: items 0 iOS, 1 Windows, 2 Android and 3 Linux (shown
- * dimmed: not installed), 4 Recovery, 5 the Starbite card (boots Starbite
- * Kiosk). Sprite id 16 + 4 * item + state; state 0 normal, 1 selected,
- * 2 starting, 3 disabled. Volume moves over 0, 1, 4, 5; Power boots; Bixby
- * opens Starbite Engineer, with the whole screen (Samsung's logo included)
+ * dimmed: not installed), 4 Recovery chip, 5 the Starbite card (boots
+ * Linux kiosk), 6 Download chip. Sprite id 16 + 8 * item + state; state
+ * 0 normal, 1 selected, 2 starting, 3 disabled, 4 selected but inactive.
+ *
+ * Two selectors, as in the user's concept:
+ *   OS list   Volume Up/Down over iOS, Windows, the Starbite card;
+ *   service   a short Bixby press moves here (Recovery | Download, side by
+ *             side), further presses flip between the two; Volume goes back
+ *             to the OS list.
+ * Power starts whatever has focus. Holding Bixby (0.7 s) opens Starbite
+ * Engineer and nothing else; the whole screen (Samsung's logo included) is
  * saved first and put back after.
  */
-#define V5_SPRITE(item, st) (16U + 4U * (item) + (st))
-#define V5_ITEMS 6U
+#define V5_SPRITE(item, st) (16U + 8U * (item) + (st))
 #define V5_CARD 5U
+#define V5_RECOVERY 4U
+#define V5_DOWNLOAD 6U
+#define V5_HOLD_MS 700U
+#define K_BIXBY_HOLD 16U
 /* Free at menu time: the payload must end below RAM_BASE (0x92000000) and
  * nothing is copied anywhere until a choice is made. 17 MiB. */
 #define SCREEN_SAVE 0x92000000UL
@@ -864,7 +874,8 @@ static int engineer(const struct star_info *in, char *cmdline, unsigned len)
 #define V5_CARD_Y0 1678U
 #define V5_CARD_Y1 2350U
 
-static const unsigned char v5_order[4] = { 0, 1, 4, 5 };
+static const unsigned char v5_os[3] = { 0, 1, V5_CARD };
+static const unsigned char v5_svc[2] = { V5_RECOVERY, V5_DOWNLOAD };
 
 static void screen_copy(uintptr_t dst, uintptr_t src)
 {
@@ -874,17 +885,63 @@ static void screen_copy(uintptr_t dst, uintptr_t src)
         d[i] = s[i];
 }
 
-static void v5_draw_all(unsigned sel_item)
+/* One debounced press; Bixby held for V5_HOLD_MS reports K_BIXBY_HOLD at
+ * once (the hold's release is waited for by the next key_wait()). */
+static unsigned key_event(void)
 {
-    for (unsigned i = 0; i < V5_ITEMS; ++i)
-        (void)star_sprite(V5_SPRITE(i, (i == 2 || i == 3) ? 3U : (i == sel_item ? 1U : 0U)));
+    while (keys())
+        wait_ms(20);
+    for (;;) {
+        unsigned k = keys();
+        if (k) {
+            wait_ms(40);
+            if (keys() != k)
+                continue;
+            if (k == K_BIXBY) {
+                for (unsigned t = 40; t < V5_HOLD_MS; t += 10) {
+                    if (!(keys() & K_BIXBY))
+                        return K_BIXBY;
+                    wait_ms(10);
+                }
+                return K_BIXBY_HOLD;
+            }
+            while (keys())
+                wait_ms(20);
+            return k;
+        }
+        wait_ms(10);
+    }
 }
 
-/* The chosen row says "starting"; the card leaves unless it was the pick,
+struct v5 { unsigned svc_focus, os, svc; };
+
+/* Last drawn state per item (0xff = not drawn yet): only changes are drawn,
+ * the Starbite card alone is ~0.9 Mpx. */
+static unsigned char v5_shown[7] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+
+static void v5_put(unsigned item, unsigned st)
+{
+    if (v5_shown[item] != st) {
+        (void)star_sprite(V5_SPRITE(item, st));
+        v5_shown[item] = (unsigned char)st;
+    }
+}
+
+static void v5_draw(const struct v5 *m)
+{
+    for (unsigned i = 0; i < 3; ++i)
+        v5_put(v5_os[i], i != m->os ? 0U : m->svc_focus ? 4U : 1U);
+    v5_put(2, 3);
+    v5_put(3, 3);
+    for (unsigned i = 0; i < 2; ++i)
+        v5_put(v5_svc[i], m->svc_focus && i == m->svc ? 1U : 0U);
+}
+
+/* The chosen entry says "starting"; the card leaves unless it was the pick,
  * and the loader's status lines go where it was. */
 static void v5_starting(unsigned item)
 {
-    (void)star_sprite(V5_SPRITE(item, 2));
+    v5_put(item, 2);
     if (item != V5_CARD) {
         star_fb_fill_rows(V5_CARD_Y0, V5_CARD_Y1, C_BLACK);
         star_fb_row_base(25);
@@ -893,24 +950,26 @@ static void v5_starting(unsigned item)
 
 static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
 {
-    unsigned pos = 0;
-    v5_draw_all(v5_order[pos]);
+    struct v5 m = { 0, 0, 0 };
+    v5_draw(&m);
     for (;;) {
-        unsigned k = key_wait(), old = pos;
-        if (k & K_BIXBY) {
+        unsigned k = key_event();
+        if (k == K_BIXBY_HOLD) {
             screen_copy(SCREEN_SAVE, STAR_FB_BASE);
             int boot = engineer(in, cmdline, len);
             screen_copy(STAR_FB_BASE, SCREEN_SAVE);
             star_fb_row_base(36);
             if (boot) {
-                v5_draw_all(0);
+                m.svc_focus = 0;
+                m.os = 0;
+                v5_draw(&m);
                 v5_starting(0);
                 return 1;
             }
             continue;
         }
         if (k & K_POWER) {
-            unsigned item = v5_order[pos];
+            unsigned item = m.svc_focus ? v5_svc[m.svc] : v5_os[m.os];
             v5_starting(item);
             if (item == 0)
                 return 1;
@@ -918,16 +977,24 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
                 return 3;
             if (item == V5_CARD)
                 return 2;
-            reboot(INFORM_RECOVERY);
+            reboot(item == V5_DOWNLOAD ? INFORM_DOWNLOAD : INFORM_RECOVERY);
         }
-        if (k & K_UP)
-            pos = pos ? pos - 1 : 3;
-        else if (k & K_DOWN)
-            pos = (pos + 1) % 4;
-        if (pos != old) {
-            (void)star_sprite(V5_SPRITE(v5_order[old], 0));
-            (void)star_sprite(V5_SPRITE(v5_order[pos], 1));
+        if (k & K_BIXBY) {
+            if (m.svc_focus)
+                m.svc ^= 1U;
+            else
+                m.svc_focus = 1;
+        } else if (k & (K_UP | K_DOWN)) {
+            if (m.svc_focus)
+                m.svc_focus = 0;
+            else if (k & K_UP)
+                m.os = m.os ? m.os - 1 : 2;
+            else
+                m.os = (m.os + 1) % 3;
+        } else {
+            continue;
         }
+        v5_draw(&m);
     }
 }
 

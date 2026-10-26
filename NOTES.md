@@ -1048,3 +1048,12 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   framebuffer saved at 0x92000000 and restored after; starting sprite; card cleared and status rows at base 25
   unless the card was picked); old text menu stays as the fallback. BOOT = out/xnu-boot-menu5.img (sha
   4528c998..., ramdisk = menu.sbm, payload = ufsmulti16), flashed. Touch input next.
+- 2026-10-27 02:20: **Boot menu v6** (user feedback): real icons (simple-icons 9.21.0 Apple/Windows 11/Android,
+  Larry Ewing's Tux, Lucide wrench/download; tools/brand/icons/README.md), OS list = iOS, Windows, Android
+  (dim), Linux (dim); new "SERVICE · BIXBY" selector under it with Recovery | Download chips side by side
+  (y 944, 630 px each); sprite ids 16 + 8*item + state (states 0..4, 4 = selected but inactive; items 4
+  Recovery, 5 card, 6 Download). Keys: Volume = OS list (iOS, Windows, Starbite card); short Bixby = service
+  selector, again = flip Recovery/Download; Volume returns; Power starts the focused entry (Download reboots
+  with INFORM3 0x12345671); Bixby HELD 0.7 s = Engineer only (key_event). Only changed sprites are redrawn.
+  Previews build/brand/menu-preview.png / menu-preview-alt.png (PREVIEW=alt). BOOT = out/xnu-boot-menu6.img
+  (sha b264c20b...), flashed.

@@ -6,19 +6,24 @@
  * y ~1199..1575; "Powered by android" ~2664..2834 is covered by our footer).
  *
  *   top     header (Starbite mark + name, model) and the boot list:
- *           iOS 16, Windows 11, Android and Linux (dimmed: not installed),
- *           Recovery (TWRP)
+ *           iOS 16, Windows 11, Android and Linux (dimmed: not installed);
+ *           under it the Bixby service selector: Recovery | Download
  *   middle  Samsung's splash, untouched
- *   bottom  the Starbite card: Volume Down past the last row selects it and
+ *   bottom  the Starbite card: Volume Down past the last OS selects it and
  *           Power boots Linux kiosk; footer "Powered by Starbite"
  *
- * Every row exists as opaque sprites (normal / selected / starting) rendered
- * here with rsvg-convert, so the loader only copies pixels. Output
- * build/brand/menu.sbm: "SBMENU01", u32 count, then per sprite
- * u32 id, x, y, w, h, runs, runs x { u32 length, u32 0xAARRGGBB } (row-major).
- * Sprite ids: 0 = base (drawn once), 16 + 4 * item + state (state 0 normal,
- * 1 selected, 2 starting, 3 disabled); items 0 iOS, 1 Windows, 2 Android,
- * 3 Linux, 4 Recovery, 5 Starbite card. Also writes build/brand/menu-preview.png.
+ * Every element exists as opaque sprites rendered here with rsvg-convert, so
+ * the loader only copies pixels. Output build/brand/menu.sbm: "SBMENU01",
+ * u32 count, then per sprite u32 id, x, y, w, h, runs, runs x { u32 length,
+ * u32 0xAARRGGBB } (row-major). Sprite ids: 0 = base (drawn once),
+ * 16 + 8 * item + state; items 0 iOS, 1 Windows, 2 Android, 3 Linux,
+ * 4 Recovery chip, 5 Starbite card, 6 Download chip; states 0 normal,
+ * 1 selected, 2 starting, 3 disabled, 4 selected but inactive (the other
+ * selector has focus). Also writes build/brand/menu-preview.png.
+ *
+ * Icons (tools/brand/icons): Apple, Windows 11, Android from simple-icons
+ * 9.21.0 (CC0); Tux by Larry Ewing (lewing@isc.tamu.edu) made with The GIMP,
+ * via Wikimedia Commons; wrench and download from lucide-static 0.400.0 (ISC).
  *
  *   node tools/brand/menu.mjs      (needs build/brand/overlay.png from overlay.mjs)
  */
@@ -35,7 +40,7 @@ const out = join(project, 'build/brand');
 mkdirSync(out, { recursive: true });
 
 const W = 1440;
-const INK = '#eef1f6', DIM = '#8a93a3', FAINT = '#3a404c', CORAL = '#6fb3ff', GOLD = '#ffd43b';
+const INK = '#eef1f6', DIM = '#8a93a3', FAINT = '#3a404c', CORAL = '#6fb3ff', GOLD = '#ffd43b', AMBER = '#ffb547';
 const SANS = 'Avenir Next';
 const MONO = 'Menlo';
 
@@ -44,6 +49,8 @@ export const LAYOUT = {
   header: { y: 70, h: 150 },
   label: { y: 236, h: 40 },
   rows: { x: 70, w: W - 140, y0: 290, h: 136, stride: 150 },
+  service: { y: 896, h: 40 },                       // "SERVICE · BIXBY" label
+  chips: { y: 944, h: 124, x0: 70, w: 630, gap: 40 },
   card: { x: 100, y: 1700, w: 1240, h: 560 },     // the Starbite card (from overlay.png)
   cardSrcY: 1920,                                   // where overlay.mjs drew it
   footerY: 2500,
@@ -108,37 +115,57 @@ const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 const text = (s, { x, y, size, weight = 500, fill = INK, family = SANS, anchor = 'start', spacing = 0, opacity = 1 }) =>
   `<text x="${x}" y="${y}" font-family="${family}" font-size="${size}" font-weight="${weight}" fill="${fill}" text-anchor="${anchor}" letter-spacing="${spacing}" opacity="${opacity}">${esc(s)}</text>`;
 
-// ---- icons (100 x 100 boxes, drawn here: no third-party artwork) ----------
-const ICON = {
-  apple: (c) => `<path fill="${c}" d="M50 27C44 27 39 21 30 21C17 21 7 33 7 52C7 74 20 97 32 97C38 97 42 93 50 93C58 93 62 97 68 97C79 97 88 82 92 71C82 66 76 57 76 47C76 38 81 31 88 27C82 19 74 15 66 15C58 15 54 21 50 27Z"/><path fill="${c}" d="M51 19C51 10 58 3 67 2C67 11 60 18 51 19Z"/>`,
-  windows: () => `<g fill="#3c9cf0"><rect x="8" y="8" width="40" height="40" rx="3"/><rect x="52" y="8" width="40" height="40" rx="3"/><rect x="8" y="52" width="40" height="40" rx="3"/><rect x="52" y="52" width="40" height="40" rx="3"/></g>`,
-  android: () => `<g stroke="#3ddc84" stroke-width="5" stroke-linecap="round"><line x1="30" y1="40" x2="20" y2="23"/><line x1="70" y1="40" x2="80" y2="23"/></g><path fill="#3ddc84" d="M8 76A42 42 0 0 1 92 76Z"/><circle cx="33" cy="60" r="5" fill="#000"/><circle cx="67" cy="60" r="5" fill="#000"/>`,
-  tux: () => `<ellipse cx="50" cy="56" rx="31" ry="39" fill="#1d1d1d" stroke="#5a5a5a" stroke-width="2"/><ellipse cx="50" cy="65" rx="21" ry="27" fill="#f2f2f2"/><circle cx="41" cy="31" r="7" fill="#fff"/><circle cx="59" cy="31" r="7" fill="#fff"/><circle cx="43" cy="32" r="3.2" fill="#111"/><circle cx="57" cy="32" r="3.2" fill="#111"/><ellipse cx="50" cy="42" rx="10" ry="5.5" fill="#f5b52e"/><ellipse cx="35" cy="93" rx="14" ry="6" fill="#f5b52e"/><ellipse cx="65" cy="93" rx="14" ry="6" fill="#f5b52e"/>`,
-  recovery: (c) => `<g fill="none" stroke="${c}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"><path d="M80 34A34 34 0 1 0 84 62"/><polyline points="80,14 80,34 60,34"/></g><circle cx="50" cy="50" r="9" fill="${c}"/>`,
-};
+// ---- icons -----------------------------------------------------------------
+const iconFile = (f) => readFileSync(join(here, 'icons', f), 'utf8');
+/** Nest an icon SVG at (x, y, size): brand glyphs take `fill`, Lucide line icons take `stroke`. */
+function icon(f, x, y, size, { fill, stroke } = {}) {
+  const src = iconFile(f).replace(/<\?xml[^>]*>/, '').replace(/<!--[\s\S]*?-->/g, '');
+  const open = src.match(/<svg\b[^>]*>/)[0];
+  const vb = open.match(/viewBox="([^"]+)"/)[1];
+  const inner = src.slice(src.indexOf(open) + open.length, src.lastIndexOf('</svg>')).replace(/<title>[\s\S]*?<\/title>/, '');
+  const paint = stroke
+    ? `fill="none" stroke="${stroke}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"`
+    : fill ? `fill="${fill}"` : '';
+  return `<svg x="${x}" y="${y}" width="${size}" height="${size}" viewBox="${vb}" preserveAspectRatio="xMidYMid meet"><g ${paint}>${inner}</g></svg>`;
+}
 
 const ITEMS = [
-  { key: 'ios', name: 'iOS 16', meta: '16.7.16 · XNU 8796', icon: (s) => ICON.apple(s ? '#ffffff' : '#c9ced8') },
-  { key: 'win', name: 'Windows 11', meta: '23H2 · ARM64', icon: () => ICON.windows() },
-  { key: 'android', name: 'Android', meta: 'not installed', icon: () => ICON.android(), disabled: true },
-  { key: 'linux', name: 'Linux', meta: 'not installed', icon: () => ICON.tux(), disabled: true },
-  { key: 'twrp', name: 'Recovery', meta: 'TWRP 3.7.0', icon: (s) => ICON.recovery(s ? '#ffffff' : '#c9ced8') },
+  { name: 'iOS 16', meta: '16.7.16 · XNU 8796', icon: (x, y, s) => icon('si-apple.svg', x, y, s, { fill: '#ffffff' }) },
+  { name: 'Windows 11', meta: '23H2 · ARM64', icon: (x, y, s) => icon('si-windows11.svg', x, y, s, { fill: '#0078d4' }) },
+  { name: 'Android', meta: 'not installed', icon: (x, y, s) => icon('si-android.svg', x, y, s, { fill: '#3ddc84' }), disabled: true },
+  { name: 'Linux', meta: 'not installed', icon: (x, y, s) => icon('tux.svg', x, y - s * 0.06, s * 1.12), disabled: true },
 ];
 
-// state: 0 normal, 1 selected, 2 starting, 3 disabled
+// row state: 0 normal, 1 selected, 2 starting, 3 disabled, 4 selected but inactive
 function rowSvg(it, state) {
   const { w, h } = LAYOUT.rows;
   const sel = state === 1 || state === 2;
-  const op = state === 3 ? 0.32 : sel ? 1 : 0.72;
+  const op = state === 3 ? 0.32 : sel || state === 4 ? 1 : 0.8;
   const pill = sel
     ? `<rect x="2" y="2" width="${w - 4}" height="${h - 4}" rx="${(h - 4) / 2}" fill="#ffffff" fill-opacity="0.075" stroke="#ffffff" stroke-opacity="0.14" stroke-width="3"/>`
-    : '';
-  const ic = 76, ix = 48, iy = (h - ic) / 2;
-  const icon = `<g opacity="${op}"><svg x="${ix}" y="${iy}" width="${ic}" height="${ic}" viewBox="0 0 100 100">${it.icon(sel)}</svg></g>`;
+    : state === 4
+      ? `<rect x="2" y="2" width="${w - 4}" height="${h - 4}" rx="${(h - 4) / 2}" fill="none" stroke="#ffffff" stroke-opacity="0.09" stroke-width="3"/>`
+      : '';
+  const ic = 76, ix = 52, iy = (h - ic) / 2;
   const meta = state === 2 ? 'starting…' : it.meta;
-  return pill + icon +
+  return pill + `<g opacity="${op}">${it.icon(ix, iy, ic)}</g>` +
     text(it.name, { x: ix + ic + 40, y: h / 2 + 21, size: 60, weight: sel ? 600 : 500, fill: sel ? INK : DIM, opacity: state === 3 ? 0.45 : 1 }) +
     text(meta, { x: w - 64, y: h / 2 + 13, size: 34, family: MONO, fill: state === 2 ? CORAL : sel ? DIM : FAINT, anchor: 'end', opacity: state === 3 ? 0.7 : 1 });
+}
+
+// chip state: 0 normal, 1 selected, 2 starting
+const CHIPS = [
+  { item: 4, name: 'Recovery', meta: 'TWRP 3.7.0', accent: CORAL, icon: (x, y, s, c) => icon('lucide-wrench.svg', x, y, s, { stroke: c }) },
+  { item: 6, name: 'Download', meta: 'Odin mode', accent: AMBER, icon: (x, y, s, c) => icon('lucide-download.svg', x, y, s, { stroke: c }) },
+];
+function chipSvg(c, state) {
+  const { w, h } = LAYOUT.chips;
+  const on = state !== 0;
+  const box = `<rect x="3" y="3" width="${w - 6}" height="${h - 6}" rx="36" fill="${on ? c.accent : '#ffffff'}" fill-opacity="${on ? 0.1 : 0}" stroke="${on ? c.accent : FAINT}" stroke-width="${on ? 4 : 3}"/>`;
+  const ic = 60;
+  return box + c.icon(44, (h - ic) / 2, ic, on ? c.accent : DIM) +
+    text(c.name, { x: 44 + ic + 30, y: 56, size: 46, weight: on ? 600 : 500, fill: on ? INK : DIM }) +
+    text(state === 2 ? 'rebooting…' : c.meta, { x: 44 + ic + 30, y: 96, size: 28, family: MONO, fill: on ? (state === 2 ? c.accent : DIM) : FAINT });
 }
 
 // ---- RLE sprites -------------------------------------------------------------
@@ -166,14 +193,26 @@ function sprite(id, x, y, w, h, px) {
   const lb = text('BOOT', { x: 74, y: 30, size: 28, family: MONO, fill: DIM, spacing: 7 }) +
     `<rect x="190" y="18" width="${W - 260}" height="2" fill="${FAINT}"/>`;
   sprite(0, 0, l.y, W, l.h, render(W, l.h, lb));
+  const sv = LAYOUT.service;
+  const sl = text('SERVICE · BIXBY', { x: 74, y: 30, size: 28, family: MONO, fill: DIM, spacing: 7 }) +
+    `<rect x="470" y="18" width="${W - 540}" height="2" fill="${FAINT}"/>`;
+  sprite(0, 0, sv.y, W, sv.h, render(W, sv.h, sl));
 }
 
-// Rows.
+// OS rows.
+const SID = (item, state) => 16 + 8 * item + state;
 ITEMS.forEach((it, i) => {
   const r = LAYOUT.rows;
   const y = r.y0 + i * r.stride;
-  const states = it.disabled ? [3] : [0, 1, 2];
-  for (const st of states) sprite(16 + 4 * i + st, r.x, y, r.w, r.h, render(r.w, r.h, rowSvg(it, st)));
+  const states = it.disabled ? [3] : [0, 1, 2, 4];
+  for (const st of states) sprite(SID(i, st), r.x, y, r.w, r.h, render(r.w, r.h, rowSvg(it, st)));
+});
+
+// Bixby service chips.
+CHIPS.forEach((c, k) => {
+  const ch = LAYOUT.chips;
+  const x = ch.x0 + k * (ch.w + ch.gap);
+  for (const st of [0, 1, 2]) sprite(SID(c.item, st), x, ch.y, ch.w, ch.h, render(ch.w, ch.h, chipSvg(c, st)));
 });
 
 // Starbite card (item 5) from overlay.png: normal, selected (gold ring + label), starting.
@@ -204,9 +243,11 @@ ITEMS.forEach((it, i) => {
   const ring = `<rect x="6" y="6" width="${sw - 12}" height="${c.h + 2 * pad - 12}" rx="56" fill="none" stroke="${GOLD}" stroke-width="7"/>`;
   const label = (s, fill) => text(s, { x: sw / 2, y: c.h + 2 * pad + 50, size: 34, family: MONO, fill, anchor: 'middle', spacing: 2 });
   const x = c.x - pad, y = c.y - pad;
-  sprite(16 + 4 * 5 + 0, x, y, sw, sh, overlayOn(''));
-  sprite(16 + 4 * 5 + 1, x, y, sw, sh, overlayOn(ring + label('PRESS POWER TO START THE LINUX KIOSK', GOLD)));
-  sprite(16 + 4 * 5 + 2, x, y, sw, sh, overlayOn(ring + label('STARTING THE LINUX KIOSK…', CORAL)));
+  const dimRing = `<rect x="6" y="6" width="${sw - 12}" height="${c.h + 2 * pad - 12}" rx="56" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="5"/>`;
+  sprite(SID(5, 0), x, y, sw, sh, overlayOn(''));
+  sprite(SID(5, 1), x, y, sw, sh, overlayOn(ring + label('PRESS POWER TO START THE LINUX KIOSK', GOLD)));
+  sprite(SID(5, 2), x, y, sw, sh, overlayOn(ring + label('STARTING THE LINUX KIOSK…', CORAL)));
+  sprite(SID(5, 4), x, y, sw, sh, overlayOn(dimRing));
 
   // Footer (Powered by Starbite) from overlay.png, over Samsung's "Powered by android".
   const fy = LAYOUT.footerY, fh = ov.h - fy;
@@ -239,7 +280,10 @@ console.log(`build/brand/menu.sbm: ${sprites.length} sprites, ${buf.length} byte
   const fb = new Uint32Array(W * H).fill(0xff000000);
   const lpng = decodePng(svgPng(`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${W}" height="${H}"><rect width="${W}" height="${H}" fill="#000"/><image x="180" y="1144" width="1079" height="1747" xlink:href="data:image/jpeg;base64,${readFileSync(logo).toString('base64')}"/></svg>`));
   for (let i = 0; i < W * H; i++) fb[i] = (0xff000000 | (lpng.px[i * 4] << 16) | (lpng.px[i * 4 + 1] << 8) | lpng.px[i * 4 + 2]) >>> 0;
-  const want = (id) => id === 0 || id === 16 + 1 || [16 + 4, 16 + 8 + 3, 16 + 12 + 3, 16 + 16, 16 + 20].includes(id);
+  const sel = process.env.PREVIEW === 'alt'
+    ? [SID(0, 4), SID(1, 0), SID(2, 3), SID(3, 3), SID(4, 1), SID(6, 0), SID(5, 0)]
+    : [SID(0, 1), SID(1, 0), SID(2, 3), SID(3, 3), SID(4, 0), SID(6, 0), SID(5, 0)];
+  const want = (id) => id === 0 || sel.includes(id);
   for (const s of sprites) if (want(s.id))
     for (let y = 0; y < s.h; y++) for (let x = 0; x < s.w; x++) fb[(s.y + y) * W + s.x + x] = s.px[y * s.w + x];
   const raw = Buffer.alloc(H * (W * 4 + 1));
@@ -251,6 +295,6 @@ console.log(`build/brand/menu.sbm: ${sprites.length} sprites, ${buf.length} byte
   const crc = (b) => { let c = ~0; for (const x of b) { c ^= x; for (let k = 0; k < 8; k++) c = c & 1 ? (c >>> 1) ^ 0xedb88320 : c >>> 1; } return ~c >>> 0; };
   const chunk = (t, d) => { const l = Buffer.alloc(4); l.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([l, td, c]); };
   const ih = Buffer.alloc(13); ih.writeUInt32BE(W, 0); ih.writeUInt32BE(H, 4); ih[8] = 8; ih[9] = 6;
-  writeFileSync(join(out, 'menu-preview.png'), Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ih), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]));
+  writeFileSync(join(out, process.env.PREVIEW === 'alt' ? 'menu-preview-alt.png' : 'menu-preview.png'), Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ih), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]));
   console.log('build/brand/menu-preview.png');
 }
