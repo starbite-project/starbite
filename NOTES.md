@@ -529,3 +529,7 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   the difference for SEC; the remaining failure is a post-handoff bugcheck. Set CrashControl\AutoReboot 1->0 in
   the offline SYSTEM hive (one byte at file 0x4faeac; original in backup/20261026-win-hives/SYSTEM) so the
   bugcheck screen stays up to read the stop code.
+- 2026-10-26 16:30: VG6 release-UEFI try 2: SEC death again (P V W X Y S $ U; pstore-vg6-rel2.bin) -> the
+  release's SEC flakiness (W2, no 0002 dc-zva fix) persists on VG6; try 1 just got lucky. Plan: retry the
+  release until it reaches the kernel and read the bugcheck (AutoReboot now 0). Our src builds are not the
+  answer yet: their winload patch sites target another winload build (try 9), the release matches 22621.7582.
