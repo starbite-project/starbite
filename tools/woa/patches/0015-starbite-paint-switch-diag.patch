@@ -1,0 +1,98 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c	2026-10-26 09:15:23
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c	2026-10-26 09:15:53
+@@ -2778,31 +2778,73 @@
+         BdsPramStr (" rva=");
+         BdsPramHex ((UINT32)(WlP - WlBase), 6);
+         MemAttr->ClearMemoryAttributes (MemAttr, WlP & ~(UINT64)EFI_PAGE_MASK, EFI_PAGE_SIZE, EFI_MEMORY_RO | EFI_MEMORY_RP);
+-        *WlI = 0xD503201Fu;      // nop
+-        Star2LteFlushPatchedInstruction (WlP);
+-        BdsPramStr (" =WLNOP");
+ 
+         //
+-        // Starbite W5 try 11 (src22): NOPing the MMU-off tlbi alone still hung winload at
+-        // =AFRET post-ExitBootServices (try 10 pstore-win9: stale TLB -> page-walk fault once
+-        // the leaf re-enables the MMU). The hyp cannot emulate the whole-TLB flush with the MMU
+-        // off; do it with the MMU back ON. The leaf re-enables the MMU at WlI[3]
+-        // (msr SCTLR_EL1,x3) then dsb/isb, and ends with a redundant pipeline refetch
+-        // (adr x4,.+8 ; br x4 -> the immediately-following ret) at WlI[6]/WlI[7]. Overwrite that
+-        // dead pair with an MMU-on `tlbi vmalle1 ; dsb sy` and fall through to the ret at WlI[8].
+-        //
+-        if ((WlI[6] == 0x10000044u) &&     // adr x4, .+8
+-            (WlI[7] == 0xD61F0080u) &&     // br  x4
+-            (WlI[8] == 0xD65F03C0u))       // ret
+-        {
+-          WlI[6] = 0xD508871Fu;            // tlbi vmalle1  (MMU is on now -- hyp emulates this)
+-          WlI[7] = 0xD5033F9Fu;            // dsb sy
+-          Star2LteFlushPatchedInstruction ((UINT64)(UINTN)&WlI[6]);
+-          Star2LteFlushPatchedInstruction ((UINT64)(UINTN)&WlI[7]);
+-          BdsPramStr (" =WLMON");
++        // Starbite W5 try 12 (src23) -- VISIBILITY DIAGNOSTIC (woa ext#9). try 10/11 proved
++        // =WLNOP/=WLMON apply, but winload went dark right after =AFRET. Re-reading the woa
++        // source: the EL1 MMU-on tlbi self-test already passes, so the flush was never the hang;
++        // the switch most likely SUCCEEDS and our PRAM ring simply stops being mapped in
++        // winload's new tables post-switch -- we go blind, not stuck. To tell "reached the
++        // address-space switch after ExitBootServices" apart from "faulted before it", paint the
++        // framebuffer from inside the leaf and HALT (no PRAM needed; the panel is live -- the user
++        // sees a frozen Windows logo at 0xCC000000). The switch leaf is, from the NOPed tlbi slot:
++        //   WlI[0] 0x10dc tlbi vmalle1 (NOP)   <- MMU already OFF (msr SCTLR_EL1,x4 @0x10b0),
++        //   WlI[1] 0x10e0 dsb sy                  TTBR0/TTBR1/TCR already set
++        //   WlI[2] 0x10e4 isb
++        //   WlI[3] 0x10e8 msr SCTLR_EL1,x3     <- MMU back ON
++        //   WlI[4] 0x10ec dsb sy ; WlI[5] isb ; WlI[6]/[7] our tlbi/dsb ; WlI[8] 0x10fc ret
++        // We overwrite WlI[0..8] (9 words, 0x10dc..0x10fc) with a self-contained paint+halt stub.
++        // It runs with the MMU OFF, so the stores to the GOP framebuffer 0xCC000000 are PHYSICAL
++        // and cannot fault on winload's tables. x0-x3 hold the new TTBR/TCR/SCTLR but we never
++        // return, so x4-x6 are free. Assembled + verified offline (scratchpad/paint.s):
++        //   mov  x4, #0xCC000000        ; d2b98004  framebuffer base (STAR2LTE_FB_BASE)
++        //   mov  w5, #0x70000           ; 52a000e5  count hi
++        //   movk w5, #0xff80            ; 729ff005  x5 = 0x7ff80 = 1440*364 px (top ~364 rows)
++        //   mov  w6, #0xff00            ; 529fe006  w6 = 0x0000ff00 green (XRGB32)
++        // loop:                                      (band = winload reached the switch post-EBS)
++        //   str  w6, [x4], #4           ; b8004486
++        //   subs x5, x5, #1            ; f10004a5
++        //   b.ne loop                   ; 54ffffc1
++        // halt:
++        //   wfi                         ; d503207f
++        //   b    halt                   ; 17ffffff
++        // Band shows => reached+entered the switch (breakthrough signal); frozen logo stays =>
++        // faulted at/before the switch. This is a one-shot diagnostic: it does NOT boot Windows
++        // (the leaf halts). Set FALSE to restore the try-11 =WLNOP/=WLMON boot path.
++        //
++        STATIC CONST BOOLEAN  mStarbitePaintDiag = TRUE;
++
++        if (mStarbitePaintDiag) {
++          STATIC CONST UINT32  Paint[9] = {
++            0xD2B98004u, 0x52A000E5u, 0x729FF005u, 0x529FE006u,
++            0xB8004486u, 0xF10004A5u, 0x54FFFFC1u, 0xD503207Fu, 0x17FFFFFFu
++          };
++          UINTN  Pk;
++
++          for (Pk = 0; Pk < (sizeof (Paint) / sizeof (Paint[0])); Pk++) {
++            WlI[Pk] = Paint[Pk];
++            Star2LteFlushPatchedInstruction ((UINT64)(UINTN)&WlI[Pk]);
++          }
++
++          BdsPramStr (" =WLPAINT");
+         } else {
+-          BdsPramStr (" =WLMON? t6=");
+-          BdsPramHex (WlI[6], 8);
++          *WlI = 0xD503201Fu;      // nop
++          Star2LteFlushPatchedInstruction (WlP);
++          BdsPramStr (" =WLNOP");
++
++          if ((WlI[6] == 0x10000044u) &&     // adr x4, .+8
++              (WlI[7] == 0xD61F0080u) &&     // br  x4
++              (WlI[8] == 0xD65F03C0u))       // ret
++          {
++            WlI[6] = 0xD508871Fu;            // tlbi vmalle1  (MMU is on now -- hyp emulates this)
++            WlI[7] = 0xD5033F9Fu;            // dsb sy
++            Star2LteFlushPatchedInstruction ((UINT64)(UINTN)&WlI[6]);
++            Star2LteFlushPatchedInstruction ((UINT64)(UINTN)&WlI[7]);
++            BdsPramStr (" =WLMON");
++          } else {
++            BdsPramStr (" =WLMON? t6=");
++            BdsPramHex (WlI[6], 8);
++          }
+         }
+ 
+         WlHit = TRUE;

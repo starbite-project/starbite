@@ -441,3 +441,27 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   what did the screen SHOW during the WINDOWS 11 attempt (frozen Windows logo / black / UEFI text / reboot /
   anything new vs try 10)? That observation is free and sharpens H1-vs-H2 before we build src23. BOOT still =
   out/xnu-boot-src22.img.
+- 2026-10-26 09:20: **W5 try 12 (src23) RESULT (pstore-win11.bin) — paint stub installed, NO band: winload
+  dies BEFORE the switch leaf's MMU-off window.** Ring: =WLBASE ok, =NTPATCH n=04 cf=03, =STLBI0/1/2, then
+  **=WLSW b=90fb6000 rva=0010dc =WLPAINT** (the 9-word paint+halt stub was written over winload RVA
+  0x10dc..0x10fc), =WTRACE n=00, =HANDOFF minimal, =AFRET (pra 0x90fc53d8 daif=0200), dark. Screen stayed on
+  the FROZEN WINDOWS LOGO -- NO green band (user confirmed). So the stub installed fine but winload never
+  executed it: it does not reach RVA 0x10dc. =HB stops after =AFRET (IRQs masked), same as try 10, i.e. winload
+  gets control back from our handoff and then hangs before the MMU-off paint point.
+  **DISASM INSIGHT (build/woa/win-bin/winload.efi, objdump 0x1054..0x10b4).** What we have been calling "the
+  switch leaf" is actually BlpArchEnterEl2 @RVA 0x1054 = a cluster of THREE adjacent routines:
+    (1) 0x1054 EL2-ENTER:  mov x2,x0 ; **hvc #1** @0x1058 ; msr VBAR_EL2,x2 @0x105c ; mrs x0,SP_EL1 ; mov sp,x0 ;
+        mov x0,#0 ; ret @0x106c  -- a HYPERCALL into Samsung's uH/RKP EL2 hyp, then EL2-side VBAR_EL2 setup.
+    (2) 0x1070 TRAMPOLINE:  stp x29,x30 ; mov sp,x2 ; mov x0,x1 ; blr x2 @0x1084 ; ... ret @0x1090.
+    (3) 0x1094 MMU SWITCH:  mrs x4,SCTLR_EL1 ; clear M/C/I ; msr SCTLR_EL1,x4 (MMU OFF) @0x10b0 ; set TCR/TTBR0/
+        TTBR1 ; tlbi vmalle1 @0x10dc (our =WLNOP/=WLPAINT site) ; msr SCTLR_EL1,x3 (MMU ON) @0x10e8 ; ret @0x10fc.
+  Our tlbi NOP (0013), MMU-on reflush (0014) and paint (0015) are ALL in routine (3). No band => winload does
+  not reach 0x10dc in (3) on the post-EBS call. This REFRAMES the hang: it is NOT the MMU-off tlbi (we proved
+  the EL1 MMU-on tlbi is emulated, =STLBI1/2) and probably not routine (3) at all -- the prime suspect is the
+  **hvc #1 @0x1058** (winload asking Samsung's locked EL2 hyp to enter/hand over EL2; a locked uH/RKP may refuse
+  or not implement it -> hang), or the MMU-off @0x10b0, or post-EBS prep before this cluster.
+  NEXT (src24): move the SAME paint+halt stub to the cluster ENTRY RVA 0x1054 (anchored WlP-0x88 off the =WLSW
+  tlbi match), MMU still ON, FB 0xCC000000 reached via winload's pre-switch identity map. Band at 0x1054 =>
+  winload DOES reach BlpArchEnterEl2 post-EBS and hangs at/after the hvc #1 (EL2-entry is the wall; focus there
+  next); no band => winload dies even earlier (ExitBootServices or pre-cluster prep) and we instrument that
+  window. BOOT = out/xnu-boot-src23.img (diagnostic, does not boot Windows).
