@@ -416,6 +416,12 @@ star_dump_latches(void)
         pmsg_put(" 7f");
         pmsg_hex(*(volatile uint32_t *)(0xFED17F00UL + off[i]));
     }
+    /* Firmware<->UFS-driver low-level watchdog handoff record (0xFED13800). */
+    pmsg_put(" wdt");
+    for (unsigned i = 0; i < 3; ++i) {
+        pmsg_put(" ");
+        pmsg_hex(*(volatile uint32_t *)(0xFED13800UL + 4 * i));
+    }
     pmsg_put("\n");
 }
 
