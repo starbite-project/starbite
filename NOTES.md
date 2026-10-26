@@ -803,3 +803,18 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   to dismiss it). Original: backup/20261026-bcd/BCD-seq49-ignoreallfailures; patched build/woa/bcd/
   BCD-displayallfailures (sha 809ca955...), written to WINESP and verified. The BCD parse was validated
   against the earlier numproc edit (25000061 -> 0x409c). RESTORE the original once the code is known.
+- 2026-10-26 19:20: src33 error code (user's slow-mo video): **"A fatal error occurred transitioning to the
+  operating system", 0xC0000240** = STATUS_REQUEST_ABORTED = winload's mapping of EFI_ABORTED from a firmware
+  service; after ExitBootServices, so DisplayAllFailures cannot hold the screen (no boot services left).
+  Published PlatformBootManagerLib: the EBS hook's Star2LteScanKernelPt hard-codes the WINDOWS KERNEL PT ROOT
+  at PA 0x907AA000 ("rock-stable in 25+ captures") in 13 places -- stable only because winload's allocation
+  pattern is deterministic for the bank-0-only map. Extra conventional memory shifts winload's allocations
+  (top-down into bank 1) and the release's (binary, newer) gate/hooks abort. The published hook itself only
+  logs =SUSP and never returns EFI_ABORTED, so the abort is in the release's newer gate or P module.
+  FIX ATTEMPT: patch 0022 now also builds a BuildMemoryAllocationHob(bank, EfiBootServicesData) for each
+  extra range (STAR2LTE_RAM_AS_BS_DATA=1): the banks show in the UEFI map as allocated boot-services data,
+  so neither DXE/BDS nor winload allocates from them and the bank-0 layout (PT root 0x907AA000) is
+  unchanged, while Windows reclaims boot-services memory after the handoff (LoaderFirmwareTemporary ->
+  free) and should report ~1.2 GiB in the witness. src34 = same patch set, stage 1 + BS-data:
+  build/woa/starbite-uefi-src34.bin (sha 4b1419c8...), BOOT = out/xnu-boot-src34.img (sha 973e824f...),
+  flashed. BCD restored to the original (sha 0e09b755..., seq 49, IgnoreAllFailures).

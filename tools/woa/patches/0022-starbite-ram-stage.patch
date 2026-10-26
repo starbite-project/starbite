@@ -1,5 +1,5 @@
 --- a/Platform/Star2LtePkg/Library/PlatformMemoryMapLib/PlatformMemoryMapLib.c	2026-10-25 13:05:55
-+++ b/Platform/Star2LtePkg/Library/PlatformMemoryMapLib/PlatformMemoryMapLib.c	2026-10-26 18:54:58
++++ b/Platform/Star2LtePkg/Library/PlatformMemoryMapLib/PlatformMemoryMapLib.c	2026-10-26 19:10:50
 @@ -17,6 +17,7 @@
  #include <Library/ArmPlatformLib.h>
  #include <Library/ArmLib.h>
@@ -8,21 +8,33 @@
  #include <Platform/Exynos9810.h>
  #include "Star2LteFbText.h"
  
-@@ -27,6 +28,10 @@
+@@ -27,6 +28,21 @@
  #define STAR2LTE_USB_DEBUG_MODE 0
  #endif
  
 +#ifndef STAR2LTE_RAM_STAGE
 +#define STAR2LTE_RAM_STAGE 0
 +#endif
++//
++// 1 = publish the extra banks as already-allocated EfiBootServicesData instead
++// of free conventional memory. Neither the firmware nor the OS loader then
++// allocates from them, so winload's allocation pattern (and the kernel
++// page-table root the release's ExitBootServices gate hard-codes at
++// 0x907AA000) stays exactly as with the bank-0-only map, while Windows reclaims
++// boot-services memory after the handoff and gets the banks as free RAM.
++//
++#ifndef STAR2LTE_RAM_AS_BS_DATA
++#define STAR2LTE_RAM_AS_BS_DATA 1
++#endif
 +
  #define MMAP_DRAM   ARM_MEMORY_REGION_ATTRIBUTE_WRITE_BACK
  #define MMAP_DEV    ARM_MEMORY_REGION_ATTRIBUTE_DEVICE
  
-@@ -81,6 +86,35 @@
+@@ -80,7 +96,36 @@
+ };
  
  #define MMIO_REGION_COUNT  (sizeof (mMmioRegions) / sizeof (mMmioRegions[0]))
- 
++
 +//
 +// starbite: extra DRAM published at SEC/PEI, staged by STAR2LTE_RAM_STAGE
 +// (0 = the 0x90000000+0x2C800000 PcdSystemMemory window only, 711 MiB).
@@ -49,13 +61,13 @@
 +  // Stage 3: the 2 GiB high bank (no carveouts in the DT).
 +  { 0x0000000880000000ULL, 0x0000000080000000ULL, 3 },
 +};
-+
+ 
 +#define EXTRA_RAM_COUNT  (sizeof (mExtraRam) / sizeof (mExtraRam[0]))
 +
  /**
    Build the platform memory map. Caller frees nothing; table is static.
  
-@@ -93,7 +127,7 @@
+@@ -93,7 +138,7 @@
    )
  {
    // DRAM + framebuffer + pram-diag + all MMIO windows + terminator.
@@ -64,7 +76,7 @@
    UINTN                                Index;
    UINTN                                Region;
  
-@@ -156,6 +190,34 @@
+@@ -156,6 +201,41 @@
    Index++;
  
    //
@@ -93,6 +105,13 @@
 +      mExtraRam[Region].Base,
 +      mExtraRam[Region].Size
 +      );
++#if STAR2LTE_RAM_AS_BS_DATA
++    BuildMemoryAllocationHob (
++      mExtraRam[Region].Base,
++      mExtraRam[Region].Size,
++      EfiBootServicesData
++      );
++#endif
 +  }
 +
 +  //
@@ -100,7 +119,7 @@
    // Only mapped once the base is verified.
    //
 --- a/Platform/Star2LtePkg/Library/PlatformMemoryMapLib/PlatformMemoryMapLib.inf	2026-10-25 13:05:55
-+++ b/Platform/Star2LtePkg/Library/PlatformMemoryMapLib/PlatformMemoryMapLib.inf	2026-10-26 18:54:58
++++ b/Platform/Star2LtePkg/Library/PlatformMemoryMapLib/PlatformMemoryMapLib.inf	2026-10-26 18:55:07
 @@ -26,6 +26,7 @@
  [LibraryClasses]
    ArmLib
