@@ -818,3 +818,17 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   free) and should report ~1.2 GiB in the witness. src34 = same patch set, stage 1 + BS-data:
   build/woa/starbite-uefi-src34.bin (sha 4b1419c8...), BOOT = out/xnu-boot-src34.img (sha 973e824f...),
   flashed. BCD restored to the original (sha 0e09b755..., seq 49, IgnoreAllFailures).
+- 2026-10-26 19:35: **src34 (bank 1 as boot-services data): boots like src32c, Windows now sees 1206 MiB.**
+  Setup dialog again, then the phone switched off without "Restarting" (postmortem-src34-run1). Witness WWR1:
+  4/4 CPUs, 308746 pages = 1206 MiB in 14 ranges (was 181966 pages / 710 MiB / 11). So the BS-data trick works:
+  winload keeps its bank-0 layout, the release EBS gate is happy, Windows reclaims the banks. NRM1 again phase
+  1 only; RST_STAT SWRESET; P3 PREBRANCH. Setup outcome unchanged -> 710 MiB was not the (only) blocker.
+  Windows-side clock: Panther\UnattendGC\setupact.log holds 7 windeploy launches (one per Windows boot so far),
+  ALL stamped 2026-08-05 14:29:56..14:30:38; SOFTWARE hive and INF\setupapi.dev.log mtimes are the same moment;
+  only SYSTEM carries 2026-10-26 (our host-side hive edits). => Windows starts every boot at the same fixed
+  time (~2026-08-05 14:29 local); the release firmware's GetTime likely returns a constant (same on the S9+).
+  Only one "Setup.exe failed ... [0x1f]" line is in the windeploy log; Panther\setupact.log is rewritten per
+  run and always ends at the Specialize.xml session creation. (TWRP's busybox has no stat -c/od -A; use
+  stat -t; TWRP's clock is 2018 so find -mtime is useless on this volume.)
+  NEXT: src35 = stage 2 (+0xE3700000+0xC900000, ~1.4 GiB, above the S9+ release's 1357 MiB) to rule memory
+  out completely.
