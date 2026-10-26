@@ -533,3 +533,8 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   release's SEC flakiness (W2, no 0002 dc-zva fix) persists on VG6; try 1 just got lucky. Plan: retry the
   release until it reaches the kernel and read the bugcheck (AutoReboot now 0). Our src builds are not the
   answer yet: their winload patch sites target another winload build (try 9), the release matches 22621.7582.
+- 2026-10-26 16:45: 5 more VG6 release tries: all SEC deaths. Binary fix of the release's SEC: its memset
+  (arm-optimized-routines, SEC core FFS file @0x228 of FV @0x1e0, attr 0x4, no data checksum) reads DCZID_EL0 at
+  0x12e0 and uses `dc zva` (faults with MMU off, = our patches/0002). Patched 0x12e0 `mrs x5, dczid_el0`
+  (d53b00e5) -> `mov x5, #0x10` (d2800205): DZP set -> plain-store loop. build/woa/uefi-22621.7582-nozva.bin,
+  BOOT = out/xnu-boot-rel7582-nozva.img (sha256 064ee781...).
