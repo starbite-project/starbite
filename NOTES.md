@@ -500,3 +500,15 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   Untested since Windows was installed: the v0.1.0 RELEASE UEFI built for exactly 22621.7582
   (build/woa/uefi-22621.7582.bin) against the installed Windows. That one boot discriminates "our source build
   doesn't match the Windows build" from "S9 hardware/S9+-only". BOOT = out/xnu-boot-src25.img.
+- 2026-10-26 14:50: **Release 22621.7582 UEFI vs installed Windows (out/xnu-boot-rel7582.img, packed on the
+  host without lima): dies in SEC instantly** (pstore-rel7582.bin = only "P V W X Y S $ T U" + loader line, then
+  the woa recovery divert reboots to TWRP) -- same as W2; the release lacks our 0002 dc-zva SEC fix. No info.
+  **S9 lead:** JoshAtticus/exynos9810-woa (fork of ntdevlabs) is 1 commit ahead: "installer: support the Galaxy
+  S9 (starlte SM-G960F)" (580a81f, 2026-10-03), installer/tools only -- NO firmware changes; it reuses the
+  star2lte UEFI images and validates S-Boot **G960FXXUHFVG6**. Our phone: **G960FXXUHFVG4** (ro.boot.bootloader).
+  S-Boot ships Samsung's uH/RKP EL2 hyp and leaves the CPU state SEC starts from, so the bootloader revision is a
+  credible explanation for both the release's SEC death and our pre-EBS winload hang. Same binary rev (U...H),
+  so VG4<->VG6 should not trip the rollback counter (unverified).
+  Also: host disk filled (116 MB free) -> lima guest disk writes failed (today's sshd "Input/output error"s);
+  pruned out/xnu-boot-src1..23 (1.2 GB free now). lima guest no longer boots (sshd never up) -- needs repair or
+  re-create before any source rebuild.
