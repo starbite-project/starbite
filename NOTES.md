@@ -905,3 +905,9 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   = backup/20261026-bcd/BCD. BOOT = src36. Next: ONE uninterrupted first boot. Specialize ends in Windows' own
   restart; the driver leaves INFORM3 normal, so that restart lands at OUR MENU -> pick WINDOWS 11 again
   (expected, not a failure). Do not force-reset during the spinner.
+- 2026-10-26 21:20: ***** SETUP GETS PAST SPECIALIZE ***** Clean first boot (fresh image, src36 with the RWD1/P3
+  handshake, 1407 MiB): "Getting devices ready" -> "Starting services" -> "Getting devices ready 100%" ->
+  "Getting ready" (user), no error dialog, no reset at ~60 s. So the dialog loop was entirely the stale
+  interrupted-setup state from the first (broken-platform) run, and the ~60 s resets were Windows' own restart
+  after setup.exe exited 0x1f. Sitting at "Getting ready" for many minutes (slow I/O through the bounce
+  buffer); leave it running.
