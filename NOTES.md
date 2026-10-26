@@ -969,3 +969,4 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   --scale2 --bank2 (dram 0x880000000+0x60000000). BOOT image out/xnu-boot-ios-bank2.img (sha e0520863...;
   src37 Windows firmware + kiosk kernel unchanged). Backup first: USERDATA 0..16 GiB (iOS HFS root) ->
   SD card /external_sd/ios-root-userdata-16g.img (on-phone dd + sha compare).
+- 2026-10-26 23:05: iOS root backup verified on the SD card (sha 5b38e479..., 16 GiB, 40.8 MB/s). Flashed out/xnu-boot-ios-bank2.img (fallback for iOS: out/xnu-boot-src37.img = 472 MiB window).
