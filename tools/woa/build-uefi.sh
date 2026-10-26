@@ -18,7 +18,8 @@ src=build/woa/fw
 rm -rf "$src"
 mkdir -p build/woa
 cp -R ref/exynos9810-woa/firmware "$src"
-for p in tools/woa/patches/*.patch; do
+# PATCHES: glob of patches to apply (default all), e.g. PATCHES='tools/woa/patches/000[1-6]-*.patch'
+for p in ${PATCHES:-tools/woa/patches/*.patch}; do
     patch -s -d "$src" -p1 < "$p"
 done
 limactl shell starbite -- bash -c "

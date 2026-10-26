@@ -543,3 +543,15 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   one success), 0x829a1000 (died) -- S-Boot's placement of the boot image varies between runs; 3 samples, no
   conclusion. Pivot: every src build so far ran on VG4 only, and the stage they stalled at (pre-=EBSENTER) is the
   stage VG6 unblocked for the release. Testing src25 (minimal handoff, SEC passes reliably) on VG6 as-is.
+- 2026-10-26 17:20: **src25 on VG6: same wall (=AFRET, dark; pstore-vg6-src25.bin). KEY DIFF vs the release
+  ring (VG6, reached the kernel):** the release never emits =HANDOFF/=AFRET; winload runs through its GMMF
+  loop to =EBSENTER and ntos gets patched THERE (=NTPATCH n=08 inside EBSENTER..EBSOK). In the published
+  source the pre-EBS "=HANDOFF minimal" block (Star2LtePatchNtosCntfrqInMemory + Star2LtePatchWinloadTimers,
+  star2lte winload sites) is gated on winload's final zero-size map query being <= 0xC00 -- on the S9 the
+  maps are 0x1380+, so in the release that gate NEVER fires. Our 0007 widened it to 0x4000 (+pra heuristic)
+  because on VG4 (pstore-win2) winload hung unpatched; 0011-0017 all sit on that forced handoff, and =AFRET
+  (compiled out upstream, `if (FALSE && ...)`) is where our build goes dark. On VG6 the forced handoff is
+  likely the wall itself. NEXT (src26): rebuild with PATCHES='tools/woa/patches/000[1-6]-*.patch' only
+  (SEC dc-zva, no divert, pstore mirror, UFS diag, EndOfDxe, ring wraps) = published flow + S9 fixes, closest
+  possible to the release; expect =EBSENTER..=EBSOK then the kernel (and the bugcheck, AutoReboot=0).
+  build-uefi.sh now honours PATCHES=. Blocked on lima (restarting).
