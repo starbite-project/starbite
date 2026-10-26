@@ -19,6 +19,11 @@ import mkadt   # noqa: E402
 
 DRAM_BASE = 0x92000000      # isolated XNU window (after vendor logs at 0x91202000..0x9179c000)
 DRAM_SIZE = 0x1d800000      # 472 MiB, ends at the RKP region 0xaf800000
+# --bank2: the S9's second DRAM bank (TWRP /proc/iomem 880000000-8ffffffff, 2 GiB, no
+# reserved-memory node in it; Windows uses it as RAM stage 3). Needs the bank-aware
+# shim (BANK2_* in shim/starlte/xnu_boot.c) and, above 4 GiB, the SMP trampoline at
+# 0x8fffe000 (herolte patch 0223, active for STARLTE).
+BANK2_BASE, BANK2_SIZE = 0x880000000, 0x80000000
 SOC_BASE = 0x10000000       # arm-io ranges base; child regs are relative
 FB_BASE, FB_WIDTH, FB_HEIGHT = 0xcc000000, 1440, 2960
 TIMEBASE = 26000000         # CNTFRQ_EL0 is 0 at handoff; OSCCLK is 26 MHz
@@ -151,7 +156,13 @@ if __name__ == '__main__':
     parser.add_argument('output', type=Path)
     parser.add_argument('--scale2', action='store_true',
                         help='iPhone XR canvas 828x1792 @2x, scaled by the kernel')
+    parser.add_argument('--bank2', action='store_true',
+                        help='XNU RAM = the second bank instead of the 472 MiB window')
+    parser.add_argument('--bank2-mb', type=int, default=1536,
+                        help='MiB of the second bank; on herolte 1536 boots with boot-arg '
+                             'vm_compression_limit=98304 and 2048 panics in write_pte_fast')
     args = parser.parse_args()
-    blob = adt.serialize(build(scale2=args.scale2))
+    dram = (BANK2_BASE, min(args.bank2_mb << 20, BANK2_SIZE)) if args.bank2 else (DRAM_BASE, DRAM_SIZE)
+    blob = adt.serialize(build(dram=dram, scale2=args.scale2))
     args.output.write_bytes(blob)
     print(f'{args.output}: {len(blob)} bytes')

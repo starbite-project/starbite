@@ -18,9 +18,10 @@
 #define LOG_BASE 0x91fff000UL
 #define RAM_BASE 0x92000000UL
 #define RAM_END  0xaf800000UL
-/* The second DRAM bank is not described until its layout is measured. */
-#define BANK2_BASE RAM_END
-#define BANK2_END  RAM_END
+/* Second DRAM bank (TWRP /proc/iomem 880000000-8ffffffff, 2 GiB, no
+ * reserved-memory node): XNU may own it (tools/mkadt_starlte.py --bank2). */
+#define BANK2_BASE 0x880000000UL
+#define BANK2_END  0x900000000UL
 #define DRAM_LOW 0x80000000UL
 #define PAGE_SIZE 4096UL
 #define BOOT_LINE_LENGTH 608

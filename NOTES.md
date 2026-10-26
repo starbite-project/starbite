@@ -957,3 +957,15 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   Turnip. Mali-G72 analogue: Mesa Panfrost (GLES 3.1, Bifrost v6) in the same GL ES slot + an XNU Mali kernel
   driver (power/clocks, MMU address spaces, job chains, IRQs) modelled on Linux panfrost + Samsung mali_kbase
   in our downstream kernel.
+- 2026-10-26 22:55: **iOS RAM: XNU into the second bank.** Same path the S7 port took (ref HEROLTE_PROGRESS.md
+  2026-10-23): bank2 0x880000000 (no reserved-memory node); there 2048 MiB panicked (kmem ranges, then
+  write_pte_fast; the macOS-config compressor reserves 16 x RAM), 1536 MiB + boot-arg
+  vm_compression_limit=98304 boots; secondaries need the <4 GiB CPU_ON trampoline (patch 0223, page
+  0x8fffe000, active for STARLTE since its board header also defines HEROLTE; 0x8fffe000 is plain bank-0 RAM on
+  the S9). UFS DMA: herolte_ufs.c programs UTRLBAU/UCDBAU/PRDT upper halves and refuses >4 GiB DMA without
+  CAP.64AS; S9 CAP 0x1303ff0f has 64AS (bit 24). Changes: tools/mkadt_starlte.py --bank2 [--bank2-mb 1536],
+  shim BANK2_BASE/END = 0x880000000/0x900000000. Kernel unchanged (out/kernel.development.starlte reproduces
+  out/payload.bin byte-for-byte). out/payload-bank2.bin = same cmdline + vm_compression_limit=98304, ADT
+  --scale2 --bank2 (dram 0x880000000+0x60000000). BOOT image out/xnu-boot-ios-bank2.img (sha e0520863...;
+  src37 Windows firmware + kiosk kernel unchanged). Backup first: USERDATA 0..16 GiB (iOS HFS root) ->
+  SD card /external_sd/ios-root-userdata-16g.img (on-phone dd + sha compare).
