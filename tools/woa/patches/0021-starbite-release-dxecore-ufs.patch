@@ -1,0 +1,26 @@
+Starbite: use the v0.1.0 release's DxeCore (110080 B vs ours 114224) and
+UfsPassThruDxe (30720 vs 28734): with the release's BdsDxe/shim transplanted
+(src30) BDS still never resumes after the shim's start phase (locp 6).
+Applies on top of 0020.
+--- a/Platform/Star2LtePkg/Star2LtePkg.fdf
++++ b/Platform/Star2LtePkg/Star2LtePkg.fdf
+@@ -98,5 +98,8 @@
+   # --- DXE core + PCD ---
+   #
+-  INF MdeModulePkg/Core/Dxe/DxeMain.inf
++  FILE DXE_CORE = d6a2cb7f-6a18-4e2f-b43b-9920a733700a {
++    SECTION PE32 = /Users/dev/project-starbite/build/woa/relmods/DxeCore/pe32.efi
++    SECTION UI = "DxeCore"
++  }
+   INF MdeModulePkg/Universal/PCD/Dxe/Pcd.inf
+ 
+@@ -176,5 +176,8 @@
+     SECTION UI = "98100003-4768-4f46-9100-140500009041"
+   }
+-  INF MdeModulePkg/Bus/Ufs/UfsPassThruDxe/UfsPassThruDxe.inf
++  FILE DRIVER = e7f1dff9-dab6-498a-9adf-57f344eddf57 {
++    SECTION PE32 = /Users/dev/project-starbite/build/woa/relmods/UfsPassThruDxe/pe32.efi
++    SECTION UI = "UfsPassThruDxe"
++  }
+   INF MdeModulePkg/Bus/Scsi/ScsiBusDxe/ScsiBusDxe.inf
+   INF MdeModulePkg/Bus/Scsi/ScsiDiskDxe/ScsiDiskDxe.inf

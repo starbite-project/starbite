@@ -684,3 +684,10 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   patches/0020 = transplant the release's BdsDxe (6d33944a-...) and SecurityStubDxe (f80697e9-..., 5.7 KB).
   src30 = 0001,0002,0005,0018,0019,0020 (building). Untransplanted release files left: DxeCore (-4 KB),
   UfsPassThruDxe (+2 KB), 6e89af20 freeform (all 0xFF padding, 2.8 KB), ~512 B deltas in 6 stock modules.
+- 2026-10-26 21:35: src30 (release BdsDxe+SecurityStub too): earlier stop, HUD "locp 6". Both rings do bt006
+  locp VariablePolicy (81d1675c) OK, then the shim's start phase; the release BDS resumes with stall> polling,
+  ours never resumes (pstore-src30.bin). Outer FV: our PeilessSec 61368 B vs release 57272 (different edk2).
+  patches/0021 = + release DxeCore + UfsPassThruDxe (src31, building). CONTROL src32 = our bootshim + our
+  PeilessSec file + the release's ENTIRE compressed DXE volume (python splice, FV checksum fixed, verified):
+  build/woa/starbite-uefi-src32.bin, BOOT = out/xnu-boot-src32.img (sha d3870dc8...). Blue bar -> the hang is
+  in our DXE module set; no -> it is in our SEC/PEI.
