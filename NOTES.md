@@ -645,3 +645,7 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
 - 2026-10-26 20:15: src27 REAL build (FD sha b55bbdb2..., fw tree verified free of 0011-0013 code): patches
   0001,0002,0005 only. BOOT = out/xnu-boot-src27.img. Question: does the map stay small enough for winload's
   final probe (src26 fragmented to 0x1410..0x1500; release max 0x1080)?
+- 2026-10-26 20:25: real src27: same as src26 (ring ends in the loop, bt0cc, apg E000e x3, map 0x1440, no final
+  probe/EBS). Published-source fragmentation is upstream; cannot reach the kernel from our source. CLOSED.
+  New lead from the release's kernel-run ring: "=SUSP l=3 va=80200000..8020b000 d=...72f" x12 then "=PTSCAN
+  sp=2700 pf=0000": the release's PT scanner flagged 12 identity PTEs for PA 0x80200000.. and HEALED NONE.
