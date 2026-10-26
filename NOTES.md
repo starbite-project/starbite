@@ -465,3 +465,27 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   winload DOES reach BlpArchEnterEl2 post-EBS and hangs at/after the hvc #1 (EL2-entry is the wall; focus there
   next); no band => winload dies even earlier (ExitBootServices or pre-cluster prep) and we instrument that
   window. BOOT = out/xnu-boot-src23.img (diagnostic, does not boot Windows).
+- 2026-10-26 09:35: **W5 try 13 (src24) RESULT (no band at 0x1054) + KEY REFRAME: winload NEVER reaches
+  =EBSENTER on our setup; our handoff self-tests are the prime suspect.** src24 moved the paint+halt stub to
+  the BlpArchEnterEl2 cluster ENTRY (RVA 0x1054, MMU on, =WLPAINT2) -- user reports NO band, frozen Windows
+  logo again. So winload does not even reach BlpArchEnterEl2 post-EBS. Checked all 11 pstore rings: =EBSENTER
+  count = 0 in EVERY boot -- winload has NEVER called ExitBootServices on this starlte setup. The invariant end
+  is =HANDOFF/=AFRET (our final-GetMemoryMap handoff hook); after it: nothing (no 2nd GetMemoryMap, no alloc,
+  no =EBSENTER). =HB stops because winload raises TPL_HIGH entering its pre-EBS critical section, not because
+  EBS ran.
+  **ROOT-CAUSE HYPOTHESIS (grounded in the woa source's own 2026-08-08 "BOOT RELIABILITY FIX" comment @ the
+  handoff, lines ~5152-5195):** that comment says diagnostics in this live handoff made boot INTERMITTENT --
+  "roughly half of all boots stopped at the Windows logo before the kernel started" -- and that writing
+  TTBRs/TCR underneath a running winload "has no place in a boot we want to be reliable." OUR
+  Star2LtePatchWinloadTimers runs a BATTERY of hyp self-tests (ext55-62: =STLBI/=CFQ/=ATST/=UTCR/=IPS/=EPD/=BC)
+  that do exactly that -- `msr tcr_el1` (EPD1=0, IPS=48, AS=1, A1=1, T1SZ=17) and `msr ttbr1_el1` (live 16-bit
+  ASID, UEFI root base) + `tlbi vmalle1`, then restore -- in winload's live pre-EBS context. Any imperfect
+  restore / TLB disturbance leaves winload's high-half translation corrupt => hang at the logo = our exact
+  symptom. These self-tests were added to reproduce a KERNEL-stage tlbi/ASID hang (the woa project's LATER
+  wall, post-=EBSOK); on our build they appear to break winload BEFORE EBS.
+  NEXT (src25): gate the ENTIRE self-test battery OFF (STATIC mStarbiteHypProbe=FALSE) and set
+  mStarbitePaintDiag=FALSE so the =WLSW block does the real boot path (NOP the switch tlbi + MMU-on reflush).
+  This is the woa "minimal handoff" (ntos CNTFRQ patch + winload tlbi NOP only). If winload then reaches
+  =EBSENTER / =EBSOK (or the screen advances past the frozen logo) => the self-tests were the wall, breakthrough;
+  if it still hangs at =AFRET => try a pure passthrough (NOP also off) next. BOOT = out/xnu-boot-src24.img
+  (diagnostic).

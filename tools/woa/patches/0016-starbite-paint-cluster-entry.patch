@@ -1,0 +1,32 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c	2026-10-26 09:26:30
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c	2026-10-26 09:26:43
+@@ -2820,13 +2820,26 @@
+             0xB8004486u, 0xF10004A5u, 0x54FFFFC1u, 0xD503207Fu, 0x17FFFFFFu
+           };
+           UINTN  Pk;
++          //
++          // Starbite W5 try 13 (src24): try 12 painted at the tlbi slot (RVA 0x10dc, inside
++          // the MMU-switch routine, after the MMU is off) and showed NO band -- winload does
++          // not reach there post-EBS. Bracket it: move the SAME paint+halt stub to the CLUSTER
++          // ENTRY, BlpArchEnterEl2 @RVA 0x1054 = WlP - 0x88 (the tlbi match WlP is 0x10dc). The
++          // MMU is still ON here and the stub runs BEFORE the `hvc #1` @0x1058 and before the
++          // MMU-off @0x10b0, so the framebuffer 0xCC000000 is reached through winload's live
++          // pre-switch identity map. Band => winload reaches BlpArchEnterEl2 after
++          // ExitBootServices and the hang is at/after the hvc #1 EL2-entry; no band => it dies
++          // even earlier (EBS or pre-cluster prep). Same page as 0x10dc, already RO-cleared.
++          //
++          volatile UINT32  *WlI2 = (volatile UINT32 *)(UINTN)(WlP - 0x88ULL);   // RVA 0x1054
+ 
+           for (Pk = 0; Pk < (sizeof (Paint) / sizeof (Paint[0])); Pk++) {
+-            WlI[Pk] = Paint[Pk];
+-            Star2LteFlushPatchedInstruction ((UINT64)(UINTN)&WlI[Pk]);
++            WlI2[Pk] = Paint[Pk];
++            Star2LteFlushPatchedInstruction ((UINT64)(UINTN)&WlI2[Pk]);
+           }
+ 
+-          BdsPramStr (" =WLPAINT");
++          BdsPramStr (" =WLPAINT2 rva=");
++          BdsPramHex ((UINT32)((WlP - 0x88ULL) - WlBase), 6);
+         } else {
+           *WlI = 0xD503201Fu;      // nop
+           Star2LteFlushPatchedInstruction (WlP);
