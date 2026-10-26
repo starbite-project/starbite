@@ -30,6 +30,17 @@ install -m 600 -o 10000 -g 10000 /tmp/starbite_ed25519.pub /home/$U/.ssh/authori
 mkdir -p /etc/NetworkManager/conf.d
 printf '[keyfile]\nunmanaged-devices=interface-name:usb0\n' > /etc/NetworkManager/conf.d/50-starbite-usb0.conf
 
+# NetworkManager from Plasma: polkit judged the autologin session not active
+# (auth_admin for network-control); the phone's user (netdev) may manage it.
+mkdir -p /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/50-starbite-networkmanager.rules <<'EOR'
+polkit.addRule(function(action, subject) {
+	// Starbite: the phone's user (netdev) manages networks without a password prompt
+	if (action.id.indexOf("org.freedesktop.NetworkManager.") == 0 && subject.isInGroup("netdev"))
+		return polkit.Result.YES;
+});
+EOR
+
 # Internal UFS (iOS, Windows, Android, EFS) is read-only from the initramfs;
 # keep it out of the desktop's disk list as well.
 mkdir -p /etc/udev/rules.d

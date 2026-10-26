@@ -1170,3 +1170,11 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   doas, PIN from build/linux/pmos-login.txt answered by expect); the store/BOOT writers take
   PHONE_RUN=tools/linux/pmos-root.sh. The init installs /usr/local/sbin/reboot-linux (+ its busybox,
   for devmem) into the system so pmOS can reboot straight back into Linux.
+- 2026-10-27: Wi-Fi from Plasma failed "Not authorized to control networking": polkit gave auth_admin
+  for NetworkManager.network-control although Plasma runs in the active seat0 session c1 (cgroup /c1,
+  autologin). Fix: /etc/polkit-1/rules.d/50-starbite-networkmanager.rules (netdev group may use all
+  NetworkManager actions), installed live and in tools/linux/pmos-setup.sh. Smoothness: KWin = OpenGL ES
+  3.1 on "Mali-G72 MC18 (Panfrost)", 60 Hz (DECON ~60 irq/s), scale 2.25, CMA 320 MiB fine; but GPU
+  devfreq (simple_ondemand, 260/455/572 MHz) sat at 260 MHz 99.8 % of the time. Test: userspace
+  governor at 572 MHz (36 C idle) - not persistent yet. App start is also bound by the microSD
+  (22.6 MB/s, high speed; UHS needs the 1.8 V switch on LDO2).
