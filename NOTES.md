@@ -899,3 +899,9 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   (nohup /tmp/redeploy.sh, log /tmp/redeploy.log). After it: fresh first boot on src36 (RWD1/P3 handshake,
   1407 MiB) = the real test of specialize. Note the ESP is rewritten too (image's own BCD) and the image's
   SYSTEM hive has AutoReboot at its default.
+- 2026-10-26 21:00: on-device redeploy DONE bad=0 (845 steps, every copied 32 MiB block verified card vs
+  partition by sha256 on the phone; card sha ok). Fresh volume: Panther = unattend.xml only; HKLM\SYSTEM\Setup
+  original (SetupType 1, SetupPhase 4, SystemSetupInProgress 1, no Status\ChildCompletion); BCD sha 83297751
+  = backup/20261026-bcd/BCD. BOOT = src36. Next: ONE uninterrupted first boot. Specialize ends in Windows' own
+  restart; the driver leaves INFORM3 normal, so that restart lands at OUR MENU -> pick WINDOWS 11 again
+  (expected, not a failure). Do not force-reset during the spinner.
