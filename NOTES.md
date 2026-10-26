@@ -790,3 +790,16 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   src33 = patches 0001,0002,0005,0018-0022 at STAR2LTE_RAM_STAGE=1, spliced with the release DXE volume:
   build/woa/starbite-uefi-src33.bin (sha e3ae67b3...), BOOT = out/xnu-boot-src33.img (sha 7a5eb2dd...),
   flashed. Expect the witness to report ~1.2 GiB; then see whether setup.exe still fails at specialize.
+- 2026-10-26 19:10: **src33 (stage 1, ~1.2 GiB): NEW FAILURE -- Windows logo, then winload's "Your PC needs to
+  be repaired" screen flashes, reset.** Post-mortem (postmortem-src33-run1): the whole retained PRAM area reads
+  0xFF (latches, witness, P3, ring = only the next shim dump) = DRAM was re-initialised: winload's failure
+  path calls ResetSystem(EfiResetCold) and the release's Star2LteResetSystemLib does PSCI SYSTEM_RESET first,
+  which on this EL3 is a cold reset. So a LOADER failure never leaves a ring; only driver/kernel-era resets
+  (PMU SWRESET / RESET2 warm) do. No bootstat.dat on the Windows partition. The extra memory is the only
+  change, so winload rejects something about the new map (two more conventional ranges above the firmware
+  window; DXE/BDS/loader allocations now land top-down in 0xDxxxxxxx). To read the error code instead of
+  filming it: BCD bootstatuspolicy (element 250000e0, QWORD at file 0x3674 of EFI/Microsoft/Boot/BCD, hive
+  seq 49/49) set 1 IgnoreAllFailures -> 0 DisplayAllFailures, so the recovery screen stays up (no keyboard
+  to dismiss it). Original: backup/20261026-bcd/BCD-seq49-ignoreallfailures; patched build/woa/bcd/
+  BCD-displayallfailures (sha 809ca955...), written to WINESP and verified. The BCD parse was validated
+  against the earlier numproc edit (25000061 -> 0x409c). RESTORE the original once the code is known.
