@@ -770,3 +770,23 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   matches ours. No S9+ memory figure documented. Firmware-side evidence for the restart mechanism is
   exhausted: the ends vary (orderly "Restarting" in run 3 vs none in run 4), the driver's ring is flooded by
   the 78 write records before the end, and the cause is setup.exe's 0x1f failure at specialize start.
+- 2026-10-26 19:00: **RAM track.** Why 710 MiB: the memory map Windows sees comes from SEC/PEI (PcdSystemMemory
+  0x90000000+0x2C800000), and src32 uses OUR PeilessSec with the release DXE volume (no RamManagerDxe) -> bank 0
+  only. The reference DSC has `STAR2LTE_RAM_STAGE` ("0 = 711 MiB baseline, 3 = the deployed 1,357 MiB, 4 = adds
+  the 4 GiB bank") but the implementation was in the authors' private edk2 MemoryInitPeiLib, not published:
+  the S9+ release ships with ~1.36 GiB, our build with 711 MiB. S9 DRAM (TWRP /proc/iomem): 0x80000000-
+  0xBC7FFFFF, 0xC0000000-0xDFFFFFFF, 0xE1900000-0xFF7FFFFF, 0x880000000-0x8FFFFFFFF (2 GiB high bank);
+  reserved (starlte.dts): seclog 0xC0000000+0x80000, fb 0xCC000000+0x1044000, secure_camera 0xE1900000+
+  0x1E00000, modem_if 0xF0000000+0x9200000, cp_ram_logging 0xF9200000+0x2000000, abox 0xFB200000+0x2800000,
+  exynos_ss 0xFDA00000+0x1C08000 (pstore 0xFED10000 inside), fimc 0xFF800000+0x800000, rkp/tima in bank 0.
+  (The UfsHcDxe "A105" comment claiming the other banks are not non-secure-accessible came from a bounce
+  allocated in an UNMAPPED bank -- a translation fault; Linux at the same EL uses all four banks.)
+  patches/0022-starbite-ram-stage: PlatformMemoryMapLib maps each extra bank write-back AND builds a tested
+  EFI_RESOURCE_SYSTEM_MEMORY HOB for it (HOB list exists before MemoryPeim): stage 1 = 0xC0080000+0xBF80000
+  and 0xCD044000+0x12FBC000 (the RamManagerDxe ranges, +495 MiB -> ~1.2 GiB), stage 2 = +0xE3700000+0xC900000
+  (201 MiB), stage 3 = +0x880000000+0x80000000 (2 GiB; DXE allocates top-down, so this one puts firmware
+  allocations above 4 GiB -- test last). tools/woa/fv-splice.py = reproducible src32-style splice (our outer
+  FV + the release's compressed DXE volume; reproduces src32's DXE volume byte-for-byte).
+  src33 = patches 0001,0002,0005,0018-0022 at STAR2LTE_RAM_STAGE=1, spliced with the release DXE volume:
+  build/woa/starbite-uefi-src33.bin (sha e3ae67b3...), BOOT = out/xnu-boot-src33.img (sha 7a5eb2dd...),
+  flashed. Expect the witness to report ~1.2 GiB; then see whether setup.exe still fails at specialize.

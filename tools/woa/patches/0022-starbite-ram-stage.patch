@@ -1,0 +1,111 @@
+--- a/Platform/Star2LtePkg/Library/PlatformMemoryMapLib/PlatformMemoryMapLib.c	2026-10-25 13:05:55
++++ b/Platform/Star2LtePkg/Library/PlatformMemoryMapLib/PlatformMemoryMapLib.c	2026-10-26 18:54:58
+@@ -17,6 +17,7 @@
+ #include <Library/ArmPlatformLib.h>
+ #include <Library/ArmLib.h>
+ #include <Library/DebugLib.h>
++#include <Library/HobLib.h>
+ #include <Platform/Exynos9810.h>
+ #include "Star2LteFbText.h"
+ 
+@@ -27,6 +28,10 @@
+ #define STAR2LTE_USB_DEBUG_MODE 0
+ #endif
+ 
++#ifndef STAR2LTE_RAM_STAGE
++#define STAR2LTE_RAM_STAGE 0
++#endif
++
+ #define MMAP_DRAM   ARM_MEMORY_REGION_ATTRIBUTE_WRITE_BACK
+ #define MMAP_DEV    ARM_MEMORY_REGION_ATTRIBUTE_DEVICE
+ 
+@@ -81,6 +86,35 @@
+ 
+ #define MMIO_REGION_COUNT  (sizeof (mMmioRegions) / sizeof (mMmioRegions[0]))
+ 
++//
++// starbite: extra DRAM published at SEC/PEI, staged by STAR2LTE_RAM_STAGE
++// (0 = the 0x90000000+0x2C800000 PcdSystemMemory window only, 711 MiB).
++// Galaxy S9 (starlte, 4 GB) banks from TWRP's /proc/iomem: 0x80000000+0x3C800000,
++// 0xC0000000+0x20000000, 0xE1900000+0x1DF00000, 0x880000000+0x80000000, minus the
++// DT reserved-memory carveouts (device/dtb/starlte.dts). Each range is mapped
++// write-back here and published as tested system memory, so DXE and the OS
++// loader see it as conventional RAM from the start (no RamManagerDxe needed).
++//
++typedef struct {
++  UINT64  Base;
++  UINT64  Size;
++  UINT8   Stage;
++} EXTRA_RAM_RANGE;
++
++STATIC CONST EXTRA_RAM_RANGE  mExtraRam[] = {
++  // Stage 1: bank 1 minus seclog (0xC0000000+0x80000) and the page-rounded
++  // framebuffer (0xCC000000..0xCD044000) -- the published RamManagerDxe ranges.
++  { 0x00000000C0080000ULL, 0x000000000BF80000ULL, 1 },
++  { 0x00000000CD044000ULL, 0x0000000012FBC000ULL, 1 },
++  // Stage 2: bank 2 between secure_camera (0xE1900000+0x1E00000, untouchable)
++  // and modem_if (0xF0000000); the rest of bank 2 is CP/abox/exynos_ss (pstore).
++  { 0x00000000E3700000ULL, 0x000000000C900000ULL, 2 },
++  // Stage 3: the 2 GiB high bank (no carveouts in the DT).
++  { 0x0000000880000000ULL, 0x0000000080000000ULL, 3 },
++};
++
++#define EXTRA_RAM_COUNT  (sizeof (mExtraRam) / sizeof (mExtraRam[0]))
++
+ /**
+   Build the platform memory map. Caller frees nothing; table is static.
+ 
+@@ -93,7 +127,7 @@
+   )
+ {
+   // DRAM + framebuffer + pram-diag + all MMIO windows + terminator.
+-  STATIC ARM_MEMORY_REGION_DESCRIPTOR  Table[MMIO_REGION_COUNT + 5];
++  STATIC ARM_MEMORY_REGION_DESCRIPTOR  Table[MMIO_REGION_COUNT + EXTRA_RAM_COUNT + 5];
+   UINTN                                Index;
+   UINTN                                Region;
+ 
+@@ -156,6 +190,34 @@
+   Index++;
+ 
+   //
++  // --- Extra DRAM banks (starbite STAR2LTE_RAM_STAGE) ---
++  // Map before the framebuffer entry below, which carves its device window out
++  // of bank 1 again. The HOB list exists (PeilessSec builds it before MemoryPeim
++  // asks for this table), so publish each bank as tested system memory here.
++  //
++  for (Region = 0; Region < EXTRA_RAM_COUNT; Region++) {
++    if (mExtraRam[Region].Stage > STAR2LTE_RAM_STAGE) {
++      continue;
++    }
++    Table[Index].PhysicalBase = mExtraRam[Region].Base;
++    Table[Index].VirtualBase  = mExtraRam[Region].Base;
++    Table[Index].Length       = mExtraRam[Region].Size;
++    Table[Index].Attributes   = MMAP_DRAM;
++    Index++;
++    BuildResourceDescriptorHob (
++      EFI_RESOURCE_SYSTEM_MEMORY,
++      EFI_RESOURCE_ATTRIBUTE_PRESENT |
++      EFI_RESOURCE_ATTRIBUTE_INITIALIZED |
++      EFI_RESOURCE_ATTRIBUTE_WRITE_COMBINEABLE |
++      EFI_RESOURCE_ATTRIBUTE_WRITE_THROUGH_CACHEABLE |
++      EFI_RESOURCE_ATTRIBUTE_WRITE_BACK_CACHEABLE |
++      EFI_RESOURCE_ATTRIBUTE_TESTED,
++      mExtraRam[Region].Base,
++      mExtraRam[Region].Size
++      );
++  }
++
++  //
+   // --- Framebuffer carveout (device/non-cached so writes hit the panel) ---
+   // Only mapped once the base is verified.
+   //
+--- a/Platform/Star2LtePkg/Library/PlatformMemoryMapLib/PlatformMemoryMapLib.inf	2026-10-25 13:05:55
++++ b/Platform/Star2LtePkg/Library/PlatformMemoryMapLib/PlatformMemoryMapLib.inf	2026-10-26 18:54:58
+@@ -26,6 +26,7 @@
+ [LibraryClasses]
+   ArmLib
+   DebugLib
++  HobLib
+   PcdLib
+ 
+ [Ppis]
