@@ -716,3 +716,10 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   ~80 s), so it expires ~1 min after the spinner and resets the SoC. Windows setup itself logs no error (Panther
   setupact.log stops mid-specialize). Touch does not respond in the setup dialog (separate issue: S6SY761/ACPI).
   The session's safety classifier stopped the reply that worked on this watchdog; continue in a fresh session.
+- 2026-10-26 22:40: 3rd src32 run: same (setup dialog, reset ~1 min). Touch does not work on the dialog.
+  Latch dump now includes the firmware<->UFS-driver handoff record @0xFED13800: 'ARM1' / 0 / 'FWA1'
+  (firmware-armed; never 'WAR1'/'WST1'), i.e. the shipped driver never acknowledges the shim's boot timeout
+  on this phone, and the timeout ends every Windows boot ~60 s in. The published-source firmware has no such
+  timeout (STAR2LTE_EBS_HW_WATCHDOG=0), so the way forward is the buildable track: make OUR DXE set reach the
+  kernel (src31 = +DxeCore/UFS next; bisect from src32 otherwise).
+  (Replies touching Windows-side internals keep getting stopped by the session safety classifier.)
