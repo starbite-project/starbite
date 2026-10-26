@@ -595,3 +595,8 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   (So the nozva/dc-zva theory for the release was wrong.) FIX in our shim: xnu_boot.S zeroes TPIDRRO_EL0
   next to x1-x3 before `br x16` (shim built in lima ~/shimbuild, copied out; old Image in
   build/xnu_boot.Image.pre-tpidrro). Test: release UEFI (unmodified) + fixed shim = out/xnu-boot-rel7582-tpz.img.
+- 2026-10-26 18:35: rel7582-tpz (release UEFI + TPIDRRO_EL0-zeroing shim), 3 tries: menu freeze, instant reboot,
+  and one KERNEL RUN (pstore-tpz.bin: same chain as the first VG6 success, =EBSENTER..=EBSOK =P2F =SWA, then the
+  blue/white top-of-screen glitch, reset, next UEFI's divert -> TWRP). TPIDRRO fix helps but a second SEC failure
+  remains (its rings are overwritten by later runs). AutoReboot=0 hive re-applied (sha 9cf09bda...) to read the
+  bugcheck on the next kernel run.
