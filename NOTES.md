@@ -756,3 +756,17 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   OPEN: why setup.exe fails (0x1f) at specialize start on the S9 while the S9+ installs with the same
   firmware+driver. S9-specific inputs: 710 MiB visible RAM (vs the S9+), display/touch (no touch in the
   dialog), DT/ACPI. The Windows-internals part stays out of this transcript (safety classifier).
+- 2026-10-26 18:55: src32c run 4: same dialog, then a reset to the MENU (user saw no "Restarting" this time,
+  longer until black); menu -> REBOOT TO RECOVERY; tools/woa/twrp-postmortem.sh src32c-run4. The shim's dump at
+  that menu boot (first line of the ring) read run 4's leftovers: **NRM1 status 0x00010001 = phase 1 (init)
+  only** -> the driver never saw SRB_FUNCTION_SHUTDOWN, i.e. the restart did NOT go through an orderly
+  storage shutdown; INFORM2/3 stayed at the driver's init values 12345678/12345670 (normal) -> menu. Run 3
+  landed in TWRP (recovery reason set by something at the end: bugcheck callback or driver recovery route);
+  run 4 did not. Witness unchanged (4 CPUs, 710 MiB, 11 ranges), crash latch 7F40=a701d201 (completed=1),
+  P3 still PREBRANCH, RST_STAT in TWRP is SWRESET but is the shim's own reboot-to-recovery this time.
+  Reference project (docs/installer/architecture.md): no mention of this setup failure; its first boot is
+  driven from the host (BootRouteService: clear MISC, rwd1_ack, zero RWD1/P3 if non-zero), Windows goes to
+  USERDATA, boot files to the FAT EFI; the image build (apply, Add-Driver, slim profile, unattend, bcdboot)
+  matches ours. No S9+ memory figure documented. Firmware-side evidence for the restart mechanism is
+  exhausted: the ends vary (orderly "Restarting" in run 3 vs none in run 4), the driver's ring is flooded by
+  the 78 write records before the end, and the cause is setup.exe's 0x1f failure at specialize start.
