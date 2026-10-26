@@ -600,3 +600,13 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   blue/white top-of-screen glitch, reset, next UEFI's divert -> TWRP). TPIDRRO fix helps but a second SEC failure
   remains (its rings are overwritten by later runs). AutoReboot=0 hive re-applied (sha 9cf09bda...) to read the
   bugcheck on the next kernel run.
+- 2026-10-26 18:50: User photo of a VG6 kernel run: top band = the release firmware's own
+  Star2LteDrawHandoffMarker(0xFF blue, y=96) + "EBS 4F 470 0" overlay, drawn in its ExitBootServices hook (never
+  seen before because nothing reached EBS). Below: only the Windows boot logo; Windows draws nothing. ~2 min then
+  reset (AutoReboot=0) vs a few s (AutoReboot=1) -> early Windows bugcheck, then something external resets.
+  TWRP has no /dev/mem and Linux owns 0xba000000 -> no post-mortem. Image vs the S9 installer: same 3 drivers
+  (test-signed, embedded sig + .cat; UFS = boot-start, DIRID 13 = runs from DriverStore, ACPI\EXYN9810), same
+  BCD settings (testsigning, numproc 4, vsm/hypervisor off, detecthal, IgnoreAllFailures), Stock profile ==
+  their "None". NEXT: discriminate our shim: release star2lte-uefi-22621.7582.img flashed DIRECTLY to BOOT
+  (sha 734672ce..., what the S9 installer does). Menu image to restore after: out/xnu-boot-rel7582-tpz.img.
+  (Two more transcript safety-classifier stops while inspecting Windows internals; staying at trace level.)
