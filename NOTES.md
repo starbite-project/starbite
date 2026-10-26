@@ -911,3 +911,16 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   interrupted-setup state from the first (broken-platform) run, and the ~60 s resets were Windows' own restart
   after setup.exe exited 0x1f. Sitting at "Getting ready" for many minutes (slow I/O through the bounce
   buffer); leave it running.
+- 2026-10-26 21:45: ********** WINDOWS 11 DESKTOP ON THE GALAXY S9 ********** After "Getting ready" Windows
+  restarted by itself to our menu (specialize done), user picked WINDOWS 11 again: login screen for
+  "starbite" (autologon), "Getting things ready for you ... Almost there", then the DESKTOP (photo: Windows 11
+  Pro, Test Mode watermark, taskbar, Recycle Bin). TOUCH WORKS (long-press opened the taskbar context menu).
+  Clock shows 8/5/2026 2:54 PM = the firmware's fixed RTC value (see 19:35 entry).
+  RECIPE THAT WORKS: BOOT = out/xnu-boot-src36.img (our xnu menu shim with TPIDRRO_EL0 zeroing + RWD1
+  SEC_ACTIVE commit + P3 clear; our bootshim + our PeilessSec with patches 0001,0002,0005,0018-0022 at
+  STAR2LTE_RAM_STAGE=2, banks as boot-services data; the release 22621.7582 DXE volume spliced in by
+  tools/woa/fv-splice.py), a CLEAN first boot of the VM-built image (tools/woa/redeploy-from-sd.py from the
+  SD card), and no interruption of setup. Windows sees 4 CPUs and 1407 MiB.
+  Known gaps: RAM (stage 3 high bank not yet tried), RTC fixed, no Wi-Fi/audio/battery/cellular drivers,
+  display is the firmware framebuffer (no GPU driver exists for Mali on Windows), and the UFS driver's
+  S9+-numbered write fence leaves Android USERDATA (sda25) and A16DATA (sda28) WRITABLE from Windows.
