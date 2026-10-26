@@ -57,6 +57,8 @@ int hw_touch_rails(uint8_t *l35, uint8_t *l43);
 int star_sprite_at(unsigned id, int x, int y);
 int star_font_blob(uint64_t *start, uint64_t *end);
 uint64_t star_bundle(const struct star_info *in, int linux_not_uefi, uint64_t *size);
+/* OS store on UFS (xnu_boot.c): 1 if the entry exists. */
+int star_store_has(const char *name);
 
 /* em.c: EngineerMode. Returns 1 to boot iOS with the (edited) cmdline, 0 to
  * go back to the boot menu. */

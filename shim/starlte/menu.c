@@ -1087,7 +1087,7 @@ static int engineer(const struct star_info *in, char *cmdline, unsigned len)
  * until a choice is made (the woa FD lands at 0x90000000 only after). 17 MiB. */
 #define SCREEN_SAVE 0x94000000UL
 
-static const unsigned char v5_os[3] = { 0, 1, V5_CARD };
+static const unsigned char v5_os[4] = { 0, 1, 3, V5_CARD };   /* iOS, Windows, Linux, card */
 static const unsigned char v5_svc[2] = { V5_RECOVERY, V5_DOWNLOAD };
 
 static void screen_copy(uintptr_t dst, uintptr_t src)
@@ -1134,12 +1134,25 @@ static unsigned input_event(int *tx, int *ty)
     }
 }
 
-/* Item under a tap (state-0 sprite rectangle), or -1. Disabled rows (2, 3)
+/* Linux (item 3) is selectable only when the OS store holds a kernel. */
+static int v5_linux;
+
+static unsigned v5_step(unsigned os, int dir)
+{
+    do
+        os = (os + 4U + (unsigned)dir) % 4U;
+    while (os == 2 && !v5_linux);
+    return os;
+}
+
+/* Item under a tap (state-0 sprite rectangle), or -1. Disabled rows (2; 3 without Linux)
  * do not count. */
 static int v5_hit(int x, int y)
 {
-    static const unsigned char items[6] = { 0, 1, 4, 5, 6, 7 };
-    for (unsigned i = 0; i < 6; ++i) {
+    static const unsigned char items[7] = { 0, 1, 3, 4, 5, 6, 7 };
+    for (unsigned i = 0; i < 7; ++i) {
+        if (items[i] == 3 && !v5_linux)
+            continue;
         unsigned rx, ry, rw, rh;
         if (star_sprite_rect(16U + 8U * items[i], &rx, &ry, &rw, &rh) &&
             x >= (int)rx && x < (int)(rx + rw) && y >= (int)ry && y < (int)(ry + rh))
@@ -1149,6 +1162,7 @@ static int v5_hit(int x, int y)
 }
 
 struct v5 { unsigned svc_focus, os, svc; };
+
 
 /* Last drawn state per item (0xff = not drawn yet): only changes are drawn,
  * the Starbite card alone is ~0.9 Mpx. */
@@ -1164,10 +1178,9 @@ static void v5_put(unsigned item, unsigned st)
 
 static void v5_draw(const struct v5 *m)
 {
-    for (unsigned i = 0; i < 3; ++i)
-        v5_put(v5_os[i], i != m->os ? 0U : m->svc_focus ? 4U : 1U);
+    for (unsigned i = 0; i < 4; ++i)
+        v5_put(v5_os[i], v5_os[i] == 3 && !v5_linux ? 3U : i != m->os ? 0U : m->svc_focus ? 4U : 1U);
     v5_put(2, 3);
-    v5_put(3, 3);
     v5_put(7, 0);
     v5_put(8, 0);
     for (unsigned i = 0; i < 2; ++i)
@@ -1191,6 +1204,7 @@ static void v5_starting(unsigned item)
 static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
 {
     struct v5 m = { 0, 0, 0 };
+    v5_linux = star_store_has("linux.image");
     v5_draw(&m);
     tp_init();
     for (;;) {
@@ -1206,7 +1220,7 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
         if (k == K_TAP) {
             int hit = v5_hit(tx, ty);
             int svc = hit == (int)V5_RECOVERY || hit == (int)V5_DOWNLOAD;
-            unsigned idx = svc ? (hit == (int)V5_DOWNLOAD) : (hit == 0 ? 0U : hit == 1 ? 1U : 2U);
+            unsigned idx = svc ? (hit == (int)V5_DOWNLOAD) : (hit == 0 ? 0U : hit == 1 ? 1U : hit == 3 ? 2U : 3U);
             if ((unsigned)svc == m.svc_focus && idx == (svc ? m.svc : m.os)) {
                 k = K_POWER;                        /* second tap starts it */
             } else {
@@ -1253,6 +1267,8 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
                 return 3;
             if (item == V5_CARD)
                 return 2;
+            if (item == 3)
+                return 4;
             reboot(item == V5_DOWNLOAD ? INFORM_DOWNLOAD : INFORM_RECOVERY);
         }
         if (k & K_BIXBY) {
@@ -1263,10 +1279,8 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
         } else if (k & (K_UP | K_DOWN)) {
             if (m.svc_focus)
                 m.svc_focus = 0;
-            else if (k & K_UP)
-                m.os = m.os ? m.os - 1 : 2;
             else
-                m.os = (m.os + 1) % 3;
+                m.os = v5_step(m.os, (k & K_UP) ? -1 : 1);
         } else {
             continue;
         }

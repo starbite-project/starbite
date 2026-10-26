@@ -6,7 +6,8 @@
  * y ~1199..1575; "Powered by android" ~2664..2834 is covered by our footer).
  *
  *   top     header (Starbite mark + name, model) and the boot list:
- *           iOS 16, Windows 11, Android and Linux (dimmed: not installed)
+ *           iOS 16, Windows 11, Android (dimmed: not installed) and Linux (dimmed until the
+ *           OS store on UFS holds a kernel)
  *   middle  Samsung's splash, untouched; right under it the Bixby service
  *           selector: Recovery | Download
  *   bottom  the Starbite card: Volume Down past the last OS selects it and
@@ -136,7 +137,8 @@ const ITEMS = [
   { name: 'iOS 16', meta: '16.7.16 · XNU 8796', icon: (x, y, s) => icon('si-apple.svg', x, y, s, { fill: '#ffffff' }) },
   { name: 'Windows 11', meta: '23H2 · ARM64', icon: (x, y, s) => icon('si-windows11.svg', x, y, s, { fill: '#0078d4' }) },
   { name: 'Android', meta: 'not installed', icon: (x, y, s) => icon('si-android.svg', x, y, s, { fill: '#3ddc84' }), disabled: true },
-  { name: 'Linux', meta: 'not installed', icon: (x, y, s) => icon('tux.svg', x, y - s * 0.06, s * 1.12), disabled: true },
+  // Linux: mainline 7.1 from the UFS OS store; state 3 when the store has no kernel.
+  { name: 'Linux', meta: 'mainline 7.1', icon: (x, y, s) => icon('tux.svg', x, y - s * 0.06, s * 1.12), optional: true },
 ];
 
 // row state: 0 normal, 1 selected, 2 starting, 3 disabled, 4 selected but inactive
@@ -150,7 +152,7 @@ function rowSvg(it, state) {
       ? `<rect x="2" y="2" width="${w - 4}" height="${h - 4}" rx="${(h - 4) / 2}" fill="none" stroke="#ffffff" stroke-opacity="0.09" stroke-width="3"/>`
       : '';
   const ic = 76, ix = 52, iy = (h - ic) / 2;
-  const meta = state === 2 ? 'starting…' : it.meta;
+  const meta = state === 2 ? 'starting…' : state === 3 ? 'not installed' : it.meta;
   return pill + `<g opacity="${op}">${it.icon(ix, iy, ic)}</g>` +
     text(it.name, { x: ix + ic + 40, y: h / 2 + 21, size: 60, weight: sel ? 600 : 500, fill: sel ? INK : DIM, opacity: state === 3 ? 0.45 : 1 }) +
     text(meta, { x: w - 64, y: h / 2 + 13, size: 34, family: MONO, fill: state === 2 ? CORAL : sel ? DIM : FAINT, anchor: 'end', opacity: state === 3 ? 0.7 : 1 });
@@ -207,7 +209,7 @@ const SID = (item, state) => 16 + 8 * item + state;
 ITEMS.forEach((it, i) => {
   const r = LAYOUT.rows;
   const y = r.y0 + i * r.stride;
-  const states = it.disabled ? [3] : [0, 1, 2, 4];
+  const states = it.disabled ? [3] : it.optional ? [0, 1, 2, 3, 4] : [0, 1, 2, 4];
   for (const st of states) sprite(SID(i, st), r.x, y, r.w, r.h, render(r.w, r.h, rowSvg(it, st)));
 });
 

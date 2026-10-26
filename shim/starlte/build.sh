@@ -38,4 +38,4 @@ PY
 }
 
 image probe probe.S probe.c fbtext.c ../fdt.c
-image xnu_boot xnu_boot.S xnu_boot.c menu.c ui.c em.c em_vec.S fbtext.c ../fdt.c
+image xnu_boot xnu_boot.S xnu_boot.c menu.c ui.c em.c em_vec.S ufs.c fbtext.c ../fdt.c

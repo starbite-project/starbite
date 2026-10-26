@@ -15,6 +15,7 @@
 #include "fbtext.h"
 #include "menu.h"
 #include "hw.h"
+#include "ufs.h"
 
 #define LOG_BASE 0x91fff000UL
 #define RAM_BASE 0x92000000UL
@@ -460,6 +461,134 @@ star_linux(volatile uint64_t *log, uintptr_t fdt, const struct payload *p, uint6
 }
 
 /*
+ * OS store: a 1 GiB area in USERDATA between the iOS root (0..16 GiB) and the
+ * Kiosk root (+17 GiB) that holds kernels the BOOT partition has no room for
+ * (tools/linux/sbstore.py). Block 0: "SBSTORE1", u32 version 1, u32 count,
+ * u64 size in blocks; from +64, count entries of 64 bytes: char name[24],
+ * u64 offset (bytes from the store start, 4 KiB aligned), u64 size, u32 CRC32
+ * (IEEE), u32 flags, 8 bytes reserved. Read only: tools/linux/sbstore-flash.sh
+ * writes it from TWRP.
+ */
+#define STORE_MAGIC 0x3145524f54534253ULL      /* "SBSTORE1" */
+#define STORE_OFFSET 4194304ULL                /* 16 GiB in 4 KiB blocks */
+#define STORE_BLOCKS 262144ULL                 /* up to the Kiosk root */
+#define LINUX_DTB 0xae000000UL                 /* below UFS_DMA (ufs.h) */
+
+struct store_ent {
+    uint64_t lba, size;
+    uint32_t crc;
+};
+
+static uint64_t store_lba;
+
+static uint64_t u8le(uintptr_t p, unsigned n)
+{
+    uint64_t v = 0;
+    for (unsigned i = n; i; --i)
+        v = v << 8 | *(volatile uint8_t *)(p + i - 1);
+    return v;
+}
+
+/* Header block into UFS_BUF; 1 if a store is there. */
+static int store_open(void)
+{
+    uint64_t first, last;
+    if (!gpt_find("USERDATA", &first, &last) || last - first + 1 < STORE_OFFSET + STORE_BLOCKS)
+        return 0;
+    store_lba = first + STORE_OFFSET;
+    if (ufs_read(store_lba, 1) || u8le(UFS_BUF, 8) != STORE_MAGIC || u8le(UFS_BUF + 8, 4) != 1)
+        return 0;
+    return 1;
+}
+
+static int store_find(const char *name, struct store_ent *e)
+{
+    uint32_t n = (uint32_t)u8le(UFS_BUF + 12, 4);
+    for (uint32_t i = 0; i < n && i < 63; ++i) {
+        uintptr_t p = UFS_BUF + 64 + 64U * i;
+        unsigned k = 0;
+        while (k < 23 && name[k] && *(volatile uint8_t *)(p + k) == (uint8_t)name[k])
+            ++k;
+        if (name[k] || *(volatile uint8_t *)(p + k))
+            continue;
+        uint64_t off = u8le(p + 24, 8);
+        e->size = u8le(p + 32, 8);
+        e->crc = (uint32_t)u8le(p + 40, 4);
+        if ((off & 4095U) || off / 4096U + (e->size + 4095U) / 4096U > STORE_BLOCKS)
+            return 0;
+        e->lba = store_lba + off / 4096U;
+        return 1;
+    }
+    return 0;
+}
+
+int star_store_has(const char *name)
+{
+    struct store_ent e;
+    return store_open() && store_find(name, &e);
+}
+
+/* CRC32 (IEEE, reflected) with the ARMv8 CRC32 instructions. */
+__attribute__((target("+crc"))) static uint32_t crc32_mem(uintptr_t p, uint64_t n)
+{
+    uint32_t c = 0xffffffffU;
+    uint64_t i = 0;
+    for (; i + 8 <= n; i += 8)
+        __asm__("crc32x %w0, %w0, %x1" : "+r"(c) : "r"(*(volatile uint64_t *)(p + i)));
+    for (; i < n; ++i)
+        __asm__("crc32b %w0, %w0, %w1" : "+r"(c) : "r"((uint32_t)*(volatile uint8_t *)(p + i)));
+    return ~c;
+}
+
+static int store_load(const struct store_ent *e, uintptr_t dst)
+{
+    if (ufs_read_to(e->lba, (e->size + 4095U) / 4096U, dst))
+        return -1;
+    return crc32_mem(dst, e->size) == e->crc ? 0 : -2;
+}
+
+/*
+ * Mainline Linux from the store: "linux.image" (arm64 Image, initramfs built
+ * in) at RAM_BASE + text_offset, "linux.dtb" at LINUX_DTB; x0 = DTB. Unlike
+ * the Kiosk kernel, the display trigger stays free-running (0x1281, as
+ * uniLoader leaves it): mainline's framebuffer driver depends on it.
+ */
+static uintptr_t
+star_linux_store(volatile uint64_t *log)
+{
+    struct store_ent img, dtb;
+    star_fb_text(1, "LOADING LINUX FROM UFS");
+    if (!ufs_up())
+        return fail(log, -40, "UFS NOT READY");
+    if (!store_open() || !store_find("linux.dtb", &dtb) || !store_find("linux.image", &img))
+        return fail(log, -41, "NO LINUX IN THE OS STORE");
+    if (dtb.size > (2UL << 20))
+        return fail(log, -42, "LINUX DTB TOO LARGE");
+    if (store_load(&dtb, LINUX_DTB))
+        return fail(log, -43, "LINUX DTB READ OR CRC FAILED");
+    if (ufs_read(img.lba, 1) || u8le(UFS_BUF + 56, 4) != 0x644d5241U)
+        return fail(log, -44, "BAD LINUX IMAGE");
+    uint64_t text_offset = u8le(UFS_BUF + 8, 8), image_size = u8le(UFS_BUF + 16, 8);
+    if (image_size < img.size)
+        image_size = img.size;
+    uintptr_t dst = LINUX_BASE + text_offset;
+    if (text_offset >= (2UL << 20) || dst + image_size > LINUX_DTB)
+        return fail(log, -45, "LINUX IMAGE TOO LARGE");
+    star_fb_hex(2, "LINUX AT", dst);
+    int r = store_load(&img, dst);
+    if (r)
+        return fail(log, -46, r == -2 ? "LINUX IMAGE CRC MISMATCH" : "LINUX IMAGE READ FAILED");
+    clean_bytes(dst, dst + image_size);
+    clean_bytes(LINUX_DTB, LINUX_DTB + dtb.size);
+    log[10] = 0x400;
+    log[15] = dst;
+    log[17] = LINUX_DTB;
+    clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+    __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
+    return dst;
+}
+
+/*
  * Windows 11: the exynos9810-woa UEFI (BOOT kernel of its release image:
  * edk2-msm style bootshim + EDK2 FD) in an "SBUEFI!!" bundle. The bootshim
  * is position independent and copies the FD to 0x90000000 itself, so it is
@@ -748,6 +877,8 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
             return star_linux(log, fdt, p, length, rd_start, rd_end);
         if (pick == 3)
             return star_uefi(log, fdt, p, rd_start, rd_end);
+        if (pick == 4)
+            return star_linux_store(log);
     }
     star_fb_text(0, "PROJECT STARBITE");
     star_fb_text(1, "");

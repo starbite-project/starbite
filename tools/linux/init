@@ -1,0 +1,115 @@
+#!/bin/sh
+# Project Starbite: mainline Linux bring-up init (initramfs, busybox).
+#
+# Milestone 1: no root filesystem yet. Shows what the kernel found on the
+# panel, keeps every UFS block device READ-ONLY (USERDATA holds the iOS root
+# and Kiosk, WINDOWS/WINESP hold Windows, EFS holds the IMEI), and offers a
+# shell to the Mac over USB: CDC-ECM network (telnet 172.16.42.1) plus an ACM
+# serial port. Nothing here writes to internal storage.
+export PATH=/bin:/sbin
+mkdir -p /proc /sys /dev /run /tmp
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /tmp
+
+exec </dev/null >/dev/tty0 2>&1
+printf '\033[2J\033[H\033[?25l'
+
+# ---- internal storage stays read-only --------------------------------------
+lock_ufs() {
+	for b in /sys/block/sd*; do
+		[ -e "$b" ] || continue
+		n=${b##*/}
+		blockdev --setro "/dev/$n" 2>/dev/null
+		for p in /dev/"$n"[0-9]*; do
+			[ -b "$p" ] && blockdev --setro "$p" 2>/dev/null
+		done
+	done
+}
+lock_ufs
+( i=0; while [ $i -lt 120 ]; do lock_ufs; sleep 0.5; i=$((i + 1)); done ) &
+
+# ---- USB: ECM network + ACM serial ------------------------------------------
+usb_up() {
+	mount -t configfs none /sys/kernel/config 2>/dev/null
+	G=/sys/kernel/config/usb_gadget/starbite
+	[ -d /sys/kernel/config/usb_gadget ] || return 1
+	mkdir -p $G
+	echo 0x1d6b > $G/idVendor          # Linux Foundation
+	echo 0x0104 > $G/idProduct         # Multifunction Composite Gadget
+	mkdir -p $G/strings/0x409
+	echo Starbite > $G/strings/0x409/manufacturer
+	echo "Galaxy S9 Linux" > $G/strings/0x409/product
+	echo starbite-s9 > $G/strings/0x409/serialnumber
+	mkdir -p $G/functions/ecm.usb0 $G/functions/acm.GS0
+	echo 02:53:39:00:00:01 > $G/functions/ecm.usb0/dev_addr
+	echo 02:53:39:00:00:02 > $G/functions/ecm.usb0/host_addr
+	mkdir -p $G/configs/c.1/strings/0x409
+	echo "ECM + ACM" > $G/configs/c.1/strings/0x409/configuration
+	ln -s $G/functions/ecm.usb0 $G/configs/c.1/ 2>/dev/null
+	ln -s $G/functions/acm.GS0 $G/configs/c.1/ 2>/dev/null
+	udc=$(ls /sys/class/udc 2>/dev/null | head -1)
+	[ -n "$udc" ] || return 2
+	echo "$udc" > $G/UDC || return 3
+	i=0
+	while [ ! -e /sys/class/net/usb0 ] && [ $i -lt 20 ]; do sleep 0.2; i=$((i + 1)); done
+	ifconfig usb0 172.16.42.1 netmask 255.255.255.0 up || return 4
+	cat > /run/udhcpd.conf <<EOF
+start 172.16.42.2
+end 172.16.42.2
+interface usb0
+lease_file /run/udhcpd.leases
+option subnet 255.255.255.0
+option lease 86400
+EOF
+	touch /run/udhcpd.leases
+	udhcpd /run/udhcpd.conf
+	telnetd -l /bin/sh -p 23
+	( while :; do [ -c /dev/ttyGS0 ] && setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done ) &
+	return 0
+}
+usb_up
+USB=$?
+
+# ---- report -----------------------------------------------------------------
+val() { [ -r "$1" ] && cat "$1" 2>/dev/null || echo "-"; }
+report() {
+	printf '\033[H'
+	echo "  PROJECT STARBITE  -  LINUX $(uname -r)"
+	echo "  Samsung Galaxy S9 (SM-G960F), Exynos 9810"
+	echo ""
+	echo "  CPUs online    $(val /sys/devices/system/cpu/online)"
+	mem=$(awk '/MemTotal/ {printf "%d MiB", $2 / 1024}' /proc/meminfo)
+	echo "  Memory         $mem"
+	echo "  Uptime         $(cut -d. -f1 /proc/uptime) s"
+	n=$(grep -c ' sd[a-z][0-9]*$' /proc/partitions)
+	echo "  UFS            $n block devices, all read-only"
+	if ls /dev/mmcblk* >/dev/null 2>&1; then
+		echo "  microSD        $(ls /dev/mmcblk* | tr '\n' ' ')"
+	else
+		echo "  microSD        no driver yet"
+	fi
+	for ps in /sys/class/power_supply/*; do
+		[ -e "$ps/capacity" ] && echo "  Battery        $(val $ps/capacity) %  $(val $ps/status)"
+	done
+	for tz in /sys/class/thermal/thermal_zone*; do
+		[ -e "$tz/temp" ] && echo "  $(val $tz/type | cut -c1-12)$(printf '%*s' 3 '')$(( $(val $tz/temp) / 1000 )) C"
+	done
+	echo ""
+	case $USB in
+	0) echo "  USB            telnet 172.16.42.1  (or the ACM serial port)" ;;
+	1) echo "  USB            no configfs gadget support" ;;
+	2) echo "  USB            no device controller (UDC)" ;;
+	*) echo "  USB            gadget setup failed ($USB)" ;;
+	esac
+	echo ""
+	echo "  Hold Power + Vol down to leave."
+}
+while :; do
+	report
+	sleep 5
+done

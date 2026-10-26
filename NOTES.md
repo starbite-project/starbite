@@ -1104,3 +1104,21 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   F0 A5 A5 as DCS long writes on DSIM 0x16080000 (payload then header, wait PH empty <= 50 ms, retry once,
   always relock), AOR clamped 0x000C..0x0BA3; panel ID via DCS read 0x04. Flashed out/xnu-boot-em3.img
   (sha e69d9ab8...) instead of em2.
+- 2026-10-27: **Linux, milestone 1 (mainline 7.1 from UFS)**. Kernel: mainline v7.1 + SheroAbi/galaxy-s9plus-
+  mainline-linux (S9+ star2lte port: UFS, DECON bootfb/scanout, Panfrost G3D power, PCIe BCM4361, USB PHY,
+  ACPM, cpufreq, all 8 cores) built in lima by tools/linux/build-kernel.sh: S9 tree from
+  tools/linux/mk-starlte-dts.py (4 GB banks from TWRP iomem, 3000 mAh, model), our initramfs init
+  tools/linux/init (every UFS block device setro, report on tty0, USB CDC-ECM 172.16.42.1 telnet + ACM
+  shell; the port's own init mounts sda25 rw = our USERDATA: never use it), cmdline console=tty0 +
+  ramoops. Image 22.4 MB. Mainline has a basic exynos9810-starlte.dts upstream (Markuss Broks); ztOS ran
+  the S9+ drivers on an S9. Their port has no microSD node (stock dwmmc2@11500000): Linux root on the
+  64 GB microSD is milestone 3, keeping UFS for Android (SYSTEM/VENDOR/A16DATA).
+  **OS store**: USERDATA +16 GiB (the 1 GiB gap between the iOS HFSX root, which ends at exactly 16.00 GiB,
+  and Kiosk's ext4 at +17 GiB; was all zeros). tools/linux/sbstore.py packs "SBSTORE1" (entries name,
+  offset, size, CRC32); tools/linux/sbstore-flash.sh checks HFS+ end / Kiosk superblock / empty target
+  from TWRP, writes, reads back. Loader: UFS code moved to shim/starlte/ufs.c (DMA now 0xAF000000 at the
+  top of the loader window, ufs_read_to straight into RAM), xnu_boot.c star_linux_store loads linux.image
+  at 0x92080000 and linux.dtb at 0xAE000000 with CRC32 (ARMv8 crc32x), x0 = DTB, display trigger left
+  free-running (0x1281, as uniLoader). Menu: Linux row (item 3) selectable when the store has
+  linux.image (states 0-4 generated; 3 = "not installed"); menu pick 4. BOOT out/xnu-boot-linux1.img
+  (sha 4aaecc8c...), store sha b1716af5....
