@@ -1013,3 +1013,15 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   re-added unchanged; isolates the repack tool). RTC is UTC: Windows needs
   HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation RealTimeIsUniversal=1 (DWORD) for local time.
 - 2026-10-27 00:35: **src38: Windows shows the correct date/time** (PMIC-seeded RTC works). Step 3 (storage safety + clock) DONE. BOOT = out/xnu-boot-src38.img (iOS bank2 1 GiB, Windows 3.4 GB + S9 fence + real clock, kiosk).
+- 2026-10-27 01:00: **Step 4 (iOS storage speed).** Root cause of the old multi-block failures: on STARLTE the
+  driver kept the 8890 vendor offsets (VS_TXPRDT = VS_BASE+0x100) but the 9810 vs_hci block starts AT
+  0x11121100 (TXPRDT +0x00, RXPRDT +0x04, NEXUS +0x40, DATA_REORDER +0x60, AXIDMA +0x6C; Linux ufs-exynos,
+  Exynos9810Ufs.h, Star2LteUfsHcDxe) -> both tries wrote unrelated registers at 0x11121200.. (and the old
+  "txprdt 0 rxprdt 0 nexus 0x2" probe values were from there). The Windows driver requires the UEFI's state
+  TX 0x8000000C, RX 0xC, DATA_REORDER 0xA, AXIDMA bit31; one 128-byte FMP entry per 4 KiB, max 16 (64 KiB),
+  PRDT length in bytes, 4 KiB-aligned buffers. xnu/patches/0300 (herolte_ufs.c): S9 offsets fixed, NEXUS
+  slot-0 bit now hits the real register (every boot), self-test (ufsmulti=1) programs TX/RX 0x8000000C,
+  REORDER 0xA, AXIDMA 0x98000003, zeroes each 128-byte entry, compares 16 blocks single vs one 16-entry
+  command, restores all four on mismatch; STARLTE_MULTI 32 -> 16. Kernel 17 s incremental (previous kernel:
+  out/kernel.development.starlte.pre-ufsmulti). BOOT = out/xnu-boot-ufsmulti.img (iOS 1 GiB + ufsmulti=1,
+  src38 Windows, kiosk; sha ebac754c...), flashed. Fallback: out/xnu-boot-src38.img.
