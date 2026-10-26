@@ -1,0 +1,33 @@
+Starbite: transplant the four modules the v0.1.0 release FD carries that the
+published source lacks (extracted from build/woa/uefi-22621.7582.bin's inner
+FV into build/woa/relmods): P (SMP/MADT), Star2LtePsciEl2ShimStage0Proven
+(=PSCI2), Winpe22621RuntimeFrequency (=LFC*) and 98100003-...9041 (with its
+RAW section). Same GUIDs, sections and position (after the UFS host driver).
+Applies on top of 0018.
+--- a/Platform/Star2LtePkg/Star2LtePkg.fdf
++++ b/Platform/Star2LtePkg/Star2LtePkg.fdf
+@@ -152,5 +152,24 @@
+   #     high DRAM banks and the UFS ESP enumerates) ---
+   #
+   INF Platform/Star2LtePkg/Drivers/Star2LteUfsHcDxe/Star2LteUfsHcDxe.inf
++  FILE DRIVER = 5a9b1c0e-ba11-4b10-9810-c1df00003011 {
++    SECTION PE32 = /Users/dev/project-starbite/build/woa/relmods/P/pe32.efi
++    SECTION UI = "P"
++  }
++  FILE DRIVER = 5a9b1c0e-ba11-4b10-9810-c1df00006003 {
++    SECTION PE32 = /Users/dev/project-starbite/build/woa/relmods/Star2LtePsciEl2ShimStage0Proven/pe32.efi
++    SECTION UI = "Star2LtePsciEl2ShimStage0Proven"
++  }
++  FILE DRIVER = 22621026-9810-4a64-a001-000000000001 {
++    SECTION DXE_DEPEX = /Users/dev/project-starbite/build/woa/relmods/Winpe22621RuntimeFrequency/depex.bin
++    SECTION PE32 = /Users/dev/project-starbite/build/woa/relmods/Winpe22621RuntimeFrequency/pe32.efi
++    SECTION UI = "Winpe22621RuntimeFrequency"
++  }
++  FILE DRIVER = 98100003-4768-4f46-9100-140500009041 {
++    SECTION DXE_DEPEX = /Users/dev/project-starbite/build/woa/relmods/98100003-4768-4f46-9100-140500009041/depex.bin
++    SECTION PE32 = /Users/dev/project-starbite/build/woa/relmods/98100003-4768-4f46-9100-140500009041/pe32.efi
++    SECTION RAW = /Users/dev/project-starbite/build/woa/relmods/98100003-4768-4f46-9100-140500009041/raw.bin
++    SECTION UI = "98100003-4768-4f46-9100-140500009041"
++  }
+   INF MdeModulePkg/Bus/Ufs/UfsPassThruDxe/UfsPassThruDxe.inf
+   INF MdeModulePkg/Bus/Scsi/ScsiBusDxe/ScsiBusDxe.inf

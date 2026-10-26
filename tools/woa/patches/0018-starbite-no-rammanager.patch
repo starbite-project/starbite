@@ -1,0 +1,21 @@
+Starbite: drop Star2LteRamManagerDxe. The v0.1.0 release FD has no such module:
+it publishes DRAM bank 0 only (0x90000000+0x2C800000) and its memory map stays
+<= 0x1080 bytes, while with the bank-1 ranges winload's address-specific
+AllocatePages fail (ConvertPages: multiple entries) and it hangs after its
+final GetMemoryMap probe (pstore-src26/27).
+--- a/Platform/Star2LtePkg/Star2LtePkg.fdf
++++ b/Platform/Star2LtePkg/Star2LtePkg.fdf
+@@ -152,5 +152,4 @@
+   #     high DRAM banks and the UFS ESP enumerates) ---
+   #
+-  INF Platform/Star2LtePkg/Drivers/Star2LteRamManagerDxe/Star2LteRamManagerDxe.inf
+   INF Platform/Star2LtePkg/Drivers/Star2LteUfsHcDxe/Star2LteUfsHcDxe.inf
+   INF MdeModulePkg/Bus/Ufs/UfsPassThruDxe/UfsPassThruDxe.inf
+--- a/Platform/Star2LtePkg/Star2LtePkg.dsc
++++ b/Platform/Star2LtePkg/Star2LtePkg.dsc
+@@ -383,5 +383,4 @@
+ 
+   # --- RAM discovery (publish the verified high DRAM banks to DXE) ---
+-  Platform/Star2LtePkg/Drivers/Star2LteRamManagerDxe/Star2LteRamManagerDxe.inf
+ 
+   # --- Storage + filesystem (Windows ESP on UFS) ---

@@ -660,3 +660,15 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   STATUS: firmware-side checks exhausted for today (shim, image, BCD, hive, numproc, RAM map, patch subsets).
   The remaining analysis needs Windows-loader/kernel internals, which repeatedly trips the session's safety
   classifier. Pausing Windows; options logged for the user.
+- 2026-10-26 20:40: **src27 (real): same gmm freeze, map 0x1440, 3 apg E000e.** After our runs the 7F60 latch
+  reads 'RAM2' (our RamManagerDxe ran); after RELEASE runs it is 0. Unpacked both FDs' LZMA inner FV and diffed
+  the module sets (tools: inline python, GUID+UI name): **the release is NOT the published source.**
+  ONLY in the release: P (18 KB, "SMP!SMP1", XSDT/APIC/FACP), Star2LtePsciEl2ShimStage0Proven (11 KB, emits
+  =PSCI2 -- the marker the release ring shows), Winpe22621RuntimeFrequency (4.6 KB, =LFC* markers),
+  98100003-...-140500009041 (25 KB + 602 B RAW, depex), 6e89af20-... (2.8 KB freeform). ONLY in ours:
+  Star2LteRamManagerDxe. Size diffs: SecurityStubDxe release 5.7 KB vs ours 26 KB (custom stub -> why 0005
+  EndOfDxe is needed), BdsDxe +7 KB in the release, DxeCore/UfsPassThru differ. Extracted the release-only
+  modules (PE32/depex/UI/RAW sections) to build/woa/relmods/<name>/.
+  patches/0018 = drop RamManagerDxe (release-like map: bank 0 only). patches/0019 = transplant the 4 modules as
+  binary FILE DRIVER entries (same GUIDs/sections, after the UFS host driver). src28 = 0001,0002,0005,0018
+  (sha ebadfdfa..., flashed). src29 = + 0019 (building).
