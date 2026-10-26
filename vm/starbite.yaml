@@ -21,4 +21,22 @@ provision:
       apt-get install -y build-essential git curl wget clang lld llvm python3 python3-pip perl xz-utils \
         liblz4-dev lz4 qemu-system-arm qemu-efi-aarch64 device-tree-compiler hfsprogs fuse3 \
         libfuse3-dev cmake zlib1g-dev libbz2-dev libattr1-dev libssl-dev bison flex bc cpio \
-        android-sdk-libsparse-utils unzip zstd file
+        android-sdk-libsparse-utils unzip zstd file uuid-dev nasm acpica-tools
+  # edk2 for tools/woa/build-uefi.sh: master 2938b830 (NOTES.md W2), BaseTools built.
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -e
+      mkdir -p ~/work && cd ~/work
+      [ -d edk2 ] || git clone -q https://github.com/tianocore/edk2.git
+      cd edk2
+      git checkout -q 2938b830
+      git submodule update -q --init --depth 1 \
+        BaseTools/Source/C/BrotliCompress/brotli MdeModulePkg/Library/BrotliCustomDecompressLib/brotli \
+        MdePkg/Library/BaseFdtLib/libfdt MdePkg/Library/MipiSysTLib/mipisyst \
+        CryptoPkg/Library/OpensslLib/openssl CryptoPkg/Library/MbedTlsLib/mbedtls \
+        UnitTestFrameworkPkg/Library/CmockaLib/cmock UnitTestFrameworkPkg/Library/GoogleTestLib/googletest \
+        UnitTestFrameworkPkg/Library/SubhookLib/subhook RedfishPkg/Library/JsonLib/jansson \
+        MdeModulePkg/Universal/RegularExpressionDxe/oniguruma SecurityPkg/DeviceSecurity/SpdmLib/libspdm 2>/dev/null || git submodule update -q --init
+      make -s -C BaseTools -j"$(nproc)" >/tmp/basetools.log 2>&1 || { tail -20 /tmp/basetools.log; exit 1; }
+      echo "edk2 ready at $(git rev-parse --short=8 HEAD)"

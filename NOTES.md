@@ -555,3 +555,8 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   (SEC dc-zva, no divert, pstore mirror, UFS diag, EndOfDxe, ring wraps) = published flow + S9 fixes, closest
   possible to the release; expect =EBSENTER..=EBSOK then the kernel (and the bugcheck, AutoReboot=0).
   build-uefi.sh now honours PATCHES=. Blocked on lima (restarting).
+- 2026-10-26 17:40: lima recreated from vm/starbite.yaml (now also clones edk2 @2938b830 + builds BaseTools in
+  provisioning; up in ~5 min, guest home is /home/dev.guest, project at /Users/dev/project-starbite).
+  The virtiofs mount is READ-ONLY from the guest in this lima -> build-uefi.sh's cp silently failed and
+  the first "src26" flash was src25's FD again (sha 7a0e17d8..., ignore). build-uefi.sh now copies the FD and
+  bootshim out via `limactl shell cat`. src26 = patches 0001-0006 only (published pre-EBS gate intact).

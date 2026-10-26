@@ -34,9 +34,13 @@ limactl shell starbite -- bash -c "
     build -a AARCH64 -t CLANGPDB -b $target -p Platform/Star2LtePkg/Star2LtePkg.dsc $* \
         -n \$(nproc) > /tmp/uefi-build.log 2>&1 ||
         { grep -n -E 'error|Error' /tmp/uefi-build.log | head -20; tail -15 /tmp/uefi-build.log; exit 1; }
-    cp Build/Star2LtePkg/${target}_CLANGPDB/FV/STAR2LTE_UEFI.fd '$PWD/build/woa/Star2LtePkg.fd'
     clang -target aarch64-none-elf -c '$PWD/$src/tools/bootshim/bootshim.S' -o /tmp/bootshim.o
     llvm-objcopy -O binary /tmp/bootshim.o /tmp/bootshim.bin
-    cat /tmp/bootshim.bin '$PWD/build/woa/Star2LtePkg.fd' > '$PWD/build/woa/starbite-uefi.bin'
 "
+# The virtiofs mount is read-only from the guest (lima 2.x/vz), so copy the
+# outputs out through the shell instead of writing to the mount.
+limactl shell starbite -- cat "/home/$(limactl shell starbite -- whoami </dev/null)/work/edk2/Build/Star2LtePkg/${target}_CLANGPDB/FV/STAR2LTE_UEFI.fd" </dev/null > build/woa/Star2LtePkg.fd
+limactl shell starbite -- cat /tmp/bootshim.bin </dev/null > build/woa/bootshim.bin
+[ "$(stat -f %z build/woa/Star2LtePkg.fd)" -gt 1000000 ] || { echo "FD copy failed"; exit 1; }
+cat build/woa/bootshim.bin build/woa/Star2LtePkg.fd > build/woa/starbite-uefi.bin
 ls -l build/woa/Star2LtePkg.fd build/woa/starbite-uefi.bin
