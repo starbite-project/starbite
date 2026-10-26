@@ -29,10 +29,16 @@ install -m755 "$PROJ/tools/linux/init" "$WORK/device/mainline-init-boot"
 sed -i 's/star2lte/starlte/g' "$WORK/scripts/build/build71.sh"
 grep -q 'exynos9810-starlte.dts' "$WORK/scripts/build/build71.sh"
 
+python3 "$PROJ/tools/linux/patch-mainline.py" "$BUILD/src/mainline"
+
 export INIT=boot UFS=1 GADGET=configfs
 export DIST="$WORK/dist"
 export BOOT_CMDLINE="${BOOT_CMDLINE:-console=ramoops-1 console=tty0 loglevel=7 panic=10 earlycon=s9pram keep_bootcon maxcpus=8 s9p_late_ramlog s9p_vendor_m3_defaults}"
-bash "$WORK/scripts/build/build71.sh" "$@"
+# microSD (Starbite): DW MSHC with the Exynos glue, fixed rails, FAT/exFAT
+STARBITE_CFG=("--enable MMC" "--enable MMC_BLOCK" "--enable MMC_DW" "--enable MMC_DW_PLTFM"
+	"--enable MMC_DW_EXYNOS" "--enable REGULATOR" "--enable REGULATOR_FIXED_VOLTAGE"
+	"--enable VFAT_FS" "--enable EXFAT_FS" "--enable NLS_CODEPAGE_437" "--enable NLS_ISO8859_1")
+bash "$WORK/scripts/build/build71.sh" "${STARBITE_CFG[@]}" "$@"
 
 SRC=$BUILD/src/mainline
 mkdir -p "$OUT"

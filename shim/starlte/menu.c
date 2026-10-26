@@ -1205,6 +1205,19 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
 {
     struct v5 m = { 0, 0, 0 };
     v5_linux = star_store_has("linux.image");
+    /* One-shot "boot Linux next" from Linux itself (tools/linux/reboot-linux):
+     * u64 "SBNEXTLX" in the retained page above the pmsg ring, cleared here. */
+    volatile uint64_t *next = (volatile uint64_t *)0xFED17FE0UL;
+    if (*next == 0x584c5458454e4253ULL) {
+        *next = 0;
+        __asm__ volatile("dsb sy" : : : "memory");
+        if (v5_linux) {
+            m.os = 2;
+            v5_draw(&m);
+            v5_starting(3);
+            return 4;
+        }
+    }
     v5_draw(&m);
     tp_init();
     for (;;) {
@@ -1381,6 +1394,22 @@ int hw_acpm_build(char out[25])
     }
     out[24] = 0;
     return 1;
+}
+
+/* microSD rails for Linux (stock DT: vmmc = S2MPS18 LDO31 2.8 V, vqmmc =
+ * LDO2 1.7-3.3 V; both 1.8 V + 25 mV steps, CTRL 0x68 / 0x4A): LDO31 at
+ * 2.8 V (vsel 0x28), LDO2 at 3.3 V (0x3c), enable bits [7:6]. Refused unless
+ * LDO31 reads off or already 2.8 V. Same return values as hw_touch_rails. */
+int hw_sd_rails(uint8_t *l31, uint8_t *l2)
+{
+    if (!pmic_read(1, 0x68, l31) || !pmic_read(1, 0x4a, l2))
+        return -1;
+    if ((*l31 & 0x3fU) != 0x28U && (*l31 & 0x3fU) != 0)
+        return 0;
+    int ok = pmic_write(1, 0x68, 0xe8) && pmic_write(1, 0x4a, 0xfc);
+    (void)pmic_read(1, 0x68, l31);
+    (void)pmic_read(1, 0x4a, l2);
+    return ok ? 1 : -1;
 }
 
 int hw_touch_rails(uint8_t *l35, uint8_t *l43)

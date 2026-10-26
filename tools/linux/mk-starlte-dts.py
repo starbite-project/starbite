@@ -40,5 +40,111 @@ sub('charge-full-design-microamp-hours = <3500000>;', 'charge-full-design-microa
 sub('energy-full-design-microwatt-hours = <13480000>;', 'energy-full-design-microwatt-hours = <11550000>;')
 if 'star2lte' in s.replace('star2lte_eur', ''):
     print('mk-starlte-dts: note, star2lte still mentioned in comments')
+# ---- microSD (dwmmc2@11500000, stock starlte DT) ----------------------------
+# Controller: DesignWare MSHC 2.70a, HCON 64-bit addressing, CLKSEL64 at 0xa8
+# (read live 2026-10-27) = mainline's Exynos7 type. Clocks: CMU top
+# MUX_CLKCMU_FSYS1_MMC_CARD selects PLL_MMC (~806 MHz); its divider is set to
+# /1 here (stock clock-frequency 800 MHz, ciu-div 3 -> 200 MHz bus clock).
+# Rails: S2MPS18 LDO31 2.8 V (vmmc) and LDO2 3.3 V (vqmmc), switched on by the
+# Starbite loader before it enters Linux (no PMIC regulator driver here), so
+# they appear as fixed supplies and the card runs at 3.3 V signalling (high
+# speed, no UHS). Stock timings <div f_drv drv smpl> -> mainline <smpl drv>.
+sub("""				     <0x11002008>;	/* FSYS0 USBDPPHY_REF_SOC_PLL */""",
+    """				     <0x11002008>,	/* FSYS0 USBDPPHY_REF_SOC_PLL */
+				     /* microSD (Starbite) */
+				     <0x1a242070>,	/* GATE_CLKCMU_FSYS1_MMC_CARD (CMU top) */
+				     <0x11402030>,	/* FSYS1 MMC_CARD ACLK */
+				     <0x11402034>;	/* FSYS1 MMC_CARD SDCLKIN */""")
+sub("""				    <0x16030070 0x1281>,""",
+    """				    <0x16030070 0x1281>,
+				    <0x1a241864 0x0>,	/* DIV_CLKCMU_FSYS1_MMC_CARD = /1 (Starbite) */""")
+s += """
+/ {
+	sd_vmmc: regulator-sd-vmmc {
+		compatible = "regulator-fixed";
+		regulator-name = "vmmc";		/* S2MPS18 LDO31, on from the loader */
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		regulator-always-on;
+	};
+
+	sd_vqmmc: regulator-sd-vqmmc {
+		compatible = "regulator-fixed";
+		regulator-name = "vqmmc";		/* S2MPS18 LDO2 at 3.3 V, from the loader */
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+
+	sd_biu_clk: clock-sd-biu {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000000>;
+	};
+
+	sd_ciu_clk: clock-sd-ciu {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <800000000>;
+	};
+
+	mmc_2: mmc@11500000 {
+		compatible = "samsung,exynos7-dw-mshc";
+		reg = <0x0 0x11500000 0x2000>;
+		interrupts = <0 249 4>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		clocks = <&sd_biu_clk>, <&sd_ciu_clk>;
+		clock-names = "biu", "ciu";
+		fifo-depth = <0x40>;
+		starbite,dma-32bit;		/* tools/linux/patch-mainline.py */
+		starbite,max-data-timeout;	/* vendor: TMOUT = ~0 */
+		card-detect-delay = <200>;
+		samsung,dw-mshc-ciu-div = <3>;
+		samsung,dw-mshc-sdr-timing = <0 2>;
+		samsung,dw-mshc-ddr-timing = <1 2>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4>;
+		bus-width = <4>;
+		cap-sd-highspeed;
+		disable-wp;
+		max-frequency = <50000000>;
+		cd-gpios = <&gpa1 5 GPIO_ACTIVE_LOW>;
+		vmmc-supply = <&sd_vmmc>;
+		vqmmc-supply = <&sd_vqmmc>;
+		status = "okay";
+	};
+};
+
+&pinctrl_fsys1 {
+	sd2_clk: sd2-clk-pins {
+		samsung,pins = "gpf1-0";
+		samsung,pin-function = <2>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <4>;
+	};
+
+	sd2_cmd: sd2-cmd-pins {
+		samsung,pins = "gpf1-1";
+		samsung,pin-function = <2>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <3>;
+	};
+
+	sd2_bus1: sd2-bus-width1-pins {
+		samsung,pins = "gpf1-2";
+		samsung,pin-function = <2>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <3>;
+	};
+
+	sd2_bus4: sd2-bus-width4-pins {
+		samsung,pins = "gpf1-3", "gpf1-4", "gpf1-5";
+		samsung,pin-function = <2>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <3>;
+	};
+};
+"""
 out.write_text(s)
 print(f'{out}: S9 (starlte) device tree')

@@ -33,6 +33,21 @@ lock_ufs() {
 lock_ufs
 ( i=0; while [ $i -lt 120 ]; do lock_ufs; sleep 0.5; i=$((i + 1)); done ) &
 
+# ---- helpers for the Mac (tools/linux/phone.py) ------------------------------
+# reboot-linux: straight back into Linux through the Starbite menu's one-shot
+# flag (u64 "SBNEXTLX" at 0xFED17FE0); "reboot-linux menu" for the menu.
+cat > /bin/reboot-linux <<'EOF2'
+#!/bin/sh
+if [ "$1" != menu ]; then
+	devmem 0xFED17FE0 32 0x454e4253
+	devmem 0xFED17FE4 32 0x584c5458
+fi
+devmem 0x1406080c 32 0x12345670
+sync
+echo b > /proc/sysrq-trigger
+EOF2
+chmod 755 /bin/reboot-linux
+
 # ---- USB: ECM network + ACM serial ------------------------------------------
 usb_up() {
 	mount -t configfs none /sys/kernel/config 2>/dev/null

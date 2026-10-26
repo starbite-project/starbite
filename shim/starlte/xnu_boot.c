@@ -575,6 +575,10 @@ star_linux_store(volatile uint64_t *log)
     if (text_offset >= (2UL << 20) || dst + image_size > LINUX_DTB)
         return fail(log, -45, "LINUX IMAGE TOO LARGE");
     star_fb_hex(2, "LINUX AT", dst);
+    uint8_t l31 = 0, l2 = 0;
+    int rails = hw_sd_rails(&l31, &l2);
+    star_fb_text(3, rails > 0 ? "MICROSD POWER ON" : rails == 0 ? "MICROSD POWER REFUSED" : "MICROSD POWER: NO ACPM");
+    log[18] = (uint64_t)l31 << 8 | l2;
     int r = store_load(&img, dst);
     if (r)
         return fail(log, -46, r == -2 ? "LINUX IMAGE CRC MISMATCH" : "LINUX IMAGE READ FAILED");

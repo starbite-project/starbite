@@ -52,6 +52,8 @@ void hw_opt_apply(char *cmdline, unsigned len);
 /* Touch rails on now (LDO35 1.8 V, LDO43 3.0 V) with the kernel's checks:
  * 1 written, 0 refused (unexpected voltage), -1 ACPM failure. */
 int hw_touch_rails(uint8_t *l35, uint8_t *l43);
+/* microSD rails for Linux: LDO31 2.8 V, LDO2 3.3 V (same return values). */
+int hw_sd_rails(uint8_t *l31, uint8_t *l2);
 
 /* xnu_boot.c */
 int star_sprite_at(unsigned id, int x, int y);

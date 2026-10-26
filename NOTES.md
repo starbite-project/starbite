@@ -1122,3 +1122,20 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   free-running (0x1281, as uniLoader). Menu: Linux row (item 3) selectable when the store has
   linux.image (states 0-4 generated; 3 = "not installed"); menu pick 4. BOOT out/xnu-boot-linux1.img
   (sha 4aaecc8c...), store sha b1716af5....
+- 2026-10-27: **Linux milestone 2: microSD works** (mainline dw_mmc, Exynos7 type). Bring-up findings:
+  stock DT dwmmc2@11500000, SPI 249, pins GPF1-0..5 func 2 (pinctrl_fsys1 0x11430000 offset 0), CD GPA1-5
+  active low; rails S2MPS18 LDO31 2.8 V (CTRL 0x68 = 0xE8) and LDO2 3.3 V (0x4A = 0xFC), both 1.8 V + 25 mV
+  steps, switched on by the loader before Linux (hw_sd_rails, menu.c) and fixed-regulators in the DT;
+  clock CMU top MUX_CLKCMU_FSYS1_MMC_CARD -> PLL_MMC (~806 MHz), DIV 0x1A241864 set to /1, gates
+  0x1A242070 / 0x11402030 / 0x11402034 manual (s9p,clock-gates). Controller: VERID 270a, HCON 64-bit
+  addressing + 64-bit data, CLKSEL64 at 0xA8. The protection window at +0x1000 (MPSBEGIN0..) reads 0 and
+  ignores writes; FMP/SMU is UFS-only here, not the problem. Two mainline fixes (tools/linux/
+  patch-mainline.py, DT switches): starbite,dma-32bit (descriptors were in the 0x8_8000_0000 bank; kept
+  as a precaution) and **starbite,max-data-timeout** (the real one: every read ended in DRTO, rintsts
+  0x20c, even at 400 kHz; vendor always writes TMOUT = ~0). Card: SDXC 58.2 GiB "SD64G", high speed
+  50 MHz 4-bit, 22.6 MB/s read. It holds exFAT with ios-root-userdata-16g.img (16 GiB) and
+  starbite-win.vhdx (14.1 GiB), 28 GB free: Linux root goes in an ext4 image file there, nothing wiped.
+  Iteration without buttons: tools/linux/phone.py (telnet), sbstore-flash-linux.sh / boot-flash-linux.sh
+  (write the store / BOOT from Linux: http fetch, checks, only sda + that partition writable for the dd,
+  readback), reboot-linux in the initramfs (one-shot u64 "SBNEXTLX" at 0xFED17FE0, the menu boots Linux).
+  BOOT out/xnu-boot-linux3.img (sha 7f1d5283...).
