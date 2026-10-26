@@ -976,3 +976,4 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   reliably on the S7): out/xnu-boot-ios-bank2-1g.img (sha 283251eb...), flashed; mkadt --bank2-mb default 1024.
   Root cause of the >= 1.5 GiB misalignment is open (later: find which allocation hands out a PT page whose
   4-PTE group straddles; with 1 GiB that path apparently is not hit).
+- 2026-10-26 23:25: **iOS boots with 1 GiB in the second bank** (out/xnu-boot-ios-bank2-1g.img, was 472 MiB); user: home screen, "does feel smoother". This image is the new baseline for all three OSes (iOS bank2 1 GiB, Windows src37 3.4 GB, kiosk unchanged).
