@@ -610,3 +610,11 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   their "None". NEXT: discriminate our shim: release star2lte-uefi-22621.7582.img flashed DIRECTLY to BOOT
   (sha 734672ce..., what the S9 installer does). Menu image to restore after: out/xnu-boot-rel7582-tpz.img.
   (Two more transcript safety-classifier stops while inspecting Windows internals; staying at trace level.)
+- 2026-10-26 19:05: Release image DIRECT on BOOT (no shim): same blue EBS band + hang -> our shim is NOT the
+  cause. User: SEC success rate is much better after a full power-off (cold boot) than a warm reboot -- fits the
+  stale-TPIDRRO_EL0 finding (cold reset clears it). Latch page (survives warm reset; UFS driver crash latch
+  0xFED17F40 + 'WATL' guard 0x44, RAM_STATUS 7F60, KiSystemStartup progress 7F80, Windows handoff marker 7FB0;
+  drivers/Exynos9810Ufs/Exynos9810Ufs.h) is wiped by our star_uefi() and overwritten by TWRP's own pmsg logging,
+  so: shim now logs "STARBITE: latches 7f<10,14,40,44,60,80,b0>" at the START of every boot (before the menu).
+  BOOT = out/xnu-boot-rel7582-latch.img (sha 3ed9d7e9...). Procedure: WINDOWS 11 -> wait for the hang/reset ->
+  at OUR MENU pick REBOOT TO RECOVERY -> read the ring.

@@ -401,10 +401,29 @@ star_uefi(volatile uint64_t *log, uintptr_t fdt, const struct payload *p,
 }
 
 /* Returns entry PA or zero. Status stays in the log page at LOG_BASE. */
+/*
+ * Cross-reset words a Windows run leaves in the latch page, logged before
+ * star_uefi() clears it: boot-attempt counter (7F10/14), UFS driver crash
+ * latch + 'WATL' guard (7F40/44), RAM_STATUS (7F60), KiSystemStartup
+ * progress (7F80) and the Windows handoff marker (7FB0).
+ */
+static void
+star_dump_latches(void)
+{
+    static const uint32_t off[] = { 0x10, 0x14, 0x40, 0x44, 0x60, 0x80, 0xB0 };
+    pmsg_put("STARBITE: latches");
+    for (unsigned i = 0; i < sizeof(off) / sizeof(off[0]); ++i) {
+        pmsg_put(" 7f");
+        pmsg_hex(*(volatile uint32_t *)(0xFED17F00UL + off[i]));
+    }
+    pmsg_put("\n");
+}
+
 uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)
 {
     uint64_t rd_start, rd_end;
     static char cmdline[BOOT_LINE_LENGTH];
+    star_dump_latches();
     log[77] = star_fb_enable();
     int branded = star_splash(fdt);
     if (el != 4)
