@@ -1,0 +1,33 @@
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c	2026-10-26 08:55:13
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c	2026-10-26 08:55:23
+@@ -2781,6 +2781,30 @@
+         *WlI = 0xD503201Fu;      // nop
+         Star2LteFlushPatchedInstruction (WlP);
+         BdsPramStr (" =WLNOP");
++
++        //
++        // Starbite W5 try 11 (src22): NOPing the MMU-off tlbi alone still hung winload at
++        // =AFRET post-ExitBootServices (try 10 pstore-win9: stale TLB -> page-walk fault once
++        // the leaf re-enables the MMU). The hyp cannot emulate the whole-TLB flush with the MMU
++        // off; do it with the MMU back ON. The leaf re-enables the MMU at WlI[3]
++        // (msr SCTLR_EL1,x3) then dsb/isb, and ends with a redundant pipeline refetch
++        // (adr x4,.+8 ; br x4 -> the immediately-following ret) at WlI[6]/WlI[7]. Overwrite that
++        // dead pair with an MMU-on `tlbi vmalle1 ; dsb sy` and fall through to the ret at WlI[8].
++        //
++        if ((WlI[6] == 0x10000044u) &&     // adr x4, .+8
++            (WlI[7] == 0xD61F0080u) &&     // br  x4
++            (WlI[8] == 0xD65F03C0u))       // ret
++        {
++          WlI[6] = 0xD508871Fu;            // tlbi vmalle1  (MMU is on now -- hyp emulates this)
++          WlI[7] = 0xD5033F9Fu;            // dsb sy
++          Star2LteFlushPatchedInstruction ((UINT64)(UINTN)&WlI[6]);
++          Star2LteFlushPatchedInstruction ((UINT64)(UINTN)&WlI[7]);
++          BdsPramStr (" =WLMON");
++        } else {
++          BdsPramStr (" =WLMON? t6=");
++          BdsPramHex (WlI[6], 8);
++        }
++
+         WlHit = TRUE;
+         break;
+       }

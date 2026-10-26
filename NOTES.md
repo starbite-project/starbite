@@ -415,3 +415,29 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   NOP and ALSO inject an MMU-ON `tlbi vmalle1` inline in the switch leaf tail (our leaf: msr SCTLR_EL1,x3
   @0x10e8 re-enables MMU, then redundant `adr x4;br x4` @0x10f4/0x10f8 jump to `ret` @0x10fc -> overwrite
   that pair with `tlbi vmalle1; dsb sy`, falling through to ret). Pattern-anchored off the same switch match.
+- 2026-10-26 09:05: **W5 try 11 (src22) RESULT (pstore-win10.bin) — MMU-on reflush injected, SAME dark-after-=AFRET.**
+  Rebuilt FD with patch 0014 (lima sshd had wedged mid-session: fresh ssh refused at kex, guest agent/vsock fine;
+  `limactl stop/start starbite` fixed it, edk2 workspace persisted). Packed src22 = src20/src21 inputs, only the
+  FD differs (verified: cmp vs src21 = 3 clusters only -- 20 B @0x240 boot-header SHA, 64 B @~15 MiB ADT random
+  seed, 185616 B @~41 MiB FD; nothing else). Flashed, booted WINDOWS 11. Ring tail: =WLBASE b=90fb6000 ok,
+  =NTPATCH n=04 cf=03, self-tests =STLBI0/1/2 =CFQ0, then **=WLSW b=90fb6000 rva=0010dc =WLNOP =WLMON** -- the
+  switch tlbi was NOPed AND the MMU-on `tlbi vmalle1; dsb sy` was injected into the leaf's dead refetch slot
+  (=WLMON, not =WLMON?, so the adr/br/ret guard matched). Then =WTRACE n=00, =HANDOFF minimal, =AFRET
+  (pra 0x90fc53d8 daif=0200) -- ring dark, IDENTICAL to try 10 (no =WLMON-era change in outcome).
+  **REFRAME (re-read the woa source's own ext#7/#9/#16 design comments):** the wall is Samsung's uH/RKP hyp
+  @EL2; winload runs at EL1. Our EL1 MMU-on tlbi self-test already passed (=STLBI1/2), so =WLMON's flush is fine
+  -- it was never the hang. The woa project did the SAME fix (NOP MMU-off tlbi + re-issue MMU-on) and in ext#9
+  concluded the flush WORKS and winload ADVANCES past the switch; their apparent "hang" was that **PRAM
+  (0xFED14000 / our pstore ring) is no longer mapped in winload's NEW page tables after the address-space
+  switch**, so every post-switch trace goes dark -- exactly our =AFRET-then-silence. So "dark after =AFRET" is
+  NOT proof of a hang; we are simply blind post-switch (ExitBootServices also masks IRQs, which is why =HB stops).
+  The bottleneck is now VISIBILITY, not the switch. woa's answer (ext#9): a post-switch signal that does not need
+  PRAM -- PAINT THE FRAMEBUFFER. Our UEFI is the same Star2LtePkg build, GOP FB at physical STAR2LTE_FB_BASE
+  0xCC000000 (1440x2960), which is on-screen whenever our UEFI/winload runs (user has seen the UEFI text + Windows
+  logo there). NEXT (src23): inject a FB paint (distinctive colour band to 0xCC000000) in winload's switch leaf
+  right after our MMU-on flush, pattern-anchored off the same =WLSW match. If the band appears on screen =>
+  winload executed PAST the switch (breakthrough; the hang-appearance is just PRAM dark) and the next frontier is
+  post-switch Windows boot; if the screen stays frozen => a real fault at/before the switch. Open Q for the user:
+  what did the screen SHOW during the WINDOWS 11 attempt (frozen Windows logo / black / UEFI text / reboot /
+  anything new vs try 10)? That observation is free and sharpens H1-vs-H2 before we build src23. BOOT still =
+  out/xnu-boot-src22.img.
