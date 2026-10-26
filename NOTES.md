@@ -691,3 +691,11 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   PeilessSec file + the release's ENTIRE compressed DXE volume (python splice, FV checksum fixed, verified):
   build/woa/starbite-uefi-src32.bin, BOOT = out/xnu-boot-src32.img (sha d3870dc8...). Blue bar -> the hang is
   in our DXE module set; no -> it is in our SEC/PEI.
+- 2026-10-26 21:50: ***** WINDOWS RUNS ON THE S9 ***** src32 (our bootshim + our PeilessSec + the release's
+  entire DXE volume): blue EBS band, then the WINDOWS LOGO + SPINNER (first ever), screen black, logo+spinner
+  again (Windows' own first-boot reboot), crash a few s later, reset -> TWRP (the UFS driver sets the recovery
+  boot reason: =UFSNORMAL B3=12345674). Ring (pstore-src32.bin): =UFSENTRY =UFSINIT (HWINIT=1 STARTED=1)
+  =UFSNORMAL OK=1, 78x =UFSWRIT (WMODE=2, issued=verified), =UFSBUGCHECK ARMED=1 (= callback registered).
+  Latches: 7F40=a7014401 ('WATL' guard ok: tag a7, boots 1, attempt 0x44, completed), 7F80=0x2c6ce (release KE
+  progress latch). => SEC/PEI from our source is fine; the hang in src29-31 is in OUR DXE module set vs the
+  release's. Windows got far enough to write its disk.
