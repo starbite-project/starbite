@@ -626,3 +626,8 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   release sets the recovery boot reason), so: TWRP Reboot->System -> our menu (dump) -> REBOOT TO RECOVERY.
   Test: BCD numproc 4 -> 1 (one 8-byte value at file 0x409c of EFI/Microsoft/Boot/BCD; hive clean, seq 41/41;
   original backup/20261026-bcd/BCD, patched build/woa/bcd/BCD-numproc1 sha 2c125e8e...).
+- 2026-10-26 19:35: numproc 1: same (blue EBS band, reset to TWRP); latch dump from the following menu boot
+  (pstore-np1.bin) identical: 7F40/44 0/0, 7FB0 "KEP1". Secondary-CPU bring-up is not the cause. BCD restored
+  to the original (numproc 4). The transcript's safety classifier has now stopped several replies that went into
+  Windows-kernel internals; further work stays on the firmware side (ACPI/DT S9 vs S9+, memory map) and on
+  reproducing the reported S9 setup exactly.
