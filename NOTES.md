@@ -699,3 +699,9 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   Latches: 7F40=a7014401 ('WATL' guard ok: tag a7, boots 1, attempt 0x44, completed), 7F80=0x2c6ce (release KE
   progress latch). => SEC/PEI from our source is fine; the hang in src29-31 is in OUR DXE module set vs the
   release's. Windows got far enough to write its disk.
+- 2026-10-26 22:00: No "=UFSBUGCHECK BC=" record in the ring -> Windows did NOT bugcheck (the callback never
+  fired). SYSTEM hive on disk rewritten by Windows (7077888 -> 7602176 B, dated today). Reading: first-boot
+  setup is progressing; each phase ends in Windows' own reboot, which the UFS driver routes to TWRP
+  (B3=12345674) by design. The mid-boot black flash = display handover. Test: just boot Windows again (src32
+  stays), time spinner->reset, see if the ring's write count / latch attempt byte advance. src31 packed
+  (out/xnu-boot-src31.img, sha a9e10c8c...) for the buildability track later.
