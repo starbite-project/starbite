@@ -970,3 +970,9 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   src37 Windows firmware + kiosk kernel unchanged). Backup first: USERDATA 0..16 GiB (iOS HFS root) ->
   SD card /external_sd/ios-root-userdata-16g.img (on-phone dd + sha compare).
 - 2026-10-26 23:05: iOS root backup verified on the SD card (sha 5b38e479..., 16 GiB, 40.8 MB/s). Flashed out/xnu-boot-ios-bank2.img (fallback for iOS: out/xnu-boot-src37.img = 472 MiB window).
+- 2026-10-26 23:15: bank2 1536 MiB: panic soon after boot "HEROLTE: unaligned pmap_enter" -- the S7 port's own
+  diagnostic in pmap_enter_pte (16 KiB VM pages over 4 KiB hw pages, TEST_PAGE_RATIO_4: pte_p & 0x1f), whose
+  comment says second-bank RAM >= 1.5 GiB sometimes hits it; no upstream fix. Dropped to 1024 MiB (booted
+  reliably on the S7): out/xnu-boot-ios-bank2-1g.img (sha 283251eb...), flashed; mkadt --bank2-mb default 1024.
+  Root cause of the >= 1.5 GiB misalignment is open (later: find which allocation hands out a PT page whose
+  4-PTE group straddles; with 1 GiB that path apparently is not hit).

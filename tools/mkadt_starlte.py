@@ -158,7 +158,7 @@ if __name__ == '__main__':
                         help='iPhone XR canvas 828x1792 @2x, scaled by the kernel')
     parser.add_argument('--bank2', action='store_true',
                         help='XNU RAM = the second bank instead of the 472 MiB window')
-    parser.add_argument('--bank2-mb', type=int, default=1536,
+    parser.add_argument('--bank2-mb', type=int, default=1024,
                         help='MiB of the second bank; on herolte 1536 boots with boot-arg '
                              'vm_compression_limit=98304 and 2048 panics in write_pte_fast')
     args = parser.parse_args()
