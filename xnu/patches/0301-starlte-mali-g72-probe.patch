@@ -2,7 +2,7 @@ diff --git a/bsd/dev/starlte_gpu.c b/bsd/dev/starlte_gpu.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/starlte_gpu.c
-@@ -0,0 +1,435 @@
+@@ -0,0 +1,622 @@
 +/*
 + * STARLTE (Galaxy S9 SM-G960F, Exynos 9810) Mali-G72 MP18 (Bifrost), stage 1:
 + * read-only probe, the S9 counterpart of herolte_gpu.c (Mali-T880).
@@ -137,16 +137,28 @@ new file mode 100644
 + *      TRANSCFG = 0 = legacy), MEMATTR 0x888d88, TRANSTAB | 7
 + *   6. WRITE_VALUE "zero" on JS1 (the T880's first job), then WRITE_VALUE
 + *      "immediate 64" writing "STARBITE", both on every shader core
-+ *   7. cores off, BUCK6 back to the value S-Boot left
-+ * The GPU memory is 64 KiB at 0x8f0000000, in bank 2 above XNU's 1 GiB
++ *   7. stage 3: fragment clears (sg_clear below), first of a private
++ *      64x64 buffer, then of a 256x256 square in the middle of the panel
++ *   8. cores off, BUCK6 back to the value S-Boot left
++ * The GPU memory is 256 KiB at 0x8f0000000, in bank 2 above XNU's 1 GiB
 + * (0x880000000, tools/mkadt_starlte.py --bank2), mapped uncached on the
-+ * CPU (COHERENCY_FEATURES = 0: the GPU is not IO-coherent).
++ * CPU (COHERENCY_FEATURES = 0: the GPU is not IO-coherent): page tables at
++ * +0x0000, the panel's level-3 tables at +0x4000, data pages from
++ * +0x10000 at GPU VA 0x02000000. The panel scanout (mkadt_starlte.py
++ * FB_BASE 0xcc000000, 1440x2960, stride 5760) is mapped at GPU VA
++ * 0x04000000 (both 2 MiB aligned).
 + */
 +#define SG_MEM_PA       0x8f0000000ull
-+#define SG_MEM_BYTES    0x10000u
-+#define SG_VA           0x02000000ull   /* the data pages, from +0x4000 */
-+#define SG_DATA_OFF     0x4000u
-+#define SG_DATA_PAGES   8u
++#define SG_MEM_BYTES    0x40000u
++#define SG_VA           0x02000000ull   /* the data pages, from +SG_DATA_OFF */
++#define SG_DATA_OFF     0x10000u
++#define SG_DATA_PAGES   48u
++#define SG_PANEL_L3_OFF 0x4000u
++#define SG_FB_PA        0xcc000000ull
++#define SG_FB_W         1440u
++#define SG_FB_H         2960u
++#define SG_FB_STRIDE    (SG_FB_W * 4u)
++#define SG_PANEL_VA     0x04000000ull
 +#define SG_BUCK6        0x2bu
 +#define SG_BUCK6_950MV  0x68u           /* 300 mV + 0x68 * 6.25 mV */
 +
@@ -226,7 +238,8 @@ new file mode 100644
 +	return raw & 0x100;
 +}
 +
-+/* Page tables: SG_DATA_PAGES pages from +SG_DATA_OFF at GPU VA SG_VA. */
++/* Page tables: SG_DATA_PAGES pages from +SG_DATA_OFF at GPU VA SG_VA, the
++ * panel at SG_PANEL_VA (9 level-3 tables of 2 MiB). */
 +static void
 +sg_tables(void)
 +{
@@ -244,6 +257,15 @@ new file mode 100644
 +	for (unsigned i = 0; i < SG_DATA_PAGES; i++) {
 +		/* Mali-LPAE leaf: read/write, outer shareable, MEMATTR index 0. */
 +		l3[i] = (SG_MEM_PA + SG_DATA_OFF + i * 0x1000) | 0x2c1;
++	}
++	unsigned pages = (SG_FB_STRIDE * SG_FB_H + 0xfff) / 0x1000;
++	for (unsigned t = 0; t * 512 < pages; t++) {
++		uint32_t table = SG_PANEL_L3_OFF + t * 0x1000;
++		volatile uint64_t *pl3 = (volatile uint64_t *)(sg_mem + table);
++		l2[((SG_PANEL_VA >> 21) & 0x1ff) + t] = (SG_MEM_PA + table) | 3;
++		for (unsigned i = 0; i < 512 && t * 512 + i < pages; i++) {
++			pl3[i] = (SG_FB_PA + (uint64_t)(t * 512 + i) * 0x1000) | 0x2c1;
++		}
 +	}
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +}
@@ -339,6 +361,179 @@ new file mode 100644
 +	return ok;
 +}
 +
++/*
++ * Stage 3: a fragment job that only clears (Mesa genxml v6.xml and
++ * pan_desc.c, GENX(pan_emit_fbd) for PAN_ARCH 6). No draws, so no tiler job:
++ * Mesa then leaves the framebuffer's tiler pointer 0; with_tiler instead
++ * points it at a Tiler Context + Tiler Heap as Mesa's jm_emit_tiler_desc()
++ * builds for batches with draws (the fallback if a null tiler faults).
++ * Data offsets: fragment job +0x400, Framebuffer +0x1000 (Parameters 64 B,
++ * Padding 64 B) with one Render Target at +0x1080, sample positions
++ * +0x1200, Tiler Heap +0x1400, Tiler Context +0x1440, heap +0x10000.
++ * One 16x16 tile (256 px, the v6 maximum) of RGBA8 = 1 KiB of tile buffer.
++ */
++#define SG_FRAG_OFF     0x0400u
++#define SG_FBD_OFF      0x1000u
++#define SG_SAMPLES_OFF  0x1200u
++#define SG_HEAPD_OFF    0x1400u
++#define SG_TILER_OFF    0x1440u
++#define SG_PIX_OFF      0x2000u         /* private 64x64 RGBA8, 16 KiB */
++#define SG_HEAP_OFF     0x10000u
++#define SG_HEAP_BYTES   0x20000u
++
++static void
++sg_put32(uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(sg_mem + SG_DATA_OFF + off) = v;
++}
++
++static void
++sg_put64(uint32_t off, uint64_t v)
++{
++	*(volatile uint64_t *)(sg_mem + SG_DATA_OFF + off) = v;
++}
++
++static bool
++sg_clear(uint64_t pixels_va, uint32_t w, uint32_t h, uint32_t stride, uint32_t color,
++    bool with_tiler, uint32_t affinity, const char *what)
++{
++	for (uint32_t off = SG_FRAG_OFF; off < SG_FRAG_OFF + 64; off += 4) {
++		sg_put32(off, 0);
++	}
++	for (uint32_t off = SG_FBD_OFF; off < SG_PIX_OFF; off += 4) {
++		sg_put32(off, 0);
++	}
++	/* Sample positions, single-sampled (pan_samples.c): sample 0 and the
++	 * origin at the pixel centre, (0 + 8) * 16 = 128 in 1/256 pixel. */
++	sg_put32(SG_SAMPLES_OFF + 0 * 4, 128u | 128u << 16);
++	sg_put32(SG_SAMPLES_OFF + 32 * 4, 128u | 128u << 16);
++
++	uint64_t tiler = 0;
++	if (with_tiler) {
++		/* Tiler Heap: size, base, bottom, top. */
++		sg_put32(SG_HEAPD_OFF + 4, SG_HEAP_BYTES);
++		sg_put64(SG_HEAPD_OFF + 8, SG_VA + SG_HEAP_OFF);
++		sg_put64(SG_HEAPD_OFF + 16, SG_VA + SG_HEAP_OFF);
++		sg_put64(SG_HEAPD_OFF + 24, SG_VA + SG_HEAP_OFF + SG_HEAP_BYTES);
++		/* Tiler Context: hierarchy mask 0xff (8 levels, TILER_FEATURES
++		 * 0x809; pan_select_tiler_hierarchy_mask), single-sampled, FB size,
++		 * heap. */
++		sg_put32(SG_TILER_OFF + 8, 0xff);
++		sg_put32(SG_TILER_OFF + 12, (w - 1) | (h - 1) << 16);
++		sg_put64(SG_TILER_OFF + 24, SG_VA + SG_HEAPD_OFF);
++		tiler = SG_VA + SG_TILER_OFF;
++	}
++
++	/* Framebuffer Parameters. Pre/post frame shaders never (word 0). */
++	sg_put64(SG_FBD_OFF + 16, SG_VA + SG_SAMPLES_OFF);
++	sg_put32(SG_FBD_OFF + 32, (w - 1) | (h - 1) << 16);    /* width, height */
++	sg_put32(SG_FBD_OFF + 36, 0);                           /* bound min */
++	sg_put32(SG_FBD_OFF + 40, (w - 1) | (h - 1) << 16);    /* bound max */
++	/* 1 sample, single pattern, tie-break MINUS_180_IN_0_OUT (2), tile
++	 * 256 px (log2 8), 1 render target, colour buffer 1 KiB (>> 10). */
++	sg_put32(SG_FBD_OFF + 44, 2u << 6 | 8u << 9 | 1u << 24);
++	sg_put32(SG_FBD_OFF + 48, 1u << 16);                    /* Z internal D24 */
++	sg_put64(SG_FBD_OFF + 56, tiler);
++
++	/* Render Target: internal R8G8B8A8; write enable, writeback R8G8B8A8
++	 * (19), linear (2), dithering, swizzle RGBA (0x688), clean pixel
++	 * write; base, row stride; clear colour 0. */
++	uint32_t rt = SG_FBD_OFF + 128;
++	sg_put32(rt + 0, 1u << 26);
++	sg_put32(rt + 4, 1u | 19u << 3 | 2u << 10 | 1u << 15 | 0x688u << 16 | 1u << 31);
++	sg_put64(rt + 32, pixels_va);
++	sg_put32(rt + 40, stride);
++	sg_put32(rt + 48, color);
++
++	/* Fragment job: header (64-bit, type 9, index 1), bounds in 16x16
++	 * tiles, framebuffer pointer tagged MFBD (bit 0), 1 render target. */
++	sg_put32(SG_FRAG_OFF + 16, 1u | 9u << 1 | 1u << 16);
++	sg_put32(SG_FRAG_OFF + 32, 0);
++	sg_put32(SG_FRAG_OFF + 36, ((w - 1) >> 4) | ((h - 1) >> 4) << 16);
++	sg_put64(SG_FRAG_OFF + 40, (SG_VA + SG_FBD_OFF) | 1);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	return sg_run(0, SG_VA + SG_FRAG_OFF, affinity, what);
++}
++
++/* Reset, power everything on, fresh page tables, AS0. */
++static bool
++sg_gpu_up(uint32_t shaders)
++{
++	if (!sg_soft_reset()) {
++		return false;
++	}
++	bool on = sg_power(L2_PWRON_LO, L2_READY_LO, sg_rd(sg_gpu, L2_PRESENT_LO), "L2") &&
++	    sg_power(SHADER_PWRON_LO, SHADER_READY_LO, shaders, "shader cores") &&
++	    sg_power(TILER_PWRON_LO, TILER_READY_LO, sg_rd(sg_gpu, TILER_PRESENT_LO), "tiler");
++	printf("STARLTE GPU: GPU_STATUS=%#x rawstat=%#x after power-up\n",
++	    sg_rd(sg_gpu, GPU_STATUS), sg_rd(sg_gpu, GPU_IRQ_RAWSTAT));
++	if (!on) {
++		return false;
++	}
++	sg_tables();
++	return sg_mmu_setup();
++}
++
++#define SG_GREEN        0xff00ff00u     /* RGBA8 and BGRA8 alike */
++#define SG_SQ           256u
++#define SG_SQ_X         592u            /* (1440 - 256) / 2, 16-pixel aligned */
++#define SG_SQ_Y         1344u           /* about (2960 - 256) / 2, 16-aligned */
++
++static void
++sg_stage3(uint32_t shaders)
++{
++	/* Private 64x64 buffer, filled with a marker first. */
++	volatile uint32_t *pix = (volatile uint32_t *)(sg_mem + SG_DATA_OFF + SG_PIX_OFF);
++	bool with_tiler = false, ok = false;
++	for (unsigned attempt = 0; attempt < 2 && !ok; attempt++) {
++		with_tiler = attempt == 1;
++		if (attempt && !sg_gpu_up(shaders)) {
++			return;
++		}
++		for (unsigned i = 0; i < 64 * 64; i++) {
++			pix[i] = 0x12345678u;
++		}
++		__asm__ volatile ("dsb sy" ::: "memory");
++		bool ran = sg_clear(SG_VA + SG_PIX_OFF, 64, 64, 64 * 4, SG_GREEN, with_tiler, shaders,
++		    with_tiler ? "FRAGMENT clear 64x64 (tiler context)" : "FRAGMENT clear 64x64 (no tiler)");
++		unsigned good = 0;
++		for (unsigned i = 0; i < 64 * 64; i++) {
++			good += pix[i] == SG_GREEN;
++		}
++		ok = ran && good == 64 * 64;
++		printf("STARLTE GPU: private clear: %u of 4096 pixels green, first %#x last %#x -> %s\n",
++		    good, pix[0], pix[64 * 64 - 1], ok ? "THE MALI-G72 CLEARED A BUFFER" : "failed");
++	}
++	if (!ok) {
++		printf("STARLTE GPU: stage 3 private clear did not pass; panel left alone\n");
++		return;
++	}
++	/* The panel: a 256x256 green square in the middle. */
++	vm_offset_t fb = ml_io_map((vm_offset_t)SG_FB_PA, SG_FB_STRIDE * SG_FB_H);
++	if (!fb) {
++		printf("STARLTE GPU: panel mapping failed\n");
++		return;
++	}
++	volatile uint32_t *px = (volatile uint32_t *)fb;
++#define SG_PX(x, y) px[(y) * SG_FB_W + (x)]
++	uint32_t outside = SG_PX(SG_SQ_X - 1, SG_SQ_Y + 10);
++	uint64_t va = SG_PANEL_VA + (uint64_t)SG_SQ_Y * SG_FB_STRIDE + SG_SQ_X * 4u;
++	bool ran = sg_clear(va, SG_SQ, SG_SQ, SG_FB_STRIDE, SG_GREEN, with_tiler, shaders,
++	    "FRAGMENT clear panel 256x256");
++	unsigned good = 0;
++	for (unsigned y = 0; y < SG_SQ; y += 15) {
++		for (unsigned x = 0; x < SG_SQ; x += 15) {
++			good += SG_PX(SG_SQ_X + x, SG_SQ_Y + y) == SG_GREEN;
++		}
++	}
++	bool ok3 = ran && good == 18 * 18 && SG_PX(SG_SQ_X + SG_SQ - 1, SG_SQ_Y + SG_SQ - 1) == SG_GREEN;
++	printf("STARLTE GPU: panel clear: %u of 324 sampled pixels green, corner %#x, left neighbour "
++	    "%#x (was %#x) -> %s\n", good, SG_PX(SG_SQ_X + SG_SQ - 1, SG_SQ_Y + SG_SQ - 1),
++	    SG_PX(SG_SQ_X - 1, SG_SQ_Y + 10), outside, ok3 ? "THE MALI-G72 DREW ON THE PANEL" : "failed");
++#undef SG_PX
++	printf("STARLTE GPU: stage 3 %s\n", ok3 ? "PASSED" : "did not pass");
++}
++
 +static void
 +sg_jobs(vm_offset_t pmu)
 +{
@@ -376,22 +571,14 @@ new file mode 100644
 +		printf("STARLTE GPU: GPU memory mapping failed\n");
 +		goto restore;
 +	}
-+	if (!sg_soft_reset()) {
-+		goto restore;
-+	}
 +	uint32_t shaders = sg_rd(sg_gpu, SHADER_PRESENT_LO);
-+	bool on = sg_power(L2_PWRON_LO, L2_READY_LO, sg_rd(sg_gpu, L2_PRESENT_LO), "L2") &&
-+	    sg_power(SHADER_PWRON_LO, SHADER_READY_LO, shaders, "shader cores") &&
-+	    sg_power(TILER_PWRON_LO, TILER_READY_LO, sg_rd(sg_gpu, TILER_PRESENT_LO), "tiler");
-+	printf("STARLTE GPU: GPU_STATUS=%#x rawstat=%#x after power-up\n",
-+	    sg_rd(sg_gpu, GPU_STATUS), sg_rd(sg_gpu, GPU_IRQ_RAWSTAT));
-+	if (on) {
-+		sg_tables();
-+		if (sg_mmu_setup()) {
-+			bool a = sg_write_value(0x000, 0x100, 3, 0, 0, shaders, "WRITE_VALUE zero");
-+			bool b = sg_write_value(0x200, 0x300, 7, 0x4554494252415453ull,
-+			    0x4554494252415453ull, shaders, "WRITE_VALUE STARBITE");
-+			printf("STARLTE GPU: stage 2 %s\n", a && b ? "PASSED" : "did not pass");
++	if (sg_gpu_up(shaders)) {
++		bool a = sg_write_value(0x000, 0x100, 3, 0, 0, shaders, "WRITE_VALUE zero");
++		bool b = sg_write_value(0x200, 0x300, 7, 0x4554494252415453ull,
++		    0x4554494252415453ull, shaders, "WRITE_VALUE STARBITE");
++		printf("STARLTE GPU: stage 2 %s\n", a && b ? "PASSED" : "did not pass");
++		if (a && b) {
++			sg_stage3(shaders);
 +		}
 +	}
 +	sg_cores_off();
