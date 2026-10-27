@@ -134,17 +134,21 @@ sg_probe(vm_offset_t pmu, const char *when)
  *      "immediate 64" writing "STARBITE", both on every shader core
  *   7. stage 3: fragment clears (sg_clear below), first of a private
  *      64x64 buffer, then of a 256x256 square in the middle of the panel
- *   8. cores off, BUCK6 back to the value S-Boot left
- * The GPU memory is 256 KiB at 0x8f0000000, in bank 2 above XNU's 1 GiB
+ *   8. stage 4: the first draw, a tiler job + fragment job built offline by
+ *      tools/gpu/starlte-g72-tri.c with Mesa (starlte_gpu_tri.h below)
+ *   9. cores off, BUCK6 back to the value S-Boot left
+ * The GPU memory is 288 KiB at 0x8f0000000, in bank 2 above XNU's 1 GiB
  * (0x880000000, tools/mkadt_starlte.py --bank2), mapped uncached on the
  * CPU (COHERENCY_FEATURES = 0: the GPU is not IO-coherent): page tables at
  * +0x0000, the panel's level-3 tables at +0x4000, data pages from
  * +0x10000 at GPU VA 0x02000000. The panel scanout (mkadt_starlte.py
  * FB_BASE 0xcc000000, 1440x2960, stride 5760) is mapped at GPU VA
- * 0x04000000 (both 2 MiB aligned).
+ * 0x04000000 (both 2 MiB aligned). Stage 4's tiler heap is 16 MiB more at
+ * 0x8f1000000, GPU VA 0x10000000, its 8 level-3 tables at +0x40000 (no
+ * growable heap: nothing here handles GPU page faults).
  */
 #define SG_MEM_PA       0x8f0000000ull
-#define SG_MEM_BYTES    0x40000u
+#define SG_MEM_BYTES    0x48000u
 #define SG_VA           0x02000000ull   /* the data pages, from +SG_DATA_OFF */
 #define SG_DATA_OFF     0x10000u
 #define SG_DATA_PAGES   48u
@@ -154,6 +158,10 @@ sg_probe(vm_offset_t pmu, const char *when)
 #define SG_FB_H         2960u
 #define SG_FB_STRIDE    (SG_FB_W * 4u)
 #define SG_PANEL_VA     0x04000000ull
+#define SG_HEAP_PA      0x8f1000000ull
+#define SG_HEAP_L3_OFF  0x40000u
+
+#include "starlte_gpu_tri.h"
 #define SG_BUCK6        0x2bu
 #define SG_BUCK6_950MV  0x68u           /* 300 mV + 0x68 * 6.25 mV */
 
@@ -260,6 +268,14 @@ sg_tables(void)
 		l2[((SG_PANEL_VA >> 21) & 0x1ff) + t] = (SG_MEM_PA + table) | 3;
 		for (unsigned i = 0; i < 512 && t * 512 + i < pages; i++) {
 			pl3[i] = (SG_FB_PA + (uint64_t)(t * 512 + i) * 0x1000) | 0x2c1;
+		}
+	}
+	for (unsigned t = 0; t * 512 < SG_TRI_HEAP_BYTES / 0x1000; t++) {
+		uint32_t table = SG_HEAP_L3_OFF + t * 0x1000;
+		volatile uint64_t *hl3 = (volatile uint64_t *)(sg_mem + table);
+		l2[((SG_TRI_HEAP_VA >> 21) & 0x1ff) + t] = (SG_MEM_PA + table) | 3;
+		for (unsigned i = 0; i < 512; i++) {
+			hl3[i] = (SG_HEAP_PA + (uint64_t)(t * 512 + i) * 0x1000) | 0x2c1;
 		}
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
@@ -530,6 +546,55 @@ sg_stage3(uint32_t shaders)
 	printf("STARLTE GPU: stage 3 %s\n", ok3 ? "PASSED" : "did not pass");
 }
 
+/*
+ * Stage 4: one magenta triangle on a dark grey 512x512 square in the middle
+ * of the panel. The blob (tiler job, fragment job, framebuffer, tiler
+ * context/heap descriptors, renderer state + blend, viewport, positions,
+ * and the fragment shader from Mesa's Bifrost compiler) is position
+ * dependent: it goes to data offset 0x8000 = GPU VA SG_TRI_BLOB_VA. The
+ * tiler job bins the triangle (JS1), then the fragment job clears and
+ * shades the tiles (JS0), as Panfrost submits them.
+ */
+static void
+sg_stage4(uint32_t shaders)
+{
+	uint32_t base = (uint32_t)(SG_TRI_BLOB_VA - SG_VA);
+	for (unsigned i = 0; i < SG_TRI_BLOB_WORDS; i++) {
+		sg_put32(base + i * 4, sg_tri_blob[i]);
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	bool tiled = sg_run(1, SG_TRI_BLOB_VA + SG_TRI_TILER_JOB, shaders, "TILER triangle");
+	bool shaded = tiled && sg_run(0, SG_TRI_BLOB_VA + SG_TRI_FRAG_JOB, shaders,
+	    "FRAGMENT triangle 512x512");
+
+	uint64_t rows_pa = SG_FB_PA + (uint64_t)SG_TRI_RT_Y * SG_FB_STRIDE;
+	uint64_t map_pa = rows_pa & ~0x3fffull;
+	vm_size_t map_len = (vm_size_t)(((rows_pa + SG_TRI_FB_H * SG_FB_STRIDE - map_pa) + 0x3fff) &
+	    ~0x3fffull);
+	vm_offset_t fb = ml_io_map((vm_offset_t)map_pa, map_len);
+	volatile uint32_t *px = (volatile uint32_t *)(fb + (rows_pa - map_pa));
+#define SG_RT(x, y) px[(y) * SG_FB_W + SG_TRI_RT_X + (x)]
+	/* Inside: around the centroid (256, 325). Outside: the corners and
+	 * (100, 100), left of the edge from (256, 48) to (48, 464). */
+	unsigned in = 0, out = 0;
+	for (unsigned y = 300; y < 350; y += 10) {
+		for (unsigned x = 231; x < 281; x += 10) {
+			in += SG_RT(x, y) == SG_TRI_COLOR;
+		}
+	}
+	out += SG_RT(2, 2) == SG_TRI_CLEAR;
+	out += SG_RT(509, 2) == SG_TRI_CLEAR;
+	out += SG_RT(2, 509) == SG_TRI_CLEAR;
+	out += SG_RT(509, 509) == SG_TRI_CLEAR;
+	out += SG_RT(100, 100) == SG_TRI_CLEAR;
+	bool ok = shaded && in == 25 && out == 5;
+	printf("STARLTE GPU: triangle: %u of 25 inside pixels magenta (centre %#x), %u of 5 outside grey "
+	    "(corner %#x) -> %s\n", in, SG_RT(256, 325), out, SG_RT(2, 2),
+	    ok ? "THE MALI-G72 DREW A TRIANGLE" : "failed");
+#undef SG_RT
+	printf("STARLTE GPU: stage 4 %s\n", ok ? "PASSED" : "did not pass");
+}
+
 static void
 sg_jobs(vm_offset_t pmu)
 {
@@ -575,6 +640,10 @@ sg_jobs(vm_offset_t pmu)
 		printf("STARLTE GPU: stage 2 %s\n", a && b ? "PASSED" : "did not pass");
 		if (a && b) {
 			sg_stage3(shaders);
+			/* Fresh reset, tables and AS0 for the draw. */
+			if (sg_gpu_up(shaders)) {
+				sg_stage4(shaders);
+			}
 		}
 	}
 	sg_cores_off();
