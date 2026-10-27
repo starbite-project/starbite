@@ -1219,3 +1219,11 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   surgically: same ADT (out/starlte-current.adt) and boot-args (build/ios-cmdline.txt) taken from
   payload-linux-ufsmulti16.bin, bundles (Kiosk + src38 UEFI) appended byte-identical at 0xfd6000 ->
   out/payload-linux-gpu1.bin; BOOT out/xnu-boot-gpu1.img (sha 8282e382...).
+- 2026-10-28: HackiOS research done (build/ios-gpu-research.md; code now in oosexgang/refport-os). Their path:
+  msm DRM ioctls through one IOUserClient selector (low byte of the ioctl), 226-line libdrm shim, Mesa 25.0.7
+  cross-built for arm64-apple-ios (softpipe + freedreno into libOSMesa), IOSurface -> GPU BO (selector 0x7e)
+  and EGLImage, DYLD_INSERT_LIBRARIES via a kern.exec_inject sysctl, eagl.c hooks EAGLContext and QuartzCore's
+  GL dispatch (+ vtable patches at iOS 16.5 addresses). For Panfrost: syncobjs required (emulate), DRM
+  version >= 1.1 (pre-allocate the heap BO), ioctls CREATE_BO/MMAP_BO/SUBMIT/WAIT_BO/GET_PARAM/GET_BO_OFFSET/
+  MADVISE/GEM_CLOSE. Licenses: refport kernel APSL, userland/tools/Mesa patches MIT; Linux panfrost and
+  mali_kbase are GPL (reference only, no code copying).
