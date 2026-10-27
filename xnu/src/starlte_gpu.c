@@ -503,14 +503,15 @@ sg_stage3(uint32_t shaders)
 		printf("STARLTE GPU: stage 3 private clear did not pass; panel left alone\n");
 		return;
 	}
-	/* The panel: a 256x256 green square in the middle. */
-	vm_offset_t fb = ml_io_map((vm_offset_t)SG_FB_PA, SG_FB_STRIDE * SG_FB_H);
-	if (!fb) {
-		printf("STARLTE GPU: panel mapping failed\n");
-		return;
-	}
-	volatile uint32_t *px = (volatile uint32_t *)fb;
-#define SG_PX(x, y) px[(y) * SG_FB_W + (x)]
+	/* The panel: a 256x256 green square in the middle. The CPU maps only
+	 * the square's rows (1.4 MiB): the whole 17 MiB scanout in one
+	 * ml_io_map() panicked in kmem_alloc (no such VA range free). */
+	uint64_t rows_pa = SG_FB_PA + (uint64_t)SG_SQ_Y * SG_FB_STRIDE;
+	uint64_t map_pa = rows_pa & ~0x3fffull;
+	vm_size_t map_len = (vm_size_t)(((rows_pa + SG_SQ * SG_FB_STRIDE - map_pa) + 0x3fff) & ~0x3fffull);
+	vm_offset_t fb = ml_io_map((vm_offset_t)map_pa, map_len);
+	volatile uint32_t *px = (volatile uint32_t *)(fb + (rows_pa - map_pa));
+#define SG_PX(x, y) px[((y) - SG_SQ_Y) * SG_FB_W + (x)]
 	uint32_t outside = SG_PX(SG_SQ_X - 1, SG_SQ_Y + 10);
 	uint64_t va = SG_PANEL_VA + (uint64_t)SG_SQ_Y * SG_FB_STRIDE + SG_SQ_X * 4u;
 	bool ran = sg_clear(va, SG_SQ, SG_SQ, SG_FB_STRIDE, SG_GREEN, with_tiler, shaders,
