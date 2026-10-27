@@ -1254,3 +1254,15 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   First try panicked: ml_io_map() of the whole 17 MiB scanout -> kmem_alloc failed (vm_kern.c:178); the CPU
   now maps only the square's rows. Next: phase 4, tiler job + a hand-assembled Bifrost fragment shader
   (first triangle), then GPU scaling of iOS frames.
+- 2026-10-28: **iOS GPU phase 4 PASSED: the Mali-G72's first draw under iOS, a shaded triangle** (user saw it;
+  BOOT out/xnu-boot-gpu4.img sha 33692ef9..., commit ffb8a8c; log build/ios-gpu4-log.txt, flush #12). The draw is
+  built offline by tools/gpu/starlte-g72-tri.c in the lima VM against Mesa 25.0.7 (~/mesa, built with
+  -Dgallium-drivers=panfrost; tools/gpu/build-g72-tri.sh): the fragment shader from Mesa's Bifrost compiler
+  (is_blit: MOV r0-r3 = 1,0,1,1 + BLEND, no ATEST, 144 B; gpu_id must be the product ID 0x6221, not the full
+  GPU_ID), every descriptor packed with Mesa's v6 genxml macros, both chains checked with pandecode
+  (build/g72-tri-pandecode.log) -> xnu/src/starlte_gpu_tri.h (tools/gpu/regen-0301.py puts it in 0301). Tiler
+  job (JS1, no vertex job: screen-space positions straight to the tiler, as Mesa's preload) 44 us; fragment job
+  (JS0) 151 us; 25/25 inside pixels magenta, 5/5 outside grey. Tiler heap 16 MiB pre-mapped at PA 0x8f1000000
+  (GPU VA 0x10000000), hierarchy mask 0xff, 512x512 render target on the panel at (464,1216). No faults.
+  Next: GPU scaling of iOS frames (textured quad + sampler, as the S7's sweetfb_gpu), then interrupts and a
+  Panfrost-style IOUserClient UAPI for Mesa in userland.
