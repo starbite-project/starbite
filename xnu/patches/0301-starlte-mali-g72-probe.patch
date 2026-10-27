@@ -2,7 +2,7 @@ diff --git a/bsd/dev/starlte_gpu.c b/bsd/dev/starlte_gpu.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/starlte_gpu.c
-@@ -0,0 +1,692 @@
+@@ -0,0 +1,883 @@
 +/*
 + * STARLTE (Galaxy S9 SM-G960F, Exynos 9810) Mali-G72 MP18 (Bifrost), stage 1:
 + * read-only probe, the S9 counterpart of herolte_gpu.c (Mali-T880).
@@ -141,8 +141,11 @@ new file mode 100644
 + *      64x64 buffer, then of a 256x256 square in the middle of the panel
 + *   8. stage 4: the first draw, a tiler job + fragment job built offline by
 + *      tools/gpu/starlte-g72-tri.c with Mesa (starlte_gpu_tri.h below)
-+ *   9. cores off, BUCK6 back to the value S-Boot left
-+ * The GPU memory is 288 KiB at 0x8f0000000, in bank 2 above XNU's 1 GiB
++ *   9. stage 5: if every stage passed, the GPU stays powered at 950 mV and
++ *      takes over SweetFramebuffer's full-frame presents (sweetfb_gpu=1,
++ *      starlte_gpu_present_* below); otherwise cores off, BUCK6 back to the
++ *      value S-Boot left
++ * The GPU memory is 352 KiB at 0x8f0000000, in bank 2 above XNU's 1 GiB
 + * (0x880000000, tools/mkadt_starlte.py --bank2), mapped uncached on the
 + * CPU (COHERENCY_FEATURES = 0: the GPU is not IO-coherent): page tables at
 + * +0x0000, the panel's level-3 tables at +0x4000, data pages from
@@ -150,10 +153,11 @@ new file mode 100644
 + * FB_BASE 0xcc000000, 1440x2960, stride 5760) is mapped at GPU VA
 + * 0x04000000 (both 2 MiB aligned). Stage 4's tiler heap is 16 MiB more at
 + * 0x8f1000000, GPU VA 0x10000000, its 8 level-3 tables at +0x40000 (no
-+ * growable heap: nothing here handles GPU page faults).
++ * growable heap: nothing here handles GPU page faults). Stage 5's surface
++ * slots: 4 x 8 MiB at GPU VA 0x20000000.., their level-3 tables at +0x48000.
 + */
 +#define SG_MEM_PA       0x8f0000000ull
-+#define SG_MEM_BYTES    0x48000u
++#define SG_MEM_BYTES    0x58000u
 +#define SG_VA           0x02000000ull   /* the data pages, from +SG_DATA_OFF */
 +#define SG_DATA_OFF     0x10000u
 +#define SG_DATA_PAGES   48u
@@ -309,6 +313,9 @@ new file mode 100644
 +	return true;
 +}
 +
++/* Log only failed jobs (the per-frame GPU present). */
++static bool sg_run_quiet;
++
 +/* Start the chain at GPU VA job_va on slot js, wait (bounded), log. */
 +static bool
 +sg_run(unsigned js, uint64_t job_va, uint32_t affinity, const char *what)
@@ -339,11 +346,13 @@ new file mode 100644
 +	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
 +	volatile uint32_t *hdr = (volatile uint32_t *)(sg_mem + SG_DATA_OFF + (job_va - SG_VA));
 +	bool ok = (jirq & (1u << js)) && !(jirq & (1u << (js + 16))) && !mirq && !(girq & 0x81);
-+	printf("STARLTE GPU: %s: %s in %llu us: irq=%#x mmu=%#x gpu=%#x js_status=%#x "
-+	    "as_fault=%#x@%#x exception=%#x fault=%#x:%#x gpu_fault=%#x@%#x\n", what,
-+	    ok ? "done" : "FAILED", ns / 1000, jirq, mirq, girq,
-+	    sg_rd(sg_gpu, slot + 0x24), sg_rd(sg_gpu, AS0 + 0x1c), sg_rd(sg_gpu, AS0 + 0x20),
-+	    hdr[0], hdr[3], hdr[2], sg_rd(sg_gpu, GPU_FAULTSTATUS), sg_rd(sg_gpu, GPU_FAULTADDR_LO));
++	if (!ok || !sg_run_quiet) {
++		printf("STARLTE GPU: %s: %s in %llu us: irq=%#x mmu=%#x gpu=%#x js_status=%#x "
++		    "as_fault=%#x@%#x exception=%#x fault=%#x:%#x gpu_fault=%#x@%#x\n", what,
++		    ok ? "done" : "FAILED", ns / 1000, jirq, mirq, girq,
++		    sg_rd(sg_gpu, slot + 0x24), sg_rd(sg_gpu, AS0 + 0x1c), sg_rd(sg_gpu, AS0 + 0x20),
++		    hdr[0], hdr[3], hdr[2], sg_rd(sg_gpu, GPU_FAULTSTATUS), sg_rd(sg_gpu, GPU_FAULTADDR_LO));
++	}
 +	sg_wr(sg_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
 +	sg_wr(sg_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
 +	return ok;
@@ -560,7 +569,7 @@ new file mode 100644
 + * tiler job bins the triangle (JS1), then the fragment job clears and
 + * shades the tiles (JS0), as Panfrost submits them.
 + */
-+static void
++static bool
 +sg_stage4(uint32_t shaders)
 +{
 +	uint32_t base = (uint32_t)(SG_TRI_BLOB_VA - SG_VA);
@@ -598,6 +607,182 @@ new file mode 100644
 +	    ok ? "THE MALI-G72 DREW A TRIANGLE" : "failed");
 +#undef SG_RT
 +	printf("STARLTE GPU: stage 4 %s\n", ok ? "PASSED" : "did not pass");
++	return ok;
++}
++
++/*
++ * Stage 5: the GPU present, as the S7's herolte_gpu_present_* (patch 0303
++ * points SweetFramebuffer's gpuPresent() here on STARLTE). iOS's canvas
++ * (SG_PRES_CANVAS_W x _H, the ADT canvas / sweetfb_lw,lh) is a texture on
++ * a quad at full panel height between black bars, bilinear, on all 18
++ * cores; the blob (tools/gpu/starlte-g72-tri.c) is copied fresh for every
++ * frame (the GPU writes back job headers and tiler state) and only the
++ * texture's surface pointer and strides are patched. iOS surfaces get GPU
++ * VAs in 8 MiB slots (4 level-3 tables each); a slot is keyed by surface
++ * id and first page, a remapped slot takes a fresh VA and the MMU's page
++ * table caches are flushed. Called only from SweetFramebuffer's present(),
++ * which its vsync timer serializes, and only after sgp_ready is set.
++ */
++#define SGP_SLOTS       4u
++#define SGP_SLOT_TABLES 4u
++#define SGP_SLOT_PAGES  (SGP_SLOT_TABLES * 512u)
++#define SGP_L3_OFF      0x48000u
++#define SGP_VA_BASE     0x20000000ull
++#define SGP_VA_END      0x40000000ull   /* the one level-2 table covers 1 GiB */
++
++struct sgp_slot {
++	uint32_t        id;
++	uint64_t        first_pa;
++	uint64_t        va;
++};
++static struct sgp_slot sgp_slots[SGP_SLOTS];
++static unsigned sgp_victim;
++static uint64_t sgp_next_va = SGP_VA_BASE;
++static uint32_t sgp_shaders;
++static volatile bool sgp_ready;
++static uint64_t sgp_frames, sgp_ns_sum, sgp_ns_max;
++
++int starlte_gpu_present_ready(void);
++int starlte_gpu_present_slot(uint32_t id, uint64_t first_pa);
++int starlte_gpu_present_map(uint32_t id, const uint64_t *pages, unsigned n);
++bool starlte_gpu_present_draw(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h);
++
++static bool
++sgp_as_idle(void)
++{
++	for (unsigned i = 0; i < 10000 && (sg_rd(sg_gpu, AS0 + 0x28) & 1); i++) {
++		delay(1);
++	}
++	return !(sg_rd(sg_gpu, AS0 + 0x28) & 1);
++}
++
++/* Lock a VA range and flush the MMU's page table caches for it (kbase's
++ * mmu_hw_do_operation(): LOCKADDR, LOCK, FLUSH_PT, which also unlocks). */
++static bool
++sgp_mmu_flush(uint64_t va, unsigned log2_size)
++{
++	uint64_t lock = (va & ~((1ull << log2_size) - 1)) | (log2_size - 1);
++	if (!sgp_as_idle()) {
++		return false;
++	}
++	sg_wr(sg_gpu, AS0 + 0x10, (uint32_t)lock);              /* AS_LOCKADDR */
++	sg_wr(sg_gpu, AS0 + 0x14, (uint32_t)(lock >> 32));
++	sg_wr(sg_gpu, AS0 + 0x18, 2);                           /* LOCK */
++	if (!sgp_as_idle()) {
++		return false;
++	}
++	sg_wr(sg_gpu, AS0 + 0x18, 4);                           /* FLUSH_PT */
++	return sgp_as_idle();
++}
++
++int
++starlte_gpu_present_ready(void)
++{
++	return sgp_ready;
++}
++
++/* Is the surface (id, first page) mapped? Returns its slot or -1. */
++int
++starlte_gpu_present_slot(uint32_t id, uint64_t first_pa)
++{
++	if (!sgp_ready) {
++		return -1;
++	}
++	for (unsigned i = 0; i < SGP_SLOTS; i++) {
++		if (sgp_slots[i].id == id && sgp_slots[i].first_pa == first_pa && id != 0) {
++			return (int)i;
++		}
++	}
++	return -1;
++}
++
++/* Map n 4 KiB pages of a surface into a slot (round robin); slot or -1. */
++int
++starlte_gpu_present_map(uint32_t id, const uint64_t *pages, unsigned n)
++{
++	if (!sgp_ready || n == 0 || n > SGP_SLOT_PAGES) {
++		return -1;
++	}
++	unsigned s = sgp_victim;
++	sgp_victim = (sgp_victim + 1) % SGP_SLOTS;
++	if (sgp_next_va + SGP_SLOT_PAGES * 0x1000ull > SGP_VA_END) {
++		sgp_next_va = SGP_VA_BASE;
++	}
++	uint64_t old_va = sgp_slots[s].va, va = sgp_next_va;
++	sgp_next_va += SGP_SLOT_PAGES * 0x1000ull;
++	volatile uint64_t *l2 = (volatile uint64_t *)(sg_mem + 0x2000);
++	if (old_va) {
++		for (unsigned t = 0; t < SGP_SLOT_TABLES; t++) {
++			l2[((old_va >> 21) & 0x1ff) + t] = 0;
++		}
++	}
++	for (unsigned t = 0; t < SGP_SLOT_TABLES; t++) {
++		uint32_t table = SGP_L3_OFF + (s * SGP_SLOT_TABLES + t) * 0x1000;
++		volatile uint64_t *l3 = (volatile uint64_t *)(sg_mem + table);
++		for (unsigned i = 0; i < 512; i++) {
++			unsigned p = t * 512 + i;
++			l3[i] = p < n ? (pages[p] | 0x2c1) : 0;
++		}
++		l2[((va >> 21) & 0x1ff) + t] = (SG_MEM_PA + table) | 3;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	if (!sgp_mmu_flush(SGP_VA_BASE, 30)) {
++		printf("STARLTE GPU PRESENT: MMU flush timeout\n");
++	}
++	sgp_slots[s].id = id;
++	sgp_slots[s].first_pa = pages[0];
++	sgp_slots[s].va = va;
++	printf("STARLTE GPU PRESENT: surface %u (%u pages, pa %#llx) in slot %u at VA %#llx\n",
++	    id, n, pages[0], s, va);
++	return (int)s;
++}
++
++/*
++ * Draw the w x h canvas at byte offset off (row stride bytes) of the
++ * surface in slot s to the panel. The caller has cleaned it to the point of
++ * coherency. False: the caller falls back to the CPU copy; after a GPU
++ * fault the present path switches itself off.
++ */
++bool
++starlte_gpu_present_draw(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h)
++{
++	if (!sgp_ready || s < 0 || s >= (int)SGP_SLOTS || w != SG_PRES_CANVAS_W ||
++	    h != SG_PRES_CANVAS_H || stride < w * 4) {
++		return false;
++	}
++	uint32_t base = (uint32_t)(SG_PRES_BLOB_VA - SG_VA);
++	for (unsigned i = 0; i < SG_PRES_BLOB_WORDS; i++) {
++		sg_put32(base + i * 4, sg_pres_blob[i]);
++	}
++	sg_put64(base + SG_PRES_SURFACE + 0, sgp_slots[s].va + off);
++	sg_put32(base + SG_PRES_SURFACE + 8, stride);
++	sg_put32(base + SG_PRES_SURFACE + 12, stride * h);
++	__asm__ volatile ("dsb sy" ::: "memory");
++
++	uint64_t t0 = mach_absolute_time();
++	sg_run_quiet = true;
++	bool ok = sg_run(1, SG_PRES_BLOB_VA + SG_PRES_TILER_JOB, sgp_shaders, "PRESENT tiler") &&
++	    sg_run(0, SG_PRES_BLOB_VA + SG_PRES_FRAG_JOB, sgp_shaders, "PRESENT fragment");
++	sg_run_quiet = false;
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++	sgp_frames++;
++	sgp_ns_sum += ns;
++	if (ns > sgp_ns_max) {
++		sgp_ns_max = ns;
++	}
++	if (sgp_frames <= 3 || !ok) {
++		printf("STARLTE GPU PRESENT: frame %llu %ux%u stride %u slot %d: %llu us -> %s\n",
++		    sgp_frames, w, h, stride, s, ns / 1000, ok ? "ok" : "FAILED, back to the CPU copy");
++	} else if (sgp_frames % 600 == 0) {
++		printf("STARLTE GPU PRESENT: %llu frames, average %llu us, max %llu us\n",
++		    sgp_frames, sgp_ns_sum / 600 / 1000, sgp_ns_max / 1000);
++		sgp_ns_sum = sgp_ns_max = 0;
++	}
++	if (!ok) {
++		sgp_ready = false;
++	}
++	return ok;
 +}
 +
 +static void
@@ -645,9 +830,15 @@ new file mode 100644
 +		printf("STARLTE GPU: stage 2 %s\n", a && b ? "PASSED" : "did not pass");
 +		if (a && b) {
 +			sg_stage3(shaders);
-+			/* Fresh reset, tables and AS0 for the draw. */
-+			if (sg_gpu_up(shaders)) {
-+				sg_stage4(shaders);
++			/* Fresh reset, tables and AS0 for the draw, then again for
++			 * the present (stage 5), which keeps the GPU powered. */
++			if (sg_gpu_up(shaders) && sg_stage4(shaders) && sg_gpu_up(shaders)) {
++				sgp_shaders = shaders;
++				__atomic_thread_fence(__ATOMIC_RELEASE);
++				sgp_ready = true;
++				printf("STARLTE GPU: stage 5: GPU present ready (%u x %u canvas), cores on, "
++				    "vdd_g3d stays at 950 mV\n", SG_PRES_CANVAS_W, SG_PRES_CANVAS_H);
++				return;
 +			}
 +		}
 +	}
@@ -699,7 +890,7 @@ diff --git a/bsd/dev/starlte_gpu_tri.h b/bsd/dev/starlte_gpu_tri.h
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/starlte_gpu_tri.h
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,210 @@
 +/* Generated by tools/gpu/starlte-g72-tri.c (Mesa 25.0.7, MIT). Do not edit. */
 +#define SG_TRI_BLOB_VA     0x2008000ull
 +#define SG_TRI_HEAP_VA     0x10000000ull
@@ -802,6 +993,109 @@ new file mode 100644
 +	0x00000000, 0x00000000, 0x00000049, 0x80cb1844, 0xc0076593, 0x4806000c,
 +	0x0c304029, 0x80cb686c, 0x000765b3, 0x02400004, 0x00014021, 0x80cb687c,
 +	0x184765b7, 0x58c3de04, 0x00000044, 0xf8000000, 0xe0300003, 0xc000a960,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000,
++};
++
++/* Phase 5: the GPU present (iOS canvas scaled to the panel). */
++#define SG_PRES_BLOB_VA    0x200c000ull
++#define SG_PRES_TILER_JOB  0x0u
++#define SG_PRES_FRAG_JOB   0x100u
++#define SG_PRES_SURFACE    0x680u   /* Surface With Stride: pointer, row, surface */
++#define SG_PRES_CANVAS_W   828u
++#define SG_PRES_CANVAS_H   1792u
++#define SG_PRES_BLOB_WORDS 548u
++static const uint32_t sg_pres_blob[SG_PRES_BLOB_WORDS] = {
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0001000f, 0x00000000,
++	0x00000000, 0x00000000, 0x00000003, 0x28000000, 0x1803800a, 0x00000000,
++	0x00000000, 0x00000003, 0x00000000, 0x00000000, 0x3f800000, 0x00000000,
++	0x0200c300, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000003, 0x00000000, 0x00000000, 0x00000000,
++	0x0200c500, 0x00000000, 0x00000000, 0x00000000, 0x0200c640, 0x00000000,
++	0x0200c600, 0x00000000, 0x00000000, 0x00000000, 0x0200c400, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0200c5c0, 0x00000000,
++	0x0200c580, 0x00000000, 0x0200c480, 0x00000000, 0x00000000, 0x00000000,
++	0x0200c4c0, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00010013, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00b80059, 0x0200c201, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x0200c700, 0x00000000, 0x00000000, 0x00000000, 0x0b8f059f, 0x00000000,
++	0x0b8f059f, 0x01001080, 0x00010000, 0x00000000, 0x0200c300, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x04000000, 0x86888899,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x04000000, 0x00000000, 0x00001680, 0x00000000, 0xff000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x000000ff, 0x0b8f059f, 0x00000000, 0x00000000,
++	0x0200c3c0, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x01000000, 0x10000000, 0x00000000, 0x10000000, 0x00000000,
++	0x11000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0200c800, 0x00000000,
++	0x00010001, 0x00010000, 0x00180200, 0x00000000, 0x00000000, 0x00000000,
++	0x0700ffff, 0x0000ffff, 0x024fff00, 0x024fff00, 0x00000080, 0x00000000,
++	0x00000000, 0x00000000, 0x00000a00, 0xf0122122, 0x00000019, 0x010ed688,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0xff800000, 0xff800000, 0x7f800000, 0x7f800000, 0x00000000, 0x3f800000,
++	0x00000000, 0x0b8f059f, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000001f,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x42100000, 0x00000000, 0x00000000, 0x3f800000,
++	0x44af6000, 0x00000000, 0x00000000, 0x3f800000, 0x42100000, 0x45390000,
++	0x00000000, 0x3f800000, 0x44af6000, 0x45390000, 0x00000000, 0x3f800000,
++	0x00000000, 0x00000000, 0x00000000, 0x3f800000, 0x444f0000, 0x00000000,
++	0x00000000, 0x3f800000, 0x00000000, 0x44e00000, 0x00000000, 0x3f800000,
++	0x444f0000, 0x44e00000, 0x00000000, 0x3f800000, 0x2dea2000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x0200c541, 0x00000000, 0x00000010, 0x00000040,
++	0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x04299901, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x2eda2022, 0x06ff033b,
++	0x00002688, 0x00000000, 0x0200c680, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x20000000, 0x00000000, 0x00000cf0, 0x005a9000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00800080, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00800080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x0000004e, 0x80cb1844, 0xc0028a03, 0x4906080c,
++	0xcc30084e, 0x80cb186b, 0x0002a583, 0x02400004, 0x00000000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
