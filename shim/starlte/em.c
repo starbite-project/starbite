@@ -1999,6 +1999,92 @@ static void kv_mhz(const char *k, uint64_t hz, const char *note)
     kv_add(k, u.b);
 }
 
+/* ---- Mali-G72 (read only): the probe the iOS GPU driver starts from ---------
+ * gpu@17500000 (job/mmu/gpu SPI 282/281/283), G3D domain PMU 0x14064040/44,
+ * CMU_G3D 0x17400000, vdd_g3d = S2MPS18 BUCK6 (reg 0x2b, 300 mV + n x 6.25).
+ * Registers are read only while the domain reports on: a powered-off block
+ * stalls the bus (and EngineerMode's vectors catch a synchronous abort).
+ */
+#define MALI 0x17500000UL
+
+static void kv_mali_hex(const char *k, uint32_t off)
+{
+    uint32_t v = 0;
+    if (probe32(MALI + off, &v))
+        kv_hex(k, v, 8);
+    else
+        kv_trap(k);
+}
+
+static void fill_gpu(void)
+{
+    struct ub u;
+    uint32_t st = rd(0x14064044UL);
+    uint8_t b6 = 0;
+    kv_hdr("POWER (LIVE)");
+    kv_hex("G3D domain status", st, 8);
+    kv_addc("Domain", (st & 0xfU) == 0xfU ? "on (left on by S-Boot)" : "OFF", (st & 0xfU) == 0xfU ? UI_GREEN : UI_ORANGE);
+    if (hw_pmic_read(1, 0x2b, &b6)) {
+        ub_init(&u);
+        ub_fix(&u, 300000U + b6 * 6250U, 3);
+        ub_s(&u, " mV  (vsel ");
+        ub_hex(&u, b6, 2);
+        ub_s(&u, b6 >= 0x68 ? ")" : ", jobs need 950 mV)");
+        kv_addc("BUCK6 vdd_g3d", u.b, b6 >= 0x68 ? UI_TEXT : UI_ORANGE);
+    }
+    if ((st & 0xfU) != 0xfU) {
+        kv_addc("GPU registers", "not read: domain off", UI_TEXT3);
+        return;
+    }
+    uint32_t con0 = rd(0x17400140UL);
+    kv_hex("PLL_G3D CON0", con0, 8);
+    kv_mhz("PLL_G3D", pll_hz(0x17400140UL, 0), (con0 & 0x20000000U) ? "  locked" : "  not stable");
+    kv_hdr("MALI-G72 0x17500000 (LIVE)");
+    uint32_t id = 0;
+    if (probe32(MALI + 0x000, &id)) {
+        ub_init(&u);
+        ub_hex(&u, id, 8);
+        ub_s(&u, (id >> 16) == 0x6221U ? "  Mali-G72" : "  unexpected");
+        ub_s(&u, " r");
+        ub_dec(&u, (id >> 12) & 0xfU);
+        ub_c(&u, 'p');
+        ub_dec(&u, (id >> 4) & 0xfU);
+        kv_addc("GPU_ID", u.b, (id >> 16) == 0x6221U ? UI_GREEN : UI_ORANGE);
+    } else {
+        kv_trap("GPU_ID");
+        return;
+    }
+    kv_mali_hex("L2_FEATURES", 0x004);
+    kv_mali_hex("CORE_FEATURES", 0x008);
+    kv_mali_hex("TILER_FEATURES", 0x00c);
+    kv_mali_hex("MEM_FEATURES", 0x010);
+    kv_mali_hex("MMU_FEATURES", 0x014);
+    kv_mali_hex("AS_PRESENT", 0x018);
+    kv_mali_hex("JS_PRESENT", 0x01c);
+    kv_mali_hex("GPU_STATUS", 0x034);
+    uint32_t sh = 0, rdy = 0;
+    if (probe32(MALI + 0x100, &sh)) {
+        unsigned n = 0;
+        for (uint32_t x = sh; x; x &= x - 1)
+            ++n;
+        ub_init(&u);
+        ub_hex(&u, sh, 8);
+        ub_s(&u, "  ");
+        ub_dec(&u, n);
+        ub_s(&u, " shader cores");
+        kv_add("SHADER_PRESENT", u.b);
+    }
+    kv_mali_hex("TILER_PRESENT", 0x110);
+    kv_mali_hex("L2_PRESENT", 0x120);
+    if (probe32(MALI + 0x140, &rdy))
+        kv_addc("SHADER_READY", rdy ? "powered" : "off (powered on by a driver)", rdy ? UI_GREEN : UI_TEXT2);
+    kv_mali_hex("L2_READY", 0x160);
+    kv_hdr("FOR THE IOS DRIVER");
+    kv_add("Interrupts", "job SPI 282, mmu 281, gpu 283");
+    kv_add("Before jobs", "BUCK6 950 mV, PLL_G3D relock");
+    kv_add("After a power cycle", "SMC 0x82000410 (TZPC restore)");
+}
+
 static void fill_clocks(void)
 {
     int ul = 0;
@@ -3743,6 +3829,7 @@ static void build_tab(int t)
         row_add("CPU", "clusters and core map", 0);
         row_add("Temperatures", "TMU: big, little, GPU, ISP (live)", 0);
         row_add("Clocks", "CPU, GPU, memory and bus PLLs (live)", 0);
+        row_add("GPU (Mali-G72)", "power, voltage, ID, cores (read only)", 0);
         row_add("Core bring-up test", "PSCI CPU_ON each core, then CPU_OFF", R_WARN);
         row_add("Memory test", "16 MiB pattern test", 0);
         row_add("Memory bandwidth", "read, write, copy", 0);
@@ -3802,22 +3889,23 @@ static void open_item(int t, int i)
     case 0x10: info_screen("CPU", fill_cpu, 0); break;
     case 0x11: info_screen("Temperatures", fill_thermal, 1000); break;
     case 0x12: info_screen("Clocks", fill_clocks, 2000); break;
-    case 0x13:
+    case 0x13: info_screen("GPU (Mali-G72)", fill_gpu, 1000); break;
+    case 0x14:
         if (dialog("Core bring-up test", "Start each core, then turn it off.", "Reboot after it if a core parks.", "RUN"))
             run_cores();
         break;
-    case 0x14:
+    case 0x15:
         if (dialog("Memory test", "Test 16 MiB at 0x92000000?", "Takes a few seconds.", "RUN"))
             run_ram();
         break;
-    case 0x15: run_bw(); break;
-    case 0x16: info_screen("Display panel", fill_panel, 0); break;
-    case 0x17: test_display(); break;
-    case 0x18: list_screen("Brightness", build_bright, act_bright); break;
-    case 0x19: test_touch(); break;
-    case 0x1a: test_keys(); break;
-    case 0x1b: info_screen("Real-time clock", fill_rtc, 500); break;
-    case 0x1c:
+    case 0x16: run_bw(); break;
+    case 0x17: info_screen("Display panel", fill_panel, 0); break;
+    case 0x18: test_display(); break;
+    case 0x19: list_screen("Brightness", build_bright, act_bright); break;
+    case 0x1a: test_touch(); break;
+    case 0x1b: test_keys(); break;
+    case 0x1c: info_screen("Real-time clock", fill_rtc, 500); break;
+    case 0x1d:
         measure_timer();
         info_screen("Timer", fill_timer, 500);
         break;

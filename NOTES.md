@@ -1205,3 +1205,17 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   Start an OS; live partition filesystem probe (fs_kind: ext4 label, f2fs, HFS+, NTFS, FAT32), store listing
   (star_store_entry), em_main returns the menu pick (1 iOS, 2 Kiosk, 3 Windows, 4 Linux, 5 Android).
   BOOT out/xnu-boot-menu8.img (sha 0565e508...), 54.35 MB of 55 MiB.
+- 2026-10-28: iOS, Windows, Kiosk all boot with LineageOS's DTB in BOOT (user). **iOS GPU, phase 1 started.**
+  Facts from the S9+ port (src/soc/s9p-g3d-pd.c, s9p-g3d.c, DTS): gpu@17500000 (job/mmu/gpu SPI 282/281/
+  283), G3D domain PMU 0x14064040/44 (S-Boot leaves it on), CMU_G3D 0x17400000 (PLL_G3D CON0 +0x140, CON2
+  +0x148; S-Boot's CON2 0x10000001 never reaches STABLE), vdd_g3d S2MPS18 BUCK6 reg 0x2b = 300 mV + n*6.25
+  (S-Boot 644 mV; jobs need 950 mV = 0x68, lower gave DATA_INVALID_FAULTs), after a power cycle SMC
+  0x82000410(1, 0x17410204, 0) restores the G3D TZPC or the first access SErrors. Our XNU tree has the S7's
+  Mali-T880 driver (bsd/dev/herolte_gpu.c, patches 0225-0235: probe, jobs, fragment clear, triangle,
+  textured quad, sweetfb_gpu present); STARLTE builds define ARM64_BOARD_CONFIG_HEROLTE too.
+  EngineerMode: Hardware Testing > GPU (Mali-G72), read only (domain, BUCK6, PLL, GPU_ID, features).
+  xnu/patches/0301 + xnu/src/starlte_gpu.c: read-only probe at 5 s / 60 s (boot-arg stargpu=0 off).
+  tools/build-xnu-local.sh now applies every xnu/patches/03xx (records .applied-<name>). Payload rebuilt
+  surgically: same ADT (out/starlte-current.adt) and boot-args (build/ios-cmdline.txt) taken from
+  payload-linux-ufsmulti16.bin, bundles (Kiosk + src38 UEFI) appended byte-identical at 0xfd6000 ->
+  out/payload-linux-gpu1.bin; BOOT out/xnu-boot-gpu1.img (sha 8282e382...).

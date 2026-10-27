@@ -1,0 +1,146 @@
+/*
+ * STARLTE (Galaxy S9 SM-G960F, Exynos 9810) Mali-G72 MP18 (Bifrost), stage 1:
+ * read-only probe, the S9 counterpart of herolte_gpu.c (Mali-T880).
+ *
+ * From the S9+ mainline port (SheroAbi/galaxy-s9plus-mainline-linux, which
+ * drives this GPU with Panfrost on the same SoC): gpu@17500000 (0x5000; SPIs
+ * job 282, mmu 281, gpu 283), G3D domain PMU EMBEDDED_G3D_CONFIGURATION/STATUS
+ * 0x14064040/0x14064044, CMU_G3D 0x17400000 (PLL_G3D CON0 at +0x140),
+ * vdd_g3d = S2MPS18 BUCK6 (reg 0x2b, 300 mV + n * 6.25 mV; S-Boot leaves
+ * 644 mV, jobs need 950 mV). S-Boot hands the domain over switched on; after
+ * a power cycle the domain's TZPC must be restored through EL3
+ * (SMC 0x82000410(1, 0x17410204, 0)) or the first GPU access is an SError.
+ *
+ * Nothing is written. CMU_G3D and the GPU are read only while the domain
+ * status low nibble is 0xf. Boot-arg stargpu=0 skips the probe.
+ */
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+#include <sys/param.h>
+#include <sys/systm.h>
+#include <kern/clock.h>
+#include <kern/thread.h>
+#include <kern/sched_prim.h>
+#include <mach/mach_time.h>
+#include <machine/machine_routines.h>
+#include <pexpert/pexpert.h>
+
+extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+void starlte_gpu_probe(void);
+
+#define SG_PMU_G3D_PA   0x14064000u     /* page with CONFIGURATION +0x40, STATUS +0x44 */
+#define SG_PMU_G3D_CONF 0x40u
+#define SG_PMU_G3D_STAT 0x44u
+#define SG_CMU_PA       0x17400000u
+#define SG_GPU_PA       0x17500000u
+
+/* Mali Bifrost register offsets (Linux Panfrost panfrost_regs.h). */
+#define GPU_ID                  0x000
+#define L2_FEATURES             0x004
+#define CORE_FEATURES           0x008
+#define TILER_FEATURES          0x00c
+#define MEM_FEATURES            0x010
+#define MMU_FEATURES            0x014
+#define AS_PRESENT              0x018
+#define JS_PRESENT              0x01c
+#define GPU_IRQ_RAWSTAT         0x020
+#define GPU_STATUS              0x034
+#define THREAD_MAX_THREADS      0x0a0
+#define SHADER_PRESENT_LO       0x100
+#define TILER_PRESENT_LO        0x110
+#define L2_PRESENT_LO           0x120
+#define SHADER_READY_LO         0x140
+#define TILER_READY_LO          0x150
+#define L2_READY_LO             0x160
+#define COHERENCY_FEATURES      0x300
+
+static uint32_t
+sg_rd(vm_offset_t base, uint32_t off)
+{
+	uint32_t v = *(volatile uint32_t *)(base + off);
+	__builtin_arm_dmb(0xb);
+	return v;
+}
+
+static void
+sg_msleep(unsigned ms)
+{
+	uint64_t deadline;
+	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+	clock_delay_until(deadline);
+}
+
+static void
+sg_probe(vm_offset_t pmu, const char *when)
+{
+	uint32_t conf = sg_rd(pmu, SG_PMU_G3D_CONF), stat = sg_rd(pmu, SG_PMU_G3D_STAT);
+	printf("STARLTE GPU: %s: PMU G3D conf=%#x status=%#x\n", when, conf, stat);
+	if ((stat & 0xf) != 0xf) {
+		printf("STARLTE GPU: %s: G3D domain off; CMU and Mali not read\n", when);
+		return;
+	}
+	static vm_offset_t cmu, gpu;
+	if (!cmu) {
+		cmu = ml_io_map(SG_CMU_PA, 0x2000);
+	}
+	if (!gpu) {
+		gpu = ml_io_map(SG_GPU_PA, 0x5000);
+	}
+	if (!cmu || !gpu) {
+		printf("STARLTE GPU: MMIO mapping failed\n");
+		return;
+	}
+	uint32_t con0 = sg_rd(cmu, 0x140);
+	uint64_t m = (con0 >> 16) & 0x3ff, p = (con0 >> 8) & 0x3f, s = con0 & 7;
+	uint64_t khz = (con0 & 0x10) && p ? 26000ull * m / (p << s) : 26000;
+	printf("STARLTE GPU: %s: PLL_G3D CON0=%#x CON2=%#x (%llu kHz%s), USER mux=%#x BUSD mux=%#x div=%#x busp=%#x\n",
+	    when, con0, sg_rd(cmu, 0x148), khz, (con0 & (1u << 29)) ? ", locked" : ", not stable",
+	    sg_rd(cmu, 0x100), sg_rd(cmu, 0x1000), sg_rd(cmu, 0x1800), sg_rd(cmu, 0x1804));
+	if ((sg_rd(pmu, SG_PMU_G3D_STAT) & 0xf) != 0xf) {
+		printf("STARLTE GPU: %s: domain went off; Mali not read\n", when);
+		return;
+	}
+	uint32_t id = sg_rd(gpu, GPU_ID);
+	printf("STARLTE GPU: %s: GPU_ID=%#x product %#x (0x6221 = Mali-G72) r%up%u\n",
+	    when, id, id >> 16, (id >> 12) & 0xf, (id >> 4) & 0xff);
+	printf("STARLTE GPU: L2_FEATURES=%#x CORE=%#x TILER=%#x MEM=%#x MMU=%#x AS=%#x JS=%#x THREADS=%u\n",
+	    sg_rd(gpu, L2_FEATURES), sg_rd(gpu, CORE_FEATURES), sg_rd(gpu, TILER_FEATURES),
+	    sg_rd(gpu, MEM_FEATURES), sg_rd(gpu, MMU_FEATURES), sg_rd(gpu, AS_PRESENT),
+	    sg_rd(gpu, JS_PRESENT), sg_rd(gpu, THREAD_MAX_THREADS));
+	printf("STARLTE GPU: present shader=%#x tiler=%#x l2=%#x; ready shader=%#x tiler=%#x l2=%#x\n",
+	    sg_rd(gpu, SHADER_PRESENT_LO), sg_rd(gpu, TILER_PRESENT_LO), sg_rd(gpu, L2_PRESENT_LO),
+	    sg_rd(gpu, SHADER_READY_LO), sg_rd(gpu, TILER_READY_LO), sg_rd(gpu, L2_READY_LO));
+	printf("STARLTE GPU: GPU_STATUS=%#x IRQ_RAWSTAT=%#x COHERENCY_FEATURES=%#x; no GPU jobs\n",
+	    sg_rd(gpu, GPU_STATUS), sg_rd(gpu, GPU_IRQ_RAWSTAT), sg_rd(gpu, COHERENCY_FEATURES));
+}
+
+static void
+sg_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	vm_offset_t pmu = ml_io_map(SG_PMU_G3D_PA, 0x1000);
+	if (!pmu) {
+		printf("STARLTE GPU: PMU mapping failed\n");
+		return;
+	}
+	/* Once early, once after the UI is up (in case something changed it). */
+	sg_msleep(5000);
+	sg_probe(pmu, "5s");
+	sg_msleep(55000);
+	sg_probe(pmu, "60s");
+}
+
+void
+starlte_gpu_probe(void)
+{
+	int enabled = 1;
+	thread_t thread;
+
+	PE_parse_boot_argn("stargpu", &enabled, sizeof(enabled));
+	if (!enabled) {
+		printf("STARLTE GPU: probe disabled\n");
+		return;
+	}
+	if (kernel_thread_start(sg_thread, NULL, &thread) == KERN_SUCCESS) {
+		thread_deallocate(thread);
+	}
+}
+#endif /* ARM64_BOARD_CONFIG_STARLTE */

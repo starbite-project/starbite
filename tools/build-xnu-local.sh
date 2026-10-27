@@ -39,18 +39,23 @@ assert text.count(old) == 1, 'darwin-xnu-build firehose line changed'
 path.write_text(text.replace(old, new))
 PY
 fi
-# The patch set always comes from the fork checkout plus our 0300.
-cp "$ROOT"/xnu/patches/0300-starlte-board-target.patch "$FORK"/xnu/patches/
-APPLIED=$DXB/.applied-0300.patch
-if [ -f "$APPLIED" ] && [ -d "$DXB/xnu" ]; then
-    # Incremental: the series is already in the tree; swap only our 0300 so
-    # make recompiles just the files it touches, and skip build.sh's patches().
-    if ! cmp -s "$APPLIED" "$ROOT/xnu/patches/0300-starlte-board-target.patch"; then
-        git -C "$DXB/xnu" apply -R "$APPLIED"
-        git -C "$DXB/xnu" apply "$ROOT/xnu/patches/0300-starlte-board-target.patch"
-        cp "$ROOT/xnu/patches/0300-starlte-board-target.patch" "$APPLIED"
-        echo "swapped 0300 in the patched tree"
-    fi
+# The patch set always comes from the fork checkout plus ours (xnu/patches/03xx:
+# 0300 board target, 0301 Mali-G72, ...).
+OURS=$(ls "$ROOT"/xnu/patches/03[0-9][0-9]-*.patch)
+cp $OURS "$FORK"/xnu/patches/
+if [ -f "$DXB/.applied-0300-starlte-board-target.patch" ] && [ -d "$DXB/xnu" ]; then
+    # Incremental: the series is already in the tree; swap only our patches
+    # that changed (or apply new ones) so make recompiles just what they touch.
+    for p in $OURS; do
+        applied=$DXB/.applied-$(basename "$p")
+        if [ -f "$applied" ] && cmp -s "$applied" "$p"; then
+            continue
+        fi
+        [ -f "$applied" ] && git -C "$DXB/xnu" apply -R "$applied"
+        git -C "$DXB/xnu" apply "$p"
+        cp "$p" "$applied"
+        echo "applied $(basename "$p") in the patched tree"
+    done
     export SKIP_PATCHES=1
 else
     rm -f "$DXB"/patches/0[0-9][0-9][0-9]-*.patch "$DXB"/patches/0[0-9][0-9][0-9]-*.sh
@@ -67,7 +72,7 @@ touch "$ROOT/build/xnu-local.log.start"
 MAKEFLAGS=${MAKEFLAGS:--k} bash build.sh 2>&1 | tee "$ROOT/build/xnu-local.log" | grep -E --line-buffered "error:|BUILD|Installing|Applying|Building|xnu" | tail -40 || true
 kernel=$DXB/fakeroot/System/Library/Kernels/kernel.development.starlte
 [ -f "$kernel" ] || { echo "no kernel; see build/xnu-local.log"; exit 1; }
-[ -f "$APPLIED" ] || cp "$ROOT/xnu/patches/0300-starlte-board-target.patch" "$APPLIED"
+for p in $OURS; do [ -f "$DXB/.applied-$(basename "$p")" ] || cp "$p" "$DXB/.applied-$(basename "$p")"; done
 [ "$kernel" -nt "$ROOT/build/xnu-local.log.start" ] || { echo "kernel was not relinked; see build/xnu-local.log"; exit 1; }
 cp "$kernel" "$ROOT/out/kernel.development.starlte"
 echo "kernel built in $(( $(date +%s) - start )) s -> out/kernel.development.starlte"
