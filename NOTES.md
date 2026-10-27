@@ -1233,3 +1233,13 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   cores), tiler/L2 1, AS 0xff, JS 0x7, THREADS 384, all cores powered off, GPU_STATUS 0, IRQ_RAWSTAT 0x100
   (RESET_COMPLETED), COHERENCY_FEATURES 0. Registers read fine from XNU with no TZPC SMC (S-Boot's state).
   iOS ran >60 s with the probe, no panic. Next: phase 2 (BUCK6 to 950 mV, L2 + shader power-up, first job).
+- 2026-10-28: **iOS GPU phase 2 PASSED: the Mali-G72 ran its first jobs under iOS** (BOOT out/xnu-boot-gpu2.img,
+  sha b49f2ee6..., commit bff9e2c; log build/ios-gpu2-log.txt, flush #18). ~8 s after boot: BUCK6 0x33 (618.75
+  mV) -> 0x68 (950 mV) through ACPM (0302: locked starlte_pmic_read/write in starlte_touch.c), soft reset done in
+  10 us, L2 / all 18 shader cores (0x5771777) / tiler ready within 10 us, AS0 TRANSCFG 0 before (legacy/LPAE),
+  Mali-LPAE tables at 0x8f0000000 (bank 2 above XNU's 1 GiB), MEMATTR 0x888d88, TRANSTAB | 7 -- the T880
+  recipe works unchanged on Bifrost. WRITE_VALUE zero (type 3) 39 us and WRITE_VALUE immediate-64 (type 7,
+  payload +48) "STARBITE" 64 us on JS1, affinity = all cores: JOB_IRQ 0x2, exception 0x1 (DONE), no MMU/GPU
+  faults, outputs correct. Cores off, BUCK6 back to 0x33; GPU_IRQ_RAWSTAT 0x600 (power changed). iOS ran
+  normally afterwards (60 s probe, no panic). Next: phase 3, fragment job (clear) -> panel, with the Bifrost
+  (v6) framebuffer descriptor; then Panfrost-style UAPI.
