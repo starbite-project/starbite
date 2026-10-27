@@ -2,7 +2,7 @@ diff --git a/bsd/dev/starlte_gpu.c b/bsd/dev/starlte_gpu.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/starlte_gpu.c
-@@ -0,0 +1,895 @@
+@@ -0,0 +1,1169 @@
 +/*
 + * STARLTE (Galaxy S9 SM-G960F, Exynos 9810) Mali-G72 MP18 (Bifrost), stage 1:
 + * read-only probe, the S9 counterpart of herolte_gpu.c (Mali-T880).
@@ -29,6 +29,8 @@ new file mode 100644
 +#include <mach/mach_time.h>
 +#include <machine/machine_routines.h>
 +#include <pexpert/pexpert.h>
++#include <kern/locks.h>
++#include <sys/errno.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +extern bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
@@ -192,6 +194,7 @@ new file mode 100644
 +#define MMU_IRQ_RAWSTAT         0x2000
 +#define MMU_IRQ_CLEAR           0x2004
 +#define AS0                     0x2400
++#define ASN(n)                  (0x2400u + (n) * 0x40u)
 +
 +static vm_offset_t sg_mem;
 +
@@ -317,6 +320,10 @@ new file mode 100644
 +
 +/* Log only failed jobs (the per-frame GPU present). */
 +static bool sg_run_quiet;
++/* Address space and poll bound (x 10 us) of the jobs sg_run() starts: AS0
++ * and 200 ms for the kernel's own jobs, AS1 and longer for apps' (stage 6). */
++static unsigned sg_run_as;
++static unsigned sg_run_polls = 20000;
 +
 +/* Start the chain at GPU VA job_va on slot js, wait (bounded), log. */
 +static bool
@@ -329,13 +336,13 @@ new file mode 100644
 +	sg_wr(sg_gpu, slot + 0x44, (uint32_t)(job_va >> 32));
 +	sg_wr(sg_gpu, slot + 0x50, affinity);                   /* AFFINITY_NEXT */
 +	sg_wr(sg_gpu, slot + 0x54, 0);
-+	/* AS 0, flush clean+invalidate at start and end, thread priority 8 */
-+	sg_wr(sg_gpu, slot + 0x58, (8u << 16) | (3u << 8) | (3u << 12));
++	/* AS sg_run_as, flush clean+invalidate at start and end, priority 8 */
++	sg_wr(sg_gpu, slot + 0x58, (8u << 16) | (3u << 8) | (3u << 12) | sg_run_as);
 +	uint64_t t0 = mach_absolute_time();
 +	sg_wr(sg_gpu, slot + 0x60, 1);                          /* COMMAND_NEXT START */
 +
 +	uint32_t jirq = 0, mirq = 0, girq = 0;
-+	for (unsigned i = 0; i < 20000; i++) {
++	for (unsigned i = 0; i < sg_run_polls; i++) {
 +		jirq = sg_rd(sg_gpu, JOB_IRQ_RAWSTAT);
 +		mirq = sg_rd(sg_gpu, MMU_IRQ_RAWSTAT);
 +		girq = sg_rd(sg_gpu, GPU_IRQ_RAWSTAT);
@@ -346,13 +353,18 @@ new file mode 100644
 +	}
 +	uint64_t ns = 0;
 +	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
-+	volatile uint32_t *hdr = (volatile uint32_t *)(sg_mem + SG_DATA_OFF + (job_va - SG_VA));
++	/* The job header, for the log: only the kernel's own jobs (AS0) are
++	 * mapped here; an app's job header is read back by the app. */
++	static const uint32_t no_hdr[4];
++	volatile const uint32_t *hdr = sg_run_as == 0 ?
++	    (volatile const uint32_t *)(sg_mem + SG_DATA_OFF + (job_va - SG_VA)) : no_hdr;
 +	bool ok = (jirq & (1u << js)) && !(jirq & (1u << (js + 16))) && !mirq && !(girq & 0x81);
 +	if (!ok || !sg_run_quiet) {
 +		printf("STARLTE GPU: %s: %s in %llu us: irq=%#x mmu=%#x gpu=%#x js_status=%#x "
 +		    "as_fault=%#x@%#x exception=%#x fault=%#x:%#x gpu_fault=%#x@%#x\n", what,
 +		    ok ? "done" : "FAILED", ns / 1000, jirq, mirq, girq,
-+		    sg_rd(sg_gpu, slot + 0x24), sg_rd(sg_gpu, AS0 + 0x1c), sg_rd(sg_gpu, AS0 + 0x20),
++		    sg_rd(sg_gpu, slot + 0x24), sg_rd(sg_gpu, ASN(sg_run_as) + 0x1c),
++		    sg_rd(sg_gpu, ASN(sg_run_as) + 0x20),
 +		    hdr[0], hdr[3], hdr[2], sg_rd(sg_gpu, GPU_FAULTSTATUS), sg_rd(sg_gpu, GPU_FAULTADDR_LO));
 +	}
 +	sg_wr(sg_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
@@ -643,6 +655,10 @@ new file mode 100644
 +static uint32_t sgp_shaders;
 +static volatile bool sgp_ready;
 +static uint64_t sgp_frames, sgp_ns_sum, sgp_ns_max;
++/* One user of the job slots at a time: the present (vsync work loop) and
++ * apps' submits (stage 6, StarbiteMali.cpp). */
++static LCK_GRP_DECLARE(sg_lck_grp, "starlte_gpu");
++static LCK_MTX_DECLARE(sg_lock, &sg_lck_grp);
 +
 +int starlte_gpu_present_ready(void);
 +int starlte_gpu_present_slot(uint32_t id, uint64_t first_pa);
@@ -752,6 +768,7 @@ new file mode 100644
 +	    h != SG_PRES_CANVAS_H || stride < w * 4) {
 +		return false;
 +	}
++	lck_mtx_lock(&sg_lock);
 +	uint32_t base = (uint32_t)(SG_PRES_BLOB_VA - SG_VA);
 +	for (unsigned i = 0; i < SG_PRES_BLOB_WORDS; i++) {
 +		sg_put32(base + i * 4, sg_pres_blob[i]);
@@ -766,6 +783,7 @@ new file mode 100644
 +	bool ok = sg_run(1, SG_PRES_BLOB_VA + SG_PRES_TILER_JOB, sgp_shaders, "PRESENT tiler") &&
 +	    sg_run(0, SG_PRES_BLOB_VA + SG_PRES_FRAG_JOB, sgp_shaders, "PRESENT fragment");
 +	sg_run_quiet = false;
++	lck_mtx_unlock(&sg_lock);
 +	uint64_t ns = 0;
 +	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
 +	sgp_frames++;
@@ -785,6 +803,256 @@ new file mode 100644
 +		sgp_ready = false;
 +	}
 +	return ok;
++}
++
++/*
++ * Stage 6: the GPU for apps (iokit/Kernel/arm/StarbiteMali.cpp, the
++ * Panfrost-style user client Mesa will talk to). Apps share address space 1
++ * (the kernel's own jobs and the present keep AS0); its Mali-LPAE tables
++ * live in 4 MiB at 0x8f2000000 (bank 2, above the stage 4 heap), mapped
++ * uncached: L0 at +0, L1 at +0x1000, the four L2 tables for VA 0..4 GiB at
++ * +0x2000, level-3 tables handed out from +0x6000 (1018 of them, 2 GiB of
++ * mappings) and never freed. Buffers are 4 KiB pages of XNU memory that the
++ * user client maps uncached on the CPU side (the GPU is not IO-coherent).
++ * Jobs run synchronously under sg_lock, polled (no interrupts yet); a
++ * faulting or hung job gets the GPU reset and both address spaces back.
++ */
++#define SGU_PT_PA       0x8f2000000ull
++#define SGU_PT_BYTES    0x400000u
++#define SGU_L3_FIRST    0x6000u
++
++static vm_offset_t sgu_pt;
++static uint32_t sgu_next_table = SGU_L3_FIRST;
++static bool sgu_ready;
++static uint64_t sgu_jobs, sgu_faults;
++
++int starlte_gpu_user_ready(void);
++bool starlte_gpu_user_param(uint32_t param, uint64_t *value);
++bool starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n);
++void starlte_gpu_user_unmap(uint64_t va, unsigned n);
++int starlte_gpu_user_submit(uint64_t jc, uint32_t requirements);
++extern void starbite_mali_publish(void);        /* iokit/Kernel/arm/StarbiteMali.cpp */
++
++static bool
++sgu_as_wait(unsigned as)
++{
++	for (unsigned i = 0; i < 10000 && (sg_rd(sg_gpu, ASN(as) + 0x28) & 1); i++) {
++		delay(1);
++	}
++	return !(sg_rd(sg_gpu, ASN(as) + 0x28) & 1);
++}
++
++/* Program address space as (TRANSTAB, MEMATTR, TRANSCFG legacy) and UPDATE. */
++static bool
++sgu_as_enable(unsigned as, uint64_t table_pa)
++{
++	uint64_t transtab = table_pa | 0x7;
++	if (!sgu_as_wait(as)) {
++		return false;
++	}
++	sg_wr(sg_gpu, ASN(as) + 0x00, (uint32_t)transtab);
++	sg_wr(sg_gpu, ASN(as) + 0x04, (uint32_t)(transtab >> 32));
++	sg_wr(sg_gpu, ASN(as) + 0x08, 0x888d88);
++	sg_wr(sg_gpu, ASN(as) + 0x0c, 0);
++	sg_wr(sg_gpu, ASN(as) + 0x30, 0);
++	sg_wr(sg_gpu, ASN(as) + 0x34, 0);
++	sg_wr(sg_gpu, ASN(as) + 0x18, 1);               /* UPDATE */
++	return sgu_as_wait(as);
++}
++
++/* LOCK + FLUSH_PT over all 4 GiB of address space as. */
++static bool
++sgu_flush(unsigned as)
++{
++	if (!sgu_as_wait(as)) {
++		return false;
++	}
++	sg_wr(sg_gpu, ASN(as) + 0x10, 31);              /* LOCKADDR: base 0, 2^32 */
++	sg_wr(sg_gpu, ASN(as) + 0x14, 0);
++	sg_wr(sg_gpu, ASN(as) + 0x18, 2);               /* LOCK */
++	if (!sgu_as_wait(as)) {
++		return false;
++	}
++	sg_wr(sg_gpu, ASN(as) + 0x18, 4);               /* FLUSH_PT */
++	return sgu_as_wait(as);
++}
++
++/* Called with the GPU powered and AS0 set up (end of stage 5). */
++static bool
++sgu_setup(void)
++{
++	sgu_pt = ml_io_map((vm_offset_t)SGU_PT_PA, SGU_PT_BYTES);
++	if (!sgu_pt) {
++		return false;
++	}
++	volatile uint64_t *q = (volatile uint64_t *)sgu_pt;
++	for (unsigned i = 0; i < SGU_L3_FIRST / 8; i++) {
++		q[i] = 0;
++	}
++	volatile uint64_t *l0 = q, *l1 = (volatile uint64_t *)(sgu_pt + 0x1000);
++	l0[0] = (SGU_PT_PA + 0x1000) | 3;
++	for (unsigned i = 0; i < 4; i++) {
++		l1[i] = (SGU_PT_PA + 0x2000 + i * 0x1000) | 3;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	return sgu_as_enable(1, SGU_PT_PA);
++}
++
++int
++starlte_gpu_user_ready(void)
++{
++	return sgu_ready;
++}
++
++/* DRM_PANFROST_PARAM_* values (enum drm_panfrost_param, tools/gpu/panfrost_drm.h,
++ * MIT), from the GPU registers as Linux panfrost_gpu.c reads them. */
++bool
++starlte_gpu_user_param(uint32_t param, uint64_t *value)
++{
++	static const uint16_t reg[] = {
++		[2] = SHADER_PRESENT_LO, [3] = TILER_PRESENT_LO, [4] = L2_PRESENT_LO,
++		[6] = AS_PRESENT, [7] = JS_PRESENT, [8] = L2_FEATURES, [9] = CORE_FEATURES,
++		[10] = TILER_FEATURES, [11] = MEM_FEATURES, [12] = MMU_FEATURES,
++		[13] = 0x0ac /* THREAD_FEATURES */, [14] = THREAD_MAX_THREADS,
++		[15] = 0x0a4 /* THREAD_MAX_WORKGROUP_SIZE */, [16] = 0x0a8 /* THREAD_MAX_BARRIER_SIZE */,
++		[17] = COHERENCY_FEATURES, [39] = 0x310 /* THREAD_TLS_ALLOC */,
++	};
++	if (!sgu_ready) {
++		return false;
++	}
++	uint32_t id = sg_rd(sg_gpu, GPU_ID);
++	if (param == 0) {                               /* GPU_PROD_ID */
++		*value = id >> 16;
++	} else if (param == 1) {                        /* GPU_REVISION */
++		*value = id & 0xffff;
++	} else if (param == 5 || param == 40) {         /* STACK_PRESENT, AFBC_FEATURES */
++		*value = 0;
++	} else if (param == 44) {                       /* SELECTED_COHERENCY */
++		*value = 31;                            /* DRM_PANFROST_GPU_COHERENCY_NONE */
++	} else if (param >= 18 && param <= 21) {        /* TEXTURE_FEATURES0..3 */
++		*value = sg_rd(sg_gpu, 0x0b0 + (param - 18) * 4);
++	} else if (param >= 22 && param <= 37) {        /* JS_FEATURES0..15 */
++		*value = sg_rd(sg_gpu, 0x0c0 + (param - 22) * 4);
++	} else if (param == 38) {                       /* NR_CORE_GROUPS */
++		*value = 1;
++	} else if (param < sizeof(reg) / sizeof(reg[0]) && reg[param]) {
++		*value = sg_rd(sg_gpu, reg[param]);
++		if (param >= 2 && param <= 4) {
++			*value |= (uint64_t)sg_rd(sg_gpu, reg[param] + 4) << 32;
++		}
++	} else {
++		return false;
++	}
++	return true;
++}
++
++/* Map n 4 KiB pages at GPU VA va (4 KiB aligned, below 4 GiB) in AS1. */
++bool
++starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n)
++{
++	if (!sgu_ready || (va & 0xfff) || va + (uint64_t)n * 0x1000 > (1ull << 32)) {
++		return false;
++	}
++	lck_mtx_lock(&sg_lock);
++	bool ok = true;
++	for (unsigned i = 0; i < n && ok; i++) {
++		uint64_t v = va + (uint64_t)i * 0x1000;
++		volatile uint64_t *l2 = (volatile uint64_t *)(sgu_pt + 0x2000 + (v >> 30) * 0x1000);
++		unsigned l2i = (v >> 21) & 0x1ff;
++		if (!l2[l2i]) {
++			if (sgu_next_table + 0x1000 > SGU_PT_BYTES) {
++				printf("STARLTE GPU USER: out of level-3 tables\n");
++				ok = false;
++				break;
++			}
++			volatile uint64_t *nt = (volatile uint64_t *)(sgu_pt + sgu_next_table);
++			for (unsigned j = 0; j < 512; j++) {
++				nt[j] = 0;
++			}
++			l2[l2i] = (SGU_PT_PA + sgu_next_table) | 3;
++			sgu_next_table += 0x1000;
++		}
++		volatile uint64_t *l3 = (volatile uint64_t *)(sgu_pt +
++		    (uint32_t)((l2[l2i] & ~0xfffull) - SGU_PT_PA));
++		l3[(v >> 12) & 0x1ff] = (pages[i] & ~0xfffull) | 0x2c1;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	if (!sgu_flush(1)) {
++		printf("STARLTE GPU USER: AS1 flush timeout\n");
++	}
++	lck_mtx_unlock(&sg_lock);
++	return ok;
++}
++
++void
++starlte_gpu_user_unmap(uint64_t va, unsigned n)
++{
++	if (!sgu_ready) {
++		return;
++	}
++	lck_mtx_lock(&sg_lock);
++	for (unsigned i = 0; i < n; i++) {
++		uint64_t v = va + (uint64_t)i * 0x1000;
++		volatile uint64_t *l2 = (volatile uint64_t *)(sgu_pt + 0x2000 + (v >> 30) * 0x1000);
++		uint64_t l2e = l2[(v >> 21) & 0x1ff];
++		if (l2e) {
++			volatile uint64_t *l3 = (volatile uint64_t *)(sgu_pt +
++			    (uint32_t)((l2e & ~0xfffull) - SGU_PT_PA));
++			l3[(v >> 12) & 0x1ff] = 0;
++		}
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	(void)sgu_flush(1);
++	lck_mtx_unlock(&sg_lock);
++}
++
++/* After a fault or a hung job: reset, power, AS0 and AS1 as they were. */
++static void
++sgu_recover(void)
++{
++	(void)sg_soft_reset();
++	(void)sg_power(L2_PWRON_LO, L2_READY_LO, sg_rd(sg_gpu, L2_PRESENT_LO), "L2");
++	(void)sg_power(SHADER_PWRON_LO, SHADER_READY_LO, sgp_shaders, "shader cores");
++	(void)sg_power(TILER_PWRON_LO, TILER_READY_LO, sg_rd(sg_gpu, TILER_PRESENT_LO), "tiler");
++	bool as0 = sg_mmu_setup(), as1 = sgu_as_enable(1, SGU_PT_PA);
++	printf("STARLTE GPU USER: GPU reset after a failed job, AS0 %s AS1 %s\n",
++	    as0 ? "ok" : "FAILED", as1 ? "ok" : "FAILED");
++}
++
++/*
++ * Run the job chain at jc (GPU VA in AS1) to completion: fragment chains
++ * (PANFROST_JD_REQ_FS) on JS0, the rest on JS1, all shader cores, up to
++ * 2 s. 0, or an errno (EIO: the job faulted, ETIMEDOUT).
++ */
++int
++starlte_gpu_user_submit(uint64_t jc, uint32_t requirements)
++{
++	if (!sgu_ready) {
++		return ENODEV;
++	}
++	lck_mtx_lock(&sg_lock);
++	sg_run_as = 1;
++	sg_run_polls = 200000;
++	sg_run_quiet = true;
++	uint64_t t0 = mach_absolute_time();
++	bool ok = sg_run((requirements & 1) ? 0 : 1, jc, sgp_shaders,
++	    (requirements & 1) ? "APP fragment chain" : "APP vertex/tiler chain");
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++	sg_run_quiet = false;
++	sg_run_polls = 20000;
++	sg_run_as = 0;
++	sgu_jobs++;
++	if (!ok) {
++		sgu_faults++;
++		sgu_recover();
++	}
++	lck_mtx_unlock(&sg_lock);
++	if (sgu_jobs <= 8 || !ok) {
++		printf("STARLTE GPU USER: job %llu chain %#llx req %#x: %s in %llu us\n", sgu_jobs, jc,
++		    requirements, ok ? "done" : "FAILED", ns / 1000);
++	}
++	return ok ? 0 : (ns >= 1900ull * NSEC_PER_MSEC ? ETIMEDOUT : EIO);
 +}
 +
 +static void
@@ -848,6 +1116,12 @@ new file mode 100644
 +				sgp_shaders = shaders;
 +				__atomic_thread_fence(__ATOMIC_RELEASE);
 +				sgp_ready = true;
++				sgu_ready = sgu_setup();
++				printf("STARLTE GPU: stage 6: GPU for apps %s (AS1, tables at %#llx)\n",
++				    sgu_ready ? "ready" : "NOT ready", SGU_PT_PA);
++				if (sgu_ready) {
++					starbite_mali_publish();
++				}
 +				printf("STARLTE GPU: stage 5: GPU present ready (%u x %u canvas), cores on, "
 +				    "vdd_g3d stays at 950 mV\n", SG_PRES_CANVAS_W, SG_PRES_CANVAS_H);
 +				return;

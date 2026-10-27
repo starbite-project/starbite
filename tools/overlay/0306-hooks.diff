@@ -1,0 +1,47 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@
+ bsd/dev/starlte_touch.c			standard
+ bsd/dev/starlte_smp.c			standard
+ bsd/dev/starlte_gpu.c			standard
++bsd/dev/starlte_overlay.c		standard
+ bsd/dev/herolte_battery.c		standard
+ bsd/dev/herolte_gpu.c			standard
+ bsd/dev/a5xelte_keys.c			standard
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1103,6 +1103,15 @@
+ 
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	/* Starbite iOS overlay from the OS store, before launchd reads anything
++	 * (bsd/dev/starlte_overlay.c). */
++	{
++		extern void starlte_overlay_install(void);
++		starlte_overlay_install();
++	}
++#endif
++
+ 	load_init_program(p);
+ 	lock_trace = 1;
+ }
+diff --git a/bsd/vfs/vfs_subr.c b/bsd/vfs/vfs_subr.c
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1257,10 +1257,11 @@
+ 
+ 		mp = vfs_rootmountalloc_internal(vfsp, "root_device");
+ 		mp->mnt_devvp = rootvp;
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_STARLTE)
+ 		/*
+ 		 * SWEET has no data volume: /private/var lives on the root, so
+-		 * boot-arg rootrw=1 mounts it read-write from the start.
++		 * boot-arg rootrw=1 mounts it read-write from the start. STARLTE
++		 * too, and its overlay installer writes before launchd starts.
+ 		 */
+ 		{
+ 			uint32_t rootrw = 0;
