@@ -1227,3 +1227,9 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   version >= 1.1 (pre-allocate the heap BO), ioctls CREATE_BO/MMAP_BO/SUBMIT/WAIT_BO/GET_PARAM/GET_BO_OFFSET/
   MADVISE/GEM_CLOSE. Licenses: refport kernel APSL, userland/tools/Mesa patches MIT; Linux panfrost and
   mali_kbase are GPL (reference only, no code copying).
+- 2026-10-28: **iOS GPU phase 1 passed.** EngineerMode page (photo) and XNU probe (log flush #15, 5 s and 60 s)
+  agree: G3D domain on (status 0x10000f), PLL_G3D CON0 0xa0a00412 = 260 MHz and reported locked (CON2 still
+  0x10000001), BUCK6 vsel 0x33 = 618.75 mV, GPU_ID 0x62210010 Mali-G72 r0p1, shader_present 0x5771777 (18
+  cores), tiler/L2 1, AS 0xff, JS 0x7, THREADS 384, all cores powered off, GPU_STATUS 0, IRQ_RAWSTAT 0x100
+  (RESET_COMPLETED), COHERENCY_FEATURES 0. Registers read fine from XNU with no TZPC SMC (S-Boot's state).
+  iOS ran >60 s with the probe, no panic. Next: phase 2 (BUCK6 to 950 mV, L2 + shader power-up, first job).
