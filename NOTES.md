@@ -1277,3 +1277,13 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   under iOS on the S9). Next levers: M3 cores in XNU (S7 did 8 cores via ADT cpu4..7 + 0223 trampoline; Linux
   already runs all 8 on this S9), A55/M3 clocks, then GPU rendering of the UI (Mesa in userland, HackiOS path).
   Payload note: the iOS kernel grew, bundles now at 0xfde000 (were 0xfd6000); the loader finds them by itself.
+- 2026-10-28: **iOS on all 8 cores** (4 A55 + 4 Mongoose M3; patch 0304, ADT mkadt_starlte.py --big ->
+  out/starlte-big.adt, boot-arg cpus=8 now in build/ios-cmdline.txt). From Linux on the phone: M3 MPIDR Aff =
+  0x100..0x103 (no MT bit; A55 core 1 is 0x81000100, same Aff1:Aff0), S9P vendor PMU 1088 c7150000->8d150000,
+  2114/2180/21ec/2258/2384 1->2, M3 lacks PAN/LSE/RDM/DotProd/FP16/LRCPC/DPB. 0304: PMU defaults then PSCI
+  CPU_ON 0x100+n; reset vector and ml_get_cpu_number give MT-less cores bit 16 (reg 0x10100+n); msr PAN only if
+  ID_AA64MMFR1.PAN; commpage features = nibble-min of A55 and M3 ID regs. First try panicked "CPU registration
+  timeout" (ml_get_cpu_number masked 0x10100 to A55 core 1's 0x100); fixed. Log build/ios-m3b-log.txt: 8/8 CPUs,
+  M3 MIDR 0x531f0020, timers wake on all 8; iOS up to 9.7 fps (was <= 5); user: "a little smoother". That boot
+  the GPU present stayed off: stage 4's panel read-back raced iOS's CPU copies (3/5 outside pixels), now the
+  stages hold SweetFramebuffer (sweet_fb_hold_until) while they draw. BOOT out/xnu-boot-m3c.img (sha 8981832e...).
