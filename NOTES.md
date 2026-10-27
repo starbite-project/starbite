@@ -1266,3 +1266,14 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   (GPU VA 0x10000000), hierarchy mask 0xff, 512x512 render target on the panel at (464,1216). No faults.
   Next: GPU scaling of iOS frames (textured quad + sampler, as the S7's sweetfb_gpu), then interrupts and a
   Panfrost-style IOUserClient UAPI for Mesa in userland.
+- 2026-10-28: **iOS GPU phase 5 PASSED: the Mali-G72 presents iOS frames** (BOOT out/xnu-boot-gpu5.img sha
+  4249c95d..., commit 5ce3bbf, boot-arg sweetfb_gpu=1 now in build/ios-cmdline.txt; log build/ios-gpu5-log.txt).
+  Stages 2-4 pass, stage 5 keeps the GPU at 950 mV with all cores on; SweetFramebuffer's full-frame presents of
+  the 828x1792 canvas (stride 3328) go through the GPU: Mesa VAR_TEX + BLEND shader, bilinear, full-height quad
+  x 36..1403 between black bars; surfaces 3/4 (1456 pages) in slots 0/1; 1.9-2.0 ms per frame (A5XELTE FB perf:
+  avg 2.4-2.5 ms per present incl. cache clean, was a 17 MB CPU scale-copy). User: looks a little smoother
+  (bilinear), but does not RUN smoother: presents are capped at 30 Hz (sweetfb_hz) and iOS itself delivers only
+  0.1-5 fps, because CoreAnimation renders on the CPU (4 A55 little cores, cpus=4; the M3 big cores are not up
+  under iOS on the S9). Next levers: M3 cores in XNU (S7 did 8 cores via ADT cpu4..7 + 0223 trampoline; Linux
+  already runs all 8 on this S9), A55/M3 clocks, then GPU rendering of the UI (Mesa in userland, HackiOS path).
+  Payload note: the iOS kernel grew, bundles now at 0xfde000 (were 0xfd6000); the loader finds them by itself.
