@@ -1243,3 +1243,14 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   faults, outputs correct. Cores off, BUCK6 back to 0x33; GPU_IRQ_RAWSTAT 0x600 (power changed). iOS ran
   normally afterwards (60 s probe, no panic). Next: phase 3, fragment job (clear) -> panel, with the Bifrost
   (v6) framebuffer descriptor; then Panfrost-style UAPI.
+- 2026-10-28: **iOS GPU phase 3 PASSED: the Mali-G72 drew on the panel under iOS** (user saw the green square;
+  BOOT out/xnu-boot-gpu3b.img sha f7a452ca..., commit d4eb663; log build/ios-gpu3-log.txt, flush #13).
+  Bifrost v6 fragment job (type 9) on JS0 with Mesa's layouts (genxml v6.xml, pan_desc.c): Framebuffer
+  Parameters + 64 B padding, one RGBA8 linear RT at +128 (word0 1<<26, word1 0x86888899, base, stride, clear
+  colour), single-sample positions table (128,128 at sample 0 and origin), 16x16 tiles (log2 8), colour buffer
+  1 KiB, tie-break 2, Z D24, FB pointer | 1. A NULL tiler pointer works for clear-only frames (no Tiler
+  Context / Heap needed). Private 64x64: 63 us, 4096/4096 green. Panel 256x256 at (592,1344) of the scanout
+  0xcc000000 (GPU VA 0x04000000, 9 L3 tables): 53 us, 324/324 samples green, left neighbour untouched.
+  First try panicked: ml_io_map() of the whole 17 MiB scanout -> kmem_alloc failed (vm_kern.c:178); the CPU
+  now maps only the square's rows. Next: phase 4, tiler job + a hand-assembled Bifrost fragment shader
+  (first triangle), then GPU scaling of iOS frames.
