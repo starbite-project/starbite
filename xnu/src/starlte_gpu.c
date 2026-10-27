@@ -28,6 +28,7 @@
 #include <sys/errno.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+extern void ml_io_unmap(vm_offset_t, vm_size_t);
 extern bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
 extern bool starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val);
 /* SweetFramebuffer.cpp: no CPU copies to the panel before this mach time. */
@@ -566,6 +567,9 @@ sg_stage3(uint32_t shaders)
 	    "%#x (was %#x) -> %s\n", good, SG_PX(SG_SQ_X + SG_SQ - 1, SG_SQ_Y + SG_SQ - 1),
 	    SG_PX(SG_SQ_X - 1, SG_SQ_Y + 10), outside, ok3 ? "THE MALI-G72 DREW ON THE PANEL" : "failed");
 #undef SG_PX
+	/* The I/O mapping space is small (a 4 MiB map failed after these two
+	 * checks kept theirs): give the panel rows back. */
+	ml_io_unmap(fb, map_len);
 	printf("STARLTE GPU: stage 3 %s\n", ok3 ? "PASSED" : "did not pass");
 }
 
@@ -615,6 +619,7 @@ sg_stage4(uint32_t shaders)
 	    "(corner %#x) -> %s\n", in, SG_RT(256, 325), out, SG_RT(2, 2),
 	    ok ? "THE MALI-G72 DREW A TRIANGLE" : "failed");
 #undef SG_RT
+	ml_io_unmap(fb, map_len);
 	printf("STARLTE GPU: stage 4 %s\n", ok ? "PASSED" : "did not pass");
 	return ok;
 }
@@ -806,14 +811,15 @@ starlte_gpu_present_draw(int s, uint32_t off, uint32_t stride, uint32_t w, uint3
  * (the kernel's own jobs and the present keep AS0); its Mali-LPAE tables
  * live in 4 MiB at 0x8f2000000 (bank 2, above the stage 4 heap), mapped
  * uncached: L0 at +0, L1 at +0x1000, the four L2 tables for VA 0..4 GiB at
- * +0x2000, level-3 tables handed out from +0x6000 (1018 of them, 2 GiB of
- * mappings) and never freed. Buffers are 4 KiB pages of XNU memory that the
+ * +0x2000, level-3 tables handed out from +0x6000 (250 of them, 500 MiB
+ * of mappings) and never freed. 1 MiB: a 4 MiB ml_io_map() panicked in
+ * kmem_alloc (the kernel's I/O mapping space is small). Buffers are 4 KiB pages of XNU memory that the
  * user client maps uncached on the CPU side (the GPU is not IO-coherent).
  * Jobs run synchronously under sg_lock, polled (no interrupts yet); a
  * faulting or hung job gets the GPU reset and both address spaces back.
  */
 #define SGU_PT_PA       0x8f2000000ull
-#define SGU_PT_BYTES    0x400000u
+#define SGU_PT_BYTES    0x100000u
 #define SGU_L3_FIRST    0x6000u
 
 static vm_offset_t sgu_pt;

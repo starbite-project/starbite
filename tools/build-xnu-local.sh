@@ -44,18 +44,26 @@ fi
 OURS=$(ls "$ROOT"/xnu/patches/03[0-9][0-9]-*.patch)
 cp $OURS "$FORK"/xnu/patches/
 if [ -f "$DXB/.applied-0300-starlte-board-target.patch" ] && [ -d "$DXB/xnu" ]; then
-    # Incremental: the series is already in the tree; swap only our patches
-    # that changed (or apply new ones) so make recompiles just what they touch.
+    # Incremental: the series is already in the tree. If any of our patches
+    # changed (or is new), unwind ours newest first and re-apply them all in
+    # order: neighbouring hunks (bsd/conf/files) depend on each other, so one
+    # patch cannot be swapped alone. make then recompiles what changed.
+    changed=
     for p in $OURS; do
         applied=$DXB/.applied-$(basename "$p")
-        if [ -f "$applied" ] && cmp -s "$applied" "$p"; then
-            continue
-        fi
-        [ -f "$applied" ] && git -C "$DXB/xnu" apply -R "$applied"
-        git -C "$DXB/xnu" apply "$p"
-        cp "$p" "$applied"
-        echo "applied $(basename "$p") in the patched tree"
+        [ -f "$applied" ] && cmp -s "$applied" "$p" || changed=1
     done
+    if [ -n "$changed" ]; then
+        for applied in $(ls -r "$DXB"/.applied-03[0-9][0-9]-*.patch); do
+            git -C "$DXB/xnu" apply -R "$applied"
+            rm "$applied"
+        done
+        for p in $OURS; do
+            git -C "$DXB/xnu" apply "$p"
+            cp "$p" "$DXB/.applied-$(basename "$p")"
+            echo "applied $(basename "$p") in the patched tree"
+        done
+    fi
     export SKIP_PATCHES=1
 else
     rm -f "$DXB"/patches/0[0-9][0-9][0-9]-*.patch "$DXB"/patches/0[0-9][0-9][0-9]-*.sh
