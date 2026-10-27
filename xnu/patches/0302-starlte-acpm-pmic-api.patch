@@ -1,0 +1,90 @@
+diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
+--- a/bsd/dev/starlte_touch.c
++++ b/bsd/dev/starlte_touch.c
+@@ -24,6 +24,7 @@
+ #include <kern/clock.h>
+ #include <kern/thread.h>
+ #include <kern/sched_prim.h>
++#include <kern/locks.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ 
+@@ -131,6 +132,10 @@
+ static uint32_t acpm_ch;                /* SRAM offset of channel 2 */
+ static uint32_t acpm_chans, acpm_ap_max;
+ static uint32_t acpm_seq;
++/* One ACPM command at a time: touch power and DVFS here, vdd_g3d from
++ * bsd/dev/starlte_gpu.c (starlte_pmic_read/write below). */
++static LCK_GRP_DECLARE(acpm_lck_grp, "starlte_acpm");
++static LCK_MTX_DECLARE(acpm_lock, &acpm_lck_grp);
+ 
+ static inline uint32_t
+ acpm_rd(uint32_t off)
+@@ -200,7 +205,7 @@
+ 
+ /* One command on channel id (descriptor c), polled; reply copied back. */
+ static bool
+-acpm_send_on(uint32_t c, uint32_t id, uint32_t cmd[4])
++acpm_send_on_locked(uint32_t c, uint32_t id, uint32_t cmd[4])
+ {
+ 	uint32_t qlen = acpm_rd(c + 0x34), esz = acpm_rd(c + 0x38);
+ 	uint32_t tx_rear = acpm_rd(c + 0x10), tx_front = acpm_rd(c + 0x14), tx_base = acpm_rd(c + 0x18);
+@@ -260,6 +265,15 @@
+ }
+ 
+ static bool
++acpm_send_on(uint32_t c, uint32_t id, uint32_t cmd[4])
++{
++	lck_mtx_lock(&acpm_lock);
++	bool ok = acpm_send_on_locked(c, id, cmd);
++	lck_mtx_unlock(&acpm_lock);
++	return ok;
++}
++
++static bool
+ acpm_send(uint32_t cmd[4])
+ {
+ 	return acpm_send_on(acpm_ch, ACPM_PMIC_CH, cmd);
+@@ -340,12 +354,41 @@
+ 	return true;
+ }
+ 
++/*
++ * PMIC registers for other drivers (type 1 = PMIC, 0 = TOP), through the
++ * same ACPM channel; the channel is looked up on first use if the touch
++ * thread has not done it yet.
++ */
++bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
++bool starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val);
++
++static bool
++acpm_ready(void)
++{
++	lck_mtx_lock(&acpm_lock);
++	bool ok = acpm_ch || acpm_init();
++	lck_mtx_unlock(&acpm_lock);
++	return ok;
++}
++
++bool
++starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val)
++{
++	return acpm_ready() && pmic_read(type, reg, val);
++}
++
++bool
++starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val)
++{
++	return acpm_ready() && pmic_write(type, reg, val);
++}
++
+ /* Returns true once both touch rails are on (or were already). */
+ static bool
+ st_power_on(void)
+ {
+ 	uint8_t id = 0, l35 = 0, l43 = 0;
+-	if (!acpm_init() || !pmic_read(0, 0x00, &id)) {
++	if (!acpm_ready() || !pmic_read(0, 0x00, &id)) {
+ 		return false;
+ 	}
+ 	(void)pmic_read(1, 0x6c, &l35);
