@@ -30,6 +30,7 @@ TIMEBASE = 26000000         # CNTFRQ_EL0 is 0 at handoff; OSCCLK is 26 MHz
 CONSOLE_TOP = 640             # boot console rows start below the Starbite header
 CONSOLE_HEIGHT = 1880         # ... and end above the bottom status card
 LITTLE_CORES = 4            # Cortex-A55 cluster; cpus=N boot-arg limits what starts
+BIG_CORES = 4               # Mongoose M3 cluster (--big)
 
 
 def set_prop(node, name, value):
@@ -47,7 +48,7 @@ def child(node, name):
     raise ValueError(f'missing donor ADT node {name}')
 
 
-def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False):
+def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False, big=False):
     root = mkadt.build(seed=os.urandom(64), qemu=True)
     canvas = (FB_WIDTH, FB_HEIGHT)
     if scale2:
@@ -86,24 +87,28 @@ def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False):
     cpus.children = [cpu0]
     # Cortex-A55 cores 1..3: MPIDR_EL1 Aff1 = core (0x81000n00), measured on
     # the phone with starsmpprobe=1; PSCI CPU_ON takes n (SweetCPU.cpp).
-    # One cluster, like mkadt_herolte.py. The Mongoose M3 cores did not
-    # answer the probe and stay undescribed.
-    for logical in range(1, LITTLE_CORES):
+    # One cluster, like mkadt_herolte.py.
+    # --big: the Mongoose M3 cores as logical 4..7. They need the vendor PMU
+    # defaults before PSCI CPU_ON 0x100..0x103 (Linux S9+ port; SweetCPU.cpp),
+    # and their MPIDR is 0x100+n without the MT bit: the same Aff1:Aff0 as
+    # A55 core 1, so XNU's reset vector adds bit 16 for them (reg 0x10100+n).
+    for logical in range(1, LITTLE_CORES + (BIG_CORES if big else 0)):
+        m3 = logical >= LITTLE_CORES
         cpus.children.append(mkadt.node(f'cpu{logical}', [
             ('device_type', mkadt.cstr('cpu')),
-            ('compatible', mkadt.cstr('arm,cortex-a55') + mkadt.cstr('arm,cortex-a53') +
-             mkadt.cstr('ARM,v8')),
-            ('reg', mkadt.u32(logical << 8)),
+            ('compatible', (mkadt.cstr('samsung,mongoose-m3') if m3 else mkadt.cstr('arm,cortex-a55')) +
+             mkadt.cstr('arm,cortex-a53') + mkadt.cstr('ARM,v8')),
+            ('reg', mkadt.u32(0x10100 + logical - LITTLE_CORES if m3 else logical << 8)),
             ('cpu-id', mkadt.u32(logical)),
             ('cluster-id', mkadt.u32(0)),
             ('cluster-type', mkadt.u32(0)),
             ('die-cluster-id', mkadt.u32(0)),
             ('cluster-core-id', mkadt.u32(logical)),
-            ('l2-cache-id', mkadt.u32(0)),
+            ('l2-cache-id', mkadt.u32(1 if m3 else 0)),
             ('l3-cache-id', mkadt.u32(0)),
             ('state', mkadt.cstr('stopped')),
             ('timebase-frequency', mkadt.u32(TIMEBASE)),
-            ('clock-frequency', mkadt.u32(1794000000)),
+            ('clock-frequency', mkadt.u32(2704000000 if m3 else 1794000000)),
             ('bus-frequency', mkadt.u32(100000000)),
             ('memory-frequency', mkadt.u32(1794000000)),
             ('peripheral-frequency', mkadt.u32(TIMEBASE)),
@@ -156,6 +161,8 @@ if __name__ == '__main__':
     parser.add_argument('output', type=Path)
     parser.add_argument('--scale2', action='store_true',
                         help='iPhone XR canvas 828x1792 @2x, scaled by the kernel')
+    parser.add_argument('--big', action='store_true',
+                        help='describe the four Mongoose M3 cores too (logical 4..7, boot-arg cpus=8)')
     parser.add_argument('--bank2', action='store_true',
                         help='XNU RAM = the second bank instead of the 472 MiB window')
     parser.add_argument('--bank2-mb', type=int, default=1024,
@@ -163,6 +170,6 @@ if __name__ == '__main__':
                              'vm_compression_limit=98304 and 2048 panics in write_pte_fast')
     args = parser.parse_args()
     dram = (BANK2_BASE, min(args.bank2_mb << 20, BANK2_SIZE)) if args.bank2 else (DRAM_BASE, DRAM_SIZE)
-    blob = adt.serialize(build(dram=dram, scale2=args.scale2))
+    blob = adt.serialize(build(dram=dram, scale2=args.scale2, big=args.big))
     args.output.write_bytes(blob)
     print(f'{args.output}: {len(blob)} bytes')
