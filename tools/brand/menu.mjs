@@ -6,7 +6,7 @@
  * y ~1199..1575; "Powered by android" ~2664..2834 is covered by our footer).
  *
  *   top     header (Starbite mark + name, model) and the boot list:
- *           iOS 16, Windows 11, Android (dimmed: not installed) and Linux (dimmed until the
+ *           iPadOS 18, Windows 11, Android (dimmed: not installed) and Linux (dimmed until the
  *           OS store on UFS holds a kernel)
  *   middle  Samsung's splash, untouched; right under it the Bixby service
  *           selector: Recovery | Download
@@ -157,7 +157,7 @@ function icon(f, x, y, size, { fill, stroke } = {}) {
 // Item ids are what the loader acts on (shim/starlte/menu.c v5_os); `row` is where each sits:
 // Android, iOS, Linux, Windows. Labels: "<OS version>" | "<flavour> · <kernel or build>".
 const ITEMS = [
-  { name: 'iOS 16', meta: '16.7.16 · XNU 8796', row: 1, icon: (x, y, s) => icon('si-apple.svg', x, y, s, { fill: '#ffffff' }) },
+  { name: 'iPadOS 18', meta: '18.7.11 · XNU 11417', row: 1, icon: (x, y, s) => icon('si-apple.svg', x, y, s, { fill: '#ffffff' }) },
   { name: 'Windows 11', meta: '23H2 · NT 22631', row: 3, icon: (x, y, s) => icon('si-windows11.svg', x, y, s, { fill: '#0078d4' }) },
   // Android: the vendor 4.9 kernel + ramdisk from the UFS OS store; state 3 until installed.
   { name: 'Android 17', meta: 'LineageOS 24.0 · Linux 4.9', row: 0, icon: (x, y, s) => icon('si-android.svg', x, y, s, { fill: '#3ddc84' }), optional: true },

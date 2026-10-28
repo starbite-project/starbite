@@ -27,3 +27,9 @@ echo "$(date +%H:%M:%S) booting; waiting for TWRP"
 wait_recovery
 sleep 8
 for try in 1 2 3; do python3 tools/starlte-log-pull.py adb "$log" | tail -1 && break; sleep 10; done
+# A panic in a sweetreboot boot leaves its log tail in the ramoops pmsg ring.
+adb exec-out cat /sys/fs/pstore/pmsg-ramoops-0 > "${log%.txt}-pstore.bin" 2>/dev/null || true
+if grep -aq "STARBITE: XNU panic" "${log%.txt}-pstore.bin" 2>/dev/null; then
+    echo "KERNEL PANIC: panic log in ${log%.txt}-pstore.bin"
+    grep -a -m3 "panic(" "${log%.txt}-pstore.bin" | cut -c1-200
+fi

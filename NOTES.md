@@ -1462,3 +1462,80 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   sweetreboot=100 (+ sweetdumpfile=/private/var/tmp/backboardd.log) via tools/starlte-cycle.sh. Remaining
   crashers: replicatord, cryptexd, iconservicesagent, gamed (none UI-critical). backboardd's stderr log grows
   ~20 KB/s while debugging; drop the redirect from the launchd cache for daily use.
+- 2026-10-29: **More RAM, full-panel canvas, iPhone UI** (boot26-32). 0313 `sweetmemscale=N` multiplies jetsam
+  per-process limits (crash loops from jetsam reason 7 gone at 4); 0314 keeps 4 KiB VM pages above 1 GiB (arm_init
+  switched to 16 KiB pages when memSize > 1 GiB: intermittent "unaligned pmap_enter"), so XNU now gets 1.5 GiB of
+  bank 2 (out/starlte-ipad7-1536.adt; max 1792 MiB below the GPU tables at 0x8f0000000). Canvas from the ADT
+  (`mkadt_starlte.py --canvas WxH --scale N --artwork-subtype N`) + sweetfb_lw/lh: 1440x2960 @2x fills the panel.
+  iPhone UI = MobileGestalt answers, not the ADT: `tools/starlte-mg.py ROOT phone` edits the answer cache
+  (/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/
+  com.apple.MobileGestalt.plist; CacheData = 658 slots x 8 + 658 presence bytes, DeviceClassNumber slot 101 = 1,
+  CacheExtra DeviceClass/DeviceName "iPhone", ArtworkTraits.ArtworkDeviceIdiom "phone"; key = base64(md5(
+  "MGCopyAnswer"+name))[:22]); with out/starlte-ipad7-phone.adt (1242x2208 @3x, subtype 2208) SpringBoard runs the
+  phone UI (user: "more phone-ey", home indicator). Live root edits without a full reflash:
+  `tools/starlte-root-sync.py pull BASE OUT` / `push OUT` (64 MiB chunk hashes on the phone).
+  Red status bar banner "rdar:45025538" = SystemStatusUI's Fallback provider: STUIStatusBarVisualProvider_Phone picks
+  LegacyPhone only when the screen has no exclusion area; SpringBoard sets it from
+  `+[UISDisplaySingleRectShape sb_displayShapeForScreenType:]` (SBHScreenTypeForCurrentDevice), so our screen type
+  gets a notch shape and the Split providers (matched by native width 828/1080/1125/1170/1242/1284) find none.
+  Cosmetic; fix later via the screen type (MG) or a canvas that matches a Split provider.
+- 2026-10-29: **GPU route for iPadOS 18.** `CA::WindowServer::AccelServer::renderer()` only tries Metal
+  (CAMetalContextCreate -> CA::OGL::new_metal_context), else the CPU renderer: iOS 16's GLES fallback in the window
+  server is gone. But `CA::OGL::GLESContext` is still in QuartzCore with its window-server methods
+  (create_surface_from_iosurface, make_buffer_current(WindowServer::Surface*), release_display_surface), and the
+  OpenGLES.framework dispatch table is unchanged from iOS 16.5 (glClear +0x58, glDrawArrays +0x210, glBindTexture
+  +0x30, glFinish +0x2d0, glClearColor +0x68 from the table base): an earlier port's eagl.c/eagl_slots.txt (MIT, re-cloned
+  into ref/refport-os from github.com/oosexgang/refport-xnu-kernel @ 8851317) carries over. Plan: (1) StarbiteMali
+  from an app [sbgpu-test], (2) Mesa Panfrost for iOS [done, below], (3) GLES from an app [sbgl-test], (4) IOSurface
+  import selector, (5) inject into backboardd and replace renderer() with a GLESContext over an EAGL backed by Mesa.
+  - Mesa 25.0.7 for iOS: `tools/mesa-ios/mk-mesa-ios.sh` (Xcode 16.4 iPhoneOS 18.5 SDK, meson cross, Homebrew bison)
+    builds softpipe + Panfrost into one libOSMesa.8.dylib (16 MB, 1296 gl* exports), no errors on the first build.
+    `tools/mesa-ios/starbite-drm/` stands in for libdrm: Panfrost ioctls -> StarbiteMali selectors (nr - 0x40,
+    GEM_CLOSE -> 0x100), version reported as 1.1 (no timestamp queries), sync objects always signalled (SUBMIT is
+    synchronous), the "mmap offset" is the address the kernel mapped. `panfrost-ios.patch`: meson wiring, mmap/munmap,
+    32 MiB tiler heap (not 128; heap BOs are committed in full), OSMesa creates the Panfrost screen first
+    (OSMESA_SOFTWARE=1 -> softpipe), OSMesa ES profile (from an earlier port).
+  - sbgpu-test under 18 (launchd job added to the launchd.plist cache, /usr/bin/sbgpu-test): GET_PARAM works
+    ("interface 1.3.0, GPU 0x6221, shaders 0x5771777"), then the first CREATE_BO panicked "phystokv_range: illegal
+    PA 0xce821000". XNU bug (0315): legacy arm pmap `pmap_sync_page_attributes_phys()` shifts the 32-bit ppnum_t by
+    PAGE_SHIFT in 32 bits; with 4 KiB pages and RAM at 0x880000000 the cache flush for a page turning write-combined
+    (pmap_sync_wimg) goes to a truncated PA. Fixed with ptoa(). The panic hook (0309) now saves the panic log head
+    (11 KiB: string, panicked task, backtrace) + the console's last lines, not the stackshot tail.
+  - 0315 verified (boot36): sbgpu-test from launchd: "WRITE_VALUE from userland ... AN APP RAN A GPU JOB" (198 us),
+    "FRAGMENT clear from userland: 4096 of 4096 pixels green -> AN APP DREW WITH THE GPU"; no panic in 150 s. (SUBMIT
+    returns 0xe00002c2 to a caller that passes no output struct although the job ran: iOS 18 IOKit hands
+    externalMethod a non-NULL structureOutput of size 0. Harmless for Mesa, which passes in = out.)
+  - backboardd hook recipe (QuartzCore 18, from `-[CARenderer _initWithEAGLContext:options:]` and
+    AccelServer::renderer()): the EAGLContext must say API 3; context = calloc(1, 0x8b8) +
+    `CA::OGL::GLESContext::GLESContext(void *eagl)`; renderer wrapper = malloc(0x68): [0] = context, [8], [0x10] = 0,
+    [0x30] = malloc(0x40000), [0x38] = 0, [0x60] = 1 (u32), [0x64] = 0 (u16). AccelServer keeps the context at
+    server+0x400 and the wrapper at +0x408 (also stored at [server+0x60]+0x138), then calls context vtable +0xb0
+    (framebuffer compression flag); once +0x408 is set, the original renderer() only runs its per-call tail. So a
+    replaced vtable slot can build both and call the original.
+  - IOSurface import (for CoreAnimation's render targets and layer textures): StarbiteMali selector 0x103 SURFACE
+    (folded into 0305) maps a SweetSurface's pages (buffer or physical) at a GPU VA of its own, one handle per
+    surface and client (flags 1 = describe only: size, offset, row bytes, size, format, planes). Mesa side: the shim's
+    drmPrimeFDToHandle takes the surface ID as the "dma-buf fd", pan_kmod_bo_import sizes it through the shim, and
+    OSMesa's get_egl_image turns glEGLImageTargetTexture2DOES(target, (GLeglImageOES)surfaceID) into a BGRA8
+    texture/render target on the surface's memory (as an earlier port's freedreno patch did).
+  - sbgl-test (boot37-38): "GLES: context in 1132 ms: Mesa | Mali-G72 (Panfrost) | OpenGL ES 3.1 Mesa 25.0.7",
+    framebuffer complete, shaders compile and link, 15 GET_PARAMs and 12 CREATE_BO/MMAP_BO fine, but every SUBMIT
+    failed EINVAL: Mesa 25.0's drm_panfrost_submit is 40 bytes (no jm_ctx_handle/pad), StarbiteMali wanted 48.
+    0305 now takes both. Also: launchd gives an unlisted daemon 6 MB x sweetmemscale and ignores the job's
+    JetsamProperties; the test raises its own limit (memorystatus_control SET_JETSAM_TASK_LIMIT as root).
+    Debugging: STARBITE_DRM_TRACE=1 logs the shim's calls on stderr; the job's StandardErrorPath file is read by
+    pulling the root (starlte-root-sync.py pull, then attach read-write: a read-only attach refuses the dirty
+    journal).
+  - **2026-10-29 01:10: OpenGL ES through Mesa runs on the Mali-G72 under iPadOS 18** (boot40,
+    build/ipados18-boot40.txt): GPU jobs from Mesa done in 0.1-1.3 ms, no faults; clear reads back blue
+    (0xffff0000 = RGBA bytes 00 00 ff ff), triangle middle 0xff6d4949 (the three vertex colours interpolated),
+    corner 0xff333333 (the clear grey): "THE GPU DREW A TRIANGLE THROUGH MESA". The default-framebuffer loop ran
+    0.8 fps only because OSMesa copies the 11 MB frame into the user buffer on every glFinish, reading the GPU's
+    write-combined (uncached) memory with the CPU; CoreAnimation renders into IOSurfaces and never does that.
+    GPU speed (boot41, off-screen 1242x2208 RGBA8 texture target, no read-back): clear + 5 full-screen textured,
+    alpha-blended quads per frame = **816 frames in 4.0 s = 203.9 fps** (first frame 5 ms), GL error 0. For
+    comparison, CoreAnimation's CPU renderer gives ~15 fps on the home screen.
+    memorystatus_control SET_JETSAM_TASK_LIMIT (6) answers EINVAL here, INCREASE_JETSAM_TASK_LIMIT (22, own pid,
+    DEVELOPMENT kernel) works; the test boot also used sweetmemscale=16.
+  - Kernel limits to fix before CoreAnimation: StarbiteMali's GPU VA allocator only bumps (never reuses) and AS1
+    level-3 tables are never freed (1 MiB = ~250 tables = ~500 MiB of mappings ever).

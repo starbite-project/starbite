@@ -111,7 +111,15 @@ submit(uint64_t jc, uint32_t req)
 int
 main(void)
 {
-	io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("StarbiteMali"));
+	/* Run from a launchd job at boot: the kernel publishes StarbiteMali
+	 * only after its GPU stages (some seconds in), so wait for it. */
+	io_service_t svc = IO_OBJECT_NULL;
+	for (int i = 0; i < 120 && svc == IO_OBJECT_NULL; i++) {
+		svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("StarbiteMali"));
+		if (svc == IO_OBJECT_NULL) {
+			sleep(1);
+		}
+	}
 	if (svc == IO_OBJECT_NULL) {
 		printf("sbgpu-test: no StarbiteMali service\n");
 		return 1;

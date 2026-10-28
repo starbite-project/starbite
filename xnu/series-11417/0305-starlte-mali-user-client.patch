@@ -1,20 +1,20 @@
-From 2bfbc79a931d8c9ebb7147135e11663d108f48ed Mon Sep 17 00:00:00 2001
+From 63459ac797ad8f3e74c23ed728504b425cfc2be4 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:14 +0200
 Subject: [PATCH] patch: 0305-starlte-mali-user-client.patch
 
 ---
- iokit/Kernel/arm/StarbiteMali.cpp | 397 ++++++++++++++++++++++++++++++
+ iokit/Kernel/arm/StarbiteMali.cpp | 500 ++++++++++++++++++++++++++++++
  iokit/conf/files.arm64            |   1 +
- 2 files changed, 398 insertions(+)
+ 2 files changed, 501 insertions(+)
  create mode 100644 iokit/Kernel/arm/StarbiteMali.cpp
 
 diff --git a/iokit/Kernel/arm/StarbiteMali.cpp b/iokit/Kernel/arm/StarbiteMali.cpp
 new file mode 100644
-index 0000000..a262f9e
+index 0000000..33fcda7
 --- /dev/null
 +++ b/iokit/Kernel/arm/StarbiteMali.cpp
-@@ -0,0 +1,397 @@
+@@ -0,0 +1,500 @@
 +/*
 + * Project Starbite: the Mali-G72 for iOS apps (stage 6 of
 + * bsd/dev/starlte_gpu.c). The IOService "StarbiteMali" and its user client
@@ -27,6 +27,9 @@ index 0000000..a262f9e
 + *   0x100 GEM_CLOSE             struct drm_gem_close (handle, pad)
 + *   0x101 VERSION               out: u32 major, minor, patch (1.3.0)
 + *   0x102 LOG                   in: text for the kernel log (test tools)
++ *   0x103 SURFACE               an IOSurface (SweetSurface) by ID as a buffer:
++ *                               its pages mapped at a GPU VA, handle back;
++ *                               flags 1 = only describe it (size, layout)
 + *
 + * Buffers are XNU memory in 4 KiB pages, cleaned out of the CPU caches and
 + * mapped write-combined into the app (the GPU is not IO-coherent), at GPU
@@ -42,6 +45,8 @@ index 0000000..a262f9e
 +#include <IOKit/IOLocks.h>
 +#include <IOKit/IOKitKeys.h>
 +#include <sys/errno.h>
++
++#include "SweetSurface.h"
 +
 +extern "C" {
 +int starlte_gpu_user_ready(void);
@@ -88,11 +93,20 @@ index 0000000..a262f9e
 +struct sbm_version {
 +	uint32_t major, minor, patch;
 +};
++struct sbm_surface {
++	uint32_t surface, handle;               /* in: IOSurface ID; out: buffer handle */
++	uint64_t size;                          /* out: bytes of the surface's memory */
++	uint32_t offset, row_bytes;             /* out: where the pixels start, row length */
++	uint32_t width, height, pixel_format, planes;
++	uint32_t flags, pad;                    /* in: SBM_SURFACE_DESCRIBE */
++};
++#define SBM_SURFACE_DESCRIBE    1u
++#define SBM_SUBMIT_V1_SIZE      40u             /* struct drm_panfrost_submit before jm_ctx_handle */
 +
 +enum {
 +	SBM_SUBMIT = 0, SBM_WAIT_BO = 1, SBM_CREATE_BO = 2, SBM_MMAP_BO = 3, SBM_GET_PARAM = 4,
 +	SBM_GET_BO_OFFSET = 5, SBM_MADVISE = 8, SBM_GEM_CLOSE = 0x100, SBM_VERSION = 0x101,
-+	SBM_LOG = 0x102,
++	SBM_LOG = 0x102, SBM_SURFACE = 0x103,
 +};
 +
 +#define SBM_MAX_BOS     8192u
@@ -101,10 +115,11 @@ index 0000000..a262f9e
 +#define SBM_MAX_BO      (256u << 20)
 +
 +struct sbm_bo {
-+	IOBufferMemoryDescriptor *mem;
++	IOMemoryDescriptor *mem;
 +	IOMemoryMap *map;
 +	uint64_t va;
 +	uint32_t pages;
++	uint32_t surface;                       /* IOSurface ID of an imported buffer, else 0 */
 +};
 +
 +/* GPU VAs: one bump allocator for all clients (they share AS1), never reused. */
@@ -125,6 +140,7 @@ index 0000000..a262f9e
 +	uint32_t fCount = 0;
 +
 +	IOReturn createBO(sbm_create_bo *a);
++	IOReturn importSurface(sbm_surface *a);
 +	IOReturn mmapBO(sbm_mmap_bo *a);
 +	sbm_bo *lookup(uint32_t handle);
 +	void closeBO(sbm_bo *bo);
@@ -175,6 +191,7 @@ index 0000000..a262f9e
 +	OSSafeReleaseNULL(bo->mem);
 +	bo->va = 0;
 +	bo->pages = 0;
++	bo->surface = 0;
 +}
 +
 +IOReturn
@@ -240,6 +257,85 @@ index 0000000..a262f9e
 +	return kIOReturnSuccess;
 +}
 +
++/*
++ * An IOSurface as a buffer, so the GPU can draw into it or read it: the
++ * surface's pages (buffer or physical) at a GPU VA of their own. One handle
++ * per surface and client, as Panfrost keeps one buffer per handle.
++ */
++IOReturn
++StarbiteMaliUserClient::importSurface(sbm_surface *a)
++{
++	SweetSurface *s = sweet_surface_copy(a->surface);
++	if (s == NULL || s->memory == NULL) {
++		OSSafeReleaseNULL(s);
++		return kIOReturnNotFound;
++	}
++	a->size = round_page(s->memory->getLength());
++	a->offset = s->offset;
++	a->row_bytes = s->bytesPerRow;
++	a->width = s->width;
++	a->height = s->height;
++	a->pixel_format = s->pixelFormat;
++	a->planes = s->planeCount;
++	a->handle = 0;
++	if (a->flags & SBM_SURFACE_DESCRIBE) {
++		s->release();
++		return kIOReturnSuccess;
++	}
++	for (uint32_t i = 0; i < fCount; i++) {
++		if (fBos[i].mem != NULL && fBos[i].surface == a->surface && fBos[i].mem == s->memory) {
++			a->handle = i + 1;
++			s->release();
++			return kIOReturnSuccess;
++		}
++	}
++	uint32_t handle = 0;
++	for (uint32_t i = 0; i < fCount; i++) {
++		if (fBos[i].mem == NULL) {
++			handle = i + 1;
++			break;
++		}
++	}
++	if (handle == 0) {
++		if (fCount >= SBM_MAX_BOS) {
++			s->release();
++			return kIOReturnNoResources;
++		}
++		handle = ++fCount;
++	}
++	uint32_t pages = (uint32_t)(a->size / 0x1000);
++	IOLockLock(sbm_va_lock);
++	uint64_t va = sbm_next_va;
++	if (va + a->size > SBM_VA_END) {
++		IOLockUnlock(sbm_va_lock);
++		s->release();
++		return kIOReturnNoSpace;
++	}
++	sbm_next_va = (va + a->size + 0xffff) & ~0xffffull;
++	IOLockUnlock(sbm_va_lock);
++	uint64_t *pa = (uint64_t *)IOMallocData((vm_size_t)pages * sizeof(uint64_t));
++	bool ok = pa != NULL;
++	for (uint32_t i = 0; i < pages && ok; i++) {
++		IOByteCount len = 0;
++		pa[i] = s->memory->getPhysicalSegment((IOByteCount)i * 0x1000, &len, kIOMemoryMapperNone);
++		ok = pa[i] != 0;
++	}
++	ok = ok && starlte_gpu_user_map(va, pa, pages);
++	if (pa != NULL) {
++		IOFreeData(pa, (vm_size_t)pages * sizeof(uint64_t));
++	}
++	if (!ok) {
++		s->release();
++		return kIOReturnVMError;
++	}
++	s->memory->retain();
++	fBos[handle - 1] = (sbm_bo){ .mem = s->memory, .map = NULL, .va = va, .pages = pages,
++		                     .surface = a->surface };
++	a->handle = handle;
++	s->release();
++	return kIOReturnSuccess;
++}
++
 +IOReturn
 +StarbiteMaliUserClient::mmapBO(sbm_mmap_bo *a)
 +{
@@ -273,6 +369,7 @@ index 0000000..a262f9e
 +		sbm_madvise madvise;
 +		sbm_gem_close close;
 +		sbm_version version;
++		sbm_surface surface;
 +		char text[256];
 +	} u;
 +	size_t want;
@@ -287,6 +384,7 @@ index 0000000..a262f9e
 +	case SBM_GEM_CLOSE: want = sizeof(u.close); break;
 +	case SBM_VERSION: want = 0; break;
 +	case SBM_LOG: want = args->structureInputSize; break;
++	case SBM_SURFACE: want = sizeof(u.surface); break;
 +	default:
 +		return kIOReturnUnsupported;
 +	}
@@ -295,6 +393,8 @@ index 0000000..a262f9e
 +		if (want == 0 || want >= sizeof(u.text)) {
 +			return kIOReturnBadArgument;
 +		}
++	} else if (selector == SBM_SUBMIT && args->structureInputSize == SBM_SUBMIT_V1_SIZE) {
++		want = SBM_SUBMIT_V1_SIZE;              /* Mesa 25.0's uapi: no jm_ctx_handle */
 +	} else if (args->structureInputSize != want) {
 +		return kIOReturnBadArgument;
 +	}
@@ -344,6 +444,9 @@ index 0000000..a262f9e
 +	case SBM_VERSION:
 +		u.version = (sbm_version){ 1, 3, 0 };
 +		want = sizeof(u.version);
++		break;
++	case SBM_SURFACE:
++		ret = importSurface(&u.surface);
 +		break;
 +	case SBM_LOG:
 +		u.text[want] = 0;

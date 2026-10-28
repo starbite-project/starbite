@@ -80,12 +80,21 @@ def ipad_identity(root, adt_path):
     return IPAD_CANVAS, ('J171AP', 'iPad7,11')
 
 
-def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False, big=False, ipad=None):
+def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False, big=False, ipad=None, canvas_override=None,
+          scale_override=None, subtype_override=None):
     root = mkadt.build(seed=os.urandom(64), qemu=True)
     canvas = (FB_WIDTH, FB_HEIGHT)
     identity = ('D22AP', 'iPhone10,3')
     if ipad:
         canvas, identity = ipad_identity(root, ipad)
+        if canvas_override:
+            canvas = canvas_override
+        product, chosen = child(root, 'product'), child(root, 'chosen')
+        if scale_override:
+            set_prop(chosen, 'display-scale', mkadt.u32(scale_override))
+            set_prop(product, 'artwork-scale-factor', mkadt.u32(scale_override))
+        if subtype_override:
+            set_prop(product, 'artwork-device-subtype', mkadt.u32(subtype_override))
     elif scale2:
         # As mkadt_herolte.py --scale2: a whole iPhone XR screen (414x896
         # points @2x = 828x1792), 2.9x fewer pixels than the panel for the CPU
@@ -206,9 +215,19 @@ if __name__ == '__main__':
     parser.add_argument('--ipad7', type=Path, metavar='J171AP_ADT',
                         help='iPadOS 18 identity from the real J171AP device tree '
                              '(build/ipsw-18/j171ap.adt), 1440x1920 @2x canvas')
+    parser.add_argument('--canvas', metavar='WxH',
+                        help='with --ipad7: another canvas, e.g. 1440x2960 = the whole panel '
+                             '(720x1480 points @2x); boot-args sweetfb_lw/sweetfb_lh must match')
+    parser.add_argument('--scale', type=int, choices=(2, 3),
+                        help='with --ipad7: display and artwork scale (phone UI: 3)')
+    parser.add_argument('--artwork-subtype', type=int,
+                        help='with --ipad7: /product artwork-device-subtype (iPhone 8 Plus: 2208)')
     args = parser.parse_args()
+    canvas_override = tuple(int(v) for v in args.canvas.lower().split('x')) if args.canvas else None
     dram = (BANK2_BASE, min(args.bank2_mb << 20, BANK2_SIZE)) if args.bank2 else (DRAM_BASE, DRAM_SIZE)
     assert dram[0] + dram[1] <= PRAM_BASE or dram[0] >= PRAM_BASE + PRAM_SIZE, 'XNU RAM overlaps /pram'
-    blob = adt.serialize(build(dram=dram, scale2=args.scale2, big=args.big, ipad=args.ipad7))
+    blob = adt.serialize(build(dram=dram, scale2=args.scale2, big=args.big, ipad=args.ipad7,
+                              canvas_override=canvas_override, scale_override=args.scale,
+                              subtype_override=args.artwork_subtype))
     args.output.write_bytes(blob)
     print(f'{args.output}: {len(blob)} bytes')

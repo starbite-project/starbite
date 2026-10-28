@@ -2469,7 +2469,7 @@ static void build_start(void)
     start_avail[2] = star_store_has("linux.image");
     start_avail[1] = start_avail[3] = start_avail[4] = 1;
     row_add("Android 17", "LineageOS 24.0", start_avail[0] ? 0 : R_DIS);
-    row_add("iOS 16", "with the current boot options", 0);
+    row_add("iPadOS 18", "with the current boot options", 0);
     row_add("Linux 7.1", "postmarketOS " UI_DOT " Alpine edge", start_avail[2] ? 0 : R_DIS);
     row_add("Windows 11", "23H2", 0);
     row_add("Linux kiosk", "Linux kiosk", 0);
@@ -3856,7 +3856,7 @@ static void build_tab(int t)
         break;
     case 4:
         row_add("Android 17", "LineageOS 24.0: store, partitions, safety", 0);
-        row_add("iOS 16", "XNU 8796, 1 GiB, boot-args", 0);
+        row_add("iPadOS 18", "XNU 11417, boot-args", 0);
         row_add("iOS boot options", "multi-block, flags, boot iOS", 0);
         row_add("Linux 7.1", "postmarketOS (Alpine edge) on mainline", 0);
         row_add("Windows 11", "firmware, RAM stage, last run report", 0);
@@ -3919,7 +3919,7 @@ static void open_item(int t, int i)
     case 0x33: run_speed(); break;
     case 0x34: sector_screen(); break;
     case 0x40: info_screen("Android 17", fill_android, 0); break;
-    case 0x41: info_screen("iOS 16", fill_ios, 0); break;
+    case 0x41: info_screen("iPadOS 18", fill_ios, 0); break;
     case 0x42: list_screen("iOS boot options", build_ios_opts, act_ios_opts); break;
     case 0x43: info_screen("Linux 7.1", fill_linux, 0); break;
     case 0x44: info_screen("Windows 11", fill_windows, 0); break;

@@ -27,7 +27,9 @@ kernel of iPadOS 18.7.11 (22H384) for J171AP. Built by `tools/build-xnu-11417.sh
   `sweettracename=<p_comm>` (trace a process by name; its failing syscalls with the
   path argument and failing Mach traps are always logged), `sweetmsg=1` (printable
   text of the traced process's Mach messages, incl. out-of-line data),
-  `sweetreboot=N` (flush the log and reset into recovery after N s),
+  `sweetreboot=N` (flush the log and reset into recovery after N s; panics reset
+  too, with the panic log head and the console's last lines in the ramoops pmsg
+  ring that TWRP shows as /sys/fs/pstore/pmsg-ramoops-0),
   `sweetdumpfile=<path>` (print a file's tail before that reset).
 - `0310-port-madvise-hardware-page.patch`: madvise aligns to the 4 KiB kernel page
   (as 8796 did); 11417's vm_sanitize widened it to the 16 KiB user page and
@@ -37,6 +39,14 @@ kernel of iPadOS 18.7.11 (22H384) for J171AP. Built by `tools/build-xnu-11417.sh
 - `0312-port-xpc-service-port-check.patch`: mach_port_is_connection_for_service
   answers "no filter policy" when no Sandbox message-filter callbacks exist (iPadOS
   18's libxpc rejected every new peer on KERN_NOT_SUPPORTED).
+- `0313-port-memlimit-scale.patch`: boot-arg `sweetmemscale=N` (1..16) multiplies
+  the jetsam per-process active/inactive limits (capped at 2048 MB).
+- `0314-port-4k-pages-above-1g.patch`: SWEET/A5XELTE keep 4 KiB VM pages when
+  memSize > 1 GiB (arm_init switched to 16 KiB pages there; intermittent
+  "unaligned pmap_enter"), so the S9 can give XNU 1.5 GiB of bank 2.
+- `0315-port-sync-page-phys-64bit.patch`: pmap_sync_page_attributes_phys shifted
+  the 32-bit ppnum_t in 32 bits; with 4 KiB pages and RAM at 0x880000000 the flush
+  of a page turning write-combined hit a truncated PA (phystokv_range panic).
 - iPadOS 18 fixes folded into existing patches: 0201 (Sandbox op 0x43 container
   expected; AMFI policy named "AMFI", op 90 dyld policy = development vars), 0068
   (IOSurface ABI of iPadOS 18: limits 0x28, lock result 0xc68), 0209 (iPadOS 18
