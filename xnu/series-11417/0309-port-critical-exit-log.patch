@@ -1,0 +1,318 @@
+From 24929cdedfaf339c16a024ad2bdb92b41382d56f Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 28 Oct 2026 17:56:59 +0200
+Subject: [PATCH] patch: 0309-port-critical-exit-log.patch
+
+port: diagnostics for launchd dying early. proc_handle_critical_exit()
+panics for pid 1 before proc_prepareexit() reaches the SWEET crash log
+(0043/0044), and within ~30 s of boot, before the persistent log's first
+10 s flush. For the critical process it now prints the crash log (pc, lr,
+user backtrace, strings for SIGABRT) and flushes the console ring to the
+flash log synchronously (herolte_log_flush_now, HEROLTE boards) before
+the core dump and panic. herolte_log_thread's body moved to
+herolte_log_write(), shared by both.
+---
+ bsd/dev/arm/systemcalls.c |  30 +++++++++++
+ bsd/dev/herolte_ufs.c     | 107 +++++++++++++++++++++++++-------------
+ bsd/kern/kern_exit.c      |  14 +++++
+ osfmk/arm64/bsd_arm64.c   |  11 ++++
+ osfmk/kern/exception.c    |  47 +++++++++++++++++
+ 5 files changed, 172 insertions(+), 37 deletions(-)
+
+diff --git a/bsd/dev/arm/systemcalls.c b/bsd/dev/arm/systemcalls.c
+index 0906700..88717b7 100644
+--- a/bsd/dev/arm/systemcalls.c
++++ b/bsd/dev/arm/systemcalls.c
+@@ -44,6 +44,22 @@ extern void dtrace_systrace_syscall_return(unsigned short, int, int *);
+ extern void
+ unix_syscall(struct arm_saved_state * regs, thread_t thread_act, struct proc * proc);
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++/* Remaining pid 1 trace lines (boot-arg sweettrace, default 0 = off). */
++int sweet_trace_left(void);
++int
++sweet_trace_left(void)
++{
++	static int left = -1;
++	if (left < 0) {
++		int n = 0;
++		PE_parse_boot_argn("sweettrace", &n, sizeof(n));
++		left = n;
++	}
++	return left > 0 ? left-- : 0;
++}
++#endif
++
+ static int      arm_get_syscall_args(uthread_t, struct arm_saved_state *, const struct sysent *);
+ static int      arm_get_u32_syscall_args(uthread_t, arm_saved_state32_t *, const struct sysent *);
+ static void     arm_prepare_u32_syscall_return(const struct sysent *, arm_saved_state_t *, uthread_t, int);
+@@ -180,6 +196,20 @@ unix_syscall(
+ 	AUDIT_SYSCALL_ENTER(code, proc, uthread);
+ 	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
+ 	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	/* sweet (0309): boot-arg sweettrace=N logs pid 1's first N syscalls and
++	 * Mach traps (bsd_arm64.c), with arguments and results. */
++	{
++		extern int sweet_trace_left(void);
++		extern const char *syscallnames[];
++		if (__improbable(pid == 1) && sweet_trace_left() > 0) {
++			printf("SYS %s(%d)(0x%llx, 0x%llx, 0x%llx, 0x%llx) = %d / 0x%llx\n",
++			    code < nsysent ? syscallnames[code] : "?", code,
++			    uthread->uu_arg[0], uthread->uu_arg[1], uthread->uu_arg[2], uthread->uu_arg[3],
++			    error, (uint64_t)uthread->uu_rval[0]);
++		}
++	}
++#endif
+ 
+ #if CONFIG_MACF
+ skip_syscall:
+diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
+index ee2f0da..d26f003 100644
+--- a/bsd/dev/herolte_ufs.c
++++ b/bsd/dev/herolte_ufs.c
+@@ -789,62 +789,95 @@ struct herolte_log_header {
+ };
+ 
+ static int herolte_log_chan;
++static uint64_t herolte_log_first, herolte_log_flushed, herolte_log_seq;
++
++/* Copy what the console ring gained since the last flush, then the header. */
++static int
++herolte_log_write(void)
++{
++	const char *ring;
++	uint32_t rsize;
++	uint64_t total;
++	uint8_t *bounce = (uint8_t *)(su.dma + DMA_BOUNCE);
++	a5xelte_log_snapshot(&ring, &rsize, &total);
++	if (total == herolte_log_flushed) {
++		return 0;
++	}
++	uint64_t first = herolte_log_first;
++	uint64_t pos = total - herolte_log_flushed >= rsize ? total - rsize : herolte_log_flushed;
++	uint64_t left = total - pos;
++	int error = 0;
++	lck_mtx_lock(&herolte_ufs_lock);
++	while (left && !error) {
++		uint32_t blk = (uint32_t)((pos % rsize) / UFS_BLOCK);
++		uint32_t skip = (uint32_t)(pos % UFS_BLOCK);
++		uint32_t n = (uint32_t)MIN((uint64_t)(BOUNCE_SIZE / UFS_BLOCK),
++		    MIN((uint64_t)(rsize / UFS_BLOCK - blk), (left + skip + UFS_BLOCK - 1) / UFS_BLOCK));
++		memcpy(bounce, ring + (size_t)blk * UFS_BLOCK, (size_t)n * UFS_BLOCK);
++		error = ufs_write_blocks(first + 1 + blk, n);
++		uint64_t adv = (uint64_t)n * UFS_BLOCK - skip;
++		pos += adv;
++		left -= MIN(adv, left);
++	}
++	if (!error) {
++		struct herolte_log_header h = {
++			.magic = { 'H', 'E', 'R', 'O', 'L', 'O', 'G', '1' },
++			.version = 1, .size = rsize, .total = total, .seq = ++herolte_log_seq,
++		};
++		bzero(bounce, UFS_BLOCK);
++		memcpy(bounce, &h, sizeof(h));
++		error = ufs_write_blocks(first, 1);
++	}
++	if (!error) {
++		error = ufs_sync_cache();
++	}
++	lck_mtx_unlock(&herolte_ufs_lock);
++	if (!error) {
++		herolte_log_flushed = total;
++	}
++	return error;
++}
++
++/*
++ * Synchronous flush for proc_handle_critical_exit (kern_exit.c): launchd's
++ * death panics within ~30 s of boot, before the 10 s thread's first flush
++ * landed (xnu-11417 bring-up). Thread context, before the panic.
++ */
++void herolte_log_flush_now(void);
++void
++herolte_log_flush_now(void)
++{
++	if (herolte_log_first == 0) {
++		return;
++	}
++	int error = herolte_log_write();
++	printf("HEROLTE LOG: flushed before the critical-exit panic (%d)\n", error);
++	(void)herolte_log_write();      /* the line above */
++}
+ 
+ static void
+ herolte_log_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+ 	const char *ring;
+ 	uint32_t rsize;
+-	uint64_t total, flushed = 0, seq = 0;
++	uint64_t total;
+ 	uint32_t ticks = 0;
+ 	a5xelte_log_snapshot(&ring, &rsize, &total);
+-	uint64_t first = su.first_block + su.nblocks - (1 + rsize / UFS_BLOCK);
+-	uint8_t *bounce = (uint8_t *)(su.dma + DMA_BOUNCE);
++	herolte_log_first = su.first_block + su.nblocks - (1 + rsize / UFS_BLOCK);
+ 	printf("HEROLTE LOG: %u KiB ring at partition block %llu\n",
+-	    rsize >> 10, first - su.first_block);
++	    rsize >> 10, herolte_log_first - su.first_block);
+ 	for (;;) {
+ 		(void)tsleep(&herolte_log_chan, PZERO, "herolog", hz * 10);
+ 		/* Heartbeat: gaps between these lines show CPU starvation. */
+ 		if (++ticks % 6 == 0) {
+ 			printf("HEROLTE LOG: alive %u s\n", ticks * 10);
+ 		}
+-		a5xelte_log_snapshot(&ring, &rsize, &total);
+-		if (total == flushed) {
+-			continue;
+-		}
+-		uint64_t pos = total - flushed >= rsize ? total - rsize : flushed;
+-		uint64_t left = total - pos;
+-		int error = 0;
+-		lck_mtx_lock(&herolte_ufs_lock);
+-		while (left && !error) {
+-			uint32_t blk = (uint32_t)((pos % rsize) / UFS_BLOCK);
+-			uint32_t skip = (uint32_t)(pos % UFS_BLOCK);
+-			uint32_t n = (uint32_t)MIN((uint64_t)(BOUNCE_SIZE / UFS_BLOCK),
+-			    MIN((uint64_t)(rsize / UFS_BLOCK - blk), (left + skip + UFS_BLOCK - 1) / UFS_BLOCK));
+-			memcpy(bounce, ring + (size_t)blk * UFS_BLOCK, (size_t)n * UFS_BLOCK);
+-			error = ufs_write_blocks(first + 1 + blk, n);
+-			uint64_t adv = (uint64_t)n * UFS_BLOCK - skip;
+-			pos += adv;
+-			left -= MIN(adv, left);
+-		}
+-		if (!error) {
+-			struct herolte_log_header h = {
+-				.magic = { 'H', 'E', 'R', 'O', 'L', 'O', 'G', '1' },
+-				.version = 1, .size = rsize, .total = total, .seq = ++seq,
+-			};
+-			bzero(bounce, UFS_BLOCK);
+-			memcpy(bounce, &h, sizeof(h));
+-			error = ufs_write_blocks(first, 1);
+-		}
+-		if (!error) {
+-			error = ufs_sync_cache();
+-		}
+-		lck_mtx_unlock(&herolte_ufs_lock);
++		int error = herolte_log_write();
+ 		if (error) {
+ 			printf("HEROLTE LOG: write failed (%d), stopping\n", error);
++			herolte_log_first = 0;
+ 			return;
+ 		}
+-		flushed = total;
+ 	}
+ }
+ 
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+index f076642..5633fad 100644
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1860,6 +1860,20 @@ proc_handle_critical_exit(proc_t p, int rv)
+ 		prefix_str = prefix_str_buf;
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	/* sweet: proc_prepareexit's crash log comes after this panic; print it
++	 * for the critical process here, then save the console to flash. */
++	if (p == current_proc()) {
++		struct uthread *ut = current_uthread();
++		extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
++		sweet_crash_log(p->p_comm, proc_getpid(p), WTERMSIG(rv),
++		    ((uint64_t)ut->uu_exception << 32) | (uint32_t)ut->uu_code, ut->uu_subcode);
++	}
++#if defined(ARM64_BOARD_CONFIG_HEROLTE)
++	extern void herolte_log_flush_now(void);
++	herolte_log_flush_now();
++#endif
++#endif
+ 	proc_crash_coredump(p);
+ 
+ 	sync(p, (void *)NULL, (int *)NULL);
+diff --git a/osfmk/arm64/bsd_arm64.c b/osfmk/arm64/bsd_arm64.c
+index 6cb830d..736b674 100644
+--- a/osfmk/arm64/bsd_arm64.c
++++ b/osfmk/arm64/bsd_arm64.c
+@@ -279,6 +279,17 @@ mach_syscall(struct arm_saved_state *state)
+ 
+ 
+ 	retval = mach_call(&args);
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	{
++		extern int sweet_trace_left(void);
++		extern int proc_selfpid(void);
++		if (__improbable(proc_selfpid() == 1) && sweet_trace_left() > 0) {
++			printf("TRAP %s(-%d)(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%x\n",
++			    mach_syscall_name_table[call_number], call_number,
++			    (uint64_t)args.arg1, (uint64_t)args.arg2, (uint64_t)args.arg3, (uint64_t)args.arg4, retval);
++		}
++	}
++#endif
+ 
+ skip_machcall:
+ 
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index 0308c41..0ac21e8 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -980,6 +980,44 @@ exception_triage(
+  * (crashing) thread.
+  */
+ void sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subcode);
++/* sweet (0309): which mapping holds addr (descending into the shared
++ * region submap), and the first 32 bytes there. */
++static void
++sweet_crash_where(const char *name, const char *what, uint64_t addr)
++{
++	vm_map_t map = current_map();
++	vm_map_entry_t entry;
++	uint64_t data[4] = { 0 };
++	int rc = copyin((user_addr_t)addr, data, sizeof(data));
++	vm_map_lock_read(map);
++	if (!vm_map_lookup_entry(map, (vm_map_offset_t)addr, &entry)) {
++		vm_map_unlock_read(map);
++		printf("CRASH %s %s 0x%llx: not mapped\n", name, what, addr);
++		return;
++	}
++	printf("CRASH %s %s 0x%llx in 0x%llx-0x%llx prot %d/%d tag %d off 0x%llx%s copyin %d: %016llx %016llx %016llx %016llx\n",
++	    name, what, addr, (uint64_t)entry->vme_start, (uint64_t)entry->vme_end,
++	    entry->protection, entry->max_protection, (int)VME_ALIAS(entry),
++	    (uint64_t)VME_OFFSET(entry), entry->is_sub_map ? " SUBMAP" : "", rc,
++	    data[0], data[1], data[2], data[3]);
++	if (entry->is_sub_map) {
++		vm_map_t sub = VME_SUBMAP(entry);
++		vm_map_offset_t saddr = addr - entry->vme_start + VME_OFFSET(entry);
++		vm_map_entry_t se;
++		vm_map_lock_read(sub);
++		if (vm_map_lookup_entry(sub, saddr, &se)) {
++			printf("CRASH %s %s submap 0x%llx in 0x%llx-0x%llx prot %d/%d off 0x%llx object %p%s\n",
++			    name, what, (uint64_t)saddr, (uint64_t)se->vme_start, (uint64_t)se->vme_end,
++			    se->protection, se->max_protection, (uint64_t)VME_OFFSET(se),
++			    se->is_sub_map ? NULL : (void *)VME_OBJECT(se), se->is_sub_map ? " SUBMAP" : "");
++		} else {
++			printf("CRASH %s %s submap 0x%llx: hole\n", name, what, (uint64_t)saddr);
++		}
++		vm_map_unlock_read(sub);
++	}
++	vm_map_unlock_read(map);
++}
++
+ static void sweet_crash_strings(const char *name);
+ 
+ void
+@@ -1019,6 +1057,15 @@ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subc
+ 		fp = frame[0];
+ 	}
+ 	printf("%s\n", line);
++	/* sweet (0309): all general registers, and where x0 / x19 point. */
++	for (unsigned i = 0; i < 29; i += 4) {
++		printf("CRASH %s x%u: %016llx %016llx %016llx %016llx\n", name, i,
++		    get_saved_state_reg(ss, i), get_saved_state_reg(ss, i + 1),
++		    i + 2 < 29 ? get_saved_state_reg(ss, i + 2) : 0,
++		    i + 3 < 29 ? get_saved_state_reg(ss, i + 3) : 0);
++	}
++	sweet_crash_where(name, "x0", get_saved_state_reg(ss, 0));
++	sweet_crash_where(name, "x19", get_saved_state_reg(ss, 19));
+ 
+ 	if (sig == 11 || sig == 10) {
+ 		/* Which mapping the faulting address is in, or which two it falls between. */

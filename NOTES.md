@@ -1383,3 +1383,28 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   BOOT restored to out/xnu-boot-uc3.img (a8431754..., iOS 16 known good). Follow-ups: loader boot_args for
   BOOT_LINE_LENGTH 1024 (11417 reads bootFlags/memSizeActual at +1132/+1140; today both read 0 from the zeroed
   page, memSizeActual 0 falls back to memSize), flash-log flush on panic, then plan step 2 (iPadOS 18 root).
+- 2026-10-28: **iPadOS 18.7.11 root built, written and booted (plan step 2): reaches launchd, which dies in
+  libSystem start-up.** Root: `sudo IPSW=build/ipsw-18 OUT=build/root-ipados18.img INSTALL_STAGED_APPS=1
+  tools/build-ios-root.sh` + `IMG=build/root-ipados18.img tools/starlte-tune-ios-root.sh` (16 GiB HFSX, 13 GB used,
+  220 apps in /Applications incl. the 36 staged stock apps, their AppPlaceholders left out; tools/stage-ios-root.sh =
+  the fork's a5xelte-stage script + optional PaperBoard + INSTALL_STAGED_APPS). Written over the iOS 16 root
+  (USERDATA 0..16 GiB; iOS 16 backup on the microSD /external_sd/ios-root-userdata-16g.img, Oct 26) with
+  starlte-flash-root.py (TWRP had A16DATA on /data: umount first), image sha 609e5387.... ADT:
+  mkadt_starlte.py --big --bank2 --ipad7 build/ipsw-18/j171ap.adt -> out/starlte-ipad7.adt (J171AP/iPad7,11/J171,
+  real J171AP /product, chip-id 0x8010, display-scale 2, artwork subtype 2160, canvas 1440x1920 = 720x960 pt @2x:
+  SweetFramebuffer's in-panel surface caps the width at 1440). Boot-args build/ipados18-cmdline.txt (sweetfb_lw=1440
+  sweetfb_lh=1920, sweetscan=launchd, sweettrace=2000). BOOT images out/xnu-boot-ipados18{a..e}.img.
+  Result every boot: J171/iPad7,11, 8 CPUs, root mounted, libignition "goodbye", then pid 1 dies -- SIGSEGV (isa 0)
+  or SIGABRT (libmalloc free_list_checksum_botch), both while freeing an XPC dictionary in
+  _libSystem_initializer -> _container_init -> _os_feature_enabled_SLOWPATH (symbolized with blacktop ipsw `dsc a2s`
+  against a local copy of the cache, build/dsc-18). Heap corruption, same spot as iOS 16 on this kernel (also
+  SIGABRT). Ruled out: M3/inter-cluster coherency (cpus=4 = A55 only: identical abort), commpage CPU counts (8),
+  madvise REUSABLE rounding and shared-region submap page shift (same as 8796), pager slide loop (cache uses v2,
+  4 KiB slide pages). Trace (sweettrace): map_with_linking_np (dyld pager, new since iOS 17) = EINVAL, then dyld's
+  userland fallback; objc_bp_assist_cfg_np = EIO; sandbox stand-in only op 2. Suspects left: xnu-11417's VM on a
+  4 KiB-page kernel with 16 KiB user maps (new vm_sanitize layer, allocation/deallocation alignment) -- iOS 16 on
+  8796 never hit it. Next: a static test init (no libSystem) at /usr/appleinternal/sbin/launchd.development, which
+  load_init_program tries first, exercising anonymous memory, file mmap, COW, vm_allocate/deallocate and
+  madvise on 4 KiB sub-ranges of 16 KiB pages and checking the data, to find the broken primitive.
+  Kernel diagnostics (patch 0309): critical-exit crash log (pc/lr/bt, all registers, mapping of x0/x19) + flash-log
+  flush before the init-death panic; boot-arg sweettrace=N logs pid 1's first N syscalls / Mach traps.

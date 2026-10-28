@@ -53,10 +53,40 @@ def child(node, name):
     raise ValueError(f'missing donor ADT node {name}')
 
 
-def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False, big=False):
+# --ipad7: iPadOS 18 (iPad7,11 / J171AP userland). The canvas keeps an iPad's
+# 3:4 at the panel's full width: 1440x1920 = 720x960 points @2x
+# (sweetfb_lw=1440 sweetfb_lh=1920), 94% of the 10.2" iPad's 768x1024 points.
+# A real iPad's 1536+ px width does not fit SweetFramebuffer's in-panel surface.
+IPAD_CANVAS = (1440, 1920)
+
+
+def ipad_identity(root, adt_path):
+    """Root identity and /product of the real J171AP tree, A10 chip-id."""
+    old = child(root, 'product')
+    phandle = old.prop('AAPL,phandle')
+    root.children = [n for n in root.children if n.prop('name') != mkadt.cstr('product')]
+    props = mkadt.d22ap_product(adt_path)
+    product = mkadt.node('product', ([('AAPL,phandle', phandle)] if phandle else []) + props)
+    root.children.append(product)
+    # J171AP leaves artwork-device-subtype empty for iBoot; 2160 = iPad 10.2".
+    set_prop(product, 'artwork-device-subtype', mkadt.u32(2160))
+    set_prop(product, 'artwork-scale-factor', mkadt.u32(2))
+    chosen = child(root, 'chosen')
+    set_prop(chosen, 'display-scale', mkadt.u32(2))
+    set_prop(chosen, 'chip-id', mkadt.u32(0x8010))
+    set_prop(root, 'model', mkadt.cstr('iPad7,11'))
+    set_prop(root, 'target-type', mkadt.cstr('J171'))
+    set_prop(root, 'target-sub-type', mkadt.cstr('J171AP'))
+    return IPAD_CANVAS, ('J171AP', 'iPad7,11')
+
+
+def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False, big=False, ipad=None):
     root = mkadt.build(seed=os.urandom(64), qemu=True)
     canvas = (FB_WIDTH, FB_HEIGHT)
-    if scale2:
+    identity = ('D22AP', 'iPhone10,3')
+    if ipad:
+        canvas, identity = ipad_identity(root, ipad)
+    elif scale2:
         # As mkadt_herolte.py --scale2: a whole iPhone XR screen (414x896
         # points @2x = 828x1792), 2.9x fewer pixels than the panel for the CPU
         # renderer; the kernel scales it up (sweetfb_scale=1 sweetfb_lw=828
@@ -66,9 +96,9 @@ def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False, big=False):
         set_prop(product, 'artwork-device-subtype', mkadt.u32(1792))
         set_prop(product, 'artwork-scale-factor', mkadt.u32(2))
         canvas = (828, 1792)
-    # iPhone X identity, as herolte; 'samsung,a5xelte' keeps the shared
-    # SweetPlatformExpert IONameMatch.
-    set_prop(root, 'compatible', mkadt.cstr('D22AP') + mkadt.cstr('iPhone10,3') +
+    # iPhone X identity, as herolte (or the iPad's, --ipad7); 'samsung,a5xelte'
+    # keeps the shared SweetPlatformExpert IONameMatch.
+    set_prop(root, 'compatible', mkadt.cstr(identity[0]) + mkadt.cstr(identity[1]) +
              mkadt.cstr('samsung,a5xelte') + mkadt.cstr('samsung,herolte') +
              mkadt.cstr('samsung,starlte') + mkadt.cstr('samsung,exynos9810') +
              mkadt.cstr('AppleARM'))
@@ -173,9 +203,12 @@ if __name__ == '__main__':
     parser.add_argument('--bank2-mb', type=int, default=1024,
                         help='MiB of the second bank; on herolte 1536 boots with boot-arg '
                              'vm_compression_limit=98304 and 2048 panics in write_pte_fast')
+    parser.add_argument('--ipad7', type=Path, metavar='J171AP_ADT',
+                        help='iPadOS 18 identity from the real J171AP device tree '
+                             '(build/ipsw-18/j171ap.adt), 1440x1920 @2x canvas')
     args = parser.parse_args()
     dram = (BANK2_BASE, min(args.bank2_mb << 20, BANK2_SIZE)) if args.bank2 else (DRAM_BASE, DRAM_SIZE)
     assert dram[0] + dram[1] <= PRAM_BASE or dram[0] >= PRAM_BASE + PRAM_SIZE, 'XNU RAM overlaps /pram'
-    blob = adt.serialize(build(dram=dram, scale2=args.scale2, big=args.big))
+    blob = adt.serialize(build(dram=dram, scale2=args.scale2, big=args.big, ipad=args.ipad7))
     args.output.write_bytes(blob)
     print(f'{args.output}: {len(blob)} bytes')

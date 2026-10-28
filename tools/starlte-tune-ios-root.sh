@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# S9-specific root tweaks on build/root.img (raw HFSX volume), after
+# S9-specific root tweaks on build/root.img (raw HFSX volume; IMG= another), after
 # tools/build-ios-root.sh. Run as root:  sudo tools/starlte-tune-ios-root.sh
 #   - drop launchd jobs for hardware the S9 port does not drive yet: they
 #     only crash-loop and cost the single CPU and many UFS reads
@@ -7,7 +7,7 @@
 set -euo pipefail
 [[ ${EUID} == 0 ]] || { echo "run as root: sudo $0" >&2; exit 2; }
 cd "$(dirname "$0")/.."
-img=build/root.img
+img=${IMG:-build/root.img}
 [[ -f $img ]] || { echo "missing $img" >&2; exit 1; }
 
 dev=$(hdiutil attach -nomount -nobrowse -imagekey diskimage-class=CRawDiskImage "$img" | awk 'NR==1 {print $1}')

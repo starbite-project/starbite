@@ -19,6 +19,11 @@ kernel of iPadOS 18.7.11 (22H384) for J171AP. Built by `tools/build-xnu-11417.sh
   processor_boot is skipped for the generic boards), and initCPU no longer opens
   an IRQ window for the self-SGI (processor_cpu_reinit asserts SIGPdisabled is
   still set, then unmasks and waits itself; the window tripped it on CPU 4).
+- `0309-port-critical-exit-log.patch` (diagnostics): for a critical process (launchd)
+  the SWEET crash log is printed before the init-death panic (pc/lr/backtrace, all
+  registers, the mapping of x0/x19), and the console ring is flushed to the flash log
+  synchronously (herolte_log_flush_now); boot-arg sweettrace=N logs pid 1's first N
+  BSD syscalls and Mach traps with arguments and results.
 - Not exported, obsolete on 11417 (upstream already): 0001, 0002, 0005, 0083.
 
 Check: the staging scripts + every patch here, in name order, on a clean
