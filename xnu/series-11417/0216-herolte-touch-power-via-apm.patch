@@ -1,4 +1,4 @@
-From f150e80029bbd2db90d361a08a8e6b4e98411d3a Mon Sep 17 00:00:00 2001
+From d0f41ef35a6e5e78dc6085beebbb99603a00e232 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:52 +0200
 Subject: [PATCH] patch: 0216-herolte-touch-power-via-apm.patch

@@ -1408,3 +1408,57 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   madvise on 4 KiB sub-ranges of 16 KiB pages and checking the data, to find the broken primitive.
   Kernel diagnostics (patch 0309): critical-exit crash log (pc/lr/bt, all registers, mapping of x0/x19) + flash-log
   flush before the init-death panic; boot-arg sweettrace=N logs pid 1's first N syscalls / Mach traps.
+- 2026-10-28: **iPadOS 18: launchd, SpringBoard and backboardd all stay up; the loop is unattended now.** Six
+  kernel findings, one per boot (a boot cost a flash + reboot + reset into TWRP + log pull, hence the pace):
+  1. launchd heap corruption = madvise widened to 16 KiB on the 4 KiB kernel (patch 0310, `kern_mman.c` aligns to
+     PAGE_MASK as 8796 did); found with the static memtest init (tools/memtest, `launchdsuffix=memtest`).
+  2. `sandbox_get_container_expected()` (Sandbox op 0x43) must succeed (stand-in returns 0; folded into 0201).
+  3. Kernel panic "metadata ... chunk len greater than max" in `ipc_port_lock_check_aligned` while notifyd ran:
+     PGZ-protected ipc port in a multi-page chunk (4 KiB pages) fails `zone_id_require_aligned`; patch 0311
+     resolves PGZ addresses to the original element first.
+  4. lsd/backboardd/findmydeviced abort loop: containermanagerd never answered (clients saw their reply port die,
+     reconnected, 7 retries, abort); containermanagerd itself got dead-name from usermanagerd. Root cause (patch
+     0312): `mach_port_is_connection_for_service()` returned KERN_NOT_SUPPORTED without Sandbox message-filter
+     callbacks and iPadOS 18's libxpc rejects every new peer on that; now KERN_SUCCESS / policy 0 when there are no
+     callbacks. (iOS 16's libxpc never asked.)
+  5. Diagnostics that got there (patch 0309): `sweettracename=<p_comm>` traces a process by name, its failing
+     syscalls (with the path argument) and failing Mach traps are always logged; `sweetmsg=1` prints the printable
+     text of its Mach messages incl. out-of-line data (XPC dictionaries, launchd lookups, send-once/dead-name
+     notifications = ids 69/71); containermanagerd/usermanagerd/lsd/SpringBoard/backboardd all read this way.
+  6. Unattended loop: loader option `starauto=N` (in the payload boot-args; shim/starlte menu starts iOS after N s
+     unless a key is pressed, built in the lima VM) + kernel `sweetreboot=N` (log thread flushes and resets into
+     recovery via PMU INFORM2/3 + SWRESET after N s) + `tools/starlte-cycle.sh IMG LOG` (wait for TWRP, flash, wait
+     for the boot to come and go, pull the log). First run: boot16 (ipados18p).
+  State after boot16-18 (`build/ipados18-boot1[6-8].txt`, 300 s each): ~3500 execs, SpringBoard pid 27 alive for the
+  whole run (scenes, PosterBoard, home-screen service, backlight requests), backboardd turns the display on and
+  swaps at vsync, but every IOMFB swap record carries NULL layers (no IOSurface is ever created by backboardd; iOS 16
+  created 828x1792 BGRA buffers at once). iPadOS 18's swap record is 0x514 bytes = the 0x46c layout shifted by 0x48
+  (swap id 0x98, surface ids 0x9c, mask 0x14c); SweetFramebuffer reads both (folded into 0209). QuartzCore 18 still
+  has the CPU renderer (`CA::WindowServer::Server::sw_renderer` -> SWContext, used when AccelServer::renderer()
+  has no Metal device), so the gap is in display buffer allocation / screen-on: `com.apple.backlightd` is hosted by
+  backboardd (no backlightd binary in 18.7.11), SpringBoard asks it for screen-on. Remaining crashers: replicatord,
+  cryptexd, gamed (Swift assertions), iconservicesagent jetsam; none UI-critical. Uncommitted: 0309 folds, 0310,
+  0311, 0312, 0201/0209 folds, tools/memtest, shim starauto, tools/starlte-cycle.sh.
+- 2026-10-28 22:44: **MILESTONE: iPadOS 18.7.11 boots to the lock screen on the S9, touch works** (user report;
+  boot25 = out/xnu-boot-ipados18x.img, log build/ipados18-boot25.txt). CPU rendering (QuartzCore's SW renderer, no
+  Metal device), 1440x1920 iPad canvas on the 1440x2960 panel. The two blockers after SpringBoard came up:
+  1. libsystem_trace only honours ACTIVITY_LOG_STDERR / OS_ACTIVITY_* when `amfi_check_dyld_policy_self` (=
+     `__mac_syscall("AMFI", 90)`) reports AMFI_DYLD_OUTPUT_ALLOW_DEVELOPMENT_VARS (bit 8); our AMFI stand-in was
+     registered as "SWEET AMFI" so every process got ENOPOLICY. Now named "AMFI", op 90 answers bit 8 only (0201).
+     With backboardd's job (in /System/Library/xpc/launchd.plist -- launchd ignores the individual plists) set to
+     ACTIVITY_LOG_STDERR=1 + StandardErrorPath=/private/var/tmp/backboardd.log and the kernel's
+     `sweetdumpfile=<path>` (prints the file's tail before the sweetreboot reset), backboardd said:
+     "IOSurface creation failed. IOSurface open failed: 0 / CAIOSurfaceCreate: failed to allocate IOSurface (1440 x
+     1920, BGRA)". (StandardErrorPath=/dev/console instead kept backboardd from starting at all.)
+  2. iPadOS 18 IOSurface ABI (SweetSurface, folded into 0068): sel 13 limits is 0x28 bytes with the ABI version u16
+     at +0x22 (iOS 16: 0x18, +0x16), else the framework closes the connection; the lock result is 0xc68 bytes,
+     copied to IOSurfaceClient+0x70: +0 base, +8 state page, +0x10 timestamps, +0x18 id (u32), +0x20 alloc size,
+     +0x28 width, +0x30 height, +0x38 bytes per row, +0x40 offset (all u64), +0x48 pixel format, +0x50 alloc size
+     (u64), +0x58 plane count, +0x60 bpe (u16) / +0x62 ew / +0x63 eh, +0x64 cache mode, +0x70 parent id, planes at
+     +0x88 x 0x98 (+0 w, +8 h, +0x18 offset, +0x20 bpr, +0x28 size (u64), +0x30 bpe, +0x32/+0x33 ew/eh). The stand-in
+     picks the iOS 16 or 18 layout by the caller's output buffer size.
+  Result: backboardd creates two 1440x1920 BGRA surfaces and alternates them every swap. Daily image (no timer):
+  out/xnu-boot-ipados18-live.img = build/ipados18-live-cmdline.txt (starauto=3). Test images: starauto=3
+  sweetreboot=100 (+ sweetdumpfile=/private/var/tmp/backboardd.log) via tools/starlte-cycle.sh. Remaining
+  crashers: replicatord, cryptexd, iconservicesagent, gamed (none UI-critical). backboardd's stderr log grows
+  ~20 KB/s while debugging; drop the redirect from the launchd cache for daily use.

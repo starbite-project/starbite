@@ -1,4 +1,4 @@
-From aa526fcfc19a8f3edecd2d6fc1c165e19ed88763 Mon Sep 17 00:00:00 2001
+From c862fb49ac48b1a9442c249d2907cb5a8c1635f4 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:34:08 +0200
 Subject: [PATCH] patch: 0235-herolte-gpu-present.patch
@@ -366,7 +366,7 @@ index a3e9022..0c902cd 100644
  static void
  hg_all_cores_test(uint64_t hold)
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 12b7033..997dd66 100644
+index 59fbf6f..d70acd2 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -65,6 +65,11 @@ uint64_t sweet_fb_hold_until;
@@ -381,7 +381,7 @@ index 12b7033..997dd66 100644
  #endif
  
  enum {
-@@ -125,6 +130,7 @@ public:
+@@ -126,6 +131,7 @@ public:
  	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
  	int32_t       fOffX, fOffY;             /* logical origin of the panel */
  	bool          fScaled;                  /* sweetfb_scale: logical = 2/3 panel, x1.5 */
@@ -389,7 +389,7 @@ index 12b7033..997dd66 100644
  	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
  	IOMemoryMap  *fMap;
  	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
-@@ -153,6 +159,9 @@ public:
+@@ -154,6 +160,9 @@ public:
  	uint64_t present(const uint8_t *rec);
  	uint64_t scaledCopy(uintptr_t src, uint32_t srcRowBytes, int32_t dx, int32_t dy,
  	    int32_t w, int32_t h);
@@ -399,7 +399,7 @@ index 12b7033..997dd66 100644
  };
  
  OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
-@@ -226,6 +235,11 @@ AppleCLCD::start(IOService *provider)
+@@ -227,6 +236,11 @@ AppleCLCD::start(IOService *provider)
  		fScaled = true;
  		fLogicalW = fWidth * 2 / 3;
  		fLogicalH = fHeight * 2 / 3;
@@ -411,7 +411,7 @@ index 12b7033..997dd66 100644
  	}
  #elif !defined(ARM64_BOARD_CONFIG_A5XELTE)
  	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
-@@ -706,6 +720,14 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -721,6 +735,14 @@ AppleCLCD::present(const uint8_t *rec)
  		    s->memory == NULL || last > s->memory->getLength()) {
  			src = 0;
  		}
@@ -426,7 +426,7 @@ index 12b7033..997dd66 100644
  		if (src != 0 && bpe == 4 && fScaled) {
  			copied += scaledCopy(src + s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4,
  			    s->bytesPerRow, dx, dy, w, h);
-@@ -732,6 +754,53 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -747,6 +769,53 @@ AppleCLCD::present(const uint8_t *rec)
  }
  
  #if defined(ARM64_BOARD_CONFIG_HEROLTE)

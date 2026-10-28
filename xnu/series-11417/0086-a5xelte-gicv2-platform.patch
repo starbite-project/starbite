@@ -1,4 +1,4 @@
-From 727edb2967bcc313004c31e98fc2f4929adbfc8b Mon Sep 17 00:00:00 2001
+From b730d6828afc3dab55e7ec503e61c56dd9d626fc Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:32:26 +0200
 Subject: [PATCH] patch: 0086-a5xelte-gicv2-platform.patch

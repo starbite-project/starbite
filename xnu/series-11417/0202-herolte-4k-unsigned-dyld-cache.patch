@@ -1,4 +1,4 @@
-From 62cf5cfae4f5b5010d885618435e1b926d1adb6a Mon Sep 17 00:00:00 2001
+From d5208cf2693b889cbdeb6fa4051d8ea077d39373 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:51 +0200
 Subject: [PATCH] patch: 0202-herolte-4k-unsigned-dyld-cache.patch

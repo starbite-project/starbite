@@ -1,4 +1,4 @@
-From 24929cdedfaf339c16a024ad2bdb92b41382d56f Mon Sep 17 00:00:00 2001
+From 24c67a30758d3b9580227f2f4029b7e00a3bff1b Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 17:56:59 +0200
 Subject: [PATCH] patch: 0309-port-critical-exit-log.patch
@@ -11,24 +11,42 @@ user backtrace, strings for SIGABRT) and flushes the console ring to the
 flash log synchronously (herolte_log_flush_now, HEROLTE boards) before
 the core dump and panic. herolte_log_thread's body moved to
 herolte_log_write(), shared by both.
+
+build: sweettracename=<p_comm> traces a process by name; its failing syscalls are always logged with the path argument
+
+build: sweetmsg=1 dumps the printable text of the traced process's Mach messages (XPC replies)
+
+build: sweetmsg follows OOL descriptors and prints a hex header for text-less messages
+
+build: failing Mach traps of the traced process are always logged
+
+build: persona(494) syscalls are logged from every process
+
+build: sweetreboot=N: the log thread flushes and resets into recovery after N seconds
+
+build: persona syscalls are only logged for the traced process again
+
+build: sweetdumpfile=<path>: the tail of that file is printed to the console before the sweetreboot reset
 ---
- bsd/dev/arm/systemcalls.c |  30 +++++++++++
- bsd/dev/herolte_ufs.c     | 107 +++++++++++++++++++++++++-------------
- bsd/kern/kern_exit.c      |  14 +++++
- osfmk/arm64/bsd_arm64.c   |  11 ++++
- osfmk/kern/exception.c    |  47 +++++++++++++++++
- 5 files changed, 172 insertions(+), 37 deletions(-)
+ bsd/dev/arm/systemcalls.c |  93 ++++++++++++++++
+ bsd/dev/herolte_ufs.c     | 223 ++++++++++++++++++++++++++++++++------
+ bsd/kern/kern_exit.c      |  14 +++
+ osfmk/arm64/bsd_arm64.c   |  30 +++++
+ osfmk/ipc/ipc_kmsg.c      | 110 +++++++++++++++++++
+ osfmk/ipc/mach_msg.c      |   6 +
+ osfmk/kern/exception.c    |  47 ++++++++
+ 7 files changed, 487 insertions(+), 36 deletions(-)
 
 diff --git a/bsd/dev/arm/systemcalls.c b/bsd/dev/arm/systemcalls.c
-index 0906700..88717b7 100644
+index 0906700..0706163 100644
 --- a/bsd/dev/arm/systemcalls.c
 +++ b/bsd/dev/arm/systemcalls.c
-@@ -44,6 +44,22 @@ extern void dtrace_systrace_syscall_return(unsigned short, int, int *);
+@@ -44,6 +44,70 @@ extern void dtrace_systrace_syscall_return(unsigned short, int, int *);
  extern void
  unix_syscall(struct arm_saved_state * regs, thread_t thread_act, struct proc * proc);
  
 +#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
-+/* Remaining pid 1 trace lines (boot-arg sweettrace, default 0 = off). */
++/* Remaining trace lines (boot-arg sweettrace, default 0 = off). */
 +int sweet_trace_left(void);
 +int
 +sweet_trace_left(void)
@@ -41,12 +59,60 @@ index 0906700..88717b7 100644
 +	}
 +	return left > 0 ? left-- : 0;
 +}
++
++/*
++ * Which process the trace follows: pid 1, or every process whose p_comm
++ * matches boot-arg sweettracename=<name> (first MAXCOMLEN characters).
++ */
++bool sweet_trace_match(const char *comm, int pid);
++bool
++sweet_trace_match(const char *comm, int pid)
++{
++	static char name[MAXCOMLEN + 1];
++	static int state = -1;
++
++	if (state < 0) {
++		state = PE_parse_boot_argn("sweettracename", name, sizeof(name)) ? 1 : 0;
++	}
++	if (state == 0) {
++		return pid == 1;
++	}
++	return strncmp(comm, name, MAXCOMLEN) == 0;
++}
++
++/* Failing syscalls of the traced process are always logged (capped). */
++static int
++sweet_trace_err_left(void)
++{
++	static int left = 3000;
++	return left > 0 ? left-- : 0;
++}
++
++/* The path argument of a failing filesystem syscall, if it has one. */
++static user_addr_t
++sweet_trace_path_arg(int code, const uint64_t *arg)
++{
++	switch (code) {
++	case SYS_open: case SYS_unlink: case SYS_chmod: case SYS_chown:
++	case SYS_access: case SYS_symlink: case SYS_readlink: case SYS_rename:
++	case SYS_mkdir: case SYS_rmdir: case SYS_getattrlist: case SYS_setattrlist:
++	case SYS_getxattr: case SYS_setxattr: case SYS_listxattr: case SYS_fsctl:
++	case SYS_stat64: case SYS_lstat64: case SYS_statfs64:
++		return (user_addr_t)arg[0];
++	case SYS_openat: case SYS_renameat: case SYS_faccessat: case SYS_fchmodat:
++	case SYS_fchownat: case SYS_fstatat64: case SYS_unlinkat: case SYS_readlinkat:
++	case SYS_mkdirat: case SYS_getattrlistat:
++		return (user_addr_t)arg[1];
++	default:
++		return 0;
++	}
++}
 +#endif
 +
  static int      arm_get_syscall_args(uthread_t, struct arm_saved_state *, const struct sysent *);
  static int      arm_get_u32_syscall_args(uthread_t, arm_saved_state32_t *, const struct sysent *);
  static void     arm_prepare_u32_syscall_return(const struct sysent *, arm_saved_state_t *, uthread_t, int);
-@@ -180,6 +196,20 @@ unix_syscall(
+@@ -180,6 +244,35 @@ unix_syscall(
  	AUDIT_SYSCALL_ENTER(code, proc, uthread);
  	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
  	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
@@ -55,12 +121,27 @@ index 0906700..88717b7 100644
 +	 * Mach traps (bsd_arm64.c), with arguments and results. */
 +	{
 +		extern int sweet_trace_left(void);
++		extern bool sweet_trace_match(const char *, int);
 +		extern const char *syscallnames[];
-+		if (__improbable(pid == 1) && sweet_trace_left() > 0) {
-+			printf("SYS %s(%d)(0x%llx, 0x%llx, 0x%llx, 0x%llx) = %d / 0x%llx\n",
-+			    code < nsysent ? syscallnames[code] : "?", code,
-+			    uthread->uu_arg[0], uthread->uu_arg[1], uthread->uu_arg[2], uthread->uu_arg[3],
-+			    error, (uint64_t)uthread->uu_rval[0]);
++		/* persona(494) calls are logged from every process: user sessions depend on them */
++		if (__improbable(sweet_trace_match(proc->p_comm, pid))) {
++			bool failed = error != 0 && error != EJUSTRETURN && error != ERESTART;
++			if (sweet_trace_left() > 0 || (failed && sweet_trace_err_left() > 0)) {
++				char path[160] = "";
++				user_addr_t pa = failed ? sweet_trace_path_arg(code, uthread->uu_arg) : 0;
++				if (pa != 0) {
++					size_t done;
++					path[0] = ' ';
++					if (copyinstr(pa, path + 1, sizeof(path) - 1, &done) != 0) {
++						path[0] = '\0';
++					}
++				}
++				printf("SYS %s[%d] %s(%d)(0x%llx, 0x%llx, 0x%llx, 0x%llx) = %d / 0x%llx%s\n",
++				    proc->p_comm, pid,
++				    code < nsysent ? syscallnames[code] : "?", code,
++				    uthread->uu_arg[0], uthread->uu_arg[1], uthread->uu_arg[2], uthread->uu_arg[3],
++				    error, *(uint64_t *)(void *)&uthread->uu_rval[0], path);   /* full 64-bit result (mmap) */
++			}
 +		}
 +	}
 +#endif
@@ -68,14 +149,25 @@ index 0906700..88717b7 100644
  #if CONFIG_MACF
  skip_syscall:
 diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
-index ee2f0da..d26f003 100644
+index ee2f0da..cde5a3a 100644
 --- a/bsd/dev/herolte_ufs.c
 +++ b/bsd/dev/herolte_ufs.c
-@@ -789,62 +789,95 @@ struct herolte_log_header {
+@@ -24,6 +24,9 @@
+ #include <sys/errno.h>
+ #include <sys/proc.h>
+ #include <sys/uio.h>
++#include <sys/vnode.h>
++#include <sys/vnode_internal.h>
++#include <sys/fcntl.h>
+ #include <miscfs/devfs/devfs.h>
+ #include <kern/locks.h>
+ #include <kern/clock.h>
+@@ -789,62 +792,209 @@ struct herolte_log_header {
  };
  
  static int herolte_log_chan;
 +static uint64_t herolte_log_first, herolte_log_flushed, herolte_log_seq;
++static bool herolte_log_started;      /* herolte_log_start() decided to log */
 +
 +/* Copy what the console ring gained since the last flush, then the header. */
 +static int
@@ -129,16 +221,119 @@ index ee2f0da..d26f003 100644
 + * death panics within ~30 s of boot, before the 10 s thread's first flush
 + * landed (xnu-11417 bring-up). Thread context, before the panic.
 + */
++static void
++herolte_log_setup(void)
++{
++	const char *ring;
++	uint32_t rsize;
++	uint64_t total;
++	a5xelte_log_snapshot(&ring, &rsize, &total);
++	herolte_log_first = su.first_block + su.nblocks - (1 + rsize / UFS_BLOCK);
++}
++
 +void herolte_log_flush_now(void);
 +void
 +herolte_log_flush_now(void)
 +{
++	/* An init that dies within moments of the root mount can beat the log
++	 * thread's start: set the area up here then (needs the writable root). */
++	if (herolte_log_first == 0 && su.writable && herolte_log_started) {
++		herolte_log_setup();
++	}
 +	if (herolte_log_first == 0) {
++		printf("HEROLTE LOG: no flash log to flush\n");
 +		return;
 +	}
 +	int error = herolte_log_write();
 +	printf("HEROLTE LOG: flushed before the critical-exit panic (%d)\n", error);
 +	(void)herolte_log_write();      /* the line above */
++}
++
++/*
++ * Boot-arg sweetdumpfile=<path>: right before the sweetreboot reset, print
++ * the last 128 KiB of that file line by line into the console (and so the
++ * persistent log).  Daemons whose os_log is mirrored to a file with
++ * ACTIVITY_LOG_STDERR=1 + StandardErrorPath become readable this way.
++ */
++static void
++starlte_dump_file(void)
++{
++	static char path[128];
++	vnode_t vp = NULLVP;
++	vfs_context_t ctx = vfs_context_kernel();
++	off_t size = 0, off;
++	char *buf, line[400];
++	size_t ln = 0;
++
++	if (!PE_parse_boot_argn("sweetdumpfile", path, sizeof(path))) {
++		return;
++	}
++	if (vnode_open(path, FREAD, 0, 0, &vp, ctx) != 0) {
++		printf("SWEET DUMP: cannot open %s\n", path);
++		return;
++	}
++	(void)vnode_size(vp, &size, ctx);
++	off = size > 131072 ? size - 131072 : 0;
++	printf("SWEET DUMP: %s, %lld bytes, from offset %lld\n", path, size, off);
++	buf = kalloc_data(4096, Z_WAITOK | Z_ZERO);
++	for (; buf != NULL && off < size; off += 4096) {
++		int resid = 0;
++		int n = (int)MIN(4096, size - off);
++		if (vn_rdwr(UIO_READ, vp, buf, n, off, UIO_SYSSPACE, 0,
++		    vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx)) != 0) {
++			break;
++		}
++		for (int i = 0; i < n - resid; i++) {
++			char c = buf[i];
++			if (c == '\n' || ln == sizeof(line) - 1) {
++				line[ln] = '\0';
++				printf("DUMP| %s\n", line);
++				ln = 0;
++				if (c == '\n') {
++					continue;
++				}
++			}
++			line[ln++] = (c >= 0x20 && c < 0x7f) ? c : '.';
++		}
++	}
++	if (ln) {
++		line[ln] = '\0';
++		printf("DUMP| %s\n", line);
++	}
++	if (buf) {
++		kfree_data(buf, 4096);
++	}
++	(void)vnode_close(vp, FREAD, ctx);
++	printf("SWEET DUMP: end\n");
++}
++
++/*
++ * Boot-arg sweetreboot=N: N seconds after the log thread starts, flush the
++ * persistent log and reset into recovery (TWRP), like the loader's menu does:
++ * PMU INFORM2 = 0x12345678, INFORM3 = 0x12345674 (recovery), SWRESET.
++ * Lets a test boot run unattended: flash, auto-boot, log, back to TWRP.
++ */
++static void
++starlte_reboot_recovery(void)
++{
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	volatile uint32_t *pmu = (volatile uint32_t *)ml_io_map(0x14060000, PAGE_SIZE);
++	if (pmu == NULL) {
++		printf("HEROLTE LOG: PMU mapping failed, no reboot\n");
++		return;
++	}
++	(void)ml_set_interrupts_enabled(FALSE);
++	pmu[0x808 / 4] = 0x12345678U;
++	pmu[0x80c / 4] = 0x12345674U;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	pmu[0x400 / 4] = 1;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	for (;;) {
++		__asm__ volatile ("wfe");
++	}
++#else
++	printf("HEROLTE LOG: sweetreboot is STARLTE only\n");
++#endif
 +}
  
  static void
@@ -152,10 +347,14 @@ index ee2f0da..d26f003 100644
  	a5xelte_log_snapshot(&ring, &rsize, &total);
 -	uint64_t first = su.first_block + su.nblocks - (1 + rsize / UFS_BLOCK);
 -	uint8_t *bounce = (uint8_t *)(su.dma + DMA_BOUNCE);
-+	herolte_log_first = su.first_block + su.nblocks - (1 + rsize / UFS_BLOCK);
++	if (herolte_log_first == 0) {
++		herolte_log_setup();
++	}
  	printf("HEROLTE LOG: %u KiB ring at partition block %llu\n",
 -	    rsize >> 10, first - su.first_block);
 +	    rsize >> 10, herolte_log_first - su.first_block);
++	uint32_t reboot_s = 0;
++	PE_parse_boot_argn("sweetreboot", &reboot_s, sizeof(reboot_s));
  	for (;;) {
  		(void)tsleep(&herolte_log_chan, PZERO, "herolog", hz * 10);
  		/* Heartbeat: gaps between these lines show CPU starvation. */
@@ -165,7 +364,12 @@ index ee2f0da..d26f003 100644
 -		a5xelte_log_snapshot(&ring, &rsize, &total);
 -		if (total == flushed) {
 -			continue;
--		}
++		if (reboot_s != 0 && ticks * 10 >= reboot_s) {
++			printf("HEROLTE LOG: sweetreboot=%u reached, flushing and rebooting to recovery\n", reboot_s);
++			starlte_dump_file();
++			(void)herolte_log_write();
++			starlte_reboot_recovery();
+ 		}
 -		uint64_t pos = total - flushed >= rsize ? total - rsize : flushed;
 -		uint64_t left = total - pos;
 -		int error = 0;
@@ -204,6 +408,14 @@ index ee2f0da..d26f003 100644
  	}
  }
  
+@@ -884,6 +1034,7 @@ herolte_log_start(void)
+ 	if (!on || !su.writable || su.nblocks < 2 * (1 + (4u << 20) / UFS_BLOCK)) {
+ 		return;
+ 	}
++	herolte_log_started = true;
+ 	if (kernel_thread_start(herolte_log_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
 diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 index f076642..5633fad 100644
 --- a/bsd/kern/kern_exit.c
@@ -230,26 +442,197 @@ index f076642..5633fad 100644
  
  	sync(p, (void *)NULL, (int *)NULL);
 diff --git a/osfmk/arm64/bsd_arm64.c b/osfmk/arm64/bsd_arm64.c
-index 6cb830d..736b674 100644
+index 6cb830d..12000fc 100644
 --- a/osfmk/arm64/bsd_arm64.c
 +++ b/osfmk/arm64/bsd_arm64.c
-@@ -279,6 +279,17 @@ mach_syscall(struct arm_saved_state *state)
+@@ -279,6 +279,36 @@ mach_syscall(struct arm_saved_state *state)
  
  
  	retval = mach_call(&args);
 +#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 +	{
 +		extern int sweet_trace_left(void);
++		extern bool sweet_trace_match(const char *, int);
 +		extern int proc_selfpid(void);
-+		if (__improbable(proc_selfpid() == 1) && sweet_trace_left() > 0) {
-+			printf("TRAP %s(-%d)(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%x\n",
++		extern void proc_selfname(char *, int);
++		char comm[17];
++		proc_selfname(comm, sizeof(comm));
++		/* failing traps of the traced process are always logged (capped) */
++		static int err_left = 3000;
++		bool failed = retval != KERN_SUCCESS && call_number != 31 /* mach_msg_trap */ &&
++		    call_number != 47 /* mach_msg2_trap: timeouts are routine */;
++		if (call_number == 31 || call_number == 47) {
++			/* but a send failure is not */
++			failed = (retval & 0xfff00000) == 0x10000000 && retval != 0x10004003;
++		}
++		if (__improbable(sweet_trace_match(comm, proc_selfpid())) &&
++		    (sweet_trace_left() > 0 || (failed && err_left > 0 && err_left--))) {
++			/* vm_allocate (10) / vm_map (15): the address the kernel chose */
++			uint64_t out_addr = 0;
++			if ((call_number == 10 || call_number == 15) && retval == KERN_SUCCESS) {
++				(void)copyin((user_addr_t)args.arg2, &out_addr, sizeof(out_addr));
++			}
++			printf("TRAP %s(-%d)(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%x -> 0x%llx\n",
 +			    mach_syscall_name_table[call_number], call_number,
-+			    (uint64_t)args.arg1, (uint64_t)args.arg2, (uint64_t)args.arg3, (uint64_t)args.arg4, retval);
++			    (uint64_t)args.arg1, (uint64_t)args.arg2, (uint64_t)args.arg3, (uint64_t)args.arg4, retval,
++			    out_addr);
 +		}
 +	}
 +#endif
  
  skip_machcall:
+ 
+diff --git a/osfmk/ipc/ipc_kmsg.c b/osfmk/ipc/ipc_kmsg.c
+index 07839de..c3f1343 100644
+--- a/osfmk/ipc/ipc_kmsg.c
++++ b/osfmk/ipc/ipc_kmsg.c
+@@ -131,6 +131,7 @@
+ #include <string.h>
+ 
+ #include <sys/kdebug.h>
++#include <pexpert/pexpert.h>
+ #include <libkern/OSAtomic.h>
+ 
+ #include <ptrauth.h>
+@@ -4864,6 +4865,112 @@ ipc_kmsg_deflate(
+  *		MACH_RCV_INVALID_DATA    Couldn't copy to user message.
+  *		the incoming "mr"        Copied data out of message buffer.
+  */
++
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++/*
++ * sweet: boot-arg sweetmsg=1 prints the printable runs of every Mach
++ * message the traced process (sweettracename=) sends or receives, so XPC
++ * dictionaries (keys, strings, error descriptions) can be read off the
++ * console without os_log.
++ */
++extern bool sweet_trace_match(const char *, int);
++extern int proc_selfpid(void);
++extern void proc_selfname(char *, int);
++
++void sweet_msg_dump(const char *dir, mach_vm_address_t uaddr, mach_msg_size_t size);
++
++/* Append the printable runs (>= 5 chars) of buf[0..n) to out; returns new o. */
++static size_t
++sweet_msg_scan(const char *buf, size_t n, char *out, size_t o, size_t osz)
++{
++	size_t i, run;
++	for (i = 0; i < n; ) {
++		for (run = 0; i + run < n && buf[i + run] >= 0x20 && buf[i + run] < 0x7f; run++) {
++		}
++		if (run >= 5) {
++			if (o + run + 3 >= osz) {
++				break;
++			}
++			if (o) {
++				out[o++] = ' '; out[o++] = '|'; out[o++] = ' ';
++			}
++			memcpy(out + o, buf + i, run);
++			o += run;
++		}
++		i += run ? run : 1;
++	}
++	out[o] = '\0';
++	return o;
++}
++
++void
++sweet_msg_dump(const char *dir, mach_vm_address_t uaddr, mach_msg_size_t size)
++{
++	static int enabled = -1;
++	char comm[17];
++	char buf[1536];
++	char out[480];
++	size_t n, o;
++	uint32_t bits, dcount, off;
++
++	if (enabled < 0) {
++		int v = 0;
++		PE_parse_boot_argn("sweetmsg", &v, sizeof(v));
++		enabled = v;
++	}
++	if (!enabled || size < 24) {
++		return;
++	}
++	proc_selfname(comm, sizeof(comm));
++	if (!sweet_trace_match(comm, proc_selfpid())) {
++		return;
++	}
++	n = MIN(size, sizeof(buf));
++	if (copyin(uaddr, buf, n) != 0) {
++		return;
++	}
++	memcpy(&bits, buf, 4);
++	o = sweet_msg_scan(buf, n, out, 0, sizeof(out));
++	printf("MSG%s %s[%d] %u bytes id %u bits 0x%x: %s\n", dir, comm, proc_selfpid(), size,
++	    *(uint32_t *)(void *)(buf + 20), bits, out);
++	if (o == 0 && n >= 48) {
++		/* no text: the header and the first body words in hex */
++		uint32_t *w = (uint32_t *)(void *)buf;
++		printf("MSG%s   hex %08x %08x %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x\n", dir,
++		    w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11]);
++	}
++	if (!(bits & MACH_MSGH_BITS_COMPLEX) || n < 28) {
++		return;
++	}
++	/* follow out-of-line memory descriptors (user 64-bit layout) */
++	memcpy(&dcount, buf + 24, 4);
++	off = 28;
++	for (uint32_t d = 0; d < dcount && d < 8 && off + 12 <= n; d++) {
++		uint8_t type = (uint8_t)buf[off + 11];
++		if (type == MACH_MSG_OOL_DESCRIPTOR || type == MACH_MSG_OOL_VOLATILE_DESCRIPTOR) {
++			uint64_t addr; uint32_t osize;
++			if (off + 16 > n) {
++				break;
++			}
++			memcpy(&addr, buf + off, 8);
++			memcpy(&osize, buf + off + 12, 4);
++			size_t on = MIN(osize, sizeof(buf));
++			if (on >= 8 && copyin((user_addr_t)addr, buf, on) == 0) {
++				sweet_msg_scan(buf, on, out, 0, sizeof(out));
++				printf("MSG%s   OOL %u bytes: %s\n", dir, osize, out);
++			} else {
++				printf("MSG%s   OOL %u bytes at 0x%llx: unreadable\n", dir, osize, addr);
++			}
++			off += 16;
++		} else if (type == MACH_MSG_PORT_DESCRIPTOR) {
++			off += 12;
++		} else {
++			off += 16;
++		}
++	}
++}
++#endif
++
+ mach_msg_return_t
+ ipc_kmsg_put_to_user(
+ 	ipc_kmsg_t              kmsg,     /* scalar or vector */
+@@ -4983,6 +5090,9 @@ ipc_kmsg_put_to_user(
+ 		mr = MACH_RCV_INVALID_DATA;
+ 		goto out;
+ 	}
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	sweet_msg_dump("<", msg_rcv_addr, usize);
++#endif
+ 
+ out:
+ 	if (mr == MACH_RCV_INVALID_DATA) {
+diff --git a/osfmk/ipc/mach_msg.c b/osfmk/ipc/mach_msg.c
+index 3829475..87f727a 100644
+--- a/osfmk/ipc/mach_msg.c
++++ b/osfmk/ipc/mach_msg.c
+@@ -727,6 +727,12 @@ mach_msg_trap_send(
+ 		ipc_kmsg_free(kmsg);
+ 		return mr;
+ 	}
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	{
++		extern void sweet_msg_dump(const char *, mach_vm_address_t, mach_msg_size_t);
++		sweet_msg_dump(">", (mach_vm_address_t)send_uctx->send_msg_addr, send_uctx->send_msg_size);
++	}
++#endif
+ 
+ 	mr = ipc_kmsg_send(kmsg, options, msg_timeout);
  
 diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 index 0308c41..0ac21e8 100644

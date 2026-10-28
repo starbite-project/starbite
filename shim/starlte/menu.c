@@ -315,6 +315,7 @@ static void opt_load(const char *c)
     opt.touchpwr = arg_num(c, "startouchpwr", 1) != 0;
     opt.multi = arg_num(c, "ufsmulti", 0) != 0;
     opt.smpprobe = arg_num(c, "starsmpprobe", 0) != 0;
+    opt.autoboot = arg_num(c, "starauto", 0);
 }
 
 static void opt_apply(char *c, unsigned len)
@@ -1229,6 +1230,29 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
     }
     v5_draw(&m);
     tp_init();
+    /* starauto=N in the payload's boot-args: unattended test loop. iOS starts
+     * after N seconds unless a key is pressed (the kernel's sweetreboot=
+     * brings the phone back to recovery afterwards). */
+    if (opt.autoboot && v5_avail(0)) {
+        star_fb_row_base(36);
+        star_fb_text_c(0, "AUTO-BOOT iOS: PRESS ANY KEY TO STOP", C_MUTED, C_BLACK);
+        unsigned stop = 0;
+        for (unsigned t = 0; t < opt.autoboot * 100U && !stop; ++t) {
+            if (keys())
+                stop = 1;
+            wait_ms(10);
+        }
+        if (!stop) {
+            m.svc_focus = 0;
+            m.os = 0;
+            while (m.os < 4 && v5_os[m.os] != 0)
+                ++m.os;
+            v5_draw(&m);
+            v5_starting(0);
+            return 1;
+        }
+        v5_draw(&m);
+    }
     for (;;) {
         int tx = 0, ty = 0;
         unsigned k = input_event(&tx, &ty);

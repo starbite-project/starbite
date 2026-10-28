@@ -1,4 +1,4 @@
-From 964a56746bc113bf0b30ae8bca60188f20b2a4c9 Mon Sep 17 00:00:00 2001
+From 78fc5b983e95b01cad5fc994367e8883c60dbc21 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:52 +0200
 Subject: [PATCH] patch: 0220-herolte-battery-and-power-key.patch
@@ -421,7 +421,7 @@ index 9969739..6d8a0fd 100644
 -#endif /* ARM64_BOARD_CONFIG_SWEET */
 +#endif /* ARM64_BOARD_CONFIG_SWEET || ARM64_BOARD_CONFIG_HEROLTE */
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 95205eb..e18602c 100644
+index d6f0e92..1e5d8b5 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -37,6 +37,9 @@
@@ -434,7 +434,7 @@ index 95205eb..e18602c 100644
  
  #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
  #include <IOKit/IOService.h>
-@@ -658,8 +661,18 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -678,8 +681,18 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  #if defined(ARM64_BOARD_CONFIG_A5XELTE)
  			int keep_on = 0;
  			if (off && PE_parse_boot_argn("a5fb_keep_on", &keep_on, sizeof(keep_on)) && keep_on) {

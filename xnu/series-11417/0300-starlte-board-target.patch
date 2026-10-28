@@ -1,4 +1,4 @@
-From 65affddcd9cb3c811e0622a78c6e8c2e0c24a75e Mon Sep 17 00:00:00 2001
+From 2e4ace0fcbe029a77ecc361010b1c10c4f3246da Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:13 +0200
 Subject: [PATCH] patch: 0300-starlte-board-target.patch
@@ -1534,10 +1534,10 @@ index b269868..007d9bd 100644
  	/* cpu_start() discards PE_cpu_start's return; do not silently carry on. */
  	if (rc != 0) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 3dc6d44..9f3a4a4 100644
+index 32381a7..b6537c0 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -267,6 +267,18 @@ AppleCLCD::start(IOService *provider)
+@@ -268,6 +268,18 @@ AppleCLCD::start(IOService *provider)
  	fSurface = sweet_surface_create_physical(fPhys, fScaled ? fLogicalW : fWidth,
  	    fScaled ? fLogicalH : fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
  	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
@@ -1556,7 +1556,7 @@ index 3dc6d44..9f3a4a4 100644
  	fWorkLoop = IOWorkLoop::workLoop();
  	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
  		IOLog("SWEET FB: setup failed\n");
-@@ -605,6 +617,58 @@ AppleCLCD::scaledCopy(uintptr_t src, uint32_t srcRowBytes, int32_t dx, int32_t d
+@@ -616,6 +628,58 @@ AppleCLCD::scaledCopy(uintptr_t src, uint32_t srcRowBytes, int32_t dx, int32_t d
      int32_t w, int32_t h)
  {
  	static uint16_t column[2048];

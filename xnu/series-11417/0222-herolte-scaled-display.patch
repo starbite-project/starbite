@@ -1,4 +1,4 @@
-From 605a019d16367e903d528b8aabcc1eef5dda3cbe Mon Sep 17 00:00:00 2001
+From d2683b66a32c542478dcc99eb169129ddbac0801 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:52 +0200
 Subject: [PATCH] patch: 0222-herolte-scaled-display.patch
@@ -9,10 +9,10 @@ Subject: [PATCH] patch: 0222-herolte-scaled-display.patch
  2 files changed, 83 insertions(+), 8 deletions(-)
 
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index e18602c..82c2f7b 100644
+index 1e5d8b5..6ae2b83 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -112,6 +112,7 @@ public:
+@@ -113,6 +113,7 @@ public:
  	uint32_t      fWidth, fHeight, fRowBytes;
  	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
  	int32_t       fOffX, fOffY;             /* logical origin of the panel */
@@ -20,16 +20,16 @@ index e18602c..82c2f7b 100644
  	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
  	IOMemoryMap  *fMap;
  	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
-@@ -138,6 +139,8 @@ public:
+@@ -139,6 +140,8 @@ public:
  	void removeClient(IOMobileFramebufferUserClient *client);
- 	void swap(const uint8_t *rec);
+ 	void swap(const uint8_t *rec, uint32_t size);
  	uint64_t present(const uint8_t *rec);
 +	uint64_t scaledCopy(uintptr_t src, uint32_t srcRowBytes, int32_t dx, int32_t dy,
 +	    int32_t w, int32_t h);
  };
  
  OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
-@@ -203,17 +206,29 @@ AppleCLCD::start(IOService *provider)
+@@ -204,17 +207,29 @@ AppleCLCD::start(IOService *provider)
  		fLogicalW = SWEET_FB_LOGICAL_W;
  		fLogicalH = SWEET_FB_LOGICAL_H;
  	}
@@ -62,7 +62,7 @@ index e18602c..82c2f7b 100644
  	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
  	fWorkLoop = IOWorkLoop::workLoop();
  	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
-@@ -424,6 +439,53 @@ AppleCLCD::swap(const uint8_t *rec)
+@@ -435,6 +450,53 @@ AppleCLCD::swap(const uint8_t *rec, uint32_t size)
  	}
  }
  
@@ -116,7 +116,7 @@ index e18602c..82c2f7b 100644
  uint64_t
  AppleCLCD::present(const uint8_t *rec)
  {
-@@ -499,11 +561,14 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -514,11 +576,14 @@ AppleCLCD::present(const uint8_t *rec)
  		if (h > (int32_t)s->height - sy) {
  			h = (int32_t)s->height - sy;
  		}
@@ -135,7 +135,7 @@ index e18602c..82c2f7b 100644
  		}
  		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
  		    (uint64_t)(sx + w) * 4;
-@@ -511,7 +576,10 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -526,7 +591,10 @@ AppleCLCD::present(const uint8_t *rec)
  		    s->memory == NULL || last > s->memory->getLength()) {
  			src = 0;
  		}

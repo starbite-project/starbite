@@ -1,4 +1,4 @@
-From 31b689abd3b07bd75f55f77746c8c1052ba71e83 Mon Sep 17 00:00:00 2001
+From 2697fb3fa9467fe83cf1791cc27d9eca9ae91fe3 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:34 +0200
 Subject: [PATCH] patch: 0114-a5xelte-gicv2-sgi-intid.patch

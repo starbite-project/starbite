@@ -1,4 +1,4 @@
-From 3b705b27c7832e150165ff5022e26a1cd86b019a Mon Sep 17 00:00:00 2001
+From f59b6d76d4e640740593d1fc1de25ee237584585 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:34:07 +0200
 Subject: [PATCH] patch: 0230-herolte-mali-whole-panel.patch
@@ -191,7 +191,7 @@ index e32abb5..c08d1f6 100644
  }
  
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index afac9b2..3304d87 100644
+index bb3fcd2..3a4c0a3 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -58,6 +58,9 @@ extern "C" uint64_t a5xelte_power_pressed_at;   /* bsd/dev/a5xelte_keys.c */
@@ -204,7 +204,7 @@ index afac9b2..3304d87 100644
  #endif
  
  enum {
-@@ -328,6 +331,12 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -329,6 +332,12 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		return;
  	}
  	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
@@ -216,4 +216,4 @@ index afac9b2..3304d87 100644
 +#endif
  	uint8_t *rec = NULL;
  	if (flush) {
- 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+ 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_MAX);

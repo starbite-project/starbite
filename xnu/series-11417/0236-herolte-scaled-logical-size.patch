@@ -1,4 +1,4 @@
-From e5553ca125b4813a5f879782bcaa92da9f57a070 Mon Sep 17 00:00:00 2001
+From dd1014e9a67ec0b0bcc908f219f064d3105dcd93 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:34:08 +0200
 Subject: [PATCH] patch: 0236-herolte-scaled-logical-size.patch
@@ -8,10 +8,10 @@ Subject: [PATCH] patch: 0236-herolte-scaled-logical-size.patch
  1 file changed, 11 insertions(+)
 
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 997dd66..3dc6d44 100644
+index d70acd2..32381a7 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -235,6 +235,17 @@ AppleCLCD::start(IOService *provider)
+@@ -236,6 +236,17 @@ AppleCLCD::start(IOService *provider)
  		fScaled = true;
  		fLogicalW = fWidth * 2 / 3;
  		fLogicalH = fHeight * 2 / 3;

@@ -45,6 +45,7 @@ struct star_opt {
     unsigned cpus;
     int rw, verbose, touch, touchpwr;   /* boot options */
     int multi, smpprobe;                /* experiments */
+    unsigned autoboot;                  /* starauto=N: start iOS after N s unless a key is pressed */
 };
 extern struct star_opt opt;
 void hw_opt_load(const char *cmdline);

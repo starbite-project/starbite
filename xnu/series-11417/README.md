@@ -23,7 +23,24 @@ kernel of iPadOS 18.7.11 (22H384) for J171AP. Built by `tools/build-xnu-11417.sh
   the SWEET crash log is printed before the init-death panic (pc/lr/backtrace, all
   registers, the mapping of x0/x19), and the console ring is flushed to the flash log
   synchronously (herolte_log_flush_now); boot-arg sweettrace=N logs pid 1's first N
-  BSD syscalls and Mach traps with arguments and results.
+  BSD syscalls and Mach traps with arguments and results. Later additions:
+  `sweettracename=<p_comm>` (trace a process by name; its failing syscalls with the
+  path argument and failing Mach traps are always logged), `sweetmsg=1` (printable
+  text of the traced process's Mach messages, incl. out-of-line data),
+  `sweetreboot=N` (flush the log and reset into recovery after N s),
+  `sweetdumpfile=<path>` (print a file's tail before that reset).
+- `0310-port-madvise-hardware-page.patch`: madvise aligns to the 4 KiB kernel page
+  (as 8796 did); 11417's vm_sanitize widened it to the 16 KiB user page and
+  MADV_FREE_REUSABLE zeroed live heap next to the range (launchd heap corruption).
+- `0311-port-pgz-require-aligned.patch`: zone_id_require_aligned resolves PGZ
+  addresses first (ipc ports in multi-page chunks on 4 KiB pages panicked).
+- `0312-port-xpc-service-port-check.patch`: mach_port_is_connection_for_service
+  answers "no filter policy" when no Sandbox message-filter callbacks exist (iPadOS
+  18's libxpc rejected every new peer on KERN_NOT_SUPPORTED).
+- iPadOS 18 fixes folded into existing patches: 0201 (Sandbox op 0x43 container
+  expected; AMFI policy named "AMFI", op 90 dyld policy = development vars), 0068
+  (IOSurface ABI of iPadOS 18: limits 0x28, lock result 0xc68), 0209 (iPadOS 18
+  swap record layout +0x48).
 - Not exported, obsolete on 11417 (upstream already): 0001, 0002, 0005, 0083.
 
 Check: the staging scripts + every patch here, in name order, on a clean

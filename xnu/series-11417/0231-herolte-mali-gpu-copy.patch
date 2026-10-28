@@ -1,4 +1,4 @@
-From 30f4bbcb70433c690148d0db7966d21fd59a1c28 Mon Sep 17 00:00:00 2001
+From 31f51c5387a58eeb099c4db2e26ba9ffc470a349 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:34:07 +0200
 Subject: [PATCH] patch: 0231-herolte-mali-gpu-copy.patch
@@ -238,7 +238,7 @@ index c08d1f6..2ba345f 100644
  }
  
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 3304d87..12b7033 100644
+index 3a4c0a3..59fbf6f 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -61,6 +61,10 @@ static void sweet_fb_copy_init(void);
@@ -252,7 +252,7 @@ index 3304d87..12b7033 100644
  #endif
  
  enum {
-@@ -711,6 +715,9 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -726,6 +730,9 @@ AppleCLCD::present(const uint8_t *rec)
  			sweet_fb_copy_rows(fPixels + (uint64_t)dy * fRowBytes + (uint64_t)dx * 4, fRowBytes,
  			    src + s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4, s->bytesPerRow,
  			    (size_t)w * 4, h);
@@ -262,7 +262,7 @@ index 3304d87..12b7033 100644
  #else
  			for (int32_t y = 0; y < h; y++) {
  				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
-@@ -724,6 +731,51 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -739,6 +746,51 @@ AppleCLCD::present(const uint8_t *rec)
  	return copied;
  }
  

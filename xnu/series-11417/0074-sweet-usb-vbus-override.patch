@@ -1,4 +1,4 @@
-From c568d791b108fb539a2a6e5097e278d1369509e3 Mon Sep 17 00:00:00 2001
+From 7444511c05330442b9ee3d0be76d5dedca4943b2 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:31:24 +0200
 Subject: [PATCH] patch: 0074-sweet-usb-vbus-override.patch

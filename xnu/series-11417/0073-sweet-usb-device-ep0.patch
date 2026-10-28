@@ -1,4 +1,4 @@
-From 3018b4c8a6f3b93227ea7f08545f2e018f81ca30 Mon Sep 17 00:00:00 2001
+From db7136984a03766e45affd3a0b425a133c99329e Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:31:24 +0200
 Subject: [PATCH] patch: 0073-sweet-usb-device-ep0.patch

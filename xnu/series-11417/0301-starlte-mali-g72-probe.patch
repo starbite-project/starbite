@@ -1,4 +1,4 @@
-From 1a47ba5c723c918c5e7b20e88ca83e5df678e9f9 Mon Sep 17 00:00:00 2001
+From ae0983f122b43976386f1e48c29742e4df0bc5fa Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:14 +0200
 Subject: [PATCH] patch: 0301-starlte-mali-g72-probe.patch

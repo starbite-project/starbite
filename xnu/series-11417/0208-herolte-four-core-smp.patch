@@ -1,4 +1,4 @@
-From af1937a56799d05688bfb6169941f09657a08a40 Mon Sep 17 00:00:00 2001
+From c19b75cbb27b9e51ba6ec5772682a0bfdefd419f Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:51 +0200
 Subject: [PATCH] patch: 0208-herolte-four-core-smp.patch
