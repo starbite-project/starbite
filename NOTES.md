@@ -1287,3 +1287,48 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   M3 MIDR 0x531f0020, timers wake on all 8; iOS up to 9.7 fps (was <= 5); user: "a little smoother". That boot
   the GPU present stayed off: stage 4's panel read-back raced iOS's CPU copies (3/5 outside pixels), now the
   stages hold SweetFramebuffer (sweet_fb_hold_until) while they draw. BOOT out/xnu-boot-m3c.img (sha 8981832e...).
+- 2026-10-28: **Next target: iPadOS 18.7.11 (22H384) for the iPad 7th gen (iPad7,11 / J171AP, A10 T8010).**
+  Why not iOS 26/27 on an iPhone 11: every iPhone userland from iOS 17 on is arm64e only (A12+), and the S9 has no
+  PAC (A55 v8.2, M3 v8.0); non-hint PAC ops (RETAB, BRAA, BLRAA, LDRAA, PACIA ...) are UNDEFINED here, so it would
+  need a whole-cache PAC-stripping rewriter + trap emulation (JSCVT/FCMA) + userland pinned to the A55s (M3 lacks
+  LSE/LRCPC), on xnu-12377. iOS 27's XNU is not published yet (newest tag xnu-12377.121.6). iPadOS 18 is the
+  newest userland these cores run natively: kernelcache.release.ipad7c is plain arm64, `xnu-11417.140.69.706.66~1/
+  RELEASE_ARM64_T8010`, and Apple published tag xnu-11417.140.69. IPSW 7525 MiB, still signed; OS
+  (094-32804-044.dmg.aea, 5.6 GiB) and Cryptex1,SystemOS (094-33089-044.dmg.aea, 1.5 GiB) are AEA-encrypted,
+  AppOS (094-32850-044.dmg) is not. Tools: tools/fetch-ios-parts.sh now takes DEVICE/VERSION/BOARD/OUT,
+  tools/decrypt-ios-parts.sh (key from wkms-public.apple.com via blacktop ipsw 3.1.739 release binary in
+  build/tools/ipsw, then macOS `aea decrypt`). Homebrew refuses installs while Xcode 15.4 is xcode-select'ed.
+  Patch trial (build/xnu-11417-trial.txt): the 168-patch series (fork starlte branch + our 03xx) on a clean
+  xnu-11417.140.69: 120 apply clean, 48 fail with 122 of 980 hunks rejected (0002 UIO_STACKBUF backport 37/37 is
+  probably obsolete there; the rest are board target, console, boot, SMP, HMAC PRNG, AMFI hunks).
+  Host: the "Starbite Windows" UTM VM (W-series image build) deleted at the user's request: 2.2 -> 58.6 GB free.
+  Wi-Fi reference: BCM4361/5 on PCIe Gen1 x1 (14e4:441f), brcmfmac 13.50.28 works under Linux on this phone.
+- 2026-10-28: iPadOS 18.7.11 parts in build/ipsw-18 (fetch + decrypt OK). The AEA images decrypt to **raw APFS**
+  (not UDIF): attach with `-imagekey diskimage-class=CRawDiskImage`. Volumes: CrystalUpdate22H384.J171J172OS
+  (5.9 GiB used), ...SystemCryptex (3.9 GiB image), AppCryptex (16 MiB). SystemCryptex holds
+  `dyld_shared_cache_arm64` (+ .01 ...), magic `dyld_v1   arm64`: plain arm64 confirmed. Staged root ~10 GiB
+  before hard links: build-ios-root.sh's 16 GiB HFSX fits, but leave room (USERDATA is 54 GiB).
+  **Why iOS 16 has almost no apps:** 36 stock apps (AppStore, MobileSafari, Photos, Camera, MobileMail,
+  MobileNotes, MobileCal, Maps, Music, Files, Weather, ...; 325 MiB) are not in /Applications but in
+  /private/var/staged_system_apps (placeholders in /System/Library/AppPlaceholders). DataMigration's
+  SystemAppMigrator.migrator installs them on first boot, and herolte-tune-ios-root.sh sets
+  com.apple.migration LastSystemVersion = build so DataMigration never runs. iOS 16 is most likely the same (to verify on
+  the phone: /private/var/staged_system_apps present, /private/var/containers/Bundle/Application empty). Fix for the iPadOS 18 root: let
+  SystemAppMigrator run (or pre-install the staged apps the way installd does).
+
+## iPadOS 18 plan (2026-10-28)
+
+Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later Wi-Fi. Order:
+
+1. Kernel: port the series to xnu-11417.140.69 (122 hunks by hand), toolchain for macOS 15 (Xcode 16.x + a
+   macOS 15 KDK through darwin-xnu-build; keep Xcode 15.4 for the iOS 16 kernel). First goal: same console
+   milestones as iOS 16 (UFS root mounted, launchd exec'd), iOS 16 stays bootable as the fallback.
+2. Root: J171AP root from the 18.7.11 OS + SystemOS + AppOS cryptexes (staging script for the iOS 18 layout,
+   all apps), ADT /product from DeviceTree.j171ap. Bigger than 16 GiB HFSX? check the staged size first.
+3. Home screen (iPad UI). Then "full": install the staged stock apps (SystemAppMigrator, see the
+   2026-10-28 entry) and why there is no wallpaper
+   (suspect: PosterBoard renders with Metal; needs a CPU fallback or the GPU path).
+4. iPhone UI: identity (ADT product / MobileGestalt device class and idiom) so SpringBoard runs the phone UI.
+5. GPU rendering (Mesa Panfrost in CoreAnimation, HackiOS path; check iOS 18 still has CA's GL renderer).
+6. Wi-Fi: own XNU PCIe driver for the BCM4361 (Linux brcmfmac as reference, GPL so no code copying), first as a
+   plain network interface (IP traffic), then the Apple80211 / wifid side for the Settings Wi-Fi UI.

@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Fetch the iPhone X (iPhone10,3 / D22AP) iOS 16.7.16 pieces the root image
-# needs, straight from Apple's CDN (the URL ipsw.me lists), without the whole
-# IPSW: BuildManifest, OS / SystemOS / AppOS disk images and the device tree.
-# Same selection as the herolte ios-root workflow. Apple files stay in
-# build/ipsw (gitignored), never in a repository.
+# Fetch the iOS pieces the root image needs, straight from Apple's CDN (the
+# URL ipsw.me lists), without the whole IPSW: BuildManifest, OS / SystemOS /
+# AppOS disk images and the device tree. Same selection as the herolte
+# ios-root workflow. Default: iPhone X (iPhone10,3 / D22AP) iOS 16.7.16.
+# iPadOS 18 (iPad 7th gen):
+#   DEVICE=iPad7,11 VERSION=18.7.11 BOARD=j171ap OUT=build/ipsw-18 tools/fetch-ios-parts.sh
+# iOS 18 images come as .aea (encrypted); tools/decrypt-ios-parts.sh opens them.
+# Apple files stay in build/ (gitignored), never in a repository.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-DEVICE=${DEVICE:-iPhone10,3} VERSION=${VERSION:-16.7.16}
-out=build/ipsw
+DEVICE=${DEVICE:-iPhone10,3} VERSION=${VERSION:-16.7.16} BOARD=${BOARD:-d22ap}
+out=${OUT:-build/ipsw}
 mkdir -p "$out"
 RZ=ref/ios-herolte/tools/remotezip.py
 
@@ -19,11 +22,11 @@ case "$url" in https://updates.cdn-apple.com/*|https://appldnld.apple.com/*) ;; 
     echo "unexpected IPSW host: $url"; exit 1 ;; esac
 echo "IPSW: $url"
 [ -f "$out/BuildManifest.plist" ] || python3 "$RZ" "$url" BuildManifest.plist "$out"
-python3 - "$out/BuildManifest.plist" > "$out/members.txt" <<'PY'
+python3 - "$out/BuildManifest.plist" "$BOARD" > "$out/members.txt" <<'PY'
 import plistlib, sys
 m = plistlib.load(open(sys.argv[1], 'rb'))
 ident = next(i for i in m['BuildIdentities']
-             if i['Info']['DeviceClass'].lower() == 'd22ap'
+             if i['Info']['DeviceClass'].lower() == sys.argv[2]
              and 'Erase' in i['Info'].get('Variant', ''))
 want = {'OS': 'os', 'Cryptex1,SystemOS': 'systemos', 'Cryptex1,AppOS': 'appos',
         'DeviceTree': 'devicetree'}
@@ -32,7 +35,8 @@ for key, name in want.items():
 PY
 cat "$out/members.txt"
 while read -r name path; do
-    dest="$out/$name.${path##*.}"
+    case "$path" in *.dmg.aea) ext=dmg.aea ;; *) ext=${path##*.} ;; esac
+    dest="$out/$name.$ext"
     [ -f "$dest" ] && { echo "have $dest"; continue; }
     python3 "$RZ" "$url" "$path" "$out"
     mv "$out/$path" "$dest"
