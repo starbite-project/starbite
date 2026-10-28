@@ -1362,3 +1362,24 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   only 17 csdb (hint space, NOP on v8.0) and the one ldumaxah the iOS 16 kernel already has: M3-safe as before.
   Not booted yet. Next: payload with this kernel (ADT /product from J171AP) -- first boot can use the iOS 16 root
   to check the kernel milestones (UFS root mounted, launchd exec'd) before the iPadOS 18 root exists.
+- 2026-10-28: **xnu-11417 kernel boot test on the S9 PASSED (kernel milestones), with the iOS 16 root.** Image
+  recipe: uc3's loader, ramdisk (menu) and Kiosk/UEFI bundles byte-identical, only the SWEETXNU payload rebuilt
+  (mkpayload of uc3's kernel + out/starlte-big.adt + build/ios-cmdline.txt reproduces payload-uc.bin exactly).
+  11417 payload 19.1 MB, BOOT image 56.9 MB of 57.67 MB. Rounds (photos of the panel; the 4 MiB flash log never got
+  an 11417 flush, every boot died before the first periodic flush at ~30 s):
+  a) "SWEET CPU: cpu=0 processor_start failed": processor_start from IOKit is a no-op (KERN_FAILURE) in 11417 ->
+     patch 0308: SweetCPU::startAll calls processor_boot(), ml_processor_register skips its own for our boards.
+  b) nested panics (limit 5) on pe_init.c:711 assert(panic_info): no panic region. mkadt_starlte.py now adds
+     /pram reg <0x8f8000000 0x100000> + /chosen embedded-panic-log-size 0x80000 (out/starlte-big-pram.adt) and,
+     as asked by the user, a FULL-SCREEN boot console (a5xelte-fbcon = whole 1440x2960 panel, cleared by the
+     kernel; was rows 640..1880 between the menu header and the bottom card).
+  c) cpu 4 (first M3): cpu_common.c:862 assert cpu_signal == SIGPdisabled, from processor_start_thread ->
+     processor_cpu_reinit: SweetCPU::initCPU's HEROLTE IRQ window took the self-SGI early (8796 never unmasked
+     there; 11417 does it itself after the assert) -> window removed (0308). The A55s just missed the window.
+  d) xnu-boot-11417d.img (sha dd3c77c2...): all 8 CPUs run, UFS root mounted, exec launchd, libignition
+     "ignition sequence complete", then pid 1 exits with namespace 2 (OS_REASON_SIGNAL) subcode 6 (SIGABRT) ->
+     "initproc failed to start". Expected: iOS 16 launchd on a 2-generation newer kernel; iPadOS 18's userland
+     matches xnu-11417. Panic header now complete (Panicked task launchd, cores 0-7 PCs, stackshot OK).
+  BOOT restored to out/xnu-boot-uc3.img (a8431754..., iOS 16 known good). Follow-ups: loader boot_args for
+  BOOT_LINE_LENGTH 1024 (11417 reads bootFlags/memSizeActual at +1132/+1140; today both read 0 from the zeroed
+  page, memSizeActual 0 falls back to memSize), flash-log flush on panic, then plan step 2 (iPadOS 18 root).

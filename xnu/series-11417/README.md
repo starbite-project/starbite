@@ -13,6 +13,12 @@ kernel of iPadOS 18.7.11 (22H384) for J171AP. Built by `tools/build-xnu-11417.sh
   port note is in the header (ignored by `git apply`).
 - `0307-port-board-master-configs-11417.patch`: the four board MASTER configs
   (8796 MacOSX copies) three-way merged onto 11417's MacOSX config.
+- `0308-port-sweetcpu-processor-boot.patch` (found on the phone): CPUs are booted
+  with processor_boot() from SweetCPU::startAll (processor_start from IOKit is a
+  no-op returning KERN_FAILURE in 11417; ml_processor_register's own
+  processor_boot is skipped for the generic boards), and initCPU no longer opens
+  an IRQ window for the self-SGI (processor_cpu_reinit asserts SIGPdisabled is
+  still set, then unmasks and waits itself; the window tripped it on CPU 4).
 - Not exported, obsolete on 11417 (upstream already): 0001, 0002, 0005, 0083.
 
 Check: the staging scripts + every patch here, in name order, on a clean
@@ -21,7 +27,9 @@ patches/15.0 then apply on top (link_kdk, link_kdk146 and remove_tightbeam skip:
 Apple-SoC-only link flags, and a file 11417 no longer has).
 
 Builds with Xcode 16.4 (clang 17) + KDK 15.6: `tools/build-xnu-11417.sh` ->
-`out/kernel.development.starlte-11417` (19.9 MB). Not booted yet.
+`out/kernel.development.starlte-11417` (19.9 MB). Boot-tested on the S9 with the
+iOS 16 root (2026-10-28): 8/8 CPUs, UFS root mounted, launchd + libignition run;
+iOS 16's launchd then aborts (SIGABRT), expected on this kernel.
 
 ## Build fixes (folded into the patch that introduced the code)
 

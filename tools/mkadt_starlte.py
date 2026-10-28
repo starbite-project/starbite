@@ -27,8 +27,13 @@ BANK2_BASE, BANK2_SIZE = 0x880000000, 0x80000000
 SOC_BASE = 0x10000000       # arm-io ranges base; child regs are relative
 FB_BASE, FB_WIDTH, FB_HEIGHT = 0xcc000000, 1440, 2960
 TIMEBASE = 26000000         # CNTFRQ_EL0 is 0 at handoff; OSCCLK is 26 MHz
-CONSOLE_TOP = 640             # boot console rows start below the Starbite header
-CONSOLE_HEIGHT = 1880         # ... and end above the bottom status card
+CONSOLE_TOP = 0               # the boot console takes the whole panel once XNU starts
+CONSOLE_HEIGHT = FB_HEIGHT    # (was 640..1880, between the menu header and bottom card)
+# Panic region (pe_init.c check_for_panic_log): /pram reg + /chosen
+# embedded-panic-log-size. Without it xnu-11417's DEVELOPMENT panic path
+# asserts panic_info (pe_init.c:711) and every panic nests to the limit.
+# Bank 2 above XNU's RAM (--bank2-mb <= 1536) and the GPU tables at 0x8f0000000.
+PRAM_BASE, PRAM_SIZE, PANIC_LOG_SIZE = 0x8f8000000, 0x100000, 0x80000
 LITTLE_CORES = 4            # Cortex-A55 cluster; cpus=N boot-arg limits what starts
 BIG_CORES = 4               # Mongoose M3 cluster (--big)
 
@@ -72,6 +77,7 @@ def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False, big=False):
     set_prop(chosen, 'dram-size', mkadt.u64(dram[1]))
     set_prop(chosen, 'firmware-version', mkadt.cstr('starlte-entry'))
     set_prop(chosen, 'system-firmware-version', mkadt.cstr('starlte-entry'))
+    set_prop(chosen, 'embedded-panic-log-size', mkadt.u32(PANIC_LOG_SIZE))
     # Synthetic, locally administered addresses (see mkadt_herolte.py).
     for name, last in (('wifi0', 1), ('bluetooth0', 2), ('ethernet0', 3)):
         set_prop(chosen, f'mac-address-{name}', bytes((0x02, 0x53, 0x54, 0x41, 0x52, last)))
@@ -142,14 +148,13 @@ def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False, big=False):
     root.children.append(mkadt.node('herolte-ufs', [
         ('reg', mkadt.u64(0x11120000, 0x1300)),
     ]))
+    root.children.append(mkadt.node('pram', [('reg', mkadt.u64(PRAM_BASE, PRAM_SIZE))]))
     # pe_serial.c looks this node up by name for the kprintf console.
     root.children.append(mkadt.node('a5xelte-fbcon', [
-        # Console rows between the loader's header and bottom card.
+        # The whole panel (CONSOLE_TOP 0): the console clears it when it starts.
         ('reg', mkadt.u64(FB_BASE + CONSOLE_TOP * FB_WIDTH * 4,
                           FB_WIDTH * (CONSOLE_HEIGHT - CONSOLE_TOP) * 4)),
         ('width', mkadt.u32(FB_WIDTH)),
-        # The console stops above the loader's bottom band (tools/brand
-        # overlay.mjs BAND_TOP), which then stays up through the kernel boot.
         ('height', mkadt.u32(CONSOLE_HEIGHT - CONSOLE_TOP)),
         ('stride', mkadt.u32(FB_WIDTH * 4)),
     ]))
@@ -170,6 +175,7 @@ if __name__ == '__main__':
                              'vm_compression_limit=98304 and 2048 panics in write_pte_fast')
     args = parser.parse_args()
     dram = (BANK2_BASE, min(args.bank2_mb << 20, BANK2_SIZE)) if args.bank2 else (DRAM_BASE, DRAM_SIZE)
+    assert dram[0] + dram[1] <= PRAM_BASE or dram[0] >= PRAM_BASE + PRAM_SIZE, 'XNU RAM overlaps /pram'
     blob = adt.serialize(build(dram=dram, scale2=args.scale2, big=args.big))
     args.output.write_bytes(blob)
     print(f'{args.output}: {len(blob)} bytes')
