@@ -1,0 +1,28 @@
+From 7de71ba48608642e410e572daa3bcaa0cd267123 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 28 Oct 2026 16:33:10 +0200
+Subject: [PATCH] patch: 0099-a5xelte-architected-timer.patch
+
+---
+ pexpert/arm/pe_identify_machine.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/pexpert/arm/pe_identify_machine.c b/pexpert/arm/pe_identify_machine.c
+index 937ce42..c1b5cb1 100644
+--- a/pexpert/arm/pe_identify_machine.c
++++ b/pexpert/arm/pe_identify_machine.c
+@@ -221,8 +221,14 @@ pe_arm_map_interrupt_controller(void)
+ 		kprintf("pe_arm_map_interrupt_controller: gTimerBase: 0x%lx\n", (unsigned long)gTimerBase);
+ 	}
+ 	if (gTimerBase == 0) {
++#if defined(A5XELTE)
++		/* CNTV is an architectural timer. It has no MMIO timer base in
++		 * the Exynos7580 device tree; virtual timer PPI 27 is in the GIC. */
++		return 1;
++#else
+ 		kprintf("pe_arm_map_interrupt_controller: failed to find the timer.\n");
+ 		return 0;
++#endif
+ 	}
+ 
+ 	return 1;

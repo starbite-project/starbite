@@ -1332,3 +1332,33 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
 5. GPU rendering (Mesa Panfrost in CoreAnimation, HackiOS path; check iOS 18 still has CA's GL renderer).
 6. Wi-Fi: own XNU PCIe driver for the BCM4361 (Linux brcmfmac as reference, GPL so no code copying), first as a
    plain network interface (IP traffic), then the Apple80211 / wifid side for the Settings Wi-Fi UI.
+- 2026-10-28: **Kernel series ported to xnu-11417.140.69** (plan step 1, source side). Port tree build/xnu-11417
+  (one commit per patch, tools: scratch port-next.sh), exported to xnu/series-11417 (README lists every port
+  note). With the staging scripts run first (the earlier trial skipped them, which inflated the failures):
+  0017-0046 etc. applied clean; 33 patches needed changes, 4 are obsolete upstream (0001 clang flag, 0002
+  UIO_STACKBUF, 0005 pmap reserved10, 0083 IORPC.kernelContent). Notable 11417 changes: **BCM2837 target removed**
+  (only a board header for us; SWEET.h is self-contained); serial_init matches a `serial-device` phandle and
+  returns early without one (fbcon now initialised before that); entropy pool is SHA-512 initialised at boot
+  (0033's BearSSL SHA512_* covers it, 0014's entropy.c half dropped, PRNG half kept); pid_hibernate moved to
+  bsd/kern/kern_proc.c; choose_processor split (fast-core pick ported into the non-SMT one, CLPC masks are 0
+  here); real osfmk/arm64/kpc.c (Apple PMU) -> board configs get CPU_COUNTERS_BASE = [ ] (kperf kept), kpc stub
+  dropped; board MASTER configs (8796 MacOSX copies) three-way merged onto 11417's (0307). Checked: series +
+  scripts on a clean tree reproduce the port tree exactly; darwin-xnu-build's patches/15.0 apply on top
+  (restore_files.sh needs xnu-8796.101.5 / xnu-10063.121.3 tags, dxb clones full history; link_kdk,
+  link_kdk146, remove_tightbeam skip as expected). staging scripts pinned: libpthread-536 69fb92b6,
+  hfs-683.120.3 1ce7f99f; both ran clean (their exact-match asserts held).
+  Toolchain: KDK 15.6 24G84 from dortania's KdkSupportPkg mirror, unpacked (pkgutil --expand-full, both
+  payloads) to build/kdk/KDK_15.6_24G84.kdk, not installed (3.7 GiB). CommandLineTools lack iig/ctfconvert, so
+  Xcode 16.4 is needed (Apple ID download, user). tools/build-xnu-11417.sh (build/dxb-11417, same dxb commit,
+  series into patches/15.0) -> out/kernel.development.starlte-11417. Not compiled yet.
+- 2026-10-28: **xnu-11417 STARLTE kernel builds** (out/kernel.development.starlte-11417, 19.9 MB, `Darwin Kernel
+  Version 24.6.0 ... xnu-11417.140.69`; iOS 16 kernel is 17.3 MB). Xcode 16.4 (16F6, clang 17, MacOSX15.5 SDK)
+  unxipped to /Applications/Xcode_16.4.app (signature checked), used only via DEVELOPER_DIR; xcode-select still
+  points at the CommandLineTools. Five build rounds; fixes folded into the introducing patches (list in
+  xnu/series-11417/README.md): apple_arm64_cpu.h needs apple_arm64_regs.h; KDK lib<board>.os.a force-load skipped
+  for our boards; amcc_rorgn_ppl_{amcc,ctrr3}.c stubs; libTightbeam.exports out of the Private symbol set; split VM
+  headers (vm_shared_region_xnu.h, vm_map_internal.h, vm_kern_xnu.h); primary_map is SMT-only (and the realtime
+  fast-core pick moved to the non-SMT chooser). Instruction scan (llvm-objdump): no LSE/RCpc/PAC/dot-product ops,
+  only 17 csdb (hint space, NOP on v8.0) and the one ldumaxah the iOS 16 kernel already has: M3-safe as before.
+  Not booted yet. Next: payload with this kernel (ADT /product from J171AP) -- first boot can use the iOS 16 root
+  to check the kernel milestones (UFS root mounted, launchd exec'd) before the iPadOS 18 root exists.

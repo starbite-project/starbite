@@ -1,0 +1,28 @@
+From 96d552280cac20fb5b74e36587979af61f9d436a Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 28 Oct 2026 16:33:26 +0200
+Subject: [PATCH] patch: 0100-a5xelte-counter-epoch.patch
+
+port: context only
+---
+ osfmk/arm/arm_init.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 12350eb..219f586 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -373,6 +373,13 @@ arm_init(
+ #endif /* APPLEVIRTUALPLATFORM */
+ 
+ 	cpu_data_init(&BootCpuData);
++#if defined(A5XELTE)
++	/* Samsung firmware can leave CNTVCT_EL0 at an arbitrary epoch.  XNU
++	 * reserves its top bit for processor-idle accounting, so start the
++	 * boot CPU's Mach time at one tick without changing the hardware timer. */
++	rtclock_base_abstime = 1 - ml_get_hwclock();
++	BootCpuData.cpu_base_timebase = rtclock_base_abstime;
++#endif
+ #if defined(HAS_APPLE_PAC)
+ 	/* bootstrap cpu process dependent key for kernel has been loaded by start.s */
+ 	BootCpuData.rop_key = ml_default_rop_pid();
