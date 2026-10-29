@@ -1,4 +1,4 @@
-From d6d021fb1f6bba236057d179b82c4e6f4e86eecb Mon Sep 17 00:00:00 2001
+From 96435d09e6187fdfcaeeff4df007464c9a4410eb Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:51 +0200
 Subject: [PATCH] patch: 0213-herolte-pmic-batcher-init.patch

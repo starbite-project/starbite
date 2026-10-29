@@ -1,4 +1,4 @@
-From 71e1564a67b8da515a94572c427829d88c204630 Mon Sep 17 00:00:00 2001
+From 7d8a71e3d512d42ab77042ea018296e811546d18 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:30:31 +0200
 Subject: [PATCH] patch: 0051-sweet-crash-heap-strings.patch

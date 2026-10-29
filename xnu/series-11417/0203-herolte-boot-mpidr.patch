@@ -1,4 +1,4 @@
-From f16f9c336d6d7938cb7e9147fc5d886b41f113c9 Mon Sep 17 00:00:00 2001
+From 0da3514f699dad3b98a82ec7aaeaccf7b20715ca Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:51 +0200
 Subject: [PATCH] patch: 0203-herolte-boot-mpidr.patch

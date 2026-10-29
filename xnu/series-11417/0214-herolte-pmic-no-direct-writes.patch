@@ -1,4 +1,4 @@
-From 8964dc88bf8a268d5572d037062ef83b9978e929 Mon Sep 17 00:00:00 2001
+From 2b90fa815fe4ec352061110b793e7bb00565cefd Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:51 +0200
 Subject: [PATCH] patch: 0214-herolte-pmic-no-direct-writes.patch

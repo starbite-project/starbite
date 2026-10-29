@@ -1,4 +1,4 @@
-From c5a5632a7a4147f8c91be27d56cd1a5b19e3730f Mon Sep 17 00:00:00 2001
+From 08c56e12c2eb7e6c0e4254de58500c2b19ad5e44 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:34:06 +0200
 Subject: [PATCH] patch: 0224-herolte-parallel-copy-kmem-log.patch

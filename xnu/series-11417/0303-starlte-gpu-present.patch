@@ -1,18 +1,82 @@
-From 0998abd3bc17a144f805cbd376af041f32a594d4 Mon Sep 17 00:00:00 2001
+From cbdfbe0eb5082693aaf9545b14ea571e332b8e16 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:14 +0200
 Subject: [PATCH] patch: 0303-starlte-gpu-present.patch
 
 ---
- iokit/Kernel/arm/SweetFramebuffer.cpp | 17 ++++++++++++++++-
- 1 file changed, 16 insertions(+), 1 deletion(-)
+ bsd/dev/starlte_touch.c               | 26 ++++++++++-----
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 48 ++++++++++++++++++++-------
+ iokit/Kernel/arm/SweetSurface.cpp     | 31 +++++++++++++++++
+ iokit/Kernel/arm/SweetSurface.h       |  3 ++
+ 4 files changed, 88 insertions(+), 20 deletions(-)
 
+diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
+index 9e89b19..3416d19 100644
+--- a/bsd/dev/starlte_touch.c
++++ b/bsd/dev/starlte_touch.c
+@@ -697,21 +697,25 @@ st_thread(__unused void *arg, __unused wait_result_t wr)
+  * lock screen). The phone UI is the home-button iPhone's (8 Plus canvas): a swipe up from the
+  * bottom edge opens Control Center (on the home screen it did not, boot54), Home closes it and
+  * unlocks (single presses 5 s apart, not a double press), a swipe left shows the applications'
+- * page, a tap opens Settings. Times are since boot. Swipes use finger 9 in panel pixels through
+- * sweet_hid_touch(), 24 steps of 12 ms, like the real ones; Home goes through sweet_hid_key().
++ * page, a tap opens Settings. Times count from the first frame on the panel
++ * (sweet_fb_first_present, SweetFramebuffer.cpp: 70-85 s after boot in boot55-56, when absolute
++ * times had most of the script run before there was a UI). Swipes use finger 9 in panel pixels
++ * through sweet_hid_touch(), 24 steps of 12 ms, like the real ones; Home goes through
++ * sweet_hid_key().
+  */
+ extern void sweet_hid_key(int key, int down);
++extern uint64_t sweet_fb_first_present;
+ 
+ static const struct {
+ 	unsigned at_s;
+ 	int home;                       /* 1: press Home; 0: swipe x0,y0 -> x1,y1 */
+ 	int x0, y0, x1, y1;
+ } st_script[] = {
+-	{ 50, 0, 720, 2950, 720, 1300 },        /* Control Center over the lock screen (sbca shot at 62 s) */
+-	{ 66, 1, 0, 0, 0, 0 },                  /* closes it */
+-	{ 71, 1, 0, 0, 0, 0 },                  /* unlocks */
+-	{ 80, 0, 1300, 1500, 150, 1500 },       /* home screen page 2, the applications (shot at 95 s) */
+-	{ 100, 0, 534, 1790, 534, 1790 },       /* a tap on Settings (shot at 135 s) */
++	{ 15, 0, 720, 2950, 720, 1300 },        /* Control Center over the lock screen (sbca shot at 25 s) */
++	{ 30, 1, 0, 0, 0, 0 },                  /* closes it */
++	{ 35, 1, 0, 0, 0, 0 },                  /* unlocks */
++	{ 45, 0, 1300, 1500, 150, 1500 },       /* home screen page 2, the applications (shot at 55 s) */
++	{ 60, 0, 534, 1790, 534, 1790 },        /* a tap on Settings (shot at 80 s) */
+ };
+ 
+ static void
+@@ -719,10 +723,16 @@ st_script_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+ 	const int f = ST_FINGERS - 1, steps = 24;
+ 
++	while (sweet_fb_first_present == 0) {
++		st_msleep(250);
++	}
++	uint64_t start_ns;
++	absolutetime_to_nanoseconds(sweet_fb_first_present, &start_ns);
++	printf("STARLTE TOUCH: first frame on the panel; scripted input starts\n");
+ 	for (unsigned i = 0; i < sizeof(st_script) / sizeof(st_script[0]); i++) {
+ 		uint64_t now_ns;
+ 		absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+-		uint64_t at_ns = (uint64_t)st_script[i].at_s * NSEC_PER_SEC;
++		uint64_t at_ns = start_ns + (uint64_t)st_script[i].at_s * NSEC_PER_SEC;
+ 		if (now_ns < at_ns) {
+ 			st_msleep((unsigned)((at_ns - now_ns) / NSEC_PER_MSEC));
+ 		}
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index b6537c0..b548d97 100644
+index b6537c0..7ee10e3 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -65,7 +65,16 @@ uint64_t sweet_fb_hold_until;
+@@ -63,9 +63,22 @@ extern "C" uint64_t sweet_fb_hold_until;
+ uint64_t sweet_fb_hold_until;
+ /* Last surface copied full-screen to the panel (GPU copy test). */
  static uint32_t sweet_fb_last_surface_id;
++/* mach_absolute_time() of the first swap that put pixels on the panel (0: none yet), for scripted
++ * test input (starlte_touch.c, sweetswipe=1) */
++extern "C" uint64_t sweet_fb_first_present;
++uint64_t sweet_fb_first_present;
  extern "C" bool sweet_fb_last_surface(uint64_t *pages, unsigned max_pages, unsigned *npages,
      uint32_t *offset, uint32_t *stride, uint32_t *width, uint32_t *height, uintptr_t *kva);
 -/* bsd/dev/herolte_gpu.c: the Mali scales a surface to the whole panel. */
@@ -29,7 +93,61 @@ index b6537c0..b548d97 100644
  extern "C" int herolte_gpu_present_slot(uint32_t id, uint64_t first_pa);
  extern "C" int herolte_gpu_present_map(uint32_t id, const uint64_t *pages, unsigned n);
  extern "C" bool herolte_gpu_present_draw(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h);
-@@ -856,6 +865,12 @@ AppleCLCD::gpuPresent(SweetSurface *s, int32_t sx, int32_t sy, int32_t w, int32_
+@@ -264,22 +277,24 @@ AppleCLCD::start(IOService *provider)
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	/* The default surface must have the presented size (a mismatch left
+-	 * every swap layer empty); scaled, it is the panel's top-left part. */
+-	fSurface = sweet_surface_create_physical(fPhys, fScaled ? fLogicalW : fWidth,
+-	    fScaled ? fLogicalH : fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+-	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
+-#if defined(ARM64_BOARD_CONFIG_STARLTE)
+-	/* Scaled, the default surface covers only the logical rows (1792 of
+-	 * 2960): scaledCopy() writes the whole panel, so it needs a mapping of
+-	 * all of it, or the lower rows go past the end (black lower third and
+-	 * stray writes, seen on the S9). */
++	 * every swap layer empty). Scaled, it is a buffer of its own, presented
++	 * like any other: CoreAnimation double-buffers between it and a surface
++	 * of its own, and when it was the panel's top-left part every other
++	 * frame landed on the panel unscaled (iPadOS 18 boot52: the doubled
++	 * band above the scaled picture). */
++	fSurface = fScaled ? sweet_surface_create_buffer(fLogicalW, fLogicalH, SWEET_FB_FORMAT_BGRA) :
++	    sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
++	fPixels = fSurface != NULL && !fScaled ? fSurface->kernelAddress() : 0;
++	/* Scaled, scaledCopy() writes the whole panel, so it needs a mapping of
++	 * all of it (with the panel's top-left part as the default surface, the
++	 * lower rows went past its end: black lower third and stray writes, seen
++	 * on the S9). */
+ 	if (fScaled && fSurface != NULL) {
+ 		SweetSurface *panel = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes,
+ 		    SWEET_FB_FORMAT_BGRA);
+ 		fPixels = panel != NULL ? panel->kernelAddress() : 0;
+ 		IOLog("SWEET FB: scaled: panel mapping %ux%u for the scaler\n", fWidth, fHeight);
+ 	}
+-#endif
+ 	fWorkLoop = IOWorkLoop::workLoop();
+ 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
+ 		IOLog("SWEET FB: setup failed\n");
+@@ -760,7 +775,7 @@ AppleCLCD::present(const uint8_t *rec)
+ 			    s ? s->pixelFormat : 0, s ? s->bytesPerRow : 0, sx, sy, get32(a, 8),
+ 			    get32(a, 12), dx, dy, w, h);
+ 		}
+-		if (s == NULL || s == fSurface) {
++		if (s == NULL || (s == fSurface && !fScaled)) {
+ 			OSSafeReleaseNULL(s);
+ 			continue;
+ 		}
+@@ -840,6 +855,9 @@ AppleCLCD::present(const uint8_t *rec)
+ 		}
+ 		s->release();
+ 	}
++	if (copied != 0 && sweet_fb_first_present == 0) {
++		sweet_fb_first_present = mach_absolute_time();
++	}
+ 	return copied;
+ }
+ 
+@@ -856,6 +874,12 @@ AppleCLCD::gpuPresent(SweetSurface *s, int32_t sx, int32_t sy, int32_t w, int32_
  {
  	static uint64_t pages[SWEET_FB_GPU_MAX_PAGES];
  	static uint32_t failures;
@@ -42,3 +160,59 @@ index b6537c0..b548d97 100644
  	if (failures >= 8 || s->memory == NULL) {
  		return false;
  	}
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index ef50879..b9aa6ff 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -255,6 +255,37 @@ sweet_surface_create_physical(uint64_t phys, uint32_t width, uint32_t height,
+ 	return s;
+ }
+ 
++SweetSurface *
++sweet_surface_create_buffer(uint32_t width, uint32_t height, uint32_t pixelFormat)
++{
++	SweetSurface *s = sweet_surface_alloc();
++	if (s == NULL) {
++		return NULL;
++	}
++	s->width = width;
++	s->height = height;
++	s->bytesPerRow = (width * 4 + SWEET_SURFACE_ROW_ALIGN - 1) & ~(uint32_t)(SWEET_SURFACE_ROW_ALIGN - 1);
++	s->bytesPerElement = 4;
++	s->elementWidth = s->elementHeight = 1;
++	s->pixelFormat = pixelFormat;
++	s->allocSize = (uint32_t)round_page((uint64_t)s->bytesPerRow * height);
++	IOBufferMemoryDescriptor *mem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++	    kIODirectionInOut | kIOMemoryKernelUserShared, s->allocSize, page_size);
++	if (mem == NULL) {
++		s->release();
++		return NULL;
++	}
++	OSAddAtomic64(s->allocSize, (volatile SInt64 *)&sweet_surface_wired);
++	bzero(mem->getBytesNoCopy(), s->allocSize);
++	s->memory = mem;
++	s->mapCache = kIOMapDefaultCache;
++	if (!sweet_surface_publish(s)) {
++		s->release();
++		return NULL;
++	}
++	return s;
++}
++
+ mach_port_name_t
+ sweet_surface_port_in_task(SweetSurface *s, task_t task)
+ {
+diff --git a/iokit/Kernel/arm/SweetSurface.h b/iokit/Kernel/arm/SweetSurface.h
+index f1f816e..7dbcd98 100644
+--- a/iokit/Kernel/arm/SweetSurface.h
++++ b/iokit/Kernel/arm/SweetSurface.h
+@@ -59,6 +59,9 @@ SweetSurface *sweet_surface_copy(uint32_t id);
+ SweetSurface *sweet_surface_create_physical(uint64_t phys, uint32_t width,
+     uint32_t height, uint32_t bytesPerRow, uint32_t pixelFormat);
+ 
++/* Publish a zeroed kernel buffer as a surface (retained, as above). */
++SweetSurface *sweet_surface_create_buffer(uint32_t width, uint32_t height, uint32_t pixelFormat);
++
+ /* Send right for the surface in task (IOSurfaceLookupFromMachPort). */
+ mach_port_name_t sweet_surface_port_in_task(SweetSurface *surface, task_t task);
+ 

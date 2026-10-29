@@ -1,4 +1,4 @@
-From 9ce1e2917a4d33ce80a8f0985a80769b08a1f878 Mon Sep 17 00:00:00 2001
+From b4901305495d0432dae5fb1ee9431315d03a0a54 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:52 +0200
 Subject: [PATCH] patch: 0215-herolte-apm-readonly-probe.patch

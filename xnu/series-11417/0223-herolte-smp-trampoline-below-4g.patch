@@ -1,4 +1,4 @@
-From b9f7d8f8c7ef2b97c8b48eae6e7f08b3b9a13f49 Mon Sep 17 00:00:00 2001
+From f6bfae832c6cc032890402d1dd6f75a675992dd4 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:52 +0200
 Subject: [PATCH] patch: 0223-herolte-smp-trampoline-below-4g.patch

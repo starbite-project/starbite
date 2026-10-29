@@ -1,4 +1,4 @@
-From 8a1449e38fed2d11ecf14ac0f409b4b0bdfc20a8 Mon Sep 17 00:00:00 2001
+From 810d6b1a8f2d6e1839dbc310cb4417ce0ec2c795 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:26 +0200
 Subject: [PATCH] patch: 0102-a5xelte-builtin-pthread.patch

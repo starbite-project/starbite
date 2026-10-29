@@ -1,4 +1,4 @@
-From bee0b61272199ef37ab5dea5291f1fd39470b1df Mon Sep 17 00:00:00 2001
+From 5b733a2fe4aca975956fe952c71a7ae65e541073 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:52 +0200
 Subject: [PATCH] patch: 0219-herolte-cluster-timer-probe.patch

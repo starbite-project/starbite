@@ -1,4 +1,4 @@
-From 2cb11069cf43a7e8e2291a72b3ac5161cc8ab608 Mon Sep 17 00:00:00 2001
+From 6f94e97cf4a757050f889aaec13bf5338ae4beec Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:36:36 +0200
 Subject: [PATCH] port: rebase board MASTER configs on xnu-11417

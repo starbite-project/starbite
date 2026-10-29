@@ -1,4 +1,4 @@
-From 31f51c5387a58eeb099c4db2e26ba9ffc470a349 Mon Sep 17 00:00:00 2001
+From effe2c1b07bb6bdea0cc52bb940633bcf8115749 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:34:07 +0200
 Subject: [PATCH] patch: 0231-herolte-mali-gpu-copy.patch

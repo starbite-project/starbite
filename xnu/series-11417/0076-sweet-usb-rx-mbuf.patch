@@ -1,4 +1,4 @@
-From fcf887f2bd0f52b929d88261ab57345ec275361a Mon Sep 17 00:00:00 2001
+From ce5874e5910b04c6b622402060c7efd4aaed214e Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:31:24 +0200
 Subject: [PATCH] patch: 0076-sweet-usb-rx-mbuf.patch

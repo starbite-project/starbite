@@ -1,4 +1,4 @@
-From caf773a599c86989c2831321e8cdda48dd22bf07 Mon Sep 17 00:00:00 2001
+From 1dda2e58b05911c1d3ff000f18c30f18a63f594f Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:30:56 +0200
 Subject: [PATCH] patch: 0065-sweet-smp-psci.patch

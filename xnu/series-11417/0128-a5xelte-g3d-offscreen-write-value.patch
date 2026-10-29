@@ -1,4 +1,4 @@
-From ffcf6bbf09c265ab70408fe8d970f3f8cf387701 Mon Sep 17 00:00:00 2001
+From 7d7a517c73ea7720245596cece53b02c570a7f76 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:42 +0200
 Subject: [PATCH] patch: 0128-a5xelte-g3d-offscreen-write-value.patch

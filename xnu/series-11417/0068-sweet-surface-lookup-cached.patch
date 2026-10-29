@@ -1,4 +1,4 @@
-From bf0862321024399644e2bc087a6d3a4fc20b1e6b Mon Sep 17 00:00:00 2001
+From afc424552177bdd64a74065fc026fcb7b903c346 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:31:04 +0200
 Subject: [PATCH] patch: 0068-sweet-surface-lookup-cached.patch
@@ -9,10 +9,10 @@ build: iPadOS 18 IOSurface ABI: limits 0x28 (version at +0x22), lock result 0xc6
  1 file changed, 87 insertions(+), 13 deletions(-)
 
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
-index 9bee210..f376c92 100644
+index c0fb53e..ef50879 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
-@@ -57,7 +57,8 @@ enum {
+@@ -60,7 +60,8 @@ enum {
  	kSweetSurfaceTrapReleaseFailed  = 5,
  };
  
@@ -22,7 +22,7 @@ index 9bee210..f376c92 100644
  #define SWEET_SURFACE_MAX_ID            4096
  #define SWEET_SURFACE_MAX_DIM           16384
  #define SWEET_SURFACE_MAX_ALLOC         (256u << 20)
-@@ -407,7 +408,7 @@ class IOSurfaceRootUserClient : public IOUserClient {
+@@ -413,7 +414,7 @@ class IOSurfaceRootUserClient : public IOUserClient {
  	OSArray *fRefs;
  
  	SweetSurfaceRef *findRef(uint32_t id, unsigned int *index);
@@ -31,7 +31,7 @@ index 9bee210..f376c92 100644
  	IOReturn returnSurface(SweetSurface *s, IOExternalMethodArguments *args);
  	IOReturn create(IOExternalMethodArguments *args);
  
-@@ -495,17 +496,25 @@ IOSurfaceRootUserClient::findRef(uint32_t id, unsigned int *index)
+@@ -502,17 +503,25 @@ IOSurfaceRootUserClient::findRef(uint32_t id, unsigned int *index)
  /*
   * Count one more create/lookup of s by this client, mapping it into the
   * task the first time. Takes over the caller's user count on s.
@@ -59,7 +59,7 @@ index 9bee210..f376c92 100644
  		return kIOReturnSuccess;
  	}
  	IOLockUnlock(fLock);
-@@ -554,6 +563,47 @@ put64(uint8_t *p, uint32_t off, uint64_t v)
+@@ -561,6 +570,47 @@ put64(uint8_t *p, uint32_t off, uint64_t v)
  	memcpy(p + off, &v, 8);
  }
  
@@ -107,7 +107,7 @@ index 9bee210..f376c92 100644
  /* IOSurface.framework's lock result (copied to IOSurfaceClient + 0x68). */
  static void
  sweet_surface_fill_result(SweetSurface *s, SweetSurfaceRef *ref, uint8_t *out)
-@@ -591,6 +641,16 @@ sweet_surface_fill_result(SweetSurface *s, SweetSurfaceRef *ref, uint8_t *out)
+@@ -598,6 +648,16 @@ sweet_surface_fill_result(SweetSurface *s, SweetSurfaceRef *ref, uint8_t *out)
  	}
  }
  
@@ -124,7 +124,7 @@ index 9bee210..f376c92 100644
  static IOReturn
  sweet_struct_out(IOExternalMethodArguments *args, const void *buf, uint32_t len)
  {
-@@ -615,19 +675,29 @@ IOReturn
+@@ -622,19 +682,29 @@ IOReturn
  IOSurfaceRootUserClient::returnSurface(SweetSurface *s, IOExternalMethodArguments *args)
  {
  	SweetSurfaceRef *ref = NULL;
@@ -160,7 +160,7 @@ index 9bee210..f376c92 100644
  		/* The caller never learns the id: undo this create/lookup. */
  		trapRelease((void *)(uintptr_t)s->id, NULL, NULL, NULL, NULL, NULL);
  	}
-@@ -718,12 +788,16 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+@@ -865,12 +935,16 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
  
  	switch (selector) {
  	case kSweetSurfaceLimits: {

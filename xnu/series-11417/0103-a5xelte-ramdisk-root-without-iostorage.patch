@@ -1,4 +1,4 @@
-From 15bff3aec3d2bdf69127b7a3a7af46b3b16384b0 Mon Sep 17 00:00:00 2001
+From 8eda47492ab3920305b92d40e2a612f022e2d528 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:26 +0200
 Subject: [PATCH] patch: 0103-a5xelte-ramdisk-root-without-iostorage.patch

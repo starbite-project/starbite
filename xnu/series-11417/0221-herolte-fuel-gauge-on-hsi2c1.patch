@@ -1,4 +1,4 @@
-From 605930950090be85cb280ab2a08d6688ea73dd94 Mon Sep 17 00:00:00 2001
+From de67cbf6de2b513cf8f6e19058e4cab85cbcafff Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:52 +0200
 Subject: [PATCH] patch: 0221-herolte-fuel-gauge-on-hsi2c1.patch

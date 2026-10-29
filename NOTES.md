@@ -1539,3 +1539,85 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     DEVELOPMENT kernel) works; the test boot also used sweetmemscale=16.
   - Kernel limits to fix before CoreAnimation: StarbiteMali's GPU VA allocator only bumps (never reuses) and AS1
     level-3 tables are never freed (1 MiB = ~250 tables = ~500 MiB of mappings ever).
+- 2026-10-29 02:40: **CoreAnimation draws the iPadOS 18 UI on the Mali-G72** (boot45-48, `build/ipados18-boot4[5-8].txt`).
+  `tools/ca-gpu/sbca.c` (injected into backboardd, patch 0316) replaces AccelServer::renderer() (vtable slot
+  0x1e697c450): with no renderer yet it makes an EAGLContext of API 3 (an earlier port eagl.c over Mesa, `libsbgl.dylib`
+  in /usr/local/starbite/lib), a `CA::OGL::GLESContext` (calloc 0x8b8 in QuartzCore's x_malloc zone) and the
+  0x68-byte renderer record exactly as renderer() does for Metal, stores them at server+0x400/+0x408 and
+  display+0x138, turns framebuffer compression off (context vtable +0xb0) and lets the original run its tail.
+  Boot-arg `sbgl=0` keeps the CPU renderer. `tools/ca-gpu/build-sbca.sh` builds both libraries.
+  - boot45: every GL call went to Apple's empty OpenGLES (libsbgl linked `-framework OpenGLES` before Mesa, so
+    the gl* symbols bound there). Fixed: no OpenGLES link; sbca dlopens OpenGLES before libsbgl.
+  - boot46: Mesa context fine ("OpenGL ES 3.1 Mesa 25.0.7; Mali-G72 (Panfrost)"), then backboardd SIGSEGV in
+    IOSurfaceClientGetBulkAttachments (state page pointer client+0x78 NULL) from wrap_buffer ->
+    iosurface_get_edr_factor. Cause: IOSurface sel 6 (IOSurfaceClientWrapClientImage, struct in {u64 addr, u32 w,
+    h, fmt, bpe, bpr, size}; used by CA::Render::Image::retain_iosurface for page-aligned image data) and sel 7
+    (WrapClientMemory, scalars [addr, size]) fell into SweetSurface's default case: zeroed lock result +
+    success -> a client of nothing (id 0, 0x0, no state page). 0046 now refuses both; CA uploads those images
+    instead. (Zero-copy wrapping via IOMemoryDescriptor::withAddressRange is a later speed-up.)
+    sbca keeps a SIGSEGV catcher for that exact fault (logs the client, gives it a zero page) as a guard.
+  - boot48 (user photos): lock screen wallpaper gradient, clock, home-screen labels, Control Center glyphs drawn
+    correctly by the GPU; home screen frames ~5-7 ms of GPU time, renderer() ~58/s. Not yet right: app icons
+    invisible (180x180 IOSurfaces with pixel format 0 shown via -texImageIOSurface, contents probably empty),
+    materials/blur platters (dock, search, Control Center) flat white/grey (an earlier port inject.c's renderer
+    function/shader fixes, `give_the_renderer_a_shader` etc., not ported; needs iOS 18 GLESContext addresses),
+    a doubled copy offset along the top edge (partial-update / buffer reuse?).
+- 2026-10-29 03:00-04:10 (unattended, user asleep): **GPU UI fixes, self-screenshots** (boot49-56).
+  - Test boots now verify themselves: kernel boot-arg `sweetswipe=1` (starlte_touch.c, folded into 0302) plays
+    scripted input through sweet_hid_touch()/sweet_hid_key(): swipe up from the bottom edge at 50 s (the UI is
+    the home-button iPhone's, 8 Plus canvas, so that is Control Center), Home at 66 and 71 s (close, unlock),
+    swipe left at 80 s (applications' page), tap Settings at 100 s. sbca writes every panel-sized BGRA surface
+    at 62/95/135 s of uptime to /private/var/tmp/sbca-shot-<s>-<id>-<W>x<H>-<rowbytes>.bgra (F_FULLFSYNC +
+    sync, or the sweetreboot reset loses them); `tools/ca-gpu/fetch-shots.sh bootNN` pulls the root (also the
+    base for the next install) and makes PNGs (tools/ca-gpu/shots-to-png.py, zlib only) in build/shots/bootNN.
+    `tools/ca-gpu/install-sbca.sh [--pull]` installs the libraries without the 2-3 min pull when the root was
+    pulled after the last boot. sbca truncates its log once per boot (file older than kern.boottime).
+  - IOSurface (0046): iPadOS 18 wraps caller memory two ways and both were missing: sel 6
+    IOSurfaceClientWrapClientImage (struct in {u64 addr; u32 w, h, fmt, bpe, bpr, size}), sel 7
+    WrapClientMemory (scalars addr, size), and IOSurfaceCreate with kIOSurfaceClientAddress, whose key is
+    **"IOSurfaceAddress"** (+ IOSurfaceAllocSize/IOSurfaceOffset; CA::Render::Image::retain_iosurface uses it
+    for icons). sweet_surface_wrap_memory() wires the pages (withAddressRange + prepare; kIODirectionOut and a
+    read-only mapping when the pages are not writable, e.g. file-backed images), any alignment (s->offset gets
+    the page offset). Before: sel 6/7 fell into the default case (zeroed lock result + success = a client with
+    no state page: backboardd SIGSEGV in IOSurfaceClientGetBulkAttachments via iosurface_get_edr_factor), and
+    the IOSurfaceAddress creates got fresh zeroed buffers (every icon transparent).
+  - Doubled picture (0303): CoreAnimation double-buffers between its own surface and the display's default
+    surface (GetLayerDefaultSurface, id 1). Scaled, id 1 was the panel's top-left 1242x2208 and present()
+    skipped swaps of it, so every other frame landed on the panel unscaled (the band above the letterboxed
+    picture, flicker). Scaled, the default surface is now a kernel buffer (sweet_surface_create_buffer) and its
+    swaps are presented like any other; the panel mapping for the scaler is made on every scaled board.
+  - CoreAnimation effect numbers: the authoritative table is CA::OGL::MetalContext::TextureFunction_codes
+    (0x1e6994d48, char * per CA::OGL::TextureFunction); the CFString literals at 0x1e69a4600 are only in source
+    order (pnc/rim/srl/lut sit elsewhere). 106 effects up to cst (105), then blend modes. GL fragment sources:
+    CA::OGL::tex_fragment_shaders (0x1e6997ca0, NULL = no shader); GLContext::function_supported() is a fixed
+    bitmask (supported: 0-13, 15-19, 21, 23-26, 49-53, 105; 27-38, 41, 43-46 too when byte +0x11 of the
+    function state is 0). Hooked vtable slots (GLESContext vtable + 0x10 = 0x1e6984358): function_supported
+    +0x3d8, function_uniform +0x3e8, compile_shader +0x78. eagl.c renumbered: c4p 22, ds8 29, vrd 39, vrb 40,
+    sb3 42, vcm 48 (cross-checked: 48 gets 20 numbers, 29 gets 8, 74 = edr gets [inf 0 0 0]); its vibrant
+    colour matrix and 8x box stand-ins now run ("a colour matrix over what is behind: made"). Still refused:
+    20 (c3s, also unsupported by the CPU renderer). an earlier port's libref.gl needs the function_uniform hook
+    (refgl_function_values) for those stand-ins: without it Control Center's materials came out as
+    unfiltered copies (the "random colours").
+- 2026-10-29 14:15: **boot57: lock screen, home screen with real icons, Settings, all drawn by the Mali; test
+  boots verify themselves** (build/shots/boot57/*.png). Dock icons (Messages, Safari, Music, Mail) are right
+  since 0046 honours IOSurfaceAddress; Settings opens from the scripted tap and renders cleanly. No backboardd
+  crash in boots 56-57.
+  - The scratch folder with fold-fix.sh, mkimage.sh and the boot menu inputs (uc3/) was cleaned. Now in the repo:
+    `tools/fold-fix-11417.sh` (same script) and `tools/mkimage-11417.sh` ([ADT=...] NAME CMDLINE_FILE), which
+    reads build/boot-uc3/{loader.Image,ramdisk.bin,bundles.bin}; those were cut back out of
+    out/xnu-boot-ipados18-sbcb.img (kernel slot = loader + pad to 4 KiB + payload; payload-linux = payload + pad
+    + bundles) and repack byte-identically. Keep build/boot-uc3/.
+  - Scripted input (sweetswipe=1, 0303 now) starts at the first frame on the panel (sweet_fb_first_present):
+    backboardd is exec'd at ~37 s but asks for its first renderer() only at ~69 s, so absolute times missed the
+    UI. sbca's shots are 25/55/80 s after its first renderer() call; sweetreboot=200 in
+    build/ipados18-sbcb-cmdline.txt. sbca log lines carry seconds since boot.
+  - sbca's watchdog (backtraces of all threads after 3 s without renderer()) fires on idle screens too:
+    CoreAnimation does not draw when nothing changes. boot56's "5 frames" was the late UI start plus idle, not
+    a hang. Its fault handler now names image+offset/symbol (dladdr) or the unslid cache address.
+  - Open: (1) Control Center: TextureFunction 20 "c3s" is refused (no GL source in tex_fragment_shaders, not in
+    the SW renderer either); what needs it is not drawn. Needs a source in the table (an earlier port's
+    give_the_renderer_a_shader) once its inputs are known. (2) Wallpaper black on lock and home screen:
+    PosterBoard runs and does not crash; it most likely renders with Metal (the earlier red gradient was the
+    vibrant-colour-matrix veil drawn as a picture, gone since the effect numbers are right). (3) Settings row
+    icons missing (no wrap or upload failure logged). (4) Widgets "Waiting...". (5) Mesa rejects zero-copy import
+    of wrapped surfaces whose offset is not 64-byte aligned (CPU copy instead; slower only).

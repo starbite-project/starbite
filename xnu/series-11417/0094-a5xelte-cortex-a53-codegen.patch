@@ -1,4 +1,4 @@
-From f6f602f3361355f842c2d5153dbf82d4172f6360 Mon Sep 17 00:00:00 2001
+From 5af99f8821c7e48423e61e51c667d04f6e5d3080 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:33:00 +0200
 Subject: [PATCH] patch: 0094-a5xelte-cortex-a53-codegen.patch

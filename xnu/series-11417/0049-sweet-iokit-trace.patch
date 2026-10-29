@@ -1,4 +1,4 @@
-From b07fdb8526bb5d0118efa531c6f43a0be76f4734 Mon Sep 17 00:00:00 2001
+From 2eb8a4f3b01caac53d885f09ac49f6da044f6345 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:30:31 +0200
 Subject: [PATCH] patch: 0049-sweet-iokit-trace.patch
