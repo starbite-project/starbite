@@ -1621,3 +1621,15 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     vibrant-colour-matrix veil drawn as a picture, gone since the effect numbers are right). (3) Settings row
     icons missing (no wrap or upload failure logged). (4) Widgets "Waiting...". (5) Mesa rejects zero-copy import
     of wrapped surfaces whose offset is not 64-byte aligned (CPU copy instead; slower only).
+- 2026-10-29 15:00: **Control Center drawn by the GPU** (boot58-61, build/shots/boot61). TextureFunction 20
+  "c3s" = a 3x3 colour matrix + bias (vec3 color_matrix[4]) over what is behind (gl_LastFragData), the
+  material of Control Center's platters and (probably) Settings' row icons. sbca gives its NULL
+  tex_fragment_shaders entry a source (premultiplied 3x3+bias, clamped to alpha, marked "sbc3s" so eagl.c
+  declares the uniform CoreAnimation does not), says yes in function_supported, and sets color_matrix by hand
+  after GLContext::function_uniform (which has no location for it) through Mesa's glUniform3fv. Opens with a
+  swipe down from the top-right corner (iPhone X style; the bottom-edge swipe does nothing), scripted with
+  eased 50-sample swipes. kern.sweet_first_present (sysctl) = first panel frame; sbca's shots and the kernel's
+  input script both count from it (backboardd's first renderer() is ~17 s earlier). Still wrong: the blurred
+  background behind Control Center is over-bright (bias likely needs scaling by alpha, or the blur stand-in
+  over-accumulates); wallpaper black; Settings row icons missing; widgets "Waiting...".
+  out/xnu-boot-ipados18-gpu-live.img = the same without the timed reset/script/shots, for the user's testing.

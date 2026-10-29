@@ -1,33 +1,50 @@
-From cbdfbe0eb5082693aaf9545b14ea571e332b8e16 Mon Sep 17 00:00:00 2001
+From 7c48f6c0018d00badc044c713d58edc65fd6a2db Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:14 +0200
 Subject: [PATCH] patch: 0303-starlte-gpu-present.patch
 
 ---
- bsd/dev/starlte_touch.c               | 26 ++++++++++-----
- iokit/Kernel/arm/SweetFramebuffer.cpp | 48 ++++++++++++++++++++-------
+ bsd/dev/starlte_touch.c               | 50 +++++++++++++++++++--------
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 48 ++++++++++++++++++-------
  iokit/Kernel/arm/SweetSurface.cpp     | 31 +++++++++++++++++
  iokit/Kernel/arm/SweetSurface.h       |  3 ++
- 4 files changed, 88 insertions(+), 20 deletions(-)
+ 4 files changed, 105 insertions(+), 27 deletions(-)
 
 diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
-index 9e89b19..3416d19 100644
+index 9e89b19..9c59d2e 100644
 --- a/bsd/dev/starlte_touch.c
 +++ b/bsd/dev/starlte_touch.c
-@@ -697,21 +697,25 @@ st_thread(__unused void *arg, __unused wait_result_t wr)
-  * lock screen). The phone UI is the home-button iPhone's (8 Plus canvas): a swipe up from the
-  * bottom edge opens Control Center (on the home screen it did not, boot54), Home closes it and
-  * unlocks (single presses 5 s apart, not a double press), a swipe left shows the applications'
+@@ -22,6 +22,7 @@
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+ #include <sys/param.h>
+ #include <sys/systm.h>
++#include <sys/sysctl.h>
+ #include <kern/clock.h>
+ #include <kern/thread.h>
+ #include <kern/sched_prim.h>
+@@ -694,35 +695,52 @@ st_thread(__unused void *arg, __unused wait_result_t wr)
+ 
+ /*
+  * Boot-arg sweetswipe=1: scripted input for unattended test boots (screenshots of what is past the
+- * lock screen). The phone UI is the home-button iPhone's (8 Plus canvas): a swipe up from the
+- * bottom edge opens Control Center (on the home screen it did not, boot54), Home closes it and
+- * unlocks (single presses 5 s apart, not a double press), a swipe left shows the applications'
 - * page, a tap opens Settings. Times are since boot. Swipes use finger 9 in panel pixels through
 - * sweet_hid_touch(), 24 steps of 12 ms, like the real ones; Home goes through sweet_hid_key().
-+ * page, a tap opens Settings. Times count from the first frame on the panel
++ * lock screen). Control Center opens with a swipe down from the top right corner, as on the iPhone X
++ * (a swipe up from the bottom edge does nothing, boot57; the user's own swipe down worked, boot58),
++ * Home closes it and unlocks (single presses 5 s apart, not a double press), a swipe left shows the
++ * applications' page, a tap opens Settings, Home and the swipe down give Control Center over the
++ * home screen. Times count from the first frame on the panel
 + * (sweet_fb_first_present, SweetFramebuffer.cpp: 70-85 s after boot in boot55-56, when absolute
 + * times had most of the script run before there was a UI). Swipes use finger 9 in panel pixels
-+ * through sweet_hid_touch(), 24 steps of 12 ms, like the real ones; Home goes through
-+ * sweet_hid_key().
++ * through sweet_hid_touch(), like the real ones; Home goes through sweet_hid_key().
   */
  extern void sweet_hid_key(int key, int down);
 +extern uint64_t sweet_fb_first_present;
++/* for sbca (backboardd), whose screenshots are to be timed like this script */
++SYSCTL_QUAD(_kern, OID_AUTO, sweet_first_present, CTLFLAG_RD | CTLFLAG_LOCKED, &sweet_fb_first_present,
++    "mach_absolute_time() of the first frame on the panel, 0 before");
  
  static const struct {
  	unsigned at_s;
@@ -39,17 +56,22 @@ index 9e89b19..3416d19 100644
 -	{ 71, 1, 0, 0, 0, 0 },                  /* unlocks */
 -	{ 80, 0, 1300, 1500, 150, 1500 },       /* home screen page 2, the applications (shot at 95 s) */
 -	{ 100, 0, 534, 1790, 534, 1790 },       /* a tap on Settings (shot at 135 s) */
-+	{ 15, 0, 720, 2950, 720, 1300 },        /* Control Center over the lock screen (sbca shot at 25 s) */
++	{ 15, 0, 1380, 6, 1380, 1500 },         /* Control Center over the lock screen (sbca shots at 17-25 s) */
 +	{ 30, 1, 0, 0, 0, 0 },                  /* closes it */
 +	{ 35, 1, 0, 0, 0, 0 },                  /* unlocks */
 +	{ 45, 0, 1300, 1500, 150, 1500 },       /* home screen page 2, the applications (shot at 55 s) */
 +	{ 60, 0, 534, 1790, 534, 1790 },        /* a tap on Settings (shot at 80 s) */
++	{ 72, 1, 0, 0, 0, 0 },                  /* back to the home screen */
++	{ 88, 0, 1380, 6, 1380, 1500 },         /* Control Center over the home screen (shots at 97, 103 s) */
  };
  
  static void
-@@ -719,10 +723,16 @@ st_script_thread(__unused void *arg, __unused wait_result_t wr)
+ st_script_thread(__unused void *arg, __unused wait_result_t wr)
  {
- 	const int f = ST_FINGERS - 1, steps = 24;
+-	const int f = ST_FINGERS - 1, steps = 24;
++	/* 50 samples 6 ms apart, eased in and out (smoothstep): 24 even steps of 60 px were not taken
++	 * for a swipe from the top edge (boot59), where the user's own swipe was */
++	const int f = ST_FINGERS - 1, steps = 50;
  
 +	while (sweet_fb_first_present == 0) {
 +		st_msleep(250);
@@ -65,6 +87,22 @@ index 9e89b19..3416d19 100644
  		if (now_ns < at_ns) {
  			st_msleep((unsigned)((at_ns - now_ns) / NSEC_PER_MSEC));
  		}
+@@ -736,10 +754,12 @@ st_script_thread(__unused void *arg, __unused wait_result_t wr)
+ 		printf("STARLTE TOUCH: scripted swipe %u: %d,%d -> %d,%d\n", i, st_script[i].x0, st_script[i].y0,
+ 		    st_script[i].x1, st_script[i].y1);
+ 		for (int k = 0; k <= steps; k++) {
+-			int x = st_script[i].x0 + (st_script[i].x1 - st_script[i].x0) * k / steps;
+-			int y = st_script[i].y0 + (st_script[i].y1 - st_script[i].y0) * k / steps;
++			int t = k * 1000 / steps;                       /* 0..1000 */
++			int e = t * t / 1000 * (3000 - 2 * t) / 1000;   /* smoothstep, 0..1000 */
++			int x = st_script[i].x0 + (st_script[i].x1 - st_script[i].x0) * e / 1000;
++			int y = st_script[i].y0 + (st_script[i].y1 - st_script[i].y0) * e / 1000;
+ 			sweet_hid_touch(f, 1, x, y);
+-			st_msleep(12);
++			st_msleep(6);
+ 		}
+ 		sweet_hid_touch(f, 0, st_script[i].x1, st_script[i].y1);
+ 	}
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 index b6537c0..7ee10e3 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp

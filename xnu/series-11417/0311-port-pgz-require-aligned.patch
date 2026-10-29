@@ -1,4 +1,4 @@
-From ef82af2128c9e0f3f94b0b726c570c1019aa5f45 Mon Sep 17 00:00:00 2001
+From 5206cd29925fcc51e61800fd754c4bd2a3f1cc77 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 19:21:41 +0200
 Subject: [PATCH] patch: 0311-port-pgz-require-aligned.patch

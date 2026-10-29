@@ -1,4 +1,4 @@
-From 446b90f4431981062268565cbabb6d7c68ad81b0 Mon Sep 17 00:00:00 2001
+From 58f46b9bf323664f371a019a244502a6d202b896 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 20:33:53 +0200
 Subject: [PATCH] patch: 0312-port-xpc-service-port-check.patch
