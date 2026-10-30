@@ -1633,3 +1633,22 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   background behind Control Center is over-bright (bias likely needs scaling by alpha, or the blur stand-in
   over-accumulates); wallpaper black; Settings row icons missing; widgets "Waiting...".
   out/xnu-boot-ipados18-gpu-live.img = the same without the timed reset/script/shots, for the user's testing.
+- 2026-10-30: **Why the GPU UI felt like the CPU one and died within minutes** (user's live sessions, logs
+  build/ipados18-live1.txt + build/shots/live1/sbca.log; fixed in boot62-63).
+  - Death: "STARLTE GPU USER: out of level-3 tables" x1282, then DRM_IOCTL_PANFROST_CREATE_BO failed x2772,
+    panfrost_batch_init/prepare_draw failed x1000, frames of 1.35 s, backboardd SIGSEGV. The app GPU mapper
+    handed out level-3 tables from a bump pointer and never freed them (250 tables = 500 MiB of mappings ever),
+    and StarbiteMali's GPU VAs were a bump allocator too. Now (0301) tables are counted and return to a free
+    list when their last page is unmapped (a failed map is rolled back), and (0305) VAs come from a bitmap of
+    64 KiB granules, next-fit, one free granule after each buffer, freed on GEM_CLOSE and failure paths.
+    boot62-63: peak 64-67 of 250 tables, no CREATE_BO failure.
+  - Slowness: the panel ran at 8-14 fps at best ("A5XELTE FB: frames=..." lines; this kernel defines all three
+    board configs, so the A5 30 Hz timer and copy timing apply). Every frame was scaled to the panel by the CPU
+    (scaledCopy, 11-31 ms: a gather into write-combined memory that also reads rows back from it), because
+    the GPU present (0301 blob, tools/gpu/starlte-g72-tri.c) was built for the old 828x1792 canvas and
+    SweetFramebuffer's page array and starlte_gpu.c's slots held 8 MiB. Now: blob regenerated for 1242x2208
+    (full width, 200-row bars, as scaledCopy), slots 6 tables = 12 MiB (SG_MEM_BYTES 0x60000),
+    SWEET_FB_GPU_MAX_PAGES 3072, a5fb_hz=60, and gpuPresent() says why when it gives up (it used to fail eight
+    times silently). boot63: "STARLTE GPU PRESENT: 600 frames, average 2316 us" (4.1-4.5 ms with the cache
+    clean) instead of 11-31 ms on the CPU. eagl's own frame work: ~18 ms (2.2 ms of it waiting for the GPU).
+  - Still: G3D PLL at 260 MHz (vdd_g3d 950 mV, no DVFS), CPU clocks unknown (the cycle counter line is broken).

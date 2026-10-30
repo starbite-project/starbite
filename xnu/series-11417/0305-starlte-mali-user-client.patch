@@ -1,20 +1,20 @@
-From a5dbed93a44bf5ba40007b44392b8dc438eae3f6 Mon Sep 17 00:00:00 2001
+From 3010061375734ed6cd1a4df3708deedc0970a125 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:14 +0200
 Subject: [PATCH] patch: 0305-starlte-mali-user-client.patch
 
 ---
- iokit/Kernel/arm/StarbiteMali.cpp | 500 ++++++++++++++++++++++++++++++
+ iokit/Kernel/arm/StarbiteMali.cpp | 566 ++++++++++++++++++++++++++++++
  iokit/conf/files.arm64            |   1 +
- 2 files changed, 501 insertions(+)
+ 2 files changed, 567 insertions(+)
  create mode 100644 iokit/Kernel/arm/StarbiteMali.cpp
 
 diff --git a/iokit/Kernel/arm/StarbiteMali.cpp b/iokit/Kernel/arm/StarbiteMali.cpp
 new file mode 100644
-index 0000000..33fcda7
+index 0000000..00d171a
 --- /dev/null
 +++ b/iokit/Kernel/arm/StarbiteMali.cpp
-@@ -0,0 +1,500 @@
+@@ -0,0 +1,566 @@
 +/*
 + * Project Starbite: the Mali-G72 for iOS apps (stage 6 of
 + * bsd/dev/starlte_gpu.c). The IOService "StarbiteMali" and its user client
@@ -122,9 +122,79 @@ index 0000000..33fcda7
 +	uint32_t surface;                       /* IOSurface ID of an imported buffer, else 0 */
 +};
 +
-+/* GPU VAs: one bump allocator for all clients (they share AS1), never reused. */
++/*
++ * GPU VAs, shared by all clients (they share AS1): a bitmap of 64 KiB granules from SBM_VA_FIRST to
++ * 4 GiB, handed out next-fit with one free granule after each buffer (a fault past its end lands
++ * in nothing). It used to be a bump allocator that never reused anything; with CoreAnimation
++ * making and dropping textures all the time, the page tables behind it ran out within minutes
++ * (the user's sessions: "out of level-3 tables" x1282, backboardd crashing and crawling).
++ */
++#define SBM_VA_GRANULE          0x10000ull
++#define SBM_VA_GRANULES         ((SBM_VA_END - SBM_VA_FIRST) / SBM_VA_GRANULE)
 +static IOLock *sbm_va_lock;
-+static uint64_t sbm_next_va = SBM_VA_FIRST;
++static uint64_t sbm_va_used[SBM_VA_GRANULES / 64];
++static uint64_t sbm_va_cursor;
++
++static uint64_t
++sbm_va_granules(uint64_t bytes)
++{
++	return (bytes + SBM_VA_GRANULE - 1) / SBM_VA_GRANULE + 1;
++}
++
++static bool
++sbm_va_bit(uint64_t g)
++{
++	return (sbm_va_used[g / 64] >> (g % 64)) & 1;
++}
++
++static void
++sbm_va_set(uint64_t first, uint64_t n, bool used)
++{
++	for (uint64_t g = first; g < first + n; g++) {
++		if (used) {
++			sbm_va_used[g / 64] |= 1ull << (g % 64);
++		} else {
++			sbm_va_used[g / 64] &= ~(1ull << (g % 64));
++		}
++	}
++}
++
++/* A GPU VA for bytes, or 0. */
++static uint64_t
++sbm_va_alloc(uint64_t bytes)
++{
++	uint64_t n = sbm_va_granules(bytes), va = 0;
++
++	IOLockLock(sbm_va_lock);
++	for (unsigned pass = 0; pass < 2 && va == 0; pass++) {
++		uint64_t g = pass == 0 ? sbm_va_cursor : 0, run = 0;
++		uint64_t end = pass == 0 ? SBM_VA_GRANULES : sbm_va_cursor + n;
++		for (; g < end && g < SBM_VA_GRANULES; g++) {
++			if (sbm_va_bit(g)) {
++				run = 0;
++			} else if (++run == n) {
++				uint64_t first = g + 1 - n;
++				sbm_va_set(first, n, true);
++				sbm_va_cursor = g + 1;
++				va = SBM_VA_FIRST + first * SBM_VA_GRANULE;
++				break;
++			}
++		}
++	}
++	IOLockUnlock(sbm_va_lock);
++	return va;
++}
++
++static void
++sbm_va_free(uint64_t va, uint64_t bytes)
++{
++	if (va < SBM_VA_FIRST || va >= SBM_VA_END) {
++		return;
++	}
++	IOLockLock(sbm_va_lock);
++	sbm_va_set((va - SBM_VA_FIRST) / SBM_VA_GRANULE, sbm_va_granules(bytes), false);
++	IOLockUnlock(sbm_va_lock);
++}
 +
 +class StarbiteMali : public IOService {
 +	OSDeclareDefaultStructors(StarbiteMali);
@@ -187,6 +257,7 @@ index 0000000..33fcda7
 +StarbiteMaliUserClient::closeBO(sbm_bo *bo)
 +{
 +	starlte_gpu_user_unmap(bo->va, bo->pages);
++	sbm_va_free(bo->va, (uint64_t)bo->pages * 0x1000);
 +	OSSafeReleaseNULL(bo->map);
 +	OSSafeReleaseNULL(bo->mem);
 +	bo->va = 0;
@@ -215,14 +286,10 @@ index 0000000..33fcda7
 +	}
 +	uint32_t pages = (a->size + 0xfff) / 0x1000;
 +	uint64_t bytes = (uint64_t)pages * 0x1000;
-+	IOLockLock(sbm_va_lock);
-+	uint64_t va = sbm_next_va;
-+	if (va + bytes > SBM_VA_END) {
-+		IOLockUnlock(sbm_va_lock);
++	uint64_t va = sbm_va_alloc(bytes);
++	if (va == 0) {
 +		return kIOReturnNoSpace;
 +	}
-+	sbm_next_va = (va + bytes + 0xffff) & ~0xffffull;       /* a gap between buffers */
-+	IOLockUnlock(sbm_va_lock);
 +
 +	IOBufferMemoryDescriptor *mem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
 +	    kIODirectionInOut | kIOMemoryKernelUserShared | kIOMapWriteCombineCache,
@@ -233,6 +300,7 @@ index 0000000..33fcda7
 +		if (pa) {
 +			IOFreeData(pa, (vm_size_t)pages * sizeof(uint64_t));
 +		}
++		sbm_va_free(va, bytes);
 +		return kIOReturnNoMemory;
 +	}
 +	/* Out of the CPU caches by physical address, then zeroed write-combined:
@@ -249,6 +317,7 @@ index 0000000..33fcda7
 +	IOFreeData(pa, (vm_size_t)pages * sizeof(uint64_t));
 +	if (!ok) {
 +		mem->release();
++		sbm_va_free(va, bytes);
 +		return kIOReturnVMError;
 +	}
 +	fBos[handle - 1] = (sbm_bo){ .mem = mem, .map = NULL, .va = va, .pages = pages };
@@ -304,15 +373,11 @@ index 0000000..33fcda7
 +		handle = ++fCount;
 +	}
 +	uint32_t pages = (uint32_t)(a->size / 0x1000);
-+	IOLockLock(sbm_va_lock);
-+	uint64_t va = sbm_next_va;
-+	if (va + a->size > SBM_VA_END) {
-+		IOLockUnlock(sbm_va_lock);
++	uint64_t va = sbm_va_alloc(a->size);
++	if (va == 0) {
 +		s->release();
 +		return kIOReturnNoSpace;
 +	}
-+	sbm_next_va = (va + a->size + 0xffff) & ~0xffffull;
-+	IOLockUnlock(sbm_va_lock);
 +	uint64_t *pa = (uint64_t *)IOMallocData((vm_size_t)pages * sizeof(uint64_t));
 +	bool ok = pa != NULL;
 +	for (uint32_t i = 0; i < pages && ok; i++) {
@@ -326,6 +391,7 @@ index 0000000..33fcda7
 +	}
 +	if (!ok) {
 +		s->release();
++		sbm_va_free(va, a->size);
 +		return kIOReturnVMError;
 +	}
 +	s->memory->retain();

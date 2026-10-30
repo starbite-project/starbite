@@ -1,4 +1,4 @@
-From 1195b03b6d25bb54f5feb9e99754e1d9f747fc9c Mon Sep 17 00:00:00 2001
+From 4fdca996fd68fd1fe3bc75369856630e3ea45b71 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Thu, 29 Oct 2026 01:24:56 +0200
 Subject: [PATCH] patch: 0316-port-exec-inject.patch

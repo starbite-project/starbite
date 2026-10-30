@@ -10,7 +10,7 @@
  * its GPU addresses, for xnu/src/starlte_gpu.c. Both job chains are run
  * through pandecode first.
  *
- * Phase 5 adds a second blob, the GPU present: iOS's 828x1792 canvas
+ * Phase 5 adds a second blob, the GPU present: iOS's 1242x2208 canvas
  * (sweetfb_lw/lh) as a texture on a quad scaled to the panel's full height,
  * bilinear, between black bars, as SweetFramebuffer's scaledCopy() lays it
  * out. Per frame the kernel patches only the surface pointer and strides.
@@ -97,8 +97,8 @@ compile_fs(struct util_dynarray *bin, struct pan_shader_info *info)
 }
 
 /* ---- phase 5: the present blob ---------------------------------------- */
-#define CANVAS_W        828u            /* boot-args sweetfb_lw / sweetfb_lh */
-#define CANVAS_H        1792u
+#define CANVAS_W        1242u           /* boot-args sweetfb_lw / sweetfb_lh */
+#define CANVAS_H        2208u
 #define PANEL_W         1440u
 #define PANEL_H         2960u
 #define P_BLOB_VA       0x0200c000ull   /* SG_VA + data offset 0xc000 */
@@ -187,14 +187,22 @@ gen_present(void)
            (unsigned long long)info.preload, info.texture_count, info.sampler_count,
            info.varyings.input_count);
 
-   /* The canvas keeps its aspect at full panel height (scaledCopy()). */
-   unsigned out_w = CANVAS_W * PANEL_H / CANVAS_H;
-   unsigned x0 = (PANEL_W - out_w) / 2, x1 = x0 + out_w;
+   /* The canvas keeps its aspect, centred, as scaledCopy() lays it out: at full panel height
+    * between bars at the sides when it is narrower than the panel (828x1792), at full panel
+    * width between bars above and below when it is wider (1242x2208: 1440x2560, 200 rows each). */
+   unsigned x0 = 0, x1 = PANEL_W, y0 = 0, y1 = PANEL_H;
+   if (CANVAS_W * PANEL_H <= PANEL_W * CANVAS_H) {
+      unsigned out_w = CANVAS_W * PANEL_H / CANVAS_H;
+      x0 = (PANEL_W - out_w) / 2, x1 = x0 + out_w;
+   } else {
+      unsigned out_h = CANVAS_H * PANEL_W / CANVAS_W;
+      y0 = (PANEL_H - out_h) / 2, y1 = y0 + out_h;
+   }
    float pos[] = {
-      x0, 0, 0, 1,
-      x1, 0, 0, 1,
-      x0, PANEL_H, 0, 1,
-      x1, PANEL_H, 0, 1,
+      x0, y0, 0, 1,
+      x1, y0, 0, 1,
+      x0, y1, 0, 1,
+      x1, y1, 0, 1,
    };
    memcpy(pat(P_POS), pos, sizeof(pos));
    float tc[] = {
@@ -385,7 +393,7 @@ gen_present(void)
    pandecode_jc(ctx, P_BLOB_VA + P_TILER_JOB, GPU_ID);
    fprintf(stderr, "==== present fragment chain ====\n");
    pandecode_jc(ctx, P_BLOB_VA + P_FRAG_JOB, GPU_ID);
-   fprintf(stderr, "present quad x %u..%u of %u\n", x0, x1, PANEL_W);
+   fprintf(stderr, "present quad x %u..%u y %u..%u of %ux%u\n", x0, x1, y0, y1, PANEL_W, PANEL_H);
    return (P_SHADER + bin.size + 3) / 4;
 }
 

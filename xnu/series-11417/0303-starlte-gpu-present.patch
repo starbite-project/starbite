@@ -1,14 +1,14 @@
-From 7c48f6c0018d00badc044c713d58edc65fd6a2db Mon Sep 17 00:00:00 2001
+From 8ab6e91be19eb90dc3e8954700cd86e7b5014afa Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:14 +0200
 Subject: [PATCH] patch: 0303-starlte-gpu-present.patch
 
 ---
- bsd/dev/starlte_touch.c               | 50 +++++++++++++++++++--------
- iokit/Kernel/arm/SweetFramebuffer.cpp | 48 ++++++++++++++++++-------
- iokit/Kernel/arm/SweetSurface.cpp     | 31 +++++++++++++++++
+ bsd/dev/starlte_touch.c               | 50 +++++++++++++++++-------
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 56 ++++++++++++++++++++-------
+ iokit/Kernel/arm/SweetSurface.cpp     | 31 +++++++++++++++
  iokit/Kernel/arm/SweetSurface.h       |  3 ++
- 4 files changed, 105 insertions(+), 27 deletions(-)
+ 4 files changed, 110 insertions(+), 30 deletions(-)
 
 diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
 index 9e89b19..9c59d2e 100644
@@ -104,10 +104,10 @@ index 9e89b19..9c59d2e 100644
  		sweet_hid_touch(f, 0, st_script[i].x1, st_script[i].y1);
  	}
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index b6537c0..7ee10e3 100644
+index b6537c0..2163ad6 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -63,9 +63,22 @@ extern "C" uint64_t sweet_fb_hold_until;
+@@ -63,13 +63,26 @@ extern "C" uint64_t sweet_fb_hold_until;
  uint64_t sweet_fb_hold_until;
  /* Last surface copied full-screen to the panel (GPU copy test). */
  static uint32_t sweet_fb_last_surface_id;
@@ -131,6 +131,11 @@ index b6537c0..7ee10e3 100644
  extern "C" int herolte_gpu_present_slot(uint32_t id, uint64_t first_pa);
  extern "C" int herolte_gpu_present_map(uint32_t id, const uint64_t *pages, unsigned n);
  extern "C" bool herolte_gpu_present_draw(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h);
+-#define SWEET_FB_GPU_MAX_PAGES 2048     /* one 8 MiB GPU slot */
++#define SWEET_FB_GPU_MAX_PAGES 3072     /* one 12 MiB GPU slot (starlte_gpu.c): 1242x2208 x 5120 B */
+ #endif
+ 
+ enum {
 @@ -264,22 +277,24 @@ AppleCLCD::start(IOService *provider)
  	fLock = IOLockAlloc();
  	fClients = OSArray::withCapacity(4);
@@ -198,6 +203,26 @@ index b6537c0..7ee10e3 100644
  	if (failures >= 8 || s->memory == NULL) {
  		return false;
  	}
+@@ -874,7 +898,9 @@ AppleCLCD::gpuPresent(SweetSurface *s, int32_t sx, int32_t sy, int32_t w, int32_
+ 		slot = ok ? herolte_gpu_present_map(s->id, pages, n) : -1;
+ 	}
+ 	if (slot < 0) {
+-		failures++;
++		/* (eight of these and the CPU copies for good: say why, as it used to happen silently) */
++		IOLog("SWEET FB: GPU present: surface %u (%llu bytes, first page %#llx) not mapped (%u of 8)\n", s->id,
++		    (unsigned long long)s->memory->getLength(), (unsigned long long)pa0, ++failures);
+ 		return false;
+ 	}
+ 	uint64_t off = (uint64_t)s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4;
+@@ -885,7 +911,7 @@ AppleCLCD::gpuPresent(SweetSurface *s, int32_t sx, int32_t sy, int32_t w, int32_
+ 	}
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ 	if (!herolte_gpu_present_draw(slot, (uint32_t)off, s->bytesPerRow, (uint32_t)w, (uint32_t)h)) {
+-		failures++;
++		IOLog("SWEET FB: GPU present: %dx%d stride %u not drawn (%u of 8)\n", w, h, s->bytesPerRow, ++failures);
+ 		return false;
+ 	}
+ 	return true;
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
 index ef50879..b9aa6ff 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp

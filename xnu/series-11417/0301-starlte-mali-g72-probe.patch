@@ -1,14 +1,14 @@
-From 1e3e8f28dab44113ebaf9485c394801a54bf6c61 Mon Sep 17 00:00:00 2001
+From 39dc11b25ca1188c6ca5f7befa056ec3935dc198 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:14 +0200
 Subject: [PATCH] patch: 0301-starlte-mali-g72-probe.patch
 
 ---
  bsd/conf/files                |    1 +
- bsd/dev/starlte_gpu.c         | 1131 +++++++++++++++++++++++++++++++++
+ bsd/dev/starlte_gpu.c         | 1183 +++++++++++++++++++++++++++++++++
  bsd/dev/starlte_gpu_tri.h     |  210 ++++++
  iokit/bsddev/IOKitBSDInit.cpp |    3 +
- 4 files changed, 1345 insertions(+)
+ 4 files changed, 1397 insertions(+)
  create mode 100644 bsd/dev/starlte_gpu.c
  create mode 100644 bsd/dev/starlte_gpu_tri.h
 
@@ -26,10 +26,10 @@ index c17d55f..ae5f13b 100644
  bsd/dev/a5xelte_keys.c			standard
 diff --git a/bsd/dev/starlte_gpu.c b/bsd/dev/starlte_gpu.c
 new file mode 100644
-index 0000000..ba4ba47
+index 0000000..e1b67e3
 --- /dev/null
 +++ b/bsd/dev/starlte_gpu.c
-@@ -0,0 +1,1131 @@
+@@ -0,0 +1,1183 @@
 +/*
 + * STARLTE (Galaxy S9 SM-G960F, Exynos 9810) Mali-G72 MP18 (Bifrost), stage 1:
 + * read-only probe, the S9 counterpart of herolte_gpu.c (Mali-T880).
@@ -185,10 +185,11 @@ index 0000000..ba4ba47
 + * 0x04000000 (both 2 MiB aligned). Stage 4's tiler heap is 16 MiB more at
 + * 0x8f1000000, GPU VA 0x10000000, its 8 level-3 tables at +0x40000 (no
 + * growable heap: nothing here handles GPU page faults). Stage 5's surface
-+ * slots: 4 x 8 MiB at GPU VA 0x20000000.., their level-3 tables at +0x48000.
++ * slots: 4 x 12 MiB at GPU VA 0x20000000.., their level-3 tables at +0x48000
++ * (12 MiB: iOS's 1242x2208 canvas at 5120 bytes a row is 11.3 MB).
 + */
 +#define SG_MEM_PA       0x8f0000000ull
-+#define SG_MEM_BYTES    0x58000u
++#define SG_MEM_BYTES    0x60000u
 +#define SG_VA           0x02000000ull   /* the data pages, from +SG_DATA_OFF */
 +#define SG_DATA_OFF     0x10000u
 +#define SG_DATA_PAGES   48u
@@ -620,13 +621,13 @@ index 0000000..ba4ba47
 + * cores; the blob (tools/gpu/starlte-g72-tri.c) is copied fresh for every
 + * frame (the GPU writes back job headers and tiler state) and only the
 + * texture's surface pointer and strides are patched. iOS surfaces get GPU
-+ * VAs in 8 MiB slots (4 level-3 tables each); a slot is keyed by surface
++ * VAs in 12 MiB slots (6 level-3 tables each); a slot is keyed by surface
 + * id and first page, a remapped slot takes a fresh VA and the MMU's page
 + * table caches are flushed. Called only from SweetFramebuffer's present(),
 + * which its vsync timer serializes, and only after sgp_ready is set.
 + */
 +#define SGP_SLOTS       4u
-+#define SGP_SLOT_TABLES 4u
++#define SGP_SLOT_TABLES 6u
 +#define SGP_SLOT_PAGES  (SGP_SLOT_TABLES * 512u)
 +#define SGP_L3_OFF      0x48000u
 +#define SGP_VA_BASE     0x20000000ull
@@ -800,7 +801,7 @@ index 0000000..ba4ba47
 + * live in 4 MiB at 0x8f2000000 (bank 2, above the stage 4 heap), mapped
 + * uncached: L0 at +0, L1 at +0x1000, the four L2 tables for VA 0..4 GiB at
 + * +0x2000, level-3 tables handed out from +0x6000 (250 of them, 500 MiB
-+ * of mappings) and never freed. 1 MiB: a 4 MiB ml_io_map() panicked in
++ * of mappings at a time) and given back when empty. 1 MiB: a 4 MiB ml_io_map() panicked in
 + * kmem_alloc (the kernel's I/O mapping space is small). Buffers are 4 KiB pages of XNU memory that the
 + * user client maps uncached on the CPU side (the GPU is not IO-coherent).
 + * Jobs run synchronously under sg_lock, polled (no interrupts yet); a
@@ -812,6 +813,16 @@ index 0000000..ba4ba47
 +
 +static vm_offset_t sgu_pt;
 +static uint32_t sgu_next_table = SGU_L3_FIRST;
++/*
++ * Level-3 tables are counted and given back: a table whose last page is unmapped leaves its level-2
++ * entry and goes to sgu_l3_free, and the next map takes it again. They used to be handed out from
++ * sgu_next_table and never freed: 500 MiB of mappings in all, gone within minutes once
++ * CoreAnimation drew with the GPU ("out of level-3 tables" x1282 in one session).
++ */
++#define SGU_L3_TABLES   ((SGU_PT_BYTES - SGU_L3_FIRST) / 0x1000)
++static uint16_t sgu_l3_count[SGU_L3_TABLES];    /* pages mapped through each table */
++static uint16_t sgu_l3_free[SGU_L3_TABLES];
++static unsigned sgu_l3_nfree, sgu_l3_live, sgu_l3_said;
 +static bool sgu_ready;
 +static uint64_t sgu_jobs, sgu_faults;
 +
@@ -935,7 +946,38 @@ index 0000000..ba4ba47
 +	return true;
 +}
 +
-+/* Map n 4 KiB pages at GPU VA va (4 KiB aligned, below 4 GiB) in AS1. */
++static unsigned
++sgu_l3_index(uint64_t l2e)
++{
++	return (unsigned)(((l2e & ~0xfffull) - SGU_PT_PA - SGU_L3_FIRST) / 0x1000);
++}
++
++/* Unmap n pages at va; tables left empty go back to the pool. sg_lock held. */
++static void
++sgu_unmap_locked(uint64_t va, unsigned n)
++{
++	for (unsigned i = 0; i < n; i++) {
++		uint64_t v = va + (uint64_t)i * 0x1000;
++		volatile uint64_t *l2 = (volatile uint64_t *)(sgu_pt + 0x2000 + (v >> 30) * 0x1000);
++		unsigned l2i = (v >> 21) & 0x1ff;
++		uint64_t l2e = l2[l2i];
++		if (!l2e) {
++			continue;
++		}
++		volatile uint64_t *l3 = (volatile uint64_t *)(sgu_pt + (uint32_t)((l2e & ~0xfffull) - SGU_PT_PA));
++		unsigned t = sgu_l3_index(l2e);
++		if (l3[(v >> 12) & 0x1ff] != 0) {
++			l3[(v >> 12) & 0x1ff] = 0;
++			if (t < SGU_L3_TABLES && sgu_l3_count[t] > 0 && --sgu_l3_count[t] == 0) {
++				l2[l2i] = 0;
++				sgu_l3_free[sgu_l3_nfree++] = (uint16_t)t;
++				sgu_l3_live--;
++			}
++		}
++	}
++}
++
++/* Map n 4 KiB pages at GPU VA va (4 KiB aligned, below 4 GiB) in AS1; all or nothing. */
 +bool
 +starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n)
 +{
@@ -943,27 +985,46 @@ index 0000000..ba4ba47
 +		return false;
 +	}
 +	lck_mtx_lock(&sg_lock);
-+	bool ok = true;
-+	for (unsigned i = 0; i < n && ok; i++) {
++	unsigned i;
++	for (i = 0; i < n; i++) {
 +		uint64_t v = va + (uint64_t)i * 0x1000;
 +		volatile uint64_t *l2 = (volatile uint64_t *)(sgu_pt + 0x2000 + (v >> 30) * 0x1000);
 +		unsigned l2i = (v >> 21) & 0x1ff;
 +		if (!l2[l2i]) {
-+			if (sgu_next_table + 0x1000 > SGU_PT_BYTES) {
-+				printf("STARLTE GPU USER: out of level-3 tables\n");
-+				ok = false;
++			uint32_t table;
++			if (sgu_l3_nfree > 0) {
++				table = SGU_L3_FIRST + (uint32_t)sgu_l3_free[--sgu_l3_nfree] * 0x1000;
++			} else if (sgu_next_table + 0x1000 <= SGU_PT_BYTES) {
++				table = sgu_next_table;
++				sgu_next_table += 0x1000;
++			} else {
++				printf("STARLTE GPU USER: out of level-3 tables (%u in use)\n", sgu_l3_live);
 +				break;
 +			}
-+			volatile uint64_t *nt = (volatile uint64_t *)(sgu_pt + sgu_next_table);
++			volatile uint64_t *nt = (volatile uint64_t *)(sgu_pt + table);
 +			for (unsigned j = 0; j < 512; j++) {
 +				nt[j] = 0;
 +			}
-+			l2[l2i] = (SGU_PT_PA + sgu_next_table) | 3;
-+			sgu_next_table += 0x1000;
++			l2[l2i] = (SGU_PT_PA + table) | 3;
++			sgu_l3_count[(table - SGU_L3_FIRST) / 0x1000] = 0;
++			sgu_l3_live++;
 +		}
 +		volatile uint64_t *l3 = (volatile uint64_t *)(sgu_pt +
 +		    (uint32_t)((l2[l2i] & ~0xfffull) - SGU_PT_PA));
++		if (l3[(v >> 12) & 0x1ff] == 0) {
++			sgu_l3_count[sgu_l3_index(l2[l2i])]++;
++		}
 +		l3[(v >> 12) & 0x1ff] = (pages[i] & ~0xfffull) | 0x2c1;
++	}
++	bool ok = i == n;
++	if (!ok) {
++		sgu_unmap_locked(va, i);
++	}
++	/* how full the pool gets: a line at each quarter, on the way up */
++	unsigned quarter = sgu_l3_live * 4 / SGU_L3_TABLES;
++	if (quarter > sgu_l3_said) {
++		sgu_l3_said = quarter;
++		printf("STARLTE GPU USER: %u of %u level-3 tables in use\n", sgu_l3_live, (unsigned)SGU_L3_TABLES);
 +	}
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +	if (!sgu_flush(1)) {
@@ -980,16 +1041,7 @@ index 0000000..ba4ba47
 +		return;
 +	}
 +	lck_mtx_lock(&sg_lock);
-+	for (unsigned i = 0; i < n; i++) {
-+		uint64_t v = va + (uint64_t)i * 0x1000;
-+		volatile uint64_t *l2 = (volatile uint64_t *)(sgu_pt + 0x2000 + (v >> 30) * 0x1000);
-+		uint64_t l2e = l2[(v >> 21) & 0x1ff];
-+		if (l2e) {
-+			volatile uint64_t *l3 = (volatile uint64_t *)(sgu_pt +
-+			    (uint32_t)((l2e & ~0xfffull) - SGU_PT_PA));
-+			l3[(v >> 12) & 0x1ff] = 0;
-+		}
-+	}
++	sgu_unmap_locked(va, n);
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +	(void)sgu_flush(1);
 +	lck_mtx_unlock(&sg_lock);
@@ -1163,7 +1215,7 @@ index 0000000..ba4ba47
 +#endif /* ARM64_BOARD_CONFIG_STARLTE */
 diff --git a/bsd/dev/starlte_gpu_tri.h b/bsd/dev/starlte_gpu_tri.h
 new file mode 100644
-index 0000000..604fc79
+index 0000000..b4f2241
 --- /dev/null
 +++ b/bsd/dev/starlte_gpu_tri.h
 @@ -0,0 +1,210 @@
@@ -1280,8 +1332,8 @@ index 0000000..604fc79
 +#define SG_PRES_TILER_JOB  0x0u
 +#define SG_PRES_FRAG_JOB   0x100u
 +#define SG_PRES_SURFACE    0x680u   /* Surface With Stride: pointer, row, surface */
-+#define SG_PRES_CANVAS_W   828u
-+#define SG_PRES_CANVAS_H   1792u
++#define SG_PRES_CANVAS_W   1242u
++#define SG_PRES_CANVAS_H   2208u
 +#define SG_PRES_BLOB_WORDS 548u
 +static const uint32_t sg_pres_blob[SG_PRES_BLOB_WORDS] = {
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0001000f, 0x00000000,
@@ -1337,12 +1389,12 @@ index 0000000..604fc79
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000001f,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-+	0x00000000, 0x00000000, 0x42100000, 0x00000000, 0x00000000, 0x3f800000,
-+	0x44af6000, 0x00000000, 0x00000000, 0x3f800000, 0x42100000, 0x45390000,
-+	0x00000000, 0x3f800000, 0x44af6000, 0x45390000, 0x00000000, 0x3f800000,
-+	0x00000000, 0x00000000, 0x00000000, 0x3f800000, 0x444f0000, 0x00000000,
-+	0x00000000, 0x3f800000, 0x00000000, 0x44e00000, 0x00000000, 0x3f800000,
-+	0x444f0000, 0x44e00000, 0x00000000, 0x3f800000, 0x2dea2000, 0x00000000,
++	0x00000000, 0x00000000, 0x00000000, 0x43480000, 0x00000000, 0x3f800000,
++	0x44b40000, 0x43480000, 0x00000000, 0x3f800000, 0x00000000, 0x452c8000,
++	0x00000000, 0x3f800000, 0x44b40000, 0x452c8000, 0x00000000, 0x3f800000,
++	0x00000000, 0x00000000, 0x00000000, 0x3f800000, 0x449b4000, 0x00000000,
++	0x00000000, 0x3f800000, 0x00000000, 0x450a0000, 0x00000000, 0x3f800000,
++	0x449b4000, 0x450a0000, 0x00000000, 0x3f800000, 0x2dea2000, 0x00000000,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
 +	0x00000000, 0x00000000, 0x0200c541, 0x00000000, 0x00000010, 0x00000040,
@@ -1350,10 +1402,10 @@ index 0000000..604fc79
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
 +	0x04299901, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-+	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x2eda2022, 0x06ff033b,
++	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x2eda2022, 0x089f04d9,
 +	0x00002688, 0x00000000, 0x0200c680, 0x00000000, 0x00000000, 0x00000000,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-+	0x00000000, 0x00000000, 0x20000000, 0x00000000, 0x00000cf0, 0x005a9000,
++	0x00000000, 0x00000000, 0x20000000, 0x00000000, 0x00001368, 0x00a76100,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
