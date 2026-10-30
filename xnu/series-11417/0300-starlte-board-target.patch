@@ -1,4 +1,4 @@
-From 2d1561d4ec66603c5043557d5eff5e5c10e003b5 Mon Sep 17 00:00:00 2001
+From 60e4e9b5d223c8b5eacfa24bc8bb8ab9ab8cf1a5 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:13 +0200
 Subject: [PATCH] patch: 0300-starlte-board-target.patch
@@ -9,7 +9,7 @@ port: STARLTE appended to the board list; SCTLR SPAN bit goes into the new SCTLR
  bsd/conf/files                        |   2 +
  bsd/dev/a5xelte_keys.c                |  15 +
  bsd/dev/herolte_ufs.c                 | 273 ++++++++++-
- bsd/dev/starlte_smp.c                 | 138 ++++++
+ bsd/dev/starlte_smp.c                 | 186 +++++++
  bsd/dev/starlte_touch.c               | 667 ++++++++++++++++++++++++++
  bsd/dev/sweet_sample.c                |   9 +-
  config/MASTER.arm64.starlte           | 120 +++++
@@ -25,7 +25,7 @@ port: STARLTE appended to the board list; SCTLR SPAN bit goes into the new SCTLR
  osfmk/arm64/sweet_early.c             |   4 +-
  osfmk/kern/exception.c                |  33 ++
  pexpert/pexpert/arm64/A5XELTE.h       |  35 +-
- 20 files changed, 1457 insertions(+), 30 deletions(-)
+ 20 files changed, 1505 insertions(+), 30 deletions(-)
  create mode 100644 bsd/dev/starlte_smp.c
  create mode 100644 bsd/dev/starlte_touch.c
  create mode 100644 config/MASTER.arm64.starlte
@@ -518,10 +518,10 @@ index 9b46983..ee2f0da 100644
  	}
 diff --git a/bsd/dev/starlte_smp.c b/bsd/dev/starlte_smp.c
 new file mode 100644
-index 0000000..5043413
+index 0000000..6ed7619
 --- /dev/null
 +++ b/bsd/dev/starlte_smp.c
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,186 @@
 +/*
 + * STARLTE (Galaxy S9, Exynos 9810) secondary-CPU survey, boot-arg
 + * starsmpprobe=1 only. The starlte DTB lists the Cortex-A55 cores as reg
@@ -536,6 +536,9 @@ index 0000000..5043413
 +#include <sys/param.h>
 +#include <sys/systm.h>
 +#include <kern/clock.h>
++#include <kern/processor.h>
++#include <kern/sched_prim.h>
++#include <kern/thread.h>
 +#include <machine/machine_routines.h>
 +#include <vm/vm_kern.h>
 +#include <vm/vm_kern_xnu.h>     /* 11417: kmem_alloc_contig, KMA_* */
@@ -606,10 +609,55 @@ index 0000000..5043413
 +	    mpidr, ticks ? (c1 - c0) * 26 / ticks : 0, c1 - c0, ticks);
 +}
 +
++/*
++ * What each core really runs at (nothing here sets CPU clocks: they are as S-Boot left them), 30 s
++ * after boot when all eight are up: bound to each processor in turn, a chain of dependent adds (one
++ * a cycle on the A55 and the M3 alike) timed with mach_absolute_time. The PMU line above reads a
++ * cycle counter nobody enabled and says nothing.
++ */
++extern processor_t thread_bind(processor_t processor);   /* (sched_prim.h: MACH_KERNEL_PRIVATE only) */
++
++static void
++st_cpu_survey(__unused void *arg, __unused wait_result_t wr)
++{
++	delay(30 * 1000 * 1000);
++	for (int cpu = 0; cpu < 8; cpu++) {
++		processor_t p = cpu_to_processor(cpu);
++		if (p == PROCESSOR_NULL) {
++			continue;
++		}
++		thread_bind(p);
++		thread_block(THREAD_CONTINUE_NULL);
++		uint64_t best = UINT64_MAX;
++		for (int round = 0; round < 3; round++) {
++			uint64_t n = 1000000, x = 0, t0 = mach_absolute_time();
++			__asm__ volatile (
++				"1:\n"
++				"add %1, %1, #1\n add %1, %1, #1\n add %1, %1, #1\n add %1, %1, #1\n"
++				"add %1, %1, #1\n add %1, %1, #1\n add %1, %1, #1\n add %1, %1, #1\n"
++				"subs %0, %0, #1\n b.ne 1b\n" : "+r"(n), "+r"(x));
++			uint64_t dt = mach_absolute_time() - t0;
++			if (dt < best) {
++				best = dt;
++			}
++		}
++		uint64_t ns = 0, mpidr;
++		absolutetime_to_nanoseconds(best, &ns);
++		__asm__ volatile ("mrs %0, mpidr_el1" : "=r"(mpidr));
++		printf("STARLTE CPU: cpu %d (mpidr %#llx): %llu MHz by 8M dependent adds\n", cpu, mpidr,
++		    ns ? 8000000ull * 1000 / ns : 0);
++	}
++	thread_bind(PROCESSOR_NULL);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
 +void
 +starlte_smp_probe(void)
 +{
-+	starlte_cpu_clock_report();
++	thread_t survey;
++	if (kernel_thread_start(st_cpu_survey, NULL, &survey) == KERN_SUCCESS) {
++		thread_deallocate(survey);
++	}
 +	uint32_t on = 0;
 +	PE_parse_boot_argn("starsmpprobe", &on, sizeof(on));
 +	if (!on) {

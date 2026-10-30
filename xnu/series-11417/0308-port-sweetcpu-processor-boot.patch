@@ -1,4 +1,4 @@
-From c516aadbdeb0345f003fa39b9009be9e79eff290 Mon Sep 17 00:00:00 2001
+From d5cb6d6960f312bebe047eeacd596d1d2a1726fe Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 17:01:47 +0200
 Subject: [PATCH] patch: 0308-port-sweetcpu-processor-boot.patch

@@ -1,17 +1,17 @@
-From 8ab6e91be19eb90dc3e8954700cd86e7b5014afa Mon Sep 17 00:00:00 2001
+From 421254e74490c9dffc818b6b00d04aa37af31ed5 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:14 +0200
 Subject: [PATCH] patch: 0303-starlte-gpu-present.patch
 
 ---
- bsd/dev/starlte_touch.c               | 50 +++++++++++++++++-------
- iokit/Kernel/arm/SweetFramebuffer.cpp | 56 ++++++++++++++++++++-------
- iokit/Kernel/arm/SweetSurface.cpp     | 31 +++++++++++++++
- iokit/Kernel/arm/SweetSurface.h       |  3 ++
- 4 files changed, 110 insertions(+), 30 deletions(-)
+ bsd/dev/starlte_touch.c               | 142 ++++++++++++++++----------
+ iokit/Kernel/arm/SweetFramebuffer.cpp |  56 +++++++---
+ iokit/Kernel/arm/SweetSurface.cpp     |  31 ++++++
+ iokit/Kernel/arm/SweetSurface.h       |   3 +
+ 4 files changed, 163 insertions(+), 69 deletions(-)
 
 diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
-index 9e89b19..9c59d2e 100644
+index 9e89b19..44e9859 100644
 --- a/bsd/dev/starlte_touch.c
 +++ b/bsd/dev/starlte_touch.c
 @@ -22,6 +22,7 @@
@@ -22,7 +22,105 @@ index 9e89b19..9c59d2e 100644
  #include <kern/clock.h>
  #include <kern/thread.h>
  #include <kern/sched_prim.h>
-@@ -694,35 +695,52 @@ st_thread(__unused void *arg, __unused wait_result_t wr)
+@@ -281,55 +282,58 @@ acpm_send(uint32_t cmd[4])
+ }
+ 
+ /*
+- * CPU cluster 0 (Cortex-A55) clock through ACPM DVFS (vendor
+- * cal-if/acpm_dvfs.c): cmd = { domain, kHz, 0 = FREQ_REQ | 1 = FREQ_GET, 0 },
+- * FREQ_GET returns kHz in reply word 1; ACPM sets the voltage itself.
+- * Domain cpucl0 = 2 (acpm_dvfs_exynos9810.h). Linux sends these on the
+- * ch_num it never initialises (0), so try channel 0 first. Levels
+- * (exynos9810.dtsi): 1950000 1898000 1794000 1690000 1456000 1248000
+- * 1053000 949000 832000 715000 598000 455000 kHz.
++ * CPU clocks through ACPM DVFS (vendor cal-if/acpm_dvfs.c): cmd = { domain, kHz, 0 = FREQ_REQ |
++ * 1 = FREQ_GET, 0 }; ACPM sets the voltage itself. Domains (acpm_dvfs_exynos9810.h): cpucl0 = 2 (the
++ * Cortex-A55s), cpucl1 = 3 (the Mongoose M3s). Linux sends these on ipc channel *index* 0 (its
++ * acpm_dvfs.ch_num is never set), the DT names channel 5. S-Boot leaves both clusters at ~1.05 GHz
++ * (measured, starlte_smp.c), where Settings' scrolling is CPU-bound (sbca's profile, boot65). So
++ * by default: A55s 1690000 kHz, M3s 1794000 kHz, levels of exynos9810.dtsi (the M3s' limit with all
++ * four busy and no OCP, max-freq-wo-ocp; there is no thermal control here, so not the 2.7 GHz
++ * single-core level). Boot-arg starcpu=0: leave them; starcpu=LITTLE[,BIG] in kHz: those.
++ * FREQ_GET answered 0 kHz on channel 0 earlier, so the result is judged by the clock survey.
+  */
+ extern void starlte_cpu_clock_report(void);
+ 
+ static void
+ st_cpu_dvfs(void)
+ {
+-	static const uint32_t levels[] = { 1950000, 1898000, 1794000, 1690000, 1456000, 1248000,
+-		                           1053000, 949000, 832000, 715000, 598000, 455000 };
+-	uint32_t want = 0;
+-	PE_parse_boot_argn("starfreq", &want, sizeof(want));
+-	/* FREQ_GET on channel 0 answered 0 kHz on the S9: the channel or the
+-	 * command is not the right one. Send nothing unless asked. */
+-	if (!want) {
+-		return;
+-	}
+-	uint32_t c = acpm_find(0);
+-	if (!c) {
+-		printf("STARLTE DVFS: no ACPM channel 0\n");
+-		return;
++	char arg[32] = "";
++	uint32_t little = 1690000, big = 1794000;
++	if (PE_parse_boot_argn("starcpu", arg, sizeof(arg))) {
++		if (arg[0] == '0' && arg[1] == 0) {
++			printf("STARLTE DVFS: starcpu=0: CPU clocks left as S-Boot set them\n");
++			return;
++		}
++		char *end = arg;
++		little = (uint32_t)strtoul(arg, &end, 10);
++		big = *end == ',' ? (uint32_t)strtoul(end + 1, NULL, 10) : big;
+ 	}
+-	uint32_t get[4] = { 2, 0, 1, 0 };
+-	bool ok = acpm_send_on(c, 0, get);
+-	printf("STARLTE DVFS: cpucl0 FREQ_GET %s: %u kHz (reply %#x %#x %#x)\n",
+-	    ok ? "ok" : "FAILED", get[1], get[0], get[2], get[3]);
+-	starlte_cpu_clock_report();
+-	if (!want || !ok) {
++	if (little > 1794000 || big > 1794000) {
++		printf("STARLTE DVFS: %u/%u kHz above 1794000: not without thermal control\n", little, big);
+ 		return;
+ 	}
+-	bool listed = false;
+-	for (unsigned i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
+-		listed |= levels[i] == want;
+-	}
+-	if (!listed || want > 1794000) {
+-		printf("STARLTE DVFS: starfreq %u kHz is not an allowed cpucl0 level (max 1794000 here)\n", want);
+-		return;
++	/* channel index 0 as Linux, then the descriptor whose id is 5 as the DT says */
++	uint32_t descs[2] = { acpm_chans, acpm_find(5) };
++	for (unsigned d = 0; d < 2; d++) {
++		uint32_t c = descs[d];
++		if (c == 0) {
++			continue;
++		}
++		uint32_t id = acpm_rd(c);
++		uint32_t set0[4] = { 2, little, 0, 0 }, set1[4] = { 3, big, 0, 0 };
++		bool ok0 = acpm_send_on(c, id, set0), ok1 = ok0 && acpm_send_on(c, id, set1);
++		uint32_t get0[4] = { 2, 0, 1, 0 }, get1[4] = { 3, 0, 1, 0 };
++		if (ok1) {
++			(void)acpm_send_on(c, id, get0);
++			(void)acpm_send_on(c, id, get1);
++		}
++		printf("STARLTE DVFS: channel id %u: cpucl0 %u kHz %s (reply %#x %#x %#x), cpucl1 %u kHz %s (reply %#x %#x "
++		    "%#x); FREQ_GET says %u / %u kHz\n", id, little, ok0 ? "sent" : "no reply", set0[0], set0[1], set0[2], big,
++		    ok1 ? "sent" : "no reply", set1[0], set1[1], set1[2], get0[1], get1[1]);
++		if (ok1) {
++			return;
++		}
+ 	}
+-	uint32_t set[4] = { 2, want, 0, 0 };
+-	ok = acpm_send_on(c, 0, set);
+-	uint32_t again[4] = { 2, 0, 1, 0 };
+-	(void)acpm_send_on(c, 0, again);
+-	printf("STARLTE DVFS: cpucl0 FREQ_REQ %u kHz %s, now %u kHz\n", want, ok ? "sent" : "FAILED", again[1]);
+-	starlte_cpu_clock_report();
+ }
+ 
+ static bool
+@@ -694,35 +698,63 @@ st_thread(__unused void *arg, __unused wait_result_t wr)
  
  /*
   * Boot-arg sweetswipe=1: scripted input for unattended test boots (screenshots of what is past the
@@ -34,8 +132,8 @@ index 9e89b19..9c59d2e 100644
 + * lock screen). Control Center opens with a swipe down from the top right corner, as on the iPhone X
 + * (a swipe up from the bottom edge does nothing, boot57; the user's own swipe down worked, boot58),
 + * Home closes it and unlocks (single presses 5 s apart, not a double press), a swipe left shows the
-+ * applications' page, a tap opens Settings, Home and the swipe down give Control Center over the
-+ * home screen. Times count from the first frame on the panel
++ * applications' page, a tap opens Settings, which is scrolled up and down for 20 s (frames for
++ * sbca's profiler), Home and the swipe down give Control Center over the home screen. Times count from the first frame on the panel
 + * (sweet_fb_first_present, SweetFramebuffer.cpp: 70-85 s after boot in boot55-56, when absolute
 + * times had most of the script run before there was a UI). Swipes use finger 9 in panel pixels
 + * through sweet_hid_touch(), like the real ones; Home goes through sweet_hid_key().
@@ -60,9 +158,20 @@ index 9e89b19..9c59d2e 100644
 +	{ 30, 1, 0, 0, 0, 0 },                  /* closes it */
 +	{ 35, 1, 0, 0, 0, 0 },                  /* unlocks */
 +	{ 45, 0, 1300, 1500, 150, 1500 },       /* home screen page 2, the applications (shot at 55 s) */
-+	{ 60, 0, 534, 1790, 534, 1790 },        /* a tap on Settings (shot at 80 s) */
-+	{ 72, 1, 0, 0, 0, 0 },                  /* back to the home screen */
-+	{ 88, 0, 1380, 6, 1380, 1500 },         /* Control Center over the home screen (shots at 97, 103 s) */
++	{ 60, 0, 534, 1790, 534, 1790 },        /* a tap on Settings (shot at 68 s, while it scrolls) */
++	{ 64, 0, 720, 2300, 720, 1000 },         /* scrolling Settings up and down: frames to profile */
++	{ 66, 0, 720, 1000, 720, 2300 },
++	{ 68, 0, 720, 2300, 720, 1000 },
++	{ 70, 0, 720, 1000, 720, 2300 },
++	{ 72, 0, 720, 2300, 720, 1000 },
++	{ 74, 0, 720, 1000, 720, 2300 },
++	{ 76, 0, 720, 2300, 720, 1000 },
++	{ 78, 0, 720, 1000, 720, 2300 },
++	{ 80, 0, 720, 2300, 720, 1000 },
++	{ 82, 0, 720, 1000, 720, 2300 },
++	{ 84, 0, 720, 2300, 720, 1000 },
++	{ 88, 1, 0, 0, 0, 0 },                  /* back to the home screen */
++	{ 92, 0, 1380, 6, 1380, 1500 },         /* Control Center over the home screen (shots at 97, 103 s) */
  };
  
  static void
@@ -87,7 +196,7 @@ index 9e89b19..9c59d2e 100644
  		if (now_ns < at_ns) {
  			st_msleep((unsigned)((at_ns - now_ns) / NSEC_PER_MSEC));
  		}
-@@ -736,10 +754,12 @@ st_script_thread(__unused void *arg, __unused wait_result_t wr)
+@@ -736,10 +768,12 @@ st_script_thread(__unused void *arg, __unused wait_result_t wr)
  		printf("STARLTE TOUCH: scripted swipe %u: %d,%d -> %d,%d\n", i, st_script[i].x0, st_script[i].y0,
  		    st_script[i].x1, st_script[i].y1);
  		for (int k = 0; k <= steps; k++) {

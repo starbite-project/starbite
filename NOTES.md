@@ -1652,3 +1652,17 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     times silently). boot63: "STARLTE GPU PRESENT: 600 frames, average 2316 us" (4.1-4.5 ms with the cache
     clean) instead of 11-31 ms on the CPU. eagl's own frame work: ~18 ms (2.2 ms of it waiting for the GPU).
   - Still: G3D PLL at 260 MHz (vdd_g3d 950 mV, no DVFS), CPU clocks unknown (the cycle counter line is broken).
+- 2026-10-30 (later): **CPU clocks raised through ACPM DVFS; where frame time goes** (boot64-66).
+  - Clock survey (starlte_smp.c, 30 s after boot, each CPU bound in turn, 8M dependent adds): S-Boot leaves
+    all eight cores at ~1050 MHz (cpu0-3 = A55, mpidr 0x81000x00; cpu4-7 = M3, 0x800001xx).
+  - DVFS works: on ipc channel *index* 0 (descriptor id 0, as Linux), cmd { domain, kHz, 0 = FREQ_REQ, 0 },
+    domains cpucl0 = 2 (A55), cpucl1 = 3 (M3); replies echo the request (FREQ_GET answers 0 kHz, which is why
+    it was given up before). Default now (0303, st_cpu_dvfs): A55 1690000, M3 1794000 kHz (DT levels;
+    max-freq-wo-ocp for the M3s; no thermal control here, so not the 2.7 GHz single-core level); measured
+    1689 / 1792 MHz. starcpu=0 leaves S-Boot's clocks, starcpu=L[,B] sets others (max 1794000).
+  - sbca profiler (1 kHz pc samples of backboardd's render thread / an app's main thread, system calls counted
+    at their caller; sweetinject=...,backboardd,SpringBoard,Preferences; logs sbca-<name>.log; sbprof=0 off):
+    scrolling Settings, the app's main thread is CPU-bound (ObjC/Swift/CF ~85%), SpringBoard idle, backboardd's
+    render thread ~40% idle (CFRunLoop), ~26% blocked in kernel calls from Mesa (synchronous SUBMIT, and
+    map/unmap each flushing the whole AS1), the rest Mesa/eagl/CA.
+  - Next: asynchronous GPU submits, ranged MMU flushes, G3D clock (260 MHz; ACPM domain g3d = 4).
