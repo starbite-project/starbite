@@ -1,17 +1,97 @@
-From 421254e74490c9dffc818b6b00d04aa37af31ed5 Mon Sep 17 00:00:00 2001
+From d8727ad4b84f9098f1c4ba65d72e956d9d690998 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:14 +0200
 Subject: [PATCH] patch: 0303-starlte-gpu-present.patch
 
 ---
- bsd/dev/starlte_touch.c               | 142 ++++++++++++++++----------
- iokit/Kernel/arm/SweetFramebuffer.cpp |  56 +++++++---
- iokit/Kernel/arm/SweetSurface.cpp     |  31 ++++++
+ bsd/dev/starlte_gpu.c                 |  54 +++++++++
+ bsd/dev/starlte_touch.c               | 166 +++++++++++++++++---------
+ iokit/Kernel/arm/SweetFramebuffer.cpp |  56 ++++++---
+ iokit/Kernel/arm/SweetSurface.cpp     |  31 +++++
  iokit/Kernel/arm/SweetSurface.h       |   3 +
- 4 files changed, 163 insertions(+), 69 deletions(-)
+ 5 files changed, 241 insertions(+), 69 deletions(-)
 
+diff --git a/bsd/dev/starlte_gpu.c b/bsd/dev/starlte_gpu.c
+index e1b67e3..0a0c2be 100644
+--- a/bsd/dev/starlte_gpu.c
++++ b/bsd/dev/starlte_gpu.c
+@@ -30,6 +30,8 @@
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
+ extern bool starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val);
++extern bool starlte_acpm_dvfs(uint32_t domain, uint32_t khz);
++static void sg_clock_up(void);
+ /* SweetFramebuffer.cpp: no CPU copies to the panel before this mach time. */
+ extern uint64_t sweet_fb_hold_until;
+ void starlte_gpu_probe(void);
+@@ -1122,6 +1124,7 @@ sg_jobs(vm_offset_t pmu)
+ 			bool drawn = sg_gpu_up(shaders) && sg_stage4(shaders);
+ 			sweet_fb_hold_until = 0;
+ 			if (drawn && sg_gpu_up(shaders)) {
++				sg_clock_up();
+ 				sgp_shaders = shaders;
+ 				__atomic_thread_fence(__ATOMIC_RELEASE);
+ 				sgp_ready = true;
+@@ -1144,6 +1147,57 @@ restore:
+ 	}
+ }
+ 
++/*
++ * The GPU's clock: S-Boot leaves PLL_G3D at 260 MHz, the lowest level of the DT's gpu_dvfs_table
++ * (572000 546000 455000 338000 299000 260000 kHz). Apps' frames wait for their jobs synchronously
++ * (~340 us each, ~50 a frame while scrolling: half of every second, boot67), so the clock goes up
++ * through ACPM DVFS (domain g3d = 4) before the present and apps start, and vdd_g3d is put back to
++ * 950 mV in case ACPM's own table set it lower (the top of what this GPU is run at). Not locked
++ * afterwards: back to 260 MHz. Boot-arg stargpu=0: S-Boot's clock; stargpu=KHZ: a level above.
++ */
++static uint32_t
++sg_clock_khz(void)
++{
++	static vm_offset_t cmu;
++	if (!cmu) {
++		cmu = ml_io_map(SG_CMU_PA, 0x2000);
++	}
++	uint32_t con0 = cmu ? sg_rd(cmu, 0x140) : 0;
++	uint64_t m = (con0 >> 16) & 0x3ff, p = (con0 >> 8) & 0x3f, s = con0 & 7;
++	if (!(con0 & (1u << 29)) || !p) {
++		return 0;                       /* not locked */
++	}
++	return (con0 & 0x10) ? (uint32_t)(26000ull * m / (p << s)) : 26000;
++}
++
++static void
++sg_clock_up(void)
++{
++	static const uint32_t levels[] = { 572000, 546000, 455000, 338000, 299000, 260000 };
++	uint32_t want = 572000;
++	PE_parse_boot_argn("stargpu", &want, sizeof(want));
++	bool listed = false;
++	for (unsigned i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
++		listed |= levels[i] == want;
++	}
++	if (want == 0 || !listed) {
++		printf("STARLTE GPU: clock left at %u kHz (stargpu=%u)\n", sg_clock_khz(), want);
++		return;
++	}
++	uint32_t before = sg_clock_khz();
++	bool sent = starlte_acpm_dvfs(4, want);
++	delay(1000);
++	uint8_t volt = 0;
++	bool v = starlte_pmic_write(1, SG_BUCK6, SG_BUCK6_950MV) && starlte_pmic_read(1, SG_BUCK6, &volt);
++	uint32_t after = sg_clock_khz();
++	printf("STARLTE GPU: clock %u -> %u kHz (asked %u, %s), vdd_g3d %s %u uV\n", before, after, want,
++	    sent ? "sent" : "no reply", v ? "at" : "NOT SET,", 300000u + volt * 6250u);
++	if (sent && after == 0) {
++		(void)starlte_acpm_dvfs(4, 260000);
++		printf("STARLTE GPU: PLL not locked at %u kHz: back to 260000 (%u kHz)\n", want, sg_clock_khz());
++	}
++}
++
+ static void
+ sg_thread(void *arg, __unused wait_result_t wr)
+ {
 diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
-index 9e89b19..44e9859 100644
+index 9e89b19..fbd879a 100644
 --- a/bsd/dev/starlte_touch.c
 +++ b/bsd/dev/starlte_touch.c
 @@ -22,6 +22,7 @@
@@ -22,7 +102,7 @@ index 9e89b19..44e9859 100644
  #include <kern/clock.h>
  #include <kern/thread.h>
  #include <kern/sched_prim.h>
-@@ -281,55 +282,58 @@ acpm_send(uint32_t cmd[4])
+@@ -281,55 +282,63 @@ acpm_send(uint32_t cmd[4])
  }
  
  /*
@@ -108,7 +188,7 @@ index 9e89b19..44e9859 100644
 +		    "%#x); FREQ_GET says %u / %u kHz\n", id, little, ok0 ? "sent" : "no reply", set0[0], set0[1], set0[2], big,
 +		    ok1 ? "sent" : "no reply", set1[0], set1[1], set1[2], get0[1], get1[1]);
 +		if (ok1) {
-+			return;
++			break;
 +		}
  	}
 -	uint32_t set[4] = { 2, want, 0, 0 };
@@ -117,10 +197,41 @@ index 9e89b19..44e9859 100644
 -	(void)acpm_send_on(c, 0, again);
 -	printf("STARLTE DVFS: cpucl0 FREQ_REQ %u kHz %s, now %u kHz\n", want, ok ? "sent" : "FAILED", again[1]);
 -	starlte_cpu_clock_report();
++	/*
++	 * Not the buses: asking ACPM for MIF 2093000 / INT 667000 kHz here (DT levels) froze the phone
++	 * at once, the display going green (boot69): the memory clock changes under the display's DMA
++	 * with nothing coordinating it. Left as S-Boot set them.
++	 */
  }
  
  static bool
-@@ -694,35 +698,63 @@ st_thread(__unused void *arg, __unused wait_result_t wr)
+@@ -384,6 +393,25 @@ starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val)
+ 	return acpm_ready() && pmic_write(type, reg, val);
+ }
+ 
++/*
++ * One ACPM DVFS request (cmd { domain, kHz, FREQ_REQ, 0 } on ipc channel index 0, as st_cpu_dvfs()):
++ * for other drivers, the GPU's clock (domain g3d = 4) from bsd/dev/starlte_gpu.c.
++ */
++bool starlte_acpm_dvfs(uint32_t domain, uint32_t khz);
++
++bool
++starlte_acpm_dvfs(uint32_t domain, uint32_t khz)
++{
++	if (!acpm_ready() || acpm_chans == 0) {
++		return false;
++	}
++	uint32_t cmd[4] = { domain, khz, 0, 0 };
++	bool ok = acpm_send_on(acpm_chans, acpm_rd(acpm_chans), cmd);
++	printf("STARLTE DVFS: domain %u %u kHz %s (reply %#x %#x %#x)\n", domain, khz, ok ? "sent" : "no reply",
++	    cmd[0], cmd[1], cmd[2]);
++	return ok;
++}
++
+ /* Returns true once both touch rails are on (or were already). */
+ static bool
+ st_power_on(void)
+@@ -694,35 +722,63 @@ st_thread(__unused void *arg, __unused wait_result_t wr)
  
  /*
   * Boot-arg sweetswipe=1: scripted input for unattended test boots (screenshots of what is past the
@@ -196,7 +307,7 @@ index 9e89b19..44e9859 100644
  		if (now_ns < at_ns) {
  			st_msleep((unsigned)((at_ns - now_ns) / NSEC_PER_MSEC));
  		}
-@@ -736,10 +768,12 @@ st_script_thread(__unused void *arg, __unused wait_result_t wr)
+@@ -736,10 +792,12 @@ st_script_thread(__unused void *arg, __unused wait_result_t wr)
  		printf("STARLTE TOUCH: scripted swipe %u: %d,%d -> %d,%d\n", i, st_script[i].x0, st_script[i].y0,
  		    st_script[i].x1, st_script[i].y1);
  		for (int k = 0; k <= steps; k++) {

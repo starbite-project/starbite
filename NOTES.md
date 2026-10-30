@@ -1666,3 +1666,14 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     render thread ~40% idle (CFRunLoop), ~26% blocked in kernel calls from Mesa (synchronous SUBMIT, and
     map/unmap each flushing the whole AS1), the rest Mesa/eagl/CA.
   - Next: asynchronous GPU submits, ranged MMU flushes, G3D clock (260 MHz; ACPM domain g3d = 4).
+- 2026-10-30 evening: **GPU clock 572 MHz; the memory bus must not be touched** (boot67-69).
+  - StarbiteMali now logs per-call counts/times every 10 s ("STARLTE GPU CALLS"): scrolling Settings makes
+    ~1500-1900 SUBMITs a second (~50 a frame), each waited for synchronously (342 us at 260 MHz); creates and
+    closes are negligible. Submits blocked the render thread 5.2-5.4 s of every 10 s.
+  - 0303 sg_clock_up(): ACPM DVFS domain g3d = 4 to 572000 kHz after GPU bring-up (before the present and
+    apps), vdd_g3d put back to 950 mV; PLL_G3D reads 572 MHz locked. Submits 342 -> 222 us, panel peaks
+    30-37 fps while scrolling; no fault in boot68. stargpu=0 keeps S-Boot's 260 MHz.
+  - The GPU present hardly sped up (2.52 -> 2.25 ms): memory-bound. Asking ACPM for MIF 2093000 / INT 667000
+    kHz froze the phone instantly with a green display (boot69, user's photo): removed for good.
+  - Next for speed: fewer submits a frame (why ~50: Mesa batch flushes from eagl's surface copies/glFinish,
+    CoreAnimation's offscreen passes) and asynchronous submits.

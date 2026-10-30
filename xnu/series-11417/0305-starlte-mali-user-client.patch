@@ -1,20 +1,20 @@
-From faf2900a6e5e178eeb9f87a039aa6b4ef9332dd0 Mon Sep 17 00:00:00 2001
+From 7b4ebda5f0a38166be801886a66a05968cbfb846 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:14 +0200
 Subject: [PATCH] patch: 0305-starlte-mali-user-client.patch
 
 ---
- iokit/Kernel/arm/StarbiteMali.cpp | 566 ++++++++++++++++++++++++++++++
+ iokit/Kernel/arm/StarbiteMali.cpp | 624 ++++++++++++++++++++++++++++++
  iokit/conf/files.arm64            |   1 +
- 2 files changed, 567 insertions(+)
+ 2 files changed, 625 insertions(+)
  create mode 100644 iokit/Kernel/arm/StarbiteMali.cpp
 
 diff --git a/iokit/Kernel/arm/StarbiteMali.cpp b/iokit/Kernel/arm/StarbiteMali.cpp
 new file mode 100644
-index 0000000..00d171a
+index 0000000..61ed643
 --- /dev/null
 +++ b/iokit/Kernel/arm/StarbiteMali.cpp
-@@ -0,0 +1,566 @@
+@@ -0,0 +1,624 @@
 +/*
 + * Project Starbite: the Mali-G72 for iOS apps (stage 6 of
 + * bsd/dev/starlte_gpu.c). The IOService "StarbiteMali" and its user client
@@ -222,6 +222,7 @@ index 0000000..00d171a
 +	void free(void) APPLE_KEXT_OVERRIDE;
 +	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
 +	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
++	IOReturn dispatchMethod(uint32_t selector, IOExternalMethodArguments *args);
 +};
 +
 +OSDefineMetaClassAndStructors(StarbiteMaliUserClient, IOUserClient);
@@ -422,8 +423,7 @@ index 0000000..00d171a
 +}
 +
 +IOReturn
-+StarbiteMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
-+    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference)
++StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArguments *args)
 +{
 +	union {
 +		sbm_submit submit;
@@ -528,6 +528,64 @@ index 0000000..00d171a
 +		bcopy(&u, args->structureOutput, want);
 +		args->structureOutputSize = (uint32_t)want;
 +	}
++	return ret;
++}
++
++/*
++ * Where an app's time in this driver goes (the render thread of backboardd spends a quarter of
++ * its scrolling time in calls here): count and time of each call, all clients together, a line
++ * every 10 s while calls come: "STARLTE GPU CALLS: submit N x avg us (max), create ..., close ...".
++ */
++static uint64_t sbm_calls[5], sbm_call_ns[5], sbm_call_max[5], sbm_calls_since;
++
++static unsigned
++sbm_call_kind(uint32_t selector)
++{
++	switch (selector) {
++	case SBM_SUBMIT: return 0;
++	case SBM_CREATE_BO: return 1;
++	case SBM_GEM_CLOSE: return 2;
++	case SBM_SURFACE: return 3;
++	default: return 4;
++	}
++}
++
++IOReturn
++StarbiteMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target, __unused void *reference)
++{
++	uint64_t t0 = mach_absolute_time();
++	IOReturn ret = dispatchMethod(selector, args);
++	uint64_t t1 = mach_absolute_time(), ns = 0;
++	absolutetime_to_nanoseconds(t1 - t0, &ns);
++	unsigned k = sbm_call_kind(selector);
++	IOLockLock(sbm_va_lock);
++	sbm_calls[k]++;
++	sbm_call_ns[k] += ns;
++	if (ns > sbm_call_max[k]) {
++		sbm_call_max[k] = ns;
++	}
++	if (sbm_calls_since == 0) {
++		sbm_calls_since = t1;
++	}
++	uint64_t window = 0;
++	absolutetime_to_nanoseconds(t1 - sbm_calls_since, &window);
++	if (window >= 10ull * NSEC_PER_SEC) {
++		static const char *names[5] = { "submit", "create", "close", "surface", "other" };
++		char line[400];
++		int n = snprintf(line, sizeof(line), "STARLTE GPU CALLS (%llu s):", window / NSEC_PER_SEC);
++		for (unsigned i = 0; i < 5; i++) {
++			n += snprintf(line + n, sizeof(line) - (size_t)n, " %s %llu x %llu us (max %llu), %llu ms;", names[i],
++			    sbm_calls[i], sbm_calls[i] ? sbm_call_ns[i] / sbm_calls[i] / 1000 : 0, sbm_call_max[i] / 1000,
++			    sbm_call_ns[i] / 1000000);
++			sbm_calls[i] = sbm_call_ns[i] = sbm_call_max[i] = 0;
++		}
++		sbm_calls_since = t1;
++		IOLockUnlock(sbm_va_lock);
++		IOLog("%s\n", line);
++		return ret;
++	}
++	IOLockUnlock(sbm_va_lock);
 +	return ret;
 +}
 +
