@@ -1,4 +1,4 @@
-From 94dcb25caa17e5b5558ac6fa3f22f1d753fdcadf Mon Sep 17 00:00:00 2001
+From 0c8afb7c9c7da8dd484c04e4edf29afbc2e628b9 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Sun, 1 Nov 2026 15:38:00 +0200
 Subject: [PATCH] patch: 0318-port-12377-build-fixes.patch
@@ -13,9 +13,10 @@ patches they touch so later patches' context is not disturbed):
 - exclaves.c, machine_routines.c (0009/0008): tightbeam_startup needs Apple's closed libTightbeam, compiled out for our boards; ml_device_is_prod_fused (closed, new caller in kern_mib.c) answers TRUE
 - arm_vm_init.c: progress marks 21-28 between marks 7 and 10 (first 12377 boot stopped after mark 7)
 - sweet_early.c, arm_vm_init.c: on the A5XELTE boards the early console stayed off from mark 7 (the 11417 port's assumption), so marks 21-28 never showed; it now stays on until arm_vm_init drops TTBR0 (mark 29), prints two-digit stages, and marks 8/9 bracket the first early_random
+- arm_vm_init.c: the dynamic_memory_begin > VM_MAX panic prints the layout on the A5XELTE boards
 ---
  osfmk/arm64/amcc_rorgn_pv_ctrr.c |  9 ++++
- osfmk/arm64/arm_vm_init.c        | 14 +++++++
+ osfmk/arm64/arm_vm_init.c        | 21 ++++++++++
  osfmk/arm64/cpu.c                |  1 -
  osfmk/arm64/machine_routines.c   | 12 ++++++
  osfmk/arm64/sleh.c               |  4 +-
@@ -23,7 +24,7 @@ patches they touch so later patches' context is not disturbed):
  osfmk/kern/exception.c           | 71 +++++++++++++++++---------------
  osfmk/kern/exclaves.c            |  4 +-
  osfmk/vm/vm_kern.c               |  4 +-
- 9 files changed, 89 insertions(+), 46 deletions(-)
+ 9 files changed, 96 insertions(+), 46 deletions(-)
  create mode 100644 osfmk/arm64/amcc_rorgn_pv_ctrr.c
 
 diff --git a/osfmk/arm64/amcc_rorgn_pv_ctrr.c b/osfmk/arm64/amcc_rorgn_pv_ctrr.c
@@ -42,7 +43,7 @@ index 00000000..f0feaaf1
 +
 +static const uint8_t sweet_no_amcc_rorgn __attribute__((unused)) = 0;
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
-index ce16f45c..bbb20752 100644
+index ce16f45c..3cf71a82 100644
 --- a/osfmk/arm64/arm_vm_init.c
 +++ b/osfmk/arm64/arm_vm_init.c
 @@ -1862,6 +1862,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
@@ -61,15 +62,25 @@ index ce16f45c..bbb20752 100644
  	uint64_t physmap_slide = early_random() & ARM64_PHYSMAP_SLIDE_MASK & ~((uint64_t)PAGE_MASK);
  	assert(physmap_slide < ARM64_PHYSMAP_SLIDE_RANGE);
  
-@@ -1951,6 +1953,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1948,9 +1950,17 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ #endif
+ #endif
+ 	if (dynamic_memory_begin > VM_MAX_KERNEL_ADDRESS) {
++#if defined(A5XELTE)
++		panic("Unsupported memory configuration %lx: virt %llx phys %llx top %llx physmap %llx static_end %llx dyn %llx max %llx",
++		    mem_size, (uint64_t)gVirtBase, (uint64_t)gPhysBase, (uint64_t)args->topOfKernelData,
++		    (uint64_t)physmap_base, (uint64_t)static_memory_end, (uint64_t)dynamic_memory_begin,
++		    (uint64_t)VM_MAX_KERNEL_ADDRESS);
++#else
  		panic("Unsupported memory configuration %lx", mem_size);
++#endif
  	}
  
 +	sweet_early_mark(21, "arm_vm_init: physmap layout set");
  	boot_tte = (tt_entry_t *)&bootstrap_pagetables;
  	boot_ttep = kvtophys((vm_offset_t)boot_tte);
  
-@@ -1994,6 +1997,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1994,6 +2004,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	cpu_tte = (tt_entry_t *)alloc_ptpage(TRUE);
  	cpu_ttep = kvtophys((vm_offset_t)cpu_tte);
  	bzero(cpu_tte, ARM_PGBYTES);
@@ -77,7 +88,7 @@ index ce16f45c..bbb20752 100644
  	avail_end = gPhysBase + mem_size;
  	assert(!(avail_end & PAGE_MASK));
  
-@@ -2011,6 +2015,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2011,6 +2022,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	 *   the so called physical aperture should be statically mapped
  	 */
  	init_ptpages(cpu_tte, gVirtBase, dynamic_memory_begin, TRUE, ARM_TTE_TABLE_AP(ARM_TTE_TABLE_AP_USER_NA));
@@ -85,7 +96,7 @@ index ce16f45c..bbb20752 100644
  
  #if defined(ARM_LARGE_MEMORY)
  	/*
-@@ -2126,6 +2131,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2126,6 +2138,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	edata = (vm_offset_t) segDATAB + segSizeDATA;
  	end_kern = round_page(segHIGHESTKC ? segHIGHESTKC : getlastkerneladdr()); /* Force end to next page */
  
@@ -93,7 +104,7 @@ index ce16f45c..bbb20752 100644
  	vm_set_page_size();
  
  	vm_kernel_base = segTEXTB;
-@@ -2160,7 +2166,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2160,7 +2173,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	vm_prelink_sdata = segPRELINKDATAB;
  	vm_prelink_edata = segPRELINKDATAB + segSizePRELINKDATA;
  
@@ -103,7 +114,7 @@ index ce16f45c..bbb20752 100644
  
  	/*
  	 * Initialize the page tables for the low globals:
-@@ -2204,14 +2212,20 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2204,14 +2219,20 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	/* phystokv() must still refer to the bootstrap aperture here. */
  	sweet_early_map_final();
  #endif
