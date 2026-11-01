@@ -1,4 +1,4 @@
-From 7b3bc5ba846900f4c6b4e95d671f52b026be2cb9 Mon Sep 17 00:00:00 2001
+From 3cdbfb0352d3ce895ca07d20e88f32e0a462ea87 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Sun, 1 Nov 2026 18:07:30 +0200
 Subject: [PATCH] patch: 0321-sweet-shared-cache-slide-16k.patch
@@ -11,11 +11,27 @@ arm64e (iOS 26) shared cache on the 4 KiB, non-PAC kernel:
   pages <= PAGE_SIZE and slid a 4 KiB page as if it were 16 KiB (copying
   past it). Each 4 KiB page is now slid inside its 16 KiB slide page,
   assembled from the backing object (sweet_sr_slide_subpage).
+- starlte_smp.c (0300): st_cpu_survey only walks the CPUs this boot has (cpus=4 asserted in cpu_to_processor(4))
 ---
+ bsd/dev/starlte_smp.c             |   3 +-
  osfmk/vm/vm_shared_region.c       |   6 ++
  osfmk/vm/vm_shared_region_pager.c | 111 ++++++++++++++++++++++++++++++
- 2 files changed, 117 insertions(+)
+ 3 files changed, 119 insertions(+), 1 deletion(-)
 
+diff --git a/bsd/dev/starlte_smp.c b/bsd/dev/starlte_smp.c
+index f0f57289..d9dab4b4 100644
+--- a/bsd/dev/starlte_smp.c
++++ b/bsd/dev/starlte_smp.c
+@@ -183,7 +183,8 @@ static void
+ st_cpu_survey(__unused void *arg, __unused wait_result_t wr)
+ {
+ 	delay(30 * 1000 * 1000);
+-	for (int cpu = 0; cpu < 8; cpu++) {
++	/* only the CPUs this boot has (cpus=4: the A55s; cpu_to_processor asserts) */
++	for (int cpu = 0; cpu <= ml_get_max_cpu_number() && cpu < 8; cpu++) {
+ 		processor_t p = cpu_to_processor(cpu);
+ 		if (p == PROCESSOR_NULL) {
+ 			continue;
 diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
 index 528ca86f..636b0945 100644
 --- a/osfmk/vm/vm_shared_region.c
