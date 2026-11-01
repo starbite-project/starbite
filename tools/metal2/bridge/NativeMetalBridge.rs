@@ -299,6 +299,28 @@ fn quartzcore(run: &mut Run, device: &Device, bytes: &[u8]) -> Result<(), String
             }
         }
     }
+    // Starbite: every fragment function with no vertex function of its own (the glass_*, displacement_map,
+    // chromatic_aberration, rim and SDF filters...) over CoreAnimation's own vertex function of its precision
+    // (fixed_vert_lph_spc / fixed_vert_lpf_spc), so that the ones Liquid Glass needs are tried too.
+    if list {
+        for (fragment, fname) in &fragments {
+            let paired = vertices.iter().any(|(_, v)| {
+                v.replace("_vert_", "_frag_") == *fname || v.replacen("_vert", "_frag", 1) == *fname
+            });
+            if paired {
+                continue;
+            }
+            let vwant = if fname.ends_with("_lpf") { "fixed_vert_lpf_spc" } else { "fixed_vert_lph_spc" };
+            let Some((vertex, _)) = vertices.iter().find(|(_, v)| v == vwant) else { continue };
+            let mut descriptor = RenderPipelineDescriptor::new(StageSource::Function(vertex.function_descriptor()));
+            descriptor.fragment = Some(StageSource::Function(fragment.function_descriptor()));
+            descriptor.color_attachments[0] = Some(ColorAttachmentDescriptor::new(PixelFormat::BGRA8Unorm));
+            match device.new_render_pipeline_state(&descriptor, &PipelineOptions::default()) {
+                Ok(_) => eprintln!("fragment {fname} (over {vwant}): ok"),
+                Err(e) => eprintln!("fragment {fname} (over {vwant}): {e:?}"),
+            }
+        }
+    }
     Ok(())
 }
 
