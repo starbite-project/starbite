@@ -1773,3 +1773,16 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   output on /dev/console -> flash log; --remove takes it out). First run: EXC_ARM_SP_ALIGN; a static _start needs
   crt0's sp alignment, so a naked _start now does it. Boot n (xnu12377-m image): 19/20 PASS, and the one FAIL was
   the test's own expected value (fcadd 1-20 = -19), since fixed. The job is still on the root.
+- 2026-11-01: **PAC translator: tools/a64e/a64e-rewrite.py** (cache | macho, in place, --only, --dry-run).
+  It replaces one instruction with one, in pure-instruction sections only:
+  - RETA* -> RET, BRA* -> BR, BLRA* -> BLR, PAC/AUT/XPAC register forms -> NOP.
+  - LDRA* without writeback -> LDR/LDUR.
+  - Left for sweet_a64e.c to emulate: PACGA, FJCVTZS, FCADD, writeback LDRA*.
+  Dry run on this Mac's macOS 27 arm64e cache (4113 images): 31.5 M rewrites in 14 s (pac 16.0 M, blr 7.9 M,
+  ret 6.8 M, br 0.8 M). Left to trap: 2150 fjcvtzs, 16239 fcadd, 767 pacga, 18 ldra. On a64e-test the rewrites
+  check out with otool. A rewritten Mach-O needs re-signing (codesign -f -s -); the shared region runs without
+  cs enforcement on our boards (0202).
+  Watch out: `cp -c` does not clone across volumes (the Preboot cryptex copy cost 6.7 GB, deleted).
+  iOS 26 base: iPhone 11 (N104AP) 26.6.2 23G90 (newest 26.x). OS 094-95954-090.dmg.aea 7.25 GB, SystemOS
+  094-97202-092.dmg.aea 2.0 GB, AppOS ~180 MB. The iPhone 11 also gets iOS 27 (27.2 24B119 signed), but no iOS 27
+  XNU source is published yet.
