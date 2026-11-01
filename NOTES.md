@@ -1786,3 +1786,19 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   iOS 26 base: iPhone 11 (N104AP) 26.6.2 23G90 (newest 26.x). OS 094-95954-090.dmg.aea 7.25 GB, SystemOS
   094-97202-092.dmg.aea 2.0 GB, AppOS ~180 MB. The iPhone 11 also gets iOS 27 (27.2 24B119 signed), but no iOS 27
   XNU source is published yet.
+- 2026-11-01: **iOS 26.6.2 (iPhone 11, N104AP, 23G90) root built for the S9.** It replaces iPadOS 18 on USERDATA
+  0..16 GiB. The user skipped the backup; iPadOS 18 can be rebuilt with build-ios-root.sh.
+  - Size: uncompressed it is 17.9 GB (OS 12 GB + SystemOS 5.9 GB), because APFS compression is lost on HFSX.
+    TRIM_IOS26=1 (stage-ios-root.sh) drops non-English .lproj, *.espresso.*, *.mlmodelc, the TTS voices and the
+    CVNLP word models, on top of the existing omissions. INSTALL_STAGED_APPS takes a name list (11 stock apps).
+  - Build: `sudo tools/build-ios26-root.sh` (run in the app terminal; user typed the password) ->
+    build/root-ios26.img. 14 GiB used, 1.7 GiB free.
+  - TRANSLATE_A64E=1 ran a64e-rewrite on the cache in the image: 29.5 M rewrites. Left for sweet_a64e: 535
+    fjcvtzs, 16239 fcadd, 687 pacga, 1345 writeback ldra.
+  - Tuning without sudo: attach -owners off; in-place rewrites keep the owners. starlte-tune drops plus
+    starlte-disabled.list (28 present).
+  - ADT out/starlte-iphone11.adt (`mkadt_starlte.py --big --bank2 --bank2-mb 1536 --iphone11
+    build/ipsw-26-n104/n104ap.adt`).
+  - Boot-args build/ios26-test-cmdline.txt: cpus=4 (A55 only: LSE/LDAPR), 828x1792 canvas, no sweetinject (sbca
+    carries iPadOS 18 offsets), sweettrace=1500, sweetreboot=300. BOOT out/xnu-boot-ios26-a.img (12377 kernel).
+  - Decrypted sources were deleted by DELETE_SOURCES (re-fetch with fetch-ios-parts.sh, then decrypt).
