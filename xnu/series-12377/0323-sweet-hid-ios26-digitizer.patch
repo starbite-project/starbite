@@ -1,4 +1,4 @@
-From 946b48895d708646dd23a63272945eb9ae4d6d2f Mon Sep 17 00:00:00 2001
+From 9e77e28ad6e6277cf90674e5c8038741dd0937c4 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Sun, 1 Nov 2026 19:05:45 +0200
 Subject: [PATCH] patch: 0323-sweet-hid-ios26-digitizer.patch
@@ -14,12 +14,14 @@ The double members are stored as IEEE-754 bits converted from fixed with
 integer arithmetic (no FP in the kernel); field macros and the digitizer
 constructors go through sweet_fixed_to_dbits / sweet_dbits_to_fixed.
 - starlte_touch.c: sweetswipe=3 = Home to unlock, then taps and a page swipe on the iOS 26 home screen
+- SweetHID.cpp: digitizer collection and contacts carry IsDisplayIntegrated (iOS 26 touch streams filter detached touches)
 ---
  bsd/dev/starlte_touch.c                     |  29 ++-
  iokit/Kernel/arm/hid/IOHIDEvent.cpp         |  54 ++---
  iokit/Kernel/arm/hid/IOHIDEventMacroDefs.h  | 240 ++++++++++----------
  iokit/Kernel/arm/hid/IOHIDEventStructDefs.h |  93 ++++++--
- 4 files changed, 241 insertions(+), 175 deletions(-)
+ iokit/Kernel/arm/hid/SweetHID.cpp           |   4 +
+ 5 files changed, 245 insertions(+), 175 deletions(-)
 
 diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
 index 802ae4a1..02157ab4 100644
@@ -944,3 +946,25 @@ index d500c1b6..709245ad 100644
  
  typedef struct {
      IOHIDDigitizerEventData base;
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 46dc119c..2dc08725 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -550,6 +550,9 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 		return;
+ 	}
+ 	collection->setIntegerValue(kIOHIDEventFieldDigitizerCollection, TRUE);
++	/* iOS 26's touch streams drop "detached" touches (filterDetachedTouches): mark the
++	 * collection and every contact as coming from the display's own digitizer. */
++	collection->setIntegerValue(kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
+ 
+ 	UInt32 cmask = 0;
+ 	for (int i = 0; i < SWEET_TOUCH_FINGERS; i++) {
+@@ -576,6 +579,7 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 				mask |= kIOHIDDigitizerEventIdentity;
+ 			}
+ 		}
++		child->setIntegerValue(kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
+ 		child->setIntegerValue(kIOHIDEventFieldDigitizerIndex, i);
+ 		child->setIntegerValue(kIOHIDEventFieldDigitizerIdentity, i + 2);
+ 		child->setIntegerValue(kIOHIDEventFieldDigitizerTouch, d);
