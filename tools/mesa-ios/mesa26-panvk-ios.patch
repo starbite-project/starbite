@@ -196,6 +196,26 @@
  
     *pInstance = panvk_instance_to_handle(instance);
  
+@@ -324,6 +333,19 @@
+ PUBLIC
+ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+ vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName)
++{
++   return panvk_GetInstanceProcAddr(instance, pName);
++}
++
++#ifdef __APPLE__
++/* Starbite (iOS): no Khronos loader; metal2vulkan opens the driver as its loader, by
++ * vkGetInstanceProcAddr (as Turnip exports it). */
++PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vkGetInstanceProcAddr(VkInstance instance, const char *pName);
++
++PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vkGetInstanceProcAddr(VkInstance instance, const char *pName)
+ {
+    return panvk_GetInstanceProcAddr(instance, pName);
+ }
++#endif
 --- a/src/panfrost/vulkan/meson.build
 +++ b/src/panfrost/vulkan/meson.build
 @@ -233,7 +233,10 @@
