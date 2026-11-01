@@ -1761,3 +1761,15 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   - l: no panic in 240 s. SpringBoard and backboardd ran, sbca was injected, and the Mali stage tests passed.
     Measured: 12.9 k submits per 10 s at 255 us, FB 23-34 fps, STARLTE TOP 74-225%. Log build/xnu12377-l-log.txt.
   Live image out/xnu-boot-xnu12377-live.img (gpu-live cmdline) flashed for the user.
+- 2026-11-01: **arm64e code runs on the S9 (patch 0319-sweet-arm64e-userland).** ml_grade_binary takes arm64e slices
+  with the ptrauth ABI flag at grade 8 (below arm64's 9/10, so iPadOS 18's fat binaries keep their arm64 slice).
+  User undefined instructions go through sweet_a64e_emulate() (osfmk/arm64/sweet_a64e.c + sweet_a64e_fp.s):
+  - PAC*/AUT*/XPAC* are no-ops; RETAA/B, BRA*, BLRA* become RET/BR/BLR; LDRAA/B become LDR (pre-index writeback
+    kept).
+  - PACGA is a fixed hash << 32. FJCVTZS is JS ToInt32 in integer code, with Z = exact.
+  - FCADD H/S/D uses a scalar FP asm helper under the user's FPCR.
+  Test: tools/a64e/a64e-test.c, a static arm64e binary with no libc. tools/a64e/build-a64e-test.sh signs it ad hoc.
+  tools/a64e/install-a64e-test.sh puts it on the root as the launchd job com.starbite.a64e-test (run once at boot,
+  output on /dev/console -> flash log; --remove takes it out). First run: EXC_ARM_SP_ALIGN; a static _start needs
+  crt0's sp alignment, so a naked _start now does it. Boot n (xnu12377-m image): 19/20 PASS, and the one FAIL was
+  the test's own expected value (fcadd 1-20 = -19), since fixed. The job is still on the root.
