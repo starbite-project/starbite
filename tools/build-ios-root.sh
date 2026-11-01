@@ -8,6 +8,8 @@
 #   sudo IPSW=build/ipsw-18 OUT=build/root-ipados18.img INSTALL_STAGED_APPS=1 tools/build-ios-root.sh
 #     iPadOS 18.7.11 (J171AP) from tools/fetch-ios-parts.sh + decrypt-ios-parts.sh;
 #     staged with tools/stage-ios-root.sh, stock apps installed into /Applications.
+#   sudo IPSW=build/ipsw-26-n104 OUT=build/root-ios26.img INSTALL_STAGED_APPS=1 TRANSLATE_A64E=1 tools/build-ios-root.sh
+#     iOS 26.6.2 (iPhone 11, N104AP); arm64e cache translated for the S9 (needs numpy in build/venv).
 # Output: build/root.img (raw HFSX, flashed to USERDATA with Heimdall) and
 # ref/ios-herolte/research/ipsw-x/d22ap.adt (for the ADT /product node; the
 # iPad identity uses build/ipsw-18/j171ap.adt, mkadt_starlte.py --ipad7).
@@ -54,8 +56,20 @@ STAGE_ALL_APPS=1 INSTALL_STAGED_APPS=${INSTALL_STAGED_APPS:-0} \
     bash "$ROOT/tools/stage-ios-root.sh" "$os" "$sys" "$app" "$root"
 build=$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$IPSW/BuildManifest.plist")
 bash "$TOOLS/herolte-tune-ios-root.sh" "$root" "$build"
+# iOS 26 (arm64e only): rewrite the PAC instructions of the shared cache in place
+# (tools/a64e/a64e-rewrite.py; the /System/Library/Caches copy is hard-linked to the
+# cryptex's, one rewrite covers both). The kernel emulates what is left.
+if [[ ${TRANSLATE_A64E:-0} == 1 ]]; then
+    "$ROOT/build/venv/bin/python" -I "$ROOT/tools/a64e/a64e-rewrite.py" cache \
+        "$root/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e"
+fi
 df -h "$root"
 hdiutil detach "$root"; hdiutil detach "$os"; hdiutil detach "$sys"; hdiutil detach "$app"
+# DELETE_SOURCES=1: drop the decrypted OS/SystemOS images before the raw copy when the
+# disk cannot hold both (they come back with fetch-ios-parts.sh + decrypt-ios-parts.sh).
+if [[ ${DELETE_SOURCES:-0} == 1 ]]; then
+    rm -f "$IPSW/os.dmg" "$IPSW/systemos.dmg"
+fi
 
 # Raw volume image (no partition map: the HFSX volume starts at byte 0 of
 # USERDATA, as ufsroot0 expects).

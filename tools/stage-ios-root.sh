@@ -140,7 +140,9 @@ for app in "${ui_apps[@]}"; do
         echo "required UI executable missing after copy: $app" >&2; exit 1;
     }
 done
-[[ -f "$root/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64" ]] || exit 1
+# iPadOS 18 (A10) ships dyld_shared_cache_arm64; iOS 26 is arm64e only.
+[[ -f "$root/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64" ||
+   -f "$root/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e" ]] || exit 1
 sync
 df -h "$root"
 echo "staged root complete; validate contents and filesystem before flashing"
