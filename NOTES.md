@@ -1737,3 +1737,27 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
 - Disk cleanup (user asked): removed the decrypted iPadOS 18 os/systemos dmgs (10 GiB; already staged into
   root-phone.img; re-fetch with fetch-ios-parts.sh + decrypt-ios-parts.sh), ~/Downloads/Xcode_16.4.xip, and
   superseded out/ test images and payloads. 7.5 -> 24 GiB free.
+- 2026-11-01: **xnu-12377 (iOS 26 kernel) boots iPadOS 18 to the GPU-rendered UI on the S9.** Builds with
+  Xcode 16.4 + KDK 26.5 25F71 (build/kdk, unpacked). Build fixes and boot fixes are in
+  xnu/series-12377/0318-port-12377-build-fixes.patch (tools/fix-12377.sh amends it). The payload uses a
+  `strip -x` copy (out/kernel.development.starlte-12377.x): the full kernel is 573 KB too big for BOOT; the full
+  one stays for atos. tools/mkimage-11417.sh takes KERNEL=. Boot rounds (images out/xnu-boot-xnu12377-a..l):
+  - a-c hung after STAGE 7. On the A5XELTE boards the early console switched off at mark 7 (an 11417 assumption),
+    so the later marks were never seen. It now stays on until arm_vm_init drops TTBR0 (mark 29), and early
+    panics print on screen.
+  - The seed: 12377 asks for 256 bytes of random-seed. tools/adt-reseed.py set the phone ADT to 256; mkadt.py in
+    ref/ was edited locally (ref/ is not tracked).
+  - d/e: "Unsupported memory configuration". 12377 selects the layout with ARM64_LARGE_MEMORY, so 0093's
+    LARGE_MEMORY_DEFINE was ignored: physmap was put below a kernel at 0xfffffff006000000. Fixed with
+    ARM64_LARGE_MEMORY = 0 for our boards.
+  - f: DC ZVA alignment fault in bzero of /pram from PE_create_console. 12377 maps WCOMB/RT RAM outside the
+    managed DRAM as Device-GRE. pmap_wcomb_normal() keeps it Normal-NC on our boards (framebuffer, /pram, Mali).
+  - g: assert _unsafe_kernel_text_initialized, because there is no iBoot kernel-ctrr-to-be-enabled property. Our
+    boards report unlocked text.
+  - h-k: launchd killed with KERN_INVALID_GUARD_OBJECT_SLOT (OS_REASON_MTE_FAIL namespace 37). This is the new VM
+    guard objects: a 4 KiB-kernel fault on 16 KiB user memory checks [addr, addr+16K) from the 4 KiB-aligned
+    address, which spills into the next slot. vm_guard_object_should_fallback always falls back on our boards.
+    Diagnostics kept: SWEET COPYIO FAULT, SWEET VMGO REJECT.
+  - l: no panic in 240 s. SpringBoard and backboardd ran, sbca was injected, and the Mali stage tests passed.
+    Measured: 12.9 k submits per 10 s at 255 us, FB 23-34 fps, STARLTE TOP 74-225%. Log build/xnu12377-l-log.txt.
+  Live image out/xnu-boot-xnu12377-live.img (gpu-live cmdline) flashed for the user.
