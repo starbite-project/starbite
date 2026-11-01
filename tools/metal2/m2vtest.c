@@ -5,6 +5,7 @@
  *   m2vtest [TURNIP] [CACHE_DIR] [METALLIB]
  */
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -40,8 +41,22 @@ static void mark(uint32_t m)
 	fflush(stdout);
 }
 
+/*
+ * Starbite: launchd gives an unlisted daemon a 24 MB jetsam limit and ignores the job's JetsamProperties;
+ * raise our own (MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT, MB, as root; else INCREASE_JETSAM_TASK_LIMIT, bytes).
+ */
+extern int memorystatus_control(uint32_t command, int32_t pid, uint32_t flags, void *buffer, size_t buffersize);
+static void raise_memory_limit(uint32_t mb)
+{
+	int r = memorystatus_control(6, getpid(), mb, NULL, 0);
+	int r2 = r != 0 ? memorystatus_control(22, getpid(), mb << 20, NULL, 0) : 0;
+	printf("memory limit %u MB: set %d, increase %d\n", mb, r, r2);
+	fflush(stdout);
+}
+
 int main(int argc, char **argv)
 {
+	raise_memory_limit(1536);
 	const char *lib = argc > 1 ? argv[1] : "/var/local/lib/libvulkan_freedreno.dylib";
 	const char *cache = argc > 2 ? argv[2] : "/var/local/m2v-cache";
 	const char *qc = argc > 3 ? argv[3] : "/System/Library/Frameworks/QuartzCore.framework/default.metallib";
