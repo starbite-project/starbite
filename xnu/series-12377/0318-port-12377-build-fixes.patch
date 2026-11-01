@@ -1,4 +1,4 @@
-From bcab65659efa223f003e58a03cb7d9b04a740162 Mon Sep 17 00:00:00 2001
+From 53c9783499d557a612c420313b760e17299345da Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Sun, 1 Nov 2026 15:38:00 +0200
 Subject: [PATCH] patch: 0318-port-12377-build-fixes.patch
@@ -18,6 +18,10 @@ patches they touch so later patches' context is not disturbed):
 - pmap.c: 12377 maps WCOMB/RT pages outside the kernel's DRAM as Device-GRE; on our boards the framebuffer, /pram and Mali buffers are RAM outside it, and bzero's DC ZVA on the Device-mapped panic region faulted in PE_create_console (boot f). WCOMB/RT stay Normal-NC on our boards (pmap_wcomb_normal)
 - machine_routines.c: ml_unsafe_kernel_text asserts on iBoot's /chosen kernel-ctrr-to-be-enabled (boot g panicked after dlil_init); our boards have no CTRR and report unlocked text when the property is absent
 - vm_map_store.c: VM map guard objects stay off on our boards (launchd faulted with KERN_INVALID_GUARD_OBJECT_SLOT in its first plist buffer, boot h)
+- sleh.c: log failing copyio faults on user memory (diagnostic for launchd's KERN_INVALID_GUARD_OBJECT_SLOT exit)
+- vm_map_lock.c: log which guard-object check rejects a user range (diagnostic)
+- vm_map_lock.c: diagnostic helper moved above its users
+- vm_map_store.c: guard objects were still used for user maps (the enable switch only covers the kernel); vm_guard_object_should_fallback now always falls back on our boards, so the fault range of a 4 KiB-kernel/16 KiB-user fault can no longer spill into the next slot
 ---
  makedefs/MakeInc.def             |  2 +-
  osfmk/arm/pmap/pmap.c            | 19 +++++++--
@@ -25,13 +29,14 @@ patches they touch so later patches' context is not disturbed):
  osfmk/arm64/arm_vm_init.c        | 21 ++++++++++
  osfmk/arm64/cpu.c                |  1 -
  osfmk/arm64/machine_routines.c   | 19 +++++++++
- osfmk/arm64/sleh.c               |  4 +-
+ osfmk/arm64/sleh.c               | 21 +++++++++-
  osfmk/arm64/sweet_early.c        | 16 ++++---
  osfmk/kern/exception.c           | 71 +++++++++++++++++---------------
  osfmk/kern/exclaves.c            |  4 +-
  osfmk/vm/vm_kern.c               |  4 +-
+ osfmk/vm/vm_map_lock.c           | 24 +++++++++++
  osfmk/vm/vm_map_store.c          | 10 +++++
- 12 files changed, 130 insertions(+), 50 deletions(-)
+ 13 files changed, 171 insertions(+), 50 deletions(-)
  create mode 100644 osfmk/arm64/amcc_rorgn_pv_ctrr.c
 
 diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
@@ -253,10 +258,34 @@ index 1ab9e420..1604738a 100644
 +}
 +#endif
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index 626279bf..6d25c4b8 100644
+index 626279bf..b33fae1c 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3039,9 +3039,9 @@ sleh_irq(arm_saved_state_t *state)
+@@ -2693,6 +2693,23 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
+ 			}
+ 		}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++		/* 12377 port: why copyio faults on user memory fail (launchd, boot h/i). */
++		if (recover && (fault_addr & TTBR_SELECTOR) == 0) {
++			static int sweet_copyio_fault_logs;
++			if (sweet_copyio_fault_logs++ < 8) {
++				printf("SWEET COPYIO FAULT: addr 0x%llx type %d code 0x%x result %d map pgshift %d voids %d\n",
++				    (uint64_t)fault_addr, fault_type, fault_code, result,
++				    VM_MAP_PAGE_SHIFT(map),
++#if CONFIG_MAP_RANGES
++				    (int)vm_map_in_user_range_voids(map, fault_addr, 1)
++#else
++				    -1
++#endif
++				    );
++			}
++		}
++#endif
+ 		if (recover) {
+ 			/*
+ 			 *  Handle guard object faults during copyio() routines
+@@ -3039,9 +3056,9 @@ sleh_irq(arm_saved_state_t *state)
  	if (intid == timer_intid) {
  		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_TIMER);
  		cdp->cpu_decrementer = -1; /* Large */
@@ -439,24 +468,85 @@ index 2d950928..0131230a 100644
  	    (uint64_t)sane_size);
  	for (uint32_t i = 0; i < kmem_claim_count; i++) {
  		printf("HEROLTE KMEM: claim %s %#llx\n", kmem_claims[i].kc_name,
+diff --git a/osfmk/vm/vm_map_lock.c b/osfmk/vm/vm_map_lock.c
+index 987c9d55..313caf9e 100644
+--- a/osfmk/vm/vm_map_lock.c
++++ b/osfmk/vm/vm_map_lock.c
+@@ -41,6 +41,26 @@
+ #include <vm/vm_object_internal.h>
+ #include <vm/vm_stackshot_utils_xnu.h>
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++/* 12377 port: which guard-object check rejects a user range, and with what. */
++static void
++sweet_vmgo_reject(int site, vm_map_entry_t entry, vm_map_address_t start, vm_map_address_t end)
++{
++	static int logs;
++	if (logs++ >= 8) {
++		return;
++	}
++	vm_guard_object_chunk_t chunk = vms_chunk(entry->vme_chunk);
++	printf("SWEET VMGO REJECT %d: entry 0x%llx-0x%llx chunk 0x%llx-0x%llx bitmap 0x%llx req 0x%llx-0x%llx\n",
++	    site, (uint64_t)entry->vme_start, (uint64_t)entry->vme_end,
++	    (uint64_t)vmgo_chunk_start(chunk), (uint64_t)vmgo_chunk_end(chunk),
++	    (uint64_t)vmgo_bitmap(chunk), (uint64_t)start, (uint64_t)end);
++}
++#define SWEET_VMGO_REJECT(site, e, s, x) sweet_vmgo_reject(site, e, s, x)
++#else
++#define SWEET_VMGO_REJECT(site, e, s, x) ((void)0)
++#endif
++
+ uint64_t vm_map_lookup_and_lock_object_copy_slowly_count = 0;
+ uint64_t vm_map_lookup_and_lock_object_copy_slowly_size = 0;
+ uint64_t vm_map_lookup_and_lock_object_copy_slowly_max = 0;
+@@ -2659,6 +2679,7 @@ __vmrl_atomic_lock_and_iunlock(vm_map_lock_ctx_t vml_ctx)
+ 		    VME_IN_CHUNK(entry) &&
+ 		    vmgo_chunk_start(vms_chunk(entry->vme_chunk)) < end &&
+ 		    !vm_guard_object_check_op_range(entry, start, end)) {
++			SWEET_VMGO_REJECT(1, entry, start, end);
+ 			kr = KERN_INVALID_GUARD_OBJECT_SLOT;
+ 			release_assert(!vmrl_is_kernel_pmap(flags));
+ 			break;
+@@ -2684,6 +2705,7 @@ __vmrl_atomic_lock_and_iunlock(vm_map_lock_ctx_t vml_ctx)
+ 			    VME_IN_CHUNK(VME_PREV(entry)) &&
+ 			    vmgo_chunk_end(vms_chunk(VME_PREV(entry)->vme_chunk)) > start &&
+ 			    !vm_guard_object_check_op_range(VME_PREV(entry), start, end)) {
++				SWEET_VMGO_REJECT(2, VME_PREV(entry), start, end);
+ 				kr = KERN_INVALID_GUARD_OBJECT_SLOT;
+ 				release_assert(!vmrl_is_kernel_pmap(flags));
+ 				break;
+@@ -2941,6 +2963,7 @@ restart:
+ 		if (VME_IN_CHUNK(next_entry) &&
+ 		    !vm_guard_object_check_op_range(next_entry,
+ 		    vml_ctx->__original_req_start, end)) {
++			SWEET_VMGO_REJECT(3, next_entry, vml_ctx->__original_req_start, end);
+ 			kr = KERN_INVALID_GUARD_OBJECT_SLOT;
+ 			release_assert(!vmrl_is_kernel_pmap(flags));
+ 			goto out_abort;
+@@ -3745,4 +3768,5 @@ vm_map_found_entry_ex_unlock(
+  */
+ #if DEVELOPMENT || DEBUG
+ #include <vm/vm_map_lock_tests.c>
++
+ #endif /* DEVELOPMENT || DEBUG */
 diff --git a/osfmk/vm/vm_map_store.c b/osfmk/vm/vm_map_store.c
-index df5a7458..82a1e311 100644
+index df5a7458..ea2e23a2 100644
 --- a/osfmk/vm/vm_map_store.c
 +++ b/osfmk/vm/vm_map_store.c
-@@ -896,6 +896,16 @@ vm_map_store_destroy(vm_map_t map)
- void
- vm_guard_object_enable(void)
+@@ -1765,6 +1765,16 @@ vm_guard_object_should_fallback(
+ 	vm_map_size_t           size,
+ 	vm_map_offset_t         mask)
  {
 +#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 +	/*
-+	 * sweet: guard objects (12377) split user allocations into slots
-+	 * sized by the 4 KiB kernel page while the user map pages in 16 KiB;
-+	 * launchd's first malloc'd plist buffer then faulted with
-+	 * KERN_INVALID_GUARD_OBJECT_SLOT one page past where read() stopped.
-+	 * Keep the plain allocator, as xnu-11417 had.
++	 * sweet: no guard objects, kernel or user. The 4 KiB-page kernel faults
++	 * user (16 KiB-page) memory one 16 KiB page from the 4 KiB-aligned fault
++	 * address; the guard-object range check then sees the fault spill into
++	 * the next slot (launchd: req 0x10217d000-0x102181000 against a slot
++	 * ending at 0x102180000) and fails it with KERN_INVALID_GUARD_OBJECT_SLOT.
 +	 */
-+	return;
++	return true;
 +#endif
- 	vmgo_enabled = true;
- }
- 
+ 	/*
+ 	 * Various things that do not support or do not need guard objects:
+ 	 *
