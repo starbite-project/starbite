@@ -8,7 +8,7 @@
 #   sudo IPSW=build/ipsw-18 OUT=build/root-ipados18.img INSTALL_STAGED_APPS=1 tools/build-ios-root.sh
 #     iPadOS 18.7.11 (J171AP) from tools/fetch-ios-parts.sh + decrypt-ios-parts.sh;
 #     staged with tools/stage-ios-root.sh, stock apps installed into /Applications.
-#   sudo IPSW=build/ipsw-26-n104 OUT=build/root-ios26.img INSTALL_STAGED_APPS=1 TRANSLATE_A64E=1 tools/build-ios-root.sh
+#   sudo IPSW=build/ipsw-26-n104 OUT=build/root-ios26.img TRIM_IOS26=1 INSTALL_STAGED_APPS="MobileSafari ..." TRANSLATE_A64E=1 tools/build-ios-root.sh
 #     iOS 26.6.2 (iPhone 11, N104AP); arm64e cache translated for the S9 (needs numpy in build/venv).
 # Output: build/root.img (raw HFSX, flashed to USERDATA with Heimdall) and
 # ref/ios-herolte/research/ipsw-x/d22ap.adt (for the ADT /product node; the

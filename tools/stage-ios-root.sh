@@ -73,8 +73,21 @@ omit=(
     '--exclude=/System/Library/OnBoardingBundles/***'
     '--exclude=/System/Library/Audio/***'
 )
+# TRIM_IOS26=1: iOS 26 is ~18 GB uncompressed (APFS compression is lost on HFSX) and the
+# root must fit 16 GiB. Leave out non-English localizations and the photo / voice /
+# search ML data (Espresso weights, Core ML models, TTS voices, word models); none of
+# it is needed by the UI, the daemons fall back or skip their analysis.
+trim=()
+if [[ ${TRIM_IOS26:-0} == 1 ]]; then
+    trim=('--include=en.lproj/***' '--include=Base.lproj/***' '--include=English.lproj/***'
+          '--include=en_*.lproj/***' '--exclude=*.lproj/'
+          '--exclude=*.espresso.*' '--exclude=*.mlmodelc/'
+          '--exclude=/System/Library/PrivateFrameworks/VoiceServices.framework/TTSResources/'
+          '--exclude=/System/Library/PrivateFrameworks/TextToSpeechMauiSupport.framework/TTSResources/'
+          '--exclude=/System/Library/PrivateFrameworks/CVNLP.framework/Models/')
+fi
 echo "Copying selected OS files"
-/usr/bin/rsync -aH --numeric-ids --extended-attributes "${app_filters[@]}" "${omit[@]}" "$os/" "$root/"
+/usr/bin/rsync -aH --numeric-ids --extended-attributes ${trim[@]+"${trim[@]}"} "${app_filters[@]}" "${omit[@]}" "$os/" "$root/"
 echo "Copying SystemOS and AppOS cryptexes"
 mkdir -p "$root/private/preboot/Cryptexes/OS" "$root/private/preboot/Cryptexes/App"
 /usr/bin/rsync -aH --numeric-ids --extended-attributes "$sysos/" "$root/private/preboot/Cryptexes/OS/"
@@ -106,11 +119,15 @@ for cryptex in OS App; do
     done < <(find "$source" ! -type d -print0)
 done
 
-if [[ ${INSTALL_STAGED_APPS:-0} == 1 ]]; then
+# INSTALL_STAGED_APPS=1: all of them; or a list of names, e.g. "MobileSafari Calculator".
+if [[ ${INSTALL_STAGED_APPS:-0} != 0 ]]; then
     staged="$os/private/var/staged_system_apps"
     [[ -d $staged ]] || { echo "no $staged" >&2; exit 1; }
     for bundle in "$staged"/*.app; do
         name=${bundle##*/}
+        if [[ $INSTALL_STAGED_APPS != 1 && " $INSTALL_STAGED_APPS " != *" ${name%.app} "* ]]; then
+            continue
+        fi
         /usr/bin/rsync -aH --numeric-ids --extended-attributes "$bundle" "$root/Applications/"
         chown -R 0:0 "$root/Applications/$name"
         rm -rf "$root/System/Library/AppPlaceholders/$name"
