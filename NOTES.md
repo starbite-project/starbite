@@ -1856,3 +1856,25 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   - Open: backboardd aborts in CA::OGL::Context::push_surface (assert: surface not in the tracked list; from
     AsynchronousNode::retain_surface <- ImagingNode::render), SpringBoard restarts with it. It is drawing an offscreen
     effect (glass/backdrop material); the Clock tab bar shows garbage there. No Liquid Glass, ~9 fps CPU rendering.
+- 2026-11-01 21:50: **GPU (sbca) on iOS 26: the Mali-G72 draws the lock screen** (GPU boot 5+, user photos IMG_5914-5916:
+  clock, date, charging glyph; wallpaper a red fallback). Fixes on the way, in order:
+  - sbca for iOS 26 QuartzCore: build/ca-gpu/sbca-ios26-offsets.md (renderer slot +0x1c0, GLES context 0xb10, server
+    +0x5c8/+0x5d0, display +0x148; skip CAMetalContextCreate's 30 s IOAcceleratorES wait by marking its once done).
+  - xnu 0324: sweetinject targets get ptrauth_disabled=1 (dyld load_arm64e_keysOff -> arm64 GPU libraries load).
+  - Context::push_surface asserts every surface is in the tracked list; only MetalContext tracks. sbca turns the
+    not-found branch (0x183f0f1e4 cbnz) into a b.
+  - Compression off: CAEnableIOSurfaceCompression / CAEnableFramebufferCompression = false in the three global
+    preference plists (mobile, root, /var/preferences).
+  - IOMFBDisplay::framebuffer_pixel_format chose 'b3a8' (wide colour): sbca makes it return 'BGRA'
+    (IOS-26-Hot uses CAEnableDeepFramebuffer=false instead).
+  - xnu 0325/0329: user-mode platform errors (external aborts) are logged with ESR/FAR/PAR via a thread call and kill
+    the task instead of panicking. 0326/0328: IOSurfaces and GPU buffers in whole 16 KiB user pages. 0327: imported
+    surfaces stay wired while the GPU maps them. 0330: GPU buffer pages back to default attributes before free.
+    0331: imported/client-memory surfaces never mapped write-combined (CPU or kernel).
+  - The resprings: backboardd heap pages became Normal-NC (PAR attr 0x44); objc_release's LSE atomics on Normal-NC
+    take synchronous external aborts (ESR 0x92000010) on the Exynos 9810. WIMG is per physical page: a WC view of a
+    wrapped image / client-memory surface flipped the whole page in the owner's heap.
+  - References (build/ios26-gpu-references.md): HackiOS / ios-topaz are iOS 16 (EAGLServer); every public iOS 26 port
+    is Metal->Vulkan. IOS-26-Hot (xnu-12377, Pixel 4/Realme X2 Pro) is the closest: HEIC poster layers decode to
+    nothing without HEVC hardware (converted to PNG), CABackdropLayer disabled for glass, GPU buffers in RAM XNU does
+    not manage (a WC view of managed RAM is a mismatched alias of the cacheable physical aperture).
