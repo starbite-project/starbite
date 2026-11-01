@@ -1,4 +1,4 @@
-From c9342a56ba932d6aa9ca79a2f6af0b09c311d95c Mon Sep 17 00:00:00 2001
+From 94dcb25caa17e5b5558ac6fa3f22f1d753fdcadf Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Sun, 1 Nov 2026 15:38:00 +0200
 Subject: [PATCH] patch: 0318-port-12377-build-fixes.patch
@@ -12,16 +12,18 @@ patches they touch so later patches' context is not disturbed):
 - amcc_rorgn_pv_ctrr.c (0008): new closed-source file in files.arm64 for nos_arm_asm, stubbed like the ppl ones
 - exclaves.c, machine_routines.c (0009/0008): tightbeam_startup needs Apple's closed libTightbeam, compiled out for our boards; ml_device_is_prod_fused (closed, new caller in kern_mib.c) answers TRUE
 - arm_vm_init.c: progress marks 21-28 between marks 7 and 10 (first 12377 boot stopped after mark 7)
+- sweet_early.c, arm_vm_init.c: on the A5XELTE boards the early console stayed off from mark 7 (the 11417 port's assumption), so marks 21-28 never showed; it now stays on until arm_vm_init drops TTBR0 (mark 29), prints two-digit stages, and marks 8/9 bracket the first early_random
 ---
  osfmk/arm64/amcc_rorgn_pv_ctrr.c |  9 ++++
- osfmk/arm64/arm_vm_init.c        |  8 ++++
+ osfmk/arm64/arm_vm_init.c        | 14 +++++++
  osfmk/arm64/cpu.c                |  1 -
  osfmk/arm64/machine_routines.c   | 12 ++++++
  osfmk/arm64/sleh.c               |  4 +-
+ osfmk/arm64/sweet_early.c        | 16 ++++---
  osfmk/kern/exception.c           | 71 +++++++++++++++++---------------
  osfmk/kern/exclaves.c            |  4 +-
  osfmk/vm/vm_kern.c               |  4 +-
- 8 files changed, 73 insertions(+), 40 deletions(-)
+ 9 files changed, 89 insertions(+), 46 deletions(-)
  create mode 100644 osfmk/arm64/amcc_rorgn_pv_ctrr.c
 
 diff --git a/osfmk/arm64/amcc_rorgn_pv_ctrr.c b/osfmk/arm64/amcc_rorgn_pv_ctrr.c
@@ -40,10 +42,26 @@ index 00000000..f0feaaf1
 +
 +static const uint8_t sweet_no_amcc_rorgn __attribute__((unused)) = 0;
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
-index ce16f45c..248593c2 100644
+index ce16f45c..bbb20752 100644
 --- a/osfmk/arm64/arm_vm_init.c
 +++ b/osfmk/arm64/arm_vm_init.c
-@@ -1951,6 +1951,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1862,6 +1862,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	/*
+ 	 * Get the virtual and physical kernel-managed memory base from boot_args.
+ 	 */
++	sweet_early_mark(8, "arm_vm_init entered");
+ 	gVirtBase = args->virtBase;
+ 	gPhysBase = args->physBase;
+ #if KASAN
+@@ -1901,6 +1902,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ #endif
+ 
+ 	// Slide the physical aperture to a random page-aligned location within the slide range
++	sweet_early_mark(9, "arm_vm_init: first early_random");
+ 	uint64_t physmap_slide = early_random() & ARM64_PHYSMAP_SLIDE_MASK & ~((uint64_t)PAGE_MASK);
+ 	assert(physmap_slide < ARM64_PHYSMAP_SLIDE_RANGE);
+ 
+@@ -1951,6 +1953,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  		panic("Unsupported memory configuration %lx", mem_size);
  	}
  
@@ -51,7 +69,7 @@ index ce16f45c..248593c2 100644
  	boot_tte = (tt_entry_t *)&bootstrap_pagetables;
  	boot_ttep = kvtophys((vm_offset_t)boot_tte);
  
-@@ -1994,6 +1995,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1994,6 +1997,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	cpu_tte = (tt_entry_t *)alloc_ptpage(TRUE);
  	cpu_ttep = kvtophys((vm_offset_t)cpu_tte);
  	bzero(cpu_tte, ARM_PGBYTES);
@@ -59,7 +77,7 @@ index ce16f45c..248593c2 100644
  	avail_end = gPhysBase + mem_size;
  	assert(!(avail_end & PAGE_MASK));
  
-@@ -2011,6 +2013,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2011,6 +2015,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	 *   the so called physical aperture should be statically mapped
  	 */
  	init_ptpages(cpu_tte, gVirtBase, dynamic_memory_begin, TRUE, ARM_TTE_TABLE_AP(ARM_TTE_TABLE_AP_USER_NA));
@@ -67,7 +85,7 @@ index ce16f45c..248593c2 100644
  
  #if defined(ARM_LARGE_MEMORY)
  	/*
-@@ -2126,6 +2129,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2126,6 +2131,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	edata = (vm_offset_t) segDATAB + segSizeDATA;
  	end_kern = round_page(segHIGHESTKC ? segHIGHESTKC : getlastkerneladdr()); /* Force end to next page */
  
@@ -75,7 +93,7 @@ index ce16f45c..248593c2 100644
  	vm_set_page_size();
  
  	vm_kernel_base = segTEXTB;
-@@ -2160,7 +2164,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2160,7 +2166,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	vm_prelink_sdata = segPRELINKDATAB;
  	vm_prelink_edata = segPRELINKDATAB + segSizePRELINKDATA;
  
@@ -85,7 +103,7 @@ index ce16f45c..248593c2 100644
  
  	/*
  	 * Initialize the page tables for the low globals:
-@@ -2204,8 +2210,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2204,14 +2212,20 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	/* phystokv() must still refer to the bootstrap aperture here. */
  	sweet_early_map_final();
  #endif
@@ -95,6 +113,16 @@ index ce16f45c..248593c2 100644
 +	sweet_early_mark(28, "arm_vm_init: TTBR1 switched");
  
  	ml_enable_monitor();
+ 
+ #if defined(SWEET) && !defined(A5XELTE)
+ 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
+ 	sweet_early_relocate(SWEET_EARLY_FB_VA);
++#elif defined(A5XELTE)
++	/* The early console writes the scanout through TTBR0's VA=PA map. */
++	sweet_early_mark(29, "arm_vm_init: dropping TTBR0, early console off");
++	sweet_early_disable();
+ #endif
+ 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
  
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
 index a8cc5f00..db3bb0b4 100644
@@ -144,6 +172,40 @@ index 626279bf..6d25c4b8 100644
  		A5_IRQ_EOI(iar);
  	} else if (intid < 16) {
  		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 159b9662..375258f6 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -78,19 +78,23 @@ a5_string(const char *s)
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
+-	if (!a5_active || stage > 7) {
++	if (!a5_active) {
+ 		return;
+ 	}
+ 	a5_string("A5 XNU STAGE ");
+-	sweet_early_putc((char)('0' + stage));
++	if (stage >= 10) {
++		sweet_early_putc((char)('0' + stage / 10 % 10));
++	}
++	sweet_early_putc((char)('0' + stage % 10));
+ 	a5_string(": ");
+ 	a5_string(label);
+ 	sweet_early_putc('\n');
+ 	__asm__ volatile("dsb sy" ::: "memory");
+-	/* arm_vm_init replaces TTBR0; low physical aliases then cease to exist. */
+-	if (stage == 7) {
+-		a5_active = 0;
+-	}
++	/*
++	 * 12377 port: stay on through arm_vm_init (the bootstrap TTBR0 still maps
++	 * the scanout VA=PA); arm_vm_init calls sweet_early_disable() right
++	 * before it drops TTBR0.
++	 */
+ }
+ 
+ void
 diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 index 1586e751..9b6b3efd 100644
 --- a/osfmk/kern/exception.c
