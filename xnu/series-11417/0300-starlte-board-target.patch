@@ -1,4 +1,4 @@
-From 60e4e9b5d223c8b5eacfa24bc8bb8ab9ab8cf1a5 Mon Sep 17 00:00:00 2001
+From ac7020173c25768af42ddb485e1d44b5f547b955 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:13 +0200
 Subject: [PATCH] patch: 0300-starlte-board-target.patch
@@ -9,7 +9,7 @@ port: STARLTE appended to the board list; SCTLR SPAN bit goes into the new SCTLR
  bsd/conf/files                        |   2 +
  bsd/dev/a5xelte_keys.c                |  15 +
  bsd/dev/herolte_ufs.c                 | 273 ++++++++++-
- bsd/dev/starlte_smp.c                 | 186 +++++++
+ bsd/dev/starlte_smp.c                 | 273 +++++++++++
  bsd/dev/starlte_touch.c               | 667 ++++++++++++++++++++++++++
  bsd/dev/sweet_sample.c                |   9 +-
  config/MASTER.arm64.starlte           | 120 +++++
@@ -25,7 +25,7 @@ port: STARLTE appended to the board list; SCTLR SPAN bit goes into the new SCTLR
  osfmk/arm64/sweet_early.c             |   4 +-
  osfmk/kern/exception.c                |  33 ++
  pexpert/pexpert/arm64/A5XELTE.h       |  35 +-
- 20 files changed, 1505 insertions(+), 30 deletions(-)
+ 20 files changed, 1592 insertions(+), 30 deletions(-)
  create mode 100644 bsd/dev/starlte_smp.c
  create mode 100644 bsd/dev/starlte_touch.c
  create mode 100644 config/MASTER.arm64.starlte
@@ -518,10 +518,10 @@ index 9b46983..ee2f0da 100644
  	}
 diff --git a/bsd/dev/starlte_smp.c b/bsd/dev/starlte_smp.c
 new file mode 100644
-index 0000000..6ed7619
+index 0000000..f0f5728
 --- /dev/null
 +++ b/bsd/dev/starlte_smp.c
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,273 @@
 +/*
 + * STARLTE (Galaxy S9, Exynos 9810) secondary-CPU survey, boot-arg
 + * starsmpprobe=1 only. The starlte DTB lists the Cortex-A55 cores as reg
@@ -539,6 +539,8 @@ index 0000000..6ed7619
 +#include <kern/processor.h>
 +#include <kern/sched_prim.h>
 +#include <kern/thread.h>
++#include <sys/proc_internal.h>
++#include <sys/bsdtask_info.h>
 +#include <machine/machine_routines.h>
 +#include <vm/vm_kern.h>
 +#include <vm/vm_kern_xnu.h>     /* 11417: kmem_alloc_contig, KMA_* */
@@ -617,6 +619,90 @@ index 0000000..6ed7619
 + */
 +extern processor_t thread_bind(processor_t processor);   /* (sched_prim.h: MACH_KERNEL_PRIVATE only) */
 +
++/*
++ * Which processes use the CPU (the S7 and S9 ports found a Bluetooth audio plug-in polling a
++ * missing daemon at 300-460% of the CPUs): every 10 s, each process's CPU time (task, user +
++ * system) against the last snapshot, the eight busiest as a percentage of one core:
++ * "STARLTE TOP (10 s, all 812%): backboardd[60] 95% ...". Boot-arg startop=0: off.
++ */
++#define ST_TOP_PROCS 640
++static struct st_top_entry {
++	int pid;
++	uint64_t ticks;
++	char name[24];
++} st_top_now[ST_TOP_PROCS], st_top_last[ST_TOP_PROCS];
++static unsigned st_top_n, st_top_last_n;
++
++static int
++st_top_one(proc_t p, __unused void *arg)
++{
++	task_t task = proc_task(p);
++	if (task == TASK_NULL || st_top_n >= ST_TOP_PROCS) {
++		return PROC_RETURNED;
++	}
++	struct proc_taskinfo_internal info;
++	bzero(&info, sizeof(info));
++	fill_taskprocinfo(task, &info);
++	struct st_top_entry *e = &st_top_now[st_top_n++];
++	e->pid = proc_pid(p);
++	e->ticks = info.pti_total_user + info.pti_total_system;
++	strlcpy(e->name, proc_best_name(p), sizeof(e->name));
++	return PROC_RETURNED;
++}
++
++static void
++st_top(void)
++{
++	uint32_t on = 1;
++	PE_parse_boot_argn("startop", &on, sizeof(on));
++	if (!on) {
++		return;
++	}
++	uint64_t last_time = 0;
++	for (;;) {
++		st_top_n = 0;
++		uint64_t now = mach_absolute_time();
++		proc_iterate(PROC_ALLPROCLIST, st_top_one, NULL, NULL, NULL);
++		if (last_time != 0) {
++			uint64_t window_ns = 0;
++			absolutetime_to_nanoseconds(now - last_time, &window_ns);
++			uint64_t used[ST_TOP_PROCS], all = 0;
++			for (unsigned i = 0; i < st_top_n; i++) {
++				used[i] = 0;
++				for (unsigned j = 0; j < st_top_last_n; j++) {
++					if (st_top_last[j].pid == st_top_now[i].pid && st_top_now[i].ticks >= st_top_last[j].ticks) {
++						absolutetime_to_nanoseconds(st_top_now[i].ticks - st_top_last[j].ticks, &used[i]);
++						break;
++					}
++				}
++				all += used[i];
++			}
++			char line[512];
++			int n = snprintf(line, sizeof(line), "STARLTE TOP (%llu s, all %llu%%):", window_ns / NSEC_PER_SEC,
++			    window_ns ? all * 100 / window_ns : 0);
++			for (unsigned k = 0; k < 8; k++) {
++				unsigned best = ST_TOP_PROCS;
++				for (unsigned i = 0; i < st_top_n; i++) {
++					if (used[i] != 0 && (best == ST_TOP_PROCS || used[i] > used[best])) {
++						best = i;
++					}
++				}
++				if (best == ST_TOP_PROCS || n >= (int)sizeof(line) - 40) {
++					break;
++				}
++				n += snprintf(line + n, sizeof(line) - (size_t)n, " %s[%d] %llu%%", st_top_now[best].name,
++				    st_top_now[best].pid, used[best] * 100 / window_ns);
++				used[best] = 0;
++			}
++			printf("%s\n", line);
++		}
++		bcopy(st_top_now, st_top_last, sizeof(st_top_now[0]) * st_top_n);
++		st_top_last_n = st_top_n;
++		last_time = now;
++		delay(10 * 1000 * 1000);
++	}
++}
++
 +static void
 +st_cpu_survey(__unused void *arg, __unused wait_result_t wr)
 +{
@@ -649,6 +735,7 @@ index 0000000..6ed7619
 +	}
 +	thread_bind(PROCESSOR_NULL);
 +	thread_block(THREAD_CONTINUE_NULL);
++	st_top();
 +}
 +
 +void

@@ -1,4 +1,4 @@
-From 6b3d49c880486f075e3cf6cd799734df6f3a3b6b Mon Sep 17 00:00:00 2001
+From 15ae6991aa69b53302cb0ed8210df6242a8d4327 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 16:35:14 +0200
 Subject: [PATCH] patch: 0302-starlte-acpm-pmic-api.patch

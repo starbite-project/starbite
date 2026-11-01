@@ -1,4 +1,4 @@
-From c6f3bcf482ac3b4e2de544eab156c6c2b7e52b9b Mon Sep 17 00:00:00 2001
+From 1f6c4d80d7535004622b0b0cde0a463670424c3f Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Wed, 28 Oct 2026 17:56:59 +0200
 Subject: [PATCH] patch: 0309-port-critical-exit-log.patch

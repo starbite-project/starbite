@@ -1677,3 +1677,13 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     kHz froze the phone instantly with a green display (boot69, user's photo): removed for good.
   - Next for speed: fewer submits a frame (why ~50: Mesa batch flushes from eagl's surface copies/glFinish,
     CoreAnimation's offscreen passes) and asynchronous submits.
+- 2026-11-01: **Idle CPU: daemons that spin without a network** (boot70-71). Kernel "STARLTE TOP" (0300,
+  starlte_smp.c: every 10 s the eight busiest processes by task CPU time, % of one core; startop=0 off).
+  Before: idle 56-230% of 800%, imagent 142% steady, audiomxd/cloudd/sirittsd/icloudmailagent 20-40%.
+  tools/starlte-disable-jobs.py ROOT tools/starlte-disabled.list takes jobs out of launchd.plist (kept in
+  launchd-disabled.plist): the S7 port's list (ref/ios-herolte-new, wardevsa/ios-a5xelte herolte, which has
+  CA on its Mali-T880 the same way, 35-38 fps) plus imagent, sirittsd, icloudmailagent, searchpartyd,
+  cloudd(.sync), PerfPowerServices(Extended), then parsecd (133% in boot71) and passd (crash loop feeding
+  ReportCrash/osanalyticshelper). After: idle 68-120%, mostly SpringBoard and backboardd. No
+  BTAudioHALPlugin on this iOS 18 root. an earlier port's S9 change (example-project/hackios-xnu-kernel#65): queued
+  submits, cache maintenance for surfaces named by a job (submit) and after WAIT_BO: our next step.
