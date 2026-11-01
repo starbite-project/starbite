@@ -1,4 +1,4 @@
-From e3e45c4fcb2125582a3ddea6073180337a3ade8d Mon Sep 17 00:00:00 2001
+From 3f9c5b43f146da4610ffee416179123c23501f1b Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Sun, 1 Nov 2026 15:38:00 +0200
 Subject: [PATCH] patch: 0318-port-12377-build-fixes.patch
@@ -15,8 +15,10 @@ patches they touch so later patches' context is not disturbed):
 - sweet_early.c, arm_vm_init.c: on the A5XELTE boards the early console stayed off from mark 7 (the 11417 port's assumption), so marks 21-28 never showed; it now stays on until arm_vm_init drops TTBR0 (mark 29), prints two-digit stages, and marks 8/9 bracket the first early_random
 - arm_vm_init.c: the dynamic_memory_begin > VM_MAX panic prints the layout on the A5XELTE boards
 - MakeInc.def (0093): 12377 selects the layout with ARM64_LARGE_MEMORY (into ARM64_EXTRA_BUILD_FLAGS), LARGE_MEMORY_DEFINE is unused; our boards set ARM64_LARGE_MEMORY = 0 (the first boots panicked: ARM_LARGE_MEMORY physmap below a kernel at 0xfffffff006000000)
+- pmap.c: 12377 maps WCOMB/RT pages outside the kernel's DRAM as Device-GRE; on our boards the framebuffer, /pram and Mali buffers are RAM outside it, and bzero's DC ZVA on the Device-mapped panic region faulted in PE_create_console (boot f). WCOMB/RT stay Normal-NC on our boards (pmap_wcomb_normal)
 ---
  makedefs/MakeInc.def             |  2 +-
+ osfmk/arm/pmap/pmap.c            | 19 +++++++--
  osfmk/arm64/amcc_rorgn_pv_ctrr.c |  9 ++++
  osfmk/arm64/arm_vm_init.c        | 21 ++++++++++
  osfmk/arm64/cpu.c                |  1 -
@@ -26,7 +28,7 @@ patches they touch so later patches' context is not disturbed):
  osfmk/kern/exception.c           | 71 +++++++++++++++++---------------
  osfmk/kern/exclaves.c            |  4 +-
  osfmk/vm/vm_kern.c               |  4 +-
- 10 files changed, 97 insertions(+), 47 deletions(-)
+ 11 files changed, 113 insertions(+), 50 deletions(-)
  create mode 100644 osfmk/arm64/amcc_rorgn_pv_ctrr.c
 
 diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
@@ -42,6 +44,57 @@ index 1820ea38..d5a93073 100644
  ARM64_PLKSEG_ADDR  =0xfffffff004004000
  ARM64_LINK_ADDR    =0xfffffff007004000
  endif
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 2379e237..87b38987 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -1912,6 +1912,19 @@ pmap_construct_io_pte(pmap_paddr_t paddr, pt_entry_t tmplate)
+ }
+ #endif /* XNU_MONITOR */
+ 
++/*
++ * sweet (12377 port): 12377 maps write-combined / RT pages that lie outside
++ * the kernel-managed DRAM as Device-GRE. On the Exynos boards the
++ * framebuffer, the panic region (/pram) and the Mali buffers are ordinary
++ * RAM outside that range; as device memory, DC ZVA (bzero) takes an
++ * alignment fault. Keep them Normal Non-Cacheable, as xnu-11417 did.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++#define pmap_wcomb_normal(pa) ((void)(pa), true)
++#else
++#define pmap_wcomb_normal(pa) is_dram_addr(pa)
++#endif
++
+ vm_map_address_t
+ pmap_map_bd_with_options(
+ 	vm_map_address_t virt,
+@@ -1944,7 +1957,7 @@ pmap_map_bd_with_options(
+ 
+ 	switch (options & PMAP_MAP_BD_MASK) {
+ 	case PMAP_MAP_BD_WCOMB:
+-		if (is_dram_addr(start)) {
++		if (pmap_wcomb_normal(start)) {
+ 			mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
+ 		} else {
+ #if HAS_FEAT_XS
+@@ -6001,7 +6014,7 @@ wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
+ 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
+ 		break;
+ 	case VM_WIMG_RT:
+-		if (is_dram_addr(pa)) {
++		if (pmap_wcomb_normal(pa)) {
+ 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_RT);
+ 		} else {
+ #if HAS_FEAT_XS
+@@ -6041,7 +6054,7 @@ wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
+ 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
+ 		break;
+ 	case VM_WIMG_WCOMB:
+-		if (is_dram_addr(pa)) {
++		if (pmap_wcomb_normal(pa)) {
+ 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
+ 		} else {
+ #if HAS_FEAT_XS
 diff --git a/osfmk/arm64/amcc_rorgn_pv_ctrr.c b/osfmk/arm64/amcc_rorgn_pv_ctrr.c
 new file mode 100644
 index 00000000..f0feaaf1
