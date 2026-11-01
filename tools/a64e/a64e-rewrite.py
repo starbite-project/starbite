@@ -70,7 +70,7 @@ def text_sections(lc, ncmds):
         off += csz
 
 
-def do_cache(main, only, dry):
+def do_cache(main, only, dry, skip=()):
     maps = []
     files = {}
     for p in sorted(glob.glob(main + '*')):
@@ -111,6 +111,8 @@ def do_cache(main, only, dry):
     tot, nimg = {}, 0
     for im, path in zip(imgs, paths):
         if only and not any(o in path for o in only):
+            continue
+        if any(k in path for k in skip):
             continue
         mh = read(im[0], 32)
         if not mh or struct.unpack_from('<I', mh)[0] != 0xfeedfacf:
@@ -168,9 +170,12 @@ def main():
     ap.add_argument('paths', nargs='+')
     ap.add_argument('--only', nargs='*', default=[])
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--skip', nargs='*', default=[],
+                    help='leave images whose path contains one of these untranslated '
+                         '(libcorecrypto: its FIPS self-test MACs its own code)')
     a = ap.parse_args()
     if a.kind == 'cache':
-        n, tot = do_cache(a.paths[0], a.only, a.dry_run)
+        n, tot = do_cache(a.paths[0], a.only, a.dry_run, a.skip)
         print(f'{n} images', tot)
     else:
         for p in a.paths:

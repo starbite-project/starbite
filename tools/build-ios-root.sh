@@ -61,7 +61,8 @@ bash "$TOOLS/herolte-tune-ios-root.sh" "$root" "$build"
 # cryptex's, one rewrite covers both). The kernel emulates what is left.
 if [[ ${TRANSLATE_A64E:-0} == 1 ]]; then
     "$ROOT/build/venv/bin/python" -I "$ROOT/tools/a64e/a64e-rewrite.py" cache \
-        "$root/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e"
+        "$root/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e" \
+        --skip libcorecrypto    # cc_fips_test MACs corecrypto's own code
 fi
 df -h "$root"
 hdiutil detach "$root"; hdiutil detach "$os"; hdiutil detach "$sys"; hdiutil detach "$app"
