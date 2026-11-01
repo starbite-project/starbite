@@ -42,6 +42,8 @@ main(void)
 	}
 	setenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
 	setenv("PANVK_DEBUG", "startup", 1);
+	setenv("MESA_LOG_FILE", "/private/var/tmp/vktest.mesa.log", 1);
+	setenv("STARBITE_DRM_TRACE", "1", 1);
 	say("vktest: pid %d, waiting 20 s for the GPU\n", getpid());
 	sleep(20);
 
