@@ -1802,3 +1802,21 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   - Boot-args build/ios26-test-cmdline.txt: cpus=4 (A55 only: LSE/LDAPR), 828x1792 canvas, no sweetinject (sbca
     carries iPadOS 18 offsets), sweettrace=1500, sweetreboot=300. BOOT out/xnu-boot-ios26-a.img (12377 kernel).
   - Decrypted sources were deleted by DELETE_SOURCES (re-fetch with fetch-ios-parts.sh, then decrypt).
+- 2026-11-01: **iOS 26.6.2 userland runs on the S9** (xnu-12377, iPhone 11 identity, translated cache).
+  Boots ios26-a..e:
+  - a: launchd SIGSEGV on a raw chained pointer. map_with_linking_np refused dyld's 16 KiB fixup pages (EINVAL),
+    and dyld's in-process fallback cannot fix split .dylddata subcaches. Patch 0320: 16 KiB fixup pages on the
+    4 KiB kernel (sweet_fixup_subpage assembles the 16 KiB block), arm64e formats without PAC.
+  - b: same crash, now in the shared cache. Patch 0321: slide info v3/v5 never stored authenticated pointers
+    without ptrauth_calls; the shared-region pager slid 4 KiB pages as if they were 16 KiB (overran them).
+    sweet_sr_slide_subpage slides each page inside its 16 KiB slide page.
+  - c: launchd runs. The critical boot task cc_fips_test fails only fipspost_post_integrity (MAC over
+    corecrypto's translated code); every algorithm test passed on translated code. /usr/libexec/cc_fips_test is now
+    tools/a64e/fips-ok.c (the original is kept as .orig). Future builds: build-ios-root.sh translates with
+    `--skip libcorecrypto`.
+  - d: assert cpu <= ml_get_max_cpu_number(): st_cpu_survey walked 8 CPUs with cpus=4 (fixed in 0321).
+  - e: no panic in 300 s. About 170 processes, including SpringBoard[28], backboardd[58], runningboardd, securityd,
+    cfprefsd. STARLTE TOP goes idle at 0-7%. audiomxd loops on SIGTRAP at a cache pc. No frames presented yet
+    (no "A5XELTE FB: frames"): backboardd waits on something. Next: what backboardd and SpringBoard block on
+    (sweetmsg tracing), audiomxd's trap, then the GPU (sbca for iOS 26's QuartzCore offsets).
+  Live root edits: base is now build/root-ios26.img (`starlte-root-sync.py pull build/root-ios26.img OUT`).
