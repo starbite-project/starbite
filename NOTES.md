@@ -1885,3 +1885,16 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   black boxes, laggy; Settings > About says "iPadOS 26.6.2" on iPhone 11.
   - Speed: the frame reaches the panel by a CPU scaled copy, avg 50 ms (A5XELTE FB avg_copy_us ~50000): 4-10 fps
     whatever the GPU does (GPU submit ~150 us). CPU: backboardd ~60 %, logd 30-90 %, datamigrator 15-56 %.
+- 2026-11-01 23:45: **MILESTONE: Vulkan runs on the Mali-G72 under iOS 26** (boot t3, tools/vk/vktest.c as launchd job
+  com.starbite.vktest): Mesa 25.0.7 PanVK (`VULKAN=1 tools/mesa-ios/mk-mesa-ios.sh`, panvk-ios.patch,
+  PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1) through starbite-drm and StarbiteMali: instance, device, image + buffer
+  memory, vkCmdClearColorImage + vkCmdCopyImageToBuffer, submit, wait; 4096 of 4096 pixels read back as the clear
+  colour. starbite-drm grew drmGetDevices2 & co (one platform device, render node /dev/null), timeline signal/query
+  (every point reached: jobs finish inside SUBMIT) and opens the StarbiteMali connection at the first request.
+  - Metal plan (build/metal-port-plan.md): IOS-26-Hot's phone/metal2 (MIT) + metal2vulkan (Rust) + PanVK in place of
+    Turnip; kernel IOAcceleratorES with MetalPluginName/MetalPluginClassName (their patch 0096). metal2vulkan needs
+    Vulkan 1.2: PanVK from Mesa 26.2.6 (needs host mesa_clc/vtn_bindgen2: Homebrew llvm 23 + spirv-llvm-translator).
+  - QuartzCore's default.metallib (189 AIR modules) disassembles with Homebrew llvm-dis (build/metal): Liquid Glass
+    is glass_background(_sdf)(_no_bleed), glass_foreground(_sdf), displacement_map, chromatic_aberration, rim/brim,
+    sdf_gen_field/gradients + fixed_frag's SDF branches. The GL path's census (glcensus=1): kfh, ghn, ghz, gfs, dgh,
+    dff, dfg, bvc, lub have no GL program (drawn plain or not at all): that is the broken glass.
