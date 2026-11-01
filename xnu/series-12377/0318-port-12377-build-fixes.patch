@@ -1,4 +1,4 @@
-From 3f009f996bb37ad7de7823a58e8b130f6593ac91 Mon Sep 17 00:00:00 2001
+From bcab65659efa223f003e58a03cb7d9b04a740162 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Sun, 1 Nov 2026 15:38:00 +0200
 Subject: [PATCH] patch: 0318-port-12377-build-fixes.patch
@@ -17,6 +17,7 @@ patches they touch so later patches' context is not disturbed):
 - MakeInc.def (0093): 12377 selects the layout with ARM64_LARGE_MEMORY (into ARM64_EXTRA_BUILD_FLAGS), LARGE_MEMORY_DEFINE is unused; our boards set ARM64_LARGE_MEMORY = 0 (the first boots panicked: ARM_LARGE_MEMORY physmap below a kernel at 0xfffffff006000000)
 - pmap.c: 12377 maps WCOMB/RT pages outside the kernel's DRAM as Device-GRE; on our boards the framebuffer, /pram and Mali buffers are RAM outside it, and bzero's DC ZVA on the Device-mapped panic region faulted in PE_create_console (boot f). WCOMB/RT stay Normal-NC on our boards (pmap_wcomb_normal)
 - machine_routines.c: ml_unsafe_kernel_text asserts on iBoot's /chosen kernel-ctrr-to-be-enabled (boot g panicked after dlil_init); our boards have no CTRR and report unlocked text when the property is absent
+- vm_map_store.c: VM map guard objects stay off on our boards (launchd faulted with KERN_INVALID_GUARD_OBJECT_SLOT in its first plist buffer, boot h)
 ---
  makedefs/MakeInc.def             |  2 +-
  osfmk/arm/pmap/pmap.c            | 19 +++++++--
@@ -29,7 +30,8 @@ patches they touch so later patches' context is not disturbed):
  osfmk/kern/exception.c           | 71 +++++++++++++++++---------------
  osfmk/kern/exclaves.c            |  4 +-
  osfmk/vm/vm_kern.c               |  4 +-
- 11 files changed, 120 insertions(+), 50 deletions(-)
+ osfmk/vm/vm_map_store.c          | 10 +++++
+ 12 files changed, 130 insertions(+), 50 deletions(-)
  create mode 100644 osfmk/arm64/amcc_rorgn_pv_ctrr.c
 
 diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
@@ -437,3 +439,24 @@ index 2d950928..0131230a 100644
  	    (uint64_t)sane_size);
  	for (uint32_t i = 0; i < kmem_claim_count; i++) {
  		printf("HEROLTE KMEM: claim %s %#llx\n", kmem_claims[i].kc_name,
+diff --git a/osfmk/vm/vm_map_store.c b/osfmk/vm/vm_map_store.c
+index df5a7458..82a1e311 100644
+--- a/osfmk/vm/vm_map_store.c
++++ b/osfmk/vm/vm_map_store.c
+@@ -896,6 +896,16 @@ vm_map_store_destroy(vm_map_t map)
+ void
+ vm_guard_object_enable(void)
+ {
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	/*
++	 * sweet: guard objects (12377) split user allocations into slots
++	 * sized by the 4 KiB kernel page while the user map pages in 16 KiB;
++	 * launchd's first malloc'd plist buffer then faulted with
++	 * KERN_INVALID_GUARD_OBJECT_SLOT one page past where read() stopped.
++	 * Keep the plain allocator, as xnu-11417 had.
++	 */
++	return;
++#endif
+ 	vmgo_enabled = true;
+ }
+ 
