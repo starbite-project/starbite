@@ -1,0 +1,45 @@
+From 217780c7dbfa00b3e704221141b5dc73c4888ba7 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Sun, 1 Nov 2026 21:02:34 +0200
+Subject: [PATCH] patch: 0325-sweet-user-platform-error.patch
+
+sweet: a platform error (synchronous external abort or SError) taken from user mode is logged (esr, far, pc, lr, process) and the thread is sent to an unmapped pc, so the process crashes and is logged by the CRASH logger instead of panicking the phone. Kernel-mode platform errors still panic.
+- sleh.c: user-mode platform errors crash the process
+---
+ osfmk/arm64/sleh.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 8ddea96b..f21eb24b 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -608,6 +608,29 @@ arm64_platform_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far, pl
+ 	(void)source;
+ 	cpu_data_t *cdp = getCpuDatap();
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	/*
++	 * sweet: a bus error from user code (a mapping whose physical side answers with an
++	 * error: GPU memory, a wrapped IOSurface...) crashes that process, not the phone.
++	 * It is logged here (the CRASH logger's pc will be the unmapped one below), then the
++	 * thread returns to an address in __PAGEZERO and takes an ordinary instruction abort.
++	 */
++	if (PSR64_IS_USER(get_saved_state_cpsr(state))) {
++		extern int proc_selfpid(void);
++		extern void proc_selfname(char *buf, int size);
++		static uint32_t sweet_user_platform_errors;
++		if (sweet_user_platform_errors++ < 32) {
++			char name[32] = "";
++			proc_selfname(name, sizeof(name));
++			printf("SWEET PLATFORM ERROR: %s in %s[%d]: esr %#llx far %#llx pc %#llx lr %#llx sp %#llx\n",
++			    source == PLAT_ERR_SRC_SYNC ? "synchronous abort" : "serror", name, proc_selfpid(),
++			    esr, (unsigned long long)far, get_saved_state_pc(state), get_saved_state_lr(state),
++			    get_saved_state_sp(state));
++		}
++		set_saved_state_pc(state, 0xdead0000ULL);
++		return;
++	}
++#endif
+ 	if (PE_handle_platform_error(far)) {
+ 		return;
+ 	} else if (cdp->platform_error_handler != NULL) {
