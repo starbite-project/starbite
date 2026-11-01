@@ -9,3 +9,5 @@ com.apple.wifianalyticsd
 com.apple.findmy.findmylocated  # 63-81 %
 com.apple.nearbyd               # SIGSEGV loop (UWB hardware)
 com.apple.familycircled         # SIGABRT loop (no account)
+com.apple.ReportCrash           # 55-117 % writing reports for crash loops (kernel CRASH lines cover it)
+com.apple.appplaceholdersyncd   # crash loop (26 in 200 s)
