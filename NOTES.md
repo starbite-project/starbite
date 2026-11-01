@@ -1820,3 +1820,21 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     (no "A5XELTE FB: frames"): backboardd waits on something. Next: what backboardd and SpringBoard block on
     (sweetmsg tracing), audiomxd's trap, then the GPU (sbca for iOS 26's QuartzCore offsets).
   Live root edits: base is now build/root-ios26.img (`starlte-root-sync.py pull build/root-ios26.img OUT`).
+- 2026-11-01: **MILESTONE: iOS 26.6.2 boots to the lock screen on the Galaxy S9** (user photo: Liquid Glass clock,
+  "Swipe up to open", status bar). Boot ios26-g (out/xnu-boot-ios26-g.img, log build/ios26-g-log.txt).
+  - Last blocker: backboardd aborted in libxpc's lightweight-code-requirement check (`matched ==
+    (match_result.error_code == AICMR_MATCH)`, via LightSourceSupport). libamfi calls `__mac_syscall("AMFI",
+    0x66)` = amfi_launch_constraint_matches_process; our stand-in answered ENOPOLICY with the caller's zeroed result.
+    Patch 0322 answers AICMR_MATCH. Found by symbolizing the CRASH backtrace against the root image's cache:
+    `ipsw dyld a2s CACHE ADDR --slide S`; `ipsw dsc disass --vaddr ... --cache scratch.a2s` for read-only mounts.
+  - Before that, boot ios26-e's hang chain: SpringBoard waited on backboardd (BKSDisplayGetMainScreenInfo),
+    backboardd's main thread on containermanagerd, and its render thread on CAS. The abort loop (5 backboardd restarts
+    in boot f) was the same AMFI issue.
+  - tools/starlte-disabled-ios26.list (analytics daemons, findmylocated, nearbyd, familycircled) is applied to the
+    live root.
+  - Rendering is CPU, 11-13 fps, avg copy 48 ms per frame to the 1440x2960 panel (sweetfb_gpu present not used).
+    SpringBoard 45-138 %, backboardd 66-90 %.
+  - Touch: the S6SY761 works and SweetHIDTouch is opened by backboardd. Swipes are delivered (STARLTE TOUCH / SWEET
+    HID log), but the lock screen does not react. IOHIDFamily 1915 -> 2238 changed no event or queue format that
+    matters. Next: backboardd's own log (ACTIVITY_LOG_STDERR + StandardErrorPath + sweetdumpfile, as for iPadOS 18).
+  Live image out/xnu-boot-ios26-live.img (build/ios26-live-cmdline.txt: no timed reset).
