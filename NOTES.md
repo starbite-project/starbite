@@ -1878,3 +1878,10 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     is Metal->Vulkan. IOS-26-Hot (xnu-12377, Pixel 4/Realme X2 Pro) is the closest: HEIC poster layers decode to
     nothing without HEVC hardware (converted to PNG), CABackdropLayer disabled for glass, GPU buffers in RAM XNU does
     not manage (a WC view of managed RAM is a mismatched alias of the cacheable physical aperture).
+- 2026-11-01 22:02: **MILESTONE: iOS 26 is usable on the Mali-G72** (GPU boot 10, xnu 0331 with copy-back mappings).
+  Unlock, home screen, Settings work; no backboardd/SpringBoard crash in the whole boot. (kIOMapDefaultCache for the
+  shared mappings deadlocked backboardd in vm_page_sleep, boot 9; kIOMapCopybackCache == VM_WIMG_DEFAULT works.)
+  User report: icons over-bright ("bloom"), no Liquid Glass, Control Center not drawn, Settings' top blur pixelated,
+  black boxes, laggy; Settings > About says "iPadOS 26.6.2" on iPhone 11.
+  - Speed: the frame reaches the panel by a CPU scaled copy, avg 50 ms (A5XELTE FB avg_copy_us ~50000): 4-10 fps
+    whatever the GPU does (GPU submit ~150 us). CPU: backboardd ~60 %, logd 30-90 %, datamigrator 15-56 %.
