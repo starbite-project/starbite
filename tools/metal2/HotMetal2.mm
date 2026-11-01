@@ -199,6 +199,8 @@ static bool listed(void)
 		/* Starbite: PanVK, Mesa's Vulkan driver for the Mali-G72 (Bifrost v6: experimental, by request) */
 		NSString *turnip = [bundle stringByAppendingPathComponent:@"libvulkan_panfrost.dylib"];
 		setenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
+		/* Bifrost v6 has most of Vulkan 1.2 as extensions but reports 1.0; metal2vulkan's floor is 1.2 */
+		setenv("MESA_VK_VERSION_OVERRIDE", "1.2", 0);
 		char cache[256];
 		mkdir("/var/local/m2v-cache", 0777);
 		chmod("/var/local/m2v-cache", 0777);
