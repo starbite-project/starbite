@@ -1838,3 +1838,21 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     HID log), but the lock screen does not react. IOHIDFamily 1915 -> 2238 changed no event or queue format that
     matters. Next: backboardd's own log (ACTIVITY_LOG_STDERR + StandardErrorPath + sweetdumpfile, as for iPadOS 18).
   Live image out/xnu-boot-ios26-live.img (build/ios26-live-cmdline.txt: no timed reset).
+- 2026-11-01 20:25: **MILESTONE: touch works on iOS 26** (boot ios26-touch6, user report: apps open, Clock ran).
+  Correction to the entry above: IOHIDFamily-2238 *did* change the queue format. Every event, each child too, now
+  sits behind its own 0x1c-byte IOHIDSystemQueueElement (timeStamp, senderID, options, attributeLength,
+  eventCount), and readBytes sets a child's IOHIDEventData.depth = parent's + 1 (IOHIDEvent::_parent, set by
+  appendChild). The old format (one header, children's data packed after the parent's) gave userland the
+  collection with no contacts: backboardd's BKDirectTouchState always had `contacts: []`, and SpringBoard never got
+  a type-0 UIEvent. Read from the KDK 26.5 IOHIDFamily (getLength / readBytes(void*,u64,u32*) / withBytes) and
+  folded into 0323 (getLength, appendBytes(..., count), readBytes, createBytes, withBytes).
+  - Found with tools/touchspy (an IOHIDEventSystemClient monitor, launchd job com.starbite.touchspy, still on the
+    root; log /private/var/tmp/touchspy.log): `children=0` before the fix, `children=1` with the contact after.
+  - tools/mkimage-ios26.sh always uses out/starlte-iphone11.adt (the 64-byte-seed default ADT panics in
+    prng_random: "Expected 256 seed bytes").
+  - A backboardd category-debug logging plist (TouchEvents/EventDelivery) does not reach the stderr log and costs
+    logd 70-100 % CPU: removed. With it, plus datamigrator (~110 % every boot), SpringBoard did not finish starting
+    within 200 s. build/ios26-touch6-cmdline.txt: no scripted input, sweetreboot=420.
+  - Open: backboardd aborts in CA::OGL::Context::push_surface (assert: surface not in the tracked list; from
+    AsynchronousNode::retain_surface <- ImagingNode::render), SpringBoard restarts with it. It is drawing an offscreen
+    effect (glass/backdrop material); the Clock tab bar shows garbage there. No Liquid Glass, ~9 fps CPU rendering.
