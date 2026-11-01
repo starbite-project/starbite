@@ -1716,3 +1716,24 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     with about 310 k sites.
   - Plan shape: an ahead-of-time arm64e->arm64 rewrite of the cache, done on the host; userland on the A55s first
     (M3 lacks LSE/LRCPC); xnu-12377 with the 11417 series ported forward.
+- 2026-11-01: **Kernel series ported to xnu-12377.121.6** (iOS 26 kernel line, macOS 26.5). Source side only;
+  not compiled yet. Port tree build/xnu-12377 (worktree of build/xnu-11417, branch port-12377), exported to
+  xnu/series-12377 (178 files; README lists the port notes). 0001-0316 replayed with tools/port-12377-next.sh;
+  16 needed hand fixes. Notable 12377 changes:
+  - kmem guard objects moved into the VM map store (vm_map_store.c), so 0013's RNG goes there.
+  - The realtime CPU choosers moved to sched_rt.c, so 0238's fast-core picks go there too.
+  - The shared region has a second nested config_map, so 0202 also turns off code-signing enforcement on it.
+  - write_random hashes with SHA-512 (0033's BearSSL).
+  - TBI0 is in the boot TCR.
+  - lib<board>.os.a is linked whenever a board is set (our boards are still filtered out).
+  - New Apple-SoC-only exports were dropped.
+  Board MASTER configs re-merged (0317). Staging: libpthread-539.100.4, hfs-715.120.4 (macos-265).
+  Toolchain: darwin-xnu-build at the same pinned commit knows 26.5 (patches/26.0, KDK 26.5 25F71);
+  tools/build-xnu-12377.sh. Still needed: KDK 26.5 (dortania mirror, 1.1 GiB dmg), and maybe Xcode 26 if
+  Xcode 16.4's clang 17 / 15.5 SDK are too old. Test plan: first boot with the iPadOS 18 root, which checks the
+  kernel milestones (root mounted, launchd, SpringBoard) before any iOS 26 userland exists.
+  iOS 26 base device: iPhone 11 (iPhone12,1 N104AP, A13, 4 GiB, 828x1792), real iPhone iOS rather than iPadOS
+  with an iPhone identity. Its cache still needs the census for v8.4 instructions.
+- Disk cleanup (user asked): removed the decrypted iPadOS 18 os/systemos dmgs (10 GiB; already staged into
+  root-phone.img; re-fetch with fetch-ios-parts.sh + decrypt-ios-parts.sh), ~/Downloads/Xcode_16.4.xip, and
+  superseded out/ test images and payloads. 7.5 -> 24 GiB free.
