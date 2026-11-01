@@ -37,7 +37,9 @@ for e in json.load(open(sys.argv[1] + "/compile_commands.json")):
         print(" ".join(shlex.quote(x) for x in out)); break
 PY
 )
-eval "gcc $FLAGS -I$M/src/panfrost/lib -Wno-error" \
+# CANVAS=828x1792 (iOS 26, iPhone 11) or 1242x2208 (the default, iPadOS 18's canvas)
+CANVAS=${CANVAS:-1242x2208}
+eval "gcc $FLAGS -I$M/src/panfrost/lib -Wno-error -DCANVAS_W=${CANVAS%x*}u -DCANVAS_H=${CANVAS#*x}u" \
 	"$PROJ/tools/gpu/starlte-g72-tri.c" -o "$OUT/g72-tri" \
 	-Wl,--start-group $(printf "$B/%s " "${LIBS[@]}") -Wl,--end-group -lm -lpthread -lstdc++ -lz -lexpat -ldrm
 BIFROST_MESA_DEBUG=shaders "$OUT/g72-tri" "$OUT/starlte_gpu_tri.h" 2> "$OUT/g72-tri.log"

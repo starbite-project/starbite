@@ -97,8 +97,12 @@ compile_fs(struct util_dynarray *bin, struct pan_shader_info *info)
 }
 
 /* ---- phase 5: the present blob ---------------------------------------- */
-#define CANVAS_W        1242u           /* boot-args sweetfb_lw / sweetfb_lh */
+#ifndef CANVAS_W                        /* boot-args sweetfb_lw / sweetfb_lh; -DCANVAS_W=828u -DCANVAS_H=1792u for iOS 26 */
+#define CANVAS_W        1242u
+#endif
+#ifndef CANVAS_H
 #define CANVAS_H        2208u
+#endif
 #define PANEL_W         1440u
 #define PANEL_H         2960u
 #define P_BLOB_VA       0x0200c000ull   /* SG_VA + data offset 0xc000 */
