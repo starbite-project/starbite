@@ -68,7 +68,29 @@
     if (host_addr == MAP_FAILED)
        mesa_loge("mmap(..., size=%" PRIu64 ", prot=%d, flags=0x%x) failed: %s",
                  bo->size, prot, flags, strerror(errno));
-@@ -1030,7 +1038,7 @@
+@@ -770,6 +778,21 @@
+    return host_addr;
+ }
+ 
++/* Undo pan_kmod_bo_mmap(). Starbite (iOS): the mapping is the kernel's (StarbiteMali makes it at
++ * the first mmap-offset query and drops it when the buffer is closed; asking again gives the same
++ * address), so there is nothing to unmap here: munmap() of it is an EXC_GUARD kill. */
++static inline int
++pan_kmod_bo_munmap(void *host_addr, size_t size)
++{
++#ifdef __APPLE__
++   (void)host_addr;
++   (void)size;
++   return 0;
++#else
++   return os_munmap(host_addr, size);
++#endif
++}
++
+ static inline bool
+ pan_kmod_can_sync_bo_map_from_userland(struct pan_kmod_dev *dev)
+ {
+@@ -1030,7 +1053,7 @@
  static inline struct pan_kmod_perf_session *
  pan_kmod_perf_create(struct pan_kmod_dev *dev)
  {
@@ -288,3 +310,59 @@
  }
  
  static uint32_t
+--- a/src/panfrost/vulkan/panvk_priv_bo.c
++++ b/src/panfrost/vulkan/panvk_priv_bo.c
+@@ -99,7 +99,7 @@
+ 
+ err_munmap_bo:
+    if (priv_bo->addr.host) {
+-      ret = os_munmap(priv_bo->addr.host, pan_kmod_bo_size(bo));
++      ret = pan_kmod_bo_munmap(priv_bo->addr.host, pan_kmod_bo_size(bo));
+       assert(!ret);
+    }
+ 
+@@ -159,7 +159,7 @@
+    }
+ 
+    if (priv_bo->addr.host) {
+-      ret = os_munmap(priv_bo->addr.host, pan_kmod_bo_size(priv_bo->bo));
++      ret = pan_kmod_bo_munmap(priv_bo->addr.host, pan_kmod_bo_size(priv_bo->bo));
+       assert(!ret);
+    }
+ 
+--- a/src/panfrost/vulkan/panvk_device_memory.c
++++ b/src/panfrost/vulkan/panvk_device_memory.c
+@@ -269,11 +269,11 @@
+                             pan_kmod_bo_size(mem->bo));
+ 
+       if (mem->debug.host_mapping)
+-         os_munmap(mem->debug.host_mapping, pan_kmod_bo_size(mem->bo));
++         pan_kmod_bo_munmap(mem->debug.host_mapping, pan_kmod_bo_size(mem->bo));
+    }
+ 
+    if (mem->addr.host) {
+-      ASSERTED int ret = os_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
++      ASSERTED int ret = pan_kmod_bo_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
+       assert(!ret);
+    }
+ 
+@@ -388,7 +388,7 @@
+          return panvk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED,
+                              "Failed to reserve VA on unmap.");
+    } else {
+-      ASSERTED int ret = os_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
++      ASSERTED int ret = pan_kmod_bo_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
+       assert(!ret);
+    }
+ 
+--- a/src/panfrost/vulkan/panvk_host_copy.c
++++ b/src/panfrost/vulkan/panvk_host_copy.c
+@@ -261,7 +261,7 @@
+       /* No need to call pan_kmod_flush_bo_map_syncs() even if we've written to
+        * the image. This will be done just before the next submit. */
+       ASSERTED int ret =
+-         os_munmap(plane_ptrs[i], pan_kmod_bo_size(img->planes[i].mem->bo));
++         pan_kmod_bo_munmap(plane_ptrs[i], pan_kmod_bo_size(img->planes[i].mem->bo));
+       assert(!ret);
+ 
+       /* Make sure we reset all mapping entries pointing to the same virtual
