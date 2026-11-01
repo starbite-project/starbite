@@ -25,8 +25,10 @@ for app in "${ui_apps[@]}"; do
         echo "missing required UI source: $app" >&2; exit 1;
     }
 done
-for source in "$os/sbin/launchd" "$os/System/Library/CoreServices/SpringBoard.app/SpringBoard" \
-    "$sysos/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64"; do
+# iPadOS 18 (A10) ships dyld_shared_cache_arm64; iOS 26 is arm64e only.
+dsc="$sysos/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64"
+[[ -f $dsc ]] || dsc=${dsc}e
+for source in "$os/sbin/launchd" "$os/System/Library/CoreServices/SpringBoard.app/SpringBoard" "$dsc"; do
     [[ -f "$source" ]] || { echo "missing source: $source" >&2; exit 1; }
 done
 [[ -d "$appos/System" && -d "$root" ]] || exit 1
@@ -34,7 +36,7 @@ done
     echo "OS image was mounted without owners; remount with -owners on" >&2
     exit 1
 }
-[[ $(stat -f %u "$sysos/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64") == 0 ]] || {
+[[ $(stat -f %u "$dsc") == 0 ]] || {
     echo "SystemOS image was mounted without owners" >&2
     exit 1
 }
