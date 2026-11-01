@@ -1,0 +1,11 @@
+# iOS 26 (iPhone 11 root) on the S9, on top of tools/starlte-disabled.list:
+# measured with STARLTE TOP on boot ios26-f (4 A55 cores, 300-400 % busy).
+com.apple.analyticsd            # 90-99 % of a core, no network to send to
+com.apple.audioanalyticsd
+com.apple.ecosystemanalyticsd
+com.apple.geoanalyticsd
+com.apple.inputanalyticsd
+com.apple.wifianalyticsd
+com.apple.findmy.findmylocated  # 63-81 %
+com.apple.nearbyd               # SIGSEGV loop (UWB hardware)
+com.apple.familycircled         # SIGABRT loop (no account)
