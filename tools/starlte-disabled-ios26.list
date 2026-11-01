@@ -13,3 +13,4 @@ com.apple.ReportCrash           # 55-117 % writing reports for crash loops (kern
 com.apple.appplaceholdersyncd   # crash loop (26 in 200 s)
 com.apple.dasd                  # SIGABRT loop (14 in 420 s, NSURL fileURLWithPath nil)
 com.apple.audiomxd              # SIGTRAP loop in caulk audio_allocator (10 in 420 s)
+com.apple.wifip2pd              # exit loop, restarted every 10 s (no Wi-Fi yet): 39 in 420 s
