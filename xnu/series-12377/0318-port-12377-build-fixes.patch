@@ -1,4 +1,4 @@
-From 3f9c5b43f146da4610ffee416179123c23501f1b Mon Sep 17 00:00:00 2001
+From 3f009f996bb37ad7de7823a58e8b130f6593ac91 Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Sun, 1 Nov 2026 15:38:00 +0200
 Subject: [PATCH] patch: 0318-port-12377-build-fixes.patch
@@ -16,19 +16,20 @@ patches they touch so later patches' context is not disturbed):
 - arm_vm_init.c: the dynamic_memory_begin > VM_MAX panic prints the layout on the A5XELTE boards
 - MakeInc.def (0093): 12377 selects the layout with ARM64_LARGE_MEMORY (into ARM64_EXTRA_BUILD_FLAGS), LARGE_MEMORY_DEFINE is unused; our boards set ARM64_LARGE_MEMORY = 0 (the first boots panicked: ARM_LARGE_MEMORY physmap below a kernel at 0xfffffff006000000)
 - pmap.c: 12377 maps WCOMB/RT pages outside the kernel's DRAM as Device-GRE; on our boards the framebuffer, /pram and Mali buffers are RAM outside it, and bzero's DC ZVA on the Device-mapped panic region faulted in PE_create_console (boot f). WCOMB/RT stay Normal-NC on our boards (pmap_wcomb_normal)
+- machine_routines.c: ml_unsafe_kernel_text asserts on iBoot's /chosen kernel-ctrr-to-be-enabled (boot g panicked after dlil_init); our boards have no CTRR and report unlocked text when the property is absent
 ---
  makedefs/MakeInc.def             |  2 +-
  osfmk/arm/pmap/pmap.c            | 19 +++++++--
  osfmk/arm64/amcc_rorgn_pv_ctrr.c |  9 ++++
  osfmk/arm64/arm_vm_init.c        | 21 ++++++++++
  osfmk/arm64/cpu.c                |  1 -
- osfmk/arm64/machine_routines.c   | 12 ++++++
+ osfmk/arm64/machine_routines.c   | 19 +++++++++
  osfmk/arm64/sleh.c               |  4 +-
  osfmk/arm64/sweet_early.c        | 16 ++++---
  osfmk/kern/exception.c           | 71 +++++++++++++++++---------------
  osfmk/kern/exclaves.c            |  4 +-
  osfmk/vm/vm_kern.c               |  4 +-
- 11 files changed, 113 insertions(+), 50 deletions(-)
+ 11 files changed, 120 insertions(+), 50 deletions(-)
  create mode 100644 osfmk/arm64/amcc_rorgn_pv_ctrr.c
 
 diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
@@ -216,10 +217,24 @@ index a8cc5f00..db3bb0b4 100644
  		CleanPoC_DcacheRegion_Force((vm_offset_t)bootstrap_pagetables, BOOTSTRAP_TABLE_SIZE);
  		__builtin_arm_dsb(DSB_SY);
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
-index 1ab9e420..e254fad8 100644
+index 1ab9e420..1604738a 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
-@@ -3452,3 +3452,15 @@ ml_unsafe_kernel_text(void)
+@@ -3441,6 +3441,13 @@ ml_unsafe_kernel_text_init(void)
+ 		_unsafe_kernel_text_initialized = true;
+ 		_unsafe_kernel_text = (0 == *(const int *)value);
+ 	}
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	/* sweet: no iBoot property and no CTRR here; kernel text is not locked. */
++	if (!_unsafe_kernel_text_initialized) {
++		_unsafe_kernel_text_initialized = true;
++		_unsafe_kernel_text = true;
++	}
++#endif
+ }
+ STARTUP(TUNABLES, STARTUP_RANK_FIRST, ml_unsafe_kernel_text_init);
+ 
+@@ -3452,3 +3459,15 @@ ml_unsafe_kernel_text(void)
  	return false;
  }
  #endif /* DEVELOPMENT || DEBUG || CONFIG_DTRACE || CONFIG_CSR_FROM_DT */
