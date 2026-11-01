@@ -1,4 +1,4 @@
-From 89f29c5238b2717d0324928e0f7fd2523753fc09 Mon Sep 17 00:00:00 2001
+From c9342a56ba932d6aa9ca79a2f6af0b09c311d95c Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Sun, 1 Nov 2026 15:38:00 +0200
 Subject: [PATCH] patch: 0318-port-12377-build-fixes.patch
@@ -11,15 +11,17 @@ patches they touch so later patches' context is not disturbed):
 - exception.c (0309/0111): the VM map uses range/entry locks now (no vm_map_lock_read/vm_map_lookup_entry); the crash log looks regions up with vm_map_region_recurse_64. vm_kern.c (HEROLTE KMEM log): largest_free_size is now free_size (the kmem range size)
 - amcc_rorgn_pv_ctrr.c (0008): new closed-source file in files.arm64 for nos_arm_asm, stubbed like the ppl ones
 - exclaves.c, machine_routines.c (0009/0008): tightbeam_startup needs Apple's closed libTightbeam, compiled out for our boards; ml_device_is_prod_fused (closed, new caller in kern_mib.c) answers TRUE
+- arm_vm_init.c: progress marks 21-28 between marks 7 and 10 (first 12377 boot stopped after mark 7)
 ---
  osfmk/arm64/amcc_rorgn_pv_ctrr.c |  9 ++++
+ osfmk/arm64/arm_vm_init.c        |  8 ++++
  osfmk/arm64/cpu.c                |  1 -
  osfmk/arm64/machine_routines.c   | 12 ++++++
  osfmk/arm64/sleh.c               |  4 +-
  osfmk/kern/exception.c           | 71 +++++++++++++++++---------------
  osfmk/kern/exclaves.c            |  4 +-
  osfmk/vm/vm_kern.c               |  4 +-
- 7 files changed, 65 insertions(+), 40 deletions(-)
+ 8 files changed, 73 insertions(+), 40 deletions(-)
  create mode 100644 osfmk/arm64/amcc_rorgn_pv_ctrr.c
 
 diff --git a/osfmk/arm64/amcc_rorgn_pv_ctrr.c b/osfmk/arm64/amcc_rorgn_pv_ctrr.c
@@ -37,6 +39,63 @@ index 00000000..f0feaaf1
 +#include <stdint.h>
 +
 +static const uint8_t sweet_no_amcc_rorgn __attribute__((unused)) = 0;
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index ce16f45c..248593c2 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1951,6 +1951,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 		panic("Unsupported memory configuration %lx", mem_size);
+ 	}
+ 
++	sweet_early_mark(21, "arm_vm_init: physmap layout set");
+ 	boot_tte = (tt_entry_t *)&bootstrap_pagetables;
+ 	boot_ttep = kvtophys((vm_offset_t)boot_tte);
+ 
+@@ -1994,6 +1995,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	cpu_tte = (tt_entry_t *)alloc_ptpage(TRUE);
+ 	cpu_ttep = kvtophys((vm_offset_t)cpu_tte);
+ 	bzero(cpu_tte, ARM_PGBYTES);
++	sweet_early_mark(22, "arm_vm_init: cpu_tte allocated");
+ 	avail_end = gPhysBase + mem_size;
+ 	assert(!(avail_end & PAGE_MASK));
+ 
+@@ -2011,6 +2013,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	 *   the so called physical aperture should be statically mapped
+ 	 */
+ 	init_ptpages(cpu_tte, gVirtBase, dynamic_memory_begin, TRUE, ARM_TTE_TABLE_AP(ARM_TTE_TABLE_AP_USER_NA));
++	sweet_early_mark(23, "arm_vm_init: static tables built");
+ 
+ #if defined(ARM_LARGE_MEMORY)
+ 	/*
+@@ -2126,6 +2129,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	edata = (vm_offset_t) segDATAB + segSizeDATA;
+ 	end_kern = round_page(segHIGHESTKC ? segHIGHESTKC : getlastkerneladdr()); /* Force end to next page */
+ 
++	sweet_early_mark(24, "arm_vm_init: kernel segments found");
+ 	vm_set_page_size();
+ 
+ 	vm_kernel_base = segTEXTB;
+@@ -2160,7 +2164,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	vm_prelink_sdata = segPRELINKDATAB;
+ 	vm_prelink_edata = segPRELINKDATAB + segSizePRELINKDATA;
+ 
++	sweet_early_mark(25, "arm_vm_init: calling arm_vm_prot_init");
+ 	arm_vm_prot_init(args);
++	sweet_early_mark(26, "arm_vm_init: arm_vm_prot_init done");
+ 
+ 	/*
+ 	 * Initialize the page tables for the low globals:
+@@ -2204,8 +2210,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	/* phystokv() must still refer to the bootstrap aperture here. */
+ 	sweet_early_map_final();
+ #endif
++	sweet_early_mark(27, "arm_vm_init: calling arm_vm_physmap_init");
+ 	arm_vm_physmap_init(args);
+ 	set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
++	sweet_early_mark(28, "arm_vm_init: TTBR1 switched");
+ 
+ 	ml_enable_monitor();
+ 
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
 index a8cc5f00..db3bb0b4 100644
 --- a/osfmk/arm64/cpu.c
