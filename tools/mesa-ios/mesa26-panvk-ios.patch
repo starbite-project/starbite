@@ -1,0 +1,270 @@
+--- a/meson.build
++++ b/meson.build
+@@ -1935,7 +1935,19 @@
+   # dependencies (such as vk-runtime) linking to it
+   dep_libdrm = null_dep
+ endif
+-if dep_libdrm.found()
++if host_machine.system() == 'darwin' and (with_gallium_panfrost or with_panfrost_vk)
++  # Starbite (iOS): no DRM on this system. Panfrost's requests go to the
++  # kernel's StarbiteMali user client through a stand-in for libdrm
++  # (src/starbite-drm, copied in by tools/mesa-ios/mk-mesa-ios.sh).
++  dep_libdrm = declare_dependency(
++    include_directories : include_directories('src/starbite-drm'),
++    link_args : ['-framework', 'IOKit', '-framework', 'CoreFoundation'],
++  )
++  if with_panfrost_vk
++    # (Vulkan's runtime and PanVK need libdrm's devices and sync objects: in the stand-in too)
++    pre_args += '-DHAVE_LIBDRM'
++  endif
++elif dep_libdrm.found()
+   pre_args += '-DHAVE_LIBDRM'
+   if with_dri_platform == 'drm' and with_dri
+     with_gallium_drisw_kms = true
+--- a/src/panfrost/lib/kmod/meson.build
++++ b/src/panfrost/lib/kmod/meson.build
+@@ -6,6 +6,9 @@
+   'panfrost_kmod.c',
+   'panthor_kmod.c',
+ )
++if host_machine.system() == 'darwin'
++  libpankmod_lib_files += files('../../../starbite-drm/starbite_drm.c')
++endif
+ 
+ libpankmod_lib = static_library(
+   'pankmod_lib',
+--- a/src/panfrost/lib/kmod/pan_kmod.c
++++ b/src/panfrost/lib/kmod/pan_kmod.c
+@@ -169,7 +169,13 @@
+ 
+       p_atomic_inc(&bo->refcnt);
+    } else {
++#ifdef __APPLE__
++      /* Starbite: the "dma-buf" is an IOSurface ID (src/starbite-drm). */
++      struct starbite_drm_surface surface = { .surface = (uint32_t)fd };
++      size_t size = starbite_drm_surface(dev->fd, &surface) ? 0 : surface.size;
++#else
+       size_t size = lseek(fd, 0, SEEK_END);
++#endif
+       if (size == 0 || size == (size_t)-1) {
+          mesa_loge("invalid dmabuf size");
+          goto err_close_handle;
+--- a/src/panfrost/lib/kmod/pan_kmod.h
++++ b/src/panfrost/lib/kmod/pan_kmod.h
+@@ -761,8 +761,16 @@
+    if (mmap_offset < 0)
+       return MAP_FAILED;
+ 
++#ifdef __APPLE__
++   /* Starbite: the kernel mapped the buffer into this process when asked
++    * for its mmap offset, which is the address (src/starbite-drm). */
++   (void)prot;
++   (void)flags;
++   host_addr = (void *)(uintptr_t)mmap_offset;
++#else
+    host_addr =
+       os_mmap(host_addr, bo->size, prot, flags, bo->dev->fd, mmap_offset);
++#endif
+    if (host_addr == MAP_FAILED)
+       mesa_loge("mmap(..., size=%" PRIu64 ", prot=%d, flags=0x%x) failed: %s",
+                 bo->size, prot, flags, strerror(errno));
+@@ -1030,7 +1038,7 @@
+ static inline struct pan_kmod_perf_session *
+ pan_kmod_perf_create(struct pan_kmod_dev *dev)
+ {
+-   return dev->ops->perf_create(dev);
++   return dev->ops->perf_create ? dev->ops->perf_create(dev) : NULL;
+ }
+ 
+ static inline int
+--- a/src/panfrost/lib/kmod/panfrost_kmod.c
++++ b/src/panfrost/lib/kmod/panfrost_kmod.c
+@@ -9,8 +9,10 @@
+ #include <pthread.h>
+ #include <string.h>
+ #include <xf86drm.h>
++#ifndef __APPLE__
+ #include <sys/eventfd.h>
+ #include <sys/timerfd.h>
++#endif
+ 
+ #include "util/hash_table.h"
+ #include "util/macros.h"
+@@ -654,6 +656,7 @@
+       mesa_loge("DRM_IOCTL_PANFROST_SET_LABEL_BO failed (err=%d)", errno);
+ }
+ 
++#ifndef __APPLE__ /* Starbite (iOS): no perf counters (eventfd, timerfd) */
+ static uint32_t
+ panthor_kmod_perf_hw_sample_size(struct pan_kmod_dev *dev)
+ {
+@@ -966,6 +969,8 @@
+    pthread_mutex_unlock(&panfrost_session->lock);
+ }
+ 
++#endif
++
+ const struct pan_kmod_ops panfrost_kmod_ops = {
+    .dev_create = panfrost_kmod_dev_create,
+    .dev_destroy = panfrost_kmod_dev_destroy,
+@@ -983,9 +988,11 @@
+    .vm_bind = panfrost_kmod_vm_bind,
+    .query_timestamp = panfrost_kmod_query_timestamp,
+    .bo_set_label = panfrost_kmod_bo_label,
++#ifndef __APPLE__
+    .perf_create = panfrost_kmod_perf_create,
+    .perf_destroy = panfrost_kmod_perf_destroy,
+    .perf_enable = panfrost_kmod_perf_enable,
+    .perf_disable = panfrost_kmod_perf_disable,
+    .perf_dump = panfrost_kmod_perf_dump,
++#endif
+ };
+--- a/src/gallium/drivers/panfrost/pan_bo.c
++++ b/src/gallium/drivers/panfrost/pan_bo.c
+@@ -343,10 +343,13 @@
+    if (!bo->ptr.cpu)
+       return;
+ 
++#ifndef __APPLE__
++   /* (Starbite: the kernel's mapping lives until GEM_CLOSE) */
+    if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {
+       mesa_loge("munmap failed: %s", strerror(errno));
+       abort();
+    }
++#endif
+ 
+    bo->ptr.cpu = NULL;
+ }
+--- a/src/gallium/drivers/panfrost/pan_device.c
++++ b/src/gallium/drivers/panfrost/pan_device.c
+@@ -99,7 +99,13 @@
+ 
+    if (dev->arch < 10) {
+       dev->tiler_heap = panfrost_bo_create(
++#ifdef __APPLE__
++         /* Starbite: no GPU page faults, so the kernel commits heap
++          * buffers in full; 32 MiB of wired memory, not 128. */
++         dev, 32 * 1024 * 1024, PAN_BO_INVISIBLE | PAN_BO_GROWABLE, "Tiler heap");
++#else
+          dev, 128 * 1024 * 1024, PAN_BO_INVISIBLE | PAN_BO_GROWABLE, "Tiler heap");
++#endif
+       if (!dev->tiler_heap)
+          goto err_free_kmod_dev;
+    }
+--- a/src/panfrost/vulkan/panvk_vX_physical_device.c
++++ b/src/panfrost/vulkan/panvk_vX_physical_device.c
+@@ -9,7 +9,9 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#ifndef __APPLE__
+ #include <sys/sysmacros.h>
++#endif
+ 
+ #include "git_sha1.h"
+ 
+--- a/src/panfrost/vulkan/panvk_instance.c
++++ b/src/panfrost/vulkan/panvk_instance.c
+@@ -217,6 +217,7 @@
+    panvk_debug_init();
+    pan_trace_init();
+ 
++#ifndef __APPLE__
+    const struct build_id_note *note =
+       build_id_find_nhdr_for_addr(panvk_CreateInstance);
+    if (!note) {
+@@ -229,6 +230,7 @@
+       return panvk_errorf(NULL, VK_ERROR_INITIALIZATION_FAILED,
+                           "build-id too short.  It needs to be a SHA");
+    }
++#endif
+ 
+    pAllocator = pAllocator ?: vk_default_allocator();
+    instance = vk_zalloc(pAllocator, sizeof(*instance), 8,
+@@ -267,7 +269,14 @@
+    VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
+ 
+    STATIC_ASSERT(sizeof(instance->driver_build_sha) == BLAKE3_KEY_LEN);
++#ifdef __APPLE__
++   /* Starbite (iOS): no ELF build-id in a Mach-O; the version names the build */
++   memset(instance->driver_build_sha, 0, sizeof(instance->driver_build_sha));
++   _mesa_blake3_compute("starbite-panvk-" PACKAGE_VERSION, strlen("starbite-panvk-" PACKAGE_VERSION),
++                        instance->driver_build_sha);
++#else
+    copy_build_id_to_sha1(instance->driver_build_sha, note);
++#endif
+ 
+    *pInstance = panvk_instance_to_handle(instance);
+ 
+--- a/src/panfrost/vulkan/meson.build
++++ b/src/panfrost/vulkan/meson.build
+@@ -233,7 +233,10 @@
+     idep_mesautil,
+   ],
+   c_args : [no_override_init_args, panvk_flags, soong_compat_c_args],
+-  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],
++  # (Starbite, iOS: the entrypoint tables point at weak declarations of every entrypoint, which
++  # ELF leaves NULL when undefined; Mach-O's linker wants to be told)
++  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id] +
++    (host_machine.system() == 'darwin' ? ['-Wl,-undefined,dynamic_lookup'] : []),
+   gnu_symbol_visibility : 'hidden',
+   install : true,
+ )
+--- a/src/vulkan/runtime/vk_image.c
++++ b/src/vulkan/runtime/vk_image.c
+@@ -23,7 +23,7 @@
+ 
+ #include "vk_image.h"
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_APPLE
+ #include <drm-uapi/drm_fourcc.h>
+ #endif
+ 
+@@ -105,7 +105,7 @@
+       vk_find_struct_const(pCreateInfo->pNext, WSI_IMAGE_CREATE_INFO_MESA);
+    image->wsi_legacy_scanout = wsi_info && wsi_info->scanout;
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_APPLE
+    image->drm_format_mod = ((1ULL << 56) - 1) /* DRM_FORMAT_MOD_INVALID */;
+ #endif
+ 
+@@ -185,7 +185,7 @@
+    vk_object_free(device, alloc, image);
+ }
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_APPLE
+ VKAPI_ATTR VkResult VKAPI_CALL
+ vk_common_GetImageDrmFormatModifierPropertiesEXT(UNUSED VkDevice device,
+                                                  VkImage _image,
+--- a/src/vulkan/runtime/vk_image.h
++++ b/src/vulkan/runtime/vk_image.h
+@@ -77,7 +77,7 @@
+    /* wsi_image_create_info::scanout */
+    bool wsi_legacy_scanout;
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_APPLE
+    /* VK_EXT_drm_format_modifier
+     *
+     * Initialized by vk_image_create/init() to DRM_FORMAT_MOD_INVALID.  It's
+--- a/src/util/cache_ops_aarch64.c
++++ b/src/util/cache_ops_aarch64.c
+@@ -29,9 +29,15 @@
+ static uint32_t
+ get_ctr_el0(void)
+ {
++#ifdef __APPLE__
++   /* Starbite (iOS): EL0 may not read CTR_EL0 (SCTLR_EL1.UCT is clear: SIGILL). The S9's
++    * cores (A55, Mongoose M3) have 64-byte lines: DminLine = CWG = log2(64 / 4) = 4. */
++   return (4u << 24) | (4u << 16);
++#else
+    uint32_t ctr_el0;
+    __asm("mrs\t%x0, ctr_el0" : "=r"(ctr_el0));
+    return ctr_el0;
++#endif
+ }
+ 
+ static uint32_t
