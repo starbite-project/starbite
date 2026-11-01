@@ -1687,3 +1687,32 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   ReportCrash/osanalyticshelper). After: idle 68-120%, mostly SpringBoard and backboardd. No
   BTAudioHALPlugin on this iOS 18 root. an earlier port's S9 change (example-project/hackios-xnu-kernel#65): queued
   submits, cache maintenance for surfaces named by a job (submit) and after WAIT_BO: our next step.
+- 2026-11-01: **iOS 26 feasibility, first numbers.** iPadOS 26 needs an A12 or later (the iPad 7, A10, is dropped), so
+  there is no plain-arm64 userland anymore: every iPadOS 26 binary is arm64e (ARMv8.3 with PAC). Newest published
+  XNU is still xnu-12377.121.6 (iOS 26 era), with no iOS 27 tag. Stand-in measurement: tools/dsc-isa-census.py
+  ran over this Mac's macOS 27.2 arm64e shared cache (4113 images, 921 M instructions, 3.5 GiB of code;
+  build/dsc-isa-census-macos27.txt). Counting only S_ATTR_PURE_INSTRUCTIONS sections:
+  - PAC instructions that are UNDEFINED on the S9 (RETAx 7.4, BRAx/BLRAx 9.4, PAC/AUT register forms 17.4):
+    about 34 per 1000 instructions, roughly 31 M sites. The hint-space PAC ops (14.9/1000) are already NOPs here.
+  - M3-only problems (A55 has these): LSE atomics 0.99/1000 and LDAPR 0.21/1000.
+  - Rare ops neither core has: FJCVTZS 2150 and FCADD 16 k.
+  - The macOS cache targets M-series, so iOS 26's A12 build should have fewer v8.4+ ops. PAC density is set by the
+    ABI, so it should carry over.
+  The conclusion stands: it needs a translation layer for the userland, not a few patches.
+- 2026-11-01: **The real iPadOS 26.7.2 cache (23H128, iPad 8 / J171aAP, A12).** Fetched only Cryptex1,SystemOS
+  (141-72226-027.dmg.aea, 1.9 GiB; it decrypts to a 5.2 GiB raw APFS):
+  `DEVICE=iPad11,6 VERSION=26.7.2 BOARD=j171aap PARTS=systemos OUT=build/ipsw-26 tools/fetch-ios-parts.sh`,
+  then `OUT=build/ipsw-26 tools/decrypt-ios-parts.sh` (fetch-ios-parts.sh now takes PARTS). The .dmg was deleted
+  after the survey because the disk was at 99 %; re-fetch the same way.
+  - The cache is dyld_shared_cache_arm64e only, with no arm64 variant: 4246 images, 780 M instructions, 2.9 GiB of
+    code.
+  - GOOD: QuartzCore still has the GLES renderer. The RTTI N2CA3OGL11GLESContextE / N2CA3OGL7ContextE are present,
+    and OpenGLES.framework (GLEngine, libGLProgrammability, ...) still ships. The sbca approach (EAGL over
+    OSMesa/Panfrost, replacing AccelServer::renderer) has something to hook on 26.
+  - Census (build/dsc-isa-census-ipados26.txt): non-hint PAC ops 37.7 per 1000 (RETAx 7.1, BRAx/BLRAx 13.6,
+    PAC/AUT register forms 16.9), 29.4 M sites, LDRAx only 1650. M3-only problems: LSE 1.06/1000, LDAPR 0.17/1000.
+    Neither core: FJCVTZS 532 and FCADD 16 k, rare enough for the kernel to emulate them on an undefined-instruction
+    trap. The UI stack alone (QuartzCore, UIKitCore, SpringBoard, backboardd, libsystem_*, dyld) is 48 MiB of code
+    with about 310 k sites.
+  - Plan shape: an ahead-of-time arm64e->arm64 rewrite of the cache, done on the host; userland on the A55s first
+    (M3 lacks LSE/LRCPC); xnu-12377 with the 11417 series ported forward.
