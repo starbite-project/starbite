@@ -35,7 +35,9 @@ kiosk_ok() { rd $KIOSK | python3 -c 'import sys; b=sys.stdin.buffer.read(); sys.
 kiosk_ok || { echo "no ext4 superblock at +17 GiB: refusing"; exit 1; }
 echo "Kiosk root: ext4 at +17 GiB intact"
 
-# Target: zeros or an earlier store.
+# Target: zeros or an earlier version 1 store. A version 2 store (tools/store/) keeps a version 1
+# view in block 0: writing over it here would leave its directory pointing at old data.
+[ "$(rd $((STORE + 1)) | head -c 8)" != SBSTORE2 ] || { echo "version 2 store: use tools/store/store-flash.sh"; exit 1; }
 first=$(rd $STORE | head -c 8 | xxd -p)
 case $first in
 534253544f524531|0000000000000000) ;;

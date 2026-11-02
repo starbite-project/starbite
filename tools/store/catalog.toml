@@ -1,0 +1,66 @@
+# The Starbite boot catalog: every entry the loader can start (shim/starlte/catalog.h).
+# tools/store/sbstore2.py packs it into the OS store as "catalog"; without one the loader uses
+# its built-in copy of the first four entries.
+#
+#   key       what the menu, settings and boot-next use (menu v5 shows ios26, win11, android, linux)
+#   category  apple microsoft android linux starbite other lab
+#   method    xnu linux android uefi bare
+#   tag       daily beta experimental lab stable
+#   files     store entry names ("ufs:" / "sd:" pick the medium, "a|b" = alternatives); "@boot" is
+#             BOOT's own iOS payload, "@bundle" BOOT's UEFI bundle. xnu: payload. linux: Image, DTB,
+#             initrd (optional). android: kernel, ramdisk, cmdline file (optional). uefi / bare: image.
+#   cmdline   appended to the OS's own command line
+#   root      where the OS keeps its root (shown, not used by the loader)
+#   flags     ["hidden"]: only in Engineer's "Start an OS"
+# Strings use the loader's font: ASCII and ° · … ↑ ↓ ← → µ ± × ■ ▲ ▼ ✓
+
+[[entry]]
+key = "ios26"
+name = "iOS 26"
+version = "26.6.2 · XNU 12377"
+category = "apple"
+method = "xnu"
+tag = "beta"
+files = ["@boot"]
+root = "ufs:USERDATA (HFSX, 16 GiB)"
+
+[[entry]]
+key = "win11"
+name = "Windows 11"
+version = "23H2 · NT 22631"
+category = "microsoft"
+method = "uefi"
+tag = "experimental"
+files = ["windows.uefi|@bundle"]
+root = "ufs:WINDOWS (NTFS)"
+
+[[entry]]
+key = "android"
+name = "Android 17"
+version = "LineageOS 24.0 · Linux 4.9"
+category = "android"
+method = "android"
+tag = "experimental"
+files = ["android.kernel", "android.ramdisk", "android.cmdline"]
+root = "ufs:SYSTEM + A16DATA"
+
+[[entry]]
+key = "linux"
+name = "Linux 7.1"
+version = "postmarketOS · being rebuilt"
+category = "linux"
+method = "linux"
+tag = "experimental"
+files = ["linux.image", "linux.dtb"]
+root = "sd:p1 /starbite-linux.img"
+
+# Lab: proves that a failed start comes back to the menu (its file is not an arm64 Image).
+[[entry]]
+key = "lab-failtest"
+name = "Fail-back test"
+version = "always fails, menu comes back"
+category = "lab"
+method = "bare"
+tag = "lab"
+files = ["catalog"]
+flags = ["hidden"]

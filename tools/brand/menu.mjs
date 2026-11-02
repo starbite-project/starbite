@@ -157,8 +157,8 @@ function icon(f, x, y, size, { fill, stroke } = {}) {
 // Item ids are what the loader acts on (shim/starlte/menu.c v5_os); `row` is where each sits:
 // Android, iOS, Linux, Windows. Labels: "<OS version>" | "<flavour> · <kernel or build>".
 const ITEMS = [
-  { name: 'iOS 26', meta: '26.6.2 · XNU 12377', row: 1, icon: (x, y, s) => icon('si-apple.svg', x, y, s, { fill: '#ffffff' }) },
-  { name: 'Windows 11', meta: '23H2 · NT 22631', row: 3, icon: (x, y, s) => icon('si-windows11.svg', x, y, s, { fill: '#0078d4' }) },
+  { name: 'iOS 26', meta: '26.6.2 · XNU 12377', row: 1, icon: (x, y, s) => icon('si-apple.svg', x, y, s, { fill: '#ffffff' }), optional: true },
+  { name: 'Windows 11', meta: '23H2 · NT 22631', row: 3, icon: (x, y, s) => icon('si-windows11.svg', x, y, s, { fill: '#0078d4' }), optional: true },
   // Android: the vendor 4.9 kernel + ramdisk from the UFS OS store; state 3 until installed.
   { name: 'Android 17', meta: 'LineageOS 24.0 · Linux 4.9', row: 0, icon: (x, y, s) => icon('si-android.svg', x, y, s, { fill: '#3ddc84' }), optional: true },
   // Linux: mainline 7.1 from the UFS OS store; state 3 when the store has no kernel.

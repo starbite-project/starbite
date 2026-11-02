@@ -37,6 +37,8 @@ cas=\$(dd if=$dev bs=4096 skip=4456448 count=1 2>/dev/null | dd bs=1 skip=1080 c
 [ \"\$cas\" = 53ef ] || { echo 'Kiosk superblock missing'; exit 1; }
 head=\$(dd if=$dev bs=4096 skip=4194304 count=1 2>/dev/null | dd bs=8 count=1 2>/dev/null | hexdump -v -e '1/1 \"%02x\"')
 case \$head in 534253544f524531|0000000000000000) ;; *) echo \"unknown data at the store: \$head\"; exit 1 ;; esac
+v2=\$(dd if=$dev bs=4096 skip=4194305 count=1 2>/dev/null | dd bs=8 count=1 2>/dev/null)
+[ \"\$v2\" != SBSTORE2 ] || { echo 'version 2 store: use tools/store/store-flash.sh'; exit 1; }
 echo 'checks passed'"
 
 # A partition cannot be writable under a read-only disk: unlock sda and the

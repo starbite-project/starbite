@@ -4,10 +4,13 @@
  * any animation crawl. With an identity map:
  *
  *   0x000000000..0x07fffffff  Device-nGnRnE, never executable      SoC registers
- *   0x080000000..0x091dfffff  Normal write-back, executable         loader, stack, menu assets
+ *   0x080000000..0x08bffffff  Normal write-back, executable         loader, stack, menu assets
  *                                                                   (0x89000000), S-Boot's FDT
- *   0x091e00000..0x0ffffffff  Normal non-cacheable (write-combined)  log page 0x91fff000, every OS
- *                                                                   load area, UFS DMA 0xaf000000,
+ *                                                                   (0x8a000000), screen copies
+ *   0x08c000000..0x0ffffffff  Normal non-cacheable (write-combined)  the OS staging area
+ *                                                                   0x8c000000, log page
+ *                                                                   0x91fff000, every OS load
+ *                                                                   area, UFS DMA 0xaf000000,
  *                                                                   framebuffer 0xcc000000
  *   0x880000000..0x8ffffffff  Normal non-cacheable                   XNU's RAM bank (payload copy)
  *   everything else           unmapped (a fault: EngineerMode's vectors skip it)
@@ -35,7 +38,7 @@
                     | (3ULL << 12)                  /* SH0 inner shareable */ \
                     | (1ULL << 23)                  /* EPD1: no TTBR1 walks */ \
                     | (1ULL << 32))                 /* IPS 36-bit */
-#define WB_END     0x91e00000ULL
+#define WB_END     0x8c000000ULL
 
 static uint64_t l1[64] __attribute__((aligned(4096)));       /* 64 x 1 GiB */
 static uint64_t l2_low[512] __attribute__((aligned(4096)));  /* 0x80000000..0xbfffffff, 2 MiB each */

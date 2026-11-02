@@ -45,7 +45,6 @@ struct star_opt {
     unsigned cpus;
     int rw, verbose, touch, touchpwr;   /* boot options */
     int multi, smpprobe;                /* experiments */
-    unsigned autoboot;                  /* starauto=N: start iOS after N s unless a key is pressed */
 };
 extern struct star_opt opt;
 void hw_opt_load(const char *cmdline);
@@ -59,14 +58,11 @@ int hw_sd_rails(uint8_t *l31, uint8_t *l2);
 /* xnu_boot.c */
 int star_sprite_at(unsigned id, int x, int y);
 int star_font_blob(uint64_t *start, uint64_t *end);
+/* A bundle appended to BOOT ("SBUEFI!!", or the retired "SBLINUX!"): its address, or 0. */
 uint64_t star_bundle(const struct star_info *in, int linux_not_uefi, uint64_t *size);
-/* OS store on UFS (xnu_boot.c): 1 if the entry exists. */
-int star_store_has(const char *name);
-/* Entry i of the OS store: count (0 = no store) or -1 past the end. */
-int star_store_entry(int i, char name[24], uint64_t *size, uint32_t *crc, uint64_t *lba);
 
-/* em.c: EngineerMode. Returns the boot menu's pick (1 iOS with the edited
- * cmdline, 2 Kiosk, 3 Windows, 4 Linux, 5 Android) or 0 for the menu. */
+/* em.c: EngineerMode. Returns the catalog entry to start + 1 (catalog.h; BOOT's iOS with the
+ * edited cmdline is star_ios_pick()) or 0 for the menu. */
 int em_main(const struct star_info *in, char *cmdline, unsigned len);
 /* em.c: the S2MPS18 RTC as Unix time (UTC); 0 if unreadable. */
 int em_rtc_epoch(uint64_t *epoch);

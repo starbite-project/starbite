@@ -17,6 +17,8 @@
 #include "menu.h"
 #include "fbtext.h"
 #include "hw.h"
+#include "catalog.h"
+#include "store.h"
 
 #define ALIVE_GPA0_DAT 0x14050024UL
 #define ALIVE_GPA2_DAT 0x14050064UL
@@ -315,7 +317,6 @@ static void opt_load(const char *c)
     opt.touchpwr = arg_num(c, "startouchpwr", 1) != 0;
     opt.multi = arg_num(c, "ufsmulti", 0) != 0;
     opt.smpprobe = arg_num(c, "starsmpprobe", 0) != 0;
-    opt.autoboot = arg_num(c, "starauto", 0);
 }
 
 static void opt_apply(char *c, unsigned len)
@@ -1135,22 +1136,51 @@ static unsigned input_event(int *tx, int *ty)
     }
 }
 
-/* Android (item 2) and Linux (item 3) are selectable only when the OS store
- * holds their kernel. */
-static int v5_linux, v5_android;
+/* The OS rows show the catalog entries with these keys (catalog.h; menu v6 draws the whole
+ * catalog), selectable when every file they need is there (star_entry_ready). */
+static int v5_cat[4], v5_ready[4];
 
 static int v5_avail(unsigned item)
 {
-    /* The bottom card is blank: Kiosk starts from EngineerMode. */
-    return item == 2 ? v5_android : item == 3 ? v5_linux : item != V5_CARD;
+    /* The bottom card is blank (and blank). */
+    return item < 4 ? v5_ready[item] : item != V5_CARD;
+}
+
+static void v5_lookup(void)
+{
+    for (unsigned i = 0; i < 4; ++i) {
+        v5_cat[i] = cat_find(i == 0 ? "ios26" : i == 1 ? "win11" : i == 2 ? "android" : "linux");
+        v5_ready[i] = v5_cat[i] >= 0 && star_entry_ready((unsigned)v5_cat[i], 0);
+    }
+}
+
+/* Row of catalog entry idx, or V5_CARD when it has none. */
+static unsigned v5_item_of(int idx)
+{
+    for (unsigned i = 0; i < 4; ++i)
+        if (v5_cat[i] == idx)
+            return i;
+    return V5_CARD;
 }
 
 static unsigned v5_step(unsigned os, int dir)
 {
-    do
-        os = (os + 5U + (unsigned)dir) % 5U;
-    while (!v5_avail(v5_os[os]));
-    return os;
+    unsigned at = os;
+    for (unsigned n = 0; n < 5; ++n) {
+        at = (at + 5U + (unsigned)dir) % 5U;
+        if (v5_avail(v5_os[at]))
+            return at;
+    }
+    return os;                              /* nothing installed */
+}
+
+/* Index of v5_os holding item (4 = the card's place when it has none). */
+static unsigned v5_index(unsigned item)
+{
+    unsigned i = 0;
+    while (i < 4 && v5_os[i] != item)
+        ++i;
+    return i;
 }
 
 /* Item under a tap (state-0 sprite rectangle), or -1. Rows whose OS is not installed (v5_avail)
@@ -1225,53 +1255,179 @@ static void v5_starting(unsigned item)
         (void)tp_cmd(0x62);                         /* hand over an empty event stack */
 }
 
+/* ---- settings, boot-next, coming back after a failed start ---------------
+ * The menu remembers the last choice and honours a one-shot "boot X next" (store.h settings
+ * record, written by the loader and by tools/store/settings.py; or the RAM mailbox at 0xFED17FE0,
+ * above the pmsg ring, which survives warm resets: u64 "SBNEXT2!" + char key[24], written by any
+ * OS; the older u64 "SBNEXTLX" from Linux's reboot-linux means "linux"). A next entry from the
+ * settings record is only started once clearing it was written back, so it cannot loop.
+ * settings.timeout_s > 0 starts settings.default_key after that many seconds unless a key is
+ * pressed (0, the default: wait).
+ */
+#define NEXT_MAILBOX 0xFED17FE0UL
+#define NEXT2_MAGIC  0x21325458454e4253ULL   /* "SBNEXT2!" */
+#define NEXTLX_MAGIC 0x584c5458454e4253ULL   /* "SBNEXTLX" */
+/* The screen as it was just before a start, put back if the start fails (16.3 MiB, free WB RAM
+ * between anim.c's buffers and the menu assets at 0x89000000; no OS is loaded there). */
+#define MENU_SAVE 0x86000000UL
+
+static struct star_settings settings;
+static int settings_ok, menu_resumed;
+static const char *fail_name, *fail_why;
+static struct v5 v5_m;
+
+void star_menu_failed(const char *name, const char *why)
+{
+    fail_name = name;
+    fail_why = why;
+    menu_resumed = 1;
+}
+
+static int key_eq(const char *a, const char *b)
+{
+    unsigned k = 0;
+    while (k < 23 && a[k] && a[k] == b[k])
+        ++k;
+    return k == 23 || a[k] == b[k];
+}
+
+static void key_copy(char *dst, const char *src)
+{
+    unsigned k = 0;
+    for (; k < 23 && src[k]; ++k)
+        dst[k] = src[k];
+    for (; k < 24; ++k)
+        dst[k] = 0;
+}
+
+static int ready_key(const char *key)
+{
+    int i = key[0] ? cat_find(key) : -1;
+    return i >= 0 && star_entry_ready((unsigned)i, 0) ? i : -1;
+}
+
+/* A one-shot next entry: catalog index or -1. */
+static int boot_next(void)
+{
+    volatile uint64_t *mb = (volatile uint64_t *)NEXT_MAILBOX;
+    char key[24];
+    key[0] = 0;
+    if (mb[0] == NEXT2_MAGIC) {
+        for (unsigned k = 0; k < 23; ++k)
+            key[k] = *(volatile char *)(NEXT_MAILBOX + 8 + k);
+        key[23] = 0;
+    } else if (mb[0] == NEXTLX_MAGIC) {
+        key_copy(key, "linux");
+    }
+    if (mb[0] == NEXT2_MAGIC || mb[0] == NEXTLX_MAGIC) {
+        for (unsigned i = 0; i < 4; ++i)
+            mb[i] = 0;
+        __asm__ volatile("dsb sy" : : : "memory");
+    }
+    if (!key[0] && settings_ok && settings.next_key[0]) {
+        key_copy(key, settings.next_key);
+        settings.next_key[0] = 0;
+        if (settings_save(&settings))
+            key[0] = 0;
+    }
+    return ready_key(key);
+}
+
+/* Remember the choice (one block write, only when it changed; the first one creates the record). */
+static void remember(int idx)
+{
+    const struct cat_ent *e = idx >= 0 ? cat_get((unsigned)idx) : 0;
+    if (!e || key_eq(settings.last_key, e->key))
+        return;
+    key_copy(settings.last_key, e->key);
+    (void)settings_save(&settings);
+}
+
+static void upper(char *dst, unsigned cap, const char *src)
+{
+    unsigned k = 0;
+    for (; src && src[k] && k + 1 < cap; ++k)
+        dst[k] = src[k] >= 'a' && src[k] <= 'z' ? (char)(src[k] - 32) : src[k];
+    dst[k] = 0;
+}
+
+/* Start catalog entry idx from the menu: its row says "starting", the screen before that is
+ * kept for a failed start. */
+static int v5_go(struct v5 *m, int idx)
+{
+    unsigned item = v5_item_of(idx);
+    if (item != V5_CARD) {
+        m->svc_focus = 0;
+        m->os = v5_index(item);
+    }
+    v5_draw(m);
+    screen_copy(MENU_SAVE, STAR_FB_BASE);
+    v5_starting(item);
+    remember(idx);
+    return idx + 1;
+}
+
 static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
 {
-    struct v5 m = { 0, 0, 0 };
-    v5_linux = star_store_has("linux.image");
-    v5_android = star_store_has("android.kernel");
-    while (!v5_avail(v5_os[m.os]))                  /* start on the first installed OS */
-        ++m.os;
-    /* One-shot "boot Linux next" from Linux itself (tools/linux/reboot-linux):
-     * u64 "SBNEXTLX" in the retained page above the pmsg ring, cleared here. */
-    volatile uint64_t *next = (volatile uint64_t *)0xFED17FE0UL;
-    if (*next == 0x584c5458454e4253ULL) {
-        *next = 0;
-        __asm__ volatile("dsb sy" : : : "memory");
-        if (v5_linux) {
-            m.os = 2;                               /* Linux's place in v5_os */
-            v5_draw(&m);
-            v5_starting(3);
-            return 4;
-        }
-    }
-    v5_intro(&m);
-    v5_draw(&m);
-    tp_init();
-    /* starauto=N in the payload's boot-args: unattended test loop. iOS starts
-     * after N seconds unless a key is pressed (the kernel's sweetreboot=
-     * brings the phone back to recovery afterwards). */
-    if (opt.autoboot && v5_avail(0)) {
+    struct v5 *mp = &v5_m;
+    if (menu_resumed) {
+        /* back from a start that failed: the screen as it was, and why */
+        char b[STAR_FB_COLS + 1];
+        menu_resumed = 0;
+        screen_copy(STAR_FB_BASE, MENU_SAVE);
         star_fb_row_base(36);
-        star_fb_text_c(0, "AUTO-BOOT iOS: PRESS ANY KEY TO STOP", C_MUTED, C_BLACK);
-        unsigned stop = 0;
-        for (unsigned t = 0; t < opt.autoboot * 100U && !stop; ++t) {
-            if (keys())
-                stop = 1;
-            wait_ms(10);
+        upper(b, sizeof(b), "COULD NOT START ");
+        unsigned n = 0;
+        while (b[n])
+            ++n;
+        upper(b + n, sizeof(b) - n, fail_name);
+        star_fb_text_c(0, b, C_RED, C_BLACK);
+        upper(b, sizeof(b), fail_why ? fail_why : "UNKNOWN ERROR");
+        star_fb_text_c(1, b, C_MUTED, C_BLACK);
+    } else {
+        v5_lookup();
+        settings_ok = settings_load(&settings);
+        mp->svc_focus = mp->svc = 0;
+        mp->os = 0;
+        while (mp->os < 4 && !v5_avail(v5_os[mp->os]))   /* start on the first installed OS... */
+            ++mp->os;
+        int last = ready_key(settings.last_key);         /* ...or the last choice */
+        if (last < 0)
+            last = ready_key(settings.default_key);
+        if (last >= 0 && v5_item_of(last) != V5_CARD)
+            mp->os = v5_index(v5_item_of(last));
+        if (mp->os >= 4)
+            mp->os = 0;
+        int next = boot_next();
+        if (next >= 0)
+            return v5_go(mp, next);
+        v5_intro(mp);
+        v5_draw(mp);
+        tp_init();
+        int dflt = settings_ok && settings.timeout_s ? ready_key(settings.default_key) : -1;
+        if (dflt >= 0) {
+            char b[STAR_FB_COLS + 1];
+            const struct cat_ent *e = cat_get((unsigned)dflt);
+            star_fb_row_base(36);
+            upper(b, sizeof(b), e->name);
+            star_fb_text_c(0, b, C_WHITE, C_BLACK);
+            star_fb_text_c(1, "STARTS SOON: PRESS ANY KEY TO STOP", C_MUTED, C_BLACK);
+            unsigned stop = 0;
+            for (unsigned t = 0; t < settings.timeout_s * 100U && !stop; ++t) {
+                int tx, ty;
+                if (keys() || tp_tap(&tx, &ty))
+                    stop = 1;
+                wait_ms(10);
+            }
+            star_fb_text_c(0, "", C_WHITE, C_BLACK);
+            star_fb_text_c(1, "", C_WHITE, C_BLACK);
+            if (!stop)
+                return v5_go(mp, dflt);
         }
-        if (!stop) {
-            m.svc_focus = 0;
-            m.os = 0;
-            while (m.os < 4 && v5_os[m.os] != 0)
-                ++m.os;
-            v5_draw(&m);
-            v5_starting(0);
-            return 1;
-        }
-        v5_draw(&m);
     }
+    struct v5 m = *mp;
     for (;;) {
+        *mp = m;
         int tx = 0, ty = 0;
         unsigned k = input_event(&tx, &ty);
         if (k == K_TAP) {
@@ -1284,12 +1440,7 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
         if (k == K_TAP) {
             int hit = v5_hit(tx, ty);
             int svc = hit == (int)V5_RECOVERY || hit == (int)V5_DOWNLOAD;
-            unsigned idx = 0;
-            if (svc)
-                idx = hit == (int)V5_DOWNLOAD;
-            else
-                while (idx < 4 && v5_os[idx] != (unsigned)hit)
-                    ++idx;
+            unsigned idx = svc ? (unsigned)(hit == (int)V5_DOWNLOAD) : v5_index((unsigned)hit);
             if ((unsigned)svc == m.svc_focus && idx == (svc ? m.svc : m.os)) {
                 k = K_POWER;                        /* second tap starts it */
             } else {
@@ -1315,34 +1466,24 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
         if (k == K_BIXBY_HOLD) {
             screen_copy(SCREEN_SAVE, STAR_FB_BASE);
             uint64_t fs, fe;
-            int boot = star_font_blob(&fs, &fe) ? em_main(in, cmdline, len) : engineer(in, cmdline, len);
+            int boot = star_font_blob(&fs, &fe) ? em_main(in, cmdline, len) : engineer(in, cmdline, len) ? star_ios_pick() : 0;
             screen_copy(STAR_FB_BASE, SCREEN_SAVE);
             star_fb_row_base(36);
-            if (boot) {                             /* the menu's pick: 1 iOS, 2 Kiosk, 3 Windows, 4 Linux, 5 Android */
-                unsigned item = boot == 1 ? 0U : boot == 3 ? 1U : boot == 5 ? 2U : boot == 4 ? 3U : V5_CARD;
-                m.svc_focus = 0;
-                m.os = 0;
-                while (m.os < 4 && v5_os[m.os] != item)
-                    ++m.os;
-                v5_draw(&m);
-                v5_starting(item);
-                return boot;
+            if (boot > 0) {                         /* a catalog entry, as from the menu */
+                *mp = m;
+                return v5_go(mp, boot - 1);
             }
             continue;
         }
         if (k & K_POWER) {
             unsigned item = m.svc_focus ? v5_svc[m.svc] : v5_os[m.os];
+            if (item < 4 || item == V5_CARD) {
+                if (!v5_avail(item))
+                    continue;
+                *mp = m;
+                return v5_go(mp, v5_cat[item]);
+            }
             v5_starting(item);
-            if (item == 0)
-                return 1;
-            if (item == 1)
-                return 3;
-            if (item == V5_CARD)
-                return 2;
-            if (item == 3)
-                return 4;
-            if (item == 2)
-                return 5;
             reboot(item == V5_DOWNLOAD ? INFORM_DOWNLOAD : INFORM_RECOVERY);
         }
         if (k & K_BIXBY) {
@@ -1362,34 +1503,52 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
     }
 }
 
+/* The catalog entry of iOS from BOOT (what Engineer's "boot iOS" means): index + 1, or 0. */
+int star_ios_pick(void)
+{
+    int i = cat_find("ios26");
+    if (i >= 0 && star_entry_ready((unsigned)i, 0))
+        return i + 1;
+    for (unsigned j = 0; j < cat_count(); ++j) {
+        const struct cat_ent *e = cat_get(j);
+        if (e->method == M_XNU && e->file[0][0] == '@' && star_entry_ready(j, 0))
+            return (int)j + 1;
+    }
+    return 0;
+}
+
 int star_menu(const struct star_info *in, char *cmdline, unsigned len)
 {
     unsigned sel = 0;
     opt_load(cmdline);
     if (star_menu_assets() > 0)
         return menu_v5(in, cmdline, len);
+    /* No menu sprites: the text menu (iOS and Windows from the catalog). */
+    int ios = star_ios_pick(), win = cat_find("win11");
     for (;;) {
         star_fb_row_base(MENU_ROW_BASE);
-        item(0, "IOS 26 (STARBITE)", C_WHITE);
-        item(1, "WINDOWS 11", C_WHITE);
+        if (menu_resumed) {
+            menu_resumed = 0;
+            star_fb_text_c(4, fail_why ? fail_why : "COULD NOT START", C_RED, C_BLACK);
+        }
+        item(0, "IOS 26", ios ? C_WHITE : C_MUTED);
+        item(1, "WINDOWS 11", win >= 0 && star_entry_ready((unsigned)win, 0) ? C_WHITE : C_MUTED);
         item(2, "RECOVERY (TWRP)", C_WHITE);
         item(3, "STARBITE ENGINEER", C_GOLD);
         sel = choose(0, 4, sel);
-        if (sel == 0) {
+        if (sel == 0 && ios) {
             break;
-        } else if (sel == 1) {
-            /* exynos9810-woa UEFI (xnu_boot.c star_uefi). Download mode
-             * moved into Starbite Engineer to make room for this row. */
+        } else if (sel == 1 && win >= 0 && star_entry_ready((unsigned)win, 0)) {
             star_fb_text_c(sel, "> STARTING WINDOWS 11", C_WHITE, C_BLUE);
-            return 3;
+            return win + 1;
         } else if (sel == 2) {
             star_fb_text(sel, "> REBOOTING TO RECOVERY");
             reboot(INFORM_RECOVERY);
-        } else {
+        } else if (sel == 3) {
             int boot = engineer(in, cmdline, len);
             star_fb_fill(C_BLACK);
             star_overlay_redraw();
-            if (boot)
+            if (boot && ios)
                 break;
         }
     }
@@ -1399,7 +1558,7 @@ int star_menu(const struct star_info *in, char *cmdline, unsigned len)
     /* The Starbite card belongs to the boot selector only: clear it
      * (overlay.mjs BAND_TOP .. the footer) before iOS boots. */
     star_fb_fill_rows(1880, 2500, C_BLACK);
-    return 1;
+    return ios;
 }
 
 /* ---- exported helpers (hw.h) ------------------------------------------- */

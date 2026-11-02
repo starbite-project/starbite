@@ -17,6 +17,8 @@
 #include "hw.h"
 #include "ufs.h"
 #include "mmu.h"
+#include "store.h"
+#include "catalog.h"
 
 void star_intro_splash(void);   /* anim.c */
 
@@ -61,19 +63,25 @@ _Static_assert(__builtin_offsetof(struct payload, segs) == 0x2a8, "payload layou
 _Static_assert(__builtin_offsetof(struct boot_args, CommandLine) == 108, "boot_args layout");
 _Static_assert(sizeof(struct boot_args) == 736, "boot_args size");
 
+/* 8 bytes at a time when both ends are aligned (the OS areas are non-cacheable: mmu.c). */
 static void zero_bytes(uintptr_t dst, uint64_t size)
 {
-    volatile uint8_t *d = (volatile uint8_t *)dst;
-    for (uint64_t i = 0; i < size; ++i)
-        d[i] = 0;
+    uint64_t i = 0;
+    if (!(dst & 7))
+        for (; i + 8 <= size; i += 8)
+            *(volatile uint64_t *)(dst + i) = 0;
+    for (; i < size; ++i)
+        *(volatile uint8_t *)(dst + i) = 0;
 }
 
 static void copy_bytes(uintptr_t dst, uintptr_t src, uint64_t size)
 {
-    volatile uint8_t *d = (volatile uint8_t *)dst;
-    volatile const uint8_t *s = (volatile const uint8_t *)src;
-    for (uint64_t i = 0; i < size; ++i)
-        d[i] = s[i];
+    uint64_t i = 0;
+    if (!((dst | src) & 7))
+        for (; i + 8 <= size; i += 8)
+            *(volatile uint64_t *)(dst + i) = *(volatile const uint64_t *)(src + i);
+    for (; i < size; ++i)
+        *(volatile uint8_t *)(dst + i) = *(volatile const uint8_t *)(src + i);
 }
 
 static void clean_bytes(uintptr_t start, uintptr_t end)
@@ -107,14 +115,25 @@ static uint64_t counter(void)
     return value;
 }
 
-/* Show why the loader stopped, give time for a photo, then request Download mode. */
+/* An OS could not be started: why, on screen and in the log. The menu comes back after. */
+static const char *boot_why;
+
 static uintptr_t fail(volatile uint64_t *log, int64_t step, const char *why)
 {
-    uint64_t freq;
     log[10] = (uint64_t)step;
     clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+    boot_why = why;
     star_fb_text(3, "LOADER FAIL:");
     star_fb_text(4, why);
+    return 0;
+}
+
+/* No menu to go back to: give time for a photo, then request Download mode. */
+static uintptr_t fatal(volatile uint64_t *log, int64_t step, const char *why)
+{
+    uint64_t freq;
+    if (why)
+        (void)fail(log, step, why);
     star_fb_text(5, "DOWNLOAD MODE IN 30 S");
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r" (freq));
     if (!freq)
@@ -412,22 +431,59 @@ star_overlay_redraw(void)
 }
 
 /*
- * Linux kiosk: a Linux arm64 Image (tools/kiosk, Exynos9810-LTS 4.9
- * kernel with its initramfs built in) appended after the SWEETXNU payload as
- * a 4 KiB-aligned "SBLINUX!" bundle: u64 magic, u64 Image size, Image at
- * +4096. It is copied to the XNU window's 2 MiB-aligned base + text_offset
- * (Documentation/arm64/booting.txt) and entered with x0 = S-Boot's FDT.
- * S-Boot's initrd is our overlay, so /chosen's initrd is emptied first.
- *
- * Bundles (tools/linux-bundle.py) follow each other after the payload: a
- * 4 KiB page with u64 magic + u64 size, the data, padding to 4 KiB.
+ * Where OSes are put before they start (all Normal non-cacheable, mmu.c, so the store's DMA needs
+ * no cache maintenance):
+ *   STAGE  0x8c000000..0x91000000  an XNU payload from the store (it must end below RAM_BASE), or
+ *                                  a UEFI image (below 0x90000000, where its FD goes)
+ *   RAM_BASE + text_offset         Linux, Android and bare arm64 Images (up to OS_RD)
+ *   OS_RD  0xa8000000              an initrd, Android's ramdisk
+ *   EDIT_FDT 0xad000000            an FDT being edited (Android: S-Boot's; Linux: the store's)
+ *   LINUX_DTB 0xae000000           Linux's DTB, up to UFS_DMA
  */
+#define STAGE      0x8c000000UL
+#define STAGE_END  0x91000000UL
+#define UEFI_FD    0x90000000UL
+#define UEFI_FD_END 0x90700000UL
 #define LINUX_BASE RAM_BASE
+#define OS_RD      0xa8000000UL
+#define EDIT_FDT   0xad000000UL
+#define LINUX_DTB  0xae000000UL
+#define HEAD_BUF   (UFS_BUF + (768U << 10))   /* an Image's first block */
+#define TEXT_BUF   (UFS_BUF + (832U << 10))   /* a command line file */
+
+/*
+ * BOOT itself: the SWEETXNU payload appended to this Image (or S-Boot's initrd, as a fallback),
+ * then bundles (tools/linux-bundle.py), each a 4 KiB page with u64 magic + u64 size, the data,
+ * padding to 4 KiB: "SBUEFI!!" the Windows UEFI (and "SBLINUX!", the retired Linux kiosk
+ * kernel, in older images). Without a valid payload, bundles are found by scanning pages: no OS
+ * depends on iOS any more.
+ */
 #define BUNDLE_LINUX 0x2158554e494c4253ULL   /* "SBLINUX!" */
 #define BUNDLE_UEFI  0x2121494645554253ULL   /* "SBUEFI!!" */
-static uintptr_t
-find_bundle(const struct payload *p, uintptr_t rd_start, uintptr_t rd_end, uint64_t magic,
-    uint64_t *size)
+
+static const struct payload *boot_p;          /* BOOT's payload when it is valid */
+static uintptr_t boot_rd_start, boot_rd_end;  /* what is appended to this Image */
+
+/* Why payload p (length bytes) cannot boot, or 0. */
+static const char *payload_bad(const struct payload *p, uint64_t length)
+{
+    if (length < sizeof(*p) || !magic_ok(p->magic) || p->version != 1 ||
+        !p->nsegs || p->nsegs > 32 ||
+        __builtin_offsetof(struct payload, segs) + p->nsegs * sizeof(struct payload_seg) > length ||
+        p->adt_off > length || p->adt_size > length - p->adt_off)
+        return "BAD SWEETXNU PAYLOAD";
+    /* The payload itself sits below RAM_BASE, outside both windows. */
+    uint64_t window_end = p->phys_base >= BANK2_BASE ? BANK2_END : RAM_END;
+    int in_low = p->phys_base >= RAM_BASE && p->phys_base < RAM_END;
+    int in_bank2 = p->phys_base >= BANK2_BASE && p->phys_base < BANK2_END;
+    if (!(in_low || in_bank2) ||
+        !p->mem_size || p->mem_size > window_end - p->phys_base ||
+        p->entry_va < p->virt_base || p->kernel_end < p->virt_base)
+        return "PAYLOAD RAM OUTSIDE WINDOW";
+    return 0;
+}
+
+static uint64_t payload_end(const struct payload *p)
 {
     uint64_t end = __builtin_offsetof(struct payload, segs) + p->nsegs * sizeof(struct payload_seg);
     if (p->adt_off + p->adt_size > end)
@@ -435,16 +491,49 @@ find_bundle(const struct payload *p, uintptr_t rd_start, uintptr_t rd_end, uint6
     for (uint32_t i = 0; i < p->nsegs; ++i)
         if (p->segs[i].file_off + p->segs[i].file_size > end)
             end = p->segs[i].file_off + p->segs[i].file_size;
-    uintptr_t b = align_page(rd_start + end);
-    while (b + PAGE_SIZE < rd_end) {
-        uint64_t m = *(volatile uint64_t *)b, s = *(volatile uint64_t *)(b + 8);
-        if ((m != BUNDLE_LINUX && m != BUNDLE_UEFI) || s > rd_end - b - PAGE_SIZE)
-            return 0;
-        if (m == magic) {
-            *size = s;
-            return b + PAGE_SIZE;
+    return end;
+}
+
+static void boot_payload(uintptr_t fdt)
+{
+    extern char _start[], _image_end[];
+    uint64_t image_size = *(volatile uint64_t *)(uintptr_t)(_start + 16);
+    uint64_t rs = (uintptr_t)_image_end, re = (uintptr_t)_start + image_size;
+    if (re <= rs || !magic_ok((const char *)rs)) {
+        uint64_t s, e;
+        if (fdt && !(fdt & 7) && fdt_chosen_u64(fdt, "linux,initrd-start", &s) &&
+            fdt_chosen_u64(fdt, "linux,initrd-end", &e) && e > s && s >= DRAM_LOW && e <= RAM_BASE &&
+            magic_ok((const char *)(uintptr_t)s)) {
+            rs = s;
+            re = e;
         }
-        b = align_page(b + PAGE_SIZE + s);
+    }
+    if (re <= rs || rs < DRAM_LOW || re > RAM_BASE)
+        return;
+    boot_rd_start = rs;
+    boot_rd_end = re;
+    if (!payload_bad((const struct payload *)(uintptr_t)rs, re - rs))
+        boot_p = (const struct payload *)(uintptr_t)rs;
+}
+
+static uintptr_t find_bundle(uint64_t magic, uint64_t *size)
+{
+    if (boot_rd_end <= boot_rd_start)
+        return 0;
+    uintptr_t b = boot_p ? align_page(boot_rd_start + payload_end(boot_p)) : boot_rd_start;
+    while (b + PAGE_SIZE < boot_rd_end) {
+        uint64_t m = *(volatile uint64_t *)b, s = *(volatile uint64_t *)(b + 8);
+        if ((m == BUNDLE_LINUX || m == BUNDLE_UEFI) && s <= boot_rd_end - b - PAGE_SIZE) {
+            if (m == magic) {
+                *size = s;
+                return b + PAGE_SIZE;
+            }
+            b = align_page(b + PAGE_SIZE + s);
+        } else if (boot_p) {
+            return 0;                       /* bundles follow each other after the payload */
+        } else {
+            b += PAGE_SIZE;
+        }
     }
     return 0;
 }
@@ -452,198 +541,173 @@ find_bundle(const struct payload *p, uintptr_t rd_start, uintptr_t rd_end, uint6
 uint64_t
 star_bundle(const struct star_info *in, int linux_not_uefi, uint64_t *size)
 {
+    (void)in;
     *size = 0;
-    if (!in || in->rd_end <= in->rd_start)
-        return 0;
-    return find_bundle((const struct payload *)(uintptr_t)in->rd_start, in->rd_start, in->rd_end,
-                       linux_not_uefi ? BUNDLE_LINUX : BUNDLE_UEFI, size);
+    return find_bundle(linux_not_uefi ? BUNDLE_LINUX : BUNDLE_UEFI, size);
 }
 
-static uintptr_t
-star_linux(volatile uint64_t *log, uintptr_t fdt, const struct payload *p, uint64_t length,
-    uintptr_t rd_start, uintptr_t rd_end)
-{
+/* ---- the files of a catalog entry ----------------------------------------- */
+
+#define SRC_NONE   0
+#define SRC_STORE  1
+#define SRC_BOOT   2   /* BOOT's payload */
+#define SRC_BUNDLE 3   /* BOOT's UEFI bundle */
+
+struct src {
+    int kind;
+    struct store_ent e;
+    uintptr_t addr;
     uint64_t size;
-    uintptr_t img = find_bundle(p, rd_start, rd_end, BUNDLE_LINUX, &size);
-    if (!img)
-        return fail(log, -20, "NO LINUX KIOSK KERNEL");
-    if (size < 64 || *(volatile uint32_t *)(img + 56) != 0x644d5241U)
-        return fail(log, -21, "BAD KIOSK KERNEL");
-    uint64_t text_offset = *(volatile uint64_t *)(img + 8);
-    uint64_t image_size = *(volatile uint64_t *)(img + 16);
-    if (!image_size)
-        image_size = size;
-    uintptr_t dst = LINUX_BASE + text_offset;
-    if (text_offset >= (2UL << 20) || dst + image_size > RAM_END)
-        return fail(log, -22, "KIOSK KERNEL TOO LARGE");
-    star_fb_hex(1, "LINUX AT", dst);
-    copy_bytes(dst, img, size);
-    zero_bytes(dst + size, image_size > size ? image_size - size : 0);
-    clean_bytes(dst, dst + image_size);
-    uint64_t start;
-    if (fdt_chosen_u64(fdt, "linux,initrd-start", &start))
-        (void)fdt_chosen_set_u64(fdt, "linux,initrd-end", start);
-    clean_bytes(fdt, fdt + (2UL << 20));
-    /* Last screen write: hand the display back as S-Boot left it. */
-    star_fb_restore((uint32_t)log[77]);
-    log[10] = 0x100;
-    log[15] = dst;
-    log[17] = fdt;              /* xnu_boot.S passes log[17] in x0 */
-    (void)length;
-    clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
-    __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
-    return dst;
-}
-
-/*
- * OS store: a 1 GiB area in USERDATA between the iOS root (0..16 GiB) and the
- * Kiosk root (+17 GiB) that holds kernels the BOOT partition has no room for
- * (tools/linux/sbstore.py). Block 0: "SBSTORE1", u32 version 1, u32 count,
- * u64 size in blocks; from +64, count entries of 64 bytes: char name[24],
- * u64 offset (bytes from the store start, 4 KiB aligned), u64 size, u32 CRC32
- * (IEEE), u32 flags, 8 bytes reserved. Read only: tools/linux/sbstore-flash.sh
- * writes it from TWRP.
- */
-#define STORE_MAGIC 0x3145524f54534253ULL      /* "SBSTORE1" */
-#define STORE_OFFSET 4194304ULL                /* 16 GiB in 4 KiB blocks */
-#define STORE_BLOCKS 262144ULL                 /* up to the Kiosk root */
-#define LINUX_DTB 0xae000000UL                 /* below UFS_DMA (ufs.h) */
-
-struct store_ent {
-    uint64_t lba, size;
-    uint32_t crc;
 };
 
-static uint64_t store_lba;
-
-static uint64_t u8le(uintptr_t p, unsigned n)
+static int str_eq(const char *a, const char *b)
 {
-    uint64_t v = 0;
-    for (unsigned i = n; i; --i)
-        v = v << 8 | *(volatile uint8_t *)(p + i - 1);
-    return v;
+    while (*a && *a == *b) {
+        ++a;
+        ++b;
+    }
+    return *a == *b;
 }
 
-/* Header block into UFS_BUF; 1 if a store is there. */
-static int store_open(void)
+/* The first alternative of a file field that exists. */
+static int resolve(const char *field, struct src *s)
 {
-    uint64_t first, last;
-    if (!gpt_find("USERDATA", &first, &last) || last - first + 1 < STORE_OFFSET + STORE_BLOCKS)
-        return 0;
-    store_lba = first + STORE_OFFSET;
-    if (ufs_read(store_lba, 1) || u8le(UFS_BUF, 8) != STORE_MAGIC || u8le(UFS_BUF + 8, 4) != 1)
-        return 0;
-    return 1;
-}
-
-static int store_find(const char *name, struct store_ent *e)
-{
-    uint32_t n = (uint32_t)u8le(UFS_BUF + 12, 4);
-    for (uint32_t i = 0; i < n && i < 63; ++i) {
-        uintptr_t p = UFS_BUF + 64 + 64U * i;
-        unsigned k = 0;
-        while (k < 23 && name[k] && *(volatile uint8_t *)(p + k) == (uint8_t)name[k])
-            ++k;
-        if (name[k] || *(volatile uint8_t *)(p + k))
-            continue;
-        uint64_t off = u8le(p + 24, 8);
-        e->size = u8le(p + 32, 8);
-        e->crc = (uint32_t)u8le(p + 40, 4);
-        if ((off & 4095U) || off / 4096U + (e->size + 4095U) / 4096U > STORE_BLOCKS)
-            return 0;
-        e->lba = store_lba + off / 4096U;
-        return 1;
+    char alt[64];
+    s->kind = SRC_NONE;
+    for (unsigned k = 0; cat_alt(field, k, alt); ++k) {
+        if (str_eq(alt, "@boot")) {
+            if (!boot_p)
+                continue;
+            s->kind = SRC_BOOT;
+            s->addr = boot_rd_start;
+            s->size = boot_rd_end - boot_rd_start;
+            return 1;
+        }
+        if (str_eq(alt, "@bundle")) {
+            uint64_t size;
+            uintptr_t at = find_bundle(BUNDLE_UEFI, &size);
+            if (!at)
+                continue;
+            s->kind = SRC_BUNDLE;
+            s->addr = at;
+            s->size = size;
+            return 1;
+        }
+        if (store_find(alt, &s->e)) {
+            s->kind = SRC_STORE;
+            s->size = s->e.size;
+            return 1;
+        }
     }
     return 0;
 }
 
-int star_store_has(const char *name)
+int star_entry_ready(unsigned i, const char **why)
 {
-    struct store_ent e;
-    return store_open() && store_find(name, &e);
+    const struct cat_ent *e = cat_get(i);
+    struct src s;
+    const char *w = 0;
+    if (!e)
+        w = "NO SUCH ENTRY";
+    else if (e->method < M_XNU || e->method > M_BARE)
+        w = "UNKNOWN BOOT METHOD";
+    else if (!resolve(e->file[0], &s))
+        w = e->method == M_XNU ? "NO XNU PAYLOAD" : e->method == M_UEFI ? "NO UEFI IMAGE" : "NO KERNEL";
+    else if (e->method == M_LINUX && !resolve(e->file[1], &s))
+        w = "NO DTB";
+    else if (e->method == M_ANDROID && !resolve(e->file[1], &s))
+        w = "NO RAMDISK";
+    if (why)
+        *why = w;
+    return !w;
 }
 
-/* Entry i of the OS store for EngineerMode: name (24 bytes), size, CRC32.
- * Returns the entry count (0: no store), or -1 past the end; *lba = the
- * store's first block on LU0. */
-int star_store_entry(int i, char name[24], uint64_t *size, uint32_t *crc, uint64_t *lba)
+/* " extra" onto a NUL-terminated line of cap bytes. */
+static void line_append(char *c, unsigned cap, const char *extra)
 {
-    if (!store_open())
-        return 0;
-    uint32_t n = (uint32_t)u8le(UFS_BUF + 12, 4);
-    *lba = store_lba;
-    if (i < 0 || (uint32_t)i >= n || i >= 63)
-        return -1;
-    uintptr_t p = UFS_BUF + 64 + 64U * (uint32_t)i;
-    for (unsigned k = 0; k < 24; ++k)
-        name[k] = (char)*(volatile uint8_t *)(p + k);
-    name[23] = 0;
-    *size = u8le(p + 32, 8);
-    *crc = (uint32_t)u8le(p + 40, 4);
-    return (int)n;
+    if (!extra || !extra[0])
+        return;
+    unsigned n = 0;
+    while (n + 1 < cap && c[n])
+        ++n;
+    if (n && n + 1 < cap)
+        c[n++] = ' ';
+    for (unsigned k = 0; extra[k] && n + 1 < cap; ++k)
+        c[n++] = extra[k];
+    c[n] = 0;
 }
 
-/* CRC32 (IEEE, reflected) with the ARMv8 CRC32 instructions. */
-__attribute__((target("+crc"))) static uint32_t crc32_mem(uintptr_t p, uint64_t n)
+/* An arm64 Image from the store at RAM_BASE + text_offset, ending below limit: its address, or
+ * 0 after fail(). *span = its size in memory. */
+static uintptr_t image_load(volatile uint64_t *log, const struct store_ent *e, uintptr_t limit,
+    int64_t step, uint64_t *span)
 {
-    uint32_t c = 0xffffffffU;
-    uint64_t i = 0;
-    for (; i + 8 <= n; i += 8)
-        __asm__("crc32x %w0, %w0, %x1" : "+r"(c) : "r"(*(volatile uint64_t *)(p + i)));
-    for (; i < n; ++i)
-        __asm__("crc32b %w0, %w0, %w1" : "+r"(c) : "r"((uint32_t)*(volatile uint8_t *)(p + i)));
-    return ~c;
-}
-
-static int store_load(const struct store_ent *e, uintptr_t dst)
-{
-    if (ufs_read_to(e->lba, (e->size + 4095U) / 4096U, dst))
-        return -1;
-    return crc32_mem(dst, e->size) == e->crc ? 0 : -2;
+    if (store_head(e, HEAD_BUF) || *(volatile uint32_t *)(HEAD_BUF + 56) != 0x644d5241U)
+        return fail(log, step, "NOT AN ARM64 IMAGE");
+    uint64_t text_offset = *(volatile uint64_t *)(HEAD_BUF + 8);
+    uint64_t image_size = *(volatile uint64_t *)(HEAD_BUF + 16);
+    if (image_size < e->size)
+        image_size = e->size;
+    uintptr_t dst = LINUX_BASE + text_offset;
+    if (text_offset >= (2UL << 20) || image_size > limit - dst)
+        return fail(log, step - 1, "KERNEL TOO LARGE");
+    star_fb_hex(2, "KERNEL AT", dst);
+    int r = store_load(e, dst, limit - dst);
+    if (r)
+        return fail(log, step - 2, r == -2 ? "KERNEL CRC MISMATCH" : "KERNEL READ FAILED");
+    *span = image_size;
+    return dst;
 }
 
 /*
- * Mainline Linux from the store: "linux.image" (arm64 Image, initramfs built
- * in) at RAM_BASE + text_offset, "linux.dtb" at LINUX_DTB; x0 = DTB. Unlike
- * the Kiosk kernel, the display trigger stays free-running (0x1281, as
- * uniLoader leaves it): mainline's framebuffer driver depends on it.
+ * Linux: Image + DTB (+ initrd) from the store; the entry's cmdline is appended to the DTB's
+ * bootargs. x0 = DTB. The display trigger stays free-running (0x1281, as uniLoader leaves it):
+ * mainline's framebuffer driver depends on it. The microSD rails are switched on for it.
  */
 static uintptr_t
-star_linux_store(volatile uint64_t *log)
+boot_linux(volatile uint64_t *log, const struct cat_ent *e)
 {
-    struct store_ent img, dtb;
-    star_fb_text(1, "LOADING LINUX FROM UFS");
-    if (!ufs_up())
-        return fail(log, -40, "UFS NOT READY");
-    if (!store_open() || !store_find("linux.dtb", &dtb) || !store_find("linux.image", &img))
-        return fail(log, -41, "NO LINUX IN THE OS STORE");
-    if (dtb.size > (2UL << 20))
-        return fail(log, -42, "LINUX DTB TOO LARGE");
-    if (store_load(&dtb, LINUX_DTB))
-        return fail(log, -43, "LINUX DTB READ OR CRC FAILED");
+    struct src img, dtb, rd;
+    star_fb_text(1, "LOADING LINUX");
+    if (!resolve(e->file[0], &img) || img.kind != SRC_STORE)
+        return fail(log, -41, "NO LINUX KERNEL IN THE STORE");
+    if (!resolve(e->file[1], &dtb) || dtb.kind != SRC_STORE)
+        return fail(log, -41, "NO LINUX DTB IN THE STORE");
+    int have_rd = e->file[2][0] != 0;
+    if (have_rd && (!resolve(e->file[2], &rd) || rd.kind != SRC_STORE))
+        return fail(log, -47, "NO INITRD IN THE STORE");
+    int r = store_load(&dtb.e, e->cmdline[0] ? EDIT_FDT : LINUX_DTB, 2UL << 20);
+    if (r)
+        return fail(log, -43, r == -3 ? "LINUX DTB TOO LARGE" : "LINUX DTB READ OR CRC FAILED");
+    uint64_t dtb_size = dtb.e.size;
+    if (e->cmdline[0]) {
+        dtb_size = fdt_copy_append_bootargs(EDIT_FDT, LINUX_DTB, (uint32_t)(UFS_DMA - LINUX_DTB), e->cmdline);
+        if (!dtb_size)
+            return fail(log, -48, "LINUX DTB HAS NO BOOTARGS");
+    }
     /* Wall clock for Linux (no RTC driver there): the DTB carries a u64
      * placeholder /chosen/starbite,rtc-epoch; tools/linux/init reads it. */
     uint64_t now;
     if (em_rtc_epoch(&now))
         (void)fdt_chosen_set_u64(LINUX_DTB, "starbite,rtc-epoch", now);
-    if (ufs_read(img.lba, 1) || u8le(UFS_BUF + 56, 4) != 0x644d5241U)
-        return fail(log, -44, "BAD LINUX IMAGE");
-    uint64_t text_offset = u8le(UFS_BUF + 8, 8), image_size = u8le(UFS_BUF + 16, 8);
-    if (image_size < img.size)
-        image_size = img.size;
-    uintptr_t dst = LINUX_BASE + text_offset;
-    if (text_offset >= (2UL << 20) || dst + image_size > LINUX_DTB)
-        return fail(log, -45, "LINUX IMAGE TOO LARGE");
-    star_fb_hex(2, "LINUX AT", dst);
+    if (have_rd) {
+        r = store_load(&rd.e, OS_RD, EDIT_FDT - OS_RD);
+        if (r)
+            return fail(log, -49, r == -3 ? "INITRD TOO LARGE" : "INITRD READ OR CRC FAILED");
+        if (!fdt_chosen_set_u64(LINUX_DTB, "linux,initrd-start", OS_RD) ||
+            !fdt_chosen_set_u64(LINUX_DTB, "linux,initrd-end", OS_RD + rd.e.size))
+            return fail(log, -49, "LINUX DTB HAS NO INITRD PROPERTIES");
+    }
     uint8_t l31 = 0, l2 = 0;
     int rails = hw_sd_rails(&l31, &l2);
     star_fb_text(3, rails > 0 ? "MICROSD POWER ON" : rails == 0 ? "MICROSD POWER REFUSED" : "MICROSD POWER: NO ACPM");
     log[18] = (uint64_t)l31 << 8 | l2;
-    int r = store_load(&img, dst);
-    if (r)
-        return fail(log, -46, r == -2 ? "LINUX IMAGE CRC MISMATCH" : "LINUX IMAGE READ FAILED");
-    clean_bytes(dst, dst + image_size);
-    clean_bytes(LINUX_DTB, LINUX_DTB + dtb.size);
+    uint64_t span;
+    uintptr_t dst = image_load(log, &img.e, OS_RD, -44, &span);
+    if (!dst)
+        return 0;
+    clean_bytes(dst, dst + span);
+    clean_bytes(LINUX_DTB, LINUX_DTB + dtb_size);
     log[10] = 0x400;
     log[15] = dst;
     log[17] = LINUX_DTB;
@@ -653,71 +717,82 @@ star_linux_store(volatile uint64_t *log)
 }
 
 /*
- * Android from the store: "android.kernel" (arm64 Image, Samsung 4.9) at
- * RAM_BASE + text_offset like the Kiosk kernel, "android.ramdisk" (first
- * stage init) at ANDROID_RD, and S-Boot's own FDT (the stock DTB it loaded,
- * with its androidboot.* bootargs) copied to ANDROID_FDT with
- * "android.cmdline" appended and /chosen linux,initrd-* pointing at the
- * ramdisk. The display goes back as S-Boot left it: the vendor kernel
- * initialises DECON itself.
+ * Android: kernel (arm64 Image, Samsung 4.9) at RAM_BASE + text_offset, ramdisk (first stage
+ * init) at OS_RD, and S-Boot's own FDT (the stock DTB it loaded, with its androidboot.*
+ * bootargs) copied to EDIT_FDT with the cmdline file and the entry's cmdline appended and
+ * /chosen linux,initrd-* pointing at the ramdisk. The display goes back as S-Boot left it: the
+ * vendor kernel initialises DECON itself.
  */
-#define ANDROID_RD  0xa8000000UL
-#define ANDROID_FDT 0xad000000UL                /* up to LINUX_DTB */
-
 static uintptr_t
-star_android_store(volatile uint64_t *log, uintptr_t fdt)
+boot_android(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
 {
-    struct store_ent img, rd, cl;
+    struct src img, rd, cl;
     static char cmdline[1024];
-    star_fb_text(1, "LOADING ANDROID FROM UFS");
-    if (!ufs_up())
-        return fail(log, -50, "UFS NOT READY");
-    if (!store_open() || !store_find("android.kernel", &img) || !store_find("android.ramdisk", &rd))
+    star_fb_text(1, "LOADING ANDROID");
+    if (!resolve(e->file[0], &img) || img.kind != SRC_STORE ||
+        !resolve(e->file[1], &rd) || rd.kind != SRC_STORE)
         return fail(log, -51, "NO ANDROID IN THE OS STORE");
     cmdline[0] = 0;
-    if (store_find("android.cmdline", &cl) && cl.size < sizeof(cmdline) - 1) {
-        if (store_load(&cl, UFS_BUF + (512U << 10)))
+    if (e->file[2][0] && resolve(e->file[2], &cl) && cl.kind == SRC_STORE && cl.e.size < sizeof(cmdline) - 1) {
+        if (store_load(&cl.e, TEXT_BUF, sizeof(cmdline) - 1))
             return fail(log, -52, "ANDROID CMDLINE READ OR CRC FAILED");
-        for (uint32_t i = 0; i < cl.size; ++i) {
-            char c = *(volatile char *)(UFS_BUF + (512U << 10) + i);
+        for (uint32_t i = 0; i < cl.e.size; ++i) {
+            char c = *(volatile char *)(TEXT_BUF + i);
             cmdline[i] = (c == '\n' || c == '\r') ? ' ' : c;
         }
-        cmdline[cl.size] = 0;
+        cmdline[cl.e.size] = 0;
     }
-    if (rd.size > LINUX_DTB - ANDROID_RD - (16UL << 20))
-        return fail(log, -53, "ANDROID RAMDISK TOO LARGE");
-    if (store_load(&rd, ANDROID_RD))
-        return fail(log, -54, "ANDROID RAMDISK READ OR CRC FAILED");
-    if (ufs_read(img.lba, 1) || u8le(UFS_BUF + 56, 4) != 0x644d5241U)
-        return fail(log, -55, "BAD ANDROID KERNEL");
-    uint64_t text_offset = u8le(UFS_BUF + 8, 8), image_size = u8le(UFS_BUF + 16, 8);
-    if (image_size < img.size)
-        image_size = img.size;
-    uintptr_t dst = LINUX_BASE + text_offset;
-    if (text_offset >= (2UL << 20) || dst + image_size > ANDROID_RD)
-        return fail(log, -56, "ANDROID KERNEL TOO LARGE");
-    star_fb_hex(2, "ANDROID AT", dst);
-    int r = store_load(&img, dst);
+    line_append(cmdline, sizeof(cmdline), e->cmdline);
+    int r = store_load(&rd.e, OS_RD, EDIT_FDT - OS_RD);
     if (r)
-        return fail(log, -57, r == -2 ? "ANDROID KERNEL CRC MISMATCH" : "ANDROID KERNEL READ FAILED");
-    uint32_t fsize = cmdline[0] ? fdt_copy_append_bootargs(fdt, ANDROID_FDT, LINUX_DTB - ANDROID_FDT, cmdline) : 0;
+        return fail(log, -54, r == -3 ? "ANDROID RAMDISK TOO LARGE" : "ANDROID RAMDISK READ OR CRC FAILED");
+    uint64_t span;
+    uintptr_t dst = image_load(log, &img.e, OS_RD, -55, &span);
+    if (!dst)
+        return 0;
+    uint32_t fsize = cmdline[0] ? fdt_copy_append_bootargs(fdt, EDIT_FDT, LINUX_DTB - EDIT_FDT, cmdline) : 0;
     if (!fsize) {
         uint32_t total = __builtin_bswap32(*(volatile uint32_t *)(fdt + 4));
-        if (cmdline[0] || total > LINUX_DTB - ANDROID_FDT)
+        if (cmdline[0] || total > LINUX_DTB - EDIT_FDT)
             return fail(log, -58, "ANDROID FDT FAILED");
-        copy_bytes(ANDROID_FDT, fdt, total);
+        copy_bytes(EDIT_FDT, fdt, total);
         fsize = total;
     }
-    if (!fdt_chosen_set_u64(ANDROID_FDT, "linux,initrd-start", ANDROID_RD) ||
-        !fdt_chosen_set_u64(ANDROID_FDT, "linux,initrd-end", ANDROID_RD + rd.size))
+    if (!fdt_chosen_set_u64(EDIT_FDT, "linux,initrd-start", OS_RD) ||
+        !fdt_chosen_set_u64(EDIT_FDT, "linux,initrd-end", OS_RD + rd.e.size))
         return fail(log, -59, "NO INITRD PROPERTIES IN FDT");
-    clean_bytes(dst, dst + image_size);
-    clean_bytes(ANDROID_RD, ANDROID_RD + rd.size);
-    clean_bytes(ANDROID_FDT, ANDROID_FDT + fsize);
+    clean_bytes(dst, dst + span);
+    clean_bytes(OS_RD, OS_RD + rd.e.size);
+    clean_bytes(EDIT_FDT, EDIT_FDT + fsize);
     star_fb_restore((uint32_t)log[77]);
     log[10] = 0x500;
     log[15] = dst;
-    log[17] = ANDROID_FDT;
+    log[17] = EDIT_FDT;
+    clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+    __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
+    return dst;
+}
+
+/*
+ * Bare: any arm64 Image from the store (Starbite's own systems, demos) at RAM_BASE + text_offset,
+ * entered like Linux with x0 = S-Boot's FDT and the screen as the loader leaves it (the
+ * framebuffer at STAR_FB_BASE, CPU writes reach the panel).
+ */
+static uintptr_t
+boot_bare(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
+{
+    struct src s;
+    uint64_t span;
+    star_fb_text(1, "LOADING");
+    if (!resolve(e->file[0], &s) || s.kind != SRC_STORE)
+        return fail(log, -60, "NO IMAGE IN THE STORE");
+    uintptr_t dst = image_load(log, &s.e, OS_RD, -61, &span);
+    if (!dst)
+        return 0;
+    clean_bytes(dst, dst + span);
+    log[10] = 0x600;
+    log[15] = dst;
+    log[17] = fdt;
     clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
     __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
     return dst;
@@ -725,9 +800,10 @@ star_android_store(volatile uint64_t *log, uintptr_t fdt)
 
 /*
  * Windows 11: the exynos9810-woa UEFI (BOOT kernel of its release image:
- * edk2-msm style bootshim + EDK2 FD) in an "SBUEFI!!" bundle. The bootshim
- * is position independent and copies the FD to 0x90000000 itself, so it is
- * entered where it lies, as S-Boot would enter it (x0 = FDT, MMU off).
+ * edk2-msm style bootshim + EDK2 FD), from the store ("windows.uefi", put at
+ * STAGE) or an "SBUEFI!!" bundle in BOOT. The bootshim is position
+ * independent and copies the FD to 0x90000000 itself, so it is entered where
+ * it lies, as S-Boot would enter it (x0 = FDT, MMU off).
  *
  * The woa BDS keeps a boot-attempt counter ("BAT1" magic + count at
  * 0xFED17F10, in the exynos_ss log page, survives warm resets) and sends the
@@ -784,18 +860,31 @@ pmsg_hex(uint64_t v)
 static void star_rwd1_arm(void);
 
 static uintptr_t
-star_uefi(volatile uint64_t *log, uintptr_t fdt, const struct payload *p,
-    uintptr_t rd_start, uintptr_t rd_end)
+boot_uefi(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
 {
+    struct src s;
+    uintptr_t img;
     uint64_t size;
-    uintptr_t img = find_bundle(p, rd_start, rd_end, BUNDLE_UEFI, &size);
-    if (!img)
+    if (!resolve(e->file[0], &s))
         return fail(log, -30, "NO WINDOWS UEFI");
+    if (s.kind == SRC_STORE) {
+        star_fb_text(1, "LOADING UEFI");
+        int r = store_load(&s.e, STAGE, UEFI_FD - STAGE);
+        if (r)
+            return fail(log, -33, r == -3 ? "UEFI IMAGE TOO LARGE" : r == -2 ? "UEFI IMAGE CRC MISMATCH" : "UEFI IMAGE READ FAILED");
+        img = STAGE;
+        size = s.e.size;
+    } else if (s.kind == SRC_BUNDLE) {
+        img = s.addr;
+        size = s.size;
+    } else {
+        return fail(log, -31, "NOT A UEFI IMAGE");
+    }
     if (size < 64 || *(volatile uint32_t *)(img + 56) != 0x644d5241U)
         return fail(log, -31, "BAD WINDOWS UEFI");
-    /* The FD lands at 0x90000000..0x90700000: the bundle must not be there. */
-    if (img + size > 0x90000000UL)
-        return fail(log, -32, "UEFI BUNDLE TOO HIGH");
+    /* The FD lands at 0x90000000..0x90700000: the image must not be there. */
+    if (img < UEFI_FD_END && img + size > UEFI_FD)
+        return fail(log, -32, "UEFI IMAGE OVER ITS FD");
     star_fb_hex(1, "UEFI AT", img);
     /* Empty ring: everything after the marker is this UEFI run's trace. */
     ((volatile uint32_t *)PMSG_BASE)[0] = 0;
@@ -946,80 +1035,13 @@ star_rwd1_arm(void)
     pmsg_put("STARBITE: rwd1 SEC_ACTIVE gen 1, p3 cleared\n");
 }
 
-uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)
+/* Copy XNU's segments, ADT and boot_args into its window; returns the entry PA or 0. */
+static uintptr_t
+xnu_enter(volatile uint64_t *log, const struct payload *p, uintptr_t rd_start, uint64_t length,
+    const char *cmdline)
 {
-    uint64_t rd_start, rd_end;
-    static char cmdline[BOOT_LINE_LENGTH];
-    /* Caches on before anything is drawn (mmu.c); the checks below see S-Boot's sctlr. */
-    if (el == 4 && !(sctlr & 1))
-        star_mmu_enable();
-    star_dump_latches();
-    log[77] = star_fb_enable();
-    int branded = star_splash(fdt);
-    if (el != 4)
-        return fail(log, -10, "NOT EL1");
-    if (sctlr & 1)
-        return fail(log, -11, "MMU ALREADY ON");
-    /* Appended payload first: its length is bounded by the Image header. */
-    extern char _start[], _image_end[];
-    uint64_t image_size = *(volatile uint64_t *)(uintptr_t)(_start + 16);
-    rd_start = (uintptr_t)_image_end;
-    rd_end = (uintptr_t)_start + image_size;
-    if (rd_end <= rd_start || !magic_ok((const char *)rd_start)) {
-        if (!fdt || (fdt & 7) ||
-            !fdt_chosen_u64(fdt, "linux,initrd-start", &rd_start) ||
-            !fdt_chosen_u64(fdt, "linux,initrd-end", &rd_end) ||
-            rd_end <= rd_start)
-            return fail(log, -1, "NO PAYLOAD");
-    }
-    if (rd_start < DRAM_LOW || rd_end > RAM_BASE)
-        return fail(log, -1, "PAYLOAD OVERLAPS XNU RAM");
     log[11] = rd_start;
-    log[12] = rd_end;
-
-    const struct payload *p = (const struct payload *)(uintptr_t)rd_start;
-    uint64_t length = rd_end - rd_start;
-    if (length < sizeof(*p) || !magic_ok(p->magic) || p->version != 1 ||
-        !p->nsegs || p->nsegs > 32 ||
-        __builtin_offsetof(struct payload, segs) + p->nsegs * sizeof(struct payload_seg) > length ||
-        p->adt_off > length || p->adt_size > length - p->adt_off)
-        return fail(log, -2, "BAD SWEETXNU PAYLOAD");
-    /* The payload itself sits below RAM_BASE, outside both windows. */
-    uint64_t window_end = p->phys_base >= BANK2_BASE ? BANK2_END : RAM_END;
-    int in_low = p->phys_base >= RAM_BASE && p->phys_base < RAM_END;
-    int in_bank2 = p->phys_base >= BANK2_BASE && p->phys_base < BANK2_END;
-    if (!(in_low || in_bank2) ||
-        !p->mem_size || p->mem_size > window_end - p->phys_base ||
-        p->entry_va < p->virt_base || p->kernel_end < p->virt_base)
-        return fail(log, -3, "PAYLOAD RAM OUTSIDE WINDOW");
-    for (unsigned i = 0; i < BOOT_LINE_LENGTH; ++i)
-        cmdline[i] = p->cmdline[i];
-    cmdline[BOOT_LINE_LENGTH - 1] = 0;
-    /* The boot menu (and Starbite Engineer) on the branded screen; XNU RAM
-     * is still free here, for Engineer's RAM test. */
-    if (branded) {
-        struct star_info in;
-        in.el = el;
-        in.sctlr = sctlr;
-        in.fdt = fdt;
-        in.rd_start = rd_start;
-        in.rd_end = rd_end;
-        in.phys_base = p->phys_base;
-        in.mem_size = p->mem_size;
-        in.entry_va = p->entry_va;
-        in.nsegs = p->nsegs;
-        int pick = star_menu(&in, cmdline, BOOT_LINE_LENGTH);
-        if (!pick)
-            return 0;
-        if (pick == 2)
-            return star_linux(log, fdt, p, length, rd_start, rd_end);
-        if (pick == 3)
-            return star_uefi(log, fdt, p, rd_start, rd_end);
-        if (pick == 4)
-            return star_linux_store(log);
-        if (pick == 5)
-            return star_android_store(log, fdt);
-    }
+    log[12] = rd_start + length;
     star_fb_text(0, "PROJECT STARBITE");
     star_fb_text(1, "");
     star_fb_hex(2, "RAM BASE", p->phys_base);
@@ -1076,4 +1098,109 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
     clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
     __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
     return entry_pa;
+}
+
+/*
+ * XNU: the payload is BOOT's ("@boot", with the boot-args the menu and Engineer edited) or a store
+ * entry loaded to STAGE (with its own boot-args); the entry's cmdline is appended to either.
+ */
+static uintptr_t
+boot_xnu(volatile uint64_t *log, const struct cat_ent *e, const char *edited)
+{
+    static char cmd[BOOT_LINE_LENGTH];
+    struct src s;
+    uintptr_t rd_start;
+    uint64_t length;
+    if (!resolve(e->file[0], &s))
+        return fail(log, -1, "NO PAYLOAD");
+    if (s.kind == SRC_BOOT) {
+        rd_start = s.addr;
+        length = s.size;
+    } else if (s.kind == SRC_STORE) {
+        star_fb_text(1, "LOADING XNU");
+        int r = store_load(&s.e, STAGE, STAGE_END - STAGE);
+        if (r)
+            return fail(log, -7, r == -3 ? "PAYLOAD TOO LARGE" : r == -2 ? "PAYLOAD CRC MISMATCH" : "PAYLOAD READ FAILED");
+        rd_start = STAGE;
+        length = s.e.size;
+    } else {
+        return fail(log, -1, "NOT AN XNU PAYLOAD");
+    }
+    const struct payload *p = (const struct payload *)rd_start;
+    const char *bad = payload_bad(p, length);
+    if (bad)
+        return fail(log, -2, bad);
+    const char *src = s.kind == SRC_BOOT ? edited : p->cmdline;
+    for (unsigned i = 0; i < BOOT_LINE_LENGTH; ++i)
+        cmd[i] = src[i];
+    cmd[BOOT_LINE_LENGTH - 1] = 0;
+    line_append(cmd, BOOT_LINE_LENGTH, e->cmdline);
+    return xnu_enter(log, p, rd_start, length, cmd);
+}
+
+static uintptr_t
+boot_entry(unsigned i, volatile uint64_t *log, uintptr_t fdt, const char *cmdline)
+{
+    const struct cat_ent *e = cat_get(i);
+    const char *why;
+    boot_why = 0;
+    if (!e)
+        return fail(log, -12, "NO SUCH ENTRY");
+    if (!star_entry_ready(i, &why))
+        return fail(log, -13, why);
+    if (e->method == M_XNU)
+        return boot_xnu(log, e, cmdline);
+    if (e->method == M_UEFI)
+        return boot_uefi(log, fdt, e);
+    if (e->method == M_LINUX)
+        return boot_linux(log, e);
+    if (e->method == M_ANDROID)
+        return boot_android(log, fdt, e);
+    return boot_bare(log, fdt, e);
+}
+
+/* Returns the entry PA, or 0 for Download mode. Status stays in the log page at LOG_BASE. */
+uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)
+{
+    static char cmdline[BOOT_LINE_LENGTH];
+    /* Caches on before anything is drawn (mmu.c); the checks below see S-Boot's sctlr. */
+    if (el == 4 && !(sctlr & 1))
+        star_mmu_enable();
+    star_dump_latches();
+    log[77] = star_fb_enable();
+    int branded = star_splash(fdt);
+    if (el != 4)
+        return fatal(log, -10, "NOT EL1");
+    if (sctlr & 1)
+        return fatal(log, -11, "MMU ALREADY ON");
+    boot_payload(fdt);
+    log[11] = boot_rd_start;
+    log[12] = boot_rd_end;
+    struct star_info in;
+    in.el = el;
+    in.sctlr = sctlr;
+    in.fdt = fdt;
+    in.rd_start = boot_rd_start;
+    in.rd_end = boot_rd_end;
+    in.phys_base = boot_p ? boot_p->phys_base : 0;
+    in.mem_size = boot_p ? boot_p->mem_size : 0;
+    in.entry_va = boot_p ? boot_p->entry_va : 0;
+    in.nsegs = boot_p ? boot_p->nsegs : 0;
+    for (unsigned i = 0; i < BOOT_LINE_LENGTH; ++i)
+        cmdline[i] = boot_p ? boot_p->cmdline[i] : 0;
+    cmdline[BOOT_LINE_LENGTH - 1] = 0;
+    (void)cat_load();
+    /* The boot menu (and Starbite Engineer) on the branded screen; XNU RAM is still free here,
+     * for Engineer's RAM test. A start that fails comes back to the menu. Unbranded: iOS. */
+    for (;;) {
+        int pick = branded ? star_menu(&in, cmdline, BOOT_LINE_LENGTH) : star_ios_pick();
+        if (pick <= 0)
+            return branded ? 0 : fatal(log, -1, "NO PAYLOAD");
+        uintptr_t entry = boot_entry((unsigned)(pick - 1), log, fdt, cmdline);
+        if (entry)
+            return entry;
+        if (!branded)
+            return fatal(log, 0, 0);
+        star_menu_failed(cat_get((unsigned)(pick - 1))->name, boot_why);
+    }
 }

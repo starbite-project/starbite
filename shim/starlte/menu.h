@@ -9,13 +9,16 @@ struct star_info {
 };
 
 /*
- * Boot menu under Samsung's logo: iOS (Starbite), Linux kiosk, Windows 11,
- * Recovery (TWRP), Starbite Engineer (which also has Download mode). Returns
- * 1 to boot iOS with `cmdline` (edited in place by Engineer mode), 2 for the
- * Linux kiosk Linux, 3 for the Windows UEFI; Recovery and Download reboot
- * from here.
+ * Boot menu under Samsung's logo: the catalog's OS rows (catalog.h), Recovery (TWRP), Download,
+ * and Starbite Engineer. Returns the catalog entry to start + 1 (0: Download mode), with
+ * `cmdline` (BOOT's iOS boot-args) edited in place by Engineer; Recovery and Download reboot
+ * from here. If the start fails, star_menu_failed says why and star_menu is called again: it
+ * comes back as it was, with the reason on screen.
  */
 int star_menu(const struct star_info *in, char *cmdline, unsigned len);
+void star_menu_failed(const char *name, const char *why);
+/* Catalog entry + 1 of iOS from BOOT (what Engineer's "boot iOS" starts), 0 if there is none. */
+int star_ios_pick(void);
 
 /* xnu_boot.c: draw the Starbite overlay again (over black). */
 void star_overlay_redraw(void);

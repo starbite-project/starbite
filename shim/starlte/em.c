@@ -23,6 +23,9 @@
 #include "../fdt.h"
 #include "mmu.h"
 #include "ufs.h"
+#include "store.h"
+#include "catalog.h"
+#include "menu.h"
 
 /* ---- geometry ----------------------------------------------------------- */
 
@@ -2204,13 +2207,21 @@ static void fill_windows(void)
     uint64_t size = 0;
     struct ub u;
     uint64_t at = star_bundle(E.in, 0, &size);
-    kv_hdr("FIRMWARE (SBUEFI BUNDLE)");
+    struct store_ent se;
+    kv_hdr("FIRMWARE (UEFI IMAGE)");
+    if (store_find("windows.uefi", &se)) {
+        ub_init(&u);
+        ub_size(&u, se.size);
+        ub_s(&u, se.medium == STORE_SD ? "  OS store (microSD)" : "  OS store (UFS)");
+        kv_add("windows.uefi", u.b);
+    } else {
+        kv_addc("windows.uefi", "not in the OS store", UI_RED);
+    }
     if (at) {
         ub_init(&u);
         ub_size(&u, size);
-        kv_add("UEFI image", u.b);
-    } else {
-        kv_addc("UEFI image", "not in this BOOT image", UI_RED);
+        ub_s(&u, "  fallback");
+        kv_add("BOOT bundle", u.b);
     }
     kv_add("Build", "src38: Starbite SEC/PEI + woa DXE");
     kv_add("RAM", "stage 3: 3.4 GB (BS-data banks)");
@@ -2317,8 +2328,10 @@ static int act_ios_opts(int i)
             opt.smpprobe = !opt.smpprobe;
         break;
     default:
+        if (!star_ios_pick())
+            return 0;
         hw_opt_apply(E.cmd, E.len);
-        E.boot = 1;
+        E.boot = star_ios_pick();
         return 1;
     }
     return 0;
@@ -2326,31 +2339,32 @@ static int act_ios_opts(int i)
 
 static void fs_kind(uint64_t lba, struct ub *u);   /* STORAGE section */
 
-/* Store entries whose name starts with prefix, as rows "name  size  crc". */
+/* Store entries whose name starts with prefix, as rows "name  size  crc", both media. */
 static void kv_store(const char *prefix)
 {
-    char name[24];
-    uint64_t size, lba;
-    uint32_t crc;
-    int n = star_store_entry(0, name, &size, &crc, &lba), shown = 0;
-    for (int i = 0; i < n; ++i) {
-        if (star_store_entry(i, name, &size, &crc, &lba) < 0)
-            break;
-        unsigned k = 0;
-        while (prefix[k] && name[k] == prefix[k])
-            ++k;
-        if (prefix[k])
-            continue;
-        struct ub v;
-        ub_init(&v);
-        ub_size(&v, size);
-        ub_s(&v, "  crc ");
-        ub_hexn(&v, crc, 8);
-        kv_add(name, v.b);
-        ++shown;
+    struct store_ent e;
+    int shown = 0, any = 0;
+    for (unsigned m = 0; m < STORE_MEDIA; ++m) {
+        any |= store_open(m) > 0;
+        for (unsigned i = 0; store_get(m, i, &e); ++i) {
+            unsigned k = 0;
+            while (prefix[k] && e.name[k] == prefix[k])
+                ++k;
+            if (prefix[k])
+                continue;
+            struct ub v;
+            ub_init(&v);
+            ub_size(&v, e.size);
+            ub_s(&v, "  crc ");
+            ub_hexn(&v, e.crc, 8);
+            if (m == STORE_SD)
+                ub_s(&v, "  SD");
+            kv_add(e.name, v.b);
+            ++shown;
+        }
     }
     if (!shown)
-        kv_addc("OS store", n ? "no entries for this OS" : "no store on USERDATA", UI_RED);
+        kv_addc("OS store", any ? "no entries for this OS" : "no store found", UI_RED);
 }
 
 /* Partition row: size and the filesystem found on it, live. */
@@ -2411,63 +2425,83 @@ static void fill_linux(void)
     kv_store("linux.");
 }
 
-static void fill_store(void)
+static void fill_store_medium(unsigned m)
 {
-    char name[24];
-    uint64_t size, lba, used = 4096;
-    uint32_t crc;
+    struct store_ent e;
     struct ub v;
-    int n = star_store_entry(0, name, &size, &crc, &lba);
-    kv_hdr("SBSTORE1 " UI_DOT " USERDATA +16 GIB (LIVE)");
-    if (!n) {
+    kv_hdr(m == STORE_UFS ? "UFS " UI_DOT " USERDATA +16 GIB (LIVE)" : "MICROSD " UI_DOT " PARTITION 2 (LIVE)");
+    int n = store_open(m);
+    if (!store_version(m)) {
         kv_addc("Store", "not found", UI_RED);
         return;
     }
-    kv_dec("First block (LU0)", lba, 0);
+    kv_add("Format", store_version(m) == 2 ? "SBSTORE2" : "SBSTORE1 (old)");
+    kv_dec("First block", store_base(m), 0);
     kv_dec("Entries", (uint64_t)n, 0);
-    kv_hdr("ENTRIES");
-    for (int i = 0; i < n; ++i) {
-        if (star_store_entry(i, name, &size, &crc, &lba) < 0)
-            break;
-        ub_init(&v);
-        ub_size(&v, size);
-        ub_s(&v, "  crc ");
-        ub_hexn(&v, crc, 8);
-        kv_add(name, v.b);
-        used += (size + 4095U) & ~4095ULL;
-    }
-    kv_hdr("SPACE");
     ub_init(&v);
-    ub_size(&v, used);
-    ub_s(&v, " of 1 GiB");
+    ub_size(&v, store_used(m) * 4096U);
+    ub_s(&v, " of ");
+    ub_size(&v, store_capacity(m) * 4096U);
     kv_add("Used", v.b);
-    kv_add("Written by", "TWRP or Linux, checked readback");
+    for (unsigned i = 0; store_get(m, i, &e); ++i) {
+        ub_init(&v);
+        ub_size(&v, e.size);
+        ub_s(&v, "  crc ");
+        ub_hexn(&v, e.crc, 8);
+        kv_add(e.name, v.b);
+    }
 }
 
-/* Start an OS straight from EngineerMode: E.boot = the boot menu's pick. */
-static int start_avail[5];
+static void fill_store(void)
+{
+    struct star_settings st;
+    struct ub v;
+    fill_store_medium(STORE_UFS);
+    fill_store_medium(STORE_SD);
+    kv_hdr("CATALOG");
+    kv_add("Source", cat_builtin() ? "built in (no catalog in the store)" : "OS store");
+    for (unsigned i = 0; i < cat_count(); ++i) {
+        const struct cat_ent *c = cat_get(i);
+        const char *why;
+        ub_init(&v);
+        ub_s(&v, c->key);
+        ub_s(&v, "  ");
+        ub_s(&v, star_entry_ready(i, &why) ? "ready" : why);
+        kv_addc(c->name, v.b, star_entry_ready(i, 0) ? UI_TEXT : UI_RED);
+    }
+    kv_hdr("SETTINGS");
+    if (!settings_load(&st)) {
+        kv_addc("Record", "none (defaults)", UI_RED);
+        return;
+    }
+    kv_add("Last choice", st.last_key[0] ? st.last_key : "-");
+    kv_add("Default", st.default_key[0] ? st.default_key : "-");
+    kv_dec("Timeout", st.timeout_s, " s (0 = wait)");
+    kv_add("Next (one shot)", st.next_key[0] ? st.next_key : "-");
+    kv_dec("Writes", st.seq, 0);
+}
 
+/* Start an OS straight from EngineerMode: every catalog entry (hidden ones too). E.boot = the
+ * entry + 1, as the menu's pick. */
 static void build_start(void)
 {
-    start_avail[0] = star_store_has("android.kernel");
-    start_avail[2] = star_store_has("linux.image");
-    start_avail[1] = start_avail[3] = 1;
-    row_add("Android 17", "LineageOS 24.0", start_avail[0] ? 0 : R_DIS);
-    row_add("iOS 26", "with the current boot options", 0);
-    row_add("Linux 7.1", "postmarketOS " UI_DOT " Alpine edge", start_avail[2] ? 0 : R_DIS);
-    row_add("Windows 11", "23H2", 0);
+    for (unsigned i = 0; i < cat_count(); ++i) {
+        const struct cat_ent *c = cat_get(i);
+        const char *why;
+        int ok = star_entry_ready(i, &why);
+        row_add(c->name, ok ? c->version : why, ok ? 0 : R_DIS);
+    }
 }
 
 static int act_start(int i)
 {
-    static const unsigned char pick[4] = { 5, 1, 4, 3 };
-    if (i < 0 || i > 3 || !start_avail[i])
+    if (i < 0 || (unsigned)i >= cat_count() || !star_entry_ready((unsigned)i, 0))
         return 0;
     if (!dialog("Start", rows[i].t, "Leaves EngineerMode.", "START"))
         return 0;
-    if (pick[i] == 1)
+    if (i + 1 == star_ios_pick())
         hw_opt_apply(E.cmd, E.len);
-    E.boot = pick[i];
+    E.boot = i + 1;
     return 1;
 }
 

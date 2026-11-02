@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * UFS from the loader (ufs.c): read-only commands on S-Boot's running host,
- * used by EngineerMode (em.c) and to load OSes from storage (xnu_boot.c).
+ * UFS from the loader (ufs.c): commands on S-Boot's running host, used by
+ * EngineerMode (em.c) and the OS store (store.c). Read only, except the store's
+ * settings record.
  */
 #pragma once
 #include <stdint.h>
@@ -23,8 +24,10 @@ int ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len);
 int ufs_desc(uint8_t idn, uint8_t index, uint8_t *out, unsigned cap);
 /* READ(10) of 4 KiB blocks into UFS_BUF (count <= 256). */
 int ufs_read(uint64_t lba, uint32_t count);
-/* READ(10) of 4 KiB blocks straight into RAM at dst, one block per command. */
+/* READ(10) of 4 KiB blocks straight into RAM at dst (DMA, 128 KiB per command). */
 int ufs_read_to(uint64_t lba, uint64_t count, uintptr_t dst);
+/* WRITE(10) of one 4 KiB block from src: only for the store's settings record (store.c). */
+int ufs_write_block(uint64_t lba, uintptr_t src);
 
 static inline uint8_t u8r(uintptr_t a)
 {

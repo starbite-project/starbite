@@ -8,10 +8,11 @@
 /* ---- UFS: commands from the loader (port of herolte_ufs.c, read only) ------
  * S-Boot leaves the host running with its own request list. Like the iOS
  * driver: polled, auto-hibernate off, our list in slot 0, device woken with
- * TEST UNIT READY / START STOP UNIT on the device W-LUN. MMU off = no cache
- * maintenance. Only READ(10), INQUIRY, TEST UNIT READY, START STOP UNIT and
- * QUERY READ DESCRIPTOR are ever sent: nothing here writes the flash.
- * DMA memory at UFS_DMA (ufs.h).
+ * TEST UNIT READY / START STOP UNIT on the device W-LUN. DMA memory at UFS_DMA
+ * (ufs.h) is non-cacheable (mmu.c): no cache maintenance. Only READ(10),
+ * INQUIRY, TEST UNIT READY, START STOP UNIT and QUERY READ DESCRIPTOR are
+ * sent, and one WRITE(10) of a single block: ufs_write_block, whose only
+ * caller is the OS store's settings record (store.c).
  */
 #define UFS_NEXUS (UFS + 0x1140)
 #define U_UTRL (UFS_DMA)
@@ -86,12 +87,12 @@ static int ufs_ring(unsigned dd, uint32_t len, int scsi, uintptr_t buf)
     return ufs_ocs ? -2 : 0;
 }
 
-/* SCSI command to ufs_lun; len bytes in (dd 2) into buf. */
-static int ufs_scsi_to(const uint8_t *cdb, unsigned cdb_len, uint32_t len, uintptr_t buf)
+/* SCSI command to ufs_lun; len bytes in (dd 2) into buf, or out of it (dd 1) if write. */
+static int ufs_scsi_dir(const uint8_t *cdb, unsigned cdb_len, uint32_t len, uintptr_t buf, int write)
 {
     u_zero(U_UCD, 1024);
     u8w(U_UCD + 0, 0x01);
-    u8w(U_UCD + 1, len ? 0x40 : 0x00);
+    u8w(U_UCD + 1, !len ? 0x00 : write ? 0x20 : 0x40);
     u8w(U_UCD + 2, ufs_lun);
     u8w(U_UCD + 3, ++ufs_tag);
     u8w(U_UCD + 12, (uint8_t)(len >> 24));
@@ -100,10 +101,15 @@ static int ufs_scsi_to(const uint8_t *cdb, unsigned cdb_len, uint32_t len, uintp
     u8w(U_UCD + 15, (uint8_t)len);
     for (unsigned i = 0; i < cdb_len; ++i)
         u8w(U_UCD + 16 + i, cdb[i]);
-    int r = ufs_ring(len ? 2U : 0U, len, 1, buf);
+    int r = ufs_ring(!len ? 0U : write ? 1U : 2U, len, 1, buf);
     if (r)
         return r;
     return (ufs_resp != 0x21 || ufs_qresp || ufs_status) ? -3 : 0;
+}
+
+static int ufs_scsi_to(const uint8_t *cdb, unsigned cdb_len, uint32_t len, uintptr_t buf)
+{
+    return ufs_scsi_dir(cdb, cdb_len, len, buf, 0);
 }
 
 int ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len)
@@ -150,18 +156,35 @@ int ufs_read(uint64_t lba, uint32_t count)
     return read10(lba, count, UFS_BUF);
 }
 
+/* 32 blocks (128 KiB, 32 PRDT entries) per command; a chunk that fails three
+ * times is read again one block at a time. */
 int ufs_read_to(uint64_t lba, uint64_t count, uintptr_t dst)
 {
     if (!ufs_up())
         return -5;
-    for (uint64_t i = 0; i < count; ++i) {
+    for (uint64_t i = 0, n; i < count; i += n) {
+        n = count - i < 32U ? count - i : 32U;
         int r = -1;
         for (int a = 0; a < 3 && r; ++a)
-            r = read10(lba + i, 1, dst + i * 4096U);
-        if (r)
-            return r;
+            r = read10(lba + i, (uint32_t)n, dst + i * 4096U);
+        for (uint64_t j = 0; r && j < n; ++j) {
+            int b = -1;
+            for (int a = 0; a < 3 && b; ++a)
+                b = read10(lba + i + j, 1, dst + (i + j) * 4096U);
+            if (b)
+                return b;
+        }
     }
     return 0;
+}
+
+int ufs_write_block(uint64_t lba, uintptr_t src)
+{
+    if (!ufs_up() || lba > 0xfffffffeULL)
+        return -4;
+    uint8_t cdb[10] = { 0x2a, 0, (uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8),
+                        (uint8_t)lba, 0, 0, 1, 0 };
+    return ufs_scsi_dir(cdb, sizeof(cdb), 4096U, src, 1);
 }
 
 int ufs_up(void)
