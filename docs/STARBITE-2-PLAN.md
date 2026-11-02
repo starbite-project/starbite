@@ -1,6 +1,6 @@
 # Starbite 2: many operating systems, a new boot menu, Starbite Lab
 
-Plan written 2026-11-02 after a full review of the boot chain, storage and every port
+Plan written 2026-11-02 (revised the same evening with your ideas) after a full review of the boot chain, storage and every port
 (NOTES.md, shim/starlte, tools/*). It says what exists, what blocks growth, the new architecture,
 and the order of work. No time estimates: each phase ends when its "done when" holds.
 
@@ -73,6 +73,15 @@ S-Boot ──> BOOT partition (stays small and stable)
 - **BOOT keeps only the loader + menu assets + the iOS 26 payload**. Kiosk's kernel and the
   Windows UEFI move to the store. That frees ~34 MB and lets the full (unstripped) kernel back in.
 
+### 3.2b UFS re-layout: Android as the main OS
+- Android 17 gets **A16DATA = 32 GB** (from 8 GiB). UFS is full, so something moves to the card:
+  the **Apple roots move to the microSD library**, which needs an **XNU microSD driver** (the
+  key enabler: it also gives every Apple OS its own root on the card). Windows stays on UFS
+  (it has no SD driver), shrunk to ~20 GB; the 1 GiB OS store stays.
+- Card speed: today high-speed mode (22.6 MB/s); UHS (1.8 V switch on LDO2) brings ~80 MB/s.
+- Order: back up everything, add the XNU SD driver, move iOS 26's root to the card and prove it,
+  then repartition (our own GPT tool, keeping entries 1-24 and the Windows GUIDs).
+
 ### 3.3 Robustness
 - Bundles and the store are found independently of the iOS payload: a broken iOS no longer
   takes the menu down.
@@ -98,6 +107,9 @@ S-Boot ──> BOOT partition (stays small and stable)
 - Long-press an entry: per-entry options (boot args, CPU count, verbose, safe mode), saved.
 - Bottom: Recovery, Download, Lab, Power off, plus the Starbite card kept as a compact banner.
 - Boot animation per OS while its files load (progress from the store reads).
+- **Full touch** everywhere (taps, swipes between categories, long-press, scrolling) and
+  **GPU-drawn**: first MMU+caches (smooth software drawing), then the Mali through our own job
+  path (the code that drew XNU's first triangle) for animation, blur and transitions.
 
 ## 5. Starbite Lab (EngineerMode reimagined)
 
@@ -113,60 +125,105 @@ want to open:
   XNU, ported to the loader).
 - **OS manager**: browse the catalog, verify every file's CRC, set default/timeout, edit
   boot args, see last boot logs (pmsg ring, XNU log ring), boot any entry.
-- **Storage**: GPT viewer, partition health, store browser, sector viewer (all read-only).
+- **Every OS**: per-OS pages (iOS root health, boot args, logs, overlay files; Windows BCD/latch
+  records; Android cmdline/props; Linux store entries), install/update/remove an OS.
+- **Storage**: GPT viewer and **editor**, partition health, store browser, sector viewer and
+  **editor**, image backup/restore to the card or USB stick.
+- **Armed mode** (it's Engineer mode: it may do anything): writes to any partition, register
+  pokes, PMIC rails, clocks, fuses-read, flashing. Every dangerous action shows exactly what it
+  will change, needs a deliberate confirmation (hold + slide), and takes an automatic backup
+  first. EFS/CPEFS/boot LUNs stay behind a second, explicit unlock.
 - **USB Lab** (phase 4): show the fastboot status and transfers live.
 - **Demos** launch from here too (section 6, Lab category).
 - Consistent new UI (the boot menu's design language), touch-first, keys as backup.
 
 ## 6. The OS catalog: what goes in each category
 
-Status marks: **[easy]** reuses what works, **[work]** needs real porting, **[stretch]** research.
+Every entry carries a **tag** in the menu: **Daily** (use it every day), **Beta** (works, rough
+edges), **Experimental** (boots, many gaps), **Lab** (demo/novelty), **Not installed**.
+Feasibility marks below: **[easy]** reuses what works, **[work]** real porting, **[stretch]** research.
 
 ### Apple
-- iOS 26.6.2: daily driver (done; keep improving graphics and speed).
-- Darwin console **[easy]**: XNU + a tiny init + a shell from the iOS userland, a pure Darwin
-  terminal on the panel (no SpringBoard). Great for development too.
-- iOS 16.7.16 **[work]**: the root exists on the 64 GB card. Needs a second Apple root slot (on
-  the microSD once XNU can read it, or a UFS slot after repartitioning).
-- iPadOS 18.7.11 **[work]**: re-fetch, decrypt, rebuild (the tools exist), then its own slot.
-- tvOS 26 **[stretch]**: arm64e like iOS 26 (our translator applies), TV UI controlled by keys
-  as a remote. Needs an Apple TV device identity.
-- watchOS **[stretch]**: arm64_32 userland, a different ABI; research only.
+| Entry | Tag goal | Notes |
+|---|---|---|
+| iOS 26.6.2 | Beta | Today's port (Metal on the Mali, 8 cores). Keep improving: wallpaper, Control Center, widgets, speed |
+| **iOS 14** | **Daily (the stable Apple OS)** | **[work]** iPhone 6s/7 identity: their userland is plain arm64 (no PAC), so **no translator and no instruction emulation**: it runs natively on all 8 cores. Pre-sealed-system-volume, so the root is ordinary. Kernel: xnu-7195 (public source), ported back from our 8796 series. Graphics: iOS 14 still has the OpenGL ES CoreAnimation path we already drove with Mesa on iOS 16/iPadOS 18, which is far simpler than Metal |
+| iPadOS (big screen) | Beta | **[work]** iPadOS 18.7.11 ran before (tools exist; root needs rebuilding), or iPadOS 26 on our iOS 26 stack with an iPad identity and the full 1440x2960 canvas |
+| tvOS | Lab | **[stretch]** tvOS 26 is arm64e like iOS 26 (our translator applies); TV UI driven by keys/touch as a remote |
+| Darwin console | Lab / dev | **[easy]** XNU + a tiny init + a shell, a pure Darwin terminal; also the base for "PureDarwin"-style experiments |
+| iOS 6 | Lab (history) | **[stretch]** 32-bit (armv7) userland. Needs either a 64-bit XNU that still runs 32-bit processes (the iOS 10-era xnu-3789/4570 line) or a 32-bit kernel; both are research |
+| iOS 16 | dropped | Its root stays as a backup only |
 
 ### Microsoft
-- Windows 11 23H2: done (desktop + touch).
-- UEFI Shell **[easy]**: already ran on this firmware; as a menu entry.
-- Windows PE ARM64 **[easy-work]**: same firmware, boots from FAT (WINESP or a store entry); a
-  fast-booting rescue/test Windows.
-- Windows 11 22621.2428 **[work]**: the woa release has its firmware; needs its own install.
-- Other Windows builds (24H2+, 10) **[stretch]**: each needs a DXE matched to its winload/ntoskrnl.
-- Drivers to add on the way: USB (XHCI in the FDF), then GPU is a long shot.
+- Windows 11 23H2 (Beta): done (desktop + touch). Next drivers: USB (XHCI), then battery/keys.
+- UEFI Shell (Lab) **[easy]**, Windows PE ARM64 (Beta, rescue) **[easy-work]**.
+- Windows 11 22621.2428 **[work]**; other builds (24H2+, 10) **[stretch]**, one DXE per build.
 
-### Android
-- LineageOS 24 / Android 17 **[easy-work]**: confirm it actually boots, fix what doesn't.
-- **Android versions via GSIs** **[work]**: Generic System Images (Android 12-17, AOSP and
-  variants) on top of Lineage's vendor (Treble). System images on the microSD, data in A16DATA or
-  on the card. One catalog entry per GSI. This is how "lots of Android versions" becomes real.
-- Android Go / microG builds as variants **[work]**.
+### Android (the main OS on UFS)
+- **LineageOS 24 / Android 17 = the Daily main OS**, on UFS with a **32 GB** data partition
+  (section 3.2b). First: confirm it boots and fix what doesn't.
+- **More Android versions via GSIs** **[work]**: Generic System Images (Android 12-17, AOSP,
+  microG, Go) on top of Lineage's vendor, system images in the microSD library, one entry each.
 
 ### Linux
-- postmarketOS edge, Plasma Mobile: done.
-- **More distros sharing the mainline kernel** **[easy]**: the loader passes
-  `starbite.root=<file>`; the init picks that image on the card. Candidates: postmarketOS with
-  Phosh / GNOME Mobile / Sxmo, Alpine console, Debian, Arch Linux ARM, Fedora, Ubuntu (desktop
-  ARM64 userland), Kali.
-- Linux "retro station" **[easy-work]**: QEMU under Linux running Windows 95/XP/98, classic Mac
-  OS (via QEMU PPC), DOS games, as their own entries.
-- Kiosk/media entries: Linux kiosk (move its kernel to the store), Kodi media center **[work]**.
+- postmarketOS edge, Plasma Mobile (Beta). **First fix: the GPU.** Panfrost's devfreq sat at
+  260 MHz 99.8 % of the time (NOTES.md:1178); pin/tune it to 572 MHz (as iOS runs it), check
+  KWin's compositing path, then UHS on the microSD for app start. Goal: 60 fps UI.
+- **More distros on the same mainline kernel** **[easy]**: `starbite.root=<file>` picks the
+  image on the card: postmarketOS with Phosh/GNOME Mobile/Sxmo, Debian, Arch Linux ARM, Fedora,
+  Ubuntu, Kali.
+- **ChromeOS** **[stretch]**: ChromeOS Flex is x86-only; the ARM route is ChromiumOS / FydeOS
+  built for a generic arm64 board on our mainline kernel, Panfrost for graphics.
+- Retro station **[easy-work]**: QEMU under Linux running Windows 95/98/XP, classic Mac OS, DOS.
+- Kiosks: Linux kiosk (kernel moved to the store), Kodi **[work]**.
 
-### Lab and other systems
-- **Bare-metal demos inside the loader** **[work, fun]**: Mali GPU spinning 3D/raymarching demo
-  using our own GPU job path, Mandelbrot zoom, a particle sandbox with multi-touch, a chiptune
-  player on the speaker if audio is reachable, DOOM (bare-metal port, runs off the store's WAD).
-- Other OSes **[stretch]**: NetBSD arm64 via our UEFI (it supports ACPI), FreeBSD/OpenBSD,
-  Haiku arm64, SerenityOS aarch64, Redox, Plan 9: each a research item; NetBSD is the most
-  promising first.
-- "Starbite OS": a tiny OS of our own on top of the loader **[stretch]**.
+### Starbite's own systems
+- **Starbite OS** **[work → stretch]**: our own ultra-light OS, not Linux, grown from the loader
+  (which already drives UFS, touch, display, keys, PMIC, power rails, clocks and has the Mali job
+  path from XNU to port). Adds a scheduler, apps, the GPU UI of the boot menu, USB, and later the
+  **modem**: the Shannon modem needs Samsung's CP boot (firmware load from RADIO, EFS-backed
+  NV data) and its IPC protocol over shared memory. Calls/SMS on our own OS is a long research
+  project; open references exist for the IPC side (libsamsung-ipc, ShannonEE research).
+- **USB Toolkit** **[easy-work]**: the phone becomes USB devices on the cable: keyboard/mouse,
+  mass storage (expose the microSD), network adapter, serial console, MIDI, game controller,
+  display-as-webcam. First as a Linux entry (configfs gadgets: USB networking already works
+  on our Linux), later native in Starbite OS (the same DWC3 work as fastboot).
+- **Demos (Lab)**: Mali GPU 3D/raymarching with our own job path, Mandelbrot, multi-touch
+  particle sandbox, DOOM (bare-metal), chiptunes if audio is reachable.
+
+### Other systems [stretch]
+NetBSD arm64 via our UEFI (it supports ACPI: the most promising), FreeBSD/OpenBSD, Haiku arm64,
+SerenityOS aarch64, Redox, Plan 9.
+
+## 6b. Starbite Installer and the second S9
+
+- **The second, identical S9** is the test device: everything we build gets proven on a clean
+  phone, and the daily phone stops being the guinea pig.
+- **Starbite Installer** (like a Hackintosh install USB): a USB stick (FAT/exFAT) with an
+  installer manifest, the boot image, our recovery and every OS image.
+  1. On a stock S9, Download mode accepts a flash of BOOT and RECOVERY. From a computer
+     (Heimdall/Odin) **or from the first S9**: Starbite Linux with USB host mode runs Heimdall
+     and flashes the second phone, phone to phone.
+  2. Our **Starbite Recovery** (replacing TWRP: our kernel + a small installer UI) boots, reads
+     the USB stick through the USB-C adapter (USB host/OTG: Type-C role switch + VBUS boost from
+     the MAX77705), checks the phone (model, bootloader version, EFS backed up), and lays out
+     the partitions and the microSD library.
+  3. It installs every OS from the stick and verifies each one.
+- Limits: Download mode itself is Samsung's signed bootloader; it can't be modified or run
+  our code, so step 1 always needs a flasher (a computer or the other S9). OEM unlock and
+  KnoxGuard have to allow it on the new phone (check first).
+- Prerequisites: USB host mode on our Linux, a full backup/restore of every partition we touch,
+  and the PIT/GPT issue (never let Odin/Heimdall write by name past SYSTEM; the installer
+  repartitions itself).
+
+## 6c. What S-Boot shows
+- **"Powered by android" and Samsung's splash** come from `logo.jpg` inside the UP_PARAM
+  partition (a tar, drawn 1:1 by S-Boot). Replacing that image with Starbite's own splash is a
+  known mod. Safe when done with a verified backup of UP_PARAM and our own tar writer.
+  UP_PARAM moves from the never-touch list to "touch only with backup + verify".
+- The menu then owns the screen from the first frame (and no longer draws around a logo).
+- **Download mode, the S-Boot warning screens and S-Boot's own settings can't be changed**:
+  they live in the signed bootloader.
 
 ## 7. Developer features
 
@@ -183,40 +240,45 @@ Status marks: **[easy]** reuses what works, **[work]** needs real porting, **[st
 
 ## 8. Order of work
 
-**Phase 0: safety and the 128 GB card**
-- Back up to the 128 GB card: the iOS 26 root, EFS/CPEFS, the VG6 boot LUNs, the current GPT,
-  and copy everything from the 64 GB card (Windows VHDX, iOS 16 root, Linux image).
+**Phase 0: safety, the 128 GB card, the second S9**
+- Back up to the 128 GB card: the iOS 26 root, EFS/CPEFS, the VG6 boot LUNs, UP_PARAM, the
+  current GPT, and everything on the 64 GB card (Windows VHDX, iOS 16 root, Linux image).
 - Partition the 128 GB card (p1 exFAT, p2 raw store) from TWRP or Linux.
-- Done when: every irreplaceable image exists in at least two places.
+- Second S9: read its model, bootloader version, OEM-unlock/KnoxGuard state; back up its EFS.
+- Done when: every irreplaceable image exists in at least two places, and the second S9's
+  state is known.
 
 **Phase 1: loader 2 core**
 - Store v2 (UFS + microSD reader), catalog format and tool, payload-independent bundle/store
   lookup, fail back to menu, MMU and caches on, settings record + generic boot-next mailbox.
-- Move Kiosk and the Windows UEFI out of BOOT.
-- Done when: today's five OSes boot from catalog entries and BOOT has >30 MB free.
+- Move Kiosk and the Windows UEFI out of BOOT. Our own splash in UP_PARAM.
+- Done when: today's OSes boot from catalog entries and BOOT has >30 MB free.
 
 **Phase 2: menu v6**
-- Categories, run-time labels, scrolling, per-entry options, status chips, boot animations.
-- Done when: the menu shows every catalog entry under its category, and adding one needs no
-  loader rebuild.
+- Full-screen, categories, run-time labels, tags, full touch, per-entry options, boot animations.
+- Done when: adding an OS needs only a catalog entry, and every OS is reachable by touch.
 
-**Phase 3: fill the catalog with the [easy] entries**
-- Darwin console, UEFI Shell, WinPE, Linux distros on the card, Kiosk as a normal entry,
-  verify Android 17, first bare-metal demo.
+**Phase 3: quick wins in every category**
+- Linux GPU at full speed, Linux distros on the card, Darwin console, UEFI Shell, WinPE,
+  Kiosk as a normal entry, Android 17 confirmed, USB Toolkit (Linux), first demo.
 - Done when: each category has at least two working entries.
 
-**Phase 4: Starbite Lab + fastboot**
-- New Lab UI and pages (dashboard, playground, benchmarks, OS manager); USB device mode and the
-  fastboot subset.
-- Done when: `fastboot boot` starts an iOS payload sent from the Mac.
+**Phase 4: Starbite Lab, fastboot, Starbite Recovery + Installer**
+- New Lab (all pages, armed mode); USB device mode and the fastboot subset; USB host mode;
+  our recovery replacing TWRP; the installer proven on the second S9 from a USB stick.
+- Done when: the second S9 goes from stock to full Starbite from a USB stick, and
+  `fastboot boot` starts an iOS payload sent from the Mac.
 
-**Phase 5: the big ports, one at a time**
-- Android GSIs, iPadOS 18 and iOS 16 slots (XNU microSD driver), tvOS, more Windows builds,
-  NetBSD, the GPU demo. Meanwhile iOS 26 keeps improving (wallpaper, Control Center, widgets,
-  big-core speed).
+**Phase 5: storage re-layout and the Apple line**
+- XNU microSD driver, Apple roots on the card, UFS re-layout (Android 32 GB data), iOS 14
+  (xnu-7195, native on 8 cores), iPadOS, tvOS. iOS 26 keeps improving in parallel.
+
+**Phase 6: the long ones, one at a time**
+- Starbite OS (own UI on the GPU, USB, then the modem), Android GSIs, ChromiumOS, more Windows
+  builds, NetBSD, iOS 6, GPU-drawn boot menu.
 
 ## 9. Decisions for you
 1. Starbite card: keep as a banner on the main menu, or move it into the Lab/Linux category?
-2. Samsung's logo: replace with our own full-screen menu art (recommended), or keep drawing around it?
-3. Which [stretch] OS excites you most (tvOS, NetBSD, Windows 10, Haiku)? That one goes first in phase 5.
-4. The 64 GB card: keep it as the Windows/backup card, or merge everything onto the 128 GB card?
+2. Samsung's splash: replace it in UP_PARAM with our own (recommended), or keep it?
+3. The 64 GB card: keep it as the Windows/backup card, or merge everything onto the 128 GB card?
+4. Second S9: which firmware/bootloader is on it, and may it be wiped for the installer tests?
