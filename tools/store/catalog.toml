@@ -150,9 +150,8 @@ category = "linux"
 method = "linux"
 tag = "experimental"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/arch.img"
+cmdline = "sb.root=/distros/arch.img sb.session=phosh"
 root = "sd:p1 /distros/arch.img"
-flags = ["hidden"]
 
 [[entry]]
 key = "linux-fedora"
