@@ -1898,3 +1898,21 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     is glass_background(_sdf)(_no_bleed), glass_foreground(_sdf), displacement_map, chromatic_aberration, rim/brim,
     sdf_gen_field/gradients + fixed_frag's SDF branches. The GL path's census (glcensus=1): kfh, ghn, ghz, gfs, dgh,
     dff, dfg, bvc, lub have no GL program (drawn plain or not at all): that is the broken glass.
+- 2026-11-02: **Metal memory: the freeze was a GPU buffer leak** (boots metal4..metal9b).
+  - metal4/5: RAM ran out ("vm-compressor-space-shortage", threads in vm_page_wait, kernel_task 140-170 %).
+    ADT out/starlte-iphone11-1792.adt (dram-size 0x70000000 patched into the 1536 ADT, same seed): 1792 MiB boots
+    (`ADT=... tools/mkimage-ios26.sh`); vm_compression_limit=196608. Not enough alone.
+  - 0339 (StarbiteMali "wired: buffers/surfaces/host" in the 10 s CALLS line) + 0340 (STARLTE MEM every 30 s:
+    queues, compressor, top footprints): GPU buffers grew 273 -> 1342 MiB in one tour.
+  - starbite-drm leak tracker (SBDRM lines in /var/local/mtl2.log every 15 s, call sites by live bytes; symbols:
+    out/ios/sym/{StarbiteMetal,libvulkan_panfrost.dylib}, atos -l 0): PanVK's per-batch TLS (stack) buffer,
+    2.6 MiB per render pass on the MP18, kept in the command pools' BO lists (311 MiB in backboardd); plus a 137 MiB
+    indirect-varying buffer per device. Fix (mesa26 patch): one 8 MiB TLS buffer per device (StarbiteMali runs one
+    chain at a time, synchronously), 250k indirect vertices (17 MiB), texture pools 64/24 MiB. metal8: buffers
+    level at ~535 MiB, no "unhealthy" all tour, ~10 fps steady.
+  - Boot command line max 608 bytes (shim BOOT_LINE_LENGTH); dropping -noprogress panics (pe_init.c:353 progress
+    assert). Lag: backboardd idle in samples; apps CPU-bound on the 4 A55s while datamigrator ~110 %, logd ~65 %,
+    sharingd ~45 % (com.apple.system.logging.plist Enable-Logging=false did not quiet logd).
+  - metal10: logd + sharingd Disabled in launchd.plist, DataMigration's com.apple.datamigrator.xpc renamed
+    .starbite-off, mtl2-clients += iconservicesagent PosterBoard, icon cache moved to
+    /var/local/iconscache-old-54E29C5C (Library dirs are mode 000: chmod u+rwx as owner, restore after).
