@@ -1935,3 +1935,17 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     match); the M3 lacks LSE + LRCPC. LDAPR -> LDAR is 1:1; LSE needs out-of-line LL/SC stubs (scratch registers,
     red zone): a project of its own. Command line: a5fb_perf is default on (dropped); unentitled_ios_sim_launch
     is required (macOS-config kernel refuses iOS binaries without it).
+- 2026-11-02 evening: **iOS 26 daily image; Starbite 2 plan.**
+  - Daily BOOT `out/xnu-boot-ios26-daily.img` (build/ios26-daily-cmdline.txt, sha bee472ca...): cpus=8, no
+    starauto/sweetreboot/sweetswipe/sweetdumpfile, sbprof=0 (sbca's 1 kHz main-thread profiler had been on in
+    every injected app since metal9), sbshot=0, sweetinject backboardd,SpringBoard,iconservicesagent;
+    /var/local/mtl2-env = STARBITE_DRM_LEAKS=0. Menu row relabelled "iOS 26 · 26.6.2 · XNU 12377"
+    (tools/brand/menu.mjs -> menu.sbm -> em-font.py -> menu-em.sbm = build/boot-uc3/ramdisk.bin; same 39 sprites).
+  - tools/a64e/lse-hotpatch.py: the 25 hottest LSE sites -> LL/SC stubs in __TEXT padding. First version borrowed
+    x9-x15 "unmentioned in the function": swift_retain/release_preservemost callers keep them live -> every Swift
+    daemon SIGSEGV, no SpringBoard. Now every stub saves/restores its scratch registers (SP-160). Traps: 45 M ->
+    26 M per 10 s at startup, 10-15 M -> 3-4 M later. Verified boot ios26-dailytest2: no crashes, GPU active.
+  - Old images, shots and build/dxb-11417 archived on the 64 GB PNY USB stick (build/ARCHIVED-TO-USB.txt);
+    out/xnu-boot-uc3.img (mkimage template) and out/twrp-3.7.0-a16data.img must stay in out/.
+  - Plan: docs/STARBITE-2-PLAN.md (catalog-driven loader, microSD OS library, menu v6 with categories,
+    Starbite Lab, fastboot, OS roadmap).
