@@ -153,6 +153,16 @@ static void missing(const char *cls, const char *sel)
 }
 @end
 
+/* Starbite: which processes load this plugin at all (Metal asked for a device), whatever the client list says */
+__attribute__((constructor)) static void sm2_loaded(void)
+{
+	int fd = open("/dev/console", O_WRONLY | O_NOCTTY);
+	if (fd >= 0) {
+		dprintf(fd, "MTL2[%d %s]: plugin loaded\n", getpid(), getprogname());
+		close(fd);
+	}
+}
+
 static bool listed(void)
 {
 	/* Starbite: backboardd too only when listed (it draws with sbca's OpenGL ES renderer meanwhile) */
