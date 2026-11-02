@@ -18,6 +18,7 @@ $CC -x objective-c++ -std=c++17 -fobjc-arc -O2 -g -Wall -Wno-deprecated-declarat
 	-Wl,-dead_strip -lc++ -framework Foundation -framework Metal -framework IOSurface -framework IOKit \
 	-framework CoreFoundation 2>&1 | grep -v "was built for newer 'iOS' version" || true
 [ -f "$B/StarbiteMetal" ] || exit 1
+mkdir -p out/ios/sym && cp "$B/StarbiteMetal" out/ios/sym/StarbiteMetal && cp "$PANVK" out/ios/sym/libvulkan_panfrost.dylib
 xcrun strip -x "$B/StarbiteMetal"
 cp tools/metal2/Info.plist "$B/Info.plist"
 cp "$PANVK" "$B/libvulkan_panfrost.dylib"

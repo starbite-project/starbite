@@ -245,8 +245,8 @@ static uint64_t gTexturePoolBytes;
 static std::atomic<uint64_t> gTexturePoolHits,gTexturePoolMisses;
 static void texturePoolLimits(uint64_t *capBytes,size_t *capCount) {
  const char *prog=getprogname();
- if(prog && !strcmp(prog,"backboardd")){*capBytes=192ull<<20;*capCount=32;}
- else if(prog && !strcmp(prog,"SpringBoard")){*capBytes=64ull<<20;*capCount=24;}
+ if(prog && !strcmp(prog,"backboardd")){*capBytes=64ull<<20;*capCount=24;}
+ else if(prog && !strcmp(prog,"SpringBoard")){*capBytes=24ull<<20;*capCount=16;}
  else{*capBytes=0;*capCount=0;}
 }
 static bool canPoolTextureDesc(const NmbTextureDescriptor &req) {
