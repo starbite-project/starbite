@@ -448,6 +448,28 @@
        assert(!ret);
     }
  
+--- a/src/panfrost/vulkan/panvk_vX_device.c	2026-10-28 17:17:44
++++ b/src/panfrost/vulkan/panvk_vX_device.c	2026-11-02 03:07:56
+@@ -19,6 +19,7 @@
+ #include "panvk_buffer.h"
+ #include "panvk_cmd_alloc.h"
+ #include "panvk_cmd_buffer.h"
++#include "util/detect_os.h"
+ #include "panvk_device.h"
+ #include "panvk_cmd_draw.h"
+ #include "panvk_entrypoints.h"
+@@ -491,8 +492,10 @@
+ #endif
+ 
+ #if PAN_ARCH <= 9
++   /* Starbite: StarbiteMali allocates (wires) a heap BO in full, it does not grow it on faults; 128 MiB
++    * in each Metal process (backboardd, SpringBoard, ...) ran the S9 out of memory (metal3). */
+    result = panvk_priv_bo_create(
+-      device, 128 * 1024 * 1024,
++      device, (DETECT_OS_APPLE ? 32 : 128) * 1024 * 1024,
+       PAN_KMOD_BO_FLAG_NO_MMAP | PAN_KMOD_BO_FLAG_ALLOC_ON_FAULT,
+       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &device->tiler_heap);
+    if (result != VK_SUCCESS)
 --- a/src/panfrost/vulkan/panvk_vX_physical_device.c	2026-10-28 17:17:44
 +++ b/src/panfrost/vulkan/panvk_vX_physical_device.c	2026-11-02 02:35:16
 @@ -9,7 +9,9 @@
