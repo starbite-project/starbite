@@ -84,6 +84,20 @@
 #define ICON_RESTART 27U
 #define ICON_CHEV_L 28U
 
+/* The dropdown glyphs (ICON_PLAY..ICON_CHEV_L) came with the dropdowns: a BOOT ramdisk from
+ * before them has the v6 icons but not these. Without them the options button shows three dots,
+ * dropdown rows drop their icon column and a choice shows a dot for its check mark. */
+static int glyphs_state;            /* 0 not looked yet, 1 there, 2 missing */
+
+static int glyphs(void)
+{
+    if (!glyphs_state) {
+        unsigned x, y, w, h;
+        glyphs_state = star_sprite_rect(ICON_BASE + ICON_CHEV_D, &x, &y, &w, &h) ? 1 : 2;
+    }
+    return glyphs_state == 1;
+}
+
 /* the card's options button (a chevron in a disc at its right edge) */
 #define MORE_D 84
 #define MORE_X (X0 + CW - 34 - MORE_D)
@@ -99,7 +113,6 @@
 #define HOLD_MS 700U
 #define LONG_MS 600U
 
-int star_sprite_to(unsigned id, uint32_t *dst, int x, int y, int at, unsigned fade);
 int em_main(const struct star_info *in, char *cmdline, unsigned len);
 
 static struct {
@@ -323,7 +336,11 @@ static void draw_card(unsigned slot, unsigned idx, int st)
     int cy = y + CARD_H / 2;
     ui_round(MORE_X, cy - MORE_D / 2, MORE_D, MORE_D, MORE_D / 2,
              st == 4 ? (ACCENT & 0x00ffffffU) | 0x30000000U : 0x12ffffffU);
-    (void)ui_sprite(ICON_BASE + ICON_CHEV_D, MORE_X + (MORE_D - 48) / 2, cy - 24 + 2, 256, st == 4 ? ACCENT : DIM);
+    if (glyphs())
+        (void)ui_sprite(ICON_BASE + ICON_CHEV_D, MORE_X + (MORE_D - 48) / 2, cy - 24 + 2, 256, st == 4 ? ACCENT : DIM);
+    else
+        for (int k = -1; k <= 1; ++k)
+            ui_round(MORE_X + MORE_D / 2 + k * 20 - 5, cy - 5, 10, 10, 5, st == 4 ? ACCENT : DIM);
     uint32_t tc;
     const char *tag = tag_name(e->tag, &tc);
     int right = MORE_X - 24;
@@ -558,9 +575,10 @@ static int hit(int x, int y, unsigned *i)
 #define DD_R 44
 #define DD_MAXROWS 6
 #define SURF 0xff171c26U            /* the dropdown's surface, its hairline edge, the selected row */
-#define SURF_EDGE 0xff2a3242U
+#define SURF_EDGE 0xff323b4dU
+#define SURF_TOP 0xff4a5670U        /* light on the top edge: lifts the surface off the black */
 #define SURF_LINE 0xff252c39U
-#define DD_HI ((ACCENT & 0x00ffffffU) | 0x22000000U)
+#define DD_HI ((ACCENT & 0x00ffffffU) | 0x30000000U)
 #define TRACK_OFF 0xff3a4355U
 #define KNOB_OFF 0xffaeb6c4U
 
@@ -657,9 +675,11 @@ static void dd_row_draw(const struct dd *d, unsigned i)
     /* the icon column holds an icon, or a choice's check mark; labels line up after it */
     int tx = d->x + 124;
     if (r->kind == DK_CHECK) {
-        if (r->on)
+        if (r->on && glyphs())
             (void)ui_sprite(ICON_BASE + ICON_CHECK, d->x + 40, mid - 24, 256, ACCENT);
-    } else if (r->icon) {
+        else if (r->on)
+            ui_round(d->x + 54, mid - 10, 20, 20, 10, ACCENT);
+    } else if (r->icon && glyphs()) {
         (void)ui_sprite(ICON_BASE + r->icon, d->x + 40, mid - 24, 256, !r->enabled ? FAINT : sel ? ACCENT : DIM);
     } else {
         tx = d->x + 48;
@@ -667,8 +687,12 @@ static void dd_row_draw(const struct dd *d, unsigned i)
     ui_text(F_META, tx, mid + 14, r->label, r->enabled ? INK : FAINT, UI_BEHIND);
     int right = d->x + d->w - 40;
     if (r->kind == DK_SUB) {
-        (void)ui_sprite(ICON_BASE + ICON_CHEV_R, right - 40, mid - 24, 256, sel ? ACCENT : FAINT);
-        ui_text_r(F_META, right - 52, mid + 14, r->value, sel ? ACCENT : DIM, UI_BEHIND);
+        int vr = right;
+        if (glyphs()) {
+            (void)ui_sprite(ICON_BASE + ICON_CHEV_R, right - 40, mid - 24, 256, sel ? ACCENT : FAINT);
+            vr = right - 52;
+        }
+        ui_text_r(F_META, vr, mid + 14, r->value, sel ? ACCENT : DIM, UI_BEHIND);
     } else if (r->kind == DK_SWITCH) {
         int tw = 100, th = 60, x0 = right - tw, y0 = mid - th / 2;
         ui_round(x0, y0, tw, th, th / 2, r->on ? ACCENT : TRACK_OFF);
@@ -681,12 +705,15 @@ static void dd_draw(const struct dd *d)
     /* elevation: a soft, offset shadow (seen over the cards), a hairline edge, the surface */
     for (int k = 4; k >= 1; --k)
         ui_round(d->x - 6 * k, d->y - 6 * k + 18, d->w + 12 * k, d->h + 12 * k, DD_R + 6 * k, 0x16000000U);
-    ui_round(d->x, d->y, d->w, d->h, DD_R, SURF_EDGE);
+    /* the hairline edge, lighter along the top (a crescent: full at the middle, gone at the
+     * corners), then the surface */
+    ui_round(d->x, d->y, d->w, d->h, DD_R, SURF_TOP);
+    ui_round(d->x, d->y + 3, d->w, d->h - 3, DD_R, SURF_EDGE);
     ui_round(d->x + 2, d->y + 2, d->w - 4, d->h - 4, DD_R - 2, SURF);
     if (d->head) {
         int mid = d->y + DD_PAD + (DD_HEAD - 12) / 2;
-        (void)ui_sprite(ICON_BASE + ICON_CHEV_L, d->x + 40, mid - 24, 256, DIM);
-        ui_text(F_META, d->x + 124, mid + 14, d->title, DIM, UI_BEHIND);
+        int g = glyphs() && ui_sprite(ICON_BASE + ICON_CHEV_L, d->x + 40, mid - 24, 256, DIM);
+        ui_text(F_META, d->x + (g ? 124 : 48), mid + 14, d->title, DIM, UI_BEHIND);
         ui_fill(d->x + 32, d->y + DD_PAD + DD_HEAD - 10, d->w - 64, 2, SURF_LINE);
     }
     for (unsigned i = 0; i < d->n; ++i) {
@@ -740,7 +767,10 @@ static void dd_move(struct dd *d, int dir)
     }
 }
 
-/* The row picked; -1 Bixby, -2 the back row, -3 a tap outside. */
+static void power_off(void);
+
+/* The row picked; -1 Bixby, -2 the back row, -3 a tap outside. Both volume keys held power off
+ * here too (the emergency exit works everywhere). */
 static int dd_pick(struct dd *d)
 {
     for (;;) {
@@ -758,6 +788,8 @@ static int dd_pick(struct dd *d)
         }
         if (ev == K_BIXBY || ev == EV_BIXBY_HOLD)
             return -1;
+        if (ev == EV_VOL_HOLD)
+            power_off();
         if (ev & (K_UP | K_DOWN)) {
             dd_move(d, (ev & K_UP) ? -1 : 1);
             continue;
@@ -793,6 +825,168 @@ static void menu_scene(int level)
     present_rows(0, H);
 }
 
+/* Opening and closing fade (FADE_MS): the scrim deepens (or lifts) while the dropdown fades in
+ * (or out). CANVAS holds the menu undimmed, with what stays lit (the anchor, the hints) in its
+ * final state; DD_SAVE holds what lies under the dropdown and its shadow. Each frame is one pass
+ * to the panel that dims on the way, so CANVAS is never dimmed in place; the dropdown is drawn
+ * again each frame over its region dimmed by that frame's scrim, so its shadow and corners blend
+ * over the right background. */
+#define DD_SAVE ((uint32_t *)0x88200000UL)  /* after CANVAS (ends 0x88142000), below ui.c's
+                                               UI_SCRATCH (0x88800000): 6 MiB, WB */
+#define DD_SAVE_PX (0x600000U / 4U)
+#define FADE_MS 120
+#define FADE_FRAMES 16                  /* a cap, should the timer not move */
+#define SCRIM 92U
+
+static int fx0, fy0, fx1, fy1;          /* the dropdown's region (with its shadow) */
+static int kx0, ky0, kx1, ky1;          /* the anchor: kept lit */
+
+static uint32_t dim_px(uint32_t p, unsigned f)
+{
+    return 0xff000000U | ((((p >> 16) & 255U) * f >> 8) << 16) | ((((p >> 8) & 255U) * f >> 8) << 8) |
+           ((p & 255U) * f >> 8);
+}
+
+static uint32_t lerp_px(uint32_t a, uint32_t b, unsigned t)    /* a at t/256 over b */
+{
+    uint32_t o = 0xff000000U;
+    for (unsigned sh = 0; sh < 24; sh += 8)
+        o |= ((((a >> sh) & 255U) * t + ((b >> sh) & 255U) * (256U - t)) >> 8) << sh;
+    return o;
+}
+
+static int kept(int x, int y)
+{
+    return (y >= HINT_Y - 50 && y < HINT_Y + 30) || (y >= ky0 && y < ky1 && x >= kx0 && x < kx1);
+}
+
+/* CANVAS: the menu (lit: the anchor and hints in their state after the fade), DD_SAVE: the
+ * dropdown's region of it. 0 if the region does not fit DD_SAVE. */
+static int fade_stage(const struct dd *d, int open, int level)
+{
+    fx0 = d->x - 32;
+    fx1 = d->x + d->w + 32;
+    fy0 = d->y - 24;
+    fy1 = d->y + d->h + 48;
+    if (fx0 < 0)
+        fx0 = 0;
+    if (fy0 < 0)
+        fy0 = 0;
+    if (fx1 > W)
+        fx1 = W;
+    if (fy1 > H)
+        fy1 = H;
+    if (fx1 <= fx0 || fy1 <= fy0 || (unsigned)((fx1 - fx0) * (fy1 - fy0)) > DD_SAVE_PX)
+        return 0;
+    if (anchor_card) {
+        kx0 = X0 - 4;
+        kx1 = X0 + CW + 4;
+        ky0 = anchor_top - 4;
+        ky1 = anchor_bottom + 4;
+    } else {
+        kx0 = X0 + 3 * (BAR_W + BAR_GAP) - 4;
+        kx1 = kx0 + BAR_W + 8;
+        ky0 = BAR_Y - 4;
+        ky1 = BAR_Y + BAR_H + 4;
+    }
+    compose();
+    if (open) {
+        ui_target(CANVAS);
+        if (anchor_card)
+            draw_card((unsigned)anchor_slot, anchor_idx, 4);
+        else
+            draw_bar_button(3, 1);
+        draw_hints(level ? 2 : 1);
+        ui_target(0);
+    }
+    int rw = fx1 - fx0;
+    for (int y = fy0; y < fy1; ++y)
+        for (int x = fx0; x < fx1; ++x)
+            DD_SAVE[(uint64_t)(y - fy0) * (unsigned)rw + (unsigned)(x - fx0)] = CANVAS[(uint64_t)y * W + (unsigned)x];
+    return 1;
+}
+
+/* One frame to the panel: the scrim at f/256, the dropdown at a/256 over it. */
+static void fade_frame(const struct dd *d, unsigned f, unsigned a)
+{
+    int rw = fx1 - fx0;
+    /* the region: what was under the dropdown, dimmed, then the dropdown over it */
+    for (int y = fy0; y < fy1; ++y)
+        for (int x = fx0; x < fx1; ++x) {
+            uint32_t p = DD_SAVE[(uint64_t)(y - fy0) * (unsigned)rw + (unsigned)(x - fx0)];
+            CANVAS[(uint64_t)y * W + (unsigned)x] = kept(x, y) ? p : dim_px(p, f);
+        }
+    ui_target(CANVAS);
+    dd_draw(d);
+    ui_target(0);
+    volatile uint64_t *fb = (volatile uint64_t *)STAR_FB_BASE;
+    for (int y = 0; y < H; ++y) {
+        const uint32_t *c = CANVAS + (uint64_t)y * W;
+        const uint32_t *sv = DD_SAVE + (uint64_t)(y - fy0) * (unsigned)rw;
+        int in_y = y >= fy0 && y < fy1;
+        int hint = y >= HINT_Y - 50 && y < HINT_Y + 30, anc = y >= ky0 && y < ky1;
+        for (int x = 0; x < W; x += 2) {
+            uint32_t o[2];
+            for (int k = 0; k < 2; ++k) {
+                int xx = x + k;
+                int keep = hint || (anc && xx >= kx0 && xx < kx1);
+                uint32_t p = c[xx];
+                if (in_y && xx >= fx0 && xx < fx1) {
+                    uint32_t b = sv[xx - fx0];
+                    if (!keep)
+                        b = dim_px(b, f);
+                    p = a >= 256 ? p : a ? lerp_px(p, b, a) : b;
+                } else if (!keep) {
+                    p = dim_px(p, f);
+                }
+                o[k] = p;
+            }
+            fb[((uint64_t)y * W + (unsigned)x) / 2] = o[0] | (uint64_t)o[1] << 32;
+        }
+    }
+    __asm__ volatile("dsb st" : : : "memory");
+}
+
+/* Fade the dropdown (DM[level]) in over the menu, then the scene as menu_scene draws it. */
+static void dd_open(int level)
+{
+    const struct dd *d = &DM[level ? 1 : 0];
+    if (fade_stage(d, 1, level)) {
+        uint64_t t0 = hw_ticks();
+        for (int n = 0; n < FADE_FRAMES; ++n) {
+            int ms = ms_since(t0);
+            if (ms >= FADE_MS)
+                break;
+            unsigned q = 256U - (unsigned)(ms * 256 / FADE_MS);
+            unsigned e = 256U - q * q * q / 65536U;         /* ease out */
+            fade_frame(d, 256U - (256U - SCRIM) * e / 256U, e);
+        }
+    }
+    menu_scene(level);
+}
+
+/* Fade the dropdown (DM[level]) out and the scrim off: then CANVAS and the panel are the menu. */
+static void dd_close(int level)
+{
+    const struct dd *d = &DM[level ? 1 : 0];
+    if (!fade_stage(d, 0, level)) {
+        compose();
+        present_rows(0, H);
+        return;
+    }
+    uint64_t t0 = hw_ticks();
+    for (int n = 0; n < FADE_FRAMES; ++n) {
+        int ms = ms_since(t0);
+        if (ms >= FADE_MS)
+            break;
+        unsigned q = 256U - (unsigned)(ms * 256 / FADE_MS);
+        unsigned e = 256U - q * q * q / 65536U;
+        fade_frame(d, SCRIM + (256U - SCRIM) * e / 256U, 256U - e);
+    }
+    compose();
+    present_rows(0, H);
+}
+
 static void card_menu_build(unsigned slot, unsigned idx)
 {
     const struct cat_ent *e = cat_get(idx);
@@ -818,6 +1012,12 @@ static void card_menu_build(unsigned slot, unsigned idx)
     dd_place(d, anchor_top, anchor_bottom, X0 + CW);
 }
 
+/* Auto-start's choice k: Off, 3, 5, 10 s. */
+static unsigned timeout_of(unsigned k)
+{
+    return k == 0 ? 0 : k == 1 ? 3 : k == 2 ? 5 : 10;
+}
+
 /* Auto-start's choices, in the dropdown's place, with a back row. */
 static void timeout_menu_build(void)
 {
@@ -825,7 +1025,7 @@ static void timeout_menu_build(void)
     struct dd *d = &DM[1], *p = &DM[0];
     dd_begin(d, p->w, "Auto-start");
     for (unsigned k = 0; k < 4; ++k) {
-        unsigned t = k == 0 ? 0 : k == 1 ? 3 : k == 2 ? 5 : 10;
+        unsigned t = timeout_of(k);
         char b[16];
         timeout_label(b, sizeof(b), t, 1);
         struct dd_row *r = dd_add(d, b, 0, DK_CHECK);
@@ -836,23 +1036,20 @@ static void timeout_menu_build(void)
     dd_place(d, anchor_top, anchor_bottom, p->x + p->w);
 }
 
-static unsigned timeout_of(unsigned k)
-{
-    return k == 0 ? 0 : k == 1 ? 3 : k == 2 ? 5 : 10;
-}
-
 /* A card's options. 1: start it. */
 static int card_menu(unsigned slot, unsigned idx)
 {
     const struct cat_ent *e = cat_get(idx);
     card_menu_build(slot, idx);
-    menu_scene(0);
+    dd_open(0);
     for (;;) {
         int r = dd_pick(&DM[0]);
-        if (r < 0)
+        if (r < 0) {
+            dd_close(0);
             return 0;
+        }
         if (r == 0)
-            return 1;
+            return 1;                                   /* go() draws the menu again */
         struct star_settings *s = star_menu_settings(0);
         if (r == 1) {
             if (s->default_key[0] && key_eq(s->default_key, e->key))
@@ -862,19 +1059,16 @@ static int card_menu(unsigned slot, unsigned idx)
             if (star_menu_settings_save())
                 set_status("Could not save the settings", "", RED);
             DM[0].r[1].on = s->default_key[0] != 0;
-            ui_target(CANVAS);
-            draw_card(slot, idx, 4);
-            dd_row_draw(&DM[0], 1);
-            ui_target(0);
-            present_rows(LIST_Y + (int)slot * CARD_STRIDE - 8, LIST_Y + (int)slot * CARD_STRIDE + CARD_H + 8);
-            dd_present(&DM[0]);
+            menu_scene(0);          /* every card: another one may have been the default */
             continue;
         }
         timeout_menu_build();
         menu_scene(1);
         int k = dd_pick(&DM[1]);
-        if (k == -3)
-            return 0;                                   /* a tap outside closes both */
+        if (k == -3) {
+            dd_close(1);                                /* a tap outside closes both */
+            return 0;
+        }
         if (k >= 0) {
             s->timeout_s = timeout_of((unsigned)k);
             if (star_menu_settings_save())
@@ -897,12 +1091,14 @@ static void power_menu_build(void)
     dd_place(d, anchor_top, anchor_bottom, X0 + CW);
 }
 
-/* The Power button's dropdown: 0 nothing, 1 power off, 2 restart. */
+/* The Power button's dropdown: 0 nothing (the menu is on screen again), 1 power off, 2 restart. */
 static int power_menu(void)
 {
     power_menu_build();
-    menu_scene(0);
+    dd_open(0);
     int r = dd_pick(&DM[0]);
+    if (r < 0)
+        dd_close(0);
     return r < 0 ? 0 : r + 1;
 }
 
@@ -953,10 +1149,7 @@ static int options(unsigned k)
 {
     if (k < M.top || k >= M.top + LIST_ROWS)
         return 0;
-    int start = card_menu(k - M.top, list[k]);
-    compose();
-    present_rows(0, H);
-    return start;
+    return card_menu(k - M.top, list[k]);
 }
 
 static void lab(const struct star_info *in, char *cmdline, unsigned len, int *boot)
@@ -1129,8 +1322,6 @@ int menu_v6(const struct star_info *in, char *cmdline, unsigned len)
                     power_off();
                 if (p == 2)
                     reboot_to(INFORM_NORMAL, "RESTARTING");
-                compose();
-                present_rows(0, H);
                 continue;
             }
             reboot_to(M.bar == 0 ? INFORM_RECOVERY : INFORM_DOWNLOAD,

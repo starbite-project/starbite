@@ -6,6 +6,7 @@
 #include "ui.h"
 #include "fbtext.h"
 #include "hw.h"
+#include "menu.h"          /* star_sprite_to, star_sprite_rect (xnu_boot.c) */
 
 #define MAX_FONTS 12
 
@@ -150,9 +151,6 @@ void ui_round(int x, int y, int w, int h, int r, uint32_t c)
  * (0x89000000), UI_W x UI_SCRATCH_ROWS. */
 #define UI_SCRATCH ((uint32_t *)0x88800000UL)
 #define UI_SCRATCH_ROWS 192U
-
-int star_sprite_to(unsigned id, uint32_t *dst, int x, int y, int at, unsigned fade);
-int star_sprite_rect(unsigned id, unsigned *x, unsigned *y, unsigned *w, unsigned *h);
 
 int ui_sprite(unsigned id, int x, int y, unsigned fade, uint32_t tint)
 {
