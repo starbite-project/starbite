@@ -1,16 +1,25 @@
-/* Host preview of the boot intro (Lima VM, aarch64 Linux): the real shim/starlte/anim.c
- * (star_intro_splash, then menu v6's star_reveal through the real menu_v6) frame by frame.
+/* Host preview of the boot intro: the real shim/starlte/anim.c (star_intro_splash, then menu v6's
+ * star_reveal through the real menu_v6) frame by frame. Built by run.sh, in the Lima VM (aarch64
+ * Linux) or, when the VM cannot run, natively on the Mac with the loader's RAM addresses moved up
+ * by HOSTOFF (macOS cannot map below 4 GiB).
  *
  *   - the panel (STAR_FB_BASE) starts as S-Boot leaves it: black, logo.jpg at (180, 1144)
- *   - hw_ticks() is a fake clock: each call is one frame (FRAME_US), so every frame anim.c
- *     presents is seen; star_sprite_to / star_sprite_rect are ports of xnu_boot.c's
+ *   - hw_ticks() is a fake clock: each call is one frame of AP_FRAME_US (default 16667, 60 fps;
+ *     AP_FRAME_US=66667 shows the intro at the 15 fps a slow phone would manage), so every frame
+ *     anim.c presents is seen. star_sprite_to / star_sprite_rect are ports of xnu_boot.c's
  *     sprite_walk_to (opaque copy, faded), not a blend, so the preview shows what the loader does
+ *   - AP_KEY_MS=<ms>: a key goes down at that time, up again at AP_KEY_UP_MS (default 300 ms on);
+ *     the skip path. The run checks that the intro leaves exactly the plain end state and that
+ *     the reveal, started while the key is still down, returns at once
+ *   - AP_GAP_MS: the loader's and the menu's work between the intro and the reveal (default 40)
  *   - after every frame the panel is compared with anim.c's OFF buffer (what was composed): a
- *     pixel that differs was drawn but never presented (or presented stale) -> "stray"
- *   - frames: every frame at 1/4 size into frames.raw (u32 ms, then 360 x 740 RGB), and the
- *     full panel as PPM at the times given on the command line
+ *     pixel that differs was drawn but never presented (or presented stale) -> "stray"; after the
+ *     intro the panel is compared with the plain end state (black + base), after the reveal with
+ *     the menu's CANVAS
+ *   - frames: every frame at 1/8 size into frames.raw (u32 ms, then 180 x 370 RGB), and the
+ *     full panel as PPM at the times given on the command line (AP_PPM2PNG converts each one)
  *
- * run.sh builds and runs it. Usage: ./ap ramdisk-v6.bin catalog.sbc logo.rgb ms...
+ * Usage: ./ap ramdisk-v6.bin catalog.sbc logo.rgb ms...
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,12 +27,20 @@
 #include <sys/mman.h>
 #include <time.h>
 
-#include "../../shim/starlte/menu6.c"
+#ifndef HOSTOFF
+#define HOSTOFF 0UL
+#endif
 
-#define FRAME_US 16667U
-#define OFFBUF ((uint32_t *)0x84000000UL)
+#include "menu6.c"
+
+#define OFFBUF ((uint32_t *)(0x84000000UL + HOSTOFF))
 #define FBUF ((uint32_t *)STAR_FB_BASE)
+#define FILM 8
 
+extern uint32_t star_anim_stats[8];
+
+static unsigned frame_us = 16667;
+static long key_ms = -1, key_up_ms = -1;
 static unsigned char *rd;
 static size_t rdn;
 
@@ -111,24 +128,28 @@ int star_menu_failure(const char **a, const char **b) { (void)a; (void)b; return
 void star_fb_row_base(unsigned r) { (void)r; }
 void star_fb_fill(uint32_t p) { (void)p; }
 void star_fb_text_c(unsigned r, const char *s, uint32_t a, uint32_t b) { (void)r; (void)s; (void)a; (void)b; }
-unsigned hw_keys(void) { return 0; }
-void hw_wait_ms(unsigned m) { (void)m; }
 uint64_t hw_freq(void) { return 1000000; }
 void hw_tp_clear(void) {}
 void hw_tp_start(void) {}
 void hw_power_off(void) {}
 void hw_reboot(uint32_t v) { (void)v; }
 
-/* ---- the clock, the frame dumps, the stray check ---- */
+/* ---- the clock, the keys, the frame dumps, the checks ---- */
 static uint64_t clk;            /* us */
 static int64_t last_ms = -1;    /* time of the frame now on the panel */
 static int *want_ms, nwant, wanted;
 static FILE *film;
 static int frames, stray_frames;
-static double cpu_max, cpu_sum;
+static double cpu_max, cpu_sum, a55x;
 static struct timespec ts_ret;
 static int in_intro = 1;
 static long stray_after_clean;
+
+/* Volume up from AP_KEY_MS to AP_KEY_UP_MS (default 300 ms later); the menu's input() waits with
+ * hw_wait_ms, which moves the clock on too. */
+static int64_t key_clock = -1;
+unsigned hw_keys(void) { return key_ms >= 0 && key_clock >= key_ms && key_clock < key_up_ms ? K_UP : 0; }
+void hw_wait_ms(unsigned m) { clk += (uint64_t)m * 1000; key_clock = (int64_t)(clk / 1000); }
 
 static void dump_full(const char *f)
 {
@@ -136,6 +157,22 @@ static void dump_full(const char *f)
     fprintf(o, "P6 %d %d 255\n", W, H);
     for (int i = 0; i < W * H; ++i) { uint32_t p = FBUF[i]; fputc(p >> 16, o); fputc(p >> 8, o); fputc(p, o); }
     fclose(o);
+    /* AP_PPM2PNG: a command that turns f into a PNG right away (12.8 MB a PPM) */
+    const char *conv = getenv("AP_PPM2PNG");
+    if (conv && *conv) {
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd), "%s '%s'", conv, f);
+        if (system(cmd) != 0)
+            fprintf(stderr, "AP_PPM2PNG failed on %s\n", f);
+    }
+}
+
+static long panel_diff(const uint32_t *want)
+{
+    long n = 0;
+    for (long i = 0; i < (long)W * H; ++i)
+        n += (want[i] & 0xffffffU) != (FBUF[i] & 0xffffffU);
+    return n;
 }
 
 static void frame_done(void)
@@ -147,28 +184,30 @@ static void frame_done(void)
     double ms = (now.tv_sec - ts_ret.tv_sec) * 1e3 + (now.tv_nsec - ts_ret.tv_nsec) / 1e6;
     if (ms > cpu_max) cpu_max = ms;
     if (ms > 4.0)
-        printf("  frame %4ld ms took %.2f ms to compose and present (host)\n", (long)last_ms, ms);
+        printf("  frame %4ld ms took %.2f ms to compose and present (host)%s\n", (long)last_ms, ms, in_intro ? "" : " [reveal]");
     cpu_sum += ms;
     frames++;
-    /* 1/4 size film frame (box filter) */
+    /* 1/FILM size film frame (box filter) */
     uint32_t t = (uint32_t)last_ms;
     fwrite(&t, 4, 1, film);
-    static unsigned char line[(W / 4) * 3];
-    for (int y = 0; y < H / 4; ++y) {
-        for (int x = 0; x < W / 4; ++x) {
+    static unsigned char line[(W / FILM) * 3];
+    for (int y = 0; y < H / FILM; ++y) {
+        for (int x = 0; x < W / FILM; ++x) {
             unsigned r = 0, g = 0, b = 0;
-            for (int k = 0; k < 16; ++k) {
-                uint32_t p = FBUF[(uint64_t)(y * 4 + k / 4) * W + x * 4 + k % 4];
+            for (int k = 0; k < FILM * FILM; ++k) {
+                uint32_t p = FBUF[(uint64_t)(y * FILM + k / FILM) * W + x * FILM + k % FILM];
                 r += (p >> 16) & 255; g += (p >> 8) & 255; b += p & 255;
             }
-            line[3 * x] = (unsigned char)(r / 16); line[3 * x + 1] = (unsigned char)(g / 16); line[3 * x + 2] = (unsigned char)(b / 16);
+            line[3 * x] = (unsigned char)(r / (FILM * FILM));
+            line[3 * x + 1] = (unsigned char)(g / (FILM * FILM));
+            line[3 * x + 2] = (unsigned char)(b / (FILM * FILM));
         }
         fwrite(line, 1, sizeof(line), film);
     }
     /* stray: composed (OFF) but not on the panel. At 0 ms nothing is presented yet: the panel is
      * S-Boot's splash and OFF the prepared copy without its star. */
     long n = 0;
-    if (last_ms == 0)
+    if (last_ms == 0 || (star_anim_stats[7] & 8U))   /* after the reveal the panel is CANVAS */
         goto film_done;
     int bx0 = W, by0 = H, bx1 = -1, by1 = -1;
     for (long i = 0; i < (long)W * H; ++i)
@@ -205,10 +244,21 @@ uint64_t hw_ticks(void)
 {
     frame_done();
     last_ms = (int64_t)(clk / 1000);
+    key_clock = last_ms;
     uint64_t v = clk;
-    clk += FRAME_US;
+    clk += frame_us;
     clock_gettime(CLOCK_MONOTONIC, &ts_ret);
     return v;
+}
+
+static void stats(void)
+{
+    const uint32_t *a = star_anim_stats;
+    printf("star_anim_stats: intro %u frames in %u ms, worst %u ms; gap %u ms; reveal %u frames in %u ms, worst %u ms; flags %#x\n",
+           a[0], a[2], a[1], a[3], a[4], a[6], a[5], a[7]);
+    const volatile uint64_t *log = (const volatile uint64_t *)(0x91fff000UL + HOSTOFF);
+    printf("log page [112..114]: %#llx %#llx %#llx\n", (unsigned long long)log[112], (unsigned long long)log[113],
+           (unsigned long long)log[114]);
 }
 
 /* menu_v6 waits for input once the intro is over: the run ends there. */
@@ -217,15 +267,38 @@ int hw_tp_event(int *a, int *b, int *c)
     (void)a; (void)b; (void)c;
     frame_done();
     dump_full("final.ppm");
+    long d = panel_diff(CANVAS);
+    printf("after the reveal: %ld pixels differ from the menu's CANVAS%s\n", d, d ? "  <-- WRONG" : "");
     printf("%d frames, %d with stray pixels (%ld after the splash was cleaned); compose %.2f ms avg, %.2f max (host)\n",
            frames, stray_frames, stray_after_clean, cpu_sum / frames, cpu_max);
+    if (a55x > 0)
+        printf("projected on the phone (x%.1f): %.1f ms avg, %.1f ms worst frame\n", a55x, cpu_sum / frames * a55x, cpu_max * a55x);
+    stats();
+    if (key_ms >= 0)
+        printf("skip at %ld ms: the reveal %s\n", key_ms,
+               star_anim_stats[4] == 0 && (star_anim_stats[7] & 16U) ? "returned at once (OK)" : "ran frames  <-- WRONG");
     fclose(film);
     exit(0);
+}
+
+static void *map_at(uintptr_t a, size_t n)
+{
+    void *p = mmap((void *)a, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p != (void *)a) {
+        fprintf(stderr, "cannot map %#lx (got %p)\n", (unsigned long)a, p);
+        exit(1);
+    }
+    return p;
 }
 
 int main(int argc, char **argv)
 {
     if (argc < 4) { fprintf(stderr, "usage: %s ramdisk catalog logo.rgb [ms...]\n", argv[0]); return 2; }
+    if (getenv("AP_FRAME_US")) frame_us = (unsigned)atoi(getenv("AP_FRAME_US"));
+    if (getenv("AP_KEY_MS")) key_ms = atol(getenv("AP_KEY_MS"));
+    key_up_ms = getenv("AP_KEY_UP_MS") ? atol(getenv("AP_KEY_UP_MS")) : key_ms + 300;
+    if (getenv("AP_A55X")) a55x = atof(getenv("AP_A55X"));
+    unsigned gap_ms = getenv("AP_GAP_MS") ? (unsigned)atoi(getenv("AP_GAP_MS")) : 40;
     FILE *f = fopen(argv[1], "rb");
     fseek(f, 0, SEEK_END); rdn = (size_t)ftell(f); rewind(f);
     rd = malloc(rdn);
@@ -235,12 +308,11 @@ int main(int argc, char **argv)
     nwant = argc - 4;
     want_ms = calloc((size_t)nwant + 1, sizeof(int));
     for (int i = 0; i < nwant; ++i) want_ms[i] = atoi(argv[4 + i]);
-    if (mmap((void *)0x84000000UL, 0x8000000UL, 3, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ||
-        mmap((void *)0x8c000000UL, 1 << 20, 3, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ||
-        mmap((void *)STAR_FB_BASE, 32 << 20, 3, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED) {
-        perror("mmap");
-        return 1;
-    }
+    map_at(0x84000000UL + HOSTOFF, 0x8000000UL);           /* anim.c, menu.c, CANVAS */
+    map_at(0x8c000000UL + HOSTOFF, 1 << 20);               /* the catalog */
+    map_at(0x91f00000UL + HOSTOFF, 1 << 20);               /* the log page 0x91fff000 */
+    map_at(STAR_FB_BASE, 32 << 20);
+    printf("frame %u us, key %ld ms, loader work %u ms\n", frame_us, key_ms, gap_ms);
     /* S-Boot's splash: black, logo.jpg (1079 x 1747 RGB) at (180, 1144) */
     for (long i = 0; i < (long)W * H; ++i) FBUF[i] = 0xff000000U;
     f = fopen(argv[3], "rb");
@@ -258,8 +330,16 @@ int main(int argc, char **argv)
     star_sprite_rect(2, &x, &y, &w, &h); printf("header star marker: %u,%u size %u\n", x, y, w);
     star_intro_splash();
     printf("intro over at %ld ms\n", (long)last_ms);
+    {
+        uint32_t *want = malloc((size_t)W * H * 4);
+        for (long i = 0; i < (long)W * H; ++i) want[i] = 0xff000000U;
+        star_sprite_to(0, want, 0, 0, 0, 256);
+        long d = panel_diff(want);
+        printf("after the intro: %ld pixels differ from the plain end state (black + base)%s\n", d, d ? "  <-- WRONG" : "");
+        free(want);
+    }
     in_intro = 0;
-    clk += 40000;                                   /* the loader's work before the menu */
+    clk += (uint64_t)gap_ms * 1000;                 /* the loader's work before the menu */
     struct star_info in;
     memset(&in, 0, sizeof(in));
     char cmd[64] = "";
