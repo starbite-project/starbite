@@ -30,6 +30,9 @@ int star_menu_assets(void);
 int star_sprite(unsigned id);
 /* Rectangle of the first sprite with this id; 0 if there is none. */
 int star_sprite_rect(unsigned id, unsigned *x, unsigned *y, unsigned *w, unsigned *h);
+/* Sprite id into dst (0 = the panel; panel stride), at (x, y) when at, else at its own place,
+ * faded to fade/256. An opaque copy, alpha included (ui_sprite blends). */
+int star_sprite_to(unsigned id, uint32_t *dst, int x, int y, int at, unsigned fade);
 
 /* Boot menu v6 (menu6.c): full screen, categories, run-time labels, touch. Used when the BOOT
  * ramdisk has its sprites (V6=1 tools/brand/menu.mjs: icon V6_ICON_SPRITE) and the font atlas. */

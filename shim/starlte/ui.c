@@ -6,6 +6,7 @@
 #include "ui.h"
 #include "fbtext.h"
 #include "hw.h"
+#include "menu.h"          /* star_sprite_to, star_sprite_rect (xnu_boot.c) */
 
 #define MAX_FONTS 12
 
@@ -143,6 +144,40 @@ void ui_round(int x, int y, int w, int h, int r, uint32_t c)
             row[xx] = a >= 255 ? (c | 0xff000000U) : mix(c, row[xx], a);
         }
     }
+}
+
+/* ui_sprite: the sprite is copied here first (star_sprite_to, panel stride), then blended. Free
+ * write-back RAM between menu6.c's CANVAS (0x87100000..0x88142000) and the menu assets
+ * (0x89000000), UI_W x UI_SCRATCH_ROWS. */
+#define UI_SCRATCH ((uint32_t *)0x88800000UL)
+#define UI_SCRATCH_ROWS 192U
+
+int ui_sprite(unsigned id, int x, int y, unsigned fade, uint32_t tint)
+{
+    unsigned sx, sy, w, h;
+    if (!star_sprite_rect(id, &sx, &sy, &w, &h) || !w || w > UI_W || h > UI_SCRATCH_ROWS)
+        return 0;
+    if (star_sprite_to(id, UI_SCRATCH, 0, 0, 1, 256) <= 0)
+        return 0;
+    if (fade > 256)
+        fade = 256;
+    volatile uint32_t *fb = fbuf();
+    for (unsigned r = 0; r < h; ++r) {
+        int yy = y + (int)r;
+        if (yy < clip_y0 || yy >= clip_y1)
+            continue;
+        const volatile uint32_t *src = UI_SCRATCH + (uint64_t)r * UI_W;
+        volatile uint32_t *row = fb + (uint64_t)yy * UI_W;
+        for (unsigned c = 0; c < w; ++c) {
+            int xx = x + (int)c;
+            uint32_t s = src[c];
+            unsigned a = ((s >> 24) * fade) >> 8;
+            if (!a || xx < 0 || xx >= UI_W)
+                continue;
+            row[xx] = mix(tint ? tint | 0xff000000U : s, row[xx], a);
+        }
+    }
+    return 1;
 }
 
 /* Glyph record for code c (falls back to '?'). */
