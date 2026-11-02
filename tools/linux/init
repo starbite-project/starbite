@@ -1,34 +1,110 @@
 #!/bin/sh
-# Project Starbite: mainline Linux bring-up init (initramfs, busybox).
+# Project Starbite: the generic Linux initrd /init (docs/LINUX-REBUILD-PLAN.md 3.2).
 #
-# Milestone 1: no root filesystem yet. Shows what the kernel found on the
-# panel, keeps every UFS block device READ-ONLY (USERDATA holds the iOS root
-# and Kiosk, WINDOWS/WINESP hold Windows, EFS holds the IMEI), and offers a
-# shell to the Mac over USB: CDC-ECM network (telnet 172.16.42.1) plus an ACM
-# serial port. Nothing here writes to internal storage.
-export PATH=/bin:/sbin
-mkdir -p /proc /sys /dev /run /tmp
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev 2>/dev/null
-mkdir -p /dev/pts
-mount -t devpts devpts /dev/pts
-mount -t tmpfs tmpfs /run
-mount -t tmpfs tmpfs /tmp
+# One initrd (the store's linux.initrd, tools/linux/mk-initrd.sh) for every Linux entry. The
+# catalog entry's cmdline picks what it does; the loader appends it to the DTB's bootargs, so
+# /proc/cmdline holds both and the LAST value of a parameter wins:
+#
+#   sb.root=/distros/x.img   boot that ext4 image from the card's exFAT (p1); "x" alone works too
+#   sb.root=none             stay here (USB shell + the selector on the screen)
+#   sb.root=ask              same, the first distro highlighted (also the default with no sb.root)
+#   sb.init=PATH             init in the new root (default /sbin/init, then systemd)
+#   sb.rw=0                  mount the root read-only
+#   sb.shell=1               same as holding Vol down while the kernel starts
+#   sb.wdt=SEC               arm the hardware watchdog for SEC s before switch_root (0 = off, the
+#                            default until a watchdog reset is seen to reach the menu, plan 4.3)
+#
+# Always, for every distro: every UFS block device read-only (USERDATA holds the iOS root,
+# WINDOWS/WINESP Windows, EFS the IMEI); the USB gadget (CDC-ECM 172.16.42.1 serving one DHCP
+# lease 172.16.42.2 to the Mac, telnet, plus an ACM serial shell); /bin/reboot-to KEY.
+#
+# The selector (also where every failure lands): the report and the list of /distros/*.img on
+# tty0. Vol up / Vol down move, Power starts the highlighted line. The Mac can do the same by
+# writing to the FIFO /run/sb-boot (tools/linux/phone.py): a distro name boots it with no
+# reboot (one switch_root per boot), "@card" lends the card to the Mac as USB storage, "@uncard"
+# takes it back, "@menu" reboots to the Starbite menu.
+#
+# SB_TEST=1 sources this file without running it (tools/linux/test-init.sh).
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
-exec </dev/null >/dev/tty0 2>&1
+SDDEV=/dev/mmcblk0p1
+SB_UID=10000                                       # the desktop user in every distro (plan 3.4)
+FIFO=/run/sb-boot
+GPA0_DAT=0x14050024                                # bit 3 Vol up, bit 4 Vol down (active low)
+GPA2_DAT=0x14050064                                # bit 4 Power (active low)
 
-# Wall clock from the loader (no RTC driver here): /chosen/starbite,rtc-epoch,
-# a u64 the loader writes from the S2MPS18 RTC (UTC) into the DTB it passes.
-# (Not RAM: ramoops wipes its whole area, where the boot flag lives, at boot.)
-E=/proc/device-tree/chosen/starbite,rtc-epoch
-if [ -r "$E" ]; then
-	t=$(hexdump -v -e '1/1 "%02x"' "$E")
-	[ -n "$t" ] && [ "$t" != 0000000000000000 ] && date -u -s "@$((0x$t))" >/dev/null 2>&1
-fi
-printf '\033[2J\033[H\033[?25l'
+# ==== parsing and naming (no side effects; host-tested) =====================================
 
-# ---- internal storage stays read-only --------------------------------------
+# sb_parse FILE: SB_ROOT SB_INIT SB_RW SB_SHELL SB_WDT from a kernel command line.
+sb_parse() {
+	SB_ROOT= SB_INIT= SB_RW=1 SB_SHELL=0 SB_WDT=0
+	set -f
+	for a in $(cat "$1" 2>/dev/null); do
+		case $a in
+		sb.root=*) SB_ROOT=${a#sb.root=} ;;
+		sb.init=*) SB_INIT=${a#sb.init=} ;;
+		sb.rw=*) SB_RW=${a#sb.rw=} ;;
+		sb.shell=*) SB_SHELL=${a#sb.shell=} ;;
+		sb.wdt=*) SB_WDT=${a#sb.wdt=} ;;
+		esac
+	done
+	set +f
+	[ "$SB_RW" = 0 ] || SB_RW=1
+	[ "$SB_SHELL" = 1 ] || SB_SHELL=0
+	case $SB_WDT in ""|*[!0-9]*) SB_WDT=0 ;; esac
+	[ ${#SB_WDT} -le 4 ] || SB_WDT=0
+	case $SB_INIT in /*) case $SB_INIT in *[!A-Za-z0-9/._-]*|*..*) SB_INIT= ;; esac ;; *) SB_INIT= ;; esac
+	[ -n "$SB_ROOT" ] || SB_ROOT=ask
+	return 0
+}
+
+# sb_img_path NAME|PATH: the image's path on the card (/distros/NAME.img), or fail. "_" names
+# (_tools, _kernel) are not roots; /starbite-linux.img is the old postmarketOS root.
+sb_img_path() {
+	case $1 in
+	""|none|ask|*..*|*[!A-Za-z0-9/._-]*) return 1 ;;
+	/starbite-linux.img) echo "$1"; return 0 ;;
+	/distros/*.img) p=$1 ;;
+	*/*) return 1 ;;
+	*.img) p=/distros/$1 ;;
+	*) p=/distros/$1.img ;;
+	esac
+	n=${p#/distros/}
+	case $n in */*|_*|.*|.img) return 1 ;; esac
+	echo "$p"
+}
+
+# sb_list ROOT: the bootable images under ROOT (the card), one path per line.
+sb_list() {
+	for f in "$1"/distros/*.img; do
+		[ -f "$f" ] || continue
+		n=${f##*/}
+		case $n in _*|.*) continue ;; esac
+		sb_img_path "$n" >/dev/null && echo "/distros/$n"
+	done
+	[ -f "$1/starbite-linux.img" ] && echo /starbite-linux.img
+	return 0
+}
+
+# sb_pick_init NEWROOT: the init to exec there.
+sb_pick_init() {
+	r=$1
+	if [ -n "$SB_INIT" ]; then set -- "$SB_INIT"
+	else set -- /sbin/init /usr/lib/systemd/systemd /lib/systemd/systemd; fi
+	for i in "$@"; do
+		# -L too: an absolute link (/sbin/init -> /lib/systemd/systemd) only resolves in the root
+		if [ -x "$r$i" ] || [ -L "$r$i" ]; then echo "$i"; return 0; fi
+	done
+	return 1
+}
+
+# sb_mods_dir NEWROOT RELEASE: where the shared modules image goes (usr/lib when /lib is a link).
+sb_mods_dir() {
+	if [ -L "$1/lib" ]; then echo "$1/usr/lib/modules/$2"; else echo "$1/lib/modules/$2"; fi
+}
+
+# ==== hardware ==============================================================================
+
 lock_ufs() {
 	for b in /sys/block/sd*; do
 		[ -e "$b" ] || continue
@@ -39,32 +115,28 @@ lock_ufs() {
 		done
 	done
 }
-lock_ufs
-( i=0; while [ $i -lt 120 ]; do lock_ufs; sleep 0.5; i=$((i + 1)); done ) &
 
-# ---- helpers for the Mac (tools/linux/phone.py) ------------------------------
-# reboot-linux: straight back into Linux through the Starbite menu's one-shot
-# flag (u64 "SBNEXTLX" at 0xFED17FE0); "reboot-linux menu" for the menu.
-cat > /bin/reboot-linux <<'EOF2'
-#!/bin/sh
-if [ "$1" != menu ]; then
-	devmem 0xFED17FE0 32 0x454e4253
-	devmem 0xFED17FE4 32 0x584c5458
-fi
-devmem 0x1406080c 32 0x12345670
-sync
-echo b > /proc/sysrq-trigger
-EOF2
-chmod 755 /bin/reboot-linux
+vol_down() {
+	dat=$(devmem $GPA0_DAT 32 2>/dev/null)
+	[ $(( ${dat:-0x10} & 0x10 )) -eq 0 ]
+}
 
-# ---- USB: ECM network + ACM serial ------------------------------------------
+set_clock() {                                      # /chosen/starbite,rtc-epoch, u64 UTC from the loader
+	E=/proc/device-tree/chosen/starbite,rtc-epoch
+	[ -r "$E" ] || return 0
+	t=$(hexdump -v -e '1/1 "%02x"' "$E")
+	[ -n "$t" ] && [ "$t" != 0000000000000000 ] && date -u -s "@$((0x$t))" >/dev/null 2>&1
+	return 0
+}
+
+# ---- USB gadget: ECM + ACM (+ mass storage on demand) ----------------------------------------
+G=/sys/kernel/config/usb_gadget/starbite
 usb_up() {
 	mount -t configfs none /sys/kernel/config 2>/dev/null
-	G=/sys/kernel/config/usb_gadget/starbite
 	[ -d /sys/kernel/config/usb_gadget ] || return 1
 	mkdir -p $G
-	echo 0x1d6b > $G/idVendor          # Linux Foundation
-	echo 0x0104 > $G/idProduct         # Multifunction Composite Gadget
+	echo 0x1d6b > $G/idVendor                       # Linux Foundation
+	echo 0x0104 > $G/idProduct                      # Multifunction Composite Gadget
 	mkdir -p $G/strings/0x409
 	echo Starbite > $G/strings/0x409/manufacturer
 	echo "Galaxy S9 Linux" > $G/strings/0x409/product
@@ -93,110 +165,327 @@ EOF
 	touch /run/udhcpd.leases
 	udhcpd /run/udhcpd.conf
 	telnetd -l /bin/sh -p 23
-	( while :; do [ -c /dev/ttyGS0 ] && setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done ) &
+	( while :; do [ -c /dev/ttyGS0 ] && setsid sh -c 'exec sh -l </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done ) &
+	ACM_PID=$!
 	return 0
 }
-usb_up
-USB=$?
 
-# ---- postmarketOS from the microSD ---------------------------------------------
-# Root = /starbite-linux.img (ext4) on the card's exFAT, loop-mounted. The exFAT
-# mount moves into the new root (/media/starbite-sd): it backs the image and
-# must stay mounted. Vol down held here = stay in this bring-up shell.
-ROOTIMG=starbite-linux.img
-boot_sd() {
-	dat=$(devmem 0x14050024 32)                     # GPA0 DAT, Vol down = bit 4, active low
-	[ $((dat & 0x10)) -eq 0 ] && return 10
-	i=0
-	while [ ! -b /dev/mmcblk0p1 ] && [ $i -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
-	[ -b /dev/mmcblk0p1 ] || return 11
-	mkdir -p /sd /newroot
-	mount -t exfat -o rw,noatime /dev/mmcblk0p1 /sd || return 12
-	if [ ! -f /sd/$ROOTIMG ]; then umount /sd; return 13; fi
-	losetup /dev/loop0 /sd/$ROOTIMG || { umount /sd; return 14; }
-	if ! mount -t ext4 -o rw,noatime /dev/loop0 /newroot; then
-		losetup -d /dev/loop0; umount /sd; return 15
-	fi
-	if [ ! -x /newroot/sbin/init ] && [ ! -L /newroot/sbin/init ]; then
-		umount /newroot; losetup -d /dev/loop0; umount /sd; return 16
-	fi
-	mkdir -p /newroot/media/starbite-sd 2>/dev/null
-	# Starbite owns the USB gadget (ECM + ACM, 172.16.42.1; postmarketOS's
-	# unudhcpd.usb0 serves the Mac): usb-signaller would tear it down.
-	rm -f /newroot/etc/runlevels/default/usb-signaller
-	# reboot-linux for the running system (postmarketOS has no devmem):
-	# this initramfs's busybox plus the one-shot flag, then a clean reboot.
-	mkdir -p /newroot/usr/local/lib/starbite /newroot/usr/local/sbin
-	cp /bin/busybox /newroot/usr/local/lib/starbite/busybox
-	cat > /newroot/usr/local/sbin/reboot-linux <<'EOF3'
-#!/bin/sh
-# Reboot into Linux again via the Starbite menu's one-shot flag ("menu": stop there).
-B=/usr/local/lib/starbite/busybox
-if [ "$1" != menu ]; then
-	$B devmem 0xFED17FE0 32 0x454e4253
-	$B devmem 0xFED17FE4 32 0x584c5458
-fi
-$B devmem 0x1406080c 32 0x12345670
-sync
-exec reboot
-EOF3
-	chmod 755 /newroot/usr/local/sbin/reboot-linux
-	mount --move /sd /newroot/media/starbite-sd || return 17
-	printf '\033[2J\033[H'
-	echo "  PROJECT STARBITE"
-	echo "  starting postmarketOS from the microSD ..."
-	killall telnetd 2>/dev/null                     # udhcpd keeps serving the Mac
-	umount /tmp /run 2>/dev/null
-	mount --move /dev /newroot/dev
-	mount --move /proc /newroot/proc
-	mount --move /sys /newroot/sys
-	exec switch_root /newroot /sbin/init
+# Card to Mac: the whole exFAT as a USB disk (unmounted here first). "@uncard" ends it.
+card_lend() {
+	[ -d $G ] || return 1
+	grep -q ' /sd ' /proc/mounts && { umount /sd || return 2; }
+	udc=$(cat $G/UDC)
+	echo "" > $G/UDC
+	mkdir -p $G/functions/mass_storage.0
+	echo 1 > $G/functions/mass_storage.0/lun.0/removable
+	echo $SDDEV > $G/functions/mass_storage.0/lun.0/file
+	ln -s $G/functions/mass_storage.0 $G/configs/c.1/ 2>/dev/null
+	echo "$udc" > $G/UDC
+	CARD_LENT=1
 }
-boot_sd
-SD=$?
+card_return() {
+	[ "$CARD_LENT" = 1 ] || return 0
+	udc=$(cat $G/UDC)
+	echo "" > $G/UDC
+	rm -f $G/configs/c.1/mass_storage.0
+	echo "" > $G/functions/mass_storage.0/lun.0/file 2>/dev/null
+	echo "$udc" > $G/UDC
+	CARD_LENT=0
+	card_up
+}
 
-# ---- report -----------------------------------------------------------------
+# ---- the card's exFAT on /sd (uid/gid 10000: the desktop user owns it in every distro) --------
+card_up() {
+	grep -q ' /sd ' /proc/mounts && return 0
+	[ "$CARD_LENT" = 1 ] && return 22
+	i=0
+	while [ ! -b $SDDEV ] && [ $i -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
+	[ -b $SDDEV ] || return 21
+	# VolumeFlags (boot sector offset 106), bit 1 = VolumeDirty: hard resets leave it set
+	f=$(dd if=$SDDEV bs=1 skip=106 count=1 2>/dev/null | hexdump -v -e '1/1 "%u"')
+	if [ $(( ${f:-0} & 2 )) -ne 0 ] && command -v fsck.exfat >/dev/null; then
+		echo "  checking the microSD (exFAT marked dirty) ..."
+		fsck.exfat -p $SDDEV
+		[ $? -ge 4 ] && return 22                  # not repaired: do not mount it rw
+	fi
+	mkdir -p /sd
+	mount -t exfat -o rw,noatime,uid=$SB_UID,gid=$SB_UID,fmask=0022,dmask=0022 $SDDEV /sd || return 22
+}
+
+# ---- watchdog -------------------------------------------------------------------------------
+# Armed and left running with nobody feeding it: busybox watchdog sets the timeout, then is
+# killed with SIGKILL, so the device closes without the magic 'V' and keeps counting. The
+# distro's own feeder (systemd RuntimeWatchdogSec, OpenRC's busybox watchdog) takes it over.
+wdt_arm() {
+	[ "$SB_WDT" -gt 0 ] 2>/dev/null || return 0
+	[ -c /dev/watchdog ] || { echo "  no /dev/watchdog: not armed"; return 0; }
+	t=$SB_WDT
+	m=$(cat /sys/class/watchdog/watchdog0/max_timeout 2>/dev/null)
+	[ "$t" -lt 30 ] && t=30                         # the distro needs time to take it over
+	[ -n "$m" ] && [ "$m" -gt 0 ] && [ "$t" -gt "$m" ] && t=$m
+	watchdog -T "$t" -t 1 -F /dev/watchdog &
+	p=$!
+	sleep 1
+	kill -9 $p 2>/dev/null
+	echo "  watchdog armed: ${t} s"
+}
+
+# ==== booting a root ========================================================================
+
+LOOP= MLOOP= MDIR=
+root_undo() {
+	[ -n "$MDIR" ] && umount "$MDIR" 2>/dev/null
+	[ -n "$MLOOP" ] && losetup -d "$MLOOP" 2>/dev/null
+	grep -q ' /newroot ' /proc/mounts && umount /newroot
+	[ -n "$LOOP" ] && losetup -d "$LOOP" 2>/dev/null
+	LOOP= MLOOP= MDIR=
+}
+loop_attach() {                                     # $1 file, $2 "-r" for read-only
+	# util-linux losetup by path: this busybox's sh runs its own applet first for a bare name
+	[ -x /sbin/losetup ] &&
+		l=$(/sbin/losetup --direct-io=on $2 -f --show "$1" 2>/dev/null) && { echo "$l"; return 0; }
+	l=$(losetup -f) && losetup $2 "$l" "$1" && echo "$l"
+}
+
+# Files Starbite puts in every root it starts (only when they differ: no needless card writes).
+put_file() {                                        # $1 source, $2 destination, $3 mode
+	cmp -s "$1" "$2" 2>/dev/null && return 0
+	cp "$1" "$2.sbnew" && chmod "$3" "$2.sbnew" && mv -f "$2.sbnew" "$2"
+}
+root_extras() {
+	mkdir -p "$NR/usr/local/lib/starbite" "$NR/usr/local/sbin" || return 0
+	for b in /bin/busybox.static /bin/busybox; do
+		[ -x $b ] && { put_file $b "$NR/usr/local/lib/starbite/busybox" 755; break; }
+	done
+	put_file /bin/reboot-to "$NR/usr/local/sbin/reboot-to" 755
+	[ -e "$NR/usr/local/sbin/reboot-linux" ] || ln -s reboot-to "$NR/usr/local/sbin/reboot-linux"
+}
+
+# boot_root PATH: 20-29 on failure, with everything undone except the card on /sd.
+NR=/newroot
+boot_root() {
+	img=$(sb_img_path "$1") || return 20
+	sb-tools -u 2>/dev/null                         # _tools.img must not stay mounted from /sd
+	card_up || return $?
+	[ -f "/sd$img" ] || return 23
+	if command -v e2fsck >/dev/null; then
+		echo "  checking $img ..."
+		e2fsck -p "/sd$img"
+		[ $? -ge 4 ] && return 24
+	fi
+	mkdir -p $NR
+	if [ "$SB_RW" = 0 ]; then ro=-r mo=ro; else ro= mo=rw; fi
+	LOOP=$(loop_attach "/sd$img" $ro) || { LOOP=; return 25; }
+	mount -t ext4 -o $mo,noatime "$LOOP" $NR || { root_undo; return 26; }
+	init=$(sb_pick_init $NR) || { root_undo; return 27; }
+	# the shared modules image (plan 2.3), read-only, on /lib/modules/<release>
+	K=$(uname -r)
+	M=/sd/distros/_kernel/modules-$K.img
+	if [ -f "$M" ]; then
+		MDIR=$(sb_mods_dir $NR "$K")
+		[ -d "$MDIR" ] || mkdir -p "$MDIR" 2>/dev/null
+		if [ -d "$MDIR" ] && MLOOP=$(loop_attach "$M" -r) && mount -t ext4 -o ro,noload "$MLOOP" "$MDIR"; then :; else
+			[ -n "$MLOOP" ] && losetup -d "$MLOOP" 2>/dev/null
+			MLOOP= MDIR=
+		fi
+	fi
+	[ "$SB_RW" != 0 ] && root_extras
+	[ -d $NR/media/starbite-sd ] || mkdir -p $NR/media/starbite-sd 2>/dev/null
+	if [ -d $NR/media/starbite-sd ]; then
+		mount --move /sd $NR/media/starbite-sd || { root_undo; return 28; }
+	fi
+	clear_screen
+	echo "  PROJECT STARBITE"
+	echo "  starting ${img##*/} ($init) ..."
+	wdt_arm
+	# Nothing of the initrd's that gives a root shell outlives it. Its udhcpd keeps serving the
+	# Mac unless the distro serves usb0 itself (sb-integrate.sh leaves this marker).
+	[ -n "$KEYS_PID" ] && kill $KEYS_PID 2>/dev/null
+	[ -n "$ACM_PID" ] && kill $ACM_PID 2>/dev/null
+	killall telnetd 2>/dev/null
+	[ -e $NR/etc/starbite/usb0-server ] && killall udhcpd 2>/dev/null
+	exec 4<&-                                       # the /run/sb-boot FIFO, so /run can go
+	umount -l /tmp 2>/dev/null
+	umount -l /run 2>/dev/null
+	mount --move /dev $NR/dev
+	mount --move /proc $NR/proc
+	mount --move /sys $NR/sys
+	exec switch_root $NR "$init"
+}
+
+# ==== the screen: report + selector ==========================================================
+
+clear_screen() { printf '\033[2J\033[H'; }
 val() { [ -r "$1" ] && cat "$1" 2>/dev/null || echo "-"; }
-report() {
+
+why() {
+	case $1 in
+	10) echo "skipped (Vol down or sb.shell=1)" ;;
+	20) echo "bad sb.root ($2)" ;;
+	21) echo "no microSD card" ;;
+	22) echo "microSD exFAT not mounted (needs fsck.exfat, or lent to the Mac)" ;;
+	23) echo "$2 is not on the card" ;;
+	24) echo "e2fsck could not repair $2" ;;
+	25) echo "losetup failed for $2" ;;
+	26) echo "$2 is not a mountable ext4" ;;
+	27) echo "no init in $2" ;;
+	28) echo "could not move the card into $2" ;;
+	30) echo "sb.root=$SB_ROOT" ;;
+	*) echo "$2 could not start ($1)" ;;
+	esac
+}
+
+ITEMS= NITEMS=0 SEL=0
+items_build() {
+	ITEMS=
+	grep -q ' /sd ' /proc/mounts && ITEMS=$(sb_list /sd)
+	ITEMS="$ITEMS
+@shell
+@card
+@menu"
+	ITEMS=$(echo "$ITEMS" | grep -v '^$')
+	NITEMS=$(echo "$ITEMS" | grep -c .)
+	[ $SEL -lt $NITEMS ] || SEL=0
+}
+item() { echo "$ITEMS" | sed -n "$(($1 + 1))p"; }
+label() {
+	case $1 in
+	@shell) echo "Starbite shell (stay here; sb-tools for _tools.img)" ;;
+	@card) if [ "$CARD_LENT" = 1 ]; then echo "Card back from the Mac"; else echo "Card to Mac (USB storage)"; fi ;;
+	@menu) echo "Reboot to the Starbite menu" ;;
+	/starbite-linux.img) echo "starbite-linux (old postmarketOS root)" ;;
+	*) n=${1##*/}; echo "${n%.img}" ;;
+	esac
+}
+
+screen() {
 	printf '\033[H'
-	echo "  PROJECT STARBITE  -  LINUX $(uname -r)"
+	echo "  PROJECT STARBITE  -  LINUX $(uname -r)              "
 	echo "  Samsung Galaxy S9 (SM-G960F), Exynos 9810"
 	echo ""
-	echo "  CPUs online    $(val /sys/devices/system/cpu/online)"
 	mem=$(awk '/MemTotal/ {printf "%d MiB", $2 / 1024}' /proc/meminfo)
-	echo "  Memory         $mem"
-	echo "  Uptime         $(cut -d. -f1 /proc/uptime) s"
-	n=$(grep -c ' sd[a-z][0-9]*$' /proc/partitions)
-	echo "  UFS            $n block devices, all read-only"
-	if ls /dev/mmcblk* >/dev/null 2>&1; then
-		echo "  microSD        $(ls /dev/mmcblk* | tr '\n' ' ')"
-	else
-		echo "  microSD        no driver yet"
-	fi
+	echo "  CPUs $(val /sys/devices/system/cpu/online)   memory $mem   up $(cut -d. -f1 /proc/uptime) s      "
 	for ps in /sys/class/power_supply/*; do
-		[ -e "$ps/capacity" ] && echo "  Battery        $(val $ps/capacity) %  $(val $ps/status)"
+		[ -e "$ps/capacity" ] && echo "  Battery $(val $ps/capacity) %  $(val $ps/status)        "
 	done
-	for tz in /sys/class/thermal/thermal_zone*; do
-		[ -e "$tz/temp" ] && echo "  $(val $tz/type | cut -c1-12)$(printf '%*s' 3 '')$(( $(val $tz/temp) / 1000 )) C"
-	done
-	echo ""
 	case $USB in
-	0) echo "  USB            telnet 172.16.42.1  (or the ACM serial port)" ;;
-	1) echo "  USB            no configfs gadget support" ;;
-	2) echo "  USB            no device controller (UDC)" ;;
-	*) echo "  USB            gadget setup failed ($USB)" ;;
+	0) echo "  USB     telnet 172.16.42.1 (or the ACM serial port)" ;;
+	1) echo "  USB     no configfs gadget support" ;;
+	2) echo "  USB     no device controller (UDC)" ;;
+	*) echo "  USB     gadget setup failed ($USB)" ;;
 	esac
+	echo "  Root    $STATUS                                        "
+	grep -q s9p_vendor_m3_defaults /proc/cmdline ||
+		echo "  WARNING bootargs lack s9p_vendor_m3_defaults (CPUs 4-7 stay off)"
 	echo ""
-	case $SD in
-	10) echo "  postmarketOS    skipped (Vol down held)" ;;
-	11) echo "  postmarketOS    no microSD card" ;;
-	13) echo "  postmarketOS    no $ROOTIMG on the card" ;;
-	*) echo "  postmarketOS    could not start ($SD)" ;;
-	esac
+	echo "  Vol up / Vol down: move     Power: start"
 	echo ""
-	echo "  Hold Power + Vol down to leave."
+	i=0
+	while [ $i -lt $NITEMS ]; do
+		if [ $i -eq $SEL ]; then m='  >> '; else m='     '; fi
+		echo "$m$(label "$(item $i)")                    "
+		i=$((i + 1))
+	done
+	echo ""
+	echo "  Mac: echo NAME > /run/sb-boot   (or reboot-to KEY)"
+	printf '\033[J'
 }
-while :; do
-	report
-	sleep 5
-done
+
+# Buttons, polled from the GPIO data registers (works with or without gpio-keys), as FIFO tokens.
+KEYS_PID=
+keys_start() {
+	(
+		prev=7
+		while :; do
+			a=$(devmem $GPA0_DAT 32 2>/dev/null) || exit 0
+			b=$(devmem $GPA2_DAT 32 2>/dev/null)
+			k=0
+			[ $((a & 0x08)) -eq 0 ] && k=$((k | 1))
+			[ $((a & 0x10)) -eq 0 ] && k=$((k | 2))
+			[ $(( ${b:-0x10} & 0x10)) -eq 0 ] && k=$((k | 4))
+			new=$((k & ~prev))
+			[ $((new & 1)) -ne 0 ] && echo @up >&4
+			[ $((new & 2)) -ne 0 ] && echo @down >&4
+			[ $((new & 4)) -ne 0 ] && echo @ok >&4
+			prev=$k
+			sleep 0.1
+		done
+	) &
+	KEYS_PID=$!
+}
+
+# One line from the FIFO or a button.
+act() {
+	case $1 in
+	@up) SEL=$(( (SEL + NITEMS - 1) % NITEMS )) ;;
+	@down) SEL=$(( (SEL + 1) % NITEMS )) ;;
+	@ok) act "$(item $SEL)" ;;
+	@shell) STATUS="shell (telnet 172.16.42.1)" ;;
+	@card)
+		if [ "$CARD_LENT" = 1 ]; then card_return; STATUS="card back on /sd"
+		elif card_lend; then STATUS="card lent to the Mac (eject it there, then 'Card back')"
+		else STATUS="could not lend the card (busy?)"; fi ;;
+	@uncard) card_return; STATUS="card back on /sd" ;;
+	@menu) clear_screen; echo "  rebooting to the Starbite menu ..."; reboot-to menu ;;
+	*)
+		p=$(sb_img_path "$1") || { STATUS="'$1' is not a distro name"; return; }
+		clear_screen
+		boot_root "$p"
+		STATUS=$(why $? "$p")
+		clear_screen ;;
+	esac
+}
+
+# ==== main ==================================================================================
+
+main() {
+	mkdir -p /proc /sys /dev /run /tmp
+	mount -t proc proc /proc
+	mount -t sysfs sysfs /sys
+	mount -t devtmpfs devtmpfs /dev 2>/dev/null
+	mkdir -p /dev/pts
+	mount -t devpts devpts /dev/pts
+	mount -t tmpfs -o mode=0755 tmpfs /run
+	mount -t tmpfs tmpfs /tmp
+	: > /.sb-initrd                                 # reboot-to: "still in the initrd"
+	if [ -c /dev/tty0 ]; then exec </dev/null >/dev/tty0 2>&1; else exec </dev/null >/dev/console 2>&1; fi
+	set_clock
+	printf '\033[2J\033[H\033[?25l'
+	lock_ufs
+	( i=0; while [ $i -lt 120 ]; do lock_ufs; sleep 0.5; i=$((i + 1)); done ) &
+
+	sb_parse /proc/cmdline
+	usb_up
+	USB=$?
+
+	if [ "$SB_SHELL" = 1 ] || vol_down; then
+		card_up
+		STATUS=$(why 10)
+	elif [ "$SB_ROOT" = none ] || [ "$SB_ROOT" = ask ]; then
+		card_up
+		r=$?
+		if [ $r -eq 0 ]; then STATUS=$(why 30); else STATUS=$(why $r); fi
+	else
+		boot_root "$SB_ROOT"
+		STATUS=$(why $? "$SB_ROOT")
+		clear_screen
+	fi
+
+	# The selector. Writing a name to the FIFO starts it with no reboot (only PID 1 can
+	# switch_root, so this loop reads it). Opened read-write: never blocks.
+	mkfifo -m 600 $FIFO 2>/dev/null && exec 4<>$FIFO || exec 4</dev/null
+	items_build
+	[ "$SB_ROOT" = none ] && SEL=$(( NITEMS - 3 ))    # "Starbite shell"
+	keys_start
+	while :; do
+		items_build
+		screen
+		if read -t 5 line <&4; then
+			act "$line"
+		elif [ ! -p $FIFO ]; then
+			sleep 5                                # no FIFO: read returns at once
+		fi
+	done
+}
+
+[ "${SB_TEST:-0}" = 1 ] || main "$@"

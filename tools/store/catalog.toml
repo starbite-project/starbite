@@ -2,7 +2,8 @@
 # tools/store/sbstore2.py packs it into the OS store as "catalog"; without one the loader uses
 # its built-in copy of the first four entries.
 #
-#   key       what the menu, settings and boot-next use (menu v5 shows ios26, win11, android, linux)
+#   key       what the menu, settings and boot-next use (menu v5 shows ios26, win11, android, linux;
+#             at most 23 characters: reboot-to KEY writes it into the SBNEXT2! mailbox)
 #   category  apple microsoft android linux starbite other lab
 #   method    xnu linux android uefi bare
 #   tag       daily beta experimental lab stable
@@ -44,15 +45,139 @@ tag = "experimental"
 files = ["android.kernel", "android.ramdisk", "android.cmdline"]
 root = "ufs:SYSTEM + A16DATA"
 
+# ---- Linux (docs/LINUX-REBUILD-PLAN.md 3.3): one kernel, DTB and initrd for every entry; the
+# initrd (tools/linux/init) reads sb.root= etc. from the cmdline and boots /distros/<name>.img
+# from the card's exFAT (p1). Entries whose image does not exist yet are hidden; un-hide one once
+# card-install.sh has put its image on the card.
 [[entry]]
-key = "linux"
-name = "Linux 7.1"
-version = "postmarketOS · being rebuilt"
+key = "linux-shell"
+name = "Starbite shell"
+version = "Linux 7.1 · rescue · installer"
+category = "linux"
+method = "linux"
+tag = "stable"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+cmdline = "sb.root=none"
+root = "initramfs + sd:p1 /distros/_tools.img"
+
+[[entry]]
+key = "linux-ubuntu"
+name = "Ubuntu"
+version = "26.04 LTS · Phosh · Linux 7.1"
+category = "linux"
+method = "linux"
+tag = "beta"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+cmdline = "sb.root=/distros/ubuntu.img sb.session=phosh"
+root = "sd:p1 /distros/ubuntu.img"
+
+[[entry]]
+key = "linux-ubuntu-gnome"
+name = "Ubuntu Desktop"
+version = "26.04 LTS · GNOME · Linux 7.1"
 category = "linux"
 method = "linux"
 tag = "experimental"
-files = ["linux.image", "linux.dtb"]
-root = "sd:p1 /starbite-linux.img"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+cmdline = "sb.root=/distros/ubuntu.img sb.session=gnome"
+root = "sd:p1 /distros/ubuntu.img"
+
+[[entry]]
+key = "linux-ubuntu-lomiri"
+name = "Ubuntu Lomiri"
+version = "26.04 LTS · Lomiri (Touch-style)"
+category = "linux"
+method = "linux"
+tag = "experimental"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+cmdline = "sb.root=/distros/ubuntu.img sb.session=lomiri"
+root = "sd:p1 /distros/ubuntu.img"
+
+# Menu v5 starts the key "linux", and the old "SBNEXTLX" flag (reboot-linux) means "linux": both
+# land on Ubuntu, the main distro. Hidden, so menu v6 does not list Ubuntu twice.
+[[entry]]
+key = "linux"
+name = "Ubuntu"
+version = "26.04 LTS · Phosh · Linux 7.1"
+category = "linux"
+method = "linux"
+tag = "beta"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+cmdline = "sb.root=/distros/ubuntu.img sb.session=phosh"
+root = "sd:p1 /distros/ubuntu.img"
+flags = ["hidden"]
+
+[[entry]]
+key = "linux-bringup"
+name = "Linux bring-up"
+version = "loglevel 7 · selector"
+category = "linux"
+method = "linux"
+tag = "lab"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+cmdline = "loglevel=7 keep_bootcon sb.root=ask"
+root = "sd:p1 /distros"
+flags = ["hidden"]
+
+[[entry]]
+key = "linux-debian"
+name = "Debian"
+version = "forky · Phosh · Linux 7.1"
+category = "linux"
+method = "linux"
+tag = "experimental"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+cmdline = "sb.root=/distros/debian-phosh.img sb.session=phosh"
+root = "sd:p1 /distros/debian-phosh.img"
+flags = ["hidden"]
+
+[[entry]]
+key = "linux-pmos"
+name = "postmarketOS"
+version = "edge · Phosh · Linux 7.1"
+category = "linux"
+method = "linux"
+tag = "beta"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+cmdline = "sb.root=/distros/pmos-phosh.img"
+root = "sd:p1 /distros/pmos-phosh.img"
+flags = ["hidden"]
+
+[[entry]]
+key = "linux-arch"
+name = "Arch Linux ARM"
+version = "rolling · Phosh · Linux 7.1"
+category = "linux"
+method = "linux"
+tag = "experimental"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+cmdline = "sb.root=/distros/arch.img"
+root = "sd:p1 /distros/arch.img"
+flags = ["hidden"]
+
+[[entry]]
+key = "linux-fedora"
+name = "Fedora"
+version = "Phosh · Linux 7.1"
+category = "linux"
+method = "linux"
+tag = "experimental"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+cmdline = "sb.root=/distros/fedora.img"
+root = "sd:p1 /distros/fedora.img"
+flags = ["hidden"]
+
+[[entry]]
+key = "linux-kali"
+name = "Kali Linux"
+version = "rolling · Phosh · no monitor mode"
+category = "linux"
+method = "linux"
+tag = "experimental"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+cmdline = "sb.root=/distros/kali.img"
+root = "sd:p1 /distros/kali.img"
+flags = ["hidden"]
 
 # Lab: proves that a failed start comes back to the menu (its file is not an arm64 Image).
 [[entry]]

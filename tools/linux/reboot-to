@@ -1,0 +1,54 @@
+#!/bin/sh
+# reboot-to KEY: start Starbite catalog entry KEY on the next boot, with no button presses.
+#
+# Writes the menu's one-shot RAM mailbox (shim/starlte/menu.c boot_next), which survives a warm
+# reset: the key (at most 23 characters, NUL padded to 24 bytes) as little-endian u32 words at
+# 0xFED17FE8..0xFED17FFC, then the u64 magic "SBNEXT2!" at 0xFED17FE0 (written last, so the menu
+# never sees the magic with a half-written key). Then INFORM 0x1406080c = normal reboot, and a
+# reboot. "reboot-to menu" only reboots, to the menu.
+#
+#   reboot-to linux-ubuntu        reboot-to -n linux-shell   (-n: print the writes, do nothing)
+#
+# Installed as /bin/reboot-to in the initrd (tools/linux/mk-initrd.sh) and as
+# /usr/local/sbin/reboot-to in every distro (tools/linux/distros/sb-integrate.sh), which also
+# gets a static busybox at /usr/local/lib/starbite/busybox for devmem. "reboot-linux" is the old
+# name: it means "reboot-to linux" (the old "SBNEXTLX" flag meant the same).
+dry=
+[ "$1" = -n ] && { dry=1; shift; }
+key=$1
+case ${0##*/} in reboot-linux) key=${1:-linux} ;; esac
+case $key in
+""|-h|--help|*[!A-Za-z0-9._-]*) echo "usage: reboot-to [-n] KEY|menu" >&2; exit 2 ;;
+esac
+[ ${#key} -le 23 ] || { echo "reboot-to: '$key' is longer than 23 characters" >&2; exit 2; }
+
+B=
+for b in /usr/local/lib/starbite/busybox /bin/busybox.static /bin/busybox; do
+	[ -x "$b" ] && { B=$b; break; }
+done
+[ -n "$dry" ] || [ -n "$B" ] || { echo "reboot-to: no busybox with devmem" >&2; exit 1; }
+w32() {
+	if [ -n "$dry" ]; then echo "devmem $1 32 $2"; else "$B" devmem "$1" 32 "$2"; fi
+}
+
+if [ "$key" != menu ]; then
+	set -- $(printf '%s' "$key" | od -An -v -tx1)
+	w=0
+	while [ $w -lt 6 ]; do
+		w32 $(printf '0x%X' $((0xFED17FE8 + 4 * w))) 0x${4:-00}${3:-00}${2:-00}${1:-00}
+		if [ $# -ge 4 ]; then shift 4; else set --; fi
+		w=$((w + 1))
+	done
+	w32 0xFED17FE0 0x454E4253                       # "SBNE"
+	w32 0xFED17FE4 0x21325458                       # "XT2!"
+fi
+w32 0x1406080C 0x12345670                           # INFORM: normal reboot
+[ -n "$dry" ] && exit 0
+sync
+if [ "$$" = 1 ] || [ -e /.sb-initrd ]; then
+	echo b > /proc/sysrq-trigger                    # the initrd has no init to ask
+elif command -v systemctl >/dev/null && [ -d /run/systemd/system ]; then
+	exec systemctl reboot
+else
+	exec reboot
+fi

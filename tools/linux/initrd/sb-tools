@@ -1,0 +1,25 @@
+#!/bin/sh
+# sb-tools: a shell in the Alpine tools root /sd/distros/_tools.img (plan 3.5, distro 1), from the
+# Starbite initrd. The card is inside at /sd. "sb-tools -u" unmounts it all again (the init does
+# that before it starts a distro).
+T=/tools
+if [ "$1" = -u ]; then
+	grep -q " $T " /proc/mounts || exit 0
+	for d in sd sys proc dev/pts dev; do
+		grep -q " $T/$d " /proc/mounts && umount "$T/$d"
+	done
+	exec umount -d $T
+fi
+[ -f /sd/distros/_tools.img ] || { echo "sb-tools: no /sd/distros/_tools.img (plan 3.5 makes it)" >&2; exit 1; }
+if ! grep -q " $T " /proc/mounts; then
+	mkdir -p $T
+	e2fsck -p /sd/distros/_tools.img
+	[ $? -ge 4 ] && exit 1
+	mount -o loop,noatime /sd/distros/_tools.img $T || exit 1
+fi
+for d in dev dev/pts proc sys sd; do
+	mkdir -p "$T/$d"
+	grep -q " $T/$d " /proc/mounts || mount --bind "/$d" "$T/$d"
+done
+cp /etc/resolv.conf $T/etc/ 2>/dev/null
+exec chroot $T /bin/sh -l
