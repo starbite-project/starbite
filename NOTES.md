@@ -2013,3 +2013,16 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   their free-space waits). Freed without restarting the VM: `limactl shell starbite -- bash -lc 'sync; echo 2 | sudo
   tee /proc/sys/vm/drop_caches'` (guest forgets the inodes, host closes them: 2.7 -> 9.5 GB free). mkroot-arch.sh
   now `release`s files (truncate -s 0, rm, drop_caches) and releases a half-built image on failure (tarball kept).
+- 2026-11-02 late: **pmOS image review fixes (pmos.img, not booted).** The greetd autologin bypasses phrog, which
+  would export the desktop variables from phosh.desktop, and phosh-session sets none: with XDG_CURRENT_DESKTOP unset
+  gnome-session falls back to GNOME and drops the OnlyShowIn=Phosh; on-screen keyboard (phosh-osk-stevia, a
+  RequiredComponent of phosh.session), so there would be no way to type a Wi-Fi password. initial_session is now
+  `env XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=Phosh:GNOME XDG_SESSION_DESKTOP=phosh PAN_MAX_AFBC_PACKING_RATIO=0
+  phosh-session` (other UIs: DesktopNames= with ';' -> ':', the session file's name). The image also carries an empty
+  lib/modules/<build/linux/release> (with sb.rw=0 the initrd cannot mkdir it and silently skips the modules bind).
+  Both patched into the existing image (loop-mounted rw, e2fsck -f, resize2fs -M) and checked by mkroot-pmos.sh's
+  37 checks: 2143 MiB, sha 62f0fe4c...f510. mk-payload.sh no longer loses a PIN: an old one-line login file has its
+  6-digit PIN taken out and is rewritten as "user user" + "pin NNNNNN" (no PIN: kept as .old, a new one is made),
+  and the "user user" sed skips any line with a PIN on it. That sed is how the old milestone-3 pmOS root lost its
+  PIN: its PIN is unknown and pmos-root.sh cannot log into it (SSH key only). The new pmos.img is fine: its PIN is in
+  build/linux/pmos-login.txt, pmos-root.sh greps any 6-digit number, and the SSH key is installed.

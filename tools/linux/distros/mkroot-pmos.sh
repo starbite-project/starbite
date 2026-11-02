@@ -23,7 +23,8 @@
 #     deviceinfo is a plain file (no flash method).
 #   sb-integrate.sh NAME openrc (user "user" 10000, PIN build/linux/NAME-login.txt, SSH key, usb0 +
 #     udhcpd for the Mac, GPU floor, AFBC env, scale 3, Wi-Fi firmware, reboot-to, sshd + keys)
-#   greetd autologin of "user" into the UI's session (phrog stays the greeter after a logout)
+#   greetd autologin of "user" into the UI's session with the XDG desktop variables phrog would set
+#     (phrog stays the greeter after a logout); empty lib/modules/<release> for the modules bind
 #   checks inside the image, then e2fsck -f, resize2fs -M, file truncated to the filesystem, sha256
 # Output: IMG (default $P/build/distros-build/NAME.img) + IMG.sha256.
 #
@@ -170,14 +171,7 @@ EOF
 
 # ---- Starbite integration (shared) ------------------------------------------------------------
 cp "$HERE/sb-integrate.sh" "$S/"
-# an older login file (one line, "user ... PIN/password: NNNNNN"): rewritten in mk-payload's format
-# BEFORE mk-payload runs, whose sed turns any line starting "user " into "user user" (PIN and all);
-# one with no PIN left is removed, so mk-payload makes a new PIN
-LOGIN=$P/build/linux/$NAME-login.txt
-if [ -s "$LOGIN" ] && ! grep -q '^pin [0-9]\{6\}$' "$LOGIN"; then
-	pin=$(grep -o '[0-9]\{6\}' "$LOGIN" | head -1 || true)
-	if [ -n "$pin" ]; then printf 'user user\npin %s\n' "$pin" > "$LOGIN"; else rm -f "$LOGIN"; fi
-fi
+# mk-payload rewrites an older one-line login file into "user user" + "pin NNNNNN" (PIN kept)
 UH=$UH sh "$HERE/mk-payload.sh" "$S/payload" "$NAME"
 grep -q '^pin [0-9]\{6\}$' "$S/payload/login.txt" || { echo "no PIN for $NAME" >&2; exit 1; }
 chroot "$R" /bin/sh /tmp/sb/sb-integrate.sh "$NAME" openrc /tmp/sb/payload
@@ -198,6 +192,9 @@ case $UI in phosh) [ -f "$R/usr/share/wayland-sessions/phosh.desktop" ] && desk=
 [ -n "$desk" ] || { echo "no wayland session for $UI" >&2; exit 1; }
 SESSION_CMD=$(sed -n 's/^Exec=//p' "$desk" | head -1)
 [ -n "$SESSION_CMD" ] || { echo "no Exec= in $desk" >&2; exit 1; }
+SESSION_DESK=$(basename "$desk" .desktop)
+SESSION_NAMES=$(sed -n 's/^DesktopNames=//p' "$desk" | head -1 | sed 's/;*$//; s/;/:/g')
+SESSION_ENV="XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=${SESSION_NAMES:-$SESSION_DESK} XDG_SESSION_DESKTOP=$SESSION_DESK PAN_MAX_AFBC_PACKING_RATIO=0"
 gcfg=$(sed -n 's/^[[:space:]]*cfgfile="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' "$R/etc/conf.d/greetd" 2>/dev/null | tail -1)
 [ -n "$gcfg" ] && [ "$gcfg" != /etc/greetd/starbite.toml ] && [ -f "$R$gcfg" ] || gcfg=/etc/greetd/config.toml
 mkdir -p "$R/etc/greetd"
@@ -208,9 +205,13 @@ mkdir -p "$R/etc/greetd"
 		printf '[terminal]\nvt = 7\n\n[default_session]\ncommand = "agreety --cmd /bin/sh"\nuser = "greetd"\n'
 	fi
 	# PAN_MAX_AFBC_PACKING_RATIO is in /etc/environment (pam_env), and on the command line too: the
-	# autologin session is not authenticated, so it does not depend on pam_env's setcred hook
-	printf '\n# Starbite autologin (mkroot-pmos.sh): "user" (10000) straight into %s\n[initial_session]\ncommand = "env PAN_MAX_AFBC_PACKING_RATIO=0 %s"\nuser = "user"\n' \
-		"$(basename "$desk" .desktop)" "$SESSION_CMD"
+	# autologin session is not authenticated, so it does not depend on pam_env's setcred hook.
+	# The autologin bypasses phrog, which would export the desktop variables from the session file
+	# (phosh-session sets none): XDG_CURRENT_DESKTOP from DesktopNames= (';' -> ':', e.g.
+	# Phosh:GNOME, without which gnome-session drops the OnlyShowIn=Phosh; on-screen keyboard),
+	# XDG_SESSION_DESKTOP from the file's name, XDG_SESSION_TYPE=wayland
+	printf '\n# Starbite autologin (mkroot-pmos.sh): "user" (10000) straight into %s\n[initial_session]\ncommand = "env %s %s"\nuser = "user"\n' \
+		"$SESSION_DESK" "$SESSION_ENV" "$SESSION_CMD"
 } > "$R/etc/greetd/starbite.toml.new"
 mv "$R/etc/greetd/starbite.toml.new" "$R/etc/greetd/starbite.toml"
 touch "$R/etc/conf.d/greetd"
@@ -227,6 +228,13 @@ done
 # NetworkManager never takes usb0 (sb-integrate wrote the keyfile rule; pmOS ships its own profile)
 { grep -rlsE '^interface-name=usb0' "$R/etc/NetworkManager/system-connections" "$R/usr/lib/NetworkManager/system-connections" || true; } |
 	while read -r f; do echo "removed NM profile for usb0: ${f#"$R"}"; rm -f "$f"; done
+# the shared modules image's mount point (the initrd binds /distros/_kernel/modules-REL.img there):
+# with sb.rw=0 the root is read-only and the initrd cannot mkdir it, so it is made here, empty.
+# Where the initrd's sb_mods_dir puts it: usr/lib/modules when /lib is a link, else lib/modules.
+KREL=${KREL:-$(cat "$P/build/linux/release")}
+[ -n "$KREL" ] || { echo "no kernel release in $P/build/linux/release" >&2; exit 1; }
+if [ -L "$R/lib" ]; then MODDIR=usr/lib/modules/$KREL; else MODDIR=lib/modules/$KREL; fi
+mkdir -p "$R/$MODDIR"
 # machine-id: dbus makes it on the first boot (dbus-uuidgen --ensure), not baked into the image
 rm -f "$R/etc/machine-id" "$R/var/lib/dbus/machine-id"
 rm -f "$R/etc/ssh/ssh_host_"*
@@ -259,7 +267,9 @@ c "NM leaves usb0 alone"      "grep -q interface-name:usb0 etc/NetworkManager/co
 c "networkmanager in default" "[ -L etc/runlevels/default/networkmanager ]"
 c "greetd in default"         "[ -L etc/runlevels/default/greetd ]"
 c "greetd autologin user"     "grep -qx 'cfgfile=\"/etc/greetd/starbite.toml\"' etc/conf.d/greetd && grep -A2 '^\[initial_session\]' etc/greetd/starbite.toml | grep -q 'user = \"user\"' && grep -q '^\[default_session\]' etc/greetd/starbite.toml"
-c "session binary"            "[ -x usr/bin/phosh-session ] || [ \"$UI\" != phosh ]"
+c "autologin desktop env"     "grep -A1 '^\[initial_session\]' etc/greetd/starbite.toml | grep -q 'XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=[^ ]' && { [ \"$UI\" != phosh ] || grep -q 'XDG_CURRENT_DESKTOP=Phosh:GNOME XDG_SESSION_DESKTOP=phosh ' etc/greetd/starbite.toml; }"
+c "modules mount point"       "[ -d '$MODDIR' ] && [ -z \"\$(ls -A '$MODDIR')\" ]"
+c "session binary"         "[ -x usr/bin/phosh-session ] || [ \"$UI\" != phosh ]"
 c "phosh scale 3"             "grep -A1 'output:DSI-1' etc/phosh/phoc.ini | grep -q 'scale = 3' || [ \"$UI\" != phosh ]"
 c "AFBC env"                  "grep -qx PAN_MAX_AFBC_PACKING_RATIO=0 etc/environment"
 c "GPU floor rule"            "grep -q 455000000 etc/udev/rules.d/90-starbite.rules"

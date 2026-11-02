@@ -27,10 +27,18 @@ done
 K=$P/build/linux/ssh/starbite_ed25519.pub
 [ -s "$K" ] && install -m644 "$K" "$D/authorized_keys"
 LOGIN=$P/build/linux/$NAME-login.txt
+# an older file (one line, e.g. "user starbite PIN: NNNNNN"; older ones named the uid-1000 user
+# starbite): the PIN is taken out first and both lines written back, so the PIN survives. One with
+# no 6-digit PIN at all is kept as LOGIN.old and a new PIN is made below.
+if [ -s "$LOGIN" ] && ! grep -q '^pin [0-9]\{6\}$' "$LOGIN"; then
+	pin=$(grep -o '[0-9]\{6\}' "$LOGIN" | head -1 || true)
+	if [ -n "$pin" ]; then printf 'user user\npin %s\n' "$pin" > "$LOGIN"
+	else mv "$LOGIN" "$LOGIN.old"; echo "mk-payload: no PIN in $LOGIN (kept as $LOGIN.old), making a new one" >&2; fi
+fi
 if [ ! -s "$LOGIN" ]; then
 	mkdir -p "$(dirname "$LOGIN")"
 	printf 'user user\npin %06d\n' $(( $(od -An -N4 -tu4 /dev/urandom) % 1000000 )) > "$LOGIN"
 fi
-sed -i 's/^user .*/user user/' "$LOGIN"              # older files named the uid-1000 user starbite
+sed -i '/[0-9]\{6\}/!s/^user .*/user user/' "$LOGIN"   # never a line that holds the PIN
 install -m600 "$LOGIN" "$D/login.txt"
 echo "payload in $D (login: $LOGIN)"
