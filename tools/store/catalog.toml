@@ -189,3 +189,16 @@ method = "bare"
 tag = "lab"
 files = ["catalog"]
 flags = ["hidden"]
+
+# Rollback: the same kernel with the old CMA layout (tools/linux/mk-starlte-dts.py --legacy-cma).
+[[entry]]
+key = "linux-olddtb"
+name = "Starbite shell (old DTB)"
+version = "rollback · legacy CMA layout"
+category = "linux"
+method = "linux"
+tag = "lab"
+files = ["linux.image", "linux-old.dtb", "linux.initrd"]
+cmdline = "sb.root=none"
+root = "initramfs"
+flags = ["hidden"]
