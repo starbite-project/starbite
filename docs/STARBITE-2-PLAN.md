@@ -150,13 +150,24 @@ Feasibility marks below: **[easy]** reuses what works, **[work]** real porting, 
 | iPadOS (big screen) | Beta | **[work]** iPadOS 18.7.11 ran before (tools exist; root needs rebuilding), or iPadOS 26 on our iOS 26 stack with an iPad identity and the full 1440x2960 canvas |
 | tvOS | Lab | **[stretch]** tvOS 26 is arm64e like iOS 26 (our translator applies); TV UI driven by keys/touch as a remote |
 | Darwin console | Lab / dev | **[easy]** XNU + a tiny init + a shell, a pure Darwin terminal; also the base for "PureDarwin"-style experiments |
-| iOS 6 | Lab (history) | **[stretch]** 32-bit (armv7) userland. Needs either a 64-bit XNU that still runs 32-bit processes (the iOS 10-era xnu-3789/4570 line) or a 32-bit kernel; both are research |
+| iOS 7 | Lab (history) | **[stretch]** Replaces iOS 6 (2026-11-02): iOS 7 was the first 64-bit iOS (iPhone 5s, A7), so its arm64 userland needs no 32-bit support. The hard part is the kernel: no open-source arm64 XNU is that old (public arm64 sources start around xnu-4570/iOS 11), so either a newer XNU taught iOS 7's syscall/Mach ABI, or Apple's iOS 7 kernelcache patched for the Exynos. Research; after iOS 14 |
 | iOS 16 | dropped | Its root stays as a backup only |
 
 ### Microsoft
 - Windows 11 23H2 (Beta): done (desktop + touch). Next drivers: USB (XHCI), then battery/keys.
 - UEFI Shell (Lab) **[easy]**, Windows PE ARM64 (Beta, rescue) **[easy-work]**.
-- Windows 11 22621.2428 **[work]**; other builds (24H2+, 10) **[stretch]**, one DXE per build.
+- Windows 11 22621.2428 **[work]**; other builds **[stretch]**, one DXE per build:
+  - **Windows 11 24H2/25H2**: they require ARMv8.1 atomics (LSE). The A55 cores have them, the
+    M3 cores don't, so they run on the 4 A55 cores only (Windows already runs on 4).
+  - **Windows 10 ARM64 (19041/19045)**: ARMv8.0 is enough, so all 8 cores are possible.
+  - Where they live: Windows has no microSD driver, so every Windows lives on the UFS WINDOWS
+    partition (NTFS), each version as a VHDX with native VHD boot and its own BCD entry; the
+    catalog entry picks it (one shared UEFI image in the store).
+- **GPU on Windows**: there is no Mali driver for Windows on ARM (Arm ships none; Windows on ARM
+  GPUs are Adreno only), so Windows draws in software (WARP) today. Steps: all 8 cores (needs
+  the M3 LSE story or Windows 10), a display-only WDDM driver for DECON (vsync, proper modes,
+  faster scanout), then a real Mali WDDM driver (kernel driver + D3D user-mode driver, e.g. on
+  Mesa's Panfrost/PanVK through a Dozen-like layer) as a long research project.
 
 ### Android (the main OS on UFS)
 - **LineageOS 24 / Android 17 = the Daily main OS**, on UFS with a **32 GB** data partition
