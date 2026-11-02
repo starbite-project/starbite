@@ -125,11 +125,7 @@ if [ -d "$R/etc/netplan" ]; then
 fi
 rm -f "$R/usr/sbin/policy-rc.d"
 # nothing of the build host stays
-rm -f "$R/etc/ssh/ssh_host_"*                        # sshd makes its own keys on the first boot
-if [ -e "$R/usr/lib/systemd/system/ssh.service" ] && [ ! -e "$R/etc/systemd/system/ssh.service.d/10-keys.conf" ]; then
-	mkdir -p "$R/etc/systemd/system/ssh.service.d"
-	printf '[Service]\nExecStartPre=-/usr/bin/ssh-keygen -A\n' > "$R/etc/systemd/system/ssh.service.d/10-keys.conf"
-fi
+rm -f "$R/etc/ssh/ssh_host_"*                        # sb-ssh-keys.service makes the phone's own (sb-integrate)
 rm -rf "$R"/tmp/* "$R"/var/tmp/* "$R"/var/log/*.log "$R"/var/log/apt/*
 
 # ---- unmount, check, trim, shrink ---------------------------------------------------------------

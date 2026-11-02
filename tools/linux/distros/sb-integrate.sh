@@ -14,7 +14,8 @@
 # What it does (each block says why):
 #   user "user" uid/gid 10000 (the initrd mounts the card exFAT uid=10000, but root-only under
 #   /var/lib/starbite; the user gets only its shared/ on /media/starbite-sd/shared) in video input render
-#   audio netdev plugdev wheel (+sudo); root locked; sudo/doas for wheel; SSH key; sshd
+#   audio netdev plugdev wheel (+sudo); root locked; sudo/doas for wheel; SSH key; sshd on every
+#   address (not socket-activated) with host keys made on the phone before it starts (sb-ssh-keys)
 #   usb0 172.16.42.1/24 served by the distro (systemd-networkd DHCPServer, or busybox udhcpd on
 #   OpenRC), never touched by NetworkManager or ModemManager, and nothing resets the gadget
 #   GPU devfreq floor 455 MHz, PAN_MAX_AFBC_PACKING_RATIO=0, integer scale 3, no UDisks for the UFS
@@ -210,6 +211,48 @@ if [ -f /etc/dnf/dnf.conf ]; then
 	grep -q '^exclude=' /etc/dnf/dnf.conf || echo 'exclude=kernel* grub2* shim* linux-firmware*' >> /etc/dnf/dnf.conf
 fi
 
+# ---- sshd: its own host keys made before every start, sshd itself on every address -------------
+# The image carries no host keys (the build host's are deleted: every root makes its own), so
+# something on the phone has to make them before sshd runs. Ubuntu's sshd-keygen.service only runs
+# when systemd calls the boot a first boot, and an ExecStartPre=-ssh-keygen -A drop-in runs after
+# the unit's own ExecStartPre=sshd -t, which already fails without keys: sshd then failed in a
+# restart loop, the start limit stopped ssh.socket too, and port 22 refused connections.
+# sb-ssh-keys runs before sshd on every boot (systemd unit, or OpenRC local.d) and makes any key that
+# is missing or empty. No socket activation (ssh.socket fails along with its service); no
+# ListenAddress: sshd binds the wildcard, so it serves usb0 (172.16.42.1) and Wi-Fi whenever they
+# come up, without waiting for either.
+if have sshd || [ -x /usr/sbin/sshd ]; then
+	rm -f /etc/ssh/ssh_host_*
+	cat > /usr/local/sbin/sb-ssh-keys <<'EOF'
+#!/bin/sh
+# Starbite (sb-integrate.sh): sshd host keys, made on the first boot (the image carries none) and
+# again whenever one is missing or empty (a hard reset during the first boot). Runs before sshd.
+[ -x /usr/bin/ssh-keygen ] || exit 0
+mkdir -p /etc/ssh
+for k in /etc/ssh/ssh_host_*_key; do
+	[ -e "$k" ] || continue
+	[ -s "$k" ] && [ -s "$k.pub" ] || rm -f "$k" "$k.pub"
+done
+/usr/bin/ssh-keygen -A && sync
+EOF
+	chmod 755 /usr/local/sbin/sb-ssh-keys
+	mkdir -p /etc/ssh/sshd_config.d
+	# (first value wins in sshd_config and Include comes first; ListenAddress lines add up instead,
+	# so any active one in the distro's files is commented out)
+	cat > /etc/ssh/sshd_config.d/10-starbite.conf <<'EOF'
+# Starbite (sb-integrate.sh): port 22 on every address (no ListenAddress anywhere), so sshd serves
+# usb0 172.16.42.1 and Wi-Fi without waiting for them. Root is locked; "user" logs in with the
+# SSH key (build/linux/ssh/starbite_ed25519) or the PIN.
+Port 22
+AddressFamily any
+PermitRootLogin no
+PubkeyAuthentication yes
+EOF
+	for f in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
+		[ -f "$f" ] && sed -i 's/^\([[:space:]]*ListenAddress[[:space:]]\)/#Starbite (sb-integrate.sh): \1/' "$f"
+	done
+fi
+
 # ---- init-system specific -----------------------------------------------------------------------
 if [ "$INITSYS" = systemd ]; then
 	mkdir -p /etc/systemd/system /etc/systemd/network /etc/systemd/system.conf.d \
@@ -286,9 +329,60 @@ WantedBy=sysinit.target
 EOF
 	sc() { systemctl "$@" >/dev/null 2>&1 || true; }
 	sc enable sb-phone-setup.service systemd-networkd.service serial-getty@ttyGS0.service
-	for s in ssh.service sshd.service NetworkManager.service; do
-		[ -e "/usr/lib/systemd/system/$s" ] || [ -e "/lib/systemd/system/$s" ] && sc enable "$s"
+	[ -e /usr/lib/systemd/system/NetworkManager.service ] || [ -e /lib/systemd/system/NetworkManager.service ] &&
+		sc enable NetworkManager.service
+	# sshd (see the sshd block above): Debian/Ubuntu ssh.service, Arch/Fedora/openSUSE sshd.service
+	ssh_unit=
+	for s in ssh.service sshd.service; do
+		for d in /usr/lib/systemd/system /lib/systemd/system; do
+			# a link is an alias (Ubuntu: sshd.service -> ssh.service)
+			[ -f "$d/$s" ] && [ ! -L "$d/$s" ] && [ -z "$ssh_unit" ] && ssh_unit=$s
+		done
 	done
+	if [ -n "$ssh_unit" ]; then
+		cat > /etc/systemd/system/sb-ssh-keys.service <<'EOF'
+[Unit]
+Description=Starbite: sshd host keys (first boot, or any one missing)
+After=local-fs.target
+Before=ssh.service sshd.service sshd@.service ssh.socket sshd.socket sshd-keygen.service sshdgenkeys.service sshd-keygen.target
+ConditionPathIsReadWrite=/etc
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sb-ssh-keys
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		# sshd itself listens: no socket activation (a failing service took ssh.socket down with it)
+		for s in ssh.socket sshd.socket; do
+			rm -f "/etc/systemd/system/sockets.target.wants/$s" "/etc/systemd/system/ssh.service.requires/$s" \
+				"/etc/systemd/system/sshd.service.requires/$s"
+			[ -e "/usr/lib/systemd/system/$s" ] || [ -e "/lib/systemd/system/$s" ] || continue
+			sc disable "$s"
+			sc mask "$s"
+		done
+		# an earlier mkroot-ubuntu.sh drop-in (its ssh-keygen ran after sshd -t, i.e. never); Ubuntu's
+		# socket migration drop-in
+		grep -qs 'ssh-keygen -A' /etc/systemd/system/ssh.service.d/10-keys.conf &&
+			rm -f /etc/systemd/system/ssh.service.d/10-keys.conf
+		rm -f /etc/systemd/system/ssh.service.d/00-socket.conf /etc/systemd/system/ssh.socket.d/addresses.conf
+		mkdir -p "/etc/systemd/system/$ssh_unit.d"
+		cat > "/etc/systemd/system/$ssh_unit.d/50-starbite.conf" <<'EOF'
+# Starbite (sb-integrate.sh): host keys first; keep trying instead of giving up after 5 failures
+[Unit]
+Wants=sb-ssh-keys.service
+After=sb-ssh-keys.service
+StartLimitIntervalSec=0
+
+[Service]
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=
+EOF
+		sc enable sb-ssh-keys.service "$ssh_unit"
+	fi
 	# no gadget resets, no modem, no BT/firmware updates/first-boot wizard, no wait for usb0
 	for s in ModemManager.service bluetooth.service fwupd.service fwupd-refresh.timer \
 		systemd-firstboot.service usb-gadget.service usbgadget.service android-tools-adbd.service \
@@ -311,6 +405,13 @@ else
 # usb0 keeps the initrd's address; serve the Mac's lease unless something already does
 ifconfig usb0 172.16.42.1 netmask 255.255.255.0 up 2>/dev/null
 pidof udhcpd unudhcpd >/dev/null || /usr/local/lib/starbite/busybox udhcpd /etc/starbite/udhcpd.conf
+# sshd (the sshd init script ran earlier, and makes keys too): when it is not up, e.g. its "need net"
+# failed with nothing providing net, host keys and sshd here (it binds every address: usb0 too)
+if [ -x /usr/sbin/sshd ] && ! pidof sshd >/dev/null; then
+	/usr/local/sbin/sb-ssh-keys
+	rc-service sshd start >/dev/null 2>&1
+	pidof sshd >/dev/null || /usr/sbin/sshd
+fi
 # watchdog only when the entry passed sb.wdt=N, N > 0 (the last value wins; the initrd armed it
 # with the same N, at least 30 s): fed every 10 s. sb.wdt=0 or none: never touched.
 w=0
@@ -333,7 +434,10 @@ EOF
 	done
 	# no fstrim (see the systemd block): drop a periodic one if the distro ships it
 	rm -f /etc/periodic/*/fstrim /etc/cron.*/fstrim 2>/dev/null || true
-	have rc-update && { rc-update add sshd default >/dev/null 2>&1 || true; }
+	# sshd (see the sshd block above): its init script makes missing keys (ssh-keygen -A) itself
+	if [ -x /usr/sbin/sshd ] && [ -e /etc/init.d/sshd ]; then
+		have rc-update && { rc-update add sshd default >/dev/null 2>&1 || true; }
+	fi
 	if [ -f /etc/inittab ] && ! grep -q ttyGS0 /etc/inittab; then
 		echo 'ttyGS0::respawn:/sbin/getty -L 115200 ttyGS0 vt100' >> /etc/inittab
 	fi
