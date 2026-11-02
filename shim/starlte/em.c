@@ -764,6 +764,43 @@ static void kv_arg(const char *label, const char *key)
 /* DEVICE                                                                   */
 /* ======================================================================= */
 
+/* This boot's intro (anim.c star_anim_stats; also log page slots 112..114): frames, the longest
+ * frame and the time the loader and the menu took between the intro and the reveal. */
+extern uint32_t star_anim_stats[8];
+
+static void anim_line(const char *k, uint32_t frames, uint32_t ms, uint32_t worst, uint32_t flags)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_dec(&u, frames);
+    ub_s(&u, " frames in ");
+    ub_dec(&u, ms);
+    ub_s(&u, " ms, worst ");
+    ub_dec(&u, worst);
+    ub_s(&u, " ms");
+    if (ms && frames > 1) {
+        ub_s(&u, ", ");
+        ub_dec(&u, (uint64_t)(frames - 1) * 1000U / ms);
+        ub_s(&u, " fps");
+    }
+    if (flags & 2U)
+        ub_s(&u, ", skipped");
+    if (flags & 4U)
+        ub_s(&u, ", plain base");
+    kv_add(k, u.b);
+}
+
+static void fill_anim_stats(void)
+{
+    const uint32_t *a = star_anim_stats;
+    if (a[7] & 1U) {
+        anim_line("Boot intro", a[0], a[2], a[1], a[7]);
+        kv_dec("Intro to menu", a[3], " ms (loader and menu work)");
+    }
+    if (a[7] & 8U)
+        anim_line("Menu reveal", a[4], a[6], a[5], a[7] & 16U ? 2U : 0U);
+}
+
 static void fill_device_info(void)
 {
     char v[96];
@@ -800,6 +837,7 @@ static void fill_device_info(void)
     kv_hdr("STARBITE");
     kv_add("Boot menu", "v8 (Starred Wordmark, touch)");
     kv_add("EngineerMode", "1.2");
+    fill_anim_stats();
 }
 
 /* ---- trapped reads (em_vec.S) ---------------------------------------------- */
