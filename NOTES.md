@@ -1916,3 +1916,22 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   - metal10: logd + sharingd Disabled in launchd.plist, DataMigration's com.apple.datamigrator.xpc renamed
     .starbite-off, mtl2-clients += iconservicesagent PosterBoard, icon cache moved to
     /var/local/iconscache-old-54E29C5C (Library dirs are mode 000: chmod u+rwx as owner, restore after).
+  - metal10: SpringBoard waits in -[BKSSystemShellService _checkInWithServerForReason:waitForDataMigration:]:
+    datamigrator must run (renaming its XPC service hangs the UI). logd + sharingd Disabled: all-CPU 350 -> ~125 %,
+    fps up to 24 (metal11).
+  - Metal needs sweetinject: the plugin is arm64, so only processes injected (ptrauth off) can load it.
+    iconservicesagent injected + listed: real glyphs (Airplane Mode, Accessibility, Calendar "31"); it was
+    jetsam-killed at 15 MB x 4 -> kernel 0341 (a GPU client's limits >= 64 MB x sweetmemscale, raise only).
+    CoreImage's CIKL kernels _asgDownH/_asgDownV (runtime-compiled) are "EntryNotFound": some icons stay plain.
+  - Root filled up: /var/db/diagnostics (logd's tracev3, 655 MB) and /var/tmp/SpringBoard.log (65 MB) cleared.
+  - Wallpaper: CollectionsPoster HEIC layers (24, /Library/Wallpaper) converted to PNG (originals in
+    /var/local/wallpaper-heic-backup); PosterBoard's container is empty, it never launches a poster extension;
+    PosterBoard never asks for Metal. A logd capture is unreadable on the Mac (1969 clock, no timesync).
+  - Control Center: chrome + backdrop blur drawn, modules only as faint outlines (their glass material renders
+    nearly transparent); all 6787 compositor pipelines compile, so a shader computes wrongly. Widgets: the
+    renderer (WidgetRenderer_Default, injected, listed) loads the plugin but asks for no device; its surfaces are
+    format 0x5f524234 ("_RB4", 2 planes); boxes went from white placeholders to black.
+  - Big cores: iOS 26's cache has ~133k LDAPR, ~54k CAS, ~10k CASP and up to ~1.6M LD<op>/SWP sites (loose
+    match); the M3 lacks LSE + LRCPC. LDAPR -> LDAR is 1:1; LSE needs out-of-line LL/SC stubs (scratch registers,
+    red zone): a project of its own. Command line: a5fb_perf is default on (dropped); unentitled_ios_sim_launch
+    is required (macOS-config kernel refuses iOS binaries without it).
