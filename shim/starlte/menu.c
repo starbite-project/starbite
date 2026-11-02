@@ -1370,24 +1370,19 @@ int star_menu(const struct star_info *in, char *cmdline, unsigned len)
         return menu_v5(in, cmdline, len);
     for (;;) {
         star_fb_row_base(MENU_ROW_BASE);
-        item(0, "IOS 16 (STARBITE)", C_WHITE);
-        item(1, "LINUX KIOSK", C_GOLD);
-        item(2, "WINDOWS 11", C_WHITE);
-        item(3, "RECOVERY (TWRP)", C_WHITE);
-        item(4, "STARBITE ENGINEER", C_GOLD);
-        sel = choose(0, 5, sel);
+        item(0, "IOS 26 (STARBITE)", C_WHITE);
+        item(1, "WINDOWS 11", C_WHITE);
+        item(2, "RECOVERY (TWRP)", C_WHITE);
+        item(3, "STARBITE ENGINEER", C_GOLD);
+        sel = choose(0, 4, sel);
         if (sel == 0) {
             break;
         } else if (sel == 1) {
-            /* Linux kiosk (xnu_boot.c star_linux); the card can stay. */
-            star_fb_text_c(sel, "> STARTING THE LINUX KIOSK", C_WHITE, C_BLUE);
-            return 2;
-        } else if (sel == 2) {
             /* exynos9810-woa UEFI (xnu_boot.c star_uefi). Download mode
              * moved into Starbite Engineer to make room for this row. */
             star_fb_text_c(sel, "> STARTING WINDOWS 11", C_WHITE, C_BLUE);
             return 3;
-        } else if (sel == 3) {
+        } else if (sel == 2) {
             star_fb_text(sel, "> REBOOTING TO RECOVERY");
             reboot(INFORM_RECOVERY);
         } else {

@@ -2324,23 +2324,6 @@ static int act_ios_opts(int i)
     return 0;
 }
 
-static void fill_kiosk(void)
-{
-    uint64_t size = 0;
-    struct ub u;
-    kv_hdr("LINUX KIOSK (LINUX KIOSK)");
-    if (star_bundle(E.in, 1, &size)) {
-        ub_init(&u);
-        ub_size(&u, size);
-        kv_add("Kernel image", u.b);
-    } else {
-        kv_addc("Kernel image", "not in this BOOT image", UI_RED);
-    }
-    kv_add("Kernel", "Linux 4.9 (Exynos9810-LTS)");
-    kv_add("Root", "USERDATA +17 GiB (ext4)");
-    kv_add("Sponsor", "none");
-}
-
 static void fs_kind(uint64_t lba, struct ub *u);   /* STORAGE section */
 
 /* Store entries whose name starts with prefix, as rows "name  size  crc". */
@@ -2468,18 +2451,17 @@ static void build_start(void)
 {
     start_avail[0] = star_store_has("android.kernel");
     start_avail[2] = star_store_has("linux.image");
-    start_avail[1] = start_avail[3] = start_avail[4] = 1;
+    start_avail[1] = start_avail[3] = 1;
     row_add("Android 17", "LineageOS 24.0", start_avail[0] ? 0 : R_DIS);
-    row_add("iPadOS 18", "with the current boot options", 0);
+    row_add("iOS 26", "with the current boot options", 0);
     row_add("Linux 7.1", "postmarketOS " UI_DOT " Alpine edge", start_avail[2] ? 0 : R_DIS);
     row_add("Windows 11", "23H2", 0);
-    row_add("Linux kiosk", "Linux kiosk", 0);
 }
 
 static int act_start(int i)
 {
-    static const unsigned char pick[5] = { 5, 1, 4, 3, 2 };
-    if (i < 0 || i > 4 || !start_avail[i])
+    static const unsigned char pick[4] = { 5, 1, 4, 3 };
+    if (i < 0 || i > 3 || !start_avail[i])
         return 0;
     if (!dialog("Start", rows[i].t, "Leaves EngineerMode.", "START"))
         return 0;
@@ -3861,11 +3843,10 @@ static void build_tab(int t)
         break;
     case 4:
         row_add("Android 17", "LineageOS 24.0: store, partitions, safety", 0);
-        row_add("iPadOS 18", "XNU 11417, boot-args", 0);
+        row_add("iOS 26", "XNU 12377, boot-args", 0);
         row_add("iOS boot options", "multi-block, flags, boot iOS", 0);
         row_add("Linux 7.1", "postmarketOS (Alpine edge) on mainline", 0);
         row_add("Windows 11", "firmware, RAM stage, last run report", 0);
-        row_add("Linux kiosk", "Linux kiosk", 0);
         row_add("OS store", "kernels on UFS: entries, sizes, CRCs", 0);
         row_add("Start an OS", "boot any installed system now", 0);
         break;
@@ -3924,13 +3905,12 @@ static void open_item(int t, int i)
     case 0x33: run_speed(); break;
     case 0x34: sector_screen(); break;
     case 0x40: info_screen("Android 17", fill_android, 0); break;
-    case 0x41: info_screen("iPadOS 18", fill_ios, 0); break;
+    case 0x41: info_screen("iOS 26", fill_ios, 0); break;
     case 0x42: list_screen("iOS boot options", build_ios_opts, act_ios_opts); break;
     case 0x43: info_screen("Linux 7.1", fill_linux, 0); break;
     case 0x44: info_screen("Windows 11", fill_windows, 0); break;
-    case 0x45: info_screen("Linux kiosk", fill_kiosk, 0); break;
-    case 0x46: info_screen("OS store", fill_store, 0); break;
-    case 0x47: list_screen("Start an OS", build_start, act_start); break;
+    case 0x45: info_screen("OS store", fill_store, 0); break;
+    case 0x46: list_screen("Start an OS", build_start, act_start); break;
     case 0x50: show_pmsg(); break;
     case 0x51: show_records(); break;
     case 0x52: show_cmdline(); break;

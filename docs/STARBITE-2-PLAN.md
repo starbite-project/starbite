@@ -12,7 +12,6 @@ and the order of work. No time estimates: each phase ends when its "done when" h
 | Windows 11 23H2 (22631) | Our bootshim + SEC/PEI + the woa **binary** DXE, packed in BOOT | WINESP + WINDOWS (UFS) | Desktop + touch. No GPU, USB, Wi-Fi, audio, battery; 4 CPUs |
 | Linux 7.1 / postmarketOS edge (Plasma Mobile) | `linux.image`/`linux.dtb` from the UFS OS store | 8 GiB image file on the microSD (exFAT) | Boots: 8 cores, Panfrost GPU at 60 Hz, Wi-Fi, USB networking |
 | Android 17 (LineageOS 24) | `android.kernel`/`ramdisk` from the OS store | SYSTEM/VENDOR/ODM + A16DATA (8 GiB) | Installed, **never confirmed booting** |
-| Linux kiosk (Linux 4.9 kiosk) | Kernel packed in BOOT (26.4 MB) | USERDATA +17 GiB (ext4) | Boots, but only from Engineer (the menu card is an ad) |
 | iPadOS 18.7.11 | - | **gone** (overwritten by iOS 26, no backup) | Needs re-fetch + rebuild |
 | iOS 16.7.16 | - | Only as a backup image on the 64 GB card | Needs an Apple root slot |
 
@@ -23,8 +22,8 @@ Panfrost on Linux; the arm64e and LSE translators; EngineerMode's hardware pages
 
 ## 2. What blocks growth (from the review)
 
-1. **BOOT is full**: 55 MiB, 2.7 MB free. Kiosk's kernel takes 26 MB of it for an entry the menu
-   cannot even start. The iOS kernel already ships stripped to fit.
+1. **BOOT was full**: 55 MiB, 2.7 MB free. Kiosk is gone (2026-11-02): 30 MB free now. The iOS kernel
+   still ships stripped.
 2. **UFS is fully allocated**: no free partition space; the OS store is a fixed 1 GiB (63 entries).
 3. **The menu is hard-coded in four places** (menu.mjs labels as pixels, menu.c `v5_os[5]`, em.c,
    xnu_boot.c dispatch), only 4 rows fit above Samsung's logo, labels are baked into sprites.
@@ -70,8 +69,8 @@ S-Boot ──> BOOT partition (stays small and stable)
     binaries, the catalog, menu settings.
 - The loader gets a **polling DW-MMC read driver** (the rails are already powered by us; XNU's
   `a5xelte_emmc.c` and Linux's dw_mmc patches are the references). Read-only, like the UFS one.
-- **BOOT keeps only the loader + menu assets + the iOS 26 payload**. Kiosk's kernel and the
-  Windows UEFI move to the store. That frees ~34 MB and lets the full (unstripped) kernel back in.
+- **BOOT keeps only the loader + menu assets + the iOS 26 payload**. Kiosk is removed; the
+  Windows UEFI moves to the store too. That leaves ~37 MB free and lets the full kernel back in.
 
 ### 3.2b UFS re-layout: Android as the main OS
 - Android 17 gets **A16DATA = 32 GB** (from 8 GiB). UFS is full, so something moves to the card:
@@ -175,7 +174,7 @@ Feasibility marks below: **[easy]** reuses what works, **[work]** real porting, 
 - **ChromeOS** **[stretch]**: ChromeOS Flex is x86-only; the ARM route is ChromiumOS / FydeOS
   built for a generic arm64 board on our mainline kernel, Panfrost for graphics.
 - Retro station **[easy-work]**: QEMU under Linux running Windows 95/98/XP, classic Mac OS, DOS.
-- Kiosks: Linux kiosk (kernel moved to the store), Kodi **[work]**.
+- Media: Kodi **[work]**. (Linux kiosk is retired.)
 
 ### Starbite's own systems
 - **Starbite OS** **[work → stretch]**: our own ultra-light OS, not Linux, grown from the loader
@@ -251,7 +250,7 @@ SerenityOS aarch64, Redox, Plan 9.
 **Phase 1: loader 2 core**
 - Store v2 (UFS + microSD reader), catalog format and tool, payload-independent bundle/store
   lookup, fail back to menu, MMU and caches on, settings record + generic boot-next mailbox.
-- Move Kiosk and the Windows UEFI out of BOOT. Our own splash in UP_PARAM.
+- Move the Windows UEFI out of BOOT (Kiosk already removed); free Kiosk's old root (USERDATA +17 GiB).
 - Done when: today's OSes boot from catalog entries and BOOT has >30 MB free.
 
 **Phase 2: menu v6**
@@ -260,7 +259,7 @@ SerenityOS aarch64, Redox, Plan 9.
 
 **Phase 3: quick wins in every category**
 - Linux GPU at full speed, Linux distros on the card, Darwin console, UEFI Shell, WinPE,
-  Kiosk as a normal entry, Android 17 confirmed, USB Toolkit (Linux), first demo.
+  Android 17 confirmed, USB Toolkit (Linux), first demo.
 - Done when: each category has at least two working entries.
 
 **Phase 4: Starbite Lab, fastboot, Starbite Recovery + Installer**
@@ -278,7 +277,5 @@ SerenityOS aarch64, Redox, Plan 9.
   builds, NetBSD, iOS 6, GPU-drawn boot menu.
 
 ## 9. Decisions for you
-1. Starbite card: keep as a banner on the main menu, or move it into the Lab/Linux category?
-2. Samsung's splash: replace it in UP_PARAM with our own (recommended), or keep it?
-3. The 64 GB card: keep it as the Windows/backup card, or merge everything onto the 128 GB card?
-4. Second S9: which firmware/bootloader is on it, and may it be wiped for the installer tests?
+1. The 64 GB card: keep it as the Windows/backup card, or merge everything onto the 128 GB card?
+2. Second S9: which firmware/bootloader is on it, and may it be wiped for the installer tests?
