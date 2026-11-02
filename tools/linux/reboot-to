@@ -1,0 +1,90 @@
+#!/bin/sh
+# reboot-to KEY: start Starbite catalog entry KEY on the next boot, with no button presses.
+#
+# Writes the menu's one-shot RAM mailbox (shim/starlte/menu.c boot_next), which survives a warm
+# reset: the key (at most 23 characters, NUL padded to 24 bytes) as little-endian u32 words at
+# 0xFED17FE8..0xFED17FFC, then the u64 magic "SBNEXT2!" at 0xFED17FE0 (written last, so the menu
+# never sees the magic with a half-written key). Then INFORM 0x1406080c = normal reboot, and a
+# reboot. "reboot-to menu" only reboots, to the menu. Needs root (devmem on /dev/mem).
+#
+#   reboot-to linux-ubuntu        reboot-to -n linux-shell   (-n: print the writes, do nothing)
+#   reboot-to -w KEY              write the mailbox and INFORM only, no reboot (the shutdown hook)
+#
+# The mailbox is the last 32 bytes of the ramoops console ring (0xFED10000-0xFED18000), so
+# kernel output after it is written can overwrite it. Under systemd it is therefore written as
+# late as possible: the key goes to /run/starbite/next and sb-integrate.sh's systemd-shutdown
+# hook (starbite-next) runs "reboot-to -w KEY" right before reboot(2). In the initrd and on
+# OpenRC it is written here, just before the reboot.
+#
+# Installed as /bin/reboot-to in the initrd (tools/linux/mk-initrd.sh) and as
+# /usr/local/sbin/reboot-to in every distro (tools/linux/distros/sb-integrate.sh), which also
+# gets a static busybox at /usr/local/lib/starbite/busybox for devmem. "reboot-linux" is the old
+# name: it means "reboot-to linux" (the old "SBNEXTLX" flag meant the same).
+dry= wonly=
+case $1 in
+-n) dry=1; shift ;;
+-w) wonly=1; shift ;;
+esac
+key=$1
+case ${0##*/} in reboot-linux) key=${1:-linux} ;; esac
+case $key in
+""|-h|--help|*[!A-Za-z0-9._-]*) echo "usage: reboot-to [-n|-w] KEY|menu" >&2; exit 2 ;;
+esac
+[ ${#key} -le 23 ] || { echo "reboot-to: '$key' is longer than 23 characters" >&2; exit 2; }
+if [ -z "$dry" ] && [ "$(id -u 2>/dev/null)" != 0 ]; then
+	echo "reboot-to: needs root for /dev/mem (sudo reboot-to $key)" >&2
+	exit 1
+fi
+
+B=
+for b in /usr/local/lib/starbite/busybox /bin/busybox.static /bin/busybox; do
+	[ -x "$b" ] && { B=$b; break; }
+done
+[ -n "$dry" ] || [ -n "$B" ] || { echo "reboot-to: no busybox with devmem" >&2; exit 1; }
+w32() {
+	if [ -n "$dry" ]; then echo "devmem $1 32 $2"; return 0; fi
+	"$B" devmem "$1" 32 "$2" || { echo "reboot-to: devmem $1 failed: not rebooting" >&2; exit 1; }
+}
+
+mailbox() {
+	if [ "$key" != menu ]; then
+		set -- $(printf '%s' "$key" | od -An -v -tx1)
+		w=0
+		while [ $w -lt 6 ]; do
+			w32 $(printf '0x%X' $((0xFED17FE8 + 4 * w))) 0x${4:-00}${3:-00}${2:-00}${1:-00}
+			if [ $# -ge 4 ]; then shift 4; else set --; fi
+			w=$((w + 1))
+		done
+		w32 0xFED17FE0 0x454E4253                   # "SBNE"
+		w32 0xFED17FE4 0x21325458                   # "XT2!"
+	fi
+	w32 0x1406080C 0x12345670                       # INFORM: normal reboot
+}
+
+if [ -n "$dry" ] || [ -n "$wonly" ]; then
+	mailbox
+	exit 0
+fi
+if [ "$$" = 1 ] || [ -e /.sb-initrd ]; then
+	mailbox
+	sync
+	echo b > /proc/sysrq-trigger                    # the initrd has no init to ask
+	exit 1
+fi
+if command -v systemctl >/dev/null && [ -d /run/systemd/system ]; then
+	for h in /usr/lib/systemd/system-shutdown/starbite-next /lib/systemd/system-shutdown/starbite-next; do
+		[ -x "$h" ] || continue
+		# check now that devmem works (INFORM only: harmless), so a failure is reported here
+		"$B" devmem 0x1406080C 32 0x12345670 || { echo "reboot-to: devmem failed: not rebooting" >&2; exit 1; }
+		mkdir -p /run/starbite && printf '%s\n' "$key" > /run/starbite/next.new &&
+			mv -f /run/starbite/next.new /run/starbite/next || { echo "reboot-to: cannot write /run/starbite/next" >&2; exit 1; }
+		sync
+		exec systemctl reboot
+	done
+	mailbox                                         # no hook installed: write it now
+	sync
+	exec systemctl reboot
+fi
+mailbox
+sync
+exec reboot
