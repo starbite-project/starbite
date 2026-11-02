@@ -1949,3 +1949,24 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     out/xnu-boot-uc3.img (mkimage template) and out/twrp-3.7.0-a16data.img must stay in out/.
   - Plan: docs/STARBITE-2-PLAN.md (catalog-driven loader, microSD OS library, menu v6 with categories,
     Starbite Lab, fastboot, OS roadmap).
+- 2026-11-02 evening: **Starbite 2, phase 0 (safety) and the boot intro.**
+  - S9 #1 partition backup backup/20261102-185306 (EFS, CPEFS, PARAM, UP_PARAM, BOOT, RECOVERY, DTB, DTBO, RADIO,
+    KEYSTORAGE, PERSISTENT, STEADY, OMR, LU sdb/sdc/sdd/sde, sda head 4 MiB = MBR/GPT/PIT/MD5HDR, backup GPT;
+    SHA256SUMS, all checked against the phone). Copies: USB stick starbite-backup/, 128 GB card backup/.
+  - S9 #2 (second, wiped, in Download mode): `heimdall print-pit --no-reboot` = the same PIT as S9 #1's original
+    (backup/s9b/pit.txt); its bootloader/OEM-lock/KG state still to be read off the Download screen.
+  - 64 GB card: starbite-win.vhdx copied to the USB stick (starbite-card64/, sha 8755e0de verified); the 8 GiB
+    pmOS image deliberately not kept (Linux gets rebuilt; driver work stays in tools/linux + NOTES); the card is
+    now the spare copy of the VHDX and the iOS 16 root.
+  - 128 GB SanDisk card (SK128, 249999360 sectors) in S9 #1, MBR: p1 8192..182886399 exFAT "STARBITE" (mkexfatfs
+    in TWRP), p2 182886400..249999359 type 0xDA raw 32 GiB for the loader's OS store v2. backup/ and windows/ on p1.
+  - Splash: UP_PARAM is a GNU tar of S-Boot's JPEGs (logo.jpg = boot splash, download_L/warning_L/unlock_L =
+    Download-mode and warning screens). tools/brand/splash-logo.mjs redraws "Powered by android" as "Powered by
+    starbite"; tools/brand/upparam-pack.py rebuilds the tar (refuses unless an unchanged rebuild is byte-identical:
+    GNU format); written to S9 #1 UP_PARAM and read back (sha 556079ef...).
+  - Menu: Starbite card sprites blank (SHOW_CARD=1 restores them); marker sprites 2/3 = header / splash star.
+  - Loader (untested on hardware, commit 6958997): mmu.c identity map with caches (DMA and OS areas Normal-NC,
+    loader Normal-WB), clean + MMU off before every handoff (x1-x3 zeroed after star_dcache_all); anim.c boot intro
+    (splash fade, star flight with sparkle trail, ring burst, header fade, menu cascade) composed in a WB buffer at
+    0x84000000 (+ logo copy 0x85200000; DTB reserves nothing there). Test image out/xnu-boot-ios26-anim.img
+    (`LOADER=shim/starlte/out/xnu_boot.Image tools/mkimage-ios26.sh`).
