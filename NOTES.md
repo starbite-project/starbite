@@ -1178,6 +1178,18 @@ woa installer's flow, our geometry), W5 first boot. Nothing has been committed s
   devfreq (simple_ondemand, 260/455/572 MHz) sat at 260 MHz 99.8 % of the time. Test: userspace
   governor at 572 MHz (36 C idle) - not persistent yet. App start is also bound by the microSD
   (22.6 MB/s, high speed; UHS needs the 1.8 V switch on LDO2).
+- 2026-11-02: **Linux Phase 3 kernel built (7.1.0-starbite), not yet on the phone.** `tools/linux/build-kernel.sh`
+  (lima) is now reproducible: tree reset to v7.1 8cd9520d + `git clean`, the vendored port `tools/linux/port`
+  (bcee6014fc2e) rsynced to ~/linux/work, Broadcom firmware copied from build/linux-bundle/firmware and sha256-checked
+  (not in git), FRESH_CONFIG=1, `config/starbite.config` merged and verified by `check-config.py`
+  (CMDLINE_FROM_BOOTLOADER, no built-in initramfs, LOCALVERSION -starbite, USB gadget/PHY/UFS/ext4/loop/microSD =y).
+  Outputs (VM ~/linux/out/starbite, Mac build/linux/kernel-7.1.0-starbite): Image (25.1 MB), exynos9810-starlte.dtb
+  (CMA 0xcd400000 + 300 MiB, daily bootargs, u64 initrd/rtc placeholders), linux-old.dtb (rollback: CMA
+  0x98000000 + 256 MiB, ends at OS_RD), modules-7.1.0-starbite.img (489 modules, ext4 "sb-modules", also in
+  ~/distros/_kernel). `check-dtb.py` reads both DTBs back. The kernel needs an initrd now (store linux.initrd):
+  catalog `linux` lists it, hidden `linux-olddtb` boots the same kernel with linux-old.dtb. Untested on the phone:
+  /proc/cmdline = DTB bootargs + entry cmdline, 8 cores, CMA placement, DECON early_event (modetest -v with
+  s9p_decon.early_event=1 vs 0, `early_forced` count, dmesg "flip_done timed out"), s9p_g3d rail_fixups.
 - 2026-10-27: **Android 17 (LineageOS 24.0, krazey90 unofficial, 2026-10-25) installed** (research:
   build/android-research.md). Zip md5 740fb095...; never flashed (it writes BOOT). Unpacked in lima
   (tools/android/sdat2img.py): SYSTEM 4561305600 B (Updater app removed: its OTAs are install zips that

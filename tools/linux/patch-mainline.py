@@ -21,7 +21,11 @@ Tree (mainline v7.1):
 
 Port (work copy):
   6.   s9p-decon: flip event at the TE edge that latches the new buffer
-       (module param early_event, default on; plan 1.3.1, cause C).
+       (module param early_event, default on; plan 1.3.1, cause C). A parked
+       event goes out after 2 frame starts even if the 20 us latch poll never
+       succeeded (counted in early_forced), so a slow latch costs a frame, not
+       30 Hz; a timer releases an event still parked after 50 ms (no TE), so
+       a lost TE no longer means DRM's 10 s flip_done timeout.
   7.   s9p-g3d: the rail check. With step_volt off the rail must read 950 mV
        before every clock change and after every power-up; a lower reading is
        rewritten and counted (rail_fixups). The 260 MHz step uses 950 mV even
@@ -177,6 +181,17 @@ DECON_PARAM = '''
 static bool s9p_early_event = true;
 module_param_named(early_event, s9p_early_event, bool, 0644);
 MODULE_PARM_DESC(early_event, "send the flip event at the TE that latches the new buffer (Starbite; 0 = one TE later, as before)");
+/*
+ * The latch is checked with a 20 us poll in the interrupt. If the hardware
+ * clears SHADOW_REG_UPDATE_REQ later than that, the event would wait for the
+ * next TE (30 Hz again), and with TE gone it would wait for DRM's 10 s
+ * flip_done timeout. So an event parked for 2 frame starts goes out anyway,
+ * and one still parked after 50 ms (no TE at all; the port's old poll limit)
+ * is sent by a timer. Both are counted here (should stay 0 or near it).
+ */
+static unsigned int s9p_early_forced;
+module_param_named(early_forced, s9p_early_forced, uint, 0444);
+MODULE_PARM_DESC(early_forced, "parked flip events sent without a seen latch: after 2 frame starts, or 50 ms with no TE (Starbite)");
 '''
 
 DECON_FLUSH = '''
@@ -192,6 +207,20 @@ static void s9p_flip_event_send(struct s9p_decon *priv)
 	priv->flip_event = NULL;
 }
 
+/* Starbite early_event: no TE for 50 ms, release the parked event */
+static void s9p_flip_timeout(struct timer_list *t)
+{
+	struct s9p_decon *priv = timer_container_of(priv, t, flip_timer);
+	unsigned long flags;
+
+	spin_lock_irqsave(&priv->drm.event_lock, flags);
+	if (priv->flip_event) {
+		s9p_early_forced++;
+		s9p_flip_event_send(priv);
+	}
+	spin_unlock_irqrestore(&priv->drm.event_lock, flags);
+}
+
 '''
 
 DECON_IRQ_OLD = '''		drm_crtc_handle_vblank(&priv->pipe.crtc);
@@ -203,10 +232,15 @@ DECON_IRQ_NEW = '''		drm_crtc_handle_vblank(&priv->pipe.crtc);
 			u32 v;
 
 			spin_lock(&priv->drm.event_lock);
-			if (priv->flip_event &&
-			    !readl_poll_timeout_atomic(priv->decon + DECON_SHADOW_REG_UPDATE_REQ,
-						       v, !(v & s9p_shadow_mask(priv)), 1, 20))
-				s9p_flip_event_send(priv);
+			if (priv->flip_event) {
+				if (!readl_poll_timeout_atomic(priv->decon + DECON_SHADOW_REG_UPDATE_REQ,
+							       v, !(v & s9p_shadow_mask(priv)), 1, 20)) {
+					s9p_flip_event_send(priv);
+				} else if (++priv->flip_age >= 2) {
+					s9p_early_forced++;
+					s9p_flip_event_send(priv);
+				}
+			}
 			spin_unlock(&priv->drm.event_lock);
 		}
 	}
@@ -217,6 +251,8 @@ DECON_DISABLE_OLD = '''	drm_crtc_vblank_off(&pipe->crtc);
 DECON_DISABLE_NEW = '''	spin_lock_irq(&priv->drm.event_lock);	/* Starbite early_event */
 	s9p_flip_event_send(priv);
 	spin_unlock_irq(&priv->drm.event_lock);
+	if (priv->flip_timer_ready)
+		timer_delete_sync(&priv->flip_timer);
 	drm_crtc_vblank_off(&pipe->crtc);
 	s9p_decon_blank(priv);'''
 
@@ -239,6 +275,10 @@ DECON_UPDATE_NEW = '''	struct drm_framebuffer *fb = pipe->plane.state->fb;
 				"previous shadow update stuck, skipping flip\\n");
 		} else {
 			obj = to_drm_gem_dma_obj(fb->obj[0]);
+			if (!priv->flip_timer_ready) {
+				timer_setup(&priv->flip_timer, s9p_flip_timeout, 0);
+				priv->flip_timer_ready = true;
+			}
 			s9p_decon_program_address(priv, obj->dma_addr);
 			spin_lock_irqsave(&crtc->dev->event_lock, flags);
 			/* a parked event whose flip has latched (shadow idle above) */
@@ -246,7 +286,9 @@ DECON_UPDATE_NEW = '''	struct drm_framebuffer *fb = pipe->plane.state->fb;
 			if (crtc->state->event && crtc->state->active &&
 			    drm_crtc_vblank_get(crtc) == 0) {
 				priv->flip_event = crtc->state->event;
+				priv->flip_age = 0;
 				crtc->state->event = NULL;
+				mod_timer(&priv->flip_timer, jiffies + msecs_to_jiffies(50));
 			}
 			spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
 		}
@@ -273,10 +315,14 @@ def patch_port(work):
         s = s.replace('\tint irq_frame_start;\n',
                       '\tint irq_frame_start;\n'
                       '\t/* Starbite early_event: the flip waiting for its latching TE */\n'
-                      '\tstruct drm_pending_vblank_event *flip_event;\n', 1)
+                      '\tstruct drm_pending_vblank_event *flip_event;\n'
+                      '\tunsigned int flip_age;\t/* frame starts since it was parked */\n'
+                      '\tstruct timer_list flip_timer;\t/* no-TE fallback, 50 ms */\n'
+                      '\tbool flip_timer_ready;\n', 1)
         s = s.replace('static irqreturn_t s9p_decon_irq(int irq, void *data)\n',
                       DECON_FLUSH + 'static irqreturn_t s9p_decon_irq(int irq, void *data)\n', 1)
         s = s.replace(DECON_IRQ_OLD, DECON_IRQ_NEW, 1)
+        s = s.replace('#include <linux/iopoll.h>', '#include <linux/iopoll.h>\n#include <linux/timer.h>', 1)
         s = s.replace(DECON_DISABLE_OLD, DECON_DISABLE_NEW, 1)
         s = s.replace(DECON_UPDATE_OLD, DECON_UPDATE_NEW, 1)
         (w / decon).write_text(s)
@@ -356,7 +402,7 @@ static void s9p_g3d_rail_verify(unsigned int khz)
          '''/*
  * Starbite (plan 1.3.5): 20 ms between frequency decisions left QML shells
  * ramping a frame or two behind the load. 5 ms; schedutil's rate_limit_us
- * starts from it (policy*/schedutil/rate_limit_us changes it at run time).
+ * starts from it (cpufreq/policyN/schedutil/rate_limit_us changes it at run time).
  */
 static unsigned int s9p_transition_delay_us = 5000;
 module_param_named(transition_delay_us, s9p_transition_delay_us, uint, 0444);
