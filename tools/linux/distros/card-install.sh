@@ -24,7 +24,7 @@
 set -euo pipefail
 VM=${VM:-starbite}
 VMHOME=${VMHOME:-/home/dev.guest}
-KREL=${KREL:-7.1.0-starbite}
+KREL=${KREL:-$(limactl shell starbite -- bash -lc 'cat ~/distros/_kernel/release' 2>/dev/null || echo 7.1.0-starbite)}  # build-kernel.sh writes the release (with its build id)
 HERE=$(cd "$(dirname "$0")" && pwd)
 die() { echo "card-install: $*" >&2; exit 1; }
 vm() { limactl shell "$VM" -- "$@"; }
@@ -44,7 +44,9 @@ phone_ready() {
 	ash "grep ' $SD ' /proc/mounts" | grep -q mmcblk0p1 || die "$SD is not the card's p1"
 	ash "mkdir -p $SD/distros/_kernel $SD/shared"
 }
-phone_free_mb() { ash "df -k $SD | tail -1" | awk '{print int($4 / 1024)}'; }
+# TWRP's busybox df cannot read the card's fuseblk (exfat-fuse) mount: stat -f -t gives
+# name id namelen type bsize blocks bfree bavail ...
+phone_free_mb() { ash "stat -f -t $SD" | awk '{print int($5 / 1024 * $8 / 1024)}'; }
 
 # send VMFILE DEST: stream, verify on the phone, rename
 send() {
@@ -54,7 +56,13 @@ send() {
 	free=$(phone_free_mb)
 	[ $(( size / 1048576 + 256 )) -lt "$free" ] || die "$(( size / 1048576 )) MiB does not fit: $free MiB free on the card"
 	echo "copying $(basename "$src") ($(( size / 1048576 )) MiB) to $dest ..."
-	vm cat "$src" | adb exec-in "cat > '$dest.part'"
+	# adb exec-in drops data with TWRP's adbd (33.5 MB in, 33.1 MB on the phone, 2026-11-02):
+	# stage the file on the Mac and adb push it (deleted after the push).
+	local stage
+	stage=$(mktemp "${TMPDIR:-/tmp}/card-install.XXXXXX")
+	vm cat "$src" > "$stage"
+	adb push "$stage" "$dest.part" >/dev/null || { rm -f "$stage"; die "adb push failed"; }
+	rm -f "$stage"
 	echo "checking sha256 on the phone ..."
 	[ "$(ash "sha256sum '$dest.part'" | cut -d' ' -f1)" = "$sha" ] || { ash "rm -f '$dest.part'"; die "sha256 mismatch on $dest (removed)"; }
 	ash "mv -f '$dest.part' '$dest' && sync"
@@ -89,7 +97,7 @@ image)
 	send "$SRC" "$DEST"
 	if [ "$GROW" != no ]; then
 		bytes=$(grow_size_bytes "$GROW")
-		cur=$(ash "stat -c %s '$DEST'")
+		cur=$(ash "wc -c < \'$DEST\'")
 		if [ "$bytes" -gt "$cur" ]; then
 			free=$(phone_free_mb)
 			[ $(( (bytes - cur) / 1048576 + 256 )) -lt "$free" ] || die "growing to $GROW needs $(( (bytes - cur) / 1048576 )) MiB: $free MiB free"
@@ -98,7 +106,7 @@ image)
 				die "resize2fs failed: the image is still the shipped size and usable; grow it from linux-shell"
 		fi
 	fi
-	manifest "$NAME" "$(( $(ash "stat -c %s '$DEST'") / 1048576 ))M" "vm:$SRC" "sha:$SENT_SHA" "$(date -I)" "$KREL"
+	manifest "$NAME" "$(( $(ash "wc -c < \'$DEST\'") / 1048576 ))M" "vm:$SRC" "sha:$SENT_SHA" "$(date -I)" "$KREL"
 	echo "done: $DEST. Un-hide its catalog entry (tools/store/catalog.toml) if it is hidden."
 	;;
 modules)
@@ -121,7 +129,8 @@ kit)
 	;;
 status)
 	phone_ready
-	ash "df -h $SD; ls -la $SD/distros $SD/distros/_kernel; cat $SD/distros/manifest.txt 2>/dev/null"
+	echo "free on the card: $(phone_free_mb) MiB"
+	ash "ls -la $SD/distros $SD/distros/_kernel; cat $SD/distros/manifest.txt 2>/dev/null"
 	;;
 *)
 	sed -n '2,24p' "$0"; exit 2 ;;
