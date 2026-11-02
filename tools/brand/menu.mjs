@@ -328,7 +328,10 @@ if (!V6) {
 }
 
 // ---- menu v6: footer and icons -------------------------------------------------
-// Icon ids 96 + n (menu6.c ICON_*): OS icons 112 px, service icons 64 px, over transparency.
+// Icon ids 96 + n (menu6.c ICON_*): OS icons 112 px, service icons 64 px, dropdown glyphs 48 px,
+// all over transparency (0xAARRGGBB, alpha 0 = nothing): menu6.c draws them with ui_sprite, which
+// blends them over the card. (The loader's sprite_walk_to is an opaque copy: drawn with it, the
+// transparent pixels came out as black squares.)
 if (V6) {
   const fy = 2790, fh = 120;
   const pb = 'powered by', pbs = 34, ws = 76;
@@ -352,6 +355,20 @@ if (V6) {
   add(18, s, renderAlpha(s, s, icon('lucide-wrench.svg', 4, 4, s - 8, { stroke: INK })));
   add(19, s, renderAlpha(s, s, `<path d="M32 8 V30" stroke="${INK}" stroke-width="5" stroke-linecap="round" fill="none"/>` +
     `<path d="M18 16 A20 20 0 1 0 46 16" stroke="${INK}" stroke-width="5" stroke-linecap="round" fill="none"/>`));
+  // Dropdown glyphs (menu6.c ICON_PLAY..): white masks over transparency, 48 px, tinted at run
+  // time (ui_sprite's tint). Lucide 0.400.0 geometry (ISC), 24-unit grid, stroke 2; the default
+  // row uses the brand star.
+  const m = 48;
+  const lu = (d) => renderAlpha(m, m, `<svg x="0" y="0" width="${m}" height="${m}" viewBox="0 0 24 24"><g fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">${d}</g></svg>`);
+  add(20, m, lu('<path d="M7 4.5v15a1 1 0 0 0 1.5.86l12-7.5a1 1 0 0 0 0-1.72l-12-7.5A1 1 0 0 0 7 4.5z"/>'));   // play
+  add(21, m, renderAlpha(m, m, star(4, 4, m - 8, '#fff')));                                                   // default
+  add(22, m, lu('<line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/>')); // timer
+  add(23, m, lu('<path d="M20 6 9 17l-5-5"/>'));                                                              // check
+  add(24, m, lu('<path d="m9 18 6-6-6-6"/>'));                                                                // chevron right
+  add(25, m, lu('<path d="m6 9 6 6 6-6"/>'));                                                                 // chevron down
+  add(26, m, lu('<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>'));                             // power
+  add(27, m, lu('<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>'));        // restart
+  add(28, m, lu('<path d="m15 18-6-6 6-6"/>'));                                                               // chevron left
 }
 
 // ---- EngineerMode chrome (ids 200+, opaque on their bar colours: shim/starlte/ui.h) ----

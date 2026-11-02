@@ -54,6 +54,11 @@ void ui_clip(int y0, int y1);
 void ui_round(int x, int y, int w, int h, int r, uint32_t c);
 void ui_fill(int x, int y, int w, int h, uint32_t c);
 /* Draw s with its baseline at y; returns the x after the last glyph. */
+/* Menu sprite id (xnu_boot.c, "SBMENU01") at (x, y), alpha-blended over the target at fade/256:
+ * tint 0 keeps the sprite's colours, else the sprite is a mask painted in tint (0xffRRGGBB).
+ * (star_sprite_to copies sprites opaquely, alpha included: fine for the opaque header, black
+ * squares around anything drawn over transparency.) 0 if there is no such sprite. */
+int ui_sprite(unsigned id, int x, int y, unsigned fade, uint32_t tint);
 int ui_text(int font, int x, int y, const char *s, uint32_t fg, uint32_t bg);
 int ui_text_r(int font, int right, int y, const char *s, uint32_t fg, uint32_t bg);
 int ui_text_c(int font, int cx, int y, const char *s, uint32_t fg, uint32_t bg);
