@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """The Starbite OS store, version 2 (read by shim/starlte/store.c; layout in store.h).
 
-  sbstore2.py build OUT.img --capacity BLOCKS [--catalog catalog.toml] [--import OLD.img|DIR]
-              [NAME=FILE[:TYPE] ...]
+  sbstore2.py build OUT.img (--capacity BLOCKS | --medium ufs|sd) [--catalog catalog.toml]
+              [--import OLD.img|DIR] [NAME=FILE[:TYPE] ...]
       Packs a store: the catalog (as entry "catalog"), the entries of an older store image or a
       directory of pulled entries (tools/overlay/sbstore-pull.py), then NAME=FILE arguments
       (later ones replace earlier ones of the same name). TYPE: data image dtb initrd text xnu
       uefi catalog, else taken from the name. The settings block is left empty: store-flash.sh
-      keeps the phone's.
+      keeps the phone's. --medium gives the capacity of S9 #1's store areas: ufs = USERDATA
+      after 16 GiB (721024), sd = the 128 GB card's partition 2 (8389120); store-flash*.sh check
+      it against the phone. A card store is written by store-flash-sd.sh; the loader reads it
+      only with the settings flag on (settings --sd on, or Engineer "Card store at boot").
   sbstore2.py list IMG
   sbstore2.py catalog catalog.toml OUT.sbc
   sbstore2.py settings OUT.bin [--from BLOCK.bin] [--default KEY] [--timeout S] [--next KEY]
-              [--last KEY]
+              [--last KEY] [--sd on|off]
       A settings block (4 KiB) for block 2, e.g. to set the default entry or a one-shot next.
 
 Layout, in 4 KiB blocks: 0 "SBSTORE1" view (entries with names < 24 below 1 GiB, for older
@@ -30,6 +33,8 @@ DIR_BLOCK, DIR_BLOCKS, SETTINGS_BLOCK = 3, 4, 2
 DATA_BLOCK = DIR_BLOCK + DIR_BLOCKS
 MAX_ENTRIES = DIR_BLOCKS * BLOCK // 64
 V1_BLOCKS = 262144
+MEDIA = {'ufs': 721024, 'sd': 8389120}   # S9 #1: USERDATA after 16 GiB; card p2 182886400..249999359
+SET_SD_STORE = 1                          # settings flags: read the card's store at boot
 
 TYPES = {'data': 0, 'image': 1, 'dtb': 2, 'initrd': 3, 'text': 4, 'xnu': 5, 'uefi': 6, 'catalog': 7}
 CATEGORIES = {'apple': 0, 'microsoft': 1, 'android': 2, 'linux': 3, 'starbite': 4, 'other': 5, 'lab': 6}
@@ -193,6 +198,8 @@ def settings(a):
         keys[2] = a.next
     if a.timeout is not None:
         timeout = a.timeout
+    if a.sd is not None:
+        flags = (flags | SET_SD_STORE) if a.sd == 'on' else (flags & ~SET_SD_STORE)
     if any(len(k) > 23 for k in keys):
         sys.exit('keys are at most 23 characters')
     b = bytearray(BLOCK)
@@ -200,7 +207,8 @@ def settings(a):
     struct.pack_into('<IIII24s24s24s', b, 16, seq + 1, timeout, flags, 0, *(k.encode() for k in keys))
     struct.pack_into('<I', b, 12, zlib.crc32(bytes(b[16:256])))
     Path(a.out).write_bytes(bytes(b))
-    print(f'{a.out}: default {keys[0] or "-"}, last {keys[1] or "-"}, next {keys[2] or "-"}, timeout {timeout} s')
+    print(f'{a.out}: default {keys[0] or "-"}, last {keys[1] or "-"}, next {keys[2] or "-"}, timeout {timeout} s, '
+          f'card store at boot {"on" if flags & SET_SD_STORE else "off"}')
 
 
 def main():
@@ -208,7 +216,8 @@ def main():
     sub = p.add_subparsers(dest='cmd', required=True)
     b = sub.add_parser('build')
     b.add_argument('out')
-    b.add_argument('--capacity', type=int, required=True)
+    b.add_argument('--capacity', type=int)
+    b.add_argument('--medium', choices=sorted(MEDIA))
     b.add_argument('--catalog')
     b.add_argument('--import', dest='imp')
     b.add_argument('files', nargs='*')
@@ -224,8 +233,13 @@ def main():
     s.add_argument('--last')
     s.add_argument('--next')
     s.add_argument('--timeout', type=int)
+    s.add_argument('--sd', choices=['on', 'off'])
     a = p.parse_args()
     if a.cmd == 'build':
+        if a.capacity is None:
+            if not a.medium:
+                p.error('build needs --capacity or --medium')
+            a.capacity = MEDIA[a.medium]
         build(a)
     elif a.cmd == 'list':
         listing(a)

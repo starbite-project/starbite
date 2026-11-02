@@ -21,5 +21,5 @@ b = os.environ['BUNDLES']
 Path('out/payload-linux-ipados18.bin').write_bytes(p + (Path(b).read_bytes() if b else b''))
 PY
 python3 tools/starlte-pack-boot.py pack out/xnu-boot-uc3.img "${LOADER:-$U/loader.Image}" "out/xnu-boot-$name.img" \
-	--append out/payload-linux-ipados18.bin --ramdisk $U/ramdisk.bin | tail -1
+	--append out/payload-linux-ipados18.bin --ramdisk "${RAMDISK:-$U/ramdisk.bin}" | tail -1
 shasum -a 256 "out/xnu-boot-$name.img" | awk '{print "sha256", $1}'

@@ -57,7 +57,11 @@ uint64_t store_base(unsigned medium);
 uint64_t store_capacity(unsigned medium);
 uint64_t store_used(unsigned medium);
 
+/* Forget what store_open found, so the next call reads the medium again. */
+void store_reset(unsigned medium);
+
 /* Settings record (UFS store, block 2). Keys are catalog keys ("" = none). */
+#define SET_SD_STORE 1U        /* flags: read the microSD's store at boot (sd.h) */
 struct star_settings {
     uint32_t seq, timeout_s, flags;
     char default_key[24], last_key[24], next_key[24];

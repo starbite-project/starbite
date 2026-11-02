@@ -37,9 +37,21 @@
 #define F_MONO 4
 #define F_BIG 5
 #define F_STATUS 6
+#define F_NAME 7        /* Outfit 300 64: boot menu v6 */
+#define F_META 8        /* Outfit 300 40 */
+#define F_CHIP 9        /* Outfit 500 28 */
+#define F_HINT 10       /* Outfit 300 34 */
+
+/* bg for ui_text / colour alpha for ui_round: blend with what the target already holds */
+#define UI_BEHIND 0U
 
 int ui_init(void);
+/* Draw into buf (UI_W x UI_H, e.g. a write-back off-screen buffer) instead of the framebuffer
+ * (0 = the framebuffer again). */
+void ui_target(uint32_t *buf);
 void ui_clip(int y0, int y1);
+/* Rounded rectangle, anti-aliased corners; c's alpha (0xAA......) blends over the target. */
+void ui_round(int x, int y, int w, int h, int r, uint32_t c);
 void ui_fill(int x, int y, int w, int h, uint32_t c);
 /* Draw s with its baseline at y; returns the x after the last glyph. */
 int ui_text(int font, int x, int y, const char *s, uint32_t fg, uint32_t bg);

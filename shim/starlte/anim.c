@@ -415,3 +415,63 @@ void star_intro_rows(const unsigned *ids, unsigned n)
     }
     /* menu.c draws the exact states next */
 }
+
+/* Copy src's rectangle (x, y, w, h) into OFF at y + dy, every channel scaled by fade (0..256). */
+static void blit_fade(const uint32_t *src, int x, int y, int w, int h, int dy, uint32_t fade)
+{
+    for (int r = 0; r < h; ++r) {
+        int ty = y + r + dy;
+        if (ty < 0 || ty >= (int)H)
+            continue;
+        const uint32_t *s = src + (uint64_t)(y + r) * W + x;
+        uint32_t *d = OFF + (uint64_t)ty * W + x;
+        for (int c = 0; c < w; ++c) {
+            uint32_t p = s[c];
+            d[c] = fade >= 256 ? p : 0xff000000U | ((((p >> 16) & 255U) * fade >> 8) << 16) |
+                   ((((p >> 8) & 255U) * fade >> 8) << 8) | ((p & 255U) * fade >> 8);
+        }
+    }
+}
+
+void star_reveal(const uint32_t *src, const int *rc, unsigned n)
+{
+    const int32_t STAGGER = 45, DUR = 320, RISE = 48;
+    if (star_mmu_enabled() && n && n <= 32) {
+        const int32_t T_END = STAGGER * (int32_t)(n - 1) + DUR;
+        uint64_t t0 = hw_ticks();
+        for (;;) {
+            int32_t t = now_ms(t0);
+            if (t > T_END + 20 || skip_pressed())
+                break;
+            for (unsigned i = 0; i < n; ++i) {
+                const int *q = rc + 4 * i;
+                int32_t s = prog(t, STAGGER * (int32_t)i, STAGGER * (int32_t)i + DUR);
+                if (s == 0)
+                    continue;
+                struct rect a = { q[0], q[1], q[0] + q[2], q[1] + q[3] + RISE };
+                off_fill(&a, BLACK);
+            }
+            for (unsigned i = 0; i < n; ++i) {
+                const int *q = rc + 4 * i;
+                int32_t s = prog(t, STAGGER * (int32_t)i, STAGGER * (int32_t)i + DUR);
+                if (s == 0)
+                    continue;
+                int32_t e = ease_out(s);
+                blit_fade(src, q[0], q[1], q[2], q[3], RISE - (int)(fmul(e, RISE << 16) >> 16), (uint32_t)(e >> 8));
+            }
+            for (unsigned i = 0; i < n; ++i) {
+                const int *q = rc + 4 * i;
+                if (prog(t, STAGGER * (int32_t)i, STAGGER * (int32_t)i + DUR) == 0)
+                    continue;
+                struct rect a = { q[0], q[1], q[0] + q[2], q[1] + q[3] + RISE };
+                present(&a);
+            }
+        }
+    }
+    /* the end state: src on the panel */
+    volatile uint64_t *fb = FB;
+    const uint64_t *s = (const uint64_t *)src;
+    for (uint64_t i = 0; i < (uint64_t)W * H / 2; ++i)
+        fb[i] = s[i];
+    __asm__ volatile("dsb st" : : : "memory");
+}

@@ -138,6 +138,13 @@ int store_open(unsigned m)
         s->base = first + UFS_STORE_OFFSET;
         limit = last - first + 1 - UFS_STORE_OFFSET;
     } else {
+        /* The card hardware is touched only once allowed (sd.h): by the settings record or by
+         * EngineerMode's microSD page, which then calls store_reset. */
+        struct star_settings st;
+        if (!sd_allowed() && settings_load(&st) && (st.flags & SET_SD_STORE))
+            sd_allow();
+        if (!sd_allowed())
+            return 0;
         if (!sd_store_area(&first, &limit))
             return 0;
         s->base = first;
@@ -149,6 +156,12 @@ int store_open(unsigned m)
     }
     s->state = 1;
     return (int)s->count;
+}
+
+void store_reset(unsigned m)
+{
+    if (m < STORE_MEDIA)
+        med[m].state = 0;
 }
 
 /* Struct copies would call memcpy: there is no libc. */

@@ -136,6 +136,23 @@ function render(w, h, body) {
   return o;
 }
 
+/** Render an SVG of w x h keeping its alpha (0xAARRGGBB, not premultiplied: the loader's blend()). */
+function renderAlpha(w, h, body) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${body}</svg>`;
+  const { w: pw, h: ph, px } = decodePng(svgPng(svg));
+  if (pw !== w || ph !== h) throw new Error(`render size ${pw}x${ph} != ${w}x${h}`);
+  const o = new Uint32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const a = px[i * 4 + 3];
+    o[i] = a ? ((a << 24) | (px[i * 4] << 16) | (px[i * 4 + 1] << 8) | px[i * 4 + 2]) >>> 0 : 0;
+  }
+  return o;
+}
+
+// V6=1: the sprites of boot menu v6 (shim/starlte/menu6.c), which draws its rows itself: the
+// header and footer (base, id 0), the intro's star markers, icons (ids 96+) and Engineer's chrome.
+const V6 = process.env.V6 === '1';
+
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 const text = (s, { x, y, size, weight = 500, fill = INK, family = SANS, anchor = 'start', spacing = 0, opacity = 1 }) =>
   `<text x="${x}" y="${y}" font-family="${family}" font-size="${size}" font-weight="${weight}" fill="${fill}" text-anchor="${anchor}" letter-spacing="${spacing}" opacity="${opacity}">${esc(s)}</text>`;
@@ -216,6 +233,8 @@ function sprite(id, x, y, w, h, px) {
     wordmark(74, h / 2 + 34, 104) +
     text('Galaxy S9 · SM-G960F', { x: W - 74, y: h / 2 + 14, size: 36, weight: 300, fill: DIM, anchor: 'end' });
   sprite(0, 0, y, W, h, render(W, h, body));
+}
+if (!V6) {
   const l = LAYOUT.label;
   const lb = text('BOOT', { x: 74, y: 30, size: 28, weight: 500, fill: DIM, spacing: 7 }) +
     `<rect x="190" y="18" width="${W - 260}" height="2" fill="${LINE}"/>`;
@@ -241,7 +260,7 @@ function sprite(id, x, y, w, h, px) {
 
 // OS rows.
 const SID = (item, state) => 16 + 8 * item + state;
-ITEMS.forEach((it, i) => {
+if (!V6) ITEMS.forEach((it, i) => {
   const r = LAYOUT.rows;
   const y = r.y0 + it.row * r.stride;
   const states = it.disabled ? [3] : it.optional ? [0, 1, 2, 3, 4] : [0, 1, 2, 4];
@@ -249,14 +268,14 @@ ITEMS.forEach((it, i) => {
 });
 
 // Bixby service chips.
-CHIPS.forEach((c, k) => {
+if (!V6) CHIPS.forEach((c, k) => {
   const ch = LAYOUT.chips;
   const x = ch.x0 + k * (ch.w + ch.gap);
   for (const st of [0, 1, 2]) sprite(SID(c.item, st), x, ch.y, ch.w, ch.h, render(ch.w, ch.h, chipSvg(c, st)));
 });
 
 // Starbite card (item 5) from overlay.png: normal, selected (gold ring + label), starting.
-{
+if (!V6) {
   const ov = decodePng(readFileSync(join(out, 'overlay.png')));
   const c = LAYOUT.card;
   const pad = 22, lh = 70;
@@ -301,11 +320,38 @@ CHIPS.forEach((c, k) => {
 }
 
 // Hints under "Powered by Starbite": Engineer (item 7, tappable) and power off (item 8).
-{
+if (!V6) {
   const hn = LAYOUT.hint;
   const hint = (s) => text(s, { x: hn.w / 2, y: 42, size: 28, weight: 300, fill: DIM, anchor: 'middle', spacing: 2 });
   sprite(SID(7, 0), W / 2 - hn.w - 20, hn.y, hn.w, hn.h, render(hn.w, hn.h, hint('HOLD BIXBY  ·  ENGINEER MODE')));
   sprite(SID(8, 0), W / 2 + 20, hn.y, hn.w, hn.h, render(hn.w, hn.h, hint('HOLD VOL+ & VOL−  ·  POWER OFF')));
+}
+
+// ---- menu v6: footer and icons -------------------------------------------------
+// Icon ids 96 + n (menu6.c ICON_*): OS icons 112 px, service icons 64 px, over transparency.
+if (V6) {
+  const fy = 2790, fh = 120;
+  const pb = 'powered by', pbs = 34, ws = 76;
+  const pw = measure(pb, pbs, 300), ww = measure('starbite', ws, 200) + ws * 0.39, gap = 22;
+  const x0 = (W - pw - gap - ww) / 2;
+  sprite(0, 0, fy, W, fh, render(W, fh,
+    text(pb, { x: x0, y: 80, size: pbs, weight: 300, fill: DIM, spacing: 1 }) + wordmark(x0 + pw + gap, 80, ws)));
+  const S = 112, s = 64;
+  const os = (f, opt, k = 1) => renderAlpha(S, S, icon(f, (S - S * k) / 2, (S - S * k) / 2, S * k, opt));
+  const add = (n, size, px) => sprite(96 + n, 0, 0, size, size, px);
+  add(1, S, os('si-apple.svg', { fill: '#ffffff' }, 0.86));
+  add(2, S, os('si-windows11.svg', { fill: '#0078d4' }, 0.8));
+  add(3, S, os('si-android.svg', { fill: '#3ddc84' }, 0.9));
+  add(4, S, renderAlpha(S, S, icon('tux.svg', 6, 0, S - 12)));
+  add(5, S, renderAlpha(S, S, star(8, 8, S - 16, ACCENT)));
+  add(6, S, renderAlpha(S, S, `<rect x="16" y="16" width="${S - 32}" height="${S - 32}" rx="22" fill="none" stroke="${DIM}" stroke-width="6"/>` +
+    `<circle cx="${S / 2}" cy="${S / 2}" r="10" fill="${DIM}"/>`));
+  add(7, S, os('lucide-wrench.svg', { stroke: '#b48cff' }, 0.8));
+  add(16, s, renderAlpha(s, s, icon('lucide-life-buoy.svg', 4, 4, s - 8, { stroke: INK })));
+  add(17, s, renderAlpha(s, s, icon('lucide-download.svg', 4, 4, s - 8, { stroke: INK })));
+  add(18, s, renderAlpha(s, s, icon('lucide-wrench.svg', 4, 4, s - 8, { stroke: INK })));
+  add(19, s, renderAlpha(s, s, `<path d="M32 8 V30" stroke="${INK}" stroke-width="5" stroke-linecap="round" fill="none"/>` +
+    `<path d="M18 16 A20 20 0 1 0 46 16" stroke="${INK}" stroke-width="5" stroke-linecap="round" fill="none"/>`));
 }
 
 // ---- EngineerMode chrome (ids 200+, opaque on their bar colours: shim/starlte/ui.h) ----
@@ -337,7 +383,8 @@ for (const s of sprites) {
   for (const [len, p] of s.runs) { buf.writeUInt32LE(len, o); buf.writeUInt32LE(p, o + 4); o += 8; }
 }
 writeFileSync(join(out, 'menu.sbm'), buf);
-console.log(`build/brand/menu.sbm: ${sprites.length} sprites, ${buf.length} bytes`);
+console.log(`build/brand/menu.sbm: ${sprites.length} sprites, ${buf.length} bytes${V6 ? ' (v6)' : ''}`);
+if (V6) process.exit(0);
 
 // ---- preview: Samsung's logo.jpg at (180, 1144) + base + rows (iOS selected) + card ----
 {

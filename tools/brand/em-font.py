@@ -25,7 +25,7 @@ FONTS = ROOT / 'tools/brand/fonts'
 OUT = ROOT / 'build/brand'
 
 EXTRA = ['°', '·', '…', '↑', '↓', '←', '→', 'µ', '±', '×', '■', '▲', '▼', '✓']
-CODES = [chr(c) for c in range(32, 127)] + EXTRA        # 0x80 + i for EXTRA[i]
+CODES = [chr(c) for c in range(32, 127)] + [' '] + EXTRA   # 127 blank, then 0x80 + i for EXTRA[i]
 
 # id: (file, size)  -- sizes for the 1440 px wide panel (~3.2 px per dp)
 SPEC = {
@@ -36,11 +36,18 @@ SPEC = {
     4: (Path('/System/Library/Fonts/Menlo.ttc'), 30),   # mono: hex, logs
     5: (FONTS / 'Roboto-Light.ttf', 120),     # big readouts (clock, %)
     6: (FONTS / 'Roboto-Medium.ttf', 30),     # status bar
+    # boot menu v6 (shim/starlte/menu6.c): Outfit, the brand face, (file, size, weight)
+    7: (FONTS / 'Outfit-wght.ttf', 64, 300),  # entry name
+    8: (FONTS / 'Outfit-wght.ttf', 40, 300),  # version line, tabs
+    9: (FONTS / 'Outfit-wght.ttf', 28, 500),  # chips, small caps labels
+    10: (FONTS / 'Outfit-wght.ttf', 34, 300), # hints, status
 }
 
 
-def build_font(fid, path, size):
+def build_font(fid, path, size, weight=None):
     font = ImageFont.truetype(str(path), size)
+    if weight:
+        font.set_variation_by_axes([weight])
     ascent, descent = font.getmetrics()
     glyphs, data = [], bytearray()
     for ch in CODES:
@@ -66,8 +73,8 @@ def build_font(fid, path, size):
 
 def main():
     blob = bytearray(b'SBFONT01' + struct.pack('<I', len(SPEC)))
-    for fid, (path, size) in SPEC.items():
-        blob += build_font(fid, path, size)
+    for fid, spec in SPEC.items():
+        blob += build_font(fid, *spec)
     while len(blob) % 4:
         blob += b'\0'
     (OUT / 'emfont.bin').write_bytes(blob)

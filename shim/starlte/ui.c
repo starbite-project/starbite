@@ -7,10 +7,21 @@
 #include "fbtext.h"
 #include "hw.h"
 
-#define MAX_FONTS 8
+#define MAX_FONTS 12
 
 static uintptr_t font_hdr[MAX_FONTS];
 static int clip_y0, clip_y1 = UI_H;
+static volatile uint32_t *target;
+
+static volatile uint32_t *fbuf(void)
+{
+    return target ? target : (volatile uint32_t *)STAR_FB_BASE;
+}
+
+void ui_target(uint32_t *buf)
+{
+    target = buf;
+}
 
 static uint32_t r32(uintptr_t a)
 {
@@ -58,7 +69,7 @@ void ui_fill(int x, int y, int w, int h, uint32_t c)
     int y0 = y < clip_y0 ? clip_y0 : y, y1 = y + h > clip_y1 ? clip_y1 : y + h;
     if (x1 <= x0 || y1 <= y0)
         return;
-    volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
+    volatile uint32_t *fb = fbuf();
     for (int yy = y0; yy < y1; ++yy) {
         volatile uint32_t *row = fb + (uint64_t)yy * UI_W;
         for (int xx = x0; xx < x1; ++xx)
@@ -76,6 +87,62 @@ static uint32_t mix(uint32_t fg, uint32_t bg, unsigned a)
         o |= ((f * a + b * (255U - a) + 127U) / 255U) << sh;
     }
     return o;
+}
+
+static unsigned isqrt(unsigned v)
+{
+    unsigned r = 0, b = 1U << 30;
+    while (b > v)
+        b >>= 2;
+    while (b) {
+        if (v >= r + b) {
+            v -= r + b;
+            r = (r >> 1) + b;
+        } else {
+            r >>= 1;
+        }
+        b >>= 2;
+    }
+    return r;
+}
+
+void ui_round(int x, int y, int w, int h, int r, uint32_t c)
+{
+    if (w <= 0 || h <= 0)
+        return;
+    if (r > w / 2)
+        r = w / 2;
+    if (r > h / 2)
+        r = h / 2;
+    unsigned ca = c >> 24;
+    volatile uint32_t *fb = fbuf();
+    for (int yy = y; yy < y + h; ++yy) {
+        if (yy < clip_y0 || yy >= clip_y1)
+            continue;
+        volatile uint32_t *row = fb + (uint64_t)yy * UI_W;
+        /* dx, dy: how far into a corner square the pixel is (0 = not in a corner) */
+        int dy = yy < y + r ? y + r - yy : yy >= y + h - r ? yy - (y + h - r - 1) : 0;
+        for (int xx = x; xx < x + w; ++xx) {
+            if (xx < 0 || xx >= UI_W)
+                continue;
+            int dx = xx < x + r ? x + r - xx : xx >= x + w - r ? xx - (x + w - r - 1) : 0;
+            unsigned a = ca;
+            if (dx && dy) {
+                /* the pixel centre's distance from the corner centre, in 1/16 px: coverage ramps
+                 * from 0 to 16 across the one pixel the circle's edge passes through */
+                int ex = 2 * dx - 1, ey = 2 * dy - 1;               /* doubled centre offsets */
+                int d = (int)isqrt((unsigned)(ex * ex + ey * ey) * 64U);
+                int cov = 16 * r - d + 8;
+                if (cov <= 0)
+                    continue;
+                if (cov < 16)
+                    a = a * (unsigned)cov / 16U;
+            }
+            if (!a)
+                continue;
+            row[xx] = a >= 255 ? (c | 0xff000000U) : mix(c, row[xx], a);
+        }
+    }
 }
 
 /* Glyph record for code c (falls back to '?'). */
@@ -118,7 +185,7 @@ int ui_text(int font, int x, int y, const char *s, uint32_t fg, uint32_t bg)
         return x;
     uintptr_t h = font_hdr[font];
     uintptr_t data = h + 32 + (uintptr_t)r32(h + 24) * 16;
-    volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
+    volatile uint32_t *fb = fbuf();
     for (; *s; ++s) {
         uintptr_t g = glyph(h, (unsigned char)*s);
         int adv = s16(g), w = r16(g + 2), gh = r16(g + 4), bx = s16(g + 6), by = s16(g + 8);
@@ -132,7 +199,7 @@ int ui_text(int font, int x, int y, const char *s, uint32_t fg, uint32_t bg)
                 unsigned a = *(volatile uint8_t *)(px + (uintptr_t)r * w + c);
                 int xx = x + bx + c;
                 if (a && xx >= 0 && xx < UI_W)
-                    row[xx] = mix(fg, bg, a);
+                    row[xx] = mix(fg, bg == UI_BEHIND ? row[xx] : bg, a);
             }
         }
         x += adv;

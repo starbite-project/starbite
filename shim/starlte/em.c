@@ -26,6 +26,7 @@
 #include "store.h"
 #include "catalog.h"
 #include "menu.h"
+#include "sd.h"
 
 /* ---- geometry ----------------------------------------------------------- */
 
@@ -2481,6 +2482,136 @@ static void fill_store(void)
     kv_dec("Writes", st.seq, 0);
 }
 
+/* ---- microSD (sd.c) ---------------------------------------------------------
+ * The card driver runs only from here until "Card store at boot" is on: a probe with the fault
+ * vectors armed, every step shown. */
+static void kv_ok(const char *k, int ok, const char *v)
+{
+    kv_addc(k, v, ok ? UI_GREEN : UI_RED);
+}
+
+static void fill_sd(void)
+{
+    static int probed;
+    struct ub v;
+    uint64_t faults = EMF[3];
+    if (!probed) {
+        sd_allow();
+        (void)sd_up();
+        store_reset(STORE_SD);
+        (void)store_open(STORE_SD);
+        probed = 1;
+    }
+    kv_hdr("CARD");
+    kv_ok("Card detect (GPA1-5)", sd_rep.present, sd_rep.present ? "card present" : "no card");
+    ub_init(&v);
+    ub_s(&v, sd_rep.rails > 0 ? "on" : sd_rep.rails == 0 ? "refused" : "no ACPM");
+    ub_s(&v, "  LDO31 ");
+    ub_hexn(&v, sd_rep.l31, 2);
+    ub_s(&v, "  LDO2 ");
+    ub_hexn(&v, sd_rep.l2, 2);
+    kv_ok("Power", sd_rep.rails > 0, v.b);
+    kv_hdr("CONTROLLER (DWMMC2 0x11500000)");
+    for (unsigned i = 0; i < 3; ++i) {
+        ub_init(&v);
+        ub_hexn(&v, sd_rep.gate[i], 8);
+        kv_add(i == 0 ? "Gate CMU top 1a242070" : i == 1 ? "Gate ACLK 11402030" : "Gate SDCLKIN 11402034", v.b);
+    }
+    kv_hex("CMU divider 1a241864", sd_rep.cmu_div, 8);
+    kv_hex("VERID", sd_rep.verid, 8);
+    kv_hex("HCON", sd_rep.hcon, 8);
+    kv_hex("CLKSEL64", sd_rep.clksel, 8);
+    ub_init(&v);
+    ub_dec(&v, sd_rep.bus_hz / 1000000U);
+    ub_s(&v, " MHz bus, card ");
+    ub_dec(&v, sd_rep.card_hz / 1000U);
+    ub_s(&v, " kHz");
+    kv_add("Clock", v.b);
+    kv_hdr("SD INIT");
+    kv_ok("Result", sd_rep.state > 0, sd_rep.state > 0 ? "ready, 4-bit" : sd_rep.why ? sd_rep.why : "not tried");
+    kv_hex("CMD8 response", sd_rep.r7, 8);
+    kv_hex("OCR", sd_rep.ocr, 8);
+    kv_add("Capacity class", sd_rep.high_capacity ? "SDHC/SDXC (block addressed)" : "SDSC");
+    kv_hex("RCA", sd_rep.rca, 4);
+    ub_init(&v);
+    uint32_t pnm[5] = { sd_rep.cid[3] & 255U, sd_rep.cid[2] >> 24, (sd_rep.cid[2] >> 16) & 255U,
+                        (sd_rep.cid[2] >> 8) & 255U, sd_rep.cid[2] & 255U };
+    for (unsigned i = 0; i < 5; ++i)
+        ub_c(&v, pnm[i] >= 32 && pnm[i] < 127 ? (char)pnm[i] : '.');
+    ub_s(&v, "  mfr ");
+    ub_hexn(&v, sd_rep.cid[3] >> 24, 2);
+    kv_add("CID product", v.b);
+    kv_hex("Last RINTSTS", sd_rep.last_rintsts, 8);
+    kv_hex("Last STATUS", sd_rep.last_status, 8);
+    kv_dec("Faults while probing", EMF[3] - faults, 0);
+    if (sd_rep.state <= 0)
+        return;
+    kv_hdr("MBR");
+    static uint8_t mbr[512] __attribute__((aligned(8)));
+    if (sd_read(0, 1, (uintptr_t)mbr) || mbr[510] != 0x55 || mbr[511] != 0xaa) {
+        kv_addc("Sector 0", "unreadable or no MBR", UI_RED);
+    } else {
+        for (unsigned i = 0; i < 4; ++i) {
+            const uint8_t *e = mbr + 446 + 16 * i;
+            uint32_t lba = e[8] | e[9] << 8 | e[10] << 16 | (uint32_t)e[11] << 24;
+            uint32_t len = e[12] | e[13] << 8 | e[14] << 16 | (uint32_t)e[15] << 24;
+            if (!e[4])
+                continue;
+            struct ub k;
+            ub_init(&k);
+            ub_s(&k, "p");
+            ub_dec(&k, i + 1);
+            ub_s(&k, " type ");
+            ub_hexn(&k, e[4], 2);
+            ub_init(&v);
+            ub_dec(&v, lba);
+            ub_s(&v, "  ");
+            ub_size(&v, (uint64_t)len * 512U);
+            kv_add(k.b, v.b);
+        }
+    }
+    kv_hdr("OS STORE (PARTITION TYPE DA)");
+    struct store_ent e;
+    if (!store_version(STORE_SD)) {
+        kv_addc("Store", "none on the card", UI_RED);
+        return;
+    }
+    kv_dec("First block", store_base(STORE_SD), 0);
+    ub_init(&v);
+    ub_size(&v, store_used(STORE_SD) * 4096U);
+    ub_s(&v, " of ");
+    ub_size(&v, store_capacity(STORE_SD) * 4096U);
+    kv_add("Used", v.b);
+    for (unsigned i = 0; store_get(STORE_SD, i, &e); ++i) {
+        ub_init(&v);
+        ub_size(&v, e.size);
+        ub_s(&v, "  crc ");
+        ub_hexn(&v, e.crc, 8);
+        kv_add(e.name, v.b);
+    }
+}
+
+static void build_sdboot(void)
+{
+    struct star_settings st;
+    int on = settings_load(&st) && (st.flags & SET_SD_STORE);
+    row_add("Read the card's OS store at boot", "only after the microSD probe worked", R_CHECK | R_WARN | (on ? R_ON : 0));
+}
+
+static int act_sdboot(int i)
+{
+    struct star_settings st;
+    (void)i;
+    (void)settings_load(&st);
+    if (!(st.flags & SET_SD_STORE) &&
+        !dialog("Card store at boot", "The loader will power and read the card", "at every boot.", "TURN ON"))
+        return 0;
+    st.flags ^= SET_SD_STORE;
+    if (settings_save(&st))
+        (void)dialog("Card store at boot", "Could not write the settings record.", "Nothing changed.", "OK");
+    return 0;
+}
+
 /* Start an OS straight from EngineerMode: every catalog entry (hidden ones too). E.boot = the
  * entry + 1, as the menu's pick. */
 static void build_start(void)
@@ -3874,6 +4005,8 @@ static void build_tab(int t)
         row_add("UFS device and health", "model, firmware, capacity, wear", 0);
         row_add("Speed test", "16 MiB sequential read (read only)", 0);
         row_add("Sector viewer", "raw LU0 blocks, hex + ASCII", 0);
+        row_add("microSD card", "probe the card and its OS store (read only)", 0);
+        row_add("Card store at boot", "read the card's OS store at every boot", R_WARN);
         break;
     case 4:
         row_add("Android 17", "LineageOS 24.0: store, partitions, safety", 0);
@@ -3938,6 +4071,11 @@ static void open_item(int t, int i)
     case 0x32: info_screen("UFS device and health", fill_ufs_dev, 0); break;
     case 0x33: run_speed(); break;
     case 0x34: sector_screen(); break;
+    case 0x35:
+        if (dialog("microSD card", "Power the card and read it?", "Read only. Hold Vol Down + Power if it hangs.", "PROBE"))
+            info_screen("microSD card", fill_sd, 0);
+        break;
+    case 0x36: list_screen("Card store at boot", build_sdboot, act_sdboot); break;
     case 0x40: info_screen("Android 17", fill_android, 0); break;
     case 0x41: info_screen("iOS 26", fill_ios, 0); break;
     case 0x42: list_screen("iOS boot options", build_ios_opts, act_ios_opts); break;

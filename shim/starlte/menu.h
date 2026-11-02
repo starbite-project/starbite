@@ -30,3 +30,20 @@ int star_menu_assets(void);
 int star_sprite(unsigned id);
 /* Rectangle of the first sprite with this id; 0 if there is none. */
 int star_sprite_rect(unsigned id, unsigned *x, unsigned *y, unsigned *w, unsigned *h);
+
+/* Boot menu v6 (menu6.c): full screen, categories, run-time labels, touch. Used when the BOOT
+ * ramdisk has its sprites (V6=1 tools/brand/menu.mjs: icon V6_ICON_SPRITE) and the font atlas. */
+#define V6_ICON_SPRITE 97U
+struct star_settings;
+int menu_v6(const struct star_info *in, char *cmdline, unsigned len);
+/* menu.c, for menu v6: the settings record, one-shot next, last choice, a failed start. */
+void star_menu_begin(void);
+struct star_settings *star_menu_settings(int *valid);
+int star_menu_settings_save(void);
+int star_menu_ready_key(const char *key);
+int star_menu_next(void);
+void star_menu_remember(int idx);
+int star_menu_failure(const char **name, const char **why);
+/* anim.c: rectangles (x, y, w, h each) of a composed screen src slide up and fade in, one after
+ * another, over what the off-screen buffer holds; then src is the panel. */
+void star_reveal(const uint32_t *src, const int *rects, unsigned n);

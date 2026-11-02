@@ -19,6 +19,7 @@
 #include "hw.h"
 #include "catalog.h"
 #include "store.h"
+#include "ui.h"
 
 #define ALIVE_GPA0_DAT 0x14050024UL
 #define ALIVE_GPA2_DAT 0x14050064UL
@@ -1503,6 +1504,53 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
     }
 }
 
+/* ---- shared with menu v6 (menu6.c, menu.h) ---- */
+
+struct star_settings *star_menu_settings(int *valid)
+{
+    if (valid)
+        *valid = settings_ok;
+    return &settings;
+}
+
+int star_menu_settings_save(void)
+{
+    int r = settings_save(&settings);
+    if (!r)
+        settings_ok = 1;
+    return r;
+}
+
+int star_menu_ready_key(const char *key)
+{
+    return ready_key(key);
+}
+
+void star_menu_begin(void)
+{
+    settings_ok = settings_load(&settings);
+}
+
+int star_menu_next(void)
+{
+    return boot_next();
+}
+
+void star_menu_remember(int idx)
+{
+    remember(idx);
+}
+
+int star_menu_failure(const char **name, const char **why)
+{
+    if (!menu_resumed)
+        return 0;
+    menu_resumed = 0;
+    *name = fail_name;
+    *why = fail_why;
+    return 1;
+}
+
 /* The catalog entry of iOS from BOOT (what Engineer's "boot iOS" means): index + 1, or 0. */
 int star_ios_pick(void)
 {
@@ -1521,6 +1569,9 @@ int star_menu(const struct star_info *in, char *cmdline, unsigned len)
 {
     unsigned sel = 0;
     opt_load(cmdline);
+    unsigned ix, iy, iw, ih;
+    if (star_menu_assets() > 0 && star_sprite_rect(V6_ICON_SPRITE, &ix, &iy, &iw, &ih) && ui_init())
+        return menu_v6(in, cmdline, len);
     if (star_menu_assets() > 0)
         return menu_v5(in, cmdline, len);
     /* No menu sprites: the text menu (iOS and Windows from the catalog). */
