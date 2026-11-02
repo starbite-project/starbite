@@ -139,9 +139,8 @@ category = "linux"
 method = "linux"
 tag = "beta"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/pmos-phosh.img"
-root = "sd:p1 /distros/pmos-phosh.img"
-flags = ["hidden"]
+cmdline = "sb.root=/distros/pmos.img sb.session=phosh"
+root = "sd:p1 /distros/pmos.img"
 
 [[entry]]
 key = "linux-arch"
@@ -175,9 +174,8 @@ category = "linux"
 method = "linux"
 tag = "experimental"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/kali.img"
+cmdline = "sb.root=/distros/kali.img sb.session=phosh"
 root = "sd:p1 /distros/kali.img"
-flags = ["hidden"]
 
 # Lab: proves that a failed start comes back to the menu (its file is not an arm64 Image).
 [[entry]]
