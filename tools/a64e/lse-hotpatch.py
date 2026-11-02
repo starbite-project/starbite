@@ -15,10 +15,11 @@ placed in the zero padding after its image's __TEXT, which branches back:
          2: MOV  Rs, T
             B    site + 4
   LD{ADD,CLR,EOR,SET}, SWP likewise (old value to Rt, new one built in a scratch register).
-The scratch registers are temporaries (x9-x15) the whole function never mentions: dead at the site,
-and never an argument passed through to a tail call. Without enough of them, the stub saves x9-x11
-below SP lowered by 160 (beyond the 128-byte red zone, so a signal frame cannot land on them) and
-restores them. Sites already patched (a B) are left alone.
+The stub saves its scratch registers (three of x9-x15) below SP lowered by 160 (beyond the
+128-byte red zone, so a signal frame cannot land on them) and restores them: every register but
+NZCV-free flags is preserved, whatever the calling convention (swift_*_preservemost callers keep
+x9-x15 live). Sites already patched (a B) are left alone; --restore LOG puts the original
+instructions back from a previous run's output.
 
   lse-hotpatch.py CACHE_MAIN ADDR... [--dry-run]     (unslid cache addresses, e.g. 0x18ec74bbc)
 Needs build/tools/ipsw/ipsw (function bounds, register use) and the .a2s cache of that cache."""
@@ -173,10 +174,12 @@ def b(off):
 def stub_for(w, free):
     """The LL/SC words for LSE instruction w (minus the final B back), or None. With too few dead
     temporaries, x9-x11 are saved below a lowered SP (past the 128-byte red zone) and restored."""
-    words = stub_body(w, free)
     rn = (w >> 5) & 31
-    if words is not None or rn == 31:
-        return words
+    if rn == 31:
+        return None
+    # Always save the scratch registers: "unmentioned in the function" is not "free" for special
+    # calling conventions (swift_retain_preservemost's callers keep x9/x10 across the call; the
+    # first version, which borrowed them, crashed every Swift process).
     rt, rs = w & 31, (w >> 16) & 31
     saved = [r for r in range(9, 16) if r not in (rt, rs, rn)][:3]
     words = stub_body(w, saved)
@@ -232,8 +235,18 @@ def main():
     ap.add_argument('addrs', nargs='+')
     ap.add_argument('--a2s', required=True)
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--restore', help="a previous run's output: write each site's original word back")
     a = ap.parse_args()
     c = Cache(a.cache, a.dry_run)
+    if a.restore:
+        for line in open(a.restore):
+            m = re.match(r'(0x[0-9a-f]+): \S+: (0x[0-9a-f]{8}) -> B', line)
+            if m:
+                site, word = int(m.group(1), 16), int(m.group(2), 16)
+                if (u32(c.read(site, 4)) & 0xFC000000) == 0x14000000:
+                    c.write(site, struct.pack('<I', word))
+                    print(f'{site:#x}: restored {word:#010x}')
+        return
     done = 0
     for s in a.addrs:
         addr = int(s, 16)
