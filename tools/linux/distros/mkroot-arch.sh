@@ -110,7 +110,8 @@ cleanup() {
 	[ -x "$R/usr/bin/gpgconf" ] && chroot "$R" gpgconf --homedir /etc/pacman.d/gnupg --kill all 2>/dev/null
 	kill_root_procs
 	for m in "$R/var/cache/pacman/pkg" "$R/tmp/sb" "$R/tmp" "$R/dev/pts" "$R/dev" "$R/proc" "$R/sys" "$R/run"; do mountpoint -q "$m" && umount "$m"; done
-	mountpoint -q "$R" && umount "$R"
+	# (lazily if it must: a half-built image still mounted keeps writing and grows back after release)
+	mountpoint -q "$R" && { umount -R "$R" 2>/dev/null || umount -R -l "$R"; }
 	[ -n "$LOOP" ] && losetup -d "$LOOP" 2>/dev/null
 	# a failed run: give the half-built image's blocks back now (the next run starts it afresh;
 	# the checked tarball stays in TMPD for reuse)
@@ -155,9 +156,13 @@ mkfs_img() { mkfs.ext4 -q -F -E nodiscard -O ^orphan_file,^metadata_csum_seed -L
 mkfs_img || { sleep 3; mkfs_img; }                   # virtiofs: the new file can lag a moment
 LOOP=$(losetup -f --show "$IMG")
 mount -o noatime "$LOOP" "$R"
+# private: the VM's / and /dev are shared mounts, so the other builds' chroot mounts (their
+# /dev/pts binds) propagated into this root's /dev and left it busy at the end (umount failed)
+mount --make-private "$R"
 echo "extracting $TARBALL ..."
 bsdtar -xpf "$T" -C "$R"
-mount --bind /dev "$R/dev"; mount --bind /dev/pts "$R/dev/pts"
+mount --bind /dev "$R/dev"; mount --make-private "$R/dev"
+mount --bind /dev/pts "$R/dev/pts"; mount --make-private "$R/dev/pts"
 mount -t proc proc "$R/proc"; mount -t sysfs sys "$R/sys"; mount -t tmpfs tmpfs "$R/run"
 mount -t tmpfs -o size=1G tmpfs "$R/tmp"             # temp files in RAM, never the VM's disk
 # pacman's package cache in RAM too: downloads never reach the image (the Mac's disk) or the VM's
@@ -233,7 +238,8 @@ rm -rf "$R"/var/tmp/* "$R"/var/log/pacman.log "$R"/var/log/journal/* "$R"/var/ca
 
 # ---- 5. unmount, check, shrink --------------------------------------------------------------------
 kill_root_procs
-for m in "$R/var/cache/pacman/pkg" "$R/tmp" "$R/dev/pts" "$R/dev" "$R/proc" "$R/sys" "$R/run"; do umount "$m"; done
+for m in "$R/var/cache/pacman/pkg" "$R/tmp" "$R/proc" "$R/sys" "$R/run"; do umount "$m"; done
+umount -R "$R/dev"
 rm -rf "$R"/tmp/*
 trim
 used=$(df -BM --output=used "$R" | tail -1 | tr -dc 0-9)
