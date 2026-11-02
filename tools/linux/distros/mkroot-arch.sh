@@ -191,7 +191,19 @@ rm -f "$R"/etc/systemd/network/*.network
 # ---- 3. packages ------------------------------------------------------------------------------
 trim
 mac_wait "the packages" 1
-in_root pacman -Syu --noconfirm
+# pac_sync ARGS: pacman -Syu ARGS, retried: the mirror (a geo-redirect) can 404 a package the
+# database still names while it syncs (an earlier run: libopenmpt), so each retry waits, refreshes
+# the database (-Syy, a full upgrade with it: never a partial one) and may land on another mirror
+pac_sync() {
+	local i f=-Syu
+	for i in 1 2 3 4; do
+		in_root pacman $f --noconfirm "$@" && return 0
+		[ $i = 4 ] && break
+		echo "pacman failed (try $i): retrying in $((i * 60)) s with a fresh database ..."; sleep $((i * 60)); f=-Syyu
+	done
+	echo "pacman -Syu $* failed 4 times" >&2; return 1
+}
+pac_sync
 in_root pacman -Scc --noconfirm >/dev/null
 trim
 avail=()
@@ -203,8 +215,8 @@ for p in $PKGS; do
 	fi
 done
 echo "installing: ${avail[*]}"
-mac_wait "installing" 3                              # ~2.3 GB installed
-in_root pacman -S --needed --noconfirm "${avail[@]}"
+mac_wait "installing" 2                              # ~1.3 GB more in the image (3.2 GB in all)
+pac_sync --needed "${avail[@]}"
 in_root pacman -Scc --noconfirm >/dev/null
 trim
 left=$(in_root pacman -Qq | grep -E "$NOKERNEL_RE" || true)
