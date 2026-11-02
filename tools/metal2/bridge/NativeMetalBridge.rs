@@ -272,7 +272,10 @@ fn constant_bytes(raw: u32) -> usize {
 fn zero_constants(function: &metal2vulkan_runtime::Function) -> (metal2vulkan::library::FunctionConstantValues, String) {
     let mut values = metal2vulkan::library::FunctionConstantValues::defaults();
     let mut listed = String::new();
-    let Ok(declared) = function.function_constants_dictionary() else { return (values, listed) };
+    let declared = match function.function_constants_dictionary() {
+        Ok(declared) => declared,
+        Err(e) => return (values, format!(" [constants: {e:?}]")),
+    };
     for (name, c) in &declared {
         let ty = c.data_type();
         let size = constant_bytes(ty.as_raw());

@@ -50,7 +50,10 @@ static void raise_memory_limit(uint32_t mb)
 {
 	int r = memorystatus_control(6, getpid(), mb, NULL, 0);
 	int r2 = r != 0 ? memorystatus_control(22, getpid(), mb << 20, NULL, 0) : 0;
-	printf("memory limit %u MB: set %d, increase %d\n", mb, r, r2);
+	/* and out of the idle band, where memorystatus kills an idle daemon first (t13: after 49 s) */
+	struct { int32_t priority; uint64_t user_data; } props = { 10, 0 };
+	int r3 = memorystatus_control(2, getpid(), 0, &props, sizeof(props));
+	printf("memory limit %u MB: set %d, increase %d; priority 10: %d\n", mb, r, r2, r3);
 	fflush(stdout);
 }
 
