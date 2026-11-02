@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Galaxy S9 (starlte, SM-G960F) device tree from the S9+ port's star2lte one.
 
-    mk-starlte-dts.py [--gpu-floor-455] STAR2LTE.dts OUT.dts
+    mk-starlte-dts.py [--gpu-floor-455] [--legacy-cma] STAR2LTE.dts OUT.dts
     mk-starlte-dts.py --print-bootargs
+    mk-starlte-dts.py [--legacy-cma] --print-cma    "BASE SIZE" of the CMA region
 
 SheroAbi/galaxy-s9plus-mainline-linux targets the S9+; the boards share the
 design. Differences applied here, each checked so a drifted input fails loudly:
@@ -14,6 +15,11 @@ design. Differences applied here, each checked so a drifted input fails loudly:
     placeholders for the Starbite loader
   - CMA out of the loader's Linux window (Image, initrd, DTB), see CMA below
   - microSD (dwmmc2)
+  - --legacy-cma: the rollback DTB (store file linux-old.dtb, hidden catalog
+    entry, same Image and initrd): everything above, but CMA at the port's
+    proven base 0x98000000, cut to 256 MiB so it ends at OS_RD 0xa8000000
+    where the initrd starts (check-kernel.py dtb --legacy-cma --image checks
+    that the Image + BSS ends below 0x98000000)
   - --gpu-floor-455: no 260 MHz GPU OPP (plan 1.3.2, only if faults persist
     at 950 mV; a udev min_freq rule does the same without a reflash)
   (sboot's DTBH model_info stays: the port's build packs a dt.img with it)
@@ -30,12 +36,24 @@ BOOTARGS = ('console=ramoops-1 console=tty0 loglevel=4 panic=10 maxcpus=8 '
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--print-bootargs', action='store_true')
+ap.add_argument('--print-cma', action='store_true')
 ap.add_argument('--gpu-floor-455', action='store_true')
+ap.add_argument('--legacy-cma', action='store_true')
 ap.add_argument('src', nargs='?')
 ap.add_argument('out', nargs='?')
 args = ap.parse_args()
 if args.print_bootargs:
     print(BOOTARGS)
+    sys.exit(0)
+CMA_BASE, CMA_SIZE = 0xcd400000, 0x12c00000      # see CMA below
+# --legacy-cma (rollback DTB, in case 0xcd400000 hits a carve-out no DT lists):
+# the port's base, which booted, ending at OS_RD so the initrd stays out of it.
+# It still lies inside the loader window, between the Image and the initrd.
+CMA_LEGACY_BASE, CMA_LEGACY_SIZE = 0x98000000, 0x10000000
+if args.legacy_cma:
+    CMA_BASE, CMA_SIZE = CMA_LEGACY_BASE, CMA_LEGACY_SIZE
+if args.print_cma:
+    print(f'{CMA_BASE:#x} {CMA_SIZE:#x}')
     sys.exit(0)
 if not args.src or not args.out:
     ap.error('STAR2LTE.dts OUT.dts')
@@ -93,7 +111,7 @@ sub('energy-full-design-microwatt-hours = <13480000>;', 'energy-full-design-micr
 # (Plan 2.3 proposed 0xb0000000 + 320 MiB: that overlaps rkp, tima and the
 # 0xbc800000-0xc0000000 hole.) tools/linux/check-kernel.py dtb checks the result
 # against every reserved-memory node, the memory banks and the loader window.
-CMA_BASE, CMA_SIZE = 0xcd400000, 0x12c00000
+# (CMA_BASE / CMA_SIZE are set at the top, with --legacy-cma's rollback values)
 sub("""		 * Placed by hand: the region must sit below 4 GB and inside the
 		 * gap between sboot-logs (ends 0x9179c000) and rkp (starts
 		 * 0xaf800000), which is the largest free stretch down there.
@@ -102,6 +120,11 @@ sub("""		 * Placed by hand: the region must sit below 4 GB and inside the
 		 * 4 GB and outside the loader's Linux window 0x92000000-0xaf000000
 		 * (Image, initrd at 0xa8000000, DTB at 0xae000000), right after
 		 * the boot framebuffer: 300 MiB, the largest free stretch there.
+		 */""" if not args.legacy_cma else
+    """		 * Placed by hand (Starbite rollback DTB, mk-starlte-dts.py
+		 * --legacy-cma): the port's base, cut to 256 MiB so it ends at
+		 * the loader's initrd (0xa8000000); the Image + BSS must end
+		 * below 0x98000000.
 		 */""")
 sub('reg = <0x0 0x98000000 0x14000000>;\t/* 320 MiB */',
     f'reg = <0x0 {CMA_BASE:#x} {CMA_SIZE:#x}>;\t/* {CMA_SIZE >> 20} MiB, Starbite */')
@@ -220,4 +243,4 @@ s += """
 };
 """
 out.write_text(s)
-print(f'{out}: S9 (starlte) device tree')
+print(f'{out}: S9 (starlte) device tree' + (', rollback CMA 0x98000000' if args.legacy_cma else ''))

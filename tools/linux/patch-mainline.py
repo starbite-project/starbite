@@ -296,7 +296,9 @@ def patch_port(work):
  * 950 mV whenever the clock moves and after every power-up. A field reading
  * of 850 mV at 260 MHz conflicted with that; whatever lowers it, it is put
  * back here and counted, so /sys/module/s9p_g3d/parameters/rail_fixups says
- * whether it happens at all.
+ * whether it happens at all. A read or write that fails is counted apart in
+ * rail_fixup_errors (and warned with its error code): then the rail was not
+ * checked or not restored, and the GPU may run the next clock below 950 mV.
  */
 static bool g3d_rail_check = true;
 module_param_named(rail_check, g3d_rail_check, bool, 0644);
@@ -304,18 +306,35 @@ MODULE_PARM_DESC(rail_check, "with step_volt off, read BUCK6 back before each cl
 static unsigned int g3d_rail_fixups;
 module_param_named(rail_fixups, g3d_rail_fixups, uint, 0444);
 MODULE_PARM_DESC(rail_fixups, "times BUCK6 read below 950 mV and was restored");
+static unsigned int g3d_rail_fixup_errors;
+module_param_named(rail_fixup_errors, g3d_rail_fixup_errors, uint, 0444);
+MODULE_PARM_DESC(rail_fixup_errors, "times BUCK6 could not be read, or read low and could not be restored");
 
 /* caller holds g3d_lock */
 static void s9p_g3d_rail_verify(unsigned int khz)
 {
 	u8 value;
+	int err;
 
 	if (g3d_step_volt || !g3d_rail_set || !READ_ONCE(g3d_rail_check))
 		return;
-	if (s9p_acpm_pmic_read(G3D_BUCK6_REG, &value) || value >= G3D_VSEL_950MV)
+	err = s9p_acpm_pmic_read(G3D_BUCK6_REG, &value);
+	if (err) {
+		g3d_rail_fixup_errors++;
+		pr_warn_ratelimited("s9p-g3d: BUCK6 read failed (%d) before %u kHz, rail not checked\\n",
+				    err, khz);
 		return;
-	if (!s9p_acpm_pmic_write(G3D_BUCK6_REG, G3D_VSEL_950MV))
-		udelay(200);
+	}
+	if (value >= G3D_VSEL_950MV)
+		return;
+	err = s9p_acpm_pmic_write(G3D_BUCK6_REG, G3D_VSEL_950MV);
+	if (err) {
+		g3d_rail_fixup_errors++;
+		pr_warn_ratelimited("s9p-g3d: BUCK6 read %u uV before %u kHz, restoring 950 mV failed (%d)\\n",
+				    300000u + value * 6250u, khz, err);
+		return;
+	}
+	udelay(200);
 	g3d_rail_fixups++;
 	pr_warn_ratelimited("s9p-g3d: BUCK6 read %u uV before %u kHz, restored 950 mV\\n",
 			    300000u + value * 6250u, khz);

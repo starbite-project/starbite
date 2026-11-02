@@ -1989,3 +1989,19 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   Outputs: Image 25.6 MB (7.1.0-starbite, text_offset 0x80000), DTB, kernel.config in build/linux/ (the old m71
   kernel moved to build/linux/m71-old/) and the VM ~/distros/_kernel/ with modules-7.1.0-starbite.img (546
   modules, ext4 sb-modules, 256 MiB sparse, 31 MB used). Needs an initrd now: no built-in initramfs.
+- 2026-11-02 night: **Phase 3 kernel review fixes, built, not booted.** Release is now
+  `7.1.0-starbite-<build id>` (LOCALVERSION, id = hash of port/, patch-mainline.py, starbite.config,
+  build-kernel.sh and its arguments): this build is `7.1.0-starbite-23527494`, Image sha e994ec21. The init mounts
+  `/distros/_kernel/modules-$(uname -r).img`, so a modules image can only meet its own kernel (no MODVERSIONS:
+  two configs with one release would otherwise load into each other); the image also holds `/starbite-kernel`
+  (`STARBITE-KERNEL <release> <Image sha256>`), checked by `check-kernel.py pair Image modules-<rel>.img` (run it
+  before copying modules to the card or packing the Image into the store). Older modules-*.img in ~/distros/_kernel
+  are deleted by each build. Rollback DTB `linux-old.dtb` (sha 3f2bddcf, same as the earlier run's): the daily DTB
+  with only CMA at mk-starlte-dts.py --legacy-cma (0x98000000 + 256 MiB, ends at OS_RD), made with fdtput, checked
+  by `check-kernel.py dtb --legacy-cma --image Image` (CMA between the Image + BSS and the initrd). The old
+  build/linux/m71-old DTB is not a rollback for this kernel: no initrd properties, old bootargs, CMA over the initrd.
+  Loader: the built-in fallback entry (no catalog in the store) is now linux.image + linux.dtb + linux.initrd with
+  sb.root=none (rescue shell). The kernel branch alone still has catalog.toml's `linux` entry without
+  linux.initrd: merge the userland branch before packing a store. build-kernel.sh also takes
+  ~/linux/.starbite-build.lock (WORK, OUT, REPO_OUT are shared between BUILD trees). s9p-g3d: failed BUCK6
+  reads/writes count in rail_fixup_errors (warned with the error) and no longer count as rail_fixups.

@@ -100,7 +100,12 @@ static void def(const char *key, const char *name, const char *version, unsigned
     ++cat_n;
 }
 
-/* What the loader booted before catalogs: the same four entries and the same files. */
+/*
+ * What the loader booted before catalogs: the same four entries. Linux 7.1 has
+ * no built-in initramfs, so its entry carries the store's initrd and starts the
+ * rescue shell (sb.root=none): a store without a readable catalog still gets a
+ * USB shell, and a store without linux.initrd fails back to the menu.
+ */
 static void builtin(void)
 {
     cat_n = 0;
@@ -108,7 +113,9 @@ static void builtin(void)
     def("win11", "Windows 11", "23H2", CAT_MICROSOFT, M_UEFI, TAG_EXPERIMENTAL, "windows.uefi|@bundle", 0, 0);
     def("android", "Android 17", "LineageOS 24.0", CAT_ANDROID, M_ANDROID, TAG_EXPERIMENTAL,
         "android.kernel", "android.ramdisk", "android.cmdline");
-    def("linux", "Linux", "mainline", CAT_LINUX, M_LINUX, TAG_EXPERIMENTAL, "linux.image", "linux.dtb", 0);
+    def("linux", "Linux", "rescue shell", CAT_LINUX, M_LINUX, TAG_EXPERIMENTAL, "linux.image", "linux.dtb",
+        "linux.initrd");
+    str_set(cat[cat_n - 1].cmdline, sizeof(cat[cat_n - 1].cmdline), "sb.root=none");
 }
 
 int cat_load(void)

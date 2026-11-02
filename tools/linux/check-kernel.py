@@ -3,7 +3,13 @@
 
     check-kernel.py config .config FRAGMENT...   every value of the fragments survived olddefconfig
     check-kernel.py dtb exynos9810-starlte.dtb    /chosen for the loader, CMA against reserved-memory
+    check-kernel.py dtb --legacy-cma --image Image linux-old.dtb
+                                                  the rollback DTB: CMA between the Image and the initrd
     check-kernel.py image Image                   arm64 header, text_offset 0x80000, fits the loader window
+    check-kernel.py pair Image modules-REL.img    the modules image was made for this very Image
+                                                  (release in the name, /starbite-kernel inside)
+    check-kernel.py id Image                      "STARBITE-KERNEL <release> <Image SHA256>", the line
+                                                  build-kernel.sh puts in the modules image (/starbite-kernel)
 
 Each prints what it checked and exits 1 on a failure.
 """
@@ -156,7 +162,14 @@ def h(r):
     return f'{r[0]:#x}-{r[1]:#x}'
 
 
-def check_dtb(path):
+def image_span(path):
+    """(load address, end incl. BSS) of an Image at the loader's RAM_BASE"""
+    text_offset, image_size = struct.unpack_from('<QQ', Path(path).read_bytes(), 8)
+    start = RAM_BASE + text_offset
+    return start, start + image_size
+
+
+def check_dtb(path, legacy=False, image=None):
     b = Path(path).read_bytes()
     root, total = parse_dtb(b)
     ok(f'{path}: FDT, {total} bytes, model {root.props.get("model", b"").rstrip(bytes(1)).decode()!r}')
@@ -217,13 +230,26 @@ def check_dtb(path):
     for name, r in res + fb:
         if overlap(cma, r):
             fail(f'CMA overlaps {name} {h(r)}')
-    if overlap(cma, (RAM_BASE, WINDOW_END)):
+    if legacy:
+        # rollback layout: inside the window, but only between the Image's end
+        # (with BSS) and the initrd at OS_RD
+        if not image:
+            fail('--legacy-cma needs --image (the Image + BSS must end below the CMA)')
+        else:
+            span = image_span(image)
+            print(f'      Image {h(span)} (with BSS), initrd from {OS_RD:#x}')
+            if overlap(cma, span):
+                fail(f'CMA overlaps the Image {h(span)}')
+        if overlap(cma, (OS_RD, WINDOW_END)):
+            fail(f'CMA overlaps the initrd/DTB part of the loader window {h((OS_RD, WINDOW_END))}')
+    elif overlap(cma, (RAM_BASE, WINDOW_END)):
         fail(f'CMA overlaps the loader window {h((RAM_BASE, WINDOW_END))} (Image, initrd at {OS_RD:#x}, DTB)')
     for name, r in res:
         if overlap(r, (RAM_BASE, UFS_DMA)):
             fail(f'{name} {h(r)} overlaps the loader window')
     if not [f for f in fails if 'CMA' in f]:
-        ok('CMA clear of every reserved region, the boot framebuffer and the loader window')
+        ok('CMA clear of every reserved region, the boot framebuffer and the ' +
+           ('Image, initrd and DTB (rollback layout)' if legacy else 'loader window'))
     # the GPU OPPs, for the 260 MHz question (plan 1.3.2)
     def walk(n):
         yield n
@@ -268,6 +294,41 @@ def check_image(path):
         print('      release', m.group(1).decode())
 
 
+# -------------------------------------------------------------------- pair --
+# The banner carries no build number or time here (reproducible build), so two
+# builds with different configs can share it: the release carries a build id
+# (build-kernel.sh) and the modules image a line naming the Image's SHA256.
+BANNER = re.compile(rb'Linux version (\S+) ')
+
+
+def kernel_id(image):
+    import hashlib
+    b = Path(image).read_bytes()
+    m = BANNER.search(b)
+    if not m:
+        sys.exit(f'{image}: no Linux banner')
+    return m.group(1).decode(), f'STARBITE-KERNEL {m.group(1).decode()} {hashlib.sha256(b).hexdigest()}'
+
+
+def check_pair(image, modimg):
+    """build-kernel.sh writes kernel_id() into the modules image as
+    /starbite-kernel; the release is also in the file name. Both must match."""
+    rel, kid = kernel_id(image)
+    print(f'      {kid}')
+    name = Path(modimg).name
+    if name != f'modules-{rel}.img':
+        fail(f'{name}: the Image is release {rel}, wants modules-{rel}.img')
+    else:
+        ok(f'file name matches release {rel}')
+    import mmap
+    with open(modimg, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+        found = mm.find(kid.encode() + b'\n')
+    if found < 0:
+        fail(f'{name} has no /starbite-kernel line for this Image: built for another kernel')
+    else:
+        ok(f'{name} was built with this Image')
+
+
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
@@ -275,7 +336,22 @@ def main():
     if what == 'config' and len(sys.argv) >= 4:
         check_config(sys.argv[2], sys.argv[3:])
     elif what == 'dtb':
-        check_dtb(sys.argv[2])
+        rest, legacy, image = sys.argv[2:], False, None
+        if '--legacy-cma' in rest:
+            rest.remove('--legacy-cma')
+            legacy = True
+        if '--image' in rest:
+            i = rest.index('--image')
+            image = rest[i + 1]
+            del rest[i:i + 2]
+        if len(rest) != 1:
+            sys.exit(__doc__)
+        check_dtb(rest[0], legacy, image)
+    elif what == 'id' and len(sys.argv) == 3:
+        print(kernel_id(sys.argv[2])[1])
+        return
+    elif what == 'pair' and len(sys.argv) == 4:
+        check_pair(sys.argv[2], sys.argv[3])
     elif what == 'image':
         check_image(sys.argv[2])
     else:
