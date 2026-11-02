@@ -8,3 +8,5 @@ ios*/
 ref/
 shim/*/out/
 out/
+# the vendored port's build scripts (not build output)
+!tools/linux/port/scripts/build/

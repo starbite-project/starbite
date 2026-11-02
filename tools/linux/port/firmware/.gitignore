@@ -1,0 +1,4 @@
+# fetched by tools/linux/build-kernel.sh from build/linux-bundle/firmware (STARBITE.md)
+bcmdhd_sta.bin_b2
+nvram.txt_r02a_b2
+bcmdhd_clm.blob

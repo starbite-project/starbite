@@ -47,12 +47,27 @@ root = "ufs:SYSTEM + A16DATA"
 [[entry]]
 key = "linux"
 name = "Linux 7.1"
-version = "postmarketOS · being rebuilt"
+version = "7.1.0-starbite · initrd + card"
 category = "linux"
 method = "linux"
 tag = "experimental"
-files = ["linux.image", "linux.dtb"]
-root = "sd:p1 /starbite-linux.img"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+root = "sd:p1 /distros"
+
+# Rollback for the CMA move (plan risk 2): the same kernel and initrd with
+# linux-old.dtb, whose CMA is back at the port's proven 0x98000000 (256 MiB,
+# ending at the initrd). Built by tools/linux/build-kernel.sh, mk-starlte-dts.py --legacy-cma.
+[[entry]]
+key = "linux-olddtb"
+name = "Linux (old DTB)"
+version = "CMA at 0x98000000 · rollback"
+category = "linux"
+method = "linux"
+tag = "lab"
+files = ["linux.image", "linux-old.dtb", "linux.initrd"]
+cmdline = "loglevel=7 keep_bootcon"
+root = "sd:p1 /distros"
+flags = ["hidden"]
 
 # Lab: proves that a failed start comes back to the menu (its file is not an arm64 Image).
 [[entry]]
