@@ -7,6 +7,7 @@ One instruction for one, in S_ATTR_PURE_INSTRUCTIONS sections only:
   BLRAA/BLRAB/BLRAAZ/BLRABZ Xn-> BLR Xn
   PAC*/AUT*/XPAC* (register)  -> NOP   (pointers are never signed here)
   LDRAA/LDRAB, no writeback   -> LDR (offset 0..32760) or LDUR (-256..-8)
+  LDAPR{B,H,,} (LRCPC)        -> LDAR{B,H,,}   (stronger ordering; the Mongoose M3 lacks LRCPC)
 Left for the kernel (sweet_a64e.c) to emulate on trap: PACGA, FJCVTZS, FCADD,
 LDRA* with writeback or out-of-range offsets.
 
@@ -44,6 +45,9 @@ def rewrite_words(w):
     w[pos] = (0xF9400000 | ((imm[pos] // 8).astype(np.uint32) << 10) | (rn[pos] << 5) | rt[pos]).astype(np.uint32)
     w[neg] = (0xF8400000 | ((imm[neg] & 0x1ff).astype(np.uint32) << 12) | (rn[neg] << 5) | rt[neg]).astype(np.uint32)
     c['ldra'] = int(pos.sum() + neg.sum()); c['ldra_left'] = int(m.sum() - pos.sum() - neg.sum())
+    m = (w & 0x3FFFFC00) == 0x38BFC000                       # LDAPR{B,H,,} Rt, [Xn]
+    w[m] = ((w[m] & 0xC00003FF) | 0x08DFFC00).astype(np.uint32)
+    c['ldapr'] = int(m.sum())
     c['pacga_left'] = int(((w & 0xFFE0FC00) == 0x9AC03000).sum())
     c['fjcvtzs_left'] = int(((w & 0xFFFFFC00) == 0x1E7E0000).sum())
     c['fcadd_left'] = int(((w & 0xBF20EC00) == 0x2E00E400).sum())
