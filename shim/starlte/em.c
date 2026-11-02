@@ -21,6 +21,7 @@
 #include "ui.h"
 #include "fbtext.h"
 #include "../fdt.h"
+#include "mmu.h"
 #include "ufs.h"
 
 /* ---- geometry ----------------------------------------------------------- */
@@ -2723,6 +2724,7 @@ static void run_cores(void)
     for (unsigned i = 0; i < 32; ++i)
         BOX[i] = 0;
     __asm__ volatile("dsb sy" : : : "memory");
+    star_cache_inval(em_core_box, sizeof(em_core_box));   /* zeros to DRAM now, never later over a check-in */
     draw_status();
     draw_bar("Core bring-up test", 1);
     draw_nav();
@@ -2746,6 +2748,8 @@ static void run_cores(void)
         if (c->ret)
             continue;
         for (unsigned ms = 0; ms < 1000 && c->slot < 0; ms += 1) {
+            /* the core writes with its MMU off, straight to DRAM; ours caches .data (mmu.c) */
+            star_cache_inval(em_core_box, sizeof(em_core_box));
             for (unsigned s = 0; s < 8; ++s)
                 if (BOX[s * 4] != before[s]) {
                     c->slot = (int)s;
@@ -2757,6 +2761,7 @@ static void run_cores(void)
         c->ms = (uint32_t)((hw_ticks() - t0) * 1000U / hw_freq());
         if (c->slot >= 0) {
             hw_wait_ms(50);
+            star_cache_inval(em_core_box, sizeof(em_core_box));
             c->mpidr = BOX[c->slot * 4 + 1];
             c->el = BOX[c->slot * 4 + 2];
             c->state = BOX[c->slot * 4];

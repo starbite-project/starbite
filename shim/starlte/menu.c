@@ -1194,6 +1194,23 @@ static void v5_draw(const struct v5 *m)
         v5_put(v5_svc[i], m->svc_focus && i == m->svc ? 1U : 0U);
 }
 
+/* The rows, chips and hints come in animated (anim.c), in the states v5_draw is about to give
+ * them; v5_draw then draws them exactly (v5_shown is still empty). */
+void star_intro_rows(const unsigned *ids, unsigned n);
+static void v5_intro(const struct v5 *m)
+{
+    unsigned ids[8], n = 0;
+    for (unsigned i = 0; i < 4; ++i) {
+        unsigned it = v5_os[i];
+        ids[n++] = V5_SPRITE(it, !v5_avail(it) ? 3U : i != m->os ? 0U : m->svc_focus ? 4U : 1U);
+    }
+    for (unsigned i = 0; i < 2; ++i)
+        ids[n++] = V5_SPRITE(v5_svc[i], m->svc_focus && i == m->svc ? 1U : 0U);
+    ids[n++] = V5_SPRITE(7, 0);
+    ids[n++] = V5_SPRITE(8, 0);
+    star_intro_rows(ids, n);
+}
+
 /* The chosen entry says "starting"; the card leaves unless it was the pick,
  * and the loader's status lines go where it was. */
 static void v5_starting(unsigned item)
@@ -1228,6 +1245,7 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
             return 4;
         }
     }
+    v5_intro(&m);
     v5_draw(&m);
     tp_init();
     /* starauto=N in the payload's boot-args: unattended test loop. iOS starts

@@ -16,6 +16,9 @@
 #include "menu.h"
 #include "hw.h"
 #include "ufs.h"
+#include "mmu.h"
+
+void star_intro_splash(void);   /* anim.c */
 
 #define LOG_BASE 0x91fff000UL
 #define RAM_BASE 0x92000000UL
@@ -164,10 +167,29 @@ sprite_walk(uint64_t start, uint64_t end, uint32_t want)
 
 /* As sprite_walk; with at != 0 the sprite goes to (ox, oy) instead. */
 static int
+sprite_walk_to(uint64_t start, uint64_t end, uint32_t want, int ox, int oy, int at, volatile uint32_t *fb,
+               unsigned fade);
+
+static int
 sprite_walk_at(uint64_t start, uint64_t end, uint32_t want, int ox, int oy, int at)
 {
+    return sprite_walk_to(start, end, want, ox, oy, at, (volatile uint32_t *)STAR_FB_BASE, 256);
+}
+
+/* Scale a colour by fade/256 (the sprites are opaque on black, so this fades them in). */
+static uint32_t
+fade_px(uint32_t c, unsigned fade)
+{
+    return 0xff000000U | ((((c >> 16) & 255U) * fade >> 8) << 16) | ((((c >> 8) & 255U) * fade >> 8) << 8) |
+           ((c & 255U) * fade >> 8);
+}
+
+/* As sprite_walk_at, into fb (a panel-sized buffer: the panel itself or anim.c's) at fade/256. */
+static int
+sprite_walk_to(uint64_t start, uint64_t end, uint32_t want, int ox, int oy, int at, volatile uint32_t *fb,
+               unsigned fade)
+{
     const volatile uint32_t *h = (const volatile uint32_t *)(uintptr_t)start;
-    volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
     uint32_t n = h[2];
     const volatile uint32_t *q = h + 3;
     int drawn = 0;
@@ -194,6 +216,8 @@ sprite_walk_at(uint64_t start, uint64_t end, uint32_t want, int ox, int oy, int 
                 if (length > left)
                     return -1;
                 left -= length;
+                if (fade < 256)
+                    c = fade_px(c, fade);
                 for (; length; --length) {
                     row[px] = c;
                     if (++px == w) {
@@ -215,6 +239,16 @@ int
 star_menu_assets(void)
 {
     return menu_end > menu_start;
+}
+
+/* anim.c: sprite id into dst (0 = the panel), at (x, y) when at, faded to fade/256. */
+int
+star_sprite_to(unsigned id, uint32_t *dst, int x, int y, int at, unsigned fade)
+{
+    if (!star_menu_assets())
+        return 0;
+    return sprite_walk_to(menu_start, menu_end, id, x, y, at,
+                          dst ? (volatile uint32_t *)dst : (volatile uint32_t *)STAR_FB_BASE, fade);
 }
 
 int
@@ -289,7 +323,8 @@ star_splash_draw(void)
             return 0;
         menu_start = start;
         menu_end = end;
-        (void)sprite_walk(start, end, 0);
+        /* S-Boot's splash -> the menu's base, animated (anim.c; plain without the MMU) */
+        star_intro_splash();
         star_fb_row_base(36);
         return 1;
     }
@@ -915,6 +950,9 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
 {
     uint64_t rd_start, rd_end;
     static char cmdline[BOOT_LINE_LENGTH];
+    /* Caches on before anything is drawn (mmu.c); the checks below see S-Boot's sctlr. */
+    if (el == 4 && !(sctlr & 1))
+        star_mmu_enable();
     star_dump_latches();
     log[77] = star_fb_enable();
     int branded = star_splash(fdt);

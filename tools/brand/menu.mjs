@@ -226,6 +226,19 @@ function sprite(id, x, y, w, h, px) {
   sprite(0, 0, sv.y, W, sv.h, render(W, sv.h, sl));
 }
 
+// Markers for the intro animation (shim/starlte/anim.c), never drawn: 1-pixel-high sprites whose
+// x, y are a star's centre and whose width is its size. Id 2: the header wordmark's star. Id 3: the
+// star of "Powered by starbite" on S-Boot's splash (tools/brand/splash-logo.mjs: x 255, size 126,
+// baseline 1690 in the 1079 x 1747 logo.jpg, which S-Boot draws at (180, 1144)).
+{
+  const hs = 104, hw = measure('starbite', hs, 200), hst = hs * 0.33;
+  const hx = 74 + hw + hs * 0.06, hy = LAYOUT.header.y + LAYOUT.header.h / 2 + 34 - hs * 0.80;
+  sprite(2, Math.round(hx + hst / 2), Math.round(hy + hst / 2), Math.round(hst), 1, new Uint32Array(Math.round(hst)).fill(0xff000000));
+  const ss = 126, sw = measure('starbite', ss, 200), sst = ss * 0.33;
+  const sx = 180 + 255 - 6 + sw + ss * 0.06, sy = 1144 + 1690 - ss * 0.80;
+  sprite(3, Math.round(sx + sst / 2), Math.round(sy + sst / 2), Math.round(sst), 1, new Uint32Array(Math.round(sst)).fill(0xff000000));
+}
+
 // OS rows.
 const SID = (item, state) => 16 + 8 * item + state;
 ITEMS.forEach((it, i) => {
