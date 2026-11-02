@@ -97,7 +97,7 @@ image)
 	send "$SRC" "$DEST"
 	if [ "$GROW" != no ]; then
 		bytes=$(grow_size_bytes "$GROW")
-		cur=$(ash "wc -c < \'$DEST\'")
+		cur=$(ash "wc -c < '$DEST'")
 		if [ "$bytes" -gt "$cur" ]; then
 			free=$(phone_free_mb)
 			[ $(( (bytes - cur) / 1048576 + 256 )) -lt "$free" ] || die "growing to $GROW needs $(( (bytes - cur) / 1048576 )) MiB: $free MiB free"
@@ -106,7 +106,7 @@ image)
 				die "resize2fs failed: the image is still the shipped size and usable; grow it from linux-shell"
 		fi
 	fi
-	manifest "$NAME" "$(( $(ash "wc -c < \'$DEST\'") / 1048576 ))M" "vm:$SRC" "sha:$SENT_SHA" "$(date -I)" "$KREL"
+	manifest "$NAME" "$(( $(ash "wc -c < '$DEST'") / 1048576 ))M" "vm:$SRC" "sha:$SENT_SHA" "$(date -I)" "$KREL"
 	echo "done: $DEST. Un-hide its catalog entry (tools/store/catalog.toml) if it is hidden."
 	;;
 modules)
