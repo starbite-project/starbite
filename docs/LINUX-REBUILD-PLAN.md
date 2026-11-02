@@ -242,7 +242,7 @@ Check first that `sbstore2.py build` gives a `linux.initrd` name the ST_INITRD t
   | `sb.init=` | Override the init path |
   | `sb.rw=0` | Mount the root read-only |
   | `sb.shell=1` | Same as holding Vol down |
-  | `sb.wdt=<s>` | Watchdog timeout, default 180 s, 0 = off |
+  | `sb.wdt=<s>` | Watchdog timeout (at least 30 s), default 0 = off until 4.3 step 4 is verified. The only switch: the distro arms nothing itself |
 
 ### 3.2 The generic `/init` (replaces the hard-coded `ROOTIMG=starbite-linux.img` at tools/linux/init:106)
 
@@ -251,8 +251,8 @@ Check first that `sbstore2.py build` gives a `linux.initrd` name the ST_INITRD t
 3. If Vol down is held (GPA0 DAT 0x14050024 bit 4), or `sb.shell=1`, or `sb.root=none`, start the shell (step 8).
 4. If the exFAT dirty flag is set, run `fsck.exfat -p /dev/mmcblk0p1`. Then mount it with `uid=10000,gid=10000,noatime` on /sd.
 5. Check that `/sd$SB_ROOT` exists, then `e2fsck -p` it. Exit code 4 or higher drops to the selector. Then `losetup --direct-io=on -f --show` and mount it as ext4 rw,noatime on /newroot.
-6. Loop-mount `/sd/distros/_kernel/modules-$(uname -r).img` read-only and bind it on `/newroot/lib/modules/$(uname -r)` (using `/newroot/usr/lib/modules` when `/lib` is a symlink). Move /sd to `/newroot/media/starbite-sd`.
-7. Pick the init: `sb.init`, then `/sbin/init`, `/usr/lib/systemd/systemd`, `/lib/systemd/systemd`. Arm `/dev/watchdog` with `sb.wdt` through the watchdog ioctl helper (do not close the device, or it stops). Run `exec switch_root /newroot $init`.
+6. Loop-mount `/sd/distros/_kernel/modules-$(uname -r).img` read-only and bind it on `/newroot/lib/modules/$(uname -r)` (using `/newroot/usr/lib/modules` when `/lib` is a symlink). Move /sd to `/newroot/var/lib/starbite/card` under a root-owned 0700 `/var/lib/starbite`, and bind only its `shared/` on `/newroot/media/starbite-sd/shared`: the desktop user (uid 10000, the exFAT's owner) must not reach `backup/`, `windows/`, the iOS image or the running root image.
+7. Pick the init: `sb.init`, then `/sbin/init`, `/usr/lib/systemd/systemd`, `/lib/systemd/systemd`. Arm `/dev/watchdog` with `sb.wdt` through the watchdog ioctl helper (do not close the device, or it stops), and only then write the systemd drop-in that makes systemd feed it (removed again when `sb.wdt=0`). Run `exec switch_root /newroot $init`.
 8. **Selector and shell** (also the landing spot after any failure):
    - Show the list of `/distros/*.img` on tty0, chosen with Vol up/down (`/dev/input/event*` from gpio-keys).
    - Read the FIFO `/run/sb-boot`. Writing a name to it does the switch_root with no reboot.
@@ -340,7 +340,9 @@ It generalises pmos-setup.sh.
 
 **Phone-specific services:**
 - reboot-to (4.1).
-- Watchdog: systemd `RuntimeWatchdogSec=30`, or OpenRC busybox `watchdog -t 10 -T 60 /dev/watchdog`.
+- Watchdog: off by default (systemd `RuntimeWatchdogSec=off`). With `sb.wdt=N` the initrd writes `60-starbite-watchdog-on.conf` (`RuntimeWatchdogSec=N`); OpenRC starts busybox `watchdog -t 10 -T N` only when `/proc/cmdline` has `sb.wdt=N`, N > 0.
+- No fstrim (`fstrim.timer` masked): with no fstab entries it would trim the card's exFAT too.
+- reboot-to under systemd: the key goes to `/run/starbite/next`, and a `system-shutdown` hook writes the mailbox just before the reboot (it is the last 32 bytes of the ramoops console ring).
 - Disable hwclock and RTC services, bluetooth, fwupd, ModemManager and systemd-firstboot. Seed machine-id and locale.
 - The port's charger 500 mA rule (s9p-touch-power) and M3 floor 1066 MHz.
 - Integer scale 3.
@@ -433,7 +435,7 @@ chroot /r sh -c 'apt-get update && apt-get install -y --no-install-recommends ph
   libgl1-mesa-dri network-manager openssh-server sudo systemd-resolved && \
   apt-mark hold linux-image-arm64 flash-kernel 2>/dev/null; true'
 cp /sd/distros/sb-integrate.sh /r/tmp/ && chroot /r sh /tmp/sb-integrate.sh debian-phosh systemd
-# systemd specifics inside: phosh.service drop-in User=user; 10-usb0.network; RuntimeWatchdogSec=30;
+# systemd specifics inside: phosh.service drop-in User=user; 10-usb0.network; watchdog off unless sb.wdt;
 # mask ModemManager bluetooth fwupd systemd-timesyncd? (keep: time is set by the initrd, NTP fine later)
 rm /r/etc/apt/apt.conf.d/90sb-proxy   # re-added by sb-proxy-on when needed
 umount -R /r && e2fsck -fp debian-phosh.img

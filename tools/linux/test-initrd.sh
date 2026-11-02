@@ -23,7 +23,7 @@ fail=0
 chk() { if chroot "$W/r" /bin/sh -c "$2" >/dev/null 2>&1; then echo "ok   $1"; else echo "FAIL $1"; fail=1; fi; }
 chk "/init is the repo's"          "cmp /init /tmp/init"
 chk "/dev/console node"            "[ -c /dev/console ]"
-for a in sh devmem udhcpd telnetd watchdog switch_root hexdump setsid mkfifo blockdev ifconfig killall od cmp; do
+for a in sh devmem udhcpd telnetd watchdog switch_root hexdump setsid mkfifo blockdev ifconfig killall od cmp readlink stat id chown; do
 	chk "applet $a" "command -v $a"
 done
 chk "e2fsck runs"                  "e2fsck -V"

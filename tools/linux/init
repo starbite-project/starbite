@@ -11,12 +11,17 @@
 #   sb.init=PATH             init in the new root (default /sbin/init, then systemd)
 #   sb.rw=0                  mount the root read-only
 #   sb.shell=1               same as holding Vol down while the kernel starts
-#   sb.wdt=SEC               arm the hardware watchdog for SEC s before switch_root (0 = off, the
-#                            default until a watchdog reset is seen to reach the menu, plan 4.3)
+#   sb.wdt=SEC               arm the hardware watchdog for SEC s (at least 30) before switch_root
+#                            and have the distro feed it (0 = off, the default until a watchdog
+#                            reset is seen to reach the menu, plan 4.3). This is the ONLY switch:
+#                            the distro arms nothing on its own (sb-integrate.sh)
 #
 # Always, for every distro: every UFS block device read-only (USERDATA holds the iOS root,
 # WINDOWS/WINESP Windows, EFS the IMEI); the USB gadget (CDC-ECM 172.16.42.1 serving one DHCP
 # lease 172.16.42.2 to the Mac, telnet, plus an ACM serial shell); /bin/reboot-to KEY.
+# In a distro the card's exFAT is root-only (/var/lib/starbite/card, 0700): backup/, windows/,
+# the iOS image and the running root image are out of the desktop user's reach. Only its shared/
+# is bound to /media/starbite-sd/shared for the user (plan 5.6).
 #
 # The selector (also where every failure lands): the report and the list of /distros/*.img on
 # tty0. Vol up / Vol down move, Power starts the highlighted line. The Mac can do the same by
@@ -30,6 +35,7 @@ export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 SDDEV=/dev/mmcblk0p1
 SB_UID=10000                                       # the desktop user in every distro (plan 3.4)
 FIFO=/run/sb-boot
+SB_TMP=/tmp                                        # (set here: kernel cmdline words reach init's env)
 GPA0_DAT=0x14050024                                # bit 3 Vol up, bit 4 Vol down (active low)
 GPA2_DAT=0x14050064                                # bit 4 Power (active low)
 
@@ -165,8 +171,32 @@ EOF
 	touch /run/udhcpd.leases
 	udhcpd /run/udhcpd.conf
 	telnetd -l /bin/sh -p 23
-	( while :; do [ -c /dev/ttyGS0 ] && setsid sh -c 'exec sh -l </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done ) &
+	# the shell records its pid: killing this loop does not kill it (shells_stop)
+	( while :; do [ -c /dev/ttyGS0 ] && setsid sh -c 'echo $$ > /run/acm.pid; exec sh -l </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done ) &
 	ACM_PID=$!
+	return 0
+}
+
+# tty_holders [PROC]: pids, other than this shell, with /dev/ttyGS0 or a /dev/pts/N open (the ACM
+# shell, telnet sessions). busybox has no fuser.
+tty_holders() {
+	for d in "${1:-/proc}"/[0-9]*; do
+		p=${d##*/}
+		[ "$p" = "$$" ] && continue
+		for f in "$d"/fd/*; do
+			case $(readlink "$f" 2>/dev/null) in /dev/ttyGS0|/dev/pts/[0-9]*) echo "$p"; break ;; esac
+		done
+	done
+	return 0
+}
+
+# Before switch_root: no root shell of the initrd may outlive it (the distro gets ttyGS0 for its
+# own getty, and an OpenRC getty does no vhangup). Run while /run (acm.pid) is still mounted.
+shells_stop() {
+	[ -n "$ACM_PID" ] && kill $ACM_PID 2>/dev/null   # the respawn loop first
+	killall telnetd 2>/dev/null
+	[ -s /run/acm.pid ] && kill -9 "$(cat /run/acm.pid)" 2>/dev/null
+	for p in $(tty_holders); do kill -9 "$p" 2>/dev/null; done
 	return 0
 }
 
@@ -194,7 +224,8 @@ card_return() {
 	card_up
 }
 
-# ---- the card's exFAT on /sd (uid/gid 10000: the desktop user owns it in every distro) --------
+# ---- the card's exFAT on /sd (uid/gid 10000, so the desktop user can write shared/; the rest is
+# kept from the user by the 0700 directory it is moved under in a distro, card_into_root) -------
 card_up() {
 	grep -q ' /sd ' /proc/mounts && return 0
 	[ "$CARD_LENT" = 1 ] && return 22
@@ -213,16 +244,47 @@ card_up() {
 }
 
 # ---- watchdog -------------------------------------------------------------------------------
-# Armed and left running with nobody feeding it: busybox watchdog sets the timeout, then is
-# killed with SIGKILL, so the device closes without the magic 'V' and keeps counting. The
-# distro's own feeder (systemd RuntimeWatchdogSec, OpenRC's busybox watchdog) takes it over.
+# sb.wdt is the only switch. The distro arms nothing itself: sb-integrate.sh sets systemd's
+# watchdog off, and only the drop-in written here (WDT_CONF, while sb.wdt > 0) turns it on;
+# OpenRC's local.d starts busybox watchdog only when /proc/cmdline has sb.wdt=N > 0.
+WDT_CONF=/etc/systemd/system.conf.d/60-starbite-watchdog-on.conf
+
+# wdt_conf NEWROOT SEC: the systemd drop-in for SEC > 0, none for 0 (a stale one is removed, or on
+# a read-only root hidden under /dev/null). Fails when systemd would not be told to feed it.
+wdt_conf() {
+	f=$1$WDT_CONF
+	if [ "$2" -gt 0 ]; then
+		[ -d "$1/etc/systemd/system" ] || return 0     # not systemd: OpenRC reads sb.wdt itself
+		mkdir -p "${f%/*}" 2>/dev/null
+		printf '[Manager]\n# Starbite initrd (tools/linux/init): sb.wdt armed the watchdog; systemd feeds it.\nRuntimeWatchdogSec=%ss\nRebootWatchdogSec=2min\n' "$2" > "$SB_TMP/wdt.conf"
+		put_file "$SB_TMP/wdt.conf" "$f" 644
+		return $?
+	fi
+	[ -e "$f" ] || [ -L "$f" ] || return 0
+	rm -f "$f" 2>/dev/null || mount --bind /dev/null "$f"
+}
+
+# wdt_arm NEWROOT: armed and left running with nobody feeding it: busybox watchdog sets the
+# timeout, then is killed with SIGKILL, so the device closes without the magic 'V' and keeps
+# counting until the distro's feeder takes it over. Not armed when the distro cannot be told.
 wdt_arm() {
-	[ "$SB_WDT" -gt 0 ] 2>/dev/null || return 0
-	[ -c /dev/watchdog ] || { echo "  no /dev/watchdog: not armed"; return 0; }
-	t=$SB_WDT
-	m=$(cat /sys/class/watchdog/watchdog0/max_timeout 2>/dev/null)
-	[ "$t" -lt 30 ] && t=30                         # the distro needs time to take it over
-	[ -n "$m" ] && [ "$m" -gt 0 ] && [ "$t" -gt "$m" ] && t=$m
+	t=0
+	if [ "$SB_WDT" -gt 0 ] 2>/dev/null; then
+		if [ -c /dev/watchdog ]; then
+			t=$SB_WDT
+			m=$(cat /sys/class/watchdog/watchdog0/max_timeout 2>/dev/null)
+			[ "$t" -lt 30 ] && t=30                 # the distro needs time to take it over
+			[ -n "$m" ] && [ "$m" -gt 0 ] && [ "$t" -gt "$m" ] && t=$m
+		else
+			echo "  no /dev/watchdog: not armed"
+		fi
+	fi
+	if ! wdt_conf "$1" "$t"; then
+		echo "  watchdog not armed: could not write $WDT_CONF"
+		t=0
+		wdt_conf "$1" 0
+	fi
+	[ "$t" -gt 0 ] || return 0
 	watchdog -T "$t" -t 1 -F /dev/watchdog &
 	p=$!
 	sleep 1
@@ -261,6 +323,32 @@ root_extras() {
 	[ -e "$NR/usr/local/sbin/reboot-linux" ] || ln -s reboot-to "$NR/usr/local/sbin/reboot-linux"
 }
 
+# card_into_root NEWROOT: the whole exFAT moves to CARD_IN, under a root-owned 0700 directory, so
+# the desktop user (whom the uid=10000 mount would otherwise give all of it) cannot reach backup/,
+# windows/, the iOS image or the running root image. Only shared/ is bound for the user at
+# SHARE_IN (path permissions are checked on the path used). 1: not moved in (no safe directory,
+# e.g. a read-only root without it; the card then stays hidden at the old /sd), 2: the move failed.
+CARD_IN=/var/lib/starbite/card
+SHARE_IN=/media/starbite-sd/shared
+CARD_OWNER=0                                       # tools/linux/test-init.sh runs it as a user
+card_into_root() {
+	v=$1${CARD_IN%/*}
+	[ -L "$v" ] && return 1
+	[ -d "$v" ] || mkdir -p -m 700 "$v" 2>/dev/null
+	chown "$CARD_OWNER:$CARD_OWNER" "$v" 2>/dev/null; chmod 700 "$v" 2>/dev/null
+	[ "$(stat -c %a:%u "$v" 2>/dev/null)" = "700:$CARD_OWNER" ] || return 1
+	[ -L "$1$CARD_IN" ] && return 1
+	[ -d "$1$CARD_IN" ] || mkdir "$1$CARD_IN" 2>/dev/null
+	[ -d "$1$CARD_IN" ] || return 1
+	mount --move /sd "$1$CARD_IN" || return 2
+	[ -d "$1$CARD_IN/shared" ] || mkdir "$1$CARD_IN/shared" 2>/dev/null
+	[ -L "$1$SHARE_IN" ] || [ -d "$1$SHARE_IN" ] || mkdir -p "$1$SHARE_IN" 2>/dev/null
+	if [ -d "$1$CARD_IN/shared" ] && [ ! -L "$1$SHARE_IN" ] && [ -d "$1$SHARE_IN" ]; then
+		mount --bind "$1$CARD_IN/shared" "$1$SHARE_IN"
+	fi
+	return 0
+}
+
 # boot_root PATH: 20-29 on failure, with everything undone except the card on /sd.
 NR=/newroot
 boot_root() {
@@ -290,19 +378,16 @@ boot_root() {
 		fi
 	fi
 	[ "$SB_RW" != 0 ] && root_extras
-	[ -d $NR/media/starbite-sd ] || mkdir -p $NR/media/starbite-sd 2>/dev/null
-	if [ -d $NR/media/starbite-sd ]; then
-		mount --move /sd $NR/media/starbite-sd || { root_undo; return 28; }
-	fi
+	card_into_root $NR
+	[ $? -eq 2 ] && { root_undo; return 28; }
 	clear_screen
 	echo "  PROJECT STARBITE"
 	echo "  starting ${img##*/} ($init) ..."
-	wdt_arm
+	wdt_arm $NR
 	# Nothing of the initrd's that gives a root shell outlives it. Its udhcpd keeps serving the
 	# Mac unless the distro serves usb0 itself (sb-integrate.sh leaves this marker).
 	[ -n "$KEYS_PID" ] && kill $KEYS_PID 2>/dev/null
-	[ -n "$ACM_PID" ] && kill $ACM_PID 2>/dev/null
-	killall telnetd 2>/dev/null
+	shells_stop
 	[ -e $NR/etc/starbite/usb0-server ] && killall udhcpd 2>/dev/null
 	exec 4<&-                                       # the /run/sb-boot FIFO, so /run can go
 	umount -l /tmp 2>/dev/null

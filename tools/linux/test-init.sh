@@ -93,6 +93,53 @@ ok "label shell" "$(label @shell | cut -c1-14)" "Starbite shell"
 act 'x;y'; ok "bad FIFO name" "$STATUS" "'x;y' is not a distro name"
 ok "why 23" "$(why 23 /distros/x.img)" "/distros/x.img is not on the card"
 
+# ---- card_into_root: the exFAT root-only, only shared/ for the user (mount is stubbed) ---------
+SB_TMP=$T
+CARD_OWNER=$(id -u)
+mount() { echo "mount $*" >> "$T/mnt.log"; [ "${MOUNT_FAIL:-}" != "$1" ]; }
+cr() {                                              # cr ROOT: return code | mount calls
+	: > "$T/mnt.log"
+	card_into_root "$1"; r=$?
+	echo "$r|$(sed "s|$1||g" "$T/mnt.log" | tr '\n' ';')"
+}
+NR1=$T/nr1; mkdir -p "$NR1/var/lib" "$NR1/media"
+ok "card: moved root-only, share bound" "$(cr "$NR1")" \
+	"0|mount --move /sd /var/lib/starbite/card;mount --bind /var/lib/starbite/card/shared /media/starbite-sd/shared;"
+ok "card: /var/lib/starbite 0700" "$(stat -c %a "$NR1/var/lib/starbite")" 700
+NR2=$T/nr2; mkdir -p "$NR2/var/lib/starbite/card"; chmod 755 "$NR2/var/lib/starbite"
+cr "$NR2" >/dev/null
+ok "card: a 0755 dir is made 0700" "$(stat -c %a "$NR2/var/lib/starbite")" 700
+NR3=$T/nr3; mkdir -p "$NR3/var/lib" "$NR3/elsewhere"; ln -s ../../elsewhere "$NR3/var/lib/starbite"
+ok "card: symlinked dir refused" "$(cr "$NR3")" "1|"
+NR4=$T/nr4; mkdir -p "$NR4/var/lib"
+ok "card: failed move -> 2" "$(MOUNT_FAIL=--move cr "$NR4")" "2|mount --move /sd /var/lib/starbite/card;"
+NR5=$T/nr5; mkdir -p "$NR5/var/lib" "$NR5/media/starbite-sd"; ln -s / "$NR5/media/starbite-sd/shared"
+ok "card: symlinked share not bound" "$(cr "$NR5")" "0|mount --move /sd /var/lib/starbite/card;"
+if [ "$(id -u)" != 0 ]; then                        # read-only stand-in (root ignores modes)
+	NR6=$T/nr6; mkdir -p "$NR6/var/lib"; chmod 555 "$NR6/var/lib"
+	ok "card: no dir, no write -> stays hidden" "$(cr "$NR6")" "1|"
+	chmod 755 "$NR6/var/lib"
+fi
+unset -f mount
+
+# ---- tty_holders: the shells shells_stop kills (fake /proc) ------------------------------------
+P=$T/proc
+for x in 123:/dev/ttyGS0 124:/dev/pts/3 125:/dev/null 126:/dev/tty0 $$:/dev/pts/0; do
+	mkdir -p "$P/${x%%:*}/fd"; ln -s "${x#*:}" "$P/${x%%:*}/fd/0"
+done
+ln -s /dev/pts/1 "$P/125/fd/7"
+ok "tty_holders" "$(tty_holders "$P" | sort -n | tr '\n' ' ')" "123 124 125 "
+
+# ---- wdt_conf: sb.wdt is the only switch -------------------------------------------------------
+WR=$T/wr; mkdir -p "$WR/etc/systemd/system"
+wdt_conf "$WR" 45
+ok "wdt on: drop-in" "$(grep '^RuntimeWatchdogSec' "$WR$WDT_CONF")" "RuntimeWatchdogSec=45s"
+wdt_conf "$WR" 0
+ok "wdt off: drop-in removed" "$([ -e "$WR$WDT_CONF" ] && echo left || echo gone)" gone
+ok "wdt off: no drop-in is fine" "$(wdt_conf "$WR" 0; echo $?)" 0
+OR=$T/openrc; mkdir -p "$OR/etc"
+ok "wdt on, not systemd: nothing" "$(wdt_conf "$OR" 45; echo $?; ls "$OR/etc")" 0
+
 # ---- reboot-to: the SBNEXT2! mailbox (shim/starlte/menu.c boot_next) ----------------------
 RT=$D/reboot-to
 ok "reboot-to linux-ubuntu" "$(sh "$RT" -n linux-ubuntu | tr '\n' ';')" \
@@ -102,6 +149,13 @@ ok "reboot-to 23 chars" "$(sh "$RT" -n abcdefghijklmnopqrstuvw | sed -n 6p)" "de
 ok "reboot-to 24 chars" "$(sh "$RT" -n abcdefghijklmnopqrstuvwx 2>/dev/null; echo $?)" 2
 ok "reboot-to bad key" "$(sh "$RT" -n 'a b' 2>/dev/null; echo $?)" 2
 ok "reboot-to no key" "$(sh "$RT" -n 2>/dev/null; echo $?)" 2
+ok "reboot-to: 9 writes" "$(sh "$RT" -n linux | wc -l | tr -d ' ')" 9
+if [ "$(id -u)" != 0 ]; then                        # never run for real as root: it would reboot
+	ok "reboot-to as a user refuses" "$(sh "$RT" linux-ubuntu 2>&1; echo $?)" \
+		"reboot-to: needs root for /dev/mem (sudo reboot-to linux-ubuntu)
+1"
+	ok "reboot-to -w as a user refuses" "$(sh "$RT" -w linux 2>/dev/null; echo $?)" 1
+fi
 ln -s "$RT" "$T/reboot-linux"
 ok "reboot-linux = linux" "$(sh "$T/reboot-linux" -n | sed -n 1p)" "devmem 0xFED17FE8 32 0x756e696c"
 

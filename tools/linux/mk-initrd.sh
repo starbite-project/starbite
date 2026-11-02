@@ -5,8 +5,9 @@
 #   Ubuntu's static busybox (devmem udhcpd telnetd watchdog switch_root ...) as /bin/busybox and
 #     /bin/busybox.static (copied into every distro for reboot-to)
 #   tools/linux/init as /init, tools/linux/reboot-to, tools/linux/initrd/* (sb-tools)
-#   the BCM4361 Wi-Fi firmware: brcmfmac is built in (=y) and asks for it before any root is
-#     mounted, so it has to be in the initrd
+#   the BCM4361 Wi-Fi firmware: only a fallback. brcmfmac is built in (=y) and the kernel carries
+#     the firmware itself (CONFIG_EXTRA_FIRMWARE); this copy (~1 MiB) serves a kernel built
+#     without it, since a built-in driver asks before any root is mounted
 # Packed as newc cpio | zstd -19 (the kernel has RD_ZSTD; COMP=gzip for RD_GZIP). Budget 20 MiB,
 # hard limit 80 MiB (xnu_boot.c: OS_RD 0xA8000000 .. EDIT_FDT 0xAD000000).
 #

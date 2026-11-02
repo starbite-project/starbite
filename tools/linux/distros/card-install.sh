@@ -5,8 +5,8 @@
 #
 #   card-install.sh image NAME [GROW]   VM ~/distros/NAME.img -> /distros/NAME.img, grown to GROW
 #                                       (default 8G; "no" keeps the shipped size)
-#   card-install.sh modules [FILE]      VM /mnt/build/out/modules-7.1.0-starbite.img (default)
-#                                       -> /distros/_kernel/
+#   card-install.sh modules [FILE]      VM ~/distros/_kernel/modules-7.1.0-starbite.img (default,
+#                                       from build-kernel.sh) -> /distros/_kernel/
 #   card-install.sh kit                 sb-integrate.sh + payload (ubuntu login excluded) ->
 #                                       /distros/sb-integrate/ for roots built on the phone
 #   card-install.sh status              what is on the card, and free space
@@ -102,7 +102,7 @@ image)
 	echo "done: $DEST. Un-hide its catalog entry (tools/store/catalog.toml) if it is hidden."
 	;;
 modules)
-	SRC=${2:-/mnt/build/out/modules-$KREL.img}
+	SRC=${2:-$VMHOME/distros/_kernel/modules-$KREL.img}
 	phone_ready
 	send "$SRC" "$SD/distros/_kernel/modules-$KREL.img"
 	manifest "_kernel" "$(( $(vm stat -c %s "$SRC") / 1048576 ))M" "vm:$SRC" "sha:$SENT_SHA" "$(date -I)" "$KREL"

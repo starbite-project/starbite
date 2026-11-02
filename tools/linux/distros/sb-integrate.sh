@@ -12,12 +12,15 @@
 #   login.txt             optional: "pin NNNNNN" (build/linux/<name>-login.txt, git-ignored)
 #
 # What it does (each block says why):
-#   user "user" uid/gid 10000 (the initrd mounts the card exFAT uid=10000) in video input render
+#   user "user" uid/gid 10000 (the initrd mounts the card exFAT uid=10000, but root-only under
+#   /var/lib/starbite; the user gets only its shared/ on /media/starbite-sd/shared) in video input render
 #   audio netdev plugdev wheel (+sudo); root locked; sudo/doas for wheel; SSH key; sshd
 #   usb0 172.16.42.1/24 served by the distro (systemd-networkd DHCPServer, or busybox udhcpd on
 #   OpenRC), never touched by NetworkManager or ModemManager, and nothing resets the gadget
 #   GPU devfreq floor 455 MHz, PAN_MAX_AFBC_PACKING_RATIO=0, integer scale 3, no UDisks for the UFS
-#   watchdog feeder, no suspend, power key does not shut down, charger 500 mA, M3 floor 1066 MHz
+#   no watchdog unless the entry says sb.wdt=N (the initrd then turns systemd's feeder on), no
+#   fstrim (it would reach the card's exFAT), reboot-to's mailbox written by a systemd-shutdown hook,
+#   no suspend, power key does not shut down, charger 500 mA, M3 floor 1066 MHz
 #   never a distro kernel, bootloader or initramfs generator
 set -eu
 NAME=${1:?usage: sb-integrate.sh NAME systemd|openrc [PAYLOAD]}
@@ -95,18 +98,37 @@ install -d /usr/local/sbin /usr/local/lib/starbite
 install -m755 "$PL/busybox" /usr/local/lib/starbite/busybox
 install -m755 "$PL/reboot-to" /usr/local/sbin/reboot-to
 ln -sf reboot-to /usr/local/sbin/reboot-linux
+# systemd: reboot-to leaves the key in /run/starbite/next and this hook writes the mailbox right
+# before the kernel reboots. The mailbox (0xFED17FE0) is the last 32 bytes of the ramoops console
+# ring, so kernel output during a long shutdown could overwrite it if it were written earlier.
+if [ "$INITSYS" = systemd ]; then
+	install -d "$LIBDIR/systemd/system-shutdown"
+	cat > "$LIBDIR/systemd/system-shutdown/starbite-next" <<'EOF'
+#!/bin/sh
+# Starbite (sb-integrate.sh): run by systemd-shutdown right before reboot(2) ($1 = reboot).
+[ "$1" = reboot ] || exit 0
+[ -s /run/starbite/next ] || exit 0
+exec /usr/local/sbin/reboot-to -w "$(cat /run/starbite/next)"
+EOF
+	chmod 755 "$LIBDIR/systemd/system-shutdown/starbite-next"
+fi
 
-# ---- firmware (brcmfmac is built in and loads it from the initrd at boot; this copy serves a
-# driver rebind after switch_root, and Bluetooth) -------------------------------------------------
+# ---- firmware (brcmfmac is built in, and so is its Wi-Fi firmware: CONFIG_EXTRA_FIRMWARE; this
+# copy serves a kernel built without it, and Bluetooth) ------------------------------------------
 if [ -d "$PL/firmware/brcm" ]; then
 	install -d "$LIBDIR/firmware/brcm"
 	cp "$PL"/firmware/brcm/* "$LIBDIR/firmware/brcm/"
 fi
 
-# ---- filesystems: the initrd mounts / and the card (/media/starbite-sd) -------------------------
-printf '# / and /media/starbite-sd are mounted by the Starbite initrd (tools/linux/init)\n' > /etc/fstab
-mkdir -p /media/starbite-sd /lib/modules 2>/dev/null || true
-if [ ! -e "$H/Card" ]; then ln -s /media/starbite-sd/shared "$H/Card"; chown -h "$SB_ID:$SB_ID" "$H/Card"; fi
+# ---- filesystems: the initrd mounts /, the card and its share (tools/linux/init card_into_root) --
+# The whole exFAT (backup/, windows/, the iOS image, this root's own image) sits root-only under
+# /var/lib/starbite (0700); the desktop user sees only shared/, bound on /media/starbite-sd/shared
+# and linked as ~/Card. Made here too so a read-only boot (sb.rw=0) finds them.
+printf '# /, /var/lib/starbite/card (the card, root only) and /media/starbite-sd/shared (its shared/)\n# are mounted by the Starbite initrd (tools/linux/init card_into_root)\n' > /etc/fstab
+install -d -m700 -o 0 -g 0 /var/lib/starbite
+install -d -m755 /var/lib/starbite/card /media/starbite-sd/shared
+mkdir -p /lib/modules 2>/dev/null || true
+if [ -L "$H/Card" ] || [ ! -e "$H/Card" ]; then ln -sfn /media/starbite-sd/shared "$H/Card"; chown -h "$SB_ID:$SB_ID" "$H/Card"; fi
 
 # ---- environment + udev -----------------------------------------------------------------------
 touch /etc/environment
@@ -114,8 +136,10 @@ sed -i '/^PAN_MAX_AFBC_PACKING_RATIO=/d;/^PAN_MESA_DEBUG=/d' /etc/environment
 echo PAN_MAX_AFBC_PACKING_RATIO=0 >> /etc/environment
 mkdir -p /etc/udev/rules.d
 cat > /etc/udev/rules.d/90-starbite.rules <<'EOF'
-# Starbite (sb-integrate.sh). The internal UFS (Android, iOS, Windows) never shows up in Files.
+# Starbite (sb-integrate.sh). The internal UFS (Android, iOS, Windows) never shows up in Files,
+# nor does the card itself (its exFAT is root-only; the user's part is /media/starbite-sd/shared).
 SUBSYSTEM=="block", KERNEL=="sd*", ENV{UDISKS_IGNORE}="1"
+SUBSYSTEM=="block", KERNEL=="mmcblk0*", ENV{UDISKS_IGNORE}="1"
 # GPU clock floor 455 MHz (docs/LINUX-REBUILD-PLAN.md 1.3): no 260 MHz step under load.
 ACTION=="add", SUBSYSTEM=="devfreq", KERNEL=="17500000.gpu", ATTR{min_freq}="455000000"
 # Touchscreen and keys are plain evdev: readable by the seat.
@@ -216,12 +240,18 @@ EmitRouter=no
 EmitNTP=no
 EOF
 	echo "systemd-networkd 10-usb0.network" > /etc/starbite/usb0-server
+	# Watchdog off. sb.wdt=N in the catalog entry is the one switch: the initrd then arms the S3C2410
+	# and writes 60-starbite-watchdog-on.conf (RuntimeWatchdogSec=N), removed again when sb.wdt=0.
+	# The watchdog reset path is not verified yet (plan 4.3: it may land in upload mode).
 	cat > /etc/systemd/system.conf.d/50-starbite-watchdog.conf <<'EOF'
 [Manager]
-# Starbite: the S3C2410 watchdog resets the phone (back to the menu) if the kernel or systemd hangs.
-RuntimeWatchdogSec=30s
-RebootWatchdogSec=2min
+# Starbite (sb-integrate.sh): no hardware watchdog unless the catalog entry passes sb.wdt=N; the
+# initrd then writes 60-starbite-watchdog-on.conf (tools/linux/init wdt_conf).
+RuntimeWatchdogSec=off
+RebootWatchdogSec=off
+KExecWatchdogSec=off
 EOF
+	rm -f /etc/systemd/system.conf.d/60-starbite-watchdog-on.conf
 	cat > /etc/systemd/logind.conf.d/50-starbite.conf <<'EOF'
 [Login]
 # Starbite: the power key wakes the panel; it must not shut down. No lid, no suspend.
@@ -264,9 +294,11 @@ EOF
 		systemd-firstboot.service usb-gadget.service usbgadget.service android-tools-adbd.service \
 		systemd-networkd-wait-online.service NetworkManager-wait-online.service \
 		hwclock.service systemd-hwclock.service apt-daily-upgrade.timer unattended-upgrades.service \
-		snapd.service snapd.socket snapd.seeded.service; do
+		snapd.service snapd.socket snapd.seeded.service fstrim.timer fstrim.service; do
 		sc mask "$s"
 	done
+	# (fstrim: with no fstab entries it trims everything in mountinfo, the card's exFAT too; after a
+	# hard reset a damaged exFAT bitmap could then discard live data of backup/, windows/ or iOS)
 	# the old phosh.service (User=1000) and getty on tty1 under the session are not used
 	sc disable phosh.service
 else
@@ -279,8 +311,17 @@ else
 # usb0 keeps the initrd's address; serve the Mac's lease unless something already does
 ifconfig usb0 172.16.42.1 netmask 255.255.255.0 up 2>/dev/null
 pidof udhcpd unudhcpd >/dev/null || /usr/local/lib/starbite/busybox udhcpd /etc/starbite/udhcpd.conf
-# watchdog (the initrd may have armed it): fed every 10 s, reset after 60 s without
-[ -c /dev/watchdog ] && ! pidof watchdog >/dev/null && /usr/local/lib/starbite/busybox watchdog -t 10 -T 60 /dev/watchdog
+# watchdog only when the entry passed sb.wdt=N, N > 0 (the last value wins; the initrd armed it
+# with the same N, at least 30 s): fed every 10 s. sb.wdt=0 or none: never touched.
+w=0
+for a in $(cat /proc/cmdline); do case $a in sb.wdt=*) w=${a#sb.wdt=} ;; esac; done
+case $w in ""|*[!0-9]*|?????*) w=0 ;; esac
+if [ "$w" -gt 0 ] && [ -c /dev/watchdog ] && ! pidof watchdog >/dev/null; then
+	[ "$w" -lt 30 ] && w=30
+	m=$(cat /sys/class/watchdog/watchdog0/max_timeout 2>/dev/null)
+	[ -n "$m" ] && [ "$m" -gt 0 ] && [ "$w" -gt "$m" ] && w=$m
+	/usr/local/lib/starbite/busybox watchdog -t 10 -T "$w" /dev/watchdog
+fi
 exit 0
 EOF
 	chmod 755 /etc/local.d/50-starbite.start
@@ -290,6 +331,8 @@ EOF
 	for s in usb-signaller modemmanager bluetooth hwclock swclock; do
 		have rc-update && { rc-update del "$s" default >/dev/null 2>&1 || true; rc-update del "$s" boot >/dev/null 2>&1 || true; }
 	done
+	# no fstrim (see the systemd block): drop a periodic one if the distro ships it
+	rm -f /etc/periodic/*/fstrim /etc/cron.*/fstrim 2>/dev/null || true
 	have rc-update && { rc-update add sshd default >/dev/null 2>&1 || true; }
 	if [ -f /etc/inittab ] && ! grep -q ttyGS0 /etc/inittab; then
 		echo 'ttyGS0::respawn:/sbin/getty -L 115200 ttyGS0 vt100' >> /etc/inittab
