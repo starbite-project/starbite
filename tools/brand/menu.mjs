@@ -271,10 +271,14 @@ CHIPS.forEach((c, k) => {
   const label = (s, fill) => text(s, { x: sw / 2, y: c.h + 2 * pad + 50, size: 36, weight: 400, fill, anchor: 'middle', spacing: 2 });
   const x = c.x - pad, y = c.y - pad;
   const dimRing = `<rect x="6" y="6" width="${sw - 12}" height="${c.h + 2 * pad - 12}" rx="56" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="5"/>`;
-  sprite(SID(5, 0), x, y, sw, sh, overlayOn(''));
-  sprite(SID(5, 1), x, y, sw, sh, overlayOn(ring + label('PRESS POWER TO START THE LINUX KIOSK', GOLD)));
-  sprite(SID(5, 2), x, y, sw, sh, overlayOn(ring + label('STARTING THE LINUX KIOSK…', CORAL)));
-  sprite(SID(5, 4), x, y, sw, sh, overlayOn(dimRing));
+  // The Starbite card is off the menu for now (2026-11-02): its sprites are plain black, so the
+  // loader (which still draws item 5) leaves the area empty. SHOW_CARD=1 brings it back.
+  const showCard = process.env.SHOW_CARD === '1';
+  const blank = () => new Uint32Array(sw * sh).fill(0xff000000);
+  sprite(SID(5, 0), x, y, sw, sh, showCard ? overlayOn('') : blank());
+  sprite(SID(5, 1), x, y, sw, sh, showCard ? overlayOn(ring + label('PRESS POWER TO START THE LINUX KIOSK', GOLD)) : blank());
+  sprite(SID(5, 2), x, y, sw, sh, showCard ? overlayOn(ring + label('STARTING THE LINUX KIOSK…', CORAL)) : blank());
+  sprite(SID(5, 4), x, y, sw, sh, showCard ? overlayOn(dimRing) : blank());
 
   // Footer over Samsung's "Powered by android": "powered by" + the wordmark.
   const fy = LAYOUT.footerY, fh = ov.h - fy;
