@@ -1965,7 +1965,8 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     starbite"; tools/brand/upparam-pack.py rebuilds the tar (refuses unless an unchanged rebuild is byte-identical:
     GNU format); written to S9 #1 UP_PARAM and read back (sha 556079ef...).
   - Menu: Starbite card sprites blank (SHOW_CARD=1 restores them); marker sprites 2/3 = header / splash star.
-  - Loader (untested on hardware, commit 6958997): mmu.c identity map with caches (DMA and OS areas Normal-NC,
+  - Loader (commit 6958997; **works on hardware**: the intro runs on S9 #1, user: "looks great"; now
+    build/boot-uc3/loader.Image, the old one kept as loader-v5-nommu.Image; out/xnu-boot-ios26-daily.img = anim): mmu.c identity map with caches (DMA and OS areas Normal-NC,
     loader Normal-WB), clean + MMU off before every handoff (x1-x3 zeroed after star_dcache_all); anim.c boot intro
     (splash fade, star flight with sparkle trail, ring burst, header fade, menu cascade) composed in a WB buffer at
     0x84000000 (+ logo copy 0x85200000; DTB reserves nothing there). Test image out/xnu-boot-ios26-anim.img
