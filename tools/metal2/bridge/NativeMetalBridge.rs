@@ -245,6 +245,50 @@ pub fn air_slice(bytes: &[u8]) -> Option<&[u8]> {
     None
 }
 
+/// Bytes of a function constant of MTLDataType `raw` (lanes packed tightly), 0 for a type that is not a scalar or vector.
+fn constant_bytes(raw: u32) -> usize {
+    match raw {
+        5 | 31 | 35 => 12,
+        18 | 39 | 43 => 6,
+        47 | 51 | 55 => 3,
+        83 | 87 => 24,
+        3 | 29 | 33 => 4,
+        4 | 30 | 34 => 8,
+        6 | 32 | 36 => 16,
+        16 | 37 | 41 => 2,
+        17 | 38 | 42 => 4,
+        19 | 40 | 44 => 8,
+        45 | 49 | 53 => 1,
+        46 | 50 | 54 => 2,
+        48 | 52 | 56 => 4,
+        81 | 85 => 8,
+        82 | 86 => 16,
+        84 | 88 => 32,
+        _ => 0,
+    }
+}
+
+/// Zero values for every constant `function` declares (by index, else by name), and the list " [name:type@index ...]".
+fn zero_constants(function: &metal2vulkan_runtime::Function) -> (metal2vulkan::library::FunctionConstantValues, String) {
+    let mut values = metal2vulkan::library::FunctionConstantValues::defaults();
+    let mut listed = String::new();
+    let Ok(declared) = function.function_constants_dictionary() else { return (values, listed) };
+    for (name, c) in &declared {
+        let ty = c.data_type();
+        let size = constant_bytes(ty.as_raw());
+        listed.push_str(&format!(" {name}:{}@{}", ty.as_raw(), c.index()));
+        if size == 0 {
+            continue;
+        }
+        let value = metal2vulkan::library::FunctionConstantValue::new(ty, vec![0u8; size]);
+        values = values.with_index(c.index(), value);
+    }
+    if !listed.is_empty() {
+        listed = format!(" [{} ]", listed);
+    }
+    (values, listed)
+}
+
 /// Translates the target's own QuartzCore library: every kernel into a compute pipeline, and the vertex/fragment pairs named
 /// alike into render pipelines over a BGRA8 attachment. Counts only; refusals (function constants, tile functions) are expected.
 fn quartzcore(run: &mut Run, device: &Device, bytes: &[u8]) -> Result<(), String> {
@@ -256,10 +300,21 @@ fn quartzcore(run: &mut Run, device: &Device, bytes: &[u8]) -> Result<(), String
     let mut vertices = Vec::new();
     let mut fragments = Vec::new();
     for name in &names {
-        let Ok(function) = library.new_function_with_name(name) else { continue };
+        let Ok(plain) = library.new_function_with_name(name) else { continue };
+        // Starbite: CoreAnimation always specializes its functions; zero (false) for each constant
+        // the function declares stands in for its values, so the translation itself is what is tried.
+        let (constants, listed) = zero_constants(&plain);
         if list {
-            eprintln!("fn {name} {:?}", function.function_type());
+            eprintln!("fn {name} {:?}{listed}", plain.function_type());
         }
+        let function = if constants.is_empty() {
+            plain
+        } else {
+            match library.new_function_with_name_constant_values(name, &constants) {
+                Ok(function) => function,
+                Err(_) => plain,
+            }
+        };
         match function.function_type() {
             Ok(metal2vulkan::metal::FunctionType::Kernel) => {
                 match device.new_compute_pipeline_state_with_function(&function, &PipelineOptions::default()) {

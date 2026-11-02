@@ -1,5 +1,5 @@
---- a/meson.build
-+++ b/meson.build
+--- a/meson.build	2026-10-28 17:17:44
++++ b/meson.build	2026-11-01 23:23:31
 @@ -1935,7 +1935,19 @@
    # dependencies (such as vk-runtime) linking to it
    dep_libdrm = null_dep
@@ -21,8 +21,40 @@
    pre_args += '-DHAVE_LIBDRM'
    if with_dri_platform == 'drm' and with_dri
      with_gallium_drisw_kms = true
---- a/src/panfrost/lib/kmod/meson.build
-+++ b/src/panfrost/lib/kmod/meson.build
+--- a/src/gallium/drivers/panfrost/pan_bo.c	2026-10-28 17:17:44
++++ b/src/gallium/drivers/panfrost/pan_bo.c	2026-11-01 23:22:58
+@@ -343,10 +343,13 @@
+    if (!bo->ptr.cpu)
+       return;
+ 
++#ifndef __APPLE__
++   /* (Starbite: the kernel's mapping lives until GEM_CLOSE) */
+    if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {
+       mesa_loge("munmap failed: %s", strerror(errno));
+       abort();
+    }
++#endif
+ 
+    bo->ptr.cpu = NULL;
+ }
+--- a/src/gallium/drivers/panfrost/pan_device.c	2026-10-28 17:17:44
++++ b/src/gallium/drivers/panfrost/pan_device.c	2026-11-01 23:22:58
+@@ -99,7 +99,13 @@
+ 
+    if (dev->arch < 10) {
+       dev->tiler_heap = panfrost_bo_create(
++#ifdef __APPLE__
++         /* Starbite: no GPU page faults, so the kernel commits heap
++          * buffers in full; 32 MiB of wired memory, not 128. */
++         dev, 32 * 1024 * 1024, PAN_BO_INVISIBLE | PAN_BO_GROWABLE, "Tiler heap");
++#else
+          dev, 128 * 1024 * 1024, PAN_BO_INVISIBLE | PAN_BO_GROWABLE, "Tiler heap");
++#endif
+       if (!dev->tiler_heap)
+          goto err_free_kmod_dev;
+    }
+--- a/src/panfrost/lib/kmod/meson.build	2026-10-28 17:17:44
++++ b/src/panfrost/lib/kmod/meson.build	2026-11-01 23:22:58
 @@ -6,6 +6,9 @@
    'panfrost_kmod.c',
    'panthor_kmod.c',
@@ -33,9 +65,48 @@
  
  libpankmod_lib = static_library(
    'pankmod_lib',
---- a/src/panfrost/lib/kmod/pan_kmod.c
-+++ b/src/panfrost/lib/kmod/pan_kmod.c
-@@ -169,7 +169,13 @@
+--- a/src/panfrost/lib/kmod/pan_kmod.c	2026-10-28 17:17:44
++++ b/src/panfrost/lib/kmod/pan_kmod.c	2026-11-02 02:09:02
+@@ -144,8 +144,38 @@
+       bo->dev->ops->bo_free(bo);
+    }
+ 
++   simple_mtx_unlock(&dev->handle_to_bo.lock);
++}
++
++#ifdef __APPLE__
++/* Starbite: user memory (16 KiB aligned, whole pages) given to the GPU by StarbiteMali's
++ * IMPORT_HOST, for VK_EXT_external_memory_host; the caller keeps its own mapping. */
++struct pan_kmod_bo *
++pan_kmod_bo_import_host(struct pan_kmod_dev *dev, void *addr, uint64_t size)
++{
++   struct pan_kmod_bo *bo = NULL;
++   uint32_t handle;
++
++   if (starbite_drm_import_host(dev->fd, addr, size, &handle))
++      return NULL;
++
++   simple_mtx_lock(&dev->handle_to_bo.lock);
++   struct pan_kmod_bo **slot =
++      util_sparse_array_get(&dev->handle_to_bo.array, handle);
++   if (slot && !*slot) {
++      bo = dev->ops->bo_import(dev, handle, size);
++      if (bo) {
++         bo->flags |= PAN_KMOD_BO_FLAG_WB_MMAP;
++         *slot = bo;
++      }
++   }
+    simple_mtx_unlock(&dev->handle_to_bo.lock);
++
++   if (!bo)
++      drmCloseBufferHandle(dev->fd, handle);
++   return bo;
+ }
++#endif
+ 
+ struct pan_kmod_bo *
+ pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd)
+@@ -169,7 +199,13 @@
  
        p_atomic_inc(&bo->refcnt);
     } else {
@@ -49,9 +120,20 @@
        if (size == 0 || size == (size_t)-1) {
           mesa_loge("invalid dmabuf size");
           goto err_close_handle;
---- a/src/panfrost/lib/kmod/pan_kmod.h
-+++ b/src/panfrost/lib/kmod/pan_kmod.h
-@@ -761,8 +761,16 @@
+--- a/src/panfrost/lib/kmod/pan_kmod.h	2026-10-28 17:17:44
++++ b/src/panfrost/lib/kmod/pan_kmod.h	2026-11-02 02:09:02
+@@ -697,6 +697,10 @@
+    return bo->user_priv;
+ }
+ 
++#ifdef __APPLE__
++struct pan_kmod_bo *pan_kmod_bo_import_host(struct pan_kmod_dev *dev,
++                                            void *addr, uint64_t size);
++#endif
+ struct pan_kmod_bo *pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd);
+ 
+ static inline int
+@@ -761,8 +765,16 @@
     if (mmap_offset < 0)
        return MAP_FAILED;
  
@@ -68,7 +150,7 @@
     if (host_addr == MAP_FAILED)
        mesa_loge("mmap(..., size=%" PRIu64 ", prot=%d, flags=0x%x) failed: %s",
                  bo->size, prot, flags, strerror(errno));
-@@ -770,6 +778,21 @@
+@@ -770,6 +782,21 @@
     return host_addr;
  }
  
@@ -90,7 +172,7 @@
  static inline bool
  pan_kmod_can_sync_bo_map_from_userland(struct pan_kmod_dev *dev)
  {
-@@ -1030,7 +1053,7 @@
+@@ -1030,7 +1057,7 @@
  static inline struct pan_kmod_perf_session *
  pan_kmod_perf_create(struct pan_kmod_dev *dev)
  {
@@ -99,8 +181,8 @@
  }
  
  static inline int
---- a/src/panfrost/lib/kmod/panfrost_kmod.c
-+++ b/src/panfrost/lib/kmod/panfrost_kmod.c
+--- a/src/panfrost/lib/kmod/panfrost_kmod.c	2026-10-28 17:17:44
++++ b/src/panfrost/lib/kmod/panfrost_kmod.c	2026-11-01 23:49:33
 @@ -9,8 +9,10 @@
  #include <pthread.h>
  #include <string.h>
@@ -141,52 +223,119 @@
     .perf_dump = panfrost_kmod_perf_dump,
 +#endif
  };
---- a/src/gallium/drivers/panfrost/pan_bo.c
-+++ b/src/gallium/drivers/panfrost/pan_bo.c
-@@ -343,10 +343,13 @@
-    if (!bo->ptr.cpu)
-       return;
+--- a/src/panfrost/vulkan/meson.build	2026-10-28 17:17:44
++++ b/src/panfrost/vulkan/meson.build	2026-11-01 23:23:31
+@@ -233,7 +233,10 @@
+     idep_mesautil,
+   ],
+   c_args : [no_override_init_args, panvk_flags, soong_compat_c_args],
+-  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],
++  # (Starbite, iOS: the entrypoint tables point at weak declarations of every entrypoint, which
++  # ELF leaves NULL when undefined; Mach-O's linker wants to be told)
++  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id] +
++    (host_machine.system() == 'darwin' ? ['-Wl,-undefined,dynamic_lookup'] : []),
+   gnu_symbol_visibility : 'hidden',
+   install : true,
+ )
+--- a/src/panfrost/vulkan/panvk_device_memory.c	2026-10-28 17:17:44
++++ b/src/panfrost/vulkan/panvk_device_memory.c	2026-11-02 02:09:02
+@@ -105,6 +105,17 @@
+    if (fd_info && !fd_info->handleType)
+       fd_info = NULL;
  
-+#ifndef __APPLE__
-+   /* (Starbite: the kernel's mapping lives until GEM_CLOSE) */
-    if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {
-       mesa_loge("munmap failed: %s", strerror(errno));
-       abort();
-    }
-+#endif
- 
-    bo->ptr.cpu = NULL;
- }
---- a/src/gallium/drivers/panfrost/pan_device.c
-+++ b/src/gallium/drivers/panfrost/pan_device.c
-@@ -99,7 +99,13 @@
- 
-    if (dev->arch < 10) {
-       dev->tiler_heap = panfrost_bo_create(
 +#ifdef __APPLE__
-+         /* Starbite: no GPU page faults, so the kernel commits heap
-+          * buffers in full; 32 MiB of wired memory, not 128. */
-+         dev, 32 * 1024 * 1024, PAN_BO_INVISIBLE | PAN_BO_GROWABLE, "Tiler heap");
-+#else
-          dev, 128 * 1024 * 1024, PAN_BO_INVISIBLE | PAN_BO_GROWABLE, "Tiler heap");
++   /* Starbite: VK_EXT_external_memory_host (vk_device_memory_create took the pointer). */
++   if (!fd_info && mem->vk.host_ptr) {
++      mem->bo = pan_kmod_bo_import_host(device->kmod.dev, mem->vk.host_ptr,
++                                        pAllocateInfo->allocationSize);
++      if (!mem->bo) {
++         result = panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++         goto err_destroy_mem;
++      }
++   } else
 +#endif
-       if (!dev->tiler_heap)
-          goto err_free_kmod_dev;
+    if (fd_info) {
+       assert(
+          fd_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
+@@ -269,11 +280,11 @@
+                             pan_kmod_bo_size(mem->bo));
+ 
+       if (mem->debug.host_mapping)
+-         os_munmap(mem->debug.host_mapping, pan_kmod_bo_size(mem->bo));
++         pan_kmod_bo_munmap(mem->debug.host_mapping, pan_kmod_bo_size(mem->bo));
     }
---- a/src/panfrost/vulkan/panvk_vX_physical_device.c
-+++ b/src/panfrost/vulkan/panvk_vX_physical_device.c
-@@ -9,7 +9,9 @@
-  * SPDX-License-Identifier: MIT
-  */
  
-+#ifndef __APPLE__
- #include <sys/sysmacros.h>
+    if (mem->addr.host) {
+-      ASSERTED int ret = os_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
++      ASSERTED int ret = pan_kmod_bo_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
+       assert(!ret);
+    }
+ 
+@@ -360,7 +371,7 @@
+       map_flags |= MAP_FIXED;
+    }
+ 
+-   void *addr =
++   void *addr = mem->vk.host_ptr ? mem->vk.host_ptr :
+       pan_kmod_bo_mmap(mem->bo, PROT_READ | PROT_WRITE, map_flags, host_addr);
+    if (addr == MAP_FAILED)
+       return panvk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED,
+@@ -388,7 +399,7 @@
+          return panvk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED,
+                              "Failed to reserve VA on unmap.");
+    } else {
+-      ASSERTED int ret = os_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
++      ASSERTED int ret = pan_kmod_bo_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
+       assert(!ret);
+    }
+ 
+@@ -464,7 +475,33 @@
+    return VK_SUCCESS;
+ }
+ 
++#ifdef __APPLE__
+ VKAPI_ATTR VkResult VKAPI_CALL
++panvk_GetMemoryHostPointerPropertiesEXT(
++   VkDevice _device, VkExternalMemoryHandleTypeFlagBits handleType,
++   const void *pHostPointer,
++   VkMemoryHostPointerPropertiesEXT *pMemoryHostPointerProperties)
++{
++   VK_FROM_HANDLE(panvk_device, device, _device);
++   const struct panvk_physical_device *phys_dev =
++      to_panvk_physical_device(device->vk.physical);
++
++   if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT ||
++       ((uintptr_t)pHostPointer & 16383))
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++
++   /* Starbite: imported user memory is mapped write-back cached, coherent. */
++   pMemoryHostPointerProperties->memoryTypeBits = 0;
++   for (uint32_t i = 0; i < phys_dev->memory.type_count; i++) {
++      if (phys_dev->memory.types[i].propertyFlags &
++          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
++         pMemoryHostPointerProperties->memoryTypeBits |= BITFIELD_BIT(i);
++   }
++   return VK_SUCCESS;
++}
 +#endif
++
++VKAPI_ATTR VkResult VKAPI_CALL
+ panvk_GetMemoryFdPropertiesKHR(VkDevice _device,
+                                VkExternalMemoryHandleTypeFlagBits handleType,
+                                int fd,
+--- a/src/panfrost/vulkan/panvk_host_copy.c	2026-10-28 17:17:44
++++ b/src/panfrost/vulkan/panvk_host_copy.c	2026-11-02 00:56:46
+@@ -261,7 +261,7 @@
+       /* No need to call pan_kmod_flush_bo_map_syncs() even if we've written to
+        * the image. This will be done just before the next submit. */
+       ASSERTED int ret =
+-         os_munmap(plane_ptrs[i], pan_kmod_bo_size(img->planes[i].mem->bo));
++         pan_kmod_bo_munmap(plane_ptrs[i], pan_kmod_bo_size(img->planes[i].mem->bo));
+       assert(!ret);
  
- #include "git_sha1.h"
- 
---- a/src/panfrost/vulkan/panvk_instance.c
-+++ b/src/panfrost/vulkan/panvk_instance.c
+       /* Make sure we reset all mapping entries pointing to the same virtual
+--- a/src/panfrost/vulkan/panvk_instance.c	2026-10-28 17:17:44
++++ b/src/panfrost/vulkan/panvk_instance.c	2026-11-02 00:25:33
 @@ -217,6 +217,7 @@
     panvk_debug_init();
     pan_trace_init();
@@ -238,22 +387,102 @@
     return panvk_GetInstanceProcAddr(instance, pName);
  }
 +#endif
---- a/src/panfrost/vulkan/meson.build
-+++ b/src/panfrost/vulkan/meson.build
-@@ -233,7 +233,10 @@
-     idep_mesautil,
-   ],
-   c_args : [no_override_init_args, panvk_flags, soong_compat_c_args],
--  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],
-+  # (Starbite, iOS: the entrypoint tables point at weak declarations of every entrypoint, which
-+  # ELF leaves NULL when undefined; Mach-O's linker wants to be told)
-+  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id] +
-+    (host_machine.system() == 'darwin' ? ['-Wl,-undefined,dynamic_lookup'] : []),
-   gnu_symbol_visibility : 'hidden',
-   install : true,
- )
---- a/src/vulkan/runtime/vk_image.c
-+++ b/src/vulkan/runtime/vk_image.c
+--- a/src/panfrost/vulkan/panvk_physical_device.c	2026-10-28 17:17:44
++++ b/src/panfrost/vulkan/panvk_physical_device.c	2026-11-02 02:09:02
+@@ -1702,6 +1702,19 @@
+    VkExternalMemoryHandleTypeFlags handle_types =
+       pExternalBufferInfo->handleType;
+    VkExternalMemoryFeatureFlags features = 0;
++#ifdef __APPLE__
++   if (pExternalBufferInfo->handleType ==
++       VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT) {
++      pExternalBufferProperties->externalMemoryProperties =
++         (VkExternalMemoryProperties){
++            .externalMemoryFeatures = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,
++            .exportFromImportedHandleTypes = 0,
++            .compatibleHandleTypes =
++               VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++         };
++      return;
++   }
++#endif
+    if (pExternalBufferInfo->handleType & supported_handle_types) {
+       handle_types |= supported_handle_types;
+       features |= VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
+--- a/src/panfrost/vulkan/panvk_priv_bo.c	2026-10-28 17:17:44
++++ b/src/panfrost/vulkan/panvk_priv_bo.c	2026-11-02 00:56:46
+@@ -99,7 +99,7 @@
+ 
+ err_munmap_bo:
+    if (priv_bo->addr.host) {
+-      ret = os_munmap(priv_bo->addr.host, pan_kmod_bo_size(bo));
++      ret = pan_kmod_bo_munmap(priv_bo->addr.host, pan_kmod_bo_size(bo));
+       assert(!ret);
+    }
+ 
+@@ -159,7 +159,7 @@
+    }
+ 
+    if (priv_bo->addr.host) {
+-      ret = os_munmap(priv_bo->addr.host, pan_kmod_bo_size(priv_bo->bo));
++      ret = pan_kmod_bo_munmap(priv_bo->addr.host, pan_kmod_bo_size(priv_bo->bo));
+       assert(!ret);
+    }
+ 
+--- a/src/panfrost/vulkan/panvk_vX_physical_device.c	2026-10-28 17:17:44
++++ b/src/panfrost/vulkan/panvk_vX_physical_device.c	2026-11-02 02:09:02
+@@ -9,7 +9,9 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#ifndef __APPLE__
+ #include <sys/sysmacros.h>
++#endif
+ 
+ #include "git_sha1.h"
+ 
+@@ -164,6 +166,9 @@
+       .EXT_extended_dynamic_state3 = true,
+       .EXT_external_memory_acquire_unmodified = true,
+       .EXT_external_memory_dma_buf = true,
++#ifdef __APPLE__
++      .EXT_external_memory_host = true,
++#endif
+       .EXT_global_priority = true,
+       .EXT_global_priority_query = true,
+       .EXT_graphics_pipeline_library = true,
+@@ -1213,6 +1218,11 @@
+       /* VK_KHR_compute_shader_derivatives */
+       .meshAndTaskShaderDerivatives = false,
+ 
++#ifdef __APPLE__
++      /* VK_EXT_external_memory_host: whole iOS (16 KiB) pages */
++      .minImportedHostPointerAlignment = 16384,
++#endif
++
+       /* VK_KHR_robustness2 */
+       .robustStorageBufferAccessSizeAlignment = 4,
+       .robustUniformBufferAccessSizeAlignment = 16,
+--- a/src/util/cache_ops_aarch64.c	2026-10-28 17:17:44
++++ b/src/util/cache_ops_aarch64.c	2026-11-02 00:09:44
+@@ -29,9 +29,15 @@
+ static uint32_t
+ get_ctr_el0(void)
+ {
++#ifdef __APPLE__
++   /* Starbite (iOS): EL0 may not read CTR_EL0 (SCTLR_EL1.UCT is clear: SIGILL). The S9's
++    * cores (A55, Mongoose M3) have 64-byte lines: DminLine = CWG = log2(64 / 4) = 4. */
++   return (4u << 24) | (4u << 16);
++#else
+    uint32_t ctr_el0;
+    __asm("mrs\t%x0, ctr_el0" : "=r"(ctr_el0));
+    return ctr_el0;
++#endif
+ }
+ 
+ static uint32_t
+--- a/src/vulkan/runtime/vk_image.c	2026-10-28 17:17:44
++++ b/src/vulkan/runtime/vk_image.c	2026-11-01 23:23:31
 @@ -23,7 +23,7 @@
  
  #include "vk_image.h"
@@ -281,8 +510,8 @@
  VKAPI_ATTR VkResult VKAPI_CALL
  vk_common_GetImageDrmFormatModifierPropertiesEXT(UNUSED VkDevice device,
                                                   VkImage _image,
---- a/src/vulkan/runtime/vk_image.h
-+++ b/src/vulkan/runtime/vk_image.h
+--- a/src/vulkan/runtime/vk_image.h	2026-10-28 17:17:44
++++ b/src/vulkan/runtime/vk_image.h	2026-11-01 23:23:31
 @@ -77,7 +77,7 @@
     /* wsi_image_create_info::scanout */
     bool wsi_legacy_scanout;
@@ -292,77 +521,3 @@
     /* VK_EXT_drm_format_modifier
      *
      * Initialized by vk_image_create/init() to DRM_FORMAT_MOD_INVALID.  It's
---- a/src/util/cache_ops_aarch64.c
-+++ b/src/util/cache_ops_aarch64.c
-@@ -29,9 +29,15 @@
- static uint32_t
- get_ctr_el0(void)
- {
-+#ifdef __APPLE__
-+   /* Starbite (iOS): EL0 may not read CTR_EL0 (SCTLR_EL1.UCT is clear: SIGILL). The S9's
-+    * cores (A55, Mongoose M3) have 64-byte lines: DminLine = CWG = log2(64 / 4) = 4. */
-+   return (4u << 24) | (4u << 16);
-+#else
-    uint32_t ctr_el0;
-    __asm("mrs\t%x0, ctr_el0" : "=r"(ctr_el0));
-    return ctr_el0;
-+#endif
- }
- 
- static uint32_t
---- a/src/panfrost/vulkan/panvk_priv_bo.c
-+++ b/src/panfrost/vulkan/panvk_priv_bo.c
-@@ -99,7 +99,7 @@
- 
- err_munmap_bo:
-    if (priv_bo->addr.host) {
--      ret = os_munmap(priv_bo->addr.host, pan_kmod_bo_size(bo));
-+      ret = pan_kmod_bo_munmap(priv_bo->addr.host, pan_kmod_bo_size(bo));
-       assert(!ret);
-    }
- 
-@@ -159,7 +159,7 @@
-    }
- 
-    if (priv_bo->addr.host) {
--      ret = os_munmap(priv_bo->addr.host, pan_kmod_bo_size(priv_bo->bo));
-+      ret = pan_kmod_bo_munmap(priv_bo->addr.host, pan_kmod_bo_size(priv_bo->bo));
-       assert(!ret);
-    }
- 
---- a/src/panfrost/vulkan/panvk_device_memory.c
-+++ b/src/panfrost/vulkan/panvk_device_memory.c
-@@ -269,11 +269,11 @@
-                             pan_kmod_bo_size(mem->bo));
- 
-       if (mem->debug.host_mapping)
--         os_munmap(mem->debug.host_mapping, pan_kmod_bo_size(mem->bo));
-+         pan_kmod_bo_munmap(mem->debug.host_mapping, pan_kmod_bo_size(mem->bo));
-    }
- 
-    if (mem->addr.host) {
--      ASSERTED int ret = os_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
-+      ASSERTED int ret = pan_kmod_bo_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
-       assert(!ret);
-    }
- 
-@@ -388,7 +388,7 @@
-          return panvk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED,
-                              "Failed to reserve VA on unmap.");
-    } else {
--      ASSERTED int ret = os_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
-+      ASSERTED int ret = pan_kmod_bo_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
-       assert(!ret);
-    }
- 
---- a/src/panfrost/vulkan/panvk_host_copy.c
-+++ b/src/panfrost/vulkan/panvk_host_copy.c
-@@ -261,7 +261,7 @@
-       /* No need to call pan_kmod_flush_bo_map_syncs() even if we've written to
-        * the image. This will be done just before the next submit. */
-       ASSERTED int ret =
--         os_munmap(plane_ptrs[i], pan_kmod_bo_size(img->planes[i].mem->bo));
-+         pan_kmod_bo_munmap(plane_ptrs[i], pan_kmod_bo_size(img->planes[i].mem->bo));
-       assert(!ret);
- 
-       /* Make sure we reset all mapping entries pointing to the same virtual
