@@ -1971,3 +1971,37 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     (splash fade, star flight with sparkle trail, ring burst, header fade, menu cascade) composed in a WB buffer at
     0x84000000 (+ logo copy 0x85200000; DTB reserves nothing there). Test image out/xnu-boot-ios26-anim.img
     (`LOADER=shim/starlte/out/xnu_boot.Image tools/mkimage-ios26.sh`).
+- 2026-11-02 night: **Phase 3 kernel (plan 1.3 + 2), built, not booted.** One reproducible build:
+  `limactl shell starbite -- env BUILD=/mnt/build/starbite tools/linux/build-kernel.sh` (BUILD default
+  /mnt/build). It resets mainline to v7.1 8cd9520d35a6 (reset --hard + clean, out/ kept), rsyncs the vendored
+  port (tools/linux/port = SheroAbi port @ bcee601: src/, scripts/build/, star2lte DTS, firmware incl. the
+  BCM4361 files that build71.sh installs as brcmfmac4361-pcie.bin/.txt/.clm_blob, regulatory.db/.p7s) to
+  ~/linux/starbite-work, runs patch-mainline.py --port (DECON early_event param default on; G3D 260 MHz at
+  950 mV + rail_check/rail_fixups params; cpufreq transition_delay_us 5000 param; build71.sh fragment hook)
+  and --tree (dw_mmc x3, S9P_GEM_DMA32 hunk kept out, Panfrost autosuspend 1000 ms on exynos9810-mali),
+  mk-starlte-dts.py, build71.sh, then merges tools/linux/config/starbite.config (CMDLINE_FROM_BOOTLOADER,
+  INITRAMFS_SOURCE="", RD_ZSTD, DEVFREQ_GOV_PERFORMANCE, overlay/fuse/squashfs/erofs, zram, PSI, nftables,
+  bridge/veth, HID/uinput, AppArmor, systemd needs; 185 values checked by tools/linux/check-kernel.py config).
+  DTB: /chosen bootargs `console=ramoops-1 console=tty0 loglevel=4 panic=10 maxcpus=8 s9p_vendor_m3_defaults
+  s3c2410_wdt.tmr_atboot=0`, linux,initrd-start/end u64 0 placeholders, CMA moved to 0xCD400000+300 MiB
+  (plan's 0xB0000000 would overlap tima and the 0xBC800000 bank hole; check-kernel.py dtb verifies it against
+  all reserved-memory, the memory banks and the loader window). s9p_g3d_pd.always_on was already 0644.
+  Outputs: Image 25.6 MB (7.1.0-starbite, text_offset 0x80000), DTB, kernel.config in build/linux/ (the old m71
+  kernel moved to build/linux/m71-old/) and the VM ~/distros/_kernel/ with modules-7.1.0-starbite.img (546
+  modules, ext4 sb-modules, 256 MiB sparse, 31 MB used). Needs an initrd now: no built-in initramfs.
+- 2026-11-02 night: **Phase 3 kernel review fixes, built, not booted.** Release is now
+  `7.1.0-starbite-<build id>` (LOCALVERSION, id = hash of port/, patch-mainline.py, starbite.config,
+  build-kernel.sh and its arguments): this build is `7.1.0-starbite-23527494`, Image sha e994ec21. The init mounts
+  `/distros/_kernel/modules-$(uname -r).img`, so a modules image can only meet its own kernel (no MODVERSIONS:
+  two configs with one release would otherwise load into each other); the image also holds `/starbite-kernel`
+  (`STARBITE-KERNEL <release> <Image sha256>`), checked by `check-kernel.py pair Image modules-<rel>.img` (run it
+  before copying modules to the card or packing the Image into the store). Older modules-*.img in ~/distros/_kernel
+  are deleted by each build. Rollback DTB `linux-old.dtb` (sha 3f2bddcf, same as the earlier run's): the daily DTB
+  with only CMA at mk-starlte-dts.py --legacy-cma (0x98000000 + 256 MiB, ends at OS_RD), made with fdtput, checked
+  by `check-kernel.py dtb --legacy-cma --image Image` (CMA between the Image + BSS and the initrd). The old
+  build/linux/m71-old DTB is not a rollback for this kernel: no initrd properties, old bootargs, CMA over the initrd.
+  Loader: the built-in fallback entry (no catalog in the store) is now linux.image + linux.dtb + linux.initrd with
+  sb.root=none (rescue shell). The kernel branch alone still has catalog.toml's `linux` entry without
+  linux.initrd: merge the userland branch before packing a store. build-kernel.sh also takes
+  ~/linux/.starbite-build.lock (WORK, OUT, REPO_OUT are shared between BUILD trees). s9p-g3d: failed BUCK6
+  reads/writes count in rail_fixup_errors (warned with the error) and no longer count as rail_fixups.
