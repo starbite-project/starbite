@@ -223,6 +223,25 @@
     .perf_dump = panfrost_kmod_perf_dump,
 +#endif
  };
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c	2026-10-28 17:17:44
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c	2026-11-02 02:35:10
+@@ -301,10 +301,15 @@
+                ? PAN_EARLYZS_ZS_TILEBUF_READ_NO_OPT
+                : PAN_EARLYZS_ZS_TILEBUF_NOT_READ;
+ 
++         /* a rasterization-order read of a color attachment: no FPK, as on v10 */
++         bool roa_color =
++            cmdbuf->vk.dynamic_graphics_state.rasterization_order_access &
++            VK_IMAGE_ASPECT_COLOR_BIT;
++
+          cfg.properties.allow_forward_pixel_to_kill =
+             fs_info->fs.can_fpk && !(rt_mask & ~rt_written) &&
+             !(rt_read & rt_written) && !alpha_to_coverage &&
+-            !binfo->any_dest_read;
++            !binfo->any_dest_read && !roa_color;
+ 
+          bool writes_zs = writes_z || writes_s;
+          bool zs_always_passes = ds_test_always_passes(cmdbuf);
 --- a/src/panfrost/vulkan/meson.build	2026-10-28 17:17:44
 +++ b/src/panfrost/vulkan/meson.build	2026-11-01 23:23:31
 @@ -233,7 +233,10 @@
@@ -430,7 +449,7 @@
     }
  
 --- a/src/panfrost/vulkan/panvk_vX_physical_device.c	2026-10-28 17:17:44
-+++ b/src/panfrost/vulkan/panvk_vX_physical_device.c	2026-11-02 02:09:02
++++ b/src/panfrost/vulkan/panvk_vX_physical_device.c	2026-11-02 02:35:16
 @@ -9,7 +9,9 @@
   * SPDX-License-Identifier: MIT
   */
@@ -441,7 +460,15 @@
  
  #include "git_sha1.h"
  
-@@ -164,6 +166,9 @@
+@@ -22,6 +24,7 @@
+ #include "panvk_buffer.h"
+ #include "panvk_cmd_draw.h"
+ #include "panvk_descriptor_set_layout.h"
++#include "util/detect_os.h"
+ #include "panvk_physical_device.h"
+ #include "panvk_wsi.h"
+ 
+@@ -164,6 +167,9 @@
        .EXT_extended_dynamic_state3 = true,
        .EXT_external_memory_acquire_unmodified = true,
        .EXT_external_memory_dma_buf = true,
@@ -451,7 +478,36 @@
        .EXT_global_priority = true,
        .EXT_global_priority_query = true,
        .EXT_graphics_pipeline_library = true,
-@@ -1213,6 +1218,11 @@
+@@ -198,7 +204,7 @@
+       .EXT_primitive_topology_list_restart = true,
+       .EXT_provoking_vertex = true,
+       .EXT_queue_family_foreign = true,
+-      .EXT_rasterization_order_attachment_access = PAN_ARCH >= 10,
++      .EXT_rasterization_order_attachment_access = PAN_ARCH >= 10 || DETECT_OS_APPLE,
+       .EXT_rgba10x6_formats = PAN_ARCH >= 11,
+       .EXT_robustness2 = PAN_ARCH >= 10,
+       .EXT_sampler_filter_minmax = PAN_ARCH >= 10,
+@@ -242,7 +248,7 @@
+       .ARM_shader_core_builtins = PAN_ARCH >= 9,
+       .ARM_shader_core_properties = has_vk1_1,
+       .ARM_scheduling_controls = PAN_ARCH >= 10,
+-      .ARM_rasterization_order_attachment_access = PAN_ARCH >= 10,
++      .ARM_rasterization_order_attachment_access = PAN_ARCH >= 10 || DETECT_OS_APPLE,
+    };
+ }
+ 
+@@ -757,7 +763,9 @@
+ #endif
+ 
+       /* VK_EXT_rasterization_order_attachment_access */
+-      .rasterizationOrderColorAttachmentAccess = PAN_ARCH >= 10,
++      /* Starbite: the tile buffer is read in rasterization order on every arch (Panfrost GL's
++       * coherent framebuffer fetch); Metal's programmable blending needs this on Bifrost v6. */
++      .rasterizationOrderColorAttachmentAccess = PAN_ARCH >= 10 || DETECT_OS_APPLE,
+       .rasterizationOrderDepthAttachmentAccess = PAN_ARCH >= 10,
+       .rasterizationOrderStencilAttachmentAccess = PAN_ARCH >= 10,
+    };
+@@ -1213,6 +1221,11 @@
        /* VK_KHR_compute_shader_derivatives */
        .meshAndTaskShaderDerivatives = false,
  

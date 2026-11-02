@@ -1,16 +1,17 @@
-From 1e5f3fb7aa31633a1008bb66780eb48f167ef3dc Mon Sep 17 00:00:00 2001
+From feda16dbbf288ae5479490c3ae18a96a2aa58acf Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Mon, 2 Nov 2026 02:04:25 +0200
 Subject: [PATCH] patch: 0337-sweet-mali-import-host.patch
 
 sweet: StarbiteMali IMPORT_HOST (0x104): a range of the caller's own memory (16 KiB aligned) as a GPU buffer, its pages wired until the buffer is closed: VK_EXT_external_memory_host for PanVK (metal2vulkan's no-copy buffers and IOSurface path).
 - StarbiteMali IMPORT_HOST
+- StarbiteMali.cpp (0337): importHost wires read-only memory for reading when read/write fails
 ---
- iokit/Kernel/arm/StarbiteMali.cpp | 79 +++++++++++++++++++++++++++++--
- 1 file changed, 75 insertions(+), 4 deletions(-)
+ iokit/Kernel/arm/StarbiteMali.cpp | 87 +++++++++++++++++++++++++++++--
+ 1 file changed, 83 insertions(+), 4 deletions(-)
 
 diff --git a/iokit/Kernel/arm/StarbiteMali.cpp b/iokit/Kernel/arm/StarbiteMali.cpp
-index 438059bc..17f5b59d 100644
+index 438059bc..b4d07208 100644
 --- a/iokit/Kernel/arm/StarbiteMali.cpp
 +++ b/iokit/Kernel/arm/StarbiteMali.cpp
 @@ -85,12 +85,17 @@ struct sbm_surface {
@@ -65,7 +66,7 @@ index 438059bc..17f5b59d 100644
  }
  
  IOReturn
-@@ -417,6 +425,64 @@ StarbiteMaliUserClient::importSurface(sbm_surface *a)
+@@ -417,6 +425,72 @@ StarbiteMaliUserClient::importSurface(sbm_surface *a)
  	return kIOReturnSuccess;
  }
  
@@ -97,8 +98,16 @@ index 438059bc..17f5b59d 100644
 +		return kIOReturnNoMemory;
 +	}
 +	if (mem->prepare() != kIOReturnSuccess) {
++		/* read-only memory (a mapped file, a constant buffer): wired for the GPU to read */
 +		mem->release();
-+		return kIOReturnVMError;
++		mem = IOMemoryDescriptor::withAddressRange(a->addr, a->size, kIODirectionOut, fTask);
++		if (mem == NULL) {
++			return kIOReturnNoMemory;
++		}
++		if (mem->prepare() != kIOReturnSuccess) {
++			mem->release();
++			return kIOReturnVMError;
++		}
 +	}
 +	uint32_t pages = (uint32_t)(a->size / 0x1000);
 +	uint64_t va = sbm_va_alloc(a->size);
@@ -130,7 +139,7 @@ index 438059bc..17f5b59d 100644
  IOReturn
  StarbiteMaliUserClient::mmapBO(sbm_mmap_bo *a)
  {
-@@ -434,7 +500,7 @@ StarbiteMaliUserClient::mmapBO(sbm_mmap_bo *a)
+@@ -434,7 +508,7 @@ StarbiteMaliUserClient::mmapBO(sbm_mmap_bo *a)
  		 * shares the task's own VM object a second time, and backboardd faulting on its
  		 * wired pages through it slept in vm_page_sleep for good (GPU boot 9).
  		 */
@@ -139,7 +148,7 @@ index 438059bc..17f5b59d 100644
  		bo->map = bo->mem->createMappingInTask(fTask, 0, kIOMapAnywhere | cache);
  		if (bo->map == NULL) {
  			return kIOReturnVMError;
-@@ -459,6 +525,7 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
+@@ -459,6 +533,7 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
  		sbm_gem_close close;
  		sbm_version version;
  		sbm_surface surface;
@@ -147,7 +156,7 @@ index 438059bc..17f5b59d 100644
  		char text[256];
  	} u;
  	size_t want;
-@@ -474,6 +541,7 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
+@@ -474,6 +549,7 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
  	case SBM_VERSION: want = 0; break;
  	case SBM_LOG: want = args->structureInputSize; break;
  	case SBM_SURFACE: want = sizeof(u.surface); break;
@@ -155,7 +164,7 @@ index 438059bc..17f5b59d 100644
  	default:
  		return kIOReturnUnsupported;
  	}
-@@ -537,6 +605,9 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
+@@ -537,6 +613,9 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
  	case SBM_SURFACE:
  		ret = importSurface(&u.surface);
  		break;
@@ -165,7 +174,7 @@ index 438059bc..17f5b59d 100644
  	case SBM_LOG:
  		u.text[want] = 0;
  		IOLog("STARLTE GPU APP: %s\n", u.text);
-@@ -568,7 +639,7 @@ sbm_call_kind(uint32_t selector)
+@@ -568,7 +647,7 @@ sbm_call_kind(uint32_t selector)
  	case SBM_SUBMIT: return 0;
  	case SBM_CREATE_BO: return 1;
  	case SBM_GEM_CLOSE: return 2;
