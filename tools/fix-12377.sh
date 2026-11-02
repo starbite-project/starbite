@@ -8,7 +8,7 @@ set -euo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
 PORT=$P/build/xnu-12377 DXB=$P/build/dxb-12377 OUT=$P/xnu/series-12377
 g() { git -C "$PORT" -c user.name=starbite -c user.email=starbite@local "$@"; }
-subj=$(g log -1 --format=%s)
+subj=$(g log -1 --format=%B | head -1)
 case "$subj" in "patch: "*) name=${subj#patch: } ;; *) echo "HEAD is not a patch commit: $subj"; exit 1 ;; esac
 diff=$(mktemp)
 g add -A; g diff --cached > "$diff"
