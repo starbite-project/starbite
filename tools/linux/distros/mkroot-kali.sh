@@ -220,6 +220,13 @@ UH=$UH sh "$HERE/mk-payload.sh" "$R/tmp/sb/payload" $NAME
 chroot "$R" /bin/sh /tmp/sb/sb-integrate.sh $NAME systemd /tmp/sb/payload
 umount "$R/tmp/sb"; rmdir "$R/tmp/sb"
 echo phosh > "$R/etc/starbite/session"               # sb.session=phosh is the only session here
+# the shared modules image's mount point (the initrd binds /distros/_kernel/modules-REL.img there):
+# with sb.rw=0 the root is read-only and the initrd cannot mkdir it, so it is made here, empty.
+# Where the initrd's sb_mods_dir puts it: usr/lib/modules when /lib is a link, else lib/modules.
+KREL=${KREL:-$(cat "$P/build/linux/release")}
+[ -n "$KREL" ] || { echo "no kernel release in $P/build/linux/release" >&2; exit 1; }
+if [ -L "$R/lib" ]; then MODDIR=usr/lib/modules/$KREL; else MODDIR=lib/modules/$KREL; fi
+mkdir -p "$R/$MODDIR"
 echo "sessions installed: $(in_root dpkg-query -W -f='${Package}\n' phosh 2>/dev/null | tr '\n' ' ')" >> "$R/etc/starbite/integrated"
 
 # ---- Kali specifics -----------------------------------------------------------------------------
@@ -255,6 +262,7 @@ chk "ModemManager masked"         "systemctl is-enabled ModemManager.service 2>&
 chk "default graphical"           "systemctl get-default | grep -qx graphical.target"
 chk "Wi-Fi firmware"              "[ -s /usr/lib/firmware/brcm/brcmfmac4361-pcie.bin ]"
 chk "tools present"               "for b in nmap hydra john nxc responder sqlmap tshark \$([ $MSF = 1 ] && echo msfconsole); do command -v \$b || exit 1; done"
+chk "modules mount point"         "[ -d '/$MODDIR' ] && [ -z \"\$(ls -A '/$MODDIR')\" ] && ! ls -d /usr/lib/modules/*/kernel /lib/modules/*/kernel 2>/dev/null | grep -q ."
 chk "mesa panfrost"               "ls /usr/lib/aarch64-linux-gnu/dri/panfrost_dri.so || ls /usr/lib/aarch64-linux-gnu/libgallium-*.so"
 (cd "$R" && grep -h '^PRETTY_NAME\|^VERSION=' etc/os-release; cat etc/starbite/integrated)
 [ "$fail" = 0 ] || { echo "checks failed (image left at $IMG)" >&2; exit 1; }

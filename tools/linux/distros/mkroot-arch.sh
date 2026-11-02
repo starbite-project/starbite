@@ -11,11 +11,15 @@
 #    .sig (Arch Linux ARM Build System key, $ALARM_KEY), extracted with bsdtar into the image.
 # 2. In a chroot: pacman-key --init/--populate archlinuxarm; the distro kernel, its firmware and its
 #    initramfs generator are removed (pacman -Rdd) and put in IgnorePkg; the tarball's "alarm" user
-#    (password alarm), its root password and its DHCP-everything networkd files are removed.
+#    (password alarm), its root password and its DHCP-everything networkd files are removed. That
+#    build keyring (with its local master signing key) is deleted at the end: every copy of the
+#    image would share it. sb-pacman-keys.service makes the phone's own on the first boot.
 # 3. pacman -Syu, then Phosh (extra) + NetworkManager, openssh, mesa, PipeWire, squeekboard, sudo.
 # 4. sb-integrate.sh arch systemd: user "user" 10000, usb0 172.16.42.1 + DHCP for the Mac,
 #    sshd keys made on the phone, GPU floor, AFBC env, scale 3, Wi-Fi firmware, starbite-session
-#    (Phosh autologin on tty7 for "user"), watchdog off, no distro kernel.
+#    (Phosh autologin on tty7 for "user"), watchdog off, no distro kernel; an empty
+#    usr/lib/modules/<release> (build/linux/release) for the initrd's bind of the shared modules
+#    image, which it cannot mkdir itself on a read-only root (sb.rw=0).
 # 5. e2fsck -f, resize2fs -M, file truncated to the filesystem: IMG + IMG.sha256.
 #
 # Disk: everything (download, image, temp files, pacman's package cache, which is the image's own
@@ -51,6 +55,9 @@ NEED="phosh phoc networkmanager openssh mesa pipewire wireplumber sudo"
 # the kernel, its firmware, its initramfs generator and any boot loader: never on a Starbite root
 NOKERNEL_RE='^(linux-aarch64.*|linux-firmware.*|mkinitcpio.*|uboot.*|grub|efibootmgr|firmware-raspberrypi|raspberrypi-bootloader.*)$'
 IGNORE="linux-aarch64 linux-aarch64-headers linux-firmware linux-firmware-* mkinitcpio mkinitcpio-busybox uboot-* grub"
+# the Starbite kernel release: the modules image's mount point is named after it (checked up front)
+KREL=${KREL:-$(cat "$P/build/linux/release" 2>/dev/null || true)}
+[ -n "$KREL" ] || { echo "no kernel release in $P/build/linux/release (or KREL=...)" >&2; exit 1; }
 
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
 [ "$(uname -m)" = aarch64 ] || { echo "needs an arm64 host (the Lima VM)" >&2; exit 1; }
@@ -231,6 +238,11 @@ UH=$UH sh "$HERE/mk-payload.sh" "$R/tmp/sb/payload" $NAME
 chroot "$R" /bin/sh /tmp/sb/sb-integrate.sh $NAME systemd /tmp/sb/payload
 umount "$R/tmp/sb"
 echo phosh > "$R/etc/starbite/session"
+# the shared modules image's mount point (the initrd binds /distros/_kernel/modules-REL.img there):
+# with sb.rw=0 the root is read-only and the initrd cannot mkdir it, so it is made here, empty.
+# Where the initrd's sb_mods_dir puts it: usr/lib/modules when /lib is a link, else lib/modules.
+if [ -L "$R/lib" ]; then MODDIR=usr/lib/modules/$KREL; else MODDIR=lib/modules/$KREL; fi
+mkdir -p "$R/$MODDIR"
 {
 	echo "source=$BASE/$TARBALL md5=$TAR_MD5 sig=$ALARM_KEY"
 	echo "sessions installed: phosh"
@@ -243,10 +255,37 @@ ln -s ../run/systemd/resolve/stub-resolv.conf "$R/etc/resolv.conf"
 in_root systemctl enable systemd-resolved.service >/dev/null 2>&1 || true
 # the tarball enables things a phone root does not want
 in_root systemctl disable haveged.service >/dev/null 2>&1 || true
+# pacman's keyring: the build's (its local master signing key in private-keys-v1.d) never ships,
+# or every copy of the image could sign keys this root's pacman trusts (the mirrors are plain
+# http). The phone makes its own on the first boot, as Arch's own images do (pacman-init).
+cat > "$R/etc/systemd/system/sb-pacman-keys.service" <<'EOF'
+[Unit]
+Description=Starbite: pacman keyring (first boot; the image carries none)
+After=local-fs.target time-sync.target
+ConditionPathExists=!/etc/pacman.d/gnupg/trustdb.gpg
+ConditionPathIsReadWrite=/etc
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# (a half-made keyring is removed, so the next boot tries again)
+ExecStart=/bin/sh -c 'pacman-key --init && pacman-key --populate archlinuxarm || { rm -rf /etc/pacman.d/gnupg; exit 1; }'
+ExecStartPost=-/usr/bin/gpgconf --homedir /etc/pacman.d/gnupg --kill all
+
+[Install]
+WantedBy=multi-user.target
+EOF
+in_root systemctl enable sb-pacman-keys.service
 # nothing of the build host stays (sb-integrate removed the ssh host keys; sb-ssh-keys makes the phone's)
 in_root gpgconf --homedir /etc/pacman.d/gnupg --kill all 2>/dev/null || true
-rm -f "$R"/etc/ssh/ssh_host_* "$R"/etc/pacman.d/gnupg/S.* "$R"/root/.bash_history
+rm -rf "$R/etc/pacman.d/gnupg"
+rm -f "$R"/etc/ssh/ssh_host_* "$R"/root/.bash_history
 rm -rf "$R"/var/tmp/* "$R"/var/log/pacman.log "$R"/var/log/journal/* "$R"/var/cache/pacman/pkg/*
+# checks: the modules mount point (empty, nothing of a distro kernel), no keyring, its unit enabled
+[ -d "$R/$MODDIR" ] && [ -z "$(ls -A "$R/$MODDIR")" ] || { echo "no empty $MODDIR" >&2; exit 1; }
+! ls -d "$R"/usr/lib/modules/*/kernel "$R"/lib/modules/*/kernel >/dev/null 2>&1 || { echo "distro modules left" >&2; exit 1; }
+[ ! -e "$R/etc/pacman.d/gnupg" ] || { echo "the build's pacman keyring is still in the root" >&2; exit 1; }
+[ -L "$R/etc/systemd/system/multi-user.target.wants/sb-pacman-keys.service" ] || { echo "sb-pacman-keys not enabled" >&2; exit 1; }
 
 # ---- 5. unmount, check, shrink --------------------------------------------------------------------
 kill_root_procs
