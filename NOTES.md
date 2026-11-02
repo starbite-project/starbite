@@ -2005,3 +2005,11 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   linux.initrd: merge the userland branch before packing a store. build-kernel.sh also takes
   ~/linux/.starbite-build.lock (WORK, OUT, REPO_OUT are shared between BUILD trees). s9p-g3d: failed BUCK6
   reads/writes count in rail_fixup_errors (warned with the error) and no longer count as rail_fixups.
+- 2026-11-02 late: **Distro builds stalled: leaked images on the Mac.** Lima mounts /Users/dev read-only, so
+  mkroot-*.sh build in the git-ignored build/distros-build/ (same APFS disk, sparse; accepted as the build
+  location, card-install.sh `image NAME` now finds images there too, SRC=... overrides). The stall: `rm` on
+  virtiofs only unlinks; the guest's cached inode keeps the file open in com.apple.Virtualization (`lsof +L1`), so
+  every rerun leaked an image (3x 5 GiB apparent + the 829 MB ALARM tarball, 2.7 GB free, all three builds asleep in
+  their free-space waits). Freed without restarting the VM: `limactl shell starbite -- bash -lc 'sync; echo 2 | sudo
+  tee /proc/sys/vm/drop_caches'` (guest forgets the inodes, host closes them: 2.7 -> 9.5 GB free). mkroot-arch.sh
+  now `release`s files (truncate -s 0, rm, drop_caches) and releases a half-built image on failure (tarball kept).

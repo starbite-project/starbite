@@ -66,6 +66,21 @@ mac_wait() {
 		echo "the Mac has ${f} GB free (< $need): waiting before $1 ..."; sleep 60
 	done
 }
+# Deleting a file on virtiofs only unlinks it: the guest's cached inode keeps it open on the Mac
+# (com.apple.Virtualization) and its blocks stay allocated until the VM forgets it, so every rerun
+# leaked a whole image. release FILE...: truncate to 0 first (APFS frees the blocks even while the
+# file is held open), then unlink, then drop the guest's dentry/inode caches so the host closes it.
+release() {
+	local f
+	for f in "$@"; do [ -f "$f" ] && truncate -s 0 "$f"; rm -f "$f"; done
+	sync; echo 2 > /proc/sys/vm/drop_caches 2>/dev/null || true
+}
+# release_dir DIR: release every file in DIR, then the directory
+release_dir() {
+	[ -d "$1" ] || return 0
+	find "$1" -type f -exec truncate -s 0 {} + 2>/dev/null || true
+	rm -rf "$1"; release
+}
 # the image is sparse: blocks freed inside it go back to the Mac only when trimmed (loop -> hole)
 trim() { sync; fstrim "$R" >/dev/null 2>&1 || true; }
 if ! command -v bsdtar >/dev/null; then              # libarchive-tools: <1 MB; its .deb in RAM (/run)
@@ -78,6 +93,8 @@ export TMPDIR=$TMPD
 
 R=/mnt/sb-$NAME
 LOOP=
+STARTED=0                                            # this run made a new $IMG
+DONE=0
 in_root() { chroot "$R" /usr/bin/env LANG=C.UTF-8 TMPDIR=/tmp "$@"; }
 # anything still running inside the root (pacman's gpg-agent) keeps it busy: unmount would fail
 kill_root_procs() {
@@ -95,6 +112,10 @@ cleanup() {
 	for m in "$R/var/cache/pacman/pkg" "$R/tmp/sb" "$R/tmp" "$R/dev/pts" "$R/dev" "$R/proc" "$R/sys" "$R/run"; do mountpoint -q "$m" && umount "$m"; done
 	mountpoint -q "$R" && umount "$R"
 	[ -n "$LOOP" ] && losetup -d "$LOOP" 2>/dev/null
+	# a failed run: give the half-built image's blocks back now (the next run starts it afresh;
+	# the checked tarball stays in TMPD for reuse)
+	[ "$STARTED" = 1 ] && [ "$DONE" != 1 ] && { echo "failed: releasing the half-built $IMG" >&2; release "$IMG" "$IMG.sha256"; }
+	return 0
 }
 trap cleanup EXIT
 mkdir -p "$R"
@@ -104,7 +125,9 @@ T=$TMPD/$TARBALL
 mac_wait "the download" 1
 if [ ! -s "$T" ] || [ "${REFETCH:-0}" = 1 ]; then
 	echo "downloading $BASE/$TARBALL ..."
-	curl -fL --retry 3 -o "$T.part" "$BASE/$TARBALL" && mv "$T.part" "$T"
+	release "$T" "$T.md5" "$T.sig"
+	curl -fL --retry 3 -o "$T.part" "$BASE/$TARBALL" || { release "$T.part"; echo "download failed" >&2; exit 1; }
+	mv "$T.part" "$T"
 fi
 # (virtiofs: a file just written can take a moment to show up; the small ones go via RAM)
 seen() { local i=0; while [ ! -s "$1" ] && [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done; [ -s "$1" ]; }
@@ -125,7 +148,8 @@ echo "$TARBALL: md5 $TAR_MD5 ok, signed by $ALARM_KEY"
 
 # ---- the image: sparse on the Mac, 5 GiB while building -----------------------------------------
 mac_wait "the image" 2
-rm -f "$IMG" "$IMG.sha256"
+release "$IMG" "$IMG.sha256"
+STARTED=1
 truncate -s "$SIZE" "$IMG"
 mkfs_img() { mkfs.ext4 -q -F -E nodiscard -O ^orphan_file,^metadata_csum_seed -L "sb-$NAME" -m 0 "$IMG"; }
 mkfs_img || { sleep 3; mkfs_img; }                   # virtiofs: the new file can lag a moment
@@ -222,6 +246,7 @@ blocks=$(dumpe2fs -h "$LOOP" 2>/dev/null | awk -F: '/^Block count/ {print $2+0}'
 losetup -d "$LOOP"; LOOP=
 truncate -s $(( blocks * bs )) "$IMG"
 (cd "$(dirname "$IMG")" && sha256sum "$(basename "$IMG")") > "$IMG.sha256"
-[ "${KEEP_TMP:-0}" = 1 ] || rm -rf "$TMPD"           # the tarball and temp files: done with them
+DONE=1
+[ "${KEEP_TMP:-0}" = 1 ] || release_dir "$TMPD"      # the tarball and temp files: done with them
 echo "$IMG: $(( blocks * bs / 1048576 )) MiB ext4 (sb-$NAME), ${used} MiB of files"
 echo "manifest: $NAME $(( blocks * bs / 1048576 ))M $BASE/$TARBALL $(cut -d' ' -f1 "$IMG.sha256") $(date -I) 7.1.0-starbite"

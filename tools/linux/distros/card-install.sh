@@ -3,7 +3,9 @@
 # onto the card's exFAT /distros/, from TWRP over adb. Runs on the Mac; the images stay in the VM
 # and are streamed (no copy on the Mac's disk). docs/LINUX-REBUILD-PLAN.md 3.1.
 #
-#   card-install.sh image NAME [GROW]   VM ~/distros/NAME.img -> /distros/NAME.img, grown to GROW
+#   card-install.sh image NAME [GROW]   VM ~/distros/NAME.img (else build/distros-build/NAME.img,
+#                                       where mkroot-*.sh build; SRC=... names another) ->
+#                                       /distros/NAME.img, grown to GROW
 #                                       (default 8G; "no" keeps the shipped size)
 #   card-install.sh modules [FILE]      VM ~/distros/_kernel/modules-7.1.0-starbite.img (default,
 #                                       from build-kernel.sh) -> /distros/_kernel/
@@ -85,7 +87,15 @@ image)
 	NAME=${2:?card-install.sh image NAME [GROW]}
 	GROW=${3:-8G}
 	case $NAME in ""|_*|*[!a-z0-9-]*) die "NAME: lower case, digits, '-'" ;; esac
-	SRC=$VMHOME/distros/$NAME.img
+	# the VM's ~/distros (Ubuntu), else where the mkroot-*.sh scripts build on the Mac's APFS disk:
+	# /Users/dev/distros-build when the VM can write it, else the git-ignored build/distros-build
+	if [ -z "${SRC:-}" ]; then
+		REPO=$(cd "$HERE/../../.." && pwd)
+		for SRC in "$VMHOME/distros/$NAME.img" "/Users/dev/distros-build/$NAME.img" "$REPO/build/distros-build/$NAME.img"; do
+			vm test -f "$SRC" && break
+		done
+	fi
+	vm test -f "$SRC" || die "no $NAME.img in the VM ($SRC; SRC=... to name it)"
 	phone_ready
 	DEST=$SD/distros/$NAME.img
 	if [ "$GROW" != no ] && ! ash 'command -v resize2fs >/dev/null && command -v e2fsck >/dev/null && echo y' | grep -q y; then
