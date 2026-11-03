@@ -35,6 +35,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -58,6 +59,14 @@ uint64_t hw_ticks(void)
 }
 uint64_t hw_freq(void) { return 1000000000ULL; }
 #endif
+
+int h7_dbg;
+uint64_t h7_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ULL + (uint64_t)t.tv_nsec;
+}
 
 static void die(const char *m)
 {
@@ -132,14 +141,71 @@ static void frame_reset(void)
 uint32_t __real_g7_frame(const struct g7_frame *f);
 uint64_t stub_now_us(void);
 static int run_mode;
+extern uint64_t g7_prof[12];
 uint32_t __wrap_g7_frame(const struct g7_frame *f)
 {
     struct timespec a, b;
+    uint64_t p0[12];
+    memcpy(p0, g7_prof, sizeof p0);
     clock_gettime(CLOCK_MONOTONIC, &a);
     uint32_t px = __real_g7_frame(f);
     clock_gettime(CLOCK_MONOTONIC, &b);
+    /* H7_PROF=1: the frame's time per glass phase (ms): setup, base glass, base items, frozen,
+     * over glass, over items, edge, present, freeze */
+    const char *pe = getenv("H7_PROF");
+    h7_dbg = getenv("H7_DBG") ? atoi(getenv("H7_DBG")) : 0;
+    if (run_mode && pe && *pe == '1' && px) {
+        printf("P7");
+        for (int i = 0; i < 9; i++)
+            printf(" %.2f", (double)(g7_prof[i] - p0[i]) / 1e6);
+        printf(" | %llu %llu\n", (unsigned long long)(g7_prof[10] - p0[10]), (unsigned long long)(g7_prof[11] - p0[11]));
+    }
     static const char *const ph[M7_PH_N] = { "intro-wall", "intro-glass", "idle", "lens", "list", "expand",
                                               "over-move", "over-rest", "launch", "progress", "end" };
+    /* H7_FORKCHECK=1: at the first frame after a motion frame (intro, list, expand, over-move,
+     * launch) that is not one, and at the first frame with nothing to draw, a forked child finishes the rest bands (g7_idle), then redraws the panel with
+     * G7_F_FULL and compares: the incremental result must equal a full redraw. */
+    static int drew, moved;
+    int pc = m7_phase_last, mv = pc == 0 || pc == 1 || pc == 4 || pc == 5 || pc == 6 || pc == 8;
+    int settle = run_mode && ((px == 0 && drew) || (moved && !mv && px)) && (f->back == 0.f || f->back == 1.f);
+    if (run_mode) {
+        if (px)
+            drew = 1;
+        moved = px && mv;
+    }
+    if (settle) {
+        drew = 0;
+        const char *fc = getenv("H7_FORKCHECK");
+        if (fc && *fc == '1') {
+            fflush(stdout);
+            pid_t pid = fork();
+            if (pid == 0) {
+                while (g7_idle())
+                    ;
+                static uint32_t a[G7_W * G7_H];
+                memcpy(a, FB, sizeof a);
+                struct g7_frame g = *f;
+                g.flags |= G7_F_FULL;
+                __real_g7_frame(&g);
+                unsigned bad = 0, worst = 0;
+                for (int i = 0; i < G7_W * G7_H; i++)
+                    if (a[i] != FB[i]) {
+                        bad++;
+                        for (int s = 0; s < 24; s += 8) {
+                            int e = abs((int)((a[i] >> s) & 255) - (int)((FB[i] >> s) & 255));
+                            if ((unsigned)e > worst) worst = (unsigned)e;
+                        }
+                    }
+                printf("FORKCHECK %.0f: %u px differ from a full redraw (worst %u)\n", stub_now_us() / 1e3, bad, worst);
+                fflush(stdout);
+                _exit(0);
+            }
+            if (pid > 0) {
+                int stt;
+                waitpid(pid, &stt, 0);
+            }
+        }
+    }
     if (run_mode)
         printf("T7 %.0f %.2f %u %s%s\n", stub_now_us() / 1e3,
                (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6, px,
@@ -345,13 +411,19 @@ int main(int argc, char **argv)
             /* the loader's stages after the pick (xnu_boot.c's star_menu_progress / handoff) */
             static const char *const st[5] = { "Reading boot image", "Verifying kernel CRC32", "Loading device tree",
                                                "Loading initramfs", "Handing off to kernel" };
-            for (unsigned i = 0; i < 5; ++i) {
+            /* --again (with --fail WHY): the start fails during the stages, so the loader never
+             * hands off: it calls the menu again, which draws the error card (as on the device).
+             * H7_NOHANDOFF=1 in the environment skips the handoff without --again. */
+            const char *nh = getenv("H7_NOHANDOFF");
+            int handoff = !again && !(nh && *nh == '1');
+            for (unsigned i = 0; i < (again ? 3u : 5u); ++i) {
                 menu7_progress(i, 5, st[i], "detail");
                 printf("progress %u done at %.0f ms\n", i, stub_now_us() / 1e3);
             }
-            menu7_handoff("EL1 · 0x80080000");
-            printf("handoff done at %.0f ms\n", stub_now_us() / 1e3);
-            /* --fail WHY: the start fails and the loader calls the menu again (the error card) */
+            if (handoff) {
+                menu7_handoff("EL1 · 0x80080000");
+                printf("handoff done at %.0f ms\n", stub_now_us() / 1e3);
+            }
             if (again) {
                 r = menu7_main(0, cmd, sizeof cmd);
                 printf("menu7_main again -> %d at %.0f ms\n", r, stub_now_us() / 1e3);

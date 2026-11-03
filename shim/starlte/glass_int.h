@@ -255,6 +255,10 @@ void gw_row_b(int y, int x0, int x1, float *rgb);
 void gw_row_a5_y(float py, int x0, int x1, float *rgb);   /* the same at any panel y */
 void gw_row_b_y(float py, int x0, int x1, float *rgb);
 void gw_row_a_y(float py, int x0, int x1, float *rgb);
+/* a row's texels t0 .. t1 blended vertically at panel py, planar (o, o + stride, o + 2 stride) */
+void gw_vrow_a5(float py, int t0, int t1, float *o, int stride);
+void gw_vrow_a(float py, int t0, int t1, float *o, int stride);
+void gw_vrow_b(float py, int t0, int t1, float *o, int stride);
 void gw_row_wall(int y, int x0, int x1, float *rgb);  /* the texture at panel res (BASE not valid) */
 void gw_row_wall8(int y, int x0, int x1, float dim, uint32_t *dst);  /* x dim, dithered */
 /* rows at an arbitrary panel y (for the half resolution render) */
@@ -287,6 +291,17 @@ void gs_row(int layer, const struct gs_ctx *c, float py, float px0, int n, float
 void gs_new_frame(void);
 int gs_row_span(int layer, float py, int s0, int s1, int *x0, int *x1);
 int gs_npre(int layer);                         /* prepared shapes before the layer's first lens */
+struct gs_cls {
+    int x0, x1;                     /* the span */
+    float J[9];                     /* shade()'s linear part */
+    float mixf;                     /* frost toward B */
+    float oy;                       /* on a top or bottom rim band row: the refraction's y offset */
+    int bx0, bx1;                   /* ... over these pixels (the band's straight part) */
+};
+/* the row's x spans of prepared shapes s < s1 (box holds py, later wins), with shade()'s linear
+ * part J (out = J frost) and the frost's mix toward B: the moving frames' frost correction */
+int gs_classes(int layer, float py, int s1, struct gs_cls *o, int max);
+uint32_t gs_class_mask(int layer, float py, int s1);
 int gs_nshapes(int layer);
 /* the glass wordmark over a base row */
 void gs_word_prepare(const struct g7_word *w, const struct gs_ctx *c);
@@ -307,6 +322,8 @@ struct gd_target {
     int premul;                                 /* 1: a transparent premultiplied buffer */
 };
 void gd_items(const struct g7_layer *l, const int16_t (*bounds)[4], const struct gd_target *t);
+void gd_items_range(const struct g7_layer *l, const int16_t (*bounds)[4], const struct gd_target *t, unsigned i0,
+                    unsigned i1);                /* items i0 .. i1 - 1 */
 /* an item's drawn bounds in panel px (x0, y0, x1, y1), 0 if it draws nothing */
 int gd_bounds(const struct g7_layer *l, const struct g7_item *it, int16_t b[4]);
 int gd_init(void);

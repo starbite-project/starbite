@@ -260,6 +260,106 @@ int gs_row_span(int layer, float py, int s0, int s1, int *x0, int *x1)
 }
 
 int gs_npre(int layer) { return NPRE[layer]; }
+
+/* which prepared shapes s < s1 have py inside their box (bit s), as gs_classes picks them */
+uint32_t gs_class_mask(int layer, float py, int s1)
+{
+    uint32_t m = 0;
+    if (s1 > NSH[layer])
+        s1 = NSH[layer];
+    float fade = g_smooth(170.f, 246.f, py) * (1.f - g_smooth(2480.f, 2620.f, py));
+    for (int si = 0; si < s1; si++) {
+        const struct gsh *s = &SH[layer][si];
+        if (g_abs(py - s->cy) >= s->hby || (s->clip ? s->alpha * fade : s->alpha) < .002f || s->lens)
+            continue;
+        m |= 1U << si;
+    }
+    return m;
+}
+
+/* The moving-frame frost correction (glass.c glb_shift_row): on the row at py, the x spans of the
+ * prepared shapes s < s1 whose box holds py, the later shape winning where they overlap, each with
+ * the linear part of shade() (vibrancy, tint) as a 3 x 3 matrix and its frost mix toward B. */
+int gs_classes(int layer, float py, int s1, struct gs_cls *o, int max)
+{
+    int n = 0;
+    if (s1 > NSH[layer])
+        s1 = NSH[layer];
+    float fade = g_smooth(170.f, 246.f, py) * (1.f - g_smooth(2480.f, 2620.f, py));
+    static const float w[3] = { .2126f, .7152f, .0722f };
+    for (int si = 0; si < s1; si++) {
+        const struct gsh *s = &SH[layer][si];
+        if (g_abs(py - s->cy) >= s->hby || (s->clip ? s->alpha * fade : s->alpha) < .002f || s->lens)
+            continue;
+        int a = (int)__builtin_ceilf(s->cx - s->hbx - .5f), b = (int)__builtin_ceilf(s->cx + s->hbx - .5f);
+        if (a < 0) a = 0;
+        if (b > GW) b = GW;
+        if (a >= b)
+            continue;
+        /* cut [a, b) out of the spans so far, then insert it in order */
+        static struct gs_cls keep[2 * G7_MAX_SHAPES + 2];      /* not on the 8 KiB stack */
+        int m = 0;
+        for (int k = 0; k < n && m + 2 <= (int)(sizeof keep / sizeof keep[0]); k++) {
+            if (o[k].x1 <= a || o[k].x0 >= b) {
+                keep[m++] = o[k];
+                continue;
+            }
+            if (o[k].x0 < a) {
+                keep[m] = o[k];
+                keep[m++].x1 = a;
+            }
+            if (o[k].x1 > b) {
+                keep[m] = o[k];
+                keep[m++].x0 = b;
+            }
+        }
+        struct gs_cls c;
+        c.x0 = a;
+        c.x1 = b;
+        c.mixf = s->mixf;
+        /* a top / bottom rim band row: the straight part's refraction offset (as px_band) */
+        c.oy = 0.f;
+        c.bx0 = c.bx1 = 0;
+        {
+            const float h = 1.5f;
+            float qy = py - s->cy, ddy = g_abs(qy) - s->hby + s->r, lim;
+            if (ddy - h > 0.f)
+                lim = -h;
+            else if (ddy + h <= 0.f)
+                lim = g_min(-h, ddy - 2.f * h - 1e-3f);
+            else
+                lim = -1e9f;
+            float d = ddy > 0.f ? ddy + 1e-3f - s->r : ddy - s->r + s->eps2;
+            if (lim > -1e8f && d > -s->bez - 4.f && !s->lens) {
+                float e = g_sat(1.f + d * s->ibez), bend = 1.f - g_sqrt(g_max(1.f - e * e, 0.f));
+                float X = s->hbx - s->r + lim;
+                if (bend > 0.f && X > 0.f) {
+                    c.oy = (qy < 0.f ? -1.f : 1.f) * bend * s->bez * 1.3f * s->s;
+                    c.bx0 = (int)__builtin_ceilf(s->cx - X - .5f);
+                    c.bx1 = (int)__builtin_ceilf(s->cx + X - .5f);
+                }
+            }
+        }
+        float t[3] = { s->tr, s->tg, s->tb }, k1 = (1.f - s->tA) * 1.1f;
+        for (int r = 0; r < 3; r++)
+            for (int j = 0; j < 3; j++)
+                c.J[3 * r + j] = k1 * ((r == j ? s->vib : 0.f) + (1.f - s->vib) * w[j]) + 1.3f * s->tA * t[r] * w[j];
+        n = 0;
+        int put = 0;
+        for (int k = 0; k < m && n < max; k++) {
+            if (!put && keep[k].x0 >= b) {
+                o[n++] = c;
+                put = 1;
+                if (n >= max)
+                    break;
+            }
+            o[n++] = keep[k];
+        }
+        if (!put && n < max)
+            o[n++] = c;
+    }
+    return n;
+}
 int gs_nshapes(int layer) { return NSH[layer]; }
 
 /* One shape's row, the per-pixel GLASS_FS for pixels i0 .. i1 - 1 (any class). */
@@ -560,6 +660,152 @@ static void px_band(const struct rowc *R, int i0, int i1, float *acc, float *al,
         px_general(R, i, i1, acc, al, rowa5, rowb);
 }
 
+/* A straight side (vertical edge) span: rows where the four normal samples stay on the side's
+ * straight part (ddy + 1.5 <= 0) and pixels nearer the side than the top or bottom by more than
+ * 3 px (ddx > ddy + 3): there GLASS_FS's normal is (+-1, 0) and d depends on x only, so the
+ * refracted samples move along the row: A5, B and A of the row are blended vertically once (VS*)
+ * and every sample is one lerp, instead of 4 bilinear samples and 5 SDF evaluations a pixel. */
+#define VSN (AW + 8)
+static float VS5[3 * VSN], VSA[3 * VSN], VSB[3 * VSN];
+static inline void vs_at(const float *V, int t0, int n, float cx, float o[3])
+{
+    int x0 = g_ifloor(cx);
+    float fx = cx - (float)x0;
+    int k = x0 - t0;
+    if (k < 0) {
+        k = 0;
+        fx = 0.f;
+    } else if (k > n - 2) {
+        k = n - 2;
+        fx = 1.f;
+    }
+    o[0] = V[k] + (V[k + 1] - V[k]) * fx;
+    o[1] = V[VSN + k] + (V[VSN + k + 1] - V[VSN + k]) * fx;
+    o[2] = V[2 * VSN + k] + (V[2 * VSN + k + 1] - V[2 * VSN + k]) * fx;
+}
+static void px_side(const struct rowc *R, int i0, int i1, float *acc, float *al, const float *rowa5,
+                    const float *rowb)
+{
+    if (i0 >= i1)
+        return;
+    const struct gsh *s = R->s;
+    float qy = R->qy, aa = R->aa, iaa = R->iaa, ibez = R->ibez, alpha = R->alpha, G = (float)R->G;
+    /* the samples' x range: the pixels, refracted by up to k13, dispersed by up to k8 */
+    float xa = R->px0 + (float)i0 * G - R->k13 - R->k8 - 2.f, xb = R->px0 + (float)(i1 - 1) * G + R->k13 + R->k8 + 2.f;
+    int a0 = g_ifloor(xa * .25f - .5f), a1 = g_ifloor(xb * .25f - .5f) + 1;
+    int b0 = g_ifloor(xa * .125f - .5f), b1 = g_ifloor(xb * .125f - .5f) + 1;
+    if (a1 - a0 + 1 > VSN || b1 - b0 + 1 > VSN) {
+        px_general(R, i0, i1, acc, al, rowa5, rowb);
+        return;
+    }
+    gw_vrow_a5(R->py, a0, a1, VS5, VSN);
+    gw_vrow_a(R->py, a0, a1, VSA, VSN);
+    if (s->mixf > 0.f)
+        gw_vrow_b(R->py, b0, b1, VSB, VSN);
+    int na = a1 - a0 + 1, nb = b1 - b0 + 1;
+    float ddy = g_abs(qy) - s->hby + s->r;
+    float qs = qy - 24.f;
+    for (int i = i0; i < i1; i++) {
+        float px = R->px0 + (float)i * G;
+        float qx = px - s->cx;
+        float ddx = g_abs(qx) - s->hbx + s->r;
+        float d = ddx > 0.f ? ddx + 1e-3f - s->r : g_max(ddx, ddy) - s->r + s->eps2;
+        float *A = acc + 3 * i;
+        if (!s->lens && d > -aa) {
+            float sd2 = sdq(s, qx, qs);
+            float sh = .32f * alpha * g_exp(-g_max(sd2, 0.f) * (1.f / 48.f)) * g_smooth(-aa, aa * 2.f, d);
+            float k = 1.f - sh;
+            A[0] *= k;
+            A[1] *= k;
+            A[2] *= k;
+            al[i] += sh * (1.f - al[i]);
+        }
+        if (d > aa)
+            continue;
+        float cov = g_sat(.5f - d * iaa) * alpha;
+        int ei = R->gx0 + i - s->ex0;
+        float spec = (ei >= 0 && ei < s->exn ? s->ex[ei] : 0.f) * R->ey;
+        float col[3], e, bend, nx = 0.f;
+        if (d <= R->deep) {
+            const float *fa = rowa5 + 3 * i, *fb = rowb + 3 * i;
+            col[0] = fa[0] * R->omx + fb[0] * s->mixf;
+            col[1] = fa[1] * R->omx + fb[1] * s->mixf;
+            col[2] = fa[2] * R->omx + fb[2] * s->mixf;
+            e = 0.f;
+            bend = 0.f;
+        } else {
+            nx = qx < 0.f ? -1.f : 1.f;
+            e = g_sat(1.f + d * ibez);
+            bend = 1.f - g_sqrt(g_max(1.f - e * e, 0.f));
+            if (bend > 0.f) {
+                float ox = nx * bend * R->k13, x = px + ox, t[3];
+                vs_at(VS5, a0, na, x * .25f - .5f, col);
+                if (s->mixf > 0.f) {
+                    vs_at(VSB, b0, nb, x * .125f - .5f, t);
+                    col[0] += (t[0] - col[0]) * s->mixf;
+                    col[1] += (t[1] - col[1]) * s->mixf;
+                    col[2] += (t[2] - col[2]) * s->mixf;
+                }
+                float dx = nx * bend * R->k8;
+                vs_at(VSA, a0, na, (x + dx) * .25f - .5f, t);
+                col[0] += (t[0] - col[0]) * bend;
+                vs_at(VSA, a0, na, (x - dx) * .25f - .5f, t);
+                col[2] += (t[2] - col[2]) * bend;
+            } else {
+                const float *fa = rowa5 + 3 * i, *fb = rowb + 3 * i;
+                col[0] = fa[0] * R->omx + fb[0] * s->mixf;
+                col[1] = fa[1] * R->omx + fb[1] * s->mixf;
+                col[2] = fa[2] * R->omx + fb[2] * s->mixf;
+            }
+        }
+        shade_tail(col, d, nx, 0.f, bend, s->tr, s->tg, s->tb, s->tA, s->vib, s->milk, R->lit, R->rimk, R->Ldx, R->Ldy,
+                   spec);
+        if (s->lens) {
+            float k = (1.f - e) * .82f;
+            col[0] += (A[0] * 1.07f + .018f - col[0]) * k;
+            col[1] += (A[1] * 1.07f + .018f - col[1]) * k;
+            col[2] += (A[2] * 1.07f + .018f - col[2]) * k;
+        }
+        A[0] += (col[0] - A[0]) * cov;
+        A[1] += (col[1] - A[1]) * cov;
+        A[2] += (col[2] - A[2]) * cov;
+        al[i] += cov * (1.f - al[i]);
+    }
+}
+
+/* [a, b) per pixel, its straight side part (per pixel: ddx > ddy + 3, on rows with ddy + 1.5 <= 0)
+ * through px_side */
+static void px_sides(const struct rowc *R, int a, int b, float *acc, float *al, const float *rowa5, const float *rowb)
+{
+    if (a >= b)
+        return;
+    const struct gsh *s = R->s;
+    float ddy = g_abs(R->qy) - s->hby + s->r;
+    if (ddy + 1.5f > 0.f) {
+        px_general(R, a, b, acc, al, rowa5, rowb);
+        return;
+    }
+    /* ddx > ddy + 3 + 1e-3: |qx| > hbx - r + ddy + 3.001 */
+    float X = s->hbx - s->r + ddy + 3.001f, G = (float)R->G;
+    int la = g_ifloor((s->cx - X - R->px0) / G) + 1;   /* left side: i < la ... strictly px < cx - X */
+    int lb = (int)__builtin_ceilf((s->cx + X - R->px0) / G);  /* right side: i >= lb */
+    /* pixels with px < cx - X or px > cx + X; check the boundary pixels exactly */
+    while (la > a && !(R->px0 + (float)(la - 1) * G < s->cx - X))
+        la--;
+    while (la < b && R->px0 + (float)la * G < s->cx - X)
+        la++;
+    while (lb < b && !(R->px0 + (float)lb * G > s->cx + X))
+        lb++;
+    while (lb > a && R->px0 + (float)(lb - 1) * G > s->cx + X)
+        lb--;
+    int l1 = la < a ? a : la > b ? b : la, r0 = lb < a ? a : lb > b ? b : lb;
+    if (l1 > r0)
+        l1 = r0;
+    px_side(R, a, l1, acc, al, rowa5, rowb);
+    px_general(R, l1, r0, acc, al, rowa5, rowb);
+    px_side(R, r0, b, acc, al, rowa5, rowb);
+}
+
 /* a general segment [a, b): its straight-band part (if any) through px_band, the rest per pixel */
 static void px_rim(const struct rowc *R, int a, int b, float *acc, float *al, const float *rowa5, const float *rowb)
 {
@@ -585,12 +831,12 @@ static void px_rim(const struct rowc *R, int a, int b, float *acc, float *al, co
     if (ba < a) ba = a;
     if (bb > b) bb = b;
     if (bb - ba < 8) {
-        px_general(R, a, b, acc, al, rowa5, rowb);
+        px_sides(R, a, b, acc, al, rowa5, rowb);
         return;
     }
-    px_general(R, a, ba, acc, al, rowa5, rowb);
+    px_sides(R, a, ba, acc, al, rowa5, rowb);
     px_band(R, ba, bb, acc, al, rowa5, rowb);
-    px_general(R, bb, b, acc, al, rowa5, rowb);
+    px_sides(R, bb, b, acc, al, rowa5, rowb);
 }
 
 /* the first pixel index in [a, b) whose sdq is > th, on a side where it grows with i (dir 1) or

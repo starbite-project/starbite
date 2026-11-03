@@ -526,6 +526,34 @@ static inline void bil10(const uint32_t *T, int w, int h, float cx, float cy, fl
     out[1] = w00 * UNP10_G(p00) + w01 * UNP10_G(p01) + w10 * UNP10_G(p10) + w11 * UNP10_G(p11);
     out[2] = w00 * UNP10_B(p00) + w01 * UNP10_B(p01) + w10 * UNP10_B(p10) + w11 * UNP10_B(p11);
 }
+/* one panel row (py) of A5, A or B blended vertically, texels t0 .. t1 (clamped to the edge), planar
+ * into out[c][t - t0]: the side spans' horizontal samples are then one lerp (glass_shade.c px_side) */
+static void vrow_any(const uint32_t *T, int tw, int th, int pp, int ten, float py, int t0, int t1, float *o, int stride)
+{
+    float cy = py / (float)pp - .5f;
+    int y0 = g_ifloor(cy);
+    float fy = cy - (float)y0;
+    int ya = y0 < 0 ? 0 : y0 >= th ? th - 1 : y0, yb = y0 + 1 < 0 ? 0 : y0 + 1 >= th ? th - 1 : y0 + 1;
+    const uint32_t *A = T + ya * tw, *B = T + yb * tw;
+    for (int t = t0; t <= t1; t++) {
+        int tc = t < 0 ? 0 : t >= tw ? tw - 1 : t;
+        uint32_t a = A[tc], b = B[tc];
+        int k = t - t0;
+        if (ten) {
+            o[k] = UNP10_R(a) + (UNP10_R(b) - UNP10_R(a)) * fy;
+            o[stride + k] = UNP10_G(a) + (UNP10_G(b) - UNP10_G(a)) * fy;
+            o[2 * stride + k] = UNP10_B(a) + (UNP10_B(b) - UNP10_B(a)) * fy;
+        } else {
+            o[k] = ((float)CR(a) + ((float)CR(b) - (float)CR(a)) * fy) * (1.f / 255.f);
+            o[stride + k] = ((float)CG(a) + ((float)CG(b) - (float)CG(a)) * fy) * (1.f / 255.f);
+            o[2 * stride + k] = ((float)CB(a) + ((float)CB(b) - (float)CB(a)) * fy) * (1.f / 255.f);
+        }
+    }
+}
+void gw_vrow_a5(float py, int t0, int t1, float *o, int stride) { vrow_any(TEX(P_A5), AW, AH, 4, 1, py, t0, t1, o, stride); }
+void gw_vrow_a(float py, int t0, int t1, float *o, int stride) { vrow_any(TEX(P_A), AW, AH, 4, 0, py, t0, t1, o, stride); }
+void gw_vrow_b(float py, int t0, int t1, float *o, int stride) { vrow_any(TEX(P_B), BW, BH, 8, 0, py, t0, t1, o, stride); }
+
 void gw_sample_a(float px, float py, float out[3]) { bil8(TEX(P_A), AW, AH, px * .25f - .5f, py * .25f - .5f, out); }
 void gw_sample_a5(float px, float py, float out[3]) { bil10(TEX(P_A5), AW, AH, px * .25f - .5f, py * .25f - .5f, out); }
 void gw_sample_b(float px, float py, float out[3]) { bil8(TEX(P_B), BW, BH, px * .125f - .5f, py * .125f - .5f, out); }
@@ -571,9 +599,96 @@ static void row_at(const uint32_t *T, int tw, int th, int pp, int ten, float py,
         o[2] = vrow[2][k] + (vrow[2][k + 1] - vrow[2][k]) * fx;
     }
 }
-void gw_row_a5_at(float py, int n, float px0, float dpx, float *rgb) { row_at(TEX(P_A5), AW, AH, 4, 1, py, n, px0, dpx, rgb); }
-void gw_row_b_at(float py, int n, float px0, float dpx, float *rgb) { row_at(TEX(P_B), BW, BH, 8, 0, py, n, px0, dpx, rgb); }
-void gw_row_a_at(float py, int n, float px0, float dpx, float *rgb) { row_at(TEX(P_A), AW, AH, 4, 0, py, n, px0, dpx, rgb); }
+/* the half-resolution grid (panel x = 2g + 1): the texel rows blended 4 texels a NEON step, then the
+ * grid's fixed weights, 8 samples a step. A (pp 4): g = 2m at .75 between texels m - 1, m and
+ * g = 2m + 1 at .25 between m, m + 1. B (pp 8): g = 4m + j at .625, .875 (m - 1, m), .125, .375 (m, m + 1). */
+static float hrow[3][AW + 16];
+static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float py, int n, int g0, float *rgb)
+{
+    float cy = py / (float)pp - .5f;
+    int y0 = g_ifloor(cy);
+    float fy = cy - (float)y0;
+    int ya = y0 < 0 ? 0 : y0 >= th ? th - 1 : y0, yb = y0 + 1 < 0 ? 0 : y0 + 1 >= th ? th - 1 : y0 + 1;
+    const uint32_t *A = T + ya * tw, *B = T + yb * tw;
+    int sh = pp == 4 ? 1 : 2;                       /* grid samples per texel: 2 or 4 */
+    int t0 = (g0 >> sh) - 1, t1 = ((g0 + n - 1) >> sh) + 2;    /* texels t0 .. t1 */
+    int nt = t1 - t0 + 1;
+    const float32x4_t vfy = vdupq_n_f32(fy), k10 = vdupq_n_f32(1.f / 1023.f), k8 = vdupq_n_f32(1.f / 255.f);
+    for (int k = 0; k < nt; k += 4) {
+        uint32_t ta[4], tb[4];
+        for (int j = 0; j < 4; j++) {
+            int t = t0 + k + j, tc = t < 0 ? 0 : t >= tw ? tw - 1 : t;
+            ta[j] = A[tc];
+            tb[j] = B[tc];
+        }
+        uint32x4_t a = vld1q_u32(ta), b = vld1q_u32(tb);
+        for (int c = 0; c < 3; c++) {
+            float32x4_t va, vb;
+            if (ten) {
+                int32x4_t sv = vdupq_n_s32(-(20 - 10 * c));
+                va = vmulq_f32(vcvtq_f32_u32(vandq_u32(vshlq_u32(a, sv), vdupq_n_u32(1023U))), k10);
+                vb = vmulq_f32(vcvtq_f32_u32(vandq_u32(vshlq_u32(b, sv), vdupq_n_u32(1023U))), k10);
+            } else {
+                int32x4_t sv = vdupq_n_s32(-(16 - 8 * c));
+                va = vmulq_f32(vcvtq_f32_u32(vandq_u32(vshlq_u32(a, sv), vdupq_n_u32(255U))), k8);
+                vb = vmulq_f32(vcvtq_f32_u32(vandq_u32(vshlq_u32(b, sv), vdupq_n_u32(255U))), k8);
+            }
+            vst1q_f32(hrow[c] + k, vfmaq_f32(va, vsubq_f32(vb, va), vfy));
+        }
+    }
+    /* sample g (= g0 + i) from texels (lo, lo + 1) at f */
+    for (int i = 0; i < n; i++) {
+        int g = g0 + i, m = g >> sh, j = g & ((1 << sh) - 1), lo;
+        float f;
+        if (sh == 1) {
+            lo = j ? m : m - 1;
+            f = j ? .25f : .75f;
+        } else {
+            lo = j < 2 ? m - 1 : m;
+            f = j == 0 ? .625f : j == 1 ? .875f : j == 2 ? .125f : .375f;
+        }
+        int k = lo - t0;
+        float *o = rgb + 3 * i;
+        o[0] = hrow[0][k] + (hrow[0][k + 1] - hrow[0][k]) * f;
+        o[1] = hrow[1][k] + (hrow[1][k + 1] - hrow[1][k]) * f;
+        o[2] = hrow[2][k] + (hrow[2][k + 1] - hrow[2][k]) * f;
+    }
+}
+static inline int half_grid(float px0, float dpx, int n, int *g0)
+{
+    if (dpx != 2.f || n > 2 * AW + 8)
+        return 0;
+    float g = (px0 - 1.f) * .5f;
+    int gi = (int)g;
+    if ((float)gi != g || gi < -4)
+        return 0;
+    *g0 = gi;
+    return 1;
+}
+void gw_row_a5_at(float py, int n, float px0, float dpx, float *rgb)
+{
+    int g0;
+    if (half_grid(px0, dpx, n, &g0))
+        row_half(TEX(P_A5), AW, AH, 4, 1, py, n, g0, rgb);
+    else
+        row_at(TEX(P_A5), AW, AH, 4, 1, py, n, px0, dpx, rgb);
+}
+void gw_row_b_at(float py, int n, float px0, float dpx, float *rgb)
+{
+    int g0;
+    if (half_grid(px0, dpx, n, &g0))
+        row_half(TEX(P_B), BW, BH, 8, 0, py, n, g0, rgb);
+    else
+        row_at(TEX(P_B), BW, BH, 8, 0, py, n, px0, dpx, rgb);
+}
+void gw_row_a_at(float py, int n, float px0, float dpx, float *rgb)
+{
+    int g0;
+    if (half_grid(px0, dpx, n, &g0))
+        row_half(TEX(P_A), AW, AH, 4, 0, py, n, g0, rgb);
+    else
+        row_at(TEX(P_A), AW, AH, 4, 0, py, n, px0, dpx, rgb);
+}
 /* full-resolution rows: blend the two texel rows once, then the fixed horizontal pattern (A: 4
  * panel px per texel, B: 8). Pixel x = pp t + pp / 2 + j (j = 0 .. pp - 1) lies between texels t
  * and t + 1 at fx = (j + .5) / pp: one vector of weights per texel, 4 pixels a step. */

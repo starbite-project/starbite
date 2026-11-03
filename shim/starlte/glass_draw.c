@@ -752,11 +752,54 @@ static void draw_rect(const struct dc *c, const struct g7_item *it)
     /* dashes: Chrome's dashed border, dash = gap = 2 x width, fitted to the circumference */
     float circ = 6.28318531f * g_max(r - ring * .5f, 1.f);
     float nd = g_max(2.f, g_floor(circ / (ring * 4.f) + .5f));
+    /* a square-cornered filled rect: where a pixel centre is half a pixel inside, the coverage is 1
+     * and every pixel takes the same blend (the full-panel black of the end screens, bars) */
+    int fx0 = 1, fx1 = 0, fy0 = 1, fy1 = 0;
+    uint32_t fa = 0;
+    if (r <= 0.f && ring <= 0.f && !c->fade && !c->clip && !c->t->premul && ca > 0.f) {
+        /* target px tx with pan_x(tx) in [q->x + .5 / s, q->x + q->w - .5 / s] */
+        float is = c->is, ox = c->t->ox, oy = c->t->oy;
+        fx0 = (int)__builtin_ceilf((q->x + .5f * is) * s + ox - .5f);
+        fx1 = g_ifloor((q->x + q->w - .5f * is) * s + ox - .5f) + 1;
+        fy0 = (int)__builtin_ceilf((q->y + .5f * is) * s + oy - .5f);
+        fy1 = g_ifloor((q->y + q->h - .5f * is) * s + oy - .5f) + 1;
+        fx0 = fx0 < c->x0 ? c->x0 : fx0;
+        fx1 = fx1 > c->x1 ? c->x1 : fx1;
+        fy0 = fy0 < c->y0 ? c->y0 : fy0;
+        fy1 = fy1 > c->y1 ? c->y1 : fy1;
+        fa = (uint32_t)(g_sat(ca) * 255.f + .5f);
+    }
+    const uint8x8_t vfa = vdup_n_u8((uint8_t)fa), via = vdup_n_u8((uint8_t)(255U - fa));
+    const uint8x8_t vr = vdup_n_u8((uint8_t)CR(it->color)), vg = vdup_n_u8((uint8_t)CG(it->color)),
+                    vb = vdup_n_u8((uint8_t)CB(it->color));
     for (int y = c->y0; y < c->y1; y++) {
         float py = pan_y(c, y);
         uint32_t *d = c->t->px + (long)y * c->t->stride;
         float fk = c->fade ? fade_y(py) : 1.f;
+        int ra = c->x1, rb = c->x1;
+        if (y >= fy0 && y < fy1 && fx0 < fx1) {
+            ra = fx0;
+            rb = fx1;
+            /* blend(): (c a + v (255 - a)) / 255 rounded, 8 pixels a step */
+            int x = ra;
+            for (; x + 8 <= rb; x += 8) {
+                uint8x8x4_t v = vld4_u8((const uint8_t *)(d + x));
+                const uint8x8_t src[3] = { vb, vg, vr };
+                for (int k = 0; k < 3; k++) {
+                    uint16x8_t t = vaddq_u16(vmlal_u8(vmull_u8(src[k], vfa), v.val[k], via), vdupq_n_u16(128));
+                    v.val[k] = vshrn_n_u16(vaddq_u16(t, vshrq_n_u16(t, 8)), 8);
+                }
+                v.val[3] = vdup_n_u8(255);
+                vst4_u8((uint8_t *)(d + x), v);
+            }
+            for (; x < rb; x++)
+                blend(d + x, CR(it->color), CG(it->color), CB(it->color), ca, 0);
+        }
         for (int x = c->x0; x < c->x1; x++) {
+            if (x == ra) {
+                x = rb - 1;
+                continue;
+            }
             float px = pan_x(c, x);
             float dd = rr_sd(px, py, cx, cy, hx, hy, r);
             float cov = g_sat(.5f - dd * s);
@@ -781,6 +824,28 @@ static void draw_rect(const struct dc *c, const struct g7_item *it)
     }
 }
 
+/* erf from a table (g_erf at 4096 points over [-4, 4], linear between: within 2e-6 of it) */
+#define ERF_N 4096
+static float ERF_T[ERF_N + 2];
+static int erf_ok;
+static void erf_init(void)
+{
+    for (int i = 0; i <= ERF_N + 1; i++)
+        ERF_T[i] = g_erf(-4.f + 8.f * (float)i / (float)ERF_N);
+    erf_ok = 1;
+}
+static inline float erf_t(float u)
+{
+    float t = (u + 4.f) * ((float)ERF_N / 8.f);
+    if (t <= 0.f)
+        return -1.f;
+    if (t >= (float)ERF_N)
+        return 1.f;
+    int i = (int)t;
+    float f = t - (float)i;
+    return ERF_T[i] + (ERF_T[i + 1] - ERF_T[i]) * f;
+}
+
 /* box-shadow of a rounded rect (Gaussian, sigma = blur / 2): the vertical integral sampled at
  * 6 points, the horizontal one exact through erf (as GPU box-shadow renderers do) */
 static void draw_shadow(const struct dc *c, const struct g7_item *it)
@@ -791,27 +856,32 @@ static void draw_shadow(const struct dc *c, const struct g7_item *it)
     float hx = w * .5f, hy = h * .5f, cx = x0 + hx, cy = y0 + hy;
     r = g_min(r, g_min(hx, hy));
     float ca = (float)CA(it->color) / 255.f * c->a;
+    float k = .70710678f / g_max(sig, 1e-3f);
     for (int y = c->y0; y < c->y1; y++) {
         float py = pan_y(c, y) - cy;
         uint32_t *d = c->t->px + (long)y * c->t->stride;
+        /* the row's six samples: their weight and half width (independent of x) */
+        float wgt[6], cu[6];
+        if (sig >= .3f) {
+            float lo = py - hy, hi = py + hy;
+            float st = g_clamp(-3.f * sig, lo, hi), en = g_clamp(3.f * sig, lo, hi);
+            float step = (en - st) / 6.f, yy = st + step * .5f;
+            for (int i = 0; i < 6; i++, yy += step) {
+                float ly = py - yy;
+                float delta = g_min(hy - r - g_abs(ly), 0.f);
+                cu[i] = (hx - r + g_sqrt(g_max(0.f, r * r - delta * delta))) * k;
+                wgt[i] = .5f * g_exp(-(yy * yy) / (2.f * sig * sig)) * step * (.39894228f / sig);
+            }
+        }
         for (int x = c->x0; x < c->x1; x++) {
             float px = pan_x(c, x) - cx, v;
             if (sig < .3f) {
                 v = g_sat(.5f - rr_sd(px, py, 0.f, 0.f, hx, hy, r) * c->t->s);
             } else {
-                float lo = py - hy, hi = py + hy;
-                float st = g_clamp(-3.f * sig, lo, hi), en = g_clamp(3.f * sig, lo, hi);
-                float step = (en - st) / 6.f, yy = st + step * .5f;
+                float u = px * k;
                 v = 0.f;
-                for (int i = 0; i < 6; i++, yy += step) {
-                    float ly = py - yy;
-                    float delta = g_min(hy - r - g_abs(ly), 0.f);
-                    float curved = hx - r + g_sqrt(g_max(0.f, r * r - delta * delta));
-                    float k = .70710678f / sig;
-                    float ix = .5f * (g_erf((px + curved) * k) - g_erf((px - curved) * k));
-                    v += ix * g_exp(-(yy * yy) / (2.f * sig * sig)) * step;
-                }
-                v *= .39894228f / sig;
+                for (int i = 0; i < 6; i++)
+                    v += wgt[i] * (erf_t(u + cu[i]) - erf_t(u - cu[i]));
             }
             if (v <= .001f)
                 continue;
@@ -1002,7 +1072,14 @@ int gd_bounds(const struct g7_layer *l, const struct g7_item *it, int16_t b[4])
 
 void gd_items(const struct g7_layer *l, const int16_t (*bounds)[4], const struct gd_target *t)
 {
-    for (unsigned i = 0; i < l->nitem; i++) {
+    gd_items_range(l, bounds, t, 0, l->nitem);
+}
+void gd_items_range(const struct g7_layer *l, const int16_t (*bounds)[4], const struct gd_target *t, unsigned i0,
+                    unsigned i1)
+{
+    if (i1 > l->nitem)
+        i1 = l->nitem;
+    for (unsigned i = i0; i < i1; i++) {
         const struct g7_item *it = &l->item[i];
         const int16_t *b = bounds[i];
         if (b[2] <= b[0] || it->a <= 0.f)
@@ -1061,6 +1138,8 @@ void gd_items(const struct g7_layer *l, const int16_t (*bounds)[4], const struct
 int gd_init(void)
 {
     cache_reset();
+    if (!erf_ok)
+        erf_init();
     int ok = 1;
     for (unsigned id = 1; id < SB7_F_COUNT; id++) {
         FT[id].f = 0;

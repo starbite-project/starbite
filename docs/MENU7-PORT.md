@@ -157,11 +157,18 @@ v7 uses **0x84000000..0x88800000** (72 MiB, write-back), nothing else:
 | Address | Size | Name | Owner | Holds |
 |---|---|---|---|---|
 | 0x84000000 | 17 MiB | `G7_CANVAS` | glass | the composed panel (ARGB, stride 1440); dirty rects go from here to the FB |
-| 0x85100000 | 17 MiB | `G7_SHARP` | glass | the base layer frozen under an overlay; while nothing is frozen, GLB (the base glass composed over BG8, without the lens) |
+| 0x85100000 | 17 MiB | `G7_SHARP` | glass | the base layer frozen under an overlay; while nothing is frozen, GLB (the base glass composed over BG8, without the lens); on an end screen (frozen, back 1) CURT, the panel below the curtain |
 | 0x86200000 | 17 MiB | `G7_BASE` | glass | BG8: wallpaper (720 x 1480, bilinear to the panel) x dim .8, dithered: the opaque base, static after the intro |
-| 0x87300000 | 18 MiB | `G7_POOL` | glass | WALLTEX 720 x 1480 (4.26 MB), FIELD 720 x 1480 (intro's static field, 4.26 MB), blur A 360 x 740 (1.07 MB), frost A5 360 x 740 (1.07 MB), blur B 180 x 370 (0.27 MB), SOFT 720 x 1480 (4.26 MB), corner/edge tables (~2 MB), row buffers; glass lays it out |
+| 0x87300000 | 18 MiB | `G7_POOL` | glass | WALLTEX 720 x 1480 (4.26 MB), FIELD 720 x 1480 (intro's static field, 4.26 MB), blur A 360 x 740 (1.07 MB), frost A5 360 x 740 (1.07 MB), blur B 180 x 370 (0.27 MB), SOFT 720 x 1480 (4.26 MB; while nothing is frozen TPL, the base glass's transmission, 1440 x 2960 x 8 bits), tables and row buffers (1 MiB, below), decode scratch (1 MiB); glass lays it out (`glass_int.h`, static asserts) |
 | 0x88500000 | 3 MiB | `G7_CACHE` | glass | decoded icons and provider glyphs, rendered OS tiles (124 for every row, 92, 220, 380 on demand), LRU |
 | 0x88800000 | 8 MiB | (ui.c) | - | `UI_SCRATCH` of ui.c (EngineerMode, v6): untouched |
+
+The pool's table area (`P_TAB`, 1 MiB): 0 .. 0x2B200 the wallpaper's radial and column tables
+(`glass_wall.c`), 0x2C000 the row buffers (`glass.c`, 10 x 1440 floats), 0x40000 the sdSq g(t)
+tables, 0x50000 the specular column tables (5 sets x 20 shapes x 1440 floats, .. 0xDCA00), 0xDD000
+the half-resolution rows (.. 0xEF690), 0xF0000 the moving frames' frost-correction rows (18 x 360
+floats and 3 x 1440 int16, .. 0xF8700). Each region has a `_Static_assert` against the next. No v7
+file's `.bss` exceeds 128 KiB (glass.c 101 KiB, glass_shade.c 101 KiB, menu7.c 90 KiB).
 
 All are overlaid only by code that does not run with v7: anim.c's buffers (0x84000000..
 0x85c00000, the v6 intro), menu.c's `MENU_SAVE` (0x86000000, v5), menu6.c's `CANVAS` and
