@@ -15,6 +15,7 @@
  *
  * Display list lines (numbers are floats unless noted; colours 0xAARRGGBB; # comments):
  *   frame [full] [refreeze]           starts a frame (the previous one is drawn)
+ *   idle                              draws the frame so far, then g7_idle until the glass rests
  *   dim D | back B | light lx ly | wall sx sy si sr sw rr rf amb | word tm tf ta cx cy cw ch
  *   layer base|over                   following lines go to that layer
  *   clip x0 y0 x1 y1 r                the layer's next clip (index 1, 2, ...)
@@ -206,6 +207,53 @@ uint32_t __wrap_g7_frame(const struct g7_frame *f)
             }
         }
     }
+    /* H7_MOTIONCHECK=1: every drawn frame (motion frames included, no g7_idle first) against a
+     * G7_F_FULL redraw of the same frame: "MC <ms> mean <m> n16 <a> n64 <b> worst <w>" (per pixel the
+     * largest channel error; n16 / n64: pixels over 16 / 64 of 255). Motion frames are approximate
+     * (half resolution, shifted rows); n64 is the regression figure (docs/MENU7-BUILD.md 6.1). */
+    {
+        const char *mc = getenv("H7_MOTIONCHECK");
+        if (run_mode && px && mc && *mc == '1') {
+            fflush(stdout);
+            pid_t pid = fork();
+            if (pid == 0) {
+                static uint32_t a[G7_W * G7_H];
+                memcpy(a, FB, sizeof a);
+                struct g7_frame g = *f;
+                g.flags |= G7_F_FULL;
+                __real_g7_frame(&g);
+                unsigned long long sum = 0;
+                unsigned n16 = 0, n64 = 0, worst = 0;
+                for (int i = 0; i < G7_W * G7_H; i++) {
+                    unsigned m = 0;
+                    for (int s = 0; s < 24; s += 8) {
+                        int e = abs((int)((a[i] >> s) & 255) - (int)((FB[i] >> s) & 255));
+                        if ((unsigned)e > m)
+                            m = (unsigned)e;
+                    }
+                    sum += m;
+                    n16 += m > 16;
+                    n64 += m > 64;
+                    if (m > worst)
+                        worst = m;
+                }
+                printf("MC %.0f mean %.3f n16 %u n64 %u worst %u\n", stub_now_us() / 1e3,
+                       (double)sum / (G7_W * G7_H), n16, n64, worst);
+                /* H7_MCDUMP=<ms>: that frame as drawn (mc-frame.ppm) and redrawn in full (mc-full.ppm) */
+                const char *md = getenv("H7_MCDUMP");
+                if (md && (long)(stub_now_us() / 1e3 + .5) == atol(md)) {
+                    write_ppm("mc-frame.ppm", a);
+                    write_ppm("mc-full.ppm", FB);
+                }
+                fflush(stdout);
+                _exit(0);
+            }
+            if (pid > 0) {
+                int stt;
+                waitpid(pid, &stt, 0);
+            }
+        }
+    }
     if (run_mode)
         printf("T7 %.0f %.2f %u %s%s\n", stub_now_us() / 1e3,
                (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6, px,
@@ -273,6 +321,13 @@ static void parse_list(const char *path)
             }
             L = &LBASE;
             have = 1;
+        } else if (!strcmp(k, "idle")) {
+            /* draw the frame so far, then let the renderer finish its rest bands (g7_idle) */
+            if (have)
+                draw_frame();
+            have = 0;
+            while (g7_idle())
+                ;
         } else if (!strcmp(k, "dim") && nt >= 2) F.dim = FV(1);
         else if (!strcmp(k, "back") && nt >= 2) F.back = FV(1);
         else if (!strcmp(k, "light") && nt >= 3) { F.lx = FV(1); F.ly = FV(2); }

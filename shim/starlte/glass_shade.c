@@ -296,6 +296,16 @@ int gs_classes(int layer, float py, int s1, struct gs_cls *o, int max)
         if (b > GW) b = GW;
         if (a >= b)
             continue;
+        struct gs_cls c;
+        c.has_u = 0;
+        for (int k = 0; k < n; k++)
+            if (o[k].x0 <= a && o[k].x1 >= b) {
+                c.has_u = 1;
+                c.umixf = o[k].mixf;
+                for (int j = 0; j < 9; j++)
+                    c.uJ[j] = o[k].J[j];
+                break;
+            }
         /* cut [a, b) out of the spans so far, then insert it in order */
         static struct gs_cls keep[2 * G7_MAX_SHAPES + 2];      /* not on the 8 KiB stack */
         int m = 0;
@@ -313,7 +323,7 @@ int gs_classes(int layer, float py, int s1, struct gs_cls *o, int max)
                 keep[m++].x0 = b;
             }
         }
-        struct gs_cls c;
+        c.si = si;
         c.x0 = a;
         c.x1 = b;
         c.mixf = s->mixf;
@@ -359,6 +369,22 @@ int gs_classes(int layer, float py, int s1, struct gs_cls *o, int max)
             o[n++] = c;
     }
     return n;
+}
+int gs_cover_row(int layer, int si, float py, int x0, int x1, float *cov)
+{
+    const struct gsh *s = &SH[layer][si];
+    float fade = g_smooth(170.f, 246.f, py) * (1.f - g_smooth(2480.f, 2620.f, py));
+    float al = s->clip ? s->alpha * fade : s->alpha, iaa = 1.f / s->aa, qy = py - s->cy;
+    float ay = g_abs(qy);
+    int edge = ay > s->hby - 2.f * s->aa - 1.f;              /* the top / bottom edge: every pixel */
+    int corner = ay > s->hby - s->r - 1.f;
+    /* pixels with |qx| <= in are inside by more than the AA width */
+    float in = edge ? -1.f : corner ? s->hbx - s->r - 1.f : s->hbx - 2.f * s->aa - 1.f;
+    for (int x = x0; x < x1; x++) {
+        float qx = (float)x + .5f - s->cx;
+        cov[x - x0] = g_abs(qx) <= in ? al : g_sat(.5f - sdq(s, qx, qy) * iaa) * al;
+    }
+    return corner || edge;
 }
 int gs_nshapes(int layer) { return NSH[layer]; }
 

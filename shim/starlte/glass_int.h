@@ -297,11 +297,17 @@ struct gs_cls {
     float mixf;                     /* frost toward B */
     float oy;                       /* on a top or bottom rim band row: the refraction's y offset */
     int bx0, bx1;                   /* ... over these pixels (the band's straight part) */
+    int si;                         /* the prepared shape */
+    int has_u;                      /* one span lies under the whole box (a tile on its card): */
+    float uJ[9], umixf;             /* its J and mix, for the pixels of the box the shape leaves */
 };
 /* the row's x spans of prepared shapes s < s1 (box holds py, later wins), with shade()'s linear
  * part J (out = J frost) and the frost's mix toward B: the moving frames' frost correction */
 int gs_classes(int layer, float py, int s1, struct gs_cls *o, int max);
 uint32_t gs_class_mask(int layer, float py, int s1);
+/* shape si's coverage as shade() takes it (edge AA x alpha x the viewport fade) on the row at py,
+ * pixels x0 .. x1 - 1; returns 1 on a corner or top / bottom edge row (it changes from row to row) */
+int gs_cover_row(int layer, int si, float py, int x0, int x1, float *cov);
 int gs_nshapes(int layer);
 /* the glass wordmark over a base row */
 void gs_word_prepare(const struct g7_word *w, const struct gs_ctx *c);

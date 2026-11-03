@@ -50,6 +50,7 @@ static int inited, baked, first = 1, frozen, base_ok;
 static struct g7_wall cur_wall;
 static float cur_dim = -1.f, cur_back = -1.f, cur_lx, cur_ly;
 static struct g7_word cur_word;
+static struct g7_word frz_word;     /* the wordmark at the freeze (sharp_refine) */
 static struct gs_ctx CBASE, COVER;
 static const struct g7_layer *LB, *LO;
 static float back_now, glb_soft = -1.f;
@@ -109,11 +110,24 @@ static void dirty_b(const int16_t b[4]) { dirty(b[0], b[1], b[2], b[3]); }
 static int16_t GV0[GH], GV1[GH];
 static uint8_t GAPX[GH];            /* GLB row drawn at half resolution (motion): redraw it at rest */
 static int napx;                    /* rows with GAPX set */
+/* Shifted rows (shift_apply): GOF, where the row's moving glass sits in GLB minus where it is (px,
+ * |GOF| <= GOF_MAX: the shift takes the integer dy from where the glass sits, so rounding never adds
+ * up; a horizontal edge row is shaded again at any offset), and GSN,
+ * the shifts since the row was shaded (each adds the correction's quantisation and rim error; at
+ * SHIFT_MAX the row is shaded again instead). GSN_MIXED: shaded in part over shifted content (two
+ * offsets in one row), never a shift's source. */
+#define SHIFT_MAX 4
+#define GOF_MAX 1.001f
+#define GSN_MIXED 255
+static float GOF[GH];
+static uint8_t GSN[GH];
 static void glb_inval_all(void)
 {
     for (int y = 0; y < GH; y++) {
         GV0[y] = GV1[y] = 0;
         GAPX[y] = 0;
+        GOF[y] = 0.f;
+        GSN[y] = 0;
     }
     napx = 0;
 }
@@ -201,7 +215,7 @@ struct pent {
 };
 struct sext {                       /* a shape's entry, for the shift: all but y, and y */
     uint32_t nyh;
-    float y;
+    float y, h;
     uint8_t clip;
 };
 static struct sext PSX[G7_MAX_SHAPES], CSX[G7_MAX_SHAPES];         /* base layer: previous, this frame */
@@ -212,10 +226,11 @@ struct oext {                       /* an over shape: all but its box, its box, 
 static struct oext POX[G7_MAX_SHAPES], COX[G7_MAX_SHAPES];
 static uint64_t over_area;          /* this frame: the area of the over glass's changes */
 static uint8_t AFF[GH];             /* rows a moving GLB shape touched (old or new place) */
+static int sh_dy, sh_on;            /* this frame's shift (px; sh_on: there is one, maybe 0 px) */
 static void dirty_e(const struct pent *e, const int16_t b[4])
 {
     dirty_b(b);
-    if (e->glass == 1 && e->mover) {
+    if (e->glass == 1 && e->mover == 1 && sh_on) {
         for (int y = b[1] < 0 ? 0 : b[1]; y < b[3] && y < GH; y++)
             AFF[y] = 1;
     } else if (e->glass == 1)
@@ -400,6 +415,7 @@ static void layer_entries(int li, const struct g7_layer *l, int *ns, int *ni)
         if (li == 0) {
             CSX[n].nyh = shape_hash_ny(s) ^ (pre ? i * 0x9e3779b9U : 0);
             CSX[n].y = s->y;
+            CSX[n].h = s->h;
             CSX[n].clip = (s->flags & G7_S_CLIP) != 0;
         } else {
             uint32_t h = 0x9747b28cU ^ i;
@@ -450,11 +466,11 @@ static void layer_entries(int li, const struct g7_layer *l, int *ns, int *ni)
 #define TPL ((uint8_t *)P_SOFT)     /* the base glass's transmission x 255 per panel pixel (not frozen) */
 _Static_assert((unsigned long)GW * GH <= PL_WALL_BYTES, "transmission plane overflows SOFT");
 #define BG8P ((const uint32_t *)G7_BASE)
-static int sh_dy, sh_on;            /* this frame's shift (px; sh_on: there is one, maybe 0 px) */
 static float sh_dyf;
 static int sh_clip;                 /* a moving shape is G7_S_CLIP: rows only where the viewport fade is 1 */
 static int sh_allclip;              /* every moving shape is: rows where the fade is 0 do not change */
 static uint8_t BLK[GH];             /* rows a shape that did not move touches (now, or dy below its old place) */
+static uint8_t EDG[GH];             /* rows on a moving shape's straight top or bottom edge (where it is now) */
 
 /* the shift: the dy (float) by which the most glass area moved with nothing else changed */
 static void shift_detect(const struct pent *prev, int np, const struct sext *px, const struct pent *cur,
@@ -502,7 +518,36 @@ static void shift_detect(const struct pent *prev, int np, const struct sext *px,
     if (best < 0)
         return;
     float d = cand[best];
-    int di = g_ifloor(d + .5f);
+    /* the dy: from where the glass sits in GLB (GOF of the largest moving shape's rows), not from
+     * where it was, so each frame's rounding is taken back by the next */
+    float g = 0.f;
+    {
+        uint64_t ba = 0;
+        int bk = -1;
+        for (int i = 0; i < nc; i++) {
+            if (cur[i].glass != 1 || cur[i].b[2] <= cur[i].b[0])
+                continue;
+            for (int k = 0; k < np; k++)
+                if (prev[k].key == cur[i].key && prev[k].glass == 1 && prev[k].b[2] > prev[k].b[0] &&
+                    px[k].nyh == cx[i].nyh && g_abs(cx[i].y - px[k].y - d) <= .01f) {
+                    uint64_t a = (uint64_t)(cur[i].b[2] - cur[i].b[0]) * (uint64_t)(cur[i].b[3] - cur[i].b[1]);
+                    if (bk < 0 || a > ba) {
+                        ba = a;
+                        bk = k;
+                    }
+                    break;
+                }
+        }
+        if (bk >= 0) {
+            int y0 = prev[bk].b[1] < 0 ? 0 : prev[bk].b[1], y1 = prev[bk].b[3] > GH ? GH : prev[bk].b[3];
+            for (int y = (y0 + y1) / 2, n = 0; n < y1 - y0; n++, y = y + 1 >= y1 ? y0 : y + 1)
+                if (GV0[y] == 0 && GV1[y] == GW && GSN[y] != GSN_MIXED) {
+                    g = GOF[y];
+                    break;
+                }
+        }
+    }
+    int di = g_ifloor(d - g + .5f);
     if (di >= GH / 2 || di <= -GH / 2)
         return;
     sh_dyf = d;
@@ -634,7 +679,7 @@ static void glb_shift_row(int y, int dy)
         int nc = mask ? gs_classes(0, py, npre, CLS, 2 * G7_MAX_SHAPES) : 0;
         int needb = 0, ia = AW, ib = 0;
         for (int k = 0; k < nc; k++) {
-            needb |= CLS[k].mixf > 0.f;
+            needb |= CLS[k].mixf > 0.f || (CLS[k].has_u && CLS[k].umixf > 0.f);
             int i0 = (CLS[k].x0 + 1) >> 2, i1 = (CLS[k].x1 + 1) >> 2;
             if (i0 < ia) ia = i0;
             if (i1 > ib) ib = i1;
@@ -679,18 +724,39 @@ static void glb_shift_row(int y, int dy)
                 }
                 band = 1;
             }
+            /* a shape on another (a tile on its card): per pixel cov x its J + (1 - cov) x the
+             * one under it, so the box's corners outside the shape (and an alpha < 1) take the card's */
+            static float COVB[GW + 4];
+            int pu = C->has_u && i1 > i0;
+            if (pu && gs_cover_row(0, C->si, py, 4 * i0, 4 * i1, COVB))
+                band = 1;           /* (a corner row: the coverage changes from row to row) */
             for (int i = i0; i < i1; i++) {
-                float f[3];
+                float f[3], fu[3];
+                for (int c = 0; c < 3; c++)
+                    fu[c] = (DFA[c][i] * om + (m > 0.f ? DFB[c][i] * m : 0.f)) * (255.f * 8.f);
                 if (i >= ba && i < bb)
                     for (int c = 0; c < 3; c++)
                         f[c] = ((DBA[c][i] - DT[c][i]) * om + (m > 0.f ? (DBB[c][i] - DT2[c][i]) * m : 0.f)) * (255.f * 8.f);
                 else
                     for (int c = 0; c < 3; c++)
-                        f[c] = (DFA[c][i] * om + (m > 0.f ? DFB[c][i] * m : 0.f)) * (255.f * 8.f);
+                        f[c] = fu[c];
+                if (pu) {
+                    float um = C->umixf, uom = 1.f - um;
+                    for (int c = 0; c < 3; c++)
+                        fu[c] = (DFA[c][i] * uom + (um > 0.f ? DFB[c][i] * um : 0.f)) * (255.f * 8.f);
+                }
                 for (int c = 0; c < 3; c++) {
                     float v = g_clamp(C->J[3 * c] * f[0] + C->J[3 * c + 1] * f[1] + C->J[3 * c + 2] * f[2], -32000.f, 32000.f);
-                    int16_t q = (int16_t)(v < 0.f ? v - .5f : v + .5f);
-                    JDX[c][4 * i] = JDX[c][4 * i + 1] = JDX[c][4 * i + 2] = JDX[c][4 * i + 3] = q;
+                    if (!pu) {
+                        int16_t q = (int16_t)(v < 0.f ? v - .5f : v + .5f);
+                        JDX[c][4 * i] = JDX[c][4 * i + 1] = JDX[c][4 * i + 2] = JDX[c][4 * i + 3] = q;
+                        continue;
+                    }
+                    float u = g_clamp(C->uJ[3 * c] * fu[0] + C->uJ[3 * c + 1] * fu[1] + C->uJ[3 * c + 2] * fu[2], -32000.f, 32000.f);
+                    for (int k = 0; k < 4; k++) {
+                        float w = u + (v - u) * COVB[4 * (i - i0) + k];
+                        JDX[c][4 * i + k] = (int16_t)(w < 0.f ? w - .5f : w + .5f);
+                    }
                 }
             }
             if (i1 > at)
@@ -758,7 +824,19 @@ static void shift_apply(void)
 {
     int dy = sh_dy;
     for (int y = 0; y < GH; y++)
-        BLK[y] = 0;
+        BLK[y] = EDG[y] = 0;
+    /* a horizontal edge row is shaded again: with the content off by GOF the whole row is off by up
+     * to half the edge's contrast, and its rim highlight depends on where the shape is */
+    for (int i = 0; i < nshape_cur; i++) {
+        if (CS[i].glass != 1 || CS[i].mover != 1)
+            continue;
+        for (int e = 0; e < 2; e++) {
+            int ye = g_ifloor(CSX[i].y + (e ? CSX[i].h : 0.f));
+            for (int y = ye - 1; y <= ye + 2; y++)
+                if (y >= 0 && y < GH)
+                    EDG[y] = 1;
+        }
+    }
     /* dy = 0 (a sub-pixel tail): a shape that did not move is where it was; one that changed
      * invalidated its rows in the diff (GV), which the source check below sees */
     for (int pass = 0; pass < 2 && dy; pass++) {
@@ -786,10 +864,18 @@ static void shift_apply(void)
         int ok = !BLK[y] && s >= 0 && s < GH && GV0[s] == 0 && GV1[s] == GW;
         if (ok && sh_clip && dy)    /* (a sub-pixel tail: the fade changes by nothing either) */
             ok = y >= 246 && y < 2480 && s >= 246 && s < 2480;
+        /* the content's offset stays within GOF_MAX (the dy keeps the largest shape's rows within
+         * .5 px; rows shaded since may be up to 1 px off it), and a row is shifted at most SHIFT_MAX
+         * times (+ 0..3 by its 128-row band, so the rows due for shading come in turns) */
+        float of = ok ? GOF[s] + (float)dy - sh_dyf : 0.f;
+        if (ok && (EDG[y] || g_abs(of) > GOF_MAX || GSN[s] >= SHIFT_MAX + ((y >> 7) & 3)))
+            ok = 0;
         if (!ok)
             continue;
         if (!(y & 7))
             g7_poll();
+        GSN[y] = (uint8_t)(GSN[s] + (dy != 0));
+        GOF[y] = of;
         if (dy)
             glb_shift_row(y, dy);
         GV0[y] = 0;
@@ -909,8 +995,12 @@ static void layer_diff_save(int li, const struct g7_layer *l, int check)
     else
         for (int i = 0; i < ns; i++)
             POX[i] = COX[i];
-    for (int i = 0; i < ns; i++)
+    /* mover is this frame's (shift_detect sets it again on both sides before diff reads it): a
+     * stale flag would make the next frame's diff skip glb_inval for a shape that moved here */
+    for (int i = 0; i < ns; i++) {
         PS[li][i] = CS[i];
+        PS[li][i].mover = 0;
+    }
     for (int i = 0; i < ni; i++)
         PI[li][i] = CI[i];
     nps[li] = ns;
@@ -1154,6 +1244,12 @@ static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb,
                 uint32_t *g = GLB + (unsigned)y * GW + x0;
                 if (g != d)
                     g_copy32(g, d, n);
+                if ((x0 == 0 && x1 == GW) || GV1[y] <= GV0[y]) {
+                    GOF[y] = 0.f;   /* the row's glass is all shaded where it is now */
+                    GSN[y] = 0;
+                } else if (GSN[y] || GOF[y] != 0.f) {
+                    GSN[y] = GSN_MIXED;
+                }
                 glb_valid(y, x0, x1);
             }
             if (glb || dst == (uint32_t *)G7_CANVAS) {
@@ -1299,7 +1395,8 @@ static int curtain_index(const struct g7_layer *l)
 {
     for (unsigned i = 0; l && i < l->nitem; i++) {
         const struct g7_item *it = &l->item[i];
-        if (it->kind != G7_RECT || it->clip || it->flags || CA(it->color) != 255U || it->a <= 0.f || it->a >= 1.f)
+        /* (a = 1 too: the fade's last frame stays a copy and a blend) */
+        if (it->kind != G7_RECT || it->clip || it->flags || CA(it->color) != 255U || it->a <= 0.f || it->a > 1.f)
             continue;
         const struct g7_rect *q = &it->u.rect;
         if (q->r == 0.f && q->ring == 0.f && q->x <= 0.f && q->y <= 0.f && q->x + q->w >= (float)GW &&
@@ -1864,6 +1961,7 @@ uint32_t g7_frame(const struct g7_frame *f)
         layer_diff_save(0, LB, 1);
         shift_on = 0;
         PROF0;
+        frz_word = f->word;
         freeze();                   /* SHARP = GLB + the lens and items (GLB is in SHARP) */
         PROF(8);                    /* (its compose_base counts in 1 and 2 as well) */
         froze_us = ST.freeze_us;
@@ -1912,7 +2010,9 @@ uint32_t g7_frame(const struct g7_frame *f)
         shift_on = 0;
         /* a motion frame: the glass changed over more than an eighth of the panel (or all of it,
          * and this is not a first or forced frame) */
-        motion_half = !forced && (wide || glass_area * 8U > (uint64_t)GW * GH);
+        /* a shifting frame too: the rows it shades again (edges, rows due after SHIFT_MAX, rows a
+         * still shape blocks) are as approximate as the shifted ones and drawn exactly at rest */
+        motion_half = !forced && (wide || glass_area * 8U > (uint64_t)GW * GH || (sh_on && sh_dy != 0));
         if (motion_half)
             gs_prepare(GS_HALF, LB ? LB->shape : 0, LB ? LB->nshape : 0, &CBASE, 1.f);
     } else {
@@ -2005,12 +2105,17 @@ uint32_t g7_frame(const struct g7_frame *f)
  * IDLE_ROWS at a time (a few ms of the A55), from the last frame's lists. 1: more to do. */
 #define IDLE_ROWS 128
 /* frozen: the next band of SHARP rows taken approximate, shaded exactly, if the base layer is still
- * the one frozen (its entries equal the freeze's); else they stay as they are */
+ * the one frozen (its entries and the wordmark equal the freeze's). Else a band of the new base would
+ * tear the backdrop: the approximate rows stay until the overlay closes (a freeze again would be
+ * exact but costs a full shade, ~95 ms VM, in the middle of an overlay's motion: menu7's list spring
+ * keeps moving under the options menu; the freeze-time items are gone, their strings live only
+ * during g7_frame). Since the shift keeps its rows within .5 px and SHIFT_MAX shifts, they are as
+ * close as the half-resolution rows. */
 static int sharp_refine(void)
 {
     int ns, ni;
     layer_entries(0, LB, &ns, &ni);
-    int same = ns == nps[0] && ni == npi[0];
+    int same = ns == nps[0] && ni == npi[0] && word_same(&frz_word, &cur_word);
     for (int i = 0; same && i < ns; i++)
         same = CS[i].key == PS[0][i].key && CS[i].hash == PS[0][i].hash;
     for (int i = 0; same && i < ni; i++)

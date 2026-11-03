@@ -67,6 +67,7 @@ T7 <fake ms> <host ms> <pixels> <class> [full]
 Environment switches of `h7 --run`:
 
 - `H7_FORKCHECK=1`: at the first frame after motion (intro, list, expand, over-move, launch) that is not motion, and at the first frame with nothing to draw (both only with `back` at 0 or 1), a forked child finishes the rest bands (`g7_idle`), redraws the panel with `G7_F_FULL` and prints `FORKCHECK <ms>: N px differ from a full redraw`. N must be 0.
+- `H7_MOTIONCHECK=1`: every drawn frame, motion frames included and with no `g7_idle` first, against a `G7_F_FULL` redraw of the same frame: `MC <ms> mean <m> n16 <a> n64 <b> worst <w>` (per pixel the largest channel error; n16 / n64 count the pixels over 16 / 64 of 255). Motion frames are approximate, so the figure to watch is n64 per motion frame (`build/menu7-work/fix3/mcsum.py` sums it per class; 6.1 has the reference values). `H7_MCDUMP=<ms>` also writes that frame as drawn and as redrawn (`mc-frame.ppm`, `mc-full.ppm`).
 - `H7_PROF=1`: before each `T7` line, `P7` with the frame's ms per glass phase: setup (diff, shift), base glass, base items, frozen crossfade, over glass, over items, edge, present, freeze, then the rows shifted and the rows shaded again (`build/menu7-work/r2/prof.py` averages them per class).
 - `H7_DBG=1`: the shift's and the freeze's diagnostics on stderr; `H7_DBG=5` / `6` turn the moving-frame correction off / to the BG8 term only (to measure it).
 
@@ -112,33 +113,57 @@ Measured with `build/menu7-work/scen.sh` (four key scripts) and summarised per c
 
 ### 6.1 Round 2: moving frames, the curtain, the freeze
 
-Also inside `glass*.c` only (menu7, intro7 and the headers are unchanged except `glass_int.h`). Every compare state's mean error is unchanged to 0.01/255 (`compare-all.sh`, all 21 states and every region, +0.00), and the stills differ from the round-1 loader by at most 1/255 in a few pixels.
+Also inside `glass*.c` only (menu7, intro7 and the headers are unchanged except `glass_int.h`). Every compare state's mean error is unchanged to 0.01/255 (`compare-all.sh`, all 21 states and every region, +0.00), and the stills differ from the round-1 loader by at most 1/255 in a few pixels (the review fixes leave all 18 `--state` stills byte-identical to the first round-2 commit).
 
-- **Moving glass is shifted, not shaded.** When base shapes only moved (the list scrolls, the island makes room, the sections below an opening one move), `g7_frame` finds the dy by which the most glass area moved with nothing else changed, and every GLB row whose shapes all moved by it is the GLB row dy above, shifted (`glb_shift_row`), 16 pixels a NEON step. The glass refracts the wallpaper, which did not move, so the shifted row is corrected: by T x (BG8 change), T being the glass's transmission per pixel (`TPL`, written whenever GLB is), and by (1 - T) x J x (frost change), J being `shade()`'s linear part (vibrancy, tint) of the shape under the pixel, on a 4 x 4 px grid; on a top or bottom rim band row the frost change is taken where that row refracts to. Rows a shape that did not move touches, and the viewport's fade rows (170 .. 246, 2480 .. 2620) for clipped shapes, are shaded as before; rows where the fade is 0 stay as they are. A sub-pixel tail of a spring (dy rounds to 0) keeps the rows. Shifted rows are marked like half-resolution ones (`GAPX`) and drawn exactly at rest.
-  Error of a moved frame against its exact render (`r2/movetest.py`, the menu's section cards moved, mean over the cards in the viewport): 176 px: 10.4/255 without the correction, 1.07 with it; -176: 10.5 -> 0.96; 60: 3.8 -> 0.85; 37.4 (sub-pixel): 2.7 -> 1.04. The rest is the rims' refraction and dispersion (p99 6-7/255).
+- **Moving glass is shifted, not shaded (review fixes below).** When base shapes only moved (the list scrolls, the island makes room, the sections below an opening one move), `g7_frame` finds the dy by which the most glass area moved with nothing else changed, and every GLB row whose shapes all moved by it is the GLB row dy above, shifted (`glb_shift_row`), 16 pixels a NEON step. The glass refracts the wallpaper, which did not move, so the shifted row is corrected: by T x (BG8 change), T being the glass's transmission per pixel (`TPL`, written whenever GLB is), and by (1 - T) x J x (frost change), J being `shade()`'s linear part (vibrancy, tint) of the shape under the pixel, on a 4 x 4 px grid; on a top or bottom rim band row the frost change is taken where that row refracts to. Rows a shape that did not move touches, and the viewport's fade rows (170 .. 246, 2480 .. 2620) for clipped shapes, are shaded as before; rows where the fade is 0 stay as they are. A sub-pixel tail of a spring (dy rounds to 0) keeps the rows. Shifted rows are marked like half-resolution ones (`GAPX`) and drawn exactly at rest.
+  Review fixes to the shift:
+  - **No drift.** GLB holds the glass at the integer offset it was last drawn at, not at the frame's exact y, so taking dy from the last frame's y let each frame's rounding add up (40 frames of -4.4 px left the cards and tiles 16 px from their place; sub-pixel steps never moved them). Each GLB row now keeps where its glass sits relative to where it is (`GOF`) and the shifts since it was shaded (`GSN`); dy is taken from where the largest moving shape's rows sit, a row is shifted only while its offset stays within 1 px, and at most `SHIFT_MAX` (4) + 0..3 (by 128-row band, so the rows come due in turns) times in a row, after which it is shaded again. A row shaded in part over shifted content is never a shift's source.
+  - **Horizontal edges are shaded.** The four rows around each moving shape's top and bottom edge are shaded again on every shifting frame (an offset there moves the whole edge, and the rim highlight depends on where the shape is), and every row a shifting frame shades again is shaded at half resolution, as the other motion frames (`GAPX`, exact at rest).
+  - **Nested shapes.** Where a shape lies on another (an icon tile on its card), the frost correction is weighted per pixel by the upper shape's coverage (`gs_cover_row`: edge AA, alpha, the viewport fade) between its J and the J of the shape under it, so the tile box's corners take the card's correction.
+  - **A stale `mover` flag** carried into the next frame's diff (`layer_diff_save` copied it into the previous frame's entries) skipped `glb_inval` for a shape that had moved: one removed, faded out or resized the frame after a shift kept its old glass in GLB for good (`review2/t1.dl`: 840288 px off a full redraw at rest; now 0).
+
+  Error of the last frame of N consecutive moving frames (no rest between) against an exact render of the end position (`tools/menu7/preview/motion-check.sh`: the menu's section cards; cards: mean over the cards' boxes; n64: panel pixels over 64/255):
+
+  | N x step (px) | round 1 (half resolution) cards / panel mean / n64 | round 2 as first committed | round 2 with the review fixes |
+  |---|---|---|---|
+  | 1 x 176 | 0.43 / 0.37 / 421 | 1.07 / 0.61 / 176 | 1.25 / 0.78 / 408 |
+  | 8 x 22 | 0.43 / 0.37 / 421 | 1.59 / 0.89 / 168 | 1.02 / 0.68 / 420 |
+  | 22 x 8 | 0.43 / 0.37 / 421 | 2.98 / 1.60 / 148 | 1.08 / 0.70 / 421 |
+  | 44 x 4 | 0.43 / 0.37 / 421 | 4.44 / 2.32 / 150 | 0.99 / 0.65 / 421 |
+  | 40 x -4.4 | 0.37 / 0.39 / 1062 | 8.62 / 5.86 / 87529 | 1.02 / 0.77 / 1155 |
+  | 60 x 0.3 | 0.40 / 0.38 / 821 | 4.82 / 4.23 / 92483 | 1.04 / 0.75 / 932 |
+
+  So a shifted motion frame is still about 2.5x less accurate in mean than round 1's half-resolution frame (0.4 -> 1.0-1.25/255 over the cards: the correction's 4 px grid, the rims' refraction and dispersion, up to 1 px of offset at corner arcs), with about the same count of pixels over 64/255 (the half-resolution edge rows). The first commit's "10.4 -> 1.07" compared shifting without and with the correction from an exact frame, which hid both the drift and the comparison with round 1.
+  Real menu motion (`scen.sh`'s four scripts with `H7_MOTIONCHECK=1`, per list frame): round 1 mean 0.25/255, n64 276 on average, worst frame 2193; round 2 as first committed 0.83, 2826, 12131 (max error 241); with the fixes 0.49, 277, 2386 (max 107). Lens frames n64 27 / 386 / 49, expand 17 / 622 / 21. A list that ends mid-motion (`build/menu7-work/listbench.dl`, `--check-full` compares a motion frame, so it is not 0 by design): round 1 216,929 px differ (mean 0.21, n64 32), round 2 as first committed 2,146,334 (0.86, 130), with the fixes 1,884,530 (0.64, 30): far more pixels differ by a unit or two (the shifted interiors), about as many by much.
 - **Side edges by spans.** On rows where a shape's straight vertical edge is (the four normal samples all on it), its rim pixels have the normal (+-1, 0) and d depends on x only: `px_side` blends the row's A5, A and B vertically once and takes each refracted sample with one lerp. Corners are still per pixel (`px_general`).
 - **Half-resolution rows.** The half grid's frost rows (`row_half`: NEON vertical blend, fixed weights) and the over layer's motion rows (`over_half_store`: the bilinear and the premultiplied store in one NEON pass) replace the per-sample code.
-- **The end screens' curtain.** The full-panel rect the end screens fade in is drawn over a copy of what is below it, kept at its first frame in `G7_SHARP` (frozen, back 1: the crossfade shows SOFT only), so a fade frame is a copy and one blend pass (`compose_curtain`). SHARP is then lost; back leaving 1 takes the base layer again. Square-cornered filled rects without clip or fade blend their inside 8 pixels a NEON step.
+- **The end screens' curtain.** The full-panel rect the end screens fade in is drawn over a copy of what is below it, kept at its first frame in `G7_SHARP` (frozen, back 1: the crossfade shows SOFT only), so a fade frame is a copy and one blend pass (`compose_curtain`); the fade's last frame (the curtain at alpha 1) too, which used to leave this path and shade the whole over glass under the opaque curtain again (42 ms VM, as the first frame). SHARP is then lost; back leaving 1 takes the base layer again. Square-cornered filled rects without clip or fade blend their inside 8 pixels a NEON step.
 - **The over layer while back moves.** Below 1/256 a change of back moves no pixel by a unit and is not drawn (back reaching 1 is); a change dirties only what the largest fully opaque over shape does not cover (its box inset by the corner); the over glass is then shaded at half resolution. An over shape whose box moved under half a pixel from where it was drawn (the launch card's spring tail) is not drawn again: its rows are marked `OAPX` and drawn exactly at rest.
 - **Box shadows** take erf from a 4096-point table and their six vertical samples per row once.
-- **The freeze.** Below the freeze threshold (back <= .002) the base glass keeps soft 0 (it changed nothing by a unit), so an overlay opening keeps GLB; the frame that freezes may shift GLB rows too; GLB rows a motion frame left approximate go into SHARP as they are and are shaded exactly afterwards, a band per `g7_idle` (`SAPX`, only while the base layer is still the frozen one). The soft version (SOFT, its content blur) is unchanged: ~19 + 7 ms VM.
+- **The freeze.** Below the freeze threshold (back <= .002) the base glass keeps soft 0 (it changed nothing by a unit), so an overlay opening keeps GLB; the frame that freezes may shift GLB rows too; GLB rows a motion frame left approximate go into SHARP as they are and are shaded exactly afterwards, a band per `g7_idle` (`SAPX`, only while the base layer and the wordmark are still the frozen ones: a band of a changed base or word would tear the backdrop). If the base changes first (menu7's list spring still moving under the options menu), the remaining SAPX rows stay approximate until the overlay closes: freezing again would be exact but costs a full shade (~95 ms VM) in the middle of the overlay's motion, and the freeze-time items cannot be redrawn (their strings live only during `g7_frame`). Those rows are now within 1 px and 4-7 shifts of exact, like the half-resolution rows. The soft version (SOFT, its content blur) is unchanged: ~19 + 7 ms VM.
 - **Frame budget.** `g7_stats.full_us` no longer includes the frame's freeze, so the launch card's first frame (which freezes) no longer puts menu7 in frame-budget mode by itself: the card animates while its own frames stay under `M7_SLOW_MS`.
 - **The intro** no longer copies its rows into GLB (every intro frame invalidates it).
 
-Host timings (VM ms, mean / p90 over two runs of `scen.sh`, x12 for the A55):
+Host timings (VM ms, mean / p90 over two runs of `scen.sh`). Round 1 is from the earlier session; the two round-2 columns were measured in one session, alternating runs (the code the fixes did not touch, intro-wall and intro-glass, came out 3-4 % slower in the second column: VM noise of that size applies to every row):
 
-| class | round 1 | round 2 | A55 estimate (round 2) |
-|---|---|---|---|
-| intro-wall | 22.0 / 27.1 | 21.5 / 26.9 | 258 / 323 |
-| intro-glass | 32.8 / 37.2 | 31.2 / 35.0 | 375 / 420 |
-| list | 24.2 / 31.2 | 10.9 / 16.7 | 130 / 200 |
-| lens | 5.5 / 8.0 | 4.4 / 7.2 | 53 / 87 |
-| expand | 18.7 / 21.2 | 17.1 / 20.3 | 206 / 243 |
-| over-move | 22.5 / 24.6 (freeze frame 95) | 17.3 / 18.9 (freeze frame 55) | 208 / 226 (660) |
-| over-rest | 3.1 / 5.6 | 2.9 / 6.1 | 35 / 74 |
-| launch (incl. the error card) | 38.1 / 50.0 | 21.1 / 31.6 | 253 / 379 |
-| error card (scenario D) | 30.3 / 50.4 | 18.2 / 32.3 | 219 / 388 |
-| progress | 4.8 / 4.8 | 2.5 / 2.9 | 30 / 35 |
-| end (handoff) | 64.0 / 64.5 | 8.5 / 42.5 (first frame 43-51) | 101 / 510 |
+| class | round 1 | round 2 as first committed | round 2 with the review fixes | A55 estimate (fixes; uncalibrated) |
+|---|---|---|---|---|
+| intro-wall | 22.0 / 27.1 | 22.9 / 28.1 | 23.8 / 29.2 | 285 / 350 |
+| intro-glass | 32.8 / 37.2 | 33.6 / 37.6 | 34.5 / 39.1 | 414 / 470 |
+| list | 24.2 / 31.2 | 11.2 / 17.6 | 13.2 / 20.8 | 159-238 / 250-374 |
+| lens | 5.5 / 8.0 | 4.6 / 7.8 | 4.8 / 8.0 | 57 / 96 |
+| expand | 18.7 / 21.2 | 18.1 / 21.7 | 18.9 / 22.6 | 227 / 271 |
+| over-move | 22.5 / 24.6 (freeze frame 95) | 18.5 / 21.1 (freeze frame 59) | 19.3 / 21.5 (freeze frame 72) | 231-347 / 258-387 (860) |
+| over-rest | 3.1 / 5.6 | 3.0 / 5.9 | 3.1 / 6.3 | 37 / 76 |
+| launch (incl. the error card) | 38.1 / 50.0 | 22.9 / 33.7 | 23.5 / 35.1 | 282 / 421 |
+| error card (scenario D) | 30.3 / 50.4 | 21.8 / 34.5 | 22.5 / 36.0 | 270 / 432 |
+| progress | 4.8 / 4.8 | 2.7 / 3.2 | 2.7 / 3.3 | 33 / 39 |
+| end (handoff) | 64.0 / 64.5 | 9.1 / 46.6 (first and last frame 43-50) | 6.2 / 3.6 (first frame 50) | 74-111 / 43-65 (first frame 600-900) |
+
+The fixes cost the list about 2 ms VM a frame (the edge rows and the rows due after `SHIFT_MAX`, shaded at half resolution) and the freeze frame after a scroll about 13 ms (more rows left to shade exactly). The end screen's last frame is now a blend (2.7 ms instead of 42).
+
+**The A55 column is not calibrated.** x12 (the factor used so far) has not been measured on the device. Round 2 moved work into NEON-heavy paths (`vld4q` / `vst4q` and `vqrdmulhq` chains in `glb_shift_row`, `row_half`, `over_half_store`, the 8-pixel rect blend); the in-order A55 issues about one 128-bit op a cycle at ~1.95 GHz against the M4's four at ~4.4 GHz, so those classes may run at x12-x18 (the ranges above: list, over-move, end). The memory-bound copies (the curtain, into a write-combined framebuffer, `mmu.c`) are probably near x12. On the first device boot of this image, read log slots 128-138 (`frames << 48 | worst ms << 32 | total ms` per class, `M7_PH_*`) after running the same key script as one of `scen.sh`'s scenarios, divide by the host's figures for that scenario, and replace this column with the per-class factors.
+
+Test procedure for changes to the moving frames: `--check-full` on every list in `build/menu7-work` (0 for every list that ends at rest), `H7_FORKCHECK=1` over `scen.sh` (every FORKCHECK 0), `H7_MOTIONCHECK=1` over `scen.sh` (n64 per list frame near round 1's ~280 on average, worst frame under ~2500), and `tools/menu7/preview/motion-check.sh` (the table above: no growth with N).
 
 None of these reach 30 fps on the A55 (2.8 ms VM). What is left: the intro's wallpaper (WALL_FS 4.7 ms a frame and the upsample to the panel ~10 ms, both changing everywhere from ~1000 ms on), the opening section's own glass during expand (its height, SZ and specular change every frame: no translation), the over layer's motion rows (an overlay pane over a backdrop that fades: no translation either), the launch card while it grows, corners per pixel, SOFT (19 ms) at each freeze, and the curtain's first frame.
