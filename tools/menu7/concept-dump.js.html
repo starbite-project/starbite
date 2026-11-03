@@ -1,0 +1,34 @@
+<script>
+setTimeout(()=>{
+ const scr=document.getElementById('scr'),SR=scr.getBoundingClientRect(),S=SR.width/1440;
+ const R=r=>({x:+((r.left-SR.left)/S).toFixed(1),y:+((r.top-SR.top)/S).toFixed(1),w:+(r.width/S).toFixed(1),h:+(r.height/S).toFixed(1)});
+ const out=[];
+ const vis=el=>{let e=el;while(e&&e!==scr){const cs=getComputedStyle(e);if(cs.display==='none'||cs.visibility==='hidden')return false;e=e.parentElement}return true};
+ const op=el=>{let o=1,e=el;while(e&&e!==scr){o*=+getComputedStyle(e).opacity;e=e.parentElement}return +o.toFixed(3)};
+ const path=el=>{const a=[];let e=el;while(e&&e!==scr){a.unshift(e.id?'#'+e.id:(e.className&&e.className.baseVal===undefined&&e.className?'.'+String(e.className).trim().split(/\s+/).join('.'):e.tagName.toLowerCase()));e=e.parentElement}return a.slice(-4).join(' > ')};
+ scr.querySelectorAll('*').forEach(el=>{
+  if(!vis(el))return;const r=el.getBoundingClientRect();if(r.width<1||r.height<1)return;
+  const cs=getComputedStyle(el);
+  const txt=[...el.childNodes].filter(n=>n.nodeType===3&&n.textContent.trim()).map(n=>n.textContent).join('');
+  const o={p:path(el),r:R(r),a:op(el)};
+  if(el.dataset&&el.dataset.glass!==undefined){o.glass={r:el.dataset.r,clip:el.dataset.clip,frost:el.dataset.frost,tint:el.dataset.tint,s:el.dataset.s};}
+  if(el.dataset&&el.dataset.f)o.f=el.dataset.f;
+  if(txt){
+    const tn=[...el.childNodes].find(n=>n.nodeType===3&&n.textContent.trim());
+    /* wrap the text node so an anonymous flex item gets a real inline formatting context, then
+       a zero-size inline-block on its baseline gives the baseline y and the pen x */
+    const wr=document.createElement('span');el.insertBefore(wr,tn);wr.appendChild(tn);
+    const sp=document.createElement('span');sp.style.cssText='display:inline-block;width:0;height:0;vertical-align:baseline';
+    wr.insertBefore(sp,tn);const b=(sp.getBoundingClientRect().top-SR.top)/S;const bx=(sp.getBoundingClientRect().left-SR.left)/S;sp.remove();
+    el.insertBefore(tn,wr);wr.remove();
+    const rg=document.createRange();rg.selectNodeContents(tn);const tr=rg.getBoundingClientRect();
+    o.text=txt;o.base=+b.toFixed(1);o.tx=+bx.toFixed(1);o.tw=+(tr.width/S).toFixed(1);
+    o.font=`${cs.fontFamily.split(',')[0]} ${cs.fontWeight} ${cs.fontSize} ls=${cs.letterSpacing} lh=${cs.lineHeight}`;o.color=cs.color;
+  } else if(el.tagName==='svg'||el.tagName==='use'){o.svg=(el.querySelector&&el.querySelector('use')?el.querySelector('use').getAttribute('href'):'')||'';o.color=cs.color;}
+  else {const bg=cs.backgroundColor;if(bg&&bg!=='rgba(0, 0, 0, 0)')o.bg=bg;if(cs.borderRadius!=='0px')o.br=cs.borderRadius;if(cs.transform!=='none')o.tf=cs.transform;if(cs.boxShadow!=='none')o.sh=cs.boxShadow}
+  if(cs.transform!=='none')o.tf=cs.transform;
+  out.push(o);
+ });
+ const pre=document.createElement('pre');pre.id='DUMP';pre.textContent=JSON.stringify(out);document.body.appendChild(pre);
+},5000);
+</script>
