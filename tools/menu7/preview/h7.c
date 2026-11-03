@@ -66,7 +66,7 @@ static void die(const char *m)
 }
 static void map_fixed(uintptr_t a, size_t n)
 {
-    void *p = mmap((void *)a, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    void *p = mmap((void *)a, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_POPULATE, -1, 0);  /* prefaulted: no page faults in the timings (the phone has none) */
     if (p != (void *)a) {
         fprintf(stderr, "h7: cannot map 0x%lx (+0x%zx)\n", (unsigned long)a, n);
         exit(1);
@@ -138,9 +138,12 @@ uint32_t __wrap_g7_frame(const struct g7_frame *f)
     clock_gettime(CLOCK_MONOTONIC, &a);
     uint32_t px = __real_g7_frame(f);
     clock_gettime(CLOCK_MONOTONIC, &b);
+    static const char *const ph[M7_PH_N] = { "intro-wall", "intro-glass", "idle", "lens", "list", "expand",
+                                              "over-move", "over-rest", "launch", "progress", "end" };
     if (run_mode)
-        printf("T7 %.0f %.2f %u%s\n", stub_now_us() / 1e3,
+        printf("T7 %.0f %.2f %u %s%s\n", stub_now_us() / 1e3,
                (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6, px,
+               m7_phase_last >= 0 && m7_phase_last < M7_PH_N ? ph[m7_phase_last] : "?",
                (f->flags & G7_F_FULL) ? " full" : "");
     return px;
 }
@@ -303,7 +306,7 @@ int main(int argc, char **argv)
 {
     const char *ramdisk = 0, *list = 0, *out = 0, *state = 0;
     float p = 0, t = -1;
-    int check = 0;
+    int check = 0, again = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--ramdisk") && i + 1 < argc) ramdisk = argv[++i];
         else if (!strcmp(argv[i], "--list") && i + 1 < argc) list = argv[++i];
@@ -315,8 +318,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--check-full")) check = 1;
 #ifdef H7_TIME
         else if (!strcmp(argv[i], "--run")) { run_mode = 1; state = "run"; }
+        else if (!strcmp(argv[i], "--again")) again = 1;
 #endif
     }
+    (void)again;
     if (!ramdisk || !out || (!list && !state))
         die("usage: h7 --ramdisk menu-v7.sbm (--list scene.dl | --state st) --out out.ppm [--stats] [--check-full]");
     map_fixed(0x84000000UL + G7_HOSTOFF, 0x04800000UL);
@@ -346,6 +351,11 @@ int main(int argc, char **argv)
             }
             menu7_handoff("EL1 · 0x80080000");
             printf("handoff done at %.0f ms\n", stub_now_us() / 1e3);
+            /* --fail WHY: the start fails and the loader calls the menu again (the error card) */
+            if (again) {
+                r = menu7_main(0, cmd, sizeof cmd);
+                printf("menu7_main again -> %d at %.0f ms\n", r, stub_now_us() / 1e3);
+            }
         }
         write_ppm(out, FB);
         return 0;
@@ -356,7 +366,9 @@ int main(int argc, char **argv)
     g7_bake();
     struct g7_stats st;
     g7_get_stats(&st);
-    fprintf(stderr, "bake %.1f ms host (x12 ~ %.0f ms on the A55)\n", st.bake_us / 1e3, st.bake_us * 12 / 1e3);
+    fprintf(stderr, "bake %.1f ms host (x12 ~ %.0f ms on the A55): field %.1f, wallpaper %.1f, blur %.1f, BG8 %.1f\n",
+            st.bake_us / 1e3, st.bake_us * 12 / 1e3, st.bake_part[0] / 1e3, st.bake_part[1] / 1e3, st.bake_part[2] / 1e3,
+            st.bake_part[3] / 1e3);
     if (list)
         parse_list(list);
 #ifdef H7_MENU7

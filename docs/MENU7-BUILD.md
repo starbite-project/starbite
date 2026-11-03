@@ -59,8 +59,10 @@ Chrome needs these adjustments to give a fair picture of the concept:
 Frame timing: `h7 --run [loader_stubs options]` runs `menu7_main` on the fake clock and prints one line per `g7_frame` call:
 
 ```
-T7 <fake ms> <host ms> <pixels> [full]
+T7 <fake ms> <host ms> <pixels> <class> [full]
 ```
+
+`<class>` is what the frame shows (`M7_PH_*` in `menu7.h`): intro-wall, intro-glass, idle, lens, list, expand, over-move, over-rest, launch, progress, end. `--again` with `--fail WHY` calls `menu7_main` a second time after the handoff, so the error card is timed too. h7 maps the memory map with `MAP_POPULATE`, so page faults stay out of the timings.
 
 For example, `--keys 'wait:3000,down,wait:600,power,wait:3000' --tmax 12000`.
 
@@ -71,3 +73,32 @@ For example, `--keys 'wait:3000,down,wait:600,power,wait:3000' --tmax 12000`.
 - **Speed check.** Before anything is drawn, `menu7_main` reads `g7_bake`'s time. Above `M7_BAKE_MAX_MS` (400 ms; VM 60–75 ms) v7 does not run and v6 does (slot 127 bit 16, slot 125 the bake in ms). Boot-args `starmenu7=0` turns v7 off and `starmenu7=2` skips the check.
 - **Input during long frames.** `g7_set_poll` makes the renderer sample the keys every 2 ms between rows. Holds are timed from the moment the key went down, and fire only while it is still down. Both Volume keys held 700 ms power off at once (then reboot if a charger keeps the PMIC up), with no drawing.
 - **Testing it on the host.** `h7 --run --tick-us N` makes every clock read cost N µs. Since the renderer reads the clock between rows, a full frame then costs about rows × N. `--cmd 'starmenu7=0'` passes boot-args, `hold-vol` holds both Volume keys, and after a pick `--run` plays five progress stages and the handoff, printing their times.
+
+## 6. Frame cost (performance work)
+
+What makes the frames cheaper, all inside `glass*.c` (the look is unchanged: the compare sheets' mean errors moved by at most +0.03/255):
+
+- **BG8.** `G7_BASE` holds the final wallpaper × .8 already dithered (built at its first use, not in the bake). A pixel without glass is a copy.
+- **GLB.** While nothing is frozen, `G7_SHARP` holds the base glass composed over BG8 (every base shape before the lens). A frame whose glass did not change where it draws (the lens moved, the countdown ring or a text changed) copies GLB and shades only the lens on top. Per-row valid ranges (`GV0`/`GV1`) follow the diff. A freeze builds SHARP from GLB in place.
+- **The shader by spans.** Each shape's row is cut, by binary search on the SDF, into shadow-only, rim and interior spans. The interior and the straight top and bottom rim bands (one d, normal and refraction offset per row, so the refracted samples are rows) run 4 pixels per NEON step. Shadows beside straight edges are geometric sequences, above and below them a constant. Only corners and the vertical straight edges stay per pixel.
+- **Motion frames at half resolution.** When the glass changes over more than 1/8 of the panel (scroll, room, sections, intro, overlay panes, the launch card), that frame shades it on the half-resolution grid (premultiplied C and transmission M), bilinear to the panel. Those rows are marked and drawn again exactly once the glass rests: one 128-row band per resting frame, or per `g7_idle()` call, which `menu7`'s loop makes when it has nothing to draw. A rest frame is pixel-identical to a full redraw (`h7 --list … --check-full`).
+- **NEON** for the frost rows, the dithered stores, the wallpaper rows, the crossfade under overlays (integer 9/3/3/1 weights), the freeze's box blurs and the bake's blur passes. The static field is evaluated on a 4-texel grid and interpolated.
+
+On-device timing: log slots 128 + class (`M7_PH_*`), each `frames << 48 | worst ms << 32 | total ms`. Slots 120..127 are unchanged.
+
+Host timings (VM ms, `h7 --run`, mean / p90; ×12 for the A55):
+
+| class | before | after |
+|---|---|---|
+| bake | 58 | 19 |
+| intro-wall | 45 / 57 | 22 / 27 |
+| intro-glass | 99 / 102 | 32 / 36 |
+| list | 81 / 104 | 24 / 30 |
+| lens | 14 / 19 | 5 / 7 |
+| expand | 57 / 70 | 18 / 21 |
+| over-move | 65 / 69 (freeze 202) | 23 / 24 (freeze 95) |
+| over-rest | 6 / 8 | 3 / 5 |
+| launch | 101 / 106 | 43 / 48 |
+| end | 92 / 133 | 44 / 64 |
+
+Measured with `build/menu7-work/scen.sh` (four key scripts) and summarised per class.

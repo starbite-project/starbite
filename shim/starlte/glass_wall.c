@@ -48,50 +48,77 @@ static float whash(float x, float y)   /* WALL_FS hash */
     return g_fract(x * y);
 }
 
+/* The field at one texel (fractional texel coordinates allowed): WALL_FS without the uniforms. */
+static void field_at(float ti, float tj, float out[3])
+{
+    const float ar = 2960.f / 1440.f, s0x = 1290.f / 1440.f, s0y = 232.f / 1440.f;
+    float ux = (ti + .5f) * 2.f / 1440.f, uy = (tj + .5f) * 2.f / 1440.f;
+    float cx1 = .06f + 1.05f * (1.f - ux) + .05f * g_sin(ux * 3.1f + .6f);
+    float cx2 = .72f + .85f * (1.f - ux) + .08f * g_sin(ux * 2.4f + 2.f);
+    float gx1 = (ux - .08f) * (ux - .08f), gx2 = (ux - .9f) * (ux - .9f);
+    float t = g_smooth(0.f, ar * .95f, uy);
+    float br = g_mix(.011f, .002f, t), bg = g_mix(.024f, .005f, t), bb = g_mix(.066f, .017f, t);
+    float gy1 = (uy - 1.55f) * (uy - 1.55f), gy2 = (uy - 1.95f) * (uy - 1.95f);
+    float dsy = (uy - s0y) * .82f, vy = (uy - ar * .5f) * .5f;
+    float dsx = ux - s0x, dd2 = dsx * dsx + dsy * dsy, dd = g_sqrt(dd2);
+    float r = br, g = bg, b = bb, k;
+    k = g_exp(-dd2 / .13f) * .85f;
+    r += .03f * k; g += .075f * k; b += .22f * k;
+    float edd = g_exp(-dd / .9f);
+    k = edd * .5f;
+    r += .016f * k; g += .04f * k; b += .12f * k;
+    k = g_exp(-(gx1 + gy1) / .22f);
+    r += .016f * k; g += .04f * k; b += .13f * k;
+    k = g_exp(-(gx2 + gy2) / .12f);
+    r += .012f * k; g += .026f * k; b += .085f * k;
+    float s1 = uy - cx1;
+    float f1 = s1 < 0.f ? g_exp(-s1 * s1 / (.30f * .30f)) : g_exp(-s1 * s1 / (.075f * .075f));
+    k = f1 * (.55f + .45f * g_exp(-dd * .9f));
+    r += .022f * k; g += .055f * k; b += .15f * k;
+    float s2 = uy - cx2;
+    float f2 = s2 > 0.f ? g_exp(-s2 * s2 / (.34f * .34f)) : g_exp(-s2 * s2 / (.09f * .09f));
+    k = f2 * .6f;
+    r += .03f * k; g += .035f * k; b += .13f * k;
+    float vx = (ux - .5f) * 1.25f;
+    float v = 1.f - .32f * g_smooth(.55f, 1.15f, g_sqrt(vx * vx + vy * vy));
+    out[0] = r * v;
+    out[1] = g * v;
+    out[2] = b * v;
+}
+
+/* Every term of the field is smooth on the scale of tens of texels (the narrowest, the silk's
+ * lower edge, has sigma .075 = 54 texels), so it is evaluated on a grid of every 4th texel and
+ * interpolated bilinearly in between (error < 1e-4 of the value, below the packing's step). */
+#define FQ 4
+#define FGW (WW / FQ + 1)
+#define FGH (WH / FQ + 1)
 void gw_field(void)
 {
     uint32_t *F = TEX(P_FIELD);
-    float *cx1 = g_row_tmp, *cx2 = g_row_tmp + WW, *gx1 = g_row_tmp + 2 * WW, *gx2 = g_row_tmp + 3 * WW;
-    const float ar = 2960.f / 1440.f, s0x = 1290.f / 1440.f, s0y = 232.f / 1440.f;
-    for (int i = 0; i < WW; i++) {
-        float ux = (i + .5f) * 2.f / 1440.f;
-        cx1[i] = .06f + 1.05f * (1.f - ux) + .05f * g_sin(ux * 3.1f + .6f);
-        cx2[i] = .72f + .85f * (1.f - ux) + .08f * g_sin(ux * 2.4f + 2.f);
-        gx1[i] = (ux - .08f) * (ux - .08f);
-        gx2[i] = (ux - .9f) * (ux - .9f);
+    float *G = (float *)P_SOFT;                         /* the grid: FGW x FGH rgb (bake temp) */
+    for (int b = 0; b < FGH; b++) {
+        if (!(b & 31))
+            g7_poll();
+        for (int a = 0; a < FGW; a++)
+            field_at((float)(a * FQ), (float)(b * FQ), G + 3 * (b * FGW + a));
     }
     for (int j = 0; j < WH; j++) {
-        float uy = (j + .5f) * 2.f / 1440.f;
-        g7_poll();
-        float t = g_smooth(0.f, ar * .95f, uy);
-        float br = g_mix(.011f, .002f, t), bg = g_mix(.024f, .005f, t), bb = g_mix(.066f, .017f, t);
-        float gy1 = (uy - 1.55f) * (uy - 1.55f), gy2 = (uy - 1.95f) * (uy - 1.95f);
-        float dsy = (uy - s0y) * .82f, vy = (uy - ar * .5f) * .5f;
+        if (!(j & 63))
+            g7_poll();
+        int b = j / FQ;
+        float fy = (float)(j - b * FQ) * (1.f / FQ);
+        const float *g0 = G + 3 * b * FGW, *g1 = g0 + 3 * FGW;
         uint32_t *row = F + (unsigned)j * WW;
         for (int i = 0; i < WW; i++) {
-            float ux = (i + .5f) * 2.f / 1440.f;
-            float dsx = ux - s0x, dd2 = dsx * dsx + dsy * dsy, dd = g_sqrt(dd2);
-            float r = br, g = bg, b = bb, k;
-            k = g_exp(-dd2 / .13f) * .85f;
-            r += .03f * k; g += .075f * k; b += .22f * k;
-            float edd = g_exp(-dd / .9f);
-            k = edd * .5f;
-            r += .016f * k; g += .04f * k; b += .12f * k;
-            k = g_exp(-(gx1[i] + gy1) / .22f);
-            r += .016f * k; g += .04f * k; b += .13f * k;
-            k = g_exp(-(gx2[i] + gy2) / .12f);
-            r += .012f * k; g += .026f * k; b += .085f * k;
-            float s1 = uy - cx1[i];
-            float f1 = s1 < 0.f ? g_exp(-s1 * s1 / (.30f * .30f)) : g_exp(-s1 * s1 / (.075f * .075f));
-            k = f1 * (.55f + .45f * g_exp(-dd * .9f));
-            r += .022f * k; g += .055f * k; b += .15f * k;
-            float s2 = uy - cx2[i];
-            float f2 = s2 > 0.f ? g_exp(-s2 * s2 / (.34f * .34f)) : g_exp(-s2 * s2 / (.09f * .09f));
-            k = f2 * .6f;
-            r += .03f * k; g += .035f * k; b += .13f * k;
-            float vx = (ux - .5f) * 1.25f;
-            float v = 1.f - .32f * g_smooth(.55f, 1.15f, g_sqrt(vx * vx + vy * vy));
-            row[i] = fpack(r * v, g * v, b * v);
+            int a = i / FQ;
+            float fx = (float)(i - a * FQ) * (1.f / FQ);
+            const float *p = g0 + 3 * a, *q = g1 + 3 * a;
+            float c[3];
+            for (int k = 0; k < 3; k++) {
+                float top = p[k] + (p[k + 3] - p[k]) * fx, bot = q[k] + (q[k + 3] - q[k]) * fx;
+                c[k] = top + (bot - top) * fy;
+            }
+            row[i] = fpack(c[0], c[1], c[2]);
         }
     }
     /* the tiny stars */
@@ -113,10 +140,15 @@ void gw_field(void)
 int gw_field_valid(void) { return field_ok; }
 void gw_field_lost(void) { field_ok = 0; }
 
+/* the reveal mask is 1 on the whole panel once rr - rf is past its farthest pixel from the star */
+static int revealed(const struct g7_wall *w)
+{
+    float dx = g_max(w->sx, (float)GW - w->sx), dy = g_max(w->sy, (float)GH - w->sy);
+    return w->rr - w->rf > g_sqrt(dx * dx + dy * dy) + 2.f;
+}
 int gw_wall_same(const struct g7_wall *a, const struct g7_wall *b)
 {
-    /* the reveal mask is 1 everywhere once rr - rf is past the farthest pixel (3300 px) */
-    int ra = a->rr - a->rf > 3400.f, rb = b->rr - b->rf > 3400.f;
+    int ra = revealed(a), rb = revealed(b);
     if (ra != rb)
         return 0;
     if (!ra && (g_abs(a->rr - b->rr) > 1e-4f || g_abs(a->rf - b->rf) > 1e-4f))
@@ -244,7 +276,11 @@ static inline uint32_t q8(float r, float g, float b)
     return 0xff000000U | (uint32_t)(g_sat(r) * 255.f + .5f) << 16 | (uint32_t)(g_sat(g) * 255.f + .5f) << 8 |
            (uint32_t)(g_sat(b) * 255.f + .5f);
 }
-/* one renderWall blur(src, dst, dx, dy) pass; ratio = src / dst size (1 or 2) */
+/* one renderWall blur(src, dst, dx, dy) pass; ratio = src / dst size (1 or 2). The same sums in the
+ * same order as a tap-by-tap loop, but on float rows (planar, clamp-to-edge padding) so the inner
+ * loops are straight multiply-adds. */
+#define BPAD 16
+static float BL[3][2 * WW + 2 * BPAD], BACC[3][WW];
 static void blur_pass(const uint32_t *src, int sw, int sh, uint32_t *dst, int dw, int dh, int horiz, float d)
 {
     int ratio = sw / dw;
@@ -252,41 +288,75 @@ static void blur_pass(const uint32_t *src, int sw, int sh, uint32_t *dst, int dw
     /* centre along the axis for dst index 0: (0 + .5) * ratio - .5 */
     mk_kern(&k, .5f * (float)ratio - .5f, d);
     for (int j = 0; j < dh; j++) {
-        if (!(j & 7))
+        if (!(j & 15))
             g7_poll();
-        for (int i = 0; i < dw; i++) {
-            float r = 0.f, g = 0.f, b = 0.f;
-            for (int t = 0; t < k.n; t++) {
-                uint32_t v;
-                if (horiz) {
-                    int x = ratio * i + k.off[t];
-                    x = x < 0 ? 0 : x >= sw ? sw - 1 : x;
-                    if (ratio == 2) {   /* rows 2j, 2j + 1 at .5 each */
-                        uint32_t a = src[(unsigned)(2 * j) * sw + x], c = src[(unsigned)(2 * j + 1) * sw + x];
-                        r += k.w[t] * .5f * (float)(CR(a) + CR(c));
-                        g += k.w[t] * .5f * (float)(CG(a) + CG(c));
-                        b += k.w[t] * .5f * (float)(CB(a) + CB(c));
-                        continue;
-                    }
-                    v = src[(unsigned)j * sw + x];
-                } else {
-                    int y = ratio * j + k.off[t];
-                    y = y < 0 ? 0 : y >= sh ? sh - 1 : y;
-                    if (ratio == 2) {
-                        uint32_t a = src[(unsigned)y * sw + 2 * i], c = src[(unsigned)y * sw + 2 * i + 1];
-                        r += k.w[t] * .5f * (float)(CR(a) + CR(c));
-                        g += k.w[t] * .5f * (float)(CG(a) + CG(c));
-                        b += k.w[t] * .5f * (float)(CB(a) + CB(c));
-                        continue;
-                    }
-                    v = src[(unsigned)y * sw + i];
-                }
-                r += k.w[t] * (float)CR(v);
-                g += k.w[t] * (float)CG(v);
-                b += k.w[t] * (float)CB(v);
+        for (int c = 0; c < 3; c++)
+            for (int i = 0; i < dw; i++)
+                BACC[c][i] = 0.f;
+        if (horiz) {
+            /* the source line (rows 2j, 2j + 1 at .5 each when downsampling), padded */
+            const uint32_t *ra = src + (unsigned)(ratio * j) * sw, *rb = ratio == 2 ? ra + sw : ra;
+            const float32x4_t half = vdupq_n_f32(.5f);
+            for (int x = 0; x < sw; x += 8) {       /* sw is a multiple of 8 (720, 360) */
+                float32x4_t u[3][2], v[3][2];
+                g_unpack8(ra + x, u);
+                g_unpack8(rb + x, v);
+                for (int c = 0; c < 3; c++)
+                    for (int h = 0; h < 2; h++)
+                        vst1q_f32(BL[c] + BPAD + x + 4 * h, vmulq_f32(half, vaddq_f32(u[c][h], v[c][h])));
             }
-            dst[(unsigned)j * dw + i] = q8(r * (1.f / 255.f), g * (1.f / 255.f), b * (1.f / 255.f));
+            for (int x = -BPAD; x < 0; x++) {
+                uint32_t a0 = ra[0], c0 = rb[0], a1 = ra[sw - 1], c1 = rb[sw - 1];
+                BL[0][x + BPAD] = .5f * (float)(CR(a0) + CR(c0));
+                BL[1][x + BPAD] = .5f * (float)(CG(a0) + CG(c0));
+                BL[2][x + BPAD] = .5f * (float)(CB(a0) + CB(c0));
+                BL[0][sw - 1 - x + BPAD] = .5f * (float)(CR(a1) + CR(c1));
+                BL[1][sw - 1 - x + BPAD] = .5f * (float)(CG(a1) + CG(c1));
+                BL[2][sw - 1 - x + BPAD] = .5f * (float)(CB(a1) + CB(c1));
+            }
+            for (int t = 0; t < k.n; t++) {
+                float32x4_t w = vdupq_n_f32(k.w[t]);
+                int o = k.off[t] + BPAD;
+                for (int c = 0; c < 3; c++) {
+                    const float *L = BL[c] + o;
+                    float *A = BACC[c];
+                    if (ratio == 2)
+                        for (int i = 0; i < dw; i += 4)
+                            vst1q_f32(A + i, vfmaq_f32(vld1q_f32(A + i), w, vld2q_f32(L + 2 * i).val[0]));
+                    else
+                        for (int i = 0; i < dw; i += 4)
+                            vst1q_f32(A + i, vfmaq_f32(vld1q_f32(A + i), w, vld1q_f32(L + i)));
+                }
+            }
+        } else {
+            for (int t = 0; t < k.n; t++) {
+                int y = ratio * j + k.off[t];
+                y = y < 0 ? 0 : y >= sh ? sh - 1 : y;
+                const uint32_t *r = src + (unsigned)y * sw;
+                float32x4_t w = vdupq_n_f32(k.w[t]), wh = vdupq_n_f32(k.w[t] * .5f);
+                if (ratio == 2) {
+                    for (int i = 0; i < dw; i += 4) {
+                        uint8x8x4_t p = vld4_u8((const uint8_t *)(r + 2 * i));
+                        for (int c = 0; c < 3; c++) {
+                            uint16x4_t sum = vpaddl_u8(p.val[2 - c]);       /* columns 2i + 2i+1 */
+                            float32x4_t f = vcvtq_f32_u32(vmovl_u16(sum));
+                            vst1q_f32(BACC[c] + i, vfmaq_f32(vld1q_f32(BACC[c] + i), wh, f));
+                        }
+                    }
+                } else {
+                    for (int i = 0; i < dw; i += 8) {
+                        float32x4_t u[3][2];
+                        g_unpack8(r + i, u);
+                        for (int c = 0; c < 3; c++)
+                            for (int h = 0; h < 2; h++)
+                                vst1q_f32(BACC[c] + i + 4 * h, vfmaq_f32(vld1q_f32(BACC[c] + i + 4 * h), w, u[c][h]));
+                    }
+                }
+            }
         }
+        uint32_t *o = dst + (unsigned)j * dw;
+        for (int i = 0; i < dw; i++)
+            o[i] = q8(BACC[0][i] * (1.f / 255.f), BACC[1][i] * (1.f / 255.f), BACC[2][i] * (1.f / 255.f));
     }
 }
 
@@ -321,39 +391,109 @@ void gw_blur(void)
 
 /* ---- BASE: the wallpaper texture bilinear at panel pixel centres (texel x / 2 - .25) ---- */
 
-static void wall_row_panel(const uint32_t *T, int y, int x0, int x1, float *rgb)
+static float WV[3][WW + 2];
+/* the texture's two rows for panel row y blended (fy), texels t0 - 1 .. t1 + 1 clamped, into WV */
+static void wall_vrow(const uint32_t *T, int y, int t0, int t1)
 {
     float cy = (y + .5f) * .5f - .5f;
     int r0 = g_ifloor(cy);
     float fy = cy - (float)r0;
     int ra = r0 < 0 ? 0 : r0 >= WH ? WH - 1 : r0, rb = r0 + 1 >= WH ? WH - 1 : r0 + 1 < 0 ? 0 : r0 + 1;
     const uint32_t *A = T + (unsigned)ra * WW, *B = T + (unsigned)rb * WW;
+    int t = t0;
+    const float32x4_t vfy = vdupq_n_f32(fy), k = vdupq_n_f32(1.f / 255.f);
+    for (; t <= t1; t++) {
+        if (t >= 0 && t + 8 <= WW && t + 8 <= t1 + 1)
+            break;
+        int tc = t < 0 ? 0 : t >= WW ? WW - 1 : t;
+        uint32_t a = A[tc], b = B[tc];
+        WV[0][t - t0] = ((float)CR(a) + ((float)CR(b) - (float)CR(a)) * fy) * (1.f / 255.f);
+        WV[1][t - t0] = ((float)CG(a) + ((float)CG(b) - (float)CG(a)) * fy) * (1.f / 255.f);
+        WV[2][t - t0] = ((float)CB(a) + ((float)CB(b) - (float)CB(a)) * fy) * (1.f / 255.f);
+    }
+    for (; t + 8 <= WW && t + 8 <= t1 + 1; t += 8) {
+        float32x4_t u[3][2], v[3][2];
+        g_unpack8(A + t, u);
+        g_unpack8(B + t, v);
+        for (int c = 0; c < 3; c++)
+            for (int h = 0; h < 2; h++)
+                vst1q_f32(WV[c] + (t - t0) + 4 * h, vmulq_f32(vfmaq_f32(u[c][h], vsubq_f32(v[c][h], u[c][h]), vfy), k));
+    }
+    for (; t <= t1; t++) {
+        int tc = t < 0 ? 0 : t >= WW ? WW - 1 : t;
+        uint32_t a = A[tc], b = B[tc];
+        WV[0][t - t0] = ((float)CR(a) + ((float)CR(b) - (float)CR(a)) * fy) * (1.f / 255.f);
+        WV[1][t - t0] = ((float)CG(a) + ((float)CG(b) - (float)CG(a)) * fy) * (1.f / 255.f);
+        WV[2][t - t0] = ((float)CB(a) + ((float)CB(b) - (float)CB(a)) * fy) * (1.f / 255.f);
+    }
+}
+static void wall_row_panel(const uint32_t *T, int y, int x0, int x1, float *rgb)
+{
+    int t0 = g_ifloor((x0 + .5f) * .5f - .5f), t1 = g_ifloor((x1 - .5f) * .5f - .5f) + 1;
+    wall_vrow(T, y, t0, t1);
     for (int x = x0; x < x1; x++) {
-        float cx = (x + .5f) * .5f - .5f;
-        int c0 = g_ifloor(cx);
-        float fx = cx - (float)c0;
-        int ca = c0 < 0 ? 0 : c0, cb = c0 + 1 >= WW ? WW - 1 : c0 + 1;
-        uint32_t p00 = A[ca], p01 = A[cb], p10 = B[ca], p11 = B[cb];
-        float w00 = (1.f - fx) * (1.f - fy), w01 = fx * (1.f - fy), w10 = (1.f - fx) * fy, w11 = fx * fy;
+        int c0 = (x - 1) >> 1;                      /* floor(x / 2 - .25) */
+        float fx = (x & 1) ? .25f : .75f;
+        int k = c0 - t0;
         float *o = rgb + 3 * (x - x0);
-        o[0] = (w00 * CR(p00) + w01 * CR(p01) + w10 * CR(p10) + w11 * CR(p11)) * (1.f / 255.f);
-        o[1] = (w00 * CG(p00) + w01 * CG(p01) + w10 * CG(p10) + w11 * CG(p11)) * (1.f / 255.f);
-        o[2] = (w00 * CB(p00) + w01 * CB(p01) + w10 * CB(p10) + w11 * CB(p11)) * (1.f / 255.f);
+        o[0] = WV[0][k] + (WV[0][k + 1] - WV[0][k]) * fx;
+        o[1] = WV[1][k] + (WV[1][k + 1] - WV[1][k]) * fx;
+        o[2] = WV[2][k] + (WV[2][k + 1] - WV[2][k]) * fx;
     }
 }
 
+/* the wallpaper at panel resolution x dim, dithered (GLASS_FS's store), into dst[x0 .. x1).
+ * Panel x = 2m samples texels m - 1, m at .25 / .75, x = 2m + 1 texels m, m + 1 at .75 / .25: eight
+ * pixels from five texels per NEON step. */
+static inline uint32_t wall_px(int x, int t0, float k255, float Y)
+{
+    int k = ((x - 1) >> 1) - t0;
+    float fx = (x & 1) ? .25f : .75f, h = g_dither(x, Y);
+    float r = (WV[0][k] + (WV[0][k + 1] - WV[0][k]) * fx) * k255 + h;
+    float g = (WV[1][k] + (WV[1][k + 1] - WV[1][k]) * fx) * k255 + h;
+    float b = (WV[2][k] + (WV[2][k + 1] - WV[2][k]) * fx) * k255 + h;
+    return 0xff000000U | g_q255(r) << 16 | g_q255(g) << 8 | g_q255(b);
+}
+void gw_row_wall8(int y, int x0, int x1, float dim, uint32_t *dst)
+{
+    const uint32_t *T = TEX(P_TMP);
+    int t0 = g_ifloor((x0 + .5f) * .5f - .5f), t1 = g_ifloor((x1 - .5f) * .5f - .5f) + 1;
+    wall_vrow(T, y, t0, t1);
+    float Y = gs_dither_y(y), k255 = dim * 255.f;
+    int x = x0;
+    while (x < x1 && (x & 1))
+        dst[x - x0] = wall_px(x, t0, k255, Y), x++;
+    const float32x4_t q1 = vdupq_n_f32(.25f * k255), q3 = vdupq_n_f32(.75f * k255);
+    for (; x + 8 <= x1; x += 8) {
+        int k = (x >> 1) - 1 - t0;             /* texel m - 1 for x = 2m */
+        uint32x4x2_t o;
+        float32x4_t h0 = g_dither4(x, Y), h1 = g_dither4(x + 4, Y);
+        float32x4_t c[3][2];
+        for (int ch = 0; ch < 3; ch++) {
+            float32x4_t a = vld1q_f32(WV[ch] + k), b = vld1q_f32(WV[ch] + k + 1), e = vld1q_f32(WV[ch] + k + 2);
+            float32x4_t ev = vfmaq_f32(vmulq_f32(a, q1), b, q3);     /* x = 2m */
+            float32x4_t od = vfmaq_f32(vmulq_f32(b, q3), e, q1);     /* x = 2m + 1 */
+            float32x4x2_t z = vzipq_f32(ev, od);
+            c[ch][0] = vaddq_f32(z.val[0], h0);
+            c[ch][1] = vaddq_f32(z.val[1], h1);
+        }
+        o.val[0] = g_pack4(c[0][0], c[1][0], c[2][0]);
+        o.val[1] = g_pack4(c[0][1], c[1][1], c[2][1]);
+        vst1q_u32(dst + (x - x0), o.val[0]);
+        vst1q_u32(dst + (x - x0) + 4, o.val[1]);
+    }
+    for (; x < x1; x++)
+        dst[x - x0] = wall_px(x, t0, k255, Y);
+}
+
+/* BG8 (G7_BASE): the final wallpaper x .8, dithered, what every pixel without glass shows */
 void gw_base(void)
 {
     uint32_t *base = (uint32_t *)G7_BASE;
-    const uint32_t *T = TEX(P_TMP);
-    float *row = g_row_tmp;
     for (int y = 0; y < GH; y++) {
-        if (!(y & 3))
+        if (!(y & 15))
             g7_poll();
-        wall_row_panel(T, y, 0, GW, row);
-        uint32_t *o = base + (unsigned)y * GW;
-        for (int x = 0; x < GW; x++)
-            o[x] = g_pack10(row[3 * x], row[3 * x + 1], row[3 * x + 2]);
+        gw_row_wall8(y, 0, GW, .8f, base + (unsigned)y * GW);
     }
 }
 
@@ -390,54 +530,56 @@ void gw_sample_a(float px, float py, float out[3]) { bil8(TEX(P_A), AW, AH, px *
 void gw_sample_a5(float px, float py, float out[3]) { bil10(TEX(P_A5), AW, AH, px * .25f - .5f, py * .25f - .5f, out); }
 void gw_sample_b(float px, float py, float out[3]) { bil8(TEX(P_B), BW, BH, px * .125f - .5f, py * .125f - .5f, out); }
 
-void gw_row_a5_at(float py, int n, float px0, float dpx, float *rgb)
+/* rows at any spacing (half resolution: dpx 2): the two texel rows blended once (vrow), then one
+ * lerp per sample */
+static float vrow[3][AW + 4];
+static void row_at(const uint32_t *T, int tw, int th, int pp, int ten, float py, int n, float px0, float dpx,
+                   float *rgb)
 {
-    const uint32_t *T = TEX(P_A5);
-    float cy = py * .25f - .5f;
+    float ip = 1.f / (float)pp, cy = py * ip - .5f;
     int y0 = g_ifloor(cy);
     float fy = cy - (float)y0;
-    int ya = y0 < 0 ? 0 : y0 >= AH ? AH - 1 : y0, yb = y0 + 1 < 0 ? 0 : y0 + 1 >= AH ? AH - 1 : y0 + 1;
-    const uint32_t *A = T + ya * AW, *B = T + yb * AW;
+    int ya = y0 < 0 ? 0 : y0 >= th ? th - 1 : y0, yb = y0 + 1 < 0 ? 0 : y0 + 1 >= th ? th - 1 : y0 + 1;
+    const uint32_t *A = T + ya * tw, *B = T + yb * tw;
+    int t0 = g_ifloor(px0 * ip - .5f), t1 = g_ifloor((px0 + dpx * (float)(n - 1)) * ip - .5f) + 1;
+    if (t1 - t0 > AW + 2)
+        t1 = t0 + AW + 2;
+    for (int t = t0; t <= t1; t++) {
+        int tc = t < 0 ? 0 : t >= tw ? tw - 1 : t;
+        uint32_t a = A[tc], b = B[tc];
+        int k = t - t0;
+        if (ten) {
+            vrow[0][k] = UNP10_R(a) + (UNP10_R(b) - UNP10_R(a)) * fy;
+            vrow[1][k] = UNP10_G(a) + (UNP10_G(b) - UNP10_G(a)) * fy;
+            vrow[2][k] = UNP10_B(a) + (UNP10_B(b) - UNP10_B(a)) * fy;
+        } else {
+            vrow[0][k] = ((float)CR(a) + ((float)CR(b) - (float)CR(a)) * fy) * (1.f / 255.f);
+            vrow[1][k] = ((float)CG(a) + ((float)CG(b) - (float)CG(a)) * fy) * (1.f / 255.f);
+            vrow[2][k] = ((float)CB(a) + ((float)CB(b) - (float)CB(a)) * fy) * (1.f / 255.f);
+        }
+    }
     for (int i = 0; i < n; i++) {
-        float cx = (px0 + dpx * (float)i) * .25f - .5f;
-        int x0 = g_ifloor(cx);
-        float fx = cx - (float)x0;
-        int xa = x0 < 0 ? 0 : x0 >= AW ? AW - 1 : x0, xb = x0 + 1 < 0 ? 0 : x0 + 1 >= AW ? AW - 1 : x0 + 1;
-        uint32_t p00 = A[xa], p01 = A[xb], p10 = B[xa], p11 = B[xb];
-        float w00 = (1.f - fx) * (1.f - fy), w01 = fx * (1.f - fy), w10 = (1.f - fx) * fy, w11 = fx * fy;
+        float cx = (px0 + dpx * (float)i) * ip - .5f;
+        int c0 = g_ifloor(cx);
+        float fx = cx - (float)c0;
+        int k = c0 - t0;
+        if (k > t1 - t0 - 1)
+            k = t1 - t0 - 1;
         float *o = rgb + 3 * i;
-        o[0] = w00 * UNP10_R(p00) + w01 * UNP10_R(p01) + w10 * UNP10_R(p10) + w11 * UNP10_R(p11);
-        o[1] = w00 * UNP10_G(p00) + w01 * UNP10_G(p01) + w10 * UNP10_G(p10) + w11 * UNP10_G(p11);
-        o[2] = w00 * UNP10_B(p00) + w01 * UNP10_B(p01) + w10 * UNP10_B(p10) + w11 * UNP10_B(p11);
+        o[0] = vrow[0][k] + (vrow[0][k + 1] - vrow[0][k]) * fx;
+        o[1] = vrow[1][k] + (vrow[1][k + 1] - vrow[1][k]) * fx;
+        o[2] = vrow[2][k] + (vrow[2][k + 1] - vrow[2][k]) * fx;
     }
 }
-void gw_row_b_at(float py, int n, float px0, float dpx, float *rgb)
+void gw_row_a5_at(float py, int n, float px0, float dpx, float *rgb) { row_at(TEX(P_A5), AW, AH, 4, 1, py, n, px0, dpx, rgb); }
+void gw_row_b_at(float py, int n, float px0, float dpx, float *rgb) { row_at(TEX(P_B), BW, BH, 8, 0, py, n, px0, dpx, rgb); }
+void gw_row_a_at(float py, int n, float px0, float dpx, float *rgb) { row_at(TEX(P_A), AW, AH, 4, 0, py, n, px0, dpx, rgb); }
+/* full-resolution rows: blend the two texel rows once, then the fixed horizontal pattern (A: 4
+ * panel px per texel, B: 8). Pixel x = pp t + pp / 2 + j (j = 0 .. pp - 1) lies between texels t
+ * and t + 1 at fx = (j + .5) / pp: one vector of weights per texel, 4 pixels a step. */
+static void row_fast(const uint32_t *T, int tw, int th, int pp, int ten, float py, int x0, int x1, float *rgb)
 {
-    const uint32_t *T = TEX(P_B);
-    float cy = py * .125f - .5f;
-    int y0 = g_ifloor(cy);
-    float fy = cy - (float)y0;
-    int ya = y0 < 0 ? 0 : y0 >= BH ? BH - 1 : y0, yb = y0 + 1 < 0 ? 0 : y0 + 1 >= BH ? BH - 1 : y0 + 1;
-    const uint32_t *A = T + ya * BW, *B = T + yb * BW;
-    for (int i = 0; i < n; i++) {
-        float cx = (px0 + dpx * (float)i) * .125f - .5f;
-        int x0 = g_ifloor(cx);
-        float fx = cx - (float)x0;
-        int xa = x0 < 0 ? 0 : x0 >= BW ? BW - 1 : x0, xb = x0 + 1 < 0 ? 0 : x0 + 1 >= BW ? BW - 1 : x0 + 1;
-        uint32_t p00 = A[xa], p01 = A[xb], p10 = B[xa], p11 = B[xb];
-        float w00 = (1.f - fx) * (1.f - fy), w01 = fx * (1.f - fy), w10 = (1.f - fx) * fy, w11 = fx * fy;
-        float *o = rgb + 3 * i;
-        o[0] = (w00 * CR(p00) + w01 * CR(p01) + w10 * CR(p10) + w11 * CR(p11)) * (1.f / 255.f);
-        o[1] = (w00 * CG(p00) + w01 * CG(p01) + w10 * CG(p10) + w11 * CG(p11)) * (1.f / 255.f);
-        o[2] = (w00 * CB(p00) + w01 * CB(p01) + w10 * CB(p10) + w11 * CB(p11)) * (1.f / 255.f);
-    }
-}
-/* full-resolution rows: blend the two texel rows once, then the fixed horizontal pattern
- * (A: 4 panel px per texel, B: 8) */
-static float vrow[3 * (AW + 2)];
-static void row_fast(const uint32_t *T, int tw, int th, int pp, int ten, int y, int x0, int x1, float *rgb)
-{
-    float cy = (y + .5f) / (float)pp - .5f;
+    float cy = py / (float)pp - .5f;
     int y0 = g_ifloor(cy);
     float fy = cy - (float)y0;
     int ya = y0 < 0 ? 0 : y0 >= th ? th - 1 : y0, yb = y0 + 1 < 0 ? 0 : y0 + 1 >= th ? th - 1 : y0 + 1;
@@ -446,27 +588,60 @@ static void row_fast(const uint32_t *T, int tw, int th, int pp, int ten, int y, 
     for (int t = t0; t <= t1; t++) {
         int tc = t < 0 ? 0 : t >= tw ? tw - 1 : t;
         uint32_t a = A[tc], b = B[tc];
-        float *v = vrow + 3 * (t - t0);
+        int k = t - t0;
         if (ten) {
-            v[0] = UNP10_R(a) + (UNP10_R(b) - UNP10_R(a)) * fy;
-            v[1] = UNP10_G(a) + (UNP10_G(b) - UNP10_G(a)) * fy;
-            v[2] = UNP10_B(a) + (UNP10_B(b) - UNP10_B(a)) * fy;
+            vrow[0][k] = UNP10_R(a) + (UNP10_R(b) - UNP10_R(a)) * fy;
+            vrow[1][k] = UNP10_G(a) + (UNP10_G(b) - UNP10_G(a)) * fy;
+            vrow[2][k] = UNP10_B(a) + (UNP10_B(b) - UNP10_B(a)) * fy;
         } else {
-            v[0] = ((float)CR(a) + ((float)CR(b) - (float)CR(a)) * fy) * (1.f / 255.f);
-            v[1] = ((float)CG(a) + ((float)CG(b) - (float)CG(a)) * fy) * (1.f / 255.f);
-            v[2] = ((float)CB(a) + ((float)CB(b) - (float)CB(a)) * fy) * (1.f / 255.f);
+            vrow[0][k] = ((float)CR(a) + ((float)CR(b) - (float)CR(a)) * fy) * (1.f / 255.f);
+            vrow[1][k] = ((float)CG(a) + ((float)CG(b) - (float)CG(a)) * fy) * (1.f / 255.f);
+            vrow[2][k] = ((float)CB(a) + ((float)CB(b) - (float)CB(a)) * fy) * (1.f / 255.f);
         }
     }
-    for (int x = x0; x < x1; x++) {
+    int x = x0, half = pp >> 1;
+    /* to the first pixel of a texel interval (x = pp t + pp / 2) */
+    while (x < x1 && ((x - half) & (pp - 1))) {
         float cx = (x + .5f) / (float)pp - .5f;
         int c0 = g_ifloor(cx);
         float fx = cx - (float)c0;
-        const float *v = vrow + 3 * (c0 - t0);
+        int k = c0 - t0;
         float *o = rgb + 3 * (x - x0);
-        o[0] = v[0] + (v[3] - v[0]) * fx;
-        o[1] = v[1] + (v[4] - v[1]) * fx;
-        o[2] = v[2] + (v[5] - v[2]) * fx;
+        for (int c = 0; c < 3; c++)
+            o[c] = vrow[c][k] + (vrow[c][k + 1] - vrow[c][k]) * fx;
+        x++;
+    }
+    const float32x4_t w4 = { .125f, .375f, .625f, .875f }, w8a = { .0625f, .1875f, .3125f, .4375f },
+                      w8b = { .5625f, .6875f, .8125f, .9375f };
+    for (; x + pp <= x1; x += pp) {
+        int k = (x - half) / pp - t0;
+        float32x4x3_t o0, o1;
+        for (int c = 0; c < 3; c++) {
+            float32x4_t v = vdupq_n_f32(vrow[c][k]), dv = vdupq_n_f32(vrow[c][k + 1] - vrow[c][k]);
+            if (pp == 4) {
+                o0.val[c] = vfmaq_f32(v, dv, w4);
+            } else {
+                o0.val[c] = vfmaq_f32(v, dv, w8a);
+                o1.val[c] = vfmaq_f32(v, dv, w8b);
+            }
+        }
+        vst3q_f32(rgb + 3 * (x - x0), o0);
+        if (pp == 8)
+            vst3q_f32(rgb + 3 * (x - x0) + 12, o1);
+    }
+    for (; x < x1; x++) {
+        float cx = (x + .5f) / (float)pp - .5f;
+        int c0 = g_ifloor(cx);
+        float fx = cx - (float)c0;
+        int k = c0 - t0;
+        float *o = rgb + 3 * (x - x0);
+        for (int c = 0; c < 3; c++)
+            o[c] = vrow[c][k] + (vrow[c][k + 1] - vrow[c][k]) * fx;
     }
 }
-void gw_row_a5(int y, int x0, int x1, float *rgb) { row_fast(TEX(P_A5), AW, AH, 4, 1, y, x0, x1, rgb); }
-void gw_row_b(int y, int x0, int x1, float *rgb) { row_fast(TEX(P_B), BW, BH, 8, 0, y, x0, x1, rgb); }
+void gw_row_a5(int y, int x0, int x1, float *rgb) { row_fast(TEX(P_A5), AW, AH, 4, 1, y + .5f, x0, x1, rgb); }
+/* rows of A5, B, A at any panel y (pixel centres x0 + .5 ..): the straight rim bands' refracted rows */
+void gw_row_a5_y(float py, int x0, int x1, float *rgb) { row_fast(TEX(P_A5), AW, AH, 4, 1, py, x0, x1, rgb); }
+void gw_row_b_y(float py, int x0, int x1, float *rgb) { row_fast(TEX(P_B), BW, BH, 8, 0, py, x0, x1, rgb); }
+void gw_row_a_y(float py, int x0, int x1, float *rgb) { row_fast(TEX(P_A), AW, AH, 4, 0, py, x0, x1, rgb); }
+void gw_row_b(int y, int x0, int x1, float *rgb) { row_fast(TEX(P_B), BW, BH, 8, 0, y + .5f, x0, x1, rgb); }

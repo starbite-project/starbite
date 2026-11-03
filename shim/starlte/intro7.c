@@ -301,7 +301,7 @@ int intro7_run(void)
         intro7_frame(&frame, t);
         frame.flags = first ? G7_F_FULL : 0;        /* the first frame replaces S-Boot's splash */
         first = 0;
-        g7_frame(&frame);
+        m7_frame_timed(&frame, t < 1600.f ? M7_PH_INTRO_WALL : M7_PH_INTRO_GLASS);
         /* until the next frame: input every 2 ms (frames are dropped when late, never slowed) */
         uint64_t next = now + I7_FRAME_US;
         for (;;) {
@@ -335,6 +335,6 @@ finish:
     }
     m7_build(&frame, 0);
     frame.flags = first ? G7_F_FULL : 0;
-    g7_frame(&frame);
+    m7_frame_timed(&frame, M7_PH_INTRO_GLASS);
     return res;
 }

@@ -4130,6 +4130,62 @@ static void stats_log(void)
  * the main loop (doc 4.2.3)
  * ============================================================================================== */
 
+/* per-class frame statistics: log slots 128 + class */
+int m7_phase_last;
+static struct { uint32_t n, worst, total; } PHS[M7_PH_N];
+static int phase_sync = -1;          /* menu7_progress / menu7_handoff frames */
+
+uint32_t m7_frame_timed(const struct g7_frame *f, int ph)
+{
+    if (ph < 0 || ph >= M7_PH_N)
+        ph = M7_PH_IDLE;
+    m7_phase_last = ph;
+    uint64_t t0 = m7_now_us();
+    uint32_t px = g7_frame(f);
+    if (!px)
+        return 0;
+    uint32_t ms = (uint32_t)((m7_now_us() - t0 + 500) / 1000);
+    PHS[ph].n++;
+    PHS[ph].total += ms;
+    if (ms > PHS[ph].worst)
+        PHS[ph].worst = ms;
+    log_put(128U + (unsigned)ph, (uint64_t)(PHS[ph].n > 0xffffU ? 0xffffU : PHS[ph].n) << 48 |
+                                     (uint64_t)(PHS[ph].worst > 0xffffU ? 0xffffU : PHS[ph].worst) << 32 | PHS[ph].total);
+    return px;
+}
+
+static int moving_any(const struct m7_spring *s, unsigned n)
+{
+    for (unsigned i = 0; i < n; ++i)
+        if (sp_moving(&s[i]))
+            return 1;
+    return 0;
+}
+
+/* what this menu frame shows (M7_PH_*) */
+static int menu_phase(void)
+{
+    if (phase_sync >= 0)
+        return phase_sync;
+    if (S.end_vis)
+        return M7_PH_END;
+    if (S.mode == MD_LAUNCH || S.launch_vis)
+        return M7_PH_LAUNCH;
+    if (sp_moving(&SP.back) || sp_moving(&SP.ctx) || sp_moving(&SP.sub) || sp_moving(&SP.alert) ||
+        sp_moving(&SP.sheet) || sp_moving(&SP.lift))
+        return M7_PH_OVER_MOVE;
+    if (S.ctx_vis || S.alert_vis || S.sheet_vis)
+        return M7_PH_OVER_REST;
+    for (unsigned i = 0; i < NS; ++i)
+        if (sp_moving(&SP.open[i]))
+            return M7_PH_EXPAND;
+    if (sp_moving(&SP.scroll) || sp_moving(&SP.room) || sp_moving(&SP.pill_y) || sp_moving(&SP.pill_s))
+        return M7_PH_LIST;
+    if (moving_any(SP.lb, 6))
+        return M7_PH_LENS;
+    return M7_PH_IDLE;
+}
+
 static const struct star_info *M_in;
 static char *M_cmd;
 static unsigned M_len;
@@ -4145,7 +4201,7 @@ static void frame_out(void)
     launching = S.launch_vis && (sp_moving(&SP.lw) || sp_moving(&SP.lh));
     m7_build(&f, 0);
     uint64_t t0 = m7_now_us();
-    (void)g7_frame(&f);
+    (void)m7_frame_timed(&f, menu_phase());
     uint32_t ms = (uint32_t)((m7_now_us() - t0 + 500) / 1000);
     ++ST.menu_frames;
     if (ms > ST.menu_worst)
@@ -4305,6 +4361,8 @@ static int run_loop(void)
         if (first || had || S.full || S.refreeze || S.cd || springs_moving() || timers_pending() ||
             S.now < anim_until)
             frame_out();
+        else
+            (void)g7_idle();        /* at rest: motion frames' half-resolution glass to full */
         first = 0;
         frame_wait(t0);
     }
@@ -4540,7 +4598,9 @@ void menu7_progress(unsigned stage, unsigned n, const char *title, const char *d
     S.bar_from = S.bar;
     S.bar_to = n ? c01((float)(stage + 1) / (float)n) : 1;
     S.bar_t = S.now;
+    phase_sync = M7_PH_PROGRESS;
     sync_frames(S.now + 120);
+    phase_sync = -1;
 }
 
 void menu7_handoff(const char *detail)
@@ -4553,7 +4613,9 @@ void menu7_handoff(const char *detail)
     S.bar = S.bar_to = 1;
     scopy(S.end_det, sizeof(S.end_det), detail);
     end_screen(EN_HANDOFF);
+    phase_sync = M7_PH_END;
     sync_frames(S.now + 520);
+    phase_sync = -1;
 }
 
 /* ================================================================================================

@@ -213,6 +213,9 @@ int g7_init(void);
 void g7_bake(void);
 /* Draw what changed and present it. Returns the panel pixels presented (0: nothing changed). */
 uint32_t g7_frame(const struct g7_frame *f);
+/* Nothing to draw this frame: a motion frame's half-resolution glass, again at full resolution, a
+ * band at a time (a few ms). Returns 1 while there is more of it (call again next frame). */
+int g7_idle(void);
 /* G7_CANVAS to the panel again (after Lab drew on it). */
 void g7_present_all(void);
 /* A function g7_frame and g7_bake call between rows (every few ms of drawing), so input is
@@ -238,6 +241,7 @@ struct g7_stats {
     uint32_t bake_us;               /* g7_bake */
     uint32_t full_us;               /* a full-panel frame's time, scaled from the last frame that
                                      * drew at least 1/8 of the panel (0: none yet) */
+    uint32_t bake_part[4];          /* g7_bake: field, wallpaper, blur planes, BG8 (us) */
 };
 void g7_get_stats(struct g7_stats *s);
 

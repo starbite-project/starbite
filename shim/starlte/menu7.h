@@ -151,10 +151,10 @@ void menu7_handoff(const char *detail);
  * time however few frames are drawn. */
 #define M7_DT_CATCHUP 0.5f
 /* Frame-budget mode: a full-panel frame takes longer than this (g7_stats.full_us; VM ~100-180
- * ms, the A55 seconds). The launch card's springs snap and the pick is returned at once, a progress
+ * ms after the motion-frame work, x12 ~0.3-0.6 s). The launch card's springs snap and the pick is returned at once, a progress
  * stage draws one frame, the handoff screen is skipped. */
 #define M7_SLOW_MS 300
-/* Speed check before anything is drawn: g7_bake slower than this (VM: 60-75 ms) and v7 does not
+/* Speed check before anything is drawn: g7_bake slower than this (VM: ~19 ms, x12 ~230 ms) and v7 does not
  * run (menu v6 does; log slot 127 bit 16). Boot-args starmenu7=0 turns v7 off, starmenu7=2 skips
  * the check. */
 #define M7_BAKE_MAX_MS 400
@@ -196,6 +196,24 @@ struct m7_ev {
 /* Poll keys and touch once and return the next event (0: none). Debounce, holds, repeat. */
 int m7_input(struct m7_ev *ev);
 uint64_t m7_now_us(void);
+
+/* Frame timing by what the frame shows (on the device: log slots 128 + class, each
+ * frames << 48 | worst ms << 32 | total ms; h7 --run prints the class's name). */
+enum { M7_PH_INTRO_WALL,            /* intro, the wallpaper still revealing (t < 1600 ms) */
+       M7_PH_INTRO_GLASS,           /* intro, the menu's glass arriving */
+       M7_PH_IDLE,                  /* menu: nothing but items (countdown ring, a press, a notice) */
+       M7_PH_LENS,                  /* menu: the focus lens moving */
+       M7_PH_LIST,                  /* menu: the list moving (scroll, the island's room, the island) */
+       M7_PH_EXPAND,                /* a section opening or closing */
+       M7_PH_OVER_MOVE,             /* an overlay opening or closing (backdrop, options, sheet, alert) */
+       M7_PH_OVER_REST,             /* an overlay at rest (its lens, switch, segments) */
+       M7_PH_LAUNCH,                /* the launch card growing or the error card */
+       M7_PH_PROGRESS,              /* menu7_progress frames */
+       M7_PH_END,                   /* end screens, handoff */
+       M7_PH_N };
+/* g7_frame, timed into the class's statistics (intro7_run uses it too) */
+uint32_t m7_frame_timed(const struct g7_frame *f, int phase);
+extern int m7_phase_last;           /* the class of the last m7_frame_timed */
 
 /* ---- springs (spec "Springs": m = 1, k = (2 pi / response)^2, c = 4 pi zeta / response) ---- */
 

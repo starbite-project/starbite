@@ -125,6 +125,9 @@ slow frame drops frames, never slows the motion.
 
 ### 2.3 Stats
 
+Per frame class (`M7_PH_*`: intro, menu, lens, list, expand, overlays, launch, progress, end), menu7
+also writes slots 128 + class: frames << 48 | worst ms << 32 | total ms (MENU7-BUILD.md section 6).
+
 menu7 writes frame statistics to log slots 120..127 (`g7_get_stats` plus per-state worst frame:
 120 intro frames | worst ms, 121 menu frames | worst ms, 122 expand worst, 123 launch worst,
 124 freeze ms, 125 bake ms, 126 CNTFRQ-based boot-to-menu ms, 127 flags). Lab can show them as
@@ -154,8 +157,8 @@ v7 uses **0x84000000..0x88800000** (72 MiB, write-back), nothing else:
 | Address | Size | Name | Owner | Holds |
 |---|---|---|---|---|
 | 0x84000000 | 17 MiB | `G7_CANVAS` | glass | the composed panel (ARGB, stride 1440); dirty rects go from here to the FB |
-| 0x85100000 | 17 MiB | `G7_SHARP` | glass | the base layer frozen under an overlay |
-| 0x86200000 | 17 MiB | `G7_BASE` | glass | wallpaper (720 x 1480, bilinear to the panel) x dim .8: the opaque base, static after the intro |
+| 0x85100000 | 17 MiB | `G7_SHARP` | glass | the base layer frozen under an overlay; while nothing is frozen, GLB (the base glass composed over BG8, without the lens) |
+| 0x86200000 | 17 MiB | `G7_BASE` | glass | BG8: wallpaper (720 x 1480, bilinear to the panel) x dim .8, dithered: the opaque base, static after the intro |
 | 0x87300000 | 18 MiB | `G7_POOL` | glass | WALLTEX 720 x 1480 (4.26 MB), FIELD 720 x 1480 (intro's static field, 4.26 MB), blur A 360 x 740 (1.07 MB), frost A5 360 x 740 (1.07 MB), blur B 180 x 370 (0.27 MB), SOFT 720 x 1480 (4.26 MB), corner/edge tables (~2 MB), row buffers; glass lays it out |
 | 0x88500000 | 3 MiB | `G7_CACHE` | glass | decoded icons and provider glyphs, rendered OS tiles (124 for every row, 92, 220, 380 on demand), LRU |
 | 0x88800000 | 8 MiB | (ui.c) | - | `UI_SCRATCH` of ui.c (EngineerMode, v6): untouched |

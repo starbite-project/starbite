@@ -16,6 +16,7 @@
  */
 #pragma once
 #include <stdint.h>
+#include <arm_neon.h>
 #include "glass.h"
 #include "sb7.h"
 
@@ -42,7 +43,10 @@ uint64_t hw_freq(void);
 #define P_A      (P_TMP + PL_WALL_BYTES)                /* blur A, 8-bit */
 #define P_A5     (P_A + PL_A_BYTES)                     /* frost taps on A, 10:10:10 */
 #define P_B      (P_A5 + PL_A_BYTES)                    /* blur B, 8-bit */
-#define P_TAB    (P_B + PL_B_BYTES)                     /* tables, 1 MiB */
+#define P_TAB    (P_B + PL_B_BYTES)                     /* tables, 1 MiB: gw_wall's radial and column
+                                                         * tables 0 .. 0x2B200, glass.c's row buffers
+                                                         * 0x2C000, sdSq g(t) 0x40000, specular columns
+                                                         * 0x50000, half rows 0xDD000 */
 #define P_TAB_BYTES 0x100000UL
 #define P_SCR    (P_TAB + P_TAB_BYTES)                  /* scratch for decoding, 1 MiB */
 #define P_SCR_BYTES 0x100000UL
@@ -173,13 +177,73 @@ static inline uint32_t g_pack10(float r, float g, float b)
 #define UNP10_G(v) ((float)(((v) >> 10) & 1023U) * (1.f / 1023.f))
 #define UNP10_B(v) ((float)((v) & 1023U) * (1.f / 1023.f))
 
+/* ---- the dither: GLASS_FS hash(gl_FragCoord.xy), gl_FragCoord = (x + .5, 2960 - y - .5) ---- */
+extern float g_dxt[GW];                         /* fract((x + .5) * 443.897), glass_shade.c */
+static inline float gs_dither_y(int y) { return g_fract(((float)GH - (float)y - .5f) * 441.423f); }
+static inline float g_dither(int x, float Y)
+{
+    float X = g_dxt[x];
+    float d = X * (Y + 19.19f) + Y * (X + 19.19f);
+    X += d;
+    Y += d;
+    return g_fract((X + Y) * X);
+}
+static inline uint32_t g_q255(float v) { return v <= 0.f ? 0U : v >= 255.f ? 255U : (uint32_t)v; }
+/* NEON: the dither for 4 columns (g_dxt[x .. x + 3]) of a row (Y = gs_dither_y), and the store's
+ * clamp-and-truncate of 4 pixels (values in 0 .. 255 units) to 0xffRRGGBB */
+static inline float32x4_t g_fract4(float32x4_t v) { return vsubq_f32(v, vrndmq_f32(v)); }
+static inline float32x4_t g_dither4(int x, float Y)
+{
+    float32x4_t X = vld1q_f32(g_dxt + x), Yv = vdupq_n_f32(Y), k = vdupq_n_f32(19.19f);
+    float32x4_t d = vaddq_f32(vmulq_f32(X, vaddq_f32(Yv, k)), vmulq_f32(Yv, vaddq_f32(X, k)));
+    X = vaddq_f32(X, d);
+    Yv = vaddq_f32(Yv, d);
+    return g_fract4(vmulq_f32(vaddq_f32(X, Yv), X));
+}
+/* n pixels (no overlap), 16 a step */
+static inline void g_copy32(uint32_t *d, const uint32_t *s, int n)
+{
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint32x4x4_t v = vld1q_u32_x4(s + i);
+        vst1q_u32_x4(d + i, v);
+    }
+    for (; i < n; i++)
+        d[i] = s[i];
+}
+/* 8 pixels 0xAARRGGBB -> float r, g, b (0 .. 255), lanes 0..3 and 4..7 */
+static inline void g_unpack8(const uint32_t *p, float32x4_t o[3][2])
+{
+    uint8x8x4_t v = vld4_u8((const uint8_t *)p);   /* bytes B, G, R, A */
+    for (int c = 0; c < 3; c++) {
+        uint16x8_t w = vmovl_u8(v.val[2 - c]);
+        o[c][0] = vcvtq_f32_u32(vmovl_u16(vget_low_u16(w)));
+        o[c][1] = vcvtq_f32_u32(vmovl_u16(vget_high_u16(w)));
+    }
+}
+/* 4 pixels -> float r, g, b (0 .. 255) */
+static inline void g_unpack4(const uint32_t *p, float32x4_t o[3])
+{
+    uint32x4_t v = vld1q_u32(p), m = vdupq_n_u32(255U);
+    o[0] = vcvtq_f32_u32(vandq_u32(vshrq_n_u32(v, 16), m));
+    o[1] = vcvtq_f32_u32(vandq_u32(vshrq_n_u32(v, 8), m));
+    o[2] = vcvtq_f32_u32(vandq_u32(v, m));
+}
+static inline uint32x4_t g_pack4(float32x4_t r, float32x4_t g, float32x4_t b)
+{
+    uint32x4_t m = vdupq_n_u32(255U);
+    uint32x4_t R = vminq_u32(vcvtq_u32_f32(r), m), G = vminq_u32(vcvtq_u32_f32(g), m), B = vminq_u32(vcvtq_u32_f32(b), m);
+    return vorrq_u32(vorrq_u32(vdupq_n_u32(0xff000000U), vshlq_n_u32(R, 16)), vorrq_u32(vshlq_n_u32(G, 8), B));
+}
+void gs_dither_init(void);
+
 /* ---- glass_wall.c ---- */
 void gw_field(void);                            /* the static field into P_FIELD (bake) */
 int gw_field_valid(void);
 void gw_field_lost(void);                       /* P_FIELD was reused (freeze temp) */
 void gw_wall(const struct g7_wall *w);          /* WALL_FS for w into P_TMP (8-bit texture) */
 void gw_blur(void);                             /* renderWall's blur passes: P_TMP -> A, B; A5 */
-void gw_base(void);                             /* BASE = the texture at panel res (10:10:10) */
+void gw_base(void);                             /* G7_BASE = BG8: the texture at panel res x .8, dithered */
 int gw_wall_same(const struct g7_wall *a, const struct g7_wall *b);
 /* bilinear samples at a panel point (clamp to edge, WebGL texel centres) */
 void gw_sample_a(float px, float py, float out[3]);
@@ -188,12 +252,26 @@ void gw_sample_b(float px, float py, float out[3]);
 /* one panel row of A5 and B at pixel centres x0 .. x1 - 1 into rgb triplets */
 void gw_row_a5(int y, int x0, int x1, float *rgb);
 void gw_row_b(int y, int x0, int x1, float *rgb);
+void gw_row_a5_y(float py, int x0, int x1, float *rgb);   /* the same at any panel y */
+void gw_row_b_y(float py, int x0, int x1, float *rgb);
+void gw_row_a_y(float py, int x0, int x1, float *rgb);
 void gw_row_wall(int y, int x0, int x1, float *rgb);  /* the texture at panel res (BASE not valid) */
+void gw_row_wall8(int y, int x0, int x1, float dim, uint32_t *dst);  /* x dim, dithered */
 /* rows at an arbitrary panel y (for the half resolution render) */
 void gw_row_b_at(float py, int n, float px0, float dpx, float *rgb);
 void gw_row_a5_at(float py, int n, float px0, float dpx, float *rgb);
+void gw_row_a_at(float py, int n, float px0, float dpx, float *rgb);
 
 /* ---- glass_shade.c ---- */
+/* prepared shape sets: the base and over layers at panel resolution, the soft base (freeze, K = 2,
+ * half resolution) and the base at half resolution with the panel's uniforms (motion frames) */
+#define GS_BASE 0
+#define GS_OVER 1
+#define GS_SOFT 2
+#define GS_HALF 3
+#define GS_HALFO 4                                  /* the over layer at half resolution */
+#define GS_NL 5
+_Static_assert(0x50000UL + GS_NL * 20UL * 1440UL * 4UL <= 0x100000UL, "glass table overflow");
 struct gs_ctx {                                 /* the uniforms of one GLASS_FS draw */
     float K, soft, dim, back;
     int opaque;
@@ -205,8 +283,11 @@ void gs_prepare(int layer, const struct g7_shape *sh, unsigned n, const struct g
 /* shade one row: pixel centres px = px0 + i * grid (grid 1, or 2 for layer 2), py; acc rgb and al
  * in/out; rowa5 / rowb: A5 and B at those pixel centres */
 void gs_row(int layer, const struct gs_ctx *c, float py, float px0, int n, float *acc, float *al,
-            const float *rowa5, const float *rowb);
+            const float *rowa5, const float *rowb, int s0, int s1);   /* prepared shapes s0 .. s1 - 1 */
 void gs_new_frame(void);
+int gs_row_span(int layer, float py, int s0, int s1, int *x0, int *x1);
+int gs_npre(int layer);                         /* prepared shapes before the layer's first lens */
+int gs_nshapes(int layer);
 /* the glass wordmark over a base row */
 void gs_word_prepare(const struct g7_word *w, const struct gs_ctx *c);
 int gs_word_rows(int *y0, int *y1, int *x0, int *x1);
