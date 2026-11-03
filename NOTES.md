@@ -2056,3 +2056,22 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   docs/WIN11-24H2-A55.md: LSE -> A55 only; A55 core 1 and M3 core 0 share Aff 0x100, so the MADT must list only the
   4 A55 (MPIDR 0x000/0x100/0x200/0x300, parked, no M3, PPTT 1 cluster); per-build CNTFRQ/NTPATCH work for 26100 is
   the blocker. tools/woa/winpe/acpi-dump.ps1 dumps the release's real tables from Windows (first step).
+- 2026-11-03: **Native Samsung splash (built, not booted, nothing flashed).**
+  - Stock check: logo.jpg in build/fw-vg6/bl/up_param.bin (VG6 firmware tar), backup/20261025-233855 (VG4) and
+    backup/20261102-185306 UP_PARAM.img is the same file (136775 bytes, sha e2db11d5...); 20261102 = the VG6
+    up_param.bin byte for byte plus zero padding to 8 MiB (the 20261025 one differs only in tar mtimes: VG4).
+  - tools/brand/splash-noknox.py: "Secured by Knox" (rows 379..430, x 541..991 of logo.jpg) replaced in the DCT
+    domain by a block of the image's own background (jpegtran -crop + -drop, no re-encoding): 0 pixels differ
+    outside x 536..999 y 376..439, inside it is 0,0,0; markers kept, baseline 4:4:4. build/brand/upparam-native/
+    logo.jpg sha 9ae3c717..., up_param.img (upparam-pack.py, unchanged-rebuild self-test passed) sha 49788aca...
+    Not flashed: the user decides.
+  - intro7: intro7_capture copies the panel's non-black row bands into I7_CAPT (0x83800000, 8 MiB, checked free at
+    run time) as runtime SB7 images (sb7_put, SB7_S_CAPT0..); the intro's first frame is S-Boot's splash pixel for
+    pixel (h7 --splash, intro-film.sh I7_SPLASH: 0 px differ for the stock, Knox-free, "Powered by starbite" and
+    concept logo.jpg), then it fades into the concept's intro. No capture: the concept splash as before (frames
+    byte-identical to the previous loader). Films: build/splash-review/{native,stock,current,v7concept}/.
+  - Review fixes: no glass wordmark on the capture path (it double-exposed with "Galaxy S9" at 100..260 ms); the real
+    SAMSUNG band (panel row 1232) eases into the wordmark box and fades over the melt. Bands are found with max
+    channel >= 8 (PIL's decode of the stock logo has ~22K pixels at 1..7) and padded 8 px, copied raw: 4 bands,
+    first frame 0 px differ. Capture result + duration in log slots 116..117; intro7_release unregisters the SB7
+    images when the intro ends; capt_free also checks star_info rd_start..rd_end (m7_rd_range).

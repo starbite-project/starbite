@@ -117,10 +117,47 @@ uintptr_t sb7_base(uint32_t *size)
     return sb7_start;
 }
 
+/* run-time sections (sb7_put): the captured splash */
+static struct {
+    uint32_t type, id, size;
+    uintptr_t p;
+} sb7_rt[SB7_RT_MAX];
+static uint32_t sb7_nrt;
+
+int sb7_put(uint32_t type, uint32_t id, const void *p, uint32_t size)
+{
+    for (uint32_t i = 0; i < sb7_nrt; i++)
+        if (sb7_rt[i].type == type && sb7_rt[i].id == id) {
+            if (!p) {
+                sb7_rt[i] = sb7_rt[--sb7_nrt];
+                return 1;
+            }
+            sb7_rt[i].p = (uintptr_t)p;
+            sb7_rt[i].size = size;
+            return 1;
+        }
+    if (!p)
+        return 1;
+    if (sb7_nrt >= SB7_RT_MAX)
+        return 0;
+    sb7_rt[sb7_nrt].type = type;
+    sb7_rt[sb7_nrt].id = id;
+    sb7_rt[sb7_nrt].size = size;
+    sb7_rt[sb7_nrt].p = (uintptr_t)p;
+    sb7_nrt++;
+    return 1;
+}
+
 const void *sb7_get(uint32_t type, uint32_t id, uint32_t *size)
 {
     if (!sb7_start)
         return 0;
+    for (uint32_t i = 0; i < sb7_nrt; i++)
+        if (sb7_rt[i].type == type && sb7_rt[i].id == id) {
+            if (size)
+                *size = sb7_rt[i].size;
+            return (const void *)sb7_rt[i].p;
+        }
     uint64_t key = ((uint64_t)type << 32) | id;
     uint32_t lo = 0, hi = sb7_count;
     while (lo < hi) {

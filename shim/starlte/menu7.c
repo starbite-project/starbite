@@ -4288,6 +4288,16 @@ static int menu_phase(void)
 }
 
 static const struct star_info *M_in;
+
+int m7_rd_range(uint64_t *start, uint64_t *end)
+{
+    if (!M_in)
+        return 0;
+    *start = M_in->rd_start;
+    *end = M_in->rd_end;
+    return 1;
+}
+
 static char *M_cmd;
 static unsigned M_len;
 static int M_inited;

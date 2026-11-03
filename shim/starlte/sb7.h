@@ -183,6 +183,9 @@ struct sb7_image {
 
 /* Splash */
 #define SB7_S_SAMSUNG    80U        /* A8 1300 x 220: drawSam(k = 1), the 900 x 120 wordmark centred */
+/* 96 .. 103: not in the container. The splash S-Boot left on the panel, captured at run time by
+ * intro7_capture: one ARGB (premultiplied) RAW image per row band, put in with sb7_put. */
+#define SB7_S_CAPT0      96U
 
 /* 256 .. 4095: tile glyph layers (ARGB), referenced only by sb7_tile.glyph[] */
 #define SB7_G_FIRST     256U
@@ -240,6 +243,10 @@ uintptr_t sb7_base(uint32_t *size);
 /* Tile id for a catalog entry: exact key, then prefixes (longest first), then the category's
  * default; 0 if none. */
 unsigned sb7_tile_for(const char *key, unsigned category);
+/* A section made at run time (in RAM the caller owns, laid out as the container's): sb7_get finds
+ * it before the container. p = 0 removes (type, id). 0 when the table (SB7_RT_MAX) is full. */
+#define SB7_RT_MAX 8U
+int sb7_put(uint32_t type, uint32_t id, const void *p, uint32_t size);
 
 /* sb7.c also defines memcpy, memset and memmove (no libc in the loader): GCC may emit calls to
  * them for struct copies in code compiled with FP/SIMD (glass.c, menu7.c, intro7.c). */

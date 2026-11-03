@@ -1,6 +1,7 @@
 /* Host preview of boot menu v7 (docs/MENU7-PORT.md section 5): the real shim/starlte/glass*.c and
  * sb7.c (and, when built with -DH7_MENU7, menu7*.c, intro7.c and loader_stubs.c) on aarch64 Linux
  * (the Lima VM), with the loader's memory map mmap'ed at its own addresses:
+ *   0x83800000 .. 0x84000000  I7_CAPT (intro7's copy of S-Boot's splash)
  *   0x84000000 .. 0x88800000  G7_CANVAS, G7_SHARP, G7_BASE, G7_POOL, G7_CACHE
  *   0x89000000                the BOOT ramdisk (menu-v7.sbm), as S-Boot loads it
  *   0xcc000000                the framebuffer
@@ -13,6 +14,13 @@
  *   h7 --ramdisk menu-v7.sbm --state <state> [--p 0.4] [--t ms] [loader_stubs options] --out out.ppm
  *       (H7_MENU7 builds) menu7's own frame for a concept state (m7_preview_state), or the intro
  *       at t ms (intro7_frame)
+ *   --splash logo.ppm [--splash-at X,Y]
+ *       the panel S-Boot leaves (binary PPM): black, and the picture at (X, Y); a 1440 x 2960
+ *       picture is the whole panel, anything else defaults to S-Boot's place for logo.jpg, x
+ *       (1440 - w) / 2 rounded down (180 for 1079), y 1144 (docs/MENU7-PORT.md 4.3). The intro
+ *       (--state intro, --run) then starts from it through intro7_capture, as on the device;
+ *       without it the panel is black and the intro draws the concept's splash. (PNG / JPG:
+ *       intro-film.sh converts them.)
  *
  * Display list lines (numbers are floats unless noted; colours 0xAARRGGBB; # comments):
  *   frame [full] [refreeze]           starts a frame (the previous one is drawn)
@@ -119,6 +127,32 @@ static size_t load_ramdisk(const char *path)
         die("short read");
     close(fd);
     return (size_t)st.st_size;
+}
+
+/* --splash: the panel as S-Boot leaves it */
+static void load_splash(const char *path, const char *at)
+{
+    FILE *f = fopen(path, "rb");
+    int w, h, mx;
+    if (!f || fscanf(f, "P6 %d %d %d", &w, &h, &mx) != 3 || mx != 255 || w <= 0 || h <= 0 || w > G7_W || h > G7_H)
+        die("--splash: not a binary PPM that fits the panel");
+    fgetc(f);
+    int x0 = w == G7_W && h == G7_H ? 0 : (G7_W - w) / 2, y0 = w == G7_W && h == G7_H ? 0 : 1144;
+    if (at && sscanf(at, "%d,%d", &x0, &y0) != 2)
+        die("--splash-at X,Y");
+    if (x0 < 0 || y0 < 0 || x0 + w > G7_W || y0 + h > G7_H)
+        die("--splash: the picture is outside the panel");
+    for (int i = 0; i < G7_W * G7_H; i++)
+        FB[i] = 0xff000000U;
+    static unsigned char row[3 * G7_W];
+    for (int y = 0; y < h; y++) {
+        if (fread(row, 3, (size_t)w, f) != (size_t)w)
+            die("--splash: short read");
+        for (int x = 0; x < w; x++)
+            FB[(y0 + y) * G7_W + x0 + x] = 0xff000000U | (uint32_t)row[3 * x] << 16 | (uint32_t)row[3 * x + 1] << 8 | row[3 * x + 2];
+    }
+    fclose(f);
+    fprintf(stderr, "splash %s: %d x %d at (%d, %d)\n", path, w, h, x0, y0);
 }
 
 static void write_ppm(const char *path, const uint32_t *px)
@@ -488,7 +522,7 @@ __attribute__((weak)) int h7_stubs_args(int argc, char **argv);
 
 int main(int argc, char **argv)
 {
-    const char *ramdisk = 0, *list = 0, *out = 0, *state = 0;
+    const char *ramdisk = 0, *list = 0, *out = 0, *state = 0, *splash = 0, *splash_at = 0;
     float p = 0, t = -1;
     int check = 0, again = 0;
     for (int i = 1; i < argc; i++) {
@@ -499,6 +533,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--p") && i + 1 < argc) p = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--t") && i + 1 < argc) t = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--stats")) stats = 1;
+        else if (!strcmp(argv[i], "--splash") && i + 1 < argc) splash = argv[++i];
+        else if (!strcmp(argv[i], "--splash-at") && i + 1 < argc) splash_at = argv[++i];
         else if (!strcmp(argv[i], "--check-full")) check = 1;
         else if (!strcmp(argv[i], "--poison")) poison = 1;
 #ifdef H7_TIME
@@ -514,7 +550,7 @@ int main(int argc, char **argv)
         if (pe && *pe && *pe != '0')
             poison = !strcmp(pe, "a5") ? 2 : 1;
     }
-    map_fixed(0x84000000UL + G7_HOSTOFF, 0x04800000UL);
+    map_fixed(0x83800000UL + G7_HOSTOFF, 0x05000000UL);     /* I7_CAPT, then G7_CANVAS .. G7_RAM_END */
     map_fixed((uintptr_t)FB, G7_FRAME_BYTES);
     if (poison) {
         /* H7_POISON_ONLY=<bits> (debugging): only some regions: 1 CANVAS, 2 SHARP, 4 BASE, 8 POOL,
@@ -536,6 +572,8 @@ int main(int argc, char **argv)
                 poison_fill(G7_POOL + o, n & ~7UL);
         }
     }
+    if (splash)                     /* after the poison: S-Boot's picture is on the panel */
+        load_splash(splash, splash_at);
     size_t rn = load_ramdisk(ramdisk);
     if (!sb7_open(RD_BASE, RD_BASE + rn))
         die("no valid SB7ASSET container in the ramdisk");
@@ -595,6 +633,8 @@ int main(int argc, char **argv)
             /* the intro as intro7_run plays it, up to T: 30 fps steps of m7_step + intro7_frame, so the
              * springs that run beside it (the list's room for the island) are where they are at T */
             float T = t < 0 ? 0 : t, ti = 0;
+            if (splash)
+                fprintf(stderr, "intro7_capture: %d bands\n", intro7_capture());
             m7_prepare_boot();
             for (;;) {
                 float nt = ti + 1000.0f / 30 < T ? ti + 1000.0f / 30 : T;

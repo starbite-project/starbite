@@ -17,7 +17,17 @@ This step needs `build/brand/menu-em.sbm`, the menu v6 sprites and the EngineerM
 |---|---|
 | `build/brand/menu7.sb7` | the container: fonts, icons, tiles, SAMSUNG |
 | `build/brand/menu-v7.sbm` | the BOOT ramdisk: `menu-em.sbm`, padding to 4 KiB, then the container. S-Boot loads it at 0x89000000, so it must stay under 16 MB. |
-| `build/brand/upparam-v7/logo.jpg` | the S-Boot splash that matches the intro's first frame. It is not packed or flashed by this step. |
+| `build/brand/upparam-v7/logo.jpg` | the concept's splash as a logo.jpg (no longer needed: the intro starts from whatever S-Boot drew). It is not packed or flashed by this step. |
+
+The native splash (Samsung's own, without "Secured by Knox"), not flashed:
+
+```sh
+build/venv/bin/python -I tools/brand/splash-noknox.py backup/20261102-185306/UP_PARAM.img build/brand/upparam-native
+```
+
+It takes logo.jpg from the stock UP_PARAM (checks its sha256), puts a block of the image's own
+background over the Knox mark in the DCT domain (jpegtran -crop / -drop: no re-encoding, 0 pixels
+change outside x 536..999, y 376..439), and packs `up_param.img` with `upparam-pack.py`.
 
 ## 2. The loader
 
@@ -58,6 +68,8 @@ CMP_RD=build/brand/concept/menu-v7.sbm sh tools/menu7/preview/compare-all.sh
 ```
 
 The concept-artwork ramdisk is for comparison only; the device ramdisk is `build/brand/menu-v7.sbm`.
+
+The intro from a real splash: `h7 --splash logo.ppm [--splash-at X,Y]` puts S-Boot's panel on the fake framebuffer (logo.jpg's size at (180, 1144), a 1440 x 2960 picture as the whole panel) and the intro captures it (`intro7_capture`, also in `--run`). `I7_SPLASH=logo.jpg sh tools/menu7/preview/intro-film.sh 0 100 ...` converts a JPG / PNG, films it and checks the first frame: `first frame: 0 px differ from the splash`.
 
 The states are: menu, countdown, collapsed, apple, ctx, submenu, sheet, alert, recovery, launch (at 40 %), error, missing, lab, handoff, and the intro at 0, 300, 700, 1050, 1400, 1800 and 2350 ms.
 
