@@ -30,7 +30,7 @@ build() {
     defs="-DM7_PREVIEW" wrap=""
     if [ -f "$st/menu7.c" ] && [ -f "$pv/loader_stubs.c" ]; then
         for f in "$st"/menu7*.c "$st/intro7.c" "$pv/loader_stubs.c"; do [ -f "$f" ] && files="$files $f"; done
-        defs="$defs -DH7_MENU7 -DH7_TIME"; wrap="-Wl,--wrap=g7_frame -Wl,--wrap=g7_idle"
+        defs="$defs -DH7_MENU7 -DH7_TIME"; wrap="-Wl,--wrap=g7_frame,--wrap=g7_idle"
     fi
     limactl shell starbite -- bash -lc "set -e; cd '$out'; gcc -O2 -mcpu=cortex-a55 -fno-math-errno -ffp-contract=fast \
         -mstrict-align -Wall -Wextra -Werror -Wno-unused-parameter $defs -I'$st' -I'$src/shim' -o h7 '$pv/h7.c' $files $wrap -lm"

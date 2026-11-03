@@ -240,10 +240,13 @@ void gs_prepare(int layer, const struct g7_shape *in, unsigned n, const struct g
         float xa = s->cx - s->hbx - aa - 2.f, xb = s->cx + s->hbx + aa + 2.f;
         int gw = GW / G;
         int i0 = g_ifloor(xa / (float)G - .5f), i1 = g_ifloor(xb / (float)G - .5f) + 1;
-        if (i0 < 0)
-            i0 = 0;
-        if (i1 > gw)
-            i1 = gw;
+        /* the half-resolution rows' grid runs from column -1 to gw (half_row: ia = (x0 - 1) >> 1,
+         * through ib = gw), and px_interior / px_band read the table unchecked: cover those too
+         * (column -1 read the float before this shape's entries, garbage at boot) */
+        if (i0 < 1 - G)
+            i0 = 1 - G;
+        if (i1 > gw + G - 1)
+            i1 = gw + G - 1;
         if (i1 - i0 > EX_N)
             i1 = i0 + EX_N;
         s->ex0 = i0;
