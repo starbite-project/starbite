@@ -11,8 +11,14 @@
       after 16 GiB (721024), sd = the 128 GB card's partition 2 (8389120); store-flash*.sh check
       it against the phone. A card store is written by store-flash-sd.sh; the loader reads it
       only with the settings flag on (settings --sd on, or Engineer "Card store at boot").
+      With both --catalog and --import, refuses when the new catalog lacks a menu key the imported
+      store's catalog has (another workflow's row would vanish): --drop KEY (repeatable) allows it.
+      --medium ufs also refuses a store that reaches the last 1025 blocks of USERDATA (the iOS 26
+      kernel's herolog ring, bsd/dev/herolte_ufs.c).
   sbstore2.py list IMG
   sbstore2.py catalog catalog.toml OUT.sbc
+  sbstore2.py catalog-keys IMG|OUT.sbc|catalog.toml
+      The menu keys of a catalog, one per line (sorted): diff two of them before flashing.
   sbstore2.py settings OUT.bin [--from BLOCK.bin] [--default KEY] [--timeout S] [--next KEY]
               [--last KEY] [--sd on|off]
       A settings block (4 KiB) for block 2, e.g. to set the default entry or a one-shot next.
@@ -34,6 +40,7 @@ DATA_BLOCK = DIR_BLOCK + DIR_BLOCKS
 MAX_ENTRIES = DIR_BLOCKS * BLOCK // 64
 V1_BLOCKS = 262144
 MEDIA = {'ufs': 721024, 'sd': 8389120}   # S9 #1: USERDATA after 16 GiB; card p2 182886400..249999359
+HEROLOG_BLOCKS = 1025                     # herolte_ufs.c: 4 MiB ring + header block at the end of the root partition
 SET_SD_STORE = 1                          # settings flags: read the card's store at boot
 
 TYPES = {'data': 0, 'image': 1, 'dtb': 2, 'initrd': 3, 'text': 4, 'xnu': 5, 'uefi': 6, 'catalog': 7}
@@ -105,14 +112,35 @@ def pack_catalog(path):
     return struct.pack('<8sIIIIII', b'SBCATLG1', 1, len(recs), 64, base, total, 0) + b''.join(recs) + bytes(pool)
 
 
+def check_header(hdr, img='store'):
+    """(n, cap, used) of a version 2 header block, or exit: magic, version, CRC, bounds."""
+    magic, ver, n, cap, used, dblk, dblks, sblk, dcrc, hcrc = struct.unpack_from('<8sIIQQIIIII', hdr, 0)
+    if magic != b'SBSTORE2':
+        sys.exit(f'{img}: no version 2 header (magic {magic!r})')
+    if zlib.crc32(bytes(hdr[:48])) != hcrc:
+        sys.exit(f'{img}: header CRC mismatch')
+    if ver != 2 or (dblk, dblks, sblk) != (DIR_BLOCK, DIR_BLOCKS, SETTINGS_BLOCK) or n > MAX_ENTRIES:
+        sys.exit(f'{img}: unexpected header (version {ver}, {n} entries, directory {dblk}+{dblks})')
+    if not DATA_BLOCK <= used <= cap:
+        sys.exit(f'{img}: used {used} blocks outside [{DATA_BLOCK}, capacity {cap}]')
+    return n, cap, used, dcrc
+
+
 def read_store(img):
     """Entries (name, type, blob) of a store image (v2, else the v1 view), CRC checked."""
     data = Path(img).read_bytes()
     out = []
     if data[BLOCK:BLOCK + 8] == b'SBSTORE2':
-        _, _, n, cap, used, dblk, dblks, sblk, dcrc, hcrc = struct.unpack_from('<8sIIQQIIIII', data, BLOCK)
+        n, cap, used, dcrc = check_header(data[BLOCK:BLOCK + 52], img)
+        if len(data) < used * BLOCK:
+            sys.exit(f'{img}: {len(data)} bytes, header says {used} blocks')
+        dirb = data[DIR_BLOCK * BLOCK:DIR_BLOCK * BLOCK + 64 * n]
+        if zlib.crc32(dirb) != dcrc:
+            sys.exit(f'{img}: directory CRC mismatch')
         for i in range(n):
-            name, blk, size, crc, typ, _fl = struct.unpack_from('<32sQQIHH', data, dblk * BLOCK + 64 * i)
+            name, blk, size, crc, typ, _fl = struct.unpack_from('<32sQQIHH', dirb, 64 * i)
+            if blk < DATA_BLOCK or blk + (size + BLOCK - 1) // BLOCK > used:
+                sys.exit(f'{img}: entry {name.rstrip(bytes(1))!r} at block {blk} + {size} B is outside [{DATA_BLOCK}, {used})')
             blob = data[blk * BLOCK:blk * BLOCK + size]
             out.append((name.rstrip(b'\0').decode(), typ, blob, crc))
     elif data[:8] == b'SBSTORE1':
@@ -128,10 +156,46 @@ def read_store(img):
     return [(n, t, b) for n, t, b, _ in out]
 
 
+def catalog_keys(blob, what='catalog'):
+    """The menu keys of a packed SBCATLG1 catalog."""
+    magic, ver, n, recsize, base, total, _ = struct.unpack_from('<8sIIIIII', blob, 0)
+    if magic != b'SBCATLG1' or recsize != 64 or 32 + 64 * n > len(blob):
+        sys.exit(f'{what}: not a packed catalog (magic {magic!r})')
+    return [blob[32 + 64 * i:32 + 64 * i + 24].split(b'\0')[0].decode() for i in range(n)]
+
+
+def keys_of(path):
+    """Catalog keys of a store image (its 'catalog' entry), a packed .sbc or a catalog TOML."""
+    p = Path(path)
+    if p.suffix == '.toml':
+        return catalog_keys(pack_catalog(p), str(p))
+    head = p.read_bytes()[:8]
+    if head == b'SBCATLG1':
+        return catalog_keys(p.read_bytes(), str(p))
+    cat = {n: b for n, _, b in read_store(p)}.get('catalog')
+    if cat is None:
+        sys.exit(f'{path}: no catalog entry')
+    return catalog_keys(cat, f'{path} catalog')
+
+
 def build(a):
     items = {}
     if a.catalog:
         items['catalog'] = (TYPES['catalog'], pack_catalog(a.catalog))
+    if a.catalog and a.imp:
+        src = Path(a.imp)
+        old = None
+        if src.is_dir():
+            if (src / 'catalog').is_file():
+                old = (src / 'catalog').read_bytes()
+        else:
+            old = {n: b for n, _, b in read_store(src)}.get('catalog')
+        if old is not None:
+            lost = set(catalog_keys(old, f'{a.imp} catalog')) - set(catalog_keys(items['catalog'][1])) - set(a.drop)
+            if lost:
+                sys.exit(f'{a.catalog} lacks menu keys the imported catalog has: {" ".join(sorted(lost))}. '
+                         'Build the catalog from the TOML the live store was built from, or pass --drop KEY '
+                         'for each key you mean to remove.')
     if a.imp:
         src = Path(a.imp)
         if src.is_dir():
@@ -164,6 +228,8 @@ def build(a):
         blk += nblk
     if blk > a.capacity:
         sys.exit(f'store needs {blk} blocks > capacity {a.capacity}')
+    if a.medium == 'ufs' and blk > a.capacity - HEROLOG_BLOCKS:
+        sys.exit(f'store needs {blk} blocks: past {a.capacity - HEROLOG_BLOCKS} it would overlap the USERDATA herolog ring')
     struct.pack_into('<8sIIQ', v1, 0, b'SBSTORE1', 1, nv1, min(blk, V1_BLOCKS))
     n = len(items)
     hdr = bytearray(BLOCK)
@@ -220,12 +286,15 @@ def main():
     b.add_argument('--medium', choices=sorted(MEDIA))
     b.add_argument('--catalog')
     b.add_argument('--import', dest='imp')
+    b.add_argument('--drop', action='append', default=[], metavar='KEY')
     b.add_argument('files', nargs='*')
     l = sub.add_parser('list')
     l.add_argument('img')
     c = sub.add_parser('catalog')
     c.add_argument('toml')
     c.add_argument('out')
+    k = sub.add_parser('catalog-keys')
+    k.add_argument('src')
     s = sub.add_parser('settings')
     s.add_argument('out')
     s.add_argument('--from', dest='frm')
@@ -245,6 +314,8 @@ def main():
         listing(a)
     elif a.cmd == 'catalog':
         Path(a.out).write_bytes(pack_catalog(a.toml))
+    elif a.cmd == 'catalog-keys':
+        print('\n'.join(sorted(keys_of(a.src))))
     else:
         settings(a)
 

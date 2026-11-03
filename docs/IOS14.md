@@ -53,8 +53,8 @@ the 11417 series (0314, 0315).
 | `out/kernel.development.starlte-7195` | the kernel (FRESH build from the series, 13,869,328 bytes) | `a3cb846f...` |
 | `out/starlte-iphone7.adt` | iPhone 7 ADT, 8 CPUs described (new random seed per build) | `2cc1df24...` |
 | `out/payload-ios14-k1.bin` | SWEETXNU payload, **kernel test**: RAM-disk root = one static test init (mockfs), `cpus=1`, `tools/cmdline/ios14-kernel-test.txt` | `14497dc6...` |
-| `out/payload-ios14-u1.bin` | SWEETXNU payload, **userland**: `rd=ufsroot0 ufsroot=IOS14`, `cpus=8`, `tools/cmdline/ios14-userland.txt` | `d602c146...` |
-| `out/xnu-boot-ios14-k1.img`, `-u1.img` | the same payloads behind the old uc3 loader (BOOT images, for a lab bench only) | `a2387b8b...`, `3e32f23c...` |
+| `out/payload-ios14-u1.bin` | SWEETXNU payload, **userland**: `rd=ufsroot0 ufsroot=IOS14 herolog=0`, `cpus=8`, `tools/cmdline/ios14-userland.txt` | `a2f66dc2...` |
+| `out/xnu-boot-ios14-k1.img`, `-u1.img` | the same payloads behind the old uc3 loader (BOOT images, for a lab bench only) | `a2387b8b...`, `3c88fcf1...` |
 
 `tools/mkimage-ios14.sh NAME CMDLINE` builds them (`MDROOT=build/ios14/sweet-init` adds the
 test init: `clang -target arm64-apple-ios14.0 -c ref/ios-herolte/tools/sweet-init.S` +
@@ -68,7 +68,7 @@ The kernel test touches no partition: its root is the RAM disk inside the payloa
    from the Mac copy `build/store/ufs-store.img`, which may be behind the phone), make a catalog
    that is the live catalog plus the `ios14-k1` entry, build, compare, flash:
    ```
-   tools/store/store-pull.sh build/store/ufs-store-live.img    # read-only; must say the live catalog == catalog.toml
+   tools/store/store-pull.sh build/store/ufs-store-live.img    # read-only; must say the live catalog == catalog.toml, not STOP
    cp tools/store/catalog.toml build/store/catalog-ios14.toml
    # append the ios14-k1 [[entry]] from section 6 (key ios14-k1, files = ["ios14k1.xnu"],
    # flags = ["hidden"]) to build/store/catalog-ios14.toml; catalog.toml has no ios14 rows on purpose
@@ -77,12 +77,16 @@ The kernel test touches no partition: its root is the RAM disk inside the payloa
        ios14k1.xnu=out/payload-ios14-k1.bin:xnu
    diff <(python3 tools/store/sbstore2.py list build/store/ufs-store-live.img) \
         <(python3 tools/store/sbstore2.py list build/store/ufs-store-ios14.img)
+   diff <(python3 tools/store/sbstore2.py catalog-keys build/store/ufs-store-live.img) \
+        <(python3 tools/store/sbstore2.py catalog-keys build/store/ufs-store-ios14.img)
    tools/store/store-flash.sh build/store/ufs-store-ios14.img
    ```
-   The diff must show only the changed `catalog` line and the added `ios14k1.xnu`. Without the
+   The first diff must show only the changed `catalog` line and the added `ios14k1.xnu`; the second
+   only `> ios14-k1`. `sbstore2.py build` refuses a `--catalog` that drops a live key. Without the
    catalog copy the store would carry ios14k1.xnu with no catalog row, and the menu entry would not
-   exist. (The catalog holds 16 of 32 entries, so it fits. If store-pull.sh says the live catalog
-   differs from catalog.toml, append the entry to a copy of the TOML the live one was built from.)
+   exist. (The catalog holds 16 of 32 entries, so it fits. If store-pull.sh prints **STOP** (the
+   live catalog differs from catalog.toml), append the entry to a copy of the TOML the live one was
+   built from, not to catalog.toml.)
 2. Reboot, Engineer > Start an OS > iOS 14 (kernel test).
 3. Expected on screen (framebuffer console): XNU 7195 boot log, `SWEET PRNG: HMAC-SHA256
    registered`, `SWEET AMFI: platform binary policy registered (0)`, `SWEET Sandbox: permissive
@@ -90,14 +94,16 @@ The kernel test touches no partition: its root is the RAM disk inside the payloa
    registered (err)` with the error number), the md0 root mounted through mockfs, then the test
    init's PID 1 lines.
    **Film the screen for the whole boot: it is the only evidence of the kernel test.** The
-   persistent console log (patches 0047/0206) is written only by the UFS root driver, to the last
+   persistent console log (herolog, patch 0206, `bsd/dev/herolte_ufs.c`; STARLTE builds the
+   HEROLTE UFS driver, so 0047's `sweetlog` is not in play) is written only by the UFS root driver, to the last
    4 MiB + 4 KiB of the partition named by `ufsroot=`, and only when the kernel booted with
    `rd=ufsroot0` and a writable root. The k1 payload boots `rd=md0` with no `ufsroot`/`ufsrw`, so
    it never brings up UFS and writes **no log at all** (and the log is never on /pram). Running
    `tools/starlte-log-pull.py` after a k1 hang would return the previous iOS 26 boot's log from the
    tail of USERDATA and look like an iOS 14 result: do not use it for k1. A hang or panic: film or
    photograph the last lines, then forced reset (Volume Down + Power 7 s).
-   For the **userland** payload (u1, `ufsroot=IOS14 ufsrw=1`) the log does exist, at the tail of
+   For the **userland** payload (u1, `ufsroot=IOS14 ufsrw=1`) the log exists only once
+   `herolog=0` is taken out of its cmdline (section 5 item 4); then it is at the tail of
    **IOS14**, not USERDATA: `python3 tools/starlte-log-pull.py adb build/ios14-u1-log.txt --part IOS14`
    from TWRP (compare the flush number with the previous pull to be sure it is a new boot).
 4. Then `cpus=8` (edit the cmdline file, rebuild the payload) to bring up the A55 + M3 cores.
@@ -121,14 +127,24 @@ The kernel test touches no partition: its root is the RAM disk inside the payloa
 3. Graphics: iOS 14 still has the OpenGL ES CoreAnimation path; the Mesa/GLES work from
    iOS 16 / iPadOS 18 (`tools/mesa-ios`, `build/mesa-ios`) is the route, not Metal.
 4. **Partition size vs the log ring.** With `ufsroot=IOS14 ufsrw=1` the kernel writes its
-   persistent log (sweetlog) into the **last 4 MiB + 4 KiB (1025 blocks of 4 KiB)** of IOS14 on
-   every boot. If the HFSX volume fills the partition, that overwrites the volume's tail (the
-   alternate volume header and the last allocation blocks). So either make the IOS14 partition at
-   least 4 MiB + 4 KiB larger than the HFSX volume (for example an 8 GiB volume in an
-   8 GiB + 8 MiB partition, or `SIZE_MB=8184` in an 8 GiB partition), or boot u1 with
-   `sweetlog=0` (no log). iOS 26 is safe only because its 16 GiB root sits inside a much larger
-   USERDATA. `tools/cmdline/ios14-userland.txt` has no `sweetlog=0`, so the partition must be
-   sized with the margin.
+   persistent log (the herolog ring: patch 0206, `bsd/dev/herolte_ufs.c`, magic HEROLOG1, flushed
+   every 10 s; the boot-arg is `herolog`, not `sweetlog`, which only the SWEET board reads) into the
+   **last 4 MiB + 4 KiB (1025 blocks of 4 KiB)** of IOS14 on every boot. If the HFSX volume fills
+   the partition, that overwrites the volume's tail (the alternate volume header and the last
+   allocation blocks). The primary fix is the margin: make the IOS14 partition at least
+   4 MiB + 4 KiB larger than the HFSX volume (for example an 8 GiB volume in an 8 GiB + 8 MiB
+   partition, or `SIZE_MB=8184` in an 8 GiB partition). Until that partition exists and is
+   checked, `tools/cmdline/ios14-userland.txt` carries **`herolog=0`** (no log, nothing written
+   past the volume). When the partition is created, check from TWRP, with the root image on it:
+   ```
+   adb exec-out 'dd if=/dev/block/by-name/IOS14 bs=512 skip=2 count=1 2>/dev/null' | python3 -c '
+   import struct, sys; b = sys.stdin.buffer.read()
+   assert b[:2] in (b"H+", b"HX"), b[:2]; bs, n = struct.unpack(">II", b[40:48]); print(bs * n)'
+   adb shell 'echo $(( $(cat /sys/class/block/$(basename $(readlink -f /dev/block/by-name/IOS14))/size) * 512 - 1025 * 4096 ))'
+   ```
+   The first number (volume end, block_size × total_blocks) must be <= the second (partition
+   bytes minus the ring). Only then remove `herolog=0` and rebuild u1. iOS 26 is safe only
+   because its 16 GiB root sits inside a much larger USERDATA.
 5. Disk: the OS image (4.7 GB) plus an 8 GiB sparse root plus its raw copy does not fit the
    ~12 GB free now; build it in pieces (DELETE_SOURCES=1) or after a cleanup.
 
@@ -154,7 +170,7 @@ category = "apple"
 method = "xnu"
 tag = "experimental"
 files = ["ios14.xnu"]
-root = "ufs:IOS14 (HFSX 8 GiB in an 8 GiB + 8 MiB partition: sweetlog ring at the tail) — not allocated yet"
+root = "ufs:IOS14 · not allocated · herolog ring at tail"
 flags = ["hidden"]
 ```
 
@@ -167,11 +183,10 @@ flags = ["hidden"]
   inside a partition.
 - **Store vs iOS 26 log ring (already in the tree).** store-flash.sh gives the UFS store a
   capacity that runs to the very end of USERDATA (USERDATA / 4 KiB - 16 GiB = 721024 blocks), and
-  the iOS 26 kernel's sweetlog ring is the last 1025 blocks of USERDATA. Today's store uses about
-  82 MiB, far from it, but a store that ever grows past 721024 - 1025 blocks would overwrite the
-  ring (and the ring would corrupt the store's last entries). Keep stores below that, or reserve
-  the tail in sbstore2.py / store-flash.sh (needs both, since store-flash.sh checks capacity
-  against USERDATA).
+  the iOS 26 kernel's herolog ring (patch 0206, `bsd/dev/herolte_ufs.c`) is the last 1025 blocks
+  of USERDATA. Today's store uses about 82 MiB, far from it. Enforced now: store-flash.sh refuses a
+  store whose used blocks exceed capacity - 1025, and `sbstore2.py build --medium ufs` refuses the
+  same (the capacity itself is unchanged, so store-flash.sh's capacity check still matches).
 - Untested on hardware: the 7195-specific changes (serial console table, GIC file from 8796,
   PRNG, commpage masks, stubs) are compile-checked only.
 - Dropped for now (SKIPPED.txt): the fast-core scheduler placement (0238), the 8796-only root

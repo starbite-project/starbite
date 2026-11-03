@@ -1,6 +1,8 @@
 #!/bin/sh
 # Pull every log an Android (LineageOS 24 / GSI) boot attempt leaves behind, from TWRP over adb.
-# Read-only on the phone: ODM and CACHE are mounted -o ro,noload (no journal replay) and unmounted again. docs/ANDROID-PLAN.md 3.
+# ODM is mounted -o ro,noload (no journal replay) and unmounted again. CACHE is read where TWRP
+# already mounted it (/cache, rw: TWRP itself writes /cache/recovery/log and last_log), else mounted
+# ro,noload like ODM. docs/ANDROID-PLAN.md 3.
 #   tools/android/collect-logs.sh [TAG]     -> build/android/logs/<date>-<TAG>/
 set -eu
 tag=${1:-try}
@@ -29,10 +31,17 @@ adb shell 'ls -la /tmp/sbmd /tmp/sbmd/vold 2>/dev/null' > "$out/metadata-ls.txt"
 adb shell 'umount /tmp/sbmd' || true
 # BCB in MISC (did Android ask recovery to wipe?) and the /cache recovery command
 adb exec-out 'dd if=/dev/block/platform/11120000.ufs/by-name/MISC bs=2048 count=1 2>/dev/null' > "$out/misc-bcb.bin" || true
-# CACHE (ext4) is mounted read-only without journal replay, like ODM, and unmounted again
-adb shell 'mkdir -p /tmp/sbcache && mount -t ext4 -o ro,noload /dev/block/platform/11120000.ufs/by-name/CACHE /tmp/sbcache' || true
-adb shell 'cat /tmp/sbcache/recovery/command /tmp/sbcache/recovery/last_log 2>/dev/null' > "$out/cache-recovery.txt" || true
-adb shell 'umount /tmp/sbcache' || true
+# CACHE (ext4): TWRP mounts it rw at /cache itself (a second ro mount of the same superblock would
+# fail with EBUSY), so read it there; only when it is not mounted, mount it ro,noload and unmount.
+if adb shell 'grep -q " /cache " /proc/mounts && echo yes' | tr -d '\r' | grep -q yes; then
+    echo "CACHE: read from TWRP's /cache mount"
+    adb shell 'cat /cache/recovery/command /cache/recovery/last_log 2>/dev/null' > "$out/cache-recovery.txt" || true
+else
+    adb shell 'mkdir -p /tmp/sbcache && mount -t ext4 -o ro,noload /dev/block/platform/11120000.ufs/by-name/CACHE /tmp/sbcache' ||
+        echo "CACHE: ro mount failed (not ext4?)"
+    adb shell 'cat /tmp/sbcache/recovery/command /tmp/sbcache/recovery/last_log 2>/dev/null' > "$out/cache-recovery.txt" || true
+    adb shell 'umount /tmp/sbcache 2>/dev/null' || true
+fi
 strings "$out/misc-bcb.bin" | head -5 > "$out/misc-bcb.txt"
 # filesystem state of the Android partitions
 adb shell 'blkid 2>/dev/null | grep -E "sda1[89]|sda2[018]|mmcblk0"' > "$out/blkid.txt" || true

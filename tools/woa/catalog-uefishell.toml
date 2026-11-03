@@ -1,0 +1,12 @@
+# The UEFI Shell menu row (docs/UEFI-SHELL.md). Appended to a copy of the live store's catalog TOML:
+#   cat tools/woa/catalog-uefishell.toml >> build/store/catalog-shell.toml
+
+[[entry]]
+key = "uefishell"
+name = "UEFI Shell"
+version = "EDK2 · Shell 2.2"
+category = "microsoft"
+method = "uefi"
+tag = "lab"
+files = ["uefishell.uefi"]
+root = "-"

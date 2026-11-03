@@ -28,7 +28,8 @@ There is no keyboard (no USB host stack in UEFI, touch is not an input device he
 drive a **command palette**:
 
 - **Volume Down / Volume Up**: clear the line (ESC) and type the next / previous palette command
-  (repeats while held).
+  (repeats while held). The position is kept across commands; only the first press of a boot
+  starts from an unset position (Down: `ver`, Up: `reset`).
 - **Power**: Enter (runs the command, continues at a `-b` page break or a `pause`).
 - **Bixby**: `q` (stops a `-b` listing).
 
@@ -94,42 +95,41 @@ or the shell's 10 s auto-reset) goes through S-Boot back to the Starbite menu, n
    ```
    tools/store/store-pull.sh build/store/ufs-store-live.img     # read-only; lists, CRC-checks, compares the catalog
    cp tools/store/catalog.toml build/store/catalog-shell.toml    # only if store-pull says the live catalog == catalog.toml
-   cat >> build/store/catalog-shell.toml <<'EOF'
-
-   [[entry]]
-   key = "uefishell"
-   name = "UEFI Shell"
-   version = "EDK2 · Shell 2.2"
-   category = "microsoft"
-   method = "uefi"
-   tag = "lab"
-   files = ["uefishell.uefi"]
-   root = "-"
-   EOF
+   cat tools/woa/catalog-uefishell.toml >> build/store/catalog-shell.toml
    python3 tools/store/sbstore2.py build build/store/ufs-store-shell.img --medium ufs \
        --catalog build/store/catalog-shell.toml --import build/store/ufs-store-live.img \
        uefishell.uefi=build/woa/shell/uefishell.uefi
    diff <(python3 tools/store/sbstore2.py list build/store/ufs-store-live.img) \
         <(python3 tools/store/sbstore2.py list build/store/ufs-store-shell.img)
+   diff <(python3 tools/store/sbstore2.py catalog-keys build/store/ufs-store-live.img) \
+        <(python3 tools/store/sbstore2.py catalog-keys build/store/ufs-store-shell.img)
    tools/store/store-flash.sh build/store/ufs-store-shell.img
    ```
-   The diff must show only the changed `catalog` line and the added `uefishell.uefi`; nothing else
-   removed or changed. If store-pull.sh warns that the live catalog differs from catalog.toml, find
-   the TOML the live catalog was built from (ask whoever flashed it) and append the entry to a copy
-   of that instead. store-flash.sh keeps the settings block and verifies by SHA-256. (A dry run with
+   (The entry is the committed file `tools/woa/catalog-uefishell.toml`, the same as the proposed
+   entry above, so the block has no heredoc and pastes from the raw markdown too.)
+   The first diff must show only the changed `catalog` line and the added `uefishell.uefi`; the
+   second only `> uefishell`. Nothing else removed or changed. If store-pull.sh prints **STOP**
+   (the live catalog differs from catalog.toml), do not go on: find the TOML the live catalog was
+   built from (ask whoever flashed it) and append the entry to a copy of that instead.
+   `sbstore2.py build` refuses a `--catalog` that drops a key the imported catalog has. store-flash.sh keeps the settings block and verifies by SHA-256. (A dry run with
    catalog.toml + this entry packs 10 entries, 82.4 MiB of 721024 blocks.)
 2. `adb reboot` from TWRP; in the menu pick **UEFI Shell**. Expected: "LOADING UEFI", then the woa UEFI text, then a cleared
    screen with the Starbite key hint line, the Shell banner and the mapping table (all LU0 partitions
    as BLKx, WINESP as FS0), the 5 s startup countdown, and then `Shell>`.
    During the 5 s countdown any Volume key sends ESC first, which skips `startup.nsh`; that is
    harmless (none exists yet).
-3. Press Volume Down: `ver` appears on the prompt line. Press Power to run it. Step through to
-   `acpiview -s APIC` (the MADT our source publishes) and `memmap -b`. Mind **Volume Up**: from an
-   empty palette it starts at the *last* entry, which is `reset`, so Volume Up first and then Power
-   resets the phone. Volume Up later steps backwards through the list (wrapping to `reset` again
-   before `ver`). Always read the prompt line before pressing Power.
-4. Run `reset` (last palette entry: one Volume Up from a fresh prompt, then Power) to get back to
-   the menu.
+3. Press Volume Down: `ver` appears on the prompt line. Press Power to run it. Volume Down then
+   steps `map -b`, `memmap -b`, `acpiview -l`, `acpiview -s APIC` (the MADT our source publishes);
+   run each with Power. The palette position is one global index in Star2LteKeysDxe: it starts
+   unset only before the very first Volume press of the boot, and after that every press moves ±1
+   from the last command typed; running a command does not reset it. Mind **Volume Up** as the
+   *first* press of the boot: from the unset position it jumps to the *last* entry, which is
+   `reset`, so Volume Up first and then Power resets the phone. Volume Up later steps backwards
+   through the list (wrapping from `ver` to `reset`). Always read the prompt line before pressing Power.
+4. Run `reset` to get back to the menu: the position persists from step 3, so press Volume Up until
+   the prompt line reads `reset` (from `acpiview -s APIC` that is 5 presses: `acpiview -l`,
+   `memmap -b`, `map -b`, `ver`, then wrapping to `reset`), or Volume Down to the end of the list
+   (17 presses from there). Check the line, then press Power.
 5. Read the ring afterwards from TWRP: in the menu after the reset, do a forced reset and go to
    TWRP with the key combo above (the ring survives a warm reset, and TWRP's kernel reads it before
    reusing it, so do not boot anything else in between), then

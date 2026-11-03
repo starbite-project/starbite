@@ -2,7 +2,8 @@
 # Write a version 2 OS store (tools/store/sbstore2.py build) to USERDATA +16 GiB from TWRP, keeping
 # the phone's settings record (block 2). Refuses unless the iOS root (HFS+) ends by 16 GiB, the
 # store's capacity is what USERDATA leaves after 16 GiB, and the target holds a store or zeros.
-# Kiosk's root at +17 GiB is retired: a store may grow over it. Checked by a SHA-256 on the phone.
+# Kiosk's root at +17 GiB is retired: a store may grow over it, but not into the last 1025 blocks
+# (iOS 26's herolog ring). Checked by a SHA-256 on the phone.
 #   tools/store/store-flash.sh build/store/ufs-store.img
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -24,6 +25,10 @@ print(cap, used)
 PY
 )
 [ "$want_cap" = "$cap" ] || { echo "store capacity $want_cap, USERDATA leaves $cap blocks: rebuild with --capacity $cap"; exit 1; }
+# The iOS 26 kernel (rd=ufsroot0 ufsrw=1) writes its herolog ring into the last 1025 blocks of
+# USERDATA (bsd/dev/herolte_ufs.c: 4 MiB ring + header block); the store must end before it.
+HEROLOG=1025
+[ "$used" -le $(( cap - HEROLOG )) ] || { echo "store needs $used blocks: past $(( cap - HEROLOG )) it would overlap the USERDATA herolog ring: refusing"; exit 1; }
 
 # iOS root: HFS+ volume header at byte 1024, must end by 16 GiB.
 python3 - <(rd 0) <<'PY'
