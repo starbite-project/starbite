@@ -95,13 +95,16 @@ static void sb_publish(void)
 	});
 }
 
+/* NS_RETURNS_RETAINED like the originals: the callers release what they get */
+static NSArray<id<MTLDevice>> *sb_MTLCopyAllDevices(void) NS_RETURNS_RETAINED;
 static NSArray<id<MTLDevice>> *sb_MTLCopyAllDevices(void)
 {
 	sb_publish();
 	return MTLCopyAllDevices();
 }
 
-static NSArray<id<MTLDevice>> *sb_MTLCopyAllDevicesWithObserver(id<NSObject> *observer, MTLDeviceNotificationHandler handler)
+static NSArray<id<MTLDevice>> *sb_MTLCopyAllDevicesWithObserver(id<NSObject> __strong *observer, MTLDeviceNotificationHandler handler) NS_RETURNS_RETAINED;
+static NSArray<id<MTLDevice>> *sb_MTLCopyAllDevicesWithObserver(id<NSObject> __strong *observer, MTLDeviceNotificationHandler handler)
 {
 	sb_publish();
 	NSArray<id<MTLDevice>> *all = MTLCopyAllDevicesWithObserver(observer, handler);
@@ -111,6 +114,7 @@ static NSArray<id<MTLDevice>> *sb_MTLCopyAllDevicesWithObserver(id<NSObject> *ob
 	return all;
 }
 
+static id<MTLDevice> sb_MTLCreateSystemDefaultDevice(void) NS_RETURNS_RETAINED;
 static id<MTLDevice> sb_MTLCreateSystemDefaultDevice(void)
 {
 	sb_publish();

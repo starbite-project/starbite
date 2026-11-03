@@ -1,0 +1,96 @@
+From: starbite <starbite@local>
+Subject: [PATCH] starbite: StarbiteAcceleratorMac, the Mali as macOS Metal finds it (sbmtl=2)
+
+macOS Metal.framework matches IOServiceMatching("IOAccelerator") (iOS: IOAcceleratorES), then loads
+<MetalPluginName>.bundle through gpu_bundle_find_trusted(). sbmtl=2 publishes an IOAccelerator with
+MetalPluginName StarbiteMetal / MetalPluginClassName StarbiteMTLDevice (tools/macos/metal). Optional: the
+first tests publish the device from userland (sbmac.dylib, MTLAddDevice) and need no accelerator. Needs
+SIP off in the ADT (/chosen/asmb lp-sip0 bit 1) for the bundle to count as trusted.
+(docs/MACOS-METAL.md; not compiled here: written against build/xnu-12377 at f1e38734 + 0360.)
+---
+--- a/iokit/Kernel/arm/StarbiteAccelerator.cpp	2026-11-03 22:22:18
++++ b/iokit/Kernel/arm/StarbiteAccelerator.cpp	2026-11-03 22:23:47
+@@ -9,7 +9,7 @@
+  * through StarbiteMali).
+  *
+  * Boot-arg sbmtl=1 publishes it; without it Metal finds no device and CoreAnimation keeps
+- * sbca's OpenGL ES renderer.
++ * sbca's OpenGL ES renderer. sbmtl=2 (macOS) also publishes StarbiteAcceleratorMac, below.
+  */
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+ #include <IOKit/IOService.h>
+@@ -54,4 +54,60 @@
+ 	IOLog("STARBITE MTL: IOAcceleratorES published (MetalPluginName StarbiteMetal)\n");
+ 	return true;
+ }
++
++/*
++ * The same GPU as macOS's Metal.framework sees it (macOS 26/27): -[MTLIOAccelServiceGlobalContext init]
++ * matches IOServiceMatching("IOAccelerator") (IOAcceleratorES is iOS's name), and
++ * getMetalPluginClassForService() reads MetalPluginName, asks libsystem_sandbox's
++ * gpu_bundle_find_trusted() for <name>.bundle in /Library/GPUBundles, /System/Library/Extensions or
++ * /AppleInternal/Library/Extensions, loads it and takes MetalPluginClassName (or the principal class).
++ * The bundle (tools/macos/metal: StarbiteMetal.bundle, class StarbiteMTLDevice) is the macOS build of
++ * the same frontend + metal2vulkan + PanVK stack, reaching the GPU through StarbiteMali.
++ *
++ * Two userland conditions, not checked here: gpu_bundle_find_trusted() takes a path only when rootless
++ * trusts it, i.e. csr_check(CSR_ALLOW_UNRESTRICTED_FS) == 0 (ADT /chosen/asmb lp-sip0 with bit 1, as
++ * `csrutil disable`) or the root is an authenticated APFS volume; and the process must load arm64
++ * images (ptrauth_disabled=1: sweetinject targets, 0324). Without them Metal skips the service, and the
++ * device can still be published from userland (sbmac.dylib, MTLAddDevice).
++ *
++ * Boot-arg sbmtl=2 (macOS) publishes this class as well as IOAcceleratorES.
++ */
++class IOAccelerator : public IOService {
++	OSDeclareDefaultStructors(IOAccelerator);
++};
++
++OSDefineMetaClassAndStructors(IOAccelerator, IOService);
++
++class StarbiteAcceleratorMac : public IOAccelerator {
++	OSDeclareDefaultStructors(StarbiteAcceleratorMac);
++
++public:
++	IOService *probe(IOService *provider, SInt32 *score) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(StarbiteAcceleratorMac, IOAccelerator);
++
++IOService *
++StarbiteAcceleratorMac::probe(IOService *provider, SInt32 *score)
++{
++	uint32_t on = 0;
++	PE_parse_boot_argn("sbmtl", &on, sizeof(on));
++	return on == 2 ? IOService::probe(provider, score) : NULL;
++}
++
++bool
++StarbiteAcceleratorMac::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty("MetalPluginName", "StarbiteMetal");
++	setProperty("MetalPluginClassName", "StarbiteMTLDevice");
++	setProperty("model", "Mali-G72 MP18");
++	setProperty("gpu-core-count", 18ULL, 32);
++	registerService();
++	IOLog("STARBITE MTL: IOAccelerator published for macOS (MetalPluginName StarbiteMetal, class StarbiteMTLDevice)\n");
++	return true;
++}
+ #endif /* ARM64_BOARD_CONFIG_STARLTE */
+--- a/iokit/KernelConfigTables.cpp	2026-11-03 22:23:22
++++ b/iokit/KernelConfigTables.cpp	2026-11-03 22:23:47
+@@ -105,6 +105,11 @@
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = StarbiteAccelerator;"
+     "   },"
++    "   {"
++    "     'IOClass'         = StarbiteAcceleratorMac;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = StarbiteAcceleratorMac;"
++    "   },"
+ #endif
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+     "   {"

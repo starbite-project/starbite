@@ -156,6 +156,7 @@ do_bundle() {
 		-Wl,-exported_symbol,'_OBJC_METACLASS_$_StarbiteMTLDevice' \
 		-lc++ -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation
 	mkdir -p "$OUT/sym" && cp "$B/Contents/MacOS/StarbiteMetal" "$OUT/sym/StarbiteMetal"
+	rm -rf "$OUT/sym/StarbiteMetal.dSYM" && mv "$B/Contents/MacOS/StarbiteMetal.dSYM" "$OUT/sym/" 2>/dev/null || true
 	cp "$OUT/libvulkan_panfrost.dylib" "$OUT/sym/libvulkan_panfrost.dylib"
 	xcrun strip -x "$B/Contents/MacOS/StarbiteMetal"
 	cp "$HERE/Info.plist" "$B/Contents/Info.plist"
@@ -171,10 +172,11 @@ do_bundle() {
 do_shim() {
 	do_mount
 	# shellcheck disable=SC2086
-	$CC -x objective-c -fobjc-arc -O2 -g -Wall -dynamiclib -install_name /usr/lib/sbmac.dylib \
+	$CC -x objective-c -fobjc-arc -O2 -g -Wall -dynamiclib -install_name /usr/lib/sbmac.dylib -Wl,-not_for_dyld_shared_cache -Wl,-no_warn_inits \
 		-o "$OUT/sbmac.dylib" "$HERE/sbmac.m" -framework Foundation -framework Metal -framework IOKit \
 		-framework CoreFoundation
 	mkdir -p "$OUT/sym" && cp "$OUT/sbmac.dylib" "$OUT/sym/sbmac.dylib"
+	rm -rf "$OUT/sym/sbmac.dylib.dSYM" && mv "$OUT/sbmac.dylib.dSYM" "$OUT/sym/" 2>/dev/null || true
 	xcrun strip -x "$OUT/sbmac.dylib"
 	codesign -f -s - "$OUT/sbmac.dylib"
 	log "shim: $OUT/sbmac.dylib"
@@ -187,6 +189,7 @@ do_test() {
 	$CC -x objective-c -fobjc-arc -O2 -g -Wall -o "$OUT/sbmtltest" "$HERE/sbmtltest.m" \
 		-framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation
 	mkdir -p "$OUT/sym" && cp "$OUT/sbmtltest" "$OUT/sym/sbmtltest"
+	rm -rf "$OUT/sym/sbmtltest.dSYM" && mv "$OUT/sbmtltest.dSYM" "$OUT/sym/" 2>/dev/null || true
 	xcrun strip -x "$OUT/sbmtltest"
 	codesign -f -s - "$OUT/sbmtltest"
 	log "test: $OUT/sbmtltest"

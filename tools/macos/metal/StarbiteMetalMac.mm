@@ -198,6 +198,8 @@ static uint64_t gpu_registry_id(mach_port_t port)
 	uint64_t id = 0;
 	if (port && IORegistryEntryGetRegistryEntryID(port, &id) == KERN_SUCCESS)
 		return id;
+	if (const char *forced = getenv("STARBITE_REGISTRY_ID"))	/* host smoke tests: no StarbiteMali on a Mac */
+		return strtoull(forced, NULL, 0);
 	io_service_t s = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("StarbiteMali"));
 	if (s) {
 		IORegistryEntryGetRegistryEntryID(s, &id);
