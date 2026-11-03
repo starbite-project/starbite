@@ -498,7 +498,9 @@ concept's. The tile map (`SB7_T_TILEMAP`) for today's catalog:
 | category defaults | Apple: Apple logo on the provider grey; Microsoft: as win11; Android: as android; Linux: Tux on #15161a -> #3a3d45; Starbite, other, Lab: their glyphs |
 
 The concept catalog's demo ids for the same systems (a17, phosh, gnome, arch, pmos, kali) map to
-these tiles too; only tiles the map reaches are written.
+these tiles too; only tiles the map reaches are written. `menu7-assets.py --concept-art` builds a
+container with the concept's own artwork for those ids and the provider glyphs instead
+(`build/brand/concept/`, for `compare-all.sh` with `CMP_RD`; docs/MENU7-BUILD.md section 4).
 
 **Splash.** `SB7_S_SAMSUNG`: the concept's `drawSam` (paths `WORD`, stroke 17, miter, butt) at
 k = 1 into 1300 x 220, A8. `SB7_T_HEIGHT`: `buildHeight()`'s 650 x 110 field. `splash7.mjs`

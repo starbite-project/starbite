@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Check every ARGB image of an SB7ASSET container (sb7.h): premultiplied (each of R, G, B <= A),
-alpha 0 means 0x00000000, and no opaque black block (a 4 x 4 run of A = 255, RGB = 0 that is not
-part of a dark logo is what showed as a "black square").
+alpha 0 means 0x00000000, and counts opaque black 4 x 4 blocks (A = 255, RGB = 0; Tux's body is
+the only expected one). This checks the assets only: the menu v7 build before the real logos had
+1 to 5 colour-above-alpha pixels in each of 5 tile layers, too few to show, so the black squares
+and side glitches seen on the phone are not explained by the assets (still open, in the glass and
+runtime path; they need a capture on the device).
 
     build/venv/bin/python -I tools/menu7/sb7-premul-check.py build/brand/menu7.sb7
 """

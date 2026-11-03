@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """The real OS and company logos for menu v7 (provider glyphs and OS tile glyph layers).
 
-    build/venv/bin/python tools/brand/menu7_logos.py --fetch     download every source logo into
-                                                                 its own directory under
-                                                                 build/logos-src/ (checks sha256)
+    build/venv/bin/python tools/brand/menu7_logos.py --fetch     download every source logo again
+                                                                 and check it against the copy in
+                                                                 tools/brand/logos/src/ (sha256)
     build/venv/bin/python tools/brand/menu7_logos.py --sheet OUT.png   every logo, as rendered
 
 Used by tools/brand/menu7-assets.py. Sources, licences and trademark notes:
 tools/brand/logos/SOURCES.md.
+
+The source SVGs are committed under tools/brand/logos/src/ (about 120 KB), so the build does not
+depend on the source sites: Commons serves a file's current revision at its URL and kali.org's
+file can change. --fetch downloads each one into a temporary file and fails (exit 1, nothing kept)
+on a sha256 mismatch, so a changed upstream file is noticed and never replaces the pinned copy.
 
 The SVGs are treated as data: never executed or included in anything; each one is checked
 against its sha256 and for external references, edited only by removing whole elements named
 here (a background square, a wordmark), then rasterised by rsvg-convert straight to the target
 pixel size (no resampling), and cropped to the logo's own bounds measured from a 2048 px render.
 rsvg-convert writes straight (unpremultiplied) alpha; menu7-assets premultiplies once when it
-stores the pixels, so fully transparent pixels are 0x00000000 (no dark fringes, no squares).
+stores the pixels, so fully transparent pixels are 0x00000000.
 """
 import argparse
 import hashlib
@@ -28,7 +33,7 @@ import numpy as np
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[2]
-SRC = ROOT / 'build/logos-src'
+SRC = ROOT / 'tools/brand/logos/src'
 COMMONS = 'https://upload.wikimedia.org/wikipedia/commons/'
 
 # name: (directory/file under build/logos-src, URL, sha256)
@@ -49,9 +54,11 @@ FILES = {
     'arch': ('arch-official/archlinux-logo-dark-scalable.svg',
              'https://archlinux.org/static/logos/archlinux-logo-dark-scalable.svg',
              'a7f37c9c87f0e0e37454b47ec1221b61416aa9e319cc46a1f0b5b70c4a1dcb6e'),
-    'kali': ('kali/Kali-dragon-icon.svg', COMMONS + '2/2b/Kali-dragon-icon.svg',
-             '5ed9b29cfe8ada18c90310fa763cbbdfd45591dbf5280f49a382f64233c0b4e1'),
-    'pmos': ('pmos/PostmarketOS_logo.svg', COMMONS + 'a/a6/PostmarketOS_logo.svg',
+    'kali': ('kali/kali-dragon-icon.svg', 'https://www.kali.org/images/kali-dragon-icon.svg',
+             '9a3ed29a936b48cffe54795f9cabfd351a79dfcf861024db200fb569e6fcc2a6'),
+    # the project's artwork repository at the commit that added the logo (2017-08-26)
+    'pmos': ('pmos/logo.svg', 'https://gitlab.com/postmarketOS/artwork/-/raw/'
+             'ede3978936131a44e121db1d4e642af405a2a8e9/logo/logo.svg',
              'a4162f754b853293fbe2be804466c16406765f2cf6959a0447b5c90ce588b4b5'),
     'tux': ('tux/Tux.svg', COMMONS + '3/35/Tux.svg',
             'cd503ad510e16ff2869f959cf57b892bb2175a6874ff696b495bd94fd7db9743'),
@@ -61,24 +68,52 @@ FILES = {
                'e0cad9aa4736a492cbeed7f875cb6a7ddfeab54879fc9e218fc00933ef18b6b6'),
 }
 
-BAD = re.compile(r'<script|foreignObject|<image|href\s*=\s*"(?!#)|url\(\s*(?!#)|@import', re.I)
+# Anything that could load or run something: scripts, foreign content, images, and any href or
+# url() (either quote, or none) that is not a local '#id' reference.
+BAD = re.compile(r'<script|foreignObject|<image|href\s*=(?!\s*[\'"]\s*#)|url\((?!\s*[\'"]?\s*#)'
+                 r'|@import', re.I)
+
+# Short credits for the INFO section of menu7.sb7 (ASCII), so the notice travels with the built
+# container and ramdisk; the full notes are in tools/brand/logos/SOURCES.md.
+CREDITS = {
+    'apple': 'Apple logo: Wikimedia Commons, public domain; trademark of Apple Inc.',
+    'windows11': 'Windows 11 logo: Wikimedia Commons, public domain; trademark of Microsoft Corp.',
+    'microsoft': 'Microsoft logo: Wikimedia Commons, public domain; trademark of Microsoft Corp.',
+    'google-g': 'Google G logo: Wikimedia Commons, public domain; trademark of Google LLC',
+    'android': 'Android robot: Google, CC BY 3.0 (Wikimedia Commons); Android is a trademark of '
+               'Google LLC',
+    'ubuntu': 'Ubuntu Circle of Friends (2022): Canonical Ltd., GPLv3 (Wikimedia Commons); '
+              'trademark of Canonical Ltd.',
+    'arch': 'Arch Linux logo: archlinux.org; trademark of the Arch Linux project',
+    'kali': 'Kali Linux dragon: kali.org; Kali Linux and the dragon are trademarks of OffSec '
+            'Services Ltd.',
+    'pmos': 'postmarketOS logo: postmarketOS developers, CC BY-SA 3.0 '
+            '(gitlab.com/postmarketOS/artwork); modified: rasterised',
+    'tux': 'Tux: Larry Ewing (lewing@isc.tamu.edu), Simon Budig, Garrett LeSage, made with The GIMP',
+    'debian': 'Debian Open Use Logo: (c) Software in the Public Interest, Inc., CC BY-SA 3.0; '
+              'modified: wordmark removed, rasterised',
+    'fedora': 'Fedora logo: Wikimedia Commons, public domain; trademark of Red Hat, Inc.',
+}
+assert set(CREDITS) == set(FILES)
+
+
+def credits():
+    """The INFO lines: one per logo."""
+    return ['logos (tools/brand/logos/SOURCES.md; rasterised, nominative use, no endorsement):'] + \
+        ['  ' + CREDITS[n] for n in FILES]
 
 
 def _kali_dragon(s):
-    """Kali-dragon-icon.svg: only the dragon (its <g fill="#fff">) in the icon's coordinates,
-    without the blue sphere it sits on."""
-    vb = re.search(r'viewBox="([^"]+)"', s).group(1)
-    outer = re.search(r'<g stroke-width="[^"]*" transform="([^"]+)"', s).group(1)
-    i = s.index('<g fill="#fff"')
-    depth, j = 0, i
-    for m in re.finditer(r'<g[\s>]|</g>', s[i:]):
-        depth += 1 if m.group(0) != '</g>' else -1
-        if depth == 0:
-            j = i + m.end()
-            break
-    assert j > i
+    """kali.org's kali-dragon-icon.svg: only the crisp white dragon (the last path of its last
+    <g ... fill="#fff">, without the blurred copy under it), in the icon's coordinates, without
+    the blue sphere, its shadows and their filters."""
+    vb = re.search(r'<svg\b[^>]*\bviewBox="([^"]+)"', s).group(1)
+    gs = list(re.finditer(r'<g transform="([^"]+)" fill="#fff">(.*?)</g>', s, re.S))
+    assert len(gs) == 1, 'kali: dragon group'
+    paths = re.findall(r'<path\b[^>]*/>', gs[0].group(2))
+    assert len(paths) == 2 and 'filter=' in paths[0] and 'filter=' not in paths[1], 'kali: paths'
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{vb}">'
-            f'<g transform="{outer}">{s[i:j]}</g></svg>')
+            f'<g transform="{gs[0].group(1)}" fill="#fff">{paths[1]}</g></svg>')
 
 
 def _drop_groups(*ids):
@@ -122,7 +157,7 @@ def source_svg(name):
     rel, url, sha = FILES[name]
     p = SRC / rel
     if not p.exists():
-        sys.exit(f'menu7_logos: {p} missing: run tools/brand/menu7_logos.py --fetch')
+        sys.exit(f'menu7_logos: {p} missing (committed under tools/brand/logos/src/)')
     b = p.read_bytes()
     h = hashlib.sha256(b).hexdigest()
     assert h == sha, f'{p}: sha256 {h}, expected {sha}'
@@ -203,17 +238,32 @@ def render(name, W, H, box, fit=1.0, dx=0.0, dy=0.0, color=None):
 
 
 def fetch():
+    """Download every source again and check it against FILES (and the committed copy). A
+    mismatch exits 1 and keeps nothing: the pinned copy in tools/brand/logos/src/ stays."""
+    bad = []
     for name, (rel, url, sha) in FILES.items():
         p = SRC / rel
-        if p.exists() and hashlib.sha256(p.read_bytes()).hexdigest() == sha:
-            print(f'{name}: ok')
+        with tempfile.TemporaryDirectory() as td:
+            t = Path(td) / 'a.svg'
+            r = subprocess.run(['curl', '-sSLf', '--max-time', '60', '--max-filesize', '3000000',
+                                '-A', 'starbite-logo-fetch/1.0 (one-off asset build)', '-o', str(t),
+                                url])
+            if r.returncode or not t.exists():
+                print(f'{name}: {url} download failed (curl {r.returncode})')
+                bad.append(name)
+                continue
+            b = t.read_bytes()
+        h = hashlib.sha256(b).hexdigest()
+        if h != sha:
+            print(f'{name}: {url} sha256 {h}  MISMATCH (expected {sha}); not kept')
+            bad.append(name)
             continue
-        p.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(['curl', '-sSLf', '--max-filesize', '3000000', '-A',
-                        'starbite-logo-fetch/1.0 (one-off asset build)', '-o', str(p), url],
-                       check=True)
-        h = hashlib.sha256(p.read_bytes()).hexdigest()
-        print(f'{name}: {url} sha256 {h}' + ('' if h == sha else '  MISMATCH (expected ' + sha + ')'))
+        if not p.exists() or p.read_bytes() != b:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b)
+        print(f'{name}: ok')
+    if bad:
+        sys.exit(f'menu7_logos: {len(bad)} source(s) changed upstream or failed: {", ".join(bad)}')
 
 
 def sheet(out):

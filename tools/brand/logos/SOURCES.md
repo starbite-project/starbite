@@ -1,9 +1,10 @@
 # Menu v7 logos: sources, licences, trademarks
 
-The real OS and company logos on menu v7's provider tiles and OS tiles. `tools/brand/menu7_logos.py --fetch`
-downloads each file into its own directory under `build/logos-src/` and checks the sha256 below;
-`tools/brand/menu7-assets.py` then rasterises them (rsvg-convert, straight to each target size) into
-`build/brand/menu7.sb7`. Fetched 2026-11-03; licences as Commons records them (imageinfo extmetadata, same day). Nothing from the files is executed: they are checked for
+The real OS and company logos on menu v7's provider tiles and OS tiles. The source files are committed
+in `src/` here, each in its own directory, with the sha256 below pinned in `menu7_logos.FILES`;
+`tools/brand/menu7_logos.py --fetch` downloads them again and fails (exit 1, nothing replaced) if any
+upstream file changed. `tools/brand/menu7-assets.py` rasterises them (rsvg-convert, straight to each
+target size) into `build/brand/menu7.sb7`. Fetched 2026-11-03; licences as Commons records them (imageinfo extmetadata, same day). Nothing from the files is executed: they are checked for
 scripts and external references, edited only by removing the whole elements named below, and rendered.
 
 Every logo is a trademark of its owner. They are used here only to label the operating system or
@@ -19,8 +20,8 @@ guidelines use a monochrome version (Apple: white) and the removals listed. No e
 | Android robot head | tile Android 17 and the Android default | https://upload.wikimedia.org/wikipedia/commons/3/31/Android_robot_head.svg | `0d3d8e90f448472d65eafefc7aaf4b6836517d840b96e0613ca7078879c279f2` | Commons: public domain; Google's brand guidelines let the robot be used and modified with attribution (CC BY 3.0 terms); "Android" is a trademark of Google LLC | none (#3DDC84) |
 | Ubuntu Circle of Friends (2022) | tiles Ubuntu, Ubuntu Desktop, Ubuntu Lomiri (and `linux`) | https://upload.wikimedia.org/wikipedia/commons/0/00/Ubuntu-logo-no-wordmark-2022.svg | `808267226514c1ad3a75269de5b6fd2ecf1bc362fb1a244c57d85c798a823ce9` | Commons: GPLv3 (Canonical Ltd.); Ubuntu and the Circle of Friends are trademarks of Canonical Ltd. (Canonical's trademark policy allows use to refer to Ubuntu) | the orange tag rectangle removed: the white Circle of Friends on the Ubuntu-orange tile |
 | Arch Linux logo | tile Arch Linux ARM | https://archlinux.org/static/logos/archlinux-logo-dark-scalable.svg | `a7f37c9c87f0e0e37454b47ec1221b61416aa9e319cc46a1f0b5b70c4a1dcb6e` | The project's own file (archlinux.org/art); the Arch Linux name and logo are trademarks of the Arch Linux project, used under its trademark policy to refer to Arch Linux | the "archlinux" wordmark and (TM) removed: the icon only (#1793d1) |
-| Kali Linux dragon | tile Kali Linux | https://upload.wikimedia.org/wikipedia/commons/2/2b/Kali-dragon-icon.svg | `5ed9b29cfe8ada18c90310fa763cbbdfd45591dbf5280f49a382f64233c0b4e1` | Commons: CC BY-SA 4.0 (vector by Abiss21 of Kali's dragon icon); Kali Linux and its dragon are trademarks of OffSec Services Ltd. | only the white dragon kept (the blue sphere under it removed), on the Kali-blue tile |
-| postmarketOS logo | tile postmarketOS | https://upload.wikimedia.org/wikipedia/commons/a/a6/PostmarketOS_logo.svg | `a4162f754b853293fbe2be804466c16406765f2cf6959a0447b5c90ce588b4b5` | Commons: CC BY-SA 3.0, postmarketOS developer team (the project's logo) | none (#009900) |
+| Kali Linux dragon | tile Kali Linux | https://www.kali.org/images/kali-dragon-icon.svg | `9a3ed29a936b48cffe54795f9cabfd351a79dfcf861024db200fb569e6fcc2a6` | Kali's own file (kali.org, the site's dragon icon); Kali Linux and its dragon are trademarks of OffSec Services Ltd., used to refer to Kali Linux | only the crisp white dragon kept (the blue sphere, the shadows, the blurred copy and their filters removed), on the Kali-blue tile |
+| postmarketOS logo | tile postmarketOS | https://gitlab.com/postmarketOS/artwork/-/raw/ede3978936131a44e121db1d4e642af405a2a8e9/logo/logo.svg | `a4162f754b853293fbe2be804466c16406765f2cf6959a0447b5c90ce588b4b5` | The project's own artwork repository (gitlab.com/postmarketOS/artwork, at the commit that added the logo, 2017-08-26; the repository's LICENCE: CC BY-SA 3.0), postmarketOS developers; same bytes as the Commons copy | none (#009900) |
 | Tux | provider Linux (`SB7_P_LINUX`), the Linux default tile | https://upload.wikimedia.org/wikipedia/commons/3/35/Tux.svg | `cd503ad510e16ff2869f959cf57b892bb2175a6874ff696b495bd94fd7db9743` | Commons: attribution: Tux by Larry Ewing (lewing@isc.tamu.edu), Simon Budig, Garrett LeSage, made with The GIMP; use permitted with this credit (same file as `tools/brand/icons/tux.svg`) | none |
 | Debian swirl | tile Debian | https://upload.wikimedia.org/wikipedia/commons/4/4a/Debian-OpenLogo.svg | `a759c381560e82e8d719e0038d0d95209b85c00b0d0f6b92c5fc510b959226b7` | Commons: CC BY-SA 3.0 (Debian); the Debian Open Use Logo, (c) Software in the Public Interest, Inc. | the "debian" wordmark cut away (render cropped above it): the swirl (#D70751) |
 | Fedora logo (2021) | tile Fedora | https://upload.wikimedia.org/wikipedia/commons/4/41/Fedora_icon_%282021%29.svg | `e0cad9aa4736a492cbeed7f875cb6a7ddfeab54879fc9e218fc00933ef18b6b6` | Commons: public domain; Fedora and its logo are trademarks of Red Hat, Inc. (used under the Fedora trademark guidelines to refer to Fedora) | none |
@@ -37,3 +38,11 @@ Not real logos (kept from the concept, they are Starbite's own): the Starbite st
   and Debian a light tile (their logos are blue, green and red); Android the brand's navy (#073042-ish);
   Ubuntu the concept's orange / aubergine gradients; Arch a dark tile; Kali the concept's Kali blue;
   Fedora Fedora blue (#294172). The table is `LOGO_G` and `tile_table()` in `tools/brand/menu7-assets.py`.
+
+## Distributing the built files
+
+`menu7.sb7` and `menu-v7.sbm` contain rasterised derivatives of these files, some under CC BY-SA
+(postmarketOS, Debian), CC BY (the Android robot) and GPLv3 (the Ubuntu Circle of Friends). The
+container's INFO section (`SB7_T_INFO`) carries one credit line per logo, so the notice travels with
+the binary. Whenever the ramdisk, a boot image holding it, or the UP_PARAM / assets bundle is shared
+outside this repository, ship this file next to it (or paste its table into the release notes).

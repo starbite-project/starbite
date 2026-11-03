@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Boot menu v7 assets: the "SB7ASSET" container (shim/starlte/sb7.h, docs/MENU7-PORT.md 4.4).
 
-    build/venv/bin/python tools/brand/menu7-assets.py [--fonts-only] [--preview DIR]
+    build/venv/bin/python tools/brand/menu7-assets.py [--fonts-only] [--preview DIR] [--concept-art]
 
 Writes
     build/brand/menu7.sb7        the container (fonts, icons, provider glyphs, OS tiles and their
@@ -11,6 +11,9 @@ Writes
     build/brand/upparam-v7/logo.jpg   S-Boot's splash = the concept's splash at the intro's t = 0
                                  (tools/brand/menu7-splash.py; not flashed)
     --preview DIR: glyph sheets, icons, tiles (composited as glass will), SAMSUNG, height field
+    --concept-art: the concept's own tile and provider-glyph artwork instead of the real logos,
+                 into build/brand/concept/ (menu7.sb7, menu-v7.sbm; no splash), for measuring
+                 concept fidelity (compare-all.sh with CMP_RD=build/brand/concept/menu-v7.sbm)
 
 Needs build/venv with freetype-py, uharfbuzz, fonttools, numpy, Pillow; rsvg-convert; node.
 Sources of truth: the concept (docs/concepts/ios27-boot.html: its <symbol>s, TG(), the provider
@@ -45,6 +48,7 @@ import menu7_logos  # noqa: E402  the real OS and company logos (tools/brand/log
 ROOT = Path(__file__).resolve().parents[2]
 FONTS = ROOT / 'tools/brand/fonts'
 OUT = ROOT / 'build/brand'
+CONCEPT_ART = False   # --concept-art
 TOOL_VERSION = 'menu7-assets 2 (real logos)'
 
 # ---- sb7.h constants -----------------------------------------------------------------------
@@ -419,7 +423,7 @@ def provider_glyph(gid):
     Apple, Microsoft, Google and Linux are the real logos (PROVIDER_LOGOS)."""
     S, m = 96, 20
     W = S + 2 * m
-    if gid in PROVIDER_LOGOS:
+    if gid in PROVIDER_LOGOS and not CONCEPT_ART:
         name, fit, dx, dy, col = PROVIDER_LOGOS[gid]
         g = menu7_logos.render(name, W, W, S, fit, dx, dy, col)
     else:
@@ -606,6 +610,8 @@ def tile_table(art):
         ('linux-shell', byid['uefi']), ('linux-olddtb', byid['uefi']),
         ('linux-bringup', byid['uefi']), ('@lab', new['lab']),
     ]
+    if CONCEPT_ART:   # the concept's artwork wherever the key is a concept id (ios26, win11)
+        real = [(k, byid.get(k, tid)) for k, tid in real]
     for key, tid in real:
         tmap.append((key, tid, 0, 0))
     tmap.append(('lab-', byid['display'], CAT['lab'], TM_PREFIX))
@@ -613,6 +619,8 @@ def tile_table(art):
     # the ones that are a real OS above show its real logo too
     same = {'a17': logo['android'], 'phosh': logo['ubuntu'], 'gnome': logo['gnome'],
             'arch': logo['arch'], 'pmos': logo['pmos'], 'kali': logo['kali']}
+    if CONCEPT_ART:
+        same = {}
     for t in art['tiles']:
         if t['id'] not in dict(real):
             tmap.append((t['id'], same.get(t['id'], byid[t['id']]), 0, 0))
@@ -740,6 +748,10 @@ def build(fonts_only=False, preview=None, log=print):
             info.append(f'  google/fonts commit {m.group(1)}')
     info.append(f'  Inter opsz {INTER_OPSZ}, features: kern (tnum on font 6); no cv11/ss01 '
                 '(as fonts.googleapis.com served the concept)')
+    if CONCEPT_ART:
+        info.append("tiles and provider glyphs: the concept's own artwork (--concept-art)")
+    else:
+        info += menu7_logos.credits()
     stats = {}
     for fid in FONT_SPEC:
         b, st = build_font(fid)
@@ -816,8 +828,9 @@ def build(fonts_only=False, preview=None, log=print):
         log(f'tiles: {len(tiles)}, glyph layers: {next_img - G_FIRST}, map entries: {len(tmap)}')
     secs[(T_INFO, 0)] = ('\n'.join(info) + '\n').encode('ascii') + b'\0'
     blob = container(secs)
-    OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / 'menu7.sb7').write_bytes(blob)
+    out = OUT / 'concept' if CONCEPT_ART else OUT
+    out.mkdir(parents=True, exist_ok=True)
+    (out / 'menu7.sb7').write_bytes(blob)
     by_type = {}
     for (t, i), b in secs.items():
         by_type[t] = by_type.get(t, 0) + len(b)
@@ -827,8 +840,8 @@ def build(fonts_only=False, preview=None, log=print):
     em = (OUT / 'menu-em.sbm').read_bytes()
     rd = em + b'\0' * (align(len(em), 4096) - len(em)) + blob
     assert len(rd) < 15 << 20, 'ramdisk over 15 MiB'
-    (OUT / 'menu-v7.sbm').write_bytes(rd)
-    log(f'ramdisk: build/brand/menu-v7.sbm {len(rd)} bytes, SB7ASSET at +0x{align(len(em), 4096):x}')
+    (out / 'menu-v7.sbm').write_bytes(rd)
+    log(f'ramdisk: {(out / "menu-v7.sbm").relative_to(ROOT)} {len(rd)} bytes, SB7ASSET at +0x{align(len(em), 4096):x}')
     if preview and not fonts_only:
         write_previews(Path(preview), imgs, layers, tiles)
     return blob
@@ -926,9 +939,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--fonts-only', action='store_true')
     ap.add_argument('--preview')
+    ap.add_argument('--concept-art', action='store_true')
     args = ap.parse_args()
+    global CONCEPT_ART
+    CONCEPT_ART = args.concept_art
     build(args.fonts_only, args.preview)
-    if not args.fonts_only:
+    if not args.fonts_only and not CONCEPT_ART:
         subprocess.run([sys.executable, str(ROOT / 'tools/brand/menu7-splash.py')], check=True)
 
 
