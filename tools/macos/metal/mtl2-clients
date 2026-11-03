@@ -1,0 +1,3 @@
+# Processes that get the Mali Metal device (StarbiteMetal.bundle): names, "*" = all, "-NAME" = never.
+# Only processes started with ptrauth_disabled=1 (sweetinject) can load the arm64 bundle at all.
+WindowServer sbmtltest
