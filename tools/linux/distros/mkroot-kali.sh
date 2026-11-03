@@ -60,7 +60,7 @@ VULKAN=${VULKAN:-1}
 CORE="kali-linux-core network-manager wpasupplicant wireless-regdb iw openssh-server sudo polkitd
  dbus-user-session libpam-systemd systemd-timesyncd less
  libgl1-mesa-dri libegl-mesa0 libgles2 libgbm1 mesa-utils kmscube glmark2-es2-drm glmark2-es2-wayland
- wlr-randr evtest"
+ wlr-randr evtest grim kbd"
 [ "$VULKAN" = 1 ] && CORE="$CORE mesa-vulkan-drivers"
 UI=${UI:-"phosh-core phosh-mobile-settings gnome-console gnome-control-center firefox-esr
  firefox-esr-mobile-config wireplumber xdg-desktop-portal-gtk kali-menu"}

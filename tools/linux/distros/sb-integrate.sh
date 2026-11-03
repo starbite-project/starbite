@@ -491,7 +491,9 @@ OnFailure=getty@tty1.service
 [Service]
 Environment=XDG_SESSION_TYPE=wayland
 ExecStart=/usr/local/bin/sb-session
-ExecStartPost=+-chvt 7
+# tty7 must become the active VT or logind never makes the session active and phoc gives up
+# ("Timeout waiting session to become active"); Kali has no kbd (no chvt): busybox's chvt then
+ExecStartPost=+-/bin/sh -c 'chvt 7 2>/dev/null || exec /usr/local/lib/starbite/busybox chvt 7'
 TimeoutStartSec=30
 User=$SB_USER
 PAMName=login
