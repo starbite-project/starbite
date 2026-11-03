@@ -10,7 +10,8 @@ of the missing log was found, and the fix is now kernel patch 0349 (in `out/` si
 (`build/macos13/root-full.img`, section 6.2) is the step after it, where launchd actually runs.
 
 Contents: 1 version · 2 Ventura or 26.5 · 3 partial download · 4 instruction census ·
-5 device identity · 6 the roots · 7 kernels · 8 first boot · 9 blockers · 10 sources.
+5 device identity · 6 the roots · 7 kernels · 8 first boot · 9 blockers · 10 sources ·
+11 kernel side for 26.5 (emulation 0350-0352, census corrections, what macOS expects).
 
 ---
 
@@ -497,3 +498,145 @@ Both ranges are read-only for XNU (no `sdrw`).
   `tools/store/sbstore2.py`, `build/dsc-isa-census-*.txt`.
 - Measured here: the cryptex listing (`build/macos13/cryptex-dyld-ls.txt`), the census reports
   (`build/macos13/census-*.txt`), the J313AP/J274AP device trees (`build/macos13/dt/`).
+
+---
+
+## 11. Kernel side for macOS 26.5 (kernel agent, 2026-11-03)
+
+Scope: what macOS 26.5's userland needs from our 12377 kernel, from the first launchd up to
+WindowServer, beyond what iOS 26 needed. The 26.5 binaries were not on the Mac yet, so the
+userland evidence is this Mac's **macOS 27.2** (`26B5112a`, M4, read only), marked "27.2
+proxy"; kernel evidence is the 12377 source and Apple's **26.5 kernels in the KDK**
+(`build/kdk/KDK_26.5_25F71.kdk`).
+
+### 11.1 Instruction emulation: patches 0350-0352
+
+| Patch | Classes | Status | Proof |
+|---|---|---|---|
+| 0350 (main session) | MSR/MRS DIT, STLUR/LDAPUR/LDAPURS | in the series, booted with iOS 26 | — |
+| `0351-sweet-a64e-fhm` | FMLAL, FMLAL2, FMLSL, FMLSL2, vector and by element | **in the series** (main session 5e2f2e3, builds clean) | exact FPMulAddH: halves widened in integer code (AHP 0, FZ16 flush without IDC), addend FZ flush with IDC, NaN pick as FPProcessNaNs3H + FPConvertNaN, then one single-precision FMADD under the user's FPCR (n*m of two halves is exact in single). `tools/a64e/difftest/run.sh` against this Mac's real FMLAL: 72 encodings, 3.6 M random cases (NaN/denormal/inf, FZ/FZ16/DN/AHP, all rounding modes): **0 mismatches** |
+| `0352-sweet-a64e-sha3-sha512-sb` | EOR3, BCAX, RAX1, XAR, SHA512H/H2/SU0/SU1, SB; two FCADD-helper fixes | `xnu/patches/pending-macos26/`, commit f1e38734 in `build/xnu-12377`; single-file compile check with dxb's exact flags: clean, **not yet linked** | difftest: 2.2 M cases, **0 mismatches** |
+
+Both new emulations use only integer code and ARMv8.0 FP, so they run on the M3 too. The FMADD
+helper masks IRQ/FIQ while the user's FPCR and v0-v2 are live.
+
+**0352 also fixes a latent panic that can hit iOS 26 with `cpus=8`:** FCADD with H elements ran
+`fadd h0` (FP16 arithmetic) inside the kernel. The Mongoose M3 has no FP16 arithmetic, so on an
+M3 that is an *undefined kernel instruction* = panic. 0352 refuses H-size FCADD on an M3
+(MIDR implementer 0x53), and sleh.c pins the thread to an A55, where it is emulated. Also
+fixed: both FP helpers zero-extend the 32-bit FPCR argument before `msr FPCR`.
+
+Feature reporting is unchanged on purpose: FHM, DIT, LRCPC2, SHA3, SHA512 and SB stay
+**absent** in `hw.optional.arm.*` and the commpage, so dispatching code keeps its non-FHM/SHA3
+paths and only compiler-generated or unconditional sites trap.
+
+### 11.2 Census corrections (tools/dsc-isa-census.py, for the 26.5 table)
+
+- **The FHM class was wrong.** Its mask `0x9F60DC00 / 0x0E20CC00` ignores U (bit 29), so it also
+  counts **FMLA/FMLS .2S/.4S** (U=0, opcode 110011) and **FACGE/FACGT .S** (U=1, 111011). §4's
+  81,997 (13.5) and 74,093 (27.2) "FMLAL" sites are almost all ordinary FMLA. Correct patterns
+  (encodings checked with clang on this Mac):
+
+  | class | mask | value |
+  |---|---|---|
+  | FMLAL/FMLSL vector | `0xBF60FC00` | `0x0E20EC00` |
+  | FMLAL2/FMLSL2 vector | `0xBF60FC00` | `0x2E20CC00` |
+  | FMLAL/FMLSL by element | `0xBFC0B400` | `0x0F800000` |
+  | FMLAL2/FMLSL2 by element | `0xBFC0B400` | `0x2F808000` |
+
+  True FHM count in the whole 27.2 cache: **180** (76 + 76 + 14 + 14, libBNNS and a few ML
+  libraries). The "FMLAL" hits in SkyLight, CoreGraphics, QuartzCore, CoreImage are FMLA.
+- **BCAX was never counted:** `EOR3/BCAX 0xFFA08000 / 0xCE000000` matches EOR3 only. Use
+  `0xFFE08000 / 0xCE000000` (EOR3) and `0xFFE08000 / 0xCE200000` (BCAX). 27.2: EOR3 977, BCAX 491.
+- Handled-by labels: FHM -> `trap (0351)`; SB, EOR3, BCAX, RAX1, XAR, SHA512* -> `trap (0352)`.
+- The tool was being edited by the root agent (uncommitted MOPS/SSBS/SME/CSSC classes), so I
+  did not touch it: **root agent, please apply the masks above before the 26.5 run.**
+
+Corrected per-image census, 27.2 proxy, classes that trap on both S9 cores (after 0350-0352
+everything listed here except BF16 is emulated):
+
+| Image (boot or WindowServer path) | sites |
+|---|---|
+| libsystem_m | EOR3 13, BCAX 4, XAR 1 (compiler output with +sha3), BFDOT/BFMLAL idx 2 (M2+, gated), SVE space 134 (`__sme_*`) |
+| libsystem_platform | SB 1, DIT 3, SVE space 82 (`__sme_memchr` etc., chosen only with kHasFeatSME) |
+| libcorecrypto | SB 1, DIT 62, LDAPUR 4, EOR3 20, BCAX 50, RAX1 10, XAR 48, SHA512 144 |
+| dyld (in the cache) | SHA512 144 (its own corecrypto), DIT 3, SB 1, LDAPUR 3 |
+| libsystem_malloc | LDAPUR/STLUR 66 |
+| Foundation, Metal, JavaScriptCore, vImage, Espresso | EOR3 1 each (JSC also BCAX 12, LDAPUR 1,951) |
+| CoreGraphics | **BCAX 48** |
+| libboringssl | EOR3 2, XAR 6 |
+| libBNNS | the only real FHM (180 in total), EOR3 4 |
+
+### 11.3 SVE, SME, AMX and Apple IMPDEF registers: absent for every process (checked, no change)
+
+- **Commpage / hw.optional:** ISAR0/ISAR1/MMFR2/PFR0 features are the nibble-minimum of the A55
+  and the M3 (`commpage.c`, STARLTE). SME comes only from `arm_sme_version()`, i.e.
+  ID_AA64PFR1.SME = 0 on both cores, so `kHasFeatSME/SME2/SME2p1` = 0, every
+  `hw.optional.arm.SME_*` = 0, `sme_max_svl_b` = 0; SMFR0 is not even read. There is no SVE
+  flag; `FEAT_SVE_B16B16` reads ID_AA64ZFR0 (RAZ on v8.0/v8.2) = 0. Same commpage for iOS and
+  macOS processes.
+- **AMX:** not a sysctl. Apple's 26.5 kernels carry `arm_amx_version <= (kAMXVersionMask >>
+  kAMXVersionShift)`: the AMX version lives in the commpage capability word. This Mac's
+  `caps64` = `0x9fffef97af0a7fc8`; the bits that are *not* in the public header are 27, 29, 36,
+  39 and 63 (bits 27-29 = 0b101 [inference: the AMX version field]). Our kernel sets only
+  public-header bits, so they are 0, and `_COMM_PAGE_CPUFAMILY` = 0 (A55 part 0xd05 ->
+  CPUFAMILY_UNKNOWN).
+- **IMPDEF registers (S3_x_C15), disassembled on the 27.2 cache:** dyld's TPRO toggles
+  (`S3_6_C15_C1_5`, about 660 MRS/MSR sites) run only if commpage byte **+0x10C** is 2..4; libsystem_pthread's
+  APRR/SPRR JIT toggles only for a commpage mode byte 1..4; libsystem_platform's ktrace writes
+  only if `_COMM_PAGE_APT_ACTIVE` (+0x341) is set (our `apt_msg_policy()` stub returns 0). Our
+  commpage leaves all of these 0.
+- **Rule for later patches:** never write commpage bytes or capability bits outside the public
+  `cpu_capabilities.h` for a macOS boot; that is what keeps AMX, TPRO, SPRR and SME code off.
+
+### 11.4 Shared region: the cache must fit 6 GiB
+
+Our kernel's arm64 shared region is `0x180000000 + 0x180000000` (6 GiB). Apple's **26.5**
+T8103 release kernel uses the same (disassembled `vm_shared_region_lookup`: `mov x8,
+#0x180000000` for both), so a real 26.5 cache fits. This Mac's **27.2 cache spans 7.18 GiB**
+(`sharedRegionSize 0x1cb930000`): our kernel cannot map it, so 27.2 is a census stand-in only,
+never a root. Root agent: check the 26.5 header's `sharedRegionSize <= 0x180000000`.
+
+### 11.5 What macOS 26 expects at boot, and the plan
+
+| Need | Who reads it | State on our kernel | Plan |
+|---|---|---|---|
+| `hw.machine` = `arm64`, `hw.model` = `MacBookAir10,1` | uname -m, model identifier everywhere | **already right for macOS.** The STARLTE build compiles the macOS branch of `sysctl_hw_generic` (its SWEET exception tests `ARM64_BOARD_CONFIG_SWEET`; STARLTE defines A5XELTE; checked by preprocessing kern_mib.c with dxb's flags) | none. Side finding for iOS: iOS processes get `hw.machine` = `iPad8,6` (Apple's iOS-on-Mac kludge), likely NOTES' "some UI says iPad". Do **not** add A5XELTE to that `#if` (macOS would get `uname -m` = MacBookAir10,1); if iOS needs DT names, switch at run time on `proc_platform(initproc)` |
+| `hw.target` J313AP, `hw.product` MacBookAir10,1 | MobileGestalt, softwareupdate | right (first `compatible`, `model`) | none |
+| IOPlatformUUID, `gethostuuid()` | configd, opendirectoryd, CFPreferences ByHost, loginwindow | present: on arm64 `generatePlatformUUID()` hashes `/chosen` unique-chip-id + chip-id (both in the Mac ADT). §5's `/efi/platform` system-id is the x86_64 input | none (mkadt-mac comment corrected) |
+| IOPlatformSerialNumber | System Information, loginwindow | `STARBITES9M1` from root `serial-number` (`configureDefaults`) | none |
+| Other root properties (platform-name, secure-root-prefix, model-number, region-info, mlb-serial-number) | System Information, MobileGestalt | absent | ignore; ADT if a daemon asks |
+| `/chosen` boot-uuid, apfs-preboot-uuid, boot-objects-path (`kern.bootuuid`...) | launchd | ENOENT; 27.2 launchd only builds cookie paths under `/System/Volumes/Preboot/<uuid>/` and gives up ("no cookie") | ignore |
+| NVRAM (`/options`, IODTNVRAM) | nvram(8), some daemons' settings | absent (no `/options`) | ignore for MAC1-2. `mkadt-mac --nvram` would give an in-memory IODTNVRAM (no `nvram-bank-size` -> empty CHRP image); untested |
+| IOPMrootDomain, RootDomainUserClient | powerd, loginwindow | present (PMInstantiatePowerDomains) | none |
+| **System sleep** | powerd idle sleep (laptop identity, no user input on the phone) | the port has no sleep path | **ADT: `/defaults sleep-disabled = 1`** (read by IOPMrootDomain at boot-complete; Apple's VMs do the same). Done in `tools/macos/mkadt-mac.py` (48b3066); regenerate `out/starlte-mac-j313.adt` at the next pack |
+| Battery (IOPMPowerSource) | powerd, menu extras | SweetBattery (built for HEROLTE boards): 100 %, AC | none |
+| AppleSMC | CoreBrightness, thermalmonitord, SampleAnalysis | absent; callers log "Failed to find the AppleSMC service" | ignore; a key-less `AppleSMC` IOService stub only if one blocks |
+| IOHIDSystem (`IOService:/IOResources/IOHIDSystem`) | IOKit.framework NX* calls, CoreDisplay, OSServices | absent. CoreDisplay's `get_hid_service_connection()` returns 0 without aborting (disassembled) | ignore for drawing. MAC3+ input: a macOS-only SweetHID pointer service (GenericDesktop Mouse pair, absolute X/Y + button 1 from the digitizer) when initproc is a macOS binary; IOHIDSystem parameter stub only if loginwindow/WindowServer stall on it. SweetHIDButtons' consumer keys go through the same IOHIDEventService user client to macOS's hidd. No text input: use auto-login |
+| kernelmanagerd check-in | IOKit registry quiet, deferred (dext) matching | `iokitDaemonAvailable()` is true on the macOS config: the service root stays busy +1 until kernelmanagerd sends personalities. iOS 26 logs show "KextLog: kernelmanagerd is active" | keep `com.apple.kernelmanagerd` enabled. If it fails, IOKitWaitQuiet callers (diskarbitrationd...) hang; kernel fallback (boot-arg that skips the busy count) not written |
+| AMFI/Sandbox | dyld, launchd, every daemon | permissive stand-ins as for iOS. macOS-only sysctls missing (ENOENT): `security.mac.amfi.developer_mode_status`, `.allow_only_platform_code`, `security.mac.asp.willshutdown`, `security.mac.sandbox.sandcastle.enabled`, `security.mac.img4.ignition_blob` (iOS 26 runs without them too) | read the first boot's "SWEET AMFI: <proc> op N" / "SWEET Sandbox:" lines for macOS-only ops |
+| Data volume (APFS) | launchd boot mode | 27.2 launchd: `fsctl(APFSIOC_GET_DEV_BY_ROLE)` on `/System/Volumes/macOS` and `APFSIOC_IS_VOL_LOCKED` on `/` fail on HFS -> data status 0 -> **default boot mode** (not fvunlock, not "pivot root"). The kernel's ROSV/firmlink/mount-by-role code runs only for APFS roles | root side: **do not** set `launchd_force_data_status=1` (1 = "unlocked [pivot root]" mode) |
+| Boot tasks | launchd (27.2): fsck, mount-phase-1 (`/sbin/mount -P 1`), mount-phase-2, init-with-data-volume, `/sbin/mount -uw /` ("Root device is mounted read-only"), `/sbin/mount -vat nonfs` | the card root has no write path (`sdrw` prints "no write path"): `mount -uw /` fails, and a failed boot task was fatal on iOS 16 (milestone 5) | **MAC1 needs a writable root**: (a) a card write path in `starlte_sd.c` bounded to the `sdroot=` range (main session's driver), or (b) a macOS root on UFS (`ufsrw=1` works, but `ufsroot=` takes a whole GPT partition), or (c) for a first look only: no-op wrappers for these tasks and a read-only `/private/var` |
+| `kern.osproductversion`, `osreleasetype`, `osproductversioncompat` | everything | RW sysctls, set by launchd from SystemVersion(Compat).plist | none |
+| SIP | launchd, AMFI | `/chosen/asmb lp-sip0` = 0x6f from the base ADT (relaxed) | none |
+| Shared cache size | dyld | 6 GiB region (11.4) | root: check the 26.5 header |
+| Metal / IOGPU / IOSurface / IOMobileFramebuffer | WindowServer | Metal agent | — |
+
+**Net result: no further kernel patch is required for the first macOS 26.5 launchd boots
+beyond 0350-0352.** The blockers that remain are root-side (writable root, boot tasks) and one
+ADT property (sleep-disabled, done in the tool).
+
+### 11.6 For the root agent
+
+1. Apply the census masks of 11.2 before the 26.5 table.
+2. Check the 26.5 cache's `sharedRegionSize <= 0x180000000` (11.4).
+3. Writable root or boot-task wrappers (11.5, "Boot tasks"); keep kernelmanagerd; leave
+   `launchd_force_data_status` unset.
+4. Re-run `tools/macos/mkadt-mac.py` for the Mac ADT (now adds `/defaults sleep-disabled`).
+
+### 11.7 For the Metal/WindowServer agent
+
+- CoreGraphics has 48 BCAX sites: **0352 must be in the kernel before WindowServer runs.**
+  The FMLAL hits counted earlier in SkyLight/CoreGraphics/QuartzCore are ordinary FMLA.
+- `IOHIDSystem` absence is tolerated by CoreDisplay; input for macOS is MAC3+ (11.5).
+- macOS processes see `hw.model` MacBookAir10,1, `/product graphics-featureset-class` APPLE7.
