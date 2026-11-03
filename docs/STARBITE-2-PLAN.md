@@ -7,7 +7,7 @@ and the order of work. No time estimates: each phase ends when its "done when" h
 ## 0. The user's priorities (2026-11-03)
 - **Apple:** iOS 14 as the stable one, the rest as planned, and later **many iOS versions** plus fun ones (iOS 7, tvOS, iPadOS…).
 - **Microsoft:** **both Windows 10 and Windows 11.** Windows 10 ARM64 (ARMv8.0) can use all 8 cores; 11 24H2+ only the 4 A55s.
-- **Android:** **lots and lots of Android versions** (GSIs from the card). Android 17 is the main OS on UFS; its data partition size (24 or 32 GB) is decided at the UFS re-layout.
+- **Android:** **lots and lots of Android versions** (GSIs from the card). Android 17 is the main OS on UFS with a **24 GB** data partition (user's choice, 2026-11-03).
 - **Soon:** **Starbite OS** and **ChromeOS** (ChromiumOS/FydeOS on our mainline kernel).
 
 ## 1. Where things stand
@@ -79,7 +79,7 @@ S-Boot ──> BOOT partition (stays small and stable)
   Windows UEFI moves to the store too. That leaves ~37 MB free and lets the full kernel back in.
 
 ### 3.2b UFS re-layout: Android as the main OS
-- Android 17 gets **A16DATA = 32 GB** (from 8 GiB). UFS is full, so something moves to the card:
+- Android 17 gets **A16DATA = 24 GB** (from 8 GiB; the user's choice, 2026-11-03). UFS is full, so something moves to the card:
   the **Apple roots move to the microSD library**, which needs an **XNU microSD driver** (the
   key enabler: it also gives every Apple OS its own root on the card). Windows stays on UFS
   (it has no SD driver), shrunk to ~20 GB; the 1 GiB OS store stays.
@@ -176,7 +176,7 @@ Feasibility marks below: **[easy]** reuses what works, **[work]** real porting, 
   Mesa's Panfrost/PanVK through a Dozen-like layer) as a long research project.
 
 ### Android (the main OS on UFS)
-- **LineageOS 24 / Android 17 = the Daily main OS**, on UFS with a **32 GB** data partition
+- **LineageOS 24 / Android 17 = the Daily main OS**, on UFS with a **24 GB** data partition
   (section 3.2b). First: confirm it boots and fix what doesn't.
 - **More Android versions via GSIs** **[work]**: Generic System Images (Android 12-17, AOSP,
   microG, Go) on top of Lineage's vendor, system images in the microSD library, one entry each.
@@ -286,7 +286,7 @@ SerenityOS aarch64, Redox, Plan 9.
   `fastboot boot` starts an iOS payload sent from the Mac.
 
 **Phase 5: storage re-layout and the Apple line**
-- XNU microSD driver, Apple roots on the card, UFS re-layout (Android 32 GB data), iOS 14
+- XNU microSD driver, Apple roots on the card, UFS re-layout (Android 24 GB data), iOS 14
   (xnu-7195, native on 8 cores), iPadOS, tvOS. iOS 26 keeps improving in parallel.
 
 **Phase 6: the long ones, one at a time**
