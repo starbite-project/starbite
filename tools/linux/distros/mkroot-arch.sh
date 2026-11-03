@@ -15,6 +15,8 @@
 #    build keyring (with its local master signing key) is deleted at the end: every copy of the
 #    image would share it. sb-pacman-keys.service makes the phone's own on the first boot.
 # 3. pacman -Syu, then Phosh (extra) + NetworkManager, openssh, mesa, PipeWire, squeekboard, sudo.
+#    wlroots0.20 rebuilt with phoc's own layer-shell patch (arch/wlroots0.20/, makepkg in the root,
+#    then IgnorePkg): Arch's phoc links the stock one, and phosh dies on it (a restart loop).
 # 4. sb-integrate.sh arch systemd: user "user" 10000, usb0 172.16.42.1 + DHCP for the Mac,
 #    sshd keys made on the phone, GPU floor, AFBC env, scale 3, Wi-Fi firmware, starbite-session
 #    (Phosh autologin on tty7 for "user"), watchdog off, no distro kernel; an empty
@@ -229,6 +231,42 @@ trim
 left=$(in_root pacman -Qq | grep -E "$NOKERNEL_RE" || true)
 [ -z "$left" ] || { echo "a kernel/boot package came back: $left" >&2; exit 1; }
 [ -x "$R/usr/bin/phosh-session" ] || { echo "no /usr/bin/phosh-session after installing phosh" >&2; exit 1; }
+
+# ---- phoc's wlroots patch -------------------------------------------------------------------------
+# Arch builds phoc with -D embed-wlroots=disabled against the stock wlroots0.20, but phoc's own
+# build patches its wlroots (subprojects/packagefiles/wlroots: revert "layer-shell: error on 0
+# dimension without anchors"). Phosh's "phosh home" layer surface commits size 0x0 anchored
+# bottom|left|right, so stock wlroots kills phosh with a protocol error ("height 0 requested
+# without setting top and bottom anchors"), gnome-session ends with it and starbite-session starts
+# it again every few seconds: the spinner loop of the first image (2026-11-03). Debian, Kali and
+# Ubuntu build phoc with its embedded, patched wlroots. Here: Arch's PKGBUILD + phoc's patch
+# (arch/wlroots0.20/), built with makepkg in the root, then held in IgnorePkg.
+WLR_SRC=$HERE/arch/wlroots0.20
+wlr_have=$(in_root pacman -Q wlroots0.20 | awk '{print $2}')
+wlr_want=$(sed -n 's/^pkgver=//p' "$WLR_SRC/PKGBUILD")
+[ "${wlr_have%-*}" = "$wlr_want" ] ||
+	{ echo "wlroots0.20 is $wlr_have, arch/wlroots0.20/PKGBUILD builds $wlr_want: update it (and check phoc's patch)" >&2; exit 1; }
+WLR_MK="base-devel git meson ninja vulkan-headers"
+wlr_new=$(for p in $WLR_MK; do in_root pacman -Q "$p" >/dev/null 2>&1 || echo "$p"; done)
+pac_sync --needed $WLR_MK glslang xorg-xwayland
+in_root useradd -r -M -d /tmp/sb-wlr sb-build 2>/dev/null || true
+install -d -o "$(in_root id -u sb-build)" "$R/tmp/sb-wlr"
+cp "$WLR_SRC"/PKGBUILD "$WLR_SRC"/*.patch "$R/tmp/sb-wlr/"
+chown -R "$(in_root id -u sb-build)" "$R/tmp/sb-wlr"
+# (git source pinned by its sha256; the tag's signature keys are not in the root's keyring)
+in_root su -s /bin/sh sb-build -c 'cd /tmp/sb-wlr && makepkg -f --skippgpcheck --ignorearch'
+in_root sh -c 'pacman -U --noconfirm /tmp/sb-wlr/wlroots0.20-*.pkg.tar.*'
+in_root pacman -Q wlroots0.20 | grep -q -- '-1\.1$' || { echo "the patched wlroots0.20 did not install" >&2; exit 1; }
+! grep -q 'height 0 requested without setting top and bottom anchors' "$R/usr/lib/libwlroots-0.20.so" ||
+	{ echo "libwlroots-0.20.so still has the layer-shell check" >&2; exit 1; }
+sed -i 's/^IgnorePkg = \(.*\)$/IgnorePkg = \1 wlroots0.20/' "$R/etc/pacman.conf"
+grep -q '^IgnorePkg = .* wlroots0.20' "$R/etc/pacman.conf" || { echo "wlroots0.20 not held" >&2; exit 1; }
+rm -rf "$R/tmp/sb-wlr"
+in_root userdel sb-build 2>/dev/null || true
+# shellcheck disable=SC2086
+[ -z "$wlr_new" ] || in_root pacman -Rns --noconfirm $wlr_new
+in_root pacman -Scc --noconfirm >/dev/null
+trim
 
 # ---- 4. Starbite integration (shared with every distro) -----------------------------------------
 mkdir -p "$R/tmp/sb"
