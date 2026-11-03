@@ -14,8 +14,14 @@ Only identity changes; every S9 hardware node stays as it is:
   /product    replaced by the Mac's (product-name, artwork-device-idiom "mac",
               graphics-featureset-class, ...), iBoot's syscfg placeholders dropped
   /chosen     chip-id, board-id of the Mac; display-scale 2; a fresh 256-byte seed
-  /efi/platform  system-id (16 bytes, from the serial): IOPlatformUUID / gethostuuid()
-              (--nvram: /options platform-uuid instead, which also brings up IODTNVRAM)
+  /defaults   sleep-disabled = 1 (IOPMrootDomain never allows system sleep, as in Apple's
+              VMs: macOS's powerd idle-sleeps a laptop and the S9 port has no sleep path;
+              --allow-sleep leaves it out)
+  /efi/platform  system-id (16 bytes, from the serial). On arm64 IOPlatformUUID does NOT come
+              from here: generatePlatformUUID() hashes /chosen unique-chip-id + chip-id
+              (the base ADT has both, so the UUID exists); system-id and --nvram's
+              /options platform-uuid are the x86_64 sources. --nvram still brings up an
+              (in-memory, controller-less) IODTNVRAM on /options
 """
 import argparse, hashlib, os, struct, sys
 from pathlib import Path
@@ -55,6 +61,7 @@ def main():
     ap.add_argument('--serial', default='STARBITES9M1')
     ap.add_argument('--keep-seed', action='store_true')
     ap.add_argument('--nvram', action='store_true', help='UUID in a new /options (IODTNVRAM) instead of /efi/platform')
+    ap.add_argument('--allow-sleep', action='store_true', help='no /defaults sleep-disabled')
     a = ap.parse_args()
     root, _ = adt.parse(a.base.read_bytes())
     mac, _ = adt.parse(a.mac.read_bytes())
@@ -87,10 +94,18 @@ def main():
     if not a.keep_seed:
         setp(chosen, 'random-seed', os.urandom(256))
 
-    # IOPlatformUUID (gethostuuid(), IOPlatformExpertDevice): generatePlatformUUID()
-    # hashes /efi/platform system-id on arm too (IOPlatformExpert.cpp). That node is
-    # read for nothing else on arm64, while an /options node would also create an
-    # IODTNVRAM (createNVRAM): --nvram puts the UUID there instead.
+    # IOPlatformExpertDevice::generatePlatformUUID() (IOPlatformExpert.cpp) on arm64 hashes
+    # /chosen unique-chip-id (8 bytes) + chip-id (4 bytes); /efi/platform system-id and
+    # /options platform-uuid are its x86_64 inputs. Kept for the x86 path; an /options node
+    # also creates an IODTNVRAM (createNVRAM).
+    assert len(props(chosen).get('unique-chip-id', b'')) == 8, 'base ADT has no unique-chip-id: no IOPlatformUUID'
+    if not a.allow_sleep:
+        # IOPMrootDomain reads PE_get_default("sleep-disabled") when powerd reports boot complete
+        defaults = next((c for c in root.children if name_of(c) == 'defaults'), None)
+        if defaults is None:
+            defaults = mkadt.node('defaults', [])
+            root.children.append(defaults)
+        setp(defaults, 'sleep-disabled', mkadt.u32(1))
     sysid = hashlib.sha256(b'starbite-s9:' + a.serial.encode()).digest()[:16]
     if a.nvram:
         opts = next((c for c in root.children if name_of(c) == 'options'), None)
@@ -108,7 +123,8 @@ def main():
     blob = adt.serialize(root)
     a.out.write_bytes(blob)
     print(f'{a.out}: {len(blob)} bytes, {sub} / {model}, chip-id 0x{chip:x} board-id 0x{board:x}, '
-          f'serial {a.serial}, system-id {sysid.hex()}' + (' in /options' if a.nvram else ' in /efi/platform'))
+          f'serial {a.serial}, system-id {sysid.hex()}' + (' in /options' if a.nvram else ' in /efi/platform') +
+          ('' if a.allow_sleep else ', /defaults sleep-disabled'))
 
 
 if __name__ == '__main__':
