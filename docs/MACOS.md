@@ -5,8 +5,8 @@ in `build/macos13/` and `out/` (both gitignored, Apple software stays local).
 
 **Done means "the kernel starts macOS's launchd from a read-only root on the card".** The
 payload for that test is `out/xnu-mac13-t0b.xnu`, with `build/macos13/root-t0.img` already in
-the card's 64 MiB test range (section 8.1). Its first version (t0) hung with no log; the
-cause of the missing log is found, and the fix (patch 0349) is written but not built. A second root with the full translated shared cache
+the card's 64 MiB test range (section 8.1). Its first version (t0) hung with no log. The cause
+of the missing log was found, and the fix is now kernel patch 0349 (in `out/` since 20:17). A second root with the full translated shared cache
 (`build/macos13/root-full.img`, section 6.2) is the step after it, where launchd actually runs.
 
 Contents: 1 version · 2 Ventura or 26.5 · 3 partial download · 4 instruction census ·
@@ -371,17 +371,18 @@ hook armed at STARTUP KMEM). So t0 did not panic: something hung or looped, and 
 reset it. The same holds for every card-root boot, the SD probe included (it ended in a
 deliberate panic).
 
-- **Fix (written, not built):** `xnu/patches/pending-mac13/for-12377/0349-starlte-sweetreboot-timer-no-ufs.patch`.
-  A STARTUP(EARLY_BOOT) thread waits N s; unless the UFS log thread took over, it puts the
-  console tail into pmsg and resets to TWRP (`starlte_panic_to_recovery()`). It applies on
-  `build/xnu-12377`. There is no existing boot-arg that panics if IOFindBSDRoot is not reached;
-  with 0349, any hang after EARLY_BOOT becomes a log.
+- **Fix: `xnu/series-12377/0349-starlte-sweetreboot-timer-no-ufs.patch`** (written here;
+  committed and built by the main session as 1ebc653, `out/kernel.development.starlte-12377`
+  from 20:17). A STARTUP(EARLY_BOOT) thread waits N s; unless the UFS log thread took over, it
+  puts the console tail into pmsg and resets to TWRP (`starlte_panic_to_recovery()`). No
+  existing boot-arg panics if IOFindBSDRoot is not reached. With 0349, any hang after
+  EARLY_BOOT becomes a log.
 - **t0's cmdline was the other suspect** (coordinator): it dropped most of the daily set
   (sweetfb canvas, `cpus=8`, memory limits). **t0b** keeps it.
 
 | | |
 |---|---|
-| Payload (run this one) | **`out/xnu-mac13-t0b.xnu`**, sha256 `355683503903001b050689ad484cb88c5097982cdfa4aedb4d4e9f3f1d66c399` (12377 kernel with 0345-0348; `out/starlte-iphone11-1792.adt`; `tools/cmdline/macos13-t0b.txt`). Store entry `mac13-t0b.xnu`, catalog key `mac13t0b` |
+| Payload (run this one) | **`out/xnu-mac13-t0b.xnu`**, sha256 `1f00aecb145e1645f582adb6ef54d8e04cf629c1e5953cac85682ebaf04f324a` (12377 kernel with 0345-0349, re-packed at 20:17; `out/starlte-iphone11-1792.adt`; `tools/cmdline/macos13-t0b.txt`, read back from the payload). Store entry `mac13-t0b.xnu`, catalog key `mac13t0b` |
 | Root | `build/macos13/root-t0.img` -> card sectors **249868288 + 131072** (the 64 MiB test range; already on the card) |
 | Command line (435 bytes) | `tools/cmdline/ios26-sdprobe.txt` minus `sdprobe`/`sdhold`/`sdbench`, `sweetinject`, `sbgl`/`sbmtl`/`sbprof`/`sbshot` and `a5fb_noconsole`, plus `sweettracename=launchd sweetreboot=120` (`rd=sdroot0 sdroot=lba:249868288,131072 herolog=0` kept) |
 | First try | `out/xnu-mac13-t0.xnu` (sha `48787dec...`, `tools/cmdline/macos13-t0.txt`: a minimal 243-byte set with `cpus=4`): hung |
@@ -442,7 +443,7 @@ classes).
 |---|---|
 | Root | `build/macos13/root-full.img` (3900 MiB = 7,987,200 sectors) -> card sectors **241348608 + 7987200**, inside p2 (182886400..249999359), past the store's used end (block 8), ending at 249335807: 64 MiB clear of the test range. The range also lies in the "free in p3" area of the quick Android re-layout (236169216..249999359, ANDROID-PLAN §5.1), so it survives that re-layout; after the full re-layout it moves to p6 |
 | Command line | `tools/cmdline/macos13-t1.txt` (436 bytes): t0b's with `sdroot=lba:241348608,7987200` and `sweetreboot=300` |
-| Payload | `out/xnu-mac13-t1.xnu`, sha256 `2e61dd47a5168b2e45bd14679e967232efe1ce72aa7a8e83e8440dbf93f3d4b8` (12377 kernel, **`out/starlte-mac-j313.adt`**). Run it only after t0b passes, and preferably with 0349 built in |
+| Payload | `out/xnu-mac13-t1.xnu`, sha256 `2e61dd47a5168b2e45bd14679e967232efe1ce72aa7a8e83e8440dbf93f3d4b8` (12377 kernel with 0345-0349, **`out/starlte-mac-j313.adt`**). Run it only after t0b passes |
 
 Steps: `card-range-flash.py build/macos13/root-full.img 241348608` (about 61 chunks; all-zero
 chunks are written from `/dev/zero` on the phone), the same store procedure with key
@@ -460,9 +461,8 @@ Both ranges are read-only for XNU (no `sdrw`).
 
 ## 9. Blockers (honest)
 
-0. **Card-root boots have no timed reset.** 12377's sweetreboot timer needs the UFS log thread,
-   so a hang on `rd=sdroot0` stays hung (t0). Patch 0349 is written, not built (section 8.1).
-   Until it is in, every hang costs a button press and gives no log.
+0. **Why t0 hung is still unknown.** The log gap is closed (0349: card-root boots now reset with
+   the console tail), but the hang itself is not explained until t0b's log or a photo arrives.
 1. **Disk for macOS 26.5 (the drawing path).** Its root is about 8 GB against the 6 GB budget.
    Needs the external drive or the master drive (master plan decision 1). Until then, 26.5 can
    only be censused and staged in pieces.
