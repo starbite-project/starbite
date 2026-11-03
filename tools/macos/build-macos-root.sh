@@ -86,6 +86,9 @@ json.dump(own, open(path, 'w'), indent=0, sort_keys=True)
 print(f'Data template merged ({moved} owner entries re-keyed)')
 PY
 mkdir -p "$mnt$CRYPTEX/System/Library/dyld" "$mnt/dev" "$mnt/private/var/tmp" "$mnt/private/var/db"
+# dyld-1066 on our kernel looks only in /System/Library/dyld/ (no cryptex mount here: 2026-11-03
+# tier 1 log, open("/System/Library/dyld/") = ENOENT), so point that at the cryptex copy.
+[ -e "$mnt/System/Library/dyld" ] || ln -s ../Volumes/Preboot/Cryptexes/OS/System/Library/dyld "$mnt/System/Library/dyld"
 fi
 
 build=$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$W/BuildManifest.plist" 2>/dev/null || echo 22G74)
