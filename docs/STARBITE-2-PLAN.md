@@ -4,11 +4,23 @@ Plan written 2026-11-02 (revised the same evening with your ideas) after a full 
 (NOTES.md, shim/starlte, tools/*). It says what exists, what blocks growth, the new architecture,
 and the order of work. No time estimates: each phase ends when its "done when" holds.
 
-## 0. The user's priorities (2026-11-03)
-- **Apple:** iOS 14 as the stable one, the rest as planned, and later **many iOS versions** plus fun ones (iOS 7, tvOS, iPadOS…).
-- **Microsoft:** **both Windows 10 and Windows 11.** Windows 10 ARM64 (ARMv8.0) can use all 8 cores; 11 24H2+ only the 4 A55s.
-- **Android:** **lots and lots of Android versions** (GSIs from the card). Android 17 is the main OS on UFS with a **24 GB** data partition (user's choice, 2026-11-03).
-- **Soon:** **Starbite OS** and **ChromeOS** (ChromiumOS/FydeOS on our mainline kernel).
+## 0. THE LINEUP (locked 2026-11-03, replaces every older list below)
+Two systems per category, plus Starbite's own three. Everything else is parked: kept on disk,
+hidden from the menu, no work on it.
+
+| Category | Systems |
+|---|---|
+| **Apple** | iOS 26 (today's port) · **macOS** (on our XNU 12377 port, which is already a macOS-config kernel) |
+| **Google** | **Pure Android 17** (AOSP, Pixel-like; later maybe the newest One UI) · **ChromeOS** (the real thing; ChromiumOS from Google's source as the first step, never FydeOS) |
+| **Microsoft** | Windows 11 · Windows 10 ARM64 (all 8 cores) |
+| **Linux** | Ubuntu Touch · postmarketOS |
+| **Starbite** | **Emergency OS** (a minimal phone OS for emergencies) · **Utility OS** (low level, no Linux: USB device emulation such as RAM as a USB drive, keyboard and mouse, radio and antenna tools, many small useful tools) · **Engineer OS** (today's Lab/EngineerMode grown up: tests and stress tests for every component, direct PMIC control, risky low-level access, managing Starbite itself and its boot options) |
+
+Parked (hidden, nothing deleted): iOS 14, iPadOS, tvOS, iOS 7, the Darwin console, Android GSIs
+of other versions, LineageOS as the visible Android, Ubuntu (Phosh/GNOME/Lomiri desktop), Arch,
+Kali, Debian, Fedora, WinPE, the UEFI Shell (stays reachable from Engineer OS), retro and media.
+
+Menu v7 keeps getting faster in the background until it is smooth on the phone.
 
 ## 1. Where things stand
 
