@@ -144,8 +144,20 @@ void menu7_handoff(const char *detail);
 /* ---- motion (spec "Motion": response s / damping ratio) ---------------------------------- */
 
 #define M7_SPRING_H 0.004f          /* semi-implicit Euler sub-step */
-#define M7_DT_MAX 0.05f             /* a frame's dt is clamped (the concept's frame()) */
+#define M7_DT_MAX 0.05f             /* the concept's frame() clamps dt to this: one m7_step */
 #define M7_FPS 30                   /* frame pacing target */
+/* A frame later than M7_DT_MAX (the A55 can take seconds for a full-panel glass frame) advances
+ * the springs by its real dt in M7_DT_MAX steps (m7_advance), up to this much: animations end on
+ * time however few frames are drawn. */
+#define M7_DT_CATCHUP 0.5f
+/* Frame-budget mode: a full-panel frame takes longer than this (g7_stats.full_us; VM ~100-180
+ * ms, the A55 seconds). The launch card's springs snap and the pick is returned at once, a progress
+ * stage draws one frame, the handoff screen is skipped. */
+#define M7_SLOW_MS 300
+/* Speed check before anything is drawn: g7_bake slower than this (VM: 60-75 ms) and v7 does not
+ * run (menu v6 does; log slot 127 bit 16). Boot-args starmenu7=0 turns v7 off, starmenu7=2 skips
+ * the check. */
+#define M7_BAKE_MAX_MS 400
 /* lens .38/.72 (x, y), .38/.76 (w, h), .38/.8 (r), .3/1 (a); eps .05; bounce +-900 px/s */
 /* section open .50/.86 eps .002; scroll .55/1 eps .05; room .50/.86; press down .18/1 to .965,
  * release .30/.55; options .42/.80, lift .35/.70, backdrop (back) .40/1; alert .34/.80;
@@ -161,6 +173,7 @@ void menu7_handoff(const char *detail);
 #define M7_REPEAT_MS 450            /* Volume held: repeat after 450 ms, every 110 ms */
 #define M7_REPEAT_EVERY_MS 110
 #define M7_DEBOUNCE_MS 20
+#define M7_VOL_HOLD_MS 700          /* both Volume keys held: power off now (v5 / v6 K_VOL_HOLD) */
 
 enum {
     M7_EV_NONE,
@@ -230,6 +243,8 @@ void m7_prepare_boot(void);
 void m7_build(struct g7_frame *f, const struct m7_xf *xf);
 /* Advance every menu spring by dt seconds (the concept steps all springs every frame). */
 void m7_step(float dt);
+/* m7_step for a frame's real dt: clamped to M7_DT_CATCHUP, in steps of at most M7_DT_MAX. */
+void m7_advance(float dt);
 /* finishIntro(skipped): lens on, island spring home (snapped if skipped), countdown starts. */
 void m7_finish_intro(int skipped);
 /* The splash star's centre and radius (#spStar), where the intro's star flight starts. */

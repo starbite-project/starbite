@@ -32,9 +32,10 @@ h7args() {   # state -> h7 arguments
 hash() {     # state -> concept URL fragment
     case $1 in
     intro-*) echo "state=intro&stopat=${1#intro-}&solo" ;;
-    error) echo "state=error&snap=2500&solo" ;;      # snap once the card has turned into the error
+    error) echo "state=error&shotat=4500&solo" ;;   # real time, once the card has turned into the error
     launch) echo "state=launch&snap&p=0.4&solo" ;;
     missing|lab) echo "state=$1&shotat=1400&solo" ;; # real time, while the notice is up
+    ctx|submenu|sheet|alert|recovery|apple|countdown) echo "state=$1&settle=700&solo" ;;  # real time, at rest
     *) echo "state=$1&snap&solo" ;;
     esac
 }
@@ -47,6 +48,10 @@ hash() {     # state -> concept URL fragment
 #    which is what the loader shows at T;
 #  - #shotat=MS (missing, lab: their notice and its room run on timers and springs) shoots in real
 #    time MS after the state starts;
+#  - #settle=MS (the overlay states, apple, countdown: their springs barely move under virtual time,
+#    so the lens, the button rims and the dock under the blur were caught mid-flight) shoots in real
+#    time once MS have passed and every spring has been at rest for 6 frames; the countdown's clock
+#    is restarted 3 frames before, so its ring is full as in the loader's state;
 #  - the end screens' 0.5 s CSS fade, which virtual time never runs, is already done.
 "$py" -I - "$root/docs/concepts/ios27-boot.html" "$out/concept/.page.html" <<'PY'
 import sys
@@ -58,7 +63,12 @@ def sub(a, b):
 sub("const t=S.freeze!==null?S.freeze:now-S.t0;",
     "const STOP=+(HP.get('stopat')||1e9),t=S.freeze!==null?S.freeze:Math.min(now-S.t0,STOP);"
     "if(t>=STOP&&S.freeze===null){introAt(t);SPR.forEach(s=>s.step(dt));update();render();document.title='M7STOP';return}")
-sub("else if(st){go(st);", "else if(st){go(st);if(HP.has('shotat'))setTimeout(()=>{document.title='M7STOP'},+HP.get('shotat'));")
+sub("else if(st){go(st);", "else if(st){go(st);if(HP.has('shotat'))setTimeout(()=>{document.title='M7STOP'},+HP.get('shotat'));"
+    "if(HP.has('settle')){const T0=performance.now();let calm=0;const chk=()=>{"
+    "const rest=[...SPR].every(q=>q.x===q.t&&q.v===0);"
+    "calm=rest&&performance.now()-T0>+HP.get('settle')?calm+1:0;"
+    "if(calm===3&&S.cd)S.cd.t0=NOW;"
+    "if(calm>=6){document.title='M7STOP';return}requestAnimationFrame(chk)};requestAnimationFrame(chk)}")
 sub('endEl.style.opacity=0;requestAnimationFrame(()=>endEl.style.opacity=1)', 'endEl.style.opacity=1')
 open(sys.argv[2], 'w').write(s)
 PY
@@ -68,7 +78,7 @@ cmds=""
 for s in $states; do
     if [ -n "${CMP_NOCONCEPT:-}" ] && [ -f "$out/concept/$s.png" ]; then
         :
-    elif [ "${s#intro-}" != "$s" ] || [ "$s" = missing ] || [ "$s" = lab ]; then
+    elif [ "${s#intro-}" != "$s" ] || [ "$(hash "$s" | grep -c 'shotat\|settle\|stopat')" != 0 ]; then
         node "$pv/cdp-shot.mjs" "file://$out/concept/.page.html#$(hash "$s")" "$out/concept/$s.png"
     else
         "$chrome" --headless=new --window-size=1000,1500 --virtual-time-budget=6000 --hide-scrollbars \

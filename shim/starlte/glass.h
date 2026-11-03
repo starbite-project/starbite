@@ -215,6 +215,10 @@ void g7_bake(void);
 uint32_t g7_frame(const struct g7_frame *f);
 /* G7_CANVAS to the panel again (after Lab drew on it). */
 void g7_present_all(void);
+/* A function g7_frame and g7_bake call between rows (every few ms of drawing), so input is
+ * sampled while a slow frame draws (menu7: the keys). It must not draw. 0: none. Set at run time
+ * (no static pointer: no absolute relocation). */
+void g7_set_poll(void (*fn)(void));
 
 /* Text measurement, the same arithmetic g7_frame draws with (kerning, letter-spacing after every
  * character as CSS does, so the result matches the concept's tw). */
@@ -232,6 +236,8 @@ struct g7_stats {
     uint32_t last_px;               /* pixels presented by the last frame */
     uint32_t freeze_us;             /* the last freeze (SHARP + SOFT) */
     uint32_t bake_us;               /* g7_bake */
+    uint32_t full_us;               /* a full-panel frame's time, scaled from the last frame that
+                                     * drew at least 1/8 of the panel (0: none yet) */
 };
 void g7_get_stats(struct g7_stats *s);
 

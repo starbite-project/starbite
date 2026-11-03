@@ -372,6 +372,20 @@ static void sb_u(struct sbuf *s, unsigned v)
     s->b[s->n] = 0;
 }
 
+/* "0x9A3F1C07" */
+static void sb_x8(struct sbuf *s, uint32_t v)
+{
+    char d[11];
+    d[0] = '0';
+    d[1] = 'x';
+    for (unsigned i = 0; i < 8; ++i) {
+        unsigned n = (v >> (28 - 4 * i)) & 15U;
+        d[2 + i] = (char)(n < 10 ? '0' + n : 'A' + n - 10);
+    }
+    d[10] = 0;
+    sb_s(s, d);
+}
+
 /* "31.4 MB" */
 static void sb_mb(struct sbuf *s, uint64_t bytes)
 {
@@ -1938,7 +1952,32 @@ static void error_texts(const char *why)
     sb_s(&s, e->category == CAT_LINUX ? "Linux" : e->category == CAT_ANDROID ? "Android" :
              e->category == CAT_MICROSOFT ? "Windows" : name);
     sentence(S.err_why, sizeof(S.err_why), why);
-    scopy(S.err_code, sizeof(S.err_code), why);
+    /* the evidence under the message (the concept's "expected 0x... · read 0x..."), not the pill
+     * again: the CRCs of a CRC failure, else the file the loader was reading and its size */
+    {
+        char fnm[32];
+        uint64_t fsz;
+        uint32_t want, got;
+        int lr = store_last_load(fnm, sizeof(fnm), &fsz, &want, &got);
+        sb_init(&s, S.err_code, sizeof(S.err_code));
+        if (lr == -2) {
+            sb_s(&s, "expected ");
+            sb_x8(&s, want);
+            sb_s(&s, " · read ");
+            sb_x8(&s, got);
+        } else if (lr != 1 && fnm[0]) {
+            sb_s(&s, fnm);
+            sb_s(&s, " · ");
+            sb_mb(&s, fsz);
+            sb_s(&s, lr == -1 ? " · read error" : lr == -3 ? " · too large" : "");
+        } else {
+            sb_s(&s, e->key);
+            if (e->file[0][0]) {
+                sb_s(&s, " · ");
+                sb_s(&s, e->file[0]);
+            }
+        }
+    }
     sb_init(&s, S.err_msg, sizeof(S.err_msg));
     if (has_word(why, "CRC")) {
         const char *kind = has_word(why, "DTB") ? "device tree" : has_word(why, "INITRD") ? "initramfs" :
@@ -2557,7 +2596,18 @@ static void sheet_info(int r)
     char a[64], b[64], loc[64], sz[32];
     uint64_t size = 0;
     loc[0] = 0;
-    sr_add("Version", R[r].det, 0);
+    /* the catalog's version to its second " · " field ("26.04 LTS · Phosh · Linux 7.1" ->
+     * "26.04 LTS · Phosh", the concept's value); the row's subtitle keeps all of it */
+    {
+        char v[64];
+        cat_utf8(v, sizeof(v), e->version);
+        for (unsigned i = 0, f = 0; v[i]; ++i)
+            if (v[i] == ' ' && v[i + 1] == '\xc2' && v[i + 2] == '\xb7' && v[i + 3] == ' ' && ++f == 2) {
+                v[i] = 0;
+                break;
+            }
+        sr_add("Version", v, 0);
+    }
     sr_file(e->file[0], a, sizeof(a), &size, loc, sizeof(loc));
     switch (e->method) {
     case M_XNU: sr_add("Image", a, 0); break;
@@ -2773,6 +2823,18 @@ void m7_step(float dt)
     springs_step(dt);
     ptr_long();
     update();
+}
+
+void m7_advance(float dt)
+{
+    dt = clampf(dt, 0, M7_DT_CATCHUP);
+    for (;;) {
+        float h = minf(dt, M7_DT_MAX);
+        m7_step(h);
+        dt -= h;
+        if (dt <= 0)
+            break;
+    }
 }
 
 /* ================================================================================================
@@ -3355,7 +3417,15 @@ static void build_base(void)
     EC = 0;
     EF = 0;
     t_text(KEY(NS_STATUS, 0, 1), SB7_F_IT600_46, "Galaxy S9", M7_STATUS_X0, M7_STATUS_BASE, -0.01f, C_WHITE, 1, 0, 0);
-    t_img(KEY(NS_STATUS, 0, 2), SB7_I_BAT_84, 1264, 92, 84, 40, C_WHITE, 1);     /* D8: no percentage */
+    /* D8: the battery as the concept's #i-bat without its fill and without the percentage (the
+     * loader has no fuel gauge): the 45 % outline (viewBox 44 x 20 at 84 x 40) and the nub, ending
+     * where the concept's glyph ends (x 1348) */
+    {
+        const float u = 84.f / 44.f;
+        t_rect(KEY(NS_STATUS, 0, 2), 1264 + 0.2f * u, 92 + 0.2f * u, 38.6f * u, 19.6f * u, 6.3f * u, 1.6f * u,
+               C_WHITE, 0.45f, 0);
+        t_rect(KEY(NS_STATUS, 0, 3), 1264 + 40.5f * u, 92 + 7 * u, 2 * u, 6 * u, 1 * u, 0, C_WHITE, 0.45f, 0);
+    }
 
     /* #vp > #content */
     unsigned vp = g7_add_clip(E, 0, M7_VP_Y0, G7_W, M7_VP_Y1, 0);
@@ -3878,9 +3948,10 @@ uint64_t m7_now_us(void)
 
 static struct inp {
     int inited;
+    int render;                     /* g7's poll hook samples the keys (the menu or the intro runs) */
     unsigned stable, raw, ignore;
-    uint64_t raw_t, pdown, bdown, rep_up, rep_dn;
-    int pheld, bheld;
+    uint64_t raw_t, praw_t, braw_t, pdown, bdown, rep_up, rep_dn, vol_t, hook_t;
+    int pheld, bheld, vol;
     struct m7_ev q[16];
     unsigned qh, qn;
 } IN;
@@ -3905,15 +3976,22 @@ static void in_ignore_held(void)
     IN.raw_t = m7_now_us();
 }
 
-static void in_poll(void)
+/* The keys at now: debounce, holds (timed from when the key went down, and only while it is still
+ * down: a release seen late is a press, not a hold), repeat, and both Volume keys held: power off
+ * at once, with no drawing (v5 / v6 K_VOL_HOLD), so the way out never waits for a frame. */
+static void in_keys(uint64_t now)
 {
-    uint64_t now = m7_now_us();
     if (!IN.inited) {
         IN.inited = 1;
         in_ignore_held();
     }
     unsigned k = hw_keys();
     if (k != IN.raw) {
+        unsigned ch = k ^ IN.raw;
+        if (ch & K_POWER)
+            IN.praw_t = now;
+        if (ch & K_BIXBY)
+            IN.braw_t = now;
         IN.raw = k;
         IN.raw_t = now;
     }
@@ -3934,11 +4012,11 @@ static void in_poll(void)
         }
         if (dn & K_POWER) {
             q_push(M7_EV_POWER_DOWN, 0, 0, now);
-            IN.pdown = now;
+            IN.pdown = IN.praw_t;
             IN.pheld = 0;
         }
         if (dn & K_BIXBY) {
-            IN.bdown = now;
+            IN.bdown = IN.braw_t;
             IN.bheld = 0;
         }
         if ((up & K_POWER) && !IN.pheld)
@@ -3947,11 +4025,11 @@ static void in_poll(void)
             q_push(M7_EV_BIXBY, 0, 0, now);
     }
     unsigned live = IN.stable & ~IN.ignore;
-    if ((live & K_POWER) && !IN.pheld && now - IN.pdown >= M7_HOLD_POWER_MS * 1000U) {
+    if ((live & IN.raw & K_POWER) && !IN.pheld && now - IN.pdown >= M7_HOLD_POWER_MS * 1000U) {
         IN.pheld = 1;
         q_push(M7_EV_POWER_HOLD, 0, 0, now);
     }
-    if ((live & K_BIXBY) && !IN.bheld && now - IN.bdown >= M7_HOLD_BIXBY_MS * 1000U) {
+    if ((live & IN.raw & K_BIXBY) && !IN.bheld && now - IN.bdown >= M7_HOLD_BIXBY_MS * 1000U) {
         IN.bheld = 1;
         q_push(M7_EV_BIXBY_HOLD, 0, 0, now);
     }
@@ -3963,6 +4041,38 @@ static void in_poll(void)
         q_push(M7_EV_DOWN, 0, 0, now);
         IN.rep_dn += M7_REPEAT_EVERY_MS * 1000U;
     }
+    if ((live & IN.raw & (K_UP | K_DOWN)) == (K_UP | K_DOWN)) {
+        if (!IN.vol) {
+            IN.vol = 1;
+            IN.vol_t = now;
+        } else if (now - IN.vol_t >= M7_VOL_HOLD_MS * 1000U) {
+            hw_power_off();
+            /* still on: a charger keeps the PMIC up */
+            hw_reboot(INFORM_NORMAL);
+            IN.vol_t = now;
+        }
+    } else {
+        IN.vol = 0;
+    }
+}
+
+/* g7_set_poll: the keys between rows of a frame (rate-limited to every 2 ms); touch stays in the
+ * controller's FIFO until the frame ends */
+static void in_render_poll(void)
+{
+    if (!IN.render)
+        return;
+    uint64_t now = m7_now_us();
+    if (now - IN.hook_t < 2000)
+        return;
+    IN.hook_t = now;
+    in_keys(now);
+}
+
+static void in_poll(void)
+{
+    uint64_t now = m7_now_us();
+    in_keys(now);
     int st, x, y;
     while (IN.qn < 16 && hw_tp_event(&st, &x, &y))
         q_push(st == 1 ? M7_EV_TOUCH_DOWN : st == 2 ? M7_EV_TOUCH_MOVE : M7_EV_TOUCH_UP, x, y, now);
@@ -4059,6 +4169,29 @@ static int timers_pending(void)
     return 0;
 }
 
+/* frame-budget mode: a full-panel frame takes longer than M7_SLOW_MS (the intro's first frame
+ * already says) */
+static int m7_slow(void)
+{
+    struct g7_stats g;
+    g7_get_stats(&g);
+    return g.full_us > M7_SLOW_MS * 1000U;
+}
+
+/* the launch card where its springs are going (frame-budget mode: no growing over many frames) */
+static void launch_snap(void)
+{
+    m7_spring_snap(&SP.lx, SP.lx.t);
+    m7_spring_snap(&SP.ly, SP.ly.t);
+    m7_spring_snap(&SP.lw, SP.lw.t);
+    m7_spring_snap(&SP.lh, SP.lh.t);
+    m7_spring_snap(&SP.lr, SP.lr.t);
+    m7_spring_snap(&SP.la, SP.la.t);
+    m7_spring_snap(&SP.back, SP.back.t);
+    m7_spring_snap(&SP.run_a, 1);
+    ST.flags |= 32;
+}
+
 static int launch_settled(void)
 {
     return !sp_moving(&SP.lx) && !sp_moving(&SP.ly) && !sp_moving(&SP.lw) && !sp_moving(&SP.lh) &&
@@ -4127,6 +4260,7 @@ static int run_loop(void)
 {
     double last = now_ms();
     int first = 1;
+    IN.render = 1;
     for (;;) {
         double t0 = now_ms();
         struct m7_ev ev;
@@ -4138,7 +4272,7 @@ static int run_loop(void)
         }
         float dt = (float)((t0 - last) / 1000.0);
         last = t0;
-        m7_step(clampf(dt, 0, M7_DT_MAX));
+        m7_advance(dt);
         if (S.result == RES_LAB) {
             S.result = RES_NONE;
             run_lab();
@@ -4146,15 +4280,20 @@ static int run_loop(void)
             continue;
         }
         if (S.result == RES_DOWNLOAD) {
+            IN.render = 0;
             star_fb_mute(1);
             return 0;
         }
+        if (S.mode == MD_LAUNCH && S.run_on && !S.run_err && !S.returned && !launch_settled() && m7_slow())
+            launch_snap();
         if (S.mode == MD_LAUNCH && S.run_on && !S.run_err && !S.returned && launch_settled()) {
             S.returned = 1;
             SP.hint.t = 0;          /* "Bixby to cancel" no longer applies */
             star_menu_remember(S.run_cat);
             star_fb_mute(1);
             hw_tp_clear();
+            store_last_clear();     /* the error card's evidence is this start's */
+            IN.render = 0;
             return S.run_cat + 1;
         }
         if (S.end_t > anim_until - 600)
@@ -4249,19 +4388,57 @@ int menu7_ready(void)
     return ready_state;
 }
 
+/* boot-args key=N (the first digit run), or dflt */
+static int cmd_num(const char *c, const char *key, int dflt)
+{
+    unsigned n = slen(key);
+    for (unsigned i = 0; c && c[i]; ++i) {
+        if (i && c[i - 1] != ' ')
+            continue;
+        unsigned k = 0;
+        while (k < n && c[i + k] == key[k])
+            ++k;
+        if (k < n || c[i + n] != '=' || c[i + n + 1] < '0' || c[i + n + 1] > '9')
+            continue;
+        int v = 0;
+        for (unsigned j = i + n + 1; c[j] >= '0' && c[j] <= '9' && v < 1000; ++j)
+            v = v * 10 + (c[j] - '0');
+        return v;
+    }
+    return dflt;
+}
+
+static int M_off;                   /* v7 declined to run (speed check, starmenu7=0): v6 runs */
+
 int menu7_main(const struct star_info *in, char *cmdline, unsigned len)
 {
     const char *fname, *fwhy;
     M_in = in;
     M_cmd = cmdline;
     M_len = len;
+    if (M_off)
+        return -1;
     if (!M_inited) {
-        if (!menu7_ready() || !g7_init())
+        int mode = cmd_num(cmdline, "starmenu7", 1);
+        if (!mode || !menu7_ready() || !g7_init()) {
+            M_off = 1;
             return -1;              /* nothing drawn: menu v6 runs */
+        }
+        g7_bake();
+        /* Speed check (nothing drawn yet: S-Boot's splash is still on the panel, so v6 can take
+         * over with its own intro). The bake is per-pixel float work like a frame's glass. */
+        struct g7_stats gb;
+        g7_get_stats(&gb);
+        if (mode < 2 && gb.bake_us > M7_BAKE_MAX_MS * 1000U) {
+            ST.flags |= 16;
+            stats_log();
+            M_off = 1;
+            return -1;
+        }
         core_init();
         M_inited = 1;
         ST.flags |= 1;
-        g7_bake();
+        g7_set_poll(in_render_poll);
         hw_tp_start();
         in_ignore_held();
         int next = star_menu_next();
@@ -4287,6 +4464,7 @@ int menu7_main(const struct star_info *in, char *cmdline, unsigned len)
         }
         struct g7_stats g0, g1;
         g7_get_stats(&g0);
+        IN.render = 1;
         int r = intro7_run();
         g7_get_stats(&g1);
         ST.intro_frames = g1.frames - g0.frames;
@@ -4326,11 +4504,18 @@ int menu7_main(const struct star_info *in, char *cmdline, unsigned len)
 static void sync_frames(double until)
 {
     double last = now_ms();
+    if (m7_slow()) {
+        /* frame-budget mode: one frame, the bar at its target (only the bar and texts change) */
+        m7_advance(0);
+        S.bar = S.bar_to;
+        frame_out();
+        return;
+    }
     for (;;) {
         double t0 = now_ms();
         float dt = (float)((t0 - last) / 1000.0);
         last = t0;
-        m7_step(clampf(dt, 0, M7_DT_MAX));
+        m7_advance(dt);
         if (S.bar_t + 120 > S.now) {
             float p = c01((float)((S.now - S.bar_t) / 120));
             S.bar = lerpf(S.bar_from, S.bar_to, m7_ease(p));
@@ -4362,6 +4547,8 @@ void menu7_handoff(const char *detail)
 {
     if (!M_inited || !S.run_on)
         return;
+    if (m7_slow())
+        return;                     /* frame-budget mode: the card at 100 % is the last frame */
     S.now = now_ms();
     S.bar = S.bar_to = 1;
     scopy(S.end_det, sizeof(S.end_det), detail);

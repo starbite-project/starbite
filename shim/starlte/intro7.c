@@ -295,10 +295,9 @@ int intro7_run(void)
             break;
         float dt = (float)(now - last) * 1e-6f;
         last = now;
-        if (dt > M7_DT_MAX)
-            dt = M7_DT_MAX;
-        /* frame(): introAt(t), every spring steps, update + render */
-        m7_step(dt);
+        /* frame(): introAt(t), every spring steps (by the real dt: a slow frame does not slow the
+         * island or the list down), update + render */
+        m7_advance(dt);
         intro7_frame(&frame, t);
         frame.flags = first ? G7_F_FULL : 0;        /* the first frame replaces S-Boot's splash */
         first = 0;
@@ -332,10 +331,7 @@ finish:
     m7_finish_intro(res != I7_DONE);
     {
         uint64_t now = m7_now_us();
-        float dt = (float)(now - last) * 1e-6f;
-        if (dt > M7_DT_MAX)
-            dt = M7_DT_MAX;
-        m7_step(dt);
+        m7_advance((float)(now - last) * 1e-6f);
     }
     m7_build(&frame, 0);
     frame.flags = first ? G7_F_FULL : 0;

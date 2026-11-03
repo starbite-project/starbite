@@ -331,8 +331,22 @@ int main(int argc, char **argv)
 #ifdef H7_TIME
     if (run_mode) {
         static char cmd[1024];
+        for (int i = 1; argv[i] && argv[i + 1]; ++i)
+            if (!strcmp(argv[i], "--cmd"))
+                snprintf(cmd, sizeof cmd, "%s", argv[i + 1]);
         int r = menu7_main(0, cmd, sizeof cmd);
-        printf("menu7_main -> %d\n", r);
+        printf("menu7_main -> %d at %.0f ms\n", r, stub_now_us() / 1e3);
+        if (r > 0) {
+            /* the loader's stages after the pick (xnu_boot.c's star_menu_progress / handoff) */
+            static const char *const st[5] = { "Reading boot image", "Verifying kernel CRC32", "Loading device tree",
+                                               "Loading initramfs", "Handing off to kernel" };
+            for (unsigned i = 0; i < 5; ++i) {
+                menu7_progress(i, 5, st[i], "detail");
+                printf("progress %u done at %.0f ms\n", i, stub_now_us() / 1e3);
+            }
+            menu7_handoff("EL1 · 0x80080000");
+            printf("handoff done at %.0f ms\n", stub_now_us() / 1e3);
+        }
         write_ppm(out, FB);
         return 0;
     }

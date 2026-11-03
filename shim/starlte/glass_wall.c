@@ -62,6 +62,7 @@ void gw_field(void)
     }
     for (int j = 0; j < WH; j++) {
         float uy = (j + .5f) * 2.f / 1440.f;
+        g7_poll();
         float t = g_smooth(0.f, ar * .95f, uy);
         float br = g_mix(.011f, .002f, t), bg = g_mix(.024f, .005f, t), bb = g_mix(.066f, .017f, t);
         float gy1 = (uy - 1.55f) * (uy - 1.55f), gy2 = (uy - 1.95f) * (uy - 1.95f);
@@ -154,6 +155,7 @@ void gw_wall(const struct g7_wall *w)
     const uint32_t *F = TEX(P_FIELD);
     for (int j = 0; j < WH; j++) {
         float py = (j + .5f) * 2.f, dy = py - w->sy, ady = g_abs(dy);
+        g7_poll();
         float ry1 = g_exp(-ady / (R * 1.25f)), ry2 = g_exp(-ady / (R * .035f));
         float rp = ady / R < 1.2f ? g_pow(ady / R + 1e-4f, .62f) : 9.f;
         const uint32_t *fr = F + (unsigned)j * WW;
@@ -250,6 +252,8 @@ static void blur_pass(const uint32_t *src, int sw, int sh, uint32_t *dst, int dw
     /* centre along the axis for dst index 0: (0 + .5) * ratio - .5 */
     mk_kern(&k, .5f * (float)ratio - .5f, d);
     for (int j = 0; j < dh; j++) {
+        if (!(j & 7))
+            g7_poll();
         for (int i = 0; i < dw; i++) {
             float r = 0.f, g = 0.f, b = 0.f;
             for (int t = 0; t < k.n; t++) {
@@ -344,6 +348,8 @@ void gw_base(void)
     const uint32_t *T = TEX(P_TMP);
     float *row = g_row_tmp;
     for (int y = 0; y < GH; y++) {
+        if (!(y & 3))
+            g7_poll();
         wall_row_panel(T, y, 0, GW, row);
         uint32_t *o = base + (unsigned)y * GW;
         for (int x = 0; x < GW; x++)

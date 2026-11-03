@@ -41,6 +41,8 @@ static const char *o_ramdisk = "build/brand/menu-v7.sbm";
 static char o_next[24];
 static const char *o_fail;
 static int o_lab_pick;
+static uint64_t o_tick_us;          /* --tick-us N: every hw_ticks read costs N us (a slow phone: the
+                                     * renderer reads the clock between rows, so frames cost ~ rows x N) */
 static uint64_t o_tmax;             /* --tmax MS: exit when the fake clock passes it (an idle menu) */
 static struct star_settings o_set;
 static int o_set_valid = 1;
@@ -71,6 +73,7 @@ static uint64_t parse_steps(const char *s, struct step *a, unsigned *n, int touc
             else if (!strcmp(tok, "bixby")) p->keys = K_BIXBY;
             else if (!strcmp(tok, "hold-power")) { p->keys = K_POWER; d = 600000; }
             else if (!strcmp(tok, "hold-bixby")) { p->keys = K_BIXBY; d = 800000; }
+            else if (!strcmp(tok, "hold-vol")) { p->keys = K_UP | K_DOWN; d = 900000; }
             else { fprintf(stderr, "loader_stubs: key %s?\n", tok); continue; }
             p->t1 = t + d;
             t += d + 120000;
@@ -140,6 +143,7 @@ int h7_stubs_args(int argc, char **argv)
         else if (!strcmp(a, "--fail") && v) { o_fail = v; ++i; }
         else if (!strcmp(a, "--lab-pick") && v) { o_lab_pick = atoi(v); ++i; }
         else if (!strcmp(a, "--tmax") && v) { o_tmax = (uint64_t)atoi(v) * 1000; ++i; }
+        else if (!strcmp(a, "--tick-us") && v) { o_tick_us = (uint64_t)atoi(v); ++i; }
         else argv[o++] = argv[i];
     }
     argv[o] = 0;
@@ -158,7 +162,7 @@ int h7_stubs_args(int argc, char **argv)
 static uint64_t clk;
 
 uint64_t stub_now_us(void) { return clk; }
-uint64_t hw_ticks(void) { return ++clk; }
+uint64_t hw_ticks(void) { return clk += 1 + o_tick_us; }
 uint64_t hw_freq(void) { return 1000000; }
 void hw_wait_us(uint64_t us)
 {
@@ -354,6 +358,17 @@ int store_find(const char *name, struct store_ent *e)
 }
 
 int store_load(const struct store_ent *e, uintptr_t dst, uint64_t cap) { (void)e; (void)dst; (void)cap; return 0; }
+
+/* the error state's evidence: the concept's CRCs (state=error, "expected ... · read ...") */
+int store_last_load(char *name, unsigned cap, uint64_t *size, uint32_t *want, uint32_t *got)
+{
+    snprintf(name, cap, "linux.image");
+    *size = 31400000;
+    *want = 0x9A3F1C07U;
+    *got = 0x9A3F0E11U;
+    return -2;
+}
+void store_last_clear(void) {}
 
 /* ---- menu.c's API ---- */
 

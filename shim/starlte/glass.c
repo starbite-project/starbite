@@ -31,6 +31,14 @@ static struct g7_word cur_word;
 static struct gs_ctx CBASE, COVER;
 static const struct g7_layer *LB, *LO;
 static float back_now;
+static void (*poll_fn)(void);
+
+void g7_set_poll(void (*fn)(void)) { poll_fn = fn; }
+void g7_poll(void)
+{
+    if (poll_fn)
+        poll_fn();
+}
 
 static inline uint64_t us_since(uint64_t t0)
 {
@@ -349,6 +357,7 @@ static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1)
     int word = gs_word_rows(&wy0, &wy1, &wx0, &wx1);
     for (int y = y0; y < y1; y++) {
         float py = y + .5f;
+        g7_poll();
         base_acc_row(y, x0, n);
         if (shapes_touch_row(LB, py)) {
             gw_row_a5(y, x0, x1, RA5);
@@ -374,6 +383,8 @@ static void compose_frozen(uint32_t *dst, int x0, int y0, int x1, int y1)
     float k = g_sat(back_now), ik = 1.f - k;
     for (int y = y0; y < y1; y++) {
         float cy = (y + .5f) * .5f - .5f;
+        if (!(y & 7))
+            g7_poll();
         int r0 = g_ifloor(cy);
         float fy = cy - (float)r0;
         int ra = r0 < 0 ? 0 : r0, rb = r0 + 1 >= WH ? WH - 1 : r0 + 1;
@@ -401,6 +412,7 @@ static void compose_over(uint32_t *dst, int x0, int y0, int x1, int y1)
     if (LO && (LO->nshape || al0 > 0.f))
         for (int y = y0; y < y1; y++) {
             float py = y + .5f;
+            g7_poll();
             int touch = shapes_touch_row(LO, py);
             if (!touch && al0 <= 0.f)
                 continue;
@@ -488,6 +500,8 @@ static void box_h(const uint32_t *src, uint32_t *dst, int r)
     int w = 2 * r + 1;
     for (int y = 0; y < WH; y++) {
         const uint32_t *s = src + (unsigned)y * WW;
+        if (!(y & 15))
+            g7_poll();
         uint32_t *d = dst + (unsigned)y * WW;
         uint32_t sa = 0, sr = 0, sg = 0, sb = 0;
         for (int x = 0; x < r && x < WW; x++) {
@@ -524,6 +538,8 @@ static void box_v(const uint32_t *src, uint32_t *dst, int r)
                 sum[4 * x] += CA(v); sum[4 * x + 1] += CR(v); sum[4 * x + 2] += CG(v); sum[4 * x + 3] += CB(v);
             }
         uint32_t *d = dst + (unsigned)y * WW;
+        if (!(y & 15))
+            g7_poll();
         for (int x = 0; x < WW; x++)
             d[x] = (sum[4 * x] + w / 2) / w << 24 | (sum[4 * x + 1] + w / 2) / w << 16 | (sum[4 * x + 2] + w / 2) / w << 8 |
                    (sum[4 * x + 3] + w / 2) / w;
@@ -549,6 +565,7 @@ static void freeze(void)
     uint32_t *soft = (uint32_t *)P_SOFT;
     for (int j = 0; j < WH; j++) {
         float py = 2.f * j + 1.f;
+        g7_poll();
         gw_row_b_at(py, WW, 1.f, 2.f, RB);
         for (int i = 0; i < WW; i++) {
             ACC[3 * i] = RB[3 * i] * cs.dim;
@@ -740,6 +757,8 @@ uint32_t g7_frame(const struct g7_frame *f)
         ST.last_us = (uint32_t)us_since(t0);
         if (ST.last_us > ST.worst_us)
             ST.worst_us = ST.last_us;
+        if (px >= (uint32_t)GW * GH / 8U)
+            ST.full_us = (uint32_t)((uint64_t)ST.last_us * GW * GH / px);
     }
     ST.last_px = px;
     return px;

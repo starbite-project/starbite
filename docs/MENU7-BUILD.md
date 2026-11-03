@@ -63,3 +63,11 @@ T7 <fake ms> <host ms> <pixels> [full]
 ```
 
 For example, `--keys 'wait:3000,down,wait:600,power,wait:3000' --tmax 12000`.
+
+## 5. Running on a slow phone (review fixes)
+
+- **Real-time springs.** Every loop (menu, intro, progress) advances the springs by the frame's real dt (`m7_advance`: capped at 0.5 s, in 50 ms steps), so animations end on time however few frames are drawn.
+- **Frame-budget mode.** When a full-panel frame takes over `M7_SLOW_MS` (300 ms; `g7_stats.full_us`, scaled from the last frame that drew at least 1/8 of the panel), the launch card's springs snap and the pick is returned at once, each progress stage draws one frame with the bar at its target, and the handoff end screen is skipped. Log slot 127 bit 32 records it.
+- **Speed check.** Before anything is drawn, `menu7_main` reads `g7_bake`'s time. Above `M7_BAKE_MAX_MS` (400 ms; VM 60–75 ms) v7 does not run and v6 does (slot 127 bit 16, slot 125 the bake in ms). Boot-args `starmenu7=0` turns v7 off and `starmenu7=2` skips the check.
+- **Input during long frames.** `g7_set_poll` makes the renderer sample the keys every 2 ms between rows. Holds are timed from the moment the key went down, and fire only while it is still down. Both Volume keys held 700 ms power off at once (then reboot if a charger keeps the PMIC up), with no drawing.
+- **Testing it on the host.** `h7 --run --tick-us N` makes every clock read cost N µs. Since the renderer reads the clock between rows, a full frame then costs about rows × N. `--cmd 'starmenu7=0'` passes boot-args, `hold-vol` holds both Volume keys, and after a pick `--run` plays five progress stages and the handoff, printing their times.

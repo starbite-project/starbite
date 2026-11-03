@@ -225,13 +225,53 @@ int store_find(const char *name, struct store_ent *e)
     return 0;
 }
 
+static struct {
+    int res;
+    uint32_t want, got;
+    uint64_t size;
+    char name[32];
+} last_ld = { 1, 0, 0, 0, { 0 } };
+
+void store_last_clear(void)
+{
+    last_ld.res = 1;
+    last_ld.name[0] = 0;
+}
+
+int store_last_load(char *name, unsigned cap, uint64_t *size, uint32_t *want, uint32_t *got)
+{
+    unsigned i = 0;
+    for (; cap && i + 1 < cap && i < sizeof(last_ld.name) && last_ld.name[i]; ++i)
+        name[i] = last_ld.name[i];
+    if (cap)
+        name[i] = 0;
+    *size = last_ld.size;
+    *want = last_ld.want;
+    *got = last_ld.got;
+    return last_ld.res;
+}
+
 int store_load(const struct store_ent *e, uintptr_t dst, uint64_t cap)
 {
-    if (e->size > cap)
-        return -3;
-    if (med_read(e->medium, e->lba, (e->size + 4095U) / 4096U, dst))
-        return -1;
-    return star_crc32(dst, e->size) == e->crc ? 0 : -2;
+    int r;
+    uint32_t got = 0;
+    if (e->size > cap) {
+        r = -3;
+    } else if (med_read(e->medium, e->lba, (e->size + 4095U) / 4096U, dst)) {
+        r = -1;
+    } else {
+        got = star_crc32(dst, e->size);
+        r = got == e->crc ? 0 : -2;
+    }
+    unsigned i = 0;
+    for (; i + 1 < sizeof(last_ld.name) && i < sizeof(e->name) && e->name[i]; ++i)
+        last_ld.name[i] = e->name[i];
+    last_ld.name[i] = 0;
+    last_ld.res = r;
+    last_ld.size = e->size;
+    last_ld.want = e->crc;
+    last_ld.got = got;
+    return r;
 }
 
 int store_head(const struct store_ent *e, uintptr_t dst)

@@ -232,4 +232,5 @@ int gd_init(void);
 const struct sb7_font *gd_font(unsigned id);
 
 /* ---- glass.c ---- */
+void g7_poll(void);                             /* the g7_set_poll hook, between rows (glass.c) */
 extern float g_row_tmp[];                       /* shared row scratch (see glass.c) */

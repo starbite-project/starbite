@@ -50,6 +50,11 @@ int store_get(unsigned medium, unsigned i, struct store_ent *e);
 int store_find(const char *name, struct store_ent *e);
 /* Whole entry to dst (at most cap bytes), CRC checked: 0, -1 read error, -2 CRC, -3 too large. */
 int store_load(const struct store_ent *e, uintptr_t dst, uint64_t cap);
+/* The last store_load since store_last_clear: its result (0, -1, -2, -3; 1 = none since the clear),
+ * the entry's name (cut to cap), size, the directory's CRC32 and the one computed (0 unless read).
+ * For the menu's error card ("expected 0x... · read 0x..."). */
+int store_last_load(char *name, unsigned cap, uint64_t *size, uint32_t *want, uint32_t *got);
+void store_last_clear(void);
 /* The entry's first 4 KiB block to dst (no CRC): 0 or -1. */
 int store_head(const struct store_ent *e, uintptr_t dst);
 /* First block, capacity and blocks in use (header + data). */
