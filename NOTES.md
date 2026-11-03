@@ -2026,3 +2026,17 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   and the "user user" sed skips any line with a PIN on it. That sed is how the old milestone-3 pmOS root lost its
   PIN: its PIN is unknown and pmos-root.sh cannot log into it (SSH key only). The new pmos.img is fine: its PIN is in
   build/linux/pmos-login.txt, pmos-root.sh greps any 6-digit number, and the SSH key is installed.
+- 2026-11-03: **Darwin console (Lab), built, not booted.** tools/darwin/: `dsh` (dsh.c + start.s) is one static
+  arm64 Mach-O, no dyld/libSystem, raw XNU syscalls, ad-hoc signed (LC_BUILD_VERSION iOS 14 added after `ld -static`
+  so codesign writes CD v0x20400). As PID 1 it opens /dev/console, prints a banner + sysinfo, autoruns
+  `sysinfo;mount;ls -l /dev;ps;bench` (boot-args dshauto=0, dshrun=a,b+c, dshtick=N status line period), then a
+  `darwin#` prompt; every command runs in a forked child; `sh` execve()s /sbin/launchd again. Commands: sysinfo uname
+  sysctl (-a, name=value) ps dmesg ls cat xxd mount cpus mem uptime date bench kill reboot halt ... Boot path = the
+  herolte-proven one: mkpayload.py --ramdisk (RAM disk after the kernel, ADT /chosen/memory-map RAMDisk), rd=md0,
+  mockfs serves the device as /sbin/launchd (series-12377 0021/0024, Mach-O check), DEVELOPMENT kernel allows static
+  executables. `tools/darwin/build-darwin.sh` -> out/darwin.xnu (12377 kernel strip -x + out/starlte-iphone11.adt +
+  dsh + tools/darwin/darwin-cmdline.txt, 17.25 MB < the loader's 80 MiB STAGE); `--host` builds the same shell for
+  the Mac (`dsh-host --as-init "BOOTARGS"` runs the PID 1 path on stdio): all commands checked there. No UFS, nothing
+  written. Input only from a serial console: the S9 keys/touch are IOHID services, not a tty (next: a kernel patch
+  feeding sweet_hid_key into the console tty). Catalog entry proposed, not added (key darwin, method xnu,
+  files ["darwin.xnu"], tag lab).
