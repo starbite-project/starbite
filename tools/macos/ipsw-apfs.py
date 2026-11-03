@@ -121,6 +121,7 @@ LZFSE, LZBITMAP, LZVN = 0x801, 0x702, 0x900   # 0x900: libcompression's raw LZVN
 
 
 def lc_decode(src, size, algo=LZFSE):
+    src = bytes(src)
     dst = ctypes.create_string_buffer(size + 64)
     n = _lc.compression_decode_buffer(dst, size + 64, src, len(src), None, algo)
     if n != size:
@@ -539,8 +540,9 @@ def decode_rsrc(kind, rs, usize, path):
     return bytes(out)
 
 
-def write_items(plan, outdir, streams):
-    """streams[i]: the raw bytes of item i's data stream (plain file or resource fork)."""
+def write_items(plan, outdir, streams, direct=()):
+    """streams[i]: the raw bytes of item i's data stream (plain file or resource fork);
+    items in `direct` were already written to disk by pass 2 (only metadata is set here)."""
     root = os.geteuid() == 0
     dirs = []
     for i, (path, ino, src) in enumerate(plan.items):
@@ -551,14 +553,17 @@ def write_items(plan, outdir, streams):
             dirs.append((dst, ino))
             continue
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        if os.path.lexists(dst):
+        data = None
+        if i not in direct and os.path.lexists(dst):
             os.unlink(dst)
-        if src[0] == 'link':
+        if i in direct:
+            pass
+        elif src[0] == 'link':
             os.symlink(src[1], dst)
             if root:
                 os.lchown(dst, ino['uid'], ino['gid'])
             continue
-        if src[0] == 'plain':
+        elif src[0] == 'plain':
             data = streams.get(i, b'')[:ino['size']]
             data += bytes(ino['size'] - len(data))
         elif src[0] == 'inline':
@@ -568,8 +573,9 @@ def write_items(plan, outdir, streams):
             data = decode_rsrc(src[1], src[2], src[3], path)
         else:
             data = decode_rsrc(src[1], streams[i][:src[3]], src[4], path)
-        with open(dst, 'wb') as f:
-            f.write(data)
+        if data is not None:
+            with open(dst, 'wb') as f:
+                f.write(thin(data) if THIN else data)
         if root:
             os.chown(dst, ino['uid'], ino['gid'])
         os.chmod(dst, ino['mode'] & 0o7777)
@@ -581,6 +587,26 @@ def write_items(plan, outdir, streams):
         os.chmod(dst, ino['mode'] & 0o7777)
         t = ino['mtime'] / 1e9
         os.utime(dst, (t, t))
+
+
+THIN = False
+
+
+def thin(data):
+    """A universal Mach-O -> its arm64e slice (as lipo -thin arm64e); anything else as is."""
+    if len(data) < 64 or data[:4] not in (b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf'):
+        return data
+    n, = struct.unpack_from('>I', data, 4)
+    if not 0 < n < 16:
+        return data     # a Java class file has the same magic
+    for i in range(n):
+        if data[:4] == b'\xca\xfe\xba\xbe':
+            ct, cs, off, size, _ = struct.unpack_from('>iiIII', data, 8 + 20 * i)
+        else:
+            ct, cs, off, size, _, _ = struct.unpack_from('>iiQQII', data, 8 + 32 * i)
+        if ct == 0x0100000c and (cs & 0xff) == 2 and data[off:off + 4] == b'\xcf\xfa\xed\xfe':
+            return data[off:off + size]
+    return data
 
 
 # ---------------------------------------------------------------- members
@@ -666,41 +692,149 @@ def open_member(rem, name, index=None):
     return Apfs(blocks), m, None
 
 
-def fetch_stored(u, fs, plan):
+def fetch_stored(u, fs, plan, run_max=32 << 20):
+    """All wanted data of a stored UDIF member, each compressed chunk fetched once:
+    the extents are cut at chunk boundaries, sorted, and runs of chunks that are
+    adjacent in the file go out as one ranged GET (at most run_max bytes)."""
+    pieces = []           # (chunk, offset in chunk, length, item, offset in the item's stream)
     streams = {}
     for i, (path, ino, src) in enumerate(plan.items):
         if not src or src[0] not in ('plain', 'rsrc'):
             continue
         exts = src[1] if src[0] == 'plain' else src[2]
         size = src[2] if src[0] == 'plain' else src[3]
-        data = bytearray(size)
+        streams[i] = bytearray(size)
         for la, ln, pb in exts:
-            if pb and la < size:
-                n = min(ln, size - la)
-                data[la:la + n] = u.read(pb * fs.bs, n)
-        streams[i] = bytes(data)
-    return streams
+            if not pb or la >= size:
+                continue
+            off, left, dst = pb * fs.bs, min(ln, size - la), la
+            while left:
+                c = bisect.bisect_right(u.offs, off) - 1
+                co, cl = u.chunks[c][0], u.chunks[c][1]
+                n = min(left, co + cl - off)
+                pieces.append((c, off - co, n, i, dst))
+                off += n; dst += n; left -= n
+    pieces.sort()
+    need = sorted({p[0] for p in pieces})
+    runs, cur = [], []
+    for c in need:
+        t, fo, cl = u.chunks[c][2], u.chunks[c][3], u.chunks[c][4]
+        if cur and (t in (0, 2) or u.chunks[cur[-1]][2] in (0, 2) or
+                    not 0 <= fo - (u.chunks[cur[-1]][3] + u.chunks[cur[-1]][4]) <= 4 << 20 or
+                    fo + cl - u.chunks[cur[0]][3] > run_max):
+            runs.append(cur); cur = []
+        cur.append(c)
+    if cur:
+        runs.append(cur)
+    print(f'{len(pieces)} pieces in {len(need)} chunks, {len(runs)} requests', file=sys.stderr)
+    k = 0
+    for n, run in enumerate(runs):
+        first = u.chunks[run[0]]
+        if first[2] in (0, 2):
+            raw = None
+        else:
+            last = u.chunks[run[-1]]
+            raw = u.rem.get(first[3], last[3] + last[4] - first[3])
+        for c in run:
+            off, ln, t, fo, cl = u.chunks[c]
+            if t in (0, 2):
+                data = bytes(ln)
+            else:
+                b = raw[fo - first[3]:fo - first[3] + cl]
+                data = b if t == 1 else lc_decode(b, ln) if t == 0x80000007 else zlib.decompress(b)
+            while k < len(pieces) and pieces[k][0] == c:
+                _, o, ln2, i, dst = pieces[k]
+                streams[i][dst:dst + ln2] = data[o:o + ln2]
+                k += 1
+        if n % 20 == 0:
+            print(f'\r  request {n + 1}/{len(runs)}, {u.rem.fetched >> 20} MiB', end='', file=sys.stderr, flush=True)
+    print(file=sys.stderr)
+    return {i: bytes(v) for i, v in streams.items()}
 
 
-def fetch_deflated(rem, m, fs, plan):
+class RsrcSink:
+    """Decodes one decmpfs resource fork (offset-table formats: LZVN, LZFSE, LZBITMAP, raw)
+    while its blocks stream by, writing 64 KiB chunks straight to the destination file, so
+    a multi-GB compressed file never sits in memory or on disk twice."""
+    def __init__(self, f, kind, rsize, usize):
+        self.f, self.kind, self.rsize, self.usize = f, kind, rsize, usize
+        self.n = (usize + 65535) // 65536
+        self.buf, self.base, self.pending, self.k, self.offs = bytearray(), 0, {}, 0, None
+
+    def put(self, lo, data):
+        self.pending[lo] = data
+        while self.base + len(self.buf) in self.pending:
+            self.buf += self.pending.pop(self.base + len(self.buf))
+        end = self.base + len(self.buf)
+        if self.offs is None:
+            if end < 4 * (self.n + 1):
+                return
+            self.offs = struct.unpack_from('<%dI' % (self.n + 1), self.buf, 0)
+        while self.k < self.n and self.offs[self.k + 1] <= end:
+            a, b = self.offs[self.k] - self.base, self.offs[self.k + 1] - self.base
+            want = min(65536, self.usize - self.k * 65536)
+            self.f.seek(self.k * 65536)
+            self.f.write(decmpfs_chunk(self.kind, bytes(self.buf[a:b]), want))
+            self.k += 1
+        if self.k < self.n:
+            cut = self.offs[self.k] - self.base
+            del self.buf[:cut]
+            self.base += cut
+
+    def done(self):
+        return self.k == self.n
+
+
+DIRECT = 8 << 20   # files above this go straight to disk during pass 2
+
+
+def fetch_deflated(rem, m, fs, plan, outdir):
+    """Pass 2. Returns (streams for small items, {item: written-to-disk} for big ones)."""
     need = plan.blocks()
-    streams = {}
+    streams, direct = {}, {}
     for i, (path, ino, src) in enumerate(plan.items):
-        if src and src[0] in ('plain', 'rsrc'):
+        if not src or src[0] not in ('plain', 'rsrc'):
+            continue
+        size = src[2] if src[0] == 'plain' else src[4]
+        if size > DIRECT and (src[0] == 'plain' or src[1] in ('lzvn', 'lzfse', 'lzbitmap', 'raw')):
+            dst = os.path.join(outdir, path.lstrip('/'))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if os.path.lexists(dst):
+                os.unlink(dst)
+            f = open(dst, 'w+b')
+            f.truncate(size)
+            direct[i] = f if src[0] == 'plain' else RsrcSink(f, src[1], src[3], src[4])
+        else:
             streams[i] = bytearray(src[2] if src[0] == 'plain' else src[3])
     if not need:
-        return streams
+        return streams, direct
     last = max(need)
     print(f'pass 2 (data): {len(need)} blocks up to block {last}', file=sys.stderr)
     for pb, b in stream_blocks(rem, m, fs.bs):
         for i, off in need.get(pb, ()):
+            if i in direct:
+                d = direct[i]
+                if isinstance(d, RsrcSink):
+                    d.put(off, b)
+                else:
+                    n = min(fs.bs, plan.items[i][2][2] - off)
+                    if n > 0:
+                        d.seek(off); d.write(b[:n])
+                continue
             s = streams[i]
             n = min(fs.bs, len(s) - off)
             if n > 0:
                 s[off:off + n] = b[:n]
         if pb >= last:
             break
-    return streams
+    for i, d in direct.items():
+        if isinstance(d, RsrcSink):
+            if not d.done():
+                raise IOError(f'{plan.items[i][0]}: decoded {d.k} of {d.n} chunks')
+            d.f.close()
+        else:
+            d.close()
+    return streams, direct
 
 
 # ---------------------------------------------------------------- CLI
@@ -713,9 +847,11 @@ def main():
     ap.add_argument('--index', help='pass-1 metadata index for a deflated member (cached)')
     ap.add_argument('--owners', help='get: also write a JSON {path: [uid, gid, mode]} of what was '
                     'extracted (a non-root run cannot chown; tools/macos/hfs-owners.py applies it)')
+    ap.add_argument('--thin', action='store_true', help='get: keep only the arm64e slice of '
+                    'universal Mach-O files (each slice carries its own code signature)')
     ap.add_argument('--prefix', default='', help='get: path prefix for --owners keys (e.g. the '
                     'cryptex mount point /System/Volumes/Preboot/Cryptexes/OS)')
-    a = ap.parse_args()
+    a = ap.parse_intermixed_args()   # paths may follow the options (build-macos-root.sh)
     rem = Remote(a.url)
     if a.cmd == 'members':
         for n, m in sorted(rem.members().items(), key=lambda x: -x[1]['usize']):
@@ -739,11 +875,14 @@ def main():
     print(f'{len(plan.items)} items, {plan.logical() / 2**20:.1f} MiB of file data', file=sys.stderr)
     if a.cmd == 'du':
         return
+    global THIN
+    THIN = a.thin
+    direct = {}
     if u:
         streams = fetch_stored(u, fs, plan)
     else:
-        streams = fetch_deflated(rem, m, fs, plan)
-    write_items(plan, a.args[1], streams)
+        streams, direct = fetch_deflated(rem, m, fs, plan, a.args[1])
+    write_items(plan, a.args[1], streams, direct)
     if a.owners:
         import json
         own = {}

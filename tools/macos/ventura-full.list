@@ -1,0 +1,28 @@
+# macOS 13.5 (22G74) OS volume, full tier (MAC1/MAC2 groundwork): tier 0, plus the
+# command-line userland, every launchd job definition and the pieces WindowServer and
+# loginwindow need later (MAC3). Code of frameworks and dylibs lives in the shared cache
+# (added by build-macos-root.sh from the SystemOS cryptex), so only executables, plists
+# and resources come from here. Fetched with --thin: arm64e slices only.
+/sbin/launchd
+/usr/lib/dyld
+/etc
+/var
+/tmp
+/System/Cryptexes/OS
+/System/Cryptexes/App
+/private/
+/dev/
+/System/Library/Templates/Data/private
+/System/Library/xpc
+/System/Library/LaunchDaemons
+/System/Library/LaunchAgents
+/System/Library/CoreServices/SystemVersion.plist
+/System/Library/CoreServices/loginwindow.app
+/System/Library/PrivateFrameworks/SkyLight.framework
+/System/Library/Frameworks/Metal.framework
+/System/Library/Frameworks/CoreGraphics.framework
+/bin
+/sbin
+/usr/sbin
+/usr/lib
+/usr/libexec

@@ -1,0 +1,201 @@
+From da43614c7bcea76187971d658e10412238e1f237 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 20:05:06 +0200
+Subject: [PATCH] patch: 0312-starlte-pmsg-sweetreboot.patch (from 12377 0309:
+ panic and timer -> ramoops pmsg -> TWRP, no UFS)
+
+---
+ bsd/conf/files         |   1 +
+ bsd/dev/starlte_pmsg.c | 143 +++++++++++++++++++++++++++++++++++++++++
+ osfmk/kern/debug.c     |  13 ++++
+ 3 files changed, 157 insertions(+)
+ create mode 100644 bsd/dev/starlte_pmsg.c
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index e85fea2..1fd378b 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -113,6 +113,7 @@ bsd/dev/starlte_smp.c			standard
+ bsd/dev/starlte_gpu.c			standard
+ bsd/dev/starlte_overlay.c		standard
+ bsd/dev/starlte_sd.c			standard
++bsd/dev/starlte_pmsg.c			standard
+ bsd/dev/herolte_battery.c		standard
+ bsd/dev/herolte_gpu.c			standard
+ bsd/dev/a5xelte_keys.c			standard
+diff --git a/bsd/dev/starlte_pmsg.c b/bsd/dev/starlte_pmsg.c
+new file mode 100644
+index 0000000..f36f1b8
+--- /dev/null
++++ b/bsd/dev/starlte_pmsg.c
+@@ -0,0 +1,143 @@
++/*
++ * STARLTE (Galaxy S9): sweetreboot=N for the 8796 series, ported from the
++ * 12377 series' 0309 (bsd/dev/herolte_ufs.c there) without its UFS log ring:
++ * a card-root boot never brings UFS up, so the RAM ramoops pmsg ring is the log.
++ *
++ * Boot-arg sweetreboot=N (N > 0) arms it at STARTUP(KMEM):
++ *  - any panic: panic_spin_forever() calls sweet_panic_hook once, which copies the
++ *    panic log head and the console ring's tail into the ramoops pmsg ring at
++ *    0xFED14000 ("DBGC" sig/start/size, as the loader and the woa UEFI write it;
++ *    TWRP shows it as /sys/fs/pstore/pmsg-ramoops-0) and resets into recovery
++ *    (PMU INFORM2 = 0x12345678, INFORM3 = 0x12345674, SWRESET), as the menu does;
++ *  - no panic: after N seconds a kernel thread does the same with the console tail.
++ * Nothing is written to flash. Both mappings are made at boot: nothing may be
++ * mapped inside a panic.
++ */
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/thread.h>
++#include <kern/startup.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#define STARLTE_PMU_PA          0x14060000
++#define STARLTE_PMSG_PA         0xFED14000
++#define STARLTE_PMSG_DATA       0x3F00u         /* the loader's cap, clear of the UEFI latches */
++
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern void IOSleep(unsigned milliseconds);
++extern void a5xelte_log_snapshot(const char **ring, uint32_t *size, uint64_t *total);
++extern void (*sweet_panic_hook)(void);
++extern char *debug_buf_base;
++extern char *debug_buf_ptr;
++
++static volatile uint32_t *starlte_pmu_va;
++static volatile uint8_t *starlte_pmsg_va;
++static uint32_t starlte_reboot_secs;
++
++static void
++starlte_reset_to_recovery(void)
++{
++	volatile uint32_t *pmu = starlte_pmu_va;
++	if (pmu == NULL) {
++		return;
++	}
++	(void)ml_set_interrupts_enabled(FALSE);
++	pmu[0x808 / 4] = 0x12345678U;
++	pmu[0x80c / 4] = 0x12345674U;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	pmu[0x400 / 4] = 1;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	for (;;) {
++		__asm__ volatile ("wfe");
++	}
++}
++
++static void
++starlte_pmsg_put(volatile uint8_t *d, uint32_t *o, const char *s, uint32_t n)
++{
++	while (n-- > 0 && *o < STARLTE_PMSG_DATA) {
++		d[(*o)++] = (uint8_t)*s++;
++	}
++}
++
++/* hdr, then (panics) the panic log head, then the console ring's last bytes. */
++static void
++starlte_pmsg_save(const char *hdr, bool panic_log)
++{
++	static const char mid[] = "\n--- console before the reset:\n";
++	volatile uint32_t *h = (volatile uint32_t *)(void *)starlte_pmsg_va;
++	const char *b = debug_buf_base, *e = debug_buf_ptr, *ring;
++	uint32_t rsize, o = 0;
++	uint64_t total;
++
++	if (h == NULL) {
++		return;
++	}
++	volatile uint8_t *d = starlte_pmsg_va + 12;
++	starlte_pmsg_put(d, &o, hdr, (uint32_t)strlen(hdr));
++	if (panic_log && b != NULL && e > b) {
++		starlte_pmsg_put(d, &o, b, (uint32_t)MIN(e - b, 11 * 1024));
++	}
++	starlte_pmsg_put(d, &o, mid, sizeof(mid) - 1);
++	a5xelte_log_snapshot(&ring, &rsize, &total);
++	if (ring != NULL && rsize != 0) {
++		uint64_t n = MIN(total, MIN((uint64_t)rsize, (uint64_t)(STARLTE_PMSG_DATA - o)));
++		for (uint64_t k = total - n; k < total; k++) {
++			starlte_pmsg_put(d, &o, &ring[k % rsize], 1);
++		}
++	}
++	h[0] = 0x43474244U;                     /* "DBGC" */
++	h[1] = o % STARLTE_PMSG_DATA;
++	h[2] = o;
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++static void
++starlte_panic_to_recovery(void)
++{
++	starlte_pmsg_save("STARBITE: XNU panic (sweetreboot), panic log head:\n", true);
++	starlte_reset_to_recovery();
++}
++
++static void
++starlte_reboot_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	IOSleep(starlte_reboot_secs * 1000);
++	printf("STARBITE: sweetreboot=%u reached, console tail to pmsg, reset to recovery\n",
++	    starlte_reboot_secs);
++	starlte_pmsg_save("STARBITE: sweetreboot timer (no panic), console tail:\n", false);
++	starlte_reset_to_recovery();
++}
++
++/* Armed as soon as kmem works, so early panics reach TWRP too. */
++static void
++starlte_reboot_early(void)
++{
++	if (!PE_parse_boot_argn("sweetreboot", &starlte_reboot_secs, sizeof(starlte_reboot_secs)) ||
++	    starlte_reboot_secs == 0) {
++		return;
++	}
++	starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);
++	starlte_pmsg_va = (volatile uint8_t *)ml_io_map(STARLTE_PMSG_PA, 0x4000);
++	if (starlte_pmu_va != NULL && starlte_pmsg_va != NULL) {
++		sweet_panic_hook = starlte_panic_to_recovery;
++	}
++	printf("STARBITE: sweetreboot=%u armed (PMU %p, pmsg %p, panics reset too)\n",
++	    starlte_reboot_secs, starlte_pmu_va, starlte_pmsg_va);
++}
++STARTUP(KMEM, STARTUP_RANK_LAST, starlte_reboot_early);
++
++/* The timer thread needs the scheduler: started with the other late boot threads. */
++static void
++starlte_reboot_timer(void)
++{
++	thread_t th;
++	if (starlte_reboot_secs > 1 && starlte_pmu_va != NULL &&
++	    kernel_thread_start(starlte_reboot_thread, NULL, &th) == KERN_SUCCESS) {
++		thread_deallocate(th);
++	}
++}
++STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_reboot_timer);
++#endif /* ARM64_BOARD_CONFIG_STARLTE */
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+index 437adb1..c595edb 100644
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1155,9 +1155,22 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+ 	__builtin_unreachable();
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++/* sweet: set by the board (STARLTE: boot-arg sweetreboot, bsd/dev/starlte_pmsg.c) to
++ * save the panic log and reset instead of spinning; called once. */
++void (*sweet_panic_hook)(void) = NULL;
++#endif
++
+ void
+ panic_spin_forever(void)
+ {
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	static bool sweet_panic_hook_ran;
++	if (sweet_panic_hook != NULL && !sweet_panic_hook_ran) {
++		sweet_panic_hook_ran = true;
++		sweet_panic_hook();
++	}
++#endif
+ 	for (;;) {
+ #if defined(__arm__) || defined(__arm64__)
+ 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
