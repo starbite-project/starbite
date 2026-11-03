@@ -19,6 +19,19 @@ This step needs `build/brand/menu-em.sbm`, the menu v6 sprites and the EngineerM
 | `build/brand/menu-v7.sbm` | the BOOT ramdisk: `menu-em.sbm`, padding to 4 KiB, then the container. S-Boot loads it at 0x89000000, so it must stay under 16 MB. |
 | `build/brand/upparam-v7/logo.jpg` | the concept's splash as a logo.jpg (no longer needed: the intro starts from whatever S-Boot drew). It is not packed or flashed by this step. |
 
+Starbite's own splash, "One mark" (`build/splash-concepts/final/logo.jpg`,
+`docs/concepts/splash/HANDOFF.md`), not flashed:
+
+```sh
+mkdir -p build/brand/upparam-onemark && cp build/splash-concepts/final/logo.jpg build/brand/upparam-onemark/
+build/venv/bin/python -I tools/brand/upparam-pack.py build/brand/upparam-starbite/up_param.img \
+    build/brand/upparam-onemark/up_param.img logo.jpg=build/brand/upparam-onemark/logo.jpg
+```
+
+Every other member is the "Powered by starbite" image's, byte for byte; sha256 5bb50d61257b303a...
+(in `upparam-flash.sh`'s known list). Flash it only together with a loader whose intro7 has the
+One mark handoff (the star and the 1380 word band); older loaders fall back to a plain fade.
+
 The native splash (Samsung's own, without "Secured by Knox"), not flashed:
 
 ```sh

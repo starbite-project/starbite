@@ -53,7 +53,8 @@ void intro7_release(void);
 #define I7_CAPT       (0x83800000UL + G7_HOSTOFF)
 #define I7_CAPT_SIZE  0x00800000UL
 #define I7_CAPT_BANDS 8             /* row bands (images SB7_S_CAPT0 ..); closer ones merge */
-#define I7_CAPT_GAP   8             /* black rows that still join two bands */
+#define I7_CAPT_GAP   16            /* black rows that still join two bands: 2 * I7_CAPT_PAD, so two
+                                     * padded boxes never have to split a JPEG block's faint values */
 #define I7_CAPT_PAD   8             /* each band box grows by this (one JPEG block), copied raw */
 #define I7_CAPT_MAX_PX (384U * 1024U)   /* 1.5 MiB of G7_CACHE (3 MiB) at most */
 /* the timeline from the captured picture: bands above I7_NAT_SPLIT (the logo block) fade over
@@ -69,6 +70,23 @@ void intro7_release(void);
 #define I7_NAT_SAM_MAX_H 160
 #define I7_NAT_MOVE0  I7_GS9_FADE
 #define I7_NAT_SAM_W  900.0f
+/* the wordmark band is a line of text: at least I7_NAT_WORD_ASPECT times as wide as it is tall */
+#define I7_NAT_WORD_ASPECT 3U
+/* Starbite's own splash ("One mark", docs/concepts/splash/HANDOFF.md): when no wordmark crosses
+ * I7_NAT_SAM_ROW, the band across I7_NAT_WORD_ROW (the capsule's centre) is the word "starbite".
+ * It is already where the capsule is born: it keeps its size (k = 1) and settles on I7_CAP_X. */
+#define I7_NAT_WORD_ROW 1380
+/* The splash's star: a band I7_STAR_MIN .. I7_STAR_MAX square (sides within a quarter of each
+ * other) and blue (2 sum B >= 3 sum R). It hands over in place: it fades over I7_STAR_FADE with no
+ * rise while the wallpaper's star lights at its centre (the alpha centroid) and its R (the
+ * alpha area over I7_STAR_AREA = the area of WALL_FS's core |x|^.62 + |y|^.62 <= 1 with its
+ * smoothstep(.86, 1) edge, at R = 1: 4 G(1 + 1 / .62)^2 / G(1 + 2 / .62) * .7945), and flies
+ * home through I7_FLY_STAR_C. Without one the star starts at M7_STAR0 and flies through I7_FLY_C. */
+#define I7_STAR_MIN 24U
+#define I7_STAR_MAX 128U
+#define I7_STAR_AREA 0.825350f
+#define I7_FLY_STAR_CX 1350.0f
+#define I7_FLY_STAR_CY 1180.0f
 /* intro7_capture's result in the log page (0x91fff000, uncached), slots I7_LOG_CAPT ..:
  *   [116] px << 32 | I7_LOG_TAG << 16 | why << 8 | bands   (px: the bands' total area)
  *   [117] the capture's duration in us (both passes)
@@ -95,7 +113,7 @@ void intro7_release(void);
 /* the wallpaper's star flies a quadratic path star0 -> C -> STAR: */
 #define I7_FLY0 120                 /* e = ease((t - 120) / 950) */
 #define I7_FLY_MS 950
-#define I7_FLY_CX 1390.0f           /* control point */
+#define I7_FLY_CX 1390.0f           /* control point (from M7_STAR0; a captured star: I7_FLY_STAR_C) */
 #define I7_FLY_CY 1520.0f
 #define I7_BLOOM0 950               /* bloom = sin(pi * c01((t - 950) / 600)) */
 #define I7_BLOOM_MS 600

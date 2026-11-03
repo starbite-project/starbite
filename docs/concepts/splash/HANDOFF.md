@@ -39,6 +39,18 @@ The word is already where the glass capsule is born. It does not glide or grow. 
 
 The star band (band 1) never moves. The wallpaper's star lights on top of it at exactly the same centre and radius, while the captured star fades out over the same 120 ms. Then the star flies home to (1290, 232).
 
+## As implemented (intro7, runtime, not constants)
+
+Items 1 to 5 landed as values chosen at the capture, so the stock and "Powered by starbite" splashes
+and the no-capture intro are unchanged (h7: 0 px against the previous loader; the old splash only
+gains 37 faint px it used to lose): `M7_STAR0`, `I7_NAT_SAM_ROW` 1232, `I7_NAT_SAM_W` 900 and
+`I7_FLY_C` stay; a captured star band (`I7_STAR_*`) gives the star's start (alpha centroid, R from
+the alpha area) and the control point `I7_FLY_STAR_C` (1350, 1180), and with no wordmark across
+1232 the band across `I7_NAT_WORD_ROW` 1380 is the word, kept at its own width. Items 6 and 7 are
+not done (glass*.c). Films: `build/splash-onemark/`. Packed: `build/brand/upparam-onemark/up_param.img`.
+
+The plan as first written:
+
 ## intro7 / menu7 changes (one commit, together with the flash)
 
 The splash and these constants must land in one commit and one flash. A splash flashed early should never meet an old loader, and the reverse too. The fallbacks are described below.

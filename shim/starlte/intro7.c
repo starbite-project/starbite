@@ -176,7 +176,10 @@ struct capt_band {
 };
 static struct capt_band CB[I7_CAPT_BANDS];
 static int capt_n;                  /* bands captured; 0: the concept's splash */
-static int capt_sam = -1;           /* the band that is Samsung's wordmark, or -1 */
+static int capt_sam = -1;           /* the band that is the wordmark (SAMSUNG or "starbite"), or -1 */
+static float sam_w;                 /* the width capt_sam glides to: I7_NAT_SAM_W, or its own (k = 1) */
+static int capt_star = -1;          /* the band that is the splash's star (I7_STAR_*), or -1: M7_STAR0 */
+static float star_x, star_y, star_r;    /* its alpha centroid and R: the wallpaper star's start */
 static uint16_t row_x0[G7_H], row_x1[G7_H];     /* pass 1: each row's non-black columns */
 
 #ifndef M7_PREVIEW
@@ -238,6 +241,20 @@ static void capt_drop(void)
         (void)sb7_put(SB7_T_IMAGE, SB7_S_CAPT0 + i, 0, 0);
     capt_n = 0;
     capt_sam = -1;
+    capt_star = -1;
+}
+
+/* the wordmark: the band across `row`, no taller than a line of text and I7_NAT_WORD_ASPECT times
+ * as wide as it is tall (never the star), or -1 */
+static int capt_word(unsigned row)
+{
+    for (int i = 0; i < capt_n; i++) {
+        unsigned h = CB[i].y1 - CB[i].y0, w = CB[i].x1 - CB[i].x0;
+        if (i != capt_star && CB[i].y0 <= row && CB[i].y1 > row && h <= I7_NAT_SAM_MAX_H &&
+            w >= I7_NAT_WORD_ASPECT * h)
+            return i;
+    }
+    return -1;
 }
 
 int intro7_capture(void)
@@ -319,6 +336,10 @@ int intro7_capture(void)
     uintptr_t at = I7_CAPT;
     for (int i = 0; i < n; i++) {
         unsigned w = CB[i].x1 - CB[i].x0, h = CB[i].y1 - CB[i].y0;
+        /* a star-shaped box also sums its alpha (a, a x, a y) and its red and blue */
+        int st = capt_star < 0 && w >= I7_STAR_MIN && w <= I7_STAR_MAX && h >= I7_STAR_MIN && h <= I7_STAR_MAX &&
+                 4U * w >= 3U * h && 4U * h >= 3U * w;
+        uint64_t sa = 0, sax = 0, say = 0, sr = 0, sb = 0;
         struct sb7_image *im = (struct sb7_image *)at;
         im->w = (uint16_t)w;
         im->h = (uint16_t)h;
@@ -339,7 +360,20 @@ int intro7_capture(void)
                 if (((c >> 8) & 255U) > m) m = (c >> 8) & 255U;
                 if ((c & 255U) > m) m = c & 255U;
                 *d++ = m << 24 | c;
+                if (st) {
+                    sa += m;
+                    sax += (uint64_t)m * x;
+                    say += (uint64_t)m * y;
+                    sr += c >> 16;
+                    sb += c & 255U;
+                }
             }
+        }
+        if (st && sa && 2U * sb >= 3U * sr) {
+            capt_star = i;
+            star_x = (float)CB[i].x0 + 0.5f + (float)sax / (float)sa;
+            star_y = (float)CB[i].y0 + 0.5f + (float)say / (float)sa;
+            star_r = __builtin_sqrtf((float)sa * (1.0f / 255.0f) / I7_STAR_AREA);
         }
         uint32_t size = (uint32_t)sizeof(*im) + im->data_size;
         if (!sb7_put(SB7_T_IMAGE, SB7_S_CAPT0 + (unsigned)i, im, size)) {
@@ -349,13 +383,15 @@ int intro7_capture(void)
         at += ((uintptr_t)size + 63U) & ~(uintptr_t)63U;
     }
     capt_n = n;
-    /* Samsung's wordmark: the logo block's band across panel row I7_NAT_SAM_ROW, if it is no taller
-     * than a line of text */
-    for (int i = 0; i < n; i++)
-        if (CB[i].y0 <= I7_NAT_SAM_ROW && CB[i].y1 > I7_NAT_SAM_ROW && CB[i].y1 - CB[i].y0 <= I7_NAT_SAM_MAX_H) {
-            capt_sam = i;
-            break;
-        }
+    /* the wordmark: Samsung's across panel row I7_NAT_SAM_ROW (it glides and grows to I7_NAT_SAM_W),
+     * else Starbite's across I7_NAT_WORD_ROW (it keeps its size) */
+    capt_sam = capt_word(I7_NAT_SAM_ROW);
+    sam_w = I7_NAT_SAM_W;
+    if (capt_sam < 0) {
+        capt_sam = capt_word(I7_NAT_WORD_ROW);
+        if (capt_sam >= 0)
+            sam_w = (float)(CB[capt_sam].x1 - CB[capt_sam].x0);
+    }
     return capt_end(t0, I7_CAPT_OK, px32);
 }
 
@@ -365,10 +401,11 @@ void intro7_release(void)
 }
 
 /* The captured bands at t. The rest of the logo block fades and rises as #gs9, the bands below it
- * ("Powered by ...") fade as #pow. Samsung's own wordmark (capt_sam) is the only SAMSUNG on the
- * screen: it stays while "Galaxy S9" goes, then moves and grows into the concept's wordmark box
- * (I7_NAT_SAM_W wide, centred on the capsule at I7_CAP_X, I7_CAP_Y) by I7_MELT0, and shrinks with
- * the capsule's width (W0 -> W1) as it fades out over the melt, where the island takes over. */
+ * ("Powered by ...") fade as #pow. The wordmark (capt_sam) is the only one on the screen: it stays
+ * while "Galaxy S9" goes, then moves (and Samsung's grows) into the concept's wordmark box (sam_w
+ * wide, centred on the capsule at I7_CAP_X, I7_CAP_Y) by I7_MELT0, and shrinks with the capsule's
+ * width (W0 -> W1) as it fades out over the melt, where the island takes over. The splash's star
+ * (capt_star) fades in place over I7_STAR_FADE as the wallpaper's star lights on top of it. */
 static void capt_items(struct g7_layer *l, float t)
 {
     float ua = 1.0f - c01(t / I7_GS9_FADE), dy = -36.0f * m7_eout(c01(t / I7_GS9_RISE));
@@ -379,10 +416,15 @@ static void capt_items(struct g7_layer *l, float t)
         if (i == capt_sam) {
             float p = m7_ease(c01((t - I7_NAT_MOVE0) / (float)(I7_MELT0 - I7_NAT_MOVE0)));
             float m = m7_ease(c01((t - I7_MELT0) / I7_MELT_MS));
-            float k = lerpf(1.0f, I7_NAT_SAM_W / w, p) * lerpf(1.0f, I7_CAP_W1 / I7_CAP_W0, m);
+            float k = lerpf(1.0f, sam_w / w, p) * lerpf(1.0f, I7_CAP_W1 / I7_CAP_W0, m);
             float cx = lerpf(x + 0.5f * w, I7_CAP_X, p), cy = lerpf(y + 0.5f * h, I7_CAP_Y, p);
             add_image(l, I7_KEY(16 + i), SB7_S_CAPT0 + (unsigned)i, cx - 0.5f * w * k, cy - 0.5f * h * k, w * k, h * k,
                       0xffffffffU, 1.0f - m);
+            continue;
+        }
+        if (i == capt_star) {
+            add_image(l, I7_KEY(16 + i), SB7_S_CAPT0 + (unsigned)i, x, y, w, h, 0xffffffffU,
+                      1.0f - c01(t / I7_STAR_FADE));
             continue;
         }
         int up = CB[i].y0 < I7_NAT_SPLIT;
@@ -401,9 +443,15 @@ static void capt_items(struct g7_layer *l, float t)
 static void wall_at(struct g7_wall *w, float t)
 {
     /* star flight along a quadratic path, bloom on arrival */
-    float e = m7_ease(c01((t - I7_FLY0) / I7_FLY_MS)), a = 1.0f - e;
-    float sx = a * a * M7_STAR0_X + 2.0f * a * e * I7_FLY_CX + e * e * G7_WALL_FINAL_SX;
-    float sy = a * a * M7_STAR0_Y + 2.0f * a * e * I7_FLY_CY + e * e * G7_WALL_FINAL_SY;
+    float e = m7_ease(c01((t - I7_FLY0) / I7_FLY_MS)), a = 1.0f - e, sx, sy;
+    if (capt_star >= 0) {
+        /* from the captured star: a short arc up and to the right */
+        sx = a * a * star_x + 2.0f * a * e * I7_FLY_STAR_CX + e * e * G7_WALL_FINAL_SX;
+        sy = a * a * star_y + 2.0f * a * e * I7_FLY_STAR_CY + e * e * G7_WALL_FINAL_SY;
+    } else {
+        sx = a * a * M7_STAR0_X + 2.0f * a * e * I7_FLY_CX + e * e * G7_WALL_FINAL_SX;
+        sy = a * a * M7_STAR0_Y + 2.0f * a * e * I7_FLY_CY + e * e * G7_WALL_FINAL_SY;
+    }
     float bloom = sinpi01(c01((t - I7_BLOOM0) / I7_BLOOM_MS));
     float rr = t < I7_REV0 ? 0.0f : I7_REV_R * m7_eout(c01((t - I7_REV0) / I7_REV_MS));
     int final = t >= I7_FLY0 + I7_FLY_MS && t >= I7_SR0 + I7_SR_MS && t >= I7_SW0 + I7_SW_MS &&
@@ -425,7 +473,7 @@ static void wall_at(struct g7_wall *w, float t)
     w->sx = sx;
     w->sy = sy;
     w->si = c01(t / I7_SI_RAMP) * (1.0f + 0.45f * bloom);
-    w->sr = lerpf(M7_STAR0_R, 54.0f, m7_ease(c01((t - I7_SR0) / I7_SR_MS)));
+    w->sr = lerpf(capt_star >= 0 ? star_r : M7_STAR0_R, 54.0f, m7_ease(c01((t - I7_SR0) / I7_SR_MS)));
     w->sw = 0.72f * m7_ease(c01((t - I7_SW0) / I7_SW_MS));
     w->rr = rr;
     w->rf = I7_REV_FEATHER;
