@@ -27,6 +27,7 @@ START = 182888448
 URL = ('https://updates.cdn-apple.com/2026SpringFCS/fullrestores/122-58869/'
        'DFB1CEEF-5619-4591-9924-E20DB2C8FED0/UniversalMac_26.5_25F71_Restore.ipsw')
 OS_DMG = '094-56453-087.dmg.aea'
+CX_DMG = '094-56679-089.dmg.aea'        # the SystemOS cryptex (dylibs outside the cache, resources)
 C = 64 << 20
 
 
@@ -34,13 +35,53 @@ def sh(*a, **k):
     return subprocess.run(a, check=True, text=True, capture_output=True, **k).stdout
 
 
+def attached_elsewhere():
+    info = subprocess.run(['hdiutil', 'info'], text=True, capture_output=True).stdout
+    return f'image-path      : {IMG}' in info
+
+
 def attach(nomount=False):
+    if attached_elsewhere():
+        sys.exit(f'{IMG} is already attached (another agent?): refusing to attach it again')
     a = ['hdiutil', 'attach', '-nobrowse', '-imagekey', 'diskimage-class=CRawDiskImage'] + \
         (['-nomount'] if nomount else []) + [IMG]
     out = sh(*a)
     if nomount:
         return out.split()[0]
     return [l.split('\t')[-1] for l in out.splitlines() if '/Volumes/' in l][0]
+
+
+def replace_copy(src, dst):
+    """copy2 that replaces an existing (possibly read-only) file or link instead of writing into it"""
+    if os.path.lexists(dst) and not os.path.isdir(dst):
+        os.unlink(dst)
+    return shutil.copy2(src, dst, follow_symlinks=False)
+
+
+def merge_tree(src, dst):
+    """src's tree over dst: directories made, files and symlinks replaced, nothing else touched"""
+    for d, dirs, files in os.walk(src):
+        rel = os.path.relpath(d, src)
+        t = dst if rel == '.' else os.path.join(dst, rel)
+        if os.path.lexists(t) and not os.path.isdir(t):
+            os.unlink(t)
+        os.makedirs(t, exist_ok=True)
+        for n in list(dirs):
+            if os.path.islink(os.path.join(d, n)):       # os.walk lists dir symlinks as dirs
+                dirs.remove(n)
+                files.append(n)
+        for n in files:
+            if n.startswith('._'):
+                continue                                  # exFAT AppleDouble sidecars
+            s, o = os.path.join(d, n), os.path.join(t, n)
+            if os.path.lexists(o) and not (os.path.isdir(o) and not os.path.islink(o)):
+                os.unlink(o)
+            elif os.path.isdir(o) and not os.path.islink(o):
+                shutil.rmtree(o)
+            if os.path.islink(s):
+                os.symlink(os.readlink(s), o)
+            else:
+                shutil.copy2(s, o)
 
 
 def chunk_hashes():
@@ -86,6 +127,7 @@ def main():
     ap.add_argument('--wrap', action='append', default=[])
     ap.add_argument('--unwrap', action='append', default=[])
     ap.add_argument('--fetch', action='append', default=[])
+    ap.add_argument('--fetch-cx', action='append', default=[], help='like --fetch, from the SystemOS cryptex')
     ap.add_argument('--link', action='append', default=[])
     ap.add_argument('--rm', action='append', default=[])
     ap.add_argument('--boot', default='mac26t1')
@@ -97,30 +139,40 @@ def main():
         sys.exit(f'{HASHES} missing: hash the image as it is on the card first')
     before = open(HASHES).read().split()
     own = json.load(open(OWNERS))
-    edits = a.wrap or a.unwrap or a.fetch or a.link or a.rm
+    edits = a.wrap or a.unwrap or a.fetch or a.fetch_cx or a.link or a.rm
     if edits:
-        if a.fetch:
-            stage = f'{W}/stage-cycle'
+        stage = f'{W}/stage-cycle'
+        if a.fetch or a.fetch_cx:
             shutil.rmtree(stage, ignore_errors=True)
             os.makedirs(stage)
+        for member, paths in ((OS_DMG, a.fetch), (CX_DMG, a.fetch_cx)):
+            if not paths:
+                continue
             ofs = f'{W}/owners-cycle.json'
-            subprocess.run(['python3', '-I', '-B', 'tools/macos/ipsw-apfs.py', URL, 'get', OS_DMG, stage, *a.fetch,
+            subprocess.run(['python3', '-I', '-B', 'tools/macos/ipsw-apfs.py', URL, 'get', member, stage, *paths,
                             '--keys', f'{W}/keys.txt', '--owners', ofs, '--thin'], check=True)
-            own.update(json.load(open(ofs)))
+            if os.path.exists(ofs):
+                own.update(json.load(open(ofs)))
         mnt = attach()
         try:
-            for p in a.fetch:
+            for p in a.fetch + a.fetch_cx:
                 src, dst = stage + p, mnt + p
+                if not os.path.lexists(src):
+                    print('not in the IPSW, skipped:', p)
+                    continue
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 if os.path.isdir(src) and not os.path.islink(src):
-                    shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+                    merge_tree(src, dst)
                 elif os.path.lexists(dst):
                     os.unlink(dst)
                     shutil.copy2(src, dst, follow_symlinks=False)
                 else:
                     shutil.copy2(src, dst, follow_symlinks=False)
                 for junk in glob.glob(dst + '/**/._*', recursive=True) + glob.glob(os.path.dirname(dst) + '/._*'):
-                    os.unlink(junk)
+                    try:
+                        os.unlink(junk)
+                    except FileNotFoundError:
+                        pass
                 print('fetched', p)
             for p in a.wrap:
                 t, o = mnt + p, mnt + p + '.starbite-orig'
