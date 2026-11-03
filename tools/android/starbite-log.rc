@@ -1,0 +1,26 @@
+# Starbite first-boot logging for LineageOS 24 (docs/ANDROID-PLAN.md section 3).
+# Install to VENDOR as /vendor/etc/init/starbite-log.rc (mode 0644, root:root, context
+# u:object_r:vendor_configs_file:s0) together with /vendor/bin/starbite-log.sh (0755, root:shell,
+# u:object_r:vendor_file:s0). Needs a userdebug build (the su domain) and permissive SELinux
+# (androidboot.selinux=permissive is already in the LineageOS DTB bootargs).
+# Logs go to /metadata/starbite/boot<N>/ (ODM, ext4, unencrypted: readable from TWRP).
+
+on early-init
+    start starbite_klog
+
+on post-fs
+    start starbite_logcat
+
+service starbite_klog /vendor/bin/starbite-log.sh klog
+    user root
+    group root log
+    seclabel u:r:su:s0
+    oneshot
+    disabled
+
+service starbite_logcat /vendor/bin/starbite-log.sh logcat
+    user root
+    group root log
+    seclabel u:r:su:s0
+    oneshot
+    disabled

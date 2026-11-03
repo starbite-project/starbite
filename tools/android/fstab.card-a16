@@ -1,0 +1,17 @@
+# Card slot 1 (docs/ANDROID-PLAN.md section 5): Android 16 on the microSD, LineageOS 23.2 vendor.
+# Goes into BOTH the first-stage ramdisk (tools/android/ramdisk-fstab.py put ... fstab.samsungexynos9810=)
+# and the card vendor copy (/vendor/etc/fstab.samsungexynos9810 on mmcblk0p6).
+# Card MBR: p1 exFAT, p2 0xDA store (8 GiB), p3 extended: p5 system, p6 vendor, p7 odm, p8 metadata, p9 data.
+# No /cache (UFS CACHE stays Lineage 24's and TWRP's), no voldmanaged sdcard (vold must never offer to
+# format the card), software FBE (the card has no inline crypto engine).
+/dev/block/mmcblk0p5 /system ext4 ro wait,first_stage_mount
+/dev/block/mmcblk0p6 /vendor ext4 ro wait,first_stage_mount
+/dev/block/mmcblk0p7 /odm ext4 ro wait,first_stage_mount
+/dev/block/mmcblk0p8 /metadata ext4 noatime,nosuid,nodev wait,check,first_stage_mount
+/dev/block/platform/11120000.ufs/by-name/BOOT /boot emmc defaults recoveryonly
+/dev/block/platform/11120000.ufs/by-name/RECOVERY /recovery emmc defaults recoveryonly
+/dev/block/mmcblk0p9 /data f2fs noatime,nosuid,nodev,discard,usrquota,grpquota,reserve_root=32768,resgid=5678 latemount,wait,check,fileencryption=aes-256-xts:aes-256-cts:v2,reservedsize=128M,quota
+/dev/block/platform/11120000.ufs/by-name/EFS /mnt/vendor/efs ext4 noatime,nosuid,nodev,noauto_da_alloc,discard,journal_checksum,data=ordered,errors=panic wait,check
+/dev/block/platform/11120000.ufs/by-name/CPEFS /mnt/vendor/cpefs ext4 ro,noload,noatime,nosuid,nodev wait,nofail
+/dev/block/platform/11120000.ufs/by-name/MISC /misc emmc defaults defaults
+/dev/block/zram0 none swap defaults zramsize=2147483648,max_comp_streams=8
