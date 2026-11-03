@@ -1,0 +1,602 @@
+diff -ruN a/Platform/Star2LtePkg/Drivers/Star2LteKeysDxe/Star2LteKeysDxe.c b/Platform/Star2LtePkg/Drivers/Star2LteKeysDxe/Star2LteKeysDxe.c
+--- a/Platform/Star2LtePkg/Drivers/Star2LteKeysDxe/Star2LteKeysDxe.c	1970-01-01 02:00:00
++++ b/Platform/Star2LtePkg/Drivers/Star2LteKeysDxe/Star2LteKeysDxe.c	2026-11-03 08:12:56
+@@ -0,0 +1,339 @@
++/** @file
++  Star2LteKeysDxe: the Galaxy S9's hardware keys as a SimpleTextIn console.
++
++  The phone has no keyboard in UEFI (no USB host stack, touch is not a HID
++  here), so the four keys drive the UEFI Shell through a command palette:
++
++    Volume Down  type the next palette command (ESC clears the line first)
++    Volume Up    type the previous palette command
++    Power        Enter (run it; continue at a "-b" page break or a pause)
++    Bixby        'q' (quit at a "-b" page break)
++
++  Volume keys repeat while held. The palette holds read-only commands only;
++  its last entry is "reset", which returns to the Starbite boot menu.
++
++  Keys (shim/starlte/menu.c keys(), active low): GPIO_ALIVE 0x14050000,
++  GPA0_DAT +0x24 bit 3 Volume Up, bit 4 Volume Down, bit 6 Bixby; GPA2_DAT
++  +0x64 bit 4 Power. The ALIVE page is not in the platform MMU map, so it is
++  added to the GCD as uncached MMIO here.
++
++  SPDX-License-Identifier: BSD-2-Clause-Patent
++**/
++
++#include <Uefi.h>
++#include <Pi/PiDxeCis.h>
++#include <Library/UefiBootServicesTableLib.h>
++#include <Library/DxeServicesTableLib.h>
++#include <Library/MemoryAllocationLib.h>
++#include <Library/BaseMemoryLib.h>
++#include <Library/IoLib.h>
++#include <Library/DebugLib.h>
++#include <Protocol/SimpleTextIn.h>
++#include <Protocol/DevicePath.h>
++
++#define ALIVE_GPIO_BASE  0x14050000ULL
++#define ALIVE_GPIO_SIZE  0x1000ULL
++#define GPA0_DAT         (ALIVE_GPIO_BASE + 0x24)
++#define GPA2_DAT         (ALIVE_GPIO_BASE + 0x64)
++
++#define K_UP     BIT0
++#define K_DOWN   BIT1
++#define K_BIXBY  BIT2
++#define K_POWER  BIT3
++
++#define SAMPLE_100NS    (15 * 10000)   // 15 ms
++#define REPEAT_FIRST    34             // samples (~0.5 s) before a held Volume key repeats
++#define REPEAT_EVERY    12             // then every ~180 ms
++
++#define QUEUE_SIZE  256
++
++//
++// Read-only commands; "-b" pages long output (Power continues, Bixby quits).
++//
++STATIC CONST CHAR16  *mPalette[] = {
++  L"ver",
++  L"map -b",
++  L"memmap -b",
++  L"acpiview -l",
++  L"acpiview -s APIC",
++  L"acpiview -s GTDT",
++  L"acpiview -s PPTT",
++  L"acpiview -s FACP",
++  L"acpiview -s DBG2",
++  L"smbiosview -b",
++  L"dmem 0x14050000 0x80",
++  L"drivers -b",
++  L"devtree -b",
++  L"dh -b",
++  L"dmpstore -b",
++  L"ls -b fs0:\\",
++  L"ls -b fs0:\\EFI",
++  L"vol fs0:",
++  L"date",
++  L"time",
++  L"help -b",
++  L"reset"
++};
++
++#define PALETTE_COUNT  (sizeof (mPalette) / sizeof (mPalette[0]))
++
++typedef struct {
++  VENDOR_DEVICE_PATH          Vendor;
++  EFI_DEVICE_PATH_PROTOCOL    End;
++} KEYS_DEVICE_PATH;
++
++STATIC KEYS_DEVICE_PATH  mKeysPath = {
++  {
++    { HARDWARE_DEVICE_PATH, HW_VENDOR_DP, { sizeof (VENDOR_DEVICE_PATH), 0 } },
++    { 0x5b1e5d7a, 0x2c61, 0x4f0b, { 0x9e, 0x2a, 0x53, 0x54, 0x41, 0x52, 0x42, 0x4b } }
++  },
++  { END_DEVICE_PATH_TYPE, END_ENTIRE_DEVICE_PATH_SUBTYPE, { sizeof (EFI_DEVICE_PATH_PROTOCOL), 0 } }
++};
++
++STATIC EFI_SIMPLE_TEXT_INPUT_PROTOCOL  mTextIn;
++STATIC EFI_INPUT_KEY                   mQueue[QUEUE_SIZE];
++STATIC UINTN                           mHead;
++STATIC UINTN                           mTail;
++STATIC UINT32                          mStable;       // debounced key state
++STATIC UINT32                          mLastRaw;
++STATIC UINT32                          mHeld;         // samples the current Volume key has been held
++STATIC INTN                            mPaletteIndex = -1;
++
++STATIC
++UINT32
++RawKeys (
++  VOID
++  )
++{
++  UINT32  A;
++  UINT32  B;
++
++  A = MmioRead32 (GPA0_DAT);
++  B = MmioRead32 (GPA2_DAT);
++  return ((A & BIT3) ? 0 : K_UP) | ((A & BIT4) ? 0 : K_DOWN) |
++         ((A & BIT6) ? 0 : K_BIXBY) | ((B & BIT4) ? 0 : K_POWER);
++}
++
++STATIC
++VOID
++Push (
++  IN UINT16  Scan,
++  IN CHAR16  Char
++  )
++{
++  UINTN  Next;
++
++  Next = (mTail + 1) % QUEUE_SIZE;
++  if (Next == mHead) {
++    return;                       // full: drop
++  }
++
++  mQueue[mTail].ScanCode    = Scan;
++  mQueue[mTail].UnicodeChar = Char;
++  mTail                     = Next;
++}
++
++STATIC
++VOID
++TypePalette (
++  IN INTN  Step
++  )
++{
++  CONST CHAR16  *S;
++
++  if (mPaletteIndex < 0) {
++    mPaletteIndex = (Step > 0) ? 0 : (INTN)PALETTE_COUNT - 1;
++  } else {
++    mPaletteIndex = (mPaletteIndex + Step + (INTN)PALETTE_COUNT) % (INTN)PALETTE_COUNT;
++  }
++
++  Push (SCAN_ESC, CHAR_NULL);     // the shell's line editor clears the line on ESC
++  for (S = mPalette[mPaletteIndex]; *S != L'\0'; S++) {
++    Push (SCAN_NULL, *S);
++  }
++}
++
++STATIC
++VOID
++EFIAPI
++Sample (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  UINT32  Raw;
++  UINT32  Pressed;
++
++  Raw = RawKeys ();
++  if (Raw != mLastRaw) {          // debounce: two equal samples in a row
++    mLastRaw = Raw;
++    return;
++  }
++
++  Pressed = Raw & ~mStable;
++  mStable = Raw;
++
++  if (Pressed & K_DOWN) {
++    TypePalette (1);
++  }
++
++  if (Pressed & K_UP) {
++    TypePalette (-1);
++  }
++
++  if (Pressed & K_POWER) {
++    Push (SCAN_NULL, CHAR_CARRIAGE_RETURN);
++  }
++
++  if (Pressed & K_BIXBY) {
++    Push (SCAN_NULL, L'q');
++  }
++
++  //
++  // Auto-repeat for a single held Volume key.
++  //
++  if ((Raw == K_UP) || (Raw == K_DOWN)) {
++    mHeld++;
++    if ((mHeld >= REPEAT_FIRST) && (((mHeld - REPEAT_FIRST) % REPEAT_EVERY) == 0)) {
++      TypePalette ((Raw == K_DOWN) ? 1 : -1);
++    }
++  } else {
++    mHeld = 0;
++  }
++}
++
++STATIC
++EFI_STATUS
++EFIAPI
++KeysReset (
++  IN EFI_SIMPLE_TEXT_INPUT_PROTOCOL  *This,
++  IN BOOLEAN                         ExtendedVerification
++  )
++{
++  EFI_TPL  OldTpl;
++
++  OldTpl = gBS->RaiseTPL (TPL_NOTIFY);
++  mHead  = mTail;
++  gBS->RestoreTPL (OldTpl);
++  return EFI_SUCCESS;
++}
++
++STATIC
++EFI_STATUS
++EFIAPI
++KeysRead (
++  IN  EFI_SIMPLE_TEXT_INPUT_PROTOCOL  *This,
++  OUT EFI_INPUT_KEY                   *Key
++  )
++{
++  EFI_TPL     OldTpl;
++  EFI_STATUS  Status;
++
++  if (Key == NULL) {
++    return EFI_INVALID_PARAMETER;
++  }
++
++  OldTpl = gBS->RaiseTPL (TPL_NOTIFY);
++  if (mHead == mTail) {
++    Status = EFI_NOT_READY;
++  } else {
++    *Key   = mQueue[mHead];
++    mHead  = (mHead + 1) % QUEUE_SIZE;
++    Status = EFI_SUCCESS;
++  }
++
++  gBS->RestoreTPL (OldTpl);
++  return Status;
++}
++
++STATIC
++VOID
++EFIAPI
++KeysWaitNotify (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  if (mHead != mTail) {
++    gBS->SignalEvent (Event);
++  }
++}
++
++STATIC
++EFI_STATUS
++MapAliveGpio (
++  VOID
++  )
++{
++  EFI_GCD_MEMORY_SPACE_DESCRIPTOR  Desc;
++  EFI_STATUS                       Status;
++
++  Status = gDS->GetMemorySpaceDescriptor (ALIVE_GPIO_BASE, &Desc);
++  if (EFI_ERROR (Status)) {
++    return Status;
++  }
++
++  if (Desc.GcdMemoryType == EfiGcdMemoryTypeNonExistent) {
++    Status = gDS->AddMemorySpace (
++                    EfiGcdMemoryTypeMemoryMappedIo,
++                    ALIVE_GPIO_BASE,
++                    ALIVE_GPIO_SIZE,
++                    EFI_MEMORY_UC
++                    );
++    if (EFI_ERROR (Status)) {
++      return Status;
++    }
++  }
++
++  return gDS->SetMemorySpaceAttributes (ALIVE_GPIO_BASE, ALIVE_GPIO_SIZE, EFI_MEMORY_UC);
++}
++
++EFI_STATUS
++EFIAPI
++Star2LteKeysEntry (
++  IN EFI_HANDLE        ImageHandle,
++  IN EFI_SYSTEM_TABLE  *SystemTable
++  )
++{
++  EFI_STATUS  Status;
++  EFI_EVENT   Timer;
++  EFI_HANDLE  Handle;
++
++  Status = MapAliveGpio ();
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, "Star2LteKeys: ALIVE GPIO map failed: %r\n", Status));
++    return Status;
++  }
++
++  mStable  = RawKeys ();          // keys already down at start do not count
++  mLastRaw = mStable;
++
++  mTextIn.Reset         = KeysReset;
++  mTextIn.ReadKeyStroke = KeysRead;
++  Status = gBS->CreateEvent (EVT_NOTIFY_WAIT, TPL_NOTIFY, KeysWaitNotify, NULL, &mTextIn.WaitForKey);
++  if (EFI_ERROR (Status)) {
++    return Status;
++  }
++
++  Status = gBS->CreateEvent (EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_NOTIFY, Sample, NULL, &Timer);
++  if (EFI_ERROR (Status)) {
++    return Status;
++  }
++
++  Status = gBS->SetTimer (Timer, TimerPeriodic, SAMPLE_100NS);
++  if (EFI_ERROR (Status)) {
++    return Status;
++  }
++
++  Handle = NULL;
++  Status = gBS->InstallMultipleProtocolInterfaces (
++                  &Handle,
++                  &gEfiSimpleTextInProtocolGuid,
++                  &mTextIn,
++                  &gEfiDevicePathProtocolGuid,
++                  &mKeysPath,
++                  NULL
++                  );
++  DEBUG ((DEBUG_INFO, "Star2LteKeys: installed: %r (keys 0x%x)\n", Status, mStable));
++  return Status;
++}
+diff -ruN a/Platform/Star2LtePkg/Drivers/Star2LteKeysDxe/Star2LteKeysDxe.inf b/Platform/Star2LtePkg/Drivers/Star2LteKeysDxe/Star2LteKeysDxe.inf
+--- a/Platform/Star2LtePkg/Drivers/Star2LteKeysDxe/Star2LteKeysDxe.inf	1970-01-01 02:00:00
++++ b/Platform/Star2LtePkg/Drivers/Star2LteKeysDxe/Star2LteKeysDxe.inf	2026-11-03 08:12:23
+@@ -0,0 +1,35 @@
++## @file
++#  Star2LteKeysDxe: the S9's Volume Up/Down, Power and Bixby keys as a
++#  SimpleTextIn console, with a command palette for the UEFI Shell (Starbite).
++#  SPDX-License-Identifier: BSD-2-Clause-Patent
++##
++
++[Defines]
++  INF_VERSION                    = 0x0001001B
++  BASE_NAME                      = Star2LteKeysDxe
++  FILE_GUID                      = 5B1E5D7A-2C61-4F0B-9E2A-53544152424B
++  MODULE_TYPE                    = DXE_DRIVER
++  VERSION_STRING                 = 1.0
++  ENTRY_POINT                    = Star2LteKeysEntry
++
++[Sources]
++  Star2LteKeysDxe.c
++
++[Packages]
++  MdePkg/MdePkg.dec
++
++[LibraryClasses]
++  UefiDriverEntryPoint
++  UefiBootServicesTableLib
++  DxeServicesTableLib
++  MemoryAllocationLib
++  BaseMemoryLib
++  IoLib
++  DebugLib
++
++[Protocols]
++  gEfiSimpleTextInProtocolGuid            ## PRODUCES
++  gEfiDevicePathProtocolGuid              ## PRODUCES
++
++[Depex]
++  gEfiCpuArchProtocolGuid
+diff -ruN a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c	2026-11-03 08:10:57
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.c	2026-11-03 08:13:29
+@@ -9773,7 +9773,121 @@
+ // ----------------------------------------------------------------------------
+ //
+ 
++#ifndef STAR2LTE_BOOT_SHELL
++#define STAR2LTE_BOOT_SHELL  0
++#endif
++
++#if STAR2LTE_BOOT_SHELL
++//
++// Starbite "UEFI Shell" store entry (tools/woa/build-shell-uefi.sh): the FV
++// carries the edk2 Shell under the standard gUefiShellFileGuid and
++// Star2LteKeysDxe (Volume/Power/Bixby as SimpleTextIn). BDS never registers or
++// boots Windows in this build: it starts the Shell, restarts it when it exits,
++// and resets to the boot menu if it cannot be loaded.
++//
++STATIC CONST EFI_GUID  mStar2LteShellFileGuid = {
++  0x7C04A583, 0x9E3E, 0x4F1C, { 0xAD, 0x65, 0xE0, 0x52, 0x68, 0xD0, 0xB4, 0xD1 }
++};
++
++/** Every SimpleTextIn handle (the keys driver) becomes a ConIn device. */
++STATIC
+ VOID
++Star2LteRegisterKeyConsoles (
++  VOID
++  )
++{
++  EFI_STATUS                Status;
++  UINTN                     HandleCount;
++  EFI_HANDLE                *HandleBuffer;
++  UINTN                     Index;
++  EFI_DEVICE_PATH_PROTOCOL  *DevicePath;
++
++  HandleBuffer = NULL;
++  Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleTextInProtocolGuid, NULL, &HandleCount, &HandleBuffer);
++  BdsPramStr ("\n=KEYCON n=");
++  BdsPramHex ((UINT32)(EFI_ERROR (Status) ? 0 : HandleCount), 2);
++  BdsPramByte ('\n');
++  if (EFI_ERROR (Status)) {
++    return;
++  }
++
++  for (Index = 0; Index < HandleCount; Index++) {
++    Status = gBS->HandleProtocol (HandleBuffer[Index], &gEfiDevicePathProtocolGuid, (VOID **)&DevicePath);
++    if (!EFI_ERROR (Status)) {
++      EfiBootManagerUpdateConsoleVariable (ConIn, DevicePath, NULL);
++      gBS->ConnectController (HandleBuffer[Index], NULL, NULL, TRUE);
++    }
++  }
++
++  FreePool (HandleBuffer);
++}
++
++STATIC
++VOID
++Star2LteBootShell (
++  VOID
++  )
++{
++  EFI_STATUS                         Status;
++  EFI_LOADED_IMAGE_PROTOCOL          *Self;
++  MEDIA_FW_VOL_FILEPATH_DEVICE_PATH  Node;
++  EFI_DEVICE_PATH_PROTOCOL           *Path;
++  EFI_HANDLE                         Image;
++  UINTN                              Run;
++
++  Status = gBS->HandleProtocol (gImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&Self);
++  if (EFI_ERROR (Status)) {
++    return;
++  }
++
++  EfiInitializeFwVolDevicepathNode (&Node, &mStar2LteShellFileGuid);
++  Path = AppendDevicePathNode (DevicePathFromHandle (Self->DeviceHandle), (EFI_DEVICE_PATH_PROTOCOL *)&Node);
++  if (Path == NULL) {
++    return;
++  }
++
++  for (Run = 0; Run < 64; Run++) {
++    Image  = NULL;
++    Status = gBS->LoadImage (TRUE, gImageHandle, Path, NULL, 0, &Image);
++    BdsPramStr ("\n=SHELL run=");
++    BdsPramHex ((UINT32)Run, 2);
++    BdsPramStr (" load=");
++    BdsPramByte (EFI_ERROR (Status) ? (UINT8)'E' : (UINT8)'S');
++    BdsPramHex ((UINT32)(Status & 0xFFFFu), 4);
++    BdsPramByte ('\n');
++    if (EFI_ERROR (Status)) {
++      break;
++    }
++
++    if ((Run == 0) && (gST->ConOut != NULL)) {
++      gST->ConOut->ClearScreen (gST->ConOut);
++      gST->ConOut->OutputString (
++        gST->ConOut,
++        L"Starbite UEFI Shell  |  Volume: pick a command  |  Power: Enter  |  Bixby: q (stop paging)\r\n"
++        L"The last command in the list is 'reset' (back to the boot menu).\r\n\r\n"
++        );
++    }
++
++    gBS->SetWatchdogTimer (0, 0, 0, NULL);
++    Status = gBS->StartImage (Image, NULL, NULL);
++    BdsPramStr ("\n=SHELLRET st=");
++    BdsPramByte (EFI_ERROR (Status) ? (UINT8)'E' : (UINT8)'S');
++    BdsPramHex ((UINT32)(Status & 0xFFFFu), 4);
++    BdsPramByte ('\n');
++  }
++
++  FreePool (Path);
++  if (gST->ConOut != NULL) {
++    gST->ConOut->OutputString (gST->ConOut, L"\r\nUEFI Shell could not be started. Back to the boot menu in 10 s.\r\n");
++  }
++
++  gBS->Stall (10 * 1000 * 1000);
++  gRT->ResetSystem (EfiResetCold, EFI_SUCCESS, 0, NULL);
++  CpuDeadLoop ();
++}
++#endif
++
++VOID
+ EFIAPI
+ PlatformBootManagerBeforeConsole (
+   VOID
+@@ -9789,6 +9903,9 @@
+ #endif
+   Star2LteBootAttemptWatchdog ();
+   RegisterConsoles ();
++#if STAR2LTE_BOOT_SHELL
++  Star2LteRegisterKeyConsoles ();
++#endif
+   BDS_DPUT ('b');   // DIAG: consoles registered (ConOut var set)
+ #if STAR2LTE_PMU_PROBE
+   //
+@@ -9892,6 +10009,10 @@
+     Star2LteConnectUfsScsiStack (&UfsHcCount, &ExtScsiCount, &ScsiIoCount, &BlockIoCount, &UfsConnect, &ExtScsiConnect, &ScsiIoConnect);
+   }
+   BDS_DPUT ('e');              // DIAG: targeted storage connect done
++
++#if STAR2LTE_BOOT_SHELL
++  Star2LteBootShell ();        // does not return
++#endif
+ 
+   RegisterWindowsBootOption ();
+   BDS_DPUT ('f');              // DIAG: boot option scan done
+diff -ruN a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+--- a/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf	2026-11-03 08:10:57
++++ b/Platform/Star2LtePkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf	2026-11-03 08:13:29
+@@ -52,6 +52,7 @@
+   gEfiCpuArchProtocolGuid                  ## CONSUMES
+   gEfiMemoryAttributeProtocolGuid          ## CONSUMES
+   gEfiPartitionInfoProtocolGuid            ## CONSUMES
++  gEfiSimpleTextInProtocolGuid             ## CONSUMES
+ 
+ [Guids]
+   gEfiEndOfDxeEventGroupGuid
+diff -ruN a/Platform/Star2LtePkg/Star2LtePkg.dsc b/Platform/Star2LtePkg/Star2LtePkg.dsc
+--- a/Platform/Star2LtePkg/Star2LtePkg.dsc	2026-11-03 08:10:57
++++ b/Platform/Star2LtePkg/Star2LtePkg.dsc	2026-11-03 08:13:43
+@@ -30,6 +30,15 @@
+ # ext210: staged extra-RAM publication at SEC/PEI (see MemoryInitPeiLib.c).
+ #   0 = 711 MiB baseline, 3 = the deployed 1,357 MiB, 4 = adds the 4 GiB bank.
+ #
++#
++# Starbite UEFI Shell build (tools/woa/build-shell-uefi.sh): 1 = BDS boots the
++# Shell embedded in the FV (STAR2LTE_SHELL_EFI = its PE32, WORKSPACE-relative)
++# and the hardware keys are a console; Windows is never started.
++#
++!ifndef STAR2LTE_BOOT_SHELL
++  DEFINE STAR2LTE_BOOT_SHELL = 0
++!endif
++
+ !ifndef STAR2LTE_RAM_STAGE
+   DEFINE STAR2LTE_RAM_STAGE = 0
+ !endif
+@@ -43,8 +52,8 @@
+   # prologue faulted). Matches ArmVirtPkg/ArmVirt.dsc.inc.
+   GCC:*_*_AARCH64_DLINK_FLAGS    = -z common-page-size=0x1000
+   CLANGPDB:*_*_*_DLINK_FLAGS     = /ALIGN:0x1000
+-  CLANGPDB:*_*_AARCH64_CC_FLAGS  = -DSTAR2LTE_USB_DEBUG_MODE=$(STAR2LTE_USB_DEBUG_MODE) -DSTAR2LTE_RAM_STAGE=$(STAR2LTE_RAM_STAGE)
+-  CLANGDWARF:*_*_AARCH64_CC_FLAGS = -DSTAR2LTE_USB_DEBUG_MODE=$(STAR2LTE_USB_DEBUG_MODE) -DSTAR2LTE_RAM_STAGE=$(STAR2LTE_RAM_STAGE)
++  CLANGPDB:*_*_AARCH64_CC_FLAGS  = -DSTAR2LTE_USB_DEBUG_MODE=$(STAR2LTE_USB_DEBUG_MODE) -DSTAR2LTE_RAM_STAGE=$(STAR2LTE_RAM_STAGE) -DSTAR2LTE_BOOT_SHELL=$(STAR2LTE_BOOT_SHELL)
++  CLANGDWARF:*_*_AARCH64_CC_FLAGS = -DSTAR2LTE_USB_DEBUG_MODE=$(STAR2LTE_USB_DEBUG_MODE) -DSTAR2LTE_RAM_STAGE=$(STAR2LTE_RAM_STAGE) -DSTAR2LTE_BOOT_SHELL=$(STAR2LTE_BOOT_SHELL)
+ 
+ ################################################################################
+ #
+@@ -415,3 +424,9 @@
+   # ShellPkg library tail once the minimal FD boots on device.
+   # MdeModulePkg/Application/UiApp/UiApp.inf
+   # ShellPkg/Application/Shell/Shell.inf
++
++!if $(STAR2LTE_BOOT_SHELL) == 1
++  # --- Starbite UEFI Shell entry: keys console + device-path text protocols ---
++  Platform/Star2LtePkg/Drivers/Star2LteKeysDxe/Star2LteKeysDxe.inf
++  MdeModulePkg/Universal/DevicePathDxe/DevicePathDxe.inf
++!endif
+diff -ruN a/Platform/Star2LtePkg/Star2LtePkg.fdf b/Platform/Star2LtePkg/Star2LtePkg.fdf
+--- a/Platform/Star2LtePkg/Star2LtePkg.fdf	2026-11-03 08:10:57
++++ b/Platform/Star2LtePkg/Star2LtePkg.fdf	2026-11-03 08:13:43
+@@ -176,6 +176,19 @@
+   # INF MdeModulePkg/Application/UiApp/UiApp.inf
+   # INF ShellPkg/Application/Shell/Shell.inf
+ 
++!if $(STAR2LTE_BOOT_SHELL) == 1
++  #
++  # Starbite UEFI Shell entry: the edk2 Shell (full build, acpiview included,
++  # built from ShellPkg.dsc) as a binary under gUefiShellFileGuid; BDS starts it.
++  #
++  INF Platform/Star2LtePkg/Drivers/Star2LteKeysDxe/Star2LteKeysDxe.inf
++  INF MdeModulePkg/Universal/DevicePathDxe/DevicePathDxe.inf
++  FILE APPLICATION = 7C04A583-9E3E-4F1C-AD65-E05268D0B4D1 {
++    SECTION PE32 = $(STAR2LTE_SHELL_EFI)
++    SECTION UI = "Shell"
++  }
++!endif
++
+ ################################################################################
+ #
+ # FFS packaging rules — how each module type is wrapped into the FV.

@@ -2040,3 +2040,19 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   written. Input only from a serial console: the S9 keys/touch are IOHID services, not a tty (next: a kernel patch
   feeding sweet_hid_key into the console tty). Catalog entry proposed, not added (key darwin, method xnu,
   files ["darwin.xnu"], tag lab).
+- 2026-11-03: **UEFI side (Microsoft category): UEFI Shell entry built, WinPE plan + tooling, 24H2 assessment.**
+  Nothing written to the phone. (1) `tools/woa/build-shell-uefi.sh` -> build/woa/shell/uefishell.uefi (sha c29f5343...):
+  our source Star2LtePkg (patches 0001,0002,0003,0005,0018,0022,0023) + tools/woa/patches-shell/0024 (switch
+  STAR2LTE_BOOT_SHELL, default 0): the edk2 Shell (ShellPkg RELEASE, all commands incl. acpiview) in the FV under
+  gUefiShellFileGuid, Star2LteKeysDxe (GPA0/GPA2 keys as SimpleTextIn: Volume = command palette of read-only
+  commands, Power = Enter, Bixby = q; ALIVE page added to the GCD as UC MMIO), BDS boots the Shell right after the
+  UFS connect and never Windows; own edk2 output dir Build/Star2LteShell. Ring markers =KEYCON / =SHELL / =SHELLRET.
+  docs/UEFI-SHELL.md (catalog entry key uefishell, test steps). (2) docs/WINPE-ARM64-PLAN.md: WinPE/WinRE serviced
+  ON the phone's Windows (DISM/bcdedit; tools/woa/winpe/starbite-winpe.cmd re|pe|transplant|once|remove: ramdisk
+  entry for C:\Starbite\WinPE\boot.wim with fixed BCD ids, S9 drivers from the DriverStore so the UFS driver owns
+  the boot watchdog), host fallback with wimlib (tools/woa/winpe/winpe-host.sh, pever.py; wimtools + libhivex-bin
+  installed in lima). Main risk: image build vs the firmware's 22621.7582 match (ConvertConfig LCUwinre=0).
+  Menu selection design: Star2LteBcdDefaultDxe (in-place REG_SZ swap of {bootmgr} default 23000003). (3)
+  docs/WIN11-24H2-A55.md: LSE -> A55 only; A55 core 1 and M3 core 0 share Aff 0x100, so the MADT must list only the
+  4 A55 (MPIDR 0x000/0x100/0x200/0x300, parked, no M3, PPTT 1 cluster); per-build CNTFRQ/NTPATCH work for 26100 is
+  the blocker. tools/woa/winpe/acpi-dump.ps1 dumps the release's real tables from Windows (first step).
