@@ -1,6 +1,7 @@
 # XNU microSD root driver (design)
 
-Status: design only. Nothing here has been built, flashed or booted. The phone was not touched.
+Status: v1 (PIO, read-only) implemented as xnu/series-12377 patches 0345/0346 and built (section 12).
+The probe payload `out/xnu-sdprobe.xnu` is built but not flashed or booted. The phone was not touched.
 
 The goal is to let our XNU ports (iOS 26 on xnu-12377, iOS 14 on xnu-7195, both STARLTE) mount an
 HFSX root from the 128 GB microSD card. The driver is read-only by default. That frees internal UFS,
@@ -486,3 +487,157 @@ The same kernel keeps `rd=ufsroot0` working, so nothing about the daily iOS 26 b
 3. The tail reservation in `sbstore2.py --medium sd`.
 4. The T1 kernel image and the 64 MiB test image. Then T1, then T2.
 5. v1.1: `sdhs=1`, `sdrw=1` with the card herolog. v2: IDMAC below 4 GiB.
+
+## 12. Implementation (v1) and the first device test
+
+### 12.1 What was built
+
+| Piece | Where |
+|---|---|
+| Driver | `xnu/series-12377/0345-starlte-microsd-driver.patch`: `bsd/dev/starlte_sd.c` + its `bsd/conf/files` line |
+| Root hook | `xnu/series-12377/0346-starlte-microsd-root.patch`: `IOFindBSDRoot` STARLTE block, `sdprobe=` before the UFS probe, `rd=sdroot0` next to `ufsroot0` |
+| Kernel | `out/kernel.development.starlte-12377` (incremental `tools/build-xnu-12377.sh`, no warnings in the new files); the kernel before it is kept as `out/kernel.development.starlte-12377.pre-sd` |
+| Payload tool | `tools/mkpayload-ios26.sh NAME CMDLINE` -> `out/xnu-NAME.xnu` (strip -x kernel + `out/starlte-iphone11.adt` + cmdline, `mkpayload.py`; a store entry, no BOOT image) |
+| Probe cmdline | `tools/cmdline/ios26-sdprobe.txt`: the daily set minus `ufsrw=1 rootrw=1`, plus `herolog=0 sdprobe=2 sdhold=60 sdbench=16 sdroot=lba:249868288,131072 sweetreboot=1` (593 of 607 bytes) |
+| Payload | `out/xnu-sdprobe.xnu`, 17,198,848 bytes |
+
+Differences from the design, all on the safe side:
+- **No write path at all in v1.** `sdrw=1` only prints that writes are not in this build. The strategy
+  returns EROFS for every write, open refuses FWRITE, and `DKIOCISWRITABLE` is 0. The card
+  herolog (section 8) waits for v1.1.
+- **CMD9 added** between CMD3 and CMD7 (stand-by state) to read the CSD. It gives the card size
+  (249999360 sectors expected for the SK128), so reads past the end are refused and `sdroot=` is
+  checked against the real size. If CMD9 fails, `sdroot=` is refused, and the probe still runs.
+- `sdroot=lba:` refuses overlap with any FAT/exFAT/NTFS primary entry (0x07/0x0b/0x0c/0x0e), not only
+  p1. `sdroot=pN` also refuses those types, extended containers, empty entries and 0xDA.
+- `rd=sdroot0` checks for an `H+`/`HX` volume header at sector 2 of the range before it publishes
+  the devfs nodes. With no header it panics (`EFTYPE`, 79) instead of handing HFS garbage.
+- The controller address is the constant 0x11500000. An ADT `/starbite-sd` node is optional and only
+  checked (a node at another address refuses to start). `mkadt_starlte.py` is unchanged, so the
+  daily ADT is reused as it is.
+- `sdhs`, `sdwait`, `sdclkdiv` and IDMAC are not in v1. `sdfifo32=1` is.
+- Not done yet: the series-7195 port, the host test of the MBR/EBR parser and the
+  `sbstore2.py --medium sd` tail reservation (section 11, items 1-3).
+
+### 12.2 What the probe does (`sdprobe=2`)
+
+It runs in `IOFindBSDRoot` before anything touches UFS, so with `sdprobe=2` UFS is never
+initialised: nothing on internal storage is read or written. It writes nothing to the card.
+1. Card up (2.3 + CMD9). It prints the gates, the CMU divider, bus Hz, LDO31/LDO2, VERID/HCON, then
+   CID name, OCR, RCA, the size and the card clock.
+2. MBR (sector 0). It prints the disk id and every entry.
+3. p1 sector 0 (the exFAT boot sector). It prints the OEM name `EXFAT   `, the volume length, the
+   sector and cluster shifts, the serial and the first 16 bytes.
+4. p2, the 0xDA store. It reads blocks 0-1 (16 sectors, one CMD18) and prints `SBSTORE1`, then the
+   SBSTORE2 version, count, capacity, used and the **header CRC check**. Then it reads the
+   directory (32 sectors, one CMD18), checks the **directory CRC** and prints up to 12 entry
+   names. Both CRCs are computed by sbstore2.py on the Mac, so "ok" proves multi-block reads
+   return the right bytes.
+5. `sdroot=lba:249868288,131072` is resolved and checked. Then sector 249868290 (the last 64 MiB
+   of the card) is read for an HFS header. Today that range is the unused tail of p2, so expect
+   `sdroot ok no HFS`. It proves the range parser and a read near the card's last sector.
+6. Throughput: it reads 16 MiB from p2's start in 128 KiB CMD18s, then reads the first chunk again
+   and compares the two.
+7. It prints `STARBITE SD: probe done: <summary>` and `holding 60 s ... photograph the screen now`.
+   Then it waits 60 s and calls `panic("STARBITE SD: probe done (sdprobe=2, nothing written): <summary>")`.
+   With `sweetreboot=1` the panic hook copies the panic head and the console tail into the
+   ramoops pmsg ring and resets into TWRP.
+
+On a failure, the summary reads `FAIL at <step> (<err>, rintsts 0x.. status 0x..) verid 0x..
+ldo31 0x..`. The panic still comes, and so does the reset.
+
+### 12.3 Device test T1 (probe only, read-only, no card re-layout)
+
+The phone starts in TWRP (adb `recovery`). Claude runs every host command, and the user only presses
+the buttons (`device-workflow-division`). The payload goes in as a **store entry on UFS, never as
+BOOT**: BOOT and the daily `@boot` iOS 26 entry stay as they are.
+
+1. **Check the payload** on the Mac:
+   ```
+   shasum -a 256 out/xnu-sdprobe.xnu      # fb8d83619e88b2da826bd95d3aba5cc4cd05eb3665883641e78fa5f90d1e396e
+   strings out/xnu-sdprobe.xnu | grep -o 'sdprobe=2 sdhold=60.*sweetreboot=1'
+   ```
+2. **Pull the live store** (read-only), in the same sitting as the flash:
+   ```
+   tools/store/store-pull.sh build/store/ufs-store-live.img    # must not print STOP
+   ```
+3. **Make a catalog** from the live one plus a hidden lab entry:
+   ```
+   cp tools/store/catalog.toml build/store/catalog-sdprobe.toml
+   cat >> build/store/catalog-sdprobe.toml <<'TOML'
+
+   [[entry]]
+   key = "sdprobe"
+   name = "microSD probe"
+   version = "XNU 12377 · read only · panics"
+   category = "lab"
+   method = "xnu"
+   tag = "lab"
+   files = ["sdprobe.xnu"]
+   root = "none (probe ends in a panic)"
+   flags = ["hidden"]
+   TOML
+   ```
+   If store-pull.sh printed STOP, append the entry to a copy of the TOML that the live catalog was
+   built from, not to `catalog.toml`. There must be no `cmdline =` line: the cmdline is 593 of
+   the payload's 607 bytes.
+4. **Build and compare**:
+   ```
+   python3 tools/store/sbstore2.py build build/store/ufs-store-sdprobe.img --medium ufs \
+       --catalog build/store/catalog-sdprobe.toml --import build/store/ufs-store-live.img \
+       sdprobe.xnu=out/xnu-sdprobe.xnu:xnu
+   diff <(python3 tools/store/sbstore2.py list build/store/ufs-store-live.img) \
+        <(python3 tools/store/sbstore2.py list build/store/ufs-store-sdprobe.img)
+   diff <(python3 tools/store/sbstore2.py catalog-keys build/store/ufs-store-live.img) \
+        <(python3 tools/store/sbstore2.py catalog-keys build/store/ufs-store-sdprobe.img)
+   ```
+   The first diff may show only the changed `catalog` line and the added `sdprobe.xnu`. The second
+   may show only `> sdprobe`. Anything else means stop.
+5. **Flash the store**: `tools/store/store-flash.sh build/store/ufs-store-sdprobe.img`. It checks the
+   SHA-256 on the phone and keeps the settings block.
+6. **Card in place.** The 128 GB card must be in the slot. Nothing on it changes.
+7. **User:** reboot from TWRP into the menu, then choose Engineer > Start an OS > **microSD probe**.
+8. **Expected on screen** (framebuffer console, `-v`), within about 10 s of the kernel start:
+   ```
+   STARBITE SD: probe (read only): microSD controller 0x11500000
+   STARBITE SD: gates 0x..3..... 0x..3..... 0x..3....., cmu div 0x.. -> bus 201500000 Hz, ldo31 0xe8 ldo2 0xfc, verid 0x....270a hcon 0x...
+   STARBITE SD: card SDHC/SDXC "SK128" mid 0x.. rca 0x.... ocr 0xc0ff8000, 249999360 sectors (122069 MiB), clksel 0x3020000, 20150 kHz 4 bit, fifo 64
+   STARBITE SD: MBR p1 type 0x07 ... lba 8192 +182878208 ...
+   STARBITE SD: MBR p2 type 0xda ... lba 182886400 +67112960 ...
+   STARBITE SD: p1 sector 0: oem "EXFAT   " ...
+   STARBITE SD: p2: block 0 "SBSTORE1"|..., SBSTORE2 v2, N entries, ... header crc ok
+   STARBITE SD: p2: directory (one 32-sector CMD18) crc ok
+   STARBITE SD: sdroot=lba:249868288,131072: 0, lba 249868288 +131072, volume header none
+   STARBITE SD: read 128 x 128 KiB from 182886400: 0, ... us, ~9000-11000 KB/s, reread same
+   STARBITE SD: probe done: card up in ... ms, 122069 MiB, 20150 kHz, rca ....; p1 07 ... p2 da ...
+   STARBITE SD: holding 60 s, then a deliberate panic (photograph the screen now)
+   ```
+   (The VERID, divider, clock and name values are expectations, not measurements.) If the card store
+   was never written, p2 prints `no SBSTORE2 header`. That is still a pass for the driver as long as
+   the MBR and p1 lines are right.
+9. **User: photograph the screen** during the 60 s hold. The phone then panics and resets into TWRP
+   by itself. If it does not reset (the screen shows the panic and stays), photograph that too, then
+   do a forced reset into TWRP.
+10. **Pull the log** (Claude, in TWRP):
+    ```
+    adb exec-out cat /sys/fs/pstore/pmsg-ramoops-0 > build/sdprobe-t1-pstore.bin
+    strings build/sdprobe-t1-pstore.bin | grep -E 'STARBITE (SD|: XNU panic)'
+    ```
+11. **Clean up** (optional): rebuild the store from a fresh pull without the entry, or leave the
+    hidden entry for T2.
+
+**Pass:** the card comes up, the MBR matches section 1 item 4, p1 says `EXFAT   `, both store CRCs
+are `ok` (or the store is honestly absent), the reread is `same`, and the throughput is printed.
+**First things to try on a failure** (one boot each):
+- `FIFO`/data errors -5/-6: `sdfifo32=1`.
+- DRTO: check that TMOUT reads back ~0.
+- `ACPM`: the card rails. Compare with the loader's EngineerMode microSD page.
+- `no card`: reseat the card.
+
+### 12.4 Device test T2 (root on the card, read-only), after T1 passes
+
+Make the 64 MiB non-journaled HFSX image of section 9 and `dd` it to sector 249868288 from TWRP,
+then read it back and compare the sha. Then build the payload with the daily cmdline, but with
+`rd=ufsroot0 ufsroot=USERDATA ufsrw=1 rootrw=1` replaced by `rd=sdroot0 sdroot=lba:249868288,131072`
+and `herolog=0 sweetreboot=1` added (`tools/mkpayload-ios26.sh sdroot-t2 FILE`). Flash it as a
+second hidden store entry the same way. Pass: the test init's hash of `/sdtest.bin` matches the host.
