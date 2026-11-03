@@ -1,0 +1,22 @@
+From b892d4c0c7c33c24663cd6c01151ff2d95b0e368 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 08:07:53 +0200
+Subject: [PATCH] patch: 0084-a5xelte-4k-user-va.patch
+
+---
+ osfmk/mach/arm/vm_param.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/osfmk/mach/arm/vm_param.h b/osfmk/mach/arm/vm_param.h
+index 0ffbb9b..b489822 100644
+--- a/osfmk/mach/arm/vm_param.h
++++ b/osfmk/mach/arm/vm_param.h
+@@ -167,7 +167,7 @@ extern int PAGE_SHIFT_CONST;
+ 
+ /* system-wide values */
+ #define MACH_VM_MIN_ADDRESS_RAW 0x0ULL
+-#if defined(PLATFORM_MacOSX) || defined(PLATFORM_DriverKit)
++#if (defined(PLATFORM_MacOSX) || defined(PLATFORM_DriverKit)) && !defined(A5XELTE)
+ #define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL
+ #else
+ #define MACH_VM_MAX_ADDRESS_RAW 0x0000000FC0000000ULL

@@ -1,0 +1,27 @@
+From e7e5119cad3c3d1ba77d52f4f14ee3df4f7821f2 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 08:07:52 +0200
+Subject: [PATCH] patch: 0044-sweet-crash-log-reason.patch
+
+---
+ bsd/kern/kern_exit.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+index 0a683c9..e504219 100644
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1068,6 +1068,13 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
+ 			extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
+ 			sweet_crash_log(p->p_comm, p->p_pid, WTERMSIG(rv),
+ 			    ((uint64_t)ut->uu_exception << 32) | (uint32_t)ut->uu_code, ut->uu_subcode);
++			/* abort_with_payload messages (_objc_fatal, os_crash_fmt, ...) */
++			if (PROC_HAS_EXITREASON(p)) {
++				char *desc = exit_reason_get_string_desc(p->p_exit_reason);
++				printf("CRASH %s reason ns %u code 0x%llx: %s\n", p->p_comm,
++				    p->p_exit_reason->osr_namespace, p->p_exit_reason->osr_code,
++				    desc != NULL ? desc : "(none)");
++			}
+ 		}
+ #endif
+ 

@@ -1,0 +1,1 @@
+debug=0xc serial=3 cpus=8 keepsyms=1 -v -noprogress rd=ufsroot0 ufsroot=IOS14 ufsrw=1 rootrw=1 cs_enforcement_disable=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 wdt=-1 -wdt_no_pmu wdt_test=no_user_checkin a5fb_keep_on=1 a5fb_noconsole=1 sweetfb_native=1 sweetfb_scale=1 sweetfb_lw=750 sweetfb_lh=1334 vm_compression_limit=98304 ufsmulti=1

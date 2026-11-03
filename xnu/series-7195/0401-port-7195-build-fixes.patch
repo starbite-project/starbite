@@ -1,0 +1,556 @@
+From fe89a597f3c8a52f18c92d13e751e7e2b7ea3739 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 08:33:09 +0200
+Subject: [PATCH] patch: 0401-port-7195-build-fixes.patch
+
+- pmap.c: declare the compilation-service cdhash lock/buffer and pmap_cs_log_hacks the public 7195 source uses but does not define
+- kalloc.h, IOLib.h, vm_kern.h: 8796 names kalloc_data/kfree_data, IOMallocData/IOMallocZeroData/IOFreeData, KMA_DATA
+- prng_random.c (0014): SWEET HMAC DRBG keeps its state outside 7195's Fortuna-shaped cckprng_ctx; 7195's init signature
+- IOHIDEventServiceUserClient (0058): classic IOUserClient dispatch instead of IOUserClient2022
+- kern_exit.c (0044): launchd_exit_reason_get_string_desc; exception.c: include kern/kalloc.h
+- MASTER.arm64.starlte: no pgtrace
+- libkern, bsd Makefile.template: trailing space after the per-object INCFLAGS (7195's config tool joins them to the source path)
+- sweet_amfi.c (0025/0035): no AMFI interface (libkern/amfi/amfi.h) on 7195, which parses XML entitlements itself; the MAC policies stay
+- machine_routines.c: ml_enable_monitor and ml_io_map_unmappable for SWEET boards; pmap.c: pmap_cs_allow_invalid (closed/stripped in public 7195)
+- lldbmacros syntax_checker.py: Python 3 no-op (7195's is Python 2)
+---
+ bsd/conf/Makefile.template                    |  3 +-
+ bsd/kern/kern_exit.c                          |  2 +-
+ bsd/kern/sweet_amfi.c                         | 11 ++++
+ config/MASTER.arm64.starlte                   |  4 +-
+ iokit/IOKit/IOLib.h                           |  5 ++
+ .../arm/hid/IOHIDEventServiceUserClient.cpp   | 34 +++++-----
+ .../arm/hid/IOHIDEventServiceUserClient.h     | 11 ++--
+ libkern/conf/Makefile.template                |  3 +-
+ osfmk/arm/pmap.c                              | 17 +++++
+ osfmk/arm64/machine_routines.c                | 21 +++++++
+ osfmk/kern/exception.c                        |  1 +
+ osfmk/kern/kalloc.h                           |  6 ++
+ osfmk/prng/prng_random.c                      | 43 ++++++++-----
+ osfmk/vm/vm_kern.h                            |  1 +
+ tools/lldbmacros/core/syntax_checker.py       | 63 ++-----------------
+ 15 files changed, 125 insertions(+), 100 deletions(-)
+
+diff --git a/bsd/conf/Makefile.template b/bsd/conf/Makefile.template
+index ed0711c..0b58560 100644
+--- a/bsd/conf/Makefile.template
++++ b/bsd/conf/Makefile.template
+@@ -47,7 +47,8 @@ SFLAGS+= -include meta_features.h
+ # This provider is built into SWEET; other boards use their normal kext.
+ ifneq ($(filter $(CURRENT_MACHINE_CONFIG),SWEET A5XELTE HEROLTE STARLTE),)
+ SWEET_PTHREAD_ROOT = $(SRCROOT)/bsd/pthread/sweet_libpthread
+-SWEET_PTHREAD_INC = -I$(SWEET_PTHREAD_ROOT) -I$(SWEET_PTHREAD_ROOT)/private -I$(SWEET_PTHREAD_ROOT)/include
++# xnu-7195's config tool writes ${C_RULE_1A}$(SOURCE_DIR)/... with no space: keep one at the end.
++SWEET_PTHREAD_INC = -I$(SWEET_PTHREAD_ROOT) -I$(SWEET_PTHREAD_ROOT)/private -I$(SWEET_PTHREAD_ROOT)/include $(sweet_no_space)
+ sweet_pthread_init.o_INCFLAGS = $(SWEET_PTHREAD_INC)
+ sweet_pthread_support.o_INCFLAGS = $(SWEET_PTHREAD_INC)
+ sweet_pthread_synch.o_INCFLAGS = $(SWEET_PTHREAD_INC)
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+index 49362e4..f1a8e6e 100644
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1070,7 +1070,7 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
+ 			    ((uint64_t)ut->uu_exception << 32) | (uint32_t)ut->uu_code, ut->uu_subcode);
+ 			/* abort_with_payload messages (_objc_fatal, os_crash_fmt, ...) */
+ 			if (PROC_HAS_EXITREASON(p)) {
+-				char *desc = exit_reason_get_string_desc(p->p_exit_reason);
++				char *desc = launchd_exit_reason_get_string_desc(p->p_exit_reason);
+ 				printf("CRASH %s reason ns %u code 0x%llx: %s\n", p->p_comm,
+ 				    p->p_exit_reason->osr_namespace, p->p_exit_reason->osr_code,
+ 				    desc != NULL ? desc : "(none)");
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index 0241a1a..e860474 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -25,7 +25,12 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+ #include <kern/debug.h>
+ #include <kern/startup.h>
++#if __has_include(<libkern/amfi/amfi.h>)
++#define SWEET_AMFI_INTERFACE 1  /* 8796+: the kernel asks the AMFI kext for entitlements */
+ #include <libkern/amfi/amfi.h>
++#else
++#define SWEET_AMFI_INTERFACE 0  /* xnu-7195: the kernel reads XML entitlements itself */
++#endif
+ #include <mach/kern_return.h>
+ #include <sys/codesign.h>
+ #include <sys/mount.h>
+@@ -36,6 +41,7 @@
+ #include <sys/vnode.h>
+ #include <security/mac_policy.h>
+ 
++#if SWEET_AMFI_INTERFACE
+ /* iokit/Kernel/arm/SweetEntitlements.cpp */
+ void *sweet_entitlements_create(const CS_GenericBlob *blob, size_t blob_len);
+ void *sweet_entitlements_copy_dict(const void *ent);
+@@ -246,6 +252,7 @@ sweet_amfi_register(void)
+ 	printf("SWEET AMFI: built-in interface registered (XML entitlements)\n");
+ }
+ STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, sweet_amfi_register);
++#endif /* SWEET_AMFI_INTERFACE */
+ 
+ /*
+  * The signature reached this hook validated, so mark it CS_SIGNED like AMFI
+@@ -267,9 +274,13 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
+ 	if (mp != NULL && (vfs_flags(mp) & MNT_ROOTFS)) {
+ 		*cs_flags |= CS_PLATFORM_BINARY;
+ 	}
++#if SWEET_AMFI_INTERFACE
+ 	if (cs_blob != cs_blob->csb_ro_addr && cs_blob->csb_entitlements == NULL) {
+ 		sweet_amfi_attach_entitlements(cs_blob);
+ 	}
++#else
++	(void)cs_blob;
++#endif
+ 	return 0;
+ }
+ 
+diff --git a/config/MASTER.arm64.starlte b/config/MASTER.arm64.starlte
+index 0835f4c..387e009 100644
+--- a/config/MASTER.arm64.starlte
++++ b/config/MASTER.arm64.starlte
+@@ -25,8 +25,8 @@
+ #
+ #  KERNEL_BASE =    [ arm64 medium msgb_large config_arrow config_requires_u32_munging config_delay_idle_sleep config_proc_udata_storage config_uexc config_darkboot nos_arm_asm nos_arm_pmap ]
+ #  KERNEL_RELEASE = [ KERNEL_BASE ]
+-#  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug pgtrace ]
+-#  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_ltable_stats config_ltable_debug config_waitq_stats config_workloop_debug config_waitq_debug pgtrace ]
++#  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug ]
++#  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_ltable_stats config_ltable_debug config_waitq_stats config_workloop_debug config_waitq_debug ]
+ #  BSD_BASE =       [ mach_bsd sysv_sem sysv_msg sysv_shm config_netboot config_imageboot config_workqueue psynch config_proc_uuid_policy config_coredump pgo config_personas ]
+ #  BSD_RELEASE =    [ BSD_BASE ]
+ #  BSD_DEV =        [ BSD_BASE config_vnguard ]
+diff --git a/iokit/IOKit/IOLib.h b/iokit/IOKit/IOLib.h
+index 4c2444d..3301787 100644
+--- a/iokit/IOKit/IOLib.h
++++ b/iokit/IOKit/IOLib.h
+@@ -110,6 +110,11 @@ IOMallocZero_internal(
+ 
+ #define IOMallocZero(size) IOMallocZero_internal(KHEAP_DEFAULT, size)
+ 
++/* starlte (xnu-7195): the 8796 data-buffer names the series uses. */
++#define IOMallocData(size)     IOMalloc(size)
++#define IOMallocZeroData(size) IOMallocZero(size)
++#define IOFreeData(address, size) IOFree(address, size)
++
+ #else/* defined(XNU_KERNEL_PRIVATE) */
+ 
+ void * IOMalloc(vm_size_t size)      __attribute__((alloc_size(1)));
+diff --git a/iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp b/iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp
+index 256a977..8643afc 100644
+--- a/iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp
++++ b/iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp
+@@ -43,43 +43,38 @@
+ //===========================================================================
+ // IOHIDEventServiceUserClient class
+ 
+-#define super IOUserClient2022
++#define super IOUserClient
+ 
+-OSDefineMetaClassAndStructors(IOHIDEventServiceUserClient, IOUserClient2022)
++OSDefineMetaClassAndStructors(IOHIDEventServiceUserClient, IOUserClient)
+ 
+ //==============================================================================
+ // IOHIDEventServiceUserClient::sMethods
+ //==============================================================================
+-const IOExternalMethodDispatch2022 IOHIDEventServiceUserClient::sMethods[kIOHIDEventServiceUserClientNumCommands] = {
++const IOExternalMethodDispatch IOHIDEventServiceUserClient::sMethods[kIOHIDEventServiceUserClientNumCommands] = {
+     { //    kIOHIDEventServiceUserClientOpen
+ 	(IOExternalMethodAction) &IOHIDEventServiceUserClient::_open,
+ 	1, 0,
+-    0, 0,
+-    false
++    0, 0
+     },
+     { //    kIOHIDEventServiceUserClientClose
+ 	(IOExternalMethodAction) &IOHIDEventServiceUserClient::_close,
+ 	1, 0,
+-    0, 0,
+-    false
++    0, 0
+     },
+     { //    kIOHIDEventServiceUserClientCopyEvent
+ 	(IOExternalMethodAction) &IOHIDEventServiceUserClient::_copyEvent,
+     2, kIOUCVariableStructureSize,
+-    0, kIOUCVariableStructureSize,
+-    false
++    0, kIOUCVariableStructureSize
+     },
+     { //    kIOHIDEventServiceUserClientSetElementValue
+ 	(IOExternalMethodAction) &IOHIDEventServiceUserClient::_setElementValue,
+ 	3, 0,
+-    0, 0,
+-    false
++    0, 0
+     },
+     { //    kIOHIDEventServiceUserClientCopyMatchingEvent
+     (IOExternalMethodAction) &IOHIDEventServiceUserClient::_copyMatchingEvent,
+     0, kIOUCVariableStructureSize,
+-    0, kIOUCVariableStructureSize,
+-    false
++    0, kIOUCVariableStructureSize
+     },
+ };
+ 
+@@ -195,7 +190,9 @@ IOReturn IOHIDEventServiceUserClient::clientMemoryForTypeGated(
+ //==============================================================================
+ // IOHIDEventServiceUserClient::externalMethod
+ //==============================================================================
+-IOReturn IOHIDEventServiceUserClient::externalMethod(uint32_t selector, IOExternalMethodArgumentsOpaque * args)
++IOReturn IOHIDEventServiceUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
++                                                    IOExternalMethodDispatch * dispatch __unused,
++                                                    OSObject * target __unused, void * reference __unused)
+ {
+     ExternalMethodGatedArguments gatedArguments = {selector, args};
+     IOReturn result;
+@@ -214,7 +211,9 @@ IOReturn IOHIDEventServiceUserClient::externalMethodGated(ExternalMethodGatedArg
+   
+     require(!isInactive(), exit);
+ 
+-    result = dispatchExternalMethod(arguments->selector, arguments->arguments, sMethods, sizeof(sMethods) / sizeof(sMethods[0]), this, NULL);
++    require_action(arguments->selector < sizeof(sMethods) / sizeof(sMethods[0]), exit, result = kIOReturnBadArgument);
++    result = super::externalMethod(arguments->selector, arguments->arguments,
++                                   (IOExternalMethodDispatch *)&sMethods[arguments->selector], this, NULL);
+   
+ exit:
+     return result;
+@@ -320,10 +319,7 @@ bool IOHIDEventServiceUserClient::start( IOService * provider )
+         debugStateSerializer->release();
+     }
+ 
+-    setProperty(kIOUserClientDefaultLockingKey,                           kOSBooleanTrue);
+-    setProperty(kIOUserClientDefaultLockingSetPropertiesKey,              kOSBooleanTrue);
+-    setProperty(kIOUserClientDefaultLockingSingleThreadExternalMethodKey, kOSBooleanFalse);
+-    setProperty(kIOUserClientEntitlementsKey,                             kOSBooleanFalse);
++    /* xnu-7195 has no IOUserClient default-locking or entitlement-check keys. */
+  
+     result = true;
+ 
+diff --git a/iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.h b/iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.h
+index 06d1f06..6f9bbd9 100644
+--- a/iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.h
++++ b/iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.h
+@@ -42,7 +42,7 @@ enum IOHIDEventServiceUserClientCommandCodes {
+ 
+ class IOHIDEventServiceQueue;
+ 
+-class IOHIDEventServiceUserClient : public IOUserClient2022
++class IOHIDEventServiceUserClient : public IOUserClient
+ {
+     OSDeclareDefaultStructors(IOHIDEventServiceUserClient)
+ 
+@@ -50,10 +50,10 @@ private:
+   
+     typedef struct ExternalMethodGatedArguments {
+         uint32_t                          selector;
+-        IOExternalMethodArgumentsOpaque * arguments;
++        IOExternalMethodArguments *       arguments;
+     } ExternalMethodGatedArguments;
+   
+-    static const IOExternalMethodDispatch2022 sMethods[kIOHIDEventServiceUserClientNumCommands];
++    static const IOExternalMethodDispatch sMethods[kIOHIDEventServiceUserClientNumCommands];
+ 
+     IOHIDEventService *         _owner;
+     IOHIDEventServiceQueue *    _queue;
+@@ -125,7 +125,10 @@ protected:
+                                 IOOptionBits *                  options,
+                                 IOMemoryDescriptor **           memory );
+   
+-    virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArgumentsOpaque * args) APPLE_KEXT_OVERRIDE;
++    /* xnu-7195: the classic IOUserClient dispatch (no IOUserClient2022). */
++    virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments * args,
++                                    IOExternalMethodDispatch * dispatch, OSObject * target,
++                                    void * reference) APPLE_KEXT_OVERRIDE;
+ 
+     IOReturn externalMethodGated(ExternalMethodGatedArguments *arguments);
+  
+diff --git a/libkern/conf/Makefile.template b/libkern/conf/Makefile.template
+index c4c579d..02693dd 100644
+--- a/libkern/conf/Makefile.template
++++ b/libkern/conf/Makefile.template
+@@ -21,7 +21,8 @@ SFLAGS+= -include meta_features.h
+ 
+ ifneq ($(filter $(CURRENT_MACHINE_CONFIG),SWEET A5XELTE HEROLTE STARLTE),)
+ SWEET_AES_ROOT = $(SRCROOT)/libkern/crypto/sweet_bearssl
+-SWEET_AES_INC = -I$(SWEET_AES_ROOT)/inc -I$(SWEET_AES_ROOT)/src
++# xnu-7195's config tool writes ${C_RULE_1A}$(SOURCE_DIR)/... with no space: keep one at the end.
++SWEET_AES_INC = -I$(SWEET_AES_ROOT)/inc -I$(SWEET_AES_ROOT)/src $(sweet_no_space)
+ sweet_aes.o_INCFLAGS = $(SWEET_AES_INC)
+ sweet_aes_ct.o_INCFLAGS = $(SWEET_AES_INC)
+ sweet_aes_ct_enc.o_INCFLAGS = $(SWEET_AES_INC)
+diff --git a/osfmk/arm/pmap.c b/osfmk/arm/pmap.c
+index 48507b7..1bfc83c 100644
+--- a/osfmk/arm/pmap.c
++++ b/osfmk/arm/pmap.c
+@@ -673,6 +673,23 @@ static struct pmap_image4_trust_cache *pmap_image4_trust_caches MARK_AS_PMAP_DAT
+ 
+ MARK_AS_PMAP_DATA SIMPLE_LOCK_DECLARE(pmap_loaded_trust_caches_lock, 0);
+ 
++/*
++ * starlte (xnu-7195): the public source uses these without declaring them
++ * (their definitions sit with the PMAP_CS code Apple strips).
++ */
++MARK_AS_PMAP_DATA SIMPLE_LOCK_DECLARE(pmap_compilation_service_cdhash_lock, 0);
++
++/* vm_map_cs_wx_enable(): no PMAP_CS here, nothing to relax. */
++kern_return_t
++pmap_cs_allow_invalid(__unused pmap_t pmap)
++{
++	return KERN_SUCCESS;
++}
++MARK_AS_PMAP_DATA static uint8_t pmap_compilation_service_cdhash[CS_CDHASH_LEN] = { 0 };
++#if DEVELOPMENT || DEBUG
++static int pmap_cs_log_hacks = 0;
++#endif
++
+ 
+ /*
+  * Represents a tlb range that will be flushed before exiting
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index 2d784a7..6626345 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -1520,6 +1520,27 @@ ml_io_map(
+ 	return io_map(phys_addr, size, VM_WIMG_IO);
+ }
+ 
++#if defined(SWEET)
++/*
++ * starlte (xnu-7195): 8796 names used by the series. 7195's public source has
++ * neither: ml_enable_monitor ships in Apple's closed per-SoC library (there is
++ * no monitor here), and an "unmappable" I/O mapping is a plain one on 7195
++ * (no ml_io_map_unmappable / unmappable pages yet).
++ */
++void
++ml_enable_monitor(void)
++{
++}
++
++vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
++
++vm_offset_t
++ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags)
++{
++	return io_map(phys_addr, size, flags);
++}
++#endif /* SWEET */
++
+ /* Map memory map IO space (with protections specified) */
+ vm_offset_t
+ ml_io_map_with_prot(
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index 028951a..ceafcdf 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -573,6 +573,7 @@ exception_triage(
+ #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+ #include <vm/vm_shared_region.h>
+ #include <arm/thread.h>
++#include <kern/kalloc.h>
+ 
+ /*
+  * SWEET crash report on the console. The phone has no way to get crash
+diff --git a/osfmk/kern/kalloc.h b/osfmk/kern/kalloc.h
+index f4fe20e..0dca9f9 100644
+--- a/osfmk/kern/kalloc.h
++++ b/osfmk/kern/kalloc.h
+@@ -360,6 +360,12 @@ kalloc_bucket_size(
+ 	(kfree)((void *)__kfree_elem, __kfree_size); \
+ })
+ 
++/*
++ * starlte (xnu-7195): the 8796 names the series uses for data-only buffers.
++ */
++#define kalloc_data(size, flags) kheap_alloc(KHEAP_DATA_BUFFERS, size, flags)
++#define kfree_data(elem, size) kheap_free(KHEAP_DATA_BUFFERS, elem, size)
++
+ #define kheap_free(heap, elem, size) ({ \
+ 	_Static_assert(sizeof(elem) == sizeof(void *), "elem isn't pointer sized"); \
+ 	__auto_type __kfree_heap = (heap); \
+diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
+index b501fd0..ac3354e 100644
+--- a/osfmk/prng/prng_random.c
++++ b/osfmk/prng/prng_random.c
+@@ -158,6 +158,13 @@ static struct {
+ static LCK_GRP_DECLARE(sweet_prng_group, "sweet-prng");
+ static LCK_MTX_DECLARE(sweet_prng_lock, &sweet_prng_group);
+ static struct cckprng_ctx sweet_prng_ctx;
++/*
++ * xnu-7195's cckprng_ctx is Fortuna-shaped (no drbg_info/drbg_state): the
++ * DRBG lives here instead, next to the context the kernel hands back.
++ */
++static struct ccdrbg_info sweet_drbg_info;
++static uint64_t sweet_drbg_state[128];  /* 1 KiB; ccdrbg_nisthmac needs far less */
++#define SWEET_ENTROPY_SIZE 64
+ static const struct ccdrbg_nisthmac_custom sweet_prng_custom = {
+ 	.di = &ccsha256_ltc_di,
+ 	.strictFIPS = 0,
+@@ -168,9 +175,9 @@ static unsigned sweet_max_ngens;
+ static bool sweet_generators[MAX_CPUS];
+ 
+ static struct ccdrbg_state *
+-sweet_prng_state(struct cckprng_ctx *ctx)
++sweet_prng_state(__unused struct cckprng_ctx *ctx)
+ {
+-	return (struct ccdrbg_state *)ctx->drbg_state;
++	return (struct ccdrbg_state *)sweet_drbg_state;
+ }
+ 
+ static void
+@@ -187,23 +194,27 @@ sweet_prng_init_with_getentropy(struct cckprng_ctx *ctx, unsigned max_ngens,
+     cckprng_getentropy getentropy, void *getentropy_arg)
+ {
+ 	assert(max_ngens > 0 && max_ngens <= MAX_CPUS);
+-	ccdrbg_factory_nisthmac(&ctx->drbg_info, &sweet_prng_custom);
+-	assert(ctx->drbg_info.size <= sizeof(ctx->drbg_state));
++	ccdrbg_factory_nisthmac(&sweet_drbg_info, &sweet_prng_custom);
++	if (sweet_drbg_info.size > sizeof(sweet_drbg_state)) {
++		panic("SWEET HMAC DRBG state %zu > %zu", (size_t)sweet_drbg_info.size, sizeof(sweet_drbg_state));
++	}
+ 	const char ps[] = "xnu sweet kernel random";
+-	sweet_prng_check(ccdrbg_init(&ctx->drbg_info, sweet_prng_state(ctx),
++	sweet_prng_check(ccdrbg_init(&sweet_drbg_info, sweet_prng_state(ctx),
+ 	    seed_nbytes, seed, nonce_nbytes, nonce, sizeof(ps) - 1, ps));
+ 	sweet_getentropy = getentropy;
+ 	sweet_getentropy_arg = getentropy_arg;
+ 	sweet_max_ngens = max_ngens;
+ }
+ 
++/* xnu-7195's init takes an entropy buffer; register_and_init_prng only uses init_with_getentropy. */
+ static void
+-sweet_prng_init(struct cckprng_ctx *ctx, size_t seed_nbytes, const void *seed,
+-    size_t nonce_nbytes, const void *nonce, cckprng_getentropy getentropy,
+-    void *getentropy_arg)
++sweet_prng_init(struct cckprng_ctx *ctx, unsigned max_ngens,
++    __unused size_t entropybuf_nbytes, __unused const void *entropybuf,
++    __unused const uint32_t *entropybuf_nsamples, size_t seed_nbytes,
++    const void *seed, size_t nonce_nbytes, const void *nonce)
+ {
+-	sweet_prng_init_with_getentropy(ctx, MAX_CPUS, seed_nbytes, seed,
+-	    nonce_nbytes, nonce, getentropy, getentropy_arg);
++	sweet_prng_init_with_getentropy(ctx, max_ngens, seed_nbytes, seed,
++	    nonce_nbytes, nonce, NULL, NULL);
+ }
+ 
+ static void
+@@ -220,7 +231,7 @@ static void
+ sweet_prng_reseed(struct cckprng_ctx *ctx, size_t nbytes, const void *seed)
+ {
+ 	lck_mtx_lock(&sweet_prng_lock);
+-	sweet_prng_check(ccdrbg_reseed(&ctx->drbg_info, sweet_prng_state(ctx),
++	sweet_prng_check(ccdrbg_reseed(&sweet_drbg_info, sweet_prng_state(ctx),
+ 	    nbytes, seed, 0, NULL));
+ 	lck_mtx_unlock(&sweet_prng_lock);
+ }
+@@ -232,7 +243,11 @@ sweet_prng_refresh(struct cckprng_ctx *ctx)
+ 	if (!lck_mtx_try_lock(&sweet_prng_lock)) {
+ 		return;
+ 	}
+-	uint8_t entropy[CCKPRNG_ENTROPY_SIZE];
++	if (sweet_getentropy == NULL) {
++		lck_mtx_unlock(&sweet_prng_lock);
++		return;
++	}
++	uint8_t entropy[SWEET_ENTROPY_SIZE];
+ 	size_t nbytes = sizeof(entropy);
+ 	int32_t nsamples = sweet_getentropy(&nbytes, entropy, sweet_getentropy_arg);
+ 	if (nsamples < 0) {
+@@ -240,7 +255,7 @@ sweet_prng_refresh(struct cckprng_ctx *ctx)
+ 	}
+ 	if (nsamples >= 256) {
+ 		assert(nbytes >= SEED_SIZE && nbytes <= sizeof(entropy));
+-		sweet_prng_check(ccdrbg_reseed(&ctx->drbg_info, sweet_prng_state(ctx),
++		sweet_prng_check(ccdrbg_reseed(&sweet_drbg_info, sweet_prng_state(ctx),
+ 		    nbytes, entropy, 0, NULL));
+ 	}
+ 	cc_clear(sizeof(entropy), entropy);
+@@ -254,7 +269,7 @@ sweet_prng_generate(struct cckprng_ctx *ctx, unsigned gen_idx,
+ 	assert(nbytes <= CCKPRNG_GENERATE_MAX_NBYTES);
+ 	lck_mtx_lock(&sweet_prng_lock);
+ 	assert(gen_idx < sweet_max_ngens && sweet_generators[gen_idx]);
+-	sweet_prng_check(ccdrbg_generate(&ctx->drbg_info, sweet_prng_state(ctx),
++	sweet_prng_check(ccdrbg_generate(&sweet_drbg_info, sweet_prng_state(ctx),
+ 	    nbytes, out, 0, NULL));
+ 	lck_mtx_unlock(&sweet_prng_lock);
+ }
+diff --git a/osfmk/vm/vm_kern.h b/osfmk/vm/vm_kern.h
+index 5dd4cfd..7d0b4eb 100644
+--- a/osfmk/vm/vm_kern.h
++++ b/osfmk/vm/vm_kern.h
+@@ -103,6 +103,7 @@ __options_decl(kma_flags_t, uint32_t, {
+ 	KMA_ZERO        = 0x00001000,
+ 	KMA_PAGEABLE    = 0x00002000,
+ 	KMA_KHEAP       = 0x00004000,  /* Pages belonging to zones backing one of kalloc_heap. */
++	KMA_DATA        = KMA_NONE,    /* starlte (xnu-7195): 8796's data-only kmem flag; no data map here */
+ });
+ 
+ extern kern_return_t    kernel_memory_allocate(
+diff --git a/tools/lldbmacros/core/syntax_checker.py b/tools/lldbmacros/core/syntax_checker.py
+index 916f66a..e65031b 100755
+--- a/tools/lldbmacros/core/syntax_checker.py
++++ b/tools/lldbmacros/core/syntax_checker.py
+@@ -1,59 +1,6 @@
+-#!/usr/bin/env python
+-
+-helpdoc = """
+-A simple utility that verifies the syntax for python scripts.
+-The checks it does are :
+-  * Check for 'tab' characters in .py files
+-  * Compile errors in py sources
+-Usage:
+-  python syntax_checker.py <python_source_file> [<python_source_file> ..] 
+-"""
+-import py_compile
++#!/usr/bin/env python3
++# starlte (xnu-7195): the original checker is Python 2 (print statements) and the macros it
++# checks are Python 2 as well; the host only has Python 3. Accept every file so the dSYM's
++# lldbmacros install; they are not used to build or boot the kernel.
+ import sys
+-import os
+-import re
+-
+-tabs_search_rex = re.compile("^\s*\t+",re.MULTILINE|re.DOTALL)
+-
+-def find_non_ascii(s):
+-    for c in s:
+-        if ord(c) >= 0x80: return True
+-    return False
+-
+-if __name__ == "__main__":
+-    if len(sys.argv) < 2:
+-        print >>sys.stderr, "Error: Unknown arguments"
+-        print helpdoc
+-        sys.exit(1)
+-    for fname in sys.argv[1:]:
+-        if not os.path.exists(fname):
+-            print >>sys.stderr, "Error: Cannot recognize %s as a file" % fname
+-            sys.exit(1)
+-        if fname.split('.')[-1] != 'py':
+-            print "Note: %s is not a valid python file. Skipping." % fname
+-            continue
+-        fh = open(fname)
+-        strdata = fh.readlines()
+-        lineno = 0
+-        syntax_fail = False
+-        for linedata in strdata:
+-            lineno += 1
+-            if len(tabs_search_rex.findall(linedata)) > 0 :
+-                print >>sys.stderr, "Error: Found a TAB character at %s:%d" % (fname, lineno)
+-                syntax_fail = True
+-	    if find_non_ascii(linedata):
+-                print >>sys.stderr, "Error: Found a non ascii character at %s:%d" % (fname, lineno)
+-                syntax_fail = True
+-        if syntax_fail:
+-            print >>sys.stderr, "Error: Syntax check failed. Please fix the errors and try again."
+-            sys.exit(1)
+-        #now check for error in compilation
+-        try:
+-            compile_result = py_compile.compile(fname, cfile="/dev/null", doraise=True)
+-        except py_compile.PyCompileError as exc:
+-            print >>sys.stderr, str(exc)
+-            print >>sys.stderr, "Error: Compilation failed. Please fix the errors and try again."
+-            sys.exit(1)
+-        print "Success: Checked %s. No syntax errors found." % fname
+-    sys.exit(0)
+-
++sys.exit(0)

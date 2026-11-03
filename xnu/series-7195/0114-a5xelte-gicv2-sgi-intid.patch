@@ -1,0 +1,27 @@
+From 449d8add39d9901f941b5318871fb1746cc1eac1 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 08:07:54 +0200
+Subject: [PATCH] patch: 0114-a5xelte-gicv2-sgi-intid.patch
+
+---
+ osfmk/arm64/sleh.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index e92a105..b92077f 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1776,7 +1776,13 @@ sleh_irq(arm_saved_state_t *state)
+ 	#define A5_IRQ_EOI(value) __builtin_arm_wsr64("ICC_EOIR1_EL1", (value))
+ 	const uint32_t timer_intid = sweet_vtimer_intid;
+ #endif
++#if defined(A5XELTE)
++	/* GICv2 IAR bits [12:10] identify the SGI source CPU.  Only the
++	 * low ten bits are the INTID: CPU1's self-SGI1 reads as 0x401. */
++	uint32_t intid = (uint32_t)(iar & 0x3FF);
++#else
+ 	uint32_t intid = (uint32_t)(iar & 0xFFFFFF);
++#endif
+ 
+ 	if (intid >= 1020 && intid <= 1023) {
+ 		return; /* spurious */

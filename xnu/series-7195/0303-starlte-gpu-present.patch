@@ -1,0 +1,44 @@
+From 64b812b4fb4ef4b89ce8436b5e4b8a71897cd9f3 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 08:07:57 +0200
+Subject: [PATCH] patch: 0303-starlte-gpu-present.patch
+
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 9f3a4a4..7d71c4b 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -65,7 +65,16 @@ uint64_t sweet_fb_hold_until;
+ static uint32_t sweet_fb_last_surface_id;
+ extern "C" bool sweet_fb_last_surface(uint64_t *pages, unsigned max_pages, unsigned *npages,
+     uint32_t *offset, uint32_t *stride, uint32_t *width, uint32_t *height, uintptr_t *kva);
+-/* bsd/dev/herolte_gpu.c: the Mali scales a surface to the whole panel. */
++/* bsd/dev/herolte_gpu.c: the Mali scales a surface to the whole panel. On
++ * STARLTE (whose board config also defines HEROLTE) the S9's Mali-G72 does
++ * it instead: bsd/dev/starlte_gpu.c, ready once its boot-time GPU tests
++ * have passed. */
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#define herolte_gpu_present_slot starlte_gpu_present_slot
++#define herolte_gpu_present_map starlte_gpu_present_map
++#define herolte_gpu_present_draw starlte_gpu_present_draw
++extern "C" int starlte_gpu_present_ready(void);
++#endif
+ extern "C" int herolte_gpu_present_slot(uint32_t id, uint64_t first_pa);
+ extern "C" int herolte_gpu_present_map(uint32_t id, const uint64_t *pages, unsigned n);
+ extern "C" bool herolte_gpu_present_draw(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h);
+@@ -841,6 +850,12 @@ AppleCLCD::gpuPresent(SweetSurface *s, int32_t sx, int32_t sy, int32_t w, int32_
+ {
+ 	static uint64_t pages[SWEET_FB_GPU_MAX_PAGES];
+ 	static uint32_t failures;
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	/* Until the G72 is up (about 8 s into boot) the CPU copies, uncounted. */
++	if (!starlte_gpu_present_ready()) {
++		return false;
++	}
++#endif
+ 	if (failures >= 8 || s->memory == NULL) {
+ 		return false;
+ 	}

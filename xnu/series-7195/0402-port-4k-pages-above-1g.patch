@@ -1,0 +1,34 @@
+From c2c282f82a736cc339e6272ad28c95e49260e246 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 08:52:34 +0200
+Subject: [PATCH] patch: 0402-port-4k-pages-above-1g.patch
+
+From xnu/series-11417 0314 (applies unchanged): SWEET/A5XELTE boards keep 4 KiB VM pages above 1 GiB of RAM (the bank-2 configurations).
+---
+ osfmk/arm/arm_init.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 9563876..91e480f 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -349,7 +349,19 @@ arm_init(
+ 		/*
+ 		 * Select the advertised kernel page size.
+ 		 */
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++		/*
++		 * sweet: keep the 4 KiB hardware page size at any RAM size. Above
++		 * 1 GiB stock XNU switches to 16 KiB VM pages over 4 KiB hardware
++		 * pages (TEST_PAGE_RATIO_4, last used on A7/A8), which panics
++		 * intermittently here ("unaligned pmap_enter", S7 and S9 at
++		 * 1.5 GiB); every iOS 18 fix in this series was made and tested
++		 * with 4 KiB kernel pages under 16 KiB user maps.
++		 */
++		if (false) {
++#else
+ 		if (args->memSize > 1ULL * 1024 * 1024 * 1024) {
++#endif
+ 			/*
+ 			 * arm64 device with > 1GB of RAM:
+ 			 * kernel uses 16KB pages.

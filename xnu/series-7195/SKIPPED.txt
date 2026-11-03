@@ -1,0 +1,15 @@
+# 8796 patches deliberately not carried to xnu-7195 (name: reason). tools/port-7195-next.sh skips them.
+0002-new-clang-backport-UIO_STACKBUF.patch: 7195 declares `char uio_buf[UIO_SIZEOF(n)]` (no uio_stackbuf_t), which new clang accepts; nothing to backport
+0005-non-pac-build-fixes.patch: 8796-only duplicate struct pmap field name in osfmk/arm/pmap/pmap.h; 7195's osfmk/arm/pmap.h has no such clash
+0013-sweet-kmem-rng-without-corecrypto.patch: 7195 has no kmem sizeclass RNG (kmem_crypto_init is 8796+); nothing to replace
+0015-sweet-unavailable-trust-cache-runtime.patch: bsd/kern/kern_trustcache.c (Image4 trust-cache runtime) is 8796+; 7195's osfmk/arm/trustcache.c needs no Image4/AMFI kext
+0022-sweet-ramdisk-root-without-iomedia.patch: publishHiddenMedia does not exist in 7195
+0097-a5xelte-zone-va-size.patch: 7195 sizes the zone map from ZONE_MAP_VIRTUAL_SIZE_LP64 = 32 GiB on arm64 without ARM_LARGE_MEMORY, already within the 39-bit kernel VA
+0103-a5xelte-ramdisk-root-without-iostorage.patch: edits setRootMedia/publishHiddenMedia, which 7195 does not have (see 0021/0022)
+# Partially carried (the dropped part is listed):
+# 0008-sweet-fill-closed-lib-gaps-kpc-stub.patch: only the MASTER config change; 7195's open-source kpc.c, pmap.c, caches_asm.s and start.s need no closed-library stubs
+# 0009-sweet-drop-apple-soc-only-exports.patch: same intent, re-applied as line removals on 7195's export lists
+# 0224-herolte-parallel-copy-kmem-log.patch: the vm_kern.c kmem-claims log (no kmem claims in 7195)
+# 0226-herolte-mali-first-job.patch: the pmap.c unaligned-PTE debug panic (8796 pmap_enter_pte)
+# 0238-herolte-fast-cores-aks-wrap.patch: the sched_prim.c fast-core placement (TODO: port to the 7195 scheduler; 0304 M3 cores)
+# 0021-sweet-mockfs-ramdisk-root.patch: carried only its config change; the IOService root-media hunk targets 8796's setRootMedia/publishHiddenMedia (not in 7195) and the mockfs kalloc_type conversion is 8796 API

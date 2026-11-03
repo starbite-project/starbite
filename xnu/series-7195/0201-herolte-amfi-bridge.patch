@@ -1,0 +1,51 @@
+From 07c90fad6bcdba8d6b0e2da6cfda9931cb6adf5c Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 08:07:55 +0200
+Subject: [PATCH] patch: 0201-herolte-amfi-bridge.patch
+
+---
+ bsd/kern/bsd_init.c   | 4 ++--
+ bsd/kern/sweet_amfi.c | 6 +++---
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index 8df0ad0..b23b0d3 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -752,8 +752,8 @@ bsd_init(void)
+ 	bsd_init_kprintf("calling vfsinit\n");
+ 	vfsinit();
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-	/* AMFI's MAC policy is built in on SWEET (bsd/kern/sweet_amfi.c). */
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	/* AMFI's MAC policy is built in (bsd/kern/sweet_amfi.c). */
+ 	extern void sweet_amfi_policy_register(void);
+ 	sweet_amfi_policy_register();
+ #endif
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index cb67b4d..0241a1a 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -1,5 +1,5 @@
+ /*
+- * Built-in AMFI interface for SWEET.
++ * Built-in AMFI interface for SWEET, A5XELTE and HEROLTE.
+  *
+  * On Apple platforms AppleMobileFileIntegrity registers this interface and
+  * provides entitlements through the closed CoreEntitlements library. SWEET
+@@ -22,7 +22,7 @@
+  * Interfaces no kernel path uses on SWEET (they serve other Apple kexts)
+  * panic with a clear message instead of being NULL.
+  */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+ #include <kern/debug.h>
+ #include <kern/startup.h>
+ #include <libkern/amfi/amfi.h>
+@@ -380,4 +380,4 @@ sweet_amfi_policy_register(void)
+ 	printf("SWEET Sandbox: permissive policy %s (%d)\n",
+ 	    error ? "NOT registered" : "registered", error);
+ }
+-#endif /* ARM64_BOARD_CONFIG_SWEET */
++#endif /* ARM64_BOARD_CONFIG_SWEET || ARM64_BOARD_CONFIG_A5XELTE */

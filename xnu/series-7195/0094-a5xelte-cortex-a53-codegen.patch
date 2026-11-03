@@ -1,0 +1,22 @@
+From 835be56cdca55bb782964287b3677e376f3e6c38 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 08:07:54 +0200
+Subject: [PATCH] patch: 0094-a5xelte-cortex-a53-codegen.patch
+
+---
+ makedefs/MakeInc.def | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+index 56b122f..90a70ba 100644
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -72,7 +72,7 @@ MACHINE_FLAGS_ARM64_T8020 = -DARM64_BOARD_CONFIG_T8020 -mcpu=vortex
+ MACHINE_FLAGS_ARM64_T8101 = -DARM64_BOARD_CONFIG_T8101 -mcpu=firestorm
+ MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103 -mcpu=firestorm
+ MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto
+-MACHINE_FLAGS_ARM64_A5XELTE = -DARM64_BOARD_CONFIG_A5XELTE            -march=armv8-a+crypto
++MACHINE_FLAGS_ARM64_A5XELTE = -DARM64_BOARD_CONFIG_A5XELTE            -mcpu=cortex-a53 -march=armv8-a+crypto
+ 
+ 
+ #

@@ -1,0 +1,21 @@
+From 992dbc81bd3ec0e7e66c8791c477b135d9c006fe Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 08:07:50 +0200
+Subject: [PATCH] patch: 0001-new-clang-drop-removed-auto-var-init-flag.patch
+
+---
+ makedefs/MakeInc.def | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+index bf2b6f8..5abcadc 100644
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -311,7 +311,6 @@ CFLAGS_GEN = $(DEBUG_CFLAGS) -nostdinc \
+ 	-fno-builtin \
+ 	-fno-common \
+ 	-ftrivial-auto-var-init=zero \
+-	-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang \
+ 	-fsigned-bitfields \
+ 	-fmerge-all-constants \
+ 	-fno-c++-static-destructors \

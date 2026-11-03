@@ -1,0 +1,63 @@
+From 9088b235fa8a7b3b10dd8c5cff09bbe43349a14e Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 08:07:53 +0200
+Subject: [PATCH] patch: 0083-xcode27-iig-kernel-content.patch
+
+---
+ iokit/DriverKit/IORPC.h       | 1 +
+ iokit/IOKit/IORPC.h           | 1 +
+ iokit/Kernel/IOUserServer.cpp | 3 +++
+ 3 files changed, 5 insertions(+)
+
+diff --git a/iokit/DriverKit/IORPC.h b/iokit/DriverKit/IORPC.h
+index 0ae1415..7134c2e 100644
+--- a/iokit/DriverKit/IORPC.h
++++ b/iokit/DriverKit/IORPC.h
+@@ -214,6 +214,7 @@ struct IORPC {
+ 	IORPCMessageMach * reply;
+ 	uint32_t           sendSize;
+ 	uint32_t           replySize;
++	IORPCMessage *     kernelContent;
+ };
+ typedef struct IORPC IORPC;
+ 
+diff --git a/iokit/IOKit/IORPC.h b/iokit/IOKit/IORPC.h
+index 0ae1415..7134c2e 100644
+--- a/iokit/IOKit/IORPC.h
++++ b/iokit/IOKit/IORPC.h
+@@ -214,6 +214,7 @@ struct IORPC {
+ 	IORPCMessageMach * reply;
+ 	uint32_t           sendSize;
+ 	uint32_t           replySize;
++	IORPCMessage *     kernelContent;
+ };
+ typedef struct IORPC IORPC;
+ 
+diff --git a/iokit/Kernel/IOUserServer.cpp b/iokit/Kernel/IOUserServer.cpp
+index 20ebad9..bc0a770 100644
+--- a/iokit/Kernel/IOUserServer.cpp
++++ b/iokit/Kernel/IOUserServer.cpp
+@@ -1830,6 +1830,7 @@ OSMetaClassBase::Invoke(IORPC rpc)
+ 		return kIOReturnIPCError;
+ 	}
+ 	message->flags |= kIORPCMessageKernel;
++	rpc.kernelContent = message;
+ 
+ 	us = NULL;
+ 	if (!(kIORPCMessageLocalHost & message->flags)) {
+@@ -2442,6 +2443,7 @@ IOUserServer::kernelDispatch(OSObject * obj, IORPC rpc)
+ 	if (!message) {
+ 		return kIOReturnIPCError;
+ 	}
++	rpc.kernelContent = message;
+ 
+ 	if (OSObject_Instantiate_ID == message->msgid) {
+ 		ret = objectInstantiate(obj, rpc, message);
+@@ -2733,6 +2735,7 @@ IOUserServerUEXTTrap(OSObject * object, void * p1, void * p2, void * p3, void *
+ 	rpc.sendSize  = mach->msgh.msgh_size;
+ 	rpc.reply     = (IORPCMessageMach *) (p + inSize);
+ 	rpc.replySize = ((uint32_t) (sizeof(buffer.buffer) - inSize));    // inSize was checked
++	rpc.kernelContent = message;
+ 
+ 	message->objects[0] = 0;
+ 	if ((action = OSDynamicCast(OSAction, object))) {

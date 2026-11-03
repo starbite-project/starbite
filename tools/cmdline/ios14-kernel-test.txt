@@ -1,0 +1,1 @@
+debug=0xc serial=3 cpus=1 keepsyms=1 -v -enable_kprintf_spam -noprogress rd=md0 wdt=-1 -wdt_no_pmu a5fb_keep_on=1 cs_enforcement_disable=1

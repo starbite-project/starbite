@@ -1,0 +1,176 @@
+From 71b0c668bcbe85ef9941368f6a1821f908849b7c Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 08:07:50 +0200
+Subject: [PATCH] patch: 0003-sweet-framebuffer-serial-console.patch
+
+---
+ pexpert/arm/pe_serial.c | 149 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 149 insertions(+)
+
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+index 3a705d3..7e91bce 100644
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -816,6 +816,153 @@ register_serial_functions(struct pe_serial_functions *fns)
+ 	gPESF = fns;
+ }
+ 
++/*****************************************************************************/
++
++/*
++ * sweet: framebuffer "serial" for boards with no usable UART (the Redmi Note
++ * 10 Pro's debug UART engine runs in SPI mode). kprintf output is drawn onto
++ * the boot framebuffer described by the ADT node "sweet-fbcon":
++ *   reg    = <phys size>       absolute physical address, not arm-io relative
++ *   width, height              pixels
++ *   stride                     bytes per line, 32bpp
++ * Lines wrap back to the top instead of scrolling; the line after the cursor
++ * is kept blank so the newest output is easy to find.
++ */
++
++extern unsigned char iso_font[256 * 16];
++
++#define FBCON_SCALE     2
++#define FBCON_FG        0xffffffffu
++#define FBCON_BG        0xff000000u
++
++static volatile uint32_t *fbcon_base;
++static uint32_t fbcon_width, fbcon_height, fbcon_stride;
++static uint32_t fbcon_cols, fbcon_rows, fbcon_col, fbcon_row;
++
++static void
++fbcon_clear_row(uint32_t row)
++{
++	for (uint32_t y = row * 16 * FBCON_SCALE; y < (row + 1) * 16 * FBCON_SCALE; y++) {
++		volatile uint32_t *line = fbcon_base + y * (fbcon_stride / 4);
++		for (uint32_t x = 0; x < fbcon_width; x++) {
++			line[x] = FBCON_BG;
++		}
++	}
++}
++
++static void
++fbcon_newline(void)
++{
++	fbcon_col = 0;
++	fbcon_row = (fbcon_row + 1) % fbcon_rows;
++	fbcon_clear_row(fbcon_row);
++	fbcon_clear_row((fbcon_row + 1) % fbcon_rows);
++}
++
++static void
++fbcon_init(void)
++{
++	fbcon_cols = fbcon_width / (8 * FBCON_SCALE);
++	fbcon_rows = fbcon_height / (16 * FBCON_SCALE);
++	fbcon_col = fbcon_row = 0;
++	for (uint32_t r = 0; r < fbcon_rows; r++) {
++		fbcon_clear_row(r);
++	}
++}
++
++static int
++fbcon_transmit_ready(void)
++{
++	return 1;
++}
++
++static void
++fbcon_transmit_data(int c)
++{
++	if (c == '\r') {
++		fbcon_col = 0;
++		return;
++	}
++	if (c == '\n') {
++		fbcon_newline();
++		return;
++	}
++	if (fbcon_col >= fbcon_cols) {
++		fbcon_newline();
++	}
++	const unsigned char *glyph = iso_font + (c & 0xff) * 16;
++	uint32_t x0 = fbcon_col * 8 * FBCON_SCALE, y0 = fbcon_row * 16 * FBCON_SCALE;
++	for (uint32_t gy = 0; gy < 16; gy++) {
++		for (uint32_t sy = 0; sy < FBCON_SCALE; sy++) {
++			volatile uint32_t *line = fbcon_base + (y0 + gy * FBCON_SCALE + sy) * (fbcon_stride / 4) + x0;
++			for (uint32_t gx = 0; gx < 8; gx++) {
++				uint32_t px = (glyph[gy] & (1u << gx)) ? FBCON_FG : FBCON_BG;
++				for (uint32_t sx = 0; sx < FBCON_SCALE; sx++) {
++					line[gx * FBCON_SCALE + sx] = px;
++				}
++			}
++		}
++	}
++	fbcon_col++;
++}
++
++static int
++fbcon_receive_ready(void)
++{
++	return 0;
++}
++
++static int
++fbcon_receive_data(void)
++{
++	return 0;
++}
++
++static void
++fbcon_set_baud_rate(__unused int unit, __unused uint32_t baud_rate)
++{
++}
++
++SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) sweet_fbcon_serial_functions =
++{
++	.uart_init = fbcon_init,
++	.uart_set_baud_rate = fbcon_set_baud_rate,
++	.tr0 = fbcon_transmit_ready,
++	.td0 = fbcon_transmit_data,
++	.rr0 = fbcon_receive_ready,
++	.rd0 = fbcon_receive_data,
++};
++
++static void
++fbcon_probe(void)
++{
++	DTEntry entry;
++	uint64_t const *reg;
++	uint32_t const *val;
++	unsigned int size;
++
++	if (SecureDTFindEntry("name", "sweet-fbcon", &entry) != kSuccess ||
++	    SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) != kSuccess || size < 16) {
++		return;
++	}
++	if (SecureDTGetProperty(entry, "width", (void const **)&val, &size) == kSuccess) {
++		fbcon_width = *val;
++	}
++	if (SecureDTGetProperty(entry, "height", (void const **)&val, &size) == kSuccess) {
++		fbcon_height = *val;
++	}
++	if (SecureDTGetProperty(entry, "stride", (void const **)&val, &size) == kSuccess) {
++		fbcon_stride = *val;
++	}
++	if (!fbcon_width || !fbcon_height || fbcon_stride < fbcon_width * 4) {
++		return;
++	}
++	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);
++	if (fbcon_base != NULL) {
++		register_serial_functions(&sweet_fbcon_serial_functions);
++	}
++}
++
+ int
+ serial_init(void)
+ {
+@@ -855,6 +1002,8 @@ serial_init(void)
+ 		return 0;
+ 	}
+ 
++	fbcon_probe();
++
+ #ifdef PI3_UART
+ 	if (SecureDTFindEntry("name", "gpio", &entryP) == kSuccess) {
+ 		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);

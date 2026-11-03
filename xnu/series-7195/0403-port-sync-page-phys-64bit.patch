@@ -1,0 +1,23 @@
+From 8f4c1467f63ba0f3a8153eb271392144eba9065d Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 3 Nov 2026 08:52:34 +0200
+Subject: [PATCH] patch: 0403-port-sync-page-phys-64bit.patch
+
+From xnu/series-11417 0315: pmap_sync_page_attributes_phys shifted the 32-bit ppnum_t in 32 bits, truncating physical addresses above 4 GiB (bank 2 at 0x880000000); same bug in 7195's osfmk/arm/pmap.c.
+---
+ osfmk/arm/pmap.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/osfmk/arm/pmap.c b/osfmk/arm/pmap.c
+index 1bfc83c..f25d7c1 100644
+--- a/osfmk/arm/pmap.c
++++ b/osfmk/arm/pmap.c
+@@ -9682,7 +9682,7 @@ void
+ pmap_sync_page_attributes_phys(
+ 	ppnum_t pp)
+ {
+-	flush_dcache((vm_offset_t) (pp << PAGE_SHIFT), PAGE_SIZE, TRUE);
++	flush_dcache((vm_offset_t) ptoa(pp), PAGE_SIZE, TRUE);
+ }
+ 
+ #if CONFIG_COREDUMP
