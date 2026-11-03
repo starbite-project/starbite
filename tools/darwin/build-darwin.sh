@@ -15,7 +15,10 @@
 # (series-12377 0021/0024, Mach-O check) mounts md0 as the root and serves the whole device as
 # /sbin/launchd (plus devfs at /dev), so dsh runs as PID 1. A DEVELOPMENT kernel accepts static
 # executables; the built-in SWEET AMFI makes signed binaries on the root mount platform binaries.
-# This is the path herolte proved on hardware (ref/ios-herolte/NOTES.md, 0024/0025 boots).
+# herolte proved this path on hardware with xnu-8796 (ref/ios-herolte/NOTES.md, 0024/0025 boots); on
+# the 12377 starlte kernel it is untested. dsh carries LC_BUILD_VERSION platform=iOS and the kernel is
+# built XNU_TARGET_OS_OSX, so exec refuses it (EXEC_EXIT_REASON_WRONG_PLATFORM) unless the cmdline has
+# unentitled_ios_sim_launch=1 (darwin-cmdline.txt does).
 #
 # The loader stages a store payload at 0x8c000000..0x91000000 (80 MiB, xnu_boot.c STAGE): kernel +
 # ADT + RAM disk must stay below that; the script checks it.
