@@ -49,6 +49,13 @@ the alpha area) and the control point `I7_FLY_STAR_C` (1350, 1180), and with no 
 1232 the band across `I7_NAT_WORD_ROW` 1380 is the word, kept at its own width. Items 6 and 7 are
 not done (glass*.c). Films: `build/splash-onemark/`. Packed: `build/brand/upparam-onemark/up_param.img`.
 
+Review fixes (after `137ab5f`): the star test also needs sum B >= sum G, a fill of at most half its
+box and a centroid above `I7_NAT_SPLIT`, and R is clamped to 8..54 (a blue tile or a green star is
+no longer taken for the star; One mark's frames are unchanged, 0 px). A failed capture (not a
+black panel) no longer draws the concept's SAMSUNG splash: black, then the wallpaper star lights
+at One mark's star (`I7_ONE_STAR`). The loader and test image to flash with the One mark
+up_param are recorded in `docs/MENU7-BUILD.md`.
+
 The plan as first written:
 
 ## intro7 / menu7 changes (one commit, together with the flash)

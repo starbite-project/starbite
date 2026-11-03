@@ -448,16 +448,24 @@ velocity), tap. Any input cancels the countdown; Power during the countdown star
   eases into the concept wordmark's box centred on (720, 1380) by 700 ms (Samsung's grows to
   900 wide; Starbite's keeps its size, a 14 px settle), then shrinks with the capsule and fades
   over the melt as the island comes out of it, so the only wordmark on screen is the real one.
-  The splash's star (`I7_STAR_*`: a band 24..128 px, nearly square, 2 sum B >= 3 sum R; only the
-  One mark splash has one) fades in place over 120 ms, no rise, while the wallpaper's star lights
+  The splash's star (`I7_STAR_*`: a band 24..128 px, nearly square, blue: 2 sum B >= 3 sum R and
+  sum B >= sum G, so green, cyan and teal icons are not stars; star-shaped: alpha fills at most
+  half the box, One mark's 0.23 against a solid tile's 1.0; centroid above `I7_NAT_SPLIT`; R
+  clamped to 8..54; only the One mark splash has one) fades in place over 120 ms, no rise, while the wallpaper's star lights
   at its alpha centroid with R = sqrt(alpha area / `I7_STAR_AREA`), the area of WALL_FS's core at
   R 1 (One mark: (961.75, 1259.02), R 27.05, against the splash's 961.74, 1259.0, 27), and flies
   home through (1350, 1180) (`I7_FLY_STAR_C`). Without one the star starts at `M7_STAR0` and flies
   through `I7_FLY_C`, as before. All of it is chosen once at the capture: every frame is still a
   pure function of t. The wallpaper, the island and the menu are the concept's.
   `docs/concepts/splash/HANDOFF.md`'s optional glass drain (item 6) and reveal centre (item 7) are
-  not done: both need glass*.c, and the captured word stays white until the melt. Nothing captured (a black panel, more than 1.5 MiB of
-  picture, `I7_CAPT` not free): the concept's splash items as before (byte-identical frames).
+  not done: both need glass*.c, and the captured word stays white until the melt. A black panel
+  (`I7_CAPT_BLACK`): the concept's splash items as before (byte-identical frames). A failed
+  capture (`I7_CAPT` not free, more than 1.5 MiB of picture, the SB7 table full): S-Boot drew
+  something that was not copied, and with One mark flashed the concept's SAMSUNG splash (or its
+  glass SAMSUNG wordmark) would be a hard cut from the approved one. So there are no splash
+  items and no glass wordmark: the first frame clears the panel to black and the wallpaper star
+  lights at One mark's star (`I7_ONE_STAR`, 961.74, 1259.0, R 27) and flies through
+  `I7_FLY_STAR_C`; the capsule is born empty (h7: `H7_CAPT_BUSY=1`).
   The concept's "black 250 ms, splash until 1600 ms" phase is S-Boot's own time and is not
   replayed.
 - The capture's result is in log slots 116..117 (`intro7.h`): slot 116 = px << 32 | 0xca97 << 16

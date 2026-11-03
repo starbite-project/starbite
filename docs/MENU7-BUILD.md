@@ -32,6 +32,24 @@ Every other member is the "Powered by starbite" image's, byte for byte; sha256 5
 (in `upparam-flash.sh`'s known list). Flash it only together with a loader whose intro7 has the
 One mark handoff (the star and the 1380 word band); older loaders fall back to a plain fade.
 
+The pair to flash in one session (not flashed yet). The loader is master after `137ab5f` (the
+glass speed round 3 part 1: half-res glass, cached gs_prepare) plus the One mark review fixes
+(the commit that adds this table); the earlier `cdbe2c8`-only Image and its test image are gone
+from `out/` and must not be flashed:
+
+| file | sha256 |
+|---|---|
+| `build/brand/upparam-onemark/up_param.img` | 5bb50d61257b303abaa1e746fe00b68bbc3d240c5a6469bf16f6b4af98269b52 |
+| `shim/starlte/out/xnu_boot.Image` | b47e5c6f9eea2429787ca77af667f4fd6aaa9539f0b3f7cb65ebd6b49e113d9f |
+| `build/brand/menu-v7.sbm` (BOOT ramdisk) | d3fcca0b57f370b6da0fb5f13bdfe87fc0e84840f4cb46dc115aebf85754ce58 |
+| `out/xnu-boot-ios26-v7test.img` | 4d36a1bc5b6f5be691738a437c5ba9a3fd5219b24cc717cb8e37be4ed200cdf5 |
+
+The test image is section 3's command with `ios26-v7test build/ios26-v7test-cmdline.txt` (it is
+reproducible: the same inputs give the same sha256). On the first boot with One mark, read log slot
+116 (`I7_LOG_CAPT`, 0x91fff000 + 116 * 8) before trusting the handoff: bits 8..15 (why) must be 0xff
+(`I7_CAPT_OK`) and bits 0..7 (bands) 2, with bits 16..31 the tag 0xca97. Any other why means the
+capture failed and the intro faded up from black with the star at One mark's star instead.
+
 The native splash (Samsung's own, without "Secured by Knox"), not flashed:
 
 ```sh

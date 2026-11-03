@@ -178,7 +178,10 @@ static struct capt_band CB[I7_CAPT_BANDS];
 static int capt_n;                  /* bands captured; 0: the concept's splash */
 static int capt_sam = -1;           /* the band that is the wordmark (SAMSUNG or "starbite"), or -1 */
 static float sam_w;                 /* the width capt_sam glides to: I7_NAT_SAM_W, or its own (k = 1) */
-static int capt_star = -1;          /* the band that is the splash's star (I7_STAR_*), or -1: M7_STAR0 */
+static int capt_star = -1;          /* the band that is the splash's star (I7_STAR_*), or -1 */
+static int capt_fail;               /* the capture failed (not a black panel): no concept splash */
+static int star_own;                /* star_x, star_y, star_r hold the wallpaper star's start (a
+                                     * captured star or, after a failure, I7_ONE_STAR); else M7_STAR0 */
 static float star_x, star_y, star_r;    /* its alpha centroid and R: the wallpaper star's start */
 static uint16_t row_x0[G7_H], row_x1[G7_H];     /* pass 1: each row's non-black columns */
 
@@ -190,9 +193,16 @@ extern char _start[];               /* xnu_boot.S: the Image header (image_size 
  * that is boot_rd_end too), the payload appended to it (star_info's rd_start .. rd_end, from
  * boot_rd_*) does not overlap it, and neither does the SB7 part of the menu ramdisk (S-Boot loads
  * that at 0x89000000; star_font_blob gives its SBFONT01 tail, which ends where the ramdisk ends). */
+#ifdef M7_PREVIEW
+extern int h7_capt_busy;            /* h7: H7_CAPT_BUSY=1 plays I7_CAPT_NOT_FREE */
+#endif
 static int capt_free(void)
 {
     uint64_t s, e;
+#ifdef M7_PREVIEW
+    if (h7_capt_busy)
+        return 0;
+#endif
 #ifndef M7_PREVIEW
     uint64_t isz = *(const volatile uint64_t *)(uintptr_t)(_start + 16);
     if ((uintptr_t)_start + isz > I7_CAPT)
@@ -223,6 +233,13 @@ static int capt_end(uint64_t t0, unsigned why, uint32_t px)
 {
     capt_why = why;
     capt_px = px;
+    capt_fail = why != I7_CAPT_OK && why != I7_CAPT_BLACK;
+    if (capt_fail) {
+        star_own = 1;
+        star_x = I7_ONE_STAR_X;
+        star_y = I7_ONE_STAR_Y;
+        star_r = I7_ONE_STAR_R;
+    }
     uint64_t d = m7_now_us() - t0;
     capt_us = d > 0xffffffffU ? 0xffffffffU : (uint32_t)d;
     capt_log();
@@ -242,6 +259,8 @@ static void capt_drop(void)
     capt_n = 0;
     capt_sam = -1;
     capt_star = -1;
+    capt_fail = 0;
+    star_own = 0;
 }
 
 /* the wordmark: the band across `row`, no taller than a line of text and I7_NAT_WORD_ASPECT times
@@ -336,10 +355,10 @@ int intro7_capture(void)
     uintptr_t at = I7_CAPT;
     for (int i = 0; i < n; i++) {
         unsigned w = CB[i].x1 - CB[i].x0, h = CB[i].y1 - CB[i].y0;
-        /* a star-shaped box also sums its alpha (a, a x, a y) and its red and blue */
+        /* a star-shaped box also sums its alpha (a, a x, a y) and its red, green and blue */
         int st = capt_star < 0 && w >= I7_STAR_MIN && w <= I7_STAR_MAX && h >= I7_STAR_MIN && h <= I7_STAR_MAX &&
                  4U * w >= 3U * h && 4U * h >= 3U * w;
-        uint64_t sa = 0, sax = 0, say = 0, sr = 0, sb = 0;
+        uint64_t sa = 0, sax = 0, say = 0, sr = 0, sg = 0, sb = 0;
         struct sb7_image *im = (struct sb7_image *)at;
         im->w = (uint16_t)w;
         im->h = (uint16_t)h;
@@ -365,15 +384,21 @@ int intro7_capture(void)
                     sax += (uint64_t)m * x;
                     say += (uint64_t)m * y;
                     sr += c >> 16;
+                    sg += (c >> 8) & 255U;
                     sb += c & 255U;
                 }
             }
         }
-        if (st && sa && 2U * sb >= 3U * sr) {
+        /* blue (not white, grey, green or teal), not a solid tile, in the logo block */
+        if (st && sa && 2U * sb >= 3U * sr && sb >= sg &&
+            (uint64_t)I7_STAR_FILL_DIV * sa <= 255U * (uint64_t)w * h &&
+            (uint64_t)CB[i].y0 * sa + say < (uint64_t)I7_NAT_SPLIT * sa) {
+            float r = __builtin_sqrtf((float)sa * (1.0f / 255.0f) / I7_STAR_AREA);
             capt_star = i;
+            star_own = 1;
             star_x = (float)CB[i].x0 + 0.5f + (float)sax / (float)sa;
             star_y = (float)CB[i].y0 + 0.5f + (float)say / (float)sa;
-            star_r = __builtin_sqrtf((float)sa * (1.0f / 255.0f) / I7_STAR_AREA);
+            star_r = r < I7_STAR_R_MIN ? I7_STAR_R_MIN : r > I7_STAR_R_MAX ? I7_STAR_R_MAX : r;
         }
         uint32_t size = (uint32_t)sizeof(*im) + im->data_size;
         if (!sb7_put(SB7_T_IMAGE, SB7_S_CAPT0 + (unsigned)i, im, size)) {
@@ -444,8 +469,8 @@ static void wall_at(struct g7_wall *w, float t)
 {
     /* star flight along a quadratic path, bloom on arrival */
     float e = m7_ease(c01((t - I7_FLY0) / I7_FLY_MS)), a = 1.0f - e, sx, sy;
-    if (capt_star >= 0) {
-        /* from the captured star: a short arc up and to the right */
+    if (star_own) {
+        /* from the captured star (or One mark's, after a failed capture): a short arc up and right */
         sx = a * a * star_x + 2.0f * a * e * I7_FLY_STAR_CX + e * e * G7_WALL_FINAL_SX;
         sy = a * a * star_y + 2.0f * a * e * I7_FLY_STAR_CY + e * e * G7_WALL_FINAL_SY;
     } else {
@@ -473,7 +498,7 @@ static void wall_at(struct g7_wall *w, float t)
     w->sx = sx;
     w->sy = sy;
     w->si = c01(t / I7_SI_RAMP) * (1.0f + 0.45f * bloom);
-    w->sr = lerpf(capt_star >= 0 ? star_r : M7_STAR0_R, 54.0f, m7_ease(c01((t - I7_SR0) / I7_SR_MS)));
+    w->sr = lerpf(star_own ? star_r : M7_STAR0_R, 54.0f, m7_ease(c01((t - I7_SR0) / I7_SR_MS)));
     w->sw = 0.72f * m7_ease(c01((t - I7_SW0) / I7_SW_MS));
     w->rr = rr;
     w->rf = I7_REV_FEATHER;
@@ -524,8 +549,9 @@ void intro7_frame(struct g7_frame *f, float t)
     f->word.tf = 1.0f - m7_ease(c01((t - I7_DRAIN0) / I7_DRAIN_MS));
     f->word.tm = m;
     /* from the captured splash there is no glass wordmark: Samsung's own (capt_items) takes its
-     * place, and the island comes out of where it fades */
-    f->word.ta = t >= I7_ISLAND0 || capt_n ? 0.0f : 1.0f;
+     * place, and the island comes out of where it fades; after a failed capture neither (the
+     * glass wordmark is SAMSUNG's: the capsule is born empty) */
+    f->word.ta = t >= I7_ISLAND0 || capt_n || capt_fail ? 0.0f : 1.0f;
     f->word.cap[0] = I7_CAP_X;
     f->word.cap[1] = I7_CAP_Y;
     f->word.cap[2] = lerpf(I7_CAP_W0, I7_CAP_W1, m);
@@ -534,7 +560,7 @@ void intro7_frame(struct g7_frame *f, float t)
     /* m7_build points f->over at menu7's own (writable) over layer */
     if (capt_n)
         capt_items((struct g7_layer *)f->over, t);
-    else
+    else if (!capt_fail)
         splash_items((struct g7_layer *)f->over, t);
 }
 

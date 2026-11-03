@@ -77,7 +77,10 @@ void intro7_release(void);
  * It is already where the capsule is born: it keeps its size (k = 1) and settles on I7_CAP_X. */
 #define I7_NAT_WORD_ROW 1380
 /* The splash's star: a band I7_STAR_MIN .. I7_STAR_MAX square (sides within a quarter of each
- * other) and blue (2 sum B >= 3 sum R). It hands over in place: it fades over I7_STAR_FADE with no
+ * other), blue (2 sum B >= 3 sum R and sum B >= sum G: not green, cyan or teal), star-shaped (its
+ * alpha fills at most 1 / I7_STAR_FILL_DIV of the box: One mark's 0.23, a solid tile 1.0) and in
+ * the logo block (its centroid above I7_NAT_SPLIT). Its R is clamped to I7_STAR_R_MIN ..
+ * I7_STAR_R_MAX (the wallpaper star's final 54). It hands over in place: it fades over I7_STAR_FADE with no
  * rise while the wallpaper's star lights at its centre (the alpha centroid) and its R (the
  * alpha area over I7_STAR_AREA = the area of WALL_FS's core |x|^.62 + |y|^.62 <= 1 with its
  * smoothstep(.86, 1) edge, at R = 1: 4 G(1 + 1 / .62)^2 / G(1 + 2 / .62) * .7945), and flies
@@ -87,6 +90,16 @@ void intro7_release(void);
 #define I7_STAR_AREA 0.825350f
 #define I7_FLY_STAR_CX 1350.0f
 #define I7_FLY_STAR_CY 1180.0f
+#define I7_STAR_FILL_DIV 2U
+#define I7_STAR_R_MIN 8.0f
+#define I7_STAR_R_MAX 54.0f
+/* A capture that failed (I7_CAPT_NOT_FREE, I7_CAPT_TOO_BIG, I7_CAPT_TABLE_FULL: S-Boot drew
+ * something, it was not copied) does not draw the concept's SAMSUNG splash over it: the panel is
+ * cleared and the wallpaper star lights at One mark's star (the approved splash) and flies through
+ * I7_FLY_STAR_C, a fade from black. Only a black panel (I7_CAPT_BLACK) gets the concept's splash. */
+#define I7_ONE_STAR_X 961.74f
+#define I7_ONE_STAR_Y 1259.0f
+#define I7_ONE_STAR_R 27.0f
 /* intro7_capture's result in the log page (0x91fff000, uncached), slots I7_LOG_CAPT ..:
  *   [116] px << 32 | I7_LOG_TAG << 16 | why << 8 | bands   (px: the bands' total area)
  *   [117] the capture's duration in us (both passes)

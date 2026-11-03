@@ -16,6 +16,8 @@
 #                    captures it (intro7_capture) as the device does. With t = 0 in the list the
 #                    first frame is checked against it: "first frame: N px differ" (must be 0).
 #   I7_SPLASH_AT=X,Y another place for it
+#   I7_H7ENV='K=V ...' environment for h7 in the VM (e.g. H7_CAPT_BUSY=1: the capture fails
+#                    with I7_CAPT_NOT_FREE)
 #   I7_PY=path       Python with Pillow (default build/venv/bin/python)
 # Out: concept-<t>.png, h7-<t>.png, sheet.png (and diff-<t>.* from diff.py). A few PNGs only.
 set -eu
@@ -53,7 +55,7 @@ if [ -x "$h7" ] && [ -f "$rd" ]; then
     have_h7=1
     cmds=""
     for t in $times; do
-        cmds="$cmds '$h7' --ramdisk '$rd' $splash_args --state intro --t $t --out '$out/h7-$t.ppm' --stats &&"
+        cmds="$cmds ${I7_H7ENV:-} '$h7' --ramdisk '$rd' $splash_args --state intro --t $t --out '$out/h7-$t.ppm' --stats &&"
     done
     limactl shell starbite -- bash -lc "set -e; cd '$out'; $cmds true"
     # PPM (12.8 MB a frame) -> PNG

@@ -129,6 +129,8 @@ static size_t load_ramdisk(const char *path)
     return (size_t)st.st_size;
 }
 
+int h7_capt_busy;                   /* intro7.c's capt_free: H7_CAPT_BUSY */
+
 /* --splash: the panel as S-Boot leaves it */
 static void load_splash(const char *path, const char *at)
 {
@@ -561,6 +563,12 @@ int main(int argc, char **argv)
         const char *pe = getenv("H7_POISON");
         if (pe && *pe && *pe != '0')
             poison = !strcmp(pe, "a5") ? 2 : 1;
+    }
+    {
+        /* H7_CAPT_BUSY=1: I7_CAPT is taken (a bigger BOOT Image or payload), so intro7_capture
+         * fails with I7_CAPT_NOT_FREE, as on the device */
+        const char *cb = getenv("H7_CAPT_BUSY");
+        h7_capt_busy = cb && *cb == '1';
     }
     map_fixed(0x83800000UL + G7_HOSTOFF, 0x05000000UL);     /* I7_CAPT, then G7_CANVAS .. G7_RAM_END */
     map_fixed((uintptr_t)FB, G7_FRAME_BYTES);
