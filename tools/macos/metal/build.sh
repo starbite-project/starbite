@@ -187,6 +187,7 @@ do_test() {
 	do_mount
 	# shellcheck disable=SC2086
 	$CC -x objective-c -fobjc-arc -O2 -g -Wall -o "$OUT/sbmtltest" "$HERE/sbmtltest.m" \
+		-Wl,-sectcreate,__TEXT,__info_plist,"$HERE/sbmtltest-Info.plist" \
 		-framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation
 	mkdir -p "$OUT/sym" && cp "$OUT/sbmtltest" "$OUT/sym/sbmtltest"
 	rm -rf "$OUT/sym/sbmtltest.dSYM" && mv "$OUT/sbmtltest.dSYM" "$OUT/sym/" 2>/dev/null || true

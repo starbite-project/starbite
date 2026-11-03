@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Embedded in sbmtltest (__TEXT,__info_plist). GPUSelectionPolicy here means IOSurface.framework's first
+     connect takes the policy from the bundle instead of asking LaunchServices
+     (CFURLCopyResourcePropertyForKey(_NSURLApplicationPrefersExternalGPUKey)), which blocks for ever when
+     coreservicesd is missing. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key><string>com.starbite.sbmtltest</string>
+	<key>CFBundleName</key><string>sbmtltest</string>
+	<key>GPUSelectionPolicy</key><string>avoidHighPower</string>
+</dict>
+</plist>

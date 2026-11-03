@@ -24,6 +24,7 @@
 #include <CoreGraphics/CGGeometry.h>
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
+#include <pthread.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <unistd.h>
@@ -52,6 +53,23 @@ static void say(const char *fmt, ...)
 		write(console, line, (size_t)n);
 }
 
+/* A step that never returns is reported: the step number and how long, every 15 s (M1 boot 1: IOSurfaceCreate
+ * blocked in IOSurface.framework's first connect, which asks LaunchServices; coreservicesd was missing). */
+static volatile int current_step = 1;
+static void *watchdog(void *arg)
+{
+	(void)arg;
+	int last = 0, seconds = 0;
+	for (;;) {
+		sleep(15);
+		seconds = current_step == last ? seconds + 15 : 15;
+		last = current_step;
+		say("still in step %d after %d s (step 2 hangs: IOSurface's connect waits on cfprefsd or LaunchServices/coreservicesd)",
+		    last, seconds);
+	}
+	return NULL;
+}
+
 static bool step(int number, const char *name, bool ok, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 static bool step(int number, const char *name, bool ok, const char *fmt, ...)
 {
@@ -61,6 +79,7 @@ static bool step(int number, const char *name, bool ok, const char *fmt, ...)
 	vsnprintf(detail, sizeof(detail), fmt, ap);
 	va_end(ap);
 	say("%d %s %s %s", number, name, ok ? "PASS" : "FAIL", detail);
+	current_step = number + 1;
 	if (!ok && !firstFailure)
 		firstFailure = number;
 	return ok;
@@ -159,6 +178,9 @@ int main(int argc, char **argv)
 				bundle = argv[++i];
 		}
 		console = open("/dev/console", O_WRONLY | O_NOCTTY | O_NONBLOCK);
+		pthread_t wd;
+		pthread_create(&wd, NULL, watchdog, NULL);
+		pthread_detach(wd);
 		NSOperatingSystemVersion v = NSProcessInfo.processInfo.operatingSystemVersion;
 		say("start: macOS %ld.%ld.%ld, pid %d uid %d", (long)v.majorVersion, (long)v.minorVersion, (long)v.patchVersion,
 		    getpid(), getuid());
