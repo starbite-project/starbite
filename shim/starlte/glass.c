@@ -24,7 +24,8 @@
 #define G7_FB ((uint32_t *)(0xcc000000UL + G7_HOSTOFF))
 
 /* preview builds: time per phase (h7 H7_PROF=1). 0 frame setup, 1 base glass, 2 base items,
- * 3 frozen crossfade, 4 over glass, 5 over items, 6 edge, 7 present, 8 freeze, 9 idle */
+ * 3 frozen crossfade, 4 over glass, 5 over items, 6 edge, 7 present, 8 freeze, 9 the intro's
+ * wallpaper (gw_wall); 10, 11 rows shifted / shaded again (counts) */
 #ifdef M7_PREVIEW
 uint64_t h7_ns(void);
 uint64_t g7_prof[12];
@@ -347,7 +348,8 @@ static uint32_t item_hash(const struct g7_layer *l, const struct g7_item *it)
 
 static void shape_bounds(const struct g7_shape *s, int16_t b[4])
 {
-    float mx = (s->flags & G7_S_LENS) ? 4.f : 112.f, my = (s->flags & G7_S_LENS) ? 4.f : 152.f;
+    /* a lens has no shadow: its aa (2.5 px on the half grid) and the bilinear upsample's reach (2 px) */
+    float mx = (s->flags & G7_S_LENS) ? 6.f : 112.f, my = (s->flags & G7_S_LENS) ? 6.f : 152.f;
     float x0 = g_clamp(g_floor(s->x - mx), 0.f, GW), y0 = g_clamp(g_floor(s->y - my), 0.f, GH);
     float x1 = g_clamp(__builtin_ceilf(s->x + s->w + mx), 0.f, GW), y1 = g_clamp(__builtin_ceilf(s->y + s->h + my), 0.f, GH);
     b[0] = (int16_t)x0;
@@ -1091,14 +1093,17 @@ static void base_glass_row(uint32_t *d, int y, int x0, int x1, int s0, int s1, i
     gs_store_row(d + (sa - x0), y, sa, m, ACC);
 }
 
-/* ---- motion frames: the base glass at half resolution ----
+/* ---- the glass at half resolution ----
  *
- * While the glass moves (the list scrolls, a section opens, the intro), a frame shades the base
- * glass on the half-resolution grid (panel x = 2i + 1, y = 2j + 1, the wallpaper texture's own
- * grid) as premultiplied colour C and transmission M over whatever is below, and every panel row
- * takes C + M x BG8 bilinear from the two half rows around it: a quarter of the shading. The rows
- * are marked (GAPX) and drawn again at full resolution once the glass rests (g7_idle). */
-struct hrow { int j, ia, n; float C[3 * (GW / 2 + 4)], M[GW / 2 + 4]; };
+ * Every frame (motion or rest) shades the glass on the half-resolution grid (panel x = 2i + 1,
+ * y = 2j + 1, the wallpaper texture's own grid) as premultiplied colour C and the multiplier M of
+ * what is below (M = 1 - AL; a base lens can exceed 1, its rule mixes the below in at 1.07), and
+ * every panel row takes C + M x below bilinear from the two half rows around it: a quarter of the
+ * shading. The content items (text, icons, tiles, their rims) stay at panel resolution, and so does
+ * what is below (BG8, the cards under the lens). A row's result depends only on its half rows, so
+ * a rest frame equals a full redraw (--check-full). Approximate rows are now only the shifted ones
+ * (GAPX) and the over layer's held ones (OAPX). */
+struct hrow { int j, ia, n, s0, s1, empty; float C[3 * (GW / 2 + 4)], M[GW / 2 + 4]; };
 #define TAB_HALF (P_TAB + 0xDD000UL)          /* after the specular tables (.. 0xDCA00) */
 #define HR ((struct hrow *)TAB_HALF)          /* base half rows [2], over half rows HO [2] */
 #define HO (HR + 2)
@@ -1107,31 +1112,37 @@ struct hrow { int j, ia, n; float C[3 * (GW / 2 + 4)], M[GW / 2 + 4]; };
 #define HV ((float (*)[GW / 2 + 8])(RBH + 3 * (GW / 2 + 4)))
 _Static_assert(0xDD000UL + 4UL * sizeof(struct hrow) + 6UL * (GW / 2 + 4) * 4UL + 4UL * (GW / 2 + 8) * 4UL <= 0xF0000UL,
                "glass half-row buffers overflow (TAB_SHIFT follows)");
-static void hr_reset(void) { HR[0].n = HR[1].n = -1; }
-static const struct hrow *half_row(int j, int ia, int n, int s0, int s1)
+#define HL ((struct hrow *)(P_TAB + 0xF8800UL))  /* the lens's half rows [2], after TAB_SHIFT (.. 0xF8700) */
+_Static_assert(0xF8800UL + 2UL * sizeof(struct hrow) <= P_TAB_BYTES, "glass lens half rows overflow the table area");
+static void hr_reset(void) { HR[0].n = HR[1].n = HL[0].n = HL[1].n = -1; }
+static const struct hrow *half_row(struct hrow *H, int j, int ia, int n, int s0, int s1)
 {
     for (int k = 0; k < 2; k++)
-        if (HR[k].j == j && HR[k].ia == ia && HR[k].n == n)
-            return &HR[k];
+        if (H[k].j == j && H[k].ia == ia && H[k].n == n && H[k].s0 == s0 && H[k].s1 == s1)
+            return &H[k];
     /* keep the neighbour row (j - 1 or j + 1) the caller needs with this one */
-    int keep0 = HR[0].n == n && HR[0].ia == ia && (HR[0].j == j - 1 || HR[0].j == j + 1);
-    struct hrow *h = &HR[keep0 ? 1 : 0];
+    int keep0 = H[0].n == n && H[0].ia == ia && H[0].s0 == s0 && H[0].s1 == s1 && (H[0].j == j - 1 || H[0].j == j + 1);
+    struct hrow *h = &H[keep0 ? 1 : 0];
     h->j = j;
     h->ia = ia;
     h->n = n;
-    for (int i = 0; i < 3 * n; i++)
-        h->C[i] = 0.f;
-    for (int i = 0; i < n; i++)
-        h->M[i] = 0.f;              /* AL, then 1 - AL */
+    h->s0 = s0;
+    h->s1 = s1;
+    h->empty = 1;
     float py = 2.f * (float)j + 1.f, px0 = 2.f * (float)ia + 1.f;
     int a = 0, b = 0;
     if (s1 > s0 && gs_row_span(GS_HALF, py, s0, s1, &a, &b)) {
+        for (int i = 0; i < 3 * n; i++)
+            h->C[i] = 0.f;
+        for (int i = 0; i < n; i++)
+            h->M[i] = 0.f;          /* AL, then 1 - AL */
+        h->empty = 0;
         gw_row_a5_at(py, n, px0, 2.f, RA5H);
         gw_row_b_at(py, n, px0, 2.f, RBH);
         gs_row(GS_HALF, &CBASE, py, px0, n, h->C, h->M, RA5H, RBH, s0, s1);
+        for (int i = 0; i < n; i++)
+            h->M[i] = 1.f - h->M[i];
     }
-    for (int i = 0; i < n; i++)
-        h->M[i] = 1.f - h->M[i];
     return h;
 }
 
@@ -1150,20 +1161,31 @@ static inline uint32_t half_px(int x, int ia, float Y, uint32_t v, uint8_t *tp)
     float b = HV[2][k] + (HV[2][k + 1] - HV[2][k]) * fx + m * (float)CB(v) + h;
     return 0xff000000U | g_q255(r) << 16 | g_q255(g) << 8 | g_q255(b);
 }
-static void base_glass_half(uint32_t *d, int y, int x0, int x1, int npre, uint8_t *tp)
+static void base_glass_half(uint32_t *d, int y, int x0, int x1, int s0, int s1, uint8_t *tp, struct hrow *H)
 {
     float cy = (float)y * .5f - .25f;
     int j0 = g_ifloor(cy);
     float fy = cy - (float)j0;
     int ia = ((x0 - 1) >> 1), ib = ((x1 - 2) >> 1) + 1, n = ib - ia + 1;
     int ja = j0 < 0 ? 0 : j0, jb = j0 + 1 > WH - 1 ? WH - 1 : j0 + 1;
-    const struct hrow *A = half_row(ja, ia, n, 0, npre), *B = half_row(jb, ia, n, 0, npre);
-    float mn = 1.f;
+    const struct hrow *A = half_row(H, ja, ia, n, s0, s1), *B = half_row(H, jb, ia, n, s0, s1);
+    if (A->empty && B->empty) {
+        if (tp)
+            t_fill(tp, x1 - x0);
+        return;                     /* no glass on this row: d stays */
+    }
+    if (A->empty || B->empty) {     /* the other row: C 0, M 1 */
+        struct hrow *E = (struct hrow *)(A->empty ? A : B);
+        for (int i = 0; i < 3 * n; i++)
+            E->C[i] = 0.f;
+        for (int i = 0; i < n; i++)
+            E->M[i] = 1.f;
+        E->empty = 0;
+    }
     const float32x4_t vfy = vdupq_n_f32(fy), k255 = vdupq_n_f32(255.f);
     int i = 0;
     for (; i + 4 <= n; i += 4) {
         float32x4_t ma = vld1q_f32(A->M + i), mb = vld1q_f32(B->M + i);
-        mn = g_min(mn, vminvq_f32(vminq_f32(ma, mb)));
         vst1q_f32(HV[3] + i, vfmaq_f32(ma, vsubq_f32(mb, ma), vfy));
         float32x4x3_t ca = vld3q_f32(A->C + 3 * i), cb = vld3q_f32(B->C + 3 * i);
         for (int c = 0; c < 3; c++)
@@ -1171,15 +1193,9 @@ static void base_glass_half(uint32_t *d, int y, int x0, int x1, int npre, uint8_
     }
     for (; i < n; i++) {
         float ma = A->M[i], mb = B->M[i];
-        mn = g_min(mn, g_min(ma, mb));
         HV[3][i] = ma + (mb - ma) * fy;
         for (int c = 0; c < 3; c++)
             HV[c][i] = (A->C[3 * i + c] + (B->C[3 * i + c] - A->C[3 * i + c]) * fy) * 255.f;
-    }
-    if (mn >= 1.f) {
-        if (tp)
-            t_fill(tp, x1 - x0);
-        return;                     /* no glass on this row: d stays */
     }
     for (int c = 0; c < 4; c++)
         HV[c][n] = HV[c][n + 1] = HV[c][n - 1];
@@ -1217,13 +1233,13 @@ static void base_glass_half(uint32_t *d, int y, int x0, int x1, int npre, uint8_
         d[x - x0] = half_px(x, ia, Y, d[x - x0], tp ? tp + (x - x0) : 0);
 }
 
-/* the base layer (glass and items) for the rect into dst (stride GW). glb: use and keep GLB;
- * half: rows that need their glass again get it at half resolution (a motion frame) */
-static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb, int half)
+/* the base layer (glass and items) for the rect into dst (stride GW). glb: use and keep GLB. The
+ * glass at half resolution (base shapes, then the lens over GLB), the wordmark at panel resolution */
+static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb)
 {
     int n = x1 - x0, wy0 = 0, wy1 = 0, wx0 = 0, wx1 = 0;
     int word = gs_word_rows(&wy0, &wy1, &wx0, &wx1);
-    int npre = LB ? gs_npre(0) : 0, nsh = LB ? gs_nshapes(0) : 0;
+    int npre = LB ? gs_npre(GS_HALF) : 0, nsh = LB ? gs_nshapes(GS_HALF) : 0;
     PROF0;
     hr_reset();
     for (int y = y0; y < y1; y++) {
@@ -1238,10 +1254,7 @@ static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb,
         } else {
             base_bg_row(d, y, x0, x1);
             uint8_t *tp = glb && !frozen ? TPL + (unsigned)y * GW + x0 : 0;    /* (frozen: TPL is SOFT) */
-            if (half)
-                base_glass_half(d, y, x0, x1, npre, tp);
-            else
-                base_glass_row(d, y, x0, x1, 0, npre, 0, 0, 0, tp);
+            base_glass_half(d, y, x0, x1, 0, npre, tp, HR);
             if (glb) {
                 uint32_t *g = GLB + (unsigned)y * GW + x0;
                 if (g != d)
@@ -1254,17 +1267,15 @@ static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb,
                 }
                 glb_valid(y, x0, x1);
             }
-            if (glb || dst == (uint32_t *)G7_CANVAS) {
-                if (half && !GAPX[y]) {
-                    GAPX[y] = 1;
-                    napx++;
-                } else if (!half && GAPX[y] && x0 == 0 && x1 == GW) {
-                    GAPX[y] = 0;
-                    napx--;
-                }
+            if ((glb || dst == (uint32_t *)G7_CANVAS) && GAPX[y] && x0 == 0 && x1 == GW) {
+                GAPX[y] = 0;        /* shaded again where the glass is: no longer shifted */
+                napx--;
             }
         }
-        base_glass_row(d, y, x0, x1, npre, nsh, wd, wx0, wx1, 0);
+        if (nsh > npre)
+            base_glass_half(d, y, x0, x1, npre, nsh, 0, HL);      /* the lens over the base */
+        if (wd)
+            base_glass_row(d, y, x0, x1, 0, 0, wd, wx0, wx1, 0);
     }
     PROF(1);
     if (LB) {
@@ -1487,7 +1498,8 @@ static void compose_over(uint32_t *dst, int x0, int y0, int x1, int y1)
     float al0 = COVER.back * .45f;
     PROF0;
     HO[0].n = HO[1].n = -1;
-    if (noapx && !(LO && (LO->nshape || al0 > 0.f)) && x0 == 0 && x1 == GW)
+    /* every over row is drawn here as at rest (half resolution): a held row (OAPX) is then exact */
+    if (noapx && x0 == 0 && x1 == GW)
         for (int y = y0; y < y1; y++)
             if (OAPX[y]) {
                 OAPX[y] = 0;
@@ -1499,22 +1511,14 @@ static void compose_over(uint32_t *dst, int x0, int y0, int x1, int y1)
             if (!(y & 3))
                 g7_poll();
             int touch = shapes_touch_row(LO, py);
-            if (OAPX[y] && !(touch && motion_over) && x0 == 0 && x1 == GW) {
-                OAPX[y] = 0;        /* drawn exactly below */
-                noapx--;
-            }
             if (!touch && al0 <= 0.f)
                 continue;
-            if (touch && motion_over) {
+            if (touch) {
                 /* (A, al) bilinear from the two half rows around y, then the premultiplied store */
                 float cy = (float)y * .5f - .25f;
                 int j0 = g_ifloor(cy);
                 float fy = cy - (float)j0;
                 int ia = ((x0 - 1) >> 1), ib = ((x1 - 2) >> 1) + 1, m = ib - ia + 1;
-                if (!OAPX[y]) {
-                    OAPX[y] = 1;
-                    noapx++;
-                }
                 const struct hrow *A = half_over_row(j0 < 0 ? 0 : j0, ia, m, al0),
                                   *B = half_over_row(j0 + 1 > WH - 1 ? WH - 1 : j0 + 1, ia, m, al0);
                 over_half_store(dst + (unsigned)y * GW + x0, y, x0, x1, A, B, fy, ia, m);
@@ -1605,7 +1609,7 @@ static void compose(int x0, int y0, int x1, int y1)
         PROF(3);
     } else {
         /* GLB only for the final wallpaper at dim .8: in the intro every frame changes it all */
-        compose_base(canvas, x0, y0, x1, y1, base_ok && CBASE.dim == .8f, motion_half);
+        compose_base(canvas, x0, y0, x1, y1, base_ok && CBASE.dim == .8f);
     }
     compose_over(canvas, x0, y0, x1, y1);
     PROF0;
@@ -1731,7 +1735,7 @@ static void freeze(void)
             fprintf(stderr, "freeze: %d rows not valid, %d approximate\n", inv, nsapx);
     }
 #endif
-    compose_base((uint32_t *)G7_SHARP, 0, 0, GW, GH, 1, 0);
+    compose_base((uint32_t *)G7_SHARP, 0, 0, GW, GH, 1);
 #ifdef M7_PREVIEW
     uint64_t fz1 = h7_ns();
 #endif
@@ -1851,8 +1855,8 @@ static void set4(int16_t *r, int x0, int y0, int x1, int y1)
     r[3] = (int16_t)y1;
 }
 /* back changed while frozen: it shows only where the over glass does not cover everything (al < 1).
- * Inside an over shape at full opacity, a pixel half the AA width inside its edge has cov = 1, so
- * al = 1 and the colour no longer depends on what is below: the largest such shape's box, inset by
+ * Inside an over shape at full opacity, a pixel whose half-grid samples are all half the AA width
+ * (1.25 px) inside its edge has cov = 1, so al = 1 and the colour no longer depends on what is below: the largest such shape's box, inset by
  * its corner (the circle's 45 degree point covers the continuous corner too), is left alone. */
 static void back_dirty(void)
 {
@@ -1861,8 +1865,12 @@ static void back_dirty(void)
         const struct g7_shape *q = &LO->shape[i];
         if (q->a < 1.f || (q->flags & G7_S_LENS))
             continue;
-        float in = q->r * 1.18f * .2929f + 3.f;
+        float in = q->r * 1.18f * .2929f + 6.f;   /* + aa and the half grid's bilinear reach */
         float x0 = q->x + in, y0 = q->y + in, x1 = q->x + q->w - in, y1 = q->y + q->h - in;
+        if (q->flags & G7_S_CLIP) {     /* the viewport fade (170 .. 246, 2480 .. 2620) lets the backdrop in */
+            y0 = g_max(y0, 248.f);
+            y1 = g_min(y1, 2478.f);
+        }
         if (x1 - x0 < 64.f || y1 - y0 < 64.f || (x1 - x0) * (y1 - y0) <= best)
             continue;
         best = (x1 - x0) * (y1 - y0);
@@ -1913,9 +1921,11 @@ uint32_t g7_frame(const struct g7_frame *f)
     LO = f->over;
     /* the wallpaper (intro) */
     if (!gw_wall_same(&f->wall, &cur_wall)) {
+        PROF(0);
         if (!gw_field_valid())
             gw_field();
         gw_wall(&f->wall);
+        PROF(9);
         cur_wall = f->wall;
         base_ok = 0;
         wide = 1;
@@ -1957,12 +1967,13 @@ uint32_t g7_frame(const struct g7_frame *f)
             glb_soft = 0.f;
         }
         gs_prepare(0, LB ? LB->shape : 0, LB ? LB->nshape : 0, &CBASE, 1.f);
+        gs_prepare(GS_HALF, LB ? LB->shape : 0, LB ? LB->nshape : 0, &CBASE, 1.f);
         gs_word_prepare(&f->word, &CBASE);
         /* GLB: only where this base's glass differs from the last (moved rows shifted, SAPX) */
         shift_on = !forced && !all_dirty && base_ok && bg8_ok && CBASE.dim == .8f && f->word.ta <= .001f;
         layer_diff_save(0, LB, 1);
         shift_on = 0;
-        PROF0;
+        PROF(0);
         frz_word = f->word;
         freeze();                   /* SHARP = GLB + the lens and items (GLB is in SHARP) */
         PROF(8);                    /* (its compose_base counts in 1 and 2 as well) */
@@ -2015,8 +2026,7 @@ uint32_t g7_frame(const struct g7_frame *f)
         /* a shifting frame too: the rows it shades again (edges, rows due after SHIFT_MAX, rows a
          * still shape blocks) are as approximate as the shifted ones and drawn exactly at rest */
         motion_half = !forced && (wide || glass_area * 8U > (uint64_t)GW * GH || (sh_on && sh_dy != 0));
-        if (motion_half)
-            gs_prepare(GS_HALF, LB ? LB->shape : 0, LB ? LB->nshape : 0, &CBASE, 1.f);
+        gs_prepare(GS_HALF, LB ? LB->shape : 0, LB ? LB->nshape : 0, &CBASE, 1.f);
     } else {
         gs_word_prepare(&f->word, &CBASE);
         motion_half = 0;            /* frozen: the base does not move (the rest check below) */
@@ -2026,7 +2036,7 @@ uint32_t g7_frame(const struct g7_frame *f)
     /* the over glass moves over more than an eighth of the panel, or the backdrop fades */
     motion_over = !forced && LO && LO->nshape &&
                   (over_area * 8U > (uint64_t)GW * GH || bk != cur_back);
-    if (motion_over)
+    if (LO && LO->nshape)
         gs_prepare(GS_HALFO, LO->shape, LO->nshape, &COVER, 1.f);
     /* an end screen's curtain over an unchanged panel (frozen, back 1) */
     curt_k = frozen && bk == 1.f ? curtain_index(LO) : -1;
@@ -2064,6 +2074,15 @@ uint32_t g7_frame(const struct g7_frame *f)
             all_dirty = 1;
     }
     PROF(0);
+#ifdef M7_PREVIEW
+    {
+        extern int h7_dbg;
+        if (h7_dbg == 7)
+            fprintf(stderr, "FR all %d forced %d wide %d mh %d mo %d frozen %d nrr %d garea %llu oarea %llu napx %d sh %d/%d bg8 %d base_ok %d\n",
+                    all_dirty, forced, wide, motion_half, motion_over, frozen, nrr, (unsigned long long)glass_area,
+                    (unsigned long long)over_area, napx, sh_on, sh_dy, bg8_ok, base_ok);
+    }
+#endif
     if (all_dirty) {
         nrr = 1;
         RR[0][0] = 0;
@@ -2144,7 +2163,7 @@ static int sharp_refine(void)
         }
     }
     hr_reset();
-    compose_base((uint32_t *)G7_SHARP, 0, y0, GW, y1, 1, 0);
+    compose_base((uint32_t *)G7_SHARP, 0, y0, GW, y1, 1);
     for (int y = y0; y < y1; y++)
         GV0[y] = GV1[y] = 0;        /* SHARP holds the lens and the items too: never GLB */
     int mh = motion_half, mo = motion_over;

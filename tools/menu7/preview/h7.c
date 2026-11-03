@@ -141,7 +141,23 @@ static void frame_reset(void)
  * timed on the host clock and printed as "T7 <fake ms> <host ms> <px> <mode>" */
 uint32_t __real_g7_frame(const struct g7_frame *f);
 uint64_t stub_now_us(void);
+void stub_advance_us(uint64_t us);
+extern double o_slow;
 static int run_mode;
+int __real_g7_idle(void);
+int __wrap_g7_idle(void)
+{
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    int r = __real_g7_idle();
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    double ms = (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6;
+    if (run_mode && o_slow > 0.)
+        stub_advance_us((uint64_t)(ms * 1e3 * o_slow));
+    if (run_mode && getenv("H7_IDLELOG") && ms > .05)
+        printf("I7 %.0f %.2f\n", stub_now_us() / 1e3, ms);
+    return r;
+}
 extern uint64_t g7_prof[12];
 uint32_t __wrap_g7_frame(const struct g7_frame *f)
 {
@@ -157,7 +173,7 @@ uint32_t __wrap_g7_frame(const struct g7_frame *f)
     h7_dbg = getenv("H7_DBG") ? atoi(getenv("H7_DBG")) : 0;
     if (run_mode && pe && *pe == '1' && px) {
         printf("P7");
-        for (int i = 0; i < 9; i++)
+        for (int i = 0; i < 10; i++)
             printf(" %.2f", (double)(g7_prof[i] - p0[i]) / 1e6);
         printf(" | %llu %llu\n", (unsigned long long)(g7_prof[10] - p0[10]), (unsigned long long)(g7_prof[11] - p0[11]));
     }
@@ -254,6 +270,8 @@ uint32_t __wrap_g7_frame(const struct g7_frame *f)
             }
         }
     }
+    if (run_mode && o_slow > 0.)
+        stub_advance_us((uint64_t)(((double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6) * 1e3 * o_slow));
     if (run_mode)
         printf("T7 %.0f %.2f %u %s%s\n", stub_now_us() / 1e3,
                (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6, px,
