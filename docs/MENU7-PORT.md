@@ -157,7 +157,7 @@ v7 uses **0x84000000..0x88800000** (72 MiB, write-back) and, for the intro only,
 
 | Address | Size | Name | Owner | Holds |
 |---|---|---|---|---|
-| 0x83800000 | 8 MiB | `I7_CAPT` | intro7 | S-Boot's splash as the intro found it on the panel: its non-black row bands (at most `I7_CAPT_BANDS` 8, `I7_CAPT_MAX_PX` 393216 px = 1.5 MiB), each an `sb7_image` (ARGB premultiplied, RAW, 64-byte aligned) put in with `sb7_put` as `SB7_S_CAPT0 + i`. Used only when `intro7_capture` finds at run time that the BOOT Image with its appended payload (`_start` + image_size) ends at or below 0x83800000 and the ramdisk does not reach into it (BOOT is 0x3700000 bytes, so an Image at 0x80080000 ends by 0x83780000). Dead once the intro has decoded it into `G7_CACHE`. Static asserts in intro7.c: ends at `G7_CANVAS`, holds `I7_CAPT_MAX_PX`, at most half of `G7_CACHE` |
+| 0x83800000 | 8 MiB | `I7_CAPT` | intro7 | S-Boot's splash as the intro found it on the panel: its non-black row bands (at most `I7_CAPT_BANDS` 8, `I7_CAPT_MAX_PX` 393216 px = 1.5 MiB), each an `sb7_image` (ARGB premultiplied, RAW, 64-byte aligned) put in with `sb7_put` as `SB7_S_CAPT0 + i`. Used only when `intro7_capture` finds at run time that the BOOT Image (`_start` + image_size, which with a payload appended is also `boot_rd_end`) ends at or below 0x83800000, that the appended payload (`star_info` rd_start .. rd_end, from `boot_rd_*`, read through `m7_rd_range`) does not overlap it, and that the menu ramdisk's SB7 tail (`star_font_blob`) does not either (BOOT is 0x3700000 bytes, so an Image at 0x80080000 ends by 0x83780000). `intro7_release` unregisters the images when `intro7_run` returns; their decoded copies stay in `G7_CACHE` (unreachable) until glass resets it. Static asserts in intro7.c: ends at `G7_CANVAS`, holds `I7_CAPT_MAX_PX`, at most half of `G7_CACHE` |
 | 0x84000000 | 17 MiB | `G7_CANVAS` | glass | the composed panel (ARGB, stride 1440); dirty rects go from here to the FB |
 | 0x85100000 | 17 MiB | `G7_SHARP` | glass | the base layer frozen under an overlay; while nothing is frozen, GLB (the base glass composed over BG8, without the lens); on an end screen (frozen, back 1) CURT, the panel below the curtain |
 | 0x86200000 | 17 MiB | `G7_BASE` | glass | BG8: wallpaper (720 x 1480, bilinear to the panel) x dim .8, dithered: the opaque base, static after the intro |
@@ -194,7 +194,7 @@ goes off, so the dirty v7 lines reach RAM and nothing stale stays behind for the
   vmalle1`, `dsb`, `isb`. After a failed start, everything that lived there must be rebuilt (an
   XNU copy may have overwritten it).
 - 0x83800000..0x84000000 (8 MiB): taken by `I7_CAPT` during the intro (checked at run time,
-  above); free again after it.
+  above); free again after it (`intro7_release`: `sb7_get` no longer finds SB7_S_CAPT0 ..).
 
 ---
 
@@ -432,19 +432,27 @@ velocity), tap. Any input cancels the countdown; Power during the countdown star
 - The loader starts while S-Boot's logo.jpg is on the panel: Samsung's own splash (UP_PARAM;
   `tools/brand/splash-noknox.py` makes the stock one without "Secured by Knox", losslessly).
   `intro7_capture` (first thing in `intro7_run`, before anything is drawn) reads the panel once
-  (uncached, 64-bit loads), finds its non-black rows, groups them into bands (black gaps up to
-  `I7_CAPT_GAP` 8 rows join; more than 8 bands and the gap doubles), and copies each band's box
-  into `I7_CAPT` as a premultiplied ARGB image with alpha = its largest channel, so over the
+  (uncached, 64-bit loads), finds its picture rows (a pixel counts when its largest channel is at least 8: JPEG leaves
+  1..7 values in background blocks), groups them into bands (black gaps up to
+  `I7_CAPT_GAP` 8 rows join; more than 8 bands and the gap doubles), grows each band's box by
+  `I7_CAPT_PAD` 8 px (never past the middle of a gap) and copies it unthresholded into `I7_CAPT` as a premultiplied ARGB image with alpha = its largest channel, so over the
   intro's black t = 0 base it is exactly what S-Boot drew. The intro's first frame is then the
   splash pixel for pixel (`intro-film.sh` with `I7_SPLASH`: 0 px differ for the stock, the
   Knox-free, the "Powered by starbite" and the concept logo.jpg). From the captured picture: the
   bands above `I7_NAT_SPLIT` (the logo block) fade over 260 ms rising -36 eo(t / 420) (#gs9), the
-  others fade over 200 ms (#pow), the concept's SAMSUNG glass wordmark fades in white
-  (`I7_NAT_WORD0` 100 .. 260 ms) and then drains and melts as in the concept; the wallpaper, the
+  others fade over 200 ms (#pow), there is no glass wordmark: Samsung's own wordmark (the band across panel row 1232)
+  stays until 260 ms, eases into the concept wordmark's box (900 wide, centred on 720, 1380) by
+  700 ms, then shrinks with the capsule and fades over the melt as the island comes out of it, so
+  the only SAMSUNG on screen is the real one; the wallpaper, the
   island and the menu are the concept's. Nothing captured (a black panel, more than 1.5 MiB of
   picture, `I7_CAPT` not free): the concept's splash items as before (byte-identical frames).
   The concept's "black 250 ms, splash until 1600 ms" phase is S-Boot's own time and is not
   replayed.
+- The capture's result is in log slots 116..117 (`intro7.h`): slot 116 = px << 32 | 0xca97 << 16
+  | why << 8 | bands (why: 0 `I7_CAPT` not free, 1 black panel, 2 too much picture, 3 SB7 table
+  full, 0xff the native path ran), slot 117 its duration in us. The duration is unmeasured on the
+  device (both passes read the uncached panel; estimated ~50 ms); if it is large, pass 1 can scan
+  only S-Boot's logo rows and a strip at the top.
 - `intro7_frame(f, t)` is the concept's `introAt(t)` with reduced motion off, using the
   constants in `intro7.h`, star0 = `M7_STAR0_*` (the measured `#spStar`). It calls
   `m7_build(f, &xf)` then sets `f->wall`, `f->word`, `f->dim` and appends the splash items to
@@ -568,7 +576,7 @@ reviewer can see, except the listed deliberate differences.
 | D2 | the light follows the pointer (`light` springs) | fixed light, lx = ly = 0 | no pointer; the accelerometer later (no driver yet) |
 | D3 | glass canvases at 0.32-0.75 of the panel (K 1.3-3) | K = 1: aa 1.25 px, rim falloff 2 px | native resolution; edges are crisper, the formulas are the same |
 | D4 | the menu behind an overlay blurs 0 -> 26 px, darkens, zooms to .965 progressively | crossfade between the frozen sharp base and a soft version rendered once (sharp side zoomed when the budget allows) | a full-screen blur per frame does not fit |
-| D5 | "black 250 ms, splash until 1600 ms", then the concept's SAMSUNG / Galaxy S9 / Powered by starbite fade | S-Boot's own splash (Samsung's logo.jpg), as long as S-Boot and the bake take; the intro starts from the captured panel and fades it out while the SAMSUNG glass wordmark fades in | it is S-Boot's screen; the user asked for the native splash |
+| D5 | "black 250 ms, splash until 1600 ms", then the concept's SAMSUNG / Galaxy S9 / Powered by starbite fade | S-Boot's own splash (Samsung's logo.jpg), as long as S-Boot and the bake take; the intro starts from the captured panel and fades it out; Samsung's own wordmark takes the glass wordmark's place | it is S-Boot's screen; the user asked for the native splash |
 | D6 | the blur planes follow the blooming star in the intro | baked once at the final wallpaper; glass that appears from 1050 ms refracts the final state | per-frame blurs do not fit; by 1050 ms the reveal is past 3250 px |
 | D7 | concept demo data (iOS 14, iPadOS 18, tvOS, Darwin, iOS 7, WinPE, UEFI Shell, GSI, ChromeOS, Starbite OS, USB Toolkit, Demos, the four Lab tools) | the catalog; Lab = Starbite Lab (EngineerMode) + visible lab entries | catalog-driven |
 | D8 | battery "87%" | the battery glyph without a percentage | no fuel gauge driver in the loader |
@@ -592,5 +600,5 @@ composing them (no vsync source in the loader). Watch for it on the first boot.
    inactive until the ramdisk has SB7.
 2. The integrator diffs all states with `diff.py`, checks `readelf -r` (no ABS64), the Image size,
    and the ramdisk size, then hands the user `menu-v7.sbm` + the loader for one flash.
-3. First boot reads: log slots 119 (CPACR), 120..127 (frame stats), the user's photo of the menu;
+3. First boot reads: log slots 116..117 (the splash capture), 119 (CPACR), 120..127 (frame stats), the user's photo of the menu;
    if v7 fails before drawing, v6 appears (fallback), and the log says why.

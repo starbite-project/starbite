@@ -196,6 +196,9 @@ struct m7_ev {
 /* Poll keys and touch once and return the next event (0: none). Debounce, holds, repeat. */
 int m7_input(struct m7_ev *ev);
 uint64_t m7_now_us(void);
+/* The payload appended to the BOOT Image (menu7_main's star_info rd_start .. rd_end, from
+ * xnu_boot.c's boot_rd_*): 1 and the range, or 0 before menu7_main / in the preview. */
+int m7_rd_range(uint64_t *start, uint64_t *end);
 
 /* Frame timing by what the frame shows (on the device: log slots 128 + class, each
  * frames << 48 | worst ms << 32 | total ms; h7 --run prints the class's name). */

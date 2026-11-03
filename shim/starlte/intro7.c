@@ -176,14 +176,17 @@ struct capt_band {
 };
 static struct capt_band CB[I7_CAPT_BANDS];
 static int capt_n;                  /* bands captured; 0: the concept's splash */
+static int capt_sam = -1;           /* the band that is Samsung's wordmark, or -1 */
 static uint16_t row_x0[G7_H], row_x1[G7_H];     /* pass 1: each row's non-black columns */
 
 #ifndef M7_PREVIEW
 extern char _start[];               /* xnu_boot.S: the Image header (image_size at + 16) */
 #endif
 
-/* I7_CAPT is free: the BOOT Image with what is appended to it ends below it, and the ramdisk
- * (S-Boot's, at 0x89000000) does not reach into it. */
+/* I7_CAPT is free: the BOOT Image ends below it (_start + image_size: with a payload appended,
+ * that is boot_rd_end too), the payload appended to it (star_info's rd_start .. rd_end, from
+ * boot_rd_*) does not overlap it, and neither does the SB7 part of the menu ramdisk (S-Boot loads
+ * that at 0x89000000; star_font_blob gives its SBFONT01 tail, which ends where the ramdisk ends). */
 static int capt_free(void)
 {
     uint64_t s, e;
@@ -192,31 +195,70 @@ static int capt_free(void)
     if ((uintptr_t)_start + isz > I7_CAPT)
         return 0;
 #endif
+    if (m7_rd_range(&s, &e) && e > s && s < I7_CAPT + I7_CAPT_SIZE && e > I7_CAPT)
+        return 0;
     if (star_font_blob(&s, &e) && s < I7_CAPT + I7_CAPT_SIZE && e > I7_CAPT)
         return 0;
     return 1;
 }
 
-int intro7_capture(void)
+/* the result, for the log page and the preview */
+static uint32_t capt_px, capt_us;
+static unsigned capt_why;
+
+static void capt_log(void)
 {
-    capt_n = 0;
+#ifndef M7_PREVIEW
+    volatile uint64_t *log = (volatile uint64_t *)I7_LOG;
+    log[I7_LOG_CAPT] = (uint64_t)capt_px << 32 | (uint64_t)I7_LOG_TAG << 16 | (uint64_t)capt_why << 8 |
+                       (uint64_t)(unsigned)capt_n;
+    log[I7_LOG_CAPT + 1] = capt_us;
+#endif
+}
+
+static int capt_end(uint64_t t0, unsigned why, uint32_t px)
+{
+    capt_why = why;
+    capt_px = px;
+    uint64_t d = m7_now_us() - t0;
+    capt_us = d > 0xffffffffU ? 0xffffffffU : (uint32_t)d;
+    capt_log();
+    return capt_n;
+}
+
+/* A pixel (the low 24 bits) counts as picture when its largest channel is at least 8: JPEG
+ * leaves 1..7 values in background blocks (the stock logo.jpg has ~22K of them, on PIL's
+ * decoder; S-Boot's is untested), which would widen and merge the bands. Only the bands' boxes
+ * are found that way; what is copied is every pixel in them, unthresholded. */
+#define I7_PIX2 0x00f8f8f800f8f8f8ULL
+
+static void capt_drop(void)
+{
     for (unsigned i = 0; i < I7_CAPT_BANDS; i++)
         (void)sb7_put(SB7_T_IMAGE, SB7_S_CAPT0 + i, 0, 0);
+    capt_n = 0;
+    capt_sam = -1;
+}
+
+int intro7_capture(void)
+{
+    uint64_t t0 = m7_now_us();
+    capt_drop();
     if (!capt_free())
-        return 0;
-    /* pass 1 (one read of the uncached panel, two pixels a load): each row's non-black extent */
+        return capt_end(t0, I7_CAPT_NOT_FREE, 0);
+    /* pass 1 (one read of the uncached panel, two pixels a load): each row's picture extent */
     const volatile uint64_t *fb = I7_FB;
     for (unsigned y = 0; y < G7_H; y++) {
         unsigned x0 = G7_W, x1 = 0;
         const volatile uint64_t *r = fb + (uint64_t)y * (G7_W / 2);
         for (unsigned i = 0; i < G7_W / 2; i++) {
             uint64_t v = r[i];
-            if (!(v & 0x00ffffff00ffffffULL))
+            if (!(v & I7_PIX2))
                 continue;
-            unsigned a = (v & 0xffffffU) ? 2 * i : 2 * i + 1;
+            unsigned a = (v & (I7_PIX2 & 0xffffffffU)) ? 2 * i : 2 * i + 1;
             if (a < x0)
                 x0 = a;
-            x1 = (v & 0x00ffffff00000000ULL) ? 2 * i + 2 : 2 * i + 1;
+            x1 = (v & (I7_PIX2 & ~0xffffffffULL)) ? 2 * i + 2 : 2 * i + 1;
         }
         row_x0[y] = (uint16_t)x0;
         row_x1[y] = (uint16_t)x1;
@@ -252,11 +294,26 @@ int intro7_capture(void)
         if (n <= I7_CAPT_BANDS)
             break;
     }
+    /* each box grows by I7_CAPT_PAD (one JPEG block: the faint values sit in the text's blocks),
+     * vertically never past the middle of the black gap to the next band, so boxes never overlap */
+    unsigned prev_y1 = 0;
+    for (int i = 0; i < n; i++) {
+        unsigned y0 = CB[i].y0, y1 = CB[i].y1;
+        unsigned lo = i ? (prev_y1 + y0 + 1) / 2 : 0, hi = i + 1 < n ? (y1 + CB[i + 1].y0) / 2 : G7_H;
+        prev_y1 = y1;
+        CB[i].y0 = (uint16_t)(y0 >= lo + I7_CAPT_PAD ? y0 - I7_CAPT_PAD : lo);
+        CB[i].y1 = (uint16_t)(y1 + I7_CAPT_PAD <= hi ? y1 + I7_CAPT_PAD : hi);
+        CB[i].x0 = (uint16_t)(CB[i].x0 >= I7_CAPT_PAD ? CB[i].x0 - I7_CAPT_PAD : 0);
+        CB[i].x1 = (uint16_t)(CB[i].x1 + I7_CAPT_PAD <= G7_W ? CB[i].x1 + I7_CAPT_PAD : G7_W);
+    }
     uint64_t px = 0;
     for (int i = 0; i < n; i++)
-        px += (uint64_t)(CB[i].y1 - CB[i].y0) * (CB[i].x1 - CB[i].x0);
-    if (!n || px > I7_CAPT_MAX_PX)
-        return 0;
+        px +=(uint64_t)(CB[i].y1 - CB[i].y0) * (CB[i].x1 - CB[i].x0);
+    uint32_t px32 = px > 0xffffffffU ? 0xffffffffU : (uint32_t)px;
+    if (!n)
+        return capt_end(t0, I7_CAPT_BLACK, 0);
+    if (px > I7_CAPT_MAX_PX)
+        return capt_end(t0, I7_CAPT_TOO_BIG, px32);
     /* pass 2: each band as an sb7 image, premultiplied with alpha = its largest channel, so over
      * black (the intro's base at t = 0) it is exactly what S-Boot drew */
     uintptr_t at = I7_CAPT;
@@ -286,25 +343,51 @@ int intro7_capture(void)
         }
         uint32_t size = (uint32_t)sizeof(*im) + im->data_size;
         if (!sb7_put(SB7_T_IMAGE, SB7_S_CAPT0 + (unsigned)i, im, size)) {
-            for (int j = 0; j < i; j++)
-                (void)sb7_put(SB7_T_IMAGE, SB7_S_CAPT0 + (unsigned)j, 0, 0);
-            return 0;
+            capt_drop();
+            return capt_end(t0, I7_CAPT_TABLE_FULL, px32);
         }
         at += ((uintptr_t)size + 63U) & ~(uintptr_t)63U;
     }
     capt_n = n;
-    return n;
+    /* Samsung's wordmark: the logo block's band across panel row I7_NAT_SAM_ROW, if it is no taller
+     * than a line of text */
+    for (int i = 0; i < n; i++)
+        if (CB[i].y0 <= I7_NAT_SAM_ROW && CB[i].y1 > I7_NAT_SAM_ROW && CB[i].y1 - CB[i].y0 <= I7_NAT_SAM_MAX_H) {
+            capt_sam = i;
+            break;
+        }
+    return capt_end(t0, I7_CAPT_OK, px32);
 }
 
-/* The captured bands at t: the logo block fades and rises as #gs9, the rest fades as #pow. */
+void intro7_release(void)
+{
+    capt_drop();
+}
+
+/* The captured bands at t. The rest of the logo block fades and rises as #gs9, the bands below it
+ * ("Powered by ...") fade as #pow. Samsung's own wordmark (capt_sam) is the only SAMSUNG on the
+ * screen: it stays while "Galaxy S9" goes, then moves and grows into the concept's wordmark box
+ * (I7_NAT_SAM_W wide, centred on the capsule at I7_CAP_X, I7_CAP_Y) by I7_MELT0, and shrinks with
+ * the capsule's width (W0 -> W1) as it fades out over the melt, where the island takes over. */
 static void capt_items(struct g7_layer *l, float t)
 {
     float ua = 1.0f - c01(t / I7_GS9_FADE), dy = -36.0f * m7_eout(c01(t / I7_GS9_RISE));
     float la = 1.0f - c01(t / I7_POW_FADE);
     for (int i = 0; i < capt_n; i++) {
+        float x = (float)CB[i].x0, y = (float)CB[i].y0;
+        float w = (float)(CB[i].x1 - CB[i].x0), h = (float)(CB[i].y1 - CB[i].y0);
+        if (i == capt_sam) {
+            float p = m7_ease(c01((t - I7_NAT_MOVE0) / (float)(I7_MELT0 - I7_NAT_MOVE0)));
+            float m = m7_ease(c01((t - I7_MELT0) / I7_MELT_MS));
+            float k = lerpf(1.0f, I7_NAT_SAM_W / w, p) * lerpf(1.0f, I7_CAP_W1 / I7_CAP_W0, m);
+            float cx = lerpf(x + 0.5f * w, I7_CAP_X, p), cy = lerpf(y + 0.5f * h, I7_CAP_Y, p);
+            add_image(l, I7_KEY(16 + i), SB7_S_CAPT0 + (unsigned)i, cx - 0.5f * w * k, cy - 0.5f * h * k, w * k, h * k,
+                      0xffffffffU, 1.0f - m);
+            continue;
+        }
         int up = CB[i].y0 < I7_NAT_SPLIT;
-        add_image(l, I7_KEY(16 + i), SB7_S_CAPT0 + (unsigned)i, (float)CB[i].x0, (float)CB[i].y0 + (up ? dy : 0.0f),
-                  (float)(CB[i].x1 - CB[i].x0), (float)(CB[i].y1 - CB[i].y0), 0xffffffffU, up ? ua : la);
+        add_image(l, I7_KEY(16 + i), SB7_S_CAPT0 + (unsigned)i, x, y + (up ? dy : 0.0f), w, h, 0xffffffffU,
+                  up ? ua : la);
     }
 }
 
@@ -392,8 +475,9 @@ void intro7_frame(struct g7_frame *f, float t)
     float m = m7_ease(c01((t - I7_MELT0) / I7_MELT_MS));
     f->word.tf = 1.0f - m7_ease(c01((t - I7_DRAIN0) / I7_DRAIN_MS));
     f->word.tm = m;
-    /* from the captured splash the wordmark fades in (white) while the splash fades out */
-    f->word.ta = t >= I7_ISLAND0 ? 0.0f : capt_n ? c01((t - I7_NAT_WORD0) / I7_NAT_WORD_MS) : 1.0f;
+    /* from the captured splash there is no glass wordmark: Samsung's own (capt_items) takes its
+     * place, and the island comes out of where it fades */
+    f->word.ta = t >= I7_ISLAND0 || capt_n ? 0.0f : 1.0f;
     f->word.cap[0] = I7_CAP_X;
     f->word.cap[1] = I7_CAP_Y;
     f->word.cap[2] = lerpf(I7_CAP_W0, I7_CAP_W1, m);
@@ -492,5 +576,6 @@ finish:
     m7_build(&frame, 0);
     frame.flags = first ? G7_F_FULL : 0;
     m7_frame_timed(&frame, M7_PH_INTRO_GLASS);
+    intro7_release();               /* I7_CAPT is free again: nothing may find the bands now */
     return res;
 }

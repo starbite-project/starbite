@@ -2070,3 +2070,8 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     pixel (h7 --splash, intro-film.sh I7_SPLASH: 0 px differ for the stock, Knox-free, "Powered by starbite" and
     concept logo.jpg), then it fades into the concept's intro. No capture: the concept splash as before (frames
     byte-identical to the previous loader). Films: build/splash-review/{native,stock,current,v7concept}/.
+  - Review fixes: no glass wordmark on the capture path (it double-exposed with "Galaxy S9" at 100..260 ms); the real
+    SAMSUNG band (panel row 1232) eases into the wordmark box and fades over the melt. Bands are found with max
+    channel >= 8 (PIL's decode of the stock logo has ~22K pixels at 1..7) and padded 8 px, copied raw: 4 bands,
+    first frame 0 px differ. Capture result + duration in log slots 116..117; intro7_release unregisters the SB7
+    images when the intro ends; capt_free also checks star_info rd_start..rd_end (m7_rd_range).
