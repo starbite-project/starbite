@@ -958,7 +958,12 @@ static void freeze(void)
         gw_base();
         bg8_ok = 1;
     }
-    /* SHARP: the base layer as it is */
+    /* SHARP: the base layer as it is, exact: GLB rows a motion frame shaded at half resolution
+     * are shaded again (g7_idle never revisits SHARP) */
+    if (napx)
+        for (int y = 0; y < GH; y++)
+            if (GAPX[y])
+                GV0[y] = GV1[y] = 0;
     compose_base((uint32_t *)G7_SHARP, 0, 0, GW, GH, 1, 0);
     /* SOFT: base glass at uSoft = 1, half resolution (K = 2), shapes zoomed .965 */
     struct gs_ctx cs = CBASE;
@@ -1155,6 +1160,7 @@ uint32_t g7_frame(const struct g7_frame *f)
             gs_prepare(GS_HALF, LB ? LB->shape : 0, LB ? LB->nshape : 0, &CBASE, 1.f);
     } else {
         gs_word_prepare(&f->word, &CBASE);
+        motion_half = 0;            /* frozen: the base does not move (the rest check below) */
     }
     gs_prepare(1, LO ? LO->shape : 0, LO ? LO->nshape : 0, &COVER, 1.f);
     layer_diff_save(1, LO, 1);

@@ -99,6 +99,7 @@ Host timings (VM ms, `h7 --run`, mean / p90; ×12 for the A55):
 | over-move | 65 / 69 (freeze 202) | 23 / 24 (freeze 95) |
 | over-rest | 6 / 8 | 3 / 5 |
 | launch | 101 / 106 | 43 / 48 |
-| end | 92 / 133 | 44 / 64 |
+| end (handoff) | 114 | 65 / 65 |
+| error card (real fail-back) | 87 / 136 | 30 / 50 |
 
-Measured with `build/menu7-work/scen.sh` (four key scripts) and summarised per class.
+Measured with `build/menu7-work/scen.sh` (four key scripts) and summarised per class. The end and error-card rows come from the review's corrected runs: `--again` used to start the fail-back after the handoff, an order the device never takes, so it only redrew the handoff screen.
