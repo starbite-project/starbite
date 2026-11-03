@@ -48,3 +48,4 @@
 /usr/libexec
 /usr/share/sandbox
 /usr/share/zoneinfo
+/usr/bin/true

@@ -143,6 +143,9 @@ fi
 
 printf 'Starbite macOS root, tier %s, build %s, made %s by tools/macos/build-macos-root.sh\n' \
     "$TIER" "$build" "$(date -u +%Y-%m-%dT%H:%MZ)" > "$mnt/.starbite-macos"
+# 26.5: the Starbite layer (boot-task no-ops, WindowServer job out, Metal staging + the gated
+# sbmtltest job): tools/macos/macos26-post.sh, docs/MACOS.md section 12
+[ "${MACOS:-13}" != 26 ] || W="$W" tools/macos/macos26-post.sh "$mnt" "$owners"
 df -h "$mnt" | tail -1
 hdiutil detach "$mnt" >/dev/null
 trap - EXIT

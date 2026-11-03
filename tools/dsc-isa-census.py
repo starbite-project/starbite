@@ -9,7 +9,7 @@ constant data in __TEXT does not count.
 Each class says which S9 core lacks it (A55 = Cortex-A55 v8.2 with LSE, RCpc,
 RDM, DotProd, FP16, DPB; M3 = Mongoose M3 v8.0) and what handles it today:
   rewrite = tools/a64e/a64e-rewrite.py (ahead of time, 1:1)
-  trap    = the 12377 kernel's sweet_a64e_emulate (0319; DIT + LRCPC2: 0350) / M3 LSE emulation (0342-0344)
+  trap    = the 12377 kernel's sweet_a64e_emulate (0319; DIT + LRCPC2: 0350; FHM: 0351; SHA3/SHA512/SB: 0352) / M3 LSE emulation (0342-0344)
   none    = an undefined-instruction crash if it runs (many sit behind a runtime
             CPU-feature check, which the kernel answers for the A55: a static count
             is an upper bound on what runs)
@@ -74,7 +74,7 @@ PATS = [
  ('DotProd idx',        0x9FC0F400, 0x0F80E000, 'M3',   'none (M3)'),
  ('SQRDMLAH/SH (RDM)',  0xBF20F400, 0x2E008400, 'M3',   'none (M3)'),
  # ARMv8.4+ classes (neither core); first match wins, so specific encodings first
- ('SB',                 0xFFFFFFFF, 0xD50330FF, 'both', 'none'),
+ ('SB',                 0xFFFFFFFF, 0xD50330FF, 'both', 'trap (0352)'),
  ('CFINV (FlagM)',      0xFFFFFFFF, 0xD500401F, 'both', 'none'),
  ('AXFLAG/XAFLAG',      0xFFFFFFDF, 0xD500405F, 'both', 'none'),
  ('RMIF (FlagM)',       0xFFE07C10, 0xBA000400, 'both', 'none'),
@@ -100,12 +100,17 @@ PATS = [
  ('BFMMLA',             0xFFE0FC00, 0x6E40EC00, 'both', 'none'),
  ('SMMLA/UMMLA/USMMLA', 0xDFE0F400, 0x4E80A400, 'both', 'none'),
  ('USDOT',              0xBFE0FC00, 0x0E809C00, 'both', 'none'),
- ('EOR3/BCAX (SHA3)',   0xFFA08000, 0xCE000000, 'both', 'none'),
- ('RAX1 (SHA3)',        0xFFE0FC00, 0xCE608C00, 'both', 'none'),
- ('XAR (SHA3)',         0xFFE00000, 0xCE800000, 'both', 'none'),
- ('SHA512H/H2/SU1',     0xFFE0F000, 0xCE608000, 'both', 'none'),
- ('SHA512SU0',          0xFFFFFC00, 0xCEC08000, 'both', 'none'),
- ('FMLAL/FMLSL (FHM)',  0x9F60DC00, 0x0E20CC00, 'both', 'none'),
+ ('EOR3 (SHA3)',        0xFFE08000, 0xCE000000, 'both', 'trap (0352)'),
+ ('BCAX (SHA3)',        0xFFE08000, 0xCE200000, 'both', 'trap (0352)'),
+ ('RAX1 (SHA3)',        0xFFE0FC00, 0xCE608C00, 'both', 'trap (0352)'),
+ ('XAR (SHA3)',         0xFFE00000, 0xCE800000, 'both', 'trap (0352)'),
+ ('SHA512H/H2/SU1',     0xFFE0F000, 0xCE608000, 'both', 'trap (0352)'),
+ ('SHA512SU0',          0xFFFFFC00, 0xCEC08000, 'both', 'trap (0352)'),
+ # FHM (kernel agent, docs/MACOS.md 11.2): the old 0x9F60DC00/0x0E20CC00 also caught FMLA/FMLS .2S/.4S and FACGE/FACGT
+ ('FMLAL/FMLSL vector', 0xBF60FC00, 0x0E20EC00, 'both', 'trap (0351)'),
+ ('FMLAL2/FMLSL2 vector',0xBF60FC00, 0x2E20CC00, 'both', 'trap (0351)'),
+ ('FMLAL/FMLSL elem',   0xBFC0B400, 0x0F800000, 'both', 'trap (0351)'),
+ ('FMLAL2/FMLSL2 elem', 0xBFC0B400, 0x2F808000, 'both', 'trap (0351)'),
  ('SVE space',          0x1E000000, 0x04000000, 'both', 'none'),
  ('SME space',          0x9E000000, 0x80000000, 'both', 'none'),
  ('CSSC CTZ/CNT v8.9',  0x7FFFF800, 0x5AC01800, 'both', 'none'),

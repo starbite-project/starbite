@@ -1,0 +1,2 @@
+# launchd jobs taken out of the macOS 26.5 root for the first boots (tools/macos/macos26-post.sh)
+com.apple.WindowServer   # M1: sbmtltest owns the panel; WindowServer comes back for M2

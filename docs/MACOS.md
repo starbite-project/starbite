@@ -11,7 +11,8 @@ of the missing log was found, and the fix is now kernel patch 0349 (in `out/` si
 
 Contents: 1 version · 2 Ventura or 26.5 · 3 partial download · 4 instruction census ·
 5 device identity · 6 the roots · 7 kernels · 8 first boot · 9 blockers · 10 sources ·
-11 kernel side for 26.5 (emulation 0350-0352, census corrections, what macOS expects).
+11 kernel side for 26.5 (emulation 0350-0352, census corrections, what macOS expects) ·
+12 **the macOS 26.5 root and payloads** (`root-26t1.img`, `xnu-mac26-t1/m1.xnu`, the 26.5 census).
 
 ---
 
@@ -464,9 +465,7 @@ Both ranges are read-only for XNU (no `sdrw`).
 
 0. **Why t0 hung is still unknown.** The log gap is closed (0349: card-root boots now reset with
    the console tail), but the hang itself is not explained until t0b's log or a photo arrives.
-1. **Disk for macOS 26.5 (the drawing path).** Its root is about 8 GB against the 6 GB budget.
-   Needs the external drive or the master drive (master plan decision 1). Until then, 26.5 can
-   only be censused and staged in pieces.
+1. ~~Disk for macOS 26.5~~: solved, the 26.5 root is built on the USB drive (section 12).
 2. **Instruction classes the translator does not handle yet** (section 4). The likely
    unconditional ones on macOS are DIT, SB and LRCPC2. Small fixes, but each one is a crash until
    it is done, and 26.5 adds FHM-heavy and SME-gated code.
@@ -640,3 +639,225 @@ ADT property (sleep-disabled, done in the tool).
   The FMLAL hits counted earlier in SkyLight/CoreGraphics/QuartzCore are ordinary FMLA.
 - `IOHIDSystem` absence is tolerated by CoreDisplay; input for macOS is MAC3+ (11.5).
 - macOS processes see `hw.model` MacBookAir10,1, `/product graphics-featureset-class` APPLE7.
+
+## 12. The macOS 26.5 (25F71) root and payloads (root agent, 2026-11-03)
+
+**State: built, not booted.** One HFSX root on the USB drive, two store payloads that boot it.
+Everything Apple's is in `/Volumes/Untitled/starbite-macos26/` (the only folder this work uses on
+that drive); the Mac keeps the payloads (`out/`, 2 x 17 MB), the ADT and the census text.
+
+### 12.1 The IPSW, read without downloading it
+
+```
+https://updates.cdn-apple.com/2026SpringFCS/fullrestores/122-58869/DFB1CEEF-5619-4591-9924-E20DB2C8FED0/UniversalMac_26.5_25F71_Restore.ipsw
+19,769,944,180 bytes (api.ipsw.me, MacBookAir10,1); J313AP is still in the BuildManifest (chip 0x8103, board 0x26)
+```
+
+| Manifest key (J313AP Erase Install) | Member | Zip size | Payload |
+|---|---|---|---|
+| OS | `094-56453-087.dmg.aea` | 10.33 GB, stored | AEA -> 13.07 GB **raw APFS** container, volume "Macintosh HD" (not sealed in the IPSW) |
+| Cryptex1,SystemOS | `094-56679-089.dmg.aea` | 6.17 GB, stored | AEA -> 7.10 GB raw APFS, "CheerF25F71.arm64eSystemCryptex", sealed |
+| BaseSystem / Cryptex1,AppOS | `022-21678-092.dmg.aea` / `094-56385-096.dmg` | 1.14 GB / 52 MB | not used |
+| DeviceTree | `Firmware/all_flash/DeviceTree.j313ap.im4p` | 43 KB | `dt/j313ap-25F71.adt` (pyimg4) |
+
+**AEA at random** (the doc's earlier "two streaming passes" is not needed): `ipsw-apfs.py`
+opens a stored `.dmg.aea` member with libAppleArchive's `AEADecryptionRandomAccessInputStream`
+over a custom byte stream whose pread is a ranged GET (`RangeCache`: windows from 256 KiB,
+doubling to 16 MiB while reads are sequential). Opening costs one pass over the cluster
+headers (48 MB for the cryptex, 135 MB for the OS image). The symmetric key comes from Apple's
+key service through `ipsw fw aea --key` on the member's first 256 KiB, and is kept in
+`keys.txt` beside the image. Then the raw APFS goes through the same `Apfs`/`Plan` code as
+before; small files are written as soon as their extents are in, big ones stream to disk.
+Measured: OS files 2.69 GB fetched (for 1.6 GB of fat files), cache 1.81 GB fetched (for
+5.54 GB of files), at 5-18 MB/s.
+
+Fixed on the way (also affects Ventura): `Plan` skipped the contents of a directory that had
+first been added as the parent of an earlier path. **Ventura's `root-full.img` has only launchd
+in `/sbin` and only dyld in `/usr/lib`** (the list names `/sbin/launchd` before `/sbin`); the
+26.5 root got its 687 missing items back the same day. `Plan` also follows symlinks inside
+paths now (kept as symlinks) and skips missing paths with a warning.
+
+### 12.2 The root: `/Volumes/Untitled/starbite-macos26/root-26t1.img`
+
+| | |
+|---|---|
+| Image | 10,737,418,240 bytes (10 GiB, **20,971,520 sectors**), raw HFSX, case-sensitive, **not journaled**, volume MACROOT; 6.4 GiB used, 3.6 GiB free |
+| sha256 | **`4a1dceb6a4b2bbb48e04ed376fce15be89bfaf749bd7272c43f0c2c622f53c7d`** |
+| Checks | `fsck_hfs -fn` clean, `HX` at byte 1024, 9,129 catalog records with Apple's owners (`hfs-owners.py`) |
+| Build | `MACOS=26 tools/macos/build-macos-root.sh t1` (about 50 min on the 15-30 MB/s USB stick: 13 min of it zero-filling the 10 GiB file on exFAT) |
+| Card | **LBA 182888448 + 20971520** (ends at 203859967), inside p2 past the card store's used end, 37.5 M sectors below the Ventura root at 241348608 |
+
+Contents:
+- From the OS volume, arm64e slices only (`tools/macos/macos26-t1.list` +
+  `macos26-jobs.list`, 9,074 items, 1.6 GB fat): `/bin`, `/sbin`, `/usr/{lib,libexec,sbin}`,
+  `/usr/bin/true`, every LaunchDaemons/LaunchAgents plist and `xpc/launchd.plist`, the
+  executable (+ bundle Info.plist) of **every launchd job** outside those trees (generated from
+  the job plists: 871 paths), the Data template's `private/`, and the bundles WindowServer and
+  loginwindow need later: SkyLight (WindowServer), loginwindow.app, WindowManager.app,
+  CoreDisplay, Metal, CoreGraphics, IOSurface, QuartzCore (`default.metallib`), IOGPU,
+  GPUSupport, IOKit, Security, Keychains, Sandbox, Preferences/Logging, FeatureFlags.
+- The arm64e shared cache, all 12 subcaches + `.map` + `.atlas` (5.54 GB), at
+  `/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/`, **translated** by a64e-rewrite
+  (3,643 images, `--skip libcorecrypto`): ret 5,401,739, br 3,584,011, blr 6,067,095, pac
+  11,798,611, ldapr 133,885; left for the kernel: pacga 724, fjcvtzs 932, fcadd 16,239, ldra 18.
+  `sharedRegionSize` **0x165114000 (5.58 GiB) + maxSlide 256 MiB: fits the 6 GiB region** (11.4).
+- dyld-1378 looks in `/System/Volumes/Preboot/Cryptexes/OS/`, then `/private/preboot/Cryptexes/OS/`,
+  then `/System/Library/dyld/`. All three work: the files, `/private/preboot ->
+  ../System/Volumes/Preboot`, and `/System/Library/dyld -> ../Volumes/Preboot/Cryptexes/OS/System/Library/dyld`
+  (b8ce21d). `/System/Cryptexes/OS` is the OS volume's own link to the Preboot path.
+- Not included: x86_64 and Rosetta AOT caches, the cryptex's WebKit/Safari parts, `/usr/bin`
+  (except `true`), CoreServices apps beyond the job executables, `/System/Library/Extensions`
+  (kexts), fonts, `/Applications`.
+
+### 12.3 Instruction census of the 26.5 cache (Apple's bytes, before the rewrite)
+
+`build/venv/bin/python tools/dsc-isa-census.py .../dyld_shared_cache_arm64e` (copy in
+`build/macos26/census-25F71.txt`). 3,646 images, 735,036,712 instructions (2,804 MiB of code).
+The tool's masks were corrected first (11.2 plus: FCMLA's and FP16's values had bits outside
+their masks and never matched; the DIT/SSBS `#imm` row matched SMSTART/SMSTOP instead of SSBS).
+
+| Class | Sites | Lacks | Handled by |
+|---|---|---|---|
+| RETAA/RETAB · BRA*/BLRA* · PAC/AUT/XPAC reg | 5,406,023 · 9,655,104 · 11,800,450 | both | rewrite |
+| LDRAA/LDRAB | 22 | both | rewrite (18 writeback: trap) |
+| PACGA · FJCVTZS · FCADD | 724 · 932 · 16,239 | both | trap (0319) |
+| LDAPR | 133,885 | M3 | rewrite -> LDAR |
+| LDAPUR/STLUR (LRCPC2) | 127 | both | trap (0350) |
+| MSR DIT #imm · MRS/MSR DIT | 101 · 91 | both | trap (0350) |
+| FMLAL/FMLSL(2) vector + element | 8 + 8 + 56 + 56 = 128 | both | trap (0351) |
+| EOR3 · BCAX · RAX1 · XAR | 5,400 · 325 · 45 · 9,037 | both | trap (0352) |
+| SHA512H/H2/SU1 · SHA512SU0 · SB | 896 · 256 · 7 | both | trap (0352) |
+| LSE CAS · CASP · LD<op>/SWP | 70,260 · 450 · 717,019 | M3 | trap (M3, 0342-0344) |
+| DotProd (+U, idx) · RDM | 6,247 · 1 | M3 | **none** (M3) |
+| FP16 scalar (counts FCVT from H too, so an upper bound) | 29,771 | M3 | **none** (M3) |
+| **FCMLA vector · by element** | **3,164 · 5,643** | both | **none**: all in libBLAS (complex BLAS) except 1 in libsystem_m |
+| **MOPS CPY/SET (v8.8)** | **18** | both | **none**: all in libsystem_m |
+| **CSSC min/max** (v8.9) | 505 | both | **none** |
+| SMSTART/SMSTOP · MRS/MSR SVCR · TPIDR2 | 2,469 · 1 · 1,422 | both | none: SME paths (SME absent in the commpage, 11.3) |
+| SVE space · SME space | 132,978 · 136,508 | both | none: `__sme_*` / Accelerate kernels behind feature checks (11.3) |
+| AMX (Apple) | 359,075 | both | none: Accelerate, behind the CPU family (11.3) |
+| MRS/MSR S3_x_C15 (IMPDEF) | 1,660 | both | none: TPRO/SPRR toggles behind commpage bytes (11.3) |
+| BF16 (BFCVT/N, BFDOT idx) | 1,181 | both | none |
+| ERETA*, FlagM, SSBS, CNTxCTSS, DPB2, WFxT, FRINT32/64, BFMMLA, I8MM, CSSC CTZ/CNT/ABS | 0 | | |
+| **total in "none, both cores" classes** | **644,624** | | 510,277 in Accelerate (BLAS/BNNS/LAPACK/vDSP/vImage), 132,109 in CorePhotogrammetry/CMImaging/LearnedFeatures |
+
+Boot-path images (per image, classes that are not rewritten; `none` classes in bold):
+
+| Image | What is left |
+|---|---|
+| dyld (cache copy) | LDAPUR 3, SB 1, DIT 3, SHA512 144, LSE 65, **S3_x_C15 682** (TPRO, gated), SVE/SME space 6/3 |
+| libcorecrypto (not translated) | LDAPUR 4, SB 1, DIT 58, EOR3 20, BCAX 50, RAX1 10, XAR 48, SHA512 144, SVE/SME space 17/7; plus all its PAC ops trap (it is skipped by the rewrite) |
+| libsystem_platform | SB 1, DIT 3, LSE 84, **S3_x_C15 28**, SVE/SME space 85/15 (`__sme_*`) |
+| libsystem_m | LDAPUR 16, EOR3 13, BCAX 4, XAR 1, **MOPS 18, FCMLA 1, CSSC 4, BFDOT 2**, RDM 1, SVE/SME 134/150 |
+| libsystem_malloc · libdispatch · libxpc · libobjc · libsystem_pthread | LDAPUR 50 (malloc); LSE only; **S3_x_C15** 25 (objc), 24 (pthread) |
+| CoreFoundation · Foundation · Security · IOKit | PACGA 106/330, LSE, EOR3 1 (Foundation), DotProd U 2 (CF) |
+| SkyLight · CoreDisplay · IOSurface · IOGPU · Metal | LSE only (Metal: EOR3 1, FP16 7) |
+| CoreGraphics · QuartzCore | BCAX 48 + FP16 3,497 (CG); FP16 235 (QC) |
+
+Reading it: with 0350-0352 every class that a daemon or the WindowServer path is likely to run
+unconditionally is emulated. What is left is gated code (SME/SVE/AMX/IMPDEF, 11.3), complex
+BLAS (FCMLA), and **libsystem_m's 18 MOPS and 4 CSSC sites** (v8.8/v8.9, M4-class code, most
+likely chosen at run time; the first SIGILL in libsystem_m would say otherwise). On the M3s
+(`cpus=8`): DotProd (6,247, mostly libswiftCore/JavaScriptCore/sqlite3) and real FP16
+arithmetic would trap there with no emulation; if one shows up, `cpus=4` keeps the userland on
+the A55s.
+
+### 12.4 Boot tasks and the read-write root
+
+launchd 26.5 (3102.120.13) carries its boot tasks in a plist inside its own `__TEXT` (the
+`Boot` dictionary; `/System/Library/xpc/launchd.plist` has none). 46 tasks; the ones marked
+`RequireSuccess` end the boot when they fail. With **`sdrw=1`** (kernel 0353) the root mounts
+read-only, then `mount -uw /` makes it read-write (the HFS update path has no dirty-volume check
+for the root, so a reset without unmount does not block the next boot; the first mount at boot
+stays read-only because the command line has no `rootrw=1`).
+`tools/macos/macos26-boot-tasks.sh` puts Apple's `/usr/bin/true` in place of:
+
+| Task (program) | Why a no-op |
+|---|---|
+| `fsck` / `fsck-safe` (`/sbin/fsck -qL -R 1`, RequireRun) | the kernel's fsck_hfs path is untested (coordinator) |
+| `fips` (`/usr/libexec/cc_fips_test`, RequireRun) | corecrypto's self-test on trap-emulated PAC/DIT/SHA3/SHA512; one failure ends the boot (iOS 26 needed fips-ok too). Undo after a boot that gets far |
+| `data-protection` (`/usr/libexec/init_data_protection`) | no AppleKeyStore in our kernel |
+| `EndpointSecurity` (`/usr/libexec/endpointsecurityd --init`) | no EndpointSecurity kext (the daemon behind it is gone too) |
+
+Originals stay as `<path>.starbite-orig` (list in `/.starbite-boot-tasks`); `--undo` restores
+them, `--ro` also wraps the four tasks that write (dirs_cleaner, mount -P 1/2, tzinit,
+dirhelper) for a root without `sdrw=1`. Left as they are: `mount -P 1/2` (prints "Not booted
+from APFS, skipping apfs_boot_util"; no fstab), dirs_cleaner, tzinit, dirhelper, rc.netboot,
+the internal Block tasks; the installer/demo/obliteration programs are not on the root.
+
+The rest of the Starbite layer (`tools/macos/macos26-post.sh`, run by the builder):
+- **WindowServer's job is out** (`macos26-disabled.list`, taken out of launchd.plist by
+  `starlte-disable-jobs.py`, its LaunchDaemons plist renamed `.starbite-off`). Note that its job
+  also owns `com.apple.iohideventsystem`.
+- **Metal staged** (`tools/macos/metal/build.sh stage`, docs/MACOS-METAL.md §5): the bundle in
+  `/System/Library/Extensions/StarbiteMetal.bundle`, `/usr/lib/sbmac.dylib`,
+  `/usr/local/bin/sbmtltest`, `/private/var/local/{mtl2-clients,m2v-cache}`.
+- **The M1 job is gated:** launchd 26.5's bootstrap paths do not include `/Library/LaunchDaemons`,
+  so `com.starbite.sbmtltest` is in `/System/Library/LaunchDaemons` and in launchd.plist, and it
+  runs `/bin/sh -c` that execs `sbmtltest --seconds 30` only when `sbmtltest=1` is on the command
+  line (otherwise it prints `SBMTLTEST: off`). One root serves both payloads.
+
+### 12.5 Payloads, store and catalog
+
+Both: `out/kernel.development.starlte-12377` (22:33, 0345-0353 + 0360; sha `a4b9d1cb...`) +
+`out/starlte-mac-j313.adt` (regenerated from **26.5's** J313AP tree with `/defaults
+sleep-disabled`; sha `5a58af7c...`) + the command line, packed by `mkpayload-ios26.sh`.
+
+| Payload | sha256 | Command line |
+|---|---|---|
+| `out/xnu-mac26-t1.xnu` (17,217,616 B) | `e1a08185f37c1389612cf6f8a70b7592fb8b0bf9214e865fab914954328bd2e4` | `tools/cmdline/macos26-t1.txt`, 444 bytes: macos13-t1's with `sdroot=lba:182888448,20971520`, `sweetreboot=420`, `sdrw=1` |
+| `out/xnu-mac26-m1.xnu` (17,217,616 B) | `3dcb2a417b1abd03888ce1508feae6b1321f3353547b6f0d6743b8fb0c9df836` | `tools/cmdline/macos26-m1.txt`, 519 bytes: t1's + `sweetinject=/usr/lib/sbmac.dylib,WindowServer a5fb_noconsole=1 sbmtltest=1` |
+
+Card: `python3 tools/macos/card-range-flash.py /Volumes/Untitled/starbite-macos26/root-26t1.img 182888448 --check-only`,
+then without `--check-only` (160 chunks of 64 MiB; about 100 carry data, the rest are written from /dev/zero). Read-back of the whole range must
+print `4a1dceb6...3c7d` **before the first boot**: with `sdrw=1` the range changes on every boot.
+
+Store files and catalog (`docs/XNU-MICROSD.md` §12.3 procedure):
+`mac26-t1.xnu=out/xnu-mac26-t1.xnu:xnu` and `mac26-m1.xnu=out/xnu-mac26-m1.xnu:xnu`
+
+```toml
+[[entry]]
+key = "mac26t1"
+name = "macOS 26 tier 1"
+version = "26.5 25F71 · XNU 12377 · card p2"
+category = "lab"
+method = "xnu"
+tag = "lab"
+files = ["mac26-t1.xnu"]
+root = "sd:lba 182888448+20971520 (HFSX 10 GiB, sdrw)"
+flags = ["hidden"]
+
+[[entry]]
+key = "mac26m1"
+name = "macOS 26 Metal M1"
+version = "26.5 25F71 · XNU 12377 · sbmtltest"
+category = "lab"
+method = "xnu"
+tag = "lab"
+files = ["mac26-m1.xnu"]
+root = "sd:lba 182888448+20971520 (HFSX 10 GiB, sdrw)"
+flags = ["hidden"]
+```
+
+### 12.6 Expected first boot (mac26t1)
+
+`STARBITE SD: ... high speed` -> `root sdroot=lba:182888448,20971520 ... HX, read-write (sdrw=1)`
+-> `BSD root: sdroot0` -> HFS mounts MACROOT -> `/sbin/launchd` (arm64e, grade 8) -> dyld-1378
+maps the translated cache (sweettrace shows the opens under `/System/Volumes/Preboot/Cryptexes/OS/`)
+-> launchd's banner, **"Darwin Bootstrapper Version 7.0.0 ... 3102.120.13"**, and this time past
+Ventura's "could not set up inheritance port" (launchd 26.5 and xnu-12377 are one release). Then
+the boot tasks (four no-ops, `mount -uw /` via `mount -P 1`, dirs_cleaner, tzinit, dirhelper),
+the boot mode (default: launchd's APFS role ioctls fail on HFS, 11.5), and the system domain's
+~888 daemons. `SBMTLTEST: off` on the console shows LaunchDaemons started. sweetreboot resets
+into TWRP at 420 s with the console tail in pmsg.
+
+Likely first failures, in order of my guess: a `RequireSuccess` boot task that still fails
+(`mount -P 1`, `dirhelper`, `tzinit`: rerun the wrapper with `--ro` on that task); libignition's
+cryptex graft (no APFS, no graftdmg; it was not fatal on Ventura); kernelmanagerd's check-in
+(11.5); daemons crashing on missing hardware or APFS; a SIGILL in a class from 12.3 (the class
+names the fix). **mac26m1** expects MACOS-METAL.md §6.2's `SBMTLTEST:` lines (steps 1-7).
+
+Notes: the root is not journaled and fsck is a no-op, so every reset leaves it dirty; it still
+mounts (above), but re-flash it from the image (or run `fsck_hfs -fy` on a pulled copy) if HFS
+errors appear. A card store build (`sbstore2.py --medium sd`) grows from p2's start and would
+overwrite this range: check `sbstore2.py header` first, as for the Ventura range.

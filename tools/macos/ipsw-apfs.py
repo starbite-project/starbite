@@ -616,7 +616,7 @@ class Apfs:
 class Plan:
     """What to write for each wanted path, and which physical blocks it needs."""
     def __init__(self, fs, paths, recurse=True):
-        self.fs, self.items, self.seen = fs, [], set()
+        self.fs, self.items, self.seen, self.shallow = fs, [], set(), set()
         for p in paths:
             only_dir = p.endswith('/') and p != '/'
             self.add('/' + p.strip('/'), recurse and not only_dir)
@@ -647,10 +647,17 @@ class Plan:
             parent = '/' + '/'.join(parts[:i])
             if parent not in self.seen:
                 self.seen.add(parent)
+                self.shallow.add(parent)
                 self.items.append((parent, fs.inode(fs.lookup(parent)), None))
 
     def _add(self, path, oid, recurse):
         if path in self.seen:
+            # A directory first met as the parent of an earlier path (/sbin after /sbin/launchd)
+            # or listed with a trailing '/' still gets its contents when a later entry asks.
+            if recurse and path in self.shallow:
+                self.shallow.discard(path)
+                for name, cid in sorted(self.fs.children(oid).items()):
+                    self._add(path.rstrip('/') + '/' + name, cid, True)
             return
         self.seen.add(path)
         ino = self.fs.inode(oid)
@@ -660,6 +667,8 @@ class Plan:
             if recurse:
                 for name, cid in sorted(self.fs.children(oid).items()):
                     self._add(path.rstrip('/') + '/' + name, cid, True)
+            else:
+                self.shallow.add(path)
             return
         x = self.fs.xattrs(oid)
         if fmt == stat.S_IFLNK:
