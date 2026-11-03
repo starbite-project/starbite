@@ -39,10 +39,13 @@ import uharfbuzz as hb
 from fontTools.ttLib import TTFont
 from PIL import Image
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import menu7_logos  # noqa: E402  the real OS and company logos (tools/brand/logos/SOURCES.md)
+
 ROOT = Path(__file__).resolve().parents[2]
 FONTS = ROOT / 'tools/brand/fonts'
 OUT = ROOT / 'build/brand'
-TOOL_VERSION = 'menu7-assets 1'
+TOOL_VERSION = 'menu7-assets 2 (real logos)'
 
 # ---- sb7.h constants -----------------------------------------------------------------------
 T_FONT, T_IMAGE, T_TILE, T_TILEMAP, T_HEIGHT, T_INFO = 1, 2, 3, 4, 5, 6
@@ -303,9 +306,12 @@ def image_section(arr, fmt, nominal, enc=RLE):
     else:
         h, w = arr.shape[:2]
         rgba = arr.astype(np.float64)
-        al = rgba[..., 3:4] / 255.0
-        pm = np.clip(np.rint(rgba[..., :3] * al), 0, 255).astype(np.uint32)
-        a = rgba[..., 3].astype(np.uint32)
+        # alpha rounded (not truncated) first, and the colour premultiplied by that stored alpha
+        # and kept <= it: a colour channel above its alpha overflows the blend in glass
+        a = np.clip(np.rint(rgba[..., 3]), 0, 255).astype(np.uint32)
+        al = (a / 255.0)[..., None]
+        pm = np.minimum(np.clip(np.rint(np.clip(rgba[..., :3], 0, 255) * al), 0, 255).astype(np.uint32),
+                        a[..., None])
         px = ((a << 24) | (pm[..., 0] << 16) | (pm[..., 1] << 8) | pm[..., 2]).reshape(-1)
         px = px.astype('<u4')
         bpp = 4
@@ -397,20 +403,36 @@ def over(dst, src):
     return np.concatenate([rgb, oa * 255.0], axis=-1)
 
 
+# Provider glyphs that are the company's real logo (menu7_logos), in its own colours (Apple's
+# logo is monochrome: white, as on the concept's glass): (logo, fit in the 96 px box, dx, dy,
+# colour or None).
+PROVIDER_LOGOS = {
+    'apple': ('apple', .90, 0, -.02, '#ffffff'),
+    'win': ('microsoft', .82, 0, 0, None),       # SB7_P_MICROSOFT: the Microsoft logo
+    'andr': ('google-g', .86, 0, 0, None),       # SB7_P_GOOGLE: the Google "G"
+    'tux': ('tux', .98, 0, 0, None),             # SB7_P_LINUX: Tux
+}
+
+
 def provider_glyph(gid):
-    """.tile svg: 96 px, viewBox 100, fill #fff, drop-shadow(0 4px 10px rgba(0,0,0,.25)) baked."""
+    """.tile svg: 96 px, viewBox 100, fill #fff, drop-shadow(0 4px 10px rgba(0,0,0,.25)) baked.
+    Apple, Microsoft, Google and Linux are the real logos (PROVIDER_LOGOS)."""
     S, m = 96, 20
     W = S + 2 * m
-    if gid == 'other':
-        body = ('<circle cx="50" cy="50" r="38" fill="none" stroke="#fff" stroke-width="7"/>'
-                '<circle cx="31" cy="50" r="6.5"/><circle cx="50" cy="50" r="6.5"/>'
-                '<circle cx="69" cy="50" r="6.5"/>')
-        vb = '0 0 100 100'
+    if gid in PROVIDER_LOGOS:
+        name, fit, dx, dy, col = PROVIDER_LOGOS[gid]
+        g = menu7_logos.render(name, W, W, S, fit, dx, dy, col)
     else:
-        vb, body = symbol_body('g-' + gid)
-    inner = (f'<svg x="{m}" y="{m}" width="{S}" height="{S}" viewBox="{vb}" overflow="visible" '
-             f'fill="#fff" color="#fff">{body}</svg>')
-    g = rsvg(svg_doc(W, W, inner, ART['defs_only']), W, W)
+        if gid == 'other':
+            body = ('<circle cx="50" cy="50" r="38" fill="none" stroke="#fff" stroke-width="7"/>'
+                    '<circle cx="31" cy="50" r="6.5"/><circle cx="50" cy="50" r="6.5"/>'
+                    '<circle cx="69" cy="50" r="6.5"/>')
+            vb = '0 0 100 100'
+        else:
+            vb, body = symbol_body('g-' + gid)
+        inner = (f'<svg x="{m}" y="{m}" width="{S}" height="{S}" viewBox="{vb}" overflow="visible" '
+                 f'fill="#fff" color="#fff">{body}</svg>')
+        g = rsvg(svg_doc(W, W, inner, ART['defs_only']), W, W)
     al = g[..., 3]
     sh = gauss_blur(al, 5.0) * 0.25
     sh = np.roll(sh, 4, axis=0)
@@ -506,6 +528,30 @@ EXTRA_G = {
 }
 
 
+# Glyph kinds 'L:<id>': a real OS logo (menu7_logos) on the tile, in the logo's own colours:
+# id: (logo, fit in the tile box, dx, dy, colour or None). The tile colours are chosen per logo
+# (tile_table): the brand's own background where the logo is white on it (Ubuntu orange, Kali
+# blue), a light tile under a logo whose colour is the brand's blue, green or red (Windows 11,
+# postmarketOS, Debian), the brand's dark under Android's green, Arch's blue and Fedora's icon.
+LOGO_G = {
+    'L:apple': ('apple', .54, 0, -.015, '#ffffff'),
+    'L:win11': ('windows11', .50, 0, 0, None),
+    'L:android': ('android', .64, 0, .01, None),
+    'L:ubuntu': ('ubuntu', .60, 0, 0, None),
+    'L:arch': ('arch', .62, 0, -.01, None),
+    'L:pmos': ('pmos', .60, 0, -.01, None),
+    'L:kali': ('kali', .64, .01, .02, None),
+    'L:debian': ('debian', .58, 0, 0, None),
+    'L:fedora': ('fedora', .60, 0, 0, None),
+    'L:tux': ('tux', .66, 0, 0, None),
+}
+
+
+def logo_layer(g, T):
+    name, fit, dx, dy, col = LOGO_G[g]
+    return menu7_logos.render(name, T, T, T, fit, dx, dy, col)
+
+
 def darker(c, f=.42):
     r, g, b = hexrgb(c)
     return '#%02x%02x%02x' % (int(r * f), int(g * f), int(b * f))
@@ -523,44 +569,62 @@ def tile_table(art):
 
     for t in art['tiles']:                      # the concept's demo tiles, keyed by concept id
         byid[t['id']] = add('concept:' + t['id'], t['c1'], t['c2'], t['g'], t['dark'])
+    # the real OS logos (LOGO_G); c1 -> c2 as the concept's tiles, or the brand's own colours
+    logo = {
+        'ios26': add('ios26', '#0b2560', '#3d8cff', 'L:apple'),
+        'win11': add('win11', '#ffffff', '#dbe4f0', 'L:win11', True),
+        'android': add('android', '#05202c', '#0b4a5e', 'L:android'),          # #073042: Android navy
+        'ubuntu': add('linux-ubuntu', '#c13a0d', '#f47b3c', 'L:ubuntu'),
+        'gnome': add('linux-ubuntu-gnome', '#5e1b58', '#d2491f', 'L:ubuntu'),
+        'lomiri': add('linux-ubuntu-lomiri', '#77216f', '#e95420', 'L:ubuntu'),
+        'arch': add('linux-arch', '#0c1015', '#2a333e', 'L:arch'),
+        'pmos': add('linux-pmos', '#ffffff', '#dfeadf', 'L:pmos', True),
+        'kali': add('linux-kali', '#0a1b3c', '#367bf0', 'L:kali'),
+        'debian': add('linux-debian', '#ffffff', '#eee1e6', 'L:debian', True),
+        'fedora': add('linux-fedora', '#0b1a30', '#294172', 'L:fedora'),        # #294172: Fedora blue
+    }
     new = {
-        'lomiri': add('linux-ubuntu-lomiri', '#77216f', '#e95420', 'cof'),
-        'debian': add('linux-debian', '#5c0a26', '#d70a53', 'deb'),
-        'fedora': add('linux-fedora', '#0b2a5c', '#3c6eb4', 'fed'),
         'lab': add('@lab', '#3a145e', '#ad61f2', 'g:flask'),
     }
     prov = {p['id']: p for p in art['providers']}
     cat_default = {
-        'apple': add('default:apple', darker(prov['apple']['tc']), prov['apple']['tc'], 'g:apple'),
-        'microsoft': add('default:microsoft', darker(prov['microsoft']['tc']),
-                         prov['microsoft']['tc'], 'win'),
-        'android': add('default:android', darker(prov['google']['tc']), prov['google']['tc'], 'andr'),
-        'linux': add('default:linux', darker(prov['linux']['tc']), prov['linux']['tc'], 'g:tux'),
+        'apple': add('default:apple', darker(prov['apple']['tc']), prov['apple']['tc'], 'L:apple'),
+        'microsoft': add('default:microsoft', '#ffffff', '#dbe4f0', 'L:win11', True),
+        'android': add('default:android', '#05202c', '#0b4a5e', 'L:android'),
+        'linux': add('default:linux', '#15161a', '#3a3d45', 'L:tux'),
         'starbite': add('default:starbite', '#030918', '#0f2f73', 'star'),
         'other': add('default:other', darker('#8e8e93'), '#8e8e93', 'g:other'),
         'lab': add('default:lab', darker(prov['lab']['tc']), prov['lab']['tc'], 'g:flask'),
     }
     # today's catalog (docs/MENU7-PORT.md 4.4)
     real = [
-        ('ios26', byid['ios26']), ('win11', byid['win11']), ('android', byid['a17']),
-        ('linux-ubuntu', byid['phosh']), ('linux', byid['phosh']),
-        ('linux-ubuntu-gnome', byid['gnome']), ('linux-ubuntu-lomiri', new['lomiri']),
-        ('linux-arch', byid['arch']), ('linux-pmos', byid['pmos']), ('linux-kali', byid['kali']),
-        ('linux-debian', new['debian']), ('linux-fedora', new['fedora']),
+        ('ios26', logo['ios26']), ('win11', logo['win11']), ('android', logo['android']),
+        ('linux-ubuntu', logo['ubuntu']), ('linux', logo['ubuntu']),
+        ('linux-ubuntu-gnome', logo['gnome']), ('linux-ubuntu-lomiri', logo['lomiri']),
+        ('linux-arch', logo['arch']), ('linux-pmos', logo['pmos']), ('linux-kali', logo['kali']),
+        ('linux-debian', logo['debian']), ('linux-fedora', logo['fedora']),
         ('linux-shell', byid['uefi']), ('linux-olddtb', byid['uefi']),
         ('linux-bringup', byid['uefi']), ('@lab', new['lab']),
     ]
     for key, tid in real:
         tmap.append((key, tid, 0, 0))
     tmap.append(('lab-', byid['display'], CAT['lab'], TM_PREFIX))
-    # the concept's demo entries by their concept id (tools/menu7/preview/concept-catalog.toml)
+    # the concept's demo entries by their concept id (tools/menu7/preview/concept-catalog.toml):
+    # the ones that are a real OS above show its real logo too
+    same = {'a17': logo['android'], 'phosh': logo['ubuntu'], 'gnome': logo['gnome'],
+            'arch': logo['arch'], 'pmos': logo['pmos'], 'kali': logo['kali']}
     for t in art['tiles']:
         if t['id'] not in dict(real):
-            tmap.append((t['id'], byid[t['id']], 0, 0))
+            tmap.append((t['id'], same.get(t['id'], byid[t['id']]), 0, 0))
     for cat, tid in cat_default.items():
         tmap.append(('', tid, CAT[cat], 0))
     keys = [k for k, *_ in tmap if k]
     assert len(keys) == len(set(keys)), 'duplicate tile map key'
+    # only the tiles the map reaches (the concept's own artwork for a real OS is replaced above)
+    used = sorted({tid for _, tid, _, _ in tmap})
+    renum = {old: i + 1 for i, old in enumerate(used)}
+    tiles = [tiles[old - 1] for old in used]
+    tmap = [(k, renum[tid], c, f) for k, tid, c, f in tmap]
     return tiles, tmap
 
 
@@ -729,15 +793,15 @@ def build(fonts_only=False, preview=None, log=print):
         reqs = []
         for name, c1, c2, g, dark in tiles:
             reqs.append([g, 'dark' if dark else c2])
-        tg = artwork([r for r in reqs if not r[0].startswith('g:')])['tg']
+        tg = artwork([r for r in reqs if not r[0].startswith(('g:', 'L:'))])['tg']
         it = iter(tg)
         layers = {}
         next_img = G_FIRST
         for tid, ((name, c1, c2, g, dark), (gg, bg)) in enumerate(zip(tiles, reqs), 1):
-            svg = EXTRA_G[g] if g.startswith('g:') else next(it)
+            svg = None if g.startswith('L:') else EXTRA_G[g] if g.startswith('g:') else next(it)
             ids = []
             for si, T in enumerate(TILE_SIZES):
-                lay = tile_layer(svg, T)
+                lay = logo_layer(g, T) if svg is None else tile_layer(svg, T)
                 if lay[..., 3].max() == 0:
                     ids.append(0)
                     continue

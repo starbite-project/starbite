@@ -9,6 +9,8 @@ build/venv/bin/python tools/brand/menu7-assets.py          # about 5 s
 build/venv/bin/python -I tools/menu7/sb7-dump.py build/brand/menu7.sb7 --check-geometry   # optional check
 ```
 
+The OS logos come from `build/logos-src/` (fetch them once with `build/venv/bin/python tools/brand/menu7_logos.py --fetch`, which checks each file's sha256; sources in `tools/brand/logos/SOURCES.md`). `build/venv/bin/python -I tools/menu7/sb7-premul-check.py build/brand/menu7.sb7` checks that every ARGB image is premultiplied (only Tux's own black body shows as opaque black), and `tools/menu7/preview/logos-dl.py small|large` makes display lists of every catalog tile and provider glyph for `run.sh list`.
+
 This step needs `build/brand/menu-em.sbm`, the menu v6 sprites and the EngineerMode font. If it is missing, rebuild it with `tools/brand/menu.mjs` and `tools/brand/em-font.py`.
 
 | Output | What it is |

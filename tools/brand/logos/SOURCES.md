@@ -1,0 +1,39 @@
+# Menu v7 logos: sources, licences, trademarks
+
+The real OS and company logos on menu v7's provider tiles and OS tiles. `tools/brand/menu7_logos.py --fetch`
+downloads each file into its own directory under `build/logos-src/` and checks the sha256 below;
+`tools/brand/menu7-assets.py` then rasterises them (rsvg-convert, straight to each target size) into
+`build/brand/menu7.sb7`. Fetched 2026-11-03; licences as Commons records them (imageinfo extmetadata, same day). Nothing from the files is executed: they are checked for
+scripts and external references, edited only by removing the whole elements named below, and rendered.
+
+Every logo is a trademark of its owner. They are used here only to label the operating system or
+vendor that the boot entry starts (nominative use), unmodified apart from colour where the owner's
+guidelines use a monochrome version (Apple: white) and the removals listed. No endorsement is implied.
+
+| Logo | Used for | Source URL | sha256 | Licence / trademark note | Edits |
+|---|---|---|---|---|---|
+| Apple logo | provider Apple (`SB7_P_APPLE`), tiles iOS 26 and the Apple default | https://upload.wikimedia.org/wikipedia/commons/f/fa/Apple_logo_black.svg | `9d00ea77a3240f291356c36261c5f45d7fa456f29c97a2f060caf0ed4b9c3231` | Commons: public domain (original design Rob Janoff); trademark of Apple Inc. | painted white (Apple's logo is monochrome, black or white) |
+| Windows 11 logo (2021) | tile Windows 11 and the Microsoft default | https://upload.wikimedia.org/wikipedia/commons/8/87/Windows_logo_-_2021.svg | `0f6b74d8d8ede1ec0e454b3c6fcdfba65fbe989af9a49ad4ff0c498f4dc3afbb` | Commons: public domain (file by OAOV); trademark of Microsoft Corporation | none (#0078d4) |
+| Microsoft logo | provider Microsoft (`SB7_P_MICROSOFT`) | https://upload.wikimedia.org/wikipedia/commons/4/44/Microsoft_logo.svg | `3d41251f93127b4b42c2f69fa423d204946cf9c307d786ea36b8d9bef4179282` | Commons: public domain; trademark of Microsoft Corporation | the light grey backdrop square removed (the logo is the four squares) |
+| Google "G" | provider Google (`SB7_P_GOOGLE`) | https://upload.wikimedia.org/wikipedia/commons/c/c1/Google_%22G%22_logo.svg | `ed9087d76cdc6d1c53698f6068f79872e77e87c8d012c0cfdad13b05b6ccb37c` | Commons: public domain (Google LLC); trademark of Google LLC | none |
+| Android robot head | tile Android 17 and the Android default | https://upload.wikimedia.org/wikipedia/commons/3/31/Android_robot_head.svg | `0d3d8e90f448472d65eafefc7aaf4b6836517d840b96e0613ca7078879c279f2` | Commons: public domain; Google's brand guidelines let the robot be used and modified with attribution (CC BY 3.0 terms); "Android" is a trademark of Google LLC | none (#3DDC84) |
+| Ubuntu Circle of Friends (2022) | tiles Ubuntu, Ubuntu Desktop, Ubuntu Lomiri (and `linux`) | https://upload.wikimedia.org/wikipedia/commons/0/00/Ubuntu-logo-no-wordmark-2022.svg | `808267226514c1ad3a75269de5b6fd2ecf1bc362fb1a244c57d85c798a823ce9` | Commons: GPLv3 (Canonical Ltd.); Ubuntu and the Circle of Friends are trademarks of Canonical Ltd. (Canonical's trademark policy allows use to refer to Ubuntu) | the orange tag rectangle removed: the white Circle of Friends on the Ubuntu-orange tile |
+| Arch Linux logo | tile Arch Linux ARM | https://archlinux.org/static/logos/archlinux-logo-dark-scalable.svg | `a7f37c9c87f0e0e37454b47ec1221b61416aa9e319cc46a1f0b5b70c4a1dcb6e` | The project's own file (archlinux.org/art); the Arch Linux name and logo are trademarks of the Arch Linux project, used under its trademark policy to refer to Arch Linux | the "archlinux" wordmark and (TM) removed: the icon only (#1793d1) |
+| Kali Linux dragon | tile Kali Linux | https://upload.wikimedia.org/wikipedia/commons/2/2b/Kali-dragon-icon.svg | `5ed9b29cfe8ada18c90310fa763cbbdfd45591dbf5280f49a382f64233c0b4e1` | Commons: CC BY-SA 4.0 (vector by Abiss21 of Kali's dragon icon); Kali Linux and its dragon are trademarks of OffSec Services Ltd. | only the white dragon kept (the blue sphere under it removed), on the Kali-blue tile |
+| postmarketOS logo | tile postmarketOS | https://upload.wikimedia.org/wikipedia/commons/a/a6/PostmarketOS_logo.svg | `a4162f754b853293fbe2be804466c16406765f2cf6959a0447b5c90ce588b4b5` | Commons: CC BY-SA 3.0, postmarketOS developer team (the project's logo) | none (#009900) |
+| Tux | provider Linux (`SB7_P_LINUX`), the Linux default tile | https://upload.wikimedia.org/wikipedia/commons/3/35/Tux.svg | `cd503ad510e16ff2869f959cf57b892bb2175a6874ff696b495bd94fd7db9743` | Commons: attribution: Tux by Larry Ewing (lewing@isc.tamu.edu), Simon Budig, Garrett LeSage, made with The GIMP; use permitted with this credit (same file as `tools/brand/icons/tux.svg`) | none |
+| Debian swirl | tile Debian | https://upload.wikimedia.org/wikipedia/commons/4/4a/Debian-OpenLogo.svg | `a759c381560e82e8d719e0038d0d95209b85c00b0d0f6b92c5fc510b959226b7` | Commons: CC BY-SA 3.0 (Debian); the Debian Open Use Logo, (c) Software in the Public Interest, Inc. | the "debian" wordmark cut away (render cropped above it): the swirl (#D70751) |
+| Fedora logo (2021) | tile Fedora | https://upload.wikimedia.org/wikipedia/commons/4/41/Fedora_icon_%282021%29.svg | `e0cad9aa4736a492cbeed7f875cb6a7ddfeab54879fc9e218fc00933ef18b6b6` | Commons: public domain; Fedora and its logo are trademarks of Red Hat, Inc. (used under the Fedora trademark guidelines to refer to Fedora) | none |
+
+Not real logos (kept from the concept, they are Starbite's own): the Starbite star, the Lab flask, the
+`>_` tile of the Starbite shell, the Display Test bars, and the "other" ring.
+
+## Colours and sizes
+
+- Provider glyphs (96 px box, drawn 1:1 on the provider's glass tile, drop shadow baked): Apple white
+  (.90 of the box), Microsoft four squares (.82), Google "G" (.86), Tux (.98).
+- OS tiles (92, 124, 220, 380): the concept's squircle, gradient, sheen and rim, with the logo in its own
+  colours at about .5 to .64 of the tile. Tile colours: iOS 26 the concept's blue; Windows 11, postmarketOS
+  and Debian a light tile (their logos are blue, green and red); Android the brand's navy (#073042-ish);
+  Ubuntu the concept's orange / aubergine gradients; Arch a dark tile; Kali the concept's Kali blue;
+  Fedora Fedora blue (#294172). The table is `LOGO_G` and `tile_table()` in `tools/brand/menu7-assets.py`.

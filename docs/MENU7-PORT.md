@@ -465,31 +465,40 @@ Estimated size ~3 MB.
 (resvg or Chrome) to A8 coverage (ARGB for `SB7_I_WARN_150` and `SB7_I_BAT_84`), RLE. The nominal
 box is the SVG's 1 em box (24-unit viewBox), with a margin for anti-aliasing.
 
-**Provider glyphs.** `g-apple`, `g-win`, `g-andr`, `g-tux`, `g-star`, `g-flask` with their masks,
-96 px, white, drop-shadow(0 4px 10px rgba(0,0,0,.25)) baked, ARGB RLE; `SB7_P_OTHER` new.
+**Provider glyphs.** `g-star`, `g-flask` with their masks, 96 px, white,
+drop-shadow(0 4px 10px rgba(0,0,0,.25)) baked, ARGB RLE; `SB7_P_OTHER` new. Apple, Microsoft,
+Google and Linux are the real marks instead of the concept's drawn `g-apple`, `g-win`, `g-andr`,
+`g-tux` (the user's request): the Apple logo (white), the Microsoft four squares, the Google "G" and
+Tux, in their own colours, with the same shadow (`tools/brand/menu7_logos.py`, sources and
+trademark notes in `tools/brand/logos/SOURCES.md`).
 
-**OS tiles.** One `sb7_tile` per tile id with glyph layers at 92, 124, 220, 380 (the concept's
-`TG()` artwork: text glyphs in Inter Tight 700 / JetBrains Mono 700 at the concept's sizes,
-`cof`, `deb`, `arch`, `fed`, `pmos`, `star`, `usb`, `spark`, `bars`, `touch`, `uart`, `mem`,
-`chrome`, `win`, `andr`). The tile map (`SB7_T_TILEMAP`) for today's catalog:
+**OS tiles.** One `sb7_tile` per tile id with glyph layers at 92, 124, 220, 380: for the real
+operating systems the official logo (`menu7_logos.py`, rendered by rsvg-convert at each size, in
+its own colours, `LOGO_G` in `menu7-assets.py`); for the rest the concept's `TG()` artwork (text
+glyphs in Inter Tight 700 / JetBrains Mono 700 at the concept's sizes, `star`, `usb`, `spark`,
+`bars`, `touch`, `uart`, `mem`, `chrome`). The squircle, gradient, sheen and rim stay the
+concept's. The tile map (`SB7_T_TILEMAP`) for today's catalog:
 
 | Catalog key | Tile (c1 -> c2, glyph) |
 |---|---|
-| ios26 | #0b2560 -> #3d8cff, "26" (concept iOS 26) |
-| win11 | #0a3a8c -> #2f8cff, win (concept) |
-| android | #0d5532 -> #3ddc84, andr (concept Android 17) |
-| linux-ubuntu, linux | #c13a0d -> #f47b3c, cof (concept Ubuntu 26.04 LTS) |
-| linux-ubuntu-gnome | #5e1b58 -> #d2491f, cof (concept Ubuntu Desktop) |
-| linux-ubuntu-lomiri | #77216f -> #e95420, cof (new) |
-| linux-arch | #0d5f8a -> #1793d1, arch (concept) |
-| linux-pmos | #0b5a1a -> #2fb34a, pmos (concept) |
-| linux-kali | #0a1b3c -> #367bf0, "K" (concept) |
-| linux-debian | #5c0a26 -> #d70a53, deb (new colours) |
-| linux-fedora | #0b2a5c -> #3c6eb4, fed (new colours) |
+| ios26 | #0b2560 -> #3d8cff, Apple logo (white) |
+| win11 | #ffffff -> #dbe4f0, Windows 11 logo (#0078d4) |
+| android | #05202c -> #0b4a5e (Android navy), Android robot head (#3ddc84) |
+| linux-ubuntu, linux | #c13a0d -> #f47b3c, Ubuntu Circle of Friends (2022, white) |
+| linux-ubuntu-gnome | #5e1b58 -> #d2491f, Circle of Friends |
+| linux-ubuntu-lomiri | #77216f -> #e95420, Circle of Friends |
+| linux-arch | #0c1015 -> #2a333e, Arch Linux logo (#1793d1) |
+| linux-pmos | #ffffff -> #dfeadf, postmarketOS logo (#009900) |
+| linux-kali | #0a1b3c -> #367bf0, Kali dragon (white) |
+| linux-debian | #ffffff -> #eee1e6, Debian swirl (#d70751) |
+| linux-fedora | #0b1a30 -> #294172, Fedora logo |
 | linux-shell, linux-olddtb, linux-bringup | #0c0c0e -> #2c2c31, ">_" mono (concept UEFI Shell look) |
 | lab-* (prefix) | #121215 -> #2c2c31, bars (concept Display Test) |
 | Starbite Lab row (key "@lab") | #3a145e -> #ad61f2, flask (new) |
-| category defaults | the provider glyph on the provider tint, darker c1 |
+| category defaults | Apple: Apple logo on the provider grey; Microsoft: as win11; Android: as android; Linux: Tux on #15161a -> #3a3d45; Starbite, other, Lab: their glyphs |
+
+The concept catalog's demo ids for the same systems (a17, phosh, gnome, arch, pmos, kali) map to
+these tiles too; only tiles the map reaches are written.
 
 **Splash.** `SB7_S_SAMSUNG`: the concept's `drawSam` (paths `WORD`, stroke 17, miter, butt) at
 k = 1 into 1300 x 220, A8. `SB7_T_HEIGHT`: `buildHeight()`'s 650 x 110 field. `splash7.mjs`
