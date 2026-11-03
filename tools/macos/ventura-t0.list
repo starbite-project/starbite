@@ -1,0 +1,15 @@
+# macOS 13.5 (22G74) OS volume, tier 0: launchd and dyld only (no shared cache).
+# Paths for tools/macos/ipsw-apfs.py get --list; a trailing / = the directory alone.
+# build-macos-root.sh moves /System/Library/Templates/Data/* to / (the Data volume
+# template: System and Data are one HFSX volume here).
+/sbin/launchd
+/usr/lib/dyld
+/etc
+/var
+/tmp
+/System/Cryptexes/OS
+/System/Cryptexes/App
+/private/
+/dev/
+/System/Library/xpc/launchd.plist
+/System/Library/Templates/Data/private

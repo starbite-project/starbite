@@ -1,0 +1,1 @@
+debug=0xc serial=3 cpus=4 -v -noprogress keepsyms=1 rd=sdroot0 sdroot=lba:249868288,131072 cs_enforcement_disable=1 cs_integrity_skip=1 wdt=-1 -wdt_no_pmu wdt_test=no_user_checkin a5fb_keep_on=1 herolog=0 sweettracename=launchd sweetreboot=120
