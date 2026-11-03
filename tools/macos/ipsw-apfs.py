@@ -112,6 +112,159 @@ class Remote:
         return m['lho'] + 30 + nlen + xlen
 
 
+# ---------------------------------------------------------------- AEA (macOS 15+ images)
+class RangeCache:
+    """pread() over a byte range of the remote IPSW (one stored zip member), with an LRU
+    of fetched windows. Sequential misses grow the read-ahead (256 KiB .. 16 MiB), so a
+    multi-GB file streams in large ranged GETs and scattered metadata reads stay small."""
+    def __init__(self, rem, base, size, keep=6):
+        self.rem, self.base, self.size = rem, base, size
+        self.win = OrderedDict()        # start -> bytes
+        self.keep, self.ra, self.last_end = keep, 256 << 10, -1
+        self.lock = __import__('threading').Lock()
+
+    def pread(self, off, n):
+        with self.lock:
+            return self._pread(off, n)
+
+    def _pread(self, off, n):
+        out = bytearray()
+        while n > 0 and off < self.size:
+            hit = None
+            for s, b in reversed(self.win.items()):
+                if s <= off < s + len(b):
+                    hit = (s, b)
+                    break
+            if hit is None:
+                self.ra = min(self.ra * 2, 16 << 20) if off == self.last_end else 256 << 10
+                ln = min(max(n, self.ra), self.size - off)
+                b = self.rem.get(self.base + off, ln)
+                self.win[off] = b
+                self.last_end = off + ln
+                if len(self.win) > self.keep:
+                    self.win.popitem(last=False)
+                hit = (off, b)
+            else:
+                self.win.move_to_end(hit[0])
+            s, b = hit
+            piece = b[off - s:off - s + n]
+            out += piece; off += len(piece); n -= len(piece)
+        return bytes(out)
+
+
+_aa = None
+_PREAD = ctypes.CFUNCTYPE(ctypes.c_ssize_t, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_longlong)
+_READ = ctypes.CFUNCTYPE(ctypes.c_ssize_t, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t)
+_SEEK = ctypes.CFUNCTYPE(ctypes.c_longlong, ctypes.c_void_p, ctypes.c_longlong, ctypes.c_int)
+
+
+def _libaa():
+    global _aa
+    if _aa is None:
+        _aa = ctypes.CDLL('/usr/lib/libAppleArchive.dylib')
+        vp = ctypes.c_void_p
+        for name, res, args in (
+                ('AACustomByteStreamOpen', vp, []),
+                ('AACustomByteStreamSetPReadProc', None, [vp, _PREAD]),
+                ('AACustomByteStreamSetReadProc', None, [vp, _READ]),
+                ('AACustomByteStreamSetSeekProc', None, [vp, _SEEK]),
+                ('AEAContextCreateWithEncryptedStream', vp, [vp]),
+                ('AEAContextSetFieldBlob', ctypes.c_int, [vp, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t]),
+                ('AEAContextGetFieldUInt', ctypes.c_uint64, [vp, ctypes.c_uint32]),
+                ('AEAContextDecryptAttributes', ctypes.c_int, [vp]),
+                ('AEADecryptionRandomAccessInputStreamOpen', vp, [vp, vp, ctypes.c_size_t, ctypes.c_uint64, ctypes.c_int]),
+                ('AAByteStreamPRead', ctypes.c_ssize_t, [vp, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_longlong]),
+                ('AAByteStreamSeek', ctypes.c_longlong, [vp, ctypes.c_longlong, ctypes.c_int])):
+            f = getattr(_aa, name)
+            f.restype, f.argtypes = res, args
+    return _aa
+
+
+class Aea:
+    """Random access to the decrypted payload of a stored .dmg.aea member, through
+    libAppleArchive's AEADecryptionRandomAccessInputStream over ranged GETs. The key is the
+    archive's symmetric key (base64:...), from Apple's key service: `ipsw fw aea --key` on
+    the member's first 256 KiB (aea_key() below). Same get()/fetched interface as Remote,
+    so Udif and Apfs read through it unchanged."""
+    def __init__(self, rem, m, key):
+        aa = _libaa()
+        self.rc = RangeCache(rem, rem.data_start(m), m['csize'])
+        self.pos = 0
+        def pread(_, buf, n, off):
+            try:
+                b = self.rc.pread(off, n)
+            except Exception as e:      # an exception cannot cross the C callback
+                print(f'\nAEA pread {off}+{n}: {e}', file=sys.stderr)
+                return -1
+            ctypes.memmove(buf, b, len(b))
+            return len(b)
+        def read(_, buf, n):
+            r = pread(None, buf, n, self.pos)
+            if r > 0:
+                self.pos += r
+            return r
+        def seek(_, off, whence):
+            self.pos = off if whence == 0 else self.pos + off if whence == 1 else self.rc.size + off
+            return self.pos
+        self._cb = (_PREAD(pread), _READ(read), _SEEK(seek))   # keep the thunks alive
+        s = aa.AACustomByteStreamOpen()
+        aa.AACustomByteStreamSetPReadProc(s, self._cb[0])
+        aa.AACustomByteStreamSetReadProc(s, self._cb[1])
+        aa.AACustomByteStreamSetSeekProc(s, self._cb[2])
+        ctx = aa.AEAContextCreateWithEncryptedStream(s)
+        if not ctx:
+            raise IOError('not an AEA stream (or its prologue could not be read)')
+        k = __import__('base64').b64decode(key.split(':', 1)[-1])
+        if aa.AEAContextSetFieldBlob(ctx, 9, 0, k, len(k)) or aa.AEAContextDecryptAttributes(ctx):
+            raise IOError('AEA key rejected')            # 9: AEA_CONTEXT_FIELD_SYMMETRIC_KEY
+        self.size = aa.AEAContextGetFieldUInt(ctx, 13)   # AEA_CONTEXT_FIELD_RAW_SIZE
+        self.d = aa.AEADecryptionRandomAccessInputStreamOpen(s, ctx, 128 << 20, 0, 2)
+        if not self.d:
+            raise IOError('AEADecryptionRandomAccessInputStreamOpen failed')
+        self.s, self.ctx = s, ctx
+        self.rem = rem
+
+    @property
+    def fetched(self):
+        return self.rem.fetched
+
+    @fetched.setter
+    def fetched(self, v):
+        pass
+
+    def get(self, start, n):
+        buf = ctypes.create_string_buffer(n)
+        got = 0
+        while got < n:
+            r = _aa.AAByteStreamPRead(self.d, ctypes.byref(buf, got), n - got, start + got)
+            if r <= 0:
+                raise IOError(f'AEA read {start + got}+{n - got}: {r}')
+            got += r
+        return buf.raw
+
+
+def aea_key(rem, name, m, keyfile=None):
+    """base64:... for member `name`: from KEYFILE ("member base64:..." lines) if listed there,
+    else asked of Apple's key service by blacktop's ipsw (build/tools/ipsw/ipsw) on the
+    member's first 256 KiB, and added to KEYFILE."""
+    if keyfile and os.path.exists(keyfile):
+        for line in open(keyfile):
+            p = line.split()
+            if len(p) == 2 and p[0] == name:
+                return p[1]
+    tool = os.environ.get('IPSW_TOOL', os.path.join(os.path.dirname(__file__), '../../build/tools/ipsw/ipsw'))
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix='.aea') as t:
+        t.write(rem.get(rem.data_start(m), min(m['csize'], 262144))); t.flush()
+        out = subprocess.run([tool, 'fw', 'aea', '--key', t.name], check=True,
+                             capture_output=True, text=True).stdout
+    key = next(w for w in out.split() if w.startswith('base64:'))
+    if keyfile:
+        with open(keyfile, 'a') as f:
+            f.write(f'{name} {key}\n')
+    return key
+
+
 # ---------------------------------------------------------------- decompression
 _lc = ctypes.CDLL('libcompression.dylib')
 _lc.compression_decode_buffer.restype = ctypes.c_size_t
@@ -423,6 +576,28 @@ class Apfs:
             oid = kids[part]
         return oid
 
+    def resolve(self, path, depth=0):
+        """Like lookup, but follows symlinks in the directories on the way (not the last
+        component). -> (oid, real path, [paths of the symlinks passed])."""
+        import posixpath
+        parts = [p for p in path.split('/') if p]
+        oid, cur = 2, ''
+        for i, part in enumerate(parts):
+            kids = self.children(oid)
+            if part not in kids:
+                raise FileNotFoundError(path)
+            cid, here = kids[part], cur + '/' + part
+            if i < len(parts) - 1 and (self.inode(cid)['mode'] & S_IFMT) == stat.S_IFLNK:
+                if depth > 16:
+                    raise FileNotFoundError(f'{path}: symlink loop')
+                tgt = self.xattrs(cid)['com.apple.fs.symlink'][1].rstrip(b'\0').decode()
+                nxt = posixpath.normpath(posixpath.join(tgt if tgt.startswith('/') else (cur or '/') + '/' + tgt,
+                                                        *parts[i + 1:]))
+                o, real, links = self.resolve(nxt, depth + 1)
+                return o, real, [here] + links
+            oid, cur = cid, here
+        return oid, cur or '/', []
+
     def xattrs(self, oid):
         out = {}
         for k, v in self.records(oid, T_XATTR):
@@ -446,17 +621,33 @@ class Plan:
             only_dir = p.endswith('/') and p != '/'
             self.add('/' + p.strip('/'), recurse and not only_dir)
 
+    missing = 0
+
     def add(self, path, recurse):
         fs = self.fs
-        oid = fs.lookup(path)
+        try:
+            oid, real, links = fs.resolve(path)
+        except FileNotFoundError:
+            # A list names what a release may or may not ship: skip, say so.
+            print(f'  not in this volume: {path}', file=sys.stderr)
+            self.missing += 1
+            return
+        # symlinks on the way are kept as symlinks, their targets come along
+        for ln in links:
+            self._parents(ln)
+            self._add(ln, fs.lookup(ln), False)
+        self._parents(real)
+        self._add(real, oid, recurse)
+
+    def _parents(self, path):
         # parents first, so directories exist with their own modes
+        fs = self.fs
         parts = [p for p in path.split('/') if p]
         for i in range(1, len(parts)):
             parent = '/' + '/'.join(parts[:i])
             if parent not in self.seen:
                 self.seen.add(parent)
                 self.items.append((parent, fs.inode(fs.lookup(parent)), None))
-        self._add(path, oid, recurse)
 
     def _add(self, path, oid, recurse):
         if path in self.seen:
@@ -557,7 +748,13 @@ def write_items(plan, outdir, streams, direct=()):
         if i not in direct and os.path.lexists(dst):
             os.unlink(dst)
         if i in direct:
-            pass
+            if THIN and direct[i] != 'done' and src and src[0] in ('plain', 'rsrc') and os.path.getsize(dst) < 1 << 29:
+                with open(dst, 'rb') as f:
+                    whole = f.read()
+                t = thin(whole)
+                if len(t) != len(whole):
+                    with open(dst, 'wb') as f:
+                        f.write(t)
         elif src[0] == 'link':
             os.symlink(src[1], dst)
             if root:
@@ -680,16 +877,132 @@ def index_deflated(rem, m, path):
     return blocks
 
 
-def open_member(rem, name, index=None):
+class RawImage:
+    """A raw APFS image behind a get(off, n) reader (a decrypted AEA payload): blocks with
+    a small LRU, read 64 KiB at a time (metadata nodes cluster)."""
+    def __init__(self, reader, bs=4096, span=16):
+        self.r, self.bs, self.span = reader, bs, span
+        self.cache = OrderedDict()
+
+    def __call__(self, pb):
+        base = pb - pb % self.span
+        if base not in self.cache:
+            self.cache[base] = self.r.get(base * self.bs, self.span * self.bs)
+            if len(self.cache) > 512:
+                self.cache.popitem(last=False)
+        else:
+            self.cache.move_to_end(base)
+        o = (pb - base) * self.bs
+        return self.cache[base][o:o + self.bs]
+
+
+def open_member(rem, name, index=None, keyfile=None):
     ms = rem.members()
     if name not in ms:
         sys.exit(f'no member {name}')
     m = ms[name]
+    if m['method'] == 0 and name.endswith('.aea'):
+        aea = Aea(rem, m, aea_key(rem, name, m, keyfile))
+        head = aea.get(0, 4096)
+        if head[32:36] == b'NXSB':          # macOS 26: the payload is a raw APFS container
+            return Apfs(RawImage(aea)), m, ('raw', aea)
+        u = Udif(aea, 0, aea.size)
+        fs = Apfs(lambda pb: u.read(pb * 4096, 4096))
+        return fs, m, u
     if m['method'] == 0:
         fs, u = open_stored(rem, m)
         return fs, m, u
     blocks = index_deflated(rem, m, index)
     return Apfs(blocks), m, None
+
+
+def fetch_raw(reader, fs, plan, outdir, run_max=4 << 20):
+    """All wanted data of a random-access raw APFS image (a decrypted AEA payload).
+    Small items: extents sorted by physical block, read in runs into memory. Big items
+    (> DIRECT): their extents in logical order, straight to disk (RsrcSink decodes a
+    compressed fork chunk by chunk). Returns (streams, direct) like fetch_deflated."""
+    bs = fs.bs
+    streams, direct, pieces = {}, {}, []
+    big = []
+    for i, (path, ino, src) in enumerate(plan.items):
+        if not src or src[0] not in ('plain', 'rsrc'):
+            continue
+        exts = src[1] if src[0] == 'plain' else src[2]
+        size = src[2] if src[0] == 'plain' else src[3]      # bytes of the stream on disk
+        usize = src[2] if src[0] == 'plain' else src[4]     # bytes of the file
+        if usize > DIRECT and (src[0] == 'plain' or src[1] in ('lzvn', 'lzfse', 'lzbitmap', 'raw')):
+            big.append((i, exts, size))
+            continue
+        streams[i] = bytearray(size)
+        for la, ln, pb in exts:
+            if pb and la < size:
+                pieces.append((pb, min(ln, size - la), i, la))
+    pieces.sort()
+    # runs of physically adjacent (or nearly: gaps up to 256 KiB) pieces -> one read
+    runs, cur = [], []
+    for p in pieces:
+        if cur and (p[0] * bs - (cur[-1][0] * bs + cur[-1][1]) > 256 << 10 or
+                    p[0] * bs + p[1] - cur[0][0] * bs > run_max):
+            runs.append(cur); cur = []
+        cur.append(p)
+    if cur:
+        runs.append(cur)
+    print(f'{len(pieces)} small extents in {len(runs)} reads, {len(big)} big files', file=sys.stderr)
+    left = {}
+    for p in pieces:
+        left[p[2]] = left.get(p[2], 0) + 1
+    for n, run in enumerate(runs):
+        lo = run[0][0] * bs
+        hi = max(p[0] * bs + p[1] for p in run)
+        raw = reader.get(lo, hi - lo)
+        for pb, ln, i, la in run:
+            streams[i][la:la + ln] = raw[pb * bs - lo:pb * bs - lo + ln]
+            left[i] -= 1
+            if not left[i]:          # complete: decode + write now, keep RAM flat
+                path, ino, src = plan.items[i]
+                dst = os.path.join(outdir, path.lstrip('/'))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if os.path.lexists(dst):
+                    os.unlink(dst)
+                if src[0] == 'plain':
+                    data = bytes(streams[i][:ino['size']]) + bytes(max(0, ino['size'] - len(streams[i])))
+                else:
+                    data = decode_rsrc(src[1], streams.pop(i)[:src[3]], src[4], path)
+                streams.pop(i, None)
+                with open(dst, 'wb') as f:
+                    f.write(thin(data) if THIN else data)
+                direct[i] = 'done'
+        if n % 50 == 0:
+            print(f'\r  read {n + 1}/{len(runs)}, {reader.fetched >> 20} MiB fetched', end='', file=sys.stderr, flush=True)
+    print(file=sys.stderr)
+    for i, exts, size in big:
+        path, ino, src = plan.items[i]
+        dst = os.path.join(outdir, path.lstrip('/'))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.lexists(dst):
+            os.unlink(dst)
+        f = open(dst, 'w+b')
+        f.truncate(src[2] if src[0] == 'plain' else src[4])
+        sink = None if src[0] == 'plain' else RsrcSink(f, src[1], src[3], src[4])
+        print(f'  {path}: {size >> 20} MiB on disk', file=sys.stderr, flush=True)
+        for la, ln, pb in sorted(exts):
+            ln = min(ln, size - la)
+            off = 0
+            while off < ln:
+                k = min(run_max, ln - off)
+                b = bytes(k) if not pb else reader.get(pb * bs + off, k)
+                if sink:
+                    sink.put(la + off, b)
+                else:
+                    f.seek(la + off); f.write(b)
+                off += k
+            print(f'\r    {(la + ln) * 100 // max(size, 1):3d}%, {reader.fetched >> 20} MiB fetched', end='', file=sys.stderr, flush=True)
+        print(file=sys.stderr)
+        if sink and not sink.done():
+            raise IOError(f'{path}: decoded {sink.k} of {sink.n} chunks')
+        f.close()
+        direct[i] = True
+    return streams, direct
 
 
 def fetch_stored(u, fs, plan, run_max=32 << 20):
@@ -841,9 +1154,12 @@ def fetch_deflated(rem, m, fs, plan, outdir):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('url')
-    ap.add_argument('cmd', choices=['members', 'ls', 'get', 'du'])
+    ap.add_argument('cmd', choices=['members', 'fetch', 'ls', 'get', 'du'])
     ap.add_argument('args', nargs='*')
-    ap.add_argument('--list', help='file with one path per line')
+    ap.add_argument('--list', action='append', default=[], help='file with one path per line (repeatable)')
+    ap.add_argument('--keys', help='AEA keys file ("member base64:KEY" lines); missing keys are '
+                    'fetched from Apple with build/tools/ipsw/ipsw and appended')
+    ap.add_argument('--head', type=int, default=0, help='fetch: only the first N bytes of the member')
     ap.add_argument('--index', help='pass-1 metadata index for a deflated member (cached)')
     ap.add_argument('--owners', help='get: also write a JSON {path: [uid, gid, mode]} of what was '
                     'extracted (a non-root run cannot chown; tools/macos/hfs-owners.py applies it)')
@@ -857,7 +1173,21 @@ def main():
         for n, m in sorted(rem.members().items(), key=lambda x: -x[1]['usize']):
             print(f"{m['usize']:>12} {'stored' if m['method'] == 0 else 'deflated':8} {n}")
         return
-    fs, m, u = open_member(rem, a.args[0], a.index)
+    if a.cmd == 'fetch':      # fetch MEMBER OUTFILE: one whole member (or its first --head bytes)
+        ms = rem.members()
+        m = ms[a.args[0]]
+        start = rem.data_start(m)
+        if m['method'] == 0:
+            n = a.head or m['csize']
+            data = rem.get(start, n)
+        else:
+            data = zlib.decompressobj(-15).decompress(rem.get(start, m['csize']))
+            data = data[:a.head] if a.head else data
+        with open(a.args[1], 'wb') as f:
+            f.write(data)
+        print(f'{a.args[1]}: {len(data)} bytes', file=sys.stderr)
+        return
+    fs, m, u = open_member(rem, a.args[0], a.index, a.keys)
     print(f'volume "{fs.vol_name}", block {fs.bs}, sealed {fs.sealed}', file=sys.stderr)
     if a.cmd == 'ls':
         oid = fs.lookup(a.args[1] if len(a.args) > 1 else '/')
@@ -869,8 +1199,8 @@ def main():
             print(f"{stat.filemode(ino['mode'])} {ino['uid']:>3} {ino['gid']:>3} {ino['size']:>12} {name}")
         return
     paths = (a.args[2:] if a.cmd == 'get' else a.args[1:])
-    if a.list:
-        paths += [l.split('#')[0].strip() for l in open(a.list) if l.split('#')[0].strip()]
+    for lst in a.list:
+        paths += [l.split('#')[0].strip() for l in open(lst) if l.split('#')[0].strip()]
     plan = Plan(fs, paths)
     print(f'{len(plan.items)} items, {plan.logical() / 2**20:.1f} MiB of file data', file=sys.stderr)
     if a.cmd == 'du':
@@ -878,7 +1208,9 @@ def main():
     global THIN
     THIN = a.thin
     direct = {}
-    if u:
+    if isinstance(u, tuple):
+        streams, direct = fetch_raw(u[1], fs, plan, a.args[1])
+    elif u:
         streams = fetch_stored(u, fs, plan)
     else:
         streams, direct = fetch_deflated(rem, m, fs, plan, a.args[1])

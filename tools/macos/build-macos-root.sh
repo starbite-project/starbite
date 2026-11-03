@@ -15,25 +15,55 @@
 #       the deflated cryptex) translated by tools/a64e/a64e-rewrite.py as the iOS 26 root
 #       build does (--skip libcorecrypto), + the files in tools/macos/ventura-full.list.
 #
-# Env: IPSW_URL, OS_DMG, SYS_DMG (default macOS 13.5 22G74), OUT, SIZE_MB, KEEP_MOUNTED=1,
+# macOS 26.5 (25F71), the drawing path (docs/MACOS.md section 11): MACOS=26.
+#   MACOS=26 tools/macos/build-macos-root.sh t1 -> /Volumes/Untitled/starbite-macos26/root-26t1.img
+#       (SIZE_MB, 10240): launchd + dyld, /bin /sbin /usr/{lib,libexec,sbin}, every job's executable
+#       (macos26-t1.list + macos26-jobs.list) and the whole arm64e shared cache (12 subcaches,
+#       5.8 GB) from the SystemOS cryptex, translated. 26.5's images are AEA-encrypted: ipsw-apfs.py
+#       reads them at random through libAppleArchive over ranged GETs (keys in $W/keys.txt, asked of
+#       Apple's key service once). Everything large is on the USB drive (W=); the Mac keeps nothing.
+#
+# Env: MACOS (13 or 26), IPSW_URL, OS_DMG, SYS_DMG, W, OUT, SIZE_MB, KEEP_MOUNTED=1,
 #      RESUME=1 (keep the image and its OS files, redo from the cache step), CENSUS=0, TRANSLATE_A64E=0.
-# Apple software stays local (build/ is gitignored).
+# Apple software stays local (build/ is gitignored; the USB folder is not a repository).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$PWD
 TIER=${1:-t0}
-URL=${IPSW_URL:-https://updates.cdn-apple.com/2023SummerFCS/fullrestores/032-69606/D3E05CDF-E105-434C-A4A1-4E3DC7668DD0/UniversalMac_13.5_22G74_Restore.ipsw}
-OS_DMG=${OS_DMG:-096-63007-081.dmg}       # BuildManifest OS (UDIF, stored in the zip)
-SYS_DMG=${SYS_DMG:-096-62994-081.dmg}     # Cryptex1,SystemOS (raw APFS, deflated in the zip)
-W=$ROOT/build/macos13
-CRYPTEX=/System/Volumes/Preboot/Cryptexes/OS   # where dyld-1066 looks first for the cache
+CRYPTEX=/System/Volumes/Preboot/Cryptexes/OS   # where dyld looks first for the cache
+KEYS=()
+if [ "${MACOS:-13}" = 26 ]; then
+    URL=${IPSW_URL:-https://updates.cdn-apple.com/2026SpringFCS/fullrestores/122-58869/DFB1CEEF-5619-4591-9924-E20DB2C8FED0/UniversalMac_26.5_25F71_Restore.ipsw}
+    OS_DMG=${OS_DMG:-094-56453-087.dmg.aea}    # BuildManifest OS (AEA: a raw APFS container)
+    SYS_DMG=${SYS_DMG:-094-56679-089.dmg.aea}  # Cryptex1,SystemOS (AEA: raw APFS)
+    W=${W:-/Volumes/Untitled/starbite-macos26}
+    KEYS=(--keys "$W/keys.txt")
+    CACHE=(dyld_shared_cache_arm64e dyld_shared_cache_arm64e.01 dyld_shared_cache_arm64e.02.dylddata
+           dyld_shared_cache_arm64e.03.dyldreadonly dyld_shared_cache_arm64e.04.dyldlinkedit
+           dyld_shared_cache_arm64e.05 dyld_shared_cache_arm64e.06.dylddata
+           dyld_shared_cache_arm64e.07.dyldreadonly dyld_shared_cache_arm64e.08.dyldlinkedit
+           dyld_shared_cache_arm64e.09 dyld_shared_cache_arm64e.10.dylddata dyld_shared_cache_arm64e.11
+           dyld_shared_cache_arm64e.12.dyldlinkedit dyld_shared_cache_arm64e.map dyld_shared_cache_arm64e.atlas)
+    case $TIER in
+        t1) SIZE_MB=${SIZE_MB:-10240}; LISTS=(--list tools/macos/macos26-t1.list --list tools/macos/macos26-jobs.list)
+            OUT=${OUT:-$W/root-26t1.img}; CACHE_TIER=1 ;;
+        *) echo "usage: MACOS=26 $0 t1"; exit 2 ;;
+    esac
+    [ -d "$W" ] || { echo "$W missing (the USB drive)"; exit 1; }
+else
+    URL=${IPSW_URL:-https://updates.cdn-apple.com/2023SummerFCS/fullrestores/032-69606/D3E05CDF-E105-434C-A4A1-4E3DC7668DD0/UniversalMac_13.5_22G74_Restore.ipsw}
+    OS_DMG=${OS_DMG:-096-63007-081.dmg}       # BuildManifest OS (UDIF, stored in the zip)
+    SYS_DMG=${SYS_DMG:-096-62994-081.dmg}     # Cryptex1,SystemOS (raw APFS, deflated in the zip)
+    W=${W:-$ROOT/build/macos13}
+    CACHE=(dyld_shared_cache_arm64e dyld_shared_cache_arm64e.01 dyld_shared_cache_arm64e.map)
+    case $TIER in
+        t0)   SIZE_MB=${SIZE_MB:-64};   LISTS=(--list tools/macos/ventura-t0.list);   OUT=${OUT:-$W/root-t0.img}; CACHE_TIER= ;;
+        full) SIZE_MB=${SIZE_MB:-3900}; LISTS=(--list tools/macos/ventura-full.list); OUT=${OUT:-$W/root-full.img}; CACHE_TIER=1 ;;
+        *) echo "usage: $0 t0|full"; exit 2 ;;
+    esac
+fi
 mkdir -p "$W"
-RD=(python3 -I "$ROOT/tools/macos/ipsw-apfs.py" "$URL")
-case $TIER in
-    t0)   SIZE_MB=${SIZE_MB:-64};   LIST=tools/macos/ventura-t0.list;   OUT=${OUT:-$W/root-t0.img} ;;
-    full) SIZE_MB=${SIZE_MB:-3900}; LIST=tools/macos/ventura-full.list; OUT=${OUT:-$W/root-full.img} ;;
-    *) echo "usage: $0 t0|full"; exit 2 ;;
-esac
+RD=(python3 -I -B "$ROOT/tools/macos/ipsw-apfs.py" "$URL")
 free_mb=$(df -m "$W" | awk 'NR==2 {print $4}')
 [ -n "${RESUME:-}" ] || (( free_mb > SIZE_MB + 800 )) || { echo "need $((SIZE_MB + 800)) MB free in $W, have $free_mb"; exit 1; }
 
@@ -56,11 +86,12 @@ mnt=$(attach "$OUT" | awk -F'\t' '/\/Volumes\// {print $NF}')
 [ -d "$mnt" ] || { echo "could not mount $OUT"; exit 1; }
 cleanup() { [ -n "${KEEP_MOUNTED:-}" ] || hdiutil detach "$mnt" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
+touch "$mnt/.metadata_never_index"               # no Spotlight on the build mount
 echo "image $OUT mounted at $mnt"
 
 # 1. the OS volume's files
-thin=(); [ "$TIER" = full ] && thin=(--thin)       # full: arm64e slices only
-"${RD[@]}" get "$OS_DMG" "$mnt" --list "$LIST" --owners "$owners" "${thin[@]}"
+thin=(); [ -n "$CACHE_TIER" ] && thin=(--thin)      # cache tiers: arm64e slices only
+"${RD[@]}" get "$OS_DMG" "$mnt" "${LISTS[@]}" "${KEYS[@]}" --owners "$owners" "${thin[@]}"
 
 # 2. System and Data are one volume here: the Data template (what the installer copies to
 #    a new Data volume) is moved into place, its owners re-keyed.
@@ -89,16 +120,15 @@ mkdir -p "$mnt$CRYPTEX/System/Library/dyld" "$mnt/dev" "$mnt/private/var/tmp" "$
 # dyld-1066 on our kernel looks only in /System/Library/dyld/ (no cryptex mount here: 2026-11-03
 # tier 1 log, open("/System/Library/dyld/") = ENOENT), so point that at the cryptex copy.
 [ -e "$mnt/System/Library/dyld" ] || ln -s ../Volumes/Preboot/Cryptexes/OS/System/Library/dyld "$mnt/System/Library/dyld"
+# dyld-1378 (26.5) also tries /private/preboot/Cryptexes/OS/ (the iOS layout) after the Preboot path.
+[ "${MACOS:-13}" != 26 ] || [ -e "$mnt/private/preboot" ] || ln -s ../System/Volumes/Preboot "$mnt/private/preboot"
 fi
 
 build=$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$W/BuildManifest.plist" 2>/dev/null || echo 22G74)
-# 3. full: the arm64e shared cache from the SystemOS cryptex, translated in place
-if [ "$TIER" = full ]; then
-    "${RD[@]}" get "$SYS_DMG" "$mnt$CRYPTEX" --index "$W/systemos.idx" \
-        --owners "$owners" --prefix "$CRYPTEX" \
-        /System/Library/dyld/dyld_shared_cache_arm64e \
-        /System/Library/dyld/dyld_shared_cache_arm64e.01 \
-        /System/Library/dyld/dyld_shared_cache_arm64e.map
+# 3. cache tiers: the arm64e shared cache from the SystemOS cryptex, translated in place
+if [ -n "$CACHE_TIER" ]; then
+    "${RD[@]}" get "$SYS_DMG" "$mnt$CRYPTEX" --index "$W/systemos.idx" "${KEYS[@]}" \
+        --owners "$owners" --prefix "$CRYPTEX" "${CACHE[@]/#//System/Library/dyld/}"
     [ -x "$ROOT/build/venv/bin/python" ] || { echo "build/venv (numpy) missing: see tools/build-ios-root.sh"; exit 1; }
     # The census runs on Apple's bytes, before the rewrite (CENSUS=0 skips it).
     if [ "${CENSUS:-1}" = 1 ]; then

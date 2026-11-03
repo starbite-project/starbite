@@ -1,0 +1,50 @@
+# macOS 26.5 (25F71) OS volume, tier 1 (the first 26.5 boot): launchd + dyld, the whole
+# command-line userland under /bin /sbin /usr/{lib,libexec,sbin}, every launchd job
+# definition, the Data template's private/, and the bundles WindowServer and loginwindow
+# need later (SkyLight, CoreDisplay, Metal, CoreGraphics, IOSurface, IOGPU, QuartzCore).
+# Code of frameworks and dylibs lives in the shared cache (added by build-macos-root.sh
+# from the SystemOS cryptex). Fetched with --thin: arm64e slices only. The daemons'
+# own executables outside these trees are in macos26-jobs.list (passed as well).
+/sbin/launchd
+/usr/lib/dyld
+/etc
+/var
+/tmp
+/System/Cryptexes/OS
+/System/Cryptexes/App
+/private/
+/dev/
+/System/Library/Templates/Data/private
+/System/Library/xpc
+/System/Library/LaunchDaemons
+/System/Library/LaunchAgents
+/System/Library/CoreServices/SystemVersion.plist
+/System/Library/CoreServices/PlatformSupport.plist
+/System/Library/CoreServices/loginwindow.app
+/System/Library/CoreServices/WindowManager.app
+/System/Library/PrivateFrameworks/SkyLight.framework
+/System/Library/Frameworks/CoreDisplay.framework
+/System/Library/Frameworks/Metal.framework
+/System/Library/Frameworks/CoreGraphics.framework
+/System/Library/Frameworks/IOSurface.framework
+/System/Library/Frameworks/QuartzCore.framework
+/System/Library/PrivateFrameworks/IOGPU.framework
+/System/Library/PrivateFrameworks/GPUSupport.framework
+/System/Library/Frameworks/IOKit.framework
+/System/Library/Frameworks/CoreFoundation.framework
+/System/Library/Frameworks/Foundation.framework
+/System/Library/Frameworks/Security.framework
+/System/Library/Frameworks/SystemConfiguration.framework
+/System/Library/Keychains
+/System/Library/Security
+/System/Library/Sandbox
+/System/Library/Preferences/Logging
+/System/Library/FeatureFlags
+/System/Library/DefaultsConfigurations
+/bin
+/sbin
+/usr/sbin
+/usr/lib
+/usr/libexec
+/usr/share/sandbox
+/usr/share/zoneinfo

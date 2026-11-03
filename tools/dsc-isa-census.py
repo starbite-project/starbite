@@ -9,7 +9,7 @@ constant data in __TEXT does not count.
 Each class says which S9 core lacks it (A55 = Cortex-A55 v8.2 with LSE, RCpc,
 RDM, DotProd, FP16, DPB; M3 = Mongoose M3 v8.0) and what handles it today:
   rewrite = tools/a64e/a64e-rewrite.py (ahead of time, 1:1)
-  trap    = the 12377 kernel's sweet_a64e_emulate (0319) / M3 LSE emulation (0342-0344)
+  trap    = the 12377 kernel's sweet_a64e_emulate (0319; DIT + LRCPC2: 0350) / M3 LSE emulation (0342-0344)
   none    = an undefined-instruction crash if it runs (many sit behind a runtime
             CPU-feature check, which the kernel answers for the A55: a static count
             is an upper bound on what runs)
@@ -60,10 +60,12 @@ PATS = [
  ('PACGA',              0xFFE0FC00, 0x9AC03000, 'both', 'trap'),
  ('ERETAA/B',           0xFFFFFBFF, 0xD69F0BFF, 'both', 'none'),
  ('FJCVTZS (JSCVT)',    0xFFFFFC00, 0x1E7E0000, 'both', 'trap'),
- ('FCMLA/FCADD',        0x9F20E400, 0x2E00C400, 'both', 'none (FCMLA)'),
+ ('FCMLA vector',       0xBF20E400, 0x2E00C400, 'both', 'none'),
+ ('FCMLA by element',   0xBF009400, 0x2F001000, 'both', 'none'),
  ('FCADD',              0xBF20EC00, 0x2E00E400, 'both', 'trap'),
  ('LDAPR (RCpc)',       0x3FFFFC00, 0x38BFC000, 'M3',   'rewrite (-> LDAR)'),
- ('LDAPUR/STLUR v8.4',  0x3F000C00, 0x19000000, 'both', 'none'),
+ ('LDAPUR/STLUR v8.4',  0x3F000C00, 0x19000000, 'both', 'trap (0350)'),
+ ('MOPS CPY/SET v8.8',  0x3B200C00, 0x19000400, 'both', 'none'),
  ('LSE CAS',            0x3FA07C00, 0x08A07C00, 'M3',   'trap (M3)'),
  ('LSE CASP',           0xBFA07C00, 0x08207C00, 'M3',   'trap (M3)'),
  ('LSE LD<op>/SWP',     0x3F200C00, 0x38200000, 'M3',   'trap (M3)'),
@@ -77,9 +79,14 @@ PATS = [
  ('AXFLAG/XAFLAG',      0xFFFFFFDF, 0xD500405F, 'both', 'none'),
  ('RMIF (FlagM)',       0xFFE07C10, 0xBA000400, 'both', 'none'),
  ('SETF8/16 (FlagM)',   0xFFFFBC1F, 0x3A00080D, 'both', 'none'),
- ('MSR DIT/SSBS imm',   0xFFFFF0DF, 0xD503405F, 'both', 'none'),
- ('MSR SVCR (SME)',     0xFFFFF0FF, 0xD503407F, 'both', 'none'),
- ('MRS/MSR DIT reg',    0xFFDFFFE0, 0xD51B42A0, 'both', 'none'),
+ # MSR <pstatefield>, #imm: op1=3 (bits 18:16), op2 bits 7:5: DIT 010, SSBS 001, SVCR (SMSTART/SMSTOP) 011
+ ('MSR DIT imm',        0xFFFFF0FF, 0xD503405F, 'both', 'trap (0350)'),
+ ('MSR SSBS imm',       0xFFFFF0FF, 0xD503403F, 'both', 'none'),
+ ('SMSTART/SMSTOP (SME)',0xFFFFF0FF, 0xD503407F, 'both', 'none'),
+ ('MRS/MSR DIT reg',    0xFFDFFFE0, 0xD51B42A0, 'both', 'trap (0350)'),
+ ('MRS/MSR SSBS reg',   0xFFDFFFE0, 0xD51B42C0, 'both', 'none'),
+ ('MRS/MSR SVCR (SME)', 0xFFDFFFE0, 0xD51B4240, 'both', 'none'),
+ ('MRS/MSR TPIDR2 (SME)',0xFFDFFFE0, 0xD51BD0A0, 'both', 'none'),
  ('MRS CNTxCTSS v8.6',  0xFFFFFFC0, 0xD53BE080, 'both', 'none'),
  ('MRS/MSR S3_x_C15',   0xFFD8F000, 0xD518F000, 'both', 'none (IMPDEF)'),
  ('DC CVADP (DPB2)',    0xFFFFFFE0, 0xD50B7D20, 'both', 'none'),
@@ -100,8 +107,13 @@ PATS = [
  ('SHA512SU0',          0xFFFFFC00, 0xCEC08000, 'both', 'none'),
  ('FMLAL/FMLSL (FHM)',  0x9F60DC00, 0x0E20CC00, 'both', 'none'),
  ('SVE space',          0x1E000000, 0x04000000, 'both', 'none'),
+ ('SME space',          0x9E000000, 0x80000000, 'both', 'none'),
+ ('CSSC CTZ/CNT v8.9',  0x7FFFF800, 0x5AC01800, 'both', 'none'),
+ ('CSSC ABS v8.9',      0x7FFFFC00, 0x5AC02000, 'both', 'none'),
+ ('CSSC MIN/MAX reg',   0x7FE0F000, 0x1AC06000, 'both', 'none'),
+ ('CSSC MIN/MAX imm',   0x7FC00000, 0x11C00000, 'both', 'none'),
  ('AMX (Apple)',        0xFFFFFC00, 0x00201000, 'both', 'none (Apple only)'),
- ('FP16 scalar dp',     0xFF200000, 0x1EE00000, 'M3',   'none (M3)'),
+ ('FP16 scalar (+FCVT H)',0xFFE00000, 0x1EE00000, 'M3',  'none (M3)'),
  ('hint PAC (NOP here)',0xFFFFFD1F, 0xD503211F, 'hint', 'nop'),
  ('hint BTI (NOP here)',0xFFFFFF3F, 0xD503241F, 'hint', 'nop'),
 ]

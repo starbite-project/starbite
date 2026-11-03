@@ -112,7 +112,7 @@ def do_cache(main, only, dry, skip=()):
         paths = []
         for im in imgs:
             f.seek(im[3]); paths.append(f.read(256).split(b'\0')[0].decode())
-    tot, nimg = {}, 0
+    tot, nimg, dirty = {}, 0, 0
     for im, path in zip(imgs, paths):
         if only and not any(o in path for o in only):
             continue
@@ -130,7 +130,12 @@ def do_cache(main, only, dry, skip=()):
             mm = files[p]
             buf = np.array(mm[o:o + (size & ~3)]).view(np.uint32) if dry else mm[o:o + (size & ~3)].view(np.uint32)
             add(tot, rewrite_words(buf))
+            dirty += size
         nimg += 1
+        if not dry and dirty > 256 << 20:   # write back as it goes: a slow (USB) image would pile up dirty pages
+            for mm in files.values():
+                mm.flush()
+            dirty = 0
     if not dry:
         for mm in files.values():
             mm.flush()
