@@ -8,6 +8,7 @@
 #                                                            h7 -> PNG -> diff.py against the concept
 #   sh tools/menu7/preview/run.sh list <scene.dl> <out.png> [h7 args]
 #   sh tools/menu7/preview/run.sh state <state> <out.png> [h7 args]      (needs menu7)
+#   (h7 --run [loader_stubs options]: menu7_main on the fake clock, each g7_frame timed: "T7 ...")
 #
 # H7_SRC   the source root (default: this checkout); private copies under build/menu7-work/<who>
 # H7_OUT   output directory (default: build/menu7/preview)
@@ -26,13 +27,13 @@ pv="$src/tools/menu7/preview"
 build() {
     files="$st/glass.c $st/sb7.c"
     for f in "$st"/glass_*.c; do [ -f "$f" ] && files="$files $f"; done
-    defs="-DM7_PREVIEW"
+    defs="-DM7_PREVIEW" wrap=""
     if [ -f "$st/menu7.c" ] && [ -f "$pv/loader_stubs.c" ]; then
         for f in "$st"/menu7*.c "$st/intro7.c" "$pv/loader_stubs.c"; do [ -f "$f" ] && files="$files $f"; done
-        defs="$defs -DH7_MENU7"
+        defs="$defs -DH7_MENU7 -DH7_TIME"; wrap="-Wl,--wrap=g7_frame"
     fi
     limactl shell starbite -- bash -lc "set -e; cd '$out'; gcc -O2 -mcpu=cortex-a55 -fno-math-errno -ffp-contract=fast \
-        -mstrict-align -Wall -Wextra -Werror -Wno-unused-parameter $defs -I'$st' -I'$src/shim' -o h7 '$pv/h7.c' $files -lm"
+        -mstrict-align -Wall -Wextra -Werror -Wno-unused-parameter $defs -I'$st' -I'$src/shim' -o h7 '$pv/h7.c' $files $wrap -lm"
     echo "built $out/h7 ($defs)"
 }
 topng() {

@@ -1,0 +1,65 @@
+# Menu v7: build, preview, compare, boot image
+
+How to build the loader with menu v7, its BOOT ramdisk, the comparison against the concept, and a boot image. The design is in `docs/MENU7-PORT.md`. Run all commands from the repo root on the Mac.
+
+## 1. Assets: the SB7 container and the BOOT ramdisk
+
+```sh
+build/venv/bin/python tools/brand/menu7-assets.py          # about 5 s
+build/venv/bin/python -I tools/menu7/sb7-dump.py build/brand/menu7.sb7 --check-geometry   # optional check
+```
+
+This step needs `build/brand/menu-em.sbm`, the menu v6 sprites and the EngineerMode font. If it is missing, rebuild it with `tools/brand/menu.mjs` and `tools/brand/em-font.py`.
+
+| Output | What it is |
+|---|---|
+| `build/brand/menu7.sb7` | the container: fonts, icons, tiles, SAMSUNG |
+| `build/brand/menu-v7.sbm` | the BOOT ramdisk: `menu-em.sbm`, padding to 4 KiB, then the container. S-Boot loads it at 0x89000000, so it must stay under 16 MB. |
+| `build/brand/upparam-v7/logo.jpg` | the S-Boot splash that matches the intro's first frame. It is not packed or flashed by this step. |
+
+## 2. The loader
+
+```sh
+limactl shell starbite -- bash -lc 'cd /Users/dev/project-starbite/shim/starlte && sh build.sh'
+```
+
+`build.sh` links v7 when `glass.c`, `sb7.c`, `intro7.c` and `menu7.c` are all present, and compiles those files with FP/SIMD (`CFLAGS_V7`). The build fails on any ABS64 relocation, and every file compiles with `-Werror`. The output is `shim/starlte/out/xnu_boot.Image`.
+
+At run time, `star_menu` tries v7 first. v7 runs when the ramdisk carries a valid SB7ASSET container and all 29 fonts load. Otherwise v6 runs, and v5 if v6 is unavailable.
+
+## 3. Boot image (iOS 26 daily, v7)
+
+```sh
+LOADER=shim/starlte/out/xnu_boot.Image RAMDISK=build/brand/menu-v7.sbm ADT=out/starlte-iphone11-1792.adt \
+    tools/mkimage-ios26.sh ios26-v7 build/ios26-daily-cmdline.txt        # -> out/xnu-boot-ios26-v7.img
+```
+
+## 4. Preview and comparison with the concept
+
+```sh
+sh tools/menu7/preview/run.sh build                               # h7 in the VM (real glass, menu7, intro7)
+sh tools/menu7/preview/compare-all.sh [state ...]                 # -> build/menu7-compare/
+```
+
+`compare-all.sh` renders each concept state twice: once in headless Chrome, and once from the loader's own code through h7. For each state it writes:
+
+- `<state>.png`: concept, loader and |diff| ×4, side by side
+- `all.png`: every pair on one contact sheet
+
+It also prints the mean error per region.
+
+The states are: menu, countdown, collapsed, apple, ctx, submenu, sheet, alert, recovery, launch (at 40 %), error, missing, lab, handoff, and the intro at 0, 300, 700, 1050, 1400, 1800 and 2350 ms.
+
+Chrome needs these adjustments to give a fair picture of the concept:
+
+- **Few animation frames under virtual time.** Headless Chrome runs only 2 to 4 animation frames under virtual time, so springs barely move. The menu states are unaffected, because `#snap` snaps every spring.
+- **Intro, missing and lab.** These are shot in real time over DevTools (`tools/menu7/preview/cdp-shot.mjs`). The intro runs from the start and stops itself at exactly T ms (`#stopat=T`, injected into a copy of the page). h7 plays the intro the way `intro7_run` does, at 30 fps up to T.
+- **The handoff end screen.** Its CSS fade-in never runs under virtual time, so the copy of the page skips the fade.
+
+Frame timing: `h7 --run [loader_stubs options]` runs `menu7_main` on the fake clock and prints one line per `g7_frame` call:
+
+```
+T7 <fake ms> <host ms> <pixels> [full]
+```
+
+For example, `--keys 'wait:3000,down,wait:600,power,wait:3000' --tmax 12000`.

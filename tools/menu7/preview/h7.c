@@ -126,6 +126,26 @@ static void frame_reset(void)
     strtop = 0;
 }
 
+#ifdef H7_TIME
+/* --run (H7_TIME builds link with -Wl,--wrap=g7_frame): menu7_main on the fake clock, every g7_frame
+ * timed on the host clock and printed as "T7 <fake ms> <host ms> <px> <mode>" */
+uint32_t __real_g7_frame(const struct g7_frame *f);
+uint64_t stub_now_us(void);
+static int run_mode;
+uint32_t __wrap_g7_frame(const struct g7_frame *f)
+{
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    uint32_t px = __real_g7_frame(f);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    if (run_mode)
+        printf("T7 %.0f %.2f %u%s\n", stub_now_us() / 1e3,
+               (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6, px,
+               (f->flags & G7_F_FULL) ? " full" : "");
+    return px;
+}
+#endif
+
 static void draw_frame(void)
 {
     struct timespec a, b;
@@ -293,6 +313,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--t") && i + 1 < argc) t = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--stats")) stats = 1;
         else if (!strcmp(argv[i], "--check-full")) check = 1;
+#ifdef H7_TIME
+        else if (!strcmp(argv[i], "--run")) { run_mode = 1; state = "run"; }
+#endif
     }
     if (!ramdisk || !out || (!list && !state))
         die("usage: h7 --ramdisk menu-v7.sbm (--list scene.dl | --state st) --out out.ppm [--stats] [--check-full]");
@@ -305,6 +328,15 @@ int main(int argc, char **argv)
     if (h7_stubs_args)
         h7_stubs_args(argc, argv);
 #endif
+#ifdef H7_TIME
+    if (run_mode) {
+        static char cmd[1024];
+        int r = menu7_main(0, cmd, sizeof cmd);
+        printf("menu7_main -> %d\n", r);
+        write_ppm(out, FB);
+        return 0;
+    }
+#endif
     if (!g7_init())
         die("g7_init failed (fonts missing?)");
     g7_bake();
@@ -316,8 +348,20 @@ int main(int argc, char **argv)
 #ifdef H7_MENU7
     else {
         static struct g7_frame f;
-        if (!strcmp(state, "intro"))
-            intro7_frame(&f, t < 0 ? 0 : t);
+        if (!strcmp(state, "intro")) {
+            /* the intro as intro7_run plays it, up to T: 30 fps steps of m7_step + intro7_frame, so the
+             * springs that run beside it (the list's room for the island) are where they are at T */
+            float T = t < 0 ? 0 : t, ti = 0;
+            m7_prepare_boot();
+            for (;;) {
+                float nt = ti + 1000.0f / 30 < T ? ti + 1000.0f / 30 : T;
+                m7_step((nt - ti) / 1000);
+                ti = nt;
+                intro7_frame(&f, ti);
+                if (ti >= T)
+                    break;
+            }
+        }
         else {
             if (!m7_preview_state(state, p))
                 die("unknown state");

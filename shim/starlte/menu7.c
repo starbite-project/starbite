@@ -1436,8 +1436,9 @@ static void go_lab(void)
     close_overlays(0);
     if (preview_lab) {
         int i = sec_by_cat(CAT_LAB);
+        int d = row_by_key("display");  /* the concept's openProv('lab','r:lab:display') */
         if (i >= 0 && SEC[i].n)
-            open_prov(i, FK(F_R, i, 0));
+            open_prov(i, d >= 0 && R[d].sec == i ? rkey(d) : FK(F_R, i, 0));
         toast(IC_FLASK, "Lab", "Engineering tools for Galaxy S9");
         return;
     }
@@ -2695,6 +2696,14 @@ static void update(void)
     int menu_lens = (S.mode == MD_MENU || S.mode == MD_LAUNCH) && S.focus;
     if (S.mode != MD_INTRO)
         lens_step(SP.lb, &LBm, S.focus, menu_lens, 0);
+    else if (LBm.init) {
+        /* the lens fading in during the intro stays on the focused row while the list makes room
+         * for the island (its alpha is the intro's) */
+        float a = SP.lb[LA_].x, at = SP.lb[LA_].t;
+        lens_step(SP.lb, &LBm, S.focus, 1, 1);
+        m7_spring_snap(&SP.lb[LA_], a);
+        SP.lb[LA_].t = at;
+    }
     if (S.cd) {
         double rem = S.cd_dur - (S.now - S.cd_t0);
         if (rem <= 0) {
