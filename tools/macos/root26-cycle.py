@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""One macOS 26.5 fix-and-boot cycle on the S9, unattended (the phone in TWRP).
+
+  root26-cycle.py [--wrap PATH]... [--unwrap PATH]... [--fetch PATH]... [--link LINK=TARGET]...
+                  [--rm PATH]... [--boot KEY] [--no-boot] [--wait S]
+
+1. Edit the root image (attached on the Mac):
+     --wrap PATH    PATH -> PATH.starbite-orig, Apple's /usr/bin/true in its place (a boot task or
+                    daemon that cannot work on our kernel yet); --unwrap undoes it
+     --fetch PATH   copy PATH (file or tree) from the 26.5 IPSW's system volume (ipsw-apfs.py,
+                    staged on the USB drive, AppleDouble files dropped)
+     --link L=T     symlink L -> T          --rm PATH   delete PATH
+2. Owners (hfs-owners.py with the build's owners JSON, kept up to date here), fsck_hfs -fn.
+3. Rewrite to the card only the 64 MiB chunks that changed since the last cycle, plus every
+   chunk holding HFS metadata (volume headers, allocation / extents / catalog / attributes
+   files), with card-range-flash-fast.py. macOS's own writes elsewhere are free space again.
+4. boot-next.sh KEY (default mac26t1), then a summary of the boot log.
+"""
+import argparse, glob, hashlib, json, os, shutil, struct, subprocess, sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+W = '/Volumes/Untitled/starbite-macos26'
+IMG = f'{W}/root-26t1.img'
+OWNERS = f'{W}/owners-t1b.json'
+HASHES = f'{ROOT}/build/test-boots/26t1-chunks-current.txt'
+START = 182888448
+URL = ('https://updates.cdn-apple.com/2026SpringFCS/fullrestores/122-58869/'
+       'DFB1CEEF-5619-4591-9924-E20DB2C8FED0/UniversalMac_26.5_25F71_Restore.ipsw')
+OS_DMG = '094-56453-087.dmg.aea'
+C = 64 << 20
+
+
+def sh(*a, **k):
+    return subprocess.run(a, check=True, text=True, capture_output=True, **k).stdout
+
+
+def attach(nomount=False):
+    a = ['hdiutil', 'attach', '-nobrowse', '-imagekey', 'diskimage-class=CRawDiskImage'] + \
+        (['-nomount'] if nomount else []) + [IMG]
+    out = sh(*a)
+    if nomount:
+        return out.split()[0]
+    return [l.split('\t')[-1] for l in out.splitlines() if '/Volumes/' in l][0]
+
+
+def chunk_hashes():
+    hs = []
+    with open(IMG, 'rb') as f:
+        while True:
+            b = f.read(C)
+            if not b:
+                return hs
+            hs.append(hashlib.sha256(b).hexdigest())
+
+
+def meta_chunks():
+    with open(IMG, 'rb') as f:
+        f.seek(1024)
+        vh = f.read(512)
+    bs, = struct.unpack_from('>I', vh, 40)
+    out = {0, os.path.getsize(IMG) // C - 1}
+    for off in (112, 192, 272, 352):
+        for i in range(8):
+            sb, n = struct.unpack_from('>II', vh, off + 16 + 8 * i)
+            if n:
+                out.update(range(sb * bs // C, ((sb + n) * bs - 1) // C + 1))
+    return out
+
+
+def summary(log):
+    t = open(log, errors='replace').read().splitlines()
+    keys = ('panic(', 'boot task', 'exited --', 'CRASH ', '<Error>', 'SBMTLTEST', 'SBMAC', 'WindowServer',
+            'loginwindow', 'mount:', 'Library not loaded', 'Symbol not found')
+    seen, out = set(), []
+    for l in t:
+        if any(k in l for k in keys) and l not in seen:
+            seen.add(l)
+            out.append(l[:220])
+    tasks = [l.split('(')[1].split(')')[0] for l in t if 'Doing boot task' in l and '(' in l]
+    print('boot tasks run:', ' '.join(dict.fromkeys(tasks)))
+    print('\n'.join(out[-40:]))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--wrap', action='append', default=[])
+    ap.add_argument('--unwrap', action='append', default=[])
+    ap.add_argument('--fetch', action='append', default=[])
+    ap.add_argument('--link', action='append', default=[])
+    ap.add_argument('--rm', action='append', default=[])
+    ap.add_argument('--boot', default='mac26t1')
+    ap.add_argument('--no-boot', action='store_true')
+    ap.add_argument('--wait', type=int, default=600)
+    a = ap.parse_args()
+    os.chdir(ROOT)
+    if not os.path.exists(HASHES):
+        sys.exit(f'{HASHES} missing: hash the image as it is on the card first')
+    before = open(HASHES).read().split()
+    own = json.load(open(OWNERS))
+    edits = a.wrap or a.unwrap or a.fetch or a.link or a.rm
+    if edits:
+        if a.fetch:
+            stage = f'{W}/stage-cycle'
+            shutil.rmtree(stage, ignore_errors=True)
+            os.makedirs(stage)
+            ofs = f'{W}/owners-cycle.json'
+            subprocess.run(['python3', '-I', '-B', 'tools/macos/ipsw-apfs.py', URL, 'get', OS_DMG, stage, *a.fetch,
+                            '--keys', f'{W}/keys.txt', '--owners', ofs, '--thin'], check=True)
+            own.update(json.load(open(ofs)))
+        mnt = attach()
+        try:
+            for p in a.fetch:
+                src, dst = stage + p, mnt + p
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if os.path.isdir(src) and not os.path.islink(src):
+                    shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+                elif os.path.lexists(dst):
+                    os.unlink(dst)
+                    shutil.copy2(src, dst, follow_symlinks=False)
+                else:
+                    shutil.copy2(src, dst, follow_symlinks=False)
+                for junk in glob.glob(dst + '/**/._*', recursive=True) + glob.glob(os.path.dirname(dst) + '/._*'):
+                    os.unlink(junk)
+                print('fetched', p)
+            for p in a.wrap:
+                t, o = mnt + p, mnt + p + '.starbite-orig'
+                if os.path.exists(o):
+                    print('already wrapped', p)
+                    continue
+                os.rename(t, o)
+                own[p + '.starbite-orig'] = own.get(p, [0, 0, 0o755])
+                shutil.copy2(mnt + '/usr/bin/true', t)
+                own[p] = [0, 0, 0o755]
+                print('wrapped', p)
+            for p in a.unwrap:
+                o = mnt + p + '.starbite-orig'
+                if os.path.exists(o):
+                    os.replace(o, mnt + p)
+                    own[p] = own.pop(p + '.starbite-orig', [0, 0, 0o755])
+                    print('unwrapped', p)
+            for l in a.link:
+                lk, tg = l.split('=', 1)
+                os.makedirs(os.path.dirname(mnt + lk), exist_ok=True)
+                if os.path.lexists(mnt + lk):
+                    os.unlink(mnt + lk)
+                os.symlink(tg, mnt + lk)
+                print('linked', lk, '->', tg)
+            for p in a.rm:
+                q = mnt + p
+                if os.path.isdir(q) and not os.path.islink(q):
+                    shutil.rmtree(q)
+                elif os.path.lexists(q):
+                    os.unlink(q)
+                own.pop(p, None)
+                print('removed', p)
+            shutil.rmtree(mnt + '/.fseventsd', ignore_errors=True)
+        finally:
+            subprocess.run(['sync'])
+            subprocess.run(['hdiutil', 'detach', mnt], capture_output=True)
+        json.dump(own, open(OWNERS, 'w'))
+        print(sh('python3', '-I', 'tools/macos/hfs-owners.py', IMG, OWNERS).strip())
+        dev = attach(nomount=True)
+        try:
+            fs = subprocess.run(['fsck_hfs', '-fn', dev.replace('disk', 'rdisk')], text=True, capture_output=True)
+        finally:
+            subprocess.run(['hdiutil', 'detach', dev], capture_output=True)
+        print(fs.stdout.strip().splitlines()[-1])
+        if fs.returncode:
+            sys.exit('fsck_hfs failed: not writing')
+    after = chunk_hashes()
+    need = {k for k, h in enumerate(after) if k >= len(before) or before[k] != h} | meta_chunks()
+    state = f'{ROOT}/build/test-boots/cycle.state'
+    open(state, 'w').write('\n'.join(str(k) for k in range(len(after)) if k not in need) + '\n')
+    print('card chunks:', sorted(need))
+    subprocess.run(['python3', 'tools/macos/card-range-flash-fast.py', IMG, str(START), '--state', state],
+                   check=True)
+    open(HASHES, 'w').write('\n'.join(after) + '\n')
+    if a.no_boot:
+        return
+    r = subprocess.run(['tools/store/boot-next.sh', a.boot, str(a.wait)], text=True, capture_output=True)
+    print(r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr)
+    logs = sorted(glob.glob(f'build/test-boots/*-{a.boot}/pmsg.txt'), key=os.path.getmtime)
+    if logs:
+        print('log:', logs[-1])
+        summary(logs[-1])
+
+
+if __name__ == '__main__':
+    main()
