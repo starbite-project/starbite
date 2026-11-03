@@ -14,6 +14,11 @@
  * Every number is the concept's (the constants in intro7.h). Compiled with FP/SIMD; no libm:
  * the springs' closed form, ease and eOut are menu7's (m7_spa, m7_ease, m7_eout); the bloom's
  * sine is a polynomial here.
+ *
+ * The first frame is S-Boot's own splash (logo.jpg as it is on the panel): intro7_capture copies
+ * the panel's non-black row bands into I7_CAPT before anything is drawn, and the intro fades
+ * them out of exactly that picture (deliberate difference D5, docs/MENU7-PORT.md). The concept's
+ * splash items are drawn only when there is no capture.
  */
 #include <stdint.h>
 #include "intro7.h"
@@ -21,6 +26,11 @@
 #include "menu7.h"
 #include "sb7.h"
 #include "hw.h"
+
+_Static_assert(I7_CAPT + I7_CAPT_SIZE <= G7_CANVAS, "I7_CAPT runs into G7_CANVAS");
+_Static_assert(I7_CAPT >= 0x83800000UL + G7_HOSTOFF, "I7_CAPT below the BOOT Image's limit");
+_Static_assert((uint64_t)I7_CAPT_MAX_PX * 4U + I7_CAPT_BANDS * 64U <= I7_CAPT_SIZE, "I7_CAPT too small");
+_Static_assert((uint64_t)I7_CAPT_MAX_PX * 4U <= G7_CACHE_SIZE / 2U, "the captured splash must leave G7_CACHE room");
 
 /* ---- the concept's helpers -------------------------------------------------------------------- */
 
@@ -157,6 +167,147 @@ static void splash_items(struct g7_layer *l, float t)
               2.0f * M7_STAR0_R, 2.0f * M7_STAR0_R, M7_STAR, 1.0f - c01(t / I7_STAR_FADE));
 }
 
+/* ---- the captured splash ------------------------------------------------------------------------ */
+
+#define I7_FB ((const volatile uint64_t *)(0xcc000000UL + G7_HOSTOFF))     /* glass.c's G7_FB */
+
+struct capt_band {
+    uint16_t y0, y1, x0, x1;        /* panel rows [y0, y1), columns [x0, x1) */
+};
+static struct capt_band CB[I7_CAPT_BANDS];
+static int capt_n;                  /* bands captured; 0: the concept's splash */
+static uint16_t row_x0[G7_H], row_x1[G7_H];     /* pass 1: each row's non-black columns */
+
+#ifndef M7_PREVIEW
+extern char _start[];               /* xnu_boot.S: the Image header (image_size at + 16) */
+#endif
+
+/* I7_CAPT is free: the BOOT Image with what is appended to it ends below it, and the ramdisk
+ * (S-Boot's, at 0x89000000) does not reach into it. */
+static int capt_free(void)
+{
+    uint64_t s, e;
+#ifndef M7_PREVIEW
+    uint64_t isz = *(const volatile uint64_t *)(uintptr_t)(_start + 16);
+    if ((uintptr_t)_start + isz > I7_CAPT)
+        return 0;
+#endif
+    if (star_font_blob(&s, &e) && s < I7_CAPT + I7_CAPT_SIZE && e > I7_CAPT)
+        return 0;
+    return 1;
+}
+
+int intro7_capture(void)
+{
+    capt_n = 0;
+    for (unsigned i = 0; i < I7_CAPT_BANDS; i++)
+        (void)sb7_put(SB7_T_IMAGE, SB7_S_CAPT0 + i, 0, 0);
+    if (!capt_free())
+        return 0;
+    /* pass 1 (one read of the uncached panel, two pixels a load): each row's non-black extent */
+    const volatile uint64_t *fb = I7_FB;
+    for (unsigned y = 0; y < G7_H; y++) {
+        unsigned x0 = G7_W, x1 = 0;
+        const volatile uint64_t *r = fb + (uint64_t)y * (G7_W / 2);
+        for (unsigned i = 0; i < G7_W / 2; i++) {
+            uint64_t v = r[i];
+            if (!(v & 0x00ffffff00ffffffULL))
+                continue;
+            unsigned a = (v & 0xffffffU) ? 2 * i : 2 * i + 1;
+            if (a < x0)
+                x0 = a;
+            x1 = (v & 0x00ffffff00000000ULL) ? 2 * i + 2 : 2 * i + 1;
+        }
+        row_x0[y] = (uint16_t)x0;
+        row_x1[y] = (uint16_t)x1;
+    }
+    /* the bands: rows joined across black gaps of up to `gap` rows; more than I7_CAPT_BANDS of
+     * them and the gap doubles */
+    int n = 0;
+    for (unsigned gap = I7_CAPT_GAP;; gap *= 2) {
+        n = 0;
+        unsigned last = 0;
+        for (unsigned y = 0; y < G7_H && n <= I7_CAPT_BANDS; y++) {
+            unsigned x0 = row_x0[y], x1 = row_x1[y];
+            if (x1 <= x0)
+                continue;
+            if (!n || y - last > gap) {
+                if (n == I7_CAPT_BANDS) {
+                    n++;
+                    break;
+                }
+                CB[n].y0 = (uint16_t)y;
+                CB[n].x0 = (uint16_t)x0;
+                CB[n].x1 = (uint16_t)x1;
+                n++;
+            }
+            struct capt_band *c = &CB[n - 1];
+            c->y1 = (uint16_t)(y + 1);
+            if (x0 < c->x0)
+                c->x0 = (uint16_t)x0;
+            if (x1 > c->x1)
+                c->x1 = (uint16_t)x1;
+            last = y;
+        }
+        if (n <= I7_CAPT_BANDS)
+            break;
+    }
+    uint64_t px = 0;
+    for (int i = 0; i < n; i++)
+        px += (uint64_t)(CB[i].y1 - CB[i].y0) * (CB[i].x1 - CB[i].x0);
+    if (!n || px > I7_CAPT_MAX_PX)
+        return 0;
+    /* pass 2: each band as an sb7 image, premultiplied with alpha = its largest channel, so over
+     * black (the intro's base at t = 0) it is exactly what S-Boot drew */
+    uintptr_t at = I7_CAPT;
+    for (int i = 0; i < n; i++) {
+        unsigned w = CB[i].x1 - CB[i].x0, h = CB[i].y1 - CB[i].y0;
+        struct sb7_image *im = (struct sb7_image *)at;
+        im->w = (uint16_t)w;
+        im->h = (uint16_t)h;
+        im->format = SB7_ARGB;
+        im->enc = SB7_RAW;
+        im->flags = 0;
+        im->nx = 0;
+        im->ny = 0;
+        im->nw = (uint16_t)w;
+        im->nh = (uint16_t)h;
+        im->data_size = w * h * 4U;
+        uint32_t *d = (uint32_t *)(im + 1);
+        const volatile uint32_t *fb32 = (const volatile uint32_t *)I7_FB;
+        for (unsigned y = 0; y < h; y++) {
+            const volatile uint32_t *r = fb32 + (uint64_t)(CB[i].y0 + y) * G7_W + CB[i].x0;
+            for (unsigned x = 0; x < w; x++) {
+                uint32_t c = r[x] & 0xffffffU, m = c >> 16;
+                if (((c >> 8) & 255U) > m) m = (c >> 8) & 255U;
+                if ((c & 255U) > m) m = c & 255U;
+                *d++ = m << 24 | c;
+            }
+        }
+        uint32_t size = (uint32_t)sizeof(*im) + im->data_size;
+        if (!sb7_put(SB7_T_IMAGE, SB7_S_CAPT0 + (unsigned)i, im, size)) {
+            for (int j = 0; j < i; j++)
+                (void)sb7_put(SB7_T_IMAGE, SB7_S_CAPT0 + (unsigned)j, 0, 0);
+            return 0;
+        }
+        at += ((uintptr_t)size + 63U) & ~(uintptr_t)63U;
+    }
+    capt_n = n;
+    return n;
+}
+
+/* The captured bands at t: the logo block fades and rises as #gs9, the rest fades as #pow. */
+static void capt_items(struct g7_layer *l, float t)
+{
+    float ua = 1.0f - c01(t / I7_GS9_FADE), dy = -36.0f * m7_eout(c01(t / I7_GS9_RISE));
+    float la = 1.0f - c01(t / I7_POW_FADE);
+    for (int i = 0; i < capt_n; i++) {
+        int up = CB[i].y0 < I7_NAT_SPLIT;
+        add_image(l, I7_KEY(16 + i), SB7_S_CAPT0 + (unsigned)i, (float)CB[i].x0, (float)CB[i].y0 + (up ? dy : 0.0f),
+                  (float)(CB[i].x1 - CB[i].x0), (float)(CB[i].y1 - CB[i].y0), 0xffffffffU, up ? ua : la);
+    }
+}
+
 /* ---- the wallpaper ------------------------------------------------------------------------------ */
 
 /* WALL_FS's reveal is m = 1 - smoothstep(rr - rf, rr, r): once rr - rf is beyond every pixel's
@@ -241,14 +392,18 @@ void intro7_frame(struct g7_frame *f, float t)
     float m = m7_ease(c01((t - I7_MELT0) / I7_MELT_MS));
     f->word.tf = 1.0f - m7_ease(c01((t - I7_DRAIN0) / I7_DRAIN_MS));
     f->word.tm = m;
-    f->word.ta = t < I7_ISLAND0 ? 1.0f : 0.0f;
+    /* from the captured splash the wordmark fades in (white) while the splash fades out */
+    f->word.ta = t >= I7_ISLAND0 ? 0.0f : capt_n ? c01((t - I7_NAT_WORD0) / I7_NAT_WORD_MS) : 1.0f;
     f->word.cap[0] = I7_CAP_X;
     f->word.cap[1] = I7_CAP_Y;
     f->word.cap[2] = lerpf(I7_CAP_W0, I7_CAP_W1, m);
     f->word.cap[3] = lerpf(I7_CAP_H0, I7_CAP_H1, m);
 
     /* m7_build points f->over at menu7's own (writable) over layer */
-    splash_items((struct g7_layer *)f->over, t);
+    if (capt_n)
+        capt_items((struct g7_layer *)f->over, t);
+    else
+        splash_items((struct g7_layer *)f->over, t);
 }
 
 /* ---- the run ------------------------------------------------------------------------------------ */
@@ -285,6 +440,7 @@ static int intro_event(const struct m7_ev *ev, int armed)
 
 int intro7_run(void)
 {
+    (void)intro7_capture();         /* before the first frame overwrites S-Boot's splash */
     m7_prepare_boot();
     uint64_t t0 = m7_now_us(), last = t0, up_since = t0;
     int armed = 0, res = I7_DONE, first = 1;

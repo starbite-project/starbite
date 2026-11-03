@@ -3,13 +3,18 @@
  * concept's introAt(t) / finishIntro() (docs/concepts/ios27-boot.html), 2350 ms. Section 4.3 of
  * docs/MENU7-PORT.md.
  *
- * S-Boot has shown logo.jpg (the same splash, tools/brand/splash7.mjs) since power on; the loader
- * leaves it on the panel while it bakes the wallpaper, then intro7 takes over at the intro's
- * t = 0 with the concept's splash drawn exactly (SAMSUNG, "Galaxy S9", "Powered by starbite"), so
- * the switch is invisible. Every frame is a pure function of t: intro7_frame(t) builds the menu
- * (m7_build with the intro's struct m7_xf), the wallpaper's uniforms (struct g7_wall), the glass
- * wordmark (struct g7_word) and the splash items, and glass draws it. Any key or tap skips to the
- * end; Bixby held (700 ms) skips and opens Lab.
+ * S-Boot has shown logo.jpg (Samsung's own splash, from UP_PARAM) since power on; the loader
+ * leaves it on the panel while it bakes the wallpaper. intro7_capture then copies what is on the
+ * panel (its non-black row bands, I7_CAPT) and the intro starts from exactly that picture: the
+ * captured bands are over-layer images (SB7_S_CAPT0.., sb7_put) that fade out (the logo block
+ * rising, as the concept's "Galaxy S9") while the concept's SAMSUNG glass wordmark fades in and
+ * the wallpaper's star appears; from there it is the concept's intro. Only when nothing can be
+ * captured (a black panel, too much picture, the area not free) does the intro draw the concept's
+ * own splash (SAMSUNG, "Galaxy S9", "Powered by starbite") as before. Every frame is a pure
+ * function of t and the captured picture: intro7_frame(t) builds the menu (m7_build with the
+ * intro's struct m7_xf), the wallpaper's uniforms (struct g7_wall), the glass wordmark (struct
+ * g7_word) and the splash items, and glass draws it. Any key or tap skips to the end; Bixby held
+ * (700 ms) skips and opens Lab.
  *
  * Compiled with FP/SIMD. Frozen interface: a change goes through the integrator.
  */
@@ -28,6 +33,28 @@
 int intro7_run(void);
 /* The intro's frame at t ms into f (no drawing; the preview harness renders state=intro&t=). */
 void intro7_frame(struct g7_frame *f, float t);
+/* Copy S-Boot's splash off the panel (G7_FB) into I7_CAPT, before anything is drawn on it.
+ * intro7_run calls it first; the preview harness calls it after putting a splash on its fake
+ * panel. Returns the bands captured (the native splash path), or 0: the concept's splash. */
+int intro7_capture(void);
+
+/* ---- the captured splash (docs/MENU7-PORT.md section 3) ---- */
+
+/* 0x83800000 .. 0x84000000, write-back, below G7_CANVAS: free while the menu runs once the BOOT
+ * Image (with its appended payload) and the ramdisk are checked to lie outside it (run time).
+ * Only the intro reads it: glass decodes each band into G7_CACHE at its first frame. */
+#define I7_CAPT       (0x83800000UL + G7_HOSTOFF)
+#define I7_CAPT_SIZE  0x00800000UL
+#define I7_CAPT_BANDS 8             /* row bands (images SB7_S_CAPT0 ..); closer ones merge */
+#define I7_CAPT_GAP   8             /* black rows that still join two bands */
+#define I7_CAPT_MAX_PX (384U * 1024U)   /* 1.5 MiB of G7_CACHE (3 MiB) at most */
+/* the timeline from the captured picture: bands above I7_NAT_SPLIT (the logo block) fade over
+ * I7_GS9_FADE and rise -36 eo(t / I7_GS9_RISE), as #gs9; the ones below ("Powered by ...") fade
+ * over I7_POW_FADE; the glass wordmark's alpha is c01((t - I7_NAT_WORD0) / I7_NAT_WORD_MS)
+ * (white, fully in when the splash is gone; it drains from I7_DRAIN0 as in the concept). */
+#define I7_NAT_SPLIT  1973          /* 2 / 3 of the panel */
+#define I7_NAT_WORD0  100
+#define I7_NAT_WORD_MS 160
 
 /* ---- the timeline (ms), the concept's introAt; e = m7_ease, eo = m7_eout, c01 = clamp to 0..1 ---- */
 
