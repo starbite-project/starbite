@@ -10,9 +10,14 @@
 # and all.png, every pair at a glance. 
 #   CMP_SRC=dir    source tree for h7 (default this checkout; a private copy under build/menu7-work/)
 #   CMP_NOCONCEPT=1   reuse concept shots already rendered
+#   CMP_RD=file    the BOOT ramdisk h7 draws from (default build/brand/menu-v7.sbm, the real logos).
+#                  For the concept's tile and provider-glyph artwork, build it with
+#                  menu7-assets.py --concept-art and pass build/brand/concept/menu-v7.sbm
 set -eu
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 src=${CMP_SRC:-$root}
+rd=${CMP_RD:-$root/build/brand/menu-v7.sbm}
+case $rd in /*) ;; *) rd="$root/$rd" ;; esac
 out="$root/build/menu7-compare"
 py="$root/build/venv/bin/python"
 pv="$root/tools/menu7/preview"
@@ -84,7 +89,7 @@ for s in $states; do
         "$chrome" --headless=new --window-size=1000,1500 --virtual-time-budget=6000 --hide-scrollbars \
             --screenshot="$out/concept/$s.png" "file://$out/concept/.page.html#$(hash "$s")" >/dev/null 2>&1
     fi
-    cmds="$cmds ./h7 --ramdisk '$root/build/brand/menu-v7.sbm' $(h7args "$s") --out '$out/h7/$s.ppm' >/dev/null &&"
+    cmds="$cmds ./h7 --ramdisk '$rd' $(h7args "$s") --out '$out/h7/$s.ppm' >/dev/null &&"
 done
 limactl shell starbite -- bash -lc "set -e; cd '$out/bin'; $cmds true"
 

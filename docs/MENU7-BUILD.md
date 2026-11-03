@@ -9,6 +9,8 @@ build/venv/bin/python tools/brand/menu7-assets.py          # about 5 s
 build/venv/bin/python -I tools/menu7/sb7-dump.py build/brand/menu7.sb7 --check-geometry   # optional check
 ```
 
+The OS logos' source SVGs are committed under `tools/brand/logos/src/` and pinned by sha256 (sources, licences and trademark notes in `tools/brand/logos/SOURCES.md`; the container's INFO section carries a short credit line per logo). `build/venv/bin/python tools/brand/menu7_logos.py --fetch` downloads them again and exits 1, keeping nothing, if any upstream file changed. `build/venv/bin/python -I tools/menu7/sb7-premul-check.py build/brand/menu7.sb7` checks that every ARGB image is premultiplied (only Tux's own black body shows as opaque black; this is an asset check only, the black squares seen on the device are not explained by it), and `tools/menu7/preview/logos-dl.py small|large` makes display lists of every catalog tile and provider glyph for `run.sh list`.
+
 This step needs `build/brand/menu-em.sbm`, the menu v6 sprites and the EngineerMode font. If it is missing, rebuild it with `tools/brand/menu.mjs` and `tools/brand/em-font.py`.
 
 | Output | What it is |
@@ -47,6 +49,15 @@ sh tools/menu7/preview/compare-all.sh [state ...]                 # -> build/men
 - `all.png`: every pair on one contact sheet
 
 It also prints the mean error per region.
+
+The real-logo ramdisk (`build/brand/menu-v7.sbm`) no longer matches the concept's tile artwork: the concept ids ios26, win11, a17, phosh, gnome, arch, pmos and kali (and the provider glyphs Apple, Microsoft, Google, Linux) show the real logos, so the sections holding them differ by design. Measured on `menu` (`collapsed`): sections 0..3 mean 2.53 / 4.20 / 3.47 / 3.58 (2.53 / 4.20 / 3.47 / 4.22, sections 4, 5 at 2.47, 2.20), against 2.34 / 2.37 / 2.22 / 2.23 (2.34 / 2.37 / 2.22 / 2.78, 2.47, 2.20) with the concept's artwork; status, title and dock are unchanged (2.32, 1.88, 2.47). To measure concept fidelity, build the concept-artwork ramdisk and compare against it:
+
+```sh
+build/venv/bin/python tools/brand/menu7-assets.py --concept-art                 # -> build/brand/concept/
+CMP_RD=build/brand/concept/menu-v7.sbm sh tools/menu7/preview/compare-all.sh
+```
+
+The concept-artwork ramdisk is for comparison only; the device ramdisk is `build/brand/menu-v7.sbm`.
 
 The states are: menu, countdown, collapsed, apple, ctx, submenu, sheet, alert, recovery, launch (at 40 %), error, missing, lab, handoff, and the intro at 0, 300, 700, 1050, 1400, 1800 and 2350 ms.
 
