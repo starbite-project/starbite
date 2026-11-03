@@ -149,6 +149,14 @@ apk add $NEVER openrc unudhcpd
 # shellcheck disable=SC2086
 apk add $NEVER $PKGS
 apk info -e "postmarketos-ui-$UI" >/dev/null
+# the on-screen keyboard's GSettings schemas: Alpine splits them into stevia-schemas, which nothing
+# pulls in. Without them phosh-osk-stevia aborts ("Settings schema 'mobi.phosh.osk' is not
+# installed"), and sm.puri.OSK0 is a RequiredComponent of phosh.session: gnome-session gives up
+# and shows its "something has gone wrong" screen behind the lock screen (first boot 2026-11-03).
+if apk info -e stevia >/dev/null; then
+	apk add stevia-schemas
+	[ -f "$R/usr/share/glib-2.0/schemas/mobi.phosh.osk.gschema.xml" ] || { echo "no mobi.phosh.osk schema" >&2; exit 1; }
+fi
 
 # what pmOS tools read about the device (no flash method: nothing flashes, nothing deploys)
 mkdir -p "$R/usr/share/deviceinfo"
