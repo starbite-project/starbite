@@ -4,6 +4,12 @@ Plan written 2026-11-02 (revised the same evening with your ideas) after a full 
 (NOTES.md, shim/starlte, tools/*). It says what exists, what blocks growth, the new architecture,
 and the order of work. No time estimates: each phase ends when its "done when" holds.
 
+## 0. The user's priorities (2026-11-03)
+- **Apple:** iOS 14 as the stable one, the rest as planned, and later **many iOS versions** plus fun ones (iOS 7, tvOS, iPadOS…).
+- **Microsoft:** **both Windows 10 and Windows 11.** Windows 10 ARM64 (ARMv8.0) can use all 8 cores; 11 24H2+ only the 4 A55s.
+- **Android:** **lots and lots of Android versions** (GSIs from the card). Android 17 is the main OS on UFS; its data partition size (24 or 32 GB) is decided at the UFS re-layout.
+- **Soon:** **Starbite OS** and **ChromeOS** (ChromiumOS/FydeOS on our mainline kernel).
+
 ## 1. Where things stand
 
 | OS | How it boots | Root lives on | State |
@@ -11,7 +17,7 @@ and the order of work. No time estimates: each phase ends when its "done when" h
 | iOS 26.6.2 (iPhone 11 identity, xnu-12377) | XNU payload in BOOT | USERDATA 0-16 GiB (HFSX) | Boots, Metal on the Mali, 8 cores. Black wallpaper, CC tiles faint, some icons plain. Daily image `out/xnu-boot-ios26-daily.img` |
 | Windows 11 23H2 (22631) | Our bootshim + SEC/PEI + the woa **binary** DXE, packed in BOOT | WINESP + WINDOWS (UFS) | Desktop + touch. No GPU, USB, Wi-Fi, audio, battery; 4 CPUs |
 | Linux 7.1 / postmarketOS edge (Plasma Mobile) | `linux.image`/`linux.dtb` from the UFS OS store | 8 GiB image file on the microSD (exFAT) | Boots: 8 cores, Panfrost GPU at 60 Hz, Wi-Fi, USB networking |
-| Android 17 (LineageOS 24) | `android.kernel`/`ramdisk` from the OS store | SYSTEM/VENDOR/ODM + A16DATA (8 GiB) | Installed, **never confirmed booting** |
+| Android 17 (LineageOS 24) | `android.kernel`/`ramdisk` from the OS store | SYSTEM/VENDOR/ODM + A16DATA (8 GiB) | Boots from the Starbite menu (user, 2026-11-03); a logged first-boot run (docs/ANDROID-PLAN.md) is still useful for bugs |
 | iPadOS 18.7.11 | - | **gone** (overwritten by iOS 26, no backup) | Needs re-fetch + rebuild |
 | iOS 16.7.16 | - | Only as a backup image on the 64 GB card | Needs an Apple root slot |
 
