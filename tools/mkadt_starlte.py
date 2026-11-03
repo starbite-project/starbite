@@ -105,13 +105,44 @@ def iphone11_identity(root, adt_path):
     return IPHONE11_CANVAS, ('N104AP', 'iPhone12,1')
 
 
-def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False, big=False, ipad=None, iphone11=None, canvas_override=None,
+# --iphone7: iOS 14 (iPhone9,1 / D10AP userland, A10 T8010, plain arm64, no
+# PAC). iPhone 7 screen: 375x667 points @2x = 750x1334, scaled up to the panel
+# by the kernel (sweetfb_scale=1 sweetfb_lw=750 sweetfb_lh=1334); artwork
+# subtype 1334. Its /product says compatible-device-fallback iPhone8,1 (6s).
+IPHONE7_CANVAS = (750, 1334)
+
+
+def iphone7_identity(root, adt_path):
+    """Root identity and /product of the real D10AP tree (iOS 14.8), A10 (T8010) chip-id."""
+    old = child(root, 'product')
+    phandle = old.prop('AAPL,phandle')
+    root.children = [n for n in root.children if n.prop('name') != mkadt.cstr('product')]
+    props = mkadt.d22ap_product(adt_path)
+    product = mkadt.node('product', ([('AAPL,phandle', phandle)] if phandle else []) + props)
+    root.children.append(product)
+    set_prop(product, 'artwork-device-subtype', mkadt.u32(1334))
+    set_prop(product, 'artwork-scale-factor', mkadt.u32(2))
+    chosen = child(root, 'chosen')
+    set_prop(chosen, 'display-scale', mkadt.u32(2))
+    set_prop(chosen, 'chip-id', mkadt.u32(0x8010))
+    set_prop(root, 'model', mkadt.cstr('iPhone9,1'))
+    set_prop(root, 'target-type', mkadt.cstr('D10'))
+    set_prop(root, 'target-sub-type', mkadt.cstr('D10AP'))
+    return IPHONE7_CANVAS, ('D10AP', 'iPhone9,1')
+
+
+def build(dram=(DRAM_BASE, DRAM_SIZE), scale2=False, big=False, ipad=None, iphone11=None, iphone7=None, canvas_override=None,
           scale_override=None, subtype_override=None):
     root = mkadt.build(seed=os.urandom(256), qemu=True)  # xnu-12377 wants 256
     canvas = (FB_WIDTH, FB_HEIGHT)
     identity = ('D22AP', 'iPhone10,3')
-    if ipad or iphone11:
-        canvas, identity = ipad_identity(root, ipad) if ipad else iphone11_identity(root, iphone11)
+    if ipad or iphone11 or iphone7:
+        if ipad:
+            canvas, identity = ipad_identity(root, ipad)
+        elif iphone11:
+            canvas, identity = iphone11_identity(root, iphone11)
+        else:
+            canvas, identity = iphone7_identity(root, iphone7)
         if canvas_override:
             canvas = canvas_override
         product, chosen = child(root, 'product'), child(root, 'chosen')
@@ -243,6 +274,9 @@ if __name__ == '__main__':
     parser.add_argument('--iphone11', type=Path, metavar='N104AP_ADT',
                         help='iOS 26 identity from the real N104AP device tree '
                              '(build/ipsw-26-n104/n104ap.adt), 828x1792 @2x canvas')
+    parser.add_argument('--iphone7', type=Path, metavar='D10AP_ADT',
+                        help='iOS 14 identity from the real D10AP device tree '
+                             '(build/ipsw-14/d10ap.adt), 750x1334 @2x canvas')
     parser.add_argument('--canvas', metavar='WxH',
                         help='with --ipad7: another canvas, e.g. 1440x2960 = the whole panel '
                              '(720x1480 points @2x); boot-args sweetfb_lw/sweetfb_lh must match')
@@ -255,7 +289,7 @@ if __name__ == '__main__':
     dram = (BANK2_BASE, min(args.bank2_mb << 20, BANK2_SIZE)) if args.bank2 else (DRAM_BASE, DRAM_SIZE)
     assert dram[0] + dram[1] <= PRAM_BASE or dram[0] >= PRAM_BASE + PRAM_SIZE, 'XNU RAM overlaps /pram'
     blob = adt.serialize(build(dram=dram, scale2=args.scale2, big=args.big, ipad=args.ipad7,
-                              iphone11=args.iphone11,
+                              iphone11=args.iphone11, iphone7=args.iphone7,
                               canvas_override=canvas_override, scale_override=args.scale,
                               subtype_override=args.artwork_subtype))
     args.output.write_bytes(blob)

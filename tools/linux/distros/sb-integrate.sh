@@ -99,6 +99,8 @@ install -d /usr/local/sbin /usr/local/lib/starbite
 install -m755 "$PL/busybox" /usr/local/lib/starbite/busybox
 install -m755 "$PL/reboot-to" /usr/local/sbin/reboot-to
 ln -sf reboot-to /usr/local/sbin/reboot-linux
+# sudo's secure_path skips /usr/local/sbin on some distros (Kali): also in /usr/sbin
+[ -e /usr/sbin/reboot-to ] || ln -s /usr/local/sbin/reboot-to /usr/sbin/reboot-to
 # systemd: reboot-to leaves the key in /run/starbite/next and this hook writes the mailbox right
 # before the kernel reboots. The mailbox (0xFED17FE0) is the last 32 bytes of the ramoops console
 # ring, so kernel output during a long shutdown could overwrite it if it were written earlier.

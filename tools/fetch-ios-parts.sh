@@ -7,6 +7,8 @@
 #   DEVICE=iPad7,11 VERSION=18.7.11 BOARD=j171ap OUT=build/ipsw-18 tools/fetch-ios-parts.sh
 # Only some parts (iPadOS 26 shared cache survey, A12 iPad 8):
 #   DEVICE=iPad11,6 VERSION=26.7.2 BOARD=j171aap PARTS=systemos OUT=build/ipsw-26 tools/fetch-ios-parts.sh
+# iOS 14 (iPhone 7, no cryptexes; only the root OS image and the device tree):
+#   DEVICE=iPhone9,1 VERSION=14.8.1 BOARD=d10ap OUT=build/ipsw-14 PARTS=devicetree tools/fetch-ios-parts.sh
 # iOS 18 images come as .aea (encrypted); tools/decrypt-ios-parts.sh opens them.
 # Apple files stay in build/ (gitignored), never in a repository.
 set -euo pipefail
@@ -34,7 +36,8 @@ ident = next(i for i in m['BuildIdentities']
 want = {'OS': 'os', 'Cryptex1,SystemOS': 'systemos', 'Cryptex1,AppOS': 'appos',
         'DeviceTree': 'devicetree'}
 for key, name in want.items():
-    print(name, ident['Manifest'][key]['Info']['Path'])
+    if key in ident['Manifest']:   # iOS 14/15 have no cryptexes
+        print(name, ident['Manifest'][key]['Info']['Path'])
 PY
 cat "$out/members.txt"
 while read -r name path; do
