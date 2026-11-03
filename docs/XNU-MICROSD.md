@@ -1,6 +1,7 @@
 # XNU microSD root driver (design)
 
-Status: v1 (PIO, read-only) implemented as xnu/series-12377 patches 0345/0346 and built (section 12).
+Status: v1 (PIO, read-only) implemented as xnu/series-12377 patches 0345/0346 and built (section 12),
+with the review fixes (error recovery, failed-mount panic, early bring-up print, store-aware `lba:`).
 The probe payload `out/xnu-sdprobe.xnu` is built but not flashed or booted. The phone was not touched.
 
 The goal is to let our XNU ports (iOS 26 on xnu-12377, iOS 14 on xnu-7195, both STARLTE) mount an
@@ -310,11 +311,16 @@ so a mistyped command line can never expose the wrong area.
     FAT/NTFS/exFAT types (`ANDROID-PLAN.md:318`), so Android leaves it alone.
 - **`sdroot=lba:START,COUNT`**: an absolute range in 512-byte sectors.
   - START and COUNT must be multiples of 8, for 4 KiB alignment, and must fit the card.
-  - Read-only: any range not overlapping p1 is allowed (reads are harmless, but p1 is the user's
-    data, so the rule stays).
-  - Writable: the range must also lie inside one MBR entry other than p1. When that entry is the
-    0xDA store, the driver reads the SBSTORE2 header (p2 block 1: u64 capacity, u64 used blocks;
-    `store.h:9-16`) and refuses unless START is at or beyond the store's used end.
+  - Read-only (v1, built): the range must not overlap any FAT/exFAT/NTFS partition, primary or
+    logical (types 0x01/0x04/0x06/0x07/0x0b/0x0c/0x0e, the whole EBR chain is read; an unreadable
+    table refuses). Where it overlaps a 0xDA store entry it must lie inside that entry and start at
+    or beyond the store's used end, read from the SBSTORE2 header (p2 block 1: u64 capacity at 16,
+    u64 used blocks at 24, CRC at 48; `store.h:9-16`). A bad header CRC or an SBSTORE1 view with no
+    SBSTORE2 header refuses. An 0xDA entry holding no store at all is allowed.
+  - Writable (v1.1, not built): additionally the range must lie inside one MBR entry other than the
+    data partitions.
+  - Only `sdroot=pN` refuses 0xDA as such; `lba:` may sit in the store's unused tail, which is where
+    the test range is.
 
 The driver prints the result. For example:
 `STARBITE SD: root lba 249868288 +131072 (64 MiB), inside p2 type 0xda, read-only, card SDXC rca 0xd555 20150 kHz`.
@@ -397,9 +403,11 @@ When writes come (v1.1), the card log uses the herolog layout unchanged:
   (`ANDROID-PLAN.md:316`).
 
 The same command line therefore works across the re-layout. Before writing, confirm with
-`tools/store/store-pull.sh ... sd` + `sbstore2.py list` that the store's used end is far below
-block 8372736. Add a tail reservation to `sbstore2.py --medium sd` (like `HEROLOG_BLOCKS` for UFS,
-`sbstore2.py:43`) so that a future store build cannot grow into the range.
+`tools/store/store-pull.sh ... sd` + `sbstore2.py header` that the store's used end clears
+block 8372736 (it prints `microSD root tail ...: clear`). `sbstore2.py build --medium sd` refuses a
+store that would reach the last 16384 blocks of p2 (`SD_ROOT_TAIL_BLOCKS`, like `HEROLOG_BLOCKS` for
+UFS), so a future store build cannot grow into the range. The driver also refuses the range when
+the card store's used end reaches past its start (section 6).
 
 Host (Mac, small: 64 MiB):
 1. Make a raw volume with no partition map: `hdiutil create -size 64m -fs "Case-sensitive HFS+"
@@ -484,7 +492,7 @@ The same kernel keeps `rd=ufsroot0` working, so nothing about the daily iOS 26 b
    become a new patch in series-12377 and one in series-7195.
 2. A host unit test of the MBR/EBR and range parser (compiled for macOS, fed synthetic MBRs and
    the real card layouts from NOTES and ANDROID-PLAN).
-3. The tail reservation in `sbstore2.py --medium sd`.
+3. The tail reservation in `sbstore2.py --medium sd` (done: `SD_ROOT_TAIL_BLOCKS`, `sbstore2.py header`).
 4. The T1 kernel image and the 64 MiB test image. Then T1, then T2.
 5. v1.1: `sdhs=1`, `sdrw=1` with the card herolog. v2: IDMAC below 4 GiB.
 
@@ -498,8 +506,8 @@ The same kernel keeps `rd=ufsroot0` working, so nothing about the daily iOS 26 b
 | Root hook | `xnu/series-12377/0346-starlte-microsd-root.patch`: `IOFindBSDRoot` STARLTE block, `sdprobe=` before the UFS probe, `rd=sdroot0` next to `ufsroot0` |
 | Kernel | `out/kernel.development.starlte-12377` (incremental `tools/build-xnu-12377.sh`, no warnings in the new files); the kernel before it is kept as `out/kernel.development.starlte-12377.pre-sd` |
 | Payload tool | `tools/mkpayload-ios26.sh NAME CMDLINE` -> `out/xnu-NAME.xnu` (strip -x kernel + `out/starlte-iphone11.adt` + cmdline, `mkpayload.py`; a store entry, no BOOT image) |
-| Probe cmdline | `tools/cmdline/ios26-sdprobe.txt`: the daily set minus `ufsrw=1 rootrw=1`, plus `herolog=0 sdprobe=2 sdhold=60 sdbench=16 sdroot=lba:249868288,131072 sweetreboot=1` (593 of 607 bytes) |
-| Payload | `out/xnu-sdprobe.xnu`, 17,198,848 bytes |
+| Probe cmdline | `tools/cmdline/ios26-sdprobe.txt`: the daily set with `rd=ufsroot0 ufsroot=USERDATA ufsrw=1 rootrw=1 ufsmulti=1` replaced by `rd=sdroot0`, plus `herolog=0 sdprobe=2 sdhold=60 sdbench=16 sdroot=lba:249868288,131072 sweetreboot=1` (564 of 607 bytes). Should the probe ever return (sdprobe=1), the root is the card range, whose missing HFS header panics (EFTYPE): UFS is never brought up |
+| Payload | `out/xnu-sdprobe.xnu`, 17,215,232 bytes. `mkpayload-ios26.sh` refuses a cmdline over 607 bytes or of more than one line (mkpayload.py would cut it silently), reads the packed cmdline back, and deletes its stripped kernel copy |
 
 Differences from the design, all on the safe side:
 - **No write path at all in v1.** `sdrw=1` only prints that writes are not in this build. The strategy
@@ -508,23 +516,47 @@ Differences from the design, all on the safe side:
 - **CMD9 added** between CMD3 and CMD7 (stand-by state) to read the CSD. It gives the card size
   (249999360 sectors expected for the SK128), so reads past the end are refused and `sdroot=` is
   checked against the real size. If CMD9 fails, `sdroot=` is refused, and the probe still runs.
-- `sdroot=lba:` refuses overlap with any FAT/exFAT/NTFS primary entry (0x07/0x0b/0x0c/0x0e), not only
-  p1. `sdroot=pN` also refuses those types, extended containers, empty entries and 0xDA.
+- `sdroot=lba:` refuses overlap with any FAT/exFAT/NTFS partition, primary or logical (EBR chain), not
+  only p1, and inside the 0xDA store it must start at or past the store's used end (section 6).
+  Only `sdroot=pN` refuses 0xDA as such; `pN` also refuses the data types, extended containers and
+  empty entries.
 - `rd=sdroot0` checks for an `H+`/`HX` volume header at sector 2 of the range before it publishes
   the devfs nodes. With no header it panics (`EFTYPE`, 79) instead of handing HFS garbage.
 - The controller address is the constant 0x11500000. An ADT `/starbite-sd` node is optional and only
   checked (a node at another address refuses to start). `mkadt_starlte.py` is unchanged, so the
   daily ADT is reused as it is.
 - `sdhs`, `sdwait`, `sdclkdiv` and IDMAC are not in v1. `sdfifo32=1` is.
-- Not done yet: the series-7195 port, the host test of the MBR/EBR parser and the
-  `sbstore2.py --medium sd` tail reservation (section 11, items 1-3).
+- A failed read never leaves the controller inside the CMD18. `read_chunk` returns on a data error
+  (DCRC/DRTO/HTO/FRUN/SBE/EBE) or its deadline without draining the FIFO, and flow control then stops
+  the card clock. So every failure, the last retry included, runs `sd_recover()`, as Linux does after
+  a data error (`dw_mci_data_complete` -> `dw_mci_reset`, `send_stop_abort`): controller + FIFO reset,
+  RINTSTS cleared, UPD_CLK without PRV_WAIT, then CMD12 with stop_abort (bit 14, no busy wait, no
+  PRV_WAIT; a card already in tran does not answer), then CMD13 until the card is in tran (at most
+  250 ms). Each one prints `read S+N: E (rintsts .. status ..), reset + CMD12: card state 4 (tran),
+  retry`. The loader's `shim/starlte/sd.c` has the same recovery (compile-checked, not rebuilt
+  into an image).
+- `rd=sdroot0`: a second `starlte_sd_rootdev()` call means HFS did not mount (bsd_init calls
+  IOFindBSDRoot again only after `vfs_mountroot` failed, and this path skips the 10-attempt check). It
+  panics `STARBITE SD: HFS did not mount sdroot=... (lba .. +..)` instead of looping forever, so
+  sweetreboot brings the log to TWRP.
+- Bring-up order: card detect (GPA1 CON +0x40 and DAT printed on "no card"), gates and divider, then a
+  `gates ... cmu div ... gpa1 con ...` line before anything else, and a gate whose bits 20/21 do not
+  read back set stops with `clock gates did not open` before 0x11500000 is touched. The rails print
+  before and after. VERID/HCON and S-Boot's CLKSEL print right after the first controller read.
+  CLKSEL is changed in its timing fields only (`& ~0x07070007`, as Linux
+  `dw_mci_exynos_set_clksel_timing`).
+- The probe tells a reread mismatch (`reread DIFF`) apart from a failed reread (`reread err N`) and a
+  bench that never read the first chunk (`reread skipped`), and counts recoveries (`rec N`).
+- Not done yet: the series-7195 port and a committed host test of the MBR/EBR parser (section 11,
+  items 1-2; the parser was host-tested against the real and the re-layout tables during review).
 
 ### 12.2 What the probe does (`sdprobe=2`)
 
 It runs in `IOFindBSDRoot` before anything touches UFS, so with `sdprobe=2` UFS is never
 initialised: nothing on internal storage is read or written. It writes nothing to the card.
-1. Card up (2.3 + CMD9). It prints the gates, the CMU divider, bus Hz, LDO31/LDO2, VERID/HCON, then
-   CID name, OCR, RCA, the size and the card clock.
+1. Card up (2.3 + CMD9). It prints the gates, the CMU divider, bus Hz and the GPA1 pin, then LDO31/LDO2
+   before and after the power cycle, then VERID/HCON and S-Boot's CLKSEL, then CID name, OCR, RCA,
+   the size, the new CLKSEL and the card clock.
 2. MBR (sector 0). It prints the disk id and every entry.
 3. p1 sector 0 (the exFAT boot sector). It prints the OEM name `EXFAT   `, the volume length, the
    sector and cluster shifts, the serial and the first 16 bytes.
@@ -537,14 +569,14 @@ initialised: nothing on internal storage is read or written. It writes nothing t
    of the card) is read for an HFS header. Today that range is the unused tail of p2, so expect
    `sdroot ok no HFS`. It proves the range parser and a read near the card's last sector.
 6. Throughput: it reads 16 MiB from p2's start in 128 KiB CMD18s, then reads the first chunk again
-   and compares the two.
+   and compares the two (`same`, `DIFF`, `err N` for a failed reread).
 7. It prints `STARBITE SD: probe done: <summary>` and `holding 60 s ... photograph the screen now`.
    Then it waits 60 s and calls `panic("STARBITE SD: probe done (sdprobe=2, nothing written): <summary>")`.
    With `sweetreboot=1` the panic hook copies the panic head and the console tail into the
    ramoops pmsg ring and resets into TWRP.
 
 On a failure, the summary reads `FAIL at <step> (<err>, rintsts 0x.. status 0x..) verid 0x..
-ldo31 0x..`. The panic still comes, and so does the reset.
+ldo31 0x.. gates .. .. .. gpa1 ..`. The panic still comes, and so does the reset.
 
 ### 12.3 Device test T1 (probe only, read-only, no card re-layout)
 
@@ -554,7 +586,7 @@ BOOT**: BOOT and the daily `@boot` iOS 26 entry stay as they are.
 
 1. **Check the payload** on the Mac:
    ```
-   shasum -a 256 out/xnu-sdprobe.xnu      # fb8d83619e88b2da826bd95d3aba5cc4cd05eb3665883641e78fa5f90d1e396e
+   shasum -a 256 out/xnu-sdprobe.xnu      # e2478d7883b1b1915e425673250660d14c91d1c47399cb976fd93d9ff7cfd992
    strings out/xnu-sdprobe.xnu | grep -o 'sdprobe=2 sdhold=60.*sweetreboot=1'
    ```
 2. **Pull the live store** (read-only), in the same sitting as the flash:
@@ -579,7 +611,7 @@ BOOT**: BOOT and the daily `@boot` iOS 26 entry stay as they are.
    TOML
    ```
    If store-pull.sh printed STOP, append the entry to a copy of the TOML that the live catalog was
-   built from, not to `catalog.toml`. There must be no `cmdline =` line: the cmdline is 593 of
+   built from, not to `catalog.toml`. There must be no `cmdline =` line: the cmdline is 564 of
    the payload's 607 bytes.
 4. **Build and compare**:
    ```
@@ -600,15 +632,18 @@ BOOT**: BOOT and the daily `@boot` iOS 26 entry stay as they are.
 8. **Expected on screen** (framebuffer console, `-v`), within about 10 s of the kernel start:
    ```
    STARBITE SD: probe (read only): microSD controller 0x11500000
-   STARBITE SD: gates 0x..3..... 0x..3..... 0x..3....., cmu div 0x.. -> bus 201500000 Hz, ldo31 0xe8 ldo2 0xfc, verid 0x....270a hcon 0x...
-   STARBITE SD: card SDHC/SDXC "SK128" mid 0x.. rca 0x.... ocr 0xc0ff8000, 249999360 sectors (122069 MiB), clksel 0x3020000, 20150 kHz 4 bit, fifo 64
+   STARBITE SD: gates 0x..3..... 0x..3..... 0x..3....., cmu div 0x.. -> bus 201500000 Hz, gpa1 con 0x........ dat 0x..
+   STARBITE SD: rails ldo31 0x.. -> 0xe8, ldo2 0x.. -> 0xfc
+   STARBITE SD: verid 0x....270a hcon 0x..., clksel 0x... (as S-Boot left it)
+   STARBITE SD: card SDHC/SDXC "SK128" mid 0x.. rca 0x.... ocr 0xc0ff8000, 249999360 sectors (122069 MiB), clksel 0x3020000 (was 0x...), 20150 kHz 4 bit, fifo 64
    STARBITE SD: MBR p1 type 0x07 ... lba 8192 +182878208 ...
    STARBITE SD: MBR p2 type 0xda ... lba 182886400 +67112960 ...
    STARBITE SD: p1 sector 0: oem "EXFAT   " ...
    STARBITE SD: p2: block 0 "SBSTORE1"|..., SBSTORE2 v2, N entries, ... header crc ok
    STARBITE SD: p2: directory (one 32-sector CMD18) crc ok
+   STARBITE SD: sdroot=lba:249868288,131072: inside p2 (type 0xda), past the store's used end (block N of 8389120)
    STARBITE SD: sdroot=lba:249868288,131072: 0, lba 249868288 +131072, volume header none
-   STARBITE SD: read 128 x 128 KiB from 182886400: 0, ... us, ~9000-11000 KB/s, reread same
+   STARBITE SD: read 128 x 128 KiB from 182886400: 0, ... us, ~9000-11000 KB/s, reread same, ... reads, 0 recoveries
    STARBITE SD: probe done: card up in ... ms, 122069 MiB, 20150 kHz, rca ....; p1 07 ... p2 da ...
    STARBITE SD: holding 60 s, then a deliberate panic (photograph the screen now)
    ```
@@ -628,7 +663,11 @@ BOOT**: BOOT and the daily `@boot` iOS 26 entry stay as they are.
 
 **Pass:** the card comes up, the MBR matches section 1 item 4, p1 says `EXFAT   `, both store CRCs
 are `ok` (or the store is honestly absent), the reread is `same`, and the throughput is printed.
+A `read S+N: ... reset + CMD12: card state 4 (tran), retry` line is a recovered transient error: the
+driver works, but note it. Repeated ones on every read point at the bus (clock, CLKSEL phase).
 **First things to try on a failure** (one boot each):
+- `clock gates did not open`: compare the three gate values with the loader's EngineerMode microSD
+  page; the controller was not touched.
 - `FIFO`/data errors -5/-6: `sdfifo32=1`.
 - DRTO: check that TMOUT reads back ~0.
 - `ACPM`: the card rails. Compare with the loader's EngineerMode microSD page.
@@ -636,8 +675,15 @@ are `ok` (or the store is honestly absent), the reread is `same`, and the throug
 
 ### 12.4 Device test T2 (root on the card, read-only), after T1 passes
 
+Before the `dd`: pull the card store (`tools/store/store-pull.sh ... sd`) and check
+`python3 tools/store/sbstore2.py header IMG` prints `microSD root tail ...: clear` (T1's
+`sdroot=` line already says `past the store's used end`). Card stores are built with
+`--medium sd`, which keeps the last 64 MiB of p2 free.
 Make the 64 MiB non-journaled HFSX image of section 9 and `dd` it to sector 249868288 from TWRP,
 then read it back and compare the sha. Then build the payload with the daily cmdline, but with
-`rd=ufsroot0 ufsroot=USERDATA ufsrw=1 rootrw=1` replaced by `rd=sdroot0 sdroot=lba:249868288,131072`
+`rd=ufsroot0 ufsroot=USERDATA ufsrw=1 rootrw=1 ufsmulti=1` replaced by `rd=sdroot0 sdroot=lba:249868288,131072`
 and `herolog=0 sweetreboot=1` added (`tools/mkpayload-ios26.sh sdroot-t2 FILE`). Flash it as a
 second hidden store entry the same way. Pass: the test init's hash of `/sdtest.bin` matches the host.
+If HFS does not mount, the kernel panics `STARBITE SD: HFS did not mount sdroot=...` on bsd_init's
+second IOFindBSDRoot call, after `cannot mount root, errno = N`, and sweetreboot resets into TWRP
+with both lines in pmsg.

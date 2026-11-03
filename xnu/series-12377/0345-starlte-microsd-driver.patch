@@ -1,4 +1,4 @@
-From 75b3d1a85b48b11406b3d7dd35fd4851c3cecf40 Mon Sep 17 00:00:00 2001
+From 70e56296140fb7a2b3748d6b4bf6aaa5cce70d4c Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Tue, 3 Nov 2026 17:44:02 +0200
 Subject: [PATCH] patch: 0345-starlte-microsd-driver.patch - STARLTE microSD
@@ -6,12 +6,16 @@ Subject: [PATCH] patch: 0345-starlte-microsd-driver.patch - STARLTE microSD
  CMD9 card size, MBR/EBR + sdroot= range (pN | lba:START,COUNT, no default,
  FAT/exFAT/NTFS/store refused), devfs sdroot0/rsdroot0, sdprobe=1/2 (MBR, p1
  boot sector, p2 SBSTORE2 header/directory CRCs, throughput; 2 = sdhold then a
- deliberate panic); no write path
+ deliberate panic); no write path - review: sd_recover after every failed read
+ (controller+FIFO reset, UPD_CLK, CMD12 stop_abort, CMD13 tran), second
+ rootdev call panics (failed mount), gates/rails/GPA1 printed and checked
+ before the controller, CLKSEL timing-field RMW, lba: refuses logical data
+ partitions and the store below its used end, reread err vs DIFF
 
 ---
  bsd/conf/files       |    1 +
- bsd/dev/starlte_sd.c | 1180 ++++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 1181 insertions(+)
+ bsd/dev/starlte_sd.c | 1370 ++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 1371 insertions(+)
  create mode 100644 bsd/dev/starlte_sd.c
 
 diff --git a/bsd/conf/files b/bsd/conf/files
@@ -28,10 +32,10 @@ index ad533bbe..ba9d06c6 100644
  bsd/dev/a5xelte_keys.c			standard
 diff --git a/bsd/dev/starlte_sd.c b/bsd/dev/starlte_sd.c
 new file mode 100644
-index 00000000..a1aea62f
+index 00000000..3dad7a0e
 --- /dev/null
 +++ b/bsd/dev/starlte_sd.c
-@@ -0,0 +1,1180 @@
+@@ -0,0 +1,1370 @@
 +/*
 + * STARLTE (Galaxy S9, Exynos 9810) microSD card: a polling, read-only block
 + * device on the card controller (dwmmc2, DesignWare MSHC 2.70a, Exynos7 type,
@@ -47,8 +51,17 @@ index 00000000..a1aea62f
 + *           power-cycled as the loader's hw_sd_rails (through starlte_touch.c's
 + *           ACPM PMIC path)
 + *   TMOUT   ~0, else every read ends in a data read timeout
++ *   CLKSEL  read-modify-write of the timing fields only, as Linux
++ *           dw_mci_exynos_set_clksel_timing; S-Boot's value is printed
 + *   I/O     CMD17 / CMD18 with auto stop, the FIFO drained by the CPU, no DMA,
 + *           no interrupts, every wait bounded
++ *   errors  every failed read is followed by sd_recover() (Linux dw_mci_reset +
++ *           send_stop_abort: controller and FIFO reset, clock reload, CMD12 with
++ *           stop_abort, CMD13 until tran), then retried; nothing is left mid-CMD18
++ *
++ * The gates, divider, rails and card-detect pin are printed before the
++ * controller is first read, and a gate that did not open stops the bring-up
++ * before 0x11500000 is touched.
 + *
 + * Nothing here writes the card: the strategy refuses writes (EROFS) and this
 + * build has no write command at all. Boot-args:
@@ -92,7 +105,7 @@ index 00000000..a1aea62f
 +#define CMU_PA          0x1a240000UL    /* gate +0x2070, divider +0x1864 */
 +#define FSYS1_PA        0x11400000UL    /* gates +0x2030, +0x2034 */
 +#define PINCTRL_PA      0x11430000UL    /* GPF1 CON +0, PUD +8, DRV +0xc */
-+#define ALIVE_PA        0x14050000UL    /* GPA1 DAT +0x44 */
++#define ALIVE_PA        0x14050000UL    /* GPA1 CON +0x40, DAT +0x44 */
 +
 +#undef CTRL                     /* sys/ttydefaults.h */
 +#define CTRL      0x00
@@ -121,6 +134,7 @@ index 00000000..a1aea62f
 +#define C_HOLD     (1U << 29)
 +#define C_UPD_CLK  (1U << 21)
 +#define C_INIT     (1U << 15)
++#define C_STOP     (1U << 14)           /* stop_abort_cmd (Linux SDMMC_CMD_STOP) */
 +#define C_PRV_WAIT (1U << 13)
 +#define C_AUTOSTOP (1U << 12)
 +#define C_DATA     (1U << 9)
@@ -154,14 +168,15 @@ index 00000000..a1aea62f
 +	const char *why;                /* the failed step */
 +	int err;                        /* its command / read error */
 +	bool fifo32;
-+	uint8_t l31, l2;
-+	uint32_t gate[3], cmu_div, verid, hcon, clksel;
++	uint8_t l31, l2, l31_was, l2_was;
++	uint32_t gpa1_con, gpa1_dat;
++	uint32_t gate[3], cmu_div, verid, hcon, clksel, clksel_was;
 +	uint64_t bus_hz, card_hz;
 +	uint32_t r7, ocr, rca, cid[4], csd[4];
 +	bool high_capacity;
 +	uint64_t card_sectors;          /* from the CSD, 0 = unknown */
 +	uint32_t last_rintsts, last_status;
-+	uint64_t nreads, nsectors_read;
++	uint64_t nreads, nsectors_read, nrecover;
 +	/* the root range, absolute card sectors */
 +	uint64_t first, count;
 +	char range[48];
@@ -236,11 +251,13 @@ index 00000000..a1aea62f
 +	return 0;
 +}
 +
++/* The CIU loads CLKDIV / CLKSRC / CLKENA. prv_wait: after the last data transfer (clock changes);
++ * without it right after a controller reset, as Linux dw_mci_reset's SDMMC_CMD_UPD_CLK. */
 +static int
-+update_clock(void)
++update_clock(bool prv_wait)
 +{
 +	wr(CMDARG, 0);
-+	wr(CMD, C_START | C_HOLD | C_UPD_CLK | C_PRV_WAIT);
++	wr(CMD, C_START | C_HOLD | C_UPD_CLK | (prv_wait ? C_PRV_WAIT : 0));
 +	return wait_reg(CMD, C_START, 0, 100);
 +}
 +
@@ -252,32 +269,34 @@ index 00000000..a1aea62f
 +		div = 255;
 +	}
 +	wr(CLKENA, 0);
-+	if (update_clock()) {
++	if (update_clock(true)) {
 +		return -1;
 +	}
 +	wr(CLKDIV, (uint32_t)div);
 +	wr(CLKSRC, 0);
-+	if (update_clock()) {
++	if (update_clock(true)) {
 +		return -1;
 +	}
 +	wr(CLKENA, 1);
-+	if (update_clock()) {
++	if (update_clock(true)) {
 +		return -1;
 +	}
 +	sd.card_hz = div ? sd.bus_hz / (2 * div) : sd.bus_hz;
 +	return 0;
 +}
 +
-+/* One command; 0, -1 controller stuck, -2 no response, -3 response CRC, -4 response error. */
++/* One command; 0, -1 controller stuck, -2 no response, -3 response CRC, -4 response error.
++ * A stop (C_STOP) goes out at once, as Linux sends it: no busy wait, no PRV_WAIT. */
 +static int
 +cmd(unsigned idx, uint32_t arg, uint32_t flags)
 +{
-+	if (wait_reg(STATUS, 1U << 9, 0, 500)) {        /* card busy (R1b of the last command) */
++	bool stop = (flags & C_STOP) != 0;
++	if (!stop && wait_reg(STATUS, 1U << 9, 0, 500)) {      /* card busy (R1b of the last command) */
 +		return -1;
 +	}
 +	wr(RINTSTS, 0xffffffffU);
 +	wr(CMDARG, arg);
-+	wr(CMD, C_START | C_HOLD | C_PRV_WAIT | flags | idx);
++	wr(CMD, C_START | C_HOLD | (stop ? 0 : C_PRV_WAIT) | flags | idx);
 +	if (wait_reg(CMD, C_START, 0, 100)) {
 +		return -1;
 +	}
@@ -377,10 +396,13 @@ index 00000000..a1aea62f
 +		return ENXIO;
 +	}
 +
-+	/* 1 card present */
-+	if (mrd(sd.alive, 0x44) & (1U << 5)) {
++	/* 1 card present: GPA1-5 (CON bits 23:20, 0 input / 0xf EINT) reads low */
++	sd.gpa1_con = mrd(sd.alive, 0x40);
++	sd.gpa1_dat = mrd(sd.alive, 0x44);
++	if (sd.gpa1_dat & (1U << 5)) {
 +		sd.why = "no card (detect GPA1-5 high)";
-+		printf("STARBITE SD: %s\n", sd.why);
++		printf("STARBITE SD: %s: gpa1 con 0x%08x (pin 5 function 0x%x) dat 0x%02x\n", sd.why,
++		    sd.gpa1_con, (sd.gpa1_con >> 20) & 0xfU, sd.gpa1_dat & 0xffU);
 +		return ENXIO;
 +	}
 +	/* 2 the three gates, manual + on; 3 the divider, read only */
@@ -392,6 +414,18 @@ index 00000000..a1aea62f
 +	}
 +	sd.cmu_div = mrd(sd.cmu, 0x1864);
 +	sd.bus_hz = PLL_MMC_HZ / ((sd.cmu_div & 0xfU) + 1U) / 4U;
++	/* Printed before the controller is first read: a read of an unclocked 0x11500000 can stall
++	 * the bus or take an SError, and then this line is the last evidence. */
++	printf("STARBITE SD: gates 0x%x 0x%x 0x%x, cmu div 0x%x -> bus %llu Hz, gpa1 con 0x%08x dat 0x%02x\n",
++	    sd.gate[0], sd.gate[1], sd.gate[2], sd.cmu_div, sd.bus_hz, sd.gpa1_con, sd.gpa1_dat & 0xffU);
++	for (unsigned i = 0; i < 3; i++) {
++		if ((sd.gate[i] & (3U << 20)) != (3U << 20)) {
++			sd.why = "clock gates did not open";
++			printf("STARBITE SD: %s (gate %u reads 0x%x): the controller is not touched\n", sd.why, i,
++			    sd.gate[i]);
++			return ENXIO;
++		}
++	}
 +	/* 4 pins */
 +	mwr(sd.pinctrl, 0x0, (mrd(sd.pinctrl, 0x0) & 0xff000000U) | 0x00222222U);
 +	mwr(sd.pinctrl, 0x8, mrd(sd.pinctrl, 0x8) & 0xff000000U);
@@ -402,6 +436,8 @@ index 00000000..a1aea62f
 +		printf("STARBITE SD: %s failed\n", sd.why);
 +		return ENXIO;
 +	}
++	sd.l31_was = sd.l31;
++	sd.l2_was = sd.l2;
 +	unsigned v = sd.l31 & 0x3fU;
 +	if (v != 0 && (v < 0x24U || v > 0x3cU)) {
 +		sd.why = "card power (LDO31 vsel outside 2.7-3.3 V, refused)";
@@ -414,6 +450,8 @@ index 00000000..a1aea62f
 +	delay(5 * 1000);
 +	(void)starlte_pmic_read(1, 0x68, &sd.l31);
 +	(void)starlte_pmic_read(1, 0x4a, &sd.l2);
++	printf("STARBITE SD: rails ldo31 0x%x -> 0x%x, ldo2 0x%x -> 0x%x%s\n", sd.l31_was, sd.l31, sd.l2_was,
++	    sd.l2, ok ? "" : " (an ACPM write failed)");
 +	if (!ok) {
 +		sd.why = "card power (ACPM write)";
 +		printf("STARBITE SD: %s failed\n", sd.why);
@@ -423,9 +461,9 @@ index 00000000..a1aea62f
 +	delay(10 * 1000);
 +	sd.verid = rd(VERID);
 +	sd.hcon = rd(HCON);
-+	printf("STARBITE SD: gates 0x%x 0x%x 0x%x, cmu div 0x%x -> bus %llu Hz, ldo31 0x%x ldo2 0x%x, "
-+	    "verid 0x%x hcon 0x%x\n", sd.gate[0], sd.gate[1], sd.gate[2], sd.cmu_div, sd.bus_hz,
-+	    sd.l31, sd.l2, sd.verid, sd.hcon);
++	sd.clksel_was = rd(CLKSEL64);
++	printf("STARBITE SD: verid 0x%x hcon 0x%x, clksel 0x%x (as S-Boot left it)\n", sd.verid, sd.hcon,
++	    sd.clksel_was);
 +	if ((sd.verid & 0xffffU) != 0x270aU) {
 +		return fail("controller not answering (VERID)", 0);
 +	}
@@ -443,7 +481,10 @@ index 00000000..a1aea62f
 +	wr(RINTSTS, 0xffffffffU);
 +	wr(TMOUT, 0xffffffffU);
 +	wr(FIFOTH, (2U << 28) | (31U << 16) | 32U);
-+	wr(CLKSEL64, (3U << 24) | (2U << 16));          /* ciu div 3, drive phase 2, sample phase 0 */
++	/* ciu div 3, drive phase 2, sample phase 0 (Linux SDMMC_CLKSEL_TIMING(0, 2, 3) from the DT's
++	 * <0 2> and ciu-div 3); the other bits stay as they are (SDMMC_CLKSEL_TIMING_MASK) */
++	uint32_t clksel = rd(CLKSEL64);
++	wr(CLKSEL64, (clksel & ~0x07070007U) | (3U << 24) | (2U << 16));
 +	sd.clksel = rd(CLKSEL64);
 +	wr(CTYPE, 0);
 +	wr(PWREN, 1);
@@ -519,9 +560,9 @@ index 00000000..a1aea62f
 +	}
 +	pnm[5] = 0;
 +	printf("STARBITE SD: card %s \"%s\" mid 0x%02x rca 0x%04x ocr 0x%08x, %llu sectors (%llu MiB), "
-+	    "clksel 0x%x, %llu kHz 4 bit, fifo %s\n", sd.high_capacity ? "SDHC/SDXC" : "SDSC", pnm,
++	    "clksel 0x%x (was 0x%x), %llu kHz 4 bit, fifo %s\n", sd.high_capacity ? "SDHC/SDXC" : "SDSC", pnm,
 +	    sd.cid[3] >> 24, sd.rca, sd.ocr, sd.card_sectors, sd.card_sectors >> 11, sd.clksel,
-+	    sd.card_hz / 1000, sd.fifo32 ? "2x32" : "64");
++	    sd.clksel_was, sd.card_hz / 1000, sd.fifo32 ? "2x32" : "64");
 +	sd.why = NULL;
 +	sd.state = 1;
 +	return 0;
@@ -583,6 +624,52 @@ index 00000000..a1aea62f
 +	return 0;
 +}
 +
++/*
++ * After a failed read_chunk the CIU can still be inside the CMD18: read_chunk returned on the
++ * error bit or its deadline without draining the FIFO, and once the FIFO is full flow control
++ * stops the card clock. The next command (PRV_WAIT) would then wait for that transfer forever.
++ * So, as Linux does after a data error (dw_mci_data_complete -> dw_mci_reset, plus
++ * send_stop_abort):
++ *   controller + FIFO reset (CTRL bits 0, 1), RINTSTS cleared, UPD_CLK so the CIU reloads the
++ *   clock registers; then CMD12 with stop_abort (no busy wait, no PRV_WAIT): a card still in
++ *   "data" goes back to "tran"; a card already in tran does not answer (illegal command, RTO,
++ *   ignored). Then CMD13 until the card says tran (4), at most 250 ms, with one more CMD12 when
++ *   it still says data (5). Returns the last CMD13 state, or -1 when CMD13 got no answer. Lock held.
++ */
++static int
++sd_recover(void)
++{
++	sd.nrecover++;
++	wr(CTRL, rd(CTRL) | 3U);
++	(void)wait_reg(CTRL, 3U, 0, 100);
++	wr(RINTSTS, 0xffffffffU);
++	(void)update_clock(false);
++	(void)cmd(12, 0, R1 | C_STOP);
++	(void)wait_reg(STATUS, 1U << 9, 0, 500);        /* R1b busy */
++	int state = -1;
++	bool restopped = false;
++	uint64_t t = deadline_ms(250);
++	for (;;) {
++		if (cmd(13, sd.rca << 16, R1) == 0) {
++			state = (int)((rd(RESP0) >> 9) & 0xfU);
++			if (state == 4) {
++				break;
++			}
++			if (state == 5 && !restopped) {
++				restopped = true;
++				(void)cmd(12, 0, R1 | C_STOP);
++				(void)wait_reg(STATUS, 1U << 9, 0, 500);
++			}
++		}
++		if (expired(t)) {
++			break;
++		}
++		delay(1000);
++	}
++	wr(RINTSTS, 0xffffffffU);
++	return state;
++}
++
 +/* count sectors from absolute card sector `sector` to dst (8-byte aligned); 0 or a read error. Lock held. */
 +static int
 +sd_read_sectors(uint64_t sector, uint32_t count, void *dst)
@@ -600,9 +687,15 @@ index 00000000..a1aea62f
 +		int r = -1;
 +		for (int a = 0; a < 3 && r; a++) {
 +			r = read_chunk(sector, n, (uint64_t *)(void *)p);
-+			if (r && a < 2) {
-+				printf("STARBITE SD: read %llu+%u: %d (rintsts 0x%x), retry\n", sector, n, r,
-+				    sd.last_rintsts);
++			if (r) {
++				/* every failure is recovered, the last one too, so the next read starts clean */
++				uint32_t ri = sd.last_rintsts, st = rd(STATUS);
++				int cs = sd_recover();
++				printf("STARBITE SD: read %llu+%u: %d (rintsts 0x%x status 0x%x), reset + CMD12: card "
++				    "state %d%s, %s\n", sector, n, r, ri, st, cs, cs == 4 ? " (tran)" : "",
++				    a < 2 ? "retry" : "giving up");
++				sd.last_rintsts = ri;
++				sd.last_status = st;
 +			}
 +		}
 +		if (r) {
@@ -675,52 +768,126 @@ index 00000000..a1aea62f
 +	return t == 0x05 || t == 0x0f || t == 0x85;
 +}
 +
-+/* Types the driver never exposes: empty, extended containers, FAT/exFAT/NTFS (the user's data), the OS store. */
++/* FAT12/16/32, exFAT, NTFS: the user's data (vold mounts these). */
++static inline bool
++type_data(uint8_t t)
++{
++	return t == 0x01 || t == 0x04 || t == 0x06 || t == 0x07 || t == 0x0b || t == 0x0c || t == 0x0e;
++}
++
++/* Types sdroot=pN never exposes: empty, extended containers, the user's data, the OS store (0xDA). */
 +static inline bool
 +type_refused(uint8_t t)
 +{
-+	return t == 0 || type_extended(t) || t == 0x07 || t == 0x0b || t == 0x0c || t == 0x0e || t == 0xda;
++	return t == 0 || type_extended(t) || type_data(t) || t == 0xda;
++}
++
++#define SD_MAXPARTS 36                  /* p1..p4 + 32 logical */
++
++/*
++ * The partition table: p[0..3] the primary entries, p[4..] the logical partitions of the first
++ * extended entry (p5.., the EBR chain, relative LBAs, at most 32 hops, inside the container).
++ * *np = the entries found. 0, or EIO (MBR / an EBR unreadable or not 55aa) or EINVAL (a logical
++ * partition outside its container); the entries found before the error are kept.
++ */
++static int
++sd_partitions(struct sd_part p[SD_MAXPARTS], unsigned *np, uint8_t *sec)
++{
++	*np = 0;
++	if (sd_read(0, 1, sec) || !mbr_entries(sec, p)) {
++		return EIO;
++	}
++	*np = 4;
++	unsigned x;
++	for (x = 0; x < 4 && !type_extended(p[x].type); x++) {
++	}
++	if (x == 4) {
++		return 0;
++	}
++	uint64_t base = p[x].start, end = p[x].start + p[x].count, ebr = base;
++	for (unsigned hop = 0; hop < SD_MAXPARTS - 4; hop++) {
++		struct sd_part l[4];
++		if (ebr < base || ebr >= end || sd_read(ebr, 1, sec) || !mbr_entries(sec, l)) {
++			return EIO;
++		}
++		struct sd_part *o = &p[*np];
++		o->type = l[0].type;
++		o->start = ebr + l[0].start;
++		o->count = l[0].count;
++		if (o->start < base || o->start + o->count > end) {
++			return EINVAL;
++		}
++		(*np)++;
++		if (!type_extended(l[1].type) || !l[1].start) {
++			return 0;
++		}
++		ebr = base + l[1].start;
++	}
++	return 0;
 +}
 +
 +/* Partition N (1..4 primary, 5.. logical through the EBR chain). 0 or an errno. */
 +static int
 +find_part(unsigned n, struct sd_part *out, uint8_t *sec)
 +{
-+	struct sd_part p[4];
-+	if (sd_read(0, 1, sec) || !mbr_entries(sec, p)) {
-+		return EIO;
-+	}
-+	if (n >= 1 && n <= 4) {
++	struct sd_part p[SD_MAXPARTS];
++	unsigned np = 0;
++	int e = sd_partitions(p, &np, sec);
++	if (n >= 1 && n <= np) {
 +		*out = p[n - 1];
 +		return 0;
 +	}
-+	unsigned x;
-+	for (x = 0; x < 4 && !type_extended(p[x].type); x++) {
++	return e ? e : ENOENT;
++}
++
++/*
++ * sdroot=lba: inside the OS store (an 0xDA entry): only at or past the store's used end, read from
++ * the SBSTORE2 header (entry block 1: u64 capacity at 16, u64 used blocks at 24, CRC32 of bytes
++ * 0..47 at 48; shim/starlte/store.h), so a range never covers an entry the loader boots. An entry
++ * with no store in it (neither SBSTORE1 at block 0 nor SBSTORE2 at block 1) is allowed. 0 or EPERM
++ * / EIO, reason printed.
++ */
++static int
++sd_range_vs_store(const char *spec, unsigned idx, const struct sd_part *e, uint64_t s, uint64_t c,
++    uint8_t *sec)
++{
++	if (s < e->start || s + c > e->start + e->count) {
++		printf("STARBITE SD: sdroot=%s: crosses the bounds of p%u (type 0xda, the OS store), refused\n",
++		    spec, idx);
++		return EPERM;
 +	}
-+	if (n < 5 || x == 4) {
-+		return ENOENT;
++	if (sd_read(e->start + 8, 1, sec)) {
++		printf("STARBITE SD: sdroot=%s: p%u store header unreadable, refused\n", spec, idx);
++		return EIO;
 +	}
-+	uint64_t base = p[x].start, end = p[x].start + p[x].count, ebr = base;
-+	for (unsigned hop = 0; hop < 32; hop++) {
-+		struct sd_part l[4];
-+		if (ebr < base || ebr >= end || sd_read(ebr, 1, sec) || !mbr_entries(sec, l)) {
-+			return EIO;
++	if (memcmp(sec, "SBSTORE2", 8) == 0) {
++		uint64_t cap = le64(sec + 16), used = le64(sec + 24);
++		if (crc32(0, sec, 48) != le32(sec + 48) || used > cap || cap * 8 > e->count) {
++			printf("STARBITE SD: sdroot=%s: p%u SBSTORE2 header bad (crc, capacity %llu, used %llu), "
++			    "refused\n", spec, idx, cap, used);
++			return EPERM;
 +		}
-+		if (hop + 5 == n) {
-+			out->type = l[0].type;
-+			out->start = ebr + l[0].start;
-+			out->count = l[0].count;
-+			if (out->start < base || out->start + out->count > end) {
-+				return EINVAL;
-+			}
-+			return 0;
++		uint64_t used_end = e->start + used * 8;
++		if (s < used_end) {
++			printf("STARBITE SD: sdroot=%s: inside p%u's store below its used end (sector %llu, block %llu), "
++			    "refused\n", spec, idx, used_end, used);
++			return EPERM;
 +		}
-+		if (!type_extended(l[1].type) || !l[1].start) {
-+			return ENOENT;
-+		}
-+		ebr = base + l[1].start;
++		printf("STARBITE SD: sdroot=%s: inside p%u (type 0xda), past the store's used end (block %llu of %llu)\n",
++		    spec, idx, used, cap);
++		return 0;
 +	}
-+	return ENOENT;
++	if (sd_read(e->start, 1, sec)) {
++		printf("STARBITE SD: sdroot=%s: p%u block 0 unreadable, refused\n", spec, idx);
++		return EIO;
++	}
++	if (memcmp(sec, "SBSTORE1", 8) == 0) {
++		printf("STARBITE SD: sdroot=%s: p%u has a store with no SBSTORE2 header (used end unknown), refused\n",
++		    spec, idx);
++		return EPERM;
++	}
++	printf("STARBITE SD: sdroot=%s: inside p%u (type 0xda), which holds no store\n", spec, idx);
++	return 0;
 +}
 +
 +/* boot-arg sdroot=: pN or lba:START,COUNT into sd.first / sd.count. 0 or an errno, reason printed. */
@@ -774,18 +941,27 @@ index 00000000..a1aea62f
 +			error = EINVAL;
 +			goto out;
 +		}
-+		struct sd_part p[4];
-+		if (sd_read(0, 1, sec) || !mbr_entries(sec, p)) {
-+			printf("STARBITE SD: sdroot=%s: MBR unreadable, refused\n", spec);
-+			error = EIO;
++		/* every partition, primary and logical, is checked: the whole table must read */
++		struct sd_part p[SD_MAXPARTS];
++		unsigned np = 0;
++		int pe = sd_partitions(p, &np, sec);
++		if (pe) {
++			printf("STARBITE SD: sdroot=%s: partition table unreadable (%d, %u entries read), refused\n",
++			    spec, pe, np);
++			error = pe;
 +			goto out;
 +		}
-+		for (unsigned i = 0; i < 4; i++) {
-+			bool data = p[i].type == 0x07 || p[i].type == 0x0b || p[i].type == 0x0c || p[i].type == 0x0e;
-+			if (data && s < p[i].start + p[i].count && p[i].start < s + c) {
++		for (unsigned i = 0; i < np; i++) {
++			if (type_data(p[i].type) && s < p[i].start + p[i].count && p[i].start < s + c) {
 +				printf("STARBITE SD: sdroot=%s: overlaps p%u (type 0x%02x, the user's data), refused\n",
 +				    spec, i + 1, p[i].type);
 +				error = EPERM;
++				goto out;
++			}
++		}
++		for (unsigned i = 0; i < np; i++) {
++			if (p[i].type == 0xda && s < p[i].start + p[i].count && p[i].start < s + c &&
++			    (error = sd_range_vs_store(spec, i + 1, &p[i], s, c, sec))) {
 +				goto out;
 +			}
 +		}
@@ -994,8 +1170,13 @@ index 00000000..a1aea62f
 +starlte_sd_rootdev(dev_t *dev)
 +{
 +	if (sd.ready) {
-+		*dev = sd.bdev;
-+		return 0;
++		/*
++		 * IOFindBSDRoot runs again only after vfs_mountroot failed (bsd_init's mount loop). This
++		 * path skips IOFindBSDRoot's 10-attempt check (and wdt=-1 turns it off), so returning the
++		 * same dev would loop forever with no panic, no pmsg and no reset into TWRP. Panic instead:
++		 * bsd_init's "cannot mount root, errno = N" is in the console tail sweetreboot saves.
++		 */
++		panic("STARBITE SD: HFS did not mount sdroot=%s (lba %llu +%llu)", sd.range, sd.first, sd.count);
 +	}
 +	uint32_t rw = 0;
 +	if (PE_parse_boot_argn("sdrw", &rw, sizeof(rw)) && rw) {
@@ -1104,8 +1285,9 @@ index 00000000..a1aea62f
 +	uint64_t t0 = mach_absolute_time();
 +	int e = sd_up_locked();
 +	if (e) {
-+		snprintf(sum, sizeof(sum), "FAIL at %s (%d, rintsts 0x%x status 0x%x) verid 0x%x ldo31 0x%x",
-+		    sd.why ? sd.why : "?", sd.err, sd.last_rintsts, sd.last_status, sd.verid, sd.l31);
++		snprintf(sum, sizeof(sum), "FAIL at %s (%d, rintsts 0x%x status 0x%x) verid 0x%x ldo31 0x%x "
++		    "gates %x %x %x gpa1 %x", sd.why ? sd.why : "?", sd.err, sd.last_rintsts, sd.last_status,
++		    sd.verid, sd.l31, sd.gate[0], sd.gate[1], sd.gate[2], sd.gpa1_con);
 +		goto done;
 +	}
 +	snprintf(sum, sizeof(sum), "card up in %llu ms, %llu MiB, %llu kHz, rca %04x;",
@@ -1184,14 +1366,26 @@ index 00000000..a1aea62f
 +			}
 +		}
 +		uint64_t us = elapsed_us(t);
-+		bool same = !r && !sd_read(from, CHUNK, buf) && memcmp(buf, buf2, BUF) == 0;
++		/* the reread needs the first chunk (k > 0); a mismatch and a failed reread are told apart */
++		char reread[16];
++		int rr = 0;
++		if (k == 0) {
++			strlcpy(reread, "skipped", sizeof(reread));
++		} else if ((rr = sd_read(from, CHUNK, buf))) {
++			snprintf(reread, sizeof(reread), "err %d", rr);
++		} else {
++			strlcpy(reread, memcmp(buf, buf2, BUF) == 0 ? "same" : "DIFF", sizeof(reread));
++		}
 +		uint64_t kbps = us ? (uint64_t)k * 128 * 1000000 / us : 0;
-+		printf("STARBITE SD: read %u x 128 KiB from %llu: %d, %llu us, %llu KB/s, reread %s, %llu reads\n",
-+		    k, from, r, us, kbps, same ? "same" : "DIFFERENT", sd.nreads);
++		printf("STARBITE SD: read %u x 128 KiB from %llu: %d, %llu us, %llu KB/s, reread %s, %llu reads, "
++		    "%llu recoveries\n", k, from, r, us, kbps, reread, sd.nreads, sd.nrecover);
 +		snprintf(sum + strlen(sum), sizeof(sum) - strlen(sum), " %u MiB %llu KB/s reread %s", k / 8,
-+		    kbps, same ? "same" : "DIFF");
++		    kbps, reread);
 +		if (r) {
 +			snprintf(sum + strlen(sum), sizeof(sum) - strlen(sum), " err %d", r);
++		}
++		if (sd.nrecover) {
++			snprintf(sum + strlen(sum), sizeof(sum) - strlen(sum), " rec %llu", sd.nrecover);
 +		}
 +	}
 +done:

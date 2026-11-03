@@ -15,7 +15,11 @@
  *
  * Init at 400 kHz: CMD0, CMD8, ACMD41 until ready, CMD2, CMD3, CMD7, ACMD6 (4 bit), then 25 MHz.
  * Reads: CMD17 / CMD18 with auto stop, the FIFO emptied by the CPU (no DMA, no interrupts), every
- * wait bounded by the generic timer. Nothing here ever writes the card.
+ * wait bounded by the generic timer. A failed read is followed by sd_recover() (controller + FIFO
+ * reset, clock reload, CMD12 with stop_abort, CMD13 until tran; Linux dw_mci_reset +
+ * send_stop_abort) before the retry, so no error leaves the controller inside the CMD18. CLKSEL is
+ * changed in its timing fields only (Linux dw_mci_exynos_set_clksel_timing); a CMU gate that did
+ * not open stops the bring-up before the controller is read. Nothing here ever writes the card.
  */
 #include <stdint.h>
 #include "sd.h"
@@ -48,6 +52,7 @@
 #define C_HOLD     (1U << 29)
 #define C_UPD_CLK  (1U << 21)
 #define C_INIT     (1U << 15)
+#define C_STOP     (1U << 14)           /* stop_abort_cmd (Linux SDMMC_CMD_STOP) */
 #define C_PRV_WAIT (1U << 13)
 #define C_AUTOSTOP (1U << 12)
 #define C_DATA     (1U << 9)
@@ -133,10 +138,12 @@ static int wait_reg(uintptr_t off, uint32_t mask, uint32_t want, unsigned ms)
     return 0;
 }
 
-static int update_clock(void)
+/* prv_wait: after the last data transfer (clock changes); without it right after a controller
+ * reset, as Linux dw_mci_reset's SDMMC_CMD_UPD_CLK. */
+static int update_clock(int prv_wait)
 {
     wr(CMDARG, 0);
-    wr(CMD, C_START | C_HOLD | C_UPD_CLK | C_PRV_WAIT);
+    wr(CMD, C_START | C_HOLD | C_UPD_CLK | (prv_wait ? C_PRV_WAIT : 0));
     return wait_reg(CMD, C_START, 0, 100);
 }
 
@@ -146,27 +153,29 @@ static int set_clock(uint64_t hz)
     if (div > 255)
         div = 255;
     wr(CLKENA, 0);
-    if (update_clock())
+    if (update_clock(1))
         return -1;
     wr(CLKDIV, (uint32_t)div);
     wr(CLKSRC, 0);
-    if (update_clock())
+    if (update_clock(1))
         return -1;
     wr(CLKENA, 1);
-    if (update_clock())
+    if (update_clock(1))
         return -1;
     sd_rep.card_hz = div ? sd_rep.bus_hz / (2 * div) : sd_rep.bus_hz;
     return 0;
 }
 
-/* One command; 0, -1 controller stuck, -2 no response, -3 response CRC, -4 response error. */
+/* One command; 0, -1 controller stuck, -2 no response, -3 response CRC, -4 response error.
+ * A stop (C_STOP) goes out at once, as Linux sends it: no busy wait, no PRV_WAIT. */
 static int cmd(unsigned idx, uint32_t arg, uint32_t flags)
 {
-    if (wait_reg(STATUS, 1U << 9, 0, 500))     /* card busy (R1b of the last command) */
+    int stop = (flags & C_STOP) != 0;
+    if (!stop && wait_reg(STATUS, 1U << 9, 0, 500))   /* card busy (R1b of the last command) */
         return -1;
     wr(RINTSTS, 0xffffffffU);
     wr(CMDARG, arg);
-    wr(CMD, C_START | C_HOLD | C_PRV_WAIT | flags | idx);
+    wr(CMD, C_START | C_HOLD | (stop ? 0 : C_PRV_WAIT) | flags | idx);
     if (wait_reg(CMD, C_START, 0, 100))
         return -1;
     uint64_t t = deadline(500);
@@ -220,6 +229,11 @@ int sd_up(void)
     }
     sd_rep.cmu_div = mrd(0x1a241864UL);
     sd_rep.bus_hz = PLL_MMC_HZ / ((sd_rep.cmu_div & 0xfU) + 1U) / 4U;
+    for (unsigned i = 0; i < 3; ++i)               /* an unclocked controller can stall the bus */
+        if ((sd_rep.gate[i] & (3U << 20)) != (3U << 20)) {
+            sd_rep.why = "clock gates did not open";
+            return 0;
+        }
     mwr(PINCTRL_FSYS1 + 0x0, (mrd(PINCTRL_FSYS1 + 0x0) & 0xff000000U) | 0x00222222U);
     mwr(PINCTRL_FSYS1 + 0x8, mrd(PINCTRL_FSYS1 + 0x8) & 0xff000000U);
     mwr(PINCTRL_FSYS1 + 0xc, (mrd(PINCTRL_FSYS1 + 0xc) & 0xff000000U) | 0x00333334U);
@@ -229,6 +243,7 @@ int sd_up(void)
     hw_wait_ms(10);
     sd_rep.verid = rd(VERID);
     sd_rep.hcon = rd(HCON);
+    sd_rep.clksel_was = rd(CLKSEL64);
     if ((sd_rep.verid & 0xffffU) != 0x270aU)
         return fail("controller not answering (VERID)");
     if (((sd_rep.hcon >> 7) & 7U) != 2U)
@@ -243,7 +258,8 @@ int sd_up(void)
     wr(RINTSTS, 0xffffffffU);
     wr(TMOUT, 0xffffffffU);
     wr(FIFOTH, (2U << 28) | (31U << 16) | 32U);
-    wr(CLKSEL64, (3U << 24) | (2U << 16));     /* ciu div 3, drive phase 2, sample phase 0 */
+    /* ciu div 3, drive phase 2, sample phase 0; the bits outside SDMMC_CLKSEL_TIMING_MASK stay */
+    wr(CLKSEL64, (rd(CLKSEL64) & ~0x07070007U) | (3U << 24) | (2U << 16));
     sd_rep.clksel = rd(CLKSEL64);
     wr(CTYPE, 0);
     wr(PWREN, 1);
@@ -332,6 +348,44 @@ static int read_chunk(uint64_t sector, uint32_t n, uintptr_t dst)
     return 0;
 }
 
+/*
+ * After a failed read_chunk the controller can still be inside the CMD18 (the FIFO full, the card
+ * clock stopped by flow control), and the next command would wait for it forever. As Linux after a
+ * data error: controller + FIFO reset, RINTSTS cleared, UPD_CLK; CMD12 with stop_abort (a card
+ * already in tran does not answer: ignored); CMD13 until tran (4), at most 250 ms. Returns the
+ * last card state or -1.
+ */
+static int sd_recover(void)
+{
+    sd_rep.recoveries++;
+    wr(CTRL, rd(CTRL) | 3U);
+    (void)wait_reg(CTRL, 3U, 0, 100);
+    wr(RINTSTS, 0xffffffffU);
+    (void)update_clock(0);
+    (void)cmd(12, 0, R1 | C_STOP);
+    (void)wait_reg(STATUS, 1U << 9, 0, 500);   /* R1b busy */
+    int state = -1, restopped = 0;
+    uint64_t t = deadline(250);
+    for (;;) {
+        if (cmd(13, sd_rep.rca << 16, R1) == 0) {
+            state = (int)((rd(RESP0) >> 9) & 0xfU);
+            if (state == 4)
+                break;
+            if (state == 5 && !restopped) {
+                restopped = 1;
+                (void)cmd(12, 0, R1 | C_STOP);
+                (void)wait_reg(STATUS, 1U << 9, 0, 500);
+            }
+        }
+        if (expired(t))
+            break;
+        hw_wait_ms(1);
+    }
+    wr(RINTSTS, 0xffffffffU);
+    sd_rep.card_state = state;
+    return state;
+}
+
 int sd_read(uint64_t sector, uint32_t count, uintptr_t dst)
 {
     if (!sd_up())
@@ -339,8 +393,15 @@ int sd_read(uint64_t sector, uint32_t count, uintptr_t dst)
     while (count) {
         uint32_t n = count > 256U ? 256U : count;
         int r = -1;
-        for (int a = 0; a < 3 && r; ++a)
+        for (int a = 0; a < 3 && r; ++a) {
             r = read_chunk(sector, n, dst);
+            if (r) {                               /* the last failure too: the next read starts clean */
+                uint32_t ri = sd_rep.last_rintsts;
+                sd_rep.last_error = r;
+                (void)sd_recover();
+                sd_rep.last_rintsts = ri;
+            }
+        }
         if (r)
             return r;
         sector += n;

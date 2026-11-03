@@ -23,10 +23,13 @@ struct sd_report {
     int present;                /* card detect GPA1-5 low */
     int rails;                  /* hw_sd_rails: 1 on, 0 refused, -1 no ACPM */
     uint8_t l31, l2;
-    uint32_t gate[3], cmu_div, verid, hcon, clksel;
+    uint32_t gate[3], cmu_div, verid, hcon, clksel, clksel_was;
     uint64_t bus_hz, card_hz;
     uint32_t r7, ocr, rca, cid[4];
     int high_capacity;          /* SDHC/SDXC: block addressing */
     uint32_t last_rintsts, last_status;
+    int last_error;             /* the last failed read_chunk (-1..-8), 0 none */
+    int card_state;             /* CMD13 state after the last recovery (4 tran), -1 no answer */
+    uint32_t recoveries;        /* sd_recover() runs */
 };
 extern struct sd_report sd_rep;

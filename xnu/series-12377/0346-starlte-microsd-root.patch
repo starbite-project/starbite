@@ -1,4 +1,4 @@
-From de9c1f9fcccdc64c30c7892cd616980f4169d22d Mon Sep 17 00:00:00 2001
+From 2cf3cd9a46e3e4d8676a1753a1e4e07f7483346b Mon Sep 17 00:00:00 2001
 From: starbite <starbite@local>
 Date: Tue, 3 Nov 2026 17:44:02 +0200
 Subject: [PATCH] patch: 0346-starlte-microsd-root.patch - IOFindBSDRoot

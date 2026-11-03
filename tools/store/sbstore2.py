@@ -14,8 +14,13 @@
       With both --catalog and --import, refuses when the new catalog lacks a menu key the imported
       store's catalog has (another workflow's row would vanish): --drop KEY (repeatable) allows it.
       --medium ufs also refuses a store that reaches the last 1025 blocks of USERDATA (the iOS 26
-      kernel's herolog ring, bsd/dev/herolte_ufs.c).
+      kernel's herolog ring, bsd/dev/herolte_ufs.c). --medium sd refuses a store that reaches the
+      last 16384 blocks (64 MiB) of card p2: the XNU microSD root test range
+      sdroot=lba:249868288,131072 (bsd/dev/starlte_sd.c, docs/XNU-MICROSD.md section 9).
   sbstore2.py list IMG
+  sbstore2.py header IMG
+      The version 2 header: entries, capacity and used blocks; for a card store (capacity 8389120)
+      also whether the used end clears the microSD root tail at block 8372736.
   sbstore2.py catalog catalog.toml OUT.sbc
   sbstore2.py catalog-keys IMG|OUT.sbc|catalog.toml
       The menu keys of a catalog, one per line (sorted): diff two of them before flashing.
@@ -41,6 +46,7 @@ MAX_ENTRIES = DIR_BLOCKS * BLOCK // 64
 V1_BLOCKS = 262144
 MEDIA = {'ufs': 721024, 'sd': 8389120}   # S9 #1: USERDATA after 16 GiB; card p2 182886400..249999359
 HEROLOG_BLOCKS = 1025                     # herolte_ufs.c: 4 MiB ring + header block at the end of the root partition
+SD_ROOT_TAIL_BLOCKS = 16384               # starlte_sd.c: the card's last 64 MiB (p2 blocks 8372736..), sdroot=lba:249868288,131072
 SET_SD_STORE = 1                          # settings flags: read the card's store at boot
 
 TYPES = {'data': 0, 'image': 1, 'dtb': 2, 'initrd': 3, 'text': 4, 'xnu': 5, 'uefi': 6, 'catalog': 7}
@@ -230,6 +236,9 @@ def build(a):
         sys.exit(f'store needs {blk} blocks > capacity {a.capacity}')
     if a.medium == 'ufs' and blk > a.capacity - HEROLOG_BLOCKS:
         sys.exit(f'store needs {blk} blocks: past {a.capacity - HEROLOG_BLOCKS} it would overlap the USERDATA herolog ring')
+    if a.medium == 'sd' and blk > a.capacity - SD_ROOT_TAIL_BLOCKS:
+        sys.exit(f'store needs {blk} blocks: past {a.capacity - SD_ROOT_TAIL_BLOCKS} it would overlap the '
+                 'microSD root test range (sdroot=lba:249868288,131072)')
     struct.pack_into('<8sIIQ', v1, 0, b'SBSTORE1', 1, nv1, min(blk, V1_BLOCKS))
     n = len(items)
     hdr = bytearray(BLOCK)
@@ -241,6 +250,18 @@ def build(a):
     for name, typ, b, size, crc in rows:
         print(f'  {name:<24} {names[typ]:<8} block {b:>7} size {size:>10} crc32 {crc:08x}')
     print(f'{a.out}: {blk} blocks ({blk * BLOCK / 2**20:.1f} MiB) of {a.capacity}, {n} entries ({nv1} in the v1 view)')
+
+
+def header(a):
+    data = Path(a.img).read_bytes()[:2 * BLOCK]
+    if data[BLOCK:BLOCK + 8] != b'SBSTORE2':
+        sys.exit(f'{a.img}: no version 2 header')
+    n, cap, used, _ = check_header(data[BLOCK:BLOCK + 52], a.img)
+    print(f'{a.img}: {n} entries, used {used} of {cap} blocks')
+    if cap == MEDIA['sd']:
+        tail = cap - SD_ROOT_TAIL_BLOCKS
+        state = 'clear' if used <= tail else f'OVERLAPPED by {used - tail} blocks'
+        print(f'microSD root tail (p2 blocks {tail}..{cap - 1}, sdroot=lba:249868288,131072): {state}')
 
 
 def listing(a):
@@ -290,6 +311,8 @@ def main():
     b.add_argument('files', nargs='*')
     l = sub.add_parser('list')
     l.add_argument('img')
+    h = sub.add_parser('header')
+    h.add_argument('img')
     c = sub.add_parser('catalog')
     c.add_argument('toml')
     c.add_argument('out')
@@ -312,6 +335,8 @@ def main():
         build(a)
     elif a.cmd == 'list':
         listing(a)
+    elif a.cmd == 'header':
+        header(a)
     elif a.cmd == 'catalog':
         Path(a.out).write_bytes(pack_catalog(a.toml))
     elif a.cmd == 'catalog-keys':
