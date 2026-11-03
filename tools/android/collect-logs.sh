@@ -1,6 +1,6 @@
 #!/bin/sh
 # Pull every log an Android (LineageOS 24 / GSI) boot attempt leaves behind, from TWRP over adb.
-# Read-only on the phone: /metadata (ODM) is mounted ro and unmounted again. docs/ANDROID-PLAN.md 3.
+# Read-only on the phone: ODM and CACHE are mounted -o ro,noload (no journal replay) and unmounted again. docs/ANDROID-PLAN.md 3.
 #   tools/android/collect-logs.sh [TAG]     -> build/android/logs/<date>-<TAG>/
 set -eu
 tag=${1:-try}
@@ -29,7 +29,10 @@ adb shell 'ls -la /tmp/sbmd /tmp/sbmd/vold 2>/dev/null' > "$out/metadata-ls.txt"
 adb shell 'umount /tmp/sbmd' || true
 # BCB in MISC (did Android ask recovery to wipe?) and the /cache recovery command
 adb exec-out 'dd if=/dev/block/platform/11120000.ufs/by-name/MISC bs=2048 count=1 2>/dev/null' > "$out/misc-bcb.bin" || true
-adb shell 'mount /cache 2>/dev/null; cat /cache/recovery/command /cache/recovery/last_log 2>/dev/null' > "$out/cache-recovery.txt" || true
+# CACHE (ext4) is mounted read-only without journal replay, like ODM, and unmounted again
+adb shell 'mkdir -p /tmp/sbcache && mount -t ext4 -o ro,noload /dev/block/platform/11120000.ufs/by-name/CACHE /tmp/sbcache' || true
+adb shell 'cat /tmp/sbcache/recovery/command /tmp/sbcache/recovery/last_log 2>/dev/null' > "$out/cache-recovery.txt" || true
+adb shell 'umount /tmp/sbcache' || true
 strings "$out/misc-bcb.bin" | head -5 > "$out/misc-bcb.txt"
 # filesystem state of the Android partitions
 adb shell 'blkid 2>/dev/null | grep -E "sda1[89]|sda2[018]|mmcblk0"' > "$out/blkid.txt" || true

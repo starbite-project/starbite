@@ -11,10 +11,11 @@ New tools for this plan (tools/android/, none touches a device by itself):
 
 | File | sha256 | What |
 |---|---|---|
-| ramdisk-fstab.py | ae46c80c… | list / cat / replace files in a first-stage ramdisk (gzip newc cpio), byte-exact elsewhere (round trip of android.ramdisk is identical) |
+| ramdisk-fstab.py | 7a826f8c… | list / cat / replace (`put`) / add files (`add`) and directories (`mkdir`) in a first-stage ramdisk (gzip newc cpio), byte-exact elsewhere (round trip of android.ramdisk is identical) |
 | starbite-log.rc | 540951f5… | vendor init: kernel log + logcat of every boot to /metadata/starbite/boot0..4 |
-| starbite-log.sh | 37236e9b… | the script those services run |
-| collect-logs.sh | 0fa06324… | host: pulls last_kmsg, pstore, sec_log, BCB, /metadata/starbite, blkid from TWRP |
+| starbite-log.sh | 40f926b3… | the script those services run; both stop at `sys.boot_completed` (dmesg capped at 4 MiB / 10 min, logcat at 3 x 2 MiB, ends 60 s after boot_completed; oldest boots pruned while /metadata has < 32 MiB free) |
+| collect-logs.sh | 040a9475… | host: pulls last_kmsg, pstore, sec_log, BCB, /metadata/starbite, CACHE recovery log, blkid from TWRP; ODM and CACHE mounted `-o ro,noload` and unmounted again |
+| ../store/store-pull.sh | 83a7620d… | host: reads the phone's live store back as one image (read-only), lists it, compares its catalog with tools/store/catalog.toml |
 | fstab.card-a16 | cec8ae38… | the fstab for card slot 1 (section 5) |
 
 ---
@@ -52,6 +53,17 @@ Checked and **fine** (not a reason for a failure):
   (checked on out/xnu-boot-uc3.img and backup/20261102-185306/BOOT.img), so FBE keys made on the
   first boot stay valid. **Invariant: every future BOOT must keep that header** (a lower
   patch level makes keymaster refuse the keys and Android asks to wipe /data). **[read]**
+- **Open conflict with the card slots (section 4/5):** BOOT is shared, so every Android the loader
+  starts (LineageOS 23.2 on the card, later GSIs) sees BOOT's os_version 17.0.0 / patch 2026-10
+  through S-Boot's keymaster root of trust, while its own system reports Android 16 and an older
+  `ro.build.version.security_patch`. Keymaster/keystore compares the two: a system older than the
+  boot header can make key generation or the version check fail, so FBE on p9 may refuse to set up
+  or ask for a wipe **[unconf]**. Options, in order: (a) first boot G1 with a fresh p9 and read
+  `keystore`/`vold` lines in logcat (a fresh /data costs nothing there); (b) give the card system a
+  `ro.build.version.security_patch` (and vendor patch) not older than BOOT's on the host, which is
+  cosmetic but may satisfy the check; (c) run the card data without FBE (fstab `fileencryption`
+  removed) as a test-only fallback. Changing BOOT's header is **not** an option: it would break
+  Android 17's keys (the invariant above).
 - Same handoff as Linux (works), with the MMU off and caches cleaned.
 
 ### 1.2 Why it may still not boot (ranked)
@@ -103,15 +115,26 @@ androidboot.init_fatal_reboot_target=recovery printk.devkmsg=on
 `init_fatal_reboot_target=recovery` turns an init fatal (default: reboot to bootloader = Download
 mode on Samsung, no logs) into a reboot straight into TWRP with last_kmsg intact.
 `printk.devkmsg=on` stops init's /dev/kmsg lines from being rate-limited.
+Build it from a **fresh pull of the phone's store**, never from the Mac copy
+`build/store/ufs-store.img`: other workflows flash the store (iOS overlay, linux.*, windows.uefi,
+menu), and store-flash.sh replaces the whole store area, so a rebuild from a stale image silently
+rolls their entries back. No `--catalog`: the live catalog already names android.cmdline and is
+kept as it is.
 ```
 printf 'androidboot.init_fatal_reboot_target=recovery printk.devkmsg=on' > build/android/android.cmdline
+tools/store/store-pull.sh build/store/ufs-store-live.img          # TWRP, read-only; lists + CRC-checks
 python3 tools/store/sbstore2.py build build/store/ufs-store-a17.img --medium ufs \
-    --catalog tools/store/catalog.toml --import build/store/ufs-store.img \
+    --import build/store/ufs-store-live.img \
     android.cmdline=build/android/android.cmdline:text
-python3 tools/store/sbstore2.py list build/store/ufs-store-a17.img     # android.cmdline present
+diff <(python3 tools/store/sbstore2.py list build/store/ufs-store-live.img) \
+     <(python3 tools/store/sbstore2.py list build/store/ufs-store-a17.img)   # only + android.cmdline
 tools/store/store-flash.sh build/store/ufs-store-a17.img                 # TWRP; USERDATA+16 GiB, keeps settings
 ```
-(Coordinate with whoever owns the store that night: the store is shared by every OS.)
+The diff must show exactly one added line (android.cmdline) and nothing removed or changed; any
+other difference means the pull and the flash are not back to back, so pull again. Do the pull,
+build and flash in one sitting, and tell whoever else uses the store that night (it is shared by
+every OS). (tools/overlay/sbstore-pull.py reads only the v1 view of the store; store-pull.sh reads
+the whole version 2 store.)
 
 H2. Note the reference hashes: kernel 5d571d14…, ramdisk ba113e05… (store crc32 be72b6c2 /
 ca2ef41d), VENDOR original `~/android/z/vendor.orig.img`, patched `~/android/z/vendor.img`.
@@ -138,10 +161,18 @@ Volume Down + Power 7 s; leaving Upload mode = Volume Down + Power 7 s.
 1. Baseline logs: `tools/android/collect-logs.sh baseline` (this is TWRP's own previous boot: the
    reference for what an empty result looks like).
 2. Backups to the Mac (Android may write these): `adb exec-out 'dd if=/dev/block/sda19 bs=4M'` >
-   VENDOR, and PERSISTENT (sda14), STEADY (sda16), MISC (sda15), CACHE (sda21); sha256 each on
-   both sides.
+   VENDOR, and PERSISTENT (sda14), STEADY (sda16), MISC (sda15), CACHE (sda21), and a **fresh EFS**
+   (`/dev/block/by-name/EFS`, plus SEC_EFS if present: `ls -l /dev/block/by-name`), taken now, not
+   the 20261102 one (that predates any Android boot); sha256 each on both sides. EFS holds the
+   IMEI and Android mounts it rw (`errors=panic`).
 3. `blkid /dev/block/sda21` — if CACHE is not ext4: `mke2fs -t ext4 -b 4096 -L cache /dev/block/sda21`.
-4. `fsck.f2fs /dev/block/sda28` (read-only check; it must report no errors).
+   Windows now uses WINESP, not CACHE, but tools/woa/ufs-test.sh still targets CACHE: after this
+   mke2fs its saved `build/woa/cache-backup.img` holds the older filesystem, so a later
+   `ufs-test.sh restore` would undo this step. Run ufs-test.sh only after re-taking its backup.
+4. `fsck.f2fs --dry-run /dev/block/sda28` (really read-only; it must report no errors). TWRP
+   3.7.0's fsck.f2fs is probably older than lima's mkfs.f2fs, which used casefold, compression and
+   similar features: ignore "unknown feature" / unsupported-feature reports from it and never run
+   it without `--dry-run` (a repair by the older tool could damage the newer filesystem).
 5. VENDOR edits (no verity on VENDOR):
    ```
    adb shell 'mkdir -p /tmp/v && mount -t ext4 -o rw /dev/block/sda19 /tmp/v'
@@ -151,12 +182,19 @@ Volume Down + Power 7 s; leaving Upload mode = Volume Down + Power 7 s.
       chown 0:2000 bin/starbite-log.sh &&
       chcon u:object_r:vendor_configs_file:s0 etc/init/starbite-log.rc &&
       chcon u:object_r:vendor_file:s0 bin/starbite-log.sh &&
+      ls -lZ etc/fstab.samsungexynos9810 &&
       sed -i "s|^/devices/platform/11500000.dwmmc2|#&|" etc/fstab.samsungexynos9810 &&
-      ls -lZ etc/init/starbite-log.rc bin/starbite-log.sh && grep -n dwmmc2 etc/fstab.samsungexynos9810'
+      chmod 0644 etc/fstab.samsungexynos9810 && chown 0:0 etc/fstab.samsungexynos9810 &&
+      chcon u:object_r:vendor_configs_file:s0 etc/fstab.samsungexynos9810 &&
+      ls -lZ etc/init/starbite-log.rc bin/starbite-log.sh etc/fstab.samsungexynos9810 &&
+      grep -n dwmmc2 etc/fstab.samsungexynos9810'
    adb shell 'umount /tmp/v && sha256sum /dev/block/sda19'
    ```
-   (Use `sed -i` in TWRP, not on the host: TWRP's toybox sed keeps the file's xattrs because it
-   rewrites in place via a temp file in the same directory **[unconf: check `ls -Z` after]**.)
+   `sed -i` rewrites the file through a temp file and **has dropped the security.selinux xattr on
+   this very file before** (NOTES.md 2026-10-27), so the label is set again explicitly with
+   `chcon` and checked with `ls -lZ`: the fstab must show `0644 root root
+   u:object_r:vendor_configs_file:s0` (the first `ls -lZ` shows what it was before; owner and label
+   must match). An unlabeled fstab makes second-stage `mount_all` fail under SELinux.
 6. Optionally pull ODM's `/metadata` listing: it should be empty except lost+found.
 
 **P2. The boot.** `adb reboot` (TWRP → S-Boot → menu). Pick **Android** (Volume to move, Power to
@@ -180,6 +218,10 @@ loader screen → screen change (kernel took DECON) → LineageOS boot animation
 
 **P4. After a successful boot:** compare PERSISTENT, STEADY, MISC, CACHE, EFS with the P1.2 backups;
 then boot iOS, Windows and Linux once each from the menu (Android shares EFS/MISC/CACHE with them).
+EFS is **expected** to differ: the Samsung RIL writes it during normal operation (nv data, logs,
+time stamps), so an EFS diff alone is not an alarm. Alarm only if the IMEI is gone (`*#06#`),
+files under EFS are missing, or another OS loses its modem afterwards; then restore the P1.2 EFS
+backup from TWRP. PERSISTENT and STEADY should be unchanged unless setup wrote the FRP block.
 
 ---
 
@@ -265,8 +307,13 @@ rebuilt at 8 GiB **before** the MBR changes.
 
 Type 0x83 keeps vold away (vold only mounts FAT/NTFS/exFAT MBR types). Steps (TWRP, card store
 backed up first with `dd if=/dev/block/mmcblk0p2 bs=4M count=<used>`):
-1. `sbstore2.py list` of the pulled card store: all entries must end below 8 GiB.
-2. Host: `sbstore2.py build card-store-8g.img --capacity 2097152 --import <pulled store>`.
+1. `tools/store/store-pull.sh build/store/card-store-live.img sd`, then `sbstore2.py list` it: all
+   entries must end below 8 GiB.
+2. Host: `sbstore2.py build card-store-8g.img --capacity 2097152 --import build/store/card-store-live.img`.
+   From now on **every** card store build must pass `--capacity 2097152`: `sbstore2.py --medium sd`
+   hard-codes the old p2 size (8389120 blocks), and store-flash-sd.sh would refuse such a build
+   (capacity must equal the partition). Update `MEDIA['sd']` in sbstore2.py to 2097152 once the new
+   MBR is on the card (not done here, the old layout is still live).
 3. TWRP: write the new MBR with `sfdisk` (TWRP has it **[unconf]**; else write the 512-byte MBR +
    EBRs built on the host with Python and `dd`), `blockdev --rereadpt`, check `/proc/partitions`.
 4. `tools/store/store-flash-sd.sh card-store-8g.img`; menu → Engineer → OS store: card store opens.
@@ -287,9 +334,21 @@ backed up first with `dd if=/dev/block/mmcblk0p2 bs=4M count=<used>`):
    Do it with `debugfs -w` (`rm` + `write` + `ea_set security.selinux`), then compare every other
    file's xattr with the original (the sed lesson from NOTES 2026-10-27). Add starbite-log.rc/.sh
    too (logs land on p8).
-4. Ramdisk: `tools/android/ramdisk-fstab.py put ramdisk-23.2 a16card.ramdisk fstab.samsungexynos9810=tools/android/fstab.card-a16`.
+4. Ramdisk: list the 23.2 first-stage ramdisk first, because 23.2 has no /metadata (its ODM goes
+   to /odm) and fstab.card-a16 has a `first_stage_mount` /metadata line, which needs the mount
+   point in the ramdisk:
+   ```
+   python3 tools/android/ramdisk-fstab.py list ramdisk-23.2        # is there a 'metadata' directory?
+   python3 tools/android/ramdisk-fstab.py put ramdisk-23.2 a16card-1.ramdisk fstab.samsungexynos9810=tools/android/fstab.card-a16
+   python3 tools/android/ramdisk-fstab.py mkdir a16card-1.ramdisk a16card.ramdisk metadata   # only if it was missing
+   ```
+   (`put` replaces existing members only; `mkdir`/`add` append new ones.) If the fstab name in
+   23.2's ramdisk differs, `put` refuses with the missing name: use the name `list` shows.
 5. Store (UFS): add `a16.kernel` (23.2 kernel), `a16card.ramdisk`, `a16card.cmdline`
-   (`androidboot.init_fatal_reboot_target=recovery printk.devkmsg=on`), plus the catalog entry below.
+   (`androidboot.init_fatal_reboot_target=recovery printk.devkmsg=on`), plus the catalog entry below,
+   the same way as H1: `store-pull.sh` a fresh live store, `cp tools/store/catalog.toml
+   build/store/catalog-a16.toml`, append the a16-card `[[entry]]`, build with `--import` the pull
+   and `--catalog build/store/catalog-a16.toml`, `diff` the two listings, then store-flash.sh.
 6. Card writes from TWRP with sha256 read-back per partition: p5 ← system.img, p6 ← vendor copy,
    p7 ← odm.img, `mke2fs -t ext4 -b 4096 -L metadata /dev/block/mmcblk0p8`,
    `mkfs.f2fs -g android -O encrypt,quota,project_quota,extra_attr,casefold -C utf8 -l data /dev/block/mmcblk0p9`
@@ -297,7 +356,8 @@ backed up first with `dd if=/dev/block/mmcblk0p2 bs=4M count=<used>`):
 
 ### 5.3 Test G1, then G2
 - G1: menu → Engineer → Start an OS → "Android 16 (card)". Same outcome table and
-  `collect-logs.sh` as section 3, plus `mount -o ro /dev/block/mmcblk0p8` for its /metadata logs.
+  `collect-logs.sh` as section 3, plus `mount -t ext4 -o ro,noload /dev/block/mmcblk0p8` for its
+  /metadata logs (p8 is 64 MiB: starbite-log.sh prunes old boots below 32 MiB free).
   First boot from a 22.6 MB/s card: allow 15 minutes.
 - G2: 7z-extract the GSI in lima, `simg2img` if sparse, `e2fsck -f` + `resize2fs` to 4.5 GiB, write
   p5, re-make p9 (mkfs.f2fs), boot the same entry. Expected trouble spots: VINTF/HAL mismatches

@@ -47,7 +47,14 @@ tools/woa/build-shell-uefi.sh            # RAM stage 0 (bank 0, 711 MiB); "... 2
 
 It runs in lima: edk2 ~/work/edk2 @2938b830 + patches-edk2, its own output directory
 `Build/Star2LteShell` (so `build-uefi.sh` output is untouched). It refuses to run while another edk2
-build is running there. Outputs are in `build/woa/shell/`:
+build is running there.
+
+**Shared-tree hazard:** like `build-uefi.sh`, it resets lima's `~/work/edk2` with
+`git checkout -- .` before applying `tools/woa/patches-edk2`. That throws away any uncommitted edk2
+edits another workflow has there; the pgrep guard only catches builds that are running. The script
+now saves the tracked diff to `~/work/edk2-discarded-<date>.diff` (in lima) before the reset, but
+untracked files are not saved, and `build-uefi.sh` has no such safeguard: check with whoever else
+uses `~/work/edk2` before building, and commit or stash edk2 work you want to keep. Outputs are in `build/woa/shell/`:
 
 | File | sha256 |
 |---|---|
@@ -56,7 +63,8 @@ build is running there. Outputs are in `build/woa/shell/`:
 | `Shell-full.efi` (edk2 Shell, 1139712 B) | `e9cc4a8e2d5363e07e7429e05771ba0a93f05f819b892ddd611e08ecc1c88aa6` |
 | `bootshim.bin` | `46c61695ab8c5fb42f23594d35def338f14a8eb9cbe038469853edeca74530dd` |
 
-The build checks the FD size, the ARMd magic, and that the Shell file is listed in FVMAIN. The Shell
+The build checks the FD size, the ARMd magic, and that FVMAIN.inf lists the Shell file (GUID
+7C04A583), `Star2LteKeysDxe` (the only input device) and `DevicePathDxe`. The Shell
 binary is reproducible from edk2. The FD includes a build timestamp, so its sha256 changes with each build.
 
 ## Proposed catalog entry (not added: catalog.toml belongs to the menu work)
@@ -75,22 +83,66 @@ root = "-"
 
 ## Test on the phone (when it is free)
 
-1. Store: `python3 tools/store/sbstore2.py build build/store/ufs-store-shell.img --medium ufs
-   --catalog <catalog with the entry above> --import build/store/ufs-store.img
-   uefishell.uefi=build/woa/shell/uefishell.uefi`, then from TWRP
-   `tools/store/store-flash.sh build/store/ufs-store-shell.img` (keeps the settings block and verifies
-   by SHA-256). The rest of the store is unchanged.
-2. In the menu pick **UEFI Shell**. Expected: "LOADING UEFI", then the woa UEFI text, then a cleared
+Key combos (no keyboard): **forced reset** = hold Volume Down + Power about 7 s until the screen
+goes off; **TWRP** = from a forced reset (or from off), let go of Volume Down the moment the screen
+goes off and hold Volume Up + Bixby + Power until the TWRP logo. A plain reset (forced, `reset`,
+or the shell's 10 s auto-reset) goes through S-Boot back to the Starbite menu, not to TWRP.
+
+1. Store, built from a **fresh pull of the phone's store**, never from the Mac copy
+   `build/store/ufs-store.img` (other workflows flash the store; store-flash.sh replaces the whole
+   store area, so a stale import silently rolls their entries back). In TWRP, in one sitting:
+   ```
+   tools/store/store-pull.sh build/store/ufs-store-live.img     # read-only; lists, CRC-checks, compares the catalog
+   cp tools/store/catalog.toml build/store/catalog-shell.toml    # only if store-pull says the live catalog == catalog.toml
+   cat >> build/store/catalog-shell.toml <<'EOF'
+
+   [[entry]]
+   key = "uefishell"
+   name = "UEFI Shell"
+   version = "EDK2 · Shell 2.2"
+   category = "microsoft"
+   method = "uefi"
+   tag = "lab"
+   files = ["uefishell.uefi"]
+   root = "-"
+   EOF
+   python3 tools/store/sbstore2.py build build/store/ufs-store-shell.img --medium ufs \
+       --catalog build/store/catalog-shell.toml --import build/store/ufs-store-live.img \
+       uefishell.uefi=build/woa/shell/uefishell.uefi
+   diff <(python3 tools/store/sbstore2.py list build/store/ufs-store-live.img) \
+        <(python3 tools/store/sbstore2.py list build/store/ufs-store-shell.img)
+   tools/store/store-flash.sh build/store/ufs-store-shell.img
+   ```
+   The diff must show only the changed `catalog` line and the added `uefishell.uefi`; nothing else
+   removed or changed. If store-pull.sh warns that the live catalog differs from catalog.toml, find
+   the TOML the live catalog was built from (ask whoever flashed it) and append the entry to a copy
+   of that instead. store-flash.sh keeps the settings block and verifies by SHA-256. (A dry run with
+   catalog.toml + this entry packs 10 entries, 82.4 MiB of 721024 blocks.)
+2. `adb reboot` from TWRP; in the menu pick **UEFI Shell**. Expected: "LOADING UEFI", then the woa UEFI text, then a cleared
    screen with the Starbite key hint line, the Shell banner and the mapping table (all LU0 partitions
    as BLKx, WINESP as FS0), the 5 s startup countdown, and then `Shell>`.
+   During the 5 s countdown any Volume key sends ESC first, which skips `startup.nsh`; that is
+   harmless (none exists yet).
 3. Press Volume Down: `ver` appears on the prompt line. Press Power to run it. Step through to
-   `acpiview -s APIC` (the MADT our source publishes) and `memmap -b`.
-4. Run `reset` (last palette entry) to get back to the menu.
-5. Read the ring afterwards from TWRP: `adb exec-out cat /sys/fs/pstore/pmsg-ramoops-0`. Look for
+   `acpiview -s APIC` (the MADT our source publishes) and `memmap -b`. Mind **Volume Up**: from an
+   empty palette it starts at the *last* entry, which is `reset`, so Volume Up first and then Power
+   resets the phone. Volume Up later steps backwards through the list (wrapping to `reset` again
+   before `ver`). Always read the prompt line before pressing Power.
+4. Run `reset` (last palette entry: one Volume Up from a fresh prompt, then Power) to get back to
+   the menu.
+5. Read the ring afterwards from TWRP: in the menu after the reset, do a forced reset and go to
+   TWRP with the key combo above (the ring survives a warm reset, and TWRP's kernel reads it before
+   reusing it, so do not boot anything else in between), then
+   `adb exec-out cat /sys/fs/pstore/pmsg-ramoops-0`. Look for
    `=KEYCON n=01` (the keys console registered), `=SHELL run=00 load=S0000`, and on exit
    `=SHELLRET`. "Star2LteKeys: installed" shows in the DEBUG mirror.
 
-If the shell starts but the keys do nothing: `=KEYCON n=00` means the driver failed. The DEBUG line
+If the shell never comes up, it prints "UEFI Shell could not be started" and resets to the menu
+after 10 s. On a hang (frozen screen, no reset after about a minute) the only way out is the forced
+reset, then TWRP for the ring as in step 5.
+
+If the shell starts but the keys do nothing (so `reset` cannot be typed either): forced reset, then
+TWRP. `=KEYCON n=00` means the driver failed. The DEBUG line
 then gives the GCD status. An `X ... FAR 14050024` exception would mean the ALIVE page mapping did
 not take. If nothing appears after the UEFI text: compare with W2's src12 ring. The only BDS change
 is that `Star2LteBootShell` runs right after the UFS connect.

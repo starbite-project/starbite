@@ -26,13 +26,19 @@ and the ISO's `boot.wim` are most likely **not** at .7582. Three outcomes, in te
 - **A. Base image as is.** The release DXE contains a module named `Winpe22621RuntimeFrequency`
   (build/woa/relmods): the woa firmware has a WinPE-22621 timer path, so a base-22621 WinPE may just
   work. Check: the ring shows `=NTPATCH n=..` and `=EBSOK` like a Windows boot.
-- **B. Transplant.** `starbite-winpe.cmd transplant` copies this Windows' own winload.efi,
-  ntoskrnl.exe and hal.dll (22621.7582) into the image. The kernel then matches the firmware. The
-  remaining WinPE binaries stay at the base CU (same 22621 branch; ci.dll is the most likely
-  mismatch).
-- **C. A matching image.** Re-run the UUP converter with `LCUwinre=1` and `UpdtBootFiles=1`. This
-  needs DISM, so it runs in Windows: on the phone (slow, but possible) or in a temporary VM (about
-  20 GB, not now: the Mac has 12 GB free).
+- **B. Transplant (low probability).** `starbite-winpe.cmd transplant` copies this Windows' own
+  winload.efi, ntoskrnl.exe and hal.dll (22621.7582) into the image. The kernel then matches the
+  firmware, but everything else stays at the base CU: ntdll.dll, ci.dll, the boot drivers and the
+  rest of early user mode. A 7582 kernel next to an older ntdll/ci.dll/driver set is likely to
+  bugcheck at boot or fail in early user mode (smss/winlogon), so B is a cheap experiment to try
+  once, not a fallback to count on.
+- **C. A matching image (the realistic route).** Re-run the UUP converter with `LCUwinre=1` and
+  `UpdtBootFiles=1`, so DISM applies the same cumulative update to WinRE / boot.wim, or obtain any
+  WinPE/WinRE image that is already at **22621.7582** (versions.txt confirms it). This needs DISM,
+  so it runs in Windows: on the phone (slow, but possible) or in a temporary VM (about 20 GB, not
+  now: the Mac has 12 GB free).
+
+If A fails, plan on C (or a matching .7582 image); treat B only as a quick check on the way.
 
 ## Route 1 (primary): WinRE serviced on the phone
 
@@ -54,11 +60,18 @@ entry (no 0x23000008 element), so WinRE is currently unused.
    WinPE". The loader uses device/osdevice `ramdisk=[C:]\Starbite\WinPE\boot.wim,{options}`, path
    `\Windows\System32\Boot\winload.efi`, `winpe yes`, `detecthal yes`, and the same platform settings
    as our Windows 11 entry (testsigning, numproc 4, nx OptIn, hypervisorlaunchtype off,
-   bootstatuspolicy IgnoreAllFailures). It is added last in displayorder. **The default and the
-   Windows 11 entry are not touched.**
-2. If versions.txt shows the image is not at 22621.7582: try A first, then
-   `starbite-winpe.cmd transplant` (B).
-3. `starbite-winpe.cmd once` sets `bcdedit /bootsequence` to the WinPE entry for one boot. Restart
+   bootstatuspolicy IgnoreAllFailures). It is **not** added to `{bootmgr}` displayorder: with two
+   entries there, bootmgr may show its text boot menu for the BCD timeout (30 s by default) on
+   every ordinary Windows 11 boot, with no keyboard to answer it, while the release firmware's SoC
+   watchdog (about 80 s, armed before bootmgr, disarmed only by Windows' UFS driver) keeps
+   running, so a menu wait could turn normal boots into watchdog resets. **The default, the boot
+   order (displayorder) and the Windows 11 entry are not touched**; the WinPE entry is reachable
+   only through `once`.
+2. If versions.txt shows the image is not at 22621.7582: try A first. Then the realistic next step
+   is C (a matching 22621.7582 image); `starbite-winpe.cmd transplant` (B) is a low-probability
+   quick try.
+3. `starbite-winpe.cmd once` sets `bcdedit /bootsequence` to the WinPE entry for one boot
+   (bootsequence works for an entry outside displayorder and does not show the menu). Restart
    (the restart goes through PSCI reset, S-Boot and our menu), then pick **Windows 11**. Bootmgr
    then takes the one-shot sequence into WinPE.
 4. `starbite-winpe.cmd remove` undoes everything (both BCD objects and C:\Starbite\WinPE).
@@ -137,7 +150,8 @@ root = "ufs:WINDOWS \\Starbite\\WinPE\\boot.wim"
    WinRE's "Choose an option". Touch should work (S6SY761 is in the image).
 3. If it resets about 80 s in: the UFS driver did not load (check the starbite-winpe.log Add-Driver
    lines, or the latches `7F40` WATL and RWD1 in the next menu boot's ring). If it stops at the logo
-   with no reset: the build-match rule. Run `transplant`, then go to C.
+   with no reset: the build-match rule. Go to C (a matching .7582 image); `transplant` (B) may be
+   tried once first but will most likely bugcheck or stop in early user mode.
 4. Leave WinRE with "Continue" (into Windows) or "Turn off".
 5. Only after 2 works: write Star2LteBcdDefaultDxe and the winpe.uefi store entry.
 

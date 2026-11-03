@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Pull and decode the herolte persistent console log (patch 0206) via TWRP.
 
-  starlte-log-pull.py ADB OUT.txt
+  starlte-log-pull.py ADB OUT.txt [--part NAME]
 
-The log is the last 4 MiB + 4 KiB of USERDATA: block 0 is the header
+The log is the last 4 MiB + 4 KiB of the partition the kernel booted from with ufsroot=NAME
+(default USERDATA, the iOS 26 root; --part IOS14 for an iOS 14 userland boot with
+ufsroot=IOS14). Only the UFS root driver writes it, and only for rd=ufsroot0 with a writable
+root: a RAM-disk boot (rd=md0, e.g. the iOS 14 kernel test) writes no log at all, and this tool
+would then return an older boot's log. Check the flush number against the last pull.
+Block 0 is the header
 ("HEROLOG1", version, ring size, total bytes, flush sequence), then the ring.
 The raw area is kept next to OUT as OUT.bin. Both may hold device
 identifiers and userland messages; keep them out of git.
@@ -13,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-DEV = '/dev/block/by-name/USERDATA'
+DEV = '/dev/block/by-name/{}'
 BLOCK = 4096
 RING = 4 << 20
 
@@ -26,12 +31,22 @@ def adb(tool, *args):
 
 
 def main():
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    part = 'USERDATA'
+    if '--part' in args:
+        i = args.index('--part')
+        if i + 1 >= len(args):
+            raise SystemExit(__doc__)
+        part = args[i + 1]
+        del args[i:i + 2]
+    if len(args) != 2 or not part.isalnum():
         raise SystemExit(__doc__)
-    tool, out = sys.argv[1], Path(sys.argv[2])
-    size = int(adb(tool, 'shell', f'blockdev --getsize64 {DEV}').strip())
+    tool, out = args[0], Path(args[1])
+    dev = DEV.format(part)
+    print(f'reading the log tail of {dev}')
+    size = int(adb(tool, 'shell', f'blockdev --getsize64 {dev}').strip())
     first = size // BLOCK - (1 + RING // BLOCK)
-    adb(tool, 'shell', f'dd if={DEV} of=/tmp/herolog.bin bs={BLOCK} skip={first} '
+    adb(tool, 'shell', f'dd if={dev} of=/tmp/herolog.bin bs={BLOCK} skip={first} '
         f'count={1 + RING // BLOCK} 2>/dev/null')
     raw = out.with_suffix('.bin')
     adb(tool, 'pull', '/tmp/herolog.bin', str(raw))

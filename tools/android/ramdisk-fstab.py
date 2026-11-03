@@ -4,10 +4,13 @@
   ramdisk-fstab.py list RAMDISK
   ramdisk-fstab.py cat RAMDISK NAME
   ramdisk-fstab.py put RAMDISK OUT NAME=FILE [NAME=FILE ...]
+  ramdisk-fstab.py add RAMDISK OUT NAME=FILE [NAME=FILE ...]   (new regular files, 0644 root:root)
+  ramdisk-fstab.py mkdir RAMDISK OUT NAME [NAME ...]           (new directories, 0755 root:root)
 
 Used for docs/ANDROID-PLAN.md: a GSI or card-booted Android gets the same first-stage init as its
 vendor's boot.img, with only fstab.samsungexynos9810 replaced (system/vendor/odm/metadata on the
-microSD). Every other member keeps its mode, uid/gid, mtime and data; replaced members keep their
+microSD). 'add' and 'mkdir' append new members before the trailer (for example 'metadata' when a
+ramdisk lacks the first_stage_mount /metadata mount point); 'list' the ramdisk first. Every other member keeps its mode, uid/gid, mtime and data; replaced members keep their
 header fields except the size (and the input's hex case). The output is gzip -9 when the input
 was gzip (the 4.9 kernel has CONFIG_RD_GZIP). Nothing here touches a device.
 """
@@ -93,6 +96,35 @@ def main(argv):
             sys.exit(f'not in the ramdisk (only existing members can be replaced): {sorted(missing)}')
         upper = any(c in b'ABCDEF' for c in blob[6:110])
         cpio = emit(new, tail, upper)
+        if parse(cpio)[0] is None:
+            sys.exit('re-parse failed')
+        Path(out).write_bytes(gzip.compress(cpio, 9, mtime=0) if gz else cpio)
+    elif cmd in ('add', 'mkdir'):
+        if len(argv) < 5:
+            sys.exit(__doc__)
+        out = argv[3]
+        names = {name for name, _, _ in entries}
+        body, trailer = entries[:-1], entries[-1]
+        ino = max(h['ino'] for _, h, _ in entries) + 1
+        for a in argv[4:]:
+            if cmd == 'add':
+                name, src = a.split('=', 1)
+                mode, nlink, data = 0o100644, 1, Path(src).read_bytes()
+            else:
+                name, mode, nlink, data = a.rstrip('/'), 0o040755, 2, b''
+            name = name.lstrip('/')
+            if name in names:
+                sys.exit(f'{name}: already in the ramdisk (use put to replace a file)')
+            parent = name.rsplit('/', 1)[0] if '/' in name else None
+            if parent and parent not in names:
+                sys.exit(f'{name}: parent directory {parent} is not in the ramdisk (mkdir it first)')
+            h = dict(trailer[1], ino=ino, mode=mode, uid=0, gid=0, nlink=nlink, mtime=0,
+                     devmajor=0, devminor=0, rdevmajor=0, rdevminor=0, check=0)
+            body.append((name, h, data))
+            names.add(name)
+            ino += 1
+        upper = any(c in b'ABCDEF' for c in blob[6:110])
+        cpio = emit(body + [trailer], tail, upper)
         if parse(cpio)[0] is None:
             sys.exit('re-parse failed')
         Path(out).write_bytes(gzip.compress(cpio, 9, mtime=0) if gz else cpio)

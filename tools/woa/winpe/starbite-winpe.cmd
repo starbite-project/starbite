@@ -6,13 +6,17 @@ rem
 rem    starbite-winpe.cmd re              WinRE (C:\Windows\System32\Recovery\Winre.wim)
 rem    starbite-winpe.cmd pe D:\boot.wim  any WinPE/WinRE WIM (index 1), e.g. an ISO's boot.wim
 rem    starbite-winpe.cmd transplant      after re/pe: put THIS Windows' winload/ntoskrnl/hal
-rem                                       into the image (firmware build match, plan step B)
+rem                                       into the image (plan step B: a low-probability
+rem                                       experiment; C, a matching 22621.7582 image, is the real fix)
 rem    starbite-winpe.cmd once            boot the WinPE entry on the next restart only
 rem    starbite-winpe.cmd remove          delete the entry and C:\Starbite\WinPE
 rem
 rem  What it writes (nothing else): C:\Starbite\WinPE\{boot.wim,boot.sdi,versions.txt},
 rem  a mount dir C:\Starbite\mnt (removed at the end), and two NEW BCD objects with
-rem  fixed ids. The Windows 11 entry, the BCD default and the boot order stay as they are.
+rem  fixed ids. The Windows 11 entry, the BCD default and the boot order (displayorder)
+rem  stay as they are: the WinPE entry is NOT added to displayorder, so bootmgr never shows its
+rem  boot menu (no keyboard here, and the firmware's ~80 s watchdog runs until Windows' UFS
+rem  driver disarms it). It is reached only through the one-shot bootsequence ("once").
 rem  Windows (DISM, bcdedit, reagentc) does all image servicing: ADK WinPE tools
 rem  cannot run on macOS, but this Windows can.
 rem ===========================================================================
@@ -132,7 +136,9 @@ bcdedit /set %PE% nx OptIn
 bcdedit /set %PE% hypervisorlaunchtype off
 bcdedit /set %PE% bootstatuspolicy IgnoreAllFailures
 bcdedit /set %PE% bootmenupolicy standard
-bcdedit /displayorder %PE% /addlast
+rem Deliberately not in {bootmgr} displayorder: a second entry there can make bootmgr show its
+rem text menu for the BCD timeout on every normal boot. "once" uses /bootsequence, which works
+rem for an entry outside displayorder.
 bcdedit /enum %PE%
 echo.
 echo Done. Boot it once with: starbite-winpe.cmd once  (then restart; pick Windows 11 in the

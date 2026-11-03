@@ -17,6 +17,9 @@
 # Output (build/woa/shell/): Star2LteShell.fd, Shell-full.efi, bootshim.bin and
 # uefishell.uefi = bootshim + FD, the store entry (method uefi, type uefi).
 # Nothing here touches the phone.
+# Shared lima tree: the build resets ~/work/edk2 with 'git checkout -- .' (as build-uefi.sh does),
+# which discards uncommitted edk2 edits of any other workflow. The pgrep guard only covers running
+# builds, so the tracked diff is saved first to ~/work/edk2-discarded-<date>.diff when it is not empty.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 stage=${1:-0}
@@ -40,6 +43,11 @@ limactl shell starbite -- bash -c "
     if pgrep -f '[b]uild[.]py|[G]enFds' >/dev/null; then echo 'another edk2 build is running in lima'; exit 1; fi
     cd ~/work/edk2
     [ \"\$(git rev-parse --short=8 HEAD)\" = 2938b830 ] || { echo 'edk2 is not at 2938b830'; exit 1; }
+    if ! git diff --quiet; then
+        d=~/work/edk2-discarded-\$(date +%Y%m%d-%H%M%S).diff
+        git diff > \"\$d\"
+        echo \"edk2 tree diff (possibly only the last build's patches-edk2) saved to \$d before git checkout -- .\"
+    fi
     git checkout -q -- .
     for p in '$PWD'/tools/woa/patches-edk2/*.patch; do [ -f \"\$p\" ] && git apply \"\$p\"; done
     export WORKSPACE=\$PWD PACKAGES_PATH=\$PWD:'$PWD/$src' CLANG_BIN=/usr/bin/
@@ -65,8 +73,11 @@ limactl shell starbite -- cat /tmp/shell-bootshim.bin </dev/null > "$out/bootshi
 cat "$out/bootshim.bin" "$out/Star2LteShell.fd" > "$out/uefishell.uefi"
 # The loader checks the arm64 Image magic "ARMd" at +56 (xnu_boot.c boot_uefi).
 [ "$(dd if="$out/uefishell.uefi" bs=1 skip=56 count=4 2>/dev/null)" = ARMd ] || { echo "no ARMd magic" >&2; exit 1; }
-# The shell must be inside the (compressed) DXE volume: check the build report.
-limactl shell starbite -- bash -lc "grep -c 7C04A583 ~/work/edk2/Build/Star2LteShell/DEBUG_CLANGPDB/FV/FVMAIN.inf" </dev/null | grep -q '^[1-9]' ||
-    { echo "Shell file missing from FVMAIN" >&2; exit 1; }
+# The shell and the modules it needs must be inside the (compressed) DXE volume: check the build
+# report for the Shell file GUID, the keys driver (the only input device) and DevicePathDxe.
+fvmain=$(limactl shell starbite -- bash -lc "cat ~/work/edk2/Build/Star2LteShell/DEBUG_CLANGPDB/FV/FVMAIN.inf" </dev/null)
+for want in 7C04A583 Star2LteKeysDxe DevicePathDxe; do
+    grep -q "$want" <<<"$fvmain" || { echo "$want missing from FVMAIN" >&2; exit 1; }
+done
 (cd "$out" && shasum -a 256 uefishell.uefi Star2LteShell.fd Shell-full.efi bootshim.bin | tee SHA256SUMS)
 ls -l "$out"
