@@ -43,6 +43,9 @@ static const char *o_fail;
 static int o_lab_pick;
 static uint64_t o_tick_us;          /* --tick-us N: every hw_ticks read costs N us (a slow phone: the
                                      * renderer reads the clock between rows, so frames cost ~ rows x N) */
+double o_slow;                      /* --slow K: every g7_frame (and g7_idle) advances the fake clock by K x
+                                     * its host time (the device: K ~ 35), so real-time springs and the
+                                     * countdown see the phone's frame times */
 static uint64_t o_tmax;             /* --tmax MS: exit when the fake clock passes it (an idle menu) */
 static struct star_settings o_set;
 static int o_set_valid = 1;
@@ -144,6 +147,7 @@ int h7_stubs_args(int argc, char **argv)
         else if (!strcmp(a, "--lab-pick") && v) { o_lab_pick = atoi(v); ++i; }
         else if (!strcmp(a, "--tmax") && v) { o_tmax = (uint64_t)atoi(v) * 1000; ++i; }
         else if (!strcmp(a, "--tick-us") && v) { o_tick_us = (uint64_t)atoi(v); ++i; }
+        else if (!strcmp(a, "--slow") && v) { o_slow = atof(v); ++i; }
         else argv[o++] = argv[i];
     }
     argv[o] = 0;
@@ -162,6 +166,7 @@ int h7_stubs_args(int argc, char **argv)
 static uint64_t clk;
 
 uint64_t stub_now_us(void) { return clk; }
+void stub_advance_us(uint64_t us) { clk += us; }
 uint64_t hw_ticks(void) { return clk += 1 + o_tick_us; }
 uint64_t hw_freq(void) { return 1000000; }
 void hw_wait_us(uint64_t us)

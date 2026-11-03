@@ -33,10 +33,23 @@ struct gsh {
     float spx, spy, sdx, sdy;       /* specular centre and 1 / (hb * 1.05 + 50) */
     int ex0, exn;                   /* column table: grid index of entry 0, entries */
     float *ex;
+    float gn;                       /* sdSq's exponent (gt is its table, gti the slot) */
+    int gti;
 };
+/* gs_prepare's inputs per (layer, slot): a shape whose inputs equal the last call's keeps its
+ * prepared entry (and its specular column table); one that only moved vertically keeps all but its
+ * centre */
+struct gkey {
+    float x, y, w, h, r, a, s, t[4];
+    float aa, soft, K, Ldx, Ldy;
+    uint32_t flags;
+    int valid;
+};
+static struct gkey GK[GS_NL][G7_MAX_SHAPES];
 static struct gsh SH[GS_NL][G7_MAX_SHAPES];
 static int NSH[GS_NL], GRID[GS_NL], NPRE[GS_NL];
 static float LIT[GS_NL], RIMK[GS_NL];
+static int OPQ[GS_NL];              /* the layer is opaque (base): al tracks 1 - M, M the multiplier of below */
 
 /* g(t) tables by exponent: most shapes have n = 2.6 (r / min half size < .72) or 2 (capsules,
  * no table); the few in between (a lens changing shape) get a slot each, reused across frames */
@@ -46,13 +59,14 @@ static int gt_used;
 
 void gs_new_frame(void) { gt_frame++; }
 
-static const float *gtable(float n)
+static const float *gtable(float n, int *slot)
 {
     float *base = (float *)TAB_GT;
     int best = -1;
     for (int i = 0; i < gt_used; i++)
         if (gt_n[i] == n) {
             gt_stamp[i] = gt_frame;
+            *slot = i;
             return base + i * (GT_N + 1);
         }
     if (gt_used < NGT)
@@ -67,6 +81,7 @@ static const float *gtable(float n)
             for (int i = 1; i < NGT; i++)
                 if (g_abs(gt_n[i] - n) < g_abs(gt_n[best] - n))
                     best = i;
+            *slot = -1;             /* (borrowed: not this n) */
             return base + best * (GT_N + 1);
         }
     }
@@ -78,6 +93,7 @@ static const float *gtable(float n)
     t[0] = 1.f;
     gt_n[best] = n;
     gt_stamp[best] = gt_frame;
+    *slot = best;
     return t;
 }
 
@@ -110,17 +126,36 @@ static void sq_params(struct gsh *s, float r)
     float k = g_smooth(.72f, .98f, mb > 0.f ? r / mb : 1.f);
     float n = g_mix(2.6f, 2.f, k);
     s->r = g_min(r * g_mix(1.18f, 1.f, k), mb);
-    s->gt = n == 2.f ? 0 : gtable(n);
+    s->gn = n;
+    s->gti = -1;
+    s->gt = n == 2.f ? 0 : gtable(n, &s->gti);
     s->eps2 = 1e-3f * g_exp2(1.f / n);
+}
+
+/* a cached entry's g(t) table: still its exponent's (another shape may have taken the slot) */
+static void gt_keep(struct gsh *s)
+{
+    if (!s->gt)
+        return;
+    if (s->gti >= 0 && gt_n[s->gti] == s->gn) {
+        gt_stamp[s->gti] = gt_frame;
+        return;
+    }
+    s->gt = gtable(s->gn, &s->gti);
 }
 
 void gs_prepare(int layer, const struct g7_shape *in, unsigned n, const struct gs_ctx *c, float zoom)
 {
     int G = layer >= GS_SOFT ? 2 : 1;
+    /* the half-resolution grid at the panel's uniforms takes the concept's own canvas scale (K 2,
+     * its canvas runs at .4625 of the panel): aa 2.5 px, the rim falloff 2.2 px, one grid step of
+     * anti-aliasing, so the bilinear upsample has no stairs */
+    float K = G == 2 && c->K < 2.f ? 2.f : c->K;
     GRID[layer] = G;
     LIT[layer] = 1.f - c->soft * .85f;
-    RIMK[layer] = g_max(2.f, c->K * 1.1f);
-    float aa = c->K * 1.25f + c->soft * 30.f;
+    RIMK[layer] = g_max(2.f, K * 1.1f);
+    OPQ[layer] = c->opaque;
+    float aa = K * 1.25f + c->soft * 30.f;
     int m = 0, lens_at = G7_MAX_SHAPES;
     for (unsigned i = 0; i < n && i < G7_MAX_SHAPES; i++)
         if (in[i].flags & G7_S_LENS) {
@@ -141,8 +176,41 @@ void gs_prepare(int layer, const struct g7_shape *in, unsigned n, const struct g
         if (p->a <= .002f || w < 1.f || h < 1.f)
             continue;
         struct gsh *s = &SH[layer][m];
+        struct gkey *k = &GK[layer][m];
         if ((int)i < lens_at)
             NPRE[layer] = m + 1;
+        /* the cache: everything but y equal -> only the centre moves; x, w and the light equal ->
+         * the specular column table stays */
+        int same = k->valid && k->w == w && k->h == h && k->r == r && k->a == p->a && k->s == p->s &&
+                   k->flags == p->flags && k->t[0] == p->tint[0] && k->t[1] == p->tint[1] && k->t[2] == p->tint[2] &&
+                   k->t[3] == p->tint[3] && k->aa == aa && k->soft == c->soft && k->K == K && k->Ldy == c->Ldy;
+        int same_ex = same && k->x == x && k->Ldx == c->Ldx;
+        if (same_ex) {
+            gt_keep(s);
+            if (k->y != y) {
+                s->cy = y + s->hby;
+                s->spy = s->cy + c->Ldy * s->hby * .6f;
+                k->y = y;
+            }
+            m++;
+            continue;
+        }
+        k->valid = 1;
+        k->x = x;
+        k->y = y;
+        k->w = w;
+        k->h = h;
+        k->r = r;
+        k->a = p->a;
+        k->s = p->s;
+        k->flags = p->flags;
+        for (int q = 0; q < 4; q++)
+            k->t[q] = p->tint[q];
+        k->aa = aa;
+        k->soft = c->soft;
+        k->K = K;
+        k->Ldx = c->Ldx;
+        k->Ldy = c->Ldy;
         s->hbx = w * .5f;
         s->hby = h * .5f;
         s->cx = x + s->hbx;
@@ -184,9 +252,9 @@ void gs_prepare(int layer, const struct g7_shape *in, unsigned n, const struct g
         s->ex0 = i0;
         s->exn = i1 > i0 ? i1 - i0 : 0;
         s->ex = (float *)TAB_EX + ((unsigned)layer * G7_MAX_SHAPES + (unsigned)m) * EX_N;
-        for (int k = 0; k < s->exn; k++) {
-            float px = ((float)(i0 + k) + .5f) * (float)G, dq = (px - s->spx) * s->sdx;
-            s->ex[k] = g_exp(-2.2f * dq * dq);
+        for (int q = 0; q < s->exn; q++) {
+            float px = ((float)(i0 + q) + .5f) * (float)G, dq = (px - s->spx) * s->sdx;
+            s->ex[q] = g_exp(-2.2f * dq * dq);
         }
         m++;
     }
@@ -396,7 +464,11 @@ struct rowc {                       /* what every pixel of one shape's row share
     const struct gsh *s;
     float py, qy, px0, alpha, aa, iaa, bez, ibez, ey, deep, k13, k8, omx, lit, rimk, Ldx, Ldy;
     int G, gx0;
+    int mop;                        /* an opaque layer: a lens keeps al = 1 - M, M its multiplier of what is
+                                     * below (the lens rule mixes it in at 1.07), so a layer drawn over
+                                     * transparent black (C, M) composites as C + M x below */
 };
+static inline float lens_al(float al, float cov, float k) { return 1.f - (1.f - al) * (1.f - cov + 1.07f * k * cov); }
 static void px_general(const struct rowc *R, int i0, int i1, float *acc, float *al, const float *rowa5,
                        const float *rowb)
 {
@@ -469,16 +541,17 @@ static void px_general(const struct rowc *R, int i0, int i1, float *acc, float *
         }
         shade_tail(col, d, nx, ny, bend, s->tr, s->tg, s->tb, s->tA, s->vib, s->milk, R->lit, R->rimk, R->Ldx, R->Ldy,
                    spec);
+        float kl = 0.f;
         if (s->lens) {
-            float k = (1.f - e) * .82f;
-            col[0] += (A[0] * 1.07f + .018f - col[0]) * k;
-            col[1] += (A[1] * 1.07f + .018f - col[1]) * k;
-            col[2] += (A[2] * 1.07f + .018f - col[2]) * k;
+            kl = (1.f - e) * .82f;
+            col[0] += (A[0] * 1.07f + .018f - col[0]) * kl;
+            col[1] += (A[1] * 1.07f + .018f - col[1]) * kl;
+            col[2] += (A[2] * 1.07f + .018f - col[2]) * kl;
         }
         A[0] += (col[0] - A[0]) * cov;
         A[1] += (col[1] - A[1]) * cov;
         A[2] += (col[2] - A[2]) * cov;
-        al[i] += cov * (1.f - al[i]);
+        al[i] = s->lens && R->mop ? lens_al(al[i], cov, kl) : al[i] + cov * (1.f - al[i]);
     }
 }
 
@@ -587,7 +660,10 @@ static void px_interior(const struct rowc *R, int i0, int i1, float *acc, float 
         }
         vst3q_f32(acc + 3 * i, A);
         float32x4_t l = vld1q_f32(al + i);
-        vst1q_f32(al + i, vfmaq_f32(l, va, vsubq_f32(one, l)));
+        if (s->lens && R->mop)      /* 1 - (1 - l)(1 - a + 1.07 x .82 a) */
+            vst1q_f32(al + i, vsubq_f32(one, vmulq_f32(vsubq_f32(one, l), vfmaq_f32(vsubq_f32(one, va), va, vdupq_n_f32(1.07f * .82f)))));
+        else
+            vst1q_f32(al + i, vfmaq_f32(l, va, vsubq_f32(one, l)));
     }
     if (i < i1)
         px_general(R, i, i1, acc, al, rowa5, rowb);
@@ -683,7 +759,10 @@ static void px_band(const struct rowc *R, int i0, int i1, float *acc, float *al,
             A.val[k] = vfmaq_f32(A.val[k], vsubq_f32(r, A.val[k]), vcov);
         }
         vst3q_f32(acc + 3 * i, A);
-        vst1q_f32(al + i, vfmaq_f32(l, vcov, vsubq_f32(one, l)));
+        if (s->lens && R->mop)
+            vst1q_f32(al + i, vsubq_f32(one, vmulq_f32(vsubq_f32(one, l), vfmaq_f32(vsubq_f32(one, vcov), vcov, vmulq_f32(vkl, k107)))));
+        else
+            vst1q_f32(al + i, vfmaq_f32(l, vcov, vsubq_f32(one, l)));
     }
     if (i < i1)
         px_general(R, i, i1, acc, al, rowa5, rowb);
@@ -789,16 +868,17 @@ static void px_side(const struct rowc *R, int i0, int i1, float *acc, float *al,
         }
         shade_tail(col, d, nx, 0.f, bend, s->tr, s->tg, s->tb, s->tA, s->vib, s->milk, R->lit, R->rimk, R->Ldx, R->Ldy,
                    spec);
+        float kl = 0.f;
         if (s->lens) {
-            float k = (1.f - e) * .82f;
-            col[0] += (A[0] * 1.07f + .018f - col[0]) * k;
-            col[1] += (A[1] * 1.07f + .018f - col[1]) * k;
-            col[2] += (A[2] * 1.07f + .018f - col[2]) * k;
+            kl = (1.f - e) * .82f;
+            col[0] += (A[0] * 1.07f + .018f - col[0]) * kl;
+            col[1] += (A[1] * 1.07f + .018f - col[1]) * kl;
+            col[2] += (A[2] * 1.07f + .018f - col[2]) * kl;
         }
         A[0] += (col[0] - A[0]) * cov;
         A[1] += (col[1] - A[1]) * cov;
         A[2] += (col[2] - A[2]) * cov;
-        al[i] += cov * (1.f - al[i]);
+        al[i] = s->lens && R->mop ? lens_al(al[i], cov, kl) : al[i] + cov * (1.f - al[i]);
     }
 }
 
@@ -891,6 +971,7 @@ void gs_row(int layer, const struct gs_ctx *c, float py, float px0, int n, float
 {
     struct rowc R;
     R.G = GRID[layer];
+    R.mop = OPQ[layer];
     R.lit = LIT[layer];
     R.rimk = RIMK[layer];
     R.Ldx = c->Ldx;
