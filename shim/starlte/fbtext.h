@@ -20,3 +20,6 @@ unsigned star_fb_row_y(unsigned row);
 /* Text rows are 60 px; 38 characters fit across the panel. */
 #define STAR_FB_COLS 38U
 void star_fb_hex(unsigned row, const char *label, uint64_t value);
+/* While on, star_fb_text*, star_fb_hex and star_fb_fill_rows draw nothing: menu v7 mutes the
+ * loader's status lines while its launch card is on the panel; fatal() unmutes. */
+void star_fb_mute(int on);

@@ -1565,10 +1565,39 @@ int star_ios_pick(void)
     return 0;
 }
 
+/* Menu v7 (menu7.c): the default when the BOOT ramdisk has its assets. It runs from S-Boot's
+ * splash (star_splash_draw left it on the panel); if it cannot start (nothing drawn), v6 gets the
+ * intro it would have had and runs, now and after every failed start. */
+void star_intro_splash(void);   /* anim.c */
+static int v7_active, v7_failed;
+
+void star_menu_progress(unsigned stage, unsigned n, const char *title, const char *detail)
+{
+    if (v7_active)
+        menu7_progress(stage, n, title, detail);
+}
+
+void star_menu_handoff(const char *detail)
+{
+    if (v7_active)
+        menu7_handoff(detail);
+}
+
 int star_menu(const struct star_info *in, char *cmdline, unsigned len)
 {
     unsigned sel = 0;
     opt_load(cmdline);
+    if (!v7_failed && menu7_ready()) {
+        int r = menu7_main(in, cmdline, len);
+        if (r >= 0) {
+            v7_active = 1;
+            return r;
+        }
+        v7_failed = 1;
+        v7_active = 0;
+        star_intro_splash();
+        star_fb_row_base(36);
+    }
     unsigned ix, iy, iw, ih;
     if (star_menu_assets() > 0 && star_sprite_rect(V6_ICON_SPRITE, &ix, &iy, &iw, &ih) && ui_init())
         return menu_v6(in, cmdline, len);

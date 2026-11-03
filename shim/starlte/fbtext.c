@@ -17,6 +17,13 @@
 #define TOP 200U
 /* First text row; star_fb_row_base() moves it below a boot splash. */
 static unsigned row_base;
+static int muted;
+
+void
+star_fb_mute(int on)
+{
+    muted = on;
+}
 
 void
 star_fb_row_base(unsigned row)
@@ -96,6 +103,8 @@ void star_fb_fill(uint32_t pixel)
 void star_fb_fill_rows(unsigned y0, unsigned y1, uint32_t pixel)
 {
     volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
+    if (muted)
+        return;
     for (unsigned y = y0; y < y1 && y < STAR_FB_HEIGHT; ++y)
         for (unsigned x = 0; x < STAR_FB_WIDTH; ++x)
             fb[y * STAR_FB_WIDTH + x] = pixel;
@@ -125,7 +134,7 @@ void star_fb_text_c(unsigned row, const char *s, uint32_t fg, uint32_t bg)
 {
     volatile uint32_t *fb = (volatile uint32_t *)STAR_FB_BASE;
     unsigned top = TOP + (row + row_base) * CELL_H + 2U * SCALE;
-    if (top + 7U * SCALE >= STAR_FB_HEIGHT) return;
+    if (muted || top + 7U * SCALE >= STAR_FB_HEIGHT) return;
     fill_row(row, bg);
     for (unsigned col = 0; s[col] && LEFT + (col + 1U) * CELL_W <= STAR_FB_WIDTH; ++col) {
         const uint8_t *g = glyph_for(s[col]);
@@ -145,6 +154,8 @@ void star_fb_hex(unsigned row, const char *label, uint64_t value)
 {
     char line[40];
     unsigned n = 0;
+    if (muted)
+        return;
     while (label[n] && n < 20) {
         line[n] = label[n];
         ++n;

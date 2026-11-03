@@ -47,6 +47,19 @@ int star_menu_ready_key(const char *key);
 int star_menu_next(void);
 void star_menu_remember(int idx);
 int star_menu_failure(const char **name, const char **why);
+/* Boot menu v7 (menu7.c, the approved concept docs/concepts/ios27-boot.html; docs/MENU7-PORT.md):
+ * the default when the BOOT ramdisk has its SB7ASSET container. menu7_ready: 1 when it does.
+ * menu7_main: as menu_v6 (entry + 1, or 0 for Download mode), or -1 when v7 cannot run (nothing
+ * drawn: v6 follows). menu7_progress / menu7_handoff: the launch card's bar and stage text while
+ * the loader loads the pick, and the last frame before the jump. */
+int menu7_ready(void);
+int menu7_main(const struct star_info *in, char *cmdline, unsigned len);
+void menu7_progress(unsigned stage, unsigned n, const char *title, const char *detail);
+void menu7_handoff(const char *detail);
+/* menu.c: forward to menu v7 while it is the active menu, else nothing (xnu_boot.c calls these at
+ * the real stages of each boot method). */
+void star_menu_progress(unsigned stage, unsigned n, const char *title, const char *detail);
+void star_menu_handoff(const char *detail);
 /* anim.c: rectangles (x, y, w, h each) of a composed screen src slide up and fade in, one after
  * another, over what the off-screen buffer holds; then src is the panel. */
 void star_reveal(const uint32_t *src, const int *rects, unsigned n);

@@ -132,6 +132,7 @@ static uintptr_t fail(volatile uint64_t *log, int64_t step, const char *why)
 static uintptr_t fatal(volatile uint64_t *log, int64_t step, const char *why)
 {
     uint64_t freq;
+    star_fb_mute(0);                /* menu v7 muted the status lines; no menu comes back now */
     if (why)
         (void)fail(log, step, why);
     star_fb_text(5, "DOWNLOAD MODE IN 30 S");
@@ -342,8 +343,11 @@ star_splash_draw(void)
             return 0;
         menu_start = start;
         menu_end = end;
-        /* S-Boot's splash -> the menu's base, animated (anim.c; plain without the MMU) */
-        star_intro_splash();
+        /* S-Boot's splash -> the menu's base, animated (anim.c; plain without the MMU). Menu v7
+         * leaves S-Boot's splash on the panel: its intro starts from it (menu.c falls back to this
+         * intro if v7 cannot run). */
+        if (!menu7_ready())
+            star_intro_splash();
         star_fb_row_base(36);
         return 1;
     }
@@ -637,6 +641,92 @@ static void line_append(char *c, unsigned cap, const char *extra)
     c[n] = 0;
 }
 
+/* Menu v7's launch card follows the real stages (menu.c forwards these while v7 is the menu):
+ * stage k of n, what is happening and a detail line ("linux.image · 31.4 MB", "0x9A3F1C07"). */
+struct pline { char b[64]; unsigned n; };
+
+static void pl_s(struct pline *p, const char *s)
+{
+    while (s && *s && p->n + 1 < sizeof(p->b))
+        p->b[p->n++] = *s++;
+    p->b[p->n] = 0;
+}
+
+static void pl_u(struct pline *p, uint64_t v)
+{
+    char d[20];
+    unsigned k = 0;
+    do {
+        d[k++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v && k < sizeof(d));
+    while (k && p->n + 1 < sizeof(p->b))
+        p->b[p->n++] = d[--k];
+    p->b[p->n] = 0;
+}
+
+static void pl_hex(struct pline *p, uint64_t v, unsigned digits)
+{
+    pl_s(p, "0x");
+    while (digits-- && p->n + 1 < sizeof(p->b)) {
+        unsigned d = (unsigned)(v >> (4 * digits)) & 15U;
+        p->b[p->n++] = (char)(d < 10 ? '0' + d : 'A' + d - 10);
+    }
+    p->b[p->n] = 0;
+}
+
+/* "31.4 MB", or "212 KB" below 1 MiB */
+static void pl_size(struct pline *p, uint64_t bytes)
+{
+    if (bytes < (1U << 20)) {
+        pl_u(p, (bytes + 512) >> 10);
+        pl_s(p, " KB");
+        return;
+    }
+    uint64_t t = (bytes * 10 + (1U << 19)) >> 20;
+    pl_u(p, t / 10);
+    pl_s(p, ".");
+    pl_u(p, t % 10);
+    pl_s(p, " MB");
+}
+
+static void stage_text(unsigned k, unsigned n, const char *title, const char *a, uint64_t size)
+{
+    struct pline p;
+    p.n = 0;
+    p.b[0] = 0;
+    pl_s(&p, a);
+    if (size) {
+        pl_s(&p, a && a[0] ? " \xc2\xb7 " : "");
+        pl_size(&p, size);
+    }
+    star_menu_progress(k, n, title, p.b);
+}
+
+static void stage_file(unsigned k, unsigned n, const char *title, const struct store_ent *e)
+{
+    stage_text(k, n, title, e->name, e->size);
+}
+
+static void stage_crc(unsigned k, unsigned n, const char *title, uint32_t crc)
+{
+    struct pline p;
+    p.n = 0;
+    pl_hex(&p, crc, 8);
+    star_menu_progress(k, n, title, p.b);
+}
+
+/* the last stage, then v7's handoff screen ("EL1 · 0x92080000") */
+static void stage_entry(unsigned k, unsigned n, const char *title, uintptr_t entry)
+{
+    struct pline p;
+    p.n = 0;
+    pl_s(&p, "EL1 \xc2\xb7 ");
+    pl_hex(&p, entry, 8);
+    star_menu_progress(k, n, title, p.b);
+    star_menu_handoff(p.b);
+}
+
 /* An arm64 Image from the store at RAM_BASE + text_offset, ending below limit: its address, or
  * 0 after fail(). *span = its size in memory. */
 static uintptr_t image_load(volatile uint64_t *log, const struct store_ent *e, uintptr_t limit,
@@ -676,6 +766,8 @@ boot_linux(volatile uint64_t *log, const struct cat_ent *e)
     int have_rd = e->file[2][0] != 0;
     if (have_rd && (!resolve(e->file[2], &rd) || rd.kind != SRC_STORE))
         return fail(log, -47, "NO INITRD IN THE STORE");
+    unsigned ns = have_rd ? 5 : 4, k = 0;
+    stage_file(k++, ns, "Loading device tree", &dtb.e);
     int r = store_load(&dtb.e, e->cmdline[0] ? EDIT_FDT : LINUX_DTB, 2UL << 20);
     if (r)
         return fail(log, -43, r == -3 ? "LINUX DTB TOO LARGE" : "LINUX DTB READ OR CRC FAILED");
@@ -691,6 +783,7 @@ boot_linux(volatile uint64_t *log, const struct cat_ent *e)
     if (em_rtc_epoch(&now))
         (void)fdt_chosen_set_u64(LINUX_DTB, "starbite,rtc-epoch", now);
     if (have_rd) {
+        stage_file(k++, ns, "Loading initramfs", &rd.e);
         r = store_load(&rd.e, OS_RD, EDIT_FDT - OS_RD);
         if (r)
             return fail(log, -49, r == -3 ? "INITRD TOO LARGE" : "INITRD READ OR CRC FAILED");
@@ -703,9 +796,12 @@ boot_linux(volatile uint64_t *log, const struct cat_ent *e)
     star_fb_text(3, rails > 0 ? "MICROSD POWER ON" : rails == 0 ? "MICROSD POWER REFUSED" : "MICROSD POWER: NO ACPM");
     log[18] = (uint64_t)l31 << 8 | l2;
     uint64_t span;
+    stage_file(k++, ns, "Reading kernel", &img.e);
     uintptr_t dst = image_load(log, &img.e, OS_RD, -44, &span);
     if (!dst)
         return 0;
+    stage_crc(k++, ns, "Verifying kernel CRC32", img.e.crc);
+    stage_entry(k, ns, "Handing off to kernel", dst);
     clean_bytes(dst, dst + span);
     clean_bytes(LINUX_DTB, LINUX_DTB + dtb_size);
     log[10] = 0x400;
@@ -743,13 +839,16 @@ boot_android(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
         cmdline[cl.e.size] = 0;
     }
     line_append(cmdline, sizeof(cmdline), e->cmdline);
+    stage_file(0, 4, "Loading ramdisk", &rd.e);
     int r = store_load(&rd.e, OS_RD, EDIT_FDT - OS_RD);
     if (r)
         return fail(log, -54, r == -3 ? "ANDROID RAMDISK TOO LARGE" : "ANDROID RAMDISK READ OR CRC FAILED");
     uint64_t span;
+    stage_file(1, 4, "Reading kernel", &img.e);
     uintptr_t dst = image_load(log, &img.e, OS_RD, -55, &span);
     if (!dst)
         return 0;
+    stage_text(2, 4, "Loading device tree", "S-Boot FDT", __builtin_bswap32(*(volatile uint32_t *)(fdt + 4)));
     uint32_t fsize = cmdline[0] ? fdt_copy_append_bootargs(fdt, EDIT_FDT, LINUX_DTB - EDIT_FDT, cmdline) : 0;
     if (!fsize) {
         uint32_t total = __builtin_bswap32(*(volatile uint32_t *)(fdt + 4));
@@ -761,6 +860,7 @@ boot_android(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
     if (!fdt_chosen_set_u64(EDIT_FDT, "linux,initrd-start", OS_RD) ||
         !fdt_chosen_set_u64(EDIT_FDT, "linux,initrd-end", OS_RD + rd.e.size))
         return fail(log, -59, "NO INITRD PROPERTIES IN FDT");
+    stage_entry(3, 4, "Handing off to kernel", dst);
     clean_bytes(dst, dst + span);
     clean_bytes(OS_RD, OS_RD + rd.e.size);
     clean_bytes(EDIT_FDT, EDIT_FDT + fsize);
@@ -786,9 +886,11 @@ boot_bare(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
     star_fb_text(1, "LOADING");
     if (!resolve(e->file[0], &s) || s.kind != SRC_STORE)
         return fail(log, -60, "NO IMAGE IN THE STORE");
+    stage_file(0, 2, "Reading image", &s.e);
     uintptr_t dst = image_load(log, &s.e, OS_RD, -61, &span);
     if (!dst)
         return 0;
+    stage_entry(1, 2, "Handing off", dst);
     clean_bytes(dst, dst + span);
     log[10] = 0x600;
     log[15] = dst;
@@ -869,6 +971,7 @@ boot_uefi(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
         return fail(log, -30, "NO WINDOWS UEFI");
     if (s.kind == SRC_STORE) {
         star_fb_text(1, "LOADING UEFI");
+        stage_file(0, 3, "Reading firmware", &s.e);
         int r = store_load(&s.e, STAGE, UEFI_FD - STAGE);
         if (r)
             return fail(log, -33, r == -3 ? "UEFI IMAGE TOO LARGE" : r == -2 ? "UEFI IMAGE CRC MISMATCH" : "UEFI IMAGE READ FAILED");
@@ -885,6 +988,7 @@ boot_uefi(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
     /* The FD lands at 0x90000000..0x90700000: the image must not be there. */
     if (img < UEFI_FD_END && img + size > UEFI_FD)
         return fail(log, -32, "UEFI IMAGE OVER ITS FD");
+    stage_text(1, 3, "Verifying image", s.kind == SRC_STORE ? "arm64 Image" : "BOOT bundle", size);
     star_fb_hex(1, "UEFI AT", img);
     /* Empty ring: everything after the marker is this UEFI run's trace. */
     ((volatile uint32_t *)PMSG_BASE)[0] = 0;
@@ -898,6 +1002,7 @@ boot_uefi(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
     zero_bytes(UEFI_LATCH_PAGE, UEFI_LATCH_END - UEFI_LATCH_PAGE);
     clean_bytes(UEFI_LATCH_PAGE, UEFI_LATCH_END);
     star_rwd1_arm();
+    stage_entry(2, 3, "Starting firmware", img);
     star_fb_restore((uint32_t)log[77]);
     log[10] = 0x200;
     log[15] = img;
@@ -1118,6 +1223,7 @@ boot_xnu(volatile uint64_t *log, const struct cat_ent *e, const char *edited)
         length = s.size;
     } else if (s.kind == SRC_STORE) {
         star_fb_text(1, "LOADING XNU");
+        stage_file(0, 4, "Reading kernelcache", &s.e);
         int r = store_load(&s.e, STAGE, STAGE_END - STAGE);
         if (r)
             return fail(log, -7, r == -3 ? "PAYLOAD TOO LARGE" : r == -2 ? "PAYLOAD CRC MISMATCH" : "PAYLOAD READ FAILED");
@@ -1127,6 +1233,8 @@ boot_xnu(volatile uint64_t *log, const struct cat_ent *e, const char *edited)
         return fail(log, -1, "NOT AN XNU PAYLOAD");
     }
     const struct payload *p = (const struct payload *)rd_start;
+    unsigned ns = s.kind == SRC_STORE ? 4 : 3, k = ns - 3;
+    stage_text(k++, ns, "Verifying image", s.kind == SRC_BOOT ? "BOOT payload" : "SWEETXNU", length);
     const char *bad = payload_bad(p, length);
     if (bad)
         return fail(log, -2, bad);
@@ -1135,7 +1243,17 @@ boot_xnu(volatile uint64_t *log, const struct cat_ent *e, const char *edited)
         cmd[i] = src[i];
     cmd[BOOT_LINE_LENGTH - 1] = 0;
     line_append(cmd, BOOT_LINE_LENGTH, e->cmdline);
-    return xnu_enter(log, p, rd_start, length, cmd);
+    {
+        struct pline pl;
+        pl.n = 0;
+        pl_u(&pl, p->nsegs);
+        pl_s(&pl, " segments");
+        star_menu_progress(k++, ns, "Copying kernel", pl.b);
+    }
+    uintptr_t entry = xnu_enter(log, p, rd_start, length, cmd);
+    if (entry)
+        stage_entry(k, ns, "Handing off to XNU", entry);
+    return entry;
 }
 
 static uintptr_t

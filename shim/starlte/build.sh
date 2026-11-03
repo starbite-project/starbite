@@ -9,13 +9,34 @@ cd "$(dirname "$0")"
 : "${CROSS:=}"   # native gcc in the aarch64 VM; set aarch64-linux-gnu- elsewhere
 mkdir -p out
 CFLAGS="-c -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie -nostdlib -fno-asynchronous-unwind-tables -fno-jump-tables -fno-tree-switch-conversion -fno-tree-loop-distribute-patterns -mgeneral-regs-only -mstrict-align -mcpu=cortex-a53 -Wall -Wextra -Werror"
+# Menu v7 (docs/MENU7-PORT.md section 2): its renderer and menu use FP/SIMD (xnu_boot.S enables it
+# for the loader and restores S-Boot's CPACR before an OS starts); every other file stays
+# general-regs-only.
+CFLAGS_V7="-c -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie -nostdlib -fno-asynchronous-unwind-tables -fno-jump-tables -fno-tree-switch-conversion -fno-tree-loop-distribute-patterns -mstrict-align -mcpu=cortex-a55 -fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror"
+# v7 is linked when all of its modules are in the tree; without them a stub keeps v6 the default.
+if [ -f glass.c ] && [ -f sb7.c ] && [ -f intro7.c ] && [ -f menu7.c ]; then
+    V7="$(ls glass*.c) menu7.c intro7.c sb7.c"
+else
+    cat > out/v7_off.c <<'V7OFF'
+#include "../menu.h"
+int menu7_ready(void) { return 0; }
+int menu7_main(const struct star_info *in, char *c, unsigned n) { (void)in; (void)c; (void)n; return -1; }
+void menu7_progress(unsigned k, unsigned n, const char *t, const char *d) { (void)k; (void)n; (void)t; (void)d; }
+void menu7_handoff(const char *d) { (void)d; }
+V7OFF
+    V7="out/v7_off.c"
+fi
 
 image() {
     name=$1; shift
     objs=""
     for src in "$@"; do
         obj="out/${name}_$(basename "$src" | tr . _).o"
-        "${CROSS}gcc" $CFLAGS "$src" -o "$obj"
+        case "$(basename "$src")" in
+        glass*.c|menu7.c|intro7.c|sb7.c) flags=$CFLAGS_V7 ;;
+        *) flags=$CFLAGS ;;
+        esac
+        "${CROSS}gcc" $flags "$src" -o "$obj"
         objs="$objs $obj"
     done
     "${CROSS}ld" -static -T image.ld --build-id=none --no-warn-rwx-segments $objs -o "out/$name.elf"
@@ -38,4 +59,4 @@ PY
 }
 
 image probe probe.S probe.c fbtext.c ../fdt.c
-image xnu_boot xnu_boot.S xnu_boot.c mmu.c anim.c menu.c menu6.c ui.c em.c em_vec.S ufs.c store.c sd.c catalog.c fbtext.c ../fdt.c
+image xnu_boot xnu_boot.S xnu_boot.c mmu.c anim.c menu.c menu6.c ui.c em.c em_vec.S ufs.c store.c sd.c catalog.c fbtext.c ../fdt.c $V7

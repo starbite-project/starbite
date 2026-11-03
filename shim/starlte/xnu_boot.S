@@ -45,6 +45,13 @@ zero_log:
     str x14, [x13, #32]
     adr x14, star_boot_stack_top
     mov sp, x14
+    /* FP/SIMD on for menu v7 (docs/MENU7-PORT.md 2.2): S-Boot's CPACR_EL1 in x22 (callee-saved, kept
+     * through the C code) and in log slot 119; it is put back before any OS is entered. */
+    mrs x22, cpacr_el1
+    str x22, [x13, #952]
+    orr x14, x22, #(3 << 20)
+    msr cpacr_el1, x14
+    isb
     mov x0, x19
     mov x1, x13
     mov x2, x20
@@ -83,6 +90,8 @@ zero_log:
     mov x1, xzr               /* arm64 Linux boot protocol: x1-x3 zero (after star_dcache_all) */
     mov x2, xzr
     mov x3, xzr
+    msr cpacr_el1, x22        /* S-Boot's FP/SIMD access: each OS sets up its own */
+    isb
     br x16
 fail:
     /* Exynos9810 PMU 0x14060000: INFORM2, INFORM3 (download), SWRESET. */

@@ -1,0 +1,208 @@
+# The concept's demo systems (docs/concepts/ios27-boot.html, P) as a boot catalog, for menu v7's
+# preview harness (docs/MENU7-PORT.md section 5): the concept's states rendered from menu7.c with
+# this catalog match the concept's own data. Keys are the concept's entry ids. Ready entries are the
+# concept's 'ready' ones: pass them to the harness as
+#   --ready ios26,win11,a17,phosh,display,touch,uart,mem
+#   --settings default=phosh,last=ios26,timeout=5
+# 'coming' entries have an empty first file; 'missing' ones name files the harness reports absent.
+#   python3 tools/store/sbstore2.py catalog tools/menu7/preview/concept-catalog.toml OUT.sbc
+
+[[entry]]
+key = "ios26"
+name = "iOS 26"
+version = "26.6.2 · XNU 12377"
+category = "apple"
+method = "xnu"
+tag = "beta"
+files = ["@boot"]
+
+[[entry]]
+key = "ios14"
+name = "iOS 14"
+version = "Port in progress"
+category = "apple"
+method = "xnu"
+files = [""]
+
+[[entry]]
+key = "ipados18"
+name = "iPadOS 18"
+version = "No image on device"
+category = "apple"
+method = "xnu"
+files = ["ipados18.xnu"]
+
+[[entry]]
+key = "tvos"
+name = "tvOS"
+version = "No image on device"
+category = "apple"
+method = "xnu"
+files = ["tvos.xnu"]
+
+[[entry]]
+key = "darwin"
+name = "Darwin"
+version = "XNU · console only"
+category = "apple"
+method = "xnu"
+files = ["darwin.xnu"]
+
+[[entry]]
+key = "ios7"
+name = "iOS 7"
+version = "Legacy · first 64-bit iOS"
+category = "apple"
+method = "xnu"
+files = ["ios7.xnu"]
+
+[[entry]]
+key = "win11"
+name = "Windows 11"
+version = "23H2 · ARM64"
+category = "microsoft"
+method = "uefi"
+tag = "experimental"
+files = ["windows.uefi|@bundle"]
+
+[[entry]]
+key = "winpe"
+name = "WinPE"
+version = "Preinstallation environment"
+category = "microsoft"
+method = "uefi"
+files = ["winpe.uefi"]
+
+[[entry]]
+key = "uefi"
+name = "UEFI Shell"
+version = "EDK II shell"
+category = "microsoft"
+method = "uefi"
+files = ["shell.uefi"]
+
+[[entry]]
+key = "a17"
+name = "Android 17"
+version = "LineageOS 24.0"
+category = "android"
+method = "android"
+tag = "experimental"
+files = ["android.kernel", "android.ramdisk", "android.cmdline"]
+
+[[entry]]
+key = "gsi"
+name = "Android GSI"
+version = "Generic system image"
+category = "android"
+method = "android"
+files = ["gsi.kernel", "gsi.ramdisk"]
+
+[[entry]]
+key = "chromeos"
+name = "ChromeOS"
+version = "ChromiumOS · arm64"
+category = "android"
+method = "linux"
+files = ["chromeos.image", "chromeos.dtb"]
+
+[[entry]]
+key = "phosh"
+name = "Ubuntu 26.04 LTS"
+version = "Phosh"
+category = "linux"
+method = "linux"
+tag = "beta"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+
+[[entry]]
+key = "gnome"
+name = "Ubuntu Desktop"
+version = "GNOME"
+category = "linux"
+method = "linux"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+
+[[entry]]
+key = "arch"
+name = "Arch Linux ARM"
+version = "aarch64"
+category = "linux"
+method = "linux"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+
+[[entry]]
+key = "pmos"
+name = "postmarketOS"
+version = "edge · samsung-starlte"
+category = "linux"
+method = "linux"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+
+[[entry]]
+key = "kali"
+name = "Kali"
+version = "NetHunter"
+category = "linux"
+method = "linux"
+files = ["linux.image", "linux.dtb", "linux.initrd"]
+
+[[entry]]
+key = "sbos"
+name = "Starbite OS"
+version = "Native shell"
+category = "starbite"
+method = "bare"
+files = [""]
+
+[[entry]]
+key = "usb"
+name = "USB Toolkit"
+version = "Install and manage images"
+category = "starbite"
+method = "bare"
+files = [""]
+
+[[entry]]
+key = "demos"
+name = "Demos"
+version = "Renderer showcases"
+category = "starbite"
+method = "bare"
+files = [""]
+
+[[entry]]
+key = "display"
+name = "Display Test"
+version = "Panel · gamma · burn-in"
+category = "lab"
+method = "bare"
+tag = "stable"
+files = ["lab-display.image"]
+
+[[entry]]
+key = "touch"
+name = "Touch & Keys"
+version = "Digitizer and buttons"
+category = "lab"
+method = "bare"
+tag = "lab"
+files = ["lab-touch.image"]
+
+[[entry]]
+key = "uart"
+name = "UART Log"
+version = "S-Boot handoff trace"
+category = "lab"
+method = "bare"
+tag = "lab"
+files = ["lab-uart.image"]
+
+[[entry]]
+key = "mem"
+name = "Memory Test"
+version = "4 GB LPDDR4X"
+category = "lab"
+method = "bare"
+tag = "lab"
+files = ["lab-mem.image"]
