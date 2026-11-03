@@ -5,7 +5,8 @@
  *   0x89000000                the BOOT ramdisk (menu-v7.sbm), as S-Boot loads it
  *   0xcc000000                the framebuffer
  *
- *   h7 --ramdisk menu-v7.sbm --list scene.dl --out out.ppm [--stats] [--check-full]
+ *   h7 --ramdisk menu-v7.sbm --list scene.dl --out out.ppm [--stats] [--check-full] [--poison]
+ *       (--poison or H7_POISON=1|a5: the v7 RAM and the framebuffer start as garbage, as on the phone)
  *       a display list (geom2dl.py): one or more frames, each drawn by g7_frame; the panel
  *       (the framebuffer) after the last one is written. --check-full draws the last frame again
  *       with G7_F_FULL and compares: the dirty-rect path must equal a full redraw.
@@ -83,6 +84,28 @@ static void map_fixed(uintptr_t a, size_t n)
     }
 }
 
+/* --poison / H7_POISON=1 (or =a5): fill the v7 RAM (0x84000000..0x88800000) and the framebuffer with
+ * garbage before anything runs, as the phone's DRAM holds at boot (the host's anonymous maps are
+ * zero, and zero premultiplied pixels / transmissions blend to nothing, which hides any read of
+ * memory v7 never wrote). The default pattern is a per-byte hash of the address (multicoloured,
+ * different in every column and row); "a5" fills 0xA5 bytes. The files' .bss needs nothing: the
+ * loader image stores it as zeros (image.ld), as on the host. */
+static int poison;
+static void poison_fill(uintptr_t a, size_t n)
+{
+    if (poison == 2) {
+        memset((void *)a, 0xa5, n);
+        return;
+    }
+    uint64_t *q = (uint64_t *)a;
+    for (size_t i = 0; i < n / 8; ++i) {
+        uint64_t x = (uint64_t)(a + 8 * i) * 0x9e3779b97f4a7c15ULL;
+        x ^= x >> 29;
+        x *= 0xbf58476d1ce4e5b9ULL;
+        q[i] = x ^ (x >> 32);
+    }
+}
+
 static size_t load_ramdisk(const char *path)
 {
     int fd = open(path, O_RDONLY);
@@ -142,6 +165,34 @@ static void frame_reset(void)
 uint32_t __real_g7_frame(const struct g7_frame *f);
 uint64_t stub_now_us(void);
 static int run_mode;
+static void write_ppm(const char *path, const uint32_t *px);
+/* H7_FBHASH=1: "FH <ms> frame|idle <hash>" (FNV-1a of the panel) after every g7_frame and every
+ * g7_idle from menu7: two runs (H7_POISON=1 against none) must print the same sequence. */
+static void fb_hash(const char *what)
+{
+    const char *e = getenv("H7_FBHASH");
+    if (!e || *e != '1')
+        return;
+    uint64_t h = 0xcbf29ce484222325ULL;
+    const uint64_t *q = (const uint64_t *)FB;
+    for (size_t i = 0; i < G7_FRAME_BYTES / 8; ++i)
+        h = (h ^ q[i]) * 0x100000001b3ULL;
+    printf("FH %.0f %s %016llx\n", stub_now_us() / 1e3, what, (unsigned long long)h);
+    const char *d = getenv("H7_FHDUMP");   /* H7_FHDUMP=<ms>: that frame's panel in fh-<ms>-<what>.ppm */
+    if (d && (long)(stub_now_us() / 1e3 + .5) == atol(d)) {
+        char nm[64];
+        snprintf(nm, sizeof nm, "fh-%ld-%s.ppm", atol(d), what);
+        write_ppm(nm, FB);
+    }
+}
+int __real_g7_idle(void);
+int __wrap_g7_idle(void)
+{
+    int r = __real_g7_idle();
+    if (run_mode)
+        fb_hash("idle");
+    return r;
+}
 extern uint64_t g7_prof[12];
 uint32_t __wrap_g7_frame(const struct g7_frame *f)
 {
@@ -254,6 +305,8 @@ uint32_t __wrap_g7_frame(const struct g7_frame *f)
             }
         }
     }
+    if (run_mode)
+        fb_hash("frame");
     if (run_mode)
         printf("T7 %.0f %.2f %u %s%s\n", stub_now_us() / 1e3,
                (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6, px,
@@ -419,6 +472,16 @@ static void parse_list(const char *path)
         draw_frame();
 }
 
+#ifdef H7_TIME
+static const char *run_out;
+static void run_exit(void)
+{
+    if (run_out)
+        write_ppm(run_out, FB);
+    run_out = 0;
+}
+#endif
+
 #ifdef H7_MENU7
 __attribute__((weak)) int h7_stubs_args(int argc, char **argv);
 #endif
@@ -437,6 +500,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--t") && i + 1 < argc) t = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--stats")) stats = 1;
         else if (!strcmp(argv[i], "--check-full")) check = 1;
+        else if (!strcmp(argv[i], "--poison")) poison = 1;
 #ifdef H7_TIME
         else if (!strcmp(argv[i], "--run")) { run_mode = 1; state = "run"; }
         else if (!strcmp(argv[i], "--again")) again = 1;
@@ -445,8 +509,33 @@ int main(int argc, char **argv)
     (void)again;
     if (!ramdisk || !out || (!list && !state))
         die("usage: h7 --ramdisk menu-v7.sbm (--list scene.dl | --state st) --out out.ppm [--stats] [--check-full]");
+    {
+        const char *pe = getenv("H7_POISON");
+        if (pe && *pe && *pe != '0')
+            poison = !strcmp(pe, "a5") ? 2 : 1;
+    }
     map_fixed(0x84000000UL + G7_HOSTOFF, 0x04800000UL);
     map_fixed((uintptr_t)FB, G7_FRAME_BYTES);
+    if (poison) {
+        /* H7_POISON_ONLY=<bits> (debugging): only some regions: 1 CANVAS, 2 SHARP, 4 BASE, 8 POOL,
+         * 16 CACHE, 32 the framebuffer; 64: the pool bytes H7_POISON_POOL=<offset>,<length> */
+        const char *po = getenv("H7_POISON_ONLY");
+        unsigned m = po ? (unsigned)strtoul(po, 0, 0) : 63U;
+        static const uintptr_t r0[5] = { G7_CANVAS, G7_SHARP, G7_BASE, G7_POOL, G7_CACHE };
+        static const uintptr_t r1[5] = { G7_SHARP, G7_BASE, G7_POOL, G7_CACHE, G7_RAM_END };
+        for (int i = 0; i < 5; i++)
+            if (m & (1U << i))
+                poison_fill(r0[i], r1[i] - r0[i]);
+        if (m & 32)
+            poison_fill((uintptr_t)FB, G7_FRAME_BYTES);
+        const char *pp = getenv("H7_POISON_POOL");
+        if ((m & 64) && pp) {
+            char *e;
+            unsigned long o = strtoul(pp, &e, 0), n = *e == ',' ? strtoul(e + 1, 0, 0) : 0;
+            if (o < G7_POOL_SIZE && n <= G7_POOL_SIZE - o)
+                poison_fill(G7_POOL + o, n & ~7UL);
+        }
+    }
     size_t rn = load_ramdisk(ramdisk);
     if (!sb7_open(RD_BASE, RD_BASE + rn))
         die("no valid SB7ASSET container in the ramdisk");
@@ -460,6 +549,8 @@ int main(int argc, char **argv)
         for (int i = 1; argv[i] && argv[i + 1]; ++i)
             if (!strcmp(argv[i], "--cmd"))
                 snprintf(cmd, sizeof cmd, "%s", argv[i + 1]);
+        run_out = out;
+        atexit(run_exit);   /* --tmax exits from the fake clock: the panel as it is then */
         int r = menu7_main(0, cmd, sizeof cmd);
         printf("menu7_main -> %d at %.0f ms\n", r, stub_now_us() / 1e3);
         if (r > 0) {
@@ -484,8 +575,7 @@ int main(int argc, char **argv)
                 printf("menu7_main again -> %d at %.0f ms\n", r, stub_now_us() / 1e3);
             }
         }
-        write_ppm(out, FB);
-        return 0;
+        return 0;   /* run_exit writes the panel */
     }
 #endif
     if (!g7_init())

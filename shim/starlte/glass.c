@@ -1811,6 +1811,13 @@ int g7_init(void)
         return 0;
     gs_load_height();
     gs_dither_init();
+    /* glb_shift_row adds JDX across the whole row and clears only what earlier rows set, so JDX
+     * starts zero (the pool holds garbage at boot: the panel's side columns took it as stripes) */
+    for (int c = 0; c < 3; c++)
+        for (int x = 0; x < GW; x++)
+            JDX[c][x] = 0;
+    jd_ia = jd_ib = 0;
+    jd_j = -1;
     inited = 1;
     first = 1;
     frozen = 0;
