@@ -4113,6 +4113,107 @@ static void log_put(unsigned slot, uint64_t v)
 
 static struct { uint32_t menu_frames, menu_worst, expand_worst, launch_worst, intro_frames, intro_worst, flags; } ST;
 
+/* One line in the pmsg ring (TWRP: /sys/fs/pstore/pmsg-ramoops-0 after the next reboot): why v7
+ * stopped or what it picked, the bake, and log slots 119..138. The log page itself is not readable
+ * from TWRP or Linux. */
+#ifndef M7_PREVIEW
+void star_pmsg(const char *s);
+static void rep_hex(char *b, unsigned *n, uint64_t v)
+{
+    int d = 15;
+    while (d > 0 && !((v >> (4 * d)) & 15))
+        --d;
+    for (; d >= 0; --d)
+        b[(*n)++] = "0123456789abcdef"[(v >> (4 * d)) & 15];
+}
+static void rep_str(char *b, unsigned *n, const char *s)
+{
+    while (*s && *n < 900)
+        b[(*n)++] = *s++;
+}
+/* Micro-benchmarks for the report (us each): a 20M-iteration subs/b.ne loop (about 1 cycle each:
+ * MHz = 20e6 / us), a 5M dependent fmadd chain, 2 MiB WB -> WB copy in ui.c's scratch (unused by
+ * v7), 2 MiB canvas -> framebuffer (the same pixels it already shows), and SCTLR_EL1. */
+static uint64_t bench_us(int k)
+{
+    uint64_t t0 = m7_now_us();
+    if (k == 0) {
+        uint64_t c = 20000000;
+        __asm__ volatile("1: subs %0, %0, #1\n b.ne 1b" : "+r"(c));
+    } else if (k == 1) {
+        float x = 1.f, m = .999f, a = .001f;
+        for (int i = 0; i < 5000000; ++i)
+            __asm__ volatile("fmadd %s0, %s0, %s1, %s2" : "+w"(x) : "w"(m), "w"(a));
+    } else if (k == 2) {
+        const volatile uint64_t *src = (const volatile uint64_t *)0x88800000UL;
+        volatile uint64_t *dst = (volatile uint64_t *)0x88a00000UL;
+        for (unsigned i = 0; i < (2U << 20) / 8; ++i)
+            dst[i] = src[i];
+    } else {
+        const volatile uint64_t *src = (const volatile uint64_t *)G7_CANVAS;
+        volatile uint64_t *dst = (volatile uint64_t *)0xcc000000UL;
+        for (unsigned i = 0; i < (2U << 20) / 8; ++i)
+            dst[i] = src[i];
+        __asm__ volatile("dsb st" ::: "memory");
+    }
+    return m7_now_us() - t0;
+}
+
+void m7_report(const char *why)
+{
+    static char b[1024];
+    unsigned n = 0;
+    struct g7_stats g;
+    g7_get_stats(&g);
+    rep_str(b, &n, "STARBITE v7: ");
+    rep_str(b, &n, why);
+    rep_str(b, &n, " flags ");
+    rep_hex(b, &n, ST.flags);
+    rep_str(b, &n, " bake_us ");
+    rep_hex(b, &n, g.bake_us);
+    for (unsigned i = 0; i < 4; ++i) {
+        rep_str(b, &n, i ? "," : " parts ");
+        rep_hex(b, &n, g.bake_part[i]);
+    }
+    rep_str(b, &n, " bench alu,fma,wbcopy,fbcopy_us ");
+    for (int k = 0; k < 4; ++k) {
+        if (k)
+            rep_str(b, &n, ",");
+        uint64_t us = bench_us(k);
+        log_put(140U + (unsigned)k, us);   /* also in the log page (readable from Linux /dev/mem) */
+        rep_hex(b, &n, us);
+    }
+    uint64_t sc;
+    __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sc));
+    log_put(144, sc);
+    /* glass.c's phase totals (glass.c PROF: 0 setup, 1 base glass, 2 base items, 3 frozen, 4 over
+     * glass, 5 over items, 6 edge, 7 present, 8 freeze, 9 idle; ticks -> ms), slots 145..156 */
+    extern uint64_t g7_prof[12];
+    rep_str(b, &n, " prof_ms");
+    for (int k = 0; k < 12; ++k) {
+        uint64_t v = k < 10 ? g7_prof[k] / 26000U : g7_prof[k];
+        log_put(145U + (unsigned)k, v);
+        rep_str(b, &n, k ? "," : " ");
+        rep_hex(b, &n, v);
+    }
+    rep_str(b, &n, " sctlr ");
+    rep_hex(b, &n, sc);
+    rep_str(b, &n, " slots");
+    for (unsigned k = 119; k <= 138 && n < 990 - 20; ++k) {
+        rep_str(b, &n, " ");
+        rep_hex(b, &n, ((volatile uint64_t *)M7_LOG)[k]);
+    }
+    b[n++] = '\n';
+    b[n] = 0;
+    star_pmsg(b);
+}
+#else
+void m7_report(const char *why)
+{
+    (void)why;
+}
+#endif
+
 static void stats_log(void)
 {
     struct g7_stats g;
@@ -4480,6 +4581,7 @@ int menu7_main(const struct star_info *in, char *cmdline, unsigned len)
         int mode = cmd_num(cmdline, "starmenu7", 1);
         if (!mode || !menu7_ready() || !g7_init()) {
             M_off = 1;
+            m7_report(!mode ? "off (starmenu7=0)" : !menu7_ready() ? "no assets (SB7ASSET/fonts)" : "g7_init failed");
             return -1;              /* nothing drawn: menu v6 runs */
         }
         g7_bake();
@@ -4491,6 +4593,7 @@ int menu7_main(const struct star_info *in, char *cmdline, unsigned len)
             ST.flags |= 16;
             stats_log();
             M_off = 1;
+            m7_report("too slow (bake over 400 ms)");
             return -1;
         }
         core_init();
@@ -4615,7 +4718,7 @@ void menu7_handoff(const char *detail)
     end_screen(EN_HANDOFF);
     phase_sync = M7_PH_END;
     sync_frames(S.now + 520);
-    phase_sync = -1;
+    phase_sync = -1;    m7_report("handoff");
 }
 
 /* ================================================================================================

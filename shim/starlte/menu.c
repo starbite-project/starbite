@@ -1590,6 +1590,7 @@ int star_menu(const struct star_info *in, char *cmdline, unsigned len)
     if (!v7_failed && menu7_ready()) {
         int r = menu7_main(in, cmdline, len);
         if (r >= 0) {
+            m7_report("pick");
             v7_active = 1;
             return r;
         }

@@ -22,6 +22,7 @@ struct star_info;
 
 /* 1 when the BOOT ramdisk holds a valid SB7 container (sb7_open). Cheap; no drawing. */
 int menu7_ready(void);
+void m7_report(const char *why);   /* pmsg diagnostics: why v7 stopped, or the pick and its timings */
 /* The menu, as menu_v6: returns the catalog entry to start + 1, or 0 for Download mode
  * (Recovery, Restart and Power Off happen inside). The first call runs the intro (intro7_run);
  * a call after star_menu_failed resumes on the error card ("Couldn't Start ..."). Returns -1 if

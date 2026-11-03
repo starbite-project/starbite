@@ -31,8 +31,10 @@ uint64_t g7_prof[12];
 #define PROF0 uint64_t prof_t = h7_ns()
 #define PROF(i) do { uint64_t prof_n = h7_ns(); g7_prof[i] += prof_n - prof_t; prof_t = prof_n; } while (0)
 #else
-#define PROF0 do { } while (0)
-#define PROF(i) do { } while (0)
+/* the device: the same phases in counter ticks (26 MHz), read by menu7's m7_report */
+uint64_t g7_prof[12];
+#define PROF0 uint64_t prof_t = hw_ticks()
+#define PROF(i) do { uint64_t prof_n = hw_ticks(); g7_prof[i] += prof_n - prof_t; prof_t = prof_n; } while (0)
 #endif
 
 float g_row_tmp[4 * GW];

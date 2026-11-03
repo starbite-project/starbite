@@ -959,6 +959,12 @@ pmsg_hex(uint64_t v)
     pmsg_put(b);
 }
 
+/* for menu7's diagnostics (menu7.c m7_report) */
+void star_pmsg(const char *s)
+{
+    pmsg_put(s);
+}
+
 static void star_rwd1_arm(void);
 
 static uintptr_t

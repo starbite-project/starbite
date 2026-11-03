@@ -54,6 +54,7 @@ int star_menu_failure(const char **name, const char **why);
  * the loader loads the pick, and the last frame before the jump. */
 int menu7_ready(void);
 int menu7_main(const struct star_info *in, char *cmdline, unsigned len);
+void m7_report(const char *why);
 void menu7_progress(unsigned stage, unsigned n, const char *title, const char *detail);
 void menu7_handoff(const char *detail);
 /* menu.c: forward to menu v7 while it is the active menu, else nothing (xnu_boot.c calls these at
