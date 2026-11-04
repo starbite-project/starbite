@@ -112,6 +112,50 @@ def meta_chunks():
     return out
 
 
+def changed_file_chunks(since):
+    """Chunks holding the data of every file or symlink changed since the last card write (ctime newer
+    than the hash list's mtime): the volume mounted read-only, `find -newer`, then each file's extents
+    from F_LOG2PHYS_EXT (device offset == image offset: the image is a bare HFSX volume). Replaces
+    hashing all 10 GiB over the ~34 MB/s USB stick; FULLHASH=1 goes back to hashing."""
+    import fcntl
+    mnt = attach_ro()
+    out, n = set(), 0
+    try:
+        found = subprocess.run(['find', mnt, '-xdev', '-newer', since, '(', '-type', 'f', '-o', '-type', 'l', ')'],
+                               text=True, capture_output=True).stdout.splitlines()
+        for path in found:
+            try:
+                fd = os.open(path, os.O_RDONLY | (0x200000 if os.path.islink(path) else 0))   # O_SYMLINK
+            except OSError:
+                continue
+            try:
+                size = os.fstat(fd).st_size
+                off = 0
+                while off < size:
+                    buf = struct.pack('<Iqq', 0, size - off, off)
+                    _, contig, dev = struct.unpack('<Iqq', fcntl.fcntl(fd, 65, buf))   # F_LOG2PHYS_EXT
+                    if contig <= 0:
+                        break
+                    out.update(range(dev // C, (dev + contig - 1) // C + 1))
+                    off += contig
+                n += 1
+            finally:
+                os.close(fd)
+    finally:
+        subprocess.run(['hdiutil', 'detach', mnt], capture_output=True)
+    print(f'changed since the last write: {n} files in chunks {sorted(out)}')
+    return out
+
+
+def attach_ro():
+    for _ in range(30):
+        if not attached_elsewhere():
+            break
+        __import__('time').sleep(1)
+    out = sh('hdiutil', 'attach', '-readonly', '-nobrowse', '-imagekey', 'diskimage-class=CRawDiskImage', IMG)
+    return [l.split('\t')[-1] for l in out.splitlines() if '/Volumes/' in l][0]
+
+
 def summary(log):
     t = open(log, errors='replace').read().splitlines()
     keys = ('panic(', 'boot task', 'exited --', 'CRASH ', '<Error>', 'SBMTLTEST', 'SBMAC', 'WindowServer',
@@ -343,14 +387,21 @@ def main():
         print(fs.stdout.strip().splitlines()[-1])
         if fs.returncode:
             sys.exit('fsck_hfs failed: not writing')
-    after = chunk_hashes()
-    need = {k for k, h in enumerate(after) if k >= len(before) or before[k] != h} | meta_chunks()
+    nchunks = os.path.getsize(IMG) // C
+    if os.environ.get('FULLHASH') == '1':
+        after = chunk_hashes()
+        need = {k for k, h in enumerate(after) if k >= len(before) or before[k] != h} | meta_chunks()
+    else:
+        need = changed_file_chunks(HASHES) | meta_chunks()
     state = f'{ROOT}/build/test-boots/cycle.state'
-    open(state, 'w').write('\n'.join(str(k) for k in range(len(after)) if k not in need) + '\n')
+    open(state, 'w').write('\n'.join(str(k) for k in range(nchunks) if k not in need) + '\n')
     print('card chunks:', sorted(need))
     subprocess.run(['python3', 'tools/macos/card-range-flash-fast.py', IMG, str(START), '--state', state],
                    check=True)
-    open(HASHES, 'w').write('\n'.join(after) + '\n')
+    if os.environ.get('FULLHASH') == '1':
+        open(HASHES, 'w').write('\n'.join(after) + '\n')
+    else:
+        os.utime(HASHES)   # the reference time for the next cycle's `find -newer`
     if a.no_boot:
         return
     r = subprocess.run(['tools/store/boot-next.sh', a.boot, str(a.wait)], text=True, capture_output=True)
