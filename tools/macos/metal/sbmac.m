@@ -90,6 +90,22 @@ static void sb_publish(void)
 		void (*add)(id) = (void (*)(id))dlsym(RTLD_DEFAULT, "MTLAddDevice");
 		if (!present && add)
 			add(dev);
+		/* every 10 s while anything changed: the frontend's counters (commits/failures, completed, pipelines,
+		 * problems, render passes, draws, full-screen passes, biggest pass KiB, dispatches, blits, last problems):
+		 * whether WindowServer composites through the Mali at all (SBMAC_STATUS=0 turns it off) */
+		if (status && !(getenv("SBMAC_STATUS") && !strcmp(getenv("SBMAC_STATUS"), "0"))) {
+			dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+				char last[400] = "", now[400];
+				for (;;) {
+					sleep(10);
+					status(now, sizeof(now));
+					if (strcmp(now, last)) {
+						sblog("metal %s", now);
+						strlcpy(last, now, sizeof(last));
+					}
+				}
+			});
+		}
 		NSUInteger count = MTLCopyAllDevices().count;
 		sblog("Metal device \"%s\" registry id %#llx %s in %.0f ms: MTLCopyAllDevices now has %lu",
 		      dev.name.UTF8String, (unsigned long long)dev.registryID,
