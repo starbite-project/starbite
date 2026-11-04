@@ -10,7 +10,7 @@ hidden from the menu, no work on it.
 
 | Category | Systems |
 |---|---|
-| **Apple** | iOS 26 (today's port) · **macOS** (on our XNU 12377 port, which is already a macOS-config kernel) |
+| **Apple** | **Stable pair (active, changed 2026-11-04):** iOS 16.5, an earlier port-based (github.com/example-project, APSL kernel / MIT loader, credits kept), booted from our store instead of its installer · **macOS Ventura** on our XNU 8796 port (an earlier port's kernel family). **Edge pair (bootable, parked):** iOS 26 · macOS 26 (XNU 12377): too heavy for the phone (one compositor shader: 79k instructions, 740 MB, minutes to compile); they get what the stable pair's work lifts for free |
 | **Google** | **Pure Android 17** (AOSP, Pixel-like; later maybe the newest One UI) · **ChromeOS** (the real thing; ChromiumOS from Google's source as the first step, never FydeOS) |
 | **Microsoft** | Windows 11 · Windows 10 ARM64 (all 8 cores) |
 | **Linux** | Ubuntu Touch · postmarketOS |
