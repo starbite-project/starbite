@@ -235,6 +235,15 @@ def main():
                     plistlib.dump(kept, f, fmt=plistlib.FMT_BINARY)
             if a.disable_list:
                 subprocess.run(['python3', '-I', 'tools/starlte-disable-jobs.py', mnt, a.disable_list], check=True)
+                import plistlib
+                want = {l.split('#')[0].strip() for l in open(a.disable_list)} - {''}
+                for pl in glob.glob(mnt + '/System/Library/LaunchDaemons/*.plist') + glob.glob(mnt + '/System/Library/LaunchAgents/*.plist'):
+                    try:
+                        if plistlib.load(open(pl, 'rb')).get('Label') in want:
+                            os.rename(pl, pl + '.starbite-off')
+                            print('renamed', pl[len(mnt):])
+                    except Exception:
+                        pass
             if a.job_set:
                 import plistlib
                 lp = mnt + '/System/Library/xpc/launchd.plist'

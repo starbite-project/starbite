@@ -40,3 +40,21 @@ adb shell 'cat /sys/fs/pstore/pmsg-ramoops-0' 2>/dev/null | LC_ALL=C tr -c '[:pr
 adb shell 'ls -l /sys/fs/pstore/' > "$out/pstore-ls.txt" 2>&1 || true
 echo "back in TWRP after ~$((t + 20)) s; log: $out/pmsg.txt ($(wc -l < "$out/pmsg.txt") lines)"
 grep -a -m3 'panic(' "$out/pmsg.txt" || true
+# sdlog=1 kernels (0370) leave the whole kernel log ring in the card's last 64 MiB: block 0
+# "SBLOG001" + ring size + write index, then the ring. Saved in order as kernel.log; the header is
+# zeroed after reading so a later boot without sdlog leaves no stale log.
+hdr=$(adb exec-out "dd if=/dev/block/mmcblk0 bs=512 skip=249868288 count=1 2>/dev/null" | head -c 24 | xxd -p | tr -d '\n')
+if [ "${hdr:0:16}" = "$(printf SBLOG001 | xxd -p)" ]; then
+    adb exec-out "dd if=/dev/block/mmcblk0 bs=512 skip=249868288 count=2049 2>/dev/null" > "$out/sdlog.raw"
+    python3 - "$out/sdlog.raw" "$out/kernel.log" <<'PY'
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+size, bufx = struct.unpack_from('<QQ', d, 8)
+ring = d[512:512 + size]
+out = (ring[bufx:] + ring[:bufx]).replace(b'\0', b'')
+open(sys.argv[2], 'wb').write(out)
+print(f'kernel log from the card: {len(out)} bytes, {out.count(b"\n")} lines -> {sys.argv[2]}')
+PY
+    adb shell "dd if=/dev/zero of=/dev/block/mmcblk0 bs=512 seek=249868288 count=1 conv=fsync 2>/dev/null"
+    rm -f "$out/sdlog.raw"
+fi
