@@ -27,6 +27,9 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <mach/mach.h>
+#include <mach-o/dyld.h>
+#include <libkern/OSCacheControl.h>
+#include <string.h>
 
 #define SBMAC_BUNDLE "/System/Library/Extensions/StarbiteMetal.bundle/Contents/MacOS/StarbiteMetal"
 
@@ -137,8 +140,57 @@ SB_INTERPOSE(sb_MTLCopyAllDevices, MTLCopyAllDevices);
 SB_INTERPOSE(sb_MTLCopyAllDevicesWithObserver, MTLCopyAllDevicesWithObserver);
 SB_INTERPOSE(sb_MTLCreateSystemDefaultDevice, MTLCreateSystemDefaultDevice);
 
+/*
+ * CA::WindowServer::IOMFBDisplay::framebuffer_pixel_format() -> 'BGRA'.
+ * WindowServer composites into the display surface CoreAnimation allocates in this format. macOS 26.5's
+ * CA picks 'b3a8'/'w4a0'/'RGhA' (wide colour, EDR) from the display's answers, SkyLight's
+ * WSCompositeDestinationCreateWithIOSurface takes only 'BGRA', 'RGBA', 'RGfA', 32, 'R10k', 'l10r', 'b64a'
+ * and aborts ("Unimplemented pixel format of %i") on anything else (WindowServer SIGABRT every ~40 s,
+ * SLCADisplay::render_update), and metal2vulkan has no 'b3a8' either. sbca does the same on iOS 26.
+ * The function's offset from QuartzCore's Mach-O header in the 26.5 (25F71) cache: 0x352ae0
+ * (__ZN2CA12WindowServer12IOMFBDisplay24framebuffer_pixel_formatEv); its first three instructions
+ * are checked before anything is written, so another build is left alone (and logged).
+ */
+#define QC_FRAMEBUFFER_PIXEL_FORMAT_26_5 0x352ae0
+static const uint32_t fb_format_was[3] = { 0xd503237fu, 0x6dbc23e9u, 0xa90157f6u };	/* pacibsp; stp d9,d8; stp x22,x21 */
+static const uint32_t fb_format_bgra[3] = { 0x528a4820u, 0x72a848e0u, 0xd65f03c0u };	/* mov w0,#'RA'; movk 'BG'; ret */
+
+static void sb_patch_pixel_format(const struct mach_header *mh)
+{
+	uint32_t *at = (uint32_t *)((uintptr_t)mh + (getenv("SBMAC_QC_FBFORMAT") ? strtoul(getenv("SBMAC_QC_FBFORMAT"), NULL, 0) :
+						      QC_FRAMEBUFFER_PIXEL_FORMAT_26_5));
+	if (at[0] == fb_format_bgra[0] && at[1] == fb_format_bgra[1])
+		return;
+	if (memcmp(at, fb_format_was, sizeof(fb_format_was)) != 0) {
+		sblog("framebuffer_pixel_format: found %#x %#x %#x, not 26.5's prologue: left alone", at[0], at[1], at[2]);
+		return;
+	}
+	vm_address_t page = (vm_address_t)at & ~(vm_address_t)(vm_page_size - 1);
+	vm_size_t len = ((vm_address_t)(at + 3) - page + vm_page_size - 1) & ~(vm_address_t)(vm_page_size - 1);
+	kern_return_t kr = vm_protect(mach_task_self(), page, len, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+	if (kr != KERN_SUCCESS) {
+		sblog("framebuffer_pixel_format: cannot make the code writable (%d)", kr);
+		return;
+	}
+	for (int i = 2; i >= 0; i--)	/* the last instruction first: never half patched */
+		at[i] = fb_format_bgra[i];
+	kr = vm_protect(mach_task_self(), page, len, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+	sys_icache_invalidate(at, sizeof(fb_format_bgra));
+	sblog("CA::WindowServer::IOMFBDisplay::framebuffer_pixel_format -> 'BGRA' (patched, r-x again: %d)", kr);
+}
+
+static void sb_image_added(const struct mach_header *mh, intptr_t slide)
+{
+	(void)slide;
+	Dl_info info;
+	if (dladdr(mh, &info) && info.dli_fname && strstr(info.dli_fname, "/QuartzCore.framework/") &&
+	    !strcmp(getprogname(), "WindowServer") && !getenv("SBMAC_NO_FBFORMAT"))
+		sb_patch_pixel_format(mh);
+}
+
 __attribute__((constructor)) static void sb_loaded(void)
 {
+	_dyld_register_func_for_add_image(sb_image_added);
 	/* CoreAnimation's render server (QuartzCore's CA::WindowServer in WindowServer) reads these at its start,
 	 * before Metal is asked: 8-bit BGRA framebuffers, no Apple compression (IOS-26-Hot, NOTES 2026-11-01). */
 	setenv("CA_DISABLE_FRAMEBUFFER_COMPRESSION", "1", 1);
