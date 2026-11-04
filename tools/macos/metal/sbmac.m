@@ -27,9 +27,12 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <mach/mach.h>
+#include <IOKit/IOKitLib.h>
+#include <objc/runtime.h>
 #include <mach-o/dyld.h>
 #include <libkern/OSCacheControl.h>
 #include <string.h>
+#include <pthread.h>
 
 #define SBMAC_BUNDLE "/System/Library/Extensions/StarbiteMetal.bundle/Contents/MacOS/StarbiteMetal"
 
@@ -54,6 +57,32 @@ static void sblog(const char *fmt, ...)
 }
 
 static id<MTLDevice> gOurs;
+static size_t (*sb_status_fn)(char *, size_t);
+
+/* every 10 s while anything changed: the frontend's counters (commits/failures, completed, pipelines, problems,
+ * render passes, draws, full-screen passes, biggest pass KiB, dispatches, blits, last problems), and once a
+ * minute the process's thread count, so a starved dispatch pool shows */
+static void *sb_status_thread(void *arg)
+{
+	(void)arg;
+	char last[400] = "", now[400];
+	for (int tick = 0;; tick++) {
+		sleep(10);
+		sb_status_fn(now, sizeof(now));
+		if (strcmp(now, last) || tick % 6 == 0) {
+			mach_msg_type_number_t n = 0;
+			thread_act_array_t list;
+			if (task_threads(mach_task_self(), &list, &n) == KERN_SUCCESS) {
+				for (mach_msg_type_number_t i = 0; i < n; i++)
+					mach_port_deallocate(mach_task_self(), list[i]);
+				vm_deallocate(mach_task_self(), (vm_address_t)list, n * sizeof(*list));
+			}
+			sblog("metal %s (threads %u)", now, n);
+			strlcpy(last, now, sizeof(last));
+		}
+	}
+	return NULL;
+}
 
 static void sb_publish(void)
 {
@@ -81,6 +110,26 @@ static void sb_publish(void)
 			return;
 		}
 		gOurs = dev;
+		/*
+		 * SkyLight's compositor is keyed by the device's acceleratorPort: WSGetDefaultMetalAccelerator takes
+		 * [MTLCopyAllDevices().firstObject acceleratorPort], SLCADisplay::is_accelerated() is "that != 0", and
+		 * CompositorMetal::new_compositor(accel) picks the device whose acceleratorPort equals it. The frontend's
+		 * device (a bare _MTLDevice subclass) answered 0: no compositor, the display never accelerated, every
+		 * frame black (26.5 boots 102422-123708). Answer a real service port: the StarbiteMali GPU's.
+		 */
+		if (!(getenv("SBMAC_ACCEL_PORT") && !strcmp(getenv("SBMAC_ACCEL_PORT"), "0"))) {
+			io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("StarbiteMali"));
+			if (svc) {
+				static io_service_t port;
+				port = svc;	/* kept: the name stays valid for the process */
+				SEL sel = sel_registerName("acceleratorPort");
+				IMP imp = imp_implementationWithBlock(^io_service_t(id me) { (void)me; return port; });
+				Method m = class_getInstanceMethod(object_getClass(dev), sel);
+				class_replaceMethod(object_getClass(dev), sel, imp, m ? method_getTypeEncoding(m) : "I16@0:8");
+				sblog("acceleratorPort -> %#x (StarbiteMali service): SkyLight's compositor key", port);
+			} else
+				sblog("acceleratorPort: no StarbiteMali service, left as it is");
+		}
 		/* MTLAddDevice asserts _deviceArray != NULL: Metal's list must exist first (this is the original
 		 * MTLCopyAllDevices: calls from inside the interposing image are not interposed). */
 		NSArray<id<MTLDevice>> *all = MTLCopyAllDevices();
@@ -94,17 +143,12 @@ static void sb_publish(void)
 		 * problems, render passes, draws, full-screen passes, biggest pass KiB, dispatches, blits, last problems):
 		 * whether WindowServer composites through the Mali at all (SBMAC_STATUS=0 turns it off) */
 		if (status && !(getenv("SBMAC_STATUS") && !strcmp(getenv("SBMAC_STATUS"), "0"))) {
-			dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-				char last[400] = "", now[400];
-				for (;;) {
-					sleep(10);
-					status(now, sizeof(now));
-					if (strcmp(now, last)) {
-						sblog("metal %s", now);
-						strlcpy(last, now, sizeof(last));
-					}
-				}
-			});
+			/* a plain pthread, not a dispatch queue: if WindowServer's work-queue threads are all blocked, a
+			 * dispatch block would never run (boot 123708 printed no status at all) */
+			sb_status_fn = status;
+			pthread_t t;
+			if (pthread_create(&t, NULL, sb_status_thread, NULL) == 0)
+				pthread_detach(t);
 		}
 		NSUInteger count = MTLCopyAllDevices().count;
 		sblog("Metal device \"%s\" registry id %#llx %s in %.0f ms: MTLCopyAllDevices now has %lu",
