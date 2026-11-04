@@ -131,6 +131,8 @@ def main():
     ap.add_argument('--link', action='append', default=[])
     ap.add_argument('--rm', action='append', default=[])
     ap.add_argument('--enable-job', action='append', default=[], help='LABEL: back into launchd.plist from launchd-disabled.plist')
+    ap.add_argument('--disable-list', help='a list file of launchd labels to take out (starlte-disable-jobs.py)')
+    ap.add_argument('--job-set', action='append', default=[], help='LABEL:KEY=JSON on a launchd.plist job')
     ap.add_argument('--job-console', action='append', default=[], help='LABEL: its stdout/stderr to /dev/console, os_log to stderr')
     ap.add_argument('--fix-frameworks', action='store_true', help='add missing Versions/Current and top-level bundle links')
     ap.add_argument('--put', action='append', default=[], help='LOCAL=ROOTPATH: a file from the Mac (owner 0:0, mode kept)')
@@ -143,7 +145,7 @@ def main():
         sys.exit(f'{HASHES} missing: hash the image as it is on the card first')
     before = open(HASHES).read().split()
     own = json.load(open(OWNERS))
-    edits = a.wrap or a.unwrap or a.fetch or a.fetch_cx or a.link or a.rm or a.put or a.fix_frameworks or a.enable_job or a.job_console
+    edits = a.wrap or a.unwrap or a.fetch or a.fetch_cx or a.link or a.rm or a.put or a.fix_frameworks or a.enable_job or a.job_console or a.disable_list or a.job_set
     if edits:
         stage = f'{W}/stage-cycle'
         if a.fetch or a.fetch_cx:
@@ -231,6 +233,22 @@ def main():
                     plistlib.dump(d, f, fmt=plistlib.FMT_BINARY)
                 with open(kp, 'wb') as f:
                     plistlib.dump(kept, f, fmt=plistlib.FMT_BINARY)
+            if a.disable_list:
+                subprocess.run(['python3', '-I', 'tools/starlte-disable-jobs.py', mnt, a.disable_list], check=True)
+            if a.job_set:
+                import plistlib
+                lp = mnt + '/System/Library/xpc/launchd.plist'
+                d = plistlib.load(open(lp, 'rb'))
+                for spec in a.job_set:
+                    label, kv = spec.split(':', 1)
+                    k, v = kv.split('=', 1)
+                    for key, job in d['LaunchDaemons'].items():
+                        if job.get('Label') == label:
+                            job[k] = json.loads(v)
+                            print('set', label, k, '=', job[k])
+                with open(lp, 'r+b') as f:
+                    f.truncate(0)
+                    plistlib.dump(d, f, fmt=plistlib.FMT_BINARY)
             if a.job_console:
                 import plistlib
                 lp = mnt + '/System/Library/xpc/launchd.plist'

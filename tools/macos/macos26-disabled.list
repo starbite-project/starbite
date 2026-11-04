@@ -1,2 +1,17 @@
 # launchd jobs taken out of the macOS 26.5 root for the first boots (tools/macos/macos26-post.sh)
 com.apple.WindowServer   # M1: sbmtltest owns the panel; WindowServer comes back for M2
+# 2026-11-04 night: crash loops / CPU hogs that flood the 16 KiB pmsg log, not needed for the desktop
+com.apple.ReportCrash
+com.apple.ReportCrash.Root
+com.apple.SubmitDiagInfo
+com.apple.PerfPowerServices
+com.apple.apsd
+com.apple.cmio.uvcassistantextension
+com.apple.contextstored
+com.apple.coreduetd
+com.apple.coresymbolicationd
+com.apple.metadata.mds
+com.apple.spindump
+com.apple.tailspind
+com.apple.AirPlayXPCHelper
+com.apple.sysextd
