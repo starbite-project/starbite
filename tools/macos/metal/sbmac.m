@@ -301,8 +301,8 @@ static void sb_patch_pixel_format(const struct mach_header *mh)
 static void *sb_mps_nil(void *me, SEL s, ...) { (void)me; (void)s; return NULL; }
 static void sb_mps_disable(void)
 {
-	if (getenv("SBMAC_MPS") && !strcmp(getenv("SBMAC_MPS"), "1"))
-		return;
+	if ((getenv("SBMAC_MPS") && !strcmp(getenv("SBMAC_MPS"), "1")) || strcmp(getprogname(), "WindowServer"))
+		return;	/* (every class walked once per MPS image: only where it matters) */
 	Class kernel = objc_getClass("MPSKernel");
 	if (!kernel)
 		return;
@@ -345,15 +345,57 @@ static id sb_avt_env_node(id me, SEL s)
 	Class node = objc_getClass("SCNNode");
 	return node ? [[node alloc] init] : nil;
 }
+/* the scene is a VFX one (boot 171117: "-[SCNNode world]: unrecognized selector"): skip installing
+ * the environment at all, the half-made object is returned as it is (its ivars zero) */
+static id sb_avt_env_init(id me, SEL s, id scene, id renderer)
+{
+	(void)s; (void)scene; (void)renderer;
+	return me;
+}
 static void sb_avatarkit_patch(void)
 {
 	Class c = objc_getClass("AVTAvatarEnvironment");
+	Method mi = c ? class_getInstanceMethod(c, sel_registerName("initAndInstallInScene:renderer:")) : NULL;
+	if (mi && method_getImplementation(mi) != (IMP)sb_avt_env_init) {
+		method_setImplementation(mi, (IMP)sb_avt_env_init);
+		sblog("AvatarKit: -[AVTAvatarEnvironment initAndInstallInScene:renderer:] -> no environment");
+	}
 	SEL sel = sel_registerName("defaultEnvironmentNode");
 	Method m = c ? class_getInstanceMethod(c, sel) : NULL;
 	if (!m || method_getImplementation(m) == (IMP)sb_avt_env_node)
 		return;
 	method_setImplementation(m, (IMP)sb_avt_env_node);
 	sblog("AvatarKit: -[AVTAvatarEnvironment defaultEnvironmentNode] -> empty SCNNode (no Memoji assets)");
+}
+
+/* objc's load-image hook runs with the runtime lock held (165716, 170418: loginwindow deadlocked on
+ * dispatch / runtime calls there and was killed): it only records the header; a plain pthread does
+ * the lookup and the patch outside every lock. */
+static const struct mach_header *volatile sb_loaded_images[4096];
+static volatile unsigned sb_loaded_count;
+static void sb_objc_image_loaded(const struct mach_header *mh)
+{
+	unsigned n = __atomic_fetch_add(&sb_loaded_count, 1, __ATOMIC_RELAXED);
+	if (n < 4096)
+		sb_loaded_images[n] = mh;
+}
+static void *sb_avatar_watch(void *arg)
+{
+	(void)arg;
+	unsigned seen = 0;
+	for (int i = 0; i < 12000; i++) {	/* 60 s */
+		unsigned n = __atomic_load_n(&sb_loaded_count, __ATOMIC_RELAXED);
+		for (; seen < n && seen < 4096; seen++) {
+			Dl_info info;
+			const struct mach_header *mh = sb_loaded_images[seen];
+			if (mh && dladdr(mh, &info) && info.dli_fname && strstr(info.dli_fname, "/AvatarKit.framework/")) {
+				sb_avatarkit_patch();
+				return NULL;
+			}
+		}
+		usleep(5000);
+	}
+	return NULL;
 }
 
 static void sb_image_added(const struct mach_header *mh, intptr_t slide)
@@ -388,4 +430,15 @@ __attribute__((constructor)) static void sb_loaded(void)
 		sb_publish();
 	sb_mps_disable();
 	sb_avatarkit_patch();
+	/* the runtime's own hook: after an image's classes are registered (AvatarKit comes in later,
+	 * with SecurityAgent's login plugin, and the dyld callback saw it before its classes) */
+	void (*add)(void (*)(const struct mach_header *)) = dlsym(RTLD_DEFAULT, "objc_addLoadImageFunc");
+	if (add && strcmp(getprogname(), "WindowServer")) {
+		pthread_t t;
+		add(sb_objc_image_loaded);
+		pthread_create(&t, NULL, sb_avatar_watch, NULL);
+		pthread_detach(t);
+	}
+	else
+		sblog("objc_addLoadImageFunc missing");
 }

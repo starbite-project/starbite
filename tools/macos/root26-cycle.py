@@ -23,6 +23,7 @@ W = '/Volumes/Untitled/starbite-macos26'
 IMG = os.environ.get('ROOTIMG', f'{W}/root-26t1.img')   # ROOTIMG: a copy on the internal SSD (the USB stick reads ~34 MB/s)
 OWNERS = f'{W}/owners-t1b.json'
 HASHES = f'{ROOT}/build/test-boots/26t1-chunks-current.txt'
+DIRTY = f'{ROOT}/build/test-boots/26t1-dirty.txt'   # root chunks the phone wrote (boot-next.sh)
 START = 182888448
 URL = ('https://updates.cdn-apple.com/2026SpringFCS/fullrestores/122-58869/'
        'DFB1CEEF-5619-4591-9924-E20DB2C8FED0/UniversalMac_26.5_25F71_Restore.ipsw')
@@ -393,11 +394,22 @@ def main():
         need = {k for k, h in enumerate(after) if k >= len(before) or before[k] != h} | meta_chunks()
     else:
         need = changed_file_chunks(HASHES) | meta_chunks()
+    # what the phone wrote since the last card write (kernel 0384 bitmap via boot-next.sh): the card's
+    # copy of those chunks is no longer the image's, whatever the image says is allocated there
+    if os.path.exists(DIRTY):
+        words = open(DIRTY).read().split()
+        if 'ALL' in words:
+            need |= set(range(nchunks))
+            print('phone writes unknown for a boot: every chunk')
+        else:
+            need |= {int(w) for w in words if int(w) < nchunks}
     state = f'{ROOT}/build/test-boots/cycle.state'
     open(state, 'w').write('\n'.join(str(k) for k in range(nchunks) if k not in need) + '\n')
     print('card chunks:', sorted(need))
     subprocess.run(['python3', 'tools/macos/card-range-flash-fast.py', IMG, str(START), '--state', state],
                    check=True)
+    if os.path.exists(DIRTY):
+        os.unlink(DIRTY)
     if os.environ.get('FULLHASH') == '1':
         open(HASHES, 'w').write('\n'.join(after) + '\n')
     else:

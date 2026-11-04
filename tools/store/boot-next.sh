@@ -55,7 +55,20 @@ ring = d[512:512 + size]
 out = (ring[bufx:] + ring[:bufx]).replace(b'\0', b'')
 open(sys.argv[2], 'wb').write(out)
 print(f'kernel log from the card: {len(out)} bytes, {out.count(b"\n")} lines -> {sys.argv[2]}')
+# kernel 0384: the root chunks this boot wrote, for root26-cycle to rewrite from the image
+dirty = 'build/test-boots/26t1-dirty.txt'
+if d[32:40] == b'SBDIRTY1':
+    words = struct.unpack_from('<4Q', d, 40)
+    chunks = [w * 64 + b for w in range(4) for b in range(64) if words[w] >> b & 1]
+    open(dirty, 'a').write(''.join(f'{c}\n' for c in chunks))
+    print(f'root chunks written by this boot: {chunks}')
+else:
+    open(dirty, 'a').write('ALL\n')
+    print('no written-chunk bitmap (kernel before 0384): the next cycle rewrites every chunk')
 PY
     adb shell "dd if=/dev/zero of=/dev/block/mmcblk0 bs=512 seek=249868288 count=1 conv=fsync 2>/dev/null"
     rm -f "$out/sdlog.raw"
+else
+    echo ALL >> build/test-boots/26t1-dirty.txt   # no log: what the boot wrote is unknown
+    echo "no kernel log on the card: the next cycle rewrites every root chunk"
 fi
