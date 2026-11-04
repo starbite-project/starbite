@@ -45,7 +45,8 @@ grep -a -m3 'panic(' "$out/pmsg.txt" || true
 # zeroed after reading so a later boot without sdlog leaves no stale log.
 hdr=$(adb exec-out "dd if=/dev/block/mmcblk0 bs=512 skip=249868288 count=1 2>/dev/null" | head -c 24 | xxd -p | tr -d '\n')
 if [ "${hdr:0:16}" = "$(printf SBLOG001 | xxd -p)" ]; then
-    adb exec-out "dd if=/dev/block/mmcblk0 bs=512 skip=249868288 count=2049 2>/dev/null" > "$out/sdlog.raw"
+    size=$((16#$(echo "${hdr:16:16}" | sed 's/\(..\)/\1 /g' | awk '{for(i=NF;i>0;i--) printf $i}')))
+    adb exec-out "dd if=/dev/block/mmcblk0 bs=512 skip=249868288 count=$(( (size + 511) / 512 + 1 )) 2>/dev/null" > "$out/sdlog.raw"
     python3 - "$out/sdlog.raw" "$out/kernel.log" <<'PY'
 import struct, sys
 d = open(sys.argv[1], 'rb').read()
