@@ -293,6 +293,46 @@ static void sb_patch_pixel_format(const struct mach_header *mh)
 	sblog("CA::WindowServer::IOMFBDisplay::framebuffer_pixel_format -> 'BGRA' (patched, r-x again: %d)", kr);
 }
 
+
+/* WindowServer crashed in MPSCore (+0x88f44, a NULL MPS device record: MPS has no entry for the Mali)
+ * from SkyLight's MPSImage filters at the login -> desktop switch (boots 143146, 144945). Every MPS
+ * kernel's -initWithDevice... answers nil instead: SkyLight's encode calls then go to nil (no blur,
+ * no crash). SBMAC_MPS=1 leaves MPS alone. */
+static void *sb_mps_nil(void *me, SEL s, ...) { (void)me; (void)s; return NULL; }
+static void sb_mps_disable(void)
+{
+	if (getenv("SBMAC_MPS") && !strcmp(getenv("SBMAC_MPS"), "1"))
+		return;
+	Class kernel = objc_getClass("MPSKernel");
+	if (!kernel)
+		return;
+	static int patched;
+	unsigned n = 0;
+	Class *all = objc_copyClassList(&n);
+	for (unsigned i = 0; i < n; i++) {
+		Class c = all[i];
+		Class k = c;
+		while (k && k != kernel)
+			k = class_getSuperclass(k);
+		if (!k)
+			continue;
+		unsigned m = 0;
+		Method *ms = class_copyMethodList(c, &m);
+		for (unsigned j = 0; j < m; j++) {
+			const char *name = sel_getName(method_getName(ms[j]));
+			if (strncmp(name, "initWithDevice", 14) && strncmp(name, "initWithCoder:device:", 21))
+				continue;
+			if (method_getImplementation(ms[j]) == (IMP)sb_mps_nil)
+				continue;
+			method_setImplementation(ms[j], (IMP)sb_mps_nil);
+			patched++;
+		}
+		free(ms);
+	}
+	free(all);
+	sblog("MPS: %d initWithDevice methods answer nil (no MPS on the Mali)", patched);
+}
+
 static void sb_image_added(const struct mach_header *mh, intptr_t slide)
 {
 	(void)slide;
@@ -300,6 +340,8 @@ static void sb_image_added(const struct mach_header *mh, intptr_t slide)
 	if (dladdr(mh, &info) && info.dli_fname && strstr(info.dli_fname, "/QuartzCore.framework/") &&
 	    !strcmp(getprogname(), "WindowServer") && !getenv("SBMAC_NO_FBFORMAT"))
 		sb_patch_pixel_format(mh);
+	if (dladdr(mh, &info) && info.dli_fname && strstr(info.dli_fname, "/MetalPerformanceShaders.framework/"))
+		sb_mps_disable();
 }
 
 __attribute__((constructor)) static void sb_loaded(void)
@@ -314,4 +356,5 @@ __attribute__((constructor)) static void sb_loaded(void)
 	sblog("injected (uid %d)%s", getuid(), getenv("SBMAC_EAGER") ? ", publishing the device now" : "");
 	if (getenv("SBMAC_EAGER"))
 		sb_publish();
+	sb_mps_disable();
 }

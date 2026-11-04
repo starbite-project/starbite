@@ -20,7 +20,7 @@ import argparse, glob, hashlib, json, os, shutil, struct, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 W = '/Volumes/Untitled/starbite-macos26'
-IMG = f'{W}/root-26t1.img'
+IMG = os.environ.get('ROOTIMG', f'{W}/root-26t1.img')   # ROOTIMG: a copy on the internal SSD (the USB stick reads ~34 MB/s)
 OWNERS = f'{W}/owners-t1b.json'
 HASHES = f'{ROOT}/build/test-boots/26t1-chunks-current.txt'
 START = 182888448
