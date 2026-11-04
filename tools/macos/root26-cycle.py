@@ -41,7 +41,11 @@ def attached_elsewhere():
 
 
 def attach(nomount=False):
-    if attached_elsewhere():
+    for _ in range(30):                             # a detach can take a few seconds to clear
+        if not attached_elsewhere():
+            break
+        __import__('time').sleep(1)
+    else:
         sys.exit(f'{IMG} is already attached (another agent?): refusing to attach it again')
     a = ['hdiutil', 'attach', '-nobrowse', '-imagekey', 'diskimage-class=CRawDiskImage'] + \
         (['-nomount'] if nomount else []) + [IMG]
@@ -134,6 +138,7 @@ def main():
     ap.add_argument('--enable-job', action='append', default=[], help='LABEL: back into launchd.plist from launchd-disabled.plist')
     ap.add_argument('--disable-list', help='a list file of launchd labels to take out (starlte-disable-jobs.py)')
     ap.add_argument('--job-set', action='append', default=[], help='LABEL:KEY=JSON on a launchd.plist job')
+    ap.add_argument('--job-unset', action='append', default=[], help='LABEL:KEY removed from a launchd.plist job (and its plist file)')
     ap.add_argument('--job-console', action='append', default=[], help='LABEL: its stdout/stderr to /dev/console, os_log to stderr')
     ap.add_argument('--fix-frameworks', action='store_true', help='add missing Versions/Current and top-level bundle links')
     ap.add_argument('--put', action='append', default=[], help='LOCAL=ROOTPATH: a file from the Mac (owner 0:0, mode kept)')
@@ -146,9 +151,9 @@ def main():
         sys.exit(f'{HASHES} missing: hash the image as it is on the card first')
     before = open(HASHES).read().split()
     own = json.load(open(OWNERS))
-    edits = a.wrap or a.unwrap or a.fetch or a.fetch_list or a.fetch_cx or a.link or a.rm or a.put or a.fix_frameworks or a.enable_job or a.job_console or a.disable_list or a.job_set
+    edits = a.wrap or a.unwrap or a.fetch or a.fetch_list or a.fetch_cx or a.link or a.rm or a.put or a.fix_frameworks or a.enable_job or a.job_console or a.disable_list or a.job_set or a.job_unset
     if edits:
-        stage = f'{W}/stage-cycle'
+        stage = os.environ.get('STAGE', f'{W}/stage-cycle')   # small files: an APFS folder beats exFAT's 128 KiB clusters
         if a.fetch or a.fetch_cx or a.fetch_list:
             shutil.rmtree(stage, ignore_errors=True)
             os.makedirs(stage)
@@ -267,6 +272,23 @@ def main():
                 with open(lp, 'r+b') as f:
                     f.truncate(0)
                     plistlib.dump(d, f, fmt=plistlib.FMT_BINARY)
+            if a.job_unset:
+                import plistlib
+                lp = mnt + '/System/Library/xpc/launchd.plist'
+                d = plistlib.load(open(lp, 'rb'))
+                for spec in a.job_unset:
+                    label, k = spec.split(':', 1)
+                    for sec in ('LaunchDaemons', 'LaunchAgents'):
+                        for key, job in d.get(sec, {}).items():
+                            if job.get('Label') == label and k in job:
+                                job.pop(k)
+                                print('unset', label, k)
+                                if os.path.exists(mnt + key):
+                                    with open(mnt + key, 'wb') as f:
+                                        plistlib.dump(job, f)
+                with open(lp, 'r+b') as f:
+                    f.truncate(0)
+                    plistlib.dump(d, f, fmt=plistlib.FMT_BINARY)
             if a.job_console:
                 import plistlib
                 lp = mnt + '/System/Library/xpc/launchd.plist'
@@ -306,7 +328,11 @@ def main():
             shutil.rmtree(mnt + '/.fseventsd', ignore_errors=True)
         finally:
             subprocess.run(['sync'])
-            subprocess.run(['hdiutil', 'detach', mnt], capture_output=True)
+            for attempt in range(6):                # busy right after big edits: retry, then force
+                if subprocess.run(['hdiutil', 'detach', mnt] + (['-force'] if attempt == 5 else []),
+                                  capture_output=True).returncode == 0:
+                    break
+                __import__('time').sleep(3)
         json.dump(own, open(OWNERS, 'w'))
         print(sh('python3', '-I', 'tools/macos/hfs-owners.py', IMG, OWNERS).strip())
         dev = attach(nomount=True)
