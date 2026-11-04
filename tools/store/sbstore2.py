@@ -211,6 +211,9 @@ def build(a):
         else:
             for name, typ, blob in read_store(src):
                 items.setdefault(name, (guess_type(name) if typ is None else typ, blob))
+    for name in a.omit:
+        if items.pop(name, None) is None:
+            sys.exit(f'--omit {name}: no such entry')
     for arg in a.files:
         name, _, rest = arg.partition('=')
         path, _, typ = rest.partition(':')
@@ -308,6 +311,7 @@ def main():
     b.add_argument('--catalog')
     b.add_argument('--import', dest='imp')
     b.add_argument('--drop', action='append', default=[], metavar='KEY')
+    b.add_argument('--omit', action='append', default=[], metavar='NAME', help='leave an imported entry out')
     b.add_argument('files', nargs='*')
     l = sub.add_parser('list')
     l.add_argument('img')
