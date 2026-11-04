@@ -1,11 +1,12 @@
 --- a/src/panfrost/vulkan/panvk_vX_shader.c
 +++ b/src/panfrost/vulkan/panvk_vX_shader.c
-@@ -19,6 +19,12 @@
+@@ -19,6 +19,13 @@
  #include "panvk_physical_device.h"
  #include "panvk_sampler.h"
  #include "panvk_shader.h"
 +#ifdef __APPLE__
 +#include <fcntl.h>
++#include <time.h>
 +#include <unistd.h>
 +#include <stdio.h>
 +#include <stdlib.h>
@@ -13,7 +14,7 @@
  
  #include "spirv/nir_spirv.h"
  #include "util/memstream.h"
-@@ -1017,6 +1023,36 @@
+@@ -1017,8 +1024,59 @@
     input.fau.reserved = shader->fau.total_count * 2;
     input.fau.promote_immediates = true;
  
@@ -31,12 +32,13 @@
 +         }
 +      }
 +      const char *env = getenv("STARBITE_PANVK_MAX_INSTRS");
-+      unsigned limit = env ? (unsigned)strtoul(env, NULL, 0) : 15000;
++      unsigned limit = env ? (unsigned)strtoul(env, NULL, 0) : 0;   /* 0: no cap (a long compile ends; a refused one leaves WindowServer black) */
 +      if (instrs > 3000) {
-+         char msg[160];
++         char msg[256];
 +         int fd = open("/dev/console", O_WRONLY | O_NOCTTY);
-+         int n = snprintf(msg, sizeof(msg), "PANVK: %s shader of %u NIR instructions%s\n",
-+                          _mesa_shader_stage_to_string(nir->info.stage), instrs,
++         int n = snprintf(msg, sizeof(msg), "PANVK: %s shader %.60s of %u NIR instructions%s\n",
++                          _mesa_shader_stage_to_string(nir->info.stage),
++                          nir->info.name ? nir->info.name : "?", instrs,
 +                          limit && instrs > limit ? ": too big, pipeline refused" : "");
 +         if (fd >= 0) {
 +            write(fd, msg, n > 0 ? (size_t)n : 0);
@@ -47,6 +49,28 @@
 +         return VK_ERROR_OUT_OF_HOST_MEMORY;
 +   }
 +#endif
++#ifdef __APPLE__
++   struct timespec t0, t1;
++   clock_gettime(CLOCK_MONOTONIC, &t0);
++#endif
     struct util_dynarray binary = UTIL_DYNARRAY_INIT;
     pan_shader_compile(nir, &input, &binary, &shader->info);
++#ifdef __APPLE__
++   clock_gettime(CLOCK_MONOTONIC, &t1);
++   {
++      long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
++      if (ms > 1000) {
++         char msg[128];
++         int fd = open("/dev/console", O_WRONLY | O_NOCTTY);
++         int n = snprintf(msg, sizeof(msg), "PANVK: %s shader compiled in %ld ms, %u bytes\n",
++                          _mesa_shader_stage_to_string(nir->info.stage), ms, binary.size);
++         if (fd >= 0) {
++            write(fd, msg, n > 0 ? (size_t)n : 0);
++            close(fd);
++         }
++      }
++   }
++#endif
  
+    /* Propagate potential additional FAU values into the panvk info struct. */
+    /* FAU consts are pushed as 32bit values, but total_count is for 64bit

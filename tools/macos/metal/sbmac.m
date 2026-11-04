@@ -70,6 +70,21 @@ static id sbzero(id me, SEL s, ...) { (void)me; (void)s; return nil; }
 	return YES;
 }
 @end
+static void sb_log_pipeline(id d)
+{
+	static unsigned n;
+	if (n++ > 400)
+		return;
+	@try {
+		id vf = [d valueForKey:@"vertexFunction"], ff = [d valueForKey:@"fragmentFunction"];
+		NSString *label = [d valueForKey:@"label"];
+		sblog("pipeline %u: vs %s fs %s label %s", n, vf ? [[vf valueForKey:@"name"] UTF8String] : "-",
+		      ff ? [[ff valueForKey:@"name"] UTF8String] : "-", label ? [label UTF8String] : "-");
+	} @catch (id e) {
+		sblog("pipeline %u: (descriptor unreadable)", n);
+	}
+}
+
 static void sbmac_device_fill(id dev)
 {
 	Class c = object_getClass(dev);
@@ -87,6 +102,46 @@ static void sbmac_device_fill(id dev)
 		return stub;
 	}), "@24@0:8:16");
 	sblog("device %s: peerGroupID/peerIndex/peerCount + zero catch-all", class_getName(c));
+	/* which render pipelines WindowServer asks for (the 79465-instruction fragment shader panvk
+	 * refuses, boots 180954-184715): the descriptor's function names and label, logged before the
+	 * compile, so the console line right before panvk's refusal names it */
+	const char *sels[] = { "newRenderPipelineStateWithDescriptor:error:",
+			       "newRenderPipelineStateWithDescriptor:options:reflection:error:",
+			       "newRenderPipelineStateWithDescriptor:completionHandler:",
+			       "newRenderPipelineStateWithDescriptor:options:completionHandler:" };
+	for (unsigned k = 0; k < 4; k++) {
+		SEL sel = sel_registerName(sels[k]);
+		Method m = class_getInstanceMethod(c, sel);
+		if (!m)
+			continue;
+		IMP orig = method_getImplementation(m);
+		unsigned argc = method_getNumberOfArguments(m);
+		IMP imp = NULL;
+		if (argc == 4)
+			imp = imp_implementationWithBlock(^id(id me, id d, void *e) {
+				sb_log_pipeline(d);
+				return ((id (*)(id, SEL, id, void *))orig)(me, sel, d, e);
+			});
+		else if (argc == 6)
+			imp = imp_implementationWithBlock(^id(id me, id d, NSUInteger o, void *r, void *e) {
+				sb_log_pipeline(d);
+				return ((id (*)(id, SEL, id, NSUInteger, void *, void *))orig)(me, sel, d, o, r, e);
+			});
+		else if (argc == 5 && k == 3)
+			imp = imp_implementationWithBlock(^void(id me, id d, NSUInteger o, id h) {
+				sb_log_pipeline(d);
+				((void (*)(id, SEL, id, NSUInteger, id))orig)(me, sel, d, o, h);
+			});
+		else if (argc == 4 + 0 && k == 2)
+			imp = NULL;
+		if (k == 2 && argc == 4)
+			imp = imp_implementationWithBlock(^void(id me, id d, id h) {
+				sb_log_pipeline(d);
+				((void (*)(id, SEL, id, id))orig)(me, sel, d, h);
+			});
+		if (imp)
+			method_setImplementation(m, imp);
+	}
 }
 
 static id<MTLDevice> gOurs;
