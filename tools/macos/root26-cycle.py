@@ -127,6 +127,7 @@ def main():
     ap.add_argument('--wrap', action='append', default=[])
     ap.add_argument('--unwrap', action='append', default=[])
     ap.add_argument('--fetch', action='append', default=[])
+    ap.add_argument('--fetch-list', help='a file of OS-volume paths to fetch (ipsw-apfs.py --list)')
     ap.add_argument('--fetch-cx', action='append', default=[], help='like --fetch, from the SystemOS cryptex')
     ap.add_argument('--link', action='append', default=[])
     ap.add_argument('--rm', action='append', default=[])
@@ -145,23 +146,28 @@ def main():
         sys.exit(f'{HASHES} missing: hash the image as it is on the card first')
     before = open(HASHES).read().split()
     own = json.load(open(OWNERS))
-    edits = a.wrap or a.unwrap or a.fetch or a.fetch_cx or a.link or a.rm or a.put or a.fix_frameworks or a.enable_job or a.job_console or a.disable_list or a.job_set
+    edits = a.wrap or a.unwrap or a.fetch or a.fetch_list or a.fetch_cx or a.link or a.rm or a.put or a.fix_frameworks or a.enable_job or a.job_console or a.disable_list or a.job_set
     if edits:
         stage = f'{W}/stage-cycle'
-        if a.fetch or a.fetch_cx:
+        if a.fetch or a.fetch_cx or a.fetch_list:
             shutil.rmtree(stage, ignore_errors=True)
             os.makedirs(stage)
-        for member, paths in ((OS_DMG, a.fetch), (CX_DMG, a.fetch_cx)):
-            if not paths:
+        listed = []
+        if a.fetch_list:
+            listed = [l.split('#')[0].strip() for l in open(a.fetch_list)]
+            listed = [l for l in listed if l]
+        for member, paths, lst in ((OS_DMG, a.fetch, a.fetch_list), (CX_DMG, a.fetch_cx, None)):
+            if not paths and not lst:
                 continue
             ofs = f'{W}/owners-cycle.json'
             subprocess.run(['python3', '-I', '-B', 'tools/macos/ipsw-apfs.py', URL, 'get', member, stage, *paths,
+                            *(['--list', lst] if lst else []),
                             '--keys', f'{W}/keys.txt', '--owners', ofs, '--thin'], check=True)
             if os.path.exists(ofs):
                 own.update(json.load(open(ofs)))
         mnt = attach()
         try:
-            for p in a.fetch + a.fetch_cx:
+            for p in a.fetch + a.fetch_cx + listed:
                 src, dst = stage + p, mnt + p
                 if not os.path.lexists(src):
                     print('not in the IPSW, skipped:', p)
