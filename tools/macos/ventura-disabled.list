@@ -14,3 +14,10 @@ com.apple.spindump
 com.apple.tailspind
 com.apple.AirPlayXPCHelper
 com.apple.sysextd
+# 2026-11-05: analyticsd ~90% of a core all boot, nehelper 55%, update/asset daemons not needed
+com.apple.analyticsd
+com.apple.nehelper
+com.apple.mobileassetd
+com.apple.softwareupdated
+com.apple.suhelperd
+com.apple.InstallerProgress

@@ -324,14 +324,26 @@ SB_INTERPOSE(sb_ColorSyncDisplayServicesUpdateProfiles, ColorSyncDisplayServices
 static const uint32_t fb_format_was[3] = { 0xd503237fu, 0x6dbc23e9u, 0xa90157f6u };	/* pacibsp; stp d9,d8; stp x22,x21 */
 static const uint32_t fb_format_bgra[3] = { 0x528a4820u, 0x72a848e0u, 0xd65f03c0u };	/* mov w0,#'RA'; movk 'BG'; ret */
 
+/* macOS 13.5 (22G74) cache: QuartzCore+0x2d6548, same default ('RGhA') after a different prologue */
+#define QC_FRAMEBUFFER_PIXEL_FORMAT_13_5 0x2d6548
+static const uint32_t fb_format_was_13[3] = { 0xd503237fu, 0xa9bd57f6u, 0xa9014ff4u };	/* pacibsp; stp x22,x21; stp x20,x19 */
+
 static void sb_patch_pixel_format(const struct mach_header *mh)
 {
-	uint32_t *at = (uint32_t *)((uintptr_t)mh + (getenv("SBMAC_QC_FBFORMAT") ? strtoul(getenv("SBMAC_QC_FBFORMAT"), NULL, 0) :
-						      QC_FRAMEBUFFER_PIXEL_FORMAT_26_5));
+	uint32_t *at = NULL;
+	if (getenv("SBMAC_QC_FBFORMAT"))
+		at = (uint32_t *)((uintptr_t)mh + strtoul(getenv("SBMAC_QC_FBFORMAT"), NULL, 0));
+	else {
+		uint32_t *a26 = (uint32_t *)((uintptr_t)mh + QC_FRAMEBUFFER_PIXEL_FORMAT_26_5);
+		uint32_t *a13 = (uint32_t *)((uintptr_t)mh + QC_FRAMEBUFFER_PIXEL_FORMAT_13_5);
+		if (a13[0] == fb_format_bgra[0] && a13[1] == fb_format_bgra[1])
+			return;
+		at = memcmp(a13, fb_format_was_13, sizeof(fb_format_was_13)) == 0 ? a13 : a26;
+	}
 	if (at[0] == fb_format_bgra[0] && at[1] == fb_format_bgra[1])
 		return;
-	if (memcmp(at, fb_format_was, sizeof(fb_format_was)) != 0) {
-		sblog("framebuffer_pixel_format: found %#x %#x %#x, not 26.5's prologue: left alone", at[0], at[1], at[2]);
+	if (memcmp(at, fb_format_was, sizeof(fb_format_was)) != 0 && memcmp(at, fb_format_was_13, sizeof(fb_format_was_13)) != 0) {
+		sblog("framebuffer_pixel_format: found %#x %#x %#x, neither 26.5's nor 13.5's prologue: left alone", at[0], at[1], at[2]);
 		return;
 	}
 	vm_address_t page = (vm_address_t)at & ~(vm_address_t)(vm_page_size - 1);

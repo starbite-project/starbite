@@ -9,6 +9,7 @@ cd "$(dirname "$0")/../.."
 key=${1:?usage: boot-next.sh KEY [WAIT_S]}
 wait_s=${2:-600}
 [ "$(adb get-state 2>/dev/null)" = recovery ] || { echo "phone not in TWRP"; exit 1; }
+grep -q "^key = \"$key\"" build/store/catalog-live.toml || { echo "'$key' is not a catalog key (the loader would show the menu): refusing"; exit 1; }
 dev=$(adb shell readlink -f /dev/block/by-name/USERDATA | tr -d '\r')
 SET=$(( 4194304 + 2 ))
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
