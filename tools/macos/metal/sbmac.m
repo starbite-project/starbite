@@ -333,6 +333,29 @@ static void sb_mps_disable(void)
 	sblog("MPS: %d initWithDevice methods answer nil (no MPS on the Mali)", patched);
 }
 
+
+/* SecurityAgent / loginwindow: the login UI's user view builds an AvatarKit scene whose environment
+ * comes from a Memoji asset this system never downloaded: -[AVTAvatarEnvironment
+ * defaultEnvironmentNode] passes a nil path to +[NSURL fileURLWithPath:isDirectory:] and the
+ * uncaught exception kills SecurityAgent, so every login fails (boot 163705). An empty SCNNode
+ * instead: the avatar has no lighting environment, the login goes on. */
+static id sb_avt_env_node(id me, SEL s)
+{
+	(void)me; (void)s;
+	Class node = objc_getClass("SCNNode");
+	return node ? [[node alloc] init] : nil;
+}
+static void sb_avatarkit_patch(void)
+{
+	Class c = objc_getClass("AVTAvatarEnvironment");
+	SEL sel = sel_registerName("defaultEnvironmentNode");
+	Method m = c ? class_getInstanceMethod(c, sel) : NULL;
+	if (!m || method_getImplementation(m) == (IMP)sb_avt_env_node)
+		return;
+	method_setImplementation(m, (IMP)sb_avt_env_node);
+	sblog("AvatarKit: -[AVTAvatarEnvironment defaultEnvironmentNode] -> empty SCNNode (no Memoji assets)");
+}
+
 static void sb_image_added(const struct mach_header *mh, intptr_t slide)
 {
 	(void)slide;
@@ -346,6 +369,9 @@ static void sb_image_added(const struct mach_header *mh, intptr_t slide)
 		sb_patch_pixel_format(mh);
 	if (dladdr(mh, &info) && info.dli_fname && strstr(info.dli_fname, "/MetalPerformanceShaders.framework/"))
 		sb_mps_disable();
+	if (dladdr(mh, &info) && info.dli_fname && (strstr(info.dli_fname, "/AvatarKit.framework/") ||
+						    strstr(info.dli_fname, "/SceneKit.framework/")))
+		sb_avatarkit_patch();
 }
 
 __attribute__((constructor)) static void sb_loaded(void)
@@ -361,4 +387,5 @@ __attribute__((constructor)) static void sb_loaded(void)
 	if (getenv("SBMAC_EAGER"))
 		sb_publish();
 	sb_mps_disable();
+	sb_avatarkit_patch();
 }
