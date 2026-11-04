@@ -173,7 +173,7 @@ do_shim() {
 	do_mount
 	# shellcheck disable=SC2086
 	$CC -x objective-c -fobjc-arc -O2 -g -Wall -dynamiclib -install_name /usr/lib/sbmac.dylib -Wl,-not_for_dyld_shared_cache -Wl,-no_warn_inits \
-		-o "$OUT/sbmac.dylib" "$HERE/sbmac.m" -framework Foundation -framework Metal -framework IOKit \
+		-o "$OUT/sbmac.dylib" "$HERE/sbmac.m" -framework Foundation -framework Metal -framework IOKit -framework ColorSync \
 		-framework CoreFoundation
 	mkdir -p "$OUT/sym" && cp "$OUT/sbmac.dylib" "$OUT/sym/sbmac.dylib"
 	rm -rf "$OUT/sym/sbmac.dylib.dSYM" && mv "$OUT/sbmac.dylib.dSYM" "$OUT/sym/" 2>/dev/null || true

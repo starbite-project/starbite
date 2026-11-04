@@ -129,6 +129,25 @@ static id<MTLDevice> sb_MTLCreateSystemDefaultDevice(void)
 	return dev;
 }
 
+/*
+ * ColorSync's display-profile update. WindowServer's WS::Displays::CAWSManager::restore_color_preferences
+ * block calls it (looked up with dlsym) and signals a semaphore that the session code waits on; it asks
+ * the com.apple.colorsync.displayservices daemon synchronously over XPC (ColorSyncXPCAcquireDisplayInfo).
+ * On the card root that reply never came (26.5 boot 20261104-051706: WindowServer thread in
+ * ColorSync+0x664b4 <- SkyLight+0x442ad4, loginwindow blocked in CreateSessionWithAuditSessionID).
+ * Answer "no profile info" (NULL: SkyLight checks it) at once; SBMAC_COLORSYNC=1 calls the real one.
+ */
+extern CFTypeRef ColorSyncDisplayServicesUpdateProfiles(void *a, void *b, void *c);
+static CFTypeRef sb_ColorSyncDisplayServicesUpdateProfiles(void *a, void *b, void *c)
+{
+	if (getenv("SBMAC_COLORSYNC"))
+		return ColorSyncDisplayServicesUpdateProfiles(a, b, c);
+	static int told;
+	if (!told++)
+		sblog("ColorSyncDisplayServicesUpdateProfiles: answered NULL without asking colorsync.displayservices");
+	return NULL;
+}
+
 #define SB_INTERPOSE(replacement, replacee)                                                                      \
 	__attribute__((used)) static struct {                                                                    \
 		const void *r;                                                                                    \
@@ -139,6 +158,7 @@ static id<MTLDevice> sb_MTLCreateSystemDefaultDevice(void)
 SB_INTERPOSE(sb_MTLCopyAllDevices, MTLCopyAllDevices);
 SB_INTERPOSE(sb_MTLCopyAllDevicesWithObserver, MTLCopyAllDevicesWithObserver);
 SB_INTERPOSE(sb_MTLCreateSystemDefaultDevice, MTLCreateSystemDefaultDevice);
+SB_INTERPOSE(sb_ColorSyncDisplayServicesUpdateProfiles, ColorSyncDisplayServicesUpdateProfiles);
 
 /*
  * CA::WindowServer::IOMFBDisplay::framebuffer_pixel_format() -> 'BGRA'.
