@@ -130,6 +130,10 @@ def main():
     ap.add_argument('--fetch-cx', action='append', default=[], help='like --fetch, from the SystemOS cryptex')
     ap.add_argument('--link', action='append', default=[])
     ap.add_argument('--rm', action='append', default=[])
+    ap.add_argument('--enable-job', action='append', default=[], help='LABEL: back into launchd.plist from launchd-disabled.plist')
+    ap.add_argument('--job-console', action='append', default=[], help='LABEL: its stdout/stderr to /dev/console, os_log to stderr')
+    ap.add_argument('--fix-frameworks', action='store_true', help='add missing Versions/Current and top-level bundle links')
+    ap.add_argument('--put', action='append', default=[], help='LOCAL=ROOTPATH: a file from the Mac (owner 0:0, mode kept)')
     ap.add_argument('--boot', default='mac26t1')
     ap.add_argument('--no-boot', action='store_true')
     ap.add_argument('--wait', type=int, default=600)
@@ -139,7 +143,7 @@ def main():
         sys.exit(f'{HASHES} missing: hash the image as it is on the card first')
     before = open(HASHES).read().split()
     own = json.load(open(OWNERS))
-    edits = a.wrap or a.unwrap or a.fetch or a.fetch_cx or a.link or a.rm
+    edits = a.wrap or a.unwrap or a.fetch or a.fetch_cx or a.link or a.rm or a.put or a.fix_frameworks or a.enable_job or a.job_console
     if edits:
         stage = f'{W}/stage-cycle'
         if a.fetch or a.fetch_cx:
@@ -174,6 +178,12 @@ def main():
                     except FileNotFoundError:
                         pass
                 print('fetched', p)
+            for pr in a.put:
+                loc, rp = pr.split('=', 1)
+                os.makedirs(os.path.dirname(mnt + rp), exist_ok=True)
+                replace_copy(loc, mnt + rp)
+                own[rp] = [0, 0, os.stat(loc).st_mode & 0o7777]
+                print('put', rp)
             for p in a.wrap:
                 t, o = mnt + p, mnt + p + '.starbite-orig'
                 if os.path.exists(o):
@@ -205,6 +215,55 @@ def main():
                     os.unlink(q)
                 own.pop(p, None)
                 print('removed', p)
+            if a.enable_job:
+                import plistlib
+                lp, kp = mnt + '/System/Library/xpc/launchd.plist', mnt + '/System/Library/xpc/launchd-disabled.plist'
+                d, kept = plistlib.load(open(lp, 'rb')), plistlib.load(open(kp, 'rb'))
+                for key, job in list(kept.items()):
+                    if job.get('Label') in a.enable_job:
+                        d['LaunchDaemons'][key] = kept.pop(key)
+                        off = mnt + key + '.starbite-off'
+                        if os.path.exists(off):
+                            os.replace(off, mnt + key)
+                        print('enabled', job['Label'], key)
+                with open(lp, 'r+b') as f:
+                    f.truncate(0)
+                    plistlib.dump(d, f, fmt=plistlib.FMT_BINARY)
+                with open(kp, 'wb') as f:
+                    plistlib.dump(kept, f, fmt=plistlib.FMT_BINARY)
+            if a.job_console:
+                import plistlib
+                lp = mnt + '/System/Library/xpc/launchd.plist'
+                d = plistlib.load(open(lp, 'rb'))
+                for key, job in d['LaunchDaemons'].items():
+                    if job.get('Label') in a.job_console:
+                        job['StandardOutPath'] = job['StandardErrorPath'] = '/dev/console'
+                        env = job.setdefault('EnvironmentVariables', {})
+                        env['OS_ACTIVITY_DT_MODE'] = 'YES'
+                        env['OS_ACTIVITY_MODE'] = 'debug'
+                        print('console + os_log to stderr for', job['Label'])
+                with open(lp, 'r+b') as f:
+                    f.truncate(0)
+                    plistlib.dump(d, f, fmt=plistlib.FMT_BINARY)
+            if a.fix_frameworks:
+                n = 0
+                for fw in glob.glob(mnt + '/System/Library/**/*.framework', recursive=True):
+                    v = fw + '/Versions'
+                    if not os.path.isdir(v) or os.path.islink(fw):
+                        continue
+                    vers = [d for d in os.listdir(v) if d != 'Current' and not d.startswith('.')]
+                    if not os.path.lexists(v + '/Current') and len(vers) == 1:
+                        os.symlink(vers[0], v + '/Current')
+                        n += 1
+                    if not os.path.isdir(v + '/Current'):
+                        continue
+                    for e in os.listdir(v + '/Current'):
+                        if e.startswith('._') or e == '_CodeSignature':
+                            continue
+                        if not os.path.lexists(fw + '/' + e):
+                            os.symlink('Versions/Current/' + e, fw + '/' + e)
+                            n += 1
+                print('framework links added:', n)
             shutil.rmtree(mnt + '/.fseventsd', ignore_errors=True)
         finally:
             subprocess.run(['sync'])
