@@ -19,16 +19,30 @@
 import argparse, glob, hashlib, json, os, shutil, struct, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-W = '/Volumes/Untitled/starbite-macos26'
-IMG = os.environ.get('ROOTIMG', f'{W}/root-26t1.img')   # ROOTIMG: a copy on the internal SSD (the USB stick reads ~34 MB/s)
-OWNERS = f'{W}/owners-t1b.json'
-HASHES = f'{ROOT}/build/test-boots/26t1-chunks-current.txt'
-DIRTY = f'{ROOT}/build/test-boots/26t1-dirty.txt'   # root chunks the phone wrote (boot-next.sh)
-START = 182888448
-URL = ('https://updates.cdn-apple.com/2026SpringFCS/fullrestores/122-58869/'
-       'DFB1CEEF-5619-4591-9924-E20DB2C8FED0/UniversalMac_26.5_25F71_Restore.ipsw')
-OS_DMG = '094-56453-087.dmg.aea'
-CX_DMG = '094-56679-089.dmg.aea'        # the SystemOS cryptex (dylibs outside the cache, resources)
+DIRTY = f'{ROOT}/build/test-boots/26t1-dirty.txt'   # root chunks the phone wrote (boot-next.sh; one macOS at a time)
+if os.environ.get('MACOS') == '13':
+    # Ventura 13.5 (2026-11-04 on): the desktop root (build-macos-root.sh desktop) on the card after iOS 26's 16 GiB
+    W = f'{ROOT}/build/macos13'
+    IMG = os.environ.get('ROOTIMG', f'{W}/root-desktop.img')
+    OWNERS = f'{W}/owners-desktop.json'
+    HASHES = f'{ROOT}/build/test-boots/13d-chunks-current.txt'
+    START = 216442880
+    URL = ('https://updates.cdn-apple.com/2023SummerFCS/fullrestores/032-69606/'
+           'D3E05CDF-E105-434C-A4A1-4E3DC7668DD0/UniversalMac_13.5_22G74_Restore.ipsw')
+    OS_DMG = '096-63007-081.dmg'
+    CX_DMG = '096-62994-081.dmg'
+    KEYS = []                           # Ventura's images are not AEA
+else:
+    W = '/Volumes/Untitled/starbite-macos26'
+    IMG = os.environ.get('ROOTIMG', f'{W}/root-26t1.img')   # ROOTIMG: a copy on the internal SSD (the USB stick reads ~34 MB/s)
+    OWNERS = f'{W}/owners-t1b.json'
+    HASHES = f'{ROOT}/build/test-boots/26t1-chunks-current.txt'
+    START = 182888448
+    URL = ('https://updates.cdn-apple.com/2026SpringFCS/fullrestores/122-58869/'
+           'DFB1CEEF-5619-4591-9924-E20DB2C8FED0/UniversalMac_26.5_25F71_Restore.ipsw')
+    OS_DMG = '094-56453-087.dmg.aea'
+    CX_DMG = '094-56679-089.dmg.aea'        # the SystemOS cryptex (dylibs outside the cache, resources)
+    KEYS = ['--keys', f'{W}/keys.txt']
 C = 64 << 20
 
 
@@ -212,7 +226,7 @@ def main():
             ofs = f'{W}/owners-cycle.json'
             subprocess.run(['python3', '-I', '-B', 'tools/macos/ipsw-apfs.py', URL, 'get', member, stage, *paths,
                             *(['--list', lst] if lst else []),
-                            '--keys', f'{W}/keys.txt', '--owners', ofs, '--thin'], check=True)
+                            *KEYS, '--owners', ofs, '--thin'], check=True)
             if os.path.exists(ofs):
                 own.update(json.load(open(ofs)))
         mnt = attach()

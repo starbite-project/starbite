@@ -5,8 +5,8 @@
 
 The same checks as card-range-flash.py before anything is written (TWRP, the 128 GB card,
 the range inside p2 past the card store's used end or exactly the 64 MiB test range, never
-p1, 1 MiB alignment), plus: the range must not overlap the parked Ventura root
-(241348608+7987200) unless it is that range.
+p1, 1 MiB alignment), plus: the range must never overlap iOS 26's root on the card
+(182888448+33554432, moved there 2026-11-04; macOS 26's old range is inside it).
 
 Faster because (measured 2026-11-03 in TWRP: adb push 29.6 MB/s, card write 15.4 MB/s,
 card read 17 MB/s; the old tool's gzip / gunzip and one-step-at-a-time loop gave ~3 MB/s):
@@ -25,7 +25,7 @@ import argparse, hashlib, os, queue, struct, subprocess, sys, tempfile, threadin
 DEV = '/dev/block/mmcblk0'
 CARD_SECTORS = 249999360
 TEST_RANGE = (249868288, 131072)
-VENTURA = (241348608, 7987200)
+IOS26 = (182888448, 33554432)        # iOS 26's root on the card: never written by this tool
 CHUNK = 64 << 20
 MIB = 1 << 20
 SLOTS = ('/tmp/sbfast0', '/tmp/sbfast1')
@@ -55,8 +55,8 @@ def check(start, count):
     s, e = start, start + count
     if s < p1[1] + p1[2] and p1[1] < e:
         sys.exit('the range overlaps p1 (the exFAT data partition): refusing')
-    if (s, count) != VENTURA and s < VENTURA[0] + VENTURA[1] and VENTURA[0] < e:
-        sys.exit('the range overlaps the parked Ventura root (241348608+7987200): refusing')
+    if s < IOS26[0] + IOS26[1] and IOS26[0] < e:
+        sys.exit('the range overlaps iOS 26\'s root on the card (182888448+33554432): refusing')
     if (s, count) == TEST_RANGE:
         return 'the 64 MiB test range'
     if p2[0] != 0xDA or s < p2[1] or e > p2[1] + p2[2]:

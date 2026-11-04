@@ -695,6 +695,10 @@ class Plan:
                     else:
                         xoid, rsize = rf[1]
                         src = ('rsrc', kind, self.fs.extents(xoid), rsize, usize)
+            logical = usize if 'com.apple.decmpfs' in x and x['com.apple.decmpfs'][0] == 'data' else ino['size']
+            if MAX_FILE and logical > MAX_FILE:
+                SKIPPED.append((path, logical))     # --max-file-size: not fetched, listed (--skipped-list)
+                return
             self.items.append((path, ino, src))
 
     def blocks(self):
@@ -796,6 +800,8 @@ def write_items(plan, outdir, streams, direct=()):
 
 
 THIN = False
+MAX_FILE = 0          # --max-file-size
+SKIPPED = []          # (path, bytes) left out by it
 
 
 def thin(data):
@@ -1172,6 +1178,9 @@ def main():
     ap.add_argument('--index', help='pass-1 metadata index for a deflated member (cached)')
     ap.add_argument('--owners', help='get: also write a JSON {path: [uid, gid, mode]} of what was '
                     'extracted (a non-root run cannot chown; tools/macos/hfs-owners.py applies it)')
+    ap.add_argument('--max-file-size', type=int, default=0, help='get: leave out regular files larger than this '
+                    '(logical bytes); they are listed with --skipped-list')
+    ap.add_argument('--skipped-list', help='get: write the paths --max-file-size left out here, with their sizes')
     ap.add_argument('--thin', action='store_true', help='get: keep only the arm64e slice of '
                     'universal Mach-O files (each slice carries its own code signature)')
     ap.add_argument('--prefix', default='', help='get: path prefix for --owners keys (e.g. the '
@@ -1210,8 +1219,16 @@ def main():
     paths = (a.args[2:] if a.cmd == 'get' else a.args[1:])
     for lst in a.list:
         paths += [l.split('#')[0].strip() for l in open(lst) if l.split('#')[0].strip()]
+    global MAX_FILE
+    MAX_FILE = a.max_file_size
     plan = Plan(fs, paths)
     print(f'{len(plan.items)} items, {plan.logical() / 2**20:.1f} MiB of file data', file=sys.stderr)
+    if SKIPPED:
+        print(f'left out (over {MAX_FILE} bytes each): {len(SKIPPED)} files, '
+              f'{sum(n for _, n in SKIPPED) / 2**20:.1f} MiB', file=sys.stderr)
+        if a.skipped_list:
+            with open(a.skipped_list, 'a') as f:
+                f.writelines(f'{p}\t{n}\n' for p, n in SKIPPED)
     if a.cmd == 'du':
         return
     global THIN

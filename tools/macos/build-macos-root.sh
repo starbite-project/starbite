@@ -11,6 +11,8 @@
 #       the kernel mounts it, execs /sbin/launchd, dyld runs and stops at the missing
 #       cache; launchd (pid 1) dies -> "initproc exited" panic -> sweetreboot -> TWRP.
 #   tools/macos/build-macos-root.sh full    -> build/macos13/root-full.img (SIZE_MB, 3900)
+#   tools/macos/build-macos-root.sh desktop -> build/macos13/root-desktop.img (SIZE_MB, 15360): nearly the whole
+#       OS volume (ventura-desktop.list), files over MAXFILE (16 MiB) left out and listed, + the cache as full's.
 #       + the arm64e shared cache (SystemOS cryptex, 3.2 GiB, two streaming passes over
 #       the deflated cryptex) translated by tools/a64e/a64e-rewrite.py as the iOS 26 root
 #       build does (--skip libcorecrypto), + the files in tools/macos/ventura-full.list.
@@ -59,7 +61,9 @@ else
     case $TIER in
         t0)   SIZE_MB=${SIZE_MB:-64};   LISTS=(--list tools/macos/ventura-t0.list);   OUT=${OUT:-$W/root-t0.img}; CACHE_TIER= ;;
         full) SIZE_MB=${SIZE_MB:-3900}; LISTS=(--list tools/macos/ventura-full.list); OUT=${OUT:-$W/root-full.img}; CACHE_TIER=1 ;;
-        *) echo "usage: $0 t0|full"; exit 2 ;;
+        desktop) SIZE_MB=${SIZE_MB:-15360}; LISTS=(--list tools/macos/ventura-desktop.list); OUT=${OUT:-$W/root-desktop.img}
+              CACHE_TIER=1; MAXFILE=${MAXFILE:-16777216} ;;
+        *) echo "usage: $0 t0|full|desktop"; exit 2 ;;
     esac
 fi
 mkdir -p "$W"
@@ -91,7 +95,8 @@ echo "image $OUT mounted at $mnt"
 
 # 1. the OS volume's files
 thin=(); [ -n "$CACHE_TIER" ] && thin=(--thin)      # cache tiers: arm64e slices only
-"${RD[@]}" get "$OS_DMG" "$mnt" "${LISTS[@]}" "${KEYS[@]}" --owners "$owners" "${thin[@]}"
+maxf=(); [ -n "${MAXFILE:-}" ] && maxf=(--max-file-size "$MAXFILE" --skipped-list "$W/skipped-$TIER.txt")
+"${RD[@]}" get "$OS_DMG" "$mnt" "${LISTS[@]}" ${KEYS[@]+"${KEYS[@]}"} --owners "$owners" ${thin[@]+"${thin[@]}"} ${maxf[@]+"${maxf[@]}"}
 
 # 2. System and Data are one volume here: the Data template (what the installer copies to
 #    a new Data volume) is moved into place, its owners re-keyed.
@@ -127,7 +132,7 @@ fi
 build=$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$W/BuildManifest.plist" 2>/dev/null || echo 22G74)
 # 3. cache tiers: the arm64e shared cache from the SystemOS cryptex, translated in place
 if [ -n "$CACHE_TIER" ]; then
-    "${RD[@]}" get "$SYS_DMG" "$mnt$CRYPTEX" --index "$W/systemos.idx" "${KEYS[@]}" \
+    "${RD[@]}" get "$SYS_DMG" "$mnt$CRYPTEX" --index "$W/systemos.idx" ${KEYS[@]+"${KEYS[@]}"} \
         --owners "$owners" --prefix "$CRYPTEX" "${CACHE[@]/#//System/Library/dyld/}"
     [ -x "$ROOT/build/venv/bin/python" ] || { echo "build/venv (numpy) missing: see tools/build-ios-root.sh"; exit 1; }
     # The census runs on Apple's bytes, before the rewrite (CENSUS=0 skips it).
