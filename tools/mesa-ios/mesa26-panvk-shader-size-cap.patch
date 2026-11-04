@@ -1,0 +1,52 @@
+--- a/src/panfrost/vulkan/panvk_vX_shader.c
++++ b/src/panfrost/vulkan/panvk_vX_shader.c
+@@ -19,6 +19,12 @@
+ #include "panvk_physical_device.h"
+ #include "panvk_sampler.h"
+ #include "panvk_shader.h"
++#ifdef __APPLE__
++#include <fcntl.h>
++#include <unistd.h>
++#include <stdio.h>
++#include <stdlib.h>
++#endif
+ 
+ #include "spirv/nir_spirv.h"
+ #include "util/memstream.h"
+@@ -1017,6 +1023,36 @@
+    input.fau.reserved = shader->fau.total_count * 2;
+    input.fau.promote_immediates = true;
+ 
++#ifdef __APPLE__
++   /* Starbite: one of macOS WindowServer's pipelines is so large that Bifrost's register
++    * allocator ran for minutes on the phone's CPU and WindowServer drew nothing. Above
++    * STARBITE_PANVK_MAX_INSTRS NIR instructions (default 15000) this one pipeline fails instead
++    * (CoreAnimation goes without that effect). Big ones are noted on the console either way. */
++   {
++      unsigned instrs = 0;
++      nir_foreach_function_impl(impl, nir) {
++         nir_foreach_block(block, impl) {
++            nir_foreach_instr(instr, block)
++               instrs++;
++         }
++      }
++      const char *env = getenv("STARBITE_PANVK_MAX_INSTRS");
++      unsigned limit = env ? (unsigned)strtoul(env, NULL, 0) : 15000;
++      if (instrs > 3000) {
++         char msg[160];
++         int fd = open("/dev/console", O_WRONLY | O_NOCTTY);
++         int n = snprintf(msg, sizeof(msg), "PANVK: %s shader of %u NIR instructions%s\n",
++                          _mesa_shader_stage_to_string(nir->info.stage), instrs,
++                          limit && instrs > limit ? ": too big, pipeline refused" : "");
++         if (fd >= 0) {
++            write(fd, msg, n > 0 ? (size_t)n : 0);
++            close(fd);
++         }
++      }
++      if (limit && instrs > limit)
++         return VK_ERROR_OUT_OF_HOST_MEMORY;
++   }
++#endif
+    struct util_dynarray binary = UTIL_DYNARRAY_INIT;
+    pan_shader_compile(nir, &input, &binary, &shader->info);
+ 
