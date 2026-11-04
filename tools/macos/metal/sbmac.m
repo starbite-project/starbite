@@ -56,6 +56,39 @@ static void sblog(const char *fmt, ...)
 		write(2, line, (size_t)n);
 }
 
+/* Catch-all for MTLDevice selectors the bridge device lacks (WindowServer aborted on -peerGroupID,
+ * boot 130455): sends it cannot answer are forwarded to this stub, which answers 0/nil and logs the
+ * name once. respondsToSelector: stays honest (only real sends are forwarded). */
+@interface SBMacZeroStub : NSObject
+@end
+@implementation SBMacZeroStub
+static id sbzero(id me, SEL s, ...) { (void)me; (void)s; return nil; }
++ (BOOL)resolveInstanceMethod:(SEL)sel
+{
+	sblog("metal: unimplemented device selector %s -> 0", sel_getName(sel));
+	class_addMethod(self, sel, (IMP)sbzero, "@16@0:8");
+	return YES;
+}
+@end
+static void sbmac_device_fill(id dev)
+{
+	Class c = object_getClass(dev);
+	class_addMethod(c, sel_registerName("peerGroupID"), imp_implementationWithBlock(^uint64_t(id me) { (void)me; return 0; }), "Q16@0:8");
+	class_addMethod(c, sel_registerName("peerIndex"), imp_implementationWithBlock(^uint32_t(id me) { (void)me; return 0; }), "I16@0:8");
+	class_addMethod(c, sel_registerName("peerCount"), imp_implementationWithBlock(^uint32_t(id me) { (void)me; return 1; }), "I16@0:8");
+	static id stub;
+	stub = [SBMacZeroStub new];
+	SEL fw = @selector(forwardingTargetForSelector:);
+	class_addMethod(c, fw, imp_implementationWithBlock(^id(id me, SEL s) {
+		(void)me;
+		const char *n = sel_getName(s);
+		/* only plain getters/MTLDevice-style sends; leave NSObject/runtime machinery alone */
+		if (n[0] == '_' || !strncmp(n, "retain", 6) || !strncmp(n, "release", 7)) return nil;
+		return stub;
+	}), "@24@0:8:16");
+	sblog("device %s: peerGroupID/peerIndex/peerCount + zero catch-all", class_getName(c));
+}
+
 static id<MTLDevice> gOurs;
 static size_t (*sb_status_fn)(char *, size_t);
 
@@ -117,6 +150,7 @@ static void sb_publish(void)
 		 * device (a bare _MTLDevice subclass) answered 0: no compositor, the display never accelerated, every
 		 * frame black (26.5 boots 102422-123708). Answer a real service port: the StarbiteMali GPU's.
 		 */
+		sbmac_device_fill(dev);
 		if (!(getenv("SBMAC_ACCEL_PORT") && !strcmp(getenv("SBMAC_ACCEL_PORT"), "0"))) {
 			io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("StarbiteMali"));
 			if (svc) {
