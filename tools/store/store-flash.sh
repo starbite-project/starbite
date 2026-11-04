@@ -30,14 +30,23 @@ PY
 HEROLOG=1025
 [ "$used" -le $(( cap - HEROLOG )) ] || { echo "store needs $used blocks: past $(( cap - HEROLOG )) it would overlap the USERDATA herolog ring: refusing"; exit 1; }
 
-# iOS root: HFS+ volume header at byte 1024, must end by 16 GiB.
+# The Apple slot (USERDATA's first 16 GiB) must end before the store: either the old iOS 26 root (HFS+ volume
+# header at byte 1024) or iOS 16's (an earlier port's) system APFS container at block 0, whose 8 GiB SBIOSSYS part it fills
+# at most (the HFSX /var volume behind it, SBIOSVAR, ends at 16 GiB by construction: tools/refport/slot-write.py).
 python3 - <(rd 0) <<'PY'
 import struct, sys
-b = open(sys.argv[1], 'rb').read()[1024:1024 + 512]
-assert b[:2] in (b'H+', b'HX'), f'no HFS+ volume at USERDATA (signature {b[:2]!r})'
-bs, total = struct.unpack('>II', b[40:48])
-assert bs * total <= 16 << 30, f'HFS+ volume ends at {bs * total} > 16 GiB'
-print(f'iOS root: HFS+ {b[:2].decode()} ends at {bs * total / 2**30:.2f} GiB')
+d = open(sys.argv[1], 'rb').read()
+b = d[1024:1024 + 512]
+if b[:2] in (b'H+', b'HX'):
+    bs, total = struct.unpack('>II', b[40:48])
+    assert bs * total <= 16 << 30, f'HFS+ volume ends at {bs * total} > 16 GiB'
+    print(f'Apple slot: HFS+ {b[:2].decode()} ends at {bs * total / 2**30:.2f} GiB')
+elif d[32:36] == b'NXSB':
+    bs, count = struct.unpack_from('<IQ', d, 36)
+    assert bs * count <= 8 << 30, f'APFS container ends at {bs * count} > 8 GiB (SBIOSSYS)'
+    print(f'Apple slot: iOS 16 APFS system, {bs * count / 2**30:.2f} GiB (SBIOSSYS 8 GiB)')
+else:
+    sys.exit(f'Apple slot holds neither an HFS+ root nor the iOS 16 APFS system (signature {b[:2]!r}): refusing')
 PY
 
 # Target: a store (either version) or zeros.
