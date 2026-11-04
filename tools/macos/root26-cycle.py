@@ -255,6 +255,9 @@ def main():
                         if job.get('Label') == label:
                             job[k] = json.loads(v)
                             print('set', label, k, '=', job[k])
+                            if os.path.exists(mnt + key):                  # the on-disk plist too: launchd reads both
+                                with open(mnt + key, 'wb') as f:
+                                    plistlib.dump(job, f)
                 with open(lp, 'r+b') as f:
                     f.truncate(0)
                     plistlib.dump(d, f, fmt=plistlib.FMT_BINARY)
@@ -269,6 +272,9 @@ def main():
                         env['OS_ACTIVITY_DT_MODE'] = 'YES'
                         env['OS_ACTIVITY_MODE'] = 'debug'
                         print('console + os_log to stderr for', job['Label'])
+                        if os.path.exists(mnt + key):                  # the on-disk plist too: launchd reads both
+                            with open(mnt + key, 'wb') as f:
+                                plistlib.dump(job, f)
                 with open(lp, 'r+b') as f:
                     f.truncate(0)
                     plistlib.dump(d, f, fmt=plistlib.FMT_BINARY)
