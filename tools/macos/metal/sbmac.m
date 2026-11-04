@@ -337,6 +337,10 @@ static void sb_image_added(const struct mach_header *mh, intptr_t slide)
 {
 	(void)slide;
 	Dl_info info;
+	/* images outside the shared cache (our Mesa/Metal bridge): their load address, so the kernel
+	 * sampler's pcs in WindowServer can be symbolicated (the CPU spin of boot 160330) */
+	if (!(mh->flags & 0x80000000) && dladdr(mh, &info) && info.dli_fname && !strcmp(getprogname(), "WindowServer"))
+		sblog("image %p %s", (void *)mh, info.dli_fname);
 	if (dladdr(mh, &info) && info.dli_fname && strstr(info.dli_fname, "/QuartzCore.framework/") &&
 	    !strcmp(getprogname(), "WindowServer") && !getenv("SBMAC_NO_FBFORMAT"))
 		sb_patch_pixel_format(mh);
