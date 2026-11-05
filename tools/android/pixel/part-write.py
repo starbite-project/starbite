@@ -22,13 +22,14 @@ CHUNK, MIB = 64 << 20, 1 << 20
 
 def adb(*args, check=True):
     for attempt in range(6):
-        p = subprocess.run(['adb', *args], capture_output=True, text=True)
+        # stdin=DEVNULL: adb shell reads stdin, and with IMAGE '-' that is the image stream
+        p = subprocess.run(['adb', *args], capture_output=True, text=True, stdin=subprocess.DEVNULL)
         transient = any(s in p.stderr for s in ('daemon', 'device offline', 'no devices', 'cannot connect'))
         if not (p.returncode and transient):
             break
         print(f'adb transient error, retry {attempt + 1}: {p.stderr.strip()[:120]}', flush=True)
         time.sleep(5)
-        subprocess.run(['adb', 'wait-for-recovery'], capture_output=True, timeout=120)
+        subprocess.run(['adb', 'wait-for-recovery'], capture_output=True, timeout=120, stdin=subprocess.DEVNULL)
     if check and p.returncode:
         sys.exit(f'adb {" ".join(args)} failed: {p.stdout} {p.stderr}')
     return p.stdout.replace('\r', '')
@@ -42,6 +43,18 @@ def open_image(path):
     if path == '-':
         return sys.stdin.buffer
     return gzip.open(path, 'rb') if path.endswith('.gz') else open(path, 'rb')
+
+
+def read_full(f, n):
+    """Exactly n bytes, or fewer only at the end of the image: a pipe's read() may return less than
+    asked (stdin from unzip -p): a short read would misplace every following chunk."""
+    out = bytearray()
+    while len(out) < n:
+        c = f.read(n - len(out))
+        if not c:
+            break
+        out += c
+    return bytes(out)
 
 
 def image_size(path, given):
@@ -89,7 +102,7 @@ def main():
     if a.dry_run:
         h, zeros, f = hashlib.sha256(), 0, open_image(a.image)
         for i in range(n_chunks):
-            d = f.read(CHUNK); h.update(d)
+            d = read_full(f, CHUNK); h.update(d)
             zeros += d.count(0) == len(d)
         print(f'image sha256 {h.hexdigest()}; {zeros} all-zero chunks (written from /dev/zero), '
               f'{n_chunks - zeros} pushed')
@@ -107,7 +120,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         local = os.path.join(tmp, 'chunk.gz')
         for i in range(n_chunks):
-            data = f.read(CHUNK)
+            data = read_full(f, CHUNK)
             total.update(data)
             seek, count = i * CHUNK // MIB, (len(data) + MIB - 1) // MIB
             want = hashlib.sha256(data).hexdigest()
