@@ -14,7 +14,7 @@
 #   root      where the OS keeps its root (shown, not used by the loader)
 #   flags     ["hidden"]: only in Engineer's "Start an OS"
 # Hidden on 2026-11-05 (the user's menu cleanup; nothing deleted): Starbite shell, Ubuntu Desktop, Ubuntu
-# Lomiri (black screen), Arch Linux ARM, UEFI Shell, Darwin console, microSD probe.
+# Lomiri (black screen), Arch Linux ARM, Kali Linux, UEFI Shell, Darwin console, microSD probe.
 # Strings use the loader's font: ASCII and ° · … ↑ ↓ ← → µ ± × ■ ▲ ▼ ✓
 
 [[entry]]
@@ -212,6 +212,7 @@ tag = "experimental"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
 cmdline = "sb.root=/distros/kali.img sb.session=phosh"
 root = "sd:p1 /distros/kali.img"
+flags = ["hidden"]
 
 # Lab: proves that a failed start comes back to the menu (its file is not an arm64 Image).
 [[entry]]
