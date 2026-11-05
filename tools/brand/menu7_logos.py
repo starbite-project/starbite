@@ -104,15 +104,39 @@ assert set(CREDITS) == set(FILES)
 # here; otherwise it keeps its vendor-logo tile (menu7-assets tile_table). Each value:
 #   (file under src/, source URL, sha256, credit line, mode)
 #   mode 'bleed': the icon is itself an app icon (a squircle or square with its own background):
-#                 it fills the tile, cut to the tile's squircle; 'fit': a mark on the tile colours.
+#                 it fills the tile, cut to the tile's squircle; a number: a mark (or a round
+#                 badge) at that fraction of the tile, centred on the tile's colours.
 # A file present but not pinned (sha256 None) stops the build with the sha256 to pin. SVG or PNG
-# (PNG: the largest size published, resampled to each tile size with Lanczos).
+# (PNG: the largest size published, resampled to each tile size with Lanczos). Added 2026-11-05
+# (downloads approved by the user; SOURCES.md has the rows).
+DEV_ICONS = 'https://developer.apple.com/assets/elements/icons/'
 RELEASE = {
-    'ios16': (None, None, None, None, 'bleed'),
-    'mac13': (None, None, None, None, 'bleed'),
-    'ios26': (None, None, None, None, 'bleed'),
-    'android': (None, None, None, None, 'fit'),
-    'linux-ubuntu': (None, None, None, None, 'fit'),
+    'ios16': ('release/ios16/ios-16-num-256x256_2x.png', DEV_ICONS + 'ios-16-num/ios-16-num-256x256_2x.png',
+              '8bb8a4512731a939c86eef1b20bd68ec7fea930e3c9497569b2ed4320e8c3616',
+              "iOS 16 icon: Apple Inc. (developer.apple.com); Apple's copyright and trademark", 'bleed'),
+    'ios26': ('release/ios26/ios-26-256x256_2x.png', DEV_ICONS + 'ios-26/ios-26-256x256_2x.png',
+              'b6752a31066de2f524a31302f6954b89d6a29b797499b81c874e4fd4d97a4e28',
+              "iOS 26 icon: Apple Inc. (developer.apple.com); Apple's copyright and trademark", 'bleed'),
+    # the Install macOS Ventura app's App Store artwork (app id 1638787999): a round badge
+    'mac13': ('release/mac13/InstallAssistant-512x512bb.png',
+              'https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/0d/53/b3/'
+              '0d53b3bb-70ee-a0f9-6ecd-237260e13725/InstallAssistant.png/512x512bb.png',
+              '3de4f8f255bba5b1ac5675c4d678489a529bae03e044b619e9533d3e2ef44ecf',
+              "macOS Ventura installer icon: Apple Inc. (App Store artwork); Apple's copyright and "
+              'trademark', .80),
+    # the Android 17 badge from the stable release post (on white: _matte_white below)
+    'android': ('release/android/metadata-static.png',
+                'https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEgV7zuuXjulHty999mGDWY1kfL8Q9SXjY'
+                'YWn-7JTpMfVdNP78eb5fW9shOpvVdEqK0WnNp7AhdO0qc7pXAaqcfTwXgOGsfZyqcQv8wyD-9niWBpZuP6ZAPHBSetW'
+                'enN2lMlRS5wi2d71-n8RCYqrLsFhUCEvM7KeoGLnNaDbiyOZQ0vvyr0O580nXK4Vas/s2048/Metadata%20-%20Static.png',
+                '637c790be0ce209bee4b24301dddc66b7f129ce902a38f2136154daba5ce1338',
+                'Android 17 badge: Google LLC (Android Developers Blog); Android is a trademark of Google LLC',
+                .82),
+    'linux-ubuntu': ('release/linux-ubuntu/ubuntu-mascot-light.svg',
+                     'https://www.omgubuntu.co.uk/wp-content/uploads/2026/02/ubuntu-mascot-light.svg',
+                     'b89ff17308d8a6e8bcaff394e6ad740eae3d7d2fa9be2d751966e64deacbcad9',
+                     "Ubuntu 26.04 'Resolute Raccoon' mascot: Canonical Ltd. (via OMG! Ubuntu); Ubuntu "
+                     'is a trademark of Canonical Ltd.', .74),
 }
 RELEASE_DIR = SRC / 'release'
 
@@ -138,6 +162,42 @@ def release_file(key):
     return p
 
 
+def _matte_white(im, edge=224.0):
+    """A badge on an opaque white page -> the badge on transparency. Only the white outside it
+    goes: the near-white pixels connected to the image border (flood fill), plus a 2 px band
+    along the rim, are unmixed from white (alpha = distance from white / the rim colour's
+    distance `edge`, colour = 255 - (255 - c) / alpha). White inside the badge (the "ANDROID"
+    and "17" lettering) is not connected to the border and stays opaque."""
+    from PIL import ImageDraw
+    rgb = np.asarray(im.convert('RGB')).astype(np.float64)
+    d = 255 - rgb.min(axis=2)                           # 0 = white
+    light = Image.fromarray(np.where(d < 100, 255, 0).astype(np.uint8), 'L').copy()  # writable
+    H, W = d.shape
+    border = [(x, 0) for x in range(W)] + [(x, H - 1) for x in range(W)] + \
+             [(0, y) for y in range(H)] + [(W - 1, y) for y in range(H)]
+    for xy in border:
+        if light.getpixel(xy) == 255:
+            ImageDraw.floodfill(light, xy, 128)
+    out = np.asarray(light) == 128                      # the white outside, as one region
+    band = out.copy()
+    for _ in range(2):                                  # the anti-aliased rim next to it
+        g = band.copy()
+        g[1:] |= band[:-1]
+        g[:-1] |= band[1:]
+        g[:, 1:] |= band[:, :-1]
+        g[:, :-1] |= band[:, 1:]
+        band = g
+    a = np.where(band, np.clip(d / edge, 0, 1), 1.0)
+    c = np.where(band[..., None] & (a[..., None] > 0),
+                 255 - (255 - rgb) / np.maximum(a[..., None], 1e-6), rgb)
+    rgba = np.concatenate([np.clip(c, 0, 255), a[..., None] * 255], axis=-1)
+    return Image.fromarray(np.rint(rgba).astype(np.uint8), 'RGBA')
+
+
+RELEASE_PREP = {'android': _matte_white}    # applied to the pinned source on every build
+_PREP_CACHE = {}
+
+
 def release_render(key, T):
     """The release icon at T x T, straight RGBA float 0..255, and its mode ('bleed' / 'fit')."""
     p = release_file(key)
@@ -147,6 +207,8 @@ def release_render(key, T):
         im = Image.fromarray(np.clip(np.rint(a), 0, 255).astype(np.uint8), 'RGBA')
     else:
         im = Image.open(p).convert('RGBA')
+    if key in RELEASE_PREP:
+        im = _PREP_CACHE[key] if key in _PREP_CACHE else _PREP_CACHE.setdefault(key, RELEASE_PREP[key](im))
     bb = im.getchannel('A').point(lambda v: 255 if v > 8 else 0).getbbox()
     if bb:                              # to the icon's own bounds (an app icon fills the tile)
         im = im.crop(bb)

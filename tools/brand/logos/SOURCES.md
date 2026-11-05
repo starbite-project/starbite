@@ -30,24 +30,32 @@ guidelines use a monochrome version (Apple: white) and the removals listed. No e
 Not real logos (kept from the concept, they are Starbite's own): the Starbite star, the Lab flask, the
 `>_` tile of the Starbite shell, the Display Test bars, and the "other" ring.
 
-## Release icons (`src/release/<catalog key>/`, slots ready, no files yet)
+## Release icons (`src/release/<catalog key>/`)
 
-A tile can show the icon of its release instead of the vendor logo: put the file (SVG, or PNG at
-the largest size published) in `src/release/<key>/` and pin it in `menu7_logos.RELEASE[<key>]`
-(file, URL, sha256, credit line for INFO, mode) with a row in the table below. An unpinned file
-stops the build and prints its sha256; without a file the vendor-logo tile above stays (the
-container is then byte-identical). Mode `bleed`: an app icon with its own background, cropped
-to its bounds and filling the tile, cut to the squircle; `fit`: a mark at .62 of the tile on the
-vendor tile's colours. Slots: `ios16`, `mac13`, `ios26` (bleed), `android`, `linux-ubuntu` (fit).
+A tile shows the icon of its release instead of the vendor logo when the file is in
+`src/release/<key>/` and pinned in `menu7_logos.RELEASE[<key>]` (file, URL, sha256, credit line for
+INFO, mode). An unpinned file stops the build and prints its sha256; without a file the vendor-logo
+tile above stays. Mode `bleed`: an app icon with its own background, cropped to its bounds and
+filling the tile, cut to the squircle; a number: the icon at that fraction of the tile, centred on
+the vendor tile's colours. Downloaded 2026-11-05 (approved by the user) and placed by the
+coordinating session; hashes checked here, the SVGs checked for scripts and external references
+(none). Every icon is Apple's / Canonical's artwork and trademark, used only to label the release
+the entry starts (nominative use, no endorsement).
 
-| Key | Candidate (2026-11-05, not downloaded: needs the user's own go-ahead) | Note |
-|---|---|---|
-| ios16 | Apple's "ios-16-num" icon, `https://developer.apple.com/assets/elements/icons/ios-16-num/ios-16-num-96x96_2x.png` (192 x 192 PNG; named as the source of Commons `File:IOS_16_logo.png`, 192 x 192, 19 688 bytes, tagged public domain) | the Apple-hosted file is the official one; the URL was not opened |
-| mac13 | none found on Commons (only `File:MacOS_Ventura_wordmark.svg`, a wordmark, 512 x 56); the installer icon would have to come from apple.com / developer.apple.com | not located |
-| ios26 | none on Commons (only iOS 26 app icons); Apple developer site's iOS 26 icon not located | not located |
-| android | Google published an Android 17 logo (reported Feb-Mar 2026); no official file location found | not located |
-| linux-ubuntu | Canonical's 26.04 "Resolute Raccoon" mascot, monochrome SVG (light / dark), via the Ubuntu artwork channels (reported Feb 2026) | URL not confirmed |
-| win11, chromeos, linux-pmos | keep the current official logos: no 23H2-specific Windows icon, no separate ChromiumOS release mark, postmarketOS has no release icons | |
+| Key | File | Source URL | sha256 | Licence / trademark note | Mode |
+|---|---|---|---|---|---|
+| ios16 | `release/ios16/ios-16-num-256x256_2x.png` (512 x 512 PNG) | https://developer.apple.com/assets/elements/icons/ios-16-num/ios-16-num-256x256_2x.png | `8bb8a4512731a939c86eef1b20bd68ec7fea930e3c9497569b2ed4320e8c3616` | Apple's iOS 16 icon (developer.apple.com); copyright and trademark Apple Inc. | bleed |
+| ios26 | `release/ios26/ios-26-256x256_2x.png` (512 x 512 PNG) | https://developer.apple.com/assets/elements/icons/ios-26/ios-26-256x256_2x.png | `b6752a31066de2f524a31302f6954b89d6a29b797499b81c874e4fd4d97a4e28` | Apple's iOS 26 icon (developer.apple.com); copyright and trademark Apple Inc. | bleed |
+| mac13 | `release/mac13/InstallAssistant-512x512bb.png` (512 x 512 PNG) | https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/0d/53/b3/0d53b3bb-70ee-a0f9-6ecd-237260e13725/InstallAssistant.png/512x512bb.png | `3de4f8f255bba5b1ac5675c4d678489a529bae03e044b619e9533d3e2ef44ecf` | the Install macOS Ventura app's App Store artwork (Apple's lookup API, app id 1638787999); copyright and trademark Apple Inc. A round badge with transparent corners | .80 on the Ventura tile (#6a1d45 -> #f7a03a) |
+| linux-ubuntu | `release/linux-ubuntu/ubuntu-mascot-light.svg` (12 117 bytes) | https://www.omgubuntu.co.uk/wp-content/uploads/2026/02/ubuntu-mascot-light.svg | `b89ff17308d8a6e8bcaff394e6ad740eae3d7d2fa9be2d751966e64deacbcad9` | Canonical's official Ubuntu 26.04 "Resolute Raccoon" mascot, rehosted by OMG! Ubuntu (Canonical's own copy is in its artwork Google Drive); Ubuntu is a trademark of Canonical Ltd. | .74 on the Ubuntu-orange tile |
+| (linux-ubuntu, unused) | `release/linux-ubuntu/ubuntu-mascot-dark.svg` (12 093 bytes) | https://www.omgubuntu.co.uk/wp-content/uploads/2026/02/ubuntu-mascot-dark.svg | `f342664e8506bb55b5c0439925982e0e6fcfe5e9e371bfcc711814e3e9e3d38a` | as above; the dark variant, kept for a light tile | not used |
+
+| android | `release/android/metadata-static.png` (2048 x 1323 RGB, the badge on white) | https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEgV7zuuXjulHty999mGDWY1kfL8Q9SXjYYWn-7JTpMfVdNP78eb5fW9shOpvVdEqK0WnNp7AhdO0qc7pXAaqcfTwXgOGsfZyqcQv8wyD-9niWBpZuP6ZAPHBSetWenN2lMlRS5wi2d71-n8RCYqrLsFhUCEvM7KeoGLnNaDbiyOZQ0vvyr0O580nXK4Vas/s2048/Metadata%20-%20Static.png ("Metadata - Static.png" of the stable post https://android-developers.googleblog.com/2026/06/Android-17.html) | `637c790be0ce209bee4b24301dddc66b7f129ce902a38f2136154daba5ce1338` | the final Android 17 release badge, Google LLC artwork; Android is a trademark of Google LLC. Edit at build time (`menu7_logos._matte_white`): only the white outside the badge (flood fill from the image border, plus a 2 px rim band unmixed from white) made transparent; the white "ANDROID" / "17" lettering stays | .82 on the Android navy tile |
+| (android, unused) | `release/android/heptadecagraph-rounded-calm.png` (1024 x 1024 RGBA) | https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEjDYVIPcSHC3ZeYbTu-FSxsYdp1PDK62bN18DL-VuLlWbmEG9L7vPfW6CA6SfA0iaUiZ-V79edfaGQ7DWsaMH7i9zQlTNbYlKZlsEgMb6IQAIJdxMb7NXcqtETxMk2T3X1uY2U7Ok4xq1-52gDN_yH5LOUEAr6xb3wBx0XJJKBnvmKHt8JNfo7Bfp9n_0g/s0/heptadecagraph-rounded-calm@2x.png (Beta 1 post https://android-developers.googleblog.com/2026/02/the-first-beta-of-android-17.html) | `c6558afe8eb724447edca918cf24a58c788991ebfc1e5aa6ff9390b8d3449db7` | the Beta 1 version of the badge (a different planet), Google LLC; kept for reference | not used |
+
+No release icon: Windows 11 (no 23H2-specific icon), ChromiumOS (no separate release
+mark: the Chromium logo stays), postmarketOS (no release icons). The `linux` key (the generic
+Ubuntu entry) keeps the Circle of Friends.
 
 ## Starbite-drawn (`src/starbite/`, 2026-11-05)
 

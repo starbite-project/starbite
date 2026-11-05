@@ -585,12 +585,14 @@ CUSTOM_G = {
 
 def release_layer(g, T):
     """'R:<key>': the release icon (menu7_logos.RELEASE). 'bleed' fills the tile (an app icon of
-    its own), 'fit' sits at .62 of the tile on its colours; both cut to the squircle."""
+    its own), a number sits at that fraction of the tile on its colours; both cut to the
+    squircle."""
     key = g[2:]
-    if menu7_logos.RELEASE[key][4] == 'bleed':
+    mode = menu7_logos.RELEASE[key][4]
+    if mode == 'bleed':
         lay, _ = menu7_logos.release_render(key, T)
     else:
-        n = int(round(T * .62))
+        n = int(round(T * mode))
         small, _ = menu7_logos.release_render(key, n)
         lay = np.zeros((T, T, 4))
         o = (T - n) // 2

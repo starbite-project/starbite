@@ -526,14 +526,15 @@ concept's. The tile map (`SB7_T_TILEMAP`) for today's catalog:
 
 | Catalog key | Tile (c1 -> c2, glyph) |
 |---|---|
-| ios16 | #0a58d0 -> #5ac8fa (iOS 16 era lighter blue), Apple logo (white) |
-| mac13 | #6a1d45 -> #f7a03a (Ventura wallpaper magenta -> orange), Apple logo (white) |
-| ios26 | #0b2560 -> #3d8cff (the concept's current blue), Apple logo (white) |
+| ios16 | Apple's iOS 16 icon, full bleed (release icon; without it: #0a58d0 -> #5ac8fa, Apple logo) |
+| mac13 | #6a1d45 -> #f7a03a (Ventura magenta -> orange), the Ventura installer badge at .80 (without it: Apple logo) |
+| ios26 | Apple's iOS 26 icon, full bleed (without it: #0b2560 -> #3d8cff, Apple logo) |
 | chromeos | #ffffff -> #dfe8f7 (dark), official Chromium logo (Commons Chromium_Material_Icon.svg) |
 | engineer | #06121f -> #1b4a6e, gear with the Starbite star in its hub (`starbite/engineer.svg`, Starbite-drawn: Starbite's own system) |
 | win11 | #ffffff -> #dbe4f0, Windows 11 logo (#0078d4) |
-| android | #05202c -> #0b4a5e (Android navy), Android robot head (#3ddc84) |
-| linux-ubuntu, linux | #c13a0d -> #f47b3c, Ubuntu Circle of Friends (2022, white) |
+| android | #05202c -> #0b4a5e (Android navy), the Android 17 release badge at .82 (without it: the robot head, #3ddc84) |
+| linux-ubuntu | #c13a0d -> #f47b3c, the Ubuntu 26.04 Resolute Raccoon mascot (light) at .74 |
+| linux | #c13a0d -> #f47b3c, Ubuntu Circle of Friends (2022, white) |
 | linux-ubuntu-gnome | #5e1b58 -> #d2491f, Circle of Friends |
 | linux-ubuntu-lomiri | #77216f -> #e95420, Circle of Friends |
 | linux-arch | #0c1015 -> #2a333e, Arch Linux logo (#1793d1) |
@@ -548,8 +549,12 @@ concept's. The tile map (`SB7_T_TILEMAP`) for today's catalog:
 
 Release icons (`menu7_logos.RELEASE`, `R:` glyph kinds): where a release's own icon is in
 `tools/brand/logos/src/release/<key>/` and pinned, that key's tile shows it instead (app icons full
-bleed, marks on the vendor tile's colours); none is in the tree yet (SOURCES.md lists the
-candidates). Every other OS shows its official logo; only Starbite's own systems may use Starbite-drawn art
+bleed, others at a fraction of the tile on the vendor tile's colours): iOS 16 and iOS 26 (Apple's
+developer icons, full bleed), macOS Ventura (the installer's round badge at .80 on its magenta ->
+orange tile), Ubuntu (the 26.04 Resolute Raccoon mascot, light, at .74 on Ubuntu orange), Android 17
+(the release badge from Google's stable post, its white page made transparent by a border flood
+fill at build time, at .82 on the Android navy tile). Windows 11, ChromiumOS and postmarketOS have
+no release icon and keep their logos (SOURCES.md). Every other OS shows its official logo; only Starbite's own systems may use Starbite-drawn art
 (the `X:` glyph kinds, `CUSTOM_G` in `menu7-assets.py`, today only Engineer OS). Their layers are
 cut to the squircle when they are built, because glass draws a glyph layer unclipped. `tools/menu7/tile-sheet.py` draws the visible systems'
 tiles from a container, labelled (`tools/brand/preview/icons-before.png`, `icons-after.png`).
