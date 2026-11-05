@@ -60,12 +60,12 @@ root = "ufs:WINDOWS (NTFS)"
 [[entry]]
 key = "android"
 name = "Android 17"
-version = "Google GSI 17 QPR3 · Play · Linux 4.9"
+version = "Pixel-style LineageOS 24 · Linux 4.9"
 category = "android"
 method = "android"
 tag = "experimental"
 files = ["android.kernel", "android.ramdisk", "android.cmdline"]
-root = "ufs:SYSTEM (Google GSI) + VENDOR + A16DATA"
+root = "ufs:SYSTEM + VENDOR + A16DATA"
 
 [[entry]]
 key = "chromeos"
@@ -290,7 +290,7 @@ flags = ["hidden"]
 [[entry]]
 key = "engineer"
 name = "Engineer OS"
-version = "Engineer OS 1 · read only · dry-run writes"
+version = "Engineer OS 1.1 · read only · dry-run writes"
 category = "starbite"
 method = "bare"
 tag = "beta"
