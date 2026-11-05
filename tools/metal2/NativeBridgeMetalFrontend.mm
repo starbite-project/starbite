@@ -94,7 +94,28 @@ static std::atomic<uint64_t> gTraceObjectIDs{0};
 @interface NBObject : NSObject {uint64_t _traceObjectID;}
 @property(atomic,copy) NSString *label;
 @end
+// Starbite: a selector a bridge object lacks answered 0/nil (logged once each) instead of
+// doesNotRecognizeSelector's exception: macOS 13's WindowServer aborted on one ~7 minutes into a session
+// (boot 20261105-073357). Plain object-returning/scalar sends only: forwarding never covers struct returns.
+@interface NBZeroStub : NSObject
+@end
+@implementation NBZeroStub
+static id nbzero(id me, SEL s, ...) { (void)me; (void)s; return nil; }
++ (BOOL)resolveInstanceMethod:(SEL)sel {
+ class_addMethod(self, sel, (IMP)nbzero, "@16@0:8");
+ return YES;
+}
+@end
 @implementation NBObject
+- (id)forwardingTargetForSelector:(SEL)selector {
+ const char *n=sel_getName(selector);
+ if(n[0]=='_'||!strncmp(n,"retain",6)||!strncmp(n,"release",7)||!strcmp(n,"dealloc"))return nil;
+ static NSMutableSet *seen; static NBZeroStub *stub; static dispatch_once_t once;
+ dispatch_once(&once,^{seen=[NSMutableSet new];stub=[NBZeroStub new];});
+ NSString *key=[NSString stringWithFormat:@"%s %s",class_getName(object_getClass(self)),n];
+ @synchronized(seen){if(![seen containsObject:key]){[seen addObject:key];sm2_logs([NSString stringWithFormat:@"native-metal: missing %@ -> 0",key].UTF8String);noteProblem([@"missing " stringByAppendingString:key]);}}
+ return stub;
+}
 - (id<MTLDevice>)device {return gDeviceObject;}
 // Metal's trace identity: queues, command buffers, encoders and heaps answer globalTraceObjectID for signposts (unique, never reused).
 - (uint64_t)globalTraceObjectID {
