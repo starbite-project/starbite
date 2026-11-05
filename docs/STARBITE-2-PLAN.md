@@ -46,6 +46,10 @@ redo** (it lags; better icons).
    Starbite S9, every OS working. **No user password or passcode set on any OS** (it would only confuse);
    where an OS insists on an account, log in automatically.
 
+**One phone only (2026-11-05):** the second S9 is missing, so everything is built and tested on S9 #1. Work the
+plans gave to S9 #2 (GPT editor, installer writes, UO1/FB1 bring-up) runs here instead: dry runs first, and a
+fresh, verified backup of every irreplaceable partition and image before any real write.
+
 ## 1. Where things stand
 
 | OS | How it boots | Root lives on | State |
