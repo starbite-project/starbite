@@ -60,12 +60,12 @@ root = "ufs:WINDOWS (NTFS)"
 [[entry]]
 key = "android"
 name = "Android 17"
-version = "LineageOS 24.0 · Linux 4.9"
+version = "Google GSI 17 QPR3 · Play · Linux 4.9"
 category = "android"
 method = "android"
 tag = "experimental"
 files = ["android.kernel", "android.ramdisk", "android.cmdline"]
-root = "ufs:SYSTEM + A16DATA"
+root = "ufs:SYSTEM (Google GSI) + VENDOR + A16DATA"
 
 [[entry]]
 key = "chromeos"
