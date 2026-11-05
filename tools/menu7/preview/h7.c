@@ -286,15 +286,31 @@ uint32_t __wrap_g7_frame(const struct g7_frame *f)
                 g.flags |= G7_F_FULL;
                 __real_g7_frame(&g);
                 unsigned bad = 0, worst = 0;
+                int bx0 = G7_W, by0 = G7_H, bx1 = -1, by1 = -1;
                 for (int i = 0; i < G7_W * G7_H; i++)
                     if (a[i] != FB[i]) {
                         bad++;
+                        int x = i % G7_W, y = i / G7_W;
+                        if (x < bx0) bx0 = x;
+                        if (x > bx1) bx1 = x;
+                        if (y < by0) by0 = y;
+                        if (y > by1) by1 = y;
                         for (int s = 0; s < 24; s += 8) {
                             int e = abs((int)((a[i] >> s) & 255) - (int)((FB[i] >> s) & 255));
                             if ((unsigned)e > worst) worst = (unsigned)e;
                         }
                     }
-                printf("FORKCHECK %.0f: %u px differ from a full redraw (worst %u)\n", stub_now_us() / 1e3, bad, worst);
+                printf("FORKCHECK %.0f: %u px differ from a full redraw (worst %u)", stub_now_us() / 1e3, bad, worst);
+                if (bad)
+                    printf(" in %d,%d .. %d,%d", bx0, by0, bx1, by1);
+                printf("\n");
+                {
+                    const char *dm = getenv("H7_FCDUMP");     /* H7_FCDUMP=<ms>: fc-inc.ppm, fc-full.ppm */
+                    if (dm && bad && (int)(stub_now_us() / 1000) == atoi(dm)) {
+                        write_ppm("fc-full.ppm", FB);
+                        write_ppm("fc-inc.ppm", a);
+                    }
+                }
                 fflush(stdout);
                 _exit(0);
             }

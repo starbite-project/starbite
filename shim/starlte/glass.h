@@ -16,8 +16,16 @@
  * glass.c keeps the previous frame's lists and draws only what changed: every shape and item
  * carries a stable key, and a change of an item's key, geometry or content dirties its old and new
  * bounds (a shape's with its 110 x 150 px shadow margin, as GLASS_FS's own cull); a change of a
- * frame-wide value (dim, back, light, wall, word) dirties the panel. Dirty rects are composed in
- * G7_CANVAS and copied to the framebuffer. A frame that changes nothing costs nothing.
+ * frame-wide value (dim, back, light, wall, word) dirties the panel. A frame that changes nothing
+ * costs nothing.
+ *
+ * Resolution (MV4 route 2): everything below the content items (wallpaper, glass, the frozen base,
+ * the over glass) is composed in G7_CANVAS on the half-resolution grid, 720 x 1480 (canvas pixel
+ * (i, j) is the panel point (2i + 1, 2j + 1)). The present scales the dirty rects 2x to the
+ * framebuffer (bilinear) and draws the content items over them at panel resolution, so text, icons
+ * and tiles keep their full sharpness; a change of an item alone is only presented again. Behind an
+ * overlay (frozen) the base layer's items are part of the frozen canvas. All coordinates in this
+ * interface stay panel px.
  *
  * Compiled with FP/SIMD (not -mgeneral-regs-only): see build.sh and section 2 of the doc.
  * Units: panel px (1440 x 2960), y down; colours are sRGB-encoded values blended as such (the
@@ -34,9 +42,9 @@
 #ifndef G7_HOSTOFF
 #define G7_HOSTOFF 0UL              /* the preview harness may move everything up (macOS) */
 #endif
-#define G7_CANVAS     (0x84000000UL + G7_HOSTOFF)  /* 17 MiB: the composed panel, ARGB, stride G7_W */
-#define G7_SHARP      (0x85100000UL + G7_HOSTOFF)  /* 17 MiB: the base layer, frozen under an overlay */
-#define G7_BASE       (0x86200000UL + G7_HOSTOFF)  /* 17 MiB: wallpaper x dim at panel res (static after the intro) */
+#define G7_CANVAS     (0x84000000UL + G7_HOSTOFF)  /* 17 MiB: the canvas (720 x 1480 ARGB), the present's band buffer */
+#define G7_SHARP      (0x85100000UL + G7_HOSTOFF)  /* 17 MiB: the base glass (GLB) / the frozen base layer (canvas size) */
+#define G7_BASE       (0x86200000UL + G7_HOSTOFF)  /* 17 MiB: wallpaper x .8 (canvas size), the over glass plane */
 #define G7_POOL       (0x87300000UL + G7_HOSTOFF)  /* 18 MiB: glass's planes, tables, row buffers */
 #define G7_POOL_SIZE  0x01200000UL
 #define G7_CACHE      (0x88500000UL + G7_HOSTOFF)  /* 3 MiB: decoded images and rendered tiles */

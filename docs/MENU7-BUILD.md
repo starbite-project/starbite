@@ -223,3 +223,43 @@ The fixes cost the list about 2 ms VM a frame (the edge rows and the rows due af
 Test procedure for changes to the moving frames: `--check-full` on every list in `build/menu7-work` (0 for every list that ends at rest), the same with `H7_POISON=1` and the run scenarios' `H7_FBHASH=1` sequences with and without it (identical: `build/menu7-work/poison/ptest.sh` and `fh.sh`), `H7_FORKCHECK=1` over `scen.sh` (every FORKCHECK 0), `H7_MOTIONCHECK=1` over `scen.sh` (n64 per list frame near round 1's ~280 on average, worst frame under ~2500), and `tools/menu7/preview/motion-check.sh` (the table above: no growth with N).
 
 None of these reach 30 fps on the A55 (2.8 ms VM). What is left: the intro's wallpaper (WALL_FS 4.7 ms a frame and the upsample to the panel ~10 ms, both changing everywhere from ~1000 ms on), the opening section's own glass during expand (its height, SZ and specular change every frame: no translation), the over layer's motion rows (an overlay pane over a backdrop that fades: no translation either), the launch card while it grows, corners per pixel, SOFT (19 ms) at each freeze, and the curtain's first frame.
+
+### 6.2 Round 3 part 2: MV4 route 2 (half-resolution canvas, 2x present)
+
+All in `glass*.c` (the interface `glass.h` is unchanged; coordinates stay panel px), plus the log slots in `menu7.c`'s `m7_frame_timed`.
+
+- **The canvas is 720 x 1480.** Canvas pixel (i, j) is the panel point (2i + 1, 2j + 1): the grid the glass has been shaded on since round 3 part 1, and the wallpaper texture's own texels. BG8, GLB, TPL, SHARP and SOFT are canvas-sized; the glass is stored 1:1 (C + M x below) instead of bilinear to the panel (that upsample, `base_glass_half`, was 33 % of all VM time). The shift works in canvas rows (frost-correction blocks 2 x 2 canvas px, `GOF` in canvas px).
+- **The present scales 2x and draws the content.** Each dirty rect is scaled 2x (bilinear, the 1/4-3/4 weights, as byte averages: `vrhadd` then `vhadd`, within one unit) into a 16-row band buffer in write-back RAM, the content items (text, images, tiles, rects, rings, arcs, strokes, shadows) are drawn there at panel resolution, then the edge shade, then the band goes to the framebuffer; a band without items goes straight to the framebuffer. Text, icons and tiles are exactly as sharp as before (1:1 crops: `build/cmp-final/*-crop*.png` in the worktree that made them). A change of an item alone is presented again without composing the canvas (`PR` rects).
+- **Over glass while nothing is frozen** (toasts, the Lab card): kept in `OVP` (canvas grid, premultiplied) and composited by the present after the base items, so base text under or near it stays sharp. Frozen (overlays), the base items are in SHARP and the over glass goes into the canvas as before.
+- **The curtain** (end screens): frozen, the curtain and the over items below it are drawn on the canvas, the canvas below it kept at its first frame (`CURT`, canvas-sized), so a fade frame is a canvas copy, a quarter-panel blend and the present.
+- **The freeze's soft version** (uSoft = 1 glass, content blurred 26 px) is shaded and blurred on the quarter grid (360 x 740) and scaled 2x into SOFT: VM soft glass 16.9 -> 6.0 ms, content 7.1 -> 2.7 ms.
+- **Motion frames on the quarter grid** (`G7_QMOTION`, default 1): a frame whose base glass changes over more than a quarter of the panel without a shift (the intro's glass arriving, a section opening) or whose frozen over glass moves shades those rows on the quarter grid (K = 4 uniforms) and marks them (`GAPX` / `OAPX`); `g7_idle` draws them exactly at rest, 64 canvas rows a call. Rims are softer while moving (`build/cmp5/exp-motion-crop.png`: motion frame | exact).
+- **Frost planes on the canvas grid**: A5 and B sampled at the canvas grid, built row by row at first use (not in the bake), 10:10:10 in the upper half of G7_SHARP; a frost row is a row read.
+- **NEON**: 1:1 glyph and bitmap blends (integer), the intro's wallpaper (`gw_wall`, 4 texels a step), the field interpolation, the blur passes' stores and A5, the 2x upscalers. The bake is 19.5 -> 16.7 ms VM.
+
+Memory: G7_CANVAS holds the canvas (4.26 MB), the band buffer (+0x420000), CURT (+0x500000), the freeze's quarter planes (+0x920000) and the quarter motion rows (+0xC60000); G7_SHARP the GLB / frozen base (4.26 MB) and the frost planes (+0x420000, +0x840000); G7_BASE BG8 and OVP (+0x420000).
+
+Checks (VM): every `--state` still `--check-full` 0; every display list in `build/menu7-work` that ends at rest `--check-full` 0; `H7_FORKCHECK=1` over the four `scen.sh` scenarios: 28 checks, all 0; `H7_POISON` per RAM region (`H7_POISON_ONLY` 1..16) leaves the run hash sequences unchanged (poisoning the framebuffer changes them, as before this round: the intro captures S-Boot's splash from it); against the full-resolution renderer every still is within 0.05-0.42/255 mean (`build/cmp-final.txt`). Motion frames' error against an exact frame (`H7_MOTIONCHECK=1`, mean / pixels over 64 per frame): list .54 / 48 (round 3 part 1: .35 / 0), expand .66 / 12, intro-glass 1.18 / 33, launch .29 / 85.
+
+Host timings (VM ms, mean / max, `scen.sh` with a pinned ramdisk; the baseline is commit e0c20ac on the same ramdisk). A55 at S-Boot's ~1050 MHz: the plan's x22-x33 for CPU-bound work, **not measured** (MV1); the present's framebuffer writes are memory-bound and may scale differently.
+
+| class | before | after | A55 at x22-x33 [est] |
+|---|---|---|---|
+| intro-wall | 21.3 / 30.4 | 7.7 / 11.3 | 169-254 ms |
+| intro-glass | 31.3 / 38.8 | 11.1 / 12.6 | 244-366 ms |
+| list | 11.8 / 23.1 | 6.8 / 11.4 | 150-225 ms |
+| lens | 2.5 / 20.4 | 1.6 / 7.1 | 35-53 ms |
+| expand | 17.2 / 21.6 | 6.2 / 7.9 | 136-205 ms |
+| over-move | 17.0 / 58.2 (freeze) | 6.5 / 21.1 (freeze) | 143-215 ms (freeze frame 460-700) |
+| over-rest | 1.6 / 18.0 | 0.9 / 6.9 | 20-30 ms |
+| launch | 19.7 / 46.5 | 9.0 / 19.6 | 198-297 ms |
+| progress | 1.7 / 9.5 | 1.0 / 6.1 | 22-33 ms |
+| end | 4.5 / 29.2 | 3.0 / 12.0 | 66-99 ms |
+| idle (rest bands) | 0.12 | 0.74 | 16-24 ms |
+| bake | 19.5 | 16.7 | 367-551 ms (v6 above 400) |
+
+Still not 30 fps on the A55 for the moving classes (that needs about 1-1.5 ms VM). What is left, by VM cost: the present of large areas (2-5 ms: the 2x and the content items at panel resolution), corner and rim pixels of the shader (`px_general`), the shifted rows' upkeep in list frames (`glb_shift_row`, the edge rows), the intro's wallpaper (~3 ms) and full glass shading while the intro's cards arrive.
+
+**The bake and the v6 fallback.** `M7_BAKE_MAX_MS` (400 ms) is checked against the A55's bake time; at x22 or more even this bake (16.7 ms VM) is near or above it, and the round-3-part-1 bake (19.5 ms VM) was above it from x21. If MV1's boot shows v6 (slot 127 bit 16, slot 125 the bake in ms), boot with `starmenu7=2` (skips the check) to measure v7, then decide on the threshold.
+
+**One phone boot for MV1.** Run one `scen.sh` key script, then read: slots 128..138 (per class `frames << 48 | worst ms << 32 | total ms`, the total now summed in us), slot 139 (`0x4d563401` = this renderer `<< 32 |` panel pixels presented / 1024), 125 (bake ms), 127 (flags), 140..144 (bench: alu, fma, WB copy, FB copy us; SCTLR), 145..156 (glass phases in ms: 0 setup and the shift, 1 base glass, 2 base items (freeze only), 3 frozen crossfade, 4 over glass, 7 present (2x, items, edge), 8 freeze, 9 the intro's wallpaper; 10, 11 rows shifted / shaded again). Per class, A55 ms / VM ms of the same scenario is the factor.

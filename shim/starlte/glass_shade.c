@@ -146,11 +146,14 @@ static void gt_keep(struct gsh *s)
 
 void gs_prepare(int layer, const struct g7_shape *in, unsigned n, const struct gs_ctx *c, float zoom)
 {
-    int G = layer >= GS_SOFT ? 2 : 1;
+    /* the soft base (freeze) and the motion sets: the quarter grid */
+    int G = layer == GS_SOFT || layer >= GS_QB ? 4 : layer > GS_SOFT ? 2 : 1;
     /* the half-resolution grid at the panel's uniforms takes the concept's own canvas scale (K 2,
      * its canvas runs at .4625 of the panel): aa 2.5 px, the rim falloff 2.2 px, one grid step of
      * anti-aliasing, so the bilinear upsample has no stairs */
-    float K = G == 2 && c->K < 2.f ? 2.f : c->K;
+    float K = G >= 2 && c->K < 2.f ? 2.f : c->K;
+    if (layer >= GS_QB && K < 4.f)
+        K = 4.f;                    /* one quarter-grid step of anti-aliasing: no stairs in the 2x */
     GRID[layer] = G;
     LIT[layer] = 1.f - c->soft * .85f;
     RIMK[layer] = g_max(2.f, K * 1.1f);
@@ -250,8 +253,9 @@ void gs_prepare(int layer, const struct g7_shape *in, unsigned n, const struct g
         if (i1 - i0 > EX_N)
             i1 = i0 + EX_N;
         s->ex0 = i0;
-        s->exn = i1 > i0 ? i1 - i0 : 0;
-        s->ex = (float *)TAB_EX + ((unsigned)layer * G7_MAX_SHAPES + (unsigned)m) * EX_N;
+        s->exn = i1 > i0 && G > 1 ? i1 - i0 : 0;      /* (G 1: never shaded) */
+        unsigned slot = layer == GS_QB ? GS_BASE : layer == GS_QO ? GS_OVER : (unsigned)layer;
+        s->ex = (float *)TAB_EX + (slot * G7_MAX_SHAPES + (unsigned)m) * EX_N;
         for (int q = 0; q < s->exn; q++) {
             float px = ((float)(i0 + q) + .5f) * (float)G, dq = (px - s->spx) * s->sdx;
             s->ex[q] = g_exp(-2.2f * dq * dq);
@@ -454,6 +458,21 @@ int gs_cover_row(int layer, int si, float py, int x0, int x1, float *cov)
     for (int x = x0; x < x1; x++) {
         float qx = (float)x + .5f - s->cx;
         cov[x - x0] = g_abs(qx) <= in ? al : g_sat(.5f - sdq(s, qx, qy) * iaa) * al;
+    }
+    return corner || edge;
+}
+int gs_cover_row_g(int layer, int si, float py, float px0, float dpx, int n, float *cov)
+{
+    const struct gsh *s = &SH[layer][si];
+    float fade = g_smooth(170.f, 246.f, py) * (1.f - g_smooth(2480.f, 2620.f, py));
+    float al = s->clip ? s->alpha * fade : s->alpha, iaa = 1.f / s->aa, qy = py - s->cy;
+    float ay = g_abs(qy);
+    int edge = ay > s->hby - 2.f * s->aa - 1.f;
+    int corner = ay > s->hby - s->r - 1.f;
+    float in = edge ? -1.f : corner ? s->hbx - s->r - 1.f : s->hbx - 2.f * s->aa - 1.f;
+    for (int k = 0; k < n; k++) {
+        float qx = px0 + (float)k * dpx - s->cx;
+        cov[k] = g_abs(qx) <= in ? al : g_sat(.5f - sdq(s, qx, qy) * iaa) * al;
     }
     return corner || edge;
 }
@@ -1120,13 +1139,17 @@ static inline float fld(float px, float py)
 
 void gs_word_row(const struct gs_ctx *c, float py, int x0, int n, float *acc)
 {
+    gs_word_row_g(c, py, (float)x0 + .5f, 1.f, n, acc);
+}
+void gs_word_row_g(const struct gs_ctx *c, float py, float px0, float dpx, int n, float *acc)
+{
     if (!WD.on)
         return;
     float lit = 1.f - c->soft * .85f, rimk = g_max(2.f, c->K * 1.1f);
     const float bez = 18.f;
     float dyq = (py - WD.cap.spy) * WD.cap.sdy, ey = g_exp(-2.2f * dyq * dyq);
     for (int i = 0; i < n; i++) {
-        float px = (float)(x0 + i) + .5f;
+        float px = px0 + (float)i * dpx;
         float f0 = fld(px, py);
         if (f0 <= .02f)
             continue;
