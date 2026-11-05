@@ -13,7 +13,7 @@ guidelines use a monochrome version (Apple: white) and the removals listed. No e
 
 | Logo | Used for | Source URL | sha256 | Licence / trademark note | Edits |
 |---|---|---|---|---|---|
-| Apple logo | provider Apple (`SB7_P_APPLE`), tiles macOS Ventura and the Apple default | https://upload.wikimedia.org/wikipedia/commons/f/fa/Apple_logo_black.svg | `9d00ea77a3240f291356c36261c5f45d7fa456f29c97a2f060caf0ed4b9c3231` | Commons: public domain (original design Rob Janoff); trademark of Apple Inc. | painted white (Apple's logo is monochrome, black or white) |
+| Apple logo | provider Apple (`SB7_P_APPLE`), tiles iOS 16, macOS Ventura, iOS 26 (told apart by the tile colours) and the Apple default | https://upload.wikimedia.org/wikipedia/commons/f/fa/Apple_logo_black.svg | `9d00ea77a3240f291356c36261c5f45d7fa456f29c97a2f060caf0ed4b9c3231` | Commons: public domain (original design Rob Janoff); trademark of Apple Inc. | painted white (Apple's logo is monochrome, black or white) |
 | Windows 11 logo (2021) | tile Windows 11 and the Microsoft default | https://upload.wikimedia.org/wikipedia/commons/8/87/Windows_logo_-_2021.svg | `0f6b74d8d8ede1ec0e454b3c6fcdfba65fbe989af9a49ad4ff0c498f4dc3afbb` | Commons: public domain (file by OAOV); trademark of Microsoft Corporation | none (#0078d4) |
 | Microsoft logo | provider Microsoft (`SB7_P_MICROSOFT`) | https://upload.wikimedia.org/wikipedia/commons/4/44/Microsoft_logo.svg | `3d41251f93127b4b42c2f69fa423d204946cf9c307d786ea36b8d9bef4179282` | Commons: public domain; trademark of Microsoft Corporation | the light grey backdrop square removed (the logo is the four squares) |
 | Google "G" | provider Google (`SB7_P_GOOGLE`) | https://upload.wikimedia.org/wikipedia/commons/c/c1/Google_%22G%22_logo.svg | `ed9087d76cdc6d1c53698f6068f79872e77e87c8d012c0cfdad13b05b6ccb37c` | Commons: public domain (Google LLC); trademark of Google LLC | none |
@@ -25,29 +25,29 @@ guidelines use a monochrome version (Apple: white) and the removals listed. No e
 | Tux | provider Linux (`SB7_P_LINUX`), the Linux default tile | https://upload.wikimedia.org/wikipedia/commons/3/35/Tux.svg | `cd503ad510e16ff2869f959cf57b892bb2175a6874ff696b495bd94fd7db9743` | Commons: attribution: Tux by Larry Ewing (lewing@isc.tamu.edu), Simon Budig, Garrett LeSage, made with The GIMP; use permitted with this credit (same file as `tools/brand/icons/tux.svg`) | none |
 | Debian swirl | tile Debian | https://upload.wikimedia.org/wikipedia/commons/4/4a/Debian-OpenLogo.svg | `a759c381560e82e8d719e0038d0d95209b85c00b0d0f6b92c5fc510b959226b7` | Commons: CC BY-SA 3.0 (Debian); the Debian Open Use Logo, (c) Software in the Public Interest, Inc. | the "debian" wordmark cut away (render cropped above it): the swirl (#D70751) |
 | Fedora logo (2021) | tile Fedora | https://upload.wikimedia.org/wikipedia/commons/4/41/Fedora_icon_%282021%29.svg | `e0cad9aa4736a492cbeed7f875cb6a7ddfeab54879fc9e218fc00933ef18b6b6` | Commons: public domain; Fedora and its logo are trademarks of Red Hat, Inc. (used under the Fedora trademark guidelines to refer to Fedora) | none |
+| Chromium logo (Material) | tile ChromiumOS (`chromeos`) | https://upload.wikimedia.org/wikipedia/commons/f/fe/Chromium_Material_Icon.svg | `72a4e02e7032106bc04e21c4133b42dde6903d6b8b7c3ef8164967a945883c54` | Commons: CC BY 2.5; Chromium is a trademark of Google LLC, used to refer to ChromiumOS. Added 2026-11-05 (download approved by the user; checked: no scripts or external references, one local `url(#clipPath5127)`) | none |
 
 Not real logos (kept from the concept, they are Starbite's own): the Starbite star, the Lab flask, the
 `>_` tile of the Starbite shell, the Display Test bars, and the "other" ring.
 
 ## Starbite-drawn (`src/starbite/`, 2026-11-05)
 
-Drawn for this project as plain SVG paths (nothing downloaded or traced from a file), not pinned by
-sha256 (they are ours to change), rendered by `CUSTOM_G` in `tools/brand/menu7-assets.py`:
+Only Starbite's own systems use Starbite-drawn art; every other OS shows its official logo above.
+Drawn for this project as plain SVG paths (nothing downloaded or traced), not pinned by sha256
+(they are ours to change), rendered by `CUSTOM_G` in `tools/brand/menu7-assets.py`:
 
 | File / art | Used for | What it is |
 |---|---|---|
-| `starbite/chromium.svg` | tile ChromiumOS (`chromeos`) | the Chromium mark's construction (three segments bounded by lines tangent to the centre ring, white ring, blue centre) in shades of blue, computed from circle geometry; refers to ChromiumOS (nominative use; Chromium and Chrome are trademarks of Google LLC) |
-| `starbite/ventura.svg` | tile macOS Ventura (`mac13`), under the Apple logo above | four flowing bands in Ventura's wallpaper colours (magenta, red-orange, orange, gold); evokes, does not copy, Apple's wallpaper |
 | `starbite/engineer.svg` | tile Engineer OS (`engineer`) | an eight-tooth gear with the concept's Starbite star in its hub |
-| "16", "26" (no file) | tiles iOS 16 (`ios16`), iOS 26 (`ios26`) | the version number in Inter Tight 700 (OFL, `tools/brand/fonts/`) as the concept's number tiles; iOS 16 flat with a blue -> violet -> pink fill, iOS 26 as Liquid Glass (white body, bright top edges, blue shadow) |
-| the charging bolt (no file) | `SB7_I_BOLT_30`, the status bar battery | a filled six-point bolt path in `menu7-assets.py` |
+| the charging bolt (no file) | `SB7_I_BOLT_30`, the status bar battery | a filled bolt path in `menu7-assets.py` |
 
 ## Colours and sizes
 
 - Provider glyphs (96 px box, drawn 1:1 on the provider's glass tile, drop shadow baked): Apple white
   (.90 of the box), Microsoft four squares (.82), Google "G" (.86), Tux (.98).
 - OS tiles (92, 124, 220, 380): the concept's squircle, gradient, sheen and rim, with the logo in its own
-  colours at about .5 to .64 of the tile. Tile colours: iOS 26 the concept's blue (now with the Liquid Glass "26"); Windows 11, postmarketOS
+  colours at about .5 to .64 of the tile. Tile colours: iOS 26 the concept's blue, iOS 16 a lighter era blue (#0a58d0 -> #5ac8fa),
+  macOS Ventura its wallpaper's magenta -> orange (#6a1d45 -> #f7a03a); ChromiumOS a light tile; Windows 11, postmarketOS
   and Debian a light tile (their logos are blue, green and red); Android the brand's navy (#073042-ish);
   Ubuntu the concept's orange / aubergine gradients; Arch a dark tile; Kali the concept's Kali blue;
   Fedora Fedora blue (#294172). The table is `LOGO_G` and `tile_table()` in `tools/brand/menu7-assets.py`.
@@ -55,7 +55,7 @@ sha256 (they are ours to change), rendered by `CUSTOM_G` in `tools/brand/menu7-a
 ## Distributing the built files
 
 `menu7.sb7` and `menu-v7.sbm` contain rasterised derivatives of these files, some under CC BY-SA
-(postmarketOS, Debian), CC BY (the Android robot) and GPLv3 (the Ubuntu Circle of Friends). The
+(postmarketOS, Debian), CC BY (the Android robot, the Chromium logo) and GPLv3 (the Ubuntu Circle of Friends). The
 container's INFO section (`SB7_T_INFO`) carries one credit line per logo, so the notice travels with
 the binary. Whenever the ramdisk, a boot image holding it, or the UP_PARAM / assets bundle is shared
 outside this repository, ship this file next to it (or paste its table into the release notes).

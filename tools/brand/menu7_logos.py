@@ -66,6 +66,8 @@ FILES = {
                'a759c381560e82e8d719e0038d0d95209b85c00b0d0f6b92c5fc510b959226b7'),
     'fedora': ('fedora/Fedora_icon__282021_29.svg', COMMONS + '4/41/Fedora_icon_%282021%29.svg',
                'e0cad9aa4736a492cbeed7f875cb6a7ddfeab54879fc9e218fc00933ef18b6b6'),
+    'chromium': ('chromium/Chromium_Material_Icon.svg', COMMONS + 'f/fe/Chromium_Material_Icon.svg',
+                 '72a4e02e7032106bc04e21c4133b42dde6903d6b8b7c3ef8164967a945883c54'),
 }
 
 # Anything that could load or run something: scripts, foreign content, images, and any href or
@@ -93,6 +95,7 @@ CREDITS = {
     'debian': 'Debian Open Use Logo: (c) Software in the Public Interest, Inc., CC BY-SA 3.0; '
               'modified: wordmark removed, rasterised',
     'fedora': 'Fedora logo: Wikimedia Commons, public domain; trademark of Red Hat, Inc.',
+    'chromium': 'Chromium logo: Wikimedia Commons, CC BY 2.5; Chromium is a trademark of Google LLC',
 }
 assert set(CREDITS) == set(FILES)
 
