@@ -18,7 +18,6 @@
 
 #define TEX(a) ((uint32_t *)(a))
 static int field_ok;
-static int planes_ok;             /* gw_planes built A5C, BCP from this blur */
 
 /* ---- the static field ---- */
 
@@ -110,16 +109,20 @@ void gw_field(void)
         float fy = (float)(j - b * FQ) * (1.f / FQ);
         const float *g0 = G + 3 * b * FGW, *g1 = g0 + 3 * FGW;
         uint32_t *row = F + (unsigned)j * WW;
-        for (int i = 0; i < WW; i++) {
-            int a = i / FQ;
-            float fx = (float)(i - a * FQ) * (1.f / FQ);
+        const float32x4_t wx = { 0.f, .25f, .5f, .75f }, vfy = vdupq_n_f32(fy), z = vdupq_n_f32(0.f), o1 = vdupq_n_f32(1.f);
+        const float32x4_t sc[3] = { vdupq_n_f32(8.f), vdupq_n_f32(4.f), vdupq_n_f32(2.f) };
+        const float32x4_t mx[3] = { vdupq_n_f32(1023.f), vdupq_n_f32(2047.f), vdupq_n_f32(2047.f) };
+        for (int a = 0; a < WW / FQ; a++) {             /* texels 4a .. 4a + 3 */
             const float *p = g0 + 3 * a, *q = g1 + 3 * a;
-            float c[3];
+            uint32x4_t u[3];
             for (int k = 0; k < 3; k++) {
-                float top = p[k] + (p[k + 3] - p[k]) * fx, bot = q[k] + (q[k + 3] - q[k]) * fx;
-                c[k] = top + (bot - top) * fy;
+                float l = p[k] + (q[k] - p[k]) * fy, r = p[k + 3] + (q[k + 3] - p[k + 3]) * fy;
+                float32x4_t c = vfmaq_f32(vdupq_n_f32(l), vdupq_n_f32(r - l), wx);
+                c = vminq_f32(vmaxq_f32(vmulq_f32(c, sc[k]), z), o1);
+                u[k] = vcvtq_u32_f32(vfmaq_f32(vdupq_n_f32(.5f), c, mx[k]));
             }
-            row[i] = fpack(c[0], c[1], c[2]);
+            vst1q_u32(row + 4 * a, vorrq_u32(vorrq_u32(vshlq_n_u32(u[0], 22), vshlq_n_u32(u[1], 11)), u[2]));
+            (void)vfy;
         }
     }
     /* the tiny stars */
@@ -386,14 +389,22 @@ static void blur_pass(const uint32_t *src, int sw, int sh, uint32_t *dst, int dw
             }
         }
         uint32_t *o = dst + (unsigned)j * dw;
-        for (int i = 0; i < dw; i++)
-            o[i] = q8(BACC[0][i] * (1.f / 255.f), BACC[1][i] * (1.f / 255.f), BACC[2][i] * (1.f / 255.f));
+        {
+            /* q8(acc / 255): (sat(acc / 255) x 255 + .5), 4 pixels a step (dw: 360 or 180) */
+            const float32x4_t z = vdupq_n_f32(0.f), mx = vdupq_n_f32(255.f), h = vdupq_n_f32(.5f);
+            for (int i = 0; i < dw; i += 4) {
+                float32x4_t r = vaddq_f32(vminq_f32(vmaxq_f32(vld1q_f32(BACC[0] + i), z), mx), h);
+                float32x4_t g = vaddq_f32(vminq_f32(vmaxq_f32(vld1q_f32(BACC[1] + i), z), mx), h);
+                float32x4_t b = vaddq_f32(vminq_f32(vmaxq_f32(vld1q_f32(BACC[2] + i), z), mx), h);
+                vst1q_u32(o + i, g_pack4(r, g, b));
+            }
+        }
     }
 }
 
 void gw_blur(void)
 {
-    planes_ok = 0;                  /* (gw_planes again after it) */
+    gw_planes();                    /* the canvas-grid frost planes are this blur's again */
     uint32_t *wall = TEX(P_TMP), *a1 = TEX(P_SOFT), *a2 = TEX(P_A), *b1 = TEX(P_SOFT + PL_A_BYTES), *b2 = TEX(P_B);
     /* renderWall: blur(wall,a1,2,0); blur(a1,a2,0,1.6); blur(a2,a1,1.6,0); blur(a1,a2,0,1.6);
      *             blur(a2,b1,2,0); blur(b1,b2,0,1.6); blur(b2,b1,1.6,0); blur(b1,b2,0,1.6) */
@@ -409,7 +420,27 @@ void gw_blur(void)
     uint32_t *a5 = TEX(P_A5);
     for (int j = 0; j < AH; j++) {
         int jm = j - 3 < 0 ? 0 : j - 3, jp = j + 3 >= AH ? AH - 1 : j + 3;
+        const uint32_t *rc = a2 + j * AW, *rm = a2 + jm * AW, *rp = a2 + jp * AW;
+        const float32x4_t k36 = vdupq_n_f32(.36f / 255.f), k16 = vdupq_n_f32(.16f / 255.f), z = vdupq_n_f32(0.f),
+                          o1 = vdupq_n_f32(1.f), k = vdupq_n_f32(1023.f), h = vdupq_n_f32(.5f);
+        for (int i = 4; i + 4 <= AW - 4; i += 4) {      /* i - 3 >= 0, i + 3 + 3 < AW */
+            float32x4_t c[3], t[4][3];
+            g_unpack4(rc + i, c);
+            g_unpack4(rm + i - 3, t[0]);
+            g_unpack4(rm + i + 3, t[1]);
+            g_unpack4(rp + i - 3, t[2]);
+            g_unpack4(rp + i + 3, t[3]);
+            uint32x4_t q[3];
+            for (int ch = 0; ch < 3; ch++) {
+                float32x4_t sum = vaddq_f32(vaddq_f32(t[0][ch], t[1][ch]), vaddq_f32(t[2][ch], t[3][ch]));
+                float32x4_t v = vfmaq_f32(vmulq_f32(c[ch], k36), sum, k16);
+                q[ch] = vcvtq_u32_f32(vfmaq_f32(h, vminq_f32(vmaxq_f32(v, z), o1), k));
+            }
+            vst1q_u32(a5 + j * AW + i, vorrq_u32(vorrq_u32(vshlq_n_u32(q[0], 20), vshlq_n_u32(q[1], 10)), q[2]));
+        }
         for (int i = 0; i < AW; i++) {
+            if (i == 4)
+                i = AW - 4;     /* (4 .. AW - 4 above) */
             int im = i - 3 < 0 ? 0 : i - 3, ip = i + 3 >= AW ? AW - 1 : i + 3;
             uint32_t c = a2[j * AW + i], t0 = a2[jm * AW + im], t1 = a2[jm * AW + ip], t2 = a2[jp * AW + im],
                      t3 = a2[jp * AW + ip];
@@ -711,34 +742,42 @@ static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float p
     }
 }
 /* A5 and B on the canvas grid (canvas pixel (i, j) = panel point (2i + 1, 2j + 1)), packed 10:10:10,
- * built once after the blur planes: a frost row of the canvas grid is then a row read (gw_planes) */
+ * in the upper 8.5 MiB of G7_SHARP: a frost row of the canvas grid is a row read. Each row is built
+ * the first time it is read (not in the bake: the bake's time decides v7 against v6). */
 #define A5C ((uint32_t *)(G7_SHARP + 0x420000UL))
 #define BCP ((uint32_t *)(G7_SHARP + 0x840000UL))
 _Static_assert(0x840000UL + 4UL * CW * CH <= G7_BASE - G7_SHARP, "canvas frost planes overflow G7_SHARP");
+static uint8_t PROW[2][CH];         /* the plane's row is built (gw_blur clears it) */
 static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float py, int n, int g0, float *rgb);
+static float PRT[3 * CW];
+static void plane_build(int p, int j)
+{
+    if (p)
+        row_half(TEX(P_B), BW, BH, 8, 0, 2.f * (float)j + 1.f, CW, 0, PRT);
+    else
+        row_half(TEX(P_A5), AW, AH, 4, 1, 2.f * (float)j + 1.f, CW, 0, PRT);
+    uint32_t *d = (p ? BCP : A5C) + (unsigned)j * CW;
+    const float32x4_t k = vdupq_n_f32(1023.f), h = vdupq_n_f32(.5f), z = vdupq_n_f32(0.f), o = vdupq_n_f32(1.f);
+    for (int i = 0; i < CW; i += 4) {
+        float32x4x3_t c = vld3q_f32(PRT + 3 * i);
+        uint32x4_t r = vcvtq_u32_f32(vfmaq_f32(h, vminq_f32(vmaxq_f32(c.val[0], z), o), k));
+        uint32x4_t g = vcvtq_u32_f32(vfmaq_f32(h, vminq_f32(vmaxq_f32(c.val[1], z), o), k));
+        uint32x4_t b = vcvtq_u32_f32(vfmaq_f32(h, vminq_f32(vmaxq_f32(c.val[2], z), o), k));
+        vst1q_u32(d + i, vorrq_u32(vorrq_u32(vshlq_n_u32(r, 20), vshlq_n_u32(g, 10)), b));
+    }
+    PROW[p][j] = 1;
+}
 void gw_planes(void)
 {
-    for (int p = 0; p < 2; p++) {
-        uint32_t *D = p ? BCP : A5C;
-        for (int j = 0; j < CH; j++) {
-            if (!(j & 31))
-                g7_poll();
-            float *row = g_row_tmp;
-            if (p)
-                row_half(TEX(P_B), BW, BH, 8, 0, 2.f * (float)j + 1.f, CW, 0, row);
-            else
-                row_half(TEX(P_A5), AW, AH, 4, 1, 2.f * (float)j + 1.f, CW, 0, row);
-            uint32_t *d = D + (unsigned)j * CW;
-            for (int i = 0; i < CW; i++)
-                d[i] = g_pack10(row[3 * i], row[3 * i + 1], row[3 * i + 2]);
-        }
-    }
-    planes_ok = 1;
+    for (int j = 0; j < CH; j++)
+        PROW[0][j] = PROW[1][j] = 0;
 }
-/* n samples of a canvas-grid plane's row j from column g0, unpacked to rgb triplets */
-static void plane_row(const uint32_t *P, int j, int g0, int n, float *rgb)
+/* n samples of the canvas-grid plane p's row j from column g0, unpacked to rgb triplets */
+static void plane_row(int p, int j, int g0, int n, float *rgb)
 {
-    const uint32_t *s = P + (unsigned)j * CW + g0;
+    if (!PROW[p][j])
+        plane_build(p, j);
+    const uint32_t *s = (p ? BCP : A5C) + (unsigned)j * CW + g0;
     const uint32x4_t m = vdupq_n_u32(1023U);
     const float32x4_t k = vdupq_n_f32(1.f / 1023.f);
     int i = 0;
@@ -760,7 +799,7 @@ static void plane_row(const uint32_t *P, int j, int g0, int n, float *rgb)
 /* the row is a canvas row (py = 2j + 1) inside the canvas: the plane */
 static inline int plane_at(float py, int g0, int n, int *j)
 {
-    if (!planes_ok || g0 < 0 || g0 + n > CW)
+    if (g0 < 0 || g0 + n > CW)
         return 0;
     float c = (py - 1.f) * .5f;
     int ci = (int)c;
@@ -784,7 +823,7 @@ void gw_row_a5_at(float py, int n, float px0, float dpx, float *rgb)
 {
     int g0, j;
     if (half_grid(px0, dpx, n, &g0) && plane_at(py, g0, n, &j))
-        plane_row(A5C, j, g0, n, rgb);
+        plane_row(0, j, g0, n, rgb);
     else if (half_grid(px0, dpx, n, &g0))
         row_half(TEX(P_A5), AW, AH, 4, 1, py, n, g0, rgb);
     else
@@ -794,7 +833,7 @@ void gw_row_b_at(float py, int n, float px0, float dpx, float *rgb)
 {
     int g0, j;
     if (half_grid(px0, dpx, n, &g0) && plane_at(py, g0, n, &j))
-        plane_row(BCP, j, g0, n, rgb);
+        plane_row(1, j, g0, n, rgb);
     else if (half_grid(px0, dpx, n, &g0))
         row_half(TEX(P_B), BW, BH, 8, 0, py, n, g0, rgb);
     else

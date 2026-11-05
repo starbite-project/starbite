@@ -146,11 +146,11 @@ static void gt_keep(struct gsh *s)
 
 void gs_prepare(int layer, const struct g7_shape *in, unsigned n, const struct gs_ctx *c, float zoom)
 {
-    int G = layer >= GS_SOFT ? 2 : 1;
+    int G = layer == GS_SOFT ? 4 : layer > GS_SOFT ? 2 : 1;     /* the soft base: the quarter grid (freeze) */
     /* the half-resolution grid at the panel's uniforms takes the concept's own canvas scale (K 2,
      * its canvas runs at .4625 of the panel): aa 2.5 px, the rim falloff 2.2 px, one grid step of
      * anti-aliasing, so the bilinear upsample has no stairs */
-    float K = G == 2 && c->K < 2.f ? 2.f : c->K;
+    float K = G >= 2 && c->K < 2.f ? 2.f : c->K;
     GRID[layer] = G;
     LIT[layer] = 1.f - c->soft * .85f;
     RIMK[layer] = g_max(2.f, K * 1.1f);
