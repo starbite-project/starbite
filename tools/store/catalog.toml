@@ -297,3 +297,16 @@ tag = "beta"
 files = ["ufs:engineer.img|sd:engineer.img"]
 root = "none (RAM only)"
 
+# 2026-11-05: Linux display black-bars diagnostic kernel (patch-mainline step 6e), hidden; boot by key only.
+[[entry]]
+key = "linux-pmos-bb"
+name = "postmarketOS"
+version = "edge · Phosh · display diagnostics"
+category = "linux"
+method = "linux"
+tag = "beta"
+flags = ["hidden"]
+files = ["linux-bb.image", "linux-bb.dtb", "linux.initrd"]
+cmdline = "sb.root=/distros/pmos.img sb.session=phosh"
+root = "sd:p1 /distros/pmos.img"
+

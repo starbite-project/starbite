@@ -562,3 +562,17 @@ Build: `limactl shell starbite -- env PROJ=<worktree> WORK=~/linux/blackbars-wor
 4. **Self-mask test (live, no reboot):** `echo 1 > /sys/module/s9p_decon/parameters/panel_mask_off` (dmesg: `panel self mask off (7A 00): 0`). If the bars disappear (the corners turn square), hypothesis 1 is confirmed. The fix is then to make it the default, or to upload the vendor mask image after every sleep-out. If nothing changes, it is not the mask; set it back to 0.
 5. **Sleep-cycle test:** `echo 0 > /sys/module/s9p_decon/parameters/panel_sleep`, then press power twice (blank and unblank). If the bars only appeared after unblanks before, and no longer do, the sleep cycle is losing panel state. Keep `panel_sleep=0` until it is fixed; the cost is a dimly lit panel while blanked.
 6. With the session stopped: `modetest -M exynos -s <conn>@<crtc>:1440x2960` (from _tools.img). The pattern has to touch all four edges. If it does, the kernel path is clean and the bars come from the compositor.
+
+### 6.5 First phone run of the 6e kernel (2026-11-05, 23:44, S9 #1, hidden key `linux-pmos-bb`)
+Read over SSH (usb0), saved in build/linux/runs/blackbars-20261105/. Every stage carries the full 2960 rows:
+DECON `bg_size=0b9005a0` (normal and shadow), win5 `0..0b8f059f` (normal and shadow), IDMA src/img `0b9005a0`,
+DSIM `transfers=00000b90 resol=0b9001e0` (2960 lines of 480 compressed px), both DSC encoders
+`pps04 height=0x0b90`, width 2 x 0x2d0, slice height 40. **Suspect 3 (a short frame) is ruled out**, and the
+kernel's fb/plane/window path is clean. Left: suspect 1 (the panel's self mask, rows 0-149 and 2810-2959) and
+suspect 2 (Phosh `scale = 3` in /etc/phosh/phoc.ini [output:DSI-1]: 986 logical rows = 2958 px, bottom 2 rows
+never drawn). Both need someone looking at the panel: the morning test is `echo 1 >
+/sys/module/s9p_decon/parameters/panel_mask_off` (driven over SSH while the user watches); if the bars stay,
+try scale 3.2 (exact: 1440/3.2 = 450, 2960/3.2 = 925; 384/120 in wlroots' steps). Defaults now: geom_log on,
+panel_mask_off N, panel_sleep Y. grim is not installed in the pmOS root (no screenshot this run).
+Returning to TWRP from mainline Linux with INFORM3 = 0x12345674 + `reboot -f` did NOT reach TWRP (the phone
+dropped off USB; it needs the keys). Android's `adb reboot recovery` does reach TWRP.
