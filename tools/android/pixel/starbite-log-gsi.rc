@@ -23,3 +23,10 @@ service starbite_logcat /vendor/bin/starbite-log.sh logcat
     group root log
     oneshot
     disabled
+
+# Temporary (2026-11-05, GSI attempt 4): cameraserver's addListener fails with -38 (linkToDeath:
+# "Thread Pool max thread count is 0") on this 4.9 kernel, and system_server's BiometricService does
+# not catch it, so system_server crash-loops. With cameraserver gone CameraManager just sees no camera
+# service and the boot continues. Camera off until the binder issue is fixed; remove these lines then.
+on property:init.svc.cameraserver=running
+    stop cameraserver
