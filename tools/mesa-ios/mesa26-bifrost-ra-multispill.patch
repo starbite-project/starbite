@@ -9,6 +9,18 @@
  {
     /* Pick a node satisfying bi_spill_register's preconditions */
     BITSET_WORD *no_spill = BITSET_CALLOC(l->node_count);
+@@ -620,6 +620,10 @@
+               ins->src[0].value ==
+                  bi_preload_reg(BI_PRELOAD_CUMULATIVE_COVERAGE, ctx->arch))) {
+-            BITSET_SET(no_spill, ins->dest[d].value);
++            /* Starbite: several spills a round (below) add spill temporaries past the graph's
++             * node_count; they are never candidates, and setting their bit overran no_spill
++             * (heap corruption, WindowServer SIGSEGV in malloc from bi_register_allocate) */
++            if (ins->dest[d].value < l->node_count)
++               BITSET_SET(no_spill, ins->dest[d].value);
+          }
+       }
+    }
 @@ -638,7 +638,7 @@
           if (!constraint)
              continue;
