@@ -430,8 +430,15 @@ void page_end(struct page *p)
     }
 }
 
+#ifdef SB_HOST
+struct page *host_last_page;    /* the preview's scroll check: redraw it whole and compare */
+#endif
+
 void page_set_scroll(struct page *p, int s)
 {
+#ifdef SB_HOST
+    host_last_page = p;
+#endif
     int ms = page_max_scroll(p);
     if (s > ms)
         s = ms;
