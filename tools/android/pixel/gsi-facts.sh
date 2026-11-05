@@ -23,3 +23,7 @@ for d in /system/priv-app /system/app /system/product/priv-app /system/product/a
   echo "$d: $(ls_ $d | tr '\n' ' ')"
 done
 echo "-- product overlays"; ls_ /system/product/overlay | tr '\n' ' '; echo
+echo "-- recovery writers (must both be missing: nothing may rewrite RECOVERY = TWRP)"
+for i in /system/bin/install-recovery.sh /system/recovery-from-boot.p /system/etc/recovery-resource.dat; do
+  printf '%s: ' "$i"; debugfs -R "stat $i" "$S" 2>/dev/null | grep -q Inode && echo PRESENT || echo missing
+done
