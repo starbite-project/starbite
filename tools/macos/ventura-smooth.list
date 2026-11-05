@@ -57,3 +57,5 @@ com.apple.ScreenTimeAgent
 com.apple.accessibility.axassetsd
 com.apple.corespotlightservice
 com.apple.Spotlight
+# 2026-11-05: re-renders every icon each boot via software OpenGL (2 cores, ~470 MB, 6-8 min); the harvested caches serve the Dock/Finder
+com.apple.iconservices.iconservicesagent
