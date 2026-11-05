@@ -26,6 +26,13 @@ adb push "$tmp/new.bin" /tmp/sbset.bin >/dev/null
 adb shell "dd if=/tmp/sbset.bin of=$dev bs=4096 seek=$SET count=1 conv=notrunc,fsync 2>/dev/null; sync"
 back=$(adb exec-out "dd if=$dev bs=4096 skip=$SET count=1 2>/dev/null" | shasum -a 256 | cut -c1-64)
 [ "$back" = "$(shasum -a 256 "$tmp/new.bin" | cut -c1-64)" ] || { echo "settings readback mismatch"; exit 1; }
+# the clock for macOS (kernel 0393): "SBTIME01" + Unix seconds in the 128 GB card's last sector (the sdlog
+# range's end, never reached by the log ring); only on that card
+if [ "$(adb shell cat /sys/block/mmcblk0/size 2>/dev/null | tr -d '\r')" = 249999360 ]; then
+    python3 -c 'import struct,sys,time; sys.stdout.buffer.write(b"SBTIME01"+struct.pack("<Q",int(time.time()))+bytes(496))' > "$tmp/time.bin"
+    adb push "$tmp/time.bin" /tmp/sbtime.bin >/dev/null
+    adb shell "dd if=/tmp/sbtime.bin of=/dev/block/mmcblk0 bs=512 seek=249999359 count=1 conv=notrunc,fsync 2>/dev/null; sync"
+fi
 echo "next = $key; rebooting"
 adb reboot
 sleep 20
