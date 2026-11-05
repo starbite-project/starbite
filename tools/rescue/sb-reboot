@@ -1,0 +1,45 @@
+#!/bin/sh
+# Project Starbite: reboot from the rescue ramdisk (/bin/sb-reboot, docs/RESCUE-USB-HOST.md).
+#
+#   sb-reboot menu|twrp|download
+#
+# The ramdisk has no init system, so it reboots with sysrq "b", an emergency restart: no driver
+# shutdown hooks run. The MAX77705 OTG boost would then stay on into TWRP, Download mode or the
+# next OS. So, first:
+#   1. VBUS off: s9p-max77705-muic's vbus=0, then wait (up to 3 s) until the usb-otg-vbus
+#      regulator reads "disabled";
+#   2. sync, and the rescue disk remounted read-only (it normally is already);
+#   3. INFORM3 (PMU 0x1406080C, Samsung sec_reboot magic): 0x12345670 normal (the Starbite menu),
+#      0x12345674 recovery (TWRP), 0x12345671 download;
+#   4. sysrq "b".
+# Rescue scripts on the disk may call it (it is on PATH in the ramdisk).
+case ${1:-} in
+menu) magic=0x12345670 what="the Starbite menu" ;;
+twrp|recovery) magic=0x12345674 what="TWRP" ;;
+download) magic=0x12345671 what="Download mode" ;;
+*) echo "usage: sb-reboot menu|twrp|download" >&2; exit 2 ;;
+esac
+
+vbus_param=/sys/module/s9p_max77705_muic/parameters/vbus
+[ -w $vbus_param ] && echo 0 > $vbus_param
+i=0
+while [ $i -lt 30 ]; do
+	on=
+	for r in /sys/class/regulator/*; do
+		[ "$(cat "$r/name" 2>/dev/null)" = usb-otg-vbus ] || continue
+		[ "$(cat "$r/state" 2>/dev/null)" = enabled ] && on=1
+	done
+	[ -z "$on" ] && break
+	sleep 0.1
+	i=$((i + 1))
+done
+[ -n "$on" ] && echo "sb-reboot: WARNING: USB VBUS still on" > /dev/kmsg 2>/dev/null
+
+echo "Rebooting to $what" > /dev/tty0 2>/dev/null
+echo "sb-reboot: $what" > /dev/kmsg 2>/dev/null
+sync
+mount -o remount,ro /rescue 2>/dev/null
+sync
+devmem 0x1406080C 32 $magic || { echo "sb-reboot: devmem failed" >&2; exit 1; }
+echo b > /proc/sysrq-trigger
+sleep 5

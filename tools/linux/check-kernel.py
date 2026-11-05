@@ -5,6 +5,8 @@
     check-kernel.py dtb exynos9810-starlte.dtb    /chosen for the loader, CMA against reserved-memory
     check-kernel.py dtb --legacy-cma --image Image linux-old.dtb
                                                   the rollback DTB: CMA between the Image and the initrd
+    check-kernel.py dtb --usb-host rescue.dtb     the rescue DTB: dwc3 host by default, OTG VBUS on
+                                                  (without --usb-host: dwc3 peripheral, OTG VBUS off)
     check-kernel.py image Image                   arm64 header, text_offset 0x80000, fits the loader window
     check-kernel.py pair Image modules-REL.img    the modules image was made for this very Image
                                                   (release in the name, /starbite-kernel inside)
@@ -169,7 +171,46 @@ def image_span(path):
     return start, start + image_size
 
 
-def check_dtb(path, legacy=False, image=None):
+def check_usb(root, host):
+    """dwc3 role and the OTG VBUS wiring (docs/RESCUE-USB-HOST.md)."""
+    def s(n, p):
+        v = n.props.get(p) if n else None
+        return None if v is None else v.rstrip(b'\0').decode(errors='replace')
+    usb = root.find('soc/usb@10c00000')
+    otg = root.find('soc/i2c@14360000/charger@69/usb-otg-vbus')
+    muic = root.find('soc/i2c@14360000/muic@25')
+    if not usb:
+        return fail('no /soc/usb@10c00000')
+    dr, rsw, dflt = s(usb, 'dr_mode'), 'usb-role-switch' in usb.props, s(usb, 'role-switch-default-mode')
+    print(f'      usb: dr_mode {dr!r}, usb-role-switch {rsw}, default {dflt!r}; '
+          f'otg-vbus {s(otg, "status") if otg else "absent"!r}; muic role {s(muic, "starbite,usb-role")!r}')
+    if not host:
+        if dr != 'peripheral' or rsw:
+            fail('daily DTB: dwc3 must stay dr_mode "peripheral" without a role switch')
+        if otg and s(otg, 'status') != 'disabled':
+            fail('daily DTB: usb-otg-vbus must be disabled')
+        if muic and 'starbite,usb-role' in muic.props:
+            fail('daily DTB: muic has starbite,usb-role')
+        if not [f for f in fails if 'daily DTB' in f]:
+            ok('USB: device mode only (the daily DTB)')
+        return
+    if dr != 'otg' or not rsw or dflt != 'host':
+        fail('rescue DTB: dwc3 needs dr_mode "otg", usb-role-switch, role-switch-default-mode "host"')
+    if not otg or s(otg, 'status') != 'okay':
+        fail('rescue DTB: usb-otg-vbus must be okay')
+    if not muic or s(muic, 'starbite,usb-role') != 'host':
+        fail('rescue DTB: muic needs starbite,usb-role "host"')
+    elif otg:
+        ph, sup = otg.props.get('phandle'), muic.props.get('vbus-supply')
+        if not ph or sup != ph:
+            fail('rescue DTB: muic vbus-supply does not point at usb-otg-vbus')
+    if otg and otg.props.get('regulator-max-microamp') != (900000).to_bytes(4, 'big'):
+        fail('rescue DTB: usb-otg-vbus current limit is not 900 mA')
+    if not [f for f in fails if 'rescue DTB' in f]:
+        ok('USB: host by default, OTG VBUS 5 V / 900 mA through the Type-C MCU (the rescue DTB)')
+
+
+def check_dtb(path, legacy=False, image=None, usb_host=False):
     b = Path(path).read_bytes()
     root, total = parse_dtb(b)
     ok(f'{path}: FDT, {total} bytes, model {root.props.get("model", b"").rstrip(bytes(1)).decode()!r}')
@@ -182,7 +223,9 @@ def check_dtb(path, legacy=False, image=None):
         return fail('no /chosen')
     args = ch.props.get('bootargs', b'').rstrip(b'\0').decode()
     print(f'      bootargs = "{args}"')
-    for a in REQUIRED_ARGS:
+    # rescue.dtb: loglevel=7, so ramoops (console=ramoops-1) keeps the USB/driver lines
+    req = [('loglevel=7' if a == 'loglevel=4' else a) for a in REQUIRED_ARGS] if usb_host else REQUIRED_ARGS
+    for a in req:
         if a not in args.split():
             fail(f'bootargs lack {a}')
     for a in FORBIDDEN_ARGS:
@@ -266,6 +309,7 @@ def check_dtb(path, legacy=False, image=None):
             for f, v in opps:
                 if v and v < 950:
                     fail(f'{n.name}: {f} MHz at {v} mV (< 950 mV)')
+    check_usb(root, usb_host)
 
 
 # ------------------------------------------------------------------- image --
@@ -336,17 +380,20 @@ def main():
     if what == 'config' and len(sys.argv) >= 4:
         check_config(sys.argv[2], sys.argv[3:])
     elif what == 'dtb':
-        rest, legacy, image = sys.argv[2:], False, None
+        rest, legacy, image, usb_host = sys.argv[2:], False, None, False
         if '--legacy-cma' in rest:
             rest.remove('--legacy-cma')
             legacy = True
+        if '--usb-host' in rest:
+            rest.remove('--usb-host')
+            usb_host = True
         if '--image' in rest:
             i = rest.index('--image')
             image = rest[i + 1]
             del rest[i:i + 2]
         if len(rest) != 1:
             sys.exit(__doc__)
-        check_dtb(rest[0], legacy, image)
+        check_dtb(rest[0], legacy, image, usb_host)
     elif what == 'id' and len(sys.argv) == 3:
         print(kernel_id(sys.argv[2])[1])
         return

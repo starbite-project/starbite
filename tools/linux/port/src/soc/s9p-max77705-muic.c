@@ -17,11 +17,34 @@
  * D+/D- however well the SoC PHY is configured. This driver does the one
  * thing that is needed: it routes D+/D- to the AP, and repeats that whenever
  * VBUS reappears.
+ *
+ * Starbite rescue (docs/RESCUE-USB-HOST.md): with starbite,usb-role = "host"
+ * (only in the rescue DTB) the driver also gives the port 5 V when, and only
+ * when, the MCU's Type-C state machine says the phone is the source:
+ *   - at probe, MCU auto-VBUS off (opcode 0x54, data 0x00), as Samsung's
+ *     max77705_usbc_probe() does via max77705_usbc_disable_auto_vbus(), so
+ *     VBUS is the AP's decision alone;
+ *   - every host_poll_ms, CC_STATUS0 (0x0a) CCStat[2:0]: 2 (cc_SOURCE, a
+ *     sink with Rd such as an OTG adapter is attached) turns the charger's
+ *     OTG boost on through the vbus-supply regulator, anything else turns it
+ *     off; 1 (cc_SINK, a charger is attached) always means off. This is
+ *     max77705_ccstat_irq_handler() -> max77705_vbus_turn_on_ctrl() of the
+ *     vendor, polled instead of interrupt driven;
+ *   - never switched on while BC_STATUS.VBUSDet says someone else already
+ *     powers VBUS; the regulator itself refuses while CHGIN/WCIN has power;
+ *   - a boost that drops by itself (bypass over-current) is retried twice,
+ *     5 s apart, then left off until the device is unplugged;
+ *   - off on remove, shutdown and when vbus=0 is written (the rescue init
+ *     does that before it switches the port to device mode).
+ * The MCU firmware is a DRP by default and presents Rp itself on attach; no
+ * CC opcode is sent (the vendor sends none for OTG either).
  */
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
+#include <linux/jiffies.h>
 #include <linux/of.h>
+#include <linux/regulator/consumer.h>
 #include <linux/workqueue.h>
 
 #define REG_UIC_HW_REV		0x00
@@ -53,6 +76,13 @@
 #define OPCODE_BC_CTRL1_WRITE	0x02
 #define OPCODE_CONTROL1_READ	0x05
 #define OPCODE_CONTROL1_WRITE	0x06
+#define OPCODE_AUTO_VBUS	0x54	/* vendor max77705_usbc_{en,dis}able_auto_vbus */
+
+/* CC_STATUS0 CCStat[2:0] (vendor enum max77705_cc_pin_state) */
+#define CC_STAT_MASK		0x07
+#define CC_NO_CONNECTION	0
+#define CC_SINK			1	/* phone is the sink: a charger/host is attached */
+#define CC_SOURCE		2	/* phone is the source: a device is attached */
 
 /*
  * CONTROL1: NoBCComp[7] RCPS[6] COMP2SW(D+)[5:3] COMN1SW(D-)[2:0]
@@ -68,11 +98,36 @@ MODULE_PARM_DESC(path, "CONTROL1 switch value to apply (0x09 USB, 0x3f open, -1 
 static int s9p_muic_poll_ms = 2000;
 module_param_named(poll_ms, s9p_muic_poll_ms, int, 0644);
 
+static int s9p_muic_host_poll_ms = 250;
+module_param_named(host_poll_ms, s9p_muic_host_poll_ms, int, 0644);
+MODULE_PARM_DESC(host_poll_ms, "host mode: Type-C state poll interval");
+
+/*
+ * Host mode only. 1: boost while CCStat says source (default). 0: never
+ * (written by the rescue init before device mode). 2: boost whenever no one
+ * else powers VBUS, whatever CCStat says -- a first-test fallback in case the
+ * MCU never reports cc_SOURCE; only with nothing but a USB device attached.
+ */
+static int s9p_muic_vbus = 1;
+module_param_named(vbus, s9p_muic_vbus, int, 0644);
+MODULE_PARM_DESC(vbus, "host mode VBUS: 0 off, 1 on Type-C source (default), 2 forced");
+
+#define VBUS_RETRY_MS		5000
+#define VBUS_MAX_FAILS		3
+
 struct s9p_muic {
 	struct i2c_client *client;
 	struct delayed_work work;
 	u8 last_bc;
 	bool applied;
+	/* host mode (rescue DTB) */
+	bool host;
+	struct regulator *vbus;
+	bool vbus_on;
+	int last_cc;
+	int fails;
+	unsigned long retry_at;
+	bool told_ext;
 };
 
 static int muic_read(struct s9p_muic *m, u8 reg)
@@ -145,10 +200,94 @@ static int muic_set_path(struct s9p_muic *m, u8 val)
 	return 0;
 }
 
+static void muic_vbus_off(struct s9p_muic *m, const char *why)
+{
+	if (!m->vbus_on)
+		return;
+	regulator_disable(m->vbus);
+	m->vbus_on = false;
+	dev_info(&m->client->dev, "VBUS off (%s)\n", why);
+}
+
+/* host mode: one step of the VBUS state machine */
+static void muic_host_step(struct s9p_muic *m, int bc)
+{
+	struct device *dev = &m->client->dev;
+	int cc0 = muic_read(m, REG_CC_STATUS0);
+	int cc = cc0 < 0 ? -1 : cc0 & CC_STAT_MASK;
+	int mode = READ_ONCE(s9p_muic_vbus);
+	bool want, ext;
+	int ret;
+
+	if (cc != m->last_cc) {
+		dev_info(dev, "CC_STATUS0 %02x: CCStat %d -> %d (%s)\n",
+			 cc0 & 0xff, m->last_cc, cc,
+			 cc == CC_SOURCE ? "source, a device is attached" :
+			 cc == CC_SINK ? "sink, a charger/host is attached" :
+			 cc == CC_NO_CONNECTION ? "nothing attached" : "other");
+		if (cc != CC_SOURCE) {	/* unplugged: a fresh start next time */
+			m->fails = 0;
+			m->retry_at = 0;
+			m->told_ext = false;
+		}
+		m->last_cc = cc;
+	}
+	if (!m->vbus)
+		return;
+
+	want = (mode == 1 && cc == CC_SOURCE) || mode == 2;
+	if (cc == CC_SINK || cc < 0)
+		want = false;		/* a charger, or the MCU does not answer */
+
+	/* the boost dropped by itself (bypass over-current, see the charger) */
+	if (m->vbus_on && regulator_is_enabled(m->vbus) <= 0) {
+		dev_err(dev, "VBUS dropped while on (over-current?)\n");
+		muic_vbus_off(m, "dropped");
+		m->fails++;
+		m->retry_at = jiffies + msecs_to_jiffies(VBUS_RETRY_MS);
+	}
+
+	if (!want) {
+		muic_vbus_off(m, mode == 0 ? "vbus=0" : cc == CC_SINK ?
+			      "a power source is attached" : "detached");
+		return;
+	}
+	if (m->vbus_on)
+		return;
+	if (m->fails >= VBUS_MAX_FAILS) {
+		if (m->fails == VBUS_MAX_FAILS) {
+			dev_err(dev, "VBUS failed %d times, off until unplugged\n",
+				m->fails);
+			m->fails++;
+		}
+		return;
+	}
+	if (m->retry_at && time_before(jiffies, m->retry_at))
+		return;
+	ext = bc >= 0 && (bc & BC_STATUS_VBUSDET);
+	if (ext) {		/* a powered hub or Y cable: not ours to drive */
+		if (!m->told_ext)
+			dev_info(dev, "VBUS already present (BC_STATUS %02x), no boost\n",
+				 bc);
+		m->told_ext = true;
+		return;
+	}
+	ret = regulator_enable(m->vbus);
+	if (ret) {
+		dev_err(dev, "VBUS on failed: %d\n", ret);
+		m->fails++;
+		m->retry_at = jiffies + msecs_to_jiffies(VBUS_RETRY_MS);
+		return;
+	}
+	m->vbus_on = true;
+	dev_info(dev, "VBUS on (CCStat %d%s)\n", cc, mode == 2 ? ", forced" : "");
+}
+
 static void muic_poll(struct work_struct *work)
 {
 	struct s9p_muic *m = container_of(work, struct s9p_muic, work.work);
 	int bc = muic_read(m, REG_BC_STATUS);
+	int ms;
 
 	if (bc >= 0 && (u8)bc != m->last_bc) {
 		dev_info(&m->client->dev, "BC_STATUS %02x -> %02x\n",
@@ -159,8 +298,39 @@ static void muic_poll(struct work_struct *work)
 			muic_set_path(m, s9p_muic_path);
 		m->last_bc = bc;
 	}
-	if (s9p_muic_poll_ms > 0)
-		schedule_delayed_work(&m->work, msecs_to_jiffies(s9p_muic_poll_ms));
+	if (m->host)
+		muic_host_step(m, bc);
+	ms = m->host ? s9p_muic_host_poll_ms : s9p_muic_poll_ms;
+	if (ms > 0)
+		schedule_delayed_work(&m->work, msecs_to_jiffies(ms));
+}
+
+/* host mode setup at probe: auto-VBUS off, the VBUS regulator */
+static int muic_host_init(struct s9p_muic *m)
+{
+	struct device *dev = &m->client->dev;
+	u8 off = 0x00, res[2] = {};
+	int ret;
+
+	m->vbus = devm_regulator_get_optional(dev, "vbus");
+	if (IS_ERR(m->vbus)) {
+		ret = PTR_ERR(m->vbus);
+		m->vbus = NULL;
+		if (ret == -EPROBE_DEFER)
+			return ret;
+		dev_warn(dev, "host mode without vbus-supply (%d): needs a powered hub\n",
+			 ret);
+	}
+
+	ret = muic_opcode_write(m, OPCODE_AUTO_VBUS, &off, 1);
+	if (!ret) {
+		msleep(20);
+		muic_opcode_result(m, res, sizeof(res));
+	}
+	dev_info(dev, "host mode: MCU auto-VBUS off (%d, answer %02x %02x), vbus=%d\n",
+		 ret, res[0], res[1], s9p_muic_vbus);
+	m->last_cc = -2;	/* log the first state */
+	return 0;
 }
 
 static int s9p_muic_probe(struct i2c_client *client)
@@ -181,6 +351,19 @@ static int s9p_muic_probe(struct i2c_client *client)
 				     "MAX77705 USBC does not answer\n");
 	dev_info(&client->dev, "MAX77705 USBC: HW rev %02x, FW rev %02x\n",
 		 hw, fw);
+	{
+		const char *role;
+
+		m->host = !of_property_read_string(client->dev.of_node,
+						   "starbite,usb-role", &role) &&
+			  !strcmp(role, "host");
+	}
+	if (m->host) {
+		int ret = muic_host_init(m);
+
+		if (ret)
+			return dev_err_probe(&client->dev, ret, "host mode\n");
+	}
 	muic_log_status(m, "at probe");
 
 	bc = muic_read(m, REG_BC_STATUS);
@@ -192,7 +375,9 @@ static int s9p_muic_probe(struct i2c_client *client)
 	}
 
 	INIT_DELAYED_WORK(&m->work, muic_poll);
-	if (s9p_muic_poll_ms > 0)
+	if (m->host)
+		schedule_delayed_work(&m->work, 0);
+	else if (s9p_muic_poll_ms > 0)
 		schedule_delayed_work(&m->work, msecs_to_jiffies(s9p_muic_poll_ms));
 	return 0;
 }
@@ -202,6 +387,17 @@ static void s9p_muic_remove(struct i2c_client *client)
 	struct s9p_muic *m = i2c_get_clientdata(client);
 
 	cancel_delayed_work_sync(&m->work);
+	muic_vbus_off(m, "remove");
+}
+
+static void s9p_muic_shutdown(struct i2c_client *client)
+{
+	struct s9p_muic *m = i2c_get_clientdata(client);
+
+	if (!m)
+		return;
+	cancel_delayed_work_sync(&m->work);
+	muic_vbus_off(m, "shutdown");
 }
 
 static const struct of_device_id s9p_muic_of_match[] = {
@@ -217,6 +413,7 @@ static struct i2c_driver s9p_muic_driver = {
 	},
 	.probe	= s9p_muic_probe,
 	.remove	= s9p_muic_remove,
+	.shutdown = s9p_muic_shutdown,
 };
 module_i2c_driver(s9p_muic_driver);
 

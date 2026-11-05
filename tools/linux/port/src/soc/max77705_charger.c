@@ -11,6 +11,24 @@
  * (for example a charge limiter) can stop and resume charging in hardware. This file
  * replaces the pristine upstream driver in apply_drivers.sh — re-check it
  * after rebasing onto a newer mainline tree.
+ *
+ * Starbite (docs/RESCUE-USB-HOST.md): USB OTG VBUS, the charger's reverse
+ * boost, as a regulator. Registered only when the DT has an available
+ * "usb-otg-vbus" child (the rescue DTB; the daily DTB keeps it disabled, so
+ * the daily kernel behaves exactly as before). The sequence is Samsung's
+ * max77705_set_otg() (battery_v2/max77705_charger.c of the stock 4.9
+ * kernel), on top of what this driver already programs at probe
+ * (OTG_ILIM 900 mA, VBYPSET 0 = 5.0 V):
+ *   on:  refuse when CHGIN or WCIN already has power; CHGIN/AICL interrupts
+ *        off (the vendor masks CHG_I/CHGIN_I); CNFG_08 FSW 3 MHz; CNFG_12
+ *        DISKIP 1 (no skip mode); CNFG_00 CHG off, OTG + BOOST on (MODE
+ *        0x5 -> 0xe, the vendor's state for an OTG cable: the battery driver
+ *        stops charging, max77705_set_otg() sets CHG_CNFG_00_OTG_CTRL).
+ *   off: CNFG_00 OTG + BOOST off, CHG as it was; 50 ms (vendor mdelay);
+ *        FSW 1.5 MHz, auto skip; interrupts back on.
+ *   BYP_I with BYP_DTLS bit 0 (bypass over-current): boost off at once, as
+ *        the vendor's max77705_bypass_irq() does.
+ *   shutdown/remove: boost off (the vendor's shutdown writes CNFG_00 = 0x04).
  */
 
 #include <linux/devm-helpers.h>
@@ -23,6 +41,11 @@
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
+#include <linux/of.h>
+#include <linux/mutex.h>
+#include <linux/delay.h>
+#include <linux/regulator/driver.h>
+#include <linux/regulator/of_regulator.h>
 
 static const char *max77705_charger_model		= "max77705";
 static const char *max77705_charger_manufacturer	= "Maxim Integrated";
@@ -507,6 +530,265 @@ static const struct power_supply_desc max77705_charger_psy_desc = {
 	.set_property = max77705_set_property,
 };
 
+/* ---- Starbite: USB OTG VBUS (reverse boost) ------------------------------ */
+struct max77705_otg {
+	struct max77705_charger_data *chg;
+	struct regulator_dev *rdev;
+	struct mutex lock;
+	int virq_chgin, virq_aicl, virq_byp;
+	bool on;
+	unsigned int chg_bit;		/* CNFG_00 CHG before the boost */
+};
+
+static const unsigned int max77705_otg_ilim_ua[] = {
+	500000, 900000, 1200000, 1500000,	/* CNFG_02 OTG_ILIM 0..3 */
+};
+
+static void max77705_otg_log(struct max77705_otg *otg, const char *when)
+{
+	struct regmap *r = otg->chg->regmap;
+	unsigned int c0 = 0xff, c2 = 0xff, ok = 0xff, d0 = 0xff, d1 = 0xff,
+		     d2 = 0xff;
+
+	regmap_read(r, MAX77705_CHG_REG_CNFG_00, &c0);
+	regmap_read(r, MAX77705_CHG_REG_CNFG_02, &c2);
+	regmap_read(r, MAX77705_CHG_REG_INT_OK, &ok);
+	regmap_read(r, MAX77705_CHG_REG_DETAILS_00, &d0);
+	regmap_read(r, MAX77705_CHG_REG_DETAILS_01, &d1);
+	regmap_read(r, MAX77705_CHG_REG_DETAILS_02, &d2);
+	dev_info(otg->chg->dev,
+		 "otg %s: CNFG_00=%02x CNFG_02=%02x INT_OK=%02x DTLS=%02x/%02x/%02x\n",
+		 when, c0, c2, ok, d0, d1, d2);
+}
+
+/* called with otg->lock held */
+static int max77705_otg_switch(struct max77705_otg *otg, bool on)
+{
+	struct max77705_charger_data *chg = otg->chg;
+	struct regmap *r = chg->regmap;
+	unsigned int ok, c0;
+	int ret;
+
+	if (on == otg->on)
+		return 0;
+	if (on) {
+		ret = regmap_read(r, MAX77705_CHG_REG_INT_OK, &ok);
+		if (ret)
+			return ret;
+		if (ok & (MAX77705_CHGIN_OK | MAX77705_WCIN_OK)) {
+			dev_warn(chg->dev,
+				 "otg: input power present (INT_OK %02x), boost refused\n",
+				 ok);
+			return -EBUSY;
+		}
+		ret = regmap_read(r, MAX77705_CHG_REG_CNFG_00, &c0);
+		if (ret)
+			return ret;
+		otg->chg_bit = c0 & MAX77705_CHG_MASK;
+		disable_irq(otg->virq_chgin);
+		disable_irq(otg->virq_aicl);
+		regmap_field_write(chg->rfield[MAX77705_REG_FSW], MAX77705_CHG_FSW_3MHz);
+		regmap_field_write(chg->rfield[MAX77705_REG_DISKIP], MAX77705_DISABLE_SKIP);
+		ret = regmap_update_bits(r, MAX77705_CHG_REG_CNFG_00,
+					 MAX77705_CHG_MASK | MAX77705_OTG_CTRL,
+					 MAX77705_OTG_CTRL);
+		if (ret) {
+			regmap_update_bits(r, MAX77705_CHG_REG_CNFG_00,
+					   MAX77705_CHG_MASK | MAX77705_OTG_CTRL,
+					   otg->chg_bit);
+			regmap_field_write(chg->rfield[MAX77705_REG_FSW], MAX77705_CHG_FSW_1_5MHz);
+			regmap_field_write(chg->rfield[MAX77705_REG_DISKIP], MAX77705_AUTO_SKIP);
+			enable_irq(otg->virq_aicl);
+			enable_irq(otg->virq_chgin);
+			return ret;
+		}
+		otg->on = true;
+		msleep(20);
+		max77705_otg_log(otg, "on");
+	} else {
+		ret = regmap_update_bits(r, MAX77705_CHG_REG_CNFG_00,
+					 MAX77705_CHG_MASK | MAX77705_OTG_CTRL,
+					 otg->chg_bit);
+		msleep(50);
+		regmap_field_write(chg->rfield[MAX77705_REG_FSW], MAX77705_CHG_FSW_1_5MHz);
+		regmap_field_write(chg->rfield[MAX77705_REG_DISKIP], MAX77705_AUTO_SKIP);
+		otg->on = false;
+		enable_irq(otg->virq_aicl);
+		enable_irq(otg->virq_chgin);
+		max77705_otg_log(otg, "off");
+	}
+	return ret;
+}
+
+static int max77705_otg_enable(struct regulator_dev *rdev)
+{
+	struct max77705_otg *otg = rdev_get_drvdata(rdev);
+	int ret;
+
+	mutex_lock(&otg->lock);
+	ret = max77705_otg_switch(otg, true);
+	mutex_unlock(&otg->lock);
+	return ret;
+}
+
+static int max77705_otg_disable(struct regulator_dev *rdev)
+{
+	struct max77705_otg *otg = rdev_get_drvdata(rdev);
+	int ret;
+
+	mutex_lock(&otg->lock);
+	ret = max77705_otg_switch(otg, false);
+	mutex_unlock(&otg->lock);
+	return ret;
+}
+
+static int max77705_otg_hw_on(struct max77705_charger_data *chg)
+{
+	unsigned int c0;
+	int ret;
+
+	ret = regmap_read(chg->regmap, MAX77705_CHG_REG_CNFG_00, &c0);
+	if (ret)
+		return ret;
+	return !!(c0 & MAX77705_OTG_CTRL);	/* either bit: not off */
+}
+
+static int max77705_otg_is_enabled(struct regulator_dev *rdev)
+{
+	struct max77705_otg *otg = rdev_get_drvdata(rdev);
+
+	return max77705_otg_hw_on(otg->chg);
+}
+
+static const struct regulator_ops max77705_otg_ops = {
+	.enable			= max77705_otg_enable,
+	.disable		= max77705_otg_disable,
+	.is_enabled		= max77705_otg_is_enabled,
+	.set_current_limit	= regulator_set_current_limit_regmap,
+	.get_current_limit	= regulator_get_current_limit_regmap,
+};
+
+static const struct regulator_desc max77705_otg_desc = {
+	.name			= "max77705-otg-vbus",
+	.of_match		= "usb-otg-vbus",
+	.type			= REGULATOR_VOLTAGE,
+	.owner			= THIS_MODULE,
+	.ops			= &max77705_otg_ops,
+	.n_voltages		= 1,
+	.fixed_uV		= 5000000,	/* VBYPSET 0 */
+	.curr_table		= max77705_otg_ilim_ua,
+	.n_current_limits	= ARRAY_SIZE(max77705_otg_ilim_ua),
+	.csel_reg		= MAX77705_CHG_REG_CNFG_02,
+	.csel_mask		= GENMASK(7, 6),
+	/* a consumer sees VBUS settle before it looks for a device */
+	.enable_time		= 20000,
+};
+
+/* BYP_I: bypass node over-current while boosting (vendor max77705_bypass_irq) */
+static irqreturn_t max77705_otg_byp_irq(int irq, void *data)
+{
+	struct max77705_otg *otg = data;
+	unsigned int d2 = 0;
+	bool tripped = false;
+
+	regmap_read(otg->chg->regmap, MAX77705_CHG_REG_DETAILS_02, &d2);
+	mutex_lock(&otg->lock);
+	d2 &= MAX77705_BYP_DTLS;
+	if (otg->on && (d2 & 0x1)) {		/* BYP_DTLS0: OTG over-current */
+		dev_err(otg->chg->dev,
+			"otg: bypass over-current (BYP_DTLS %x), boost off\n", d2);
+		max77705_otg_switch(otg, false);
+		tripped = true;
+	}
+	mutex_unlock(&otg->lock);
+	if (tripped)
+		regulator_notifier_call_chain(otg->rdev,
+					      REGULATOR_EVENT_OVER_CURRENT |
+					      REGULATOR_EVENT_DISABLE, NULL);
+	return IRQ_HANDLED;
+}
+
+/* one MAX77705 per board: shutdown finds the OTG state here */
+static struct max77705_otg *max77705_otg_inst;
+
+static void max77705_otg_off_action(void *data)
+{
+	struct max77705_otg *otg = data;
+
+	mutex_lock(&otg->lock);
+	max77705_otg_switch(otg, false);
+	mutex_unlock(&otg->lock);
+	max77705_otg_inst = NULL;
+}
+
+static int max77705_otg_register(struct max77705_charger_data *chg,
+				 struct regmap_irq_chip_data *irq_data)
+{
+	struct device *dev = chg->dev;
+	struct regulator_config cfg = {};
+	struct device_node *np;
+	struct max77705_otg *otg;
+	int ret;
+
+	np = of_get_child_by_name(dev->of_node, "usb-otg-vbus");
+	if (!np)
+		return 0;
+	if (!of_device_is_available(np)) {
+		of_node_put(np);
+		return 0;		/* the daily DTB: no OTG */
+	}
+	of_node_put(np);
+
+	otg = devm_kzalloc(dev, sizeof(*otg), GFP_KERNEL);
+	if (!otg)
+		return -ENOMEM;
+	otg->chg = chg;
+	mutex_init(&otg->lock);
+	otg->virq_chgin = regmap_irq_get_virq(irq_data, MAX77705_CHGIN_I);
+	otg->virq_aicl = regmap_irq_get_virq(irq_data, MAX77705_AICL_I);
+	otg->virq_byp = regmap_irq_get_virq(irq_data, MAX77705_BYP_I);
+	if (otg->virq_chgin <= 0 || otg->virq_aicl <= 0 || otg->virq_byp <= 0)
+		return dev_err_probe(dev, -EINVAL, "otg: no charger interrupts\n");
+
+	/* a boost someone else left on (a crashed rescue kernel) goes off here */
+	if (max77705_otg_hw_on(chg) > 0) {
+		dev_warn(dev, "otg: boost found on at probe, switching it off\n");
+		regmap_update_bits(chg->regmap, MAX77705_CHG_REG_CNFG_00,
+				   MAX77705_OTG_CTRL, 0);
+	}
+
+	cfg.dev = dev;
+	cfg.driver_data = otg;
+	cfg.regmap = chg->regmap;
+	otg->rdev = devm_regulator_register(dev, &max77705_otg_desc, &cfg);
+	if (IS_ERR(otg->rdev))
+		return dev_err_probe(dev, PTR_ERR(otg->rdev), "otg: regulator\n");
+
+	ret = devm_add_action_or_reset(dev, max77705_otg_off_action, otg);
+	if (ret)
+		return ret;
+	ret = devm_request_threaded_irq(dev, otg->virq_byp, NULL,
+					max77705_otg_byp_irq, IRQF_TRIGGER_NONE,
+					"otg-byp-irq", otg);
+	if (ret)
+		return dev_err_probe(dev, ret, "otg: BYP irq\n");
+	max77705_otg_inst = otg;
+	max77705_otg_log(otg, "registered");
+	return 0;
+}
+
+/* reboot to TWRP/Download/the menu: never with the boost on */
+static void max77705_charger_shutdown(struct i2c_client *i2c)
+{
+	struct max77705_otg *otg = max77705_otg_inst;
+
+	if (otg && otg->chg->dev == &i2c->dev) {
+		mutex_lock(&otg->lock);
+		max77705_otg_switch(otg, false);
+		mutex_unlock(&otg->lock);
+	}
+}
+
 static void max77705_chgin_isr_work(struct work_struct *work)
 {
 	struct max77705_charger_data *chg =
@@ -705,7 +987,13 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to enable charge\n");
 
-	return devm_add_action_or_reset(dev, max77705_charger_disable, chg);
+	ret = devm_add_action_or_reset(dev, max77705_charger_disable, chg);
+	if (ret)
+		return ret;
+
+	/* Starbite: OTG VBUS, rescue DTB only (after the charge-disable action,
+	 * so on remove the boost goes off first) */
+	return max77705_otg_register(chg, irq_data);
 }
 
 static const struct of_device_id max77705_charger_of_match[] = {
@@ -720,6 +1008,7 @@ static struct i2c_driver max77705_charger_driver = {
 		.of_match_table = max77705_charger_of_match,
 	},
 	.probe = max77705_charger_probe,
+	.shutdown = max77705_charger_shutdown,
 };
 module_i2c_driver(max77705_charger_driver);
 

@@ -23,6 +23,19 @@
  * Only the high-speed side is brought up. The SuperSpeed/DP combo PMA at
  * 0x110a0000 stays powered down (PMA_LOW_PWRN), exactly as the vendor does
  * before the USB3 PHY instance is enabled.
+ *
+ * Host mode (Starbite rescue, docs/RESCUE-USB-HOST.md): dwc3 calls
+ * phy_set_mode(PHY_MODE_USB_HOST) when it becomes a host (dr_mode "host", or
+ * "otg" + usb-role-switch in the rescue DTB). The vendor does two things
+ * then, both replayed here:
+ *   - phy_exynos_usb_v3p1_config_host_mode() (SET_DPDM_PULLDOWN, called by
+ *     dwc3_otg_start_host() because is_not_vbus_pad = 1): DP/DM 15k
+ *     pull-downs on, FORCE_BVALID/FORCE_VBUSVALID off, VBUSVLDEXTSEL/
+ *     VBUSVLDEXT off;
+ *   - exynos_usbdrd_phy_tune(OTG_STATE_A_HOST): the host column of the
+ *     stock hs_tune node.
+ * PHY_MODE_USB_DEVICE puts the device-mode values back. The mode is kept,
+ * so a later phy_init (dwc3 resume) reapplies it.
  */
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -115,6 +128,14 @@
 #define S9P_HSP_TUNE_VAL	(HSP_TUNE_TXVREF(0xd) | HSP_TUNE_TXRISE(1) | \
 				 HSP_TUNE_TXRES(3) | HSP_TUNE_TXPREEMPA(3) | \
 				 HSP_TUNE_SQRX(4) | HSP_TUNE_COMPDIS(3))
+/*
+ * Host column of the same node (exynos9810-starlte_common.dtsi usb_hs_tune,
+ * tune_value = <dev host>): tx_pre_emp 3, tx_vref 0x7, rx_sqrx 6,
+ * compdis 7, tx_res 1, tx_rise 1.
+ */
+#define S9P_HSP_TUNE_HOST_VAL	(HSP_TUNE_TXVREF(0x7) | HSP_TUNE_TXRISE(1) | \
+				 HSP_TUNE_TXRES(1) | HSP_TUNE_TXPREEMPA(3) | \
+				 HSP_TUNE_SQRX(6) | HSP_TUNE_COMPDIS(7))
 
 static bool s9p_phy_tune = true;
 module_param_named(tune, s9p_phy_tune, bool, 0444);
@@ -131,6 +152,8 @@ struct s9p_usbphy {
 	struct clk_bulk_data clks[2];
 	int nclks;
 	struct phy *phy;
+	bool host;		/* last phy_set_mode(): PHY_MODE_USB_HOST */
+	bool inited;
 };
 
 static inline void rmw(void __iomem *reg, u32 clear, u32 set)
@@ -218,6 +241,33 @@ static void s9p_usbphy_rewa_ready(struct s9p_usbphy *p)
 	rmw(p->regs + USBCON_HSREWA_INT1_MASK, 0, HSREWA_INT1_ALL);
 }
 
+/* is_not_vbus_pad = 1, device side: VBUS and B-session always valid */
+static void s9p_usbphy_device_utmi(struct s9p_usbphy *p)
+{
+	void __iomem *r = p->regs;
+
+	rmw(r + USBCON_UTMI, UTMI_DP_PULLDOWN | UTMI_DM_PULLDOWN,
+	    UTMI_FORCE_BVALID | UTMI_FORCE_VBUSVALID);
+	rmw(r + USBCON_HSP, 0, HSP_VBUSVLDEXTSEL | HSP_VBUSVLDEXT);
+}
+
+/* phy_exynos_usb_v3p1_config_host_mode() */
+static void s9p_usbphy_host_utmi(struct s9p_usbphy *p)
+{
+	void __iomem *r = p->regs;
+
+	rmw(r + USBCON_UTMI, UTMI_FORCE_BVALID | UTMI_FORCE_VBUSVALID,
+	    UTMI_DP_PULLDOWN | UTMI_DM_PULLDOWN);
+	rmw(r + USBCON_HSP, HSP_VBUSVLDEXTSEL | HSP_VBUSVLDEXT, 0);
+}
+
+static void s9p_usbphy_tune(struct s9p_usbphy *p)
+{
+	if (s9p_phy_tune)
+		rmw(p->regs + USBCON_HSP_TUNE, S9P_HSP_TUNE_MASK,
+		    p->host ? S9P_HSP_TUNE_HOST_VAL : S9P_HSP_TUNE_VAL);
+}
+
 static int s9p_usbphy_init(struct phy *phy)
 {
 	struct s9p_usbphy *p = phy_get_drvdata(phy);
@@ -266,8 +316,7 @@ static int s9p_usbphy_init(struct phy *phy)
 
 	/* no VBUS pad on this board: force VBUS valid, bypass the bus filter */
 	rmw(r + USBCON_LINK_CTRL, 0, LINKCTRL_BUS_FILTER_BYPASS_MASK);
-	rmw(r + USBCON_UTMI, 0, UTMI_FORCE_BVALID | UTMI_FORCE_VBUSVALID);
-	rmw(r + USBCON_HSP, 0, HSP_VBUSVLDEXTSEL | HSP_VBUSVLDEXT);
+	s9p_usbphy_device_utmi(p);
 
 	/* over-current from the hub, not from an IO pad */
 	rmw(r + USBCON_LINK_PORT, 0, LINKPORT_HUB_PORT_SEL_OCD_U3 |
@@ -282,8 +331,12 @@ static int s9p_usbphy_init(struct phy *phy)
 	rmw(r + USBCON_COMBO_PMA_CTRL, 0, PMA_LOW_PWRN);
 
 	/* --- phy_exynos_usb_v3p1_tune(), device-mode values --- */
-	if (s9p_phy_tune)
-		rmw(r + USBCON_HSP_TUNE, S9P_HSP_TUNE_MASK, S9P_HSP_TUNE_VAL);
+	s9p_usbphy_tune(p);
+
+	/* a host before a re-init (dwc3 resume) is a host again */
+	if (p->host)
+		s9p_usbphy_host_utmi(p);
+	p->inited = true;
 
 	s9p_usbphy_dump(p, "after init");
 	return 0;
@@ -300,6 +353,43 @@ static int s9p_usbphy_exit(struct phy *phy)
 	s9p_usbphy_q_ch(p, false);
 
 	clk_bulk_disable_unprepare(p->nclks, p->clks);
+	p->inited = false;
+	return 0;
+}
+
+static int s9p_usbphy_set_mode(struct phy *phy, enum phy_mode mode,
+			       int submode)
+{
+	struct s9p_usbphy *p = phy_get_drvdata(phy);
+	bool host;
+
+	switch (mode) {
+	case PHY_MODE_USB_HOST:
+	case PHY_MODE_USB_HOST_LS:
+	case PHY_MODE_USB_HOST_FS:
+	case PHY_MODE_USB_HOST_HS:
+		host = true;
+		break;
+	case PHY_MODE_USB_DEVICE:
+	case PHY_MODE_USB_DEVICE_LS:
+	case PHY_MODE_USB_DEVICE_FS:
+	case PHY_MODE_USB_DEVICE_HS:
+		host = false;
+		break;
+	default:
+		return 0;	/* PHY_MODE_USB_OTG and the rest: nothing to change */
+	}
+	if (host == p->host)
+		return 0;
+	p->host = host;
+	if (!p->inited)
+		return 0;	/* s9p_usbphy_init() applies it */
+	if (host)
+		s9p_usbphy_host_utmi(p);
+	else
+		s9p_usbphy_device_utmi(p);
+	s9p_usbphy_tune(p);
+	s9p_usbphy_dump(p, host ? "host mode" : "device mode");
 	return 0;
 }
 
@@ -325,6 +415,7 @@ static const struct phy_ops s9p_usbphy_ops = {
 	.exit		= s9p_usbphy_exit,
 	.power_on	= s9p_usbphy_power_on,
 	.power_off	= s9p_usbphy_power_off,
+	.set_mode	= s9p_usbphy_set_mode,
 	.owner		= THIS_MODULE,
 };
 

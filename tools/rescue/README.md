@@ -7,15 +7,20 @@ straight into a small Linux ramdisk that asks for a **Starbite rescue USB disk**
 script on it. The Starbite Installer is meant to make that disk.
 
 Status: the loader side (finding the rescue system, the reboot, the start) is done. The ramdisk
-(`init`, `mk-rescue-initrd.sh`) is written but has not been built or run. **USB host mode is not
-wired up in the kernel yet** (see "Kernel"), so today only the microSD fallback can work.
+(`init`, `sb-reboot`, `mk-rescue-initrd.sh`) builds (2026-11-05) but has not run on the phone.
+**USB host mode is written but untested on hardware** (`docs/RESCUE-USB-HOST.md`): the store's
+`rescue.dtb` makes the DWC3 a host and gives the port 5 V. The microSD fallback works without it.
 
 ## Files
 
 | File | What |
 |---|---|
-| `init` | the ramdisk's `/init` (busybox sh): the screen, the keys, finding and running the rescue disk |
-| `mk-rescue-initrd.sh` | builds `rescue.initrd` (static busybox + `init`, gzip cpio, about 1 MiB) in the Lima VM |
+| `init` | the ramdisk's `/init` (busybox sh): the screen, the keys, USB host/device, finding and running the rescue disk |
+| `sb-reboot` | `/bin/sb-reboot menu\|twrp\|download` in the ramdisk: USB VBUS off, sync, INFORM3, sysrq b |
+| `mk-rescue-initrd.sh` | builds `rescue.initrd` (static busybox + `init` + `sb-reboot`, gzip cpio, about 1 MiB) in the Lima VM |
+| `mk-rescue-dtb.sh` | `rescue.dtb` from the daily DTB: DWC3 host by default, OTG VBUS, loglevel=7 (run by `build-kernel.sh`) |
+| `mk-rescue-usb.sh` | a rescue USB disk **image file** (FAT32 `SB-RESCUE` by default, exFAT, or ext4 `STARBITE-RESCUE`) with `usb/rescue.sh` |
+| `usb/rescue.sh` | the sample rescue script: system info, a log on the disk, Volume Up TWRP / Volume Down Download |
 | `bundle-rescue.py` | appends an `SBRESCUE` bundle (kernel + DTB + initrd) to the BOOT payload |
 
 ## How the loader finds it (`shim/starlte/xnu_boot.c`)
@@ -41,7 +46,9 @@ also cancels the request.
 ## The rescue disk (what the installer writes)
 
 - Any filesystem the rescue kernel can mount (FAT32 is the safe choice: macOS, Windows and Linux
-  can all create it), with the label **`STARBITE-RESCUE`**.
+  can all create it), with the label **`STARBITE-RESCUE`** or **`SB-RESCUE`**. FAT32 and exFAT
+  labels hold 11 characters, so on those use `SB-RESCUE`; ext4 can carry `STARBITE-RESCUE`.
+  `mk-rescue-usb.sh` makes such a disk as an image file.
 - A whole disk or a partition, on USB mass storage or on a microSD card.
 - `/starbite-rescue/rescue.sh`: run with `sh`. It gets these environment variables:
   - `RESCUE_ROOT`: the mount point, read-only
@@ -58,37 +65,33 @@ CPEFS, PARAM, KEYSTORAGE, PERSISTENT, STEADY, BOTA*, DTB, DTBO, the GPT or the b
 Keys in rescue mode:
 - **Power** (hold 2 s): reboot to the Starbite menu.
 - **Volume Up**: look for the disk again.
-- **Volume Down**: switch the port to USB device mode and start a CDC-ACM serial shell, for
-  debugging the rescue system from a computer.
+- **Volume Down**: switch USB VBUS off and the port to device mode (the DWC3 role switch), and
+  start a CDC-ACM serial shell, for debugging the rescue system from a computer. Volume Up
+  switches back to host mode.
 
-## Kernel: what USB host mode needs (not changed here)
+Every reboot from the ramdisk goes through `sb-reboot`: sysrq "b" runs no driver shutdown, so the
+OTG boost has to be switched off first.
 
-Today's Linux port runs the DWC3 (0x10C00000) as a **peripheral** only (`dr_mode = "peripheral"` in
-`tools/linux/port/src/mainline-dts/exynos9810-star2lte.dts`), and the USB 2.0 PHY driver
-(`port/src/usb/phy-exynos9810-usbdrd.c`) is brought up for device mode. A rescue kernel needs all
-of the following:
+## Kernel: USB host mode (docs/RESCUE-USB-HOST.md)
 
-- **DT**: `dr_mode = "host"` for a host-only rescue kernel, or `"otg"` with `usb-role-switch` so
-  the Volume Down serial shell still works.
-- **Config**: `USB_XHCI_HCD`, `USB_DWC3_HOST` or `USB_DWC3_DUAL_ROLE`, `USB_STORAGE` (optionally
-  `USB_UAS`), `SCSI`, `BLK_DEV_SD`, `VFAT_FS` + `NLS_CODEPAGE_437` + `NLS_ISO8859_1`, `EXFAT_FS`,
-  `EXT4_FS`, `DEVTMPFS`, `DEVMEM`, `FRAMEBUFFER_CONSOLE` on the boot framebuffer, `RD_GZIP`.
-- **VBUS**: the MAX77705 charger has to switch to reverse boost (OTG, CNFG_00 mode 0xA) to give
-  5 V. `max77705_charger` needs an OTG regulator, or the disk needs a powered hub or Y cable.
-- **Type-C**: the MAX77705 USB-C/PD MCU has to present Rp (source/DFP role). The MUIC driver
-  (`s9p-max77705-muic`) already routes D+/D- to the AP.
-- **PHY**: host-mode UTMI setup in `phy-exynos9810-usbdrd.c`: VBUS-valid and ID overrides for
-  host instead of device.
+Done in the kernel port, selected per boot by the DTB: the store entry `rescue.dtb`
+(`mk-rescue-dtb.sh`, built by `tools/linux/build-kernel.sh`) has the DWC3 as `dr_mode = "otg"` +
+`usb-role-switch`, default host; the charger's `usb-otg-vbus` regulator on; and the MUIC in host
+role. The daily DTB is unchanged in behaviour (`check-kernel.py dtb` checks both). Drivers:
+`phy-exynos9810-usbdrd` (host UTMI setup and host tuning on `phy_set_mode`), `max77705_charger`
+(OTG boost regulator), `s9p-max77705-muic` (VBUS from the Type-C state). xHCI, mass storage, UAS,
+SCSI disk, FAT/exFAT/ext4 are built in (`tools/linux/config/starbite.config`).
 
-Until that exists, a `STARBITE-RESCUE` partition on the **microSD** works the same way (mmc is up
-in the port).
-
-## Building and installing (not done yet)
+## Building and installing
 
 ```sh
+# kernel + rescue.dtb (outputs in the VM; see docs/RESCUE-USB-HOST.md for the isolated variant)
+limactl shell starbite -- /Users/dev/project-starbite/tools/linux/build-kernel.sh
 limactl shell starbite -- sudo bash /Users/dev/project-starbite/tools/rescue/mk-rescue-initrd.sh
-# store path: add rescue.initrd to the OS store (tools/store/sbstore2.py, type initrd)
-# or BOOT path:
+limactl shell starbite -- bash /Users/dev/project-starbite/tools/rescue/mk-rescue-usb.sh \
+    ~/distros/out/starbite-rescue-usb.img
+# store path: rescue.image (that build's Image), rescue.dtb, rescue.initrd, see
+# docs/RESCUE-USB-HOST.md "Deploy". Or the BOOT path (needs a kernel small enough for BOOT):
 python3 tools/rescue/bundle-rescue.py payload.bin payload-rescue.bin \
-    --image rescue.Image --dtb linux.dtb --initrd rescue.initrd --cmdline "console=tty0"
+    --image rescue.Image --dtb rescue.dtb --initrd rescue.initrd
 ```
