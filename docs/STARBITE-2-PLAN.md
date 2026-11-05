@@ -22,7 +22,8 @@ Kali, Debian, Fedora, WinPE, the UEFI Shell (stays reachable from Engineer OS), 
 
 Menu v7 keeps getting faster in the background until it is smooth on the phone.
 
-Later, in this order (the user, 2026-11-05): after the Ventura touch polish, **ChromeOS** next. Much later:
+Later, in this order (the user, 2026-11-05): after the Ventura touch polish, **ChromeOS** next, then a
+**Windows GPU driver** (accelerated Windows on the Mali, from what the Metal bridge taught us). Much later:
 macOS **Sequoia** as a possible newer stable macOS (Ventura is "more than good" for now), and a **boot menu
 redo** (it lags; better icons).
 
