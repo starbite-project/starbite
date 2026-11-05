@@ -28,7 +28,7 @@ OUT=${1:-$UH/distros/out/linux.initrd}
 BUSYBOX=${BUSYBOX:-/mnt/build/out/busybox-arm64}
 FW=${FW:-$UH/linux/s9p/device/base/lib/firmware/brcm}
 COMP=${COMP:-zstd}
-PKGS="e2fsprogs e2fsprogs-extra exfatprogs losetup dosfstools evtest"
+PKGS="e2fsprogs e2fsprogs-extra exfatprogs losetup dosfstools evtest swtpm"   # swtpm: ChromeOS (2026-11-05)
 
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
 [ "$(uname -m)" = aarch64 ] || { echo "needs an arm64 host (the Lima VM)" >&2; exit 1; }

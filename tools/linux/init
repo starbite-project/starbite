@@ -380,6 +380,32 @@ boot_disk() {
 			MLOOP= MDIR=
 		fi
 	fi
+	# a software TPM 2.0 for ChromeOS (no TPM chip in the S9): swtpm behind the kernel's vTPM proxy gives
+	# /dev/tpm0 and /dev/tpmrm0, already started (startup-clear) as firmware would leave it; its state is
+	# on the card, so the encrypted stateful's key survives reboots. NOT a secure TPM (master plan 3.5).
+	if command -v swtpm >/dev/null && [ -e /dev/vtpmx ]; then
+		tpmdir=/sd/distros/chromeos-tpm
+		mkdir -p "$tpmdir"
+		swtpm chardev --vtpm-proxy --tpm2 --tpmstate dir="$tpmdir" \
+			--flags not-need-init,startup-clear --daemon \
+			--log file=/sd/distros/chromeos-tpm.log,level=2 >/dev/null 2>&1
+		for i in 1 2 3 4 5 6 7 8 9 10; do
+			[ -e /dev/tpm0 ] && break
+			mdev -s 2>/dev/null
+			sleep 0.2
+		done
+		echo "  TPM: $( [ -e /dev/tpm0 ] && echo 'software TPM 2.0 (swtpm) ready' || echo 'swtpm did not start')"
+	else
+		echo "  TPM: none (no swtpm or no /dev/vtpmx)"
+	fi
+	# the boot log on the card (bring-up): the kernel log, ChromeOS's early messages included, kept by a
+	# reader that outlives switch_root (its file stays open on the card), synced every 3 s
+	if [ -e /dev/kmsg ]; then
+		log=/sd/distros/chromeos-boot.log
+		[ -f "$log" ] && mv -f "$log" "$log.1"
+		cat /dev/kmsg > "$log" 2>/dev/null &
+		( while sleep 3; do sync; done ) >/dev/null 2>&1 &
+	fi
 	clear_screen
 	echo "  PROJECT STARBITE"
 	echo "  starting ${img##*/} (ChromiumOS) ..."
