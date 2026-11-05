@@ -15,6 +15,11 @@ design. Differences applied here, each checked so a drifted input fails loudly:
     placeholders for the Starbite loader
   - CMA out of the loader's Linux window (Image, initrd, DTB), see CMA below
   - microSD (dwmmc2)
+  - USB OTG VBUS for the rescue DTB (docs/RESCUE-USB-HOST.md): the MAX77705
+    charger's usb-otg-vbus regulator node, status "disabled" here, and the
+    MUIC's vbus-supply. tools/rescue/mk-rescue-dtb.sh enables it (and sets
+    dr_mode) in a copy; with the node disabled the daily DTB behaves as
+    before (no regulator, no device link, dr_mode "peripheral")
   - --legacy-cma: the rollback DTB (store file linux-old.dtb, hidden catalog
     entry, same Image and initrd): everything above, but CMA at the port's
     proven base 0x98000000, cut to 256 MiB so it ends at OS_RD 0xa8000000
@@ -134,6 +139,34 @@ if args.gpu_floor_455:
 				opp-microvolt = <950000>;
 			};
 """, '\t\t\t/* opp-260000000 dropped (mk-starlte-dts.py --gpu-floor-455) */\n')
+# ---- USB OTG VBUS (rescue DTB only, docs/RESCUE-USB-HOST.md) -----------------
+# Reverse boost of the MAX77705 charger (max77705_charger.c, Starbite part):
+# 5.0 V (VBYPSET 0), current limit CNFG_02 OTG_ILIM 900 mA (the vendor's
+# CONFIG_CHARGER_MAX77705_OTG_LIMIT value; plenty for a USB 2.0 stick).
+sub("""			interrupt-parent = <&max77705>;
+			interrupts = <0>;
+		};
+""", """			interrupt-parent = <&max77705>;
+			interrupts = <0>;
+
+			/* Starbite: enabled only in rescue.dtb (tools/rescue/mk-rescue-dtb.sh) */
+			usb_otg_vbus: usb-otg-vbus {
+				regulator-name = "usb-otg-vbus";
+				regulator-min-microvolt = <5000000>;
+				regulator-max-microvolt = <5000000>;
+				regulator-min-microamp = <900000>;
+				regulator-max-microamp = <900000>;
+				status = "disabled";
+			};
+		};
+""")
+sub("""			compatible = "samsung,s9p-max77705-muic";
+			reg = <0x25>;
+""", """			compatible = "samsung,s9p-max77705-muic";
+			reg = <0x25>;
+			/* used only with starbite,usb-role = "host" (rescue.dtb) */
+			vbus-supply = <&usb_otg_vbus>;
+""")
 if 'star2lte' in s.replace('star2lte_eur', ''):
     print('mk-starlte-dts: note, star2lte still mentioned in comments')
 # ---- microSD (dwmmc2@11500000, stock starlte DT) ----------------------------

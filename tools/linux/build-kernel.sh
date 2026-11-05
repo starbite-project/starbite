@@ -20,7 +20,9 @@
 #
 # Outputs:
 #   $OUT ($HOME/distros/_kernel)   Image, exynos9810-starlte.dtb, linux-old.dtb (rollback,
-#                                  mk-starlte-dts.py --legacy-cma), kernel.config, release,
+#                                  mk-starlte-dts.py --legacy-cma), rescue.dtb (USB host for
+#                                  the rescue ramdisk, tools/rescue/mk-rescue-dtb.sh,
+#                                  docs/RESCUE-USB-HOST.md), kernel.config, release,
 #                                  modules-<release>.img (ext4, label sb-modules), SHA256SUMS
 #   $REPO_OUT ($PROJ/build/linux)  the same without the modules image, plus
 #                                  kernel-source.patch (small files only)
@@ -179,20 +181,26 @@ cp "$OUT/exynos9810-starlte.dtb" "$OUT/linux-old.dtb"
 fdtput -t x "$OUT/linux-old.dtb" /reserved-memory/linux,cma reg 0 "${CMA_OLD_BASE#0x}" "${CMA_OLD_SIZE#0x}"
 NDIFF=$(diff <(dtc -q -I dtb -O dts "$OUT/exynos9810-starlte.dtb") <(dtc -q -I dtb -O dts "$OUT/linux-old.dtb") | grep -c '^[<>]' || true)
 [ "$NDIFF" = 2 ] || { echo "linux-old.dtb differs in $NDIFF lines, expected only the CMA reg"; exit 1; }
+# rescue.dtb (store entry for the rescue ramdisk): this DTB with dwc3 host by default and the
+# MAX77705 OTG VBUS on; the daily DTB stays device-only (check-kernel.py dtb checks both)
+bash "$PROJ/tools/rescue/mk-rescue-dtb.sh" "$OUT/exynos9810-starlte.dtb" "$OUT/rescue.dtb"
 cp out/.config "$OUT/kernel.config"
 echo "$KREL" > "$OUT/release"
 mkdir -p "$REPO_OUT"
-cp "$OUT/Image" "$OUT/exynos9810-starlte.dtb" "$OUT/linux-old.dtb" "$OUT/kernel.config" "$OUT/release" "$REPO_OUT/"
+cp "$OUT/Image" "$OUT/exynos9810-starlte.dtb" "$OUT/linux-old.dtb" "$OUT/rescue.dtb" "$OUT/kernel.config" "$OUT/release" "$REPO_OUT/"
 B71=$(ls -d "$DIST"/m71-* 2>/dev/null | tail -1)
 [ -z "$B71" ] || cp "$B71/kernel-source.patch" "$REPO_OUT/kernel-source.patch"
 rm -rf "$DIST"                  # vmlinux, boot.img, dt.img: not used by the Starbite loader
-(cd "$OUT" && sha256sum Image exynos9810-starlte.dtb linux-old.dtb kernel.config release modules-*.img 2>/dev/null > SHA256SUMS)
-(cd "$REPO_OUT" && sha256sum Image exynos9810-starlte.dtb linux-old.dtb kernel.config release > SHA256SUMS)
+# (NO_MODULES: no modules image, and an unmatched glob would fail sha256sum under set -e)
+(cd "$OUT" && sha256sum Image exynos9810-starlte.dtb linux-old.dtb rescue.dtb kernel.config release \
+	$(ls modules-*.img 2>/dev/null) > SHA256SUMS)
+(cd "$REPO_OUT" && sha256sum Image exynos9810-starlte.dtb linux-old.dtb rescue.dtb kernel.config release > SHA256SUMS)
 
 echo "=== checks ==="
 python3 "$LINUX/check-kernel.py" image "$OUT/Image"
 python3 "$LINUX/check-kernel.py" dtb "$OUT/exynos9810-starlte.dtb"
 python3 "$LINUX/check-kernel.py" dtb --legacy-cma --image "$OUT/Image" "$OUT/linux-old.dtb"
+python3 "$LINUX/check-kernel.py" dtb --usb-host "$OUT/rescue.dtb"
 python3 "$LINUX/check-kernel.py" config "$OUT/kernel.config" "$STARBITE_CONFIG"
 if [ -f "$OUT/modules-$KREL.img" ]; then
 	python3 "$LINUX/check-kernel.py" pair "$OUT/Image" "$OUT/modules-$KREL.img"
@@ -200,6 +208,6 @@ else
 	echo "no modules-$KREL.img (NO_MODULES): build the modules for this Image before copying it to the card"
 fi
 dtc -q -I dtb -O dts "$OUT/exynos9810-starlte.dtb" | grep -E 'bootargs|linux,initrd|starbite,rtc-epoch'
-ls -l "$OUT" "$REPO_OUT/Image" "$REPO_OUT/exynos9810-starlte.dtb" "$REPO_OUT/linux-old.dtb"
+ls -l "$OUT" "$REPO_OUT/Image" "$REPO_OUT/exynos9810-starlte.dtb" "$REPO_OUT/linux-old.dtb" "$REPO_OUT/rescue.dtb"
 space end
 echo STARBITE_KERNEL_OK "$KREL"
