@@ -4,8 +4,15 @@
 # The loader starts this ramdisk when the Starbite Recovery menu (hold Bixby at boot) picks
 # "Starbite Rescue mode", or after `reboot-to rescue`. It asks for a Starbite rescue disk, made by
 # the Starbite Installer: a USB mass-storage disk (or a microSD card) with a filesystem labelled
-# STARBITE-RESCUE holding /starbite-rescue/rescue.sh. When one appears it is mounted read-only,
-# checked against /starbite-rescue/rescue.sha256 if present, and rescue.sh runs.
+# STARBITE-RESCUE (ext4 and other filesystems with 15-character labels) or SB-RESCUE (FAT32 and
+# exFAT: their labels hold 11 characters) holding /starbite-rescue/rescue.sh. When one appears it
+# is mounted read-only, checked against /starbite-rescue/rescue.sha256 if present, and rescue.sh
+# runs.
+#
+# USB host (docs/RESCUE-USB-HOST.md): with the store's rescue.dtb the DWC3 starts as a host and
+# s9p-max77705-muic gives the port 5 V while the Type-C MCU reports a device attached. Volume Down
+# turns VBUS off and switches the controller to device mode (the role switch). Every reboot goes
+# through /bin/sb-reboot, which switches VBUS off first (sysrq "b" runs no driver shutdown).
 #
 # Keys (polled with devmem, as tools/linux/init): Power held 2 s reboots to the Starbite menu;
 # Volume Up rescans now; Volume Down switches the USB port to device mode and starts a serial
@@ -19,6 +26,8 @@
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
 LABEL=STARBITE-RESCUE
+LABELS="STARBITE-RESCUE SB-RESCUE"                 # SB-RESCUE: FAT32/exFAT (11-character labels)
+VBUS_PARAM=/sys/module/s9p_max77705_muic/parameters/vbus
 MNT=/rescue
 LOG=/run/rescue.log
 GPA0_DAT=0x14050024                                # bit 3 Vol up, bit 4 Vol down (active low)
@@ -29,7 +38,8 @@ GPA2_DAT=0x14050064                                # bit 4 Power (active low)
 say() {                                            # the screen (fbcon on tty0) and the log
 	echo "$*" > /dev/tty0 2>/dev/null
 	echo "$*" >> "$LOG" 2>/dev/null
-	echo "rescue: $*" > /dev/kmsg 2>/dev/null
+	# KERN_DEBUG: in dmesg, but not printed on tty0 a second time (rescue.dtb has loglevel=7)
+	echo "<7>rescue: $*" > /dev/kmsg 2>/dev/null
 	return 0
 }
 
@@ -71,15 +81,41 @@ candidates() {
 	return 0
 }
 
-# find_rescue: the first candidate whose filesystem label is STARBITE-RESCUE.
+is_label() {                                       # is_label LABEL: one of $LABELS
+	for x in $LABELS; do [ "$1" = "$x" ] && return 0; done
+	return 1
+}
+
+# find_rescue: the first candidate whose filesystem label is one of $LABELS. blkid when the
+# busybox has it, else findfs (Ubuntu's busybox-static has findfs but no blkid).
 find_rescue() {
-	for d in $(candidates); do
-		[ -b "$d" ] || continue
-		l=$(blkid -s LABEL -o value "$d" 2>/dev/null)
-		[ -z "$l" ] && l=$(blkid "$d" 2>/dev/null | sed -n 's/.* LABEL="\([^"]*\)".*/\1/p')
-		[ "$l" = "$LABEL" ] && { echo "$d"; return 0; }
+	c=$(candidates)
+	if command -v blkid >/dev/null 2>&1; then
+		for d in $c; do
+			[ -b "$d" ] || continue
+			l=$(blkid -s LABEL -o value "$d" 2>/dev/null)
+			[ -z "$l" ] && l=$(blkid "$d" 2>/dev/null | sed -n 's/.* LABEL="\([^"]*\)".*/\1/p')
+			is_label "$l" && { echo "$d"; return 0; }
+		done
+		return 1
+	fi
+	for x in $LABELS; do
+		d=$(findfs "LABEL=$x" 2>/dev/null) || continue
+		for e in $c; do                            # only a USB disk or the microSD card
+			[ "$e" = "$d" ] && { echo "$d"; return 0; }
+		done
 	done
 	return 1
+}
+
+# vbus_state: "on", "off" or "none" (no OTG regulator: not the rescue DTB, or an old kernel)
+vbus_state() {
+	st=none
+	for r in /sys/class/regulator/*; do
+		[ "$(cat "$r/name" 2>/dev/null)" = usb-otg-vbus ] || continue
+		case $(cat "$r/state" 2>/dev/null) in enabled) st=on ;; *) st=off ;; esac
+	done
+	echo $st
 }
 
 [ "$SB_TEST" = 1 ] && return 0
@@ -98,30 +134,39 @@ lock_ufs() {
 	done
 }
 
-# USB host mode. The DWC3 at 0x10C00000 is dr_mode "peripheral" in today's DTB; a rescue kernel
-# needs "host" or "otg" + usb-role-switch, VBUS from the MAX77705 (reverse boost / OTG) and the
-# Type-C port in source role (README.md "Kernel"). Each way is tried; none is an error here.
+# USB host mode (docs/RESCUE-USB-HOST.md). rescue.dtb: dwc3 dr_mode "otg" + usb-role-switch,
+# default host; s9p-max77705-muic drives VBUS (vbus=1: while the Type-C MCU reports a device).
+# With the daily DTB there is no role switch and no OTG regulator: only the microSD works then.
 usb_host() {
+	[ -w $VBUS_PARAM ] && echo 1 > $VBUS_PARAM
 	for r in /sys/class/usb_role/*/role; do
 		[ -w "$r" ] && echo host > "$r" 2>/dev/null
-	done
-	mount -t debugfs none /sys/kernel/debug 2>/dev/null
-	for m in /sys/kernel/debug/*.usb/mode /sys/kernel/debug/usb/*.usb/mode; do
-		[ -w "$m" ] && echo host > "$m" 2>/dev/null
-	done
-	for v in /sys/class/power_supply/*/otg /sys/class/power_supply/*/usb_otg; do
-		[ -w "$v" ] && echo 1 > "$v" 2>/dev/null
 	done
 	return 0
 }
 
+# usb_report: one line on the screen about the port
+usb_report() {
+	role=none
+	for r in /sys/class/usb_role/*/role; do
+		[ -r "$r" ] && role=$(cat "$r")
+	done
+	n=0
+	for u in /sys/bus/usb/devices/[0-9]*-[0-9]*; do
+		[ -e "$u/idVendor" ] && n=$((n + 1))
+	done
+	say "USB: role $role, VBUS $(vbus_state), $n device(s)"
+}
+
 usb_device_shell() {
+	[ -w $VBUS_PARAM ] && echo 0 > $VBUS_PARAM      # VBUS off before the role changes
+	i=0
+	while [ "$(vbus_state)" = on ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
 	for r in /sys/class/usb_role/*/role; do
 		[ -w "$r" ] && echo device > "$r" 2>/dev/null
 	done
-	for m in /sys/kernel/debug/*.usb/mode /sys/kernel/debug/usb/*.usb/mode; do
-		[ -w "$m" ] && echo device > "$m" 2>/dev/null
-	done
+	i=0                                            # the UDC appears once dwc3 is a gadget
+	while [ -z "$(ls /sys/class/udc 2>/dev/null)" ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
 	mount -t configfs none /sys/kernel/config 2>/dev/null
 	G=/sys/kernel/config/usb_gadget/rescue
 	mkdir -p $G/strings/0x409 $G/functions/acm.GS0 $G/configs/c.1/strings/0x409 || return 1
@@ -139,6 +184,10 @@ usb_device_shell() {
 
 reboot_menu() {
 	say "Rebooting to the Starbite menu"
+	if command -v sb-reboot >/dev/null 2>&1; then
+		sb-reboot menu                         # VBUS off first, then INFORM normal + sysrq b
+	fi
+	[ -w $VBUS_PARAM ] && echo 0 > $VBUS_PARAM && sleep 1
 	sync
 	devmem 0x1406080C 32 0x12345670 2>/dev/null       # INFORM: normal boot
 	echo b > /proc/sysrq-trigger
@@ -188,13 +237,15 @@ say "  STARBITE RESCUE MODE"
 say "=============================================="
 say ""
 say "Connect a Starbite rescue USB disk"
-say "(made by the Starbite Installer, label $LABEL)."
+say "(made by the Starbite Installer, label $LABEL or SB-RESCUE)."
 say ""
 say "Power (hold 2 s): reboot to the Starbite menu"
 say "Volume Up: look again   Volume Down: USB serial shell"
 say ""
 lock_ufs
 usb_host
+sleep 1
+usb_report
 
 held=0
 shown=
@@ -223,6 +274,10 @@ while :; do
 		usb_device_shell || say "No USB device controller"
 		while key_down down; do sleep 0.2; done
 	fi
-	key_down up && say "Looking again..."
+	if key_down up; then
+		say "Looking again..."
+		usb_host                               # back to host after the serial shell, too
+		usb_report
+	fi
 	sleep 0.5
 done
