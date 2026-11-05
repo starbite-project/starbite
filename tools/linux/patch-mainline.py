@@ -298,6 +298,81 @@ def patch_port(work):
          '\tpriv = devm_drm_dev_alloc(&pdev->dev, &s9p_drm_driver,\n',
          's9p_drm_driver.name = s9p_drm_name')
 
+    # 6c. s9p-decon: honour the framebuffer's pitch (2026-11-05). The driver kept sboot's fetch setup
+    # (IDMA_SRC_SIZE 0x0b9005a0: 2960 rows of a 1440-pixel-wide buffer) and only moved the base address,
+    # so every client had to hand it 5760-byte rows. Mesa's kms_swrast (ChromiumOS, boot 8) pads rows to
+    # 64-pixel tiles, 1472 px = 5888 bytes: the picture sheared 32 px per row (near-horizontal lines every
+    # ~46 rows, the text smeared into one tilted band). SRC_SIZE's low half is the buffer's full width in
+    # pixels (IMG_SIZE stays the 1440x2960 crop); it sits in the same shadowed IDMA bank as the base
+    # address, so it latches with the same update request. The plane check refuses what the fetch can't do.
+    edit(w, decon,
+         '\tu32 inherited_path1;\n',
+         '\tu32 inherited_path1;\n'
+         '\tu32 src_size;\t\t/* Starbite stride: IDMA_SRC_SIZE as programmed */\n',
+         'Starbite stride: IDMA_SRC_SIZE as programmed')
+    edit(w, decon,
+         'static void s9p_decon_program_address(struct s9p_decon *priv, dma_addr_t addr)\n'
+         '{\n'
+         '\tvoid __iomem *ch = s9p_chan_regs(priv, priv->chan);\n',
+         'static void s9p_decon_program_address(struct s9p_decon *priv, dma_addr_t addr,\n'
+         '\t\t\t\t      unsigned int pitch)\n'
+         '{\n'
+         '\tvoid __iomem *ch = s9p_chan_regs(priv, priv->chan);\n'
+         '\tu32 src = (priv->src_size & 0xffff0000) | (pitch / 4);\n'
+         '\n'
+         '\t/* Starbite stride: the buffer\'s row length, in pixels; latched with the address */\n'
+         '\tif (src != priv->src_size) {\n'
+         '\t\twritel_relaxed(src, ch + IDMA_SRC_SIZE);\n'
+         '\t\tdrm_dbg_kms(&priv->drm, "stride %u -> %u px\\n",\n'
+         '\t\t\t    priv->src_size & 0xffff, pitch / 4);\n'
+         '\t\tpriv->src_size = src;\n'
+         '\t}\n',
+         'Starbite stride: the buffer')
+    edit(w, decon,
+         '\tobj = to_drm_gem_dma_obj(plane_state->fb->obj[0]);\n'
+         '\ts9p_wait_shadow_idle(priv);\n'
+         '\ts9p_decon_program_address(priv, obj->dma_addr);\n',
+         '\tobj = to_drm_gem_dma_obj(plane_state->fb->obj[0]);\n'
+         '\ts9p_wait_shadow_idle(priv);\n'
+         '\ts9p_decon_program_address(priv, obj->dma_addr + plane_state->fb->offsets[0],\n'
+         '\t\t\t\t  plane_state->fb->pitches[0]);\n',
+         'obj->dma_addr + plane_state->fb->offsets[0]')
+    edit(w, decon,
+         '\t\t\ts9p_decon_program_address(priv, obj->dma_addr);\n',
+         '\t\t\ts9p_decon_program_address(priv, obj->dma_addr + fb->offsets[0],\n'
+         '\t\t\t\t\t\t  fb->pitches[0]);\n',
+         'obj->dma_addr + fb->offsets[0]', count=2)
+    edit(w, decon,
+         '\ts9p_decon_program_address(priv, priv->black_dma);\n',
+         '\ts9p_decon_program_address(priv, priv->black_dma, PANEL_W * 4);\n',
+         'priv->black_dma, PANEL_W * 4')
+    edit(w, decon,
+         '\tsrc = readl_relaxed(s9p_chan_regs(priv, priv->chan) + IDMA_SRC_SIZE);\n',
+         '\tsrc = readl_relaxed(s9p_chan_regs(priv, priv->chan) + IDMA_SRC_SIZE);\n'
+         '\tpriv->src_size = src;\t/* Starbite stride: sboot\'s geometry */\n',
+         "Starbite stride: sboot's geometry")
+    edit(w, decon,
+         'static const struct drm_simple_display_pipe_funcs s9p_pipe_funcs = {\n',
+         '/* Starbite stride: what the inherited fetch can scan (linear XRGB8888, full panel, no crop) */\n'
+         'static int s9p_decon_pipe_check(struct drm_simple_display_pipe *pipe,\n'
+         '\t\t\t\tstruct drm_plane_state *plane_state,\n'
+         '\t\t\t\tstruct drm_crtc_state *crtc_state)\n'
+         '{\n'
+         '\tstruct drm_framebuffer *fb = plane_state->fb;\n'
+         '\n'
+         '\tif (!fb)\n'
+         '\t\treturn 0;\n'
+         '\tif (fb->pitches[0] % 4 || fb->pitches[0] / 4 < PANEL_W ||\n'
+         '\t    fb->pitches[0] / 4 > 0x3fff || fb->offsets[0] % 16 ||\n'
+         '\t    plane_state->src_x || plane_state->src_y)\n'
+         '\t\treturn -EINVAL;\n'
+         '\treturn 0;\n'
+         '}\n'
+         '\n'
+         'static const struct drm_simple_display_pipe_funcs s9p_pipe_funcs = {\n'
+         '\t.check = s9p_decon_pipe_check,\n',
+         's9p_decon_pipe_check')
+
     # 7. s9p-g3d: rail check, 950 mV at 260 MHz
     g3d = 'src/soc/s9p-g3d.c'
     edit(w, g3d,
