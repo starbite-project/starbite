@@ -136,7 +136,7 @@ def changed_file_chunks(since):
     mnt = attach_ro()
     out, n = set(), 0
     try:
-        found = subprocess.run(['find', mnt, '-xdev', '-newer', since, '(', '-type', 'f', '-o', '-type', 'l', ')'],
+        found = subprocess.run(['find', mnt, '-xdev', '-cnewer', since, '(', '-type', 'f', '-o', '-type', 'l', ')'],
                                text=True, capture_output=True).stdout.splitlines()
         for path in found:
             try:

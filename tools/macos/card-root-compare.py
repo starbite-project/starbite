@@ -4,7 +4,7 @@ the card (TWRP sha256sum, nothing crosses USB) while the Mac hashes the image, i
   card-root-compare.py [IMAGE] > chunk numbers that differ (one per line), progress on stderr"""
 import hashlib, os, subprocess, sys, threading
 IMG = sys.argv[1] if len(sys.argv) > 1 else '/Volumes/Untitled/starbite-macos26/root-26t1.img'
-START = 182888448            # sectors; the root's 10 GiB from there
+START = int(os.environ.get('START', 182888448))   # sectors (Ventura: START=216442880)
 C = 64 << 20
 n = os.path.getsize(IMG) // C
 img, card = {}, {}
