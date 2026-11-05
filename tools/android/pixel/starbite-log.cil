@@ -1,0 +1,19 @@
+; Starbite boot logger for the Google GSI (a user build: SELinux is always enforcing and the userdebug
+; "su" domain has no rules). Appended to VENDOR's /etc/selinux/vendor_sepolicy.cil by build-vendor.sh.
+; A vendor domain of its own, entered from init by a type transition on the script's label, and
+; permissive (only this domain), so the logger can read the kernel log and logcat and write
+; /metadata/starbite without a full rule set. Test-only: drop it once Android is daily-stable.
+; Names ending _202604 are the platform's public types at the vendor's policy version.
+(type starbite_log)
+(roletype object_r starbite_log)
+(type starbite_log_exec)
+(roletype object_r starbite_log_exec)
+(typeattributeset domain (starbite_log))
+(typeattributeset file_type (starbite_log_exec))
+(typeattributeset exec_type (starbite_log_exec))
+(typeattributeset vendor_file_type (starbite_log_exec))
+(allow init_202604 starbite_log_exec (file (read getattr map execute open)))
+(allow init_202604 starbite_log (process (transition siginh rlimitinh noatsecure)))
+(allow starbite_log starbite_log_exec (file (read getattr map execute open entrypoint)))
+(typetransition init_202604 starbite_log_exec process starbite_log)
+(typepermissive starbite_log)
