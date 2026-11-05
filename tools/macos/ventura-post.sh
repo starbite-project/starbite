@@ -59,7 +59,8 @@ pw = list(open(pwfile, 'rb').readline().rstrip(b'\n'))
 pw += [0] * (12 - len(pw) % 12) if len(pw) % 12 else []     # zero-padded to whole 12-byte rounds
 put('/private/etc/kcpassword', bytes(b ^ key[i % len(key)] for i, b in enumerate(pw)), [0, 0, 0o600])
 # no blur, no motion
-ua = plistlib.dumps({'reduceTransparency': True, 'reduceMotion': True}, fmt=plistlib.FMT_BINARY)
+ua = plistlib.dumps({'reduceTransparency': True, 'reduceMotion': True, 'virtualKeyboardEnabled': True},   # + the on-screen
+                   fmt=plistlib.FMT_BINARY)                                                       # Accessibility Keyboard
 put('/Library/Preferences/com.apple.universalaccess.plist', ua, [0, 0, 0o644])
 put('/private/var/root/Library/Preferences/com.apple.universalaccess.plist', ua, [0, 0, 0o600])
 put('/Users/starbite/Library/Preferences/com.apple.universalaccess.plist', ua, [501, 20, 0o600])
@@ -70,3 +71,16 @@ json.dump(own, open(owners, 'w'))
 print('Ventura Starbite layer: setup done, user starbite (auto-login), reduce transparency/motion')
 PY
 printf 'Starbite layer: ventura-post.sh %s\n' "$(date -u +%Y-%m-%dT%H:%MZ)" >> "$mnt/.starbite-macos"
+# 5. (2026-11-05) dirs_cleaner keys on the boot UUID launchd cannot get here: wrap it so /var/run is emptied
+#    every boot (a stale com.apple.loginwindow.didRunThisBoot kept loginwindow from starting after a reset)
+if [ ! -e "$mnt/usr/libexec/dirs_cleaner.starbite-orig" ]; then
+    mv "$mnt/usr/libexec/dirs_cleaner" "$mnt/usr/libexec/dirs_cleaner.starbite-orig"
+    cp tools/macos/ventura-dirs-cleaner.sh "$mnt/usr/libexec/dirs_cleaner"
+    python3 -I - "$owners" <<'PY'
+import json, sys
+o = sys.argv[1]; j = json.load(open(o))
+j['/usr/libexec/dirs_cleaner.starbite-orig'] = j.get('/usr/libexec/dirs_cleaner', [0, 0, 0o555])
+j['/usr/libexec/dirs_cleaner'] = [0, 0, 0o755]
+json.dump(j, open(o, 'w'))
+PY
+fi
