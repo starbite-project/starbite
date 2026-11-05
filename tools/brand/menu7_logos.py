@@ -99,11 +99,72 @@ CREDITS = {
 }
 assert set(CREDITS) == set(FILES)
 
+# Release icons (one per catalog key: the mark of that release, e.g. Apple's "16" for iOS 16),
+# optional: a tile uses its release icon only when the file is in src/release/<key>/ and pinned
+# here; otherwise it keeps its vendor-logo tile (menu7-assets tile_table). Each value:
+#   (file under src/, source URL, sha256, credit line, mode)
+#   mode 'bleed': the icon is itself an app icon (a squircle or square with its own background):
+#                 it fills the tile, cut to the tile's squircle; 'fit': a mark on the tile colours.
+# A file present but not pinned (sha256 None) stops the build with the sha256 to pin. SVG or PNG
+# (PNG: the largest size published, resampled to each tile size with Lanczos).
+RELEASE = {
+    'ios16': (None, None, None, None, 'bleed'),
+    'mac13': (None, None, None, None, 'bleed'),
+    'ios26': (None, None, None, None, 'bleed'),
+    'android': (None, None, None, None, 'fit'),
+    'linux-ubuntu': (None, None, None, None, 'fit'),
+}
+RELEASE_DIR = SRC / 'release'
+
+
+def release_file(key):
+    """The release icon's path for a catalog key, or None (no file: keep the vendor tile)."""
+    rel, url, sha, credit, mode = RELEASE.get(key, (None,) * 5)
+    d = RELEASE_DIR / key
+    if rel is None:
+        found = sorted(p for p in d.glob('*') if p.suffix.lower() in ('.svg', '.png')) if d.is_dir() else []
+        if not found:
+            return None
+        sys.exit(f'menu7_logos: {found[0]} is not pinned: add it to RELEASE[{key!r}] '
+                 f'(file {found[0].relative_to(SRC)}, sha256 '
+                 f'{hashlib.sha256(found[0].read_bytes()).hexdigest()}, its URL and credit)')
+    p = SRC / rel
+    if not p.exists():
+        return None
+    h = hashlib.sha256(p.read_bytes()).hexdigest()
+    assert h == sha, f'{p}: sha256 {h}, expected {sha}'
+    if p.suffix.lower() == '.svg':
+        assert not BAD.search(p.read_text(errors='replace')), f'{p}: external reference or script'
+    return p
+
+
+def release_render(key, T):
+    """The release icon at T x T, straight RGBA float 0..255, and its mode ('bleed' / 'fit')."""
+    p = release_file(key)
+    mode = RELEASE[key][4]
+    if p.suffix.lower() == '.svg':
+        a = _rsvg(p.read_text(), ['-w', '1024', '-h', '1024', '--keep-aspect-ratio'])
+        im = Image.fromarray(np.clip(np.rint(a), 0, 255).astype(np.uint8), 'RGBA')
+    else:
+        im = Image.open(p).convert('RGBA')
+    bb = im.getchannel('A').point(lambda v: 255 if v > 8 else 0).getbbox()
+    if bb:                              # to the icon's own bounds (an app icon fills the tile)
+        im = im.crop(bb)
+    s = T / max(im.size)
+    w, h = max(1, round(im.size[0] * s)), max(1, round(im.size[1] * s))
+    im = im.convert('RGBa').resize((w, h), Image.LANCZOS).convert('RGBA')   # premultiplied
+    c = Image.new('RGBA', (T, T), (0, 0, 0, 0))
+    c.paste(im, ((T - w) // 2, (T - h) // 2))
+    out = np.asarray(c).astype(np.float64)
+    out[out[..., 3] == 0] = 0
+    return out, mode
+
 
 def credits():
-    """The INFO lines: one per logo."""
+    """The INFO lines: one per logo (and per release icon present)."""
     return ['logos (tools/brand/logos/SOURCES.md; rasterised, nominative use, no endorsement):'] + \
-        ['  ' + CREDITS[n] for n in FILES]
+        ['  ' + CREDITS[n] for n in FILES] + \
+        ['  ' + RELEASE[k][3] for k in RELEASE if RELEASE[k][0] and (SRC / RELEASE[k][0]).exists()]
 
 
 def _kali_dragon(s):

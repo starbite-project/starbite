@@ -546,7 +546,10 @@ concept's. The tile map (`SB7_T_TILEMAP`) for today's catalog:
 | Starbite Lab row (key "@lab") | #3a145e -> #ad61f2, flask (new) |
 | category defaults | Apple: Apple logo on the provider grey; Microsoft: as win11; Android: as android; Linux: Tux on #15161a -> #3a3d45; Starbite, other, Lab: their glyphs |
 
-Every other OS shows its official logo; only Starbite's own systems may use Starbite-drawn art
+Release icons (`menu7_logos.RELEASE`, `R:` glyph kinds): where a release's own icon is in
+`tools/brand/logos/src/release/<key>/` and pinned, that key's tile shows it instead (app icons full
+bleed, marks on the vendor tile's colours); none is in the tree yet (SOURCES.md lists the
+candidates). Every other OS shows its official logo; only Starbite's own systems may use Starbite-drawn art
 (the `X:` glyph kinds, `CUSTOM_G` in `menu7-assets.py`, today only Engineer OS). Their layers are
 cut to the squircle when they are built, because glass draws a glyph layer unclipped. `tools/menu7/tile-sheet.py` draws the visible systems'
 tiles from a container, labelled (`tools/brand/preview/icons-before.png`, `icons-after.png`).
