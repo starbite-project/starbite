@@ -1,0 +1,1 @@
+androidboot.init_fatal_reboot_target=recovery printk.devkmsg=on

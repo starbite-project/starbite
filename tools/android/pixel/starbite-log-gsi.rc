@@ -1,0 +1,25 @@
+# Starbite boot logging, Google GSI variant (docs/ANDROID-PIXEL.md). Same services and script as
+# tools/android/starbite-log.rc, but without `seclabel u:r:su:s0`: the GSI is a user build, its "su"
+# domain has no rules and SELinux is always enforcing. The domain comes from a type transition on the
+# script's label instead (tools/android/pixel/starbite-log.cil: starbite_log, permissive).
+# build-vendor.sh installs it as /vendor/etc/init/starbite-log.rc (0644 root:root,
+# u:object_r:vendor_configs_file:s0) with /vendor/bin/starbite-log.sh (0755 root:shell,
+# u:object_r:starbite_log_exec:s0). Logs go to /metadata/starbite/boot<N>/ (ODM, ext4, readable from TWRP).
+
+on early-init
+    start starbite_klog
+
+on post-fs
+    start starbite_logcat
+
+service starbite_klog /vendor/bin/starbite-log.sh klog
+    user root
+    group root log
+    oneshot
+    disabled
+
+service starbite_logcat /vendor/bin/starbite-log.sh logcat
+    user root
+    group root log
+    oneshot
+    disabled

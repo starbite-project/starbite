@@ -1,0 +1,19 @@
+#!/bin/bash
+# fake-adb: stands in for `adb` in rehearse-part-write.sh (lima only). Runs TWRP-style shell commands
+# locally with /dev/block/, /tmp/ and /proc/mounts redirected into $FAKE_ROOT; FAIL_AT=N makes the
+# command containing "seek=N " fail (a simulated cable pull).
+R=${FAKE_ROOT:?}
+blockdev_fn='blockdev() { stat -L -c %s "$2"; }'
+case $1 in
+  get-state) echo recovery ;;
+  wait-for-recovery|start-server) ;;
+  push) cp "$2" "$R$3" ;;
+  shell|exec-out)
+    shift; c="$*"
+    c=${c//\/dev\/block\//$R/dev/block/}
+    c=${c//\/tmp\//$R/tmp/}
+    c=${c//\/proc\/mounts/$R/proc/mounts}
+    if [ -n "${FAIL_AT:-}" ] && [[ "$c" == *"seek=$FAIL_AT "* ]]; then echo "simulated cable pull" >&2; exit 1; fi
+    bash -c "$blockdev_fn; $c" | sed "s|$R||g" ;;
+  *) echo "fake-adb: $1 not faked" >&2; exit 1 ;;
+esac
