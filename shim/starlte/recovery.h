@@ -27,6 +27,7 @@ int rec_rescue_take(void);
 /* What recovery_main asks the loader to do. */
 #define REC_CONTINUE 0      /* the normal boot (POST, then the boot menu) */
 #define REC_BOOT     1      /* start catalog entry *pick (Engineer Lite or "Boot entry...") */
+#define REC_FASTBOOT 2      /* USB fastboot (fastboot_dev.c): run by recovery_loop in xnu_boot.c */
 
 /* The recovery menu (blocks until the user leaves it; reboots and power off happen inside).
  * why: a line shown in red at the top (the reason recovery came up, or 0). */

@@ -239,7 +239,7 @@ static void rescue_reboot(void)
 #define ROW_MSG   13U
 #define ROW_BODY  16U
 #define ROW_HINT  44U
-#define N_ITEMS   9U
+#define N_ITEMS   10U
 
 #define IT_CONTINUE 0U
 #define IT_RESCUE   1U
@@ -249,7 +249,8 @@ static void rescue_reboot(void)
 #define IT_DOWNLOAD 5U
 #define IT_REBOOT   6U
 #define IT_POWEROFF 7U
-#define IT_ENTRY    8U
+#define IT_FASTBOOT 8U
+#define IT_ENTRY    9U
 
 static const char *item_name(unsigned i)
 {
@@ -262,6 +263,7 @@ static const char *item_name(unsigned i)
     case IT_DOWNLOAD: return "REBOOT TO DOWNLOAD MODE";
     case IT_REBOOT:   return "REBOOT";
     case IT_POWEROFF: return "POWER OFF";
+    case IT_FASTBOOT: return "USB FASTBOOT / CONSOLE";
     default:          return "BOOT ENTRY...";
     }
 }
@@ -574,6 +576,11 @@ int recovery_main(const char *why, int *pick)
                 r_wait_ms(200);
                 hw_reboot(INFORM_NORMAL);
                 break;
+            case IT_FASTBOOT:
+                star_pmsg("STARBITE: recovery: USB fastboot\n");
+                leave();
+                star_fb_row_base(base);
+                return REC_FASTBOOT;
             case IT_POWEROFF:
                 msg("POWERING OFF", 0, C_GREEN);
                 star_pmsg("STARBITE: recovery: power off\n");
