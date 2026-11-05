@@ -46,6 +46,15 @@ redo** (it lags; better icons).
    Starbite S9, every OS working. **No user password or passcode set on any OS** (it would only confuse);
    where an OS insists on an account, log in automatically.
 
+**Status, night of 2026-11-05:** 1 done. 2 Engineer OS v1.1 in the store (keys-only navigation, exit to menu,
+unit tests; hardware checklist docs/ENGINEER-OS.md section 12 open). 3 done (icons, TWRP label, battery, tags
+hidden). 4 speed merged, not yet judged on screen; POST works. 5 USB fastboot works (43 MB/s). 6 Bixby recovery
+menu works; Rescue: ramdisk + USB host merged, stick image built (build/installer/rescue/), not yet written
+(needs sudo) or tried (needs an OTG adapter). 7 installer v1 merged (dry run / rehearse / real, backups first,
+resumable, no-password checks; rehearsed against fakes only); 64 GB card layout in progress. Android: Pixel-style
+LineageOS 24 live (docs/ANDROID-PIXEL.md section 10). Linux black bars: kernel path proven full-frame, the panel
+mask test needs eyes (docs/LINUX-REBUILD-PLAN.md 6.5).
+
 **One phone only (2026-11-05):** the second S9 is missing, so everything is built and tested on S9 #1. Work the
 plans gave to S9 #2 (GPT editor, installer writes, UO1/FB1 bring-up) runs here instead: dry runs first, and a
 fresh, verified backup of every irreplaceable partition and image before any real write.
