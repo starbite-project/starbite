@@ -36,10 +36,16 @@ sed -E 's|^(/devices/platform/11500000\.dwmmc2/.*voldmanaged=sdcard.*)$|#\1|' "$
 if grep -q '^;; starbite-log.cil begin' "$T/cil.old"; then
   sed '/^;; starbite-log.cil begin/,/^;; starbite-log.cil end/d' "$T/cil.old" > "$T/cil.base"
 else cp "$T/cil.old" "$T/cil.base"; fi
-{ cat "$T/cil.base"; echo ';; starbite-log.cil begin'; grep -v '^;' "$HERE/starbite-log.cil"; echo ';; starbite-log.cil end'; } > "$T/cil.new"
+if grep -q '^;; gsi-legacy.cil begin' "$T/cil.base"; then
+  sed -i '/^;; gsi-legacy.cil begin/,/^;; gsi-legacy.cil end/d' "$T/cil.base"
+fi
+{ cat "$T/cil.base"; echo ';; starbite-log.cil begin'; grep -v '^;' "$HERE/starbite-log.cil"; echo ';; starbite-log.cil end'
+  echo ';; gsi-legacy.cil begin'; grep -v '^;' "$HERE/gsi-legacy.cil"; echo ';; gsi-legacy.cil end'; } > "$T/cil.new"
 # 4
 grep -v 'starbite-log' "$T/fc.old" > "$T/fc.new" || true
 echo '/(vendor|system/vendor)/bin/starbite-log\.sh u:object_r:starbite_log_exec:s0' >> "$T/fc.new"
+grep -v '^/dev/ion ' "$T/fc.new" > "$T/fc.tmp" && mv "$T/fc.tmp" "$T/fc.new"
+echo '/dev/ion u:object_r:ion_device:s0' >> "$T/fc.new"   # gsi-legacy.cil: the GSI's platform dropped it
 echo "== $FSTAB"; diff -u "$T/fstab.old" "$T/fstab.new" || true
 echo "== $CIL (tail)"; diff -u "$T/cil.old" "$T/cil.new" | tail -25 || true
 echo "== $FC"; diff -u "$T/fc.old" "$T/fc.new" || true

@@ -1,0 +1,7 @@
+; GSI on a pre-Android-15 vendor (LineageOS 24's starlte vendor, gralloc 2.1/3.0 on ION). Google's Android 17
+; platform policy dropped /dev/ion's label and every ion_device rule with ION, so /dev/ion came up as plain
+; "device" and the gralloc allocator, the composer and surfaceflinger were denied (attempt 3, 2026-11-05).
+; Restores the access the platform policy gave ion_device before: every process that draws may import
+; gralloc buffers through the passthrough mapper. Appended to VENDOR's vendor_sepolicy.cil by build-vendor.sh;
+; the label is in vendor_file_contexts ("/dev/ion u:object_r:ion_device:s0").
+(allow domain ion_device_202604 (chr_file (ioctl read open getattr map)))
