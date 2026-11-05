@@ -1,0 +1,227 @@
+# installer-manifest.toml: the main Starbite S9's set (EXAMPLE).
+# Copy it into a bundle directory as installer-manifest.toml, put the files next to it under the
+# names below, then: tools/installer/starbite-install --update-hashes BUNDLE (fills size + sha256),
+# and tools/installer/starbite-install --verify-bundle BUNDLE. Sizes and hashes below are
+# placeholders. docs/INSTALLER.md section 3 describes every field.
+#
+# Personal bundles only (docs/STARBITE-MASTER-PLAN.md 1.2.11 and 5.5): Apple, Google and
+# Microsoft images are licensed per device. Never put a used OS root of another phone, EFS, Medical
+# ID or anything per-phone into a bundle.
+
+format = 1
+name = "Starbite S9 - main phone set (example)"
+catalog = "store/catalog.toml"          # a copy of tools/store/catalog.toml: which menu entries this bundle covers
+
+[phone]
+models = ["SM-G960F"]
+devices = ["starlte"]
+ufs_blocks = 15616000                   # UFS LU0 in 4 KiB blocks
+min_battery = 50
+
+[card]
+min_bytes = 60000000000                 # "at least 64 GB" (a 64 GB card holds 61.9-64.1 GB)
+sectors = 249999360                     # this set's card roots sit at fixed sectors (payload command lines): the 128 GB card
+p1 = { type = 0x07, start = 8192, sectors = 182878208, label = "STARBITE" }
+p2 = { type = 0xda, start = 182886400, sectors = 67112960 }
+
+# The UFS layout this set was made for (S9 #1's "layout A", docs/ANDROID-PIXEL.md 2.1). Checked,
+# never written. 4 KiB blocks. tools/installer/starbite-install --describe-phone prints a phone's.
+[[layout]]
+name = "SYSTEM"
+node = "sda18"
+start = 68736
+blocks = 1245184
+
+[[layout]]
+name = "VENDOR"
+node = "sda19"
+start = 1313920
+blocks = 185600
+
+[[layout]]
+name = "ODM"
+node = "sda20"
+start = 1499520
+blocks = 179200
+
+[[layout]]
+name = "USERDATA"
+node = "sda25"
+start = 1698432
+blocks = 4915328
+
+[[layout]]
+name = "WINESP"
+node = "sda26"
+start = 6613760
+blocks = 131072
+
+[[layout]]
+name = "WINDOWS"
+node = "sda27"
+start = 6744832
+blocks = 6773760
+
+[[layout]]
+name = "A16DATA"
+node = "sda28"
+start = 13518592
+blocks = 2097403
+
+# ---- items: written in a fixed order (Apple slot, UFS store, Android, Windows, card store, card
+# roots, card files, RECOVERY, BOOT last), whatever their order here.
+
+[[item]]
+key = "boot"
+title = "Starbite loader + menu (BOOT)"
+os = "starbite"
+file = "boot/starbite-boot.img"         # out/xnu-boot-*.img: loader, menu v7 assets, bundles
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "part:BOOT"
+
+[[item]]
+key = "twrp"
+title = "TWRP (Starbite: /data = A16DATA)"
+os = "starbite"
+file = "boot/twrp-starbite.img"         # also what Download mode gets on a phone without TWRP
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "part:RECOVERY"
+
+[[item]]
+key = "ufs-store"
+title = "OS store (UFS): catalog, kernels, payloads, Engineer OS, rescue system"
+os = "starbite"
+file = "store/ufs-store.img"            # sbstore2.py build --medium ufs --catalog store/catalog.toml ... rescue.image= rescue.dtb= rescue.initrd=
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "store:ufs"
+
+[[item]]
+key = "sd-store"
+title = "OS store (microSD p2)"
+os = "starbite"
+file = "store/sd-store.img"             # sbstore2.py build --medium sd
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "store:sd"
+optional = true
+
+[[item]]
+key = "ios16-slot"
+title = "iOS 16.5 (an earlier port) root: APFS system + HFSX /var"
+os = "ios"
+file = "apple/ios16-slot.img"           # the 16 GiB slot image, clean (before its first boot)
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "slot:USERDATA@0"
+data = true
+
+[[item]]
+key = "android-system"
+title = "Android 17 system (Google GSI)"
+os = "android"
+file = "android/system.img"             # fetch-gsi.py output; Google's licence: each phone downloads its own
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "part:SYSTEM"
+
+[[item]]
+key = "android-vendor"
+title = "Android vendor (Starbite build)"
+os = "android"
+file = "android/vendor.img"             # tools/android/pixel/build-vendor.sh output
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "part:VENDOR"
+
+[[item]]
+key = "android-data"
+title = "Android /data (empty f2fs)"
+os = "android"
+file = "android/a16data.img"            # tools/android/pixel/make-a16data.sh 8590962688 (sparse)
+size = 8590962688
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "part:A16DATA"
+data = true
+
+[[item]]
+key = "android-metadata"
+title = "Android /metadata (fresh ext4)"
+os = "android"
+dest = "part:ODM"
+action = "mkfs-metadata"                # TWRP's own mke2fs (tools/android/pixel/metadata-reset.sh)
+
+[[item]]
+key = "winesp"
+title = "Windows 11 boot files (ESP)"
+os = "windows"
+file = "windows/winesp.img"             # not built yet: a clean image, licensed per phone
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "part:WINESP"
+data = true
+optional = true
+
+[[item]]
+key = "windows"
+title = "Windows 11 (NTFS)"
+os = "windows"
+file = "windows/windows.img"
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "part:WINDOWS"
+data = true
+optional = true
+
+[[item]]
+key = "mac13-root"
+title = "macOS Ventura root (HFSX, 15 GiB)"
+os = "macos"
+file = "apple/mac13-root.img"           # sdroot=lba:216442880,31457280 in the mac13 payload
+size = 16106127360
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "card:lba:216442880"
+data = true
+
+[[item]]
+key = "ios26-root"
+title = "iOS 26 root (parked edge pair)"
+os = "ios"
+file = "apple/ios26-root.img"
+size = 17179869184
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "card:lba:182888448"
+data = true
+optional = true
+
+[[item]]
+key = "pmos"
+title = "postmarketOS (Phosh)"
+os = "linux"
+file = "card/distros/pmos.img"          # mkroot-pmos.sh with SB_NO_PIN=1
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "card:file:/distros/pmos.img"
+data = true
+
+[[item]]
+key = "ubuntu"
+title = "Ubuntu (Phosh)"
+os = "linux"
+file = "card/distros/ubuntu.img"        # mkroot-ubuntu.sh with SB_NO_PIN=1
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "card:file:/distros/ubuntu.img"
+data = true
+
+[[item]]
+key = "chromeos"
+title = "ChromiumOS (GPT disk image)"
+os = "chromeos"
+file = "card/distros/chromeos.img"
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "card:file:/distros/chromeos.img"
+data = true

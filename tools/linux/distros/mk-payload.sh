@@ -8,6 +8,8 @@
 #   firmware/brcm/   the port's BCM4361 Wi-Fi + BT firmware, already under the names brcmfmac wants
 #   authorized_keys  build/linux/ssh/starbite_ed25519.pub
 #   login.txt        build/linux/NAME-login.txt: "user user" + "pin NNNNNN", made here once
+#                    SB_NO_PIN=1 (the Starbite installer's images): "user user" + "pin none" instead:
+#                    no password and no lock screen (sb-integrate.sh); the saved PIN file is left alone
 set -eu
 D=${1:?usage: mk-payload.sh DIR NAME}
 NAME=${2:?usage: mk-payload.sh DIR NAME}
@@ -26,6 +28,12 @@ done
 [ -s "$D/firmware/brcm/brcmfmac4361-pcie.bin" ] || { echo "mk-payload: no Wi-Fi firmware in $FW" >&2; exit 1; }
 K=$P/build/linux/ssh/starbite_ed25519.pub
 [ -s "$K" ] && install -m644 "$K" "$D/authorized_keys"
+if [ "${SB_NO_PIN:-0}" = 1 ]; then
+	printf 'user user\npin none\n' > "$D/login.txt"
+	chmod 600 "$D/login.txt"
+	echo "payload in $D (login: no password, SB_NO_PIN=1)"
+	exit 0
+fi
 LOGIN=$P/build/linux/$NAME-login.txt
 # an older file (one line, e.g. "user starbite PIN: NNNNNN"; older ones named the uid-1000 user
 # starbite): the PIN is taken out first and both lines written back, so the PIN survives. One with

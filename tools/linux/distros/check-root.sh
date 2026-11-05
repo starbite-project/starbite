@@ -11,7 +11,11 @@ c() { if ( cd "$R" && eval "$2" ) >/dev/null 2>&1; then echo "ok   $1"; else ech
 c "init present"                 "[ -L sbin/init ] || [ -x sbin/init ]"
 c "user 10000:10000"             "grep -q '^user:x:10000:10000:' etc/passwd"
 c "user in video,render,input"   "for g in video render input; do grep -q \"^\$g:.*[:,]user\" etc/group || exit 1; done"
+if [ "$(cat "$R/etc/starbite/login" 2>/dev/null)" = none ]; then   # SB_NO_PIN=1 image: no password, no lock screen
+c "user has no password"         "[ -z \"\$(grep '^user:' etc/shadow | cut -d: -f2)\" ]"
+else
 c "user has a password"          "grep '^user:' etc/shadow | cut -d: -f2 | grep -q '^\\$'"
+fi
 c "root locked"                  "grep '^root:' etc/shadow | cut -d: -f2 | grep -q '^!'"
 c "ssh key"                      "[ -s home/user/.ssh/authorized_keys ]"
 c "no host keys baked in"        "! ls etc/ssh/ssh_host_* 2>/dev/null | grep -q ."

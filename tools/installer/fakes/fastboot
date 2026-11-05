@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Fake `fastboot` for installer rehearsals: the Starbite loader's FB1 subset (docs/USB-FASTBOOT.md),
+read-only except reboots. The phone is $FAKE_ROOT (fakephone.py)."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import fakephone  # noqa: E402
+
+R = os.environ.get('FAKE_ROOT') or sys.exit('fake fastboot: FAKE_ROOT is not set')
+VARS = {'product': 'starlte', 'version-bootloader': 'starbite-fb1', 'serialno': 'FAKE0000SERIAL',
+        'unlocked': 'yes', 'secure': 'no', 'battery-level': '87'}
+a = sys.argv[1:]
+on = fakephone.read_state(R) == 'fastboot'
+if a[:1] == ['devices']:
+    if on:
+        print('FAKE0000SERIAL\tfastboot')
+elif a[:1] == ['getvar'] and on:
+    sys.stderr.write(f'{a[1]}: {VARS.get(a[1], "")}\nFinished. Total time: 0.001s\n')
+elif a[:1] == ['reboot'] and on:
+    fakephone.write_state(R, {'recovery': 'recovery', 'bootloader': 'fastboot', 'download': 'download'}.get(
+        a[1] if len(a) > 1 else '', 'menu'))
+    sys.stderr.write('Rebooting\nFinished.\n')
+elif a[:1] == ['--version']:
+    print('fastboot version (starbite fake fastboot)')
+else:
+    sys.stderr.write('< waiting for any device >\n' if not on else f'fake fastboot: {a} is not faked\n')
+    sys.exit(1)

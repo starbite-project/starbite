@@ -45,7 +45,7 @@ if v2 == b'SBSTORE2' and st[:8] == b'SBSETTNG' and zlib.crc32(st[16:256]) == str
     img[8192:12288] = st
 open(sys.argv[3], 'wb').write(img)
 PY
-blocks=$(( ($(stat -f %z "$tmp/store.img") + 4095) / 4096 ))
+blocks=$(( ($(wc -c < "$tmp/store.img") + 4095) / 4096 ))   # wc -c: macOS and Linux
 [ "$blocks" = "$used" ] || { echo "image is $blocks blocks, header says $used"; exit 1; }
 adb push "$tmp/store.img" /tmp/sdstore.img >/dev/null
 adb shell "dd if=/tmp/sdstore.img of=$dev bs=4096 conv=notrunc,fsync 2>/dev/null; sync; rm /tmp/sdstore.img"
