@@ -59,7 +59,7 @@ pw = list(open(pwfile, 'rb').readline().rstrip(b'\n'))
 pw += [0] * (12 - len(pw) % 12) if len(pw) % 12 else []     # zero-padded to whole 12-byte rounds
 put('/private/etc/kcpassword', bytes(b ^ key[i % len(key)] for i, b in enumerate(pw)), [0, 0, 0o600])
 # no blur, no motion
-ua = plistlib.dumps({'reduceTransparency': True, 'reduceMotion': True, 'virtualKeyboardEnabled': True},   # + the on-screen
+ua = plistlib.dumps({'reduceTransparency': True, 'reduceMotion': True, 'virtualKeyboardOnOff': True},   # + the on-screen
                    fmt=plistlib.FMT_BINARY)                                                       # Accessibility Keyboard
 put('/Library/Preferences/com.apple.universalaccess.plist', ua, [0, 0, 0o644])
 put('/private/var/root/Library/Preferences/com.apple.universalaccess.plist', ua, [0, 0, 0o600])
