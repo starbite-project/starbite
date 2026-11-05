@@ -280,6 +280,24 @@ def patch_port(work):
     else:
         print(f'{decon}: early_event already there')
 
+    # 6b. s9p-decon: drm_name= for ChromeOS boots (2026-11-05). minigbm picks a buffer backend by the DRM
+    # driver's name and its "exynos" backend calls Exynos GEM ioctls this driver lacks; Mesa's kmsro needs
+    # "exynos" to pair the display with Panfrost, so the name changes only when the boot asks for it
+    # (s9p_decon.drm_name=vkms: minigbm's dumb-buffer backend, for ChromeOS with software GL).
+    edit(w, decon,
+         'static const struct drm_driver s9p_drm_driver = {\n',
+         'static char *s9p_drm_name;\n'
+         'module_param_named(drm_name, s9p_drm_name, charp, 0444);\n'
+         'MODULE_PARM_DESC(drm_name, "DRM driver name to report instead of exynos (ChromeOS boots)");\n\n'
+         'static struct drm_driver s9p_drm_driver = {\n',
+         's9p_drm_name')
+    edit(w, decon,
+         '\tpriv = devm_drm_dev_alloc(&pdev->dev, &s9p_drm_driver,\n',
+         '\tif (s9p_drm_name && *s9p_drm_name)\n'
+         '\t\ts9p_drm_driver.name = s9p_drm_name;\n'
+         '\tpriv = devm_drm_dev_alloc(&pdev->dev, &s9p_drm_driver,\n',
+         's9p_drm_driver.name = s9p_drm_name')
+
     # 7. s9p-g3d: rail check, 950 mV at 260 MHz
     g3d = 'src/soc/s9p-g3d.c'
     edit(w, g3d,
