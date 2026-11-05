@@ -494,6 +494,65 @@ static inline void saturate(float *r, float *g, float *b, float s, float a)
     *b = g_clamp((.213f - .213f * s) * R + (.715f - .715f * s) * G + (.072f + .928f * s) * B, 0.f, a);
 }
 
+/* NEON: n pixels of d (opaque target) under an 8-bit coverage run cv x K / 256 in colour (r, g, b):
+ * blend() with the alpha rounded in integer (within one unit of the float path) */
+static void blend_a8_run(uint32_t *d, const uint8_t *cv, int n, uint32_t K, uint32_t r, uint32_t g, uint32_t b)
+{
+    int x = 0;
+    const uint8x8_t cr = vdup_n_u8((uint8_t)r), cg = vdup_n_u8((uint8_t)g), cb = vdup_n_u8((uint8_t)b);
+    const uint16x8_t vk = vdupq_n_u16((uint16_t)K), r128 = vdupq_n_u16(128);
+    for (; x + 8 <= n; x += 8) {
+        uint8x8_t c = vld1_u8(cv + x);
+        if (!vmaxv_u8(c))
+            continue;
+        uint8x8_t a = vshrn_n_u16(vmlaq_u16(r128, vmovl_u8(c), vk), 8), ia = vmvn_u8(a);
+        uint8x8x4_t v = vld4_u8((const uint8_t *)(d + x));
+        const uint8x8_t src[3] = { cb, cg, cr };
+        for (int k = 0; k < 3; k++) {
+            uint16x8_t t = vaddq_u16(vmlal_u8(vmull_u8(src[k], a), v.val[k], ia), r128);
+            v.val[k] = vshrn_n_u16(vaddq_u16(t, vshrq_n_u16(t, 8)), 8);
+        }
+        v.val[3] = vdup_n_u8(255);
+        vst4_u8((uint8_t *)(d + x), v);
+    }
+    for (; x < n; x++) {
+        if (!cv[x])
+            continue;
+        uint32_t a = (cv[x] * K + 128U) >> 8, ia = 255U - a, v = d[x];
+        d[x] = 0xff000000U | g_div255(r * a + CR(v) * ia) << 16 | g_div255(g * a + CG(v) * ia) << 8 | g_div255(b * a + CB(v) * ia);
+    }
+}
+/* NEON: n premultiplied ARGB source pixels x K / 256 over d (opaque target), blend_pm() in integer */
+static void blend_pm_run(uint32_t *d, const uint32_t *s, int n, uint32_t K)
+{
+    int x = 0;
+    const uint16x8_t vk = vdupq_n_u16((uint16_t)K), r128 = vdupq_n_u16(128);
+    for (; x + 8 <= n; x += 8) {
+        uint8x8x4_t p = vld4_u8((const uint8_t *)(s + x));
+        if (!vmaxv_u8(p.val[3]))
+            continue;
+        uint8x8x4_t v = vld4_u8((const uint8_t *)(d + x));
+        uint8x8_t sa = K >= 256U ? p.val[3] : vshrn_n_u16(vmlaq_u16(r128, vmovl_u8(p.val[3]), vk), 8), ia = vmvn_u8(sa);
+        for (int k = 0; k < 3; k++) {
+            uint8x8_t sc = K >= 256U ? p.val[k] : vshrn_n_u16(vmlaq_u16(r128, vmovl_u8(p.val[k]), vk), 8);
+            uint16x8_t t = vaddq_u16(vmull_u8(v.val[k], ia), r128);
+            v.val[k] = vqadd_u8(sc, vshrn_n_u16(vaddq_u16(t, vshrq_n_u16(t, 8)), 8));
+        }
+        v.val[3] = vdup_n_u8(255);
+        vst4_u8((uint8_t *)(d + x), v);
+    }
+    for (; x < n; x++) {
+        uint32_t q = s[x];
+        if (!CA(q))
+            continue;
+        uint32_t sa = K >= 256U ? CA(q) : (CA(q) * K + 128U) >> 8, ia = 255U - sa, v = d[x];
+        uint32_t sr = K >= 256U ? CR(q) : (CR(q) * K + 128U) >> 8, sg = K >= 256U ? CG(q) : (CG(q) * K + 128U) >> 8,
+                 sb = K >= 256U ? CB(q) : (CB(q) * K + 128U) >> 8;
+        uint32_t R = sr + g_div255(CR(v) * ia), G = sg + g_div255(CG(v) * ia), B = sb + g_div255(CB(v) * ia);
+        d[x] = 0xff000000U | (R > 255U ? 255U : R) << 16 | (G > 255U ? 255U : G) << 8 | (B > 255U ? 255U : B);
+    }
+}
+
 /* ---- per item drawing context ---- */
 
 struct dc {
@@ -559,6 +618,11 @@ static void draw_glyph(const struct dc *c, const struct gfont *F, int gi, float 
                 r = (uint32_t)(g_mix((float)CR(col), (float)CR(tx->color2), u) + .5f);
                 gg = (uint32_t)(g_mix((float)CG(col), (float)CG(tx->color2), u) + .5f);
                 b = (uint32_t)(g_mix((float)CB(col), (float)CB(tx->color2), u) + .5f);
+            }
+            if (!c->fade && !c->clip && !t->premul) {
+                if (xb > xa)
+                    blend_a8_run(d + xa, src + (xa - gx), xb - xa, (uint32_t)(g_sat(ca) * 256.f + .5f), r, gg, b);
+                continue;
             }
             for (int x = xa; x < xb; x++) {
                 uint32_t cv = src[x - gx];
@@ -667,8 +731,17 @@ static void draw_bitmap(const struct dc *c, const struct ce *e, float x, float y
         int gx = g_ifloor(bx0 + .5f), gy = g_ifloor(by0 + .5f);
         int ya = gy < c->y0 ? c->y0 : gy, yb = gy + e->h > c->y1 ? c->y1 : gy + e->h;
         int xa = gx < c->x0 ? c->x0 : gx, xb = gx + e->w > c->x1 ? c->x1 : gx + e->w;
+        int fast = !c->fade && !c->clip && !t->premul && (!argb || sat == 1.f) && xb > xa;
+        uint32_t K = (uint32_t)(g_sat(ca) * 256.f + .5f);
         for (int yy = ya; yy < yb; yy++) {
             uint32_t *d = t->px + (long)yy * t->stride;
+            if (fast) {
+                if (argb)
+                    blend_pm_run(d + xa, (const uint32_t *)base + (yy - gy) * e->w + (xa - gx), xb - xa, K);
+                else
+                    blend_a8_run(d + xa, base + (yy - gy) * e->w + (xa - gx), xb - xa, K, CR(color), CG(color), CB(color));
+                continue;
+            }
             float py = pan_y(c, yy);
             for (int xx = xa; xx < xb; xx++) {
                 float k = ca;

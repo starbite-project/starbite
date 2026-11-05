@@ -285,6 +285,13 @@ static int nps[2], npi[2];
 static struct pent CS[G7_MAX_SHAPES], CI[G7_MAX_ITEMS];             /* this frame */
 static int nshape_cur;
 static int16_t BND[2][G7_MAX_ITEMS][4];                             /* item bounds, for drawing */
+static int curt_k = -1;                                             /* the curtain (curtain_index) */
+/* CURT: the canvas below the curtain at its first frame (frozen, back 1, the over glass at rest),
+ * so the fade's next frames are a copy and the curtain's blend (curt_use) */
+#define CURT ((uint32_t *)(G7_CANVAS + 0x500000UL))
+_Static_assert(0x500000UL + 4UL * CW * CH <= G7_SHARP - G7_CANVAS, "CURT overflows G7_CANVAS");
+static int curt_cap, curt_use, curt_ok;
+static uint32_t curt_sig;
 
 static inline uint32_t hmix(uint32_t h, uint32_t v)
 {
@@ -485,9 +492,11 @@ static void layer_entries(int li, const struct g7_layer *l, int *ns, int *ni)
         if (!gd_bounds(l, it, b))
             b[0] = b[1] = b[2] = b[3] = 0;
         CI[n].key = it->key ? it->key : 0xf0000000U | i;
-        CI[n].glass = 4;            /* drawn at present time (frozen: in SHARP, frame-wide) */
+        /* drawn at present time (frozen: the base's in SHARP, frame-wide), or, the end screens'
+         * curtain and the over items below it, in the canvas (curt_k) */
+        CI[n].glass = (uint8_t)(li == 1 && (int)i <= curt_k ? 3 : 4);
         CI[n].mover = 0;
-        CI[n].hash = b[2] > b[0] ? item_hash(l, it) : 0;
+        CI[n].hash = b[2] > b[0] ? item_hash(l, it) ^ (CI[n].glass == 3 ? 0x6a09e667U : 0U) : 0;
         for (int k = 0; k < 4; k++)
             CI[n].b[k] = b[k];
         n++;
@@ -979,6 +988,22 @@ static void shift_apply(void)
 
 static int shift_on;                /* this frame may shift GLB rows (set by g7_frame) */
 static int forced_now;              /* this frame redraws everything (first, G7_F_FULL) */
+/* The end screens fade a full-panel opaque rect (the curtain) in over the frozen panel. It has no
+ * edge to keep sharp: frozen, the curtain and the over items below it go into the canvas (a
+ * quarter of the pixels a fade frame blends), the items after it are drawn at present time. */
+static int curtain_index(const struct g7_layer *l)
+{
+    for (unsigned i = 0; l && i < l->nitem && i < G7_MAX_ITEMS; i++) {
+        const struct g7_item *it = &l->item[i];
+        if (it->kind != G7_RECT || it->clip || it->flags || CA(it->color) != 255U || it->a <= 0.f || it->a > 1.f)
+            continue;
+        const struct g7_rect *q = &it->u.rect;
+        if (q->r == 0.f && q->ring == 0.f && q->x <= 0.f && q->y <= 0.f && q->x + q->w >= (float)GW &&
+            q->y + q->h >= (float)GH)
+            return (int)i;
+    }
+    return -1;
+}
 
 /* An over shape whose box moved less than half a pixel from where it was last drawn (a spring's
  * tail: the launch card creeping to the panel's edges for half a second) is not drawn again: its
@@ -1422,6 +1447,14 @@ static void compose_over(uint32_t *dst, int x0, int y0, int x1, int y1)
                 gs_over_row(d, y, x0, n, ACC, AL);
             }
         }
+    if (LO && curt_k >= 0) {         /* the curtain and what is below it (frozen) */
+        struct gd_target t = { dst, CW, x0, y0, x1, y1, .5f, 0.f, 0.f, 0 };
+        gd_items_range(LO, (const int16_t (*)[4])BND[1], &t, 0, (unsigned)curt_k);
+        if (curt_cap)                /* what is below the curtain, kept (the panel: all_dirty) */
+            for (int y = y0; y < y1; y++)
+                g_copy32(CURT + (unsigned)y * CW + x0, dst + (unsigned)y * CW + x0, x1 - x0);
+        gd_items_range(LO, (const int16_t (*)[4])BND[1], &t, (unsigned)curt_k, (unsigned)curt_k + 1U);
+    }
     PROF(4);
 }
 
@@ -1432,6 +1465,18 @@ static void compose(int x0, int y0, int x1, int y1)
 {
     if (x0 >= x1 || y0 >= y1)
         return;
+    if (curt_use) {                 /* below an unchanged curtain: CURT, then the curtain */
+        PROF0;
+        for (int y = y0; y < y1; y++) {
+            if (!(y & 31))
+                g7_poll();
+            g_copy32(CANV + (unsigned)y * CW + x0, CURT + (unsigned)y * CW + x0, x1 - x0);
+        }
+        struct gd_target t = { CANV, CW, x0, y0, x1, y1, .5f, 0.f, 0.f, 0 };
+        gd_items_range(LO, (const int16_t (*)[4])BND[1], &t, (unsigned)curt_k, (unsigned)curt_k + 1U);
+        PROF(4);
+        return;
+    }
     if (frozen) {
         PROF0;
         compose_frozen(CANV, x0, y0, x1, y1);
@@ -1581,7 +1626,7 @@ static uint32_t present_c(int i0, int j0, int i1, int j1)
             if (LB->item[i].a > 0.f && meets(BND[0][i], X0, Y0, X1, Y1))
                 PIL[0][np[0]++] = (uint16_t)i;
     if (LO)
-        for (unsigned i = 0; i < LO->nitem && i < G7_MAX_ITEMS; i++)
+        for (unsigned i = (unsigned)(curt_k + 1); i < LO->nitem && i < G7_MAX_ITEMS; i++)
             if (LO->item[i].a > 0.f && meets(BND[1][i], X0, Y0, X1, Y1))
                 PIL[1][np[1]++] = (uint16_t)i;
     int edge = X0 < 35 || X1 > GW - 35, w = X1 - X0;
@@ -1846,6 +1891,7 @@ void g7_bake(void)
     gw_wall(&WALL_FINAL);
     uint64_t t2 = hw_ticks();
     gw_blur();
+    gw_planes();
     uint64_t t3 = hw_ticks();
     /* BG8 waits for its first use: the intro rebuilds the wallpaper (and BG8) before it shows it
      * at dim .8, so only a boot straight to the launch card pays for it here (base_bg_row) */
@@ -1997,6 +2043,7 @@ uint32_t g7_frame(const struct g7_frame *f)
         glb_inval_all();
         frozen = 1;
         all_dirty = 1;
+        curt_ok = 0;
     } else if (!want && frozen) {
         frozen = 0;
         all_dirty = 1;
@@ -2044,10 +2091,29 @@ uint32_t g7_frame(const struct g7_frame *f)
         motion_half = 0;            /* frozen: the base does not move (the rest check below) */
     }
     gs_prepare(1, LO ? LO->shape : 0, LO ? LO->nshape : 0, &COVER, 1.f);
+    curt_k = frozen ? curtain_index(LO) : -1;
     layer_diff_save(1, LO, 1);
     /* the over glass moves over more than an eighth of the panel, or the backdrop fades */
     motion_over = !forced && LO && LO->nshape &&
                   (over_area * 8U > (uint64_t)GW * GH || bk != cur_back);
+    curt_cap = curt_use = 0;
+    if (curt_k >= 0 && bk == 1.f) {
+        /* the curtain's signature: the over shapes, the items below it */
+        uint32_t sig = hmix(2166136261U, (uint32_t)curt_k);
+        for (int i = 0; i < nps[1]; i++)
+            sig = hmix(hmix(sig, PS[1][i].key), PS[1][i].hash);
+        for (int i = 0; i < curt_k && i < npi[1]; i++)
+            sig = hmix(hmix(sig, PI[1][i].key), PI[1][i].hash);
+        if (curt_ok && sig == curt_sig && !forced)
+            curt_use = 1;
+        else if (!motion_over) {
+            curt_cap = 1;
+            curt_sig = sig;
+            all_dirty = 1;          /* CURT is the whole canvas */
+        }
+    } else {
+        curt_ok = 0;
+    }
     if (LO && LO->nshape)
         gs_prepare(GS_HALFO, LO->shape, LO->nshape, &COVER, 1.f);
     cur_word = f->word;
@@ -2108,6 +2174,10 @@ uint32_t g7_frame(const struct g7_frame *f)
         }
     }
     nxr = 0;
+    if (curt_cap) {
+        curt_ok = 1;
+        curt_cap = 0;
+    }
     if (px) {
         ST.frames++;
         ST.last_us = (uint32_t)us_since(t0);

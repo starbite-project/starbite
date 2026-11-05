@@ -254,6 +254,7 @@ int gw_field_valid(void);
 void gw_field_lost(void);                       /* P_FIELD was reused (freeze temp) */
 void gw_wall(const struct g7_wall *w);          /* WALL_FS for w into P_TMP (8-bit texture) */
 void gw_blur(void);                             /* renderWall's blur passes: P_TMP -> A, B; A5 */
+void gw_planes(void);                           /* A5 and B on the canvas grid (G7_SHARP + 4 MiB, + 8 MiB) */
 void gw_base(void);                             /* G7_BASE = BG8: the texture at panel res x .8, dithered */
 int gw_wall_same(const struct g7_wall *a, const struct g7_wall *b);
 /* bilinear samples at a panel point (clamp to edge, WebGL texel centres) */

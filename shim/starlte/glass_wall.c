@@ -18,6 +18,7 @@
 
 #define TEX(a) ((uint32_t *)(a))
 static int field_ok;
+static int planes_ok;             /* gw_planes built A5C, BCP from this blur */
 
 /* ---- the static field ---- */
 
@@ -192,27 +193,52 @@ void gw_wall(const struct g7_wall *w)
         float rp = ady / R < 1.2f ? g_pow(ady / R + 1e-4f, .62f) : 9.f;
         const uint32_t *fr = F + (unsigned)j * WW;
         float uy = py / 1440.f, tiny = 1.f - .6f * g_smooth(.4f, 1.8f, uy);
-        for (int i = 0; i < WW; i++) {
-            float dx = (i + .5f) * 2.f - w->sx;
-            float r = g_sqrt(dx * dx + dy * dy);
-            float q = r * RT_STEP;
-            int k = (int)q;
-            float f = q - (float)k;
-            if (k >= RT_N - 1) {
-                k = RT_N - 2;
-                f = 1.f;
+        /* 4 texels a NEON step: the radial table's two entries per texel by a 4 x 4 transpose */
+        {
+            const float32x4_t vdy2 = vdupq_n_f32(dy * dy), vsx = vdupq_n_f32(w->sx), k4 = vdupq_n_f32(RT_STEP);
+            const float32x4_t one = vdupq_n_f32(1.f), vry1 = vdupq_n_f32(ry1), vry2 = vdupq_n_f32(ry2), vrp = vdupq_n_f32(rp);
+            const float32x4_t vssw = vdupq_n_f32(ssw), vsi = vdupq_n_f32(si), k04 = vdupq_n_f32(.4f);
+            const float32x4_t kr = vdupq_n_f32(.125f / 1023.f), kg = vdupq_n_f32(.25f / 2047.f), kb = vdupq_n_f32(.5f / 2047.f);
+            const float32x4_t vcor = vdupq_n_f32(cor), vcog = vdupq_n_f32(cog), vcob = vdupq_n_f32(cob);
+            const float32x4_t vscr = vdupq_n_f32(scr), vscg = vdupq_n_f32(scg), vscb = vdupq_n_f32(scb);
+            const float32x4_t ki = vdupq_n_f32(1.f / (.86f - 1.f)), three = vdupq_n_f32(3.f), two = vdupq_n_f32(2.f);
+            const float32x4_t vlast = vdupq_n_f32((float)(RT_N - 2)), vend = vdupq_n_f32((float)(RT_N - 1));
+            const float32x4_t i0 = { 1.f, 3.f, 5.f, 7.f };     /* (i + k + .5) x 2 = 2i + 2k + 1 */
+            for (int i = 0; i < WW; i += 4) {
+                float32x4_t dx = vsubq_f32(vaddq_f32(vdupq_n_f32(2.f * (float)i), i0), vsx);
+                float32x4_t q = vmulq_f32(vsqrtq_f32(vfmaq_f32(vdy2, dx, dx)), k4);
+                uint32x4_t far = vcgeq_f32(q, vend);
+                float32x4_t qf = vrndmq_f32(vminq_f32(q, vlast));
+                float32x4_t f = vbslq_f32(far, one, vsubq_f32(q, qf));
+                int32x4_t kk = vcvtq_s32_f32(qf);
+                const float *e0 = rt + 3 * vgetq_lane_s32(kk, 0), *e1 = rt + 3 * vgetq_lane_s32(kk, 1),
+                            *e2 = rt + 3 * vgetq_lane_s32(kk, 2), *e3 = rt + 3 * vgetq_lane_s32(kk, 3);
+                float32x4_t a0 = vld1q_f32(e0), a1 = vld1q_f32(e1), a2 = vld1q_f32(e2), a3 = vld1q_f32(e3);
+                float32x4x2_t t01 = vtrnq_f32(a0, a1), t23 = vtrnq_f32(a2, a3);
+                float32x4_t E0 = vcombine_f32(vget_low_f32(t01.val[0]), vget_low_f32(t23.val[0]));
+                float32x4_t E1 = vcombine_f32(vget_low_f32(t01.val[1]), vget_low_f32(t23.val[1]));
+                float32x4_t E2 = vcombine_f32(vget_high_f32(t01.val[0]), vget_high_f32(t23.val[0]));
+                float32x4_t E3 = vcombine_f32(vget_high_f32(t01.val[1]), vget_high_f32(t23.val[1]));
+                float32x4_t b01 = vcombine_f32(vld1_f32(e0 + 4), vld1_f32(e1 + 4)), b23 = vcombine_f32(vld1_f32(e2 + 4), vld1_f32(e3 + 4));
+                float32x4_t E4 = vuzp1q_f32(b01, b23), E5 = vuzp2q_f32(b01, b23);
+                float32x4_t lit = vfmaq_f32(E0, vsubq_f32(E3, E0), f), halo = vfmaq_f32(E1, vsubq_f32(E4, E1), f),
+                            m = vfmaq_f32(E2, vsubq_f32(E5, E2), f), lm = vmulq_f32(lit, m);
+                uint32x4_t v = vld1q_u32(fr + i);
+                float32x4_t cr = vmulq_f32(vmulq_f32(vcvtq_f32_u32(vshrq_n_u32(v, 22)), kr), lm);
+                float32x4_t cg = vmulq_f32(vmulq_f32(vcvtq_f32_u32(vandq_u32(vshrq_n_u32(v, 11), vdupq_n_u32(2047U))), kg), lm);
+                float32x4_t cb = vmulq_f32(vmulq_f32(vcvtq_f32_u32(vandq_u32(v, vdupq_n_u32(2047U))), kb), lm);
+                float32x4_t spike = vfmaq_f32(vmulq_f32(vry2, vld1q_f32(cx1 + i)), vld1q_f32(cx2 + i), vry1);
+                float32x4_t hs = vmulq_f32(vfmaq_f32(halo, spike, k04), vssw);
+                float32x4_t ast = vaddq_f32(vld1q_f32(cp + i), vrp);
+                float32x4_t t = vminq_f32(vmaxq_f32(vmulq_f32(vsubq_f32(ast, one), ki), vdupq_n_f32(0.f)), one);
+                float32x4_t core = vmulq_f32(vmulq_f32(t, t), vfmsq_f32(three, two, t));
+                core = vbslq_f32(vcltq_f32(ast, one), core, vdupq_n_f32(0.f));
+                float32x4x3_t o;
+                o.val[0] = vfmaq_f32(cr, vfmaq_f32(vmulq_f32(vscr, hs), vcor, core), vsi);
+                o.val[1] = vfmaq_f32(cg, vfmaq_f32(vmulq_f32(vscg, hs), vcog, core), vsi);
+                o.val[2] = vfmaq_f32(cb, vfmaq_f32(vmulq_f32(vscb, hs), vcob, core), vsi);
+                vst3q_f32(row + 3 * i, o);
             }
-            const float *e = rt + 3 * k;
-            float lit = e[0] + (e[3] - e[0]) * f, halo = e[1] + (e[4] - e[1]) * f, m = e[2] + (e[5] - e[2]) * f;
-            uint32_t v = fr[i];
-            float cr = FUNP_R(v) * lit * m, cg = FUNP_G(v) * lit * m, cb = FUNP_B(v) * lit * m;
-            float spike = ry2 * cx1[i] + cx2[i] * ry1;
-            float hs = (halo + spike * .4f) * ssw;
-            float ast = cp[i] + rp;
-            float core = ast < 1.f ? g_smooth(1.f, .86f, ast) : 0.f;
-            row[3 * i] = cr + (cor * core + scr * hs) * si;
-            row[3 * i + 1] = cg + (cog * core + scg * hs) * si;
-            row[3 * i + 2] = cb + (cob * core + scb * hs) * si;
         }
         /* tiny stars of this row's cells, before the reveal mask (col *= m * amb) */
         int cy = g_ifloor(py / 46.f);
@@ -234,10 +260,15 @@ void gw_wall(const struct g7_wall *w)
             }
         }
         uint32_t *t = T + (unsigned)j * WW;
-        for (int i = 0; i < WW; i++) {
-            uint32_t R8 = (uint32_t)(g_sat(row[3 * i]) * 255.f + .5f), G8 = (uint32_t)(g_sat(row[3 * i + 1]) * 255.f + .5f),
-                     B8 = (uint32_t)(g_sat(row[3 * i + 2]) * 255.f + .5f);
-            t[i] = 0xff000000U | R8 << 16 | G8 << 8 | B8;
+        {
+            const float32x4_t z = vdupq_n_f32(0.f), o1 = vdupq_n_f32(1.f), k = vdupq_n_f32(255.f), h = vdupq_n_f32(.5f);
+            for (int i = 0; i < WW; i += 4) {
+                float32x4x3_t c = vld3q_f32(row + 3 * i);
+                float32x4_t r = vfmaq_f32(h, vminq_f32(vmaxq_f32(c.val[0], z), o1), k);
+                float32x4_t g = vfmaq_f32(h, vminq_f32(vmaxq_f32(c.val[1], z), o1), k);
+                float32x4_t b = vfmaq_f32(h, vminq_f32(vmaxq_f32(c.val[2], z), o1), k);
+                vst1q_u32(t + i, g_pack4(r, g, b));
+            }
         }
     }
 }
@@ -362,6 +393,7 @@ static void blur_pass(const uint32_t *src, int sw, int sh, uint32_t *dst, int dw
 
 void gw_blur(void)
 {
+    planes_ok = 0;                  /* (gw_planes again after it) */
     uint32_t *wall = TEX(P_TMP), *a1 = TEX(P_SOFT), *a2 = TEX(P_A), *b1 = TEX(P_SOFT + PL_A_BYTES), *b2 = TEX(P_B);
     /* renderWall: blur(wall,a1,2,0); blur(a1,a2,0,1.6); blur(a2,a1,1.6,0); blur(a1,a2,0,1.6);
      *             blur(a2,b1,2,0); blur(b1,b2,0,1.6); blur(b2,b1,1.6,0); blur(b1,b2,0,1.6) */
@@ -678,6 +710,65 @@ static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float p
         o[2] = hrow[2][k] + (hrow[2][k + 1] - hrow[2][k]) * f;
     }
 }
+/* A5 and B on the canvas grid (canvas pixel (i, j) = panel point (2i + 1, 2j + 1)), packed 10:10:10,
+ * built once after the blur planes: a frost row of the canvas grid is then a row read (gw_planes) */
+#define A5C ((uint32_t *)(G7_SHARP + 0x420000UL))
+#define BCP ((uint32_t *)(G7_SHARP + 0x840000UL))
+_Static_assert(0x840000UL + 4UL * CW * CH <= G7_BASE - G7_SHARP, "canvas frost planes overflow G7_SHARP");
+static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float py, int n, int g0, float *rgb);
+void gw_planes(void)
+{
+    for (int p = 0; p < 2; p++) {
+        uint32_t *D = p ? BCP : A5C;
+        for (int j = 0; j < CH; j++) {
+            if (!(j & 31))
+                g7_poll();
+            float *row = g_row_tmp;
+            if (p)
+                row_half(TEX(P_B), BW, BH, 8, 0, 2.f * (float)j + 1.f, CW, 0, row);
+            else
+                row_half(TEX(P_A5), AW, AH, 4, 1, 2.f * (float)j + 1.f, CW, 0, row);
+            uint32_t *d = D + (unsigned)j * CW;
+            for (int i = 0; i < CW; i++)
+                d[i] = g_pack10(row[3 * i], row[3 * i + 1], row[3 * i + 2]);
+        }
+    }
+    planes_ok = 1;
+}
+/* n samples of a canvas-grid plane's row j from column g0, unpacked to rgb triplets */
+static void plane_row(const uint32_t *P, int j, int g0, int n, float *rgb)
+{
+    const uint32_t *s = P + (unsigned)j * CW + g0;
+    const uint32x4_t m = vdupq_n_u32(1023U);
+    const float32x4_t k = vdupq_n_f32(1.f / 1023.f);
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32x4_t v = vld1q_u32(s + i);
+        float32x4x3_t o;
+        o.val[0] = vmulq_f32(vcvtq_f32_u32(vandq_u32(vshrq_n_u32(v, 20), m)), k);
+        o.val[1] = vmulq_f32(vcvtq_f32_u32(vandq_u32(vshrq_n_u32(v, 10), m)), k);
+        o.val[2] = vmulq_f32(vcvtq_f32_u32(vandq_u32(v, m)), k);
+        vst3q_f32(rgb + 3 * i, o);
+    }
+    for (; i < n; i++) {
+        uint32_t v = s[i];
+        rgb[3 * i] = UNP10_R(v);
+        rgb[3 * i + 1] = UNP10_G(v);
+        rgb[3 * i + 2] = UNP10_B(v);
+    }
+}
+/* the row is a canvas row (py = 2j + 1) inside the canvas: the plane */
+static inline int plane_at(float py, int g0, int n, int *j)
+{
+    if (!planes_ok || g0 < 0 || g0 + n > CW)
+        return 0;
+    float c = (py - 1.f) * .5f;
+    int ci = (int)c;
+    if ((float)ci != c || ci < 0 || ci >= CH)
+        return 0;
+    *j = ci;
+    return 1;
+}
 static inline int half_grid(float px0, float dpx, int n, int *g0)
 {
     if (dpx != 2.f || n > 2 * AW + 8)
@@ -691,16 +782,20 @@ static inline int half_grid(float px0, float dpx, int n, int *g0)
 }
 void gw_row_a5_at(float py, int n, float px0, float dpx, float *rgb)
 {
-    int g0;
-    if (half_grid(px0, dpx, n, &g0))
+    int g0, j;
+    if (half_grid(px0, dpx, n, &g0) && plane_at(py, g0, n, &j))
+        plane_row(A5C, j, g0, n, rgb);
+    else if (half_grid(px0, dpx, n, &g0))
         row_half(TEX(P_A5), AW, AH, 4, 1, py, n, g0, rgb);
     else
         row_at(TEX(P_A5), AW, AH, 4, 1, py, n, px0, dpx, rgb);
 }
 void gw_row_b_at(float py, int n, float px0, float dpx, float *rgb)
 {
-    int g0;
-    if (half_grid(px0, dpx, n, &g0))
+    int g0, j;
+    if (half_grid(px0, dpx, n, &g0) && plane_at(py, g0, n, &j))
+        plane_row(BCP, j, g0, n, rgb);
+    else if (half_grid(px0, dpx, n, &g0))
         row_half(TEX(P_B), BW, BH, 8, 0, py, n, g0, rgb);
     else
         row_at(TEX(P_B), BW, BH, 8, 0, py, n, px0, dpx, rgb);
