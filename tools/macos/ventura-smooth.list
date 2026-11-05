@@ -37,3 +37,24 @@ com.apple.commerce
 com.apple.storeassetd
 com.apple.sharingd
 com.apple.amp.mediasharingd
+# 2026-11-05 04:15: speech-synthesis extensions (MacinTalk/SiriTTS/Warda/Kona) and pivtoken crash-looped, 600+ spawns a boot
+com.apple.corespeechd
+com.apple.sirittsd
+com.apple.speech.speechsynthesisd.arm64
+com.apple.speech.speechsynthesisd.x86_64
+com.apple.speech.synthesisserver
+com.apple.speech.speechdatainstallerd
+com.apple.Siri.agent
+com.apple.assistant_service
+com.apple.siriinferenced
+com.apple.intelligenceplatformd
+com.apple.proactived
+com.apple.linkd
+com.apple.tipsd
+com.apple.ctkd
+com.apple.CryptoTokenKit.ahp
+com.apple.CryptoTokenKit.ahp.agent
+com.apple.ScreenTimeAgent
+com.apple.accessibility.axassetsd
+com.apple.corespotlightservice
+com.apple.Spotlight
