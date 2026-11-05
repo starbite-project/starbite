@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Fake `adb` for installer rehearsals (tools/installer/fakes/fakephone.py has the phone). Runs
+TWRP-style shell commands locally with the phone's paths (/dev/block/, /tmp/, /sys/, /proc/mounts,
+/external_sd) redirected into $FAKE_ROOT, and the TWRP tools the host lacks (getprop, blockdev,
+mke2fs, blkid, mount, mkfs.exfat ...) as shell stand-ins. The successor of
+tools/android/pixel/fake-adb (Lima only); this one also runs on macOS.
+FAKE_FAIL=REGEX makes the first FAKE_FAIL_TIMES (default 1) shell commands matching REGEX fail
+(a simulated cable pull); the count lives in $FAKE_ROOT/fail-count."""
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+import fakephone  # noqa: E402
+
+R = os.environ.get('FAKE_ROOT')
+if not R:
+    sys.exit('fake adb: FAKE_ROOT is not set')
+R = os.path.realpath(R)
+PREFIX = re.compile(r'(?<![\w./-])(/dev/block/|/tmp/|/sys/|/proc/mounts|/external_sd)')
+FUNCS = r'''
+R=%(R)s
+getprop() { sed -n "s/^$1=//p" "$R/props"; }
+blockdev() { case $1 in --getsize64) wc -c < "$2" | tr -d ' ' ;; --rereadpt) python3 "%(fp)s" rereadpt "$R" ;; *) ;; esac; }
+mke2fs() { for d; do :; done; printf 'TYPE="ext4" LABEL="metadata"\n' > "$R/blkid/$(basename "$d")"; echo "fake mke2fs: ext4 'metadata' on ${d#$R}"; }
+e2fsck() { echo "fake e2fsck: clean"; }
+blkid() { printf '%%s: ' "$1"; cat "$R/blkid/$(basename "$1")" 2>/dev/null || echo; }
+mount() {
+  if [ $# = 0 ]; then cat "$R/proc/mounts"; return; fi
+  t=auto; while [ $# -gt 2 ]; do case $1 in -t) t=$2; shift 2 ;; *) shift ;; esac; done
+  mkdir -p "$2"; echo "$1 $2 $t rw 0 0" >> "$R/proc/mounts"; }
+exfat-fuse() { mkdir -p "$2"; echo "$1 $2 fuseblk rw 0 0" >> "$R/proc/mounts"; }
+umount() { grep -v " $1 " "$R/proc/mounts" > "$R/proc/mounts.n"; mv "$R/proc/mounts.n" "$R/proc/mounts"; }
+mkfs.exfat() { for d; do :; done; python3 "%(fp)s" mkexfat "$R" "$d"; }
+mkexfatfs() { mkfs.exfat "$@"; }
+'''
+
+
+def rewrite(s):
+    return PREFIX.sub(lambda m: R + m.group(1), s).replace('[ -b ', '[ -e ')
+
+
+def visible_state():
+    st = fakephone.read_state(R)
+    return {'recovery': 'recovery', 'android': 'device'}.get(st)
+
+
+def maybe_fail(cmd):
+    pat = os.environ.get('FAKE_FAIL')
+    if not pat or not re.search(pat, cmd):
+        return
+    cf = os.path.join(R, 'fail-count')
+    n = int(open(cf).read()) if os.path.exists(cf) else 0
+    if n < int(os.environ.get('FAKE_FAIL_TIMES', '1')):
+        open(cf, 'w').write(str(n + 1))
+        sys.stderr.write('fake adb: simulated cable pull\n')
+        sys.exit(1)
+
+
+def run_shell(cmd, binary):
+    if visible_state() != 'recovery':
+        sys.stderr.write('error: no devices/emulators found\n')
+        sys.exit(1)
+    maybe_fail(cmd)
+    script = FUNCS % {'R': R, 'fp': os.path.join(HERE, 'fakephone.py')} + rewrite(cmd)
+    p = subprocess.run(['bash', '-c', script], capture_output=True)
+    if binary:
+        sys.stdout.buffer.write(p.stdout)
+    else:
+        sys.stdout.write(p.stdout.decode(errors='replace').replace(R, ''))
+    sys.stderr.write(p.stderr.decode(errors='replace').replace(R, ''))
+    sys.exit(p.returncode)
+
+
+def main(a):
+    while a and a[0] in ('-s', '-t'):
+        a = a[2:]
+    cmd = a[0] if a else ''
+    st = visible_state()
+    if cmd == 'version':
+        print('Android Debug Bridge version 1.0.41 (starbite fake adb)')
+    elif cmd == 'start-server' or cmd.startswith('wait-for-'):
+        pass
+    elif cmd == 'devices':
+        print('List of devices attached')
+        if st:
+            print(f'FAKE0000SERIAL\t{st}')
+    elif cmd == 'get-state':
+        if not st:
+            sys.stderr.write('error: no devices/emulators found\n')
+            sys.exit(1)
+        print(st)
+    elif cmd == 'push':
+        if st != 'recovery':
+            sys.exit('error: no devices/emulators found')
+        *srcs, dst = a[1:]
+        maybe_fail('push ' + dst)
+        d = rewrite(dst)
+        for s in srcs:
+            shutil.copyfile(s, os.path.join(d, os.path.basename(s)) if d.endswith('/') or len(srcs) > 1 else d)
+        print(f'{len(srcs)} file(s) pushed')
+    elif cmd == 'pull':
+        shutil.copyfile(rewrite(a[1]), a[2])
+    elif cmd in ('shell', 'exec-out'):
+        run_shell(' '.join(a[1:]), cmd == 'exec-out')
+    elif cmd == 'reboot':
+        if not st:
+            sys.exit('error: no devices/emulators found')
+        to = a[1] if len(a) > 1 else ''
+        fakephone.write_state(R, {'recovery': 'recovery', 'bootloader': 'fastboot', 'download': 'download'}.get(to, 'menu'))
+    else:
+        sys.exit(f'fake adb: "{cmd}" is not faked')
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

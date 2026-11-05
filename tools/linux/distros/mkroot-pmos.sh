@@ -181,7 +181,7 @@ EOF
 cp "$HERE/sb-integrate.sh" "$S/"
 # mk-payload rewrites an older one-line login file into "user user" + "pin NNNNNN" (PIN kept)
 UH=$UH sh "$HERE/mk-payload.sh" "$S/payload" "$NAME"
-grep -q '^pin [0-9]\{6\}$' "$S/payload/login.txt" || { echo "no PIN for $NAME" >&2; exit 1; }
+grep -qE '^pin ([0-9]{6}|none)$' "$S/payload/login.txt" || { echo "no PIN (or pin none) for $NAME" >&2; exit 1; }
 chroot "$R" /bin/sh /tmp/sb/sb-integrate.sh "$NAME" openrc /tmp/sb/payload
 
 # ---- pmOS specifics -----------------------------------------------------------------------------
@@ -259,7 +259,12 @@ c "openrc init"               "[ -e sbin/init ] && [ -x sbin/openrc ]"
 c "user 10000:10000"          "grep -q '^user:x:10000:10000:' etc/passwd"
 c "user shell exists"         "[ -x \".\$(grep '^user:' etc/passwd | cut -d: -f7)\" ]"
 c "user groups"               "for g in video input audio netdev plugdev wheel; do grep -q \"^\$g:.*[:,]user\" etc/group || exit 1; done"
+if [ "$(cat "$R/etc/starbite/login" 2>/dev/null)" = none ]; then   # SB_NO_PIN=1: the installer's no-password image
+c "user has no password"      "[ -z \"\$(grep '^user:' etc/shadow | cut -d: -f2)\" ]"
+c "lock screen off"           "grep -q 'lock-enabled=false' usr/share/glib-2.0/schemas/90-starbite-nolock.gschema.override"
+else
 c "user has a password"       "grep '^user:' etc/shadow | cut -d: -f2 | grep -q '^\\$'"
+fi
 c "root locked"               "grep '^root:' etc/shadow | cut -d: -f2 | grep -q '^!'"
 c "doas for wheel"            "grep -qs 'permit persist :wheel' etc/doas.d/*.conf"
 c "ssh key"                   "[ -s home/user/.ssh/authorized_keys ]"

@@ -9,7 +9,8 @@
 #   reboot-to             tools/linux/reboot-to
 #   firmware/brcm/*       BCM4361 Wi-Fi + BT firmware under their final names
 #   authorized_keys       optional: build/linux/ssh/starbite_ed25519.pub
-#   login.txt             optional: "pin NNNNNN" (build/linux/<name>-login.txt, git-ignored)
+#   login.txt             optional: "pin NNNNNN" (build/linux/<name>-login.txt, git-ignored), or
+#                         "pin none": an empty password, lock screen off (/etc/starbite/login = none)
 #
 # What it does (each block says why):
 #   user "user" uid/gid 10000 (the initrd mounts the card exFAT uid=10000, but root-only under
@@ -78,7 +79,27 @@ for g in video input render audio netdev plugdev wheel sudo dialout feedbackd; d
 done
 PIN=
 [ -f "$PL/login.txt" ] && PIN=$(awk '/^pin/ {print $2}' "$PL/login.txt")
-if [ -n "$PIN" ]; then echo "$SB_USER:$PIN" | chpasswd; else say "no PIN in the payload: $SB_USER has no password set"; fi
+GS=/usr/share/glib-2.0/schemas
+NOLOCK=$GS/90-starbite-nolock.gschema.override
+if [ "$PIN" = none ]; then
+	# "pin none" (mk-payload.sh with SB_NO_PIN=1, the Starbite installer's images): no password at
+	# all, and no lock screen that would ask for one (docs/INSTALLER.md, no-password list)
+	passwd -d "$SB_USER" >/dev/null
+	echo none > /etc/starbite/login
+	if [ -f "$GS/org.gnome.desktop.screensaver.gschema.xml" ] && [ -f "$GS/org.gnome.desktop.lockdown.gschema.xml" ]; then
+		printf '%s\n' '# Starbite (sb-integrate.sh, pin none): no password, so no lock screen' \
+			'[org.gnome.desktop.screensaver]' 'lock-enabled=false' \
+			'[org.gnome.desktop.lockdown]' 'disable-lock-screen=true' > "$NOLOCK"
+		# a bad override would break every later schema compile (package triggers): take it out again
+		have glib-compile-schemas && ! glib-compile-schemas "$GS" 2>/dev/null &&
+			{ rm -f "$NOLOCK"; glib-compile-schemas "$GS" 2>/dev/null || true; say "lock screen override refused by glib-compile-schemas"; }
+	fi
+	if [ -f "$NOLOCK" ]; then say "$SB_USER: no password, lock screen off (pin none)"
+	else say "$SB_USER: no password (pin none), but NO lock screen override: no GNOME schemas here"; fi
+elif [ -n "$PIN" ]; then
+	echo "$SB_USER:$PIN" | chpasswd
+	rm -f /etc/starbite/login "$NOLOCK"
+else say "no PIN in the payload: $SB_USER has no password set"; fi
 passwd -l root >/dev/null 2>&1 || true
 if [ -d /etc/sudoers.d ]; then
 	printf '%%wheel ALL=(ALL:ALL) ALL\n' > /etc/sudoers.d/10-starbite

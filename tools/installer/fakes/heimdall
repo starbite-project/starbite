@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Fake `heimdall` for installer rehearsals: only `detect` and `flash --RECOVERY FILE [--no-reboot]`.
+After the flash it moves the fake phone to TWRP, standing in for the user's key combination
+(Volume Down + Power, then Volume Up + Bixby + Power)."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import fakephone  # noqa: E402
+
+R = os.environ.get('FAKE_ROOT') or sys.exit('fake heimdall: FAKE_ROOT is not set')
+a = sys.argv[1:]
+on = fakephone.read_state(R) == 'download'
+if a[:1] == ['detect']:
+    print('Device detected' if on else 'ERROR: Failed to detect compatible download-mode device.')
+    sys.exit(0 if on else 1)
+if a[:1] == ['flash'] and on:
+    if len(a) < 3 or a[1] != '--RECOVERY' or set(a[3:]) - {'--no-reboot'}:
+        sys.exit(f'fake heimdall: only "flash --RECOVERY FILE [--no-reboot]" is faked, not {a}')
+    target = os.path.realpath(os.path.join(R, 'dev', 'block', 'by-name', 'RECOVERY'))
+    data = open(a[2], 'rb').read()
+    with open(target, 'r+b') as f:
+        f.write(data)
+    print(f'Uploading RECOVERY\n100%\nRECOVERY upload successful ({len(data)} bytes)')
+    fakephone.write_state(R, 'recovery')
+    print('(fake: the user held Volume Down + Power, then Volume Up + Bixby + Power: TWRP is up)')
+    sys.exit(0)
+sys.exit(f'fake heimdall: {a} (phone in Download mode: {on})')
