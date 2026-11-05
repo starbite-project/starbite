@@ -1325,7 +1325,7 @@ int menu_v6(const struct star_info *in, char *cmdline, unsigned len)
                 continue;
             }
             reboot_to(M.bar == 0 ? INFORM_RECOVERY : INFORM_DOWNLOAD,
-                      M.bar == 0 ? "REBOOTING TO RECOVERY" : "REBOOTING TO DOWNLOAD MODE");
+                      M.bar == 0 ? "REBOOTING TO TWRP RECOVERY" : "REBOOTING TO DOWNLOAD MODE");
         }
         if (ev & (K_UP | K_DOWN)) {
             make_list(M.tab);

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+<!-- Starbite-drawn (tools/brand/logos/SOURCES.md): Engineer OS, an eight-tooth gear with the
+     Starbite star (the concept's g-star outline) in its hub, in a 100 box. -->
+<defs>
+<linearGradient id="eg" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#f2f7ff"/><stop offset="1" stop-color="#a9c4e6"/>
+</linearGradient>
+</defs>
+<path fill="url(#eg)" fill-rule="evenodd" d="M77.25 38.71 L78.89 44.02 L86.67 45.07 L86.67 54.93 L78.89 55.98 L77.25 61.29 L74.66 66.20 L79.41 72.45 L72.45 79.41 L66.20 74.66 L61.29 77.25 L55.98 78.89 L54.93 86.67 L45.07 86.67 L44.02 78.89 L38.71 77.25 L33.80 74.66 L27.55 79.41 L20.59 72.45 L25.34 66.20 L22.75 61.29 L21.11 55.98 L13.33 54.93 L13.33 45.07 L21.11 44.02 L22.75 38.71 L25.34 33.80 L20.59 27.55 L27.55 20.59 L33.80 25.34 L38.71 22.75 L44.02 21.11 L45.07 13.33 L54.93 13.33 L55.98 21.11 L61.29 22.75 L66.20 25.34 L72.45 20.59 L79.41 27.55 L74.66 33.80 Z M50 31 A19 19 0 1 0 50 69 A19 19 0 1 0 50 31 Z"/>
+<path transform="translate(35 35) scale(.30)" d="M50 0C54 34 66 46 100 50 66 54 54 66 50 100 46 66 34 54 0 50 34 46 46 34 50 0Z" fill="#9fcbff"/>
+</svg>

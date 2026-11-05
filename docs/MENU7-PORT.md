@@ -506,7 +506,9 @@ Estimated size ~3 MB.
 
 **Icons.** The concept's `<symbol>` SVGs at the sizes and stroke widths in `sb7.h`, rendered
 (resvg or Chrome) to A8 coverage (ARGB for `SB7_I_WARN_150` and `SB7_I_BAT_84`), RLE. The nominal
-box is the SVG's 1 em box (24-unit viewBox), with a margin for anti-aliasing.
+box is the SVG's 1 em box (24-unit viewBox), with a margin for anti-aliasing. `SB7_I_BOLT_30` (the
+charging bolt, 18 x 30, A8) is not in the concept: drawn in `menu7-assets.py`. `SB7_I_BAT_84`
+carries the concept's fixed 87 % fill, so the status bar draws the battery from rects instead (D8).
 
 **Provider glyphs.** `g-star`, `g-flask` with their masks, 96 px, white,
 drop-shadow(0 4px 10px rgba(0,0,0,.25)) baked, ARGB RLE; `SB7_P_OTHER` new. Apple, Microsoft,
@@ -524,7 +526,11 @@ concept's. The tile map (`SB7_T_TILEMAP`) for today's catalog:
 
 | Catalog key | Tile (c1 -> c2, glyph) |
 |---|---|
-| ios26 | #0b2560 -> #3d8cff, Apple logo (white) |
+| ios16 | #ffffff -> #e4e8f2 (dark), "16" in Inter Tight 700 filled blue -> violet -> pink (Starbite-drawn, flat) |
+| mac13 | #0a0d2a -> #2a1650, Ventura-coloured bands (`logos/src/starbite/ventura.svg`) under the white Apple logo |
+| ios26 | #0b2560 -> #3d8cff, "26" as Liquid Glass: white body fading to pale blue, bright top edges, blue shadow |
+| chromeos | #ffffff -> #dfe8f7 (dark), Chromium mark in blues (`starbite/chromium.svg`, Starbite-drawn) |
+| engineer | #06121f -> #1b4a6e, gear with the Starbite star in its hub (`starbite/engineer.svg`) |
 | win11 | #ffffff -> #dbe4f0, Windows 11 logo (#0078d4) |
 | android | #05202c -> #0b4a5e (Android navy), Android robot head (#3ddc84) |
 | linux-ubuntu, linux | #c13a0d -> #f47b3c, Ubuntu Circle of Friends (2022, white) |
@@ -539,6 +545,11 @@ concept's. The tile map (`SB7_T_TILEMAP`) for today's catalog:
 | lab-* (prefix) | #121215 -> #2c2c31, bars (concept Display Test) |
 | Starbite Lab row (key "@lab") | #3a145e -> #ad61f2, flask (new) |
 | category defaults | Apple: Apple logo on the provider grey; Microsoft: as win11; Android: as android; Linux: Tux on #15161a -> #3a3d45; Starbite, other, Lab: their glyphs |
+
+The `X:` glyph kinds (`CUSTOM_G` in `menu7-assets.py`) are Starbite's own art; their layers are
+cut to the squircle when they are built, because glass draws a glyph layer unclipped (the
+Ventura bands reach the tile's corners). `tools/menu7/tile-sheet.py` draws the visible systems'
+tiles from a container, labelled (`tools/brand/preview/icons-before.png`, `icons-after.png`).
 
 The concept catalog's demo ids for the same systems (a17, phosh, gnome, arch, pmos, kali) map to
 these tiles too; only tiles the map reaches are written. `menu7-assets.py --concept-art` builds a
@@ -610,7 +621,7 @@ reviewer can see, except the listed deliberate differences.
 | D5 | "black 250 ms, splash until 1600 ms", then the concept's SAMSUNG / Galaxy S9 / Powered by starbite fade | S-Boot's own splash (Samsung's logo.jpg), as long as S-Boot and the bake take; the intro starts from the captured panel and fades it out; Samsung's own wordmark takes the glass wordmark's place | it is S-Boot's screen; the user asked for the native splash |
 | D6 | the blur planes follow the blooming star in the intro | baked once at the final wallpaper; glass that appears from 1050 ms refracts the final state | per-frame blurs do not fit; by 1050 ms the reveal is past 3250 px |
 | D7 | concept demo data (iOS 14, iPadOS 18, tvOS, Darwin, iOS 7, WinPE, UEFI Shell, GSI, ChromeOS, Starbite OS, USB Toolkit, Demos, the four Lab tools) | the catalog; Lab = Starbite Lab (EngineerMode) + visible lab entries | catalog-driven |
-| D8 | battery "87%" | the battery glyph without a percentage | no fuel gauge driver in the loader |
+| D8 | battery "87%" (fixed) | the real charge: `shim/starlte/batt.c` reads the MAX77705 fuel gauge (RepSOC 0x06, VCELL 0x09, Current 0x0A) and charger (CHG_INT_OK 0xB2 for the cable, CHG_DETAILS_01 0xB4) on HSI2C 0x14360000, read only, when the menu starts and then every 10 s (`M7_BATT_MS`, never per frame; a change takes one frame, or a refreeze behind an overlay). The concept's outline and nub, a fill 31.4 x pct of the 44-unit box (white; green #30d158 with the `SB7_I_BOLT_30` bolt while a cable is in; red #ff453a under 15 % on battery) and "NN%" ending at x 1250. No answer from the bus, no battery, or the gauge's init failed: the outline only, as before. h7: `H7_BATT=87` / `64,c` / `9` / `none` (`tools/brand/preview/battery-states.png`) | the reader never writes the MAX77705: S-Boot arms the charger watchdog (CNFG_00 WDTEN) and nothing in the loader feeds it (em.c says the same), so charging can pause (CHG_DTLS 0xB) while the menu sits; the bolt follows the cable, not the charge state. Untested on the phone |
 | D9 | launch progress is a 3.6 s timer in 5 stages; Bixby cancels any time | real loader stages via `menu7_progress`; Bixby cancels until the card settles | the load is synchronous |
 | D10 | Lab opens a Lab section with a notice | dock Lab / Hold Bixby open EngineerMode directly | the tools live in EngineerMode |
 | D11 | Reduced motion, CSS fallback, "Fail the next start" options | not present | no such settings on the device; failures are real |
@@ -618,6 +629,7 @@ reviewer can see, except the listed deliberate differences.
 | D13 | screen corner radius 118 (the mockup) | not drawn | the panel's own corners |
 | D14 | text by Skia (subpixel positions, its own AA) | FreeType A8 at fixed sizes, whole-pixel glyph origins, bilinear when scaled | atlases; differences under one pixel |
 | D15 | one-shot boot-next goes through the menu | launch card directly, no intro | a reboot-to must not wait |
+| D16 | "Restart to Recovery?", "...restarts into Samsung Recovery", button "Restart to Recovery", "Restarting to Recovery" | "Restart to TWRP?", "Galaxy S9 restarts into TWRP recovery. ...", "Restart to TWRP", "Restarting to TWRP" (the dock keeps "Recovery") | the RECOVERY partition holds TWRP 3.7.0 (as EngineerMode and menu v5 say) |
 
 Tearing: the DECON scans out the framebuffer we write; v7 presents dirty rects right after
 composing them (no vsync source in the loader). Watch for it on the first boot.

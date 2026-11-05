@@ -556,6 +556,97 @@ def logo_layer(g, T):
     return menu7_logos.render(name, T, T, T, fit, dx, dy, col)
 
 
+# Glyph kinds 'X:<id>': Starbite's own tile art (tools/brand/logos/SOURCES.md, "Starbite-drawn"):
+# version numbers set in Inter Tight 700 as the concept's TG() sets them (46 in the 100 box,
+# y 53), coloured per release, and the SVGs in tools/brand/logos/src/starbite/.
+STARBITE_SVG = ROOT / 'tools/brand/logos/src/starbite'
+
+
+def own_svg(name, T):
+    s = (STARBITE_SVG / f'{name}.svg').read_text()
+    assert not menu7_logos.BAD.search(s), name
+    return rsvg(s, T, T)
+
+
+def number_layer(text, T, sz=46, ls=-1.6):
+    """White text centred as TG()'s <text x=50 y=53>: (A8 coverage as a T x T float array)."""
+    lay = np.zeros((T, T, 4))
+    k = T / 100
+    base = (53 + x_height(FAM_IT, 700) * sz / 2) * k
+    text_layer(lay, text, FAM_IT, 700, sz * k, ls * k, (255, 255, 255), x_mid=50 * k, baseline=base)
+    return lay[..., 3]
+
+
+def grad(T, stops, x0=0.0, y0=0.0, x1=1.0, y1=1.0):
+    """Linear gradient over the T box from (x0, y0) to (x1, y1) (box units): RGB float."""
+    y, x = (np.mgrid[0:T, 0:T] + .5) / T
+    dx, dy = x1 - x0, y1 - y0
+    t = np.clip(((x - x0) * dx + (y - y0) * dy) / (dx * dx + dy * dy), 0, 1)
+    pos = [p for p, _ in stops]
+    cols = np.array([hexrgb(c) for _, c in stops], dtype=np.float64)
+    return np.stack([np.interp(t, pos, cols[:, i]) for i in range(3)], axis=-1)
+
+
+def rgba(rgb, a):
+    return np.concatenate([rgb, a[..., None]], axis=-1)
+
+
+def shadow(a, T, dy=.02, sigma=.025, op=.35, col=(0, 0, 0)):
+    s = np.roll(gauss_blur(a, max(sigma * T, .6)), int(round(dy * T)), axis=0) * op
+    return rgba(np.broadcast_to(np.array(col, np.float64), (T, T, 3)).copy(), s)
+
+
+def x_ios16(T):
+    """iOS 16: "16" on a light tile, filled with a blue -> violet -> pink gradient (the iOS 16
+    release colours; flat, as iOS 16's icons)."""
+    a = number_layer('16', T)
+    fill = grad(T, [(0, '#1e6bff'), (.55, '#8a4dff'), (1, '#ff4f8b')], .2, .25, .8, .8)
+    return over(shadow(a, T, op=.12), rgba(fill, a))
+
+
+def x_ios26(T):
+    """iOS 26: "26" as Liquid Glass on the blue tile: a white body fading down to clear blue,
+    a bright upper rim, a soft blue shadow under it."""
+    a = number_layer('26', T)
+    body = rgba(grad(T, [(0, '#ffffff'), (1, '#cfe2ff')], 0, .25, 0, .8),
+                a * (1 - .30 * np.clip(((np.mgrid[0:T, 0:T][0] + .5) / T - .3) / .5, 0, 1)))
+    up = np.roll(a, max(1, int(round(.012 * T))), axis=0)
+    rim = np.clip(a - up, 0, 255)                       # the top edges of the strokes
+    lay = over(shadow(a, T, dy=.03, sigma=.03, op=.45, col=(4, 22, 70)), body)
+    return over(lay, rgba(np.full((T, T, 3), 255.0), rim * .9))
+
+
+def x_ventura(T):
+    """macOS Ventura: the wallpaper's bands (ventura.svg) under the white Apple logo."""
+    lay = own_svg('ventura', T)
+    ap = menu7_logos.render('apple', T, T, T, .40, 0, -.10, '#ffffff')
+    return over(over(lay, shadow(ap[..., 3], T, op=.3)), ap)
+
+
+def x_svg(name, shade=.25):
+    def f(T):
+        lay = own_svg(name, T)
+        return over(shadow(lay[..., 3], T, op=shade), lay)
+    return f
+
+
+CUSTOM_G = {
+    'X:ios16': x_ios16,
+    'X:ios26': x_ios26,
+    'X:ventura': x_ventura,
+    'X:chromium': x_svg('chromium', .18),
+    'X:engineer': x_svg('engineer', .35),
+}
+
+
+def custom_layer(g, T):
+    """CUSTOM_G's layer cut to the tile's squircle: glass draws a glyph layer unclipped, and the
+    Ventura bands reach the tile's corners."""
+    lay = CUSTOM_G[g](T)
+    lay[..., 3] *= sq_mask(T) / 255
+    return lay
+
+
 def darker(c, f=.42):
     r, g, b = hexrgb(c)
     return '#%02x%02x%02x' % (int(r * f), int(g * f), int(b * f))
@@ -575,7 +666,12 @@ def tile_table(art):
         byid[t['id']] = add('concept:' + t['id'], t['c1'], t['c2'], t['g'], t['dark'])
     # the real OS logos (LOGO_G); c1 -> c2 as the concept's tiles, or the brand's own colours
     logo = {
-        'ios26': add('ios26', '#0b2560', '#3d8cff', 'L:apple'),
+        # Apple: one look per system (Starbite-drawn, CUSTOM_G); the Apple logo stays the default
+        'ios16': add('ios16', '#ffffff', '#e4e8f2', 'X:ios16', True),
+        'ios26': add('ios26', '#0b2560', '#3d8cff', 'X:ios26'),
+        'mac13': add('mac13', '#0a0d2a', '#2a1650', 'X:ventura'),
+        'chromeos': add('chromeos', '#ffffff', '#dfe8f7', 'X:chromium', True),
+        'engineer': add('engineer', '#06121f', '#1b4a6e', 'X:engineer'),
         'win11': add('win11', '#ffffff', '#dbe4f0', 'L:win11', True),
         'android': add('android', '#05202c', '#0b4a5e', 'L:android'),          # #073042: Android navy
         'ubuntu': add('linux-ubuntu', '#c13a0d', '#f47b3c', 'L:ubuntu'),
@@ -602,6 +698,8 @@ def tile_table(art):
     }
     # today's catalog (docs/MENU7-PORT.md 4.4)
     real = [
+        ('ios16', logo['ios16']), ('mac13', logo['mac13']), ('chromeos', logo['chromeos']),
+        ('engineer', logo['engineer']),
         ('ios26', logo['ios26']), ('win11', logo['win11']), ('android', logo['android']),
         ('linux-ubuntu', logo['ubuntu']), ('linux', logo['ubuntu']),
         ('linux-ubuntu-gnome', logo['gnome']), ('linux-ubuntu-lomiri', logo['lomiri']),
@@ -786,6 +884,15 @@ def build(fonts_only=False, preview=None, log=print):
         bat = rsvg(svg_doc(84 + 2 * m, 40 + 2 * m, inner, ''), 84 + 2 * m, 40 + 2 * m)
         secs[(T_IMAGE, 23)] = image_section(bat, ARGB, (m, m, 84, 40))
         imgs[23] = ('argb', bat, (m, m, 84, 40))
+        # the charging bolt 18 x 30 (Starbite-drawn, not in the concept): A8, drawn in the battery
+        m = 2
+        inner = (f'<svg x="{m}" y="{m}" width="18" height="30" viewBox="0 0 18 30" overflow="visible">'
+                 f'<path d="M11.2 0.6 L1.4 16.9 H8.1 L6.6 29.4 L16.6 12.6 H9.8 Z" fill="#fff" '
+                 f'stroke="#fff" stroke-width=".8" stroke-linejoin="round"/></svg>')
+        bolt = np.clip(np.rint(rsvg(svg_doc(18 + 2 * m, 30 + 2 * m, inner, ''), 18 + 2 * m, 30 + 2 * m)[..., 3]),
+                       0, 255).astype(np.uint8)
+        secs[(T_IMAGE, 26)] = image_section(bolt, A8, (m, m, 18, 30))
+        imgs[26] = ('a8', bolt, (m, m, 18, 30))
         # wordmark stars (.sbw .sst: .42 em); nominal box in whole px, the item scales it
         for iid, px in ((24, 56), (25, 66)):
             a, nom = glyph_a8('g-star', .42 * px, int(round(.42 * px)))
@@ -805,15 +912,16 @@ def build(fonts_only=False, preview=None, log=print):
         reqs = []
         for name, c1, c2, g, dark in tiles:
             reqs.append([g, 'dark' if dark else c2])
-        tg = artwork([r for r in reqs if not r[0].startswith(('g:', 'L:'))])['tg']
+        tg = artwork([r for r in reqs if not r[0].startswith(('g:', 'L:', 'X:'))])['tg']
         it = iter(tg)
         layers = {}
         next_img = G_FIRST
         for tid, ((name, c1, c2, g, dark), (gg, bg)) in enumerate(zip(tiles, reqs), 1):
-            svg = None if g.startswith('L:') else EXTRA_G[g] if g.startswith('g:') else next(it)
+            svg = None if g.startswith(('L:', 'X:')) else EXTRA_G[g] if g.startswith('g:') else next(it)
             ids = []
             for si, T in enumerate(TILE_SIZES):
-                lay = logo_layer(g, T) if svg is None else tile_layer(svg, T)
+                lay = (custom_layer(g, T) if g.startswith('X:') else logo_layer(g, T)) if svg is None \
+                    else tile_layer(svg, T)
                 if lay[..., 3].max() == 0:
                     ids.append(0)
                     continue

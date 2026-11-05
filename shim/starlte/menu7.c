@@ -21,6 +21,7 @@
 #include "catalog.h"
 #include "store.h"
 #include "fbtext.h"
+#include "batt.h"
 
 #define PX 1440.0f
 #define PY 2960.0f
@@ -1659,7 +1660,7 @@ static void ctx_activate(uint32_t k)
 
 static const char *alert_title(void)
 {
-    return S.alert == AL_POWER ? "Power Off?" : S.alert == AL_RECOVERY ? "Restart to Recovery?" :
+    return S.alert == AL_POWER ? "Power Off?" : S.alert == AL_RECOVERY ? "Restart to TWRP?" :
            "Enter Download Mode?";
 }
 
@@ -1667,7 +1668,7 @@ static const char *alert_msg(void)
 {
     return S.alert == AL_POWER ? "Galaxy S9 will shut down. Hold Power to turn it on again." :
            S.alert == AL_RECOVERY ?
-           "Galaxy S9 restarts into Samsung Recovery. Starbite comes back on the next normal start." :
+           "Galaxy S9 restarts into TWRP recovery. Starbite comes back on the next normal start." :
            "Odin can flash Galaxy S9 over USB. Keep the cable connected until it finishes.";
 }
 
@@ -1676,7 +1677,7 @@ static const char *alert_btn_text(unsigned act)
     switch (act) {
     case A_OFF: return "Power Off";
     case A_RESTART: return "Restart";
-    case A_RECOVERY: return "Restart to Recovery";
+    case A_RECOVERY: return "Restart to TWRP";
     case A_DOWNLOAD: return "Enter Download Mode";
     default: return "Cancel";
     }
@@ -2816,10 +2817,30 @@ static int springs_moving(void)
     return 0;
 }
 
+/* The battery (D8): batt.c's MAX77705 reader, read when the menu starts and then every
+ * M7_BATT_MS, never per frame. A change (percentage, cable, known / unknown) costs one frame;
+ * while an overlay is up, the frozen base behind it is taken again. */
+#define M7_BATT_MS 10000.0
+static struct batt_info BAT;
+static double bat_due;              /* S.now of the next reading (0: at the first step) */
+
+static void bat_poll(void)
+{
+    if (bat_due > 0 && S.now < bat_due)
+        return;
+    bat_due = S.now + M7_BATT_MS;
+    struct batt_info b;
+    (void)batt_read(&b);
+    if (b.valid != BAT.valid || b.pct != BAT.pct || b.plugged != BAT.plugged)
+        S.refreeze = 1;             /* also makes run_loop draw a frame when nothing is frozen */
+    BAT = b;
+}
+
 void m7_step(float dt)
 {
     S.now = now_ms();
     tmr_run();
+    bat_poll();
     springs_step(dt);
     ptr_long();
     update();
@@ -2857,6 +2878,8 @@ enum { NS_STATUS = 1, NS_TOP, NS_FOOT, NS_DOCK, NS_PILL, NS_CARD = 0x10, NS_ROW 
 #define C_BRAND 0xc7ffffffU         /* rgba(255,255,255,.78) */
 #define C_CHEV 0x80ebebf5U          /* rgba(235,235,245,.5) */
 #define C_SD_GLOW 0x8030d158U
+#define C_BAT_CHG 0xff30d158U         /* battery fill while a cable is in (#30d158) */
+#define C_BAT_LOW 0xffff453aU         /* battery fill under 15 % (#ff453a) */
 #define C_SD_MISS 0x4debebf5U       /* rgba(235,235,245,.3) */
 #define C_SD_COME 0xd9ff9f0aU       /* rgba(255,159,10,.85) */
 #define C_STAR16 0x296fb3ffU        /* rgba(111,179,255,.16) */
@@ -3417,14 +3440,37 @@ static void build_base(void)
     EC = 0;
     EF = 0;
     t_text(KEY(NS_STATUS, 0, 1), SB7_F_IT600_46, "Galaxy S9", M7_STATUS_X0, M7_STATUS_BASE, -0.01f, C_WHITE, 1, 0, 0);
-    /* D8: the battery as the concept's #i-bat without its fill and without the percentage (the
-     * loader has no fuel gauge): the 45 % outline (viewBox 44 x 20 at 84 x 40) and the nub, ending
-     * where the concept's glyph ends (x 1348) */
+    /* D8: the battery as the concept's #i-bat (viewBox 44 x 20 at 84 x 40, ending where the
+     * concept's glyph ends, x 1348): the 45 % outline and nub, the fill (the concept's rect at
+     * x 3.8, 27 wide for 87 %, so 31.4 at 100 %) and "87%" ending at 1250 (gap 14), from batt.c.
+     * Green with a bolt while a cable is in, red under 15 % on battery; unknown (no answer from
+     * the MAX77705): the outline only. */
     {
         const float u = 84.f / 44.f;
         t_rect(KEY(NS_STATUS, 0, 2), 1264 + 0.2f * u, 92 + 0.2f * u, 38.6f * u, 19.6f * u, 6.3f * u, 1.6f * u,
                C_WHITE, 0.45f, 0);
         t_rect(KEY(NS_STATUS, 0, 3), 1264 + 40.5f * u, 92 + 7 * u, 2 * u, 6 * u, 1 * u, 0, C_WHITE, 0.45f, 0);
+        if (BAT.valid) {
+            float fw = maxf(31.4f * (float)BAT.pct / 100.f, 1.5f);
+            uint32_t fc = BAT.plugged ? C_BAT_CHG : BAT.pct < 15 ? C_BAT_LOW : C_WHITE;
+            t_rect(KEY(NS_STATUS, 0, 4), 1264 + 3.8f * u, 92 + 3.8f * u, fw * u, 12.4f * u,
+                   minf(3, fw / 2) * u, 0, fc, 1, 0);
+            char pc[5];
+            unsigned n = 0, p = BAT.pct;
+            if (p >= 100)
+                pc[n++] = '1';
+            if (p >= 10)
+                pc[n++] = (char)('0' + p / 10 % 10);
+            pc[n++] = (char)('0' + p % 10);
+            pc[n++] = '%';
+            pc[n] = 0;
+            const char *ps = arena(pc);
+            t_text(KEY(NS_STATUS, 0, 5), SB7_F_IT600_46, ps, 1250 - tw(SB7_F_IT600_46, ps, -0.01f),
+                   M7_STATUS_BASE, -0.01f, C_WHITE, 1, 0, 0);
+            if (BAT.plugged)        /* the bolt centred on the body (x 1 .. 38, y 1 .. 19) */
+                t_img(KEY(NS_STATUS, 0, 6), SB7_I_BOLT_30, 1264 + 19.5f * u - 9, 92 + 10 * u - 15, 18, 30,
+                      C_WHITE, 1);
+        }
     }
 
     /* #vp > #content */
@@ -3787,7 +3833,7 @@ static void end_items(void)
         break;
     case EN_OFF: t = "Galaxy S9 is off"; sub = "Press Power to turn it on."; break;
     case EN_RESTART: t = "Restarting"; break;
-    case EN_RECOVERY: t = "Restarting to Recovery"; break;
+    case EN_RECOVERY: t = "Restarting to TWRP"; break;
     case EN_DOWNLOAD: t = "Entering Download Mode"; break;
     default: t = "Couldn’t Power Off"; sub = "A charger keeps Galaxy S9 on. Restarting…"; break;
     }
@@ -4540,6 +4586,7 @@ static void core_init(void)
     S.autos = valid ? (int)st->timeout_s : 0;
     if (S.autos < 0 || S.autos > 60)
         S.autos = 0;
+    bat_poll();                     /* the first reading, before the intro reveals the status bar */
 }
 
 /* ================================================================================================

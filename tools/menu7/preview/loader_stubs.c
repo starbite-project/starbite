@@ -458,3 +458,47 @@ int star_font_blob(uint64_t *start, uint64_t *end)
         }
     return 0;
 }
+
+/* ---- the battery (batt.c is the phone's: MMIO) ----
+ * H7_BATT: "87" (default), "12" (low), "64,c" (cable in), "none" (no answer: the outline only). */
+
+#include "../../../shim/starlte/batt.h"
+
+int batt_init(void)
+{
+    const char *e = getenv("H7_BATT");
+    return !(e && !strcmp(e, "none"));
+}
+
+int batt_read(struct batt_info *b)
+{
+    const char *e = getenv("H7_BATT");
+    memset(b, 0, sizeof(*b));
+    if (!batt_init())
+        return 0;
+    int p = e ? atoi(e) : 87;
+    b->valid = 1;
+    b->pct = (uint8_t)(p < 0 ? 0 : p > 100 ? 100 : p);
+    b->plugged = b->charging = e && strchr(e, 'c') ? 1 : 0;
+    b->mv = (uint16_t)(3500 + 7 * b->pct);
+    b->ma = (int16_t)(b->plugged ? 900 : -250);
+    return 1;
+}
+
+int batt_percent(void)
+{
+    struct batt_info b;
+    return batt_read(&b) ? b.pct : -1;
+}
+
+int batt_mv(void)
+{
+    struct batt_info b;
+    return batt_read(&b) ? b.mv : -1;
+}
+
+int batt_plugged(void)
+{
+    struct batt_info b;
+    return batt_read(&b) ? b.plugged : -1;
+}

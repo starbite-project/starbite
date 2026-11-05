@@ -168,7 +168,8 @@ struct sb7_image {
 #define SB7_I_BAT_84      23U   /* i-bat 84 x 40: ARGB white with its .45 parts: status bar */
 #define SB7_I_GSTAR_56    24U   /* g-star at .42 em of 56 (23.52 px): menu wordmark star */
 #define SB7_I_GSTAR_66    25U   /* g-star at .42 em of 66 (27.72 px): splash wordmark star */
-#define SB7_I_COUNT       26U
+#define SB7_I_BOLT_30     26U   /* charging bolt 18 x 30 (Starbite-drawn): A8, in the battery */
+#define SB7_I_COUNT       27U
 
 /* Provider tile glyphs: the concept's g-apple, g-win, g-andr, g-tux, g-star, g-flask (masks
  * included), white, 96 px nominal box, with the tile's drop-shadow(0 4px 10px rgba(0,0,0,.25))

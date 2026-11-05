@@ -13,7 +13,7 @@ guidelines use a monochrome version (Apple: white) and the removals listed. No e
 
 | Logo | Used for | Source URL | sha256 | Licence / trademark note | Edits |
 |---|---|---|---|---|---|
-| Apple logo | provider Apple (`SB7_P_APPLE`), tiles iOS 26 and the Apple default | https://upload.wikimedia.org/wikipedia/commons/f/fa/Apple_logo_black.svg | `9d00ea77a3240f291356c36261c5f45d7fa456f29c97a2f060caf0ed4b9c3231` | Commons: public domain (original design Rob Janoff); trademark of Apple Inc. | painted white (Apple's logo is monochrome, black or white) |
+| Apple logo | provider Apple (`SB7_P_APPLE`), tiles macOS Ventura and the Apple default | https://upload.wikimedia.org/wikipedia/commons/f/fa/Apple_logo_black.svg | `9d00ea77a3240f291356c36261c5f45d7fa456f29c97a2f060caf0ed4b9c3231` | Commons: public domain (original design Rob Janoff); trademark of Apple Inc. | painted white (Apple's logo is monochrome, black or white) |
 | Windows 11 logo (2021) | tile Windows 11 and the Microsoft default | https://upload.wikimedia.org/wikipedia/commons/8/87/Windows_logo_-_2021.svg | `0f6b74d8d8ede1ec0e454b3c6fcdfba65fbe989af9a49ad4ff0c498f4dc3afbb` | Commons: public domain (file by OAOV); trademark of Microsoft Corporation | none (#0078d4) |
 | Microsoft logo | provider Microsoft (`SB7_P_MICROSOFT`) | https://upload.wikimedia.org/wikipedia/commons/4/44/Microsoft_logo.svg | `3d41251f93127b4b42c2f69fa423d204946cf9c307d786ea36b8d9bef4179282` | Commons: public domain; trademark of Microsoft Corporation | the light grey backdrop square removed (the logo is the four squares) |
 | Google "G" | provider Google (`SB7_P_GOOGLE`) | https://upload.wikimedia.org/wikipedia/commons/c/c1/Google_%22G%22_logo.svg | `ed9087d76cdc6d1c53698f6068f79872e77e87c8d012c0cfdad13b05b6ccb37c` | Commons: public domain (Google LLC); trademark of Google LLC | none |
@@ -29,12 +29,25 @@ guidelines use a monochrome version (Apple: white) and the removals listed. No e
 Not real logos (kept from the concept, they are Starbite's own): the Starbite star, the Lab flask, the
 `>_` tile of the Starbite shell, the Display Test bars, and the "other" ring.
 
+## Starbite-drawn (`src/starbite/`, 2026-11-05)
+
+Drawn for this project as plain SVG paths (nothing downloaded or traced from a file), not pinned by
+sha256 (they are ours to change), rendered by `CUSTOM_G` in `tools/brand/menu7-assets.py`:
+
+| File / art | Used for | What it is |
+|---|---|---|
+| `starbite/chromium.svg` | tile ChromiumOS (`chromeos`) | the Chromium mark's construction (three segments bounded by lines tangent to the centre ring, white ring, blue centre) in shades of blue, computed from circle geometry; refers to ChromiumOS (nominative use; Chromium and Chrome are trademarks of Google LLC) |
+| `starbite/ventura.svg` | tile macOS Ventura (`mac13`), under the Apple logo above | four flowing bands in Ventura's wallpaper colours (magenta, red-orange, orange, gold); evokes, does not copy, Apple's wallpaper |
+| `starbite/engineer.svg` | tile Engineer OS (`engineer`) | an eight-tooth gear with the concept's Starbite star in its hub |
+| "16", "26" (no file) | tiles iOS 16 (`ios16`), iOS 26 (`ios26`) | the version number in Inter Tight 700 (OFL, `tools/brand/fonts/`) as the concept's number tiles; iOS 16 flat with a blue -> violet -> pink fill, iOS 26 as Liquid Glass (white body, bright top edges, blue shadow) |
+| the charging bolt (no file) | `SB7_I_BOLT_30`, the status bar battery | a filled six-point bolt path in `menu7-assets.py` |
+
 ## Colours and sizes
 
 - Provider glyphs (96 px box, drawn 1:1 on the provider's glass tile, drop shadow baked): Apple white
   (.90 of the box), Microsoft four squares (.82), Google "G" (.86), Tux (.98).
 - OS tiles (92, 124, 220, 380): the concept's squircle, gradient, sheen and rim, with the logo in its own
-  colours at about .5 to .64 of the tile. Tile colours: iOS 26 the concept's blue; Windows 11, postmarketOS
+  colours at about .5 to .64 of the tile. Tile colours: iOS 26 the concept's blue (now with the Liquid Glass "26"); Windows 11, postmarketOS
   and Debian a light tile (their logos are blue, green and red); Android the brand's navy (#073042-ish);
   Ubuntu the concept's orange / aubergine gradients; Arch a dark tile; Kali the concept's Kali blue;
   Fedora Fedora blue (#294172). The table is `LOGO_G` and `tile_table()` in `tools/brand/menu7-assets.py`.
