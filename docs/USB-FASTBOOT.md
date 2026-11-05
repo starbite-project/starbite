@@ -371,3 +371,16 @@ Division of work, as always: Claude runs every host command (build, flash throug
 - the XNU UFS log ring in `oem log`;
 - moving the driver into libsb for the Utility OS (UO2+);
 - a shared finalize between `boot_*` and `star_boot_ram`.
+
+## 9. First hardware run (2026-11-05, S9 #1)
+
+Entered from the Bixby recovery menu (USB FASTBOOT / CONSOLE). First try:
+- the Mac (macOS 27.2) asked to allow "Starbite loader (Galaxy S9)"; then `system_profiler SPUSBHostDataType`
+  showed it at 480 Mb/s, 18d1:4ee0, serial 0000000000000001; `/dev/cu.usbmodem101`; `fastboot devices` listed it.
+- `getvar all`: battery 100 % / 4324 mV, 23 catalog entries; ep0: 20 SETUPs, 0 stalls, 0 command failures.
+- `fastboot stage` 40 MiB of random data: 0.945 s (~43 MB/s); `downloaded` matched. Register dump:
+  build/usb/oem-usb-first.txt. MAX77705: D+/D- routed (CONTROL1 read back 0x09), 4 re-routes, 0 I2C errors.
+- `oem boot-next fastboot` + `fastboot boot out/xnu-sdprobe.xnu`: "booting as xnu", the probe ran from RAM to its
+  end (card, MBR, store CRCs, read 22.7 MB/s, write test 5.0 MB/s) and panicked deliberately as it does. The panic
+  reset went to TWRP (sweetreboot), not to fastboot: a test kernel's reset path wins over the boot-next mailbox.
+  The log came from TWRP's /sys/fs/pstore/pmsg-ramoops-0. FB1's done-when is met (log read via pstore).
