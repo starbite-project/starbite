@@ -124,7 +124,14 @@ RELEASE = {
               '3de4f8f255bba5b1ac5675c4d678489a529bae03e044b619e9533d3e2ef44ecf',
               "macOS Ventura installer icon: Apple Inc. (App Store artwork); Apple's copyright and "
               'trademark', .80),
-    'android': (None, None, None, None, .62),       # no official Android 17 badge file found
+    # the Android 17 badge from the stable release post (on white: _matte_white below)
+    'android': ('release/android/metadata-static.png',
+                'https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEgV7zuuXjulHty999mGDWY1kfL8Q9SXjY'
+                'YWn-7JTpMfVdNP78eb5fW9shOpvVdEqK0WnNp7AhdO0qc7pXAaqcfTwXgOGsfZyqcQv8wyD-9niWBpZuP6ZAPHBSetW'
+                'enN2lMlRS5wi2d71-n8RCYqrLsFhUCEvM7KeoGLnNaDbiyOZQ0vvyr0O580nXK4Vas/s2048/Metadata%20-%20Static.png',
+                '637c790be0ce209bee4b24301dddc66b7f129ce902a38f2136154daba5ce1338',
+                'Android 17 badge: Google LLC (Android Developers Blog); Android is a trademark of Google LLC',
+                .82),
     'linux-ubuntu': ('release/linux-ubuntu/ubuntu-mascot-light.svg',
                      'https://www.omgubuntu.co.uk/wp-content/uploads/2026/02/ubuntu-mascot-light.svg',
                      'b89ff17308d8a6e8bcaff394e6ad740eae3d7d2fa9be2d751966e64deacbcad9',
@@ -155,6 +162,42 @@ def release_file(key):
     return p
 
 
+def _matte_white(im, edge=224.0):
+    """A badge on an opaque white page -> the badge on transparency. Only the white outside it
+    goes: the near-white pixels connected to the image border (flood fill), plus a 2 px band
+    along the rim, are unmixed from white (alpha = distance from white / the rim colour's
+    distance `edge`, colour = 255 - (255 - c) / alpha). White inside the badge (the "ANDROID"
+    and "17" lettering) is not connected to the border and stays opaque."""
+    from PIL import ImageDraw
+    rgb = np.asarray(im.convert('RGB')).astype(np.float64)
+    d = 255 - rgb.min(axis=2)                           # 0 = white
+    light = Image.fromarray(np.where(d < 100, 255, 0).astype(np.uint8), 'L').copy()  # writable
+    H, W = d.shape
+    border = [(x, 0) for x in range(W)] + [(x, H - 1) for x in range(W)] + \
+             [(0, y) for y in range(H)] + [(W - 1, y) for y in range(H)]
+    for xy in border:
+        if light.getpixel(xy) == 255:
+            ImageDraw.floodfill(light, xy, 128)
+    out = np.asarray(light) == 128                      # the white outside, as one region
+    band = out.copy()
+    for _ in range(2):                                  # the anti-aliased rim next to it
+        g = band.copy()
+        g[1:] |= band[:-1]
+        g[:-1] |= band[1:]
+        g[:, 1:] |= band[:, :-1]
+        g[:, :-1] |= band[:, 1:]
+        band = g
+    a = np.where(band, np.clip(d / edge, 0, 1), 1.0)
+    c = np.where(band[..., None] & (a[..., None] > 0),
+                 255 - (255 - rgb) / np.maximum(a[..., None], 1e-6), rgb)
+    rgba = np.concatenate([np.clip(c, 0, 255), a[..., None] * 255], axis=-1)
+    return Image.fromarray(np.rint(rgba).astype(np.uint8), 'RGBA')
+
+
+RELEASE_PREP = {'android': _matte_white}    # applied to the pinned source on every build
+_PREP_CACHE = {}
+
+
 def release_render(key, T):
     """The release icon at T x T, straight RGBA float 0..255, and its mode ('bleed' / 'fit')."""
     p = release_file(key)
@@ -164,6 +207,8 @@ def release_render(key, T):
         im = Image.fromarray(np.clip(np.rint(a), 0, 255).astype(np.uint8), 'RGBA')
     else:
         im = Image.open(p).convert('RGBA')
+    if key in RELEASE_PREP:
+        im = _PREP_CACHE[key] if key in _PREP_CACHE else _PREP_CACHE.setdefault(key, RELEASE_PREP[key](im))
     bb = im.getchannel('A').point(lambda v: 255 if v > 8 else 0).getbbox()
     if bb:                              # to the icon's own bounds (an app icon fills the tile)
         im = im.crop(bb)

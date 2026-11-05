@@ -532,7 +532,7 @@ concept's. The tile map (`SB7_T_TILEMAP`) for today's catalog:
 | chromeos | #ffffff -> #dfe8f7 (dark), official Chromium logo (Commons Chromium_Material_Icon.svg) |
 | engineer | #06121f -> #1b4a6e, gear with the Starbite star in its hub (`starbite/engineer.svg`, Starbite-drawn: Starbite's own system) |
 | win11 | #ffffff -> #dbe4f0, Windows 11 logo (#0078d4) |
-| android | #05202c -> #0b4a5e (Android navy), Android robot head (#3ddc84) |
+| android | #05202c -> #0b4a5e (Android navy), the Android 17 release badge at .82 (without it: the robot head, #3ddc84) |
 | linux-ubuntu | #c13a0d -> #f47b3c, the Ubuntu 26.04 Resolute Raccoon mascot (light) at .74 |
 | linux | #c13a0d -> #f47b3c, Ubuntu Circle of Friends (2022, white) |
 | linux-ubuntu-gnome | #5e1b58 -> #d2491f, Circle of Friends |
@@ -551,8 +551,10 @@ Release icons (`menu7_logos.RELEASE`, `R:` glyph kinds): where a release's own i
 `tools/brand/logos/src/release/<key>/` and pinned, that key's tile shows it instead (app icons full
 bleed, others at a fraction of the tile on the vendor tile's colours): iOS 16 and iOS 26 (Apple's
 developer icons, full bleed), macOS Ventura (the installer's round badge at .80 on its magenta ->
-orange tile), Ubuntu (the 26.04 Resolute Raccoon mascot, light, at .74 on Ubuntu orange). Android 17,
-Windows 11, ChromiumOS and postmarketOS have no release icon and keep their logos (SOURCES.md). Every other OS shows its official logo; only Starbite's own systems may use Starbite-drawn art
+orange tile), Ubuntu (the 26.04 Resolute Raccoon mascot, light, at .74 on Ubuntu orange), Android 17
+(the release badge from Google's stable post, its white page made transparent by a border flood
+fill at build time, at .82 on the Android navy tile). Windows 11, ChromiumOS and postmarketOS have
+no release icon and keep their logos (SOURCES.md). Every other OS shows its official logo; only Starbite's own systems may use Starbite-drawn art
 (the `X:` glyph kinds, `CUSTOM_G` in `menu7-assets.py`, today only Engineer OS). Their layers are
 cut to the squircle when they are built, because glass draws a glyph layer unclipped. `tools/menu7/tile-sheet.py` draws the visible systems'
 tiles from a container, labelled (`tools/brand/preview/icons-before.png`, `icons-after.png`).
