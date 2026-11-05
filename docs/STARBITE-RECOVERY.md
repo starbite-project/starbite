@@ -156,20 +156,23 @@ total: 400 ms of that is the Bixby window. To shorten the window, change `REC_WI
    - Holding Bixby during this boot cancels the request (recovery opens instead).
    - If the start fails, the recovery menu opens with the reason.
 3. The ramdisk (`tools/rescue/init`) says "Connect a Starbite rescue USB disk". It waits for a
-   filesystem labelled `STARBITE-RESCUE` on USB (or microSD), mounts it read-only, checks
-   `rescue.sha256` and runs `starbite-rescue/rescue.sh`. Power held 2 s reboots to the menu.
+   filesystem labelled `STARBITE-RESCUE` (or `SB-RESCUE`: FAT32 and exFAT labels hold only 11
+   characters) on USB (or microSD), mounts it read-only, checks `rescue.sha256` and runs
+   `starbite-rescue/rescue.sh`. Power held 2 s reboots to the menu. USB host mode needs the
+   store's `rescue.dtb` (docs/RESCUE-USB-HOST.md).
 4. `reboot-to rescue` from any Starbite Linux does the same thing: the existing tool writes the
    same mailbox.
 
 ### Placeholder parts
 
-- No rescue system exists yet: no `rescue.initrd` in the store, no `SBRESCUE` bundle in BOOT.
-  `mk-rescue-initrd.sh` and `bundle-rescue.py` are written. Only the bundle tool has been tested,
-  by a round-trip against a Python copy of the loader's parser.
-- **USB host mode does not exist yet**: the DWC3 is `dr_mode = "peripheral"`, and VBUS (the
-  MAX77705 OTG boost) and the Type-C source role are not set up. `tools/rescue/README.md`
-  "Kernel" lists what is needed; the kernel config is not changed here. Until then, a microSD
-  partition labelled `STARBITE-RESCUE` is the working way in.
+- No rescue system is in the store yet. `rescue.initrd`, `rescue.dtb` and a matching
+  `rescue.image` are built (2026-11-05, docs/RESCUE-USB-HOST.md "Deploy"); the `SBRESCUE` bundle
+  tool has only been tested by a round-trip against a Python copy of the loader's parser.
+- **USB host mode is written but has not run on the phone** (docs/RESCUE-USB-HOST.md): the
+  rescue DTB makes the DWC3 a host by default, the MAX77705 charger gives 5 V (OTG boost, 900 mA)
+  while its Type-C MCU reports a device attached. The daily DTB keeps the port a peripheral.
+  Until host mode is proven, a microSD partition labelled `STARBITE-RESCUE` or `SB-RESCUE` is the
+  working way in.
 - The Starbite Installer, which should make the rescue disk, is item 7 of the plan.
 
 ## 6. RAM used
