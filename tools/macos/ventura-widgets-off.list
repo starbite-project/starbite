@@ -1,0 +1,25 @@
+/System/Applications/Calendar.app/Contents/PlugIns/CalendarWidgetExtension.appex
+/System/Applications/Clock.app/Contents/PlugIns/WorldClockWidget.appex
+/System/Applications/Home.app/Contents/PlugIns/HomeWidget.appex
+/System/Applications/Home.app/Contents/PlugIns/HomeWidgetSingleAccessoryIntent.appex
+/System/Applications/FaceTime.app/Contents/PlugIns/FaceTimeIntentsExtension.appex
+/System/Applications/FindMy.app/Contents/PlugIns/FindMyWidgetIntentsItems.appex
+/System/Applications/FindMy.app/Contents/PlugIns/FindMyWidgetIntentsPeople.appex
+/System/Applications/FindMy.app/Contents/PlugIns/FindMyWidgetItems.appex
+/System/Applications/FindMy.app/Contents/PlugIns/FindMyWidgetPeople.appex
+/System/Applications/Stocks.app/Contents/PlugIns/StocksDetailIntents.appex
+/System/Applications/Stocks.app/Contents/PlugIns/StocksWidget.appex
+/System/Applications/Weather.app/Contents/PlugIns/WeatherIntents.appex
+/System/Applications/Weather.app/Contents/PlugIns/WeatherWidget.appex
+/System/Applications/VoiceMemos.app/Contents/PlugIns/VoiceMemosIntentsExtension.appex
+/System/Applications/Podcasts.app/Contents/PlugIns/PodcastsWidget.appex
+/System/Applications/Reminders.app/Contents/PlugIns/RemindersIntentsExtension.appex
+/System/Applications/Reminders.app/Contents/PlugIns/RemindersWidgetExtension.appex
+/System/Applications/News.app/Contents/PlugIns/NewsToday2.appex
+/System/Applications/News.app/Contents/PlugIns/NewsTodayIntents.appex
+/System/Applications/Notes.app/Contents/PlugIns/com.apple.Notes.IntentsExtension.appex
+/System/Applications/Notes.app/Contents/PlugIns/com.apple.Notes.WidgetExtension.appex
+/System/Applications/Photos.app/Contents/PlugIns/PhotosReliveWidget.appex
+/System/Library/CoreServices/Tips.app/Contents/PlugIns/TipsAppWidget-macOSExtension.appex
+/System/Library/CoreServices/Screen Time.app/Contents/PlugIns/ScreenTimeWidgetExtension.appex
+/System/Library/CoreServices/Screen Time.app/Contents/PlugIns/ScreenTimeWidgetIntentsExtension.appex
