@@ -344,3 +344,17 @@ EFS, PARAM, KEYSTORAGE, PERSISTENT, STEADY, BOTA, the boot LUNs.
 ## 8. Not done here
 No phone access, no adb, no flashing, no edit of tools/store/catalog.toml (A5 does it with the flash), no change
 to the loader, BOOT, RECOVERY, the kernel or the ramdisk (all unchanged: `android.kernel`, `android.ramdisk` stay).
+
+## 9. In-place patches on the GSI's SYSTEM (tools/android/pixel/block-patch.py)
+TWRP's 4.9 kernel cannot mount the GSI's ext4 read-write, so these are same-size binary patches written block
+by block (each original 4 KiB block must match exactly once on the partition; written, read back). Re-apply
+after any fresh GSI flash. (Decision 6 said "never modified": these two patches are the exception, local only.)
+
+| File | Where (file offset) | Change | Why |
+|---|---|---|---|
+| `/system/lib64/libui.so` | 0x35890, 0x6159c | `b.gt` → `nop` | libui skips Gralloc2/3 when api level > 35; the vendor has mapper 2.1/3.0 only ("gralloc-mapper is missing") |
+| `/system/lib/libui.so` | 0x373a2, 0x37330 | `bgt` (T1) → `nop` | same, 32-bit |
+| `/system/bin/cameraserver` (libcameraservice is static) | 0x1202bc, block 288 → partition block 75522 | `cbz w27` (9b040034) → `b` (24000014) | `CameraService::addListenerHelper` fails when `IBinder::addFrozenStateChangeCallback` returns INVALID_OPERATION (-38): the 4.9 binder driver has no freeze notification. system_server's BiometricsCallbackHandler then dies ("Failed to register a camera service listener") and the boot animation never ends (attempt 5). Listeners now register without the frozen-state callback (only used to hold back callbacks to frozen apps). |
+
+Originals: `build/android/pixel/libui-cmp/`, `build/android/pixel/cam/cameraserver-gsi` (sha256 4d812091…). The
+attempt-4 workaround (`stop cameraserver` in starbite-log.rc) is removed: it never held (init restarted the service).
