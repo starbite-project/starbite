@@ -2075,3 +2075,11 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     channel >= 8 (PIL's decode of the stock logo has ~22K pixels at 1..7) and padded 8 px, copied raw: 4 bands,
     first frame 0 px differ. Capture result + duration in log slots 116..117; intro7_release unregisters the SB7
     images when the intro ends; capt_free also checks star_info rd_start..rd_end (m7_rd_range).
+- 2026-11-05: **Linux black bars (top/bottom), diagnosed, not pinned; kernel built, not flashed.** Nothing the kernel programs
+  has a short size (mode 1440x2960, window 0..2959, IDMA 2960x1440, Phosh fb pitch 5760). Ranked: (1) the S6E3HA8
+  self mask, vendor `7A 01 0000 0095 0AFA 0B8F` = rows 0-149 and 2810-2959, re-sent by Android after every panel
+  init and never by us (we sleep-cycle the panel on blank/modeset); (2) certain but tiny: scale 3 lays out
+  986 x 3 = 2958 rows, so rows 2958-2959 are never drawn (the screenshots are 1440x2958); (3) a DSIM/DSC frame
+  shorter than 2960; (4) alpha (IN_CON format 0 is ARGB8888, not XRGB as the 6d comment says). patch-mainline.py
+  6e: geom_log dumps (probe, enable, fb changes), dump_geometry=1|2, panel_mask_off test. 7.1.0-starbite-9f3d455b,
+  Image sha 7936828c... Checklist: docs/LINUX-REBUILD-PLAN.md section 6.

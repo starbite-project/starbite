@@ -513,3 +513,52 @@ Always tell the user what changed and what to expect before and after each boot 
 10. **Watchdog reset path not yet verified** (4.3). Until it is, a hung distro needs the user's button combination.
 11. **Trademarks.** Distro logos in menu sprites follow each project's guidelines. postmarketOS, Debian, Arch and Fedora all publish rules.
 12. **Port drift.** The port is pinned at bcee601 and mainline at v7.1. Upstream port updates come in only as deliberate subtree pulls, each followed by a full `sb matrix` run.
+---
+
+## 6. Display: black bars (2026-11-05)
+
+**Report.** Under mainline Linux (Phosh; ChromeOS runs the same kernel) there are black lines or bars at the top and bottom of the panel.
+
+**Verdict.** The cause is **not pinned**. Nothing the kernel programs can cut rows off the picture: every register with a size in it is either sboot's (inherited, never written) or matches 1440x2960 in the probe log. What the code and the vendor sources leave is one certain 2-row gap at the bottom, which comes from userspace and is too thin to look like a bar. They also leave one panel-side mechanism that has exactly the reported shape but has not been confirmed. The kernel built for this (`7.1.0-starbite-9f3d455b`) adds diagnostics and a switch, so one boot settles it (checklist below).
+
+### 6.1 What is ruled out (with the numbers)
+
+| Stage | Evidence | Result |
+|---|---|---|
+| DRM mode | `s9p_decon_get_modes` → `drm_cvt_mode(1440, 2960, 60, false, false, false)`. With `margins=false`, `vdisplay = vdisplay + 2*0` (drm_modes.c), so the mode is 1440x2960 | full height |
+| Plane / fb | Simple-pipe primary plane: it must cover the CRTC, and `s9p_decon_pipe_check` (6c) refuses `src_x/src_y != 0` and pitch < 1440 px. Phosh's buffers have a 5760-byte pitch, so `IDMA_SRC_SIZE` is never rewritten for them | full height, no crop |
+| DECON window | Probe (build/test-boots/chromeos-12.log): `window 5 ... start 00000000 end 0b8f059f`, so (0,0)..(1439,2959). The probe refuses any other window | full panel |
+| Fetch channel | `src_size=0b9005a0 img_size=0b9005a0` (2960 rows x 1440 px), `base=cc000000` in both banks | full height |
+| simple-framebuffer | `reg = 1440*2960*4`, `height = 2960`. It is used only until s9p-decon evicts simpledrm | n/a after takeover |
+| Compositor content | Phosh screenshots (build/linux/runs/{pmos,arch,kali}-20261103/*.png) have content from row 0 down to the home bar; there is no black band in the picture itself | bars are not in the image |
+| S9 vs S9+ | Vendor DT (ref/starlte-kernel, exynos9810-display-lcd.dtsi): both phones are S6E3HA8, 1440x2960, v-porch 15/3/1, DSC 2 slices x 720, slice height 40. Only the size differs: S9 `64 132` mm, S9+ `69 142`. The driver reports 68x140, which only affects DPI-based auto-scale (Phosh and ChromeOS force scale 3) | not a geometry difference |
+
+### 6.2 Hypotheses, ranked
+
+1. **The panel's "self mask", rows 0-149 and 2810-2959. This matches the shape; it is unverified.** The S6E3HA8 multiplies two row bands by a mask image held in its side RAM; that is how it rounds the corners. The vendor enable sequence (panel/s6e3ha8/s6e3ha8_aod_panel.h, `S6E3HA8_AOD_SELF_MASK_ENA`) is `7A 01 0000 0095 0AFA 0B8F`, which gives rows 0x000-0x095 (0-149) and 0xAFA-0xB8F (2810-2959). The factory variant moves both bands below row 2959 (`0B90..0CBB`), which supports reading these values as row ranges. Android re-uploads the image and re-enables the mask after every panel init (`aod_init_panel`, called after `PANEL_INIT_SEQ` in panel_drv.c), and the vendor DT sets `self_mask_en = true`. If the mask is on with no valid image (or the image is lost), the result is two black bars of 150 rows each, about 6.7 mm at 570 ppi, at the top and bottom. Under S-Boot that would be invisible, because its logo sits on black at (180,1144). Our driver does a DCS sleep-in/out (`panel_sleep=1`) on every blank and on the compositor's first modeset, and the vendor never runs that sleep cycle without re-sending the mask. What is unknown: whether S-Boot enables the mask at all, and whether sleep-in clears the side RAM.
+2. **2 rows at the bottom: Phosh and ChromeOS at scale 3 (certain, userspace).** 2960 / 3 = 986.67. wlroots truncates the logical height to 986, so the layout covers 986 x 3 = 2958 rows; the screenshots are 1440x**2958**. Rows 2958-2959 are never drawn: they stay black in the zeroed CMA buffer. At 570 ppi that is a line of about 0.09 mm, so it is not a "bar". Exact scales for this panel: 2 or 4 (5 also divides 2960, but 1440/5 = 288 logical px is too narrow), or fractional 2.5 (576x1184). This is not a kernel bug; scale 3 was chosen in 1.3 item 8.
+3. **The DSIM/DSC frame is shorter than 2960 rows (bottom only).** `DSIM_NUM_OF_TRANSFER` (vendor: `lcd_info->yres`), `DSIM_RESOL` and the DSC PPS picture height are all sboot's and were never logged. A short value would leave the panel's bottom rows unrefreshed. That fits a bottom bar but not a top one.
+4. **Alpha (content-dependent, unlikely).** `IDMA_IN_CON = 0x02000000` means format 0, which is **ARGB8888** in dpu_9810 regs-dpp.h, not XRGB (the comment at 6d says otherwise). If S-Boot's window blend were coverage (`WIN_CONTROL_1` FG=AF, BG=1-AF) on its black background, XRGB pixels with X=0 would come out black. The vendor's default is `DECON_BLENDING_NONE` (ONE/ZERO, alpha ignored), and the effect would follow the content, not two fixed bands.
+
+### 6.3 What the build adds (patch-mainline.py step 6e, all in s9p-decon)
+
+- `geom_log` (default 1, 0644): at probe and after every enable (unblank or modeset), `geom[...]` lines with the DECON blender, splitter and OUTFIFO sizes, the data path and background color, every enabled window's control/start/end/colormap, the fetch channel in both banks (`in_con out_con src_size src_off img_size blk_* base`), and DSIM (`transfers resol vporch hporch config cprs slice cmd te`). Commits log one `geom: fb ...` line whenever the framebuffer or plane geometry changes (size, pitch, offset, fourcc, modifier, src/crtc rects). These are reads only, from blocks the driver already reads or writes.
+- `dump_geometry` (0200): `echo 1 > /sys/module/s9p_decon/parameters/dump_geometry` dumps now; `2` adds the DECON shadow (active) bank and the DSC encoders' PPS. Each encoder is read only if `DATA_PATH_CONTROL_2` says it is in the path.
+- `panel_mask_off` (default 0, 0644): sends the vendor's own `SELF_MASK_DIS` sequence (`F0 5A 5A`, `7A 00`, `F0 A5 A5`) after every enable, or at once when written at run time. It needs DCS long writes, so the driver gained `s9p_decon_dsi_write` (the vendor `dsim_long_data_wr` pattern: payload words, then a `0x39` header).
+
+Nothing changes on screen unless `panel_mask_off` is set.
+
+Build: `limactl shell starbite -- env PROJ=<worktree> WORK=~/linux/blackbars-work OUT=~/distros/_kernel-blackbars MIN_HOST_FREE_GB=2 tools/linux/build-kernel.sh`, release `7.1.0-starbite-9f3d455b`. Image sha256 `7936828c70d388bf483ab4edf4739158b342483dc89e7becfaa51a5b39341301`, with modules-7.1.0-starbite-9f3d455b.img in the same OUT. Not flashed.
+
+### 6.4 Phone checklist (one boot of this kernel)
+
+1. **Boot console, before any session.** Does the first fbcon text line touch the top edge, and does the text scroll down to the bottom edge? If yes, the panel shows all 2960 rows while there has been no sleep cycle. If the top ~7 mm is blank already, the cause is on the panel side from S-Boot (go to 4).
+2. **Measure the bars in the session** on a bright wallpaper (pmOS green; on Arch/Kali's black lockscreen nothing shows):
+   - About 2 px at the bottom only: hypothesis 2 (scale 3). Optionally try `[output:DSI-1] scale = 2` or `2.5` in /etc/phosh/phoc.ini.
+   - About 150 rows (about 7 mm, symmetric) at both ends: hypothesis 1 (go to 4).
+   - Bottom only and thicker than 2 px: hypothesis 3 (read `transfers`/`resol` in step 3).
+   - Something else, or bands that follow the content: hypothesis 4 (`win5: ctrl=` in step 3).
+3. **`dmesg | grep geom`**, plus `echo 2 > /sys/module/s9p_decon/parameters/dump_geometry; dmesg | grep geom | tail`, saved to build/linux/runs/. Expected for a full frame: dsim `transfers=00000b90` (2960) and `resol` 0x0b90 in the high half, `bg_size=0b9005a0`, `src_off=00000000`, idma `img_size=0b9005a0`, and DSC `pps04` low half 0x0b90. Any other row count is the cause.
+4. **Self-mask test (live, no reboot):** `echo 1 > /sys/module/s9p_decon/parameters/panel_mask_off` (dmesg: `panel self mask off (7A 00): 0`). If the bars disappear (the corners turn square), hypothesis 1 is confirmed. The fix is then to make it the default, or to upload the vendor mask image after every sleep-out. If nothing changes, it is not the mask; set it back to 0.
+5. **Sleep-cycle test:** `echo 0 > /sys/module/s9p_decon/parameters/panel_sleep`, then press power twice (blank and unblank). If the bars only appeared after unblanks before, and no longer do, the sleep cycle is losing panel state. Keep `panel_sleep=0` until it is fixed; the cost is a dimly lit panel while blanked.
+6. With the session stopped: `modetest -M exynos -s <conn>@<crtc>:1440x2960` (from _tools.img). The pattern has to touch all four edges. If it does, the kernel path is clean and the bars come from the compositor.
