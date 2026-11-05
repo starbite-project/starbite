@@ -7,13 +7,33 @@
 # and checks: no undefined symbols, only R_AARCH64_RELATIVE relocations, the Image header.
 # SB7=path picks the menu v7 asset container (default build/brand/menu7.sb7 of this checkout or of
 # the main checkout); without one the build is skipped (exit 0) so the loader build is unaffected.
+#   sh starbite/engineer/build.sh --repro    build twice (the second into out/repro) and require
+#                                            byte-identical images
+# On a native aarch64 host the build first runs the host unit tests (starbite/tools/unit-test.c)
+# and stops if one fails. ENG_OUT=dir changes the output directory.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 lib="$root/starbite/libsb"
-out="$root/starbite/out"
+out=${ENG_OUT:-"$root/starbite/out"}
 : "${CROSS:=}"
 mkdir -p "$out"
+native=0
+if [ -z "$CROSS" ] && [ "$(uname -m)" = aarch64 ]; then native=1; fi
+
+if [ "${1:-}" = --repro ]; then
+    sh "$0"
+    ENG_OUT="$out/repro" sh "$0"
+    a=$(sha256sum "$out/engineer.img" | cut -d' ' -f1)
+    b=$(sha256sum "$out/repro/engineer.img" | cut -d' ' -f1)
+    if [ "$a" != "$b" ]; then
+        echo "engineer: NOT reproducible: $a vs $b" >&2
+        exit 1
+    fi
+    rm -rf "$out/repro"
+    echo "engineer: reproducible: two builds give $a"
+    exit 0
+fi
 
 SB7=${SB7:-}
 if [ -z "$SB7" ]; then
@@ -26,10 +46,20 @@ if [ -z "$SB7" ] || [ ! -f "$SB7" ]; then
     exit 0
 fi
 python3 "$root/starbite/tools/mkassets.py" "$SB7" "$out/sbassets.sb7"
+echo "engineer: assets from $(basename "$SB7"), sha256 $(sha256sum "$SB7" | cut -d' ' -f1)"
+
+# Host unit tests of the pure logic (string builder, identity map, register policy, write fence,
+# UFS opcode allowlist, key state machine): a failure stops the build.
+if [ "$native" = 1 ]; then
+    gcc -O1 -Wall -Wextra -Werror -Wno-unused-parameter -I"$lib" -I"$here" -o "$out/unit-test" \
+        "$root/starbite/tools/unit-test.c" "$lib/str.c" "$lib/fence.c" "$lib/sbui_input.c" "$lib/mmu.c" \
+        "$here/policy.c"
+    "$out/unit-test"
+fi
 
 CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie -fvisibility=hidden \
 -nostdlib -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-plt -mstrict-align -mcpu=cortex-a55 \
--fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror -I$lib -I$here"
+-fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$here"
 objs=""
 for src in "$lib"/*.c "$lib"/*.S "$here"/*.c; do
     obj="$out/eng_$(basename "$src" | tr . _).o"
@@ -56,9 +86,13 @@ fi
 # What runs before relocation (crt0 -> sb_mmu_enable, sb_reloc_check) must not load an absolute
 # address from data: no `blr`/`br` through a register and no GOT loads. One such call (sb_dcache_all
 # through the GOT) made the first phone boot reset silently.
-for f in sb_mmu_enable sb_reloc_check; do
+for f in sb_mmu_enable sb_reloc_check sb_dcache_all; do
     d=$("${CROSS}objdump" -d --no-show-raw-insn --disassemble="$f" "$out/engineer.elf" 2>/dev/null ||
         "${CROSS}objdump" -d --no-show-raw-insn "$out/engineer.elf" | awk -v f="<$f>:" '$0 ~ f {p=1; next} /^$/ {p=0} p')
+    if ! echo "$d" | grep -E -q '\bret\b'; then
+        echo "engineer: could not disassemble $f (the pre-relocation check would be empty)" >&2
+        exit 1
+    fi
     if echo "$d" | grep -E -q '\b(blr|br)\b|_GLOBAL_OFFSET_TABLE_|:got'; then
         echo "engineer: $f (runs before relocation) has an indirect branch or GOT access:" >&2
         echo "$d" | grep -E '\b(blr|br)\b|_GLOBAL_OFFSET_TABLE_|:got' >&2
@@ -70,8 +104,18 @@ done
 "${CROSS}nm" "$out/engineer.elf" | sort > "$out/engineer.map"
 python3 "$root/starbite/tools/check-image.py" "$out/engineer.bin" "$out/engineer.img" "$out/engineer.map"
 
+# No build-host paths or names in the image (it is shared as a store entry).
+leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/engineer.img" | head -3 || true)
+if [ -n "$leak" ]; then
+    echo "engineer: the image contains build-host paths:" >&2
+    echo "$leak" >&2
+    exit 1
+fi
+
 # The relocation test runs the image's own relocation code on the host (aarch64 only).
-if [ -z "$CROSS" ] && [ "$(uname -m)" = aarch64 ]; then
+if [ "$native" = 1 ]; then
     gcc -O2 -Wall -Wextra -Werror -o "$out/reloc-test" "$root/starbite/tools/reloc-test.c" "$lib/reloc.c"
     "$out/reloc-test" "$out/engineer.img" "$out/engineer.elf" "$out/engineer-at40.bin" "$out/engineer-at40.elf"
 fi
+sha256sum "$out/engineer.img" | sed "s#  .*#  engineer.img#" > "$out/engineer.img.sha256"
+echo "engineer: $(cat "$out/engineer.img.sha256")"

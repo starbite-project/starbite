@@ -1,6 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-only
  * sbui input: keys and touch merged into events (after shim/starlte/em.c ev_wait), with volume
- * auto-repeat, Bixby short / long, drag with release velocity for flings, sideways swipes.
+ * auto-repeat, Bixby short / long, Power short / long, drag with release velocity for flings,
+ * sideways swipes.
+ *
+ * Power selects when it is released within UI_POWER_LONG_MS; held that long it is "back" instead
+ * (EV_BACK, once, nothing on the release). With that, Volume + Power alone reach every page and
+ * leave it again: Bixby and touch are conveniences, not requirements.
  */
 #include "sbui.h"
 
@@ -10,6 +15,8 @@ static unsigned qh, qt;
 static unsigned held, vol_key;
 static uint64_t held_t0, vol_next, bixby_t0, last_input;
 static int bixby_long;
+static uint64_t power_t0;
+static int power_armed;              /* Power went down after the last reset: select or back pending */
 static int t_down, t_mode, t_x0, t_y0, t_lx, t_ly;     /* t_mode: 0 none, 1 drag, 2 swipe */
 static int64_t t_vy;                                    /* px/s, smoothed */
 static uint64_t t_lt;
@@ -47,6 +54,7 @@ void ui_input_reset(void)
     held = sb_keys();       /* keys still down are ignored until released */
     vol_key = 0;
     bixby_long = 1;
+    power_armed = 0;
     t_down = 0;
     t_mode = 0;
     sb_touch_clear();
@@ -78,8 +86,18 @@ static void poll_keys(void)
         vol_key = SB_K_DOWN;
         vol_next = now + 420;
     }
-    if (pressed & SB_K_POWER)
+    if (pressed & SB_K_POWER) {
+        power_t0 = now;
+        power_armed = 1;
+    }
+    if (power_armed && (k & SB_K_POWER) && now - power_t0 >= UI_POWER_LONG_MS) {
+        power_armed = 0;
+        push(EV_BACK, 0, 0, 1);                 /* d = 1: from a long Power */
+    }
+    if (power_armed && (released & SB_K_POWER)) {
+        power_armed = 0;
         push(EV_SELECT, 0, 0, 0);
+    }
     if (pressed & SB_K_BIXBY) {
         bixby_t0 = now;
         bixby_long = 0;

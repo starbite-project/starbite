@@ -2075,3 +2075,11 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     channel >= 8 (PIL's decode of the stock logo has ~22K pixels at 1..7) and padded 8 px, copied raw: 4 bands,
     first frame 0 px differ. Capture result + duration in log slots 116..117; intro7_release unregisters the SB7
     images when the intro ends; capt_free also checks star_info rd_start..rd_end (m7_rd_range).
+- 2026-11-05: **Engineer OS v1.1** (docs/ENGINEER-OS.md sections 11-12). Keys-only navigation: Power selects on
+  release, Power held 0.6 s = back; the Dashboard lists the other tabs (TABS) and "Exit to the boot menu" (also in
+  Tools: clears a stale boot-next, PMU reset normal). Touch / Keys tests leave without Bixby; Brightness asks before
+  the AOR write; RAM test labels = 0xA0100000 + 126 MiB (static asserts keep the window off S-Boot's ECT). Register
+  policy moved to engineer/policy.c. Host checks: tools/unit-test.c (policy sweep, fence never writes, UFS read-only
+  opcodes, key state machine) runs in build.sh; `build.sh --repro`; host preview `tour` opens all 62 pages with
+  Volume + Power only; `sh starbite/host/selfcheck.sh` runs both. engineer.img sha256 c3e2c8d6ca27f739...729e
+  (4169728 bytes). On the phone so far: boots, libsb up, touch works; the rest is host-only.

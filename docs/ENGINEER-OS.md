@@ -9,18 +9,26 @@ menu): the rescue tool that works when the store is broken, and the only one tha
 **v1 writes nothing to storage, and no regulator.** Every change Engineer Lite makes by hand (touch
 rails, card rails, the settings record, a register poke) is a change card here, logged as a dry run.
 
-Status (2026-11-05): built and checked on the host (image header, relocation test, preview frames).
-**Not run on the phone yet.**
+Status (2026-11-05, v1.1): **boots on the phone** from the OS store (libsb comes up, touch works:
+coordinator report after the sb_dcache_all GOT fix). Everything else is checked on the host only
+(unit tests, relocation test, the keys-only tour of every page, preview frames): see section 11 for
+the status of each page and section 12 for the phone checklist.
+
+v1.1 (this change): Volume + Power alone reach and leave every page (hold Power = back, the
+Dashboard's TABS rows switch tabs), a one-step **Exit to the boot menu** (Dashboard and Tools), the
+touch and keys tests can be left without Bixby, the Brightness write asks first, the RAM test labels
+match the real window (0xA0100000, 126 MiB, ECT left alone), the register policy moved to `policy.c`
+and is unit-tested, and the build is reproducible and self-checking.
 
 ## 1. Layout
 
 | Path | What |
 |---|---|
 | `starbite/libsb/` | the core: `crt0.S` (header, entry, self-relocation, vectors, PSCI core stub), `reloc.c`, `mmu.c`, `sys.c` (timer, keys, reset, power off, boot-next, PSCI, probes, arena), `log.c`, `fdt.c`, `acpm.c` (S2MPS18), `hsi2c.c`, `touch.c` (S6SY761), `max77705.c`, `tmu.c` (temperatures, clocks), `ufs.c` / `store.c` / `catalog.c` / `sd.c` (read-only copies of the loader's), `fence.c` (write fence, dry-run), `crash.c`, `sb7.c` + `assets.S` (embedded fonts), sbui (`sbui*.c`) |
-| `starbite/engineer/` | the application: `main.c` (chrome, screens, navigation), `tabs.c`, `pages_em.c` (em.c's pages), `pages_sb.c`, `dash.c`, `tests.c`, `armed.c`, `build.sh`, `preview/*.png` |
-| `starbite/host/` | the host preview (`host.c` fake hardware, `preview.sh`) |
-| `starbite/tools/` | `mkassets.py` (font container), `check-image.py` (header, CRC), `reloc-test.c` |
-| `starbite/out/` | build output (ignored): `engineer.img`, `engineer.elf`, `engineer.map` |
+| `starbite/engineer/` | the application: `main.c` (chrome, screens, navigation), `tabs.c`, `pages_em.c` (em.c's pages), `pages_sb.c`, `dash.c`, `tests.c`, `armed.c`, `policy.c` (register peek / poke policy, pure), `build.sh`, `preview/*.png` |
+| `starbite/host/` | the host preview (`host.c` fake hardware, `preview.sh`, the keys-only `tour`), `selfcheck.sh` |
+| `starbite/tools/` | `mkassets.py` (font container), `check-image.py` (header, CRC, size budget), `reloc-test.c`, `unit-test.c` |
+| `starbite/out/` | build output (ignored): `engineer.img`, `engineer.img.sha256`, `engineer.elf`, `engineer.map` |
 
 ## 2. Build
 
@@ -48,7 +56,44 @@ limactl shell --workdir <checkout> starbite sh starbite/engineer/build.sh     # 
    (tables of function and string pointers, 141663 expected); relocates again at a random address
    and checks every word moved by the delta; checks a corrupted entry is refused.
 
-Output: `starbite/out/engineer.img` (about 4 MB, 361 relocations at the time of writing).
+Also, since v1.1:
+- before anything is compiled for the phone, `tools/unit-test.c` (host, aarch64 VM) tests the pure
+  logic and stops the build on a failure: the string builder and CRC32; `sb_map_kind` (RAM test
+  window non-cacheable end to end, 0xaf800000..0xbfffffff unmapped); the register policy (every CMU
+  block, MIF/INT, PMU, ACPM mailbox and SRAM, fuses and DRAM never pokeable and named as such; an
+  exhaustive 4 KiB sweep of 0..0x20000000 finds exactly the 5 allowlisted pages at tier 1); the
+  write fence on an S9-like GPT (never-touch partitions, tiers, ranges) and that **`sb_write` refuses
+  at every tier** (v1 dry-run); the UFS SCSI allowlist (only TEST UNIT READY, INQUIRY, START STOP,
+  READ(10); 14 write opcodes refused before any register is touched); the key state machine
+  (Power selects on release, held 0.6 s = back once, Bixby short / long, Volume repeat, keys held
+  across a reset ignored). Mutations of the policy, the Power timing and the opcode list were
+  checked to make it fail;
+- `-ffile-prefix-map`, and a scan that refuses an image containing build-host paths
+  (`/Users/`, `/home/`, ...);
+- the pre-relocation check also covers `sb_dcache_all` and fails if a function cannot be
+  disassembled (an empty listing would pass silently);
+- `check-image.py`: at most 32 MiB, at least 96 MiB of arena left below 0xa0000000 when loaded at
+  0x92080000, `sb_vectors` 2 KiB aligned, the entry-path symbols inside the image;
+- `sb.h` static asserts: the RAM test window starts at or above 0xa0100000 (S-Boot's ECT at
+  0xa0000000 is never written) and ends inside the non-cacheable map; the arena ends at 0xa0000000;
+- `out/engineer.img.sha256`, and the asset container's sha256 in the log (it is the one input not
+  in the repository: `build/brand/menu7.sb7`);
+- `sh starbite/engineer/build.sh --repro` builds twice (the second time into another directory)
+  and requires identical images.
+
+Output: `starbite/out/engineer.img` (4.0 MiB, 372 relocations at v1.1).
+
+### 2.1 Host self-checks (no phone)
+
+```sh
+sh starbite/host/selfcheck.sh     # build --repro (unit tests + every image check, twice) + the tour
+sh starbite/host/preview.sh tour  # the keys-only tour alone
+```
+
+The **tour** runs the real application on the host preview and, with Volume and Power only (no
+touch, no Bixby), opens every row of every tab (62 pages; other tabs through the Dashboard's TABS
+rows), checks that each page drew something and that every drawn pixel reached the panel, then
+holds Power four times and checks it is back at the Dashboard. Exit status 0 = all passed.
 
 ## 3. Entry contract (what the loader leaves, what crt0 does)
 
@@ -86,7 +131,10 @@ counted and skipped; anything else shows the crash screen (5x7 font straight to 
 ESR class, ELR / FAR, ELR as image offset for `engineer.map`, all registers, the last log lines; also
 written to pmsg). Keys there: Power = menu, Volume Up = Engineer OS again, Volume Down = power off.
 
-Exit: **Tools > Reboot and power** (menu, Engineer OS again, recovery, download, power off). Starting
+Exit: **Exit to the boot menu** (on the Dashboard under LEAVE, and in Tools): a dialog, then the
+boot-next mailbox is invalidated (a stale key would skip the menu) and the PMU resets with INFORM3
+normal: S-Boot, the loader, its menu. **Tools > Reboot and power** has the other modes (Engineer OS
+again, recovery, download, power off). Starting
 another OS (**Starbite > Start an OS**, the iOS options page) writes the boot-next mailbox at
 0xFED17FE0 (`"SBNEXT2!"` + key[24]) and resets through the PMU (INFORM2 0x12345678, INFORM3 normal,
 SWRESET); the loader starts that entry once without the menu (`shim/starlte/menu.c boot_next`).
@@ -141,21 +189,28 @@ monospace lines, notes, custom items), dialog, hold-Power ring, hold-to-confirm 
 card), toast, line chart. Fonts: menu v7's Inter, Inter Tight and JetBrains Mono at exact sizes, with
 kerning (`SB7ASSET`, embedded); UTF-8 plus the loader font's one-byte codes (catalog strings). No glass.
 
-Keys everywhere: Volume moves (repeats while held), Power selects, short Bixby back, long Bixby the
-tab's root (at a root: the Dashboard). Touch: tap, drag, fling, swipe right = back, the tab bar.
+Keys everywhere: Volume moves (repeats while held), Power selects (on release), **Power held 0.6 s =
+back** (once; nothing on the release), short Bixby back, long Bixby the tab's root (at a root: the
+Dashboard). Without touch, the tab bar is replaced by the Dashboard's **TABS** rows (hold Power at
+any tab's root to come back). Touch: tap, drag, fling, swipe right = back, the tab bar. Every
+modal follows the same keys: dialogs (Volume picks, Power confirms, hold Power cancels), the change
+card (hold Volume Up 1.5 s to slide, hold Power cancels), the tier 2 keypad, the display test
+(Power next, hold Power leaves). Exceptions, because the keys or touch are the thing under test:
+**Touch screen** (Volume or Bixby leaves, short Power clears, hold Power leaves) and **Keys** (hold
+any one key 1.5 s, Bixby 1 s, or tap Back).
 
 ## 6. Pages
 
 | Tab | Pages |
 |---|---|
-| Dashboard | live tiles (A55 MHz, M3 MHz / off, hottest °C, GPU °C + MHz, battery % / V / input, current mA, RAM, uptime), current graph; Device information, SoC and CPU, Memory map (+ the FDT's reserved-memory, live), Reset and boot reason, Battery graph |
-| Tests | Core bring-up test, Memory test (16 MiB or the 128 MiB window, non-cacheable), Memory bandwidth (DRAM and cached), Display test (11 fields, 20 s cap per field), Display panel, Brightness (AOR), Touch screen (10 fingers), Keys, Speed test, Test history |
+| Dashboard | TABS (every other tab, for keys), LEAVE (Exit to the boot menu); live tiles (A55 MHz, M3 MHz / off, hottest °C, GPU °C + MHz, battery % / V / input, current mA, RAM, uptime), current graph; Device information, SoC and CPU, Memory map (+ the FDT's reserved-memory, live), Reset and boot reason, Battery graph |
+| Tests | Core bring-up test, Memory test (16 MiB or the 126 MiB window at 0xA0100000, non-cacheable), Memory bandwidth (DRAM and cached), Display test (11 fields, 20 s cap per field), Display panel, Brightness (AOR, asks once per session), Touch screen (10 fingers), Keys, Speed test, Test history |
 | Power | Battery and charger, Battery graph, PMIC regulators, PMIC register dump, Touch rails (tier 1, dry-run), Reboot and power |
 | Clocks | CPU, Clocks, Temperatures, GPU (Mali-G72), Real-time clock, Timer |
 | Storage | UFS host controller, UFS device and health, Partitions, GPT viewer (both headers, CRCs, fence tier per partition), Sector viewer, Speed test, microSD card, Card store at boot (tier 1, dry-run) |
 | Starbite | OS store, Catalog, Settings record (+ the boot-next mailbox), Start an OS (boot-next), Write fence, Apple, iOS boot options, Android 17, Linux, Windows 11 |
 | Logs | Engineer OS log, Boot log (pmsg), Loader handoff (log page + this image's entry state), Test history, Audit log, Retained records, Kernel command lines, Registers |
-| Tools | Armed mode, Register peek, Reboot and power, Stress / Radio / Installer ("coming"), About |
+| Tools | Armed mode, Register peek, Exit to the boot menu, Reboot and power, Stress / Radio / Installer ("coming"), About |
 
 Every em.c page is there. Differences: BOOT's iOS payload, its boot-args and the UEFI bundle live in
 the loader's RAM (shown as such; iOS options are decoded from the catalog's command lines); the intro
@@ -178,7 +233,7 @@ seeded values; PMIC, fuel gauge (a moving current), touch, UFS (a GPT like S9 #1
 catalog from `catalog.toml`) and card are fakes; EL1 system register reads are emulated. A script of key
 presses and taps runs on a fake clock. Every shot prints how many panel pixels differ from the back
 buffer (0 = the dirty rectangles covered every change); `S:` shots also redraw the scrolled page whole
-and compare (0 = incremental scrolling is exact). All 25 scenes report 0 and 0.
+and compare (0 = incremental scrolling is exact). All 26 scenes report 0 and 0 (`hub`: the Dashboard's TABS rows, new in v1.1).
 
 ## 8. Armed mode (EN3, dry-run)
 
@@ -214,8 +269,8 @@ fuses, storage (ufs.c sends read opcodes only; sd.c never writes; there is no se
 
 ## 10. Untested and risky (first boot checklist)
 
-- Nothing has run on the phone. First boot: `tools/store/boot-next.sh engineer`, then pull pmsg:
-  every `eng:` line (base, fdt, relocs) and any `CRASH` line with ELR as an image offset.
+- First boot done (boots, libsb up, touch works). On any problem: pull pmsg, every `eng:` line
+  (base, fdt, relocs) and any `CRASH` line with ELR as an image offset (`engineer.map`).
 - The MMU attributes (MAIR / TCR as the loader's) and the unmapped 0xaf800000..0xbfffffff hole.
 - The touch controller re-init without CMU writes (needs the loader's menu to have started touch);
   without it Engineer OS is keys-only.
@@ -225,3 +280,68 @@ fuses, storage (ufs.c sends read opcodes only; sd.c never writes; there is no se
 - Frame rate on the A55: not measured. A scroll frame moves the viewport (~13.7 MB) in write-back RAM
   and copies it to the write-combined panel; the host preview proves which pixels change, not how fast.
 - The menu7.c Lab change is built (loader and the menu7 preview `h7` compile) but not exercised.
+
+## 11. Status per page and test (v1.1)
+
+"HW" = seen working on the phone; "host" = built, drawn and navigated in the host preview and the
+keys-only tour (fake hardware), not yet looked at on the phone. Writes: what the page itself writes
+beyond reads (section 9); "dry-run" = only a change card and a log line.
+
+| Page / test | Status | Writes |
+|---|---|---|
+| Start-up, relocation, MMU, crash vectors | **HW** (boots, libsb up) | - |
+| Touch input (taps, scroll, tab bar) | **HW** (touch works) | - |
+| Keys-only navigation (hold Power = back, TABS rows) | host (tour: 62 pages) | - |
+| Exit to the boot menu | host | boot-next mailbox cleared, PMU reset |
+| Dashboard tiles, current graph | host | - |
+| Device information, SoC and CPU, Memory map, Reset and boot reason | host | - |
+| Battery graph, Battery and charger | host | - (MAX77705 reads) |
+| Core bring-up test | host (dialog first) | PSCI CPU_ON / OFF |
+| Memory test 16 MiB / 126 MiB | host | the RAM test window 0xA0100000.. only |
+| Memory bandwidth | host | the RAM test window + an arena buffer |
+| Display test (11 fields, 20 s cap) | host | framebuffer |
+| Display panel | host | - |
+| Brightness | host (asks once per session) | DSIM / panel AOR (S-Boot's command, until the next OS) |
+| Touch screen (10 fingers) | host; touch itself HW | - |
+| Keys | host | - |
+| Speed test (UFS 16 MiB read) | host | vs_hci registers during the test (restored) |
+| Test history (pmsg) | host | pmsg ring |
+| PMIC regulators, PMIC register dump | host | - (ACPM reads) |
+| Touch rails, Card store at boot | host | dry-run |
+| Reboot and power | host | PMU reset / PS_HOLD |
+| CPU, Clocks, Temperatures, GPU, Real-time clock, Timer | host | RTC read latch |
+| UFS host controller, UFS device and health, Partitions, GPT viewer, Sector viewer | host | - (read opcodes only, unit-tested) |
+| microSD card | host | - |
+| OS store, Catalog, Settings record, Write fence | host | dry-run |
+| Start an OS, iOS boot options | host | boot-next mailbox, PMU reset |
+| Apple, Android 17, Linux, Windows 11 | host | - |
+| Logs: Engineer OS log, Boot log, Loader handoff, Audit log, Retained records, Kernel command lines, Registers | host | - |
+| Armed mode (arm, tier 2 keypad, change cards) | host | dry-run (audit + log line) |
+| Register peek | host | poke = dry-run change card |
+| Stress, Radio, Installer | "coming" pages | - |
+| About | host | - |
+
+## 12. Phone checklist (Engineer OS v1.1)
+
+Start it from the boot menu's Lab row / dock (or `tools/store/boot-next.sh engineer`). Only the
+phone's buttons and screen are needed; tick what works, note what does not:
+
+1. It starts on the **Dashboard**; the tiles (A55 MHz, temperatures, battery %) change every second.
+2. **Keys only**: Volume Down moves the highlight, Power opens the row, **hold Power about 1 s**
+   goes back.
+3. Volume Down to **TABS**, open **Tests** with Power; hold Power: back at the Dashboard. Same for
+   one or two other tabs.
+4. **Touch**: tap the tab bar, scroll a long page (Memory map), swipe right to go back.
+5. Tests > **Keys**: press each of the four keys (each gets a tick), then hold one key 1.5 s to leave.
+6. Tests > **Touch screen**: draw with several fingers; short Power clears; Volume leaves.
+7. Tests > **Display test**: Power steps through the 11 fields; hold Power leaves early.
+8. Tests > **Memory test** > Quick: 16 MiB PASS. (Optional: Whole window, a few seconds.)
+9. Tests > **Speed test**: a MiB/s figure, no error.
+10. Storage > **Partitions** lists the GPT; Starbite > **Catalog** lists the entries.
+11. Tools > **About**: note the FRAMES average and worst copy time (the frame rate on the A55 has
+    never been measured).
+12. **Exit to the boot menu** (bottom of the Dashboard, or Tools), confirm: the phone reboots to the
+    Starbite menu, not straight into an OS.
+
+Anything odd: reboot to TWRP and pull pmsg (`eng:` and `CRASH` lines) before starting another OS
+(Windows clears the ring).

@@ -3,6 +3,7 @@
 #   sh starbite/host/preview.sh            build in the Lima VM, run every scene, PNGs to
 #                                          starbite/engineer/preview/
 #   sh starbite/host/preview.sh SCENE      one scene
+#   sh starbite/host/preview.sh tour       the keys-only tour (every page, checks, no PNGs)
 # The VM compiles the real Engineer OS and sbui sources for aarch64 Linux with starbite/host/host.c
 # underneath (fake hardware, scripted keys and taps on a fake clock); the Mac converts the PPM
 # frames with build/venv's Pillow. Each shot also prints how many panel pixels differ from the
@@ -42,11 +43,18 @@ Image.open(sys.argv[1]).save(sys.argv[2], optimize=True)" "$out/$name.ppm" "$png
     rm -f "$out/$name.ppm"
 }
 
-all="dashboard tests power battery clocks temps storage partitions starbite catalog start logs pmsg tools armed change peek device soc memory history dialog sector gpt keys"
+if [ "${1:-}" = tour ]; then
+    # keys-only tour: every row of every tab opened with Volume + Power, checks only (no PNGs)
+    limactl shell --workdir "$root" starbite "$out/engineer-host" "$out" "$out/catalog.sbc" tour
+    exit $?
+fi
+
+all="dashboard hub tests power battery clocks temps storage partitions starbite catalog start logs pmsg tools armed change peek device soc memory history dialog sector gpt keys"
 want=${1:-$all}
 for s in $want; do
     case $s in
     dashboard) scene dashboard w:90000 ;;
+    hub) scene hub w:800 h:d:1100 w:600 ;;
     tests) scene tests w:800 t:270,2824 w:500 ;;
     power) scene power w:800 t:450,2824 w:500 ;;
     battery) scene battery w:800 t:450,2824 w:400 k:d k:p w:2300 ;;

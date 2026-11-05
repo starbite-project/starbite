@@ -267,7 +267,8 @@ void fill_memory(void)
     ub_size(&u, sb_arena_free());
     ub_s(&u, " free");
     kv_add("Arena to 0x0A0000000", u.b);
-    kv_add("RAM test window", "0x0A0000000 + 128 MiB, non-cacheable");
+    kv_add("RAM test window", "0x0A0100000 + 126 MiB, non-cacheable");
+    kv_addc("Never written", "0x0A0000000 + 1 MiB: S-Boot's ECT (the kernel reads it)", UI_ORANGE);
     kv_add("UFS DMA", "0x0AF000000 + 8 MiB, non-cacheable");
     kv_add("Framebuffer", "0x0CC000000, write-combined");
     kv_add("S-Boot FDT", "0x08A000000 (x0 at entry)");
@@ -500,7 +501,7 @@ static void touch_head(void)
         ub_s(&u, " ch");
         ui_text(F_MONO, 48, 90, u.b, C_STAR);
     }
-    ui_text(F_SMALL, 48, 170, "Draw with up to ten fingers " U_DOT " Power: clear " U_DOT " Bixby: back", C_L2);
+    ui_text(F_SMALL, 48, 170, "Ten fingers " U_DOT " Power: clear " U_DOT " Volume, Bixby or hold Power: back", C_L2);
 }
 
 void test_touch(void)
@@ -510,8 +511,10 @@ void test_touch(void)
         lx[i] = -1;
     if (!sb_tp.ok)
         (void)sb_touch_start();
+    uint64_t pw_t0 = 0;
     ui_guard(0);
     ui_noclip();
+    sb_keys_release_wait();             /* the Power release that opened this page */
     for (int clear = 1;;) {
         if (clear) {
             ui_fill(0, 0, UI_W, UI_H, C_BG);
@@ -523,11 +526,18 @@ void test_touch(void)
             ui_present();
             clear = 0;
         }
+        /* Keys only leave or clear (touch is the thing under test): Volume or Bixby leave, a
+         * short Power clears, Power held UI_POWER_LONG_MS leaves (as "back" everywhere else). */
         unsigned k = sb_keys();
-        if (k & SB_K_BIXBY)
+        if (k & (SB_K_BIXBY | SB_K_UP | SB_K_DOWN))
             break;
         if (k & SB_K_POWER) {
-            sb_keys_release_wait();
+            if (!pw_t0)
+                pw_t0 = sb_ms() | 1U;
+            else if (sb_ms() - pw_t0 >= UI_POWER_LONG_MS)
+                break;
+        } else if (pw_t0) {
+            pw_t0 = 0;
             clear = 1;
             continue;
         }
@@ -589,7 +599,7 @@ static void fill_keys(void)
     unsigned k = sb_keys();
     uint32_t a = *(volatile uint32_t *)0x14050024UL, b = *(volatile uint32_t *)0x14050064UL;
     keys_seen |= k;
-    kv_hdr("LIVE " U_DOT " HOLD BIXBY 1 S OR TAP BACK TO LEAVE");
+    kv_hdr("LIVE " U_DOT " HOLD ANY ONE KEY 1.5 S OR TAP BACK TO LEAVE");
     kv_addc("Volume up   (GPA0-3)", (k & SB_K_UP) ? "PRESSED" : (keys_seen & SB_K_UP) ? "released " U_CHECK : "released",
             (k & SB_K_UP) ? UI_GREEN : UI_TEXT2);
     kv_addc("Volume down (GPA0-4)", (k & SB_K_DOWN) ? "PRESSED" : (keys_seen & SB_K_DOWN) ? "released " U_CHECK : "released",
@@ -615,15 +625,17 @@ void test_keys(void)
     keys_seen = 0;
     unsigned held = 0;
     uint64_t t0 = 0;
+    sb_keys_release_wait();             /* the Power release that opened this page */
     for (;;) {
         eng_build_page(&p, fill_keys);
         ui_present();
+        /* Leave: one key held alone for 1.5 s (Bixby: 1 s), so every key can still be tested. */
         unsigned k = sb_keys();
-        if (k == SB_K_BIXBY) {
-            if (!held)
-                t0 = sb_ticks();
-            held = 1;
-            if (sb_ticks() - t0 > sb_freq())
+        if (k == SB_K_UP || k == SB_K_DOWN || k == SB_K_POWER || k == SB_K_BIXBY) {
+            if (held != k)
+                t0 = sb_ms();
+            held = k;
+            if (sb_ms() - t0 >= (k == SB_K_BIXBY ? 1000U : 1500U))
                 break;
         } else {
             held = 0;
@@ -726,7 +738,7 @@ static void build_ram(void)
 {
     kv_hdr("RUN");
     row_add("Quick: 16 MiB", "about a second", 0);
-    row_add("Whole window: 128 MiB", "0x0A0000000 .. 0x0A8000000, several seconds", 0);
+    row_add("Whole window: 126 MiB", "0x0A0100000 .. 0x0A7F00000, several seconds", 0);
     row_add("Last result", ram_done ? (ram_errors ? "FAIL" : "PASS") : "not run", ram_done ? 0 : R_DIS);
     kv_note("Only the free window libsb maps non-cacheable is tested: this image, its arena and every "
             "carve-out are left alone.");
@@ -3114,7 +3126,14 @@ static void build_bright(void)
 
 static int act_bright(int i)
 {
+    static int asked;
     if (i < 6) {
+        /* The one write on the Tests tab (S-Boot's own AOR command, RAM in the panel, gone at the
+         * next OS start): asked once per session. */
+        if (!asked && !dialog("Brightness", "Send the AOR command to the panel?",
+                              "S-Boot's own command; lasts until an OS starts.", "SEND"))
+            return 0;
+        asked = 1;
         bright_msg = panel_set_aor(bright_aor(i)) ? -1 : 1;
     } else if (i == 6) {
         bright_idn = panel_read_id(bright_id);
@@ -3163,8 +3182,24 @@ static void build_reboot(void)
     row_add("Power off", "PS_HOLD low (with a cable: reboots)", 0);
 }
 
+void eng_exit_to_menu(void)
+{
+    if (!dialog("Exit Engineer OS", "Reboot to the Starbite boot menu?",
+                armed_tier() ? "Armed mode ends with the reboot." : "Test history stays in the pmsg ring.",
+                "EXIT"))
+        return;
+    audit_line("exit: reboot to the boot menu");
+    big_message("Rebooting" UI_ELLIPSIS, "to the Starbite boot menu", C_STAR);
+    sb_boot_next_clear();               /* a stale boot-next would skip the menu */
+    sb_reboot(SB_INFORM_NORMAL);
+}
+
 static int act_reboot(int i)
 {
+    if (i == 0) {
+        eng_exit_to_menu();
+        return 0;
+    }
     if (i == 4) {
         if (dialog("Power off", "Turn the phone off now?", 0, "POWER OFF"))
             power_off();
@@ -3215,7 +3250,7 @@ void fill_bw(void)
     ub_dec(&u, bw_rd);
     ub_s(&u, " MiB/s");
     kv_big("DRAM read (non-cacheable, 64-bit)", u.b);
-    kv_hdr("DRAM: 16 MIB AT 0x0A0000000, NON-CACHEABLE");
+    kv_hdr("DRAM: 16 MIB AT 0x0A0100000, NON-CACHEABLE");
     kv_mibs("Write", bw_wr);
     kv_mibs("Read", bw_rd);
     kv_mibs("Copy (8 MiB)", bw_cp);

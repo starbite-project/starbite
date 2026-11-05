@@ -2,10 +2,11 @@
  * Engineer OS: start-up, the chrome (status bar, header, tab bar), the screens of eng.h, the tab
  * roots and the navigation between them.
  *
- * Keys: Volume moves, Power selects, short Bixby goes back, long Bixby goes to the tab's root (at
- * a root: the Dashboard). Touch: tap, drag and fling to scroll, swipe right to go back, the tab bar
- * switches tabs. Leaving Engineer OS is a reboot (Tools > Reboot and power), the loader's menu
- * comes back.
+ * Keys: Volume moves, Power selects (on release), Power held 0.6 s or short Bixby goes back, long
+ * Bixby goes to the tab's root (at a root: the Dashboard). The Dashboard lists the other tabs as
+ * rows, so Volume + Power alone reach every page. Touch: tap, drag and fling to scroll, swipe
+ * right to go back, the tab bar switches tabs. Leaving Engineer OS is a reboot (Dashboard or
+ * Tools > Exit to the boot menu; Tools > Reboot and power for the other modes).
  */
 #include "eng.h"
 
@@ -14,6 +15,11 @@ int cur_tab;
 const char *const tab_label[NTABS] = { "Home", "Tests", "Power", "Clocks", "Storage", "Starbite", "Logs", "Tools" };
 static const char *const tab_title[NTABS] = { "Dashboard", "Tests", "Power", "Clocks", "Storage", "Starbite",
                                               "Logs", "Tools" };
+
+const char *tab_title_of(int t)
+{
+    return t >= 0 && t < NTABS ? tab_title[t] : "";
+}
 
 /* ---- status bar --------------------------------------------------------------------------------- */
 
