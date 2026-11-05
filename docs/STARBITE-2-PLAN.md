@@ -43,7 +43,8 @@ redo** (it lags; better icons).
    into a ramdisk that asks for a **Starbite rescue USB disk** (made by the installer).
 7. **Starbite Installer**, last: a script on Linux or the Mac opens the installer, which asks you to confirm an
    unlocked bootloader and a microSD of at least 64 GB, then does everything until the phone matches the main
-   Starbite S9, every OS working.
+   Starbite S9, every OS working. **No user password or passcode set on any OS** (it would only confuse);
+   where an OS insists on an account, log in automatically.
 
 ## 1. Where things stand
 
