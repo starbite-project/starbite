@@ -38,6 +38,16 @@ cgroup v1 cpuset/memory and CFS bandwidth (ui-pre-start), xt_owner, hidraw. No `
 6. logo forever: ui pre-start exit 2 (cpu.cfs_quota_us) -> kernel cgroup options.
 7. black: Chrome runs OOBE, but no scanout buffer (minigbm on Panfrost's render node, Mesa swrast without DRM),
    GPU process gave up after 6 crashes -> render node override + Mesa kms_swrast on the DECON.
+8. sheared logo: kms_swrast rows are 1472 px, the DECON fetched 1440 -> s9p-decon honours the pitch (6c).
+9-10. logo stays (Chrome's copy of it): every ADDFB2 refused, AR24 unsupported -> s9p-decon takes ARGB8888 (6d).
+11. **welcome screen (CR1)**, 2026-11-05: OOBE "Welcome to your Chrome device", touch, on-screen keyboard, Wi-Fi
+    scan (real networks listed), clock. Software rendering: regions that don't refresh (stale patches), slow, hot.
+    Banner: Google API keys missing (no user can be added; Browse as Guest works without them).
+
+## API keys (the user's own, never committed)
+GOOGLE_API_KEY / GOOGLE_DEFAULT_CLIENT_ID / GOOGLE_DEFAULT_CLIENT_SECRET as lines in /etc/chrome_dev.conf (room
+there for a same-length edit: ~2 KB of comment lines). Google account sign-in on Chromium builds also needs the
+account in google-browser-signin-testaccounts@chromium.org (chromium.org/developers/how-tos/api-keys).
 
 ## Next
 CR2: Mesa Panfrost (kmsro with the DECON) and minigbm on Panfrost for GPU acceleration; then login, Wi-Fi, touch.
