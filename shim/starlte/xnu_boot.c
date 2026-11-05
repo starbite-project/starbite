@@ -19,6 +19,8 @@
 #include "mmu.h"
 #include "store.h"
 #include "catalog.h"
+#include "fastboot.h"
+#include "ramboot.h"
 
 void star_intro_splash(void);   /* anim.c */
 
@@ -1314,6 +1316,13 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
         cmdline[i] = boot_p ? boot_p->cmdline[i] : 0;
     cmdline[BOOT_LINE_LENGTH - 1] = 0;
     (void)cat_load();
+    /* Loader fastboot (FB1, fastboot_dev.c, docs/USB-FASTBOOT.md): Volume Up held, or boot-next
+     * "fastboot". `fastboot boot` starts its image from here; `fastboot continue`: the menu. */
+    {
+        uintptr_t fb = fastboot_hook();
+        if (fb)
+            return fb;
+    }
     /* The boot menu (and Starbite Engineer) on the branded screen; XNU RAM is still free here,
      * for Engineer's RAM test. A start that fails comes back to the menu. Unbranded: iOS. */
     for (;;) {
@@ -1327,4 +1336,163 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
             return fatal(log, 0, 0);
         star_menu_failed(cat_get((unsigned)(pick - 1))->name, boot_why);
     }
+}
+
+/*
+ * ---- Loader fastboot: an image already in RAM (ramboot.h, fastboot_dev.c) --------------------
+ * `fastboot boot` puts the image in STAGE (the download buffer); this places it exactly as the
+ * catalog's start path for its method would after loading it from the store, and leaves the
+ * same handoff state (log[10] method code, log[15] entry, log[17] x0). XNU goes through the
+ * same xnu_enter; the other methods repeat the few placement steps of boot_linux / boot_android
+ * / boot_bare / boot_uefi, so those functions stay untouched.
+ */
+_Static_assert(STAR_RAM_DL == STAGE && STAR_RAM_DL_END == STAGE_END, "fastboot buffer is STAGE");
+
+static uintptr_t ram_kernel(volatile uint64_t *log, const struct star_ram *r, uintptr_t limit,
+    int64_t step, uint64_t *span)
+{
+    if (r->kernel_size < 64 || (r->kernel & 7) || *(volatile uint32_t *)(r->kernel + 56) != 0x644d5241U)
+        return fail(log, step, "NOT AN ARM64 IMAGE");
+    uint64_t text_offset = *(volatile uint64_t *)(r->kernel + 8);
+    uint64_t image_size = *(volatile uint64_t *)(r->kernel + 16);
+    if (image_size < r->kernel_size)
+        image_size = r->kernel_size;
+    uintptr_t dst = LINUX_BASE + text_offset;
+    if (text_offset >= (2UL << 20) || image_size > limit - dst)
+        return fail(log, step - 1, "KERNEL TOO LARGE");
+    star_fb_hex(2, "KERNEL AT", dst);
+    copy_bytes(dst, r->kernel, r->kernel_size);
+    *span = image_size;
+    return dst;
+}
+
+static uintptr_t ram_handoff(volatile uint64_t *log, uint64_t code, uintptr_t entry, uintptr_t x0)
+{
+    log[10] = code;
+    log[15] = entry;
+    log[17] = x0;
+    clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+    __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
+    return entry;
+}
+
+static uintptr_t ram_start(volatile uint64_t *log, const struct star_ram *r, uintptr_t fdt)
+{
+    static char cmd[BOOT_LINE_LENGTH];
+    uint64_t span;
+    uintptr_t dst;
+    boot_why = 0;
+    star_fb_text(1, "FASTBOOT: STARTING IMAGE");
+    if (r->method == M_XNU) {
+        const struct payload *p = (const struct payload *)r->kernel;
+        const char *bad = (r->kernel & 7) ? "PAYLOAD NOT ALIGNED" : payload_bad(p, r->kernel_size);
+        if (bad)
+            return fail(log, -71, bad);
+        if (r->kernel + r->kernel_size > RAM_BASE)
+            return fail(log, -71, "PAYLOAD OVER THE XNU WINDOW");
+        for (unsigned i = 0; i < BOOT_LINE_LENGTH; ++i)
+            cmd[i] = p->cmdline[i];
+        cmd[BOOT_LINE_LENGTH - 1] = 0;
+        line_append(cmd, BOOT_LINE_LENGTH, r->cmdline);
+        return xnu_enter(log, p, r->kernel, r->kernel_size, cmd);
+    }
+    if (r->method == M_UEFI) {
+        uint64_t size = r->kernel_size;
+        if (size < 64 || STAGE + size > UEFI_FD)
+            return fail(log, -72, "UEFI IMAGE TOO LARGE");
+        if (r->kernel != STAGE)
+            copy_bytes(STAGE, r->kernel, size);       /* down to STAGE: ascending, overlap-safe */
+        if (*(volatile uint32_t *)(STAGE + 56) != 0x644d5241U)
+            return fail(log, -72, "BAD WINDOWS UEFI");
+        ((volatile uint32_t *)PMSG_BASE)[0] = 0;
+        pmsg_put("STARBITE: fastboot entering UEFI at ");
+        pmsg_hex(STAGE);
+        pmsg_put(" size ");
+        pmsg_hex(size);
+        pmsg_put(" fdt ");
+        pmsg_hex(fdt);
+        pmsg_put("\n");
+        zero_bytes(UEFI_LATCH_PAGE, UEFI_LATCH_END - UEFI_LATCH_PAGE);
+        clean_bytes(UEFI_LATCH_PAGE, UEFI_LATCH_END);
+        star_rwd1_arm();
+        star_fb_restore((uint32_t)log[77]);
+        return ram_handoff(log, 0x200, STAGE, fdt);
+    }
+    if (r->method == M_LINUX) {
+        uint64_t dtb_size = r->dtb_size;
+        if (!dtb_size)
+            return fail(log, -73, "NO DTB: FASTBOOT --DTB X --HEADER-VERSION 2");
+        if (dtb_size > (2UL << 20))
+            return fail(log, -73, "LINUX DTB TOO LARGE");
+        if (r->cmdline && r->cmdline[0]) {
+            dtb_size = fdt_copy_append_bootargs(r->dtb, LINUX_DTB, (uint32_t)(UFS_DMA - LINUX_DTB), r->cmdline);
+            if (!dtb_size)
+                return fail(log, -74, "LINUX DTB HAS NO BOOTARGS");
+        } else {
+            copy_bytes(LINUX_DTB, r->dtb, dtb_size);
+        }
+        uint64_t now;
+        if (em_rtc_epoch(&now))
+            (void)fdt_chosen_set_u64(LINUX_DTB, "starbite,rtc-epoch", now);
+        if (r->ramdisk_size) {
+            if (r->ramdisk_size > EDIT_FDT - OS_RD)
+                return fail(log, -75, "INITRD TOO LARGE");
+            copy_bytes(OS_RD, r->ramdisk, r->ramdisk_size);
+            if (!fdt_chosen_set_u64(LINUX_DTB, "linux,initrd-start", OS_RD) ||
+                !fdt_chosen_set_u64(LINUX_DTB, "linux,initrd-end", OS_RD + r->ramdisk_size))
+                return fail(log, -75, "LINUX DTB HAS NO INITRD PROPERTIES");
+        }
+        uint8_t l31 = 0, l2 = 0;
+        int rails = hw_sd_rails(&l31, &l2);
+        star_fb_text(3, rails > 0 ? "MICROSD POWER ON" : rails == 0 ? "MICROSD POWER REFUSED" : "MICROSD POWER: NO ACPM");
+        log[18] = (uint64_t)l31 << 8 | l2;
+        dst = ram_kernel(log, r, OS_RD, -76, &span);
+        if (!dst)
+            return 0;
+        clean_bytes(dst, dst + span);
+        clean_bytes(LINUX_DTB, LINUX_DTB + dtb_size);
+        return ram_handoff(log, 0x400, dst, LINUX_DTB);
+    }
+    if (r->method == M_ANDROID) {
+        if (!r->ramdisk_size)
+            return fail(log, -77, "ANDROID NEEDS A RAMDISK");
+        if (r->ramdisk_size > EDIT_FDT - OS_RD)
+            return fail(log, -77, "ANDROID RAMDISK TOO LARGE");
+        copy_bytes(OS_RD, r->ramdisk, r->ramdisk_size);
+        dst = ram_kernel(log, r, OS_RD, -78, &span);
+        if (!dst)
+            return 0;
+        uint32_t total = __builtin_bswap32(*(volatile uint32_t *)(fdt + 4));
+        uint32_t fsize = r->cmdline && r->cmdline[0] ?
+            fdt_copy_append_bootargs(fdt, EDIT_FDT, LINUX_DTB - EDIT_FDT, r->cmdline) : 0;
+        if (!fsize) {
+            if ((r->cmdline && r->cmdline[0]) || total > LINUX_DTB - EDIT_FDT)
+                return fail(log, -79, "ANDROID FDT FAILED");
+            copy_bytes(EDIT_FDT, fdt, total);
+            fsize = total;
+        }
+        if (!fdt_chosen_set_u64(EDIT_FDT, "linux,initrd-start", OS_RD) ||
+            !fdt_chosen_set_u64(EDIT_FDT, "linux,initrd-end", OS_RD + r->ramdisk_size))
+            return fail(log, -79, "NO INITRD PROPERTIES IN FDT");
+        clean_bytes(dst, dst + span);
+        clean_bytes(OS_RD, OS_RD + r->ramdisk_size);
+        clean_bytes(EDIT_FDT, EDIT_FDT + fsize);
+        star_fb_restore((uint32_t)log[77]);
+        return ram_handoff(log, 0x500, dst, EDIT_FDT);
+    }
+    if (r->method == M_BARE) {
+        dst = ram_kernel(log, r, OS_RD, -80, &span);
+        if (!dst)
+            return 0;
+        clean_bytes(dst, dst + span);
+        return ram_handoff(log, 0x600, dst, fdt);
+    }
+    return fail(log, -70, "UNKNOWN BOOT METHOD");
+}
+
+uintptr_t star_boot_ram(const struct star_ram *r, uintptr_t fdt, const char **why)
+{
+    uintptr_t e = ram_start((volatile uint64_t *)LOG_BASE, r, fdt);
+    *why = e ? 0 : boot_why;
+    return e;
 }

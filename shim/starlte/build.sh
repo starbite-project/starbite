@@ -59,4 +59,6 @@ PY
 }
 
 image probe probe.S probe.c fbtext.c ../fdt.c
-image xnu_boot xnu_boot.S xnu_boot.c mmu.c anim.c menu.c menu6.c ui.c em.c em_vec.S ufs.c store.c sd.c catalog.c fbtext.c ../fdt.c $V7
+# USB device mode + loader fastboot (docs/USB-FASTBOOT.md)
+USB="usb_dwc3.c usb_phy.c usb_desc.c max77705_muic.c fastboot.c fastboot_dev.c"
+image xnu_boot xnu_boot.S xnu_boot.c mmu.c anim.c menu.c menu6.c ui.c em.c em_vec.S ufs.c store.c sd.c catalog.c fbtext.c ../fdt.c $USB $V7
