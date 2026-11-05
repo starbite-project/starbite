@@ -4114,7 +4114,7 @@ static void log_put(unsigned slot, uint64_t v)
 static struct { uint32_t menu_frames, menu_worst, expand_worst, launch_worst, intro_frames, intro_worst, flags; } ST;
 
 /* One line in the pmsg ring (TWRP: /sys/fs/pstore/pmsg-ramoops-0 after the next reboot): why v7
- * stopped or what it picked, the bake, and log slots 119..138. The log page itself is not readable
+ * stopped or what it picked, the bake, and log slots 119..139. The log page itself is not readable
  * from TWRP or Linux. */
 #ifndef M7_PREVIEW
 void star_pmsg(const char *s);
@@ -4186,8 +4186,10 @@ void m7_report(const char *why)
     uint64_t sc;
     __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sc));
     log_put(144, sc);
-    /* glass.c's phase totals (glass.c PROF: 0 setup, 1 base glass, 2 base items, 3 frozen, 4 over
-     * glass, 5 over items, 6 edge, 7 present, 8 freeze, 9 idle; ticks -> ms), slots 145..156 */
+    /* glass.c's phase totals (glass.c PROF: 0 setup (diff, the shift), 1 base glass, 2 base items
+     * (the freeze only), 3 frozen crossfade, 4 over glass (and the curtain), 5, 6 unused, 7 present
+     * (the 2x, the content items, the edge), 8 freeze, 9 the intro's wallpaper; ticks -> ms;
+     * 10, 11 rows shifted / shaded again, counts), slots 145..156 */
     extern uint64_t g7_prof[12];
     rep_str(b, &n, " prof_ms");
     for (int k = 0; k < 12; ++k) {
@@ -4199,7 +4201,7 @@ void m7_report(const char *why)
     rep_str(b, &n, " sctlr ");
     rep_hex(b, &n, sc);
     rep_str(b, &n, " slots");
-    for (unsigned k = 119; k <= 138 && n < 990 - 20; ++k) {
+    for (unsigned k = 119; k <= 139 && n < 990 - 20; ++k) {
         rep_str(b, &n, " ");
         rep_hex(b, &n, ((volatile uint64_t *)M7_LOG)[k]);
     }
@@ -4231,9 +4233,13 @@ static void stats_log(void)
  * the main loop (doc 4.2.3)
  * ============================================================================================== */
 
-/* per-class frame statistics: log slots 128 + class */
+/* per-class frame statistics: log slots 128 + class, frames << 48 | worst ms << 32 | total ms (the
+ * total kept in us: no per-frame rounding). Slot 139: the renderer's stamp M7_RSTAMP << 32 | the
+ * panel pixels presented so far / 1024 (with slots 128.. and 152 (present ms), ms per Mpx). */
+#define M7_RSTAMP 0x4d563401ULL      /* "MV4", 1: canvas 720 x 1480, 2x present, items at panel resolution */
 int m7_phase_last;
-static struct { uint32_t n, worst, total; } PHS[M7_PH_N];
+static struct { uint32_t n, worst; uint64_t total_us; } PHS[M7_PH_N];
+static uint64_t px_total;
 static int phase_sync = -1;          /* menu7_progress / menu7_handoff frames */
 
 uint32_t m7_frame_timed(const struct g7_frame *f, int ph)
@@ -4245,13 +4251,18 @@ uint32_t m7_frame_timed(const struct g7_frame *f, int ph)
     uint32_t px = g7_frame(f);
     if (!px)
         return 0;
-    uint32_t ms = (uint32_t)((m7_now_us() - t0 + 500) / 1000);
+    uint64_t us = m7_now_us() - t0;
+    uint32_t ms = (uint32_t)((us + 500) / 1000);
     PHS[ph].n++;
-    PHS[ph].total += ms;
+    PHS[ph].total_us += us;
     if (ms > PHS[ph].worst)
         PHS[ph].worst = ms;
+    uint64_t tot = (PHS[ph].total_us + 500) / 1000;
     log_put(128U + (unsigned)ph, (uint64_t)(PHS[ph].n > 0xffffU ? 0xffffU : PHS[ph].n) << 48 |
-                                     (uint64_t)(PHS[ph].worst > 0xffffU ? 0xffffU : PHS[ph].worst) << 32 | PHS[ph].total);
+                                     (uint64_t)(PHS[ph].worst > 0xffffU ? 0xffffU : PHS[ph].worst) << 32 |
+                                     (tot > 0xffffffffULL ? 0xffffffffULL : tot));
+    px_total += px;
+    log_put(139, M7_RSTAMP << 32 | ((px_total >> 10) & 0xffffffffULL));
     return px;
 }
 
