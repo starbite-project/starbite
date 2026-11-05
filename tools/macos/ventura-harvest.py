@@ -28,19 +28,19 @@ att = lambda img, mnt, *o: subprocess.run(['hdiutil', 'attach', '-nobrowse', *o,
                                            'diskimage-class=CRawDiskImage', img], check=True, capture_output=True)
 cvo = cv + '-owners'
 os.makedirs(cvo, exist_ok=True)
-att(clone, cvo, '-readonly', '-owners', 'on')
-# read as anyone (owners off) to copy; real owners from the owners-on mount where readable, else the
-# nearest readable parent's (a cache tree belongs to one daemon)
-st_owner = {}
-for p in paths:
-    q = p
+clone2 = clone + '2'
+subprocess.run(['cp', '-c', clone, clone2], check=True)
+att(clone2, cvo, '-readonly', '-owners', 'on')     # real owners (where the directory can be read)
+att(clone, cv, '-readonly')                        # contents (owners off: everything readable)
+def owner_of(path):
+    # the item's own owner if the owners-on mount lets us lstat it, else its nearest such ancestor's
+    q = path
     while q not in ('', '/'):
         try:
-            st = os.lstat(cvo + q); st_owner[p] = (st.st_uid, st.st_gid); break
+            st = os.lstat(cvo + q); return st.st_uid, st.st_gid
         except OSError:
             q = os.path.dirname(q)
-subprocess.run(['hdiutil', 'detach', cvo], capture_output=True)
-att(clone, cv, '-readonly')
+    return 0, 0
 att(IMG, rw)
 own = json.load(open(OWNERS))
 n = 0
@@ -56,13 +56,15 @@ try:
             for name in [''] + dns + fns:
                 full = os.path.join(dp, name) if name else dp
                 st = os.lstat(full)
-                uid, gid = st_owner.get(p, (0, 0))
+                uid, gid = owner_of(full[len(cv):])
                 own[full[len(cv):]] = [uid, gid, st.st_mode & 0o7777]
                 n += 1
         print('kept', p)
 finally:
     subprocess.run(['hdiutil', 'detach', rw], capture_output=True)
     subprocess.run(['hdiutil', 'detach', cv], capture_output=True)
+    subprocess.run(['hdiutil', 'detach', cvo], capture_output=True)
     os.unlink(clone)
+    os.unlink(clone2)
 json.dump(own, open(OWNERS, 'w'))
 print(f'{n} items with their owners -> {OWNERS}')
