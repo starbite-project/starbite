@@ -690,14 +690,13 @@ static void row_at(const uint32_t *T, int tw, int th, int pp, int ten, float py,
  * grid's fixed weights, 8 samples a step. A (pp 4): g = 2m at .75 between texels m - 1, m and
  * g = 2m + 1 at .25 between m, m + 1. B (pp 8): g = 4m + j at .625, .875 (m - 1, m), .125, .375 (m, m + 1). */
 static float hrow[3][AW + 16];
-static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float py, int n, int g0, float *rgb)
+static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float py, int n, int g0, float *rgb, int sh)
 {
     float cy = py / (float)pp - .5f;
     int y0 = g_ifloor(cy);
     float fy = cy - (float)y0;
     int ya = y0 < 0 ? 0 : y0 >= th ? th - 1 : y0, yb = y0 + 1 < 0 ? 0 : y0 + 1 >= th ? th - 1 : y0 + 1;
     const uint32_t *A = T + ya * tw, *B = T + yb * tw;
-    int sh = pp == 4 ? 1 : 2;                       /* grid samples per texel: 2 or 4 */
     int t0 = (g0 >> sh) - 1, t1 = ((g0 + n - 1) >> sh) + 2;    /* texels t0 .. t1 */
     int nt = t1 - t0 + 1;
     const float32x4_t vfy = vdupq_n_f32(fy), k10 = vdupq_n_f32(1.f / 1023.f), k8 = vdupq_n_f32(1.f / 255.f);
@@ -748,14 +747,14 @@ static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float p
 #define BCP ((uint32_t *)(G7_SHARP + 0x840000UL))
 _Static_assert(0x840000UL + 4UL * CW * CH <= G7_BASE - G7_SHARP, "canvas frost planes overflow G7_SHARP");
 static uint8_t PROW[2][CH];         /* the plane's row is built (gw_blur clears it) */
-static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float py, int n, int g0, float *rgb);
+static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float py, int n, int g0, float *rgb, int sh);
 static float PRT[3 * CW];
 static void plane_build(int p, int j)
 {
     if (p)
-        row_half(TEX(P_B), BW, BH, 8, 0, 2.f * (float)j + 1.f, CW, 0, PRT);
+        row_half(TEX(P_B), BW, BH, 8, 0, 2.f * (float)j + 1.f, CW, 0, PRT, 2);
     else
-        row_half(TEX(P_A5), AW, AH, 4, 1, 2.f * (float)j + 1.f, CW, 0, PRT);
+        row_half(TEX(P_A5), AW, AH, 4, 1, 2.f * (float)j + 1.f, CW, 0, PRT, 1);
     uint32_t *d = (p ? BCP : A5C) + (unsigned)j * CW;
     const float32x4_t k = vdupq_n_f32(1023.f), h = vdupq_n_f32(.5f), z = vdupq_n_f32(0.f), o = vdupq_n_f32(1.f);
     for (int i = 0; i < CW; i += 4) {
@@ -808,6 +807,34 @@ static inline int plane_at(float py, int g0, int n, int *j)
     *j = ci;
     return 1;
 }
+/* the quarter grid (panel x = 4g + 2): A5's texels themselves (4 px each), B at 2 samples a texel
+ * (the half grid's pattern for A) */
+static inline int quarter_grid(float px0, float dpx, int n, int *g0)
+{
+    if (dpx != 4.f || n > AW + 8)
+        return 0;
+    float g = (px0 - 2.f) * .25f;
+    int gi = (int)g;
+    if ((float)gi != g || gi < -4)
+        return 0;
+    *g0 = gi;
+    return 1;
+}
+static void a5_quarter(float py, int n, int g0, float *rgb)
+{
+    float cy = py * .25f - .5f;
+    int y0 = g_ifloor(cy);
+    float fy = cy - (float)y0;
+    int ya = y0 < 0 ? 0 : y0 >= AH ? AH - 1 : y0, yb = y0 + 1 < 0 ? 0 : y0 + 1 >= AH ? AH - 1 : y0 + 1;
+    const uint32_t *A = TEX(P_A5) + ya * AW, *B = TEX(P_A5) + yb * AW;
+    for (int i = 0; i < n; i++) {
+        int t = g0 + i, tc = t < 0 ? 0 : t >= AW ? AW - 1 : t;
+        uint32_t a = A[tc], b = B[tc];
+        rgb[3 * i] = UNP10_R(a) + (UNP10_R(b) - UNP10_R(a)) * fy;
+        rgb[3 * i + 1] = UNP10_G(a) + (UNP10_G(b) - UNP10_G(a)) * fy;
+        rgb[3 * i + 2] = UNP10_B(a) + (UNP10_B(b) - UNP10_B(a)) * fy;
+    }
+}
 static inline int half_grid(float px0, float dpx, int n, int *g0)
 {
     if (dpx != 2.f || n > 2 * AW + 8)
@@ -825,7 +852,9 @@ void gw_row_a5_at(float py, int n, float px0, float dpx, float *rgb)
     if (half_grid(px0, dpx, n, &g0) && plane_at(py, g0, n, &j))
         plane_row(0, j, g0, n, rgb);
     else if (half_grid(px0, dpx, n, &g0))
-        row_half(TEX(P_A5), AW, AH, 4, 1, py, n, g0, rgb);
+        row_half(TEX(P_A5), AW, AH, 4, 1, py, n, g0, rgb, 1);
+    else if (quarter_grid(px0, dpx, n, &g0))
+        a5_quarter(py, n, g0, rgb);
     else
         row_at(TEX(P_A5), AW, AH, 4, 1, py, n, px0, dpx, rgb);
 }
@@ -835,7 +864,9 @@ void gw_row_b_at(float py, int n, float px0, float dpx, float *rgb)
     if (half_grid(px0, dpx, n, &g0) && plane_at(py, g0, n, &j))
         plane_row(1, j, g0, n, rgb);
     else if (half_grid(px0, dpx, n, &g0))
-        row_half(TEX(P_B), BW, BH, 8, 0, py, n, g0, rgb);
+        row_half(TEX(P_B), BW, BH, 8, 0, py, n, g0, rgb, 2);
+    else if (quarter_grid(px0, dpx, n, &g0))
+        row_half(TEX(P_B), BW, BH, 8, 0, py, n, g0, rgb, 1);
     else
         row_at(TEX(P_B), BW, BH, 8, 0, py, n, px0, dpx, rgb);
 }
@@ -843,7 +874,7 @@ void gw_row_a_at(float py, int n, float px0, float dpx, float *rgb)
 {
     int g0;
     if (half_grid(px0, dpx, n, &g0))
-        row_half(TEX(P_A), AW, AH, 4, 0, py, n, g0, rgb);
+        row_half(TEX(P_A), AW, AH, 4, 0, py, n, g0, rgb, 1);
     else
         row_at(TEX(P_A), AW, AH, 4, 0, py, n, px0, dpx, rgb);
 }

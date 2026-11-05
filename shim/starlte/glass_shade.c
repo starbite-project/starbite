@@ -146,11 +146,14 @@ static void gt_keep(struct gsh *s)
 
 void gs_prepare(int layer, const struct g7_shape *in, unsigned n, const struct gs_ctx *c, float zoom)
 {
-    int G = layer == GS_SOFT ? 4 : layer > GS_SOFT ? 2 : 1;     /* the soft base: the quarter grid (freeze) */
+    /* the soft base (freeze) and the motion sets: the quarter grid */
+    int G = layer == GS_SOFT || layer >= GS_QB ? 4 : layer > GS_SOFT ? 2 : 1;
     /* the half-resolution grid at the panel's uniforms takes the concept's own canvas scale (K 2,
      * its canvas runs at .4625 of the panel): aa 2.5 px, the rim falloff 2.2 px, one grid step of
      * anti-aliasing, so the bilinear upsample has no stairs */
     float K = G >= 2 && c->K < 2.f ? 2.f : c->K;
+    if (layer >= GS_QB && K < 4.f)
+        K = 4.f;                    /* one quarter-grid step of anti-aliasing: no stairs in the 2x */
     GRID[layer] = G;
     LIT[layer] = 1.f - c->soft * .85f;
     RIMK[layer] = g_max(2.f, K * 1.1f);
@@ -250,8 +253,9 @@ void gs_prepare(int layer, const struct g7_shape *in, unsigned n, const struct g
         if (i1 - i0 > EX_N)
             i1 = i0 + EX_N;
         s->ex0 = i0;
-        s->exn = i1 > i0 ? i1 - i0 : 0;
-        s->ex = (float *)TAB_EX + ((unsigned)layer * G7_MAX_SHAPES + (unsigned)m) * EX_N;
+        s->exn = i1 > i0 && G > 1 ? i1 - i0 : 0;      /* (G 1: never shaded) */
+        unsigned slot = layer == GS_QB ? GS_BASE : layer == GS_QO ? GS_OVER : (unsigned)layer;
+        s->ex = (float *)TAB_EX + (slot * G7_MAX_SHAPES + (unsigned)m) * EX_N;
         for (int q = 0; q < s->exn; q++) {
             float px = ((float)(i0 + q) + .5f) * (float)G, dq = (px - s->spx) * s->sdx;
             s->ex[q] = g_exp(-2.2f * dq * dq);

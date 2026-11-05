@@ -24,6 +24,11 @@
 #endif
 
 #define G7_FB ((uint32_t *)(0xcc000000UL + G7_HOSTOFF))
+/* motion frames whose glass changes over a large area without a shift: shaded on the quarter grid and
+ * drawn exactly at rest (0: always the canvas grid) */
+#ifndef G7_QMOTION
+#define G7_QMOTION 1
+#endif
 /* the canvas (glass_int.h CW x CH) and, after it in G7_CANVAS, the present's band buffer: PB_ROWS
  * panel rows (the 2x scale, then the content items at panel resolution, then the edge) and two
  * canvas rows blended vertically (PVR), padded by a texel each side */
@@ -1233,6 +1238,204 @@ static void base_glass_c(uint32_t *d, int y, int x0, int x1, int s0, int s1, uin
     }
 }
 
+/* the quarter grid (360 x 740): the freeze's soft version, the motion frames */
+#define QW (CW / 2)
+#define QH (CH / 2)
+/* ---- motion frames on the quarter grid ----
+ *
+ * A frame whose glass changes over more than a quarter of the panel without a shift (the intro's
+ * glass arriving, a section opening, the launch card growing), or whose frozen over glass moves,
+ * shades those rows on the quarter grid (quarter pixel (a, b) = panel point (4a + 2, 4b + 2), K = 4
+ * uniforms: one grid step of anti-aliasing), C and M bilinear 2x to the canvas (the 1/4 - 3/4
+ * weights, as the canvas to the panel). Those rows are marked (GAPX base, OAPX over) and drawn exactly
+ * once the glass rests, a band per g7_idle. */
+#define QROWS ((struct hrow *)(G7_CANVAS + 0xC60000UL))   /* base [2], over [2] */
+#define QHV ((float (*)[GW / 2 + 8])(QROWS + 4))          /* the two quarter rows blended, planar r g b m */
+#define QA5 ((float *)(QHV + 4))
+#define QB5 (QA5 + 3 * (GW / 2 + 4))
+_Static_assert(0xC60000UL + 4UL * sizeof(struct hrow) + 4UL * (GW / 2 + 8) * 4UL + 6UL * (GW / 2 + 4) * 4UL <=
+               G7_SHARP - G7_CANVAS, "quarter rows overflow G7_CANVAS");
+static int motion_qb, motion_qo;   /* this frame: base rows / the over glass on the quarter grid */
+static void qr_reset(void) { QROWS[0].n = QROWS[1].n = QROWS[2].n = QROWS[3].n = -1; }
+/* quarter row q, quarter columns ia .. ia + n - 1: base (C, M = 1 - AL) or over (C, al with the backdrop) */
+static const struct hrow *qrow(int over, int q, int ia, int n, int s0, int s1, float al0)
+{
+    struct hrow *H = QROWS + 2 * over;
+    for (int k = 0; k < 2; k++)
+        if (H[k].j == q && H[k].ia == ia && H[k].n == n && H[k].s0 == s0 && H[k].s1 == s1)
+            return &H[k];
+    int keep0 = H[0].n == n && H[0].ia == ia && H[0].s0 == s0 && H[0].s1 == s1 && (H[0].j == q - 1 || H[0].j == q + 1);
+    struct hrow *h = &H[keep0 ? 1 : 0];
+    h->j = q;
+    h->ia = ia;
+    h->n = n;
+    h->s0 = s0;
+    h->s1 = s1;
+    float py = 4.f * (float)q + 2.f, px0 = 4.f * (float)ia + 2.f;
+    for (int i = 0; i < n; i++) {
+        h->C[3 * i] = 0.f;
+        h->C[3 * i + 1] = over ? .004f : 0.f;
+        h->C[3 * i + 2] = over ? .014f : 0.f;
+        h->M[i] = over ? al0 : 0.f;
+    }
+    h->empty = 1;
+    int a = 0, b = 0, L = over ? GS_QO : GS_QB;
+    if (s1 > s0 && gs_row_span(L, py, s0, s1, &a, &b)) {
+        h->empty = 0;
+        gw_row_a5_at(py, n, px0, 4.f, QA5);
+        gw_row_b_at(py, n, px0, 4.f, QB5);
+        gs_row(L, over ? &COVER : &CBASE, py, px0, n, h->C, h->M, QA5, QB5, s0, s1);
+    }
+    if (!over)
+        for (int i = 0; i < n; i++)
+            h->M[i] = 1.f - h->M[i];
+    else if (al0 > 0.f)
+        h->empty = 0;
+    return h;
+}
+/* canvas row y, columns [x0, x1): the two quarter rows around it blended into QHV (C x 255 for the
+ * base, C for the over, then M); returns 0 when neither holds glass */
+static int q_vblend(int over, int y, int x0, int x1, int s0, int s1, float al0, int *pia)
+{
+    float cy = (float)y * .5f - .25f;
+    int j0 = g_ifloor(cy);
+    float fy = cy - (float)j0;
+    int ia = ((x0 - 1) >> 1), ib = ((x1 - 2) >> 1) + 1, n = ib - ia + 1;
+    int ja = j0 < 0 ? 0 : j0, jb = j0 + 1 > QH - 1 ? QH - 1 : j0 + 1;
+    const struct hrow *A = qrow(over, ja, ia, n, s0, s1, al0), *B = qrow(over, jb, ia, n, s0, s1, al0);
+    *pia = ia;
+    if (A->empty && B->empty)
+        return 0;
+    const float32x4_t vfy = vdupq_n_f32(fy), kc = vdupq_n_f32(over ? 1.f : 255.f);
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t ma = vld1q_f32(A->M + i), mb = vld1q_f32(B->M + i);
+        vst1q_f32(QHV[3] + i, vfmaq_f32(ma, vsubq_f32(mb, ma), vfy));
+        float32x4x3_t ca = vld3q_f32(A->C + 3 * i), cb = vld3q_f32(B->C + 3 * i);
+        for (int c = 0; c < 3; c++)
+            vst1q_f32(QHV[c] + i, vmulq_f32(vfmaq_f32(ca.val[c], vsubq_f32(cb.val[c], ca.val[c]), vfy), kc));
+    }
+    for (; i < n; i++) {
+        float ma = A->M[i], mb = B->M[i];
+        QHV[3][i] = ma + (mb - ma) * fy;
+        for (int c = 0; c < 3; c++)
+            QHV[c][i] = (A->C[3 * i + c] + (B->C[3 * i + c] - A->C[3 * i + c]) * fy) * (over ? 1.f : 255.f);
+    }
+    for (int c = 0; c < 4; c++)
+        QHV[c][n] = QHV[c][n + 1] = QHV[c][n - 1];
+    return 1;
+}
+/* the 2x of QHV at canvas column x: column 2m from quarter m - 1, m at .25 / .75, 2m + 1 from m, m + 1 */
+static inline float q_at(int c, int x, int ia)
+{
+    int k = ((x - 1) >> 1) - ia;
+    float fx = (x & 1) ? .25f : .75f;
+    return QHV[c][k] + (QHV[c][k + 1] - QHV[c][k]) * fx;
+}
+/* d[0 .. x1 - x0) holds what is below (dithered): the quarter-grid base glass over it, dithered */
+static void base_glass_q(uint32_t *d, int y, int x0, int x1, int s0, int s1, uint8_t *tp)
+{
+    int ia;
+    if (!q_vblend(0, y, x0, x1, s0, s1, 0.f, &ia)) {
+        if (tp)
+            t_fill(tp, x1 - x0);
+        return;
+    }
+    float Y = gs_dither_y(y);
+    int x = x0;
+    for (; x < x1 && (x & 1); x++) {
+        uint32_t v = d[x - x0];
+        float m = q_at(3, x, ia), h = g_dither(x, Y);
+        if (tp)
+            tp[x - x0] = (uint8_t)g_q255(m * 255.f + .5f);
+        d[x - x0] = 0xff000000U | g_q255(q_at(0, x, ia) + m * (float)CR(v) + h) << 16 |
+                    g_q255(q_at(1, x, ia) + m * (float)CG(v) + h) << 8 | g_q255(q_at(2, x, ia) + m * (float)CB(v) + h);
+    }
+    /* 8 canvas pixels a NEON step: x = 2m from quarter m - 1, m at .25 / .75, 2m + 1 from m, m + 1 */
+    const float32x4_t q1 = vdupq_n_f32(.25f), q3 = vdupq_n_f32(.75f), k255 = vdupq_n_f32(255.f), hf = vdupq_n_f32(.5f);
+    for (; x + 8 <= x1; x += 8) {
+        int k = (x >> 1) - 1 - ia;
+        float32x4_t v[4][2], bg[3][2];
+        for (int c = 0; c < 4; c++) {
+            float32x4_t a = vld1q_f32(QHV[c] + k), b = vld1q_f32(QHV[c] + k + 1), e = vld1q_f32(QHV[c] + k + 2);
+            float32x4x2_t z = vzipq_f32(vfmaq_f32(vmulq_f32(a, q1), b, q3), vfmaq_f32(vmulq_f32(b, q3), e, q1));
+            v[c][0] = z.val[0];
+            v[c][1] = z.val[1];
+        }
+        g_unpack8(d + (x - x0), bg);
+        for (int hh = 0; hh < 2; hh++) {
+            float32x4_t h = g_dither4(x + 4 * hh, Y), o[3];
+            for (int c = 0; c < 3; c++)
+                o[c] = vfmaq_f32(vaddq_f32(v[c][hh], h), v[3][hh], bg[c][hh]);
+            vst1q_u32(d + (x - x0) + 4 * hh, g_pack4(o[0], o[1], o[2]));
+        }
+        if (tp) {
+            uint32x4_t t0 = vcvtq_u32_f32(vfmaq_f32(hf, v[3][0], k255)), t1 = vcvtq_u32_f32(vfmaq_f32(hf, v[3][1], k255));
+            vst1_u8(tp + (x - x0), vqmovn_u16(vcombine_u16(vqmovn_u32(t0), vqmovn_u32(t1))));
+        }
+    }
+    for (; x < x1; x++) {
+        uint32_t v = d[x - x0];
+        float m = q_at(3, x, ia), h = g_dither(x, Y);
+        if (tp)
+            tp[x - x0] = (uint8_t)g_q255(m * 255.f + .5f);
+        d[x - x0] = 0xff000000U | g_q255(q_at(0, x, ia) + m * (float)CR(v) + h) << 16 |
+                    g_q255(q_at(1, x, ia) + m * (float)CG(v) + h) << 8 | g_q255(q_at(2, x, ia) + m * (float)CB(v) + h);
+    }
+}
+static inline void over_q_px(uint32_t *d, int x, int ia, float Y)
+{
+    float a = q_at(3, x, ia);
+    if (a <= 0.f)
+        return;
+    float h = (g_dither(x, Y) - .5f) * a, kk = 1.f - a;
+    uint32_t v = *d;
+    float r = g_sat(q_at(0, x, ia)) * a * 255.f + h + (float)CR(v) * kk + .5f;
+    float g = g_sat(q_at(1, x, ia)) * a * 255.f + h + (float)CG(v) * kk + .5f;
+    float b = g_sat(q_at(2, x, ia)) * a * 255.f + h + (float)CB(v) * kk + .5f;
+    *d = 0xff000000U | g_q255(r) << 16 | g_q255(g) << 8 | g_q255(b);
+}
+/* the quarter-grid over glass premultiplied over canvas row y (gs_over_row's arithmetic) */
+static void over_glass_q(uint32_t *d, int y, int x0, int x1, float al0)
+{
+    int ia;
+    if (!q_vblend(1, y, x0, x1, 0, G7_MAX_SHAPES, al0, &ia))
+        return;
+    float Y = gs_dither_y(y);
+    int x = x0;
+    for (; x < x1 && (x & 1); x++)
+        over_q_px(d + (x - x0), x, ia, Y);
+    const float32x4_t q1 = vdupq_n_f32(.25f), q3 = vdupq_n_f32(.75f), k255 = vdupq_n_f32(255.f),
+                      zero = vdupq_n_f32(0.f), one = vdupq_n_f32(1.f), half = vdupq_n_f32(.5f);
+    for (; x + 8 <= x1; x += 8) {
+        int k = (x >> 1) - 1 - ia;
+        float32x4_t v[4][2];
+        for (int c = 0; c < 4; c++) {
+            float32x4_t a = vld1q_f32(QHV[c] + k), b = vld1q_f32(QHV[c] + k + 1), e = vld1q_f32(QHV[c] + k + 2);
+            float32x4x2_t z = vzipq_f32(vfmaq_f32(vmulq_f32(a, q1), b, q3), vfmaq_f32(vmulq_f32(b, q3), e, q1));
+            v[c][0] = z.val[0];
+            v[c][1] = z.val[1];
+        }
+        for (int hh = 0; hh < 2; hh++) {
+            uint32_t *p = d + (x - x0) + 4 * hh;
+            float32x4_t a = v[3][hh];
+            if (vmaxvq_f32(a) <= 0.f)
+                continue;
+            float32x4_t h = vfmaq_f32(half, vsubq_f32(g_dither4(x + 4 * hh, Y), half), a), kk = vsubq_f32(one, a);
+            float32x4_t ka = vmulq_f32(a, k255), bg[3], o[3];
+            g_unpack4(p, bg);
+            for (int ch = 0; ch < 3; ch++) {
+                float32x4_t cs = vminq_f32(vmaxq_f32(v[ch][hh], zero), one);
+                o[ch] = vfmaq_f32(vfmaq_f32(h, cs, ka), bg[ch], kk);
+            }
+            uint32x4_t px = g_pack4(o[0], o[1], o[2]), keep = vcleq_f32(a, zero);
+            vst1q_u32(p, vbslq_u32(keep, vld1q_u32(p), px));
+        }
+    }
+    for (; x < x1; x++)
+        over_q_px(d + (x - x0), x, ia, Y);
+}
+
 /* the base layer for the canvas rect into dst (stride CW). glb: use and keep GLB. items: 0 none (they
  * are drawn at present time), 1 the base items too, on the canvas grid (the freeze: SHARP) */
 static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb, int items)
@@ -1248,6 +1451,8 @@ static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb,
     int npre = LB ? gs_npre(GS_HALF) : 0, nsh = LB ? gs_nshapes(GS_HALF) : 0;
     PROF0;
     hr_reset();
+    qr_reset();
+    int qm = motion_qb && dst == CANV;
     for (int y = y0; y < y1; y++) {
         uint32_t *d = dst + (unsigned)y * CW + x0;
         if (!(y & 1))
@@ -1260,7 +1465,10 @@ static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb,
         } else {
             base_bg_row(d, y, x0, x1);
             uint8_t *tp = glb && !frozen ? TPL + (unsigned)y * CW + x0 : 0;    /* (frozen: TPL is SOFT) */
-            base_glass_c(d, y, x0, x1, 0, npre, tp, HR);
+            if (qm)
+                base_glass_q(d, y, x0, x1, 0, npre, tp);
+            else
+                base_glass_c(d, y, x0, x1, 0, npre, tp, HR);
             if (glb) {
                 uint32_t *g = GLB + (unsigned)y * CW + x0;
                 if (g != d)
@@ -1273,7 +1481,12 @@ static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb,
                 }
                 glb_valid(y, x0, x1);
             }
-            if ((glb || dst == CANV) && GAPX[y] && x0 == 0 && x1 == CW) {
+            if (qm) {
+                if (!GAPX[y]) {     /* on the quarter grid: drawn exactly at rest */
+                    GAPX[y] = 1;
+                    napx++;
+                }
+            } else if ((glb || dst == CANV) && GAPX[y] && x0 == 0 && x1 == CW) {
                 GAPX[y] = 0;        /* shaded again where the glass is: no longer shifted */
                 napx--;
             }
@@ -1397,6 +1610,7 @@ static void compose_over(uint32_t *dst, int x0, int y0, int x1, int y1)
                 noapx--;
             }
     int any = LO && (LO->nshape || al0 > 0.f);
+    qr_reset();
     if (!frozen) {
         for (int y = y0; y < y1; y++) {
             int touch = any && (al0 > 0.f || shapes_touch_row(LO, 2.f * (float)y + 1.f));
@@ -1434,7 +1648,13 @@ static void compose_over(uint32_t *dst, int x0, int y0, int x1, int y1)
             if (!touch && al0 <= 0.f)
                 continue;
             uint32_t *d = dst + (unsigned)y * CW + x0;
-            if (touch) {
+            if (touch && motion_qo) {
+                over_glass_q(d, y, x0, x1, al0);
+                if (!OAPX[y]) {      /* on the quarter grid: drawn exactly at rest */
+                    OAPX[y] = 1;
+                    noapx++;
+                }
+            } else if (touch) {
                 const struct hrow *A = half_over_row(y, x0, n, al0);
                 gs_over_row(d, y, x0, n, A->C, A->M);
             } else {
@@ -1771,9 +1991,7 @@ static void box_v(const uint32_t *src, uint32_t *dst, int r, int bw, int bh)
     }
 }
 
-/* the freeze's quarter grid (360 x 740), in G7_CANVAS after CURT */
-#define QW (CW / 2)
-#define QH (CH / 2)
+/* the freeze's quarter-grid planes, in G7_CANVAS after CURT */
 #define QGL ((uint32_t *)(G7_CANVAS + 0x920000UL))
 #define QCT (QGL + QW * QH)
 #define QTM (QCT + QW * QH)
@@ -2122,9 +2340,14 @@ uint32_t g7_frame(const struct g7_frame *f)
          * frame (the rows it shifts are approximate and drawn exactly at rest) */
         motion_half = !forced && (wide || glass_area * 8U > (uint64_t)GW * GH || (sh_on && sh_dy != 0));
         gs_prepare(GS_HALF, LB ? LB->shape : 0, LB ? LB->nshape : 0, &CBASE, 1.f);
+        /* the glass changes over more than a quarter of the panel: those rows on the quarter grid */
+        motion_qb = G7_QMOTION && motion_half && glass_area * 4U > (uint64_t)GW * GH;
+        if (motion_qb)
+            gs_prepare(GS_QB, LB ? LB->shape : 0, LB ? LB->nshape : 0, &CBASE, 1.f);
     } else {
         gs_word_prepare(&f->word, &CBASE);
         motion_half = 0;            /* frozen: the base does not move (the rest check below) */
+        motion_qb = 0;
     }
     gs_prepare(1, LO ? LO->shape : 0, LO ? LO->nshape : 0, &COVER, 1.f);
     curt_k = frozen ? curtain_index(LO) : -1;
@@ -2152,6 +2375,10 @@ uint32_t g7_frame(const struct g7_frame *f)
     }
     if (LO && LO->nshape)
         gs_prepare(GS_HALFO, LO->shape, LO->nshape, &COVER, 1.f);
+    /* the frozen over glass moves: on the quarter grid */
+    motion_qo = G7_QMOTION && motion_over && frozen;
+    if (motion_qo)
+        gs_prepare(GS_QO, LO->shape, LO->nshape, &COVER, 1.f);
     cur_word = f->word;
     cur_dim = f->dim;
     cur_back = bk;
@@ -2272,12 +2499,14 @@ static int sharp_refine(void)
     compose_base((uint32_t *)G7_SHARP, 0, y0, CW, y1, 1, 1);
     for (int y = y0; y < y1; y++)
         GV0[y] = GV1[y] = 0;        /* SHARP holds the lens and the items too: never GLB */
-    int mh = motion_half, mo = motion_over;
-    motion_half = motion_over = 0;
+    int mh = motion_half, mo = motion_over, qb = motion_qb, qo = motion_qo;
+    motion_half = motion_over = motion_qb = motion_qo = 0;
     compose(0, y0, CW, y1);
     (void)present_c(0, y0, CW, y1);
     motion_half = mh;
     motion_over = mo;
+    motion_qb = qb;
+    motion_qo = qo;
     return nsapx > 0;
 }
 
@@ -2308,12 +2537,14 @@ int g7_idle(void)
     if (flag == GAPX)
         for (int y = y0; y < y1; y++)
             GV0[y] = GV1[y] = 0;    /* redraw the glass of these rows */
-    int mh = motion_half, mo = motion_over;
-    motion_half = motion_over = 0;
+    int mh = motion_half, mo = motion_over, qb = motion_qb, qo = motion_qo;
+    motion_half = motion_over = motion_qb = motion_qo = 0;
     compose(0, y0, CW, y1);
     (void)present_c(0, y0, CW, y1);
     motion_half = mh;
     motion_over = mo;
+    motion_qb = qb;
+    motion_qo = qo;
     return napx || noapx;
 }
 

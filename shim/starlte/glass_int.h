@@ -287,8 +287,13 @@ void gw_row_a_at(float py, int n, float px0, float dpx, float *rgb);
 #define GS_SOFT 2
 #define GS_HALF 3
 #define GS_HALFO 4                                  /* the over layer at half resolution */
-#define GS_NL 5
-_Static_assert(0x50000UL + GS_NL * 20UL * 1440UL * 4UL <= 0x100000UL, "glass table overflow");
+#define GS_QB 5                                     /* the base at quarter resolution (motion frames) */
+#define GS_QO 6                                     /* the over layer at quarter resolution (motion frames) */
+#define GS_NL 7
+/* specular column tables: the panel-resolution sets (0, 1) are never shaded (only their geometry is
+ * used: the shift's classes), so the quarter sets take their slots */
+#define GS_EXSLOTS 5
+_Static_assert(0x50000UL + GS_EXSLOTS * 20UL * 1440UL * 4UL <= 0x100000UL, "glass table overflow");
 struct gs_ctx {                                 /* the uniforms of one GLASS_FS draw */
     float K, soft, dim, back;
     int opaque;
