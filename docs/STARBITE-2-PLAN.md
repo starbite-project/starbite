@@ -30,6 +30,21 @@ storage price spike); a **bootloader with full self tests**, a proper system rat
 macOS **Sequoia** as a possible newer stable macOS (Ventura is "more than good" for now), and a **boot menu
 redo** (it lags; better icons).
 
+### Current order (the user, 2026-11-05, after ChromeOS reached guest mode; replaces the "Later" list above)
+1. **Menu cleanup**: hide Darwin console, microSD probe, UEFI Shell, Starbite shell, Ubuntu Desktop and
+   Ubuntu Lomiri (Ubuntu with Phosh stays), Arch Linux ARM. Hidden, not deleted: reachable from Engineer OS.
+2. **Engineer OS, done properly**, replacing the Lab entry.
+3. Alongside it, **menu fixes**: the recovery row says Samsung recovery although it is TWRP; battery percentage
+   missing; proper OS icons.
+4. **Menu speed** (0.3-2 fps at best today) and a **POST** screen.
+5. **Developer features** in the menu (fastboot or similar, to make development easier).
+6. **Bixby interrupt**: holding Bixby early in boot enters a **Starbite Recovery** menu. The path up to that
+   check must be so simple that nothing can fail. Its options include **Starbite Rescue mode**: reboot at once
+   into a ramdisk that asks for a **Starbite rescue USB disk** (made by the installer).
+7. **Starbite Installer**, last: a script on Linux or the Mac opens the installer, which asks you to confirm an
+   unlocked bootloader and a microSD of at least 64 GB, then does everything until the phone matches the main
+   Starbite S9, every OS working.
+
 ## 1. Where things stand
 
 | OS | How it boots | Root lives on | State |
