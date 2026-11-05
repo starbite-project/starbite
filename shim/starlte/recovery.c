@@ -16,7 +16,7 @@
  * RAM used (the loader's free XNU window, mmu.c non-cacheable, unused until an OS is loaded):
  *   REC_PANEL_SAVE 0x9C000000  the panel on entry (1440 x 2960 x 4 = 16.3 MiB), put back on Continue
  *   REC_HINT_SAVE  0x9E800000  the Bixby hint's row (345 KiB)
- *   post.c uses 0x9E000000 (its rows) and 0xA0000000 (the RAM pattern).
+ *   post.c uses 0x9E000000 (its rows) and 0x8C000000 = STAGE (the RAM pattern; never 0xA0000000, the ECT).
  * No pointer tables: the Image must have no absolute relocations.
  */
 #include "recovery.h"

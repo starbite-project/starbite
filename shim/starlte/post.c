@@ -18,7 +18,7 @@
  *
  * Results: post_last() (the menu can show them), the log page slots 200..212 (readable from
  * Linux through /dev/mem: 0x91fff000 + 8 * slot) and one line in the pmsg ring.
- * RAM used: 0x9E000000 (the panel rows POST draws over, put back after), 0xA0000000 (the RAM
+ * RAM used: 0x9E000000 (the panel rows POST draws over, put back after), 0x8C000000 = STAGE (the RAM
  * pattern: 1 MiB quick, 64 MiB full). No pointer tables (no absolute relocations).
  */
 #include "post.h"
@@ -30,7 +30,11 @@
 #include "recovery.h"
 
 #define POST_ROWS_SAVE 0x9E000000UL
-#define POST_RAM_BASE  0xA0000000UL
+/* STAGE (xnu_boot.c, 0x8c000000..0x91000000): the loader's own download buffer, unused until after
+ * POST. NOT 0xA0000000: that is S-Boot's ECT (stock DT `ect { parameter_address = <0xa0000000>;
+ * parameter_size = <0x32000>; }`), which the Android kernel's ACPM init reads; the pattern test
+ * there made LineageOS/GSI panic at 1.1 s in exynos_acpm_binary_update (2026-11-05). */
+#define POST_RAM_BASE  0x8C000000UL
 #define POST_RAM_QUICK (1UL << 20)
 #define POST_RAM_FULL  (64UL << 20)
 #define POST_LOG       ((volatile uint64_t *)0x91fff000UL)
