@@ -44,10 +44,24 @@ cgroup v1 cpuset/memory and CFS bandwidth (ui-pre-start), xt_owner, hidraw. No `
     scan (real networks listed), clock. Software rendering: regions that don't refresh (stale patches), slow, hot.
     Banner: Google API keys missing (no user can be added; Browse as Guest works without them).
 
+12-17. **GPU (CR2)**: Mesa 25.0.7 Panfrost (tools/chromeos/build-mesa.sh) replaces Mesa 21.3; libEGL logs
+    "using driver panfrost". Guest sessions segfaulted at login: fileno(NULL) in Chrome's post-login log
+    redirect, because `--enable-logging=stderr` leaves no log FILE (found with tools/chromeos/minidump-info.py on
+    dumps copied out by starbite-crashcopy). Flag removed; maxcpus=4 test ruled out the A55/M3 mix.
+18. **Guest session works** (the user, 2026-11-05): "works well enough", parked here for later.
+
+Logging now: ui.conf sends session_manager/Chrome stderr to /dev/kmsg; starbite-logfwd copies syslog there
+(saved to /distros/chromeos-boot.log); starbite-crashcopy copies /home/chronos/crash, /var/spool/crash,
+/var/log/chrome, /var/log/ui and messages to STATE's unencrypted/starbite-crash (TWRP: losetup -r -o
+2512388096 on chromeos.img, mount -o ro,noload). Chrome's own log is /var/log/chrome/chrome.
+
+Open: stale-region/line glitches on screen (DECON side, same family as the Linux line artifacts), the API
+keys (the user's, later), EGL_LOG_LEVEL=debug and --disable-logging-redirect still set in chrome_dev.conf.
+
 ## API keys (the user's own, never committed)
 GOOGLE_API_KEY / GOOGLE_DEFAULT_CLIENT_ID / GOOGLE_DEFAULT_CLIENT_SECRET as lines in /etc/chrome_dev.conf (room
 there for a same-length edit: ~2 KB of comment lines). Google account sign-in on Chromium builds also needs the
 account in google-browser-signin-testaccounts@chromium.org (chromium.org/developers/how-tos/api-keys).
 
-## Next
-CR2: Mesa Panfrost (kmsro with the DECON) and minigbm on Panfrost for GPU acceleration; then login, Wi-Fi, touch.
+## Next (when ChromeOS resumes)
+Display glitches, API keys + sign-in, Wi-Fi connect, sound, suspend.
