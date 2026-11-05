@@ -651,8 +651,16 @@ static void cat_tint(unsigned c, float *t)
     }
 }
 
+/* Tags (Daily, Beta, ...) hidden on every row, sheet and launch card (the user, 2026-11-05: "we
+ * might add those back later"). The catalog keeps them; set M7_SHOW_TAGS 1 to show them again. */
+#ifndef M7_SHOW_TAGS
+#define M7_SHOW_TAGS 0
+#endif
+
 static const char *tag_title(unsigned t)
 {
+    if (!M7_SHOW_TAGS)
+        return 0;
     switch (t) {
     case TAG_DAILY: return "Daily";
     case TAG_BETA: return "Beta";
