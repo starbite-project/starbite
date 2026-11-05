@@ -373,6 +373,16 @@ def patch_port(work):
          '\t.check = s9p_decon_pipe_check,\n',
          's9p_decon_pipe_check')
 
+    # 6d. s9p-decon: accept ARGB8888 framebuffers too (2026-11-05). ChromiumOS's compositor buffers are
+    # AR24; with XRGB8888 alone every ADDFB2 after Chrome's first modeset failed ("Unsupported pixel format
+    # AR24") and the panel kept the copied boot logo. Same layout; the fetch channel stays XRGB (sboot's
+    # IDMA_IN_CON), so the alpha byte is ignored and scanout is unchanged. XRGB stays first (fbdev).
+    edit(w, decon,
+         'static const u32 s9p_formats[] = {\n\tDRM_FORMAT_XRGB8888,\n};\n',
+         'static const u32 s9p_formats[] = {\n\tDRM_FORMAT_XRGB8888,\n'
+         '\tDRM_FORMAT_ARGB8888,\t/* Starbite: ChromiumOS, alpha ignored by the XRGB fetch */\n};\n',
+         'Starbite: ChromiumOS, alpha ignored')
+
     # 7. s9p-g3d: rail check, 950 mV at 260 MHz
     g3d = 'src/soc/s9p-g3d.c'
     edit(w, g3d,
