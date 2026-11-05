@@ -4,7 +4,8 @@ logic behind the fake adb, fastboot and heimdall next to this file. Works on mac
 (sparse files: the 64 GB UFS and the 128 GB card cost almost no disk).
 
   fakephone.py create DIR [--state recovery|download|fastboot|android] [--card blank|starbite|foreign]
-                          [--card-sectors N] [--battery N]
+                          [--card-sectors N] [--layout sd128|sd64] [--battery N]
+      --card starbite lays the card out as --layout (default sd128, which needs the 249999360-sector card)
   fakephone.py rereadpt DIR          (the fake `blockdev --rereadpt /dev/block/mmcblk0`)
   fakephone.py mkexfat DIR NODE      (the fake mkfs.exfat)
 
@@ -29,9 +30,11 @@ STARBITE = [(18, 'SYSTEM', 68736, 1245184), (19, 'VENDOR', 1313920, 185600), (20
             (25, 'USERDATA', 1698432, 4915328), (26, 'WINESP', 6613760, 131072),
             (27, 'WINDOWS', 6744832, 6773760), (28, 'A16DATA', 13518592, 2097403)]
 UFS_BLOCKS = 15616000
-CARD_SECTORS = 249999360
-CARD_P1 = (0x07, 8192, 182878208)
-CARD_P2 = (0xDA, 182886400, 67112960)
+sys.dont_write_bytecode = True                     # no __pycache__ in tools/store
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', 'store'))
+import cardlayout  # noqa: E402  (tools/store/cardlayout.py: the card layouts)
+CARD_SECTORS = cardlayout.get('sd128').exact                     # 249999360
+CARD_P1, CARD_P2 = cardlayout.get('sd128').parts(CARD_SECTORS)    # (0x07, 8192, 182878208), (0xDA, 182886400, 67112960)
 MIB = 1 << 20
 
 
@@ -63,7 +66,7 @@ def mbr(parts):
     return bytes(m)
 
 
-def create(root, state='recovery', card='blank', card_sectors=CARD_SECTORS, battery=87, seed=9):
+def create(root, state='recovery', card='blank', card_sectors=CARD_SECTORS, battery=87, seed=9, layout='sd128'):
     rnd = random.Random(seed)
     rb = lambda n: bytes(rnd.getrandbits(8) for _ in range(n)) if n <= 4096 else os.urandom(n)  # noqa: E731
     dev, byname = os.path.join(root, 'dev', 'block'), os.path.join(root, 'dev', 'block', 'by-name')
@@ -108,10 +111,12 @@ def create(root, state='recovery', card='blank', card_sectors=CARD_SECTORS, batt
     card_path = os.path.join(dev, 'mmcblk0')
     sparse(card_path, card_sectors * 512)
     open(os.path.join(root, 'sys', 'block', 'mmcblk0', 'size'), 'w').write(f'{card_sectors}\n')
-    open(os.path.join(root, 'sys', 'block', 'mmcblk0', 'device', 'name'), 'w').write('SD128\n')
+    gb = card_sectors * 512 / 1e9
+    open(os.path.join(root, 'sys', 'block', 'mmcblk0', 'device', 'name'), 'w').write(
+        f'SD{128 if gb > 96 else 64 if gb > 48 else 32}\n')
     open(os.path.join(root, 'proc', 'mounts'), 'w').write('')
     if card in ('starbite', 'foreign'):
-        parts = [CARD_P1, CARD_P2] if card == 'starbite' else [(0x0C, 2048, card_sectors - 2048)]
+        parts = cardlayout.get(layout).parts(card_sectors) if card == 'starbite' else [(0x0C, 2048, card_sectors - 2048)]
         with open(card_path, 'r+b') as f:
             f.write(mbr(parts))
         rereadpt(root)
@@ -126,7 +131,8 @@ def create(root, state='recovery', card='blank', card_sectors=CARD_SECTORS, batt
              'ro.boot.warranty_bit': '1', 'ro.twrp.version': '3.7.0_9-0'}
     open(os.path.join(root, 'props'), 'w').write(''.join(f'{k}={v}\n' for k, v in props.items()))
     write_state(root, state)
-    print(f'fake phone in {root}: state {state}, card {card} ({card_sectors} sectors)')
+    print(f'fake phone in {root}: state {state}, card {card}{f" {layout}" if card == "starbite" else ""} '
+          f'({card_sectors} sectors)')
 
 
 def rereadpt(root):
@@ -176,7 +182,7 @@ if __name__ == '__main__':
         opt = lambda k, d: a[a.index(k) + 1] if k in a else d  # noqa: E731
         os.makedirs(root, exist_ok=True)
         create(root, opt('--state', 'recovery'), opt('--card', 'blank'), int(opt('--card-sectors', CARD_SECTORS)),
-               int(opt('--battery', 87)))
+               int(opt('--battery', 87)), layout=opt('--layout', 'sd128'))
     elif cmd == 'rereadpt':
         rereadpt(root)
     elif cmd == 'mkexfat':

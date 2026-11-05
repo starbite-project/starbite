@@ -1,10 +1,31 @@
 """Constants shared by the Starbite installer (docs/INSTALLER.md)."""
+import importlib.util
 import os
+import sys
 from pathlib import Path
 
 INSTALLER_DIR = Path(__file__).resolve().parent.parent          # tools/installer
 REPO = INSTALLER_DIR.parent.parent                               # the checkout
 TOOLS = REPO / 'tools'
+
+
+def _load_cardlayout():
+    """tools/store/cardlayout.py, the microSD card layouts (one module for the installer,
+    sbstore2.py and card-range-flash.py; registered under its own name so they share it)."""
+    if 'cardlayout' in sys.modules:
+        return sys.modules['cardlayout']
+    spec = importlib.util.spec_from_file_location('cardlayout', TOOLS / 'store' / 'cardlayout.py')
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules['cardlayout'] = mod
+    keep, sys.dont_write_bytecode = sys.dont_write_bytecode, True      # no __pycache__ in tools/store
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = keep
+    return mod
+
+
+cardlayout = _load_cardlayout()
 
 MIB = 1 << 20
 GIB = 1 << 30
@@ -12,7 +33,7 @@ CHUNK = 64 * MIB
 
 # A card "sold as 64 GB" holds 61.9-64.1 GB (SanDisk: 124,735,488 sectors = 63.86 GB), so the
 # user's "at least 64 GB" rule is checked as "at least 60,000,000,000 bytes". A 32 GB card has ~31 GB.
-MIN_CARD_BYTES = 60_000_000_000
+MIN_CARD_BYTES = cardlayout.MIN_CARD_BYTES      # 60_000_000_000
 # Rescue stick: refuse anything larger. A stick sold as 256 GB has ~256.06e9 bytes, so the limit
 # is 256 GiB (274.9e9): every 256 GB stick passes, every 512 GB drive and every SSD above fails.
 MAX_RESCUE_DISK_BYTES = 256 * GIB

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write a root image into a sector range of the S9's microSD card through TWRP's adb.
 
-  card-range-flash.py IMAGE START_SECTOR [--state FILE] [--check-only]
+  card-range-flash.py IMAGE START_SECTOR [--state FILE] [--check-only] [--layout sd128|sd64]
 
 The range is START_SECTOR .. START_SECTOR + size/512 - 1 of /dev/block/mmcblk0. Before
 anything is written it checks, on the phone:
@@ -14,12 +14,23 @@ Then, as starlte-flash-root.py does for USERDATA: 64 MiB chunks; all-zero chunks
 written from /dev/zero on the phone; others are gzip'd, pushed to /tmp, written with
 dd and read back for a SHA-256 comparison. --state records finished chunks (resume).
 Nothing outside the range is written. --check-only runs the checks and stops.
+
+--layout NAME (tools/store/cardlayout.py) selects a card layout explicitly: the card must fit it
+(sd128: exactly the 128 GB card; sd64: any card of at least 64 GB), its MBR's p1/p2 must be that
+layout's, and the range must lie inside one of the layout's root slots (or be exactly its 64 MiB
+tail, the test range). Without --layout nothing changes: the 128 GB card only, as above.
 """
 import argparse, gzip, hashlib, os, struct, subprocess, sys, tempfile, zlib
+from pathlib import Path
+
+sys.dont_write_bytecode = True                     # no __pycache__ in tools/store
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'store'))
+import cardlayout  # noqa: E402  (the card geometry: tools/store/cardlayout.py)
 
 DEV = '/dev/block/mmcblk0'
-CARD_SECTORS = 249999360
-TEST_RANGE = (249868288, 131072)
+SD128 = cardlayout.get('sd128')
+CARD_SECTORS = SD128.exact                              # 249999360
+TEST_RANGE = (SD128.tail.start, SD128.tail.sectors)     # (249868288, 131072)
 CHUNK = 64 << 20
 MIB = 1 << 20
 
@@ -39,6 +50,7 @@ def main():
     ap.add_argument('start', type=int)
     ap.add_argument('--state')
     ap.add_argument('--check-only', action='store_true')
+    ap.add_argument('--layout', choices=cardlayout.names(), help='check the card and the range against this layout')
     a = ap.parse_args()
     size = os.path.getsize(a.image)
     count = size // 512
@@ -47,19 +59,38 @@ def main():
     if adb(['get-state']) != 'recovery':
         sys.exit('the phone is not in TWRP')
     sectors = int(adb(['shell', 'cat /sys/block/mmcblk0/size']))
-    if sectors != CARD_SECTORS:
-        sys.exit(f'mmcblk0 has {sectors} sectors, not the 128 GB card ({CARD_SECTORS}): refusing')
+    lay, test_range = None, TEST_RANGE
+    if a.layout is None:
+        if sectors != CARD_SECTORS:
+            sys.exit(f'mmcblk0 has {sectors} sectors, not the 128 GB card ({CARD_SECTORS}): refusing')
+    else:
+        lay = cardlayout.get(a.layout)
+        try:
+            want = lay.parts(sectors)
+        except cardlayout.LayoutError as err:
+            sys.exit(f'mmcblk0: {err}: refusing')
+        test_range = (lay.tail.start, lay.tail.sectors)
     mbr = read_sectors(0, 1)
     if len(mbr) != 512 or mbr[510:512] != b'\x55\xaa':
         sys.exit('no MBR on the card')
     parts = [struct.unpack_from('<4xB3xII', mbr, 446 + 16 * i) for i in range(4)]
     p1, p2 = parts[0], parts[1]
+    if lay is not None and parts[:2] != want:
+        other = cardlayout.identify(parts, sectors)
+        sys.exit(f'the card\'s MBR (p1 {p1[1]}+{p1[2]}, p2 {p2[1]}+{p2[2]}) is not the {lay.name} layout '
+                 f'(p1 {want[0][1]}+{want[0][2]}, p2 {want[1][1]}+{want[1][2]})'
+                 + (f': it is {other}' if other else '') + ': refusing')
     s, e = a.start, a.start + count
     if s < p1[1] + p1[2] and p1[1] < e:
         sys.exit('the range overlaps p1 (the exFAT data partition): refusing')
-    if (s, count) == TEST_RANGE:
+    if (s, count) == test_range:
         where = 'the 64 MiB test range'
     else:
+        if lay is not None:
+            slot = lay.area_at(s, count)
+            if slot is None or slot.kind != 'root':
+                roots = ', '.join(f'{r.name} {r.start}+{r.sectors}' for r in lay.roots())
+                sys.exit(f'the range {s}+{count} is not inside a root slot of the {lay.name} layout ({roots}): refusing')
         if p2[0] != 0xDA or s < p2[1] or e > p2[1] + p2[2]:
             sys.exit(f'the range {s}+{count} is not inside p2 (type 0x{p2[0]:02x} {p2[1]}+{p2[2]}): refusing')
         hdr = read_sectors(p2[1] + 8, 1)

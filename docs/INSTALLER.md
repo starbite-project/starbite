@@ -100,7 +100,7 @@ set): `tools/installer/installer-manifest.example.toml`.
 | `name` | shown on the screens |
 | `catalog` | optional: a copy of `tools/store/catalog.toml` in the bundle. Then the plan lists every visible menu entry as `covered` or `MISSING` (its store files must be in the bundle's stores, read with `sbstore2.py`; its root must be an item) and warns when the UFS store's catalog differs from it |
 | `[phone]` | `models` (SM-G960F), `devices` (starlte), `ufs_blocks` (15616000), `min_battery` (50) |
-| `[card]` | `min_bytes` (at least 60,000,000,000: a card sold as 64 GB holds 61.9-64.1 GB), `sectors` (the exact card this layout was made for; card roots sit at fixed sectors in payload command lines), `p1`/`p2` `{type, start, sectors[, label]}`: the MBR the card layout step writes |
+| `[card]` | `min_bytes` (at least 60,000,000,000: a card sold as 64 GB holds 61.9-64.1 GB), `layout` (`"sd128"` S9 #1's 128 GB card, `"sd64"` any card of at least 64 GB: section 11; p1, p2 and the root sectors then come from `tools/store/cardlayout.py`, and `--verify-bundle` checks the catalog roots and the payloads' `sdroot=` against it), `sectors` (the exact card this layout was made for; card roots sit at fixed sectors in payload command lines; not with `sd64`), `p1`/`p2` `{type, start, sectors[, label]}`: the MBR the card layout step writes (with `layout`: may be left out, must agree if given) |
 | `[[layout]]` | `name`, `node`, `start`, `blocks` (4 KiB blocks): the UFS GPT the set was made for. Checked in preflight, never written |
 | `[[item]]` | one thing to install, below |
 
@@ -109,7 +109,7 @@ set): `tools/installer/installer-manifest.example.toml`.
 | `key` | unique, `[a-z0-9-]`; `--replace KEY` names it |
 | `title`, `os`, `note` | shown; `os` (starbite, android, linux, chromeos, windows, macos, ios) drives the no-password list |
 | `file`, `size`, `sha256` | path inside the bundle (no `..`, no symlink out), byte size, SHA-256. `--update-hashes` fills the last two |
-| `dest` | `part:NAME` (BOOT RECOVERY SYSTEM VENDOR A16DATA WINESP WINDOWS; ODM only with `action = "mkfs-metadata"`), `slot:USERDATA@OFFSET` (the 16 GiB Apple slot), `store:ufs`, `store:sd`, `card:lba:SECTOR` (inside `[card] p2`, 1 MiB aligned, no overlaps), `card:file:/PATH` (a file on card p1's exFAT) |
+| `dest` | `part:NAME` (BOOT RECOVERY SYSTEM VENDOR A16DATA WINESP WINDOWS; ODM only with `action = "mkfs-metadata"`), `slot:USERDATA@OFFSET` (the 16 GiB Apple slot), `store:ufs`, `store:sd`, `card:lba:SECTOR` (inside `[card] p2`, 1 MiB aligned, no overlaps; with a card layout inside one of its root slots), `card:root:KEY` (with `[card] layout`: the root slot of KEY, e.g. `card:root:mac13`, resolved to `card:lba:` at load), `card:file:/PATH` (a file on card p1's exFAT) |
 | `action` | `write` (default) or `mkfs-metadata` (ODM, no file) |
 | `data` | `true`: the target holds user data once its OS runs (never replaced without `--replace`) |
 | `optional` | `true`: a missing file skips the item instead of refusing the bundle |
@@ -201,7 +201,9 @@ the person at the phone; a lock set later by the user; macOS as above.
 
 ## 8. Tests and the rehearsal
 
-- Unit tests (`tools/installer/tests/`, 59 tests; `rehearse.sh`: 63 checks): disk safety with recorded diskutil plists (internal
+- Unit tests (`tools/installer/tests/`, 77 tests, 18 of them the card layouts of section 11;
+  `rehearse.sh`: 87 checks, 24 of them the 64 GB card of section 11.6; the transcript below is the
+  128 GB part, which still reads the same apart from an `ok card layout sd128: ...` line per run): disk safety with recorded diskutil plists (internal
   disk, APFS container, USB stick, 1 TB USB SSD, disk image, internal SD reader, 256 GB stick) and fake
   sysfs/proc trees (SATA root disk, USB stick, USB SSD, mounted stick, stick under an LVM root); the
   destination allowlist, manifest checks, bundle verification, symlink escape, hash cache, `--update-hashes`;
@@ -215,6 +217,9 @@ the person at the phone; a lock set later by the user; macOS as above.
   part-write.py, slot-write.py, store-flash*.sh, card-range-flash.py, metadata-reset.sh) run unchanged
   against it. Fake limitations: partition nodes are separate files (not windows into one disk), `[ -b` is
   read as `[ -e`, and `mke2fs`, `blkid`, `mount`, `mkfs.exfat`, `getprop`, `blockdev` are shell stand-ins.
+  `dd` onto a `/dev/block` stand-in gets `conv=notrunc` (a block device cannot be truncated; before that,
+  `card-range-flash.py`'s `dd` cut the fake card off after the macOS root, unnoticed on the 128 GB card
+  because nothing lies behind that root, and fatal on `sd64`, where p1 does).
 
 Transcript of `RESCUE_IMG=build/installer/rescue/starbite-rescue-usb.img tools/installer/rehearse.sh`
 (2026-11-05, macOS; long runs shown as headers, plan rows and ok/WARN/REFUSED/STOPPED lines):
@@ -750,9 +755,9 @@ the disk-safety rules; the summary.
 **Stubbed or not done:**
 - GPT repartitioning of a stock phone (section 9): refused, not written.
 - No real bundle exists (section 5); the example manifest has placeholder sizes and hashes.
-- Card layouts other than the 128 GB card's: the card roots' sectors are in payload command lines and
-  `card-range-flash.py` accepts only the 249,999,360-sector card, so a 64 GB card needs its own bundle
-  (other `sdroot=` sectors, rebuilt payloads) and that tool taught other sizes.
+- Card layouts: done on the host for any card of at least 64 GB (section 11, layout `sd64`). Still open
+  there: the XNU kernel's clock and kernel-log sectors (a kernel rebuild, 11.5), and everything in 11.7
+  that needs the phone. iOS 26 (parked) has no slot on `sd64`.
 - macOS Ventura still has a password (section 6).
 - Windows: no clean image; the WINDOWS write path exists but has only run against the fake.
 - UP_PARAM (the Starbite splash) and the bootloader (VG6) step of the master plan are not part of v1.
@@ -774,3 +779,266 @@ the disk-safety rules; the summary.
 11. On a phone with a fresh install: Android's setup wizard without a lock, the Linux images built with `SB_NO_PIN=1` (empty password accepted by PAM, Phosh's lock screen really off), Windows signing in by itself.
 12. The rescue stick on the phone (the whole of docs/RESCUE-USB-HOST.md section 5).
 13. `--make-rescue-usb --real` on a real stick (the coordinator does this after review).
+
+## 11. microSD card layouts: the 128 GB card and any card of 64 GB or more
+
+Written 2026-11-06. The user's spec says the phone needs "an SD card of at least 64 GB". Until now every
+card number was S9 #1's 128 GB card (249,999,360 sectors), spelled out in a dozen places. Now the geometry
+lives in one module, `tools/store/cardlayout.py`, with two layouts:
+
+- **`sd128`**: S9 #1's card exactly as it is. Nothing on it moves; every number below is the one the phone
+  has today.
+- **`sd64`**: any card of at least 60,000,000,000 bytes (117,187,500 sectors: every card sold as 64 GB, and
+  any bigger one). The raw p2 comes first and has a fixed size, so the macOS root is at the same sector
+  on every card and one set of payloads serves every card. p1 exFAT takes the rest of the card.
+
+`python3 tools/store/cardlayout.py show [sd128|sd64] [--sectors N]` prints a layout for a given card.
+
+### 11.1 Inventory: every place that assumes the card's geometry
+
+"From the table" means the value now comes from `cardlayout.py` (the same value as before for `sd128`).
+
+**Host tools**
+
+| Where | What it assumes | Status |
+|---|---|---|
+| `tools/macos/card-range-flash.py:31-32`, `:63` | card = 249,999,360 sectors; test range 249868288+131072 | from the table; without `--layout` unchanged (128 GB card only); `--layout sd128\|sd64` (`:52`, `:66-92`) checks the card size, that the MBR is the layout's, and that the range is in a root slot |
+| `tools/macos/card-range-flash-fast.py:26-28`, `:48`, `:59-60` | the same, plus the iOS 26 range 182888448+33554432 | not changed: iOS 26 root-cycle tool, `sd128` only |
+| `tools/macos/root26-cycle.py:29`, `:40`; `root26-pull.py:11`; `ventura-harvest.py:13`; `card-root-compare.py:7` | root starts 216442880 (Ventura) and 182888448 (iOS 26) | not changed: development tools for S9 #1's card |
+| `tools/macos/build-macos-root.sh:10` (comment) | the 64 MiB test range at 249868288 | not changed |
+| `tools/store/sbstore2.py:54-58` (`MEDIA['sd']` 8389120, `SD_ROOT_TAIL_BLOCKS` 16384), `:251-257`, `:277-284` | card store capacity = the 128 GB card's p2; the tail = p2's last 64 MiB | from the table; new `--medium sd64` (capacity 3,964,928 blocks; refuses a store larger than the 64 MiB store area); `header` also reports the store area |
+| `tools/store/store-flash-sd.sh:13-21`, `:30` | p2 is MBR entry 2 (`mmcblk0p2`), type 0xDA; store capacity == p2 blocks | generic already (read from the card's MBR): unchanged |
+| `tools/store/boot-next.sh:29-34` | clock "SBTIME01" in sector 249999359, only on a 249,999,360-sector card | not changed (11.5) |
+| `tools/store/boot-next.sh:51-57`, `:77` | the sdlog ring at sector 249868288 | not changed (11.5) |
+| `tools/store/catalog.toml:38`, `:48`, `:284` | roots `sd:lba 216442880+31457280` (mac13), `182888448+33554432` (ios26, ios26sdt) | `cardlayout.py catalog LAYOUT IN OUT` writes them for a layout (identity on `sd128`); the installer checks them |
+| `build/macos13-user.txt` (untracked) packed into `out/xnu-mac13-v33.xnu` at offset 0x48 (`tools/macos/mac13-payload.sh:10`, `tools/mkpayload-ios26.sh:15`, `:28-30`) | `sdroot=lba:216442880,31457280` in the Ventura payload's boot-args (and the iOS 26 payloads' `182888448,33554432`) | `cardlayout.py payload LAYOUT KEY IN OUT` rewrites it. Checked on the real v33 payload (in memory, nothing written): byte-identical for `sd128`; for `sd64` only the cmdline field differs (`sdroot=lba:139264,31457280`, 514 of 607 bytes) |
+| `tools/cmdline/macos13-t0.txt`, `-t0b.txt`, `ios26-sdprobe.txt` (`sdroot=lba:249868288,131072`), `macos13-t1.txt` (`241348608,7987200`), `macos26-demo/-m1/-t1.txt` (`182888448,20971520`) | test and parked command lines | not changed; `cardlayout.py cmdline LAYOUT KEY FILE` retargets one when needed |
+| `tools/installer/installer-manifest.example.toml:22-27`, `:187`, `:197` | `[card] sectors/p1/p2`, `card:lba:216442880`, `card:lba:182888448` | now also `layout = "sd128"`; the values are unchanged and checked against the table |
+| `tools/installer/sbinst/common.py:32` | `MIN_CARD_BYTES` 60,000,000,000 | from the table |
+| `tools/installer/sbinst/steps.py:207-223` | "card layout fit" = the exact card size | with `[card] layout`: that layout's rule (exact / at least) and which layout the card needs |
+| `tools/installer/sbinst/steps.py:374-417`, `:600-652` | MBR and exFAT format from the manifest's fixed p1/p2 | from the layout, sized for the card in the phone; another Starbite layout on the card is named in the BLOCKED reason |
+| `tools/installer/fakes/fakephone.py:35-36` | the 128 GB card's p1/p2 | from the table; `--layout sd64` lays a fake card out as `sd64` |
+| `tools/installer/tests/test_manifest.py:18-19`, `:31`, `:132`, `:140`; `test_resume.py:170`, `:200-201` | 128 GB card values in fixtures | unchanged (they test manifests without a layout) |
+| `tools/linux/init:35` (`SDDEV=/dev/mmcblk0p1`), `tools/linux/distros/card-install.sh:42-46` | p1 is MBR entry 1 and exFAT; no sector numbers | holds on both layouts (p1 stays entry 1 on `sd64`) |
+| `tools/android/fstab.card-a16` | the old card-slot Android (p5-p9 logical partitions) | not in the lineup or the installer; not changed |
+
+**Loader and Engineer OS**: no fixed sectors anywhere.
+
+| Where | What it assumes |
+|---|---|
+| `shim/starlte/sd.c:424-443` `sd_store_area` (same in `starbite/libsb/sd.c:427-446`) | the card store is the first primary MBR entry of type 0xDA with a 4 KiB-aligned start and at least 64 sectors. Position and size come from the MBR, so `sd64`'s p2 at sector 8192 works unchanged |
+| `shim/starlte/store.c:146-152` | the card store's capacity fits that entry (`open_v2` limit) |
+| `shim/starlte/em.c:2589`, `starbite/engineer/pages_em.c:1966` | read the MBR for display only |
+
+**XNU kernel** (`xnu/series-12377`, in the Ventura and iOS 26 kernels)
+
+| Where | What it assumes | On `sd64` |
+|---|---|---|
+| `0345-starlte-microsd-driver.patch:893-971` (the `sdroot=` parser) | `sdroot=lba:START,COUNT` or `pN` from the boot-args; checked against the CSD's card size (`:909`, `:924`, `:938`); refuses FAT/exFAT/NTFS overlap and a start below the 0xDA store's used end (`:844`) | generic: works unchanged |
+| `0370-starlte-sdlog.patch:58`, `:65`; `0377-starlte-sdlog-busy-card.patch:28` | the kernel log ring (`sdlog=1`) at 249868288+131072, only on a 249,999,360-sector card | silently off: no kernel log on the card |
+| `0384-starlte-sd-dirty-chunks.patch` | the written-chunk bitmap, relative to the `sdroot=` range, saved in the sdlog header | generic, but rides on the sdlog header (off) |
+| `0393-starlte-sd-clock.patch:29`, `:46`, `:51`; `0395-starlte-sd-clock-periodic.patch:37`, `:54` | the clock "SBTIME01" in sector 249999359, only on a 249,999,360-sector card | silently off: macOS starts at 1970 ("System clock is incorrect") |
+| `0383-starlte-msgbuf-8m.patch:20` (comment) | the 64 MiB card log region | - |
+
+### 11.2 What each OS needs on the card, and what fits on 64 GB
+
+Only these keep anything on the card. iOS 16.5, Android 17, Windows 11/10 and the Starbite OSes live on
+UFS (the card store holds only a fallback copy of Engineer OS).
+
+| Item | Where | Size | Source |
+|---|---|---|---|
+| card OS store (catalog, Engineer OS fallback of 10-16 MB) | p2 head | `sd128`: a 1 MiB area (today's card stores are 32-92 KiB); `sd64`: a 64 MiB area | `build/store/sd-store-min.img`; docs/STARBITE-MASTER-PLAN.md 2.5 |
+| macOS Ventura (active stable pair) | p2 raw range | 15 GiB (31,457,280 sectors) | catalog.toml:38, `build/macos13-user.txt` |
+| iOS 26 (parked edge pair) | p2 raw range | 16 GiB (33,554,432 sectors) | catalog.toml:48 |
+| tail: XNU test range, sdlog ring, clock | p2's last 64 MiB | 64 MiB | starlte_sd.c (11.1) |
+| postmarketOS | p1 `/distros/pmos.img` | 8 GiB budget (2,143 MiB today) | MASTER-PLAN 2.4, 2.5 |
+| Ubuntu (Phosh) | p1 `/distros/ubuntu.img` | 8 GiB budget [est] (built in 8 GiB, then shrunk) | `tools/linux/distros/mkroot-ubuntu.sh:28` |
+| ChromiumOS | p1 `/distros/chromeos.img` | 6.34 GiB (6.8 GB; its GPT ends at sector 13,295,615) | docs/CHROMEOS-STATUS.md:15, :23 |
+| Ubuntu Touch (in the lineup, not built yet) | p1 `/distros/ut.img` | 8 GiB [est] | MASTER-PLAN 2.4 |
+| p1 working room: tools, staging, slack | p1 | 2 + 4 + 0.5 GiB | MASTER-PLAN 2.4 (p1 budget) |
+| MBR and alignment | sectors 0..8191 | 4 MiB | |
+
+Against the smallest card the installer accepts (60.0 GB = 55.88 GiB; a SanDisk "64 GB" card has
+124,735,488 sectors = 59.48 GiB):
+
+| Set | Size | Fits in 55.88 GiB? |
+|---|---|---|
+| today's bundle with iOS 26: store + Ventura + iOS 26 + tail + pmOS + Ubuntu + ChromiumOS + lead-in | 53.47 GiB | only just: 2.4 GiB left for files, staging and growth |
+| the same plus Ubuntu Touch (the lineup's Linux pair) | 61.47 GiB | **no** |
+| the master plan's full p1 budget (36 GiB) plus store, Ventura, iOS 26 and tail | 67.13 GiB | **no** |
+| **`sd64`**: store + Ventura + tail (15.13 GiB) + the p1 budget (36 GiB) | 51.13 GiB | **yes**: p1 is 40.75 GiB on the smallest card (44.35 GiB on the SanDisk card), 4.75 GiB above the budget |
+
+So the 64 GB layout carries every OS of the lineup that lives on the card **except iOS 26**, which is
+parked (the edge pair) and keeps its root only on S9 #1's 128 GB card. Priority if space runs short:
+1. the card store and the tail (tiny: the card fallback, the kernel log and the clock), 2. macOS Ventura
+(the active stable pair), 3. postmarketOS, 4. Ubuntu / Ubuntu Touch, 5. ChromiumOS (later real ChromeOS),
+6. staging and the user's files, 7. iOS 26 (128 GB card only).
+
+### 11.3 The `sd64` layout
+
+```
+sector 0             MBR (entry 1 = p1 exFAT, entry 2 = p2 0xDA, as on sd128)
+8192..139263         p2: card OS store area, 64 MiB (sbstore2.py --medium sd64: a 3,964,928-block store,
+                         at most 16,384 blocks used)
+139264..31596543         macOS Ventura root, 15 GiB  ->  sdroot=lba:139264,31457280
+31596544..31727615       tail, 64 MiB (test range / sdlog ring; 31727615 = the clock sector)
+31727616..           p1: exFAT "STARBITE" to the card's last whole MiB (85,458,944 sectors = 40.75 GiB on
+                         a 60.0 GB card, 93,007,872 on a SanDisk 64 GB, 218,271,744 on a 128 GB card)
+```
+
+Why this shape:
+- **Fixed sectors for everything the boot side names.** The roots are in payload boot-args, and the card
+  store's capacity is in its header (store-flash-sd.sh refuses a store whose capacity is not p2's size).
+  With p2 first and of fixed size, one bundle (one catalog, one Ventura payload, one card store image)
+  fits every card of 64 GB or more; a bigger card only gets a bigger p1. A layout computed per card size
+  would need the payloads and the store rebuilt for each card, after the bundle's hashes were made.
+- **MBR entry numbers unchanged.** p1 (exFAT) is still entry 1, so `/dev/block/mmcblk0p1` in TWRP, the
+  Linux initrd (`SDDEV=/dev/mmcblk0p1`), card-install.sh and Android's vold see the same thing; p2 is
+  entry 2, the loader's first 0xDA entry and store-flash-sd.sh's `mmcblk0p2`. Only its position differs.
+- **One tail rule for both layouts: the last 64 MiB of the 0xDA partition.** On `sd128` p2 ends at the
+  card's end, so that is today's 249868288 / 249999359; sbstore2.py's tail check already said "the last
+  16384 blocks of p2". The kernel change in 11.5 uses exactly this rule.
+- exFAT no longer starts at the card's beginning (where SD controllers expect the FAT); p1 is 4 MiB
+  aligned as on `sd128`. Worth a speed check on the phone (11.7).
+- Any card that is not S9 #1's exact card gets `sd64`, including a 128 GB card of another brand (then
+  without iOS 26). A "big card" variant could add an iOS 26 slot behind the macOS root at a fixed sector;
+  not made, since the edge pair is parked.
+
+### 11.4 What was implemented (host side)
+
+- `tools/store/cardlayout.py`: the table (`sd128`, `sd64`); card fit and identification (`for_card`,
+  `identify`); boot-args and SWEETXNU payload retargeting (`retarget_cmdline`, `retarget_payload`: only the
+  608-byte cmdline at offset 0x48 changes; no checksum covers it, and the store's CRC is made when the
+  store is built); catalog roots for a layout (`catalog_text`: entries without a slot are hidden and their
+  root says so; keys are kept, so sbstore2.py `--import` still accepts it); a CLI (`show`, `for-card`,
+  `manifest`, `cmdline`, `payload`, `payload-root`, `catalog`). Standard library only.
+- `tools/store/sbstore2.py`: `MEDIA` and the tail from the table; `--medium sd64` with its store-area check;
+  `header` reports the store area. `--medium sd` builds exactly as before.
+- `tools/macos/card-range-flash.py`: constants from the table; `--layout sd128|sd64`. Without it unchanged.
+- Installer: `[card] layout` and `card:root:KEY`, with root-slot checks at load; `--verify-bundle` (and every
+  run) refuses a bundle whose catalog roots or payload `sdroot=` do not match its layout
+  (`manifest.layout_problems`); preflight checks the card against the layout and names the layout a card
+  needs; the MBR and exFAT steps use the layout's p1/p2 for the card in the phone; a card with the other
+  Starbite layout is BLOCKED (both named) unless `--erase-card`; `card-range-flash.py` gets `--layout sd64`
+  (never for `sd128`, whose command line stays the one it always was); the plan prints the layout and its
+  `PENDING` items (11.5); `--describe-phone` names the card's layout.
+- Fakes: `fakephone.py create --card starbite --layout sd64`; `mkbundle.py OUT --layout sd64` builds the
+  bundle the way a real bundle builder would (below); the fake `adb`'s `dd` no longer truncates
+  block-device stand-ins (section 8).
+
+Making a real `sd64` bundle from the `sd128` parts (no rebuild):
+
+```sh
+python3 tools/store/cardlayout.py catalog sd64 tools/store/catalog.toml BUNDLE/store/catalog.toml
+python3 tools/store/cardlayout.py payload sd64 mac13 out/xnu-mac13-v33.xnu out/xnu-mac13-v33-sd64.xnu
+python3 tools/store/sbstore2.py build BUNDLE/store/ufs-store.img --medium ufs --catalog BUNDLE/store/catalog.toml \
+    --import build/store/ufs-store-mac13-v33.img --omit ios26-sd.xnu --omit ios26-sdt.xnu \
+    mac13-v33.xnu=out/xnu-mac13-v33-sd64.xnu:xnu ...
+python3 tools/store/sbstore2.py build BUNDLE/store/sd-store.img --medium sd64 engineer.img=...
+# installer-manifest.toml: [card] layout = "sd64" (no sectors/p1/p2); mac13-root dest = "card:root:mac13";
+# no ios26-root item. Then --update-hashes and --verify-bundle, which checks all of the above.
+```
+
+The macOS root image is the same file on both layouts (HFSX does not know where it sits).
+
+### 11.5 What needs a rebuild (not done)
+
+**The XNU kernel's clock and log sectors.** On `sd64` today's kernel boots macOS Ventura from
+`sdroot=lba:139264,31457280` (the driver is generic), but `sdlog=1` and the SBTIME01 clock are tied to the
+249,999,360-sector card. So on `sd64` there is no clock from the card (macOS starts at 1970) and no kernel
+log in the tail. The change, as one new patch after 0395 in `xnu/series-12377` (`bsd/dev/starlte_sd.c`):
+
+1. Once the card is up (`sd_up_locked`, after the CSD), read sector 0 and take the first primary MBR entry
+   of type 0xDA with a 4 KiB-aligned start and at least 131,072 + 8 sectors (the loader's `sd_store_area`
+   rule): `sd_tail_first = start + count - 131072`, `sd_tail_end = start + count`; both 0 when there is none.
+2. 0370/0377 `starlte_sd_dump_log`: `sd.card_sectors != 249999360ULL` becomes `!sd_tail_end`, and
+   `first = 249868288ULL` becomes `first = sd_tail_first`.
+3. 0393: `SD_TIME_SECTOR` becomes `sd_tail_end - 1` (both uses), the guard `sd.card_sectors != 249999360ULL`
+   becomes `!sd_tail_end`; 0395: both `sd.card_sectors == 249999360ULL` become `sd_tail_end != 0`.
+
+On `sd128` that gives 249868288 and 249999359, today's sectors: same bytes, same behaviour. Then:
+`tools/build-xnu-12377.sh` (Mac, Xcode 16.4, KDK 26.5), the Ventura kernel that `tools/macos/mac13-payload.sh:10`
+reads (`out/kernel.development.starlte-12377-ventura`), a new `mac13-vN` payload from `build/macos13-user.txt`,
+and for `sd64` `cardlayout.py payload sd64 mac13` on it. The host side follows in `tools/store/boot-next.sh`:
+the clock at the layout's `clock_sector` and the log at its `tail.start`, for the layout `identify` finds on
+the card. Until that kernel exists this would only write a sector nobody reads, so it waits for it. The plan
+screen lists all of this as `PENDING` for `sd64` (from `cardlayout.py`'s `pending`).
+
+Nothing else needs a rebuild: the loader, Engineer OS, the Linux kernel and initrd, and the iOS 16.5 path
+have no card sectors in them.
+
+**Found on the way (`sd128`, not changed):** the 128 GB card's store area is only 1 MiB (256 blocks)
+before the iOS 26 root, but `sbstore2.py --medium sd` refuses only at the tail. A card store above 1 MiB
+(say with the Engineer OS fallback copy) would be written over the head of the iOS 26 root by
+store-flash-sd.sh. `sbstore2.py header` now prints `sd128 store area ...: OVERLAPPED by N blocks` for such
+a store; making `--medium sd` refuse it is a one-line change, left for the user to approve.
+
+### 11.6 Tests and the rehearsal
+
+- `tools/installer/tests/test_cardlayout.py` (18 tests): the layout rules (alignment, the areas tile p2,
+  store first, tail last, clock sector); `sd128` equal to every constant still spelled out elsewhere
+  (sbstore2.py, card-range-flash.py, fakephone.py, boot-next.sh, the XNU patches 0370/0393/0395, the
+  catalog roots, the example manifest); `sd64` on 60 GB, 64 GB, 128 GB and 256 GB cards; refusals (a 32 GB
+  card, one sector short, `sd128` on another card); `for_card` and `identify`; cmdline and payload
+  retargeting (identity on `sd128`, only the cmdline field changes, refusals); catalog conversion (identity
+  on `sd128`, iOS 26 hidden, packs with sbstore2.py); `sbstore2.py --medium sd64`;
+  `card-range-flash.py --check-only` through the fake adb on small sparse fake cards (default path,
+  `--layout sd64`, tail/store/p1 ranges refused, an `sd128` MBR under `--layout sd64` named, no MBR, a
+  32 GB card); manifest `layout` / `card:root:` and their refusals; `layout_problems` for matching and
+  mismatched payloads and catalogs.
+- `tools/installer/rehearse.sh` section 14 (24 checks): an `sd64` bundle on a fake SanDisk 64 GB card is
+  verified; the `sd128` bundle is refused on it (and says which layout the card needs); an `sd64` bundle
+  carrying the 128 GB card's payloads is refused; the dry run writes nothing; the rehearsal writes
+  everything; the fake card then has the `sd64` MBR, a 3,964,928-block store, the macOS root at 139264 and
+  the Linux files; a second run writes nothing; an `sd64` bundle on a card with S9 #1's layout is BLOCKED
+  with both layout names, and laid out with `--erase-card` (same p2, p1 218,271,744 sectors).
+- Run 2026-11-06 (macOS): unit tests 77/77 OK; `rehearse.sh` 87 passed, 0 failed. Sections 1-13 (the 128 GB
+  card) are the same 63 checks as before, all passing.
+
+Section 14 of the run (shortened):
+
+```
+######## 14. a 64 GB card: the sd64 card layout (tools/store/cardlayout.py; docs/INSTALLER.md 11)
+rehearsal bundle in build/installer-rehearsal/bundle64 (sd64 card layout)
+ok  card layout sd64: catalog roots and payload sdroot= match (mac13 139264)
+ok  bundle verified: 14 items; optional items not in it: windows
+REFUSED: preflight failed:
+PASS the 128 GB card's bundle (sd128) on a 64 GB card is refused (exit 2)
+PASS ...because sd128 is S9 #1's card only
+PASS ...and says which layout this card needs
+REFUSED: the bundle does not match its card layout (sd64):
+PASS an sd64 bundle carrying the 128 GB card's payloads is refused (exit 2)
+PASS names the payload and both sectors
+  3  write  microSD partition table (p1 exFAT, p2 raw)  microSD sector 0
+  14  write  macOS Ventura root (HFSX, 15 GiB)  microSD sectors 139264..  3.0 MiB  tools/macos/card-range-flash.py
+WARN card layout sd64: PENDING: XNU kernel: the SBTIME01 clock and the sdlog ring are read/written only on ...
+PASS sd64 dry run: the fake phone is byte-identical
+PASS p2 first (fixed), p1 exFAT to the card's end
+PASS card-range-flash.py is called with --layout sd64
+ok  card MBR written and read back; partitions re-read
+ok  mac13-root: verified on the phone (read back)
+  written 14, skipped 1, kept 0; 51 write commands ran
+  MBR: p1 (7, 31727616, 93007872), p2 (218, 8192, 31719424): sd64
+PASS sd64 card: MBR, store capacity, macOS root and Linux files as the layout says
+  written 0, skipped 10, kept 8; 0 write commands ran
+REFUSED: the plan has blocked steps: microSD partition table (p1 exFAT, p2 raw): the card has the Starbite
+  sd128 card layout and this bundle is made for sd64 (p1 type 0x07 8192+182878208, p2 type 0xda ...); ...
+PASS ...with --erase-card the 128 GB card is laid out as sd64 (exit 0)
+PASS sd64 on a 128 GB card: same p2, a bigger p1
+######## result: 87 passed, 0 failed
+```
+
+### 11.7 What needs the real phone (and a 64 GB card)
+
+Nothing here touched S9 #1 or its card, and `sd128` is unchanged, so S9 #1 needs nothing. To prove
+`sd64`, with a spare card of 64 GB or more in the phone (the 128 GB card set aside, backed up first):
+1. TWRP mounting p1 when p1 is not at the card's start (`mount -t exfat /dev/block/mmcblk0p1`), and
+   `blockdev --rereadpt` picking up the `sd64` MBR.
+2. The loader's card store at sector 8192 (Engineer > Storage > Card store at boot), and Engineer OS from it.
+3. macOS Ventura from `sdroot=lba:139264,31457280` with today's kernel: the driver's "past the store's
+   used end" and "no exFAT overlap" checks at the new positions, boot to the desktop; the clock stays at
+   1970 until the 11.5 kernel.
+4. The Linux distros and ChromiumOS from p1 (initrd `SDDEV=/dev/mmcblk0p1`), and Android 17's vold
+   showing only p1, with no format offer.
+5. exFAT speed on p1 away from the card's start (SD controllers tune their first allocation units for FAT).
+6. After 11.5: the clock and the sdlog ring in the `sd64` tail, and `boot-next.sh` reading them.

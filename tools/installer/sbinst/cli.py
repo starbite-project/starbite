@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import manifest as mf
 from . import rescue
-from .common import INSTALLER_DIR, Refused, Stopped, default_state_dir, human
+from .common import INSTALLER_DIR, Refused, Stopped, cardlayout, default_state_dir, human
 from .device import Phone, Runner
 from .steps import Installer, mbr_parts
 from .ui import UI
@@ -91,6 +91,12 @@ def describe_phone(ui, runner):
     for n, (t, s, c) in enumerate(parts[:2], 1):
         if c:
             ui.emit(f'p{n} = {{ type = 0x{t:02x}, start = {s}, sectors = {c} }}')
+    name = cardlayout.identify(parts, f.card or 0)
+    fits = cardlayout.for_card(f.card or 0)
+    lay = cardlayout.LAYOUTS.get(name)
+    ui.emit(f'# card layout: {name or "none of tools/store/cardlayout.py"}' +
+            (' (in a manifest: layout = "sd64" without sectors/p1/p2)' if lay is not None and not lay.exact else '') +
+            (f'; this card fits the {fits} layout (`layout = "{fits}"`)' if fits and fits != name else ''))
     return 0
 
 
@@ -137,6 +143,12 @@ def main(argv=None):
             ui.info(f'{"ok  " if it.present else "--  "} {it.key:<16} {it.file or it.action:<40} -> {it.dest}')
         if problems:
             raise Refused('the bundle does not match its manifest:\n  ' + '\n  '.join(problems))
+        lay = mf.layout_problems(m)
+        if lay:
+            raise Refused(f'the bundle does not match its card layout ({m.card_layout.name}):\n  ' + '\n  '.join(lay))
+        if m.card_layout is not None:
+            ui.ok(f'card layout {m.card_layout.name}: catalog roots and payload sdroot= match '
+                  f'({", ".join(f"{r.name} {r.start}" for r in m.card_layout.roots())})')
         missing = [i.key for i in m.items if not i.present]
         ui.ok(f'bundle verified: {len(m.items) - len(missing)} items' +
               (f'; optional items not in it: {", ".join(missing)}' if missing else ''))
