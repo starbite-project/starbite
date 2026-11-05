@@ -114,16 +114,17 @@ RELEASE = {
     'ios16': ('release/ios16/ios-16-num-256x256_2x.png', DEV_ICONS + 'ios-16-num/ios-16-num-256x256_2x.png',
               '8bb8a4512731a939c86eef1b20bd68ec7fea930e3c9497569b2ed4320e8c3616',
               "iOS 16 icon: Apple Inc. (developer.apple.com); Apple's copyright and trademark", 'bleed'),
-    'ios26': ('release/ios26/ios-26-256x256_2x.png', DEV_ICONS + 'ios-26/ios-26-256x256_2x.png',
-              'b6752a31066de2f524a31302f6954b89d6a29b797499b81c874e4fd4d97a4e28',
-              "iOS 26 icon: Apple Inc. (developer.apple.com); Apple's copyright and trademark", 'bleed'),
-    # the Install macOS Ventura app's App Store artwork (app id 1638787999): a round badge
-    'mac13': ('release/mac13/InstallAssistant-512x512bb.png',
-              'https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/0d/53/b3/'
-              '0d53b3bb-70ee-a0f9-6ecd-237260e13725/InstallAssistant.png/512x512bb.png',
-              '3de4f8f255bba5b1ac5675c4d678489a529bae03e044b619e9533d3e2ef44ecf',
-              "macOS Ventura installer icon: Apple Inc. (App Store artwork); Apple's copyright and "
-              'trademark', .80),
+    'ios26': ('release/ios26/ios-ipados-26-256x256_2x.png', DEV_ICONS + 'ios-ipados-26/ios-ipados-26-256x256_2x.png',
+              '2799c661d348a612dac1ad197fb43b5f9f2b2ab9e840d521e83102a103f1a9b7',
+              "iOS 26 icon (the 26 numeral): Apple Inc. (developer.apple.com); Apple's copyright and trademark", 'bleed'),
+    # the macOS Ventura icon (the round wallpaper disc) from Apple's Mac User Guide for macOS 13
+    # (support.apple.com/guide/mac-help/welcome/13.0/mac, its landing art "AppLanding_macOS")
+    'mac13': ('release/mac13/macos-ventura-userguide-400.png',
+              'https://help.apple.com/assets/63BCA927AAE78C58DD7FBE35/63BCA92EAAE78C58DD7FBE76/en_US/'
+              'ba4de10ea93536361680a5dea7896f66.png',
+              'd23ece9cc256e64b46115b1cf47062c9df653c357b1fcd1c0ac42f4fcd5dda23',
+              "macOS Ventura icon: Apple Inc. (Mac User Guide for macOS 13); Apple's copyright and "
+              'trademark', .86),
     # the Android 17 badge from the stable release post (on white: _matte_white below)
     'android': ('release/android/metadata-static.png',
                 'https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEgV7zuuXjulHty999mGDWY1kfL8Q9SXjY'
