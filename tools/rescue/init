@@ -1,0 +1,228 @@
+#!/bin/sh
+# Project Starbite: Starbite Rescue mode /init (tools/rescue/README.md, docs/STARBITE-RECOVERY.md).
+#
+# The loader starts this ramdisk when the Starbite Recovery menu (hold Bixby at boot) picks
+# "Starbite Rescue mode", or after `reboot-to rescue`. It asks for a Starbite rescue disk, made by
+# the Starbite Installer: a USB mass-storage disk (or a microSD card) with a filesystem labelled
+# STARBITE-RESCUE holding /starbite-rescue/rescue.sh. When one appears it is mounted read-only,
+# checked against /starbite-rescue/rescue.sha256 if present, and rescue.sh runs.
+#
+# Keys (polled with devmem, as tools/linux/init): Power held 2 s reboots to the Starbite menu;
+# Volume Up rescans now; Volume Down switches the USB port to device mode and starts a serial
+# shell (CDC-ACM) for a Mac or PC, for debugging the rescue system itself.
+#
+# Every UFS block device is read-only until rescue.sh says otherwise (blockdev --setrw on the one
+# partition it restores). A rescue script must never write EFS, CPEFS, PARAM, KEYSTORAGE,
+# PERSISTENT, STEADY, BOTA*, DTB, DTBO, the GPT or the boot LUNs.
+#
+# SB_TEST=1 sources this file without running it (host tests of the helpers).
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+LABEL=STARBITE-RESCUE
+MNT=/rescue
+LOG=/run/rescue.log
+GPA0_DAT=0x14050024                                # bit 3 Vol up, bit 4 Vol down (active low)
+GPA2_DAT=0x14050064                                # bit 4 Power (active low)
+
+# ==== helpers (no side effects except where named) ===========================================
+
+say() {                                            # the screen (fbcon on tty0) and the log
+	echo "$*" > /dev/tty0 2>/dev/null
+	echo "$*" >> "$LOG" 2>/dev/null
+	echo "rescue: $*" > /dev/kmsg 2>/dev/null
+	return 0
+}
+
+key_down() {                                       # key_down up|down|power
+	case $1 in
+	up) a=$GPA0_DAT; m=0x08 ;;
+	down) a=$GPA0_DAT; m=0x10 ;;
+	power) a=$GPA2_DAT; m=0x10 ;;
+	*) return 1 ;;
+	esac
+	v=$(devmem $a 32 2>/dev/null) || return 1
+	[ $(( v & m )) -eq 0 ]
+}
+
+# is_usb_disk NAME: sdX on the USB bus (UFS LUNs are sdX too, under the UFS host).
+is_usb_disk() {
+	p=$(readlink -f "/sys/block/$1" 2>/dev/null)
+	case $p in */usb[0-9]*/*) return 0 ;; esac
+	return 1
+}
+
+# candidates: block devices a rescue disk can be: USB disks and their partitions, microSD partitions.
+candidates() {
+	for b in /sys/block/sd*; do
+		[ -e "$b" ] || continue
+		n=${b##*/}
+		is_usb_disk "$n" || continue
+		found=
+		for p in /sys/block/"$n"/"$n"[0-9]*; do
+			[ -e "$p" ] || continue
+			echo "/dev/${p##*/}"
+			found=1
+		done
+		[ -n "$found" ] || echo "/dev/$n"      # a superfloppy (no partition table)
+	done
+	for p in /sys/block/mmcblk*/mmcblk*p[0-9]*; do
+		[ -e "$p" ] && echo "/dev/${p##*/}"
+	done
+	return 0
+}
+
+# find_rescue: the first candidate whose filesystem label is STARBITE-RESCUE.
+find_rescue() {
+	for d in $(candidates); do
+		[ -b "$d" ] || continue
+		l=$(blkid -s LABEL -o value "$d" 2>/dev/null)
+		[ -z "$l" ] && l=$(blkid "$d" 2>/dev/null | sed -n 's/.* LABEL="\([^"]*\)".*/\1/p')
+		[ "$l" = "$LABEL" ] && { echo "$d"; return 0; }
+	done
+	return 1
+}
+
+[ "$SB_TEST" = 1 ] && return 0
+
+# ==== hardware ==============================================================================
+
+lock_ufs() {
+	for b in /sys/block/sd*; do
+		[ -e "$b" ] || continue
+		n=${b##*/}
+		is_usb_disk "$n" && continue
+		blockdev --setro "/dev/$n" 2>/dev/null
+		for p in /dev/"$n"[0-9]*; do
+			[ -b "$p" ] && blockdev --setro "$p" 2>/dev/null
+		done
+	done
+}
+
+# USB host mode. The DWC3 at 0x10C00000 is dr_mode "peripheral" in today's DTB; a rescue kernel
+# needs "host" or "otg" + usb-role-switch, VBUS from the MAX77705 (reverse boost / OTG) and the
+# Type-C port in source role (README.md "Kernel"). Each way is tried; none is an error here.
+usb_host() {
+	for r in /sys/class/usb_role/*/role; do
+		[ -w "$r" ] && echo host > "$r" 2>/dev/null
+	done
+	mount -t debugfs none /sys/kernel/debug 2>/dev/null
+	for m in /sys/kernel/debug/*.usb/mode /sys/kernel/debug/usb/*.usb/mode; do
+		[ -w "$m" ] && echo host > "$m" 2>/dev/null
+	done
+	for v in /sys/class/power_supply/*/otg /sys/class/power_supply/*/usb_otg; do
+		[ -w "$v" ] && echo 1 > "$v" 2>/dev/null
+	done
+	return 0
+}
+
+usb_device_shell() {
+	for r in /sys/class/usb_role/*/role; do
+		[ -w "$r" ] && echo device > "$r" 2>/dev/null
+	done
+	for m in /sys/kernel/debug/*.usb/mode /sys/kernel/debug/usb/*.usb/mode; do
+		[ -w "$m" ] && echo device > "$m" 2>/dev/null
+	done
+	mount -t configfs none /sys/kernel/config 2>/dev/null
+	G=/sys/kernel/config/usb_gadget/rescue
+	mkdir -p $G/strings/0x409 $G/functions/acm.GS0 $G/configs/c.1/strings/0x409 || return 1
+	echo 0x1d6b > $G/idVendor
+	echo 0x0104 > $G/idProduct
+	echo Starbite > $G/strings/0x409/manufacturer
+	echo "Galaxy S9 Rescue" > $G/strings/0x409/product
+	echo ACM > $G/configs/c.1/strings/0x409/configuration
+	ln -s $G/functions/acm.GS0 $G/configs/c.1/ 2>/dev/null
+	udc=$(ls /sys/class/udc 2>/dev/null | head -1)
+	[ -n "$udc" ] && echo "$udc" > $G/UDC || return 2
+	( while :; do [ -c /dev/ttyGS0 ] && setsid sh -c 'exec sh -l </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done ) &
+	return 0
+}
+
+reboot_menu() {
+	say "Rebooting to the Starbite menu"
+	sync
+	devmem 0x1406080C 32 0x12345670 2>/dev/null       # INFORM: normal boot
+	echo b > /proc/sysrq-trigger
+	sleep 5
+}
+
+# run_rescue DEV: mount it, check it, run its script. Returns the script's status.
+run_rescue() {
+	dev=$1
+	mkdir -p $MNT
+	mount -o ro "$dev" $MNT 2>/dev/null || { say "Cannot mount $dev"; return 90; }
+	d=$MNT/starbite-rescue
+	if [ ! -f $d/rescue.sh ]; then
+		say "$dev is labelled $LABEL but has no starbite-rescue/rescue.sh"
+		umount $MNT
+		return 91
+	fi
+	if [ -f $d/rescue.sha256 ]; then
+		say "Checking the rescue files..."
+		( cd $d && sha256sum -c rescue.sha256 >> "$LOG" 2>&1 ) || {
+			say "CHECKSUM MISMATCH: not running this rescue disk"
+			umount $MNT
+			return 92
+		}
+	fi
+	say "Running the rescue script from $dev"
+	RESCUE_ROOT=$MNT RESCUE_DIR=$d RESCUE_DEV=$dev RESCUE_LOG=$LOG \
+		sh $d/rescue.sh > /dev/tty0 2>&1 < /dev/null
+	st=$?
+	say "Rescue script finished (status $st)"
+	cp "$LOG" /run/rescue-last.log 2>/dev/null
+	return $st
+}
+
+# ==== main ==================================================================================
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /run /tmp
+mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /tmp
+: > "$LOG"
+printf '\033[2J\033[H' > /dev/tty0 2>/dev/null
+say "=============================================="
+say "  STARBITE RESCUE MODE"
+say "=============================================="
+say ""
+say "Connect a Starbite rescue USB disk"
+say "(made by the Starbite Installer, label $LABEL)."
+say ""
+say "Power (hold 2 s): reboot to the Starbite menu"
+say "Volume Up: look again   Volume Down: USB serial shell"
+say ""
+lock_ufs
+usb_host
+
+held=0
+shown=
+while :; do
+	lock_ufs                                       # late UFS LUNs too
+	dev=$(find_rescue)
+	if [ -n "$dev" ]; then
+		run_rescue "$dev"
+		say "Remove the rescue disk, or hold Power to reboot."
+		while [ -n "$(find_rescue)" ]; do
+			key_down power && reboot_menu
+			sleep 1
+		done
+		say "Waiting for a Starbite rescue USB disk..."
+		continue
+	fi
+	[ -n "$shown" ] || { say "Waiting for a Starbite rescue USB disk..."; shown=1; }
+	if key_down power; then
+		held=$((held + 1))
+		[ $held -ge 4 ] && reboot_menu
+	else
+		held=0
+	fi
+	if key_down down; then
+		say "USB serial shell: connect the phone to a computer (115200 8N1)"
+		usb_device_shell || say "No USB device controller"
+		while key_down down; do sleep 0.2; done
+	fi
+	key_down up && say "Looking again..."
+	sleep 0.5
+done
