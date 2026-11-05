@@ -32,6 +32,17 @@ uint64_t hw_freq(void);
 #define AH 740
 #define BW 180                      /* blur B */
 #define BH 370
+/* The canvas (MV4 route 2): every layer below the content is composed on the half-resolution grid,
+ * canvas pixel (i, j) = the panel point (2i + 1, 2j + 1), the wallpaper texture's own texels and the
+ * grid the glass has been shaded on since round 3. Geometry stays in panel px. The present scales
+ * the canvas 2x to the panel (bilinear, the weights the glass's upsample had) and draws the content
+ * items there at panel resolution, so text, icons and tiles stay sharp. G7_CANVAS, G7_SHARP (GLB,
+ * the frozen base), G7_BASE (BG8), TPL and SOFT are canvas-sized. */
+#define CW WW
+#define CH WH
+/* a panel range [p0, p1) -> the canvas samples it can change, with one sample of margin */
+static inline int c_lo(int p, int n) { int v = (p >> 1) - 1; return v < 0 ? 0 : v > n ? n : v; }
+static inline int c_hi(int p, int n) { int v = ((p + 1) >> 1) + 1; return v < 0 ? 0 : v > n ? n : v; }
 
 /* G7_POOL layout (18 MiB). Sizes in bytes. */
 #define PL_WALL_BYTES (4UL * WW * WH)                   /* 4 262 400 */
@@ -261,6 +272,7 @@ void gw_vrow_a(float py, int t0, int t1, float *o, int stride);
 void gw_vrow_b(float py, int t0, int t1, float *o, int stride);
 void gw_row_wall(int y, int x0, int x1, float *rgb);  /* the texture at panel res (BASE not valid) */
 void gw_row_wall8(int y, int x0, int x1, float dim, uint32_t *dst);  /* x dim, dithered */
+void gw_crow_wall8(int j, int i0, int i1, float dim, uint32_t *dst); /* canvas row j: texels x dim, dithered */
 /* rows at an arbitrary panel y (for the half resolution render) */
 void gw_row_b_at(float py, int n, float px0, float dpx, float *rgb);
 void gw_row_a5_at(float py, int n, float px0, float dpx, float *rgb);
@@ -308,11 +320,14 @@ uint32_t gs_class_mask(int layer, float py, int s1);
 /* shape si's coverage as shade() takes it (edge AA x alpha x the viewport fade) on the row at py,
  * pixels x0 .. x1 - 1; returns 1 on a corner or top / bottom edge row (it changes from row to row) */
 int gs_cover_row(int layer, int si, float py, int x0, int x1, float *cov);
+/* the same at n points px0 + k dpx (the canvas grid) */
+int gs_cover_row_g(int layer, int si, float py, float px0, float dpx, int n, float *cov);
 int gs_nshapes(int layer);
 /* the glass wordmark over a base row */
 void gs_word_prepare(const struct g7_word *w, const struct gs_ctx *c);
 int gs_word_rows(int *y0, int *y1, int *x0, int *x1);
 void gs_word_row(const struct gs_ctx *c, float py, int x0, int n, float *acc);
+void gs_word_row_g(const struct gs_ctx *c, float py, float px0, float dpx, int n, float *acc);
 /* dither and store: out = floor(255 acc + hash) for gl_FragCoord (x + .5, 2960 - y - .5) */
 void gs_store_row(uint32_t *dst, int y, int x0, int n, const float *acc);
 /* over layer composite: dst = acc al + dst (1 - al), dithered */
@@ -330,6 +345,8 @@ struct gd_target {
 void gd_items(const struct g7_layer *l, const int16_t (*bounds)[4], const struct gd_target *t);
 void gd_items_range(const struct g7_layer *l, const int16_t (*bounds)[4], const struct gd_target *t, unsigned i0,
                     unsigned i1);                /* items i0 .. i1 - 1 */
+void gd_items_list(const struct g7_layer *l, const int16_t (*bounds)[4], const struct gd_target *t,
+                   const uint16_t *idx, unsigned n);   /* items idx[0 .. n - 1], in that order */
 /* an item's drawn bounds in panel px (x0, y0, x1, y1), 0 if it draws nothing */
 int gd_bounds(const struct g7_layer *l, const struct g7_item *it, int16_t b[4]);
 int gd_init(void);

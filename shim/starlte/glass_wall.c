@@ -486,14 +486,38 @@ void gw_row_wall8(int y, int x0, int x1, float dim, uint32_t *dst)
         dst[x - x0] = wall_px(x, t0, k255, Y);
 }
 
-/* BG8 (G7_BASE): the final wallpaper x .8, dithered, what every pixel without glass shows */
+/* a canvas row of the texture x dim, dithered (canvas pixel (i, j) is texel (i, j)): 8 bytes of
+ * each channel widened, scaled in float, the dither added, 8 pixels a step */
+void gw_crow_wall8(int j, int i0, int i1, float dim, uint32_t *dst)
+{
+    const uint32_t *T = TEX(P_TMP) + (unsigned)j * WW;
+    float Y = gs_dither_y(j), k = dim;
+    int i = i0;
+    const float32x4_t vk = vdupq_n_f32(k);
+    for (; i + 8 <= i1; i += 8) {
+        float32x4_t c[3][2];
+        g_unpack8(T + i, c);
+        float32x4_t h0 = g_dither4(i, Y), h1 = g_dither4(i + 4, Y);
+        vst1q_u32(dst + (i - i0), g_pack4(vfmaq_f32(h0, c[0][0], vk), vfmaq_f32(h0, c[1][0], vk), vfmaq_f32(h0, c[2][0], vk)));
+        vst1q_u32(dst + (i - i0) + 4,
+                  g_pack4(vfmaq_f32(h1, c[0][1], vk), vfmaq_f32(h1, c[1][1], vk), vfmaq_f32(h1, c[2][1], vk)));
+    }
+    for (; i < i1; i++) {
+        uint32_t v = T[i];
+        float h = g_dither(i, Y);
+        dst[i - i0] = 0xff000000U | g_q255((float)CR(v) * k + h) << 16 | g_q255((float)CG(v) * k + h) << 8 |
+                      g_q255((float)CB(v) * k + h);
+    }
+}
+
+/* BG8 (G7_BASE): the final wallpaper x .8, dithered, what every pixel without glass shows (canvas) */
 void gw_base(void)
 {
     uint32_t *base = (uint32_t *)G7_BASE;
-    for (int y = 0; y < GH; y++) {
-        if (!(y & 15))
+    for (int j = 0; j < CH; j++) {
+        if (!(j & 31))
             g7_poll();
-        gw_row_wall8(y, 0, GW, .8f, base + (unsigned)y * GW);
+        gw_crow_wall8(j, 0, CW, .8f, base + (unsigned)j * CW);
     }
 }
 

@@ -1074,16 +1074,13 @@ void gd_items(const struct g7_layer *l, const int16_t (*bounds)[4], const struct
 {
     gd_items_range(l, bounds, t, 0, l->nitem);
 }
-void gd_items_range(const struct g7_layer *l, const int16_t (*bounds)[4], const struct gd_target *t, unsigned i0,
-                    unsigned i1)
+static void draw_item(const struct g7_layer *l, const int16_t (*bounds)[4], const struct gd_target *t, unsigned i)
 {
-    if (i1 > l->nitem)
-        i1 = l->nitem;
-    for (unsigned i = i0; i < i1; i++) {
+    {
         const struct g7_item *it = &l->item[i];
         const int16_t *b = bounds[i];
         if (b[2] <= b[0] || it->a <= 0.f)
-            continue;
+            return;
         struct dc c;
         c.t = t;
         c.a = it->a;
@@ -1098,7 +1095,7 @@ void gd_items_range(const struct g7_layer *l, const int16_t (*bounds)[4], const 
         c.x1 = x1 < t->x1 ? x1 : t->x1;
         c.y1 = y1 < t->y1 ? y1 : t->y1;
         if (c.x0 >= c.x1 || c.y0 >= c.y1)
-            continue;
+            return;
         if (it->clip && it->clip < l->nclip && l->clip[it->clip].r > 0.f)
             c.clip = &l->clip[it->clip];
         switch (it->kind) {
@@ -1133,6 +1130,21 @@ void gd_items_range(const struct g7_layer *l, const int16_t (*bounds)[4], const 
             break;
         }
     }
+}
+void gd_items_range(const struct g7_layer *l, const int16_t (*bounds)[4], const struct gd_target *t, unsigned i0,
+                    unsigned i1)
+{
+    if (i1 > l->nitem)
+        i1 = l->nitem;
+    for (unsigned i = i0; i < i1; i++)
+        draw_item(l, bounds, t, i);
+}
+void gd_items_list(const struct g7_layer *l, const int16_t (*bounds)[4], const struct gd_target *t,
+                   const uint16_t *idx, unsigned n)
+{
+    for (unsigned k = 0; k < n; k++)
+        if (idx[k] < l->nitem)
+            draw_item(l, bounds, t, idx[k]);
 }
 
 int gd_init(void)

@@ -457,6 +457,21 @@ int gs_cover_row(int layer, int si, float py, int x0, int x1, float *cov)
     }
     return corner || edge;
 }
+int gs_cover_row_g(int layer, int si, float py, float px0, float dpx, int n, float *cov)
+{
+    const struct gsh *s = &SH[layer][si];
+    float fade = g_smooth(170.f, 246.f, py) * (1.f - g_smooth(2480.f, 2620.f, py));
+    float al = s->clip ? s->alpha * fade : s->alpha, iaa = 1.f / s->aa, qy = py - s->cy;
+    float ay = g_abs(qy);
+    int edge = ay > s->hby - 2.f * s->aa - 1.f;
+    int corner = ay > s->hby - s->r - 1.f;
+    float in = edge ? -1.f : corner ? s->hbx - s->r - 1.f : s->hbx - 2.f * s->aa - 1.f;
+    for (int k = 0; k < n; k++) {
+        float qx = px0 + (float)k * dpx - s->cx;
+        cov[k] = g_abs(qx) <= in ? al : g_sat(.5f - sdq(s, qx, qy) * iaa) * al;
+    }
+    return corner || edge;
+}
 int gs_nshapes(int layer) { return NSH[layer]; }
 
 /* One shape's row, the per-pixel GLASS_FS for pixels i0 .. i1 - 1 (any class). */
@@ -1120,13 +1135,17 @@ static inline float fld(float px, float py)
 
 void gs_word_row(const struct gs_ctx *c, float py, int x0, int n, float *acc)
 {
+    gs_word_row_g(c, py, (float)x0 + .5f, 1.f, n, acc);
+}
+void gs_word_row_g(const struct gs_ctx *c, float py, float px0, float dpx, int n, float *acc)
+{
     if (!WD.on)
         return;
     float lit = 1.f - c->soft * .85f, rimk = g_max(2.f, c->K * 1.1f);
     const float bez = 18.f;
     float dyq = (py - WD.cap.spy) * WD.cap.sdy, ey = g_exp(-2.2f * dyq * dyq);
     for (int i = 0; i < n; i++) {
-        float px = (float)(x0 + i) + .5f;
+        float px = px0 + (float)i * dpx;
         float f0 = fld(px, py);
         if (f0 <= .02f)
             continue;
