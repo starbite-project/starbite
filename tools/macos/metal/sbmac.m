@@ -52,6 +52,12 @@ static void sblog(const char *fmt, ...)
 		fd = open("/dev/console", O_WRONLY | O_NOCTTY | O_NONBLOCK);
 	if (fd >= 0)
 		write(fd, line, (size_t)n);
+	/* the console drops lines (O_NONBLOCK, busy): a copy on the root, read from the card afterwards */
+	static int file = -2;
+	if (file == -2)
+		file = open("/private/var/local/sbmac.log", O_WRONLY | O_APPEND | O_CREAT, 0666);
+	if (file >= 0)
+		write(file, line, (size_t)n);
 	if (getenv("SBMTL_STDERR"))
 		write(2, line, (size_t)n);
 }
