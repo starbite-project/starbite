@@ -30,6 +30,25 @@ guidelines use a monochrome version (Apple: white) and the removals listed. No e
 Not real logos (kept from the concept, they are Starbite's own): the Starbite star, the Lab flask, the
 `>_` tile of the Starbite shell, the Display Test bars, and the "other" ring.
 
+## Release icons (`src/release/<catalog key>/`, slots ready, no files yet)
+
+A tile can show the icon of its release instead of the vendor logo: put the file (SVG, or PNG at
+the largest size published) in `src/release/<key>/` and pin it in `menu7_logos.RELEASE[<key>]`
+(file, URL, sha256, credit line for INFO, mode) with a row in the table below. An unpinned file
+stops the build and prints its sha256; without a file the vendor-logo tile above stays (the
+container is then byte-identical). Mode `bleed`: an app icon with its own background, cropped
+to its bounds and filling the tile, cut to the squircle; `fit`: a mark at .62 of the tile on the
+vendor tile's colours. Slots: `ios16`, `mac13`, `ios26` (bleed), `android`, `linux-ubuntu` (fit).
+
+| Key | Candidate (2026-11-05, not downloaded: needs the user's own go-ahead) | Note |
+|---|---|---|
+| ios16 | Apple's "ios-16-num" icon, `https://developer.apple.com/assets/elements/icons/ios-16-num/ios-16-num-96x96_2x.png` (192 x 192 PNG; named as the source of Commons `File:IOS_16_logo.png`, 192 x 192, 19 688 bytes, tagged public domain) | the Apple-hosted file is the official one; the URL was not opened |
+| mac13 | none found on Commons (only `File:MacOS_Ventura_wordmark.svg`, a wordmark, 512 x 56); the installer icon would have to come from apple.com / developer.apple.com | not located |
+| ios26 | none on Commons (only iOS 26 app icons); Apple developer site's iOS 26 icon not located | not located |
+| android | Google published an Android 17 logo (reported Feb-Mar 2026); no official file location found | not located |
+| linux-ubuntu | Canonical's 26.04 "Resolute Raccoon" mascot, monochrome SVG (light / dark), via the Ubuntu artwork channels (reported Feb 2026) | URL not confirmed |
+| win11, chromeos, linux-pmos | keep the current official logos: no 23H2-specific Windows icon, no separate ChromiumOS release mark, postmarketOS has no release icons | |
+
 ## Starbite-drawn (`src/starbite/`, 2026-11-05)
 
 Only Starbite's own systems use Starbite-drawn art; every other OS shows its official logo above.

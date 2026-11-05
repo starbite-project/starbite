@@ -583,6 +583,22 @@ CUSTOM_G = {
 }
 
 
+def release_layer(g, T):
+    """'R:<key>': the release icon (menu7_logos.RELEASE). 'bleed' fills the tile (an app icon of
+    its own), 'fit' sits at .62 of the tile on its colours; both cut to the squircle."""
+    key = g[2:]
+    if menu7_logos.RELEASE[key][4] == 'bleed':
+        lay, _ = menu7_logos.release_render(key, T)
+    else:
+        n = int(round(T * .62))
+        small, _ = menu7_logos.release_render(key, n)
+        lay = np.zeros((T, T, 4))
+        o = (T - n) // 2
+        lay[o:o + n, o:o + n] = small
+    lay[..., 3] *= sq_mask(T) / 255
+    return lay
+
+
 def custom_layer(g, T):
     """CUSTOM_G's layer cut to the tile's squircle (glass draws a glyph layer unclipped)."""
     lay = CUSTOM_G[g](T)
@@ -653,6 +669,14 @@ def tile_table(art):
         ('linux-shell', byid['uefi']), ('linux-olddtb', byid['uefi']),
         ('linux-bringup', byid['uefi']), ('@lab', new['lab']),
     ]
+    # a release's own icon (menu7_logos.RELEASE) where its file is in the tree, on the vendor
+    # tile's colours; without the file the vendor-logo tile above stays
+    rel = {}
+    for k, tid in real:
+        if not CONCEPT_ART and k in menu7_logos.RELEASE and menu7_logos.release_file(k):
+            name, c1, c2, g, dark = tiles[tid - 1]
+            rel[k] = add(k + ':release', c1, c2, 'R:' + k, dark)
+    real = [(k, rel.get(k, tid)) for k, tid in real]
     if CONCEPT_ART:   # the concept's artwork wherever the key is a concept id (ios26, win11)
         real = [(k, byid.get(k, tid)) for k, tid in real]
     for key, tid in real:
@@ -857,15 +881,15 @@ def build(fonts_only=False, preview=None, log=print):
         reqs = []
         for name, c1, c2, g, dark in tiles:
             reqs.append([g, 'dark' if dark else c2])
-        tg = artwork([r for r in reqs if not r[0].startswith(('g:', 'L:', 'X:'))])['tg']
+        tg = artwork([r for r in reqs if not r[0].startswith(('g:', 'L:', 'X:', 'R:'))])['tg']
         it = iter(tg)
         layers = {}
         next_img = G_FIRST
         for tid, ((name, c1, c2, g, dark), (gg, bg)) in enumerate(zip(tiles, reqs), 1):
-            svg = None if g.startswith(('L:', 'X:')) else EXTRA_G[g] if g.startswith('g:') else next(it)
+            svg = None if g.startswith(('L:', 'X:', 'R:')) else EXTRA_G[g] if g.startswith('g:') else next(it)
             ids = []
             for si, T in enumerate(TILE_SIZES):
-                lay = (custom_layer(g, T) if g.startswith('X:') else logo_layer(g, T)) if svg is None \
+                lay = (custom_layer(g, T) if g.startswith('X:') else release_layer(g, T) if g.startswith('R:') else logo_layer(g, T)) if svg is None \
                     else tile_layer(svg, T)
                 if lay[..., 3].max() == 0:
                     ids.append(0)
