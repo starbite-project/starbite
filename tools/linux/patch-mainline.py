@@ -22,6 +22,9 @@ Tree (mainline v7.1):
 Port (work copy):
   6.   s9p-decon: flip event at the TE edge that latches the new buffer
        (module param early_event, default on; plan 1.3.1, cause C).
+       6b-6d: drm_name=, the framebuffer's pitch/offset, ARGB8888.
+       6e: geometry dumps (geom_log, dump_geometry) and the panel_mask_off
+       test for the black bars (plan, "Display: black bars").
   7.   s9p-g3d: the rail check. With step_volt off the rail must read 950 mV
        before every clock change and after every power-up; a lower reading is
        rewritten and counted (rail_fixups). The 260 MHz step uses 950 mV even
@@ -250,6 +253,232 @@ DECON_UPDATE_NEW = '''	struct drm_framebuffer *fb = pipe->plane.state->fb;
 		if (s9p_wait_shadow_idle(priv)) {'''
 
 
+DECON_GEOM = r'''/*
+ * Starbite geometry (docs/LINUX-REBUILD-PLAN.md, "Display: black bars"). The
+ * driver inherits every size register from sboot and logs only two of them at
+ * probe, so a picture that does not reach the panel's edges cannot be placed
+ * from the log. This prints everything between the framebuffer and the panel
+ * that has a size in it: DECON (blender, splitter, OUTFIFO, data path), the
+ * live window, the fetch channel in both banks, DSIM (resolution, porches,
+ * transfers per frame, DSC slices, TE) and, on request, the DECON shadow bank
+ * and the DSC encoders' PPS (picture height). Reads only; the registers are
+ * the ones of blocks this driver already reads or writes, DSC only when the
+ * data path says the encoder is in use.
+ *
+ *   geom_log=1 (default)  dumps at probe and at every pipe enable (unblank), and
+ *                         one line per framebuffer geometry change on commits
+ *   echo 1|2 > /sys/module/s9p_decon/parameters/dump_geometry
+ *                         dump now (2 adds the shadow bank and DSC)
+ *   panel_mask_off=1      S6E3HA8 "self mask" off (F0 5A 5A, 7A 00, F0 A5 A5,
+ *                         the vendor's own SELF_MASK_DIS sequence) at every
+ *                         enable, or right away when written at run time.
+ *                         The mask darkens rows 0-149 and 2810-2959 (vendor
+ *                         SELF_MASK_ENA: 7A 01 0000 0095 0AFA 0B8F) through an
+ *                         image in the panel's side RAM; a test for the black
+ *                         bars, off by default.
+ */
+#define S9P_GEOM_SHD			0x7000	/* DECON shadow (active) bank */
+#define S9P_GEOM_DSC(n)			(0x4000 + 0x1000 * (n))
+#define DSIM_PAYLOAD			0x005c
+
+static unsigned int s9p_geom_log = 1;
+module_param_named(geom_log, s9p_geom_log, uint, 0644);
+MODULE_PARM_DESC(geom_log, "log scanout geometry: dumps at probe/enable and framebuffer geometry changes (Starbite; 0 = off)");
+
+static struct s9p_decon *s9p_geom_dev;	/* set once probe has succeeded */
+static DEFINE_MUTEX(s9p_geom_lock);
+
+#define GR(base, off)	readl_relaxed((base) + (off))
+
+static void s9p_decon_dump_geometry(struct s9p_decon *priv, const char *why, int level)
+{
+	struct device *dev = priv->drm.dev;
+	void __iomem *d = priv->decon;
+	void __iomem *ch = s9p_chan_regs(priv, priv->chan);
+	u32 en = GR(d, DECON_DATA_PATH_CONTROL_0);
+	u32 path2 = GR(d, 0x0230);
+	int w, b;
+
+	dev_info(dev, "geom[%s] decon: global=%08x trig=%08x scaled=%08x splitter=%08x/%08x outfifo=%08x/%08x/%08x\n",
+		 why, GR(d, 0x0000), GR(d, DECON_HW_SW_TRIG_CONTROL), GR(d, 0x00a0), GR(d, 0x0100),
+		 GR(d, 0x0104), GR(d, 0x0120), GR(d, 0x0124), GR(d, 0x0128));
+	dev_info(dev, "geom[%s] decon: bg_size=%08x bg_color=%08x/%08x lrm=%08x path=%08x/%08x/%08x dsim_conn=%08x start_time=%08x\n",
+		 why, GR(d, 0x0200), GR(d, 0x0208), GR(d, 0x020c), GR(d, 0x0210), en,
+		 GR(d, DECON_DATA_PATH_CONTROL_1), path2, GR(d, 0x0250), GR(d, 0x0260));
+	for (w = 0; w < DECON_MAX_WIN; w++) {
+		void __iomem *r = d + 0x1000 + 0x30 * w;
+
+		if (!(en & DECON_WIN_EN(w)))
+			continue;
+		dev_info(dev, "geom[%s] win%d: ctrl=%08x/%08x start=%08x end=%08x colormap=%08x/%08x\n",
+			 why, w, GR(r, 0x00), GR(r, 0x04), GR(r, 0x08), GR(r, 0x0c), GR(r, 0x10), GR(r, 0x14));
+		if (level >= 2)
+			dev_info(dev, "geom[%s] win%d shadow: ctrl=%08x/%08x start=%08x end=%08x\n",
+				 why, w, GR(r, S9P_GEOM_SHD + 0x00), GR(r, S9P_GEOM_SHD + 0x04),
+				 GR(r, S9P_GEOM_SHD + 0x08), GR(r, S9P_GEOM_SHD + 0x0c));
+	}
+	for (b = 0; b < 2; b++) {
+		void __iomem *c = ch + (b ? IDMA_SHD_BANK : 0);
+
+		dev_info(dev, "geom[%s] idma%u %s: en=%08x in_con=%08x out_con=%08x src_size=%08x src_off=%08x img_size=%08x blk_off=%08x blk_size=%08x base=%08x\n",
+			 why, priv->chan, b ? "shadow" : "normal", GR(c, 0x00), GR(c, IDMA_IN_CON),
+			 GR(c, 0x0c), GR(c, IDMA_SRC_SIZE), GR(c, 0x14), GR(c, IDMA_IMG_SIZE),
+			 GR(c, 0x24), GR(c, 0x28), GR(c, IDMA_IN_BASE_ADDR_Y));
+	}
+	if (priv->dsim)
+		dev_info(dev, "geom[%s] dsim: link=%08x/%08x mipi=%08x dphy=%08x transfers=%08x resol=%08x vporch=%08x hporch=%08x config=%08x cprs=%08x slice=%08x/%08x cmd=%08x te=%08x/%08x cmd_status=%08x\n",
+			 why, GR(priv->dsim, 0x08), GR(priv->dsim, 0x0c), GR(priv->dsim, 0x18),
+			 GR(priv->dsim, 0x1c), GR(priv->dsim, 0x30), GR(priv->dsim, 0x3c),
+			 GR(priv->dsim, 0x40), GR(priv->dsim, 0x44), GR(priv->dsim, 0x4c),
+			 GR(priv->dsim, 0x74), GR(priv->dsim, 0x78), GR(priv->dsim, 0x7c),
+			 GR(priv->dsim, 0x80), GR(priv->dsim, 0x84), GR(priv->dsim, 0x88),
+			 GR(priv->dsim, 0x8c));
+	if (level < 2)
+		return;
+	dev_info(dev, "geom[%s] decon shadow: global=%08x scaled=%08x splitter=%08x outfifo=%08x/%08x bg_size=%08x path2=%08x\n",
+		 why, GR(d, S9P_GEOM_SHD + 0x0000), GR(d, S9P_GEOM_SHD + 0x00a0),
+		 GR(d, S9P_GEOM_SHD + 0x0100), GR(d, S9P_GEOM_SHD + 0x0120),
+		 GR(d, S9P_GEOM_SHD + 0x0124), GR(d, S9P_GEOM_SHD + 0x0200),
+		 GR(d, S9P_GEOM_SHD + 0x0230));
+	/* COMP_OUTIF_PATH: 0x10 = DSC encoder 0, 0x20 = encoder 1 (dpu_9810 decon.h) */
+	for (b = 0; b < 2; b++) {
+		void __iomem *s = d + S9P_GEOM_DSC(b);
+
+		if (!(path2 & (0x10 << b)))
+			continue;
+		dev_info(dev, "geom[%s] dsc%d: ctrl0=%08x ctrl3=%08x pps00=%08x pps04(height)=%08x pps08(width|slice_h)=%08x pps12(slice_w)=%08x\n",
+			 why, b, GR(s, 0x00), GR(s, 0x0c), GR(s, 0x20), GR(s, 0x24), GR(s, 0x28), GR(s, 0x2c));
+	}
+}
+
+/* one line whenever what a commit scans out changes shape */
+static void s9p_decon_log_fb(struct s9p_decon *priv, struct drm_plane_state *st)
+{
+	struct drm_framebuffer *fb = st->fb;
+	u32 sig[ARRAY_SIZE(priv->geom_last)];
+
+	if (!s9p_geom_log || !fb)
+		return;
+	sig[0] = fb->width;
+	sig[1] = fb->height;
+	sig[2] = fb->pitches[0];
+	sig[3] = fb->offsets[0];
+	sig[4] = fb->format->format;
+	sig[5] = (u32)fb->modifier;
+	sig[6] = st->src_x >> 16;
+	sig[7] = st->src_y >> 16;
+	sig[8] = st->src_w >> 16;
+	sig[9] = st->src_h >> 16;
+	sig[10] = st->crtc_x;
+	sig[11] = st->crtc_y;
+	sig[12] = st->crtc_w;
+	sig[13] = st->crtc_h;
+	if (!memcmp(sig, priv->geom_last, sizeof(sig)))
+		return;
+	memcpy(priv->geom_last, sig, sizeof(sig));
+	drm_info(&priv->drm,
+		 "geom: fb %ux%u pitch %u offset %u %p4cc mod %llx, src %u,%u %ux%u, crtc %d,%d %ux%u; idma src_size %08x img_size %08x\n",
+		 fb->width, fb->height, fb->pitches[0], fb->offsets[0], &fb->format->format,
+		 fb->modifier, sig[6], sig[7], sig[8], sig[9], st->crtc_x, st->crtc_y,
+		 st->crtc_w, st->crtc_h,
+		 GR(s9p_chan_regs(priv, priv->chan), IDMA_SRC_SIZE),
+		 GR(s9p_chan_regs(priv, priv->chan), IDMA_IMG_SIZE));
+}
+
+static int s9p_dump_geometry_set(const char *val, const struct kernel_param *kp)
+{
+	int level, ret = kstrtoint(val, 0, &level);
+
+	if (ret)
+		return ret;
+	mutex_lock(&s9p_geom_lock);
+	if (s9p_geom_dev && level > 0)
+		s9p_decon_dump_geometry(s9p_geom_dev, "sysfs", level);
+	mutex_unlock(&s9p_geom_lock);
+	return 0;
+}
+
+static const struct kernel_param_ops s9p_dump_geometry_ops = {
+	.set = s9p_dump_geometry_set,
+};
+module_param_cb(dump_geometry, &s9p_dump_geometry_ops, NULL, 0200);
+MODULE_PARM_DESC(dump_geometry, "write 1 (or 2: + shadow bank and DSC) to log the scanout registers now (Starbite)");
+
+/* One DSI write from the command FIFO: 1 byte DCS short, 2 bytes DCS short
+ * with parameter, longer a DCS long write through the payload FIFO (the
+ * vendor's dsim_long_data_wr: little-endian words, then the header). */
+static int s9p_decon_dsi_write(struct s9p_decon *priv, const u8 *buf, unsigned int len)
+{
+	unsigned int i, j;
+	u32 v, hdr;
+
+	if (!priv->dsim || !len || len > 64)
+		return -EINVAL;
+	writel_relaxed(DSIM_INTSRC_PH_FIFO_EMPTY, priv->dsim + DSIM_INTSRC);
+	if (len == 1) {
+		hdr = DSIM_PKTHDR_ID(MIPI_DCS_SHORT_WRITE) | DSIM_PKTHDR_DATA0(buf[0]);
+	} else if (len == 2) {
+		hdr = DSIM_PKTHDR_ID(0x15) | DSIM_PKTHDR_DATA0(buf[0]) | DSIM_PKTHDR_DATA1(buf[1]);
+	} else {
+		for (i = 0; i < len; i += 4) {
+			for (v = 0, j = 0; j < 4 && i + j < len; j++)
+				v |= (u32)buf[i + j] << (8 * j);
+			writel_relaxed(v, priv->dsim + DSIM_PAYLOAD);
+		}
+		hdr = DSIM_PKTHDR_ID(0x39) | DSIM_PKTHDR_DATA0(len & 0xff) |
+		      DSIM_PKTHDR_DATA1(len >> 8);
+	}
+	wmb();
+	writel_relaxed(hdr, priv->dsim + DSIM_PKTHDR);
+	if (readl_poll_timeout_atomic(priv->dsim + DSIM_INTSRC, v,
+				      v & DSIM_INTSRC_PH_FIFO_EMPTY, 10, 20000)) {
+		dev_warn(priv->drm.dev, "panel did not take DSI write %02x+%u (INTSRC=%08x)\n",
+			 buf[0], len, v);
+		return -ETIMEDOUT;
+	}
+	return 0;
+}
+
+static bool s9p_panel_mask_off;
+
+static void s9p_panel_mask_apply(struct s9p_decon *priv)
+{
+	static const u8 key_on[] = { 0xf0, 0x5a, 0x5a }, mask_off[] = { 0x7a, 0x00 },
+			key_off[] = { 0xf0, 0xa5, 0xa5 };
+	int ret;
+
+	if (!READ_ONCE(s9p_panel_mask_off) || !s9p_panel_dcs)
+		return;
+	mutex_lock(&s9p_geom_lock);
+	ret = s9p_decon_dsi_write(priv, key_on, sizeof(key_on));
+	if (!ret)
+		ret = s9p_decon_dsi_write(priv, mask_off, sizeof(mask_off));
+	s9p_decon_dsi_write(priv, key_off, sizeof(key_off));
+	mutex_unlock(&s9p_geom_lock);
+	dev_info(priv->drm.dev, "panel self mask off (7A 00): %d\n", ret);
+}
+
+static int s9p_panel_mask_off_set(const char *val, const struct kernel_param *kp)
+{
+	int ret = param_set_bool(val, kp);
+
+	if (!ret && s9p_panel_mask_off && s9p_geom_dev && s9p_geom_dev->enabled)
+		s9p_panel_mask_apply(s9p_geom_dev);
+	return ret;
+}
+
+static const struct kernel_param_ops s9p_panel_mask_off_ops = {
+	.set = s9p_panel_mask_off_set,
+	.get = param_get_bool,
+};
+module_param_cb(panel_mask_off, &s9p_panel_mask_off_ops, &s9p_panel_mask_off, 0644);
+MODULE_PARM_DESC(panel_mask_off, "send the S6E3HA8 self-mask disable (F0 5A 5A, 7A 00, F0 A5 A5) at every enable (Starbite black-bar test)");
+
+#undef GR
+
+'''
+
+
 def patch_port(work):
     w = Path(work)
 
@@ -382,6 +611,56 @@ def patch_port(work):
          'static const u32 s9p_formats[] = {\n\tDRM_FORMAT_XRGB8888,\n'
          '\tDRM_FORMAT_ARGB8888,\t/* Starbite: ChromiumOS, alpha ignored by the XRGB fetch */\n};\n',
          'Starbite: ChromiumOS, alpha ignored')
+
+    # 6e. s9p-decon: geometry diagnostics and the self-mask test (2026-11-05). Black bars at the top and
+    # bottom of the panel under Phosh/ChromeOS; nothing the driver programs has a size in it (window,
+    # IDMA SRC/IMG are sboot's 1440x2960, logged at probe), so the dumps print the rest of the path
+    # (DECON blender/splitter/OUTFIFO, DSIM resolution/transfers/porches, DSC PPS on request) and every
+    # framebuffer geometry change, and panel_mask_off tests the S6E3HA8 self mask (rows 0-149 and
+    # 2810-2959). Analysis and the phone checklist: docs/LINUX-REBUILD-PLAN.md "Display: black bars".
+    edit(w, decon,
+         '\tu32 src_size;\t\t/* Starbite stride: IDMA_SRC_SIZE as programmed */\n',
+         '\tu32 src_size;\t\t/* Starbite stride: IDMA_SRC_SIZE as programmed */\n'
+         '\tu32 geom_last[14];\t/* Starbite geometry: last logged fb/plane shape */\n',
+         'Starbite geometry: last logged fb/plane shape')
+    edit(w, decon,
+         '/* ----------------------------------------------------------------- pipe */\n',
+         DECON_GEOM + '/* ----------------------------------------------------------------- pipe */\n',
+         'static void s9p_decon_dump_geometry(')
+    edit(w, decon,
+         '\ts9p_panel_up(priv);\n\tobj = to_drm_gem_dma_obj(plane_state->fb->obj[0]);\n',
+         '\ts9p_panel_up(priv);\n'
+         '\ts9p_panel_mask_apply(priv);\t/* Starbite geometry: off unless panel_mask_off */\n'
+         '\tobj = to_drm_gem_dma_obj(plane_state->fb->obj[0]);\n',
+         's9p_panel_mask_apply(priv);\t/* Starbite geometry')
+    edit(w, decon,
+         '\ts9p_frame_start_irq_set(priv, true);\n\tpriv->enabled = true;\n\tdrm_crtc_vblank_on(&pipe->crtc);\n',
+         '\ts9p_frame_start_irq_set(priv, true);\n\tpriv->enabled = true;\n\tdrm_crtc_vblank_on(&pipe->crtc);\n'
+         '\ts9p_decon_log_fb(priv, plane_state);\n'
+         '\tif (s9p_geom_log) {\t/* Starbite geometry: after every unblank */\n'
+         '\t\tmutex_lock(&s9p_geom_lock);\n'
+         '\t\ts9p_decon_dump_geometry(priv, "enable", 1);\n'
+         '\t\tmutex_unlock(&s9p_geom_lock);\n'
+         '\t}\n',
+         'Starbite geometry: after every unblank')
+    edit(w, decon,
+         '\tstruct drm_framebuffer *fb = pipe->plane.state->fb;\n\n'
+         '\t/*\n\t * Starbite early_event: program',
+         '\tstruct drm_framebuffer *fb = pipe->plane.state->fb;\n\n'
+         '\ts9p_decon_log_fb(priv, pipe->plane.state);\t/* Starbite geometry */\n'
+         '\t/*\n\t * Starbite early_event: program',
+         's9p_decon_log_fb(priv, pipe->plane.state);\t/* Starbite geometry */')
+    edit(w, decon,
+         '\tpriv->dsim = devm_ioremap(&pdev->dev, DSIM_PHYS, 0x100);\n',
+         '\tpriv->dsim = devm_ioremap(&pdev->dev, DSIM_PHYS, 0x100);\n'
+         '\tif (s9p_geom_log)\t/* Starbite geometry: what sboot left */\n'
+         '\t\ts9p_decon_dump_geometry(priv, "probe", 1);\n',
+         'Starbite geometry: what sboot left')
+    edit(w, decon,
+         '\tdrm_info(drm, "DECON scanout %ux%u on window %u\\n",\n',
+         '\ts9p_geom_dev = priv;\t/* Starbite geometry: sysfs dump and panel_mask_off */\n'
+         '\tdrm_info(drm, "DECON scanout %ux%u on window %u\\n",\n',
+         's9p_geom_dev = priv;')
 
     # 7. s9p-g3d: rail check, 950 mV at 260 MHz
     g3d = 'src/soc/s9p-g3d.c'
