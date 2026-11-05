@@ -1,0 +1,39 @@
+# Ventura on the S9 (2026-11-05): background jobs that cost CPU/RAM (1.7 GB phone) or crash-loop, none needed for the
+# desktop. Applied with root26-cycle.py --disable-list (labels out of launchd.plist, plists renamed .starbite-off).
+# crash loops
+com.apple.audio.coreaudiod
+com.apple.kernelmanagerd
+com.apple.chronod
+# Siri / intelligence
+com.apple.assistantd
+com.apple.siriknowledged
+com.apple.siriactionsd
+com.apple.suggestd
+com.apple.routined
+com.apple.mediaanalysisd
+com.apple.photoanalysisd
+com.apple.knowledge-agent
+com.apple.triald
+com.apple.spotlightknowledged
+com.apple.biomesyncd
+com.apple.parsecd
+com.apple.corespotlightd
+com.apple.ContextStoreAgent
+com.apple.metadata.mds.index
+# iCloud / accounts / media sharing
+com.apple.AMPDevicesAgent
+com.apple.photolibraryd
+com.apple.cloudd
+com.apple.itunescloudd
+com.apple.bird
+com.apple.icloud.searchpartyuseragent
+com.apple.icloud.findmydeviced
+com.apple.icloud.fmfd
+com.apple.rapportd
+com.apple.telephonyutilities.callservicesd
+com.apple.imagent
+com.apple.identityservicesd
+com.apple.commerce
+com.apple.storeassetd
+com.apple.sharingd
+com.apple.amp.mediasharingd
