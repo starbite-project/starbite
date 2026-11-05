@@ -349,6 +349,51 @@ card_into_root() {
 	return 0
 }
 
+# boot_disk PATH (2026-11-05): a ChromiumOS disk image on the card, attached whole with its partition table,
+# so ChromeOS finds its stateful partition (p1) on the disk its root (p3, ext2, read-only) is on, as on a
+# Chromebook (chromeos_startup derives it from the root device). Our kernel's modules go on a tmpfs over
+# the root's /lib/modules. The card stays mounted on /sd in the initramfs (the root cannot take it).
+boot_disk() {
+	img=$1
+	LOOP=
+	if [ -x /sbin/losetup ]; then
+		LOOP=$(/sbin/losetup -P -f --show "/sd$img" 2>/dev/null)
+	fi
+	[ -n "$LOOP" ] || { LOOP=$(losetup -f) && losetup -P "$LOOP" "/sd$img" 2>/dev/null; } || { LOOP=; return 25; }
+	for i in 1 2 3 4 5 6 7 8 9 10; do
+		[ -b "${LOOP}p3" ] && [ -b "${LOOP}p1" ] && break
+		mdev -s 2>/dev/null
+		sleep 0.3
+	done
+	[ -b "${LOOP}p3" ] || { root_undo; return 25; }
+	mkdir -p $NR
+	mount -t ext4 -o ro "${LOOP}p3" $NR 2>/dev/null || mount -t ext2 -o ro "${LOOP}p3" $NR || { root_undo; return 26; }
+	init=/sbin/init
+	[ -x $NR$init ] || { root_undo; return 27; }
+	K=$(uname -r)
+	M=/sd/distros/_kernel/modules-$K.img
+	if [ -f "$M" ] && [ -d $NR/lib/modules ] && mount -t tmpfs -o mode=755,size=1m tmpfs $NR/lib/modules; then
+		mkdir -p $NR/lib/modules/$K
+		MDIR=$NR/lib/modules/$K
+		if MLOOP=$(loop_attach "$M" -r) && mount -t ext4 -o ro,noload "$MLOOP" "$MDIR"; then :; else
+			[ -n "$MLOOP" ] && losetup -d "$MLOOP" 2>/dev/null
+			MLOOP= MDIR=
+		fi
+	fi
+	clear_screen
+	echo "  PROJECT STARBITE"
+	echo "  starting ${img##*/} (ChromiumOS) ..."
+	[ -n "$KEYS_PID" ] && kill $KEYS_PID 2>/dev/null
+	shells_stop
+	exec 4<&-
+	umount -l /tmp 2>/dev/null
+	umount -l /run 2>/dev/null
+	mount --move /dev $NR/dev
+	mount --move /proc $NR/proc
+	mount --move /sys $NR/sys
+	exec switch_root $NR "$init"
+}
+
 # boot_root PATH: 20-29 on failure, with everything undone except the card on /sd.
 NR=/newroot
 boot_root() {
@@ -356,6 +401,11 @@ boot_root() {
 	sb-tools -u 2>/dev/null                         # _tools.img must not stay mounted from /sd
 	card_up || return $?
 	[ -f "/sd$img" ] || return 23
+	# a whole GPT disk (ChromiumOS / ChromeOS, master plan 3.5): its own partitions, booted by boot_disk
+	if [ "$(dd if="/sd$img" bs=1 skip=512 count=8 2>/dev/null)" = "EFI PART" ]; then
+		boot_disk "$img"
+		return $?
+	fi
 	if command -v e2fsck >/dev/null; then
 		echo "  checking $img ..."
 		e2fsck -p "/sd$img"
