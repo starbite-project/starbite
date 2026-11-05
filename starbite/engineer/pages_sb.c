@@ -367,9 +367,12 @@ static void fill_about(void)
     kv_add("Copy time", u.b);
     kv_hdr("KEYS");
     kv_add("Volume", "move (hold: repeat)");
-    kv_add("Power", "select");
+    kv_add("Power", "select (on release)");
+    kv_add("Hold Power", "back (0.6 s); at a tab's root: the Dashboard");
     kv_add("Bixby", "back; hold: the tab's root");
     kv_add("Touch", "tap, drag, fling; swipe right: back");
+    kv_add("Other tabs", "Dashboard > TABS (keys), or the tab bar (touch)");
+    kv_add("Leave", "Dashboard or Tools > Exit to the boot menu");
     kv_hdr("CREDITS");
     kv_add("Fonts", "Inter, Inter Tight, JetBrains Mono (OFL)");
     kv_add("Icons", "menu v7 line icons");

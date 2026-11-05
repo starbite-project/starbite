@@ -107,6 +107,16 @@ int sb_boot_next_peek(char key[24])
     return key[0] != 0;
 }
 
+void sb_boot_next_clear(void)
+{
+    volatile uint64_t *mb = (volatile uint64_t *)SB_NEXT_MBOX;
+    if (mb[0] == NEXT2_MAGIC) {
+        mb[0] = 0;
+        __asm__ volatile("dsb sy" : : : "memory");
+        sb_log("boot-next cleared");
+    }
+}
+
 /* The mailbox is RAM above the pmsg ring (0xFED17FE0, non-cacheable here); the loader reads and
  * clears it on the next boot (shim/starlte/menu.c boot_next) and starts the entry once. */
 void sb_boot_next(const char *key)

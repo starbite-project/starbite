@@ -12,6 +12,11 @@
  *     s:NAME        write OUTDIR/NAME.ppm; also check that the panel equals the back buffer (every
  *                   drawn pixel was presented: the dirty rectangles cover every change)
  *     q             quit
+ *     tour          (alone) the keys-only tour: generates a script that opens every row of every
+ *                   tab with Volume and Power only (other tabs through the Dashboard's TABS rows),
+ *                   checks each page opened (the panel changed), that every pixel drawn was
+ *                   presented, and that holding Power always leads back to the Dashboard. No files
+ *                   are written; exit status 0 = every page passed.
  *
  * Register blocks, DRAM windows, the framebuffer, pmsg and the loader's log page are anonymous
  * mappings at their real addresses, seeded with plausible values, so the pages' raw register
@@ -19,6 +24,7 @@
  */
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -121,6 +127,7 @@ void sb_reboot(uint32_t inform3) { printf("host: reboot (inform3 %#x)\n", inform
 void sb_power_off(void) { printf("host: power off\n"); exit(0); }
 void sb_boot_next(const char *key) { printf("host: boot-next %s\n", key); exit(0); }
 int sb_boot_next_peek(char key[24]) { key[0] = 0; return 0; }
+void sb_boot_next_clear(void) { printf("host: boot-next cleared\n"); }
 
 /* ---- PMIC, RTC, rails ------------------------------------------------------------------------------ */
 
@@ -515,6 +522,113 @@ static int ncmd, ci;
 static uint64_t next_t;
 static int in_step;
 
+/* ---- the keys-only tour ---------------------------------------------------------------------- */
+
+#include "eng.h"
+
+static int tour_mode, tour_ready, tour_pages, tour_fail, tour_tab;
+static uint64_t tour_root_hash;
+
+static uint64_t panel_hash(void)
+{
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < (size_t)UI_W * UI_H; i += 7)
+        h = (h ^ (panel[i] & 0xffffffU)) * 1099511628211ULL;
+    return h;
+}
+
+static uint64_t panel_vs_back(void)
+{
+    uint64_t diff = 0;
+    const uint32_t *bb = ui_back();
+    for (size_t i = 0; bb && i < (size_t)UI_W * UI_H; ++i)
+        diff += (panel[i] & 0xffffffU) != (bb[i] & 0xffffffU);
+    return diff;
+}
+
+static int scratch_tab;
+static void scratch_build(void) { tab_build(scratch_tab); }
+
+/* Rows per tab, counted on a scratch page (the back buffer is saved and restored around it). */
+static int tab_rows(int t)
+{
+    extern struct page *host_last_page;
+    struct page *keep_last = host_last_page;
+    size_t n = (size_t)UI_W * UI_H;
+    uint32_t *save = malloc(n * 4);
+    memcpy(save, ui_back(), n * 4);
+    struct ui_rect clip = ui_get_clip();
+    struct page p;
+    page_init(&p, UI_VIEW_Y0, UI_VIEW_Y1);
+    scratch_tab = t;
+    eng_build_page(&p, scratch_build);
+    int rows = p.nrows;
+    page_free(&p);
+    ui_set_clip(clip);
+    memcpy(ui_back(), save, n * 4);
+    free(save);
+    host_last_page = keep_last;
+    return rows;
+}
+
+static char **tl;
+static int tn, tcap;
+static void tadd(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void tadd(const char *fmt, ...)
+{
+    char b[64];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof(b), fmt, ap);
+    va_end(ap);
+    if (tn == tcap) {
+        tcap = tcap ? 2 * tcap : 1024;
+        tl = realloc(tl, sizeof(*tl) * (size_t)tcap);
+    }
+    tl[tn++] = strdup(b);
+}
+
+#define TOUR_HUB 5          /* Dashboard row of tab 1 (tabs.c: rows 5..11 = tabs 1..7) */
+#define TOUR_BACK "h:p:1700"
+#define TOUR_TOP "h:u:2200"         /* 1 + (2200 - 420) / 90 = 20 rows up */
+
+static void tour_generate(void)
+{
+    tadd("w:800");
+    for (int t = 0; t < NTABS; ++t) {
+        int rows = tab_rows(t);
+        printf("tour: tab %d %s: %d rows\n", t, tab_title_of(t), rows);
+        for (int r = 0; r < rows; ++r) {
+            if (t == 0 && r >= TOUR_HUB && r < TOUR_HUB + NTABS - 1)
+                continue;                               /* the hub rows: the tour's own path */
+            /* Volume Up held (auto-repeat) puts the focus on the first row of any root, wherever
+             * it was; then Volume Down counts rows: the Dashboard's TABS row, the tab's row. */
+            if (t) {
+                tadd(TOUR_TOP);
+                for (int k = 0; k < TOUR_HUB + t - 1; ++k)
+                    tadd("k:d");
+                tadd("k:p");
+                tadd("w:500");
+            }
+            tadd("R:%d", t);
+            tadd(TOUR_TOP);
+            for (int k = 0; k < r; ++k)
+                tadd("k:d");
+            tadd("k:p");
+            tadd("w:1500");
+            tadd("x:%d.%d", t, r);
+            for (int k = 0; k < 4; ++k)
+                tadd(TOUR_BACK);
+            tadd("w:300");
+            tadd("H");
+        }
+    }
+    tadd("Q");
+    cmds = tl;
+    ncmd = tn;
+    ci = 0;
+}
+
 static unsigned key_of(char c)
 {
     return c == 'p' ? SB_K_POWER : c == 'u' ? SB_K_UP : c == 'd' ? SB_K_DOWN : SB_K_BIXBY;
@@ -532,8 +646,48 @@ static void host_step(void)
         keys_now &= ~key_held;
         key_held = 0;
     }
+    if (tour_mode && !tour_ready) {
+        if (ui_back() && ui_stats.frames >= 2 && E.tab_req < 0) {
+            tour_ready = 1;
+            tour_generate();
+        } else {
+            in_step = 0;
+            return;
+        }
+    }
     while (ci < ncmd && now_us >= next_t && !key_held) {
         const char *c = cmds[ci++];
+        if (c[0] == 'R') {
+            tour_tab = atoi(c + 2);
+            tour_root_hash = panel_hash();
+            if (cur_tab != tour_tab || E.depth != 0) {
+                printf("tour FAIL: wanted the root of tab %d, at tab %d depth %d\n", tour_tab, cur_tab, E.depth);
+                ++tour_fail;
+            }
+            continue;
+        }
+        if (c[0] == 'x') {
+            uint64_t d = panel_vs_back(), h = panel_hash();
+            const char *title = E.depth > 0 && E.depth <= 8 ? E.titles[E.depth - 1] : "(full screen)";
+            int bad = d != 0 || h == tour_root_hash;
+            printf("tour %-6s %-4s depth %d  %-34s panel vs back buffer %llu px%s\n", c + 2, bad ? "FAIL" : "ok",
+                   E.depth, title, (unsigned long long)d, h == tour_root_hash ? "  (nothing opened)" : "");
+            tour_fail += bad;
+            ++tour_pages;
+            continue;
+        }
+        if (c[0] == 'H') {
+            if (cur_tab != 0 || E.depth != 0) {
+                printf("tour FAIL: holding Power did not lead back to the Dashboard (tab %d depth %d)\n", cur_tab,
+                       E.depth);
+                ++tour_fail;
+            }
+            continue;
+        }
+        if (c[0] == 'Q') {
+            printf("tour: %d pages opened with Volume and Power only, %d failures\n", tour_pages, tour_fail);
+            exit(tour_fail ? 4 : 0);
+        }
         if (c[0] == 'w') {
             next_t = now_us + (uint64_t)atoi(c + 2) * 1000U;
         } else if (c[0] == 'k' || c[0] == 'h') {
@@ -809,6 +963,9 @@ int main(int argc, char **argv)
     }
     cmds = argv + 3;
     ncmd = argc - 3;
+    tour_mode = ncmd == 1 && !strcmp(cmds[0], "tour");
+    if (tour_mode)
+        ncmd = 0;
     map(0x02000000ULL, 0x00100000ULL);
     map(0x10000000ULL, 0x0e000000ULL);
     map(0x80000000ULL, 0x80000000ULL);

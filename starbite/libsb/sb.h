@@ -26,6 +26,12 @@
 #define SB_TEST_BASE  0xa0100000UL      /* RAM test window, non-cacheable (DRAM, not caches); starts above
                                           * S-Boot's ECT at 0xa0000000 (+0x32000), which Android's kernel reads */
 #define SB_TEST_SIZE  (126UL << 20)      /* to 0xa7f00000: inside the non-cacheable window */
+/* The RAM test and bandwidth windows write here. Never below 0xa0100000 (S-Boot's ECT at
+ * 0xa0000000 must stay intact for the next OS) and never outside the non-cacheable window
+ * 0xa0000000..0xa8000000 that mmu.c maps for it (POST's STAGE 0x8c000000 is far away). */
+_Static_assert(SB_TEST_BASE >= 0xa0100000UL, "RAM test window overlaps S-Boot's ECT at 0xa0000000");
+_Static_assert(SB_TEST_BASE + SB_TEST_SIZE <= 0xa8000000UL, "RAM test window leaves the non-cacheable map");
+_Static_assert(SB_ARENA_END <= 0xa0000000UL, "the arena must end below S-Boot's ECT");
 #define SB_DMA_BASE   0xaf000000UL      /* UFS DMA + read scratch, non-cacheable (ufs.h) */
 #define SB_DMA_END    0xaf800000UL
 #define SB_FB         0xcc000000UL      /* S-Boot's scanout buffer, write-combined */
@@ -158,6 +164,8 @@ void sb_power_off(void);
 void sb_boot_next(const char *key) __attribute__((noreturn));
 /* The mailbox as it is now (another OS may have left it): 1 and the key if valid. */
 int sb_boot_next_peek(char key[24]);
+/* Invalidate a pending boot-next (the magic), so the next reset shows the menu. */
+void sb_boot_next_clear(void);
 
 /* ---- PSCI (SMC, PSCI 0.1 function ids of the starlte DTB) ------------------------------------- */
 

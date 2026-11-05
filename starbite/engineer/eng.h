@@ -13,8 +13,8 @@
 #include "catalog.h"
 #include "sd.h"
 
-#define ENG_VERSION "1.0"
-#define ENG_BUILD "EN1-EN3 (v1, dry-run)"
+#define ENG_VERSION "1.1"
+#define ENG_BUILD "EN1-EN3 (v1.1, dry-run; keys-only navigation)"
 
 /* em.c's colour names on menu v7's palette */
 #define UI_TEXT C_L1
@@ -46,6 +46,7 @@ extern struct eng E;
 #define NTABS 8
 extern const char *const tab_label[NTABS];
 extern int cur_tab;
+const char *tab_title_of(int t);
 
 /* ---- screens (shell.c) ----------------------------------------------------------------------- */
 
@@ -113,6 +114,8 @@ void test_display(void), test_touch(void), test_keys(void), run_cores_dialog(voi
 void run_bw(void), run_speed(void), sector_screen(void), peek_screen(void), dump_pmic(void);
 void touch_rails(void), sd_page(void), sdboot_page(void), start_page(void), ios_opts_page(void);
 void bright_page(void), reboot_page(void), show_pmsg(void), show_records(void), show_cmdline(void);
+/* Clear a pending boot-next, reboot normally: S-Boot, the loader, its menu. Asks first. */
+void eng_exit_to_menu(void);
 
 /* ---- armed mode (armed.c) -------------------------------------------------------------------- */
 

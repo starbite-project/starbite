@@ -132,8 +132,10 @@ int ui_icon_size(unsigned id, int *w, int *h);     /* the nominal box */
 uint32_t ui_mix(uint32_t fg, uint32_t bg, unsigned a);
 
 /* ---- input ----------------------------------------------------------------------------------
- * Keys: Volume moves (auto-repeat while held), Power selects, short Bixby goes back, long Bixby
- * goes home. Touch: tap, drag (scroll), fling, sideways swipe. */
+ * Keys: Volume moves (auto-repeat while held), Power selects (on release), Power held
+ * UI_POWER_LONG_MS goes back, short Bixby goes back, long Bixby goes home. Touch: tap, drag
+ * (scroll), fling, sideways swipe. */
+#define UI_POWER_LONG_MS 600U
 enum {
     EV_NONE, EV_UP, EV_DOWN, EV_SELECT, EV_BACK, EV_HOME,
     EV_TAP, EV_PRESS, EV_DRAG, EV_RELEASE, EV_SWIPE_L, EV_SWIPE_R, EV_TOUCH_UP

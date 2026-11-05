@@ -4,6 +4,17 @@
  */
 #include "eng.h"
 
+static const char *const tab_hint[NTABS] = {
+    "",
+    "CPU cores, memory, display, touch, keys, UFS speed",
+    "battery, charger, PMIC regulators and registers",
+    "CPU, clocks, temperatures, GPU, RTC, timer",
+    "UFS, partitions, GPT, sectors, microSD",
+    "OS store, catalog, settings, start an OS",
+    "Engineer OS log, pmsg, loader handoff, audit",
+    "armed mode, register peek, reboot, about",
+};
+
 void tab_build(int t)
 {
     switch (t) {
@@ -15,6 +26,15 @@ void tab_build(int t)
         row_add("Memory map", "DRAM banks, carve-outs, Engineer OS layout", 0);
         row_add("Reset and boot reason", "PMU RST_STAT, INFORM, PMIC sources", 0);
         row_add("Battery graph", "fuel gauge current and voltage, live", 0);
+        /* The other tabs as rows: with Volume and Power alone (no touch, no Bixby) the tab bar
+         * cannot be reached, so the Dashboard is the hub (hold Power at a tab's root comes back
+         * here). Rows 5..11 = tabs 1..7. */
+        kv_hdr("TABS");
+        for (int i = 1; i < NTABS; ++i)
+            row_add(tab_title_of(i), tab_hint[i], 0);
+        kv_hdr("LEAVE");
+        row_add("Exit to the boot menu", "reboot: S-Boot, then the Starbite menu", 0);
+        kv_note("Keys: Volume moves, Power selects, hold Power (or Bixby) goes back.");
         break;
     case 1:
         kv_hdr("PROCESSOR AND MEMORY");
@@ -24,7 +44,7 @@ void tab_build(int t)
         kv_hdr("DISPLAY AND INPUT");
         row_add("Display test", "colour fields, grey ramp, checkerboard, grid", 0);
         row_add("Display panel", "panel, resolution, framebuffer", 0);
-        row_add("Brightness", "panel AOR via DSI, panel ID", 0);
+        row_add("Brightness", "panel AOR via DSI (asks first), panel ID", R_WARN);
         row_add("Touch screen", "S6SY761: ten-finger paint, controller info", 0);
         row_add("Keys", "live key states", 0);
         kv_hdr("STORAGE");
@@ -96,6 +116,8 @@ void tab_build(int t)
         kv_hdr("ENGINEER");
         row_add("Armed mode", "tier 0 read only; arm for dry runs", R_WARN);
         row_add("Register peek", "allowlisted blocks; poke is dry-run", R_WARN);
+        kv_hdr("LEAVE");
+        row_add("Exit to the boot menu", "reboot: S-Boot, then the Starbite menu", 0);
         row_add("Reboot and power", "menu, recovery, download, power off", 0);
         kv_hdr("COMING");
         row_add("Stress", "all cores, RAM, GPU with a thermal guard (v2)", 0);
@@ -115,6 +137,11 @@ void tab_open(int t, int i)
     case 0x02: info_screen("Memory map", fill_memory, 0); break;
     case 0x03: info_screen("Reset and boot reason", fill_reset, 0); break;
     case 0x04: dash_battery_page(); break;
+    case 0x05: case 0x06: case 0x07: case 0x08: case 0x09: case 0x0a: case 0x0b:
+        E.home = 1;
+        E.tab_req = i - 4;
+        break;
+    case 0x0c: eng_exit_to_menu(); break;
     case 0x10: run_cores_dialog(); break;
     case 0x11: run_ram_dialog(); break;
     case 0x12: run_bw(); break;
@@ -168,11 +195,12 @@ void tab_open(int t, int i)
     case 0x67: info_screen("Registers", fill_regs, 500); break;
     case 0x70: armed_page(); break;
     case 0x71: peek_screen(); break;
-    case 0x72: reboot_page(); break;
-    case 0x73: sb_pages_coming("Stress"); break;
-    case 0x74: sb_pages_coming("Radio"); break;
-    case 0x75: sb_pages_coming("Installer"); break;
-    case 0x76: sb_pages_about(); break;
+    case 0x72: eng_exit_to_menu(); break;
+    case 0x73: reboot_page(); break;
+    case 0x74: sb_pages_coming("Stress"); break;
+    case 0x75: sb_pages_coming("Radio"); break;
+    case 0x76: sb_pages_coming("Installer"); break;
+    case 0x77: sb_pages_about(); break;
     default: break;
     }
 }
