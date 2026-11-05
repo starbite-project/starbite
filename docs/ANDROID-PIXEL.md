@@ -358,3 +358,28 @@ after any fresh GSI flash. (Decision 6 said "never modified": these two patches 
 
 Originals: `build/android/pixel/libui-cmp/`, `build/android/pixel/cam/cameraserver-gsi` (sha256 4d812091…). The
 attempt-4 workaround (`stop cameraserver` in starbite-log.rc) is removed: it never held (init restarted the service).
+
+## 10. Decision 2026-11-05: back to LineageOS 24, made Pixel-style (live on S9 #1)
+The GSI kept hitting 4.9-kernel incompatibilities (binder freeze notifications, ION, gralloc 2/3); the user chose
+LineageOS 24 "as pure Android as possible, like the Pixel UI". Built by `tools/android/lpix/build-lpix.sh`
+(the 2026-11-05 image was made by hand with exactly those steps; the script itself has not been re-run yet):
+LineageOS 24's system.img + Google's own Android 17 GMS apps taken from the GSI (Play Services, Play Store,
+Google setup wizard, Google app, Phone, Messages, Contacts, Photos, Chrome + Trichrome, Digital Wellbeing,
+Speech Services, Calendar sync), LineageOS's duplicates and LineageSetupWizard removed, AOSP boot animation.
+Gmail, Maps, YouTube, Drive come from Play (the 8 GiB /data would hold their updates twice otherwise).
+
+| Partition | Content | sha256 |
+|---|---|---|
+| SYSTEM | Pixel-style LineageOS (VM: ~/android/lpix/system-pixel.img) | 74fc930e... |
+| VENDOR | LineageOS 24's own (backup/20261105-pixel/VENDOR.img.gz) | 2693de7d... |
+| ODM (/metadata) | fresh (metadata-reset.sh) | - |
+| A16DATA | fresh f2fs (a16data-8g.img.gz) | c4369d4e... |
+
+Fixes found on the phone: (1) GoogleConfigOverlay names com.google.android.ext.services (Google's mainline
+ExtServices; LineageOS has com.android.extservices): system_server died in PackageManagerService, removed.
+(2) Google WebView 149 + GoogleWebViewOverlay: "No WebView-library manifest flag" and the overlay hid
+LineageOS's WebView 156: both removed, com.android.webview 156 is the provider. Result: boot_completed in ~30 s,
+Google's setup wizard ("Hi there"), 0 system_server crashes. Dev: adb on from first boot, only this Mac's key
+pre-authorized (DEV=0 in the script for an image without it). Not reverted: the cameraserver/libui GSI
+patches (section 9) are gone with the GSI. Removed files are kept in the VM at ~/android/lpix/removed/, the GMS
+source tree at ~/gsi-gms (the GSI itself is no longer on the phone).
