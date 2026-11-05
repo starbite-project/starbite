@@ -1403,9 +1403,78 @@ pub unsafe extern "C" fn nmb_render_pipeline_new_with_options(device: *mut NmbDe
     guard(std::ptr::null_mut(), || {
         let device = &get(device)?.0;
         let resolved = unsafe { pipeline_options(options)? };
-        let state = device.new_render_pipeline_state(&render_descriptor(descriptor)?, &resolved).map_err(e("render pipeline"))?;
-        Ok(boxed(NmbRenderPipeline(state)))
+        let mut desc = render_descriptor(descriptor)?;
+        // Starbite: a value use of a constant the caller never set is a refusal here
+        // (Compile(NeedsInput(FunctionConstant { index }))), while Apple's compiler takes it (macOS 13's
+        // CoreAnimation draw shaders leave constant 52 unset; WindowServer then aborts with "Metal failed to
+        // build render pipeline"). Retry with that constant zero (false) in the stages that declare it.
+        let mut zeroed: Vec<u32> = Vec::new();
+        loop {
+            match device.new_render_pipeline_state(&desc, &resolved) {
+                Ok(state) => return Ok(boxed(NmbRenderPipeline(state))),
+                Err(error) => {
+                    let text = format!("{error:?}");
+                    if let Some(index) = missing_constant(&text) {
+                        if zeroed.len() < 64 && !zeroed.contains(&index) && zero_constant(&mut desc, index) {
+                            zeroed.push(index);
+                            continue;
+                        }
+                    }
+                    return Err(format!("render pipeline: {text}"));
+                }
+            }
+        }
     })
+}
+
+/// The index in "...NeedsInput(FunctionConstant { index: N })...".
+fn missing_constant(text: &str) -> Option<u32> {
+    let at = text.find("FunctionConstant { index: ")? + "FunctionConstant { index: ".len();
+    let digits: String = text[at..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// Zero bytes for constant `index` in every stage whose function declares it (and was not given it); false if none did.
+fn zero_constant(desc: &mut RenderPipelineDescriptor, index: u32) -> bool {
+    let mut done = false;
+    let stages = std::iter::once(&mut desc.vertex).chain(desc.fragment.iter_mut());
+    for stage in stages {
+        let StageSource::Function(fd) = stage else { continue };
+        let Ok(declared) = fd.function.function_constants_dictionary() else { continue };
+        let Some(c) = declared.values().find(|c| c.index() == index) else { continue };
+        let ty = c.data_type();
+        let size = constant_bytes(ty.as_raw());
+        if size == 0 {
+            continue;
+        }
+        let values = std::mem::take(&mut fd.constants);
+        fd.constants = values.with_index(index, FunctionConstantValue::new(ty, vec![0u8; size]));
+        done = true;
+    }
+    done
+}
+
+/// Bytes of a function constant of MTLDataType `raw` (lanes packed tightly), 0 for a type that is not a scalar or vector.
+fn constant_bytes(raw: u32) -> usize {
+    match raw {
+        5 | 31 | 35 => 12,
+        18 | 39 | 43 => 6,
+        47 | 51 | 55 => 3,
+        83 | 87 => 24,
+        3 | 29 | 33 => 4,
+        4 | 30 | 34 => 8,
+        6 | 32 | 36 => 16,
+        16 | 37 | 41 => 2,
+        17 | 38 | 42 => 4,
+        19 | 40 | 44 => 8,
+        45 | 49 | 53 => 1,
+        46 | 50 | 54 => 2,
+        48 | 52 | 56 => 4,
+        81 | 85 => 8,
+        82 | 86 => 16,
+        84 | 88 => 32,
+        _ => 0,
+    }
 }
 
 fn render_descriptor(descriptor: *const NmbRenderPipelineDescriptor) -> Result<RenderPipelineDescriptor, String> {

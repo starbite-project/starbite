@@ -91,6 +91,27 @@ static void sb_log_pipeline(id d)
 	}
 }
 
+/* a pipeline the bridge refused: which one and the bridge's reason (WindowServer then aborts with "Metal failed
+ * to build render pipeline", Ventura boot 20261105-024544 at the first desktop content) */
+static void sb_log_pipeline_error(id d, NSError *err)
+{
+	@try {
+		id vf = [d valueForKey:@"vertexFunction"], ff = [d valueForKey:@"fragmentFunction"];
+		NSString *label = [d valueForKey:@"label"];
+		sblog("pipeline FAILED: vs %s fs %s label %s: %s", vf ? [[vf valueForKey:@"name"] UTF8String] : "-",
+		      ff ? [[ff valueForKey:@"name"] UTF8String] : "-", label ? [label UTF8String] : "-",
+		      err ? [[err description] UTF8String] : "(no error object)");
+		id ca = [d valueForKey:@"colorAttachments"];
+		for (NSUInteger i = 0; i < 2; i++) {
+			id a = [ca objectAtIndexedSubscript:i];
+			sblog("  color %lu: format %lu blend %d", (unsigned long)i, (unsigned long)[[a valueForKey:@"pixelFormat"] unsignedIntegerValue],
+			      [[a valueForKey:@"blendingEnabled"] boolValue]);
+		}
+	} @catch (id e) {
+		sblog("pipeline FAILED (descriptor unreadable): %s", err ? [[err description] UTF8String] : "-");
+	}
+}
+
 static void sbmac_device_fill(id dev)
 {
 	Class c = object_getClass(dev);
@@ -126,24 +147,46 @@ static void sbmac_device_fill(id dev)
 		if (argc == 4)
 			imp = imp_implementationWithBlock(^id(id me, id d, void *e) {
 				sb_log_pipeline(d);
-				return ((id (*)(id, SEL, id, void *))orig)(me, sel, d, e);
+				NSError *__autoreleasing local = nil;
+				NSError *__autoreleasing *ep = e ? (NSError *__autoreleasing *)e : &local;
+				id r = ((id (*)(id, SEL, id, void *))orig)(me, sel, d, ep);
+				if (!r)
+					sb_log_pipeline_error(d, *ep);
+				return r;
 			});
 		else if (argc == 6)
 			imp = imp_implementationWithBlock(^id(id me, id d, NSUInteger o, void *r, void *e) {
 				sb_log_pipeline(d);
-				return ((id (*)(id, SEL, id, NSUInteger, void *, void *))orig)(me, sel, d, o, r, e);
+				NSError *__autoreleasing local = nil;
+				NSError *__autoreleasing *ep = e ? (NSError *__autoreleasing *)e : &local;
+				id res = ((id (*)(id, SEL, id, NSUInteger, void *, void *))orig)(me, sel, d, o, r, ep);
+				if (!res)
+					sb_log_pipeline_error(d, *ep);
+				return res;
 			});
 		else if (argc == 5 && k == 3)
 			imp = imp_implementationWithBlock(^void(id me, id d, NSUInteger o, id h) {
 				sb_log_pipeline(d);
-				((void (*)(id, SEL, id, NSUInteger, id))orig)(me, sel, d, o, h);
+				void (^hh)(id, id, NSError *) = h;
+				id wrapped = hh ? ^(id st, id refl, NSError *err) {
+					if (!st)
+						sb_log_pipeline_error(d, err);
+					hh(st, refl, err);
+				} : nil;
+				((void (*)(id, SEL, id, NSUInteger, id))orig)(me, sel, d, o, wrapped);
 			});
 		else if (argc == 4 + 0 && k == 2)
 			imp = NULL;
 		if (k == 2 && argc == 4)
 			imp = imp_implementationWithBlock(^void(id me, id d, id h) {
 				sb_log_pipeline(d);
-				((void (*)(id, SEL, id, id))orig)(me, sel, d, h);
+				void (^hh)(id, NSError *) = h;
+				id wrapped = hh ? ^(id st, NSError *err) {
+					if (!st)
+						sb_log_pipeline_error(d, err);
+					hh(st, err);
+				} : nil;
+				((void (*)(id, SEL, id, id))orig)(me, sel, d, wrapped);
 			});
 		if (imp)
 			method_setImplementation(m, imp);
