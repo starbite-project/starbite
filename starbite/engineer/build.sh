@@ -53,6 +53,18 @@ if [ -n "$bad" ]; then
     echo "$bad" >&2
     exit 1
 fi
+# What runs before relocation (crt0 -> sb_mmu_enable, sb_reloc_check) must not load an absolute
+# address from data: no `blr`/`br` through a register and no GOT loads. One such call (sb_dcache_all
+# through the GOT) made the first phone boot reset silently.
+for f in sb_mmu_enable sb_reloc_check; do
+    d=$("${CROSS}objdump" -d --no-show-raw-insn --disassemble="$f" "$out/engineer.elf" 2>/dev/null ||
+        "${CROSS}objdump" -d --no-show-raw-insn "$out/engineer.elf" | awk -v f="<$f>:" '$0 ~ f {p=1; next} /^$/ {p=0} p')
+    if echo "$d" | grep -E -q '\b(blr|br)\b|_GLOBAL_OFFSET_TABLE_|:got'; then
+        echo "engineer: $f (runs before relocation) has an indirect branch or GOT access:" >&2
+        echo "$d" | grep -E '\b(blr|br)\b|_GLOBAL_OFFSET_TABLE_|:got' >&2
+        exit 1
+    fi
+done
 "${CROSS}objcopy" -O binary "$out/engineer.elf" "$out/engineer.bin"
 "${CROSS}objcopy" -O binary "$out/engineer-at40.elf" "$out/engineer-at40.bin"
 "${CROSS}nm" "$out/engineer.elf" | sort > "$out/engineer.map"

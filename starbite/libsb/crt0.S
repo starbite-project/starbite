@@ -40,6 +40,11 @@ entry:
     mrs x23, vbar_el1
     mrs x24, CurrentEL
     mrs x25, daif
+    /* Our vectors first (PC-relative, valid before relocation): a fault in the MMU setup or the
+     * relocation shows the crash screen instead of resetting silently through S-Boot's vectors. */
+    adr x9, sb_vectors
+    msr vbar_el1, x9
+    isb
     adrp x9, sb_stack_top
     add x9, x9, :lo12:sb_stack_top
     mov sp, x9

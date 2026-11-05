@@ -37,7 +37,9 @@ static uint64_t l1[64] __attribute__((aligned(4096)));
 static uint64_t l2_low[512] __attribute__((aligned(4096)));   /* 0x80000000..0xbfffffff */
 static int mmu_on;
 
-extern void sb_dcache_all(unsigned op);
+/* hidden: called before relocation, so it must be a direct `bl`, not a call through the
+ * GOT (an unrelocated GOT entry jumped to garbage: the first phone boot reset silently). */
+extern void sb_dcache_all(unsigned op) __attribute__((visibility("hidden")));
 
 static uint64_t l2_desc(uint64_t pa)
 {
