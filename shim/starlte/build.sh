@@ -59,4 +59,4 @@ PY
 }
 
 image probe probe.S probe.c fbtext.c ../fdt.c
-image xnu_boot xnu_boot.S xnu_boot.c mmu.c anim.c menu.c menu6.c ui.c em.c em_vec.S ufs.c store.c sd.c catalog.c fbtext.c ../fdt.c $V7
+image xnu_boot xnu_boot.S xnu_boot.c mmu.c anim.c menu.c menu6.c ui.c em.c em_vec.S ufs.c store.c sd.c catalog.c fbtext.c ../fdt.c recovery.c post.c $V7

@@ -63,6 +63,8 @@ static const struct glyph font[] = {
     {'_',{0,0,0,0,0,0,31}}, {'*',{0,4,21,14,21,4,0}},
     {'!',{4,4,4,4,4,0,4}}, {'[',{14,8,8,8,8,8,14}},
     {']',{14,2,2,2,2,2,14}}, {'#',{10,10,31,10,31,10,10}},
+    /* POST and Starbite Recovery (post.c, recovery.c): FBT_CHECK, FBT_CROSS in fbtext.h. */
+    {'\x01',{0,1,1,2,20,8,0}}, {'\x02',{0,17,10,4,10,17,0}},
 };
 
 uint32_t star_fb_enable(void)

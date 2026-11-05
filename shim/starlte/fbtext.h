@@ -17,6 +17,9 @@ void star_fb_text(unsigned row, const char *s);
 void star_fb_text_c(unsigned row, const char *s, uint32_t fg, uint32_t bg);
 void star_fb_fill_rows(unsigned y0, unsigned y1, uint32_t pixel);
 unsigned star_fb_row_y(unsigned row);
+/* Two symbols for status lines (post.c, recovery.c): a check mark and a cross. */
+#define FBT_CHECK "\x01"
+#define FBT_CROSS "\x02"
 /* Text rows are 60 px; 38 characters fit across the panel. */
 #define STAR_FB_COLS 38U
 void star_fb_hex(unsigned row, const char *label, uint64_t value);

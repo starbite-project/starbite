@@ -19,8 +19,11 @@
 #include "mmu.h"
 #include "store.h"
 #include "catalog.h"
+#include "recovery.h"
+#include "post.h"
 
 void star_intro_splash(void);   /* anim.c */
+uint32_t star_crc32(uintptr_t p, uint64_t n);   /* store.c */
 
 #define LOG_BASE 0x91fff000UL
 #define RAM_BASE 0x92000000UL
@@ -464,6 +467,7 @@ star_overlay_redraw(void)
  */
 #define BUNDLE_LINUX 0x2158554e494c4253ULL   /* "SBLINUX!" */
 #define BUNDLE_UEFI  0x2121494645554253ULL   /* "SBUEFI!!" */
+#define BUNDLE_RESCUE 0x4555435345524253ULL  /* "SBRESCUE": Starbite Rescue (tools/rescue/bundle-rescue.py) */
 
 static const struct payload *boot_p;          /* BOOT's payload when it is valid */
 static uintptr_t boot_rd_start, boot_rd_end;  /* what is appended to this Image */
@@ -527,7 +531,7 @@ static uintptr_t find_bundle(uint64_t magic, uint64_t *size)
     uintptr_t b = boot_p ? align_page(boot_rd_start + payload_end(boot_p)) : boot_rd_start;
     while (b + PAGE_SIZE < boot_rd_end) {
         uint64_t m = *(volatile uint64_t *)b, s = *(volatile uint64_t *)(b + 8);
-        if ((m == BUNDLE_LINUX || m == BUNDLE_UEFI) && s <= boot_rd_end - b - PAGE_SIZE) {
+        if ((m == BUNDLE_LINUX || m == BUNDLE_UEFI || m == BUNDLE_RESCUE) && s <= boot_rd_end - b - PAGE_SIZE) {
             if (m == magic) {
                 *size = s;
                 return b + PAGE_SIZE;
@@ -1283,44 +1287,319 @@ boot_entry(unsigned i, volatile uint64_t *log, uintptr_t fdt, const char *cmdlin
     return boot_bare(log, fdt, e);
 }
 
+/* ---- boot setup, Starbite Recovery and Rescue (recovery.c, docs/STARBITE-RECOVERY.md) ------- */
+
+static uintptr_t boot_fdt;
+static uint64_t boot_el, boot_sctlr;
+static struct star_info boot_in;
+static char boot_cmdline[BOOT_LINE_LENGTH];
+
+/* BOOT's payload and bundles (RAM only: what S-Boot loaded), the star_info the menus get and the
+ * iOS boot-args (filled once: Engineer edits the boot-args in place). */
+static void boot_info(void)
+{
+    static int done;
+    if (done)
+        return;
+    done = 1;
+    boot_payload(boot_fdt);
+    boot_in.el = boot_el;
+    boot_in.sctlr = boot_sctlr;
+    boot_in.fdt = boot_fdt;
+    boot_in.rd_start = boot_rd_start;
+    boot_in.rd_end = boot_rd_end;
+    boot_in.phys_base = boot_p ? boot_p->phys_base : 0;
+    boot_in.mem_size = boot_p ? boot_p->mem_size : 0;
+    boot_in.entry_va = boot_p ? boot_p->entry_va : 0;
+    boot_in.nsegs = boot_p ? boot_p->nsegs : 0;
+    for (unsigned i = 0; i < BOOT_LINE_LENGTH; ++i)
+        boot_cmdline[i] = boot_p ? boot_p->cmdline[i] : 0;
+    boot_cmdline[BOOT_LINE_LENGTH - 1] = 0;
+}
+
+/* What star_splash records for the menus (the SBMENU01 sprites and the font atlas after them),
+ * with nothing drawn: Engineer Lite from the recovery menu needs the atlas, not the intro. */
+static void assets_find(void)
+{
+    uint64_t start, end;
+    uintptr_t fdt = boot_fdt;
+    if (!fdt || (fdt & 7) || !fdt_chosen_u64(fdt, "linux,initrd-start", &start) ||
+        !fdt_chosen_u64(fdt, "linux,initrd-end", &end) || end <= start + 16)
+        return;
+    const volatile uint32_t *h = (const volatile uint32_t *)(uintptr_t)start;
+    if (h[0] == 0x454d4253U && h[1] == 0x3130554eU && sprite_walk(start, end, 0xffffffffU) >= 0) {
+        menu_start = start;
+        menu_end = end;
+    }
+}
+
+const struct star_info *star_boot_setup(char **cmdline, unsigned *len)
+{
+    assets_find();
+    boot_info();
+    if (cmdline)
+        *cmdline = boot_cmdline;
+    if (len)
+        *len = BOOT_LINE_LENGTH;
+    return &boot_in;
+}
+
+/* Why no OS may start from this state, or 0. */
+static const char *boot_env_bad(void)
+{
+    if (boot_el != 4)
+        return "NOT EL1";
+    if (boot_sctlr & 1)
+        return "MMU ALREADY ON";
+    return 0;
+}
+
+/*
+ * Starbite Rescue: a Linux kernel + DTB + rescue initrd (tools/rescue/), found without the catalog
+ * or the menu:
+ *  1. an "SBRESCUE" bundle in BOOT (RAM only): the bundle page (u64 magic, u64 size), then
+ *     "SBRSCU01", u32 version 1, u32 flags, three { u64 offset, u64 size, u64 CRC32 } (Image,
+ *     DTB, initrd; offsets from the data start, 4 KiB aligned), char cmdline[256] at +88
+ *     (tools/rescue/bundle-rescue.py);
+ *  2. else the OS store: rescue.initrd with rescue.image|linux.image and rescue.dtb|linux.dtb.
+ * The kernel command line gets "sb.rescue=1" (and the bundle's cmdline).
+ */
+#define RESCUE_MAGIC 0x3130554353524253ULL   /* "SBRSCU01" */
+#define RESCUE_CMDLINE "sb.rescue=1"
+
+struct rescue_part {
+    uintptr_t at;
+    uint64_t size;
+    uint32_t crc;
+};
+
+/* The bundle's three parts, bounds and CRCs checked: 1, or 0 with *why (0 when there is none). */
+static int rescue_bundle(struct rescue_part part[3], const char **cmd, const char **why)
+{
+    uint64_t size;
+    *why = 0;
+    uintptr_t b = find_bundle(BUNDLE_RESCUE, &size);
+    if (!b)
+        return 0;
+    const volatile uint64_t *h = (const volatile uint64_t *)b;
+    if (size < 4096 || h[0] != RESCUE_MAGIC || (uint32_t)h[1] != 1) {
+        *why = "BAD RESCUE BUNDLE HEADER";
+        return 0;
+    }
+    for (unsigned k = 0; k < 3; ++k) {
+        uint64_t off = h[2 + 3 * k], len = h[3 + 3 * k];
+        if (off < 4096 || (off & (PAGE_SIZE - 1)) || off > size || !len || len > size - off) {
+            *why = "BAD RESCUE BUNDLE LAYOUT";
+            return 0;
+        }
+        part[k].at = b + off;
+        part[k].size = len;
+        part[k].crc = (uint32_t)h[4 + 3 * k];
+    }
+    *cmd = (const char *)(b + 88);
+    if (part[0].size < 64 || *(volatile const uint32_t *)(part[0].at + 56) != 0x644d5241U) {
+        *why = "RESCUE KERNEL IS NOT AN ARM64 IMAGE";
+        return 0;
+    }
+    for (unsigned k = 0; k < 3; ++k)
+        if (star_crc32(part[k].at, part[k].size) != part[k].crc) {
+            *why = k == 0 ? "RESCUE KERNEL CRC MISMATCH" : k == 1 ? "RESCUE DTB CRC MISMATCH" : "RESCUE INITRD CRC MISMATCH";
+            return 0;
+        }
+    return 1;
+}
+
+static const struct cat_ent rescue_ent = {
+    .key = "rescue",
+    .name = "Starbite Rescue",
+    .file = { "rescue.image|linux.image", "rescue.dtb|linux.dtb", "rescue.initrd", "" },
+    .cmdline = RESCUE_CMDLINE,
+    .category = CAT_STARBITE,
+    .method = M_LINUX,
+};
+
+int star_rescue_ready(const char **why)
+{
+    struct rescue_part part[3];
+    const char *cmd, *w;
+    struct src s;
+    boot_info();
+    if (rescue_bundle(part, &cmd, &w))
+        return 1;
+    if (w) {
+        *why = w;
+        return 0;
+    }
+    if (!resolve(rescue_ent.file[2], &s) || s.kind != SRC_STORE)
+        *why = "NO RESCUE BUNDLE IN BOOT, NO RESCUE.INITRD IN THE STORE";
+    else if (!resolve(rescue_ent.file[0], &s) || s.kind != SRC_STORE)
+        *why = "NO RESCUE KERNEL IN THE STORE";
+    else if (!resolve(rescue_ent.file[1], &s) || s.kind != SRC_STORE)
+        *why = "NO RESCUE DTB IN THE STORE";
+    else
+        return 1;
+    return 0;
+}
+
+/* The rescue system from BOOT's bundle: as boot_linux, from RAM. */
+static uintptr_t rescue_from_bundle(volatile uint64_t *log, const struct rescue_part part[3], const char *bcmd)
+{
+    static char cmd[320];
+    static char extra[256];
+    unsigned n = 0;
+    for (const char *c = RESCUE_CMDLINE; *c; ++c)
+        cmd[n++] = *c;
+    cmd[n] = 0;
+    for (unsigned k = 0; k < 255; ++k)
+        extra[k] = *(volatile const char *)(bcmd + k);
+    extra[255] = 0;
+    line_append(cmd, sizeof(cmd), extra);
+    const struct rescue_part *img = &part[0], *dtb = &part[1], *rd = &part[2];
+    uint64_t text_offset = *(volatile const uint64_t *)(img->at + 8);
+    uint64_t span = *(volatile const uint64_t *)(img->at + 16);
+    if (span < img->size)
+        span = img->size;
+    uintptr_t dst = LINUX_BASE + text_offset;
+    if (text_offset >= (2UL << 20) || span > OS_RD - dst)
+        return fail(log, -71, "RESCUE KERNEL TOO LARGE");
+    if (dtb->size > (2UL << 20))
+        return fail(log, -72, "RESCUE DTB TOO LARGE");
+    if (rd->size > EDIT_FDT - OS_RD)
+        return fail(log, -73, "RESCUE INITRD TOO LARGE");
+    star_fb_text(2, "COPYING THE RESCUE SYSTEM");
+    copy_bytes(EDIT_FDT, dtb->at, dtb->size);
+    uint32_t dsize = fdt_copy_append_bootargs(EDIT_FDT, LINUX_DTB, (uint32_t)(UFS_DMA - LINUX_DTB), cmd);
+    if (!dsize)
+        return fail(log, -74, "RESCUE DTB HAS NO BOOTARGS");
+    uint64_t now;
+    if (em_rtc_epoch(&now))
+        (void)fdt_chosen_set_u64(LINUX_DTB, "starbite,rtc-epoch", now);
+    copy_bytes(OS_RD, rd->at, rd->size);
+    if (!fdt_chosen_set_u64(LINUX_DTB, "linux,initrd-start", OS_RD) ||
+        !fdt_chosen_set_u64(LINUX_DTB, "linux,initrd-end", OS_RD + rd->size))
+        return fail(log, -75, "RESCUE DTB HAS NO INITRD PROPERTIES");
+    copy_bytes(dst, img->at, img->size);
+    uint8_t l31 = 0, l2 = 0;
+    (void)hw_sd_rails(&l31, &l2);         /* a STARBITE-RESCUE microSD works too (tools/rescue/init) */
+    log[18] = (uint64_t)l31 << 8 | l2;
+    clean_bytes(dst, dst + span);
+    clean_bytes(OS_RD, OS_RD + rd->size);
+    clean_bytes(LINUX_DTB, LINUX_DTB + dsize);
+    log[10] = 0x700;
+    log[15] = dst;
+    log[17] = LINUX_DTB;
+    clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+    __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
+    return dst;
+}
+
+/* Rescue mode after the reboot the recovery menu asked for: the entry PA, or 0 with boot_why. */
+static uintptr_t star_rescue_boot(volatile uint64_t *log)
+{
+    struct rescue_part part[3];
+    const char *cmd, *w;
+    boot_why = 0;
+    star_fb_row_base(0);
+    star_fb_text_c(0, "STARBITE RESCUE MODE", 0xffffd43bU, 0xff000000U);
+    star_fb_text(1, "STARTING THE RESCUE SYSTEM");
+    pmsg_put("STARBITE: rescue mode\n");
+    if (rescue_bundle(part, &cmd, &w)) {
+        pmsg_put("STARBITE: rescue from the BOOT bundle\n");
+        return rescue_from_bundle(log, part, cmd);
+    }
+    if (w)
+        return fail(log, -70, w);
+    if (!star_rescue_ready(&w))
+        return fail(log, -70, w);
+    pmsg_put("STARBITE: rescue from the store\n");
+    uintptr_t entry = boot_linux(log, &rescue_ent);
+    if (entry)
+        log[10] = 0x701;
+    return entry;
+}
+
+/* The recovery menu until it says Continue: an entry PA to start, or 0 to go on booting. */
+static uintptr_t recovery_loop(volatile uint64_t *log, const char *why)
+{
+    for (;;) {
+        int pick = -1;
+        if (recovery_main(why, &pick) != REC_BOOT)
+            return 0;
+        const char *bad = boot_env_bad();
+        if (bad) {
+            why = bad;
+            continue;
+        }
+        star_boot_setup(0, 0);
+        rec_panel_lost();       /* a load may overwrite the panel copy */
+        star_fb_row_base(0);
+        uintptr_t entry = boot_entry((unsigned)pick, log, boot_fdt, boot_cmdline);
+        if (entry)
+            return entry;
+        why = boot_why ? boot_why : "COULD NOT START";
+    }
+}
+
 /* Returns the entry PA, or 0 for Download mode. Status stays in the log page at LOG_BASE. */
 uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)
 {
-    static char cmdline[BOOT_LINE_LENGTH];
     /* Caches on before anything is drawn (mmu.c); the checks below see S-Boot's sctlr. */
     if (el == 4 && !(sctlr & 1))
         star_mmu_enable();
-    star_dump_latches();
     log[77] = star_fb_enable();
+    /* The Bixby window: only the key GPIO, the timer and fbtext up to here (recovery.c). */
+    int rec = rec_bixby_window(REC_WINDOW_MS);
+    boot_fdt = fdt;
+    boot_el = el;
+    boot_sctlr = sctlr;
+    star_dump_latches();
+    int rescue = rec_rescue_take();
+    uintptr_t entry;
+    if (rec) {
+        pmsg_put("STARBITE: Bixby held: Starbite Recovery\n");
+        rescue = 0;
+        entry = recovery_loop(log, 0);
+        if (entry)
+            return entry;
+    }
     int branded = star_splash(fdt);
     if (el != 4)
         return fatal(log, -10, "NOT EL1");
     if (sctlr & 1)
         return fatal(log, -11, "MMU ALREADY ON");
-    boot_payload(fdt);
+    boot_info();
+    char *cmdline = boot_cmdline;
     log[11] = boot_rd_start;
     log[12] = boot_rd_end;
-    struct star_info in;
-    in.el = el;
-    in.sctlr = sctlr;
-    in.fdt = fdt;
-    in.rd_start = boot_rd_start;
-    in.rd_end = boot_rd_end;
-    in.phys_base = boot_p ? boot_p->phys_base : 0;
-    in.mem_size = boot_p ? boot_p->mem_size : 0;
-    in.entry_va = boot_p ? boot_p->entry_va : 0;
-    in.nsegs = boot_p ? boot_p->nsegs : 0;
-    for (unsigned i = 0; i < BOOT_LINE_LENGTH; ++i)
-        cmdline[i] = boot_p ? boot_p->cmdline[i] : 0;
-    cmdline[BOOT_LINE_LENGTH - 1] = 0;
+    /* Rescue mode (the recovery menu's reboot): no POST, no menu. A failure comes back to recovery. */
+    if (rescue) {
+        entry = star_rescue_boot(log);
+        if (entry)
+            return entry;
+        rec_panel_lost();
+        entry = recovery_loop(log, boot_why ? boot_why : "RESCUE MODE FAILED");
+        if (entry)
+            return entry;
+    }
+    /* POST: a fatal check, or Bixby held during it, brings up the recovery menu. */
+    {
+        int bixby = 0;
+        const char *why = 0;
+        int f = post_boot(branded, &bixby, &why);
+        if (f || bixby) {
+            entry = recovery_loop(log, why);
+            if (entry)
+                return entry;
+        }
+    }
     (void)cat_load();
     /* The boot menu (and Starbite Engineer) on the branded screen; XNU RAM is still free here,
      * for Engineer's RAM test. A start that fails comes back to the menu. Unbranded: iOS. */
     for (;;) {
-        int pick = branded ? star_menu(&in, cmdline, BOOT_LINE_LENGTH) : star_ios_pick();
+        int pick = branded ? star_menu(&boot_in, cmdline, BOOT_LINE_LENGTH) : star_ios_pick();
         if (pick <= 0)
             return branded ? 0 : fatal(log, -1, "NO PAYLOAD");
-        uintptr_t entry = boot_entry((unsigned)(pick - 1), log, fdt, cmdline);
+        entry = boot_entry((unsigned)(pick - 1), log, fdt, cmdline);
         if (entry)
             return entry;
         if (!branded)
