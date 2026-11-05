@@ -1443,6 +1443,8 @@ static void open_sheet(int r);
 
 static int preview_lab;             /* m7_preview_state("lab"): the concept's goLab */
 
+static int lab_os;                  /* this Lab request may start Engineer OS (go_lab_os) */
+
 static void go_lab(void)
 {
     if (S.mode != MD_MENU)
@@ -1457,6 +1459,16 @@ static void go_lab(void)
         return;
     }
     S.result = RES_LAB;             /* D10: EngineerMode, run by menu7_main */
+    lab_os = 0;
+}
+
+/* Engineer OS (docs/ENGINEER-OS.md): the Lab row and the dock's Lab button start the "engineer"
+ * catalog entry when it is installed (run_lab); holding Bixby (go_lab) always opens Engineer Lite,
+ * the loader's EngineerMode, which also stays the fallback when the entry is missing. */
+static void go_lab_os(void)
+{
+    go_lab();
+    lab_os = S.result == RES_LAB;
 }
 
 static void start_entry(int r, uint32_t src)
@@ -1472,7 +1484,7 @@ static void start_entry(int r, uint32_t src)
         return;
     }
     if (R[r].cat < 0) {
-        go_lab();
+        go_lab_os();                /* the Lab row: Engineer OS when installed */
         return;
     }
     launch(R[r].cat, r, src ? SRC_ROW : SRC_NONE, src, 0);
@@ -1497,7 +1509,7 @@ static void menu_activate(void)
     case F_T:
         pulse(k);
         if (FB(k) == T_LAB)
-            go_lab();
+            go_lab_os();            /* the dock's Lab button: Engineer OS when installed */
         else
             open_alert(FB(k) == T_POWER ? AL_POWER : FB(k) == T_RECOVERY ? AL_RECOVERY : AL_DOWNLOAD);
         break;
@@ -2406,7 +2418,7 @@ static void tap(uint32_t f)
         if (r >= 0)
             start_entry(r, f);
     } else if (f == FK(F_T, 0, T_LAB)) {
-        go_lab();
+        go_lab_os();                /* a tap on the dock's Lab button */
     } else if (FKIND(f) == F_T) {
         open_alert(FB(f) == T_POWER ? AL_POWER : FB(f) == T_RECOVERY ? AL_RECOVERY : AL_DOWNLOAD);
     }
@@ -4377,7 +4389,11 @@ static void frame_wait(double t0)
 static void run_lab(void)
 {
     ST.flags |= 4;
-    int r = em_main(M_in, M_cmd, M_len);
+    /* Engineer OS when the Lab row or button asked and the entry is ready: it is launched as a
+     * picked entry below (r = entry + 1); otherwise Engineer Lite (em_main) as before. */
+    int eng = lab_os ? cat_find("engineer") : -1;
+    lab_os = 0;
+    int r = eng >= 0 && star_entry_ready((unsigned)eng, 0) ? eng + 1 : em_main(M_in, M_cmd, M_len);
     for (unsigned i = 0; i < NR; ++i)
         row_state(&R[i]);           /* Lab may have mounted the SD store */
     in_ignore_held();

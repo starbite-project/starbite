@@ -60,3 +60,9 @@ PY
 
 image probe probe.S probe.c fbtext.c ../fdt.c
 image xnu_boot xnu_boot.S xnu_boot.c mmu.c anim.c menu.c menu6.c ui.c em.c em_vec.S ufs.c store.c sd.c catalog.c fbtext.c ../fdt.c $V7
+
+# Engineer OS (docs/ENGINEER-OS.md): its own bare image on libsb, starbite/out/engineer.img. It is
+# skipped (not an error) when the menu v7 asset container it embeds fonts from is missing.
+if [ -f ../../starbite/engineer/build.sh ]; then
+    sh ../../starbite/engineer/build.sh
+fi
