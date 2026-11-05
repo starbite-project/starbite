@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import nopassword, rescue
 from .common import (BACKUP_OPTIONAL, BACKUP_RAW, BACKUP_REQUIRED, GIB, MIB, NATIVE_PARTS, PART_WRITE_PY,
-                     PROTECTED, REPO, Refused, Stopped, human)
+                     PROTECTED, REPO, Refused, Stopped, cardlayout, human)
 from .device import Phone, chunk_write
 from .journal import Journal
 from .manifest import coverage, writer_of
@@ -75,6 +75,7 @@ class Installer:
         self.mode = runner.mode
         self.done = {'written': 0, 'skipped': 0, 'kept': 0}
         self.warnings = []
+        self.card_parts = None      # [p1, p2] dicts for this card (the manifest's, or its card layout's)
 
     # ------------------------------------------------------------------ welcome / state
     def welcome(self):
@@ -204,7 +205,18 @@ class Installer:
         cbytes = (f.card or 0) * 512
         row('microSD', f'{human(cbytes)} ({f.card or 0} sectors) {f.card_name}'.strip() if f.card else 'none',
             cbytes >= self.m.card['min_bytes'], 'no card, or smaller than 64 GB')
-        if f.card and self.m.card.get('sectors'):
+        L = self.m.card_layout
+        if f.card and L is not None:
+            try:
+                self.card_parts = L.parts_dicts(f.card)
+                self.card_parts[0]['label'] = self.m.card['p1'].get('label', L.p1_label)
+                ok, why = True, ''
+            except cardlayout.LayoutError as e:
+                ok, why = False, (f'{e}: this bundle\'s card roots and payloads are made for the {L.name} card layout; '
+                                  f'this card needs a bundle made for the {cardlayout.for_card(f.card)} layout'
+                                  if cardlayout.for_card(f.card) else str(e))
+            row('card layout fit', f'bundle made for the {L.name} card layout ({L.title})', ok, why)
+        elif f.card and self.m.card.get('sectors'):
             row('card layout fit', f'bundle made for a {self.m.card["sectors"]}-sector card',
                 f.card == self.m.card['sectors'],
                 f'this card has {f.card} sectors: the bundle\'s card roots are at fixed sectors (payload command '
@@ -359,26 +371,38 @@ class Installer:
             return 'keep', f'has data: kept (--replace {i.key} overwrites it)'
         return 'write', 'differs: overwritten (holds no user data)'
 
+    def want_parts(self):
+        """[p1, p2] as dicts: the card layout's for this card (preflight), else the manifest's."""
+        if self.card_parts:
+            return self.card_parts
+        c = self.m.card
+        return [c['p1'], c['p2']] if 'p1' in c and 'p2' in c and 'sectors' in c['p1'] else None
+
     def plan_card(self):
         self._card_status = 'skip'
-        c = self.m.card
-        if 'p1' not in c or 'p2' not in c:
+        w = self.want_parts()
+        if not w:
             return []
         mbr = self.phone.exec_out('dd if=/dev/block/mmcblk0 bs=512 count=1 2>/dev/null')
         parts = mbr_parts(mbr)
-        want = [(c['p1']['type'], c['p1']['start'], c['p1']['sectors']), (c['p2']['type'], c['p2']['start'], c['p2']['sectors'])]
+        want = [(p['type'], p['start'], p['sectors']) for p in w]
+        L = self.m.card_layout
+        other = cardlayout.identify(parts, self.facts.card or 0) if parts and self.facts else None
+        named = f' ({L.name})' if L is not None else ''
         if parts and parts[:2] == want:
-            st, why = 'skip', 'the card already has the Starbite MBR'
+            st, why = 'skip', f'the card already has the Starbite MBR{named}'
         elif not parts or not any(p[2] for p in parts):
-            st, why = 'write', 'blank card'
+            st, why = 'write', f'blank card{named}'
         elif self.o.erase_card:
-            st, why = 'replace', 'another layout: ERASED (--erase-card): ' + self._parts_text(parts)
+            st, why = 'replace', (f'the Starbite {other} layout, this bundle is for {L.name if L else "another"}: ERASED '
+                                  if other else 'another layout: ERASED ') + '(--erase-card): ' + self._parts_text(parts)
         else:
-            st, why = 'BLOCKED', ('the card has another layout (' + self._parts_text(parts) +
-                                  '); everything on it would be lost: run again with --erase-card')
+            st, why = 'BLOCKED', ((f'the card has the Starbite {other} card layout and this bundle is made for '
+                                   f'{L.name if L else "another one"} (' if other else 'the card has another layout (') +
+                                  self._parts_text(parts) + '); everything on it would be lost: run again with --erase-card')
         self._card_status = st
         steps = [Step('card-layout', 'microSD partition table (p1 exFAT, p2 raw)', 'microSD sector 0', st, why)]
-        p1 = c['p1']
+        p1 = w[0]
         boot = self.phone.exec_out(f'dd if=/dev/block/mmcblk0 bs=512 skip={p1["start"]} count=1 2>/dev/null')
         has_exfat = boot[3:11] == b'EXFAT   '
         if st in ('write', 'replace'):
@@ -414,6 +438,7 @@ class Installer:
             u.h2('Menu entries this bundle covers')
             u.table(cov_rows, ('key', 'OS', 'files + root'))
         self.warnings += cov_warn
+        self.show_card_layout()
         u.h2('No user password on any OS')
         self.plan_status = {s.key: s.status for s in steps}
         checks = nopassword.report(self.m, self.journal, self.plan_status)
@@ -461,6 +486,23 @@ class Installer:
                        'The real mode (--real, or --rehearse on a fake phone) is now allowed for this bundle on this phone.')
         return 0
 
+    def show_card_layout(self):
+        """The bundle's card layout, and what it still needs (a rebuild, the phone): PENDING lines."""
+        L, u = self.m.card_layout, self.ui
+        if L is None:
+            return
+        u.h2(f'microSD card layout: {L.name}')
+        u.info(f'{L.title}; tools/store/cardlayout.py show {L.name}')
+        w = self.want_parts()
+        if w:
+            u.info(f'this card: p1 exFAT {w[0]["start"]}+{w[0]["sectors"]}, p2 0xda {w[1]["start"]}+{w[1]["sectors"]}')
+        for r in L.roots():
+            u.info(f'  root {r.name:<6} sectors {r.start}+{r.sectors} ({r.what}; menu {", ".join(r.keys)})')
+        for p in L.pending:
+            u.info(f'  PENDING: {p}')
+            if f'card layout {L.name}: PENDING: {p}' not in self.warnings:
+                self.warnings.append(f'card layout {L.name}: PENDING: {p}')
+
     def offline_plan(self):
         u = self.ui
         u.h1('The plan (no phone: targets not checked)')
@@ -472,6 +514,7 @@ class Installer:
         if cov_rows:
             u.h2('Menu entries this bundle covers')
             u.table(cov_rows, ('key', 'OS', 'files + root'))
+        self.show_card_layout()
         u.h2('No user password on any OS')
         u.table([(c.os, c.status, c.evidence) for c in nopassword.report(self.m)], ('OS', 'status', 'how / evidence'))
         for w in cov_warn:
@@ -555,11 +598,13 @@ class Installer:
             u.ok(f'backup complete: {len(done)} items in {self.rel(d)}')
 
     def do_card_layout(self, s):
-        c, p, u = self.m.card, self.phone, self.ui
-        mbr = build_mbr(c['p1'], c['p2'])
-        p2_head = c['p2']['start'] // 8
-        u.info('p1 type 0x%02x %d+%d, p2 type 0x%02x %d+%d' % (c['p1']['type'], c['p1']['start'], c['p1']['sectors'],
-                                                               c['p2']['type'], c['p2']['start'], c['p2']['sectors']))
+        p, u = self.phone, self.ui
+        p1, p2 = self.want_parts()
+        mbr = build_mbr(p1, p2)
+        p2_head = p2['start'] // 8
+        u.info('p1 type 0x%02x %d+%d, p2 type 0x%02x %d+%d' % (p1['type'], p1['start'], p1['sectors'],
+                                                               p2['type'], p2['start'], p2['sectors']) +
+               (f' (card layout {self.m.card_layout.name})' if self.m.card_layout else ''))
         if self.mode == 'dry-run':
             u.cmd('adb push mbr.bin /tmp/sbinst-mbr.bin; adb shell "umount /external_sd; dd if=/tmp/sbinst-mbr.bin '
                   'of=/dev/block/mmcblk0 bs=512 count=1 conv=notrunc,fsync"    [dry run: not run]')
@@ -580,7 +625,7 @@ class Installer:
         p.sh(f'dd if=/dev/zero of=/dev/block/mmcblk0 bs=4096 seek={p2_head} count=3 conv=notrunc,fsync 2>/dev/null', write=True)
         p.sh('blockdev --rereadpt /dev/block/mmcblk0', write=True)
         for _ in range(10):
-            if p.sh('cat /sys/class/block/mmcblk0p1/start 2>/dev/null', check=False) == str(c['p1']['start']):
+            if p.sh('cat /sys/class/block/mmcblk0p1/start 2>/dev/null', check=False) == str(p1['start']):
                 break
             time.sleep(1)
         else:
@@ -589,7 +634,8 @@ class Installer:
 
     def do_card_format(self, s):
         p, u, f = self.phone, self.ui, self.facts
-        label = self.m.card['p1'].get('label', 'STARBITE')
+        p1 = self.want_parts()[0]
+        label = p1.get('label', 'STARBITE')
         tool = 'mkfs.exfat' if 'mkfs.exfat' in f.tools else 'mkexfatfs' if 'mkexfatfs' in f.tools else None
         cmd = f'umount /external_sd 2>/dev/null; {tool or "mkfs.exfat"} -n {label} /dev/block/mmcblk0p1'
         if self.mode == 'dry-run':
@@ -601,7 +647,7 @@ class Installer:
             raise Stopped('TWRP has no exFAT formatter (mkfs.exfat / mkexfatfs): format microSD p1 as exFAT '
                           f'"{label}" from a computer, then run again')
         p.sh(cmd, write=True)
-        boot = p.exec_out(f'dd if=/dev/block/mmcblk0 bs=512 skip={self.m.card["p1"]["start"]} count=1 2>/dev/null')
+        boot = p.exec_out(f'dd if=/dev/block/mmcblk0 bs=512 skip={p1["start"]} count=1 2>/dev/null')
         if boot[3:11] != b'EXFAT   ':
             raise Stopped('p1 does not read back as exFAT after formatting')
         u.ok(f'p1 formatted exFAT "{label}"')
@@ -659,7 +705,9 @@ class Installer:
         elif d.kind == 'store':
             self.r.run(['bash', TOOL['store-ufs' if d.name == 'ufs' else 'store-sd'], i.path], write=True, stream=True)
         elif d.kind == 'card-lba':
-            self.r.run([*py, TOOL['card-range'], i.path, str(d.offset), '--state', state], write=True, stream=True)
+            L = self.m.card_layout                # sd128 keeps the tool's default (the 128 GB card only)
+            lay = ['--layout', L.name] if L is not None and L.name != 'sd128' else []
+            self.r.run([*py, TOOL['card-range'], i.path, str(d.offset), '--state', state, *lay], write=True, stream=True)
         elif d.kind == 'card-file':
             self.write_card_file(i, node, state)
         if self.mode == 'dry-run':

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The Starbite OS store, version 2 (read by shim/starlte/store.c; layout in store.h).
 
-  sbstore2.py build OUT.img (--capacity BLOCKS | --medium ufs|sd) [--catalog catalog.toml]
+  sbstore2.py build OUT.img (--capacity BLOCKS | --medium ufs|sd|sd64) [--catalog catalog.toml]
               [--import OLD.img|DIR] [NAME=FILE[:TYPE] ...]
       Packs a store: the catalog (as entry "catalog"), the entries of an older store image or a
       directory of pulled entries (tools/overlay/sbstore-pull.py), then NAME=FILE arguments
@@ -9,7 +9,10 @@
       uefi catalog, else taken from the name. The settings block is left empty: store-flash.sh
       keeps the phone's. --medium gives the capacity of S9 #1's store areas: ufs = USERDATA
       after 16 GiB (721024), sd = the 128 GB card's partition 2 (8389120); store-flash*.sh check
-      it against the phone. A card store is written by store-flash-sd.sh; the loader reads it
+      it against the phone. --medium sd64 is the card store of the sd64 card layout (any card of
+      at least 64 GB, tools/store/cardlayout.py): capacity = that layout's p2 (3964928 blocks), and the
+      store must stay inside its 64 MiB store area (the macOS Ventura root follows it). The card
+      geometry (sd = sd128, sd64) comes from cardlayout.py. A card store is written by store-flash-sd.sh; the loader reads it
       only with the settings flag on (settings --sd on, or Engineer "Card store at boot").
       With both --catalog and --import, refuses when the new catalog lacks a menu key the imported
       store's catalog has (another workflow's row would vanish): --drop KEY (repeatable) allows it.
@@ -19,8 +22,9 @@
       sdroot=lba:249868288,131072 (bsd/dev/starlte_sd.c, docs/XNU-MICROSD.md section 9).
   sbstore2.py list IMG
   sbstore2.py header IMG
-      The version 2 header: entries, capacity and used blocks; for a card store (capacity 8389120)
-      also whether the used end clears the microSD root tail at block 8372736.
+      The version 2 header: entries, capacity and used blocks; for a card store (capacity 8389120,
+      sd128; 3964928, sd64) also whether the used end clears the microSD root tail at block 8372736
+      (sd64: 3948544) and the layout's store area (the first root starts after it).
   sbstore2.py catalog catalog.toml OUT.sbc
   sbstore2.py catalog-keys IMG|OUT.sbc|catalog.toml
       The menu keys of a catalog, one per line (sorted): diff two of them before flashing.
@@ -39,14 +43,20 @@ import tomllib
 import zlib
 from pathlib import Path
 
+sys.dont_write_bytecode = True                     # no __pycache__ in tools/store
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cardlayout  # noqa: E402  (the card geometry: tools/store/cardlayout.py)
+
 BLOCK = 4096
 DIR_BLOCK, DIR_BLOCKS, SETTINGS_BLOCK = 3, 4, 2
 DATA_BLOCK = DIR_BLOCK + DIR_BLOCKS
 MAX_ENTRIES = DIR_BLOCKS * BLOCK // 64
 V1_BLOCKS = 262144
-MEDIA = {'ufs': 721024, 'sd': 8389120}   # S9 #1: USERDATA after 16 GiB; card p2 182886400..249999359
+SD_LAYOUTS = {'sd': cardlayout.get('sd128'), 'sd64': cardlayout.get('sd64')}
+# S9 #1: USERDATA after 16 GiB; card p2 182886400..249999359 (sd = sd128: 8389120); sd64: p2 8192..31727615 (3964928)
+MEDIA = {'ufs': 721024, **{m: L.store_blocks for m, L in SD_LAYOUTS.items()}}
 HEROLOG_BLOCKS = 1025                     # herolte_ufs.c: 4 MiB ring + header block at the end of the root partition
-SD_ROOT_TAIL_BLOCKS = 16384               # starlte_sd.c: the card's last 64 MiB (p2 blocks 8372736..), sdroot=lba:249868288,131072
+SD_ROOT_TAIL_BLOCKS = cardlayout.TAIL_SECTORS // cardlayout.BLOCK_SECTORS   # 16384: p2's last 64 MiB, the tail
 SET_SD_STORE = 1                          # settings flags: read the card's store at boot
 
 TYPES = {'data': 0, 'image': 1, 'dtb': 2, 'initrd': 3, 'text': 4, 'xnu': 5, 'uefi': 6, 'catalog': 7}
@@ -239,9 +249,13 @@ def build(a):
         sys.exit(f'store needs {blk} blocks > capacity {a.capacity}')
     if a.medium == 'ufs' and blk > a.capacity - HEROLOG_BLOCKS:
         sys.exit(f'store needs {blk} blocks: past {a.capacity - HEROLOG_BLOCKS} it would overlap the USERDATA herolog ring')
-    if a.medium == 'sd' and blk > a.capacity - SD_ROOT_TAIL_BLOCKS:
+    lay = SD_LAYOUTS.get(a.medium)
+    if lay is not None and blk > a.capacity - SD_ROOT_TAIL_BLOCKS:
         sys.exit(f'store needs {blk} blocks: past {a.capacity - SD_ROOT_TAIL_BLOCKS} it would overlap the '
-                 'microSD root test range (sdroot=lba:249868288,131072)')
+                 f'microSD root test range ({lay.tail.sdroot()})')
+    if a.medium == 'sd64' and blk > lay.store_area_blocks:
+        sys.exit(f'store needs {blk} blocks: past {lay.store_area_blocks} it would overlap the {lay.name} '
+                 f'macOS Ventura root ({lay.root("mac13").sdroot()})')
     struct.pack_into('<8sIIQ', v1, 0, b'SBSTORE1', 1, nv1, min(blk, V1_BLOCKS))
     n = len(items)
     hdr = bytearray(BLOCK)
@@ -261,10 +275,14 @@ def header(a):
         sys.exit(f'{a.img}: no version 2 header')
     n, cap, used, _ = check_header(data[BLOCK:BLOCK + 52], a.img)
     print(f'{a.img}: {n} entries, used {used} of {cap} blocks')
-    if cap == MEDIA['sd']:
+    lay = next((L for L in SD_LAYOUTS.values() if cap == L.store_blocks), None)
+    if lay is not None:
         tail = cap - SD_ROOT_TAIL_BLOCKS
         state = 'clear' if used <= tail else f'OVERLAPPED by {used - tail} blocks'
-        print(f'microSD root tail (p2 blocks {tail}..{cap - 1}, sdroot=lba:249868288,131072): {state}')
+        print(f'microSD root tail (p2 blocks {tail}..{cap - 1}, {lay.tail.sdroot()}): {state}')
+        area = lay.store_area_blocks
+        state = 'clear' if used <= area else f'OVERLAPPED by {used - area} blocks'
+        print(f'{lay.name} store area (p2 blocks 0..{area - 1}; the first root follows): {state}')
 
 
 def listing(a):

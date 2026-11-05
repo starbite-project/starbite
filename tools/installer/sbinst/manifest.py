@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import tomlmini
 from .common import (MIB, MODELS, DEVICES, MIN_CARD_BYTES, NATIVE_PARTS, PART_WRITE_PY, PROTECTED,
-                     PROTECTED_RAW, WRITABLE_PARTS, Refused, TOOLS)
+                     PROTECTED_RAW, WRITABLE_PARTS, Refused, TOOLS, cardlayout)
 
 MANIFEST_NAME = 'installer-manifest.toml'
 SLOT_BYTES = 16 << 30                     # USERDATA 0..16 GiB: the Apple (an earlier port iOS 16) slot
@@ -114,6 +114,7 @@ class Manifest:
     layout: list
     items: list = field(default_factory=list)
     sha256: str = ''
+    card_layout: object = None    # a cardlayout.Layout when [card] layout is set (docs/INSTALLER.md 11)
 
     def item(self, key):
         return next(i for i in self.items if i.key == key)
@@ -150,9 +151,11 @@ def load(bundle):
     card.setdefault('min_bytes', MIN_CARD_BYTES)
     if card['min_bytes'] < MIN_CARD_BYTES:
         raise Refused(f'{path}: [card] min_bytes is below the 64 GB rule ({MIN_CARD_BYTES})')
+    card_layout = _card_layout(card, path)
     for p in ('p1', 'p2'):
         if p in card:
-            for k in ('type', 'start', 'sectors'):
+            rest = p == 'p1' and card_layout is not None and not card_layout.p1_sectors   # p1 to the card's end
+            for k in ('type', 'start') if rest else ('type', 'start', 'sectors'):
                 _need(card[p], k, int, f'[card] {p}')
             if card[p]['start'] % 2048:
                 raise Refused(f'[card] {p} does not start on a 1 MiB boundary')
@@ -161,7 +164,7 @@ def load(bundle):
         _need(L, 'name', str, f'[[layout]] {i}')
         _need(L, 'blocks', int, f'[[layout]] {L["name"]}')
     m = Manifest(path=path, bundle=bundle, raw=raw, name=raw.get('name', bundle.name), phone=phone,
-                 card=card, layout=layout, sha256=hashlib.sha256(text.encode()).hexdigest())
+                 card=card, layout=layout, sha256=hashlib.sha256(text.encode()).hexdigest(), card_layout=card_layout)
     seen_keys, seen_dest = set(), {}
     for n, it in enumerate(raw.get('item', [])):
         where = f'[[item]] {n + 1}'
@@ -171,7 +174,16 @@ def load(bundle):
         if key in seen_keys:
             raise Refused(f'{where}: duplicate key {key}')
         seen_keys.add(key)
-        dest = parse_dest(_need(it, 'dest', str, f'item {key}'))
+        dest_s = _need(it, 'dest', str, f'item {key}')
+        if dest_s.startswith('card:root:'):       # a root slot of the card layout, by name or menu key
+            if card_layout is None:
+                raise Refused(f'item {key}: {dest_s} needs [card] layout (tools/store/cardlayout.py)')
+            slot = card_layout.root(dest_s[len('card:root:'):])
+            if slot is None:
+                raise Refused(f'item {key}: {dest_s}: the {card_layout.name} card layout has no such root '
+                              f'(it has: {", ".join(r.name for r in card_layout.roots())})')
+            dest_s = f'card:lba:{slot.start}'
+        dest = parse_dest(dest_s)
         action = it.get('action', 'write')
         if action not in ACTIONS:
             raise Refused(f'item {key}: action {action!r} is not one of {ACTIONS}')
@@ -207,10 +219,39 @@ def load(bundle):
     return m
 
 
+def _card_layout(card, path):
+    """[card] layout = "NAME": the layout (tools/store/cardlayout.py) gives p1, p2 and the exact card
+    size; p1/p2 written in the manifest must agree with it. Without `layout` nothing changes."""
+    name = card.get('layout')
+    if name is None:
+        return None
+    try:
+        L = cardlayout.get(name)
+    except cardlayout.LayoutError as e:
+        raise Refused(f'{path}: [card] {e}') from None
+    want = {'p1': {'type': cardlayout.EXFAT, 'start': L.p1_start, **({'sectors': L.p1_sectors} if L.p1_sectors else {})},
+            'p2': {'type': cardlayout.RAW_STORE, 'start': L.p2_start, 'sectors': L.p2_sectors}}
+    for p, w in want.items():
+        got = {k: v for k, v in card.get(p, {}).items() if k != 'label'}
+        if p in card and got != w:
+            raise Refused(f'{path}: [card] {p} {got} is not the {L.name} layout\'s {w}: leave p1/p2 out, '
+                          'the layout gives them')
+        label = card.get(p, {}).get('label')
+        card[p] = dict(w, **({'label': label or L.p1_label} if p == 'p1' else {}))
+    if L.exact:
+        if card.setdefault('sectors', L.exact) != L.exact:
+            raise Refused(f'{path}: [card] sectors {card["sectors"]}: the {L.name} layout is for the {L.exact}-sector card')
+    elif 'sectors' in card:
+        raise Refused(f'{path}: [card] sectors: the {L.name} layout fits any card of at least {L.min_sectors} sectors')
+    card['min_bytes'] = max(card['min_bytes'], L.min_sectors * 512)
+    return L
+
+
 def _check_card_ranges(m):
     """Card ranges must lie inside p2 and not overlap each other (card-range-flash.py checks the
-    store's used end on the phone)."""
+    store's used end on the phone); with a card layout, each inside one of its root slots."""
     p2 = m.card.get('p2')
+    L = m.card_layout
     ranges = []
     for it in m.items:
         if it.dest.kind != 'card-lba':
@@ -218,6 +259,11 @@ def _check_card_ranges(m):
         s, e = it.dest.offset, it.dest.offset + it.size // 512
         if p2 and not (p2['start'] <= s and e <= p2['start'] + p2['sectors']):
             raise Refused(f'item {it.key}: card sectors {s}..{e - 1} are not inside [card] p2')
+        if L is not None:
+            a = L.area_at(s, e - s)
+            if a is None or a.kind != 'root':
+                raise Refused(f'item {it.key}: card sectors {s}..{e - 1} are not inside a root slot of the {L.name} '
+                              f'card layout ({", ".join(f"{r.name} {r.start}+{r.sectors}" for r in L.roots())})')
         for k, (s2, e2) in ranges:
             if s < e2 and s2 < e:
                 raise Refused(f'item {it.key}: card sectors overlap item {k}')
@@ -394,6 +440,65 @@ def coverage(m):
         if missing:
             warns.append(f'{e.get("name", e["key"])} ({e["key"]}) will not boot from this bundle: {", ".join(missing)}')
     return rows, warns
+
+
+def layout_problems(m):
+    """With [card] layout: the bundle's boot side must point at that layout's sectors. Every catalog
+    entry whose root is on the card (`root = "sd:lba S+C"`) needs its key's root slot at S, and every
+    SWEETXNU payload of an xnu entry in the bundle's stores whose boot-args carry sdroot=lba:S,C must
+    point at its key's slot (entries without a slot: a root slot or the tail, never p1). A payload or
+    catalog made for another card layout would boot from the wrong sectors (cardlayout.py fixes both)."""
+    L = m.card_layout
+    if L is None:
+        return []
+    probs = []
+    cat_file = m.raw.get('catalog')
+    entries = []
+    if cat_file and (m.bundle / cat_file).is_file():
+        entries = tomlmini.loads((m.bundle / cat_file).read_text()).get('entry', [])
+    sb = _sbstore2()
+    blobs = {}
+    for it in m.items:
+        if it.dest.kind == 'store' and it.present and sb is not None:
+            try:
+                for n, _, b in sb.read_store(it.path):
+                    blobs.setdefault(n, b)
+            except SystemExit:
+                continue
+    for e in entries:
+        key, hidden = e['key'], 'hidden' in e.get('flags', [])
+        slot = L.root(key)
+        mm = re.match(r'sd:lba (\d+)\+(\d+)', e.get('root', ''))
+        if mm:
+            s, c = int(mm.group(1)), int(mm.group(2))
+            if slot is None:
+                probs.append(f'catalog {key}: root sd:lba {s}: the {L.name} card layout has no root slot for it '
+                             f'(cardlayout.py catalog {L.name} hides it)')
+            elif s != slot.start or c > slot.sectors:
+                probs.append(f'catalog {key}: root sd:lba {s}+{c}, the {L.name} layout has {slot.start}+{slot.sectors} '
+                             f'(cardlayout.py catalog {L.name})')
+        if e.get('method') != 'xnu' or not e.get('files'):
+            continue
+        for alt in (a.split(':', 1)[-1] for a in e['files'][0].split('|')):
+            blob = blobs.get(alt)
+            line = cardlayout.payload_cmdline(blob) if blob else None
+            if line is None:
+                continue
+            try:
+                r = cardlayout.sdroot_of(line)
+            except cardlayout.LayoutError as err:
+                probs.append(f'payload {alt} ({key}): {err}')
+                continue
+            if r is None:
+                continue
+            area = L.area_at(r[0], r[1])
+            if slot is not None and area is not slot:
+                probs.append(f'payload {alt} ({key}): sdroot=lba:{r[0]},{r[1]}; the {L.name} layout puts {key} at '
+                             f'{slot.start}+{slot.sectors} (cardlayout.py payload {L.name} {key} IN OUT)')
+            elif slot is None and (area is None or area.kind not in ('root', 'tail')):
+                probs.append(f'payload {alt} ({key}{", hidden" if hidden else ""}): sdroot=lba:{r[0]},{r[1]} is not '
+                             f'a root slot or the tail of the {L.name} card layout: leave it out of the store')
+    return probs
 
 
 def writer_of(item):

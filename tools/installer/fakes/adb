@@ -36,6 +36,20 @@ exfat-fuse() { mkdir -p "$2"; echo "$1 $2 fuseblk rw 0 0" >> "$R/proc/mounts"; }
 umount() { grep -v " $1 " "$R/proc/mounts" > "$R/proc/mounts.n"; mv "$R/proc/mounts.n" "$R/proc/mounts"; }
 mkfs.exfat() { for d; do :; done; python3 "%(fp)s" mkexfat "$R" "$d"; }
 mkexfatfs() { mkfs.exfat "$@"; }
+# a block device cannot be truncated: dd onto a /dev/block stand-in (a regular file) gets conv=notrunc
+dd() {
+  case " $* " in *" of=$R/dev/block/"*) ;; *) command dd "$@"; return ;; esac
+  local a out=() seen=
+  for a; do
+    case $a in
+      conv=*notrunc*) seen=1; out+=("$a") ;;
+      conv=*) seen=1; out+=("$a,notrunc") ;;
+      *) out+=("$a") ;;
+    esac
+  done
+  [ -n "$seen" ] || out+=(conv=notrunc)
+  command dd "${out[@]}"
+}
 '''
 
 

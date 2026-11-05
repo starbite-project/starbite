@@ -10,7 +10,9 @@
 #   - the main phone without a journal: everything kept, nothing replaced
 #   - starting from Download mode (TWRP via fake heimdall) and from the loader's fastboot
 #   - the rescue USB stick: refusals for internal / huge / disk-image disks, a dry run, a write + read-back
-# About 300 MB in WORKDIR (default build/installer-rehearsal; sparse files), removed at the end unless KEEP=1.
+#   - a 64 GB card (sd64 card layout): bundle/payload layout checks, the 128 GB bundle refused, dry run,
+#     rehearsal, the card checked against the layout, an sd128 card not erased without --erase-card
+# About 450 MB in WORKDIR (default build/installer-rehearsal; sparse files), removed at the end unless KEEP=1.
 # Long runs are shown in summary (headers, plan rows, ok/WARN/REFUSED/STOPPED lines); their full logs
 # are in WORKDIR/state*/logs/.
 set -uo pipefail
@@ -255,6 +257,62 @@ a = open(sys.argv[1], 'rb').read(); b = open(sys.argv[2], 'rb').read(len(a))
 sys.exit(a != b)
 PY
 unset SBINST_FAKE_DISKS
+
+hdr "14. a 64 GB card: the sd64 card layout (tools/store/cardlayout.py; docs/INSTALLER.md 11)"
+rm -rf "$W/phone-dl" "$W/state-dl" "$W/phone-fb" "$W/state-fb" "$W/phone-x" "$W/state-x" "$W/state-nojournal" "$FD"
+B64=$W/bundle64 P64=$W/phone64 ST64=$W/state64
+python3 -B tools/installer/fakes/mkbundle.py "$B64" --layout sd64 | tail -1
+"${FP[@]}" create "$P64" --card blank --card-sectors 124735488     # a SanDisk card sold as 64 GB
+C64=(--bundle "$B64" --fake-root "$P64" --state-dir "$ST64")
+run 0 "sd64 bundle verified" -- "${SI[@]}" --verify-bundle "$B64" --state-dir "$ST64"
+has 'card layout sd64: catalog roots and payload sdroot= match \(mac13 139264\)' "its catalog root and macOS payload sdroot= are sd64's"
+has 'bundle verified: 14 items; optional items not in it: windows$' "no iOS 26 item (no slot on sd64)"
+run 2 "the 128 GB card's bundle (sd128) on a 64 GB card is refused" -- "${SI[@]}" --bundle "$B" --fake-root "$P64" --state-dir "$W/state64x" --dry-run --yes
+has 'card layout fit: the sd128 layout is only for the 249999360-sector card' "...because sd128 is S9 #1's card only"
+has 'needs a bundle made for the sd64 layout' "...and says which layout this card needs"
+cp -R "$B64" "$W/b64-mixed"; cp "$B/store/ufs-store.img" "$W/b64-mixed/store/ufs-store.img"
+"${SI[@]}" --update-hashes "$W/b64-mixed" --state-dir "$W/state64x" >/dev/null
+run 2 "an sd64 bundle carrying the 128 GB card's payloads is refused" -- "${SI[@]}" --verify-bundle "$W/b64-mixed" --state-dir "$W/state64x"
+has 'payload mac13-v33.xnu \(mac13\): sdroot=lba:216442880,31457280; the sd64 layout puts mac13 at 139264' "names the payload and both sectors"
+rm -rf "$W/b64-mixed"
+before=$(fakehash "$P64")
+BRIEF_WARN=1 run 0 "sd64 dry run" -- "${SI[@]}" "${C64[@]}" --dry-run --yes --replace-all
+[ "$(fakehash "$P64")" = "$before" ] && ok "sd64 dry run: the fake phone is byte-identical" || bad "sd64 dry run changed the fake phone"
+has 'card layout fit +bundle made for the sd64 card layout.* ok' "card layout fit: sd64 on a 64 GB card"
+has 'this card: p1 exFAT 31727616\+93007872, p2 0xda 8192\+31719424' "p2 first (fixed), p1 exFAT to the card's end"
+has 'card-range-flash.py .*mac13-root.img 139264 --state .* --layout sd64' "card-range-flash.py is called with --layout sd64"
+has 'PENDING: XNU kernel: the SBTIME01 clock' "the plan names what still needs a kernel rebuild"
+run 0 "sd64 rehearsal" -- "${SI[@]}" "${C64[@]}" --rehearse --yes --replace-all --no-reboot
+has 'mac13-root: verified on the phone' "macOS root written at 139264 and read back"
+python3 - "$B64" "$P64" <<'PY' && ok "sd64 card: MBR, store capacity, macOS root and Linux files as the layout says" || bad "sd64 card differs"
+import hashlib, os, struct, sys
+sys.path.insert(0, 'tools/store')
+import cardlayout
+b, p = sys.argv[1:]
+dev = os.path.join(p, 'dev', 'block')
+mbr = open(os.path.join(dev, 'mmcblk0'), 'rb').read(512)
+parts = [struct.unpack_from('<4xB3xII', mbr, 446 + 16 * i) for i in range(2)]
+assert parts == cardlayout.get('sd64').parts(124735488), parts
+print(f'  MBR: p1 {parts[0]}, p2 {parts[1]}: {cardlayout.identify(parts, 124735488)}')
+hdr = open(os.path.join(dev, 'mmcblk0p2'), 'rb').read(8192)[4096:]
+assert hdr[:8] == b'SBSTORE2' and struct.unpack_from('<Q', hdr, 16)[0] == 3964928
+img = open(os.path.join(b, 'apple', 'mac13-root.img'), 'rb').read()
+with open(os.path.join(dev, 'mmcblk0'), 'rb') as f:
+    f.seek(139264 * 512)
+    assert f.read(len(img)) == img
+for n in ('pmos', 'ubuntu', 'chromeos'):
+    a = open(os.path.join(b, 'card', 'distros', n + '.img'), 'rb').read()
+    assert open(os.path.join(p, 'external_sd', 'distros', n + '.img'), 'rb').read() == a, n
+PY
+run 0 "sd64: the same again, nothing to do" -- "${SI[@]}" "${C64[@]}" --rehearse --yes --no-reboot
+has '; 0 write commands ran' "0 write commands"
+"${FP[@]}" create "$W/phone64b" --card starbite >/dev/null    # S9 #1's 128 GB card, sd128 layout
+run 2 "an sd64 bundle on a card with the sd128 layout is not erased without --erase-card" -- "${SI[@]}" --bundle "$B64" --fake-root "$W/phone64b" --state-dir "$W/state64b" --dry-run --yes
+has 'the card has the Starbite sd128 card layout and this bundle is made for sd64' "names both layouts"
+run 0 "...with --erase-card the 128 GB card is laid out as sd64" -- "${SI[@]}" --bundle "$B64" --fake-root "$W/phone64b" --state-dir "$W/state64b" --dry-run --yes --erase-card
+has 'REPLACE  microSD partition table' "the card step is REPLACE"
+has 'this card: p1 exFAT 31727616\+218271744, p2 0xda 8192\+31719424' "sd64 on a 128 GB card: same p2, a bigger p1"
+rm -rf "$W/phone64b" "$W/state64b" "$W/state64x"
 
 hdr "result: $pass passed, $fail failed"
 [ "${KEEP:-0}" = 1 ] || rm -rf "$W"

@@ -20,6 +20,8 @@ min_battery = 50
 
 [card]
 min_bytes = 60000000000                 # "at least 64 GB" (a 64 GB card holds 61.9-64.1 GB)
+layout = "sd128"                        # tools/store/cardlayout.py: S9 #1's 128 GB card. Any other card of 64 GB or
+                                        # more: layout = "sd64", no sectors/p1/p2, roots as card:root:KEY (docs/INSTALLER.md 11)
 sectors = 249999360                     # this set's card roots sit at fixed sectors (payload command lines): the 128 GB card
 p1 = { type = 0x07, start = 8192, sectors = 182878208, label = "STARBITE" }
 p2 = { type = 0xda, start = 182886400, sectors = 67112960 }
