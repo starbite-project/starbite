@@ -203,9 +203,27 @@ def _starbite_a16g():
                          'installer writes WINDOWS fresh from the bundle anyway.',))
 
 
-LAYOUTS = {L.name: L for L in (_stock(), _starbite_a(), _starbite_a16g())}
+def _starbite_oneui():
+    """One UI 8 as the main Android (docs/ANDROID-ONEUI.md, 2026-11-06): WINDOWS exactly 18 GiB (its NTFS was
+    shrunk with ntfsresize to 18 GiB - 64 MiB first; the partition must never be smaller than the NTFS),
+    A16DATA from there to the last usable block (~15.84 GiB, Linux data). SYSTEM / VENDOR / ODM stay where
+    they are (One UI's EROFS images are written into them)."""
+    a = _starbite_a()
+    rows = list(a.parts)
+    win_blocks = 18 << 18                              # 18 GiB in 4 KiB blocks = 4718592
+    rows[26] = replace(rows[26], blocks=win_blocks)
+    rows[27] = replace(rows[27], start=6744832 + win_blocks, type=LINUX_DATA)
+    return Layout('starbite-oneui', 'Starbite layout for One UI 8: WINDOWS 18 GiB, A16DATA ~15.84 GiB (Linux data)',
+                  tuple(rows), min_blocks=15616000,
+                  notes=('WINDOWS must be shrunk with ntfsresize to <= 18 GiB BEFORE this table is written.',
+                         'The Windows UFS driver write fence still spans 6613760..13518591 (old WINDOWS end): NTFS '
+                         'only writes inside its 18 GiB volume, so A16DATA from 11463424 is safe while Windows does '
+                         'not grow its volume.'))
+
+
+LAYOUTS = {L.name: L for L in (_stock(), _starbite_a(), _starbite_a16g(), _starbite_oneui())}
 ACTIVE = 'starbite-a'          # the table a Starbite install lays out unless the bundle names another
-TARGETS = ('starbite-a', 'starbite-a16g')      # layouts a bundle may name (stock is a reference only)
+TARGETS = ('starbite-a', 'starbite-a16g', 'starbite-oneui')      # layouts a bundle may name (stock is a reference only)
 
 
 # ---------------------------------------------------------------------------------------------
