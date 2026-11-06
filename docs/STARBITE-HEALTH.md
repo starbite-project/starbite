@@ -855,6 +855,9 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
      (CLUSTER1_WDTRESET). 6a605a1f spins instead (kernel step 11) and arms the watchdog for
      panic_timeout + 5 s at the panic as a backstop (LINUX-REBUILD-PLAN 7.6-7.9). A RESET row of
      CLUSTER1_WDTRESET after about 15 s means the backstop caught a remaining stall.
+   - 6a605a1f still reset about 2 minutes late. 8775991b counts down on the panel itself, timed by the
+     counter and by the panel's frame starts, then writes SWRESET. It shows a diagnostics row (CLOCK, TE,
+     WDT0/WDT1, SWRESET), and the stopped CPUs keep spinning (LINUX-REBUILD-PLAN 7.10-7.12).
    - Try Volume Up (levels 2 and 3), Bixby (older lines), Power (menu).
    - The menu must show no countdown.
    - `python3 -I tools/store/sbstore2.py crashlog live --level 3`.

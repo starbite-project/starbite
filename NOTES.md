@@ -2251,3 +2251,18 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
     `panic_last_ms` reports a dry run's time. CONFIG_DRM_PANIC_SCREEN="user".
   - Host render of the real code with the phone's log: 1.6 ms.
   - Image b5ef2205..., modules 49e19a5a...; the DTBs are unchanged (f563dee1...).
+- 2026-11-06 night: **6a605a1f still reset ~2 min after a panic; third round 7.1.0-starbite-8775991b (built, not flashed).**
+  docs/LINUX-REBUILD-PLAN.md 7.10-7.12.
+  - On the phone neither the exact countdown nor the 15 s cluster-1 watchdog backstop reset in time, nor the
+    loader's 60 s watchdog in f797be6b's run, while the same watchdog resets on time in a running system and
+    `reboot`'s SWRESET works.
+  - The state only a panic creates: seven CPUs parked in WFE/WFI for 10 s or more. Hypothesis: idle clusters
+    slow or stop the time-keeping, or hold back the reset.
+  - Now: the countdown runs at the end of s9p-decon's panic_flush (`s9p_panic_restart()` in s9p-clkgate,
+    never back to panic()). It busy-waits and is timed by both CNTVCT and DECON frame starts (TE, 60 Hz),
+    whichever first. Then INFORM2 + SWRESET direct, retried each second; from the third try both watchdogs
+    are armed for 1 s.
+  - The panel shows a live countdown and a diagnostics row: CLOCK, TE, WDT0/WDT1 WTCNT, SWRESET count.
+  - Backstop on both watchdogs (cluster 0 0x10050000 bit 24, cluster 1 bit 23) at panic_timeout + 5 s.
+  - Tree step 12: the stopped CPUs spin instead of WFE/WFI while a panic with a restart is due.
+  - Image 56addce0..., modules 6182ccac...; the DTBs are unchanged.
