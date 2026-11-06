@@ -44,6 +44,15 @@ Host scripts: `build/oneui-dl.sh` (download + unzip, `SBI` env = device id), `bu
    and restarts into recovery. A hang on the boot animation therefore always comes back without the buttons
    (`androidboot.init_fatal_reboot_target=recovery` in the cmdline covers init and critical-service crashes).
 
+**After `make_rom`, always run `tools/android/oneui/postfix-vendor.sh` (VM).** UN1CA's
+`exynos9810_boot_restore` patch (build_order 20) runs after every mod and rewrites both vendor fstabs from a
+template with /data on USERDATA (ext4 + an f2fs fallback; the build fails without that line), and it sets
+`ro.setupwizard.mode=OPTIONAL`. The script fixes the finished work_dir (fstabs -> A16DATA; the uppercase
+by-name `userdata_block_device` label in `vendor_file_contexts` moves from USERDATA to A16DATA, so USERDATA
+keeps the generic `block_device` label that no Android domain may open) and rebuilds `vendor.img` with
+UN1CA's `build_fs_image.sh`, checking the image itself. It never edits the source tree (make_rom's work hash).
+The vendor image from the target-files zip must never be written to the phone.
+
 ## 3. Boot path
 
 The loader's `android` method starts One UI with four store files: `android.kernel` (DS-ACK G960F kernel),
