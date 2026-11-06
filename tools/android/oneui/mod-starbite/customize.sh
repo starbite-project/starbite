@@ -35,3 +35,20 @@ fi
 # 3. No setup wizard: the first boot goes to the home screen (Google's wizard honours this; Samsung's
 #    wizard is completed by tools/android/oneui/first-boot.sh over adb until a native way is proven).
 SET_PROP "system" "ro.setupwizard.mode" "DISABLED"
+
+# 4. Boot guard: a hang before sys.boot_completed restarts into recovery after ro.starbite.bootguard
+#    seconds (files/starbite-bootguard.rc, files/bootguard.sh), so an unattended first boot always returns.
+LOG "- Starbite: boot guard (recovery after 1200 s without boot_completed)"
+EVAL "install -D -m 644 \"$MODPATH/files/starbite-bootguard.rc\" \"$WORK_DIR/system/system/etc/init/starbite-bootguard.rc\"" || return 1
+EVAL "install -D -m 644 \"$MODPATH/files/bootguard.sh\" \"$WORK_DIR/system/system/etc/starbite/bootguard.sh\"" || return 1
+for e in "/system/etc/init/starbite-bootguard\\.rc" "/system/etc/starbite" "/system/etc/starbite/bootguard\\.sh"; do
+    grep -qF "$e " "$WORK_DIR/configs/file_context-system" ||
+        echo "$e u:object_r:system_file:s0" >> "$WORK_DIR/configs/file_context-system"
+done
+grep -q "^system/etc/init/starbite-bootguard.rc " "$WORK_DIR/configs/fs_config-system" ||
+    echo "system/etc/init/starbite-bootguard.rc 0 0 644 capabilities=0x0" >> "$WORK_DIR/configs/fs_config-system"
+grep -q "^system/etc/starbite " "$WORK_DIR/configs/fs_config-system" ||
+    echo "system/etc/starbite 0 0 755 capabilities=0x0" >> "$WORK_DIR/configs/fs_config-system"
+grep -q "^system/etc/starbite/bootguard.sh " "$WORK_DIR/configs/fs_config-system" ||
+    echo "system/etc/starbite/bootguard.sh 0 0 644 capabilities=0x0" >> "$WORK_DIR/configs/fs_config-system"
+SET_PROP "system" "ro.starbite.bootguard" "1200"

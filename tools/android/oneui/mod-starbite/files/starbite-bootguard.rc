@@ -1,0 +1,13 @@
+# Starbite boot guard (tools/android/oneui/mod-starbite, docs/ANDROID-ONEUI.md): when Android has not
+# finished booting (sys.boot_completed) within ro.starbite.bootguard seconds (0 = off), it saves the log
+# and restarts into recovery, so a hang on the boot animation never needs the buttons. It runs as the
+# shell user in the shell domain, the same as `adb shell reboot recovery`.
+service starbite_bootguard /system/bin/sh /system/etc/starbite/bootguard.sh
+    user shell
+    group shell log readproc
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+on late-init
+    start starbite_bootguard
