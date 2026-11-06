@@ -1117,6 +1117,80 @@ unsigned kq_key_bit(const char *s)
     return 0;
 }
 
+/* ---- the menus' background USB link ----------------------------------------------------------- */
+
+void bgl_init(struct bgl *b)
+{
+    z(b, sizeof(*b));
+    b->retry_ms = BGL_RETRY_MS;
+    b->unconf_ms = BGL_UNCONF_MS;
+}
+
+void bgl_enable(struct bgl *b, int on)
+{
+    b->wanted = (uint8_t)(on != 0);
+}
+
+unsigned bgl_poll(struct bgl *b, uint64_t now_ms, int configured, int vbus)
+{
+    uint64_t t = now_ms + 1U;
+    if (!b->wanted)
+        return BGL_IDLE;
+    if (!b->up) {
+        if (b->failed && t < b->retry_at)
+            return BGL_IDLE;
+        return BGL_START;
+    }
+    if (b->last && t - b->last > BGL_GAP_MS)
+        return BGL_RELINK;              /* nobody served it for a while: the host may have given up */
+    if (configured || !vbus) {
+        b->unconf_since = 0;
+        if (configured)
+            b->unconf_ms = BGL_UNCONF_MS;
+    } else if (!b->unconf_since) {
+        b->unconf_since = t;
+    } else if (t - b->unconf_since > b->unconf_ms) {
+        b->unconf_since = 0;
+        b->unconf_ms = b->unconf_ms * 2U > BGL_RETRY_MAX_MS ? BGL_RETRY_MAX_MS : b->unconf_ms * 2U;
+        return BGL_RELINK;              /* plugged in, never configured: attach again */
+    }
+    return BGL_SERVE;
+}
+
+void bgl_result(struct bgl *b, unsigned what, int ok, uint64_t now_ms)
+{
+    uint64_t t = now_ms + 1U;
+    if (what == BGL_RELINK)
+        ++b->relinks;
+    else
+        ++b->starts;
+    if (ok) {
+        b->up = 1;
+        b->failed = 0;
+        b->routed = 1;
+        b->retry_ms = BGL_RETRY_MS;
+        b->last = t;
+        return;
+    }
+    ++b->fails;
+    b->up = 0;
+    b->failed = 1;
+    b->retry_at = t + b->retry_ms;
+    b->retry_ms = b->retry_ms * 2U > BGL_RETRY_MAX_MS ? BGL_RETRY_MAX_MS : b->retry_ms * 2U;
+}
+
+void bgl_served(struct bgl *b, uint64_t now_ms)
+{
+    b->last = now_ms + 1U;
+}
+
+void bgl_stopped(struct bgl *b)
+{
+    b->up = 0;
+    b->last = 0;
+    b->unconf_since = 0;
+}
+
 /* ---- crash text ------------------------------------------------------------------------------- */
 
 unsigned sb_crash_prefix(const char *l, unsigned n)

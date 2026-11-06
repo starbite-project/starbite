@@ -12,6 +12,8 @@ int muic_route_usb(void);
  * MCU's own detection may reopen it). Returns 2 when VBUS has just come back (a replug: the
  * caller restarts the link), 1 while present, 0 without, -1 on a bus error. */
 int muic_poll(void);
+/* VBUS as the last route / poll read it (0 if the MAX77705 never answered) */
+int muic_vbus(void);
 /* Fuel gauge (0x36): RepSOC in percent and VCELL in mV; 1 if read. */
 int muic_battery(unsigned *mv, unsigned *pct);
 void muic_diag(struct tb *t);

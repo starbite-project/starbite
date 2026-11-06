@@ -350,6 +350,39 @@ unsigned kq_bits(struct kq *k, uint64_t now_ms);
 /* "up" "down" "bixby" "power" (also "volup" "voldown" "vol+" "vol-"): the K_* bit, 0 if unknown. */
 unsigned kq_key_bit(const char *name);
 
+/* ---- the menus' background USB link: when to start, serve, re-link (fastboot_dev.c fbbg_*) -----
+ * One owner for the whole boot: the crash report, the boot menu and Starbite Recovery poll the
+ * same link. The phone, health5: after the crash report the menu's intro and wallpaper (about
+ * 3 s) polled nothing; the Mac's command in that time made it reset the device, nobody answered
+ * the new enumeration, macOS gave up on the port and `fastboot devices` stayed empty at the menu.
+ * So a link not served for BGL_GAP_MS is restarted (soft disconnect, PHY and core again: the
+ * host sees a fresh attach) before it is served again; a start that failed is retried after
+ * BGL_RETRY_MS, doubling to BGL_RETRY_MAX_MS; a link that VBUS says is plugged in but no host has
+ * configured for BGL_UNCONF_MS (doubling to the same cap) is restarted too. Times in ms. */
+#define BGL_GAP_MS       750U
+#define BGL_RETRY_MS     5000U
+#define BGL_UNCONF_MS    10000U
+#define BGL_RETRY_MAX_MS 60000U
+#define BGL_IDLE   0U               /* nothing to do: not wanted, or a failed start waits for its retry */
+#define BGL_START  1U               /* bring the link up now (bgl.routed 0: route D+/D- first) */
+#define BGL_RELINK 2U               /* stop it and bring it up again first */
+#define BGL_SERVE  3U               /* serve it */
+struct bgl {
+    uint8_t wanted, up, failed, routed;
+    uint64_t last;                  /* ms + 1 of the last poll that served it, 0 = never */
+    uint64_t retry_at, unconf_since;    /* ms + 1, 0 = none */
+    uint32_t retry_ms, unconf_ms;
+    uint32_t starts, relinks, fails;    /* for `oem usb` and the host test */
+};
+void bgl_init(struct bgl *b);
+void bgl_enable(struct bgl *b, int on);         /* wanted (fbbg_enable / fbbg_off) */
+/* A poll at now_ms: what to do first. configured: a host has configured the link; vbus: a cable. */
+unsigned bgl_poll(struct bgl *b, uint64_t now_ms, int configured, int vbus);
+/* After BGL_START / BGL_RELINK: ok or not. A success also counts as routed and served. */
+void bgl_result(struct bgl *b, unsigned what, int ok, uint64_t now_ms);
+void bgl_served(struct bgl *b, uint64_t now_ms);    /* the poll served it (BGL_SERVE, after a start) */
+void bgl_stopped(struct bgl *b);                    /* the loader stopped the link (fbbg_stop) */
+
 /* ---- what a crashed OS left: the crash screen's parser (crash.c) -------------------------------
  * Text from the ramoops dmesg record or the console ring (Linux: lines "<N>[ secs.usecs] text",
  * the prefix optional) or XNU's panic dump in the pmsg ring (docs/STARBITE-HEALTH.md 5.4). Each

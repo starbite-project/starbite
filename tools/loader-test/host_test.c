@@ -1445,6 +1445,122 @@ static void test_kq(const char *fxdir)
     free(rb);
 }
 
+/* ---- the menus' background USB link across one boot (sbfmt.c bgl_*, fastboot_dev.c fbbg_*) ----- */
+
+struct bgsim { struct bgl b; unsigned starts, relinks, serves, idles; int fail_next; uint64_t cfg_at; int host; int vbus; };
+
+/* Polls every `every` ms over [t0, t1): what fastboot_dev.c's fbbg_poll does with the policy. The
+ * host configures the link `host` ms after each (re)start, if a host is there. */
+static void bg_run(struct bgsim *s, uint64_t t0, uint64_t t1, unsigned every)
+{
+    for (uint64_t t = t0; t < t1; t += every) {
+        int configured = s->b.up && s->host && s->cfg_at && t >= s->cfg_at;
+        unsigned w = bgl_poll(&s->b, t, configured, s->vbus);
+        if (w == BGL_IDLE) {
+            ++s->idles;
+            continue;
+        }
+        if (w != BGL_SERVE) {
+            int ok = !s->fail_next;
+            if (s->fail_next > 0)
+                --s->fail_next;
+            *(w == BGL_START ? &s->starts : &s->relinks) += 1;
+            bgl_result(&s->b, w, ok, t);
+            s->cfg_at = ok ? t + 300U : 0;
+            if (!ok)
+                continue;
+        }
+        ++s->serves;
+        bgl_served(&s->b, t);
+    }
+}
+
+static void test_bgl(void)
+{
+    struct bgsim s;
+    memset(&s, 0, sizeof(s));
+    bgl_init(&s.b);
+    s.host = 1;
+    s.vbus = 1;
+    bg_run(&s, 0, 1000, 10);
+    CHECK(s.idles == 100 && !s.starts, "bgl: not wanted (before fbbg_enable): nothing");
+    bgl_enable(&s.b, 1);
+    /* the crash report (a poll every 5 ms + redraws: say 35 ms) for 6 s, the Mac working with it */
+    bg_run(&s, 1000, 7000, 35);
+    CHECK(s.starts == 1 && s.relinks == 0 && s.b.up, "bgl: crash report: one start, served (%u starts)", s.starts);
+    /* Power: menu v7's intro and wallpaper, nothing polls for 3.2 s (health5's dead link) */
+    bg_run(&s, 10200, 70200, 16);
+    CHECK(s.starts == 1 && s.relinks == 1, "bgl: the menu's first poll after the 3.2 s gap restarts the link (%u)", s.relinks);
+    /* a minute of menu at 60 fps with an occasional slow frame: never restarted again */
+    unsigned r0 = s.relinks;
+    for (uint64_t t = 70200; t < 130200; t += 600) {
+        bg_run(&s, t, t + 400, 16);
+        bg_run(&s, t + 600, t + 601, 1);    /* a 200 ms frame: the poll after it */
+    }
+    CHECK(s.relinks == r0, "bgl: slow frames (200 ms) are not gaps");
+    /* the menu starts an OS that fails: boot_entry stopped the link; the menu comes back */
+    bgl_stopped(&s.b);
+    bg_run(&s, 140000, 141000, 16);
+    CHECK(s.starts == 2 && s.b.up, "bgl: after a start stopped it, the next menu poll starts it again");
+    /* to Starbite Recovery (recovery polls every 10 ms), a full POST there (9 s without polls) */
+    bg_run(&s, 141500, 150000, 10);
+    unsigned r1 = s.relinks;
+    bg_run(&s, 159000, 165000, 10);
+    CHECK(s.relinks == r1 + 1, "bgl: recovery after a 9 s POST run: restarted once");
+    /* fbbg_off (an OS starts): nothing more */
+    bgl_enable(&s.b, 0);
+    bgl_stopped(&s.b);
+    unsigned st = s.starts, rl = s.relinks;
+    bg_run(&s, 166000, 200000, 10);
+    CHECK(s.starts == st && s.relinks == rl, "bgl: off: never started again");
+
+    /* a start that fails is retried with back-off: 5 s, 10 s, 20 s ... at most 60 s */
+    memset(&s, 0, sizeof(s));
+    bgl_init(&s.b);
+    s.host = 1;
+    s.vbus = 1;
+    bgl_enable(&s.b, 1);
+    s.fail_next = 3;
+    bg_run(&s, 0, 4900, 10);
+    CHECK(s.starts == 1 && !s.b.up, "bgl: a failed start: no retry for 5 s (%u)", s.starts);
+    bg_run(&s, 4900, 5100, 10);
+    CHECK(s.starts == 2, "bgl: retried after 5 s");
+    bg_run(&s, 5100, 15000, 10);
+    CHECK(s.starts == 2, "bgl: then not for 10 s");
+    bg_run(&s, 15000, 15200, 10);
+    CHECK(s.starts == 3, "bgl: retried after 10 s");
+    bg_run(&s, 15200, 35100, 10);
+    CHECK(s.starts == 4 && s.b.up && s.b.fails == 3, "bgl: after 20 s, and it comes up (%u starts, %u fails)", s.starts, s.b.fails);
+    CHECK(s.idles > 3000, "bgl: polls while it waits cost nothing (%u idle)", s.idles);
+    s.fail_next = 100;
+    bgl_stopped(&s.b);
+    unsigned s0 = s.starts;
+    bg_run(&s, 40000, 400000, 10);
+    /* at 40, 45, 55, 75, 115, 175, 235, 295, 355 s */
+    CHECK(s.starts - s0 == 9 && s.b.retry_ms == BGL_RETRY_MAX_MS,
+          "bgl: failing for good: back-off reaches 60 s (%u starts in 6 min)", s.starts - s0);
+
+    /* plugged in, but no host configures it (a charger, a prompt not answered): restarted after
+     * 10 s, 20, 40, 60 s; with a host it stays; without VBUS it is left alone */
+    memset(&s, 0, sizeof(s));
+    bgl_init(&s.b);
+    s.vbus = 1;
+    bgl_enable(&s.b, 1);
+    bg_run(&s, 0, 10500, 10);
+    CHECK(s.starts == 1 && s.relinks == 1, "bgl: not configured for 10 s: restarted (%u)", s.relinks);
+    bg_run(&s, 10500, 31000, 10);
+    CHECK(s.relinks == 2, "bgl: then after 20 s (%u)", s.relinks);
+    s.host = 1;
+    s.cfg_at = 31000;
+    bg_run(&s, 31000, 200000, 10);
+    CHECK(s.relinks == 2 && s.b.unconf_ms == BGL_UNCONF_MS, "bgl: configured: kept, back-off reset");
+    memset(&s, 0, sizeof(s));
+    bgl_init(&s.b);
+    bgl_enable(&s.b, 1);
+    bg_run(&s, 0, 300000, 10);
+    CHECK(s.starts == 1 && s.relinks == 0, "bgl: no VBUS: never restarted");
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 4 && !strcmp(argv[1], "--catalog-variant")) {
@@ -1482,6 +1598,7 @@ int main(int argc, char **argv)
         test_real_panic2(fx);
         test_dedup(fx);
         test_kq(fx);
+        test_bgl();
     }
     char cmd[2048];
     for (unsigned v = 0; v < 2; ++v) {

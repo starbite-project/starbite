@@ -2265,3 +2265,14 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   tools/menu7/preview/loader_stubs.c gets an fbbg_poll stub (h7 still builds). Host: loader-test 347 checks,
   usb-fastboot 392 (clang ASan/UBSan and VM gcc), xnu-health-test 911. Loader Image d2118f6a...; BOOT
   out/xnu-boot-health5.img d5e6063c957d1915bb2b273367d8ae71bd4636a20e88a92b144cdbe366e10e9e (health2's recipe).
+- 2026-11-07: **health6: one background USB link per boot (built, host-tested, not flashed).** health5 on the
+  phone: menu / crash report over USB good (status, screen, boot, `key down:1500` scrolled the report), but after
+  `sbfb key power` on the crash report the menu never answered and `fastboot devices` stayed empty. Cause: nothing
+  polled USB during menu v7's intro and wallpaper (about 3 s); the Mac's command then made macOS reset the device,
+  the new enumeration got no answer, macOS gave up on the port. Now sbfmt.c bgl_* decides per poll: a link not
+  served for 750 ms is restarted (soft disconnect + PHY + core: a fresh attach) before it is served; a failed start
+  is retried after 5, 10, 20 ... 60 s; plugged in (VBUS) but unconfigured for 10 s (then 20, 40, 60) is restarted;
+  the MAX77705 route once a boot. `oem usb` shows starts / restarts / failures. Host: crash report -> menu ->
+  recovery transitions, slow frames, a stopped start, POST gap, off, back-off, unconfigured, no VBUS (loader-test
+  365 checks; usb-fastboot 392; clang ASan/UBSan and VM gcc; xnu-health-test 911). Loader Image 2488043d...;
+  BOOT out/xnu-boot-health6.img babb570226cc5092d8bee99c5fadce64988cd7995dcf111ed64e899572781dc9 (same recipe).
