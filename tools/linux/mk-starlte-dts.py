@@ -36,8 +36,10 @@ from pathlib import Path
 
 # The daily command line (plan 2.3). Bring-up adds "loglevel=7 keep_bootcon"
 # through a hidden catalog entry; the loader appends the entry's cmdline.
+# fbcon=font:VGA8x16 keeps the console font it always had: the panic screen's
+# TER16x32 (starbite.config) would otherwise become fbcon's default at 1440x2960.
 BOOTARGS = ('console=ramoops-1 console=tty0 loglevel=4 panic=10 maxcpus=8 '
-            's9p_vendor_m3_defaults s3c2410_wdt.tmr_atboot=0')
+            's9p_vendor_m3_defaults s3c2410_wdt.tmr_atboot=0 fbcon=font:VGA8x16')
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--print-bootargs', action='store_true')

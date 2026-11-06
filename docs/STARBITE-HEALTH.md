@@ -311,6 +311,14 @@ A crash can only be shown if the reset lands in the loader, not in RECOVERY or u
   the DTB to 0x12345670 (normal)** (`fdt_patch_pairs`; log slot 20 = pairs patched). `panic=10` in the
   DTB's bootargs makes a panic reset after 10 s. A clean `reboot` still writes INFORM3 through
   `syscon-reboot-mode`.
+  **Restart path (2026-11-06, kernel step 10, LINUX-REBUILD-PLAN 7)**: until then the kernel's only
+  restart handler was the cluster-1 watchdog (PSCI is v0.1 here, no SYSTEM_RESET), and `reboot -f`
+  never reset (the watchdog's reset was masked again by its driver's shutdown) while a panic sat on
+  screen for about two minutes. The kernel now restarts the way Samsung's does: INFORM2 =
+  0x12345678, then PMU SWRESET, leaving INFORM3 as written (reboot-mode's value for `reboot`, the
+  boot value for a panic). And the panic shows on the panel at once (kernel step 6g): a Starbite
+  banner over the kernel log's tail, for the 10 s before the reset; the loader's crash screen
+  follows as before.
 - **Android (Samsung 4.9)**: S-Boot gives `androidboot.debug_level=0x4f4c` (LOW): panics and
   watchdog resets reboot normally (no upload mode) and S-Boot passes KPON/WPON. Nothing to do.
 - **XNU**: before 0399, the panic hook (`starlte_panic_to_recovery`, bsd/dev/herolte_ufs.c on 12377)
@@ -713,8 +721,11 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
    - pmsg shows `launch linux-pmos #n watchdog 60 s`, then `... CLEAN RESTART`.
 7. **Panic**:
    - In pmOS as root, run `echo c > /proc/sysrq-trigger`.
+   - With a kernel that has steps 6g and 10 (LINUX-REBUILD-PLAN 7.5): within about 1 s the
+     Starbite panic screen (red "STARBITE: LINUX KERNEL PANIC", "sysrq triggered crash", gold
+     "RESTARTING IN 10 S", the kernel log below). Older kernels: the last picture stays.
    - After about 10 s the phone resets, then POST, then the crash screen KERNEL PANIC ("panic:
-     sysrq triggered crash").
+     sysrq triggered crash"); with step 10 the level-1 RESET row reads SWRESET.
    - Try Volume Up (levels 2 and 3), Bixby (older lines), Power (menu).
    - The menu must show no countdown.
    - `python3 -I tools/store/sbstore2.py crashlog live --level 3`.
