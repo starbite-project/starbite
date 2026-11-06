@@ -272,7 +272,9 @@ int store_load(const struct store_ent *e, uintptr_t dst, uint64_t cap)
         r = -1;
     } else {
         got = star_crc32(dst, e->size);
-        r = got == e->crc ? 0 : -2;
+        /* flag 1 = volatile entry (the loader's crash log ring, docs/STARBITE-HEALTH.md): rewritten in
+         * place, so its directory CRC is not kept up to date and is not checked */
+        r = (e->flags & 1U) || got == e->crc ? 0 : -2;
     }
     unsigned i = 0;
     for (; i + 1 < sizeof(last_ld.name) && i < sizeof(e->name) && e->name[i]; ++i)

@@ -71,11 +71,11 @@ struct star_settings {
     uint32_t seq, timeout_s, flags;
     char default_key[24], last_key[24], next_key[24];
 };
-/* Engineer OS v2 settings flags the loader does not read yet (stored for a later loader; Engineer OS
- * shows and edits them): POST level and log level. */
-#define SET_POST_SHIFT 4U      /* 0 quick (default), 1 off, 2 full */
+/* POST level and log level, shared with the loader (shim/starlte/store.h; docs/STARBITE-HEALTH.md). 0 is the
+ * default in both, so a record written before these existed means full POST and quiet logs. */
+#define SET_POST_SHIFT 4U      /* 0 full (default), 1 quick, 2 off */
 #define SET_POST_MASK  (3U << SET_POST_SHIFT)
-#define SET_LOG_SHIFT  8U      /* 0 normal (default), 1 quiet, 2 verbose */
+#define SET_LOG_SHIFT  8U      /* 0 quiet (default), 1 normal, 2 verbose, 3 debug */
 #define SET_LOG_MASK   (3U << SET_LOG_SHIFT)
 /* 1 if a valid record was read; otherwise *s = defaults (zeros) and 0. */
 int settings_load(struct star_settings *s);

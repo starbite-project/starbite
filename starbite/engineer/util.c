@@ -1082,8 +1082,8 @@ void util_store(void)
 static struct star_settings se_old, se_new;
 static int se_valid, se_loaded;
 static const unsigned se_timeouts[] = { 0, 3, 5, 10, 15, 30, 60 };
-static const char *const se_post[] = { "quick (every boot)", "off", "full" };
-static const char *const se_log[] = { "normal", "quiet", "verbose" };
+static const char *const se_post[] = { "full (default)", "quick", "off", "full (default)" };
+static const char *const se_log[] = { "quiet (default)", "normal", "verbose", "debug" };
 
 static void se_load(void)
 {
@@ -1130,8 +1130,8 @@ static void build_settings(void)
     int changed = memcmp(&se_old, &se_new, sizeof(se_new)) != 0;
     row_add("Save", changed ? "tier 1: one block, read back" : "nothing changed", changed ? R_WARN : R_DIS);
     row_add("Revert the changes", "", changed ? 0 : R_DIS);
-    kv_note("POST level and log level are stored for the loader; today's loader does not read them yet "
-            "(Engineer OS shows them). Last choice: the loader writes it when you pick an OS.");
+    kv_note("POST level and log level are read by the loader at every start (loader with the health "
+            "update; older loaders ignore them). Last choice: the loader writes it when you pick an OS.");
 }
 
 int util_settings_write(struct star_settings *n, const char *what);
@@ -1184,7 +1184,7 @@ static int act_settings(int i)
         break;
     }
     case 2: se_new.flags = (f & ~SET_POST_MASK) | ((((f & SET_POST_MASK) >> SET_POST_SHIFT) + 1U) % 3U) << SET_POST_SHIFT; break;
-    case 3: se_new.flags = (f & ~SET_LOG_MASK) | ((((f & SET_LOG_MASK) >> SET_LOG_SHIFT) + 1U) % 3U) << SET_LOG_SHIFT; break;
+    case 3: se_new.flags = (f & ~SET_LOG_MASK) | ((((f & SET_LOG_MASK) >> SET_LOG_SHIFT) + 1U) % 4U) << SET_LOG_SHIFT; break;
     case 4: se_new.flags ^= SET_SD_STORE; break;
     case 5: next_key(se_new.next_key); break;
     case 6: se_new.last_key[0] = 0; break;
