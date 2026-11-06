@@ -38,7 +38,9 @@ log = ["quiet loglevel=3 vt.global_cursor_default=0 systemd.show_status=auto rd.
        "loglevel=4",
        "loglevel=7 s9p_decon.geom_log=1 systemd.log_level=info",
        "loglevel=8 ignore_loglevel keep_bootcon printk.devkmsg=on s9p_decon.geom_log=1 systemd.log_level=debug"]
-wdt = 60
+# 0 until a watchdog reset is seen to reach the loader (not Samsung's upload mode) on S9 #1 with the user
+# present (docs/STARBITE-HEALTH.md section 10 step 8); then 60.
+wdt = 0
 wdt_feed = "kernel"
 crash_return = true
 
@@ -336,7 +338,7 @@ flags = ["hidden"]
 [[entry]]
 key = "engineer"
 name = "Engineer OS"
-version = "Engineer OS 1.1 · read only · dry-run writes"
+version = "Starbite Lab 2 · tests · tiered writes"
 category = "starbite"
 method = "bare"
 tag = "beta"
@@ -357,3 +359,29 @@ flags = ["hidden"]
 files = ["linux-prev.image", "linux-prev.dtb", "linux.initrd"]
 cmdline = "sb.root=/distros/pmos.img sb.session=phosh"
 root = "sd:p1 /distros/pmos.img"
+
+# 2026-11-06: Starbite Maintenance from the OS store (docs/MAINTENANCE.md 4.3), hidden; started by the
+# loader's Starbite Recovery > Starbite Maintenance item, reboot-to maint, or fastboot oem maint.
+[[entry]]
+key = "maint"
+name = "Starbite Maintenance"
+version = "Linux 7.1 · ssh over USB · no TWRP"
+category = "starbite"
+method = "linux"
+tag = "beta"
+files = ["maint.image|linux.image", "maint.dtb", "maint.initrd"]
+cmdline = "sb.maint=1 sb.maint.src=store s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
+root = "none (RAM only)"
+flags = ["hidden"]
+
+[[entry]]
+key = "maint-rescue"
+name = "Starbite Maintenance (rescue)"
+version = "Linux 7.1 · USB host · rescue disk"
+category = "starbite"
+method = "linux"
+tag = "beta"
+files = ["maint.image|linux.image", "maint-rescue.dtb|rescue.dtb", "maint.initrd"]
+cmdline = "sb.maint=1 sb.rescue=1 sb.maint.src=store s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
+root = "none (RAM only)"
+flags = ["hidden"]
