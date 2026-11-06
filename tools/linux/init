@@ -11,6 +11,7 @@
 #   sb.init=PATH             init in the new root (default /sbin/init, then systemd)
 #   sb.rw=0                  mount the root read-only
 #   sb.shell=1               same as holding Vol down while the kernel starts
+#   quiet / sb.quiet=1       no status lines on the screen (the loader's log level 0 passes "quiet")
 #   sb.wdt=SEC               arm the hardware watchdog for SEC s (at least 30) before switch_root
 #                            and have the distro feed it (0 = off, the default until a watchdog
 #                            reset is seen to reach the menu, plan 4.3). This is the ONLY switch:
@@ -42,8 +43,11 @@ GPA2_DAT=0x14050064                                # bit 4 Power (active low)
 # ==== parsing and naming (no side effects; host-tested) =====================================
 
 # sb_parse FILE: SB_ROOT SB_INIT SB_RW SB_SHELL SB_WDT from a kernel command line.
+# say TEXT: a status line on the screen, unless the boot is quiet (log level 0: "quiet" in the cmdline)
+say() { [ "$SB_QUIET" = 1 ] || echo "$@"; }
+
 sb_parse() {
-	SB_ROOT= SB_INIT= SB_RW=1 SB_SHELL=0 SB_WDT=0
+	SB_ROOT= SB_INIT= SB_RW=1 SB_SHELL=0 SB_WDT=0 SB_QUIET=0
 	set -f
 	for a in $(cat "$1" 2>/dev/null); do
 		case $a in
@@ -52,11 +56,14 @@ sb_parse() {
 		sb.rw=*) SB_RW=${a#sb.rw=} ;;
 		sb.shell=*) SB_SHELL=${a#sb.shell=} ;;
 		sb.wdt=*) SB_WDT=${a#sb.wdt=} ;;
+		quiet) SB_QUIET=1 ;;
+		sb.quiet=*) SB_QUIET=${a#sb.quiet=} ;;
 		esac
 	done
 	set +f
 	[ "$SB_RW" = 0 ] || SB_RW=1
 	[ "$SB_SHELL" = 1 ] || SB_SHELL=0
+	[ "$SB_QUIET" = 1 ] || SB_QUIET=0
 	case $SB_WDT in ""|*[!0-9]*) SB_WDT=0 ;; esac
 	[ ${#SB_WDT} -le 4 ] || SB_WDT=0
 	case $SB_INIT in /*) case $SB_INIT in *[!A-Za-z0-9/._-]*|*..*) SB_INIT= ;; esac ;; *) SB_INIT= ;; esac
@@ -235,7 +242,7 @@ card_up() {
 	# VolumeFlags (boot sector offset 106), bit 1 = VolumeDirty: hard resets leave it set
 	f=$(dd if=$SDDEV bs=1 skip=106 count=1 2>/dev/null | hexdump -v -e '1/1 "%u"')
 	if [ $(( ${f:-0} & 2 )) -ne 0 ] && command -v fsck.exfat >/dev/null; then
-		echo "  checking the microSD (exFAT marked dirty) ..."
+		say "  checking the microSD (exFAT marked dirty) ..."
 		fsck.exfat -p $SDDEV
 		[ $? -ge 4 ] && return 22                  # not repaired: do not mount it rw
 	fi
@@ -276,11 +283,11 @@ wdt_arm() {
 			[ "$t" -lt 30 ] && t=30                 # the distro needs time to take it over
 			[ -n "$m" ] && [ "$m" -gt 0 ] && [ "$t" -gt "$m" ] && t=$m
 		else
-			echo "  no /dev/watchdog: not armed"
+			say "  no /dev/watchdog: not armed"
 		fi
 	fi
 	if ! wdt_conf "$1" "$t"; then
-		echo "  watchdog not armed: could not write $WDT_CONF"
+		say "  watchdog not armed: could not write $WDT_CONF"
 		t=0
 		wdt_conf "$1" 0
 	fi
@@ -289,7 +296,7 @@ wdt_arm() {
 	p=$!
 	sleep 1
 	kill -9 $p 2>/dev/null
-	echo "  watchdog armed: ${t} s"
+	say "  watchdog armed: ${t} s"
 }
 
 # ==== booting a root ========================================================================
@@ -394,9 +401,9 @@ boot_disk() {
 			mdev -s 2>/dev/null
 			sleep 0.2
 		done
-		echo "  TPM: $( [ -e /dev/tpm0 ] && echo 'software TPM 2.0 (swtpm) ready' || echo 'swtpm did not start')"
+		say "  TPM: $( [ -e /dev/tpm0 ] && echo 'software TPM 2.0 (swtpm) ready' || echo 'swtpm did not start')"
 	else
-		echo "  TPM: none (no swtpm or no /dev/vtpmx)"
+		say "  TPM: none (no swtpm or no /dev/vtpmx)"
 	fi
 	# the boot log on the card (bring-up): the kernel log, ChromeOS's early messages included, kept by a
 	# reader that outlives switch_root (its file stays open on the card), synced every 3 s
@@ -407,8 +414,8 @@ boot_disk() {
 		( while sleep 3; do sync; done ) >/dev/null 2>&1 &
 	fi
 	clear_screen
-	echo "  PROJECT STARBITE"
-	echo "  starting ${img##*/} (ChromiumOS) ..."
+	say "  PROJECT STARBITE"
+	say "  starting ${img##*/} (ChromiumOS) ..."
 	[ -n "$KEYS_PID" ] && kill $KEYS_PID 2>/dev/null
 	shells_stop
 	exec 4<&-
@@ -433,7 +440,7 @@ boot_root() {
 		return $?
 	fi
 	if command -v e2fsck >/dev/null; then
-		echo "  checking $img ..."
+		say "  checking $img ..."
 		e2fsck -p "/sd$img"
 		[ $? -ge 4 ] && return 24
 	fi
@@ -457,8 +464,8 @@ boot_root() {
 	card_into_root $NR
 	[ $? -eq 2 ] && { root_undo; return 28; }
 	clear_screen
-	echo "  PROJECT STARBITE"
-	echo "  starting ${img##*/} ($init) ..."
+	say "  PROJECT STARBITE"
+	say "  starting ${img##*/} ($init) ..."
 	wdt_arm $NR
 	# Nothing of the initrd's that gives a root shell outlives it. Its udhcpd keeps serving the
 	# Mac unless the distro serves usb0 itself (sb-integrate.sh leaves this marker).

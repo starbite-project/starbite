@@ -36,6 +36,11 @@ ok "sb.init with .. dropped"     "$(cl sb.init=/../bin/sh)"                   "a
 ok "sb.rw=1 / junk"              "$(cl sb.rw=yes sb.shell=2)"                 "ask||1|0|0"
 ok "empty cmdline file"          "$(: > "$T/cmdline"; sb_parse "$T/cmdline"; echo $SB_ROOT)" "ask"
 ok "missing cmdline file"        "$(sb_parse "$T/nope"; echo $SB_ROOT)"      "ask"
+ql() { printf '%s\n' "$*" > "$T/cmdline"; sb_parse "$T/cmdline"; echo "$SB_QUIET|$(say x)"; }
+ok "quiet: default loud"         "$(ql loglevel=4 sb.root=pmos)"            "0|x"
+ok "quiet: kernel quiet"         "$(ql quiet sb.root=pmos)"                 "1|"
+ok "quiet: sb.quiet=1"           "$(ql sb.quiet=1)"                         "1|"
+ok "quiet: sb.quiet=junk"        "$(ql sb.quiet=yes)"                       "0|x"
 ok "sb.session ignored here"     "$(cl sb.root=ubuntu sb.session=gnome)"      "ubuntu||1|0|0"
 
 # ---- sb_img_path -------------------------------------------------------------------------
