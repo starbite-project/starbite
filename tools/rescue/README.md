@@ -9,7 +9,7 @@ script on it. The Starbite Installer is meant to make that disk.
 Status: the loader side (finding the rescue system, the reboot, the start) is done. The ramdisk
 (`init`, `sb-reboot`, `mk-rescue-initrd.sh`) builds (2026-11-05) but has not run on the phone.
 **USB host mode is written but untested on hardware** (`docs/RESCUE-USB-HOST.md`): the store's
-`rescue.dtb` makes the DWC3 a host and gives the port 5 V. The microSD fallback works without it.
+`rescue.dtb` makes the DWC3 a host and gives the port 5 V. The rescue disk is USB only: it never comes from the microSD card (2026-11-06).
 
 **Also inside Starbite Maintenance (2026-11-06, docs/MAINTENANCE.md 7):** SBMAINT's rescue mode
 (`sb.rescue=1`) runs this same `init` as `/bin/sb-rescue` with `SB_RESCUE_EMBEDDED=1` (the mounts are
@@ -55,7 +55,7 @@ also cancels the request.
   can all create it), with the label **`STARBITE-RESCUE`** or **`SB-RESCUE`**. FAT32 and exFAT
   labels hold 11 characters, so on those use `SB-RESCUE`; ext4 can carry `STARBITE-RESCUE`.
   `mk-rescue-usb.sh` makes such a disk as an image file.
-- A whole disk or a partition, on USB mass storage or on a microSD card.
+- A whole disk or a partition, on USB mass storage (never the microSD card).
 - `/starbite-rescue/rescue.sh`: run with `sh`. It gets these environment variables:
   - `RESCUE_ROOT`: the mount point, read-only
   - `RESCUE_DIR`: `$RESCUE_ROOT/starbite-rescue`

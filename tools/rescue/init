@@ -3,7 +3,8 @@
 #
 # The loader starts this ramdisk when the Starbite Recovery menu (hold Bixby at boot) picks
 # "Starbite Rescue mode", or after `reboot-to rescue`. It asks for a Starbite rescue disk, made by
-# the Starbite Installer: a USB mass-storage disk (or a microSD card) with a filesystem labelled
+# the Starbite Installer: a USB mass-storage disk (never the microSD card: the user's rule,
+# 2026-11-06, rescue must not depend on the card) with a filesystem labelled
 # STARBITE-RESCUE (ext4 and other filesystems with 15-character labels) or SB-RESCUE (FAT32 and
 # exFAT: their labels hold 11 characters) holding /starbite-rescue/rescue.sh. When one appears it
 # is mounted read-only, checked against /starbite-rescue/rescue.sha256 if present, and rescue.sh
@@ -67,7 +68,7 @@ is_usb_disk() {
 	return 1
 }
 
-# candidates: block devices a rescue disk can be: USB disks and their partitions, microSD partitions.
+# candidates: block devices a rescue disk can be: USB disks and their partitions (never the microSD).
 candidates() {
 	for b in /sys/block/sd*; do
 		[ -e "$b" ] || continue
@@ -80,9 +81,6 @@ candidates() {
 			found=1
 		done
 		[ -n "$found" ] || echo "/dev/$n"      # a superfloppy (no partition table)
-	done
-	for p in /sys/block/mmcblk*/mmcblk*p[0-9]*; do
-		[ -e "$p" ] && echo "/dev/${p##*/}"
 	done
 	return 0
 }
@@ -107,7 +105,7 @@ find_rescue() {
 	fi
 	for x in $LABELS; do
 		d=$(findfs "LABEL=$x" 2>/dev/null) || continue
-		for e in $c; do                            # only a USB disk or the microSD card
+		for e in $c; do                            # only a USB disk
 			[ "$e" = "$d" ] && { echo "$d"; return 0; }
 		done
 	done
@@ -142,7 +140,7 @@ lock_ufs() {
 
 # USB host mode (docs/RESCUE-USB-HOST.md). rescue.dtb: dwc3 dr_mode "otg" + usb-role-switch,
 # default host; s9p-max77705-muic drives VBUS (vbus=1: while the Type-C MCU reports a device).
-# With the daily DTB there is no role switch and no OTG regulator: only the microSD works then.
+# With the daily DTB there is no role switch and no OTG regulator: rescue needs the rescue DTB.
 usb_host() {
 	if [ -n "$SB_RESCUE_HOST_HOOK" ]; then
 		$SB_RESCUE_HOST_HOOK

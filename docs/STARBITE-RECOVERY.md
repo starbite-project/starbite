@@ -170,7 +170,7 @@ total: 400 ms of that is the Bixby window. To shorten the window, change `REC_WI
    - If the start fails, the recovery menu opens with the reason.
 3. The ramdisk (`tools/rescue/init`) says "Connect a Starbite rescue USB disk". It waits for a
    filesystem labelled `STARBITE-RESCUE` (or `SB-RESCUE`: FAT32 and exFAT labels hold only 11
-   characters) on USB (or microSD), mounts it read-only, checks `rescue.sha256` and runs
+   characters) on USB only (never the microSD card: the user's rule, 2026-11-06), mounts it read-only, checks `rescue.sha256` and runs
    `starbite-rescue/rescue.sh`. Power held 2 s reboots to the menu. USB host mode needs the
    store's `rescue.dtb` (docs/RESCUE-USB-HOST.md).
 4. `reboot-to rescue` from any Starbite Linux does the same thing: the existing tool writes the
@@ -184,7 +184,7 @@ total: 400 ms of that is the Bixby window. To shorten the window, change `REC_WI
 - **USB host mode is written but has not run on the phone** (docs/RESCUE-USB-HOST.md): the
   rescue DTB makes the DWC3 a host by default, the MAX77705 charger gives 5 V (OTG boost, 900 mA)
   while its Type-C MCU reports a device attached. The daily DTB keeps the port a peripheral.
-  Until host mode is proven, a microSD partition labelled `STARBITE-RESCUE` or `SB-RESCUE` is the
+  (2026-11-06: the microSD fallback was removed; rescue is USB only.) Formerly, until host mode was proven, a microSD partition labelled `STARBITE-RESCUE` or `SB-RESCUE` was the
   working way in.
 - The Starbite Installer, which should make the rescue disk, is item 7 of the plan.
 
