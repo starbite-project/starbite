@@ -5,9 +5,9 @@
  * sb_fg_word, ufs_*, store_*, the libsb fault probes). What changed, and why:
  *   - the screens (info_screen, list_screen, text_screen, dialog) are Engineer OS's (main.c);
  *   - custom screens (display, touch, keys, sector viewer, register peek) are drawn with sbui;
- *   - every write the loader's EngineerMode makes by hand (touch rails, the settings record, a
- *     register poke) goes through the armed-mode framework instead, which in v1 only shows the
- *     change card and logs a dry run (armed.c);
+ *   - every write the loader's EngineerMode makes by hand (touch rails, card rails, the settings
+ *     record) goes through lab_confirm and the write gate (armed.c): a warning screen, the
+ *     confirmations its tier needs, then the write; the register peek moved to util.c;
  *   - things only the loader can see (BOOT's iOS payload and its boot-args, the UEFI bundle, the
  *     intro's frame statistics) are shown as such; "Start an OS" writes the boot-next mailbox and
  *     resets, and the loader starts the entry;
@@ -973,19 +973,28 @@ static void fill_touch_rails(void)
 static int touch_rails_act(int i)
 {
     uint8_t l35 = 0, l43 = 0;
+    struct sb_auth au;
+    const char *why;
     (void)i;
     (void)sb_touch_rails(&l35, &l43);
-    struct ub o, n;
+    struct ub o;
     ub_init(&o);
     ub_s(&o, "LDO35 ");
     ub_hex(&o, l35, 2);
     ub_s(&o, ", LDO43 ");
     ub_hex(&o, l43, 2);
-    ub_init(&n);
-    ub_s(&n, "LDO35 0xEC, LDO43 0xF0");
-    struct change c = { "PMIC rail (peripheral)", "S2MPS18 PMIC 0x6C, 0x74", o.b, n.b,
-                        "none needed (read-back, auto-revert timer)", TIER1 };
-    (void)armed_change(&c);
+    struct action a = { "Touch rails on", "TOUCH", { "Writes S2MPS18 LDO35 = 0xEC (on, 1.8 V) and LDO43 = 0xF0 (on, 3.0 V)",
+                        "the kernel's and the loader's values; read back", 0, 0 },
+                        "a reboot (the loader sets them again)", o.b, "LDO35 0xEC, LDO43 0xF0", "", TIER1, SB_SP_PMIC, 0,
+                        0, 0x16cU, 9 };
+    int t1 = pmic_tier(1, 0x6c, 0xec, &why), t2 = pmic_tier(1, 0x74, 0xf0, &why);
+    a.tier = t1 > t2 ? t1 : t2;
+    if (!lab_confirm(&a, &au))
+        return 0;
+    int ok = lab_pmic(1, 0x6c, 0xec, &au) && lab_pmic(1, 0x74, 0xf0, &au);
+    if (ok && !sb_tp.ok)
+        (void)sb_touch_start();
+    ui_toast(ok ? "Rails on (read back)" : "Rail write failed", ok ? C_GREEN : C_RED, 1100);
     return 0;
 }
 
@@ -993,9 +1002,9 @@ static void build_touch_rails(void)
 {
     fill_touch_rails();
     kv_hdr("CHANGE");
-    row_add("Switch both rails on", "LDO35 1.8 V, LDO43 3.0 V: tier 1, dry-run in v1", R_WARN);
-    kv_note("Engineer Lite (the loader) still switches them on for real. In Engineer OS v1 every write is a "
-            "dry run: the change card is shown and logged, nothing is written.");
+    row_add("Switch both rails on", "LDO35 1.8 V, LDO43 3.0 V: tier 1 (warning, slide)", R_WARN);
+    kv_note("The loader's menu switches them on before Engineer OS starts; this is for a touch controller "
+            "that did not come up.");
 }
 
 void touch_rails(void)
@@ -2010,26 +2019,67 @@ static void build_sd(void)
 {
     fill_sd();
     if (sd_rep.state <= 0 && sd_rep.present) {
-        kv_hdr("CHANGE");
-        row_add("Power the card", "LDO31 2.8 V + LDO2 3.3 V: tier 1, dry-run in v1", R_WARN);
-        kv_note("Engineer OS reads the card only as the loader left it: with \"Card store at boot\" on, the "
-                "loader powers and clocks it before the menu. Engineer Lite can power it by hand.");
+        kv_hdr("BRING THE CARD UP");
+        row_add("1. Power the card", "LDO31 2.8 V + LDO2 3.3 V, power-cycled: tier 1", R_WARN);
+        row_add("2. Open the card clocks", "CMU gates 0x1A242070, 0x11402030/34: tier 2", R_WARN);
+        row_add("3. Try the card again", "controller and SD init", 0);
+        kv_note("With \"Card store at boot\" on, the loader powers and clocks the card before the menu and "
+                "none of this is needed.");
     }
 }
 
 static int act_sd(int i)
 {
-    uint8_t l31 = sd_rep.l31, l2 = sd_rep.l2;
+    struct sb_auth au;
+    const char *why;
     struct ub o;
-    (void)i;
-    ub_init(&o);
-    ub_s(&o, "LDO31 ");
-    ub_hex(&o, l31, 2);
-    ub_s(&o, ", LDO2 ");
-    ub_hex(&o, l2, 2);
-    struct change c = { "PMIC rail (peripheral)", "S2MPS18 PMIC 0x68, 0x4A", o.b, "off 20 ms, then 0xE8, 0xFC",
-                        "none needed (read-back)", TIER1 };
-    (void)armed_change(&c);
+    if (i == 0) {
+        uint8_t l31 = 0, l2 = 0;
+        (void)sb_sd_rails(&l31, &l2);
+        ub_init(&o);
+        ub_s(&o, "LDO31 ");
+        ub_hex(&o, l31, 2);
+        ub_s(&o, ", LDO2 ");
+        ub_hex(&o, l2, 2);
+        struct action a = { "Power the card", "CARD", { "LDO31 = 0x28 and LDO2 off, 20 ms, then LDO31 = 0xE8 (2.8 V) and LDO2 = 0xFC (3.3 V)",
+                            "the loader's power cycle (hw_sd_rails); read back", 0, 0 },
+                            "a reboot", o.b, "0xE8, 0xFC", "", TIER1, SB_SP_PMIC, 0, 0, 0x14aU, 0x1fU };
+        a.tier = pmic_tier(1, 0x68, 0xe8, &why);
+        if (!lab_confirm(&a, &au))
+            return 0;
+        int ok = lab_pmic(1, 0x68, 0x28, &au) && lab_pmic(1, 0x4a, (unsigned)(l2 & 0x3fU), &au);
+        sb_mdelay(20);
+        ok = ok && lab_pmic(1, 0x68, 0xe8, &au) && lab_pmic(1, 0x4a, 0xfc, &au);
+        sb_mdelay(5);
+        ui_toast(ok ? "Card rails on" : "Rail write failed", ok ? C_GREEN : C_RED, 1100);
+    } else if (i == 1) {
+        static const uint64_t g[3] = { 0x1a242070ULL, 0x11402030ULL, 0x11402034ULL };
+        struct action a = { "Open the card clocks", "CMU", { "Sets bits 20 (manual) and 21 (on) in three clock gates:",
+                            "CMU_TOP 0x1A242070 (MMC_CARD), CMU_FSYS1 0x11402030 (ACLK), 0x11402034 (SDCLKIN)",
+                            "as Linux's s9p-clkgate does", 0 }, "a reboot", "", "gates on", "", TIER2, SB_SP_MEM, 0, 0,
+                            0x11402030ULL, 0x1a242074ULL - 0x11402030ULL };
+        int t = 0;
+        for (int k = 0; k < 3; ++k) {
+            int x = poke_tier(g[k], &why);
+            t = x > t ? x : t;
+        }
+        a.tier = t;
+        if (!lab_confirm(&a, &au))
+            return 0;
+        int ok = 1;
+        for (int k = 0; k < 3; ++k) {
+            uint32_t v = 0;
+            if (sb_probe32(g[k], &v) && (v & 0x00300000U) != 0x00300000U)
+                ok &= lab_poke32(g[k], v | 0x00300000U, &au);
+        }
+        ui_toast(ok ? "Card clocks open" : "Gate write failed", ok ? C_GREEN : C_RED, 1100);
+    } else if (i == 2) {
+        sd_rep.state = 0;
+        sd_allow();
+        store_reset(STORE_SD);
+        (void)sd_up();
+        (void)store_open(STORE_SD);
+    }
     return 0;
 }
 
@@ -2050,32 +2100,20 @@ static void build_sdboot(void)
     kv_addc("Record", valid ? "valid" : "none (defaults)", valid ? UI_GREEN : UI_TEXT3);
     kv_add("Card store at boot", on ? "on" : "off");
     kv_hdr("CHANGE");
-    row_add("Read the card's OS store at boot", "a settings write: tier 1, dry-run in v1",
+    row_add("Read the card's OS store at boot", "a settings write: tier 1 (warning, slide)",
             R_CHECK | R_WARN | (on ? R_ON : 0));
+    kv_note("All the settings: Tools > Settings editor.");
 }
+
+int util_settings_write(struct star_settings *n, const char *what);
 
 static int act_sdboot(int i)
 {
     struct star_settings st;
-    struct ub o, n, t;
     (void)i;
-    int valid = settings_load(&st);
-    uint64_t first = 0, last = 0;
-    (void)gpt_find("USERDATA", &first, &last);
-    ub_init(&t);
-    ub_s(&t, "UFS block ");
-    ub_dec(&t, first + 4194304ULL + 2U);
-    ub_s(&t, " (USERDATA +16 GiB +2)");
-    ub_init(&o);
-    ub_s(&o, valid ? "flags " : "no record, flags ");
-    ub_hex(&o, st.flags, 2);
-    ub_init(&n);
-    ub_s(&n, "flags ");
-    ub_hex(&n, st.flags ^ SET_SD_STORE, 2);
-    ub_s(&n, ", seq + 1");
-    struct change c = { "Settings record", t.b, o.b, n.b, "the old block, in RAM, read back first", TIER1 };
-    if (armed_change(&c) == SB_W_DRYRUN)
-        (void)sb_write(SB_MED_UFS, first + 4194304ULL + 2U, 1, 0, armed_tier());
+    (void)settings_load(&st);
+    st.flags ^= SET_SD_STORE;
+    (void)util_settings_write(&st, (st.flags & SET_SD_STORE) ? "Card store at boot: on" : "Card store at boot: off");
     return 0;
 }
 
@@ -3349,158 +3387,4 @@ void fill_panel(void)
     ub_s(&u, " " U_MICRO "s");
     kv_add("Worst copy", u.b);
     kv_add("Brightness", "Tests > Brightness (AOR)");
-}
-
-/* ---- register peek: allowlisted blocks read; a poke is a tier 1 dry run ------------------ */
-
-static const char *peek_key(int k)
-{
-    switch (k) {
-    case 0: return "0"; case 1: return "1"; case 2: return "2"; case 3: return "3";
-    case 4: return "4"; case 5: return "5"; case 6: return "6"; case 7: return "7";
-    case 8: return "8"; case 9: return "9"; case 10: return "A"; case 11: return "B";
-    case 12: return "C"; case 13: return "D"; case 14: return "E"; case 15: return "F";
-    case 16: return "DEL"; case 17: return "GO"; case 18: return "POKE";
-    default: return "CLEAR";
-    }
-}
-
-#define PK_Y 1700
-#define PK_H 200
-
-static uint64_t pk_addr = 0x14060000ULL;
-static char pk_ent[12];
-static unsigned pk_en;
-static int pk_wmode;
-
-static void peek_draw(void)
-{
-    struct ub u;
-    struct ui_rect save = ui_get_clip();
-    ui_clip(0, UI_VIEW_Y0, UI_W, UI_VIEW_Y1 - UI_VIEW_Y0);
-    ui_fill(0, UI_VIEW_Y0, UI_W, UI_VIEW_Y1 - UI_VIEW_Y0, C_BG);
-    ub_init(&u);
-    ub_s(&u, pk_wmode ? "VALUE 0x" : "ADDR 0x");
-    ub_s(&u, pk_ent[0] ? pk_ent : "_");
-    ui_text(F_TITLE_S, 64, UI_VIEW_Y0 + 90, u.b, pk_wmode ? C_ORANGE : C_STAR);
-    const char *why = 0;
-    int tier = poke_tier(pk_addr, &why);
-    ub_init(&u);
-    ub_s(&u, "at ");
-    ub_hex(&u, pk_addr, 9);
-    ub_s(&u, "  " U_DOT "  poke: ");
-    ub_s(&u, tier == TIER_NEVER ? "never (" : "tier 1 (");
-    ub_s(&u, why ? why : "?");
-    ub_c(&u, ')');
-    ui_text_cut(F_DETAIL, 64, UI_VIEW_Y0 + 160, u.b, UI_W - 128, tier == TIER_NEVER ? C_RED : C_L2);
-    ui_round(40, UI_VIEW_Y0 + 196, UI_W - 80, 16 * 66 + 40, 36, C_CARD);
-    uint64_t base = pk_addr & ~0xfULL;
-    int ok = peek_allowed(base);
-    for (unsigned r = 0; r < 16; ++r) {
-        uint64_t a = base + 16U * r;
-        ub_init(&u);
-        ub_hexn(&u, a, 9);
-        ub_s(&u, ": ");
-        for (unsigned w = 0; w < 4; ++w) {
-            uint32_t word;
-            if (ok && peek_allowed(a) && sb_probe32(a + 4U * w, &word))
-                ub_hexn(&u, word, 8);
-            else if (ok && peek_allowed(a))
-                ub_s(&u, "*FAULT**");
-            else
-                ub_s(&u, "--------");
-            ub_c(&u, ' ');
-        }
-        ui_text(F_MONO, 80, UI_VIEW_Y0 + 260 + 66 * (int)r, u.b, a == base ? C_L1 : C_L2);
-    }
-    if (!ok)
-        ui_text(F_DETAIL, 64, PK_Y - 26, "Not on the read allowlist: nothing is read here.", C_ORANGE);
-    for (int k = 0; k < 20; ++k) {
-        int x = (k % 4) * (UI_W / 4), y = PK_Y + (k / 4) * PK_H;
-        uint32_t bg = k >= 16 ? C_CARD3 : C_CARD2;
-        ui_round(x + 12, y + 10, UI_W / 4 - 24, PK_H - 20, 30, bg);
-        ui_text_c(F_SEG, x + UI_W / 8, y + PK_H / 2 + 16, peek_key(k),
-                  k == 18 ? C_ORANGE : k >= 16 ? C_STAR : C_L1);
-    }
-    ui_set_clip(save);
-}
-
-void peek_screen(void)
-{
-    pk_en = 0;
-    pk_ent[0] = 0;
-    pk_wmode = 0;
-    screen_push("Register peek");
-    chrome("Register peek", "ALLOWLIST", C_GREEN);
-    peek_draw();
-    ui_present();
-    uint64_t next = sb_ms() + 1000;
-    for (;;) {
-        struct ui_ev e;
-        int key = -1;
-        ui_poll(&e, 50);
-        if (E.redraw) {
-            chrome("Register peek", "ALLOWLIST", C_GREEN);
-            peek_draw();
-        }
-        if (nav_event(&e))
-            break;
-        if (e.type == EV_UP || e.type == EV_DOWN) {
-            pk_addr = e.type == EV_UP ? pk_addr - 0x100U : pk_addr + 0x100U;
-        } else if (e.type == EV_SELECT) {
-            key = 17;
-        } else if (e.type == EV_TAP && e.y >= PK_Y && e.y < PK_Y + 5 * PK_H) {
-            key = (e.y - PK_Y) / PK_H * 4 + e.x / (UI_W / 4);
-        } else if (e.type == EV_NONE) {
-            if (sb_ms() < next)
-                continue;
-            next = sb_ms() + 1000;                  /* live refresh of the allowlisted block */
-        }
-        if (key >= 0 && key < 16 && pk_en < 9) {
-            pk_ent[pk_en++] = peek_key(key)[0];
-            pk_ent[pk_en] = 0;
-        } else if (key == 16 && pk_en) {
-            pk_ent[--pk_en] = 0;
-        } else if (key == 19) {
-            pk_en = 0;
-            pk_ent[0] = 0;
-            pk_wmode = 0;
-        } else if (key == 18) {
-            pk_wmode = !pk_wmode;
-            pk_en = 0;
-            pk_ent[0] = 0;
-        } else if (key == 17) {
-            uint64_t v = 0;
-            for (unsigned i = 0; i < pk_en; ++i)
-                v = v * 16U + (uint64_t)(pk_ent[i] <= '9' ? pk_ent[i] - '0' : pk_ent[i] - 'A' + 10);
-            if (pk_wmode && pk_en) {
-                struct ub t, o, n;
-                uint32_t cur = 0;
-                uint64_t a = pk_addr & ~3ULL;
-                int readable = peek_allowed(a) && sb_probe32(a, &cur);
-                ub_init(&t);
-                ub_hex(&t, a, 9);
-                ub_init(&o);
-                if (readable)
-                    ub_hex(&o, cur, 8);
-                else
-                    ub_s(&o, "not read");
-                ub_init(&n);
-                ub_hex(&n, v & 0xffffffffU, 8);
-                const char *why = 0;
-                int tier = poke_tier(a, &why);
-                struct change c = { "Register write", t.b, o.b, n.b, "the old value, in the audit log", tier };
-                (void)armed_change(&c);
-                pk_wmode = 0;
-                chrome("Register peek", "ALLOWLIST", C_GREEN);
-            } else if (pk_en) {
-                pk_addr = v & ~3ULL;
-            }
-            pk_en = 0;
-            pk_ent[0] = 0;
-        }
-        peek_draw();
-        ui_present();
-    }
-    screen_pop();
 }

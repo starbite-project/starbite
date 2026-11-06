@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * The microSD card from the loader (sd.c): read only, for the card's OS store (store.c). */
+ * The microSD card from the loader (sd.c), for the card's OS store (store.c). Writes only through
+ * the write fence (fence.c sb_write): sd_write refuses otherwise. */
 #pragma once
 #include <stdint.h>
 
@@ -15,6 +16,11 @@ int sd_read(uint64_t sector, uint32_t count, uintptr_t dst);
 int sd_store_area(uint64_t *first, uint64_t *blocks);
 /* count 4 KiB blocks from 4 KiB block lba of the card to dst: 0 on success. */
 int sd_read4k(uint64_t lba, uint64_t count, uintptr_t dst);
+/* Writes: -9 unless the write fence is active (sb_write). 0 on success. */
+int sd_write(uint64_t sector, uint32_t count, uintptr_t src);
+int sd_write4k(uint64_t lba, uint64_t count, uintptr_t src);
+/* The end of the MBR's last partition, in sectors (a lower bound of the card size): 0 unknown. */
+uint64_t sd_sectors_hint(void);
 
 /* What the last sd_up() found, step by step (EngineerMode shows it). */
 struct sd_report {

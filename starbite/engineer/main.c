@@ -66,16 +66,16 @@ void status_refresh(int force)
         struct ub u;
         uint64_t left = armed_left_ms() / 1000U;
         ub_init(&u);
-        ub_s(&u, armed_tier() == TIER2 ? "ARMED T2 " : "ARMED T1 ");
-        ub_s(&u, U_DOT " DRY RUN " U_DOT " ");
+        ub_s(&u, "ARMED ");
+        ub_s(&u, sb_fence_is_dry_run() ? U_DOT " DRY RUN " U_DOT " " : U_DOT " ");
         ub_dec(&u, left / 60U);
         ub_c(&u, ':');
         ub_dec2(&u, (unsigned)(left % 60U));
         sb_strcpy(s.mid, sizeof(s.mid), u.b);
         s.mid_c = C_RED;
     } else {
-        sb_strcpy(s.mid, sizeof(s.mid), "ENGINEER OS");
-        s.mid_c = C_L3;
+        sb_strcpy(s.mid, sizeof(s.mid), sb_fence_is_dry_run() ? "STARBITE LAB " U_DOT " DRY RUN" : "STARBITE LAB");
+        s.mid_c = sb_fence_is_dry_run() ? C_ORANGE : C_L3;
     }
     struct ub r;
     ub_init(&r);
@@ -132,7 +132,7 @@ void chrome(const char *title, const char *note, uint32_t note_c)
     if (armed)
         ui_border_draw(C_RED, 14);
     status_refresh(1);
-    ui_header_draw(title, E.depth ? back_label() : "", note && note[0] ? note : armed ? "DRY RUN" : "",
+    ui_header_draw(title, E.depth ? back_label() : "", note && note[0] ? note : armed ? "ARMED" : "",
                    note && note[0] ? note_c : C_RED);
     ui_tabbar_draw(tab_label, NTABS, cur_tab);
     E.redraw = 0;

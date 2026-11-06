@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * UFS for libsb (ufs.c, copied from shim/starlte/ufs.c): commands on S-Boot's running host, read
- * only. libsb has no WRITE(10): the loader's ufs_write_block (its settings record) is not here.
+ * UFS for libsb (ufs.c, copied from shim/starlte/ufs.c): commands on S-Boot's running host. Reads
+ * go through ufs_scsi's read-only opcode list; the only write is ufs_write_blocks (WRITE(10) of
+ * single blocks, the loader's ufs_write_block), which refuses unless fence.c's sb_write runs it.
  */
 #pragma once
 #include <stdint.h>
@@ -10,6 +11,12 @@
 #define UFS_DMA 0xaf000000UL
 #define UFS_BUF (UFS_DMA + 0x4000)
 #define UFS_BUF_SIZE (1U << 20)
+/* Engineer OS v2 I/O buffers in the same non-cacheable window: 0xaf200000 one UFS write staging
+ * block (ufs.c), 0xaf400000..0xaf800000 the lab I/O buffer (partition copies, read-back verify):
+ * the first 3 MiB for the caller, the last 1 MiB for the store writer (store.c). */
+#define SB_IO_BUF (UFS_DMA + 0x400000)
+#define SB_IO_SIZE (3U << 20)
+#define SB_STORE_IO (UFS_DMA + 0x700000)
 
 extern int ufs_state;           /* 0 untouched, 1 ready, -1 failed */
 extern int ufs_why;             /* 1 host not ready, 2 busy, 3 list refused, 4 no answer */
@@ -24,6 +31,12 @@ int ufs_desc(uint8_t idn, uint8_t index, uint8_t *out, unsigned cap);
 int ufs_read(uint64_t lba, uint32_t count);
 /* READ(10) of 4 KiB blocks straight into RAM at dst (DMA, 128 KiB per command). */
 int ufs_read_to(uint64_t lba, uint64_t count, uintptr_t dst);
+/* The same on logical unit lu (0 = the main LU with the GPT; the S9's boot LUs are 1..4). */
+int ufs_read_lu(unsigned lu, uint64_t lba, uint32_t count);
+int ufs_read_lu_to(unsigned lu, uint64_t lba, uint64_t count, uintptr_t dst);
+/* WRITE(10) of count 4 KiB blocks from src (any RAM), one block per command. -6 unless the write
+ * fence is active (only sb_write calls it); 0 on success. */
+int ufs_write_blocks(unsigned lu, uint64_t lba, uint64_t count, uintptr_t src);
 
 static inline uint8_t u8r(uintptr_t a)
 {

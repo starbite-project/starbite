@@ -36,6 +36,23 @@ int sb_tmu_state(uintptr_t base)
     return (rd(base + 0x160) & 1U) ? 2 : 1;
 }
 
+/* The TOP hardware trip S-Boot armed (CONTROL bit 12): THD_TEMP0 0x50 [24:16] is the rising
+ * code (te1 + 90 for 115 C in one-point mode: build/em-research-thermal-clocks.md 1.4), converted
+ * with probe 0's trim. -100 when the trip is not armed. Decoded, not measured. */
+static int trip_c(uintptr_t base)
+{
+    if (!(rd(base + 0x20) & 0x1000U))
+        return -100;
+    uint32_t tri = rd(base);
+    int te1 = (int)(tri & 0x1ffU), te2 = (int)((tri >> 9) & 0x1ffU), two = (int)((tri >> 23) & 1U);
+    int code = (int)((rd(base + 0x50) >> 16) & 0x1ffU);
+    if (!te1)
+        te1 = 55;
+    if (!code)
+        return -100;
+    return (two && te2 > te1) ? (code - te1) * 60 / (te2 - te1) + 25 : code - te1 + 25;
+}
+
 void sb_temps_read(struct sb_temps *t)
 {
     t->top = sb_tmu_state(SB_TMU_TOP);
@@ -43,6 +60,11 @@ void sb_temps_read(struct sb_temps *t)
     t->hottest = -100;
     t->flags = 0;
     t->big_max = t->little = t->gpu = t->isp = -100;
+    for (unsigned i = 0; i < 8; ++i)
+        t->top_all[i] = t->top ? sb_tmu_temp(SB_TMU_TOP, i, &t->flags) : -100;
+    for (unsigned i = 0; i < 3; ++i)
+        t->sub_all[i] = t->sub ? sb_tmu_temp(SB_TMU_SUB, i, &t->flags) : -100;
+    t->trip_c = t->top ? trip_c(SB_TMU_TOP) : -100;
     if (t->top) {
         for (unsigned i = 0; i < 5; ++i) {
             t->big[i] = sb_tmu_temp(SB_TMU_TOP, big_probe[i], &t->flags);

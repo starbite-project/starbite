@@ -3,7 +3,7 @@
  * as one line, "SBENG1 T <PASS|FAIL> <name> | <detail>", next to a "SBENG1 B <n>" line per start.
  * The pmsg ring survives warm resets, so the next start reads the earlier sessions back from it
  * (and TWRP shows them in /sys/fs/pstore/pmsg-ramoops-0). The ring is RAM: no storage is
- * written. History on the card (survives a power-off) needs the write fence (EN4).
+ * written here; Tests > Save report (lab.c) appends this session's report to the OS store.
  */
 #include "eng.h"
 
@@ -147,8 +147,8 @@ static void fill_history(void)
             kv_note(want_earlier ? "None in the ring (a cold boot or a Windows start clears it)."
                                  : "No test run yet: Tests tab.");
     }
-    kv_note("Kept in the pmsg RAM ring: it survives a reboot, not a power-off. History on the card "
-            "comes with the write fence (EN4).");
+    kv_note("Kept in the pmsg RAM ring: it survives a reboot, not a power-off. Tests > Save report to the "
+            "OS store keeps this session's results (and the thermal log) as a text entry in the store.");
 }
 
 void tests_history(void)
