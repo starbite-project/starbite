@@ -24,7 +24,7 @@ PREFIX = re.compile(r'(?<![\w./-])(/dev/block/|/tmp/|/sys/|/proc/mounts|/externa
 FUNCS = r'''
 R=%(R)s
 getprop() { sed -n "s/^$1=//p" "$R/props"; }
-blockdev() { case $1 in --getsize64) wc -c < "$2" | tr -d ' ' ;; --rereadpt) python3 "%(fp)s" rereadpt "$R" ;; *) ;; esac; }
+blockdev() { case $1 in --getsize64) wc -c < "$2" | tr -d ' ' ;; --rereadpt) case $2 in *sda) python3 "%(fp)s" rereadpt-sda "$R" ;; *) python3 "%(fp)s" rereadpt "$R" ;; esac ;; *) ;; esac; }
 mke2fs() { for d; do :; done; printf 'TYPE="ext4" LABEL="metadata"\n' > "$R/blkid/$(basename "$d")"; echo "fake mke2fs: ext4 'metadata' on ${d#$R}"; }
 e2fsck() { echo "fake e2fsck: clean"; }
 blkid() { printf '%%s: ' "$1"; cat "$R/blkid/$(basename "$1")" 2>/dev/null || echo; }
@@ -75,6 +75,14 @@ def maybe_fail(cmd):
 
 
 def run_shell(cmd, binary):
+    if visible_state() == 'device':              # Android (not rooted): only getprop is faked there
+        m = re.fullmatch(r'\s*getprop\s+(\S+)\s*', cmd)
+        if not m:
+            sys.stderr.write(f'fake adb: only getprop is faked in Android, not {cmd[:60]}\n')
+            sys.exit(1)
+        props = dict(l.split('=', 1) for l in open(os.path.join(R, 'props-android')).read().splitlines() if '=' in l)
+        print(props.get(m.group(1), ''))
+        sys.exit(0)
     if visible_state() != 'recovery':
         sys.stderr.write('error: no devices/emulators found\n')
         sys.exit(1)
@@ -124,7 +132,10 @@ def main(a):
         if not st:
             sys.exit('error: no devices/emulators found')
         to = a[1] if len(a) > 1 else ''
-        fakephone.write_state(R, {'recovery': 'recovery', 'bootloader': 'fastboot', 'download': 'download'}.get(to, 'menu'))
+        stock_rec = open(os.path.join(R, 'recovery-kind')).read().strip() == 'stock'
+        maybe_fail('reboot ' + to)
+        fakephone.write_state(R, {'recovery': 'stock-recovery' if stock_rec else 'recovery', 'bootloader': 'fastboot',
+                                  'download': 'download'}.get(to, 'menu'))
     else:
         sys.exit(f'fake adb: "{cmd}" is not faked')
 

@@ -9,10 +9,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import nopassword, rescue
-from .common import (BACKUP_OPTIONAL, BACKUP_RAW, BACKUP_REQUIRED, GIB, MIB, NATIVE_PARTS, PART_WRITE_PY,
-                     PROTECTED, REPO, Refused, Stopped, cardlayout, human)
-from .device import Phone, chunk_write
+from . import nopassword, pit, repart, rescue
+from .common import (BACKUP_OPTIONAL, BACKUP_RAW, BACKUP_REQUIRED, DOWNLOAD_MODE_USB, GIB, MIB, NATIVE_PARTS,
+                     PART_WRITE_PY, PROTECTED, REPO, Refused, Stopped, cardlayout, human)
+from .device import Heimdall, Phone, android_props, chunk_write, is_stock_samsung, usb_ids
 from .journal import Journal
 from .manifest import coverage, writer_of
 
@@ -76,6 +76,8 @@ class Installer:
         self.done = {'written': 0, 'skipped': 0, 'kept': 0}
         self.warnings = []
         self.card_parts = None      # [p1, p2] dicts for this card (the manifest's, or its card layout's)
+        self.rp = None              # repart.Repart when the bundle names a UFS layout ([ufs] layout)
+        self.heimdall = Heimdall(runner, str(self.state_dir / 'download' / 'heimdall-session-open'))
 
     # ------------------------------------------------------------------ welcome / state
     def welcome(self):
@@ -114,6 +116,17 @@ class Installer:
                 return None
             raise Refused('no phone found. Put it in TWRP (Vol Up + Bixby + Power), the Starbite menu\'s fastboot, '
                           'or Download mode (Vol Down + Bixby + Power, then Vol Up), and connect USB')
+        if st.kind == 'android':
+            props = android_props(p)
+            model = props.get('ro.product.model', '')
+            u.info(f'Android: {model or "?"} ({props.get("ro.build.PDA") or props.get("ro.lineage.version") or "?"})')
+            if model and model not in self.m.phone['models']:
+                raise Refused(f'this is a {model}, not a Galaxy S9 SM-G960F: nothing was done')
+            if props.get('ro.boot.flash.locked') == '1' or props.get('ro.boot.verifiedbootstate') == 'green':
+                raise Refused('the bootloader is locked (ro.boot.flash.locked=1 / verifiedbootstate green): unlock it '
+                              'first (Developer options > OEM unlocking, then Download mode: long-press Volume Up)')
+            if is_stock_samsung(props):
+                return self.from_stock_android()
         if st.kind in ('android', 'fastboot-starbite'):
             cmd = ['adb', 'reboot', 'recovery'] if st.kind == 'android' else ['fastboot', 'reboot', 'recovery']
             u.info(f'the installer works from TWRP: {" ".join(cmd)}')
@@ -133,30 +146,86 @@ class Installer:
             return self.from_download_mode()
         raise Refused(f'unexpected phone state {st.kind}')
 
+    def from_stock_android(self):
+        """Stock Samsung Android with USB debugging: its RECOVERY is Samsung's (no adb), so the way to
+        TWRP is Download mode: `adb reboot download`, then from_download_mode()."""
+        u = self.ui
+        u.info('stock Samsung firmware: TWRP is not on this phone yet. The way in is Download mode:')
+        u.cmd('adb reboot download' + ('    [dry run: not run]' if self.mode == 'dry-run' else ''))
+        if self.mode == 'dry-run':
+            u.warn('dry run: the phone is not rebooted, so the plan below has no phone checks')
+            return None
+        if not u.confirm('Reboot the phone into Download mode now? (it shows a blue "Downloading..." screen)'):
+            raise Refused('the phone has to be in Download mode or TWRP')
+        self.phone.adb('reboot', 'download')
+        self.heimdall.closed()
+        u.info('waiting up to 90 s for Download mode (USB 04e8:685d)...')
+        for _ in range(45):
+            if DOWNLOAD_MODE_USB in usb_ids():
+                break
+            time.sleep(2)
+        else:
+            raise Refused('Download mode did not appear. With the phone off: hold Volume Down + Bixby, plug in the '
+                          'USB cable, then press Volume Up at the warning; run the installer again')
+        if self.phone.detect().kind != 'download':
+            raise Refused('Download mode did not appear on USB; run the installer again with the phone in Download mode')
+        return self.from_download_mode()
+
     def from_download_mode(self):
-        """A phone in Download mode gets TWRP into RECOVERY with Heimdall (the only Download-mode write
-        the installer makes; RECOVERY's stock image is in Samsung's firmware), then the user boots it."""
+        """A phone in Download mode: `heimdall detect`, its PIT read (`download-pit`, read only) and checked
+        against the SM-G960F's table (an S9+ or any other phone is refused here), then TWRP into
+        RECOVERY (`heimdall flash --RECOVERY ... --no-reboot`: the only Download-mode write the
+        installer makes), then the user boots TWRP with the keys and the installer waits for its adb."""
         u = self.ui
         twrp = next((i for i in self.m.items if str(i.dest) == 'part:RECOVERY' and i.present), None)
         if twrp is None:
             raise Refused('the phone is in Download mode, and the bundle has no RECOVERY (TWRP) image to flash')
-        cmd = ['heimdall', 'flash', '--RECOVERY', str(twrp.path), '--no-reboot']
-        u.info('Download mode: TWRP goes into RECOVERY first (raw image; nothing else is written in Download mode).')
-        u.cmd(' '.join(cmd) + ('    [dry run: not run]' if self.mode == 'dry-run' else ''))
-        u.info('Then: hold Volume Down + Power until the screen goes black, and at once hold Volume Up + Bixby +')
-        u.info('Power until TWRP shows. Do not let stock Android start (it may put the stock recovery back).')
+        u.info('Download mode. First, read only: is this an SM-G960F? (heimdall detect, heimdall download-pit)')
+        if self.r.run(['heimdall', 'detect'], check=False).returncode:
+            raise Refused('heimdall does not see the phone in Download mode (heimdall detect). Install heimdall '
+                          '(macOS: brew install heimdall; Linux: the heimdall-flash package), use a data USB cable, '
+                          'and on Linux allow USB access (udev rule for 04e8:685d) or run as root')
+        pdir = self.state_dir / 'download'
+        pdir.mkdir(parents=True, exist_ok=True)
+        pf = pdir / time.strftime('pit-%Y%m%d-%H%M%S.bin')
+        self.heimdall.run(['download-pit', '--output', str(pf), '--no-reboot'])
+        try:
+            ok, unit, lines = pit.check(pf.read_bytes())
+        except (OSError, pit.PitError) as e:
+            raise Refused(f'could not read the phone\'s PIT ({e}): nothing was flashed') from None
+        for ln in lines:
+            u.info(ln)
+        if not ok:
+            raise Refused('the PIT is not an SM-G960F\'s (an S9+ SM-G965F, or another phone): nothing was flashed')
+        u.ok(f'PIT: an SM-G960F ({self.rel(pf)})')
+        cmd = ['flash', '--RECOVERY', str(twrp.path), '--no-reboot']
+        u.info('TWRP goes into RECOVERY (raw image; nothing else is written in Download mode):')
+        u.cmd('heimdall ' + ' '.join(cmd) + ('    [dry run: not run]' if self.mode == 'dry-run' else ''))
+        self.key_instructions()
         if self.mode == 'dry-run':
             u.warn('dry run: TWRP is not flashed, so the plan below has no phone checks')
             return None
         if not u.typed('Flash TWRP into RECOVERY now?', 'flash twrp'):
             raise Refused('TWRP not flashed')
-        self.r.run(cmd, write=True)
+        self.heimdall.run(cmd, write=True)
+        u.ok('TWRP is in RECOVERY. Now the keys (above): Volume Down + Power, then at once Volume Up + Bixby + Power')
         u.info('waiting up to 5 minutes for TWRP (adb)...')
         st = self.phone.wait_for('recovery', 300)
         if st.kind != 'recovery':
-            raise Refused('TWRP did not appear; boot it with the keys above and run the installer again')
+            raise Refused('TWRP did not appear. Boot it with the keys above and run the installer again. If stock '
+                          'Android started instead, it may have put the stock recovery back: Download mode and again')
+        self.heimdall.closed()
         u.ok('TWRP is up')
         return st
+
+    def key_instructions(self):
+        u = self.ui
+        u.info('Then, on the phone, exactly:')
+        u.info('  1. Hold Volume Down + Power (about 7 s) until the screen goes black.')
+        u.info('  2. The moment it is black, switch to Volume Up + Bixby + Power and hold all three.')
+        u.info('  3. When "Galaxy S9" shows, let go of Power only; keep Volume Up + Bixby until TWRP appears.')
+        u.info('  4. If TWRP asks to "Keep System Read only?": swipe to allow modifications.')
+        u.info('  Do not let stock Android start first: it can put Samsung\'s recovery back over TWRP.')
 
     # ------------------------------------------------------------------ preflight
     def preflight(self, st):
@@ -187,7 +256,8 @@ class Installer:
         row('protected areas', 'all present' if not missing else 'missing ' + ' '.join(missing), not missing,
             'this is not a stock-partitioned S9')
         bad = []
-        for L in self.m.layout:
+        layout_rows = [] if self.m.ufs_layout is not None else self.m.layout
+        for L in layout_rows:
             p = f.parts.get(L['name'])
             if p is None:
                 bad.append(f'{L["name"]} missing')
@@ -199,9 +269,10 @@ class Installer:
                 bad.append(f'{L["name"]} starts at block {start // 8}, not {L["start"]}')
             if size != L['blocks'] * 8:
                 bad.append(f'{L["name"]} has {size // 8} blocks, not {L["blocks"]}')
-        row('UFS layout', f'{len(self.m.layout)} partitions as the bundle expects' if not bad else '; '.join(bad[:4]),
-            not bad, 'the GPT is not the Starbite layout this bundle was made for. v1 never writes the GPT: '
-            'see docs/INSTALLER.md "Repartitioning"')
+        if self.m.ufs_layout is None:
+            row('UFS layout', f'{len(self.m.layout)} partitions as the bundle expects' if not bad else '; '.join(bad[:4]),
+                not bad, 'the GPT is not the Starbite layout this bundle was made for, and the bundle names no '
+                '[ufs] layout to repartition to: see docs/INSTALLER.md 9')
         cbytes = (f.card or 0) * 512
         row('microSD', f'{human(cbytes)} ({f.card or 0} sectors) {f.card_name}'.strip() if f.card else 'none',
             cbytes >= self.m.card['min_bytes'], 'no card, or smaller than 64 GB')
@@ -231,10 +302,23 @@ class Installer:
         serial = pr.get('ro.boot.serialno') or st.serial
         self.phone_id = 'phone-' + hashlib.sha256(serial.encode()).hexdigest()[:10]
         rows.append(('phone id', f'{self.phone_id} (a hash of the serial number)', 'ok'))
+        self.journal = Journal(self.state_dir / self.phone_id / 'journal.json')
+        if self.m.ufs_layout is not None and not fatal:
+            self.rp = repart.Repart(self, self.m.ufs_layout)
+            try:
+                a = self.rp.assess()
+                txt = {'skip': f'{self.m.ufs_layout.name} (both GPT copies valid)',
+                       'reread': f'{self.m.ufs_layout.name}: written, the kernel has not read it yet',
+                       'resume': f'{self.m.ufs_layout.name}: an earlier write was interrupted ({a.why}): resumes',
+                       'repartition': f'another table: repartition to {self.m.ufs_layout.name} '
+                                      f'({sum(r.status != "same" for r in a.plan.rows)} rows change)'}[a.status]
+                row('UFS layout', txt, True)
+                row('UFS block size', f'{f.lbs or "?"} bytes', f.lbs in (None, 4096), 'not 4096')
+            except Refused as e:
+                row('UFS layout', 'REFUSED', False, str(e))
         u.table(rows, ('check', 'value', ''))
         if fatal:
             raise Refused('preflight failed:\n  ' + '\n  '.join(fatal))
-        self.journal = Journal(self.state_dir / self.phone_id / 'journal.json')
 
     @staticmethod
     def rel(p):
@@ -253,7 +337,7 @@ class Installer:
         """(node, byte offset) of an item's destination on the phone."""
         d, f = item.dest, self.facts
         if d.kind == 'part':
-            return f.node(d.name), 0
+            return f.node(d.name) or self.planned_node(d.name), 0
         if d.kind == 'slot':
             return f.node('USERDATA'), d.offset
         if d.kind == 'store':
@@ -261,6 +345,51 @@ class Installer:
         if d.kind == 'card-lba':
             return '/dev/block/mmcblk0', d.offset * 512
         return '/external_sd' + d.name, 0
+
+    def planned_node(self, name):
+        """The node a partition will have after the repartitioning (dry run on a phone without it)."""
+        if self.rp is not None and self.rp.a is not None:
+            e = next((e for e in self.rp.a.plan.entries if e.name == name), None)
+            if e is not None:
+                return f'/dev/block/sda{e.index}'
+        return None
+
+    def planned_size(self, name):
+        if self.rp is not None and self.rp.a is not None:
+            e = next((e for e in self.rp.a.plan.entries if e.name == name), None)
+            if e is not None:
+                return e.blocks * 4096
+        return self.facts.size(name)
+
+    @staticmethod
+    def part_of(item):
+        d = item.dest
+        if d.kind == 'part':
+            return d.name
+        if d.kind == 'slot' or (d.kind == 'store' and d.name == 'ufs'):
+            return 'USERDATA'
+        return None
+
+    def is_fresh(self, item):
+        """The item's partition was (or is about to be) re-laid by the GPT step and the item has not been
+        written there since: whatever the place holds is not the item's data, so it is written without
+        --replace. The list is per item and an item leaves it once written (journal 'fresh_items'), so
+        data an OS writes later is never mistaken for a fresh place."""
+        if self.journal and item.key in self.journal.d.get('fresh_items', []):
+            return True
+        a = getattr(getattr(self, 'rp', None), 'a', None)
+        return a is not None and a.status in ('repartition', 'resume') and self.part_of(item) in a.fresh
+
+    def forget_fresh(self, names):
+        """The GPT step re-lays these partitions: earlier records of items on them no longer hold."""
+        keys = set(self.journal.d.get('fresh_items', []))
+        for it in self.m.items:
+            if self.part_of(it) in names:
+                self.journal.d['items'].pop(it.key, None)
+                self.journal.chunk_state(it).unlink(missing_ok=True)
+                keys.add(it.key)
+        self.journal.d['fresh_items'] = sorted(keys)
+        self.journal.save()
 
     def store_sums(self, item):
         hdr = open(item.path, 'rb').read(4096 * 2)
@@ -324,7 +453,24 @@ class Installer:
         else:
             steps.append(Step('backup', 'Back up the protected areas', 'this computer', 'host',
                               'read only on the phone; resumes' if b.get('status') == 'started' else 'read only on the phone'))
-        steps.append(Step('layout', 'Check the UFS layout (GPT)', '-', 'verify', 'checked in preflight; never written'))
+        if self.rp is None:
+            steps.append(Step('layout', 'Check the UFS layout (GPT)', '-', 'verify', 'checked in preflight; never written'))
+        else:
+            a, name = self.rp.a, self.m.ufs_layout.name
+            title = f'UFS partition table ({name})'
+            if a.status == 'skip':
+                steps.append(Step('gpt', title, 'UFS GPT (sda)', 'skip', a.why))
+            elif a.status in ('resume', 'reread'):
+                steps.append(Step('gpt', title, 'UFS GPT (sda)', 'resume', a.why))
+            elif o.repartition:
+                steps.append(Step('gpt', title, 'UFS GPT (sda)', 'repartition',
+                                  'REPARTITION (--repartition): ' + ', '.join(a.fresh) + ' get new places or sizes and '
+                                  'are written fresh; the GPT is backed up first'))
+            else:
+                steps.append(Step('gpt', title, 'UFS GPT (sda)', 'BLOCKED',
+                                  'the phone has another partition table; ' + ', '.join(a.fresh) + ' would get new '
+                                  'places or sizes and lose their contents (a stock phone: its Android data): run again '
+                                  'with --repartition'))
         steps += self.plan_card()
         items = sorted([i for i in self.m.items], key=rank)
         cls = {i.key: self.classify(i) for i in items}
@@ -348,6 +494,14 @@ class Installer:
         o, j = self.o, self.journal
         if not i.present:
             return 'skip', 'not in this bundle (optional)'
+        if self.is_fresh(i):                      # before the journal: the GPT step forgets earlier records
+            a = getattr(getattr(self, 'rp', None), 'a', None)
+            pending = a is not None and a.status in ('repartition', 'resume') and self.part_of(i) in a.fresh
+            if not pending and j.chunk_state(i).exists():
+                return 'resume', 'interrupted earlier (after the repartitioning): resumes'
+            if i.dest.kind == 'part' and i.action == 'write' and i.size > (self.planned_size(i.dest.name) or 0):
+                return 'BLOCKED', f'image ({human(i.size)}) is larger than {i.dest.name} in the new table'
+            return 'write', f'{self.part_of(i)} is new in the repartitioned table: written fresh'
         if j.item_done(i):
             if i.data:
                 return 'keep', 'installed and verified earlier by this installer; in use, not re-read'
@@ -533,6 +687,7 @@ class Installer:
                 self.journal.mark_item(s.item, 'done', fresh=False)
             return
         fn = {'backup': self.do_backup, 'layout': lambda s: self.ui.ok('the UFS layout matched in preflight'),
+              'gpt': self.do_gpt,
               'card-layout': self.do_card_layout, 'card-format': self.do_card_format,
               'no-password': self.do_no_password, 'finish': self.do_finish}.get(s.key)
         if fn:
@@ -596,6 +751,27 @@ class Installer:
         if self.mode != 'dry-run':
             j.mark_step('backup', 'done', dir=str(d), names=sorted(done))
             u.ok(f'backup complete: {len(done)} items in {self.rel(d)}')
+
+    def do_gpt(self, s):
+        u = self.ui
+        for ln in self.rp.describe():
+            u.info(ln)
+        self.rp.run()
+        if self.mode != 'dry-run' and s.status != 'skip':
+            self.facts = self.phone.facts()
+
+    def restore_gpt(self):
+        """--restore-gpt: the phone's own GPT, as saved before the repartitioning, written back."""
+        self.ui.banner()
+        st = self.phone.detect()
+        if st.kind != 'recovery':
+            raise Refused(f'--restore-gpt needs the phone in TWRP (found: {st.kind})')
+        self.facts = self.phone.facts()
+        serial = self.facts.props.get('ro.boot.serialno') or st.serial
+        self.phone_id = 'phone-' + hashlib.sha256(serial.encode()).hexdigest()[:10]
+        self.journal = Journal(self.state_dir / self.phone_id / 'journal.json')
+        repart.Repart(self, None).restore()
+        return 0
 
     def do_card_layout(self, s):
         p, u = self.phone, self.ui
@@ -715,6 +891,9 @@ class Installer:
             return
         self.verify(i, node, off)
         j.mark_item(i, 'done', fresh=True)
+        if i.key in j.d.get('fresh_items', []):
+            j.d['fresh_items'].remove(i.key)
+            j.save()
         Path(state).unlink(missing_ok=True)
         self.done['written'] += 1
 

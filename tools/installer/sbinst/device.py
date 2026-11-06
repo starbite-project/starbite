@@ -107,6 +107,12 @@ def usb_ids(runner=None):
                 ids.add((f'{vid:04x}', f'{int(m.group(1)):04x}'))
         return ids
     base = '/sys/bus/usb/devices'
+    if not os.path.isdir(base):                       # no sysfs: lsusb's "ID vvvv:pppp"
+        try:
+            out = subprocess.run(['lsusb'], capture_output=True, text=True).stdout
+        except FileNotFoundError:
+            return ids
+        return {tuple(m.split(':')) for m in re.findall(r'ID ([0-9a-f]{4}:[0-9a-f]{4})', out)}
     if os.path.isdir(base):
         for d in os.listdir(base):
             try:
@@ -194,6 +200,7 @@ for p in ro.product.model ro.product.device ro.boot.bootloader ro.boot.serialno 
          ro.boot.verifiedbootstate ro.boot.warranty_bit ro.twrp.version; do echo "prop=$p=$(getprop $p)"; done
 echo "battery=$(cat /sys/class/power_supply/battery/capacity 2>/dev/null)"
 echo "sda=$(cat /sys/block/sda/size 2>/dev/null)"
+echo "lbs=$(cat /sys/block/sda/queue/logical_block_size 2>/dev/null)"
 echo "card=$(cat /sys/block/mmcblk0/size 2>/dev/null)"
 echo "card_name=$(cat /sys/block/mmcblk0/device/name 2>/dev/null)"
 for l in /dev/block/by-name/*; do b=$(readlink -f $l); b=${b##*/}
@@ -221,7 +228,7 @@ df -k /external_sd 2>/dev/null | tail -1 | while read a b c d e f; do echo "sdfr
             elif k == 'mount':
                 d, m, t = (v.split() + ['', '', ''])[:3]
                 f.mounts.append((d, m, t))
-            elif k in ('battery', 'sda', 'card', 'sdfree'):
+            elif k in ('battery', 'sda', 'card', 'sdfree', 'lbs'):
                 setattr(f, k, int(v) if v.strip().isdigit() else None)
             elif k == 'card_name':
                 f.card_name = v
@@ -247,6 +254,55 @@ df -k /external_sd 2>/dev/null | tail -1 | while read a b c d e f; do echo "sdfr
         return self.range_sha(node, offset + max(0, size - MIB) // MIB * MIB, n) == zero
 
 
+class Heimdall:
+    """heimdall with Samsung's session rule: after a command that ends with --no-reboot, the next one
+    must pass --resume (and one with --resume fails when no session is open). The installer always
+    passes --no-reboot; whether a session is open is remembered in `marker` (the phone may also have
+    been rebooted since), so on a handshake/session failure the same command is tried once the other
+    way."""
+    FAIL = ('handshake', 'Protocol initialisation failed', 'Failed to begin session', 'Failed to send')
+
+    def __init__(self, runner, marker):
+        self.r, self.marker = runner, marker
+
+    def run(self, args, write=False):
+        resume = os.path.exists(self.marker)
+        for attempt in (resume, not resume):
+            argv = ['heimdall', args[0], *(['--resume'] if attempt else []), *args[1:]]
+            res = self.r.run(argv, write=write, check=False, stream=False)
+            if self.r.mode == 'dry-run' and write:
+                return res
+            text = f'{res.stdout}{res.stderr}'
+            if res.returncode == 0:
+                if '--no-reboot' in args:
+                    os.makedirs(os.path.dirname(self.marker), exist_ok=True)
+                    open(self.marker, 'w').write('open\n')
+                return res
+            if not any(f in text for f in self.FAIL):
+                break
+        raise Stopped(f'heimdall {" ".join(args[:1])} failed ({res.returncode}): {text.strip()[-600:]}')
+
+    def closed(self):
+        try:
+            os.unlink(self.marker)
+        except OSError:
+            pass
+
+
+ANDROID_PROPS = ('ro.product.model', 'ro.product.device', 'ro.boot.bootloader', 'ro.build.PDA',
+                 'ro.build.version.oneui', 'ro.boot.flash.locked', 'ro.boot.verifiedbootstate', 'ro.lineage.version')
+
+
+def android_props(phone):
+    """getprop in a running Android (one call per name: plain `getprop NAME` works unrooted)."""
+    return {k: phone.sh(f'getprop {k}', check=False) for k in ANDROID_PROPS}
+
+
+def is_stock_samsung(props):
+    """Samsung's own firmware (One UI) rather than Starbite's Android: ro.build.PDA / One UI version."""
+    return bool(props.get('ro.build.PDA') or props.get('ro.build.version.oneui')) and not props.get('ro.lineage.version')
+
+
 @dataclass
 class Facts:
     props: dict = field(default_factory=dict)
@@ -258,6 +314,7 @@ class Facts:
     card: int = None                                 # 512-byte sectors
     card_name: str = ''
     sdfree: int = None                               # KiB free on /external_sd
+    lbs: int = None                                  # sda's logical block size (4096 on this UFS)
 
     def node(self, name):
         p = self.parts.get(name)

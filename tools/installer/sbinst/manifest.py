@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import tomlmini
+from . import tomlmini, ufslayout
 from .common import (MIB, MODELS, DEVICES, MIN_CARD_BYTES, NATIVE_PARTS, PART_WRITE_PY, PROTECTED,
                      PROTECTED_RAW, WRITABLE_PARTS, Refused, TOOLS, cardlayout)
 
@@ -115,6 +115,7 @@ class Manifest:
     items: list = field(default_factory=list)
     sha256: str = ''
     card_layout: object = None    # a cardlayout.Layout when [card] layout is set (docs/INSTALLER.md 11)
+    ufs_layout: object = None     # a ufslayout.Layout when [ufs] layout is set (docs/INSTALLER.md 9)
 
     def item(self, key):
         return next(i for i in self.items if i.key == key)
@@ -164,7 +165,8 @@ def load(bundle):
         _need(L, 'name', str, f'[[layout]] {i}')
         _need(L, 'blocks', int, f'[[layout]] {L["name"]}')
     m = Manifest(path=path, bundle=bundle, raw=raw, name=raw.get('name', bundle.name), phone=phone,
-                 card=card, layout=layout, sha256=hashlib.sha256(text.encode()).hexdigest(), card_layout=card_layout)
+                 card=card, layout=layout, sha256=hashlib.sha256(text.encode()).hexdigest(), card_layout=card_layout,
+                 ufs_layout=_ufs_layout(raw, layout, path))
     seen_keys, seen_dest = set(), {}
     for n, it in enumerate(raw.get('item', [])):
         where = f'[[item]] {n + 1}'
@@ -216,7 +218,35 @@ def load(bundle):
                 raise Refused(f'item {key}: {dest.offset}+{item.size} runs past the 16 GiB Apple slot')
         m.items.append(item)
     _check_card_ranges(m)
+    if m.ufs_layout is not None:
+        names = {p.name for p in m.ufs_layout.parts}
+        for it in m.items:
+            if it.dest.kind == 'part' and it.dest.name not in names or it.dest.kind in ('slot', 'store') and \
+                    it.dest.name in ('USERDATA', 'ufs') and 'USERDATA' not in names:
+                raise Refused(f'item {it.key}: {it.dest} is not a partition of UFS layout {m.ufs_layout.name}')
     return m
+
+
+def _ufs_layout(raw, layout, path):
+    """[ufs] layout = "NAME": the UFS table (sbinst/ufslayout.py) the installer lays out on the phone,
+    repartitioning it if needed (docs/INSTALLER.md 9). [[layout]] rows, if any, must agree with it
+    (the row that fills the disk is checked by start only)."""
+    name = raw.get('ufs', {}).get('layout')
+    if name is None:
+        return None
+    if name not in ufslayout.TARGETS:
+        raise Refused(f'{path}: [ufs] layout {name!r} is not one of {", ".join(ufslayout.TARGETS)} (sbinst/ufslayout.py)')
+    L = ufslayout.get(name)
+    rows = {p.name: (i, p, s, e) for i, p, s, e in L.resolve(6, L.min_blocks - 6)}
+    for R in layout:
+        if R['name'] not in rows:
+            raise Refused(f'{path}: [[layout]] {R["name"]} is not a partition of UFS layout {name}')
+        i, p, s, e = rows[R['name']]
+        if R.get('node', f'sda{i}') != f'sda{i}' or R.get('start', s) != s or \
+                (p.blocks != ufslayout.FILL and R['blocks'] != e - s + 1):
+            raise Refused(f'{path}: [[layout]] {R["name"]} disagrees with UFS layout {name} '
+                          f'(sda{i}, start {s}, {e - s + 1} blocks): leave [[layout]] out, [ufs] layout gives it')
+    return L
 
 
 def _card_layout(card, path):

@@ -17,6 +17,8 @@ starbite-install --bundle DIR [--dry-run | --rehearse --fake-root DIR | --real] 
 starbite-install --make-rescue-image FILE
 starbite-install --make-rescue-usb /dev/diskN [--image FILE] [--dry-run | --real]
 starbite-install --verify-bundle DIR | --update-hashes DIR | --describe-phone
+starbite-install --restore-gpt [--dry-run | --real]        (the phone's own GPT, saved before repartitioning)
+starbite-install --build-bundle DIR (--from-phone | --from-local) [--card-layout sd64] [--only KEY] [--skip KEY]
 """
 
 
@@ -35,6 +37,21 @@ def parse(argv):
                     help='overwrite this item even though its target holds data (repeatable)')
     ap.add_argument('--replace-all', action='store_true', help='a fresh install: overwrite every target that holds data')
     ap.add_argument('--erase-card', action='store_true', help='erase a microSD that has another layout')
+    ap.add_argument('--repartition', action='store_true',
+                    help='write the UFS partition table of the bundle\'s [ufs] layout when the phone has another one '
+                         '(a stock phone; partitions that change are written fresh)')
+    ap.add_argument('--restore-gpt', action='store_true',
+                    help='write back the phone\'s own GPT as saved before the repartitioning (phone in TWRP)')
+    ap.add_argument('--build-bundle', type=Path, metavar='DIR', help='make a bundle (installer-manifest.toml + files)')
+    src = ap.add_mutually_exclusive_group()
+    src.add_argument('--from-phone', action='store_true', help='--build-bundle: read the main phone (TWRP; read only)')
+    src.add_argument('--from-local', action='store_true', help='--build-bundle: only local build outputs')
+    ap.add_argument('--card-layout', default=None, help='--build-bundle: the card layout the bundle is for '
+                    '(sd64: any card >= 64 GB; default: the source\'s)')
+    ap.add_argument('--sources', type=Path, metavar='FILE', help='--build-bundle: a TOML file `key = "local path"` '
+                    'naming local sources (overrides the built-in candidates)')
+    ap.add_argument('--only', action='append', default=[], metavar='KEY', help='--build-bundle: just these items')
+    ap.add_argument('--skip', action='append', default=[], metavar='KEY', help='--build-bundle: leave these out')
     ap.add_argument('--fresh-backup', action='store_true', help='take a new backup even if a complete one exists')
     ap.add_argument('--rescue-usb', metavar='DEV', help='at the end, write the rescue USB disk to DEV (shown and typed first)')
     ap.add_argument('--no-reboot', action='store_true', help='do not offer the reboot at the end')
@@ -85,6 +102,21 @@ def describe_phone(ui, runner):
         if n in f.parts:
             node, start, size = f.parts[n]
             ui.emit(f'[[layout]]\nname = "{n}"\nnode = "{node}"\nstart = {start // 8}\nblocks = {size // 8}\n')
+    from . import gpt, ufslayout
+    t = (f.sda or 0) // 8
+    d = gpt.read(p.exec_out('dd if=/dev/block/sda bs=4096 count=6 2>/dev/null'),
+                 p.exec_out(f'dd if=/dev/block/sda bs=4096 skip={t - 5} count=5 2>/dev/null'), t)
+    match = []
+    for L in ufslayout.LAYOUTS.values():
+        try:
+            pl = gpt.plan(d, L)
+            if all(r.status in ('same', 'changed') for r in pl.rows):     # same places (GUIDs may differ)
+                match.append(L.name + ('' if not pl.changed else ' (places only; GUIDs differ)'))
+        except gpt.GPTError:
+            pass
+    ui.emit(f'# UFS GPT: {"both copies valid" if d.valid else "PROBLEMS: " + "; ".join(d.problems)}; '
+            f'ufslayout: {", ".join(match) or "none of tools/installer/sbinst/ufslayout.py exactly"}'
+            + (f'\n[ufs]\nlayout = "{match[0]}"\n' if match and match[0] in ufslayout.TARGETS else ''))
     mbr = p.exec_out('dd if=/dev/block/mmcblk0 bs=512 count=1 2>/dev/null')
     parts = mbr_parts(mbr) or []
     ui.emit(f'[card]\nsectors = {f.card or 0}')
@@ -130,6 +162,18 @@ def main(argv=None):
             return 0
         if a.describe_phone:
             return describe_phone(ui, Runner(ui, 'dry-run'))
+        if a.build_bundle:
+            from . import bundler
+            if not (a.from_phone or a.from_local):
+                raise Refused('--build-bundle needs --from-phone (the main phone in TWRP, read only) or --from-local')
+            open_log(ui, state_dir, 'build-bundle')
+            # a dry-run runner on purpose: the builder only reads; any write command would only be printed
+            return bundler.build(ui, Runner(ui, 'dry-run'), a.build_bundle, from_phone=a.from_phone,
+                                 card_layout=a.card_layout, only=a.only, skip=a.skip, state_dir=state_dir,
+                                 sources_file=a.sources)
+        if a.restore_gpt:
+            open_log(ui, state_dir, f'restore-gpt-{a.mode}')
+            return Installer(ui, Runner(ui, a.mode), None, a, state_dir).restore_gpt()
         bundle = a.verify_bundle or a.bundle
         if not bundle:
             ui.emit(USAGE)

@@ -26,8 +26,14 @@ sectors = 249999360                     # this set's card roots sit at fixed sec
 p1 = { type = 0x07, start = 8192, sectors = 182878208, label = "STARBITE" }
 p2 = { type = 0xda, start = 182886400, sectors = 67112960 }
 
-# The UFS layout this set was made for (S9 #1's "layout A", docs/ANDROID-PIXEL.md 2.1). Checked,
-# never written. 4 KiB blocks. tools/installer/starbite-install --describe-phone prints a phone's.
+[ufs]
+layout = "starbite-a"                   # tools/installer/sbinst/ufslayout.py: the UFS partition table this set needs.
+                                        # A phone with another table (stock Samsung) is repartitioned to it with
+                                        # --repartition (docs/INSTALLER.md 9). Leave it out and the GPT is only checked.
+
+# The UFS layout this set was made for (S9 #1's "layout A", docs/ANDROID-PIXEL.md 2.1). With [ufs] layout
+# these rows are optional and must agree with it; without, they are checked and the GPT is never written.
+# 4 KiB blocks. tools/installer/starbite-install --describe-phone prints a phone's.
 [[layout]]
 name = "SYSTEM"
 node = "sda18"
