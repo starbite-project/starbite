@@ -24,6 +24,7 @@
 #include "recovery.h"
 #include "wdt.h"
 #include "crashdoc.h"
+#include "fbbg.h"
 #include "../fdt.h"
 
 #define CR_SNAP    0x9F000000UL
@@ -202,11 +203,6 @@ int crash_hold_autoboot(void)
     return hold_autoboot;
 }
 
-static unsigned min_u(unsigned a, unsigned b)
-{
-    return a < b ? a : b;
-}
-
 static unsigned cstrlen(const char *s, unsigned max)
 {
     unsigned n = 0;
@@ -239,6 +235,20 @@ static void reason_from(const char *src, unsigned n, const char *needle, const c
 }
 
 /* The decision and the report for a launch (h: the crash log header as read). *sev out. */
+static struct sb_found found;       /* evaluate's evidence, consumed by settle */
+
+/* The judged evidence marked in the live ramoops zones (sbfmt.c sb_consume), cleaned to RAM as
+ * the loader's pmsg writes are (xnu_boot.c pmsg_put). */
+static unsigned consume(struct cl_head *h)
+{
+    unsigned d = sb_consume((volatile uint8_t *)RAMOOPS, (volatile uint8_t *)(RAMOOPS + ZONE),
+                            (const uint8_t *)CR_SNAP, (const uint8_t *)(CR_SNAP + ZONE), ZONE, &found, h);
+    for (uintptr_t a = RAMOOPS; a < RAMOOPS + 2U * ZONE; a += 64)
+        __asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
+    __asm__ volatile("dsb sy" : : : "memory");
+    return d;
+}
+
 static unsigned evaluate(struct cl_head *h, unsigned *sev)
 {
     char *t0 = (char *)CR_T0, *t1 = (char *)CR_T1;
@@ -248,18 +258,14 @@ static unsigned evaluate(struct cl_head *h, unsigned *sev)
     unsigned m = launched ? h->method : 0;
     uint32_t ev = 0;
 
-    /* Linux: a ramoops dmesg record "====<time>-D" in zone 0 that was not there before */
-    int dmesg = n0 >= 4 && t0[0] == '=' && t0[1] == '=' && t0[2] == '=' && t0[3] == '=';
-    uint32_t c0 = dmesg ? sb_crc32(t0, n0) : 0;
-    if (m == M_LINUX && dmesg && c0 != h->seen_dmesg)
-        ev |= sb_find(t0, n0, "Panic#") >= 0 ? EV_LX_PANIC : sb_find(t0, n0, "Oops#") >= 0 ? EV_LX_OOPS : EV_LX_OTHER;
-    /* XNU: starlte_pmsg.c's dump at the start of the pmsg ring */
+    /* Linux: a ramoops dmesg record "====<time>-D" in zone 0 not judged yet; XNU: starlte_pmsg.c's
+     * dump in the pmsg ring (its panic or timer header). sbfmt.c sb_evidence: what the loader has
+     * judged it marks in RAM (sb_consume, in settle), so an identical later crash is still new. */
     int xp = sb_find(t1, n1, "STARBITE: XNU panic (sweetreboot)");
     int xh = sb_find(t1, n1, "STARBITE: sweetreboot timer (no panic)");
-    int xat = xp >= 0 ? xp : xh;
-    uint32_t cx = xat >= 0 ? sb_crc32(t1 + xat, min_u(512U, n1 - (unsigned)xat)) : 0;
-    if (m == M_XNU && xat >= 0 && cx != h->seen_pmsg)
-        ev |= xp >= 0 ? EV_XNU_PANIC : EV_XNU_HANG;
+    sb_evidence(t0, n0, t1, n1, xp, xh, m == M_LINUX, m == M_XNU, h, &found);
+    ev = found.ev;
+    int dmesg = found.dmesg, xat = found.xat;
     /* Samsung's Android kernel: sec_debug magic + panic string at 0x80000000 */
     const char *ps = (const char *)(CR_SECPG + 4);
     uint32_t magic = *(volatile const uint32_t *)CR_SECPG;
@@ -324,7 +330,7 @@ static unsigned evaluate(struct cl_head *h, unsigned *sev)
             rep.source = RS_CONSOLE;
         }
     } else if (m == M_ANDROID) {
-        if (n0 && !dmesg) {
+        if (n0 && !(n0 >= 4 && t0[0] == '=' && t0[1] == '=' && t0[2] == '=' && t0[3] == '=')) {   /* a record (judged or not) is not a console */
             src = t0;
             sn_ = n0;
             rep.source = RS_CONSOLE;
@@ -395,11 +401,8 @@ static unsigned evaluate(struct cl_head *h, unsigned *sev)
         }
     }
 
-    /* what has now been seen, so it is reported once */
-    if (dmesg)
-        h->seen_dmesg = c0;
-    if (xat >= 0)
-        h->seen_pmsg = cx;
+    /* what has now been seen, so it is reported once (dmesg and XNU: marked in RAM by settle) */
+    (void)dmesg;
     if (pn)
         h->seen_secmagic = cps;
     return kind;
@@ -571,6 +574,10 @@ static void crash_screen(const struct cl_report *r, unsigned level, unsigned tim
         unsigned left = timeout_s > idle ? timeout_s - idle : 0;
         if (timeout_s && !left)
             break;
+        /* the Mac over USB (fbbg.h): its presses come in through hw_keys(); an image it
+         * placed ends the screen (the loader then starts it) */
+        if (fbbg_poll(FBBG_CRASH) == FBBG_BOOT)
+            break;
         unsigned ev = cs_poll(&nav, hw_keys(), now);
         if (ev & CS_EV_KEY)
             last = now;
@@ -639,9 +646,19 @@ static int settle(int show, int *retry)
     char key[24];
     scopy(key, sizeof(key), h.key);
     unsigned sev = SEV_INFO;
-    uint32_t seen0 = h.seen_dmesg, seen1 = h.seen_pmsg, seen2 = h.seen_secmagic;
+    uint32_t seen0 = h.seen_dmesg, seen1 = h.seen_pmsg, seen2 = h.seen_secmagic, hf = h.hflags;
     unsigned kind = evaluate(&h, &sev);
-    int dirty = launched || seen0 != h.seen_dmesg || seen1 != h.seen_pmsg || seen2 != h.seen_secmagic;
+    unsigned marked = consume(&h);
+    if (marked) {
+        char b[96];
+        struct tb t = { b, 0, sizeof(b) };
+        tb_s(&t, "STARBITE: crash: judged evidence marked in RAM:");
+        tb_s(&t, marked & 1U ? " dmesg record" : "");
+        tb_s(&t, marked & 2U ? " xnu dump" : "");
+        tb_s(&t, "\n");
+        star_pmsg(b);
+    }
+    int dirty = launched || seen0 != h.seen_dmesg || seen1 != h.seen_pmsg || seen2 != h.seen_secmagic || hf != h.hflags;
     if (launched) {
         h.launch_state = CL_IDLE;
         ++h.boots;
@@ -793,9 +810,13 @@ void crash_browse(void)
         }
         text_row(44, "VOL UP/DOWN: MOVE   POWER: OPEN", C_MUTED);
         unsigned k;
-        for (unsigned g = 0; g < 300 && hw_keys(); ++g)
+        for (unsigned g = 0; g < 300 && hw_keys(); ++g) {
+            (void)fbbg_poll(FBBG_RECOVERY);
             hw_wait_ms(10);
+        }
         for (;;) {
+            if (fbbg_poll(FBBG_RECOVERY) == FBBG_BOOT)
+                return;                 /* an image from USB: back up to recovery_main */
             k = hw_keys();
             if (k) {
                 hw_wait_ms(30);

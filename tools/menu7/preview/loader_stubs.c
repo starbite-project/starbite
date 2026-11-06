@@ -230,6 +230,8 @@ void hw_tp_clear(void) {}
 int hw_tp_ok(void) { return 1; }
 void hw_reboot(uint32_t inform3) { printf("loader_stubs: hw_reboot(0x%08x)\n", inform3); }
 void hw_power_off(void) { printf("loader_stubs: hw_power_off (stays on)\n"); clk += 3000000; }
+/* the menus' background USB fastboot (shim/starlte/fbbg.h): never a USB start here */
+int fbbg_poll(unsigned where) { (void)where; return 0; }
 void star_fb_mute(int on) { fb_muted = on; }
 int stub_fb_muted(void) { return fb_muted; }
 

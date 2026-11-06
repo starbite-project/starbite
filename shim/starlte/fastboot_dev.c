@@ -19,6 +19,11 @@
 #include "hw.h"
 #include "../fdt.h"
 #include "crash.h"
+#include "sbfmt.h"
+#include "recovery.h"          /* star_pmsg */
+
+_Static_assert(K_UP == 1U && K_DOWN == 2U && K_BIXBY == 4U && K_POWER == 8U, "sbfmt.c kq_key_bit");
+_Static_assert(KQ_PRESS_MS > 40U && KQ_PRESS_MS < 300U, "a plain press for every menu (sbfmt.h)");
 
 #define LOG_PAGE  0x91fff000UL
 #define DL_MAX    (STAR_RAM_DL_END - STAR_RAM_DL - 0x10000UL)
@@ -67,9 +72,19 @@ static void upper(char *dst, const char *s, unsigned cap)
     dst[i] = 0;
 }
 
+/* the menus' background fastboot (the end of this file); it never draws on their screen */
+static struct {
+    int wanted, up, failed, inpoll, boot;
+    unsigned mode;                  /* FBBG_* of the loop serving it now */
+    uint64_t t_muic;
+} bg;
+static struct kq keyq;
+
 static void row(unsigned r, const char *s)
 {
     char b[STAR_FB_COLS + 1];
+    if (bg.up)
+        return;
     upper(b, s, sizeof(b));
     star_fb_text(r, b);
 }
@@ -124,6 +139,55 @@ void fbp_set_next(const char *key)
     __asm__ volatile("dsb sy" : : : "memory");
     mb[0] = NEXT2_MAGIC;
     __asm__ volatile("dsb sy" : : : "memory");
+}
+
+void fbp_clear_next(void)
+{
+    volatile uint64_t *mb = (volatile uint64_t *)NEXT_MAILBOX;
+    for (unsigned i = 0; i < 4; ++i)
+        mb[i] = 0;
+    __asm__ volatile("dsb sy" : : : "memory");
+}
+
+int fbp_key(unsigned bits, unsigned ms)
+{
+    if (!bg.up || !bg.mode)
+        return 0;
+    return kq_push(&keyq, bits, ms);
+}
+
+const char *fbp_mode(void)
+{
+    if (!bg.up)
+        return "fastboot";
+    return bg.mode == FBBG_RECOVERY ? "recovery" : bg.mode == FBBG_CRASH ? "crash" : "menu";
+}
+
+/* `oem screen`: a copy of the panel at the top of the download buffer (so the menu's next frames
+ * do not tear it), or the live panel when a download already reaches there */
+#define SCREEN_BYTES ((uint32_t)STAR_FB_WIDTH * STAR_FB_HEIGHT * 4U)
+#define SCREEN_COPY  (STAR_RAM_DL_END - 0x01100000UL)
+_Static_assert(SCREEN_COPY + SCREEN_BYTES <= STAR_RAM_DL_END && SCREEN_COPY > STAR_RAM_DL, "screen copy");
+
+int fbp_screen(uintptr_t *at, uint32_t *len)
+{
+    *len = SCREEN_BYTES;
+    if (fb_dl_size() > SCREEN_COPY - STAR_RAM_DL) {
+        *at = STAR_FB_BASE;
+        return 1;
+    }
+    volatile const uint64_t *s = (volatile const uint64_t *)STAR_FB_BASE;
+    volatile uint64_t *d = (volatile uint64_t *)SCREEN_COPY;
+    for (uint32_t i = 0; i < SCREEN_BYTES / 8U; i += 4) {
+        uint64_t a = s[i], b = s[i + 1], c = s[i + 2], e = s[i + 3];
+        d[i] = a;
+        d[i + 1] = b;
+        d[i + 2] = c;
+        d[i + 3] = e;
+    }
+    __asm__ volatile("dsb sy" : : : "memory");
+    *at = SCREEN_COPY;
+    return 1;
 }
 
 const char *fbp_speed(void)
@@ -381,9 +445,31 @@ static int leave(int how)
     return how;
 }
 
+/* everything queued (responses, console) out, at most ms */
+static void flush(unsigned ms)
+{
+    uint64_t t0 = hw_ticks(), lim = hw_freq() / 1000U * ms;
+    while ((!fb_tx_idle() || usbd_busy(P_FB_IN) || fd.zlp || con_pending() || usbd_busy(P_ACM_IN)) &&
+           usbd_configured() && hw_ticks() - t0 < lim)
+        service();
+}
+
+/* A replug: nothing in the controller notices (VBUS is forced valid in the PHY), and an earlier port saw a
+ * link left as it was take the host's resets but never a SETUP again. So, as Android does on
+ * every attach: the PHY and the core from the start. 0, or -1 with *why. */
+static int relink(const char **why)
+{
+    usbd_stop();
+    fb_usb_reset();
+    fd.cfg = fd.dtr = fd.rx_data = fd.zlp = 0;
+    ++fd.restarts;
+    return usb_phy_start(why) || usbd_start(fd.serial, why) ? -1 : 0;
+}
+
 int fastboot_run(void)
 {
     const char *why = 0;
+    fbbg_stop();                                       /* the menus' link, if up: this one is its own */
     fd.fdt = ((volatile uint64_t *)LOG_PAGE)[3];      /* x19 from S-Boot (xnu_boot.S) */
     fd.entry = 0;
     fd.cfg = fd.dtr = fd.rx_data = fd.zlp = 0;
@@ -443,11 +529,7 @@ int fastboot_run(void)
              * an earlier port saw a link left as it was take the host's resets but never a SETUP again. So,
              * as Android does on every attach: the PHY and the core from the start. */
             if (muic_poll() == 2) {
-                usbd_stop();
-                fb_usb_reset();
-                fd.cfg = fd.dtr = fd.rx_data = fd.zlp = 0;
-                ++fd.restarts;
-                if (usb_phy_start(&why) || usbd_start(fd.serial, &why)) {
+                if (relink(&why)) {
                     row(2, "USB RESTART FAILED:");
                     row(4, why);
                 } else {
@@ -523,4 +605,142 @@ uintptr_t fastboot_hook(void)
     if (fastboot_run() != FASTBOOT_BOOT)
         return 0;
     return fastboot_entry();
+}
+
+/* ---- fastboot in the background while a menu waits for keys (fbbg.h) ------------------------- *
+ * The same device, the same buffers and the same fastboot.c as fastboot_run(), served from the
+ * menus' key loops instead of its own loop; nothing is drawn. The download buffer (STAGE) and
+ * the USB area are free while a menu runs: menu v7 lives at 0x83800000..0x88800000, the crash
+ * report at 0x9F000000.., recovery's panel copy at 0x9C000000. */
+
+static void pmsg2(const char *a, const char *b)
+{
+    star_pmsg(a);
+    if (b)
+        star_pmsg(b);
+    star_pmsg("\n");
+}
+
+static int bg_start(void)
+{
+    const char *why = 0;
+    fd.fdt = ((volatile uint64_t *)LOG_PAGE)[3];
+    fd.entry = 0;
+    fd.cfg = fd.dtr = fd.rx_data = fd.zlp = 0;
+    fd.ncmd = fd.nbytes = fd.restarts = 0;
+    find_serial();
+    int routed = muic_route_usb();
+    if (usb_phy_start(&why) || usbd_start(fd.serial, &why)) {
+        usbd_stop();
+        bg.failed = 1;                                 /* not retried: no stall in every frame */
+        pmsg2("STARBITE: usb: background fastboot could not start: ", why ? why : "?");
+        return 0;
+    }
+    fb_init(STAR_RAM_DL, (uint32_t)DL_MAX, (char *)FB_SCRATCH, TEXT_CAP, (char *)FB_STAGEBUF, TEXT_CAP);
+    con_init((char *)CON_RING, TEXT_CAP, (char *)CON_SCRATCH, TEXT_CAP);
+    kq_init(&keyq);
+    bg.up = 1;
+    bg.boot = 0;
+    bg.t_muic = hw_ticks();
+    pmsg2("STARBITE: usb: fastboot in the background while the menus wait", routed ? 0 : " (D+/D-: MAX77705 did not answer)");
+    return 1;
+}
+
+void fbbg_enable(void)
+{
+    bg.wanted = 1;
+}
+
+int fbbg_pending(void)
+{
+    return bg.boot;
+}
+
+int fbbg_poll(unsigned where)
+{
+    if (bg.boot)
+        return FBBG_BOOT;
+    if (!bg.wanted || bg.inpoll || (!bg.up && (bg.failed || !bg_start())))
+        return FBBG_NONE;
+    bg.inpoll = 1;
+    bg.mode = where;
+    /* about 2 ms at most: an answer of many INFO lines goes out in bursts, downloads run in DMA */
+    uint64_t t0 = hw_ticks(), lim = hw_freq() / 500U;
+    for (;;) {
+        service();
+        if (fd.entry) {                                /* `fastboot boot` / `oem maint`: placed */
+            bg.boot = 1;
+            break;
+        }
+        uint32_t v = 0;
+        int a = FB_ACT_NONE;
+        if (!usbd_busy(P_FB_IN) && !fd.zlp)
+            a = fb_action(&v);
+        if (a == FB_ACT_NONE) {
+            a = con_action(&v);
+            if (a != FB_ACT_NONE)
+                drain_console();
+        }
+        if (a == FB_ACT_REBOOT) {                      /* the key loops are safe points */
+            flush(250);
+            pmsg2("STARBITE: usb: reboot asked by the host", 0);
+            usbd_stop();
+            bg.up = 0;
+            hw_reboot(v);
+        }
+        if (a == FB_ACT_BOOT) {
+            bg.boot = 1;
+            break;
+        }
+        /* FB_ACT_MENU (`fastboot continue`): already in a menu */
+        if ((fb_tx_idle() && !usbd_busy(P_FB_IN) && !fd.zlp && !con_pending()) || hw_ticks() - t0 > lim)
+            break;
+    }
+    uint64_t now = hw_ticks();
+    if (!bg.boot && now - bg.t_muic > hw_freq() / 2) {
+        const char *why = 0;
+        bg.t_muic = now;
+        if (muic_poll() == 2 && relink(&why)) {
+            usbd_stop();
+            bg.up = 0;
+            bg.failed = 1;
+            pmsg2("STARBITE: usb: background fastboot lost after a replug: ", why ? why : "?");
+        }
+    }
+    bg.inpoll = 0;
+    return bg.boot ? FBBG_BOOT : FBBG_NONE;
+}
+
+uintptr_t fbbg_entry(void)
+{
+    if (bg.up)
+        flush(500);                                    /* the OKAY of `boot` / `oem maint` */
+    uintptr_t e = bg.boot ? fd.entry : 0;
+    fbbg_off();
+    return e;
+}
+
+void fbbg_stop(void)
+{
+    if (bg.up) {
+        flush(100);
+        usbd_stop();
+        bg.up = 0;
+    }
+    bg.mode = 0;
+    kq_init(&keyq);
+}
+
+void fbbg_off(void)
+{
+    fbbg_stop();
+    bg.wanted = 0;
+    bg.boot = 0;
+}
+
+unsigned fbbg_inject(void)
+{
+    if (!bg.up || !keyq.n)
+        return 0;
+    return kq_bits(&keyq, hw_ticks() * 1000U / hw_freq());
 }

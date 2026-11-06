@@ -6,5 +6,5 @@ cd "$(dirname "$0")"
 S=../../shim/starlte
 out=${TMPDIR:-/tmp}/starbite-fb-host-test
 ${CC:-cc} -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -I"$S" \
-    host_test.c "$S/fastboot.c" "$S/usb_desc.c" -o "$out"
+    host_test.c "$S/fastboot.c" "$S/usb_desc.c" "$S/sbfmt.c" -o "$out"
 "$out"

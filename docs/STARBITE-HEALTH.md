@@ -266,8 +266,28 @@ first, without the screen. Rescue mode writes no launch record: it must not need
 | Windows (woa) | pmsg ring + RWD1 0xFED13D80 | the UEFI's trace; shown as the log tail |
 | The launch record | the crash log | which entry was started, when, watchdog, flags |
 
-Evidence is used only for the method that was launched. Each piece's CRC is remembered in the
-crash log header (`seen_*`), so a ramoops record that survives several boots is reported once.
+Evidence is used only for the method that was launched.
+
+**Judged evidence is marked in RAM (health5, 2026-11-07).** The phone: two runs of the hidden XNU test entry
+`xnuh-panic` (deterministic `sbtestpanic=60`) left byte-identical dumps; the first was KERNEL PANIC (report #3), the
+second "CLEAN RESTART" with no report, because the dump's CRC equalled the one remembered in the header. Now the
+loader, once it has judged a boot's evidence (`settle`), marks it in the live ramoops RAM (`sbfmt.c` sb_consume):
+
+| Evidence | Mark | Effect |
+|---|---|---|
+| Linux ramoops dmesg record (zone 0, 0xFED10000) | its header `====<sec>.<usec>-D` (or `-C`) becomes `...-S` (one byte) | Linux reads the record as before (only `C` means compressed; pstore, SBMAINT see it unchanged but for that letter); the loader no longer takes it for new |
+| XNU's dump (pmsg ring, zone 1) | `STARBITE: XNU panic (sweetreboot)...` / `STARBITE: sweetreboot timer...` becomes `STARSEEN: ...` (8 bytes) | the loader's needles no longer match; the text stays readable |
+
+- Every record and dump found is marked, whichever OS was launched, so nothing old is ever taken for a later
+  launch's crash, any number of unrelated resets later. A new crash writes a new header: even a byte-identical one
+  is new. The pmsg line `STARBITE: crash: judged evidence marked in RAM: dmesg record / xnu dump` says what was done.
+- Bytes are changed only where the live RAM still holds what the snapshot had (20 bytes of XNU's header are
+  compared: the loader's own pmsg lines, which start with "STARBITE: " too, may have wrapped over it since the
+  snapshot; then there is nothing left to mark). The touched lines are cleaned to RAM, as pmsg_put does.
+- The crash log header records it (byte 136, `hflags` bit 0 `CLH_CONSUMES`). Until it is set (the first boot of
+  this loader), old evidence is still compared with the seen CRCs once, so an old loader's judged crash is not
+  reported again. The CRCs are kept up to date either way.
+- Samsung's sec_debug page (Android, 0x80000000) is not written: it keeps the CRC check.
 
 ### 4.3 The decision (`sb_classify`, host-tested table)
 
@@ -376,8 +396,9 @@ the phone's reports. Card stores get none. The loader writes only this entry's b
 - **Block 0, the header** (CRC32 of bytes 16..1023 at 12): `SBCRASH1`, version 1, slots (15), slot
   size (4096), next slot, reports written, launches judged, launch sequence, launch state (1 =
   running), method, watchdog armed, watchdog s, key[24], name[32], launch time (UTC s), log level,
-  launch flags (1 Linux INFORM3 patched, 2 fastboot, 4 rescue, 8 retry), and the seen CRCs of the
-  dmesg record, console, sec_debug string, and XNU dump.
+  launch flags (1 Linux INFORM3 patched, 2 fastboot, 4 rescue, 8 retry), the seen CRCs of the
+  dmesg record, console, sec_debug string, and XNU dump, and at 136 `hflags` (bit 0: judged evidence is
+  marked in RAM, 4.2).
 - **Blocks 1..15, the reports** (CRC32 of 16..4095 at 12): `SBCRREP1`, version 1, number, kind,
   severity, method, source, detected / launched / event times, key, name, 16 registers, reason[96],
   then up to 3824 bytes of the last log lines (printable ASCII, `\n`).
@@ -708,7 +729,7 @@ sh tools/loader-test/run.sh                    # the Mac's clang, ASan + UBSan
 limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 ```
 
-- **host_test.c (306 checks)**:
+- **host_test.c (347 checks)**:
   - CRC32
   - settings: old record = defaults, round trip, damage, clamps, sbstore2's block as the loader reads it
   - crash log: header and report round trip, the ring wrapping at 17 reports, damage, the log tail
@@ -742,6 +763,16 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
     panic, trace and last line, tighter excerpts (1000 and 600 bytes) still ending with it, the
     report document live and saved at levels 1-3 (header, sections, the log with the panic, more than a
     page, no row wider than 76), and `cs_poll` driven like crash.c's loop on it (above)
+  - (health5) de-duplication on simulated boots over a RAM copy of the two zones (the loader's own pmsg
+    writes in between, wrapping as pmsg_put does): XNU `xnuh-panic` twice with byte-identical dumps = two
+    reports, then a clean restart and five unrelated resets = none; the header overwritten by the loader's
+    lines before judging = one report, nothing to mark; the timer dump twice = two hang reports; the real
+    Linux record twice = two reports (the judged one differs only in `-S`, its time still reads), then none;
+    an oops once; a record found after an XNU launch is marked, not reported, and not reported later as
+    Linux's; the first boot of a consuming loader after an old one (CRC equal: no report, marked; then the
+    identical next crash is reported); ring positions (`sb_ring_phys`)
+  - (health5) keys from USB: the queue's timing, a plain press against every menu's limits, injected presses
+    driving the crash report's `cs_poll` and POST's `pv_poll` (docs/USB-FASTBOOT.md 11.6)
 - **check_dtmerge.py (29 checks)**: section 6.4's rules against the merged files.
 - **test_sbstore2.py (13 tests)** (linux-pmos's expected watchdog is now 0, as the catalog's
   `[defaults.linux] wdt = 0` of 1f28633):
@@ -756,7 +787,7 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
     and carrier codes, regions and `/chosen/serial` blanked, same length (`scrub-sboot-fdt.py`).
   - When the main checkout has them: `build/android/lineage/dt.img` and
     `build/linux/exynos9810-starlte.dtb`.
-- `tools/usb-fastboot/run-host-test.sh` passes: 315 checks (with `oem maint`, `oem maint prev`, a refused
+- `tools/usb-fastboot/run-host-test.sh` passes: 392 checks (the menus over USB, docs/USB-FASTBOOT.md 11.6; with `oem maint`, `oem maint prev`, a refused
   `oem maint rescue`, a bad variant, `oem boot-next maint-rescue` without a catalog entry).
 - The installer's tests that use sbstore2.py still pass: 111 tests.
 - **tools/xnu-health-test/run.sh (911 checks, XNU's side, section 5.4)**:
@@ -780,7 +811,16 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 
 ## 9. Needs the phone
 
-**health4, first:** on the crash screen (after the next `echo c` in pmOS), Volume Down held scrolls
+**health5, first:**
+
+- The XNU test twice: boot `xnuh-panic` (by key), let it panic, back in the loader: KERNEL PANIC (report #n);
+  boot it again: KERNEL PANIC again (report #n+1). Then a clean restart: no report. pmsg: `crash: judged
+  evidence marked in RAM: xnu dump`.
+- The same with Linux: `echo c > /proc/sysrq-trigger` twice: two reports.
+- The menus over USB: docs/USB-FASTBOOT.md 11.7 (fastboot devices at the menu, `sbfb.py key`, `screen`, `boot`,
+  the crash report and recovery, replug, each OS after it).
+
+**health4:** on the crash screen (after the next `echo c` in pmOS), Volume Down held scrolls
 the report down through the log to the panic at the bottom, Volume Up back; the footer's row numbers
 move. The rest of the health3 list below still holds.
 
@@ -830,6 +870,9 @@ move. The rest of the health3 list below still holds.
 
 **Images**:
 
+- **BOOT `out/xnu-boot-health5.img` (sha256 d5e6063c957d1915..., loader Image d2118f6a...)**: health4 + judged evidence marked in RAM
+  (4.2) + fastboot in the background at the boot menu, Starbite Recovery and the crash report
+  (docs/USB-FASTBOOT.md 11); same recipe. Roll back with health4.
 - **BOOT `out/xnu-boot-health4.img` (sha256 8bcbb8e1995b58b3..., loader Image 0b8a3669...)**: health3 +
   the scrollable crash report (the log at every level, `cs_poll`), the excerpt's overflow case; same
   recipe as below. Roll back with health3 (master 81f5b55's loader, rebuilt by the same recipe).

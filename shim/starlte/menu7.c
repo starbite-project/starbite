@@ -23,6 +23,7 @@
 #include "fbtext.h"
 #include "batt.h"
 #include "crash.h"
+#include "fbbg.h"
 
 #define PX 1440.0f
 #define PY 2960.0f
@@ -4524,6 +4525,13 @@ static int run_loop(void)
         double t0 = now_ms();
         struct m7_ev ev;
         int had = 0;
+        /* the Mac over USB while the menu waits (fbbg.h): its keys come in through hw_keys();
+         * an image it placed ends the menu at once (nothing more may be drawn) */
+        if (fbbg_poll(FBBG_MENU) == FBBG_BOOT) {
+            IN.render = 0;
+            star_fb_mute(1);
+            return STAR_PICK_USB;
+        }
         while (m7_input(&ev)) {
             S.now = t0;
             dispatch(&ev);

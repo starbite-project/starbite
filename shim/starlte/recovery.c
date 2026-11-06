@@ -27,6 +27,7 @@
 #include "store.h"
 #include "sbfmt.h"
 #include "crash.h"
+#include "fbbg.h"
 
 #define ALIVE_GPA0_DAT 0x14050024UL
 #define ALIVE_GPA2_DAT 0x14050064UL
@@ -78,21 +79,31 @@ static unsigned r_keys(void)
 {
     uint32_t a = *(volatile uint32_t *)ALIVE_GPA0_DAT;
     uint32_t b = *(volatile uint32_t *)ALIVE_GPA2_DAT;
+    /* + a press the Mac sent (`fastboot oem key`, fbbg.h) */
     return (!((a >> 3) & 1U) ? K_UP : 0) | (!((a >> 4) & 1U) ? K_DOWN : 0) |
-           (!((a >> 6) & 1U) ? K_BIXBY : 0) | (!((b >> 4) & 1U) ? K_POWER : 0);
+           (!((a >> 6) & 1U) ? K_BIXBY : 0) | (!((b >> 4) & 1U) ? K_POWER : 0) | fbbg_inject();
 }
 
+/* the menu's USB fastboot is served while it waits (fbbg.h) */
 static void r_release(void)
 {
-    while (r_keys())
+    while (r_keys()) {
+        (void)fbbg_poll(FBBG_RECOVERY);
         r_wait_ms(20);
+    }
 }
+
+/* r_key_wait's answer when the Mac placed an image over USB: every loop goes back up to
+ * recovery_main, which returns REC_USBBOOT */
+#define K_USBBOOT 0x100U
 
 /* One debounced press (reported while the key is still down; the next call waits for it to go). */
 static unsigned r_key_wait(void)
 {
     r_release();
     for (;;) {
+        if (fbbg_poll(FBBG_RECOVERY) == FBBG_BOOT)
+            return K_USBBOOT;
         unsigned k = r_keys();
         if (k) {
             r_wait_ms(30);
@@ -508,6 +519,8 @@ static int pick_entry(void)
     for (;;) {
         unsigned k = r_key_wait();
         unsigned old = sel;
+        if (k & K_USBBOOT)
+            return -1;
         if (k & K_UP)
             sel = sel ? sel - 1 : n;
         else if (k & K_DOWN)
@@ -671,6 +684,8 @@ static void settings_page(void)
     for (;;) {
         unsigned k = r_key_wait();
         unsigned old = sel;
+        if (k & K_USBBOOT)
+            return;
         if (k & K_UP) {
             sel = sel ? sel - 1 : SR_N - 1;
         } else if (k & K_DOWN) {
@@ -731,9 +746,17 @@ int recovery_main(const char *why, int *pick)
     rec_log(0xffffU);
     unsigned sel = 0;
     draw_menu(sel, why);
+    fbbg_enable();                      /* the Mac can drive this menu over USB too */
     for (;;) {
         unsigned k = r_key_wait();
         unsigned old = sel;
+        if (k & K_USBBOOT) {
+            /* the image is already placed and may lie over the panel copy: it is not put back */
+            star_pmsg("STARBITE: recovery: an image from USB starts\n");
+            panel_valid = 0;
+            star_fb_row_base(base);
+            return REC_USBBOOT;
+        }
         if (k & K_UP) {
             sel = sel ? sel - 1 : N_ITEMS - 1;
         } else if (k & K_DOWN) {
@@ -768,7 +791,7 @@ int recovery_main(const char *why, int *pick)
                 star_fb_text_c(ROW_MSG, "POWER: START  VOL UP: OTHER SLOT", C_WHITE, C_BLACK);
                 star_fb_text_c(ROW_MSG + 1, "VOL DOWN: RESCUE MODE  BIXBY: BACK", C_WHITE, C_BLACK);
                 unsigned c = r_key_wait();
-                if (c & K_BIXBY) {
+                if (c & (K_BIXBY | K_USBBOOT)) {
                     msg("", 0, C_WHITE);
                     break;
                 }

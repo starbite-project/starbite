@@ -2245,3 +2245,23 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   lines alone overflow. Host: loader-test 306 checks (clang ASan/UBSan, VM gcc), xnu-health-test 911,
   usb-fastboot 315. Loader Image 0b8a366972c86fc2...; BOOT out/xnu-boot-health4.img
   8bcbb8e1995b58b3eab01d3e25a5ec25a65e5c00b4e3ae7792549b7767611d1a (health3's recipe).
+- 2026-11-07: **health5: judged crash evidence marked in RAM; fastboot from the menus (built, host-tested,
+  not flashed).** (1) The phone: xnuh-panic twice gave byte-identical XNU dumps; the second was "CLEAN
+  RESTART", no report (the seen-CRC check). Now settle() marks everything it judged in the live ramoops RAM
+  (sbfmt.c sb_consume): the Linux dmesg record's header flag -D/-C -> -S (Linux still reads it), XNU's dump
+  header "STARBITE:" -> "STARSEEN:" (only where 20 header bytes still match the snapshot: the loader's own pmsg
+  lines may have wrapped over it). Presence then means new (crash log header byte 136 hflags CLH_CONSUMES; old
+  evidence from before it still goes through the CRC once). Host: identical XNU and Linux crashes twice = two
+  reports, clean restarts and unrelated resets = none, wrap, timer dump, oops, cross-OS record, migration.
+  (2) The user: "when it's on the boot menu you can interact with it from there also". The fastboot + console
+  device now also comes up in the background (fbbg.h, fastboot_dev.c) while menu v7, Starbite Recovery's menu
+  and the crash report wait for keys, polled from their loops (<= 2 ms a poll, no drawing, start failure logged
+  and not retried, replug relink, reboots from the poll, `fastboot boot` / `oem maint` leave the menu via
+  STAR_PICK_USB / REC_USBBOOT / the crash report closing, fbbg_off in star_prepare_xnu before anything starts,
+  fbbg_stop at every catalog start). New: `getvar mode`, `oem key <up|down|bixby|power> [ms]` (a 150 ms press
+  queued and OR'ed into menu.c keys() / recovery.c r_keys(), so every menu's own rules apply), `oem screen` +
+  get_staged (1440x2960 B G R A), `oem reboot-to menu`. Mac: tools/store/sbfb.py (status, wait, key, screen
+  -> PNG, logs, crash, boot, next, menu, maint, reboot, run). docs/USB-FASTBOOT.md section 11.
+  tools/menu7/preview/loader_stubs.c gets an fbbg_poll stub (h7 still builds). Host: loader-test 347 checks,
+  usb-fastboot 392 (clang ASan/UBSan and VM gcc), xnu-health-test 911. Loader Image d2118f6a...; BOOT
+  out/xnu-boot-health5.img d5e6063c957d1915bb2b273367d8ae71bd4636a20e88a92b144cdbe366e10e9e (health2's recipe).

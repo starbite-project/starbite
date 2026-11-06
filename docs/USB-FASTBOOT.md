@@ -7,7 +7,9 @@ The loader can now be a USB device. It enumerates on the Mac as **one composite 
 
 It covers milestones UO1 and FB1 of `docs/STARBITE-MASTER-PLAN.md` (§4.4 UO1, §4.6).
 
-**Status (2026-11-05): built, host-tested, NOT run on the phone.** Nothing here has touched hardware yet. Section 8 is the plan for the first test.
+**Status:** the fastboot mode runs on the phone (section 9 at the end, 2026-11-05). **2026-11-07: the same device also
+comes up in the background while the boot menu, Starbite Recovery's menu or the crash report waits for keys**, so the
+Mac can drive the phone there without anyone pressing a key (section 11; built and host-tested, not on the phone yet).
 
 | | |
 |---|---|
@@ -254,6 +256,10 @@ if (pick == STAR_PICK_FASTBOOT) {
 | `fastboot oem reboot-to <key>` | boot-next mailbox = key, then reboot (the menu starts it) |
 | `fastboot oem boot-next <key\|fastboot>` | mailbox only, no reboot: the reset after the next boot lands there. `oem boot-next fastboot`, then `fastboot boot x` means the test OS's reboot comes back to fastboot |
 | `fastboot oem catalog`, `oem usb`, `oem help` | |
+| `fastboot getvar mode` | where the loader is: `fastboot` (this mode), `menu`, `recovery`, `crash` (section 11) |
+| `fastboot oem key <up\|down\|bixby\|power> [ms]` | one press for the menu on screen (section 11); `ms` makes a hold (`oem key bixby 900`). Refused in the fastboot mode itself |
+| `fastboot oem screen`, then `fastboot get_staged x.raw` | the panel: 1440 x 2960, 4 bytes a pixel in memory order **B G R A** (17 045 504 bytes). `tools/store/sbfb.py screen out.png` makes a PNG |
+| `fastboot oem reboot-to menu` | reboot with no boot-next: the boot menu |
 | `fastboot continue` (or `oem menu`) | USB stops, then the boot menu |
 | `fastboot reboot`, `reboot bootloader`, `reboot recovery` (TWRP), `reboot download` | PMU INFORM3 normal / boot-next fastboot / recovery / download |
 | `flash:`, `erase:`, `flashing` | refused. FB1 has no write path at all |
@@ -363,6 +369,100 @@ Division of work, as always: Claude runs every host command (build, flash throug
    - `fastboot` puts the kernel at offset 2048 (page size 2048). XNU payloads are read in place (8-byte alignment is enough). UEFI images are moved to 0x8c000000. arm64 Images are copied to RAM_BASE + text_offset.
    - A boot image with page size 2048 and an XNU payload over 80 MiB - 64 KiB will not fit.
 7. **Fastboot's behaviour assumed from AOSP sources:** wrapping non-boot-image files, the default header v0, page 2048. The host test checks the parser against a hand-built v0/v2/v3 layout, not against bytes made by `fastboot` itself. The first real `fastboot boot` is the first true check.
+
+## 11. Fastboot from the menus (the background device, 2026-11-07)
+
+The user: "when it's on the boot menu you can interact with it from there also". The loader now brings the same
+composite device (fastboot + console, section 2) up while a menu waits for keys, and serves it from that menu's key
+loop. Nothing is drawn for it; the menu stays as it is and keeps taking real keys.
+
+### 11.1 Where
+
+| Waiting for keys | Polls | `getvar mode` |
+|---|---|---|
+| boot menu v7 (`menu7.c` run_loop, every frame) | `fbbg_poll(FBBG_MENU)` | `menu` |
+| Starbite Recovery's menu and its pages (`recovery.c` r_key_wait / r_release, every 10-20 ms), its crash report list | `fbbg_poll(FBBG_RECOVERY)` | `recovery` |
+| the crash report (`crash.c` crash_screen, every 5 ms) | `fbbg_poll(FBBG_CRASH)` | `crash` |
+| the fastboot mode (section 5) | its own loop | `fastboot` |
+
+Not served: menu v6/v5, Lab / EngineerMode, POST (no loop waits there for long), menu v7's 2.35 s intro (the device
+comes up at the first poll after it).
+
+### 11.2 How (`fastboot_dev.c` "background", `fbbg.h`)
+
+- `xnu_boot.c` calls `fbbg_enable()` after the catalog is loaded (before the crash report and the menu);
+  `recovery_main` calls it too. The **first `fbbg_poll`** brings USB up: MAX77705 route, PHY, DWC3, as section 4
+  (about 0.1 s, once). If that fails, it is logged (`STARBITE: usb: background fastboot could not start: ...`) and
+  **not retried** in this boot, so no menu frame ever waits for it again.
+- Each poll services the controller and the fastboot / console queues for **at most about 2 ms** (a long answer
+  goes out in bursts over several frames; a download runs in DMA between polls). Every 500 ms it reads VBUS and
+  restarts the link after a replug (section 4.1); a MAX77705 that stops answering costs at most its I2C timeouts.
+  Nothing in a poll waits for the host.
+- `fastboot reboot ...` / `oem reboot-to` reboot from inside the poll (the key loops are safe points).
+- `fastboot boot` and `oem maint` place the image exactly as in the fastboot mode. The poll then answers
+  `FBBG_BOOT` (and keeps answering it), each loop leaves at once without drawing again
+  (`STAR_PICK_USB` from the menu, `REC_USBBOOT` from recovery, the crash report closes), and `star_prepare_xnu`
+  returns `fbbg_entry()`: the last responses go out (at most 0.5 s), USB stops, the image starts.
+- `fastboot continue` / `oem menu` answer OKAY and do nothing (already at a menu).
+- **USB is stopped before anything starts**: `fbbg_off()` in `star_prepare_xnu` on every return (an OS, a placed
+  image, or 0 for S-Boot's Download mode, which sets USB up itself), and `fbbg_stop()` at the start of every catalog
+  start (`boot_entry`: no DMA from a download the Mac had under way into STAGE while the OS loads there; a failed start
+  returns to a menu, whose next poll brings USB back). Stop = `usbd_stop()` (section 4.3): soft disconnect, end
+  transfers, core soft reset. The explicit fastboot mode stops the background device and runs its own.
+- Memory: the same as section 3. While a menu runs, STAGE (the download buffer) and 0x91000000.. are free: menu v7
+  lives at 0x83800000..0x88800000, the crash report at 0x9F000000.., recovery's panel copy at 0x9C000000.
+
+### 11.3 Keys from the Mac (`oem key`)
+
+The press goes into a queue (`sbfmt.c` kq_*, host-tested) and is added to the GPIO keys every menu reads
+(`menu.c` keys(), `recovery.c` r_keys()). So each menu's own rules apply: a plain press is held **150 ms**, longer
+than every debounce (v7 20 ms, recovery 30 ms, crash report 20 ms) and shorter than every hold or repeat (v7 Power
+hold 520 ms, Volume repeat 450 ms, crash report repeat 300 ms, Bixby hold 700 ms); then 120 ms released, then the
+next press. `oem key bixby 900` is a hold (v7: Lab; crash report: the next detail level). Up to 8 presses queue.
+
+### 11.4 The screen (`oem screen`)
+
+The panel is copied to the top of the download buffer (0x8FF00000, so the menu's next frames do not tear it) and
+staged; `fastboot get_staged x.raw` uploads it (17 MB, about 0.5 s at high speed). If a download already reaches
+there, the live panel is staged instead. Byte order B G R A (the panel's 0xAARRGGBB words, little-endian).
+
+### 11.5 On the Mac: `tools/store/sbfb.py`
+
+```sh
+python3 -I tools/store/sbfb.py status              # mode, serial, battery, catalog (getvar all)
+python3 -I tools/store/sbfb.py wait menu           # until the phone answers in the menu
+python3 -I tools/store/sbfb.py key down down power # presses, one after the other
+python3 -I tools/store/sbfb.py key bixby:900       # a hold
+python3 -I tools/store/sbfb.py screen menu.png     # the panel as PNG (--half: 720 x 1480)
+python3 -I tools/store/sbfb.py logs pmsg           # or dmesg, loader, usb, crash; -o FILE
+python3 -I tools/store/sbfb.py crash --level 3     # the crash log, decoded by sbstore2.py
+python3 -I tools/store/sbfb.py boot linux-pmos     # oem reboot-to KEY;  next KEY: boot-next only
+python3 -I tools/store/sbfb.py menu                # reboot to the menu (no boot-next)
+python3 -I tools/store/sbfb.py maint [prev|rescue] # Starbite Maintenance from UFS, now
+python3 -I tools/store/sbfb.py reboot [recovery|download|bootloader]
+python3 -I tools/store/sbfb.py run out/x.xnu       # fastboot boot, also from the menu
+```
+
+### 11.6 Host tests
+
+- `tools/usb-fastboot/run-host-test.sh` (392 checks): `getvar mode` (and in `getvar all`), `oem key` with every key
+  name, a hold, refusals (unknown key, junk, no menu waiting), `oem screen` + `upload` byte for byte, `upload` of a
+  log after it, `oem reboot-to menu` (mailbox cleared, normal reboot), `oem reboot-to maint`, `continue`.
+- `tools/loader-test/run.sh`: the key queue's timing (a press 150 ms from the first read, three presses with their
+  times and gaps, full queue, cap, names), a plain press against every menu's limits, and injected presses driving
+  the crash report's real key machine (`cs_poll`: 3 lines, one level, continue) and POST's (Volume Up opens the log).
+
+### 11.7 To check on the phone
+
+1. With the cable in, the boot menu up: `fastboot devices` lists the phone; `sbfb.py status` says `mode menu`.
+2. `sbfb.py key down` moves the menu's selection; `sbfb.py key power` starts the selected entry. Real keys still work
+   at the same time, and the menu's animation shows no stutter.
+3. `sbfb.py screen m.png`: the menu as on the panel.
+4. `sbfb.py boot linux-pmos`, `sbfb.py menu`, `sbfb.py reboot recovery` from the menu.
+5. On a crash report: `sbfb.py key down` scrolls; `sbfb.py key bixby:900` changes the level; `sbfb.py crash`.
+6. In Starbite Recovery (Bixby at boot): `sbfb.py status` says `mode recovery`; `sbfb.py maint` starts maintenance.
+7. Unplug and replug at the menu: the device comes back within about 2 s; the menu never freezes.
+8. Each OS after a menu with USB up: Linux's gadget enumerates, XNU and the woa UEFI as before (USB stopped and reset).
 
 ## 10. Later
 

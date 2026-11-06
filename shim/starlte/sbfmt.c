@@ -346,6 +346,7 @@ int cl_head_decode(const uint8_t *b, struct cl_head *h)
     h->seen_console = (uint32_t)get(b + 124, 4);
     h->seen_secmagic = (uint32_t)get(b + 128, 4);
     h->seen_pmsg = (uint32_t)get(b + 132, 4);
+    h->hflags = (uint32_t)get(b + 136, 4);
     if (h->slots != CL_SLOTS || h->slot_size != CL_BLOCK || h->next >= CL_SLOTS)
         return -1;
     return 1;
@@ -375,6 +376,7 @@ void cl_head_encode(uint8_t *b, const struct cl_head *h)
     put(b + 124, h->seen_console, 4);
     put(b + 128, h->seen_secmagic, 4);
     put(b + 132, h->seen_pmsg, 4);
+    put(b + 136, h->hflags, 4);
     put(b + 12, sb_crc32(b + 16, CL_HEAD_CRC - 16), 4);
 }
 
@@ -524,6 +526,104 @@ unsigned sb_ring_text(const uint8_t *zone, unsigned zone_size, char *out, unsign
             out[n++] = (char)d[i];
     }
     return n;
+}
+
+int sb_ring_phys(const uint8_t *zone, unsigned zone_size, unsigned i)
+{
+    if (zone_size < 16 || get(zone, 4) != RING_SIG)
+        return -1;
+    uint32_t start = (uint32_t)get(zone + 4, 4), size = (uint32_t)get(zone + 8, 4), data = zone_size - 12;
+    if (size > data || start > data || i >= size)
+        return -1;
+    uint32_t mod = 0;                      /* as sb_ring_text */
+    if (size == data && start < data)
+        mod = data;
+    else if (size == RING_PMSG && start < RING_PMSG)
+        mod = RING_PMSG;
+    return mod ? (int)((start + i) % mod) : (int)i;
+}
+
+/* ---- evidence --------------------------------------------------------------------------------- */
+
+static const char seen_mark[] = "STARSEEN";   /* replaces "STARBITE" of a judged XNU header */
+
+void sb_evidence(const char *t0, unsigned n0, const char *t1, unsigned n1, int xp, int xh, int is_linux, int is_xnu,
+                 const struct cl_head *h, struct sb_found *f)
+{
+    z(f, sizeof(*f));
+    f->xat = -1;
+    int consumes = (h->hflags & CLH_CONSUMES) != 0;
+    /* Linux: a ramoops dmesg record, header "====<sec>.<usec>-<D|C>\n"; "-S" = judged */
+    if (n0 >= 4 && t0[0] == '=' && t0[1] == '=' && t0[2] == '=' && t0[3] == '=') {
+        unsigned nl = 4;
+        while (nl < n0 && nl < 64 && t0[nl] != '\n')
+            ++nl;
+        char flag = nl < n0 && t0[nl] == '\n' && t0[nl - 2] == '-' ? t0[nl - 1] : 'D';
+        f->dflag = nl - 1;
+        f->dmesg = flag != 'S';
+        if (f->dmesg)
+            f->c0 = sb_crc32(t0, n0);
+    }
+    if (is_linux && f->dmesg && (consumes || f->c0 != h->seen_dmesg))
+        f->ev |= sb_find(t0, n0, "Panic#") >= 0 ? EV_LX_PANIC : sb_find(t0, n0, "Oops#") >= 0 ? EV_LX_OOPS : EV_LX_OTHER;
+    /* XNU: its dump's header in the pmsg ring (judged ones read "STARSEEN", so they never match) */
+    f->xat = xp >= 0 ? xp : xh;
+    f->xpanic = xp >= 0;
+    if (f->xat >= 0 && (unsigned)f->xat < n1) {
+        unsigned m = n1 - (unsigned)f->xat;
+        f->cx = sb_crc32(t1 + f->xat, m < 512U ? m : 512U);
+    } else {
+        f->xat = -1;
+    }
+    if (is_xnu && f->xat >= 0 && (consumes || f->cx != h->seen_pmsg))
+        f->ev |= f->xpanic ? EV_XNU_PANIC : EV_XNU_HANG;
+}
+
+/* The live byte at text offset i of the snapshot zone, if it still holds the snapshot's: its
+ * physical index, else -1. */
+static int live_same(volatile uint8_t *live, const uint8_t *snap, unsigned zone_size, unsigned i)
+{
+    int p = sb_ring_phys(snap, zone_size, i);
+    if (p < 0 || live[12 + (unsigned)p] != snap[12 + (unsigned)p])
+        return -1;
+    return p;
+}
+
+unsigned sb_consume(volatile uint8_t *live0, volatile uint8_t *live1, const uint8_t *snap0, const uint8_t *snap1,
+                    unsigned zone_size, const struct sb_found *f, struct cl_head *h)
+{
+    unsigned done = 0;
+    if (f->dmesg) {
+        int ok = 1, pf = -1;
+        for (unsigned i = 0; i < 4 && ok; ++i)              /* "====" still there */
+            ok = live_same(live0, snap0, zone_size, i) >= 0;
+        if (ok)
+            pf = live_same(live0, snap0, zone_size, f->dflag);
+        if (pf >= 0) {
+            live0[12 + (unsigned)pf] = 'S';
+            done |= 1U;
+        }
+        h->seen_dmesg = f->c0;
+    }
+    if (f->xat >= 0) {
+        /* 20 bytes of the header must still be there ("STARBITE: XNU panic " / "STARBITE:
+         * sweetreboot"): the loader's own lines, which may have wrapped over it, start with
+         * "STARBITE: " too */
+        int p[20];
+        int ok = 1;
+        for (unsigned k = 0; k < 20 && ok; ++k) {
+            p[k] = live_same(live1, snap1, zone_size, (unsigned)f->xat + k);
+            ok = p[k] >= 0 && (k >= 8 || snap1[12 + (unsigned)p[k]] == (uint8_t)"STARBITE"[k]);
+        }
+        if (ok) {
+            for (unsigned k = 0; k < 8; ++k)
+                live1[12 + (unsigned)p[k]] = (uint8_t)seen_mark[k];
+            done |= 2U;
+        }
+        h->seen_pmsg = f->cx;
+    }
+    h->hflags |= CLH_CONSUMES;
+    return done;
 }
 
 /* ---- Starbite Maintenance container --------------------------------------------------------- */
@@ -954,6 +1054,67 @@ unsigned pv_failures(const uint8_t *state, const uint8_t *order, unsigned n, uns
         ++c;
     }
     return c;
+}
+
+/* ---- keys from USB ---------------------------------------------------------------------------- */
+
+void kq_init(struct kq *k)
+{
+    z(k, sizeof(*k));
+}
+
+int kq_push(struct kq *k, unsigned bits, unsigned ms)
+{
+    if (!bits || k->n >= KQ_N)
+        return 0;
+    if (!ms)
+        ms = KQ_PRESS_MS;
+    if (ms > KQ_MAX_MS)
+        ms = KQ_MAX_MS;
+    unsigned i = (k->h + k->n++) % KQ_N;
+    k->bits[i] = (uint16_t)bits;
+    k->ms[i] = (uint16_t)ms;
+    return 1;
+}
+
+unsigned kq_bits(struct kq *k, uint64_t now_ms)
+{
+    if (!k->n)
+        return 0;
+    uint64_t t = now_ms + 1U;
+    if (!k->t0)
+        k->t0 = t;
+    uint64_t dt = t - k->t0;
+    if (dt < k->ms[k->h])
+        return k->bits[k->h];
+    if (dt < (uint64_t)k->ms[k->h] + KQ_GAP_MS)
+        return 0;
+    k->h = (k->h + 1U) % KQ_N;          /* done: the next one begins at the next read */
+    --k->n;
+    k->t0 = 0;
+    return 0;
+}
+
+/* s is the word w (ending at NUL or a space) */
+static int word_is(const char *s, const char *w)
+{
+    unsigned k = 0;
+    while (w[k] && s[k] == w[k])
+        ++k;
+    return !w[k] && (!s[k] || s[k] == ' ');
+}
+
+unsigned kq_key_bit(const char *s)
+{
+    if (word_is(s, "up") || word_is(s, "volup") || word_is(s, "vol+"))
+        return 1;
+    if (word_is(s, "down") || word_is(s, "voldown") || word_is(s, "vol-"))
+        return 2;
+    if (word_is(s, "bixby"))
+        return 4;
+    if (word_is(s, "power"))
+        return 8;
+    return 0;
 }
 
 /* ---- crash text ------------------------------------------------------------------------------- */
