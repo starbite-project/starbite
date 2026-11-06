@@ -53,6 +53,14 @@ if [ "$DEV" = 1 ]; then
   sudo setfattr -n security.selinux -v u:object_r:adb_keys_file:s0 "$S/product/etc/security/adb_keys"
   printf '\n# Starbite (dev): USB debugging on from first boot; only the Starbite Mac key is pre-authorized\npersist.sys.usb.config=adb\n' | sudo tee -a "$S/product/etc/build.prop" >/dev/null
 fi
+# No setup wizard: the first boot lands on the home screen (verified 2026-11-06: device_provisioned=1,
+# user_setup_complete=1); gesture navigation on from the first boot (navigation_mode=2).
+printf '\n# Starbite: no setup wizard, first boot goes straight to the home screen\nro.setupwizard.mode=DISABLED\n' | sudo tee -a "$S/product/etc/build.prop" >/dev/null
+sudo install -d -m 755 "$S/product/overlay/config"
+sudo setfattr -n security.selinux -v u:object_r:system_file:s0 "$S/product/overlay/config"
+printf '<?xml version="1.0" encoding="utf-8"?>\n<config>\n    <overlay package="com.android.internal.systemui.navbar.gestural" enabled="true" />\n</config>\n' | sudo tee "$S/product/overlay/config/config.xml" >/dev/null
+sudo chmod 644 "$S/product/overlay/config/config.xml"
+sudo setfattr -n security.selinux -v u:object_r:system_file:s0 "$S/product/overlay/config/config.xml"
 sync; sudo umount "$M"
 /sbin/e2fsck -fn "$OUT" >/dev/null
 sha256sum "$OUT"
