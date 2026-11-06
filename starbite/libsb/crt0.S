@@ -216,6 +216,84 @@ sb_core_entry:
 3:  wfe
     b 3b
 
+/* ---- secondary cores as workers (smp.c) ------------------------------------------------------
+ * Target of PSCI CPU_ON for the stress tests. MMU off on entry: sb_worker_boot (cleaned to DRAM
+ * by the boot core before CPU_ON) gives the worker index, the boot core's MAIR / TCR / TTBR0 /
+ * SCTLR and this core's stack (arena, write-back). The core turns its MMU and caches on with the
+ * same tables (no set/way maintenance here: the A55s share their L3 with the boot core), installs
+ * sb_worker_vectors, calls sb_worker_main(index), then PSCI CPU_OFF; if CPU_OFF returns, the slot
+ * says PARKED and the core waits in WFE. ARMv8.0 instructions only (the Mongoose M3 cores). */
+.global sb_worker_entry
+sb_worker_entry:
+    msr daifset, #15
+    msr tpidr_el1, xzr
+    adrp x9, sb_worker_boot
+    add x9, x9, :lo12:sb_worker_boot
+    ldr x19, [x9]
+    adr x10, sb_worker_vectors
+    msr vbar_el1, x10
+    mrs x10, cpacr_el1
+    orr x10, x10, #(3 << 20)
+    msr cpacr_el1, x10
+    ldr x10, [x9, #40]
+    mov sp, x10
+    ldr x10, [x9, #8]
+    msr mair_el1, x10
+    ldr x10, [x9, #16]
+    msr tcr_el1, x10
+    ldr x10, [x9, #24]
+    msr ttbr0_el1, x10
+    isb
+    tlbi vmalle1
+    ic iallu
+    dsb sy
+    isb
+    ldr x10, [x9, #32]
+    msr sctlr_el1, x10
+    isb
+    mov x0, x19
+    bl sb_worker_main
+    movz w0, #0x8400, lsl #16
+    movk w0, #0x0002
+    smc #0
+    mrs x1, tpidr_el1
+    cbz x1, 4f
+    mov x2, #4                  /* SB_WK_PARKED */
+    str x2, [x1]
+    dsb sy
+    dc civac, x1
+    dsb sy
+4:  wfe
+    b 4b
+
+/* Every exception on a worker: ESR / ELR / FAR into its slot (tpidr_el1), state FAULT, CPU_OFF. */
+.balign 2048
+.global sb_worker_vectors
+sb_worker_vectors:
+    .rept 16
+    .balign 0x80
+    b worker_fault
+    .endr
+worker_fault:
+    mrs x0, tpidr_el1
+    cbz x0, 5f
+    mrs x1, esr_el1
+    str x1, [x0, #40]
+    mrs x1, elr_el1
+    str x1, [x0, #48]
+    mrs x1, far_el1
+    str x1, [x0, #56]
+    mov x1, #3                  /* SB_WK_FAULT */
+    str x1, [x0]
+    dsb sy
+    dc civac, x0
+    dsb sy
+5:  movz w0, #0x8400, lsl #16
+    movk w0, #0x0002
+    smc #0
+6:  wfe
+    b 6b
+
 /* ---- whole data cache by set/way (shim/starlte/xnu_boot.S star_dcache_all) -------------------
  * x0: 0 invalidate (DC ISW), 1 clean + invalidate (DC CISW). Leaf, x0-x12. */
 .global sb_dcache_all
@@ -276,6 +354,10 @@ sb_core_box:
     .fill 8 * 4, 8, 0
 sb_crash_regs:
     .fill 40, 8, 0
+.balign 64
+.global sb_worker_boot
+sb_worker_boot:
+    .fill 8, 8, 0
 
 .section .bss
 .balign 16

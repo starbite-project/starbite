@@ -8,12 +8,12 @@
  * crash vectors and calls sb_main(). Ordinary C with function-pointer tables works here; the
  * loader's "no absolute relocations" rule does not apply to images built on libsb.
  *
- * Everything in libsb reads hardware. The writes it makes are the ones the loader itself makes on
- * every boot (ACPM IPC, the RTC read latch, I2C controller setup, the touch rails with the
- * kernel's checks) and the reboot / power-off / boot-next mailbox paths. It never writes a CMU
- * block, the MIF/INT clocks, DREX/DMC, PMU DVFS registers, fuses or the ACPM/APM SRAM outside the
- * IPC queue protocol, and it has no storage write path at all: sb_write() (fence.c) only logs
- * what it would write and refuses (v1 is dry-run).
+ * libsb reads hardware freely. The writes it makes on its own are the ones the loader makes on
+ * every boot (ACPM IPC, the RTC read latch, I2C controller setup) and the reboot / power-off /
+ * boot-next mailbox paths. Every other write (storage, PMIC, MAX77705, and the application's
+ * register pokes) needs an authorisation the user confirmed on the phone, at the tier the target
+ * needs (fence.c: the gate). Storage writes go through sb_write only; the UFS and SD drivers refuse
+ * a write that does not come from it.
  */
 #pragma once
 #include <stdint.h>
@@ -260,6 +260,8 @@ struct sb_temps {
     int top, sub;                           /* tmu states */
     int big[5], big_max, little, gpu, isp, hottest;
     unsigned flags;
+    int top_all[8], sub_all[3];             /* every probe (TOP 0..7, SUB 0..2), -100 off */
+    int trip_c;                             /* TOP hardware trip (THD_TEMP0 rise), -100 not armed */
 };
 void sb_temps_read(struct sb_temps *t);
 uint64_t sb_pll_hz(uintptr_t con0, int *unlocked);
@@ -269,23 +271,151 @@ uint64_t sb_gpu_hz(int *off);
 int sb_m3_on(void);
 int sb_g3d_on(void);
 
-/* ---- write fence (fence.c), dry-run in v1 ------------------------------------------------------- */
+/* ---- write fence and authorisation gate (fence.c) ----------------------------------------------
+ * Tiers: 0 read, 1 warning + held confirmation, 2 + the target's name typed, 3 + a second
+ * confirmation and, for storage, a verified backup first. SB_TIER_NO is what is physically
+ * impossible or would destroy Engineer OS while it runs (unmapped secure memory, S-Boot's ECT,
+ * the running image): never a matter of confirmation. */
+#define SB_TIER0 0
+#define SB_TIER1 1
+#define SB_TIER2 2
+#define SB_TIER3 3
+#define SB_TIER_NO 4
 
-#define SB_MED_UFS 0U
-#define SB_MED_SD 1U
-#define SB_W_DRYRUN  -100                   /* v1: logged, refused */
-#define SB_W_NEVER   -101                   /* never-touch target */
-#define SB_W_TIER    -102                   /* needs a higher tier */
-#define SB_W_RANGE   -103                   /* not inside one partition / unknown */
-struct sb_wdecide {
-    int tier;                               /* 0 read only, 1, 2, 3 never */
-    char part[24];                          /* GPT partition (UFS) or "card" */
-    uint64_t first, last;                   /* the partition's blocks */
-    const char *why;
+/* address spaces of an authorisation */
+#define SB_MED_UFS 0U                       /* blocks of a UFS LU (lu 0 = the GPT disk) */
+#define SB_MED_SD 1U                        /* 4 KiB blocks of the microSD card */
+#define SB_SP_MEM 2U                        /* physical addresses: registers and DRAM, bytes */
+#define SB_SP_PMIC 3U                       /* S2MPS18 via ACPM: type << 8 | reg */
+#define SB_SP_MAX 4U                        /* MAX77705: 7-bit address << 8 | reg */
+
+/* confirmation steps (struct sb_auth.steps) */
+#define SB_STEP_WARN   1U                   /* the warning screen (what happens, how to undo) */
+#define SB_STEP_HELD   2U                   /* the held confirmation (slide / hold Volume Up 1.5 s) */
+#define SB_STEP_TYPED  4U                   /* the target's name typed on the keypad */
+#define SB_STEP_SECOND 8U                   /* tier 3: the second confirmation (hold Power 3 s) */
+#define SB_STEP_BACKUP 16U                  /* tier 3 storage: a verified backup of the target */
+#define SB_STEP_ARMED  32U                  /* free-form tools: the session was armed */
+/* kinds (struct sb_auth.kind) */
+#define SB_KIND_STORAGE  1U                 /* block storage: tier 3 needs the backup step */
+#define SB_KIND_FREEFORM 2U                 /* poke, fill, sector edit: needs armed mode too */
+#define SB_KIND_STORE    4U                 /* the action writes the OS store (backup, settings) */
+unsigned sb_steps_needed(int tier, unsigned kind);
+
+struct sb_auth {
+    uint64_t magic;
+    uint32_t space, lu;
+    uint64_t first, count;                  /* blocks (storage) or bytes / registers */
+    int32_t tier;
+    uint32_t steps, kind;
+    uint64_t epoch, nonce, seal;
+    char what[48];                          /* for the log */
 };
-/* What a write of n 4 KiB blocks at lba would need (no write happens). */
-int sb_write_decide(unsigned medium, uint64_t lba, uint64_t n, struct sb_wdecide *d);
-/* The only write entry point of libsb: checks, logs "would write", returns SB_W_*. */
-int sb_write(unsigned medium, uint64_t lba, uint64_t n, const void *src, int armed_tier);
-/* Never-touch partition names (EFS, CPEFS, PARAM, ...): 1 if name is one. */
+void sb_auth_init(struct sb_auth *a, unsigned space, unsigned lu, uint64_t first, uint64_t count, int tier,
+                  unsigned kind, const char *what);
+/* Record a passed step (and reseal). Only engineer/armed.c's confirmation screens call it. */
+void sb_auth_step(struct sb_auth *a, unsigned step);
+int sb_auth_valid(const struct sb_auth *a);
+int sb_auth_complete(const struct sb_auth *a);     /* valid and every step its tier needs */
+void sb_auth_revoke_all(void);                     /* disarm: every authorisation so far is void */
+/* One open authorisation at a time, for the length of one confirmed action. */
+int sb_gate_open(const struct sb_auth *a);         /* 1 if complete */
+void sb_gate_close(void);
+/* 0 if the open authorisation covers [first, first + count) of space / lu with a tier >= need and
+ * the steps need asks for; else SB_W_* and *why. need <= 0 is always allowed. */
+int sb_gate_check(unsigned space, unsigned lu, uint64_t first, uint64_t count, int need, const char **why);
+
+#define SB_W_DRYRUN  -100                   /* dry-run switch on: logged, nothing written */
+#define SB_W_NO      -101                   /* impossible target */
+#define SB_W_TIER    -102                   /* the confirmation was for a lower tier */
+#define SB_W_RANGE   -103                   /* not inside one partition / empty / unknown */
+#define SB_W_AUTH    -104                   /* no confirmed authorisation covers it */
+#define SB_W_IO      -105                   /* the device reported an error */
+#define SB_W_BACKUP  -106                   /* tier 3 storage without a verified backup */
+struct sb_wdecide {
+    int tier;                               /* 1, 2, 3 (SB_TIER_NO when refused) */
+    char part[24];                          /* GPT partition, "boot LU n", "microSD" */
+    uint64_t first, last;                   /* the partition's blocks */
+    const char *why, *undo;
+};
+/* What a write of n 4 KiB blocks at lba of medium / lu would need (no write happens). */
+int sb_write_decide(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, struct sb_wdecide *d);
+/* The block write entry point: decides, checks the gate, writes, logs. 0 or SB_W_*. */
+int sb_write(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src);
+/* store.c only: inside the OS store region, with an open authorisation of kind SB_KIND_STORE. */
+int sb_write_store(unsigned medium, uint64_t lba, uint64_t n, const void *src);
+/* store.c reports the live store region of a medium (raw writes into it need tier 2). */
+void sb_fence_store(unsigned medium, uint64_t base, uint64_t used, uint64_t capacity);
+/* 1 while sb_write runs a write (the storage drivers refuse otherwise). */
+int sb_fence_active(void);
+void sb_fence_dry_run(int on);
+int sb_fence_is_dry_run(void);
+/* EFS, CPEFS, PARAM, ...: 1 if name is one (tier 3). */
 int sb_never_part(const char *name);
+
+/* ---- block I/O (blkio.c): one entry for UFS LUs and the card ---------------------------------- */
+
+int sb_blk_read(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, void *dst);
+/* Only from sb_write (the drivers check sb_fence_active). */
+int sb_blk_write(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src);
+
+/* ---- secondary cores as workers (smp.c, crt0.S sb_worker_entry) -------------------------------
+ * Core w (1..3 the other A55s, PSCI 1..3; 4..7 the Mongoose M3s, PSCI 0x100..0x103) runs fn(w, arg)
+ * with its MMU and caches on (the boot core's tables), its own stack and vectors (a fault records
+ * ESR / ELR / FAR in its slot and powers the core off). fn polls sb_worker_stop() and publishes its
+ * counters with sb_worker_publish(); when it returns the core calls PSCI CPU_OFF. Code that runs
+ * on a worker must be ARMv8.0 (the M3 has no LSE, RDM, DotProd, FP16, LRCPC): smp.c and the
+ * kernels are built with -march=armv8-a and checked for v8.1+ instructions. */
+#define SB_NCORES 8U
+#define SB_WK_IDLE    0U
+#define SB_WK_RUNNING 1U
+#define SB_WK_DONE    2U                    /* fn returned, CPU_OFF called */
+#define SB_WK_FAULT   3U                    /* exception: esr / elr / far set */
+#define SB_WK_PARKED  4U                    /* CPU_OFF returned: the core spins in WFE */
+struct sb_wslot {
+    volatile uint64_t state, mpidr, beats, iters, errors, esr, elr, far;
+    volatile uint64_t v[8];                 /* the work function's own counters */
+};                                          /* 128 bytes: two cache lines, one writer */
+typedef void (*sb_work_fn)(unsigned w, void *arg);
+typedef void (*sb_m3_prep_fn)(void);
+/* Called before CPU_ON of an M3 core when set (the vendor PMU defaults: the application sets it
+ * once the user confirmed those PMU writes). */
+extern sb_m3_prep_fn sb_smp_m3_prep;
+/* Start core w on fn (after the previous fn has stopped). 0, a PSCI error (< 0), or -100 when the
+ * core did not check in within 1 s. */
+int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg);
+/* PSCI target of core w. */
+uint64_t sb_smp_target(unsigned w);
+/* The slot of core w as the worker last published it (0 = this core: fill it yourself). */
+const struct sb_wslot *sb_smp_slot(unsigned w);
+struct sb_wslot *sb_smp_own_slot(unsigned w);
+/* Ask every worker to stop; wait up to ms for all to leave fn. Returns how many did not. */
+unsigned sb_smp_stop(unsigned ms);
+unsigned sb_smp_running(void);
+/* Inside fn: 1 when the boot core asked to stop; publish the slot (visible to the boot core). */
+int sb_worker_stop(void);
+void sb_worker_publish(struct sb_wslot *s);
+extern char sb_worker_entry[];
+extern volatile uint64_t sb_worker_boot[8];
+
+/* ---- CMGP ADC and thermistors (adc.c) --------------------------------------------------------- */
+
+/* One conversion of channel ch (0..11): 12-bit value, or -1 (clock gated, timeout). Polled. */
+int sb_adc_read(unsigned ch, const char **why);
+/* Linear interpolation in a thermistor table (adc ascending, temperature in 0.1 C): 0.1 C. */
+int sb_therm_c10(int adc, const int *tab_adc, const int *tab_c10, unsigned n);
+/* The vendor DT's tables: 0 AP / Wi-Fi, 1 battery / USB / charger, 2 PA. 0.1 C. */
+int sb_therm_convert(unsigned table, int adc);
+struct sb_therm {
+    const char *name;
+    unsigned ch;
+    int ok, raw, c10;                       /* 0.1 C */
+};
+/* The vendor DT's thermistors (AP, Wi-Fi, PA, battery, USB, charger): n read, -1 no ADC. */
+int sb_therms_read(struct sb_therm *t, unsigned max, const char **why);
+
+/* ---- writes with the gate (acpm.c, max77705.c) -------------------------------------------------
+ * Refused (0) unless an open authorisation covers SB_SP_PMIC (type << 8 | reg) / SB_SP_MAX
+ * (address << 8 | reg) at the tier the caller's policy gives (engineer/policy.c). */
+int sb_pmic_write(uint32_t type, uint32_t reg, uint8_t val, int tier);
+int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier);

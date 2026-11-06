@@ -19,7 +19,12 @@
  * reset, clock reload, CMD12 with stop_abort, CMD13 until tran; Linux dw_mci_reset +
  * send_stop_abort) before the retry, so no error leaves the controller inside the CMD18. CLKSEL is
  * changed in its timing fields only (Linux dw_mci_exynos_set_clksel_timing); a CMU gate that did
- * not open stops the bring-up before the controller is read. Nothing here ever writes the card.
+ * not open stops the bring-up before the controller is read.
+ *
+ * Writes (Engineer OS v2): sd_write / sd_write4k, CMD24 / CMD25 with auto stop, the FIFO filled
+ * by the CPU while it is not full, then DTO, ACD, the busy line and CMD13 until tran, every wait
+ * bounded. They refuse (-9) before touching the controller unless the write fence is active
+ * (fence.c sb_write, after the user's confirmation for that range). Not yet run on the phone.
  */
 #include <stdint.h>
 #include "sd.h"
@@ -55,6 +60,7 @@
 #define C_STOP     (1U << 14)           /* stop_abort_cmd (Linux SDMMC_CMD_STOP) */
 #define C_PRV_WAIT (1U << 13)
 #define C_AUTOSTOP (1U << 12)
+#define C_WRITE    (1U << 10)
 #define C_DATA     (1U << 9)
 #define C_CRC      (1U << 8)
 #define C_LONG     (1U << 7)
@@ -443,4 +449,103 @@ int sd_store_area(uint64_t *first, uint64_t *blocks)
         return 1;
     }
     return 0;
+}
+
+/* ---- writes (fence.c sb_write only) -------------------------------------------------------- */
+
+/* Up to 256 sectors with one CMD24 / CMD25 (auto stop), the FIFO filled by the CPU. */
+static int write_chunk(uint64_t sector, uint32_t n, uintptr_t src)
+{
+    wr(CTRL, rd(CTRL) | 2U);                   /* FIFO reset */
+    if (wait_reg(CTRL, 2U, 0, 50))
+        return -1;
+    wr(BLKSIZ, 512);
+    wr(BYTCNT, n * 512U);
+    uint32_t arg = (uint32_t)(sd_rep.high_capacity ? sector : sector * 512U);
+    int r = cmd(n > 1 ? 25 : 24, arg, R1 | C_DATA | C_WRITE | (n > 1 ? C_AUTOSTOP : 0));
+    if (r)
+        return r;
+    const volatile uint64_t *in = (const volatile uint64_t *)src;
+    uint64_t want = (uint64_t)n * 64U, put = 0;
+    uint64_t t = deadline(300 + n * 4U);
+    for (;;) {
+        uint32_t s = rd(RINTSTS);
+        while (put < want && !(rd(STATUS) & (1U << 3)))   /* FIFO not full */
+            *(volatile uint64_t *)(SD + DATA) = in[put++];
+        if (s & I_DERR) {
+            sd_rep.last_rintsts = s;
+            return -5;
+        }
+        if ((s & I_DTO) && put >= want)
+            break;
+        if (expired(t)) {
+            sd_rep.last_rintsts = s;
+            return -7;
+        }
+    }
+    if (n > 1 && wait_reg(RINTSTS, I_ACD, I_ACD, 200))
+        return -8;
+    if (wait_reg(STATUS, 1U << 9, 0, 1000))    /* the card programs (busy on DAT0) */
+        return -10;
+    uint64_t t2 = deadline(1000);
+    for (;;) {                                 /* CMD13 until tran: the data is in the card */
+        if (cmd(13, sd_rep.rca << 16, R1) == 0 && ((rd(RESP0) >> 9) & 0xfU) == 4U)
+            return 0;
+        if (expired(t2))
+            return -11;
+        sb_mdelay(1);
+    }
+}
+
+int sd_write(uint64_t sector, uint32_t count, uintptr_t src)
+{
+    if (!sb_fence_active())
+        return -9;                             /* not through the fence: nothing touched */
+    if (!sd_up())
+        return -1;
+    while (count) {
+        uint32_t n = count > 256U ? 256U : count;
+        int r = -1;
+        for (int a = 0; a < 3 && r; ++a) {
+            r = write_chunk(sector, n, src);
+            if (r) {
+                uint32_t ri = sd_rep.last_rintsts;
+                sd_rep.last_error = r;
+                (void)sd_recover();
+                sd_rep.last_rintsts = ri;
+            }
+        }
+        if (r)
+            return r;
+        sector += n;
+        count -= n;
+        src += (uintptr_t)n * 512U;
+    }
+    return 0;
+}
+
+int sd_write4k(uint64_t lba, uint64_t count, uintptr_t src)
+{
+    if (count > 0xffffffffULL / 8U)
+        return -1;
+    return sd_write(lba * 8U, (uint32_t)(count * 8U), src);
+}
+
+/* Card capacity in 512-byte sectors from the MBR's partitions' end (no CSD read): 0 unknown. */
+uint64_t sd_sectors_hint(void)
+{
+    if (!allowed || sd_read(0, 1, (uintptr_t)mbr))
+        return 0;
+    const volatile uint8_t *b = (const volatile uint8_t *)mbr;
+    if (b[510] != 0x55 || b[511] != 0xaa)
+        return 0;
+    uint64_t end = 0;
+    for (unsigned i = 0; i < 4; ++i) {
+        const volatile uint8_t *e = b + 446 + 16 * i;
+        uint32_t lba = e[8] | e[9] << 8 | e[10] << 16 | (uint32_t)e[11] << 24;
+        uint32_t len = e[12] | e[13] << 8 | e[14] << 16 | (uint32_t)e[15] << 24;
+        if ((uint64_t)lba + len > end)
+            end = (uint64_t)lba + len;
+    }
+    return end;
 }

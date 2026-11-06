@@ -48,23 +48,49 @@ fi
 python3 "$root/starbite/tools/mkassets.py" "$SB7" "$out/sbassets.sb7"
 echo "engineer: assets from $(basename "$SB7"), sha256 $(sha256sum "$SB7" | cut -d' ' -f1)"
 
-# Host unit tests of the pure logic (string builder, identity map, register policy, write fence,
-# UFS opcode allowlist, key state machine): a failure stops the build.
+# Host unit tests of the pure logic (string builder, identity map, the tier policy, the write fence
+# and its authorisation gate, the UFS / SD write refusals, the stress kernels' checks, the
+# thermistor tables, the key state machine): a failure stops the build.
 if [ "$native" = 1 ]; then
     gcc -O1 -Wall -Wextra -Werror -Wno-unused-parameter -I"$lib" -I"$here" -o "$out/unit-test" \
         "$root/starbite/tools/unit-test.c" "$lib/str.c" "$lib/fence.c" "$lib/sbui_input.c" "$lib/mmu.c" \
-        "$here/policy.c"
+        "$lib/adc.c" "$lib/sd.c" "$here/policy.c" "$here/kern.c"
     "$out/unit-test"
 fi
 
 CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie -fvisibility=hidden \
 -nostdlib -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-plt -mstrict-align -mcpu=cortex-a55 \
 -fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$here"
+# Code that runs on the worker cores (the Mongoose M3s are ARMv8.0: no LSE, RDM, DotProd, FP16,
+# LRCPC) is built for plain armv8-a and checked below: libsb/smp.c and engineer/kern.c.
+V80=" smp.c kern.c "
 objs=""
+v80objs=""
 for src in "$lib"/*.c "$lib"/*.S "$here"/*.c; do
     obj="$out/eng_$(basename "$src" | tr . _).o"
-    "${CROSS}gcc" $CFLAGS -DSB_ASSETS="\"$out/sbassets.sb7\"" "$src" -o "$obj"
+    flags=$CFLAGS
+    case "$V80" in
+    *" $(basename "$src") "*)
+        flags=$(echo "$CFLAGS" | sed 's/-mcpu=cortex-a55/-march=armv8-a+simd -mtune=cortex-a55/')
+        v80objs="$v80objs $obj" ;;
+    esac
+    "${CROSS}gcc" $flags -DSB_ASSETS="\"$out/sbassets.sb7\"" "$src" -o "$obj"
     objs="$objs $obj"
+done
+# The worker code must not contain an instruction the M3 cores lack (ARMv8.1+: LSE atomics, RDM,
+# DotProd, FP16 arithmetic, LRCPC, DC CVAP). An empty listing would pass silently: refuse it too.
+for o in $v80objs; do
+    d=$("${CROSS}objdump" -d --no-show-raw-insn "$o")
+    if ! echo "$d" | grep -E -q '\bret\b'; then
+        echo "engineer: could not disassemble $(basename "$o") for the ARMv8.0 check" >&2
+        exit 1
+    fi
+    bad=$(echo "$d" | grep -E -i '\s(ld(add|clr|eor|set|smax|smin|umax|umin)a?l?[bh]?|st(add|clr|eor|set|smax|smin|umax|umin)l?[bh]?|swpa?l?[bh]?|casa?l?[bh]?|caspa?l?|sqrdml[as]h|[su]dot|ldapr[bh]?|ldapur[bh]?|stlur[bh]?|dc\s+cvap)\s' || true)
+    if [ -n "$bad" ]; then
+        echo "engineer: $(basename "$o") (runs on the M3 cores) has ARMv8.1+ instructions:" >&2
+        echo "$bad" | head -5 >&2
+        exit 1
+    fi
 done
 LDFLAGS="-pie --no-dynamic-linker -z text -z norelro -z noexecstack --build-id=none --no-warn-rwx-segments \
 --hash-style=gnu -T $lib/image.ld"

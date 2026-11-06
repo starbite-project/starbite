@@ -2102,3 +2102,21 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   `s9p_decon.panel_mask` 1 = restore after every sleep-out (default), 2 = off (7A 00), 0 = leave; live-writable.
   sb-integrate.sh: `SB_SCALE` (default 3; 3.2 is exact for 1440x2960). Release 7.1.0-starbite-4da38c67, Image sha
   d18510ec..., in the VM at ~/distros/_kernel-mask. Test and sources: docs/LINUX-REBUILD-PLAN.md 6.6.
+
+- 2026-11-06: **Engineer OS v2 = Starbite Lab** (docs/ENGINEER-OS.md; built and host-checked, NOT run on the phone;
+  phone checklist in section 12). Tiers replace v1's dry run: tier 1 warning screen + slide; tier 2 + the target's
+  name typed; tier 3 + hold Power 3 s and, for storage, a verified backup into the OS store first (EFS, CPEFS,
+  PARAM, KEYSTORAGE, PERSISTENT, STEADY, BOTA, DTB/DTBO, GPT head/tail, boot LUs; PMU, CMU_TOP/MIF/CPU/G3D, ACPM,
+  fuses, TMU; PMIC voltages; MAX77705 config). Impossible only: S-Boot's ECT 0xA0000000, the running image
+  0x92000000..0x9FFFFFFF, the secure hole. libsb: fence.c authorisation gate (sealed sb_auth, one open, voided on
+  disarm); UFS WRITE(10) (the loader's single-block path) and SD CMD24/25 (new) only from sb_write; UFS LU reads;
+  OS store append-only writer (data, dir slot n, header = commit), settings_save, rename/remove (tier 2); smp.c:
+  the other 7 cores run C with MMU on (boot core's tables, own fault vectors; M3s need xnu 0304's PMU sequence,
+  asked as tier 3); adc.c (CMGP ADC 0x14230000, vendor DT thermistor tables: battery ADC 1950 = 26.2 C); every
+  TMU probe + decoded trip. App: lab.c (full health check, CPU / memory / display / touch / storage / thermal /
+  battery tests, report into the store), kern.c (ARMv8.0; build refuses v8.1+ instructions in worker code),
+  util.c (peek/poke, memory fill, partitions + boot LUs backup/restore/erase, store, settings editor incl. POST /
+  log level flags the loader does not read yet, PMIC/charger writes, reboot to anything). Host: 458 unit checks,
+  tour 82 pages, labtour (every test started and stopped by Power, a tier 1 write end to end, an unconfirmed
+  write refused), --repro. engineer.img sha256 da25de2c000491d2...36a6 (4407296 bytes, 575 relocations).
+  catalog.toml's version string still says "read only · dry-run writes" (not changed here).
