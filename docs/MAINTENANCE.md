@@ -120,6 +120,11 @@ whether Linux's ramoops would bind).
 
 ### 4.2 The loader (shim/starlte; for the loader agent, nothing here is implemented)
 
+**Status (2026-11-06, loader branch `worktree-agent-a1918b867acea2ce7`, built and host-tested, not run on
+the phone): R1, R2, R3, R4, R5 and R7 are implemented; R6 and R8 are not.** Details and the differences
+(R1's variant is a second prompt, not a held key) in docs/STARBITE-HEALTH.md section 12. The loader keeps
+POST slots 202..212 for checks 0..10 (the full POST's new checks are in 240..244).
+
 **R1. Recovery menu item "STARBITE MAINTENANCE"** (after "STARBITE RESCUE MODE"). On select:
 `star_maint_ready(&why)` (any source below has a valid candidate: slot headers only, no body read needed);
 if none, show "NO MAINTENANCE SYSTEM: <why>" in red and stay; else write the boot-next mailbox key `maint`

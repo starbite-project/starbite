@@ -192,46 +192,109 @@ int rec_bixby_window(unsigned ms)
     return held;
 }
 
-/* ---- the rescue request (boot-next mailbox) ------------------------------------------------- */
+/* ---- the boot-next mailbox: the keys taken right after the Bixby window ---------------------- */
 
-static int mb_is_rescue(void)
+#define NEXT2R_MAGIC 0x52325458454e4253ULL   /* "SBNEXT2R": KEY\0RET\0, docs/MAINTENANCE.md 4.2 R7 */
+
+static char ret_for[24], ret_key[24];
+
+static int mb_key_is(const char *want)
 {
-    static const char want[7] = "rescue";
-    if (*(volatile uint64_t *)NEXT_MAILBOX != NEXT2_MAGIC)
-        return 0;
-    for (unsigned k = 0; k < 7; ++k)
+    unsigned k = 0;
+    for (; want[k]; ++k)
         if (*(volatile char *)(NEXT_MAILBOX + 8 + k) != want[k])
             return 0;
-    return 1;
+    return *(volatile char *)(NEXT_MAILBOX + 8 + k) == 0;
+}
+
+static void mb_clear(void)
+{
+    volatile uint64_t *mb = (volatile uint64_t *)NEXT_MAILBOX;
+    for (unsigned i = 0; i < 4; ++i)
+        mb[i] = 0;
+    __asm__ volatile("dsb sy" : : : "memory");
+}
+
+/* The key first, the magic last (as tools/linux/reboot-to). */
+void rec_mailbox_write(const char *key)
+{
+    volatile uint64_t *mb = (volatile uint64_t *)NEXT_MAILBOX;
+    mb[0] = 0;
+    __asm__ volatile("dsb sy" : : : "memory");
+    int end = 0;
+    for (unsigned k = 0; k < 24; ++k) {
+        char c = !end && k < 23 ? key[k] : 0;
+        end |= !c;           /* zeros after the first NUL */
+        *(volatile char *)(NEXT_MAILBOX + 8 + k) = c;
+    }
+    __asm__ volatile("dsb sy" : : : "memory");
+    mb[0] = NEXT2_MAGIC;
+    __asm__ volatile("dsb sy" : : : "memory");
+}
+
+int rec_next_take(void)
+{
+    volatile uint64_t *mb = (volatile uint64_t *)NEXT_MAILBOX;
+    if (mb[0] == NEXT2R_MAGIC) {
+        /* R7: start KEY, and before its handoff put RET back in the mailbox */
+        char key[24];
+        unsigned k = 0, r = 0;
+        for (; k < 23 && *(volatile char *)(NEXT_MAILBOX + 8 + k); ++k)
+            key[k] = *(volatile char *)(NEXT_MAILBOX + 8 + k);
+        key[k] = 0;
+        for (unsigned i = k + 1; i < 24 && r < 23 && *(volatile char *)(NEXT_MAILBOX + 8 + i); ++i)
+            ret_key[r++] = *(volatile char *)(NEXT_MAILBOX + 8 + i);
+        ret_key[r] = 0;
+        for (unsigned i = 0; i < 24; ++i)
+            ret_for[i] = i <= k ? key[i] : 0;
+        if (k && r) {
+            rec_mailbox_write(key);
+            star_pmsg("STARBITE: boot-next with a return key\n");
+        } else {
+            mb_clear();
+            ret_for[0] = ret_key[0] = 0;
+        }
+    }
+    if (mb[0] != NEXT2_MAGIC)
+        return REC_NEXT_NONE;
+    int r = mb_key_is("rescue") ? REC_NEXT_RESCUE : mb_key_is("maint") ? REC_NEXT_MAINT
+          : mb_key_is("maint-prev") ? REC_NEXT_MAINT_PREV : mb_key_is("maint-rescue") ? REC_NEXT_MAINT_RESCUE
+          : REC_NEXT_NONE;
+    if (r != REC_NEXT_NONE)
+        mb_clear();          /* before the start: a system that crashes is not started again */
+    return r;
 }
 
 int rec_rescue_take(void)
 {
-    int r = mb_is_rescue();
-    if (r) {
-        volatile uint64_t *mb = (volatile uint64_t *)NEXT_MAILBOX;
-        for (unsigned i = 0; i < 4; ++i)
-            mb[i] = 0;
-        __asm__ volatile("dsb sy" : : : "memory");
-    }
-    return r;
+    return rec_next_take() == REC_NEXT_RESCUE;
 }
 
-/* The key first, the magic last (as tools/linux/reboot-to), then a normal reset. */
-static void rescue_reboot(void)
+const char *rec_return_key(const char *key)
 {
-    static const char key[8] = "rescue";
-    volatile uint64_t *mb = (volatile uint64_t *)NEXT_MAILBOX;
-    mb[0] = 0;
-    __asm__ volatile("dsb sy" : : : "memory");
-    for (unsigned k = 0; k < 24; ++k)
-        *(volatile char *)(NEXT_MAILBOX + 8 + k) = k < 8 ? key[k] : 0;
-    __asm__ volatile("dsb sy" : : : "memory");
-    mb[0] = NEXT2_MAGIC;
-    __asm__ volatile("dsb sy" : : : "memory");
-    star_pmsg("STARBITE: recovery: rescue mode requested, rebooting\n");
+    if (!ret_key[0] || !key)
+        return 0;
+    unsigned k = 0;
+    while (k < 23 && key[k] && key[k] == ret_for[k])
+        ++k;
+    if (key[k] != ret_for[k])
+        return 0;
+    ret_for[0] = 0;
+    return ret_key;
+}
+
+/* key into the mailbox, then a normal reset (Rescue mode, Starbite Maintenance). */
+static void next_reboot(const char *key, const char *line)
+{
+    rec_mailbox_write(key);
+    star_pmsg(line);
     r_wait_ms(300);
     hw_reboot(INFORM_NORMAL);
+}
+
+static void rescue_reboot(void)
+{
+    next_reboot("rescue", "STARBITE: recovery: rescue mode requested, rebooting\n");
 }
 
 /* ---- text ----------------------------------------------------------------------------------- */
@@ -242,26 +305,28 @@ static void rescue_reboot(void)
 #define ROW_MSG   16U
 #define ROW_BODY  19U
 #define ROW_HINT  44U
-#define N_ITEMS   12U
+#define N_ITEMS   13U
 
 #define IT_CONTINUE 0U
 #define IT_RESCUE   1U
-#define IT_ENGINEER 2U
-#define IT_POST     3U
-#define IT_TWRP     4U
-#define IT_DOWNLOAD 5U
-#define IT_REBOOT   6U
-#define IT_POWEROFF 7U
-#define IT_FASTBOOT 8U
-#define IT_ENTRY    9U
-#define IT_SETTINGS 10U
-#define IT_CRASHES  11U
+#define IT_MAINT    2U
+#define IT_ENGINEER 3U
+#define IT_POST     4U
+#define IT_TWRP     5U
+#define IT_DOWNLOAD 6U
+#define IT_REBOOT   7U
+#define IT_POWEROFF 8U
+#define IT_FASTBOOT 9U
+#define IT_ENTRY    10U
+#define IT_SETTINGS 11U
+#define IT_CRASHES  12U
 
 static const char *item_name(unsigned i)
 {
     switch (i) {
     case IT_CONTINUE: return "CONTINUE NORMAL BOOT";
     case IT_RESCUE:   return "STARBITE RESCUE MODE";
+    case IT_MAINT:    return "STARBITE MAINTENANCE";
     case IT_ENGINEER: return "ENGINEER LITE";
     case IT_POST:     return "RUN POST (FULL)";
     case IT_TWRP:     return "REBOOT TO TWRP";
@@ -344,7 +409,7 @@ static void draw_item(unsigned i, int sel)
     ln_init(&l);
     ln_s(&l, sel ? "> " : "  ");
     ln_s(&l, item_name(i));
-    uint32_t fg = i == IT_RESCUE ? C_GOLD : C_WHITE;
+    uint32_t fg = i == IT_RESCUE || i == IT_MAINT ? C_GOLD : C_WHITE;
     star_fb_text_c(ROW_ITEM0 + i, l.b, sel ? C_WHITE : fg, sel ? C_BLUE : C_BLACK);
 }
 
@@ -533,10 +598,10 @@ static void sr_next(unsigned r, struct star_settings *s)
 {
     switch (r) {
     case SR_POST:
-        s->post_level = (uint8_t)((sbset_post(s) + 1U) % 3U);
+        sbset_set_post(s, (sbset_post(s) + 1U) % 3U);
         break;
     case SR_LOG:
-        s->log_level = (uint8_t)((sbset_log(s) + 1U) % 4U);
+        sbset_set_log(s, (sbset_log(s) + 1U) % 4U);
         break;
     case SR_CRASH:
         s->crash_mode = (uint8_t)((s->crash_mode + 1U) % 3U);
@@ -690,6 +755,26 @@ int recovery_main(const char *why, int *pick)
                 }
                 msg("REBOOTING INTO STARBITE RESCUE MODE", 0, C_GREEN);
                 rescue_reboot();
+                break;
+            }
+            case IT_MAINT: {
+                /* docs/MAINTENANCE.md 4.2 R1: a source must exist; then the mailbox and a reset */
+                const char *w = 0;
+                msg("LOOKING FOR STARBITE MAINTENANCE...", 0, C_MUTED);
+                if (!star_maint_ready(&w)) {
+                    msg("NO MAINTENANCE SYSTEM: ", w ? w : "NOT FOUND", C_RED);
+                    break;
+                }
+                star_fb_text_c(ROW_MSG, "POWER: START  VOL UP: OTHER SLOT", C_WHITE, C_BLACK);
+                star_fb_text_c(ROW_MSG + 1, "VOL DOWN: RESCUE MODE  BIXBY: BACK", C_WHITE, C_BLACK);
+                unsigned c = r_key_wait();
+                if (c & K_BIXBY) {
+                    msg("", 0, C_WHITE);
+                    break;
+                }
+                const char *key = c & K_UP ? "maint-prev" : c & K_DOWN ? "maint-rescue" : "maint";
+                msg("REBOOTING INTO STARBITE MAINTENANCE", 0, C_GREEN);
+                next_reboot(key, "STARBITE: recovery: Starbite Maintenance requested, rebooting\n");
                 break;
             }
             case IT_ENGINEER: {

@@ -698,9 +698,17 @@ static const char oem_help[] =
     "fastboot oem log [pmsg|dmesg|loader|usb|crash|crashraw]  (then get_staged)\n"
     "fastboot oem reboot-to <catalog key|fastboot>\n"
     "fastboot oem boot-next <key|fastboot>  (next reset, no reboot)\n"
+    "fastboot oem maint [prev|rescue]       Starbite Maintenance from UFS\n"
     "fastboot oem boot-as <auto|xnu|linux|android|uefi|bare>\n"
     "fastboot oem catalog | oem usb | continue (back to menu)\n"
     "fastboot reboot [bootloader|recovery|download]\n";
+
+/* Mailbox keys the loader takes itself (recovery.c rec_next_take), with or without a catalog entry. */
+static int loader_key(const char *k)
+{
+    return fb_streq(k, "fastboot") || fb_streq(k, "rescue") || fb_streq(k, "maint") || fb_streq(k, "maint-prev") ||
+           fb_streq(k, "maint-rescue");
+}
 
 static void oem(const char *a)
 {
@@ -725,7 +733,7 @@ static void oem(const char *a)
         okay("staged: fastboot get_staged <file>");
     } else if (fb_prefix(a, "reboot-to ")) {
         const char *k = skip_sp(a + 10);
-        if (!fb_streq(k, "fastboot") && fbp_cat_find(k) < 0) {
+        if (!loader_key(k) && fbp_cat_find(k) < 0) {
             failr("no catalog entry with that key");
             return;
         }
@@ -736,7 +744,7 @@ static void oem(const char *a)
     } else if (fb_prefix(a, "boot-next ")) {
         /* the mailbox only: the reboot after the next boot lands there (e.g. back in fastboot) */
         const char *k = skip_sp(a + 10);
-        if (!fb_streq(k, "fastboot") && fbp_cat_find(k) < 0) {
+        if (!loader_key(k) && fbp_cat_find(k) < 0) {
             failr("no catalog entry with that key");
             return;
         }
@@ -755,6 +763,21 @@ static void oem(const char *a)
             fb.forced = v;
         }
         okay(fb_method_name(fb.forced));
+    } else if (fb_prefix(a, "maint") && (a[5] == 0 || a[5] == ' ')) {
+        /* docs/MAINTENANCE.md 4.2 R3: straight from the SBMAINT partition (or the store), no download */
+        const char *w = skip_sp(a + 5);
+        unsigned v = !*w ? 0U : fb_streq(w, "prev") ? 1U : fb_streq(w, "rescue") ? 2U : 9U;
+        const char *why = 0;
+        if (v > 2) {
+            failr("oem maint, oem maint prev or oem maint rescue");
+            return;
+        }
+        if (!fbp_maint(v, &why)) {
+            failr(why ? why : "no maintenance system");
+            return;
+        }
+        okay("starting Starbite Maintenance");
+        fb.act = FB_ACT_BOOT;
     } else if (fb_streq(a, "catalog")) {
         struct tb t;
         tb_init(&t, fb.scr, fb.scr_cap);

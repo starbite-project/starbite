@@ -98,14 +98,12 @@ void sbset_decode(const uint8_t *b, struct star_settings *s)
     sget(s->default_key, b + 32, 24);
     sget(s->last_key, b + 56, 24);
     sget(s->next_key, b + 80, 24);
-    s->post_level = b[104];
-    s->log_level = b[105];
-    s->crash_mode = b[106];
-    s->crash_detail = b[107];
-    s->crash_action = b[108];
-    s->crash_timeout = b[109];
-    s->wdt_mode = b[110];
-    s->wdt_s = (uint16_t)get(b + 112, 2);
+    s->crash_mode = b[104];
+    s->crash_detail = b[105];
+    s->crash_action = b[106];
+    s->crash_timeout = b[107];
+    s->wdt_mode = b[108];
+    s->wdt_s = (uint16_t)get(b + 110, 2);
 }
 
 void sbset_encode(uint8_t *b, const struct star_settings *s)
@@ -119,25 +117,34 @@ void sbset_encode(uint8_t *b, const struct star_settings *s)
     sput(b + 32, s->default_key, 24);
     sput(b + 56, s->last_key, 24);
     sput(b + 80, s->next_key, 24);
-    b[104] = s->post_level;
-    b[105] = s->log_level;
-    b[106] = s->crash_mode;
-    b[107] = s->crash_detail;
-    b[108] = s->crash_action;
-    b[109] = s->crash_timeout;
-    b[110] = s->wdt_mode;
-    put(b + 112, s->wdt_s, 2);
+    b[104] = s->crash_mode;
+    b[105] = s->crash_detail;
+    b[106] = s->crash_action;
+    b[107] = s->crash_timeout;
+    b[108] = s->wdt_mode;
+    put(b + 110, s->wdt_s, 2);
     put(b + 12, sb_crc32(b + 16, SBSET_BYTES - 16), 4);
 }
 
 unsigned sbset_post(const struct star_settings *s)
 {
-    return s->post_level <= SET_POST_OFF ? s->post_level : SET_POST_FULL;
+    unsigned v = SET_POST_OF(s->flags);
+    return v <= SET_POST_OFF ? v : SET_POST_FULL;
 }
 
 unsigned sbset_log(const struct star_settings *s)
 {
-    return s->log_level <= 3 ? s->log_level : 0;
+    return SET_LOG_OF(s->flags);
+}
+
+void sbset_set_post(struct star_settings *s, unsigned v)
+{
+    s->flags = (s->flags & ~SET_POST_MASK) | ((v & 3U) << SET_POST_SHIFT);
+}
+
+void sbset_set_log(struct star_settings *s, unsigned v)
+{
+    s->flags = (s->flags & ~SET_LOG_MASK) | ((v & 3U) << SET_LOG_SHIFT);
 }
 
 unsigned sbset_crash_timeout(const struct star_settings *s)
@@ -157,10 +164,10 @@ const char *sbset_post_name(unsigned v)
 const char *sbset_log_name(unsigned v)
 {
     switch (v) {
-    case 0:  return "0 QUIET";
-    case 1:  return "1 NORMAL";
-    case 2:  return "2 DEBUG";
-    default: return "3 VERBOSE";
+    case SET_LOG_QUIET:   return "0 QUIET";
+    case SET_LOG_NORMAL:  return "1 NORMAL";
+    case SET_LOG_VERBOSE: return "2 VERBOSE";
+    default:              return "3 DEBUG";
     }
 }
 
@@ -515,6 +522,99 @@ unsigned sb_ring_text(const uint8_t *zone, unsigned zone_size, char *out, unsign
     } else {
         for (uint32_t i = 0; i < size && n < cap; ++i)
             out[n++] = (char)d[i];
+    }
+    return n;
+}
+
+/* ---- Starbite Maintenance container --------------------------------------------------------- */
+
+#define SBM_MAGIC 0x31544e49414d4253ULL   /* "SBMAINT1" */
+
+int sbm_check(const uint8_t *h, uint64_t limit, struct sbm_info *m, const char **why)
+{
+    static const uint64_t lim[4] = { 64ULL << 20, 2ULL << 20, 80ULL << 20, 2ULL << 20 };
+    z(m, sizeof(*m));
+    const char *w = 0;
+    if (limit > SBM_STAGE_MAX)
+        limit = SBM_STAGE_MAX;
+    if (get(h, 8) != SBM_MAGIC)
+        w = "NO SBMAINT1 HEADER";
+    else if (get(h + 8, 4) != 1 || get(h + 12, 4) != SBM_HDR)
+        w = "UNKNOWN VERSION";
+    else if (sb_crc32(h, 4092) != (uint32_t)get(h + 4092, 4))
+        w = "HEADER CRC";
+    if (w) {
+        *why = w;
+        return 0;
+    }
+    m->seq = (uint32_t)get(h + 16, 4);
+    m->total = get(h + 24, 8);
+    if (!m->seq) {
+        *why = "SEQ 0";
+        return 0;
+    }
+    if (m->total % SBM_HDR || m->total < SBM_HDR || m->total > limit) {
+        *why = "SIZE OUTSIDE THE SLOT";
+        return 0;
+    }
+    uint64_t end = SBM_HDR;
+    for (unsigned i = 0; i < 4; ++i) {
+        const uint8_t *s = h + 64 + 32 * i;
+        uint64_t o = get(s, 8), n = get(s + 8, 8);
+        uint32_t c = (uint32_t)get(s + 16, 4), kind = (uint32_t)get(s + 20, 4);
+        if (kind != i + 1) {
+            *why = "SECTION ORDER";
+            return 0;
+        }
+        if (!n) {
+            if (i != SBM_DTB_RESCUE) {
+                *why = i == SBM_KERNEL ? "NO KERNEL" : i == SBM_DTB ? "NO DTB" : "NO INITRD";
+                return 0;
+            }
+            if (o || c) {
+                *why = "EMPTY SECTION WITH DATA";
+                return 0;
+            }
+            continue;
+        }
+        if (n > lim[i]) {
+            *why = "SECTION TOO LARGE";
+            return 0;
+        }
+        if (o % SBM_HDR || o < end || o + n > m->total) {
+            *why = "SECTION LAYOUT";
+            return 0;
+        }
+        end = o + n;
+        m->off[i] = o;
+        m->size[i] = n;
+        m->crc[i] = c;
+    }
+    sget(m->cmdline, h + 192, 256);
+    sget(m->version, h + 448, 64);
+    return 1;
+}
+
+uint64_t sbm_slot_b(uint64_t part_bytes)
+{
+    return part_bytes / 2U & ~0xfffffULL;
+}
+
+unsigned sbm_order(const int valid[2], const uint32_t seq[2], int prev, unsigned out[2])
+{
+    unsigned n = 0;
+    if (valid[0] && valid[1]) {
+        out[0] = seq[1] > seq[0] ? 1U : 0U;
+        out[1] = 1U - out[0];
+        n = 2;
+    } else if (valid[0] || valid[1]) {
+        out[0] = valid[0] ? 0U : 1U;
+        n = 1;
+    }
+    if (prev && n == 2) {
+        unsigned t = out[0];
+        out[0] = out[1];
+        out[1] = t;
     }
     return n;
 }

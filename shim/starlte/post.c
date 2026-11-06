@@ -28,8 +28,8 @@
  * (panel copies, recovery, the crash snapshot), never below 0x8C000000 (the loader, menu assets,
  * S-Boot's FDT).
  *
- * Results: post_last(), the log page (0x91fff000: slot 200 "POST" summary, 201 total us, 240 + id
- * per check: state << 56 | value << 32 | us) and the pmsg ring. No pointer tables.
+ * Results: post_last(), the log page (0x91fff000: slot 200 "POST" summary, 201 total us, 202 + id
+ * for checks 0..10 and 240 + id - 11 for 11..15: state << 56 | value << 32 | us) and the pmsg ring. No pointer tables.
  */
 #include "post.h"
 #include "fbtext.h"
@@ -51,7 +51,8 @@ uint32_t star_crc32(uintptr_t p, uint64_t n);   /* store.c */
 #define POST_RAM_MS     6000U          /* full: the RAM test's time budget */
 #define POST_LOG        ((volatile uint64_t *)0x91fff000UL)
 #define POST_LOG_SLOT   200U
-#define POST_LOG_CHECK  240U
+#define POST_LOG_CHECK  202U            /* checks 0..10, as before 2026-11-06 (SBMAINT decodes them) */
+#define POST_LOG_CHECK2 240U            /* checks 11..15: 202 + 11.. would reach recovery's slot 216 */
 #define POST_HOLD_MS    1500U
 #define CHUNK           (4UL << 20)
 
@@ -962,7 +963,7 @@ static void post_log(void)
     log[POST_LOG_SLOT + 1] = rep.total_us;
     for (unsigned i = 0; i < rep.n; ++i) {
         const struct post_check *c = &rep.c[i];
-        log[POST_LOG_CHECK + i] = (uint64_t)c->state << 56 | (uint64_t)((uint32_t)c->value & 0xffffffU) << 32 | c->us;
+        log[i <= POST_MICROSD ? POST_LOG_CHECK + i : POST_LOG_CHECK2 + i - POST_CPU] = (uint64_t)c->state << 56 | (uint64_t)((uint32_t)c->value & 0xffffffU) << 32 | c->us;
     }
     struct pl l;
     pl_init(&l);

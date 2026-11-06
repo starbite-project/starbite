@@ -136,8 +136,9 @@ static void test_settings(void)
     strcpy(t.default_key, "android");
     strcpy(t.last_key, "linux-ubuntu");
     strcpy(t.next_key, "rescue");
-    t.post_level = SET_POST_QUICK;
-    t.log_level = 2;
+    sbset_set_post(&t, SET_POST_QUICK);
+    sbset_set_log(&t, SET_LOG_VERBOSE);
+    CHECK(t.flags == (1U << 4 | 2U << 8), "flags bits 4-5 POST, 8-9 log (0x%x)", t.flags);
     t.crash_mode = SET_CRASH_LOG;
     t.crash_detail = 3;
     t.crash_action = SET_AFTER_RETRY;
@@ -149,7 +150,7 @@ static void test_settings(void)
     sbset_decode(b2, &s);
     CHECK(!memcmp(&s, &t, sizeof(s)), "new record round trip");
     CHECK(sbset_crash_timeout(&s) == 120, "timeout 12 -> 120 s");
-    for (unsigned i = 114; i < 4096; ++i)
+    for (unsigned i = 112; i < 4096; ++i)
         if (b2[i]) {
             CHECK(0, "byte %u of a new record is not zero", i);
             break;
@@ -164,9 +165,13 @@ static void test_settings(void)
     memset(b2, 0, 16);
     CHECK(sbset_check(b2) == 0, "no magic: no record");
     /* values from a future tool read as defaults */
-    s.post_level = 7;
-    s.log_level = 9;
-    CHECK(sbset_post(&s) == SET_POST_FULL && sbset_log(&s) == 0, "unknown levels -> defaults");
+    s.flags = SET_SD_STORE | 3U << SET_POST_SHIFT | SET_LOG_DEBUG << SET_LOG_SHIFT | 0xff000000U;
+    CHECK(sbset_post(&s) == SET_POST_FULL && sbset_log(&s) == SET_LOG_DEBUG, "POST level 3 reads as full");
+    sbset_set_post(&s, SET_POST_OFF);
+    sbset_set_log(&s, SET_LOG_QUIET);
+    CHECK(s.flags == (SET_SD_STORE | 2U << 4 | 0xff000000U), "setters keep the other bits (0x%x)", s.flags);
+    CHECK(SET_POST_MASK == 0x30U && SET_LOG_MASK == 0x300U && SET_POST_OF(0x20U) == SET_POST_OFF &&
+          SET_LOG_OF(0x300U) == SET_LOG_DEBUG, "the shared flag definitions");
     s.crash_timeout = 3;
     CHECK(sbset_crash_timeout(&s) == 30, "3 -> 30 s");
     s.crash_timeout = 200;
@@ -179,7 +184,7 @@ static void test_settings(void)
     CHECK(py && n == 4096 && sbset_check(py) == 1, "sbstore2.py settings block valid");
     if (py && n == 4096 && sbset_check(py) == 1) {
         sbset_decode(py, &s);
-        CHECK(sbset_post(&s) == SET_POST_QUICK && s.log_level == 2 && s.crash_mode == SET_CRASH_LOG &&
+        CHECK(sbset_post(&s) == SET_POST_QUICK && sbset_log(&s) == SET_LOG_VERBOSE && s.crash_mode == SET_CRASH_LOG &&
               s.crash_detail == 3 && s.crash_action == SET_AFTER_RETRY && sbset_crash_timeout(&s) == 120 &&
               s.wdt_mode == SET_WDT_FIXED && s.wdt_s == 45 && !strcmp(s.default_key, "linux-pmos"),
               "sbstore2.py settings fields as the loader reads them");
@@ -495,6 +500,76 @@ static void test_dtmerge(const char *sbp, const char *un1p, const char *linp, co
     free(un);
 }
 
+/* SBMAINT1 headers judged by tools/maint/sbmaint.py (gen_maint.py): sbm_check must agree. */
+static void test_maint(void)
+{
+    char p[1024], line[512];
+    snprintf(p, sizeof(p), "%s/maint-cases.txt", outdir);
+    FILE *f = fopen(p, "r");
+    CHECK(f != 0, "maint-cases.txt from gen_maint.py");
+    if (!f)
+        return;
+    unsigned cases = 0, valid_seen = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char name[64];
+        unsigned long long lim, v[15];
+        if (!strncmp(line, "slotb ", 6)) {
+            unsigned long long size, b;
+            if (sscanf(line + 6, "%llu %llu", &size, &b) == 2)
+                CHECK(sbm_slot_b(size) == b, "slot B of %llu: %llu, want %llu", size, (unsigned long long)sbm_slot_b(size), b);
+            continue;
+        }
+        if (!strncmp(line, "order ", 6)) {
+            int va, vb, prev;
+            unsigned sa, sb;
+            char want[8];
+            if (sscanf(line + 6, "%d %d %u %u %d %7s", &va, &vb, &sa, &sb, &prev, want) == 6) {
+                int valid[2] = { va, vb };
+                uint32_t seq[2] = { sa, sb };
+                unsigned o[2];
+                unsigned n = sbm_order(valid, seq, prev, o);
+                char got[4] = "-";
+                for (unsigned k = 0; k < n; ++k)
+                    got[k] = o[k] ? 'b' : 'a';
+                if (n)
+                    got[n] = 0;
+                CHECK(!strcmp(got, want), "slot order %s: %s, want %s", line + 6, got, want);
+            }
+            continue;
+        }
+        if (sscanf(line, "%63s %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu", name, &lim,
+                   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13],
+                   &v[14]) != 17)
+            continue;
+        size_t n;
+        snprintf(p, sizeof(p), "%s/maint-%s.bin", outdir, name);
+        uint8_t *h = slurp(p, &n);
+        if (!h || n != SBM_HDR) {
+            CHECK(0, "maint header %s", name);
+            free(h);
+            continue;
+        }
+        struct sbm_info m;
+        const char *why = 0;
+        int ok = sbm_check(h, lim, &m, &why);
+        ++cases;
+        CHECK(ok == (int)v[0], "SBMAINT1 %s: loader %s (%s), reference %s", name, ok ? "valid" : "invalid", ok ? "" : why,
+              v[0] ? "valid" : "invalid");
+        if (ok && v[0]) {
+            ++valid_seen;
+            int same = m.seq == v[1] && m.total == v[2];
+            for (unsigned k = 0; k < 4; ++k)
+                same &= m.off[k] == v[3 + 3 * k] && m.size[k] == v[4 + 3 * k] && m.crc[k] == v[5 + 3 * k];
+            CHECK(same, "SBMAINT1 %s: fields as the reference reads them", name);
+        }
+        if (!strcmp(name, "valid"))
+            CHECK(ok && !strcmp(m.cmdline, "console=tty0 sb.x=1") && !strcmp(m.version, "sbmaint test"), "cmdline, version");
+        free(h);
+    }
+    fclose(f);
+    CHECK(cases >= 15 && valid_seen == 2, "maint cases %u, valid %u", cases, valid_seen);
+}
+
 static void dump_catalog(const char *name)
 {
     FILE *f = open_out(name);
@@ -572,6 +647,7 @@ int main(int argc, char **argv)
     test_rings();
     test_text();
     test_dtmerge(argv[2], argv[3], argc > 4 ? argv[4] : "-", argc > 5 ? argv[5] : "-");
+    test_maint();
     test_catalog();
     char cmd[2048];
     for (unsigned v = 0; v < 2; ++v) {

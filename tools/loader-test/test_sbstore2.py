@@ -47,14 +47,16 @@ class Settings(unittest.TestCase):
         st = sb.settings_decode((OUT / 'set-c-old.bin').read_bytes())
         self.assertIsNotNone(st)
         self.assertEqual(st['keys'], ['linux-pmos', 'mac13', ''])
-        self.assertEqual([st[f] for f in sb.SET_FIELDS] + [st['wdt_s']], [0] * 8)
-        self.assertIn('POST full, log level 0, crash detection on, crash screen detail 1, after a crash menu, '
+        self.assertEqual([st[f] for f in sb.SET_FIELDS] + [st['wdt_s']], [0] * 6)
+        self.assertEqual(st['flags'], 1)                 # card store on; POST and log bits clear
+        self.assertIn('POST full, log level quiet, crash detection on, crash screen detail 1, after a crash menu, '
                       'crash screen 60 s, watchdog per entry', sb.settings_text(st))
 
     def test_c_record_decodes(self):
         st = sb.settings_decode((OUT / 'set-c-new.bin').read_bytes())
-        self.assertEqual((st['post_level'], st['log_level'], st['crash_mode'], st['crash_detail'], st['crash_action'],
-                          st['crash_timeout'], st['wdt_mode'], st['wdt_s']), (1, 2, 1, 3, 2, 12, 2, 45))
+        self.assertEqual((st['flags'] >> 4 & 3, st['flags'] >> 8 & 3, st['crash_mode'], st['crash_detail'],
+                          st['crash_action'], st['crash_timeout'], st['wdt_mode'], st['wdt_s']), (1, 2, 1, 3, 2, 12, 2, 45))
+        self.assertIn('POST quick, log level verbose', sb.settings_text(st))
         self.assertEqual(st['keys'], ['android', 'linux-ubuntu', 'rescue'])
         self.assertEqual(sb.settings_encode(st), (OUT / 'set-c-new.bin').read_bytes())
 
@@ -64,17 +66,18 @@ class Settings(unittest.TestCase):
             b[200] = 0x5a                                    # a field from a future tool
             struct.pack_into('<I', b, 12, zlib.crc32(bytes(b[16:256])))
             Path(t, 'in.bin').write_bytes(bytes(b))
-            r = run('settings', f'{t}/out.bin', '--from', f'{t}/in.bin', '--log', '3')
+            r = run('settings', f'{t}/out.bin', '--from', f'{t}/in.bin', '--log', 'debug')
             self.assertEqual(r.returncode, 0, r.stderr)
             o = Path(t, 'out.bin').read_bytes()
             self.assertEqual(o[200], 0x5a)
             st = sb.settings_decode(o)
-            self.assertEqual((st['log_level'], st['seq'], st['flags'], st['timeout']), (3, 8, 1, 5))
+            self.assertEqual((st['seq'], st['flags'], st['timeout']), (8, 1 | 3 << 8, 5))
             self.assertEqual(st['keys'], ['linux-pmos', 'mac13', ''])
             r = run('settings', f'{t}/o2.bin', '--from', f'{t}/out.bin', '--wdt', 'off', '--post', 'off',
                     '--crash-timeout', '60')
             st = sb.settings_decode(Path(t, 'o2.bin').read_bytes())
-            self.assertEqual((st['wdt_mode'], st['post_level'], st['crash_timeout'], st['log_level']), (1, 2, 0, 3))
+            self.assertEqual((st['wdt_mode'], st['crash_timeout'], st['flags']), (1, 0, 1 | 2 << 4 | 3 << 8))
+            self.assertNotEqual(run('settings', f'{t}/x.bin', '--log', '2').returncode, 0)
             self.assertIn('watchdog off', run('settings-show', f'{t}/o2.bin').stdout)
             self.assertNotEqual(run('settings', f'{t}/x.bin', '--wdt', '90').returncode, 0)
             self.assertNotEqual(run('settings-show', f'{t}/in.bin.missing').returncode, 0)

@@ -148,6 +148,12 @@ int fbp_boot_prepare(unsigned method, const struct fb_image *img, const char **w
     return fd.entry != 0;
 }
 
+int fbp_maint(unsigned variant, const char **why)
+{
+    fd.entry = star_maint_ram(variant, why);
+    return fd.entry != 0;
+}
+
 /* A ramoops ring (persistent_ram_buffer: u32 "DBGC", start, size, then data) as text. The
  * loader caps its pmsg writes at 0x3F00 bytes (xnu_boot.c PMSG_DATA), Linux and XNU use the
  * whole 16 KiB: a full ring says which. */

@@ -21,3 +21,7 @@ struct star_ram {
 
 /* Entry PA (log page set up for xnu_boot.S), or 0 with *why. fdt: S-Boot's. */
 uintptr_t star_boot_ram(const struct star_ram *r, uintptr_t fdt, const char **why);
+/* `fastboot oem maint [prev|rescue]`: Starbite Maintenance from the SBMAINT partition (or the
+ * store's "maint" entry) placed like star_boot_ram's images; variant MAINT_* (recovery.h). The
+ * entry, or 0 with *why. */
+uintptr_t star_maint_ram(unsigned variant, const char **why);

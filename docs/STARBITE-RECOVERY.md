@@ -5,8 +5,8 @@ item 4 of `docs/STARBITE-2-PLAN.md` "Current order".
 
 **2026-11-06: see `docs/STARBITE-HEALTH.md`** for what changed since: POST levels (full by
 default, about 10 s, Volume Down skips it once), the log level, crash and hang detection with the
-crash screen, the watchdog, two new recovery items (STARTUP SETTINGS..., CRASH REPORTS...) and the
-POST log slots (per check now 240 + id). Sections 1 and 4 below describe the quick POST, which is
+crash screen, the watchdog, new recovery items (STARBITE MAINTENANCE, STARTUP SETTINGS..., CRASH
+REPORTS...) and the early mailbox keys `maint`, `maint-prev`, `maint-rescue` (section 12 there). Sections 1 and 4 below describe the quick POST, which is
 still the "quick" level.
 
 Sources: `shim/starlte/recovery.c`/`.h`, `post.c`/`.h`, `xnu_boot.c` (`star_prepare_xnu`, the
@@ -84,6 +84,7 @@ assets. Volume Up/Down move the highlight, Power selects.
 | Reboot | INFORM3 0x12345670 + SWRESET | PMU |
 | Power off | PS_HOLD low (`hw_power_off`). With a cable in, the phone stays on and the menu says so | PMU |
 | Boot entry... | the whole catalog, hidden entries included (grey: files missing, gold: hidden). Starts the pick; a failure comes back here with the reason | UFS, store, catalog |
+| Starbite Maintenance (2026-11-06, after Rescue) | checks that an SBMAINT slot or the store's `maint` entry exists, then Power / Vol Up (other slot) / Vol Down (rescue) / Bixby (back); writes the mailbox key and resets (docs/STARBITE-HEALTH.md 12, docs/MAINTENANCE.md 4.2) | UFS (GPT + 2 header blocks) |
 | Startup settings... (2026-11-06) | POST level, log level, crash detection, crash screen detail, after a crash, crash screen time, watchdog; written only on SAVE (docs/STARBITE-HEALTH.md 4.5) | UFS (settings record) |
 | Crash reports... (2026-11-06) | the crash log's reports, newest first; one opens on the crash screen | UFS (crash log) |
 
@@ -147,7 +148,8 @@ total: 400 ms of that is the Bixby window. To shorten the window, change `REC_WI
 - **Log page** (0x91fff000; readable from Linux with `devmem 0x91fff000 + 8 * slot`):
   - slot 200: `"POST" << 32 | mode << 24 | n << 16 | fails << 8 | warns`
   - slot 201: total µs
-  - slots 240 + id (since 2026-11-06; 202..212 before): per check, `state << 56 | (value & 0xffffff) << 32 | µs`
+  - slots 202..212: per check 0..10, `state << 56 | (value & 0xffffff) << 32 | µs`; the full POST's checks
+    11..15 (2026-11-06) in slots 240..244
   - States: 0 skip, 1 ok, 2 warn, 3 fail. The page is zeroed at every loader start.
 - **pmsg ring** (TWRP: `/sys/fs/pstore/pmsg-ramoops-0`): `STARBITE: POST quick 312ms fail 0 warn 0`
   and one line for each failed or warned check.

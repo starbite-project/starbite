@@ -75,6 +75,17 @@ int fbp_boot_prepare(unsigned method, const struct fb_image *img, const char **w
     }
     return 1;
 }
+static unsigned maint_calls, maint_variant;
+int fbp_maint(unsigned variant, const char **why)
+{
+    ++maint_calls;
+    maint_variant = variant;
+    if (variant == 2) {
+        *why = "NO MAINTENANCE SYSTEM: SLOT A NO SBMAINT1 HEADER";
+        return 0;
+    }
+    return 1;
+}
 void fbp_set_next(const char *key) { snprintf(next_key, sizeof(next_key), "%s", key); }
 const char *fbp_speed(void) { return "high"; }
 void fbp_status(const char *line) { (void)line; }
@@ -531,6 +542,21 @@ static void test_protocol(void)
     CHECK(nraw == strlen(fake_log) && !memcmp(raw, fake_log, nraw), "upload data (%u)", nraw);
     cmd("oem log nosuch");
     CHECK(!strncmp(last(), "FAIL", 4), "unknown log");
+
+    /* Starbite Maintenance (docs/MAINTENANCE.md 4.2 R3) */
+    cmd("oem maint");
+    CHECK(!strcmp(last(), "OKAYstarting Starbite Maintenance") && maint_calls == 1 && maint_variant == 0, "oem maint");
+    CHECK(fb_action(&v) == FB_ACT_BOOT, "oem maint starts");
+    cmd("oem maint prev");
+    CHECK(maint_calls == 2 && maint_variant == 1 && fb_action(&v) == FB_ACT_BOOT, "oem maint prev");
+    cmd("oem maint rescue");
+    CHECK(!strcmp(last(), "FAILNO MAINTENANCE SYSTEM: SLOT A NO SBMAINT1 HEADER") && fb_action(&v) == FB_ACT_NONE,
+          "oem maint rescue refused: %s", last());
+    cmd("oem maint sideways");
+    CHECK(!strncmp(last(), "FAIL", 4) && maint_calls == 3, "oem maint bad variant");
+    cmd("oem boot-next maint-rescue");
+    CHECK(!strcmp(last(), "OKAY") && !strcmp(next_key, "maint-rescue") && fb_action(&v) == FB_ACT_NONE,
+          "boot-next maint-rescue without a catalog entry");
 
     /* reboots */
     cmd("oem reboot-to nosuch");

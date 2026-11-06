@@ -12,7 +12,8 @@ Written 2026-11-06 for three requests of the user:
   debug info from crashed to everything and it saves".
 
 It also covers the coordinator's request for One UI 8: an Android entry may bring its own device
-tree (section 6).
+tree (section 6). It also covers the loader side of Starbite Maintenance (SBMAINT, section 12), and
+the shared settings flag bits agreed with Engineer OS v2 (section 7).
 
 **Status: built and host-tested. Nothing here has run on the phone.** The loader builds with
 `-Werror` and has no ABS64 relocations. The host tests (section 8) pass with the Mac's clang
@@ -28,12 +29,12 @@ is the flash and test plan.
 | `shim/starlte/post.c/.h` | POST levels, the full POST and its screen, Volume Down to skip |
 | `shim/starlte/crash.c/.h` | Snapshot at start, launch record, evaluation, report, crash screen, the recovery menu's report list, fastboot text and raw |
 | `shim/starlte/wdt.c/.h` | Arming cluster 1's watchdog right before an OS starts |
-| `shim/starlte/xnu_boot.c` | The order (section 4.1), log-level fragments, watchdog arguments, Linux INFORM3 patch, Android 4th file |
+| `shim/starlte/xnu_boot.c` | The order (section 4.1), log-level fragments, watchdog arguments, Linux INFORM3 patch, Android 4th file, Starbite Maintenance's start (section 12) |
 | `shim/starlte/store.c/.h` | Settings record with the new fields (bytes kept), `crashlog` entry access (`SF_VOLATILE`) |
 | `shim/starlte/catalog.c/.h` | The catalog extension `SBCATEX1` |
-| `shim/starlte/recovery.c` | "STARTUP SETTINGS..." and "CRASH REPORTS..." |
+| `shim/starlte/recovery.c` | "STARTUP SETTINGS...", "CRASH REPORTS...", "STARBITE MAINTENANCE"; the early mailbox keys (rescue, maint*, the `SBNEXT2R` return key) |
 | `shim/starlte/menu.c`, `menu6.c`, `menu7.c` | No auto-start countdown right after a crash |
-| `shim/starlte/fastboot.c`, `fastboot_dev.c` | `fastboot oem log crash` and `crashraw` |
+| `shim/starlte/fastboot.c`, `fastboot_dev.c` | `fastboot oem log crash` and `crashraw`, `fastboot oem maint [prev\|rescue]`; `oem boot-next`/`reboot-to` accept the loader's own keys |
 | `shim/starlte/fbtext.c/.h` | Glyphs `( ) ' " @ \| ; & $ { } ^ ~ \` \\` for log lines; `star_fb_muted()` |
 | `tools/store/sbstore2.py` | Settings fields, `settings-show`, `crashlog IMG\|live`, the catalog extension, the `crashlog` store entry |
 | `tools/store/catalog.toml` | `[defaults.linux/android/xnu]`, per-entry overrides, field documentation |
@@ -43,14 +44,15 @@ is the flash and test plan.
 
 ### 2.1 Levels and keys
 
-| Setting `post_level` | What runs | Time |
+| Settings flags bits 4-5 (`SET_POST_*`) | What runs | Time |
 |---|---|---|
 | **full** (0, the default; every record older than 2026-11-06 reads as full) | all 16 checks on their own screen | about 8 to 10 s, see 2.4 |
 | quick (1) | the 11 checks of 2026-11-05, as lines over S-Boot's splash | about 0.3 s |
 | off (2) | nothing; the menu brings UFS and touch up when it needs them | 0 |
 
 - **Change it**: hold Bixby at boot, then **STARTUP SETTINGS... → POST AT BOOT** (Power cycles FULL,
-  QUICK, OFF), then **SAVE**. From a Mac: `sbstore2.py settings OUT --from BLOCK --post quick`.
+  QUICK, OFF), then **SAVE**. From a Mac: `sbstore2.py settings OUT --from BLOCK --post quick`. Engineer
+  OS v2's settings editor writes the same bits.
 - **Skip it once**: hold **Volume Down** during POST. The rest of the run is marked SKIPPED, the
   boot goes on, and the setting does not change. Volume Down is debounced (two reads 5 ms apart)
   and polled after every check and every 4 MiB of the RAM test.
@@ -110,16 +112,16 @@ storage, battery, rest about 0.2 s + the closing pause 0.5 s = **about 8.5 to 9 
 
 - `post_last()` for the menus. The recovery menu shows the failures.
 - Log page 0x91fff000: slot 200 `"POST" << 32 | mode << 24 | n << 16 | fails << 8 | warns`,
-  slot 201 total µs, **slots 240 + id** per check (`state << 56 | value << 32 | µs`; ids in post.h).
-  The old per-check slots 202..212 are no longer written: with 16 checks they would reach
-  recovery's slot 216.
+  slot 201 total µs, per check `state << 56 | value << 32 | µs`: **slots 202..212 for checks 0..10**
+  (as before, which SBMAINT's `sbm logs` decodes) and **240..244 for the new checks 11..15** (202 + 14
+  would reach recovery's slot 216). Ids in post.h.
 - pmsg ring: `STARBITE: POST full 8712ms fail 0 warn 1` and one line per failure or warning.
 
 ## 3. Log levels (request b)
 
-One global setting, `log_level` 0..3, in the settings record: **0 quiet (the default)**, 1 normal,
-2 debug, 3 verbose. To change it: Starbite Recovery → STARTUP SETTINGS → LOG LEVEL, or
-`sbstore2.py settings OUT --from BLOCK --log 2`.
+One global setting, the settings flags bits 8-9 (`SET_LOG_*`): **0 quiet (the default: debug output
+off)**, 1 normal, 2 verbose, 3 debug. To change it: Starbite Recovery → STARTUP SETTINGS → LOG LEVEL,
+`sbstore2.py settings OUT --from BLOCK --log verbose`, or Engineer OS v2's settings editor.
 
 ### 3.1 The loader
 
@@ -139,7 +141,7 @@ on an entry, or `[defaults.METHOD]` for every entry of a method that sets none.
 (catalog.h). Older loaders ignore that table, and older catalogs have none: then nothing is
 appended, exactly as today.
 
-| Method | 0 quiet | 1 normal | 2 debug | 3 verbose |
+| Method | 0 quiet | 1 normal | 2 verbose | 3 debug |
 |---|---|---|---|---|
 | linux (`[defaults.linux]`) | `quiet loglevel=3 vt.global_cursor_default=0 systemd.show_status=auto rd.udev.log_level=3 udev.log_level=3` | `loglevel=4` (the DTB's own) | `loglevel=7 s9p_decon.geom_log=1 systemd.log_level=info` | `loglevel=8 ignore_loglevel keep_bootcon printk.devkmsg=on s9p_decon.geom_log=1 systemd.log_level=debug` |
 | android | — | — | `loglevel=7` | `loglevel=8 ignore_loglevel` |
@@ -244,15 +246,15 @@ menus' auto-start countdown for this boot**, so a crashing default entry does no
 
 ### 4.5 Settings (Starbite Recovery → STARTUP SETTINGS, or `sbstore2.py settings`)
 
-| Row | Values | Record byte |
+| Row | Values | Where |
 |---|---|---|
-| POST AT BOOT | FULL, QUICK, OFF | 104 |
-| LOG LEVEL | 0 QUIET .. 3 VERBOSE | 105 |
-| CRASH DETECTION | ON, SAVE ONLY (no screen), OFF (no launch record, no INFORM3 patch) | 106 |
-| CRASH SCREEN SHOWS | 1 SUMMARY, 2 + LOG, 3 ALL | 107 |
-| AFTER A CRASH | BOOT MENU, RECOVERY, RETRY ONCE | 108 |
-| CRASH SCREEN WAITS | 60, 120, 300, 600, 30 s | 109 (seconds / 10, 0 = 60) |
-| WATCHDOG | PER ENTRY, OFF, 30 S, 60 S, 82 S | 110 mode, 112 u16 seconds |
+| POST AT BOOT | FULL, QUICK, OFF | flags bits 4-5 |
+| LOG LEVEL | 0 QUIET, 1 NORMAL, 2 VERBOSE, 3 DEBUG | flags bits 8-9 |
+| CRASH DETECTION | ON, SAVE ONLY (no screen), OFF (no launch record, no INFORM3 patch) | byte 104 |
+| CRASH SCREEN SHOWS | 1 SUMMARY, 2 + LOG, 3 ALL | 105 |
+| AFTER A CRASH | BOOT MENU, RECOVERY, RETRY ONCE | 106 |
+| CRASH SCREEN WAITS | 60, 120, 300, 600, 30 s | 107 (seconds / 10, 0 = 60) |
+| WATCHDOG | PER ENTRY, OFF, 30 S, 60 S, 82 S | 108 mode, 110 u16 seconds |
 
 The page reads the record when it opens and writes it only on SAVE.
 
@@ -428,19 +430,33 @@ Checked on the host for UN1CA and LineageOS by an independent parser (`check_dtm
 
 ```
   0 "SBSETTNG"  8 u32 version 1  12 u32 CRC32 of bytes 16..255
- 16 u32 seq  20 u32 timeout_s  24 u32 flags (1 = card store at boot)  28 u32 0
+ 16 u32 seq  20 u32 timeout_s  24 u32 flags  28 u32 0
  32 default_key[24]  56 last_key[24]  80 next_key[24]
-104 u8 post_level  105 u8 log_level  106 u8 crash_mode  107 u8 crash_detail  108 u8 crash_action
-109 u8 crash_timeout (s / 10)  110 u8 wdt_mode  111 u8 0  112 u16 wdt_s  114..255 zero
+104 u8 crash_mode  105 u8 crash_detail  106 u8 crash_action  107 u8 crash_timeout (s / 10)
+108 u8 wdt_mode  109 u8 0  110 u16 wdt_s  112..255 zero
 ```
+
+**The flags word: one definition** for the loader (`shim/starlte/store.h`), Engineer OS v2
+(`starbite/libsb/store.h`, which the coordinator aligns to this) and `sbstore2.py`:
+
+| Bits | Name | Values |
+|---|---|---|
+| 0 | `SET_SD_STORE` | read the microSD's store at boot |
+| 4-5 | `SET_POST_SHIFT` 4, `SET_POST_MASK` 3 << 4 | 0 `SET_POST_FULL` (default), 1 `SET_POST_QUICK`, 2 `SET_POST_OFF` (3 reads as full) |
+| 8-9 | `SET_LOG_SHIFT` 8, `SET_LOG_MASK` 3 << 8 | 0 `SET_LOG_QUIET` (default), 1 `SET_LOG_NORMAL`, 2 `SET_LOG_VERBOSE`, 3 `SET_LOG_DEBUG` |
+
+So every existing record (flags 0 or 1) means a full POST and quiet boots, as the user wants.
+`SET_POST_OF(flags)`, `SET_LOG_OF(flags)`, `sbset_set_post/log` read and write them.
 
 - **Old records** have zeros from byte 104, and **every new field's 0 is its default**: full POST,
   quiet, crash detection on, detail 1, menu, 60 s, watchdog per entry. The version stays 1.
-- The loader's `settings_save` (menu, Engineer Lite, recovery) keeps bytes 114..255 of the record it
+- The loader's `settings_save` (menu, Engineer Lite, recovery) keeps bytes 112..255 of the record it
   read, for a future tool. `sbstore2.py settings --from` keeps everything it does not change.
-- An **older loader** reads the new record fine, but rewriting it (when the menu remembers the last
-  entry) zeroes bytes 104.., so it falls back to the defaults. Harmless.
-- Engineer OS (starbite/libsb) only reads the record.
+- An **older loader** reads the new record fine. When it rewrites it (the menu remembering the last
+  entry), the flags word, and so the POST and log levels, is kept; bytes 104.. (the crash settings)
+  go back to their defaults. Harmless.
+- Engineer OS v2's settings editor writes the flags bits above. It should also keep bytes 104..255 as
+  it found them (note for its owner).
 - **Catalog**: the header's last u32 (+28, always 0 before) points to `SBCATEX1`. Older loaders
   ignore it, and a catalog without it gives empty fragments and no watchdog.
 - **Store**: a store with `crashlog` works with older loaders. They never look at directory flags,
@@ -454,7 +470,7 @@ sh tools/loader-test/run.sh                    # the Mac's clang, ASan + UBSan
 limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 ```
 
-- **host_test.c (125 checks)**:
+- **host_test.c (163 checks)**:
   - CRC32
   - settings: old record = defaults, round trip, damage, clamps, sbstore2's block as the loader reads it
   - crash log: header and report round trip, the ring wrapping at 17 reports, damage, the log tail
@@ -467,6 +483,10 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
   - merges: UN1CA with and without extra, LineageOS; refuses one byte short; repeatable
   - the Linux DTB INFORM3 patch: once, then nothing left, INFORM2 untouched
   - catalog.c parsing sbstore2's catalog: defaults, overrides, an old catalog, a damaged extension
+  - SBMAINT1: 17 headers made and judged by `tools/maint/sbmaint.py` (`gen_maint.py`: a valid one, one
+    with dtb-rescue, one damage per R4 rule); `sbm_check` agrees on every verdict and field;
+    `sbm_slot_b` against `slot_b_offset`; `sbm_order` against `sbmaint.choose` (seq, tie, prev)
+  - the shared flag bits (masks, setters keep the other bits)
 - **check_dtmerge.py (29 checks)**: section 6.4's rules against the merged files.
 - **test_sbstore2.py (13 tests)**:
   - settings: old block, the C block, unknown bytes kept, errors
@@ -480,7 +500,8 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
     and carrier codes, regions and `/chosen/serial` blanked, same length (`scrub-sboot-fdt.py`).
   - When the main checkout has them: `build/android/lineage/dt.img` and
     `build/linux/exynos9810-starlte.dtb`.
-- `tools/usb-fastboot/run-host-test.sh` still passes: 302 checks.
+- `tools/usb-fastboot/run-host-test.sh` passes: 315 checks (with `oem maint`, `oem maint prev`, a refused
+  `oem maint rescue`, a bad variant, `oem boot-next maint-rescue` without a catalog entry).
 - The installer's tests that use sbstore2.py still pass: 111 tests.
 
 ## 9. Needs the phone
@@ -506,7 +527,7 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 
 **Images**:
 
-- BOOT `out/xnu-boot-health1.img` in this worktree. It is the loader of this branch plus the iOS
+- BOOT `out/xnu-boot-health2.img` in this worktree. It is the loader of this branch plus the iOS
   payload of `out/xnu-boot-batch8.img` (`build/boot-batch/payload-v7test.sweetxnu`, sha256
   29568ace...) and the menu ramdisk `build/brand/menu-v7.sbm` (6b69ce08...), with batch8's header
   and DTBH.
@@ -558,9 +579,15 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
     - Check that it boots to the home screen.
     - Over adb: `cat /proc/device-tree/chosen/bootargs` (S-Boot's line + the cmdline file),
       `ls /proc/device-tree | grep memory` (4 nodes), `cat /proc/device-tree/model_info-system_rev`.
-12. **Log level 2**:
+12. **Log level 2 (verbose)**:
     - Set it in the settings, then start pmOS. Expect kernel text on the panel (loglevel 7).
-    - Set it back to 0.
+    - Set it back to 0 (quiet).
+13. **Starbite Maintenance** (section 12; needs the store entries `maint*` or the SBMAINT partition):
+    - Hold Bixby, then STARBITE MAINTENANCE. With no source: red "NO MAINTENANCE SYSTEM: ...".
+      Otherwise Power: the phone resets and starts it (screen rows "STARBITE MAINTENANCE" / "STARTING
+      SLOT A (SEQ N)" or "STARTING FROM THE OS STORE"; log slot 10 = 0x710/0x711/0x712).
+    - In fastboot: `fastboot oem maint`, then (from a running Linux) `reboot-to maint`.
+    - Hold Bixby during a maint boot: the request is cancelled and the recovery menu comes up.
 
 ## 11. RAM used (added)
 
@@ -574,5 +601,58 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 | 0xAF400000 | 4 KiB | the launch record (after the OS is loaded; above UFS DMA's buffers, below RAM_END) |
 | windows A, B, C | section 2.3 | full POST patterns |
 
-Log page slots: 19 (launch), 20 (INFORM3 pairs patched), 21 (Android DTB pick), 200/201 and 240+
+Log page slots: 10 = 0x710..0x713 for Starbite Maintenance (slot A, slot B, store, fastboot), 19
+(launch), 20 (INFORM3 pairs patched), 21 (Android DTB pick), 200/201, 202..212 and 240..244
 (POST), 216 (recovery, unchanged), 220..223 (crash).
+
+## 12. Starbite Maintenance in the loader (docs/MAINTENANCE.md 4.2)
+
+Implemented: R1, R2, R3, R4, R5, R7. Not done: R6 (`download` key) and R8 (rescue falling back to SBMAINT).
+
+- **R1, the recovery item "STARBITE MAINTENANCE"** (after Rescue):
+  - `star_maint_ready()` reads the GPT and the two slot headers (header checks only), else looks for
+    a ready catalog entry `maint`. With neither: red "NO MAINTENANCE SYSTEM: SLOT A <why>, SLOT B
+    <why>, NO MAINT ENTRY IN THE STORE", and the menu stays.
+  - Otherwise a second prompt picks the variant: **Power** `maint`, **Volume Up** `maint-prev` (the
+    other slot), **Volume Down** `maint-rescue`, **Bixby** back. This replaces the spec's "Volume Up
+    held while selecting": the menu's Volume Up already moves the highlight.
+  - Then the mailbox key (key first, `SBNEXT2!` last, as Rescue) and INFORM3 normal + SWRESET.
+- **R2, the early keys** `maint`, `maint-prev`, `maint-rescue`: taken with `rescue` by `rec_next_take()`
+  right after the Bixby window, and the mailbox is cleared before anything starts.
+  - Bixby held in that boot cancels the request, logged.
+  - The start comes where Rescue's does, after `boot_info`: no POST, no crash screen, no menu.
+  - A failure opens the recovery menu with the reason in red.
+- **R3**: `fastboot oem maint [prev|rescue]` places it from UFS and starts it (`FB_ACT_BOOT`, log slot 10
+  = 0x713). `oem boot-next` / `oem reboot-to` now accept `rescue`, `maint`, `maint-prev`, `maint-rescue`
+  without a catalog entry.
+- **R4, the sources**:
+  1. **The GPT partition `SBMAINT`**, found by name.
+     - Slot A is at byte 0, slot B at `(size / 2) & ~0xFFFFF`.
+     - Each header gets every check of `sbmaint.parse_header`, in `sbm_check` (sbfmt.c, host-tested
+       against the reference).
+     - The order is by seq, A first on a tie; `maint-prev` reverses it.
+     - A slot is read whole (`total` ≤ 0x04FF0000) into STAGE 0x8C000000. Every present section's
+       CRC-32 and the kernel's `ARMd` are checked. The DTB must take the bootargs and have initrd
+       properties.
+     - Any failure moves on to the next slot.
+  2. **The store's catalog entry** `maint` (`maint-rescue`, else `maint` plus `sb.rescue=1`), through
+     `boot_linux` with the entry's files and cmdline.
+  3. Else: "NO MAINTENANCE SYSTEM: ...".
+- **R5, the start**: placed as the rescue start does it.
+  - Placement: kernel at RAM_BASE + text_offset (≤ OS_RD), initrd at OS_RD, the DTB (dtb-rescue for
+    `maint-rescue` when present) copied to EDIT_FDT and appended into LINUX_DTB, `starbite,rtc-epoch`,
+    the microSD rails.
+  - Bootargs get `" <header cmdline> sb.maint=1 sb.maint.src=a|b sb.maint.seq=N
+    sb.maint.from=next|fastboot [sb.rescue=1] sb.serial=<S-Boot's androidboot.serialno>"`. From the
+    store, only `sb.maint.from=... [sb.rescue=1] sb.serial=...`, because the entry's cmdline has the
+    rest.
+  - Screen rows 0-1, pmsg `STARBITE: maintenance from slot a seq N <version>`, log slot 10 = 0x710 /
+    0x711 / 0x712 / 0x713. INFORM3 is left alone.
+  - A launch record (key `maint`, flag 16): the next start judges how it ended. The launch before it
+    is judged first, so a crashed test OS is still reported when maint starts next.
+  - No watchdog and no log fragments for maintenance.
+- **R7, the return key**: mailbox `SBNEXT2R` + `KEY\0RET\0`.
+  - At the early take it becomes a plain `SBNEXT2!` + KEY, so the menu's boot-next starts KEY.
+  - Right before KEY's handoff (`launch_go`, only for that key) the mailbox is re-armed with RET. If the
+    test OS does not overwrite the ramoops ring at 0xFED17FE0 (mainline Linux's ramoops does, unless
+    its DTB keeps ramoops off as SBMAINT's does), its reset comes back to RET.

@@ -69,11 +69,24 @@ void store_reset(unsigned medium);
 #define SF_VOLATILE 1U         /* written in place by the loader (the "crashlog"): no CRC check */
 
 /* Settings record (UFS store, block 2; byte layout in sbfmt.h). Keys are catalog keys ("" = none).
- * Every field after next_key reads 0 from records older than 2026-11-06, and 0 is its default. */
-#define SET_SD_STORE 1U        /* flags: read the microSD's store at boot (sd.h) */
-#define SET_POST_FULL  0U      /* post_level: the full POST (about 10 s), the default */
-#define SET_POST_QUICK 1U      /*   the quick one (about 0.3 s) */
-#define SET_POST_OFF   2U      /*   none */
+ * Every field after next_key reads 0 from records older than 2026-11-06, and 0 is its default.
+ *
+ * The u32 flags word: ONE definition shared with Engineer OS (starbite/libsb/store.h) and
+ * tools/store/sbstore2.py. A record whose flags are 0 means: no card store, full POST, quiet. */
+#define SET_SD_STORE   1U                      /* bit 0: read the microSD's store at boot (sd.h) */
+#define SET_POST_SHIFT 4U                      /* bits 4-5: the POST level */
+#define SET_POST_MASK  (3U << SET_POST_SHIFT)
+#define SET_POST_FULL  0U                      /*   the full POST (about 10 s), the default */
+#define SET_POST_QUICK 1U                      /*   the quick one (about 0.3 s) */
+#define SET_POST_OFF   2U                      /*   none (3 reads as full) */
+#define SET_LOG_SHIFT  8U                      /* bits 8-9: the log level */
+#define SET_LOG_MASK   (3U << SET_LOG_SHIFT)
+#define SET_LOG_QUIET   0U                     /*   debug output off, the default */
+#define SET_LOG_NORMAL  1U
+#define SET_LOG_VERBOSE 2U
+#define SET_LOG_DEBUG   3U                     /*   everything */
+#define SET_POST_OF(flags) (((flags) & SET_POST_MASK) >> SET_POST_SHIFT)
+#define SET_LOG_OF(flags)  (((flags) & SET_LOG_MASK) >> SET_LOG_SHIFT)
 #define SET_CRASH_ON   0U      /* crash_mode: detect, save, show the crash screen (default) */
 #define SET_CRASH_LOG  1U      /*   detect and save, no screen */
 #define SET_CRASH_OFF  2U      /*   nothing (no launch record either) */
@@ -84,10 +97,8 @@ void store_reset(unsigned medium);
 #define SET_WDT_OFF     1U     /*   never arm the watchdog */
 #define SET_WDT_FIXED   2U     /*   wdt_s for every entry whose catalog timeout is not 0 */
 struct star_settings {
-    uint32_t seq, timeout_s, flags;
+    uint32_t seq, timeout_s, flags;   /* flags: SET_SD_STORE, SET_POST_*, SET_LOG_* above */
     char default_key[24], last_key[24], next_key[24];
-    uint8_t post_level;        /* SET_POST_* */
-    uint8_t log_level;         /* 0 quiet .. 3 verbose */
     uint8_t crash_mode;        /* SET_CRASH_* */
     uint8_t crash_detail;      /* the crash screen's first level: 0 = 1 (summary), 1..3 */
     uint8_t crash_action;      /* SET_AFTER_* */
@@ -100,7 +111,7 @@ struct star_settings {
 int settings_load(struct star_settings *s);
 /* What the last settings_load found: 1 valid, 0 no record, -1 bad CRC or version, -2 no store. */
 int settings_status(void);
-/* Write and read back: 0 on success. Keeps every field it does not know of (bytes 114..255). */
+/* Write and read back: 0 on success. Keeps every field it does not know of (bytes 112..255). */
 int settings_save(struct star_settings *s);
 
 /* The crash log (sbfmt.h): the store's "crashlog" entry, 16 blocks, SF_VOLATILE. 1 found. */

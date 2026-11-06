@@ -2150,6 +2150,14 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   panics come back. Watchdog: cluster 1 0x10060000 (PMU bit 23), WTCON 0xFF39, max 82 s, armed last; Linux gets
   s3c2410_wdt.tmr_atboot=1 tmr_margin=T (mainline stops a running WDT at probe otherwise). (d) Android 4th file
   (DTB/DTBH): merged with S-Boot's /chosen, memory nodes, model_info-system_rev (dtmerge.c); 3-file path unchanged.
-  Host: tools/loader-test/run.sh (125 + 29 checks, 13 tests; clang ASan/UBSan and VM gcc). BOOT
-  out/xnu-boot-health1.img (this branch's loader + batch8's payload/ramdisk/DTBH). Needs the phone: does a
+  Host: tools/loader-test/run.sh (clang ASan/UBSan and VM gcc). BOOT
+  out/xnu-boot-health2.img (this branch's loader + batch8's payload/ramdisk/DTBH). Needs the phone: does a
   watchdog reset reach the loader (not upload mode), ramoops after panic=10, DECON pending latch, full POST time.
+  Same day, coordinator items: (1) POST and log level live in the settings flags word, one definition with
+  Engineer OS v2: bits 4-5 POST (0 full default, 1 quick, 2 off), bits 8-9 log (0 quiet default, 1 normal,
+  2 verbose, 3 debug), names in shim/starlte/store.h; crash settings at bytes 104..111. POST slots 202..212 kept
+  for checks 0..10 (sbm logs decodes them), new checks in 240..244. (2) Starbite Maintenance loader side
+  (docs/MAINTENANCE.md 4.2): R1 recovery item, R2 early keys maint/maint-prev/maint-rescue, R3 `fastboot oem
+  maint [prev|rescue]`, R4 SBMAINT partition slots (sbm_check host-tested against tools/maint/sbmaint.py) then
+  the store's maint entry, R5 start (log slot 10 = 0x710..0x713), R7 SBNEXT2R return key. Host: 163 + 29 checks,
+  13 tests, fastboot 315, installer 111, maint 34.

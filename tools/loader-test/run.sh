@@ -20,12 +20,13 @@ linux=-
 [ -f "$main/build/linux/exynos9810-starlte.dtb" ] && { cp "$main/build/linux/exynos9810-starlte.dtb" "$T/linux.dtb"; linux=$T/linux.dtb; }
 
 python3 -I -B tools/store/sbstore2.py catalog tools/store/catalog.toml "$T/cat.sbc"
-python3 -I -B tools/store/sbstore2.py settings "$T/set-py.bin" --post quick --log 2 --crash save --crash-detail 3 \
+python3 -I -B tools/store/sbstore2.py settings "$T/set-py.bin" --post quick --log verbose --crash save --crash-detail 3 \
     --crash-action retry --crash-timeout 120 --wdt 45 --default linux-pmos >/dev/null
 $CC -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -I$S -I shim \
     -DCAT_BUF='((uintptr_t)host_cat_buf)' -include tools/loader-test/host_cat.h \
     -fsanitize=address,undefined -fno-sanitize-recover=all \
     tools/loader-test/host_test.c $S/sbfmt.c $S/dtmerge.c $S/catalog.c -o "$T/host_test"
+python3 -I -B tools/loader-test/gen_maint.py "$T" $fx/sboot-fdt-scrubbed.dtb
 "$T/host_test" "$T" $fx/sboot-fdt-scrubbed.dtb $fx/un1ca-G960F-dtb "$lineage" "$linux"
 python3 -I -B tools/loader-test/check_dtmerge.py "$T" $fx/sboot-fdt-scrubbed.dtb
 python3 -I -B tools/loader-test/test_sbstore2.py "$T"

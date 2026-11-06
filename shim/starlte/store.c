@@ -296,7 +296,7 @@ uint64_t store_used(unsigned m)
 
 /* ---- settings record --------------------------------------------------------
  * Block 2 of the UFS store, the codec and layout in sbfmt.c / sbfmt.h ("SBSETTNG", version 1, CRC32
- * of bytes 16..255). settings_save keeps bytes it does not know (114..255 of the record it read).
+ * of bytes 16..255). settings_save keeps bytes it does not know (112..255 of the record it read).
  */
 static uint64_t settings_lba(void)
 {
@@ -349,7 +349,7 @@ int settings_save(struct star_settings *st)
     sbset_encode(set_blk, st);
     /* fields a newer tool wrote after ours: kept as they were (the CRC covers them again) */
     if (set_status == 1 && set_tail[0] == 'S') {
-        for (unsigned i = 114; i < SBSET_BYTES; ++i)
+        for (unsigned i = 112; i < SBSET_BYTES; ++i)
             set_blk[i] = set_tail[i];
         uint32_t c = sb_crc32(set_blk + 16, SBSET_BYTES - 16);
         for (unsigned i = 0; i < 4; ++i)

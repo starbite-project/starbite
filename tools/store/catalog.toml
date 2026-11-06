@@ -19,8 +19,8 @@
 # Boot health (2026-11-06, docs/STARBITE-HEALTH.md; packed into the catalog's SBCATEX1 table, which
 # older loaders ignore). Each may be set per entry or for a whole method under [defaults.METHOD]:
 #   log         4 command line fragments, for the global log level 0 quiet (the default), 1 normal,
-#               2 debug, 3 verbose (Starbite Recovery > Startup settings, or sbstore2.py settings
-#               --log N). Appended after cmdline; for xnu a token "!name" first removes the payload's
+#               2 verbose, 3 debug (settings flags bits 8-9; Starbite Recovery > Startup settings, or
+#               sbstore2.py settings --log quiet|normal|verbose|debug). Appended after cmdline; for xnu a token "!name" first removes the payload's
 #               own "name" / "name=..." boot-arg. At most 127 bytes each.
 #   wdt         seconds (10..82) of the hardware watchdog the loader arms right before the OS starts;
 #               0 = never. The settings can turn it off or force one value for every such entry.
@@ -50,7 +50,7 @@ wdt = 0
 wdt_feed = "own"
 
 # The XNU payloads are already quiet on the panel (a5fb_noconsole=1 sweetquiet=1 in the daily
-# boot-args); debug and verbose bring the text console back. No watchdog until XNU feeds it.
+# boot-args); verbose and debug bring the text console back. No watchdog until XNU feeds it.
 [defaults.xnu]
 log = ["", "", "!a5fb_noconsole !sweetquiet", "!a5fb_noconsole !sweetquiet -enable_kprintf_spam"]
 wdt = 0

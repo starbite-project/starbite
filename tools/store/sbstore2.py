@@ -29,13 +29,16 @@
   sbstore2.py catalog-keys IMG|OUT.sbc|catalog.toml
       The menu keys of a catalog, one per line (sorted): diff two of them before flashing.
   sbstore2.py settings OUT.bin [--from BLOCK.bin] [--default KEY] [--timeout S] [--next KEY]
-              [--last KEY] [--sd on|off] [--post full|quick|off] [--log 0..3]
+              [--last KEY] [--sd on|off] [--post full|quick|off] [--log quiet|normal|verbose|debug]
               [--crash on|save|off] [--crash-detail 1..3] [--crash-action menu|recovery|retry]
               [--crash-timeout S] [--wdt entry|off|SECONDS]
       A settings block (4 KiB) for block 2, e.g. to set the default entry or a one-shot next. With
-      --from, every field (also ones this tool does not know, bytes 114..255) is kept unless an
-      option changes it. Defaults (zeros, also in records older than 2026-11-06): full POST, log
-      level 0 (quiet), crash detection on, screen detail 1, then the menu, 60 s, watchdog per entry.
+      --from, every field (also ones this tool does not know, bytes 112..255) is kept unless an
+      option changes it. The POST level is flags bits 4-5 (0 full, 1 quick, 2 off), the log level
+      flags bits 8-9 (0 quiet, 1 normal, 2 verbose, 3 debug): one definition with the loader
+      (shim/starlte/store.h) and Engineer OS. Defaults (zeros, also in records older than
+      2026-11-06): full POST, quiet, crash detection on, screen detail 1, then the menu, 60 s,
+      watchdog per entry.
   sbstore2.py settings-show BLOCK.bin
   sbstore2.py crashlog SRC [--level 1|2|3]
       The loader's crash reports (docs/STARBITE-HEALTH.md), newest first. SRC: a store image (its
@@ -393,7 +396,9 @@ POST_LEVELS = {'full': 0, 'quick': 1, 'off': 2}
 CRASH_MODES = {'on': 0, 'save': 1, 'off': 2}
 CRASH_ACTIONS = {'menu': 0, 'recovery': 1, 'retry': 2}
 WDT_MODES = {'entry': 0, 'off': 1, 'fixed': 2}
-SET_FIELDS = ('post_level', 'log_level', 'crash_mode', 'crash_detail', 'crash_action', 'crash_timeout', 'wdt_mode')
+LOG_LEVELS = {'quiet': 0, 'normal': 1, 'verbose': 2, 'debug': 3}
+SET_POST_SHIFT, SET_LOG_SHIFT = 4, 8            # flags bits 4-5 and 8-9 (shim/starlte/store.h)
+SET_FIELDS = ('crash_mode', 'crash_detail', 'crash_action', 'crash_timeout', 'wdt_mode')   # bytes 104..108
 
 
 def settings_decode(b):
@@ -404,9 +409,9 @@ def settings_decode(b):
     seq, timeout, flags = struct.unpack_from('<III', b, 16)
     st = {'seq': seq, 'timeout': timeout, 'flags': flags,
           'keys': [b[o:o + 24].split(b'\0')[0].decode() for o in (32, 56, 80)]}
-    st.update(zip(SET_FIELDS, b[104:111]))
-    st['wdt_s'] = struct.unpack_from('<H', b, 112)[0]
-    st['tail'] = bytes(b[114:256])
+    st.update(zip(SET_FIELDS, b[104:109]))
+    st['wdt_s'] = struct.unpack_from('<H', b, 110)[0]
+    st['tail'] = bytes(b[112:256])
     return st
 
 
@@ -414,9 +419,9 @@ def settings_encode(st):
     b = bytearray(BLOCK)
     struct.pack_into('<8sII', b, 0, b'SBSETTNG', 1, 0)
     struct.pack_into('<IIII24s24s24s', b, 16, st['seq'], st['timeout'], st['flags'], 0, *(k.encode() for k in st['keys']))
-    b[104:111] = bytes(st[f] for f in SET_FIELDS)
-    struct.pack_into('<H', b, 112, st['wdt_s'])
-    b[114:256] = st['tail']
+    b[104:109] = bytes(st[f] for f in SET_FIELDS)
+    struct.pack_into('<H', b, 110, st['wdt_s'])
+    b[112:256] = st['tail']
     struct.pack_into('<I', b, 12, zlib.crc32(bytes(b[16:256])))
     return bytes(b)
 
@@ -424,20 +429,21 @@ def settings_encode(st):
 def settings_text(st):
     def name(d, v):
         return next((k for k, x in d.items() if x == v), f'? ({v})')
-    post = name(POST_LEVELS, st['post_level']) if st['post_level'] <= 2 else f"full (unknown {st['post_level']})"
+    pl, ll = st['flags'] >> SET_POST_SHIFT & 3, st['flags'] >> SET_LOG_SHIFT & 3
+    post = name(POST_LEVELS, pl) if pl <= 2 else 'full (3)'
     wdt = ('per entry' if st['wdt_mode'] == 0 else 'off' if st['wdt_mode'] == 1
            else f"{st['wdt_s']} s for every entry with a watchdog" if st['wdt_s'] else 'per entry')
     tmo = 60 if not st['crash_timeout'] else 10 * min(st['crash_timeout'], 60)
     k = st['keys']
     return (f"default {k[0] or '-'}, last {k[1] or '-'}, next {k[2] or '-'}, timeout {st['timeout']} s, card store at boot "
             f"{'on' if st['flags'] & SET_SD_STORE else 'off'}\n"
-            f"POST {post}, log level {st['log_level'] if st['log_level'] <= 3 else 0}, crash detection "
+            f"POST {post}, log level {name(LOG_LEVELS, ll)}, crash detection "
             f"{name(CRASH_MODES, st['crash_mode'])}, crash screen detail {st['crash_detail'] or 1}, after a crash "
             f"{name(CRASH_ACTIONS, st['crash_action'])}, crash screen {tmo} s, watchdog {wdt}")
 
 
 def settings(a):
-    st = {'seq': 0, 'timeout': 0, 'flags': 0, 'keys': ['', '', ''], 'wdt_s': 0, 'tail': bytes(142)}
+    st = {'seq': 0, 'timeout': 0, 'flags': 0, 'keys': ['', '', ''], 'wdt_s': 0, 'tail': bytes(144)}
     st.update({f: 0 for f in SET_FIELDS})
     if a.frm:
         old = settings_decode(Path(a.frm).read_bytes()[:BLOCK])
@@ -454,9 +460,9 @@ def settings(a):
     if a.sd is not None:
         st['flags'] = (st['flags'] | SET_SD_STORE) if a.sd == 'on' else (st['flags'] & ~SET_SD_STORE)
     if a.post is not None:
-        st['post_level'] = POST_LEVELS[a.post]
+        st['flags'] = st['flags'] & ~(3 << SET_POST_SHIFT) | POST_LEVELS[a.post] << SET_POST_SHIFT
     if a.log is not None:
-        st['log_level'] = a.log
+        st['flags'] = st['flags'] & ~(3 << SET_LOG_SHIFT) | LOG_LEVELS[a.log] << SET_LOG_SHIFT
     if a.crash is not None:
         st['crash_mode'] = CRASH_MODES[a.crash]
     if a.crash_detail is not None:
@@ -635,7 +641,7 @@ def main():
     s.add_argument('--timeout', type=int)
     s.add_argument('--sd', choices=['on', 'off'])
     s.add_argument('--post', choices=list(POST_LEVELS))
-    s.add_argument('--log', type=int, choices=range(4))
+    s.add_argument('--log', choices=list(LOG_LEVELS))
     s.add_argument('--crash', choices=list(CRASH_MODES))
     s.add_argument('--crash-detail', dest='crash_detail', type=int, choices=range(1, 4))
     s.add_argument('--crash-action', dest='crash_action', choices=list(CRASH_ACTIONS))

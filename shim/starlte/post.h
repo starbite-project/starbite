@@ -2,7 +2,7 @@
  * Starbite POST, the power-on self test (post.c, docs/STARBITE-HEALTH.md section 2,
  * docs/STARBITE-RECOVERY.md section 4). The settings record picks the level at every boot:
  * full (the default, about 10 s on its own progress screen), quick (about 0.3 s, lines over
- * S-Boot's splash) or off. Results go to the pmsg ring, the log page (slots 200, 201, 240..255)
+ * S-Boot's splash) or off. Results go to the pmsg ring, the log page (slots 200, 201, 202..212, 240..244)
  * and RAM for the menus (post_last()).
  */
 #pragma once

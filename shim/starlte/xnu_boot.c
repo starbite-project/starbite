@@ -881,6 +881,15 @@ static void launch_go(volatile uint64_t *log)
     if (!launch.valid)
         return;
     crash_launch(launch.key, launch.name, launch.method, launch.wdt, launch.wdt != 0, launch.lvl, launch.flags);
+    /* docs/MAINTENANCE.md 4.2 R7: the start an "SBNEXT2R" mailbox asked for leaves its return key
+     * in the mailbox, so the test OS's reset comes back there (to SBMAINT) instead of RECOVERY */
+    const char *rk = rec_return_key(launch.key);
+    if (rk) {
+        rec_mailbox_write(rk);
+        pmsg_put("STARBITE: boot-next return key armed: ");
+        pmsg_put(rk);
+        pmsg_put("\n");
+    }
     if (launch.wdt) {
         unsigned ms = wdt_arm(launch.wdt);
         log[19] |= (uint64_t)ms << 40;
@@ -1705,6 +1714,318 @@ static uintptr_t star_rescue_boot(volatile uint64_t *log)
     return entry;
 }
 
+/*
+ * ---- Starbite Maintenance (docs/MAINTENANCE.md 4.2: R2, R4, R5) ------------------------------
+ * Sources, in order: the GPT partition "SBMAINT" (two SBMAINT1 slots: A at byte 0, B at half the
+ * partition rounded down to 1 MiB; the valid one with the higher seq first, "maint-prev" the other
+ * way round; a slot is read whole into STAGE and every section's CRC checked before anything is
+ * placed), else the catalog entry "maint" ("maint-rescue") from the OS store, else nothing.
+ * The start is the rescue start's: kernel at RAM_BASE + text_offset, initrd at OS_RD, the DTB (or
+ * dtb-rescue) at LINUX_DTB with " <header cmdline> sb.maint=1 sb.maint.src=a|b sb.maint.seq=N
+ * sb.maint.from=next|fastboot [sb.rescue=1] sb.serial=<androidboot.serialno>" appended, the microSD
+ * rails on. Log slot 10: 0x710 slot A, 0x711 slot B, 0x712 the store, 0x713 `fastboot oem maint`.
+ */
+#define MAINT_FROM_NEXT     0U
+#define MAINT_FROM_FASTBOOT 1U
+
+struct mslot {
+    int valid;
+    uint64_t lba, bytes;          /* the slot's first 4 KiB block on LU0, its size */
+    struct sbm_info m;
+    const char *why;
+};
+static struct mslot mslots[2];
+static char maint_why[160];
+
+/* The two slots' headers (GPT + two block reads): 1 if the partition exists. */
+static int maint_scan(void)
+{
+    uint64_t first, last;
+    for (unsigned i = 0; i < 2; ++i) {
+        mslots[i].valid = 0;
+        mslots[i].why = "NO SBMAINT PARTITION";
+    }
+    if (!ufs_up() || !gpt_find("SBMAINT", &first, &last) || last < first)
+        return 0;
+    uint64_t bytes = (last - first + 1U) * 4096U, b = sbm_slot_b(bytes);
+    static uint8_t h[SBM_HDR];
+    for (unsigned i = 0; i < 2; ++i) {
+        struct mslot *s = &mslots[i];
+        uint64_t off = i ? b : 0;
+        s->lba = first + off / 4096U;
+        s->bytes = i ? bytes - b : b;
+        if (!s->bytes || ufs_read(s->lba, 1)) {
+            s->why = "UNREADABLE";
+            continue;
+        }
+        uint8_t *hp = h;
+        __asm__("" : "+r"(hp));   /* no folded "h - UFS_BUF" constant: that is an ABS64 relocation */
+        for (unsigned k = 0; k < SBM_HDR; ++k)
+            hp[k] = *(volatile uint8_t *)(UFS_BUF + k);
+        s->valid = sbm_check(h, s->bytes, &s->m, &s->why);
+    }
+    return 1;
+}
+
+static void why_cat(const char *s)
+{
+    unsigned n = 0;
+    while (n < sizeof(maint_why) - 1 && maint_why[n])
+        ++n;
+    for (; s && *s && n < sizeof(maint_why) - 1; ++s)
+        maint_why[n++] = *s;
+    maint_why[n] = 0;
+}
+
+/* The catalog entry for this variant: index, or -1; *add_rescue when "maint" stands in. */
+static int maint_entry(unsigned variant, int *add_rescue)
+{
+    *add_rescue = 0;
+    int i = variant == MAINT_RESCUE ? cat_find("maint-rescue") : -1;
+    if (i < 0 || !star_entry_ready((unsigned)i, 0)) {
+        i = cat_find("maint");
+        *add_rescue = variant == MAINT_RESCUE;
+    }
+    return i >= 0 && star_entry_ready((unsigned)i, 0) ? i : -1;
+}
+
+static const char *maint_missing(int part)
+{
+    maint_why[0] = 0;
+    if (part) {
+        why_cat("SLOT A ");
+        why_cat(mslots[0].why);
+        why_cat(", SLOT B ");
+        why_cat(mslots[1].why);
+    } else {
+        why_cat("NO SBMAINT PARTITION");
+    }
+    why_cat(", NO MAINT ENTRY IN THE STORE");
+    return maint_why;
+}
+
+int star_maint_ready(const char **why)
+{
+    int add;
+    int part = maint_scan();
+    if (mslots[0].valid || mslots[1].valid || maint_entry(MAINT_NORMAL, &add) >= 0)
+        return 1;
+    *why = maint_missing(part);
+    return 0;
+}
+
+/* " name=value" from S-Boot's bootargs (sb.serial) */
+static void sboot_arg(const char *key, char *out, unsigned cap)
+{
+    uintptr_t v;
+    uint32_t len;
+    out[0] = 0;
+    if (boot_fdt && !(boot_fdt & 7) && fdt_chosen_raw(boot_fdt, "bootargs", &v, &len))
+        (void)sb_arg((const char *)v, len, key, out, cap);
+}
+
+/* slot: "a", "b", or 0 for the store (whose catalog cmdline has sb.maint=1 sb.maint.src=store) */
+static void maint_extra(char *cmd, unsigned cap, const char *slot, uint32_t seq, unsigned from, int rescue)
+{
+    char t[64], serial[40];
+    unsigned n = 0;
+    const char *a;
+    if (slot) {
+        for (a = "sb.maint=1 sb.maint.src="; *a; ++a)
+            t[n++] = *a;
+        for (; *slot; ++slot)
+            t[n++] = *slot;
+        t[n] = 0;
+        line_append(cmd, cap, t);
+    }
+    if (seq) {
+        char d[12];
+        unsigned k = 0;
+        do {
+            d[k++] = (char)('0' + seq % 10U);
+            seq /= 10U;
+        } while (seq);
+        n = 0;
+        for (a = "sb.maint.seq="; *a; ++a)
+            t[n++] = *a;
+        while (k)
+            t[n++] = d[--k];
+        t[n] = 0;
+        line_append(cmd, cap, t);
+    }
+    line_append(cmd, cap, from == MAINT_FROM_FASTBOOT ? "sb.maint.from=fastboot" : "sb.maint.from=next");
+    if (rescue)
+        line_append(cmd, cap, "sb.rescue=1");
+    sboot_arg("androidboot.serialno", serial, sizeof(serial));
+    if (serial[0]) {
+        n = 0;
+        for (a = "sb.serial="; *a; ++a)
+            t[n++] = *a;
+        for (unsigned k = 0; serial[k] && n + 1 < sizeof(t); ++k)
+            t[n++] = serial[k];
+        t[n] = 0;
+        line_append(cmd, cap, t);
+    }
+}
+
+/* Slot i (already scanned and valid) read whole into STAGE, checked, placed: the entry, or 0 and
+ * *why (then the next slot is tried). */
+static uintptr_t maint_from_slot(volatile uint64_t *log, unsigned i, unsigned variant, unsigned from, const char **why)
+{
+    const struct mslot *s = &mslots[i];
+    const struct sbm_info *m = &s->m;
+    static char cmd[512];
+    if (ufs_read_to(s->lba, m->total / 4096U, STAGE)) {
+        *why = "SLOT READ FAILED";
+        return 0;
+    }
+    for (unsigned k = 0; k < 4; ++k)
+        if (m->size[k] && star_crc32(STAGE + m->off[k], m->size[k]) != m->crc[k]) {
+            *why = k == SBM_KERNEL ? "KERNEL CRC" : k == SBM_INITRD ? "INITRD CRC" : "DTB CRC";
+            return 0;
+        }
+    uintptr_t k0 = STAGE + m->off[SBM_KERNEL];
+    if (*(volatile uint32_t *)(k0 + 56) != 0x644d5241U) {
+        *why = "KERNEL NOT ARM64";
+        return 0;
+    }
+    uint64_t text_offset = *(volatile uint64_t *)(k0 + 8), span = *(volatile uint64_t *)(k0 + 16);
+    if (span < m->size[SBM_KERNEL])
+        span = m->size[SBM_KERNEL];
+    uintptr_t dst = LINUX_BASE + text_offset;
+    if (text_offset >= (2UL << 20) || span > OS_RD - dst) {
+        *why = "KERNEL TOO LARGE";
+        return 0;
+    }
+    if (m->size[SBM_INITRD] > EDIT_FDT - OS_RD) {
+        *why = "INITRD TOO LARGE";
+        return 0;
+    }
+    unsigned d = variant == MAINT_RESCUE && m->size[SBM_DTB_RESCUE] ? SBM_DTB_RESCUE : SBM_DTB;
+    /* the DTB first: its failures are the cheap ones */
+    copy_bytes(EDIT_FDT, STAGE + m->off[d], m->size[d]);
+    cmd[0] = 0;
+    {
+        unsigned n = 0;
+        for (; n + 1 < sizeof(cmd) && n < sizeof(m->cmdline) && m->cmdline[n]; ++n)
+            cmd[n] = m->cmdline[n] >= 32 && m->cmdline[n] < 127 ? m->cmdline[n] : ' ';
+        cmd[n] = 0;
+    }
+    maint_extra(cmd, sizeof(cmd), i ? "b" : "a", m->seq, from, variant == MAINT_RESCUE);
+    uint32_t dsize = fdt_copy_append_bootargs(EDIT_FDT, LINUX_DTB, (uint32_t)(UFS_DMA - LINUX_DTB), cmd);
+    if (!dsize) {
+        *why = "DTB HAS NO BOOTARGS";
+        return 0;
+    }
+    uint64_t now;
+    if (em_rtc_epoch(&now))
+        (void)fdt_chosen_set_u64(LINUX_DTB, "starbite,rtc-epoch", now);
+    copy_bytes(OS_RD, STAGE + m->off[SBM_INITRD], m->size[SBM_INITRD]);
+    if (!fdt_chosen_set_u64(LINUX_DTB, "linux,initrd-start", OS_RD) ||
+        !fdt_chosen_set_u64(LINUX_DTB, "linux,initrd-end", OS_RD + m->size[SBM_INITRD])) {
+        *why = "DTB HAS NO INITRD PROPERTIES";
+        return 0;
+    }
+    copy_bytes(dst, k0, m->size[SBM_KERNEL]);
+    uint8_t l31 = 0, l2 = 0;
+    (void)hw_sd_rails(&l31, &l2);
+    log[18] = (uint64_t)l31 << 8 | l2;
+    {
+        struct pline p;
+        p.n = 0;
+        pl_s(&p, "STARTING SLOT ");
+        pl_s(&p, i ? "B" : "A");
+        pl_s(&p, " (SEQ ");
+        pl_u(&p, m->seq);
+        pl_s(&p, ")");
+        star_fb_text_c(1, p.b, 0xffffffffU, 0xff000000U);
+    }
+    {
+        struct pline p;
+        p.n = 0;
+        pl_s(&p, "STARBITE: maintenance from slot ");
+        pl_s(&p, i ? "b" : "a");
+        pl_s(&p, " seq ");
+        pl_u(&p, m->seq);
+        pl_s(&p, " ");
+        pmsg_put(p.b);
+        pmsg_put(m->version);
+        pmsg_put("\n");
+    }
+    clean_bytes(dst, dst + span);
+    clean_bytes(OS_RD, OS_RD + m->size[SBM_INITRD]);
+    clean_bytes(LINUX_DTB, LINUX_DTB + dsize);
+    log[10] = from == MAINT_FROM_FASTBOOT ? 0x713 : 0x710 + i;
+    log[15] = dst;
+    log[17] = LINUX_DTB;
+    clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+    __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
+    return dst;
+}
+
+/* Starbite Maintenance from the best source: the entry PA, or 0 with boot_why. */
+static uintptr_t star_maint_boot(volatile uint64_t *log, unsigned variant, unsigned from)
+{
+    boot_why = 0;
+    star_fb_row_base(0);
+    star_fb_text_c(0, "STARBITE MAINTENANCE", 0xffffd43bU, 0xff000000U);
+    star_fb_text_c(1, "LOOKING FOR IT...", 0xffb1bad3U, 0xff000000U);
+    pmsg_put(variant == MAINT_PREV ? "STARBITE: maintenance (other slot)\n" :
+             variant == MAINT_RESCUE ? "STARBITE: maintenance (rescue)\n" : "STARBITE: maintenance\n");
+    launch_set("maint", "Starbite Maintenance", M_LINUX, CLF_MAINT | (from == MAINT_FROM_FASTBOOT ? CLF_FASTBOOT : 0U));
+    int part = maint_scan();
+    int valid[2] = { mslots[0].valid, mslots[1].valid };
+    uint32_t seq[2] = { mslots[0].m.seq, mslots[1].m.seq };
+    unsigned order[2];
+    unsigned n = sbm_order(valid, seq, variant == MAINT_PREV, order);
+    for (unsigned k = 0; k < n; ++k) {
+        const char *w = 0;
+        uintptr_t e = maint_from_slot(log, order[k], variant, from, &w);
+        if (e)
+            return e;
+        mslots[order[k]].why = w;
+        mslots[order[k]].valid = 0;
+    }
+    int add_rescue;
+    int i = maint_entry(variant, &add_rescue);
+    if (i >= 0) {
+        const struct cat_ent *e = cat_get((unsigned)i);
+        const uint8_t *src = (const uint8_t *)e;
+        uint8_t *dst = (uint8_t *)&launch_ent;
+        for (unsigned b = 0; b < sizeof(launch_ent); ++b)
+            dst[b] = src[b];
+        maint_extra(launch_ent.cmdline, sizeof(launch_ent.cmdline), 0, 0, from, add_rescue);
+        star_fb_text_c(1, "STARTING FROM THE OS STORE", 0xffffffffU, 0xff000000U);
+        pmsg_put("STARBITE: maintenance from the store\n");
+        uintptr_t entry = boot_linux(log, &launch_ent);
+        if (entry) {
+            log[10] = from == MAINT_FROM_FASTBOOT ? 0x713 : 0x712;
+            clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+            return entry;
+        }
+        launch_clear();
+        return 0;
+    }
+    launch_clear();
+    maint_missing(part);
+    static char full[200];
+    unsigned m = 0;
+    for (const char *a = "NO MAINTENANCE SYSTEM: "; *a; ++a)
+        full[m++] = *a;
+    for (unsigned k = 0; maint_why[k] && m + 1 < sizeof(full); ++k)
+        full[m++] = maint_why[k];
+    full[m] = 0;
+    return fail(log, -80, full);
+}
+
+/* `fastboot oem maint [prev|rescue]` (fastboot_dev.c): placed and ready, or 0 with *why. */
+uintptr_t star_maint_ram(unsigned variant, const char **why)
+{
+    uintptr_t e = star_maint_boot((volatile uint64_t *)LOG_BASE, variant, MAINT_FROM_FASTBOOT);
+    *why = e ? 0 : boot_why;
+    return e;
+}
+
 /* The recovery menu until it says Continue: an entry PA to start, or 0 to go on booting. */
 static uintptr_t recovery_loop(volatile uint64_t *log, const char *why)
 {
@@ -1769,11 +2090,17 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
     boot_el = el;
     boot_sctlr = sctlr;
     star_dump_latches();
-    int rescue = rec_rescue_take();
+    /* The boot-next keys the loader itself takes (mailbox cleared at once): rescue, and Starbite
+     * Maintenance's maint / maint-prev / maint-rescue (docs/MAINTENANCE.md 4.2 R2). */
+    int next = rec_next_take();
+    int rescue = next == REC_NEXT_RESCUE;
     uintptr_t entry;
     if (rec) {
         pmsg_put("STARBITE: Bixby held: Starbite Recovery\n");
+        if (next != REC_NEXT_NONE)
+            pmsg_put("STARBITE: Bixby cancelled the boot-next request\n");
         rescue = 0;
+        next = REC_NEXT_NONE;
         entry = recovery_loop(log, 0);
         if (entry)
             return entry;
@@ -1794,6 +2121,19 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
             return entry;
         rec_panel_lost();
         entry = recovery_loop(log, boot_why ? boot_why : "RESCUE MODE FAILED");
+        if (entry)
+            return entry;
+    }
+    /* Starbite Maintenance (the recovery menu's reboot, `reboot-to maint`, SBMAINT's own reboots):
+     * no POST, no menu; a failure comes back to recovery with the reason. */
+    if (next >= REC_NEXT_MAINT) {
+        unsigned variant = next == REC_NEXT_MAINT_PREV ? MAINT_PREV : next == REC_NEXT_MAINT_RESCUE ? MAINT_RESCUE
+                                                                                                  : MAINT_NORMAL;
+        entry = star_maint_boot(log, variant, MAINT_FROM_NEXT);
+        if (entry)
+            return entry;
+        rec_panel_lost();
+        entry = recovery_loop(log, boot_why ? boot_why : "MAINTENANCE FAILED");
         if (entry)
             return entry;
     }

@@ -17,19 +17,23 @@ uint32_t sb_crc32_more(uint32_t crc, const void *p, uint64_t n);   /* crc of a p
 
 /* ---- settings record: block 2 of the UFS store ------------------------------------------------
  *   0 "SBSETTNG"  8 u32 version 1  12 u32 CRC32 of bytes 16..255
- *  16 u32 seq  20 u32 timeout_s  24 u32 flags  28 u32 0
+ *  16 u32 seq  20 u32 timeout_s  24 u32 flags (store.h: bit 0 card store, bits 4-5 POST level,
+ *     bits 8-9 log level)  28 u32 0
  *  32 default_key[24]  56 last_key[24]  80 next_key[24]
- * 104 u8 post_level  105 u8 log_level  106 u8 crash_mode  107 u8 crash_detail  108 u8 crash_action
- * 109 u8 crash_timeout  110 u8 wdt_mode  111 u8 0  112 u16 wdt_s  114..255 zero
- * Records written before 2026-11-06 have zeros from 104 on: every new field's 0 is its default. */
+ * 104 u8 crash_mode  105 u8 crash_detail  106 u8 crash_action  107 u8 crash_timeout (s / 10)
+ * 108 u8 wdt_mode  109 u8 0  110 u16 wdt_s  112..255 zero
+ * Records written before 2026-11-06 have zeros from 104 on and flags bits 4-9 clear: every new
+ * field's 0 is its default. */
 #define SBSET_BYTES 256U
 int sbset_check(const uint8_t *blk);                 /* 1 valid, 0 no record (magic), -1 bad CRC/version */
 void sbset_defaults(struct star_settings *s);
 void sbset_decode(const uint8_t *blk, struct star_settings *s);   /* only call when sbset_check == 1 */
 void sbset_encode(uint8_t *blk, const struct star_settings *s);   /* 4096 bytes, seq as given */
 /* Effective values, clamped (bad bytes from a future tool read as defaults). */
-unsigned sbset_post(const struct star_settings *s);         /* SET_POST_* */
-unsigned sbset_log(const struct star_settings *s);          /* 0..3 */
+unsigned sbset_post(const struct star_settings *s);         /* SET_POST_* (3 reads as full) */
+unsigned sbset_log(const struct star_settings *s);          /* SET_LOG_* 0..3 */
+void sbset_set_post(struct star_settings *s, unsigned v);   /* flags bits 4-5 */
+void sbset_set_log(struct star_settings *s, unsigned v);    /* flags bits 8-9 */
 unsigned sbset_crash_timeout(const struct star_settings *s);/* seconds, 10..600 */
 const char *sbset_post_name(unsigned v);                    /* "FULL" ... */
 const char *sbset_log_name(unsigned v);                     /* "QUIET" ... */
@@ -115,6 +119,7 @@ const char *sb_kind_name(unsigned kind);     /* "KERNEL PANIC" */
 #define CLF_FASTBOOT      2U   /* started by `fastboot boot` */
 #define CLF_RESCUE        4U   /* Starbite Rescue */
 #define CLF_RETRY         8U   /* the automatic retry after a crash (no second retry) */
+#define CLF_MAINT        16U   /* Starbite Maintenance (docs/MAINTENANCE.md) */
 struct cl_head {
     uint32_t slots, slot_size, next, count, boots, launch_seq, launch_state;
     uint8_t method, wdt_armed;
@@ -186,6 +191,34 @@ uint32_t sb_wdt_count(unsigned secs, unsigned *ms);
 #define RING_SIG  0x43474244U
 #define RING_PMSG 0x3F00U
 unsigned sb_ring_text(const uint8_t *zone, unsigned zone_size, char *out, unsigned cap);
+
+/* ---- Starbite Maintenance: the SBMAINT1 container (docs/MAINTENANCE.md 3 and 4.2 R4) ------------
+ * One slot: a 4096-byte header, then the sections. Header: "SBMAINT1", u32 version 1, u32 header
+ * size 4096, u32 seq (>= 1), u32 flags, u64 total, u64 build time, 24 reserved, at 64 four
+ * sections {u64 offset, u64 size, u32 crc32, u32 kind, u64 0} (kernel 1, dtb 2, initrd 3,
+ * dtb-rescue 4), at 192 cmdline[256], at 448 version[64], at 512 SHA-256s, at 4092 the CRC32 of
+ * bytes 0..4091. tools/maint/sbmaint.py is the reference (parse_header, choose). */
+#define SBM_HDR        4096U
+#define SBM_STAGE_MAX  0x04FF0000U   /* the loader's download buffer: a slot is staged whole */
+#define SBM_KERNEL     0U
+#define SBM_DTB        1U
+#define SBM_INITRD     2U
+#define SBM_DTB_RESCUE 3U
+struct sbm_info {
+    uint32_t seq;
+    uint64_t total;
+    uint64_t off[4], size[4];
+    uint32_t crc[4];
+    char cmdline[256], version[64];
+};
+/* The checks the loader makes on a slot's header before it reads the body (limit: the slot's size,
+ * never more than SBM_STAGE_MAX): 1 valid, 0 with *why. */
+int sbm_check(const uint8_t *h, uint64_t limit, struct sbm_info *m, const char **why);
+/* Slot B's byte offset in a partition of part_bytes: half, rounded down to 1 MiB (slot A: 0). */
+uint64_t sbm_slot_b(uint64_t part_bytes);
+/* The order to try the slots (0 A, 1 B): valid ones only, higher seq first, A before B on a tie;
+ * prev ("maint-prev") reverses it. Returns how many (0..2). */
+unsigned sbm_order(const int valid[2], const uint32_t seq[2], int prev, unsigned out[2]);
 
 /* ---- text helpers ------------------------------------------------------------------------------ */
 /* Offset of needle in hay[0..n), or -1. */
