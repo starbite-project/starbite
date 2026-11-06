@@ -569,7 +569,7 @@ static void sr_value(struct line *l, unsigned r, const struct star_settings *s)
         ln_s(l, s->crash_mode == SET_CRASH_OFF ? "OFF" : s->crash_mode == SET_CRASH_LOG ? "SAVE ONLY" : "ON");
         break;
     case SR_DETAIL:
-        ln_s(l, s->crash_detail == 3 ? "3 ALL" : s->crash_detail == 2 ? "2 + LOG" : "1 SUMMARY");
+        ln_s(l, s->crash_detail == 3 ? "3 EVERYTHING" : s->crash_detail == 2 ? "2 DETAILS" : "1 SUMMARY");
         break;
     case SR_AFTER:
         ln_s(l, s->crash_action == SET_AFTER_RECOVERY ? "RECOVERY" : s->crash_action == SET_AFTER_RETRY ? "RETRY ONCE"

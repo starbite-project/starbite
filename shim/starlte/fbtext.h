@@ -23,6 +23,12 @@ unsigned star_fb_row_y(unsigned row);
 /* Text rows are 60 px; 38 characters fit across the panel. */
 #define STAR_FB_COLS 38U
 void star_fb_hex(unsigned row, const char *label, uint64_t value);
+/* The same 5x7 glyphs small, with lower case (the crash report, crash.c): 18 x 36 px cells, so
+ * 78 columns and about 80 rows fit the panel. Draws exactly cols cells at panel pixel (x, y), x
+ * even: s[0..n), then spaces; bytes outside printable ASCII show as '.'. Muted: nothing. */
+#define STAR_FB_MINI_W 18U
+#define STAR_FB_MINI_H 36U
+void star_fb_mini(unsigned x, unsigned y, const char *s, unsigned n, unsigned cols, uint32_t fg, uint32_t bg);
 /* While on, star_fb_text*, star_fb_hex and star_fb_fill_rows draw nothing: menu v7 mutes the
  * loader's status lines while its launch card is on the panel; fatal() unmutes. */
 void star_fb_mute(int on);

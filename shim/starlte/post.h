@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only
  * Starbite POST, the power-on self test (post.c, docs/STARBITE-HEALTH.md section 2,
  * docs/STARBITE-RECOVERY.md section 4). The settings record picks the level at every boot:
- * full (the default, about 10 s on its own progress screen), quick (about 0.3 s, lines over
- * S-Boot's splash) or off. Results go to the pmsg ring, the log page (slots 200, 201, 202..212, 240..244)
- * and RAM for the menus (post_last()).
+ * full (the default, about 8 to 9 s behind the Starbite logo; Volume Up: the live log), quick
+ * (about 0.3 s over S-Boot's splash) or off. Results go to the pmsg ring, the log page (slots 200,
+ * 201, 202..212, 240..244, 245 how it was shown) and RAM for the menus (post_last()).
  */
 #pragma once
 #include <stdint.h>
@@ -55,13 +55,18 @@ struct post_report {
 };
 #define POST_MAGIC 0x54534f50U   /* "POST" */
 
-/* The POST of a normal boot at level (SET_POST_FULL / _QUICK / _OFF, store.h). Full: its own
- * screen (the panel is saved first and put back after, so the menu's intro still sees S-Boot's
- * splash); quick: lines at the top over the splash, put back after. touch: also bring the touch
- * controller up (the boot menu does that anyway; 0 skips it). *bixby = 1 if Bixby was held during
- * the run; Volume Down held skips the rest of it for this boot (*skipped = 1). Returns 1 if a
- * fatal check failed (*why says which). */
-int post_boot(unsigned level, int touch, int *bixby, int *skipped, const char **why);
+/* The POST of a normal boot at level (SET_POST_FULL / _QUICK / _OFF, store.h). Full: the Starbite
+ * logo with its animation (Volume Up pressed during the run: the live log; POST_F_LOG: the log from
+ * the start); the panel is saved first and put back after, unless POST_F_KEEP_LOGO leaves the clean
+ * logo for menu v7's intro. Quick: nothing over S-Boot's splash (POST_F_LOG or Volume Up: lines at
+ * the top, put back after). A red check: a short failure screen, Power continues. POST_F_TOUCH:
+ * also bring the touch controller up (the boot menu does that anyway). *bixby = 1 if Bixby was
+ * held; Volume Down held skips the rest of it for this boot (*skipped = 1). Returns 1 if a fatal
+ * check failed (*why says which). */
+#define POST_F_TOUCH     1U
+#define POST_F_KEEP_LOGO 2U     /* full: leave the clean logo on the panel (menu v7 will run) */
+#define POST_F_LOG       4U     /* start in the live log (log level 2 and 3) */
+int post_boot(unsigned level, unsigned flags, int *bixby, int *skipped, const char **why);
 /* Any POST, drawn at fbtext rows row0.. as the row base stands (recovery.c). Returns the fatal
  * flag as post_boot. */
 int post_run(unsigned mode, unsigned row0, int touch, int *bixby);

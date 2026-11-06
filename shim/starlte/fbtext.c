@@ -80,6 +80,21 @@ static const struct glyph font[] = {
     {'\\',{0,16,8,4,2,1,0}},
     /* POST and Starbite Recovery (post.c, recovery.c): FBT_CHECK, FBT_CROSS in fbtext.h. */
     {'\x01',{0,1,1,2,20,8,0}}, {'\x02',{0,17,10,4,10,17,0}},
+    /* Lower case, only for star_fb_mini (the crash report's log lines); star_fb_text keeps
+     * drawing upper case. The classic 5x7 LCD shapes, descenders inside the 7 rows. */
+    {'a',{0,0,14,1,15,17,15}}, {'b',{16,16,22,25,17,17,30}},
+    {'c',{0,0,14,16,16,17,14}}, {'d',{1,1,13,19,17,17,15}},
+    {'e',{0,0,14,17,31,16,14}}, {'f',{6,9,8,28,8,8,8}},
+    {'g',{0,15,17,17,15,1,14}}, {'h',{16,16,22,25,17,17,17}},
+    {'i',{4,0,12,4,4,4,14}}, {'j',{2,0,6,2,2,18,12}},
+    {'k',{16,16,18,20,24,20,18}}, {'l',{12,4,4,4,4,4,14}},
+    {'m',{0,0,26,21,21,17,17}}, {'n',{0,0,22,25,17,17,17}},
+    {'o',{0,0,14,17,17,17,14}}, {'p',{0,0,30,17,30,16,16}},
+    {'q',{0,0,13,19,15,1,1}}, {'r',{0,0,22,25,16,16,16}},
+    {'s',{0,0,14,16,14,1,30}}, {'t',{8,8,28,8,8,9,6}},
+    {'u',{0,0,17,17,17,19,13}}, {'v',{0,0,17,17,17,10,4}},
+    {'w',{0,0,17,17,21,21,10}}, {'x',{0,0,17,10,4,10,17}},
+    {'y',{0,0,17,17,15,1,14}}, {'z',{0,0,31,2,4,8,31}},
 };
 
 uint32_t star_fb_enable(void)
@@ -163,6 +178,41 @@ void star_fb_text_c(unsigned row, const char *s, uint32_t fg, uint32_t bg)
                         fb[(top + y * SCALE + sy) * STAR_FB_WIDTH +
                            LEFT + col * CELL_W + x * SCALE + sx] = fg;
             }
+    }
+}
+
+/* The same glyphs, small (fbtext.h STAR_FB_MINI_*): with lower case, font pixels 3 x 4 in an
+ * 18 x 36 cell, written two pixels at a time (x even). Exactly cols cells: s[0..n) then spaces,
+ * printable ASCII (anything else is '.'). */
+static const uint8_t *glyph_mini(char ch)
+{
+    if (ch < 32 || ch > 126)
+        ch = '.';
+    for (unsigned i = 0; i < sizeof(font) / sizeof(font[0]); ++i)
+        if (font[i].ch == ch) return font[i].rows;
+    return glyph_for(ch);
+}
+
+void star_fb_mini(unsigned x, unsigned y, const char *s, unsigned n, unsigned cols, uint32_t fg, uint32_t bg)
+{
+    if (muted || (x & 1U) || y + STAR_FB_MINI_H > STAR_FB_HEIGHT || x + cols * STAR_FB_MINI_W > STAR_FB_WIDTH)
+        return;
+    const uint64_t ff = (uint64_t)fg << 32 | fg, fb_ = (uint64_t)bg << 32 | bg;
+    const uint64_t fbk = (uint64_t)bg << 32 | fg, bkf = (uint64_t)fg << 32 | bg;   /* low word = left pixel */
+    for (unsigned c = 0; c < cols; ++c) {
+        const uint8_t *g = glyph_mini(c < n ? s[c] : ' ');
+        volatile uint64_t *p = (volatile uint64_t *)(STAR_FB_BASE + ((uint64_t)y * STAR_FB_WIDTH + x + c * STAR_FB_MINI_W) * 4U);
+        for (unsigned yy = 0; yy < STAR_FB_MINI_H; ++yy, p += STAR_FB_WIDTH / 2U) {
+            /* glyph rows 0..6 at cell rows 4..31, four rows each */
+            unsigned bits = yy >= 4U && yy < 32U ? g[(yy - 4U) / 4U] : 0U, m = 0;
+            for (unsigned fx = 0; fx < 5; ++fx)
+                if (bits & (1U << (4 - fx)))
+                    m |= 7U << (1U + 3U * fx);          /* cell pixels 1 + 3 fx .. 3 + 3 fx */
+            for (unsigned k = 0; k < STAR_FB_MINI_W / 2U; ++k) {
+                unsigned two = (m >> (2U * k)) & 3U;
+                p[k] = two == 3U ? ff : two == 1U ? fbk : two == 2U ? bkf : fb_;
+            }
+        }
     }
 }
 

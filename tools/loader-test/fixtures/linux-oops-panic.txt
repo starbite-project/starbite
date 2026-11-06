@@ -1,0 +1,121 @@
+====1793975021.734512-D
+Panic#1 Part1
+<6>[  286.004233] systemd[1]: Started systemd-logind.service - User Login Management.
+<6>[  286.354233] systemd[1]: Reached target multi-user.target - Multi-User System.
+<6>[  286.713233] brcmfmac: brcmf_c_preinit_dcmds: Firmware: BCM4361/4 wl0: Jan 24 2019 23:50:12 version 13.38.60.2
+<6>[  287.081233] s9p-decon 16030000.decon: frame done: 2960 x 1440, pitch 5760
+<5>[  287.458233] random: crng reseeded on system resumption
+<6>[  287.844233] usb 1-1: new high-speed USB device number 2 using xhci-hcd
+<6>[  288.239233] EXT4-fs (mmcblk0p2): mounted filesystem 3c1f0a4e-1d2b-4e5f-8a9b-0c1d2e3f4a5b r/w with ordered data mode.
+<6>[  288.643233] panfrost 18500000.gpu: clock rate = 260000000
+<4>[  288.993233] s9p-g3d: BUCK6 rail check: 950 mV ok
+<6>[  289.352233] wlan0: authenticated
+<6>[  289.720233] wlan0: associated
+<6>[  290.097233] IPv6: ADDRCONF(NETDEV_CHANGE): wlan0: link becomes ready
+<6>[  290.483233] systemd[1]: Started systemd-logind.service - User Login Management.
+<6>[  290.878233] systemd[1]: Reached target multi-user.target - Multi-User System.
+<6>[  291.282233] brcmfmac: brcmf_c_preinit_dcmds: Firmware: BCM4361/4 wl0: Jan 24 2019 23:50:12 version 13.38.60.2
+<6>[  291.632233] s9p-decon 16030000.decon: frame done: 2960 x 1440, pitch 5760
+<5>[  291.991233] random: crng reseeded on system resumption
+<6>[  292.359233] usb 1-1: new high-speed USB device number 2 using xhci-hcd
+<6>[  292.736233] EXT4-fs (mmcblk0p2): mounted filesystem 3c1f0a4e-1d2b-4e5f-8a9b-0c1d2e3f4a5b r/w with ordered data mode.
+<6>[  293.122233] panfrost 18500000.gpu: clock rate = 260000000
+<4>[  293.517233] s9p-g3d: BUCK6 rail check: 950 mV ok
+<6>[  293.921233] wlan0: authenticated
+<6>[  294.271233] wlan0: associated
+<6>[  294.630233] IPv6: ADDRCONF(NETDEV_CHANGE): wlan0: link becomes ready
+<6>[  294.998233] systemd[1]: Started systemd-logind.service - User Login Management.
+<6>[  295.375233] systemd[1]: Reached target multi-user.target - Multi-User System.
+<6>[  295.761233] brcmfmac: brcmf_c_preinit_dcmds: Firmware: BCM4361/4 wl0: Jan 24 2019 23:50:12 version 13.38.60.2
+<6>[  296.156233] s9p-decon 16030000.decon: frame done: 2960 x 1440, pitch 5760
+<5>[  296.560233] random: crng reseeded on system resumption
+<6>[  296.910233] usb 1-1: new high-speed USB device number 2 using xhci-hcd
+<6>[  297.269233] EXT4-fs (mmcblk0p2): mounted filesystem 3c1f0a4e-1d2b-4e5f-8a9b-0c1d2e3f4a5b r/w with ordered data mode.
+<6>[  297.637233] panfrost 18500000.gpu: clock rate = 260000000
+<4>[  298.014233] s9p-g3d: BUCK6 rail check: 950 mV ok
+<6>[  298.400233] wlan0: authenticated
+<6>[  298.795233] wlan0: associated
+<6>[  299.199233] IPv6: ADDRCONF(NETDEV_CHANGE): wlan0: link becomes ready
+<6>[  299.549233] systemd[1]: Started systemd-logind.service - User Login Management.
+<6>[  299.908233] systemd[1]: Reached target multi-user.target - Multi-User System.
+<6>[  300.276233] brcmfmac: brcmf_c_preinit_dcmds: Firmware: BCM4361/4 wl0: Jan 24 2019 23:50:12 version 13.38.60.2
+<6>[  300.653233] s9p-decon 16030000.decon: frame done: 2960 x 1440, pitch 5760
+<5>[  301.039233] random: crng reseeded on system resumption
+<6>[  301.434233] usb 1-1: new high-speed USB device number 2 using xhci-hcd
+<6>[  301.838233] EXT4-fs (mmcblk0p2): mounted filesystem 3c1f0a4e-1d2b-4e5f-8a9b-0c1d2e3f4a5b r/w with ordered data mode.
+<6>[  302.188233] panfrost 18500000.gpu: clock rate = 260000000
+<4>[  302.547233] s9p-g3d: BUCK6 rail check: 950 mV ok
+<6>[  302.915233] wlan0: authenticated
+<6>[  303.292233] wlan0: associated
+<6>[  303.678233] IPv6: ADDRCONF(NETDEV_CHANGE): wlan0: link becomes ready
+<6>[  304.073233] systemd[1]: Started systemd-logind.service - User Login Management.
+<6>[  304.477233] systemd[1]: Reached target multi-user.target - Multi-User System.
+<6>[  304.827233] brcmfmac: brcmf_c_preinit_dcmds: Firmware: BCM4361/4 wl0: Jan 24 2019 23:50:12 version 13.38.60.2
+<6>[  305.186233] s9p-decon 16030000.decon: frame done: 2960 x 1440, pitch 5760
+<5>[  305.554233] random: crng reseeded on system resumption
+<6>[  305.931233] usb 1-1: new high-speed USB device number 2 using xhci-hcd
+<6>[  306.317233] EXT4-fs (mmcblk0p2): mounted filesystem 3c1f0a4e-1d2b-4e5f-8a9b-0c1d2e3f4a5b r/w with ordered data mode.
+<6>[  306.712233] panfrost 18500000.gpu: clock rate = 260000000
+<4>[  307.116233] s9p-g3d: BUCK6 rail check: 950 mV ok
+<6>[  307.466233] wlan0: authenticated
+<6>[  307.825233] wlan0: associated
+<6>[  308.193233] IPv6: ADDRCONF(NETDEV_CHANGE): wlan0: link becomes ready
+<6>[  308.570233] systemd[1]: Started systemd-logind.service - User Login Management.
+<6>[  308.956233] systemd[1]: Reached target multi-user.target - Multi-User System.
+<6>[  309.351233] brcmfmac: brcmf_c_preinit_dcmds: Firmware: BCM4361/4 wl0: Jan 24 2019 23:50:12 version 13.38.60.2
+<6>[  309.755233] s9p-decon 16030000.decon: frame done: 2960 x 1440, pitch 5760
+<6>[  312.402211] lkdtm: Performing direct entry EXCEPTION
+<1>[  312.402252] Unable to handle kernel NULL pointer dereference at virtual address 0000000000000000
+<1>[  312.402269] Mem abort info:
+<1>[  312.402286]   ESR = 0x0000000096000045
+<1>[  312.402303]   EC = 0x25: DABT (current EL), IL = 32 bits
+<1>[  312.402320]   SET = 0, FnV = 0
+<1>[  312.402337]   EA = 0, S1PTW = 0
+<1>[  312.402354]   FSC = 0x05: level 1 translation fault
+<1>[  312.402371] Data abort info:
+<1>[  312.402388]   ISV = 0, ISS = 0x00000045, ISS2 = 0x00000000
+<1>[  312.402405]   CM = 0, WnR = 1, TnD = 0, TagAccess = 0
+<1>[  312.402422]   GCS = 0, Overlay = 0, DirtyBit = 0, Xs = 0
+<1>[  312.402439] user pgtable: 4k pages, 39-bit VAs, pgdp=00000008835f2000
+<1>[  312.402456] [0000000000000000] pgd=0000000000000000, p4d=0000000000000000, pud=0000000000000000
+<0>[  312.402473] Internal error: Oops: 0000000096000045 [#1]  SMP
+<4>[  312.402490] Modules linked in: brcmfmac brcmutil cfg80211 panfrost gpu_sched drm_shmem_helper
+<4>[  312.402507] CPU: 2 UID: 0 PID: 1 Comm: init Not tainted 7.1.0-starbite-23527494 #1
+<4>[  312.402524] Hardware name: Samsung Galaxy S9 (SM-G960F) (DT)
+<4>[  312.402541] pstate: 60400005 (nZCv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+<4>[  312.402558] pc : lkdtm_EXCEPTION+0x8/0x18
+<4>[  312.402575] lr : lkdtm_do_action+0x24/0x40
+<4>[  312.402592] sp : ffffffc0808ebc90
+<4>[  312.402609] x29: ffffff8802b5d540 x28: 0000000000000012 x27: 0000000000000000
+<4>[  312.402626] x26: 0000000000000000 x25: ffffffc0811a5a40 x24: ffffff8803e1c000
+<4>[  312.402643] x23: ffffff8803e1c000 x22: 0000000000000000 x21: ffffffc080e7d1c8
+<4>[  312.402660] x20: ffffffc0808ebc90 x19: ffffff8802b5d540 x18: 0000000000000012
+<4>[  312.402677] x17: 0000000000000000 x16: 0000000000000000 x15: ffffffc0811a5a40
+<4>[  312.402694] x14: ffffff8803e1c000 x13: ffffff8803e1c000 x12: 0000000000000000
+<4>[  312.402711] x11: ffffffc080e7d1c8 x10: ffffffc0808ebc90 x9 : ffffff8802b5d540
+<4>[  312.402728] x8 : 0000000000000012 x7 : 0000000000000000 x6 : 0000000000000000
+<4>[  312.402745] x5 : ffffffc0811a5a40 x4 : ffffff8803e1c000 x3 : ffffff8803e1c000
+<4>[  312.402762] x2 : 0000000000000000 x1 : ffffffc080e7d1c8 x0 : ffffffc0808ebc90
+<4>[  312.402779] Call trace:
+<4>[  312.402796]  lkdtm_EXCEPTION+0x8/0x18 (P)
+<4>[  312.402813]  lkdtm_do_action+0x24/0x40 (L)
+<4>[  312.402830]  direct_entry+0x11c/0x188
+<4>[  312.402847]  full_proxy_write+0x60/0xb8
+<4>[  312.402864]  vfs_write+0xd8/0x370
+<4>[  312.402881]  ksys_write+0x78/0x110
+<4>[  312.402898]  __arm64_sys_write+0x24/0x38
+<4>[  312.402915]  invoke_syscall+0x50/0x120
+<4>[  312.402932]  el0_svc_common.constprop.0+0x48/0xf0
+<4>[  312.402949]  do_el0_svc+0x24/0x38
+<4>[  312.402966]  el0_svc+0x30/0xe0
+<4>[  312.402983]  el0t_64_sync_handler+0x120/0x130
+<4>[  312.403000]  el0t_64_sync+0x190/0x198
+<0>[  312.403017] Code: d503201f d503233f d2800000 d503201f (b900001f) 
+<4>[  312.403034] ---[ end trace 0000000000000000 ]---
+<0>[  312.405678] Kernel panic - not syncing: Oops: Fatal exception
+<2>[  312.405891] SMP: stopping secondary CPUs
+<0>[  312.406104] Kernel Offset: 0x2a6c600000 from 0xffffffc080000000
+<0>[  312.406317] PHYS_OFFSET: 0x80000000
+<0>[  312.406530] CPU features: 0x000,00000000,40080001,8241600b
+<0>[  312.406743] Memory Limit: none
+<0>[  312.406956] ---[ end Kernel panic - not syncing: Oops: Fatal exception ]---

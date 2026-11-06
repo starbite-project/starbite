@@ -592,7 +592,8 @@ static void test_catalog(void)
     CHECK(cat_load() > 10 && !cat_builtin(), "catalog parsed (%u entries)", cat_count());
     dump_catalog("cat-c.txt");
     int i = cat_find("linux-pmos");
-    CHECK(i >= 0 && cat_get((unsigned)i)->wdt_s == 60 && cat_get((unsigned)i)->wdt_feed == CW_KERNEL &&
+    /* [defaults.linux] wdt = 0 until a watchdog reset is seen to reach the loader (catalog.toml, 1f28633) */
+    CHECK(i >= 0 && cat_get((unsigned)i)->wdt_s == 0 && cat_get((unsigned)i)->wdt_feed == CW_KERNEL &&
           (cat_get((unsigned)i)->cflags & CE_LINUX_INFORM3) && !strncmp(cat_get((unsigned)i)->log[0], "quiet ", 6),
           "linux-pmos: defaults.linux applied");
     i = cat_find("linux-bringup");
@@ -627,6 +628,324 @@ static int catalog_variant(const char *mode)
     return !(cat_find("linux-pmos") >= 0 && cat_find("mac13") >= 0) ? 4 : 0;
 }
 
+/* ---- the watchdog's arguments (xnu_boot.c: not armed when they did not fit) -------------------- */
+
+static void test_wdt_args(void)
+{
+    /* XNU: boot-args of BOOT_LINE_LENGTH 608 (607 + NUL), as boot_xnu edits them */
+    static char cmd[608];
+    memset(cmd, 0, sizeof(cmd));
+    for (unsigned i = 0; i < 590; i += 10)
+        memcpy(cmd + i, "debug=0xc ", 10);
+    cmd[589] = 0;                            /* 589 bytes: ios26-sdt is 593 */
+    sb_line_edit(cmd, sizeof(cmd), "sbcrash=loader sbwdt=60", 1);
+    CHECK(!sb_wdt_args_ok(cmd, sizeof(cmd), SB_WDT_XNU, 60), "XNU: sbwdt=60 dropped (full boot-args): not armed");
+    strcpy(cmd, "-v debug=0xc rd=disk0s1 sweetquiet=1");
+    sb_line_edit(cmd, sizeof(cmd), "sbcrash=loader sbwdt=60", 1);
+    CHECK(sb_wdt_args_ok(cmd, sizeof(cmd), SB_WDT_XNU, 60), "XNU: sbwdt=60 in: armed (%s)", cmd);
+    CHECK(!sb_wdt_args_ok(cmd, sizeof(cmd), SB_WDT_XNU, 30), "XNU: another value is not ours");
+    CHECK(!sb_wdt_args_ok(cmd, sizeof(cmd), SB_WDT_XNU, 0), "no watchdog asked: nothing to arm");
+    strcpy(cmd, "sbwdt=60 a=1 sbwdt=0");
+    CHECK(!sb_wdt_args_ok(cmd, sizeof(cmd), SB_WDT_XNU, 60), "XNU: the last sbwdt= wins (0: never fed)");
+    strcpy(cmd, "xsbwdt=60 sbwdt=600");
+    CHECK(!sb_wdt_args_ok(cmd, sizeof(cmd), SB_WDT_XNU, 60), "XNU: word boundary, value");
+    char v[16];
+    CHECK(sb_arg_last("a=1 b=2 a=3", 11, "a", v, sizeof(v)) && !strcmp(v, "3") && !sb_arg_last("ab=1", 4, "a", v, sizeof(v)),
+          "last key=value");
+    /* Linux: the entry's cmdline (catalog.h cmdline[512]) after the DTB's own bootargs */
+    static char lx[512];
+    strcpy(lx, "sb.root=card sb.distro=pmos");
+    sb_line_edit(lx, sizeof(lx), "quiet loglevel=3", 0);
+    sb_line_edit(lx, sizeof(lx), "s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=60", 0);
+    CHECK(sb_wdt_args_ok(lx, sizeof(lx), SB_WDT_LINUX, 60), "Linux: both arguments: armed");
+    char dtb_and_entry[700];
+    snprintf(dtb_and_entry, sizeof(dtb_and_entry), "console=tty0 loglevel=4 s3c2410_wdt.tmr_atboot=0 %s", lx);
+    CHECK(sb_wdt_args_ok(dtb_and_entry, (unsigned)strlen(dtb_and_entry), SB_WDT_LINUX, 60),
+          "Linux: the DTB's tmr_atboot=0 comes first, ours wins");
+    memset(lx, 0, sizeof(lx));
+    for (unsigned i = 0; i < 480; i += 8)
+        memcpy(lx + i, "sb.x=12 ", 8);
+    lx[479] = 0;
+    sb_line_edit(lx, sizeof(lx), "s3c2410_wdt.tmr_atboot=1", 0);
+    sb_line_edit(lx, sizeof(lx), "s3c2410_wdt.tmr_margin=60", 0);
+    CHECK(!sb_wdt_args_ok(lx, sizeof(lx), SB_WDT_LINUX, 60), "Linux: tmr_margin dropped (long cmdline): not armed");
+    strcpy(lx, "s3c2410_wdt.tmr_margin=60");
+    CHECK(!sb_wdt_args_ok(lx, sizeof(lx), SB_WDT_LINUX, 60), "Linux: no tmr_atboot=1: the driver stops it, not armed");
+    strcpy(lx, "s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=60 s3c2410_wdt.tmr_atboot=0");
+    CHECK(!sb_wdt_args_ok(lx, sizeof(lx), SB_WDT_LINUX, 60), "Linux: a later tmr_atboot=0 wins");
+}
+
+/* ---- POST: the logo, the live log, skipping, the failure screen (post.c through sbfmt.c pv_*) -- */
+
+/* Polls every step ms from t0 to t1 with the keys given; the events seen, OR'ed. */
+static unsigned pv_run(struct pv_keys *k, int up, int down, uint64_t t0, uint64_t t1, unsigned step)
+{
+    unsigned ev = 0;
+    for (uint64_t t = t0; t < t1; t += step)
+        ev |= pv_poll(k, up, down, t);
+    return ev;
+}
+
+static void test_post_view(void)
+{
+    struct pv_keys k;
+    /* Volume Up held from power on (fastboot's gesture, checked after POST): the logo stays */
+    pv_init(&k, PV_LOGO, 1, 0);
+    CHECK(pv_run(&k, 1, 0, 0, 10000, 4) == 0 && k.view == PV_LOGO && !k.up_used && k.up_blocked,
+          "Volume Up held from the start: no log, still fastboot's");
+    CHECK(pv_end(&k, 0) == PV_END_GO, "... and straight on to fastboot's own check");
+    /* ... a 10 ms bounce in it is not a release */
+    CHECK(pv_run(&k, 0, 0, 10000, 10010, 4) == 0 && pv_run(&k, 1, 0, 10010, 12000, 4) == 0 && k.view == PV_LOGO,
+          "a bounce (released 10 ms) does not make it a new press");
+    /* ... released for real, then pressed again: that press is made during POST */
+    CHECK(pv_run(&k, 0, 0, 12000, 12100, 4) == 0 && !k.up_blocked, "released 100 ms: unblocked");
+    unsigned ev = pv_run(&k, 1, 0, 12100, 12300, 4);
+    CHECK(ev == PV_EV_LOG && k.view == PV_LOG && k.up_used, "pressed again during POST: the log");
+
+    /* a press that starts during POST, debounced */
+    pv_init(&k, PV_LOGO, 0, 0);
+    CHECK(pv_run(&k, 0, 0, 0, 3000, 5) == 0, "no keys: nothing");
+    CHECK(pv_run(&k, 1, 0, 3000, 3030, 5) == 0 && k.view == PV_LOGO, "30 ms of Volume Up: not yet");
+    CHECK(pv_run(&k, 0, 0, 3030, 3100, 5) == 0 && k.view == PV_LOGO, "a 30 ms blip never opens the log");
+    ev = pv_run(&k, 1, 0, 3100, 3200, 5);
+    CHECK(ev == PV_EV_LOG && k.view == PV_LOG, "40 ms held: the log (once)");
+    CHECK(pv_run(&k, 0, 0, 3200, 4000, 5) == 0 && pv_run(&k, 1, 0, 4000, 4500, 5) == 0 && k.view == PV_LOG,
+          "released: it stays in the log, no second event");
+    CHECK(pv_end(&k, 0) == PV_END_READ, "the log view ends with a pause to read");
+    CHECK(pv_hold(&k, 0, 0, 0) && pv_hold(&k, 0, 0, PV_READ_MS - 1) && !pv_hold(&k, 0, 0, PV_READ_MS),
+          "the pause: PV_READ_MS");
+    CHECK(pv_hold(&k, 1, 0, 30000) && !pv_hold(&k, 1, 0, PV_HOLD_MAX_MS), "Volume Up held: longer, capped");
+    CHECK(!pv_hold(&k, 1, 1, 100), "Power / Volume Down end it at once");
+    CHECK(pv_end(&k, 1) == PV_END_FAIL, "a red check: the failure screen, log or not");
+
+    /* sparse polls (a long check between them): two reads 400 ms apart still count */
+    pv_init(&k, PV_LOGO, 0, 0);
+    CHECK(pv_poll(&k, 1, 0, 1000) == 0 && pv_poll(&k, 1, 0, 1400) == PV_EV_LOG, "sparse polls");
+
+    /* log level 2-3: the log from the start; fastboot's held Volume Up does not hold it on screen */
+    pv_init(&k, PV_LOG, 1, 0);
+    CHECK(pv_run(&k, 1, 0, 0, 9000, 5) == 0 && k.view == PV_LOG && !k.up_used, "log from the start, Up held: no event");
+    CHECK(pv_end(&k, 0) == PV_END_READ && !pv_hold(&k, 1, 0, PV_READ_MS + 10), "fastboot's Up does not keep the log up");
+
+    /* quick POST: nothing drawn until Volume Up */
+    pv_init(&k, PV_NONE, 0, 0);
+    CHECK(pv_end(&k, 0) == PV_END_GO, "quick, nothing pressed: straight on");
+    CHECK(pv_run(&k, 1, 0, 0, 100, 5) == PV_EV_LOG && k.view == PV_LOG, "quick: Volume Up shows the lines");
+
+    /* Volume Down skips, once; it may be held from the start */
+    pv_init(&k, PV_LOGO, 0, 0);
+    CHECK(pv_run(&k, 0, 1, 0, 15, 5) == 0 && !k.skip, "Volume Down 15 ms: not yet");
+    CHECK(pv_run(&k, 0, 1, 15, 100, 5) == PV_EV_SKIP && k.skip, "Volume Down held: skip (once)");
+    CHECK(pv_run(&k, 1, 1, 100, 300, 5) == PV_EV_LOG && k.skip, "Volume Up still opens the log after a skip");
+    CHECK(pv_end(&k, 0) == PV_END_READ, "skipped, in the log: the pause");
+    pv_init(&k, PV_LOGO, 0, 0);
+    CHECK(pv_run(&k, 0, 1, 0, 50, 5) == PV_EV_SKIP && pv_end(&k, 0) == PV_END_GO, "skipped behind the logo: straight on");
+    CHECK(pv_end(&k, 2) == PV_END_FAIL, "... unless a check failed before the skip");
+
+    /* the failure screen's list: failures only, in display order */
+    static const uint8_t order[8] = { 0, 1, 11, 8, 2, 7, 12, 9 };
+    uint8_t st[16] = { 0 }, ids[3];
+    for (unsigned i = 0; i < 16; ++i)
+        st[i] = 1;                                   /* POST_OK */
+    CHECK(pv_failures(st, order, 8, 3, ids, 3) == 0, "clean: no failure screen");
+    st[9] = 3;                                       /* touch FAIL */
+    st[2] = 2;                                       /* PMIC WARN: never on it */
+    st[1] = 3;                                       /* timer FAIL */
+    unsigned nf = pv_failures(st, order, 8, 3, ids, 3);
+    CHECK(nf == 2 && ids[0] == 1 && ids[1] == 9, "two failures in display order (%u)", nf);
+    st[11] = 3;
+    st[12] = 3;
+    st[7] = 3;
+    nf = pv_failures(st, order, 8, 3, ids, 3);
+    CHECK(nf == 5 && ids[0] == 1 && ids[1] == 11 && ids[2] == 7, "five failed, three shown: %u", nf);
+    st[15] = 3;
+    CHECK(pv_failures(st, order, 8, 3, ids, 3) == 5, "a check not in this mode's order is not counted");
+}
+
+/* ---- the crash screen's parser and the saved excerpt, on real-looking captures ----------------- */
+
+static unsigned kinds_of(const char *t, unsigned n, unsigned want)
+{
+    struct sb_crashinfo ci;
+    static uint8_t k[4096];
+    unsigned nl = sb_crash_parse(t, n, &ci, k, sizeof(k)), c = 0;
+    for (unsigned i = 0; i < nl && i < sizeof(k); ++i)
+        c += k[i] == want;
+    return c;
+}
+
+/* The kind of the line that contains needle. */
+static int kind_at(const char *t, unsigned n, const char *needle)
+{
+    struct sb_crashinfo ci;
+    static uint8_t k[4096];
+    unsigned nl = sb_crash_parse(t, n, &ci, k, sizeof(k)), line = 0;
+    int at = sb_find(t, n, needle);
+    if (at < 0)
+        return -1;
+    for (int i = 0; i < at; ++i)
+        line += t[i] == '\n';
+    return line < nl ? k[line] : -1;
+}
+
+/* The text through a Linux persistent_ram zone (16 KiB, "DBGC", full and wrapped when it is long),
+ * back out with sb_ring_text, as crash.c gets it. */
+static unsigned through_ring(const char *t, unsigned n, char *out, unsigned cap, unsigned rot)
+{
+    static uint8_t z[0x4000];
+    const unsigned data = sizeof(z) - 12;
+    memset(z, 0, sizeof(z));
+    memcpy(z, "DBGC", 4);
+    if (n > data) {
+        t += n - data;
+        n = data;
+    }
+    unsigned start = n == data ? rot % data : n;      /* not full: data at 0..n, next write at n */
+    for (unsigned i = 0; i < n; ++i)
+        z[12 + (n == data ? (start + i) % data : i)] = (uint8_t)t[i];   /* full: oldest byte at start */
+    uint32_t st = start % data, sz = n;
+    memcpy(z + 4, &st, 4);
+    memcpy(z + 8, &sz, 4);
+    return sb_ring_text(z, sizeof(z), out, cap);
+}
+
+static void test_crash_parse(const char *fxdir)
+{
+    char p[1100];                   /* fxdir (under 1024) + a file name */
+    size_t n;
+    struct sb_crashinfo ci;
+    static char ring_text[0x4000], ex[CR_TEXT_MAX];
+    uint16_t lines;
+
+    /* Linux: an oops that panics (lkdtm EXCEPTION), the ramoops dmesg record */
+    snprintf(p, sizeof(p), "%s/linux-oops-panic.txt", fxdir);
+    char *t = (char *)slurp(p, &n);
+    CHECK(t != 0, "fixture %s", p);
+    if (t) {
+        unsigned rn = through_ring(t, (unsigned)n, ring_text, sizeof(ring_text), 0);
+        CHECK(rn == n && !memcmp(ring_text, t, n), "oops: through a ramoops zone unchanged");
+        unsigned nl = sb_crash_parse(ring_text, rn, &ci, 0, 0);
+        CHECK(nl == 121 && ci.lines == nl, "oops: %u lines", nl);
+        CHECK(!strcmp(ci.message, "Kernel panic - not syncing: Oops: Fatal exception"), "oops: message '%s'", ci.message);
+        CHECK(!strcmp(ci.version, "7.1.0-starbite-23527494"), "oops: kernel '%s'", ci.version);
+        CHECK(!strcmp(ci.task, "CPU 2 PID 1 init"), "oops: task '%s'", ci.task);
+        CHECK(ci.uptime_ms == 312405, "oops: uptime %llu ms", (unsigned long long)ci.uptime_ms);
+        CHECK(ci.regs == 15, "oops: register lines %u (pstate, pc, lr, sp, 10 x-lines, Code)", ci.regs);
+        CHECK(ci.trace == 14, "oops: trace lines %u (Call trace: + 13 frames)", ci.trace);
+        CHECK(ci.msg == 13, "oops: message lines %u (Unable, Mem abort + 5, Data abort + 3, Internal error, panic)", ci.msg);
+        CHECK(kind_at(t, (unsigned)n, "x2 : 0000000000000000") == CT_REGS && kind_at(t, (unsigned)n, "pc : lkdtm") == CT_REGS,
+              "oops: x2 / pc lines are registers");
+        CHECK(kind_at(t, (unsigned)n, " el0t_64_sync+0x190") == CT_TRACE && kind_at(t, (unsigned)n, "Call trace:") == CT_TRACE,
+              "oops: frames are the trace");
+        CHECK(kind_at(t, (unsigned)n, "---[ end trace") == CT_LOG && kind_at(t, (unsigned)n, "SMP: stopping") == CT_LOG,
+              "oops: the trace ends at the next unindented line");
+        CHECK(kind_at(t, (unsigned)n, "  FSC = 0x05") == CT_MSG && kind_at(t, (unsigned)n, "user pgtable") == CT_LOG,
+              "oops: the abort info block belongs to the message");
+        CHECK(kind_at(t, (unsigned)n, "Hardware name:") == CT_INFO && kind_at(t, (unsigned)n, "wlan0: associated") == CT_LOG,
+              "oops: info and log lines");
+        /* wrapped ring: rotate, only the order of the zone changes */
+        rn = through_ring(t, (unsigned)n, ring_text, sizeof(ring_text), 5000);
+        CHECK(rn == n && !memcmp(ring_text, t, n), "oops: a short record never wraps");
+
+        /* the saved excerpt: everything that matters, then the end; at most CR_TEXT_MAX */
+        unsigned en = cl_excerpt(ex, CR_TEXT_MAX, t, (unsigned)n, &lines);
+        struct sb_crashinfo e2;
+        CHECK(en <= CR_TEXT_MAX && en > 3000, "oops excerpt: %u bytes", en);
+        sb_crash_parse(ex, en, &e2, 0, 0);
+        CHECK(e2.regs == ci.regs && e2.trace == ci.trace && e2.msg == ci.msg && !strcmp(e2.message, ci.message) &&
+              !strcmp(e2.version, ci.version) && !strcmp(e2.task, ci.task) && e2.uptime_ms == ci.uptime_ms,
+              "oops excerpt: the same message, registers (%u), trace (%u), task, kernel, uptime", e2.regs, e2.trace);
+        CHECK(sb_find(ex, en, "[...]\n") >= 0 && sb_find(ex, en, "<4>") < 0 && sb_find(ex, en, "<0>[") < 0,
+              "oops excerpt: skipped lines marked, no <N> prefixes");
+        {
+            const char *last = "---[ end Kernel panic - not syncing: Oops: Fatal exception ]---\n";
+            unsigned ll = (unsigned)strlen(last);
+            CHECK(en > ll && !memcmp(ex + en - ll, last, ll), "oops excerpt: ends with the record's last line");
+        }
+        CHECK(ex[en - 1] == '\n' && lines == e2.lines, "oops excerpt: %u lines", lines);
+        CHECK(!memcmp(ex, "[...]\n", 6) && sb_find(ex, en, "Panic#1 Part1") < 0,
+              "oops excerpt: the start (record header, old lines) is cut");
+        CHECK(sb_crash_stamp("[  312.402558] pc : x", 21) == 15 && sb_crash_stamp("[x] a", 5) == 0 &&
+              sb_crash_stamp("[ 1.5]", 6) == 6, "time stamps");
+        /* a small report: the message and registers come first, the end is cut */
+        en = cl_excerpt(ex, 1200, t, (unsigned)n, &lines);
+        CHECK(en <= 1200 && sb_find(ex, en, "Unable to handle kernel NULL pointer") >= 0, "small excerpt %u: the message", en);
+        spit("excerpt-oops.txt", ex, en);
+        free(t);
+    }
+
+    /* Linux: `echo c > /proc/sysrq-trigger` (the phone's test, 2026-11-06): no registers */
+    snprintf(p, sizeof(p), "%s/linux-sysrq-panic.txt", fxdir);
+    t = (char *)slurp(p, &n);
+    CHECK(t != 0, "fixture %s", p);
+    if (t) {
+        sb_crash_parse(t, (unsigned)n, &ci, 0, 0);
+        CHECK(!strcmp(ci.message, "Kernel panic - not syncing: sysrq triggered crash"), "sysrq: message '%s'", ci.message);
+        CHECK(!strcmp(ci.task, "CPU 4 PID 1234 sh") && !strcmp(ci.version, "7.1.0-starbite-23527494"),
+              "sysrq: task '%s' kernel '%s'", ci.task, ci.version);
+        CHECK(ci.regs == 0 && ci.trace == 18 && ci.msg == 1, "sysrq: regs %u trace %u msg %u", ci.regs, ci.trace, ci.msg);
+        CHECK(ci.uptime_ms == 1032118, "sysrq: uptime %llu", (unsigned long long)ci.uptime_ms);
+        unsigned en = cl_excerpt(ex, CR_TEXT_MAX, t, (unsigned)n, &lines);
+        CHECK(en < n && sb_find(ex, en, "[...]") < 0 && kinds_of(ex, en, CT_TRACE) == 18,
+              "sysrq: short enough to be kept whole (%u of %zu bytes, prefixes off)", en, n);
+        free(t);
+    }
+
+    /* XNU (0399): the panic dump in the pmsg ring, through the loader's own 0x3F00 ring */
+    snprintf(p, sizeof(p), "%s/xnu-panic.txt", fxdir);
+    t = (char *)slurp(p, &n);
+    CHECK(t != 0, "fixture %s", p);
+    if (t) {
+        sb_crash_parse(t, (unsigned)n, &ci, 0, 0);
+        CHECK(!strncmp(ci.message, "panic(cpu 2 caller 0xfffffff0081d3a5c): Kernel data abort. at pc 0xfffffff008b2c4e8", 83),
+              "xnu: message '%s'", ci.message);
+        CHECK(!strcmp(ci.version, "xnu-12377.1.9~1/DEVELOPMENT_ARM64_T8101"), "xnu: kernel '%s'", ci.version);
+        CHECK(!strcmp(ci.task, "CPU 2 PID 0 kernel_task"), "xnu: task '%s'", ci.task);
+        CHECK(ci.uptime_ms == 1234000, "xnu: uptime %llu (the crash marker)", (unsigned long long)ci.uptime_ms);
+        CHECK(ci.regs == 12, "xnu: register lines %u (x0..x27 in 7, x28/fp/lr/sp, pc/cpsr/esr/far, 3 CORE)", ci.regs);
+        CHECK(ci.trace == 15, "xnu: trace lines %u (Panicked thread + 14 lr/fp)", ci.trace);
+        CHECK(kind_at(t, (unsigned)n, "CORE 2 is the one") == CT_LOG && kind_at(t, (unsigned)n, "--- console before") == CT_LOG,
+              "xnu: plain lines stay log");
+        CHECK(kind_at(t, (unsigned)n, "STARBITE: xnu crash v1") == CT_INFO && kind_at(t, (unsigned)n, "Kernel version:") == CT_INFO,
+              "xnu: the marker and version are info");
+        /* the dump as crash.c finds it: the needle, then to the end of the ring */
+        static uint8_t z[0x4000];
+        memset(z, 0, sizeof(z));
+        memcpy(z, "DBGC", 4);
+        unsigned pre = 300;
+        for (unsigned i = 0; i < pre; ++i)
+            z[12 + i] = (uint8_t)("STARBITE: loader line before the OS\n"[i % 36]);
+        memcpy(z + 12 + pre, t, n);
+        uint32_t st = pre + (uint32_t)n, sz = pre + (uint32_t)n;
+        memcpy(z + 4, &st, 4);
+        memcpy(z + 8, &sz, 4);
+        unsigned rn = sb_ring_text(z, sizeof(z), ring_text, sizeof(ring_text));
+        int at = sb_find(ring_text, rn, "STARBITE: XNU panic (sweetreboot)");
+        CHECK(at == (int)pre, "xnu: the needle at %d", at);
+        struct sb_crashinfo c2;
+        sb_crash_parse(ring_text + at, rn - (unsigned)at, &c2, 0, 0);
+        CHECK(!strcmp(c2.message, ci.message) && c2.regs == ci.regs && c2.trace == ci.trace, "xnu: from the ring");
+        unsigned en = cl_excerpt(ex, CR_TEXT_MAX, ring_text + at, rn - (unsigned)at, &lines);
+        sb_crash_parse(ex, en, &c2, 0, 0);
+        CHECK(en <= CR_TEXT_MAX && c2.regs == ci.regs && c2.trace == ci.trace && !strcmp(c2.task, ci.task) &&
+              c2.uptime_ms == ci.uptime_ms && !strcmp(c2.version, ci.version),
+              "xnu excerpt (%u bytes): registers, trace, task, uptime, kernel kept", en);
+        CHECK(sb_find(ex, en, "STARBITE HEALTH: watchdog feeder running") > 0, "xnu excerpt: the console tail's end");
+        spit("excerpt-xnu.txt", ex, en);
+        free(t);
+    }
+
+    /* prefixes, nothing, junk */
+    CHECK(sb_crash_prefix("<4>[ 1.0] x", 11) == 3 && sb_crash_prefix("<12>x", 5) == 4 && sb_crash_prefix("<x>", 3) == 0 &&
+          sb_crash_prefix("4>", 2) == 0, "syslog prefixes");
+    CHECK(sb_crash_parse("", 0, &ci, 0, 0) == 0 && !ci.message[0] && !ci.uptime_ms, "empty text");
+    const char *junk = "\x01\x02garbage\n\xff\xfe\nKernel panic - not syncing: x\n";
+    sb_crash_parse(junk, (unsigned)strlen(junk), &ci, 0, 0);
+    CHECK(!strcmp(ci.message, "Kernel panic - not syncing: x") && ci.lines == 3 && !ci.uptime_ms, "junk around a panic line");
+    unsigned en = cl_excerpt(ex, 8, junk, (unsigned)strlen(junk), &lines);
+    CHECK(en <= 8, "excerpt: a cap smaller than any line (%u)", en);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 4 && !strcmp(argv[1], "--catalog-variant")) {
@@ -649,6 +968,19 @@ int main(int argc, char **argv)
     test_dtmerge(argv[2], argv[3], argc > 4 ? argv[4] : "-", argc > 5 ? argv[5] : "-");
     test_maint();
     test_catalog();
+    test_wdt_args();
+    test_post_view();
+    {
+        /* the crash text fixtures sit beside S-Boot's FDT fixture */
+        char fx[1024];
+        snprintf(fx, sizeof(fx), "%s", argv[2]);
+        char *slash = strrchr(fx, '/');
+        if (slash)
+            *slash = 0;
+        else
+            strcpy(fx, ".");
+        test_crash_parse(fx);
+    }
     char cmd[2048];
     for (unsigned v = 0; v < 2; ++v) {
         snprintf(cmd, sizeof(cmd), "'%s' --catalog-variant '%s' %s", argv[0], outdir, v ? "damaged" : "old");

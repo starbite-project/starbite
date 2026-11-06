@@ -142,7 +142,8 @@ class Catalog(unittest.TestCase):
 
     def test_defaults_and_overrides(self):
         ext = dict(zip(sb.catalog_keys((OUT / 'cat.sbc').read_bytes()), sb.catalog_ext((OUT / 'cat.sbc').read_bytes())))
-        self.assertEqual(ext['linux-pmos'][1:], (60, 1, 1))
+        # [defaults.linux] wdt = 0 until a watchdog reset is seen to reach the loader (catalog.toml, 1f28633)
+        self.assertEqual(ext['linux-pmos'][1:], (0, 1, 1))
         self.assertEqual(ext['linux-bringup'], (['', '', '', ''], 0, 1, 1))
         self.assertEqual(ext['android'][1:3], (0, 3))
         self.assertEqual(ext['lab-failtest'][3], 2)

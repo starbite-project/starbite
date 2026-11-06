@@ -2178,3 +2178,34 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   xnu-ios26-health.xnu 44c3b7e5... in the worktree's out/. Host: tools/xnu-health-test/run.sh 911 checks.
   Catalog proposal tools/store/catalog-xnu-health.toml (wdt only per entry with a 0399 payload; hidden test
   entries xnuh-feed/-hang/-panic/-panic-spin boot with no root and no card writes).
+- 2026-11-07: **POST behind the Starbite logo, the crash report, the watchdog argument check (built,
+  host-tested, not flashed).** After health2's phone run (full POST, a real `echo c` panic detected and shown).
+  (1) The user: "i dont want that progress bar ... just starbite logo ... when you hold volume up it shows
+  the live log". The full POST now shows only the One mark logo (shim/starlte/post_logo.h, made by
+  tools/brand/post-logo.py from build/splash-concepts/final/logo.png, 11 KB PackBits) where S-Boot draws
+  its splash, the star breathing a dithered glow and three dots rippling (frames inside the checks, max 30
+  fps); S-Boot's One mark splash on the panel is used as is (no clear). A Volume Up press that starts during
+  POST opens the live log for the rest of the run (RAM line "C: CHECK 512/928 MIB 81%"); Volume Up held from
+  power on stays fastboot's (ignored until seen released 40 ms); log level 2-3 starts in the log; Volume
+  Down skips. Red checks: a failure screen (what, one line why, Power continues, 30 s); gold: logged only.
+  With menu v7 the clean logo stays on the panel for the intro's One mark handover (else the panel is put
+  back). Quick POST: silent over the splash. Key machine pv_* in sbfmt.c, host-tested. Log slot 245.
+  Why the old bar was full early: the RAM budget was only checked before writes; window C's read-back
+  (non-cacheable reads, slower) ran past it. Now writes stop while the read-back still fits (measured
+  speeds, 1/8 spare): RAM about 6 s, POST about 8 s.
+  (2) The user on the crash screen: "nowhere near detailed enough ... same text style but better". Now a
+  scrolling report in the same 5x7 font with lower case (fbtext star_fb_mini, 18x36 cells, 76 x 78 a page):
+  header (report #n = sbstore2's, OS, kernel release, crash wall time + uptime, task, reason, RST_STAT
+  bits, INFORM2/3, S-Boot code, watchdog, source, store slot), PANIC MESSAGE, CONTEXT, REGISTERS, CALL
+  TRACE, all 16 registers, LOG (30 / 150 / all), the other ramoops zone. Volume scrolls (held fast), Bixby
+  pages / next section, Bixby held = level, Power continues, one footer line. Right after a crash it shows
+  everything captured (both 16 KiB zones); the saved report keeps message/registers/trace + the end
+  (cl_excerpt). Parser sb_crash_parse, host-tested on fixtures linux-oops-panic.txt (lkdtm EXCEPTION),
+  linux-sysrq-panic.txt, xnu-panic.txt (0399 data abort). Recovery's setting: 1 SUMMARY / 2 DETAILS /
+  3 EVERYTHING. (3) boot_xnu / launch_prepare do not arm the watchdog when `sbwdt=N` (XNU, 607-byte
+  boot-args) or `s3c2410_wdt.tmr_atboot=1 tmr_margin=N` (Linux) did not make it into the command line
+  (sb_wdt_args_ok; pmsg "watchdog NOT armed", slot 19 bit 16). Host: loader-test 252 checks (Mac clang
+  ASan/UBSan and VM gcc; the two stale linux-pmos wdt=60 expectations now follow the catalog's wdt = 0),
+  xnu-health-test 911, usb-fastboot 315. Loader Image f218e18210bf71cb...; BOOT out/xnu-boot-health3.img
+  a7e942e7ca7d123aeec1ea6a38de4a82b2ae1722ea82c1943adb3bea6895714f (health2's template, payload-v7test,
+  menu-v7.sbm; the recipe rebuilds health2 byte for byte). Phone checks: docs/STARBITE-HEALTH.md 9 A-G.
