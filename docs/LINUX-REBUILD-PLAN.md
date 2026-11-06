@@ -663,3 +663,167 @@ release **`7.1.0-starbite-4da38c67`**, in the VM at /home/dev.guest/distros/_ker
 steps), so every row is drawn; `2` and `4` are the integer alternatives. Pass it through the chroot call (e.g.
 `sudo env SB_SCALE=3.2 ...`); on an already integrated root the same change is
 `sed -i 's/^scale = 3$/scale = 3.2/' /etc/phosh/phoc.ini` and a Phosh restart.
+
+---
+
+## 7. Panic screen and restart (2026-11-06)
+
+**Reports from the phone (2026-11-06, postmarketOS, `panic=10` on the command line).**
+- (a) After `echo c > /proc/sysrq-trigger` the phone stayed frozen on the Linux screen for about two minutes,
+  then reset. The loader then showed KERNEL PANIC (from the ramoops record).
+- (b) Earlier, `busybox devmem 0x1406080c 32 0x12345674; reboot -f` never reset: the phone dropped off USB and
+  needed the keys (6.5).
+
+### 7.1 Root cause: the kernel had no restart handler that resets this SoC
+
+- **PSCI is v0.1.** exynos9810.dtsi declares `compatible = "arm,psci"` with cpu_on/off/suspend IDs only. dmesg
+  says `psci: Using PSCI v0.1 Function IDs from DT` (build/test-boots/chromeos-11.log). v0.1 has no
+  SYSTEM_RESET, so the PSCI driver registers no restart handler.
+- **The PMU node has `syscon-reboot-mode` only.** That is a reboot notifier: it writes INFORM3 and resets
+  nothing. There is no `syscon-reboot` or `syscon-poweroff` node, although `CONFIG_POWER_RESET_SYSCON(_POWEROFF)=y`.
+- **The only restart handler is s3c2410_wdt's** (watchdog core, priority 128). `s3c2410wdt_restart` loads
+  WTCNT = WTDAT = 0x80 with prescaler 0x20 and divider 16, which is 2.6 ms on the 26 MHz clock. It enables the
+  reset, waits 500 ms and returns. Nothing else is registered, so `machine_restart` then prints "Reboot failed
+  -- System halted" and spins with interrupts off.
+- **`reboot` / `reboot -f`** (report b): `kernel_restart()` runs `device_shutdown()` first, and
+  `s3c2410wdt_shutdown()` calls `s3c2410wdt_enable(wdt, false)`. That sets bit 23 again in
+  AUTOMATIC_WDT_RESET_DISABLE (0x14060408) and MASK_WDT_RESET_REQUEST (0x1406040c), and stops the watchdog. The
+  restart handler then arms a watchdog whose reset request is masked, so nothing happens. The USB gadget was
+  already shut down, hence "dropped off USB". This follows from the code alone (mainline 7.1
+  drivers/watchdog/s3c2410_wdt.c).
+- **A panic** (report a): `emergency_restart()` skips `device_shutdown()`, so the bits are still clear from
+  probe and the watchdog is armed for 2.6 ms. Even so, the phone did not reset at +10 s.
+  - **No cluster-1 watchdog reset has ever been seen on this phone**: STARBITE-HEALTH 9.4 is still open, and
+    every RST_STAT recorded so far is 0x20000000 SWRESET.
+  - Samsung's kernel never restarts through the watchdog either (sec_reboot.c → exynos-reboot.c
+    `exynos_reboot`: ACPM notice, INFORM2/3, then `SWRESET = 1`).
+  - What finally reset the phone about two minutes later cannot be told from the data here. The loader's
+    saved report settles it (`python3 -I tools/store/sbstore2.py crashlog live --level 3`, row RST_STAT): bit
+    23 (0x00800000) means the watchdog reset fired, but late; anything else means another reset source.
+  - The new boot line `s9p-reset: RST_STAT ... WDT disable ... mask ... reset sequencer ...` now records the
+    same registers on every boot.
+
+### 7.2 What the kernel does now
+
+**Restart and power-off (patch-mainline.py step 10, in the port's s9p-clkgate.c).** These are plain MMIO writes
+to the PMU (`of_iomap` of the `samsung,exynos9810-pmu` node at boot). There is no regmap lock and no sleep, so
+the path works in panic context.
+- Restart, at priority 192 (before the watchdog's 128): INFORM2 = 0x12345678, then SWRESET (+0x400) = 1, then
+  `dsb`. This is Samsung's sequence, and the one the loader, Starbite Recovery and XNU's crash return use. It is
+  a warm reset, so ramoops survives.
+- **INFORM3 is not written.** reboot-mode has already written it for `reboot` (normal), `reboot recovery`,
+  `reboot download` and `reboot bootloader`. A panic keeps the boot's value, which the loader's crash return
+  has patched to normal, so the crash reaches the loader exactly as before.
+- If the phone has not reset 1 s later, the next handler (the watchdog) runs.
+- Power-off: PS_HOLD low (PMU +0x330c bit 8), as `exynos_power_off` and the loader's own power-off do. With a
+  cable in, the PMIC keeps the phone on; after 3 s it restarts instead, with INFORM3 = normal from
+  reboot-mode, so it lands in the loader menu.
+- `s9p_clkgate.pmu_reset=0` on the command line switches both off (back to the watchdog restart only).
+
+**Panic screen (patch-mainline.py step 6g, s9p-decon; `CONFIG_DRM_PANIC`).** drm_panic runs from the kmsg
+dump in `panic()`. That is after the other CPUs have stopped and the panic notifiers have run, and before
+`panic=10`'s delay. drm_panic's `kmsg` screen draws the kernel log's tail, and the driver supplies two
+hooks:
+- `get_scanout_buffer` returns the driver's own black frame (1440 x 2960, 5760-byte rows, write-combined,
+  allocated at probe and always mapped), so the client's buffer, stride and mapping never matter. If there is
+  no black frame, it uses the plane's own buffer when that has a kernel mapping.
+- drm_panic gets the rectangle x 36-1404, y 624-2800. That keeps it clear of the rounded corners and of the
+  self mask's bands (rows 0-149 and 2810-2959), in case a woken panel brings the mask back.
+  `get_default_font()` picks TER16x32 for that size: 85 columns x 68 rows, white on black.
+- `panic_flush` fills the margins black, draws the banner, then makes the frame the scanout with a flip's
+  register writes: the base address and stride, the window's shadow update request, and the hardware trigger
+  unmasked. It does not wait for the latch.
+
+**Why command mode and DSC are no obstacle.** The panel runs MIPI command mode with a TE-driven hardware
+trigger, and the trigger is left unmasked. DECON therefore sends the frame at the next TE (17 ms or less) and
+keeps sending it until the reset. DSC is applied in hardware after the blender; the buffer is plain ARGB8888.
+If the panel was blanked or never enabled, it is woken: sleep-out, a 120 ms busy wait, then display-on.
+
+**The banner** uses the loader's crash-screen layout: from y 200, a 36 px margin, 32 x 64 px cells (TER16x32
+at 2x), 42 columns.
+
+| Row | Text | Colour |
+|---|---|---|
+| 0 | `STARBITE: LINUX KERNEL PANIC` | red |
+| 1-2 | the panic message | white |
+| 3 | `CPU n  task (PID p)  UP s S` | muted |
+| 4 | `LINUX <release>` | muted |
+| 5 | `RESTARTING IN 10 S` (from `panic_timeout`) | gold |
+
+A blue rule sits under row 5. The colours are those of shim/starlte/crash.c.
+
+`s9p_decon.panic_banner=0` shows drm_panic's log only. A host render of the real code with a sysrq log (the
+patched driver's banner functions plus a copy of drm_panic's kmsg layout, real TER16x32 font) matched this
+layout; it is not checked into the repo.
+
+**Config (starbite.config).** The section sets these values:
+- `CONFIG_DRM_PANIC=y`
+- `CONFIG_DRM_PANIC_SCREEN="kmsg"`
+- foreground 0xffffff, background 0x000000
+- `CONFIG_DRM_PANIC_DEBUG=y` (optional)
+- `CONFIG_FONTS=y`, with 8x8, 8x16 and TER16x32. `FONTS=y` drops the default fonts, so 8x8 and 8x16 are
+  listed again.
+
+fbcon would also pick TER16x32 at 1440 x 2960. The DTB's bootargs therefore gain `fbcon=font:VGA8x16`
+(mk-starlte-dts.py), so the boot console looks as it did. Once drm_panic is registered, fbcon draws nothing
+during a panic (`skip_panic`), so it cannot scroll over the screen.
+
+### 7.3 Build (2026-11-06)
+
+The build ran with `limactl shell starbite -- env WORK=~/linux/panic-work OUT=~/distros/_kernel-panic
+MIN_HOST_FREE_GB=1 <worktree>/tools/linux/build-kernel.sh` (incremental, in /mnt/build). It produced release
+**`7.1.0-starbite-f797be6b`** in /home/dev.guest/distros/_kernel-panic/:
+
+| File | sha256 |
+|---|---|
+| `Image` | `35e5b39cbefb436dc90db8e5eaf77db4ac349ee762010d79b18ea4737e08325d` |
+| `exynos9810-starlte.dtb` | `f563dee16a2b2b39fc675b692d24cd1eec645f0480c36788c4db122155dd6e0f` |
+| `linux-old.dtb` | `0f33b012d73071621291d760683ca041e566bd22d584b03df79a5f890c9b287e` |
+| `rescue.dtb` | `550f1e5e0dcd8b0e096cc8374201c82c75f49155f0c88d090658a47f423eaa47` |
+| `modules-7.1.0-starbite-f797be6b.img` | `d4da3e8f1c70762991b19d5858b1e0563c70ef8393c18eaf22709b9f2dfb998a` (539 modules) |
+
+SHA256SUMS sits next to them. All check-kernel.py checks pass, including the 232 fragment values and the
+Image/modules pair. The code compiles without warnings at W=1. The work tree and the REPO_OUT copy were
+deleted. **Not flashed.**
+
+### 7.4 What needs the phone
+
+- That SWRESET from Linux resets at once. It is expected to, because the loader, Recovery, XNU and the
+  vendor kernel all reset this way.
+- That DECON shows the panic frame from panic context.
+- That a blanked panel wakes.
+- RST_STAT after the old kernel's slow reset (7.1).
+- Power-off with and without a cable.
+
+### 7.5 Phone test (one boot of this kernel, pmOS, as root over SSH)
+
+1. `dmesg | grep -e s9p-reset -e "panic screen"`. Expect two lines:
+   - `s9p-reset: RST_STAT ... INFORM3 12345670`, then `restart = INFORM2 + PMU SWRESET, power-off = PS_HOLD low`.
+   - `s9p-decon 16030000.decon: [drm] panic screen: own frame, log font TER16x32 (85 x 68 characters), banner on`.
+
+   `Registered 1 planes with drm panic` should also appear.
+2. **Dry run, no reset.** Run
+   `mount -t debugfs none /sys/kernel/debug 2>/dev/null; echo 1 > /sys/kernel/debug/dri/16030000.decon/drm_panic_plane_0`.
+   - The panel shows the panic screen at once with the gold title `STARBITE: PANIC SCREEN TEST` and the
+     live kernel log. Nothing resets.
+   - The next compositor frame (touch the screen) replaces it.
+   - Not shown: report the `dmesg` tail. The panic test below would then show nothing either, but it still
+     resets.
+3. **`reboot`.** After the shutdown messages the phone resets within about a second. The loader logs CLEAN
+   RESTART and shows no crash screen.
+4. **Panic.** Run `echo c > /proc/sysrq-trigger`.
+   - **Within about 1 s**: the Starbite panic screen.
+     - Banner: red `STARBITE: LINUX KERNEL PANIC`, white `sysrq triggered crash`, `CPU n  sh (PID n)  UP n S`,
+       `LINUX 7.1.0-starbite-f797be6b`, gold `RESTARTING IN 10 S`, a blue rule.
+     - Below it, the kernel log ending with `Kernel panic - not syncing: sysrq triggered crash`, the call
+       trace (`sysrq_handle_crash` ...), `SMP: stopping secondary CPUs`, `Memory Limit: none`.
+   - **About 10 s later** the phone resets by itself. Then S-Boot, POST as set, and the loader's crash
+     screen KERNEL PANIC ("panic: sysrq triggered crash", RESET: SWRESET).
+   - If the screen does not change but the reset still comes at 10 s: the drawing failed. Report it.
+   - If the screen shows but there is no reset: SWRESET did not reset. Hold Volume Down + Power for
+     7 s and report it.
+   - If it lands in TWRP: crash detection was off, so INFORM3 kept the DTB's recovery value (unchanged
+     behaviour).
+5. Optional: `reboot -f` also resets at once.
+6. Optional: `poweroff` with the cable out powers the phone off; press Power to start it. With the cable
+   in, it restarts into the loader after about 3 s.

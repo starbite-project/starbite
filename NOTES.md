@@ -2178,3 +2178,22 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   xnu-ios26-health.xnu 44c3b7e5... in the worktree's out/. Host: tools/xnu-health-test/run.sh 911 checks.
   Catalog proposal tools/store/catalog-xnu-health.toml (wdt only per entry with a 0399 payload; hidden test
   entries xnuh-feed/-hang/-panic/-panic-spin boot with no root and no card writes).
+- 2026-11-06: **Linux restart path and panic screen (kernel 7.1.0-starbite-f797be6b, built, not flashed).**
+  docs/LINUX-REBUILD-PLAN.md 7. Root cause of "reboot -f never resets" and of the panic that sat on screen
+  for about 2 min: this kernel's only restart handler was s3c2410_wdt's.
+  - PSCI is v0.1 (no SYSTEM_RESET), and the PMU node has reboot-mode only.
+  - `reboot` / `reboot -f`: the watchdog driver's shutdown re-masks its PMU reset (0x408/0x40c bit 23)
+    before the restart, so "Reboot failed -- System halted".
+  - panic=10: the watchdog was armed for 2.6 ms but no reset came. No cluster-1 watchdog reset has ever been
+    seen on this phone. The crash report's RST_STAT will say what reset it 2 min later.
+  - Fix, patch-mainline.py step 10 (s9p-clkgate): restart = INFORM2 0x12345678 + PMU SWRESET, the way Samsung,
+    the loader and XNU do it. Power-off = PS_HOLD low. INFORM3 is left to reboot-mode or the boot value, so the
+    loader's crash return is unchanged. `s9p_clkgate.pmu_reset=0` = off.
+  - Panic screen, step 6g (s9p-decon): drm_panic kmsg screen (TER16x32, 85x68) drawn into the driver's black
+    frame, a Starbite banner on top (the loader's layout and colours), the frame made the scanout with the
+    flip's three register writes, and a blanked panel woken. Command mode with TE and DSC need nothing more.
+  - starbite.config: DRM_PANIC, kmsg, DRM_PANIC_DEBUG (dry run through debugfs), FONTS with TER16x32.
+    Bootargs: `fbcon=font:VGA8x16` keeps the console font.
+  - Build in the VM: ~/distros/_kernel-panic/, Image 35e5b39c..., DTB f563dee1..., modules d4da3e8f....
+  - Phone test: plan 7.5 (debugfs dry run, reboot, `echo c > /proc/sysrq-trigger`: banner within ~1 s, reset
+    10 s later, then the loader's KERNEL PANIC).

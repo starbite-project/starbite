@@ -28,6 +28,10 @@ Port (work copy):
        6f: the S6E3HA8 self mask as Samsung handles it: panel_mask=1 (default)
        re-sends the rounded-corner image (patches/s6e3ha8-star-self-mask.hex)
        and the enable after every sleep-out, 2 = mask off, 0 = leave (plan 6.6).
+       6g: the panic screen: drm_panic's get_scanout_buffer/panic_flush hooks. The
+       kernel log (TER16x32) is drawn into the black frame under a Starbite banner
+       and made the scanout with the flip's register writes; panic_banner= (plan,
+       "Panic screen and restart").
   7.   s9p-g3d: the rail check. With step_volt off the rail must read 950 mV
        before every clock change and after every power-up; a lower reading is
        rewritten and counted (rail_fixups). The 260 MHz step uses 950 mV even
@@ -39,6 +43,9 @@ Port (work copy):
        and checked right after the port's own enables (STARBITE_CONFIG,
        STARBITE_CHECK = tools/linux/check-kernel.py); the boot.img size limit
        only warns (the loader takes the Image from its store).
+  10.  s9p-clkgate: restart by INFORM2 + PMU SWRESET and power-off by PS_HOLD, as
+       Samsung's exynos-reboot.c (the only restart handler was s3c2410_wdt's:
+       reboot -f hung, panic=10 reset minutes late); s9p_clkgate.pmu_reset=0 = off.
 
 The G3D power domain needs no edit: s9p_g3d_pd.always_on is already a 0644
 parameter (echo 1 > /sys/module/s9p_g3d_pd/parameters/always_on, or
@@ -641,6 +648,373 @@ MODULE_PARM_DESC(panel_mask, "S6E3HA8 self mask after every sleep-out: 1 = resto
 '''
 
 
+# 6g. The panic screen (docs/LINUX-REBUILD-PLAN.md, "Panic screen and restart").
+DECON_PANIC_INCLUDES = '''#include <linux/iopoll.h>
+/* Starbite panic screen (6g) */
+#include <drm/drm_fb_dma_helper.h>
+#include <drm/drm_panic.h>
+#include <linux/font.h>
+#include <linux/iosys-map.h>
+#include <linux/panic.h>
+#include <linux/panic_notifier.h>
+#include <linux/sched.h>
+#include <linux/sched/clock.h>
+#include <linux/utsname.h>
+'''
+
+DECON_PANIC = r'''/*
+ * Starbite panic screen (docs/LINUX-REBUILD-PLAN.md, "Panic screen and restart").
+ * drm_panic (CONFIG_DRM_PANIC, CONFIG_DRM_PANIC_SCREEN="kmsg") draws the kernel
+ * log's tail at the moment of the panic, from its kmsg dumper, before panic=10's
+ * delay. This driver gives it a buffer and makes DECON show it:
+ *
+ *  - get_scanout_buffer: the black frame allocated at probe (1440 x 2960 ARGB8888,
+ *    write-combined, always mapped, 5760-byte rows; display-off uses it otherwise),
+ *    so nothing depends on the client's buffer, its stride or its mapping. Without
+ *    that frame: the plane's own buffer if it has a kernel mapping. drm_panic gets
+ *    the rectangle x 36..1404, y 624..2800 (below the banner, clear of the rounded
+ *    corners and of the self mask's bands, rows 0-149 and 2810-2959):
+ *    get_default_font() picks TER16x32 there, 85 columns x 68 rows.
+ *  - panic_flush: black margins, the Starbite banner, then the frame is made the
+ *    scanout the way every flip is: base address (and stride) into the live fetch
+ *    channel, the window's shadow update request, the hardware trigger unmasked.
+ *    Register writes only: no lock, no sleep, no wait for the latch. The panel runs
+ *    MIPI command mode with TE-driven hardware trigger, so DECON sends the frame at
+ *    the next TE (<= 17 ms) and keeps sending it until the restart; DSC compresses
+ *    it in hardware on the way, the buffer is plain ARGB8888. A blanked panel is
+ *    woken: sleep-out, 120 ms busy wait, display-on.
+ *
+ * The banner (the loader's crash screen: from y 200, 36 px margin, 32 x 64 px
+ * cells, 42 columns): "STARBITE: LINUX KERNEL PANIC" (red), the panic message
+ * over two rows (white), CPU / task / uptime and the release (muted), the restart
+ * line (gold), a blue rule. Font: the one drm_panic uses, scaled to the cell.
+ *
+ *   panic_banner=0  drm_panic's log only (the banner area stays black)
+ *   CONFIG_DRM_PANIC_DEBUG: echo 1 > /sys/kernel/debug/dri/16030000.decon/drm_panic_plane_0
+ *                   draws the screen without a panic ("PANIC SCREEN TEST", gold);
+ *                   the next flip (any compositor frame) replaces it.
+ */
+#ifdef CONFIG_DRM_PANIC
+#define S9P_PANIC_X		36	/* the loader's LEFT */
+#define S9P_PANIC_TOP		200	/* the loader's TOP */
+#define S9P_PANIC_CELL_W	32
+#define S9P_PANIC_CELL_H	64
+#define S9P_PANIC_ROWS		6
+#define S9P_PANIC_RULE_Y	(S9P_PANIC_TOP + S9P_PANIC_ROWS * S9P_PANIC_CELL_H + 16)
+#define S9P_PANIC_RULE_H	4
+#define S9P_PANIC_LOG_Y		(S9P_PANIC_RULE_Y + 24)
+#define S9P_PANIC_LOG_END	(PANEL_H - 160)	/* above the self mask's bottom band (2810..) */
+/* the loader's crash.c colours */
+#define S9P_PANIC_BLACK		0xff000000
+#define S9P_PANIC_WHITE		0xffffffff
+#define S9P_PANIC_BLUE		0xff2a5bf0
+#define S9P_PANIC_MUTED		0xffb1bad3
+#define S9P_PANIC_GOLD		0xffffd43b
+#define S9P_PANIC_RED		0xffff4d4d
+
+static bool s9p_panic_banner = true;
+module_param_named(panic_banner, s9p_panic_banner, bool, 0644);
+MODULE_PARM_DESC(panic_banner, "Starbite banner above drm_panic's kernel log on the panic screen (default on)");
+
+static const char *s9p_panic_msg;	/* panic()'s message, from the panic notifier */
+
+static int s9p_panic_note(struct notifier_block *nb, unsigned long ev, void *data)
+{
+	s9p_panic_msg = data;
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block s9p_panic_nb = {
+	.notifier_call = s9p_panic_note,
+};
+
+struct s9p_panic_text {
+	u8 *base;
+	unsigned int pitch;
+	const struct font_desc *font;
+	unsigned int sx, sy, cols;
+};
+
+static void s9p_panic_fill(u8 *base, unsigned int pitch, unsigned int x0, unsigned int y0,
+			   unsigned int x1, unsigned int y1, u32 c)
+{
+	unsigned int x, y;
+
+	for (y = y0; y < y1 && y < PANEL_H; y++) {
+		u32 *p = (u32 *)(base + (size_t)y * pitch);
+
+		for (x = x0; x < x1 && x < PANEL_W; x++)
+			p[x] = c;
+	}
+}
+
+/* at most n characters of s on banner row r, cut at the screen's edge */
+static void s9p_panic_row(struct s9p_panic_text *t, unsigned int r, const char *s,
+			  unsigned int n, u32 fg)
+{
+	const struct font_desc *f = t->font;
+	unsigned int fp = DIV_ROUND_UP(f->width, 8);
+	unsigned int y0 = S9P_PANIC_TOP + r * S9P_PANIC_CELL_H;
+	unsigned int i, gx, gy;
+
+	for (i = 0; i < n && i < t->cols && s[i]; i++) {
+		const u8 *g = (const u8 *)f->data + (size_t)(unsigned char)s[i] * f->height * fp;
+		unsigned int x0 = S9P_PANIC_X + i * f->width * t->sx;
+
+		for (gy = 0; gy < f->height; gy++)
+			for (gx = 0; gx < f->width; gx++)
+				if (g[gy * fp + gx / 8] & (0x80 >> (gx % 8)))
+					s9p_panic_fill(t->base, t->pitch,
+						       x0 + gx * t->sx, y0 + gy * t->sy,
+						       x0 + (gx + 1) * t->sx, y0 + (gy + 1) * t->sy, fg);
+	}
+}
+
+static void s9p_panic_draw_banner(u8 *base, unsigned int pitch)
+{
+	struct s9p_panic_text t = { .base = base, .pitch = pitch };
+	bool real = panic_in_progress();
+	const char *msg = real ? s9p_panic_msg : "drm_panic test from debugfs, nothing crashed";
+	unsigned int len, n;
+	char line[64];
+
+	t.font = get_default_font(PANEL_W - 2 * S9P_PANIC_X, S9P_PANIC_LOG_END - S9P_PANIC_LOG_Y,
+				  NULL, NULL);
+	if (!t.font)
+		return;
+	t.sx = max(1u, S9P_PANIC_CELL_W / t.font->width);
+	t.sy = max(1u, S9P_PANIC_CELL_H / t.font->height);
+	t.cols = (PANEL_W - 2 * S9P_PANIC_X) / (t.font->width * t.sx);
+
+	s9p_panic_row(&t, 0, real ? "STARBITE: LINUX KERNEL PANIC" : "STARBITE: PANIC SCREEN TEST",
+		      ~0u, real ? S9P_PANIC_RED : S9P_PANIC_GOLD);
+	if (msg) {
+		len = strnlen(msg, 256);
+		while (len && (msg[len - 1] == '\n' || msg[len - 1] == ' '))
+			len--;
+		n = min(len, t.cols);
+		s9p_panic_row(&t, 1, msg, n, S9P_PANIC_WHITE);
+		if (len > n)
+			s9p_panic_row(&t, 2, msg + n, len - n, S9P_PANIC_WHITE);
+	}
+	snprintf(line, sizeof(line), "CPU %d  %.16s (PID %d)  UP %llu S", raw_smp_processor_id(),
+		 current->comm, task_pid_nr(current), local_clock() / NSEC_PER_SEC);
+	s9p_panic_row(&t, 3, line, ~0u, S9P_PANIC_MUTED);
+	snprintf(line, sizeof(line), "LINUX %.48s", init_utsname()->release);
+	s9p_panic_row(&t, 4, line, ~0u, S9P_PANIC_MUTED);
+	if (!real)
+		snprintf(line, sizeof(line), "THE NEXT FRAME ENDS THE TEST");
+	else if (panic_timeout > 0)
+		snprintf(line, sizeof(line), "RESTARTING IN %d S", panic_timeout);
+	else if (panic_timeout < 0)
+		snprintf(line, sizeof(line), "RESTARTING NOW");
+	else
+		snprintf(line, sizeof(line), "NO RESTART: VOL DOWN + POWER 7 S");
+	s9p_panic_row(&t, 5, line, ~0u, S9P_PANIC_GOLD);
+	s9p_panic_fill(base, pitch, S9P_PANIC_X, S9P_PANIC_RULE_Y, PANEL_W - S9P_PANIC_X,
+		       S9P_PANIC_RULE_Y + S9P_PANIC_RULE_H, S9P_PANIC_BLUE);
+}
+
+/* drm_panic holds mode_config.panic_lock around both hooks */
+static int s9p_panic_get_scanout_buffer(struct drm_plane *plane, struct drm_scanout_buffer *sb)
+{
+	struct s9p_decon *priv = to_s9p_decon(plane->dev);
+
+	if (priv->black_cpu) {
+		priv->panic_base = priv->black_cpu;
+		priv->panic_dma = priv->black_dma;
+		priv->panic_pitch = PANEL_W * 4;
+		sb->format = drm_format_info(DRM_FORMAT_ARGB8888);
+	} else {
+		struct drm_framebuffer *fb = plane->state ? plane->state->fb : NULL;
+		struct drm_gem_dma_object *obj;
+
+		if (!fb || fb->width < PANEL_W || fb->height < PANEL_H)
+			return -ENODEV;
+		obj = drm_fb_dma_get_gem_obj(fb, 0);
+		if (!obj || !obj->vaddr)
+			return -ENODEV;
+		priv->panic_base = (u8 *)obj->vaddr + fb->offsets[0];
+		priv->panic_dma = obj->dma_addr + fb->offsets[0];
+		priv->panic_pitch = fb->pitches[0];
+		sb->format = fb->format;
+	}
+	sb->width = PANEL_W - 2 * S9P_PANIC_X;
+	sb->height = S9P_PANIC_LOG_END - S9P_PANIC_LOG_Y;
+	sb->pitch[0] = priv->panic_pitch;
+	iosys_map_set_vaddr(&sb->map[0], priv->panic_base +
+			    (size_t)S9P_PANIC_LOG_Y * priv->panic_pitch + S9P_PANIC_X * 4);
+	return 0;
+}
+
+static void s9p_panic_flush(struct drm_plane *plane)
+{
+	struct s9p_decon *priv = to_s9p_decon(plane->dev);
+	u8 *base = priv->panic_base;
+	unsigned int pitch = priv->panic_pitch;
+
+	/* drm_panic filled and wrote the log rectangle; the rest is ours */
+	s9p_panic_fill(base, pitch, 0, 0, PANEL_W, S9P_PANIC_LOG_Y, S9P_PANIC_BLACK);
+	s9p_panic_fill(base, pitch, 0, S9P_PANIC_LOG_Y, S9P_PANIC_X, S9P_PANIC_LOG_END, S9P_PANIC_BLACK);
+	s9p_panic_fill(base, pitch, PANEL_W - S9P_PANIC_X, S9P_PANIC_LOG_Y, PANEL_W,
+		       S9P_PANIC_LOG_END, S9P_PANIC_BLACK);
+	s9p_panic_fill(base, pitch, 0, S9P_PANIC_LOG_END, PANEL_W, PANEL_H, S9P_PANIC_BLACK);
+	if (s9p_panic_banner)
+		s9p_panic_draw_banner(base, pitch);
+	if (base == priv->black_cpu && !panic_in_progress())
+		priv->panic_dirty = true;	/* a test: display-off clears it again */
+	wmb();		/* the frame is in memory before DECON is told to fetch it */
+	s9p_decon_program_address(priv, priv->panic_dma, pitch);
+	if (!priv->enabled) {
+		/* blanked (display off, maybe asleep) or never enabled: wake the panel */
+		if (s9p_panel_sleep) {
+			s9p_decon_dcs(priv, MIPI_DCS_EXIT_SLEEP_MODE);
+			mdelay(PANEL_SLEEP_DELAY_MS);
+		}
+		s9p_decon_dcs(priv, MIPI_DCS_SET_DISPLAY_ON);
+	}
+}
+
+static struct drm_plane_helper_funcs s9p_panic_plane_helpers;
+
+/* before drm_dev_register(), which registers drm_panic for planes with the hook */
+static void s9p_panic_setup(struct s9p_decon *priv)
+{
+	struct drm_plane *plane = &priv->pipe.plane;
+	unsigned int w = PANEL_W - 2 * S9P_PANIC_X, h = S9P_PANIC_LOG_END - S9P_PANIC_LOG_Y;
+	const struct font_desc *f = get_default_font(w, h, NULL, NULL);
+
+	s9p_panic_plane_helpers = *plane->helper_private;
+	s9p_panic_plane_helpers.get_scanout_buffer = s9p_panic_get_scanout_buffer;
+	s9p_panic_plane_helpers.panic_flush = s9p_panic_flush;
+	drm_plane_helper_add(plane, &s9p_panic_plane_helpers);
+	atomic_notifier_chain_register(&panic_notifier_list, &s9p_panic_nb);
+	if (!f)
+		return;
+	drm_info(&priv->drm, "panic screen: %s, log font %s (%u x %u characters), banner %s\n",
+		 priv->black_cpu ? "own frame" : "the plane's buffer", f->name,
+		 w / f->width, h / f->height, s9p_panic_banner ? "on" : "off");
+	if (f->height < 32)
+		drm_warn(&priv->drm, "panic log font %s is small: CONFIG_FONT_TER16x32 missing?\n",
+			 f->name);
+}
+#else
+static void s9p_panic_setup(struct s9p_decon *priv) { }
+#endif
+
+'''
+
+
+# 10. Restart and power-off (docs/LINUX-REBUILD-PLAN.md, "Panic screen and restart").
+CLKGATE_RESET = r'''
+/*
+ * Starbite restart and power-off (tools/linux/patch-mainline.py step 10;
+ * docs/LINUX-REBUILD-PLAN.md, "Panic screen and restart").
+ *
+ * Restart, Samsung's way (exynos-reboot.c exynos_reboot after sec_reboot.c;
+ * the Starbite loader, Starbite Recovery and XNU's crash return do the same):
+ * INFORM2 = 0x12345678 (a reset: otherwise S-Boot starts LP charging), then
+ * PMU SWRESET (+0x400) = 1, a warm reset that keeps DRAM (ramoops). INFORM3 is
+ * not touched: syscon-reboot-mode has already written it for a clean reboot
+ * ("reboot recovery", "reboot download"), and a panic keeps the boot's value
+ * (the loader's crash return patches the DTB's recovery value to normal).
+ * Plain writes to a mapping made at boot: no regmap lock, no sleeping, so
+ * panic=10's emergency_restart() resets at once. Priority 192, before
+ * s3c2410_wdt's 128.
+ *
+ * Without it the only restart handler is s3c2410_wdt's (PSCI is v0.1 on this
+ * firmware, no SYSTEM_RESET; the PMU node carries reboot-mode only). It arms
+ * cluster 1's watchdog for 2.6 ms. After device_shutdown() (reboot, reboot -f)
+ * s3c2410wdt_shutdown() has masked that watchdog's reset again (PMU 0x408 and
+ * 0x40c bit 23), so the restart ends in "Reboot failed -- System halted". After
+ * a panic it is unmasked, but no cluster-1 watchdog reset has ever been seen
+ * on this phone, and the phone sat on the panic for about two minutes.
+ *
+ * Power-off: PS_HOLD low (PMU +0x330c bit 8, exynos_power_off). With a cable
+ * in, the PMIC keeps the phone on; after 3 s it restarts instead, as the
+ * loader's own power-off does (reboot-mode wrote INFORM3 = normal).
+ *
+ * s9p_clkgate.pmu_reset=0: neither (mainline: watchdog restart, no power-off).
+ * The boot line "s9p-reset:" logs RST_STAT, the watchdog's PMU disable/mask
+ * bits and the reset sequencer (0x500, bit 0 = Samsung's DFD dump) as found.
+ */
+#define S9P_PMU_SWRESET		0x0400
+#define S9P_PMU_RST_STAT	0x0404
+#define S9P_PMU_WDT_DISABLE	0x0408
+#define S9P_PMU_WDT_MASK	0x040c
+#define S9P_PMU_RESET_SEQ	0x0500
+#define S9P_PMU_INFORM2		0x0808
+#define S9P_PMU_INFORM3		0x080c
+#define S9P_PMU_PS_HOLD		0x330c
+#define  S9P_PS_HOLD_OUT	BIT(8)
+#define S9P_INFORM2_RESET	0x12345678
+
+static void __iomem *s9p_pmu;
+static bool s9p_pmu_reset = true;
+module_param_named(pmu_reset, s9p_pmu_reset, bool, 0444);
+MODULE_PARM_DESC(pmu_reset, "restart by PMU SWRESET, power off by PS_HOLD (Starbite; 0 = watchdog restart only)");
+
+static void s9p_pmu_swreset(void)
+{
+	writel_relaxed(S9P_INFORM2_RESET, s9p_pmu + S9P_PMU_INFORM2);
+	dsb(sy);
+	writel_relaxed(1, s9p_pmu + S9P_PMU_SWRESET);
+	dsb(sy);
+}
+
+static int s9p_pmu_restart(struct sys_off_data *data)
+{
+	s9p_pmu_swreset();
+	mdelay(1000);
+	pr_emerg("s9p-reset: SWRESET did not reset (INFORM3 %08x), next handler\n",
+		 readl_relaxed(s9p_pmu + S9P_PMU_INFORM3));
+	return NOTIFY_DONE;
+}
+
+static int s9p_pmu_power_off(struct sys_off_data *data)
+{
+	writel_relaxed(readl_relaxed(s9p_pmu + S9P_PMU_PS_HOLD) & ~S9P_PS_HOLD_OUT,
+		       s9p_pmu + S9P_PMU_PS_HOLD);
+	dsb(sy);
+	mdelay(3000);
+	pr_emerg("s9p-reset: still on with PS_HOLD low (a cable keeps the PMIC on), restarting\n");
+	s9p_pmu_swreset();
+	mdelay(1000);
+	return NOTIFY_DONE;
+}
+
+static int __init s9p_pmu_reset_init(void)
+{
+	struct device_node *np;
+
+	np = of_find_compatible_node(NULL, NULL, "samsung,exynos9810-pmu");
+	if (!np)
+		return 0;
+	s9p_pmu = of_iomap(np, 0);
+	of_node_put(np);
+	if (!s9p_pmu)
+		return -ENOMEM;
+	pr_info("s9p-reset: RST_STAT %08x WDT disable %08x mask %08x reset sequencer %08x INFORM2 %08x INFORM3 %08x\n",
+		readl_relaxed(s9p_pmu + S9P_PMU_RST_STAT), readl_relaxed(s9p_pmu + S9P_PMU_WDT_DISABLE),
+		readl_relaxed(s9p_pmu + S9P_PMU_WDT_MASK), readl_relaxed(s9p_pmu + S9P_PMU_RESET_SEQ),
+		readl_relaxed(s9p_pmu + S9P_PMU_INFORM2), readl_relaxed(s9p_pmu + S9P_PMU_INFORM3));
+	if (!s9p_pmu_reset) {
+		pr_info("s9p-reset: off (pmu_reset=0): watchdog restart only, no power-off\n");
+		return 0;
+	}
+	if (IS_ERR(register_sys_off_handler(SYS_OFF_MODE_RESTART, SYS_OFF_PRIO_HIGH,
+					    s9p_pmu_restart, NULL)))
+		pr_err("s9p-reset: restart handler not registered\n");
+	if (IS_ERR(register_sys_off_handler(SYS_OFF_MODE_POWER_OFF, SYS_OFF_PRIO_DEFAULT,
+					    s9p_pmu_power_off, NULL)))
+		pr_err("s9p-reset: power-off handler not registered\n");
+	pr_info("s9p-reset: restart = INFORM2 + PMU SWRESET, power-off = PS_HOLD low\n");
+	return 0;
+}
+postcore_initcall(s9p_pmu_reset_init);
+'''
+
+
 def patch_port(work):
     w = Path(work)
 
@@ -871,6 +1245,41 @@ def patch_port(work):
          '}\n',
          's9p_panel_mask_init(priv);\t/* Starbite self mask')
 
+    # 6g. s9p-decon: the panic screen (2026-11-06). drm_panic's kmsg screen (TER16x32) drawn into the
+    # black frame, a Starbite banner on top, and the frame made the scanout with the flip's register
+    # writes (no locks, no sleeping); a blanked panel is woken. Needs CONFIG_DRM_PANIC and
+    # CONFIG_FONT_TER16x32 (starbite.config); compiles to nothing without CONFIG_DRM_PANIC.
+    edit(w, decon, '#include <linux/iopoll.h>\n', DECON_PANIC_INCLUDES, 'Starbite panic screen (6g)')
+    edit(w, decon,
+         '\tdma_addr_t black_dma;\n',
+         '\tdma_addr_t black_dma;\n'
+         '\t/* Starbite panic screen: the frame drm_panic draws into */\n'
+         '\tu8 *panic_base;\n'
+         '\tdma_addr_t panic_dma;\n'
+         '\tunsigned int panic_pitch;\n'
+         '\tbool panic_dirty;\t/* a debugfs test drew into the black frame */\n',
+         'Starbite panic screen: the frame drm_panic draws into')
+    edit(w, decon,
+         '/* ------------------------------------------------------------- connector */\n',
+         DECON_PANIC + '/* ------------------------------------------------------------- connector */\n',
+         'static int s9p_panic_get_scanout_buffer(')
+    edit(w, decon,
+         '\t\t\t\t\t   &priv->connector);\n\tif (ret)\n\t\tgoto err_config;\n',
+         '\t\t\t\t\t   &priv->connector);\n\tif (ret)\n\t\tgoto err_config;\n'
+         '\ts9p_panic_setup(priv);\t/* Starbite panic screen: before drm_dev_register() */\n',
+         's9p_panic_setup(priv);\t/* Starbite panic screen')
+    edit(w, decon,
+         '\tif (s9p_wait_shadow_idle(priv))\n\t\treturn;\n'
+         '\ts9p_decon_program_address(priv, priv->black_dma, PANEL_W * 4);\n',
+         '\tif (s9p_wait_shadow_idle(priv))\n\t\treturn;\n'
+         '\tif (priv->panic_dirty) {\t/* Starbite panic screen: a test drew into it */\n'
+         '\t\tmemset(priv->black_cpu, 0, PANEL_W * PANEL_H * 4);\n'
+         '\t\twmb();\n'
+         '\t\tpriv->panic_dirty = false;\n'
+         '\t}\n'
+         '\ts9p_decon_program_address(priv, priv->black_dma, PANEL_W * 4);\n',
+         'Starbite panic screen: a test drew into it')
+
     # 7. s9p-g3d: rail check, 950 mV at 260 MHz
     g3d = 'src/soc/s9p-g3d.c'
     edit(w, g3d,
@@ -1013,6 +1422,19 @@ if [ -n "${STARBITE_CONFIG:-}" ]; then
 fi
 ''',
          'STARBITE_CONFIG')
+
+    # 10. s9p-clkgate: restart through PMU SWRESET, power-off through PS_HOLD (2026-11-06). The only
+    #     restart handler was s3c2410_wdt's: reboot / reboot -f hung, panic=10 reset ~2 min late.
+    clk = 'src/soc/s9p-clkgate.c'
+    edit(w, clk, '#include <linux/of_address.h>\n',
+         '#include <linux/of_address.h>\n'
+         '#include <linux/moduleparam.h>\t/* Starbite restart (10) */\n'
+         '#include <linux/notifier.h>\n'
+         '#include <linux/reboot.h>\n',
+         'Starbite restart (10)')
+    edit(w, clk, 'postcore_initcall(s9p_clkgate_init);\n',
+         'postcore_initcall(s9p_clkgate_init);\n' + CLKGATE_RESET,
+         'static int s9p_pmu_restart(')
 
 
 ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
