@@ -55,6 +55,25 @@ resumable, no-password checks; rehearsed against fakes only); 64 GB card layout 
 LineageOS 24 live (docs/ANDROID-PIXEL.md section 10). Linux black bars: kernel path proven full-frame, the panel
 mask test needs eyes (docs/LINUX-REBUILD-PLAN.md 6.5).
 
+**Now (the user, 2026-11-06):** One UI 8 (UN1CA 9810, built here, installed the Starbite way) replaces
+LineageOS as the main Android; UFS re-laid with Windows kept (~18 GiB) and ~16 GiB Android data; first boot
+straight to the home screen, no setup. The installer must take a stock SM-G960F (unlocked bootloader) all the
+way to a full Starbite phone. Linux black bands after every screen-off (panel self mask, plan 6.6).
+
+**Backlog: the user's notes (2026-11-06), not yet ordered**
+- Global panic and hang detection for all systems.
+- Add the other remaining systems (the lineup's missing entries); maybe an emulation OS (QEMU).
+- Cleaner OS boots: debug logs off by default, behind a flag/level that is easy to raise, so every OS
+  boots like a native one and not hacked together.
+- Starbite OS.
+- Engineer OS: better and stronger tests (extreme stress, thermal, battery and battery-stability tests);
+  also a utility OS.
+- Linux / ChromiumOS graphics.
+- iOS 26 work.
+- Apple services on iOS 16 using identifiers from the user's own Apple device (never in shared exports).
+- macOS Sonoma / Sequoia; better trackpad and keyboard.
+- iOS 16 thermal work.
+
 **One phone only (2026-11-05):** the second S9 is missing, so everything is built and tested on S9 #1. Work the
 plans gave to S9 #2 (GPT editor, installer writes, UO1/FB1 bring-up) runs here instead: dry runs first, and a
 fresh, verified backup of every irreplaceable partition and image before any real write.
