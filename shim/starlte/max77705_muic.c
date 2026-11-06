@@ -282,6 +282,11 @@ int muic_poll(void)
     return back ? 2 : m.last_vbus;
 }
 
+int muic_vbus(void)
+{
+    return bus_state > 0 && m.last_vbus;
+}
+
 int muic_battery(unsigned *mv, unsigned *pct)
 {
     uint8_t b[2];

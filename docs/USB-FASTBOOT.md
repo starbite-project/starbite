@@ -391,9 +391,19 @@ comes up at the first poll after it).
 ### 11.2 How (`fastboot_dev.c` "background", `fbbg.h`)
 
 - `xnu_boot.c` calls `fbbg_enable()` after the catalog is loaded (before the crash report and the menu);
-  `recovery_main` calls it too. The **first `fbbg_poll`** brings USB up: MAX77705 route, PHY, DWC3, as section 4
-  (about 0.1 s, once). If that fails, it is logged (`STARBITE: usb: background fastboot could not start: ...`) and
-  **not retried** in this boot, so no menu frame ever waits for it again.
+  `recovery_main` calls it too. The **first `fbbg_poll`** brings USB up: MAX77705 route (once a boot), PHY, DWC3, as
+  section 4 (about 0.1 s).
+- **One link for the whole boot** (health6): the crash report, the boot menu and Starbite Recovery serve it in turn.
+  When to start, serve or restart it is `sbfmt.c` bgl_* (host-tested):
+  - **Not served for 750 ms** (menu v7's intro and wallpaper after the crash report, a POST run from recovery, Lab):
+    restarted (soft disconnect, PHY and core again) before it is served, so the host sees a fresh attach. health5
+    on the phone: a command sent in the 3 s between the crash report and the menu made macOS reset the device;
+    nobody answered the new enumeration, macOS gave up on the port and `fastboot devices` stayed empty at the menu.
+    A command sent during such a gap fails; the next one works (`sbfb.py wait menu`).
+  - **A failed start** is logged and retried after 5 s, then 10, 20, 40, 60 s (a waiting poll costs nothing).
+  - **Plugged in (VBUS) but not configured by a host for 10 s** (a charger, an unanswered "allow accessory"
+    prompt): restarted, then after 20, 40, 60 s; a configured link resets that.
+  - `oem usb` shows the background link's state, starts, restarts and failures.
 - Each poll services the controller and the fastboot / console queues for **at most about 2 ms** (a long answer
   goes out in bursts over several frames; a download runs in DMA between polls). Every 500 ms it reads VBUS and
   restarts the link after a replug (section 4.1); a MAX77705 that stops answering costs at most its I2C timeouts.
@@ -448,6 +458,11 @@ python3 -I tools/store/sbfb.py run out/x.xnu       # fastboot boot, also from th
 - `tools/usb-fastboot/run-host-test.sh` (392 checks): `getvar mode` (and in `getvar all`), `oem key` with every key
   name, a hold, refusals (unknown key, junk, no menu waiting), `oem screen` + `upload` byte for byte, `upload` of a
   log after it, `oem reboot-to menu` (mailbox cleared, normal reboot), `oem reboot-to maint`, `continue`.
+- `tools/loader-test/run.sh`: the link across one boot (`bgl_*`): not wanted = nothing; the crash report's start;
+  the menu's first poll after a 3.2 s intro restarts it once; slow 200 ms frames do not; a start stopped by
+  `boot_entry` starts again; recovery after a 9 s POST restarts once; off = never again; failed starts back off
+  5, 10, 20 ... 60 s; plugged in but unconfigured restarts after 10, 20 s, and stops when a host configures it; no
+  VBUS = left alone.
 - `tools/loader-test/run.sh`: the key queue's timing (a press 150 ms from the first read, three presses with their
   times and gaps, full queue, cap, names), a plain press against every menu's limits, and injected presses driving
   the crash report's real key machine (`cs_poll`: 3 lines, one level, continue) and POST's (Volume Up opens the log).
@@ -460,6 +475,8 @@ python3 -I tools/store/sbfb.py run out/x.xnu       # fastboot boot, also from th
 3. `sbfb.py screen m.png`: the menu as on the panel.
 4. `sbfb.py boot linux-pmos`, `sbfb.py menu`, `sbfb.py reboot recovery` from the menu.
 5. On a crash report: `sbfb.py key down` scrolls; `sbfb.py key bixby:900` changes the level; `sbfb.py crash`.
+   Then `sbfb.py key power` and `sbfb.py wait menu`: the menu answers within a few seconds of its first frame
+   (health6; with health5 it never did).
 6. In Starbite Recovery (Bixby at boot): `sbfb.py status` says `mode recovery`; `sbfb.py maint` starts maintenance.
 7. Unplug and replug at the menu: the device comes back within about 2 s; the menu never freezes.
 8. Each OS after a menu with USB up: Linux's gadget enumerates, XNU and the woa UEFI as before (USB stopped and reset).

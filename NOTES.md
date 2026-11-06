@@ -2325,3 +2325,15 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   addresses >= 64 GiB and what ACPM / I2C cannot encode stay impossible. Host: 526 unit checks, tour 84
   pages, Lab tour 22 incl. GPU and tier 4, reproducible; engineer.img 4476928 bytes, sha256
   0e12eac72c217e31b5ec031f091e18992eac1476fdb7d7f493805d7099427696.
+
+- 2026-11-07: **health6: one background USB link per boot (built, host-tested, not flashed).** health5 on the
+  phone: menu / crash report over USB good (status, screen, boot, `key down:1500` scrolled the report), but after
+  `sbfb key power` on the crash report the menu never answered and `fastboot devices` stayed empty. Cause: nothing
+  polled USB during menu v7's intro and wallpaper (about 3 s); the Mac's command then made macOS reset the device,
+  the new enumeration got no answer, macOS gave up on the port. Now sbfmt.c bgl_* decides per poll: a link not
+  served for 750 ms is restarted (soft disconnect + PHY + core: a fresh attach) before it is served; a failed start
+  is retried after 5, 10, 20 ... 60 s; plugged in (VBUS) but unconfigured for 10 s (then 20, 40, 60) is restarted;
+  the MAX77705 route once a boot. `oem usb` shows starts / restarts / failures. Host: crash report -> menu ->
+  recovery transitions, slow frames, a stopped start, POST gap, off, back-off, unconfigured, no VBUS (loader-test
+  365 checks; usb-fastboot 392; clang ASan/UBSan and VM gcc; xnu-health-test 911). Loader Image 2488043d...;
+  BOOT out/xnu-boot-health6.img babb570226cc5092d8bee99c5fadce64988cd7995dcf111ed64e899572781dc9 (same recipe).

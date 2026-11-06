@@ -729,7 +729,7 @@ sh tools/loader-test/run.sh                    # the Mac's clang, ASan + UBSan
 limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 ```
 
-- **host_test.c (347 checks)**:
+- **host_test.c (365 checks)**:
   - CRC32
   - settings: old record = defaults, round trip, damage, clamps, sbstore2's block as the loader reads it
   - crash log: header and report round trip, the ring wrapping at 17 reports, damage, the log tail
@@ -771,6 +771,8 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
     an oops once; a record found after an XNU launch is marked, not reported, and not reported later as
     Linux's; the first boot of a consuming loader after an old one (CRC equal: no report, marked; then the
     identical next crash is reported); ring positions (`sb_ring_phys`)
+  - (health6) the background USB link across a boot: crash report -> menu -> recovery, gaps, retries,
+    unconfigured links (docs/USB-FASTBOOT.md 11.6)
   - (health5) keys from USB: the queue's timing, a plain press against every menu's limits, injected presses
     driving the crash report's `cs_poll` and POST's `pv_poll` (docs/USB-FASTBOOT.md 11.6)
 - **check_dtmerge.py (29 checks)**: section 6.4's rules against the merged files.
@@ -870,6 +872,10 @@ move. The rest of the health3 list below still holds.
 
 **Images**:
 
+- **BOOT `out/xnu-boot-health6.img` (sha256 babb570226cc5092..., loader Image 2488043d...)**: health5 + one
+  background USB link for the boot, restarted after an unserved gap (the crash report -> menu dead link of
+  health5), failed starts retried with back-off, unconfigured links restarted (docs/USB-FASTBOOT.md 11.2). Same
+  recipe; roll back with health5.
 - **BOOT `out/xnu-boot-health5.img` (sha256 d5e6063c957d1915..., loader Image d2118f6a...)**: health4 + judged evidence marked in RAM
   (4.2) + fastboot in the background at the boot menu, Starbite Recovery and the crash report
   (docs/USB-FASTBOOT.md 11); same recipe. Roll back with health4.
