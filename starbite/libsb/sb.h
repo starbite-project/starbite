@@ -108,6 +108,12 @@ void sb_dcache_inval(const volatile void *addr, uint64_t len);
 /* What the identity map says about a physical address: 0 unmapped, 1 device, 2 write-back,
  * 3 non-cacheable. */
 int sb_map_kind(uint64_t pa);
+/* Tier 4 only (engineer/armed.c, after the confirmation): map the block that holds pa (2 MiB in
+ * 0x80000000..0xbfffffff, else 1 GiB; below 64 GiB) as Device-nGnRnE for one attempted access, so
+ * the access reaches the bus and TrustZone / the interconnect answers it. 1 mapped (call
+ * sb_mmu_unmap_temp afterwards), 0 already mapped, -1 not mappable. */
+int sb_mmu_map_temp(uint64_t pa);
+void sb_mmu_unmap_temp(void);
 
 /* ---- faults (crt0.S vectors) ----------------------------------------------------------------- */
 
@@ -247,6 +253,15 @@ int sb_fg_word(uint8_t reg, uint16_t *v);
 int sb_chg_read(uint8_t reg, uint8_t *v);
 int sb_usbc_read(uint8_t reg, uint8_t *v);
 int sb_bat_read(struct sb_bat *b);
+/* A fuel-gauge word read up to 3 times when the bus fails; with lo < hi, a value outside
+ * [lo, hi] is read again and, if it stays outside, rejected (0). Counted for the pages: the
+ * gauge's I2C reads used to turn a failed read into "0 mV". */
+int sb_fg_word_checked(uint8_t reg, uint16_t *v, unsigned lo, unsigned hi);
+struct sb_fg_stat {
+    uint32_t reads, retries, failed, rejected;
+    int last_bad;
+};
+extern struct sb_fg_stat sb_fg_stat;
 extern struct sb_i2c sb_max_bus;
 extern const char *sb_max_why;
 
@@ -260,10 +275,15 @@ struct sb_temps {
     int top, sub;                           /* tmu states */
     int big[5], big_max, little, gpu, isp, hottest;
     unsigned flags;
-    int top_all[8], sub_all[3];             /* every probe (TOP 0..7, SUB 0..2), -100 off */
-    int trip_c;                             /* TOP hardware trip (THD_TEMP0 rise), -100 not armed */
+    int top_all[8], sub_all[3];             /* every probe (TOP 0..7, SUB 0..2), -100 off or no valid sample */
+    int code_top[8], code_sub[3];           /* the last accepted CURRENT_TEMP code */
+    int trip_c, trip_sub_c;                 /* hardware trip (THD_TEMP0 rise) decoded, -100 not armed */
+    int trip_armed;                         /* bit 0 TOP, bit 1 SUB: CONTROL bit 12 (THERM_TRIP_EN) set */
 };
+/* Every probe is the median of 3 samples; code 0 / 0x1ff and temperatures outside -30..150 C are
+ * rejected and counted (sb_tmu_stats: slot = probe for TOP, 8 + probe for SUB). */
 void sb_temps_read(struct sb_temps *t);
+void sb_tmu_stats(unsigned slot, uint32_t *reads, uint32_t *rejected, int *last_bad_code);
 uint64_t sb_pll_hz(uintptr_t con0, int *unlocked);
 uint64_t sb_a55_hz(void);
 uint64_t sb_m3_hz(int *off);                /* *off = 1: cluster powered off */
@@ -273,14 +293,19 @@ int sb_g3d_on(void);
 
 /* ---- write fence and authorisation gate (fence.c) ----------------------------------------------
  * Tiers: 0 read, 1 warning + held confirmation, 2 + the target's name typed, 3 + a second
- * confirmation and, for storage, a verified backup first. SB_TIER_NO is what is physically
- * impossible or would destroy Engineer OS while it runs (unmapped secure memory, S-Boot's ECT,
- * the running image): never a matter of confirmation. */
+ * confirmation and, for storage, a verified backup first, 4 (extreme) + a full-screen red warning
+ * naming the consequence and the recovery, a typed phrase ("<target> I ACCEPT") and Power held
+ * 5 s; for storage a verified backup first unless the user picks "no backup" on a second red
+ * screen. Tier 4 is what v2.0 refused: S-Boot's ECT, the running Engineer OS, the secure world and
+ * unmapped addresses (the access is attempted and its fault caught), raw LU writes across
+ * partition boundaries. SB_TIER_NO is left only for what cannot be expressed or does not exist
+ * (docs/ENGINEER-OS.md section 8.1). */
 #define SB_TIER0 0
 #define SB_TIER1 1
 #define SB_TIER2 2
 #define SB_TIER3 3
-#define SB_TIER_NO 4
+#define SB_TIER4 4
+#define SB_TIER_NO 5
 
 /* address spaces of an authorisation */
 #define SB_MED_UFS 0U                       /* blocks of a UFS LU (lu 0 = the GPT disk) */
@@ -288,6 +313,7 @@ int sb_g3d_on(void);
 #define SB_SP_MEM 2U                        /* physical addresses: registers and DRAM, bytes */
 #define SB_SP_PMIC 3U                       /* S2MPS18 via ACPM: type << 8 | reg */
 #define SB_SP_MAX 4U                        /* MAX77705: 7-bit address << 8 | reg */
+#define SB_SP_DVFS 5U                       /* ACPM DVFS: the domain (g3d = 4) */
 
 /* confirmation steps (struct sb_auth.steps) */
 #define SB_STEP_WARN   1U                   /* the warning screen (what happens, how to undo) */
@@ -296,11 +322,18 @@ int sb_g3d_on(void);
 #define SB_STEP_SECOND 8U                   /* tier 3: the second confirmation (hold Power 3 s) */
 #define SB_STEP_BACKUP 16U                  /* tier 3 storage: a verified backup of the target */
 #define SB_STEP_ARMED  32U                  /* free-form tools: the session was armed */
+#define SB_STEP_PHRASE 64U                  /* tier 4: "<target> I ACCEPT" typed */
+#define SB_STEP_HOLD5  128U                 /* tier 4: Power held 5 s */
+#define SB_STEP_WAIVE  256U                 /* tier 4 storage: "no backup" picked on the second red screen */
+#define SB_STEP_ALL    511U
 /* kinds (struct sb_auth.kind) */
 #define SB_KIND_STORAGE  1U                 /* block storage: tier 3 needs the backup step */
 #define SB_KIND_FREEFORM 2U                 /* poke, fill, sector edit: needs armed mode too */
 #define SB_KIND_STORE    4U                 /* the action writes the OS store (backup, settings) */
+/* The steps a tier needs. Tier 4 storage needs one of SB_STEP_BACKUP / SB_STEP_WAIVE on top
+ * (not in this mask: sb_steps_ok checks it). */
 unsigned sb_steps_needed(int tier, unsigned kind);
+int sb_steps_ok(int tier, unsigned kind, unsigned steps);
 
 struct sb_auth {
     uint64_t magic;
@@ -409,8 +442,29 @@ int sb_therm_convert(unsigned table, int adc);
 struct sb_therm {
     const char *name;
     unsigned ch;
-    int ok, raw, c10;                       /* 0.1 C */
+    int ok, raw, c10;                       /* 0.1 C; raw = the median of 3 accepted conversions */
+    unsigned rej;                           /* samples rejected in this reading (raw 0, 4095, timeout) */
+    int bad;                                /* the last rejected raw value (-1 none / no conversion) */
+    int clamped;                            /* raw outside the table: the temperature is its end */
+    const char *why;                        /* no valid sample: why */
 };
+/* Sensor sample filter: calls get() up to max times, rejects SB_NO_SAMPLE and values outside
+ * [lo, hi], stops at want accepted samples and returns their median (even count: the mean of the
+ * middle two), or SB_NO_SAMPLE when none was accepted; *rejected and *last_bad say what was
+ * dropped. Pure (unit-tested). */
+#define SB_NO_SAMPLE (-0x7fffffff)
+int sb_sample_filter(int (*get)(void *ctx), void *ctx, int lo, int hi, unsigned want, unsigned max,
+                     unsigned *rejected, int *last_bad);
+/* Per channel, this session. */
+struct sb_adc_stat {
+    uint32_t conversions, readings, rejected, timeouts, flag_only;
+    int last_bad;
+};
+const struct sb_adc_stat *sb_adc_stats(unsigned ch);
+/* Median of 3 conversions, raw 0 / 4095 rejected: raw or -1. */
+int sb_adc_filtered(unsigned ch, const char **why, unsigned *rejected, int *last_bad);
+int sb_therm_raw_min(unsigned table);
+int sb_therm_raw_max(unsigned table);
 /* The vendor DT's thermistors (AP, Wi-Fi, PA, battery, USB, charger): n read, -1 no ADC. */
 int sb_therms_read(struct sb_therm *t, unsigned max, const char **why);
 
@@ -419,3 +473,69 @@ int sb_therms_read(struct sb_therm *t, unsigned max, const char **why);
  * (address << 8 | reg) at the tier the caller's policy gives (engineer/policy.c). */
 int sb_pmic_write(uint32_t type, uint32_t reg, uint8_t val, int tier);
 int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier);
+/* ACPM DVFS request { domain, kHz, FREQ_REQ, 0 } on the first ACPM channel (as the vendor kernel
+ * and Starbite's iOS port send it; g3d = 4), with the gate: SB_SP_DVFS, first = domain, at the
+ * caller's tier (at least 3). 1 sent and answered. */
+int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier);
+
+/* ---- the Mali-G72 (mali.c, mali_desc.c) ------------------------------------------------------- */
+
+#define SB_GPU 0x17500000UL
+#define SB_GPU_MEM 0x8f0000000ULL           /* 32 MiB of DRAM bank 2: page tables + data */
+#define SB_GPU_MEM_SIZE (32ULL << 20)
+#define SB_GPU_DATA (SB_GPU_MEM + 0x10000ULL)
+#define SB_GPU_DATA_SIZE (8ULL << 20)
+#define SB_GPU_VA 0x02000000ULL             /* GPU VA of SB_GPU_DATA */
+#define SB_GPU_PANEL_VA 0x04000000ULL       /* GPU VA of the scanout SB_FB */
+#define SB_GPU_HOLE_VA 0x10000000ULL        /* never mapped: the deliberate-fault test */
+/* The CPU's view of a GPU VA (data or panel). */
+#define SB_GPU_CPU(va) ((va) >= SB_GPU_PANEL_VA ? (SB_FB + ((va) - SB_GPU_PANEL_VA)) : (SB_GPU_DATA + ((va) - SB_GPU_VA)))
+
+struct sb_gpu_result {
+    int ok, timeout;
+    unsigned js;                            /* the slot reported (the first that failed) */
+    uint64_t us, ticks;
+    uint32_t jirq, mirq, girq;              /* JOB / MMU / GPU IRQ_RAWSTAT at the end */
+    uint32_t js_status, as_status, as_fault, gpu_fault;
+    uint64_t js_head, as_addr, gpu_addr;
+};
+int sb_gpu_domain(void);                    /* PMU G3D status [3:0] == 0xf */
+uint32_t sb_gpu_rd(unsigned off);
+int sb_gpu_wr(unsigned off, uint32_t v);    /* 0 (nothing written) without an open session */
+/* The session: a complete authorisation for the BUCK6 write of the confirmed GPU power-up. */
+int sb_gpu_open(const struct sb_auth *a);
+int sb_gpu_is_open(void);
+int sb_gpu_is_up(void);
+void sb_gpu_close(void);
+int sb_gpu_reset(unsigned *us);
+int sb_gpu_power_on(uint32_t shaders, unsigned us[3]);
+void sb_gpu_power_off(void);
+void sb_gpu_tables(void);
+int sb_gpu_as0(void);
+int sb_gpu_up(uint32_t shaders, unsigned us[4]);     /* reset, power, AS0 */
+int sb_gpu_submit(unsigned js, uint64_t job_va, uint32_t affinity);
+int sb_gpu_wait(unsigned js_mask, uint64_t timeout_us, struct sb_gpu_result *r);
+int sb_gpu_run(unsigned js, uint64_t job_va, uint32_t affinity, uint64_t timeout_us, struct sb_gpu_result *r);
+const char *sb_gpu_exc_name(uint32_t code);
+void sb_gpu_cycles(int on);
+uint64_t sb_gpu_cycle_count(void);
+uint64_t sb_gpu_timestamp(void);
+
+/* Descriptors (Mesa genxml v6 layouts; pure, unit-tested against Mesa's own packing). */
+#define MALI_JOB_NULL 1U
+#define MALI_JOB_WRITE_VALUE 2U
+#define MALI_JOB_FRAGMENT 9U
+#define MALI_WV_CYCLES 1U
+#define MALI_WV_TIMESTAMP 2U
+#define MALI_WV_ZERO 3U
+#define MALI_WV_IMM8 4U
+#define MALI_WV_IMM16 5U
+#define MALI_WV_IMM32 6U
+#define MALI_WV_IMM64 7U
+#define MALI_FBD_TAG 1U                     /* MFBD, 1 render target, no ZS/CRC extension */
+void mali_job_header(uint32_t *w, unsigned type, unsigned index, uint64_t next);
+void mali_write_value(uint32_t w[16], unsigned index, uint64_t next, uint64_t addr, unsigned type, uint64_t imm);
+void mali_fragment(uint32_t w[16], unsigned index, uint64_t next, unsigned wpx, unsigned hpx, uint64_t fbd);
+void mali_fbd(uint32_t w[48], uint64_t samples, unsigned wpx, unsigned hpx, uint64_t rt_base, uint32_t stride,
+              uint32_t clear);
+void mali_samples(uint32_t w[33]);

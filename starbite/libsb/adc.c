@@ -1,13 +1,27 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * The CMGP ADC (samsung,exynos-adc-v3 at 0x14230000) and the thermistors on it, polled.
+ * The CMGP ADC (samsung,exynos-adc-v3 at 0x14230000) and the thermistors on it, polled; and the
+ * sample filter every sensor reading in libsb goes through (sb_sample_filter).
  *
  * Registers (vendor drivers/iio/adc/exynos_adc.c, ADC_V2 / ADC_V3): CON1 +0x00 (bit 2 soft
  * reset, bit 1 soft non-reset, bit 0 start), CON2 +0x04 ([6:4] C_TIME, [3:0] channel), V3 DAT
  * +0x08 ([11:0] value; bit 31 a flag the driver defines but does not use), INT_EN +0x10, INT_ST
  * +0x14 (write 1 clears), VER +0x20. The kernel's v3 sequence: CON1 = soft reset, CON1 =
  * non-reset, CON2 = C_TIME(6), INT_EN = 1, then CON2 channel, CON1 |= start, wait for the
- * interrupt, DAT & 0xfff, INT_ST = 1; afterwards C_TIME cleared and INT_EN = 0. Here INT_ST bit 0
- * (or the DAT flag) is polled for at most 20 ms; interrupts stay masked at the CPU.
+ * interrupt, and only then (in the ISR) DAT & 0xfff, INT_ST = 1; afterwards C_TIME cleared and
+ * INT_EN = 0.
+ *
+ * v2.1 fix (on the phone every thermistor read raw 0 now and then: -20 C on the PA table, 90 C on
+ * the others): v2.0 polled "read DAT, then test INT_ST" and returned the DAT it had read BEFORE it
+ * saw INT_ST set, so a conversion that finished between the two reads gave the register's value
+ * from before the conversion, 0 after the soft reset. It also accepted DAT bit 31 as "done", which
+ * the vendor driver never relies on (if that bit means "busy", it returns 0 too). Now INT_ST bit 0
+ * is polled alone (2 ms at most) and DAT is read only after it is seen set, as the kernel's ISR
+ * does. If INT_ST never comes, DAT is read once after the 2 ms (the conversion is long over by
+ * then) and used only if its bit 31 is set; that path is counted ("completion not signalled") so
+ * it shows on the sensor page. On top of that the thermistors take the median of 3 conversions and
+ * reject raw 0 and full scale (4095), counting every rejected sample, so a sensor that really reads
+ * 0 (shorted) or 4095 (open) still shows: as "no valid sample" with its raw value.
+ *
  * Clock: CMU_CMGP gate ADC_CMGP PCLK_S0 0x14202018 (bit 20 manual, bit 21 on, as the other CMGP
  * gates). Engineer OS never opens it: a closed gate is reported and the ADC is not touched. S-Boot
  * reads the battery thermistor through this ADC at every boot (temp_adc in its log), so it should
@@ -15,7 +29,7 @@
  * does not run before an OS starts it, so there is no one to share with here.
  * The thermistor tables are the vendor DT's (device/dtb/starlte.dts sec_thermistor@0/2/10 and the
  * battery node's temp_table_adc / data; channels: battery 4, charger 3, USB 1, AP 0, Wi-Fi 2,
- * PA 10). Not yet run on the phone.
+ * PA 10).
  */
 #include "sb.h"
 
@@ -39,14 +53,61 @@ static void wr(uintptr_t a, uint32_t v)
     *(volatile uint32_t *)a = v;
 }
 
+/* ---- the sample filter --------------------------------------------------------------------------- */
+
+int sb_sample_filter(int (*get)(void *ctx), void *ctx, int lo, int hi, unsigned want, unsigned max,
+                     unsigned *rejected, int *last_bad)
+{
+    int acc[8];
+    unsigned n = 0, rej = 0;
+    if (want < 1)
+        want = 1;
+    if (want > 8)
+        want = 8;
+    for (unsigned i = 0; i < max && n < want; ++i) {
+        int v = get(ctx);
+        if (v == SB_NO_SAMPLE || v < lo || v > hi) {
+            ++rej;
+            if (last_bad)
+                *last_bad = v;
+            continue;
+        }
+        unsigned k = n++;                       /* insertion sort: acc stays ascending */
+        while (k && acc[k - 1] > v) {
+            acc[k] = acc[k - 1];
+            --k;
+        }
+        acc[k] = v;
+    }
+    if (rejected)
+        *rejected = rej;
+    if (!n)
+        return SB_NO_SAMPLE;
+    if (n & 1U)
+        return acc[n / 2];
+    long s = (long)acc[n / 2 - 1] + acc[n / 2];  /* even: the mean of the middle two, rounded down */
+    return (int)(s >= 0 ? s / 2 : (s - 1) / 2);
+}
+
+/* ---- one conversion ------------------------------------------------------------------------------ */
+
 #ifdef SB_HOST
 int host_adc(unsigned ch);              /* the host preview's fake converter (starbite/host/host.c) */
 #endif
+
+static struct sb_adc_stat adc_st[12];
+
+const struct sb_adc_stat *sb_adc_stats(unsigned ch)
+{
+    return ch < 12 ? &adc_st[ch] : 0;
+}
 
 int sb_adc_read(unsigned ch, const char **why)
 {
     const char *w = 0;
     int v = -1;
+    if (ch < 12)
+        ++adc_st[ch].conversions;
 #ifdef SB_HOST
     if (why)
         *why = 0;
@@ -63,18 +124,27 @@ int sb_adc_read(unsigned ch, const char **why)
         wr(ADC + INT_ST, 1);
         wr(ADC + INT_EN, 1);
         wr(ADC + CON2, (rd(ADC + CON2) & ~0xfU) | ch);
+        __asm__ volatile("dsb sy" : : : "memory");
         wr(ADC + CON1, rd(ADC + CON1) | 1U);
-        uint64_t t0 = sb_ticks(), lim = sb_freq() / 50U;          /* 20 ms */
+        uint64_t t0 = sb_ticks(), lim = sb_freq() / 500U;         /* 2 ms */
+        int done = 0;
         for (;;) {
-            uint32_t d = rd(ADC + DAT);
-            if ((rd(ADC + INT_ST) & 1U) || (d & 0x80000000U)) {
-                v = (int)(d & 0xfffU);
+            if (rd(ADC + INT_ST) & 1U) {
+                done = 1;
                 break;
             }
-            if (sb_ticks() - t0 > lim) {
-                w = "conversion timed out";
+            if (sb_ticks() - t0 > lim)
                 break;
-            }
+        }
+        uint32_t d = rd(ADC + DAT);             /* read after INT_ST: the finished conversion */
+        if (done) {
+            v = (int)(d & 0xfffU);
+        } else if (d & 0x80000000U) {
+            v = (int)(d & 0xfffU);
+            ++adc_st[ch].flag_only;
+        } else {
+            w = "conversion timed out (no INT_ST, no DAT flag in 2 ms)";
+            ++adc_st[ch].timeouts;
         }
         wr(ADC + INT_ST, 1);
         wr(ADC + CON2, rd(ADC + CON2) & ~(7U << 4));
@@ -83,6 +153,48 @@ int sb_adc_read(unsigned ch, const char **why)
     if (why)
         *why = w;
     return v;
+}
+
+struct adc_ctx {
+    unsigned ch;
+    const char *why;
+};
+
+static int adc_get(void *v)
+{
+    struct adc_ctx *c = v;
+    const char *w = 0;
+    int r = sb_adc_read(c->ch, &w);
+    if (r < 0) {
+        if (w)
+            c->why = w;
+        return SB_NO_SAMPLE;
+    }
+    return r;
+}
+
+/* A filtered conversion: the median of 3 accepted conversions out of 6 at most; raw 0 and full
+ * scale (4095: a shorted / open input or a conversion read too early) are rejected and counted.
+ * -1 when none was accepted (*why says why). */
+int sb_adc_filtered(unsigned ch, const char **why, unsigned *rejected, int *last_bad)
+{
+    struct adc_ctx c = { ch, 0 };
+    unsigned rej = 0;
+    int bad = SB_NO_SAMPLE;
+    int v = sb_sample_filter(adc_get, &c, 1, 4094, 3, 6, &rej, &bad);
+    if (ch < 12) {
+        adc_st[ch].rejected += rej;
+        if (rej && bad != SB_NO_SAMPLE)
+            adc_st[ch].last_bad = bad;
+        ++adc_st[ch].readings;
+    }
+    if (rejected)
+        *rejected = rej;
+    if (last_bad)
+        *last_bad = bad == SB_NO_SAMPLE ? -1 : bad;
+    if (why)
+        *why = v == SB_NO_SAMPLE ? (c.why ? c.why : "every sample was 0 or full scale") : 0;
+    return v == SB_NO_SAMPLE ? -1 : v;
 }
 
 /* Tables with the ADC value rising (temperature falling or rising): interpolate between the two
@@ -131,6 +243,17 @@ int sb_therm_convert(unsigned table, int adc)
                       : sb_therm_c10(adc, table ? bat_adc : ap_adc, std_c10, 23);
 }
 
+/* The raw range a table covers (outside it the temperature is clamped to -20 / 90 C). */
+int sb_therm_raw_min(unsigned table)
+{
+    return table == 2 ? pa_adc[0] : table ? bat_adc[0] : ap_adc[0];
+}
+
+int sb_therm_raw_max(unsigned table)
+{
+    return table == 2 ? pa_adc[110] : table ? bat_adc[22] : ap_adc[22];
+}
+
 int sb_therms_read(struct sb_therm *t, unsigned max, const char **why)
 {
     static const struct {
@@ -147,9 +270,11 @@ int sb_therms_read(struct sb_therm *t, unsigned max, const char **why)
         struct sb_therm *s = &t[n++];
         s->name = list[i].name;
         s->ch = list[i].ch;
-        s->raw = sb_adc_read(list[i].ch, &e);
+        s->raw = sb_adc_filtered(list[i].ch, &e, &s->rej, &s->bad);
         s->ok = s->raw >= 0;
         s->c10 = 0;
+        s->clamped = 0;
+        s->why = s->ok ? 0 : e;
         if (!s->ok) {
             if (!w)
                 w = e;
@@ -158,6 +283,7 @@ int sb_therms_read(struct sb_therm *t, unsigned max, const char **why)
             continue;
         }
         s->c10 = sb_therm_convert(list[i].table, s->raw);
+        s->clamped = s->raw < sb_therm_raw_min(list[i].table) || s->raw > sb_therm_raw_max(list[i].table);
     }
     if (why)
         *why = w;

@@ -7,7 +7,7 @@
 
 static const char *const tab_hint[NTABS] = {
     "",
-    "health check, CPU / memory / thermal / battery stress, display, touch",
+    "health check, CPU / memory / thermal / battery / GPU stress, display, touch",
     "battery tests, charger, PMIC regulators and writes",
     "CPU, clocks, every thermal sensor, GPU, RTC, timer",
     "UFS, partitions and LUs, backups, sectors, microSD",
@@ -48,6 +48,7 @@ void tab_build(int t)
         row_add("Storage test", "UFS / card read benchmark and verify", 0);
         row_add("Display stress", "full-screen fills, scrolls, flips (no GPU)", 0);
         row_add("Touch grid", "touch every cell of a 6 x 12 grid", 0);
+        row_add("GPU tests", "Mali-G72: identify, jobs, fill pattern, stress, clock", R_WARN);
         kv_hdr("QUICK TESTS");
         row_add("Core bring-up test", "PSCI CPU_ON each core, check-in, CPU_OFF", R_WARN);
         row_add("Memory test", "16 MiB of DRAM, non-cacheable window", 0);
@@ -71,7 +72,7 @@ void tab_build(int t)
         row_add("PMIC regulators", "S2MPS18 LDO1-45 via ACPM", 0);
         row_add("PMIC register dump", "S2MPS18 PMIC + TOP, hex", 0);
         row_add("Touch rails", "LDO35 / LDO43: state, switch on (tier 1)", R_WARN);
-        row_add("PMIC and charger writes", "any register: tier 1 to 3", R_RED);
+        row_add("PMIC and charger writes", "any register: tier 1 to 4", R_RED);
         kv_hdr("SYSTEM");
         row_add("Reboot and power", "menu, recovery, download, power off", 0);
         break;
@@ -82,6 +83,7 @@ void tab_build(int t)
         row_add("Temperatures", "TMU: big, little, GPU, ISP (live)", 0);
         row_add("Every thermal sensor", "all TMU probes, thermistors, fuel gauge", 0);
         row_add("GPU (Mali-G72)", "power, voltage, ID, cores (read only)", 0);
+        row_add("GPU tests", "power up, jobs, fill, stress, DVFS", R_WARN);
         kv_hdr("TIME");
         row_add("Real-time clock", "S2MPS18 RTC, live", 0);
         row_add("Timer", "generic timer vs RTC", 0);
@@ -131,8 +133,8 @@ void tab_build(int t)
     default:
         kv_hdr("ENGINEER");
         row_add("Armed mode", "free-form writes; dry run; undo; tiers", R_WARN);
-        row_add("Register peek / poke", "any address; writes tier 1 to 3", R_WARN);
-        row_add("Memory dump / fill", "any DRAM; ECT and Engineer OS impossible", R_WARN);
+        row_add("Register peek / poke", "any address; writes tier 1 to 4", R_WARN);
+        row_add("Memory dump / fill", "any DRAM; ECT, Engineer OS, secure world: tier 4", R_WARN);
         row_add("PMIC and charger writes", "S2MPS18 and MAX77705 registers", R_RED);
         row_add("Partitions and LUs", "hexdump, back up, restore, erase", R_WARN);
         row_add("OS store", "inspect, verify, copy, rename, remove", 0);
@@ -172,17 +174,18 @@ void tab_open(int t, int i)
     case 0x25: lab_storage_bench(); break;
     case 0x26: lab_display_stress(); break;
     case 0x27: lab_touch_grid(); break;
-    case 0x28: run_cores_dialog(); break;
-    case 0x29: run_ram_dialog(); break;
-    case 0x2a: run_bw(); break;
-    case 0x2b: test_display(); break;
-    case 0x2c: info_screen("Display panel", fill_panel, 0); break;
-    case 0x2d: bright_page(); break;
-    case 0x2e: test_touch(); break;
-    case 0x2f: test_keys(); break;
-    case 0x30: run_speed(); break;
-    case 0x31: tests_history(); break;
-    case 0x32: lab_save_report(); break;
+    case 0x28: lab_gpu(); break;
+    case 0x29: run_cores_dialog(); break;
+    case 0x2a: run_ram_dialog(); break;
+    case 0x2b: run_bw(); break;
+    case 0x2c: test_display(); break;
+    case 0x2d: info_screen("Display panel", fill_panel, 0); break;
+    case 0x2e: bright_page(); break;
+    case 0x2f: test_touch(); break;
+    case 0x30: test_keys(); break;
+    case 0x31: run_speed(); break;
+    case 0x32: tests_history(); break;
+    case 0x33: lab_save_report(); break;
     /* Power */
     case 0x40: info_screen("Battery and charger", fill_battery, 2000); break;
     case 0x41: dash_battery_page(); break;
@@ -198,8 +201,9 @@ void tab_open(int t, int i)
     case 0x62: info_screen("Temperatures", fill_thermal, 1000); break;
     case 0x63: lab_sensors(); break;
     case 0x64: info_screen("GPU (Mali-G72)", fill_gpu, 1000); break;
-    case 0x65: info_screen("Real-time clock", fill_rtc, 500); break;
-    case 0x66:
+    case 0x65: lab_gpu(); break;
+    case 0x66: info_screen("Real-time clock", fill_rtc, 500); break;
+    case 0x67:
         measure_timer();
         info_screen("Timer", fill_timer, 500);
         break;

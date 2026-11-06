@@ -152,13 +152,16 @@ int armed_arm(void)
     return 1;
 }
 
-/* ---- typing the target's name ------------------------------------------------------------------ */
+/* ---- typing the target's name (tier 2+) or the phrase (tier 4) ------------------------------------ */
 
-static const char keyset[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_<";
+/* 36 letters and digits, then '_', space, DEL; CONFIRM is key 39 */
+static const char keyset[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ ";
+#define K_DEL 38
+#define K_OK 39
 
-int lab_type_name(const char *title, const char *part)
+static int type_text(const char *title, const char *prompt, const char *want, uint32_t bg)
 {
-    char typed[24];
+    char typed[48];
     unsigned n = 0;
     typed[0] = 0;
     int sel = 0, res = -1;
@@ -167,58 +170,142 @@ int lab_type_name(const char *title, const char *part)
     ui_input_reset();
     while (res < 0) {
         ui_noclip();
-        ui_fill(0, UI_VIEW_Y0, UI_W, UI_VIEW_Y1 - UI_VIEW_Y0, C_BG);
-        ui_text(F_TITLE_S, 64, UI_VIEW_Y0 + 120, title, C_RED);
+        ui_fill(0, UI_VIEW_Y0, UI_W, UI_VIEW_Y1 - UI_VIEW_Y0, bg);
+        ui_text(F_TITLE_S, 64, UI_VIEW_Y0 + 120, title, bg == C_BG ? C_RED : C_L1);
         struct ub u;
         ub_init(&u);
-        ub_s(&u, "Type the target's name: ");
-        ub_s(&u, part);
-        ui_text_cut(F_ROW, 64, UI_VIEW_Y0 + 220, u.b, UI_W - 128, C_L2);
+        ub_s(&u, prompt);
+        ub_s(&u, want);
+        ui_text_cut(F_ROW, 64, UI_VIEW_Y0 + 220, u.b, UI_W - 128, bg == C_BG ? C_L2 : C_L1);
         ui_round(64, UI_VIEW_Y0 + 280, UI_W - 128, 170, 36, C_CARD);
-        ui_text(F_TITLE_S, 110, UI_VIEW_Y0 + 395, typed[0] ? typed : "_", C_L1);
-        ui_text(F_SMALL, 64, ky - 40, "Volume moves, Power types, hold Power cancels; < deletes", C_L3);
-        for (int k = 0; k < 38; ++k) {
+        ui_text_cut(F_TITLE_S, 110, UI_VIEW_Y0 + 395, typed[0] ? typed : "_", UI_W - 220, C_L1);
+        ui_text(F_SMALL, 64, ky - 40, "Volume moves, Power types, hold Power cancels; DEL deletes", C_L2);
+        for (int k = 0; k < K_DEL + 1; ++k) {
             int x = (k % 6) * kw, y = ky + (k / 6) * kh;
             ui_round(x + 10, y + 10, kw - 20, kh - 20, 26, k == sel ? C_STAR : C_CARD2);
             char s[2] = { keyset[k], 0 };
-            ui_text_c(F_SEG, x + kw / 2, y + kh / 2 + 16, k == 37 ? "DEL" : s, k == sel ? C_BG : C_L1);
+            ui_text_c(F_SEG, x + kw / 2, y + kh / 2 + 16, k == K_DEL ? "DEL" : k == 37 ? "SPACE" : s,
+                      k == sel ? C_BG : C_L1);
         }
-        int dx = 2 * kw, dy = ky + 6 * kh;
-        ui_round(dx + 10, dy + 10, 4 * kw - 20, kh - 20, 26, sel == 38 ? C_RED : ui_mix(C_RED, C_CARD, 90));
-        ui_text_c(F_SEG, dx + 2 * kw, dy + kh / 2 + 16, "CONFIRM", C_L1);
+        int dx = 3 * kw, dy = ky + 6 * kh;
+        ui_round(dx + 10, dy + 10, 3 * kw - 20, kh - 20, 26, sel == K_OK ? C_RED : ui_mix(C_RED, C_CARD, 90));
+        ui_text_c(F_SEG, dx + 3 * kw / 2, dy + kh / 2 + 16, "CONFIRM", C_L1);
         ui_present();
         struct ui_ev e;
         ui_poll(&e, 100);
         int key = -1;
         if (e.type == EV_UP)
-            sel = (sel + 38) % 39;
+            sel = (sel + K_OK) % (K_OK + 1);
         else if (e.type == EV_DOWN)
-            sel = (sel + 1) % 39;
+            sel = (sel + 1) % (K_OK + 1);
         else if (e.type == EV_SELECT)
             key = sel;
         else if (e.type == EV_BACK || e.type == EV_HOME)
             res = 0;
         else if (e.type == EV_TAP && e.y >= ky && e.y < ky + 7 * kh) {
             int r = (e.y - ky) / kh, c = e.x / kw;
-            if (r == 6)
-                key = c >= 2 ? 38 : -1;
-            else
-                key = r * 6 + c < 38 ? r * 6 + c : -1;
+            key = r == 6 ? (c >= 3 ? K_OK : 36 + c) : r * 6 + c;
         }
-        if (key == 37 && n) {
+        if (key == K_DEL && n) {
             typed[--n] = 0;
-        } else if (key >= 0 && key < 37 && n < 23) {
+        } else if (key >= 0 && key < K_DEL && n < sizeof(typed) - 1) {
             typed[n++] = keyset[key];
             typed[n] = 0;
-        } else if (key == 38) {
-            res = sb_streq(typed, part);
+        } else if (key == K_OK) {
+            res = sb_streq(typed, want);
             if (!res) {
-                ui_toast("That is not the target's name", C_RED, 900);
+                ui_toast("That is not what is shown", C_RED, 900);
                 res = -1;
             }
         }
     }
     ui_restore_screen();
+    ui_present();
+    ui_input_reset();
+    return res;
+}
+
+int lab_type_name(const char *title, const char *part)
+{
+    return type_text(title, "Type the target's name: ", part, C_BG);
+}
+
+/* ---- the red full-screen warning (tier 4) ---------------------------------------------------------- */
+
+#define C_DEEP_RED 0xff3d0606U
+
+/* Wrapped text at (x, y) in w px; returns the y after the last line. */
+static int text_wrap(int font, int x, int y, const char *s, int w, uint32_t c, int line_h)
+{
+    char buf[200];
+    while (s && *s) {
+        unsigned fit = ui_text_fit(font, s, w), n = fit;
+        if (s[fit]) {
+            while (n && s[n] != ' ')
+                --n;
+            if (!n)
+                n = fit;
+        }
+        if (n >= sizeof(buf))
+            n = sizeof(buf) - 1;
+        memcpy(buf, s, n);
+        buf[n] = 0;
+        ui_text(font, x, y, buf, c);
+        y += line_h;
+        s += n;
+        while (*s == ' ')
+            ++s;
+    }
+    return y;
+}
+
+/* A full-screen red page: a title, labelled paragraphs, two buttons (the default is the safe
+ * one, index 1). 1 for the first button, 0 for the second / Back / Bixby / hold Power. */
+static int red_screen(const char *caption, const char *title, const char *const *k, const char *const *v, int n,
+                      const char *go, const char *stop)
+{
+    int sel = 1, res = -1;
+    ui_save_screen();
+    ui_input_reset();
+    while (res < 0) {
+        ui_noclip();
+        ui_fill(0, 0, UI_W, UI_H, C_DEEP_RED);
+        ui_frame(16, 16, UI_W - 32, UI_H - 32, 12, C_RED);
+        ui_text(F_HEAD, 80, 190, caption, C_YELLOW);
+        int y = text_wrap(F_TITLE_S, 80, 300, title, UI_W - 160, C_L1, 90) + 30;
+        for (int i = 0; i < n && y < UI_H - 520; ++i) {
+            if (!v[i] || !v[i][0])
+                continue;
+            if (k[i] && k[i][0]) {
+                ui_text(F_HEAD, 80, y, k[i], C_YELLOW);
+                y += 64;
+            } else {
+                y -= 10;                        /* a further paragraph of the same heading */
+            }
+            y = text_wrap(F_ROW, 80, y, v[i], UI_W - 160, C_L1, 64) + 26;
+        }
+        int by = UI_H - 440;
+        ui_round(80, by, UI_W - 160, 160, 40, sel == 0 ? C_L1 : ui_mix(C_L1, C_DEEP_RED, 30));
+        ui_text_c(F_BTN, UI_W / 2, by + 100, go, sel == 0 ? C_DEEP_RED : C_L1);
+        ui_round(80, by + 200, UI_W - 160, 160, 40, sel == 1 ? C_STAR : C_CARD2);
+        ui_text_c(F_BTN, UI_W / 2, by + 300, stop, sel == 1 ? C_BG : C_L1);
+        ui_dirty_all();
+        ui_present();
+        struct ui_ev e;
+        ui_poll(&e, 100);
+        if (e.type == EV_UP || e.type == EV_DOWN)
+            sel = !sel;
+        else if (e.type == EV_SELECT)
+            res = sel == 0;
+        else if (e.type == EV_BACK || e.type == EV_HOME)
+            res = 0;
+        else if (e.type == EV_TAP && e.y >= by && e.y < by + 160)
+            res = 1;
+        else if (e.type == EV_TAP && e.y >= by + 200 && e.y < by + 360)
+            res = 0;
+    }
+    ui_restore_screen();
+    ui_dirty_all();
     ui_present();
     ui_input_reset();
     return res;
@@ -231,6 +318,10 @@ static int wa_choice;
 
 static const char *steps_text(int tier, unsigned kind)
 {
+    if (tier >= TIER4)
+        return (kind & SB_KIND_STORAGE) ? "red warning, type \"<target> I ACCEPT\", slide, hold Power 5 s; backup "
+                                          "first unless you pick no backup"
+                                        : "red warning, type \"<target> I ACCEPT\", slide, hold Power 5 s";
     if (tier >= TIER3)
         return (kind & SB_KIND_STORAGE) ? "type the name, slide, hold Power 3 s; a verified backup first"
                                         : "type the name, slide, then hold Power 3 s";
@@ -281,20 +372,94 @@ static int warning_screen(const struct action *a)
     return wa_choice;
 }
 
+/* The values of a confirmation, as one line for the history and pmsg. */
+static void action_line(struct ub *u, const struct action *a)
+{
+    ub_s(u, a->target ? a->target : "");
+    if (a->old_v && a->old_v[0]) {
+        ub_s(u, " now ");
+        ub_s(u, a->old_v);
+    }
+    if (a->new_v && a->new_v[0]) {
+        ub_s(u, " after ");
+        ub_s(u, a->new_v);
+    }
+}
+
+void lab_major_result(const char *title, const char *target, const char *outcome)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, target ? target : "");
+    ub_s(&u, ": ");
+    ub_s(&u, outcome ? outcome : "");
+    test_record_action(-1, title, u.b);
+}
+
+/* Tier 4: the red warning, then (after the other steps) the backup choice for storage. */
+static int tier4_warning(const struct action *a)
+{
+    const char *k[8] = { "WHAT HAPPENS", "", "", "", "TARGET", "NOW / AFTER", "IF IT GOES WRONG / HOW TO RECOVER",
+                         "WHAT FOLLOWS" };
+    struct ub na;
+    ub_init(&na);
+    if (a->old_v && a->old_v[0])
+        ub_s(&na, a->old_v);
+    if (a->new_v && a->new_v[0]) {
+        ub_s(&na, " -> ");
+        ub_s(&na, a->new_v);
+    }
+    const char *v[8] = { a->happens[0], a->happens[1], a->happens[2], a->happens[3], a->target, na.b, a->undo,
+                         steps_text(TIER4, a->kind) };
+    if (!a->happens[1])
+        v[1] = v[2] = v[3] = 0;
+    else if (!a->happens[2])
+        v[2] = v[3] = 0;
+    else if (!a->happens[3])
+        v[3] = 0;
+    return red_screen("TIER 4 " U_DOT " EXTREME " U_DOT " NOTHING STOPS THIS BUT YOU", a->title, k, v, 8,
+                      "I UNDERSTAND, CONTINUE", "Cancel (nothing happens)");
+}
+
+static int tier4_backup_choice(const struct action *a)
+{
+    static const char *const k[3] = { "THE BACKUP", "WITHOUT IT", "CHOOSE" };
+    const char *v[3] = { a->backup && a->backup[0] ? a->backup
+                                                    : "a verified copy of the whole target into the OS store first",
+                         "what is there now is gone for good if the write goes wrong; nothing can bring it back",
+                         "Back up first is selected. Pick NO BACKUP only if you accept that." };
+    /* 1 = no backup (the first button, which is not the default) */
+    return red_screen("TIER 4 " U_DOT " SECOND RED SCREEN", "Skip the backup?", k, v, 3, "NO BACKUP: I accept the loss",
+                      "Back up first (recommended)");
+}
+
+int lab_backup_needed(const struct sb_auth *auth)
+{
+    if (!auth || !(auth->kind & SB_KIND_STORAGE) || auth->tier < TIER3)
+        return 0;
+    if (auth->steps & SB_STEP_BACKUP)
+        return 0;
+    return !(auth->tier >= TIER4 && (auth->steps & SB_STEP_WAIVE));
+}
+
+static int lab_confirm4(const struct action *a, struct sb_auth *auth);
+
 int lab_confirm(const struct action *a, struct sb_auth *auth)
 {
     struct ub u;
     ub_init(&u);
     if (a->tier >= TIER_NO) {
-        ub_s(&u, "refused (impossible): ");
+        ub_s(&u, "not possible: ");
         ub_s(&u, a->title);
         ub_c(&u, ' ');
         ub_s(&u, a->target ? a->target : "");
         audit_line(u.b);
         (void)dialog_danger("Not possible", a->happens[0] ? a->happens[0] : a->title,
-                            "Physically impossible, or it would overwrite Engineer OS itself.", "OK");
+                            "This cannot be expressed on this hardware (docs/ENGINEER-OS.md 8.1).", "OK");
         return 0;
     }
+    if (a->tier >= TIER4)
+        return lab_confirm4(a, auth);
     sb_auth_init(auth, a->space, a->lu, a->first, a->count, a->tier < TIER1 ? TIER1 : a->tier, a->kind, a->title);
     if ((a->kind & SB_KIND_FREEFORM) && !armed) {
         if (!dialog("Arm first", "This tool writes anything you enter.", "Arm: hold Power 2 s, then slide.", "ARM") ||
@@ -359,6 +524,110 @@ int lab_confirm(const struct action *a, struct sb_auth *auth)
     ub_c(&u, ' ');
     ub_s(&u, a->target ? a->target : "");
     audit_line(u.b);
+    if (a->tier >= TIER3) {
+        struct ub l;
+        ub_init(&l);
+        action_line(&l, a);
+        test_record_action(a->tier, a->title, l.b);
+    }
+    E.redraw = 1;
+    return 1;
+}
+
+/* Tier 4: red warning, the typed phrase, the slide, Power held 5 s; storage: back up or waive. */
+static int lab_confirm4(const struct action *a, struct sb_auth *auth)
+{
+    struct ub u;
+    char phrase[48];
+    ub_init(&u);
+    ub_s(&u, a->target && a->target[0] ? a->target : "YES");
+    ub_s(&u, " I ACCEPT");
+    sb_strcpy(phrase, sizeof(phrase), u.b);
+    sb_auth_init(auth, a->space, a->lu, a->first, a->count, TIER4, a->kind, a->title);
+    if ((a->kind & SB_KIND_FREEFORM) && !armed) {
+        if (!dialog("Arm first", "This tool writes anything you enter.", "Arm: hold Power 2 s, then slide.", "ARM") ||
+            !armed_arm())
+            return 0;
+        sb_auth_init(auth, a->space, a->lu, a->first, a->count, TIER4, a->kind, a->title);
+    }
+    if (armed)
+        sb_auth_step(auth, SB_STEP_ARMED);
+    if (!lab_battery_ok(a->title))
+        return 0;
+    ub_init(&u);
+    ub_s(&u, "tier 4 warning shown: ");
+    ub_s(&u, a->title);
+    ub_c(&u, ' ');
+    ub_s(&u, a->target ? a->target : "");
+    audit_line(u.b);
+    if (!tier4_warning(a)) {
+        ub_init(&u);
+        ub_s(&u, "cancelled at the red warning: ");
+        ub_s(&u, a->title);
+        audit_line(u.b);
+        return 0;
+    }
+    sb_auth_step(auth, SB_STEP_WARN);
+    if (!type_text("Tier 4: type the phrase", "Type exactly: ", phrase, C_DEEP_RED)) {
+        ub_init(&u);
+        ub_s(&u, "cancelled at the phrase: ");
+        ub_s(&u, a->title);
+        audit_line(u.b);
+        return 0;
+    }
+    sb_auth_step(auth, SB_STEP_TYPED);
+    sb_auth_step(auth, SB_STEP_PHRASE);
+    struct ub l[7];
+    const char *lines[7];
+    const char *k[7] = { "What", "Target", "Now", "After", "Backup", "Recover", "Tier" };
+    const char *v[7] = { a->title, a->target ? a->target : "", a->old_v ? a->old_v : "", a->new_v ? a->new_v : "",
+                         (a->kind & SB_KIND_STORAGE) ? "asked next (second red screen)" : "none",
+                         a->undo ? a->undo : "", "4 (extreme)" };
+    for (int i = 0; i < 7; ++i) {
+        ub_init(&l[i]);
+        ub_s(&l[i], k[i]);
+        ub_c(&l[i], '\t');
+        ub_s(&l[i], v[i]);
+        lines[i] = l[i].b;
+    }
+    if (!ui_confirm_slide("Confirm (tier 4)", lines, 7, "slide to confirm", C_RED)) {
+        ub_init(&u);
+        ub_s(&u, "cancelled at the slider: ");
+        ub_s(&u, a->title);
+        audit_line(u.b);
+        return 0;
+    }
+    sb_auth_step(auth, SB_STEP_HELD);
+    if (!ui_hold_power("Last confirmation", "Tier 4: hold Power 5 seconds (Bixby cancels)", 5000, C_RED)) {
+        ub_init(&u);
+        ub_s(&u, "cancelled at the 5 s hold: ");
+        ub_s(&u, a->title);
+        audit_line(u.b);
+        return 0;
+    }
+    sb_auth_step(auth, SB_STEP_SECOND);
+    sb_auth_step(auth, SB_STEP_HOLD5);
+    const char *bak = "";
+    if (a->kind & SB_KIND_STORAGE) {
+        if (tier4_backup_choice(a)) {
+            sb_auth_step(auth, SB_STEP_WAIVE);
+            bak = " (NO BACKUP, chosen on the second red screen)";
+            audit_line("tier 4: no backup, picked on the second red screen");
+        } else {
+            bak = " (backup first)";
+        }
+    }
+    ub_init(&u);
+    ub_s(&u, "confirmed tier 4: ");
+    ub_s(&u, a->title);
+    ub_c(&u, ' ');
+    ub_s(&u, a->target ? a->target : "");
+    ub_s(&u, bak);
+    audit_line(u.b);
+    ub_init(&u);
+    action_line(&u, a);
+    ub_s(&u, bak);
+    test_record_action(TIER4, a->title, u.b);
     E.redraw = 1;
     return 1;
 }
@@ -531,6 +800,88 @@ int lab_backup(unsigned medium, unsigned lu, uint64_t first, uint64_t count, con
     return 0;
 }
 
+/* Memory into the store (S-Boot's ECT before a tier 4 write): copied through the I/O buffer,
+ * committed, then read back from the store and compared with the memory again. */
+int lab_backup_mem(uint64_t addr, uint64_t len, const char *label, char *where)
+{
+    struct sb_auth st;
+    struct store_writer w;
+    struct store_ent e;
+    struct ub u;
+    int r;
+    uint64_t blocks = (len + 4095U) / 4096U;
+    if (where)
+        where[0] = 0;
+    unsigned dm = store_free(STORE_UFS) >= blocks ? STORE_UFS : STORE_SD;
+    if (store_free(dm) < blocks) {
+        (void)dialog_danger("No room for the backup", "Neither the UFS store nor the card's store has room.",
+                            "Free space in the store (Starbite > OS store), or insert a card.", "OK");
+        audit_line("memory backup refused: no room in either store");
+        return -5;
+    }
+    char name[32];
+    for (unsigned n = 1; n < 1000; ++n) {
+        ub_init(&u);
+        ub_s(&u, "bak-");
+        ub_s(&u, label);
+        ub_c(&u, '-');
+        ub_dec(&u, n);
+        sb_strcpy(name, sizeof(name), u.b);
+        ub_init(&u);
+        ub_s(&u, dm == STORE_UFS ? "ufs:" : "sd:");
+        ub_s(&u, name);
+        if (!store_find(u.b, &e))
+            break;
+    }
+    sb_auth_init(&st, dm, 0, 0, 0, TIER1, SB_KIND_STORE, "memory backup into the OS store");
+    sb_auth_step(&st, SB_STEP_WARN);
+    sb_auth_step(&st, SB_STEP_HELD);
+    if (!sb_gate_open(&st))
+        return SB_W_AUTH;
+    r = store_wr_begin(&w, dm, name, ST_DATA, len);
+    for (uint64_t off = 0; !r && off < len;) {
+        uint64_t n = len - off < (1U << 20) ? len - off : (1U << 20);
+        memcpy((void *)SB_IO_BUF, (const void *)(uintptr_t)(addr + off), n);
+        r = store_wr_chunk(&w, (const void *)SB_IO_BUF, n);
+        off += n;
+    }
+    if (!r)
+        r = store_wr_commit(&w, &e);
+    sb_gate_close();
+    for (uint64_t i = 0; !r && i < blocks;) {
+        uint64_t n = blocks - i < 256U ? blocks - i : 256U;
+        uint64_t bytes = (i + n) * 4096U > len ? len - i * 4096U : n * 4096U;
+        if (sb_blk_read(e.medium, 0, e.lba + i, n, (void *)SB_IO_BUF) ||
+            memcmp((const void *)SB_IO_BUF, (const void *)(uintptr_t)(addr + i * 4096U), bytes))
+            r = -21;
+        i += n;
+    }
+    ub_init(&u);
+    if (r) {
+        ub_s(&u, "memory backup FAILED (");
+        ub_sdec(&u, r);
+        ub_s(&u, "): ");
+        ub_s(&u, name);
+        audit_line(u.b);
+        return r;
+    }
+    ub_s(&u, dm == STORE_UFS ? "UFS store: " : "card store: ");
+    ub_s(&u, name);
+    ub_s(&u, " (");
+    ub_size(&u, len);
+    ub_s(&u, ", CRC ");
+    ub_hexn(&u, e.crc, 8);
+    ub_c(&u, ')');
+    if (where)
+        sb_strcpy(where, 64, u.b);
+    struct ub a;
+    ub_init(&a);
+    ub_s(&a, "memory backup verified: ");
+    ub_s(&a, u.b);
+    audit_line(a.b);
+    return 0;
+}
+
 int lab_restore(const struct store_ent *e, unsigned medium, unsigned lu, uint64_t first, const struct sb_auth *auth)
 {
     uint64_t count = (e->size + 4095U) / 4096U;
@@ -585,6 +936,23 @@ static int probe_write32(uint64_t a, uint32_t v, int *serror)
     return sb_fault.count == c;
 }
 
+/* A fault-protected load that does not ask the static map first (sb_probe32 refuses what mmu.c
+ * leaves unmapped): for a block sb_mmu_map_temp just mapped. */
+static int probe_read32(uint64_t a, uint32_t *v)
+{
+    uint64_t c = sb_fault.count;
+    uint32_t x;
+    sb_probe_depth++;
+    __asm__ volatile("mov %w0, wzr\n\tldr %w0, [%1]\n\tdsb sy" : "=&r"(x) : "r"(a) : "memory");
+    sb_probe_depth--;
+    *v = x;
+    return sb_fault.count == c;
+}
+
+/* The faults of the last write (for the tier 4 result line). */
+static uint64_t poke_esr;
+static int poke_serror;
+
 int lab_poke32(uint64_t addr, uint32_t val, const struct sb_auth *auth)
 {
     const char *why;
@@ -597,9 +965,25 @@ int lab_poke32(uint64_t addr, uint32_t val, const struct sb_auth *auth)
         return 0;
     int r = sb_gate_check(SB_SP_MEM, 0, addr, 4, t, &why);
     if (!r) {
-        int had = sb_probe32(addr, &old);
+        /* tier 4 on an unmapped address: map its block for this access (the bus or TrustZone answers) */
+        int mapped = 0;
+        if (!sb_map_kind(addr)) {
+            mapped = sb_mmu_map_temp(addr);
+            if (mapped <= 0) {
+                audit_line("tier 4 write not attempted: the block could not be mapped");
+                sb_gate_close();
+                return 0;
+            }
+        }
+        uint64_t serr0 = sb_fault.serror_count;
+        int had = mapped ? probe_read32(addr, &old) : sb_probe32(addr, &old);
+        uint64_t c0 = sb_fault.count;
         int ok = probe_write32(addr, val, &serr);
-        (void)sb_probe32(addr, &back);
+        poke_esr = sb_fault.count != c0 ? sb_fault.esr : 0;
+        (void)(mapped ? probe_read32(addr, &back) : sb_probe32(addr, &back));
+        if (mapped > 0)
+            sb_mmu_unmap_temp();
+        poke_serror = serr || sb_fault.serror_count != serr0;
         if (ok) {
             last.kind = had ? 1 : 0;
             last.addr = addr;
@@ -612,17 +996,60 @@ int lab_poke32(uint64_t addr, uint32_t val, const struct sb_auth *auth)
         ub_s(&u, " = ");
         ub_hex(&u, val, 8);
         ub_s(&u, " (was ");
-        ub_hex(&u, old, 8);
+        if (had)
+            ub_hex(&u, old, 8);
+        else
+            ub_s(&u, "unreadable");
         ub_s(&u, ", reads ");
         ub_hex(&u, back, 8);
-        ub_s(&u, serr ? ", SError PENDING)" : ")");
+        if (!ok) {
+            ub_s(&u, ", ESR ");
+            ub_hex(&u, poke_esr, 8);
+        }
+        ub_s(&u, poke_serror ? ", SError PENDING)" : ")");
         audit_line(u.b);
+        if (t >= TIER3) {
+            struct ub tg;
+            ub_init(&tg);
+            ub_hex(&tg, addr, 9);
+            lab_major_result("Register / memory write", tg.b, u.b);
+        }
         r = ok ? 0 : -1;
     } else {
         audit_line(why);
     }
     sb_gate_close();
     return r == 0;
+}
+
+int lab_attempt32(uint64_t addr, int write, uint32_t *v, uint64_t *esr, int *serror)
+{
+    int mapped = sb_map_kind(addr) ? 0 : sb_mmu_map_temp(addr);
+    uint64_t serr0 = sb_fault.serror_count, c0 = sb_fault.count;
+    int ok, se = 0;
+    if (!sb_map_kind(addr) && mapped <= 0) {        /* not mappable: nothing attempted */
+        if (esr)
+            *esr = 0;
+        if (serror)
+            *serror = 0;
+        return 0;
+    }
+    if (write)
+        ok = probe_write32(addr, *v, &se);
+    else
+        ok = probe_read32(addr, v);
+    if (mapped > 0)
+        sb_mmu_unmap_temp();
+    if (esr)
+        *esr = sb_fault.count != c0 ? sb_fault.esr : 0;
+    if (serror) {
+        uint64_t isr = 0;
+#ifndef SB_HOST
+        __asm__ volatile("mrs %0, isr_el1" : "=r"(isr));
+#endif
+        *serror = se || ((isr >> 8) & 1U) || sb_fault.serror_count != serr0;
+    }
+    return ok;
 }
 
 int lab_pmic(unsigned type, unsigned reg, unsigned val, const struct sb_auth *auth)
@@ -639,6 +1066,19 @@ int lab_pmic(unsigned type, unsigned reg, unsigned val, const struct sb_auth *au
         last.kind = 2;
         last.addr = (uint64_t)type << 8 | reg;
         last.old = old;
+    }
+    if (t >= TIER3) {
+        struct ub tg, o;
+        ub_init(&tg);
+        ub_s(&tg, "PMIC ");
+        ub_hex(&tg, (uint64_t)type << 8 | reg, 3);
+        ub_init(&o);
+        ub_s(&o, ok ? "written " : "FAILED ");
+        ub_hex(&o, val, 2);
+        ub_s(&o, " (was ");
+        ub_hex(&o, old, 2);
+        ub_c(&o, ')');
+        lab_major_result("PMIC write", tg.b, o.b);
     }
     return ok;
 }
@@ -657,6 +1097,21 @@ int lab_max(unsigned addr7, unsigned reg, unsigned val, const struct sb_auth *au
         last.kind = 3;
         last.addr = (uint64_t)addr7 << 8 | reg;
         last.old = old;
+    }
+    if (t >= TIER3) {
+        struct ub tg, o;
+        ub_init(&tg);
+        ub_s(&tg, "MAX77705 ");
+        ub_hex(&tg, (uint64_t)addr7 << 8 | reg, 4);
+        ub_init(&o);
+        ub_s(&o, ok ? "written " : "FAILED ");
+        ub_hex(&o, val, 2);
+        if (had) {
+            ub_s(&o, " (was ");
+            ub_hex(&o, old, 2);
+            ub_c(&o, ')');
+        }
+        lab_major_result("MAX77705 write", tg.b, o.b);
     }
     return ok;
 }
@@ -765,7 +1220,12 @@ static void build_armed(void)
     kv_addc("Tier 3", "+ hold Power 3 s, backup first: EFS, CPEFS, PARAM, KEYSTORAGE, PERSISTENT, STEADY, BOTA, "
                       "DTB, DTBO, GPT, boot LUs; PMIC voltages; MIF / INT / CPU / GPU clocks and DVFS; PMU; TMU; fuses",
             UI_RED);
-    kv_addc("Impossible", "unmapped secure memory, S-Boot's ECT (0xA0000000), Engineer OS's own memory", UI_TEXT3);
+    kv_addc("Tier 4", "extreme: red full-screen warning, type \"<target> I ACCEPT\", slide, hold Power 5 s, backup "
+                      "unless you pick no backup: S-Boot's ECT (0xA0000000), Engineer OS's own memory, the secure "
+                      "world and unmapped addresses (attempted, the fault caught), raw LU writes across partitions, "
+                      "unknown PMIC blocks, DVFS outside the GPU's table",
+            UI_RED);
+    kv_addc("Not possible", "addresses above 64 GiB (the MMU's 36 bits), PMIC registers ACPM cannot carry", UI_TEXT3);
 }
 
 static int act_armed(int i)

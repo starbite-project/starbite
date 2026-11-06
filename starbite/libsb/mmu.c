@@ -104,6 +104,41 @@ int sb_map_kind(uint64_t pa)
     return 0;
 }
 
+/* Tier 4 attempts (engineer/armed.c): one block mapped Device-nGnRnE for one access, then the map
+ * as it was. The other cores are idle then (no test runs while a utility writes); the TLB is
+ * invalidated inner-shareable anyway. */
+static uint64_t *temp_slot, temp_old;
+
+int sb_mmu_map_temp(uint64_t pa)
+{
+    if (!mmu_on || temp_slot || pa >= (64ULL << 30))
+        return -1;
+    if (sb_map_kind(pa))
+        return 0;
+    uint64_t *slot, d;
+    if (pa >= 0x80000000ULL && pa < 0xc0000000ULL) {
+        slot = &l2_low[(pa >> 21) & 0x1ffU];
+        d = DEV | (pa & ~0x1fffffULL);
+    } else {
+        slot = &l1[pa >> 30];
+        d = DEV | (pa & ~0x3fffffffULL);
+    }
+    temp_old = *slot;
+    temp_slot = slot;
+    *slot = d;
+    __asm__ volatile("dsb ishst\n\ttlbi vmalle1is\n\tdsb ish\n\tisb" ::: "memory");
+    return 1;
+}
+
+void sb_mmu_unmap_temp(void)
+{
+    if (!temp_slot)
+        return;
+    *temp_slot = temp_old;
+    temp_slot = 0;
+    __asm__ volatile("dsb ishst\n\ttlbi vmalle1is\n\tdsb ish\n\tisb" ::: "memory");
+}
+
 void sb_dcache_clean_inval(const volatile void *addr, uint64_t len)
 {
     if (!mmu_on)

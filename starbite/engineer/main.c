@@ -175,7 +175,29 @@ void kv_mono(const char *t) { page_mono(cur, t, C_L1); }
 void kv_monoc(const char *t, uint32_t c) { page_mono(cur, t, c); }
 void kv_big(const char *k, const char *v) { page_big(cur, k, v, C_L1); }
 void kv_bigc(const char *k, const char *v, uint32_t c) { page_big(cur, k, v, c); }
-void kv_note(const char *t) { page_note(cur, t, C_L3); }
+/* A page item holds 175 characters: a longer note becomes several, cut at a space. */
+void kv_note(const char *t)
+{
+    char b[176];
+    while (t && *t) {
+        unsigned n = 0;
+        while (t[n] && n < sizeof(b) - 1)
+            ++n;
+        if (t[n]) {
+            unsigned k = n;
+            while (k > 40 && t[k] != ' ')
+                --k;
+            if (k > 40)
+                n = k;
+        }
+        memcpy(b, t, n);
+        b[n] = 0;
+        page_note(cur, b, C_L3);
+        t += n;
+        while (*t == ' ')
+            ++t;
+    }
+}
 void kv_gap(int h) { page_gap(cur, h); }
 void kv_custom(int h, pi_draw_fn draw, uintptr_t arg, uint32_t hash) { page_custom(cur, h, draw, arg, hash); }
 

@@ -11,8 +11,11 @@
  *           Starbite OS store (its header, directory and entries) -> typed name and slide
  *   tier 1  SYSTEM, VENDOR, ODM, A16DATA, WINESP, WINDOWS, USERDATA (outside the live store),
  *           CACHE, OMR, HIDDEN, CP_DEBUG, the microSD card -> warning and slide
- *   refused a write that crosses a partition boundary, lies between partitions or beyond the end,
- *           or is empty: not policy, the tools write one partition at a time
+ *   tier 4  (v2.1) a raw LU0 write that crosses a partition boundary, lies between partitions or
+ *           has no readable GPT to name it -> a red full-screen warning, "<target> I ACCEPT"
+ *           typed, slide, Power held 5 s, and a verified backup unless "no backup" was picked
+ *   refused only what is not a write at all: an empty or wrapping range, a medium that does not
+ *           exist
  * Nothing is refused because it is risky: a risky target needs more confirmation, not less power.
  *
  * The confirmation itself is an authorisation (struct sb_auth) that engineer/armed.c fills while the
@@ -80,6 +83,16 @@ static void decide_init(struct sb_wdecide *d)
     d->undo = "-";
 }
 
+/* v2.1: what v2.0 refused as "not one partition" is a tier 4 raw write of LU0 (the tools still
+ * write one partition at a time; this is for a hand-made range in the sector viewer). */
+static void raw_lu0(struct sb_wdecide *d, const char *why)
+{
+    sb_strcpy(d->part, sizeof(d->part), "LU0 raw");
+    d->tier = SB_TIER4;
+    d->why = why;
+    d->undo = "only a backup of the whole range (made first unless you pick \"no backup\"), then a restore";
+}
+
 int sb_write_decide(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, struct sb_wdecide *d)
 {
     decide_init(d);
@@ -114,8 +127,8 @@ int sb_write_decide(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, stru
         return 0;
     }
     if (gpt_load() <= 0) {
-        d->why = "no readable GPT: the target cannot be named";
-        return SB_W_RANGE;
+        raw_lu0(d, "no readable GPT: the target cannot be named (raw LU0 write)");
+        return 0;
     }
     uint64_t lo = ~0ULL, hi = 0;
     for (int i = 0; i < gpt_n; ++i) {
@@ -126,8 +139,8 @@ int sb_write_decide(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, stru
     }
     if (lba < lo || lba + n - 1 > hi) {
         if (lba < lo && lba + n - 1 >= lo) {
-            d->why = "crosses from the partition table into a partition";
-            return SB_W_RANGE;
+            raw_lu0(d, "crosses from the partition table into a partition (raw LU0 write)");
+            return 0;
         }
         sb_strcpy(d->part, sizeof(d->part), lba < lo ? "GPT/PIT head" : "GPT tail");
         d->tier = SB_TIER3;
@@ -142,8 +155,8 @@ int sb_write_decide(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, stru
         d->first = gpt_first[i];
         d->last = gpt_last[i];
         if (lba + n - 1 > gpt_last[i]) {
-            d->why = "crosses the end of the partition: refused";
-            return SB_W_RANGE;
+            raw_lu0(d, "crosses the end of the partition into the next (raw LU0 write)");
+            return 0;
         }
         if (sb_never_part(gpt_name[i])) {
             d->tier = SB_TIER3;
@@ -174,8 +187,8 @@ int sb_write_decide(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, stru
         d->undo = "restore the backup";
         return 0;
     }
-    d->why = "between partitions: refused";
-    return SB_W_RANGE;
+    raw_lu0(d, "between partitions (raw LU0 write)");
+    return 0;
 }
 
 /* ---- authorisations -------------------------------------------------------------------------- */
@@ -218,12 +231,25 @@ unsigned sb_steps_needed(int tier, unsigned kind)
         s |= SB_STEP_TYPED;
     if (tier >= SB_TIER3) {
         s |= SB_STEP_SECOND;
-        if (kind & SB_KIND_STORAGE)
+        if ((kind & SB_KIND_STORAGE) && tier == SB_TIER3)
             s |= SB_STEP_BACKUP;
     }
+    if (tier >= SB_TIER4)
+        s |= SB_STEP_PHRASE | SB_STEP_HOLD5;
     if (tier >= SB_TIER1 && (kind & SB_KIND_FREEFORM))
         s |= SB_STEP_ARMED;
     return s;
+}
+
+/* Every step the tier needs; tier 4 storage also a verified backup or the explicit "no backup". */
+int sb_steps_ok(int tier, unsigned kind, unsigned steps)
+{
+    unsigned need = sb_steps_needed(tier, kind);
+    if ((steps & need) != need)
+        return 0;
+    if (tier >= SB_TIER4 && (kind & SB_KIND_STORAGE) && !(steps & (SB_STEP_BACKUP | SB_STEP_WAIVE)))
+        return 0;
+    return 1;
 }
 
 void sb_auth_init(struct sb_auth *a, unsigned space, unsigned lu, uint64_t first, uint64_t count, int tier,
@@ -253,14 +279,13 @@ void sb_auth_step(struct sb_auth *a, unsigned step)
 
 int sb_auth_valid(const struct sb_auth *a)
 {
-    return a && a->magic == AUTH_MAGIC && a->epoch == epoch && a->tier >= SB_TIER1 && a->tier <= SB_TIER3 &&
+    return a && a->magic == AUTH_MAGIC && a->epoch == epoch && a->tier >= SB_TIER1 && a->tier <= SB_TIER4 &&
            a->seal == seal_of(a);
 }
 
 int sb_auth_complete(const struct sb_auth *a)
 {
-    unsigned need = sb_steps_needed(a->tier, a->kind);
-    return sb_auth_valid(a) && (a->steps & need) == need;
+    return sb_auth_valid(a) && sb_steps_ok(a->tier, a->kind, a->steps);
 }
 
 void sb_auth_revoke_all(void)
@@ -303,10 +328,12 @@ int sb_gate_check(unsigned space, unsigned lu, uint64_t first, uint64_t count, i
     } else if (gate.tier < need) {
         w = "the confirmation was for a lower tier";
         r = SB_W_TIER;
-    } else if ((gate.steps & sb_steps_needed(need, gate.kind)) != sb_steps_needed(need, gate.kind)) {
-        w = (sb_steps_needed(need, gate.kind) & ~gate.steps & SB_STEP_BACKUP) ? "no verified backup yet"
-                                                                               : "a confirmation step is missing";
-        r = (sb_steps_needed(need, gate.kind) & ~gate.steps & SB_STEP_BACKUP) ? SB_W_BACKUP : SB_W_AUTH;
+    } else if (!sb_steps_ok(need, gate.kind, gate.steps)) {
+        unsigned miss = sb_steps_needed(need, gate.kind) & ~gate.steps;
+        int nobak = (miss & SB_STEP_BACKUP) ||
+                    (!miss && need >= SB_TIER4 && (gate.kind & SB_KIND_STORAGE));
+        w = nobak ? "no verified backup yet" : "a confirmation step is missing";
+        r = nobak ? SB_W_BACKUP : SB_W_AUTH;
     }
     if (why)
         *why = w;

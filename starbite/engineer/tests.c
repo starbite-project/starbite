@@ -11,13 +11,13 @@
 
 struct rec {
     char name[40], detail[96];
-    uint8_t pass, earlier;
+    uint8_t pass, earlier, action;      /* action: a tier 3 / 4 confirmation or outcome ("SBENG1 W") */
     uint32_t t;                 /* seconds since power-on (this session) or the session number */
 };
 static struct rec hist[HIST_N];
 static unsigned nhist, sessions_seen;
 
-static void add(const char *name, int pass, const char *detail, int earlier, uint32_t t)
+static void add(const char *name, int pass, const char *detail, int earlier, uint32_t t, int action)
 {
     if (nhist >= HIST_N) {
         for (unsigned i = 1; i < HIST_N; ++i)
@@ -29,12 +29,13 @@ static void add(const char *name, int pass, const char *detail, int earlier, uin
     sb_strcpy(r->detail, sizeof(r->detail), detail);
     r->pass = (uint8_t)(pass != 0);
     r->earlier = (uint8_t)earlier;
+    r->action = (uint8_t)action;
     r->t = t;
 }
 
 void test_record(const char *name, int pass, const char *detail)
 {
-    add(name, pass, detail ? detail : "", 0, (uint32_t)(sb_ms() / 1000U));
+    add(name, pass, detail ? detail : "", 0, (uint32_t)(sb_ms() / 1000U), 0);
     struct ub u;
     ub_init(&u);
     ub_s(&u, "SBENG1 T ");
@@ -49,6 +50,52 @@ void test_record(const char *name, int pass, const char *detail)
     ub_s(&u, name);
     ub_s(&u, pass ? ": PASS" : ": FAIL");
     sb_log(u.b);
+}
+
+/* A tier 3 / 4 action: "SBENG1 W <what> | <when>, tier N: <detail>" (tier < 0: an outcome),
+ * written to the pmsg ring at once, before the action runs (a tier 4 write may reset the phone;
+ * the ring survives a warm reset and TWRP shows it). */
+void test_record_action(int tier, const char *what, const char *detail)
+{
+    struct ub d, u;
+    struct sb_rtc rt;
+    sb_rtc_read(&rt);
+    ub_init(&d);
+    if (rt.ok) {
+        ub_dec(&d, rt.y);
+        ub_c(&d, '-');
+        ub_dec2(&d, rt.mo);
+        ub_c(&d, '-');
+        ub_dec2(&d, rt.d);
+        ub_c(&d, ' ');
+        ub_dec2(&d, rt.h);
+        ub_c(&d, ':');
+        ub_dec2(&d, rt.mi);
+        ub_c(&d, ':');
+        ub_dec2(&d, rt.s);
+    } else {
+        uint64_t s = sb_ms() / 1000U;
+        ub_s(&d, "uptime ");
+        ub_dec(&d, s / 60U);
+        ub_c(&d, ':');
+        ub_dec2(&d, (unsigned)(s % 60U));
+    }
+    if (tier >= 0) {
+        ub_s(&d, ", confirmed tier ");
+        ub_dec(&d, (uint64_t)tier);
+    } else {
+        ub_s(&d, ", outcome");
+    }
+    ub_s(&d, ": ");
+    ub_s(&d, detail ? detail : "");
+    add(what, 1, d.b, 0, (uint32_t)(sb_ms() / 1000U), 1);
+    ub_init(&u);
+    ub_s(&u, "SBENG1 W ");
+    ub_s(&u, what);
+    ub_s(&u, " | ");
+    ub_s(&u, d.b);
+    ub_c(&u, '\n');
+    sb_pmsg_put(u.b);
 }
 
 /* Read the ring as it was at start: every SBENG1 line before ours is an earlier session's. */
@@ -85,7 +132,17 @@ void tests_load_history(void)
                 name[n] = 0;
                 if (*p)
                     p += 3;
-                add(name, pass, p, 1, sessions_seen);
+                add(name, pass, p, 1, sessions_seen, 0);
+            } else if (sb_prefix(line, "SBENG1 W ")) {
+                const char *p = line + 9;
+                char name[40];
+                unsigned n = 0;
+                while (*p && !(p[0] == ' ' && p[1] == '|') && n < sizeof(name) - 1)
+                    name[n++] = *p++;
+                name[n] = 0;
+                if (*p)
+                    p += 3;
+                add(name, 1, p, 1, sessions_seen, 1);
             }
         }
     }
@@ -102,6 +159,8 @@ static void fill_history(void)
     struct ub k, v;
     unsigned now = 0, earlier = 0, fails = 0;
     for (unsigned i = 0; i < nhist; ++i) {
+        if (hist[i].action)
+            continue;
         if (hist[i].earlier)
             ++earlier;
         else
@@ -123,7 +182,7 @@ static void fill_history(void)
         int any = 0;
         for (unsigned j = nhist; j-- > 0;) {
             const struct rec *r = &hist[j];
-            if (r->earlier != want_earlier)
+            if (r->earlier != want_earlier || r->action)
                 continue;
             ub_init(&k);
             ub_s(&k, r->pass ? U_CHECK " " : "x ");
@@ -147,6 +206,27 @@ static void fill_history(void)
             kv_note(want_earlier ? "None in the ring (a cold boot or a Windows start clears it)."
                                  : "No test run yet: Tests tab.");
     }
+    kv_hdr("TIER 3 / 4 ACTIONS (NEWEST FIRST)");
+    int acts = 0;
+    for (unsigned j = nhist; j-- > 0;) {
+        const struct rec *r = &hist[j];
+        if (!r->action)
+            continue;
+        ub_init(&k);
+        ub_s(&k, r->name);
+        ub_init(&v);
+        if (r->earlier) {
+            ub_s(&v, "session ");
+            ub_dec(&v, r->t);
+            ub_s(&v, "  ");
+        }
+        ub_s(&v, r->detail);
+        kv_addc(k.b, v.b, C_ORANGE);
+        acts = 1;
+    }
+    if (!acts)
+        kv_note("None: every tier 3 and tier 4 confirmation and its outcome are written here (and to pmsg) "
+                "before the action runs.");
     kv_note("Kept in the pmsg RAM ring: it survives a reboot, not a power-off. Tests > Save report to the "
             "OS store keeps this session's results (and the thermal log) as a text entry in the store.");
 }

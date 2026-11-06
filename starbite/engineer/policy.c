@@ -6,21 +6,30 @@
  *   tier 1  warning screen + held confirmation (slide, or hold Volume Up 1.5 s)
  *   tier 2  + the target's name typed on the keypad
  *   tier 3  + a second confirmation (hold Power 3 s); storage also needs a verified backup first
- * TIER_NO is only what is physically impossible or would destroy Engineer OS while it runs: the
- * unmapped secure world (the access faults), S-Boot's ECT at 0xA0000000 (the next OS reads it), and
- * the running image with its stack and screen buffers (0x92000000..0x9fffffff).
+ *   tier 4  (extreme, v2.1) a full-screen red warning naming the exact consequence and how to
+ *           recover, "<target> I ACCEPT" typed, the slide, Power held 5 s; storage: a verified
+ *           backup first unless "no backup" is picked on a second red screen
+ * Tier 4 is everything v2.0 refused as policy: S-Boot's ECT at 0xA0000000 (Android's kernel reads
+ * it), the running Engineer OS (0x92000000..0x9fffffff: Lab crashes at once), the secure world
+ * (0xAF800000..0xBFFFFFFF) and every address Engineer OS leaves unmapped (the access is attempted
+ * through a temporary mapping and its fault is caught and reported), PMIC blocks Starbite does not
+ * know, ACPM DVFS outside the GPU's vendor table, raw LU writes across partitions (fence.c).
+ * TIER_NO is left for what cannot be expressed: an address above the 36-bit space Engineer OS's
+ * MMU covers, a PMIC register the ACPM command cannot carry (4-bit type, 8-bit register).
  *
  * Tier 3 (the user's "most dangerous" list): the PMU (power, reset, DVFS), CMU_TOP / CORE / BUSC
  * (MIF and INT clocks), the MIF block (CMU_MIF, DREX / DMC, DDR PHY), the CPU cluster blocks
  * (CMU_CPUCL0/1, DVFS), CMU_G3D (GPU clock), the ACPM / APM mailbox and APM SRAM, CHIPID / fuses,
  * the TMU (S-Boot's 115 C hardware trip), every PMIC regulator / BUCK / TOP register except the
- * touch and card rails at the kernel's values, every MAX77705 register except the charger
- * watchdog feed, DRAM carve-outs that may be TZASC-protected (secure camera, modem).
+ * touch and card rails at the kernel's values and vdd_g3d up to 950 mV, every MAX77705 register
+ * except the charger watchdog feed, DRAM carve-outs that may be TZASC-protected (secure camera,
+ * modem), the GPU's DVFS levels from the vendor table.
  * Tier 2: the other CMU blocks (peripheral clock gates: a closed gate can stall the bus), the UFS
  * host and microSD controller (the disks), the watchdog, the GIC, the always-on GPIOs (the keys),
- * SYSREGs, any device address not listed, the UFS DMA window.
+ * SYSREGs, the Mali GPU's registers (its jobs write memory by DMA), any device address not listed,
+ * the UFS DMA window.
  * Tier 1: known peripherals (pin controllers, I2C / USI buses, DECON / DSIM), free DRAM, the
- * framebuffer, pmsg and the boot-next mailbox.
+ * framebuffer, pmsg and the boot-next mailbox, vdd_g3d between S-Boot's value and 950 mV.
  */
 #include "eng.h"
 
@@ -62,6 +71,7 @@ static const struct range regs[] = {
     { 0x11500000ULL, KB(64), TIER2, "DWMMC2 (microSD controller)" },
     { 0x14050000ULL, KB(64), TIER2, "GPIO_ALIVE (the keys: a wrong value can stop them answering)" },
     { 0x14210000ULL, KB(64), TIER2, "SYSREG_CMGP" },
+    { 0x17500000ULL, KB(64), TIER2, "Mali-G72 GPU (its jobs write memory by DMA)" },
     /* tier 1 */
     { 0x10430000ULL, KB(4), TIER1, "GPIO_PERIC0 (pins)" },
     { 0x104b0000ULL, KB(4), TIER1, "HSI2C USI03 (touch bus)" },
@@ -75,15 +85,19 @@ static const struct range regs[] = {
 
 static const struct range dram[] = {
     { 0x8a000000ULL, MB(1), TIER2, "S-Boot's device tree (Engineer OS and every OS read it)" },
-    { 0x92000000ULL, 0xa0000000ULL - 0x92000000ULL, TIER_NO, "Engineer OS itself (code, stack, screen buffers)" },
-    { 0xa0000000ULL, 0xa0100000ULL - 0xa0000000ULL, TIER_NO, "S-Boot's ECT: the next OS reads it" },
+    { 0x92000000ULL, 0xa0000000ULL - 0x92000000ULL, TIER4,
+      "Engineer OS itself (code, stack, screen buffers): Lab crashes at once" },
+    { 0xa0000000ULL, 0xa0100000ULL - 0xa0000000ULL, TIER4,
+      "S-Boot's ECT: Android's kernel reads it at boot; a bad ECT can make Android panic" },
     { 0xa0100000ULL, SB_TEST_SIZE, TIER1, "the RAM test window (free)" },
     { 0xaf000000ULL, MB(8), TIER2, "UFS DMA buffers (a write during a transfer corrupts it)" },
-    { 0xaf800000ULL, 0xc0000000ULL - 0xaf800000ULL, TIER_NO, "secure world (RKP, TIMA): unmapped, the write would fault" },
+    { 0xaf800000ULL, 0xc0000000ULL - 0xaf800000ULL, TIER4,
+      "secure world (RKP, TIMA): mapped for this one access; TrustZone faults it" },
     { 0xe1900000ULL, 0xe3700000ULL - 0xe1900000ULL, TIER3, "secure camera carve-out (TZASC: may raise an SError)" },
     { 0xf0000000ULL, 0xf9200000ULL - 0xf0000000ULL, TIER3, "modem carve-out (TZASC: may raise an SError)" },
     { 0xcc000000ULL, MB(17), TIER1, "the framebuffer (the screen)" },
     { 0xfed14000ULL, KB(16), TIER1, "pmsg ring and the boot-next mailbox" },
+    { SB_GPU_MEM, SB_GPU_MEM_SIZE, TIER1, "the GPU tests' memory (page tables, jobs, pixels)" },
 };
 
 static int lookup(const struct range *t, unsigned n, uint64_t a, const char **why)
@@ -96,14 +110,20 @@ static int lookup(const struct range *t, unsigned n, uint64_t a, const char **wh
     return -1;
 }
 
+#define ADDR_LIMIT (64ULL << 30)    /* the 36-bit space of Engineer OS's MMU (TCR T0SZ = 28) */
+
 int poke_tier(uint64_t a, const char **why)
 {
     const char *w = "?";
     int t;
-    if (!sb_map_kind(a)) {
+    if (a >= ADDR_LIMIT) {
         t = TIER_NO;
-        w = (a >= 0xaf800000ULL && a < 0xc0000000ULL) ? "secure world (RKP, TIMA): unmapped, the write would fault"
-                                                       : "unmapped: no memory or device here";
+        w = "above 64 GiB: outside the 36-bit address space Engineer OS's MMU covers";
+    } else if (!sb_map_kind(a)) {
+        t = TIER4;
+        w = (a >= 0xaf800000ULL && a < 0xc0000000ULL)
+                ? "secure world (RKP, TIMA): mapped for this one access; TrustZone faults it"
+                : "unmapped: no memory or device Starbite knows; mapped for this one access, expect a bus fault";
     } else if (a < 0x80000000ULL) {
         t = lookup(regs, sizeof(regs) / sizeof(regs[0]), a, &w);
         if (t < 0) {
@@ -122,12 +142,22 @@ int poke_tier(uint64_t a, const char **why)
     return t;
 }
 
+/* What happens and how to recover, for the warning screen. */
 const char *poke_undo(uint64_t a)
 {
     const char *w;
     int t = poke_tier(a, &w);
     if (t == TIER_NO)
         return "-";
+    if (a >= 0x92000000ULL && a < 0xa0000000ULL)
+        return "none: Lab crashes or misbehaves at once; if the screen freezes, hold Power + Volume Down "
+               "10 s (the PMIC resets the phone) and the loader starts again";
+    if (a >= 0xa0000000ULL && a < 0xa0100000ULL)
+        return "back it up first (offered next). S-Boot copies the ECT from flash when it starts, so a "
+               "full restart most likely brings it back (not verified); do not start Android before that";
+    if (t == TIER4)
+        return "nothing is written if it faults (Lab reports the fault); if the phone resets instead, it "
+               "comes back to the loader with nothing changed on storage";
     if (a >= 0x80000000ULL)
         return "a reboot reloads what needs this memory";
     if (t == TIER3)
@@ -163,14 +193,18 @@ int range_tier(uint64_t a, uint64_t len, const char **why)
 
 /* Reads: tier 0 inside the blocks known to answer without side effects (em.c peek_safe) and DRAM
  * outside the carve-outs; tier 1 for any other mapped address (some registers clear on read, an
- * unclocked block can stall the bus); never unmapped memory. */
+ * unclocked block can stall the bus); tier 4 for unmapped addresses (attempted through a
+ * temporary mapping: TrustZone or the bus faults it, Lab reports the fault). */
 int read_tier(uint64_t a, const char **why)
 {
     const char *w = "free to read";
     int t = TIER0;
-    if (!sb_map_kind(a)) {
+    if (a >= ADDR_LIMIT) {
         t = TIER_NO;
-        w = "unmapped: the read would fault";
+        w = "above 64 GiB: outside the 36-bit address space Engineer OS's MMU covers";
+    } else if (!sb_map_kind(a)) {
+        t = TIER4;
+        w = "unmapped (secure world or nothing): the read is attempted through a temporary mapping";
     } else if (a >= 0x80000000ULL && a < 0x100000000ULL) {
         if ((a >= 0xe1900000ULL && a < 0xe3700000ULL) || (a >= 0xf0000000ULL && a < 0xf9200000ULL)) {
             t = TIER1;
@@ -204,20 +238,25 @@ int peek_allowed(uint64_t a)
     return read_tier(a, 0) == TIER0;
 }
 
-/* ---- PMIC (S2MPS18 via ACPM), MAX77705 ----------------------------------------------------------
+/* ---- PMIC (S2MPS18 via ACPM), MAX77705, ACPM DVFS ------------------------------------------------
  * Tier 1 only for the exact values the kernel (and the loader's menu) uses on the peripheral
  * rails (shim/starlte/menu.c tp_power, hw_sd_rails): touch LDO35 = 0xEC (on, 1.8 V), LDO43 = 0xF0
- * (on, 3.0 V); card LDO31 = 0x28 / 0xE8 (off / on, 2.8 V) and LDO2 = off / 0xFC (on, 3.3 V), and
- * the RTC block (time, UPDATE latch). Any other value or
- * register is tier 3: a regulator, BUCK or TOP register can brown out the SoC or damage a part
- * before anything can be undone. */
+ * (on, 3.0 V); card LDO31 = 0x28 / 0xE8 (off / on, 2.8 V) and LDO2 = off / 0xFC (on, 3.3 V); the
+ * RTC block (time, UPDATE latch); vdd_g3d (BUCK6, reg 0x2B, 300 mV + n x 6.25 mV) from 0x30
+ * (600 mV, around S-Boot's 619-644 mV) to 0x68 (950 mV: what Linux's s9p-g3d and Starbite's iOS
+ * run the Mali at; jobs faulted below it). Any other value or register is tier 3: a regulator,
+ * BUCK or TOP register can brown out the SoC or damage a part before anything can be undone.
+ * ACPM types 3..15 are blocks Starbite does not know: tier 4. */
 int pmic_tier(unsigned type, unsigned reg, unsigned val, const char **why)
 {
     const char *w;
     int t = TIER3;
-    if (type > 2 || reg > 0xff) {
+    if (type > 15 || reg > 0xff || val > 0xff) {
         t = TIER_NO;
-        w = "no such PMIC register";
+        w = "not addressable: the ACPM PMIC command has a 4-bit type, 8-bit register and value";
+    } else if (type > 2) {
+        t = TIER4;
+        w = "a PMIC block Starbite does not know: the APM firmware decides where it goes";
     } else if (type == 2) {
         t = TIER1;
         w = "RTC block (the clock; the next OS reads it)";
@@ -228,6 +267,11 @@ int pmic_tier(unsigned type, unsigned reg, unsigned val, const char **why)
                              (reg == 0x4a && (val == 0xfc || !(val & 0xc0U))))) {
         t = TIER1;
         w = "microSD rail at the kernel's value";
+    } else if (type == 1 && reg == 0x2b && val >= 0x30 && val <= 0x68) {
+        t = TIER1;
+        w = "vdd_g3d (BUCK6) between S-Boot's value and 950 mV, the GPU's known-good voltage";
+    } else if (type == 1 && reg == 0x2b) {
+        w = "vdd_g3d (BUCK6) outside 600..950 mV: never run on this phone";
     } else if (type == 0) {
         w = "PMIC TOP (power sequencing, interrupts, power-off)";
     } else {
@@ -242,12 +286,14 @@ int max_tier(unsigned addr7, unsigned reg, unsigned val, const char **why)
 {
     const char *w;
     int t = TIER3;
-    if (addr7 == 0x69 && reg == 0xbd && (val & 3U) == 1U && !(val & ~0x0fU)) {
+    if (addr7 > 0x7f || reg > 0xff || val > 0xff) {
+        t = TIER_NO;
+        w = "not addressable on I2C (7-bit address, 8-bit register and value)";
+    } else if (addr7 == 0x69 && reg == 0xbd && (val & 3U) == 1U && !(val & ~0x0fU)) {
         t = TIER1;
         w = "charger watchdog feed (CNFG_06 WDTCLR = 01, as Linux does)";
     } else if (addr7 == 0x69 && reg == 0xb0) {
-        t = TIER_NO;
-        w = "CHG_INT is clear-on-read status, not a register to write";
+        w = "CHG_INT is clear-on-read status: the chip should ignore a write (not read back)";
     } else if (addr7 == 0x69) {
         w = "charger configuration (mode, currents, voltages)";
     } else if (addr7 == 0x36) {
@@ -264,7 +310,27 @@ int max_tier(unsigned addr7, unsigned reg, unsigned val, const char **why)
     return t;
 }
 
+/* The GPU's DVFS levels (vendor exynos9810.dtsi gpu_dvfs_table, kHz). 260000 is S-Boot's clock;
+ * 572000 ran for days under Starbite's iOS (xnu 0303, vdd_g3d 950 mV); the others never ran here. */
+const unsigned gpu_levels_khz[GPU_NLEVELS] = { 260000, 299000, 338000, 455000, 546000, 572000 };
+
+int dvfs_tier(unsigned domain, unsigned khz, const char **why)
+{
+    const char *w = "a DVFS level outside the GPU's vendor table (or another domain: MIF froze the phone on iOS)";
+    int t = TIER4;
+    if (domain == 4)
+        for (unsigned i = 0; i < GPU_NLEVELS; ++i)
+            if (gpu_levels_khz[i] == khz) {
+                t = TIER3;
+                w = "the GPU clock through ACPM DVFS, a level of the vendor table";
+            }
+    if (why)
+        *why = w;
+    return t;
+}
+
 const char *tier_name(int t)
 {
-    return t == TIER0 ? "tier 0" : t == TIER1 ? "tier 1" : t == TIER2 ? "tier 2" : t == TIER3 ? "tier 3" : "impossible";
+    return t == TIER0 ? "tier 0" : t == TIER1 ? "tier 1" : t == TIER2 ? "tier 2" : t == TIER3 ? "tier 3" :
+           t == TIER4 ? "tier 4 (extreme)" : "impossible";
 }
