@@ -11,6 +11,7 @@
 #                                (DECON early_event, G3D rail check, cpufreq 5 ms,
 #                                build71.sh hooks), --tree on mainline (dw_mmc,
 #                                no S9P_GEM_DMA32, Panfrost autosuspend 1 s)
+#   tools/linux/patches/s6e3ha8-star-self-mask.hex  the panel's self-mask image (step 6f)
 #   tools/linux/mk-starlte-dts.py  S9 DTS: 4 GB, 3000 mAh, /chosen bootargs and
 #                                initrd placeholders, CMA out of the loader window, microSD
 #   tools/linux/config/starbite.config  merged after the port's config, then checked
@@ -121,7 +122,7 @@ STARBITE_CFG=("--enable MMC" "--enable MMC_BLOCK" "--enable MMC_DW" "--enable MM
 BUILD_ID=$( {
 	echo "$BASE"
 	printf '%s\n' "$BOOT_CMDLINE" "${STARBITE_CFG[@]}" "$@"
-	cd "$LINUX" && find port config/starbite.config patch-mainline.py build-kernel.sh -type f -print0 |
+	cd "$LINUX" && find port config/starbite.config patch-mainline.py patches/s6e3ha8-star-self-mask.hex build-kernel.sh -type f -print0 |
 		LC_ALL=C sort -z | xargs -0 sha256sum
 } | sha256sum | cut -c1-8)
 export LOCALVERSION=-$BUILD_ID
