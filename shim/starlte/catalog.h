@@ -10,7 +10,14 @@
  * A file field names store entries ("ufs:" / "sd:" pick the medium), with alternatives separated
  * by '|'; "@boot" is the SWEETXNU payload in BOOT, "@bundle" the "SBUEFI!!" bundle in BOOT.
  * Files by method: xnu payload; linux Image, DTB, initrd (optional); android kernel, ramdisk,
- * cmdline file (optional); uefi image; bare Image. cmdline is appended to the OS's own.
+ * cmdline file (optional), DTB or DTBH (optional: replaces S-Boot's FDT, dtmerge.h); uefi image;
+ * bare Image. cmdline is appended to the OS's own.
+ *
+ * Extension (2026-11-06; older loaders ignore it): the header's last u32 (+28, 0 before) is the
+ * offset of "SBCATEX1", u32 version 1, u32 count (= the entry count), u32 entry size (32), u32 0,
+ * then count x 32 bytes in entry order: u32 string offsets of the log-level fragments 0..3 (the
+ * text appended to the command line for the global log level, docs/STARBITE-HEALTH.md), u16
+ * watchdog seconds (0 = never armed), u8 feeder (CW_*), u8 flags (CE_*), 12 bytes zero.
  */
 #pragma once
 #include <stdint.h>
@@ -40,6 +47,18 @@
 
 #define CF_HIDDEN 1U
 
+/* Who keeps the hardware watchdog fed once the OS runs (catalog extension, u8 feeder). */
+#define CW_NONE      0U   /* nobody: never arm it for this entry */
+#define CW_KERNEL    1U   /* Linux: s3c2410_wdt.tmr_atboot=1 tmr_margin=T, the watchdog core pings it */
+#define CW_USERSPACE 2U   /* Linux: as CW_KERNEL plus sb.wdt=T (the initrd hands it to systemd/busybox) */
+#define CW_OWN       3U   /* the OS's own driver takes it over (Samsung's Android kernel) */
+#define CW_XNU       4U   /* XNU with a feeder patch: sbwdt=T appended (docs/STARBITE-HEALTH.md 5.4) */
+/* Extension flags (u8). */
+#define CE_LINUX_INFORM3 1U   /* patch the Linux DTB's INFORM3 = recovery to normal, so a panic
+                               * or watchdog reset comes back to the loader instead of RECOVERY */
+#define CE_NO_LAUNCH     2U   /* no launch record (crash detection) for this entry */
+#define CAT_LOG_MAX 128U
+
 struct cat_ent {
     char key[24];
     char name[32];
@@ -47,8 +66,12 @@ struct cat_ent {
     char file[4][64];
     char cmdline[512];
     char root[64];
+    char log[4][CAT_LOG_MAX];   /* command line fragment per log level 0..3 ("" = none) */
     uint8_t category, method, tag, icon;
     uint16_t flags, order;
+    uint16_t wdt_s;             /* watchdog seconds, 0 = never */
+    uint8_t wdt_feed;           /* CW_* */
+    uint8_t cflags;             /* CE_* */
 };
 
 /* Read the catalog (once): the entry count. */

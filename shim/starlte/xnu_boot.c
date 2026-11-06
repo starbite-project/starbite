@@ -23,6 +23,10 @@
 #include "post.h"
 #include "fastboot.h"
 #include "ramboot.h"
+#include "sbfmt.h"
+#include "crash.h"
+#include "wdt.h"
+#include "dtmerge.h"
 
 void star_intro_splash(void);   /* anim.c */
 uint32_t star_crc32(uintptr_t p, uint64_t n);   /* store.c */
@@ -627,6 +631,8 @@ int star_entry_ready(unsigned i, const char **why)
         w = "NO DTB";
     else if (e->method == M_ANDROID && !resolve(e->file[1], &s))
         w = "NO RAMDISK";
+    else if (e->method == M_ANDROID && e->file[3][0] && !resolve(e->file[3], &s))
+        w = "NO ANDROID DTB";
     if (why)
         *why = w;
     return !w;
@@ -756,6 +762,134 @@ static uintptr_t image_load(volatile uint64_t *log, const struct store_ent *e, u
 }
 
 /*
+ * ---- The launch: log level, watchdog, crash log (docs/STARBITE-HEALTH.md) ---------------------
+ * boot_entry works on a copy of the catalog entry whose cmdline has the global log level's
+ * fragment (catalog extension) and the watchdog's kernel arguments appended; XNU gets its fragment
+ * through launch.xfrag, where "!token" removes a boot-arg the payload already has. Once an entry
+ * point exists, launch_go writes the launch record (crash.c) and arms the watchdog (wdt.c), the
+ * last two things before the OS starts.
+ */
+static struct {
+    int valid, inform3, retry;
+    char key[24], name[32];
+    unsigned method, wdt, lvl, flags;
+    char xfrag[CAT_LOG_MAX + 32];
+} launch;
+static struct cat_ent launch_ent;
+
+static void lscopy(char *d, unsigned cap, const char *s)
+{
+    unsigned k = 0;
+    for (; s && s[k] && k + 1 < cap; ++k)
+        d[k] = s[k];
+    d[k] = 0;
+}
+
+static void launch_clear(void)
+{
+    launch.valid = launch.inform3 = 0;
+    launch.wdt = launch.flags = 0;
+    launch.xfrag[0] = 0;
+}
+
+static void launch_set(const char *key, const char *name, unsigned method, unsigned flags)
+{
+    struct star_settings s;
+    launch_clear();
+    if (!settings_load(&s))
+        sbset_defaults(&s);
+    lscopy(launch.key, sizeof(launch.key), key);
+    lscopy(launch.name, sizeof(launch.name), name);
+    launch.method = method;
+    launch.lvl = sbset_log(&s);
+    launch.flags = flags;
+    launch.valid = 1;
+}
+
+/* " name=N" onto a command line of cap bytes */
+static void arg_num(char *line, unsigned cap, const char *name, unsigned v)
+{
+    char t[48];
+    unsigned n = 0;
+    for (; name[n] && n < 32; ++n)
+        t[n] = name[n];
+    char d[10];
+    unsigned k = 0;
+    do {
+        d[k++] = (char)('0' + v % 10U);
+        v /= 10U;
+    } while (v && k < sizeof(d));
+    while (k)
+        t[n++] = d[--k];
+    t[n] = 0;
+    (void)sb_line_edit(line, cap, t, 0);
+}
+
+/* The entry as it will be started (launch_ent) and the launch's state. */
+static const struct cat_ent *launch_prepare(const struct cat_ent *e, volatile uint64_t *log)
+{
+    struct star_settings s;
+    if (!settings_load(&s))
+        sbset_defaults(&s);
+    const uint8_t *src = (const uint8_t *)e;
+    uint8_t *dst = (uint8_t *)&launch_ent;
+    for (unsigned i = 0; i < sizeof(launch_ent); ++i)
+        dst[i] = src[i];
+    launch_clear();
+    unsigned lvl = sbset_log(&s);
+    const char *frag = e->log[lvl];
+    /* the watchdog: only where someone will feed it */
+    unsigned wdt = 0, feed = e->wdt_feed;
+    int fits = (feed == CW_KERNEL || feed == CW_USERSPACE) ? e->method == M_LINUX
+             : feed == CW_XNU ? e->method == M_XNU : feed == CW_OWN;
+    if (s.wdt_mode != SET_WDT_OFF && e->wdt_s && fits)
+        wdt = s.wdt_mode == SET_WDT_FIXED && s.wdt_s ? s.wdt_s : e->wdt_s;
+    if (wdt) {
+        unsigned ms;
+        (void)sb_wdt_count(wdt, &ms);
+        wdt = (ms + 500U) / 1000U;
+    }
+    if (e->method == M_XNU) {
+        lscopy(launch.xfrag, sizeof(launch.xfrag), frag);
+        if (wdt)
+            arg_num(launch.xfrag, sizeof(launch.xfrag), "sbwdt=", wdt);
+    } else if (e->method == M_LINUX || e->method == M_ANDROID) {
+        (void)sb_line_edit(launch_ent.cmdline, sizeof(launch_ent.cmdline), frag, 0);
+        if (wdt && e->method == M_LINUX) {
+            (void)sb_line_edit(launch_ent.cmdline, sizeof(launch_ent.cmdline), "s3c2410_wdt.tmr_atboot=1", 0);
+            arg_num(launch_ent.cmdline, sizeof(launch_ent.cmdline), "s3c2410_wdt.tmr_margin=", wdt);
+            if (feed == CW_USERSPACE)
+                arg_num(launch_ent.cmdline, sizeof(launch_ent.cmdline), "sb.wdt=", wdt);
+        }
+    }
+    lscopy(launch.key, sizeof(launch.key), e->key);
+    lscopy(launch.name, sizeof(launch.name), e->name);
+    launch.method = e->method;
+    launch.lvl = lvl;
+    launch.wdt = wdt;
+    launch.inform3 = (e->cflags & CE_LINUX_INFORM3) && e->method == M_LINUX && s.crash_mode != SET_CRASH_OFF;
+    launch.flags = (launch.inform3 ? CLF_LINUX_INFORM3 : 0U) | (launch.retry ? CLF_RETRY : 0U);
+    launch.valid = !(e->cflags & CE_NO_LAUNCH);
+    log[19] = (uint64_t)wdt << 32 | (uint64_t)lvl << 8 | (uint64_t)(unsigned)launch.inform3;
+    return &launch_ent;
+}
+
+/* The last things before the OS: the launch record, then the watchdog. */
+static void pmsg_put(const char *s);
+static void launch_go(volatile uint64_t *log)
+{
+    if (!launch.valid)
+        return;
+    crash_launch(launch.key, launch.name, launch.method, launch.wdt, launch.wdt != 0, launch.lvl, launch.flags);
+    if (launch.wdt) {
+        unsigned ms = wdt_arm(launch.wdt);
+        log[19] |= (uint64_t)ms << 40;
+        pmsg_put(ms ? "STARBITE: watchdog armed (cluster 1, 0x10060000)\n" : "STARBITE: watchdog NOT armed\n");
+    }
+    launch.valid = 0;
+}
+
+/*
  * Linux: Image + DTB (+ initrd) from the store; the entry's cmdline is appended to the DTB's
  * bootargs. x0 = DTB. The display trigger stays free-running (0x1281, as uniLoader leaves it):
  * mainline's framebuffer driver depends on it. The microSD rails are switched on for it.
@@ -788,6 +922,12 @@ boot_linux(volatile uint64_t *log, const struct cat_ent *e)
     uint64_t now;
     if (em_rtc_epoch(&now))
         (void)fdt_chosen_set_u64(LINUX_DTB, "starbite,rtc-epoch", now);
+    /* Crash detection: the port's DTB sets INFORM3 = recovery at boot (s9p,set-registers), so a
+     * panic or a watchdog reset would land in RECOVERY. The launch's copy says normal instead, and
+     * the reset comes back here (catalog flag CE_LINUX_INFORM3). */
+    if (launch.inform3)
+        log[20] = (uint64_t)fdt_patch_pairs((uint8_t *)LINUX_DTB, "s9p,set-registers", 0x1406080cU,
+                                            INFORM_RECOVERY, INFORM_NORMAL);
     if (have_rd) {
         stage_file(k++, ns, "Loading initramfs", &rd.e);
         r = store_load(&rd.e, OS_RD, EDIT_FDT - OS_RD);
@@ -822,8 +962,10 @@ boot_linux(volatile uint64_t *log, const struct cat_ent *e)
  * Android: kernel (arm64 Image, Samsung 4.9) at RAM_BASE + text_offset, ramdisk (first stage
  * init) at OS_RD, and S-Boot's own FDT (the stock DTB it loaded, with its androidboot.*
  * bootargs) copied to EDIT_FDT with the cmdline file and the entry's cmdline appended and
- * /chosen linux,initrd-* pointing at the ramdisk. The display goes back as S-Boot left it: the
- * vendor kernel initialises DECON itself.
+ * /chosen linux,initrd-* pointing at the ramdisk. With a 4th file (the OS's own DTB or DTBH,
+ * loaded to LINUX_DTB), that DTB is the base and S-Boot's run-time state is merged into it
+ * (dtmerge.c); without one the path is exactly the old one. The display goes back as S-Boot left
+ * it: the vendor kernel initialises DECON itself.
  */
 static uintptr_t
 boot_android(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
@@ -854,14 +996,39 @@ boot_android(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
     uintptr_t dst = image_load(log, &img.e, OS_RD, -55, &span);
     if (!dst)
         return 0;
-    stage_text(2, 4, "Loading device tree", "S-Boot FDT", __builtin_bswap32(*(volatile uint32_t *)(fdt + 4)));
-    uint32_t fsize = cmdline[0] ? fdt_copy_append_bootargs(fdt, EDIT_FDT, LINUX_DTB - EDIT_FDT, cmdline) : 0;
-    if (!fsize) {
-        uint32_t total = __builtin_bswap32(*(volatile uint32_t *)(fdt + 4));
-        if (cmdline[0] || total > LINUX_DTB - EDIT_FDT)
-            return fail(log, -58, "ANDROID FDT FAILED");
-        copy_bytes(EDIT_FDT, fdt, total);
-        fsize = total;
+    uint32_t fsize;
+    struct src dt;
+    if (e->file[3][0]) {
+        /* The entry's own DTB (a plain FDT or Samsung's DTBH container, dtmerge.h) instead of the
+         * one S-Boot loaded from BOOT, with what S-Boot set at run time carried over: /chosen
+         * (bootargs + this cmdline, initrd, revision, serial), the memory nodes, the root's
+         * model_info-system_rev. */
+        uint32_t chip, rev, off, dsz;
+        unsigned idx, cnt;
+        if (!resolve(e->file[3], &dt) || dt.kind != SRC_STORE)
+            return fail(log, -56, "ANDROID DTB NOT IN THE STORE");
+        stage_file(2, 4, "Loading device tree", &dt.e);
+        int rr = store_load(&dt.e, LINUX_DTB, UFS_DMA - LINUX_DTB);
+        if (rr)
+            return fail(log, -56, rr == -3 ? "ANDROID DTB TOO LARGE" : "ANDROID DTB READ OR CRC FAILED");
+        (void)fdt_board_id((const uint8_t *)fdt, &chip, &rev);
+        if (!dtbh_pick((const uint8_t *)LINUX_DTB, dt.e.size, chip, rev, &off, &dsz, &idx, &cnt))
+            return fail(log, -57, "ANDROID DTB: NO USABLE DEVICE TREE");
+        fsize = fdt_merge_sboot((const uint8_t *)(LINUX_DTB + off), (const uint8_t *)fdt, (uint8_t *)EDIT_FDT,
+                                (uint32_t)(LINUX_DTB - EDIT_FDT), cmdline);
+        if (!fsize)
+            return fail(log, -58, "ANDROID DTB MERGE FAILED");
+        log[21] = (uint64_t)chip << 48 | (uint64_t)(rev & 0xffffU) << 32 | (uint64_t)idx << 16 | cnt;
+    } else {
+        stage_text(2, 4, "Loading device tree", "S-Boot FDT", __builtin_bswap32(*(volatile uint32_t *)(fdt + 4)));
+        fsize = cmdline[0] ? fdt_copy_append_bootargs(fdt, EDIT_FDT, LINUX_DTB - EDIT_FDT, cmdline) : 0;
+        if (!fsize) {
+            uint32_t total = __builtin_bswap32(*(volatile uint32_t *)(fdt + 4));
+            if (cmdline[0] || total > LINUX_DTB - EDIT_FDT)
+                return fail(log, -58, "ANDROID FDT FAILED");
+            copy_bytes(EDIT_FDT, fdt, total);
+            fsize = total;
+        }
     }
     if (!fdt_chosen_set_u64(EDIT_FDT, "linux,initrd-start", OS_RD) ||
         !fdt_chosen_set_u64(EDIT_FDT, "linux,initrd-end", OS_RD + rd.e.size))
@@ -1255,6 +1422,8 @@ boot_xnu(volatile uint64_t *log, const struct cat_ent *e, const char *edited)
         cmd[i] = src[i];
     cmd[BOOT_LINE_LENGTH - 1] = 0;
     line_append(cmd, BOOT_LINE_LENGTH, e->cmdline);
+    if (launch.xfrag[0])     /* the log level's fragment ("!-v" removes -v) and sbwdt= */
+        (void)sb_line_edit(cmd, BOOT_LINE_LENGTH, launch.xfrag, 1);
     {
         struct pline pl;
         pl.n = 0;
@@ -1274,19 +1443,34 @@ boot_entry(unsigned i, volatile uint64_t *log, uintptr_t fdt, const char *cmdlin
     const struct cat_ent *e = cat_get(i);
     const char *why;
     boot_why = 0;
+    launch_clear();
     if (!e)
         return fail(log, -12, "NO SUCH ENTRY");
     if (!star_entry_ready(i, &why))
         return fail(log, -13, why);
+    e = launch_prepare(e, log);
+    /* log level 0: none of the loader's own status lines; 3: all of them, even under menu v7 */
+    int was = star_fb_muted();
+    if (launch.lvl == 0)
+        star_fb_mute(1);
+    else if (launch.lvl >= 3)
+        star_fb_mute(0);
+    uintptr_t entry;
     if (e->method == M_XNU)
-        return boot_xnu(log, e, cmdline);
-    if (e->method == M_UEFI)
-        return boot_uefi(log, fdt, e);
-    if (e->method == M_LINUX)
-        return boot_linux(log, e);
-    if (e->method == M_ANDROID)
-        return boot_android(log, fdt, e);
-    return boot_bare(log, fdt, e);
+        entry = boot_xnu(log, e, cmdline);
+    else if (e->method == M_UEFI)
+        entry = boot_uefi(log, fdt, e);
+    else if (e->method == M_LINUX)
+        entry = boot_linux(log, e);
+    else if (e->method == M_ANDROID)
+        entry = boot_android(log, fdt, e);
+    else
+        entry = boot_bare(log, fdt, e);
+    if (!entry) {
+        star_fb_mute(was);
+        launch_clear();
+    }
+    return entry;
 }
 
 /* ---- boot setup, Starbite Recovery and Rescue (recovery.c, docs/STARBITE-RECOVERY.md) ------- */
@@ -1501,6 +1685,7 @@ static uintptr_t star_rescue_boot(volatile uint64_t *log)
     struct rescue_part part[3];
     const char *cmd, *w;
     boot_why = 0;
+    launch_clear();     /* no launch record: rescue mode must not need UFS */
     star_fb_row_base(0);
     star_fb_text_c(0, "STARBITE RESCUE MODE", 0xffffd43bU, 0xff000000U);
     star_fb_text(1, "STARTING THE RESCUE SYSTEM");
@@ -1554,8 +1739,22 @@ static uintptr_t recovery_loop(volatile uint64_t *log, const char *why)
     }
 }
 
-/* Returns the entry PA, or 0 for Download mode. Status stays in the log page at LOG_BASE. */
+/* Status stays in the log page at LOG_BASE. */
+static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr);
+
+/* Returns the entry PA, or 0 for Download mode. A start ends with launch_go: the launch record and
+ * the watchdog, the last things before xnu_boot.S leaves the loader. */
 uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)
+{
+    uintptr_t entry = prepare(fdt, log, el, sctlr);
+    if (entry) {
+        launch_go(log);
+        clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+    }
+    return entry;
+}
+
+static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)
 {
     /* Caches on before anything is drawn (mmu.c); the checks below see S-Boot's sctlr. */
     if (el == 4 && !(sctlr & 1))
@@ -1563,6 +1762,9 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
     log[77] = star_fb_enable();
     /* The Bixby window: only the key GPIO, the timer and fbtext up to here (recovery.c). */
     int rec = rec_bixby_window(REC_WINDOW_MS);
+    /* What the last OS left in the ramoops area, before the first pmsg line changes it: reads and
+     * a RAM copy only (crash.c). */
+    crash_snapshot(fdt);
     boot_fdt = fdt;
     boot_el = el;
     boot_sctlr = sctlr;
@@ -1595,11 +1797,15 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
         if (entry)
             return entry;
     }
-    /* POST: a fatal check, or Bixby held during it, brings up the recovery menu. */
+    /* POST at the settings record's level (full by default; Volume Down skips it once): a fatal
+     * check, or Bixby held during it, brings up the recovery menu. */
     {
-        int bixby = 0;
+        int bixby = 0, skipped = 0;
         const char *why = 0;
-        int f = post_boot(branded, &bixby, &why);
+        struct star_settings ps;
+        if (!settings_load(&ps))
+            sbset_defaults(&ps);
+        int f = post_boot(sbset_post(&ps), branded, &bixby, &skipped, &why);
         if (f || bixby) {
             entry = recovery_loop(log, why);
             if (entry)
@@ -1607,6 +1813,23 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
         }
     }
     (void)cat_load();
+    /* Crash and hang detection: the last launch judged, a report saved, the crash screen
+     * (crash.c). Then the menu, Starbite Recovery or the same entry once more (settings). */
+    {
+        int retry = -1;
+        int act = crash_after(&retry);
+        if (act == CRASH_GO_RECOVERY) {
+            entry = recovery_loop(log, "THE LAST START CRASHED");
+            if (entry)
+                return entry;
+        } else if (act == CRASH_GO_RETRY && retry >= 0) {
+            launch.retry = 1;
+            entry = boot_entry((unsigned)retry, log, fdt, cmdline);
+            launch.retry = 0;
+            if (entry)
+                return entry;
+        }
+    }
     /* Loader fastboot (FB1, fastboot_dev.c, docs/USB-FASTBOOT.md): Volume Up held, or boot-next
      * "fastboot". `fastboot boot` starts its image from here; `fastboot continue`: the menu. */
     {
@@ -1783,7 +2006,11 @@ static uintptr_t ram_start(volatile uint64_t *log, const struct star_ram *r, uin
 
 uintptr_t star_boot_ram(const struct star_ram *r, uintptr_t fdt, const char **why)
 {
+    /* a launch record too (no watchdog, no log fragments): `fastboot boot` images crash as well */
+    launch_set("fastboot", "fastboot boot", r->method, CLF_FASTBOOT);
     uintptr_t e = ram_start((volatile uint64_t *)LOG_BASE, r, fdt);
+    if (!e)
+        launch_clear();
     *why = e ? 0 : boot_why;
     return e;
 }

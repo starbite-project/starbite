@@ -6,7 +6,9 @@
 #include "store.h"
 #include "ui_glyphs.h"
 
+#ifndef CAT_BUF                    /* the host test (tools/loader-test) points it at its own buffer */
 #define CAT_BUF  0x8c000000UL      /* the OS staging area (xnu_boot.c), free until a choice is made */
+#endif
 #define CAT_SIZE (64U << 10)
 
 static struct cat_ent cat[CAT_MAX];
@@ -52,6 +54,12 @@ static int parse(uintptr_t b, uint64_t size)
     uint32_t n = (uint32_t)le(b + 12, 4), esz = (uint32_t)le(b + 16, 4), total = (uint32_t)le(b + 24, 4);
     if (esz != 64 || total > size || 32ULL + (uint64_t)n * 64U > total)
         return 0;
+    /* The extension table (catalog.h): bounds checked as a whole, else ignored. */
+    uint32_t ext = (uint32_t)le(b + 28, 4);
+    if (ext && ((uint64_t)ext + 24U > total || le(b + ext, 8) != 0x3158455441434253ULL ||   /* "SBCATEX1" */
+                le(b + ext + 8, 4) != 1 || le(b + ext + 12, 4) != n || le(b + ext + 16, 4) != 32 ||
+                (uint64_t)ext + 24U + 32ULL * n > total))
+        ext = 0;
     cat_n = 0;
     for (uint32_t i = 0; i < n && cat_n < CAT_MAX; ++i) {
         uintptr_t p = b + 32 + 64U * i;
@@ -73,6 +81,12 @@ static int parse(uintptr_t b, uint64_t size)
             str_at(e->file[f], sizeof(e->file[f]), b, (uint32_t)le(p + 40 + 4 * f, 4), total);
         str_at(e->cmdline, sizeof(e->cmdline), b, (uint32_t)le(p + 56, 4), total);
         str_at(e->root, sizeof(e->root), b, (uint32_t)le(p + 60, 4), total);
+        uintptr_t x = ext ? b + ext + 24 + 32U * i : 0;
+        for (unsigned k = 0; k < 4; ++k)
+            str_at(e->log[k], sizeof(e->log[k]), b, x ? (uint32_t)le(x + 4 * k, 4) : 0, total);
+        e->wdt_s = x ? (uint16_t)le(x + 16, 2) : 0;
+        e->wdt_feed = x ? (uint8_t)le(x + 18, 1) : 0;
+        e->cflags = x ? (uint8_t)le(x + 19, 1) : 0;
         ++cat_n;
     }
     return cat_n > 0;
@@ -91,6 +105,11 @@ static void def(const char *key, const char *name, const char *version, unsigned
     str_set(e->file[3], sizeof(e->file[3]), 0);
     str_set(e->cmdline, sizeof(e->cmdline), 0);
     str_set(e->root, sizeof(e->root), 0);
+    for (unsigned k = 0; k < 4; ++k)
+        str_set(e->log[k], sizeof(e->log[k]), 0);
+    e->wdt_s = 0;
+    e->wdt_feed = 0;
+    e->cflags = 0;
     e->category = (uint8_t)category;
     e->method = (uint8_t)method;
     e->tag = (uint8_t)tag;

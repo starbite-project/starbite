@@ -22,6 +22,7 @@
 #include "store.h"
 #include "fbtext.h"
 #include "batt.h"
+#include "crash.h"
 
 #define PX 1440.0f
 #define PY 2960.0f
@@ -1310,9 +1311,19 @@ static void hide_pill(void)
     SP.pill_a.t = 0;
 }
 
+/* After a crash the loader just showed (crash.c), the menu waits: no auto-start into it again. */
+static int autostart_held(void)
+{
+#ifndef M7_PREVIEW
+    return crash_hold_autoboot();
+#else
+    return 0;
+#endif
+}
+
 static void start_countdown(void)
 {
-    if (S.autos <= 0 || !def_ready()) {
+    if (S.autos <= 0 || !def_ready() || autostart_held()) {
         pill_msg(IC_CHECK, "Ready", "Auto-start is off");
         SP.pill_a.t = 1;
         SP.pill_s.t = 1;

@@ -32,6 +32,7 @@
 #include "ui.h"
 #include "catalog.h"
 #include "store.h"
+#include "crash.h"
 
 #define W UI_W
 #define H UI_H
@@ -1199,7 +1200,7 @@ int menu_v6(const struct star_info *in, char *cmdline, unsigned len)
         rc[n++] = 0; rc[n++] = HINT_Y - 50; rc[n++] = W; rc[n++] = 80;
         star_reveal(CANVAS, rc, (unsigned)(n / 4));
         /* a default entry with a timeout starts unless something is pressed or touched */
-        int dflt = s->timeout_s ? star_menu_ready_key(s->default_key) : -1;
+        int dflt = s->timeout_s && !crash_hold_autoboot() ? star_menu_ready_key(s->default_key) : -1;
         if (dflt >= 0) {
             char b[96];
             focus_entry(dflt);

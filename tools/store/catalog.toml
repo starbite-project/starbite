@@ -9,10 +9,52 @@
 #   tag       daily beta experimental lab stable
 #   files     store entry names ("ufs:" / "sd:" pick the medium, "a|b" = alternatives); "@boot" is
 #             BOOT's own iOS payload, "@bundle" BOOT's UEFI bundle. xnu: payload. linux: Image, DTB,
-#             initrd (optional). android: kernel, ramdisk, cmdline file (optional). uefi / bare: image.
+#             initrd (optional). android: kernel, ramdisk, cmdline file (optional), DTB (optional:
+#             a plain FDT or a Samsung DTBH like dt.img; the loader then uses it instead of the DT
+#             S-Boot loaded from BOOT and carries S-Boot's run-time state over: docs/STARBITE-HEALTH.md
+#             section 6; "" for the cmdline file keeps its slot empty). uefi / bare: image.
 #   cmdline   appended to the OS's own command line
 #   root      where the OS keeps its root (shown, not used by the loader)
 #   flags     ["hidden"]: only in Engineer's "Start an OS"
+# Boot health (2026-11-06, docs/STARBITE-HEALTH.md; packed into the catalog's SBCATEX1 table, which
+# older loaders ignore). Each may be set per entry or for a whole method under [defaults.METHOD]:
+#   log         4 command line fragments, for the global log level 0 quiet (the default), 1 normal,
+#               2 debug, 3 verbose (Starbite Recovery > Startup settings, or sbstore2.py settings
+#               --log N). Appended after cmdline; for xnu a token "!name" first removes the payload's
+#               own "name" / "name=..." boot-arg. At most 127 bytes each.
+#   wdt         seconds (10..82) of the hardware watchdog the loader arms right before the OS starts;
+#               0 = never. The settings can turn it off or force one value for every such entry.
+#   wdt_feed    who keeps it fed: "kernel" (Linux: s3c2410_wdt.tmr_atboot=1 tmr_margin=N appended,
+#               the kernel's watchdog core pings it), "userspace" (also sb.wdt=N: the initrd hands it
+#               to systemd / busybox), "own" (the OS's driver takes it over: Samsung's Android
+#               kernel), "xnu" (sbwdt=N appended; needs the XNU feeder patch), "none".
+#   crash_return  true: the Linux DTB's early INFORM3 = recovery is patched to normal in the copy the
+#               loader passes, so a panic or watchdog reset comes back to the loader's crash screen
+#               instead of RECOVERY.
+#   no_launch   true: no launch record (no crash detection) for this entry.
+
+[defaults.linux]
+log = ["quiet loglevel=3 vt.global_cursor_default=0 systemd.show_status=auto rd.udev.log_level=3 udev.log_level=3",
+       "loglevel=4",
+       "loglevel=7 s9p_decon.geom_log=1 systemd.log_level=info",
+       "loglevel=8 ignore_loglevel keep_bootcon printk.devkmsg=on s9p_decon.geom_log=1 systemd.log_level=debug"]
+wdt = 60
+wdt_feed = "kernel"
+crash_return = true
+
+# Samsung's 4.9 kernel prints nothing on the panel either way (console=ram); its own watchdog driver
+# (sec_watchdog, both cluster watchdogs) takes over at probe, so the loader arms none by default.
+[defaults.android]
+log = ["", "", "loglevel=7", "loglevel=8 ignore_loglevel"]
+wdt = 0
+wdt_feed = "own"
+
+# The XNU payloads are already quiet on the panel (a5fb_noconsole=1 sweetquiet=1 in the daily
+# boot-args); debug and verbose bring the text console back. No watchdog until XNU feeds it.
+[defaults.xnu]
+log = ["", "", "!a5fb_noconsole !sweetquiet", "!a5fb_noconsole !sweetquiet -enable_kprintf_spam"]
+wdt = 0
+wdt_feed = "none"
 # Hidden on 2026-11-05 (the user's menu cleanup; nothing deleted): Starbite shell, Ubuntu Desktop, Ubuntu
 # Lomiri (black screen), Arch Linux ARM, Kali Linux, UEFI Shell, Darwin console, microSD probe.
 # Strings use the loader's font: ASCII and ° · … ↑ ↓ ← → µ ± × ■ ▲ ▼ ✓
@@ -154,6 +196,9 @@ files = ["linux.image", "linux.dtb", "linux.initrd"]
 cmdline = "loglevel=7 keep_bootcon sb.root=ask s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "sd:p1 /distros"
 flags = ["hidden"]
+# a bring-up entry prints everything at every log level, and has no watchdog
+log = ["", "", "", ""]
+wdt = 0
 
 [[entry]]
 key = "linux-debian"
@@ -224,6 +269,7 @@ method = "bare"
 tag = "lab"
 files = ["catalog"]
 flags = ["hidden"]
+no_launch = true
 
 # Rollback: the same kernel with the old CMA layout (tools/linux/mk-starlte-dts.py --legacy-cma).
 [[entry]]

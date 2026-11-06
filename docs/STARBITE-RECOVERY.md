@@ -3,6 +3,12 @@
 Written 2026-11-05. Item 6 (Bixby interrupt, Starbite Recovery, Rescue mode) and the POST from
 item 4 of `docs/STARBITE-2-PLAN.md` "Current order".
 
+**2026-11-06: see `docs/STARBITE-HEALTH.md`** for what changed since: POST levels (full by
+default, about 10 s, Volume Down skips it once), the log level, crash and hang detection with the
+crash screen, the watchdog, two new recovery items (STARTUP SETTINGS..., CRASH REPORTS...) and the
+POST log slots (per check now 240 + id). Sections 1 and 4 below describe the quick POST, which is
+still the "quick" level.
+
 Sources: `shim/starlte/recovery.c`/`.h`, `post.c`/`.h`, `xnu_boot.c` (`star_prepare_xnu`, the
 rescue start), `tools/rescue/`. **None of this has run on the phone yet.** It builds cleanly
 (`-Werror`, no ABS64 relocations). Everything else below comes from reading the code.
@@ -22,7 +28,10 @@ star_prepare_xnu
   EL1 / MMU checks → fatal()                                            (unchanged)
   BOOT payload + bundles       RAM only
   rescue requested → start the rescue system (no POST, no menu); failure → recovery menu
-  ── POST (quick) ──────────────── top of the panel, rows put back after  post.c
+  crash_snapshot             ramoops + sec_debug page copied, PMU/WDT read  crash.c (2026-11-06)
+  settings record            POST level, log level, crash settings          store.c (2026-11-06)
+  ── POST (full / quick / off) ── own screen / top of the panel          post.c
+  crash_after                last launch judged, report, crash screen       crash.c (2026-11-06)
      fatal check failed, or Bixby held during POST → recovery menu
   cat_load                     already done by POST (cached)
   boot menu (v7 / v6 / v5 / text)                                        (unchanged)
@@ -75,6 +84,8 @@ assets. Volume Up/Down move the highlight, Power selects.
 | Reboot | INFORM3 0x12345670 + SWRESET | PMU |
 | Power off | PS_HOLD low (`hw_power_off`). With a cable in, the phone stays on and the menu says so | PMU |
 | Boot entry... | the whole catalog, hidden entries included (grey: files missing, gold: hidden). Starts the pick; a failure comes back here with the reason | UFS, store, catalog |
+| Startup settings... (2026-11-06) | POST level, log level, crash detection, crash screen detail, after a crash, crash screen time, watchdog; written only on SAVE (docs/STARBITE-HEALTH.md 4.5) | UFS (settings record) |
+| Crash reports... (2026-11-06) | the crash log's reports, newest first; one opens on the crash screen | UFS (crash log) |
 
 Each item touches storage or peripherals only after the user picks it. A start that fails, from
 Boot entry or from Engineer Lite, comes back to the recovery menu with the reason in red. Every
@@ -136,7 +147,7 @@ total: 400 ms of that is the Bixby window. To shorten the window, change `REC_WI
 - **Log page** (0x91fff000; readable from Linux with `devmem 0x91fff000 + 8 * slot`):
   - slot 200: `"POST" << 32 | mode << 24 | n << 16 | fails << 8 | warns`
   - slot 201: total µs
-  - slots 202..212: per check, `state << 56 | (value & 0xffffff) << 32 | µs`
+  - slots 240 + id (since 2026-11-06; 202..212 before): per check, `state << 56 | (value & 0xffffff) << 32 | µs`
   - States: 0 skip, 1 ok, 2 warn, 3 fail. The page is zeroed at every loader start.
 - **pmsg ring** (TWRP: `/sys/fs/pstore/pmsg-ramoops-0`): `STARBITE: POST quick 312ms fail 0 warn 0`
   and one line for each failed or warned check.

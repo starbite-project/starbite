@@ -26,7 +26,7 @@ int ufs_desc(uint8_t idn, uint8_t index, uint8_t *out, unsigned cap);
 int ufs_read(uint64_t lba, uint32_t count);
 /* READ(10) of 4 KiB blocks straight into RAM at dst (DMA, 128 KiB per command). */
 int ufs_read_to(uint64_t lba, uint64_t count, uintptr_t dst);
-/* WRITE(10) of one 4 KiB block from src: only for the store's settings record (store.c). */
+/* WRITE(10) of one 4 KiB block from src: only for the store's settings record and crash log (store.c). */
 int ufs_write_block(uint64_t lba, uintptr_t src);
 
 static inline uint8_t u8r(uintptr_t a)

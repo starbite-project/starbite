@@ -2102,3 +2102,23 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   `s9p_decon.panel_mask` 1 = restore after every sleep-out (default), 2 = off (7A 00), 0 = leave; live-writable.
   sb-integrate.sh: `SB_SCALE` (default 3; 3.2 is exact for 1440x2960). Release 7.1.0-starbite-4da38c67, Image sha
   d18510ec..., in the VM at ~/distros/_kernel-mask. Test and sources: docs/LINUX-REBUILD-PLAN.md 6.6.
+
+- 2026-11-06: **Boot health (built, host-tested, not flashed): full POST, quiet boots, crash and hang detection,
+  Android's own DTB.** docs/STARBITE-HEALTH.md. (a) POST levels in the settings record (bytes 104.., zero = default):
+  full (default, ~9 s: RAM address/~address over 0x8C000000+64M, 0x92000000+128M, bank 2 0x880000000+1G within a 6 s
+  budget; RTC-timed timer, CPU clocks, TMU, PMIC, battery via batt.c, DECON frame-done, touch, USB isolation, UFS,
+  GPT primary+backup CRCs, BOOT header, store + crashlog, catalog readiness, settings, card store), quick (the old
+  one), off; Volume Down skips once; Bixby check unchanged and first. POST per-check log slots moved to 240+id.
+  (b) log level 0..3 (default 0 quiet): catalog extension SBCATEX1 (header +28) with 4 cmdline fragments per entry,
+  [defaults.linux/android/xnu] in catalog.toml; XNU fragments can remove boot-args ("!name"); loader status lines
+  muted at 0. (c) crash_snapshot after the Bixby window (0xFED10000 32K + 0x80000000 4K + PMU RST_STAT/INFORM + S-Boot
+  sec_debug.reset_reason etc.), launch record in the new volatile store entry "crashlog" (16 blocks, flag 1, ring
+  of 15 reports) before every OS, judged at the next start (sb_classify), crash screen levels 1-3 (Vol +/-, Bixby
+  pages, Power, 60 s timeout), menu auto-start held after a crash, recovery items STARTUP SETTINGS / CRASH REPORTS,
+  `fastboot oem log crash|crashraw`, `sbstore2.py crashlog IMG|live`. Linux DTB copy: INFORM3 recovery -> normal so
+  panics come back. Watchdog: cluster 1 0x10060000 (PMU bit 23), WTCON 0xFF39, max 82 s, armed last; Linux gets
+  s3c2410_wdt.tmr_atboot=1 tmr_margin=T (mainline stops a running WDT at probe otherwise). (d) Android 4th file
+  (DTB/DTBH): merged with S-Boot's /chosen, memory nodes, model_info-system_rev (dtmerge.c); 3-file path unchanged.
+  Host: tools/loader-test/run.sh (125 + 29 checks, 13 tests; clang ASan/UBSan and VM gcc). BOOT
+  out/xnu-boot-health1.img (this branch's loader + batch8's payload/ramdisk/DTBH). Needs the phone: does a
+  watchdog reset reach the loader (not upload mode), ramoops after panic=10, DECON pending latch, full POST time.

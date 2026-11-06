@@ -18,6 +18,7 @@
 #include "fbtext.h"
 #include "hw.h"
 #include "../fdt.h"
+#include "crash.h"
 
 #define LOG_PAGE  0x91fff000UL
 #define DL_MAX    (STAR_RAM_DL_END - STAR_RAM_DL - 0x10000UL)
@@ -202,6 +203,10 @@ unsigned fbp_log(const char *which, char *out, unsigned cap)
             tb_hex(&t, v, 16);
             tb_c(&t, '\n');
         }
+    } else if (fb_streq(which, "crash")) {
+        return crash_text(out, cap);                    /* every saved report, as text */
+    } else if (fb_streq(which, "crashraw")) {
+        return crash_raw(out, cap);                     /* the 64 KiB crash log entry */
     } else if (fb_streq(which, "usb")) {
         tb_s(&t, "fastboot: commands ");
         tb_u(&t, fd.ncmd);

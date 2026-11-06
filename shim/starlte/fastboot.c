@@ -695,7 +695,7 @@ static const char oem_help[] =
     "fastboot boot <file>          XNU payload, arm64 Image, UEFI\n"
     "fastboot boot <Image> <initrd> [--dtb x --header-version 2]\n"
     "fastboot getvar all | catalog | battery-level\n"
-    "fastboot oem log [pmsg|dmesg|loader|usb]  (then get_staged)\n"
+    "fastboot oem log [pmsg|dmesg|loader|usb|crash|crashraw]  (then get_staged)\n"
     "fastboot oem reboot-to <catalog key|fastboot>\n"
     "fastboot oem boot-next <key|fastboot>  (next reset, no reboot)\n"
     "fastboot oem boot-as <auto|xnu|linux|android|uefi|bare>\n"
@@ -713,10 +713,14 @@ static void oem(const char *a)
         unsigned n = fbp_log(*w ? w : "pmsg", fb.stg, fb.stg_cap);
         if (!n) {
             fb.stg_len = 0;
-            failr("no such log (pmsg, dmesg, loader, usb)");
+            failr("no such log (pmsg, dmesg, loader, usb, crash, crashraw)");
             return;
         }
         fb.stg_len = n;
+        if (fb_streq(w, "crashraw")) {         /* binary: staged only (sbstore2.py crashlog) */
+            okay("staged (binary): fastboot get_staged <file>");
+            return;
+        }
         q_text(Q_INFO, fb.stg, n);
         okay("staged: fastboot get_staged <file>");
     } else if (fb_prefix(a, "reboot-to ")) {
