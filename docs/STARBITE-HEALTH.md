@@ -15,7 +15,9 @@ It also covers the coordinator's request for One UI 8: an Android entry may brin
 tree (section 6). It also covers the loader side of Starbite Maintenance (SBMAINT, section 12), and
 the shared settings flag bits agreed with Engineer OS v2 (section 7).
 
-**Status: built and host-tested. Nothing here has run on the phone.** The loader builds with
+**Status: built and host-tested. Nothing here has run on the phone.** XNU's side (the watchdog
+feeder and the crash return, xnu/series-12377/0399) is in section 5.4, and its phone tests in
+10.1. The loader builds with
 `-Werror` and has no ABS64 relocations. The host tests (section 8) pass with the Mac's clang
 (ASan + UBSan) and with gcc in the VM. Section 9 lists what only the phone can confirm. Section 10
 is the flash and test plan.
@@ -39,6 +41,9 @@ is the flash and test plan.
 | `tools/store/sbstore2.py` | Settings fields, `settings-show`, `crashlog IMG\|live`, the catalog extension, the `crashlog` store entry |
 | `tools/store/catalog.toml` | `[defaults.linux/android/xnu]`, per-entry overrides, field documentation |
 | `tools/loader-test/` | Host tests and fixtures (section 8) |
+| `xnu/series-12377/0399-starlte-health-wdt-crash-return.patch` | **XNU's side** (section 5.4): `sbwdt=N` feeder, `sbcrash=loader\|recovery`, the crash marker, test switches; `bsd/dev/herolte_ufs.c` + new `bsd/dev/starlte_health.h` |
+| `tools/xnu-health-test/` | Host test of `starlte_health.h`, taken out of the patch, against the loader's sbfmt.c / crash.c / hw.h / wdt.h |
+| `tools/store/catalog-xnu-health.toml` | Proposal for the coordinator: `[defaults.xnu]`, per-entry watchdog, hidden XNU test entries |
 
 ## 2. POST (request a)
 
@@ -154,9 +159,12 @@ appended, exactly as today.
   could honour `quiet`. That file belongs to the Linux owner.
 - **Android**: Samsung's kernel prints nothing on the panel at any level (`console=ram`). At levels 0
   and 1 the fragment is empty, so the Android start is **byte for byte the old one**.
-- **XNU**: boot-args are first-match, so appending cannot undo the payload's `-v` or
-  `a5fb_noconsole=1`. A fragment token `!name` therefore first **removes** every `name` and
-  `name=...` token from the payload's boot-args (`sb_line_edit`). The daily payloads are already
+- **XNU**: appending cannot undo the payload's `-v` (a flag cannot be switched off). A fragment
+  token `!name` therefore first **removes** every `name` and `name=...` token from the payload's
+  boot-args (`sb_line_edit`). (Correction found with 0399: for `name=value`, pexpert's
+  `PE_parse_boot_argn` keeps the **last** occurrence, since it scans on after a match;
+  pexpert/gen/bootargs.c. Only `-flags` stop at the first. So an appended `name=value` does win
+  over the payload's; `!name` stays the clean way.) The daily payloads are already
   quiet on the panel (`a5fb_noconsole=1 sweetquiet=1`), so levels 0 and 1 change nothing. Levels 2
   and 3 bring the text console back.
 - `linux-bringup` sets its own `log = ["", "", "", ""]`: it is a debugging entry.
@@ -198,7 +206,7 @@ first, without the screen. Rescue mode writes no launch record: it must not need
 | Linux console | 0xFED14000, zone 1 | the running kernel log, so a hang leaves its last lines |
 | Samsung sec_debug | 0x80000000 (4 KiB, reserved `sec_debug_magic`) | magic 0x66262564 + the panic string at +4 |
 | Android console | 0xFED10000 zone 0 (exynos-snapshot's log_pstore) | the vendor kernel's console tail |
-| XNU | pmsg ring 0xFED14000 | `STARBITE: XNU panic (sweetreboot), panic log head:` + console tail, or `STARBITE: sweetreboot timer (no panic)` (xnu/patches/pending-mac13/0312, series-12377/0349) |
+| XNU | pmsg ring 0xFED14000 | `STARBITE: XNU panic (sweetreboot), panic log head:` + (0399) the crash marker line + the panic log head + console tail, or `STARBITE: sweetreboot timer (no panic), console tail:` (series-12377/0309, 0349, 0399; pending-mac13/0312). Before 0399 the 12377 timer wrote the panic header too (section 5.4) |
 | Windows (woa) | pmsg ring + RWD1 0xFED13D80 | the UEFI's trace; shown as the log tail |
 | The launch record | the crash log | which entry was started, when, watchdog, flags |
 
@@ -305,10 +313,13 @@ A crash can only be shown if the reset lands in the loader, not in RECOVERY or u
   `syscon-reboot-mode`.
 - **Android (Samsung 4.9)**: S-Boot gives `androidboot.debug_level=0x4f4c` (LOW): panics and
   watchdog resets reboot normally (no upload mode) and S-Boot passes KPON/WPON. Nothing to do.
-- **XNU**: `starlte_panic_to_recovery()` (bsd/dev/starlte_pmsg.c) writes INFORM3 = 0x12345674, so
-  panics land in RECOVERY. **Patch to specify, not done here**: write 0x12345670 when the boot-arg
-  `sbcrash=loader` is present (the loader could append it in `[defaults.xnu]`). The pmsg dump stays
-  as it is, and the loader reads it.
+- **XNU**: before 0399, the panic hook (`starlte_panic_to_recovery`, bsd/dev/herolte_ufs.c on 12377)
+  ran only with `sweetreboot=N` and wrote INFORM3 = 0x12345674, so panics landed in RECOVERY.
+  **Done in xnu/series-12377/0399 (section 5.4)**: with `sbcrash=loader` the hook runs whatever
+  `sweetreboot` says, writes the dump the loader reads plus a crash marker line, then INFORM3 =
+  0x12345670 + SWRESET. XNU also writes INFORM3 = normal at boot, as the Linux DTB patch does. The
+  loader has no `crash_return` path for XNU, so `sbcrash=loader` comes from the catalog's log
+  fragments (tools/store/catalog-xnu-health.toml).
 - **Windows**: the UFS driver sets INFORM3 for its own restarts; its bugchecks restart normally.
 
 ## 5. The hardware watchdog
@@ -351,9 +362,126 @@ Only cluster 1's watchdog is used. Cluster 0's stays as S-Boot left it (masked).
 |---|---|---|
 | **Linux** (mainline 7.1) | Mainline's driver **stops a running watchdog at probe unless `tmr_atboot=1`** (s3c2410_wdt.c probe; the DTB passes `tmr_atboot=0`). So the loader appends `s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=T`. The driver restarts it at probe with T and sets WDOG_HW_RUNNING, and the watchdog core pings it from the kernel (`CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED=y`, already in starbite.config, as is `CONFIG_S3C2410_WATCHDOG=y`) until user space opens /dev/watchdog. This catches kernel hangs. With `wdt_feed = "userspace"` the loader also appends `sb.wdt=T`: the initrd (tools/linux/init) hands the watchdog to systemd (`RuntimeWatchdogSec=T`) or busybox `watchdog`, which catches user-space hangs too. Optional: `watchdog.open_timeout=N` reboots if nothing opens it within N s | `[defaults.linux]`: wdt 60, feed kernel |
 | **Android** (Samsung 4.9) | Its own exynos watchdog driver takes both watchdogs over at probe. S-Boot passes `sec_watchdog.sec_pet=5` (the kernel pets every 5 s) and `softdog.soft_margin=100 softdog.soft_panic=1` (user-space hangs panic → KPON). The loader arms nothing by default. `wdt = N` with `wdt_feed = "own"` would cover only the time until the driver probes | `[defaults.android]`: wdt 0, feed own |
-| **XNU** | Booted with `wdt=-1 -wdt_no_pmu`: nothing feeds the Exynos watchdog. **Patch to specify, not done here**: in bsd/dev/starlte_pmsg.c, parse `sbwdt=N` (the loader appends it with `wdt_feed = "xnu"`), map 0x10060000 with `ml_io_map`, and from a `thread_call` every N/3 s write WTCNT (+8) = WTDAT (+4). Do not pet once `panic` starts (the sweetreboot path resets anyway). Until then, XNU's software `sweetreboot=N` timer is the hang detector, and the loader reads its dump | `[defaults.xnu]`: wdt 0 |
+| **XNU** | `wdt=-1 -wdt_no_pmu` only concern Apple's own watchdog. **Done in xnu/series-12377/0399 (section 5.4)**: `sbwdt=N` (the loader appends it with `wdt_feed = "xnu"`): XNU maps 0x10060000, checks WTCON/WTDAT, and a HIGH priority `thread_call` writes WTCNT (+8) = WTDAT (+4) every N/3 s, never after a panic starts. Only payloads with the 0399 kernel may get `wdt` > 0 | `[defaults.xnu]`: wdt 0; per entry 60 once 0399 payloads passed the phone tests |
 | **Windows / UEFI** | Off. The woa firmware and Exynos9810Ufs.sys own cluster 0's watchdog through the RWD1 handshake (NOTES 2026-10-26); a second owner would fight it | none |
 | **Bare** (Engineer OS) | Off unless libsb pets it | none |
+
+### 5.4 XNU's side: xnu/series-12377/0399 (2026-11-06)
+
+**Status: implemented and built; nothing has run on the phone.**
+
+- `herolte_ufs.c` compiles with the kernel build's own compiler command (from its `.o.json`), with no new
+  warnings under `-Weverything`.
+- The patch applies with `git apply` on the series state (build/dxb-12377) and gives exactly the
+  compiled sources.
+- The kernel was linked by replaying the logged link (`build/xnu-12377.log`). With the old objects, the
+  replay gives today's kernel byte for byte, except the `__CTF` dtrace section, which ctfmerge never
+  makes the same twice. With 0399, it is 21422296 bytes.
+- Host test: `sh tools/xnu-health-test/run.sh`, 911 checks (Mac clang, ASan + UBSan).
+
+**Which kernels have it**:
+
+| Kernel | Started by (catalog) | 0399 |
+|---|---|---|
+| xnu-12377 (`xnu/series-12377`) | every `method = "xnu"` entry: mac13 (Ventura, `mac13-v33.xnu`), ios26 (`ios26-sd.xnu`), darwin, sdprobe, ios26sdt | **yes** |
+| iOS 16.5 | `ios16` is `method = "uefi"`: an earlier port's own kernel, not built here | no (not ours) |
+| xnu-8796 (`xnu/patches/03*`, `pending-mac13/`) | no entry; pending-mac13 has never been compiled | no. To port: the same code into pending-mac13/0312's `bsd/dev/starlte_pmsg.c`, which has the same structure |
+| xnu-11417, xnu-7195 | no entry | no |
+
+**Boot-args** (`starlte_health.h` holds the constants and the pure math):
+
+| Boot-arg | What XNU does |
+|---|---|
+| `sbwdt=N` | At STARTUP(KMEM) it maps cluster 1's watchdog (0x10060000) and the PMU and reads WTCON/WTDAT. If the watchdog can reset the SoC (ENABLE, RSTEN, count > 0), it feeds it once: WTCNT = WTDAT. From STARTUP(EARLY_BOOT), a `THREAD_CALL_PRIORITY_HIGH` thread call feeds it every min(N, hardware timeout) / 3, between 1 s and 27.5 s. With 60 s that is 19999 ms. A watchdog that is not armed is only read, never written. |
+| no `sbwdt=` at all | Fed anyway, for its own timeout, but only if the watchdog is armed **with its reset unmasked in both PMU words** (bit 23 of 0x14060408 and of 0x1406040C clear). Only the loader's `wdt_arm` leaves it like that; S-Boot masks it. This covers the loader dropping the token (hazard 2). |
+| `sbwdt=0` | Never fed. |
+| `sbcrash=loader` | At boot: INFORM3 = 0x12345670, so a watchdog reset or a forced restart comes back to the loader. A panic: the dump (below), INFORM2 = 0x12345678, INFORM3 = 0x12345670, SWRESET. S-Boot starts the loader, whose crash screen shows KERNEL PANIC. This works with or without `sweetreboot`. |
+| `sbcrash=recovery` | A panic: the dump, then INFORM3 = recovery (TWRP), as `sweetreboot` did. |
+| `sweetreboot=N` (unchanged) | Panics go to TWRP unless `sbcrash=loader`. The N-second timer still resets into TWRP (the unattended cycle's way back). Its dump now has its own header, `STARBITE: sweetreboot timer (no panic), console tail:`, as the 8796 port already had. The loader reads it as HANG (OS TIMER), and `tools/starlte-cycle.sh` no longer reports it as a panic. |
+| neither, `sbwdt` armed | A panic: the dump, then the spin. The panic stays on screen until the unfed watchdog resets the phone. The loader sees the dump: KERNEL PANIC. |
+| none of these | No hook, as before 0399: a panic spins for ever. |
+| `sbtestpanic=S` | Test: `panic("STARBITE: sbtestpanic=S: test panic ...")` S s after EARLY_BOOT. |
+| `sbtesthang=S` | Test: feeding stops S s after EARLY_BOOT (a simulated hang). |
+
+**Feeding stops for good**:
+
+- When a panic starts: the panic hook sets the stop flag, and every feed checks `panic_active()`.
+- While XNU is in the debugger or panic path, the other CPUs are halted by IPI and the trapping one
+  runs with interrupts off, so no feed can run.
+
+So a whole-kernel hang (scheduler dead, timers dead, all CPUs stuck) or a panic path that never
+reaches the reset is caught by the hardware. A single stuck CPU is not: the other seven keep feeding.
+XNU's own timeouts (IPI, TLB) turn that case into a panic, which then takes this path.
+
+**The dump** in the pmsg ring (0xFED14000, `"DBGC"` sig/start/size; `sb_ring_text` reads it):
+
+```
+STARBITE: XNU panic (sweetreboot), panic log head:      the loader's needle, kept byte for byte
+STARBITE: xnu crash v1: return loader, uptime 1234 s, watchdog 60 s fed 41 times
+panic(cpu 2 caller 0x...): <the panic string>           the loader's reason line (first "panic(")
+...the panic log head (at most 11 KiB)...
+--- console before the panic:
+...the console tail, up to 0x3F00 bytes in all
+```
+
+- Data never goes past 0xFED14000 + 12 + 0x3F00 = 0xFED17F0C, so the boot-next mailbox at 0xFED17FE0 is
+  untouched (`_Static_assert`, and the host test checks it).
+- The marker line never contains `panic(`.
+- If no panic log was written yet (a very early panic), the line is `panic(unformatted): <format string>`.
+- The hook runs from `panic_spin_forever`. That needs `debug=` with DB_NMI (0x4); without it the panic
+  path ends in `halt_all_cpus` and only the watchdog resets the phone. Every daily payload has
+  `debug=0xc`.
+
+**Console lines** (shown at log level 2 or 3, or in the persistent log):
+
+```
+STARBITE HEALTH: sbwdt=60: cluster 1 watchdog WTCON 0xff39 WTDAT 47607 (59999 ms) WTCNT ... at KMEM, PMU disable 0x... mask 0x...; fed every 19999 ms until a panic
+STARBITE HEALTH: sbcrash=loader: INFORM3 0x... -> 0x12345670; panics and resets come back to the loader
+HEROLTE LOG: panic hook armed (PMU ..., pmsg ...): a panic resets to the loader (sbcrash=loader)
+STARBITE HEALTH: watchdog feeder running (thread call, every 19999 ms)
+```
+
+**Hazards and decisions**:
+
+1. **An old kernel with `wdt` > 0 resets after N s**: the loader arms, nothing feeds. The loader
+   cannot tell which kernel a payload holds. So `wdt` is set **per entry**, only where the entry's
+   file is a 0399 payload, never in `[defaults.xnu]` while old payloads exist. Today's mac13-v33,
+   ios26-sd, ios26-sdt, darwin and sdprobe are all old kernels.
+2. **Full boot-args**:
+   - The payload holds 607 bytes. `sb_line_edit` stops appending at the first token that does not fit,
+     but the loader still arms the watchdog.
+   - Headroom today: mac13-v33 517 bytes (90 left), ios26-sd 538 (69 left), ios26-sdt 593 (14 left:
+     neither `sbcrash=loader` nor `sbwdt=N` fits).
+   - 0399's fallback above feeds a loader-armed watchdog anyway.
+   - **For the loader owner**: in `boot_xnu`, if `launch.wdt` is set and `sbwdt=` is not in `cmd` after
+     the edit, clear `launch.wdt` so it does not arm. Better still, append `sbwdt=` before the log
+     fragment.
+3. **The loader has no `crash_return` for XNU.** `sbcrash=loader` travels in the log fragments, so it
+   also applies when the settings say CRASH DETECTION OFF. Harmless: the loader then just shows the
+   menu.
+   - **For the loader owner**: `launch_prepare` could append `sbcrash=loader` for `M_XNU` entries with
+     `CE_LINUX_INFORM3` (crash_return) and crash detection on, the way Linux's INFORM3 patch is gated.
+4. **Unattended TWRP cycles**:
+   - With `sbcrash=loader` from `[defaults.xnu]`, a panic in a cycle stops at the loader's crash screen,
+     then at the menu with no countdown.
+   - A cycle that must come back to TWRP boots an entry whose own `log` fragments end in
+     `sbcrash=recovery`. That is the last occurrence, so it wins.
+   - The `sweetreboot` timer always goes to TWRP.
+5. **System sleep**: this port has no system sleep. If XNU ever stopped every CPU's timers for a
+   suspend, the watchdog would reset it. The soak test (X5) covers idle and display sleep.
+6. **Rebuild**: the series hash changed, so `FRESH=1 tools/build-xnu-12377.sh`. It rebuilds
+   build/dxb-12377 (about 1.3 GB, as now).
+
+**Artifacts** (in this worktree's `out/`, git-ignored; not flashed, not in any store):
+
+| File | sha256 | What |
+|---|---|---|
+| `kernel.development.starlte-12377-health` | 24ddb06c09ff509a... | today's 12377 kernel + 0399, linked as above |
+| `xnu-mac13-health.xnu` | 9729ad1cc5d2610a... | mac13-v33's boot-args (517 bytes) + `starlte-mac-j313.adt` + this kernel. The same recipe rebuilds `xnu-mac13-v33.xnu` byte for byte from today's kernel |
+| `xnu-ios26-health.xnu` | 44c3b7e550adb3e3... | ios26-sd's boot-args (538 bytes) + `starlte-iphone11.adt` (the one inside ios26-sd, verbatim) + this kernel |
+
+The payloads' boot-args are unchanged. The loader appends `sbwdt=` and `sbcrash=` from the catalog
+(tools/store/catalog-xnu-health.toml).
 
 ## 6. Android: the entry's own device tree (the coordinator's request)
 
@@ -503,6 +631,24 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 - `tools/usb-fastboot/run-host-test.sh` passes: 315 checks (with `oem maint`, `oem maint prev`, a refused
   `oem maint rescue`, a bad variant, `oem boot-next maint-rescue` without a catalog entry).
 - The installer's tests that use sbstore2.py still pass: 111 tests.
+- **tools/xnu-health-test/run.sh (911 checks, XNU's side, section 5.4)**:
+  - `starlte_health.h` comes straight out of the 0399 patch.
+  - Constants against the loader's: INFORM values (hw.h), WDT and PMU addresses and bit 23 (wdt.h),
+    the mailbox (recovery.c), the ring format (sbfmt.h).
+  - crash.c's two needles open XNU's headers byte for byte.
+  - For every value the loader can arm, `sb_wdt_count` → XNU's hardware timeout equals the loader's
+    ms, and the feed period is at most a third of it.
+  - The no-`sbwdt=` fallback against S-Boot's masked state; `sbcrash=` parsing and the reset each
+    mode asks for; the crash marker (cut safely, never `panic(`).
+  - Dumps written by the patch's own pmsg writer and read back by `sb_ring_text`, `sb_find`,
+    `sb_line_at` and `sb_classify`: panic with return to the loader, panic then watchdog, a full ring,
+    the early-panic fallback, the sweetreboot timer, a watchdog reset. The reason line is checked.
+    The mailbox bytes stay intact.
+  - When the main checkout has the live payloads: their boot-args go through the loader's own
+    `sb_line_edit`, as `boot_xnu` does it, with the proposal's fragments. On mac13-v33 and
+    ios26-sd, `sbcrash=loader` and `sbwdt=60` are appended, and the test entries' removals (`rd`,
+    `sdrw`, `sdlog`, `sweetreboot`, console) are made. On ios26-sdt (593 bytes) both tokens are
+    dropped: hazard 2.
 
 ## 9. Needs the phone
 
@@ -522,6 +668,12 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 8. The settings page and SAVE (one UFS write), the crash log writes (2 to 3 per OS start).
 9. One UI 8 with its own DTB: boots, and `/proc/device-tree/chosen/bootargs` = S-Boot's + the
    cmdline file.
+10. XNU 0399 (section 10.1):
+    - XNU can read and write 0x10060000 from its mapping.
+    - The thread call keeps a 30 s watchdog from firing.
+    - `sbtesthang`'s reset reaches the loader (point 4, now for XNU).
+    - `sbcrash=loader`'s SWRESET lands in the loader with the pmsg dump intact.
+    - Ventura at its desktop, then idle with the display asleep, is never reset by a 60 s watchdog.
 
 ## 10. Flash and test plan (for the coordinator; the user only presses buttons)
 
@@ -588,6 +740,41 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
       SLOT A (SEQ N)" or "STARTING FROM THE OS STORE"; log slot 10 = 0x710/0x711/0x712).
     - In fastboot: `fastboot oem maint`, then (from a running Linux) `reboot-to maint`.
     - Hold Bixby during a maint boot: the request is cancelled and the recovery menu comes up.
+
+### 10.1 XNU (0399): watchdog feeder and crash return
+
+**Needs**:
+
+- the health loader on BOOT (steps 0-3 above; build/boot-batch/xnu-boot-health2.img was not flashed
+  as of 2026-11-06);
+- the settings' WATCHDOG on PER ENTRY (the default) and CRASH DETECTION on;
+- the store rebuilt with `mac13-health.xnu=out/xnu-mac13-health.xnu:xnu` (from this worktree) and the
+  test entries of tools/store/catalog-xnu-health.toml (part 3).
+
+**The test entries** (X1-X4) boot the mac13 payload with `!rd !sdrw !sdlog !sweetreboot` removed from
+its boot-args:
+
+- no root device: XNU stops at "waiting for root device" with every kernel thread running;
+- no card writes: every write in starlte_sd.c needs `sdrw=1`;
+- no UFS root;
+- `!a5fb_noconsole !sweetquiet`: the kernel text is on the panel.
+
+A crash in these tests therefore cannot hurt Ventura's card root. Each is started by key (`fastboot oem
+boot-next KEY`, or Engineer's Start an OS), never by payload name. The user only presses buttons; the
+coordinator reads the results (`python3 -I tools/store/sbstore2.py crashlog live --level 3` in the
+loader's fastboot, and photos of the panel).
+
+| Step | Entry (cmdline) | Expect | If not |
+|---|---|---|---|
+| X1 fed | `xnuh-feed` (wdt 30) | Lines `STARBITE HEALTH: sbwdt=30: cluster 1 watchdog WTCON 0xff39 WTDAT 23803 (29998 ms) ... fed every 9999 ms`, `watchdog feeder running`, `sbcrash=loader: INFORM3 ... -> 0x12345670`, then "waiting for root device". **No reset for 3 minutes.** Then the user holds Volume Down + Power 7 s: the loader's screen says FORCED RESTART (warn), which shows the boot-time INFORM3 = normal | A reset after about 30 s: feeding does not reach the hardware. Read the crash report's WDT1 registers, then set `wdt = 0` for XNU |
+| X2 hang | `xnuh-hang` (wdt 30, `sbtesthang=60`) | At about 60 s: `sbtesthang: feeding stopped after N feeds`. About 30 s later the phone resets on its own. POST, then the crash screen: **HANG (WATCHDOG)**, "cluster 1 watchdog not fed for 30 s", RST_STAT bit 23 (0x00800000) | **Upload mode** or a black screen: Volume Down + Power 7 s. Record it (the open question of section 9, point 4) and keep `wdt = 0` for XNU |
+| X3 panic | `xnuh-panic` (wdt 30, `sbtestpanic=60`) | At about 60 s the phone resets at once (SWRESET). Crash screen: **KERNEL PANIC**, reason `panic(cpu N caller 0x...): STARBITE: sbtestpanic=60: test panic ...`. Level 2 shows the marker line `STARBITE: xnu crash v1: return loader, uptime ... s, watchdog 30 s fed ... times` and the panic log head | Lands in TWRP: INFORM3 was not normal. Pull `/sys/fs/pstore/pmsg-ramoops-0` there and check its marker line says `return loader` |
+| X4 stuck panic | `xnuh-panic-spin` (wdt 30, `sbtestpanic=60`, **no** sbcrash) | The panic text stays on the panel for about 30 s, then the watchdog resets the phone: KERNEL PANIC, marker `return none (spin)`, RST_STAT bit 23 | As X2 |
+| X5 soak | `mac13` with `files = ["mac13-health.xnu"]`, `wdt = 60` (part 2 of the proposal) | Ventura's desktop as before. Use it about 10 min, then leave it idle about 20 min with the display asleep: **no reset**. The persistent log has `fed every 19999 ms` | A reset with HANG (WATCHDOG) while working: set mac13's `wdt = 0` and send the report (the feeder starved?) |
+| X6 (optional) | ios26 the same way with `ios26-health.xnu` | as X5 | as X5 |
+
+Roll back: point `mac13` back at `mac13-v33.xnu` and set `wdt = 0` for it. The test entries are
+hidden. The loader and S-Boot are not touched by any XNU step.
 
 ## 11. RAM used (added)
 

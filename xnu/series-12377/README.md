@@ -27,3 +27,12 @@ Port notes (patches that needed changes; everything else applied unchanged):
 - 0238: 12377 moved the realtime CPU choosers to sched_rt.c (pset_choose_processor_for_realtime_thread[_smt]); both fast-core hunks go there, sweet_fast_map is no longer static (extern in sched_rt.c)
 - 0310: 12377 canonicalizes the address first (MTE) and passes the flags inline; our hardware-page mask path uses the 9-argument vm_sanitize_addr_size with VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH
 - 0307 (new 0317): board MASTER configs re-merged onto 12377's MacOSX config
+
+Starbite boot health (2026-11-06, docs/STARBITE-HEALTH.md 5.4):
+
+- 0399: `sbwdt=N` keeps the loader's cluster 1 watchdog fed (thread call, N/3 s, stops at a panic);
+  `sbcrash=loader|recovery` sends the panic reset to the loader's crash screen or TWRP with a crash
+  marker in the pmsg ring; `sbtestpanic=S` / `sbtesthang=S` test switches; the sweetreboot timer's
+  dump gets its own header. Pure parts in `bsd/dev/starlte_health.h`, host-tested by
+  `tools/xnu-health-test/run.sh` (it reads the header out of this patch). New series hash: build with
+  `FRESH=1 tools/build-xnu-12377.sh`.

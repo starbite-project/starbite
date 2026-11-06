@@ -1,0 +1,690 @@
+From 0399000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Fri, 6 Nov 2026 19:00:00 +0200
+Subject: [PATCH] patch: 0399-starlte-health-wdt-crash-return.patch - the
+ Starbite loader's boot health: sbwdt=N keeps cluster 1's watchdog fed,
+ sbcrash=loader returns panics to the loader's crash screen
+
+sbwdt=N: the loader armed the cluster 1 (M3) watchdog at 0x10060000 for about
+N s and appended sbwdt=N (catalog wdt_feed = "xnu"). XNU maps it at
+STARTUP(KMEM), checks WTCON/WTDAT, feeds once, and from EARLY_BOOT a HIGH
+priority thread call rewrites WTCNT with WTDAT every N/3 s (at most a third
+of the hardware's own timeout). Feeding stops for good when a panic starts
+(panic_active(), the panic hook) and cannot happen while XNU is in the
+debugger, so a hung kernel or a stuck panic path resets the phone. With no
+sbwdt= at all (the loader drops tokens that do not fit the 607-byte
+boot-args but still arms), a watchdog armed with its reset unmasked in
+both PMU words, as only the loader leaves it, is fed anyway; sbwdt=0:
+never.
+
+sbcrash=loader: the panic hook (sweet_panic_hook, from panic_spin_forever)
+also runs without sweetreboot; it writes the loader's needle, a crash marker
+line, the panic log head and the console tail into the pmsg ring at
+0xFED14000 (never up to the boot-next mailbox at 0xFED17FE0), then INFORM3 =
+normal + SWRESET: S-Boot starts the loader, whose crash screen shows the
+panic. INFORM3 = normal is also written at boot (as the loader's Linux
+crash_return does), so a watchdog or forced reset comes back too.
+sbcrash=recovery: TWRP. With sbwdt alone a panic dumps and spins until the
+watchdog resets.
+
+The sweetreboot timer's dump gets its own header, "STARBITE: sweetreboot
+timer (no panic)", as the 8796 port has it (pending-mac13/0312): the loader
+reads it as HANG (OS TIMER), not as a panic. It still resets into TWRP.
+
+Test switches: sbtestpanic=S panics S s after EARLY_BOOT; sbtesthang=S stops
+feeding the watchdog S s after EARLY_BOOT.
+
+Constants and the pure math are in bsd/dev/starlte_health.h, which
+tools/xnu-health-test/ checks on the host against the loader's sbfmt.c.
+---
+ bsd/dev/herolte_ufs.c    | 306 +++++++++++++++++++++++----
+ bsd/dev/starlte_health.h | 256 +++++++++++++++++++++++
+ 2 files changed, 516 insertions(+), 46 deletions(-)
+ create mode 100644 bsd/dev/starlte_health.h
+
+diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
+--- a/bsd/dev/herolte_ufs.c
++++ b/bsd/dev/herolte_ufs.c
+@@ -42,6 +42,10 @@
+ #include <pexpert/device_tree.h>
+ #include <libkern/libkern.h>
+ #include <machine/atomic.h>
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include <kern/thread_call.h>
++#include "starlte_health.h"     /* 0399: sbwdt= / sbcrash= (the loader's boot health) */
++#endif
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ /* osfmk/arm/machine_routines.h, not exported to the BSD layer */
+@@ -945,29 +949,63 @@
+  * 0xFED14000 ("DBGC" sig/start/size, as the loader and the woa UEFI write it),
+  * which TWRP shows as /sys/fs/pstore/pmsg-ramoops-0, then the reset. Both
+  * mappings are made at boot: nothing may be mapped inside a panic.
++ *
++ * Starbite boot health (0399, starlte_health.h; docs/STARBITE-HEALTH.md 4.7
++ * and 5.4), boot-args the loader appends from its catalog:
++ *  - sbcrash=loader: the same dump plus a crash marker line, then INFORM3 =
++ *    normal and SWRESET: S-Boot starts the loader, whose crash screen shows the
++ *    panic. INFORM3 = normal is also written at boot, so a watchdog or forced
++ *    reset comes back to the loader too. sbcrash=recovery: TWRP, as sweetreboot
++ *    does. PE_parse_boot_argn keeps the LAST name=value occurrence, so what
++ *    the loader appends wins over the payload's own value.
++ *  - sbwdt=N: the loader armed cluster 1's watchdog for about N s; a HIGH
++ *    priority thread call rewrites WTCNT with WTDAT every N/3 s (at most a
++ *    third of the hardware's own timeout). It stops for good once a panic
++ *    starts, and cannot run while XNU is in the debugger (the other CPUs are
++ *    halted, this one has interrupts off): a hung kernel or a stuck panic path
++ *    resets the phone. With sbwdt alone a panic dumps and spins until then.
++ *    No sbwdt= at all, but the watchdog armed with its reset unmasked in the
++ *    PMU (only the loader leaves it so; its token did not fit the 607-byte
++ *    boot-args): fed anyway, for its own timeout. sbwdt=0: never fed.
++ *  - Test switches for the phone test plan: sbtestpanic=S panics S s after
++ *    boot; sbtesthang=S stops feeding S s after boot (a simulated hang).
++ * The sweetreboot timer's dump has its own header ("no panic") and always goes
++ * to TWRP: it is the unattended test cycle's way back.
+  */
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+-#define STARLTE_PMU_PA          0x14060000
+-#define STARLTE_PMSG_PA         0xFED14000
+-#define STARLTE_PMSG_DATA       0x3F00u         /* the loader's cap, clear of the UEFI latches */
++#define STARLTE_PMU_PA          SBH_PMU_PA
++#define STARLTE_PMSG_PA         SBH_PMSG_PA
++_Static_assert(SBH_PMSG_HDR + SBH_PMSG_DATA <= SBH_MAILBOX_OFF, "pmsg data reaches the boot-next mailbox");
+ static volatile uint32_t *starlte_pmu_va;
+ static volatile uint8_t *starlte_pmsg_va;
++static uint32_t starlte_sweetreboot_s;          /* boot-arg sweetreboot */
++static int starlte_crash_mode;                  /* boot-arg sbcrash: SBH_CRASH_* */
++static uint32_t starlte_sbwdt_s;                /* boot-arg sbwdt (s) */
++static volatile uint32_t *starlte_wdt_va;       /* cluster 1's watchdog, while fed */
++static uint32_t starlte_wdt_reload, starlte_wdt_period_ms;
++static uint64_t starlte_wdt_feeds;
++static volatile bool starlte_wdt_stop;          /* a panic began, or sbtesthang: never feed again */
++static thread_call_t starlte_wdt_call;
++static uint64_t starlte_test_hang_abs;          /* sbtesthang as an absolute time, 0 = off */
++static uint32_t starlte_test_panic_s;           /* boot-arg sbtestpanic */
+ extern void (*sweet_panic_hook)(void);
+ extern char *debug_buf_base;
+ extern char *debug_buf_ptr;
++extern const char *debugger_panic_str;
++extern unsigned panic_active(void);
+ 
+ static void
+-starlte_reset_to_recovery(void)
++starlte_reset(uint32_t inform3)
+ {
+ 	volatile uint32_t *pmu = starlte_pmu_va;
+ 	if (pmu == NULL) {
+ 		return;
+ 	}
+ 	(void)ml_set_interrupts_enabled(FALSE);
+-	pmu[0x808 / 4] = 0x12345678U;
+-	pmu[0x80c / 4] = 0x12345674U;
++	pmu[SBH_PMU_INFORM2 / 4] = SBH_INFORM2_REBOOT;
++	pmu[SBH_PMU_INFORM3 / 4] = inform3;
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+-	pmu[0x400 / 4] = 1;
++	pmu[SBH_PMU_SWRESET / 4] = 1;
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ 	for (;;) {
+ 		__asm__ volatile ("wfe");
+@@ -975,73 +1013,247 @@
+ }
+ 
+ static void
+-starlte_pmsg_put(volatile uint8_t *d, uint32_t *o, const char *s, uint32_t n)
++starlte_reset_to_recovery(void)
+ {
+-	while (n-- > 0 && *o < STARLTE_PMSG_DATA) {
+-		d[(*o)++] = (uint8_t)*s++;
+-	}
++	starlte_reset(SBH_INFORM3_RECOVERY);
+ }
+ 
+ /*
+- * The panic log's head (panic string, panicked thread, backtrace; its tail is
+- * the binary stackshot) and the console's last lines before the panic, into
+- * the ramoops pmsg ring that TWRP shows as /sys/fs/pstore/pmsg-ramoops-0.
++ * hdr, the crash marker, the panic log's head (panic string, panicked thread,
++ * backtrace; its tail is the binary stackshot) and the console's last lines,
++ * into the ramoops pmsg ring that TWRP shows as /sys/fs/pstore/pmsg-ramoops-0
++ * and the loader's crash detection reads (shim/starlte/crash.c). Never past
++ * 12 + 0x3F00 bytes: the boot-next mailbox at +0x3FE0 is left alone.
+  */
+ static void
+-starlte_panic_to_recovery(void)
++starlte_pmsg_save(const char *hdr, const char *marker, bool panic_log)
+ {
+-	static const char hdr[] = "STARBITE: XNU panic (sweetreboot), panic log head:\n";
+-	static const char mid[] = "\n--- console before the panic:\n";
+ 	volatile uint32_t *h = (volatile uint32_t *)(void *)starlte_pmsg_va;
+ 	volatile uint8_t *d;
+ 	const char *b = debug_buf_base, *e = debug_buf_ptr;
+-	const char *ring;
+-	uint32_t rsize, o = 0;
+-	uint64_t total;
++	const char *mid = panic_log ? "\n--- console before the panic:\n" : "\n--- console before the reset:\n";
++	const char *ring = NULL;
++	uint32_t rsize = 0, o = 0;
++	uint64_t total = 0;
+ 
+-	if (h != NULL) {
+-		d = starlte_pmsg_va + 12;
+-		starlte_pmsg_put(d, &o, hdr, sizeof(hdr) - 1);
+-		if (b != NULL && e > b) {
+-			starlte_pmsg_put(d, &o, b, (uint32_t)MIN(e - b, 11 * 1024));
+-		}
+-		starlte_pmsg_put(d, &o, mid, sizeof(mid) - 1);
+-		a5xelte_log_snapshot(&ring, &rsize, &total);
+-		uint64_t n = MIN(total, MIN((uint64_t)rsize, (uint64_t)(STARLTE_PMSG_DATA - o)));
+-		for (uint64_t k = total - n; k < total; k++) {
+-			starlte_pmsg_put(d, &o, &ring[k % rsize], 1);
+-		}
+-		h[0] = 0x43474244U;                     /* "DBGC" */
+-		h[1] = o % STARLTE_PMSG_DATA;
+-		h[2] = o;
+-		__asm__ volatile ("dsb sy" ::: "memory");
++	if (h == NULL) {
++		return;
+ 	}
+-	starlte_reset_to_recovery();
++	d = starlte_pmsg_va + SBH_PMSG_HDR;
++	sbh_pmsg_put(d, &o, hdr, (uint32_t)strlen(hdr));
++	if (marker != NULL) {
++		sbh_pmsg_put(d, &o, marker, (uint32_t)strlen(marker));
++	}
++	if (panic_log && b != NULL && e > b) {
++		sbh_pmsg_put(d, &o, b, (uint32_t)MIN(e - b, 11 * 1024));
++	} else if (panic_log && debugger_panic_str != NULL) {
++		/* no panic log written yet: at least the panic's format string */
++		static const char raw[] = "panic(unformatted): ";
++		sbh_pmsg_put(d, &o, raw, sizeof(raw) - 1);
++		sbh_pmsg_put(d, &o, debugger_panic_str, (uint32_t)strnlen(debugger_panic_str, 480));
++	}
++	sbh_pmsg_put(d, &o, mid, (uint32_t)strlen(mid));
++	a5xelte_log_snapshot(&ring, &rsize, &total);
++	sbh_pmsg_tail(d, &o, ring, rsize, total);
++	sbh_pmsg_close(h, o);                   /* "DBGC", start, size */
++	__asm__ volatile ("dsb sy" ::: "memory");
+ }
+ 
++/*
++ * sweet_panic_hook (panic_spin_forever, once): the dump, then the reset the
++ * boot-args ask for; with none (sbwdt alone) back to the spin, where the
++ * unfed watchdog resets the phone.
++ */
+ static void
++starlte_panic_hook(void)
++{
++	char marker[160];
++	uint64_t ns = 0;
++	uint32_t inform3 = sbh_panic_inform3(starlte_crash_mode, starlte_sweetreboot_s);
++
++	starlte_wdt_stop = true;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	(void)sbh_marker(marker, sizeof(marker), inform3, ns / NSEC_PER_SEC,
++	    starlte_wdt_period_ms != 0 ? starlte_sbwdt_s : 0, starlte_wdt_feeds);
++	starlte_pmsg_save(SBH_HDR_PANIC, marker, true);
++	if (inform3 != 0) {
++		starlte_reset(inform3);
++	}
++}
++
++static void
+ starlte_reboot_setup(void)
+ {
+-	starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);
+-	starlte_pmsg_va = (volatile uint8_t *)ml_io_map(STARLTE_PMSG_PA, 0x4000);
++	if (starlte_pmu_va == NULL) {
++		starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);
++	}
++	if (starlte_pmsg_va == NULL) {
++		starlte_pmsg_va = (volatile uint8_t *)ml_io_map(STARLTE_PMSG_PA, SBH_PMSG_MAP);
++	}
+ 	if (starlte_pmu_va != NULL && starlte_pmsg_va != NULL) {
+-		sweet_panic_hook = starlte_panic_to_recovery;
++		sweet_panic_hook = starlte_panic_hook;
+ 	}
+-	printf("HEROLTE LOG: sweetreboot armed (PMU %p, pmsg %p, panics reset too)\n",
+-	    starlte_pmu_va, starlte_pmsg_va);
++	uint32_t i3 = sbh_panic_inform3(starlte_crash_mode, starlte_sweetreboot_s);
++	printf("HEROLTE LOG: panic hook armed (PMU %p, pmsg %p): a panic %s\n", starlte_pmu_va, starlte_pmsg_va,
++	    i3 == SBH_INFORM3_NORMAL ? "resets to the loader (sbcrash=loader)" :
++	    i3 == SBH_INFORM3_RECOVERY ? "resets into TWRP" : "spins until the watchdog resets");
+ }
+ 
+-/* Armed as soon as kmem works, so early panics reach TWRP too. */
++static void
++starlte_wdt_feed(void)
++{
++	volatile uint32_t *w = starlte_wdt_va;
++	if (w == NULL || starlte_wdt_stop || panic_active()) {
++		return;
++	}
++	w[SBH_WTCNT / 4] = starlte_wdt_reload;
++	starlte_wdt_feeds++;
++}
++
++/*
++ * Map cluster 1's watchdog and the PMU, decide (sbh_wdt_feed_s): sbwdt=N, or a
++ * watchdog the loader armed whose sbwdt= did not fit the boot-args, or not at
++ * all; feed it once. Reads only, until the first feed.
++ */
+ static void
++starlte_wdt_early(bool found)
++{
++	volatile uint32_t *w;
++	uint32_t con, dat, cnt, dis, mask, hw_ms, secs;
++
++	if (found && starlte_sbwdt_s == 0) {
++		return;                         /* sbwdt=0: never */
++	}
++	if (starlte_pmu_va == NULL) {
++		starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);
++	}
++	w = (volatile uint32_t *)ml_io_map(SBH_WDT1_PA, PAGE_SIZE);
++	if (w == NULL || starlte_pmu_va == NULL) {
++		if (found) {
++			printf("STARBITE HEALTH: sbwdt=%u: cannot map the watchdog or the PMU, not fed\n", starlte_sbwdt_s);
++		}
++		return;
++	}
++	con = w[SBH_WTCON / 4];
++	dat = w[SBH_WTDAT / 4];
++	cnt = w[SBH_WTCNT / 4];
++	dis = starlte_pmu_va[SBH_PMU_WDT_DISABLE / 4];
++	mask = starlte_pmu_va[SBH_PMU_WDT_MASK / 4];
++	hw_ms = sbh_wdt_hw_ms(con, dat);
++	secs = sbh_wdt_feed_s(found, starlte_sbwdt_s, con, dat, dis, mask);
++	starlte_wdt_period_ms = sbh_wdt_period_ms(secs, hw_ms);
++	if (starlte_wdt_period_ms == 0) {
++		if (found) {
++			printf("STARBITE HEALTH: sbwdt=%u: the watchdog is not armed (WTCON 0x%x WTDAT %u WTCNT %u), not fed\n",
++			    starlte_sbwdt_s, con, dat, cnt);
++		}
++		return;
++	}
++	if (!found) {
++		printf("STARBITE HEALTH: no sbwdt= (the loader's token did not fit the boot-args?), but cluster 1's "
++		    "watchdog is armed with its reset unmasked: fed for its own timeout\n");
++		starlte_sbwdt_s = secs;
++	}
++	starlte_wdt_reload = dat & 0xffffu;
++	starlte_wdt_va = w;
++	starlte_wdt_feed();
++	printf("STARBITE HEALTH: sbwdt=%u: cluster 1 watchdog WTCON 0x%x WTDAT %u (%u ms) WTCNT %u at KMEM, "
++	    "PMU disable 0x%x mask 0x%x; fed every %u ms until a panic\n",
++	    starlte_sbwdt_s, con, dat, hw_ms, cnt, dis, mask, starlte_wdt_period_ms);
++}
++
++/* Armed as soon as kmem works, so early panics reach TWRP (or the loader) too. */
++static void
+ starlte_reboot_early(void)
+ {
+-	uint32_t secs = 0;
+-	if (PE_parse_boot_argn("sweetreboot", &secs, sizeof(secs)) && secs != 0) {
++	char mode[16] = "";
++	bool wdt_found;
++
++	(void)PE_parse_boot_argn("sweetreboot", &starlte_sweetreboot_s, sizeof(starlte_sweetreboot_s));
++	if (PE_parse_boot_argn("sbcrash", mode, sizeof(mode) - 1)) {
++		starlte_crash_mode = sbh_crash_mode(mode);
++	}
++	wdt_found = PE_parse_boot_argn("sbwdt", &starlte_sbwdt_s, sizeof(starlte_sbwdt_s)) ? true : false;
++	starlte_wdt_early(wdt_found);
++	if (starlte_sweetreboot_s != 0 || starlte_crash_mode != SBH_CRASH_UNSET || starlte_wdt_period_ms != 0) {
+ 		starlte_reboot_setup();
++	}
++	if (starlte_crash_mode == SBH_CRASH_LOADER && starlte_pmu_va != NULL) {
++		/* like the Linux DTB's INFORM3 pair the loader patches (crash_return) */
++		uint32_t was = starlte_pmu_va[SBH_PMU_INFORM3 / 4];
++		starlte_pmu_va[SBH_PMU_INFORM3 / 4] = SBH_INFORM3_NORMAL;
++		__asm__ volatile ("dsb sy" ::: "memory");
++		printf("STARBITE HEALTH: sbcrash=loader: INFORM3 0x%08x -> 0x%08x; panics and resets come back to the loader\n",
++		    was, SBH_INFORM3_NORMAL);
++	} else if (starlte_crash_mode == SBH_CRASH_RECOVERY) {
++		printf("STARBITE HEALTH: sbcrash=recovery: panics reset into TWRP\n");
++	} else if (mode[0] != '\0' && starlte_crash_mode == SBH_CRASH_UNSET) {
++		printf("STARBITE HEALTH: sbcrash=%s: unknown (loader, recovery), ignored\n", mode);
+ 	}
+ }
+ STARTUP(KMEM, STARTUP_RANK_LAST, starlte_reboot_early);
+ 
++static void
++starlte_wdt_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
++{
++	uint64_t deadline;
++
++	if (starlte_wdt_stop || panic_active()) {
++		return;                         /* the watchdog resets the phone */
++	}
++	if (starlte_test_hang_abs != 0 && mach_absolute_time() >= starlte_test_hang_abs) {
++		starlte_wdt_stop = true;
++		printf("STARBITE HEALTH: sbtesthang: feeding stopped after %llu feeds, the watchdog resets in about %u s\n",
++		    starlte_wdt_feeds, starlte_sbwdt_s);
++		return;
++	}
++	starlte_wdt_feed();
++	clock_interval_to_deadline(starlte_wdt_period_ms, (uint32_t)NSEC_PER_MSEC, &deadline);
++	(void)thread_call_enter_delayed(starlte_wdt_call, deadline);
++}
++
++static void __dead2
++starlte_test_panic_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	static int chan;
++	(void)tsleep(&chan, PZERO, "sbtestpanic", (int)(starlte_test_panic_s * (uint32_t)hz));
++	panic("STARBITE: sbtestpanic=%u: test panic (docs/STARBITE-HEALTH.md 5.4)", starlte_test_panic_s);
++}
++
++/* Thread calls and kernel threads work from here: the feeder, the test switches. */
++static void
++starlte_health_start(void)
++{
++	uint32_t hang_s = 0;
++	uint64_t deadline;
++	thread_t th;
++
++	if (PE_parse_boot_argn("sbtestpanic", &starlte_test_panic_s, sizeof(starlte_test_panic_s)) &&
++	    starlte_test_panic_s != 0 &&
++	    kernel_thread_start(starlte_test_panic_thread, NULL, &th) == KERN_SUCCESS) {
++		thread_deallocate(th);
++		printf("STARBITE HEALTH: sbtestpanic=%u: a test panic in %u s\n", starlte_test_panic_s, starlte_test_panic_s);
++	}
++	if (starlte_wdt_period_ms == 0) {
++		return;
++	}
++	if (PE_parse_boot_argn("sbtesthang", &hang_s, sizeof(hang_s)) && hang_s != 0) {
++		clock_interval_to_deadline(hang_s, (uint32_t)NSEC_PER_SEC, &starlte_test_hang_abs);
++		printf("STARBITE HEALTH: sbtesthang=%u: feeding stops in %u s\n", hang_s, hang_s);
++	}
++	starlte_wdt_call = thread_call_allocate_with_priority(starlte_wdt_tick, NULL, THREAD_CALL_PRIORITY_HIGH);
++	if (starlte_wdt_call == NULL) {
++		printf("STARBITE HEALTH: no thread call: the watchdog is not fed and resets in about %u s\n",
++		    starlte_sbwdt_s);
++		return;
++	}
++	starlte_wdt_feed();
++	clock_interval_to_deadline(starlte_wdt_period_ms, (uint32_t)NSEC_PER_MSEC, &deadline);
++	(void)thread_call_enter_delayed(starlte_wdt_call, deadline);
++	printf("STARBITE HEALTH: watchdog feeder running (thread call, every %u ms)\n", starlte_wdt_period_ms);
++}
++STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_health_start);
++
+ /*
+  * sweetreboot=N with no UFS log (rd=sdroot0, rd=md0, a read-only UFS root):
+  * herolte_log_start() never starts the log thread there, so its N-second reset
+@@ -1068,7 +1280,9 @@
+ 		printf("HEROLTE LOG: kernel log to card: %d\n", lr);
+ 	}
+ 	starlte_dump_file();
+-	starlte_panic_to_recovery();    /* no panic log: header + console tail */
++	/* no panic: the timer's own header (the loader: HANG (OS TIMER)), the console tail */
++	starlte_pmsg_save(SBH_HDR_TIMER, NULL, false);
++	starlte_reset_to_recovery();
+ }
+ 
+ static void
+diff --git a/bsd/dev/starlte_health.h b/bsd/dev/starlte_health.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/starlte_health.h
+@@ -0,0 +1,256 @@
++/*
++ * STARLTE (Galaxy S9) boot health, XNU side: the Starbite loader's watchdog and crash return
++ * (docs/STARBITE-HEALTH.md sections 4.7 and 5.4 in the Starbite repository).
++ *
++ *   sbwdt=N         the loader armed cluster 1's watchdog (0x10060000) for about N s right
++ *                   before the handoff; XNU rewrites WTCNT with the reload value (WTDAT) every
++ *                   N/3 s from a thread call and stops at a panic or debugger entry, so a hung
++ *                   kernel or a stuck panic path resets the phone. Without any sbwdt= (the
++ *                   token did not fit) a watchdog the loader armed is fed anyway; sbwdt=0: never.
++ *   sbcrash=loader  a panic writes a crash marker, the panic log head and the console tail into
++ *                   the ramoops pmsg ring at 0xFED14000 (the loader reads it), INFORM3 = normal,
++ *                   SWRESET: S-Boot starts the loader, which shows its crash screen. INFORM3 is
++ *                   also set to normal at boot, so a watchdog or forced reset comes back too.
++ *   sbcrash=recovery  the same dump, then INFORM3 = recovery (TWRP), as sweetreboot does.
++ *
++ * Only constants and pure functions here (no kernel headers, no state): the includer provides
++ * uint32_t / uint64_t / size_t. tools/xnu-health-test/ compiles this file, taken out of the
++ * patch, on the host and checks it against the loader's own watchdog math (shim/starlte/sbfmt.c).
++ */
++#ifndef STARLTE_HEALTH_H
++#define STARLTE_HEALTH_H
++
++/* Cluster 1's (M3) watchdog, samsung,exynos7-wdt; clock OSCCLK 26 MHz */
++#define SBH_WDT1_PA             0x10060000u
++#define SBH_WTCON               0x00u
++#define SBH_WTDAT               0x04u
++#define SBH_WTCNT               0x08u
++#define SBH_WTCON_RSTEN         (1u << 0)
++#define SBH_WTCON_ENABLE        (1u << 5)
++#define SBH_WDT_CLK_HZ          26000000u
++
++/* PMU: reset reasons for S-Boot (the vendor kernel's values; shim/starlte/hw.h) */
++#define SBH_PMU_PA              0x14060000u
++#define SBH_PMU_SWRESET         0x400u
++#define SBH_PMU_WDT_DISABLE     0x408u          /* AUTOMATIC_WDT_RESET_DISABLE, bit 23 = cluster 1 */
++#define SBH_PMU_WDT_MASK        0x40cu          /* MASK_WDT_RESET_REQUEST, bit 23 = cluster 1 */
++#define SBH_WDT1_PMU_BIT        23u             /* set in either word: its reset is blocked */
++#define SBH_PMU_INFORM2         0x808u
++#define SBH_PMU_INFORM3         0x80cu
++#define SBH_INFORM2_REBOOT      0x12345678u
++#define SBH_INFORM3_NORMAL      0x12345670u     /* S-Boot starts BOOT: the loader */
++#define SBH_INFORM3_RECOVERY    0x12345674u     /* S-Boot starts RECOVERY: TWRP */
++
++/* The ramoops pmsg ring ("DBGC" sig, start, size, then data); the boot-next mailbox above it */
++#define SBH_PMSG_PA             0xFED14000u
++#define SBH_PMSG_MAP            0x4000u
++#define SBH_PMSG_HDR            12u
++#define SBH_PMSG_DATA           0x3F00u         /* the loader's cap, clear of the UEFI latches */
++#define SBH_MAILBOX_OFF         0x3FE0u         /* 0xFED17FE0: SBNEXT2!, never written here */
++#define SBH_RING_SIG            0x43474244u     /* "DBGC" */
++
++/* The loader's needles (shim/starlte/crash.c): keep these strings byte for byte */
++#define SBH_HDR_PANIC           "STARBITE: XNU panic (sweetreboot), panic log head:\n"
++#define SBH_HDR_TIMER           "STARBITE: sweetreboot timer (no panic), console tail:\n"
++
++/* Feed period bounds: at least 1 s; at most a third of the longest timeout (82.6 s) */
++#define SBH_PERIOD_MIN_MS       1000u
++#define SBH_PERIOD_MAX_MS       27500u
++
++/* sbcrash= */
++#define SBH_CRASH_UNSET         0
++#define SBH_CRASH_LOADER        1
++#define SBH_CRASH_RECOVERY      2
++
++static inline int
++sbh_crash_mode(const char *v)
++{
++	static const char l[] = "loader", r[] = "recovery";
++	unsigned i;
++	for (i = 0; l[i] && v[i] == l[i]; i++) {
++	}
++	if (!l[i] && !v[i]) {
++		return SBH_CRASH_LOADER;
++	}
++	for (i = 0; r[i] && v[i] == r[i]; i++) {
++	}
++	if (!r[i] && !v[i]) {
++		return SBH_CRASH_RECOVERY;
++	}
++	return SBH_CRASH_UNSET;
++}
++
++/*
++ * The watchdog's timeout in ms as the hardware is set (WTCON prescaler [15:8], divider [4:3]
++ * 16/32/64/128; WTDAT the reload count), 0 when it cannot reset the SoC (not enabled, no
++ * reset, or a zero count). 0xFF39 with 47607 counts: 59999 ms.
++ */
++static inline uint32_t
++sbh_wdt_hw_ms(uint32_t wtcon, uint32_t wtdat)
++{
++	uint64_t pre = ((wtcon >> 8) & 0xffu) + 1u;
++	uint64_t div = 16u << ((wtcon >> 3) & 3u);
++	if (!(wtcon & SBH_WTCON_ENABLE) || !(wtcon & SBH_WTCON_RSTEN) || (wtdat & 0xffffu) == 0) {
++		return 0;
++	}
++	return (uint32_t)((uint64_t)(wtdat & 0xffffu) * pre * div * 1000u / SBH_WDT_CLK_HZ);
++}
++
++/*
++ * The feed period in ms: a third of the shorter of sbwdt=secs and the hardware's own timeout
++ * (hw_ms, 0 = unknown), within SBH_PERIOD_MIN_MS..SBH_PERIOD_MAX_MS. 0 = do not feed.
++ */
++static inline uint32_t
++sbh_wdt_period_ms(uint32_t secs, uint32_t hw_ms)
++{
++	uint64_t t = (uint64_t)secs * 1000u;
++	if (secs == 0 || hw_ms == 0) {
++		return 0;
++	}
++	if (hw_ms < t) {
++		t = hw_ms;
++	}
++	t /= 3u;
++	if (t < SBH_PERIOD_MIN_MS) {
++		t = SBH_PERIOD_MIN_MS;
++	}
++	if (t > SBH_PERIOD_MAX_MS) {
++		t = SBH_PERIOD_MAX_MS;
++	}
++	return (uint32_t)t;
++}
++
++/*
++ * The timeout (s) XNU keeps the watchdog fed for, 0 = not at all:
++ *  - sbwdt=N found: N, if the hardware is armed (N = 0: never, an explicit off);
++ *  - no sbwdt= at all, but cluster 1's watchdog armed with its reset unmasked in both PMU words
++ *    (bit 23 clear), as only the loader's wdt_arm leaves it (S-Boot keeps it masked): the
++ *    loader's token did not fit the payload's boot-args (607 bytes), so feed it anyway, for
++ *    the hardware's own timeout; otherwise the phone would reset after it.
++ */
++static inline uint32_t
++sbh_wdt_feed_s(int found, uint32_t sbwdt_s, uint32_t wtcon, uint32_t wtdat, uint32_t pmu_dis, uint32_t pmu_mask)
++{
++	uint32_t hw_ms = sbh_wdt_hw_ms(wtcon, wtdat);
++	if (hw_ms == 0) {
++		return 0;
++	}
++	if (found) {
++		return sbwdt_s;
++	}
++	if ((pmu_dis | pmu_mask) & (1u << SBH_WDT1_PMU_BIT)) {
++		return 0;
++	}
++	return (hw_ms + 999u) / 1000u;
++}
++
++/* The reset reason a panic leaves for S-Boot; 0 = no reset (spin: the watchdog resets) */
++static inline uint32_t
++sbh_panic_inform3(int crash_mode, uint32_t sweetreboot_s)
++{
++	if (crash_mode == SBH_CRASH_LOADER) {
++		return SBH_INFORM3_NORMAL;
++	}
++	if (crash_mode == SBH_CRASH_RECOVERY || sweetreboot_s != 0) {
++		return SBH_INFORM3_RECOVERY;
++	}
++	return 0;
++}
++
++/*
++ * The pmsg ring as XNU writes it: data at +SBH_PMSG_HDR, never more than SBH_PMSG_DATA bytes
++ * (so never up to the mailbox), then the header "DBGC", start = size % SBH_PMSG_DATA, size.
++ * The loader's sb_ring_text reads a size of exactly SBH_PMSG_DATA as a full ring from start 0.
++ */
++static inline void
++sbh_pmsg_put(volatile uint8_t *d, uint32_t *o, const char *s, uint32_t n)
++{
++	while (n-- > 0 && *o < SBH_PMSG_DATA) {
++		d[(*o)++] = (uint8_t)*s++;
++	}
++}
++
++/* The last bytes of a console ring (rsize bytes, written bytes ever), as many as still fit */
++static inline void
++sbh_pmsg_tail(volatile uint8_t *d, uint32_t *o, const char *ring, uint32_t rsize, uint64_t written)
++{
++	uint64_t n = written, room = SBH_PMSG_DATA - (*o < SBH_PMSG_DATA ? *o : SBH_PMSG_DATA);
++	if (ring == (const char *)0 || rsize == 0) {
++		return;
++	}
++	if (n > rsize) {
++		n = rsize;
++	}
++	if (n > room) {
++		n = room;
++	}
++	for (uint64_t k = written - n; k < written; k++) {
++		sbh_pmsg_put(d, o, &ring[k % rsize], 1);
++	}
++}
++
++static inline void
++sbh_pmsg_close(volatile uint32_t *h, uint32_t o)
++{
++	h[0] = SBH_RING_SIG;
++	h[1] = o % SBH_PMSG_DATA;
++	h[2] = o;
++}
++
++/* Append s (n bytes, or up to NUL if n is ~0) to out[*o..cap-1]; returns the new length */
++static inline size_t
++sbh_cat(char *out, size_t cap, size_t o, const char *s, size_t n)
++{
++	for (size_t i = 0; i < n && s[i] && o + 1 < cap; i++) {
++		out[o++] = s[i];
++	}
++	if (cap) {
++		out[o < cap ? o : cap - 1] = 0;
++	}
++	return o;
++}
++
++static inline size_t
++sbh_cat_u(char *out, size_t cap, size_t o, uint64_t v)
++{
++	char d[20];
++	size_t k = 0;
++	do {
++		d[k++] = (char)('0' + v % 10u);
++		v /= 10u;
++	} while (v && k < sizeof(d));
++	while (k && o + 1 < cap) {
++		out[o++] = d[--k];
++	}
++	if (cap) {
++		out[o < cap ? o : cap - 1] = 0;
++	}
++	return o;
++}
++
++/*
++ * The crash marker, the line after the loader's needle:
++ * "STARBITE: xnu crash v1: return loader, uptime 1234 s, watchdog 60 s fed 41 times\n"
++ * It never contains "panic(": the loader takes the first such line as the reason.
++ */
++static inline size_t
++sbh_marker(char *out, size_t cap, uint32_t inform3, uint64_t uptime_s, uint32_t wdt_s, uint64_t feeds)
++{
++	size_t o = sbh_cat(out, cap, 0, "STARBITE: xnu crash v1: return ", (size_t)~0);
++	o = sbh_cat(out, cap, o, inform3 == SBH_INFORM3_NORMAL ? "loader" :
++	    inform3 == SBH_INFORM3_RECOVERY ? "recovery" : "none (spin)", (size_t)~0);
++	o = sbh_cat(out, cap, o, ", uptime ", (size_t)~0);
++	o = sbh_cat_u(out, cap, o, uptime_s);
++	o = sbh_cat(out, cap, o, " s, watchdog ", (size_t)~0);
++	if (wdt_s) {
++		o = sbh_cat_u(out, cap, o, wdt_s);
++		o = sbh_cat(out, cap, o, " s fed ", (size_t)~0);
++		o = sbh_cat_u(out, cap, o, feeds);
++		o = sbh_cat(out, cap, o, " times\n", (size_t)~0);
++	} else {
++		o = sbh_cat(out, cap, o, "off\n", (size_t)~0);
++	}
++	return o;
++}
++
++#endif /* STARLTE_HEALTH_H */
+-- 
+2.53.0
+

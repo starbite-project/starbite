@@ -1,0 +1,129 @@
+# PROPOSAL for the coordinator, not read by any tool: catalog changes for XNU's boot health
+# (xnu/series-12377/0399, docs/STARBITE-HEALTH.md 5.4 and 10.1). Apply by hand to
+# tools/store/catalog.toml (and build/store/catalog-live.toml), in the order of the parts.
+# Checked 2026-11-06: catalog.toml with all three parts applied packs with
+# `sbstore2.py catalog` (31 of 32 entries; every log fragment under 128 bytes).
+#
+# Rules this follows:
+#  - Only a payload with the 0399 kernel may get wdt > 0: an older kernel never feeds, and the
+#    loader cannot tell, so the phone would reset after N s. Today's mac13-v33, ios26-sd,
+#    ios26-sdt, darwin and sdprobe payloads are all older. So no wdt in [defaults.xnu].
+#  - sbcrash=loader is harmless for old kernels (they ignore it), so it can go into
+#    [defaults.xnu] now. The loader has no crash_return path for XNU, so it travels in the log
+#    fragments, all four levels.
+#  - XNU keeps the LAST name=value occurrence (pexpert PE_parse_boot_argn): an entry whose own
+#    log fragments end in sbcrash=recovery overrides it (unattended TWRP cycles).
+#  - Boot-args headroom (607 bytes): mac13-v33 517, ios26-sd 538, ios26-sdt 593. Appending
+#    " sbcrash=loader" (15) and " sbwdt=60" (9) fits mac13 and ios26 only. Where it does not fit,
+#    a 0399 kernel still feeds a watchdog the loader armed (its fallback), and an older kernel
+#    simply keeps today's behaviour, since its wdt is 0.
+
+# ---- Part 1: replaces [defaults.xnu] (any time; no new payload needed) ------------------------
+[defaults.xnu]
+log = ["sbcrash=loader",
+       "sbcrash=loader",
+       "!a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!a5fb_noconsole !sweetquiet -enable_kprintf_spam sbcrash=loader"]
+wdt = 0
+wdt_feed = "xnu"
+
+# ---- Part 2: the daily entries, AFTER the phone tests X1-X4 (docs/STARBITE-HEALTH.md 10.1) ------
+# Store: mac13-health.xnu=<worktree>/out/xnu-mac13-health.xnu:xnu (sha256 9729ad1cc5d2610a...),
+#        ios26-health.xnu=<worktree>/out/xnu-ios26-health.xnu:xnu (sha256 44c3b7e550adb3e3...).
+# In the existing [[entry]] tables only these lines change; everything else stays:
+#
+#   key = "mac13"
+#   version = "13.5 22G74 · XNU 12377 · root on microSD"     (unchanged)
+#   files = ["mac13-health.xnu"]                             (was mac13-v33.xnu: same boot-args)
+#   wdt = 60                                                 (new)
+#
+#   key = "ios26"                                            (parked; optional, test X6)
+#   files = ["ios26-health.xnu"]                             (was ios26-sd.xnu: same boot-args)
+#   wdt = 60                                                 (new)
+#
+# Rollback: files back to mac13-v33.xnu / ios26-sd.xnu, and remove the wdt lines.
+
+# ---- Part 3: hidden test entries for X1-X4 (remove after the tests: 31 of 32 entries) -----------
+# The mac13 payload with no root device and no card writes: "!rd" (XNU waits for a root device
+# with every kernel thread running; wdt=-1 in the payload keeps that wait quiet and endless),
+# "!sdrw" (starlte_sd.c refuses every write), "!sdlog !sweetreboot" (no card log, no TWRP timer),
+# "!a5fb_noconsole !sweetquiet" (kernel text on the panel). The entry's log replaces
+# [defaults.xnu]'s at every level.
+[[entry]]
+key = "xnuh-feed"
+name = "XNU watchdog: fed"
+version = "XNU 12377+0399 · no root · wdt 30 s"
+category = "lab"
+method = "xnu"
+tag = "lab"
+files = ["mac13-health.xnu"]
+root = "none (waits for a root device; no writes)"
+flags = ["hidden"]
+log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader"]
+wdt = 30
+wdt_feed = "xnu"
+
+[[entry]]
+key = "xnuh-hang"
+name = "XNU watchdog: hang test"
+version = "XNU 12377+0399 · feeding stops at 60 s"
+category = "lab"
+method = "xnu"
+tag = "lab"
+files = ["mac13-health.xnu"]
+cmdline = "sbtesthang=60"
+root = "none (waits for a root device; no writes)"
+flags = ["hidden"]
+log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader"]
+wdt = 30
+wdt_feed = "xnu"
+
+[[entry]]
+key = "xnuh-panic"
+name = "XNU crash return: panic test"
+version = "XNU 12377+0399 · panic at 60 s"
+category = "lab"
+method = "xnu"
+tag = "lab"
+files = ["mac13-health.xnu"]
+cmdline = "sbtestpanic=60"
+root = "none (waits for a root device; no writes)"
+flags = ["hidden"]
+log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader"]
+wdt = 30
+wdt_feed = "xnu"
+
+# No sbcrash: the panic spins on screen until the unfed watchdog resets the phone.
+[[entry]]
+key = "xnuh-panic-spin"
+name = "XNU stuck panic test"
+version = "XNU 12377+0399 · panic, then watchdog"
+category = "lab"
+method = "xnu"
+tag = "lab"
+files = ["mac13-health.xnu"]
+cmdline = "sbtestpanic=60"
+root = "none (waits for a root device; no writes)"
+flags = ["hidden"]
+log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet"]
+wdt = 30
+wdt_feed = "xnu"
+
+# ---- For the loader owner (shim/starlte; not part of the catalog) -------------------------------
+#  1. boot_xnu: if launch.wdt is set and "sbwdt=" is not in cmd after sb_line_edit (the token did
+#     not fit the 607 bytes), clear launch.wdt so the watchdog is not armed; or append sbwdt=
+#     before the log fragment. 0399 kernels cope either way; older ones would reset.
+#  2. launch_prepare: append sbcrash=loader for M_XNU entries with crash_return = true and crash
+#     detection on (as CE_LINUX_INFORM3 gates Linux), then drop it from the log fragments here.
