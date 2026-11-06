@@ -160,6 +160,12 @@ install -d -m755 /var/lib/starbite/card /media/starbite-sd/shared
 mkdir -p /lib/modules 2>/dev/null || true
 if [ -L "$H/Card" ] || [ ! -e "$H/Card" ]; then ln -sfn /media/starbite-sd/shared "$H/Card"; chown -h "$SB_ID:$SB_ID" "$H/Card"; fi
 
+# ---- kernel panic: restart after 10 s (the loader shows the crash report then); Alpine ships 120 s --
+mkdir -p /etc/sysctl.d
+printf '# Starbite: restart 10 s after a kernel panic (the loader then shows the crash report).\nkernel.panic = 10\n' \
+	> /etc/sysctl.d/99-starbite-panic.conf
+chmod 644 /etc/sysctl.d/99-starbite-panic.conf
+
 # ---- environment + udev -----------------------------------------------------------------------
 touch /etc/environment
 sed -i '/^PAN_MAX_AFBC_PACKING_RATIO=/d;/^PAN_MESA_DEBUG=/d' /etc/environment
