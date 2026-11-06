@@ -563,6 +563,13 @@ int settings_save(struct star_settings *st)
         return -1;
     uintptr_t b = SB_STORE_IO + 0x60000;
     zero(b, 4096);
+    /* Keep everything this record does not own: the loader's crash/watchdog settings at bytes
+     * 104..255 (docs/STARBITE-HEALTH.md) and anything a later loader adds. Only a valid current
+     * record is carried over; otherwise the block starts from zeros (the loader's defaults). */
+    if (!ufs_read(lba, 1) && le(UFS_BUF, 8) == SETTINGS_MAGIC && le(UFS_BUF + 8, 4) == 1 &&
+        star_crc32(UFS_BUF + 16, 240) == (uint32_t)le(UFS_BUF + 12, 4))
+        for (unsigned i = 104; i < 256; ++i)
+            *(volatile uint8_t *)(b + i) = *(volatile uint8_t *)(UFS_BUF + i);
     st->seq++;
     put(b, SETTINGS_MAGIC, 8);
     put(b + 8, 1, 4);
