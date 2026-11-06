@@ -2161,3 +2161,20 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   maint [prev|rescue]`, R4 SBMAINT partition slots (sbm_check host-tested against tools/maint/sbmaint.py) then
   the store's maint entry, R5 start (log slot 10 = 0x710..0x713), R7 SBNEXT2R return key. Host: 163 + 29 checks,
   13 tests, fastboot 315, installer 111, maint 34.
+- 2026-11-06: **XNU boot health, xnu/series-12377/0399 (built, host-tested, not flashed, not on the phone).**
+  docs/STARBITE-HEALTH.md 5.4 / 10.1. `sbwdt=N`: the 12377 kernel maps cluster 1's watchdog (0x10060000)
+  at STARTUP(KMEM), feeds WTCNT = WTDAT once, then a HIGH thread call every min(N, hw)/3 s (60 s -> 19999 ms);
+  stops for good at a panic (panic_active + the hook); no `sbwdt=` but a loader-armed watchdog (PMU bit 23
+  clear in 0x408 and 0x40C) is fed anyway, because the loader drops tokens past 607 bytes yet still arms
+  (ios26-sdt's boot-args are 593 bytes). `sbcrash=loader`: INFORM3 normal at boot and at a panic, the hook runs
+  without sweetreboot, dump = loader needle + crash marker + panic log head + console tail, never up to the
+  mailbox; `sbcrash=recovery`: TWRP. The sweetreboot timer's dump has its own "(no panic)" header now (12377
+  wrote the panic header). Test switches sbtestpanic=S, sbtesthang=S. Found: PE_parse_boot_argn keeps the
+  LAST name=value (bootargs.c scans on), so appended values win. Only 12377 is booted by the catalog
+  (mac13/ios26/darwin/sdprobe/ios26sdt); ios16 is an earlier port's kernel via UEFI; 8796/11417/7195 not live.
+  Built in scratch without touching build/dxb-12377: herolte_ufs.c compiled with its .o.json command (no new
+  warnings), the logged link replayed (reproduces today's kernel byte for byte except __CTF), kernel
+  24ddb06c... and payloads xnu-mac13-health.xnu 9729ad1c... (the recipe rebuilds mac13-v33 exactly) and
+  xnu-ios26-health.xnu 44c3b7e5... in the worktree's out/. Host: tools/xnu-health-test/run.sh 911 checks.
+  Catalog proposal tools/store/catalog-xnu-health.toml (wdt only per entry with a 0399 payload; hidden test
+  entries xnuh-feed/-hang/-panic/-panic-spin boot with no root and no card writes).
