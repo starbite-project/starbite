@@ -29,6 +29,13 @@ if [ -f "$MODPATH/system/product/etc/security/adb_keys" ]; then
         echo "/product/etc/security/adb_keys u:object_r:adb_keys_file:s0" >> "$WORK_DIR/configs/file_context-system"
     grep -q "^product/etc/security/adb_keys " "$WORK_DIR/configs/fs_config-system" ||
         echo "product/etc/security/adb_keys 0 0 644 capabilities=0x0" >> "$WORK_DIR/configs/fs_config-system"
+    #    The same key at the root (/adb_keys), the other path adbd reads, in case this build's adbd does not
+    #    read the product one.
+    EVAL "install -D -m 644 \"$MODPATH/system/product/etc/security/adb_keys\" \"$WORK_DIR/system/adb_keys\"" || return 1
+    grep -q "^/adb_keys " "$WORK_DIR/configs/file_context-system" ||
+        echo "/adb_keys u:object_r:adb_keys_file:s0" >> "$WORK_DIR/configs/file_context-system"
+    grep -q "^adb_keys " "$WORK_DIR/configs/fs_config-system" ||
+        echo "adb_keys 0 0 644 capabilities=0x0" >> "$WORK_DIR/configs/fs_config-system"
     SET_PROP "system" "persist.sys.usb.config" "mtp,adb"
 fi
 
