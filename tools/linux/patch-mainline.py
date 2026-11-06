@@ -25,6 +25,9 @@ Port (work copy):
        6b-6d: drm_name=, the framebuffer's pitch/offset, ARGB8888.
        6e: geometry dumps (geom_log, dump_geometry) and the panel_mask_off
        test for the black bars (plan, "Display: black bars").
+       6f: the S6E3HA8 self mask as Samsung handles it: panel_mask=1 (default)
+       re-sends the rounded-corner image (patches/s6e3ha8-star-self-mask.hex)
+       and the enable after every sleep-out, 2 = mask off, 0 = leave (plan 6.6).
   7.   s9p-g3d: the rail check. With step_volt off the rail must read 950 mV
        before every clock change and after every power-up; a lower reading is
        rewritten and counted (rail_fixups). The 260 MHz step uses 950 mV even
@@ -479,6 +482,165 @@ MODULE_PARM_DESC(panel_mask_off, "send the S6E3HA8 self-mask disable (F0 5A 5A, 
 '''
 
 
+# 6f. The S6E3HA8 self mask, Samsung's way (docs/LINUX-REBUILD-PLAN.md 6.6).
+SELF_MASK_HEX = Path(__file__).resolve().parent / 'patches' / 's6e3ha8-star-self-mask.hex'
+SELF_MASK_LEN = 3552
+SELF_MASK_SHA256 = 'bc4c1d6cfd4649cb802717e1f4677ff08e36ace5ee21430a88511c7727c1b440'
+
+
+def self_mask_c_array():
+    import hashlib
+    b = bytes.fromhex(''.join(l.strip() for l in SELF_MASK_HEX.read_text().splitlines()
+                              if l.strip() and not l.startswith('#')))
+    if len(b) != SELF_MASK_LEN or hashlib.sha256(b).hexdigest() != SELF_MASK_SHA256:
+        sys.exit(f'{SELF_MASK_HEX}: not the G960F STAR_SELF_MASK_IMG ({len(b)} bytes)')
+    return '\n'.join('\t' + ' '.join(f'0x{x:02x},' for x in b[i:i + 12]) for i in range(0, len(b), 12))
+
+
+DECON_MASK_PROTO = '''/* Starbite self mask (6f): Samsung's aod_init_panel, between sleep-out and display-on */
+static void s9p_panel_mask_init(struct s9p_decon *priv);
+
+'''
+
+DECON_MASK = r'''
+/*
+ * Starbite self mask (docs/LINUX-REBUILD-PLAN.md 6.6). The S6E3HA8 darkens
+ * panel rows 0-149 and 2810-2959 through a run-length coded mask held in its
+ * side RAM: Samsung's rounded corners (0xff = black in the corners, 0 = pass
+ * through in the middle). S-Boot uploads that image and enables the mask
+ * before Linux starts (sboot.bin G960FXXUHFVG6 carries the same 3552 bytes and
+ * the same enable), and Samsung's kernel re-sends both after every panel init
+ * (panel_drv.c __panel_seq_init -> aod_drv.c aod_init_panel: SELF_MASK_IMG_SEQ,
+ * then SELF_MASK_ENA_SEQ, before PANEL_DISPLAY_ON_SEQ). This driver sleep-cycles
+ * the panel on every blank and never re-sent them; a mask that is on with a
+ * lost or corrupted image is a black band of 150 rows at each end.
+ *
+ *   panel_mask=1 (default)  restore, as Samsung: F0 5A 5A, 75 10 (side-RAM path:
+ *                           mask), 4C/5C + the image in 496-byte DCS long writes,
+ *                           F0 A5 A5; then F0 5A 5A, 7A 01 0000 0095 0AFA 0B8F
+ *                           090F 00000000, F0 A5 A5. Rounded corners.
+ *   panel_mask=2            off (SELF_MASK_DIS: F0 5A 5A, 7A 00, F0 A5 A5).
+ *                           Square corners, nothing masked.
+ *   panel_mask=0            leave the panel alone (the driver before 6f).
+ * Sent after every sleep-out (before display-on), and at once when written at
+ * run time with the display on. panel_mask_off=1 (6e) still wins: then 6e's
+ * 7A 00 is sent right after display-on and this does nothing. A restore that
+ * fails part way falls back to 7A 00, so a half-written image never stays on.
+ */
+#define S9P_MASK_LEAVE		0
+#define S9P_MASK_RESTORE	1
+#define S9P_MASK_OFF		2
+#define S9P_SRAM_ALIGN		16	/* panel.c SRAM_BYTE_ALIGN */
+#define S9P_SRAM_CHUNK		511	/* panel.c panel_dsi_write_mem: min(remained, 511) */
+
+/* STAR_SELF_MASK_IMG (s6e3ha8_self_mask_img.h, SM-G960F), 300 rows x 1440 */
+static const u8 s9p_self_mask_img[@LEN@] = {
+@IMG@
+};
+
+static int s9p_panel_mask = S9P_MASK_RESTORE;
+static u8 s9p_sram_buf[1 + S9P_SRAM_CHUNK];	/* under s9p_geom_lock */
+
+/* caller holds s9p_geom_lock; panel_dsi_write_mem's chunking */
+static int s9p_panel_sram_write(struct s9p_decon *priv, const u8 *img, unsigned int size)
+{
+	unsigned int done = 0, n;
+	int ret;
+
+	while (done < size) {
+		n = min(size - done, (unsigned int)S9P_SRAM_CHUNK);
+		n -= n % S9P_SRAM_ALIGN;
+		if (!n)
+			return -EINVAL;
+		s9p_sram_buf[0] = done ? 0x5c : 0x4c;	/* WRITE_SIDE_RAM_CONTINUE / _START */
+		memcpy(s9p_sram_buf + 1, img + done, n);
+		ret = s9p_decon_dsi_write(priv, s9p_sram_buf, n + 1);
+		if (ret)
+			return ret;
+		done += n;
+	}
+	return 0;
+}
+
+/* caller holds s9p_geom_lock */
+static void s9p_panel_mask_send(struct s9p_decon *priv, int mode, const char *why)
+{
+	static const u8 key_on[] = { 0xf0, 0x5a, 0x5a }, key_off[] = { 0xf0, 0xa5, 0xa5 };
+	static const u8 sd_path[] = { 0x75, 0x10 };
+	static const u8 mask_ena[] = { 0x7a, 0x01, 0x00, 0x00, 0x00, 0x95, 0x0a, 0xfa,
+				       0x0b, 0x8f, 0x09, 0x0f, 0x00, 0x00, 0x00, 0x00 };
+	static const u8 mask_dis[] = { 0x7a, 0x00 };
+	int ret = 0, ret2;
+
+	if (mode == S9P_MASK_RESTORE) {
+		/* SELF_MASK_IMG_SEQ */
+		ret = s9p_decon_dsi_write(priv, key_on, sizeof(key_on));
+		if (!ret)
+			ret = s9p_decon_dsi_write(priv, sd_path, sizeof(sd_path));
+		if (!ret)
+			ret = s9p_panel_sram_write(priv, s9p_self_mask_img, sizeof(s9p_self_mask_img));
+		s9p_decon_dsi_write(priv, key_off, sizeof(key_off));
+		/* SELF_MASK_ENA_SEQ */
+		if (!ret) {
+			ret = s9p_decon_dsi_write(priv, key_on, sizeof(key_on));
+			if (!ret)
+				ret = s9p_decon_dsi_write(priv, mask_ena, sizeof(mask_ena));
+			s9p_decon_dsi_write(priv, key_off, sizeof(key_off));
+		}
+		if (!ret) {
+			dev_info(priv->drm.dev, "panel self mask restored (%s): %zu B side RAM, 7A 01 rows 0-149/2810-2959\n",
+				 why, sizeof(s9p_self_mask_img));
+			return;
+		}
+		dev_warn(priv->drm.dev, "panel self mask restore failed (%s): %d, turning the mask off\n",
+			 why, ret);
+	}
+	/* SELF_MASK_DIS_SEQ (mode off, or a failed restore) */
+	ret2 = s9p_decon_dsi_write(priv, key_on, sizeof(key_on));
+	if (!ret2)
+		ret2 = s9p_decon_dsi_write(priv, mask_dis, sizeof(mask_dis));
+	s9p_decon_dsi_write(priv, key_off, sizeof(key_off));
+	dev_info(priv->drm.dev, "panel self mask off (%s, 7A 00): %d\n", why, ret2);
+}
+
+static void s9p_panel_mask_init(struct s9p_decon *priv)
+{
+	int mode = READ_ONCE(s9p_panel_mask);
+
+	if (READ_ONCE(s9p_panel_mask_off) || mode == S9P_MASK_LEAVE ||
+	    !priv->dsim || !s9p_panel_dcs)
+		return;
+	mutex_lock(&s9p_geom_lock);
+	s9p_panel_mask_send(priv, mode, "sleep-out");
+	mutex_unlock(&s9p_geom_lock);
+}
+
+static int s9p_panel_mask_set(const char *val, const struct kernel_param *kp)
+{
+	int mode, ret = kstrtoint(val, 0, &mode);
+
+	if (ret)
+		return ret;
+	if (mode < S9P_MASK_LEAVE || mode > S9P_MASK_OFF)
+		return -EINVAL;
+	WRITE_ONCE(s9p_panel_mask, mode);
+	mutex_lock(&s9p_geom_lock);
+	if (mode != S9P_MASK_LEAVE && s9p_geom_dev && s9p_geom_dev->enabled &&
+	    s9p_geom_dev->dsim && s9p_panel_dcs)
+		s9p_panel_mask_send(s9p_geom_dev, mode, "sysfs");
+	mutex_unlock(&s9p_geom_lock);
+	return 0;
+}
+
+static const struct kernel_param_ops s9p_panel_mask_ops = {
+	.set = s9p_panel_mask_set,
+	.get = param_get_int,
+};
+module_param_cb(panel_mask, &s9p_panel_mask_ops, &s9p_panel_mask, 0644);
+MODULE_PARM_DESC(panel_mask, "S6E3HA8 self mask after every sleep-out: 1 = restore Samsung's rounded-corner image + enable (default), 2 = off (7A 00), 0 = leave (Starbite)");
+'''
+
+
 def patch_port(work):
     w = Path(work)
 
@@ -661,6 +823,53 @@ def patch_port(work):
          '\ts9p_geom_dev = priv;\t/* Starbite geometry: sysfs dump and panel_mask_off */\n'
          '\tdrm_info(drm, "DECON scanout %ux%u on window %u\\n",\n',
          's9p_geom_dev = priv;')
+
+    # 6f. s9p-decon: the S6E3HA8 self mask, as Samsung's kernel handles it (2026-11-06). S-Boot uploads
+    # the rounded-corner mask image (side RAM) and enables it (7A 01, rows 0-149 and 2810-2959); Samsung's
+    # kernel re-sends image + enable after every panel init, this driver sleep-cycles the panel and never
+    # did. panel_mask (default 1) re-sends both after every sleep-out, before display-on; 2 = mask off.
+    # The image is patches/s6e3ha8-star-self-mask.hex (checked). Analysis: plan 6.6.
+    edit(w, decon,
+         '\tif (!priv->dsim || !len || len > 64)\n\t\treturn -EINVAL;\n',
+         '\t/* Starbite self mask: side-RAM writes are 1 + 496 bytes (vendor panel_dsi_write_mem) */\n'
+         '\tif (!priv->dsim || !len || len > 512)\n\t\treturn -EINVAL;\n',
+         'Starbite self mask: side-RAM writes')
+    edit(w, decon,
+         '\t} else {\n\t\tfor (i = 0; i < len; i += 4) {\n',
+         '\t} else {\n'
+         '\t\t/* Starbite self mask: the payload FIFO drained (DSIM_FIFOCTRL EMPTY_PL_SFR) */\n'
+         '\t\tif (readl_poll_timeout_atomic(priv->dsim + 0x68, v, v & BIT(8), 10, 20000))\n'
+         '\t\t\tdev_warn_once(priv->drm.dev, "DSI payload FIFO not empty before %02x+%u (FIFOCTRL=%08x)\\n",\n'
+         '\t\t\t\t      buf[0], len, v);\n'
+         '\t\tfor (i = 0; i < len; i += 4) {\n',
+         'Starbite self mask: the payload FIFO drained')
+    edit(w, decon,
+         'MODULE_PARM_DESC(panel_mask_off, "send the S6E3HA8 self-mask disable (F0 5A 5A, 7A 00, F0 A5 A5) at every enable (Starbite black-bar test)");\n',
+         'MODULE_PARM_DESC(panel_mask_off, "send the S6E3HA8 self-mask disable (F0 5A 5A, 7A 00, F0 A5 A5) at every enable (Starbite black-bar test)");\n'
+         + DECON_MASK.replace('@LEN@', str(SELF_MASK_LEN)).replace('@IMG@', self_mask_c_array()),
+         'static int s9p_panel_mask = S9P_MASK_RESTORE;')
+    edit(w, decon,
+         '/* Panel up: the reverse, with the boost converter\'s settling time. */\n'
+         'static void s9p_panel_up(struct s9p_decon *priv)\n'
+         '{\n'
+         '\tif (s9p_panel_sleep) {\n'
+         '\t\ts9p_decon_dcs(priv, MIPI_DCS_EXIT_SLEEP_MODE);\n'
+         '\t\tmsleep(PANEL_SLEEP_DELAY_MS);\n'
+         '\t}\n'
+         '\ts9p_decon_dcs(priv, MIPI_DCS_SET_DISPLAY_ON);\n'
+         '}\n',
+         DECON_MASK_PROTO +
+         '/* Panel up: the reverse, with the boost converter\'s settling time. */\n'
+         'static void s9p_panel_up(struct s9p_decon *priv)\n'
+         '{\n'
+         '\tif (s9p_panel_sleep) {\n'
+         '\t\ts9p_decon_dcs(priv, MIPI_DCS_EXIT_SLEEP_MODE);\n'
+         '\t\tmsleep(PANEL_SLEEP_DELAY_MS);\n'
+         '\t}\n'
+         '\ts9p_panel_mask_init(priv);\t/* Starbite self mask: before display-on, as Samsung */\n'
+         '\ts9p_decon_dcs(priv, MIPI_DCS_SET_DISPLAY_ON);\n'
+         '}\n',
+         's9p_panel_mask_init(priv);\t/* Starbite self mask')
 
     # 7. s9p-g3d: rail check, 950 mV at 260 MHz
     g3d = 'src/soc/s9p-g3d.c'

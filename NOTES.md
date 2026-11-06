@@ -2092,3 +2092,13 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   shorter than 2960; (4) alpha (IN_CON format 0 is ARGB8888, not XRGB as the 6d comment says). patch-mainline.py
   6e: geom_log dumps (probe, enable, fb changes), dump_geometry=1|2, panel_mask_off test. 7.1.0-starbite-9f3d455b,
   Image sha 7936828c... Checklist: docs/LINUX-REBUILD-PLAN.md section 6.
+
+- 2026-11-06: **Black bars, fix candidate built (not flashed): restore the S6E3HA8 self mask the way Samsung does.**
+  Samsung's G960F kernel (Android 10, G960FXXUHFVB4 via LineageOS exynos9810 45f6ec6f199e) re-sends the mask image
+  (`75 10` + 3552 B side RAM as 4C/5C long writes) and the enable (`7A 01 0000 0095 0AFA 0B8F 090F 00000000`) after
+  every panel init, before display-on (aod_init_panel). S-Boot VG6 carries the same image and enable (sboot.bin
+  0x134960..0x135757), so the mask is on when Linux starts. The image decodes to 300 x 1440: the rounded corners,
+  black only in the corners; with its image lost it would be a 150-row band at each end. patch-mainline.py 6f:
+  `s9p_decon.panel_mask` 1 = restore after every sleep-out (default), 2 = off (7A 00), 0 = leave; live-writable.
+  sb-integrate.sh: `SB_SCALE` (default 3; 3.2 is exact for 1440x2960). Release 7.1.0-starbite-4da38c67, Image sha
+  d18510ec..., in the VM at ~/distros/_kernel-mask. Test and sources: docs/LINUX-REBUILD-PLAN.md 6.6.

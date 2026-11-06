@@ -19,7 +19,8 @@
 #   address (not socket-activated) with host keys made on the phone before it starts (sb-ssh-keys)
 #   usb0 172.16.42.1/24 served by the distro (systemd-networkd DHCPServer, or busybox udhcpd on
 #   OpenRC), never touched by NetworkManager or ModemManager, and nothing resets the gadget
-#   GPU devfreq floor 455 MHz, PAN_MAX_AFBC_PACKING_RATIO=0, integer scale 3, no UDisks for the UFS
+#   GPU devfreq floor 455 MHz, PAN_MAX_AFBC_PACKING_RATIO=0, Phosh scale SB_SCALE (default 3), no UDisks
+#   for the UFS
 #   no watchdog unless the entry says sb.wdt=N (the initrd then turns systemd's feeder on), no
 #   fstrim (it would reach the card's exFAT), reboot-to's mailbox written by a systemd-shutdown hook,
 #   no suspend, power key does not shut down, charger 500 mA, M3 floor 1066 MHz
@@ -31,8 +32,13 @@ PL=${3:-$(cd "$(dirname "$0")" && pwd)/payload}
 SB_USER=user
 SB_ID=10000
 SB_TZ=${SB_TZ:-Europe/Helsinki}
+# Phosh output scale. 3 (default) leaves 2960 - 3 * 986 = 2 rows at the bottom undrawn; 3.2 divides
+# both sides exactly (1440 / 3.2 = 450, 2960 / 3.2 = 925; 384/120 in wlroots' fractional steps), as do
+# 2 and 4 (docs/LINUX-REBUILD-PLAN.md 6.2 item 2, 6.6)
+SB_SCALE=${SB_SCALE:-3}
 case $INITSYS in systemd|openrc) ;; *) echo "init system: systemd or openrc" >&2; exit 2 ;; esac
 case $NAME in ""|*[!a-z0-9-]*) echo "NAME: lower case letters, digits, '-'" >&2; exit 2 ;; esac
+case $SB_SCALE in ""|.*|*.|*.*.*|*[!0-9.]*) echo "SB_SCALE: a number such as 3 or 3.2" >&2; exit 2 ;; esac
 [ -d "$PL" ] || { echo "no payload directory $PL" >&2; exit 1; }
 say() { echo "sb-integrate: $*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -542,13 +548,13 @@ EOF
 	sc set-default graphical.target
 fi
 
-# ---- integer scale 3 (1440 x 2960 panel, 570 ppi) ------------------------------------------------
+# ---- scale SB_SCALE, default 3 (1440 x 2960 panel, 570 ppi) ---------------------------------------
 if [ -f /usr/share/phosh/phoc.ini ] || have phoc; then
 	mkdir -p /etc/phosh
 	[ -f /etc/phosh/phoc.ini ] || { [ -f /usr/share/phosh/phoc.ini ] && cp /usr/share/phosh/phoc.ini /etc/phosh/phoc.ini; } || : > /etc/phosh/phoc.ini
 	sed -i '/^# Starbite scale/,$d' /etc/phosh/phoc.ini
 	# DSI-1 is the s9p-decon connector name (check with wlr-randr on the first boot)
-	printf '# Starbite scale (sb-integrate.sh)\n[output:DSI-1]\nscale = 3\n' >> /etc/phosh/phoc.ini
+	printf '# Starbite scale (sb-integrate.sh)\n[output:DSI-1]\nscale = %s\n' "$SB_SCALE" >> /etc/phosh/phoc.ini
 fi
 
 {

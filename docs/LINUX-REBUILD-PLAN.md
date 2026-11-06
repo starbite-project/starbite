@@ -576,3 +576,90 @@ try scale 3.2 (exact: 1440/3.2 = 450, 2960/3.2 = 925; 384/120 in wlroots' steps)
 panel_mask_off N, panel_sleep Y. grim is not installed in the pmOS root (no screenshot this run).
 Returning to TWRP from mainline Linux with INFORM3 = 0x12345674 + `reboot -f` did NOT reach TWRP (the phone
 dropped off USB; it needs the keys). Android's `adb reboot recovery` does reach TWRP.
+
+### 6.6 How Samsung handles the self mask, and the fix candidate (2026-11-06)
+
+**Sources.** (a) Samsung's Android 10 kernel for the SM-G960F: LineageOS/android_kernel_samsung_exynos9810,
+commit `45f6ec6f199e` "drivers: video: import from samsung G960FXXUHFVB4", files under
+`drivers/video/fbdev/exynos/panel/`: `s6e3ha8/s6e3ha8_aod_panel.h`, `s6e3ha8/s6e3ha8_self_mask_img.h`,
+`s6e3ha8/s6e3ha8_crown_aod_panel.h` (Note9), `aod/aod_drv.c`, `panel_drv.c`, `panel.c`, `sysfs.c`;
+`arch/arm64/configs/exynos9810-starlte_defconfig` (branch lineage-20) has `CONFIG_EXTEND_LIVE_CLOCK=y`, which
+compiles the AOD/self-mask path in. (b) The Android 9 tree in ref/starlte-kernel (github.com/vutung2311/starlte,
+tw90-android-p): the same code; the mask image is byte-identical (Android 10 only adds a 34 ms side-RAM init delay
+for the AOD clock image, not for the mask). (c) The S10 (S6E3HA9): LineageOS/android_kernel_samsung_exynos9820,
+lineage-21, `panel/s6e3ha9/s6e3ha9_aod_panel.h`, `s6e3ha9_beyond1_aod_panel.h`, `aod/aod_drv.c`. In all three
+trees the mask is part of the AOD driver (`panel/aod/aod_drv.c`); there is no separate self_display driver.
+(d) The phone's own S-Boot, build/fw-vg6/bl/sboot.bin (G960FXXUHFVG6).
+
+**What the mask is.** `STAR_SELF_MASK_IMG`, 3552 bytes, run-length coded, 8 bits per pixel: `01nnnnnn v` = n
+pixels of value v, `10nnnnnn nnnnnnnn` = a run of 0, `11nnnnnn nnnnnnnn` = a run of 0xff, `00 00` = padding. It
+decodes to exactly 300 x 1440 = 432000 pixels: 150 rows for the top band, then 150 for the bottom. 0xff (black)
+sits only in the corners, 0 (pass through) everywhere else: row 0 is black for 208 px at each side with an
+anti-aliased ramp and 718 px clear in the middle, row 75 is black for 8 px at each edge, row 149 is all clear.
+That is the S9's **rounded corners** (wide, because the long edges curve), not bands. The Note9's
+`CROWN_SELF_MASK_IMG` decodes the same way with a small corner (48 px at row 0, flat panel). Decoded with
+scratch scripts; the image is kept in tools/linux/patches/s6e3ha8-star-self-mask.hex (sha256 `bc4c1d6c...1b440`).
+
+**The DCS sequences** (`s6e3ha8_aod_panel.h`; level-2 key `F0 5A 5A` / `F0 A5 A5` around each):
+- `SELF_MASK_IMG_SEQ`: `75 10` (side-RAM data path: mask), then the image as DSI_PKT_TYPE_WR_SR, which `panel.c`
+  `panel_dsi_write_mem` sends as DCS long writes (0x39, `common_mipi_lcd.c` `mipi_write`): first byte `4C`
+  (WRITE_SIDE_RAM_START), then `5C` (CONTINUE), payload min(remaining, 511) rounded down to 16 bytes, so 3552 bytes
+  go as 7 x 496 + 80.
+- `SELF_MASK_ENA_SEQ`: `7A 01 0000 0095 0AFA 0B8F 09 0F 00 00 00 00` (16 bytes): rows 0-149 and 2810-2959. The
+  factory build (`CONFIG_SELFMASK_FACTORY`) puts both ranges past row 2959 (`0B90..0C25`, `0C26..0CBB`), i.e.
+  no mask on screen. The S10 uses `7A 21 0000 0095 0B4A 0BDF ...` = rows 0-149 and 2890-3039 of its 3040 rows,
+  which confirms the fields are two row ranges, the last 150 rows of the panel being the second.
+- `SELF_MASK_DIS_SEQ`: `7A 00`.
+
+**When Samsung sends them** (`panel_drv.c`, `aod_drv.c`): `panel_sleep_out` -> (power on if the panel was off) ->
+`__panel_seq_init`: `PANEL_INIT_SEQ` (DSC + PPS, sleep-out `11`, 10 ms, set_area, TE on, ...), the disp-det
+check, then `panel_aod_init_panel` -> `aod_init_panel`: `SELF_MASK_IMG_SEQ` then `SELF_MASK_ENA_SEQ`, every
+time, before `PANEL_DISPLAY_ON_SEQ`. AOD entry sends `SELF_MASK_DIS_SEQ`; AOD exit sends only
+`SELF_MASK_ENA_SEQ` (the image survives LPM in side RAM). Power-off sets `reset_flag` ("clock image ... on ddi
+side ram was remove when ddi was turned off", panel_drv.c `panel_power_off`), so side RAM is known to be lost
+with power; whether a DCS sleep-in alone loses it is not documented, and Samsung never relies on it: the image
+is re-sent on every init. sysfs `self_mask` (0664) toggles at run time (0 = DIS; 1 = IMG + ENA). The S10 adds
+`75 00` after the image and a CRC check, same scheme.
+
+**S-Boot does it too.** sboot.bin VG6 holds, as data, `75 10` at 0x134960, the same 3552-byte image at
+0x134968 and the 16-byte `7A 01 ...` enable at 0x135748, right before the `s6e3ha8_panel_read_id` string. So
+the panel Linux inherits has the mask uploaded and on, rounded corners included. Our driver then sleep-cycles
+the panel (`10`/`11`) on every blank and on the first modeset and never re-sends either; a mask that stays on
+while its image is gone or corrupted gives exactly a black band of 150 rows (about 6.7 mm) at each end.
+
+**The fix candidate (patch-mainline.py step 6f, s9p-decon).** `panel_mask` (int, 0644):
+- `1` (default) = Samsung's behaviour: after every sleep-out and before display-on (inside `s9p_panel_up`),
+  `F0 5A 5A`, `75 10`, the image as 4C/5C long writes of 1 + 496 bytes, `F0 A5 A5`, then `F0 5A 5A`,
+  `7A 01 ...` (16 bytes), `F0 A5 A5`. dmesg: `panel self mask restored (sleep-out): 3552 B side RAM, 7A 01
+  rows 0-149/2810-2959`. If any write fails it sends `7A 00` instead (`restore failed ..., turning the mask
+  off`), so a half-written image never stays on.
+- `2` = off (`7A 00`): square corners, nothing masked. `0` = leave the panel alone (the driver before 6f).
+- Writing the parameter with the display on applies it at once (`echo 2 > /sys/module/s9p_decon/parameters/
+  panel_mask`), so both variants can be compared in one boot over SSH. 6e's `panel_mask_off=1` still wins.
+- `s9p_decon_dsi_write` now takes up to 512 bytes and waits for the payload FIFO to drain (DSIM_FIFOCTRL
+  EMPTY_PL_SFR) before a long write. The 6e diagnostics (geom_log, dump_geometry, panel_mask_off) are unchanged.
+- The image is read from tools/linux/patches/s6e3ha8-star-self-mask.hex and checked (length, sha256);
+  build-kernel.sh hashes that file into the build id.
+
+Build (2026-11-06): `limactl shell starbite -- env PROJ=<worktree> WORK=~/linux/mask-work
+OUT=~/distros/_kernel-mask REPO_OUT=~/distros/_kernel-mask-repo MIN_HOST_FREE_GB=1 tools/linux/build-kernel.sh`,
+release **`7.1.0-starbite-4da38c67`**, in the VM at /home/dev.guest/distros/_kernel-mask/:
+`Image` sha256 `d18510ec62d07caf21b72132231035b77543850219179df52eba28ba70ff1762`,
+`exynos9810-starlte.dtb` `78e418eb6ab2f8453cb30c2aca5e22959e99f8ba48b4315f2693b89bf0488c76`,
+`modules-7.1.0-starbite-4da38c67.img` `fd6e9f33a3063d74b3bb05f3cc5f961a83d0d2a0e34efe6eb587983e433d73d6`
+(SHA256SUMS next to them; the REPO_OUT copy and the work tree were deleted). Not flashed.
+
+**Phone test (one boot, nothing to type).** On a bright wallpaper:
+- No band at the top or bottom and all four corners softly rounded, like Android: fixed (the mask had lost its
+  image across the sleep cycle). Keep the default.
+- Bands still there: over SSH, `echo 2 > /sys/module/s9p_decon/parameters/panel_mask`. Bands gone with square
+  corners: the mask is the cause but the restore did not take (read `dmesg | grep "self mask"`); make 2 the
+  default. Bands unchanged: not the mask; look at the scale (below) and 6.4.
+- Only a hairline at the very bottom: the scale-3 rows 2958-2959 (6.2 item 2).
+
+**Phosh scale (separate option, default unchanged).** tools/linux/distros/sb-integrate.sh takes `SB_SCALE`
+(default `3`, checked to be a plain number) and writes it into /etc/phosh/phoc.ini `[output:DSI-1] scale =`.
+`SB_SCALE=3.2` divides both sides exactly (1440/3.2 = 450, 2960/3.2 = 925, 384/120 in wlroots' fractional
+steps), so every row is drawn; `2` and `4` are the integer alternatives. Pass it through the chroot call (e.g.
+`sudo env SB_SCALE=3.2 ...`); on an already integrated root the same change is
+`sed -i 's/^scale = 3$/scale = 3.2/' /etc/phosh/phoc.ini` and a Phosh restart.
