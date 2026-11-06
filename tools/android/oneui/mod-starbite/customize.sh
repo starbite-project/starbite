@@ -16,12 +16,22 @@ fi
 
 # 2. USB debugging from the first boot, accepted only from the Starbite build Mac (the key is copied
 #    into product/etc/security/adb_keys by tools/android/oneui/prepare-un1ca.sh; never committed).
-if [ -f "$MODPATH/product/etc/security/adb_keys" ]; then
+#    On the S9 build product lives inside system (system-as-root: /product = system/product, and
+#    system/system/product is an absolute link to /product), so the key is added as a "system" file
+#    at product/etc/security/adb_keys (the helper's system-as-root branch needs $MODPATH/system/system
+#    to exist) and the props go into system's build.prop.
+if [ -f "$MODPATH/system/product/etc/security/adb_keys" ]; then
     LOG "- Starbite: adb on from first boot (pre-authorized key)"
-    ADD_TO_WORK_DIR "$MODPATH" "product" "etc/security/adb_keys" 0 0 644 "u:object_r:adb_keys_file:s0"
-    SET_PROP "product" "persist.sys.usb.config" "mtp,adb"
+    #    (copied directly: ADD_TO_WORK_DIR's system branch records the label under /system/product/...,
+    #    the wrong device path; the image builder labels by these config entries)
+    EVAL "install -D -m 644 \"$MODPATH/system/product/etc/security/adb_keys\" \"$WORK_DIR/system/product/etc/security/adb_keys\"" || return 1
+    grep -q "^/product/etc/security/adb_keys " "$WORK_DIR/configs/file_context-system" ||
+        echo "/product/etc/security/adb_keys u:object_r:adb_keys_file:s0" >> "$WORK_DIR/configs/file_context-system"
+    grep -q "^product/etc/security/adb_keys " "$WORK_DIR/configs/fs_config-system" ||
+        echo "product/etc/security/adb_keys 0 0 644 capabilities=0x0" >> "$WORK_DIR/configs/fs_config-system"
+    SET_PROP "system" "persist.sys.usb.config" "mtp,adb"
 fi
 
 # 3. No setup wizard: the first boot goes to the home screen (Google's wizard honours this; Samsung's
 #    wizard is completed by tools/android/oneui/first-boot.sh over adb until a native way is proven).
-SET_PROP "product" "ro.setupwizard.mode" "DISABLED"
+SET_PROP "system" "ro.setupwizard.mode" "DISABLED"

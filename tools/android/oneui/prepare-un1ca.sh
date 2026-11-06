@@ -5,7 +5,8 @@ U=${1:?UN1CA checkout}; M=$(dirname "$0")/mod-starbite
 rm -rf "$U/unica/mods/starbite"; cp -a "$M" "$U/unica/mods/starbite"
 K=${ADBKEY:-/Users/$USER/.android/adbkey.pub}
 if [ -f "$K" ]; then
-    mkdir -p "$U/unica/mods/starbite/product/etc/security"
-    cut -d' ' -f1 "$K" > "$U/unica/mods/starbite/product/etc/security/adb_keys"   # key only, no user@host
+    D="$U/unica/mods/starbite/system"
+    mkdir -p "$D/system" "$D/product/etc/security"                  # system/system: system-as-root branch
+    cut -d' ' -f1 "$K" > "$D/product/etc/security/adb_keys"          # key only, no user@host
 fi
-ls -la "$U/unica/mods/starbite" "$U/unica/mods/starbite/product/etc/security" 2>/dev/null
+find "$U/unica/mods/starbite" | sort
