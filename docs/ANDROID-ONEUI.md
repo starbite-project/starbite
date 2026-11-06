@@ -21,6 +21,13 @@ here, never flashed with its own zip: that zip's installer repartitions the whol
 | Kernel + DT | UN1CA's DS-ACK V1.12 package (`floyd/G960F-kernel`, `floyd/G960F-dtb`, a Samsung DTBH) | the DT carries the first-stage fstab (SYSTEM, VENDOR, ODM by name) |
 | Build tools | `unica build_dependencies` on the arm64 VM | apktool's bundled aapt2 is x86-64: runs through qemu-user-static + binfmt |
 
+VM tool fixes found by full builds (2026-11-07): `patchelf` and `apksigner` installed (apt), and
+UN1CA's `out/tools/bin/signapk` replaced by `tools/android/oneui/vm/signapk` (the original kept as
+`signapk.orig`): AOSP's signapk.jar loads Conscrypt's JNI library, which it carries only for x86-64, so on
+the arm64 VM every APK signing failed. The stand-in runs `zipalign -p 4`, then `apksigner sign` (v1 + v2 + v3,
+the same platform certificate). `verify_exynos9810_images.sh` makes its temp dir under the image dir (the VM
+root's disk file sits on the nearly full Mac disk). None of these are in make_rom's source hash.
+
 Host scripts: `build/oneui-dl.sh` (download + unzip, `SBI` env = device id), `build/oneui-run.sh STEP`
 (runs `unica STEP` with the build env), `build/oneui-chain.sh` (waits for both firmwares, then
 `make_rom -x -z -F erofs`), `build/oneui-enc-cleanup.sh` (removes the `.enc4` files after decryption).

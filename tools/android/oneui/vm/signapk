@@ -1,0 +1,26 @@
+#!/bin/bash
+# Starbite (arm64 Lima VM) stand-in for UN1CA's out/tools/bin/signapk: AOSP's signapk.jar loads Conscrypt's
+# JNI library, which its jar carries only for x86-64 (UnsatisfiedLinkError on arm64). This signs the same way
+# with Debian's apksigner (libapksig, the library signapk uses for v2/v3), after `zipalign -p 4` (signapk
+# aligns while signing; apktool.sh does not zipalign APKs itself). Same certificate, same key.
+#   signapk [--min-sdk-version N] [-a N] CERT.x509.pem KEY.pk8 IN.apk OUT.apk      (-w: refused)
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+MIN=""
+while [[ "${1:-}" == -* ]]; do
+    case "$1" in
+        --min-sdk-version) MIN="$2"; shift 2 ;;
+        -a) shift 2 ;;
+        --disable-v2) shift ;;
+        -J*) shift ;;
+        -w) echo "signapk (apksigner stand-in): -w whole-file OTA signing is not supported" >&2; exit 1 ;;
+        *) echo "signapk (apksigner stand-in): unknown option $1" >&2; exit 1 ;;
+    esac
+done
+[ $# -eq 4 ] || { echo "signapk (apksigner stand-in): expected CERT KEY IN OUT, got $#: $*" >&2; exit 1; }
+CERT=$1 KEY=$2 IN=$3 OUT=$4
+T=$(mktemp -d -p "${TMP_DIR:-/mnt/oneui}" signapk.XXXXXX)
+trap 'rm -rf "$T"' EXIT
+"$here/zipalign" -f -p 4 "$IN" "$T/aligned.apk"
+apksigner sign --v1-signing-enabled true --v2-signing-enabled true --cert "$CERT" --key "$KEY" ${MIN:+--min-sdk-version "$MIN"} --out "$T/signed.apk" "$T/aligned.apk"
+mv -f "$T/signed.apk" "$OUT"
