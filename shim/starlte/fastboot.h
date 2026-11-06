@@ -109,6 +109,8 @@ uintptr_t fastboot_entry(void);
 int fastboot_wanted(void);
 uintptr_t fastboot_hook(void);
 
+#include "fbbg.h"           /* the menus' background fastboot */
+
 /* ---- platform (fastboot_dev.c on the phone, tools/usb-fastboot/host_test.c on the Mac) ---- */
 const char *fbp_serial(void);
 int fbp_battery(unsigned *mv, unsigned *pct);                   /* 1 if the fuel gauge answered */
@@ -125,5 +127,12 @@ int fbp_boot_prepare(unsigned method, const struct fb_image *img, const char **w
  * is ready to start, 0 with *why. */
 int fbp_maint(unsigned variant, const char **why);
 void fbp_set_next(const char *key);                             /* boot-next mailbox */
+void fbp_clear_next(void);                                      /* no boot-next (`oem reboot-to menu`) */
+/* `oem key`: queue a press of K_* bits for ms (0: a plain press) for the menu waiting for keys;
+ * 0 when none is (the explicit fastboot mode) or the queue is full. */
+int fbp_key(unsigned bits, unsigned ms);
+/* `oem screen`: the panel as staged data (1440 x 2960, 4 bytes a pixel: B G R A): 1 and where. */
+int fbp_screen(uintptr_t *at, uint32_t *len);
+const char *fbp_mode(void);                                     /* "fastboot" "menu" "recovery" "crash" */
 const char *fbp_speed(void);                                    /* "high", "full", "none" */
 void fbp_status(const char *line);                              /* the screen's last-command line */

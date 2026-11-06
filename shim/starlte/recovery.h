@@ -44,6 +44,8 @@ void rec_mailbox_write(const char *key);
 #define REC_CONTINUE 0      /* the normal boot (POST, then the boot menu) */
 #define REC_BOOT     1      /* start catalog entry *pick (Engineer Lite or "Boot entry...") */
 #define REC_FASTBOOT 2      /* USB fastboot (fastboot_dev.c): run by recovery_loop in xnu_boot.c */
+#define REC_USBBOOT  3      /* the Mac placed an image over USB while the menu waited (fbbg.h):
+                             * recovery_loop returns fbbg_entry() */
 
 /* The recovery menu (blocks until the user leaves it; reboots and power off happen inside).
  * why: a line shown in red at the top (the reason recovery came up, or 0). */

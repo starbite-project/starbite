@@ -18,6 +18,7 @@
 #include "dtmerge.h"
 #include "catalog.h"
 #include "store.h"
+#include "crashdoc.h"
 
 static unsigned nchk, nfail;
 #define CHECK(c, ...) do { ++nchk; if (!(c)) { ++nfail; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -946,6 +947,504 @@ static void test_crash_parse(const char *fxdir)
     CHECK(en <= 8, "excerpt: a cap smaller than any line (%u)", en);
 }
 
+/* ---- the real panic of 2026-11-06 (health3 on the phone): capture, stored report, screen, keys ---- */
+
+static struct cd_row hd_rows[6144];
+static char hd_txt[65536];
+static uint8_t hd_kinds[16384];
+
+static void hd_build(struct cd_doc *d, const struct cl_report *r, unsigned level, const struct cd_shown *sh)
+{
+    memset(d, 0, sizeof(*d));
+    d->rows = hd_rows;
+    d->max = 6144;
+    d->txt = hd_txt;
+    d->txt_cap = sizeof(hd_txt);
+    d->kinds = hd_kinds;
+    d->kinds_max = sizeof(hd_kinds);
+    cd_build(d, r, level, sh);
+}
+
+/* The first row at or after from whose text contains needle, or -1. */
+static int hd_find(const struct cd_doc *d, unsigned from, const char *needle)
+{
+    for (unsigned i = from; i < d->n; ++i) {
+        char b[CD_COLS + 1];
+        unsigned n = d->rows[i].n;
+        memcpy(b, (const char *)(uintptr_t)d->rows[i].p, n);
+        b[n] = 0;
+        if (strstr(b, needle))
+            return (int)i;
+    }
+    return -1;
+}
+
+/* crash.c's loop with the phone's timing: hw_wait_ms(5) a turn, plus draw_ms when it redraws.
+ * keys(t) for t in [t0, t1); returns the events seen, OR'ed; *moves counts the redraws. */
+struct hd_press { uint64_t from, to; unsigned keys; };
+
+static unsigned hd_drive(struct cs_nav *n, const struct hd_press *p, unsigned np, uint64_t t0, uint64_t t1,
+                         unsigned draw_ms, unsigned *moves, unsigned *levels)
+{
+    unsigned all = 0;
+    for (uint64_t t = t0; t < t1;) {
+        unsigned k = 0;
+        for (unsigned i = 0; i < np; ++i)
+            if (t >= p[i].from && t < p[i].to)
+                k |= p[i].keys;
+        unsigned ev = cs_poll(n, k, t);
+        all |= ev;
+        if (ev & CS_EV_MOVED)
+            ++*moves;
+        if (ev & CS_EV_LEVEL)
+            ++*levels;
+        t += 5U + ((ev & (CS_EV_MOVED | CS_EV_LEVEL)) ? draw_ms : 0U);
+    }
+    return all;
+}
+
+static void test_real_panic2(const char *fxdir)
+{
+    char p[1100];
+    size_t n, pn, rn;
+    snprintf(p, sizeof(p), "%s/real-panic2-dmesg.txt", fxdir);
+    char *t = (char *)slurp(p, &n);
+    snprintf(p, sizeof(p), "%s/real-panic2-pmsg.txt", fxdir);
+    char *pm = (char *)slurp(p, &pn);
+    snprintf(p, sizeof(p), "%s/real-panic2-report2.bin", fxdir);
+    uint8_t *rb = slurp(p, &rn);
+    CHECK(t && pm && rb && rn == CL_BLOCK, "real panic2 fixtures");
+    if (!t || !pm || !rb || rn != CL_BLOCK)
+        return;
+    static char ring_text[0x4000], ex[CR_TEXT_MAX];
+    unsigned tn = through_ring(t, (unsigned)n, ring_text, sizeof(ring_text), 0);
+    CHECK(tn == n && !memcmp(ring_text, t, n), "real: the dmesg record through zone 0 unchanged (%u bytes)", tn);
+
+    struct sb_crashinfo ci;
+    unsigned nl = sb_crash_parse(t, (unsigned)n, &ci, 0, 0);
+    CHECK(nl == 204 && !strcmp(ci.message, "Kernel panic - not syncing: sysrq triggered crash"), "real: %u lines, '%s'",
+          nl, ci.message);
+    CHECK(!strcmp(ci.version, "7.1.0-starbite-f797be6b") && !strcmp(ci.task, "CPU 6 PID 4029 sh") &&
+          ci.uptime_ms == 76972, "real: kernel '%s' task '%s' uptime %llu", ci.version, ci.task,
+          (unsigned long long)ci.uptime_ms);
+    CHECK(ci.trace == 18 && ci.regs == 0 && ci.msg == 1, "real: trace %u regs %u msg %u", ci.trace, ci.regs, ci.msg);
+
+    /* what the loader stored on the phone is exactly what cl_excerpt makes of the capture, and it
+     * ends with the panic, its trace and the last line */
+    static struct cl_report r;
+    CHECK(cl_report_decode(rb, &r) == 1 && r.seq == 2 && r.kind == CK_PANIC &&
+          !strcmp(r.reason, "panic: sysrq triggered crash"), "real: report #2 decodes (%s)", r.reason);
+    uint16_t lines;
+    unsigned en = cl_excerpt(ex, CR_TEXT_MAX, t, (unsigned)n, &lines);
+    CHECK(en == r.text_len && lines == r.text_lines && !memcmp(ex, r.text, en),
+          "real: the stored text = cl_excerpt of the capture (%u / %u bytes, %u lines)", en, r.text_len, lines);
+    CHECK(sb_find(r.text, r.text_len, "[   76.972237] Kernel panic - not syncing: sysrq triggered crash\n") > 0 &&
+          sb_find(r.text, r.text_len, "[   76.972288] Call trace:\n") > 0 &&
+          sb_find(r.text, r.text_len, "[   76.972506]  el0t_64_sync+0x198/0x19c\n") > 0,
+          "real: the stored report has the panic and its call trace");
+    {
+        const char *last = "[   76.972553] Memory Limit: none\n";
+        unsigned ll = (unsigned)strlen(last);
+        CHECK(r.text_len > ll && !memcmp(r.text + r.text_len - ll, last, ll), "real: the stored report ends with the record");
+    }
+    struct sb_crashinfo c2;
+    sb_crash_parse(r.text, r.text_len, &c2, 0, 0);
+    CHECK(c2.trace == 18 && !strcmp(c2.message, ci.message), "real: the stored report parses to the same trace");
+
+    /* a tighter report still keeps message, trace and the end */
+    en = cl_excerpt(ex, 1000, t, (unsigned)n, &lines);
+    CHECK(en <= 1000 && sb_find(ex, en, "Kernel panic - not syncing") >= 0 &&
+          sb_find(ex, en, "Memory Limit: none\n") == (int)(en - 19), "real: 1000-byte excerpt: panic and the end kept");
+    en = cl_excerpt(ex, 600, t, (unsigned)n, &lines);
+    CHECK(en <= 600 && sb_find(ex, en, "Kernel panic - not syncing") >= 0 && sb_find(ex, en, "Memory Limit: none\n") > 0,
+          "real: 600 bytes (the important lines alone overflow): the end still kept (%u)", en);
+
+    /* the screen right after the crash (everything captured) and from the store, every level */
+    static struct cd_doc d;
+    struct cd_shown live = { t, (unsigned)n, 1, pm, (unsigned)pn, RS_CONSOLE, 1 };
+    struct cd_shown saved = { r.text, r.text_len, 0, 0, 0, 0, 1 };
+    for (unsigned v = 0; v < 2; ++v)
+        for (unsigned level = 1; level <= 3; ++level) {
+            const struct cd_shown *sh = v ? &saved : &live;
+            hd_build(&d, &r, level, sh);
+            int head = hd_find(&d, 0, "STARBITE CRASH REPORT #2");
+            int msg = hd_find(&d, 0, "-- PANIC MESSAGE");
+            int tr = hd_find(&d, 0, "-- CALL TRACE");
+            int lg = hd_find(&d, 0, v ? "-- LOG (SAVED EXCERPT, 65 LINES)" : "-- LOG (ALL 204 LINES)");
+            int pan = lg >= 0 ? hd_find(&d, (unsigned)lg, "Kernel panic - not syncing: sysrq triggered crash") : -1;
+            int end = lg >= 0 ? hd_find(&d, (unsigned)lg, "Memory Limit: none") : -1;
+            int other = hd_find(&d, 0, "-- OTHER RING");
+            CHECK(head == 0 && msg > 0 && tr > msg && lg > tr && pan > lg && end > pan &&
+                  (other >= 0 ? (unsigned)end + 2U == (unsigned)other : (unsigned)end + 3U == d.n),
+                  "real %s, level %u: header, message, trace, the log with the panic, its last line (%d %d %d %d %d %d of %u)",
+                  v ? "saved" : "live", level, head, msg, tr, lg, pan, end, d.n);
+            CHECK(d.n > 78, "real %s, level %u: %u rows, more than a page: Volume has something to scroll", v ? "saved" : "live",
+                  level, d.n);
+            CHECK(hd_find(&d, (unsigned)tr, " el0t_64_sync+0x198/0x19c") > tr || level == 1,
+                  "real %s, level %u: the whole trace", v ? "saved" : "live", level);
+            CHECK((hd_find(&d, 0, "-- OTHER RING") >= 0) == (level == 3 && !v), "real: the pmsg ring only live, at 3");
+            CHECK(hd_find(&d, 0, "KERNEL   7.1.0-starbite-f797be6b") > 0 && hd_find(&d, 0, "UPTIME 76.972 s") > 0 &&
+                  hd_find(&d, 0, "TASK CPU 6 PID 4029 sh") > 0 && hd_find(&d, 0, "report #2 (slot 2)") > 0,
+                  "real %s, level %u: kernel, uptime, task, store slot in the header", v ? "saved" : "live", level);
+            for (unsigned i = 0; i < d.n; ++i)
+                if (d.rows[i].n + d.rows[i].indent > CD_COLS) {
+                    CHECK(0, "real: row %u wider than the panel", i);
+                    break;
+                }
+        }
+
+    /* the keys, as crash.c polls them, on the real document (level 1, as the phone opened it) */
+    hd_build(&d, &r, 1, &live);
+    struct cs_nav nv;
+    cs_init(&nv, 78);
+    cs_doc(&nv, &d);
+    unsigned m = cs_max_top(&nv), moves = 0, levels = 0;
+    CHECK(m == d.n - 78 && m > 0, "keys: max top %u", m);
+    struct hd_press tap15[] = { { 1000, 1015, CS_K_DOWN } };
+    unsigned ev = hd_drive(&nv, tap15, 1, 900, 1300, 25, &moves, &levels);
+    CHECK(nv.top == 0 && !moves, "keys: Volume Down for 15 ms is not a press (top %u)", nv.top);
+    struct hd_press tap60[] = { { 2000, 2060, CS_K_DOWN } };
+    ev = hd_drive(&nv, tap60, 1, 1900, 2400, 25, &moves, &levels);
+    CHECK(nv.top == 1 && moves == 1 && (ev & CS_EV_KEY), "keys: a 60 ms press of Volume Down: one line (top %u)", nv.top);
+    struct hd_press hold[] = { { 3000, 4000, CS_K_DOWN } };
+    moves = 0;
+    hd_drive(&nv, hold, 1, 2900, 4100, 25, &moves, &levels);
+    CHECK(nv.top > 10 && nv.top < 40, "keys: Volume Down held 1 s (25 ms redraws): repeats, top %u", nv.top);
+    struct hd_press hold3[] = { { 5000, 8000, CS_K_DOWN } };
+    hd_drive(&nv, hold3, 1, 4900, 8100, 25, &moves, &levels);
+    CHECK(nv.top == m, "keys: held 3 s: fast, to the end (top %u of %u)", nv.top, m);
+    struct hd_press up[] = { { 9000, 9500, CS_K_UP } };
+    unsigned before = nv.top;
+    hd_drive(&nv, up, 1, 8900, 9600, 25, &moves, &levels);
+    CHECK(nv.top < before && before - nv.top >= 5, "keys: Volume Up held 0.5 s: back up (%u -> %u)", before, nv.top);
+    /* slow redraws (120 ms each) still scroll */
+    struct cs_nav slow;
+    cs_init(&slow, 78);
+    cs_doc(&slow, &d);
+    moves = 0;
+    struct hd_press hold2[] = { { 100, 2100, CS_K_DOWN } };
+    hd_drive(&slow, hold2, 1, 0, 2200, 120, &moves, &levels);
+    CHECK(slow.top > 10 && moves > 10, "keys: with 120 ms redraws, held 2 s: top %u, %u redraws", slow.top, moves);
+    /* Bixby: a page (stopping at the next section), held: the level; Power: continue */
+    cs_init(&nv, 78);
+    cs_doc(&nv, &d);
+    struct hd_press bix[] = { { 1000, 1100, CS_K_BIXBY } };
+    hd_drive(&nv, bix, 1, 900, 1300, 25, &moves, &levels);
+    CHECK(nv.top > 0 && nv.top <= 78, "keys: Bixby tap: a page or the next section (top %u)", nv.top);
+    levels = 0;
+    struct hd_press bixl[] = { { 2000, 2900, CS_K_BIXBY } };
+    ev = hd_drive(&nv, bixl, 1, 1900, 3100, 25, &moves, &levels);
+    CHECK(levels == 1 && (ev & CS_EV_LEVEL) && nv.top == 0, "keys: Bixby held 0.9 s: one level change, top 0");
+    struct hd_press pw[] = { { 4000, 4050, CS_K_POWER } };
+    ev = hd_drive(&nv, pw, 1, 3900, 4100, 25, &moves, &levels);
+    CHECK(ev & CS_EV_EXIT, "keys: Power continues");
+    struct hd_press both[] = { { 5000, 6000, CS_K_UP | CS_K_DOWN } };
+    before = nv.top;
+    hd_drive(&nv, both, 1, 4900, 6100, 25, &moves, &levels);
+    CHECK(nv.top == before, "keys: both Volume keys: nothing");
+    /* the time origin may be 0 (the host); the phone's is seconds after power on */
+    struct cs_nav z0;
+    cs_init(&z0, 78);
+    cs_doc(&z0, &d);
+    struct hd_press at0[] = { { 0, 80, CS_K_DOWN } };
+    moves = 0;
+    hd_drive(&z0, at0, 1, 0, 200, 25, &moves, &levels);
+    CHECK(z0.top == 1, "keys: a press at time 0 counts");
+    free(t);
+    free(pm);
+    free(rb);
+}
+
+/* ---- crash de-duplication: identical crashes twice are two reports (sb_evidence / sb_consume) ---- */
+
+#define DZ 0x4000U
+static uint8_t dz_live[2 * DZ];           /* the phone's 0xFED10000.. as RAM */
+static uint8_t dz_snap[2 * DZ];
+
+static void dz_put32(uint8_t *p, uint32_t v)
+{
+    memcpy(p, &v, 4);
+}
+
+/* XNU 0399's writer: the pmsg ring (zone 1) reset, the dump from data offset 0 */
+static void dz_xnu_dump(const char *t, unsigned n)
+{
+    uint8_t *z = dz_live + DZ;
+    if (n > RING_PMSG)
+        n = RING_PMSG;
+    memcpy(z, "DBGC", 4);
+    dz_put32(z + 4, n % RING_PMSG);
+    dz_put32(z + 8, n);
+    memcpy(z + 12, t, n);
+}
+
+/* Linux ramoops after a panic: zone 0 zapped, the record written from data offset 0 */
+static void dz_linux_record(const char *t, unsigned n)
+{
+    uint8_t *z = dz_live;
+    const unsigned data = DZ - 12;
+    if (n > data)
+        n = data;
+    memset(z, 0, DZ);
+    memcpy(z, "DBGC", 4);
+    dz_put32(z + 4, n % data);
+    dz_put32(z + 8, n);
+    memcpy(z + 12, t, n);
+}
+
+/* the loader's pmsg_put (xnu_boot.c): appends to zone 1, wrapping at RING_PMSG */
+static void dz_loader_line(const char *s)
+{
+    uint8_t *z = dz_live + DZ;
+    uint32_t start, size;
+    memcpy(&start, z + 4, 4);
+    memcpy(&size, z + 8, 4);
+    if (memcmp(z, "DBGC", 4) || start >= RING_PMSG || size > RING_PMSG) {
+        memcpy(z, "DBGC", 4);
+        start = size = 0;
+    }
+    for (; *s; ++s) {
+        z[12 + start] = (uint8_t)*s;
+        start = (start + 1) % RING_PMSG;
+        if (size < RING_PMSG)
+            ++size;
+    }
+    dz_put32(z + 4, start);
+    dz_put32(z + 8, size);
+}
+
+/* One loader boot after a launch of `method` (0 none): snapshot, judge, the loader's own pmsg
+ * lines (lines of them, between the snapshot and the judging, as POST writes), mark; the header
+ * goes through its block codec as on UFS. Returns the EV_* bits found new. */
+static uint32_t dz_boot(uint8_t *hblk, unsigned method, unsigned lines, unsigned *marked)
+{
+    struct cl_head h;
+    if (cl_head_decode(hblk, &h) != 1)
+        cl_head_init(&h);
+    memcpy(dz_snap, dz_live, sizeof(dz_snap));
+    static char t0[DZ], t1[DZ];
+    unsigned n0 = sb_ring_text(dz_snap, DZ, t0, DZ), n1 = sb_ring_text(dz_snap + DZ, DZ, t1, DZ);
+    for (unsigned i = 0; i < lines; ++i)
+        dz_loader_line("STARBITE: POST full 8133ms fail 0 warn 0 - a loader line between snapshot and judging\n");
+    int xp = sb_find(t1, n1, "STARBITE: XNU panic (sweetreboot)");
+    int xh = sb_find(t1, n1, "STARBITE: sweetreboot timer (no panic)");
+    struct sb_found f;
+    sb_evidence(t0, n0, t1, n1, xp, xh, method == M_LINUX, method == M_XNU, &h, &f);
+    unsigned mk = sb_consume(dz_live, dz_live + DZ, dz_snap, dz_snap + DZ, DZ, &f, &h);
+    if (marked)
+        *marked = mk;
+    cl_head_encode(hblk, &h);
+    return f.ev;
+}
+
+static void test_dedup(const char *fxdir)
+{
+    char p[1100];
+    size_t xn, ln;
+    snprintf(p, sizeof(p), "%s/xnu-panic.txt", fxdir);
+    char *xt = (char *)slurp(p, &xn);
+    snprintf(p, sizeof(p), "%s/real-panic2-dmesg.txt", fxdir);
+    char *lt = (char *)slurp(p, &ln);
+    CHECK(xt && lt, "dedup fixtures");
+    if (!xt || !lt)
+        return;
+    static uint8_t hb[CL_BLOCK];
+    struct cl_head h0;
+    cl_head_init(&h0);
+    h0.hflags = CLH_CONSUMES;
+    cl_head_encode(hb, &h0);
+    unsigned mk;
+
+    /* XNU: xnuh-panic twice, the same deterministic dump each time, then a clean run */
+    memset(dz_live, 0, sizeof(dz_live));
+    dz_xnu_dump(xt, (unsigned)xn);
+    CHECK(dz_boot(hb, M_XNU, 3, &mk) == EV_XNU_PANIC && mk == 2, "xnu run 1: a report, the dump marked (%u)", mk);
+    CHECK(sb_find((const char *)dz_live + DZ + 12, RING_PMSG, "STARSEEN: XNU panic (sweetreboot)") >= 0,
+          "xnu: the judged dump reads STARSEEN in RAM");
+    dz_xnu_dump(xt, (unsigned)xn);                       /* run 2: byte for byte the same dump */
+    CHECK(dz_boot(hb, M_XNU, 3, &mk) == EV_XNU_PANIC, "xnu run 2, identical dump: a second report");
+    CHECK(dz_boot(hb, M_XNU, 3, &mk) == 0, "xnu run 3, clean restart: no report");
+    for (unsigned i = 0; i < 5; ++i)
+        CHECK(dz_boot(hb, i & 1 ? M_XNU : 0, 2, &mk) == 0, "xnu: unrelated reset %u: the old dump is not reported", i);
+    /* the loader's own lines wrap over the dump's header before it is judged: still one report */
+    dz_xnu_dump(xt, (unsigned)xn);
+    uint32_t evw = dz_boot(hb, M_XNU, 150, &mk);     /* 5684 + 150 x 86 bytes: wraps past 0x3F00 */
+    CHECK(evw == EV_XNU_PANIC && mk == 0, "xnu: header overwritten by loader lines: reported, nothing to mark (ev %u mk %u)", evw, mk);
+    CHECK(dz_boot(hb, M_XNU, 3, &mk) == 0, "xnu: and not again");
+    /* a timer dump (sweetreboot, no panic) */
+    {
+        static char tm[1024];
+        int n = snprintf(tm, sizeof(tm), "STARBITE: sweetreboot timer (no panic), console tail:\nwaiting for root device\n");
+        dz_xnu_dump(tm, (unsigned)n);
+        CHECK(dz_boot(hb, M_XNU, 1, &mk) == EV_XNU_HANG && mk == 2, "xnu timer dump: a hang report, marked");
+        dz_xnu_dump(tm, (unsigned)n);
+        CHECK(dz_boot(hb, M_XNU, 1, &mk) == EV_XNU_HANG, "xnu timer dump again: again");
+        CHECK(dz_boot(hb, M_XNU, 1, &mk) == 0, "xnu timer: then nothing");
+    }
+
+    /* Linux: the real sysrq panic record twice, then clean runs */
+    memset(dz_live, 0, sizeof(dz_live));
+    cl_head_encode(hb, &h0);
+    dz_linux_record(lt, (unsigned)ln);
+    CHECK(dz_boot(hb, M_LINUX, 3, &mk) == EV_LX_PANIC && mk == 1, "linux run 1: a report, the record marked");
+    {
+        static char t0[DZ];
+        unsigned n0 = sb_ring_text(dz_live, DZ, t0, DZ);
+        CHECK(n0 == ln && !memcmp(t0, "====1793987680.553805-S\nPanic#1 Part1\n", 38) && !memcmp(t0 + 38, lt + 38, ln - 38),
+              "linux: the judged record differs only in its flag (-D -> -S)");
+        CHECK(sb_dmesg_time(t0, n0) == 1793987680ULL, "linux: its time still reads");
+    }
+    dz_linux_record(lt, (unsigned)ln);                   /* run 2: the identical panic */
+    CHECK(dz_boot(hb, M_LINUX, 3, &mk) == EV_LX_PANIC, "linux run 2, identical record: a second report");
+    CHECK(dz_boot(hb, M_LINUX, 3, &mk) == 0, "linux run 3, clean restart: no report");
+    CHECK(dz_boot(hb, M_XNU, 3, &mk) == 0 && dz_boot(hb, M_LINUX, 3, &mk) == 0, "linux: unrelated resets: none");
+    /* an oops record (no panic): a warning, once */
+    {
+        static char oo[2048];
+        int n = snprintf(oo, sizeof(oo), "====1793990000.000001-D\nOops#1 Part1\n<0>[ 5.000000] Internal error: Oops: 96000045 [#1] SMP\n");
+        dz_linux_record(oo, (unsigned)n);
+        CHECK(dz_boot(hb, M_LINUX, 0, &mk) == EV_LX_OOPS && mk == 1, "linux oops: once");
+        CHECK(dz_boot(hb, M_LINUX, 0, &mk) == 0, "linux oops: not twice");
+    }
+    /* a record found while another OS was launched: not that OS's, but marked so it never
+     * shows up later as Linux's */
+    dz_linux_record(lt, (unsigned)ln);
+    CHECK(dz_boot(hb, M_XNU, 0, &mk) == 0 && mk == 1, "linux record after an XNU launch: not reported, marked");
+    CHECK(dz_boot(hb, M_LINUX, 0, &mk) == 0, "... and not reported at the next Linux launch");
+
+    /* the first boot of a consuming loader: old evidence is still compared with the seen CRCs */
+    {
+        memset(dz_live, 0, sizeof(dz_live));
+        dz_xnu_dump(xt, (unsigned)xn);
+        static char t1[DZ];
+        unsigned n1 = sb_ring_text(dz_live + DZ, DZ, t1, DZ);
+        int xp = sb_find(t1, n1, "STARBITE: XNU panic (sweetreboot)");
+        struct cl_head old;
+        cl_head_init(&old);
+        old.seen_pmsg = sb_crc32(t1 + xp, n1 - (unsigned)xp < 512U ? n1 - (unsigned)xp : 512U);
+        cl_head_encode(hb, &old);
+        CHECK(dz_boot(hb, M_XNU, 1, &mk) == 0 && mk == 2, "old loader's judged dump: not reported again, marked now");
+        struct cl_head now;
+        CHECK(cl_head_decode(hb, &now) == 1 && (now.hflags & CLH_CONSUMES), "the header says consumes now");
+        dz_xnu_dump(xt, (unsigned)xn);
+        CHECK(dz_boot(hb, M_XNU, 1, &mk) == EV_XNU_PANIC, "then the identical next crash is reported");
+    }
+    /* ring positions: wrapped Linux console ring and the 0x3F00 pmsg ring map back */
+    {
+        static uint8_t z[DZ];
+        memset(z, 0, sizeof(z));
+        memcpy(z, "DBGC", 4);
+        dz_put32(z + 4, 100);
+        dz_put32(z + 8, RING_PMSG);
+        CHECK(sb_ring_phys(z, DZ, 0) == 100 && sb_ring_phys(z, DZ, RING_PMSG - 100) == 0 &&
+              sb_ring_phys(z, DZ, RING_PMSG) == -1, "pmsg ring positions");
+        dz_put32(z + 8, 50);
+        dz_put32(z + 4, 50);
+        CHECK(sb_ring_phys(z, DZ, 49) == 49 && sb_ring_phys(z, DZ, 50) == -1, "linear ring positions");
+    }
+    free(xt);
+    free(lt);
+}
+
+/* ---- keys from USB (`fastboot oem key`): the queue, and the menus' own rules on it ------------- */
+
+static void test_kq(const char *fxdir)
+{
+    struct kq k;
+    kq_init(&k);
+    CHECK(kq_bits(&k, 5000) == 0, "kq: idle");
+    CHECK(kq_push(&k, 2, 0) && k.ms[0] == KQ_PRESS_MS, "kq: a plain press");
+    unsigned on = 0, first = ~0U, last = 0;
+    for (unsigned t = 1000; t < 2000; ++t)
+        if (kq_bits(&k, t) == 2) {
+            ++on;
+            first = t < first ? t : first;
+            last = t;
+        }
+    CHECK(on == KQ_PRESS_MS && first == 1000 && last == 1000 + KQ_PRESS_MS - 1 && k.n == 0, "kq: down %u ms from the first read", on);
+    /* three presses: each its time, a gap between */
+    kq_init(&k);
+    CHECK(kq_push(&k, 1, 0) && kq_push(&k, 4, 900) && kq_push(&k, 8, 0), "kq: queued");
+    unsigned seq[4] = { 0 }, ns = 0, prev = 0, dur[4] = { 0 };
+    for (unsigned t = 0; t < 3000; ++t) {
+        unsigned b = kq_bits(&k, t);
+        if (b && b != prev && ns < 4)
+            seq[ns++] = b;
+        if (b && ns)
+            ++dur[ns - 1];
+        prev = b;
+    }
+    CHECK(ns == 3 && seq[0] == 1 && seq[1] == 4 && seq[2] == 8 && dur[0] == 150 && dur[1] == 900 && dur[2] == 150,
+          "kq: up, bixby held 900, power (%u: %u %u %u)", ns, dur[0], dur[1], dur[2]);
+    kq_init(&k);
+    for (unsigned i = 0; i < KQ_N; ++i)
+        kq_push(&k, 1, 0);
+    CHECK(!kq_push(&k, 1, 0) && !kq_push(&k, 0, 0), "kq: full, and no key, refused");
+    kq_init(&k);
+    kq_push(&k, 1, 99999);
+    CHECK(k.ms[0] == KQ_MAX_MS, "kq: capped");
+    CHECK(kq_key_bit("up") == 1 && kq_key_bit("down 900") == 2 && kq_key_bit("bixby") == 4 && kq_key_bit("power") == 8 &&
+          kq_key_bit("vol+") == 1 && kq_key_bit("voldown") == 2 && !kq_key_bit("upx") && !kq_key_bit("") &&
+          !kq_key_bit("home"), "kq: key names");
+    /* a plain press against every menu's rules: menu v7 (menu7.h: debounce 20, Power hold 520,
+     * Volume repeat 450, Bixby hold 700), recovery (30 ms stable), the crash report (crashdoc.h) */
+    CHECK(KQ_PRESS_MS > 20U && KQ_PRESS_MS > 30U && KQ_PRESS_MS > CS_FIRST_MS && KQ_PRESS_MS < 450U && KQ_PRESS_MS < 520U &&
+          KQ_PRESS_MS < CS_REPEAT_MS && KQ_PRESS_MS < CS_LEVEL_MS, "kq: a plain press is a press everywhere, never a hold");
+
+    /* the crash report driven by injected presses, with crash.c's loop timing */
+    char p[1100];
+    size_t n, rn;
+    snprintf(p, sizeof(p), "%s/real-panic2-dmesg.txt", fxdir);
+    char *t = (char *)slurp(p, &n);
+    snprintf(p, sizeof(p), "%s/real-panic2-report2.bin", fxdir);
+    uint8_t *rb = slurp(p, &rn);
+    if (!t || !rb)
+        return;
+    static struct cl_report r;
+    cl_report_decode(rb, &r);
+    static struct cd_doc d;
+    struct cd_shown live = { t, (unsigned)n, 1, 0, 0, 0, 1 };
+    hd_build(&d, &r, 1, &live);
+    struct cs_nav nv;
+    cs_init(&nv, 78);
+    cs_doc(&nv, &d);
+    kq_init(&k);
+    kq_push(&k, CS_K_DOWN, 0);
+    kq_push(&k, CS_K_DOWN, 0);
+    kq_push(&k, CS_K_DOWN, 0);
+    kq_push(&k, CS_K_BIXBY, 900);
+    kq_push(&k, CS_K_POWER, 0);
+    unsigned levels = 0, exits = 0, top_before_level = 0;
+    for (uint64_t tm = 0; tm < 4000;) {
+        unsigned ev = cs_poll(&nv, kq_bits(&k, tm), tm);
+        if (ev & CS_EV_LEVEL) {
+            ++levels;
+            top_before_level = 3;
+        }
+        if (ev & CS_EV_EXIT) {
+            ++exits;
+            break;
+        }
+        tm += 5U + ((ev & (CS_EV_MOVED | CS_EV_LEVEL)) ? 25U : 0U);
+        if (!levels)
+            top_before_level = nv.top;
+    }
+    CHECK(top_before_level == 3 && levels == 1 && exits == 1,
+          "injected: 3 x Volume Down = 3 lines, Bixby 900 ms = one level, Power = continue (top %u, levels %u)",
+          top_before_level, levels);
+    /* and POST's key machine: an injected Volume Up is a press made during POST */
+    struct pv_keys pk;
+    pv_init(&pk, PV_LOGO, 0, 0);
+    kq_init(&k);
+    kq_push(&k, 1, 0);
+    unsigned pev = 0;
+    for (uint64_t tm = 100; tm < 600; tm += 5)
+        pev |= pv_poll(&pk, (kq_bits(&k, tm) & 1U) != 0, 0, tm);
+    CHECK(pev == PV_EV_LOG, "injected Volume Up opens POST's log");
+    free(t);
+    free(rb);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 4 && !strcmp(argv[1], "--catalog-variant")) {
@@ -980,6 +1479,9 @@ int main(int argc, char **argv)
         else
             strcpy(fx, ".");
         test_crash_parse(fx);
+        test_real_panic2(fx);
+        test_dedup(fx);
+        test_kq(fx);
     }
     char cmd[2048];
     for (unsigned v = 0; v < 2; ++v) {

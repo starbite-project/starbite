@@ -23,6 +23,8 @@
 #include "catalog.h"
 #include "recovery.h"
 #include "wdt.h"
+#include "crashdoc.h"
+#include "fbbg.h"
 #include "../fdt.h"
 
 #define CR_SNAP    0x9F000000UL
@@ -201,11 +203,6 @@ int crash_hold_autoboot(void)
     return hold_autoboot;
 }
 
-static unsigned min_u(unsigned a, unsigned b)
-{
-    return a < b ? a : b;
-}
-
 static unsigned cstrlen(const char *s, unsigned max)
 {
     unsigned n = 0;
@@ -238,6 +235,20 @@ static void reason_from(const char *src, unsigned n, const char *needle, const c
 }
 
 /* The decision and the report for a launch (h: the crash log header as read). *sev out. */
+static struct sb_found found;       /* evaluate's evidence, consumed by settle */
+
+/* The judged evidence marked in the live ramoops zones (sbfmt.c sb_consume), cleaned to RAM as
+ * the loader's pmsg writes are (xnu_boot.c pmsg_put). */
+static unsigned consume(struct cl_head *h)
+{
+    unsigned d = sb_consume((volatile uint8_t *)RAMOOPS, (volatile uint8_t *)(RAMOOPS + ZONE),
+                            (const uint8_t *)CR_SNAP, (const uint8_t *)(CR_SNAP + ZONE), ZONE, &found, h);
+    for (uintptr_t a = RAMOOPS; a < RAMOOPS + 2U * ZONE; a += 64)
+        __asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
+    __asm__ volatile("dsb sy" : : : "memory");
+    return d;
+}
+
 static unsigned evaluate(struct cl_head *h, unsigned *sev)
 {
     char *t0 = (char *)CR_T0, *t1 = (char *)CR_T1;
@@ -247,18 +258,14 @@ static unsigned evaluate(struct cl_head *h, unsigned *sev)
     unsigned m = launched ? h->method : 0;
     uint32_t ev = 0;
 
-    /* Linux: a ramoops dmesg record "====<time>-D" in zone 0 that was not there before */
-    int dmesg = n0 >= 4 && t0[0] == '=' && t0[1] == '=' && t0[2] == '=' && t0[3] == '=';
-    uint32_t c0 = dmesg ? sb_crc32(t0, n0) : 0;
-    if (m == M_LINUX && dmesg && c0 != h->seen_dmesg)
-        ev |= sb_find(t0, n0, "Panic#") >= 0 ? EV_LX_PANIC : sb_find(t0, n0, "Oops#") >= 0 ? EV_LX_OOPS : EV_LX_OTHER;
-    /* XNU: starlte_pmsg.c's dump at the start of the pmsg ring */
+    /* Linux: a ramoops dmesg record "====<time>-D" in zone 0 not judged yet; XNU: starlte_pmsg.c's
+     * dump in the pmsg ring (its panic or timer header). sbfmt.c sb_evidence: what the loader has
+     * judged it marks in RAM (sb_consume, in settle), so an identical later crash is still new. */
     int xp = sb_find(t1, n1, "STARBITE: XNU panic (sweetreboot)");
     int xh = sb_find(t1, n1, "STARBITE: sweetreboot timer (no panic)");
-    int xat = xp >= 0 ? xp : xh;
-    uint32_t cx = xat >= 0 ? sb_crc32(t1 + xat, min_u(512U, n1 - (unsigned)xat)) : 0;
-    if (m == M_XNU && xat >= 0 && cx != h->seen_pmsg)
-        ev |= xp >= 0 ? EV_XNU_PANIC : EV_XNU_HANG;
+    sb_evidence(t0, n0, t1, n1, xp, xh, m == M_LINUX, m == M_XNU, h, &found);
+    ev = found.ev;
+    int dmesg = found.dmesg, xat = found.xat;
     /* Samsung's Android kernel: sec_debug magic + panic string at 0x80000000 */
     const char *ps = (const char *)(CR_SECPG + 4);
     uint32_t magic = *(volatile const uint32_t *)CR_SECPG;
@@ -323,7 +330,7 @@ static unsigned evaluate(struct cl_head *h, unsigned *sev)
             rep.source = RS_CONSOLE;
         }
     } else if (m == M_ANDROID) {
-        if (n0 && !dmesg) {
+        if (n0 && !(n0 >= 4 && t0[0] == '=' && t0[1] == '=' && t0[2] == '=' && t0[3] == '=')) {   /* a record (judged or not) is not a console */
             src = t0;
             sn_ = n0;
             rep.source = RS_CONSOLE;
@@ -394,11 +401,8 @@ static unsigned evaluate(struct cl_head *h, unsigned *sev)
         }
     }
 
-    /* what has now been seen, so it is reported once */
-    if (dmesg)
-        h->seen_dmesg = c0;
-    if (xat >= 0)
-        h->seen_pmsg = cx;
+    /* what has now been seen, so it is reported once (dmesg and XNU: marked in RAM by settle) */
+    (void)dmesg;
     if (pn)
         h->seen_secmagic = cps;
     return kind;
@@ -443,514 +447,102 @@ static void log_line(unsigned kind, unsigned sev, const struct cl_head *h, int l
  *   REGISTERS        the CPU register dump the OS printed (details and up)
  *   CALL TRACE       the frames (summary: the first 12)
  *   RESET AND WATCHDOG REGISTERS   all 16 saved registers (everything)
- *   LOG              summary: the last 30 lines; details: the last 150; everything: all of it
+ *   LOG              all of it, at every level (so it always scrolls)
  *   OTHER RING       Linux: the other ramoops zone (everything)
+ * The document and the keys are crashdoc.c (no hardware, host-tested on real captures); this file
+ * draws them and polls the keys.
  * Keys: Volume Up / Down scroll a line (held: repeats, then 8 lines at a time), Bixby a page or to
  * the next section (held 0.7 s: the next detail level), Power continues. One footer line: the
  * keys, the rows shown, the time left. */
 
 #define DOC_TXT       0x9F030000UL     /* 64 KiB: the composed header lines */
 #define DOC_TXT_SIZE  0x10000U
-#define DOC_ROWS      0x9F040000UL     /* the rows (struct drow), DOC_MAX of them */
+#define DOC_ROWS      0x9F040000UL     /* the rows (struct cd_row), DOC_MAX of them */
 #define DOC_KINDS     0x9F060000UL     /* sb_crash_parse's kind of each line of the text */
 #define DOC_MAX       6144U
 #define DOC_KINDS_MAX 16384U
 #define SCR_X     36U
 #define SCR_Y     60U
-#define SCR_COLS  76U
 #define SCR_PAGE  78U                  /* rows a page: 60 + 78 x 36 = 2868 */
 #define SCR_FOOT  2880U                /* the footer row's y */
 #define C_LOG     0xffc9cfdcU
 #define C_CYAN    0xff8fd6ffU
 
+_Static_assert(sizeof(struct cd_row) == 16, "cd_row");
 _Static_assert(DOC_ROWS + DOC_MAX * 16U <= DOC_KINDS, "crash screen rows overlap the kinds");
 _Static_assert(DOC_KINDS + DOC_KINDS_MAX <= 0xA0000000UL, "crash screen buffers reach S-Boot's ECT");
+_Static_assert(CS_K_UP == K_UP && CS_K_DOWN == K_DOWN && CS_K_BIXBY == K_BIXBY && CS_K_POWER == K_POWER, "keys");
+_Static_assert(CD_COLS * STAR_FB_MINI_W + SCR_X <= STAR_FB_WIDTH, "a row fits the panel");
 
 static void text_row(unsigned r, const char *s, uint32_t fg)
 {
     star_fb_text_c(r, s, fg, C_BLACK);
 }
 
-struct drow {
-    uint64_t p;                         /* the row's text */
-    uint16_t n;
-    uint8_t color, sect, indent, pad[3];
-};
-
-enum { DC_WHITE, DC_MUTED, DC_GOLD, DC_RED, DC_GREEN, DC_LOG, DC_CYAN };
-
 static uint32_t dcolor(unsigned c)
 {
     switch (c) {
-    case DC_MUTED: return C_MUTED;
-    case DC_GOLD:  return C_GOLD;
-    case DC_RED:   return C_RED;
-    case DC_GREEN: return C_GREEN;
-    case DC_LOG:   return C_LOG;
-    case DC_CYAN:  return C_CYAN;
+    case CD_MUTED: return C_MUTED;
+    case CD_GOLD:  return C_GOLD;
+    case CD_RED:   return C_RED;
+    case CD_GREEN: return C_GREEN;
+    case CD_LOG:   return C_LOG;
+    case CD_CYAN:  return C_CYAN;
     default:       return C_WHITE;
     }
 }
 
-static struct {
-    unsigned rows, txt, nsect, sect;
-    unsigned sect_row[12];
-} doc;
+static struct cd_doc doc;
 
-#define DR ((struct drow *)DOC_ROWS)
-
-static void doc_reset(void)
+static void doc_build(const struct cl_report *r, unsigned level, const struct cd_shown *sh)
 {
-    doc.rows = doc.txt = doc.nsect = doc.sect = 0;
-}
-
-/* A line of n bytes as rows: hard wrapped at the page width, continuation rows indented by 2. */
-static void doc_add(const char *p, unsigned n, unsigned color, unsigned indent)
-{
-    unsigned ind = indent, w = SCR_COLS - indent, at = 0;
-    do {
-        if (doc.rows >= DOC_MAX)
-            return;
-        unsigned take = n - at > w ? w : n - at;
-        if (n - at > w)                     /* break after a space in the row's second half */
-            for (unsigned k = w; k > w / 2U; --k)
-                if (p[at + k - 1U] == ' ') {
-                    take = k;
-                    break;
-                }
-        struct drow *r = &DR[doc.rows++];
-        r->p = (uintptr_t)(p + at);
-        r->n = (uint16_t)take;
-        r->color = (uint8_t)color;
-        r->sect = (uint8_t)doc.sect;
-        r->indent = (uint8_t)ind;
-        at += take;
-        ind = indent + 2U;
-        w = SCR_COLS - ind;
-    } while (at < n);
-}
-
-/* A composed line in DOC_TXT */
-static struct tb *dl_begin(struct tb *t)
-{
-    t->b = (char *)(DOC_TXT + doc.txt);
-    t->n = 0;
-    t->cap = DOC_TXT_SIZE - doc.txt > 600U ? 600U : DOC_TXT_SIZE - doc.txt;
-    if (t->cap)
-        t->b[0] = 0;
-    return t;
-}
-
-static void dl_end(struct tb *t, unsigned color)
-{
-    doc_add(t->b, t->n, color, 0);
-    doc.txt += t->n + 1U;
-}
-
-static void dl_line(const char *s, unsigned color)
-{
-    struct tb t;
-    tb_s(dl_begin(&t), s);
-    dl_end(&t, color);
-}
-
-static void tb_pad(struct tb *t, unsigned col)
-{
-    while (t->n < col)
-        tb_c(t, ' ');
-}
-
-/* "-- TITLE ---------" */
-static void doc_section(const char *title, const char *more)
-{
-    if (doc.nsect < sizeof(doc.sect_row) / sizeof(doc.sect_row[0]))
-        doc.sect_row[doc.nsect++] = doc.rows;
-    doc.sect = doc.nsect;
-    dl_line("", DC_WHITE);
-    struct tb t;
-    dl_begin(&t);
-    tb_s(&t, "-- ");
-    tb_s(&t, title);
-    if (more) {
-        tb_s(&t, " ");
-        tb_s(&t, more);
-    }
-    tb_c(&t, ' ');
-    while (t.n < SCR_COLS)
-        tb_c(&t, '-');
-    dl_end(&t, DC_GOLD);
-}
-
-static unsigned kind_color(unsigned k)
-{
-    return k == CT_MSG ? DC_RED : k == CT_REGS ? DC_CYAN : k == CT_TRACE ? DC_WHITE : k == CT_INFO ? DC_MUTED : DC_LOG;
-}
-
-/* The lines of text whose kind is want (or every line for want = 0xff) from line `from` on, at
- * most max of them; returns how many were added. Lines lose their "<N>" prefix; the extracted
- * sections (want != 0xff) their "[ time] " too, so a register line fits one row. */
-static unsigned doc_lines(const char *text, unsigned n, const uint8_t *kinds, unsigned nk, unsigned want,
-                          unsigned from, unsigned max)
-{
-    unsigned i = 0, added = 0;
-    for (unsigned s = 0; s < n && added < max;) {
-        unsigned e = s;
-        while (e < n && text[e] != '\n')
-            ++e;
-        unsigned len = e - s;
-        while (len && (text[s + len - 1] == '\r' || !text[s + len - 1]))
-            --len;
-        unsigned k = i < nk ? kinds[i] : CT_LOG;
-        if (i >= from && (want == 0xffU || k == want)) {
-            unsigned p = sb_crash_prefix(text + s, len);
-            if (want != 0xffU)
-                p += sb_crash_stamp(text + s + p, len - p);
-            doc_add(text + s + p, len - p, kind_color(k), 0);
-            ++added;
-        }
-        ++i;
-        s = e + 1U;
-    }
-    return added;
-}
-
-static void tb_ms(struct tb *t, uint64_t ms)
-{
-    tb_u(t, ms / 1000U);
-    tb_c(t, '.');
-    tb_c(t, (char)('0' + ms / 100U % 10U));
-    tb_c(t, (char)('0' + ms / 10U % 10U));
-    tb_c(t, (char)('0' + ms % 10U));
-    tb_s(t, " s");
-}
-
-static const char *reg_name(unsigned i)
-{
-    switch (i) {
-    case CR_RST_STAT:   return "PMU RST_STAT";
-    case CR_INFORM2:    return "PMU INFORM2";
-    case CR_INFORM3:    return "PMU INFORM3";
-    case CR_WDT_DIS:    return "PMU WDT disable";
-    case CR_WDT_MASK:   return "PMU WDT mask";
-    case CR_SB_RR:      return "S-Boot reset_reason";
-    case CR_SB_RST:     return "S-Boot rst_stat";
-    case CR_SB_PWRON:   return "S-Boot pwronsrc";
-    case CR_SB_PWROFF:  return "S-Boot pwroffsrc";
-    case CR_SEC_MAGIC:  return "sec_debug magic";
-    case CR_WDT1_CON:   return "WDT1 WTCON";
-    case CR_WDT1_DAT:   return "WDT1 WTDAT";
-    case CR_WDT1_CNT:   return "WDT1 WTCNT";
-    case CR_WDT0_CON:   return "WDT0 WTCON";
-    case CR_LAUNCH_WDT: return "launch watchdog s";
-    default:            return "flags (launch | evidence << 16)";
-    }
-}
-
-struct shown {
-    const char *text;                   /* what the log sections show */
-    unsigned n;
-    int live;                           /* captured this boot (all of it) or the saved excerpt */
-    const char *other;                  /* Linux: the other ramoops zone, or 0 */
-    unsigned other_n, other_src;
-    int slot;                           /* the report's slot in the crash log, -1 not saved */
-};
-
-/* The report as rows at this level (1 summary, 2 details, 3 everything). */
-static void doc_build(const struct cl_report *r, unsigned level, const struct shown *sh)
-{
-    static struct sb_crashinfo ci;
-    uint8_t *kinds = (uint8_t *)DOC_KINDS;
-    unsigned nl = sb_crash_parse(sh->text, sh->n, &ci, kinds, DOC_KINDS_MAX);
-    unsigned nk = nl < DOC_KINDS_MAX ? nl : DOC_KINDS_MAX;
-    struct tb t;
-    char d[20];
-    unsigned hot = r->severity >= SEV_CRASH ? DC_RED : DC_GOLD;
-    doc_reset();
-
-    /* the header */
-    dl_begin(&t);
-    tb_s(&t, "STARBITE CRASH REPORT");
-    if (sh->slot >= 0) {
-        tb_s(&t, " #");
-        tb_u(&t, r->seq);
-    } else {
-        tb_s(&t, " (NOT SAVED)");
-    }
-    {
-        const char *kn = r->kind == CK_LOADERWDT ? "WATCHDOG RESET" : sb_kind_name(r->kind);
-        unsigned kl = cstrlen(kn, 40) + (r->severity >= SEV_CRASH ? 8U : 7U);
-        tb_pad(&t, SCR_COLS > kl + t.n + 1U ? SCR_COLS - kl : t.n + 1U);
-        tb_s(&t, kn);
-        tb_s(&t, r->severity >= SEV_CRASH ? " [CRASH]" : " [WARN]");
-    }
-    dl_end(&t, hot);
-    dl_begin(&t);
-    tb_s(&t, "OS       ");
-    tb_s(&t, r->name);
-    if (r->key[0] && r->key[0] != '-') {
-        tb_s(&t, " (");
-        tb_s(&t, r->key);
-        tb_s(&t, ", ");
-        tb_s(&t, method_name(r->method));
-        tb_s(&t, ")");
-    }
-    dl_end(&t, DC_WHITE);
-    dl_begin(&t);
-    tb_s(&t, "KERNEL   ");
-    tb_s(&t, ci.version[0] ? ci.version : "(no version line in the captured text)");
-    dl_end(&t, ci.version[0] ? DC_WHITE : DC_MUTED);
-    dl_begin(&t);
-    tb_s(&t, "CRASHED  ");
-    if (r->epoch_event || r->epoch_detect) {
-        sb_date(r->epoch_event ? r->epoch_event : r->epoch_detect, d);
-        tb_s(&t, d);
-        tb_s(&t, r->epoch_event ? " UTC (OS clock)" : " UTC (detected)");
-    } else {
-        tb_s(&t, "time unknown");
-    }
-    tb_pad(&t, 45);
-    tb_s(&t, "UPTIME ");
-    if (ci.uptime_ms)
-        tb_ms(&t, ci.uptime_ms);
-    else
-        tb_s(&t, "?");
-    dl_end(&t, DC_WHITE);
-    dl_begin(&t);
-    tb_s(&t, "STARTED  ");
-    sb_date(r->epoch_launch, d);
-    tb_s(&t, d);
-    tb_s(&t, r->epoch_launch ? " UTC" : "");
-    if (ci.task[0]) {
-        tb_pad(&t, 45);
-        tb_s(&t, "TASK ");
-        tb_s(&t, ci.task);
-    }
-    dl_end(&t, DC_WHITE);
-    dl_begin(&t);
-    tb_s(&t, "REASON   ");
-    tb_s(&t, r->reason[0] ? r->reason : sb_kind_name(r->kind));
-    dl_end(&t, hot);
-    dl_begin(&t);
-    tb_s(&t, "RESET    RST_STAT ");
-    tb_x(&t, r->reg[CR_RST_STAT], 8);
-    for (unsigned bit = 0; bit < 32; ++bit)
-        if (r->reg[CR_RST_STAT] & (1U << bit) && sb_rst_bit_name(bit)) {
-            tb_s(&t, " ");
-            tb_s(&t, sb_rst_bit_name(bit));
-        }
-    dl_end(&t, DC_WHITE);
-    dl_begin(&t);
-    tb_s(&t, "         INFORM2 ");
-    tb_x(&t, r->reg[CR_INFORM2], 8);
-    tb_s(&t, "   INFORM3 ");
-    tb_x(&t, r->reg[CR_INFORM3], 8);
-    {
-        const char *i3 = sb_inform3_name(r->reg[CR_INFORM3]);
-        tb_s(&t, " ");
-        tb_s(&t, i3 ? i3 : "?");
-    }
-    dl_end(&t, DC_WHITE);
-    dl_begin(&t);
-    tb_s(&t, "S-BOOT   ");
-    tb_s(&t, sb_rr_name((int32_t)r->reg[CR_SB_RR]));
-    tb_s(&t, " (reset_reason ");
-    tb_i(&t, (int32_t)r->reg[CR_SB_RR]);
-    tb_s(&t, ")");
-    dl_end(&t, DC_WHITE);
-    dl_begin(&t);
-    tb_s(&t, "         rst_stat ");
-    tb_x(&t, r->reg[CR_SB_RST], 8);
-    tb_s(&t, "   pwronsrc ");
-    tb_x(&t, r->reg[CR_SB_PWRON], 2);
-    tb_s(&t, "   pwroffsrc ");
-    tb_x(&t, r->reg[CR_SB_PWROFF], 2);
-    dl_end(&t, DC_MUTED);
-    dl_begin(&t);
-    tb_s(&t, "WATCHDOG ");
-    if (r->reg[CR_LAUNCH_WDT]) {
-        tb_u(&t, r->reg[CR_LAUNCH_WDT]);
-        tb_s(&t, " s, armed at the launch");
-    } else {
-        tb_s(&t, "not armed at the launch");
-    }
-    tb_s(&t, "   WDT1 con ");
-    tb_x(&t, r->reg[CR_WDT1_CON], 4);
-    tb_s(&t, " dat ");
-    tb_x(&t, r->reg[CR_WDT1_DAT], 4);
-    tb_s(&t, " cnt ");
-    tb_x(&t, r->reg[CR_WDT1_CNT], 4);
-    dl_end(&t, DC_MUTED);
-    dl_begin(&t);
-    tb_s(&t, "SOURCE   ");
-    tb_s(&t, sb_source_name(r->source));
-    tb_s(&t, ", ");
-    tb_u(&t, nl);
-    tb_s(&t, " lines, ");
-    tb_u(&t, sh->n);
-    tb_s(&t, sh->live ? " bytes (this boot)" : " bytes (saved)");
-    dl_end(&t, DC_MUTED);
-    dl_begin(&t);
-    tb_s(&t, "STORE    ");
-    if (sh->slot >= 0) {
-        tb_s(&t, "report #");
-        tb_u(&t, r->seq);
-        tb_s(&t, " (slot ");
-        tb_u(&t, (unsigned)sh->slot + 1U);
-        tb_s(&t, ")   on the Mac: sbstore2.py crashlog live");
-    } else {
-        tb_s(&t, "NOT saved (the crash log could not be written)");
-    }
-    dl_end(&t, sh->slot >= 0 ? DC_GREEN : DC_RED);
-
-    /* the message */
-    doc_section("PANIC MESSAGE", 0);
-    if (!doc_lines(sh->text, sh->n, kinds, nk, CT_MSG, 0, 400))
-        dl_line(r->reason[0] ? r->reason : "(the OS left no message: see the reset registers)", DC_MUTED);
-    if (level >= 2 && ci.info) {
-        doc_section("CONTEXT", 0);
-        (void)doc_lines(sh->text, sh->n, kinds, nk, CT_INFO, 0, 200);
-    }
-    if (level >= 2) {
-        char rc[24];
-        struct tb w = { rc, 0, sizeof(rc) };
-        tb_s(&w, "(");
-        tb_u(&w, ci.regs);
-        tb_s(&w, ci.regs == 1 ? " LINE)" : " LINES)");
-        doc_section("REGISTERS", rc);
-        if (!doc_lines(sh->text, sh->n, kinds, nk, CT_REGS, 0, 400))
-            dl_line("(no register dump: a panic() call prints only its trace)", DC_MUTED);
-    }
-    {
-        char tc[24];
-        struct tb w = { tc, 0, sizeof(tc) };
-        tb_s(&w, "(");
-        tb_u(&w, ci.trace);
-        tb_s(&w, ci.trace == 1 ? " LINE)" : " LINES)");
-        doc_section("CALL TRACE", tc);
-    }
-    {
-        unsigned max = level >= 2 ? 1000U : 13U;   /* "Call trace:" and 12 frames */
-        unsigned got = doc_lines(sh->text, sh->n, kinds, nk, CT_TRACE, 0, max);
-        if (!got)
-            dl_line("(no call trace in the captured text)", DC_MUTED);
-        else if (got == max && ci.trace > max) {
-            dl_begin(&t);
-            tb_s(&t, "... ");
-            tb_u(&t, ci.trace - max);
-            tb_s(&t, " more (hold Bixby: more detail)");
-            dl_end(&t, DC_MUTED);
-        }
-    }
-    if (level >= 3) {
-        doc_section("RESET AND WATCHDOG REGISTERS", 0);
-        for (unsigned i = 0; i < 16; ++i) {
-            dl_begin(&t);
-            tb_s(&t, reg_name(i));
-            tb_pad(&t, 34);
-            tb_x(&t, r->reg[i], 8);
-            if (i == CR_SB_RR) {
-                tb_s(&t, "  ");
-                tb_s(&t, sb_rr_name((int32_t)r->reg[i]));
-            } else if (i == CR_INFORM3 && sb_inform3_name(r->reg[i])) {
-                tb_s(&t, "  ");
-                tb_s(&t, sb_inform3_name(r->reg[i]));
-            }
-            dl_end(&t, DC_WHITE);
-        }
-    }
-    {
-        unsigned want = level >= 3 ? nl : level == 2 ? 150U : 30U;
-        unsigned from = nl > want ? nl - want : 0U;
-        char what[48];
-        struct tb w = { what, 0, sizeof(what) };
-        if (from) {
-            tb_s(&w, "(LAST ");
-            tb_u(&w, want);
-            tb_s(&w, " OF ");
-            tb_u(&w, nl);
-            tb_s(&w, " LINES)");
-        } else {
-            tb_s(&w, sh->live ? "(ALL " : "(SAVED EXCERPT, ");
-            tb_u(&w, nl);
-            tb_s(&w, " LINES)");
-        }
-        doc_section("LOG", what);
-        if (!doc_lines(sh->text, sh->n, kinds, nk, 0xffU, from, nl))
-            dl_line("(no log text: S-Boot's reset code is all there is)", DC_MUTED);
-    }
-    if (level >= 3 && sh->other && sh->other_n) {
-        doc_section("OTHER RING:", sb_source_name(sh->other_src));
-        (void)doc_lines(sh->other, sh->other_n, 0, 0, 0xffU, 0, 100000U);
-    }
-    dl_line("", DC_WHITE);
-    dl_begin(&t);
-    tb_s(&t, "-- END OF REPORT");
-    if (sh->slot >= 0) {
-        tb_s(&t, " #");
-        tb_u(&t, r->seq);
-    }
-    tb_s(&t, " ");
-    while (t.n < SCR_COLS)
-        tb_c(&t, '-');
-    dl_end(&t, DC_GOLD);
+    doc.rows = (struct cd_row *)DOC_ROWS;
+    doc.max = DOC_MAX;
+    doc.txt = (char *)DOC_TXT;
+    doc.txt_cap = DOC_TXT_SIZE;
+    doc.kinds = (uint8_t *)DOC_KINDS;
+    doc.kinds_max = DOC_KINDS_MAX;
+    cd_build(&doc, r, level, sh);
 }
 
 static void draw_page(unsigned top)
 {
-    char b[SCR_COLS + 1];
+    char b[CD_COLS + 1];
     for (unsigned i = 0; i < SCR_PAGE; ++i) {
         unsigned row = top + i, n = 0;
         uint32_t fg = C_WHITE;
-        if (row < doc.rows) {
-            const struct drow *r = &DR[row];
+        if (row < doc.n) {
+            const struct cd_row *r = &doc.rows[row];
             const char *p = (const char *)(uintptr_t)r->p;
-            for (unsigned k = 0; k < r->indent && n < SCR_COLS; ++k)
+            for (unsigned k = 0; k < r->indent && n < CD_COLS; ++k)
                 b[n++] = ' ';
-            for (unsigned k = 0; k < r->n && n < SCR_COLS; ++k)
+            for (unsigned k = 0; k < r->n && n < CD_COLS; ++k)
                 b[n++] = p[k] == '\t' ? ' ' : p[k];
             fg = dcolor(r->color);
         }
-        star_fb_mini(SCR_X, SCR_Y + i * STAR_FB_MINI_H, b, n, SCR_COLS, fg, C_BLACK);
+        star_fb_mini(SCR_X, SCR_Y + i * STAR_FB_MINI_H, b, n, CD_COLS, fg, C_BLACK);
     }
 }
 
 static void draw_footer(unsigned top, unsigned level, unsigned left)
 {
-    char b[SCR_COLS + 1];
+    char b[CD_COLS + 1];
     struct tb t = { b, 0, sizeof(b) };
     tb_s(&t, "VOL SCROLL  BIXBY PAGE (HOLD: DETAIL ");
     tb_u(&t, level);
     tb_s(&t, "/3)  POWER CONTINUE  ");
-    unsigned last = top + SCR_PAGE < doc.rows ? top + SCR_PAGE : doc.rows;
-    tb_u(&t, doc.rows ? top + 1U : 0U);
+    unsigned last = top + SCR_PAGE < doc.n ? top + SCR_PAGE : doc.n;
+    tb_u(&t, doc.n ? top + 1U : 0U);
     tb_c(&t, '-');
     tb_u(&t, last);
     tb_c(&t, '/');
-    tb_u(&t, doc.rows);
+    tb_u(&t, doc.n);
     if (left) {
         tb_s(&t, "  ");
         tb_u(&t, left);
         tb_c(&t, 's');
     }
-    star_fb_mini(SCR_X, SCR_FOOT, b, t.n, SCR_COLS, C_MUTED, C_BLACK);
-}
-
-static unsigned max_top(void)
-{
-    return doc.rows > SCR_PAGE ? doc.rows - SCR_PAGE : 0U;
-}
-
-/* Bixby: a page on, but stop at the next section's start; at the end, back to the top. */
-static unsigned page_on(unsigned top)
-{
-    unsigned m = max_top();
-    if (top >= m)
-        return 0;
-    unsigned to = top + SCR_PAGE;
-    for (unsigned s = 0; s < doc.nsect; ++s)
-        if (doc.sect_row[s] > top && doc.sect_row[s] < to)
-            to = doc.sect_row[s];
-    return to > m ? m : to;
+    star_fb_mini(SCR_X, SCR_FOOT, b, t.n, CD_COLS, C_MUTED, C_BLACK);
 }
 
 static uint64_t ms_now(void)
@@ -959,18 +551,21 @@ static uint64_t ms_now(void)
 }
 
 /* The crash screen. timeout_s counts from the last key (0: wait for one, still capped at
- * SCREEN_CAP_S). Returns when it is done. */
-static void crash_screen(const struct cl_report *r, unsigned level, unsigned timeout_s, const struct shown *sh)
+ * SCREEN_CAP_S). The keys are crashdoc.c's cs_poll (host-tested with real timing). */
+static void crash_screen(const struct cl_report *r, unsigned level, unsigned timeout_s, const struct cd_shown *sh)
 {
     if (level < 1 || level > 3)
         level = 1;
     for (unsigned g = 0; g < 300 && hw_keys(); ++g)   /* 3 s at most */
         hw_wait_ms(10);
     doc_build(r, level, sh);
+    struct cs_nav nav;
+    cs_init(&nav, SCR_PAGE);
+    cs_doc(&nav, &doc);
     star_fb_fill(C_BLACK);
-    unsigned top = 0, shown_left = ~0U, shown_top = ~0U;
-    uint64_t start = ms_now(), last = start, up_t = 0, rep_t = 0, bix_t = 0, pow_t = 0;
-    int dir_held = 0, bix_long = 0, redraw = 1;
+    draw_page(0);
+    unsigned shown_left = ~0U, shown_top = ~0U;
+    uint64_t start = ms_now(), last = start;
     for (;;) {
         uint64_t now = ms_now();
         if (now - start >= SCREEN_CAP_S * 1000U)
@@ -979,61 +574,27 @@ static void crash_screen(const struct cl_report *r, unsigned level, unsigned tim
         unsigned left = timeout_s > idle ? timeout_s - idle : 0;
         if (timeout_s && !left)
             break;
-        unsigned k = hw_keys();
-        /* Volume: a line, held: repeats after 300 ms, after 1.5 s 8 lines at a time */
-        int dir = (k & (K_UP | K_DOWN)) == K_UP ? -1 : (k & (K_UP | K_DOWN)) == K_DOWN ? 1 : 0;
-        if (dir != dir_held) {
-            dir_held = dir;
-            up_t = now;
-            rep_t = now + 20U;              /* the first step once it held 20 ms */
-        }
-        if (dir && now >= rep_t) {
-            unsigned step = now - up_t > 1500U ? 8U : 1U, m = max_top();
-            unsigned to = dir < 0 ? (top > step ? top - step : 0U) : (top + step < m ? top + step : m);
-            rep_t = now + (rep_t == up_t + 20U ? 300U : 35U);
-            if (to != top) {
-                top = to;
-                redraw = 1;
-            }
+        /* the Mac over USB (fbbg.h): its presses come in through hw_keys(); an image it
+         * placed ends the screen (the loader then starts it) */
+        if (fbbg_poll(FBBG_CRASH) == FBBG_BOOT)
+            break;
+        unsigned ev = cs_poll(&nav, hw_keys(), now);
+        if (ev & CS_EV_KEY)
             last = now;
+        if (ev & CS_EV_EXIT)
+            break;
+        if (ev & CS_EV_LEVEL) {
+            level = level % 3U + 1U;
+            doc_build(r, level, sh);
+            cs_doc(&nav, &doc);
+            draw_page(nav.top);
+            shown_top = ~0U;
+        } else if (ev & CS_EV_MOVED) {
+            draw_page(nav.top);
         }
-        /* Bixby: short = page / next section, held 0.7 s = next detail level */
-        if (k & K_BIXBY) {
-            if (!bix_t)
-                bix_t = now;
-            else if (!bix_long && now - bix_t >= 700U) {
-                bix_long = 1;
-                level = level % 3U + 1U;
-                doc_build(r, level, sh);
-                top = 0;
-                redraw = 1;
-                last = now;
-            }
-        } else {
-            if (bix_t && !bix_long && now - bix_t >= 20U) {
-                top = page_on(top);
-                redraw = 1;
-                last = now;
-            }
-            bix_t = 0;
-            bix_long = 0;
-        }
-        /* Power: continue */
-        if (k & K_POWER) {
-            if (!pow_t)
-                pow_t = now;
-            else if (now - pow_t >= 30U)
-                break;
-        } else {
-            pow_t = 0;
-        }
-        if (redraw) {
-            draw_page(top);
-            redraw = 0;
-        }
-        if (top != shown_top || left != shown_left) {
-            draw_footer(top, level, left);
-            shown_top = top;
+        if (nav.top != shown_top || left != shown_left) {
+            draw_footer(nav.top, level, left);
+            shown_top = nav.top;
             shown_left = left;
         }
         hw_wait_ms(5);
@@ -1085,9 +646,19 @@ static int settle(int show, int *retry)
     char key[24];
     scopy(key, sizeof(key), h.key);
     unsigned sev = SEV_INFO;
-    uint32_t seen0 = h.seen_dmesg, seen1 = h.seen_pmsg, seen2 = h.seen_secmagic;
+    uint32_t seen0 = h.seen_dmesg, seen1 = h.seen_pmsg, seen2 = h.seen_secmagic, hf = h.hflags;
     unsigned kind = evaluate(&h, &sev);
-    int dirty = launched || seen0 != h.seen_dmesg || seen1 != h.seen_pmsg || seen2 != h.seen_secmagic;
+    unsigned marked = consume(&h);
+    if (marked) {
+        char b[96];
+        struct tb t = { b, 0, sizeof(b) };
+        tb_s(&t, "STARBITE: crash: judged evidence marked in RAM:");
+        tb_s(&t, marked & 1U ? " dmesg record" : "");
+        tb_s(&t, marked & 2U ? " xnu dump" : "");
+        tb_s(&t, "\n");
+        star_pmsg(b);
+    }
+    int dirty = launched || seen0 != h.seen_dmesg || seen1 != h.seen_pmsg || seen2 != h.seen_secmagic || hf != h.hflags;
     if (launched) {
         h.launch_state = CL_IDLE;
         ++h.boots;
@@ -1119,7 +690,7 @@ static int settle(int show, int *retry)
         unsigned base = rec_row_base();
         star_fb_row_base(0);
         star_fb_mute(0);
-        struct shown sh = { live_src, live_n, 1, live_other, live_other_n, live_other_src, saved };
+        struct cd_shown sh = { live_src, live_n, 1, live_other, live_other_n, live_other_src, saved };
         if (!live_src) {
             sh.text = rep.text;
             sh.n = rep.text_len;
@@ -1239,9 +810,13 @@ void crash_browse(void)
         }
         text_row(44, "VOL UP/DOWN: MOVE   POWER: OPEN", C_MUTED);
         unsigned k;
-        for (unsigned g = 0; g < 300 && hw_keys(); ++g)
+        for (unsigned g = 0; g < 300 && hw_keys(); ++g) {
+            (void)fbbg_poll(FBBG_RECOVERY);
             hw_wait_ms(10);
+        }
         for (;;) {
+            if (fbbg_poll(FBBG_RECOVERY) == FBBG_BOOT)
+                return;                 /* an image from USB: back up to recovery_main */
             k = hw_keys();
             if (k) {
                 hw_wait_ms(30);
@@ -1259,7 +834,7 @@ void crash_browse(void)
                 return;
             int slot = cl_newest(&h, sel);
             if (slot >= 0 && cl_report_decode((const uint8_t *)(CR_LOG + CL_BLOCK * (1U + (unsigned)slot)), &r) == 1) {
-                struct shown sh = { r.text, r.text_len, 0, 0, 0, 0, slot };
+                struct cd_shown sh = { r.text, r.text_len, 0, 0, 0, 0, slot };
                 crash_screen(&r, 3, 0, &sh);
             }
             star_fb_fill(C_BLACK);

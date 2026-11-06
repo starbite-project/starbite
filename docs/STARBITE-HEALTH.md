@@ -18,8 +18,10 @@ the shared settings flag bits agreed with Engineer OS v2 (section 7).
 **Status (2026-11-07):** the full POST, the crash detection and the crash screen ran on the phone with
 `xnu-boot-health2.img` (a real Linux panic was detected and shown). The user's verdict led to the
 POST presentation of section 2.2 (the logo, Volume Up for the live log, the failure screen) and the
-crash report of section 4.4, both in `out/xnu-boot-health3.img` (section 10): **built and host-tested,
-not on the phone yet.** XNU's side (the watchdog
+crash report of section 4.4, in `out/xnu-boot-health3.img`. On the phone (2026-11-06 evening): the logo
+POST good, crash detection good, Bixby's levels good; Volume did not scroll the report (fixed in
+`out/xnu-boot-health4.img`, section 4.4: the summary was shorter than a page). **health4: built and
+host-tested on the real capture, not on the phone yet.** XNU's side (the watchdog
 feeder and the crash return, xnu/series-12377/0399) is in section 5.4, and its phone tests in
 10.1. The loader builds with
 `-Werror` and has no ABS64 relocations. The host tests (section 8) pass with the Mac's clang
@@ -34,7 +36,8 @@ is the flash and test plan.
 | `shim/starlte/dtmerge.c/.h` | **No hardware** (host-tested): DTBH selection, the S-Boot merge for Android device trees, in-place DTB cell patch |
 | `shim/starlte/post.c/.h` | POST levels, the full POST behind the Starbite logo, the live log (Volume Up), the failure screen, Volume Down to skip |
 | `shim/starlte/post_logo.h` | **Generated** by `tools/brand/post-logo.py` from the One mark splash source (`build/splash-concepts/final/logo.png`): the word (A8) and the star (RGB), PackBits, 11 KB |
-| `shim/starlte/crash.c/.h` | Snapshot at start, launch record, evaluation, report, crash screen, the recovery menu's report list, fastboot text and raw |
+| `shim/starlte/crash.c/.h` | Snapshot at start, launch record, evaluation, report, drawing the crash screen, the recovery menu's report list, fastboot text and raw |
+| `shim/starlte/crashdoc.c/.h` | **No hardware** (host-tested): the crash report as a document (sections, rows) and its keys (`cs_poll`) |
 | `shim/starlte/wdt.c/.h` | Arming cluster 1's watchdog right before an OS starts |
 | `shim/starlte/xnu_boot.c` | The order (section 4.1), log-level fragments, watchdog arguments, Linux INFORM3 patch, Android 4th file, Starbite Maintenance's start (section 12) |
 | `shim/starlte/store.c/.h` | Settings record with the new fields (bytes kept), `crashlog` entry access (`SF_VOLATILE`) |
@@ -45,7 +48,7 @@ is the flash and test plan.
 | `shim/starlte/fbtext.c/.h` | Glyphs `( ) ' " @ \| ; & $ { } ^ ~ \` \\` for log lines; `star_fb_muted()`; lower case and `star_fb_mini` (the same 5x7 glyphs in 18 x 36 cells: 76 columns, 78 rows a page) for the crash report |
 | `tools/store/sbstore2.py` | Settings fields, `settings-show`, `crashlog IMG\|live`, the catalog extension, the `crashlog` store entry |
 | `tools/store/catalog.toml` | `[defaults.linux/android/xnu]`, per-entry overrides, field documentation |
-| `tools/loader-test/` | Host tests and fixtures (section 8), with real-looking crash captures (`fixtures/linux-oops-panic.txt`, `linux-sysrq-panic.txt`, `xnu-panic.txt`) |
+| `tools/loader-test/` | Host tests and fixtures (section 8), with real-looking crash captures (`fixtures/linux-oops-panic.txt`, `linux-sysrq-panic.txt`, `xnu-panic.txt`) and the phone's real one (`real-panic2-dmesg.txt`, `real-panic2-pmsg.txt`: ramoops zones 0 and 1 as SBMAINT pulled them after the 2026-11-06 sysrq panic; `real-panic2-report2.bin`: report #2's 4 KiB block from `build/store/ufs-store-live-now.img`) |
 | `tools/brand/post-logo.py` | Makes `post_logo.h` (section 2.2) |
 | `xnu/series-12377/0399-starlte-health-wdt-crash-return.patch` | **XNU's side** (section 5.4): `sbwdt=N` feeder, `sbcrash=loader\|recovery`, the crash marker, test switches; `bsd/dev/herolte_ufs.c` + new `bsd/dev/starlte_health.h` |
 | `tools/xnu-health-test/` | Host test of `starlte_health.h`, taken out of the patch, against the loader's sbfmt.c / crash.c / hw.h / wdt.h |
@@ -263,8 +266,28 @@ first, without the screen. Rescue mode writes no launch record: it must not need
 | Windows (woa) | pmsg ring + RWD1 0xFED13D80 | the UEFI's trace; shown as the log tail |
 | The launch record | the crash log | which entry was started, when, watchdog, flags |
 
-Evidence is used only for the method that was launched. Each piece's CRC is remembered in the
-crash log header (`seen_*`), so a ramoops record that survives several boots is reported once.
+Evidence is used only for the method that was launched.
+
+**Judged evidence is marked in RAM (health5, 2026-11-07).** The phone: two runs of the hidden XNU test entry
+`xnuh-panic` (deterministic `sbtestpanic=60`) left byte-identical dumps; the first was KERNEL PANIC (report #3), the
+second "CLEAN RESTART" with no report, because the dump's CRC equalled the one remembered in the header. Now the
+loader, once it has judged a boot's evidence (`settle`), marks it in the live ramoops RAM (`sbfmt.c` sb_consume):
+
+| Evidence | Mark | Effect |
+|---|---|---|
+| Linux ramoops dmesg record (zone 0, 0xFED10000) | its header `====<sec>.<usec>-D` (or `-C`) becomes `...-S` (one byte) | Linux reads the record as before (only `C` means compressed; pstore, SBMAINT see it unchanged but for that letter); the loader no longer takes it for new |
+| XNU's dump (pmsg ring, zone 1) | `STARBITE: XNU panic (sweetreboot)...` / `STARBITE: sweetreboot timer...` becomes `STARSEEN: ...` (8 bytes) | the loader's needles no longer match; the text stays readable |
+
+- Every record and dump found is marked, whichever OS was launched, so nothing old is ever taken for a later
+  launch's crash, any number of unrelated resets later. A new crash writes a new header: even a byte-identical one
+  is new. The pmsg line `STARBITE: crash: judged evidence marked in RAM: dmesg record / xnu dump` says what was done.
+- Bytes are changed only where the live RAM still holds what the snapshot had (20 bytes of XNU's header are
+  compared: the loader's own pmsg lines, which start with "STARBITE: " too, may have wrapped over it since the
+  snapshot; then there is nothing left to mark). The touched lines are cleaned to RAM, as pmsg_put does.
+- The crash log header records it (byte 136, `hflags` bit 0 `CLH_CONSUMES`). Until it is set (the first boot of
+  this loader), old evidence is still compared with the seen CRCs once, so an old loader's judged crash is not
+  reported again. The CRCs are kept up to date either way.
+- Samsung's sec_debug page (Android, 0x80000000) is not written: it keeps the CRC check.
 
 ### 4.3 The decision (`sb_classify`, host-tested table)
 
@@ -302,9 +325,9 @@ small: `star_fb_mini`, 18 x 36 px cells, **76 columns, 78 rows a page** plus a f
 | PANIC MESSAGE | every message line: `Unable to handle kernel ...`, the `Mem abort info:` / `Data abort info:` blocks, `Internal error: Oops: ...`, `BUG:`, `Kernel panic - not syncing: ...`; XNU's `panic(cpu ...)` line |
 | CONTEXT | `CPU: ... PID: ... Comm: ...`, `Hardware name:`, `Modules linked in:`, `Kernel Offset:`; XNU's marker lines, `Debugger message`, `OS version`, `Kernel version`, `Panicked task` (details and up) |
 | REGISTERS | Linux `pstate:`, `pc :`, `lr :`, `sp :`, `x29: ... x0:`, `Code:`; XNU `x0: ... far:` and `CORE n: PC=...` (details and up; "no register dump" for a plain `panic()` such as sysrq's) |
-| CALL TRACE | Linux `Call trace:` and its frames; XNU `Panicked thread: ..., backtrace:` and its `lr: ... fp: ...` lines (summary: the first 12 frames) |
+| CALL TRACE | Linux `Call trace:` and its frames; XNU `Panicked thread: ..., backtrace:` and its `lr: ... fp: ...` lines (summary: the first 12 frames; the log has them all) |
 | RESET AND WATCHDOG REGISTERS | all 16 saved registers with names (everything) |
-| LOG | summary: the last 30 lines; details: the last 150; **everything: all of it** |
+| LOG | **all of it, at every level** (since health4: a summary capped at 30 lines fitted one page, so Volume had nothing to scroll) |
 | OTHER RING | Linux: the other ramoops zone (the console when the dmesg record was the source), everything only |
 
 - The sections leave out the `<N>` syslog prefix and the `[ time]` stamp (so a register line fits one
@@ -312,10 +335,18 @@ small: `star_fb_mini`, 18 x 36 px cells, **76 columns, 78 rows a page** plus a f
 - **Right after the crash the report shows everything the loader captured this boot** (the ramoops
   zones as text, up to 16 KiB each, `live_*` in crash.c). A report opened later from Starbite
   Recovery → CRASH REPORTS shows what the store keeps (below).
-- **Levels** stay presets: 1 SUMMARY, 2 DETAILS, 3 EVERYTHING (the setting; Recovery's list opens at 3).
-- **Keys**: Volume Up / Down scroll a line (held: repeats after 300 ms, after 1.5 s 8 lines at a
-  time); Bixby pages on, stopping at the next section's start (at the end: back to the top); Bixby held
-  0.7 s: the next detail level; Power continues.
+- **Levels** stay presets for the sections above the log: 1 SUMMARY (message, 12 trace frames), 2 DETAILS
+  (+ context, registers, the whole trace), 3 EVERYTHING (+ all 16 registers, the other ring). The setting
+  picks the first; Recovery's list opens at 3.
+- **Keys** (`cs_poll` in crashdoc.c, host-tested with the phone's loop timing: 5 ms a turn plus each
+  redraw): Volume Up / Down scroll a line once held 20 ms (held: repeats after 300 ms every 35 ms,
+  after 1.5 s 8 lines at a time); Bixby pages on, stopping at the next section's start (at the end:
+  back to the top); Bixby held 0.7 s: the next detail level; Power continues.
+- **The Volume bug of health3**: the phone's report (the sysrq panic) at level 1 was 73 rows, under
+  one 78-row page, so `max_top` was 0 and Volume could not move; Bixby's level change worked. On the
+  same capture health4's level 1 is 328 rows. The host test drives `cs_poll` on that real document:
+  a 15 ms press does nothing, 60 ms is one line, 1 s held repeats, 3 s held reaches the end, Volume Up
+  comes back, 120 ms redraws still scroll, Bixby pages and changes the level, Power continues.
 - **Footer** (one line): `VOL SCROLL  BIXBY PAGE (HOLD: DETAIL 2/3)  POWER CONTINUE  1-78/233  45s`.
 - **Timeout**: `crash_timeout` (default 60 s, counted from the last key), capped at 10 minutes.
 - RAM: the composed lines at 0x9F030000 (64 KiB), the rows at 0x9F040000 (6144 x 16 bytes), the
@@ -326,7 +357,14 @@ small: `star_fb_mini`, 18 x 36 px cells, **76 columns, 78 rows a page** plus a f
 **The saved report's text** (`cl_excerpt`, host-tested): the store keeps 3824 bytes per report. It
 holds every message, context, register and trace line, then as many of the last lines as fit, in
 their original order, `<N>` prefixes dropped, each run of skipped lines as one `[...]` line. So a
-report browsed later (or read on the Mac) still has the registers and the call trace.
+report browsed later (or read on the Mac) still has the registers and the call trace. If even those
+lines do not fit, the log's last lines (up to 8, a quarter of the space) are still kept.
+
+- **Checked on the phone's report #2** (2026-11-06): its stored text is byte for byte `cl_excerpt` of
+  the pulled ramoops record (16106 bytes, 204 lines): `[...]`, the log from 1.379 s, then the panic
+  at 76.972237, `Call trace:` with its 17 frames, and `Memory Limit: none` as the last line (65 lines;
+  sbstore2.py prints them under "last 65 lines:", oldest first, so the panic is at the bottom of that
+  listing). The host test asserts this on the real files.
 
 **The parser** (`sb_crash_parse` in sbfmt.c) classifies each line (`CT_MSG`, `CT_INFO`, `CT_REGS`,
 `CT_TRACE`, `CT_LOG`) and fills the header's version, task, message and uptime. Host-tested on a Linux
@@ -358,8 +396,9 @@ the phone's reports. Card stores get none. The loader writes only this entry's b
 - **Block 0, the header** (CRC32 of bytes 16..1023 at 12): `SBCRASH1`, version 1, slots (15), slot
   size (4096), next slot, reports written, launches judged, launch sequence, launch state (1 =
   running), method, watchdog armed, watchdog s, key[24], name[32], launch time (UTC s), log level,
-  launch flags (1 Linux INFORM3 patched, 2 fastboot, 4 rescue, 8 retry), and the seen CRCs of the
-  dmesg record, console, sec_debug string, and XNU dump.
+  launch flags (1 Linux INFORM3 patched, 2 fastboot, 4 rescue, 8 retry), the seen CRCs of the
+  dmesg record, console, sec_debug string, and XNU dump, and at 136 `hflags` (bit 0: judged evidence is
+  marked in RAM, 4.2).
 - **Blocks 1..15, the reports** (CRC32 of 16..4095 at 12): `SBCRREP1`, version 1, number, kind,
   severity, method, source, detected / launched / event times, key, name, 16 registers, reason[96],
   then up to 3824 bytes of the last log lines (printable ASCII, `\n`).
@@ -690,7 +729,7 @@ sh tools/loader-test/run.sh                    # the Mac's clang, ASan + UBSan
 limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 ```
 
-- **host_test.c (252 checks)**:
+- **host_test.c (347 checks)**:
   - CRC32
   - settings: old record = defaults, round trip, damage, clamps, sbstore2's block as the loader reads it
   - crash log: header and report round trip, the ring wrapping at 17 reports, damage, the log tail
@@ -719,6 +758,21 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
     `linux-sysrq-panic.txt`, `xnu-panic.txt`: message, kernel, task, uptime, the number of message /
     register / trace lines, single lines' kinds, through a ramoops zone and the pmsg ring, the excerpt
     keeping registers and trace within 3824 bytes, prefixes, junk
+  - (health4) the phone's real panic: the record through zone 0, its message / kernel / task / uptime /
+    18 trace lines, report #2 from the store = `cl_excerpt` of it byte for byte and ending with the
+    panic, trace and last line, tighter excerpts (1000 and 600 bytes) still ending with it, the
+    report document live and saved at levels 1-3 (header, sections, the log with the panic, more than a
+    page, no row wider than 76), and `cs_poll` driven like crash.c's loop on it (above)
+  - (health5) de-duplication on simulated boots over a RAM copy of the two zones (the loader's own pmsg
+    writes in between, wrapping as pmsg_put does): XNU `xnuh-panic` twice with byte-identical dumps = two
+    reports, then a clean restart and five unrelated resets = none; the header overwritten by the loader's
+    lines before judging = one report, nothing to mark; the timer dump twice = two hang reports; the real
+    Linux record twice = two reports (the judged one differs only in `-S`, its time still reads), then none;
+    an oops once; a record found after an XNU launch is marked, not reported, and not reported later as
+    Linux's; the first boot of a consuming loader after an old one (CRC equal: no report, marked; then the
+    identical next crash is reported); ring positions (`sb_ring_phys`)
+  - (health5) keys from USB: the queue's timing, a plain press against every menu's limits, injected presses
+    driving the crash report's `cs_poll` and POST's `pv_poll` (docs/USB-FASTBOOT.md 11.6)
 - **check_dtmerge.py (29 checks)**: section 6.4's rules against the merged files.
 - **test_sbstore2.py (13 tests)** (linux-pmos's expected watchdog is now 0, as the catalog's
   `[defaults.linux] wdt = 0` of 1f28633):
@@ -733,7 +787,7 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
     and carrier codes, regions and `/chosen/serial` blanked, same length (`scrub-sboot-fdt.py`).
   - When the main checkout has them: `build/android/lineage/dt.img` and
     `build/linux/exynos9810-starlte.dtb`.
-- `tools/usb-fastboot/run-host-test.sh` passes: 315 checks (with `oem maint`, `oem maint prev`, a refused
+- `tools/usb-fastboot/run-host-test.sh` passes: 392 checks (the menus over USB, docs/USB-FASTBOOT.md 11.6; with `oem maint`, `oem maint prev`, a refused
   `oem maint rescue`, a bad variant, `oem boot-next maint-rescue` without a catalog entry).
 - The installer's tests that use sbstore2.py still pass: 111 tests.
 - **tools/xnu-health-test/run.sh (911 checks, XNU's side, section 5.4)**:
@@ -757,7 +811,20 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 
 ## 9. Needs the phone
 
-**health3 (2026-11-07), first:**
+**health5, first:**
+
+- The XNU test twice: boot `xnuh-panic` (by key), let it panic, back in the loader: KERNEL PANIC (report #n);
+  boot it again: KERNEL PANIC again (report #n+1). Then a clean restart: no report. pmsg: `crash: judged
+  evidence marked in RAM: xnu dump`.
+- The same with Linux: `echo c > /proc/sysrq-trigger` twice: two reports.
+- The menus over USB: docs/USB-FASTBOOT.md 11.7 (fastboot devices at the menu, `sbfb.py key`, `screen`, `boot`,
+  the crash report and recovery, replug, each OS after it).
+
+**health4:** on the crash screen (after the next `echo c` in pmOS), Volume Down held scrolls
+the report down through the log to the panic at the bottom, Volume Up back; the footer's row numbers
+move. The rest of the health3 list below still holds.
+
+**health3 (2026-11-07):**
 
 - A. A normal boot shows only the logo (no text, no bar) with the star's glow and the dots, for about
   8 s, then the menu's intro takes the logo over without a jump (log slot 116: why 0xff, bands 2) and
@@ -803,6 +870,12 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 
 **Images**:
 
+- **BOOT `out/xnu-boot-health5.img` (sha256 d5e6063c957d1915..., loader Image d2118f6a...)**: health4 + judged evidence marked in RAM
+  (4.2) + fastboot in the background at the boot menu, Starbite Recovery and the crash report
+  (docs/USB-FASTBOOT.md 11); same recipe. Roll back with health4.
+- **BOOT `out/xnu-boot-health4.img` (sha256 8bcbb8e1995b58b3..., loader Image 0b8a3669...)**: health3 +
+  the scrollable crash report (the log at every level, `cs_poll`), the excerpt's overflow case; same
+  recipe as below. Roll back with health3 (master 81f5b55's loader, rebuilt by the same recipe).
 - **BOOT `out/xnu-boot-health3.img` (2026-11-07, sha256 a7e942e7ca7d123a..., loader Image f218e182...)**: this branch's loader
   (POST logo / live log / failure screen, RAM budget with reads, the crash report, the watchdog
   argument check) with exactly health2's other parts: template `out/xnu-boot-batch8.img` (header and

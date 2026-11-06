@@ -9,6 +9,7 @@
  * bytes) and upload (the device sends them, then OKAY).
  */
 #include "fastboot.h"
+#include "sbfmt.h"
 #include "catalog.h"
 #include "hw.h"
 
@@ -309,6 +310,8 @@ static struct {
     uint32_t dl_max, dl_size, want, got;
     char *scr, *stg;
     unsigned scr_cap, stg_cap, stg_len;
+    const char *up;                 /* what `upload` (fastboot get_staged) sends: a log or the screen */
+    uint32_t up_len;
     unsigned forced;
     int act;
     uint32_t act_val;
@@ -327,6 +330,8 @@ void fb_init(uintptr_t dl, uint32_t dl_max, char *scratch, unsigned scratch_cap,
     fb.stg = stage;
     fb.stg_cap = stage_cap;
     fb.stg_len = 0;
+    fb.up = 0;
+    fb.up_len = 0;
     fb.forced = 0;
     fb.act = FB_ACT_NONE;
     fb.act_val = 0;
@@ -483,7 +488,7 @@ void fb_rx_data(uint32_t n)
 static const char var_names[] =
     "version\0version-bootloader\0product\0serialno\0secure\0unlocked\0is-userspace\0"
     "max-download-size\0battery-voltage\0battery-level\0battery-soc-ok\0usb-speed\0boot-as\0"
-    "downloaded\0catalog-count\0";
+    "downloaded\0catalog-count\0mode\0";
 
 static int var_get(const char *name, struct tb *t)
 {
@@ -516,6 +521,8 @@ static int var_get(const char *name, struct tb *t)
         tb_s(t, !fbp_battery(&mv, &pct) || pct >= 5 ? "yes" : "no");
     else if (fb_streq(name, "usb-speed"))
         tb_s(t, fbp_speed());
+    else if (fb_streq(name, "mode"))
+        tb_s(t, fbp_mode());
     else if (fb_streq(name, "boot-as"))
         tb_s(t, fb_method_name(fb.forced));
     else if (fb_streq(name, "downloaded"))
@@ -696,11 +703,14 @@ static const char oem_help[] =
     "fastboot boot <Image> <initrd> [--dtb x --header-version 2]\n"
     "fastboot getvar all | catalog | battery-level\n"
     "fastboot oem log [pmsg|dmesg|loader|usb|crash|crashraw]  (then get_staged)\n"
-    "fastboot oem reboot-to <catalog key|fastboot>\n"
+    "fastboot oem reboot-to <catalog key|fastboot|maint|menu>\n"
     "fastboot oem boot-next <key|fastboot>  (next reset, no reboot)\n"
     "fastboot oem maint [prev|rescue]       Starbite Maintenance from UFS\n"
     "fastboot oem boot-as <auto|xnu|linux|android|uefi|bare>\n"
     "fastboot oem catalog | oem usb | continue (back to menu)\n"
+    "fastboot oem key <up|down|bixby|power> [ms]  (a press for the menu on screen)\n"
+    "fastboot oem screen, then get_staged x.raw  (1440x2960, B G R A)\n"
+    "fastboot getvar mode  (fastboot, menu, recovery, crash)\n"
     "fastboot reboot [bootloader|recovery|download]\n";
 
 /* Mailbox keys the loader takes itself (recovery.c rec_next_take), with or without a catalog entry. */
@@ -721,10 +731,13 @@ static void oem(const char *a)
         unsigned n = fbp_log(*w ? w : "pmsg", fb.stg, fb.stg_cap);
         if (!n) {
             fb.stg_len = 0;
+            fb.up_len = 0;
             failr("no such log (pmsg, dmesg, loader, usb, crash, crashraw)");
             return;
         }
         fb.stg_len = n;
+        fb.up = fb.stg;
+        fb.up_len = n;
         if (fb_streq(w, "crashraw")) {         /* binary: staged only (sbstore2.py crashlog) */
             okay("staged (binary): fastboot get_staged <file>");
             return;
@@ -733,6 +746,13 @@ static void oem(const char *a)
         okay("staged: fastboot get_staged <file>");
     } else if (fb_prefix(a, "reboot-to ")) {
         const char *k = skip_sp(a + 10);
+        if (fb_streq(k, "menu")) {          /* the boot menu: no boot-next at all */
+            fbp_clear_next();
+            okay("");
+            fb.act = FB_ACT_REBOOT;
+            fb.act_val = INFORM_NORMAL;
+            return;
+        }
         if (!loader_key(k) && fbp_cat_find(k) < 0) {
             failr("no catalog entry with that key");
             return;
@@ -791,6 +811,40 @@ static void oem(const char *a)
     } else if (fb_streq(a, "menu")) {
         okay("");
         fb.act = FB_ACT_MENU;
+    } else if (fb_prefix(a, "key ") || fb_streq(a, "key")) {
+        /* a press for the menu waiting for keys: kq_* in sbfmt.c */
+        const char *w = skip_sp(a + 3);
+        unsigned bits = kq_key_bit(w), ms = 0;
+        while (*w && *w != ' ')
+            ++w;
+        w = skip_sp(w);
+        if (*w) {
+            for (; *w >= '0' && *w <= '9' && ms < 100000U; ++w)
+                ms = ms * 10U + (unsigned)(*w - '0');
+            if (*w || !ms) {
+                failr("oem key <up|down|bixby|power> [ms]");
+                return;
+            }
+        }
+        if (!bits) {
+            failr("oem key <up|down|bixby|power> [ms]");
+            return;
+        }
+        if (!fbp_key(bits, ms)) {
+            failr("no menu is waiting for keys here (getvar mode)");
+            return;
+        }
+        okay(fbp_mode());
+    } else if (fb_streq(a, "screen")) {
+        uintptr_t at;
+        uint32_t len;
+        if (!fbp_screen(&at, &len)) {
+            failr("no screen");
+            return;
+        }
+        fb.up = (const char *)at;
+        fb.up_len = len;
+        okay("staged 1440x2960 B G R A: fastboot get_staged <file>");
     } else {
         failr("unknown oem command (fastboot oem help)");
     }
@@ -834,12 +888,12 @@ void fb_command(const uint8_t *cmd, unsigned len)
         fb.got = 0;
         q_data(size);
     } else if (fb_streq(c, "upload")) {
-        if (!fb.stg_len) {
-            failr("nothing staged (fastboot oem log first)");
+        if (!fb.up_len) {
+            failr("nothing staged (fastboot oem log or oem screen first)");
             return;
         }
-        q_data(fb.stg_len);
-        q_text(Q_RAW, fb.stg, fb.stg_len);
+        q_data(fb.up_len);
+        q_text(Q_RAW, fb.up, fb.up_len);
         okay("");
     } else if (fb_streq(c, "boot")) {
         do_boot();

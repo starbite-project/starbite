@@ -87,6 +87,15 @@ int fbp_maint(unsigned variant, const char **why)
     return 1;
 }
 void fbp_set_next(const char *key) { snprintf(next_key, sizeof(next_key), "%s", key); }
+/* the menus' background fastboot (fastboot_dev.c): the menu waiting, its key queue, the panel */
+static int cleared, key_ok = 1, key_calls;
+static unsigned key_bits, key_ms;
+static const char *mode_now = "fastboot";
+static uint8_t panel[4096];
+void fbp_clear_next(void) { next_key[0] = 0; ++cleared; }
+int fbp_key(unsigned bits, unsigned ms) { ++key_calls; key_bits = bits; key_ms = ms; return key_ok; }
+int fbp_screen(uintptr_t *at, uint32_t *len) { *at = (uintptr_t)panel; *len = sizeof(panel); return 1; }
+const char *fbp_mode(void) { return mode_now; }
 const char *fbp_speed(void) { return "high"; }
 void fbp_status(const char *line) { (void)line; }
 
@@ -660,6 +669,69 @@ static void test_console(void)
     CHECK(con_pending() <= sizeof(ring), "ring bounded");
 }
 
+/* `fastboot oem key`, `oem screen`, `getvar mode`, `oem reboot-to menu` (the menus over USB) */
+static void test_menu_usb(void)
+{
+    uint32_t v;
+    fb_init((uintptr_t)dl, DL_SIZE, scratch, sizeof(scratch), stage, sizeof(stage));
+    mode_now = "menu";
+    cmd("getvar:mode");
+    CHECK(!strcmp(last(), "OKAYmenu"), "getvar mode: %s", last());
+    cmd("getvar:all");
+    int seen = 0;
+    for (unsigned i = 0; i < nresp; ++i)
+        seen |= !strcmp(resp[i], "INFOmode: menu");
+    CHECK(seen, "getvar all has the mode");
+    key_calls = 0;
+    cmd("oem key up");
+    CHECK(!strcmp(last(), "OKAYmenu") && key_calls == 1 && key_bits == K_UP && key_ms == 0, "oem key up: %s", last());
+    cmd("oem key down");
+    CHECK(key_bits == K_DOWN && key_ms == 0, "oem key down");
+    cmd("oem key bixby 900");
+    CHECK(!strcmp(last(), "OKAYmenu") && key_bits == K_BIXBY && key_ms == 900, "oem key bixby 900 (a hold)");
+    cmd("oem key power");
+    CHECK(key_bits == K_POWER, "oem key power");
+    cmd("oem key vol-");
+    CHECK(key_bits == K_DOWN, "oem key vol-");
+    key_calls = 0;
+    cmd("oem key home");
+    CHECK(!strncmp(last(), "FAIL", 4) && !key_calls, "oem key home: refused");
+    cmd("oem key");
+    CHECK(!strncmp(last(), "FAIL", 4) && !key_calls, "oem key without a key: refused");
+    cmd("oem key up 12x");
+    CHECK(!strncmp(last(), "FAIL", 4) && !key_calls, "oem key up 12x: refused");
+    cmd("oem key upx");
+    CHECK(!strncmp(last(), "FAIL", 4) && !key_calls, "oem key upx: refused");
+    key_ok = 0;
+    mode_now = "fastboot";
+    cmd("oem key up");
+    CHECK(!strcmp(last(), "FAILno menu is waiting for keys here (getvar mode)"), "oem key in the fastboot mode: %s", last());
+    key_ok = 1;
+    CHECK(fb_action(&v) == FB_ACT_NONE, "keys: no action");
+    /* the panel: staged, then uploaded whole */
+    for (unsigned i = 0; i < sizeof(panel); ++i)
+        panel[i] = (uint8_t)(i * 7 + 3);
+    cmd("oem screen");
+    CHECK(!strncmp(last(), "OKAYstaged", 10), "oem screen: %s", last());
+    cmd("upload");
+    CHECK(nresp == 2 && !strcmp(resp[0], "DATA00001000") && !strcmp(resp[1], "OKAY") && nraw == sizeof(panel) &&
+          !memcmp(raw, panel, sizeof(panel)), "upload of the panel: %u responses, %u bytes", nresp, nraw);
+    cmd("oem log pmsg");
+    cmd("upload");
+    CHECK(nraw > 0 && memcmp(raw, panel, nraw < 16 ? nraw : 16), "after oem log, upload sends the log again");
+    /* reboot-to menu: no boot-next, a normal reboot */
+    snprintf(next_key, sizeof(next_key), "linux-pmos");
+    cleared = 0;
+    cmd("oem reboot-to menu");
+    CHECK(!strcmp(last(), "OKAY") && cleared == 1 && !next_key[0] && fb_action(&v) == FB_ACT_REBOOT && v == INFORM_NORMAL,
+          "oem reboot-to menu");
+    cmd("oem reboot-to maint");
+    CHECK(!strcmp(next_key, "maint") && fb_action(&v) == FB_ACT_REBOOT, "oem reboot-to maint");
+    cmd("continue");
+    CHECK(!strcmp(last(), "OKAY") && fb_action(&v) == FB_ACT_MENU, "continue (the menu ignores it in the background)");
+    mode_now = "fastboot";
+}
+
 int main(void)
 {
     test_descriptors();
@@ -667,6 +739,7 @@ int main(void)
     test_images();
     test_protocol();
     test_console();
+    test_menu_usb();
     printf("%d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

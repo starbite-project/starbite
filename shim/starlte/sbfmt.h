@@ -128,7 +128,9 @@ struct cl_head {
     uint64_t launch_epoch;
     uint32_t log_level, lflags;
     uint32_t seen_dmesg, seen_console, seen_secmagic, seen_pmsg;
+    uint32_t hflags;                /* 136: CLH_* */
 };
+#define CLH_CONSUMES 1U             /* judged evidence is marked in RAM (sb_consume): present = new */
 #define CR_TEXT_MAX 3824U
 #define CR_RST_STAT  0
 #define CR_INFORM2   1
@@ -191,6 +193,41 @@ uint32_t sb_wdt_count(unsigned secs, unsigned *ms);
 #define RING_SIG  0x43474244U
 #define RING_PMSG 0x3F00U
 unsigned sb_ring_text(const uint8_t *zone, unsigned zone_size, char *out, unsigned cap);
+/* Where text byte i of sb_ring_text(zone) lies in the zone's data (zone + 12 + it), or -1. */
+int sb_ring_phys(const uint8_t *zone, unsigned zone_size, unsigned i);
+
+/* ---- evidence: new, or judged already (crash.c evaluate / settle) ------------------------------
+ * The phone, 2026-11-06: two runs of the same deterministic XNU test panic left byte-identical
+ * dumps, and the second was taken for the first (the seen-CRC check): "CLEAN RESTART", no report.
+ * So the loader now marks every dmesg record and XNU dump it judged in RAM itself ("consumes" it):
+ *   Linux ramoops dmesg record (zone 0)  header "====<sec>.<usec>-D" (or -C) becomes "...-S": Linux
+ *                                        still reads the record as before (only 'C' means
+ *                                        compressed), the loader no longer takes it for new
+ *   XNU's dump (pmsg ring, zone 1)       "STARBITE: XNU panic ..." / "STARBITE: sweetreboot timer"
+ *                                        becomes "STARSEEN: ..." (the loader's needles no longer
+ *                                        match; the text stays readable)
+ * A new crash writes a new header, so even an identical one is found. Old evidence (an
+ * unrelated reset, any number of boots later) stays marked, so it is never reported again.
+ * Evidence from before the first consuming loader (cl_head.hflags without CLH_CONSUMES) is still
+ * checked against the seen CRCs once. */
+struct sb_found {
+    uint32_t ev;                    /* EV_LX_* / EV_XNU_* found new for the launched method */
+    int dmesg;                      /* zone 0 holds a live (unjudged) dmesg record */
+    unsigned dflag;                 /* the text offset of its header's flag character */
+    int xat;                        /* zone 1 text offset of XNU's live dump header, -1 none */
+    int xpanic;                     /* 1: the panic header, 0: the timer's */
+    uint32_t c0, cx;                /* CRCs as kept in seen_dmesg / seen_pmsg */
+};
+/* t0/t1: the zones' text (sb_ring_text of the snapshot); xp/xh: where crash.c's needles for XNU's
+ * panic and timer headers matched t1 (sb_find), -1 none; is_linux / is_xnu: the launched OS. */
+void sb_evidence(const char *t0, unsigned n0, const char *t1, unsigned n1, int xp, int xh, int is_linux, int is_xnu,
+                 const struct cl_head *h, struct sb_found *f);
+/* Mark what f found as judged in the live zones (live0/live1: the RAM the snapshot snap0/snap1
+ * was copied from; bytes are changed only where they still hold what the snapshot had: the
+ * loader's own pmsg lines may have overwritten XNU's header since), update h (seen CRCs,
+ * CLH_CONSUMES). Returns 1 dmesg marked | 2 XNU header marked. */
+unsigned sb_consume(volatile uint8_t *live0, volatile uint8_t *live1, const uint8_t *snap0, const uint8_t *snap1,
+                    unsigned zone_size, const struct sb_found *f, struct cl_head *h);
 
 /* ---- Starbite Maintenance: the SBMAINT1 container (docs/MAINTENANCE.md 3 and 4.2 R4) ------------
  * One slot: a 4096-byte header, then the sections. Header: "SBMAINT1", u32 version 1, u32 header
@@ -288,6 +325,30 @@ int pv_hold(const struct pv_keys *k, int up, int cut, uint64_t t_ms);
  * state[id] is fail_state, at most max into out. Returns how many failed (all of them). */
 unsigned pv_failures(const uint8_t *state, const uint8_t *order, unsigned n, unsigned fail_state,
                      uint8_t *out, unsigned max);
+
+/* ---- keys from USB (`fastboot oem key`, fastboot_dev.c) ----------------------------------------
+ * Presses queue up; each is held for its time, then released for KQ_GAP_MS, then the next. The
+ * menus read them together with the real keys (menu.c keys(), recovery.c r_keys()), so each
+ * menu's own debounce, repeat and hold rules apply unchanged. KQ_PRESS_MS is a plain press for
+ * every menu: longer than their debounce (menu v7 20 ms, recovery 30, crash report 20) and
+ * shorter than any hold or repeat (v7 Power hold 520 ms, Volume repeat 450, crash report repeat
+ * 300, Bixby hold 700). A longer time (`oem key bixby 900`) makes a hold. */
+#define KQ_N 8U
+#define KQ_PRESS_MS 150U
+#define KQ_GAP_MS 120U
+#define KQ_MAX_MS 5000U
+struct kq {
+    uint16_t bits[KQ_N], ms[KQ_N];
+    unsigned h, n;
+    uint64_t t0;                    /* ms + 1 when the head press began, 0 = not begun */
+};
+void kq_init(struct kq *k);
+/* Queue a press of key bits (K_* of hw.h) for ms (0: KQ_PRESS_MS, at most KQ_MAX_MS); 0 if full. */
+int kq_push(struct kq *k, unsigned bits, unsigned ms);
+/* The injected keys at now_ms (0 when idle: the fast path). */
+unsigned kq_bits(struct kq *k, uint64_t now_ms);
+/* "up" "down" "bixby" "power" (also "volup" "voldown" "vol+" "vol-"): the K_* bit, 0 if unknown. */
+unsigned kq_key_bit(const char *name);
 
 /* ---- what a crashed OS left: the crash screen's parser (crash.c) -------------------------------
  * Text from the ramoops dmesg record or the console ring (Linux: lines "<N>[ secs.usecs] text",

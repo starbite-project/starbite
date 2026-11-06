@@ -16,6 +16,9 @@ struct star_info {
  * comes back as it was, with the reason on screen.
  */
 int star_menu(const struct star_info *in, char *cmdline, unsigned len);
+/* star_menu's answer when the Mac placed an image over USB while the menu waited (fbbg.h):
+ * star_prepare_xnu returns fbbg_entry(). */
+#define STAR_PICK_USB (-2)
 void star_menu_failed(const char *name, const char *why);
 /* Catalog entry + 1 of iOS from BOOT (what Engineer's "boot iOS" starts), 0 if there is none. */
 int star_ios_pick(void);

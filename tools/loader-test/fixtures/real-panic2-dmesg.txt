@@ -1,0 +1,204 @@
+====1793987680.553805-D
+Panic#1 Part1
+<6>[    0.543657] phy-exynos9810-usbdrd 11100000.phy: power_on: pmu72c=00000001 pmu704=00000001 ver=00020000 linkctrl=00053ff0 linkport=0001107c clkrst=00000004 pwr=00000000 ssp_pll=00000006 pma=00000110 utmi=00000030 hsp=10003300 hsp_tune=d16f3433 hsp_test=00080000 hsp_pll=0000000c rewa=00000000
+<6>[    0.549561] usbcore: registered new interface driver uas
+<6>[    0.549624] usbcore: registered new interface driver usb-storage
+<6>[    0.551447] i2c_dev: i2c /dev entries driver
+<6>[    0.552237] exynos5-hsi2c 104b0000.i2c: S9P timing FS: ipclk=200000000 op=370000 div=36 -> scl=337837 Hz, t1=01f8ff00 t2=030003f0 t3=00240000
+<6>[    0.552340] exynos5-hsi2c 104b0000.i2c: S9P timing FS: ipclk=200000000 op=370000 div=36 -> scl=337837 Hz, t1=01f8ff00 t2=030003f0 t3=00240000
+<6>[    0.697162] exynos5-hsi2c 14360000.i2c: S9P timing FS: ipclk=200000000 op=370000 div=36 -> scl=337837 Hz, t1=01f8ff00 t2=030003f0 t3=00240000
+<6>[    0.697185] exynos5-hsi2c 14360000.i2c: S9P timing FS: ipclk=200000000 op=370000 div=36 -> scl=337837 Hz, t1=01f8ff00 t2=030003f0 t3=00240000
+<4>[    0.698388] max77705-rgb: Failed to locate of_node [id: -1]
+<4>[    0.698513] max77705-charger: Failed to locate of_node [id: -1]
+<4>[    0.698587] max77705-haptic: Failed to locate of_node [id: -1]
+<6>[    0.699493] s9p-max77705-muic 1-0025: MAX77705 USBC: HW rev 13, FW rev 32
+<6>[    0.701450] s9p-max77705-muic 1-0025: at probe: usbc1=2f usbc2=05 bc=81(vbus=1 chgtyp=1 prchg=0) cc0=b1 cc1=08 pd0=34 pd1=17 int=00/00/00/00
+<6>[    0.724288] s9p-max77705-muic 1-0025: CONTROL1 <= 09, MCU answered 06 00 00 00
+<6>[    0.726259] s9p-max77705-muic 1-0025: after switch: usbc1=2f usbc2=05 bc=81(vbus=1 chgtyp=1 prchg=0) cc0=b1 cc1=08 pd0=34 pd1=17 int=84/00/00/00
+<6>[    0.733455] s3c2410-wdt 10060000.watchdog: starting watchdog timer
+<6>[    0.733966] s3c2410-wdt 10060000.watchdog: watchdog active, reset enabled, irq disabled
+<6>[    0.734525] device-mapper: ioctl: 4.50.0-ioctl (2025-04-28) initialised: dm-devel@lists.linux.dev
+<6>[    0.739045] s9p-cpufreq: little PLL without STABLE at 1150500 kHz (con0=81620411), continuing
+<6>[    0.739531] cpufreq: cpufreq_policy_online: CPU0: Running at unlisted initial frequency: 1053000 kHz, changing to: 1150500 kHz
+<6>[    0.748687] hid: raw HID events driver (C) Jiri Kosina
+<6>[    0.749396] dwmmc_exynos 11500000.mmc: IDMAC supports 64-bit address mode.
+<6>[    0.749402] dwmmc_exynos 11500000.mmc: DMA limited to 32-bit addresses
+<6>[    0.749417] dwmmc_exynos 11500000.mmc: Using internal DMA controller.
+<6>[    0.749422] dwmmc_exynos 11500000.mmc: Version ID is 270a
+<6>[    0.749435] dwmmc_exynos 11500000.mmc: DW MMC controller at irq 85,64 bit host data width,64 deep fifo
+<6>[    0.749521] dwmmc_exynos 11500000.mmc: Got CD GPIO
+<6>[    0.754461] hw perfevents: enabled with armv8_cortex_a55 PMU driver, 7 (0,8000003f) counters available
+<6>[    0.754882] hw perfevents: enabled with armv8_samsung_mongoose PMU driver, 7 (0,8000003f) counters available
+<6>[    0.755411] NET: Registered PF_INET6 protocol family
+<6>[    0.755937] Segment Routing with IPv6
+<6>[    0.755954] In-situ OAM (IOAM) with IPv6
+<6>[    0.755997] NET: Registered PF_PACKET protocol family
+<5>[    0.756033] Bridge firewalling registered
+<6>[    0.756048] 9pnet: Installing 9P2000 support
+<5>[    0.756080] Key type dns_resolver registered
+<6>[    0.759818] registered taskstats version 1
+<5>[    0.759914] Loading compiled-in X.509 certificates
+<6>[    0.762687] mmc_host mmc0: Bus speed = 200000000Hz (req 400000Hz, actual 400000HZ div = 250)
+<5>[    0.766275] Key type .fscrypt registered
+<5>[    0.766278] Key type fscrypt-provisioning registered
+<5>[    0.766315] Key type encrypted registered
+<6>[    0.766319] AppArmor: AppArmor sha256 policy hashing enabled
+<6>[    0.766537] s9p-decon 16030000.decon: window 5: enabled, chmap 5, start 00000000 end 0b8f059f
+<6>[    0.766544] s9p-decon 16030000.decon: inherited channel 0: shadow_base=cc000000 normal_base=cc000000 src_size=0b9005a0 img_size=0b9005a0 con=02000000
+<6>[    0.766617] s9p-decon 16030000.decon: take over win=5 ch=0 trig=00001001, 3 irq(s), command-mode
+<6>[    0.776046] Console: switching to colour dummy device 80x25
+<6>[    0.779600] s9p-decon 16030000.decon: [drm] panic screen: own frame, log font TER16x32 (85 x 68 characters), banner on
+<6>[    0.779939] s9p-decon 16030000.decon: [drm] Registered 1 planes with drm panic
+<6>[    0.779946] [drm] Initialized exynos 1.1.0 for 16030000.decon on minor 2
+<6>[    0.786739] s9p-decon 16030000.decon: irq 95 (index 1) pending 00002000
+<6>[    0.793783] s9p-decon 16030000.decon: irq 94 (index 0) pending 00001000
+<6>[    0.799635] brcmfmac: brcmf_c_process_txcap_blob: no txcap_blob available (err=-2)
+<6>[    0.800060] brcmfmac: brcmf_c_preinit_dcmds: Firmware: BCM4361/5 wl0: Feb 18 2020 20:39:58 version 13.50.28 (B2 Network/rsdb) FWID 01-e21a6e9f
+<6>[    0.908949] s9p-decon 16030000.decon: panel self mask off (sleep-out, 7A 00): 0
+<6>[    0.910653] Console: switching to colour frame buffer device 180x185
+<6>[    0.936605] s9p-decon 16030000.decon: [drm] fb0: exynosdrmfb frame buffer device
+<6>[    0.936612] s9p-decon 16030000.decon: [drm] DECON scanout 1440x2960 on window 5
+<6>[    0.940153] input: gpio-keys as /devices/platform/gpio-keys/input/input0
+<5>[    0.940532] cfg80211: Loading compiled-in X.509 certificates for regulatory database
+<5>[    0.944075] Loaded X.509 cert 'sforshee: 00b28ddf47aef9cea7'
+<5>[    0.944332] Loaded X.509 cert 'wens: 61c038651aabdcf94bd0ac7ff06c7248db18c600'
+<6>[    0.944371] clk: Disabling unused clocks
+<6>[    0.944378] PM: genpd: Disabling unused power domains
+<6>[    0.959812] exynos9810-ufs 11120000.ufs: ufshcd_populate_vreg: Unable to find vdd-hba-supply regulator, assuming enabled
+<6>[    0.959831] exynos9810-ufs 11120000.ufs: ufshcd_populate_vreg: unable to find vcc-max-microamp
+<6>[    0.959837] exynos9810-ufs 11120000.ufs: ufshcd_populate_vreg: Unable to find vccq-supply regulator, assuming enabled
+<6>[    0.959844] exynos9810-ufs 11120000.ufs: ufshcd_populate_vreg: Unable to find vccq2-supply regulator, assuming enabled
+<6>[    0.973196] exynos9810-ufs 11120000.ufs: unipro mclk 166500000 Hz
+<3>[    0.977061] dwmmc_exynos 11500000.mmc: starbite: CMD52 arg 0x00000c00 error -110 rintsts 0x00000100 resp 0x00000000
+<3>[    0.977906] dwmmc_exynos 11500000.mmc: starbite: CMD52 arg 0x80000c08 error -110 rintsts 0x00000100 resp 0x00000000
+<6>[    0.985218] exynos9810-ufs 11120000.ufs: hw_rev=5 refclk_sel=00000000
+<6>[    0.985242] exynos9810-ufs 11120000.ufs: inherited 1us=166 clkstop=00000000 force_hcs=00000de0
+<3>[    0.986870] dwmmc_exynos 11500000.mmc: starbite: CMD5 arg 0x00000000 error -110 rintsts 0x00000104 resp 0x000001aa
+<3>[    0.988307] dwmmc_exynos 11500000.mmc: starbite: CMD5 arg 0x00000000 error -110 rintsts 0x00000100 resp 0x000001aa
+<3>[    0.989151] dwmmc_exynos 11500000.mmc: starbite: CMD5 arg 0x00000000 error -110 rintsts 0x00000100 resp 0x000001aa
+<3>[    0.989988] dwmmc_exynos 11500000.mmc: starbite: CMD5 arg 0x00000000 error -110 rintsts 0x00000100 resp 0x000001aa
+<6>[    0.993056] exynos9810-ufs 11120000.ufs: fmp: desctype 0 -> 0
+<6>[    0.993071] exynos9810-ufs 11120000.ufs: fmp: smu init -> 0 sg_entry=16
+<6>[    0.993073] exynos9810-ufs 11120000.ufs: limits: sg=128 sectors=2048 seg_size=4096
+<6>[    0.993088] exynos9810-ufs 11120000.ufs: dma mask 64 bit err=0
+<6>[    0.993617] exynos9810-ufs 11120000.ufs: vcc off err=0 enabled=0
+<6>[    1.014640] exynos9810-ufs 11120000.ufs: vcc on err=0 enabled=1
+<6>[    1.068164] exynos9810-ufs 11120000.ufs: device reset done, gpio=00000001
+<6>[    1.137955] scsi host0: ufshcd
+<6>[    1.138339] exynos9810-ufs 11120000.ufs: available lanes rx 2 tx 2
+<6>[    1.139515] exynos9810-ufs 11120000.ufs: pre-link: HCE=00000001 HCS=00000008 IS=00000000 IE=00000470
+<6>[    1.139526] exynos9810-ufs 11120000.ufs: UIC cmd=00000002 args=40200000/00000000/00000000 errors PA=00000000 DL=00000000 DME=00000000
+<6>[    1.139537] exynos9810-ufs 11120000.ufs: link clocks stop=00000008 force=00000de0 refclk=00000000 gpio=00000001 phy=00010001 vcc=1
+<6>[    1.139549] exynos9810-ufs 11120000.ufs: PMA readback 74=00000010 8c=00000000 lane0-134=00000043 lane1-134=00000043
+<6>[    1.139557] exynos9810-ufs 11120000.ufs: pre-link: fsm=00000000 acg=00000001 hold=00000000
+<6>[    1.139595] exynos9810-ufs 11120000.ufs: pre-link: live dme_get err=0 avail_rx=2
+<6>[    1.257379] exynos9810-ufs 11120000.ufs: power mode: M(1) G(3) L(2) HS-series(2)
+<5>[    1.269090] scsi 0:0:0:49488: Well-known LUN    SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+<6>[    1.270381] s9p-g3d-pd 14064040.power-domain: G3D LPM init: memory=00000002 option=00000001 duration=00000363 sci=af4d0001 pwr=896b0001
+<5>[    1.286021] scsi 0:0:0:49476: Well-known LUN    SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+<5>[    1.291310] scsi 0:0:0:49456: Well-known LUN    SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+<5>[    1.301956] scsi 0:0:0:0: Direct-Access     SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+<5>[    1.310199] scsi 0:0:0:1: Direct-Access     SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+<5>[    1.310321] sd 0:0:0:0: [sda] 15616000 4096-byte logical blocks: (64.0 GB/59.6 GiB)
+<5>[    1.310459] sd 0:0:0:0: [sda] Write Protect is off
+<7>[    1.310510] sd 0:0:0:0: [sda] Mode Sense: 00 32 00 10
+<5>[    1.310682] sd 0:0:0:0: [sda] Write cache: enabled, read cache: enabled, supports DPO and FUA
+<6>[    1.310860] sd 0:0:0:0: [sda] Preferred minimum I/O size 8192 bytes
+<6>[    1.310886] sd 0:0:0:0: [sda] Optimal transfer size 8192 bytes
+<5>[    1.317542] scsi 0:0:0:2: Direct-Access     SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+<5>[    1.321403] sd 0:0:0:1: [sdb] 1024 4096-byte logical blocks: (4.19 MB/4.00 MiB)
+<5>[    1.321511] sd 0:0:0:1: [sdb] Write Protect is on
+<7>[    1.321519] sd 0:0:0:1: [sdb] Mode Sense: 00 32 00 90
+<5>[    1.321653] sd 0:0:0:1: [sdb] Write cache: disabled, read cache: enabled, supports DPO and FUA
+<6>[    1.321751] sd 0:0:0:1: [sdb] Preferred minimum I/O size 8192 bytes
+<6>[    1.321758] sd 0:0:0:1: [sdb] Optimal transfer size 8192 bytes
+<5>[    1.323200] sd 0:0:0:2: [sdc] 1024 4096-byte logical blocks: (4.19 MB/4.00 MiB)
+<5>[    1.323295] sd 0:0:0:2: [sdc] Write Protect is on
+<7>[    1.323305] sd 0:0:0:2: [sdc] Mode Sense: 00 32 00 90
+<5>[    1.323366] scsi 0:0:0:3: Direct-Access     SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+<5>[    1.323452] sd 0:0:0:2: [sdc] Write cache: disabled, read cache: enabled, supports DPO and FUA
+<6>[    1.323531] sd 0:0:0:2: [sdc] Preferred minimum I/O size 8192 bytes
+<6>[    1.323540] sd 0:0:0:2: [sdc] Optimal transfer size 8192 bytes
+<5>[    1.325263] sd 0:0:0:3: [sdd] 2048 4096-byte logical blocks: (8.39 MB/8.00 MiB)
+<5>[    1.325327] sd 0:0:0:3: [sdd] Write Protect is on
+<7>[    1.325332] sd 0:0:0:3: [sdd] Mode Sense: 00 32 00 90
+<5>[    1.325451] sd 0:0:0:3: [sdd] Write cache: disabled, read cache: enabled, supports DPO and FUA
+<6>[    1.325515] sd 0:0:0:3: [sdd] Preferred minimum I/O size 8192 bytes
+<6>[    1.325518] sd 0:0:0:3: [sdd] Optimal transfer size 8192 bytes
+<5>[    1.325527] scsi 0:0:0:4: Direct-Access     SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+<5>[    1.328520] sd 0:0:0:4: [sde] 2048 4096-byte logical blocks: (8.39 MB/8.00 MiB)
+<5>[    1.328775] sd 0:0:0:4: [sde] Write Protect is on
+<7>[    1.328805] sd 0:0:0:4: [sde] Mode Sense: 00 32 00 90
+<5>[    1.328983] sd 0:0:0:4: [sde] Write cache: disabled, read cache: enabled, supports DPO and FUA
+<6>[    1.329094] sd 0:0:0:4: [sde] Preferred minimum I/O size 8192 bytes
+<6>[    1.329109] sd 0:0:0:4: [sde] Optimal transfer size 8192 bytes
+<5>[    1.359797] sd 0:0:0:1: [sdb] Attached SCSI disk
+<5>[    1.360701] sd 0:0:0:2: [sdc] Attached SCSI disk
+<6>[    1.365849]  sda: sda1 sda2 sda3 sda4 sda5 sda6 sda7 sda8 sda9 sda10 sda11 sda12 sda13 sda14 sda15 sda16 sda17 sda18 sda19 sda20 sda21 sda22 sda23 sda24 sda25 sda26 sda27 sda28
+<6>[    1.366049]  sdd: sdd1
+<5>[    1.367947] sd 0:0:0:3: [sdd] Attached SCSI disk
+<5>[    1.377131] sd 0:0:0:4: [sde] Attached SCSI disk
+<5>[    1.379408] sd 0:0:0:0: [sda] Attached SCSI disk
+<6>[    1.381390] Freeing unused kernel memory: 3584K
+<6>[    1.381446] Run /init as init process
+<7>[    1.381448]   with arguments:
+<7>[    1.381450]     /init
+<7>[    1.381452]   with environment:
+<7>[    1.381454]     HOME=/
+<7>[    1.381455]     TERM=linux
+<6>[    1.424826] mmc_host mmc0: Bus speed = 200000000Hz (req 50000000Hz, actual 50000000HZ div = 2)
+<6>[    1.424934] mmc0: new high speed SDXC card at address d555
+<6>[    1.425637] mmcblk0: mmc0:d555 SK128 119 GiB
+<6>[    1.430802]  mmcblk0: p1 p2
+<6>[    1.481175] configfs-gadget.starbite gadget.0: HOST MAC 02:53:39:00:00:02
+<6>[    1.481185] configfs-gadget.starbite gadget.0: MAC 02:53:39:00:00:01
+<6>[    1.967882] loop0: detected capacity change from 0 to 4390592
+<6>[    1.993679] EXT4-fs (loop0): mounted filesystem d16d4f52-e84e-45a2-8f64-1d080021428a r/w with ordered data mode. Quota mode: none.
+<6>[    2.061178] loop1: detected capacity change from 0 to 524288
+<6>[    2.086198] EXT4-fs (loop1): mounted filesystem 67d8708b-1b32-4ec5-8aa0-17fea1cee6e9 ro without journal. Quota mode: none.
+<5>[    3.264061] random: crng init done
+<30>[    4.075013] udevd[615]: starting version 3.2.14
+<6>[    4.098302] s9p-acpm: touch LDOs power-cycled (L35=ec)
+<30>[    4.403550] udevd[615]: starting eudev-3.2.14
+<4>[    5.286113] s6sy761 0-0048: the axis have not been set
+<6>[    5.287686] input: s6sy761 as /devices/platform/soc@0/104b0000.i2c/i2c-0/0-0048/input/input1
+<6>[    6.482283] zram0: detected capacity change from 0 to 10797056
+<6>[    6.515913] Adding 5398524k swap on /dev/zram0.  Priority:300 extents:1 across:5398524k SS
+<6>[    7.296771] s9p-acpm: touch controller alive after 1 LDO cycle(s)
+<3>[    9.221699] ieee80211 phy0: brcmf_dongle_roam: WLC_SET_ROAM_TRIGGER error (-52)
+<6>[   10.934970] NET: Registered PF_QIPCRTR protocol family
+<3>[   11.748091] ieee80211 phy0: brcmf_p2p_create_p2pdev: timeout occurred
+<3>[   11.748113] ieee80211 phy0: brcmf_cfg80211_add_iface: add iface p2p-dev-wlan0 type 10 failed: err=-5
+<6>[   25.316165] s9p-cpufreq: big 73 C -> max 2327 MHz
+<6>[   27.628749] s9p-cpufreq: big 63 C -> max 2704 MHz
+<4>[   38.547563] s9p-decon 16030000.decon: swiotlb buffer is full (sz: 2097152 bytes), total 32768 (slots), used 575 (slots)
+<3>[   38.547710] panfrost 17500000.gpu: job owner=gnome-control-c tgid=3824 bos=19 jc=0xc696440
+<3>[   38.547743] panfrost 17500000.gpu: js fault, js=1, status=INSTR_INVALID_ENC, head=0xc699740, tail=0xc699740
+<4>[   38.644700] s9p-decon 16030000.decon: swiotlb buffer is full (sz: 2097152 bytes), total 32768 (slots), used 575 (slots)
+<6>[   76.972204] sysrq: Trigger a crash
+<0>[   76.972237] Kernel panic - not syncing: sysrq triggered crash
+<4>[   76.972250] CPU: 6 UID: 0 PID: 4029 Comm: sh Tainted: G S                  7.1.0-starbite-f797be6b #23 PREEMPT 
+<4>[   76.972269] Tainted: [S]=CPU_OUT_OF_SPEC
+<4>[   76.972278] Hardware name: Samsung Galaxy S9 (SM-G960F) (DT)
+<4>[   76.972288] Call trace:
+<4>[   76.972296]  show_stack+0x18/0x24 (C)
+<4>[   76.972320]  dump_stack_lvl+0x34/0x8c
+<4>[   76.972336]  dump_stack+0x18/0x24
+<4>[   76.972349]  vpanic+0x47c/0x4dc
+<4>[   76.972363]  do_panic_on_target_cpu+0x0/0x1c
+<4>[   76.972377]  sysrq_reset_seq_param_set+0x0/0x98
+<4>[   76.972392]  __handle_sysrq+0xd4/0x1b8
+<4>[   76.972405]  write_sysrq_trigger+0xc0/0xd0
+<4>[   76.972418]  proc_reg_write+0x9c/0xf0
+<4>[   76.972430]  vfs_write+0xd4/0x370
+<4>[   76.972441]  ksys_write+0x70/0x108
+<4>[   76.972450]  __arm64_sys_write+0x1c/0x28
+<4>[   76.972459]  invoke_syscall.constprop.0+0x58/0xf8
+<4>[   76.972472]  do_el0_svc+0x40/0xb8
+<4>[   76.972484]  el0_svc+0x40/0x180
+<4>[   76.972498]  el0t_64_sync_handler+0xa0/0xe4
+<4>[   76.972506]  el0t_64_sync+0x198/0x19c
+<2>[   76.972518] SMP: stopping secondary CPUs
+<0>[   76.972535] Kernel Offset: disabled
+<0>[   76.972541] CPU features: 0x04000000,004d0048,00000000,0400420b
+<0>[   76.972553] Memory Limit: none

@@ -21,6 +21,7 @@
 #include "store.h"
 #include "ui.h"
 #include "crash.h"
+#include "fbbg.h"
 
 #define ALIVE_GPA0_DAT 0x14050024UL
 #define ALIVE_GPA2_DAT 0x14050064UL
@@ -66,8 +67,9 @@ static unsigned keys(void)
 {
     uint32_t a = *(volatile uint32_t *)ALIVE_GPA0_DAT;
     uint32_t b = *(volatile uint32_t *)ALIVE_GPA2_DAT;
+    /* + a press the Mac sent (`fastboot oem key`, fbbg.h): every menu reads it as a real one */
     return (!((a >> 3) & 1U) ? K_UP : 0) | (!((a >> 4) & 1U) ? K_DOWN : 0) |
-           (!((a >> 6) & 1U) ? K_BIXBY : 0) | (!((b >> 4) & 1U) ? K_POWER : 0);
+           (!((a >> 6) & 1U) ? K_BIXBY : 0) | (!((b >> 4) & 1U) ? K_POWER : 0) | fbbg_inject();
 }
 
 /* One debounced press, returned once every key is released again. */
@@ -1590,6 +1592,8 @@ int star_menu(const struct star_info *in, char *cmdline, unsigned len)
     opt_load(cmdline);
     if (!v7_failed && menu7_ready()) {
         int r = menu7_main(in, cmdline, len);
+        if (r == STAR_PICK_USB)
+            return r;
         if (r >= 0) {
             m7_report("pick");
             v7_active = 1;

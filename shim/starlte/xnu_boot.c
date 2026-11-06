@@ -1489,6 +1489,9 @@ boot_entry(unsigned i, volatile uint64_t *log, uintptr_t fdt, const char *cmdlin
     const struct cat_ent *e = cat_get(i);
     const char *why;
     boot_why = 0;
+    /* no USB DMA (a download the Mac had under way) into STAGE while this start loads there; a
+     * start that fails comes back to a menu, whose next poll brings it up again (fbbg.h) */
+    fbbg_stop();
     launch_clear();
     if (!e)
         return fail(log, -12, "NO SUCH ENTRY");
@@ -2069,6 +2072,8 @@ static uintptr_t recovery_loop(volatile uint64_t *log, const char *why)
     for (;;) {
         int pick = -1;
         int r = recovery_main(why, &pick);
+        if (r == REC_USBBOOT)               /* the Mac placed an image while the menu waited */
+            return fbbg_entry();
         if (r == REC_FASTBOOT) {
             /* USB fastboot / console from recovery: `fastboot boot` starts its image; any other
              * way out (continue, Bixby) comes back to the recovery menu. */
@@ -2105,6 +2110,9 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
 uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)
 {
     uintptr_t entry = prepare(fdt, log, el, sctlr);
+    /* whatever starts now (an OS, or S-Boot's Download mode for 0) sets USB up itself: the
+     * menus' background fastboot stops, the DWC3 soft-reset (usbd_stop) */
+    fbbg_off();
     if (entry) {
         launch_go(log);
         clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
@@ -2194,11 +2202,18 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
         }
     }
     (void)cat_load();
+    /* From here every menu that waits for keys (the crash report, the boot menu, Starbite
+     * Recovery) also serves USB fastboot, so the Mac can drive it (fbbg.h). It comes up at the
+     * first poll of the first of them (after menu v7's intro, which polls nothing: a host would
+     * otherwise wait through it in the middle of enumeration). */
+    fbbg_enable();
     /* Crash and hang detection: the last launch judged, a report saved, the crash screen
      * (crash.c). Then the menu, Starbite Recovery or the same entry once more (settings). */
     {
         int retry = -1;
         int act = crash_after(&retry);
+        if (fbbg_pending())                 /* the Mac placed an image during the crash report */
+            return fbbg_entry();
         if (act == CRASH_GO_RECOVERY) {
             entry = recovery_loop(log, "THE LAST START CRASHED");
             if (entry)
@@ -2222,6 +2237,8 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
      * for Engineer's RAM test. A start that fails comes back to the menu. Unbranded: iOS. */
     for (;;) {
         int pick = branded ? star_menu(&boot_in, cmdline, BOOT_LINE_LENGTH) : star_ios_pick();
+        if (pick == STAR_PICK_USB)          /* the Mac placed an image while the menu waited */
+            return fbbg_entry();
         if (pick <= 0)
             return branded ? 0 : fatal(log, -1, "NO PAYLOAD");
         entry = boot_entry((unsigned)(pick - 1), log, fdt, cmdline);
