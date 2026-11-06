@@ -1,0 +1,17 @@
+#!/bin/sh
+# Starbite Maintenance: the "current job" line on the phone's screen (sb-status) and in the log.
+#   sb-job TEXT        set it (the host's transport sets it for every command it runs: tool: command)
+#   sb-job -q TEXT     set it without a log line (the per-command updates)
+#   sb-job             clear it
+S=/run/sbmaint
+mkdir -p $S
+q=
+[ "$1" = -q ] && { q=1; shift; }
+t=$(printf '%s' "$*" | tr -c '[:print:]' ' ' | cut -c1-120)
+if [ -z "$t" ]; then
+	: > $S/job
+	exit 0
+fi
+printf '%s\n' "$t" > $S/job
+[ -n "$q" ] || echo "$(date +%H:%M:%S) job: $t" >> $S/log
+exit 0

@@ -1,0 +1,31 @@
+# PROPOSED catalog entries for Starbite Maintenance (docs/MAINTENANCE.md 4.3), NOT applied: whoever owns
+# tools/store/catalog.toml appends them there. They start SBMAINT from the OS store on TODAY's loader (the
+# catalog path: reboot-to maint, settings next=maint, Bixby > Starbite Recovery > Boot entry...), so a
+# phone without the SBMAINT partition (S9 #1 today) can use it before the loader's own early "maint" path
+# (docs/MAINTENANCE.md 4.2) exists. Store files: tools/maint/pack.py store-entries build/maint/sbmaint.img DIR
+# gives maint.image, maint.dtb, maint.initrd and maint-rescue.dtb. Checked with
+# `python3 tools/store/sbstore2.py catalog tools/maint/catalog-maint.toml /tmp/x.sbc`.
+
+[[entry]]
+key = "maint"
+name = "Starbite Maintenance"
+version = "Linux 7.1 · ssh over USB · no TWRP"
+category = "starbite"
+method = "linux"
+tag = "beta"
+files = ["maint.image|linux.image", "maint.dtb", "maint.initrd"]
+cmdline = "sb.maint=1 sb.maint.src=store s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
+root = "none (RAM only)"
+flags = ["hidden"]
+
+[[entry]]
+key = "maint-rescue"
+name = "Starbite Maintenance (rescue)"
+version = "Linux 7.1 · USB host · rescue disk"
+category = "starbite"
+method = "linux"
+tag = "beta"
+files = ["maint.image|linux.image", "maint-rescue.dtb|rescue.dtb", "maint.initrd"]
+cmdline = "sb.maint=1 sb.rescue=1 sb.maint.src=store s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
+root = "none (RAM only)"
+flags = ["hidden"]

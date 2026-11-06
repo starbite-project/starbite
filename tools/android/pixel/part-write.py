@@ -16,6 +16,9 @@ Never touches EFS, CPEFS, PARAM, KEYSTORAGE, PERSISTENT, STEADY, BOTA*, DTB, DTB
 GPT or the boot LUNs: the allowlist below is the only way in."""
 import argparse, gzip, hashlib, os, subprocess, sys, tempfile, time
 
+if os.environ.get('SB_TRANSPORT', 'twrp') != 'twrp':   # SB_TRANSPORT=maint: adb = ssh to Starbite Maintenance
+    os.environ['PATH'] = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', 'maint', 'transport') \
+        + os.pathsep + os.environ.get('PATH', '')       # (docs/MAINTENANCE.md 9; default: TWRP's adb)
 ALLOW = {'SYSTEM': 'sda18', 'VENDOR': 'sda19', 'ODM': 'sda20', 'A16DATA': 'sda28'}
 CHUNK, MIB = 64 << 20, 1 << 20
 

@@ -7,6 +7,8 @@
 #  - VENDOR sha256 (0d67327a... = the Oct 27 patched image; anything else = pull it fresh, it changed)
 #  - the card mounted at /external_sd with its free space; the Mac's free space (>= 4 GB margin)
 set -u
+# SB_TRANSPORT=maint: adb = ssh to Starbite Maintenance (docs/MAINTENANCE.md 9); default: TWRP's adb
+[ "${SB_TRANSPORT:-twrp}" = twrp ] || PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../maint/transport" && pwd):$PATH"
 stop=0
 say() { printf '%-5s %s\n' "$1" "$2"; [ "$1" = STOP ] && stop=1; return 0; }
 [ "$(adb get-state 2>/dev/null)" = recovery ] || { say STOP "phone not in TWRP"; exit 1; }

@@ -1,0 +1,139 @@
+#!/bin/sh
+# Project Starbite: Starbite Maintenance (SBMAINT) /init. docs/MAINTENANCE.md.
+#
+# One Linux maintenance environment (Linux 7.1 + this initramfs, from RAM) for three jobs that TWRP
+# did until now, and none of them touches RECOVERY:
+#   maint      (default)  the computer's root shell on the phone: USB networking (CDC-ECM, or NCM with
+#                         sb.maint.usb=ncm) + ssh, key only; TWRP-style /dev/block paths; the tools.
+#                         Started by the loader from the SBMAINT partition or the OS store (Bixby >
+#                         Starbite Recovery > Starbite Maintenance, boot-next key "maint", or fastboot).
+#   installer  sb.installer=1: the same, as the Starbite installer's environment (docs/INSTALLER.md 13):
+#                         the card is not mounted; the installer's own key comes appended to the initrd.
+#   rescue     sb.rescue=1: Starbite Rescue (tools/rescue/init, embedded): every UFS LUN read-only, the
+#                         port a USB host, a Starbite rescue USB disk's script runs; Volume Down switches
+#                         to maint's USB link.
+# The loader appends to the DTB's bootargs: sb.maint=1 sb.maint.src=a|b|store|fastboot sb.maint.seq=N
+# sb.maint.from=menu|next|fastboot [sb.rescue=1] [sb.serial=SERIAL] (docs/MAINTENANCE.md 4).
+# Keys: Power held 3 s reboots to the Starbite menu (maint/installer; rescue has its own keys).
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export HOME=/root
+S=/run/sbmaint
+GPA2_DAT=0x14050064                                # bit 4 Power (active low)
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /dev/pts /run /tmp
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=1777 tmpfs /tmp
+mount -t tmpfs -o mode=0755 tmpfs /run
+mkdir -p $S/early /var/log /external_sd /root/.ssh /etc/dropbear
+: > $S/log
+: > $S/job
+echo 1 > /proc/sys/kernel/printk 2>/dev/null       # only emergencies on the screen: it is sb-status's
+
+# ---- first: what the previous boot left in RAM, before anything can reuse it ---------------------
+# (the maint DTB keeps Linux's ramoops off the rings, so they are as the loader / the last OS left them)
+memdump 0xFED10000 0x8000 > $S/early/ramoops.bin 2>/dev/null       # dmesg ring, console/pmsg ring, mailbox
+memdump 0x91FFF000 0x1000 > $S/early/loader-log.bin 2>/dev/null    # the loader's log page (POST, starts)
+memdump 0xC0000000 0x80000 > $S/early/seclog.bin 2>/dev/null       # S-Boot's sec_log (reserved, no-map)
+mkdir -p /sys/fs/pstore $S/early/pstore
+mount -t pstore pstore /sys/fs/pstore 2>/dev/null && cp /sys/fs/pstore/* $S/early/pstore/ 2>/dev/null
+
+log() { echo "$(date +%H:%M:%S) $*" >> $S/log; echo "<6>sbmaint: $*" > /dev/kmsg 2>/dev/null; return 0; }
+
+# ---- mode and the loader's words ------------------------------------------------------------------
+MODE=maint SRC=fastboot SEQ= FROM= CARD=1
+for a in $(cat /proc/cmdline); do
+	case $a in
+	sb.rescue=1|sb.maint.mode=rescue) MODE=rescue ;;
+	sb.installer=1) [ $MODE = rescue ] || MODE=installer ;;
+	sb.maint.src=*) SRC=${a#*=} ;;
+	sb.maint.seq=*) SEQ=${a#*=} ;;
+	sb.maint.from=*) FROM=${a#*=} ;;
+	sb.maint.card=*) CARD=${a#*=} ;;
+	esac
+done
+[ $MODE = installer ] && CARD=0
+{
+	echo "mode=$MODE"
+	echo "src=$SRC"
+	echo "seq=$SEQ"
+	echo "from=$FROM"
+} > $S/state
+log "$(head -1 /etc/sbmaint-release) mode $MODE from ${SRC}${SEQ:+ seq $SEQ}"
+
+# the clock: /chosen/starbite,rtc-epoch (u64 UTC, written by the loader), as tools/linux/init
+E=/proc/device-tree/chosen/starbite,rtc-epoch
+if [ -r $E ]; then
+	t=$(hexdump -v -e '1/1 "%02x"' $E)
+	[ -n "$t" ] && [ "$t" != 0000000000000000 ] && date -u -s "@$((0x$t))" >/dev/null 2>&1
+fi
+
+# a bigger console font (fbcon's built-in 8x16 is tiny on 1440x2960); harmless if refused. kbd's
+# setfont can load fonts wider than 32 (busybox's loadfont stops at 32x32).
+F=/usr/share/sbmaint
+if command -v setfont >/dev/null && setfont -C /dev/tty0 $F/font-32x64.psf 2>/dev/null; then
+	log "console font 32x64"
+elif loadfont < $F/font-16x32.psf > /dev/tty0 2>/dev/null; then
+	log "console font 16x32"
+fi
+
+# ---- block devices: /dev/block/NAME, /dev/block/by-name/PART (sb-byname), read-only flags ---------
+i=0
+while [ ! -e /sys/class/block/sda ] && [ $i -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+sb-byname
+i=0
+while [ ! -e /dev/block/by-name/EFS ] && [ $i -lt 25 ]; do sleep 0.2; sb-byname; i=$((i + 1)); done
+[ -e /dev/block/by-name/EFS ] || log "WARNING: no UFS partitions (by-name/EFS missing)"
+if [ $MODE = rescue ]; then
+	sb-protect apply-all
+else
+	sb-protect apply
+fi
+log "$(ls /dev/block/by-name | wc -l) partitions; protected: $(sb-protect list | grep -c ' ro$') read-only"
+
+# ---- ssh keys: the built-in ones (/etc/sbmaint/authorized_keys) + one the installer appended -------
+{
+	cat /etc/sbmaint/authorized_keys 2>/dev/null
+	cat /root/.ssh/authorized_keys 2>/dev/null
+} | grep -E '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) ' | sort -u > /tmp/ak
+mv /tmp/ak /root/.ssh/authorized_keys
+chmod 700 /root /root/.ssh
+chmod 600 /root/.ssh/authorized_keys
+
+# ---- rescue mode: tools/rescue/init does the rest (it never returns) -------------------------------
+if [ $MODE = rescue ]; then
+	SB_RESCUE_EMBEDDED=1 SB_RESCUE_DEVICE_HOOK="sb-usb device" SB_RESCUE_HOST_HOOK="sb-usb host" \
+		sh /bin/sb-rescue
+	log "rescue ended: maintenance over USB"
+	MODE=maint
+	sed -i 's/^mode=.*/mode=maint/' $S/state
+fi
+
+# ---- maint / installer: USB networking + ssh, the card, the screen --------------------------------
+sb-usb device || log "ERROR: USB networking did not come up (sb-usb device: $?)"
+if [ "$CARD" = 1 ]; then                           # TWRP mounts the card's exFAT at /external_sd too
+	i=0
+	while [ ! -b /dev/block/mmcblk0p1 ] && [ $i -lt 15 ]; do sleep 0.2; sb-byname; i=$((i + 1)); done
+	if [ "$(blkid -s TYPE -o value /dev/block/mmcblk0p1 2>/dev/null)" = exfat ]; then
+		# VolumeFlags (boot sector offset 106), bit 1 = VolumeDirty: hard resets leave it set
+		f=$(dd if=/dev/block/mmcblk0p1 bs=1 skip=106 count=1 2>/dev/null | hexdump -v -e '1/1 "%u"')
+		[ $(( ${f:-0} & 2 )) -ne 0 ] && { log "card exFAT marked dirty: fsck.exfat -p"; fsck.exfat -p /dev/block/mmcblk0p1 >> $S/log 2>&1; }
+		mount -t exfat -o rw,noatime /dev/block/mmcblk0p1 /external_sd && log "card p1 (exFAT) at /external_sd"
+	fi
+fi
+sb-status --loop &
+
+# ---- stay up; Power held 3 s reboots to the menu (the computer reboots with sb-reboot) ------------
+held=0
+while :; do
+	v=$(devmem $GPA2_DAT 32 2>/dev/null)
+	if [ -n "$v" ] && [ $(( v & 0x10 )) -eq 0 ]; then
+		held=$((held + 1))
+		[ $held -eq 6 ] && { log "Power held: rebooting to the menu"; sb-reboot menu; }
+	else
+		held=0
+	fi
+	sleep 0.5
+done
