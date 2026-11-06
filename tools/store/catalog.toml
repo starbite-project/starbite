@@ -38,9 +38,9 @@ log = ["quiet loglevel=3 vt.global_cursor_default=0 systemd.show_status=auto rd.
        "loglevel=4",
        "loglevel=7 s9p_decon.geom_log=1 systemd.log_level=info",
        "loglevel=8 ignore_loglevel keep_bootcon printk.devkmsg=on s9p_decon.geom_log=1 systemd.log_level=debug"]
-# 0 until a watchdog reset is seen to reach the loader (not Samsung's upload mode) on S9 #1 with the user
-# present (docs/STARBITE-HEALTH.md section 10 step 8); then 60.
-wdt = 0
+# 60 s: verified 2026-11-06 on S9 #1 (postmarketOS, /dev/watchdog held open unfed): CLUSTER1_WDTRESET came
+# back to the loader (not upload mode), classified HANG (WATCHDOG), report saved.
+wdt = 60
 wdt_feed = "kernel"
 crash_return = true
 
