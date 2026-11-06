@@ -13,8 +13,8 @@
 #include "catalog.h"
 #include "sd.h"
 
-#define ENG_VERSION "2.0"
-#define ENG_BUILD "Starbite Lab (v2: tiered writes, stress, thermal, battery, utilities)"
+#define ENG_VERSION "2.1"
+#define ENG_BUILD "Starbite Lab (v2.1: tiers 1-4, stress, thermal, battery, GPU, utilities)"
 
 /* em.c's colour names on menu v7's palette */
 #define UI_TEXT C_L1
@@ -94,6 +94,8 @@ void dash_sample(void);
 void dash_battery_page(void);
 void tests_history(void);       /* tests.c */
 void test_record(const char *name, int pass, const char *detail);
+/* A tier 3 / 4 action (confirmation or outcome) into the history and the pmsg ring ("SBENG1 W"). */
+void test_record_action(int tier, const char *what, const char *detail);
 void tests_load_history(void);
 void logs_engineer(void);       /* pages_sb.c */
 void logs_loader(void);
@@ -119,9 +121,13 @@ void eng_exit_to_menu(void);
 
 /* ---- policy (policy.c, pure, unit-tested) ------------------------------------------------------
  * Tiers of confirmation (libsb SB_TIER*): 0 read, 1 warning + held slide, 2 + the target typed,
- * 3 + a second confirmation (+ a verified backup for storage). TIER_NO: physically impossible or
- * the running Engineer OS itself. */
-enum { TIER0 = SB_TIER0, TIER1 = SB_TIER1, TIER2 = SB_TIER2, TIER3 = SB_TIER3, TIER_NO = SB_TIER_NO };
+ * 3 + a second confirmation (+ a verified backup for storage), 4 extreme (red full-screen warning,
+ * "<target> I ACCEPT" typed, Power held 5 s, storage: a backup unless explicitly waived). TIER_NO:
+ * only what cannot be expressed (docs/ENGINEER-OS.md 8.1). */
+enum { TIER0 = SB_TIER0, TIER1 = SB_TIER1, TIER2 = SB_TIER2, TIER3 = SB_TIER3, TIER4 = SB_TIER4, TIER_NO = SB_TIER_NO };
+#define GPU_NLEVELS 6
+extern const unsigned gpu_levels_khz[GPU_NLEVELS];
+int dvfs_tier(unsigned domain, unsigned khz, const char **why);
 int poke_tier(uint64_t addr, const char **why);         /* a 32-bit register / memory write */
 const char *poke_undo(uint64_t addr);
 int range_tier(uint64_t addr, uint64_t len, const char **why);   /* memory fill: the worst page */
@@ -154,8 +160,21 @@ struct action {
     uint64_t first, count;
 };
 /* Warning screen and the confirmations; on success *auth is filled and complete except, for tier
- * 3 storage, the backup step (lab_backup adds it). 1 confirmed, 0 cancelled or refused. */
+ * 3 storage, the backup step (lab_backup adds it). 1 confirmed, 0 cancelled or refused. Tier 4:
+ * the red full-screen warning, the typed phrase, the slide, Power held 5 s; tier 4 storage also
+ * asks "back up first / no backup" on a second red screen. Every tier 3 / 4 confirmation is
+ * written to the pmsg ring before anything happens ("SBENG1 W", Test history). */
 int lab_confirm(const struct action *a, struct sb_auth *auth);
+/* 1 if the confirmed storage action still needs its verified backup (tier 3, or tier 4 without
+ * the waiver). */
+int lab_backup_needed(const struct sb_auth *auth);
+/* After a tier 3 / 4 action: the outcome next to its confirmation in the history and pmsg. */
+void lab_major_result(const char *title, const char *target, const char *outcome);
+/* Back up memory [addr, addr + len) into the OS store as "bak-<label>-<n>", verified. 0 or < 0. */
+int lab_backup_mem(uint64_t addr, uint64_t len, const char *label, char *where);
+/* A tier 4 access to an address Engineer OS does not map: mapped for the access, the fault
+ * caught. 1 the access completed (*v read), 0 it faulted (*esr, the SError state in *serror). */
+int lab_attempt32(uint64_t addr, int write, uint32_t *v, uint64_t *esr, int *serror);
 /* Back up blocks [first, first + count) of medium / lu into the OS store (UFS, else the card) as
  * "bak-<label>-<n>", verified (read back, CRC, compared with the source again). On success records
  * SB_STEP_BACKUP in auth (if given) and writes where it went into where (64 bytes). 0 or < 0. */
@@ -211,6 +230,22 @@ void lab_battery(void);                 /* the battery tests' list */
 void lab_health(void);                  /* full health check */
 void lab_save_report(void);             /* results to the OS store */
 void lab_sensors(void);                 /* every thermal sensor, live */
+void lab_gpu(void);                     /* gpu.c: the Mali-G72 tests */
+/* The temperature-limit option shared by the load tests: 70..95 C or "no limit" (index
+ * LIMIT_NONE, chosen only through a warning naming the hardware trip as decoded live). */
+#define LIMIT_N 7
+#define LIMIT_NONE 6
+int lab_limit_c(int idx);               /* C, or 1000 for no limit */
+const char *lab_limit_label(int idx);
+int lab_limit_next(int idx);            /* the next option; asks before LIMIT_NONE */
+/* gpu.c results for the report, and lab.c's live page and charts (0..4) */
+void result_line(const char *name, int pass, const char *detail);
+void lab_live_begin(const char *title);
+int lab_live_poll(void (*fill)(void), unsigned every_ms);   /* 1: the user asked to stop */
+void lab_live_end(void);
+void lab_chart_reset(unsigned i, const char *title, uint32_t col, unsigned total_samples);
+void lab_chart_push(unsigned i, int32_t v);
+void lab_chart_kv(unsigned i, int h);
 /* Results of this session as text lines (report, store export). */
 unsigned lab_report_lines(char (*out)[96], unsigned max);
 /* kern.c: the stress kernels (ARMv8.0, run on every core) */

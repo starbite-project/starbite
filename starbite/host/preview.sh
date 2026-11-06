@@ -31,7 +31,7 @@ limactl shell --workdir "$root" starbite gcc -O1 -g -DSB_HOST "-DSB_ASSETS=\"$ou
     -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I"$lib" -I"$eng" \
     -o "$out/engineer-host" "$root/starbite/host/host.c" \
     "$lib/str.c" "$lib/log.c" "$lib/sbui.c" "$lib/sbui_input.c" "$lib/sbui_page.c" "$lib/sbui_w.c" "$lib/sb7.c" \
-    "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/assets.S" "$eng"/*.c -lm -lpthread
+    "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" "$lib/assets.S" "$eng"/*.c -lm -lpthread
 
 # scene name, then the script (taps: tab bar at y 2824, tab t at x 90 + 180 t)
 scene() {
@@ -57,7 +57,7 @@ if [ "${1:-}" = labtour ]; then
     exit $?
 fi
 
-all="dashboard hub tests power battery clocks temps storage partitions starbite catalog start logs pmsg tools armed peek device soc memory history dialog sector gpt keys cpu health warning sensors"
+all="dashboard hub tests power battery clocks temps storage partitions starbite catalog start logs pmsg tools armed peek device soc memory history dialog sector gpt keys cpu health warning sensors gpu gpujm redscreen offer"
 want=${1:-$all}
 for s in $want; do
     case $s in
@@ -81,13 +81,21 @@ for s in $want; do
     device) scene device w:800 k:d k:p w:800 ;;
     soc) scene soc w:800 k:d k:d k:p w:800 ;;
     memory) scene memory w:800 k:d k:d k:d k:p w:800 g:700,2000,-900,300 w:800 S:memory-scroll1 g:700,1200,500,200 w:1500 S:memory-scroll2 k:d k:d w:300 ;;
-    history) scene history w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:800 ;;
-    dialog) scene dialog w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:600 ;;
+    history) scene history w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:800 ;;
+    dialog) scene dialog w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:600 ;;
     sector) scene sector w:800 t:810,2824 w:400 k:d k:d k:d k:d k:d k:d k:p w:800 ;;
     gpt) scene gpt w:800 t:810,2824 w:400 k:d k:d k:d k:d k:p w:800 ;;
-    keys) scene keys w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:600 ;;
+    keys) scene keys w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:600 ;;
     cpu) scene cpu w:800 t:270,2824 w:400 k:d k:d k:p w:800 k:d k:p w:600 k:d k:d k:d k:d k:p w:7000 ;;
-    health) scene health w:800 t:270,2824 w:400 k:d k:p w:800 k:d k:p w:800 h:p:1700 w:24000 ;;
+    health) scene health w:800 t:270,2824 w:400 k:d k:p w:800 k:d k:p w:800 k:d k:d k:p w:24000 ;;
+    offer) scene offer w:800 t:270,2824 w:400 k:d k:p w:800 k:d k:p w:800 ;;
+    gpu) scene gpu w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:800 ;;
+    gpujm) scene gpujm w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:800 k:d k:p w:600 \
+        k:d k:p w:600 h:u:1900 w:1500 h:u:2200 k:d k:d k:p w:3000 ;;
+    redscreen) scene redscreen w:800 t:1350,2824 w:400 k:d k:d k:p w:800 k:d k:p k:p k:u k:u k:u k:u k:u k:u k:u \
+        k:u k:u k:p k:d k:d k:d k:d k:p k:p k:d k:d k:d k:d k:d k:d k:p k:p k:p k:p k:p k:p w:600 h:u:2200 k:d \
+        k:d k:d k:p k:p k:p k:p k:p k:p k:p k:p k:p k:p k:p w:300 k:p k:p k:p k:p k:p k:p k:p k:p k:p w:600 \
+        k:p w:600 h:p:2300 w:900 h:u:1900 w:1500 ;;
     warning) scene warning w:800 t:270,2824 w:400 h:d:2600 w:300 k:p w:900 ;;
     sensors) scene sensors w:800 t:630,2824 w:400 k:d k:d k:d k:d k:p w:1500 ;;
     *) echo "unknown scene $s"; exit 1 ;;

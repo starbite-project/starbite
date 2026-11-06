@@ -272,6 +272,7 @@ static void fill_fence(void)
     kv_add("Tier 1", "warning screen + slide");
     kv_add("Tier 2", "+ the target's name typed");
     kv_add("Tier 3", "+ hold Power 3 s, and a verified backup into the OS store first");
+    kv_add("Tier 4", "red warning, \"<target> I ACCEPT\" typed, slide, hold Power 5 s; backup unless waived");
     kv_addc("Dry run", sb_fence_is_dry_run() ? "ON: writes are logged, not made" : "off (Tools > Armed mode)",
             sb_fence_is_dry_run() ? C_ORANGE : C_L2);
     kv_hdr("SAMPLE TARGETS (LIVE GPT)");

@@ -105,6 +105,69 @@ int ask_pick(const char *title, const char *const *labels, int n, int cur)
 /* ---- register peek / poke and memory dump ------------------------------------------------------ */
 
 static uint64_t pk_addr = 0x14060000ULL;
+static char pk_attempt[96];                  /* the last tier 4 read attempt */
+
+/* S-Boot's ECT: before a tier 4 write into it, offer a verified copy in the OS store. */
+#define ECT_BASE 0xa0000000ULL
+#define ECT_SIZE 0x100000ULL
+static void ect_offer_backup(uint64_t a, uint64_t len)
+{
+    char where[64];
+    if (a >= ECT_BASE + ECT_SIZE || a + len <= ECT_BASE)
+        return;
+    if (!dialog("Back up the ECT first?", "S-Boot's ECT, 1 MiB at 0xA0000000, into the OS store (verified).",
+                "Recommended: it is the only copy of what is there now.", "BACK UP"))
+        return;
+    if (!lab_backup_mem(ECT_BASE, ECT_SIZE, "ECT", where))
+        (void)dialog("ECT backed up", where, "Pull the store on the Mac to keep it (tools/store).", "OK");
+    else
+        (void)dialog_danger("ECT backup failed", "No copy was made (see the audit log).",
+                            "The write can still go ahead: you confirmed it.", "OK");
+}
+
+/* The recovery text of the first tier 4 page of a fill. */
+static const char *fill_undo(uint64_t addr, uint64_t len)
+{
+    for (uint64_t p = addr & ~0xfffULL; p < addr + len; p += 0x1000) {
+        const char *w;
+        if (poke_tier(p < addr ? addr : p, &w) >= TIER4)
+            return poke_undo(p < addr ? addr : p);
+    }
+    return poke_undo(addr);
+}
+
+/* A tier 4 fill: every store fault-protected, unmapped blocks mapped one at a time; stops at the
+ * first fault (its ESR in *esr). */
+static uint64_t fill_protected(uint64_t addr, uint64_t len, uint64_t pat, uint64_t *esr)
+{
+    uint64_t done = 0;
+    *esr = 0;
+    for (; done < len; done += 8) {
+        uint64_t a = addr + done;
+        int m = 0;
+        if (!sb_map_kind(a)) {
+            m = sb_mmu_map_temp(a);
+            if (m <= 0) {
+                audit_line("tier 4 fill stopped: a block could not be mapped for the attempt");
+                break;
+            }
+        }
+        uint64_t c = sb_fault.count;
+        sb_probe_depth++;
+        __asm__ volatile("str %0, [%1]\n\tdsb sy" : : "r"(pat), "r"(a) : "memory");
+        sb_probe_depth--;
+        if (m > 0)
+            sb_mmu_unmap_temp();
+        if (sb_fault.count != c) {
+            *esr = sb_fault.esr;
+            break;
+        }
+        if (!(done & 0xfffffU) && lab_stop_check())
+            break;
+    }
+    return done;
+}
+
 static uint64_t pk_ok_block = ~0ULL;        /* the 64 KiB block the user allowed to be read */
 static int pk_mem;                           /* 0 registers (words), 1 memory (bytes + ASCII) */
 
@@ -133,6 +196,8 @@ static void build_peek(void)
     char what[64];
     int ua = lab_undo_available(what, sizeof(what));
     row_add("Undo the last write", ua ? what : "nothing to undo", ua ? R_WARN : R_DIS);
+    if (rt == TIER4)
+        row_add("Attempt a read here", "tier 4: mapped for one access, the fault caught", R_RED);
     ub_init(&u);
     ub_s(&u, tier_name(t));
     ub_s(&u, ": ");
@@ -173,8 +238,10 @@ static void build_peek(void)
                 }
         kv_monoc(u.b, a == pk_addr ? C_STAR : C_L1);
     }
-    if (rt == TIER_NO)
+    if (rt >= TIER4)
         kv_note(rwhy);
+    if (pk_attempt[0])
+        kv_monoc(pk_attempt, C_ORANGE);
 }
 
 static int peek_write(void)
@@ -182,7 +249,7 @@ static int peek_write(void)
     struct sb_auth au;
     struct action a;
     const char *why;
-    char tgt[24], oldv[24], newv[24], hap[96];
+    char tgt[24], oldv[24], newv[24], hap[200];
     struct ub u;
     uint64_t addr = pk_addr & ~3ULL, v = 0;
     uint32_t cur = 0;
@@ -228,10 +295,67 @@ static int peek_write(void)
     a.count = 4;
     if (!lab_confirm(&a, &au))
         return 0;
+    if (a.tier >= TIER4)
+        ect_offer_backup(addr, 4);
     int ok = lab_poke32(addr, (uint32_t)v, &au);
-    ui_toast(ok ? "Written (see the audit log)" : "Write failed or faulted", ok ? C_GREEN : C_RED, 1100);
+    if (!ok && a.tier >= TIER4)
+        (void)dialog_danger("The access faulted", "Lab's exception handler caught it: the store did not complete.",
+                            "ESR and the SError state are in the audit log and Test history.", "OK");
+    else
+        ui_toast(ok ? "Written (see the audit log)" : "Write failed or faulted", ok ? C_GREEN : C_RED, 1100);
     pk_addr = addr;
     return ok;
+}
+
+/* Tier 4: a read of an address Engineer OS does not map (the secure world, nothing at all). */
+static void peek_attempt(void)
+{
+    struct sb_auth au;
+    struct action a;
+    const char *why;
+    char tgt[24];
+    struct ub u;
+    uint64_t addr = pk_addr & ~3ULL;
+    ub_init(&u);
+    ub_hexn(&u, addr, 8);
+    sb_strcpy(tgt, sizeof(tgt), u.b);
+    a.tier = read_tier(addr, &why);
+    a.title = "Read an unmapped address";
+    a.target = tgt;
+    a.happens[0] = why;
+    a.happens[1] = "One 32-bit load through a temporary Device mapping of its block; the fault (synchronous "
+                   "abort or SError) is caught by Lab's exception handler and reported";
+    a.happens[2] = "The secure monitor or the hypervisor may treat it as an attack and reset the phone";
+    a.happens[3] = 0;
+    a.undo = "a read changes nothing; if the phone resets, it comes back to the loader";
+    a.old_v = "";
+    a.new_v = "";
+    a.backup = "";
+    a.space = SB_SP_MEM;
+    a.lu = 0;
+    a.kind = SB_KIND_FREEFORM;
+    a.first = addr;
+    a.count = 4;
+    if (a.tier >= TIER_NO || !lab_confirm(&a, &au))
+        return;
+    uint32_t v = 0;
+    uint64_t esr = 0;
+    int se = 0;
+    int ok = lab_attempt32(addr, 0, &v, &esr, &se);
+    ub_init(&u);
+    ub_hex(&u, addr, 9);
+    if (ok) {
+        ub_s(&u, " reads ");
+        ub_hex(&u, v, 8);
+    } else {
+        ub_s(&u, " FAULTED, ESR ");
+        ub_hex(&u, esr, 8);
+    }
+    if (se)
+        ub_s(&u, ", SError pending");
+    sb_strcpy(pk_attempt, sizeof(pk_attempt), u.b);
+    audit_line(u.b);
+    lab_major_result("Read an unmapped address", tgt, u.b);
 }
 
 static void mem_fill(void)
@@ -265,7 +389,7 @@ static void mem_fill(void)
     a.happens[0] = rng;
     a.happens[1] = why;
     a.happens[2] = 0;
-    a.undo = a.tier >= TIER_NO ? "-" : "a reboot (nothing in that memory survives one anyway)";
+    a.undo = a.tier >= TIER4 ? fill_undo(addr, len) : "a reboot (nothing in that memory survives one anyway)";
     a.old_v = "";
     a.new_v = pat;
     a.backup = "";
@@ -274,17 +398,25 @@ static void mem_fill(void)
     a.kind = SB_KIND_FREEFORM;
     a.first = addr;
     a.count = len;
-    if (!lab_confirm(&a, &au) || !sb_gate_open(&au))
+    if (!lab_confirm(&a, &au))
+        return;
+    if (a.tier >= TIER4)
+        ect_offer_backup(addr, len);
+    if (!sb_gate_open(&au))
         return;
     const char *w2;
     int r = sb_gate_check(SB_SP_MEM, 0, addr, len, a.tier, &w2);
-    uint64_t done = 0;
+    uint64_t done = 0, esr = 0;
     if (!r) {
         lab_stop_reset();
-        for (; done < len; done += 8) {
-            *(volatile uint64_t *)(addr + done) = p;
-            if (!(done & 0xfffffU) && lab_stop_check())
-                break;
+        if (a.tier >= TIER4) {
+            done = fill_protected(addr, len, p, &esr);
+        } else {
+            for (; done < len; done += 8) {
+                *(volatile uint64_t *)(addr + done) = p;
+                if (!(done & 0xfffffU) && lab_stop_check())
+                    break;
+            }
         }
         __asm__ volatile("dsb sy" ::: "memory");
     }
@@ -297,9 +429,16 @@ static void mem_fill(void)
         ub_size(&u, done);
         ub_s(&u, " at ");
         ub_hex(&u, addr, 9);
+        if (esr) {
+            ub_s(&u, ", then FAULTED (ESR ");
+            ub_hex(&u, esr, 8);
+            ub_c(&u, ')');
+        }
     }
     audit_line(u.b);
-    ui_toast(u.b, r ? C_RED : C_GREEN, 1200);
+    if (a.tier >= TIER3)
+        lab_major_result("Memory fill", tgt, u.b);
+    ui_toast(u.b, r || esr ? C_RED : C_GREEN, 1200);
 }
 
 static int act_peek(int i)
@@ -325,6 +464,7 @@ static int act_peek(int i)
         break;
     }
     case 4: lab_undo(); break;
+    case 5: peek_attempt(); break;
     default: break;
     }
     return 0;
@@ -459,7 +599,7 @@ static void sv_edit(void)
     a.count = 1;
     if (!lab_confirm(&a, &au))
         return;
-    if (d.tier >= TIER3 && lab_backup(sv_med, sv_lu, sv_lba, 1, tgt, &au, where))
+    if (lab_backup_needed(&au) && lab_backup(sv_med, sv_lu, sv_lba, 1, tgt, &au, where))
         return;
     static uint8_t nb[4096] __attribute__((aligned(64)));
     memcpy(nb, sv_blk, sizeof(nb));
@@ -736,7 +876,7 @@ static void pt_restore(void)
     a.count = n;
     if (!lab_confirm(&a, &au))
         return;
-    if (d.tier >= TIER3 && lab_backup(pt_med, pt_lu, pt_first, n, pt_name, &au, where))
+    if (lab_backup_needed(&au) && lab_backup(pt_med, pt_lu, pt_first, n, pt_name, &au, where))
         return;
     int r = lab_restore(&e, pt_med, pt_lu, pt_first, &au);
     ui_toast(r == SB_W_DRYRUN ? "Dry run: logged, nothing written" : r ? "Restore FAILED (audit log)" : "Restored and verified",
@@ -772,7 +912,7 @@ static void pt_erase(void)
     a.count = pt_count;
     if (!lab_confirm(&a, &au))
         return;
-    if (a.tier >= TIER3 && lab_backup(pt_med, pt_lu, pt_first, pt_count, pt_name, &au, where))
+    if (lab_backup_needed(&au) && lab_backup(pt_med, pt_lu, pt_first, pt_count, pt_name, &au, where))
         return;
     if (!sb_gate_open(&au))
         return;
@@ -1215,11 +1355,17 @@ static void build_pmic_w(void)
     uint8_t cur = 0;
     kv_hdr("S2MPS18 (ACPM)");
     ub_init(&u);
-    ub_s(&u, pm_type == 0 ? "TOP" : pm_type == 1 ? "PMIC" : "RTC");
-    row_value("Block", u.b, 0);
+    if (pm_type <= 2)
+        ub_s(&u, pm_type == 0 ? "TOP" : pm_type == 1 ? "PMIC" : "RTC");
+    else {
+        ub_s(&u, "type ");
+        ub_dec(&u, pm_type);
+        ub_s(&u, " (unknown: tier 4)");
+    }
+    row_value("Block", u.b, pm_type > 2 ? R_RED : 0);
     ub_init(&u);
     ub_hex(&u, pm_reg, 2);
-    if (sb_pmic_read(pm_type, pm_reg, &cur)) {
+    if (pm_type <= 2 && sb_pmic_read(pm_type, pm_reg, &cur)) {
         ub_s(&u, "  now ");
         ub_hex(&u, cur, 2);
     }
@@ -1228,7 +1374,7 @@ static void build_pmic_w(void)
     ub_hex(&u, pm_val, 2);
     row_value("Value", u.b, 0);
     int t = pmic_tier(pm_type, pm_reg, pm_val, &why);
-    row_add("Write it", why, t >= TIER3 ? R_RED : R_WARN);
+    row_add("Write it", why, t >= TIER_NO ? R_DIS : t >= TIER3 ? R_RED : R_WARN);
     kv_hdr("MAX77705 (I2C)");
     ub_init(&u);
     ub_hex(&u, mx_addr, 2);
@@ -1245,8 +1391,9 @@ static void build_pmic_w(void)
     char what[64];
     int ua = lab_undo_available(what, sizeof(what));
     row_add("Undo the last write", ua ? what : "nothing to undo", ua ? R_WARN : R_DIS);
-    kv_note("Tier 1: the touch and card rails at the kernel's values, the RTC, the charger watchdog feed. "
-            "Every other PMIC or MAX77705 register: tier 3 (a wrong voltage can damage the phone at once).");
+    kv_note("Tier 1: the touch and card rails at the kernel's values, the RTC, the charger watchdog feed, "
+            "vdd_g3d (BUCK6 0x2B) from 600 to 950 mV. Every other PMIC or MAX77705 register: tier 3 (a wrong "
+            "voltage can damage the phone at once). ACPM types 3..15 (blocks Starbite does not know): tier 4.");
 }
 
 static int pm_write(int max)
@@ -1293,7 +1440,7 @@ static int act_pmic_w(int i)
 {
     uint64_t v;
     switch (i) {
-    case 0: pm_type = (pm_type + 1U) % 3U; break;
+    case 0: pm_type = (pm_type + 1U) % 16U; break;
     case 1: v = pm_reg; if (ask_hex("PMIC register", "Register (00..FF)", &v, 2)) pm_reg = (unsigned)v; break;
     case 2: v = pm_val; if (ask_hex("PMIC value", "Value (00..FF)", &v, 2)) pm_val = (unsigned)v; break;
     case 3: (void)pm_write(0); break;

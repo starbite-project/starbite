@@ -2303,3 +2303,25 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   tools/menu7/preview/loader_stubs.c gets an fbbg_poll stub (h7 still builds). Host: loader-test 347 checks,
   usb-fastboot 392 (clang ASan/UBSan and VM gcc), xnu-health-test 911. Loader Image d2118f6a...; BOOT
   out/xnu-boot-health5.img d5e6063c957d1915bb2b273367d8ae71bd4636a20e88a92b144cdbe366e10e9e (health2's recipe).
+
+- 2026-11-06 (evening): **Starbite Lab 2.1 after the first use on the phone** (built and host-tested only;
+  docs/ENGINEER-OS.md v2.1). The user's findings: the CPU stress stops at the temperature limit (wanted:
+  unlimited), every sensor read raw 0 now and then (-20 / 90 C), the M3 cores worked after the tier 3 PMU
+  step, wanted GPU tests, and "engineer mode allows anything behind extreme warnings". Cause of the raw 0:
+  adc.c read DAT before testing INT_ST, so a conversion finishing between the two reads returned the reset
+  value 0 (and it trusted DAT bit 31); fixed (INT_ST, then DAT) plus a sample filter for every sensor
+  (raw 0 / full scale / TMU code 0 or 0x1FF / impossible temperatures and voltages rejected and counted,
+  median of 3; a dead sensor shows "no valid sample"). "No limit" behind a warning that shows the TMU trips
+  read live (115 C decoded, never seen firing). The M3 cores are offered when a test starts. GPU tests
+  without an OS (libsb mali.c / mali_desc.c, engineer gpu.c): vdd_g3d 950 mV (BUCK6 0x30..0x68 now tier 1),
+  reset, cores, LPAE tables in bank 2 at 0x8F0000000, WRITE_VALUE on every slot + chains + a deliberate MMU
+  fault and recovery + the job IRQ at the GIC, a 64-job clear-only fragment pattern checked per pixel and
+  drawn into the scanout, a stress loop, GPU clock via ACPM DVFS (vendor table 260..572 MHz, tier 3).
+  Descriptors checked word for word against Mesa 25.0.7's own packing (starbite/tools/mesa-golden.c in the
+  VM; the iOS port's hand packing agrees too). Tier 4 (extreme): the ECT, the running image, the secure
+  world and unmapped addresses (mapped for one access, the fault caught), raw cross-partition LU writes,
+  unknown ACPM PMIC types, other DVFS; red screen, "<target> I ACCEPT", Power 5 s, backup unless waived on a
+  second red screen; tier 3 / 4 actions go to pmsg before they run ("SBENG1 W", Test history). Only
+  addresses >= 64 GiB and what ACPM / I2C cannot encode stay impossible. Host: 526 unit checks, tour 84
+  pages, Lab tour 22 incl. GPU and tier 4, reproducible; engineer.img 4476928 bytes, sha256
+  0e12eac72c217e31b5ec031f091e18992eac1476fdb7d7f493805d7099427696.

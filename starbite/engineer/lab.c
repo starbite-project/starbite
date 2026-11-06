@@ -16,7 +16,7 @@
 
 static const unsigned dur_s[] = { 30, 60, 300, 900, 1800, 3600, 0 };
 static const char *const dur_name[] = { "30 s", "1 min", "5 min", "15 min", "30 min", "60 min", "until stopped" };
-static const int limit_c[] = { 70, 75, 80, 85, 90, 95 };
+static const int limit_c[LIMIT_N] = { 70, 75, 80, 85, 90, 95, 1000 };
 static const char *const core_name[] = { "all 8 (A55 + M3)", "the 4 A55 cores", "the 4 M3 cores + cpu0", "cpu0 only" };
 static const unsigned core_mask[] = { 0xffU, 0x0fU, 0xf1U, 0x01U };
 static const char *const kern_name[] = { "INT + FP + NEON + memory", "integer", "floating point", "NEON", "memory (caches)" };
@@ -29,6 +29,114 @@ static struct {
 static int nxt(int v, int n)
 {
     return (v + 1) % n;
+}
+
+/* ---- the temperature limit, and "no limit" ----------------------------------------------------------
+ * "No limit" is offered only through a warning that shows what still protects the SoC, read live
+ * from the TMU: whether S-Boot armed the hardware trip (CONTROL bit 12, THERM_TRIP_EN) on TMU_TOP and
+ * TMU_SUB and the threshold it programmed (THD_TEMP0 [24:16], decoded with probe 0's trim: 115 C on
+ * this phone in the host model and in S-Boot's disassembly). What the trip does when it fires (the
+ * TMU signals the PMU, which cuts the power) is the vendor's description: never seen here. */
+int lab_limit_c(int idx)
+{
+    return idx >= 0 && idx < LIMIT_N ? limit_c[idx] : 85;
+}
+
+const char *lab_limit_label(int idx)
+{
+    static const char *const l[LIMIT_N] = { "70 " U_DEG "C", "75 " U_DEG "C", "80 " U_DEG "C", "85 " U_DEG "C",
+                                            "90 " U_DEG "C", "95 " U_DEG "C", "no limit (hardware trip only)" };
+    return idx >= 0 && idx < LIMIT_N ? l[idx] : "?";
+}
+
+static char nl_top[96], nl_sub[96];
+
+static void trip_line(char *out, const char *name, int armed, int c)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, name);
+    if (armed && c > -100) {
+        ub_s(&u, " hardware trip ARMED (CONTROL bit 12), threshold decodes to ");
+        ub_sdec(&u, c);
+        ub_s(&u, " " U_DEG "C");
+    } else if (armed) {
+        ub_s(&u, " hardware trip armed, threshold not decodable");
+    } else {
+        ub_s(&u, " hardware trip NOT armed: nothing on that TMU stops the heat");
+    }
+    sb_strcpy(out, 96, u.b);
+}
+
+static int nolimit_confirm(void)
+{
+    struct sb_temps t;
+    struct sb_auth au;
+    sb_temps_read(&t);
+    trip_line(nl_top, "TMU_TOP (CPU):", t.top && (t.trip_armed & 1), t.trip_c);
+    trip_line(nl_sub, "TMU_SUB (GPU):", t.sub && (t.trip_armed & 2), t.trip_sub_c);
+    int none = !(t.trip_armed & 3);
+    struct action a = { "No temperature limit", "NOLIMIT",
+                        { "The load runs until you stop it or the time ends, however hot the SoC gets", nl_top, nl_sub,
+                          none ? "NO hardware trip is armed: only you stop it. Watch the phone."
+                               : "Read from the registers now. Not verified on this phone: that the trip fires, "
+                                 "and which probes it watches (the vendor says: the PMU then cuts the power)" },
+                        "set a limit again (Power on Stop at); a reboot sets 85 C", "", "no limit", "", TIER1,
+                        SB_SP_MEM, 0, 0, 0, 0 };
+    if (!lab_confirm(&a, &au))
+        return 0;
+    audit_line(none ? "no temperature limit chosen; no hardware trip armed" : "no temperature limit chosen");
+    return 1;
+}
+
+int lab_limit_next(int idx)
+{
+    int n = (idx + 1) % LIMIT_N;
+    if (n == LIMIT_NONE && !nolimit_confirm())
+        n = 0;
+    return n;
+}
+
+/* Called once a second by the load loops. With a limit set, 3 s in a row without one valid TMU
+ * sample (every probe rejected: a broken sensor, not a glitch) stops the load too: a limit that
+ * cannot see is no limit. */
+static struct sb_temps T;                   /* (defined with the temperatures below) */
+
+static int over_limit(int t)
+{
+    static unsigned blind;
+    if (opt.limit == LIMIT_NONE)
+        return 0;
+    if (t <= -100 && T.top) {                   /* TMU running, but no probe gave a valid sample */
+        if (++blind >= 3) {
+            audit_line("no valid TMU sample for 3 s: the load stops (the limit cannot see)");
+            blind = 0;
+            return 1;
+        }
+        return 0;
+    }
+    blind = 0;
+    return t > -100 && t >= limit_c[opt.limit];
+}
+
+/* "85 C: the test stops there" or what protects the phone without a limit */
+static void limit_text(struct ub *u)
+{
+    if (opt.limit == LIMIT_NONE) {
+        struct sb_temps t;
+        sb_temps_read(&t);
+        ub_s(u, "none: ");
+        if (t.trip_armed & 1) {
+            ub_s(u, "the hardware trip (");
+            ub_sdec(u, t.trip_c);
+            ub_s(u, " " U_DEG "C, decoded) only");
+        } else {
+            ub_s(u, "no hardware trip armed");
+        }
+        return;
+    }
+    ub_dec(u, (uint64_t)limit_c[opt.limit]);
+    ub_s(u, " " U_DEG "C: the test stops there");
 }
 
 /* ---- the report: every result of this session as text ---------------------------------------- */
@@ -51,6 +159,8 @@ unsigned lab_report_lines(char (*out)[96], unsigned max)
     return n;
 }
 
+void result_line(const char *name, int pass, const char *detail);
+
 static void result(const char *name, int pass, const char *detail)
 {
     struct ub u;
@@ -61,6 +171,11 @@ static void result(const char *name, int pass, const char *detail)
     ub_s(&u, ": ");
     ub_s(&u, detail);
     rep_line(u.b);
+}
+
+void result_line(const char *name, int pass, const char *detail)
+{
+    result(name, pass, detail);
 }
 
 /* ---- the live page ---------------------------------------------------------------------------- */
@@ -177,6 +292,40 @@ static void kv_chart(unsigned i, int h)
     kv_custom(h, draw_lchart, i, hash);
 }
 
+/* For gpu.c: the same live page and charts. */
+void lab_live_begin(const char *title)
+{
+    live_begin(title);
+}
+
+int lab_live_poll(void (*fill)(void), unsigned every_ms)
+{
+    return live_poll(fill, every_ms);
+}
+
+void lab_live_end(void)
+{
+    live_end();
+}
+
+void lab_chart_reset(unsigned i, const char *title, uint32_t col, unsigned total_samples)
+{
+    if (i < CH_N)
+        ch_reset(i, title, col, total_samples);
+}
+
+void lab_chart_push(unsigned i, int32_t v)
+{
+    if (i < CH_N)
+        ch_push(i, v);
+}
+
+void lab_chart_kv(unsigned i, int h)
+{
+    if (i < CH_N)
+        kv_chart(i, h);
+}
+
 /* ---- small formatting helpers --------------------------------------------------------------------- */
 
 static void fmt_mmss(struct ub *u, uint64_t s)
@@ -248,7 +397,8 @@ static const char *psci_name(int64_t r)
 static struct kern_cfg K;
 static int64_t core_res[SB_NCORES];
 static uint64_t it0, err0, last_it[SB_NCORES], rate[SB_NCORES], rate_total;
-static int m3_state;                        /* 0 not asked, 1 confirmed, -1 declined */
+static int m3_state;                        /* 0 not enabled, 1 enabled (confirmed), -1 the PMU write failed */
+static unsigned run_mask;                   /* the cores the running test uses (after the offer) */
 static struct sb_auth m3_auth;
 
 /* The vendor PMU defaults the M3 cluster needs before CPU_ON (xnu patch 0304; the Linux S9+ port's
@@ -322,11 +472,9 @@ static unsigned load_start(unsigned mask, unsigned kmask)
         last_it[w] = rate[w] = 0;
         core_res[w] = 1;
     }
-    if ((mask & 0xf0U) && m3_state == 0)
-        m3_state = m3_confirm() ? 1 : -1;
-    if ((mask & 0xf0U) && m3_state < 0) {
+    if ((mask & 0xf0U) && m3_state <= 0) {
         mask &= 0x0fU;
-        audit_line("M3 cores not started (the PMU sequence was not confirmed)");
+        audit_line("M3 cores not started (not enabled)");
     }
     sb_smp_m3_prep = m3_state > 0 ? m3_prep : 0;
     show_now("Starting cores", fill_starting);
@@ -362,11 +510,65 @@ static int guard_ok(const char *what)
                          "Run it only while you watch the phone.", "RUN ANYWAY");
 }
 
-/* The M3 cores' PMU sequence is asked for before a test starts, never in the middle of one. */
-static void m3_ask(unsigned mask)
+/* The M3 cores are offered when a test that uses them starts (never in the middle of one): enable
+ * them now (the tier 3 PMU step, once per session), run on the A55 cores only, or cancel. */
+static int offer_pick;
+static const char *offer_test;
+
+static void build_offer(void)
 {
-    if ((mask & 0xf0U) && m3_state == 0)
-        m3_state = m3_confirm() ? 1 : -1;
+    kv_hdr("THIS TEST USES THE M3 CORES");
+    kv_add("Test", offer_test);
+    kv_add("M3 cores", m3_state < 0 ? "the last power-up write failed (see the audit log)" : "off (powered down)");
+    kv_note("The four Mongoose M3 cores (cpu4-7) stay off until 6 PMU registers get the vendor values Linux and "
+            "iOS write before every M3 CPU_ON. That is a PMU write: tier 3 (warning, type PMU, slide, hold Power "
+            "3 s), once per session. It worked on this phone on 2026-11-06.");
+    kv_hdr("CHOOSE");
+    row_add("Enable the M3 cores now", "tier 3: the PMU sequence, then PSCI CPU_ON 0x100..0x103", R_RED);
+    row_add("Run on the A55 cores only", "cpu0-3; nothing is written", 0);
+    row_add("Cancel", "back to the test's page", 0);
+}
+
+static int act_offer(int i)
+{
+    offer_pick = i;
+    return 1;
+}
+
+static int m3_enable(void)
+{
+    if (m3_state > 0)
+        return 1;
+    if (!m3_confirm()) {
+        audit_line("M3 cores not enabled (the PMU step was not confirmed)");
+        return 0;
+    }
+    m3_state = 1;
+    audit_line("M3 cores enabled for this session (the PMU step runs before their CPU_ON)");
+    return 1;
+}
+
+static void m3_enable_now(void)
+{
+    if (m3_enable())
+        ui_toast("M3 cores enabled: the next test starts them", C_GREEN, 1100);
+}
+
+static unsigned cores_offer(unsigned mask, const char *test)
+{
+    unsigned a55 = (mask & 0x0fU) ? (mask & 0x0fU) : 0x01U;
+    if (!(mask & 0xf0U) || m3_state > 0)
+        return mask;
+    offer_pick = -1;
+    offer_test = test;
+    list_screen("Use the M3 cores?", build_offer, act_offer);
+    if (E.home || E.tab_req >= 0 || offer_pick == 2 || offer_pick < 0)
+        return 0;
+    if (offer_pick == 1) {
+        audit_line("M3 cores: the user picked the A55 cores only");
+        return a55;
+    }
+    return m3_enable() ? mask : a55;
 }
 
 static void load_stop(void)
@@ -499,6 +701,32 @@ static int bat_c10(void)
     return -1000;
 }
 
+/* One TMU probe: the median of 3 samples, its code, and how many samples were rejected so far. */
+static void kv_probe(const char *k, int t, int code, unsigned slot)
+{
+    uint32_t reads = 0, rej = 0;
+    int bad = -1;
+    struct ub u;
+    sb_tmu_stats(slot, &reads, &rej, &bad);
+    ub_init(&u);
+    if (t <= -100)
+        ub_s(&u, "no valid sample");
+    else {
+        ub_sdec(&u, t);
+        ub_s(&u, " " U_DEG "C");
+    }
+    ub_s(&u, "  code ");
+    ub_dec(&u, (uint64_t)code);
+    if (rej) {
+        ub_s(&u, "  rejected ");
+        ub_dec(&u, rej);
+        ub_s(&u, " (code ");
+        ub_sdec(&u, bad);
+        ub_c(&u, ')');
+    }
+    kv_addc(k, u.b, t <= -100 ? C_ORANGE : t >= 85 ? C_RED : t >= 65 ? C_ORANGE : rej ? C_YELLOW : C_L1);
+}
+
 static void kv_temps(void)
 {
     struct ub k;
@@ -510,10 +738,12 @@ static void kv_temps(void)
         ub_s(&k, "Probe ");
         ub_dec(&k, i);
         ub_s(&k, i == 5 ? " (A55)" : (i >= 1 && i <= 4) || i == 6 ? " (M3)" : " (unassigned)");
-        kv_deg(k.b, T.top_all[i]);
+        kv_probe(k.b, T.top_all[i], T.code_top[i], i);
     }
+    if (T.top)
+        kv_addc("Hardware trip", (T.trip_armed & 1) ? "armed (CONTROL bit 12)" : "NOT armed", (T.trip_armed & 1) ? C_L1 : C_ORANGE);
     if (T.trip_c > -100)
-        kv_deg("Hardware trip (S-Boot, decoded)", T.trip_c);
+        kv_deg("Trip threshold (S-Boot, decoded)", T.trip_c);
     kv_hdr("TMU_SUB (GPU, ISP)");
     if (!T.sub)
         kv_addc("State", "off (S-Boot did not enable it)", C_L3);
@@ -522,28 +752,87 @@ static void kv_temps(void)
         ub_s(&k, "Probe ");
         ub_dec(&k, i);
         ub_s(&k, i == 1 ? " (GPU)" : i == 2 ? " (ISP)" : " (unassigned)");
-        kv_deg(k.b, T.sub_all[i]);
+        kv_probe(k.b, T.sub_all[i], T.code_sub[i], 8U + i);
     }
+    if (T.sub)
+        kv_addc("Hardware trip", (T.trip_armed & 2) ? "armed (CONTROL bit 12)" : "NOT armed", (T.trip_armed & 2) ? C_L1 : C_ORANGE);
+    if (T.trip_sub_c > -100)
+        kv_deg("Trip threshold (decoded)", T.trip_sub_c);
     if (T.flags & 1U)
         kv_note("Some probes have no eFuse trim: values are approximate.");
+    kv_note("Each probe is the median of 3 samples; code 0, all ones or a temperature outside -30..150 C is "
+            "rejected and counted here (the v2.0 glitch: every probe reading 0 now and then).");
     kv_hdr("THERMISTORS (CMGP ADC)");
     if (th_n < 0)
         kv_addc("ADC", th_why ? th_why : "not readable", C_ORANGE);
     for (int i = 0; i < th_n; ++i) {
-        if (!TH[i].ok) {
-            kv_addc(TH[i].name, "no conversion", C_ORANGE);
-            continue;
-        }
+        const struct sb_adc_stat *st = sb_adc_stats(TH[i].ch);
         struct ub n;
         ub_init(&n);
+        if (!TH[i].ok) {
+            ub_s(&n, "no valid sample: ");
+            ub_s(&n, TH[i].why ? TH[i].why : "?");
+            if (TH[i].bad >= 0) {
+                ub_s(&n, " (raw ");
+                ub_dec(&n, (uint64_t)TH[i].bad);
+                ub_c(&n, ')');
+            }
+            kv_addc(TH[i].name, n.b, C_ORANGE);
+            continue;
+        }
         ub_s(&n, "raw ");
         ub_dec(&n, (uint64_t)TH[i].raw);
+        if (TH[i].clamped)
+            ub_s(&n, " (outside the table)");
+        if (st && st->rejected) {
+            ub_s(&n, "  rejected ");
+            ub_dec(&n, st->rejected);
+            ub_s(&n, " of ");
+            ub_dec(&n, st->conversions);
+            ub_s(&n, " (raw ");
+            ub_sdec(&n, st->last_bad);
+            ub_c(&n, ')');
+        }
         kv_deg10(TH[i].name, TH[i].c10, n.b);
     }
+    unsigned flag_only = 0, timeouts = 0;
+    for (unsigned c = 0; c < 12; ++c) {
+        const struct sb_adc_stat *st = sb_adc_stats(c);
+        flag_only += st->flag_only;
+        timeouts += st->timeouts;
+    }
+    if (th_n > 0) {
+        struct ub n;
+        ub_init(&n);
+        ub_s(&n, flag_only ? "INT_ST did not come " : "INT_ST, then DAT (as the kernel)");
+        if (flag_only) {
+            ub_dec(&n, flag_only);
+            ub_s(&n, " times: DAT bit 31 used");
+        }
+        if (timeouts) {
+            ub_s(&n, ", ");
+            ub_dec(&n, timeouts);
+            ub_s(&n, " timeouts");
+        }
+        kv_addc("ADC completion", n.b, flag_only || timeouts ? C_ORANGE : C_L1);
+    }
     uint16_t v;
-    if (sb_fg_word(0x08, &v)) {
+    if (sb_fg_word_checked(0x08, &v, 0, 0)) {
         int t10 = (int)(int16_t)v * 10 / 256;
         kv_deg10("Fuel gauge temp register", t10, "(the last value S-Boot wrote)");
+    }
+    if (sb_fg_stat.reads) {
+        struct ub n;
+        ub_init(&n);
+        ub_dec(&n, sb_fg_stat.reads);
+        ub_s(&n, " reads, ");
+        ub_dec(&n, sb_fg_stat.retries);
+        ub_s(&n, " retried, ");
+        ub_dec(&n, sb_fg_stat.failed);
+        ub_s(&n, " failed, ");
+        ub_dec(&n, sb_fg_stat.rejected);
+        ub_s(&n, " implausible");
+        kv_addc("Fuel gauge I2C", n.b, sb_fg_stat.failed || sb_fg_stat.rejected ? C_ORANGE : C_L1);
     }
 }
 
@@ -599,9 +888,8 @@ static void fill_cpu_live(void)
     kv_add("Clocks", u.b);
     kv_deg("Hottest sensor", T.hottest);
     ub_init(&u);
-    ub_dec(&u, (uint64_t)limit_c[opt.limit]);
-    ub_s(&u, " " U_DEG "C: the test stops there");
-    kv_add("Limit", u.b);
+    limit_text(&u);
+    kv_addc("Limit", u.b, opt.limit == LIMIT_NONE ? C_ORANGE : C_L1);
     kv_chart(CH_TEMP, 460);
     kv_chart(CH_RATE, 460);
     kv_cores();
@@ -631,7 +919,9 @@ static void cpu_run(void)
     unsigned mask = core_mask[opt.cores];
     if (!guard_ok("CPU stress"))
         return;
-    m3_ask(mask);
+    mask = cores_offer(mask, "CPU stress");
+    if (!mask)
+        return;
     cs_dur = dur_s[opt.dur];
     ch_reset(CH_TEMP, "HOTTEST SENSOR (" U_DEG "C)", C_ORANGE, cs_dur ? (unsigned)cs_dur : 3600);
     ch_reset(CH_RATE, "WORK (BATCHES PER SECOND, ALL CORES)", C_GREEN, cs_dur ? (unsigned)cs_dur : 3600);
@@ -656,7 +946,7 @@ static void cpu_run(void)
             ch_push(CH_RATE, (int32_t)rate_total);
             if (T.hottest > cs_peak)
                 cs_peak = T.hottest;
-            if (T.hottest >= limit_c[opt.limit])
+            if (over_limit(T.hottest))
                 cs_stop = 2;
             if (load_faults())
                 cs_stop = 4;
@@ -696,18 +986,17 @@ static void build_cpu(void)
     row_value("Cores", core_name[opt.cores], 0);
     row_value("Kernels", kern_name[opt.kern], 0);
     row_value("Duration", dur_name[opt.dur], 0);
-    struct ub u;
-    ub_init(&u);
-    ub_dec(&u, (uint64_t)limit_c[opt.limit]);
-    ub_s(&u, " " U_DEG "C");
-    row_value("Stop at", u.b, 0);
+    row_value("Stop at", lab_limit_label(opt.limit), opt.limit == LIMIT_NONE ? R_RED : 0);
     kv_hdr("RUN");
     row_add("Start", m3_state > 0 || !(core_mask[opt.cores] & 0xf0U) ? "hold Power to stop"
-                                                                      : "the M3 cores ask for the PMU sequence first",
+                                                                      : "offers to enable the M3 cores first",
             R_WARN);
     row_add("Last result", cs_done ? cs_detail : "not run", cs_done ? 0 : R_DIS);
+    row_add("M3 cores (cpu4-7)", m3_state > 0 ? "enabled for this session" : "off: enable them now (tier 3, PMU)",
+            m3_state > 0 ? R_DIS : R_RED);
     kv_note("Each core runs integer, floating-point, NEON and cache kernels and compares every result with "
-            "the reference. The M3 cores need 6 PMU registers set first (the vendor sequence Linux and iOS use).");
+            "the reference. The M3 cores need 6 PMU registers set first (the vendor sequence Linux and iOS use): "
+            "a test that uses them offers that step when it starts, or enable them here.");
 }
 
 static int act_cpu(int i)
@@ -716,9 +1005,10 @@ static int act_cpu(int i)
     case 0: opt.cores = nxt(opt.cores, 4); break;
     case 1: opt.kern = nxt(opt.kern, 5); break;
     case 2: opt.dur = nxt(opt.dur, 7); break;
-    case 3: opt.limit = nxt(opt.limit, 6); break;
+    case 3: opt.limit = lab_limit_next(opt.limit); break;
     case 4: cpu_run(); break;
     case 5: info_screen("CPU stress result", fill_cpu_result, 0); break;
+    case 6: m3_enable_now(); break;
     default: break;
     }
     return 0;
@@ -759,12 +1049,16 @@ static void fill_th_live(void)
     ub_init(&u);
     ub_sdec(&u, T.hottest);
     ub_s(&u, " " U_DEG "C");
-    kv_bigc(phase_name(th_phase), u.b, T.hottest >= limit_c[opt.limit] - 5 ? C_RED : C_L1);
+    kv_bigc(phase_name(th_phase), u.b, opt.limit != LIMIT_NONE && T.hottest >= limit_c[opt.limit] - 5 ? C_RED : C_L1);
     ub_init(&u);
     fmt_mmss(&u, s);
     ub_s(&u, "  " U_DOT "  limit ");
-    ub_dec(&u, (uint64_t)limit_c[opt.limit]);
-    ub_s(&u, " " U_DEG "C");
+    if (opt.limit == LIMIT_NONE)
+        ub_s(&u, "none");
+    else {
+        ub_dec(&u, (uint64_t)limit_c[opt.limit]);
+        ub_s(&u, " " U_DEG "C");
+    }
     kv_add("Time", u.b);
     ub_init(&u);
     ub_dec(&u, a55_mhz);
@@ -863,7 +1157,9 @@ static void th_run(void)
     th_base_rate = th_base_a55 = th_base_m3 = 0;
     if (!guard_ok("Thermal test"))
         return;
-    m3_ask(core_mask[opt.cores]);
+    run_mask = cores_offer(core_mask[opt.cores], "Thermal test");
+    if (!run_mask)
+        return;
     load_alloc(kern_mask[opt.kern]);
     for (unsigned w = 0; w < SB_NCORES; ++w)
         core_res[w] = 1;
@@ -897,7 +1193,7 @@ static void th_run(void)
         ch_push(CH_RATE, (int32_t)rate_total);
         th_log();
         uint64_t in_phase = (sb_ms() - phase_t0) / 1000U;
-        if (T.hottest >= limit_c[opt.limit] && th_phase != 2) {
+        if (over_limit(T.hottest) && th_phase != 2) {
             th_stop = 2;
             break;
         }
@@ -932,7 +1228,7 @@ static void th_run(void)
         }
         if (th_phase == 0 && in_phase >= 10) {
             th_start_c = T.hottest;
-            (void)load_start(core_mask[opt.cores], kern_mask[opt.kern]);
+            (void)load_start(run_mask, kern_mask[opt.kern]);
             th_load_t0 = sb_ms();
             th_phase = 1;
             phase_t0 = sb_ms();
@@ -980,18 +1276,17 @@ static void build_th(void)
     row_value("Load on", core_name[opt.cores], 0);
     row_value("Load", kern_name[opt.kern], 0);
     row_value("Load for", dur_name[opt.dur], 0);
-    struct ub u;
-    ub_init(&u);
-    ub_dec(&u, (uint64_t)limit_c[opt.limit]);
-    ub_s(&u, " " U_DEG "C (hottest TMU probe)");
-    row_value("Stop at", u.b, 0);
+    row_value("Stop at", lab_limit_label(opt.limit), opt.limit == LIMIT_NONE ? R_RED : 0);
     row_value("Cool-down", th_cool ? "60 s, recorded" : "no", 0);
     kv_hdr("RUN");
     row_add("Start", "10 s idle baseline, the load, the cool-down", R_WARN);
     row_add("Last result", th_done ? th_detail : "not run", th_done ? 0 : R_DIS);
     row_add("Every sensor, live", "TMU probes, thermistors, fuel gauge", 0);
+    row_add("M3 cores (cpu4-7)", m3_state > 0 ? "enabled for this session" : "off: enable them now (tier 3, PMU)",
+            m3_state > 0 ? R_DIS : R_RED);
     kv_note("Logs every sensor once a second, detects throttling (clock or work rate down 15 %), and stops "
-            "the load at the limit. The phone's own hardware trip (S-Boot: 115 " U_DEG "C) is far above it.");
+            "the load at the limit. The hardware trip S-Boot arms (decoded: 115 " U_DEG "C, see Every thermal "
+            "sensor) is far above it.");
 }
 
 static int act_th(int i)
@@ -1000,11 +1295,12 @@ static int act_th(int i)
     case 0: opt.cores = nxt(opt.cores, 4); break;
     case 1: opt.kern = nxt(opt.kern, 5); break;
     case 2: opt.dur = nxt(opt.dur, 7); break;
-    case 3: opt.limit = nxt(opt.limit, 6); break;
+    case 3: opt.limit = lab_limit_next(opt.limit); break;
     case 4: th_cool = !th_cool; break;
     case 5: th_run(); break;
     case 6: info_screen("Thermal test result", fill_th_result, 0); break;
     case 7: lab_sensors(); break;
+    case 8: m3_enable_now(); break;
     default: break;
     }
     return 0;
@@ -1602,37 +1898,46 @@ struct fg {
 static int fg_s16(uint8_t reg, int *v)
 {
     uint16_t w;
-    if (!sb_fg_word(reg, &w))
+    if (!sb_fg_word_checked(reg, &w, 0, 0))
         return 0;
     *v = (int16_t)w;
     return 1;
 }
+
+/* the gauge's words with a retry; the voltages also checked against 2.5..4.7 V (VSYS 2.5..5.5 V) */
+#define FGW(reg, w) sb_fg_word_checked(reg, w, 0, 0)
+#define FGV(reg, w) sb_fg_word_checked(reg, w, 32000, 60160)
 
 static void fg_read(struct fg *f)
 {
     uint16_t w;
     uint8_t c;
     int s;
-    f->ok = sb_fg_word(0x06, &w);
+    f->ok = sb_fg_word_checked(0x06, &w, 0, 0x6500);
     if (!f->ok)
         return;
     f->soc10 = (int)(w >> 8) * 10 + (int)((w & 0xffU) * 10U / 256U);
-    f->vfsoc10 = sb_fg_word(0xff, &w) ? (int)(w >> 8) * 10 + (int)((w & 0xffU) * 10U / 256U) : -1;
-    f->avsoc10 = sb_fg_word(0x0e, &w) ? (int)(w >> 8) * 10 + (int)((w & 0xffU) * 10U / 256U) : -1;
-    f->mv = sb_fg_word(0x09, &w) ? (int)((uint32_t)w * 5U / 64U) : 0;
-    f->avg_mv = sb_fg_word(0x19, &w) ? (int)((uint32_t)w * 5U / 64U) : 0;
-    f->ocv_mv = sb_fg_word(0xfb, &w) ? (int)((uint32_t)w * 5U / 64U) : 0;
+    /* a sample without a plausible cell voltage is not a sample (it used to be 0 mV, which the
+     * discharge test's 3.45 V guard and minimum took for an empty cell) */
+    f->ok = FGV(0x09, &w);
+    if (!f->ok)
+        return;
+    f->mv = (int)((uint32_t)w * 5U / 64U);
+    f->vfsoc10 = FGW(0xff, &w) ? (int)(w >> 8) * 10 + (int)((w & 0xffU) * 10U / 256U) : -1;
+    f->avsoc10 = FGW(0x0e, &w) ? (int)(w >> 8) * 10 + (int)((w & 0xffU) * 10U / 256U) : -1;
+    f->avg_mv = FGV(0x19, &w) ? (int)((uint32_t)w * 5U / 64U) : f->mv;
+    f->ocv_mv = FGV(0xfb, &w) ? (int)((uint32_t)w * 5U / 64U) : 0;
     f->ma = fg_s16(0x0a, &s) ? s * 5 / 16 : 0;
-    f->avg_ma = fg_s16(0x0b, &s) ? s * 5 / 16 : 0;
-    f->rep_mah = sb_fg_word(0x05, &w) ? w : 0;
-    f->full_mah = sb_fg_word(0x35, &w) ? w : 0;
-    f->fullnom_mah = sb_fg_word(0x23, &w) ? w : 0;
-    f->design_mah = sb_fg_word(0x18, &w) ? w : 0;
-    f->cycles_raw = sb_fg_word(0x17, &w) ? w : -1;
-    f->status = sb_fg_word(0x00, &w) ? w : -1;
+    f->avg_ma = fg_s16(0x0b, &s) ? s * 5 / 16 : f->ma;
+    f->rep_mah = FGW(0x05, &w) ? w : 0;
+    f->full_mah = FGW(0x35, &w) ? w : 0;
+    f->fullnom_mah = FGW(0x23, &w) ? w : 0;
+    f->design_mah = FGW(0x18, &w) ? w : 0;
+    f->cycles_raw = FGW(0x17, &w) ? w : -1;
+    f->status = FGW(0x00, &w) ? w : -1;
     f->temp10 = fg_s16(0x08, &s) ? s * 10 / 256 : -1000;
-    f->iin_ma = sb_fg_word(0xd0, &w) ? (int)((uint32_t)w / 8U) : -1;
-    f->vsys_mv = sb_fg_word(0xb1, &w) ? (int)((uint32_t)w * 5U / 32U) : -1;
+    f->iin_ma = FGW(0xd0, &w) ? (int)((uint32_t)w / 8U) : -1;
+    f->vsys_mv = sb_fg_word_checked(0xb1, &w, 16000, 35200) ? (int)((uint32_t)w * 5U / 32U) : -1;
     f->input = sb_chg_read(0xb2, &c) ? ((c & 0x20U) ? 2 : (c & 0x40U) ? 1 : 0) : -1;
     f->chg_dtls = sb_chg_read(0xb4, &c) ? (int)(c & 0xfU) : -1;
     f->bat_dtls = sb_chg_read(0xb4, &c) ? (int)((c >> 4) & 7U) : -1;
@@ -1825,13 +2130,15 @@ static void fill_bd_result(void)
 static int bd_guard(void)
 {
     int bt = bat_c10();
+    if (bt <= -1000 && F.ok && F.temp10 > -1000)
+        bt = F.temp10;                      /* no valid thermistor sample: the gauge's register */
     if (F.ok && F.mv && F.mv < 3450 && bd_kind != 2)
         return 1;
     if (F.ok && F.soc10 < 100 && bd_kind != 2)
         return 1;
     if (bt > -1000 && bt >= 450)
         return 1;
-    if (T.hottest >= limit_c[opt.limit])
+    if (over_limit(T.hottest))
         return 1;
     return 0;
 }
@@ -1914,13 +2221,14 @@ static void bd_run(int kind)
     int want_cores = kind == 0 ? (bd_l <= 1) : kind == 1;
     if (want_cores && !guard_ok("Battery test"))
         return;
-    if (want_cores)
-        m3_ask(core_mask[opt.cores]);
+    run_mask = want_cores ? cores_offer(core_mask[opt.cores], "Battery test") : 0x0fU;
+    if (!run_mask)
+        return;
     bd_screen = kind == 0 && (bd_l == 0 || bd_l == 2);
     for (unsigned w = 0; w < SB_NCORES; ++w)
         core_res[w] = 1;
     if (want_cores && kind == 0)
-        (void)load_start(core_mask[opt.cores], kern_mask[0]);
+        (void)load_start(run_mask, kern_mask[0]);
     else if (kind == 1)
         load_alloc(kern_mask[0]);
     live_begin(kind == 0 ? "Discharge test" : kind == 1 ? "Sag test" : "Charge test");
@@ -1969,7 +2277,7 @@ static void bd_run(int kind)
             if (sag_phase == 0) {
                 sag_vi[sag_cycle] = nsum ? sum_v / nsum : 0;
                 sag_ii[sag_cycle] = nsum ? sum_i / nsum : 0;
-                (void)load_start(core_mask[opt.cores], kern_mask[0]);
+                (void)load_start(run_mask, kern_mask[0]);
                 sag_phase = 1;
             } else {
                 sag_vl[sag_cycle] = nsum ? sum_v / nsum : 0;
@@ -2197,7 +2505,9 @@ static void hc_run(void)
     for (int i = 0; i < HC_N; ++i)
         hc_set(i, HC_PEND, "");
     hc_stop = 0;
-    m3_ask(0xffU);
+    run_mask = cores_offer(0xffU, "Full health check");
+    if (!run_mask)
+        return;
     live_begin("Full health check");
     for (int i = 0; i < HC_N && !hc_stop; ++i) {
         hc_state[i] = HC_RUN;
@@ -2286,7 +2596,7 @@ static void hc_run(void)
             break;
         case 6: {
             int t_start = T.hottest, t_peak = T.hottest;
-            unsigned n = load_start(0xffU, KERN_INT | KERN_FP | KERN_NEON | KERN_MEM);
+            unsigned n = load_start(run_mask, KERN_INT | KERN_FP | KERN_NEON | KERN_MEM);
             uint64_t t0 = sb_ms(), next = sb_ms() + 1000;
             while (sb_ms() - t0 < 5000 && !hc_stop) {
                 load_slice(20);
@@ -2314,8 +2624,8 @@ static void hc_run(void)
             ub_s(&u, " of 8 cores ran, ");
             ub_dec(&u, e);
             ub_s(&u, " errors");
-            if (m3_state < 0)
-                ub_s(&u, " (M3 not confirmed)");
+            if (!(run_mask & 0xf0U))
+                ub_s(&u, " (M3 not enabled)");
             hc_set(i, e || load_faults() ? HC_FAIL : ran == 8 ? HC_PASS : ran >= 4 ? HC_WARN : HC_FAIL, u.b);
             (void)n;
             (void)bad;

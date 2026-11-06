@@ -1223,22 +1223,6 @@ void fill_battery(void)
 
 static const unsigned char big_probe[5] = { 1, 2, 3, 4, 6 };   /* DT mask 0x5E */
 
-/* Probe p of a running TMU in degrees C; *flags |= 1 if uncalibrated. */
-static int tmu_temp(uintptr_t base, unsigned p, unsigned *flags)
-{
-    uint32_t tri = rd(base + 4U * p);
-    int te1 = (int)(tri & 0x1ffU), te2 = (int)((tri >> 9) & 0x1ffU);
-    int two = (int)((rd(base) >> 23) & 1U);
-    if (!te1) {
-        te1 = 55;
-        *flags |= 1U;
-    }
-    uintptr_t off = p < 2 ? 0x40U : 0x44U + 4U * ((p - 2U) / 3U);
-    unsigned sh = p < 2 ? 9U * p : 9U * ((p - 2U) % 3U);
-    int code = (int)((rd(base + off) >> sh) & 0x1ffU);
-    return (two && te2 > te1) ? (code - te1) * 60 / (te2 - te1) + 25 : code - te1 + 25;
-}
-
 static uint32_t temp_col(int t)
 {
     return t >= 85 ? UI_RED : t >= 65 ? UI_ORANGE : UI_TEXT;
@@ -1248,6 +1232,10 @@ static void kv_temp(const char *k, int t, unsigned flags)
 {
     struct ub u;
     ub_init(&u);
+    if (t <= -100) {
+        kv_addc(k, "no valid sample", UI_ORANGE);
+        return;
+    }
     ub_sdec(&u, t);
     ub_s(&u, " " UI_DEG "C");
     if (flags & 1U)
@@ -1255,81 +1243,70 @@ static void kv_temp(const char *k, int t, unsigned flags)
     kv_addc(k, u.b, temp_col(t));
 }
 
-/* 0 off, 1 running, 2 emulated */
-static int tmu_state(uintptr_t base)
-{
-    if (!(rd(base + 0x20) & 1U))
-        return 0;
-    return (rd(base + 0x160) & 1U) ? 2 : 1;
-}
-
+/* The libsb reading (tmu.c): every probe the median of 3 samples, code 0 / all ones and impossible
+ * temperatures rejected (the v2.0 pages read each probe once, and showed the glitch). */
 void fill_thermal(void)
 {
-    int top = tmu_state(TMU_TOP), sub = tmu_state(TMU_SUB), hot = -100;
-    unsigned fl = 0;
-    int big[5], little = 0, gpu = 0, isp = 0;
-    if (top) {
-        for (unsigned i = 0; i < 5; ++i) {
-            big[i] = tmu_temp(TMU_TOP, big_probe[i], &fl);
-            if (big[i] > hot)
-                hot = big[i];
-        }
-        little = tmu_temp(TMU_TOP, 5, &fl);
-        if (little > hot)
-            hot = little;
-    }
-    if (sub) {
-        gpu = tmu_temp(TMU_SUB, 1, &fl);
-        isp = tmu_temp(TMU_SUB, 2, &fl);
-        if (gpu > hot)
-            hot = gpu;
-        if (isp > hot)
-            hot = isp;
-    }
-    if (hot > -100) {
+    struct sb_temps t;
+    sb_temps_read(&t);
+    if (t.hottest > -100) {
         struct ub u;
         ub_init(&u);
-        ub_sdec(&u, hot);
+        ub_sdec(&u, t.hottest);
         ub_s(&u, UI_DEG "C");
-        kv_bigc("hottest sensor", u.b, temp_col(hot));
+        kv_bigc("hottest sensor", u.b, temp_col(t.hottest));
     }
     kv_hdr("TMU_TOP 0x10070000");
-    if (!top) {
+    if (!t.top) {
         kv_addc("State", "off (not enabled by S-Boot)", UI_TEXT3);
     } else {
-        if (top == 2)
+        if (t.top == 2)
             kv_addc("State", "EMULATION ON: values are fake", UI_ORANGE);
-        int bmax = big[0];
-        for (unsigned i = 1; i < 5; ++i)
-            if (big[i] > bmax)
-                bmax = big[i];
-        kv_temp("Big cluster (Mongoose M3), max", bmax, fl);
+        kv_temp("Big cluster (Mongoose M3), max", t.big_max, t.flags);
         for (unsigned i = 0; i < 5; ++i) {
             struct ub k;
             ub_init(&k);
             ub_s(&k, "  M3 probe ");
             ub_dec(&k, big_probe[i]);
-            kv_temp(k.b, big[i], 0);
+            kv_temp(k.b, t.big[i], 0);
         }
-        kv_temp("Little cluster (Cortex-A55)", little, 0);
-        kv_temp("Probe 0 (unassigned)", tmu_temp(TMU_TOP, 0, &fl), 0);
-        kv_temp("Probe 7 (S-Boot log sensor)", tmu_temp(TMU_TOP, 7, &fl), 0);
-        kv_add("Hardware trip", (rd(TMU_TOP + 0x20) & 0x1000U) ? "armed (115 " UI_DEG "C, S-Boot)" : "not armed");
+        kv_temp("Little cluster (Cortex-A55)", t.little, 0);
+        kv_temp("Probe 0 (unassigned)", t.top_all[0], 0);
+        kv_temp("Probe 7 (S-Boot log sensor)", t.top_all[7], 0);
+        struct ub u;
+        ub_init(&u);
+        if (t.trip_armed & 1) {
+            ub_s(&u, "armed, ");
+            ub_sdec(&u, t.trip_c);
+            ub_s(&u, " " UI_DEG "C decoded (S-Boot)");
+        } else {
+            ub_s(&u, "not armed");
+        }
+        kv_add("Hardware trip", u.b);
     }
     kv_hdr("TMU_SUB 0x10074000");
-    if (!sub) {
+    if (!t.sub) {
         kv_addc("State", "off (not enabled by S-Boot)", UI_TEXT3);
     } else {
-        if (sub == 2)
+        if (t.sub == 2)
             kv_addc("State", "EMULATION ON: values are fake", UI_ORANGE);
-        kv_temp("GPU (Mali-G72)", gpu, 0);
-        kv_temp("ISP (camera)", isp, 0);
-        kv_temp("Probe 0 (unassigned)", tmu_temp(TMU_SUB, 0, &fl), 0);
-        kv_add("Hardware trip", (rd(TMU_SUB + 0x20) & 0x1000U) ? "armed" : "not armed");
+        kv_temp("GPU (Mali-G72)", t.gpu, 0);
+        kv_temp("ISP (camera)", t.isp, 0);
+        kv_temp("Probe 0 (unassigned)", t.sub_all[0], 0);
+        struct ub u;
+        ub_init(&u);
+        if (t.trip_armed & 2) {
+            ub_s(&u, "armed, ");
+            ub_sdec(&u, t.trip_sub_c);
+            ub_s(&u, " " UI_DEG "C decoded");
+        } else {
+            ub_s(&u, "not armed");
+        }
+        kv_add("Hardware trip", u.b);
     }
     kv_hdr("CALIBRATION");
     kv_add("Mode", ((rd(TMU_TOP) >> 23) & 1U) ? "two-point (25/85 " UI_DEG "C eFuse)" : "one-point");
-    kv_add("Source", "direct TMU read (APM reads the same)");
+    kv_add("Source", "direct TMU read, median of 3 (Every thermal sensor shows codes and rejects)");
 }
 
 /* ---- clocks, read only ----------------------------------------------------- */

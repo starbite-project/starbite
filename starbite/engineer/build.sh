@@ -54,7 +54,7 @@ echo "engineer: assets from $(basename "$SB7"), sha256 $(sha256sum "$SB7" | cut 
 if [ "$native" = 1 ]; then
     gcc -O1 -Wall -Wextra -Werror -Wno-unused-parameter -I"$lib" -I"$here" -o "$out/unit-test" \
         "$root/starbite/tools/unit-test.c" "$lib/str.c" "$lib/fence.c" "$lib/sbui_input.c" "$lib/mmu.c" \
-        "$lib/adc.c" "$lib/sd.c" "$here/policy.c" "$here/kern.c"
+        "$lib/adc.c" "$lib/sd.c" "$lib/mali_desc.c" "$here/policy.c" "$here/kern.c"
     "$out/unit-test"
 fi
 

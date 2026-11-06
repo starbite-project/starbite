@@ -195,6 +195,20 @@ int sb_fg_word(uint8_t reg, uint16_t *v)
     }
     return 1;
 }
+struct sb_fg_stat sb_fg_stat = { 0, 0, 0, 0, -1 };
+int sb_fg_word_checked(uint8_t reg, uint16_t *v, unsigned lo, unsigned hi)
+{
+    ++sb_fg_stat.reads;
+    if (!sb_fg_word(reg, v)) {
+        ++sb_fg_stat.failed;
+        return 0;
+    }
+    if (lo < hi && (*v < lo || *v > hi)) {
+        ++sb_fg_stat.rejected;
+        return 0;
+    }
+    return 1;
+}
 int sb_chg_read(uint8_t reg, uint8_t *v)
 {
     switch (reg) {
@@ -696,6 +710,177 @@ int sb_pmic_write(uint32_t type, uint32_t reg, uint8_t val, int tier)
     pmic[type][reg] = val;
     return 1;
 }
+static void w32(uint64_t a, uint32_t v);
+static uint32_t pll(unsigned m, unsigned p, unsigned s);
+/* ACPM DVFS: domain 4 sets the fake PLL_G3D (p 4, s 2: 26 MHz x m / 16) */
+int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier)
+{
+    const char *why;
+    if (sb_gate_check(SB_SP_DVFS, 0, domain, 1, tier < 3 ? 3 : tier, &why))
+        return 0;
+    if (domain == 4)
+        w32(0x17400140, pll(khz * 16U / 26000U, 4, 2));
+    sb_log(domain == 4 ? "acpm dvfs domain 4 (host)" : "acpm dvfs (host)");
+    return 1;
+}
+/* tier 4 attempts: the preview cannot map anything (the fake probe faults unmapped addresses) */
+int sb_mmu_map_temp(uint64_t pa) { (void)pa; return -1; }
+void sb_mmu_unmap_temp(void) {}
+
+/* ---- the Mali-G72 (libsb mali.c calls host_gpu_write after every register write) ----------------
+ * Registers are memory at 0x17500000; this fake reacts to the writes that start something: a soft
+ * reset, the power-on / -off masks, the IRQ clears, a job slot's START. A job chain is walked
+ * through the real AS0 page tables mali.c wrote (Mali-LPAE: tables | 3, level-3 pages | 1), so a
+ * wrong table or VA faults here as on the GPU; WRITE_VALUE and clear-only FRAGMENT jobs run. */
+#define HG(o) (*(volatile uint32_t *)(0x17500000UL + (o)))
+static int hg_cycles_on;
+static uint64_t hg_cyc_t0;
+static uint64_t hg_fault_va;
+
+static void *hg_va(uint64_t va)
+{
+    uint64_t t = ((uint64_t)HG(0x2404) << 32 | HG(0x2400)) & 0xfffffffff000ULL;
+    if (!t)
+        return 0;
+    for (int lvl = 0; lvl < 4; ++lvl) {
+        unsigned idx = (unsigned)(va >> (39 - 9 * lvl)) & 0x1ffU;
+        uint64_t e = ((volatile uint64_t *)(uintptr_t)t)[idx];
+        if (lvl < 3) {
+            if ((e & 3U) != 3U)
+                return 0;
+            t = e & 0xfffffffff000ULL;
+        } else {
+            if ((e & 3U) != 1U)
+                return 0;
+            return (void *)(uintptr_t)((e & 0xfffffffff000ULL) | (va & 0xfffU));
+        }
+    }
+    return 0;
+}
+
+static int hg_fill(uint64_t base, uint32_t stride, unsigned w, unsigned h, uint32_t c)
+{
+    for (unsigned y = 0; y < h; ++y) {
+        uint64_t va = base + (uint64_t)y * stride, end = va + (uint64_t)w * 4U;
+        while (va < end) {
+            uint32_t *p = hg_va(va);
+            if (!p) {
+                hg_fault_va = va;
+                return 0;
+            }
+            uint64_t n = 0x1000U - (va & 0xfffU);
+            if (n > end - va)
+                n = end - va;
+            for (uint64_t i = 0; i < n / 4U; ++i)
+                p[i] = c;
+            va += n;
+        }
+    }
+    return 1;
+}
+
+static void hg_run(unsigned js)
+{
+    unsigned s = 0x1800U + js * 0x80U;
+    uint64_t va = (uint64_t)HG(s + 0x44) << 32 | HG(s + 0x40);
+    int fault = 0;
+    for (unsigned n = 0; va && n < 100000U && !fault; ++n) {
+        volatile uint32_t *j = hg_va(va);
+        if (!j) {
+            hg_fault_va = va;
+            fault = 1;
+            break;
+        }
+        unsigned type = (j[4] >> 1) & 0x7fU;
+        if (type == 2) {
+            uint64_t a = j[8] | (uint64_t)j[9] << 32, imm = j[12] | (uint64_t)j[13] << 32;
+            uint8_t *d = hg_va(a);
+            if (!d) {
+                hg_fault_va = a;
+                fault = 1;
+                break;
+            }
+            uint64_t val = j[10] == 1 ? (now_us - hg_cyc_t0) * 260U : j[10] == 2 ? sb_ticks() : j[10] == 3 ? 0 : imm;
+            unsigned bytes = j[10] == 4 ? 1 : j[10] == 5 ? 2 : j[10] == 6 ? 4 : 8;
+            memcpy(d, &val, bytes);
+        } else if (type == 9) {
+            uint64_t fbd = (j[10] | (uint64_t)j[11] << 32) & ~63ULL;
+            volatile uint32_t *f = hg_va(fbd);
+            if (!f) {
+                hg_fault_va = fbd;
+                fault = 1;
+                break;
+            }
+            unsigned w = (f[8] & 0xffffU) + 1U, h = (f[8] >> 16) + 1U;
+            unsigned tw = ((j[9] & 0xfffU) + 1U) * 16U, th = (((j[9] >> 16) & 0xfffU) + 1U) * 16U;
+            if (!hg_fill(f[40] | (uint64_t)f[41] << 32, f[42], w < tw ? w : tw, h < th ? h : th, f[44])) {
+                fault = 1;
+                break;
+            }
+        } else if (type != 1) {
+            HG(s + 0x24) = 0x40;                        /* JOB_CONFIG_FAULT */
+            HG(0x1000) |= 1U << (js + 16);
+            return;
+        }
+        j[0] = 1;                                       /* exception status: DONE */
+        va = j[6] | (uint64_t)j[7] << 32;
+    }
+    if (fault) {                                        /* an MMU translation fault stalls the slot */
+        HG(0x2000) |= 1U;
+        HG(0x241c) = 0xc2U;
+        HG(0x2420) = (uint32_t)hg_fault_va;
+        HG(0x2424) = (uint32_t)(hg_fault_va >> 32);
+        HG(s + 0x24) = 0x08;
+        return;
+    }
+    HG(s + 0x24) = 1;
+    HG(0x1000) |= 1U << js;
+}
+
+void host_gpu_write(unsigned off, uint32_t v);
+void host_gpu_write(unsigned off, uint32_t v)
+{
+    switch (off) {
+    case 0x024: HG(0x020) &= ~v; break;
+    case 0x030:
+        if (v == 1) {
+            HG(0x020) |= 0x100U;
+            HG(0x140) = HG(0x150) = HG(0x160) = 0;
+            HG(0x1000) = HG(0x2000) = 0;
+        } else if (v == 5) {
+            hg_cycles_on = 1;
+            hg_cyc_t0 = now_us;
+        } else if (v == 6) {
+            hg_cycles_on = 0;
+        }
+        break;
+    case 0x180: HG(0x140) |= v; break;
+    case 0x190: HG(0x150) |= v; break;
+    case 0x1a0: HG(0x160) |= v; break;
+    case 0x1c0: HG(0x140) &= ~v; break;
+    case 0x1d0: HG(0x150) &= ~v; break;
+    case 0x1e0: HG(0x160) &= ~v; break;
+    case 0x1004: HG(0x1000) &= ~v; break;
+    case 0x2004: HG(0x2000) &= ~v; break;
+    default:
+        if (off >= 0x1800 && off < 0x2000 && (off & 0x7fU) == 0x60 && v == 1)
+            hg_run((off - 0x1800U) / 0x80U);
+        break;
+    }
+    /* the job interrupt line at the GIC: GICD_ISPENDR9 bit 26 (SPI 282) while masked-in and raised */
+    volatile uint32_t *pend = (volatile uint32_t *)0x10101224UL;
+    *pend = (*pend & ~(1U << 26)) | ((HG(0x1000) & HG(0x1008)) ? 1U << 26 : 0);
+}
+
+static void host_gpu_tick(void)
+{
+    uint64_t c = hg_cycles_on ? (now_us - hg_cyc_t0) * 260U : 0, ts = now_us * 26U;
+    HG(0x90) = (uint32_t)c;
+    HG(0x94) = (uint32_t)(c >> 32);
+    HG(0x98) = (uint32_t)ts;
+    HG(0x9c) = (uint32_t)(ts >> 32);
+}
+
 static uint8_t chg_regs[256];
 int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier)
 {
@@ -710,8 +895,14 @@ int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier)
 /* ---- the CMGP ADC (libsb adc.c asks host_adc under SB_HOST) ---------------------------------- */
 
 static int host_load;                   /* worker cores running: the fake temperatures rise */
+/* The phone's v2.0 glitch reproduced: every 5th conversion reads raw 0 (a conversion read before
+ * it finished). The filter must reject it: unfiltered, the battery thermistor would read 90 C and
+ * stop the Lab tour's battery tests at the 45 C guard. */
+static unsigned host_adc_n;
 int host_adc(unsigned ch)
 {
+    if (++host_adc_n % 5U == 0)
+        return 0;
     switch (ch) {
     case 4: return 1950 - host_load * 25;   /* battery ~26 C, warmer under load */
     case 0: return 1700 - host_load * 40;
@@ -969,8 +1160,10 @@ static void tour_generate(void)
 /* ---- the Lab tour: every Lab test started with keys and stopped with Power held -------------------
  * Each test is opened from the Tests tab, its options set, started; after a while Power is held
  * and the result page must show (the test stopped); then Power held leads back to the Dashboard.
- * Also: a tier 1 write end to end (Save report: warning, Continue, slide), the M3 prompt cancelled
- * inside the health check, and an unconfirmed write refused by the fence. */
+ * Also: a tier 1 write end to end (Save report: warning, Continue, slide), the M3 offer and its PMU
+ * warning cancelled inside the health check, an unconfirmed write refused by the fence, the "no
+ * limit" warning cancelled, the GPU tests (power-up, identify, job manager, fill, stress, power
+ * down) on the fake Mali, and a tier 4 write up to the red screen, cancelled. */
 static void lt_tab(int t)
 {
     tadd(TOUR_TOP);
@@ -1067,9 +1260,14 @@ static void labtour_generate(void)
     tadd("D:0");
     tadd("L:test Touch grid: FAIL");
     lt_home(2);
-    /* the full health check: the CPU step asks for the M3 PMU sequence: cancelled with Power held */
+    /* the full health check: it offers the M3 cores first; "enable" leads to the tier 3 PMU warning,
+     * cancelled with Power held: the check runs on the A55 cores */
     lt_tab(1);
     lt_row(0);
+    lt_row(0);
+    tadd("w:600");
+    tadd("T:Use the M3 cores?");
+    tadd("x:lab.offer");
     lt_row(0);
     tadd("w:600");
     tadd("T:Before you write");
@@ -1082,7 +1280,7 @@ static void labtour_generate(void)
     lt_home(3);
     /* a tier 1 write end to end: Save report -> warning -> Continue -> slide (hold Volume Up) */
     lt_tab(1);
-    lt_row(18);
+    lt_row(19);
     tadd("T:Before you write");
     tadd("x:lab.warning");
     lt_row(0);
@@ -1098,6 +1296,113 @@ static void labtour_generate(void)
     tadd("w:1500");
     tadd("L:fence: refused");
     lt_home(2);
+    /* "no limit": CPU stress, Stop at cycled 85 -> 90 -> 95 -> the warning, cancelled (back to 70) */
+    lt_tab(1);
+    lt_row(1);
+    lt_row(3);
+    lt_row(3);
+    lt_row(3);
+    tadd("T:Before you write");
+    tadd("x:lab.nolimit");
+    tadd(TOUR_BACK);
+    tadd("w:600");
+    tadd("L:audit: cancelled at the warning: No temperature limit");
+    lt_home(3);
+    /* the GPU tests: power up (tier 1: warning, Continue, slide), identify, the job manager, the fill
+     * pattern (on the screen, dismissed with a key), the stress stopped with Power, power down */
+    lt_tab(1);
+    lt_row(8);
+    tadd("T:GPU tests");
+    lt_row(0);
+    tadd("T:Before you write");
+    lt_row(0);
+    tadd("h:u:1900");
+    tadd("w:1500");
+    tadd("L:gpu: session opened");
+    tadd("L:test GPU power-up: PASS");
+    lt_row(1);
+    tadd("w:600");
+    tadd("T:GPU identification");
+    tadd("x:lab.gpuid");
+    tadd("L:test GPU identification: PASS");
+    tadd(TOUR_BACK);
+    tadd("w:600");
+    lt_row(2);
+    tadd("w:2500");
+    tadd("T:GPU job manager");
+    tadd("x:lab.gpujm");
+    tadd("L:test GPU job manager: PASS");
+    tadd(TOUR_BACK);
+    tadd("w:600");
+    lt_row(3);
+    tadd("w:3000");
+    tadd("k:d");
+    tadd("w:1500");
+    tadd("T:GPU fill pattern");
+    tadd("x:lab.gpufill");
+    tadd("L:test GPU fill pattern: PASS");
+    tadd(TOUR_BACK);
+    tadd("w:600");
+    lt_row(4);
+    tadd("T:GPU stress");
+    lt_row(3);
+    tadd("w:5000");
+    tadd("D:3");
+    tadd("T:GPU stress");
+    tadd("x:lab.gpustress");
+    tadd(TOUR_BACK);
+    tadd("w:1500");
+    tadd("T:GPU stress result");
+    tadd("x:lab.result");
+    tadd("L:test GPU stress: PASS");
+    tadd(TOUR_BACK);
+    tadd("w:600");
+    tadd(TOUR_BACK);
+    tadd("w:600");
+    tadd(TOUR_BACK);
+    tadd("w:900");
+    tadd("L:GPU powered down, vdd_g3d back");
+    lt_home(1);
+    /* tier 4 up to the red screen: Register peek / poke at S-Boot's ECT (0x0A0000000): the address
+     * (from 0x014060000: digit 1 up 9 to A, digit 2 down 4, digit 4 down 6), Write a word, the value,
+     * Arm (hold Power 2 s, slide), then the red warning: Power on its default (Cancel) */
+    lt_tab(7);
+    lt_row(1);
+    tadd("T:Register peek");
+    lt_row(0);
+    tadd("k:p");
+    for (int k = 0; k < 9; ++k)
+        tadd("k:u");
+    tadd("k:p");
+    for (int k = 0; k < 4; ++k)
+        tadd("k:d");
+    tadd("k:p");
+    tadd("k:p");
+    for (int k = 0; k < 6; ++k)
+        tadd("k:d");
+    for (int k = 0; k < 6; ++k)
+        tadd("k:p");
+    tadd("w:600");
+    lt_row(3);
+    for (int k = 0; k < 10; ++k)
+        tadd("k:p");
+    tadd("w:300");
+    for (int k = 0; k < 9; ++k)
+        tadd("k:p");
+    tadd("w:600");
+    tadd("k:p");
+    tadd("w:600");
+    tadd("h:p:2300");
+    tadd("w:900");
+    tadd("h:u:1900");
+    tadd("w:1500");
+    tadd("L:audit: armed");
+    tadd("L:audit: tier 4 warning shown: Register write A0000000");
+    tadd("k:p");
+    tadd("w:900");
+    tadd("L:audit: cancelled at the red warning: Register write");
+    tadd("x:lab.tier4");
+    lt_home(3);
     tadd("Q");
     cmds = tl;
     ncmd = tn;
@@ -1141,6 +1446,7 @@ static void host_step(void)
         return;
     in_step = 1;
     host_thermal();
+    host_gpu_tick();
     if (key_held && now_us >= key_up_at) {
         keys_now &= ~key_held;
         key_held = 0;
@@ -1386,16 +1692,29 @@ static void seed(void)
     w32(0x10074044, (uint32_t)(sub[2] + 25));
     /* clocks: A55 on its PLL (1794 MHz), shared PLLs, MIF, G3D */
     w32(0x1d000140, pll(138, 2, 0));
-    w32(0x17400140, pll(35, 2, 0));
+    w32(0x17400140, pll(160, 4, 2));        /* PLL_G3D: S-Boot's 260 MHz */
     w32(0x1b800120, pll(276, 2, 0));
     w32(0x1a240120, pll(123, 2, 0));
     w32(0x1a2401a0, pll(144, 2, 1));
     w32(0x1a240220, pll(103, 2, 0));
     w32(0x1a2402a0, pll(92, 3, 0));
     w32(0x1a240320, pll(76, 2, 0));
-    /* Mali */
+    /* Mali-G72 MP18 as the phone reported it (NOTES.md 2026-10-28); job slot features assumed */
     w32(0x17500000, 0x62210010U);
-    w32(0x17500100, 0x0003ffffU);
+    w32(0x17500004, 0x07120206U);
+    w32(0x1750000c, 0x00000809U);
+    w32(0x17500010, 0x00000001U);
+    w32(0x17500014, 0x00002830U);
+    w32(0x17500018, 0x000000ffU);
+    w32(0x1750001c, 0x00000007U);
+    w32(0x175000a0, 384U);
+    w32(0x175000c0, 0x0000020eU);
+    w32(0x175000c4, 0x000001feU);
+    w32(0x175000c8, 0x0000007eU);
+    w32(0x17500100, 0x05771777U);
+    w32(0x17500110, 1U);
+    w32(0x17500120, 1U);
+    w32(0x17500020, 0x100U);
     /* UFS host */
     w32(0x11120000, 0x0187001fU);
     w32(0x11120008, 0x00000210U);
@@ -1412,7 +1731,7 @@ static void seed(void)
     pmic[1][0x74] = 0xf0;
     pmic[1][0x68] = 0x28;
     pmic[1][0x4a] = 0x3c;
-    pmic[1][0x2b] = 0x68;
+    pmic[1][0x2b] = 0x37;                   /* vdd_g3d as S-Boot leaves it: 643.75 mV */
     pmic[1][0x10] = 0x40;
     pmic[1][0x0e] = 0x01;
     /* the loader's log page */
@@ -1490,6 +1809,7 @@ int main(int argc, char **argv)
     map(0x02000000ULL, 0x00100000ULL);
     map(0x10000000ULL, 0x0e000000ULL);
     map(0x80000000ULL, 0x80000000ULL);
+    map(SB_GPU_MEM, SB_GPU_MEM_SIZE);       /* the GPU tests' memory in bank 2 */
     arena = mmap(0, ARENA, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     panel = calloc((size_t)UI_W * UI_H, 4);
     seed();

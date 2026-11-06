@@ -93,6 +93,36 @@ int sb_fg_word(uint8_t reg, uint16_t *v)
     return 1;
 }
 
+struct sb_fg_stat sb_fg_stat = { 0, 0, 0, 0, -1 };
+
+int sb_fg_word_checked(uint8_t reg, uint16_t *v, unsigned lo, unsigned hi)
+{
+    uint16_t w = 0;
+    int bad = 0;
+    ++sb_fg_stat.reads;
+    for (unsigned a = 0; a < 3; ++a) {
+        if (a)
+            ++sb_fg_stat.retries;
+        if (!sb_fg_word(reg, &w)) {
+            sb_udelay(200);
+            continue;
+        }
+        if (lo < hi && (w < lo || w > hi)) {
+            bad = 1;
+            sb_fg_stat.last_bad = w;
+            sb_udelay(200);
+            continue;
+        }
+        *v = w;
+        return 1;
+    }
+    if (bad)
+        ++sb_fg_stat.rejected;
+    else
+        ++sb_fg_stat.failed;
+    return 0;
+}
+
 int sb_chg_read(uint8_t reg, uint8_t *v)
 {
     if (reg == 0xb0)                                    /* CHG_INT: clear on read */
@@ -146,15 +176,19 @@ int sb_bat_read(struct sb_bat *bt)
         sb_max_bus.state = 0;                           /* retry */
     if (!sb_max_init())
         return 0;
-    if (!sb_fg_word(0x06, &v))
+    if (!sb_fg_word_checked(0x06, &v, 0, 0x6500))                 /* RepSOC <= 101 % */
         return 0;
-    bt->ok = 1;
     bt->soc_pct = v >> 8;
     bt->soc_x10 = (int)(v >> 8) * 10 + (int)((v & 0xffU) * 10U / 256U);
-    bt->mv = sb_fg_word(0x09, &v) ? (int)((uint32_t)v * 5U / 64U) : 0;
-    bt->avg_mv = sb_fg_word(0x19, &v) ? (int)((uint32_t)v * 5U / 64U) : 0;
-    bt->ma = sb_fg_word(0x0a, &v) ? (int32_t)(int16_t)v * 5 / 16 : 0;
-    bt->avg_ma = sb_fg_word(0x0b, &v) ? (int32_t)(int16_t)v * 5 / 16 : 0;
+    /* VCELL 2.5..4.7 V (78.125 uV LSB): a failed or impossible read is retried, then the whole
+     * sample is "not read" instead of 0 mV (which the battery tests took for an empty cell) */
+    if (!sb_fg_word_checked(0x09, &v, 32000, 60160))
+        return 0;
+    bt->ok = 1;
+    bt->mv = (int)((uint32_t)v * 5U / 64U);
+    bt->avg_mv = sb_fg_word_checked(0x19, &v, 32000, 60160) ? (int)((uint32_t)v * 5U / 64U) : bt->mv;
+    bt->ma = sb_fg_word_checked(0x0a, &v, 0, 0) ? (int32_t)(int16_t)v * 5 / 16 : 0;
+    bt->avg_ma = sb_fg_word_checked(0x0b, &v, 0, 0) ? (int32_t)(int16_t)v * 5 / 16 : bt->ma;
     bt->input = 0;
     if (sb_chg_read(0xb2, &c))
         bt->input = (c & 0x20U) ? 2 : (c & 0x40U) ? 1 : 0;

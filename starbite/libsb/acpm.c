@@ -137,6 +137,38 @@ int sb_pmic_write(uint32_t type, uint32_t reg, uint8_t val, int tier)
     return ok;
 }
 
+/* ACPM DVFS (vendor cal-if/acpm_dvfs.c): cmd = { domain, kHz, 0 = FREQ_REQ, 0 } on the channel at
+ * index 0 of the AP's channel table (Linux sends DVFS there; Starbite's iOS port raised the GPU
+ * to 572 MHz this way, xnu/series-12377/0303). ACPM sets the PLL and, from its own table, the
+ * voltage. With the gate: SB_SP_DVFS, first = domain. */
+int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier)
+{
+    const char *why;
+    uint32_t chans = ard(ACPM_INITDATA + 0x08), ap_max = ard(ACPM_INITDATA + 0x18), cmd[4];
+    if (sb_gate_check(SB_SP_DVFS, 0, domain, 1, tier < SB_TIER3 ? SB_TIER3 : tier, &why)) {
+        sb_logx("acpm dvfs refused, domain ", domain);
+        return 0;
+    }
+    if (!ap_max || ap_max > 32 || chans >= ACPM_SRAM_SIZE - ap_max * 0x48)
+        return 0;
+    uint32_t q = ard(chans + 0x34), e = ard(chans + 0x38), id = ard(chans);
+    if (!q || q > 64 || e < 16 || e > 64 || (e & 3U) || id > 31)
+        return 0;
+    cmd[0] = domain;
+    cmd[1] = khz;
+    cmd[2] = cmd[3] = 0;
+    int ok = acpm_send(chans, id, cmd);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "acpm dvfs domain ");
+    ub_dec(&u, domain);
+    ub_s(&u, " to ");
+    ub_dec(&u, khz);
+    ub_s(&u, ok ? " kHz: answered" : " kHz: no answer");
+    sb_log(u.b);
+    return ok;
+}
+
 int sb_acpm_build(char out[25])
 {
     if (!acpm_find(ACPM_PMIC_CH)) {
