@@ -23,6 +23,10 @@
 #include "post.h"
 #include "fastboot.h"
 #include "ramboot.h"
+#include "sbfmt.h"
+#include "crash.h"
+#include "wdt.h"
+#include "dtmerge.h"
 
 void star_intro_splash(void);   /* anim.c */
 uint32_t star_crc32(uintptr_t p, uint64_t n);   /* store.c */
@@ -627,6 +631,8 @@ int star_entry_ready(unsigned i, const char **why)
         w = "NO DTB";
     else if (e->method == M_ANDROID && !resolve(e->file[1], &s))
         w = "NO RAMDISK";
+    else if (e->method == M_ANDROID && e->file[3][0] && !resolve(e->file[3], &s))
+        w = "NO ANDROID DTB";
     if (why)
         *why = w;
     return !w;
@@ -756,6 +762,143 @@ static uintptr_t image_load(volatile uint64_t *log, const struct store_ent *e, u
 }
 
 /*
+ * ---- The launch: log level, watchdog, crash log (docs/STARBITE-HEALTH.md) ---------------------
+ * boot_entry works on a copy of the catalog entry whose cmdline has the global log level's
+ * fragment (catalog extension) and the watchdog's kernel arguments appended; XNU gets its fragment
+ * through launch.xfrag, where "!token" removes a boot-arg the payload already has. Once an entry
+ * point exists, launch_go writes the launch record (crash.c) and arms the watchdog (wdt.c), the
+ * last two things before the OS starts.
+ */
+static struct {
+    int valid, inform3, retry;
+    char key[24], name[32];
+    unsigned method, wdt, lvl, flags;
+    char xfrag[CAT_LOG_MAX + 32];
+} launch;
+static struct cat_ent launch_ent;
+
+static void lscopy(char *d, unsigned cap, const char *s)
+{
+    unsigned k = 0;
+    for (; s && s[k] && k + 1 < cap; ++k)
+        d[k] = s[k];
+    d[k] = 0;
+}
+
+static void launch_clear(void)
+{
+    launch.valid = launch.inform3 = 0;
+    launch.wdt = launch.flags = 0;
+    launch.xfrag[0] = 0;
+}
+
+static void launch_set(const char *key, const char *name, unsigned method, unsigned flags)
+{
+    struct star_settings s;
+    launch_clear();
+    if (!settings_load(&s))
+        sbset_defaults(&s);
+    lscopy(launch.key, sizeof(launch.key), key);
+    lscopy(launch.name, sizeof(launch.name), name);
+    launch.method = method;
+    launch.lvl = sbset_log(&s);
+    launch.flags = flags;
+    launch.valid = 1;
+}
+
+/* " name=N" onto a command line of cap bytes */
+static void arg_num(char *line, unsigned cap, const char *name, unsigned v)
+{
+    char t[48];
+    unsigned n = 0;
+    for (; name[n] && n < 32; ++n)
+        t[n] = name[n];
+    char d[10];
+    unsigned k = 0;
+    do {
+        d[k++] = (char)('0' + v % 10U);
+        v /= 10U;
+    } while (v && k < sizeof(d));
+    while (k)
+        t[n++] = d[--k];
+    t[n] = 0;
+    (void)sb_line_edit(line, cap, t, 0);
+}
+
+/* The entry as it will be started (launch_ent) and the launch's state. */
+static const struct cat_ent *launch_prepare(const struct cat_ent *e, volatile uint64_t *log)
+{
+    struct star_settings s;
+    if (!settings_load(&s))
+        sbset_defaults(&s);
+    const uint8_t *src = (const uint8_t *)e;
+    uint8_t *dst = (uint8_t *)&launch_ent;
+    for (unsigned i = 0; i < sizeof(launch_ent); ++i)
+        dst[i] = src[i];
+    launch_clear();
+    unsigned lvl = sbset_log(&s);
+    const char *frag = e->log[lvl];
+    /* the watchdog: only where someone will feed it */
+    unsigned wdt = 0, feed = e->wdt_feed;
+    int fits = (feed == CW_KERNEL || feed == CW_USERSPACE) ? e->method == M_LINUX
+             : feed == CW_XNU ? e->method == M_XNU : feed == CW_OWN;
+    if (s.wdt_mode != SET_WDT_OFF && e->wdt_s && fits)
+        wdt = s.wdt_mode == SET_WDT_FIXED && s.wdt_s ? s.wdt_s : e->wdt_s;
+    if (wdt) {
+        unsigned ms;
+        (void)sb_wdt_count(wdt, &ms);
+        wdt = (ms + 500U) / 1000U;
+    }
+    if (e->method == M_XNU) {
+        lscopy(launch.xfrag, sizeof(launch.xfrag), frag);
+        if (wdt)
+            arg_num(launch.xfrag, sizeof(launch.xfrag), "sbwdt=", wdt);
+    } else if (e->method == M_LINUX || e->method == M_ANDROID) {
+        (void)sb_line_edit(launch_ent.cmdline, sizeof(launch_ent.cmdline), frag, 0);
+        if (wdt && e->method == M_LINUX) {
+            (void)sb_line_edit(launch_ent.cmdline, sizeof(launch_ent.cmdline), "s3c2410_wdt.tmr_atboot=1", 0);
+            arg_num(launch_ent.cmdline, sizeof(launch_ent.cmdline), "s3c2410_wdt.tmr_margin=", wdt);
+            if (feed == CW_USERSPACE)
+                arg_num(launch_ent.cmdline, sizeof(launch_ent.cmdline), "sb.wdt=", wdt);
+        }
+    }
+    lscopy(launch.key, sizeof(launch.key), e->key);
+    lscopy(launch.name, sizeof(launch.name), e->name);
+    launch.method = e->method;
+    launch.lvl = lvl;
+    launch.wdt = wdt;
+    launch.inform3 = (e->cflags & CE_LINUX_INFORM3) && e->method == M_LINUX && s.crash_mode != SET_CRASH_OFF;
+    launch.flags = (launch.inform3 ? CLF_LINUX_INFORM3 : 0U) | (launch.retry ? CLF_RETRY : 0U);
+    launch.valid = !(e->cflags & CE_NO_LAUNCH);
+    log[19] = (uint64_t)wdt << 32 | (uint64_t)lvl << 8 | (uint64_t)(unsigned)launch.inform3;
+    return &launch_ent;
+}
+
+/* The last things before the OS: the launch record, then the watchdog. */
+static void pmsg_put(const char *s);
+static void launch_go(volatile uint64_t *log)
+{
+    if (!launch.valid)
+        return;
+    crash_launch(launch.key, launch.name, launch.method, launch.wdt, launch.wdt != 0, launch.lvl, launch.flags);
+    /* docs/MAINTENANCE.md 4.2 R7: the start an "SBNEXT2R" mailbox asked for leaves its return key
+     * in the mailbox, so the test OS's reset comes back there (to SBMAINT) instead of RECOVERY */
+    const char *rk = rec_return_key(launch.key);
+    if (rk) {
+        rec_mailbox_write(rk);
+        pmsg_put("STARBITE: boot-next return key armed: ");
+        pmsg_put(rk);
+        pmsg_put("\n");
+    }
+    if (launch.wdt) {
+        unsigned ms = wdt_arm(launch.wdt);
+        log[19] |= (uint64_t)ms << 40;
+        pmsg_put(ms ? "STARBITE: watchdog armed (cluster 1, 0x10060000)\n" : "STARBITE: watchdog NOT armed\n");
+    }
+    launch.valid = 0;
+}
+
+/*
  * Linux: Image + DTB (+ initrd) from the store; the entry's cmdline is appended to the DTB's
  * bootargs. x0 = DTB. The display trigger stays free-running (0x1281, as uniLoader leaves it):
  * mainline's framebuffer driver depends on it. The microSD rails are switched on for it.
@@ -788,6 +931,12 @@ boot_linux(volatile uint64_t *log, const struct cat_ent *e)
     uint64_t now;
     if (em_rtc_epoch(&now))
         (void)fdt_chosen_set_u64(LINUX_DTB, "starbite,rtc-epoch", now);
+    /* Crash detection: the port's DTB sets INFORM3 = recovery at boot (s9p,set-registers), so a
+     * panic or a watchdog reset would land in RECOVERY. The launch's copy says normal instead, and
+     * the reset comes back here (catalog flag CE_LINUX_INFORM3). */
+    if (launch.inform3)
+        log[20] = (uint64_t)fdt_patch_pairs((uint8_t *)LINUX_DTB, "s9p,set-registers", 0x1406080cU,
+                                            INFORM_RECOVERY, INFORM_NORMAL);
     if (have_rd) {
         stage_file(k++, ns, "Loading initramfs", &rd.e);
         r = store_load(&rd.e, OS_RD, EDIT_FDT - OS_RD);
@@ -822,8 +971,10 @@ boot_linux(volatile uint64_t *log, const struct cat_ent *e)
  * Android: kernel (arm64 Image, Samsung 4.9) at RAM_BASE + text_offset, ramdisk (first stage
  * init) at OS_RD, and S-Boot's own FDT (the stock DTB it loaded, with its androidboot.*
  * bootargs) copied to EDIT_FDT with the cmdline file and the entry's cmdline appended and
- * /chosen linux,initrd-* pointing at the ramdisk. The display goes back as S-Boot left it: the
- * vendor kernel initialises DECON itself.
+ * /chosen linux,initrd-* pointing at the ramdisk. With a 4th file (the OS's own DTB or DTBH,
+ * loaded to LINUX_DTB), that DTB is the base and S-Boot's run-time state is merged into it
+ * (dtmerge.c); without one the path is exactly the old one. The display goes back as S-Boot left
+ * it: the vendor kernel initialises DECON itself.
  */
 static uintptr_t
 boot_android(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
@@ -854,14 +1005,39 @@ boot_android(volatile uint64_t *log, uintptr_t fdt, const struct cat_ent *e)
     uintptr_t dst = image_load(log, &img.e, OS_RD, -55, &span);
     if (!dst)
         return 0;
-    stage_text(2, 4, "Loading device tree", "S-Boot FDT", __builtin_bswap32(*(volatile uint32_t *)(fdt + 4)));
-    uint32_t fsize = cmdline[0] ? fdt_copy_append_bootargs(fdt, EDIT_FDT, LINUX_DTB - EDIT_FDT, cmdline) : 0;
-    if (!fsize) {
-        uint32_t total = __builtin_bswap32(*(volatile uint32_t *)(fdt + 4));
-        if (cmdline[0] || total > LINUX_DTB - EDIT_FDT)
-            return fail(log, -58, "ANDROID FDT FAILED");
-        copy_bytes(EDIT_FDT, fdt, total);
-        fsize = total;
+    uint32_t fsize;
+    struct src dt;
+    if (e->file[3][0]) {
+        /* The entry's own DTB (a plain FDT or Samsung's DTBH container, dtmerge.h) instead of the
+         * one S-Boot loaded from BOOT, with what S-Boot set at run time carried over: /chosen
+         * (bootargs + this cmdline, initrd, revision, serial), the memory nodes, the root's
+         * model_info-system_rev. */
+        uint32_t chip, rev, off, dsz;
+        unsigned idx, cnt;
+        if (!resolve(e->file[3], &dt) || dt.kind != SRC_STORE)
+            return fail(log, -56, "ANDROID DTB NOT IN THE STORE");
+        stage_file(2, 4, "Loading device tree", &dt.e);
+        int rr = store_load(&dt.e, LINUX_DTB, UFS_DMA - LINUX_DTB);
+        if (rr)
+            return fail(log, -56, rr == -3 ? "ANDROID DTB TOO LARGE" : "ANDROID DTB READ OR CRC FAILED");
+        (void)fdt_board_id((const uint8_t *)fdt, &chip, &rev);
+        if (!dtbh_pick((const uint8_t *)LINUX_DTB, dt.e.size, chip, rev, &off, &dsz, &idx, &cnt))
+            return fail(log, -57, "ANDROID DTB: NO USABLE DEVICE TREE");
+        fsize = fdt_merge_sboot((const uint8_t *)(LINUX_DTB + off), (const uint8_t *)fdt, (uint8_t *)EDIT_FDT,
+                                (uint32_t)(LINUX_DTB - EDIT_FDT), cmdline);
+        if (!fsize)
+            return fail(log, -58, "ANDROID DTB MERGE FAILED");
+        log[21] = (uint64_t)chip << 48 | (uint64_t)(rev & 0xffffU) << 32 | (uint64_t)idx << 16 | cnt;
+    } else {
+        stage_text(2, 4, "Loading device tree", "S-Boot FDT", __builtin_bswap32(*(volatile uint32_t *)(fdt + 4)));
+        fsize = cmdline[0] ? fdt_copy_append_bootargs(fdt, EDIT_FDT, LINUX_DTB - EDIT_FDT, cmdline) : 0;
+        if (!fsize) {
+            uint32_t total = __builtin_bswap32(*(volatile uint32_t *)(fdt + 4));
+            if (cmdline[0] || total > LINUX_DTB - EDIT_FDT)
+                return fail(log, -58, "ANDROID FDT FAILED");
+            copy_bytes(EDIT_FDT, fdt, total);
+            fsize = total;
+        }
     }
     if (!fdt_chosen_set_u64(EDIT_FDT, "linux,initrd-start", OS_RD) ||
         !fdt_chosen_set_u64(EDIT_FDT, "linux,initrd-end", OS_RD + rd.e.size))
@@ -1255,6 +1431,8 @@ boot_xnu(volatile uint64_t *log, const struct cat_ent *e, const char *edited)
         cmd[i] = src[i];
     cmd[BOOT_LINE_LENGTH - 1] = 0;
     line_append(cmd, BOOT_LINE_LENGTH, e->cmdline);
+    if (launch.xfrag[0])     /* the log level's fragment ("!-v" removes -v) and sbwdt= */
+        (void)sb_line_edit(cmd, BOOT_LINE_LENGTH, launch.xfrag, 1);
     {
         struct pline pl;
         pl.n = 0;
@@ -1274,19 +1452,34 @@ boot_entry(unsigned i, volatile uint64_t *log, uintptr_t fdt, const char *cmdlin
     const struct cat_ent *e = cat_get(i);
     const char *why;
     boot_why = 0;
+    launch_clear();
     if (!e)
         return fail(log, -12, "NO SUCH ENTRY");
     if (!star_entry_ready(i, &why))
         return fail(log, -13, why);
+    e = launch_prepare(e, log);
+    /* log level 0: none of the loader's own status lines; 3: all of them, even under menu v7 */
+    int was = star_fb_muted();
+    if (launch.lvl == 0)
+        star_fb_mute(1);
+    else if (launch.lvl >= 3)
+        star_fb_mute(0);
+    uintptr_t entry;
     if (e->method == M_XNU)
-        return boot_xnu(log, e, cmdline);
-    if (e->method == M_UEFI)
-        return boot_uefi(log, fdt, e);
-    if (e->method == M_LINUX)
-        return boot_linux(log, e);
-    if (e->method == M_ANDROID)
-        return boot_android(log, fdt, e);
-    return boot_bare(log, fdt, e);
+        entry = boot_xnu(log, e, cmdline);
+    else if (e->method == M_UEFI)
+        entry = boot_uefi(log, fdt, e);
+    else if (e->method == M_LINUX)
+        entry = boot_linux(log, e);
+    else if (e->method == M_ANDROID)
+        entry = boot_android(log, fdt, e);
+    else
+        entry = boot_bare(log, fdt, e);
+    if (!entry) {
+        star_fb_mute(was);
+        launch_clear();
+    }
+    return entry;
 }
 
 /* ---- boot setup, Starbite Recovery and Rescue (recovery.c, docs/STARBITE-RECOVERY.md) ------- */
@@ -1501,6 +1694,7 @@ static uintptr_t star_rescue_boot(volatile uint64_t *log)
     struct rescue_part part[3];
     const char *cmd, *w;
     boot_why = 0;
+    launch_clear();     /* no launch record: rescue mode must not need UFS */
     star_fb_row_base(0);
     star_fb_text_c(0, "STARBITE RESCUE MODE", 0xffffd43bU, 0xff000000U);
     star_fb_text(1, "STARTING THE RESCUE SYSTEM");
@@ -1518,6 +1712,318 @@ static uintptr_t star_rescue_boot(volatile uint64_t *log)
     if (entry)
         log[10] = 0x701;
     return entry;
+}
+
+/*
+ * ---- Starbite Maintenance (docs/MAINTENANCE.md 4.2: R2, R4, R5) ------------------------------
+ * Sources, in order: the GPT partition "SBMAINT" (two SBMAINT1 slots: A at byte 0, B at half the
+ * partition rounded down to 1 MiB; the valid one with the higher seq first, "maint-prev" the other
+ * way round; a slot is read whole into STAGE and every section's CRC checked before anything is
+ * placed), else the catalog entry "maint" ("maint-rescue") from the OS store, else nothing.
+ * The start is the rescue start's: kernel at RAM_BASE + text_offset, initrd at OS_RD, the DTB (or
+ * dtb-rescue) at LINUX_DTB with " <header cmdline> sb.maint=1 sb.maint.src=a|b sb.maint.seq=N
+ * sb.maint.from=next|fastboot [sb.rescue=1] sb.serial=<androidboot.serialno>" appended, the microSD
+ * rails on. Log slot 10: 0x710 slot A, 0x711 slot B, 0x712 the store, 0x713 `fastboot oem maint`.
+ */
+#define MAINT_FROM_NEXT     0U
+#define MAINT_FROM_FASTBOOT 1U
+
+struct mslot {
+    int valid;
+    uint64_t lba, bytes;          /* the slot's first 4 KiB block on LU0, its size */
+    struct sbm_info m;
+    const char *why;
+};
+static struct mslot mslots[2];
+static char maint_why[160];
+
+/* The two slots' headers (GPT + two block reads): 1 if the partition exists. */
+static int maint_scan(void)
+{
+    uint64_t first, last;
+    for (unsigned i = 0; i < 2; ++i) {
+        mslots[i].valid = 0;
+        mslots[i].why = "NO SBMAINT PARTITION";
+    }
+    if (!ufs_up() || !gpt_find("SBMAINT", &first, &last) || last < first)
+        return 0;
+    uint64_t bytes = (last - first + 1U) * 4096U, b = sbm_slot_b(bytes);
+    static uint8_t h[SBM_HDR];
+    for (unsigned i = 0; i < 2; ++i) {
+        struct mslot *s = &mslots[i];
+        uint64_t off = i ? b : 0;
+        s->lba = first + off / 4096U;
+        s->bytes = i ? bytes - b : b;
+        if (!s->bytes || ufs_read(s->lba, 1)) {
+            s->why = "UNREADABLE";
+            continue;
+        }
+        uint8_t *hp = h;
+        __asm__("" : "+r"(hp));   /* no folded "h - UFS_BUF" constant: that is an ABS64 relocation */
+        for (unsigned k = 0; k < SBM_HDR; ++k)
+            hp[k] = *(volatile uint8_t *)(UFS_BUF + k);
+        s->valid = sbm_check(h, s->bytes, &s->m, &s->why);
+    }
+    return 1;
+}
+
+static void why_cat(const char *s)
+{
+    unsigned n = 0;
+    while (n < sizeof(maint_why) - 1 && maint_why[n])
+        ++n;
+    for (; s && *s && n < sizeof(maint_why) - 1; ++s)
+        maint_why[n++] = *s;
+    maint_why[n] = 0;
+}
+
+/* The catalog entry for this variant: index, or -1; *add_rescue when "maint" stands in. */
+static int maint_entry(unsigned variant, int *add_rescue)
+{
+    *add_rescue = 0;
+    int i = variant == MAINT_RESCUE ? cat_find("maint-rescue") : -1;
+    if (i < 0 || !star_entry_ready((unsigned)i, 0)) {
+        i = cat_find("maint");
+        *add_rescue = variant == MAINT_RESCUE;
+    }
+    return i >= 0 && star_entry_ready((unsigned)i, 0) ? i : -1;
+}
+
+static const char *maint_missing(int part)
+{
+    maint_why[0] = 0;
+    if (part) {
+        why_cat("SLOT A ");
+        why_cat(mslots[0].why);
+        why_cat(", SLOT B ");
+        why_cat(mslots[1].why);
+    } else {
+        why_cat("NO SBMAINT PARTITION");
+    }
+    why_cat(", NO MAINT ENTRY IN THE STORE");
+    return maint_why;
+}
+
+int star_maint_ready(const char **why)
+{
+    int add;
+    int part = maint_scan();
+    if (mslots[0].valid || mslots[1].valid || maint_entry(MAINT_NORMAL, &add) >= 0)
+        return 1;
+    *why = maint_missing(part);
+    return 0;
+}
+
+/* " name=value" from S-Boot's bootargs (sb.serial) */
+static void sboot_arg(const char *key, char *out, unsigned cap)
+{
+    uintptr_t v;
+    uint32_t len;
+    out[0] = 0;
+    if (boot_fdt && !(boot_fdt & 7) && fdt_chosen_raw(boot_fdt, "bootargs", &v, &len))
+        (void)sb_arg((const char *)v, len, key, out, cap);
+}
+
+/* slot: "a", "b", or 0 for the store (whose catalog cmdline has sb.maint=1 sb.maint.src=store) */
+static void maint_extra(char *cmd, unsigned cap, const char *slot, uint32_t seq, unsigned from, int rescue)
+{
+    char t[64], serial[40];
+    unsigned n = 0;
+    const char *a;
+    if (slot) {
+        for (a = "sb.maint=1 sb.maint.src="; *a; ++a)
+            t[n++] = *a;
+        for (; *slot; ++slot)
+            t[n++] = *slot;
+        t[n] = 0;
+        line_append(cmd, cap, t);
+    }
+    if (seq) {
+        char d[12];
+        unsigned k = 0;
+        do {
+            d[k++] = (char)('0' + seq % 10U);
+            seq /= 10U;
+        } while (seq);
+        n = 0;
+        for (a = "sb.maint.seq="; *a; ++a)
+            t[n++] = *a;
+        while (k)
+            t[n++] = d[--k];
+        t[n] = 0;
+        line_append(cmd, cap, t);
+    }
+    line_append(cmd, cap, from == MAINT_FROM_FASTBOOT ? "sb.maint.from=fastboot" : "sb.maint.from=next");
+    if (rescue)
+        line_append(cmd, cap, "sb.rescue=1");
+    sboot_arg("androidboot.serialno", serial, sizeof(serial));
+    if (serial[0]) {
+        n = 0;
+        for (a = "sb.serial="; *a; ++a)
+            t[n++] = *a;
+        for (unsigned k = 0; serial[k] && n + 1 < sizeof(t); ++k)
+            t[n++] = serial[k];
+        t[n] = 0;
+        line_append(cmd, cap, t);
+    }
+}
+
+/* Slot i (already scanned and valid) read whole into STAGE, checked, placed: the entry, or 0 and
+ * *why (then the next slot is tried). */
+static uintptr_t maint_from_slot(volatile uint64_t *log, unsigned i, unsigned variant, unsigned from, const char **why)
+{
+    const struct mslot *s = &mslots[i];
+    const struct sbm_info *m = &s->m;
+    static char cmd[512];
+    if (ufs_read_to(s->lba, m->total / 4096U, STAGE)) {
+        *why = "SLOT READ FAILED";
+        return 0;
+    }
+    for (unsigned k = 0; k < 4; ++k)
+        if (m->size[k] && star_crc32(STAGE + m->off[k], m->size[k]) != m->crc[k]) {
+            *why = k == SBM_KERNEL ? "KERNEL CRC" : k == SBM_INITRD ? "INITRD CRC" : "DTB CRC";
+            return 0;
+        }
+    uintptr_t k0 = STAGE + m->off[SBM_KERNEL];
+    if (*(volatile uint32_t *)(k0 + 56) != 0x644d5241U) {
+        *why = "KERNEL NOT ARM64";
+        return 0;
+    }
+    uint64_t text_offset = *(volatile uint64_t *)(k0 + 8), span = *(volatile uint64_t *)(k0 + 16);
+    if (span < m->size[SBM_KERNEL])
+        span = m->size[SBM_KERNEL];
+    uintptr_t dst = LINUX_BASE + text_offset;
+    if (text_offset >= (2UL << 20) || span > OS_RD - dst) {
+        *why = "KERNEL TOO LARGE";
+        return 0;
+    }
+    if (m->size[SBM_INITRD] > EDIT_FDT - OS_RD) {
+        *why = "INITRD TOO LARGE";
+        return 0;
+    }
+    unsigned d = variant == MAINT_RESCUE && m->size[SBM_DTB_RESCUE] ? SBM_DTB_RESCUE : SBM_DTB;
+    /* the DTB first: its failures are the cheap ones */
+    copy_bytes(EDIT_FDT, STAGE + m->off[d], m->size[d]);
+    cmd[0] = 0;
+    {
+        unsigned n = 0;
+        for (; n + 1 < sizeof(cmd) && n < sizeof(m->cmdline) && m->cmdline[n]; ++n)
+            cmd[n] = m->cmdline[n] >= 32 && m->cmdline[n] < 127 ? m->cmdline[n] : ' ';
+        cmd[n] = 0;
+    }
+    maint_extra(cmd, sizeof(cmd), i ? "b" : "a", m->seq, from, variant == MAINT_RESCUE);
+    uint32_t dsize = fdt_copy_append_bootargs(EDIT_FDT, LINUX_DTB, (uint32_t)(UFS_DMA - LINUX_DTB), cmd);
+    if (!dsize) {
+        *why = "DTB HAS NO BOOTARGS";
+        return 0;
+    }
+    uint64_t now;
+    if (em_rtc_epoch(&now))
+        (void)fdt_chosen_set_u64(LINUX_DTB, "starbite,rtc-epoch", now);
+    copy_bytes(OS_RD, STAGE + m->off[SBM_INITRD], m->size[SBM_INITRD]);
+    if (!fdt_chosen_set_u64(LINUX_DTB, "linux,initrd-start", OS_RD) ||
+        !fdt_chosen_set_u64(LINUX_DTB, "linux,initrd-end", OS_RD + m->size[SBM_INITRD])) {
+        *why = "DTB HAS NO INITRD PROPERTIES";
+        return 0;
+    }
+    copy_bytes(dst, k0, m->size[SBM_KERNEL]);
+    uint8_t l31 = 0, l2 = 0;
+    (void)hw_sd_rails(&l31, &l2);
+    log[18] = (uint64_t)l31 << 8 | l2;
+    {
+        struct pline p;
+        p.n = 0;
+        pl_s(&p, "STARTING SLOT ");
+        pl_s(&p, i ? "B" : "A");
+        pl_s(&p, " (SEQ ");
+        pl_u(&p, m->seq);
+        pl_s(&p, ")");
+        star_fb_text_c(1, p.b, 0xffffffffU, 0xff000000U);
+    }
+    {
+        struct pline p;
+        p.n = 0;
+        pl_s(&p, "STARBITE: maintenance from slot ");
+        pl_s(&p, i ? "b" : "a");
+        pl_s(&p, " seq ");
+        pl_u(&p, m->seq);
+        pl_s(&p, " ");
+        pmsg_put(p.b);
+        pmsg_put(m->version);
+        pmsg_put("\n");
+    }
+    clean_bytes(dst, dst + span);
+    clean_bytes(OS_RD, OS_RD + m->size[SBM_INITRD]);
+    clean_bytes(LINUX_DTB, LINUX_DTB + dsize);
+    log[10] = from == MAINT_FROM_FASTBOOT ? 0x713 : 0x710 + i;
+    log[15] = dst;
+    log[17] = LINUX_DTB;
+    clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+    __asm__ volatile("ic iallu; dsb sy; isb" : : : "memory");
+    return dst;
+}
+
+/* Starbite Maintenance from the best source: the entry PA, or 0 with boot_why. */
+static uintptr_t star_maint_boot(volatile uint64_t *log, unsigned variant, unsigned from)
+{
+    boot_why = 0;
+    star_fb_row_base(0);
+    star_fb_text_c(0, "STARBITE MAINTENANCE", 0xffffd43bU, 0xff000000U);
+    star_fb_text_c(1, "LOOKING FOR IT...", 0xffb1bad3U, 0xff000000U);
+    pmsg_put(variant == MAINT_PREV ? "STARBITE: maintenance (other slot)\n" :
+             variant == MAINT_RESCUE ? "STARBITE: maintenance (rescue)\n" : "STARBITE: maintenance\n");
+    launch_set("maint", "Starbite Maintenance", M_LINUX, CLF_MAINT | (from == MAINT_FROM_FASTBOOT ? CLF_FASTBOOT : 0U));
+    int part = maint_scan();
+    int valid[2] = { mslots[0].valid, mslots[1].valid };
+    uint32_t seq[2] = { mslots[0].m.seq, mslots[1].m.seq };
+    unsigned order[2];
+    unsigned n = sbm_order(valid, seq, variant == MAINT_PREV, order);
+    for (unsigned k = 0; k < n; ++k) {
+        const char *w = 0;
+        uintptr_t e = maint_from_slot(log, order[k], variant, from, &w);
+        if (e)
+            return e;
+        mslots[order[k]].why = w;
+        mslots[order[k]].valid = 0;
+    }
+    int add_rescue;
+    int i = maint_entry(variant, &add_rescue);
+    if (i >= 0) {
+        const struct cat_ent *e = cat_get((unsigned)i);
+        const uint8_t *src = (const uint8_t *)e;
+        uint8_t *dst = (uint8_t *)&launch_ent;
+        for (unsigned b = 0; b < sizeof(launch_ent); ++b)
+            dst[b] = src[b];
+        maint_extra(launch_ent.cmdline, sizeof(launch_ent.cmdline), 0, 0, from, add_rescue);
+        star_fb_text_c(1, "STARTING FROM THE OS STORE", 0xffffffffU, 0xff000000U);
+        pmsg_put("STARBITE: maintenance from the store\n");
+        uintptr_t entry = boot_linux(log, &launch_ent);
+        if (entry) {
+            log[10] = from == MAINT_FROM_FASTBOOT ? 0x713 : 0x712;
+            clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+            return entry;
+        }
+        launch_clear();
+        return 0;
+    }
+    launch_clear();
+    maint_missing(part);
+    static char full[200];
+    unsigned m = 0;
+    for (const char *a = "NO MAINTENANCE SYSTEM: "; *a; ++a)
+        full[m++] = *a;
+    for (unsigned k = 0; maint_why[k] && m + 1 < sizeof(full); ++k)
+        full[m++] = maint_why[k];
+    full[m] = 0;
+    return fail(log, -80, full);
+}
+
+/* `fastboot oem maint [prev|rescue]` (fastboot_dev.c): placed and ready, or 0 with *why. */
+uintptr_t star_maint_ram(unsigned variant, const char **why)
+{
+    uintptr_t e = star_maint_boot((volatile uint64_t *)LOG_BASE, variant, MAINT_FROM_FASTBOOT);
+    *why = e ? 0 : boot_why;
+    return e;
 }
 
 /* The recovery menu until it says Continue: an entry PA to start, or 0 to go on booting. */
@@ -1554,8 +2060,22 @@ static uintptr_t recovery_loop(volatile uint64_t *log, const char *why)
     }
 }
 
-/* Returns the entry PA, or 0 for Download mode. Status stays in the log page at LOG_BASE. */
+/* Status stays in the log page at LOG_BASE. */
+static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr);
+
+/* Returns the entry PA, or 0 for Download mode. A start ends with launch_go: the launch record and
+ * the watchdog, the last things before xnu_boot.S leaves the loader. */
 uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)
+{
+    uintptr_t entry = prepare(fdt, log, el, sctlr);
+    if (entry) {
+        launch_go(log);
+        clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
+    }
+    return entry;
+}
+
+static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uint64_t sctlr)
 {
     /* Caches on before anything is drawn (mmu.c); the checks below see S-Boot's sctlr. */
     if (el == 4 && !(sctlr & 1))
@@ -1563,15 +2083,24 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
     log[77] = star_fb_enable();
     /* The Bixby window: only the key GPIO, the timer and fbtext up to here (recovery.c). */
     int rec = rec_bixby_window(REC_WINDOW_MS);
+    /* What the last OS left in the ramoops area, before the first pmsg line changes it: reads and
+     * a RAM copy only (crash.c). */
+    crash_snapshot(fdt);
     boot_fdt = fdt;
     boot_el = el;
     boot_sctlr = sctlr;
     star_dump_latches();
-    int rescue = rec_rescue_take();
+    /* The boot-next keys the loader itself takes (mailbox cleared at once): rescue, and Starbite
+     * Maintenance's maint / maint-prev / maint-rescue (docs/MAINTENANCE.md 4.2 R2). */
+    int next = rec_next_take();
+    int rescue = next == REC_NEXT_RESCUE;
     uintptr_t entry;
     if (rec) {
         pmsg_put("STARBITE: Bixby held: Starbite Recovery\n");
+        if (next != REC_NEXT_NONE)
+            pmsg_put("STARBITE: Bixby cancelled the boot-next request\n");
         rescue = 0;
+        next = REC_NEXT_NONE;
         entry = recovery_loop(log, 0);
         if (entry)
             return entry;
@@ -1595,11 +2124,28 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
         if (entry)
             return entry;
     }
-    /* POST: a fatal check, or Bixby held during it, brings up the recovery menu. */
+    /* Starbite Maintenance (the recovery menu's reboot, `reboot-to maint`, SBMAINT's own reboots):
+     * no POST, no menu; a failure comes back to recovery with the reason. */
+    if (next >= REC_NEXT_MAINT) {
+        unsigned variant = next == REC_NEXT_MAINT_PREV ? MAINT_PREV : next == REC_NEXT_MAINT_RESCUE ? MAINT_RESCUE
+                                                                                                  : MAINT_NORMAL;
+        entry = star_maint_boot(log, variant, MAINT_FROM_NEXT);
+        if (entry)
+            return entry;
+        rec_panel_lost();
+        entry = recovery_loop(log, boot_why ? boot_why : "MAINTENANCE FAILED");
+        if (entry)
+            return entry;
+    }
+    /* POST at the settings record's level (full by default; Volume Down skips it once): a fatal
+     * check, or Bixby held during it, brings up the recovery menu. */
     {
-        int bixby = 0;
+        int bixby = 0, skipped = 0;
         const char *why = 0;
-        int f = post_boot(branded, &bixby, &why);
+        struct star_settings ps;
+        if (!settings_load(&ps))
+            sbset_defaults(&ps);
+        int f = post_boot(sbset_post(&ps), branded, &bixby, &skipped, &why);
         if (f || bixby) {
             entry = recovery_loop(log, why);
             if (entry)
@@ -1607,6 +2153,23 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
         }
     }
     (void)cat_load();
+    /* Crash and hang detection: the last launch judged, a report saved, the crash screen
+     * (crash.c). Then the menu, Starbite Recovery or the same entry once more (settings). */
+    {
+        int retry = -1;
+        int act = crash_after(&retry);
+        if (act == CRASH_GO_RECOVERY) {
+            entry = recovery_loop(log, "THE LAST START CRASHED");
+            if (entry)
+                return entry;
+        } else if (act == CRASH_GO_RETRY && retry >= 0) {
+            launch.retry = 1;
+            entry = boot_entry((unsigned)retry, log, fdt, cmdline);
+            launch.retry = 0;
+            if (entry)
+                return entry;
+        }
+    }
     /* Loader fastboot (FB1, fastboot_dev.c, docs/USB-FASTBOOT.md): Volume Up held, or boot-next
      * "fastboot". `fastboot boot` starts its image from here; `fastboot continue`: the menu. */
     {
@@ -1783,7 +2346,11 @@ static uintptr_t ram_start(volatile uint64_t *log, const struct star_ram *r, uin
 
 uintptr_t star_boot_ram(const struct star_ram *r, uintptr_t fdt, const char **why)
 {
+    /* a launch record too (no watchdog, no log fragments): `fastboot boot` images crash as well */
+    launch_set("fastboot", "fastboot boot", r->method, CLF_FASTBOOT);
     uintptr_t e = ram_start((volatile uint64_t *)LOG_BASE, r, fdt);
+    if (!e)
+        launch_clear();
     *why = e ? 0 : boot_why;
     return e;
 }

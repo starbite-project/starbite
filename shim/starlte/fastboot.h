@@ -121,6 +121,9 @@ unsigned fbp_log(const char *which, char *out, unsigned cap);
 /* Put the image where its OS wants it, exactly as the catalog's start paths do (xnu_boot.c
  * star_boot_ram); 1 when it is ready to start, 0 with *why. */
 int fbp_boot_prepare(unsigned method, const struct fb_image *img, const char **why);
+/* Starbite Maintenance placed from UFS (`oem maint`): variant 0 normal, 1 prev, 2 rescue; 1 when it
+ * is ready to start, 0 with *why. */
+int fbp_maint(unsigned variant, const char **why);
 void fbp_set_next(const char *key);                             /* boot-next mailbox */
 const char *fbp_speed(void);                                    /* "high", "full", "none" */
 void fbp_status(const char *line);                              /* the screen's last-command line */

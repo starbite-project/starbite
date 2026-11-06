@@ -1,15 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * The Starbite OS store: see store.h. Read only, except the UFS settings record.
+ * The Starbite OS store: see store.h. Read only, except the UFS settings record and the crash log.
  */
 #include <stdint.h>
 #include "store.h"
 #include "ufs.h"
 #include "sd.h"
+#include "sbfmt.h"
 
 #define UFS_STORE_OFFSET 4194304ULL            /* USERDATA +16 GiB, in 4 KiB blocks */
 #define V1_BLOCKS        262144ULL             /* the version 1 store: 1 GiB */
 #define SCRATCH          (UFS_BUF + (512U << 10))
-#define SETTINGS_MAGIC   0x474e545445534253ULL /* "SBSETTNG" */
 
 struct medium {
     int state;                 /* 0 not tried, 1 open, -1 none */
@@ -295,8 +295,8 @@ uint64_t store_used(unsigned m)
 }
 
 /* ---- settings record --------------------------------------------------------
- * Block 2 of the UFS store: "SBSETTNG", u32 version 1, u32 CRC32 of bytes 16..255, u32 seq,
- * u32 timeout_s, u32 flags, u32 0, char default_key[24], last_key[24], next_key[24], zeros.
+ * Block 2 of the UFS store, the codec and layout in sbfmt.c / sbfmt.h ("SBSETTNG", version 1, CRC32
+ * of bytes 16..255). settings_save keeps bytes it does not know (112..255 of the record it read).
  */
 static uint64_t settings_lba(void)
 {
@@ -306,45 +306,39 @@ static uint64_t settings_lba(void)
     return s->base + s->settings;
 }
 
-static void key_get(char *dst, uintptr_t src)
+static int set_status = -2;
+static uint8_t set_tail[SBSET_BYTES];   /* the last record read, for the bytes after the known fields */
+
+int settings_status(void)
 {
-    for (unsigned k = 0; k < 24; ++k)
-        dst[k] = (char)*(volatile uint8_t *)(src + k);
-    dst[23] = 0;
+    return set_status;
 }
 
 int settings_load(struct star_settings *st)
 {
-    uint8_t *z = (uint8_t *)st;
-    for (unsigned i = 0; i < sizeof(*st); ++i)
-        z[i] = 0;
+    sbset_defaults(st);
     uint64_t lba = settings_lba();
-    if (!lba || ufs_read(lba, 1) || le(UFS_BUF, 8) != SETTINGS_MAGIC || le(UFS_BUF + 8, 4) != 1 ||
-        star_crc32(UFS_BUF + 16, 240) != (uint32_t)le(UFS_BUF + 12, 4))
+    if (!lba) {
+        set_status = -2;
         return 0;
-    st->seq = (uint32_t)le(UFS_BUF + 16, 4);
-    st->timeout_s = (uint32_t)le(UFS_BUF + 20, 4);
-    st->flags = (uint32_t)le(UFS_BUF + 24, 4);
-    key_get(st->default_key, UFS_BUF + 32);
-    key_get(st->last_key, UFS_BUF + 56);
-    key_get(st->next_key, UFS_BUF + 80);
+    }
+    if (ufs_read(lba, 1)) {
+        set_status = -1;
+        return 0;
+    }
+    uint8_t b[SBSET_BYTES];
+    for (unsigned i = 0; i < SBSET_BYTES; ++i)
+        b[i] = *(volatile uint8_t *)(UFS_BUF + i);
+    set_status = sbset_check(b);
+    if (set_status != 1)
+        return 0;
+    sbset_decode(b, st);
+    for (unsigned i = 0; i < SBSET_BYTES; ++i)
+        set_tail[i] = b[i];
     return 1;
 }
 
-static void put(uintptr_t p, uint64_t v, unsigned n)
-{
-    for (unsigned i = 0; i < n; ++i)
-        *(volatile uint8_t *)(p + i) = (uint8_t)(v >> (8 * i));
-}
-
-static void key_put(uintptr_t p, const char *k)
-{
-    unsigned i = 0;
-    for (; i < 23 && k[i]; ++i)
-        *(volatile uint8_t *)(p + i) = (uint8_t)k[i];
-    for (; i < 24; ++i)
-        *(volatile uint8_t *)(p + i) = 0;
-}
+static uint8_t set_blk[CL_BLOCK];
 
 int settings_save(struct star_settings *st)
 {
@@ -352,21 +346,49 @@ int settings_save(struct star_settings *st)
     if (!lba)
         return -1;
     ++st->seq;
+    sbset_encode(set_blk, st);
+    /* fields a newer tool wrote after ours: kept as they were (the CRC covers them again) */
+    if (set_status == 1 && set_tail[0] == 'S') {
+        for (unsigned i = 112; i < SBSET_BYTES; ++i)
+            set_blk[i] = set_tail[i];
+        uint32_t c = sb_crc32(set_blk + 16, SBSET_BYTES - 16);
+        for (unsigned i = 0; i < 4; ++i)
+            set_blk[12 + i] = (uint8_t)(c >> (8 * i));
+    }
     uintptr_t b = SCRATCH;
-    u_zero(b, 4096);
-    put(b, SETTINGS_MAGIC, 8);
-    put(b + 8, 1, 4);
-    put(b + 16, st->seq, 4);
-    put(b + 20, st->timeout_s, 4);
-    put(b + 24, st->flags, 4);
-    key_put(b + 32, st->default_key);
-    key_put(b + 56, st->last_key);
-    key_put(b + 80, st->next_key);
-    put(b + 12, star_crc32(b + 16, 240), 4);
+    const uint8_t *src = set_blk;
+    __asm__("" : "+r"(src));    /* no folded "set_blk - SCRATCH" constant: that is an ABS64 relocation */
+    for (unsigned i = 0; i < CL_BLOCK; ++i)
+        *(volatile uint8_t *)(b + i) = src[i];
     if (ufs_write_block(lba, b) || ufs_read(lba, 1))
         return -2;
     for (unsigned i = 0; i < 256; i += 8)
         if (*(volatile uint64_t *)(UFS_BUF + i) != *(volatile uint64_t *)(b + i))
+            return -3;
+    for (unsigned i = 0; i < SBSET_BYTES; ++i)
+        set_tail[i] = set_blk[i];
+    set_status = 1;
+    return 0;
+}
+
+/* ---- the crash log ("crashlog", SF_VOLATILE, 16 blocks: sbfmt.h) ----------------------------- */
+
+int store_crashlog(struct store_ent *e)
+{
+    return store_find("ufs:crashlog", e) && (e->flags & SF_VOLATILE) && e->size >= CL_BYTES &&
+           e->medium == STORE_UFS;
+}
+
+int store_crashlog_write(const struct store_ent *e, unsigned index, uintptr_t src)
+{
+    struct store_ent chk;
+    if (index >= CL_BYTES / CL_BLOCK || !store_crashlog(&chk) || chk.lba != e->lba)
+        return -1;
+    uint64_t lba = e->lba + index;
+    if (ufs_write_block(lba, src) || ufs_read(lba, 1))
+        return -2;
+    for (unsigned i = 0; i < CL_BLOCK; i += 8)
+        if (*(volatile uint64_t *)(UFS_BUF + i) != *(volatile uint64_t *)(src + i))
             return -3;
     return 0;
 }

@@ -20,6 +20,7 @@
 #include "catalog.h"
 #include "store.h"
 #include "ui.h"
+#include "crash.h"
 
 #define ALIVE_GPA0_DAT 0x14050024UL
 #define ALIVE_GPA2_DAT 0x14050064UL
@@ -1405,7 +1406,7 @@ static int menu_v5(const struct star_info *in, char *cmdline, unsigned len)
         v5_intro(mp);
         v5_draw(mp);
         tp_init();
-        int dflt = settings_ok && settings.timeout_s ? ready_key(settings.default_key) : -1;
+        int dflt = settings_ok && settings.timeout_s && !crash_hold_autoboot() ? ready_key(settings.default_key) : -1;
         if (dflt >= 0) {
             char b[STAR_FB_COLS + 1];
             const struct cat_ent *e = cat_get((unsigned)dflt);

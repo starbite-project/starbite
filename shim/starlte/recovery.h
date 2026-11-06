@@ -24,6 +24,22 @@ int rec_bixby_now(void);
  * other key is left for the boot menu (menu.c boot_next). */
 int rec_rescue_take(void);
 
+/* All the keys the loader takes right after the Bixby window (rec_rescue_take's place): "rescue"
+ * and Starbite Maintenance's "maint", "maint-prev", "maint-rescue" (docs/MAINTENANCE.md 4.2 R2).
+ * The mailbox is cleared at once for these; any other key is left for the boot menu. A return
+ * mailbox "SBNEXT2R" KEY\0RET\0 (R7) becomes a plain "SBNEXT2!" KEY here, and RET is kept for
+ * rec_return_key. */
+#define REC_NEXT_NONE         0
+#define REC_NEXT_RESCUE       1
+#define REC_NEXT_MAINT        2
+#define REC_NEXT_MAINT_PREV   3
+#define REC_NEXT_MAINT_RESCUE 4
+int rec_next_take(void);
+/* The return key of an R7 mailbox when key is the one it started, else 0 (one shot). */
+const char *rec_return_key(const char *key);
+/* Write the boot-next mailbox (key words first, the magic "SBNEXT2!" last). */
+void rec_mailbox_write(const char *key);
+
 /* What recovery_main asks the loader to do. */
 #define REC_CONTINUE 0      /* the normal boot (POST, then the boot menu) */
 #define REC_BOOT     1      /* start catalog entry *pick (Engineer Lite or "Boot entry...") */
@@ -49,5 +65,12 @@ const struct star_info *star_boot_setup(char **cmdline, unsigned *len);
 /* 1 if a rescue system exists (an "SBRESCUE" bundle in BOOT, else the store's rescue.initrd with
  * a kernel and DTB); otherwise *why says what is missing. May bring UFS up. */
 int star_rescue_ready(const char **why);
+/* Starbite Maintenance (docs/MAINTENANCE.md 4.2): 1 if a source exists (an SBMAINT slot whose
+ * header is valid, else a ready catalog entry "maint"); otherwise *why lists what is missing.
+ * Reads the GPT and two header blocks (UFS). */
+#define MAINT_NORMAL 0U
+#define MAINT_PREV   1U
+#define MAINT_RESCUE 2U
+int star_maint_ready(const char **why);
 /* xnu_boot.c: one line to the pmsg ring (TWRP's /sys/fs/pstore/pmsg-ramoops-0). */
 void star_pmsg(const char *s);

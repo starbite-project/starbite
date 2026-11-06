@@ -2134,3 +2134,30 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   tour 82 pages, labtour (every test started and stopped by Power, a tier 1 write end to end, an unconfirmed
   write refused), --repro. engineer.img sha256 da25de2c000491d2...36a6 (4407296 bytes, 575 relocations).
   catalog.toml's version string still says "read only · dry-run writes" (not changed here).
+- 2026-11-06: **Boot health (built, host-tested, not flashed): full POST, quiet boots, crash and hang detection,
+  Android's own DTB.** docs/STARBITE-HEALTH.md. (a) POST levels in the settings record (bytes 104.., zero = default):
+  full (default, ~9 s: RAM address/~address over 0x8C000000+64M, 0x92000000+128M, bank 2 0x880000000+1G within a 6 s
+  budget; RTC-timed timer, CPU clocks, TMU, PMIC, battery via batt.c, DECON frame-done, touch, USB isolation, UFS,
+  GPT primary+backup CRCs, BOOT header, store + crashlog, catalog readiness, settings, card store), quick (the old
+  one), off; Volume Down skips once; Bixby check unchanged and first. POST per-check log slots moved to 240+id.
+  (b) log level 0..3 (default 0 quiet): catalog extension SBCATEX1 (header +28) with 4 cmdline fragments per entry,
+  [defaults.linux/android/xnu] in catalog.toml; XNU fragments can remove boot-args ("!name"); loader status lines
+  muted at 0. (c) crash_snapshot after the Bixby window (0xFED10000 32K + 0x80000000 4K + PMU RST_STAT/INFORM + S-Boot
+  sec_debug.reset_reason etc.), launch record in the new volatile store entry "crashlog" (16 blocks, flag 1, ring
+  of 15 reports) before every OS, judged at the next start (sb_classify), crash screen levels 1-3 (Vol +/-, Bixby
+  pages, Power, 60 s timeout), menu auto-start held after a crash, recovery items STARTUP SETTINGS / CRASH REPORTS,
+  `fastboot oem log crash|crashraw`, `sbstore2.py crashlog IMG|live`. Linux DTB copy: INFORM3 recovery -> normal so
+  panics come back. Watchdog: cluster 1 0x10060000 (PMU bit 23), WTCON 0xFF39, max 82 s, armed last; Linux gets
+  s3c2410_wdt.tmr_atboot=1 tmr_margin=T (mainline stops a running WDT at probe otherwise). (d) Android 4th file
+  (DTB/DTBH): merged with S-Boot's /chosen, memory nodes, model_info-system_rev (dtmerge.c); 3-file path unchanged.
+  Host: tools/loader-test/run.sh (clang ASan/UBSan and VM gcc). BOOT
+  out/xnu-boot-health2.img (this branch's loader + batch8's payload/ramdisk/DTBH). Needs the phone: does a
+  watchdog reset reach the loader (not upload mode), ramoops after panic=10, DECON pending latch, full POST time.
+  Same day, coordinator items: (1) POST and log level live in the settings flags word, one definition with
+  Engineer OS v2: bits 4-5 POST (0 full default, 1 quick, 2 off), bits 8-9 log (0 quiet default, 1 normal,
+  2 verbose, 3 debug), names in shim/starlte/store.h; crash settings at bytes 104..111. POST slots 202..212 kept
+  for checks 0..10 (sbm logs decodes them), new checks in 240..244. (2) Starbite Maintenance loader side
+  (docs/MAINTENANCE.md 4.2): R1 recovery item, R2 early keys maint/maint-prev/maint-rescue, R3 `fastboot oem
+  maint [prev|rescue]`, R4 SBMAINT partition slots (sbm_check host-tested against tools/maint/sbmaint.py) then
+  the store's maint entry, R5 start (log slot 10 = 0x710..0x713), R7 SBNEXT2R return key. Host: 163 + 29 checks,
+  13 tests, fastboot 315, installer 111, maint 34.

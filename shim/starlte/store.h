@@ -11,7 +11,7 @@
  *            u32 dir_block, u32 dir_blocks, u32 settings_block, u32 dir CRC32, u32 CRC32 of 0..47
  *   block 2  settings record "SBSETTNG" (UFS only; the loader writes it, the tools keep it)
  *   block 3  directory: 64-byte entries: char name[32], u64 block, u64 size, u32 CRC32,
- *            u16 type, u16 flags, 8 bytes zero
+ *            u16 type, u16 flags (SF_*), 8 bytes zero
  *   data     4 KiB aligned
  */
 #pragma once
@@ -65,13 +65,57 @@ uint64_t store_used(unsigned medium);
 /* Forget what store_open found, so the next call reads the medium again. */
 void store_reset(unsigned medium);
 
-/* Settings record (UFS store, block 2). Keys are catalog keys ("" = none). */
-#define SET_SD_STORE 1U        /* flags: read the microSD's store at boot (sd.h) */
+/* Directory entry flags (u16 at +54). */
+#define SF_VOLATILE 1U         /* written in place by the loader (the "crashlog"): no CRC check */
+
+/* Settings record (UFS store, block 2; byte layout in sbfmt.h). Keys are catalog keys ("" = none).
+ * Every field after next_key reads 0 from records older than 2026-11-06, and 0 is its default.
+ *
+ * The u32 flags word: ONE definition shared with Engineer OS (starbite/libsb/store.h) and
+ * tools/store/sbstore2.py. A record whose flags are 0 means: no card store, full POST, quiet. */
+#define SET_SD_STORE   1U                      /* bit 0: read the microSD's store at boot (sd.h) */
+#define SET_POST_SHIFT 4U                      /* bits 4-5: the POST level */
+#define SET_POST_MASK  (3U << SET_POST_SHIFT)
+#define SET_POST_FULL  0U                      /*   the full POST (about 10 s), the default */
+#define SET_POST_QUICK 1U                      /*   the quick one (about 0.3 s) */
+#define SET_POST_OFF   2U                      /*   none (3 reads as full) */
+#define SET_LOG_SHIFT  8U                      /* bits 8-9: the log level */
+#define SET_LOG_MASK   (3U << SET_LOG_SHIFT)
+#define SET_LOG_QUIET   0U                     /*   debug output off, the default */
+#define SET_LOG_NORMAL  1U
+#define SET_LOG_VERBOSE 2U
+#define SET_LOG_DEBUG   3U                     /*   everything */
+#define SET_POST_OF(flags) (((flags) & SET_POST_MASK) >> SET_POST_SHIFT)
+#define SET_LOG_OF(flags)  (((flags) & SET_LOG_MASK) >> SET_LOG_SHIFT)
+#define SET_CRASH_ON   0U      /* crash_mode: detect, save, show the crash screen (default) */
+#define SET_CRASH_LOG  1U      /*   detect and save, no screen */
+#define SET_CRASH_OFF  2U      /*   nothing (no launch record either) */
+#define SET_AFTER_MENU 0U      /* crash_action: the boot menu (default) */
+#define SET_AFTER_RECOVERY 1U  /*   Starbite Recovery */
+#define SET_AFTER_RETRY 2U     /*   start the same entry again, once */
+#define SET_WDT_CATALOG 0U     /* wdt_mode: each catalog entry's own timeout (default) */
+#define SET_WDT_OFF     1U     /*   never arm the watchdog */
+#define SET_WDT_FIXED   2U     /*   wdt_s for every entry whose catalog timeout is not 0 */
 struct star_settings {
-    uint32_t seq, timeout_s, flags;
+    uint32_t seq, timeout_s, flags;   /* flags: SET_SD_STORE, SET_POST_*, SET_LOG_* above */
     char default_key[24], last_key[24], next_key[24];
+    uint8_t crash_mode;        /* SET_CRASH_* */
+    uint8_t crash_detail;      /* the crash screen's first level: 0 = 1 (summary), 1..3 */
+    uint8_t crash_action;      /* SET_AFTER_* */
+    uint8_t crash_timeout;     /* crash screen, seconds / 10: 0 = 60 s */
+    uint8_t wdt_mode;          /* SET_WDT_* */
+    uint8_t pad;
+    uint16_t wdt_s;
 };
 /* 1 if a valid record was read; otherwise *s = defaults (zeros) and 0. */
 int settings_load(struct star_settings *s);
-/* Write and read back: 0 on success. The only flash write the loader makes. */
+/* What the last settings_load found: 1 valid, 0 no record, -1 bad CRC or version, -2 no store. */
+int settings_status(void);
+/* Write and read back: 0 on success. Keeps every field it does not know of (bytes 112..255). */
 int settings_save(struct star_settings *s);
+
+/* The crash log (sbfmt.h): the store's "crashlog" entry, 16 blocks, SF_VOLATILE. 1 found. */
+int store_crashlog(struct store_ent *e);
+/* One 4 KiB block of the crash log (index 0..15) from src: written and read back, 0 on success.
+ * Refuses any block outside that entry. */
+int store_crashlog_write(const struct store_ent *e, unsigned index, uintptr_t src);
