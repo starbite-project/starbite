@@ -38,6 +38,11 @@ Host scripts: `build/oneui-dl.sh` (download + unzip, `SBI` env = device id), `bu
 3. **No setup**: `ro.setupwizard.mode=DISABLED` (Google's wizard). Samsung's wizard is finished by
    `first-boot.sh` over adb (provisioned + setup complete, both wizards disabled for user 0, home
    started) until a native way is proven.
+4. **Boot guard**: `/system/etc/init/starbite-bootguard.rc` starts `/system/etc/starbite/bootguard.sh` (shell
+   user and domain, like `adb shell reboot`). If `sys.boot_completed` is not 1 within `ro.starbite.bootguard`
+   seconds (1200; 0 = off), it saves `logcat -b all` and the properties to `/data/local/tmp/starbite-bootguard.*`
+   and restarts into recovery. A hang on the boot animation therefore always comes back without the buttons
+   (`androidboot.init_fatal_reboot_target=recovery` in the cmdline covers init and critical-service crashes).
 
 ## 3. Boot path
 
@@ -47,6 +52,17 @@ the loader takes S-Boot's `/chosen`, memory nodes and `model_info-system_rev` an
 the file (loader health update, docs/STARBITE-HEALTH.md). Without the 4th file the old path is unchanged.
 The protected DTB partition is never written (on S9 #1 it is all zeros; S-Boot's FDT comes from BOOT's DT
 section, packed from LineageOS's dt.img).
+
+`tools/android/oneui/mk-boot-files.py` makes the four files from UN1CA's own inputs:
+
+| File | From | Change |
+|---|---|---|
+| `android.kernel` | `floyd/G960F-kernel` of `DS-ACK-V1.12-24.10.2026-...-runtime49-AOT-SuSFS-erofs-dtb.zip` (the package UN1CA's EROFS build selects, sha256 87f62131...) | none |
+| `android.dtb` | `floyd/G960F-dtb` of the same package (DTBH, one FDT; its first-stage fstab says **erofs** for SYSTEM / VENDOR / ODM) | none, or `--dev OLD=NEW` renames a by-name device in place (same length) |
+| `android.ramdisk` | the cpio inside `platform/exynos9810/installer/ramdisk.img` (Samsung's first-stage init + `fstab.samsungexynos9810`) | `/data` USERDATA -> A16DATA, edited entry by entry (owners, modes, every other byte kept) |
+| `android.cmdline` | LineageOS's | `androidboot.init_fatal_reboot_target=recovery printk.devkmsg=on` |
+
+The other DS-ACK package in `installer/kernel_dtb/` has an **ext4** first-stage fstab: wrong for this build.
 
 ## 4. UFS layout
 
@@ -59,12 +75,24 @@ cannot grow in place. The plan, once the built image sizes are known:
   them, or the DT fstab in `android.dtb` is pointed at them).
 - WINDOWS: NTFS 17.9 GB in use; shrink to about 18.5 GB with `ntfsresize` (dry run first). Backup:
   `WINDOWS.ntfsclone.gz` on the card (backup/20261106-oneui/WINDOWS.sha256; verified by a full decompress).
-- A16DATA: about 16 GiB, fresh f2fs.
+- A16DATA: about 16 GiB, fresh **ext4** (One UI's /data line: `ext4 ... wait,check,encryptable=footer,quota,
+  reservedsize=128M,length=-20480`; no file-based encryption, so TWRP and Maintenance can read it). The
+  filesystem ends 20 KiB before the partition (`length=-20480`).
+- CACHE (12 MiB) and HIDDEN are already ext4 (One UI mounts /cache with `errors=panic`). ODM held LineageOS's
+  /metadata; One UI overwrites it.
+- UN1CA's sizes (SYSTEM 9500 MiB, VENDOR 1300 MiB, ODM 700 MiB, CACHE 600 MiB) are its ext4 reservations; the
+  EROFS images are what count. Source sizes for comparison: S22 system 8.0 GB + product 1.9 GB unpacked (both
+  end up in the S9's system), S9 vendor 549 MB unpacked.
 - The table change goes through the installer's GPT engine (`tools/installer/sbinst/ufslayout.py`, both GPT
   copies backed up first: backup/20261106-oneui/sda-head-4M.img and sda-tail-4M.img).
 
-## 5. Status (2026-11-06, evening)
+## 5. Status (2026-11-06, night)
 
-- Firmware downloaded; decryption, extraction and `make_rom` running on the stick (slow: about 4-15 MB/s).
-- Not yet: image sizes, the layout, the writes, the first boot (needs the loader with `android.dtb`, flashed
-  with the user present).
+- Done on S9 #1 (TWRP): NTFS shrunk to 19260243968 B (18 GiB - 64 MiB, no relocations); LineageOS's A16DATA
+  saved raw (`A16DATA-lineage.raw.gz` on the card, sha256 03f46a87... = the partition's); both GPT copies
+  saved (`backup/20261106-oneui/gpt/orig-head.bin`, `orig-tail.bin`, hashed on the phone and here).
+- The `starbite-oneui` table plans cleanly from the phone's GPT (WINDOWS resized in place keeping its type and
+  unique GUID, A16DATA moved; nothing else changes): `python3 -m sbinst.gpt plan orig-head.bin orig-tail.bin
+  starbite-oneui --blocks 15616000` in tools/installer.
+- The loader on the phone (health6) already reads `android.dtb`.
+- `make_rom` (EROFS) re-running with the boot guard; then: image sizes -> final table -> writes -> first boot.
