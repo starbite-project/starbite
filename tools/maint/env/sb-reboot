@@ -1,0 +1,69 @@
+#!/bin/sh
+# Starbite Maintenance (docs/MAINTENANCE.md 5.4): the only way this environment reboots.
+#   sb-reboot [-n] menu            the Starbite menu (the boot-next mailbox is cleared)
+#   sb-reboot [-n] maint           Starbite Maintenance again (mailbox key "maint"; the loader's early path,
+#                                  or today's catalog entry "maint" from the store)
+#   sb-reboot [-n] maint-prev      the other SBMAINT slot (after a bad `sbm update`)
+#   sb-reboot [-n] maint-rescue    Starbite Maintenance in rescue mode
+#   sb-reboot [-n] fastboot        the loader's USB fastboot (key "fastboot", docs/USB-FASTBOOT.md 5.1)
+#   sb-reboot [-n] KEY             any catalog key (the menu starts it without a key press)
+#   sb-reboot [-n] download        Samsung Download mode: INFORM3 0x12345671 (NOT verified from a mainline
+#                                  kernel: INFORM3 recovery did not survive its restart on 2026-11-05; the
+#                                  sure way is `fastboot reboot download` from the loader: sbm reboot-to download)
+#   recovery / twrp                REFUSED: Starbite never boots (or writes) RECOVERY.
+# Order: the mailbox (tools/linux/reboot-to -w: key words first, magic "SBNEXT2!" last) + INFORM3, USB
+# VBUS off if this is rescue mode's host port, the card's exFAT unmounted, sync, sysrq "b" (no init
+# system here). -n prints the register writes and does nothing.
+dry=
+[ "$1" = -n ] && { dry=1; shift; }
+to=${1:-}
+case $to in
+"") echo "usage: sb-reboot [-n] menu|maint|maint-prev|maint-rescue|fastboot|download|KEY" >&2; exit 2 ;;
+recovery|twrp) echo "sb-reboot: REFUSED: Starbite never boots RECOVERY (stock recovery stays untouched)" >&2; exit 1 ;;
+esac
+HERE=$(dirname "$0")
+RT=$(command -v reboot-to 2>/dev/null || echo "$HERE/../../linux/reboot-to")
+w32() {
+	if [ -n "$dry" ]; then echo "devmem $1 32 $2"; else devmem "$1" 32 "$2"; fi
+}
+case $to in
+menu)
+	w32 0xFED17FE0 0                    # no boot-next: the menu
+	w32 0xFED17FE4 0
+	w32 0x1406080C 0x12345670 || exit 1 ;;
+download)
+	w32 0xFED17FE0 0
+	w32 0xFED17FE4 0
+	w32 0x1406080C 0x12345671 || exit 1 ;;
+*)
+	if [ -n "$dry" ]; then
+		sh "$RT" -n "$to" || exit 2
+	else
+		reboot-to -w "$to" || exit 1     # validates the key: [A-Za-z0-9._-], at most 23 characters
+	fi ;;
+esac
+[ -n "$dry" ] && exit 0
+
+echo "Rebooting: $to" > /dev/tty0 2>/dev/null
+echo "<5>sbmaint: sb-reboot $to" > /dev/kmsg 2>/dev/null
+echo "$(date +%H:%M:%S) reboot: $to" >> /run/sbmaint/log 2>/dev/null
+vb=/sys/module/s9p_max77705_muic/parameters/vbus     # rescue mode's OTG boost (docs/RESCUE-USB-HOST.md)
+if [ -w $vb ] && [ "$(cat $vb 2>/dev/null)" != 0 ]; then
+	echo 0 > $vb
+	i=0
+	while [ $i -lt 30 ]; do
+		on=
+		for r in /sys/class/regulator/*; do
+			[ "$(cat "$r/name" 2>/dev/null)" = usb-otg-vbus ] && [ "$(cat "$r/state" 2>/dev/null)" = enabled ] && on=1
+		done
+		[ -z "$on" ] && break
+		sleep 0.1
+		i=$((i + 1))
+	done
+fi
+sync
+umount /external_sd 2>/dev/null || mount -o remount,ro /external_sd 2>/dev/null
+mount -o remount,ro /rescue 2>/dev/null
+sync
+( sleep 1; echo b > /proc/sysrq-trigger ) </dev/null >/dev/null 2>&1 &
+exit 0

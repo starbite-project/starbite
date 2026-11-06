@@ -1,0 +1,73 @@
+#!/bin/sh
+# Starbite Maintenance (docs/MAINTENANCE.md 5.3): kernel read-only flags on what no maintenance job writes.
+#   sb-protect apply          maintenance/installer mode: the protected partitions below and every UFS
+#                             LUN other than sda (the boot LUNs: S-Boot) read-only; sda itself stays
+#                             writable (the installer's GPT step writes LBA 1-5 and the backup copy)
+#   sb-protect apply-all      rescue mode: every UFS disk and partition read-only (a rescue script makes
+#                             the one partition it restores writable itself, tools/rescue/README.md)
+#   sb-protect allow NAME     one protected partition writable until the next boot (logged on the
+#                             screen); RECOVERY is refused: nothing in Starbite writes it
+#   sb-protect list           NAME ro|rw for every by-name partition
+# A whole-disk write to /dev/block/sda at a protected partition's offset is NOT stopped by this (the
+# GPT step needs sda writable); the host tools' own allowlists stay the first line of defence.
+# Tests: SB_SYSROOT=DIR and SB_FAKE_BLOCKDEV=FILE (records "ro|rw NAME" lines instead of blockdev).
+R=${SB_SYSROOT:-}
+S=$R/run/sbmaint
+B=$R/dev/block
+PROTECT="BOTA0 BOTA1 BOTA2 EFS CPEFS PARAM UP_PARAM KEYSTORAGE DTB DTBO RECOVERY RADIO NAD_REFER PERSISTENT MISC STEADY DQMDBG"
+NEVER="RECOVERY"
+mkdir -p "$S"
+touch "$S/allowed"
+
+flag() {                                   # flag ro|rw NODE
+	if [ -n "$SB_FAKE_BLOCKDEV" ]; then
+		echo "$1 ${2##*/}" >> "$SB_FAKE_BLOCKDEV"
+	else
+		blockdev --set$1 "$2" 2>/dev/null
+	fi
+}
+is_usb() { case $(readlink -f "$R/sys/class/block/$1" 2>/dev/null) in */usb[0-9]*/*) return 0 ;; esac; return 1; }
+allowed() { grep -qx "$1" "$S/allowed"; }
+log() { echo "$(date +%H:%M:%S) $*" >> "$S/log" 2>/dev/null; echo "<5>sbmaint: $*" > /dev/kmsg 2>/dev/null; return 0; }
+
+case ${1:-} in
+apply)
+	for p in $PROTECT; do
+		allowed "$p" && continue
+		[ -e "$B/by-name/$p" ] && flag ro "$B/by-name/$p"
+	done
+	for d in "$R"/sys/class/block/sd*; do  # other UFS LUNs (sdb..: S-Boot, its backup, the boot LUNs)
+		[ -e "$d" ] || continue
+		n=${d##*/}
+		case $n in sda|sda[0-9]*) continue ;; esac
+		is_usb "$(echo "$n" | sed 's/[0-9]*$//')" && continue
+		p=$(sed -n 's/^PARTNAME=//p' "$d/uevent" 2>/dev/null)
+		[ -n "$p" ] && allowed "$p" && continue
+		flag ro "$B/$n"
+	done ;;
+apply-all)
+	for d in "$R"/sys/class/block/sd*; do
+		[ -e "$d" ] || continue
+		n=${d##*/}
+		is_usb "$(echo "$n" | sed 's/[0-9]*$//')" && continue
+		flag ro "$B/$n"
+	done ;;
+allow)
+	p=${2:?usage: sb-protect allow NAME}
+	for x in $NEVER; do
+		[ "$p" = "$x" ] && { echo "sb-protect: REFUSED: nothing in Starbite writes $p (stock recovery stays)" >&2; exit 1; }
+	done
+	[ -e "$B/by-name/$p" ] || { echo "sb-protect: no partition $p" >&2; exit 1; }
+	allowed "$p" || echo "$p" >> "$S/allowed"
+	flag rw "$B/by-name/$p"
+	log "WRITABLE until reboot: $p (sb-protect allow)" ;;
+list)
+	for l in "$B"/by-name/*; do
+		[ -e "$l" ] || continue
+		n=$(readlink -f "$l")
+		ro=$(cat "$R/sys/class/block/${n##*/}/ro" 2>/dev/null)
+		echo "${l##*/} $( [ "$ro" = 1 ] && echo ro || echo rw)"
+	done ;;
+*) echo "usage: sb-protect apply|apply-all|allow NAME|list" >&2; exit 2 ;;
+esac
+exit 0

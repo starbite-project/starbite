@@ -2102,3 +2102,17 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   `s9p_decon.panel_mask` 1 = restore after every sleep-out (default), 2 = off (7A 00), 0 = leave; live-writable.
   sb-integrate.sh: `SB_SCALE` (default 3; 3.2 is exact for 1440x2960). Release 7.1.0-starbite-4da38c67, Image sha
   d18510ec..., in the VM at ~/distros/_kernel-mask. Test and sources: docs/LINUX-REBUILD-PLAN.md 6.6.
+
+- 2026-11-06: **Starbite Maintenance (SBMAINT): our own TWRP replacement, never RECOVERY** (docs/MAINTENANCE.md).
+  One Linux environment (daily 7.1 kernel 4da38c67 + an Alpine initramfs) for maintenance, the installer
+  (installer mode) and rescue (rescue mode, tools/rescue/init embedded). USB ECM + ssh (key only, host key
+  baked and pinned), TWRP-style /dev/block nodes, read-only flags on the protected partitions (RECOVERY never
+  writable), an on-screen status with the current job, the previous boot's RAM logs kept (the maint DTB keeps
+  ramoops off the rings). Lives in a proposed GPT partition SBMAINT (256 MiB, two SBMAINT1 container slots,
+  last row of the One UI proposal so nothing is renumbered) and as OS-store entries; loader spec R1-R8 in
+  docs/MAINTENANCE.md 4.2 (not implemented). Host: `tools/maint/sbm`; `SB_TRANSPORT=maint` makes the existing
+  tools talk to it (TWRP stays the default until proven). Built (container 34.9 MiB) and rehearsed in the VM
+  (35/35, the real dropbear/e2fsprogs/busybox in a chroot); 34 host tests. Found: Ubuntu's static busybox ash
+  runs its applets before PATH (so it is not SBMAINT's shell; the daily linux.initrd uses it as /bin/sh), and
+  the old installer environment's by-name links into /dev would have failed part-write.py's check. NOT run on
+  the phone.

@@ -1,0 +1,25 @@
+#!/bin/sh
+# Starbite Maintenance: `getprop NAME` for the facts the host tools read in TWRP's terms (the installer's
+# sbinst/device.py Phone.FACTS, preflight.sh). Sources: the device tree, the kernel command line (the
+# loader or the installer passes sb.serial=), and fixed answers. ro.twrp.version stays empty: this is
+# not TWRP (tools that print it show an empty version).
+cl=$(cat /proc/cmdline)
+arg() { echo "$cl" | tr ' ' '\n' | sed -n "s/^$1=//p" | tail -1; }
+model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)
+compat=$(tr '\0' ' ' < /proc/device-tree/compatible 2>/dev/null)
+case ${1:-} in
+ro.product.model)
+	case "$model $compat" in *SM-G960F*|*samsung,starlte*) echo SM-G960F ;; *SM-G965F*|*star2lte*) echo SM-G965F ;; *) echo "$model" ;; esac ;;
+ro.product.device)
+	case "$compat" in *samsung,starlte*) echo starlte ;; *star2lte*) echo star2lte ;; *) echo ;; esac ;;
+ro.boot.serialno) arg sb.serial ;;
+ro.boot.bootloader) arg androidboot.bootloader ;;
+ro.boot.flash.locked) echo 0 ;;                 # the loader runs: S-Boot accepted an unsigned BOOT
+ro.boot.verifiedbootstate) echo orange ;;
+ro.starbite.env) head -1 /etc/starbite-env 2>/dev/null ;;
+ro.starbite.maint) head -1 /etc/sbmaint-release 2>/dev/null ;;
+ro.starbite.mode) sed -n 's/^mode=//p' /run/sbmaint/state 2>/dev/null ;;
+"") for p in ro.product.model ro.product.device ro.boot.serialno ro.starbite.maint ro.starbite.mode; do
+	echo "[$p]: [$("$0" $p)]"; done ;;
+*) echo ;;
+esac
