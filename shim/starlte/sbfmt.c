@@ -1300,15 +1300,42 @@ unsigned cl_excerpt(char *dst, unsigned cap, const char *src, unsigned len, uint
             lo = mid + 1;
     }
     struct cp_walk w;
+    unsigned s, l, k, i = 0, n = 0, nl = 0;
+    /* Even the message, registers and trace alone do not fit: the end of the log is kept anyway
+     * (its last lines, up to 8 and a quarter of cap), the important lines before it while they fit. */
+    unsigned tail_from = total, reserve = 0;
+    if (lo >= total && total && ex_cost(src, len, total) > cap) {
+        unsigned size[8] = { 0 };
+        z(&w, sizeof(w));
+        w.t = src;
+        w.n = len;
+        while (cp_next(&w, &ci, &s, &l, &k))
+            size[i++ % 8U] = l - sb_crash_prefix(src + s, l) + 1U;
+        unsigned sum = 6;                   /* its "[...]" */
+        for (unsigned j = 1; j <= 8 && j <= total; ++j) {
+            unsigned add = size[(total - j) % 8U];
+            if (sum + add > cap / 4U)
+                break;
+            sum += add;
+            tail_from = total - j;
+            reserve = sum;
+        }
+        i = 0;
+    }
     z(&w, sizeof(w));
     w.t = src;
     w.n = len;
-    unsigned s, l, k, i = 0, n = 0, nl = 0;
     int gap = 0;
     while (cp_next(&w, &ci, &s, &l, &k)) {
-        if (i >= lo || k != CT_LOG) {
+        if (i >= lo || k != CT_LOG || i >= tail_from) {
             unsigned p = sb_crash_prefix(src + s, l);
-            if (n + (gap ? 6U : 0U) + l - p + 1U > cap)
+            unsigned need = (gap ? 6U : 0U) + l - p + 1U;
+            if (i < tail_from && reserve && n + need > cap - reserve) {
+                gap = 1;                    /* the tail's room is kept */
+                ++i;
+                continue;
+            }
+            if (n + need > cap)
                 break;
             if (gap) {
                 const char *m = "[...]\n";

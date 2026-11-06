@@ -25,7 +25,7 @@ python3 -I -B tools/store/sbstore2.py settings "$T/set-py.bin" --post quick --lo
 $CC -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -I$S -I shim \
     -DCAT_BUF='((uintptr_t)host_cat_buf)' -include tools/loader-test/host_cat.h \
     -fsanitize=address,undefined -fno-sanitize-recover=all \
-    tools/loader-test/host_test.c $S/sbfmt.c $S/dtmerge.c $S/catalog.c -o "$T/host_test"
+    tools/loader-test/host_test.c $S/sbfmt.c $S/dtmerge.c $S/catalog.c $S/crashdoc.c -o "$T/host_test"
 python3 -I -B tools/loader-test/gen_maint.py "$T" $fx/sboot-fdt-scrubbed.dtb
 "$T/host_test" "$T" $fx/sboot-fdt-scrubbed.dtb $fx/un1ca-G960F-dtb "$lineage" "$linux"
 python3 -I -B tools/loader-test/check_dtmerge.py "$T" $fx/sboot-fdt-scrubbed.dtb

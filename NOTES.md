@@ -2229,3 +2229,19 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   xnu-health-test 911, usb-fastboot 315. Loader Image f218e18210bf71cb...; BOOT out/xnu-boot-health3.img
   a7e942e7ca7d123aeec1ea6a38de4a82b2ae1722ea82c1943adb3bea6895714f (health2's template, payload-v7test,
   menu-v7.sbm; the recipe rebuilds health2 byte for byte). Phone checks: docs/STARBITE-HEALTH.md 9 A-G.
+- 2026-11-06 evening: **health4: the crash report scrolls (built, host-tested on the real capture, not
+  flashed).** health3 on the phone (BOOT a7e942e7): logo POST good, detection good, Bixby levels good,
+  Volume did not scroll. Cause: at level 1 the report of the real sysrq panic was 73 rows, under one
+  78-row page (the log was capped at 30 lines), so max_top was 0; nothing wrong with the key reads. Now
+  every level ends with the complete log (level 1 of that capture: 328 rows); the levels choose the
+  sections above it. The report document and its keys moved to shim/starlte/crashdoc.c (no hardware):
+  host test drives cs_poll on the real document with the phone's loop timing (5 ms + redraw): 15 ms
+  press nothing, 60 ms one line, 1 s repeats, 3 s to the end, Volume Up back, 120 ms redraws still
+  scroll, Bixby page / level, Power. The saved report: the coordinator's "ends at 38.547563" was a cut
+  listing; report #2 in build/store/ufs-store-live-now.img is byte for byte cl_excerpt of the pulled
+  ramoops record and ends with the panic, Call trace + 17 frames and Memory Limit: none (now a host test
+  on fixtures real-panic2-dmesg.txt / -pmsg.txt / -report2.bin, from build/maint/logs/20261106-195841-panic2
+  and the store image; no serial in them). cl_excerpt also keeps the log's last lines when the important
+  lines alone overflow. Host: loader-test 306 checks (clang ASan/UBSan, VM gcc), xnu-health-test 911,
+  usb-fastboot 315. Loader Image 0b8a366972c86fc2...; BOOT out/xnu-boot-health4.img
+  8bcbb8e1995b58b3eab01d3e25a5ec25a65e5c00b4e3ae7792549b7767611d1a (health3's recipe).
