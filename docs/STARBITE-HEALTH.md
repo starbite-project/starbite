@@ -850,6 +850,11 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
      "RESTARTING IN 10 S", the kernel log below). Older kernels: the last picture stays.
    - After about 10 s the phone resets, then POST, then the crash screen KERNEL PANIC ("panic:
      sysrq triggered crash"); with step 10 the level-1 RESET row reads SWRESET.
+   - Kernel f797be6b missed that reset: the screen came, but panic()'s mdelay() countdown waits in
+     WFE, which this SoC wakes about 12x too late with interrupts off, so the 60 s watchdog reset it
+     (CLUSTER1_WDTRESET). 6a605a1f spins instead (kernel step 11) and arms the watchdog for
+     panic_timeout + 5 s at the panic as a backstop (LINUX-REBUILD-PLAN 7.6-7.9). A RESET row of
+     CLUSTER1_WDTRESET after about 15 s means the backstop caught a remaining stall.
    - Try Volume Up (levels 2 and 3), Bixby (older lines), Power (menu).
    - The menu must show no countdown.
    - `python3 -I tools/store/sbstore2.py crashlog live --level 3`.
