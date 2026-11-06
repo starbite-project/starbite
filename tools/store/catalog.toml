@@ -54,12 +54,35 @@ wdt_feed = "own"
 # The XNU payloads are already quiet on the panel (a5fb_noconsole=1 sweetquiet=1 in the daily
 # boot-args); verbose and debug bring the text console back. No watchdog until XNU feeds it.
 [defaults.xnu]
-log = ["", "", "!a5fb_noconsole !sweetquiet", "!a5fb_noconsole !sweetquiet -enable_kprintf_spam"]
+log = ["sbcrash=loader",
+       "sbcrash=loader",
+       "!a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!a5fb_noconsole !sweetquiet -enable_kprintf_spam sbcrash=loader"]
 wdt = 0
-wdt_feed = "none"
-# Hidden on 2026-11-05 (the user's menu cleanup; nothing deleted): Starbite shell, Ubuntu Desktop, Ubuntu
-# Lomiri (black screen), Arch Linux ARM, Kali Linux, UEFI Shell, Darwin console, microSD probe.
-# Strings use the loader's font: ASCII and ° · … ↑ ↓ ← → µ ± × ■ ▲ ▼ ✓
+wdt_feed = "xnu"
+
+# ---- Part 2: the daily entries, AFTER the phone tests X1-X4 (docs/STARBITE-HEALTH.md 10.1) ------
+# Store: mac13-health.xnu=<worktree>/out/xnu-mac13-health.xnu:xnu (sha256 9729ad1cc5d2610a...),
+#        ios26-health.xnu=<worktree>/out/xnu-ios26-health.xnu:xnu (sha256 44c3b7e550adb3e3...).
+# In the existing [[entry]] tables only these lines change; everything else stays:
+#
+#   key = "mac13"
+#   version = "13.5 22G74 · XNU 12377 · root on microSD"     (unchanged)
+#   files = ["mac13-health.xnu"]                             (was mac13-v33.xnu: same boot-args)
+#   wdt = 60                                                 (new)
+#
+#   key = "ios26"                                            (parked; optional, test X6)
+#   files = ["ios26-health.xnu"]                             (was ios26-sd.xnu: same boot-args)
+#   wdt = 60                                                 (new)
+#
+# Rollback: files back to mac13-v33.xnu / ios26-sd.xnu, and remove the wdt lines.
+
+# ---- Part 3: hidden test entries for X1-X4 (remove after the tests: 31 of 32 entries) -----------
+# The mac13 payload with no root device and no card writes: "!rd" (XNU waits for a root device
+# with every kernel thread running; wdt=-1 in the payload keeps that wait quiet and endless),
+# "!sdrw" (starlte_sd.c refuses every write), "!sdlog !sweetreboot" (no card log, no TWRP timer),
+# "!a5fb_noconsole !sweetquiet" (kernel text on the panel). The entry's log replaces
+# [defaults.xnu]'s at every level.
 
 [[entry]]
 key = "ios16"
@@ -338,7 +361,7 @@ flags = ["hidden"]
 [[entry]]
 key = "engineer"
 name = "Engineer OS"
-version = "Starbite Lab 2 · tests · tiered writes"
+version = "Starbite Lab 2.1 · tiers 1-4 · CPU/GPU"
 category = "starbite"
 method = "bare"
 tag = "beta"
@@ -385,3 +408,74 @@ files = ["maint.image|linux.image", "maint-rescue.dtb|rescue.dtb", "maint.initrd
 cmdline = "sb.maint=1 sb.rescue=1 sb.maint.src=store s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "none (RAM only)"
 flags = ["hidden"]
+
+[[entry]]
+key = "xnuh-feed"
+name = "XNU watchdog: fed"
+version = "XNU 12377+0399 · no root · wdt 30 s"
+category = "lab"
+method = "xnu"
+tag = "lab"
+files = ["mac13-health.xnu"]
+root = "none (waits for a root device; no writes)"
+flags = ["hidden"]
+log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader"]
+wdt = 30
+wdt_feed = "xnu"
+
+[[entry]]
+key = "xnuh-hang"
+name = "XNU watchdog: hang test"
+version = "XNU 12377+0399 · feeding stops at 60 s"
+category = "lab"
+method = "xnu"
+tag = "lab"
+files = ["mac13-health.xnu"]
+cmdline = "sbtesthang=60"
+root = "none (waits for a root device; no writes)"
+flags = ["hidden"]
+log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader"]
+wdt = 30
+wdt_feed = "xnu"
+
+[[entry]]
+key = "xnuh-panic"
+name = "XNU crash return: panic test"
+version = "XNU 12377+0399 · panic at 60 s"
+category = "lab"
+method = "xnu"
+tag = "lab"
+files = ["mac13-health.xnu"]
+cmdline = "sbtestpanic=60"
+root = "none (waits for a root device; no writes)"
+flags = ["hidden"]
+log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader"]
+wdt = 30
+wdt_feed = "xnu"
+
+[[entry]]
+key = "xnuh-panic-spin"
+name = "XNU stuck panic test"
+version = "XNU 12377+0399 · panic, then watchdog"
+category = "lab"
+method = "xnu"
+tag = "lab"
+files = ["mac13-health.xnu"]
+cmdline = "sbtestpanic=60"
+root = "none (waits for a root device; no writes)"
+flags = ["hidden"]
+log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet",
+       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet"]
+wdt = 30
+wdt_feed = "xnu"
