@@ -10,8 +10,9 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from .common import CHUNK, DOWNLOAD_MODE_USB, MIB, REPO, STARBITE_FASTBOOT_USB, Refused, Stopped
+from .common import CHUNK, DOWNLOAD_MODE_USB, INSTALLER_DIR, MIB, REPO, STARBITE_FASTBOOT_USB, Refused, Stopped
 
 
 class Result:
@@ -107,6 +108,12 @@ def usb_ids(runner=None):
                 ids.add((f'{vid:04x}', f'{int(m.group(1)):04x}'))
         return ids
     base = '/sys/bus/usb/devices'
+    if not os.path.isdir(base):                       # no sysfs: lsusb's "ID vvvv:pppp"
+        try:
+            out = subprocess.run(['lsusb'], capture_output=True, text=True).stdout
+        except FileNotFoundError:
+            return ids
+        return {tuple(m.split(':')) for m in re.findall(r'ID ([0-9a-f]{4}:[0-9a-f]{4})', out)}
     if os.path.isdir(base):
         for d in os.listdir(base):
             try:
@@ -119,8 +126,9 @@ def usb_ids(runner=None):
 
 
 class Phone:
-    def __init__(self, runner):
+    def __init__(self, runner, env=None):
         self.r = runner
+        self.env = env              # InstallerEnv: detect() looks for it first
 
     # -- transport -----------------------------------------------------------------------------
     def adb(self, *args, write=False, binary=False, check=True, quiet=False):
@@ -151,6 +159,8 @@ class Phone:
 
     # -- state ---------------------------------------------------------------------------------
     def detect(self):
+        if self.env is not None and self.env.reachable():
+            return State('env', self.env.serial, 'Starbite installer environment (ssh root@172.16.42.1)')
         found = []
         res = self.r.run(['adb', 'devices'], check=False)
         for line in (res.stdout or '').splitlines()[1:]:
@@ -192,8 +202,9 @@ class Phone:
     FACTS = r'''
 for p in ro.product.model ro.product.device ro.boot.bootloader ro.boot.serialno ro.boot.flash.locked \
          ro.boot.verifiedbootstate ro.boot.warranty_bit ro.twrp.version; do echo "prop=$p=$(getprop $p)"; done
-echo "battery=$(cat /sys/class/power_supply/battery/capacity 2>/dev/null)"
+echo "battery=$(cat /sys/class/power_supply/battery/capacity 2>/dev/null || cat /sys/class/power_supply/*/capacity 2>/dev/null | head -1)"
 echo "sda=$(cat /sys/block/sda/size 2>/dev/null)"
+echo "lbs=$(cat /sys/block/sda/queue/logical_block_size 2>/dev/null)"
 echo "card=$(cat /sys/block/mmcblk0/size 2>/dev/null)"
 echo "card_name=$(cat /sys/block/mmcblk0/device/name 2>/dev/null)"
 for l in /dev/block/by-name/*; do b=$(readlink -f $l); b=${b##*/}
@@ -221,7 +232,7 @@ df -k /external_sd 2>/dev/null | tail -1 | while read a b c d e f; do echo "sdfr
             elif k == 'mount':
                 d, m, t = (v.split() + ['', '', ''])[:3]
                 f.mounts.append((d, m, t))
-            elif k in ('battery', 'sda', 'card', 'sdfree'):
+            elif k in ('battery', 'sda', 'card', 'sdfree', 'lbs'):
                 setattr(f, k, int(v) if v.strip().isdigit() else None)
             elif k == 'card_name':
                 f.card_name = v
@@ -247,6 +258,59 @@ df -k /external_sd 2>/dev/null | tail -1 | while read a b c d e f; do echo "sdfr
         return self.range_sha(node, offset + max(0, size - MIB) // MIB * MIB, n) == zero
 
 
+class Heimdall:
+    """heimdall with Samsung's session rule: after a command that ends with --no-reboot, the next one
+    must pass --resume (and one with --resume fails when no session is open). The installer always
+    passes --no-reboot; whether a session is open is remembered in `marker` (the phone may also have
+    been rebooted since), so on a handshake/session failure the same command is tried once the other
+    way."""
+    FAIL = ('handshake', 'Protocol initialisation failed', 'Failed to begin session', 'Failed to send')
+
+    def __init__(self, runner, marker):
+        self.r, self.marker = runner, marker
+
+    def run(self, args, write=False):
+        if args[0] == 'flash' and (len(args) < 3 or args[1] != '--BOOT' or any(a.startswith('--') and a not in (
+                '--BOOT', '--no-reboot') for a in args[1:])):
+            raise Refused(f'heimdall flash {" ".join(args[1:2])}: the installer writes only BOOT in Download mode '
+                          '(never RECOVERY or anything else)')
+        resume = os.path.exists(self.marker)
+        for attempt in (resume, not resume):
+            argv = ['heimdall', args[0], *(['--resume'] if attempt else []), *args[1:]]
+            res = self.r.run(argv, write=write, check=False, stream=False)
+            if self.r.mode == 'dry-run' and write:
+                return res
+            text = f'{res.stdout}{res.stderr}'
+            if res.returncode == 0:
+                if '--no-reboot' in args:
+                    os.makedirs(os.path.dirname(self.marker), exist_ok=True)
+                    open(self.marker, 'w').write('open\n')
+                return res
+            if not any(f in text for f in self.FAIL):
+                break
+        raise Stopped(f'heimdall {" ".join(args[:1])} failed ({res.returncode}): {text.strip()[-600:]}')
+
+    def closed(self):
+        try:
+            os.unlink(self.marker)
+        except OSError:
+            pass
+
+
+ANDROID_PROPS = ('ro.product.model', 'ro.product.device', 'ro.boot.bootloader', 'ro.build.PDA',
+                 'ro.build.version.oneui', 'ro.boot.flash.locked', 'ro.boot.verifiedbootstate', 'ro.lineage.version')
+
+
+def android_props(phone):
+    """getprop in a running Android (one call per name: plain `getprop NAME` works unrooted)."""
+    return {k: phone.sh(f'getprop {k}', check=False) for k in ANDROID_PROPS}
+
+
+def is_stock_samsung(props):
+    """Samsung's own firmware (One UI) rather than Starbite's Android: ro.build.PDA / One UI version."""
+    return bool(props.get('ro.build.PDA') or props.get('ro.build.version.oneui')) and not props.get('ro.lineage.version')
+
+
 @dataclass
 class Facts:
     props: dict = field(default_factory=dict)
@@ -258,6 +322,7 @@ class Facts:
     card: int = None                                 # 512-byte sectors
     card_name: str = ''
     sdfree: int = None                               # KiB free on /external_sd
+    lbs: int = None                                  # sda's logical block size (4096 on this UFS)
 
     def node(self, name):
         p = self.parts.get(name)
@@ -331,3 +396,114 @@ def chunk_write(phone, ui, src, size, node, offset, state_path, label, file_mode
             if (i + 1) % 8 == 0 or i + 1 == n:
                 ui.info(f'{label}: {min((i + 1) * 64, size // MIB or 1)} / {max(size // MIB, 1)} MiB'
                         f' ({(i + 1) * 64 / max(time.time() - t0, 1):.0f} MiB/s)')
+
+
+class InstallerEnv:
+    """The Starbite installer environment (docs/INSTALLER.md 13): a Linux kernel + initramfs
+    (tools/installer/env/) that the Starbite loader's fastboot starts from RAM (`fastboot boot KERNEL
+    INITRD --dtb DTB --header-version 2 --cmdline ...`: the loader's Linux path, star_boot_ram). It
+    brings up USB networking (CDC-ECM, the phone 172.16.42.1, the computer gets 172.16.42.2 by DHCP)
+    and dropbear, which takes only the key this computer made: an ed25519 key under <state>/env/,
+    whose public half goes into the initrd as an appended newc cpio (root/.ssh/authorized_keys), so
+    the environment needs no password and nobody else's key works. Once it answers, the transport
+    `adb` (tools/installer/transport/adb: adb's CLI on ssh) goes first on PATH, and every existing
+    writer runs against it unchanged."""
+    HOST = '172.16.42.1'
+    TRANSPORT = INSTALLER_DIR / 'transport'
+
+    def __init__(self, runner, d):
+        self.r, self.dir = runner, Path(d)
+        self.key = self.dir / 'id_ed25519'
+        self.serial = ''
+
+    def ssh_argv(self, cmd, timeout=5):
+        return ['ssh', '-i', str(self.key), '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no', '-o',
+                'UserKnownHostsFile=/dev/null', '-o', 'LogLevel=ERROR', '-o', f'ConnectTimeout={timeout}',
+                f'root@{self.HOST}', cmd]
+
+    def reachable(self):
+        if not self.key.is_file():
+            return False
+        try:
+            res = self.r.run(self.ssh_argv('echo sbinst-env-ok', 3), check=False, quiet=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            return False
+        return res.returncode == 0 and 'sbinst-env-ok' in (res.stdout or '')
+
+    def ensure_key(self):
+        if self.key.is_file() and Path(str(self.key) + '.pub').is_file():
+            return
+        self.dir.mkdir(parents=True, exist_ok=True)
+        res = self.r.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'starbite-installer', '-f',
+                          str(self.key)], check=False)
+        if res.returncode:
+            raise Refused(f'ssh-keygen failed: {res.stderr.strip()[:200]} (it comes with macOS and every Linux)')
+
+    @staticmethod
+    def newc(entries):
+        """A newc cpio archive: [(name, mode, data)] + TRAILER!!!."""
+        out = bytearray()
+        for ino, (name, mode, data) in enumerate(list(entries) + [('TRAILER!!!', 0, b'')], 1):
+            nb = name.encode() + b'\0'
+            hdr = '070701' + ''.join(f'{v:08x}' for v in (ino if name != 'TRAILER!!!' else 0, mode, 0, 0,
+                                                          2 if mode & 0o040000 else 1, 0, len(data), 0, 0, 0, 0,
+                                                          len(nb), 0))
+            out += hdr.encode() + nb
+            out += bytes(-len(out) % 4)
+            out += data
+            out += bytes(-len(out) % 4)
+        return bytes(out)
+
+    def initrd_with_key(self, initrd):
+        """The bundle's initrd + (4-byte padding) + a cpio with this computer's public key. The kernel
+        unpacks concatenated archives in order, so the key lands in the environment's /root/.ssh."""
+        pub = Path(str(self.key) + '.pub').read_bytes()
+        data = Path(initrd).read_bytes()
+        data += bytes(-len(data) % 4)
+        data += self.newc([('root', 0o040700, b''), ('root/.ssh', 0o040700, b''),
+                           ('root/.ssh/authorized_keys', 0o100600, pub)])
+        out = self.dir / f'initrd-with-key-{hashlib.sha256(data).hexdigest()[:12]}.img'
+        out.write_bytes(data)
+        return out
+
+    def fastboot_info(self):
+        vals = {}
+        for v in ('serialno', 'product', 'version-bootloader'):
+            res = self.r.run(['fastboot', 'getvar', v], check=False)
+            m = re.search(rf'{v}:\s*(\S*)', f'{res.stdout}{res.stderr}')
+            vals[v] = m.group(1) if m else ''
+        if not vals['version-bootloader'].startswith('starbite'):
+            raise Refused(f'the fastboot device is not the Starbite loader ({vals["version-bootloader"] or "?"})')
+        self.serial = vals['serialno']
+        return vals['serialno'], vals['product']
+
+    def boot(self, kernel, initrd, dtb, cmdline, serial, wait=180):
+        self.ensure_key()
+        ird = self.initrd_with_key(initrd)
+        size = sum(Path(f).stat().st_size for f in (kernel, ird, dtb)) + 3 * 2048
+        if size > 0x04ff0000:
+            raise Refused(f'the installer environment is {size} bytes; the loader\'s download buffer holds 0x04ff0000')
+        # a reboot of the environment (or a crash) comes back to the loader's fastboot, not the menu
+        self.r.run(['fastboot', 'oem', 'boot-next', 'fastboot'], check=False)
+        self.r.run(['fastboot', 'boot', str(kernel), str(ird), '--dtb', str(dtb), '--header-version', '2',
+                    '--cmdline', f'{cmdline} sb.serial={serial or "unknown"}'])
+        t0 = time.time()
+        while time.time() - t0 < wait:
+            if self.reachable():
+                self.activate()
+                return
+            time.sleep(2)
+        raise Refused('the installer environment did not answer on 172.16.42.1 within 3 minutes. Check that the '
+                      'computer shows a new USB network interface (macOS: System Settings > Network; Linux: '
+                      'ip link) with 172.16.42.2, then run again (the phone stays in the environment)')
+
+    def activate(self):
+        """From now on `adb` is the transport shim (ssh), for the installer and every tool it runs."""
+        env = {'SBINST_ENV_UP': '1', 'SBINST_ENV_KEY': str(self.key), 'SBINST_ENV_HOST': self.HOST,
+               'SBINST_ENV_SERIAL': self.serial or 'SBINST-ENV'}
+        path = os.environ['PATH']
+        if not path.startswith(str(self.TRANSPORT) + os.pathsep):
+            path = f'{self.TRANSPORT}{os.pathsep}{path}'
+        env['PATH'] = path
+        os.environ.update(env)
+        self.r.env.update(env)

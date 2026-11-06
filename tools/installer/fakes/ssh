@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Fake `ssh` for installer rehearsals: `ssh [-i KEY] [-o ...] root@172.16.42.1 CMD` runs CMD in the fake
+phone's installer environment (state `env`, booted by the fake fastboot), with the same shell stand-ins as
+the fake adb. Like the real environment (tools/installer/env/init: dropbear, key only), it refuses a key
+that is not the one the installer appended to the environment's initrd ($FAKE_ROOT/authorized_keys)."""
+import importlib.machinery
+import importlib.util
+import os
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+loader = importlib.machinery.SourceFileLoader('fake_adb', os.path.join(HERE, 'adb'))
+spec = importlib.util.spec_from_loader('fake_adb', loader)
+fa = importlib.util.module_from_spec(spec)
+loader.exec_module(fa)
+
+a, key, i = sys.argv[1:], None, 0
+while i < len(a) and a[i].startswith('-'):
+    if a[i] == '-i':
+        key = a[i + 1]
+    i += 2 if a[i] in ('-i', '-o', '-p', '-l', '-F') else 1
+host, cmd = a[i], ' '.join(a[i + 1:])
+if host.split('@')[-1] != '172.16.42.1':
+    sys.exit(f'fake ssh: only the installer environment (172.16.42.1) is faked, not {host}')
+auth = os.path.join(fa.R, 'authorized_keys')
+want = open(auth).read().split()[:2] if os.path.exists(auth) else None
+got = open(key + '.pub').read().split()[:2] if key and os.path.exists(key + '.pub') else None
+if fa.fakephone.read_state(fa.R) == 'env' and (want is None or got != want):
+    sys.stderr.write('root@172.16.42.1: Permission denied (publickey).\n')
+    sys.exit(255)
+fa.run_shell(cmd, True, via='ssh')

@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import tomlmini
+from . import tomlmini, ufslayout
 from .common import (MIB, MODELS, DEVICES, MIN_CARD_BYTES, NATIVE_PARTS, PART_WRITE_PY, PROTECTED,
                      PROTECTED_RAW, WRITABLE_PARTS, Refused, TOOLS, cardlayout)
 
@@ -31,7 +31,7 @@ class Dest:
     def __str__(self):
         return {'part': f'part:{self.name}', 'slot': f'slot:USERDATA@{self.offset}',
                 'store': f'store:{self.name}', 'card-lba': f'card:lba:{self.offset}',
-                'card-file': f'card:file:{self.name}'}[self.kind]
+                'card-file': f'card:file:{self.name}', 'env': f'env:{self.name}'}[self.kind]
 
     def where(self):
         """Plain words for the plan screen."""
@@ -39,7 +39,8 @@ class Dest:
                 'slot': f'UFS USERDATA bytes {self.offset}.. (Apple slot, below 16 GiB)',
                 'store': f'{"UFS" if self.name == "ufs" else "microSD p2"} OS store',
                 'card-lba': f'microSD sectors {self.offset}..',
-                'card-file': f'microSD p1 (exFAT) {self.name}'}[self.kind]
+                'card-file': f'microSD p1 (exFAT) {self.name}',
+                'env': f'the installer environment ({self.name}; RAM only, never stored)'}[self.kind]
 
 
 def parse_dest(s):
@@ -49,6 +50,9 @@ def parse_dest(s):
         raise Refused(f'destination {s!r} is not a string')
     kind, _, rest = s.partition(':')
     if kind == 'part':
+        if rest.upper() == 'RECOVERY':
+            raise Refused(f'destination {s}: the installer never writes RECOVERY (the phone keeps Samsung\'s stock '
+                          'recovery; Starbite works from its loader and its own environment)')
         if rest.upper() in PROTECTED or rest.lower() in PROTECTED_RAW or rest.upper().startswith('BOTA'):
             raise Refused(f'destination {s}: {rest} is a protected area; the installer never writes it')
         if rest not in WRITABLE_PARTS:
@@ -68,6 +72,10 @@ def parse_dest(s):
         if rest not in ('ufs', 'sd'):
             raise Refused(f'destination {s}: expected store:ufs or store:sd')
         return Dest('store', rest)
+    if kind == 'env':
+        if rest not in ('kernel', 'initrd', 'dtb'):
+            raise Refused(f'destination {s}: expected env:kernel, env:initrd or env:dtb (the installer environment)')
+        return Dest('env', rest)
     if kind == 'card':
         sub, _, val = rest.partition(':')
         if sub == 'lba':
@@ -83,7 +91,7 @@ def parse_dest(s):
             if not _CARD_PATH.match(val) or '..' in val.split('/') or val.endswith('/'):
                 raise Refused(f'destination {s}: card paths are absolute, plain characters, no ".."')
             return Dest('card-file', val)
-    raise Refused(f'destination {s!r}: unknown kind (part: slot: store: card:lba: card:file:)')
+    raise Refused(f'destination {s!r}: unknown kind (part: slot: store: card:lba: card:file: env:)')
 
 
 @dataclass
@@ -115,6 +123,7 @@ class Manifest:
     items: list = field(default_factory=list)
     sha256: str = ''
     card_layout: object = None    # a cardlayout.Layout when [card] layout is set (docs/INSTALLER.md 11)
+    ufs_layout: object = None     # a ufslayout.Layout when [ufs] layout is set (docs/INSTALLER.md 9)
 
     def item(self, key):
         return next(i for i in self.items if i.key == key)
@@ -164,7 +173,8 @@ def load(bundle):
         _need(L, 'name', str, f'[[layout]] {i}')
         _need(L, 'blocks', int, f'[[layout]] {L["name"]}')
     m = Manifest(path=path, bundle=bundle, raw=raw, name=raw.get('name', bundle.name), phone=phone,
-                 card=card, layout=layout, sha256=hashlib.sha256(text.encode()).hexdigest(), card_layout=card_layout)
+                 card=card, layout=layout, sha256=hashlib.sha256(text.encode()).hexdigest(), card_layout=card_layout,
+                 ufs_layout=_ufs_layout(raw, layout, path))
     seen_keys, seen_dest = set(), {}
     for n, it in enumerate(raw.get('item', [])):
         where = f'[[item]] {n + 1}'
@@ -216,7 +226,35 @@ def load(bundle):
                 raise Refused(f'item {key}: {dest.offset}+{item.size} runs past the 16 GiB Apple slot')
         m.items.append(item)
     _check_card_ranges(m)
+    if m.ufs_layout is not None:
+        names = {p.name for p in m.ufs_layout.parts}
+        for it in m.items:
+            if it.dest.kind == 'part' and it.dest.name not in names or it.dest.kind in ('slot', 'store') and \
+                    it.dest.name in ('USERDATA', 'ufs') and 'USERDATA' not in names:
+                raise Refused(f'item {it.key}: {it.dest} is not a partition of UFS layout {m.ufs_layout.name}')
     return m
+
+
+def _ufs_layout(raw, layout, path):
+    """[ufs] layout = "NAME": the UFS table (sbinst/ufslayout.py) the installer lays out on the phone,
+    repartitioning it if needed (docs/INSTALLER.md 9). [[layout]] rows, if any, must agree with it
+    (the row that fills the disk is checked by start only)."""
+    name = raw.get('ufs', {}).get('layout')
+    if name is None:
+        return None
+    if name not in ufslayout.TARGETS:
+        raise Refused(f'{path}: [ufs] layout {name!r} is not one of {", ".join(ufslayout.TARGETS)} (sbinst/ufslayout.py)')
+    L = ufslayout.get(name)
+    rows = {p.name: (i, p, s, e) for i, p, s, e in L.resolve(6, L.min_blocks - 6)}
+    for R in layout:
+        if R['name'] not in rows:
+            raise Refused(f'{path}: [[layout]] {R["name"]} is not a partition of UFS layout {name}')
+        i, p, s, e = rows[R['name']]
+        if R.get('node', f'sda{i}') != f'sda{i}' or R.get('start', s) != s or \
+                (p.blocks != ufslayout.FILL and R['blocks'] != e - s + 1):
+            raise Refused(f'{path}: [[layout]] {R["name"]} disagrees with UFS layout {name} '
+                          f'(sda{i}, start {s}, {e - s + 1} blocks): leave [[layout]] out, [ufs] layout gives it')
+    return L
 
 
 def _card_layout(card, path):
@@ -504,6 +542,8 @@ def layout_problems(m):
 def writer_of(item):
     """Which program writes an item (shown on the plan screen)."""
     d = item.dest
+    if d.kind == 'env':
+        return 'fastboot boot (RAM)'
     if item.action == 'mkfs-metadata':
         return 'tools/android/pixel/metadata-reset.sh'
     if d.kind == 'part' and d.name in PART_WRITE_PY:

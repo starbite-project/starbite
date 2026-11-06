@@ -90,7 +90,12 @@ def main(out, layout='sd128'):
     cat_text = (REPO / 'tools' / 'store' / 'catalog.toml').read_text()
     (b / 'store' / 'catalog.toml').write_text(cardlayout.catalog_text(cat_text, layout))
     put(b / 'boot' / 'starbite-boot.img', os.urandom(6 * MIB))
-    put(b / 'boot' / 'twrp-starbite.img', os.urandom(5 * MIB))
+    # the installer environment: an arm64 Image stand-in ("ARMd" at 0x38, as the loader checks), an initrd, a DTB
+    kern = bytearray(os.urandom(3 * MIB))
+    kern[0x38:0x3c] = b'ARMd'
+    put(b / 'env' / 'installer.image', bytes(kern))
+    put(b / 'env' / 'installer.initrd', gzip.compress(os.urandom(256 << 10)))
+    put(b / 'env' / 'installer.dtb', b'\xd0\x0d\xfe\xed' + os.urandom(60 << 10))
     # the OS stores: every file the visible catalog entries name, plus the rescue system
     cat = tomllib.loads((b / 'store' / 'catalog.toml').read_text())
     names = {'rescue.image', 'rescue.dtb', 'rescue.initrd'}

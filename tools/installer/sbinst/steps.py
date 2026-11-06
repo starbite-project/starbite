@@ -9,10 +9,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import nopassword, rescue
-from .common import (BACKUP_OPTIONAL, BACKUP_RAW, BACKUP_REQUIRED, GIB, MIB, NATIVE_PARTS, PART_WRITE_PY,
-                     PROTECTED, REPO, Refused, Stopped, cardlayout, human)
-from .device import Phone, chunk_write
+from . import nopassword, pit, repart, rescue
+from .common import (BACKUP_OPTIONAL, BACKUP_RAW, BACKUP_REQUIRED, DOWNLOAD_MODE_USB, GIB, MIB, NATIVE_PARTS,
+                     PART_WRITE_PY, PROTECTED, REPO, Refused, Stopped, cardlayout, default_state_dir, human)
+from .device import Heimdall, InstallerEnv, Phone, android_props, chunk_write, is_stock_samsung, usb_ids
 from .journal import Journal
 from .manifest import coverage, writer_of
 
@@ -28,7 +28,9 @@ TOOL = {k: str(REPO / v) for k, v in {
 
 
 def rank(item):
-    """Install order. BOOT is last: until it is written, the phone still starts TWRP's way."""
+    """Install order. BOOT is last: until it is written, the phone still starts its old loader (on a stock
+    phone BOOT was written first, in Download mode, and is then skipped as identical). RECOVERY is never
+    written (manifest.parse_dest refuses it)."""
     d = item.dest
     if d.kind == 'slot':
         return 10
@@ -36,7 +38,7 @@ def rank(item):
         return 20 if d.name == 'ufs' else 50
     if d.kind == 'part':
         return {'SYSTEM': 30, 'VENDOR': 31, 'A16DATA': 32, 'ODM': 33, 'WINESP': 40, 'WINDOWS': 41,
-                'RECOVERY': 90, 'BOOT': 99}[d.name]
+                'BOOT': 99}[d.name]
     return 60 if d.kind == 'card-lba' else 70
 
 
@@ -76,6 +78,10 @@ class Installer:
         self.done = {'written': 0, 'skipped': 0, 'kept': 0}
         self.warnings = []
         self.card_parts = None      # [p1, p2] dicts for this card (the manifest's, or its card layout's)
+        self.rp = None              # repart.Repart when the bundle names a UFS layout ([ufs] layout)
+        self.heimdall = Heimdall(runner, str(self.state_dir / 'download' / 'heimdall-session-open'))
+        self.env = InstallerEnv(runner, default_state_dir() / 'env')   # one key per computer, whatever --state-dir
+        self.phone.env = self.env
 
     # ------------------------------------------------------------------ welcome / state
     def welcome(self):
@@ -96,14 +102,33 @@ class Installer:
                          '   what is written to it; a card with another layout is erased only with --erase-card)'):
             raise Refused('insert a microSD card of at least 64 GB first')
 
-    def bring_to_twrp(self):
+    def bring_up(self):
+        """Get a root shell on the phone that the installer drives. v2 (--transport env, the default):
+        the Starbite installer environment, a Linux kernel + initramfs started from RAM by the
+        Starbite loader's fastboot (`fastboot boot`), reached over USB networking (ssh). Nothing in
+        the stock flow uses TWRP, and nothing ever writes or boots RECOVERY:
+          stock Android (USB debugging)  -> adb reboot download
+          Download mode                  -> PIT check, then BOOT = the Starbite loader (the only
+                                            Download-mode write), then the user starts its fastboot
+          the loader's fastboot          -> the installer environment from RAM
+        --transport twrp (legacy, S9 #1's own maintenance): TWRP's adb as in v1."""
         u, p = self.ui, self.phone
         u.h1('Phone state')
         st = p.detect()
         u.info(f'found: {st.kind}' + (f' ({st.detail})' if st.detail else ''))
-        live = self.mode != 'dry-run'
-        if st.kind == 'recovery':
+        legacy = getattr(self.o, 'transport', 'env') == 'twrp'
+        if st.kind == 'env':
+            if legacy:
+                raise Refused('the Starbite installer environment is running; --transport twrp needs TWRP')
+            self.env.activate()
+            u.ok('the Starbite installer environment is up (USB networking, ssh)')
             return st
+        if st.kind == 'recovery':
+            if legacy:
+                return st
+            raise Refused('the phone is in TWRP. The installer works from its own environment, started from the '
+                          'Starbite loader\'s fastboot: reboot, hold Bixby after the Samsung splash and pick USB FASTBOOT '
+                          '(or hold Volume Up alone while it starts). For S9 #1\'s own maintenance: --transport twrp')
         if st.kind == 'unauthorized':
             raise Refused('adb says "unauthorized": allow USB debugging on the phone, then run again')
         if st.kind == 'fastboot-other':
@@ -112,51 +137,148 @@ class Installer:
             if self.mode == 'dry-run':
                 u.warn('no phone found: the plan below is shown without the phone checks')
                 return None
-            raise Refused('no phone found. Put it in TWRP (Vol Up + Bixby + Power), the Starbite menu\'s fastboot, '
-                          'or Download mode (Vol Down + Bixby + Power, then Vol Up), and connect USB')
-        if st.kind in ('android', 'fastboot-starbite'):
-            cmd = ['adb', 'reboot', 'recovery'] if st.kind == 'android' else ['fastboot', 'reboot', 'recovery']
-            u.info(f'the installer works from TWRP: {" ".join(cmd)}')
-            if not live:
-                u.cmd(' '.join(cmd) + '    [dry run: not run]')
-                u.warn('dry run: the phone is not rebooted, so the plan below has no phone checks')
-                return None
-            if not u.confirm('Reboot the phone into TWRP now?'):
-                raise Refused('the phone has to be in TWRP')
-            self.r.run(cmd)
-            st = p.wait_for('recovery', 180)
-            if st.kind != 'recovery':
-                raise Refused(f'TWRP did not come up within 3 minutes (state: {st.kind})')
-            u.ok('TWRP is up')
-            return st
-        if st.kind == 'download':
+            raise Refused('no phone found. A stock phone: Download mode (phone off; hold Volume Down + Bixby, plug in '
+                          'USB, then Volume Up). A Starbite phone: the loader\'s fastboot (Bixby after the Samsung '
+                          'splash > USB FASTBOOT)')
+        if st.kind == 'android':
+            props = android_props(p)
+            model = props.get('ro.product.model', '')
+            u.info(f'Android: {model or "?"} ({props.get("ro.build.PDA") or props.get("ro.lineage.version") or "?"})')
+            if model and model not in self.m.phone['models']:
+                raise Refused(f'this is a {model}, not a Galaxy S9 SM-G960F: nothing was done')
+            if props.get('ro.boot.flash.locked') == '1' or props.get('ro.boot.verifiedbootstate') == 'green':
+                raise Refused('the bootloader is locked (ro.boot.flash.locked=1 / verifiedbootstate green): unlock it '
+                              'first (Developer options > OEM unlocking, then Download mode: long-press Volume Up)')
+            if is_stock_samsung(props):
+                return self.from_stock_android()
+            if legacy:
+                cmd = ['adb', 'reboot', 'recovery']
+            else:
+                raise Refused('Starbite\'s Android is running: reboot and start the loader\'s fastboot (Bixby after the '
+                              'Samsung splash > USB FASTBOOT), then run again')
+        elif st.kind == 'fastboot-starbite':
+            if not legacy:
+                return self.start_env()
+            raise Refused('--transport twrp: boot TWRP yourself (it is S9 #1\'s own maintenance path)')
+        elif st.kind == 'download':
             return self.from_download_mode()
-        raise Refused(f'unexpected phone state {st.kind}')
+        else:
+            raise Refused(f'unexpected phone state {st.kind}')
+        # legacy: Starbite Android -> TWRP
+        if self.mode == 'dry-run':
+            u.cmd(' '.join(cmd) + '    [dry run: not run]')
+            return None
+        if not u.confirm('Reboot the phone into TWRP now? (legacy transport)'):
+            raise Refused('the phone has to be in TWRP for --transport twrp')
+        self.r.run(cmd)
+        st = p.wait_for('recovery', 180)
+        if st.kind != 'recovery':
+            raise Refused(f'TWRP did not come up within 3 minutes (state: {st.kind})')
+        return st
+
+    def from_stock_android(self):
+        """Stock Samsung Android with USB debugging: `adb reboot download`, then from_download_mode()."""
+        u = self.ui
+        u.info('stock Samsung firmware: the Starbite loader is not on this phone yet. The way in is Download mode:')
+        u.cmd('adb reboot download' + ('    [dry run: not run]' if self.mode == 'dry-run' else ''))
+        if self.mode == 'dry-run':
+            u.warn('dry run: the phone is not rebooted, so the plan below has no phone checks')
+            return None
+        if not u.confirm('Reboot the phone into Download mode now? (it shows a blue "Downloading..." screen)'):
+            raise Refused('the phone has to be in Download mode or the Starbite loader\'s fastboot')
+        self.phone.adb('reboot', 'download')
+        self.heimdall.closed()
+        u.info('waiting up to 90 s for Download mode (USB 04e8:685d)...')
+        for _ in range(45):
+            if DOWNLOAD_MODE_USB in usb_ids():
+                break
+            time.sleep(2)
+        else:
+            raise Refused('Download mode did not appear. With the phone off: hold Volume Down + Bixby, plug in the '
+                          'USB cable, then press Volume Up at the warning; run the installer again')
+        if self.phone.detect().kind != 'download':
+            raise Refused('Download mode did not appear on USB; run the installer again with the phone in Download mode')
+        return self.from_download_mode()
 
     def from_download_mode(self):
-        """A phone in Download mode gets TWRP into RECOVERY with Heimdall (the only Download-mode write
-        the installer makes; RECOVERY's stock image is in Samsung's firmware), then the user boots it."""
+        """A phone in Download mode: `heimdall detect`, its PIT read (`download-pit`, read only) and checked
+        against the SM-G960F's table (an S9+ or any other phone is refused here), then the Starbite
+        loader into BOOT (`heimdall flash --BOOT ... --no-reboot`: the ONLY Download-mode write; never
+        RECOVERY, which keeps Samsung's stock recovery), then the user starts the loader's fastboot."""
         u = self.ui
-        twrp = next((i for i in self.m.items if str(i.dest) == 'part:RECOVERY' and i.present), None)
-        if twrp is None:
-            raise Refused('the phone is in Download mode, and the bundle has no RECOVERY (TWRP) image to flash')
-        cmd = ['heimdall', 'flash', '--RECOVERY', str(twrp.path), '--no-reboot']
-        u.info('Download mode: TWRP goes into RECOVERY first (raw image; nothing else is written in Download mode).')
-        u.cmd(' '.join(cmd) + ('    [dry run: not run]' if self.mode == 'dry-run' else ''))
-        u.info('Then: hold Volume Down + Power until the screen goes black, and at once hold Volume Up + Bixby +')
-        u.info('Power until TWRP shows. Do not let stock Android start (it may put the stock recovery back).')
+        if self.o.transport == 'twrp':
+            raise Refused('--transport twrp does not start from Download mode (the stock flow uses the loader)')
+        boot = next((i for i in self.m.items if str(i.dest) == 'part:BOOT' and i.present), None)
+        if boot is None:
+            raise Refused('the phone is in Download mode, and the bundle has no BOOT (Starbite loader) image to flash')
+        for k in ('env-kernel', 'env-initrd', 'env-dtb'):
+            if not any(i.dest.kind == 'env' and i.dest.name == k[4:] and i.present for i in self.m.items):
+                raise Refused(f'the bundle has no installer environment ({k}): after the loader nothing could go on')
+        u.info('Download mode. First, read only: is this an SM-G960F? (heimdall detect, heimdall download-pit)')
+        if self.r.run(['heimdall', 'detect'], check=False).returncode:
+            raise Refused('heimdall does not see the phone in Download mode (heimdall detect). Install heimdall '
+                          '(macOS: brew install heimdall; Linux: the heimdall-flash package), use a data USB cable, '
+                          'and on Linux allow USB access (udev rule for 04e8:685d) or run as root')
+        pdir = self.state_dir / 'download'
+        pdir.mkdir(parents=True, exist_ok=True)
+        pf = pdir / time.strftime('pit-%Y%m%d-%H%M%S.bin')
+        self.heimdall.run(['download-pit', '--output', str(pf), '--no-reboot'])
+        try:
+            ok, unit, lines = pit.check(pf.read_bytes())
+        except (OSError, pit.PitError) as e:
+            raise Refused(f'could not read the phone\'s PIT ({e}): nothing was flashed') from None
+        for ln in lines:
+            u.info(ln)
+        if not ok:
+            raise Refused('the PIT is not an SM-G960F\'s (an S9+ SM-G965F, or another phone): nothing was flashed')
+        u.ok(f'PIT: an SM-G960F ({self.rel(pf)})')
+        cmd = ['flash', '--BOOT', str(boot.path), '--no-reboot']
+        u.info('The Starbite loader goes into BOOT. It is the only thing written in Download mode; RECOVERY keeps')
+        u.info('Samsung\'s stock recovery (the installer never writes it). BOOT\'s stock image is in the backup')
+        u.info('the installer takes next, and in Samsung\'s firmware.')
+        u.cmd('heimdall ' + ' '.join(cmd) + ('    [dry run: not run]' if self.mode == 'dry-run' else ''))
+        self.key_instructions()
         if self.mode == 'dry-run':
-            u.warn('dry run: TWRP is not flashed, so the plan below has no phone checks')
+            u.warn('dry run: BOOT is not flashed, so the plan below has no phone checks')
             return None
-        if not u.typed('Flash TWRP into RECOVERY now?', 'flash twrp'):
-            raise Refused('TWRP not flashed')
-        self.r.run(cmd, write=True)
-        u.info('waiting up to 5 minutes for TWRP (adb)...')
-        st = self.phone.wait_for('recovery', 300)
-        if st.kind != 'recovery':
-            raise Refused('TWRP did not appear; boot it with the keys above and run the installer again')
-        u.ok('TWRP is up')
-        return st
+        if not u.typed('Flash the Starbite loader into BOOT now?', 'flash boot'):
+            raise Refused('BOOT not flashed')
+        self.heimdall.run(cmd, write=True)
+        u.ok('the Starbite loader is in BOOT. Now the keys (above).')
+        u.info('waiting up to 5 minutes for the loader\'s fastboot (USB 18d1:4ee0)...')
+        st = self.phone.wait_for('fastboot-starbite', 300)
+        if st.kind != 'fastboot-starbite':
+            raise Refused('the loader\'s fastboot did not appear. Start it with the keys above and run the installer '
+                          'again (it finds the phone in fastboot and goes on)')
+        self.heimdall.closed()
+        u.ok('the Starbite loader\'s fastboot is up')
+        return self.start_env()
+
+    def start_env(self):
+        """The installer environment from RAM through the loader's fastboot (nothing is written to the
+        phone's storage: a dry run does this too)."""
+        u = self.ui
+        items = {i.dest.name: i for i in self.m.items if i.dest.kind == 'env' and i.present}
+        missing = [k for k in ('kernel', 'initrd', 'dtb') if k not in items]
+        if missing:
+            raise Refused(f'the bundle has no installer environment ({", ".join("env:" + k for k in missing)})')
+        serial, product = self.env.fastboot_info()
+        if product and product != 'starlte':
+            raise Refused(f'the loader says product {product}, not starlte (Galaxy S9)')
+        u.info('starting the Starbite installer environment from RAM (Linux + initramfs; USB networking, ssh with a '
+               'key made for this computer). Nothing is written to the phone by this.')
+        self.env.boot(items['kernel'].path, items['initrd'].path, items['dtb'].path,
+                      self.m.raw.get('env', {}).get('cmdline', 'sb.installer=1'), serial)
+        u.ok('the installer environment is up: ssh root@172.16.42.1 (USB networking)')
+        return self.phone.detect()
+
+    def key_instructions(self):
+        u = self.ui
+        u.info('Then, on the phone, exactly:')
+        u.info('  1. Hold Volume Down + Power (about 7 s) until the screen goes black: Download mode ends.')
+        u.info('  2. At once hold Volume Up ALONE while the phone starts; let go when "STARBITE FASTBOOT" shows.')
+        u.info('     (Or: hold Bixby right after the Samsung splash, and pick USB FASTBOOT in Starbite Recovery.)')
+        u.info('  3. Leave the cable in. The installer finds the fastboot by itself.')
 
     # ------------------------------------------------------------------ preflight
     def preflight(self, st):
@@ -175,7 +297,9 @@ class Installer:
             'not a Galaxy S9 SM-G960F (starlte)')
         bl = pr.get('ro.boot.bootloader', '')
         row('bootloader', bl or '?', bl.startswith('G960F') or not bl, 'not a G960F bootloader')
-        row('unlocked', f'TWRP {pr.get("ro.twrp.version") or "?"} runs; flash.locked={pr.get("ro.boot.flash.locked") or "?"}'
+        shell = 'TWRP ' + (pr.get('ro.twrp.version') or '?') if getattr(self.o, 'transport', 'env') == 'twrp' else \
+            'installer environment ' + (pr.get('ro.starbite.env') or '?')
+        row('unlocked', f'{shell} runs; flash.locked={pr.get("ro.boot.flash.locked") or "?"}'
             f' vbstate={pr.get("ro.boot.verifiedbootstate") or "?"}', pr.get('ro.boot.flash.locked') != '1',
             'ro.boot.flash.locked=1', hard=False)
         row('battery', f'{f.battery}%' if f.battery is not None else '?',
@@ -187,7 +311,8 @@ class Installer:
         row('protected areas', 'all present' if not missing else 'missing ' + ' '.join(missing), not missing,
             'this is not a stock-partitioned S9')
         bad = []
-        for L in self.m.layout:
+        layout_rows = [] if self.m.ufs_layout is not None else self.m.layout
+        for L in layout_rows:
             p = f.parts.get(L['name'])
             if p is None:
                 bad.append(f'{L["name"]} missing')
@@ -199,9 +324,10 @@ class Installer:
                 bad.append(f'{L["name"]} starts at block {start // 8}, not {L["start"]}')
             if size != L['blocks'] * 8:
                 bad.append(f'{L["name"]} has {size // 8} blocks, not {L["blocks"]}')
-        row('UFS layout', f'{len(self.m.layout)} partitions as the bundle expects' if not bad else '; '.join(bad[:4]),
-            not bad, 'the GPT is not the Starbite layout this bundle was made for. v1 never writes the GPT: '
-            'see docs/INSTALLER.md "Repartitioning"')
+        if self.m.ufs_layout is None:
+            row('UFS layout', f'{len(self.m.layout)} partitions as the bundle expects' if not bad else '; '.join(bad[:4]),
+                not bad, 'the GPT is not the Starbite layout this bundle was made for, and the bundle names no '
+                '[ufs] layout to repartition to: see docs/INSTALLER.md 9')
         cbytes = (f.card or 0) * 512
         row('microSD', f'{human(cbytes)} ({f.card or 0} sectors) {f.card_name}'.strip() if f.card else 'none',
             cbytes >= self.m.card['min_bytes'], 'no card, or smaller than 64 GB')
@@ -223,7 +349,7 @@ class Installer:
                 'lines), so it needs a bundle made for this card size')
         for t in ('gzip', 'sha256sum', 'blockdev'):
             if t not in f.tools:
-                row(f'TWRP tool {t}', 'missing', False)
+                row(f'phone tool {t}', 'missing', False)
         free = self._host_free()
         row('host free space', human(free), free >= 512 * MIB, 'less than 512 MiB free for the backups')
         if free < 2 * GIB:
@@ -231,10 +357,23 @@ class Installer:
         serial = pr.get('ro.boot.serialno') or st.serial
         self.phone_id = 'phone-' + hashlib.sha256(serial.encode()).hexdigest()[:10]
         rows.append(('phone id', f'{self.phone_id} (a hash of the serial number)', 'ok'))
+        self.journal = Journal(self.state_dir / self.phone_id / 'journal.json')
+        if self.m.ufs_layout is not None and not fatal:
+            self.rp = repart.Repart(self, self.m.ufs_layout)
+            try:
+                a = self.rp.assess()
+                txt = {'skip': f'{self.m.ufs_layout.name} (both GPT copies valid)',
+                       'reread': f'{self.m.ufs_layout.name}: written, the kernel has not read it yet',
+                       'resume': f'{self.m.ufs_layout.name}: an earlier write was interrupted ({a.why}): resumes',
+                       'repartition': f'another table: repartition to {self.m.ufs_layout.name} '
+                                      f'({sum(r.status != "same" for r in a.plan.rows)} rows change)'}[a.status]
+                row('UFS layout', txt, True)
+                row('UFS block size', f'{f.lbs or "?"} bytes', f.lbs in (None, 4096), 'not 4096')
+            except Refused as e:
+                row('UFS layout', 'REFUSED', False, str(e))
         u.table(rows, ('check', 'value', ''))
         if fatal:
             raise Refused('preflight failed:\n  ' + '\n  '.join(fatal))
-        self.journal = Journal(self.state_dir / self.phone_id / 'journal.json')
 
     @staticmethod
     def rel(p):
@@ -253,7 +392,7 @@ class Installer:
         """(node, byte offset) of an item's destination on the phone."""
         d, f = item.dest, self.facts
         if d.kind == 'part':
-            return f.node(d.name), 0
+            return f.node(d.name) or self.planned_node(d.name), 0
         if d.kind == 'slot':
             return f.node('USERDATA'), d.offset
         if d.kind == 'store':
@@ -261,6 +400,51 @@ class Installer:
         if d.kind == 'card-lba':
             return '/dev/block/mmcblk0', d.offset * 512
         return '/external_sd' + d.name, 0
+
+    def planned_node(self, name):
+        """The node a partition will have after the repartitioning (dry run on a phone without it)."""
+        if self.rp is not None and self.rp.a is not None:
+            e = next((e for e in self.rp.a.plan.entries if e.name == name), None)
+            if e is not None:
+                return f'/dev/block/sda{e.index}'
+        return None
+
+    def planned_size(self, name):
+        if self.rp is not None and self.rp.a is not None:
+            e = next((e for e in self.rp.a.plan.entries if e.name == name), None)
+            if e is not None:
+                return e.blocks * 4096
+        return self.facts.size(name)
+
+    @staticmethod
+    def part_of(item):
+        d = item.dest
+        if d.kind == 'part':
+            return d.name
+        if d.kind == 'slot' or (d.kind == 'store' and d.name == 'ufs'):
+            return 'USERDATA'
+        return None
+
+    def is_fresh(self, item):
+        """The item's partition was (or is about to be) re-laid by the GPT step and the item has not been
+        written there since: whatever the place holds is not the item's data, so it is written without
+        --replace. The list is per item and an item leaves it once written (journal 'fresh_items'), so
+        data an OS writes later is never mistaken for a fresh place."""
+        if self.journal and item.key in self.journal.d.get('fresh_items', []):
+            return True
+        a = getattr(getattr(self, 'rp', None), 'a', None)
+        return a is not None and a.status in ('repartition', 'resume') and self.part_of(item) in a.fresh
+
+    def forget_fresh(self, names):
+        """The GPT step re-lays these partitions: earlier records of items on them no longer hold."""
+        keys = set(self.journal.d.get('fresh_items', []))
+        for it in self.m.items:
+            if self.part_of(it) in names:
+                self.journal.d['items'].pop(it.key, None)
+                self.journal.chunk_state(it).unlink(missing_ok=True)
+                keys.add(it.key)
+        self.journal.d['fresh_items'] = sorted(keys)
+        self.journal.save()
 
     def store_sums(self, item):
         hdr = open(item.path, 'rb').read(4096 * 2)
@@ -324,9 +508,26 @@ class Installer:
         else:
             steps.append(Step('backup', 'Back up the protected areas', 'this computer', 'host',
                               'read only on the phone; resumes' if b.get('status') == 'started' else 'read only on the phone'))
-        steps.append(Step('layout', 'Check the UFS layout (GPT)', '-', 'verify', 'checked in preflight; never written'))
+        if self.rp is None:
+            steps.append(Step('layout', 'Check the UFS layout (GPT)', '-', 'verify', 'checked in preflight; never written'))
+        else:
+            a, name = self.rp.a, self.m.ufs_layout.name
+            title = f'UFS partition table ({name})'
+            if a.status == 'skip':
+                steps.append(Step('gpt', title, 'UFS GPT (sda)', 'skip', a.why))
+            elif a.status in ('resume', 'reread'):
+                steps.append(Step('gpt', title, 'UFS GPT (sda)', 'resume', a.why))
+            elif o.repartition:
+                steps.append(Step('gpt', title, 'UFS GPT (sda)', 'repartition',
+                                  'REPARTITION (--repartition): ' + ', '.join(a.fresh) + ' get new places or sizes and '
+                                  'are written fresh; the GPT is backed up first'))
+            else:
+                steps.append(Step('gpt', title, 'UFS GPT (sda)', 'BLOCKED',
+                                  'the phone has another partition table; ' + ', '.join(a.fresh) + ' would get new '
+                                  'places or sizes and lose their contents (a stock phone: its Android data): run again '
+                                  'with --repartition'))
         steps += self.plan_card()
-        items = sorted([i for i in self.m.items], key=rank)
+        items = sorted([i for i in self.m.items if i.dest.kind != 'env'], key=rank)   # env: RAM only
         cls = {i.key: self.classify(i) for i in items}
         # Android's /data and /metadata belong together: /metadata holds /data's encryption keys
         a16 = next((i for i in items if str(i.dest) == 'part:A16DATA'), None)
@@ -348,6 +549,14 @@ class Installer:
         o, j = self.o, self.journal
         if not i.present:
             return 'skip', 'not in this bundle (optional)'
+        if self.is_fresh(i):                      # before the journal: the GPT step forgets earlier records
+            a = getattr(getattr(self, 'rp', None), 'a', None)
+            pending = a is not None and a.status in ('repartition', 'resume') and self.part_of(i) in a.fresh
+            if not pending and j.chunk_state(i).exists():
+                return 'resume', 'interrupted earlier (after the repartitioning): resumes'
+            if i.dest.kind == 'part' and i.action == 'write' and i.size > (self.planned_size(i.dest.name) or 0):
+                return 'BLOCKED', f'image ({human(i.size)}) is larger than {i.dest.name} in the new table'
+            return 'write', f'{self.part_of(i)} is new in the repartitioned table: written fresh'
         if j.item_done(i):
             if i.data:
                 return 'keep', 'installed and verified earlier by this installer; in use, not re-read'
@@ -454,7 +663,7 @@ class Installer:
             v = self.r.run(['adb', 'version'], check=False).stdout or ''
             if 'starbite fake adb' not in v:
                 raise Refused('--rehearse needs the fake adb first on PATH (--fake-root DIR)')
-        st = self.bring_to_twrp()
+        st = self.bring_up()
         if st is None:
             return self.offline_plan()
         self.preflight(st)
@@ -508,7 +717,7 @@ class Installer:
         u.h1('The plan (no phone: targets not checked)')
         rows = [(n, i.title, i.dest.where(), human(i.size) if i.size else '', writer_of(i),
                  'present' if i.present else 'NOT IN BUNDLE')
-                for n, i in enumerate(sorted(self.m.items, key=rank), 1)]
+                for n, i in enumerate(sorted([i for i in self.m.items if i.dest.kind != 'env'], key=rank), 1)]
         u.table(rows, ('#', 'what', 'where', 'size', 'by', 'file'))
         cov_rows, cov_warn = coverage(self.m)
         if cov_rows:
@@ -533,6 +742,7 @@ class Installer:
                 self.journal.mark_item(s.item, 'done', fresh=False)
             return
         fn = {'backup': self.do_backup, 'layout': lambda s: self.ui.ok('the UFS layout matched in preflight'),
+              'gpt': self.do_gpt,
               'card-layout': self.do_card_layout, 'card-format': self.do_card_format,
               'no-password': self.do_no_password, 'finish': self.do_finish}.get(s.key)
         if fn:
@@ -597,6 +807,32 @@ class Installer:
             j.mark_step('backup', 'done', dir=str(d), names=sorted(done))
             u.ok(f'backup complete: {len(done)} items in {self.rel(d)}')
 
+    def do_gpt(self, s):
+        u = self.ui
+        for ln in self.rp.describe():
+            u.info(ln)
+        self.rp.run()
+        if self.mode != 'dry-run' and s.status != 'skip':
+            self.facts = self.phone.facts()
+
+    def restore_gpt(self):
+        """--restore-gpt: the phone's own GPT, as saved before the repartitioning, written back."""
+        self.ui.banner()
+        st = self.phone.detect()
+        if st.kind == 'fastboot-starbite' and self.o.transport != 'twrp':
+            raise Refused('--restore-gpt: start the installer environment first (run the installer with --bundle once, '
+                          'or --start-env --bundle B)')
+        if st.kind == 'env':
+            self.env.activate()
+        elif not (st.kind == 'recovery' and self.o.transport == 'twrp'):
+            raise Refused(f'--restore-gpt needs the installer environment (found: {st.kind})')
+        self.facts = self.phone.facts()
+        serial = self.facts.props.get('ro.boot.serialno') or st.serial
+        self.phone_id = 'phone-' + hashlib.sha256(serial.encode()).hexdigest()[:10]
+        self.journal = Journal(self.state_dir / self.phone_id / 'journal.json')
+        repart.Repart(self, None).restore()
+        return 0
+
     def do_card_layout(self, s):
         p, u = self.phone, self.ui
         p1, p2 = self.want_parts()
@@ -629,7 +865,7 @@ class Installer:
                 break
             time.sleep(1)
         else:
-            raise Stopped('the kernel did not pick up the new card partitions (reboot TWRP and run again)')
+            raise Stopped('the kernel did not pick up the new card partitions (run the installer again: it restarts the environment)')
         u.ok('card MBR written and read back; partitions re-read')
 
     def do_card_format(self, s):
@@ -641,10 +877,10 @@ class Installer:
         if self.mode == 'dry-run':
             u.cmd(f'adb shell "{cmd}"    [dry run: not run]')
             if not tool:
-                u.warn('TWRP shows no mkfs.exfat/mkexfatfs: the real run would stop here (format p1 as exFAT another way)')
+                u.warn('the phone shows no mkfs.exfat/mkexfatfs: the real run would stop here (format p1 as exFAT another way)')
             return
         if not tool:
-            raise Stopped('TWRP has no exFAT formatter (mkfs.exfat / mkexfatfs): format microSD p1 as exFAT '
+            raise Stopped('the phone has no exFAT formatter (mkfs.exfat / mkexfatfs): format microSD p1 as exFAT '
                           f'"{label}" from a computer, then run again')
         p.sh(cmd, write=True)
         boot = p.exec_out(f'dd if=/dev/block/mmcblk0 bs=512 skip={p1["start"]} count=1 2>/dev/null')
@@ -715,6 +951,9 @@ class Installer:
             return
         self.verify(i, node, off)
         j.mark_item(i, 'done', fresh=True)
+        if i.key in j.d.get('fresh_items', []):
+            j.d['fresh_items'].remove(i.key)
+            j.save()
         Path(state).unlink(missing_ok=True)
         self.done['written'] += 1
 

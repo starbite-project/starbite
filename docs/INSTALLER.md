@@ -1,4 +1,4 @@
-# Starbite Installer (v1)
+# Starbite Installer (v2)
 
 Written 2026-11-05. Item 7 of `docs/STARBITE-2-PLAN.md` "Current order": from a Mac or a Linux PC you run
 one script; it asks you to confirm an unlocked bootloader and a microSD of at least 64 GB, then makes the
@@ -6,8 +6,15 @@ phone match the main Starbite S9, OS by OS, every write verified by reading it b
 passcode on any OS (section 6). Rescue USB disks for the Bixby > Starbite Recovery > Rescue mode path are
 made by the same script (section 7).
 
+**v2 (2026-11-06): a stock SM-G960F (stock firmware, stock GPT, bootloader unlocked) + a microSD of at
+least 64 GB becomes a Starbite phone with one script: Download mode -> the Starbite loader into BOOT ->
+the loader's fastboot starts the Starbite installer environment from RAM -> backup -> the UFS repartitioned
+to the table in `sbinst/ufslayout.py` (section 9) -> card -> every OS. No TWRP anywhere: the installer never
+writes or boots RECOVERY (section 13). Bundles are made by `--build-bundle` (section 12).**
+
 **Status: host side done and rehearsed against fake phones and fake disks. Nothing has run against the
-real phone.** Section 10 lists exactly what needs the phone.
+real phone, and the installer environment (`tools/installer/env/`) is written but not built yet.**
+Section 10 lists exactly what needs the phone.
 
 ## 1. Quick start
 
@@ -16,7 +23,13 @@ tools/installer/starbite-install --bundle BUNDLE                 # = --dry-run: 
 tools/installer/starbite-install --bundle BUNDLE --real          # after a finished dry run; typed confirmation
 tools/installer/starbite-install --verify-bundle BUNDLE          # files vs manifest (size + SHA-256)
 tools/installer/starbite-install --update-hashes BUNDLE          # whoever builds a bundle: fill size + sha256
+tools/installer/starbite-install --bundle BUNDLE --real --repartition   # a stock phone: its GPT is re-laid (section 9)
+tools/installer/starbite-install --bundle BUNDLE --start-env      # only start the installer environment
+tools/installer/starbite-install --restore-gpt [--real]          # the phone's own GPT back (saved before repartitioning)
+tools/installer/starbite-install --build-bundle DIR --from-phone [--card-layout sd64]   # section 12
 tools/installer/starbite-install --describe-phone                # the phone's layout as manifest TOML (read only)
+python3 tools/installer/sbinst/ufslayout.py show [LAYOUT]        # the UFS tables (section 9.1)
+python3 tools/installer/sbinst/gpt.py show|plan HEAD TAIL [LAYOUT]   # the GPT engine on a backup
 tools/installer/starbite-install --make-rescue-image FILE        # the rescue USB disk as an image file
 tools/installer/starbite-install --make-rescue-usb /dev/diskN [--image FILE] [--real]
 tools/installer/rehearse.sh                                      # everything below against fakes (no phone)
@@ -25,7 +38,8 @@ python3 -m unittest discover -s tools/installer/tests            # unit tests
 
 Python 3 standard library only (3.11+ for `tomllib`; older Pythons use the built-in fallback parser).
 macOS and Linux. Host tools it calls: `adb` (Android platform-tools), `fastboot` for a phone in the
-loader's fastboot, `heimdall` only for a phone in Download mode, `bash`, `gzip`, `shasum`/`sha256sum`.
+loader's fastboot, `heimdall` only for a phone in Download mode, `ssh` + `ssh-keygen` (the installer
+environment), `bash`, `gzip`, `shasum`/`sha256sum`. `adb` only to send a stock Android to Download mode.
 
 Options: `--replace KEY` (repeatable) / `--replace-all` overwrite targets that hold data; `--erase-card`
 erases a microSD with another layout; `--fresh-backup` takes a new backup even if a complete one exists;
@@ -36,22 +50,23 @@ erases a microSD with another layout; `--fresh-backup` takes a new backup even i
 
 ```
 Mac / Linux PC                                       Galaxy S9
-starbite-install ──adb (TWRP)──────────────────────► reads: getprop, /sys, by-name, MBR, hashes
-   │   (fastboot reboot recovery / adb reboot recovery / heimdall --RECOVERY to get there)
+starbite-install ──ssh (USB ECM 172.16.42.1)───────► the installer environment (Linux, RAM only)
+   │   stock Android: adb reboot download; Download mode: PIT check + heimdall flash --BOOT (loader);
+   │   the loader's fastboot: fastboot boot installer.image installer.initrd --dtb installer.dtb
    ├─ welcome + 2 confirmations
-   ├─ phone state: TWRP | Android | Starbite fastboot | Download mode
+   ├─ phone state: environment | Starbite fastboot | Download mode | stock Android (| TWRP: legacy only)
    ├─ preflight (read only): model, bootloader, battery, UFS size, protected areas, UFS layout, card size
    ├─ plan screen: every step, what it writes where, by which tool, and why (write/skip/keep/replace)
    ├─ dry run (default)  ── prints every command, writes nothing, records "dry run done" in the journal
    └─ real (--real) / rehearsal (--rehearse, fakes only): typed "install phone-XXXXXXXXXX", then the steps
 ```
 
-- **Transport: TWRP's adb**, the path every UFS and card write of the project already uses. The loader's
-  fastboot (docs/USB-FASTBOOT.md) has no write path by design, so a phone found there is rebooted into
-  TWRP (`fastboot reboot recovery`). Android: `adb reboot recovery`. Download mode: TWRP goes into
-  RECOVERY with `heimdall flash --RECOVERY twrp.img --no-reboot` (typed "flash twrp"; RECOVERY's stock
-  image is in Samsung's firmware), then the user boots TWRP with the keys. A dry run never reboots or
-  flashes anything; it then shows the plan without phone checks.
+- **Transport (v2): the Starbite installer environment** (section 13), a Linux kernel + initramfs that
+  the loader's fastboot starts from RAM, reached by ssh over USB networking; `tools/installer/transport/adb`
+  maps adb's CLI onto it, so every existing writer runs unchanged. Download mode writes BOOT only (the
+  loader). **RECOVERY is never written or booted.** `--transport twrp` keeps v1's TWRP adb for S9 #1's
+  own maintenance. A dry run never flashes or reboots; starting the environment from RAM writes nothing
+  and is allowed in a dry run.
 - **Existing tools do the writing** wherever one exists (section 4); the installer adds the checks before,
   the journal, and an independent read-back after each one.
 - **Modes.** `--dry-run` is the default. `--real` and `--rehearse` both need a finished dry run of the same
@@ -65,12 +80,15 @@ starbite-install ──adb (TWRP)───────────────�
   - backup first: the protected areas, BOOT, RECOVERY, MISC, RADIO, OMR, ODM, the first 4 MiB of sda
     (protective MBR, GPT, PIT area), the backup GPT and the boot LUNs sdb-sde go to
     `build/installer/<phone-id>/backups/<time>/`, each hashed on the phone and on the computer;
-  - the GPT is checked against the manifest's `[[layout]]` and never written (section 9);
   - data is never replaced silently: an item marked `data = true` (OS roots, Android /data, Windows, card
     images) is written only if its target is blank, or was written by this installer and interrupted, or
     with `--replace KEY` / `--replace-all`. Android /data and /metadata are renewed together or not at all;
   - every write is read back (SHA-256 computed on the phone); a mismatch stops the run (`STOPPED`, exit 3);
-  - BOOT is written last, so until the very end the phone still boots TWRP the old way;
+  - BOOT is written last (on a stock phone it was written first, in Download mode, and is then skipped as
+    identical); RECOVERY is never written (refused as a destination, by the heimdall wrapper and by the
+    transport);
+  - the GPT is written only by the repartition step, with `--repartition`, behind its own verified backup
+    (section 9);
   - a microSD with a foreign layout is erased only with `--erase-card` (the plan says BLOCKED otherwise);
   - one phone at a time (`more than one phone` refuses).
 - **Idempotent and resumable.** The journal (`build/installer/<phone-id>/journal.json`) records each item as
@@ -101,7 +119,9 @@ set): `tools/installer/installer-manifest.example.toml`.
 | `catalog` | optional: a copy of `tools/store/catalog.toml` in the bundle. Then the plan lists every visible menu entry as `covered` or `MISSING` (its store files must be in the bundle's stores, read with `sbstore2.py`; its root must be an item) and warns when the UFS store's catalog differs from it |
 | `[phone]` | `models` (SM-G960F), `devices` (starlte), `ufs_blocks` (15616000), `min_battery` (50) |
 | `[card]` | `min_bytes` (at least 60,000,000,000: a card sold as 64 GB holds 61.9-64.1 GB), `layout` (`"sd128"` S9 #1's 128 GB card, `"sd64"` any card of at least 64 GB: section 11; p1, p2 and the root sectors then come from `tools/store/cardlayout.py`, and `--verify-bundle` checks the catalog roots and the payloads' `sdroot=` against it), `sectors` (the exact card this layout was made for; card roots sit at fixed sectors in payload command lines; not with `sd64`), `p1`/`p2` `{type, start, sectors[, label]}`: the MBR the card layout step writes (with `layout`: may be left out, must agree if given) |
-| `[[layout]]` | `name`, `node`, `start`, `blocks` (4 KiB blocks): the UFS GPT the set was made for. Checked in preflight, never written |
+| `[ufs]` | `layout`: a target of `sbinst/ufslayout.py` (`starbite-a`, `starbite-a16g`). The phone is repartitioned to it with `--repartition` (section 9) |
+| `[env]` | `cmdline` for the installer environment (default `sb.installer=1`) |
+| `[[layout]]` | `name`, `node`, `start`, `blocks` (4 KiB blocks): v1's check. With `[ufs] layout` optional and must agree with it (the filling row by start only) |
 | `[[item]]` | one thing to install, below |
 
 | Item key | Meaning |
@@ -109,7 +129,7 @@ set): `tools/installer/installer-manifest.example.toml`.
 | `key` | unique, `[a-z0-9-]`; `--replace KEY` names it |
 | `title`, `os`, `note` | shown; `os` (starbite, android, linux, chromeos, windows, macos, ios) drives the no-password list |
 | `file`, `size`, `sha256` | path inside the bundle (no `..`, no symlink out), byte size, SHA-256. `--update-hashes` fills the last two |
-| `dest` | `part:NAME` (BOOT RECOVERY SYSTEM VENDOR A16DATA WINESP WINDOWS; ODM only with `action = "mkfs-metadata"`), `slot:USERDATA@OFFSET` (the 16 GiB Apple slot), `store:ufs`, `store:sd`, `card:lba:SECTOR` (inside `[card] p2`, 1 MiB aligned, no overlaps; with a card layout inside one of its root slots), `card:root:KEY` (with `[card] layout`: the root slot of KEY, e.g. `card:root:mac13`, resolved to `card:lba:` at load), `card:file:/PATH` (a file on card p1's exFAT) |
+| `dest` | `part:NAME` (BOOT SYSTEM VENDOR A16DATA WINESP WINDOWS; ODM only with `action = "mkfs-metadata"`; never RECOVERY), `env:kernel|initrd|dtb` (the installer environment, RAM only), `slot:USERDATA@OFFSET` (the 16 GiB Apple slot), `store:ufs`, `store:sd`, `card:lba:SECTOR` (inside `[card] p2`, 1 MiB aligned, no overlaps; with a card layout inside one of its root slots), `card:root:KEY` (with `[card] layout`: the root slot of KEY, e.g. `card:root:mac13`, resolved to `card:lba:` at load), `card:file:/PATH` (a file on card p1's exFAT) |
 | `action` | `write` (default) or `mkfs-metadata` (ODM, no file) |
 | `data` | `true`: the target holds user data once its OS runs (never replaced without `--replace`) |
 | `optional` | `true`: a missing file skips the item instead of refusing the bundle |
@@ -124,18 +144,17 @@ file (hashes cached in `build/installer/hash-cache.json` by path, size and mtime
 | # | Step | Writes | Tool | Verified by |
 |---|---|---|---|---|
 | 1 | Back up | the computer only | `tools/android/pixel/part-backup.sh mac` per partition; raw head/tail/LUNs by the installer | phone SHA-256 == local SHA-256 for each |
-| 2 | UFS layout | nothing | preflight | by-name, node, start, size vs `[[layout]]` |
+| 2 | UFS partition table | sda LBA 1-5 + the last 5 LBAs, only with `--repartition` | `sbinst/gpt.py` + `repart.py` (section 9) | both copies read back and parsed; the kernel's by-name/start/size == the plan |
 | 3 | microSD MBR | card sector 0, p2's first 3 blocks (old store header) | installer (`dd` of a 512-byte MBR built on the host), `blockdev --rereadpt` | MBR read back byte for byte; `/sys/class/block/mmcblk0p1/start` |
-| 4 | microSD p1 exFAT | p1 | TWRP's `mkfs.exfat` / `mkexfatfs -n STARBITE` | "EXFAT   " read back from p1's boot sector |
+| 4 | microSD p1 exFAT | p1 | the environment's `mkfs.exfat -n STARBITE` | "EXFAT   " read back from p1's boot sector |
 | 5 | Apple slot (iOS 16.5) | USERDATA 0..16 GiB | `tools/refport/slot-write.py` | range SHA-256 on the phone |
 | 6 | UFS OS store | USERDATA +16 GiB | `tools/store/store-flash.sh` (keeps the phone's settings block) | store area == image except block 2 |
 | 7-8 | SYSTEM, VENDOR | partitions | `tools/android/pixel/part-write.py --state` | the tool, then range SHA-256 again |
-| 9-10 | A16DATA, ODM | partitions | `part-write.py`; `metadata-reset.sh` (TWRP's mke2fs) | range SHA-256; `blkid` TYPE ext4 LABEL metadata |
+| 9-10 | A16DATA, ODM | partitions | `part-write.py`; `metadata-reset.sh` (the environment's mke2fs) | range SHA-256; `blkid` TYPE ext4 LABEL metadata |
 | 11-12 | WINESP, WINDOWS | partitions | installer chunk writer | range SHA-256 |
 | 13 | card OS store | card p2 | `tools/store/store-flash-sd.sh` | store area == image except block 2 |
 | 14-15 | macOS Ventura, iOS 26 roots | card sector ranges | `tools/macos/card-range-flash.py --state` | range SHA-256 |
 | 16-18 | pmOS, Ubuntu, ChromiumOS images | files on p1 (`/external_sd/distros/`) | installer chunk writer into `NAME.part`, then `mv` | `sha256sum` of the file |
-| 19 | RECOVERY (TWRP) | partition | installer chunk writer | range SHA-256 |
 | 20 | BOOT (loader, last) | partition | installer chunk writer | range SHA-256 |
 | 21 | No password | nothing | section 6 | |
 | 22 | Finish | the rescue stick if `--rescue-usb DEV` | section 7 | read back |
@@ -151,7 +170,8 @@ they now use `wc -c <`, so they also run on a Linux host.
 
 ## 5. What a bundle must hold for "every OS working"
 
-The example manifest lists the main phone's set: BOOT, TWRP, both stores (the UFS store with the catalog,
+The example manifest lists the main phone's set: BOOT, the installer environment (`env:kernel`,
+`env:initrd`, `env:dtb`: RAM only), both stores (the UFS store with the catalog,
 every OS's kernel/payload, Engineer OS and `rescue.image`/`rescue.dtb`/`rescue.initrd`), the iOS 16.5
 slot, Android SYSTEM/VENDOR/A16DATA + fresh ODM, Windows (optional), macOS Ventura and iOS 26 (optional)
 card roots, and the pmOS, Ubuntu and ChromiumOS images. **No such bundle exists yet**: assembling it from
@@ -201,184 +221,132 @@ the person at the phone; a lock set later by the user; macOS as above.
 
 ## 8. Tests and the rehearsal
 
-- Unit tests (`tools/installer/tests/`, 77 tests, 18 of them the card layouts of section 11;
-  `rehearse.sh`: 87 checks, 24 of them the 64 GB card of section 11.6; the transcript below is the
-  128 GB part, which still reads the same apart from an `ok card layout sd128: ...` line per run): disk safety with recorded diskutil plists (internal
-  disk, APFS container, USB stick, 1 TB USB SSD, disk image, internal SD reader, 256 GB stick) and fake
-  sysfs/proc trees (SATA root disk, USB stick, USB SSD, mounted stick, stick under an LVM root); the
-  destination allowlist, manifest checks, bundle verification, symlink escape, hash cache, `--update-hashes`;
-  the TOML fallback parser against tomllib; the ext4 reader and the no-password check on real mke2fs images
-  (`tests/fixtures/*.ext4.gz`, `tests/mk-ext4-fixtures.sh`); the journal, chunk state and the chunk writer
-  resuming after a simulated failure; plan classification; MBR round trip.
-- `tools/installer/rehearse.sh`: the real flow end to end against fake phones (`fakes/fakephone.py`: the
-  main phone's GPT layout at its real block numbers and sizes as sparse files, Samsung's small partitions
-  filled with random bytes, a sparse 128 GB card) through the fake `adb`, `fastboot` and `heimdall`, which run
-  TWRP's shell commands on the host with the phone's paths redirected. The existing tools (part-backup.sh,
-  part-write.py, slot-write.py, store-flash*.sh, card-range-flash.py, metadata-reset.sh) run unchanged
-  against it. Fake limitations: partition nodes are separate files (not windows into one disk), `[ -b` is
-  read as `[ -e`, and `mke2fs`, `blkid`, `mount`, `mkfs.exfat`, `getprop`, `blockdev` are shell stand-ins.
-  `dd` onto a `/dev/block` stand-in gets `conv=notrunc` (a block device cannot be truncated; before that,
-  `card-range-flash.py`'s `dd` cut the fake card off after the macOS root, unnoticed on the 128 GB card
-  because nothing lies behind that root, and fatal on `sd64`, where p1 does).
+- Unit tests (`python3 -m unittest discover -s tools/installer/tests`, 111 tests): v1's (disk safety with
+  recorded diskutil plists and fake sysfs trees, the destination allowlist, manifest and bundle checks,
+  the TOML parser, the ext4 reader and no-password checks, journal / chunk state / resume, plan
+  classification, MBR round trip, the card layouts of section 11) plus `test_gpt.py` (the GPT engine on
+  S9 #1's real backup and on independently written stock GPTs, the layout table's rules, every
+  interrupted-write state, the PIT check: section 9.4), `test_bundler.py` (the deny list, streaming with
+  holes and the zeroed settings block, `--from-local` with a hard link and a .gz source, `[ufs]` in a
+  manifest) and `test_no_recovery.py` (RECOVERY refused as a destination, by the heimdall wrapper, by the
+  transport shim; no code path flashes or boots it).
+- `tools/installer/rehearse.sh`: the real flow end to end against fake phones and fake disks
+  (`fakes/fakephone.py`: a sparse 64 GB UFS file holding a real GPT, built from `ufslayout.py`, with the
+  partition nodes made from it the way Linux 4.9's efi.c does (an invalid primary = no partitions);
+  Samsung's small partitions filled with random bytes; a sparse card; a PIT for heimdall; stock or
+  Starbite firmware) through the fake `adb`, `fastboot` (`boot` of the installer environment, `oem
+  boot-next`), `heimdall` (sessions, `download-pit`, BOOT only) and `ssh` (the environment; only the key
+  appended to the initrd). The existing writers run unchanged through `transport/adb`. Fake limits:
+  partition nodes are separate files, `[ -b` is read as `[ -e`, mke2fs/blkid/mount/mkfs.exfat/getprop/
+  blockdev are stand-ins, and the environment is the host's bash, not the real initramfs.
+  Sections: 1-9 the main phone's bundle (refusals, dry run, a cable pull in SYSTEM and the resume, nothing
+  left to do, the phone without a journal); 10 Download mode (BOOT only, RECOVERY untouched); 11 the
+  loader's fastboot and the legacy TWRP transport; 12 preflight refusals; 13 the rescue stick; 14 the 64 GB
+  card; **15 a stock phone, the whole way** (excerpt below).
 
-Transcript of `RESCUE_IMG=build/installer/rescue/starbite-rescue-usb.img tools/installer/rehearse.sh`
-(2026-11-05, macOS; long runs shown as headers, plan rows and ok/WARN/REFUSED/STOPPED lines):
+Result 2026-11-06 (macOS): **144 rehearsal checks passed, 0 failed; 111 unit tests OK**. Section 15 as it printed (plan rows and
+warnings left out; paths shortened):
 
 ```
-
-######## 1. a rehearsal bundle (fake images; real OS stores and ext4 roots) and a fake phone (blank 128 GB card)
-rehearsal bundle in build/installer-rehearsal/bundle
-fake phone in <repo>/build/installer-rehearsal/phone: state recovery, card blank (249999360 sectors)
-
-######## 2. the bundle against its manifest
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-PASS bundle verified (exit 0)
-PASS 14 items present, 2 optional ones absent
-
-######## 3. refusals before anything is written
-REFUSED: the bundle does not match its manifest:
-PASS a missing file is refused (exit 2)
-PASS names the missing file
-REFUSED: the bundle does not match its manifest:
-PASS a changed file is refused (exit 2)
-PASS names the file whose hash differs
-REFUSED: destination part:EFS: EFS is a protected area; the installer never writes it
-PASS a manifest that names EFS is refused (exit 2)
-PASS says EFS is protected
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: recovery (adb)
+######## 15. a STOCK phone: Samsung firmware and GPT, unlocked bootloader, a 64 GB card (docs/INSTALLER.md 9, 13)
+fake phone in <repo>/build/installer-rehearsal/phone-stock: state android, stock firmware, SM-G960F, GPT stock, card blank (124735488 sectors)
+before: kernel: USERDATA primary 6cd38d4010bf backup 7c3be94dbfe8
+ok  card layout sd64: catalog roots and payload sdroot= match (mac13 139264)
+ok  bundle verified: 16 items; optional items not in it: windows
+  found: android (adb)
+  $ adb reboot download  [dry run: not run]
+== The plan (no phone: targets not checked) ==
+ok  offline dry run: nothing was read from or written to a phone
+PASS dry run from stock Android: the way in is Download mode (exit 0)
+PASS stock firmware recognised (ro.build.PDA)
+PASS shows adb reboot download, does not run it
+ok  card layout sd64: catalog roots and payload sdroot= match (mac13 139264)
+ok  bundle verified: 16 items; optional items not in it: windows
+  found: download (Samsung Download mode (04e8:685d))
+REFUSED: the PIT is not an SM-G960F's (an S9+ SM-G965F, or another phone): nothing was flashed
+PASS an S9+ (SM-G965F) in Download mode is refused by its PIT (exit 2)
+PASS names the partition that differs
+PASS ...and says why
+PASS nothing was flashed to the S9+ (BOOT, RECOVERY)
+ok  card layout sd64: catalog roots and payload sdroot= match (mac13 139264)
+ok  bundle verified: 16 items; optional items not in it: windows
+  found: android (adb)
+  $ adb reboot download
+ok  PIT: an SM-G960F (build/installer-rehearsal/state-stock/download/pit-20261106-150014.bin)
+  $ heimdall flash --BOOT <repo>/build/installer-rehearsal/bundle64/boot/starbite-boot.img --no-reboot
+ok  the Starbite loader is in BOOT. Now the keys (above).
+ok  the Starbite loader's fastboot is up
+ok  the installer environment is up: ssh root@172.16.42.1 (USB networking)
 REFUSED: no finished dry run of this bundle on phone-5c7ed06646: run the same command with --dry-run first (it writes nothing), then again
-PASS --rehearse before a dry run is refused (exit 2)
-PASS asks for the dry run first
-REFUSED: --yes is not accepted with --real: every confirmation is typed by a person
-PASS --yes with --real is refused (exit 2)
-REFUSED: --fake-root and --real do not mix
-PASS --fake-root with --real is refused (exit 2)
-
-######## 4. dry run (fresh install: --replace-all): reads the phone, prints every command, writes nothing
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: recovery (adb)
+PASS rehearsal from stock Android: adb reboot download, PIT, BOOT via heimdall, loader fastboot, the environment, then the dry-run gate (exit 2)
+PASS the PIT is an SM-G960F's
+PASS tells the user exactly which keys to hold
+PASS ...and how to reach the loader's fastboot
+PASS the loader's fastboot came up
+PASS the installer environment runs from RAM
+PASS then asks for the dry run
+ok  card layout sd64: catalog roots and payload sdroot= match (mac13 139264)
+ok  bundle verified: 16 items; optional items not in it: windows
+  found: env (Starbite installer environment (ssh root@172.16.42.1))
+ok  the Starbite installer environment is up (USB networking, ssh)
 == The plan ==
-  1  host  Back up the protected areas  this computer
-  2  verify  Check the UFS layout (GPT)  -
-  3  write  microSD partition table (p1 exFAT, p2 raw)  microSD sector 0
-  4  write  Format microSD p1 (exFAT)  microSD p1
-  5  REPLACE  iOS 16.5 (an earlier port) root: APFS system + HFSX /var  UFS USERDATA bytes 0.. (Apple slot, below 16 GiB)  2.0 MiB  tools/refport/slot-write.py
-  6  write  OS store (UFS): catalog, kernels, payloads, Engineer OS, rescue system  UFS OS store  1.2 MiB  tools/store/store-flash.sh
-  7  write  Android 17 system (Google GSI)  UFS partition SYSTEM  129.0 MiB  tools/android/pixel/part-write.py
-  8  write  Android vendor (Starbite build)  UFS partition VENDOR  3.0 MiB  tools/android/pixel/part-write.py
-  9  REPLACE  Android /data (empty f2fs)  UFS partition A16DATA  4.0 MiB  tools/android/pixel/part-write.py
-  10  REPLACE  Android /metadata (fresh ext4)  UFS partition ODM  tools/android/pixel/metadata-reset.sh
-  11  REPLACE  Windows 11 boot files (ESP)  UFS partition WINESP  2.0 MiB  installer chunk writer
-  12  skip  Windows 11 (NTFS)  UFS partition WINDOWS  installer chunk writer
-  13  write  OS store (microSD p2)  microSD p2 OS store  92.0 KiB  tools/store/store-flash-sd.sh
-  14  write  macOS Ventura root (HFSX, 15 GiB)  microSD sectors 216442880..  3.0 MiB  tools/macos/card-range-flash.py
-  15  skip  iOS 26 root (parked edge pair)  microSD sectors 182888448..  tools/macos/card-range-flash.py
-  16  write  postmarketOS (Phosh)  microSD p1 (exFAT) /distros/pmos.img  8.0 MiB  installer chunk writer (file)
-  17  write  Ubuntu (Phosh)  microSD p1 (exFAT) /distros/ubuntu.img  8.0 MiB  installer chunk writer (file)
-  18  write  ChromiumOS (GPT disk image)  microSD p1 (exFAT) /distros/chromeos.img  2.0 MiB  installer chunk writer (file)
-  19  write  TWRP (Starbite: /data = A16DATA)  UFS partition RECOVERY  5.0 MiB  installer chunk writer
-  20  write  Starbite loader + menu (BOOT)  UFS partition BOOT  6.0 MiB  installer chunk writer
-  21  verify  No user password on any OS  -
-  22  verify  Finish: rescue USB offer, reboot into Starbite  -
-WARN iOS 26 (ios26) will not boot from this bundle: root card:lba:182888448
-WARN Windows 11 (win11) will not boot from this bundle: root part:WINDOWS
-WARN password: Linux /distros/ubuntu.img: user "user" has a PIN: rebuild the image with SB_NO_PIN=1
-WARN password: macOS Ventura: auto-login, but the account HAS a password ("starbite"): asked only if WindowServer restarts; an empty password is untested on the phone
-ok  the UFS layout matched in preflight
-  $ python3 -I tools/android/pixel/part-write.py SYSTEM build/installer-rehearsal/bundle/android/system.img --state build/installer-rehearsal/state/phone-5c7ed06646/chunks/android-system-3dde938c7282.state  [dry run: not run]
-  $ python3 -I tools/android/pixel/part-write.py VENDOR build/installer-rehearsal/bundle/android/vendor.img --state build/installer-rehearsal/state/phone-5c7ed06646/chunks/android-vendor-9fb377de6d23.state  [dry run: not run]
-  $ python3 -I tools/android/pixel/part-write.py A16DATA build/installer-rehearsal/bundle/android/a16data.img --state build/installer-rehearsal/state/phone-5c7ed06646/chunks/android-data-091662c8d6a3.state  [dry run: not run]
-ok  Android 17: by-design: empty f2fs from make-a16data.sh + fresh ODM: no lock credential exists
-ok  Linux /distros/pmos.img: ok: user "user": empty password; /etc/starbite/login = none (lock screen off)
-WARN Linux /distros/ubuntu.img: OPEN: user "user" has a PIN: rebuild the image with SB_NO_PIN=1
-ok  ChromiumOS: by-design: no account is created; Guest needs no password
-ok  Windows 11: ok: build-image.ps1 unattend: empty password + AutoLogon
-WARN macOS Ventura: OPEN: auto-login, but the account HAS a password ("starbite"): asked only if WindowServer restarts; an empty password is untested on the phone
-ok  iOS 16.5: by-design: no passcode until one is set in Settings
-ok  Engineer OS / Starbite: ok: no login; armed mode is hold-and-slide, not a PIN
+REFUSED: the plan has blocked steps: UFS partition table (starbite-a): the phone has another partition table; USERDATA, WINESP, WINDOWS, A16DATA would get new places or sizes and lose their contents (a stock phone: its Android data): run again with --repartition
+PASS dry run in the environment without --repartition: the GPT step is BLOCKED (exit 2)
+PASS UFS partition table BLOCKED
+PASS says how to allow it
+ok  card layout sd64: catalog roots and payload sdroot= match (mac13 139264)
+ok  bundle verified: 16 items; optional items not in it: windows
+  found: env (Starbite installer environment (ssh root@172.16.42.1))
+ok  the Starbite installer environment is up (USB networking, ssh)
+== The plan ==
+  $ adb shell "blockdev --rereadpt /dev/block/sda; sb-byname"; then by-name, start and size of every partition == the plan  [dry run: not run]
+  $ python3 -I tools/android/pixel/part-write.py SYSTEM build/installer-rehearsal/bundle64/android/system.img --state build/installer-rehearsal/state-stock/phone-5c7ed06646/chunks/android-system-420486d19782.state  [dry run: not run]
+  $ python3 -I tools/android/pixel/part-write.py VENDOR build/installer-rehearsal/bundle64/android/vendor.img --state build/installer-rehearsal/state-stock/phone-5c7ed06646/chunks/android-vendor-23991468e55b.state  [dry run: not run]
+  $ python3 -I tools/android/pixel/part-write.py A16DATA build/installer-rehearsal/bundle64/android/a16data.img --state build/installer-rehearsal/state-stock/phone-5c7ed06646/chunks/android-data-86f4b074e488.state  [dry run: not run]
   written 0, skipped 2, kept 0; 0 write commands ran
-WARN iOS 26 (ios26) will not boot from this bundle: root card:lba:182888448
-WARN Windows 11 (win11) will not boot from this bundle: root part:WINDOWS
-WARN password: Linux /distros/ubuntu.img: user "user" has a PIN: rebuild the image with SB_NO_PIN=1
-WARN password: macOS Ventura: auto-login, but the account HAS a password ("starbite"): asked only if WindowServer restarts; an empty password is untested on the phone
 == Dry run finished ==
 ok  nothing was written (26 write commands printed). The real mode (--real, or --rehearse on a fake phone) is now allowed for this bundle on this phone.
-PASS dry run (exit 0)
+PASS dry run with --repartition: old and new tables side by side, nothing written (exit 0)
 PASS dry run: the fake phone is byte-identical
-PASS dry run printed its write commands
-PASS exact command for SYSTEM shown
-
-######## 5. rehearsal with a cable pull in the middle of SYSTEM (chunk 1 of 3)
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: recovery (adb)
+PASS USERDATA: stock size -> 18.75 GiB, side by side
+PASS A16DATA new
+PASS the protected rows identical
+PASS plan: repartition
+PASS A16DATA written fresh (no --replace needed)
+ok  card layout sd64: catalog roots and payload sdroot= match (mac13 139264)
+ok  bundle verified: 16 items; optional items not in it: windows
+  found: env (Starbite installer environment (ssh root@172.16.42.1))
+ok  the Starbite installer environment is up (USB networking, ssh)
 == The plan ==
-  1  host  Back up the protected areas  this computer
-  2  verify  Check the UFS layout (GPT)  -
-  3  write  microSD partition table (p1 exFAT, p2 raw)  microSD sector 0
-  4  write  Format microSD p1 (exFAT)  microSD p1
-  5  REPLACE  iOS 16.5 (an earlier port) root: APFS system + HFSX /var  UFS USERDATA bytes 0.. (Apple slot, below 16 GiB)  2.0 MiB  tools/refport/slot-write.py
-  6  write  OS store (UFS): catalog, kernels, payloads, Engineer OS, rescue system  UFS OS store  1.2 MiB  tools/store/store-flash.sh
-  7  write  Android 17 system (Google GSI)  UFS partition SYSTEM  129.0 MiB  tools/android/pixel/part-write.py
-  8  write  Android vendor (Starbite build)  UFS partition VENDOR  3.0 MiB  tools/android/pixel/part-write.py
-  9  REPLACE  Android /data (empty f2fs)  UFS partition A16DATA  4.0 MiB  tools/android/pixel/part-write.py
-  10  REPLACE  Android /metadata (fresh ext4)  UFS partition ODM  tools/android/pixel/metadata-reset.sh
-  11  REPLACE  Windows 11 boot files (ESP)  UFS partition WINESP  2.0 MiB  installer chunk writer
-  12  skip  Windows 11 (NTFS)  UFS partition WINDOWS  installer chunk writer
-  13  write  OS store (microSD p2)  microSD p2 OS store  92.0 KiB  tools/store/store-flash-sd.sh
-  14  write  macOS Ventura root (HFSX, 15 GiB)  microSD sectors 216442880..  3.0 MiB  tools/macos/card-range-flash.py
-  15  skip  iOS 26 root (parked edge pair)  microSD sectors 182888448..  tools/macos/card-range-flash.py
-  16  write  postmarketOS (Phosh)  microSD p1 (exFAT) /distros/pmos.img  8.0 MiB  installer chunk writer (file)
-  17  write  Ubuntu (Phosh)  microSD p1 (exFAT) /distros/ubuntu.img  8.0 MiB  installer chunk writer (file)
-  18  write  ChromiumOS (GPT disk image)  microSD p1 (exFAT) /distros/chromeos.img  2.0 MiB  installer chunk writer (file)
-  19  write  TWRP (Starbite: /data = A16DATA)  UFS partition RECOVERY  5.0 MiB  installer chunk writer
-  20  write  Starbite loader + menu (BOOT)  UFS partition BOOT  6.0 MiB  installer chunk writer
-  21  verify  No user password on any OS  -
-  22  verify  Finish: rescue USB offer, reboot into Starbite  -
-ok  sda-head-4M: 4.0 MiB, sha256 53c9b224b4b5792f... (phone and local agree)
-ok  sda-tail-gpt: 20.0 KiB, sha256 21772b9f4fac83f2... (phone and local agree)
-ok  sdb: 4.0 MiB, sha256 3dd5959e5c0017e7... (phone and local agree)
-ok  sdc: 4.0 MiB, sha256 f886219db1e6bda7... (phone and local agree)
-ok  sdd: 2.0 MiB, sha256 67fd4a3943b40aa3... (phone and local agree)
-ok  sde: 2.0 MiB, sha256 9917235ed8fe362d... (phone and local agree)
-ok  backup complete: 24 items in build/installer-rehearsal/state/phone-5c7ed06646/backups/20261105-232519
-ok  the UFS layout matched in preflight
+ok  sda-head-4M: 4.0 MiB, sha256 e69ec3fc1a8815ea... (phone and local agree)
+ok  sda-tail-gpt: 20.0 KiB, sha256 7c3be94dbfe8f023... (phone and local agree)
+ok  sdb: 4.0 MiB, sha256 3d13313feedeb063... (phone and local agree)
+ok  sdc: 4.0 MiB, sha256 9c73e18cf4f3f9bb... (phone and local agree)
+ok  sdd: 2.0 MiB, sha256 b06546bb288fdc71... (phone and local agree)
+ok  sde: 2.0 MiB, sha256 e25666ae08e632e7... (phone and local agree)
+ok  backup complete: 24 items in build/installer-rehearsal/state-stock/phone-5c7ed06646/backups/20261106-150021
+ok  GPT backup: both copies valid, phone and computer agree (head 1ef05c28f825..., tail 7c3be94dbfe8...) in build/installer-rehearsal/state-stock/phone-5c7ed06646/gpt
+ok  backup GPT copy written and read back (20480 B at LBA 15615995, sha256 5f676eaaf798...)
+STOPPED: adb shell : sbinst-gpt-primary; (trap "" HUP INT; dd if=/tmp/sbinst-gpt/primary.bin of=/dev/block/sda bs=4096 seek=1 conv=notrunc,fsync 2>/tmp/sbinst-gpt/primary.err; echo $? > /tmp/sbinst-gpt/primary.rc. failed:  fake adb: simulated cable pull
+PASS rehearsal: a cable pull between the backup and the primary GPT copy (exit 3)
+PASS the whole GPT backed up and verified first
+PASS the backup copy written first
+PASS stopped at the primary copy
+  after the pull: kernel: USERDATA primary 6cd38d4010bf backup 5f676eaaf798
+PASS the kernel still sees the stock table (the old primary is valid)
+PASS the original GPT is saved on this computer (anchor.json new-backup.bin new-primary.bin orig-head.bin orig-tail.bin )
+ok  card layout sd64: catalog roots and payload sdroot= match (mac13 139264)
+ok  bundle verified: 16 items; optional items not in it: windows
+  found: env (Starbite installer environment (ssh root@172.16.42.1))
+ok  the Starbite installer environment is up (USB networking, ssh)
+== The plan ==
+ok  primary GPT copy written and read back (20480 B at LBA 1, sha256 a4030756a82d...)
+ok  both GPT copies on the phone are the plan (CRCs, cross references, entries)
+ok  the kernel sees the starbite-a table: 28 partitions, by-name nodes, starts and sizes as planned
 ok  card MBR written and read back; partitions re-read
 ok  p1 formatted exFAT "STARBITE"
 ok  ios16-slot: verified on the phone (read back)
 ok  ufs-store: verified on the phone (read back)
-STOPPED: command failed (1): python3 -I tools/android/pixel/part-write.py SYSTEM build/installer-rehearsal/bundle/android/system.img --state build/installer-rehearsal/state/phone-5c7ed06646/chunks/android-system-3dde938c7282.state
-PASS stopped by the simulated cable pull (exit 3)
-PASS the failure is reported as STOPPED (resumable)
-PASS SYSTEM chunk state kept: 0 
-
-######## 6. the same command again: resumes
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: recovery (adb)
-== The plan ==
-  1  skip  Back up the protected areas  this computer
-  2  verify  Check the UFS layout (GPT)  -
-  3  skip  microSD partition table (p1 exFAT, p2 raw)  microSD sector 0
-  4  skip  Format microSD p1 (exFAT)  microSD p1
-  5  keep  iOS 16.5 (an earlier port) root: APFS system + HFSX /var  UFS USERDATA bytes 0.. (Apple slot, below 16 GiB)  2.0 MiB  tools/refport/slot-write.py
-  6  skip  OS store (UFS): catalog, kernels, payloads, Engineer OS, rescue system  UFS OS store  1.2 MiB  tools/store/store-flash.sh
-  7  resume  Android 17 system (Google GSI)  UFS partition SYSTEM  129.0 MiB  tools/android/pixel/part-write.py
-  8  write  Android vendor (Starbite build)  UFS partition VENDOR  3.0 MiB  tools/android/pixel/part-write.py
-  9  REPLACE  Android /data (empty f2fs)  UFS partition A16DATA  4.0 MiB  tools/android/pixel/part-write.py
-  10  REPLACE  Android /metadata (fresh ext4)  UFS partition ODM  tools/android/pixel/metadata-reset.sh
-  11  REPLACE  Windows 11 boot files (ESP)  UFS partition WINESP  2.0 MiB  installer chunk writer
-  12  skip  Windows 11 (NTFS)  UFS partition WINDOWS  installer chunk writer
-  13  write  OS store (microSD p2)  microSD p2 OS store  92.0 KiB  tools/store/store-flash-sd.sh
-  14  write  macOS Ventura root (HFSX, 15 GiB)  microSD sectors 216442880..  3.0 MiB  tools/macos/card-range-flash.py
-  15  skip  iOS 26 root (parked edge pair)  microSD sectors 182888448..  tools/macos/card-range-flash.py
-  16  write  postmarketOS (Phosh)  microSD p1 (exFAT) /distros/pmos.img  8.0 MiB  installer chunk writer (file)
-  17  write  Ubuntu (Phosh)  microSD p1 (exFAT) /distros/ubuntu.img  8.0 MiB  installer chunk writer (file)
-  18  write  ChromiumOS (GPT disk image)  microSD p1 (exFAT) /distros/chromeos.img  2.0 MiB  installer chunk writer (file)
-  19  write  TWRP (Starbite: /data = A16DATA)  UFS partition RECOVERY  5.0 MiB  installer chunk writer
-  20  write  Starbite loader + menu (BOOT)  UFS partition BOOT  6.0 MiB  installer chunk writer
-  21  verify  No user password on any OS  -
-  22  verify  Finish: rescue USB offer, reboot into Starbite  -
-ok  the UFS layout matched in preflight
 ok  android-system: verified on the phone (read back)
 ok  android-vendor: verified on the phone (read back)
 ok  android-data: verified on the phone (read back)
@@ -389,396 +357,213 @@ ok  mac13-root: verified on the phone (read back)
 ok  pmos: verified on the phone (read back)
 ok  ubuntu: verified on the phone (read back)
 ok  chromeos: verified on the phone (read back)
-ok  twrp: verified on the phone (read back)
-ok  boot: verified on the phone (read back)
-ok  Android 17: ok: A16DATA and ODM written fresh by this install: no lock credential exists
-ok  Linux /distros/pmos.img: ok: user "user": empty password; /etc/starbite/login = none (lock screen off)
-ok  ChromiumOS: by-design: no account is created; Guest needs no password
-ok  Windows 11: ok: build-image.ps1 unattend: empty password + AutoLogon
-ok  iOS 16.5: by-design: no passcode until one is set in Settings
-ok  Engineer OS / Starbite: ok: no login; armed mode is hold-and-slide, not a PIN
-  written 12, skipped 6, kept 1; 25 write commands ran
-PASS resumed run finished (exit 0)
-PASS SYSTEM resumed (not restarted)
-PASS the finished backup is not taken again
-
-######## 7. and again: nothing left to do
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: recovery (adb)
+  written 12, skipped 3, kept 0; 34 write commands ran
+PASS the same command again: writes the primary, reboots, installs everything (exit 0)
+PASS the GPT step resumes
+PASS writes the primary copy
+PASS ...and not the backup copy again
+PASS after the re-read the kernel sees the new table
+PASS A16DATA written
+PASS BOOT: skipped, identical (it went in first, in Download mode)
+  now: kernel: USERDATA WINESP WINDOWS A16DATA primary a4030756a82d backup 5f676eaaf798
+PASS four partitions after SYSTEM..CP_DEBUG: USERDATA WINESP WINDOWS A16DATA
+PASS protected areas, Samsung's other partitions, sda's PIT area, sdb-sde: byte-identical
+  == backup/20261102-185306 (S9 #1), byte for byte
+PASS the new GPT is S9 #1's table exactly (both copies, every byte)
+PASS RECOVERY untouched through the whole install (Samsung's stock recovery)
+ok  card layout sd64: catalog roots and payload sdroot= match (mac13 139264)
+ok  bundle verified: 16 items; optional items not in it: windows
+  found: env (Starbite installer environment (ssh root@172.16.42.1))
+ok  the Starbite installer environment is up (USB networking, ssh)
 == The plan ==
-  1  skip  Back up the protected areas  this computer
-  2  verify  Check the UFS layout (GPT)  -
-  3  skip  microSD partition table (p1 exFAT, p2 raw)  microSD sector 0
-  4  skip  Format microSD p1 (exFAT)  microSD p1
-  5  keep  iOS 16.5 (an earlier port) root: APFS system + HFSX /var  UFS USERDATA bytes 0.. (Apple slot, below 16 GiB)  2.0 MiB  tools/refport/slot-write.py
-  6  skip  OS store (UFS): catalog, kernels, payloads, Engineer OS, rescue system  UFS OS store  1.2 MiB  tools/store/store-flash.sh
-  7  skip  Android 17 system (Google GSI)  UFS partition SYSTEM  129.0 MiB  tools/android/pixel/part-write.py
-  8  skip  Android vendor (Starbite build)  UFS partition VENDOR  3.0 MiB  tools/android/pixel/part-write.py
-  9  keep  Android /data (empty f2fs)  UFS partition A16DATA  4.0 MiB  tools/android/pixel/part-write.py
-  10  keep  Android /metadata (fresh ext4)  UFS partition ODM  tools/android/pixel/metadata-reset.sh
-  11  keep  Windows 11 boot files (ESP)  UFS partition WINESP  2.0 MiB  installer chunk writer
-  12  skip  Windows 11 (NTFS)  UFS partition WINDOWS  installer chunk writer
-  13  skip  OS store (microSD p2)  microSD p2 OS store  92.0 KiB  tools/store/store-flash-sd.sh
-  14  keep  macOS Ventura root (HFSX, 15 GiB)  microSD sectors 216442880..  3.0 MiB  tools/macos/card-range-flash.py
-  15  skip  iOS 26 root (parked edge pair)  microSD sectors 182888448..  tools/macos/card-range-flash.py
-  16  keep  postmarketOS (Phosh)  microSD p1 (exFAT) /distros/pmos.img  8.0 MiB  installer chunk writer (file)
-  17  keep  Ubuntu (Phosh)  microSD p1 (exFAT) /distros/ubuntu.img  8.0 MiB  installer chunk writer (file)
-  18  keep  ChromiumOS (GPT disk image)  microSD p1 (exFAT) /distros/chromeos.img  2.0 MiB  installer chunk writer (file)
-  19  skip  TWRP (Starbite: /data = A16DATA)  UFS partition RECOVERY  5.0 MiB  installer chunk writer
-  20  skip  Starbite loader + menu (BOOT)  UFS partition BOOT  6.0 MiB  installer chunk writer
-  21  verify  No user password on any OS  -
-  22  verify  Finish: rescue USB offer, reboot into Starbite  -
-ok  the UFS layout matched in preflight
-ok  Android 17: ok: A16DATA and ODM written fresh by this install: no lock credential exists
-ok  Linux /distros/pmos.img: ok: user "user": empty password; /etc/starbite/login = none (lock screen off)
-ok  ChromiumOS: by-design: no account is created; Guest needs no password
-ok  Windows 11: ok: build-image.ps1 unattend: empty password + AutoLogon
-ok  iOS 16.5: by-design: no passcode until one is set in Settings
-ok  Engineer OS / Starbite: ok: no login; armed mode is hold-and-slide, not a PIN
-  written 0, skipped 11, kept 8; 0 write commands ran
-PASS third run (exit 0)
-PASS 0 write commands
-
-######## 8. checks on the fake phone
-PASS EFS, CPEFS, PARAM, UP_PARAM, KEYSTORAGE, PERSISTENT, STEADY, BOTA0-2, DTB, DTBO, GPT head/tail, sdb-sde: byte-identical
-  boot             part:BOOT                        ok
-  twrp             part:RECOVERY                    ok
-  ios16-slot       slot:USERDATA@0                  ok
-  android-system   part:SYSTEM                      ok
-  android-vendor   part:VENDOR                      ok
-  android-data     part:A16DATA                     ok
-  winesp           part:WINESP                      ok
-  mac13-root       card:lba:216442880               ok
-  pmos             card:file:/distros/pmos.img      ok
-  ubuntu           card:file:/distros/ubuntu.img    ok
-  chromeos         card:file:/distros/chromeos.img  ok
-PASS every written target reads back as its image
-PASS backup: 24 areas, each hashed on the phone and on this computer
-  android-data=done, android-metadata=done, android-system=done, android-vendor=done, boot=done, chromeos=done, ios16-slot=done, mac13-root=done, pmos=done, sd-store=done, twrp=done, ubuntu=done, ufs-store=done, winesp=done
-PASS journal: every present item done, ODM and A16DATA fresh
-
-######## 9. the main phone without a journal (installed some other way): nothing replaced
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: recovery (adb)
-== The plan ==
-  1  host  Back up the protected areas  this computer
-  2  verify  Check the UFS layout (GPT)  -
-  3  skip  microSD partition table (p1 exFAT, p2 raw)  microSD sector 0
-  4  skip  Format microSD p1 (exFAT)  microSD p1
-  5  keep  iOS 16.5 (an earlier port) root: APFS system + HFSX /var  UFS USERDATA bytes 0.. (Apple slot, below 16 GiB)  2.0 MiB  tools/refport/slot-write.py
-  6  skip  OS store (UFS): catalog, kernels, payloads, Engineer OS, rescue system  UFS OS store  1.2 MiB  tools/store/store-flash.sh
-  7  skip  Android 17 system (Google GSI)  UFS partition SYSTEM  129.0 MiB  tools/android/pixel/part-write.py
-  8  skip  Android vendor (Starbite build)  UFS partition VENDOR  3.0 MiB  tools/android/pixel/part-write.py
-  9  keep  Android /data (empty f2fs)  UFS partition A16DATA  4.0 MiB  tools/android/pixel/part-write.py
-  10  keep  Android /metadata (fresh ext4)  UFS partition ODM  tools/android/pixel/metadata-reset.sh
-  11  keep  Windows 11 boot files (ESP)  UFS partition WINESP  2.0 MiB  installer chunk writer
-  12  skip  Windows 11 (NTFS)  UFS partition WINDOWS  installer chunk writer
-  13  skip  OS store (microSD p2)  microSD p2 OS store  92.0 KiB  tools/store/store-flash-sd.sh
-  14  keep  macOS Ventura root (HFSX, 15 GiB)  microSD sectors 216442880..  3.0 MiB  tools/macos/card-range-flash.py
-  15  skip  iOS 26 root (parked edge pair)  microSD sectors 182888448..  tools/macos/card-range-flash.py
-  16  keep  postmarketOS (Phosh)  microSD p1 (exFAT) /distros/pmos.img  8.0 MiB  installer chunk writer (file)
-  17  keep  Ubuntu (Phosh)  microSD p1 (exFAT) /distros/ubuntu.img  8.0 MiB  installer chunk writer (file)
-  18  keep  ChromiumOS (GPT disk image)  microSD p1 (exFAT) /distros/chromeos.img  2.0 MiB  installer chunk writer (file)
-  19  skip  TWRP (Starbite: /data = A16DATA)  UFS partition RECOVERY  5.0 MiB  installer chunk writer
-  20  skip  Starbite loader + menu (BOOT)  UFS partition BOOT  6.0 MiB  installer chunk writer
-  21  verify  No user password on any OS  -
-  22  verify  Finish: rescue USB offer, reboot into Starbite  -
-ok  the UFS layout matched in preflight
-ok  Linux /distros/pmos.img: ok: user "user": empty password; /etc/starbite/login = none (lock screen off)
-ok  ChromiumOS: by-design: no account is created; Guest needs no password
-ok  Windows 11: ok: build-image.ps1 unattend: empty password + AutoLogon
-ok  iOS 16.5: by-design: no passcode until one is set in Settings
-ok  Engineer OS / Starbite: ok: no login; armed mode is hold-and-slide, not a PIN
   written 0, skipped 10, kept 8; 0 write commands ran
-== Dry run finished ==
-ok  nothing was written (18 write commands printed). The real mode (--real, or --rehearse on a fake phone) is now allowed for this bundle on this phone.
-PASS dry run with a fresh state directory (exit 0)
-PASS data on the card is kept
-PASS Android data is kept
-PASS identical BOOT is skipped
-PASS says how to replace on purpose
+PASS and again: nothing left to do (exit 0)
+PASS the GPT step: skip
+PASS 0 write commands
+ok  dry run: nothing written
+PASS --restore-gpt dry run: shows how the stock table would go back (exit 0)
+PASS the exact restore command
+ok  phone: SM-G960F, card layout sd64; 6 items to read (74.3 MiB)
+ok  boot: 55.0 MiB, sha256 d6fda8f9819a... (phone and computer agree)
+ok  ufs-store: 1.2 MiB, sha256 e76799766a39... (phone and computer agree)
+ok  sd-store: 92.0 KiB, sha256 850806203210... (phone and computer agree)
+ok  pmos: 8.0 MiB, sha256 ab2f5adbdc95... (phone and computer agree)
+ok  ubuntu: 8.0 MiB, sha256 9f94c6a8dcfe... (phone and computer agree)
+ok  chromeos: 2.0 MiB, sha256 ecaf5db99c7f... (phone and computer agree)
+ok  <repo>/build/installer-rehearsal/bundle-built/installer-manifest.toml: 7 items, 74.3 MiB; verified
+PASS the bundle builder reads the installed phone (read only) into a new sd64 bundle (exit 0)
+PASS every item hashed on the phone and here
+PASS manifest written
+ok  card layout sd64: catalog roots and payload sdroot= match (mac13 139264)
+ok  bundle verified: 7 items
+PASS ...and it verifies as a bundle (exit 0)
+PASS its stores carry the sd64 card layout
 
-######## 10. a phone in Download mode (no TWRP yet): TWRP via heimdall, then the dry run gate
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: download (Samsung Download mode (04e8:685d))
-  $ heimdall flash --RECOVERY <repo>/build/installer-rehearsal/bundle/boot/twrp-starbite.img --no-reboot  [dry run: not run]
-== The plan (no phone: targets not checked) ==
-ok  offline dry run: nothing was read from or written to a phone
-PASS dry run in Download mode: shows the heimdall step, plans without phone checks (exit 0)
-PASS the exact heimdall command
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: download (Samsung Download mode (04e8:685d))
-  $ heimdall flash --RECOVERY <repo>/build/installer-rehearsal/bundle/boot/twrp-starbite.img --no-reboot
-ok  TWRP is up
-REFUSED: no finished dry run of this bundle on phone-5c7ed06646: run the same command with --dry-run first (it writes nothing), then again
-PASS rehearsal: TWRP flashed and booted, then the gate asks for a dry run (exit 2)
-PASS TWRP came up after the (fake) key combination
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: recovery (adb)
-== The plan ==
-  1  host  Back up the protected areas  this computer
-  2  verify  Check the UFS layout (GPT)  -
-  3  skip  microSD partition table (p1 exFAT, p2 raw)  microSD sector 0
-  4  skip  Format microSD p1 (exFAT)  microSD p1
-  5  REPLACE  iOS 16.5 (an earlier port) root: APFS system + HFSX /var  UFS USERDATA bytes 0.. (Apple slot, below 16 GiB)  2.0 MiB  tools/refport/slot-write.py
-  6  write  OS store (UFS): catalog, kernels, payloads, Engineer OS, rescue system  UFS OS store  1.2 MiB  tools/store/store-flash.sh
-  7  write  Android 17 system (Google GSI)  UFS partition SYSTEM  129.0 MiB  tools/android/pixel/part-write.py
-  8  write  Android vendor (Starbite build)  UFS partition VENDOR  3.0 MiB  tools/android/pixel/part-write.py
-  9  REPLACE  Android /data (empty f2fs)  UFS partition A16DATA  4.0 MiB  tools/android/pixel/part-write.py
-  10  REPLACE  Android /metadata (fresh ext4)  UFS partition ODM  tools/android/pixel/metadata-reset.sh
-  11  REPLACE  Windows 11 boot files (ESP)  UFS partition WINESP  2.0 MiB  installer chunk writer
-  12  skip  Windows 11 (NTFS)  UFS partition WINDOWS  installer chunk writer
-  13  write  OS store (microSD p2)  microSD p2 OS store  92.0 KiB  tools/store/store-flash-sd.sh
-  14  write  macOS Ventura root (HFSX, 15 GiB)  microSD sectors 216442880..  3.0 MiB  tools/macos/card-range-flash.py
-  15  skip  iOS 26 root (parked edge pair)  microSD sectors 182888448..  tools/macos/card-range-flash.py
-  16  write  postmarketOS (Phosh)  microSD p1 (exFAT) /distros/pmos.img  8.0 MiB  installer chunk writer (file)
-  17  write  Ubuntu (Phosh)  microSD p1 (exFAT) /distros/ubuntu.img  8.0 MiB  installer chunk writer (file)
-  18  write  ChromiumOS (GPT disk image)  microSD p1 (exFAT) /distros/chromeos.img  2.0 MiB  installer chunk writer (file)
-  19  skip  TWRP (Starbite: /data = A16DATA)  UFS partition RECOVERY  5.0 MiB  installer chunk writer
-  20  write  Starbite loader + menu (BOOT)  UFS partition BOOT  6.0 MiB  installer chunk writer
-  21  verify  No user password on any OS  -
-  22  verify  Finish: rescue USB offer, reboot into Starbite  -
-ok  the UFS layout matched in preflight
-  $ python3 -I tools/android/pixel/part-write.py SYSTEM build/installer-rehearsal/bundle/android/system.img --state build/installer-rehearsal/state-dl/phone-5c7ed06646/chunks/android-system-3dde938c7282.state  [dry run: not run]
-  $ python3 -I tools/android/pixel/part-write.py VENDOR build/installer-rehearsal/bundle/android/vendor.img --state build/installer-rehearsal/state-dl/phone-5c7ed06646/chunks/android-vendor-9fb377de6d23.state  [dry run: not run]
-  $ python3 -I tools/android/pixel/part-write.py A16DATA build/installer-rehearsal/bundle/android/a16data.img --state build/installer-rehearsal/state-dl/phone-5c7ed06646/chunks/android-data-091662c8d6a3.state  [dry run: not run]
-ok  Android 17: by-design: empty f2fs from make-a16data.sh + fresh ODM: no lock credential exists
-ok  Linux /distros/pmos.img: ok: user "user": empty password; /etc/starbite/login = none (lock screen off)
-ok  ChromiumOS: by-design: no account is created; Guest needs no password
-ok  Windows 11: ok: build-image.ps1 unattend: empty password + AutoLogon
-ok  iOS 16.5: by-design: no passcode until one is set in Settings
-ok  Engineer OS / Starbite: ok: no login; armed mode is hold-and-slide, not a PIN
-  written 0, skipped 5, kept 0; 0 write commands ran
-== Dry run finished ==
-ok  nothing was written (26 write commands printed). The real mode (--real, or --rehearse on a fake phone) is now allowed for this bundle on this phone.
-PASS dry run in TWRP (exit 0)
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: recovery (adb)
-== The plan ==
-  1  host  Back up the protected areas  this computer
-  2  verify  Check the UFS layout (GPT)  -
-  3  skip  microSD partition table (p1 exFAT, p2 raw)  microSD sector 0
-  4  skip  Format microSD p1 (exFAT)  microSD p1
-  5  REPLACE  iOS 16.5 (an earlier port) root: APFS system + HFSX /var  UFS USERDATA bytes 0.. (Apple slot, below 16 GiB)  2.0 MiB  tools/refport/slot-write.py
-  6  write  OS store (UFS): catalog, kernels, payloads, Engineer OS, rescue system  UFS OS store  1.2 MiB  tools/store/store-flash.sh
-  7  write  Android 17 system (Google GSI)  UFS partition SYSTEM  129.0 MiB  tools/android/pixel/part-write.py
-  8  write  Android vendor (Starbite build)  UFS partition VENDOR  3.0 MiB  tools/android/pixel/part-write.py
-  9  REPLACE  Android /data (empty f2fs)  UFS partition A16DATA  4.0 MiB  tools/android/pixel/part-write.py
-  10  REPLACE  Android /metadata (fresh ext4)  UFS partition ODM  tools/android/pixel/metadata-reset.sh
-  11  REPLACE  Windows 11 boot files (ESP)  UFS partition WINESP  2.0 MiB  installer chunk writer
-  12  skip  Windows 11 (NTFS)  UFS partition WINDOWS  installer chunk writer
-  13  write  OS store (microSD p2)  microSD p2 OS store  92.0 KiB  tools/store/store-flash-sd.sh
-  14  write  macOS Ventura root (HFSX, 15 GiB)  microSD sectors 216442880..  3.0 MiB  tools/macos/card-range-flash.py
-  15  skip  iOS 26 root (parked edge pair)  microSD sectors 182888448..  tools/macos/card-range-flash.py
-  16  write  postmarketOS (Phosh)  microSD p1 (exFAT) /distros/pmos.img  8.0 MiB  installer chunk writer (file)
-  17  write  Ubuntu (Phosh)  microSD p1 (exFAT) /distros/ubuntu.img  8.0 MiB  installer chunk writer (file)
-  18  write  ChromiumOS (GPT disk image)  microSD p1 (exFAT) /distros/chromeos.img  2.0 MiB  installer chunk writer (file)
-  19  skip  TWRP (Starbite: /data = A16DATA)  UFS partition RECOVERY  5.0 MiB  installer chunk writer
-  20  write  Starbite loader + menu (BOOT)  UFS partition BOOT  6.0 MiB  installer chunk writer
-  21  verify  No user password on any OS  -
-  22  verify  Finish: rescue USB offer, reboot into Starbite  -
-ok  sda-head-4M: 4.0 MiB, sha256 3025fbae603453ac... (phone and local agree)
-ok  sda-tail-gpt: 20.0 KiB, sha256 fed08c9d9e2d437c... (phone and local agree)
-ok  sdb: 4.0 MiB, sha256 e5815dbb0d35fe94... (phone and local agree)
-ok  sdc: 4.0 MiB, sha256 03419076353c197c... (phone and local agree)
-ok  sdd: 2.0 MiB, sha256 e3ffcda24d03f837... (phone and local agree)
-ok  sde: 2.0 MiB, sha256 94677fab286be011... (phone and local agree)
-ok  backup complete: 24 items in build/installer-rehearsal/state-dl/phone-5c7ed06646/backups/20261105-232539
-ok  the UFS layout matched in preflight
-ok  ios16-slot: verified on the phone (read back)
-ok  ufs-store: verified on the phone (read back)
-ok  android-system: verified on the phone (read back)
-ok  android-vendor: verified on the phone (read back)
-ok  android-data: verified on the phone (read back)
-ok  android-metadata: verified on the phone (read back)
-ok  winesp: verified on the phone (read back)
-ok  sd-store: verified on the phone (read back)
-ok  mac13-root: verified on the phone (read back)
-ok  pmos: verified on the phone (read back)
-ok  ubuntu: verified on the phone (read back)
-ok  chromeos: verified on the phone (read back)
-ok  boot: verified on the phone (read back)
-ok  Android 17: ok: A16DATA and ODM written fresh by this install: no lock credential exists
-ok  Linux /distros/pmos.img: ok: user "user": empty password; /etc/starbite/login = none (lock screen off)
-ok  ChromiumOS: by-design: no account is created; Guest needs no password
-ok  Windows 11: ok: build-image.ps1 unattend: empty password + AutoLogon
-ok  iOS 16.5: by-design: no passcode until one is set in Settings
-ok  Engineer OS / Starbite: ok: no login; armed mode is hold-and-slide, not a PIN
-  written 13, skipped 5, kept 0; 42 write commands ran
-PASS rehearsal completes (exit 0)
-PASS installed
-
-######## 11. a phone in the Starbite loader's fastboot
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: fastboot-starbite (starbite-fb1)
-  $ fastboot reboot recovery  [dry run: not run]
-== The plan (no phone: targets not checked) ==
-ok  offline dry run: nothing was read from or written to a phone
-PASS dry run: no reboot in a dry run (exit 0)
-PASS shows fastboot reboot recovery
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: fastboot-starbite (starbite-fb1)
-ok  TWRP is up
-REFUSED: no finished dry run of this bundle on phone-5c7ed06646: run the same command with --dry-run first (it writes nothing), then again
-PASS rehearsal: reboots to TWRP, then the gate (exit 2)
-PASS detected the Starbite loader's fastboot
-
-######## 12. preflight refusals: another phone model, a 32 GB card, a flat battery, a card with another layout
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: recovery (adb)
-REFUSED: preflight failed:
-PASS an S9+ (SM-G965F) is refused (exit 2)
-PASS names the model
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: recovery (adb)
-REFUSED: preflight failed:
-PASS a 32 GB card and 20 % battery are refused (exit 2)
-PASS the card is too small
-PASS the battery is too low
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: recovery (adb)
-== The plan ==
-  1  host  Back up the protected areas  this computer
-  2  verify  Check the UFS layout (GPT)  -
-  3  BLOCKED  microSD partition table (p1 exFAT, p2 raw)  microSD sector 0
-  4  BLOCKED  Format microSD p1 (exFAT)  microSD p1
-  5  keep  iOS 16.5 (an earlier port) root: APFS system + HFSX /var  UFS USERDATA bytes 0.. (Apple slot, below 16 GiB)  2.0 MiB  tools/refport/slot-write.py
-  6  write  OS store (UFS): catalog, kernels, payloads, Engineer OS, rescue system  UFS OS store  1.2 MiB  tools/store/store-flash.sh
-  7  write  Android 17 system (Google GSI)  UFS partition SYSTEM  129.0 MiB  tools/android/pixel/part-write.py
-  8  write  Android vendor (Starbite build)  UFS partition VENDOR  3.0 MiB  tools/android/pixel/part-write.py
-  9  keep  Android /data (empty f2fs)  UFS partition A16DATA  4.0 MiB  tools/android/pixel/part-write.py
-  10  keep  Android /metadata (fresh ext4)  UFS partition ODM  tools/android/pixel/metadata-reset.sh
-  11  keep  Windows 11 boot files (ESP)  UFS partition WINESP  2.0 MiB  installer chunk writer
-  12  skip  Windows 11 (NTFS)  UFS partition WINDOWS  installer chunk writer
-  13  write  OS store (microSD p2)  microSD p2 OS store  92.0 KiB  tools/store/store-flash-sd.sh
-  14  write  macOS Ventura root (HFSX, 15 GiB)  microSD sectors 216442880..  3.0 MiB  tools/macos/card-range-flash.py
-  15  skip  iOS 26 root (parked edge pair)  microSD sectors 182888448..  tools/macos/card-range-flash.py
-  16  write  postmarketOS (Phosh)  microSD p1 (exFAT) /distros/pmos.img  8.0 MiB  installer chunk writer (file)
-  17  write  Ubuntu (Phosh)  microSD p1 (exFAT) /distros/ubuntu.img  8.0 MiB  installer chunk writer (file)
-  18  write  ChromiumOS (GPT disk image)  microSD p1 (exFAT) /distros/chromeos.img  2.0 MiB  installer chunk writer (file)
-  19  write  TWRP (Starbite: /data = A16DATA)  UFS partition RECOVERY  5.0 MiB  installer chunk writer
-  20  write  Starbite loader + menu (BOOT)  UFS partition BOOT  6.0 MiB  installer chunk writer
-  21  verify  No user password on any OS  -
-  22  verify  Finish: rescue USB offer, reboot into Starbite  -
-REFUSED: the plan has blocked steps: microSD partition table (p1 exFAT, p2 raw): the card has another layout (p1 type 0x0c 2048+249997312); everything on it would be lost: run again with --erase-card; Format microSD p1 (exFAT): p1 is not exFAT: run again with --erase-card to format it
-PASS a card with another layout is not erased without --erase-card (exit 2)
-PASS the card step is BLOCKED
-ok  bundle verified: 14 items; optional items not in it: windows, ios26-root
-  found: recovery (adb)
-== The plan ==
-  1  host  Back up the protected areas  this computer
-  2  verify  Check the UFS layout (GPT)  -
-  3  REPLACE  microSD partition table (p1 exFAT, p2 raw)  microSD sector 0
-  4  write  Format microSD p1 (exFAT)  microSD p1
-  5  keep  iOS 16.5 (an earlier port) root: APFS system + HFSX /var  UFS USERDATA bytes 0.. (Apple slot, below 16 GiB)  2.0 MiB  tools/refport/slot-write.py
-  6  write  OS store (UFS): catalog, kernels, payloads, Engineer OS, rescue system  UFS OS store  1.2 MiB  tools/store/store-flash.sh
-  7  write  Android 17 system (Google GSI)  UFS partition SYSTEM  129.0 MiB  tools/android/pixel/part-write.py
-  8  write  Android vendor (Starbite build)  UFS partition VENDOR  3.0 MiB  tools/android/pixel/part-write.py
-  9  keep  Android /data (empty f2fs)  UFS partition A16DATA  4.0 MiB  tools/android/pixel/part-write.py
-  10  keep  Android /metadata (fresh ext4)  UFS partition ODM  tools/android/pixel/metadata-reset.sh
-  11  keep  Windows 11 boot files (ESP)  UFS partition WINESP  2.0 MiB  installer chunk writer
-  12  skip  Windows 11 (NTFS)  UFS partition WINDOWS  installer chunk writer
-  13  write  OS store (microSD p2)  microSD p2 OS store  92.0 KiB  tools/store/store-flash-sd.sh
-  14  write  macOS Ventura root (HFSX, 15 GiB)  microSD sectors 216442880..  3.0 MiB  tools/macos/card-range-flash.py
-  15  skip  iOS 26 root (parked edge pair)  microSD sectors 182888448..  tools/macos/card-range-flash.py
-  16  write  postmarketOS (Phosh)  microSD p1 (exFAT) /distros/pmos.img  8.0 MiB  installer chunk writer (file)
-  17  write  Ubuntu (Phosh)  microSD p1 (exFAT) /distros/ubuntu.img  8.0 MiB  installer chunk writer (file)
-  18  write  ChromiumOS (GPT disk image)  microSD p1 (exFAT) /distros/chromeos.img  2.0 MiB  installer chunk writer (file)
-  19  write  TWRP (Starbite: /data = A16DATA)  UFS partition RECOVERY  5.0 MiB  installer chunk writer
-  20  write  Starbite loader + menu (BOOT)  UFS partition BOOT  6.0 MiB  installer chunk writer
-  21  verify  No user password on any OS  -
-  22  verify  Finish: rescue USB offer, reboot into Starbite  -
-ok  the UFS layout matched in preflight
-  $ python3 -I tools/android/pixel/part-write.py SYSTEM build/installer-rehearsal/bundle/android/system.img --state build/installer-rehearsal/state-x/phone-5c7ed06646/chunks/android-system-3dde938c7282.state  [dry run: not run]
-  $ python3 -I tools/android/pixel/part-write.py VENDOR build/installer-rehearsal/bundle/android/vendor.img --state build/installer-rehearsal/state-x/phone-5c7ed06646/chunks/android-vendor-9fb377de6d23.state  [dry run: not run]
-ok  Linux /distros/pmos.img: ok: user "user": empty password; /etc/starbite/login = none (lock screen off)
-ok  ChromiumOS: by-design: no account is created; Guest needs no password
-ok  Windows 11: ok: build-image.ps1 unattend: empty password + AutoLogon
-ok  iOS 16.5: by-design: no passcode until one is set in Settings
-ok  Engineer OS / Starbite: ok: no login; armed mode is hold-and-slide, not a PIN
-  written 0, skipped 2, kept 4; 0 write commands ran
-== Dry run finished ==
-ok  nothing was written (23 write commands printed). The real mode (--real, or --rehearse on a fake phone) is now allowed for this bundle on this phone.
-PASS with --erase-card the plan erases it (exit 0)
-PASS the card step is REPLACE
-
-######## 13. rescue USB stick (fake disks; no real disk)
-rescue image: starbite-rescue-usb.img
-REFUSED: /dev/disk0 will not be written: it holds the running system; it is an internal disk; it is not on USB (bus: Apple Fabric)
-PASS the Mac's internal disk is refused (exit 2)
-PASS ...because it holds the running system
-REFUSED: /dev/disk5 will not be written: it is larger than 256 GiB (931.5 GiB): not a rescue stick
-PASS a 1 TB USB SSD is refused (exit 2)
-PASS ...because it is larger than 256 GiB
-REFUSED: /dev/disk6 will not be written: it is not on USB (bus: Disk Image); it is a virtual disk / disk image
-PASS a disk image is refused (exit 2)
-REFUSED: /dev/disk4s1: give a whole USB disk as /dev/sdX (from `lsblk -d -o NAME,TRAN,SIZE,MODEL`)
-PASS a partition name is refused (exit 2)
-  $ diskutil unmountDisk /dev/disk4  (prepare)
-  $ sudo dd if=build/installer-rehearsal/rescue.img of=/dev/rdisk4 bs=1m  (write)
-  $ diskutil eject /dev/disk4  (finish)
-ok  dry run: nothing written. Run again with --real to write the stick.
-PASS dry run on the 32 GB stick shows the disk and the commands (exit 0)
-PASS the exact dd command (raw device)
-  $ diskutil unmountDisk /dev/disk4  (prepare)
-  $ sudo dd if=build/installer-rehearsal/rescue.img of=/dev/rdisk4 bs=1m  (write)
-  $ diskutil eject /dev/disk4  (finish)
-ok  /dev/disk4: rescue disk written and read back (sha256 33c7eaec2b4c4241...). Label SB-RESCUE.
-PASS rehearsal: typed name, written, read back (exit 0)
-PASS the fake stick starts with the image
-
-######## result: 63 passed, 0 failed
+######## result: 144 passed, 0 failed
 ```
 
-## 9. Repartitioning (not in v1)
+## 9. Repartitioning: stock Samsung GPT to the Starbite table (v2)
 
-A stock S9 has Samsung's GPT: USERDATA spans the space where Starbite has USERDATA, WINESP, WINDOWS and
-A16DATA. v1 refuses such a phone in preflight ("the GPT is not the Starbite layout this bundle was made for").
-The split was made once on S9 #1 with `tools/woa/gpt-split.sh` (offline GPT build in Lima with sgdisk, apply
-from TWRP with read-back), and the 16 GiB A16DATA variant is `tools/android/pixel/gpt-a16grow.py`. Folding a
-GPT step into the installer means writing a protected area, which the rules allow only behind a verified
-backup of that phone's own copy and never in the default flow: it should come as a separate, explicitly
-confirmed subcommand that uses the backup step's `sda-head-4M.img` / `sda-tail-gpt.img` as its input,
-writes entries 25+ only, keeps entries 1-24, the protective MBR and the disk GUID byte-identical, reads both
-copies back and re-reads the partition table. That is the next piece of work, and it should be rehearsed
-on a disk image first.
+Written 2026-11-06. A stock SM-G960F has Samsung's GPT: after Samsung's 24 partitions, one USERDATA runs
+to the end of the disk. Starbite splits that space (USERDATA 18.75 GiB with the iOS 16.5 slot and the OS
+store, WINESP, WINDOWS, A16DATA). v2 does this as step 2 of the install, between the backup and the first
+OS write, with `--repartition` (without it the step is BLOCKED and says why).
 
-## 10. Implemented vs stubbed, and what needs the real phone
+### 9.1 One table: `tools/installer/sbinst/ufslayout.py`
 
-**Implemented and rehearsed (fakes):** the CLI and screens; the two confirmations; state detection (adb,
-fastboot with `version-bootloader`, Download mode by USB ID via `ioreg` / sysfs); getting to TWRP from
-Android, the loader's fastboot and Download mode; preflight; the plan; dry run; the dry-run gate; typed
-confirmation; backup; GPT check; card MBR + exFAT; every writer; read-back verification; journal, skip /
-keep / resume / replace; A16DATA+ODM pairing; no-password checks; rescue image build and stick write with
-the disk-safety rules; the summary.
+Every UFS table the installer knows is one Python tuple of rows; nothing else in the installer, the fakes
+or the tests spells a partition number out. `python3 tools/installer/sbinst/ufslayout.py show [LAYOUT]`
+prints one, `... check` validates all.
+
+| Layout | What | Target? |
+|---|---|---|
+| `stock` | Samsung's table: rows 1-24 + USERDATA to the end | reference only (the fake stock phone; never written) |
+| `starbite-a` | S9 #1 today (layout A, docs/ANDROID-PIXEL.md 2.1). `ACTIVE` | yes |
+| `starbite-a16g` | Phase 2 of docs/ANDROID-PIXEL.md 2.3: WINDOWS 17.84 GiB, A16DATA 16 GiB (Linux data type) | yes |
+
+A row is `Part(name, start, blocks, content, role, type, guid, attrs)`, in 4 KiB blocks (sda's logical
+block: its GPT header sits at byte 4096; `/sys/block/sda/queue/logical_block_size` = 4096, checked in
+preflight). `start=None` = after the previous row on 1 MiB; `blocks=FILL` = to the last usable block
+(only the last row: it absorbs UFS size differences between phones). The row order is the GPT entry
+order (row N = `/dev/block/sdaN`). `content` says what moving a row means:
+
+| content | rows (starbite-a) | moved or resized |
+|---|---|---|
+| `protected` | 1-17: BOTA0 BOTA1 EFS PARAM UP_PARAM KEYSTORAGE BOTA2 DTB DTBO BOOT RECOVERY RADIO NAD_REFER PERSISTENT MISC STEADY DQMDBG (`SAMSUNG_HEAD`) | never: index, name, start, size, type GUID, unique GUID and attributes must equal the phone's exactly, or the installer refuses |
+| `keep` | CACHE HIDDEN OMR CP_DEBUG | refused (nothing rewrites them) |
+| `installer` | SYSTEM VENDOR ODM USERDATA WINESP WINDOWS A16DATA | allowed: the installer writes each one fresh from the bundle |
+| `scratch` | stock USERDATA | allowed: contents not needed |
+
+Every row carries a one-line `role` (what it holds, who reads or writes it), shown by `show`. Unique
+GUIDs: Samsung's rows have Samsung's fixed ones ("ANDROID " + the name); the Starbite rows carry S9 #1's,
+so a phone laid out with `starbite-a` gets **the same GPT bytes as S9 #1** (checked against the real
+backup, 9.4); a new row without a pinned GUID gets one derived from its name, the same on every phone. A
+bundle made from the main phone (Windows' BCD, any `root=PARTUUID=`) therefore holds on every phone.
+
+**For the One UI 8 redesign:** copy `_starbite_a()`, edit the rows from SYSTEM on (never `SAMSUNG_HEAD`),
+register it in `LAYOUTS` and `TARGETS`, point `ACTIVE` at it (or name it in a bundle: `[ufs] layout =
+"NAME"`), run `ufslayout.py check` and the unit tests. If SAMSUNG's CACHE/HIDDEN/OMR/CP_DEBUG have to
+move, change their `content` to `scratch` on purpose; the engine refuses otherwise.
+
+### 9.2 The engine: `tools/installer/sbinst/gpt.py`
+
+Pure Python, bytes in, bytes out (`python3 tools/installer/sbinst/gpt.py show|plan HEAD TAIL [LAYOUT]`
+works on any backup):
+
+- `read()` checks both copies: protective MBR, signature, header CRC over the header's own size (Samsung
+  writes 512, not 92), entry-array CRC, the LBA cross references (primary 1 / alternate last, backup the
+  other way), the same disk GUID / usable range / entry geometry in both, both entry arrays byte-identical,
+  no overlaps.
+- `plan()` builds the new table from a layout: refuses unless the 17 protected rows match exactly, refuses
+  a partition on the phone the layout does not know, refuses moving a `keep` row; keeps every header field
+  (revision, header size, disk GUID, usable range, entry geometry) and only renews the CRCs; never writes
+  the protective MBR or anything after LBA 5 (Samsung's PIT area). Then a byte-by-byte check: only the CRC
+  fields and the entries from SYSTEM on may differ, and the result must read back as exactly the planned
+  entries. `plan.fresh` = rows whose place or size changed (their contents are gone).
+- `classify()` / `next_action()`: each copy on the phone is `orig` (the saved backup), `new` (the plan),
+  `invalid` or `other`; the pair says what to write (table below), anything else is a refusal.
+
+### 9.3 The step on the phone (`tools/installer/sbinst/repart.py`)
+
+1. Preflight (read only): both copies read (`dd` of LBA 0-5 and the last 5 LBAs), parsed, planned. The
+   plan screen shows the old and the new table side by side (rows 1-17 folded as "identical").
+2. **Backup first**: both copies read again with the phone's own SHA-256 next to this computer's, parsed
+   (both valid), compared with the preflight read, saved as `<state>/<phone-id>/gpt/orig-head.bin`,
+   `orig-tail.bin` (+ the planned `new-*.bin` and `anchor.json`), and next to the step-1 backups. This
+   saved copy is the "orig" every later run compares with.
+3. Typed confirmation `repartition phone-XXXXXXXXXX`; the journal records the fresh rows, and earlier
+   records of items on them are dropped.
+4. Both copies pushed to `/tmp/sbinst-gpt/` and checked by SHA-256 on the phone.
+5. **The backup copy first** (`dd ... seek=<last-5> conv=notrunc,fsync`), read back; **then the primary**
+   (LBA 1-5), read back; then both copies read and parsed together.
+6. The kernel re-reads the table (installer environment: `blockdev --rereadpt /dev/block/sda; sb-byname`,
+   since nothing there mounts sda; if that does not take, the environment restarts through the loader's
+   fastboot; legacy TWRP: `adb reboot recovery`), and every partition's by-name node, start and size is
+   checked against the plan.
+7. Every item on a fresh row is written fresh (no `--replace` needed: `--repartition` was the consent); an
+   item leaves the fresh list once written, so data an OS writes later is never mistaken for a fresh place.
+
+**Why backup first, then primary (the cable-pull answer).** Linux (`block/partitions/efi.c`) uses the
+primary whenever it is valid and never uses a valid backup's contents without `gpt=force`; with an
+invalid primary it shows no partitions at all. So the primary write is the commit point: until it lands,
+every reader (the kernel, S-Boot's lookups, the next boot) still sees the old table. Each copy is one
+`dd` started in a background subshell that ignores SIGHUP, so a cable pull cannot stop it half way; only
+a power loss inside that millisecond window can tear a copy (preflight wants 50 % battery).
+
+| primary | backup | what happened | next run |
+|---|---|---|---|
+| orig | orig | nothing written yet | write both |
+| orig | invalid | the backup write was torn (power loss) | write both |
+| orig | new | **cable pull between the copies** | write the primary only |
+| invalid | new | the primary write was torn (power loss) | write the primary from the plan |
+| new | new | done (if the kernel has not re-read: re-read) | nothing |
+| other | any | someone else changed the table | refused; `--restore-gpt` or Odin with the stock PIT |
+
+`--restore-gpt [--real]` writes the saved original back the same way (backup copy, then primary, read
+back, re-read), after a typed `restore gpt phone-XXXXXXXXXX`.
+
+### 9.4 Checked against the real backup
+
+`tests/test_gpt.py` (20 tests) reads S9 #1's `backup/20261102-185306/sda-head-4M.img` + `sda-tail-gpt.img`
+(read only; found in this checkout or the main one, or `$SBINST_GPT_BACKUP`; the tests skip without it):
+
+- it parses: 4096-byte blocks, header size 512, 128 x 128 entries, usable 6..15615994, both copies valid;
+- `starbite-a` planned on it changes nothing (every byte equal);
+- a stock table (S9 #1's rows 1-24, one USERDATA to the end, random GUIDs from SYSTEM on, written by an
+  independent writer in the test) planned to `starbite-a` gives **exactly S9 #1's GPT bytes** (both copies);
+- `starbite-a` -> `starbite-a16g` equals `tools/android/pixel/gpt-a16grow.py`'s output (which was
+  cross-checked with `sgdisk -v` by gpt-crosscheck.sh) byte for byte;
+- CRC round trip; a flipped byte in either header or either entry array is caught; a wrong disk size too;
+- refusals: EFS moved, BOOT resized, PARAM's type or KEYSTORAGE's GUID changed, an unknown partition, a
+  layout that moves OMR, a 512-byte-sector disk;
+- a bigger UFS: the last row fills it and the backup copy moves with the disk's end;
+- every interrupted state of the table above, built from real torn copies.
+
+The rehearsal (section 8, part 15) writes it on a fake stock phone through the whole flow, with the cable
+pull between the copies, and checks that the result is S9 #1's GPT byte for byte.
+
+## 10. Implemented vs stubbed, and what needs the real phone (v2)
+
+**Implemented and rehearsed (fakes):** everything in v1's list (the CLI and screens, confirmations,
+preflight, plan, dry run and its gate, backup, card MBR + exFAT, every writer, read-back, journal and
+resume, A16DATA+ODM pairing, no-password checks, rescue stick) plus: stock Android -> `adb reboot download`;
+Download mode with `heimdall detect`, `download-pit` and the PIT check (an S9+ PIT is refused before any
+write), heimdall's `--resume` session rule; the Starbite loader into BOOT (the only Download-mode write);
+the loader's fastboot -> the installer environment from RAM (key appended to the initrd, ssh, the adb
+transport shim); the GPT engine, the layout table, the repartition step with its backup, the cable-pull
+resume and `--restore-gpt`; the bundle builder (`--from-phone`, `--from-local`, sd64 retargeting of the
+stores); RECOVERY never written or booted (refused in the manifest grammar, in the heimdall wrapper, in the
+transport shim, in the fakes; tests/test_no_recovery.py).
 
 **Stubbed or not done:**
-- GPT repartitioning of a stock phone (section 9): refused, not written.
-- No real bundle exists (section 5); the example manifest has placeholder sizes and hashes.
-- Card layouts: done on the host for any card of at least 64 GB (section 11, layout `sd64`). Still open
-  there: the XNU kernel's clock and kernel-log sectors (a kernel rebuild, 11.5), and everything in 11.7
-  that needs the phone. iOS 26 (parked) has no slot on `sd64`.
-- macOS Ventura still has a password (section 6).
-- Windows: no clean image; the WINDOWS write path exists but has only run against the fake.
-- UP_PARAM (the Starbite splash) and the bootloader (VG6) step of the master plan are not part of v1.
-- The rescue stick carries the sample script only (no backups, no restore script yet).
-- The settings record (default entry) is the phone's own (store-flash keeps it) or the loader's defaults.
+- **The installer environment is not built yet** (`tools/installer/env/mk-env.sh` is written, not run):
+  no `installer.image/.initrd/.dtb` exist, so no real bundle can start the stock flow today. The fakes
+  stand in for it.
+- No real bundle exists; `--build-bundle --from-phone` is the way to make one (section 12) once the
+  environment is built (the main phone must run the environment, or TWRP with `--transport twrp`).
+- On a stock phone the stock BOOT image is replaced in Download mode **before** the installer can back it
+  up (heimdall cannot read partitions); it is Samsung's `boot.img` from the firmware (G960FXXUHFVG6 AP).
+  Everything else is backed up from the environment before anything else is written.
+- Card layouts (section 11): unchanged; macOS Ventura's password (section 6); no clean Windows image;
+  UP_PARAM / VG6 steps; the rescue stick's content.
 
-**Needs the real phone to verify:**
-1. TWRP's `getprop` names (`ro.product.model`, `ro.product.device`, `ro.boot.bootloader`, `ro.boot.serialno`,
-   `ro.boot.flash.locked`, `ro.boot.verifiedbootstate`, `ro.twrp.version`) and `/sys/class/power_supply/battery/capacity`.
-2. That one `adb shell` fact script runs in TWRP's shell (toybox/busybox: `readlink -f`, `command -v`, `df -k`).
-3. `fastboot devices` / `getvar version-bootloader` against the real loader, and `fastboot reboot recovery` landing in TWRP.
-4. Download mode detection by USB ID 04e8:685d on the Mac (`ioreg`), and `heimdall flash --RECOVERY ... --no-reboot` followed by the key combination.
-5. TWRP's exFAT formatter: whether `mkfs.exfat` or `mkexfatfs` exists, and that `-n STARBITE` is its label flag.
-6. Mounting p1 at `/external_sd` (`mount -t exfat` or `exfat-fuse`), `blockdev --rereadpt /dev/block/mmcblk0` with nothing mounted, and the new `mmcblk0p1/p2` nodes.
-7. Unmounting what TWRP mounts on its own (`/data` = A16DATA in the Starbite TWRP) before a write.
-8. Speed: the chunk writer and the read-back hashes over adb for multi-GiB items (WINDOWS, card roots: the card reads at about 20 MB/s, so a 15 GiB verify takes ~13 min).
-9. The backup of the boot LUNs `sdb`-`sde` (names and sizes on this UFS) and of `sda`'s tail.
-10. The final `adb reboot` landing in the Starbite menu.
-11. On a phone with a fresh install: Android's setup wizard without a lock, the Linux images built with `SB_NO_PIN=1` (empty password accepted by PAM, Phosh's lock screen really off), Windows signing in by itself.
-12. The rescue stick on the phone (the whole of docs/RESCUE-USB-HOST.md section 5).
-13. `--make-rescue-usb --real` on a real stick (the coordinator does this after review).
+**Needs the real phone to verify (in this order):**
+1. `heimdall download-pit` on a stock SM-G960F: the PIT's units (4 KiB blocks or 512-byte sectors: both
+   accepted, the one found is printed) and that its names match `SAMSUNG_HEAD`; heimdall's `--resume` rule.
+2. `heimdall flash --BOOT starbite-boot.img --no-reboot` on a stock phone, then the keys: Volume Up alone at
+   the loader's start (S-Boot ignoring it is unverified, docs/USB-FASTBOOT.md 9.5) or Bixby > USB FASTBOOT.
+   The loader with **no OS store** on UFS reaching its fastboot (cat_load fails first; the code ignores it).
+3. The first **Linux** `fastboot boot` (only an XNU payload has run, 2026-11-05): kernel + initrd + DTB in
+   one v2 boot image, the DTB's bootargs and `/chosen linux,initrd-*` placeholders, total under 0x04ff0000.
+4. The environment itself: dwc3 in device mode from the loader's handoff, the ECM link on the Mac
+   (172.16.42.2 by DHCP), dropbear with the appended key, `/dev/block/by-name` from PARTNAME, the facts
+   (`getprop` stand-in, `/sys/class/power_supply/*/capacity` for the battery), exfat/f2fs/ext4 tools.
+5. `blockdev --rereadpt /dev/block/sda` taking the new table in place (the fallback restarts the environment).
+6. The GPT write itself on UFS (both copies, read back) and S-Boot booting with the new table; S9 #1 is the
+   evidence that S-Boot keeps a GPT that differs from its PIT (USERDATA was split on 2026-10-25).
+7. Speed of every multi-GiB write and of `--build-bundle --from-phone` over USB networking.
+8. v1's list items 5-13 (card formatter, mounts, the final reboot into the menu, no-password checks, the
+   rescue stick), now in the environment instead of TWRP.
 
 ## 11. microSD card layouts: the 128 GB card and any card of 64 GB or more
 
@@ -1042,3 +827,90 @@ Nothing here touched S9 #1 or its card, and `sd128` is unchanged, so S9 #1 needs
    showing only p1, with no format offer.
 5. exFAT speed on p1 away from the card's start (SD controllers tune their first allocation units for FAT).
 6. After 11.5: the clock and the sdlog ring in the `sd64` tail, and `boot-next.sh` reading them.
+
+## 12. The bundle builder
+
+```sh
+tools/installer/starbite-install --build-bundle DIR --from-phone [--card-layout sd64] [--only KEY] [--skip KEY]
+tools/installer/starbite-install --build-bundle DIR --from-local [--sources FILE] [--card-layout sd64]
+```
+
+`--from-phone` (`sbinst/bundler.py`): the main phone runs the installer environment (`--bundle B
+--start-env` starts it) or, legacy, TWRP. Every item is **read** (the builder's runner is a dry-run runner:
+a write command could only be printed) and streamed straight into DIR: `adb exec-out "... | tee FIFO"`
+with `sha256sum` reading the FIFO on the phone, so each item is read once and hashed on both sides; the
+two hashes must agree or the item is dropped. Runs of zero MiB become holes. The stores lose their
+settings block (block 2: default entry, last boot; zeroed). With `--card-layout sd64` the stores are rebuilt
+for the 64 GB layout (`sbstore2.py build --import`, every SWEETXNU payload's `sdroot=` moved to its sd64
+slot, payloads without a slot left out, the catalog from `cardlayout.catalog_text`) and the macOS root goes
+to `card:root:mac13`, so one bundle from the 128 GB main phone installs on any card of 64 GB or more.
+Then `installer-manifest.toml` (`[ufs] layout`, `[env]`, `[card] layout`, every item with size and
+SHA-256, no `ufs_blocks`: the last row fills any UFS) and `--verify-bundle` on the result.
+
+`--from-local`: the same items from local build outputs (each source's candidate paths in `SOURCES`,
+under the main checkout when run from a worktree, `$SBINST_LOCAL_ROOT`, or a TOML `key = "path"` file via
+`--sources`). A plain file on the same volume is hard-linked (no copy); a `.gz` is decompressed on the way.
+
+**Never in a bundle** (code: `bundler.NEVER`, `check_source()`, tests/test_bundler.py): EFS, CPEFS, PARAM,
+UP_PARAM, KEYSTORAGE, PERSISTENT, STEADY, BOTA0-2, DTB, DTBO, RECOVERY, MISC, RADIO, OMR, CACHE, HIDDEN,
+CP_DEBUG, NAD_REFER, DQMDBG, the raw LUNs, A16DATA (Android's /data: the fresh empty one comes from
+make-a16data.sh, local only), ODM (made fresh on the phone), the stores' settings block. Carried with a
+note: the iOS 16.5 slot (its /var is the main phone's) and Windows (its user profile).
+
+**Where it can go.** DIR is any path: an external disk, the USB stick (exFAT or APFS; a FAT32 volume is
+refused before the first 4+ GiB item), or iCloud Drive (`~/Library/Mobile Documents/com~apple~CloudDocs/`).
+Every item is checked against the free space first. iCloud Drive keeps a local copy of each file until it
+is uploaded: when the next item does not fit, the builder asks iCloud to evict the finished items
+(`brctl evict`, which works once a file is uploaded) and waits up to 60 minutes, then stops (STOPPED: a
+re-run keeps every finished item, `DIR/.build-state.json`). A full bundle read from the main phone is about
+80 GB raw (whole partitions: SYSTEM 4.75 GiB, the 16 GiB slot, WINDOWS 25.8 GiB, the 15 GiB macOS root, ...),
+so with this Mac's free space the USB stick or an external disk is the practical target; iCloud works item
+by item only as fast as it uploads. Not tested on a real iCloud Drive or FAT32 stick (fakes only).
+
+## 13. No TWRP: the loader and the installer environment
+
+The user's rule (2026-11-06): **the installer never writes RECOVERY and never boots it**; the phone keeps
+Samsung's stock recovery, and everything else is done from Starbite's own side.
+
+**The flow on a stock phone:**
+1. Stock Android with USB debugging: `adb reboot download` (or the user enters Download mode).
+2. Download mode: `heimdall detect`, `heimdall download-pit` (read only) checked against `SAMSUNG_HEAD`
+   (an S9+ or any other phone is refused here), then **`heimdall flash --BOOT starbite-boot.img
+   --no-reboot`**: the only Download-mode write (typed `flash boot`). `Heimdall.run` refuses any other
+   partition.
+3. The user leaves Download mode (Volume Down + Power) and holds **Volume Up alone** while the phone starts
+   (or Bixby after the Samsung splash > USB FASTBOOT): the Starbite loader's fastboot (18d1:4ee0).
+4. The installer: `fastboot getvar serialno/product/version-bootloader` (must be `starbite-*`, `starlte`),
+   `fastboot oem boot-next fastboot` (a reboot or crash of the environment comes back to fastboot), then
+   `fastboot boot installer.image installer.initrd+key --dtb installer.dtb --header-version 2 --cmdline
+   "sb.installer=1 sb.serial=SERIAL"`. A dry run does this too: it is RAM only.
+5. The environment (`tools/installer/env/`: `init`, `sb-byname`, `getprop`, `sb-reboot`, built by
+   `mk-env.sh` from Alpine + e2fsprogs exfatprogs f2fs-tools sgdisk dropbear util-linux coreutils and the
+   static busybox): mounts nothing of the phone's storage, makes `/dev/block/NAME` and
+   `/dev/block/by-name/PARTNAME` like Android, starts USB ECM (172.16.42.1, DHCP gives the computer
+   172.16.42.2) + ACM, and dropbear on usb0 that takes only the key the installer appended to the initrd
+   (an ed25519 key under `build/installer/env/`, one per computer, newc cpio `root/.ssh/authorized_keys`).
+   No password, no telnet.
+6. From here every step (backup, GPT, card, OS writes, store, BOOT last if it changed, the reboot into the
+   menu with `sb-reboot menu`) runs against the environment. `tools/installer/transport/adb` goes first on
+   PATH: adb's CLI subset on ssh (`shell`, `exec-out`, `push`, `pull`, `get-state`, `reboot` -> `sb-reboot`;
+   `reboot recovery` refused), so the existing writers (part-write.py, part-backup.sh, slot-write.py,
+   store-flash*.sh, card-range-flash.py, metadata-reset.sh) run unchanged.
+
+`--transport twrp` keeps v1's TWRP adb for S9 #1's own maintenance; the default transport refuses a phone in
+TWRP, and the legacy one does not start from Download mode.
+
+**What the loader needs.** Nothing new for this path, by reading `shim/starlte/fastboot.c` and
+`xnu_boot.c`: `fastboot boot KERNEL INITRD --dtb DTB --header-version 2 --cmdline ...` already starts
+Linux (`fastboot.c` picks the Linux method when a DTB comes with an arm64 Image; `star_boot_ram` copies the
+DTB to 0xae000000 and appends `--cmdline` to its bootargs, puts the initrd at 0xa8000000 (up to 80 MiB) and
+sets `/chosen linux,initrd-*`, switches the microSD rails on). Limits: kernel + initrd + DTB below
+`max-download-size` 0x04ff0000; the DTB must have bootargs and the initrd placeholders (`mk-env.sh` warns).
+The fastboot hook runs after `cat_load()`, whose failure is ignored, so a stock phone without an OS store
+should still reach it. **Not verified on the phone** (10, items 2-3): only an XNU payload has gone through
+`fastboot boot` so far. Suggested later loader changes (not implemented, not needed for v2): a hidden
+catalog entry `installer` reading `installer.image/.initrd/.dtb` from the OS store (like `rescue`), so an
+installed phone can start the environment from the menu without a computer-side push; `boot-next
+installer`; and dropping the loader's `fastboot reboot recovery` / the recovery menu's TWRP item, which
+the installer no longer uses. Engineer OS may host on-phone parts later; for v2 the Linux environment is
+the engine.

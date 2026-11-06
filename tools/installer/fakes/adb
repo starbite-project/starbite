@@ -24,9 +24,11 @@ PREFIX = re.compile(r'(?<![\w./-])(/dev/block/|/tmp/|/sys/|/proc/mounts|/externa
 FUNCS = r'''
 R=%(R)s
 getprop() { sed -n "s/^$1=//p" "$R/props"; }
-blockdev() { case $1 in --getsize64) wc -c < "$2" | tr -d ' ' ;; --rereadpt) python3 "%(fp)s" rereadpt "$R" ;; *) ;; esac; }
+blockdev() { case $1 in --getsize64) wc -c < "$2" | tr -d ' ' ;; --rereadpt) case $2 in *sda) python3 "%(fp)s" rereadpt-sda "$R" ;; *) python3 "%(fp)s" rereadpt "$R" ;; esac ;; *) ;; esac; }
 mke2fs() { for d; do :; done; printf 'TYPE="ext4" LABEL="metadata"\n' > "$R/blkid/$(basename "$d")"; echo "fake mke2fs: ext4 'metadata' on ${d#$R}"; }
 e2fsck() { echo "fake e2fsck: clean"; }
+sb-reboot() { python3 "%(fp)s" set-state "$R" "$1"; }       # the installer environment's reboot (menu|fastboot|download)
+sb-byname() { :; }                                          # the environment's /dev/block/by-name links: rereadpt makes them
 blkid() { printf '%%s: ' "$1"; cat "$R/blkid/$(basename "$1")" 2>/dev/null || echo; }
 mount() {
   if [ $# = 0 ]; then cat "$R/proc/mounts"; return; fi
@@ -74,7 +76,25 @@ def maybe_fail(cmd):
         sys.exit(1)
 
 
-def run_shell(cmd, binary):
+def run_shell(cmd, binary, via='adb'):
+    if via == 'ssh':                             # the installer environment (fakes/ssh)
+        if fakephone.read_state(R) != 'env':
+            sys.stderr.write('ssh: connect to host 172.16.42.1 port 22: Connection refused\n')
+            sys.exit(255)
+        maybe_fail(cmd)
+        script = FUNCS % {'R': R, 'fp': os.path.join(HERE, 'fakephone.py')} + rewrite(cmd)
+        p = subprocess.run(['bash', '-c', script], capture_output=True, stdin=None)
+        sys.stdout.buffer.write(p.stdout.replace(R.encode(), b''))      # ssh is 8-bit clean; paths shown as on the phone
+        sys.stderr.write(p.stderr.decode(errors='replace').replace(R, ''))
+        sys.exit(p.returncode)
+    if visible_state() == 'device':              # Android (not rooted): only getprop is faked there
+        m = re.fullmatch(r'\s*getprop\s+(\S+)\s*', cmd)
+        if not m:
+            sys.stderr.write(f'fake adb: only getprop is faked in Android, not {cmd[:60]}\n')
+            sys.exit(1)
+        props = dict(l.split('=', 1) for l in open(os.path.join(R, 'props-android')).read().splitlines() if '=' in l)
+        print(props.get(m.group(1), ''))
+        sys.exit(0)
     if visible_state() != 'recovery':
         sys.stderr.write('error: no devices/emulators found\n')
         sys.exit(1)
@@ -124,7 +144,10 @@ def main(a):
         if not st:
             sys.exit('error: no devices/emulators found')
         to = a[1] if len(a) > 1 else ''
-        fakephone.write_state(R, {'recovery': 'recovery', 'bootloader': 'fastboot', 'download': 'download'}.get(to, 'menu'))
+        stock_rec = open(os.path.join(R, 'recovery-kind')).read().strip() == 'stock'
+        maybe_fail('reboot ' + to)
+        fakephone.write_state(R, {'recovery': 'stock-recovery' if stock_rec else 'recovery', 'bootloader': 'fastboot',
+                                  'download': 'download'}.get(to, 'menu'))
     else:
         sys.exit(f'fake adb: "{cmd}" is not faked')
 
