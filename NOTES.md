@@ -2229,3 +2229,25 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   xnu-health-test 911, usb-fastboot 315. Loader Image f218e18210bf71cb...; BOOT out/xnu-boot-health3.img
   a7e942e7ca7d123aeec1ea6a38de4a82b2ae1722ea82c1943adb3bea6895714f (health2's template, payload-v7test,
   menu-v7.sbm; the recipe rebuilds health2 byte for byte). Phone checks: docs/STARBITE-HEALTH.md 9 A-G.
+- 2026-11-06 evening: **panic=10 never reset on f797be6b; fixed in 7.1.0-starbite-6a605a1f (built, not
+  flashed).** docs/LINUX-REBUILD-PLAN.md 7.6-7.9.
+  - Phone (build/maint/logs/20261106-195841-panic2): the boot lines are right, the debugfs dry run drew,
+    `reboot` reset by SWRESET.
+  - A real panic showed the Starbite screen, but the reset came from the loader's 60 s watchdog
+    (RST_STAT 0x00800000).
+  - INFORM2/3 = 0 is what every watchdog reset leaves (the wdt-test shows inform3 0 too), so it is no
+    evidence about the handler. The dmesg record always ends at "Memory Limit: none" (ramoops dumps first).
+  - Cause: the first report's old kernel had no armed watchdog and a 2.6 ms watchdog restart, yet it reset
+    after ~2 min, so `emergency_restart()` came ~12x late. The only timed step is panic()'s
+    `mdelay(100)` x 100. arm64 `__delay` waits in WFE for the timer event stream, and with interrupts off
+    and the other CPUs parked this SoC wakes it far too rarely (panicking CPU 6, an M3 core).
+  - Fix, kernel step 11: `__delay` spins on the counter when interrupts are off.
+  - Step 10: the restart and power-off waits count on the counter. A panic notifier (first) arms cluster 1's
+    watchdog for panic_timeout + 5 s with the loader's wdt_arm sequence as a backstop (`panic_wdt=`); its
+    line lands in the ramoops record.
+  - Step 6g: the driver draws the whole screen itself within `panic_budget_ms` (500). drm_panic's own
+    screen goes to a 1-pixel sink: its kmsg screen walks the whole ring quadratically, minutes with
+    log_buf_len=4M, and cannot be interrupted. The log comes from one 16 KiB `kmsg_dump_get_buffer`.
+    `panic_last_ms` reports a dry run's time. CONFIG_DRM_PANIC_SCREEN="user".
+  - Host render of the real code with the phone's log: 1.6 ms.
+  - Image b5ef2205..., modules 49e19a5a...; the DTBs are unchanged (f563dee1...).

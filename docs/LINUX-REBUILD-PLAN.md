@@ -720,7 +720,8 @@ the path works in panic context.
   reboot-mode, so it lands in the loader menu.
 - `s9p_clkgate.pmu_reset=0` on the command line switches both off (back to the watchdog restart only).
 
-**Panic screen (patch-mainline.py step 6g, s9p-decon; `CONFIG_DRM_PANIC`).** drm_panic runs from the kmsg
+**Panic screen, first version (f797be6b; 7.7 replaces the drawing and adds a time budget). Patch-mainline.py
+step 6g, s9p-decon, `CONFIG_DRM_PANIC`.** drm_panic runs from the kmsg
 dump in `panic()`. That is after the other CPUs have stopped and the panic notifiers have run, and before
 `panic=10`'s delay. drm_panic's `kmsg` screen draws the kernel log's tail, and the driver supplies two
 hooks:
@@ -768,7 +769,7 @@ fbcon would also pick TER16x32 at 1440 x 2960. The DTB's bootargs therefore gain
 (mk-starlte-dts.py), so the boot console looks as it did. Once drm_panic is registered, fbcon draws nothing
 during a panic (`skip_panic`), so it cannot scroll over the screen.
 
-### 7.3 Build (2026-11-06)
+### 7.3 First build (2026-11-06, superseded by 7.8)
 
 The build ran with `limactl shell starbite -- env WORK=~/linux/panic-work OUT=~/distros/_kernel-panic
 MIN_HOST_FREE_GB=1 <worktree>/tools/linux/build-kernel.sh` (incremental, in /mnt/build). It produced release
@@ -795,7 +796,7 @@ deleted. **Not flashed.**
 - RST_STAT after the old kernel's slow reset (7.1).
 - Power-off with and without a cable.
 
-### 7.5 Phone test (one boot of this kernel, pmOS, as root over SSH)
+### 7.5 Phone test of the first build (done 2026-11-06, results in 7.6; the current test is 7.9)
 
 1. `dmesg | grep -e s9p-reset -e "panic screen"`. Expect two lines:
    - `s9p-reset: RST_STAT ... INFORM3 12345670`, then `restart = INFORM2 + PMU SWRESET, power-off = PS_HOLD low`.
@@ -827,3 +828,142 @@ deleted. **Not flashed.**
 5. Optional: `reboot -f` also resets at once.
 6. Optional: `poweroff` with the cable out powers the phone off; press Power to start it. With the cable
    in, it restarts into the loader after about 3 s.
+
+### 7.6 Phone results for f797be6b (2026-11-06 evening) and the stall
+
+**Results.** The logs are in build/maint/logs/20261106-195841-panic2.
+- The boot lines appear as expected.
+- The debugfs dry run drew the panic screen correctly.
+- A plain `reboot` reset through SWRESET about 9 s after the command (RST_STAT 0x20000000, INFORM3
+  0x12345670, CLEAN RESTART).
+- The real panic (`echo c`, `panic=10`) did **not** reset at +10 s:
+  - The user saw the Starbite panic screen appear.
+  - The ramoops dmesg record holds the full panic and ends with `Memory Limit: none`.
+  - The reset came from the loader-armed 60 s cluster-1 watchdog (RST_STAT 0x00800000, INFORM2/INFORM3 0).
+
+**Reading the evidence.**
+- The dmesg record always ends at "Memory Limit: none". ramoops writes it from its kmsg dumper, the first
+  one in the list, so the record is the log at that instant. It says nothing about what ran afterwards.
+- INFORM2/INFORM3 = 0 is what any watchdog reset leaves. The pure watchdog test of the same evening
+  (20261106-194731-wdt-test) also reported `inform3 0x00000000`. So these values do not show whether the
+  restart handler ran.
+- Two things together decide it:
+  - The screen appeared, so drm_panic's dumper and `panic_flush` returned.
+  - `reboot` resets, so the handler works when it is reached.
+- The stall is therefore in what vpanic runs between them:
+  - `console_unblank()`
+  - `console_flush_on_panic()`
+  - the countdown: `for (i = 0; i < panic_timeout * 1000; i += 100) { touch_nmi_watchdog(); ...; mdelay(100); }`
+  - `emergency_restart()`: `kmsg_dump(EMERG)`, which both dumpers skip, then `machine_restart()` and
+    `do_kernel_restart()`.
+
+**The first report (finding a) times it.**
+- That kernel (29e3b64b) had no drawing and no armed watchdog (`wdt = 0`, `tmr_atboot=0`). Its only restart
+  handler armed the watchdog for 2.6 ms, and a cluster-1 watchdog reset is now known to work.
+- Yet the reset came about 2 minutes after the panic. So that panic reached `emergency_restart()`, about
+  12x late, not never.
+- The only time-based step on the way is the countdown. `mdelay(100)` →
+  `udelay(1000)` → arm64 `__delay()` waits in **WFE** until 100 µs before the deadline, relying on the
+  architected timer's event stream to wake it (CONFIG_ARM_ARCH_TIMER_EVTSTREAM=y, about every 80-160 µs).
+- In the panic, interrupts are off on the panicking CPU and the other seven are parked, so nothing but the
+  event stream ends a WFE. On this SoC that wait lasted about 12x the requested time. The panicking CPU was
+  CPU 6, an M3 core, both times we know.
+- With `wdt = 60` (f797be6b's test) the 60 s watchdog ran out before the slowed countdown (about 2 min)
+  could reach the restart.
+- In normal operation the same WFE also wakes on interrupts (the 4 ms tick), which hides the problem.
+
+**Ruled out.**
+- drm_panic's flush: the screen appeared.
+- A lock in the restart handler: it is plain MMIO and `reboot` works.
+- `smp_send_stop()` in `machine_restart()`: it returns at once once the others are offline.
+- Its own 1 s wait in the panic: those are `udelay(1)` spins, never WFE.
+- `console_unblank()` and `console_flush_on_panic()` are not proven innocent, but they do not depend on time.
+  The watchdog backstop below covers them too.
+
+### 7.7 The fix (kernel steps 11, 10, 6g)
+
+- **Step 11 (tree, arch/arm64/lib/delay.c):** `__delay()` skips the WFE loop when interrupts are off and spins
+  on the counter instead (`cpu_relax`), so `mdelay()` in atomic context is exact. This covers the countdown,
+  `udelay()` and `readl_poll_timeout_atomic()`. With interrupts on nothing changes.
+- **Step 10 (s9p-clkgate):**
+  - The restart and power-off waits count on the architected counter (`arch_timer_read_counter`), never
+    `mdelay`: no WFE, no timer interrupt, no timekeeping.
+  - **Backstop:** a panic notifier, first in the chain, arms cluster 1's watchdog for panic_timeout + 5 s
+    (15 s with `panic=10`, at most 82 s). It uses the loader's verified `wdt_arm` sequence: WTCON 0,
+    WTDAT = WTCNT, WTCLRINT, WTCON 0xFF39, PMU bit 23 cleared in 0x408 and 0x40C.
+  - If anything after the screen stalls, the phone resets 5 s after the planned SWRESET instead of after
+    60 s or 2 min. It also resets when the loader armed no watchdog.
+  - The notifier prints `s9p-reset: panic: SWRESET in 10 s, cluster-1 watchdog backstop at 15 s`. It runs
+    before the kmsg dump, so the line is in the ramoops record.
+  - It is not armed with `panic=0`. `s9p_clkgate.panic_wdt=0` disables it.
+- **Step 6g (s9p-decon), drawing with a budget:**
+  - drm_panic's own kmsg screen was replaced. Before its first pixel it walks the whole printk ring with
+    a quadratic search: `kmsg_dump_get_buffer()` per 512 bytes, each call scanning from the oldest record.
+    That is seconds with a large ring and minutes with ChromeOS's `log_buf_len=4M`. Nothing can interrupt
+    it, so no budget could be enforced inside it.
+  - The driver now draws everything itself in `panic_flush`. drm_panic's own screen goes to a one-pixel
+    sink (a no-op `set_pixel`), and `CONFIG_DRM_PANIC_SCREEN` is "user", the cheapest.
+  - drm_panic still provides the trigger: its dumper (after ramoops), the panic lock against atomic commits,
+    fbcon's `skip_panic` and the debugfs dry run.
+  - The log comes from **one** `kmsg_dump_get_buffer()` of the newest 16 KiB, a single linear pass. It is
+    laid out bottom-up in TER16x32, 85 x 68, wrapped as drm_panic wraps it, white, with the "Kernel panic -
+    not syncing" line in gold. The banner is unchanged.
+  - **Budget:** `s9p_decon.panic_budget_ms` (default 500), counted from `get_scanout_buffer` with
+    `ktime_get_mono_fast_ns()`, which reads the counter and needs no interrupt.
+    - The order is: banner area, banner, log area, log lines. The budget is checked between 64-row slabs
+      and before every log line.
+    - Past the budget the drawing stops. The frame is shown as it is and `panic_flush` returns, so the
+      restart is never delayed by more than the budget.
+  - The panel wake-up waits 120 ms on the counter, never in `mdelay`.
+  - After a dry run, `cat /sys/module/s9p_decon/parameters/panic_last_ms` gives the draw time.
+- **Host render.** The patched driver's drawing code with the kernel calls stubbed, fed the phone's real
+  ramoops log, draws the full screen in 1.6 ms on the Mac. A frame pre-filled with grey is fully overdrawn,
+  and a zero budget stops before the first pixel. The render is in the session scratchpad, not in the repo.
+
+### 7.8 Build of the fix (2026-11-06)
+
+The build is the same command as 7.3 (REPO_OUT in the VM, deleted afterwards). It produced release
+**`7.1.0-starbite-6a605a1f`** in /home/dev.guest/distros/_kernel-panic/, replacing f797be6b's files
+there:
+
+| File | sha256 |
+|---|---|
+| `Image` | `b5ef220595aba400feedfe87709be8ad86ae4d8d0a919a74b0bf5ae0de955fd6` |
+| `exynos9810-starlte.dtb` | `f563dee16a2b2b39fc675b692d24cd1eec645f0480c36788c4db122155dd6e0f` (unchanged) |
+| `linux-old.dtb` | `0f33b012d73071621291d760683ca041e566bd22d584b03df79a5f890c9b287e` (unchanged) |
+| `rescue.dtb` | `550f1e5e0dcd8b0e096cc8374201c82c75f49155f0c88d090658a47f423eaa47` (unchanged) |
+| `modules-7.1.0-starbite-6a605a1f.img` | `49e19a5a45071fb1ab66d8934b3a0c30e42f726d3746cb19bddee8cbbf8cefb4` |
+
+All check-kernel.py checks pass, and s9p-decon.o, s9p-clkgate.o and delay.o compile without warnings at W=1.
+The disassembly of `__delay` shows the new test (`mrs x0, daif; tbnz w0, #7`) skipping the `wfe` loop when
+IRQs are masked. **Not flashed.**
+
+### 7.9 Phone test (pmOS, as root over SSH)
+
+1. Check the boot lines:
+   ```
+   dmesg | grep -e s9p-reset -e "panic screen" -e "drm panic"
+   ```
+   - `s9p-reset: restart = INFORM2 + PMU SWRESET, power-off = PS_HOLD low, panic watchdog backstop on`
+   - `panic screen: own frame, log font TER16x32 (85 x 68 characters), banner on, budget 500 ms`
+   - `Registered 1 planes with drm panic`
+2. **Dry run, no reset.** Then read the draw time:
+   ```
+   mount -t debugfs none /sys/kernel/debug 2>/dev/null
+   echo 1 > /sys/kernel/debug/dri/16030000.decon/drm_panic_plane_0
+   cat /sys/module/s9p_decon/parameters/panic_last_ms
+   ```
+   Expect the screen with the gold `STARBITE: PANIC SCREEN TEST`. The draw time should be well under
+   500 ms, with no "(budget ran out)".
+3. **Panic.** Run `echo c > /proc/sysrq-trigger`, with the loader's watchdog as set (60 s).
+   - Within about 1 s, the Starbite panic screen appears.
+   - **About 10 s later** the phone resets. The loader's crash screen shows KERNEL PANIC with RESET: SWRESET
+     (RST_STAT 0x20000000).
+   - The ramoops record ends with `Memory Limit: none` as before. It now also has
+     `s9p-reset: panic: SWRESET in 10 s, cluster-1 watchdog backstop at 15 s` just before
+     `Kernel Offset: disabled`.
+   - **Reset at about 15 s instead, RESET: CLUSTER1_WDTRESET:** the backstop caught a stall after the screen
+     that step 11 did not remove. Report it; the countdown or console flush is then still slow.
+   - **No reset for 60 s or more:** neither the countdown nor the backstop worked. Hold Volume Down + Power
+     for 7 s and report it.
+4. Optional: `reboot -f`, and `poweroff` with and without the cable (unchanged from 7.5).
