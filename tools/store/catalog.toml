@@ -75,7 +75,7 @@ category = "android"
 method = "linux"
 tag = "experimental"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/chromeos.img printk.devkmsg=on log_buf_len=4M s9p_decon.drm_name=vkms cros_debug lsm=landlock,lockdown,yama,safesetid,integrity,selinux,bpf enforcing=0 --verbose"
+cmdline = "sb.root=/distros/chromeos.img printk.devkmsg=on log_buf_len=4M s9p_decon.drm_name=vkms cros_debug lsm=landlock,lockdown,yama,safesetid,integrity,selinux,bpf enforcing=0 --verbose s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "sd:p1 /distros/chromeos.img (GPT: STATE p1, ROOT-A p3)"
 
 # ---- Linux (docs/LINUX-REBUILD-PLAN.md 3.3): one kernel, DTB and initrd for every entry; the
@@ -90,7 +90,7 @@ category = "linux"
 method = "linux"
 tag = "stable"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=none"
+cmdline = "sb.root=none s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "initramfs + sd:p1 /distros/_tools.img"
 flags = ["hidden"]
 
@@ -102,7 +102,7 @@ category = "linux"
 method = "linux"
 tag = "beta"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/ubuntu.img sb.session=phosh"
+cmdline = "sb.root=/distros/ubuntu.img sb.session=phosh s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "sd:p1 /distros/ubuntu.img"
 
 [[entry]]
@@ -113,7 +113,7 @@ category = "linux"
 method = "linux"
 tag = "experimental"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/ubuntu.img sb.session=gnome"
+cmdline = "sb.root=/distros/ubuntu.img sb.session=gnome s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "sd:p1 /distros/ubuntu.img"
 flags = ["hidden"]
 
@@ -125,7 +125,7 @@ category = "linux"
 method = "linux"
 tag = "experimental"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/ubuntu.img sb.session=lomiri"
+cmdline = "sb.root=/distros/ubuntu.img sb.session=lomiri s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "sd:p1 /distros/ubuntu.img"
 flags = ["hidden"]
 
@@ -139,7 +139,7 @@ category = "linux"
 method = "linux"
 tag = "beta"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/ubuntu.img sb.session=phosh"
+cmdline = "sb.root=/distros/ubuntu.img sb.session=phosh s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "sd:p1 /distros/ubuntu.img"
 flags = ["hidden"]
 
@@ -151,7 +151,7 @@ category = "linux"
 method = "linux"
 tag = "lab"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "loglevel=7 keep_bootcon sb.root=ask"
+cmdline = "loglevel=7 keep_bootcon sb.root=ask s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "sd:p1 /distros"
 flags = ["hidden"]
 
@@ -163,7 +163,7 @@ category = "linux"
 method = "linux"
 tag = "experimental"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/debian-phosh.img sb.session=phosh"
+cmdline = "sb.root=/distros/debian-phosh.img sb.session=phosh s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "sd:p1 /distros/debian-phosh.img"
 flags = ["hidden"]
 
@@ -175,7 +175,7 @@ category = "linux"
 method = "linux"
 tag = "beta"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/pmos.img sb.session=phosh"
+cmdline = "sb.root=/distros/pmos.img sb.session=phosh s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "sd:p1 /distros/pmos.img"
 
 [[entry]]
@@ -186,7 +186,7 @@ category = "linux"
 method = "linux"
 tag = "experimental"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/arch.img sb.session=phosh"
+cmdline = "sb.root=/distros/arch.img sb.session=phosh s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "sd:p1 /distros/arch.img"
 flags = ["hidden"]
 
@@ -198,7 +198,7 @@ category = "linux"
 method = "linux"
 tag = "experimental"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/fedora.img"
+cmdline = "sb.root=/distros/fedora.img s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "sd:p1 /distros/fedora.img"
 flags = ["hidden"]
 
@@ -210,7 +210,7 @@ category = "linux"
 method = "linux"
 tag = "experimental"
 files = ["linux.image", "linux.dtb", "linux.initrd"]
-cmdline = "sb.root=/distros/kali.img sb.session=phosh"
+cmdline = "sb.root=/distros/kali.img sb.session=phosh s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "sd:p1 /distros/kali.img"
 flags = ["hidden"]
 
@@ -234,7 +234,7 @@ category = "linux"
 method = "linux"
 tag = "lab"
 files = ["linux.image", "linux-old.dtb", "linux.initrd"]
-cmdline = "sb.root=none"
+cmdline = "sb.root=none s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
 root = "initramfs"
 flags = ["hidden"]
 # The UEFI Shell menu row (docs/UEFI-SHELL.md). Appended to a copy of the live store's catalog TOML:
@@ -298,15 +298,16 @@ files = ["ufs:engineer.img|sd:engineer.img"]
 root = "none (RAM only)"
 
 # 2026-11-05: Linux display black-bars diagnostic kernel (patch-mainline step 6e), hidden; boot by key only.
+
+# 2026-11-06: the previous Linux kernel (before the panel self-mask fix), hidden; boot by key if the new one regresses.
 [[entry]]
-key = "linux-pmos-bb"
+key = "linux-pmos-prev"
 name = "postmarketOS"
-version = "edge · Phosh · panel mask fix"
+version = "edge · Phosh · previous kernel"
 category = "linux"
 method = "linux"
 tag = "beta"
 flags = ["hidden"]
-files = ["linux-bb.image", "linux-bb.dtb", "linux.initrd"]
+files = ["linux-prev.image", "linux-prev.dtb", "linux.initrd"]
 cmdline = "sb.root=/distros/pmos.img sb.session=phosh"
 root = "sd:p1 /distros/pmos.img"
-
