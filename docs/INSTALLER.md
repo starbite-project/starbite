@@ -13,7 +13,9 @@ to the table in `sbinst/ufslayout.py` (section 9) -> card -> every OS. No TWRP a
 writes or boots RECOVERY (section 13). Bundles are made by `--build-bundle` (section 12).**
 
 **Status: host side done and rehearsed against fake phones and fake disks. Nothing has run against the
-real phone, and the installer environment (`tools/installer/env/`) is written but not built yet.**
+real phone. The installer environment is now Starbite Maintenance in installer mode (docs/MAINTENANCE.md):
+built 2026-11-06 (`tools/installer/env/mk-env.sh` -> `tools/maint/env/mk-maint.sh`), rehearsed in the VM,
+not run on the phone.**
 Section 10 lists exactly what needs the phone.
 
 ## 1. Quick start
@@ -536,9 +538,10 @@ stores); RECOVERY never written or booted (refused in the manifest grammar, in t
 transport shim, in the fakes; tests/test_no_recovery.py).
 
 **Stubbed or not done:**
-- **The installer environment is not built yet** (`tools/installer/env/mk-env.sh` is written, not run):
-  no `installer.image/.initrd/.dtb` exist, so no real bundle can start the stock flow today. The fakes
-  stand in for it.
+- **The installer environment is built but has not run on the phone** (2026-11-06: it is Starbite
+  Maintenance in installer mode, docs/MAINTENANCE.md; `mk-env.sh` writes `installer.image/.initrd/.dtb`).
+  Its by-name tree now gives real `/dev/block/sdaN` nodes (the first version linked into `/dev`, which
+  `part-write.py`'s `readlink -f` check would have refused). No bundle carries it yet.
 - No real bundle exists; `--build-bundle --from-phone` is the way to make one (section 12) once the
   environment is built (the main phone must run the environment, or TWRP with `--transport twrp`).
 - On a stock phone the stock BOOT image is replaced in Download mode **before** the installer can back it
@@ -899,6 +902,14 @@ Samsung's stock recovery, and everything else is done from Starbite's own side.
 
 `--transport twrp` keeps v1's TWRP adb for S9 #1's own maintenance; the default transport refuses a phone in
 TWRP, and the legacy one does not start from Download mode.
+
+**One environment (2026-11-06): the installer environment is Starbite Maintenance** (docs/MAINTENANCE.md) in
+installer mode (`sb.installer=1`: the card stays unmounted; the appended key is merged with the built-in
+ones). `tools/installer/env/{init,sb-byname,getprop,sb-reboot}` link to `tools/maint/env/`, `mk-env.sh` builds
+SBMAINT and names its parts `installer.*`, and `transport/adb` also serves `SB_TRANSPORT=maint` for every
+other host tool (it is reached as `tools/maint/transport/adb` too). The same environment can live in a
+partition of its own (`SBMAINT`, proposed for the One UI layout) and in the OS store, so an installed phone
+starts it from the loader without a computer-side push.
 
 **What the loader needs.** Nothing new for this path, by reading `shim/starlte/fastboot.c` and
 `xnu_boot.c`: `fastboot boot KERNEL INITRD --dtb DTB --header-version 2 --cmdline ...` already starts

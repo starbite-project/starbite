@@ -1,82 +1,266 @@
 #!/usr/bin/env python3
-"""`adb` for the Starbite installer environment (docs/INSTALLER.md 13): the installer puts this
-directory first on PATH once the environment runs (SBINST_ENV_UP=1), so the existing writers
-(part-write.py, part-backup.sh, slot-write.py, store-flash*.sh, card-range-flash.py,
-metadata-reset.sh) and the installer itself reach the phone over ssh on USB networking instead of
-TWRP's adb, unchanged. Without SBINST_ENV_UP it hands every call to the next `adb` on PATH.
+"""`adb` over ssh, for the Starbite installer environment and for Starbite Maintenance (SBMAINT,
+docs/MAINTENANCE.md 9; docs/INSTALLER.md 13). One implementation, also reached as
+tools/maint/transport/adb. Put first on PATH, it is transparent: unless one of the two modes below is
+on, every call goes to the next real `adb` on PATH (TWRP's, unchanged).
 
-The subset those tools use:
-  shell CMD... / exec-out CMD     ssh root@HOST "CMD" (8-bit clean, the remote exit status)
-  push LOCAL... REMOTE            ssh root@HOST "cat > REMOTE" < LOCAL (REMOTE/ = a directory)
-  pull REMOTE LOCAL               ssh root@HOST "cat REMOTE" > LOCAL
-  get-state                       "recovery" (the existing tools only check for a root shell)
-  devices                         one line, "<serial> recovery"
-  reboot [bootloader|download]    sb-reboot fastboot|download|menu in the environment.
-                                  `reboot recovery` is REFUSED: the installer never boots RECOVERY.
-  wait-for-*, start-server        nothing
-Settings: SBINST_ENV_HOST (172.16.42.1), SBINST_ENV_KEY (the per-install ssh key), SBINST_ENV_SERIAL."""
+  SBINST_ENV_UP=1     the installer environment (set by the installer itself; settings SBINST_ENV_HOST,
+                      SBINST_ENV_KEY, SBINST_ENV_SERIAL)
+  SB_TRANSPORT=maint  Starbite Maintenance, for every host tool (part-write.py, part-backup.sh,
+                      store-flash.sh, store-pull.sh, boot-next.sh, collect-logs.sh, metadata-reset.sh ...).
+                      Settings: SB_MAINT_HOST (172.16.42.1), SB_MAINT_KEY (default: the first of
+                      build/linux/ssh/starbite_ed25519 and build/installer/env/id_ed25519),
+                      SB_MAINT_KNOWN_HOSTS (default build/maint/known_hosts: the environment's host key,
+                      pinned; without the file the host key is not checked), SB_MAINT_SERIAL, SB_JOB (shown
+                      on the phone's screen with each command), SB_MAINT_MARKER (/etc/sbmaint-release),
+                      SB_MAINT_PORT (rehearsals only).
+                      Every command first checks that the far side IS the maintenance environment (the
+                      marker file), so a Linux distro that also answers on 172.16.42.1 is never written to.
+  SB_TRANSPORT=twrp   (or unset) TWRP's adb: the default on S9 #1 until SBMAINT is proven on the phone.
+
+The subset the tools use:
+  shell [CMD...] / exec-out CMD   ssh root@HOST CMD (8-bit clean, the remote exit status); no CMD:
+                                  an interactive shell
+  exec-in CMD                     stdin streamed to CMD (reliable over ssh; TWRP's adbd dropped data)
+  push LOCAL... REMOTE            files (REMOTE/ or several: a directory) and directories (tar)
+  pull REMOTE [LOCAL]             a file, or a directory (tar)
+  get-state                       "recovery" when the environment answers (the tools check for TWRP's
+                                  state), else an error like adb's
+  devices                         "<serial>\trecovery" or nothing
+  wait-for-recovery / -device     waits until it answers
+  reboot [bootloader|download]    sb-reboot menu | fastboot (the loader's) | download.
+                                  `reboot recovery` is REFUSED in both modes: Starbite never boots RECOVERY.
+  start-server, kill-server, version, root, remount: nothing to do"""
+import io
 import os
-import shutil
+import shlex
 import subprocess
 import sys
+import tarfile
+import time
 
-HERE = os.path.dirname(os.path.realpath(__file__))
+SELF = os.path.realpath(__file__)
+REPO = os.path.realpath(os.path.join(os.path.dirname(SELF), '..', '..', '..'))
+MAIN = REPO.split(os.sep + '.claude' + os.sep + 'worktrees' + os.sep)[0]     # a worktree's main checkout
+NOT_MAINT = 97
 
 
 def real_adb(argv):
-    path = os.pathsep.join(p for p in os.environ.get('PATH', '').split(os.pathsep)
-                           if p and os.path.realpath(p) != HERE)
-    exe = shutil.which('adb', path=path)
-    if not exe:
-        sys.exit('adb: not found (and the installer environment is not up)')
-    os.execv(exe, [exe] + argv)
+    """The next `adb` on PATH that is not this file (by identity: this shim may be on PATH twice, or
+    through a link)."""
+    for d in os.environ.get('PATH', '').split(os.pathsep):
+        exe = os.path.join(d or '.', 'adb')
+        if os.path.isfile(exe) and os.access(exe, os.X_OK) and os.path.realpath(exe) != SELF:
+            os.execv(exe, [exe] + argv)
+    sys.exit('adb: not found (no TWRP adb on PATH, and SB_TRANSPORT is not "maint")')
 
 
-def ssh(cmd, **kw):
-    host = os.environ.get('SBINST_ENV_HOST', '172.16.42.1')
-    key = os.environ['SBINST_ENV_KEY']
-    argv = ['ssh', '-i', key, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no', '-o',
-            'UserKnownHostsFile=/dev/null', '-o', 'LogLevel=ERROR', '-o', 'ConnectTimeout=5', '-o',
-            'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=3', f'root@{host}', cmd]
-    return subprocess.call(argv, **kw)
+def caller():
+    """What the phone's screen calls the job: SB_JOB, else the host tool that ran adb (its script name)."""
+    if os.environ.get('SB_JOB'):
+        return os.environ['SB_JOB']
+    try:
+        args = subprocess.run(['ps', '-o', 'command=', '-p', str(os.getppid())], capture_output=True, text=True,
+                              timeout=2).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        args = []
+    for x in args:
+        b = os.path.basename(x)
+        if not b.lower().startswith(('python', 'bash', 'sh', 'zsh', 'env')) and not x.startswith('-'):
+            return b
+    return 'adb'
+
+
+def first_file(*cands):
+    for c in cands:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+class Remote:
+    def __init__(self, maint):
+        self.maint = maint
+        e = os.environ
+        if maint:
+            self.host = e.get('SB_MAINT_HOST', '172.16.42.1')
+            self.key = e.get('SB_MAINT_KEY') or first_file(*[os.path.join(r, 'build', p) for r in (REPO, MAIN)
+                                                               for p in ('linux/ssh/starbite_ed25519',
+                                                                         'installer/env/id_ed25519')])
+            kh = e.get('SB_MAINT_KNOWN_HOSTS') or first_file(os.path.join(REPO, 'build', 'maint', 'known_hosts'),
+                                                             os.path.join(MAIN, 'build', 'maint', 'known_hosts'))
+            self.known = kh if kh and os.path.isfile(kh) else None
+            self.serial = e.get('SB_MAINT_SERIAL', 'SBMAINT')
+            self.marker = e.get('SB_MAINT_MARKER', '/etc/sbmaint-release')
+            self.port = e.get('SB_MAINT_PORT')            # tools/maint/rehearse.sh: a local dropbear
+        else:
+            self.host = e.get('SBINST_ENV_HOST', '172.16.42.1')
+            self.key = e['SBINST_ENV_KEY']
+            self.known = None
+            self.serial = e.get('SBINST_ENV_SERIAL', 'SBINST-ENV')
+            self.port = None
+
+    def argv(self, tty=False, timeout=5):
+        a = ['ssh']
+        if self.port:
+            a += ['-p', self.port]
+        if self.key:
+            a += ['-i', self.key]
+        a += ['-o', 'BatchMode=yes', '-o', 'LogLevel=ERROR', '-o', f'ConnectTimeout={timeout}',
+              '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=3']
+        if self.known:
+            a += ['-o', 'StrictHostKeyChecking=yes', '-o', f'UserKnownHostsFile={self.known}',
+                  '-o', 'HostKeyAlias=sbmaint']
+        else:
+            a += ['-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null']
+        if tty:
+            a.append('-t')
+        return a + [f'root@{self.host}']
+
+    def wrap(self, cmd, job=True):
+        """SBMAINT: refuse unless the far side is the maintenance environment; show the job on screen."""
+        if not self.maint:
+            return cmd
+        guard = (f'[ -e {shlex.quote(self.marker)} ] || {{ echo "adb (maint): {self.host} is not the Starbite '
+                 f'maintenance environment ({self.marker} missing): refusing" >&2; exit {NOT_MAINT}; }}')
+        if not job:
+            return guard + '\n' + cmd
+        text = ''.join(c if c.isprintable() else ' ' for c in f'{caller()}: {cmd}')[:110]
+        return f'{guard}\ncommand -v sb-job >/dev/null && sb-job -q {shlex.quote(text)}\n{cmd}'
+
+    def run(self, cmd, stdin=None, stdout=None, tty=False, job=True, timeout=5):
+        return subprocess.call(self.argv(tty, timeout) + [self.wrap(cmd, job)], stdin=stdin, stdout=stdout)
+
+    def alive(self):
+        return self.run('true', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, job=False, timeout=3) == 0
+
+
+def q(p):
+    return shlex.quote(p)
+
+
+def push(r, srcs, dst):
+    many = len(srcs) > 1 or dst.endswith('/')
+    if many:
+        r.run(f'mkdir -p {q(dst)}', stdin=subprocess.DEVNULL, job=False)
+    n = 0
+    for s in srcs:
+        d = dst.rstrip('/') + '/' + os.path.basename(s.rstrip('/')) if many else dst
+        if os.path.isdir(s):
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode='w') as t:
+                t.add(s, arcname=os.path.basename(d.rstrip('/')))
+            p = subprocess.Popen(r.argv() + [r.wrap(f'mkdir -p {q(os.path.dirname(d) or "/")} && '
+                                                    f'tar -xf - -C {q(os.path.dirname(d) or "/")}')],
+                                 stdin=subprocess.PIPE)
+            p.communicate(buf.getvalue())
+            if p.returncode:
+                sys.exit(f'adb push {s}: failed ({p.returncode})')
+        else:
+            with open(s, 'rb') as f:
+                if r.run(f'cat > {q(d)}', stdin=f):
+                    sys.exit(f'adb push {s}: failed')
+        n += 1
+    print(f'{n} file(s) pushed (ssh {r.host})')
+
+
+def pull(r, src, dst):
+    dst = dst or os.path.basename(src.rstrip('/'))
+    isdir = r.run(f'test -d {q(src)}', stdin=subprocess.DEVNULL, job=False) == 0
+    if not isdir:
+        if os.path.isdir(dst):
+            dst = os.path.join(dst, os.path.basename(src))
+        with open(dst, 'wb') as f:
+            st = r.run(f'cat {q(src)}', stdin=subprocess.DEVNULL, stdout=f)
+        if st:
+            os.unlink(dst)
+            sys.exit(f"adb: error: failed to stat remote object '{src}'")
+        return
+    parent, name = os.path.dirname(src.rstrip('/')) or '/', os.path.basename(src.rstrip('/'))
+    p = subprocess.run(r.argv() + [r.wrap(f'tar -cf - -C {q(parent)} {q(name)}')], stdin=subprocess.DEVNULL,
+                       capture_output=True)
+    if p.returncode:
+        sys.exit(f'adb pull {src}: failed: {p.stderr.decode(errors="replace").strip()}')
+    target = os.path.join(dst, name) if os.path.isdir(dst) else dst
+    os.makedirs(target, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(p.stdout)) as t:
+        for m in t.getmembers():
+            if m.issym() or m.islnk() or m.isdev():
+                continue                          # data only: no links or nodes from the phone
+            rel = m.name.split('/', 1)[1] if '/' in m.name else ''
+            if not rel:
+                continue
+            out = os.path.realpath(os.path.join(target, rel))
+            if not out.startswith(os.path.realpath(target) + os.sep):
+                continue
+            if m.isdir():
+                os.makedirs(out, exist_ok=True)
+            elif m.isfile():
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                with open(out, 'wb') as f:
+                    f.write(t.extractfile(m).read())
+    print(f'{src}: pulled (ssh {r.host})')
 
 
 def main(a):
-    if os.environ.get('SBINST_ENV_UP') != '1':
+    maint = os.environ.get('SB_TRANSPORT') == 'maint'
+    if os.environ.get('SBINST_ENV_UP') != '1' and not maint:
         real_adb(a)
-    while a and a[0] in ('-s', '-t'):
+    while a and a[0] in ('-s', '-t', '-H', '-P'):
         a = a[2:]
     c, rest = (a[0] if a else ''), a[1:]
+    if c == 'reboot':
+        to = rest[0] if rest else ''
+        if to in ('recovery', 'sideload', 'sideload-auto-reboot'):
+            sys.exit(f'adb ({"maintenance" if maint else "installer environment"}): refused: Starbite never boots '
+                     'RECOVERY (stock recovery stays). sbm reboot-to menu|maint|fastboot|download|KEY')
+    r = Remote(maint)
     if c in ('shell', 'exec-out'):
-        sys.exit(ssh(' '.join(rest)))
+        if not rest:
+            if c == 'exec-out':
+                sys.exit('adb exec-out: a command is needed')
+            sys.exit(subprocess.call(r.argv(tty=True) + [r.wrap('exec sh -l', job=False)]))
+        stdin = subprocess.DEVNULL if c == 'exec-out' else None
+        sys.exit(r.run(' '.join(rest), stdin=stdin))
+    if c == 'exec-in':                     # stdin -> CMD: an ssh stream is reliable (TWRP's adbd drops data)
+        if not rest:
+            sys.exit('adb exec-in: a command is needed')
+        sys.exit(r.run(' '.join(rest)))
     if c == 'push':
-        *srcs, dst = rest
-        for s in srcs:
-            d = dst + os.path.basename(s) if dst.endswith('/') or len(srcs) > 1 else dst
-            with open(s, 'rb') as f:
-                if ssh(f"cat > '{d}'", stdin=f):
-                    sys.exit(f'adb push {s}: failed')
-        print(f'{len(srcs)} file(s) pushed (installer environment)')
-        return
+        if len(rest) < 2:
+            sys.exit('adb push LOCAL... REMOTE')
+        return push(r, rest[:-1], rest[-1])
     if c == 'pull':
-        with open(rest[1], 'wb') as f:
-            sys.exit(ssh(f"cat '{rest[0]}'", stdout=f))
+        args = [x for x in rest if not x.startswith('-')]
+        if not args:
+            sys.exit('adb pull REMOTE [LOCAL]')
+        return pull(r, args[0], args[1] if len(args) > 1 else None)
     if c == 'get-state':
+        if maint and not r.alive():
+            sys.exit('error: no devices/emulators found (Starbite Maintenance does not answer on '
+                     f'{r.host}: tools/maint/sbm status)')
         print('recovery')
         return
     if c == 'devices':
-        print(f'List of devices attached\n{os.environ.get("SBINST_ENV_SERIAL", "SBINST-ENV")}\trecovery')
+        print('List of devices attached')
+        if not maint or r.alive():
+            print(f'{r.serial}\trecovery')
+        print()
+        return
+    if c.startswith('wait-for'):
+        if maint:
+            while not r.alive():
+                time.sleep(2)
         return
     if c == 'reboot':
         to = rest[0] if rest else ''
-        if to == 'recovery':
-            sys.exit('adb (installer environment): refused: the installer never boots RECOVERY')
-        sys.exit(ssh(f'sb-reboot {dict(bootloader="fastboot", download="download").get(to, "menu")}'))
-    if c in ('start-server', 'version') or c.startswith('wait-for'):
+        sys.exit(r.run(f'sb-reboot {dict(bootloader="fastboot", fastboot="fastboot", download="download").get(to, "menu")}',
+                       stdin=subprocess.DEVNULL))
+    if c in ('start-server', 'kill-server', 'root', 'remount', 'version'):
         if c == 'version':
-            print('Android Debug Bridge (starbite installer environment over ssh)')
+            print(f'Android Debug Bridge (Starbite {"Maintenance" if maint else "installer environment"} over ssh)')
         return
-    sys.exit(f'adb (installer environment): "{c}" is not supported')
+    sys.exit(f'adb ({"maintenance" if maint else "installer environment"}): "{c}" is not supported')
 
 
 if __name__ == '__main__':

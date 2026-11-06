@@ -2103,6 +2103,37 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   sb-integrate.sh: `SB_SCALE` (default 3; 3.2 is exact for 1440x2960). Release 7.1.0-starbite-4da38c67, Image sha
   d18510ec..., in the VM at ~/distros/_kernel-mask. Test and sources: docs/LINUX-REBUILD-PLAN.md 6.6.
 
+- 2026-11-06: **Starbite Maintenance (SBMAINT): our own TWRP replacement, never RECOVERY** (docs/MAINTENANCE.md).
+  One Linux environment (daily 7.1 kernel 4da38c67 + an Alpine initramfs) for maintenance, the installer
+  (installer mode) and rescue (rescue mode, tools/rescue/init embedded). USB ECM + ssh (key only, host key
+  baked and pinned), TWRP-style /dev/block nodes, read-only flags on the protected partitions (RECOVERY never
+  writable), an on-screen status with the current job, the previous boot's RAM logs kept (the maint DTB keeps
+  ramoops off the rings). Lives in a proposed GPT partition SBMAINT (256 MiB, two SBMAINT1 container slots,
+  last row of the One UI proposal so nothing is renumbered) and as OS-store entries; loader spec R1-R8 in
+  docs/MAINTENANCE.md 4.2 (not implemented). Host: `tools/maint/sbm`; `SB_TRANSPORT=maint` makes the existing
+  tools talk to it (TWRP stays the default until proven). Built (container 34.9 MiB) and rehearsed in the VM
+  (35/35, the real dropbear/e2fsprogs/busybox in a chroot); 34 host tests. Found: Ubuntu's static busybox ash
+  runs its applets before PATH (so it is not SBMAINT's shell; the daily linux.initrd uses it as /bin/sh), and
+  the old installer environment's by-name links into /dev would have failed part-write.py's check. NOT run on
+  the phone.
+
+- 2026-11-06: **Engineer OS v2 = Starbite Lab** (docs/ENGINEER-OS.md; built and host-checked, NOT run on the phone;
+  phone checklist in section 12). Tiers replace v1's dry run: tier 1 warning screen + slide; tier 2 + the target's
+  name typed; tier 3 + hold Power 3 s and, for storage, a verified backup into the OS store first (EFS, CPEFS,
+  PARAM, KEYSTORAGE, PERSISTENT, STEADY, BOTA, DTB/DTBO, GPT head/tail, boot LUs; PMU, CMU_TOP/MIF/CPU/G3D, ACPM,
+  fuses, TMU; PMIC voltages; MAX77705 config). Impossible only: S-Boot's ECT 0xA0000000, the running image
+  0x92000000..0x9FFFFFFF, the secure hole. libsb: fence.c authorisation gate (sealed sb_auth, one open, voided on
+  disarm); UFS WRITE(10) (the loader's single-block path) and SD CMD24/25 (new) only from sb_write; UFS LU reads;
+  OS store append-only writer (data, dir slot n, header = commit), settings_save, rename/remove (tier 2); smp.c:
+  the other 7 cores run C with MMU on (boot core's tables, own fault vectors; M3s need xnu 0304's PMU sequence,
+  asked as tier 3); adc.c (CMGP ADC 0x14230000, vendor DT thermistor tables: battery ADC 1950 = 26.2 C); every
+  TMU probe + decoded trip. App: lab.c (full health check, CPU / memory / display / touch / storage / thermal /
+  battery tests, report into the store), kern.c (ARMv8.0; build refuses v8.1+ instructions in worker code),
+  util.c (peek/poke, memory fill, partitions + boot LUs backup/restore/erase, store, settings editor incl. POST /
+  log level flags the loader does not read yet, PMIC/charger writes, reboot to anything). Host: 458 unit checks,
+  tour 82 pages, labtour (every test started and stopped by Power, a tier 1 write end to end, an unconfirmed
+  write refused), --repro. engineer.img sha256 da25de2c000491d2...36a6 (4407296 bytes, 575 relocations).
+  catalog.toml's version string still says "read only · dry-run writes" (not changed here).
 - 2026-11-06: **Boot health (built, host-tested, not flashed): full POST, quiet boots, crash and hang detection,
   Android's own DTB.** docs/STARBITE-HEALTH.md. (a) POST levels in the settings record (bytes 104.., zero = default):
   full (default, ~9 s: RAM address/~address over 0x8C000000+64M, 0x92000000+128M, bank 2 0x880000000+1G within a 6 s

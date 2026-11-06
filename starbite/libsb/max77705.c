@@ -1,9 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * MAX77705 (charger, fuel gauge, USB-C) on HSI2C 0x14360000 (USI_CMGP03), read only: port of
+ * MAX77705 (charger, fuel gauge, USB-C) on HSI2C 0x14360000 (USI_CMGP03), read freely; written only
+ * through sb_max_write with a confirmed authorisation (the charger watchdog feed, tier 1; any other
+ * register, tier 3: engineer/policy.c max_tier). Port of
  * shim/starlte/em.c bi_* (build/em-research-battery.md). PMIC 0x66, fuel gauge 0x36 (RepSOC 0x06
  * = %, VCELL 0x09, Current 0x0A), charger 0x69, USB-C 0x25.
  *
- * Never writes a MAX77705 register and never reads the clear-on-read interrupt registers
+ * Writes nothing on its own and never reads the clear-on-read interrupt registers
  * (PMIC 0x22 / 0x24, charger 0xB0). Unlike Engineer Lite it does not write CMU_CMGP's gates or
  * Q-channel (0x14200000): S-Boot drives this bus at every boot (charger, fuel-gauge model), so
  * the clocks run; a closed gate is reported instead. SYSREG_CMGP's USI mode and the GPM14/15 pin
@@ -101,6 +103,37 @@ int sb_chg_read(uint8_t reg, uint8_t *v)
 int sb_usbc_read(uint8_t reg, uint8_t *v)
 {
     return sb_max_init() && sb_i2c_read(&sb_max_bus, BI_USBC, reg, v, 1);
+}
+
+/* A register write (2-byte message reg, value, STOP), with the gate: the caller's policy
+ * (engineer/policy.c max_tier) gives the tier, at least 1; an open authorisation must cover
+ * SB_SP_MAX addr7 << 8 | reg. Never CHG_INT (0xB0), read back unless the register is write-only. */
+int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier)
+{
+    const char *why;
+    uint8_t m[2] = { reg, val }, back = 0;
+    if (addr7 > 0x7f || sb_gate_check(SB_SP_MAX, 0, (uint64_t)addr7 << 8 | reg, 1, tier < SB_TIER1 ? SB_TIER1 : tier,
+                                      &why)) {
+        sb_logx("max77705 write refused, reg ", (uint64_t)addr7 << 8 | reg);
+        return 0;
+    }
+    if (!sb_max_init())
+        return 0;
+    int ok = sb_i2c_msg(&sb_max_bus, addr7, 0, m, 2, 1);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "max77705 write ");
+    ub_hex(&u, (uint64_t)addr7 << 8 | reg, 4);
+    ub_s(&u, " = ");
+    ub_hex(&u, val, 2);
+    if (ok && sb_i2c_read(&sb_max_bus, addr7, reg, &back, 1)) {
+        ub_s(&u, ", reads back ");
+        ub_hex(&u, back, 2);
+    } else if (!ok) {
+        ub_s(&u, ": no ACK");
+    }
+    sb_log(u.b);
+    return ok;
 }
 
 /* One sample for the status bar and the dashboard. */

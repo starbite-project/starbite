@@ -71,6 +71,41 @@ struct star_settings {
     uint32_t seq, timeout_s, flags;
     char default_key[24], last_key[24], next_key[24];
 };
+/* Engineer OS v2 settings flags the loader does not read yet (stored for a later loader; Engineer OS
+ * shows and edits them): POST level and log level. */
+#define SET_POST_SHIFT 4U      /* 0 quick (default), 1 off, 2 full */
+#define SET_POST_MASK  (3U << SET_POST_SHIFT)
+#define SET_LOG_SHIFT  8U      /* 0 normal (default), 1 quiet, 2 verbose */
+#define SET_LOG_MASK   (3U << SET_LOG_SHIFT)
 /* 1 if a valid record was read; otherwise *s = defaults (zeros) and 0. */
 int settings_load(struct star_settings *s);
-/* (No settings_save in libsb: v1 has no storage write. A change goes through sb_write, dry-run.) */
+/* Write the record (seq + 1), read back: 0, or < 0 / SB_W_*. Needs an open authorisation of kind
+ * SB_KIND_STORE (the fence's gate). */
+int settings_save(struct star_settings *s);
+
+/* ---- writer (Engineer OS v2): append only, every block through the write fence, read back ---- */
+struct store_writer {
+    unsigned m, type;
+    int err;
+    uint64_t at, size, done;
+    uint32_t crc;
+    char name[32];
+};
+/* Free 4 KiB blocks for new entries (after the tail guard). */
+uint64_t store_free(unsigned m);
+/* Streaming append: begin (checks name, room), chunks (each a multiple of 4096 bytes except the
+ * last; written and read back), commit (the whole entry read back, then the directory slot, then
+ * the header: the entry exists from that one write on). 0 or < 0: -2 bad name, -3 exists,
+ * -4 directory full, -5 no room, -6 sizes, -7 the store changed, -8 not found after the commit,
+ * SB_W_* from the fence. Before the commit nothing a reader sees has changed. */
+int store_wr_begin(struct store_writer *w, unsigned m, const char *name, unsigned type, uint64_t size);
+int store_wr_chunk(struct store_writer *w, const void *src, uint64_t bytes);
+int store_wr_commit(struct store_writer *w, struct store_ent *out);
+int store_append(unsigned m, const char *name, unsigned type, const void *src, uint64_t size, struct store_ent *out);
+/* Tier 2 directory rewrites (see store.c): remove / rename the entry at directory index idx. */
+int store_remove(unsigned m, unsigned idx);
+int store_rename(unsigned m, unsigned idx, const char *newname);
+int store_dir_range(unsigned m, uint64_t *first, uint64_t *count);
+/* Entry i read back and its CRC computed: 0 match, 1 mismatch, < 0 read error. */
+int store_verify(unsigned m, unsigned i, uint32_t *got);
+uint32_t store_crc32(const void *p, uint64_t n);

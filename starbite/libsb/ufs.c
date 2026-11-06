@@ -1,7 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * UFS for libsb: see ufs.h. Copied from shim/starlte/ufs.c (the loader's) with the one write
- * removed: libsb sends only READ(10), INQUIRY, TEST UNIT READY, START STOP UNIT and QUERY READ
- * DESCRIPTOR. ufs_scsi refuses any CDB that is not in that list, so no caller can build a write.
+ * UFS for libsb: see ufs.h. Copied from shim/starlte/ufs.c (the loader's). The general command
+ * path (ufs_scsi) sends only READ(10), INQUIRY, TEST UNIT READY, START STOP UNIT and QUERY READ
+ * DESCRIPTOR: it refuses any CDB that is not in that list, so no caller can build a write there.
+ * The one write path is ufs_write_blocks: WRITE(10) of single 4 KiB blocks, exactly the loader's
+ * ufs_write_block (its settings record, proven on the phone), refused unless the write fence
+ * (fence.c sb_write) is running it after the user's confirmation for that range.
  */
 #include <stdint.h>
 #include "sb.h"
@@ -19,6 +22,7 @@
 #define U_UCD (UFS_DMA + 0x1000)
 #define U_RESP (U_UCD + 512)
 #define U_PRDT (U_UCD + 1024)
+#define U_WSTAGE (UFS_DMA + 0x200000)  /* one 4 KiB write staging block, non-cacheable (DMA window) */
 
 int ufs_state, ufs_why;
 uint32_t ufs_ocs, ufs_resp, ufs_status, ufs_qresp;
@@ -42,7 +46,7 @@ static void u8w(uintptr_t a, uint8_t v)
     *(volatile uint8_t *)a = v;
 }
 
-/* Run the UPIU at U_UCD in slot 0. dd: 0 none, 2 device to memory; len bytes
+/* Run the UPIU at U_UCD in slot 0. dd: 0 none, 1 memory to device, 2 device to memory; len bytes
  * into buf in 4 KiB PRDT entries (16 bytes each). 0 on success. */
 static int ufs_ring(unsigned dd, uint32_t len, int scsi, uintptr_t buf)
 {
@@ -159,19 +163,36 @@ int ufs_read(uint64_t lba, uint32_t count)
     return read10(lba, count, UFS_BUF);
 }
 
+/* The same commands to another logical unit (boot LUs 1..4 on the S9); LU0 afterwards. */
+int ufs_read_lu(unsigned lu, uint64_t lba, uint32_t count)
+{
+    if (lu > 7 || !ufs_up())
+        return -4;
+    ufs_lun = (uint8_t)lu;
+    int r = read10(lba, count, UFS_BUF);
+    ufs_lun = 0;
+    return r;
+}
+
 /* 32 blocks (128 KiB, 32 PRDT entries) per command; a chunk that fails three
  * times is read again one block at a time. */
 int ufs_read_to(uint64_t lba, uint64_t count, uintptr_t dst)
 {
-    if (!ufs_up())
+    return ufs_read_lu_to(0, lba, count, dst);
+}
+
+int ufs_read_lu_to(unsigned lu, uint64_t lba, uint64_t count, uintptr_t dst)
+{
+    if (!ufs_up() || lu > 7)
         return -5;
+    ufs_lun = (uint8_t)lu;
     int wb = sb_map_kind(dst) == 2;
     if (wb)                                 /* no dirty line may be evicted over the DMA data */
         sb_dcache_clean_inval((const void *)dst, count * 4096U);
     int r = 0;
     for (uint64_t i = 0, n; i < count && !r; i += n) {
         n = count - i < 32U ? count - i : 32U;
-        int r = -1;
+        r = -1;                             /* (v1 declared a second r here: errors were lost) */
         for (int a = 0; a < 3 && r; ++a)
             r = read10(lba + i, (uint32_t)n, dst + i * 4096U);
         for (uint64_t j = 0; r && j < n; ++j) {
@@ -184,8 +205,61 @@ int ufs_read_to(uint64_t lba, uint64_t count, uintptr_t dst)
                 r = 0;
         }
     }
+    ufs_lun = 0;
     if (wb)                                 /* lines the CPU may have prefetched meanwhile */
         sb_dcache_clean_inval((const void *)dst, count * 4096U);
+    return r;
+}
+
+/* ---- the one write path (fence.c sb_write only) -------------------------------------------
+ * WRITE(10), one 4 KiB block per command from a non-cacheable staging block, one PRDT entry: the
+ * loader's ufs_write_block, which writes its settings record on every menu change. Refused with
+ * -6 before any register or DMA memory is touched unless the write fence is active (sb_write has
+ * checked the target and the user's confirmation for it). */
+static int write10_one(uint64_t lba, uintptr_t src)
+{
+    if (lba > 0xfffffffeULL)
+        return -4;
+    volatile uint64_t *st = (volatile uint64_t *)U_WSTAGE;
+    const volatile uint64_t *in = (const volatile uint64_t *)src;
+    for (unsigned i = 0; i < 512; ++i)
+        st[i] = in[i];
+    __asm__ volatile("dsb sy" : : : "memory");
+    uint8_t cdb[10] = { 0x2a, 0, (uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8),
+                        (uint8_t)lba, 0, 0, 1, 0 };
+    u_zero(U_UCD, 1024);
+    u8w(U_UCD + 0, 0x01);
+    u8w(U_UCD + 1, 0x20);                   /* write */
+    u8w(U_UCD + 2, ufs_lun);
+    u8w(U_UCD + 3, ++ufs_tag);
+    u8w(U_UCD + 12, 0);
+    u8w(U_UCD + 13, 0);
+    u8w(U_UCD + 14, 0x10);                  /* 4096 bytes */
+    u8w(U_UCD + 15, 0);
+    for (unsigned i = 0; i < sizeof(cdb); ++i)
+        u8w(U_UCD + 16 + i, cdb[i]);
+    int r = ufs_ring(1U, 4096U, 1, U_WSTAGE);
+    if (r)
+        return r;
+    return (ufs_resp != 0x21 || ufs_qresp || ufs_status) ? -3 : 0;
+}
+
+int ufs_write_blocks(unsigned lu, uint64_t lba, uint64_t count, uintptr_t src)
+{
+    if (!sb_fence_active() || lu > 7)
+        return -6;                          /* not through the fence: nothing touched */
+    if (!ufs_up())
+        return -5;
+    if (sb_map_kind(src) == 2)              /* the CPU copies it: caches are coherent with it */
+        __asm__ volatile("dsb sy" : : : "memory");
+    int r = 0;
+    ufs_lun = (uint8_t)lu;
+    for (uint64_t i = 0; i < count && !r; ++i) {
+        r = -1;
+        for (int a = 0; a < 3 && r; ++a)
+            r = write10_one(lba + i, src + i * 4096U);
+    }
+    ufs_lun = 0;
     return r;
 }
 

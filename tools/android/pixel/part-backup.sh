@@ -10,6 +10,8 @@
 # == sha256 of the decompressed backup (Mac or phone). Prints both; exit 1 on any mismatch.
 # --dry-run: checks adb state, the by-name link, the size and the free space at the target; copies nothing.
 set -euo pipefail
+# SB_TRANSPORT=maint: adb = ssh to Starbite Maintenance (docs/MAINTENANCE.md 9); default: TWRP's adb
+[ "${SB_TRANSPORT:-twrp}" = twrp ] || PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../maint/transport" && pwd):$PATH"
 mode=${1:?mac|card}; NAME=${2:?partition}; dest=${3:?outdir|tag}; dry=${4:-}
 [ "$(adb get-state 2>/dev/null)" = recovery ] || { echo "phone not in TWRP"; exit 1; }
 dev=$(adb shell "readlink -f /dev/block/by-name/$NAME" | tr -d '\r')

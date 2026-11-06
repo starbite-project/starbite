@@ -208,6 +208,40 @@ ACTIVE = 'starbite-a'          # the table a Starbite install lays out unless th
 TARGETS = ('starbite-a', 'starbite-a16g')      # layouts a bundle may name (stock is a reference only)
 
 
+# ---------------------------------------------------------------------------------------------
+# PROPOSAL, NOT A TARGET (docs/MAINTENANCE.md 4.1; the coordinator decides the One UI 8 rows):
+# SBMAINT, Starbite Maintenance's own partition, which replaces TWRP without RECOVERY. 256 MiB = two
+# 128 MiB slots for "SBMAINT1" containers (tools/maint/sbmaint.py: A at +0, B at +128 MiB; today's
+# container is 35 MiB, the loader stages at most 80 MiB). Its own type GUID (the bytes "STARBITE MAINT01",
+# Samsung-style), so Windows gives it no drive letter and tools can tell it from a data partition;
+# attribute bit 0 ("required by the platform": partition tools should not delete it). The loader finds it
+# by NAME (gpt_find("SBMAINT")).
+# Placement here: the LAST row, after an A16DATA of fixed size (15.75 GiB instead of 16 GiB), so no
+# existing row is renumbered (part-write.py, preflight.sh, metadata-reset.sh name sda18/19/20/28) and
+# the slot B offset is the same on every phone. The other choice (SBMAINT before a FILL A16DATA, which
+# renumbers A16DATA to sda29) is in docs/MAINTENANCE.md 4.1. Not in LAYOUTS/TARGETS: no bundle can name
+# it; `ufslayout.py show proposal-sbmaint` prints it and `check` validates it.
+SBMAINT_TYPE = str(uuid.UUID(bytes_le=b'STARBITE MAINT01'))     # 52415453-4942-4554-204d-41494e543031
+SBMAINT_BLOCKS = 65536                                          # 256 MiB
+SBMAINT_ROW = Part('SBMAINT', None, SBMAINT_BLOCKS, INSTALLER, 'Starbite Maintenance: two SBMAINT1 container '
+                   'slots (kernel + DTBs + initramfs), started by the loader (Bixby > Starbite Maintenance, '
+                   'boot-next "maint"); written by `sbm update`', type=SBMAINT_TYPE, attrs=1)
+
+
+def _proposal_sbmaint():
+    """starbite-a16g (Windows 17.84 GiB, Android data 16 GiB: the One UI 8 sizes the user asked for) with
+    A16DATA fixed at 15.75 GiB and SBMAINT after it."""
+    rows = list(_starbite_a16g().parts)
+    rows[27] = replace(rows[27], blocks=4128768)                # A16DATA 15.75 GiB, no longer FILL
+    return Layout('proposal-sbmaint', 'PROPOSAL: starbite-a16g + SBMAINT 256 MiB as the last row (no renumbering)',
+                  tuple(rows) + (SBMAINT_ROW,), min_blocks=15616000,
+                  notes=('A proposal for the One UI 8 layout, not a target (docs/MAINTENANCE.md 4.1).',
+                         'SBMAINT ends 251 blocks before the last usable block on a 15616000-block UFS.'))
+
+
+PROPOSALS = {L.name: L for L in (_proposal_sbmaint(),)}
+
+
 class LayoutError(ValueError):
     pass
 
@@ -263,7 +297,7 @@ def show(L, total_blocks=15616000, out=sys.stdout):
     print(f'  UFS LU0 {total_blocks} blocks of 4 KiB ({total_blocks * BLOCK / 2**30:.2f} GiB); usable {first}..{last}',
           file=out)
     print(f'  {"#":>3} {"name":<11} {"first":>9} {"last":>9} {"size":>10}  {"content":<9} {"type":<10} role', file=out)
-    tn = {MS_BASIC: 'basic', EFI_SYSTEM: 'EFI', LINUX_DATA: 'linux'}
+    tn = {MS_BASIC: 'basic', EFI_SYSTEM: 'EFI', LINUX_DATA: 'linux', SBMAINT_TYPE: 'sbmaint'}
     for i, p, s, e in rows:
         n = (e - s + 1) * BLOCK
         size = f'{n / 2**30:.2f} GiB' if n >= 2**30 else f'{n / 2**20:.1f} MiB' if n >= 2**20 else f'{n // 1024} KiB'
@@ -280,12 +314,15 @@ def main(argv):
         for L in LAYOUTS.values():
             validate(L)
             print(f'ok  {L.name}: {len(L.parts)} rows')
+        for L in PROPOSALS.values():
+            validate(L)
+            print(f'ok  {L.name}: {len(L.parts)} rows (proposal, not a target)')
         print(f'active: {ACTIVE}')
         return
     blocks = int(argv[argv.index('--blocks') + 1]) if '--blocks' in argv else 15616000
     names = [a for a in argv[1:] if not a.startswith('--') and not a.isdigit()]
     for n in names or [ACTIVE]:
-        show(get(n), blocks)
+        show(PROPOSALS[n] if n in PROPOSALS else get(n), blocks)
 
 
 if __name__ == '__main__':

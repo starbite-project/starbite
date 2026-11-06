@@ -1,0 +1,112 @@
+#!/bin/sh
+# Starbite Maintenance (docs/MAINTENANCE.md 5.2): the USB port.
+#   sb-usb device   a USB device for the computer: CDC-ECM (or CDC-NCM with sb.maint.usb=ncm) + CDC-ACM;
+#                   usb0 172.16.42.1, udhcpd gives the computer 172.16.42.2; dropbear on usb0 only, KEY
+#                   ONLY (no password, no telnet); a root shell on the ACM port (the cable is the access
+#                   control there, as for the distros and the installer environment). With the rescue DTB
+#                   (USB host by default) VBUS goes off and the role switch turns the port around first.
+#   sb-usb host     rescue mode: the port as a USB host (VBUS on, role host; the rescue DTB only)
+#   sb-usb stop     gadget, dropbear and udhcpd off
+# The same addresses as the installer environment and the distros (172.16.42.1), so the installer and
+# every host tool reach it unchanged; the computer tells them apart by the host-side MAC
+# 02:53:39:00:02:02 and by the pinned ssh host key (tools/maint/sbm).
+G=/sys/kernel/config/usb_gadget/sbmaint
+VB=/sys/module/s9p_max77705_muic/parameters/vbus
+S=/run/sbmaint
+log() { echo "$(date +%H:%M:%S) $*" >> $S/log 2>/dev/null; echo "<6>sbmaint: $*" > /dev/kmsg 2>/dev/null; return 0; }
+arg() { tr ' ' '\n' < /proc/cmdline | sed -n "s/^$1=//p" | tail -1; }
+
+vbus_off() {
+	[ -w $VB ] && echo 0 > $VB
+	i=0
+	while [ $i -lt 30 ]; do
+		on=
+		for r in /sys/class/regulator/*; do
+			[ "$(cat "$r/name" 2>/dev/null)" = usb-otg-vbus ] && [ "$(cat "$r/state" 2>/dev/null)" = enabled ] && on=1
+		done
+		[ -z "$on" ] && return 0
+		sleep 0.1
+		i=$((i + 1))
+	done
+	log "WARNING: USB VBUS still on"
+}
+
+gadget_stop() {
+	[ -d $G ] || return 0
+	echo "" > $G/UDC 2>/dev/null
+	rm -f $G/configs/c.1/*.usb0 $G/configs/c.1/acm.GS0 2>/dev/null
+	rmdir $G/configs/c.1/strings/0x409 $G/configs/c.1 $G/functions/* $G/strings/0x409 $G 2>/dev/null
+	return 0
+}
+
+case ${1:-} in
+device)
+	if ls /sys/class/usb_role/*/role >/dev/null 2>&1; then
+		vbus_off
+		for r in /sys/class/usb_role/*/role; do echo device > "$r" 2>/dev/null; done
+	fi
+	i=0
+	while [ -z "$(ls /sys/class/udc 2>/dev/null)" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+	udc=$(ls /sys/class/udc 2>/dev/null | head -1)
+	[ -n "$udc" ] || { log "ERROR: no USB device controller (dwc3): the DTB must make it a peripheral"; exit 2; }
+	mount -t configfs none /sys/kernel/config 2>/dev/null
+	gadget_stop
+	fn=ecm
+	[ "$(arg sb.maint.usb)" = ncm ] && fn=ncm
+	mkdir -p $G/strings/0x409 $G/functions/$fn.usb0 $G/functions/acm.GS0 $G/configs/c.1/strings/0x409 || exit 3
+	echo 0x1d6b > $G/idVendor                      # Linux Foundation
+	echo 0x0104 > $G/idProduct                     # Multifunction Composite Gadget
+	echo Starbite > $G/strings/0x409/manufacturer
+	echo "Starbite Maintenance" > $G/strings/0x409/product
+	s=$(arg sb.serial)
+	echo "${s:-starbite-maint}" > $G/strings/0x409/serialnumber
+	echo 02:53:39:00:02:01 > $G/functions/$fn.usb0/dev_addr
+	echo 02:53:39:00:02:02 > $G/functions/$fn.usb0/host_addr
+	echo "$fn + ACM" > $G/configs/c.1/strings/0x409/configuration
+	echo 250 > $G/configs/c.1/MaxPower
+	ln -s $G/functions/$fn.usb0 $G/configs/c.1/
+	ln -s $G/functions/acm.GS0 $G/configs/c.1/
+	echo "$udc" > $G/UDC || { log "ERROR: could not bind the gadget to $udc"; exit 4; }
+	i=0
+	while [ ! -e /sys/class/net/usb0 ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+	ifconfig lo 127.0.0.1 up
+	ifconfig usb0 172.16.42.1 netmask 255.255.255.0 up || { log "ERROR: usb0 did not come up"; exit 5; }
+	cat > /run/udhcpd.conf <<EOF
+start 172.16.42.2
+end 172.16.42.2
+interface usb0
+lease_file /run/udhcpd.leases
+option subnet 255.255.255.0
+option lease 86400
+EOF
+	touch /run/udhcpd.leases
+	killall udhcpd 2>/dev/null
+	udhcpd /run/udhcpd.conf
+	killall dropbear 2>/dev/null
+	if [ -s /root/.ssh/authorized_keys ]; then
+		hk=/etc/dropbear/dropbear_ed25519_host_key
+		if [ -s $hk ]; then
+			dropbear -s -g -j -k -p 172.16.42.1:22 -r $hk -P /run/dropbear.pid
+		else
+			log "WARNING: no built-in ssh host key; making one (the computer's pin will not match)"
+			dropbear -s -g -j -k -R -p 172.16.42.1:22 -P /run/dropbear.pid
+		fi
+		log "USB $fn up: ssh root@172.16.42.1 (key only)"
+	else
+		log "ERROR: no ssh key in this build: the computer cannot log in"
+	fi
+	if [ ! -s /run/acm-loop.pid ]; then
+		( while :; do [ -c /dev/ttyGS0 ] && setsid sh -c 'exec sh -l </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done ) &
+		echo $! > /run/acm-loop.pid
+	fi ;;
+host)
+	gadget_stop
+	[ -w $VB ] && echo 1 > $VB
+	for r in /sys/class/usb_role/*/role; do [ -w "$r" ] && echo host > "$r" 2>/dev/null; done
+	log "USB host mode" ;;
+stop)
+	killall dropbear udhcpd 2>/dev/null
+	gadget_stop ;;
+*) echo "usage: sb-usb device|host|stop" >&2; exit 2 ;;
+esac
+exit 0

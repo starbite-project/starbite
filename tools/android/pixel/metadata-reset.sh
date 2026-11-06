@@ -5,6 +5,9 @@
 # which 4.9 cannot mount), with exactly krazey90's command (lineage-24.0-initialize-metadata-sideload.zip).
 # Refuses unless ODM -> sda20, it is not mounted, and an ODM backup line is in build/android/pixel/backups.txt.
 set -euo pipefail
+# SB_TRANSPORT=maint: adb = ssh to Starbite Maintenance (docs/MAINTENANCE.md 9; its /etc/mke2fs.conf makes
+# the same 4.9-mountable ext4 as TWRP's mke2fs); default: TWRP's adb
+[ "${SB_TRANSPORT:-twrp}" = twrp ] || PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../maint/transport" && pwd):$PATH"
 DRY=${1:-}
 [ "$(adb get-state 2>/dev/null)" = recovery ] || { echo "phone not in TWRP"; exit 1; }
 dev=$(adb shell readlink -f /dev/block/by-name/ODM | tr -d '\r')

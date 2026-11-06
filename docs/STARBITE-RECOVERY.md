@@ -186,6 +186,13 @@ total: 400 ms of that is the Bixby window. To shorten the window, change `REC_WI
   working way in.
 - The Starbite Installer, which should make the rescue disk, is item 7 of the plan.
 
+### Starbite Maintenance (proposed menu item, 2026-11-06)
+
+docs/MAINTENANCE.md 4.2 specifies a "STARBITE MAINTENANCE" item for this menu and early boot-next keys
+`maint`, `maint-prev`, `maint-rescue` handled like `rescue`: the loader starts the Starbite Maintenance Linux
+environment (TWRP's replacement; never RECOVERY) from a GPT partition `SBMAINT` (two CRC-checked container
+slots) or the OS store, with no POST or menu. Not implemented in the loader yet.
+
 ## 6. RAM used
 
 All in the loader's free XNU window (non-cacheable, unused until an OS is loaded):

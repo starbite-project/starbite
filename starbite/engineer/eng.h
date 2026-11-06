@@ -13,8 +13,8 @@
 #include "catalog.h"
 #include "sd.h"
 
-#define ENG_VERSION "1.1"
-#define ENG_BUILD "EN1-EN3 (v1.1, dry-run; keys-only navigation)"
+#define ENG_VERSION "2.0"
+#define ENG_BUILD "Starbite Lab (v2: tiered writes, stress, thermal, battery, utilities)"
 
 /* em.c's colour names on menu v7's palette */
 #define UI_TEXT C_L1
@@ -111,37 +111,121 @@ void fill_timer(void), measure_timer(void), fill_battery(void), fill_pmic(void),
 void fill_partitions(void), fill_ufs_dev(void), fill_sd(void), fill_android(void), fill_ios(void);
 void fill_linux(void), fill_windows(void), fill_store(void), fill_regs(void);
 void test_display(void), test_touch(void), test_keys(void), run_cores_dialog(void), run_ram_dialog(void);
-void run_bw(void), run_speed(void), sector_screen(void), peek_screen(void), dump_pmic(void);
+void run_bw(void), run_speed(void), sector_screen(void), dump_pmic(void);
 void touch_rails(void), sd_page(void), sdboot_page(void), start_page(void), ios_opts_page(void);
 void bright_page(void), reboot_page(void), show_pmsg(void), show_records(void), show_cmdline(void);
 /* Clear a pending boot-next, reboot normally: S-Boot, the loader, its menu. Asks first. */
 void eng_exit_to_menu(void);
 
-/* ---- armed mode (armed.c) -------------------------------------------------------------------- */
+/* ---- policy (policy.c, pure, unit-tested) ------------------------------------------------------
+ * Tiers of confirmation (libsb SB_TIER*): 0 read, 1 warning + held slide, 2 + the target typed,
+ * 3 + a second confirmation (+ a verified backup for storage). TIER_NO: physically impossible or
+ * the running Engineer OS itself. */
+enum { TIER0 = SB_TIER0, TIER1 = SB_TIER1, TIER2 = SB_TIER2, TIER3 = SB_TIER3, TIER_NO = SB_TIER_NO };
+int poke_tier(uint64_t addr, const char **why);         /* a 32-bit register / memory write */
+const char *poke_undo(uint64_t addr);
+int range_tier(uint64_t addr, uint64_t len, const char **why);   /* memory fill: the worst page */
+int read_tier(uint64_t addr, const char **why);         /* 0 free, 1 asks, TIER_NO */
+int peek_allowed(uint64_t addr);                        /* read_tier == 0 */
+int pmic_tier(unsigned type, unsigned reg, unsigned val, const char **why);
+int max_tier(unsigned addr7, unsigned reg, unsigned val, const char **why);
+const char *tier_name(int t);
 
-enum { TIER0, TIER1, TIER2, TIER_NEVER };
-int armed_tier(void);
+/* ---- armed mode and confirmations (armed.c) ------------------------------------------------------
+ * Armed mode is the session switch for the free-form tools (register poke, memory fill, sector
+ * edit, PMIC / MAX77705 writes): hold Power 2 s, then slide; red border; ends after 5 minutes
+ * without input, when its page is left, and on reboot. Every write, named or free-form, goes
+ * through lab_confirm: the warning screen (what happens, how to undo), then the confirmations its
+ * tier needs. */
+int armed_tier(void);                   /* 1 while armed, 0 not */
 uint64_t armed_left_ms(void);
-/* Arm (hold Power 2 s, then slide; battery >= 30 % for writes). 1 armed. */
 int armed_arm(void);
 void armed_disarm(const char *why);
-/* Second unlock for tier 2: type the partition name on the keypad. */
-int armed_tier2(const char *part);
 void armed_tick(void);
-/* A would-be change: shows the change card, logs the dry run, refuses. Returns SB_W_* or 0. */
-struct change {
-    const char *what;       /* "Register write", "PMIC rail", "Settings record", "Partition" */
-    const char *target;     /* "0x14050000", "LDO35", "UFS block 4194306" */
-    const char *old_v;      /* old value or hash */
-    const char *new_v;
-    const char *backup;     /* where the backup would go */
-    int tier;               /* needed tier */
+struct action {
+    const char *title;                  /* "Write EFS", "Register write" */
+    const char *target;                 /* what is typed for tier 2+: "EFS", "14220180" */
+    const char *happens[4];             /* what happens, one line each (0 ends) */
+    const char *undo;                   /* how to undo it */
+    const char *old_v, *new_v;
+    const char *backup;                 /* where the backup goes ("" none) */
+    int tier;
+    unsigned space, lu, kind;           /* the authorisation: SB_MED_UFS / SD / SB_SP_* */
+    uint64_t first, count;
 };
-int armed_change(const struct change *c);
-/* Register poke policy: TIER_NEVER for the compiled-in exclusions, TIER1 for allowlisted
- * blocks, else TIER_NEVER. */
-int poke_tier(uint64_t addr, const char **why);
-int peek_allowed(uint64_t addr);
+/* Warning screen and the confirmations; on success *auth is filled and complete except, for tier
+ * 3 storage, the backup step (lab_backup adds it). 1 confirmed, 0 cancelled or refused. */
+int lab_confirm(const struct action *a, struct sb_auth *auth);
+/* Back up blocks [first, first + count) of medium / lu into the OS store (UFS, else the card) as
+ * "bak-<label>-<n>", verified (read back, CRC, compared with the source again). On success records
+ * SB_STEP_BACKUP in auth (if given) and writes where it went into where (64 bytes). 0 or < 0. */
+int lab_backup(unsigned medium, unsigned lu, uint64_t first, uint64_t count, const char *label,
+               struct sb_auth *auth, char *where);
+/* Copy a store entry back to blocks [first, ...) of medium / lu with the gate open on auth, then
+ * read back and compare the CRC. 0 or < 0. */
+int lab_restore(const struct store_ent *e, unsigned medium, unsigned lu, uint64_t first, const struct sb_auth *auth);
+/* Run a confirmed register write / PMIC / MAX77705 write: gate open, write, read back, gate closed.
+ * The old value is kept for lab_undo. 1 written. */
+int lab_poke32(uint64_t addr, uint32_t val, const struct sb_auth *auth);
+int lab_pmic(unsigned type, unsigned reg, unsigned val, const struct sb_auth *auth);
+int lab_max(unsigned addr7, unsigned reg, unsigned val, const struct sb_auth *auth);
+int lab_undo_available(char *what, unsigned cap);
+void lab_undo(void);
+/* Power held 0.6 s (3 s if it was already down at the reset) stops a long operation or a test. */
+void lab_stop_reset(void);
+int lab_stop_check(void);
+/* The type-the-name keypad (tier 2+): 1 typed correctly, 0 cancelled. */
+int lab_type_name(const char *title, const char *name);
+/* Battery guard for writes: 1 ok (>= 20 %, or a charger, or the gauge does not answer and the
+ * user accepted that), 0 refused. */
+int lab_battery_ok(const char *what);
 void armed_page(void);
 void audit_page(void);
 void audit_line(const char *s);
+
+/* ---- utilities (util.c) ----------------------------------------------------------------------------- */
+
+void util_peek(void);                   /* register peek / poke */
+void util_memory(void);                 /* memory dump / fill */
+void util_partitions(void);             /* partition read / hexdump / backup / restore (UFS, LUs, card) */
+void util_store(void);                  /* OS store inspect / edit */
+void util_settings(void);               /* settings editor */
+void util_reboot(void);                 /* reboot to any target */
+void util_pmic(void);                   /* PMIC and MAX77705 register writes */
+void util_sector(unsigned medium, unsigned lu, uint64_t lba);   /* hexdump + edit */
+/* Keys-friendly hex entry: Volume changes the digit, Power moves on, hold Power cancels; touch:
+ * tap the upper / lower half of a digit. 1 entered. */
+int ask_hex(const char *title, const char *hint, uint64_t *v, unsigned digits);
+/* Pick one of n labels (a list): index or -1. */
+int ask_pick(const char *title, const char *const *labels, int n, int cur);
+
+/* ---- Lab tests (lab.c, kern.c) ------------------------------------------------------------------ */
+
+void lab_cpu_stress(void);
+void lab_mem_stress(void);
+void lab_display_stress(void);
+void lab_touch_grid(void);
+void lab_storage_bench(void);
+void lab_thermal(void);
+void lab_battery(void);                 /* the battery tests' list */
+void lab_health(void);                  /* full health check */
+void lab_save_report(void);             /* results to the OS store */
+void lab_sensors(void);                 /* every thermal sensor, live */
+/* Results of this session as text lines (report, store export). */
+unsigned lab_report_lines(char (*out)[96], unsigned max);
+/* kern.c: the stress kernels (ARMv8.0, run on every core) */
+#define KERN_INT 1U
+#define KERN_FP 2U
+#define KERN_NEON 4U
+#define KERN_MEM 8U
+struct kern_cfg {
+    unsigned mask;
+    uint64_t gold[4];                   /* reference results (the boot core computes them) */
+    uint64_t *buf[SB_NCORES];           /* KERN_MEM: per-core buffer */
+    uint64_t words;                     /* per buffer */
+    volatile uint32_t inject;           /* unit test / self test: corrupt one result */
+};
+void kern_gold(struct kern_cfg *c);
+/* One batch of every enabled kernel; returns the mismatches (0 = all results correct). */
+unsigned kern_batch(struct kern_cfg *c, unsigned core, uint64_t *iters);
+void kern_worker(unsigned w, void *arg);

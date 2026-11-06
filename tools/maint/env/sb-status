@@ -1,0 +1,51 @@
+#!/bin/sh
+# Starbite Maintenance: the status on the phone's screen (fbcon on tty0), redrawn in place every 2 s:
+# mode and version, the USB link, IP, the connected computer, ssh sessions, the current job (sb-job),
+# battery, the card, the protected partitions and the last log lines.
+#   sb-status --loop     (the init runs it in the background)     sb-status --once
+S=/run/sbmaint
+T=/dev/tty0
+[ -c $T ] || exit 0
+E=$(printf '\033')
+printf '\033[2J\033[H\033[?25l' > $T 2>/dev/null
+draw() {
+	eval "$(sb-info 2>/dev/null | sed -n "s/'/'\\\\''/g; s/^\([a-z_]*\)=\(.*\)$/i_\1='\2'/p")"
+	cols=$(stty size < $T 2>/dev/null | awk '{ print $2 }')
+	rows=$(stty size < $T 2>/dev/null | awk '{ print $1 }')
+	[ "${cols:-0}" -gt 20 ] || cols=80
+	[ "${rows:-0}" -gt 20 ] || rows=40
+	case $i_mode in
+	installer) title="STARBITE INSTALLER ENVIRONMENT" ;;
+	rescue) title="STARBITE MAINTENANCE (RESCUE: USB DEVICE)" ;;
+	*) title="STARBITE MAINTENANCE" ;;
+	esac
+	case $i_usb in
+	configured) link="connected to a computer ($i_usb_fn)" ;;
+	"") link="no USB device controller" ;;
+	*) link="not connected ($i_usb): plug the cable into a Mac or PC" ;;
+	esac
+	{
+		echo "$title"
+		echo "$i_release"
+		echo "started from: ${i_src:-?}${i_seq:+ (seq $i_seq)}${i_from:+, by $i_from}"
+		echo ""
+		echo "USB:     $link"
+		echo "IP:      ${i_ip:-none}   computer: ${i_host:-none yet}"
+		echo "ssh:     ${i_ssh_sessions:-0} session(s) ${i_ssh_from}"
+		echo "JOB:     ${i_job:-idle}"
+		echo ""
+		echo "battery: ${i_battery:-?}%   card: ${i_card:-not mounted}"
+		echo "partitions: ${i_byname:-0} by-name, ${i_protected_ro:-0} read-only${i_allowed:+, writable: $i_allowed}"
+		echo ""
+		echo "Power (hold 3 s): reboot to the Starbite menu"
+		echo "----"
+		tail -n $((rows - 16)) $S/log 2>/dev/null
+	} | cut -c1-"$cols" | sed "s/\$/${E}[K/" > $S/screen.new
+	printf '\033[H' > $T
+	cat $S/screen.new > $T
+	printf '\033[J' > $T
+}
+case ${1:---loop} in
+--once) draw ;;
+--loop) while :; do draw 2>/dev/null; sleep 2; done ;;
+esac

@@ -31,6 +31,7 @@
 #include <math.h>
 #include <signal.h>
 #include <ucontext.h>
+#include <time.h>
 
 #include "sbui.h"
 #include "ufs.h"
@@ -43,9 +44,21 @@
 
 static uint64_t now_us = 7ULL * 60 * 1000000 + 123456;   /* "uptime" 7 min */
 
-uint64_t sb_ticks(void) { now_us += 1; return now_us * 26U; }
+/* The fake clock also follows real time while the CPU is busy (stress loops, full-screen frames),
+ * so a busy loop's minutes are minutes of fake time too; idle waits (sb_udelay) still jump ahead. */
+static uint64_t real_last;
+static void clock_follow(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t r = (uint64_t)ts.tv_sec * 1000000U + (uint64_t)ts.tv_nsec / 1000U;
+    if (real_last && r > real_last)
+        now_us += r - real_last;
+    real_last = r;
+}
+uint64_t sb_ticks(void) { clock_follow(); now_us += 1; return now_us * 26U; }
 uint64_t sb_freq(void) { return 26000000U; }
-uint64_t sb_us(void) { now_us += 1; return now_us; }
+uint64_t sb_us(void) { clock_follow(); now_us += 1; return now_us; }
 uint64_t sb_ms(void) { return sb_us() / 1000U; }
 static void host_step(void);
 void sb_udelay(uint64_t us) { now_us += us; host_step(); }
@@ -402,26 +415,120 @@ int ufs_desc(uint8_t idn, uint8_t index, uint8_t *out, unsigned cap)
     return -3;
 }
 
+/* ---- fake block device: written blocks kept, the rest generated -------------------------------- */
+
+#define WB_MAX 8192
+static struct wblk {
+    unsigned med, lu;
+    uint64_t lba;
+    uint8_t *data;
+} wb[WB_MAX];
+static int wb_n;
+
+static struct wblk *wb_find(unsigned med, unsigned lu, uint64_t lba)
+{
+    for (int i = 0; i < wb_n; ++i)
+        if (wb[i].med == med && wb[i].lu == lu && wb[i].lba == lba)
+            return &wb[i];
+    return 0;
+}
+
+int sb_blk_read(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, void *dst)
+{
+    uint8_t *d = dst;
+    sb_udelay(n * 40U);                 /* about 100 MB/s of fake time */
+    for (uint64_t k = 0; k < n; ++k, d += 4096) {
+        struct wblk *w = wb_find(medium, lu, lba + k);
+        if (w) {
+            memcpy(d, w->data, 4096);
+        } else if (medium == SB_MED_UFS && !lu) {
+            ufs_read(lba + k, 1);
+            memcpy(d, (void *)UFS_BUF, 4096);
+        } else {
+            for (int i = 0; i < 4096; i += 8)
+                *(uint64_t *)(d + i) = (lba + k) * 0x9e3779b97f4a7c15ULL ^ (uint64_t)i ^ ((uint64_t)lu << 56);
+        }
+    }
+    return 0;
+}
+
+int sb_blk_write(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src)
+{
+    if (!sb_fence_active())
+        return -6;                      /* as the drivers: only from inside sb_write */
+    const uint8_t *s = src;
+    for (uint64_t k = 0; k < n; ++k, s += 4096) {
+        struct wblk *w = wb_find(medium, lu, lba + k);
+        if (!w) {
+            if (wb_n >= WB_MAX)
+                return -1;
+            w = &wb[wb_n++];
+            w->med = medium;
+            w->lu = lu;
+            w->lba = lba + k;
+            w->data = malloc(4096);
+        }
+        memcpy(w->data, s, 4096);
+    }
+    return 0;
+}
+
+/* ---- fake OS store: the real catalog, fixed entries, and what the store writer appends --------- */
+
 static const char *store_names[] = {
     "catalog", "ios16.uefi", "mac13-v33.xnu", "ios26-sd.xnu", "windows.uefi", "android.kernel",
     "android.ramdisk", "android.cmdline", "linux.image", "linux.dtb", "linux.initrd", "engineer.img",
     "uefishell.uefi",
 };
+#define NFIX (sizeof(store_names) / sizeof(store_names[0]))
 static uint8_t *catalog_blob;
 static uint64_t catalog_size;
-int store_open(unsigned m) { return m == STORE_UFS ? (int)(sizeof(store_names) / sizeof(store_names[0])) : 0; }
+static struct store_ent added[64];
+static unsigned nadded, removed_mask;
+static uint64_t st_used = 412931;
+#define ST_BASE 16903808ULL
+#define ST_CAP 721024ULL
+
+int store_open(unsigned m)
+{
+    if (m != STORE_UFS)
+        return 0;
+    sb_fence_store(STORE_UFS, ST_BASE, st_used, ST_CAP);
+    unsigned n = 0;
+    struct store_ent e;
+    while (store_get(m, n, &e))
+        ++n;
+    return (int)n;
+}
 int store_version(unsigned m) { return m == STORE_UFS ? 2 : 0; }
+static int raw_get(unsigned i, struct store_ent *e)
+{
+    if (i < NFIX) {
+        memset(e, 0, sizeof(*e));
+        sb_strcpy(e->name, 32, store_names[i]);
+        e->lba = ST_BASE + 7 + i * 4096U;
+        e->size = i == 0 ? catalog_size : (uint64_t)(1 + i * 7) * 1048576U + i * 4321U;
+        e->crc = 0x1234abcdU * (i + 1);
+        e->type = i == 0 ? ST_CATALOG : ST_DATA;
+        return 1;
+    }
+    if (i < NFIX + nadded) {
+        *e = added[i - NFIX];
+        return 1;
+    }
+    return 0;
+}
 int store_get(unsigned m, unsigned i, struct store_ent *e)
 {
-    if (m != STORE_UFS || i >= sizeof(store_names) / sizeof(store_names[0]))
+    if (m != STORE_UFS)
         return 0;
-    memset(e, 0, sizeof(*e));
-    sb_strcpy(e->name, 32, store_names[i]);
-    e->lba = 16903808 + i * 4096U;
-    e->size = i == 0 ? catalog_size : (uint64_t)(1 + i * 7) * 1048576U + i * 4321U;
-    e->crc = 0x1234abcdU * (i + 1);
-    e->medium = 0;
-    return 1;
+    for (unsigned r = 0, k = 0; raw_get(r, e); ++r) {
+        if (r < 32 && (removed_mask & (1U << r)))
+            continue;
+        if (k++ == i)
+            return 1;
+    }
+    return 0;
 }
 int store_find(const char *name, struct store_ent *e)
 {
@@ -443,20 +550,247 @@ int store_load(const struct store_ent *e, uintptr_t dst, uint64_t cap)
     return -1;
 }
 int store_head(const struct store_ent *e, uintptr_t dst) { (void)e; memset((void *)dst, 0, 4096); return 0; }
-uint64_t store_base(unsigned m) { return m ? 0 : 16903808; }
-uint64_t store_capacity(unsigned m) { return m ? 0 : 721024; }
-uint64_t store_used(unsigned m) { return m ? 0 : 412931; }
+uint64_t store_base(unsigned m) { return m ? 0 : ST_BASE; }
+uint64_t store_capacity(unsigned m) { return m ? 0 : ST_CAP; }
+uint64_t store_used(unsigned m) { return m ? 0 : st_used; }
 void store_reset(unsigned m) { (void)m; }
-int settings_load(struct star_settings *s)
+uint64_t store_free(unsigned m) { return m ? 0 : ST_CAP - st_used - 1033; }
+uint32_t store_crc32(const void *p, uint64_t n) { return sb_crc32(p, n); }
+
+/* The writer goes through the real fence (sb_write_store): the preview checks the gate. */
+int store_wr_begin(struct store_writer *w, unsigned m, const char *name, unsigned type, uint64_t size)
 {
-    memset(s, 0, sizeof(*s));
-    s->seq = 41;
-    s->timeout_s = 0;
-    s->flags = 0;
-    strcpy(s->last_key, "mac13");
-    strcpy(s->default_key, "mac13");
+    struct store_ent e;
+    memset(w, 0, sizeof(*w));
+    w->m = m;
+    w->type = type;
+    w->size = size;
+    sb_strcpy(w->name, sizeof(w->name), name);
+    if (m != STORE_UFS)
+        return w->err = -1;
+    if (store_find(name, &e))
+        return w->err = -3;
+    if ((size + 4095) / 4096 > store_free(m))
+        return w->err = -5;
+    w->at = ST_BASE + st_used;
+    w->crc = 0;
+    return 0;
+}
+int store_wr_chunk(struct store_writer *w, const void *src, uint64_t bytes)
+{
+    if (w->err)
+        return w->err;
+    static uint8_t pad[4096];
+    uint64_t full = bytes / 4096, lba = w->at + w->done / 4096;
+    int r = full ? sb_write_store(w->m, lba, full, src) : 0;
+    if (!r && (bytes & 4095)) {
+        memset(pad, 0, sizeof(pad));
+        memcpy(pad, (const uint8_t *)src + full * 4096, bytes & 4095);
+        r = sb_write_store(w->m, lba + full, 1, pad);
+    }
+    if (r)
+        return w->err = r;
+    w->done += bytes;
+    return 0;
+}
+int store_wr_commit(struct store_writer *w, struct store_ent *out)
+{
+    static uint8_t hdr[4096];
+    if (w->err)
+        return w->err;
+    int r = sb_write_store(w->m, ST_BASE + 1, 1, hdr);           /* the header commit */
+    if (r)
+        return w->err = r;
+    struct store_ent *e = &added[nadded < 63 ? nadded++ : 63];
+    memset(e, 0, sizeof(*e));
+    sb_strcpy(e->name, 32, w->name);
+    e->lba = w->at;
+    e->size = w->size;
+    e->type = (uint16_t)w->type;
+    e->crc = 0x5eed0000U + nadded;
+    st_used += (w->size + 4095) / 4096;
+    sb_fence_store(STORE_UFS, ST_BASE, st_used, ST_CAP);
+    if (out)
+        *out = *e;
+    printf("host: store append %s (%llu bytes)\n", w->name, (unsigned long long)w->size);
+    return 0;
+}
+int store_append(unsigned m, const char *name, unsigned type, const void *src, uint64_t size, struct store_ent *out)
+{
+    struct store_writer w;
+    int r = store_wr_begin(&w, m, name, type, size);
+    if (!r)
+        r = store_wr_chunk(&w, src, size);
+    if (!r)
+        r = store_wr_commit(&w, out);
+    return r;
+}
+int store_dir_range(unsigned m, uint64_t *first, uint64_t *count)
+{
+    if (m)
+        return 0;
+    *first = ST_BASE + 1;
+    *count = 6;
     return 1;
 }
+static int dir_edit(unsigned m, unsigned idx, const char *nn)
+{
+    static uint8_t blk[6 * 4096];
+    struct store_ent e;
+    if (m || !store_get(m, idx, &e))
+        return -2;
+    int r = sb_write(SB_MED_UFS, 0, ST_BASE + 3, 4, blk);
+    if (!r)
+        r = sb_write(SB_MED_UFS, 0, ST_BASE + 1, 1, blk);
+    if (r)
+        return r;
+    for (unsigned raw = 0, k = 0; raw_get(raw, &e); ++raw) {
+        if (raw < 32 && (removed_mask & (1U << raw)))
+            continue;
+        if (k++ != idx)
+            continue;
+        if (nn && raw >= NFIX)
+            sb_strcpy(added[raw - NFIX].name, 32, nn);
+        else if (!nn && raw < 32)
+            removed_mask |= 1U << raw;
+        break;
+    }
+    return 0;
+}
+int store_remove(unsigned m, unsigned idx) { return dir_edit(m, idx, 0); }
+int store_rename(unsigned m, unsigned idx, const char *n) { return dir_edit(m, idx, n); }
+int store_verify(unsigned m, unsigned i, uint32_t *got)
+{
+    struct store_ent e;
+    if (!store_get(m, i, &e))
+        return -1;
+    *got = e.crc;
+    return 0;
+}
+
+static struct star_settings host_settings = { 41, 0, 0, "mac13", "mac13", "" };
+int settings_load(struct star_settings *s)
+{
+    *s = host_settings;
+    return 1;
+}
+int settings_save(struct star_settings *s)
+{
+    static uint8_t blk[4096];
+    int r = sb_write_store(STORE_UFS, ST_BASE + 2, 1, blk);
+    if (r)
+        return r;
+    s->seq++;
+    host_settings = *s;
+    printf("host: settings saved (default %s, timeout %u, flags %#x)\n", s->default_key, s->timeout_s, s->flags);
+    return 0;
+}
+
+/* ---- PMIC / MAX77705 writes through the gate --------------------------------------------------- */
+
+int sb_pmic_write(uint32_t type, uint32_t reg, uint8_t val, int tier)
+{
+    const char *why;
+    if (type > 2 || reg > 255 || sb_gate_check(SB_SP_PMIC, 0, (uint64_t)type << 8 | reg, 1, tier < 1 ? 1 : tier, &why))
+        return 0;
+    pmic[type][reg] = val;
+    return 1;
+}
+static uint8_t chg_regs[256];
+int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier)
+{
+    const char *why;
+    if (sb_gate_check(SB_SP_MAX, 0, (uint64_t)addr7 << 8 | reg, 1, tier < 1 ? 1 : tier, &why))
+        return 0;
+    if (addr7 == 0x69)
+        chg_regs[reg] = val;
+    return 1;
+}
+
+/* ---- the CMGP ADC (libsb adc.c asks host_adc under SB_HOST) ---------------------------------- */
+
+static int host_load;                   /* worker cores running: the fake temperatures rise */
+int host_adc(unsigned ch)
+{
+    switch (ch) {
+    case 4: return 1950 - host_load * 25;   /* battery ~26 C, warmer under load */
+    case 0: return 1700 - host_load * 40;
+    case 1: return 1900;
+    case 2: return 1800;
+    case 10: return 0x800;
+    case 3: return 1880;
+    default: return -1;
+    }
+}
+
+/* ---- the other cores: threads ------------------------------------------------------------------- */
+
+#include <pthread.h>
+#include <sched.h>
+static struct sb_wslot hslot[SB_NCORES];
+static volatile int hstop;
+static pthread_t hth[SB_NCORES];
+static int hth_on[SB_NCORES];
+static sb_work_fn hfn[SB_NCORES];
+static void *harg[SB_NCORES];
+sb_m3_prep_fn sb_smp_m3_prep;
+
+static void *hrun(void *p)
+{
+    unsigned w = (unsigned)(uintptr_t)p;
+    hslot[w].mpidr = 0x81000000ULL | (uint64_t)w << 8;
+    hslot[w].state = SB_WK_RUNNING;
+    hfn[w](w, harg[w]);
+    hslot[w].state = SB_WK_DONE;
+    return 0;
+}
+uint64_t sb_smp_target(unsigned w) { return w < 4 ? w : 0x100U + (w - 4U); }
+const struct sb_wslot *sb_smp_slot(unsigned w) { return w < SB_NCORES ? &hslot[w] : 0; }
+struct sb_wslot *sb_smp_own_slot(unsigned w) { return w < SB_NCORES ? &hslot[w] : 0; }
+int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg)
+{
+    if (w == 0 || w >= SB_NCORES || !fn)
+        return -2;
+    if (w >= 4) {
+        if (sb_smp_m3_prep)
+            sb_smp_m3_prep();
+        return -3;                      /* the preview has no M3 cores: PSCI DENIED */
+    }
+    if (hslot[w].state == SB_WK_RUNNING)
+        return -4;
+    if (hth_on[w])
+        pthread_join(hth[w], 0);
+    memset(&hslot[w], 0, sizeof(hslot[w]));
+    hfn[w] = fn;
+    harg[w] = arg;
+    hstop = 0;
+    hth_on[w] = !pthread_create(&hth[w], 0, hrun, (void *)(uintptr_t)w);
+    while (hth_on[w] && hslot[w].state == SB_WK_IDLE)
+        sched_yield();
+    ++host_load;
+    return hth_on[w] ? 0 : -100;
+}
+unsigned sb_smp_running(void)
+{
+    unsigned n = 0;
+    for (unsigned w = 1; w < SB_NCORES; ++w)
+        n += hslot[w].state == SB_WK_RUNNING;
+    return n;
+}
+unsigned sb_smp_stop(unsigned ms)
+{
+    (void)ms;
+    hstop = 1;
+    for (unsigned w = 1; w < SB_NCORES; ++w)
+        if (hth_on[w]) {
+            pthread_join(hth[w], 0);
+            hth_on[w] = 0;
+        }
+    host_load = 0;
+    return 0;
+}
+int sb_worker_stop(void) { return hstop; }
+void sb_worker_publish(struct sb_wslot *s) { s->beats++; }
 
 struct sd_report sd_rep;
 static int sd_ok;
@@ -474,6 +808,9 @@ int sd_up(void)
 int sd_read(uint64_t s, uint32_t c, uintptr_t d) { (void)s; (void)c; (void)d; return -1; }
 int sd_store_area(uint64_t *f, uint64_t *b) { (void)f; (void)b; return 0; }
 int sd_read4k(uint64_t l, uint64_t c, uintptr_t d) { (void)l; (void)c; (void)d; return -1; }
+int sd_write(uint64_t s, uint32_t c, uintptr_t d) { (void)s; (void)c; (void)d; return sb_fence_active() ? -1 : -9; }
+int sd_write4k(uint64_t l, uint64_t c, uintptr_t d) { (void)l; (void)c; (void)d; return sb_fence_active() ? -1 : -9; }
+uint64_t sd_sectors_hint(void) { return 249999360ULL; }
 
 /* ---- present: the panel the host sees ------------------------------------------------------- */
 
@@ -526,7 +863,7 @@ static int in_step;
 
 #include "eng.h"
 
-static int tour_mode, tour_ready, tour_pages, tour_fail, tour_tab;
+static int tour_mode, tour_ready, tour_pages, tour_fail, tour_tab, lab_mode;
 static uint64_t tour_root_hash;
 
 static uint64_t panel_hash(void)
@@ -629,6 +966,144 @@ static void tour_generate(void)
     ci = 0;
 }
 
+/* ---- the Lab tour: every Lab test started with keys and stopped with Power held -------------------
+ * Each test is opened from the Tests tab, its options set, started; after a while Power is held
+ * and the result page must show (the test stopped); then Power held leads back to the Dashboard.
+ * Also: a tier 1 write end to end (Save report: warning, Continue, slide), the M3 prompt cancelled
+ * inside the health check, and an unconfirmed write refused by the fence. */
+static void lt_tab(int t)
+{
+    tadd(TOUR_TOP);
+    for (int k = 0; k < TOUR_HUB + t - 1; ++k)
+        tadd("k:d");
+    tadd("k:p");
+    tadd("w:600");
+}
+
+static void lt_row(int r)
+{
+    tadd(TOUR_TOP);
+    for (int k = 0; k < r; ++k)
+        tadd("k:d");
+    tadd("k:p");
+    tadd("w:900");
+}
+
+static void lt_home(int holds)
+{
+    for (int k = 0; k < holds; ++k)
+        tadd(TOUR_BACK);
+    tadd("w:300");
+    tadd("H");
+}
+
+/* start (row), run ms, stop with Power, expect the result title */
+static void lt_run(const char *name, int start_row, unsigned ms, const char *result_title, int holds)
+{
+    lt_row(start_row);
+    tadd("w:%u", ms);
+    tadd("D:2");
+    tadd("T:%s", name);
+    tadd("x:lab.%s", name);
+    tadd(TOUR_BACK);
+    tadd("w:1500");
+    tadd("T:%s", result_title);
+    tadd("x:lab.result");
+    lt_home(holds);
+}
+
+static void labtour_generate(void)
+{
+    tadd("w:800");
+    /* CPU stress on the A55 cores (row 0 cycles the cores option once: all 8 -> the 4 A55) */
+    lt_tab(1);
+    lt_row(1);
+    tadd("T:CPU stress");
+    lt_row(0);
+    lt_run("CPU stress", 4, 6000, "CPU stress result", 3);
+    tadd("L:test CPU stress: PASS");
+    /* memory stress, passes until stopped (row 1 three times: 1 -> 3 -> 10 -> until stopped) */
+    lt_tab(1);
+    lt_row(2);
+    lt_row(1);
+    lt_row(1);
+    lt_row(1);
+    lt_run("Memory stress", 2, 3000, "Memory stress result", 3);
+    tadd("L:test Memory stress: PASS");
+    /* thermal test: 10 s baseline, then the load; stopped during the load */
+    lt_tab(1);
+    lt_row(3);
+    lt_run("Thermal test", 5, 16000, "Thermal test result", 3);
+    tadd("L:test Thermal test");
+    /* battery: discharge (all A55 cores + white screen), then the sag test */
+    lt_tab(1);
+    lt_row(4);
+    lt_run("Discharge test", 5, 5000, "Discharge result", 3);
+    lt_tab(1);
+    lt_row(4);
+    lt_run("Sag test", 6, 25000, "Sag result", 3);
+    tadd("L:test Battery sag");
+    /* storage benchmark and verify */
+    lt_tab(1);
+    lt_row(5);
+    lt_row(1);
+    lt_row(1);
+    lt_run("Storage test", 3, 1500, "Storage test result", 3);
+    tadd("L:test Storage test (UFS): PASS");
+    /* display stress and the touch grid: full-screen, stopped by Power held, back at the Tests root */
+    lt_tab(1);
+    lt_row(6);
+    tadd("w:2500");
+    tadd(TOUR_BACK);
+    tadd("w:800");
+    tadd("D:0");
+    tadd("L:test Display stress: FAIL");
+    lt_home(2);
+    lt_tab(1);
+    lt_row(7);
+    tadd("w:1500");
+    tadd(TOUR_BACK);
+    tadd("w:800");
+    tadd("D:0");
+    tadd("L:test Touch grid: FAIL");
+    lt_home(2);
+    /* the full health check: the CPU step asks for the M3 PMU sequence: cancelled with Power held */
+    lt_tab(1);
+    lt_row(0);
+    lt_row(0);
+    tadd("w:600");
+    tadd("T:Before you write");
+    tadd(TOUR_BACK);
+    tadd("w:22000");
+    tadd("T:Health check result");
+    tadd("x:lab.health");
+    tadd("L:audit: cancelled at the warning: Start the M3 cores");
+    tadd("L:test Full health check");
+    lt_home(3);
+    /* a tier 1 write end to end: Save report -> warning -> Continue -> slide (hold Volume Up) */
+    lt_tab(1);
+    lt_row(18);
+    tadd("T:Before you write");
+    tadd("x:lab.warning");
+    lt_row(0);
+    tadd("h:u:1900");
+    tadd("w:2500");
+    tadd("L:report saved: ufs:lab-");
+    tadd("D:0");
+    lt_home(1);
+    /* an unconfirmed write: the fence refuses it */
+    lt_tab(5);
+    lt_row(5);
+    lt_row(0);
+    tadd("w:1500");
+    tadd("L:fence: refused");
+    lt_home(2);
+    tadd("Q");
+    cmds = tl;
+    ncmd = tn;
+    ci = 0;
+}
+
 static unsigned key_of(char c)
 {
     return c == 'p' ? SB_K_POWER : c == 'u' ? SB_K_UP : c == 'd' ? SB_K_DOWN : SB_K_BIXBY;
@@ -637,11 +1112,35 @@ static unsigned key_of(char c)
 static uint64_t key_up_at;
 static unsigned key_held;
 
+/* A thermal model for the preview: the TMU codes follow the worker cores' load (one-point trim 50:
+ * code = temperature + 25). */
+static double host_temp = 41.0;
+static uint64_t host_temp_t;
+static void w32(uint64_t a, uint32_t v);
+
+static void host_thermal(void)
+{
+    if (now_us - host_temp_t < 200000)
+        return;
+    double dt = (double)(now_us - host_temp_t) / 1e6;
+    host_temp_t = now_us;
+    double target = 41.0 + 9.0 * host_load, k = dt / 25.0;
+    host_temp += (target - host_temp) * (k > 1 ? 1 : k);
+    int t = (int)host_temp;
+    int top[8] = { t - 4, t + 3, t + 2, t + 4, t + 1, t - 2, t, t - 3 }, sub[3] = { t - 5, t - 3, t - 7 };
+    w32(0x10070040, (uint32_t)(top[0] + 25) | (uint32_t)(top[1] + 25) << 9);
+    w32(0x10070044, (uint32_t)(top[2] + 25) | (uint32_t)(top[3] + 25) << 9 | (uint32_t)(top[4] + 25) << 18);
+    w32(0x10070048, (uint32_t)(top[5] + 25) | (uint32_t)(top[6] + 25) << 9 | (uint32_t)(top[7] + 25) << 18);
+    w32(0x10074040, (uint32_t)(sub[0] + 25) | (uint32_t)(sub[1] + 25) << 9);
+    w32(0x10074044, (uint32_t)(sub[2] + 25));
+}
+
 static void host_step(void)
 {
     if (in_step)
         return;
     in_step = 1;
+    host_thermal();
     if (key_held && now_us >= key_up_at) {
         keys_now &= ~key_held;
         key_held = 0;
@@ -649,7 +1148,10 @@ static void host_step(void)
     if (tour_mode && !tour_ready) {
         if (ui_back() && ui_stats.frames >= 2 && E.tab_req < 0) {
             tour_ready = 1;
-            tour_generate();
+            if (lab_mode)
+                labtour_generate();
+            else
+                tour_generate();
         } else {
             in_step = 0;
             return;
@@ -657,6 +1159,22 @@ static void host_step(void)
     }
     while (ci < ncmd && now_us >= next_t && !key_held) {
         const char *c = cmds[ci++];
+        if (c[0] == 'T' || c[0] == 'D' || c[0] == 'L') {
+            const char *title = E.depth > 0 && E.depth <= 8 ? E.titles[E.depth - 1] : tab_title_of(cur_tab);
+            int ok = 1;
+            if (c[0] == 'T')
+                ok = strstr(title, c + 2) != 0;
+            else if (c[0] == 'D')
+                ok = E.depth == atoi(c + 2);
+            else {
+                ok = 0;
+                for (unsigned i = 0; i < sb_log_count() && !ok; ++i)
+                    ok = strstr(sb_log_line(i), c + 2) != 0;
+            }
+            printf("check %-44s %s  (at \"%s\", depth %d)\n", c, ok ? "ok" : "FAIL", title, E.depth);
+            tour_fail += !ok;
+            continue;
+        }
         if (c[0] == 'R') {
             tour_tab = atoi(c + 2);
             tour_root_hash = panel_hash();
@@ -859,6 +1377,7 @@ static void seed(void)
         for (int p = 0; p < 8; ++p)
             w32(base + 4U * (unsigned)p, 50);
     }
+    w32(0x10070050, 140U << 16);           /* THD_TEMP0 rise: 115 C, as S-Boot arms it */
     int top[8] = { 37, 44, 43, 45, 42, 39, 41, 38 }, sub[3] = { 36, 38, 34 };
     w32(0x10070040, (uint32_t)(top[0] + 25) | (uint32_t)(top[1] + 25) << 9);
     w32(0x10070044, (uint32_t)(top[2] + 25) | (uint32_t)(top[3] + 25) << 9 | (uint32_t)(top[4] + 25) << 18);
@@ -945,6 +1464,7 @@ static void on_sigill(int sig, siginfo_t *si, void *ctx)
 
 int main(int argc, char **argv)
 {
+    setvbuf(stdout, 0, _IOLBF, 0);
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = on_sigill;
@@ -963,7 +1483,8 @@ int main(int argc, char **argv)
     }
     cmds = argv + 3;
     ncmd = argc - 3;
-    tour_mode = ncmd == 1 && !strcmp(cmds[0], "tour");
+    lab_mode = ncmd == 1 && !strcmp(cmds[0], "labtour");
+    tour_mode = ncmd == 1 && (!strcmp(cmds[0], "tour") || lab_mode);
     if (tour_mode)
         ncmd = 0;
     map(0x02000000ULL, 0x00100000ULL);

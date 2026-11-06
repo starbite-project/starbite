@@ -1,18 +1,1 @@
-#!/bin/sh
-# Project Starbite installer environment: Android-style block paths for the installer's writers.
-#   /dev/block/NAME          -> /dev/NAME          for every block device (sda, sda25, mmcblk0p1, sdd1 ...)
-#   /dev/block/by-name/PART  -> /dev/block/NAME    for every GPT partition, from PARTNAME in its uevent
-# Run at boot and again after the GPT is re-read (blockdev --rereadpt /dev/block/sda; sb-byname).
-mkdir -p /dev/block/by-name
-rm -f /dev/block/by-name/* 2>/dev/null
-for d in /sys/class/block/*; do
-	n=${d##*/}
-	[ -e "/dev/$n" ] || continue
-	ln -sf "/dev/$n" "/dev/block/$n"
-	p=$(sed -n 's/^PARTNAME=//p' "$d/uevent" 2>/dev/null)
-	[ -n "$p" ] && ln -sf "/dev/block/$n" "/dev/block/by-name/$p"
-done
-for n in /dev/block/*; do                      # partitions the last re-read removed
-	[ -L "$n" ] && [ ! -e "$n" ] && rm -f "$n"
-done
-exit 0
+../../maint/env/sb-byname

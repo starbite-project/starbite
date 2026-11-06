@@ -1,0 +1,483 @@
+#!/usr/bin/env python3
+"""sbm: Starbite Maintenance from the computer (docs/MAINTENANCE.md 10). Python 3 standard library.
+
+  sbm [--transport maint|twrp|auto] COMMAND ...
+      maint  ssh to Starbite Maintenance (USB networking, 172.16.42.1)
+      twrp   TWRP's adb (the default on S9 #1 until SBMAINT is proven on the phone)
+      auto   maint if it answers, else TWRP if adb sees it
+      Default: $SB_TRANSPORT, else twrp.
+
+  status                          the transport, the phone's state, the USB link (+ the loader's fastboot)
+  shell [CMD...]                  a root shell (interactive without CMD)
+  push LOCAL... REMOTE            files or directories to the phone
+  pull REMOTE [LOCAL]             a file or a directory from the phone
+  backup PART [OUTDIR] [--card TAG] [--dry-run]
+                                  tools/android/pixel/part-backup.sh (mac: OUTDIR, default
+                                  build/maint/backups/<time>/; --card: the microSD's starbite-backup/TAG/)
+  write PART IMG [--dry-run] [--state FILE]
+                                  tools/android/pixel/part-write.py (its allowlist: SYSTEM VENDOR ODM A16DATA)
+  store-flash IMG                 tools/store/store-flash.sh IMG
+  store-pull OUT [ufs|sd]         tools/store/store-pull.sh OUT
+  logs [TAG] [--android]          what the last boot left in RAM (maint): the ramoops rings (the loader's pmsg
+                                  ring as text), the boot-next mailbox, the loader's log page, S-Boot's
+                                  sec_log, pstore, dmesg, the environment's log -> build/maint/logs/<time>-TAG/;
+                                  --android: tools/android/collect-logs.sh through this transport
+  reboot-to KEY|menu|maint|maint-prev|maint-rescue|fastboot|download [--direct]
+                                  KEY must be a catalog key (build/store/catalog-live.toml). download goes
+                                  through the loader's fastboot (`fastboot reboot download`) unless --direct
+  job [TEXT]                      the "current job" line on the phone's screen (empty: clear)
+  unlock PART                     a protected partition writable until the next boot (never RECOVERY)
+  run CMD...                      any host tool with this transport (`adb` = ssh to SBMAINT for maint)
+  boot-ram [--rescue] [--image FILE]
+                                  start SBMAINT from RAM through the loader's fastboot (writes nothing; the
+                                  dev loop: build, boot-ram, test)
+  update [--real] [--image FILE]  write the container into the SBMAINT partition's inactive slot (the one
+                                  the loader does not start now), seq + 1, read back; dry run without --real
+  verify-image [FILE]             tools/maint/pack.py verify (default build/maint/sbmaint.img)
+
+Nothing here writes RECOVERY or boots it."""
+import hashlib
+import os
+import re
+import shlex
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+sys.dont_write_bytecode = True
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+import sbmaint as sm  # noqa: E402
+
+REPO = os.path.realpath(os.path.join(HERE, '..', '..'))
+MAIN = REPO.split(os.sep + '.claude' + os.sep + 'worktrees' + os.sep)[0]
+TRANSPORT_DIR = os.path.join(HERE, 'transport')
+HOST_MAC = '02:53:39:00:02:02'                  # the computer's end of SBMAINT's USB link (sb-usb)
+SPECIAL = ('menu', 'maint', 'maint-prev', 'maint-rescue', 'fastboot', 'download')
+
+
+class Fail(Exception):
+    pass
+
+
+def build_path(*p):
+    """build/... in this checkout if it exists there, else in the main checkout (worktrees)."""
+    for r in (REPO, MAIN):
+        c = os.path.join(r, 'build', *p)
+        if os.path.exists(c):
+            return c
+    return os.path.join(MAIN, 'build', *p)
+
+
+def tool_env(transport, job=None):
+    e = dict(os.environ, SB_TRANSPORT=transport)
+    e['PATH'] = TRANSPORT_DIR + os.pathsep + e.get('PATH', '')
+    if job:
+        e['SB_JOB'] = job
+    return e
+
+
+def adb(transport, *args, capture=False, check=True, binary=False, job=None, stdin=subprocess.DEVNULL):
+    p = subprocess.run(['adb', *args], env=tool_env(transport, job), capture_output=capture, stdin=stdin,
+                       text=not binary)
+    if check and p.returncode:
+        err = (p.stderr if capture else '') or ''
+        raise Fail(f'adb {" ".join(args)[:80]} failed ({p.returncode}) {err.strip() if isinstance(err, str) else ""}')
+    return p
+
+
+def sh(transport, cmd, check=True, job=None):
+    return adb(transport, 'shell', cmd, capture=True, check=check, job=job).stdout.replace('\r', '')
+
+
+def maint_alive():
+    p = subprocess.run(['adb', 'get-state'], env=tool_env('maint'), capture_output=True, text=True)
+    return p.returncode == 0 and p.stdout.strip() == 'recovery'
+
+
+def twrp_alive():
+    p = subprocess.run(['adb', 'get-state'], env=tool_env('twrp'), capture_output=True, text=True)
+    return p.returncode == 0 and p.stdout.strip() == 'recovery'
+
+
+def pick_transport(want):
+    want = want or os.environ.get('SB_TRANSPORT') or 'twrp'
+    if want not in ('maint', 'twrp', 'auto'):
+        raise Fail(f'transport {want!r}: maint, twrp or auto')
+    if want != 'auto':
+        return want
+    if maint_alive():
+        return 'maint'
+    if shutil.which('adb', path=os.environ.get('PATH')) and twrp_alive():
+        return 'twrp'
+    raise Fail('auto: neither Starbite Maintenance (ssh 172.16.42.1) nor TWRP (adb) answers')
+
+
+def need_maint(t, what):
+    if t != 'maint':
+        raise Fail(f'{what} needs Starbite Maintenance (--transport maint); with TWRP see docs/MAINTENANCE.md 2')
+
+
+def run_tool(t, argv, job):
+    print(f'[{t}] {" ".join(shlex.quote(a) for a in argv)}', flush=True)
+    return subprocess.call(argv, env=tool_env(t, job), cwd=REPO)
+
+
+def catalog_keys():
+    for p in (build_path('store', 'catalog-live.toml'), os.path.join(REPO, 'tools', 'store', 'catalog.toml')):
+        if os.path.isfile(p):
+            return p, set(re.findall(r'^key\s*=\s*"([^"]+)"', open(p).read(), re.M))
+    return None, set()
+
+
+def default_image():
+    return build_path('maint', 'sbmaint.img')
+
+
+# ---- commands --------------------------------------------------------------------------------------
+def cmd_status(t, a):
+    print(f'transport: {t} ({"ssh root@172.16.42.1, adb = tools/maint/transport/adb" if t == "maint" else "TWRP adb"})')
+    link = mac_link()
+    if link:
+        print(f'USB link: {link}')
+    if shutil.which('fastboot'):
+        fb = subprocess.run(['fastboot', 'devices'], capture_output=True, text=True, timeout=10).stdout.strip()
+        if fb:
+            print(f'the loader\'s fastboot: {fb.split()[0][:4]}... (sbm boot-ram starts SBMAINT from RAM)')
+    if t == 'maint':
+        if not maint_alive():
+            print('Starbite Maintenance: not answering on 172.16.42.1')
+            return 1
+        info = dict(l.split('=', 1) for l in sh(t, 'sb-info').splitlines() if '=' in l)
+        for k in ('release', 'mode', 'src', 'seq', 'from', 'kernel', 'uptime', 'usb', 'usb_fn', 'host', 'ssh_sessions',
+                  'job', 'battery', 'card', 'byname', 'protected_ro', 'allowed', 'mem_free_kb', 'tmp_free_kb'):
+            print(f'  {k:<13} {info.get(k, "")}')
+        return 0
+    p = adb(t, 'get-state', capture=True, check=False)
+    if p.returncode or p.stdout.strip() != 'recovery':
+        print('TWRP: not seen by adb')
+        return 1
+    print(f'TWRP {sh(t, "getprop ro.twrp.version").strip()} ({sh(t, "getprop ro.product.device").strip()})')
+    return 0
+
+
+def mac_link():
+    """The computer's network interface whose MAC is SBMAINT's host side, and its address."""
+    try:
+        out = subprocess.run(['ifconfig'], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for block in re.split(r'\n(?=\S)', out):
+        if HOST_MAC in block:
+            name = block.split(':', 1)[0]
+            ip = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', block)
+            return f'{name} {ip.group(1) if ip else "(no address yet)"} (SBMAINT\'s USB networking)'
+    return None
+
+
+def cmd_shell(t, a):
+    return subprocess.call(['adb', 'shell', *a.rest], env=tool_env(t, 'shell'))
+
+
+def cmd_push(t, a):
+    return subprocess.call(['adb', 'push', *a.rest], env=tool_env(t, 'push'))
+
+
+def cmd_pull(t, a):
+    return subprocess.call(['adb', 'pull', *a.rest], env=tool_env(t, 'pull'))
+
+
+def cmd_backup(t, a):
+    r = a.rest
+    if not r:
+        raise Fail('sbm backup PART [OUTDIR] [--card TAG] [--dry-run]')
+    dry = ['--dry-run'] if '--dry-run' in r else []
+    r = [x for x in r if x != '--dry-run']
+    part = r[0]
+    tool = os.path.join(REPO, 'tools', 'android', 'pixel', 'part-backup.sh')
+    if '--card' in r:
+        tag = r[r.index('--card') + 1]
+        return run_tool(t, [tool, 'card', part, tag, *dry], f'backup {part} -> card {tag}')
+    out = r[1] if len(r) > 1 else os.path.join(MAIN, 'build', 'maint', 'backups', time.strftime('%Y%m%d-%H%M%S'))
+    return run_tool(t, [tool, 'mac', part, out, *dry], f'backup {part}')
+
+
+def cmd_write(t, a):
+    if len(a.rest) < 2:
+        raise Fail('sbm write PART IMG [--dry-run] [--state FILE]')
+    tool = os.path.join(REPO, 'tools', 'android', 'pixel', 'part-write.py')
+    return run_tool(t, [sys.executable, tool, *a.rest], f'write {a.rest[0]}')
+
+
+def cmd_store_flash(t, a):
+    return run_tool(t, [os.path.join(REPO, 'tools', 'store', 'store-flash.sh'), *a.rest], 'store-flash')
+
+
+def cmd_store_pull(t, a):
+    return run_tool(t, [os.path.join(REPO, 'tools', 'store', 'store-pull.sh'), *a.rest], 'store-pull')
+
+
+def cmd_logs(t, a):
+    r = a.rest
+    if '--android' in r:
+        r = [x for x in r if x != '--android']
+        return run_tool(t, [os.path.join(REPO, 'tools', 'android', 'collect-logs.sh'), *r], 'collect-logs')
+    need_maint(t, 'sbm logs')
+    tag = r[0] if r else 'maint'
+    out = os.path.join(MAIN, 'build', 'maint', 'logs', f'{time.strftime("%Y%m%d-%H%M%S")}-{tag}')
+    os.makedirs(out, exist_ok=True)
+    adb(t, 'pull', '/run/sbmaint/early', os.path.join(out, 'early'), capture=True, job='logs')
+    for name, cmd in (('dmesg.txt', 'dmesg'), ('sbmaint.log', 'cat /run/sbmaint/log'), ('info.txt', 'sb-info'),
+                      ('by-name.txt', 'ls -l /dev/block/by-name/'), ('blkid.txt', 'blkid'),
+                      ('partitions.txt', 'cat /proc/partitions'), ('mounts.txt', 'cat /proc/mounts'),
+                      ('protect.txt', 'sb-protect list')):
+        with open(os.path.join(out, name), 'w') as f:
+            f.write(sh(t, cmd, check=False, job='logs'))
+    summary = decode_early(os.path.join(out, 'early'), out)
+    with open(os.path.join(out, 'SUMMARY.txt'), 'w') as f:
+        f.write('\n'.join(summary) + '\n')
+    print('\n'.join(summary))
+    print(f'logs in {out}')
+    return 0
+
+
+def decode_early(d, out):
+    """Text from the raw RAM dumps the environment made at boot (tools/maint/env/init)."""
+    lines = []
+    ro = os.path.join(d, 'ramoops.bin')
+    if os.path.isfile(ro) and os.path.getsize(ro) >= 0x8000:
+        raw = open(ro, 'rb').read()
+        for name, phys, text in sm.ramoops_zones(raw):
+            if text is None:
+                lines.append(f'ramoops {name} @{phys:#x}: no persistent_ram header (raw kept in early/ramoops.bin)')
+                continue
+            open(os.path.join(out, f'ramoops-{name}.txt'), 'w').write(text)
+            lines.append(f'ramoops {name} @{phys:#x}: {len(text)} chars -> ramoops-{name}.txt')
+        mb = raw[0x7FE0:0x8000]
+        if mb[:8] == b'SBNEXT2!':
+            key = mb[8:].split(bytes(1))[0].decode('ascii', 'replace')
+            lines.append(f'boot-next mailbox: "{key}" (set, not yet taken)')
+        else:
+            lines.append('boot-next mailbox: empty')
+    lg = os.path.join(d, 'loader-log.bin')
+    if os.path.isfile(lg) and os.path.getsize(lg) >= 4096:
+        words = struct.unpack('<512Q', open(lg, 'rb').read(4096))
+        nz = [(i, w) for i, w in enumerate(words) if w]
+        with open(os.path.join(out, 'loader-log.txt'), 'w') as f:
+            for i, w in nz:
+                f.write(f'slot {i:3}: {w:#018x}\n')
+        post = words[200]
+        if post >> 32 == 0x504F5354:                      # "POST"
+            lines.append(f'loader POST: mode {post >> 24 & 0xff}, {post >> 16 & 0xff} checks, {post >> 8 & 0xff} '
+                         f'fail, {post & 0xff} warn, {words[201]} us')
+        lines.append(f'loader log page: {len(nz)} nonzero words -> loader-log.txt (slot 10 = how the last OS started)')
+    sl = os.path.join(d, 'seclog.bin')
+    if os.path.isfile(sl):
+        txt = re.findall(rb'[\x20-\x7e\t\n]{6,}', open(sl, 'rb').read())
+        open(os.path.join(out, 'seclog.txt'), 'wb').write(b'\n'.join(txt))
+        lines.append(f'S-Boot sec_log @0xc0000000: {len(txt)} text runs -> seclog.txt')
+    return lines
+
+
+def cmd_reboot_to(t, a):
+    if not a.rest:
+        raise Fail('sbm reboot-to KEY|' + '|'.join(SPECIAL))
+    key, direct = a.rest[0], '--direct' in a.rest
+    if key in ('recovery', 'twrp'):
+        raise Fail('refused: Starbite never boots RECOVERY (stock recovery stays)')
+    if key not in SPECIAL:
+        path, keys = catalog_keys()
+        if key not in keys:
+            raise Fail(f'"{key}" is not a catalog key in {path or "any catalog"}: the loader would stop at the menu. '
+                       'Use the entry\'s key = "...", not a payload file name')
+    if t == 'twrp':
+        if key == 'menu':
+            return adb(t, 'reboot', check=False).returncode
+        if key == 'download':
+            return adb(t, 'reboot', 'download', check=False).returncode
+        raise Fail(f'with TWRP, boot "{key}" by the settings record: tools/store/boot-next.sh {key}')
+    if key == 'download' and not direct:
+        if not shutil.which('fastboot'):
+            raise Fail('fastboot is not installed: sbm reboot-to download --direct (unverified from Linux)')
+        adb(t, 'shell', 'sb-reboot fastboot', job='reboot-to download')
+        print('waiting for the loader\'s fastboot ...', flush=True)
+        for _ in range(60):
+            time.sleep(2)
+            if subprocess.run(['fastboot', 'devices'], capture_output=True, text=True).stdout.strip():
+                return subprocess.call(['fastboot', 'reboot', 'download'])
+        raise Fail('the loader\'s fastboot did not appear within 2 minutes')
+    return adb(t, 'shell', f'sb-reboot {shlex.quote(key)}', check=False, job=f'reboot-to {key}').returncode
+
+
+def cmd_job(t, a):
+    need_maint(t, 'sbm job')
+    return adb(t, 'shell', 'sb-job ' + ' '.join(shlex.quote(x) for x in a.rest), check=False).returncode
+
+
+def cmd_unlock(t, a):
+    need_maint(t, 'sbm unlock')
+    if len(a.rest) != 1:
+        raise Fail('sbm unlock PART')
+    return adb(t, 'shell', f'sb-protect allow {shlex.quote(a.rest[0])}', check=False).returncode
+
+
+def cmd_run(t, a):
+    if not a.rest:
+        raise Fail('sbm run CMD...')
+    return run_tool(t, a.rest, os.path.basename(a.rest[0]))
+
+
+def cmd_verify_image(t, a):
+    return subprocess.call([sys.executable, os.path.join(HERE, 'pack.py'), 'verify', a.rest[0] if a.rest else default_image()])
+
+
+def load_image(a):
+    path = default_image()
+    if '--image' in a.rest:
+        path = a.rest[a.rest.index('--image') + 1]
+    c = open(path, 'rb').read()
+    return path, c, sm.verify(c)
+
+
+def cmd_boot_ram(t, a):
+    path, c, hd = load_image(a)
+    rescue = '--rescue' in a.rest
+    if not shutil.which('fastboot'):
+        raise Fail('fastboot is not installed (Android platform-tools)')
+    v = subprocess.run(['fastboot', 'getvar', 'version-bootloader'], capture_output=True, text=True, timeout=20)
+    m = re.search(r'version-bootloader:\s*(\S+)', v.stdout + v.stderr)
+    if not m or not m.group(1).startswith('starbite'):
+        raise Fail('no Starbite loader in fastboot (hold Volume Up alone at power-on, or Bixby > USB FASTBOOT)')
+    s = subprocess.run(['fastboot', 'getvar', 'serialno'], capture_output=True, text=True, timeout=20)
+    ms = re.search(r'serialno:\s*(\S+)', s.stdout + s.stderr)
+    tmp = tempfile.mkdtemp(prefix='sbm-boot-')
+    try:
+        b = hd['blobs']
+        dtb = b['dtb-rescue'] if rescue and b['dtb-rescue'] else b['dtb']
+        for name, data in (('kernel', b['kernel']), ('dtb', dtb), ('initrd', b['initrd'])):
+            open(os.path.join(tmp, name), 'wb').write(data)
+        words = f'{hd["cmdline"]} sb.maint=1 sb.maint.src=fastboot sb.maint.from=fastboot'
+        if rescue:
+            words += ' sb.rescue=1'
+        if ms:
+            words += f' sb.serial={ms.group(1)}'
+        print(f'starting {hd["version"]} from RAM ({"rescue" if rescue else "maintenance"} mode); nothing is written',
+              flush=True)
+        subprocess.run(['fastboot', 'oem', 'boot-next', 'fastboot'], capture_output=True)   # a crash comes back here
+        if subprocess.call(['fastboot', 'boot', os.path.join(tmp, 'kernel'), os.path.join(tmp, 'initrd'), '--dtb',
+                            os.path.join(tmp, 'dtb'), '--header-version', '2', '--cmdline', words.strip()]):
+            raise Fail('fastboot boot failed')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if rescue:
+        print('rescue mode: the port is a USB host now; Volume Down on the phone gives the ssh link')
+        return 0
+    for _ in range(90):
+        time.sleep(2)
+        if maint_alive():
+            return cmd_status('maint', a)
+    raise Fail('no answer on 172.16.42.1 within 3 minutes: check the computer\'s new USB network interface')
+
+
+def cmd_update(t, a):
+    path, c, hd = load_image(a)
+    real = '--real' in a.rest
+    node = sh(t, 'readlink -f /dev/block/by-name/SBMAINT', check=False).strip()
+    if not node or node.endswith('/by-name/SBMAINT'):
+        raise Fail('this phone has no SBMAINT partition (the One UI layout adds it). Without it, put the OS-store '
+                   'entries in the store: pack.py store-entries, then docs/MAINTENANCE.md 4.3')
+    size = int(sh(t, f'blockdev --getsize64 {node}').strip())
+    sl = sm.slots(size)
+    state = {}
+    for name, (off, ssize) in sl.items():
+        h = adb(t, 'exec-out', f'dd if={node} bs=4096 skip={off // 4096} count=1 2>/dev/null', capture=True,
+                binary=True, job='update: read').stdout
+        try:
+            ph = sm.parse_header(h, min(ssize, sm.STAGE_MAX))
+            bad = []
+            for k, (o, n, _) in ph['sections'].items():
+                if not n:
+                    continue
+                got = sh(t, f'dd if={node} bs=4096 skip={(off + o) // 4096} count={-(-n // 4096)} 2>/dev/null | '
+                            f'head -c {n} | sha256sum', job=f'update: check slot {name}').split()[0]
+                if got != ph['sha256'][k]:
+                    bad.append(k)
+            state[name] = (ph, f'sections {", ".join(bad)} do not match' if bad else None)
+        except sm.ContainerError as e:
+            state[name] = (None, str(e))
+    valid = sorted(((n, s[0]) for n, s in state.items() if s[0] and not s[1]), key=lambda x: (-x[1]['seq'], x[0]))
+    for name in sl:
+        ph, why = state[name]
+        print(f'slot {name} @{sl[name][0]}: ' + (f'seq {ph["seq"]} {ph["version"]}' if ph and not why else f'invalid ({why})'))
+    target = ('b' if valid[0][0] == 'a' else 'a') if valid else 'a'
+    seq = (max(p['seq'] for _, p in valid) if valid else 0) + 1
+    new = sm.restamp(c, seq)
+    off, ssize = sl[target]
+    if len(new) > min(ssize, sm.STAGE_MAX):
+        raise Fail(f'{len(new)} bytes do not fit slot {target}')
+    print(f'plan: {os.path.basename(path)} ({hd["version"]}) -> slot {target} @{off} as seq {seq}; '
+          f'{"slot " + valid[0][0] + " (boots today) is not touched" if valid else "no valid slot today"}')
+    if not real:
+        print('dry run: nothing written (--real writes)')
+        return 0
+    want = hashlib.sha256(new).hexdigest()
+    with tempfile.NamedTemporaryFile(suffix='.img') as f:
+        f.write(new)
+        f.flush()
+        adb(t, 'push', f.name, '/tmp/sbmaint-new.img', capture=True, job='update: push')
+    if sh(t, 'sha256sum /tmp/sbmaint-new.img').split()[0] != want:
+        raise Fail('the pushed container does not match: nothing written')
+    blk, n = off // 4096, len(new) // 4096
+    steps = (f'dd if=/dev/zero of={node} bs=4096 seek={blk} count=1 conv=notrunc,fsync 2>/dev/null',
+             f'dd if=/tmp/sbmaint-new.img of={node} bs=4096 skip=1 seek={blk + 1} count={n - 1} conv=notrunc,fsync 2>/dev/null',
+             'sync',
+             f'dd if=/tmp/sbmaint-new.img of={node} bs=4096 count=1 seek={blk} conv=notrunc,fsync 2>/dev/null',
+             'sync')
+    for s in steps:                    # header invalidated first, body, then the header: a torn write = invalid slot
+        sh(t, s, job=f'update: slot {target}')
+    back = sh(t, f'dd if={node} bs=4096 skip={blk} count={n} 2>/dev/null | sha256sum', job='update: verify').split()[0]
+    sh(t, 'rm -f /tmp/sbmaint-new.img', check=False)
+    if back != want:
+        raise Fail(f'READ-BACK MISMATCH in slot {target}: the loader will skip it (the other slot still boots)')
+    print(f'slot {target}: written and verified (seq {seq}); the loader starts it next (sbm reboot-to maint)')
+    return 0
+
+
+COMMANDS = {'status': cmd_status, 'shell': cmd_shell, 'push': cmd_push, 'pull': cmd_pull, 'backup': cmd_backup,
+            'write': cmd_write, 'store-flash': cmd_store_flash, 'store-pull': cmd_store_pull, 'logs': cmd_logs,
+            'reboot-to': cmd_reboot_to, 'job': cmd_job, 'unlock': cmd_unlock, 'run': cmd_run,
+            'boot-ram': cmd_boot_ram, 'update': cmd_update, 'verify-image': cmd_verify_image}
+NO_PHONE = ('verify-image', 'boot-ram')
+
+
+class Args:
+    pass
+
+
+def main(argv):
+    want = None
+    if argv[:1] == ['--transport'] and len(argv) > 1:
+        want, argv = argv[1], argv[2:]
+    elif argv and argv[0].startswith('--transport='):
+        want, argv = argv[0].split('=', 1)[1], argv[1:]
+    if not argv or argv[0] in ('-h', '--help', 'help') or argv[0] not in COMMANDS:
+        print(__doc__)
+        return 0 if argv and argv[0] in ('-h', '--help', 'help') else 2
+    a = Args()
+    a.cmd, a.rest = argv[0], argv[1:]
+    try:
+        t = (want or os.environ.get('SB_TRANSPORT') or 'twrp') if a.cmd in NO_PHONE else pick_transport(want)
+        return COMMANDS[a.cmd](t, a) or 0
+    except Fail as e:
+        print(f'sbm {a.cmd}: {e}', file=sys.stderr)
+        return 1
+    except (OSError, sm.ContainerError) as e:
+        print(f'sbm {a.cmd}: {e}', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

@@ -8,6 +8,8 @@
 # underneath (fake hardware, scripted keys and taps on a fake clock); the Mac converts the PPM
 # frames with build/venv's Pillow. Each shot also prints how many panel pixels differ from the
 # back buffer: 0 means every change was presented (the dirty rectangles cover what was drawn).
+#   sh starbite/host/preview.sh labtour    the Lab tour (every Lab test started and stopped, a
+#                                          tier 1 write end to end, an unconfirmed write refused)
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/starbite/out/host"
@@ -29,7 +31,7 @@ limactl shell --workdir "$root" starbite gcc -O1 -g -DSB_HOST "-DSB_ASSETS=\"$ou
     -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I"$lib" -I"$eng" \
     -o "$out/engineer-host" "$root/starbite/host/host.c" \
     "$lib/str.c" "$lib/log.c" "$lib/sbui.c" "$lib/sbui_input.c" "$lib/sbui_page.c" "$lib/sbui_w.c" "$lib/sb7.c" \
-    "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/assets.S" "$eng"/*.c -lm
+    "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/assets.S" "$eng"/*.c -lm -lpthread
 
 # scene name, then the script (taps: tab bar at y 2824, tab t at x 90 + 180 t)
 scene() {
@@ -48,8 +50,14 @@ if [ "${1:-}" = tour ]; then
     limactl shell --workdir "$root" starbite "$out/engineer-host" "$out" "$out/catalog.sbc" tour
     exit $?
 fi
+if [ "${1:-}" = labtour ]; then
+    # the Lab tour: every Lab test started with keys and stopped with Power held, a tier 1 write
+    # end to end, the M3 prompt cancelled, an unconfirmed write refused (checks only, no PNGs)
+    limactl shell --workdir "$root" starbite "$out/engineer-host" "$out" "$out/catalog.sbc" labtour
+    exit $?
+fi
 
-all="dashboard hub tests power battery clocks temps storage partitions starbite catalog start logs pmsg tools armed change peek device soc memory history dialog sector gpt keys"
+all="dashboard hub tests power battery clocks temps storage partitions starbite catalog start logs pmsg tools armed peek device soc memory history dialog sector gpt keys cpu health warning sensors"
 want=${1:-$all}
 for s in $want; do
     case $s in
@@ -64,21 +72,24 @@ for s in $want; do
     partitions) scene partitions w:800 t:810,2824 w:400 k:d k:d k:d k:p w:800 ;;
     starbite) scene starbite w:800 t:990,2824 w:500 ;;
     catalog) scene catalog w:800 t:990,2824 w:400 k:d k:d k:p w:800 ;;
-    start) scene start w:800 t:990,2824 w:400 k:d k:d k:d k:d k:p w:800 ;;
+    start) scene start w:800 t:990,2824 w:400 k:d k:d k:d k:d k:d k:p w:800 ;;
     logs) scene logs w:800 t:1170,2824 w:500 ;;
     pmsg) scene pmsg w:800 t:1170,2824 w:400 k:d k:d k:p w:800 ;;
     tools) scene tools w:800 t:1350,2824 w:500 ;;
     armed) scene armed w:800 t:1350,2824 w:400 k:d k:p w:600 k:p k:p w:400 h:p:2300 w:300 h:u:1800 w:900 ;;
-    change) scene change w:800 t:1350,2824 w:400 k:d k:p w:600 k:p k:p w:400 h:p:2300 w:300 h:u:1800 w:900 k:d k:d k:p w:700 ;;
     peek) scene peek w:800 t:1350,2824 w:400 k:d k:d k:p w:800 ;;
     device) scene device w:800 k:d k:p w:800 ;;
     soc) scene soc w:800 k:d k:d k:p w:800 ;;
     memory) scene memory w:800 k:d k:d k:d k:p w:800 g:700,2000,-900,300 w:800 S:memory-scroll1 g:700,1200,500,200 w:1500 S:memory-scroll2 k:d k:d w:300 ;;
-    history) scene history w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:800 ;;
-    dialog) scene dialog w:800 t:270,2824 w:400 k:d k:p w:600 ;;
-    sector) scene sector w:800 t:810,2824 w:400 k:d k:d k:d k:d k:d k:p w:800 ;;
+    history) scene history w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:800 ;;
+    dialog) scene dialog w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:600 ;;
+    sector) scene sector w:800 t:810,2824 w:400 k:d k:d k:d k:d k:d k:d k:p w:800 ;;
     gpt) scene gpt w:800 t:810,2824 w:400 k:d k:d k:d k:d k:p w:800 ;;
-    keys) scene keys w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:p w:600 ;;
+    keys) scene keys w:800 t:270,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:600 ;;
+    cpu) scene cpu w:800 t:270,2824 w:400 k:d k:d k:p w:800 k:d k:p w:600 k:d k:d k:d k:d k:p w:7000 ;;
+    health) scene health w:800 t:270,2824 w:400 k:d k:p w:800 k:d k:p w:800 h:p:1700 w:24000 ;;
+    warning) scene warning w:800 t:270,2824 w:400 h:d:2600 w:300 k:p w:900 ;;
+    sensors) scene sensors w:800 t:630,2824 w:400 k:d k:d k:d k:d k:p w:1500 ;;
     *) echo "unknown scene $s"; exit 1 ;;
     esac
 done

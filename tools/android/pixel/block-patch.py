@@ -10,6 +10,9 @@ is written there with dd and read back (SHA-256). Without --write: report only.
 """
 import hashlib, os, subprocess, sys, tempfile
 
+if os.environ.get('SB_TRANSPORT', 'twrp') != 'twrp':   # SB_TRANSPORT=maint: adb = ssh to Starbite Maintenance
+    os.environ['PATH'] = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', 'maint', 'transport') \
+        + os.pathsep + os.environ.get('PATH', '')       # (docs/MAINTENANCE.md 9; default: TWRP's adb)
 BS = 4096
 ALLOW = {'SYSTEM': 'sda18'}
 

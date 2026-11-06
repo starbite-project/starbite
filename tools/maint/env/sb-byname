@@ -1,0 +1,59 @@
+#!/bin/sh
+# Starbite Maintenance (docs/MAINTENANCE.md 5): Android/TWRP-style block paths, so the host tools run
+# unchanged against this environment.
+#   /dev/block/NAME                       a REAL block node (mknod, the dev number from sysfs) for every
+#                                         block device: sda, sda18, sdb, mmcblk0, mmcblk0p1, a USB disk ...
+#   /dev/block/by-name/PARTNAME           -> /dev/block/NAME, for every GPT partition (PARTNAME in uevent)
+#   /dev/block/platform/11120000.ufs/by-name -> ../../by-name   (TWRP's path; collect-logs.sh uses it)
+# Real nodes, not links into /dev: the tools check `readlink -f /dev/block/by-name/SYSTEM` against
+# /dev/block/sda18 (part-write.py, metadata-reset.sh, preflight.sh, block-patch.py), which is what TWRP
+# gives; a link to /dev/sda18 would make every one of them refuse.
+# Run at boot and after every GPT change (blockdev --rereadpt /dev/block/sda; sb-byname). Ends with
+# sb-protect apply (a re-read recreates the partitions and drops their read-only flags).
+# Tests: SB_SYSROOT=DIR reads DIR/sys and writes DIR/dev; SB_FAKE_MKNOD=1 writes "b MAJ:MIN" files.
+R=${SB_SYSROOT:-}
+B=$R/dev/block
+mkdir -p "$B/by-name" "$B/platform/11120000.ufs"
+[ -e "$B/platform/11120000.ufs/by-name" ] || ln -s ../../by-name "$B/platform/11120000.ufs/by-name"
+
+mk() {                                     # mk PATH MAJ:MIN
+	if [ -n "$SB_FAKE_MKNOD" ]; then
+		printf 'b %s\n' "$2" > "$1"
+	else
+		mknod -m 600 "$1" b "${2%%:*}" "${2##*:}"
+	fi
+}
+devof() {                                  # devof PATH -> MAJ:MIN of an existing node, or nothing
+	if [ -n "$SB_FAKE_MKNOD" ]; then
+		sed -n 's/^b //p' "$1" 2>/dev/null
+	elif [ -b "$1" ]; then
+		echo "$(( 0x$(stat -c %t "$1") )):$(( 0x$(stat -c %T "$1") ))"
+	fi
+}
+
+rm -f "$B"/by-name/* 2>/dev/null
+seen=
+for d in "$R"/sys/class/block/*; do
+	[ -r "$d/dev" ] || continue
+	n=${d##*/}
+	dev=$(cat "$d/dev")
+	if [ "$(devof "$B/$n")" != "$dev" ]; then
+		rm -f "$B/$n"
+		mk "$B/$n" "$dev" || continue
+	fi
+	seen="$seen $n "
+	p=$(sed -n 's/^PARTNAME=//p' "$d/uevent" 2>/dev/null)
+	[ -n "$p" ] || continue
+	if [ -e "$B/by-name/$p" ] || [ -L "$B/by-name/$p" ]; then
+		echo "sb-byname: two partitions are named $p (kept /dev/block/$n's on a UFS LUN only)" >&2
+		case $(readlink -f "$d" 2>/dev/null) in */usb[0-9]*/*) continue ;; esac
+	fi
+	ln -sf "../$n" "$B/by-name/$p"           # relative: readlink -f gives /dev/block/$n, as TWRP's
+done
+for f in "$B"/*; do                         # partitions the last re-read removed
+	n=${f##*/}
+	[ -d "$f" ] && continue
+	case $seen in *" $n "*) ;; *) rm -f "$f" ;; esac
+done
+[ -n "$SB_SYSROOT" ] || ! command -v sb-protect >/dev/null 2>&1 || sb-protect apply
+exit 0

@@ -6,9 +6,11 @@
  * front index advanced, INTGR0 rung, the reply read and the rear index advanced, exactly as the
  * loader and the kernel do. Nothing else in SRAM or the mailbox is ever written.
  *
- * Writes: pmic_write is static and has one caller, the RTC read latch (RTC block register 0x02
- * UPDATE bit, needed to read the clock; the loader and Engineer Lite do the same on every status
- * bar refresh). No regulator is ever written: the touch and card rails are only read here.
+ * Writes: pmic_write is static. Its callers: the RTC read latch (RTC block register 0x02 UPDATE
+ * bit, needed to read the clock; the loader and Engineer Lite do the same on every status bar
+ * refresh), and sb_pmic_write, which writes only what an open, confirmed authorisation covers
+ * (fence.c gate; the tiers are engineer/policy.c's pmic_tier: the touch and card rails at the
+ * kernel's values tier 1, every other regulator, BUCK and TOP register tier 3).
  */
 #include "sb.h"
 
@@ -108,6 +110,31 @@ static int pmic_write(uint32_t type, uint32_t reg, uint8_t val)
     cmd[1] = 1U | (uint32_t)val << 8;
     cmd[2] = cmd[3] = 0;
     return c && acpm_send(c, ACPM_PMIC_CH, cmd) && !(cmd[1] >> 24);
+}
+
+/* Any PMIC register, with the gate: the caller's policy (engineer/policy.c pmic_tier) gives the
+ * tier, at least 1; an open authorisation must cover SB_SP_PMIC type << 8 | reg. Read back. */
+int sb_pmic_write(uint32_t type, uint32_t reg, uint8_t val, int tier)
+{
+    const char *why;
+    uint8_t back = 0;
+    if (type > 2 || reg > 0xff ||
+        sb_gate_check(SB_SP_PMIC, 0, (uint64_t)type << 8 | reg, 1, tier < SB_TIER1 ? SB_TIER1 : tier, &why)) {
+        sb_logx("pmic write refused, reg ", (uint64_t)type << 8 | reg);
+        return 0;
+    }
+    int ok = pmic_write(type, reg, val) && sb_pmic_read(type, reg, &back);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "pmic write ");
+    ub_hex(&u, (uint64_t)type << 8 | reg, 3);
+    ub_s(&u, " = ");
+    ub_hex(&u, val, 2);
+    ub_s(&u, ok ? ", reads back " : ": ACPM did not answer");
+    if (ok)
+        ub_hex(&u, back, 2);
+    sb_log(u.b);
+    return ok;
 }
 
 int sb_acpm_build(char out[25])

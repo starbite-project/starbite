@@ -23,6 +23,12 @@
 # PERSISTENT, STEADY, BOTA*, DTB, DTBO, the GPT or the boot LUNs.
 #
 # SB_TEST=1 sources this file without running it (host tests of the helpers).
+#
+# Embedded in Starbite Maintenance (tools/maint/env/init, docs/MAINTENANCE.md 7): SBMAINT's init runs
+# this file as /bin/sb-rescue in rescue mode with SB_RESCUE_EMBEDDED=1 (proc, sys, dev, /run and /tmp
+# are already mounted and are not mounted again), SB_RESCUE_DEVICE_HOOK (Volume Down: the whole
+# maintenance link, USB networking + ssh, instead of the bare serial shell) and SB_RESCUE_HOST_HOOK
+# (Volume Up: back to USB host mode).
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
 LABEL=STARBITE-RESCUE
@@ -138,6 +144,10 @@ lock_ufs() {
 # default host; s9p-max77705-muic drives VBUS (vbus=1: while the Type-C MCU reports a device).
 # With the daily DTB there is no role switch and no OTG regulator: only the microSD works then.
 usb_host() {
+	if [ -n "$SB_RESCUE_HOST_HOOK" ]; then
+		$SB_RESCUE_HOST_HOOK
+		return 0
+	fi
 	[ -w $VBUS_PARAM ] && echo 1 > $VBUS_PARAM
 	for r in /sys/class/usb_role/*/role; do
 		[ -w "$r" ] && echo host > "$r" 2>/dev/null
@@ -159,6 +169,10 @@ usb_report() {
 }
 
 usb_device_shell() {
+	if [ -n "$SB_RESCUE_DEVICE_HOOK" ]; then
+		$SB_RESCUE_DEVICE_HOOK || return 2
+		return 0
+	fi
 	[ -w $VBUS_PARAM ] && echo 0 > $VBUS_PARAM      # VBUS off before the role changes
 	i=0
 	while [ "$(vbus_state)" = on ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
@@ -224,12 +238,14 @@ run_rescue() {
 
 # ==== main ==================================================================================
 
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev 2>/dev/null
-mkdir -p /run /tmp
-mount -t tmpfs tmpfs /run
-mount -t tmpfs tmpfs /tmp
+if [ "$SB_RESCUE_EMBEDDED" != 1 ]; then
+	mount -t proc proc /proc
+	mount -t sysfs sysfs /sys
+	mount -t devtmpfs devtmpfs /dev 2>/dev/null
+	mkdir -p /run /tmp
+	mount -t tmpfs tmpfs /run
+	mount -t tmpfs tmpfs /tmp
+fi
 : > "$LOG"
 printf '\033[2J\033[H' > /dev/tty0 2>/dev/null
 say "=============================================="
@@ -240,7 +256,11 @@ say "Connect a Starbite rescue USB disk"
 say "(made by the Starbite Installer, label $LABEL or SB-RESCUE)."
 say ""
 say "Power (hold 2 s): reboot to the Starbite menu"
-say "Volume Up: look again   Volume Down: USB serial shell"
+if [ -n "$SB_RESCUE_DEVICE_HOOK" ]; then
+	say "Volume Up: look again   Volume Down: USB maintenance (ssh)"
+else
+	say "Volume Up: look again   Volume Down: USB serial shell"
+fi
 say ""
 lock_ufs
 usb_host
@@ -270,7 +290,11 @@ while :; do
 		held=0
 	fi
 	if key_down down; then
-		say "USB serial shell: connect the phone to a computer (115200 8N1)"
+		if [ -n "$SB_RESCUE_DEVICE_HOOK" ]; then
+			say "USB maintenance: connect a computer, then: tools/maint/sbm status"
+		else
+			say "USB serial shell: connect the phone to a computer (115200 8N1)"
+		fi
 		usb_device_shell || say "No USB device controller"
 		while key_down down; do sleep 0.2; done
 	fi

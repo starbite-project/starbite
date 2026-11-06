@@ -224,7 +224,7 @@ static void fill_gpt(void)
         for (int i = 0; i < gpt_n; ++i) {
             struct ub k, v;
             struct sb_wdecide d;
-            int r = sb_write_decide(SB_MED_UFS, gpt_first[i], 1, &d);
+            int r = sb_write_decide(SB_MED_UFS, 0, gpt_first[i], 1, &d);
             ub_init(&k);
             ub_dec(&k, (uint64_t)i + 1U);
             ub_s(&k, "  ");
@@ -235,10 +235,11 @@ static void fill_gpt(void)
             ub_dec(&v, gpt_last[i]);
             ub_s(&v, "  ");
             ub_size(&v, (gpt_last[i] - gpt_first[i] + 1) * 4096U);
-            ub_s(&v, r == SB_W_NEVER ? "  never" : d.tier == 2 ? "  tier 2" : d.tier == 1 ? "  tier 1" : "  ?");
-            kv_addc(k.b, v.b, r == SB_W_NEVER ? C_RED : d.tier == 2 ? C_ORANGE : C_L1);
+            ub_s(&v, r ? "  refused" : d.tier == 3 ? "  tier 3" : d.tier == 2 ? "  tier 2" : "  tier 1");
+            kv_addc(k.b, v.b, r || d.tier == 3 ? C_RED : d.tier == 2 ? C_ORANGE : C_L1);
         }
-    kv_note("The PIT cross-check (device/pit.txt) and the editor come later (EN6, proven on S9 #2 first).");
+    kv_note("Writes: Storage > Partitions and LUs (the GPT head and tail are tier 3, with a backup first). "
+            "The PIT cross-check (device/pit.txt) and a GPT editor come later.");
 }
 
 void sb_pages_gpt(void)
@@ -246,64 +247,73 @@ void sb_pages_gpt(void)
     info_screen("GPT viewer", fill_gpt, 0);
 }
 
-/* ---- write fence: what each kind of target would need ------------------------------------ */
+/* ---- write fence: what each kind of target needs ------------------------------------------- */
 
-static void fence_row(const char *label, unsigned medium, uint64_t lba, uint64_t n)
+static void fence_row(const char *label, unsigned medium, unsigned lu, uint64_t lba, uint64_t n)
 {
     struct sb_wdecide d;
     struct ub v;
-    int r = sb_write_decide(medium, lba, n, &d);
+    int r = sb_write_decide(medium, lu, lba, n, &d);
     ub_init(&v);
     ub_s(&v, d.part[0] ? d.part : "?");
     ub_s(&v, ": ");
-    ub_s(&v, r ? "refused" : d.tier == 2 ? "tier 2" : "tier 1");
+    ub_s(&v, r ? "refused" : tier_name(d.tier));
     ub_s(&v, " (");
     ub_s(&v, d.why);
     ub_c(&v, ')');
-    kv_addc(label, v.b, r ? C_RED : d.tier == 2 ? C_ORANGE : C_GREEN);
+    kv_addc(label, v.b, r ? C_L3 : d.tier >= 3 ? C_RED : d.tier == 2 ? C_ORANGE : C_GREEN);
 }
 
 static void fill_fence(void)
 {
     uint64_t f, l;
-    kv_hdr("EVERY WRITE GOES THROUGH SB_WRITE (DRY-RUN IN V1)");
-    kv_add("Checks", "GPT name and range, never-touch list, tier");
-    kv_add("Writes in v1", "none: libsb has no UFS or SD write command");
+    kv_hdr("EVERY BLOCK WRITE GOES THROUGH SB_WRITE");
+    kv_add("Checks", "GPT name and range, the tier, the open confirmed authorisation (range, tier, steps)");
+    kv_add("Tier 1", "warning screen + slide");
+    kv_add("Tier 2", "+ the target's name typed");
+    kv_add("Tier 3", "+ hold Power 3 s, and a verified backup into the OS store first");
+    kv_addc("Dry run", sb_fence_is_dry_run() ? "ON: writes are logged, not made" : "off (Tools > Armed mode)",
+            sb_fence_is_dry_run() ? C_ORANGE : C_L2);
     kv_hdr("SAMPLE TARGETS (LIVE GPT)");
-    fence_row("Block 0 (GPT/PIT head)", SB_MED_UFS, 0, 1);
+    fence_row("Block 0 (GPT/PIT head)", SB_MED_UFS, 0, 0, 1);
     if (gpt_find("EFS", &f, &l))
-        fence_row("EFS, first block", SB_MED_UFS, f, 1);
+        fence_row("EFS, first block", SB_MED_UFS, 0, f, 1);
     if (gpt_find("PARAM", &f, &l))
-        fence_row("PARAM, first block", SB_MED_UFS, f, 1);
+        fence_row("PARAM, first block", SB_MED_UFS, 0, f, 1);
     if (gpt_find("BOOT", &f, &l)) {
-        fence_row("BOOT, first block", SB_MED_UFS, f, 1);
-        fence_row("BOOT, across its end", SB_MED_UFS, l, 2);
+        fence_row("BOOT, first block", SB_MED_UFS, 0, f, 1);
+        fence_row("BOOT, across its end", SB_MED_UFS, 0, l, 2);
     }
     if (gpt_find("SYSTEM", &f, &l))
-        fence_row("SYSTEM, first block", SB_MED_UFS, f, 1);
-    if (gpt_find("USERDATA", &f, &l))
-        fence_row("Starbite store settings block", SB_MED_UFS, f + 4194304ULL + 2U, 1);
-    fence_row("microSD, block 0", SB_MED_SD, 0, 1);
-    kv_note("Boot LUNs (BOOTLOADER, CM) are not addressable at all: libsb's UFS code only talks to LU0 "
-            "and the device W-LUN.");
+        fence_row("SYSTEM, first block", SB_MED_UFS, 0, f, 1);
+    if (gpt_find("USERDATA", &f, &l)) {
+        fence_row("Starbite store header", SB_MED_UFS, 0, f + 4194304ULL + 1U, 1);
+        fence_row("USERDATA, first block", SB_MED_UFS, 0, f, 1);
+    }
+    fence_row("Boot LU 1, block 0", SB_MED_UFS, 1, 0, 1);
+    fence_row("microSD, block 0", SB_MED_SD, 0, 0, 1);
+    kv_note("Without an open authorisation every write is refused before the storage driver is called; the "
+            "UFS and SD drivers refuse a write that does not come from sb_write.");
 }
 
 static void build_fence(void)
 {
     fill_fence();
     kv_hdr("TRY");
-    row_add("Dry-run a write to the settings block", "logs the decision; nothing is written", 0);
-    row_add("Dry-run a write to EFS", "refused: never-touch", 0);
+    row_add("Write the settings block with no confirmation", "refused by the gate, logged", 0);
+    row_add("Write EFS with no confirmation", "refused by the gate, logged", 0);
 }
 
 static int act_fence(int i)
 {
     uint64_t f, l;
+    static uint8_t zero[4096];
+    sb_gate_close();
     if (i == 0 && gpt_find("USERDATA", &f, &l))
-        (void)sb_write(SB_MED_UFS, f + 4194304ULL + 2U, 1, 0, armed_tier());
+        (void)sb_write(SB_MED_UFS, 0, f + 4194304ULL + 2U, 1, zero);
     if (i == 1 && gpt_find("EFS", &f, &l))
-        (void)sb_write(SB_MED_UFS, f, 1, 0, armed_tier());
-    ui_toast("Decision logged (Logs > Engineer OS log)", C_ORANGE, 1000);
+        (void)sb_write(SB_MED_UFS, 0, f, 1, zero);
+    ui_toast("Refused and logged (Logs > Engineer OS log)", C_ORANGE, 1000);
     return 0;
 }
 
@@ -318,13 +328,9 @@ static const char *coming_what;
 
 static void fill_coming(void)
 {
-    kv_bigc("not in Engineer OS v1", "Coming", C_L2);
+    kv_bigc("not in Engineer OS yet", "Coming", C_L2);
     kv_hdr("PLANNED");
-    if (sb_streq(coming_what, "Stress")) {
-        kv_add("What", "all 8 cores, RAM bandwidth, GPU jobs");
-        kv_add("Guard", "aborts at 90 " U_DEG "C; battery temperature watched");
-        kv_add("Milestone", "EN5 (with PMIC and clock guarded controls)");
-    } else if (sb_streq(coming_what, "Radio")) {
+    if (sb_streq(coming_what, "Radio")) {
         kv_add("What", "modem bench: boot stages, SIM, signal, cells");
         kv_add("Never", "calls, emergency numbers, IMEI, NV/RF data");
         kv_add("Milestone", "later (shared with the Emergency OS)");

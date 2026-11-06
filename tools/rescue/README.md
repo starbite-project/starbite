@@ -11,6 +11,12 @@ Status: the loader side (finding the rescue system, the reboot, the start) is do
 **USB host mode is written but untested on hardware** (`docs/RESCUE-USB-HOST.md`): the store's
 `rescue.dtb` makes the DWC3 a host and gives the port 5 V. The microSD fallback works without it.
 
+**Also inside Starbite Maintenance (2026-11-06, docs/MAINTENANCE.md 7):** SBMAINT's rescue mode
+(`sb.rescue=1`) runs this same `init` as `/bin/sb-rescue` with `SB_RESCUE_EMBEDDED=1` (the mounts are
+SBMAINT's), `SB_RESCUE_DEVICE_HOOK` (Volume Down: USB networking + ssh, not only the serial shell) and
+`SB_RESCUE_HOST_HOOK`. Without those variables this file behaves exactly as before. This small ramdisk
+stays for the SBRESCUE bundle in BOOT, which cannot hold SBMAINT.
+
 ## Files
 
 | File | What |
