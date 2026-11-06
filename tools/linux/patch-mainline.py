@@ -18,9 +18,9 @@ Tree (mainline v7.1):
   5.   panfrost: runtime-PM autosuspend 1000 ms on the Exynos 9810 (50 ms
        elsewhere). Every G3D power-up costs two TZPC SMCs, a PMU power-up and a
        Panfrost reset (plan 1.3.3). Runtime: .../17500000.gpu/power/autosuspend_delay_ms.
-  11.  arm64 __delay: no WFE with interrupts off. The event stream wakes it far
-       too rarely on this SoC: panic=10's mdelay() countdown ran ~12x long
-       (plan 7.6).
+  11.  arm64 __delay: no WFE with interrupts off (plan 7.6).
+  12.  arm64 local_cpu_stop: during a panic with a restart due, the stopped CPUs
+       spin instead of parking in WFE/WFI (plan 7.10).
 
 Port (work copy):
   6.   s9p-decon: flip event at the TE edge that latches the new buffer
@@ -48,9 +48,11 @@ Port (work copy):
        only warns (the loader takes the Image from its store).
   10.  s9p-clkgate: restart by INFORM2 + PMU SWRESET and power-off by PS_HOLD, as
        Samsung's exynos-reboot.c (the only restart handler was s3c2410_wdt's:
-       reboot -f hung, panic=10 reset minutes late); waits on the counter; at a
-       panic, cluster 1's watchdog armed for panic_timeout + 5 s as a backstop
-       (panic_wdt=); s9p_clkgate.pmu_reset=0 = off.
+       reboot -f hung, panic=10 reset minutes late); waits on the counter;
+       s9p_panic_restart(): the panic countdown (counter and DECON frame starts)
+       and SWRESET, run by s9p-decon after its screen; at a panic both cluster
+       watchdogs are armed for panic_timeout + 5 s as a backstop (panic_wdt=);
+       s9p_clkgate.pmu_reset=0 = off.
 
 The G3D power domain needs no edit: s9p_g3d_pd.always_on is already a 0644
 parameter (echo 1 > /sys/module/s9p_g3d_pd/parameters/always_on, or
@@ -195,6 +197,24 @@ def patch_tree(src):
          '\t\t * two minutes. With interrupts off the loop below spins on the counter.\n'
          '\t\t */\n',
          'Starbite (tools/linux/patch-mainline.py step 11)')
+
+    # 12. arm64 local_cpu_stop: the CPUs panic() stops keep spinning while a restart is due
+    #     (2026-11-06). Parked in WFE/WFI, all of them for ten seconds and more; on the phone neither
+    #     the countdown nor a cluster watchdog then reset in time. Spinning keeps every cluster busy
+    #     until the SWRESET; panic=0 parks as before.
+    edit(src, 'arch/arm64/kernel/smp.c',
+         '\tlocal_daif_mask();\n\tsdei_mask_local_cpu();\n\tcpu_park_loop();\n',
+         '\tlocal_daif_mask();\n\tsdei_mask_local_cpu();\n'
+         '\t/*\n'
+         '\t * Starbite (tools/linux/patch-mainline.py step 12): while a panic with a\n'
+         '\t * restart due is in progress, keep spinning instead of parking in WFE/WFI,\n'
+         '\t * so no cluster idles before the SWRESET (Galaxy S9, Exynos 9810).\n'
+         '\t */\n'
+         '\tif (panic_in_progress() && READ_ONCE(panic_timeout) > 0)\n'
+         '\t\tfor (;;)\n'
+         '\t\t\tcpu_relax();\n'
+         '\tcpu_park_loop();\n',
+         'Starbite (tools/linux/patch-mainline.py step 12)')
 
 
 # ------------------------------------------------------------ the port copy --
@@ -685,6 +705,7 @@ DECON_PANIC_INCLUDES = '''#include <linux/iopoll.h>
 #include <linux/panic_notifier.h>
 #include <linux/sched.h>
 #include <linux/sched/clock.h>
+#include <linux/soc/samsung/s9p-acpm.h>
 #include <linux/timekeeping.h>
 #include <linux/utsname.h>
 '''
@@ -713,6 +734,11 @@ DECON_PANIC = r'''/*
  *    the drawing stops where it is, the banner having come first, and the frame is
  *    shown as it is. A slow draw never holds up the restart. Time comes from
  *    ktime_get_mono_fast_ns(), which reads the counter: no interrupt needed.
+ *  - Then, in a real panic, panic_flush does not return: it runs s9p-clkgate's
+ *    s9p_panic_restart() (the countdown to panic=N's SWRESET, timed by the counter
+ *    and by DECON frame starts). Its tick counts the frame starts and redraws the
+ *    countdown (banner row 5) and a diagnostics row under the log ("CLOCK s TE n
+ *    WDT0 x WDT1 x SWRESET n") about 4 times a second.
  *
  * Layout, the loader's crash screen:
  *  - Banner from y 200, 36 px margin, 32 x 64 px cells (TER16x32 at 2x), 42 columns:
@@ -979,6 +1005,54 @@ static void s9p_panic_spin_ms(unsigned int ms)
 		cpu_relax();
 }
 
+static struct s9p_panic_ctx s9p_panic_live;	/* the shown frame, for the countdown */
+static unsigned int s9p_panic_frames;
+static unsigned int s9p_panic_shown_ms, s9p_panic_shown_left, s9p_panic_shown_sw;
+
+/*
+ * s9p_panic_restart()'s tick, on every pass of its busy loop: count DECON frame
+ * starts (the pending bit latches with the CPU's interrupts off; cleared by writing
+ * it) and redraw the countdown and the diagnostics row when they change, at most
+ * every 250 ms, followed by a shadow update request so the panel gets the frame
+ * even if DECON only sends frames on request.
+ */
+static void s9p_panic_tick(void *ctx, struct s9p_panic_clock *clk)
+{
+	struct s9p_decon *priv = ctx;
+	struct s9p_panic_ctx *c = &s9p_panic_live;
+	unsigned int y = S9P_PANIC_LOG_END + 8;
+	char line[96];
+
+	if (readl_relaxed(priv->decon + DECON_INTERRUPT_PENDING) & DECON_FRAME_START_INT_PEND) {
+		writel_relaxed(DECON_FRAME_START_INT_PEND, priv->decon + DECON_INTERRUPT_PENDING);
+		s9p_panic_frames++;
+	}
+	clk->frames = s9p_panic_frames;
+	if (!c->font || (clk->left_s == s9p_panic_shown_left && clk->swresets == s9p_panic_shown_sw &&
+			 clk->counter_ms - s9p_panic_shown_ms < 250))
+		return;
+	s9p_panic_shown_ms = clk->counter_ms;
+	s9p_panic_shown_left = clk->left_s;
+	s9p_panic_shown_sw = clk->swresets;
+	if (clk->left_s)
+		snprintf(line, sizeof(line), "RESTARTING IN %u S", clk->left_s);
+	else if (clk->swresets <= 1)
+		snprintf(line, sizeof(line), "RESTARTING NOW (SWRESET)");
+	else
+		snprintf(line, sizeof(line), "SWRESET X%u, NO RESET YET", clk->swresets);
+	s9p_panic_fill(c->base, c->pitch, S9P_PANIC_X, S9P_PANIC_TOP + 5 * S9P_PANIC_CELL_H,
+		       PANEL_W - S9P_PANIC_X, S9P_PANIC_TOP + 6 * S9P_PANIC_CELL_H, S9P_PANIC_BLACK);
+	s9p_panic_row(c, 5, line, ~0u, S9P_PANIC_GOLD);
+	snprintf(line, sizeof(line), "CLOCK %u.%u S  TE %u  WDT0 %04x  WDT1 %04x  SWRESET %u",
+		 clk->counter_ms / 1000, clk->counter_ms % 1000 / 100, clk->frames,
+		 clk->wtcnt0 & 0xffff, clk->wtcnt1 & 0xffff, clk->swresets);
+	s9p_panic_fill(c->base, c->pitch, S9P_PANIC_X, y, PANEL_W - S9P_PANIC_X,
+		       y + c->font->height, S9P_PANIC_BLACK);
+	s9p_panic_text(c, S9P_PANIC_X, y, 1, 1, line, ~0u, S9P_PANIC_MUTED);
+	wmb();
+	s9p_decon_program_address(priv, priv->panic_dma, priv->panic_pitch);
+}
+
 static void s9p_panic_flush(struct drm_plane *plane)
 {
 	struct s9p_decon *priv = to_s9p_decon(plane->dev);
@@ -1012,6 +1086,19 @@ static void s9p_panic_flush(struct drm_plane *plane)
 	}
 	priv->panic_ms = (ktime_get_mono_fast_ns() - priv->panic_t0) / NSEC_PER_MSEC;
 	priv->panic_late = c.late;
+	if (!panic_in_progress())
+		return;		/* a dry run */
+	/*
+	 * The restart, from here: after ramoops and the screen, without going back to
+	 * panic() (its countdown and emergency_restart() never reset in time on the
+	 * phone). Returns only with panic=0 (no restart wanted) or without the PMU.
+	 */
+	s9p_panic_live = c;
+	s9p_panic_frames = 0;
+	s9p_panic_shown_left = ~0u;
+	writel_relaxed(DECON_FRAME_START_INT_PEND, priv->decon + DECON_INTERRUPT_PENDING);
+	s9p_frame_start_irq_set(priv, true);
+	s9p_panic_restart(s9p_panic_tick, priv);
 }
 
 static struct drm_plane_helper_funcs s9p_panic_plane_helpers;
@@ -1063,50 +1150,55 @@ static void s9p_panic_setup(struct s9p_decon *priv) { }
 # 10. Restart and power-off (docs/LINUX-REBUILD-PLAN.md, "Panic screen and restart").
 CLKGATE_RESET = r'''
 /*
- * Starbite restart and power-off (tools/linux/patch-mainline.py step 10;
- * docs/LINUX-REBUILD-PLAN.md 7).
+ * Starbite restart, power-off and panic restart (tools/linux/patch-mainline.py
+ * step 10; docs/LINUX-REBUILD-PLAN.md 7).
  *
  * Restart, Samsung's way (exynos-reboot.c exynos_reboot after sec_reboot.c;
  * the Starbite loader, Starbite Recovery and XNU's crash return do the same):
  * INFORM2 = 0x12345678 (a reset, else S-Boot starts LP charging), then PMU
- * SWRESET (+0x400) = 1. This is a warm reset that keeps DRAM, so ramoops
- * survives. INFORM3 is not touched: syscon-reboot-mode has already written it
- * for a clean reboot ("reboot recovery", "reboot download"), and a panic keeps
- * the boot's value (the loader's crash return patches the DTB's recovery value
- * to normal). The handler makes plain writes to a mapping made at boot: no
- * regmap lock, no sleeping, and its waits count on the counter, so nothing
- * here waits for a timer interrupt or a WFE wake-up. Priority 192, before
- * s3c2410_wdt's 128. Verified on the phone: a plain reboot leaves through
- * SWRESET (RST_STAT 0x20000000).
+ * SWRESET (+0x400) = 1. It is a warm reset, so ramoops survives. INFORM3 is not
+ * touched: syscon-reboot-mode has written it for a clean reboot, and a panic
+ * keeps the boot's value (the loader's crash return patches it to normal). The
+ * writes go to a mapping made at boot, with no regmap lock and no sleeping; the
+ * waits count on the architected counter. Priority 192, before s3c2410_wdt's
+ * 128. Verified on the phone: reboot leaves through SWRESET (RST_STAT
+ * 0x20000000).
  *
- * Without it the only restart handler is s3c2410_wdt's (PSCI is v0.1 on this
- * firmware, no SYSTEM_RESET; the PMU node carries reboot-mode only). After
- * device_shutdown() its own shutdown has masked the watchdog's reset again
- * (PMU 0x408 and 0x40c bit 23): "Reboot failed -- System halted".
+ * Panic restart: s9p_panic_restart(), called by s9p-decon at the end of its
+ * panic screen, i.e. after ramoops and the screen, from inside drm_panic's
+ * kmsg dumper. It never goes back to panic(): on the phone, panic()'s own
+ * countdown and restart never reset in time (the first panics took about
+ * 2 minutes; a 15 s cluster-1 watchdog armed at the panic did not fire
+ * either). It busy-waits (cpu_relax, no WFE, no timer interrupt) and measures
+ * time two ways:
+ *  - the architected counter (CNTVCT) since the panic notifier;
+ *  - DECON frame starts since the screen (the panel's TE, 60 Hz, its own
+ *    oscillator), counted by the caller's tick.
+ * At panic_timeout seconds by either one it writes INFORM2 + SWRESET. It
+ * retries every second; from the third try it also arms both cluster
+ * watchdogs for 1 s. tick() redraws the countdown and a diagnostics row on
+ * the panel (counter time, TE frames, both watchdog counters, SWRESET writes),
+ * so a photo of a stuck screen shows which clock stopped.
  *
- * Panic backstop: a panic notifier (first in the chain) arms cluster 1's
- * watchdog for panic_timeout + 5 s (at most 82 s), the loader's own sequence
- * (wdt_arm: WTCON 0, WTDAT = WTCNT, WTCLRINT, WTCON 0xFF39, PMU bit 23
- * cleared in 0x408 then 0x40C). If anything after the panic screen stalls,
- * the watchdog resets 5 s after the planned SWRESET instead of whenever (the
- * phone's first panics sat for 60 s to 2 min: panic()'s mdelay() countdown
- * waits in WFE, which this SoC wakes far too rarely with interrupts off; see
- * patch-mainline.py step 11). Not armed with panic=0 (no restart wanted).
- * s9p_clkgate.panic_wdt=0 = no backstop.
+ * Panic backstop: a panic notifier (first in the chain) arms both cluster
+ * watchdogs, cluster 0 (0x10050000, PMU bit 24) and cluster 1 (0x10060000,
+ * bit 23), for panic_timeout + 5 s. It uses the loader's wdt_arm: WTCON 0,
+ * WTDAT = WTCNT, WTCLRINT, WTCON 0xFF39, the PMU bit cleared in 0x408 then
+ * 0x40C. Not armed with panic=0. s9p_clkgate.panic_wdt=0 = no backstop.
  *
  * Power-off: PS_HOLD low (PMU +0x330c bit 8, exynos_power_off). With a cable
  * in, the PMIC keeps the phone on; after 3 s it restarts instead, as the
- * loader's own power-off does (reboot-mode wrote INFORM3 = normal).
+ * loader's own power-off does.
  *
- * s9p_clkgate.pmu_reset=0: none of this (mainline: watchdog restart, no
- * power-off, no backstop).
- * The boot line "s9p-reset:" logs RST_STAT, the watchdog's PMU disable/mask
- * bits and the reset sequencer (0x500, bit 0 = Samsung's DFD dump) as found.
+ * s9p_clkgate.pmu_reset=0: none of this (mainline: watchdog restart only).
+ * The boot line "s9p-reset:" logs RST_STAT, the watchdogs' PMU disable/mask
+ * bits and the reset sequencer (0x500, bit 0 = Samsung's DFD dump).
  */
 #define S9P_PMU_SWRESET		0x0400
 #define S9P_PMU_RST_STAT	0x0404
 #define S9P_PMU_WDT_DISABLE	0x0408
 #define S9P_PMU_WDT_MASK	0x040c
+#define  S9P_PMU_WDT0_BIT	BIT(24)	/* cluster 0's watchdog */
 #define  S9P_PMU_WDT1_BIT	BIT(23)	/* cluster 1's watchdog */
 #define S9P_PMU_RESET_SEQ	0x0500
 #define S9P_PMU_INFORM2		0x0808
@@ -1114,6 +1206,7 @@ CLKGATE_RESET = r'''
 #define S9P_PMU_PS_HOLD		0x330c
 #define  S9P_PS_HOLD_OUT	BIT(8)
 #define S9P_INFORM2_RESET	0x12345678
+#define S9P_WDT0_PHYS		0x10050000	/* no DT node: the port stops it at boot */
 #define S9P_WTCON		0x00
 #define S9P_WTDAT		0x04
 #define S9P_WTCNT		0x08
@@ -1121,22 +1214,30 @@ CLKGATE_RESET = r'''
 #define S9P_WTCON_ARM		0xff39	/* prescaler 255, /128, enable, reset */
 #define S9P_WDT_HZ		793	/* 26 MHz / 256 / 128 = 793.457 */
 #define S9P_WDT_MAX_S		82	/* 65535 counts */
+#define S9P_PANIC_FPS		60	/* the panel's TE */
 
 static void __iomem *s9p_pmu;
+static void __iomem *s9p_wdt0;
 static void __iomem *s9p_wdt1;
+static u64 s9p_panic_t0;	/* counter at the panic notifier */
+static bool s9p_panic_t0_set;
 static bool s9p_pmu_reset = true;
 module_param_named(pmu_reset, s9p_pmu_reset, bool, 0444);
-MODULE_PARM_DESC(pmu_reset, "restart by PMU SWRESET, power off by PS_HOLD, panic watchdog backstop (Starbite; 0 = watchdog restart only)");
+MODULE_PARM_DESC(pmu_reset, "restart by PMU SWRESET, power off by PS_HOLD, panic restart and watchdog backstop (Starbite; 0 = watchdog restart only)");
 static bool s9p_panic_wdt = true;
 module_param_named(panic_wdt, s9p_panic_wdt, bool, 0644);
-MODULE_PARM_DESC(panic_wdt, "at a panic, arm cluster 1's watchdog for panic_timeout + 5 s (Starbite backstop)");
+MODULE_PARM_DESC(panic_wdt, "at a panic, arm both cluster watchdogs for panic_timeout + 5 s (Starbite backstop)");
+
+static u64 s9p_counter_rate(void)
+{
+	return arch_timer_get_rate() ?: 26000000;
+}
 
 /* a busy wait on the architected counter: no WFE, no timer interrupt, no timekeeping */
 static void s9p_spin_ms(unsigned int ms)
 {
-	u64 rate = arch_timer_get_rate() ?: 26000000;
 	u64 start = arch_timer_read_counter();
-	u64 ticks = rate * ms / 1000;
+	u64 ticks = s9p_counter_rate() * ms / 1000;
 
 	while (arch_timer_read_counter() - start < ticks)
 		cpu_relax();
@@ -1172,18 +1273,20 @@ static int s9p_pmu_power_off(struct sys_off_data *data)
 }
 
 /* the loader's wdt_arm, for s seconds */
-static void s9p_wdt1_arm(unsigned int s)
+static void s9p_wdt_arm(void __iomem *wdt, u32 pmu_bit, unsigned int s)
 {
-	u32 count = min(s, (unsigned int)S9P_WDT_MAX_S) * S9P_WDT_HZ;
+	u32 count = max(1u, min(s, (unsigned int)S9P_WDT_MAX_S) * S9P_WDT_HZ);
 
-	writel_relaxed(0, s9p_wdt1 + S9P_WTCON);
-	writel_relaxed(count, s9p_wdt1 + S9P_WTDAT);
-	writel_relaxed(count, s9p_wdt1 + S9P_WTCNT);
-	writel_relaxed(0, s9p_wdt1 + S9P_WTCLRINT);
-	writel_relaxed(S9P_WTCON_ARM, s9p_wdt1 + S9P_WTCON);
-	writel_relaxed(readl_relaxed(s9p_pmu + S9P_PMU_WDT_DISABLE) & ~S9P_PMU_WDT1_BIT,
+	if (!wdt)
+		return;
+	writel_relaxed(0, wdt + S9P_WTCON);
+	writel_relaxed(count, wdt + S9P_WTDAT);
+	writel_relaxed(count, wdt + S9P_WTCNT);
+	writel_relaxed(0, wdt + S9P_WTCLRINT);
+	writel_relaxed(S9P_WTCON_ARM, wdt + S9P_WTCON);
+	writel_relaxed(readl_relaxed(s9p_pmu + S9P_PMU_WDT_DISABLE) & ~pmu_bit,
 		       s9p_pmu + S9P_PMU_WDT_DISABLE);
-	writel_relaxed(readl_relaxed(s9p_pmu + S9P_PMU_WDT_MASK) & ~S9P_PMU_WDT1_BIT,
+	writel_relaxed(readl_relaxed(s9p_pmu + S9P_PMU_WDT_MASK) & ~pmu_bit,
 		       s9p_pmu + S9P_PMU_WDT_MASK);
 	dsb(sy);
 }
@@ -1193,11 +1296,14 @@ static int s9p_pmu_panic(struct notifier_block *nb, unsigned long ev, void *data
 	int t = READ_ONCE(panic_timeout);
 	unsigned int s;
 
-	if (!s9p_wdt1 || !READ_ONCE(s9p_panic_wdt) || !t)
+	s9p_panic_t0 = arch_timer_read_counter();
+	s9p_panic_t0_set = true;
+	if (!READ_ONCE(s9p_panic_wdt) || !t)
 		return NOTIFY_DONE;
 	s = t > 0 ? min(t, S9P_WDT_MAX_S - 5) + 5 : 5;
-	s9p_wdt1_arm(s);
-	pr_emerg("s9p-reset: panic: SWRESET in %d s, cluster-1 watchdog backstop at %u s\n",
+	s9p_wdt_arm(s9p_wdt1, S9P_PMU_WDT1_BIT, s);
+	s9p_wdt_arm(s9p_wdt0, S9P_PMU_WDT0_BIT, s);
+	pr_emerg("s9p-reset: panic: SWRESET in %d s, watchdog backstop (cluster 0 and 1) at %u s\n",
 		 t > 0 ? t : 0, s);
 	return NOTIFY_DONE;
 }
@@ -1206,6 +1312,39 @@ static struct notifier_block s9p_pmu_panic_nb = {
 	.notifier_call = s9p_pmu_panic,
 	.priority = INT_MAX,	/* first: before anything that could stall */
 };
+
+void s9p_panic_restart(void (*tick)(void *ctx, struct s9p_panic_clock *clk), void *ctx)
+{
+	struct s9p_panic_clock clk = { };
+	int t = READ_ONCE(panic_timeout);
+	u64 rate = s9p_counter_rate();
+	u64 t0 = s9p_panic_t0_set ? s9p_panic_t0 : arch_timer_read_counter();
+	unsigned int target_ms = t > 0 ? t * 1000 : 0, elapsed, next_ms = 0;
+
+	if (!s9p_pmu || !s9p_pmu_reset || !t)
+		return;
+	for (;;) {
+		clk.counter_ms = (arch_timer_read_counter() - t0) * 1000 / rate;
+		clk.wtcnt0 = s9p_wdt0 ? readl_relaxed(s9p_wdt0 + S9P_WTCNT) : 0;
+		clk.wtcnt1 = s9p_wdt1 ? readl_relaxed(s9p_wdt1 + S9P_WTCNT) : 0;
+		elapsed = max(clk.counter_ms, clk.frames * 1000 / S9P_PANIC_FPS);
+		clk.left_s = elapsed >= target_ms ? 0 : DIV_ROUND_UP(target_ms - elapsed, 1000);
+		if (tick)
+			tick(ctx, &clk);
+		if (elapsed >= target_ms && elapsed >= next_ms) {
+			if (clk.swresets >= 2) {
+				/* SWRESET has not reset twice: the watchdogs as well, 1 s */
+				s9p_wdt_arm(s9p_wdt1, S9P_PMU_WDT1_BIT, 1);
+				s9p_wdt_arm(s9p_wdt0, S9P_PMU_WDT0_BIT, 1);
+			}
+			s9p_pmu_swreset();
+			clk.swresets++;
+			next_ms = elapsed + 1000;
+		}
+		cpu_relax();
+	}
+}
+EXPORT_SYMBOL_GPL(s9p_panic_restart);
 
 static int __init s9p_pmu_reset_init(void)
 {
@@ -1232,16 +1371,17 @@ static int __init s9p_pmu_reset_init(void)
 	if (IS_ERR(register_sys_off_handler(SYS_OFF_MODE_POWER_OFF, SYS_OFF_PRIO_DEFAULT,
 					    s9p_pmu_power_off, NULL)))
 		pr_err("s9p-reset: power-off handler not registered\n");
-	/* cluster 1's watchdog (the DT node s3c2410_wdt drives), for the panic backstop */
+	/* cluster 1's watchdog: the DT node s3c2410_wdt drives; cluster 0's: no node */
 	np = of_find_compatible_node(NULL, NULL, "samsung,exynos7-wdt");
 	if (np) {
 		s9p_wdt1 = of_iomap(np, 0);
 		of_node_put(np);
 	}
-	if (s9p_wdt1)
-		atomic_notifier_chain_register(&panic_notifier_list, &s9p_pmu_panic_nb);
-	pr_info("s9p-reset: restart = INFORM2 + PMU SWRESET, power-off = PS_HOLD low, panic watchdog backstop %s\n",
-		s9p_wdt1 ? (s9p_panic_wdt ? "on" : "off (panic_wdt=0)") : "missing (no watchdog node)");
+	s9p_wdt0 = ioremap(S9P_WDT0_PHYS, 0x100);
+	atomic_notifier_chain_register(&panic_notifier_list, &s9p_pmu_panic_nb);
+	pr_info("s9p-reset: restart = INFORM2 + PMU SWRESET, power-off = PS_HOLD low, panic restart on, watchdog backstop %s (cluster 0 %s, cluster 1 %s)\n",
+		s9p_panic_wdt ? "on" : "off", s9p_wdt0 ? "mapped" : "missing",
+		s9p_wdt1 ? "mapped" : "missing");
 	return 0;
 }
 postcore_initcall(s9p_pmu_reset_init);
@@ -1670,11 +1810,30 @@ fi
          '#include <linux/panic.h>\n'
          '#include <linux/panic_notifier.h>\n'
          '#include <linux/reboot.h>\n'
+         '#include <linux/soc/samsung/s9p-acpm.h>\n'
          '#include <clocksource/arm_arch_timer.h>\n',
          'Starbite restart (10)')
     edit(w, clk, 'postcore_initcall(s9p_clkgate_init);\n',
          'postcore_initcall(s9p_clkgate_init);\n' + CLKGATE_RESET,
          'static int s9p_pmu_restart(')
+    # the panic restart's interface, for s9p-decon (the port's shared SoC header)
+    edit(w, 'src/soc/s9p-acpm.h', '#ifdef CONFIG_S9P_ACPM\n', '''/*
+ * Starbite panic restart (s9p-clkgate.c, tools/linux/patch-mainline.py step 10):
+ * the countdown to panic=N's SWRESET, run by s9p-decon at the end of its panic
+ * screen. tick() runs on every pass of the busy loop: it counts DECON frame starts
+ * into frames and redraws the countdown. Returns only with panic=0 or no PMU.
+ */
+struct s9p_panic_clock {
+	unsigned int left_s;		/* to the SWRESET; 0 = resetting */
+	unsigned int counter_ms;	/* since the panic, architected counter */
+	unsigned int frames;		/* since the screen, DECON frame starts (the tick) */
+	u32 wtcnt0, wtcnt1;		/* cluster 0 / 1 watchdog counters, raw */
+	unsigned int swresets;		/* SWRESET writes so far */
+};
+void s9p_panic_restart(void (*tick)(void *ctx, struct s9p_panic_clock *clk), void *ctx);
+
+#ifdef CONFIG_S9P_ACPM
+''', 'Starbite panic restart (s9p-clkgate.c')
 
 
 ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])

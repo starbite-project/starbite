@@ -796,7 +796,7 @@ deleted. **Not flashed.**
 - RST_STAT after the old kernel's slow reset (7.1).
 - Power-off with and without a cable.
 
-### 7.5 Phone test of the first build (done 2026-11-06, results in 7.6; the current test is 7.9)
+### 7.5 Phone test of the first build (done 2026-11-06, results in 7.6; the current test is 7.12)
 
 1. `dmesg | grep -e s9p-reset -e "panic screen"`. Expect two lines:
    - `s9p-reset: RST_STAT ... INFORM3 12345670`, then `restart = INFORM2 + PMU SWRESET, power-off = PS_HOLD low`.
@@ -880,7 +880,7 @@ deleted. **Not flashed.**
 - `console_unblank()` and `console_flush_on_panic()` are not proven innocent, but they do not depend on time.
   The watchdog backstop below covers them too.
 
-### 7.7 The fix (kernel steps 11, 10, 6g)
+### 7.7 The second round (kernel steps 11, 10, 6g)
 
 - **Step 11 (tree, arch/arm64/lib/delay.c):** `__delay()` skips the WFE loop when interrupts are off and spins
   on the counter instead (`cpu_relax`), so `mdelay()` in atomic context is exact. This covers the countdown,
@@ -920,7 +920,7 @@ deleted. **Not flashed.**
   ramoops log, draws the full screen in 1.6 ms on the Mac. A frame pre-filled with grey is fully overdrawn,
   and a zero budget stops before the first pixel. The render is in the session scratchpad, not in the repo.
 
-### 7.8 Build of the fix (2026-11-06)
+### 7.8 Build of the second round (2026-11-06, superseded by 7.11)
 
 The build is the same command as 7.3 (REPO_OUT in the VM, deleted afterwards). It produced release
 **`7.1.0-starbite-6a605a1f`** in /home/dev.guest/distros/_kernel-panic/, replacing f797be6b's files
@@ -938,7 +938,7 @@ All check-kernel.py checks pass, and s9p-decon.o, s9p-clkgate.o and delay.o comp
 The disassembly of `__delay` shows the new test (`mrs x0, daif; tbnz w0, #7`) skipping the `wfe` loop when
 IRQs are masked. **Not flashed.**
 
-### 7.9 Phone test (pmOS, as root over SSH)
+### 7.9 Phone test of the second round (done; result in 7.10)
 
 1. Check the boot lines:
    ```
@@ -967,3 +967,87 @@ IRQs are masked. **Not flashed.**
    - **No reset for 60 s or more:** neither the countdown nor the backstop worked. Hold Volume Down + Power
      for 7 s and report it.
 4. Optional: `reboot -f`, and `poweroff` with and without the cable (unchanged from 7.5).
+
+### 7.10 Phone result for 6a605a1f and the third round (2026-11-06, night)
+
+**Result.** dmesg confirmed both "panic watchdog backstop on" and "budget 500 ms". After `echo c` the Starbite
+screen appeared, but the reset again came after **about 2 minutes** (the user's estimate), then the loader's
+panic screen. So none of these reset in time:
+- the exact countdown (step 11);
+- the 15 s cluster-1 watchdog backstop;
+- in f797be6b's run, the loader's 60 s watchdog.
+
+In a running system (the wdt-test, /dev/watchdog held open) the same watchdog resets on time. RST_STAT for
+this run is still to come.
+
+**What that means.** Two independent timers (the countdown on the architected counter, and the watchdog on
+its 26 MHz clock) both overrun by roughly the same factor during a panic and only during a panic. `reboot`
+resets at once through the same SWRESET. Something in the panic state slows or stops time-keeping hardware,
+or holds the reset back, and the data cannot tell which.
+- The state that only a panic creates: all seven other CPUs parked in `cpu_park_loop()` (WFE/WFI, interrupts
+  masked) for ten seconds or more. During `reboot` they park only for milliseconds before the SWRESET.
+- Suspects are clock gating or power-down of idle clusters, and a reset sequencer that waits on them.
+  This is a hypothesis, not a measurement.
+
+**Third round (kernel steps 12, 10, 6g):** nothing in the restart now depends on panic() or on a single clock.
+- **The countdown runs in the latest hook,** right after the screen. At the end of `panic_flush` (a real panic
+  only) the driver calls s9p-clkgate's `s9p_panic_restart()` and never goes back to panic().
+  - It busy-waits (`cpu_relax`, no WFE, no interrupt) and measures time two ways: the architected counter
+    (CNTVCT) since the panic notifier, and DECON frame starts since the screen. Frame starts are the panel's
+    TE at 60 Hz from the panel's own oscillator; the pending bit is polled and cleared, and the frame-start
+    source is enabled for it.
+  - At panic_timeout by **either** clock it writes INFORM2 + SWRESET directly. It retries every second; from
+    the third try it also arms both watchdogs for 1 s.
+  - panic=0 returns at once, as before (no restart).
+- **Live diagnostics on the panel.** About four times a second the tick redraws banner row 5 (`RESTARTING IN
+  n S` → `RESTARTING NOW (SWRESET)` → `SWRESET Xn, NO RESET YET`). It also redraws a muted row under the log:
+  `CLOCK s.s S  TE n  WDT0 xxxx  WDT1 xxxx  SWRESET n`. A photo or a stopwatch then shows which clock runs,
+  whether the watchdogs count (their WTCNT values fall at 793/s), and whether SWRESET was written.
+- **Backstop on both watchdogs:** cluster 0 (0x10050000, PMU bit 24; it has no DT node and is ioremapped) and
+  cluster 1 (0x10060000, bit 23), both armed at the panic for panic_timeout + 5 s with the loader's sequence.
+- **Step 12 (tree, arch/arm64/kernel/smp.c `local_cpu_stop`):** while a panic with a restart due is in
+  progress (`panic_in_progress() && panic_timeout > 0`), the stopped CPUs spin with `cpu_relax` instead of
+  parking in WFE/WFI. No cluster goes idle before the SWRESET. With panic=0 they park as before.
+- Steps 11 (no WFE in `__delay` with interrupts off) and the 500 ms drawing budget stay.
+
+### 7.11 Build of the third round
+
+The build is the same command as 7.3 (REPO_OUT in the VM, deleted afterwards). It produced release
+**`7.1.0-starbite-8775991b`** in /home/dev.guest/distros/_kernel-panic/, replacing 6a605a1f's files
+there:
+
+| File | sha256 |
+|---|---|
+| `Image` | `56addce0cf3e81223c010645a1bbb7c4e1118df2a74630d6228e1d9276315d7b` |
+| `exynos9810-starlte.dtb` | `f563dee16a2b2b39fc675b692d24cd1eec645f0480c36788c4db122155dd6e0f` (unchanged) |
+| `linux-old.dtb` | `0f33b012d73071621291d760683ca041e566bd22d584b03df79a5f890c9b287e` (unchanged) |
+| `rescue.dtb` | `550f1e5e0dcd8b0e096cc8374201c82c75f49155f0c88d090658a47f423eaa47` (unchanged) |
+| `modules-7.1.0-starbite-8775991b.img` | `6182ccac9d465612424c6cb3fb0750b439dbcef06946796bf5f8cbf9a0da5de3` |
+
+All check-kernel.py checks pass, and s9p-decon.o, s9p-clkgate.o and smp.o compile without warnings at W=1.
+The disassembly of `local_cpu_stop` shows the new branch: `panic_in_progress()`, then `panic_timeout > 0`,
+leading to a `yield` loop, else the old `wfe`/`wfi` park. A host render of the tick's countdown and
+diagnostics rows matches the layout in 7.10. **Not flashed.**
+
+### 7.12 Phone test (pmOS, as root over SSH; have a stopwatch or a second phone's camera ready)
+
+1. Check the boot lines:
+   ```
+   dmesg | grep -e s9p-reset -e "panic screen"
+   ```
+   Expect `s9p-reset: restart = INFORM2 + PMU SWRESET, power-off = PS_HOLD low, panic restart on, watchdog
+   backstop on (cluster 0 mapped, cluster 1 mapped)` and `panic screen: ... budget 500 ms`.
+2. Dry run: `echo 1 > /sys/kernel/debug/dri/16030000.decon/drm_panic_plane_0`, as in 7.9. A dry run never
+   counts down or resets.
+3. **Panic.** Run `echo c > /proc/sysrq-trigger` and start the stopwatch.
+   - The screen appears. Row 5 counts `RESTARTING IN 10 S` ... `1 S`, and the bottom row shows
+     `CLOCK ... TE ... WDT0 ... WDT1 ... SWRESET 0`.
+   - **Expected:** the countdown keeps pace with the stopwatch, TE rises by about 60 a second, both WDT
+     values fall, and at about 10 s the phone resets. The loader shows KERNEL PANIC with RESET: SWRESET.
+   - **The countdown runs slow against the stopwatch:** photograph the bottom row twice, about 10 s apart.
+     - CLOCK slow but TE about 60/s: the counter slows in a panic, and TE now ends the countdown at 10 s.
+     - Both slow: the CPU itself barely runs.
+     - WDT values frozen: the watchdogs do not count in this state.
+   - **`RESTARTING NOW (SWRESET)` or `SWRESET Xn` stays on screen:** SWRESET was written and did not reset.
+     Photograph it. From the third write both watchdogs are also armed for 1 s.
+   - Report the time to the reset and RST_STAT (loader level 3) either way.
