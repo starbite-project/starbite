@@ -301,7 +301,7 @@ root = "none (RAM only)"
 [[entry]]
 key = "linux-pmos-bb"
 name = "postmarketOS"
-version = "edge · Phosh · display diagnostics"
+version = "edge · Phosh · panel mask fix"
 category = "linux"
 method = "linux"
 tag = "beta"
