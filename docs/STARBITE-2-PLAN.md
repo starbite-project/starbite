@@ -60,6 +60,23 @@ LineageOS as the main Android; UFS re-laid with Windows kept (~18 GiB) and ~16 G
 straight to the home screen, no setup. The installer must take a stock SM-G960F (unlocked bootloader) all the
 way to a full Starbite phone. Linux black bands after every screen-off (panel self mask, plan 6.6).
 
+**Status, 2026-11-06 evening** (merged on master, host-tested; phone verification pending unless said):
+- Installer v2 for a stock S9: no TWRP, never RECOVERY (BOOT via heimdall, then the loader's fastboot
+  starts the Linux installer environment); GPT engine from one layout table; bundle builder. 111 unit
+  tests, rehearsal 144/144 (docs/INSTALLER.md).
+- Starbite Maintenance (SBMAINT): one Linux maintenance/installer/rescue environment replacing TWRP,
+  own partition slots A/B or the store (docs/MAINTENANCE.md). Store entries maint / maint-rescue are on
+  the phone; not yet booted.
+- Starbite Lab (Engineer OS v2): tiered writes (warnings + confirmations, backups first), full test suite
+  incl. stress, thermal, battery, health check (docs/ENGINEER-OS.md). In the store; not yet run.
+- Loader boot health: full POST by default (~9 s, Volume Down skips), quiet log level by default, crash
+  and hang detection with crash screen + store crash log, watchdog (off until tested), Android
+  android.dtb, Maintenance boot paths (docs/STARBITE-HEALTH.md). BOOT image build/boot-batch/
+  xnu-boot-health2.img (51dbc26d...) built, NOT flashed (with the user present).
+- Linux: panel self-mask off by default (black bands gone, user-confirmed); password 220212 on every
+  distro and ChromeOS; initrd quiet at log level 0.
+- One UI 8: building (docs/ANDROID-ONEUI.md); Windows backed up (verified) for the UFS re-layout.
+
 **Backlog: the user's notes (2026-11-06), not yet ordered**
 - Global panic and hang detection for all systems.
 - Add the other remaining systems (the lineup's missing entries); maybe an emulation OS (QEMU).
