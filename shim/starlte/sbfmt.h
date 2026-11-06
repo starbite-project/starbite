@@ -239,3 +239,87 @@ unsigned sb_line_edit(char *line, unsigned cap, const char *frag, int allow_remo
 void sb_date(uint64_t epoch, char *out);
 /* Linux ramoops record header "====<sec>.<usec>-<C|D>": the seconds, or 0. */
 uint64_t sb_dmesg_time(const char *text, unsigned n);
+/* The last "key=value" of a command line (Linux's module parameters and XNU's PE_parse_boot_argn
+ * take the last one): 1 and the value, else 0. */
+int sb_arg_last(const char *args, unsigned len, const char *key, char *out, unsigned cap);
+
+/* ---- the watchdog's kernel arguments (xnu_boot.c launch_prepare / boot_xnu) -------------------
+ * sb_line_edit drops tokens that do not fit (XNU's boot-args hold 607 bytes), so the loader checks
+ * the finished command line before it arms the watchdog: 1 if line carries what makes the OS feed
+ * a watchdog of wdt seconds, 0 if not (then nothing is armed). */
+#define SB_WDT_XNU   1U     /* sbwdt=N (xnu/series-12377/0399) */
+#define SB_WDT_LINUX 2U     /* s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=N */
+int sb_wdt_args_ok(const char *line, unsigned len, unsigned how, unsigned wdt);
+
+/* ---- POST presentation (post.c, docs/STARBITE-HEALTH.md 2.2) ------------------------------------
+ * The full POST shows the Starbite logo (PV_LOGO). A Volume Up press that STARTS during POST opens
+ * the live log (PV_LOG) for the rest of the run. Volume Up already held when POST starts is the
+ * loader's fastboot gesture (fastboot_dev.c fastboot_wanted, which runs after POST): it is ignored
+ * until the key has been seen released. Volume Down held skips the rest of POST. Times in ms. */
+#define PV_LOGO 0U
+#define PV_LOG  1U
+#define PV_NONE 2U              /* nothing drawn: quick POST over S-Boot's splash */
+#define PV_DEBOUNCE_MS 40U      /* Volume Up counts once down (or released) this long */
+#define PV_SKIP_MS     20U      /* Volume Down counts once down this long */
+#define PV_READ_MS     2000U    /* the log view stays this long after the run ... */
+#define PV_HOLD_MAX_MS 60000U   /* ... or while Volume Up (pressed during POST) is held, at most this */
+#define PV_FAIL_WAIT_S 30U      /* the failure screen continues on its own after this */
+struct pv_keys {
+    uint8_t view;               /* PV_* now */
+    uint8_t up_blocked;         /* Volume Up was down at the start and not yet seen released */
+    uint8_t up_used;            /* a Volume Up press during POST (the log was asked for) */
+    uint8_t skip;               /* Volume Down: the rest is skipped */
+    uint64_t up_since, up_free_since, down_since;   /* ms + 1 when first seen, 0 = not */
+};
+#define PV_EV_LOG  1U           /* pv_poll: switch to the log view now */
+#define PV_EV_SKIP 2U           /* pv_poll: skip the rest of POST now */
+void pv_init(struct pv_keys *k, unsigned view, int up_at_start, uint64_t now_ms);
+unsigned pv_poll(struct pv_keys *k, int up, int down, uint64_t now_ms);
+/* What follows the run: the failure screen if a check failed (red), else the log view's pause to
+ * read (the log view only), else straight on. Warnings (gold) never stop the logo. */
+#define PV_END_GO   0U
+#define PV_END_READ 1U
+#define PV_END_FAIL 2U
+unsigned pv_end(const struct pv_keys *k, unsigned fails);
+/* PV_END_READ, t ms after the run ended: 1 = keep the log on the panel. Power or Volume Down
+ * (cut) ends it; Volume Up held keeps it (only a press made during POST, at most PV_HOLD_MAX_MS). */
+int pv_hold(const struct pv_keys *k, int up, int cut, uint64_t t_ms);
+/* The failed checks for the failure screen, in display order: the ids in order[0..n) whose
+ * state[id] is fail_state, at most max into out. Returns how many failed (all of them). */
+unsigned pv_failures(const uint8_t *state, const uint8_t *order, unsigned n, unsigned fail_state,
+                     uint8_t *out, unsigned max);
+
+/* ---- what a crashed OS left: the crash screen's parser (crash.c) -------------------------------
+ * Text from the ramoops dmesg record or the console ring (Linux: lines "<N>[ secs.usecs] text",
+ * the prefix optional) or XNU's panic dump in the pmsg ring (docs/STARBITE-HEALTH.md 5.4). Each
+ * line gets a kind; the header fields come from the lines. */
+#define CT_LOG   0U             /* any other line */
+#define CT_MSG   1U             /* the panic / oops message: "Kernel panic - not syncing:", "Internal
+                                 * error:", "Unable to handle kernel", "BUG:", the abort info block,
+                                 * XNU "panic(cpu ..." */
+#define CT_INFO  2U             /* who and what: "CPU: n ... PID: ... Comm:", "Hardware name:", "Modules
+                                 * linked in:", "Linux version"; XNU "Kernel
+                                 * version:", "Panicked task", the STARBITE marker lines */
+#define CT_REGS  3U             /* CPU registers: "pc :", "lr :", "sp :", "pstate:", "xNN:", "Code:";
+                                 * XNU "x0:", "pc:", "cpsr:", "CORE n: PC=" */
+#define CT_TRACE 4U             /* the call trace: "Call trace:" and its frames; XNU "Panicked
+                                 * thread: ..., backtrace:" and its "lr: ... fp: ..." lines */
+struct sb_crashinfo {
+    char version[64];           /* kernel release ("7.1.0-starbite-23527494", "xnu-12377...") */
+    char task[64];              /* "CPU 4 PID 1234 sh", "CPU 2 PID 0 kernel_task" */
+    char message[160];          /* the panic message line, without its prefix */
+    uint64_t uptime_ms;         /* at the panic (its timestamp, XNU's "uptime N s"), 0 unknown */
+    unsigned lines, msg, info, regs, trace;   /* lines in all and of each kind */
+};
+/* Parse text[0..n): fills *ci; kinds[i] = the kind of line i for i < cap (kinds may be 0).
+ * Returns the number of lines. */
+unsigned sb_crash_parse(const char *text, unsigned n, struct sb_crashinfo *ci, uint8_t *kinds, unsigned cap);
+/* Bytes of a line's "<N>" syslog prefix (0 if none): the screen and the report leave it out. */
+unsigned sb_crash_prefix(const char *line, unsigned n);
+/* Bytes of the "[ secs.usecs] " time after it (0 if none): the screen's extracted sections leave
+ * it out (the log keeps it). */
+unsigned sb_crash_stamp(const char *line, unsigned n);
+/* The saved report's text (cl_report.text): every message, info, register and trace line, then as
+ * many of the last lines as fit, in their original order, without "<N>" prefixes; skipped lines
+ * become one "[...]" line. Like cl_tail otherwise (printable ASCII, '\n' ended). */
+unsigned cl_excerpt(char *dst, unsigned cap, const char *src, unsigned len, uint16_t *lines);

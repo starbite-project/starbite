@@ -15,7 +15,11 @@ It also covers the coordinator's request for One UI 8: an Android entry may brin
 tree (section 6). It also covers the loader side of Starbite Maintenance (SBMAINT, section 12), and
 the shared settings flag bits agreed with Engineer OS v2 (section 7).
 
-**Status: built and host-tested. Nothing here has run on the phone.** XNU's side (the watchdog
+**Status (2026-11-07):** the full POST, the crash detection and the crash screen ran on the phone with
+`xnu-boot-health2.img` (a real Linux panic was detected and shown). The user's verdict led to the
+POST presentation of section 2.2 (the logo, Volume Up for the live log, the failure screen) and the
+crash report of section 4.4, both in `out/xnu-boot-health3.img` (section 10): **built and host-tested,
+not on the phone yet.** XNU's side (the watchdog
 feeder and the crash return, xnu/series-12377/0399) is in section 5.4, and its phone tests in
 10.1. The loader builds with
 `-Werror` and has no ABS64 relocations. The host tests (section 8) pass with the Mac's clang
@@ -28,7 +32,8 @@ is the flash and test plan.
 |---|---|
 | `shim/starlte/sbfmt.c/.h` | **No hardware** (host-tested): the settings record codec, the crash log format, the reset-reason decision, watchdog math, ramoops ring text, command line edits, dates |
 | `shim/starlte/dtmerge.c/.h` | **No hardware** (host-tested): DTBH selection, the S-Boot merge for Android device trees, in-place DTB cell patch |
-| `shim/starlte/post.c/.h` | POST levels, the full POST and its screen, Volume Down to skip |
+| `shim/starlte/post.c/.h` | POST levels, the full POST behind the Starbite logo, the live log (Volume Up), the failure screen, Volume Down to skip |
+| `shim/starlte/post_logo.h` | **Generated** by `tools/brand/post-logo.py` from the One mark splash source (`build/splash-concepts/final/logo.png`): the word (A8) and the star (RGB), PackBits, 11 KB |
 | `shim/starlte/crash.c/.h` | Snapshot at start, launch record, evaluation, report, crash screen, the recovery menu's report list, fastboot text and raw |
 | `shim/starlte/wdt.c/.h` | Arming cluster 1's watchdog right before an OS starts |
 | `shim/starlte/xnu_boot.c` | The order (section 4.1), log-level fragments, watchdog arguments, Linux INFORM3 patch, Android 4th file, Starbite Maintenance's start (section 12) |
@@ -37,10 +42,11 @@ is the flash and test plan.
 | `shim/starlte/recovery.c` | "STARTUP SETTINGS...", "CRASH REPORTS...", "STARBITE MAINTENANCE"; the early mailbox keys (rescue, maint*, the `SBNEXT2R` return key) |
 | `shim/starlte/menu.c`, `menu6.c`, `menu7.c` | No auto-start countdown right after a crash |
 | `shim/starlte/fastboot.c`, `fastboot_dev.c` | `fastboot oem log crash` and `crashraw`, `fastboot oem maint [prev\|rescue]`; `oem boot-next`/`reboot-to` accept the loader's own keys |
-| `shim/starlte/fbtext.c/.h` | Glyphs `( ) ' " @ \| ; & $ { } ^ ~ \` \\` for log lines; `star_fb_muted()` |
+| `shim/starlte/fbtext.c/.h` | Glyphs `( ) ' " @ \| ; & $ { } ^ ~ \` \\` for log lines; `star_fb_muted()`; lower case and `star_fb_mini` (the same 5x7 glyphs in 18 x 36 cells: 76 columns, 78 rows a page) for the crash report |
 | `tools/store/sbstore2.py` | Settings fields, `settings-show`, `crashlog IMG\|live`, the catalog extension, the `crashlog` store entry |
 | `tools/store/catalog.toml` | `[defaults.linux/android/xnu]`, per-entry overrides, field documentation |
-| `tools/loader-test/` | Host tests and fixtures (section 8) |
+| `tools/loader-test/` | Host tests and fixtures (section 8), with real-looking crash captures (`fixtures/linux-oops-panic.txt`, `linux-sysrq-panic.txt`, `xnu-panic.txt`) |
+| `tools/brand/post-logo.py` | Makes `post_logo.h` (section 2.2) |
 | `xnu/series-12377/0399-starlte-health-wdt-crash-return.patch` | **XNU's side** (section 5.4): `sbwdt=N` feeder, `sbcrash=loader\|recovery`, the crash marker, test switches; `bsd/dev/herolte_ufs.c` + new `bsd/dev/starlte_health.h` |
 | `tools/xnu-health-test/` | Host test of `starlte_health.h`, taken out of the patch, against the loader's sbfmt.c / crash.c / hw.h / wdt.h |
 | `tools/store/catalog-xnu-health.toml` | Proposal for the coordinator: `[defaults.xnu]`, per-entry watchdog, hidden XNU test entries |
@@ -59,23 +65,59 @@ is the flash and test plan.
   QUICK, OFF), then **SAVE**. From a Mac: `sbstore2.py settings OUT --from BLOCK --post quick`. Engineer
   OS v2's settings editor writes the same bits.
 - **Skip it once**: hold **Volume Down** during POST. The rest of the run is marked SKIPPED, the
-  boot goes on, and the setting does not change. Volume Down is debounced (two reads 5 ms apart)
-  and polled after every check and every 4 MiB of the RAM test.
+  boot goes on, and the setting does not change. Volume Down counts once it is down 20 ms; the keys
+  are polled after every check, every 4 MiB of the RAM test and between the timer test's RTC reads.
+- **See what it does**: press **Volume Up** during POST: the live log (2.2) for the rest of the run.
+  Volume Up **held from power on** is the loader's fastboot gesture (`fastboot_wanted`, which runs
+  after POST): POST leaves it alone (the logo stays) until it has been seen released for 40 ms.
 - **Bixby** during POST opens Starbite Recovery afterwards, as before.
+- The keys are a host-tested state machine (`pv_init`/`pv_poll`/`pv_end`/`pv_hold` in sbfmt.c).
 - **The Bixby check comes before all of this and is unchanged**: `rec_bixby_window` still uses only
   the key GPIO, the timer and fbtext. The settings record is read after it, and so is POST.
 
-### 2.2 The full POST
+### 2.2 The full POST: what it shows (2026-11-07)
 
-The screen is black, with the title, a progress bar, the 16 check lines (✓ / ✗ / !, name, detail,
-ms), a summary line, then the failures (red) and warnings (gold) as a list. The hint is "VOL DOWN:
-SKIP BIXBY: RECOVERY". At the end it pauses 3 s after a failure, 1.5 s after a warning and 0.5 s
-when clean. Volume Down or Power cuts the pause short. The whole panel is saved first (0x9A000000)
-and put back after, so menu v7's intro still captures S-Boot's splash.
+The user, after the first phone run: "i dont want that progress bar it doesnt do shit ... i just want
+starbite logo and so that when you hold volume up it shows the live log, but normally just starbite
+logo with some little animation". So:
+
+- **Normally: only the Starbite logo**, the approved One mark splash (`docs/concepts/splash/HANDOFF.md`),
+  exactly where S-Boot draws its splash (word at (478, 1327), 455 x 108; star centred at (961.74,
+  1259.0)). No text, no bar. The animation: the star breathes a soft #6FB3FF glow (2.4 s, at most
+  30 %, the star 87..100 %, dithered so the dim rings do not band) and three small dots under the
+  word ripple (1.5 s). Frames are drawn between and inside the checks, at most one every 33 ms
+  (about 1 ms each: the glow box is 169 x 169 px).
+  - If the panel already shows the One mark (S-Boot's splash with One mark in UP_PARAM: the word
+    matches and a coarse grid elsewhere is black), nothing is cleared: the animation simply starts on
+    S-Boot's own picture. Otherwise the panel goes black and the logo fades in over 360 ms.
+  - The logo is not loaded from the ramdisk: `post_logo.h` (11 KB in the loader) is unpacked to
+    0x9B100000 at the start, so it works on every boot path (also the unbranded iOS one).
+- **Volume Up pressed during POST: the live log**, for the rest of the run (releasing it does not go
+  back: switching views twice would only flicker). Every check with its state as it runs; the RAM line
+  shows its own progress: `C: CHECK 512/928 MIB 81%` (window, write or check, MiB of this pass,
+  percent of the RAM time). At the end: the summary line and the problems list, kept for 2 s, or as
+  long as Volume Up stays held (at most 60 s); Power or Volume Down continue at once. Log level 2-3
+  (verbose, debug) starts in the log.
+- **A red check: the failure screen** after the run: "A CHECK FAILED" / "N CHECKS FAILED", each failed
+  check with its one-line reason (at most 5), "POWER: CONTINUE" ("POWER: STARBITE RECOVERY" for RAM or
+  TIMER) and "BIXBY: STARBITE RECOVERY", continuing on its own after 30 s. Volume Up is not a key on it
+  (it may still be fastboot's). Gold warnings never interrupt the logo: they are in the log page, the
+  pmsg ring and `post_last()` only.
+- **The handover to the menu**: when menu v7 will run (`menu7_ready()`), POST leaves the clean logo on
+  the panel (glow and dots off) instead of putting S-Boot's splash back. v7's intro then captures it
+  exactly as it captures S-Boot's One mark splash and hands it over (the star becomes the wallpaper's,
+  the word the island). With the "Powered by starbite" splash still in UP_PARAM, the intro therefore
+  starts from the One mark after a full POST. Otherwise (v6, the unbranded iOS path, quick or off) the
+  panel is put back as before.
+- **Quick POST** draws nothing over S-Boot's splash unless Volume Up or log level 2-3 asks for its
+  lines; a red check shows the same failure screen (the panel is saved and put back around it).
+- Log page slot 245: `RAM ms << 32 | flags` (1 log by Volume Up, 2 log from the start, 4 failure
+  screen, 8 logo kept for the menu, 16 S-Boot's splash already was the logo, 32 Volume Up held at the
+  start, 64 skipped).
 
 | Check | How (full) | Bound | Fail (red) | Warn (gold) |
 |---|---|---|---|---|
-| RAM | address and ~address over windows A, B, C (2.3); each window written whole, then read whole (aliasing shows), then 0x55/0xAA over A while time is left | **6 s budget**, checked every 4 MiB | any bad word (**fatal**) | Volume Down cut it short |
+| RAM | address and ~address over windows A, B, C (2.3); each window written whole, then read whole (aliasing shows), then 0x55/0xAA over A while time is left | **6 s budget, reads included** (below) | any bad word (**fatal**) | Volume Down cut it short |
 | TIMER | ticks between two PMIC RTC second edges | 2 × 600 reads | counter stopped (**fatal**) | > 3 % off 26 MHz; RTC unread |
 | CPU | MIDR (A55), A55 cluster MHz from PLL_CPUCL0 / CMU_TOP; M3 MHz only if PMU 0x14062044 says powered | register reads | — | PLL unlocked |
 | TEMP | every TMU probe: big cluster max, little cluster, GPU/ISP | reads | ≥ 90 °C | ≥ 70 °C; TMU off |
@@ -94,6 +136,14 @@ and put back after, so menu v7's intro still captures S-Boot's splash.
 
 Only RAM and TIMER are fatal (Starbite Recovery comes up instead of the menu), as before.
 
+**The RAM budget (fixed 2026-11-07).** The first phone run showed the old progress bar full seconds
+before the RAM test ended: the budget was only checked before each 4 MiB write, so whatever window C
+had written by then was read back after the budget, and non-cacheable reads are much slower than
+writes. Now a chunk is written only while there is time left to read back everything written in that
+pass, at the measured speeds (the last chunk's write and read times; 3 x the write time until a read
+was timed), with 1/8 to spare for the keys and the logo. The 0x55/0xAA passes run chunk by chunk
+while a write + read still fits. So RAM ends at about 6 s, and slot 245 records its real time.
+
 ### 2.3 RAM windows
 
 | Window | Range | Why it is free during POST |
@@ -109,9 +159,10 @@ Only RAM and TIMER are fatal (Starbite Recovery comes up instead of the menu), a
 
 ### 2.4 Time on a healthy phone (estimate)
 
-RAM 6 s (budget) + timer about 1.5 s (waits for two RTC edges) + touch 0.2 s + display 0.06 s +
-storage, battery, rest about 0.2 s + the closing pause 0.5 s = **about 8.5 to 9 s**, plus the
-400 ms Bixby window. `POST_RAM_MS` in post.c sets the RAM share.
+RAM 6 s (budget, now including its reads) + timer about 1.5 s (waits for two RTC edges) + touch 0.2 s
++ display 0.06 s + storage, battery, rest about 0.2 s = **about 8 to 8.5 s**, plus the 400 ms Bixby
+window. No closing pause behind the logo (the log view pauses 2 s). `POST_RAM_MS` in post.c sets the
+RAM share.
 
 ### 2.5 Results
 
@@ -120,7 +171,9 @@ storage, battery, rest about 0.2 s + the closing pause 0.5 s = **about 8.5 to 9 
   slot 201 total µs, per check `state << 56 | value << 32 | µs`: **slots 202..212 for checks 0..10**
   (as before, which SBMAINT's `sbm logs` decodes) and **240..244 for the new checks 11..15** (202 + 14
   would reach recovery's slot 216). Ids in post.h.
-- pmsg ring: `STARBITE: POST full 8712ms fail 0 warn 1` and one line per failure or warning.
+- pmsg ring: `STARBITE: POST full 8712ms fail 0 warn 1` and one line per failure or warning;
+  `STARBITE: POST: Volume Up: the live log`, `STARBITE: POST: failure screen` when they happen.
+- Slot 245: how it was shown and the RAM test's real time (2.2).
 
 ## 3. Log levels (request b)
 
@@ -234,23 +287,51 @@ In order:
 Info is logged only. Warn and crash are saved as a report, show the crash screen, and **stop the
 menus' auto-start countdown for this boot**, so a crashing default entry does not loop.
 
-### 4.4 The crash screen
+### 4.4 The crash screen: a scrolling report (2026-11-07)
 
-- **Rows 0-9**: "STARBITE: THE LAST START CRASHED" (red) or "...ENDED BADLY" (gold); the OS name
-  and key; the kind; the reason over two rows; when (the OS's own clock for Linux panics, else
-  detection time UTC); started; the evidence source; RST_STAT bits; S-Boot's verdict.
-- **Level 1** (summary): "SAVED AS REPORT #n".
-- **Level 2**: plus the last log lines, wrapped to 38 columns. Bixby pages back.
-- **Level 3**: plus the registers (RST_STAT, INFORM2/3, PMU WDT disable/mask, WDT1 WTCON/WTDAT/WTCNT,
-  WDT0, S-Boot rst/pwron/pwroff, sec_debug magic, launch watchdog, flags), then the log.
-- **Keys**: Volume Up / Down change the level, Bixby shows older lines, Power continues.
-- **Timeout**: `crash_timeout` (default 60 s, counted from the last key; 30/60/120/300/600 in the
-  settings page). The screen is capped at 10 minutes whatever the setting. Nothing waits for ever.
-- The panel is saved and put back around the screen.
-- Then, by `crash_action`: the boot menu (default), Starbite Recovery, or **retry once**: the same
-  entry starts again with `CLF_RETRY`. A crash of the retried start goes to the menu.
-- Starbite Recovery → **CRASH REPORTS...** lists the saved reports, newest first, and opens any of
-  them on the same screen at level 3.
+The first real panic on the phone (`echo c > /proc/sysrq-trigger`) was detected and shown; the
+user: "its nowhere near detailed enough ... it must stay similar text style but better, and so you can
+actually see more info". The screen is now a report in the same 5x7 pixel font (with lower case),
+small: `star_fb_mini`, 18 x 36 px cells, **76 columns, 78 rows a page** plus a footer.
+
+**What it shows**, top to bottom (`doc_build` in crash.c):
+
+| Part | Content |
+|---|---|
+| Header | `STARBITE CRASH REPORT #n` and the kind ([CRASH] red / [WARN] gold); OS name (key, method); **KERNEL** (Linux: the release from the `CPU: ... Not tainted <release> #n` line or `Linux version`; XNU: the `root:xnu-...` of `Kernel version:`); **CRASHED** (the record's wall time, or when the loader found it) and **UPTIME** at the panic (Linux: the panic line's timestamp; XNU: the crash marker's `uptime N s`); **STARTED** and **TASK** (`CPU 2 PID 1 init`); **REASON**; **RESET** RST_STAT with its bit names, INFORM2, INFORM3 with its name; **S-BOOT** reset code and name, rst_stat, pwronsrc, pwroffsrc; **WATCHDOG** at the launch and WDT1's registers; **SOURCE** (which ring, lines, bytes); **STORE** `report #n (slot k)` = the `--- report #n` of `sbstore2.py crashlog live --level 3` |
+| PANIC MESSAGE | every message line: `Unable to handle kernel ...`, the `Mem abort info:` / `Data abort info:` blocks, `Internal error: Oops: ...`, `BUG:`, `Kernel panic - not syncing: ...`; XNU's `panic(cpu ...)` line |
+| CONTEXT | `CPU: ... PID: ... Comm: ...`, `Hardware name:`, `Modules linked in:`, `Kernel Offset:`; XNU's marker lines, `Debugger message`, `OS version`, `Kernel version`, `Panicked task` (details and up) |
+| REGISTERS | Linux `pstate:`, `pc :`, `lr :`, `sp :`, `x29: ... x0:`, `Code:`; XNU `x0: ... far:` and `CORE n: PC=...` (details and up; "no register dump" for a plain `panic()` such as sysrq's) |
+| CALL TRACE | Linux `Call trace:` and its frames; XNU `Panicked thread: ..., backtrace:` and its `lr: ... fp: ...` lines (summary: the first 12 frames) |
+| RESET AND WATCHDOG REGISTERS | all 16 saved registers with names (everything) |
+| LOG | summary: the last 30 lines; details: the last 150; **everything: all of it** |
+| OTHER RING | Linux: the other ramoops zone (the console when the dmesg record was the source), everything only |
+
+- The sections leave out the `<N>` syslog prefix and the `[ time]` stamp (so a register line fits one
+  row); the LOG keeps the stamps. Long lines wrap at a space in the row's second half.
+- **Right after the crash the report shows everything the loader captured this boot** (the ramoops
+  zones as text, up to 16 KiB each, `live_*` in crash.c). A report opened later from Starbite
+  Recovery → CRASH REPORTS shows what the store keeps (below).
+- **Levels** stay presets: 1 SUMMARY, 2 DETAILS, 3 EVERYTHING (the setting; Recovery's list opens at 3).
+- **Keys**: Volume Up / Down scroll a line (held: repeats after 300 ms, after 1.5 s 8 lines at a
+  time); Bixby pages on, stopping at the next section's start (at the end: back to the top); Bixby held
+  0.7 s: the next detail level; Power continues.
+- **Footer** (one line): `VOL SCROLL  BIXBY PAGE (HOLD: DETAIL 2/3)  POWER CONTINUE  1-78/233  45s`.
+- **Timeout**: `crash_timeout` (default 60 s, counted from the last key), capped at 10 minutes.
+- RAM: the composed lines at 0x9F030000 (64 KiB), the rows at 0x9F040000 (6144 x 16 bytes), the
+  lines' kinds at 0x9F060000 (16 KiB); all below S-Boot's ECT (`_Static_assert`).
+- The panel is saved and put back around the screen; then, by `crash_action`: the boot menu (default),
+  Starbite Recovery, or **retry once** (`CLF_RETRY`, a second crash goes to the menu).
+
+**The saved report's text** (`cl_excerpt`, host-tested): the store keeps 3824 bytes per report. It
+holds every message, context, register and trace line, then as many of the last lines as fit, in
+their original order, `<N>` prefixes dropped, each run of skipped lines as one `[...]` line. So a
+report browsed later (or read on the Mac) still has the registers and the call trace.
+
+**The parser** (`sb_crash_parse` in sbfmt.c) classifies each line (`CT_MSG`, `CT_INFO`, `CT_REGS`,
+`CT_TRACE`, `CT_LOG`) and fills the header's version, task, message and uptime. Host-tested on a Linux
+oops that panics (lkdtm EXCEPTION, 121 lines), the sysrq panic the phone ran, and an XNU 0399 data
+abort dump, each also through a ramoops / pmsg ring as crash.c reads it.
 
 ### 4.5 Settings (Starbite Recovery → STARTUP SETTINGS, or `sbstore2.py settings`)
 
@@ -259,7 +340,7 @@ menus' auto-start countdown for this boot**, so a crashing default entry does no
 | POST AT BOOT | FULL, QUICK, OFF | flags bits 4-5 |
 | LOG LEVEL | 0 QUIET, 1 NORMAL, 2 VERBOSE, 3 DEBUG | flags bits 8-9 |
 | CRASH DETECTION | ON, SAVE ONLY (no screen), OFF (no launch record, no INFORM3 patch) | byte 104 |
-| CRASH SCREEN SHOWS | 1 SUMMARY, 2 + LOG, 3 ALL | 105 |
+| CRASH SCREEN SHOWS | 1 SUMMARY, 2 DETAILS, 3 EVERYTHING (4.4) | 105 |
 | AFTER A CRASH | BOOT MENU, RECOVERY, RETRY ONCE | 106 |
 | CRASH SCREEN WAITS | 60, 120, 300, 600, 30 s | 107 (seconds / 10, 0 = 60) |
 | WATCHDOG | PER ENTRY, OFF, 30 S, 60 S, 82 S | 108 mode, 110 u16 seconds |
@@ -461,9 +542,12 @@ STARBITE HEALTH: watchdog feeder running (thread call, every 19999 ms)
    - Headroom today: mac13-v33 517 bytes (90 left), ios26-sd 538 (69 left), ios26-sdt 593 (14 left:
      neither `sbcrash=loader` nor `sbwdt=N` fits).
    - 0399's fallback above feeds a loader-armed watchdog anyway.
-   - **For the loader owner**: in `boot_xnu`, if `launch.wdt` is set and `sbwdt=` is not in `cmd` after
-     the edit, clear `launch.wdt` so it does not arm. Better still, append `sbwdt=` before the log
-     fragment.
+   - **Done 2026-11-07**: `boot_xnu` checks the finished boot-args (`sb_wdt_args_ok`, the last
+     `sbwdt=` must be the armed value) and does not arm when the token was dropped; Linux the same for
+     `s3c2410_wdt.tmr_atboot=1` + `tmr_margin=T` in the entry's cmdline (without them mainline's driver
+     stops or re-times the watchdog). pmsg `STARBITE: watchdog NOT armed for KEY: sbwdt= did not fit
+     the command line (60 s asked)`, log slot 19 bit 16, the launch record says no watchdog. The order
+     of the appended tokens is unchanged.
 3. **The loader has no `crash_return` for XNU.** `sbcrash=loader` travels in the log fragments, so it
    also applies when the settings say CRASH DETECTION OFF. Harmless: the loader then just shows the
    menu.
@@ -606,7 +690,7 @@ sh tools/loader-test/run.sh                    # the Mac's clang, ASan + UBSan
 limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 ```
 
-- **host_test.c (163 checks)**:
+- **host_test.c (252 checks)**:
   - CRC32
   - settings: old record = defaults, round trip, damage, clamps, sbstore2's block as the loader reads it
   - crash log: header and report round trip, the ring wrapping at 17 reports, damage, the log tail
@@ -623,8 +707,21 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
     with dtb-rescue, one damage per R4 rule); `sbm_check` agrees on every verdict and field;
     `sbm_slot_b` against `slot_b_offset`; `sbm_order` against `sbmaint.choose` (seq, tie, prev)
   - the shared flag bits (masks, setters keep the other bits)
+  - (2026-11-07) the watchdog's arguments: XNU boot-args filled to 589 bytes drop `sbwdt=60` (not
+    armed), the last `sbwdt=` wins, Linux `tmr_atboot`/`tmr_margin` after the DTB's `tmr_atboot=0`, a
+    dropped margin, a later `tmr_atboot=0`
+  - (2026-11-07) POST's key machine: Volume Up held from power on never opens the log (a 10 ms bounce
+    is not a release; a real release then a press does), a debounced press opens it once, a 30 ms blip
+    does not, sparse polls, log level 2-3 with fastboot's Up held (no hold at the end), quick POST,
+    Volume Down skip once, the end decision (failure screen / read pause / straight on), the read
+    pause's times, the failure list in display order
+  - (2026-11-07) the crash parser and `cl_excerpt` on `fixtures/linux-oops-panic.txt`,
+    `linux-sysrq-panic.txt`, `xnu-panic.txt`: message, kernel, task, uptime, the number of message /
+    register / trace lines, single lines' kinds, through a ramoops zone and the pmsg ring, the excerpt
+    keeping registers and trace within 3824 bytes, prefixes, junk
 - **check_dtmerge.py (29 checks)**: section 6.4's rules against the merged files.
-- **test_sbstore2.py (13 tests)**:
+- **test_sbstore2.py (13 tests)** (linux-pmos's expected watchdog is now 0, as the catalog's
+  `[defaults.linux] wdt = 0` of 1f28633):
   - settings: old block, the C block, unknown bytes kept, errors
   - the C crash log decoded, the `crashlog` command, a damaged report
   - the decoding tables are the same text in C and Python
@@ -660,6 +757,25 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 
 ## 9. Needs the phone
 
+**health3 (2026-11-07), first:**
+
+- A. A normal boot shows only the logo (no text, no bar) with the star's glow and the dots, for about
+  8 s, then the menu's intro takes the logo over without a jump (log slot 116: why 0xff, bands 2) and
+  slot 245 has flag 8 and RAM about 6000 ms.
+- B. Volume Up pressed during POST: the live log, the RAM line counting MiB and percent; at the end
+  the summary for 2 s or while Volume Up is held; releasing then goes to the menu (not fastboot).
+- C. Volume Up held from power on: the logo (no log), then the loader's fastboot as before.
+- D. Volume Down during POST: the rest skipped, straight to the menu.
+- E. Only if a red check happens on its own (a real fault, e.g. touch not answering; gold ones such as
+  a missing crashlog entry never interrupt): the failure screen, Power continues.
+- F. The panic test again (`echo c > /proc/sysrq-trigger` in pmOS): the new report: kernel version,
+  uptime, task, the call trace; Volume scrolls, Bixby pages, Bixby held changes the level, the footer
+  numbers match; REPORT #n equals `sbstore2.py crashlog live --level 3`'s `--- report #n`.
+- G. The font size: readable at arm's length (else `star_fb_mini` can grow to 4 x 4 font pixels:
+  60 columns).
+
+**Earlier items:**
+
 1. The full POST's real time, and that windows B and C and the 0x55/0xAA passes are as free as
    believed. Watch: an OS that misbehaves after a full POST (the ECT lesson).
 2. DISPLAY: whether the frame-done pending bit latches without the interrupt enabled. If it never
@@ -687,6 +803,14 @@ limactl shell starbite -- env CC=gcc sh $PWD/tools/loader-test/run.sh
 
 **Images**:
 
+- **BOOT `out/xnu-boot-health3.img` (2026-11-07, sha256 a7e942e7ca7d123a..., loader Image f218e182...)**: this branch's loader
+  (POST logo / live log / failure screen, RAM budget with reads, the crash report, the watchdog
+  argument check) with exactly health2's other parts: template `out/xnu-boot-batch8.img` (header and
+  DTBH), `--append build/boot-batch/payload-v7test.sweetxnu`, `--ramdisk build/brand/menu-v7.sbm`:
+  `python3 -I tools/starlte-pack-boot.py pack out/xnu-boot-batch8.img shim/starlte/out/xnu_boot.Image
+  out/xnu-boot-health3.img --append build/boot-batch/payload-v7test.sweetxnu --ramdisk
+  build/brand/menu-v7.sbm` (the same command with health2's loader gives health2, 51dbc26d..., byte for
+  byte). Roll back with health2.
 - BOOT `out/xnu-boot-health2.img` in this worktree. It is the loader of this branch plus the iOS
   payload of `out/xnu-boot-batch8.img` (`build/boot-batch/payload-v7test.sweetxnu`, sha256
   29568ace...) and the menu ramdisk `build/brand/menu-v7.sbm` (6b69ce08...), with batch8's header
@@ -792,6 +916,10 @@ hidden. The loader and S-Boot are not touched by any XNU step.
 | Address | Size | Use |
 |---|---|---|
 | 0x9A000000 | 16.3 MiB | the panel during the full POST, then during the crash screen |
+| 0x9B100000 | 64 KiB + 7.5 KiB | POST: the logo unpacked (word A8, star RGB at +64 KiB) |
+| 0x9F030000 | 64 KiB | the crash report's composed lines |
+| 0x9F040000 | 96 KiB | the crash report's rows |
+| 0x9F060000 | 16 KiB | the kinds of the shown text's lines |
 | 0x9F000000 | 32 KiB | snapshot of 0xFED10000..0xFED18000 |
 | 0x9F008000 | 4 KiB | snapshot of 0x80000000 (sec_debug) |
 | 0x9F010000 | 64 KiB | the crash log (UFS DMA) |
@@ -800,8 +928,9 @@ hidden. The loader and S-Boot are not touched by any XNU step.
 | windows A, B, C | section 2.3 | full POST patterns |
 
 Log page slots: 10 = 0x710..0x713 for Starbite Maintenance (slot A, slot B, store, fastboot), 19
-(launch), 20 (INFORM3 pairs patched), 21 (Android DTB pick), 200/201, 202..212 and 240..244
-(POST), 216 (recovery, unchanged), 220..223 (crash).
+(launch; bit 16: the watchdog's arguments did not fit, not armed), 20 (INFORM3 pairs patched), 21
+(Android DTB pick), 200/201, 202..212 and 240..244 (POST), 245 (how POST was shown, RAM ms), 216
+(recovery, unchanged), 220..223 (crash).
 
 ## 12. Starbite Maintenance in the loader (docs/MAINTENANCE.md 4.2)
 

@@ -825,6 +825,34 @@ static void arg_num(char *line, unsigned cap, const char *name, unsigned v)
     (void)sb_line_edit(line, cap, t, 0);
 }
 
+/* The watchdog's arguments did not make it into the command line (sb_line_edit drops tokens that
+ * do not fit): it is not armed for this start. Log slot 19 bit 16 records it. Returns 0. */
+static void pmsg_put(const char *s);
+static unsigned wdt_dropped(volatile uint64_t *log, const char *key, const char *what, unsigned wdt)
+{
+    char b[160];
+    unsigned n = 0;
+    const char *parts[5] = { "STARBITE: watchdog NOT armed for ", key, ": ", what, " did not fit the command line (" };
+    for (unsigned p = 0; p < 5; ++p)
+        for (const char *s = parts[p]; *s && n + 1 < sizeof(b); ++s)
+            b[n++] = *s;
+    char d[4];
+    unsigned k = 0;
+    do {
+        d[k++] = (char)('0' + wdt % 10U);
+        wdt /= 10U;
+    } while (wdt && k < sizeof(d));
+    while (k && n + 1 < sizeof(b))
+        b[n++] = d[--k];
+    const char *tail = " s asked)\n";
+    for (; *tail && n + 1 < sizeof(b); ++tail)
+        b[n++] = *tail;
+    b[n] = 0;
+    pmsg_put(b);
+    log[19] = (log[19] & ~(0xffffffffULL << 32)) | 1ULL << 16;
+    return 0;
+}
+
 /* The entry as it will be started (launch_ent) and the launch's state. */
 static const struct cat_ent *launch_prepare(const struct cat_ent *e, volatile uint64_t *log)
 {
@@ -839,7 +867,7 @@ static const struct cat_ent *launch_prepare(const struct cat_ent *e, volatile ui
     unsigned lvl = sbset_log(&s);
     const char *frag = e->log[lvl];
     /* the watchdog: only where someone will feed it */
-    unsigned wdt = 0, feed = e->wdt_feed;
+    unsigned wdt = 0, feed = e->wdt_feed, dropped = 0;
     int fits = (feed == CW_KERNEL || feed == CW_USERSPACE) ? e->method == M_LINUX
              : feed == CW_XNU ? e->method == M_XNU : feed == CW_OWN;
     if (s.wdt_mode != SET_WDT_OFF && e->wdt_s && fits)
@@ -860,6 +888,11 @@ static const struct cat_ent *launch_prepare(const struct cat_ent *e, volatile ui
             arg_num(launch_ent.cmdline, sizeof(launch_ent.cmdline), "s3c2410_wdt.tmr_margin=", wdt);
             if (feed == CW_USERSPACE)
                 arg_num(launch_ent.cmdline, sizeof(launch_ent.cmdline), "sb.wdt=", wdt);
+            /* sb_line_edit drops what does not fit: without both arguments mainline's driver stops
+             * the watchdog at probe (tmr_atboot=0 from the DTB) or runs it with its own margin, so
+             * nothing would feed ours. Then it is not armed at all. */
+            if (!sb_wdt_args_ok(launch_ent.cmdline, sizeof(launch_ent.cmdline), SB_WDT_LINUX, wdt))
+                wdt = wdt_dropped(log, e->key, "s3c2410_wdt.tmr_atboot=1 tmr_margin", wdt), dropped = 1;
         }
     }
     lscopy(launch.key, sizeof(launch.key), e->key);
@@ -870,7 +903,7 @@ static const struct cat_ent *launch_prepare(const struct cat_ent *e, volatile ui
     launch.inform3 = (e->cflags & CE_LINUX_INFORM3) && e->method == M_LINUX && s.crash_mode != SET_CRASH_OFF;
     launch.flags = (launch.inform3 ? CLF_LINUX_INFORM3 : 0U) | (launch.retry ? CLF_RETRY : 0U);
     launch.valid = !(e->cflags & CE_NO_LAUNCH);
-    log[19] = (uint64_t)wdt << 32 | (uint64_t)lvl << 8 | (uint64_t)(unsigned)launch.inform3;
+    log[19] = (uint64_t)wdt << 32 | (uint64_t)dropped << 16 | (uint64_t)lvl << 8 | (uint64_t)(unsigned)launch.inform3;
     return &launch_ent;
 }
 
@@ -1433,6 +1466,10 @@ boot_xnu(volatile uint64_t *log, const struct cat_ent *e, const char *edited)
     line_append(cmd, BOOT_LINE_LENGTH, e->cmdline);
     if (launch.xfrag[0])     /* the log level's fragment ("!-v" removes -v) and sbwdt= */
         (void)sb_line_edit(cmd, BOOT_LINE_LENGTH, launch.xfrag, 1);
+    /* The boot-args hold 607 bytes and sb_line_edit drops what does not fit: a watchdog whose
+     * sbwdt=N did not make it in is not armed (0399's no-sbwdt fallback is only a safety net). */
+    if (launch.wdt && !sb_wdt_args_ok(cmd, BOOT_LINE_LENGTH, SB_WDT_XNU, launch.wdt))
+        launch.wdt = wdt_dropped(log, e->key, "sbwdt=", launch.wdt);
     {
         struct pline pl;
         pl.n = 0;
@@ -2145,7 +2182,11 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
         struct star_settings ps;
         if (!settings_load(&ps))
             sbset_defaults(&ps);
-        int f = post_boot(sbset_post(&ps), branded, &bixby, &skipped, &why);
+        /* The full POST leaves the clean Starbite logo on the panel when menu v7 will start from it
+         * (its intro hands the One mark over); log level 2-3 shows the live log from the start. */
+        unsigned pf = (branded ? POST_F_TOUCH : 0U) | (branded && menu7_ready() ? POST_F_KEEP_LOGO : 0U) |
+                      (sbset_log(&ps) >= SET_LOG_VERBOSE ? POST_F_LOG : 0U);
+        int f = post_boot(sbset_post(&ps), pf, &bixby, &skipped, &why);
         if (f || bixby) {
             entry = recovery_loop(log, why);
             if (entry)

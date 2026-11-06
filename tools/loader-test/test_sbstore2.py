@@ -142,6 +142,7 @@ class Catalog(unittest.TestCase):
 
     def test_defaults_and_overrides(self):
         ext = dict(zip(sb.catalog_keys((OUT / 'cat.sbc').read_bytes()), sb.catalog_ext((OUT / 'cat.sbc').read_bytes())))
+        # [defaults.linux] wdt = 60: a watchdog reset was seen to reach the loader on 2026-11-06 (catalog.toml)
         self.assertEqual(ext['linux-pmos'][1:], (60, 1, 1))
         self.assertEqual(ext['linux-bringup'], (['', '', '', ''], 0, 1, 1))
         self.assertEqual(ext['android'][1:3], (0, 3))

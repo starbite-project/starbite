@@ -837,3 +837,498 @@ uint64_t sb_dmesg_time(const char *t, unsigned n)
         v = v * 10U + (uint64_t)(t[i] - '0');
     return d && i < n && t[i] == '.' ? v : 0;
 }
+
+/* ---- the last key=value, the watchdog's arguments ---------------------------------------------- */
+
+int sb_arg_last(const char *args, unsigned len, const char *key, char *out, unsigned cap)
+{
+    unsigned kl = slen(key);
+    int found = 0;
+    for (unsigned i = 0; i < len && args[i]; ++i) {
+        if (i && args[i - 1] != ' ')
+            continue;
+        unsigned m = 0;
+        while (m < kl && i + m < len && args[i + m] == key[m])
+            ++m;
+        if (m < kl || i + kl >= len || args[i + kl] != '=')
+            continue;
+        unsigned k = 0;
+        for (unsigned j = i + kl + 1; j < len && args[j] && args[j] != ' ' && k + 1 < cap; ++j)
+            out[k++] = args[j];
+        if (cap)
+            out[k] = 0;
+        found = 1;
+    }
+    return found;
+}
+
+static int arg_is(const char *line, unsigned len, const char *key, unsigned want)
+{
+    char v[24];
+    int64_t x;
+    return sb_arg_last(line, len, key, v, sizeof(v)) && sb_num(v, &x) && x == (int64_t)want;
+}
+
+int sb_wdt_args_ok(const char *line, unsigned len, unsigned how, unsigned wdt)
+{
+    if (!wdt)
+        return 0;
+    if (how == SB_WDT_XNU)
+        return arg_is(line, len, "sbwdt", wdt);
+    if (how == SB_WDT_LINUX)
+        return arg_is(line, len, "s3c2410_wdt.tmr_atboot", 1) && arg_is(line, len, "s3c2410_wdt.tmr_margin", wdt);
+    return 0;
+}
+
+/* ---- POST presentation ------------------------------------------------------------------------ */
+
+void pv_init(struct pv_keys *k, unsigned view, int up_at_start, uint64_t now_ms)
+{
+    z(k, sizeof(*k));
+    k->view = (uint8_t)(view > PV_NONE ? PV_LOGO : view);
+    k->up_blocked = (uint8_t)(up_at_start != 0);
+    if (up_at_start)
+        k->up_since = now_ms + 1;
+}
+
+unsigned pv_poll(struct pv_keys *k, int up, int down, uint64_t now_ms)
+{
+    unsigned ev = 0;
+    uint64_t t = now_ms + 1;
+    if (up) {
+        k->up_free_since = 0;
+        if (!k->up_since)
+            k->up_since = t;
+        if (!k->up_blocked && !k->up_used && t - k->up_since >= PV_DEBOUNCE_MS) {
+            k->up_used = 1;
+            if (k->view != PV_LOG) {
+                k->view = PV_LOG;
+                ev |= PV_EV_LOG;
+            }
+        }
+    } else {
+        k->up_since = 0;
+        if (!k->up_free_since)
+            k->up_free_since = t;
+        if (k->up_blocked && t - k->up_free_since >= PV_DEBOUNCE_MS)
+            k->up_blocked = 0;
+    }
+    if (down) {
+        if (!k->down_since)
+            k->down_since = t;
+        if (!k->skip && t - k->down_since >= PV_SKIP_MS) {
+            k->skip = 1;
+            ev |= PV_EV_SKIP;
+        }
+    } else {
+        k->down_since = 0;
+    }
+    return ev;
+}
+
+unsigned pv_end(const struct pv_keys *k, unsigned fails)
+{
+    if (fails)
+        return PV_END_FAIL;
+    return k->view == PV_LOG ? PV_END_READ : PV_END_GO;
+}
+
+int pv_hold(const struct pv_keys *k, int up, int cut, uint64_t t_ms)
+{
+    if (cut)
+        return 0;
+    if (t_ms < PV_READ_MS)
+        return 1;
+    return up && k->up_used && !k->up_blocked && t_ms < PV_HOLD_MAX_MS;
+}
+
+unsigned pv_failures(const uint8_t *state, const uint8_t *order, unsigned n, unsigned fail_state,
+                     uint8_t *out, unsigned max)
+{
+    unsigned c = 0;
+    for (unsigned i = 0; i < n; ++i) {
+        if (state[order[i]] != fail_state)
+            continue;
+        if (c < max)
+            out[c] = order[i];
+        ++c;
+    }
+    return c;
+}
+
+/* ---- crash text ------------------------------------------------------------------------------- */
+
+unsigned sb_crash_prefix(const char *l, unsigned n)
+{
+    if (n < 3 || l[0] != '<')
+        return 0;
+    unsigned i = 1;
+    while (i < n && i < 5 && l[i] >= '0' && l[i] <= '9')
+        ++i;
+    return i > 1 && i < n && l[i] == '>' ? i + 1 : 0;
+}
+
+/* "[  123.456789] " at l: its length (with the one space after ']'), *us the time; 0 if none. */
+static unsigned ln_stamp(const char *l, unsigned n, uint64_t *us)
+{
+    unsigned i = 1;
+    if (!n || l[0] != '[')
+        return 0;
+    while (i < n && l[i] == ' ')
+        ++i;
+    uint64_t s = 0, f = 0;
+    unsigned d = 0, fd = 0;
+    for (; i < n && l[i] >= '0' && l[i] <= '9' && d < 12; ++i, ++d)
+        s = s * 10U + (uint64_t)(l[i] - '0');
+    if (!d || i >= n || l[i] != '.')
+        return 0;
+    for (++i; i < n && l[i] >= '0' && l[i] <= '9' && fd < 9; ++i, ++fd)
+        f = f * 10U + (uint64_t)(l[i] - '0');
+    if (!fd || i >= n || l[i] != ']')
+        return 0;
+    for (; fd < 6; ++fd)
+        f *= 10U;
+    for (; fd > 6; --fd)
+        f /= 10U;
+    *us = s * 1000000U + f;
+    ++i;
+    if (i < n && l[i] == ' ')
+        ++i;
+    return i;
+}
+
+unsigned sb_crash_stamp(const char *l, unsigned n)
+{
+    uint64_t us;
+    return ln_stamp(l, n, &us);
+}
+
+static int starts(const char *c, unsigned n, const char *p)
+{
+    for (unsigned k = 0; p[k]; ++k)
+        if (k >= n || c[k] != p[k])
+            return 0;
+    return 1;
+}
+
+static int find_in(const char *c, unsigned n, const char *p)
+{
+    unsigned m = slen(p);
+    for (unsigned i = 0; i + m <= n; ++i)
+        if (starts(c + i, n - i, p))
+            return (int)i;
+    return -1;
+}
+
+/* "x12:" / "x9 :" / "x0:" (Linux pads one-digit names with a space) */
+static int xreg(const char *c, unsigned n)
+{
+    if (n < 3 || c[0] != 'x' || c[1] < '0' || c[1] > '9')
+        return 0;
+    unsigned i = 2;
+    if (i < n && c[i] >= '0' && c[i] <= '9')
+        ++i;
+    while (i < n && c[i] == ' ')
+        ++i;
+    return i < n && c[i] == ':';
+}
+
+/* Printable characters of c[0..n), at most cap - 1. */
+static void fcopy(char *d, unsigned cap, const char *c, unsigned n)
+{
+    unsigned k = 0;
+    for (unsigned i = 0; i < n && k + 1 < cap; ++i)
+        if (c[i] >= 32 && c[i] < 127)
+            d[k++] = c[i];
+    d[k] = 0;
+}
+
+/* The token after key in c (to a space, ',' or ')'), 0 if key is absent. */
+static unsigned tok_after(const char *c, unsigned n, const char *key, char *out, unsigned cap)
+{
+    int at = find_in(c, n, key);
+    unsigned k = 0;
+    if (at >= 0)
+        for (unsigned i = (unsigned)at + slen(key); i < n && c[i] != ' ' && c[i] != ',' && c[i] != ')' &&
+                                                    c[i] != ':' && k + 1 < cap; ++i)
+            out[k++] = c[i];
+    out[k] = 0;
+    return k;
+}
+
+struct sbuf { char *b; unsigned n, cap; };
+
+static void sb_put(struct sbuf *s, const char *p)
+{
+    for (; p && *p && s->n + 1 < s->cap; ++p)
+        s->b[s->n++] = *p;
+    s->b[s->n] = 0;
+}
+
+/* "CPU 4 PID 1234 sh" */
+static void task_line(struct sb_crashinfo *ci, const char *cpu, const char *pid, const char *comm)
+{
+    struct sbuf s = { ci->task, 0, sizeof(ci->task) };
+    ci->task[0] = 0;
+    if (cpu[0]) {
+        sb_put(&s, "CPU ");
+        sb_put(&s, cpu);
+    }
+    if (pid[0]) {
+        sb_put(&s, s.n ? " PID " : "PID ");
+        sb_put(&s, pid);
+    }
+    if (comm[0]) {
+        sb_put(&s, s.n ? " " : "");
+        sb_put(&s, comm);
+    }
+}
+
+struct cp_state { int trace, xtrace, abort; unsigned best; };
+
+/* The kind of one line. c: its content after "<N>" and "[ time] "; stamped: it had a time (us). */
+static unsigned crash_kind(struct cp_state *st, struct sb_crashinfo *ci, const char *c, unsigned n,
+                           uint64_t us, int stamped)
+{
+    unsigned w = 0;
+    while (w < n && (c[w] == ' ' || c[w] == '\t'))
+        ++w;
+    const char *t = c + w;
+    unsigned tn = n - w;
+    /* blocks that began on an earlier line */
+    if (st->trace) {
+        if (w && tn)
+            return CT_TRACE;            /* " show_stack+0x18/0x24" */
+        st->trace = 0;
+    }
+    if (st->xtrace) {
+        if (starts(t, tn, "lr:"))
+            return CT_TRACE;            /* XNU "lr: 0x...  fp: 0x..." */
+        st->xtrace = 0;
+    }
+    if (st->abort) {
+        if (w >= 2 && tn)
+            return CT_MSG;              /* "  ESR = 0x...", "  EC = 0x25: DABT ..." */
+        st->abort = 0;
+    }
+    unsigned prio = 0;
+    if (starts(t, tn, "Kernel panic - not syncing") || starts(t, tn, "panic("))
+        prio = 4;
+    else if (find_in(t, tn, "Internal error:") >= 0 || starts(t, tn, "kernel BUG at") || starts(t, tn, "BUG: "))
+        prio = 3;
+    else if (starts(t, tn, "Unable to handle kernel"))
+        prio = 2;
+    if (prio) {
+        if (prio > st->best) {
+            st->best = prio;
+            fcopy(ci->message, sizeof(ci->message), t, tn);
+            if (stamped)
+                ci->uptime_ms = us / 1000U;
+        }
+        return CT_MSG;
+    }
+    if (starts(t, tn, "Mem abort info:") || starts(t, tn, "Data abort info:")) {
+        st->abort = 1;
+        return CT_MSG;
+    }
+    if (starts(t, tn, "Call trace:")) {
+        st->trace = 1;
+        return CT_TRACE;
+    }
+    if (starts(t, tn, "Panicked thread:") && find_in(t, tn, "backtrace") >= 0) {
+        st->xtrace = 1;
+        return CT_TRACE;
+    }
+    if (starts(t, tn, "CPU: ") && find_in(t, tn, "PID: ") >= 0) {
+        char cpu[8], pid[12], comm[24];
+        (void)tok_after(t, tn, "CPU: ", cpu, sizeof(cpu));
+        (void)tok_after(t, tn, "PID: ", pid, sizeof(pid));
+        (void)tok_after(t, tn, "Comm: ", comm, sizeof(comm));
+        if (!ci->task[0])
+            task_line(ci, cpu, pid, comm);
+        /* the release: the token before the last " #" ("Not tainted 7.1.0-starbite-1 #1") */
+        int hash = -1;
+        for (unsigned i = 0; i + 1 < tn; ++i)
+            if (t[i] == ' ' && t[i + 1] == '#')
+                hash = (int)i;
+        if (hash > 0 && !ci->version[0]) {
+            unsigned e = (unsigned)hash, s = e;
+            while (s && t[s - 1] != ' ')
+                --s;
+            fcopy(ci->version, sizeof(ci->version), t + s, e - s);
+        }
+        return CT_INFO;
+    }
+    if (starts(t, tn, "Linux version ")) {
+        unsigned e = 14;
+        while (e < tn && t[e] != ' ')
+            ++e;
+        fcopy(ci->version, sizeof(ci->version), t + 14, e - 14);
+        return CT_INFO;
+    }
+    if (starts(t, tn, "Kernel version:")) {
+        int r = find_in(t, tn, "root:");
+        unsigned s = r >= 0 ? (unsigned)r + 5 : 15, e;
+        while (r < 0 && s < tn && t[s] == ' ')
+            ++s;
+        for (e = s; e < tn && (r < 0 || (t[e] != ' ' && t[e] != ';')); ++e)
+            ;
+        fcopy(ci->version, sizeof(ci->version), t + s, e - s);
+        return CT_INFO;
+    }
+    if (starts(t, tn, "Panicked task")) {
+        char cpu[8], pid[12], comm[24];
+        (void)tok_after(ci->message, slen(ci->message), "panic(cpu ", cpu, sizeof(cpu));
+        (void)tok_after(t, tn, "pid ", pid, sizeof(pid));
+        comm[0] = 0;
+        int p = find_in(t, tn, "pid ");
+        if (p >= 0) {
+            unsigned i = (unsigned)p + 4;
+            while (i < tn && t[i] != ':')
+                ++i;
+            if (i + 1 < tn) {
+                unsigned s = i + 1;
+                while (s < tn && t[s] == ' ')
+                    ++s;
+                unsigned e = s;
+                while (e < tn && t[e] != ' ' && t[e] != ',')
+                    ++e;
+                fcopy(comm, sizeof(comm), t + s, e - s);
+            }
+        }
+        if (!ci->task[0])
+            task_line(ci, cpu, pid, comm);
+        return CT_INFO;
+    }
+    if (starts(t, tn, "STARBITE: xnu crash v1:")) {
+        char v[16];
+        int64_t x;
+        if (tok_after(t, tn, "uptime ", v, sizeof(v)) && sb_num(v, &x) && x >= 0 && !ci->uptime_ms)
+            ci->uptime_ms = (uint64_t)x * 1000U;
+        return CT_INFO;
+    }
+    if (starts(t, tn, "STARBITE: XNU panic") || starts(t, tn, "STARBITE: sweetreboot timer") ||
+        starts(t, tn, "Hardware name:") || starts(t, tn, "Modules linked in:") ||
+        starts(t, tn, "Debugger message:") || starts(t, tn, "OS version:") || starts(t, tn, "OS release type:") ||
+        starts(t, tn, "Kernel Offset:"))
+        return CT_INFO;
+    if (xreg(t, tn) || starts(t, tn, "pc : ") || starts(t, tn, "lr : ") || starts(t, tn, "sp : ") ||
+        starts(t, tn, "pstate: ") || starts(t, tn, "Code: ") || starts(t, tn, "pc:") || starts(t, tn, "cpsr:") ||
+        (starts(t, tn, "CORE ") && find_in(t, tn, "PC=") >= 0))
+        return CT_REGS;
+    return CT_LOG;
+}
+
+/* The lines of a text, one at a time, with their kinds. */
+struct cp_walk { const char *t; unsigned n, at; struct cp_state st; };
+
+static int cp_next(struct cp_walk *w, struct sb_crashinfo *ci, unsigned *ls, unsigned *ll, unsigned *kind)
+{
+    if (w->at >= w->n)
+        return 0;
+    unsigned s = w->at, e = s;
+    while (e < w->n && w->t[e] != '\n')
+        ++e;
+    w->at = e < w->n ? e + 1 : e;
+    unsigned len = e - s;
+    while (len && (w->t[s + len - 1] == '\r' || w->t[s + len - 1] == 0))
+        --len;
+    unsigned p = sb_crash_prefix(w->t + s, len);
+    uint64_t us = 0;
+    unsigned sl = ln_stamp(w->t + s + p, len - p, &us);
+    *kind = crash_kind(&w->st, ci, w->t + s + p + sl, len - p - sl, us, sl != 0);
+    *ls = s;
+    *ll = len;
+    return 1;
+}
+
+unsigned sb_crash_parse(const char *text, unsigned n, struct sb_crashinfo *ci, uint8_t *kinds, unsigned cap)
+{
+    z(ci, sizeof(*ci));
+    struct cp_walk w;
+    z(&w, sizeof(w));
+    w.t = text;
+    w.n = n;
+    unsigned s, l, k, i = 0;
+    while (cp_next(&w, ci, &s, &l, &k)) {
+        if (kinds && i < cap)
+            kinds[i] = (uint8_t)k;
+        ci->msg += k == CT_MSG;
+        ci->info += k == CT_INFO;
+        ci->regs += k == CT_REGS;
+        ci->trace += k == CT_TRACE;
+        ++i;
+    }
+    ci->lines = i;
+    return i;
+}
+
+/* The excerpt's size when the tail starts at line `from` (earlier lines only if not CT_LOG). */
+static unsigned ex_cost(const char *src, unsigned len, unsigned from)
+{
+    struct sb_crashinfo ci;
+    struct cp_walk w;
+    z(&ci, sizeof(ci));
+    z(&w, sizeof(w));
+    w.t = src;
+    w.n = len;
+    unsigned s, l, k, i = 0, cost = 0;
+    int gap = 0;
+    while (cp_next(&w, &ci, &s, &l, &k)) {
+        if (i >= from || k != CT_LOG) {
+            cost += (gap ? 6U : 0U) + l - sb_crash_prefix(src + s, l) + 1U;
+            gap = 0;
+        } else {
+            gap = 1;
+        }
+        ++i;
+    }
+    return cost;
+}
+
+unsigned cl_excerpt(char *dst, unsigned cap, const char *src, unsigned len, uint16_t *lines)
+{
+    struct sb_crashinfo ci;
+    unsigned total = sb_crash_parse(src, len, &ci, 0, 0);
+    /* the tail's first line: the earliest that still fits (the size only falls as it moves on) */
+    unsigned lo = 0, hi = total;
+    while (lo < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+        if (ex_cost(src, len, mid) <= cap)
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    struct cp_walk w;
+    z(&w, sizeof(w));
+    w.t = src;
+    w.n = len;
+    unsigned s, l, k, i = 0, n = 0, nl = 0;
+    int gap = 0;
+    while (cp_next(&w, &ci, &s, &l, &k)) {
+        if (i >= lo || k != CT_LOG) {
+            unsigned p = sb_crash_prefix(src + s, l);
+            if (n + (gap ? 6U : 0U) + l - p + 1U > cap)
+                break;
+            if (gap) {
+                const char *m = "[...]\n";
+                for (unsigned j = 0; j < 6; ++j)
+                    dst[n++] = m[j];
+                ++nl;
+            }
+            gap = 0;
+            for (unsigned j = p; j < l; ++j) {
+                char c = tidy(src[s + j]);
+                dst[n++] = c ? c : '.';
+            }
+            dst[n++] = '\n';
+            ++nl;
+        } else {
+            gap = 1;
+        }
+        ++i;
+    }
+    if (lines)
+        *lines = (uint16_t)nl;
+    return n;
+}
