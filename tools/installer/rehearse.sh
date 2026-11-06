@@ -8,12 +8,14 @@
 #   - the same run again: nothing to do, 0 write commands
 #   - protected areas byte-identical, every target == its image, backups verified
 #   - the main phone without a journal: everything kept, nothing replaced
-#   - starting from Download mode (TWRP via fake heimdall) and from the loader's fastboot
+#   - starting from Download mode (the loader into BOOT via fake heimdall) and from the loader's fastboot
+#     (the installer environment from RAM, ssh); TWRP only as the legacy --transport twrp
 #   - the rescue USB stick: refusals for internal / huge / disk-image disks, a dry run, a write + read-back
 #   - a 64 GB card (sd64 card layout): bundle/payload layout checks, the 128 GB bundle refused, dry run,
 #     rehearsal, the card checked against the layout, an sd128 card not erased without --erase-card
-#   - a STOCK phone (Samsung firmware, Samsung's GPT, unlocked bootloader, no TWRP) and a 64 GB card:
-#     stock Android -> adb reboot download -> PIT check -> TWRP via heimdall -> dry run -> repartition
+#   - a STOCK phone (Samsung firmware, Samsung's GPT, unlocked bootloader) and a 64 GB card:
+#     stock Android -> adb reboot download -> PIT check -> BOOT via heimdall -> loader fastboot ->
+#     the installer environment -> dry run -> repartition
 #     (with a cable pull between the two GPT copies) -> the full install -> a re-run with nothing to do;
 #     an S9+ refused by its PIT; --restore-gpt; the bundle builder reading the installed phone
 # About 450 MB in WORKDIR (default build/installer-rehearsal; sparse files), removed at the end unless KEEP=1.
@@ -34,7 +36,7 @@ ok() { echo "PASS $*"; pass=$((pass + 1)); }
 bad() { echo "FAIL $*"; fail=$((fail + 1)); }
 hdr() { echo; echo "######## $*"; }
 brief() {   # the lines that tell the story of a run (WARN lines only with BRIEF_WARN=1)
-	grep -E '^(== The plan|== Dry run fin|ok   |WARN |FAIL |REFUSED|STOPPED|   [0-9]+ +(host|verify|write|skip|keep|resume|repartition|REPLACE|BLOCKED) |   \| (Uploading|RECOVERY upload|\(fake)|   found: |   \$ (heimdall|fastboot|adb reboot|diskutil|sudo dd|python3 -I tools/android/pixel/part-write.py)|   written [0-9])' |
+	grep -E '^(== The plan|== Dry run fin|ok   |WARN |FAIL |REFUSED|STOPPED|   [0-9]+ +(host|verify|write|skip|keep|resume|repartition|REPLACE|BLOCKED) |   \| (Uploading|BOOT upload|\(fake)|   found: |   \$ (heimdall|fastboot|adb reboot|diskutil|sudo dd|python3 -I tools/android/pixel/part-write.py)|   written [0-9])' |
 		grep -vE "^WARN ${BRIEF_WARN:+NEVER}" | grep -vE '^ok   (keep|skip): ' |
 		sed -E 's/  +$//; s/ {3,}/  /g'
 }
@@ -59,7 +61,7 @@ for dp, dn, fn in sorted(os.walk(sys.argv[1])):
     dn.sort()
     for f in sorted(fn):
         p = os.path.join(dp, f)
-        if os.path.islink(p) or f in ('state', 'usb'):
+        if os.path.islink(p) or f in ('state', 'usb', 'authorized_keys', 'env-cmdline', 'boot-next', 'heimdall-session'):
             continue
         h.update(p.encode())
         with open(p, 'rb') as fh:            # only the data extents: the fake UFS and card are sparse
@@ -102,7 +104,7 @@ COMMON=(--bundle "$B" --fake-root "$P" --state-dir "$ST")
 
 hdr "2. the bundle against its manifest"
 run 0 "bundle verified" -- "${SI[@]}" --verify-bundle "$B" --state-dir "$ST"
-has 'bundle verified: 14 items; optional items not in it: windows, ios26-root' "14 items present, 2 optional ones absent"
+has 'bundle verified: 16 items; optional items not in it: windows, ios26-root' "16 items present (3 of them the installer environment), 2 optional ones absent"
 
 hdr "3. refusals before anything is written"
 cp -R "$B" "$W/b-missing"; rm "$W/b-missing/android/vendor.img"
@@ -141,7 +143,7 @@ has 'skip  Back up the protected areas  this computer' "the finished backup is n
 
 hdr "7. and again: nothing left to do"
 run 0 "third run" -- "${SI[@]}" "${COMMON[@]}" --rehearse --yes --no-reboot
-has 'written 0, skipped 12, kept 8; 0 write commands ran' "0 write commands"
+has 'written 0, skipped 11, kept 8; 0 write commands ran' "0 write commands"
 
 hdr "8. checks on the fake phone"
 [ "$(protected "$P")" = "$prot" ] && ok "EFS, CPEFS, PARAM, UP_PARAM, KEYSTORAGE, PERSISTENT, STEADY, BOTA0-2, DTB, DTBO, GPT head/tail, sdb-sde: byte-identical" || bad "a protected area changed"
@@ -191,23 +193,32 @@ has 'keep  Android /data' "Android data is kept"
 has 'skip  Starbite loader \+ menu \(BOOT\)' "identical BOOT is skipped"
 has 'has data: kept \(--replace mac13-root overwrites it\)' "says how to replace on purpose"
 
-hdr "10. a phone in Download mode (no TWRP yet): TWRP via heimdall, then the dry run gate"
+hdr "10. a phone in Download mode: the Starbite loader into BOOT via heimdall (the only Download-mode write)"
 "${FP[@]}" create "$W/phone-dl" --state download --card starbite >/dev/null
 DL=(--bundle "$B" --fake-root "$W/phone-dl" --state-dir "$W/state-dl")
-run 0 "dry run in Download mode: shows the heimdall step, plans without phone checks" -- "${SI[@]}" "${DL[@]}" --dry-run --yes
-has 'heimdall flash --RECOVERY .*twrp-starbite.img --no-reboot' "the exact heimdall command"
-run 2 "rehearsal: TWRP flashed and booted, then the gate asks for a dry run" -- "${SI[@]}" "${DL[@]}" --rehearse --yes
-has 'TWRP is up' "TWRP came up after the (fake) key combination"
-run 0 "dry run in TWRP" -- "${SI[@]}" "${DL[@]}" --dry-run --yes --replace-all
+rec=$(shasum -a 256 < "$W/phone-dl/dev/block/by-name/RECOVERY")
+run 0 "dry run in Download mode: PIT read, the heimdall step shown, plan without phone checks" -- "${SI[@]}" "${DL[@]}" --dry-run --yes
+has 'heimdall flash --BOOT .*starbite-boot.img --no-reboot  \[dry run: not run\]' "the exact heimdall command: BOOT only"
+run 2 "rehearsal: BOOT flashed, the loader's fastboot, the environment from RAM, then the dry-run gate" -- "${SI[@]}" "${DL[@]}" --rehearse --yes
+has "the Starbite loader's fastboot is up" "the loader's fastboot came up after the (fake) keys"
+has 'the installer environment is up' "the installer environment started from RAM"
+run 0 "dry run in the installer environment" -- "${SI[@]}" "${DL[@]}" --dry-run --yes --replace-all
 run 0 "rehearsal completes" -- "${SI[@]}" "${DL[@]}" --rehearse --yes --replace-all --no-reboot
 has 'written 1[0-9], skipped' "installed"
+[ "$(shasum -a 256 < "$W/phone-dl/dev/block/by-name/RECOVERY")" = "$rec" ] && ok "RECOVERY untouched (Samsung's stock recovery stays)" || bad "RECOVERY changed"
 
-hdr "11. a phone in the Starbite loader's fastboot"
+hdr "11. a phone in the Starbite loader's fastboot; legacy TWRP"
 "${FP[@]}" create "$W/phone-fb" --state fastboot --card starbite >/dev/null
-run 0 "dry run: no reboot in a dry run" -- "${SI[@]}" --bundle "$B" --fake-root "$W/phone-fb" --state-dir "$W/state-fb" --dry-run --yes
-has 'fastboot reboot recovery  \[dry run: not run\]' "shows fastboot reboot recovery"
-run 2 "rehearsal: reboots to TWRP, then the gate" -- "${SI[@]}" --bundle "$B" --fake-root "$W/phone-fb" --state-dir "$W/state-fb" --rehearse --yes
+run 0 "dry run from the loader's fastboot: the environment from RAM (nothing stored), then the plan" -- "${SI[@]}" --bundle "$B" --fake-root "$W/phone-fb" --state-dir "$W/state-fb" --dry-run --yes
 has 'found: fastboot-starbite \(starbite-fb1\)' "detected the Starbite loader's fastboot"
+has 'the installer environment is up' "then the environment from RAM"
+grep -q 'sb.installer=1 sb.serial=FAKE0000SERIAL' "$W/phone-fb/env-cmdline" && ok "booted with the serial on the command line" || bad "env cmdline: $(cat "$W/phone-fb/env-cmdline")"
+[ "$(cat "$W/phone-fb/boot-next")" = fastboot ] && ok "boot-next = fastboot (an environment reboot comes back to fastboot)" || bad "boot-next not set"
+"${FP[@]}" create "$W/phone-twrp" --state recovery --card starbite >/dev/null
+run 2 "a phone in TWRP: the default transport refuses (TWRP is not part of the flow)" -- "${SI[@]}" --bundle "$B" --fake-root "$W/phone-twrp" --state-dir "$W/state-twrp" --dry-run --yes
+has 'the phone is in TWRP. The installer works from its own environment' "says how to get to the environment"
+run 0 "--transport twrp (legacy, S9 #1's maintenance): the dry run works as in v1" -- "${SI[@]}" --bundle "$B" --fake-root "$W/phone-twrp" --state-dir "$W/state-twrp" --dry-run --yes --transport twrp
+rm -rf "$W/phone-twrp" "$W/state-twrp"
 
 hdr "12. preflight refusals: another phone model, a 32 GB card, a flat battery, a card with another layout"
 rm -rf "$W/phone-x"; "${FP[@]}" create "$W/phone-x" --card starbite >/dev/null
@@ -270,7 +281,7 @@ python3 -B tools/installer/fakes/mkbundle.py "$B64" --layout sd64 | tail -1
 C64=(--bundle "$B64" --fake-root "$P64" --state-dir "$ST64")
 run 0 "sd64 bundle verified" -- "${SI[@]}" --verify-bundle "$B64" --state-dir "$ST64"
 has 'card layout sd64: catalog roots and payload sdroot= match \(mac13 139264\)' "its catalog root and macOS payload sdroot= are sd64's"
-has 'bundle verified: 14 items; optional items not in it: windows$' "no iOS 26 item (no slot on sd64)"
+has 'bundle verified: 16 items; optional items not in it: windows$' "no iOS 26 item (no slot on sd64)"
 run 2 "the 128 GB card's bundle (sd128) on a 64 GB card is refused" -- "${SI[@]}" --bundle "$B" --fake-root "$P64" --state-dir "$W/state64x" --dry-run --yes
 has 'card layout fit: the sd128 layout is only for the 249999360-sector card' "...because sd128 is S9 #1's card only"
 has 'needs a bundle made for the sd64 layout' "...and says which layout this card needs"
@@ -318,7 +329,7 @@ has 'REPLACE  microSD partition table' "the card step is REPLACE"
 has 'this card: p1 exFAT 31727616\+218271744, p2 0xda 8192\+31719424' "sd64 on a 128 GB card: same p2, a bigger p1"
 rm -rf "$W/phone64b" "$W/state64b" "$W/state64x"
 
-hdr "15. a STOCK phone: Samsung firmware and GPT, unlocked bootloader, no TWRP, a 64 GB card (docs/INSTALLER.md 9)"
+hdr "15. a STOCK phone: Samsung firmware and GPT, unlocked bootloader, a 64 GB card (docs/INSTALLER.md 9, 13)"
 PS=$W/phone-stock SS=$W/state-stock
 "${FP[@]}" create "$PS" --state android --stock --gpt stock --card blank --card-sectors 124735488
 CS=(--bundle "$B64" --fake-root "$PS" --state-dir "$SS")
@@ -352,21 +363,24 @@ PY
 }
 echo "before: $(gptof "$PS")"
 run 0 "dry run from stock Android: the way in is Download mode" -- "${SI[@]}" "${CS[@]}" --dry-run --yes
-has 'stock Samsung firmware: TWRP is not on this phone yet' "stock firmware recognised (ro.build.PDA)"
+has 'stock Samsung firmware: the Starbite loader is not on this phone yet' "stock firmware recognised (ro.build.PDA)"
 has 'adb reboot download  \[dry run: not run\]' "shows adb reboot download, does not run it"
 "${FP[@]}" create "$W/phone-s9plus" --state download --stock --gpt stock --model SM-G965F >/dev/null
-rb=$(shasum -a 256 < "$W/phone-s9plus/dev/block/by-name/RECOVERY")
+rb=$(cat "$W/phone-s9plus/dev/block/by-name/BOOT" "$W/phone-s9plus/dev/block/by-name/RECOVERY" | shasum -a 256)
 run 2 "an S9+ (SM-G965F) in Download mode is refused by its PIT" -- "${SI[@]}" --bundle "$B64" --fake-root "$W/phone-s9plus" --state-dir "$W/state-s9plus" --rehearse --yes
 has 'BOOT: PIT 19458\+16128, SM-G960F 19458\+14080' "names the partition that differs"
 has 'the PIT is not an SM-G960F' "...and says why"
-[ "$(shasum -a 256 < "$W/phone-s9plus/dev/block/by-name/RECOVERY")" = "$rb" ] && ok "nothing was flashed to the S9+" || bad "the S9+ RECOVERY changed"
+[ "$(cat "$W/phone-s9plus/dev/block/by-name/BOOT" "$W/phone-s9plus/dev/block/by-name/RECOVERY" | shasum -a 256)" = "$rb" ] && ok "nothing was flashed to the S9+ (BOOT, RECOVERY)" || bad "the S9+ changed"
 rm -rf "$W/phone-s9plus" "$W/state-s9plus"
-run 2 "rehearsal from stock Android: adb reboot download, PIT, TWRP via heimdall, then the dry-run gate" -- "${SI[@]}" "${CS[@]}" --rehearse --yes
+srec=$(shasum -a 256 < "$PS/dev/block/by-name/RECOVERY")
+run 2 "rehearsal from stock Android: adb reboot download, PIT, BOOT via heimdall, loader fastboot, the environment, then the dry-run gate" -- "${SI[@]}" "${CS[@]}" --rehearse --yes
 has 'PIT: an SM-G960F' "the PIT is an SM-G960F's"
 has 'Hold Volume Down \+ Power' "tells the user exactly which keys to hold"
-has 'TWRP is up' "TWRP came up"
+has 'hold Volume Up ALONE' "...and how to reach the loader's fastboot"
+has "the Starbite loader's fastboot is up" "the loader's fastboot came up"
+has 'the installer environment is up' "the installer environment runs from RAM"
 has 'no finished dry run' "then asks for the dry run"
-run 2 "dry run in TWRP without --repartition: the GPT step is BLOCKED" -- "${SI[@]}" "${CS[@]}" --dry-run --yes
+run 2 "dry run in the environment without --repartition: the GPT step is BLOCKED" -- "${SI[@]}" "${CS[@]}" --dry-run --yes
 has 'BLOCKED  UFS partition table \(starbite-a\)' "UFS partition table BLOCKED"
 has 'run again with --repartition' "says how to allow it"
 before=$(fakehash "$PS")
@@ -389,9 +403,9 @@ run 0 "the same command again: writes the primary, reboots, installs everything"
 has 'resume  UFS partition table' "the GPT step resumes"
 has 'primary GPT copy written and read back' "writes the primary copy"
 ! grep -q 'backup GPT copy written' "$W/last.txt" && ok "...and not the backup copy again" || bad "the backup copy was written again"
-has 'the kernel sees the starbite-a table' "after the reboot the kernel sees the new table"
+has 'the kernel sees the starbite-a table' "after the re-read the kernel sees the new table"
 has 'android-data: verified on the phone' "A16DATA written"
-has 'boot: verified on the phone' "BOOT written last"
+has 'skip  Starbite loader \+ menu \(BOOT\)' "BOOT: skipped, identical (it went in first, in Download mode)"
 g=$(gptof "$PS"); echo "  now: $g"
 case $g in "kernel: USERDATA WINESP WINDOWS A16DATA "*) ok "four partitions after SYSTEM..CP_DEBUG: USERDATA WINESP WINDOWS A16DATA";; *) bad "kernel view: $g";; esac
 [ "$(protected_nogpt "$PS")" = "$prot" ] && ok "protected areas, Samsung's other partitions, sda's PIT area, sdb-sde: byte-identical" || bad "a protected area changed"
@@ -411,15 +425,16 @@ if BK is not None:
     assert tail == open(BK / 'sda-tail-gpt.img', 'rb').read()
     print('  == backup/20261102-185306 (S9 #1), byte for byte')
 PY
+[ "$(shasum -a 256 < "$PS/dev/block/by-name/RECOVERY")" = "$srec" ] && ok "RECOVERY untouched through the whole install (Samsung's stock recovery)" || bad "RECOVERY changed"
 run 0 "and again: nothing left to do" -- "${SI[@]}" "${CS[@]}" --rehearse --yes --no-reboot
 has 'skip  UFS partition table' "the GPT step: skip"
 has '; 0 write commands ran' "0 write commands"
 run 0 "--restore-gpt dry run: shows how the stock table would go back" -- "${SI[@]}" --restore-gpt --dry-run --fake-root "$PS" --state-dir "$SS" --yes
 has 'dd if=/tmp/sbinst-gpt/backup.bin of=/dev/block/sda bs=4096 seek=15615995' "the exact restore command"
 BB=$W/bundle-built
-run 0 "the bundle builder reads the installed phone (read only) into a new sd64 bundle" -- "${SI[@]}" --build-bundle "$BB" --from-phone --fake-root "$PS" --state-dir "$SS" --only boot --only twrp --only ufs-store --only sd-store --only pmos --only ubuntu --only chromeos --only android-metadata
+run 0 "the bundle builder reads the installed phone (read only) into a new sd64 bundle" -- "${SI[@]}" --build-bundle "$BB" --from-phone --fake-root "$PS" --state-dir "$SS" --only boot --only ufs-store --only sd-store --only pmos --only ubuntu --only chromeos --only android-metadata
 has 'boot: 55.0 MiB, sha256 .* \(phone and computer agree\)' "every item hashed on the phone and here"
-has 'installer-manifest.toml: 8 items' "manifest written"
+has 'installer-manifest.toml: 7 items' "manifest written"
 run 0 "...and it verifies as a bundle" -- "${SI[@]}" --verify-bundle "$BB" --state-dir "$SS"
 has 'card layout sd64: catalog roots and payload sdroot= match' "its stores carry the sd64 card layout"
 rm -rf "$BB"

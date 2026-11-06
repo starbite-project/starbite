@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Fake `heimdall` for installer rehearsals: `detect`, `download-pit --output FILE [--no-reboot] [--resume]`
-and `flash [--resume] --RECOVERY FILE [--no-reboot]`, on the fake phone's PIT ($FAKE_ROOT/pit.bin).
+and `flash [--resume] --BOOT FILE [--no-reboot]` (RECOVERY is refused), on the fake phone's PIT ($FAKE_ROOT/pit.bin).
 
 Sessions as on a real Samsung: a command that ends with --no-reboot leaves the Download-mode session
 open, and the next command must then pass --resume (without it the handshake fails); a command with
 --resume on a phone without an open session fails too. A reboot closes the session.
-After a RECOVERY flash the fake phone goes to TWRP, standing in for the user's key combination
-(Volume Down + Power, then at once Volume Up + Bixby + Power)."""
+After the BOOT flash the fake phone is in the Starbite loader's fastboot, standing in for the user's
+keys (Volume Down + Power to leave Download mode, then Volume Up alone at the loader's start)."""
 import os
 import sys
 
@@ -50,18 +50,20 @@ if a[:1] == ['download-pit']:
     sys.exit(0)
 if a[:1] == ['flash']:
     args = [x for x in a[1:] if x not in ('--resume', '--no-reboot')]
-    if len(args) != 2 or args[0] != '--RECOVERY':
-        sys.exit(f'fake heimdall: only "flash [--resume] --RECOVERY FILE [--no-reboot]" is faked, not {a}')
-    target = os.path.realpath(os.path.join(R, 'dev', 'block', 'by-name', 'RECOVERY'))
+    if '--RECOVERY' in args:
+        sys.exit('fake heimdall: RECOVERY must never be written (Samsung\'s stock recovery stays): refused')
+    if len(args) != 2 or args[0] != '--BOOT':
+        sys.exit(f'fake heimdall: only "flash [--resume] --BOOT FILE [--no-reboot]" is faked, not {a}')
+    target = os.path.realpath(os.path.join(R, 'dev', 'block', 'by-name', 'BOOT'))
     data = open(args[1], 'rb').read()
     with open(target, 'r+b') as f:
         f.write(data)
-    open(os.path.join(R, 'recovery-kind'), 'w').write('twrp\n')
-    print(f'Uploading RECOVERY\n100%\nRECOVERY upload successful ({len(data)} bytes)')
+    open(os.path.join(R, 'boot-kind'), 'w').write('starbite\n')
+    print(f'Uploading BOOT\n100%\nBOOT upload successful ({len(data)} bytes)')
     if not no_reboot:
         end()
         sys.exit(0)
-    fakephone.write_state(R, 'recovery')
-    print('(fake: the user held Volume Down + Power, then Volume Up + Bixby + Power: TWRP is up)')
+    fakephone.write_state(R, 'fastboot')
+    print('(fake: the user held Volume Down + Power, then Volume Up alone: the Starbite loader\'s fastboot is up)')
     sys.exit(0)
 sys.exit(f'fake heimdall: {a} is not faked')

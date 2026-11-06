@@ -3,7 +3,7 @@
 logic behind the fake adb, fastboot and heimdall next to this file. Works on macOS and Linux
 (sparse files: the 64 GB UFS and the 128 GB card cost almost no disk).
 
-  fakephone.py create DIR [--state recovery|download|fastboot|android] [--card blank|starbite|foreign]
+  fakephone.py create DIR [--state fastboot|download|android|env|recovery] [--card blank|starbite|foreign]
                           [--card-sectors N] [--layout sd128|sd64] [--battery N]
                           [--gpt starbite-a|stock|LAYOUT] [--stock] [--model SM-G960F|SM-G965F]
       --card starbite lays the card out as --layout (default sd128, which needs the 249999360-sector card)
@@ -104,7 +104,7 @@ def gpt_bytes(layout_name, rnd, total=UFS_BLOCKS):
     return bytes(pmbr) + prim, back
 
 
-def create(root, state='recovery', card='blank', card_sectors=CARD_SECTORS, battery=87, seed=9, layout='sd128',
+def create(root, state='fastboot', card='blank', card_sectors=CARD_SECTORS, battery=87, seed=9, layout='sd128',
            gpt_layout='starbite-a', stock=False, model='SM-G960F'):
     rnd = random.Random(seed)
     dev = os.path.join(root, 'dev', 'block')
@@ -149,9 +149,9 @@ def create(root, state='recovery', card='blank', card_sectors=CARD_SECTORS, batt
     bl = model[3:] + 'XXUHFVG6'
     props = {'ro.product.model': model, 'ro.product.device': device, 'ro.boot.bootloader': bl,
              'ro.boot.serialno': 'FAKE0000SERIAL', 'ro.boot.flash.locked': '0', 'ro.boot.verifiedbootstate': 'orange',
-             'ro.boot.warranty_bit': '1', 'ro.twrp.version': '3.7.0_9-0'}
+             'ro.boot.warranty_bit': '1', 'ro.twrp.version': '3.7.0_9-0', 'ro.starbite.env': 'fake environment'}
     open(os.path.join(root, 'props'), 'w').write(''.join(f'{k}={v}\n' for k, v in props.items()))
-    android = {k: v for k, v in props.items() if k != 'ro.twrp.version'}
+    android = {k: v for k, v in props.items() if k not in ('ro.twrp.version', 'ro.starbite.env')}
     if stock:
         android.update({'ro.build.PDA': bl, 'ro.build.version.oneui': '20100', 'ro.product.system.brand': 'samsung'})
     else:
@@ -279,11 +279,13 @@ if __name__ == '__main__':
         a = sys.argv[3:]
         opt = lambda k, d: a[a.index(k) + 1] if k in a else d  # noqa: E731
         os.makedirs(root, exist_ok=True)
-        create(root, opt('--state', 'recovery'), opt('--card', 'blank'), int(opt('--card-sectors', CARD_SECTORS)),
+        create(root, opt('--state', 'fastboot'), opt('--card', 'blank'), int(opt('--card-sectors', CARD_SECTORS)),
                int(opt('--battery', 87)), layout=opt('--layout', 'sd128'), gpt_layout=opt('--gpt', 'starbite-a'),
                stock='--stock' in a, model=opt('--model', 'SM-G960F'))
     elif cmd == 'rereadpt':
         rereadpt(root)
+    elif cmd == 'set-state':                      # sb-reboot in the installer environment
+        write_state(root, {'menu': 'menu', 'fastboot': 'fastboot', 'download': 'download'}.get(sys.argv[3], 'menu'))
     elif cmd == 'rereadpt-sda':
         rereadpt_sda(root)
     elif cmd == 'mkexfat':

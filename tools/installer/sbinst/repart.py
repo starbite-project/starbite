@@ -245,7 +245,31 @@ class Repart:
 
     def reboot_and_check(self, p):
         u = self.ui
-        u.info('rebooting into TWRP so the kernel reads the new table (adb reboot recovery)...')
+        if os.environ.get('SBINST_ENV_UP') == '1':
+            # the installer environment mounts nothing on sda: the kernel can re-read the table in place
+            u.info('the kernel re-reads the table (blockdev --rereadpt /dev/block/sda; by-name links again)')
+            self.phone.sh('sync; blockdev --rereadpt /dev/block/sda; sb-byname', write=True, check=False)
+            f = self.phone.facts()
+            if not self.kernel_diff(p, f):
+                self.i.facts = f
+                u.ok(f'the kernel sees the {getattr(self.layout, "name", "original")} table: {len(p.entries)} '
+                     'partitions, by-name nodes, starts and sizes as planned')
+                return
+            u.info('not re-read in place: the environment restarts (loader fastboot, then the environment again)')
+            self.phone.adb('reboot', 'bootloader', write=True)
+            st = self.phone.wait_for('fastboot-starbite', 180)
+            if st.kind != 'fastboot-starbite':
+                raise Stopped('the loader\'s fastboot did not come back after the GPT write. The table is written: start '
+                              'the fastboot (Bixby > USB FASTBOOT) and run the installer again; it checks and goes on')
+            self.i.start_env()
+            f = self.phone.facts()
+            bad = self.kernel_diff(p, f)
+            if bad:
+                raise Stopped('after the restart the kernel shows another table: ' + '; '.join(bad[:4]))
+            self.i.facts = f
+            u.ok(f'the kernel sees the {getattr(self.layout, "name", "original")} table after the restart')
+            return
+        u.info('rebooting into TWRP so the kernel reads the new table (adb reboot recovery; legacy transport)...')
         self.phone.adb('reboot', 'recovery', write=True)
         time.sleep(1 if os.environ.get('FAKE_ROOT') else 8)
         st = self.phone.wait_for('recovery', 240)
@@ -279,7 +303,9 @@ class Repart:
             if a.action in ('write-both', 'write-primary'):
                 u.cmd(f'adb push primary.bin {D}/; adb shell "{cmds["primary"].split("; ", 1)[1]}"  (detached; read back)'
                       '    [dry run: not run]')
-            u.cmd('adb reboot recovery; then by-name, start and size of every partition == the plan    [dry run: not run]')
+            u.cmd(('adb shell "blockdev --rereadpt /dev/block/sda; sb-byname"' if os.environ.get('SBINST_ENV_UP') == '1'
+                   else 'adb reboot recovery (legacy TWRP)') +
+                  '; then by-name, start and size of every partition == the plan    [dry run: not run]')
             return
         if a.status != 'reread':
             self.save_anchor()

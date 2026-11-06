@@ -39,22 +39,24 @@ MIN_CARD_BYTES = cardlayout.MIN_CARD_BYTES      # 60_000_000_000
 MAX_RESCUE_DISK_BYTES = 256 * GIB
 
 # Never written by the installer, in any mode (task rules; docs/STARBITE-MASTER-PLAN.md 5.8).
+# RECOVERY too: the phone keeps Samsung's stock recovery; nothing in the installer writes or boots it
+# (the user's rule, 2026-11-06: "we do everything else from e.g. engineer mode").
 PROTECTED = ('EFS', 'CPEFS', 'PARAM', 'UP_PARAM', 'KEYSTORAGE', 'PERSISTENT', 'STEADY',
-             'BOTA0', 'BOTA1', 'BOTA2', 'DTB', 'DTBO')
+             'BOTA0', 'BOTA1', 'BOTA2', 'DTB', 'DTBO', 'RECOVERY')
 # Whole-disk regions that are protected too: the GPT (sda head + tail) and the boot LUNs.
 PROTECTED_RAW = ('sda', 'sdb', 'sdc', 'sdd', 'sde')
 
 # Partitions the installer may write, and the writer each one goes through.
 #   part-write.py (tools/android/pixel/): SYSTEM VENDOR A16DATA (ODM through metadata-reset.sh)
-#   the installer's own chunk writer: BOOT RECOVERY WINESP WINDOWS
+#   the installer's own chunk writer: BOOT WINESP WINDOWS (never RECOVERY)
 PART_WRITE_PY = ('SYSTEM', 'VENDOR', 'A16DATA')
-NATIVE_PARTS = ('BOOT', 'RECOVERY', 'WINESP', 'WINDOWS')
+NATIVE_PARTS = ('BOOT', 'WINESP', 'WINDOWS')
 WRITABLE_PARTS = PART_WRITE_PY + NATIVE_PARTS + ('ODM',)
 
 # Backed up (read only) before anything is written: the protected partitions, plus the small ones
 # the install overwrites, plus what the master plan lists (RADIO, OMR, MISC). Missing optional
 # ones are reported, missing required ones stop the install.
-BACKUP_REQUIRED = PROTECTED + ('BOOT', 'RECOVERY')
+BACKUP_REQUIRED = PROTECTED + ('BOOT',)            # RECOVERY is in PROTECTED (read, never written)
 BACKUP_OPTIONAL = ('MISC', 'RADIO', 'OMR', 'ODM')
 # Raw regions: (name, device, how). 'head' = first 4 MiB (protective MBR, primary GPT, PIT area),
 # 'tail' = last 5 blocks of 4 KiB (backup GPT), 'whole' = the whole LUN.

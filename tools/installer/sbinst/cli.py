@@ -17,6 +17,7 @@ starbite-install --bundle DIR [--dry-run | --rehearse --fake-root DIR | --real] 
 starbite-install --make-rescue-image FILE
 starbite-install --make-rescue-usb /dev/diskN [--image FILE] [--dry-run | --real]
 starbite-install --verify-bundle DIR | --update-hashes DIR | --describe-phone
+starbite-install --bundle DIR --start-env                (only start the installer environment)
 starbite-install --restore-gpt [--dry-run | --real]        (the phone's own GPT, saved before repartitioning)
 starbite-install --build-bundle DIR (--from-phone | --from-local) [--card-layout sd64] [--only KEY] [--skip KEY]
 """
@@ -37,9 +38,15 @@ def parse(argv):
                     help='overwrite this item even though its target holds data (repeatable)')
     ap.add_argument('--replace-all', action='store_true', help='a fresh install: overwrite every target that holds data')
     ap.add_argument('--erase-card', action='store_true', help='erase a microSD that has another layout')
+    ap.add_argument('--transport', choices=('env', 'twrp'), default='env',
+                    help='env (default): the Starbite installer environment from the loader\'s fastboot; twrp: '
+                         'legacy, TWRP\'s adb (S9 #1\'s own maintenance only; never the stock flow)')
     ap.add_argument('--repartition', action='store_true',
                     help='write the UFS partition table of the bundle\'s [ufs] layout when the phone has another one '
                          '(a stock phone; partitions that change are written fresh)')
+    ap.add_argument('--start-env', action='store_true',
+                    help='with --bundle: only start the installer environment (Download mode / loader fastboot -> '
+                         'the environment from RAM), e.g. for --restore-gpt or --build-bundle --from-phone')
     ap.add_argument('--restore-gpt', action='store_true',
                     help='write back the phone\'s own GPT as saved before the repartitioning (phone in TWRP)')
     ap.add_argument('--build-bundle', type=Path, metavar='DIR', help='make a bundle (installer-manifest.toml + files)')
@@ -75,9 +82,9 @@ def setup_fake(a, ui):
         if not (root / 'state').is_file():
             raise Refused(f'{root} is not a fake phone (tools/installer/fakes/fakephone.py create {root})')
         os.environ['FAKE_ROOT'] = str(root)
-        os.environ['PATH'] = f'{INSTALLER_DIR / "fakes"}{os.pathsep}{os.environ["PATH"]}'
+        os.environ['PATH'] = f'{INSTALLER_DIR / "fakes"}{os.pathsep}{os.environ["PATH"]}'   # adb fastboot heimdall ssh
         os.environ['SBINST_FAKE_USB'] = str(root / 'usb')
-        ui.info(f'fake phone: {root.name} (fake adb, fastboot and heimdall first on PATH)')
+        ui.info(f'fake phone: {root.name} (fake adb, fastboot, heimdall and ssh first on PATH)')
     elif a.mode == 'rehearse' and not a.make_rescue_usb:
         raise Refused('--rehearse needs --fake-root DIR')
 
@@ -91,10 +98,15 @@ def open_log(ui, state_dir, what):
 
 
 def describe_phone(ui, runner):
-    p = Phone(runner)
+    from .common import default_state_dir
+    from .device import InstallerEnv
+    p = Phone(runner, InstallerEnv(runner, default_state_dir() / 'env'))
     st = p.detect()
-    if st.kind != 'recovery':
-        raise Refused(f'--describe-phone needs the phone in TWRP (found: {st.kind})')
+    if st.kind == 'env':
+        p.env.activate()
+    elif st.kind != 'recovery':
+        raise Refused(f'--describe-phone needs the installer environment (--bundle B --start-env) or, legacy, TWRP '
+                      f'(found: {st.kind})')
     f = p.facts()
     ui.emit('# the phone\'s layout (read only), for installer-manifest.toml')
     ui.emit(f'[phone]\nufs_blocks = {(f.sda or 0) // 8}\n')
@@ -199,6 +211,10 @@ def main(argv=None):
         if a.verify_bundle:
             return 0
         runner = Runner(ui, a.mode)
+        if a.start_env:
+            st = Installer(ui, runner, m, a, state_dir).bring_up()
+            ui.ok(f'phone: {st.kind if st else "not started (dry run)"}')
+            return 0
         rc = Installer(ui, runner, m, a, state_dir).run()
         ui.info(f'log: {log}')
         return rc

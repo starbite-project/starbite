@@ -1,0 +1,20 @@
+#!/bin/sh
+# Project Starbite installer environment: `getprop NAME` for the facts the installer reads in TWRP's
+# terms (sbinst/device.py Phone.FACTS). Sources: the device tree, the kernel command line (the
+# installer passes sb.serial= from the loader's `getvar serialno`), and fixed answers.
+cl=$(cat /proc/cmdline)
+arg() { echo "$cl" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
+model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)
+compat=$(tr '\0' ' ' < /proc/device-tree/compatible 2>/dev/null)
+case ${1:-} in
+ro.product.model)
+	case "$model $compat" in *SM-G960F*|*samsung,starlte*) echo SM-G960F ;; *SM-G965F*|*star2lte*) echo SM-G965F ;; *) echo "$model" ;; esac ;;
+ro.product.device)
+	case "$compat" in *samsung,starlte*) echo starlte ;; *star2lte*) echo star2lte ;; *) echo ;; esac ;;
+ro.boot.serialno) arg sb.serial ;;
+ro.boot.bootloader) arg androidboot.bootloader ;;
+ro.boot.flash.locked) echo 0 ;;                 # the loader runs: S-Boot accepted an unsigned BOOT
+ro.boot.verifiedbootstate) echo orange ;;
+ro.starbite.env) cat /etc/starbite-env 2>/dev/null | head -1 ;;
+*) echo ;;
+esac

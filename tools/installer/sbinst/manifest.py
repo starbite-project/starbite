@@ -31,7 +31,7 @@ class Dest:
     def __str__(self):
         return {'part': f'part:{self.name}', 'slot': f'slot:USERDATA@{self.offset}',
                 'store': f'store:{self.name}', 'card-lba': f'card:lba:{self.offset}',
-                'card-file': f'card:file:{self.name}'}[self.kind]
+                'card-file': f'card:file:{self.name}', 'env': f'env:{self.name}'}[self.kind]
 
     def where(self):
         """Plain words for the plan screen."""
@@ -39,7 +39,8 @@ class Dest:
                 'slot': f'UFS USERDATA bytes {self.offset}.. (Apple slot, below 16 GiB)',
                 'store': f'{"UFS" if self.name == "ufs" else "microSD p2"} OS store',
                 'card-lba': f'microSD sectors {self.offset}..',
-                'card-file': f'microSD p1 (exFAT) {self.name}'}[self.kind]
+                'card-file': f'microSD p1 (exFAT) {self.name}',
+                'env': f'the installer environment ({self.name}; RAM only, never stored)'}[self.kind]
 
 
 def parse_dest(s):
@@ -49,6 +50,9 @@ def parse_dest(s):
         raise Refused(f'destination {s!r} is not a string')
     kind, _, rest = s.partition(':')
     if kind == 'part':
+        if rest.upper() == 'RECOVERY':
+            raise Refused(f'destination {s}: the installer never writes RECOVERY (the phone keeps Samsung\'s stock '
+                          'recovery; Starbite works from its loader and its own environment)')
         if rest.upper() in PROTECTED or rest.lower() in PROTECTED_RAW or rest.upper().startswith('BOTA'):
             raise Refused(f'destination {s}: {rest} is a protected area; the installer never writes it')
         if rest not in WRITABLE_PARTS:
@@ -68,6 +72,10 @@ def parse_dest(s):
         if rest not in ('ufs', 'sd'):
             raise Refused(f'destination {s}: expected store:ufs or store:sd')
         return Dest('store', rest)
+    if kind == 'env':
+        if rest not in ('kernel', 'initrd', 'dtb'):
+            raise Refused(f'destination {s}: expected env:kernel, env:initrd or env:dtb (the installer environment)')
+        return Dest('env', rest)
     if kind == 'card':
         sub, _, val = rest.partition(':')
         if sub == 'lba':
@@ -83,7 +91,7 @@ def parse_dest(s):
             if not _CARD_PATH.match(val) or '..' in val.split('/') or val.endswith('/'):
                 raise Refused(f'destination {s}: card paths are absolute, plain characters, no ".."')
             return Dest('card-file', val)
-    raise Refused(f'destination {s!r}: unknown kind (part: slot: store: card:lba: card:file:)')
+    raise Refused(f'destination {s!r}: unknown kind (part: slot: store: card:lba: card:file: env:)')
 
 
 @dataclass
@@ -534,6 +542,8 @@ def layout_problems(m):
 def writer_of(item):
     """Which program writes an item (shown on the plan screen)."""
     d = item.dest
+    if d.kind == 'env':
+        return 'fastboot boot (RAM)'
     if item.action == 'mkfs-metadata':
         return 'tools/android/pixel/metadata-reset.sh'
     if d.kind == 'part' and d.name in PART_WRITE_PY:

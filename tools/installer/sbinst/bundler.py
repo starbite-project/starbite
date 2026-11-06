@@ -1,7 +1,8 @@
 """The bundle builder (docs/INSTALLER.md 12):
 
   starbite-install --build-bundle DIR --from-phone [--card-layout sd64] [--only KEY] [--skip KEY]
-      the main phone in TWRP: every item is READ from it (never written) and streamed into DIR,
+      the main phone in the installer environment (or, legacy, TWRP): every item is READ from it (never
+      written) and streamed into DIR,
       hashed here and on the phone in the same pass (one read), then installer-manifest.toml.
   starbite-install --build-bundle DIR --from-local [--sources FILE] ...
       only local build outputs (SOURCES' `local` candidates, or a TOML file `key = "path"`).
@@ -34,11 +35,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import manifest as mf, tomlmini, ufslayout
-from .common import (GIB, MIB, PROTECTED, PROTECTED_RAW, REPO, TOOLS, Refused, Stopped, cardlayout, human)
+from .common import (GIB, MIB, PROTECTED, PROTECTED_RAW, REPO, TOOLS, Refused, Stopped, cardlayout,
+                     default_state_dir, human)
 from .device import Phone
 
 # Partitions the builder may read from the phone (the rest is per phone, or the user's own data).
-READABLE = ('BOOT', 'RECOVERY', 'SYSTEM', 'VENDOR', 'WINESP', 'WINDOWS', 'USERDATA')
+READABLE = ('BOOT', 'SYSTEM', 'VENDOR', 'WINESP', 'WINDOWS', 'USERDATA')
 NEVER = PROTECTED + ('MISC', 'RADIO', 'OMR', 'CACHE', 'HIDDEN', 'CP_DEBUG', 'NAD_REFER', 'DQMDBG', 'A16DATA',
                      'ODM') + tuple(x.upper() for x in PROTECTED_RAW)
 SLOT_BYTES = 16 * GIB
@@ -65,8 +67,6 @@ class Src:
 SOURCES = (
     Src('boot', 'Starbite loader + menu (BOOT)', 'starbite', 'part:BOOT', 'boot/starbite-boot.img', ('part', 'BOOT'),
         ('out/xnu-boot-*.img', 'build/boot/starbite-boot.img')),
-    Src('twrp', 'TWRP (Starbite: /data = A16DATA)', 'starbite', 'part:RECOVERY', 'boot/twrp-starbite.img',
-        ('part', 'RECOVERY'), ('build/android/twrp/*.img',)),
     Src('ufs-store', 'OS store (UFS): catalog, kernels, payloads, Engineer OS, rescue system', 'starbite', 'store:ufs',
         'store/ufs-store.img', ('store', 'ufs'), ('build/store/ufs-store.img',)),
     Src('sd-store', 'OS store (microSD p2)', 'starbite', 'store:sd', 'store/sd-store.img', ('store', 'sd'),
@@ -91,6 +91,12 @@ SOURCES = (
         ('card-root', 'mac13'), ('build/macos13/mac13-root.img',), data=True),
     Src('ios26-root', 'iOS 26 root (parked edge pair)', 'ios', 'card:root:ios26', 'apple/ios26-root.img',
         ('card-root', 'ios26'), (), data=True, optional=True),
+    Src('env-kernel', 'Installer environment: Linux 7.1 kernel (arm64 Image)', 'starbite', 'env:kernel',
+        'env/installer.image', None, ('build/installer-env/installer.image',)),
+    Src('env-initrd', 'Installer environment: initramfs', 'starbite', 'env:initrd', 'env/installer.initrd', None,
+        ('build/installer-env/installer.initrd',)),
+    Src('env-dtb', 'Installer environment: device tree', 'starbite', 'env:dtb', 'env/installer.dtb', None,
+        ('build/installer-env/installer.dtb',)),
     Src('pmos', 'postmarketOS (Phosh)', 'linux', 'card:file:/distros/pmos.img', 'card/distros/pmos.img',
         ('card-file', '/distros/pmos.img'), ('build/distros/pmos.img',), data=True),
     Src('ubuntu', 'Ubuntu (Phosh)', 'linux', 'card:file:/distros/ubuntu.img', 'card/distros/ubuntu.img',
@@ -411,6 +417,8 @@ def manifest_text(name, items, card_layout, ufs_layout):
     L.append('')
     L.append(f'[ufs]\nlayout = "{ufs_layout}"')
     L.append('')
+    L.append('[env]\ncmdline = "sb.installer=1"')
+    L.append('')
     L.append(f'[card]\nmin_bytes = 60000000000\nlayout = "{card_layout}"')
     L.append('')
     for it in items:
@@ -482,10 +490,14 @@ def build(ui, runner, out, from_phone, card_layout=None, only=(), skip=(), state
     src_layout = 'sd128'
     reads = {}
     if from_phone:
-        phone = Phone(runner)
+        from .device import InstallerEnv
+        phone = Phone(runner, InstallerEnv(runner, default_state_dir() / 'env'))
         dev = phone.detect()
-        if dev.kind != 'recovery':
-            raise Refused(f'--from-phone needs the main phone in TWRP (found: {dev.kind}); nothing is written to it')
+        if dev.kind == 'env':
+            phone.env.activate()
+        if dev.kind not in ('recovery', 'env'):
+            raise Refused(f'--from-phone needs the main phone in the installer environment (or TWRP, legacy) (found: '
+                          f'{dev.kind}); nothing is written to it')
         facts = phone.facts()
         rl, src_layout = read_plan(phone, facts, sel, ui)
         reads = {r.src.key: r for r in rl}

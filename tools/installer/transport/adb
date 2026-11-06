@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""`adb` for the Starbite installer environment (docs/INSTALLER.md 13): the installer puts this
+directory first on PATH once the environment runs (SBINST_ENV_UP=1), so the existing writers
+(part-write.py, part-backup.sh, slot-write.py, store-flash*.sh, card-range-flash.py,
+metadata-reset.sh) and the installer itself reach the phone over ssh on USB networking instead of
+TWRP's adb, unchanged. Without SBINST_ENV_UP it hands every call to the next `adb` on PATH.
+
+The subset those tools use:
+  shell CMD... / exec-out CMD     ssh root@HOST "CMD" (8-bit clean, the remote exit status)
+  push LOCAL... REMOTE            ssh root@HOST "cat > REMOTE" < LOCAL (REMOTE/ = a directory)
+  pull REMOTE LOCAL               ssh root@HOST "cat REMOTE" > LOCAL
+  get-state                       "recovery" (the existing tools only check for a root shell)
+  devices                         one line, "<serial> recovery"
+  reboot [bootloader|download]    sb-reboot fastboot|download|menu in the environment.
+                                  `reboot recovery` is REFUSED: the installer never boots RECOVERY.
+  wait-for-*, start-server        nothing
+Settings: SBINST_ENV_HOST (172.16.42.1), SBINST_ENV_KEY (the per-install ssh key), SBINST_ENV_SERIAL."""
+import os
+import shutil
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+
+
+def real_adb(argv):
+    path = os.pathsep.join(p for p in os.environ.get('PATH', '').split(os.pathsep)
+                           if p and os.path.realpath(p) != HERE)
+    exe = shutil.which('adb', path=path)
+    if not exe:
+        sys.exit('adb: not found (and the installer environment is not up)')
+    os.execv(exe, [exe] + argv)
+
+
+def ssh(cmd, **kw):
+    host = os.environ.get('SBINST_ENV_HOST', '172.16.42.1')
+    key = os.environ['SBINST_ENV_KEY']
+    argv = ['ssh', '-i', key, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no', '-o',
+            'UserKnownHostsFile=/dev/null', '-o', 'LogLevel=ERROR', '-o', 'ConnectTimeout=5', '-o',
+            'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=3', f'root@{host}', cmd]
+    return subprocess.call(argv, **kw)
+
+
+def main(a):
+    if os.environ.get('SBINST_ENV_UP') != '1':
+        real_adb(a)
+    while a and a[0] in ('-s', '-t'):
+        a = a[2:]
+    c, rest = (a[0] if a else ''), a[1:]
+    if c in ('shell', 'exec-out'):
+        sys.exit(ssh(' '.join(rest)))
+    if c == 'push':
+        *srcs, dst = rest
+        for s in srcs:
+            d = dst + os.path.basename(s) if dst.endswith('/') or len(srcs) > 1 else dst
+            with open(s, 'rb') as f:
+                if ssh(f"cat > '{d}'", stdin=f):
+                    sys.exit(f'adb push {s}: failed')
+        print(f'{len(srcs)} file(s) pushed (installer environment)')
+        return
+    if c == 'pull':
+        with open(rest[1], 'wb') as f:
+            sys.exit(ssh(f"cat '{rest[0]}'", stdout=f))
+    if c == 'get-state':
+        print('recovery')
+        return
+    if c == 'devices':
+        print(f'List of devices attached\n{os.environ.get("SBINST_ENV_SERIAL", "SBINST-ENV")}\trecovery')
+        return
+    if c == 'reboot':
+        to = rest[0] if rest else ''
+        if to == 'recovery':
+            sys.exit('adb (installer environment): refused: the installer never boots RECOVERY')
+        sys.exit(ssh(f'sb-reboot {dict(bootloader="fastboot", download="download").get(to, "menu")}'))
+    if c in ('start-server', 'version') or c.startswith('wait-for'):
+        if c == 'version':
+            print('Android Debug Bridge (starbite installer environment over ssh)')
+        return
+    sys.exit(f'adb (installer environment): "{c}" is not supported')
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])
