@@ -502,6 +502,7 @@ static void mb_data(struct bcmw *w)
     }
     if (d & D2H_DEV_FWHALT) {
         bcmw_say(w, "msgbuf: THE FIRMWARE HALTED (its console follows)");
+        w->console_quota += 64;
         mb_console(w);
         w->dead = 1;
     }
@@ -617,6 +618,15 @@ void mb_console(struct bcmw *w)
             continue;
         }
         w->console_line[w->console_n] = 0;
+        if (w->console_n && w->console_quota == 0) {
+            w->console_n = 0;
+            continue;
+        }
+        if (w->console_n && --w->console_quota == 0) {
+            bcmw_say(w, "fw: (the firmware's console goes on; not logged further, to keep the log short)");
+            w->console_n = 0;
+            continue;
+        }
         if (w->console_n) {
             struct bcmw_lb l;
             lb_init(&l);

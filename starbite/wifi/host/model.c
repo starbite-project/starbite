@@ -585,9 +585,13 @@ static void answer(const uint8_t *req, uint16_t trans, uint32_t cmd, const uint8
             if (cmd == BCMW_C_SET_VAR)
                 memcpy(M.event_mask, data, 16);
             rlen = cmd == BCMW_C_GET_VAR ? 16 : 0;
+        } else if (cmd == BCMW_C_GET_VAR && !strcmp(name, "scan_ver") && M.scan_v2) {
+            out[0] = 2, rlen = 4;
         } else if (!strcmp(name, "escan")) {
-            if (dlen < 72 || (uint32_t)(data[0] | data[1] << 8) != 1)
-                status = (uint16_t)-1;
+            uint32_t ver = (uint32_t)(data[0] | data[1] << 8);
+            if (M.scan_v2 ? (dlen < 80 || ver != 2 || data[8] != 2 || data[10] != 72 || data[8 + 46] != 2)
+                          : (dlen < 72 || ver != 1 || data[8 + 42] != 2))
+                status = (uint16_t)-1, M.fw_errors |= 1024;
             else
                 scan = 1;
         } else if (!strcmp(name, "mpc")) {

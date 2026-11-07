@@ -16,7 +16,7 @@ struct model {
     int sizing[4];
     /* the chip */
     uint32_t cr4_ioctl, cr4_reset, mailboxint;
-    int start_fw, fw_running, offer_dma_idx, up;
+    int start_fw, fw_running, offer_dma_idx, up, scan_v2;
     unsigned watchdog_resets, boots, doorbells, hostready, ioctls, badoption;
     unsigned fw_errors;                 /* bits: what the model's firmware found wrong */
     uint32_t fw_rstvec, nvram_seen, clm_done;

@@ -243,7 +243,7 @@ struct bcmw {
     uint32_t shared, flags, htod_mb, dtoh_mb, ring_info;
     uint32_t console_base, console_buf, console_size, console_ridx;
     char console_line[160];
-    unsigned console_n;
+    unsigned console_n, console_quota;  /* lines still logged (48, more after a halt) */
     unsigned idx_size;          /* 0: indices in TCM (16-bit); 2 or 4: in host memory */
     uint8_t *idxbuf;
     uint64_t idxbuf_bus;

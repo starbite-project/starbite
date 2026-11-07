@@ -189,6 +189,7 @@ int bcmw_init(struct bcmw *w, const struct bcmw_os *os, const struct bcmw_cfg *c
         w->cfg.rx_buffers = 64;
     if (w->cfg.rx_buffers > RX_BUFS_MAX)
         w->cfg.rx_buffers = RX_BUFS_MAX;
+    w->console_quota = 48;
     if (!os->rd32 || !os->wr32 || !os->udelay || !os->now_us || !os->dma_alloc || !os->file)
         return BCMW_E_STATE;
     return BCMW_OK;
@@ -454,9 +455,9 @@ static int step_rings(struct bcmw *w)
 
 static int step_up(struct bcmw *w)
 {
-    uint8_t mask[16], p[72];
+    uint8_t mask[16], p[80];
     uint32_t v = 0;
-    int fwerr = 0, e;
+    int fwerr = 0, e, v2;
 
     bcmw_memset(mask, 0, sizeof(mask));
     if (bcmw_iovar_get(w, "event_msgs", mask, sizeof(mask), &fwerr) == BCMW_OK) {
@@ -472,23 +473,33 @@ static int step_up(struct bcmw *w)
     bcmw_sayx(w, "fw: 10: up: ", (uint32_t)e, e == BCMW_OK ? "(fine)" : "(FAILED)");
     if (e != BCMW_OK)
         return e;
-    if (bcmw_iovar_get_u32(w, "scan_ver", &v) == BCMW_OK)
-        bcmw_sayx(w, "fw: 10: scan_ver ", v, "(1: the escan parameters below)");
-    /* escan v1: version 1, action start, sync id; ssid any, bssid broadcast, any BSS type, active,
-     * the firmware's own times, every channel */
+    /* brcmfmac's rule (feature.c, cfg80211.c): the v2 parameters when the firmware answers "scan_ver" at all */
+    v2 = bcmw_iovar_get_u32(w, "scan_ver", &v) == BCMW_OK;
+    bcmw_sayx(w, "fw: 10: scan_ver ", v2 ? v : 0xffffffffu, v2 ? "(the v2 escan parameters)" : "(unsupported: v1 parameters)");
+    /* escan: version, action start, sync id; then ssid any, bssid broadcast, any BSS type, active, the
+     * firmware's own times, every channel */
     bcmw_memset(p, 0, sizeof(p));
-    put32(p, 1);
+    put32(p, v2 ? 2 : 1);
     put16(p + 4, 1);
     put16(p + 6, 0x1234);
-    bcmw_memset(p + 8 + 36, 0xff, 6);
-    p[8 + 42] = 2;
-    p[8 + 43] = 0;
-    put32(p + 8 + 44, 0xffffffffu);
-    put32(p + 8 + 48, 0xffffffffu);
-    put32(p + 8 + 52, 0xffffffffu);
-    put32(p + 8 + 56, 0xffffffffu);
-    put32(p + 8 + 60, 0);
-    e = bcmw_iovar_set(w, "escan", p, sizeof(p), &fwerr);
+    if (v2) {
+        put16(p + 8, 2);                    /* BRCMF_SCAN_PARAMS_VERSION_V2 */
+        put16(p + 10, 72);                  /* BRCMF_SCAN_PARAMS_V2_FIXED_SIZE */
+        bcmw_memset(p + 8 + 40, 0xff, 6);
+        p[8 + 46] = 2;
+        put32(p + 8 + 48, 0);               /* active */
+        for (unsigned i = 0; i < 4; i++)
+            put32(p + 8 + 52 + 4 * i, 0xffffffffu);
+        put32(p + 8 + 68, 0);
+    } else {
+        bcmw_memset(p + 8 + 36, 0xff, 6);
+        p[8 + 42] = 2;
+        p[8 + 43] = 0;
+        for (unsigned i = 0; i < 4; i++)
+            put32(p + 8 + 44 + 4 * i, 0xffffffffu);
+        put32(p + 8 + 60, 0);
+    }
+    e = bcmw_iovar_set(w, "escan", p, v2 ? 80 : 72, &fwerr);
     bcmw_sayx(w, "fw: 10: a scan asked for (escan): ", (uint32_t)e, e == BCMW_OK ? "(the results come as events)" : "(REFUSED)");
     return e;
 }
@@ -543,8 +554,10 @@ int bcmw_bringup(struct bcmw *w, unsigned upto)
             e = BCMW_E_REFUSED;
         if (e < 0) {
             bcmw_sayx(w, "bcmw: STOPPED at step ", s, NULL);
-            if (s >= BCMW_STEP_FIRMWARE)
+            if (s >= BCMW_STEP_FIRMWARE) {
+                w->console_quota += 32;
                 mb_console(w);
+            }
             break;
         }
         w->step = s;

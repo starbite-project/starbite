@@ -412,6 +412,7 @@ static void run_bringup(int dma_idx)
     CHECK(bcmw_size() <= sizeof(mem), "struct bcmw is %u bytes", bcmw_size());
     model_reset();
     M.offer_dma_idx = 1;
+    M.scan_v2 = dma_idx;            /* one run each way: the v1 and the v2 escan parameters */
     M.fw_rstvec = le32(F.fw);
     M.fw_image = F.fw;
     M.fw_image_len = F.fwlen;
