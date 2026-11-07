@@ -1041,29 +1041,52 @@ static void CmdAddKeys(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
     }
     WDI_SET_ADD_CIPHER_KEYS_PARAMETERS p;
     NTSTATUS st = STATUS_SUCCESS;
-    if (ParseWdiSetAddCipherKeysToIhv(in - sizeof(*h), (UINT8 *)(h + 1), &d->tlv, &p) != NDIS_STATUS_SUCCESS) {
+    // the TLVs in the version this driver parses with, else in the other one of the pair (declared 2.0.0 / the OS's
+    // 2.0.3: the key containers changed at 2.0.3; which one WiFiCx uses for a driver declaring 2.0.0 is not
+    // documented)
+    ULONG v0 = d->tlv.PeerVersion, alt = v0 == d->wdi_version ? WifiDeviceGetOsWdiVersion(d->device) : d->wdi_version;
+    NDIS_STATUS ps = ParseWdiSetAddCipherKeysToIhv(in - sizeof(*h), (UINT8 *)(h + 1), &d->tlv, &p);
+    if (ps != NDIS_STATUS_SUCCESS && alt && alt != v0) {
+        d->tlv.PeerVersion = alt;
+        ps = ParseWdiSetAddCipherKeysToIhv(in - sizeof(*h), (UINT8 *)(h + 1), &d->tlv, &p);
+        Sayf("wificx: keys: not parsed as WDI %lx; as %lx: %s", v0, alt, ps == NDIS_STATUS_SUCCESS ? "fine" : "NOT EITHER");
+        d->tlv.PeerVersion = v0;
+    }
+    if (ps != NDIS_STATUS_SUCCESS) {
+        Sayf("wificx: keys: the request could not be parsed (%08x, %u bytes)", ps, in);
         Answer(r, STATUS_INVALID_PARAMETER);
         return;
     }
     for (UINT32 i = 0; i < p.SetCipherKey.ElementCount; i++) {
         WDI_SET_ADD_CIPHER_KEYS_CONTAINER *k = &p.SetCipherKey.pElements[i];
-        const UINT8 *ea = k->Optional.PeerMacAddress_IsPresent && k->CipherKeyTypeInfo.KeyType == WDI_CIPHER_KEY_TYPE_PAIRWISE_KEY
-                              ? k->PeerMacAddress.Address : NULL;
+        UINT32 type = k->CipherKeyTypeInfo.KeyType, algo = k->CipherKeyTypeInfo.CipherAlgorithm;
+        int pairwise = type == WDI_CIPHER_KEY_TYPE_PAIRWISE_KEY;
+        // a station's pairwise key is the AP's: its address when Windows leaves it out
+        const UINT8 *ea = !pairwise ? NULL : k->Optional.PeerMacAddress_IsPresent ? k->PeerMacAddress.Address : d->bssid;
         UINT32 index = k->Optional.CipherKeyID_IsPresent ? k->CipherKeyID.CipherKeyID : 0;
         const UINT8 *rsc = k->Optional.ReceiveSequenceCount_IsPresent ? k->ReceiveSequenceCount.ReceiveSequenceCount : NULL;
+        ULONG klen = k->Optional.CCMPKey_IsPresent ? k->CCMPKey.ElementCount :
+                     k->Optional.TKIPInfo_IsPresent ? k->TKIPInfo.TKIPKey.ElementCount : 0;
         int e = BCMW_E_REFUSED;
+        if (type != WDI_CIPHER_KEY_TYPE_PAIRWISE_KEY && type != WDI_CIPHER_KEY_TYPE_GROUP_KEY) {
+            // IGTK/BIGTK (management frame protection, not negotiated here): accepted, not used
+            Sayf("wificx: keys: type %lu (cipher %lu) accepted, not used", type, algo);
+            continue;
+        }
         if (k->Optional.CCMPKey_IsPresent && k->CCMPKey.ElementCount == 16)
-            e = bcmw_set_key(d->w, ea ? 0 : index, k->CCMPKey.pElements, 16, 4, ea, rsc);
+            e = bcmw_set_key(d->w, pairwise ? 0 : index, k->CCMPKey.pElements, 16, 4, ea, rsc);
         else if (k->Optional.TKIPInfo_IsPresent && k->TKIPInfo.TKIPKey.ElementCount == 16 &&
                  k->TKIPInfo.TKIPMIC.ElementCount == 16) {
             UINT8 t[32];
             RtlCopyMemory(t, k->TKIPInfo.TKIPKey.pElements, 16);
             RtlCopyMemory(t + 16, k->TKIPInfo.TKIPMIC.pElements, 16);
-            e = bcmw_set_key(d->w, ea ? 0 : index, t, 32, 2, ea, rsc);
+            e = bcmw_set_key(d->w, pairwise ? 0 : index, t, 32, 2, ea, rsc);
             RtlSecureZeroMemory(t, sizeof(t));
         }
-        Sayf("wificx: a %s key %s", ea ? "pairwise" : "group", e == BCMW_OK ? "given to the firmware" : "REFUSED");
-        if (ea && e == BCMW_OK)
+        Sayf("wificx: a %s key (cipher %lu, index %lu, %lu bytes, %s, peer %s) %s", pairwise ? "pairwise" : "group", algo,
+             index, klen, rsc ? "with RSC" : "no RSC", !pairwise ? "-" : k->Optional.PeerMacAddress_IsPresent ? "given" :
+             "the AP (implied)", e == BCMW_OK ? "given to the firmware" : "REFUSED");
+        if (pairwise && e == BCMW_OK)
             d->keyed = 1;
         if (e != BCMW_OK)
             st = STATUS_UNSUCCESSFUL;
