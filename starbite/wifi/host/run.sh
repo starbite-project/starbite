@@ -22,7 +22,7 @@ if [ -z "$dir" ]; then
     done
 fi
 flags="-std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined -I$core"
-src="$core/core.c $core/exynos_pcie.c $core/chip.c $core/fw.c $core/ring.c $core/msgbuf.c $core/link.c $core/wpa.c $here/model.c $here/model_ap.c $here/test.c"
+src="$core/core.c $core/exynos_pcie.c $core/chip.c $core/fw.c $core/ring.c $core/msgbuf.c $core/link.c $core/wpa.c $core/net.c $here/model.c $here/model_ap.c $here/test.c"
 extra=""
 if [ -n "${BCMW_LINUX:-}" ] && [ -f "$BCMW_LINUX/firmware.c" ]; then
     # Linux's parser, from firmware.c's start to the end of brcmf_fw_nvram_strip(), on a small shim

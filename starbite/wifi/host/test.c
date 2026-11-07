@@ -19,6 +19,7 @@
 #include <string.h>
 #include <dirent.h>
 #include "../win/dot11.h"
+#include "../net.h"
 #include "../bcmw_priv.h"
 #include "model.h"
 #include "../wpa.h"
@@ -451,10 +452,19 @@ static int os_sup;
 static uint8_t os_eapol[4][400];
 static unsigned os_eapol_len[4], os_eapol_n;
 
+/* sbnet on the core (Starbite OS's and wifitest's way), against the model's open network */
+static struct sbnet tnet;
+static int tnet_on;
+static struct bcmw *tnet_w;
+
 static void os_rx(void *ctx, unsigned ifidx, const uint8_t *frame, uint32_t len)
 {
     (void)ctx;
     (void)ifidx;
+    if (tnet_on) {
+        sbnet_rx(&tnet, frame, len);
+        return;
+    }
     if (os_sup && len >= 14 && frame[12] == 0x88 && frame[13] == 0x8e) {
         if (os_eapol_n < 4 && len <= sizeof(os_eapol[0])) {
             memcpy(os_eapol[os_eapol_n], frame, len);
@@ -580,6 +590,46 @@ static void test_os_supplicant(struct bcmw *w)
     CHECK(seen == 1 && M.rekey_answered == 1 && (M.keys_ok & 4) && M.ap_errors == 0,
           "os supplicant: renewal answered once (%u), installed (%x), AP faults %x", M.rekey_answered, M.keys_ok, M.ap_errors);
     os_sup = 0;
+}
+
+static int tnet_tx(void *ctx, const uint8_t *f, uint32_t len) { (void)ctx; return bcmw_tx(tnet_w, f, len) == BCMW_OK ? 0 : -1; }
+static uint64_t tnet_now(void *ctx) { (void)ctx; return M.now / 1000; }
+static uint32_t tnet_rand(void *ctx) { static uint32_t r = 77; (void)ctx; r = r * 1103515245u + 12345u; return r >> 4; }
+
+/* the core joins the model's open network (bcmw_join, no passphrase) and sbnet gets a lease and pings the router
+ * through the core's tx and os->rx (the model answers DHCP, ARP and pings in open mode) - test T4-open's path */
+static void test_open_sbnet(struct bcmw *w)
+{
+    static const uint8_t router[4] = { 192, 168, 4, 1 }, leased[4] = { 192, 168, 4, 23 };
+    static const struct sbnet_os nos = { 0, tnet_tx, tnet_now, tnet_rand, 0, 0 };
+    int jr;
+    CHECK(bcmw_leave(w) == BCMW_OK, "open: leaving the WPA2 join");
+    model_ap_reset();
+    M.open_ap = 1, M.ap_errors = 0, M.dhcp_offers = M.dhcp_acks = 0;
+    jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "", 0);
+    CHECK(jr == BCMW_OK && bcmw_link_up(w) && M.ap_errors == 0, "open: joined (%d, AP faults %x)", jr, M.ap_errors);
+    tnet_w = w;
+    sbnet_init(&tnet, &nos, bcmw_info(w)->mac);
+    tnet_on = 1;
+    sbnet_start(&tnet);
+    for (int i = 0; i < 300 && tnet.state != SBNET_BOUND; i++) {
+        bcmw_poll(w);
+        sbnet_tick(&tnet);
+        M.now += 10000;
+    }
+    CHECK(tnet.state == SBNET_BOUND && !memcmp(tnet.ip, leased, 4) && !memcmp(tnet.gateway, router, 4) &&
+          M.dhcp_offers == 1 && M.dhcp_acks == 1, "open: sbnet leased through the core (state %d, offers %u, acks %u)",
+          tnet.state, M.dhcp_offers, M.dhcp_acks);
+    CHECK(sbnet_ping(&tnet, router) == 0, "open: a ping to the router");
+    for (int i = 0; i < 100 && tnet.ping_replies == 0; i++) {
+        bcmw_poll(w);
+        sbnet_tick(&tnet);
+        M.now += 10000;
+    }
+    CHECK(tnet.ping_replies == 1, "open: the router answered through the core (%u)", tnet.ping_replies);
+    tnet_on = 0;
+    sbnet_stop(&tnet);
+    M.open_ap = 0;
 }
 
 static void synth_files(void)
@@ -720,8 +770,10 @@ static void run_bringup(int dma_idx)
         CHECK(M.tx_ip == 40 && bcmw_info(w)->tx_done == bcmw_info(w)->tx_frames, "40 frames out (%u), all done (%u/%u)", M.tx_ip,
               bcmw_info(w)->tx_done, bcmw_info(w)->tx_frames);
         CHECK(M.badoption == 0 && M.fw_errors == 0, "after the data: BADOPTION %u, faults %x", M.badoption, M.fw_errors);
-        if (!dma_idx)
+        if (!dma_idx) {
             test_os_supplicant(w);
+            test_open_sbnet(w);
+        }
     }
     /* buffers are reposted: 20 more ioctls without running out */
     for (int i = 0; i < 20; i++) {

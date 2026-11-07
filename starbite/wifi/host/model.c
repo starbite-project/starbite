@@ -612,6 +612,8 @@ static void answer(const uint8_t *req, uint16_t trans, uint32_t cmd, const uint8
                 status = (uint16_t)-1, M.fw_errors |= 1024;
             else
                 scan = (ver == 2 ? data[12] : data[8]) ? 2 : 1;  /* a name in the parameters: a directed scan */
+            if (scan == 1 && M.open_ap && M.up)
+                scan = 2;               /* Starbite OS's preview: its own scans answered with their sync id */
         } else if (!strcmp(name, "mpc")) {
         } else {
             status = (uint16_t)-23;     /* BCME_UNSUPPORTED */
