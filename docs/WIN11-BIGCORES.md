@@ -356,3 +356,33 @@ Samsung's uH).
 `xnu/patches/0304-starlte-m3-cores.patch` (ours) for the PMU sequence and targets; woa's
 `PlatformBootManagerLib.c` (BSD-2-Clause-Patent; read, not copied) for the parking protocol, the
 EL3 context-id finding and the M3 CPU_ON history; the stub is written here from the ARMv8 encodings.
+
+## 6. B3 v3 solo on the phone and v4 (2026-11-07 night, the 8-core session)
+
+**B3 v3 solo (620eace0, user present): the hand-off worked, Windows did not start.** Zone 0: M3 1 parked at dispatch
+(PSCI_VERSION FFFFFFFF, CPU_ON rc=0, 1 ms), the tables at EBS as armed, PSCI_VERSION 10000 (the shim), "now on
+mpidr=80000101 (el 1), MADT committed (UID 5 first); winload continues here". Then nothing: the Windows logo, a hang,
+the loader's watchdog reset ("HANG (WATCHDOG)"). No =UFSWRIT, no =UFSBUGCHECK. In every normal boot the woa wrapper
+logs **=EBSOK** when ExitBootServices returns to winload (combo2's ring: =KEA, then =EBSOK); here it never came. So
+the M3 hung **inside the rest of ExitBootServices**: the event handlers queued after ours and the DXE core's tail
+(timer off, GIC off), all UEFI code, before winload ran a single instruction on the M3.
+
+Suspect: UEFI drives the **physical** generic timer (Star2LtePkg.dsc: ArmGenericTimerPhyCounterLib; TimerDxe on
+PPI 30), and stopping it at ExitBootServices writes CNTP_CTL_EL0 on the current CPU. The M3's EL2 controls
+(CNTHCTL_EL2.EL1PCEN/EL1PCTEN, HCR_EL2) were set by Samsung's EL3 when it powered the core, not by S-Boot as on A55
+core 0; if EL1 physical-timer access traps to an EL2 nobody set up, the core is gone without an EL1 exception.
+Windows itself picks the virtual timer by default (ntoskrnl 0x14021F9F8: type 1 = CNTP, 3 = CNTHP, else CNTV) but
+reads CNTPCT_EL0 in three places (0x14021F8A0, 0x14021FA84, 0x1404BB92C).
+
+**v4** (M3Boot.c):
+- the hand-off happens **after** the real ExitBootServices returned: gBS->ExitBootServices is wrapped at dispatch,
+  so every handler and the DXE core's tail run on the A55, and the M3 only returns into the woa wrapper (=EBSOK
+  must then appear) and winload. After the real call gBS is zeroed: StarbiteLog's mSbAfterEbs makes SbLog write the
+  ring without boot services;
+- solo builds probe M3 core 2 at dispatch (`=M3 tprobe core 2: ... crumb=N`): CNTVCT, CNTKCTL + CNTPCT, CNTP_CTL
+  read, CNTP_CTL write, CNTV_CTL read, CNTV_CTL write, CNTP_CVAL read, a crumb after each (8 = all passed), plus the
+  A55's own CNTVCT/CNTPCT at the same moment (a CNTVOFF difference shows as vct-vs-pct offsets).
+Reading a v4 solo boot: crumb 8 and =EBSOK then a Windows hang = something later (kernel); crumb < 8 = that access
+traps on the M3 (crumb 2: CNTPCT, 3: CNTP_CTL read, 4: CNTP_CTL write), and Windows needs the virtual timer path
+everywhere, or EL2 set up on the M3.
+

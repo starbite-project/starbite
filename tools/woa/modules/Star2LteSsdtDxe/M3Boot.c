@@ -36,6 +36,19 @@
   TTBR0/TCR/SCTLR/MAIR at arming and at ExitBootServices, and the page-table entries of the entry
   code, the context and the stack.
 
+  v4 (after B3 v3 solo on the phone, 2026-11-07: "now on mpidr=80000101 ... winload continues here", then a hang at the
+  Windows logo and a watchdog reset; the woa wrapper's "=EBSOK", which it logs when ExitBootServices returns to
+  winload, never came): the M3 hung inside the rest of ExitBootServices, i.e. in UEFI code (the event handlers after
+  ours, the DXE core's tail: timer and GIC off). UEFI drives the PHYSICAL generic timer (ArmGenericTimerPhyCounterLib)
+  and the M3's EL2 timer controls were set up by EL3, not by S-Boot, so CNTP_* from EL1 may trap there. Two changes:
+    - the hand-off now happens AFTER the real ExitBootServices has returned: gBS->ExitBootServices is wrapped at
+      dispatch, every handler and the DXE core's tail run on the A55, and only the return path (the woa wrapper's
+      "=EBSOK", then winload) runs on the M3. After the real call gBS is gone (edk2 zeroes it): the log writes
+      without boot services (mSbAfterEbs) and nothing here calls one;
+    - solo builds first probe M3 core 2 (idle there) at dispatch: one CPU_ON into a stub that reads/writes
+      CNTVCT, CNTPCT, CNTP_CTL, CNTV_CTL, CNTP_CVAL with a breadcrumb after each ("=M3 tprobe"), then waits in WFE.
+      A crumb short of 8 names the access that trapped (to EL2) on an M3.
+
   Copyright (c) 2026, Starbite. SPDX-License-Identifier: GPL-2.0-only
 **/
 
@@ -300,6 +313,50 @@ __asm__ (
   "M3ParkGoEnd:\n"
   );
 
+//
+// v4 timer probe (solo builds): M3 core 2, MMU off, at dispatch. Page layout: +0x80 crumb, +0x88 CurrentEL,
+// +0x90 CNTVCT, +0x98 CNTPCT, +0xA0 CNTP_CTL, +0xA8 CNTV_CTL, +0xB0 CNTP_CVAL, +0xB8 CNTKCTL. Crumb n is written after
+// step n succeeded; then WFE forever (the page is reserved memory, as B2).
+//
+extern UINT8  M3TProbe[];
+extern UINT8  M3TProbeLit[];
+extern UINT8  M3TProbeEnd[];
+
+__asm__ (
+  "  .text\n"
+  "  .p2align 3\n"
+  "  .globl M3TProbe\n"
+  "M3TProbe:\n"
+  "  adr   x20, M3TProbeLit\n"
+  "  ldr   x19, [x20]\n"
+  "  mrs   x0, CurrentEL\n  str x0, [x19, #0x88]\n"
+  "  mov   x0, #1\n  str x0, [x19, #0x80]\n  dsb sy\n"
+  "  mrs   x0, cntvct_el0\n  str x0, [x19, #0x90]\n"
+  "  mov   x0, #2\n  str x0, [x19, #0x80]\n  dsb sy\n"
+  "  mrs   x0, cntkctl_el1\n  str x0, [x19, #0xb8]\n"
+  "  mrs   x0, cntpct_el0\n  str x0, [x19, #0x98]\n"
+  "  mov   x0, #3\n  str x0, [x19, #0x80]\n  dsb sy\n"
+  "  mrs   x0, cntp_ctl_el0\n  str x0, [x19, #0xa0]\n"
+  "  mov   x0, #4\n  str x0, [x19, #0x80]\n  dsb sy\n"
+  "  msr   cntp_ctl_el0, xzr\n  isb\n"
+  "  mov   x0, #5\n  str x0, [x19, #0x80]\n  dsb sy\n"
+  "  mrs   x0, cntv_ctl_el0\n  str x0, [x19, #0xa8]\n"
+  "  mov   x0, #6\n  str x0, [x19, #0x80]\n  dsb sy\n"
+  "  msr   cntv_ctl_el0, xzr\n  isb\n"
+  "  mov   x0, #7\n  str x0, [x19, #0x80]\n  dsb sy\n"
+  "  mrs   x0, cntp_cval_el0\n  str x0, [x19, #0xb0]\n"
+  "  mov   x0, #8\n  str x0, [x19, #0x80]\n  dsb sy\n"
+  "1:\n"
+  "  wfe\n"
+  "  b     1b\n"
+  "  .p2align 3\n"
+  "  .globl M3TProbeLit\n"
+  "M3TProbeLit:\n"
+  "  .quad 0\n"
+  "  .globl M3TProbeEnd\n"
+  "M3TProbeEnd:\n"
+  );
+
 STATIC
 UINT64
 PsciVersion (
@@ -344,7 +401,7 @@ CpuOn (
 STATIC EFI_PHYSICAL_ADDRESS  mParkPage;
 STATIC M3_BOOT_CTX           *mCtx;
 STATIC UINT64                mArmTtbr0, mArmTcr, mArmSctlr, mArmMair;
-STATIC EFI_EVENT             mEbsEvent;
+STATIC EFI_EXIT_BOOT_SERVICES  mOrigEbs;
 STATIC BOOLEAN               mFired;
 STATIC UINT8                 *mMadt;
 STATIC UINT32                mMadtLen;
@@ -728,10 +785,8 @@ CleanToPoc (
 
 STATIC
 VOID
-EFIAPI
-OnExitBootServices (
-  IN EFI_EVENT  Event,
-  IN VOID       *Context
+M3BootAfterEbs (
+  VOID
   )
 {
   UINT64           Ret;
@@ -778,7 +833,7 @@ OnExitBootServices (
     return;
   }
 
-  SbLog ("=M3 boot v3: handing the boot CPU to the parked M3 core 1 at ExitBootServices (Go, no SMC)");
+  SbLog ("=M3 boot v4: handing the boot CPU to the parked M3 core 1 after ExitBootServices (Go, no SMC)");
   ZeroMem (mCtx, sizeof (*mCtx));
   mCtx->Timeout = TIMEOUT_TICKS;
   gM3BootCtx    = (UINT64)(UINTN)mCtx;
@@ -832,6 +887,99 @@ OnExitBootServices (
     mCtx->DElr,
     mCtx->DFar
     );
+}
+
+//
+// v4, solo builds: the timer probe on M3 core 2 (see M3TProbe). Never hangs the A55: one CPU_ON, then 200 ms of
+// polling; the core stays wherever it stopped (reserved page, or an EL2 trap with nobody to answer).
+//
+STATIC
+VOID
+M3TimerProbe (
+  VOID
+  )
+{
+  volatile UINT32       *Pmu = (volatile UINT32 *)0x14060000UL;
+  EFI_PHYSICAL_ADDRESS  Page;
+  volatile UINT64       *P;
+  UINT64                *Lit;
+  UINT64                Rc;
+  UINT64                Vct;
+  UINT64                Pct;
+  UINTN                 i;
+  UINTN                 Ms;
+
+  Page = 0xFFFFFFFFu;
+  if (EFI_ERROR (gBS->AllocatePages (AllocateMaxAddress, EfiReservedMemoryType, 1, &Page))) {
+    SbLog ("=M3 tprobe: no page");
+    return;
+  }
+
+  ZeroMem ((VOID *)(UINTN)Page, EFI_PAGE_SIZE);
+  CopyMem ((VOID *)(UINTN)(Page + 0x800), M3TProbe, (UINTN)(M3TProbeEnd - M3TProbe));
+  Lit    = (UINT64 *)(UINTN)(Page + 0x800 + (UINTN)(M3TProbeLit - M3TProbe));
+  Lit[0] = Page;
+  CleanToPoc ((UINTN)Page, (UINTN)Page + EFI_PAGE_SIZE);
+  __asm__ __volatile__ ("ic iallu\n dsb sy\n isb" ::: "memory");
+  for (i = 0; i < ARRAY_SIZE (mBootPmu); i++) {
+    Pmu[mBootPmu[i].Offset / 4] = (Pmu[mBootPmu[i].Offset / 4] & ~mBootPmu[i].Mask) | mBootPmu[i].Value;
+    __asm__ __volatile__ ("dsb sy" ::: "memory");
+  }
+
+  P  = (volatile UINT64 *)(UINTN)Page;
+  Rc = CpuOn (0x102, Page + 0x800);
+  for (Ms = 0; Ms < 200; Ms++) {
+    CleanToPoc ((UINTN)Page + 0x80, (UINTN)Page + 0xC0);
+    if (P[0x80 / 8] == 8) {
+      break;
+    }
+
+    MicroSecondDelay (1000);
+  }
+
+  __asm__ __volatile__ ("isb\n mrs %0, cntvct_el0" : "=r" (Vct));
+  __asm__ __volatile__ ("isb\n mrs %0, cntpct_el0" : "=r" (Pct));
+  SbLog (
+    "=M3 tprobe core 2: CPU_ON rc=%lx crumb=%ld (8 = all) el=%lx vct=%lx pct=%lx p_ctl=%lx v_ctl=%lx p_cval=%lx kctl=%lx; A55 now vct=%lx pct=%lx",
+    Rc,
+    P[0x80 / 8],
+    P[0x88 / 8] >> 2,
+    P[0x90 / 8],
+    P[0x98 / 8],
+    P[0xA0 / 8],
+    P[0xA8 / 8],
+    P[0xB0 / 8],
+    P[0xB8 / 8],
+    Vct,
+    Pct
+    );
+  MicroSecondDelay (50000);
+}
+
+//
+// v4: gBS->ExitBootServices while armed. The real call first (all of UEFI's teardown on the A55); on success the
+// hand-off, so the M3 returns from here into the caller (the woa wrapper, then winload). Failures (a stale map
+// key: winload just retries) pass through untouched.
+//
+STATIC
+EFI_STATUS
+EFIAPI
+M3BootEbsWrap (
+  IN EFI_HANDLE  ImageHandle,
+  IN UINTN       MapKey
+  )
+{
+  EFI_STATUS  Status;
+
+  Status = mOrigEbs (ImageHandle, MapKey);
+  if (EFI_ERROR (Status) || mFired) {
+    return Status;
+  }
+
+  mSbAfterEbs = TRUE;                   // gBS is zeroed now: the log must not use it
+  SbLog ("=M3 boot v4: ExitBootServices returned %r on the A55; hand-off now", Status);
+  M3BootAfterEbs ();
+  return Status;
 }
 
 VOID
@@ -895,6 +1043,10 @@ M3BootArm (
     SbLog ("=M3 pmu %04x %08x -> %08x%a", mBootPmu[i].Offset, Before, After, ((After & mBootPmu[i].Mask) == mBootPmu[i].Value) ? "" : " NOT SET");
   }
 
+  if (BOOT_SOLO) {
+    M3TimerProbe ();                    // v4: M3 core 2, before M3 core 1 parks
+  }
+
   Rc = CpuOn (BOOT_TARGET, mParkPage + 0x800);
   for (Ms = 0; Ms < 200; Ms++) {
     CleanToPoc ((UINTN)mParkPage + 0x80, (UINTN)mParkPage + 0x90);
@@ -924,14 +1076,18 @@ M3BootArm (
   __asm__ __volatile__ ("mrs %0, sctlr_el1" : "=r" (mArmSctlr));
   __asm__ __volatile__ ("mrs %0, mair_el1" : "=r" (mArmMair));
 
-  Status = gBS->CreateEvent (EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY, OnExitBootServices, NULL, &mEbsEvent);
+  mOrigEbs                = gBS->ExitBootServices;
+  gBS->ExitBootServices   = M3BootEbsWrap;
+  gBS->Hdr.CRC32          = 0;
+  Status                  = gBS->CalculateCrc32 ((UINT8 *)gBS, gBS->Hdr.HeaderSize, &gBS->Hdr.CRC32);
   SbLog (
-    "=M3 boot v3 armed (%a): entry %lx (vectors %lx..%lx in this image), context %lx, ExitBootServices event %r",
+    "=M3 boot v4 armed (%a): entry %lx (vectors %lx..%lx in this image), context %lx, ExitBootServices wrapped (orig %lx, crc %r)",
     BOOT_SOLO ? "solo: M3 1 only" : (BOOT_BIG ? "big: M3 1 + parked M3s, no A55" : "M3 1 + A55 1..3"),
     (UINT64)(UINTN)M3BootEntry,
     (UINT64)(UINTN)M3BootVectors,
     (UINT64)(UINTN)M3BootEnd,
     (UINT64)(UINTN)mCtx,
+    (UINT64)(UINTN)mOrigEbs,
     Status
     );
 }

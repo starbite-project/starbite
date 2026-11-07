@@ -42,8 +42,6 @@
 #include <Library/TimerLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 
-#include "StarbiteLog.h"
-
 #ifndef STARBITE_CORES8
 #define STARBITE_CORES8 0
 #endif
@@ -59,6 +57,7 @@
 #define C8_BIG  (STARBITE_M3_BOOT == 3)
 
 #if STARBITE_CORES8
+#include "StarbiteLog.h"
 #include "Cores8ParkStub.h"
 
 #define C8_PMU_BASE     0x14060000UL

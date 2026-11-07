@@ -81,6 +81,12 @@ SbRingWrite (
   __asm__ __volatile__ ("dsb sy" ::: "memory");
 }
 
+//
+// Set by a module once ExitBootServices has returned (edk2 zeroes the boot-services table then): from that
+// point SbEvlogWrite uses no boot service and only appends while the ring has room (no "full" marker).
+//
+STATIC BOOLEAN  mSbAfterEbs;
+
 STATIC
 VOID
 SbEvlogWrite (
@@ -94,6 +100,23 @@ SbEvlogWrite (
   VOID             *Flag;
   UINTN            Index;
   UINT32           Pos;
+
+  if (mSbAfterEbs) {
+    if ((W[0] != SB_DBGC) || (W[2] > SB_EVLOG_CAP) || (W[1] != W[2]) ||
+        (W[2] + NumberOfBytes + sizeof (SB_EVLOG_FULL) - 1 > SB_EVLOG_CAP))
+    {
+      return;
+    }
+
+    for (Index = 0; Index < NumberOfBytes; Index++) {
+      B[W[2] + Index] = (UINT8)Buffer[Index];
+    }
+
+    W[2] = W[2] + (UINT32)NumberOfBytes;
+    W[1] = W[2];
+    __asm__ __volatile__ ("dsb sy" ::: "memory");
+    return;
+  }
 
   if (EFI_ERROR (gBS->LocateProtocol (&mSbEvlogBootGuid, NULL, &Flag)) ||
       (W[0] != SB_DBGC) || (W[2] > SB_EVLOG_CAP) || (W[1] != W[2]))
