@@ -428,3 +428,20 @@ INSIDE woa's.
 into winload. The wrapper logs its caller (`=M3 boot v6: ExitBootServices wrapper called from ...`: winload's
 address expected, 0x90F4xxxx). Watch line as in v5. Image starbite-uefi-solo6-gpu.bin 0be43045….
 
+**Correction (independent review relayed by the main session, checked here): =EBSOK was printed; the pmsg copies
+hid it.** SbRingWrite advances the header's start (W[1]) and size (W[2]); the woa BDS print advances only W[2]; the
+loader appends at W[1] after the reset. So everything BDS wrote after our last line (two `locp` trace lines and
+"\n=EBSOK ra=<16 hex>") was overwritten by the loader's own lines, and ramoops shows the region [W[1], W[2]) as a
+stale prefix at the top of the file: b3solo 91 bytes (2 trace lines + 27), solo4 27, solo5 27, exactly
+`\n=EBSOK ra=` + 16 digits. The solo5 watcher read W[2] without invalidating the A55's copy, so its frozen value
+proves nothing. **So the M3 got back into winload in v3..v5; it hangs later, in winload or the early kernel.**
+Suspects: (a) the A55's CPU_OFF through the shim to Samsung's EL3 (woa's PlatformBootManagerLib notes EL3 hanging the
+platform after a CPU_OFF from a core it started; a WFI park was stable); (b) Windows' early PSCI calls from the M3,
+which go straight to EL3 (no shim there).
+
+**v7** (solo7, on top of v6): the A55 never calls CPU_OFF: after its 15 s watch it parks in a WFI loop in its reserved
+page with the MMU and caches off. The M3 calls PSCI_VERSION once after "=M3 state" (`=M3 psci: ...` before and after:
+a missing second line = EL3 doesn't answer the M3). The watcher invalidates the pmsg header before reading it.
+WriteBackDataCache (ASSERT(FALSE)/no-op in edk2 on ARM) is gone. Image starbite-uefi-solo7-gpu.bin 95402dec….
+The loader's pmsg append fix (append at W[2] while unwrapped) is the main session's.
+
