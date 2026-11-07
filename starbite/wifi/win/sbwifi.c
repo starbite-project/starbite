@@ -6,7 +6,7 @@
 // Installed as a plain service (no INF, no device), like tools/win's hello-kmdf, because Windows has no device
 // for this radio until our UEFI's DSDT gets one (\_SB.WLAN, "STBW4361"). The hardware is reached by physical
 // address (MmMapIoSpaceEx); only the core's allow-list is ever written (bcmw_write_allowed, checked again here).
-// The firmware, NVRAM and CLM blob are read from C:\Windows\System32\drivers\StarbiteWifi\, where they were
+// The firmware, NVRAM and CLM blob are read from C:\Windows\System32\drivers\starbite\bcm4361\, where they were
 // copied from the phone's own VENDOR (they never leave the phone and are not part of this driver).
 //
 // Dead-man (as hello-kmdf): when Parameters\OneShot is 1 (the default), DriverEntry first sets the service's
@@ -182,7 +182,7 @@ static int File(void *ctx, const char *name, const uint8_t **data, uint32_t *len
             return 0;
         }
     if (nfiles == RTL_NUMBER_OF(files) ||
-        !NT_SUCCESS(RtlStringCbPrintfW(path, sizeof(path), L"\\SystemRoot\\System32\\drivers\\StarbiteWifi\\%S", name)))
+        !NT_SUCCESS(RtlStringCbPrintfW(path, sizeof(path), L"\\SystemRoot\\System32\\drivers\\starbite\\bcm4361\\%S", name)))
         return -1;
     RtlInitUnicodeString(&u, path);
     InitializeObjectAttributes(&oa, &u, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
@@ -215,6 +215,20 @@ static int Random(void *ctx, uint8_t *out, uint32_t n)
 {
     UNREFERENCED_PARAMETER(ctx);
     return NT_SUCCESS(BCryptGenRandom(NULL, out, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG)) ? 0 : -1;
+}
+
+static ULONG events, scan_aps, scan_done;
+
+static void Event(void *ctx, const struct bcmw_event *ev)
+{
+    UNREFERENCED_PARAMETER(ctx);
+    events++;
+    if (ev->type == BCMW_E_ESCAN_RESULT) {
+        if (ev->status == 8 && ev->datalen >= 12)
+            scan_aps += ev->data[10] | ev->data[11] << 8;   /* bss_count; names are not logged */
+        else
+            scan_done = 1;
+    }
 }
 
 static void Log(void *ctx, const char *line)
@@ -260,12 +274,12 @@ static void Run(PVOID arg)
     struct bcmw *w = (struct bcmw *)mem;
     struct bcmw_os os;
     struct bcmw_cfg cfg;
-    ULONG step = RegDword(L"Step", 0);
+    ULONG step = RegDword(L"Step", BCMW_STEP_UP);  /* default: up to a scan (the service is one-shot) */
     char line[160];
     int r;
     UNREFERENCED_PARAMETER(arg);
 
-    RtlStringCbPrintfA(line, sizeof(line), "SbWifi build %s: Step %lu (0: nothing is touched)", SB_BUILD_ID, step);
+    RtlStringCbPrintfA(line, sizeof(line), "SbWifi build %s: Step %lu (Parameters\\Step; 0: nothing is touched)", SB_BUILD_ID, step);
     Say(line);
     if (step == 0 || step > BCMW_STEP_ALL || bcmw_size() > sizeof(mem)) {
         PsTerminateSystemThread(STATUS_SUCCESS);
@@ -273,7 +287,7 @@ static void Run(PVOID arg)
     }
     RtlZeroMemory(&os, sizeof(os));
     os.rd32 = Rd32, os.wr32 = Wr32, os.rd16 = Rd16, os.wr16 = Wr16, os.wmb = Wmb, os.mb = Wmb, os.rmb = Wmb;
-    os.udelay = Delay, os.now_us = Now, os.dma_alloc = DmaAlloc, os.file = File, os.log = Log, os.random = Random;
+    os.udelay = Delay, os.now_us = Now, os.dma_alloc = DmaAlloc, os.file = File, os.log = Log, os.random = Random, os.event = Event;
     RtlZeroMemory(&cfg, sizeof(cfg));
     cfg.stop_after = step;
     cfg.link_speed = RegDword(L"Gen", 2);
@@ -286,6 +300,9 @@ static void Run(PVOID arg)
                 Delay(NULL, 5000);
             }
         }
+        RtlStringCbPrintfA(line, sizeof(line), "SbWifi: %lu events; the scan heard %lu access points (%s)", events, scan_aps,
+                           scan_done ? "complete" : "NOT complete");
+        Say(line);
         RtlStringCbPrintfA(line, sizeof(line), "SbWifi: END: reached step %u (%d)", bcmw_step(w), r);
         bcmw_quiesce(w);
         Say(line);
