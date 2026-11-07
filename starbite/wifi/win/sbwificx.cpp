@@ -107,6 +107,7 @@ struct BSS {
     UINT16 capability, beacon_period;
     UINT32 channel, band5, ie_len;
     INT32 rssi;
+    UINT64 seen;                    // KeQuerySystemTime when last heard (the BSS entry's age info)
     UINT8 ie[BSS_IE_MAX];
 };
 
@@ -145,6 +146,8 @@ struct DEVCTX {
     UINT32 scan_txn;
     UINT16 scan_port;
     UINT64 scan_started;
+    ULONG scans;                    // scan tasks so far (each is logged: W2 showed 0 networks in Windows)
+    ULONG bss_frame;                // Parameters\BssFrame: 0 the frame body (from the timestamp), 1 with a MAC header
     // connection
     int connecting, connected;
     UINT32 connect_txn;
@@ -360,17 +363,29 @@ static void ScanDone(DEVCTX *d, NDIS_STATUS status)
             for (ULONG i = 0; i < n; i++) {
                 BSS *b = &d->bss[i];
                 RtlCopyMemory(e[i].BSSID.Address, b->bssid, 6);
-                // the beacon's body: timestamp (8), beacon interval (2), capability (2), then the elements
-                UINT8 *body = (UINT8 *)ExAllocatePool2(POOL_FLAG_NON_PAGED, 12 + b->ie_len, TAG);
-                if (body) {
-                    RtlZeroMemory(body, 12);
+                // the frame's body: timestamp (8), beacon interval (2), capability (2), then the elements;
+                // BssFrame 1 puts a probe response's MAC header in front (WDI does not say which it wants)
+                ULONG hdr = d->bss_frame == 1 ? 24 : 0;
+                UINT8 *f = (UINT8 *)ExAllocatePool2(POOL_FLAG_NON_PAGED, hdr + 12 + b->ie_len, TAG);
+                if (f) {
+                    UINT8 *body = f + hdr;
+                    RtlZeroMemory(f, hdr + 12);
+                    if (hdr) {
+                        f[0] = 0x50;                            // management, probe response
+                        RtlFillMemory(f + 4, 6, 0xff);          // to: broadcast
+                        RtlCopyMemory(f + 10, b->bssid, 6);     // from and BSSID: the access point
+                        RtlCopyMemory(f + 16, b->bssid, 6);
+                    }
                     body[8] = (UINT8)b->beacon_period, body[9] = (UINT8)(b->beacon_period >> 8);
                     body[10] = (UINT8)b->capability, body[11] = (UINT8)(b->capability >> 8);
                     RtlCopyMemory(body + 12, b->ie, b->ie_len);
                     e[i].Optional.ProbeResponseFrame_IsPresent = 1;
-                    e[i].ProbeResponseFrame.SimpleSet(body, 12 + b->ie_len, 0);
-                    ExFreePoolWithTag(body, TAG);
+                    e[i].ProbeResponseFrame.SimpleSet(f, hdr + 12 + b->ie_len, 0);
+                    ExFreePoolWithTag(f, TAG);
                 }
+                e[i].Optional.EntryAgeInfo_IsPresent = 1;
+                e[i].EntryAgeInfo.HostTimeStamp = b->seen;
+                e[i].EntryAgeInfo.CachedInformation = FALSE;  // heard in this scan
                 e[i].SignalInfo.RSSI = b->rssi;
                 e[i].SignalInfo.LinkQuality = b->rssi >= -50 ? 100 : b->rssi <= -100 ? 0 : (UINT32)(2 * (b->rssi + 100));
                 e[i].ChannelInfo.ChannelNumber = b->channel;
@@ -378,16 +393,22 @@ static void ScanDone(DEVCTX *d, NDIS_STATUS status)
             }
             list.Optional.DeviceDescriptor_IsPresent = 1;
             list.DeviceDescriptor.SimpleAssign(e, n);
-            if (GenerateWdiIndicationBssEntryListFromIhv(&list, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen) ==
-                NDIS_STATUS_SUCCESS)
-                Indicate(d, WDI_INDICATION_BSS_ENTRY_LIST, d->scan_port, d->scan_txn, NDIS_STATUS_SUCCESS, gen, len);
-            else
-                Say("wificx: the BSS list could not be generated");
+            // an unsolicited indication (transaction id 0), as WDI defines it; W2 sent the scan's id: 0 networks
+            NDIS_STATUS gs = GenerateWdiIndicationBssEntryListFromIhv(&list, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen);
+            if (gs == NDIS_STATUS_SUCCESS) {
+                Sayf("wificx: BSS list: %lu entries, %lu bytes, unsolicited (frame %s); the first: channel %lu %s GHz, "
+                     "%ld dBm, %lu bytes of elements", n, len, d->bss_frame == 1 ? "with MAC header" : "body",
+                     d->bss[0].channel, d->bss[0].band5 ? "5" : "2.4", (long)d->bss[0].rssi, d->bss[0].ie_len);
+                Indicate(d, WDI_INDICATION_BSS_ENTRY_LIST, d->scan_port, WDI_TRANSACTION_ID_UNSOLICIT,
+                         NDIS_STATUS_SUCCESS, gen, len);
+            } else {
+                Sayf("wificx: the BSS list could not be generated (%08x)", gs);
+            }
             list.DeviceDescriptor.SimpleAssign(NULL, 0);
             delete[] e;
         }
     }
-    Sayf("wificx: scan complete: %lu access points", n);
+    Sayf("wificx: scan %lu complete: %lu access points, status %08x", d->scans, n, status);
     Indicate(d, WDI_INDICATION_SCAN_COMPLETE, d->scan_port, d->scan_txn, status, NULL, 0);
     d->scanning = 0;
 }
@@ -406,6 +427,8 @@ static void CmdScan(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
     }
     d->scan_txn = h->TransactionId;
     d->scan_port = h->PortId;
+    d->scans++;
+    Sayf("wificx: scan %lu asked (transaction %lu, %s)", d->scans, h->TransactionId, ssid ? "one name" : "all networks");
     d->nbss = 0;
     d->scanning = 1;                // before the start: its ioctl wait already delivers results
     d->scan_started = Now(NULL);
@@ -620,6 +643,28 @@ static void CmdAddKeys(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
 
 // ---- the commands ------------------------------------------------------------------------------------------------------
 
+// WDI_ABORT_TASK: a signal, answered with success at once; the task it names is completed as soon as possible (W2
+// answered NOT_SUPPORTED to the abort of the first scan, 30 ms after it began)
+static void CmdAbort(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
+{
+    WDI_TASK_ABORT_PARAMETERS p;
+    int parsed = ParseWdiAbortTaskToIhv(in - sizeof(*h), (UINT8 *)(h + 1), &d->tlv, &p) == NDIS_STATUS_SUCCESS;
+    UINT32 txn = parsed ? p.CancelParameters.OriginalTransactionId : 0;
+    ULONG oid = parsed ? (ULONG)p.CancelParameters.OriginalTaskOID : 0;
+    if (parsed)
+        CleanupParsedWdiAbortTaskToIhv(&p);
+    Answer(r, STATUS_SUCCESS);
+    Sayf("wificx: abort of task %08lx transaction %lu (%s)", oid, txn,
+         !parsed ? "not parsed" : d->scanning && txn == d->scan_txn ? "the scan: completed now" :
+         d->connecting && txn == d->connect_txn ? "the connect: failed now" : "nothing running with that id");
+    if (!parsed)
+        return;
+    if (d->scanning && txn == d->scan_txn)
+        ScanDone(d, NDIS_STATUS_REQUEST_ABORTED);
+    else if (d->connecting && txn == d->connect_txn)
+        ConnectDone(d, 0, 1);
+}
+
 static void Command(DEVCTX *d, WIFIREQUEST r)
 {
     UINT in = 0, out = 0;
@@ -663,6 +708,9 @@ static void Command(DEVCTX *d, WIFIREQUEST r)
     case WDI_SET_ADD_CIPHER_KEYS:
         CmdAddKeys(d, r, h, in);
         break;
+    case WDI_ABORT_TASK:
+        CmdAbort(d, r, h, in);
+        break;
     case WDI_SET_DELETE_CIPHER_KEYS:
     case WDI_SET_ADAPTER_CONFIGURATION:
     case WDI_SET_RECEIVE_PACKET_FILTER:
@@ -701,6 +749,11 @@ static void OsEvent(void *ctx, const struct bcmw_event *ev)
                 e->channel = b.channel;
                 e->band5 = b.band5;
                 e->rssi = b.rssi;
+                {
+                    LARGE_INTEGER t;
+                    KeQuerySystemTime(&t);
+                    e->seen = (UINT64)t.QuadPart;
+                }
                 e->ie_len = b.ie_len < BSS_IE_MAX ? b.ie_len : BSS_IE_MAX;
                 RtlCopyMemory(e->ie, b.ie, e->ie_len);
             }
@@ -1225,6 +1278,7 @@ static NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST)
     cfg.link_tries = 3;
     cfg.rx_buffers = 128;
     cfg.diag = 1;                   // step 8 checked word by word until W2 has passed once
+    d->bss_frame = Param(L"BssFrame", 0);
     if (bcmw_init(d->w, &os, &cfg) != BCMW_OK) {
         SetParam(L"GuardBoots", guard);
         return STATUS_DEVICE_CONFIGURATION_ERROR;

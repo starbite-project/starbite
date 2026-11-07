@@ -106,6 +106,17 @@ static void test_files(void)
     int n = fw_nvram((const uint8_t *)syn, sizeof(syn) - 1, out, sizeof(out), 0);
     CHECK(n > 0, "synthetic NVRAM");
     CHECK(fw_nvram_get(out, (uint32_t)n, "sromrev") && !strcmp(fw_nvram_get(out, (uint32_t)n, "sromrev"), "11"), "sromrev");
+    {   /* the control channel from d11ac chanspecs (W2: an 80 MHz BSS was said to be on its center channel) */
+        static const struct { uint16_t cs; unsigned ch; } t[] = {
+            { 0x1001, 1 }, { 0x100b, 11 }, { 0xd024, 36 }, { 0xd095, 149 },     /* 20 MHz */
+            { 0xd826, 36 }, { 0xd926, 40 }, { 0x1803, 1 }, { 0x1903, 5 },       /* 40 MHz, 5 and 2.4 GHz */
+            { 0xe02a, 36 }, { 0xe12a, 40 }, { 0xe22a, 44 }, { 0xe32a, 48 },     /* 80 MHz, center 42 */
+            { 0xe09b, 149 }, { 0xe39b, 161 }, { 0xe832, 36 }, { 0xef32, 64 },   /* 80 MHz center 155; 160 MHz center 50 */
+        };
+        for (unsigned i = 0; i < sizeof(t) / sizeof(t[0]); i++)
+            CHECK(bcmw_chanspec_channel(t[i].cs) == t[i].ch, "chanspec %04x: channel %u, not %u", t[i].cs,
+                  bcmw_chanspec_channel(t[i].cs), t[i].ch);
+    }
     CHECK(!fw_nvram_get(out, (uint32_t)n, "RAW1"), "RAW1 kept");
     CHECK(fw_nvram_get(out, (uint32_t)n, "ccode") && !strcmp(fw_nvram_get(out, (uint32_t)n, "ccode"), "0 "), "ccode value");
     CHECK(fw_nvram_get(out, (uint32_t)n, "last") != 0, "a last entry without a newline is kept");

@@ -636,6 +636,23 @@ int bcmw_leave(struct bcmw *w)
 
 /* ---- the pieces, for an OS with its own supplicant (bcmw.h) --------------------------------------------- */
 
+/* d11ac chanspec -> the control (primary 20 MHz) channel. The low byte is the CENTER channel of a 40/80/160 MHz
+ * BSS (W2: 5 GHz access points were reported on channel 42 instead of 36); bits 10:8 say which 20 MHz part is the
+ * control one, counted up from the lowest. 80+80 keeps the low byte (rare; its encoding differs). */
+unsigned bcmw_chanspec_channel(uint16_t cs)
+{
+    unsigned c = cs & 0xff, sb = (cs >> 8) & 7, half;
+    switch (cs & 0x3800) {
+    case 0x1800: half = 2; break;       /* 40 MHz */
+    case 0x2000: half = 6; break;       /* 80 MHz */
+    case 0x2800: half = 14; break;      /* 160 MHz */
+    default: return c;                  /* 20 MHz (0x1000), 80+80, or unknown */
+    }
+    if (c < half || 4 * sb > 2 * half)
+        return c;
+    return c - half + 4 * sb;
+}
+
 int bcmw_bss_parse(const struct bcmw_event *ev, struct bcmw_bss *b, uint16_t *sync)
 {
     const uint8_t *d = ev->data;
@@ -662,7 +679,7 @@ int bcmw_bss_parse(const struct bcmw_event *ev, struct bcmw_bss *b, uint16_t *sy
     b->ssid_len = d[18];
     bcmw_memcpy(b->ssid, d + 19, b->ssid_len);
     b->chanspec = le16(d + 72);
-    b->channel = b->chanspec & 0xff;
+    b->channel = bcmw_chanspec_channel(b->chanspec);
     b->band5 = (b->chanspec & 0xc000) == 0xc000;   /* d11ac chanspec: band bits 15:14, 5 GHz = 3 */
     b->rssi = (int16_t)le16(d + 78);
     b->ie = d + ie_off;

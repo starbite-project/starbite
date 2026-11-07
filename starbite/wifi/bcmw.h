@@ -189,6 +189,8 @@ struct bcmw_bss {                   /* one access point from an escan result eve
     const uint8_t *ie;              /* its information elements (inside the event: copy them) */
     uint32_t ie_len;
 };
+/* the control (primary 20 MHz) channel of a d11ac chanspec (its low byte is the center for 40 MHz and wider) */
+unsigned bcmw_chanspec_channel(uint16_t chanspec);
 /* 1 if ev is an escan result carrying a BSS (status 8), into *b; *sync = the scan's sync id */
 int bcmw_bss_parse(const struct bcmw_event *ev, struct bcmw_bss *b, uint16_t *sync);
 /* 1 if ev ends the escan with this sync id (status other than 8) */
