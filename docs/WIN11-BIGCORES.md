@@ -475,3 +475,14 @@ commit point on the M3 (`=M3 fadt: ARM_BOOT_ARCH 1 -> 0`): secondaries by the AC
 Windows already uses for the A55s and Cores8's M3s), restart by UEFI ResetSystem. The refused C2000400 attempt is
 gone; the PSCI_VERSION probe line stays. Image starbite-uefi-solo9-gpu.bin 90f6c304….
 
+**v10** (solo10, `M3PSCIEMU=1`, the fallback if v9 still hangs): Windows on the M3 keeps PSCI, answered like the
+woa shim answers it. Before the real ExitBootServices the A55 finds ntoskrnl (a PE in EfiLoaderCode/LoaderData whose
+export directory names "ntoskrnl.exe"; the memory map into a static buffer so winload's map key stays valid), finds
+its one generic SMC wrapper (SUB SP,#0x10; STR X7; SMC #0; LDR X7; STR X0,[X7]; RVA 0x2000A0 in 22621.7582, unique),
+copies M3PsciEmu.S (140 bytes: PSCI_VERSION -> 0x10000, PSCI_FEATURES -> 0 for the seven functions the shim lists,
+-1 otherwise, everything else to EL3) into the zero slack after .text's VirtualSize (RVA 0x5D7D10, .text's last
+page: non-paged, executable), and replaces the SMC with a branch there; the emulator's last instruction branches
+back after the SMC. Checked on the pulled ntoskrnl mapped by RVA: SMC +0x2000A8 -> B 0x5D7D10, exit B 0x2000AC.
+The FADT stays PSCI-compliant in v10. Log `=M3 psciemu: ntoskrnl ... SMC wrapper +2000A8 -> emulator +5D7D10`.
+Image starbite-uefi-solo10-gpu.bin 1d195086…. big3/big4 rebuilt on v9: b47427bb… / bc8a9afa….
+

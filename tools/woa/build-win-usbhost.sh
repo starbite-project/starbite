@@ -43,6 +43,7 @@ M3BOOT=${M3BOOT:-0}                               # 1: M3 core 1 becomes the boo
                                                   #    with A55 1..3); 2: the same, M3 1 alone ("solo");
                                                   #    3: "big", with CORES8: M3 1 boots, the parked M3s are its
                                                   #    secondaries, no A55 (CORES8=1: 3 M3s, =2: all 4)
+M3PSCIEMU=${M3PSCIEMU:-0}                         # 1: with M3BOOT: PSCI 1.0 answers patched into ntoskrnl (v10) instead of the FADT change
 CORES8=${CORES8:-0}                               # 1: M3 cores 1..3 parked for Windows + MADT/_MAT at EBS (7 CPUs);
                                                   #    2: also M3 core 0 (8 CPUs); docs/WIN11-24H2-A55.md
 PPTT_OEM=${PPTT_OEM:-0}                           # 1: the platform ACPI file with the OEM-shaped PPTT (tools/woa/pptt-gen.py)
@@ -114,7 +115,7 @@ image() {   # image NAME ROLE ACPI VBUS BLOB
     tools/woa/build-uefi.sh "$UEFI_TARGET" -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_USB_DXE=TRUE -D STAR2LTE_SSDT_DXE=TRUE \
         -D STARBITE_USB_ROLE=$role -D STARBITE_USB_ACPI=$acpi -D STARBITE_USB_VBUS=$vbus -D STARBITE_PPTT_FIX=$PPTT \
         -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK -D STARBITE_M3_RUN=$M3RUN -D STARBITE_M3_BOOT=$M3BOOT \
-        -D STARBITE_CORES8=$CORES8 | tail -1
+        -D STARBITE_CORES8=$CORES8 -D STARBITE_M3_PSCIEMU=$M3PSCIEMU | tail -1
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$USBDXE" "$out/$name-usb.ffs"
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$SSDTDXE" "$out/$name-ssdt.ffs"
     grep -aq "usb-policy role=$role acpi=$acpi vbus=$vbus" "$out/$name-usb.ffs" ||
@@ -153,7 +154,7 @@ flags_ok() {   # flags_ok FFS
     [ "$has" = "$M3PARK" ] || { echo "$1: M3 park present=$has, wanted $M3PARK" >&2; exit 1; }
     if grep -aq "=M3 run v2" "$1"; then has=1; else has=0; fi
     [ "$has" = "$M3RUN" ] || { echo "$1: M3 run present=$has, wanted $M3RUN" >&2; exit 1; }
-    if grep -aq "=M3 boot v9 armed" "$1"; then has=1; else has=0; fi
+    if grep -aq "=M3 boot v10 armed" "$1"; then has=1; else has=0; fi
     [ "$has" = "$((M3BOOT > 0))" ] || { echo "$1: M3 boot present=$has, wanted $M3BOOT" >&2; exit 1; }
     if [ "$M3BOOT" = 2 ]; then grep -aq "solo: M3 1 only" "$1" || { echo "$1: not the solo build" >&2; exit 1; }; fi
     if [ "$M3BOOT" = 3 ]; then grep -aq "big: M3 1 + parked M3s" "$1" && grep -aq "=C8 v1 big" "$1" || { echo "$1: not the big-core build" >&2; exit 1; }; fi
@@ -165,7 +166,7 @@ if [ -n "$SOLO" ]; then
     # EXTRA_AML blobs (e.g. SBGPU, so Windows keeps its display driver on these boots).
     echo "== $SOLO: Star2LteSsdtDxe alone (PPTT fix $PPTT, M3 probe $M3, M3 park $M3PARK, M3 run $M3RUN, M3 boot $M3BOOT, cores8 $CORES8, PPTT OEM $PPTT_OEM)"
     tools/woa/build-uefi.sh "$UEFI_TARGET" -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_SSDT_DXE=TRUE \
-        -D STARBITE_PPTT_FIX=$PPTT -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK -D STARBITE_M3_RUN=$M3RUN -D STARBITE_M3_BOOT=$M3BOOT -D STARBITE_CORES8=$CORES8 | tail -1
+        -D STARBITE_PPTT_FIX=$PPTT -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK -D STARBITE_M3_RUN=$M3RUN -D STARBITE_M3_BOOT=$M3BOOT -D STARBITE_CORES8=$CORES8 -D STARBITE_M3_PSCIEMU=$M3PSCIEMU | tail -1
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$SSDTDXE" "$out/$SOLO-ssdt.ffs"
     flags_ok "$out/$SOLO-ssdt.ffs"
     python3 tools/woa/dxe-replace.py "$W/Star2LtePkg-src38.fd" "$rel" "$out/$SOLO.fd" \

@@ -84,6 +84,10 @@
 // The DSDT's _MAT copies are made equal to the new MADT at the commit point (Cores8SyncMat).
 //
 #define BOOT_BIG        (STARBITE_M3_BOOT == 3)
+
+#ifndef STARBITE_M3_PSCIEMU
+#define STARBITE_M3_PSCIEMU 0             // v10: PSCI 1.0 answers patched into ntoskrnl instead of the v9 FADT change
+#endif
 #define BOOT_UID        5u                  // M3 core 1 (the release MADT: A55 0..3, M3 4..7)
 #define BOOT_MPIDR      0x101u
 #define BOOT_TARGET     0x101u              // PSCI target of M3 core 1
@@ -973,6 +977,203 @@ CleanToPoc (
 // v8 tried the woa shim's EL2 payload on the M3 (SiP SMC 0xC2000400 from the M3): EL3 refused (rc -1). v9 below
 // takes PSCI away from Windows on the M3 instead (FADT ARM_BOOT_ARCH).
 //
+#if STARBITE_M3_PSCIEMU
+#include "M3PsciEmu.h"
+
+//
+// v10 (STARBITE_M3_PSCIEMU=1, the alternative to v9's FADT change): Windows on the M3 keeps PSCI, and ntoskrnl's one
+// generic SMC wrapper (SUB SP,SP,#0x10; STR X7,[SP]; SMC #0; LDR X7,[SP]; STR X0,[X7]: ntoskrnl 22621.7582 RVA 0x2000A0)
+// branches to M3PsciEmu (copied into the zero slack after .text's VirtualSize, same pages, non-paged and executable)
+// instead of issuing the SMC; the emulator answers PSCI_VERSION and PSCI_FEATURES as the woa shim does and passes the
+// rest to EL3. ntoskrnl is found before the real ExitBootServices (winload has loaded it): a PE in EfiLoaderCode /
+// EfiLoaderData whose export directory names "ntoskrnl.exe". The memory map goes into a static buffer (an allocation
+// here would invalidate winload's map key). Once per boot.
+//
+STATIC UINT8    mPsciEmuMap[0x6000];
+STATIC BOOLEAN  mPsciEmuDone;
+
+STATIC
+BOOLEAN
+PeIsNtoskrnl (
+  IN UINT64  Base,
+  IN UINT64  Limit,
+  OUT UINT32 *SizeOfImage
+  )
+{
+  UINT32  Lfanew;
+  UINT64  Nt;
+  UINT32  ExpRva;
+  UINT32  NameRva;
+  CONST CHAR8  *Name;
+  STATIC CONST CHAR8  Want[] = "ntoskrnl.exe";
+  UINTN   i;
+
+  if ((*(volatile UINT16 *)(UINTN)Base != 0x5A4D) || (Base + 0x400 > Limit)) {
+    return FALSE;
+  }
+
+  Lfanew = *(volatile UINT32 *)(UINTN)(Base + 0x3C);
+  Nt     = Base + Lfanew;
+  if ((Lfanew < 0x40) || (Lfanew > 0x300) || (*(volatile UINT32 *)(UINTN)Nt != 0x4550) ||
+      (*(volatile UINT16 *)(UINTN)(Nt + 4) != 0xAA64) || (*(volatile UINT16 *)(UINTN)(Nt + 24) != 0x20B))
+  {
+    return FALSE;
+  }
+
+  *SizeOfImage = *(volatile UINT32 *)(UINTN)(Nt + 24 + 56);
+  ExpRva       = *(volatile UINT32 *)(UINTN)(Nt + 24 + 112);
+  if ((*SizeOfImage < 0x100000) || (Base + *SizeOfImage > Limit) || (ExpRva == 0) || (ExpRva + 40 > *SizeOfImage)) {
+    return FALSE;
+  }
+
+  NameRva = *(volatile UINT32 *)(UINTN)(Base + ExpRva + 12);
+  if (NameRva + sizeof (Want) > *SizeOfImage) {
+    return FALSE;
+  }
+
+  Name = (CONST CHAR8 *)(UINTN)(Base + NameRva);
+  for (i = 0; i < sizeof (Want); i++) {
+    if (Name[i] != Want[i]) {
+      return FALSE;
+    }
+  }
+
+  return TRUE;
+}
+
+STATIC
+VOID
+M3PsciEmuInstall (
+  VOID
+  )
+{
+  UINTN                  MapSize;
+  UINTN                  Key;
+  UINTN                  DescSize;
+  UINT32                 DescVer;
+  EFI_MEMORY_DESCRIPTOR  *D;
+  UINT8                  *P;
+  UINT64                 Base;
+  UINT64                 End;
+  UINT64                 Nt;
+  UINT64                 Sec;
+  UINT64                 Text;
+  UINT64                 TextEnd;
+  UINT64                 Site;
+  UINT64                 Slack;
+  UINT64                 SlackEnd;
+  UINT64                 Exit;
+  UINT32                 Size;
+  UINT32                 *W;
+  UINT16                 NumSec;
+  UINT16                 OptSize;
+  UINTN                  i;
+  INT64                  Off;
+
+  if (mPsciEmuDone) {
+    return;
+  }
+
+  mPsciEmuDone = TRUE;
+  MapSize      = sizeof (mPsciEmuMap);
+  if (EFI_ERROR (gBS->GetMemoryMap (&MapSize, (EFI_MEMORY_DESCRIPTOR *)mPsciEmuMap, &Key, &DescSize, &DescVer))) {
+    SbLog ("=M3 psciemu: no memory map (%d bytes needed), not installed", MapSize);
+    return;
+  }
+
+  Base = 0;
+  Size = 0;
+  for (P = mPsciEmuMap; (Base == 0) && (P + DescSize <= mPsciEmuMap + MapSize); P += DescSize) {
+    D = (EFI_MEMORY_DESCRIPTOR *)P;
+    if ((D->Type != EfiLoaderCode) && (D->Type != EfiLoaderData)) {
+      continue;
+    }
+
+    End = D->PhysicalStart + EFI_PAGES_TO_SIZE (D->NumberOfPages);
+    for (Nt = D->PhysicalStart; Nt + 0x1000 <= End; Nt += 0x1000) {
+      if (PeIsNtoskrnl (Nt, End, &Size)) {
+        Base = Nt;
+        break;
+      }
+    }
+  }
+
+  if (Base == 0) {
+    SbLog ("=M3 psciemu: ntoskrnl not found in loader memory, not installed");
+    return;
+  }
+
+  Nt      = Base + *(volatile UINT32 *)(UINTN)(Base + 0x3C);
+  NumSec  = *(volatile UINT16 *)(UINTN)(Nt + 6);
+  OptSize = *(volatile UINT16 *)(UINTN)(Nt + 20);
+  Text    = 0;
+  TextEnd = 0;
+  for (i = 0; i < NumSec; i++) {
+    Sec = Nt + 24 + OptSize + 40 * i;
+    if (CompareMem ((VOID *)(UINTN)Sec, ".text\0\0\0", 8) == 0) {
+      Text    = Base + *(volatile UINT32 *)(UINTN)(Sec + 12);
+      TextEnd = Text + *(volatile UINT32 *)(UINTN)(Sec + 8);
+    }
+  }
+
+  if ((Text == 0) || (TextEnd > Base + Size)) {
+    SbLog ("=M3 psciemu: ntoskrnl %lx has no usable .text, not installed", Base);
+    return;
+  }
+
+  Site = 0;
+  for (W = (UINT32 *)(UINTN)Text; (UINT64)(UINTN)(W + 5) <= TextEnd; W++) {
+    if ((W[0] == 0xD10043FFu) && (W[1] == 0xF90003E7u) && (W[2] == 0xD4000003u) && (W[3] == 0xF94003E7u) && (W[4] == 0xF90000E0u)) {
+      if (Site != 0) {
+        SbLog ("=M3 psciemu: the SMC wrapper pattern twice in ntoskrnl, not installed");
+        return;
+      }
+
+      Site = (UINT64)(UINTN)(W + 2);
+    }
+  }
+
+  Slack    = (TextEnd + 15) & ~15ull;
+  SlackEnd = (TextEnd + 0xFFF) & ~0xFFFull;
+  if ((Site == 0) || (SlackEnd - Slack < sizeof (mM3PsciEmu))) {
+    SbLog ("=M3 psciemu: ntoskrnl %lx: wrapper %lx, slack %lx..%lx: not installed", Base, Site, Slack, SlackEnd);
+    return;
+  }
+
+  for (P = (UINT8 *)(UINTN)Slack; P < (UINT8 *)(UINTN)SlackEnd; P++) {
+    if (*P != 0) {
+      SbLog ("=M3 psciemu: .text slack at %lx not zero, not installed", Slack);
+      return;
+    }
+  }
+
+  CopyMem ((VOID *)(UINTN)Slack, mM3PsciEmu, sizeof (mM3PsciEmu));
+  Exit = 0;
+  for (W = (UINT32 *)(UINTN)Slack; W < (UINT32 *)(UINTN)(Slack + M3_PSCI_EMU_LIT); W++) {
+    if (*W == 0x14000000u) {
+      Exit = (UINT64)(UINTN)W;
+    }
+  }
+
+  Off = (INT64)((Site + 4) - Exit) / 4;
+  *(UINT32 *)(UINTN)Exit = 0x14000000u | ((UINT32)Off & 0x3FFFFFFu);      // B back after the SMC
+  Off = (INT64)(Slack - Site) / 4;
+  *(UINT32 *)(UINTN)Site = 0x14000000u | ((UINT32)Off & 0x3FFFFFFu);      // the SMC -> B emulator
+  CleanToPoc ((UINTN)Slack, (UINTN)Slack + sizeof (mM3PsciEmu));
+  CleanToPoc ((UINTN)Site, (UINTN)Site + 4);
+  __asm__ __volatile__ ("ic iallu\n dsb sy\n isb" ::: "memory");
+  SbLog (
+    "=M3 psciemu: ntoskrnl %lx size %x: SMC wrapper +%lx -> emulator +%lx (%d bytes), exit +%lx",
+    Base,
+    Size,
+    Site - Base,
+    Slack - Base,
+    (UINT32)sizeof (mM3PsciEmu),
+    Exit - Base
+    );
+}
+#endif
+
 STATIC
 VOID
 M3BootAfterEbs (
@@ -1117,7 +1318,9 @@ M3BootAfterEbs (
         }
       }
 
-      if ((T == NULL) || (T->Length < 131)) {
+      if (STARBITE_M3_PSCIEMU) {
+        SbLog ("=M3 fadt: unchanged (v10: PSCI answered by the ntoskrnl patch)");
+      } else if ((T == NULL) || (T->Length < 131)) {
         SbLog ("=M3 fadt: no FADT with ARM_BOOT_ARCH, unchanged");
       } else {
         CopyMem (&Old, (UINT8 *)T + 129, 2);
@@ -1320,6 +1523,9 @@ M3BootEbsWrap (
   if (!mFired) {
     SbLog ("=M3 boot v6: ExitBootServices wrapper called from %lx (winload = outermost, as intended)", (UINT64)(UINTN)__builtin_return_address (0));
     M3BootLseGuard ();                  // while boot services still exist; idempotent if winload retries
+ #if STARBITE_M3_PSCIEMU
+    M3PsciEmuInstall ();                // once; the memory map into a static buffer (no allocation)
+ #endif
   }
 
   Status = mOrigEbs (ImageHandle, MapKey);
@@ -1470,7 +1676,7 @@ M3BootArm (
 
   Status = gBS->CreateEventEx (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, M3BootOnReadyToBoot, NULL, &gEfiEventReadyToBootGuid, &mReadyToBoot);
   SbLog (
-    "=M3 boot v9 armed (%a): entry %lx (vectors %lx..%lx in this image), context %lx, ExitBootServices wrapped at ReadyToBoot (now %lx, event %r)",
+    "=M3 boot v10 armed (%a): entry %lx (vectors %lx..%lx in this image), context %lx, ExitBootServices wrapped at ReadyToBoot (now %lx, event %r)",
     BOOT_SOLO ? "solo: M3 1 only" : (BOOT_BIG ? "big: M3 1 + parked M3s, no A55" : "M3 1 + A55 1..3"),
     (UINT64)(UINTN)M3BootEntry,
     (UINT64)(UINTN)M3BootVectors,

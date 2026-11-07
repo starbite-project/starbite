@@ -19,7 +19,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STUBS = [('M3ParkStub', 64, 'M3_PARK_STUB_LIT',
           'literals (mailbox, UID, then the digits of el, frq, kctl, spin, wake, t; 8 bytes each)'),
          ('M3RunStub', 8, 'M3_RUN_STUB_LIT', 'literal (the context address, 8 bytes)'),
-         ('Cores8ParkStub', 24, 'CORES8_PARK_STUB_LIT', 'literals (mailbox, UID, state digit address; 8 bytes each)')]
+         ('Cores8ParkStub', 24, 'CORES8_PARK_STUB_LIT', 'literals (mailbox, UID, state digit address; 8 bytes each)'),
+         ('M3PsciEmu', 8, 'M3_PSCI_EMU_LIT', 'literal (unused, 8 bytes)')]
 
 
 def elf_sections(elf):
