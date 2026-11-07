@@ -403,7 +403,7 @@ wdt_feed = "xnu"
 [[entry]]
 key = "starbite-os"
 name = "Starbite OS"
-version = "0.2 · light, heat, SOS, info, battery"
+version = "0.3: new UI, emergency, light, heat, SOS"
 category = "starbite"
 method = "bare"
 tag = "experimental"
