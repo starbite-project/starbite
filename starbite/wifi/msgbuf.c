@@ -395,6 +395,43 @@ static unsigned post_rx(struct bcmw *w)
     return done;
 }
 
+void bcmw_rx_log(struct bcmw *w, unsigned n) { w->rx_log = n; }
+
+void bcmw_rx_state(struct bcmw *w, const char *when)
+{
+    struct bcmw_ring *p = &w->ring[RING_H2D_RXPOST], *c = &w->ring[RING_D2H_RXCPL], *e = &w->ring[RING_D2H_CONTROL];
+    unsigned posted = 0;
+    struct bcmw_lb l;
+    if (w->step < BCMW_STEP_RINGS || w->dead)
+        return;
+    for (unsigned i = 0; i < w->nrx; i++)
+        posted += w->rx_posted[i];
+    lb_init(&l);
+    lb_s(&l, "msgbuf: rx state ");
+    lb_s(&l, when);
+    lb_s(&l, ": rx-post ring written ");
+    lb_dec(&l, p->w);
+    lb_s(&l, ", taken by the firmware ");
+    lb_dec(&l, p->ops->rd_idx(p, p->r_where));
+    lb_s(&l, "; rx-complete ring firmware ");
+    lb_dec(&l, c->ops->rd_idx(c, c->w_where));
+    lb_s(&l, ", ours ");
+    lb_dec(&l, c->r);
+    lb_s(&l, "; control-complete firmware ");
+    lb_dec(&l, e->ops->rd_idx(e, e->w_where));
+    lb_s(&l, ", ours ");
+    lb_dec(&l, e->r);
+    lb_s(&l, "; buffers with the firmware ");
+    lb_dec(&l, posted);
+    lb_s(&l, " of ");
+    lb_dec(&l, w->nrx);
+    lb_s(&l, "; frames ");
+    lb_dec(&l, w->info.rx_frames);
+    lb_s(&l, ", events ");
+    lb_dec(&l, w->info.events);
+    bcmw_say_lb(w, &l);
+}
+
 int mb_post_all(struct bcmw *w)
 {
     unsigned a = post_ctl(w, 0, 8), b = post_ctl(w, 1, 8), c = post_rx(w);
@@ -502,6 +539,21 @@ static void process_item(struct bcmw *w, const uint8_t *it)
                 off = (uint16_t)w->info.rx_dataoffset;
             if (off + (uint32_t)len <= RX_BUF_SIZE) {
                 w->info.rx_frames++;
+                if (w->rx_log && len >= 14) {
+                    struct bcmw_lb l;
+                    w->rx_log--;
+                    lb_init(&l);
+                    lb_s(&l, "msgbuf: rx frame: interface ");
+                    lb_dec(&l, it[1]);
+                    lb_s(&l, ", ethertype ");
+                    lb_hex(&l, be16(b + off + 12), 4);
+                    lb_s(&l, ", ");
+                    lb_dec(&l, len);
+                    lb_s(&l, " bytes, flags ");
+                    lb_hex(&l, le16(it + 18), 4);
+                    lb_s(&l, (b[off] & 1) ? ", to a group address" : ", to us");
+                    bcmw_say_lb(w, &l);
+                }
                 if (len >= 14 && be16(b + off + 12) == 0x886c)
                     got_event(w, b + off, len);
                 else if (len >= 14 && be16(b + off + 12) == 0x888e && (w->join_phase == 2 || w->join_phase == 3) &&

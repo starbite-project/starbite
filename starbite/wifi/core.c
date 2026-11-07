@@ -642,9 +642,12 @@ static int step_up(struct bcmw *w)
 
     bcmw_memset(mask, 0, sizeof(mask));
     if (bcmw_iovar_get(w, "event_msgs", mask, sizeof(mask), &fwerr) == BCMW_OK) {
+        /* only the events handled here, as brcmfmac sets it (W2e: the firmware's own default set on top of these
+         * overran the 8 event buffers after an association: "dngl_sendpkt: dropped pkt") */
+        bcmw_memset(mask, 0, sizeof(mask));
         static const uint8_t ev[] = { BCMW_E_SET_SSID, BCMW_E_JOIN, BCMW_E_AUTH, BCMW_E_DEAUTH, BCMW_E_DEAUTH_IND,
                                       BCMW_E_ASSOC, BCMW_E_DISASSOC_IND, BCMW_E_LINK, BCMW_E_IF, BCMW_E_ESCAN_RESULT,
-                                      46 /* PSK_SUP */ };
+                                      46 /* PSK_SUP */, 9 /* REASSOC */, 11 /* DISASSOC */, 17 /* MIC_ERROR */ };
         for (unsigned i = 0; i < sizeof(ev); i++)
             mask[ev[i] / 8] |= (uint8_t)(1u << (ev[i] % 8));
         bcmw_iovar_set(w, "event_msgs", mask, sizeof(mask), &fwerr);

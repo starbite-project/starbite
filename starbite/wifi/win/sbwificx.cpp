@@ -157,7 +157,8 @@ struct DEVCTX {
     UINT32 last_reason, set_ssid_status;
     volatile LONG eapol_in, eapol_up, eapol_out, eapol_out_fail;  // EAPOL frames: from the AP, to Windows, from Windows
     ULONG tx_dropped_seen, rx_dropped_seen;
-    ULONG rx_at_connect;            // the core's received-frame count when the connect began
+    ULONG rx_at_connect;
+    UINT64 rx_check_at;             // when to log the rx state again (1.5 s after an association)            // the core's received-frame count when the connect began
     UINT16 connect_port;
     UINT8 bssid[6], rsn[BCMW_RSN_OURS];
     UINT64 connect_started;
@@ -605,6 +606,8 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
     Indicate(d, WDI_INDICATION_CONNECT_COMPLETE, d->connect_port, d->connect_txn,
              ok ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE, NULL, 0);
     Sayf("wificx: connect %s", ok ? "COMPLETE (associated; Windows does the handshake now)" : "FAILED");
+    bcmw_rx_state(d->w, "at the association result");
+    d->rx_check_at = ok ? Now(NULL) + 1500000 : 0;
     d->connecting = 0;
     {   // the frames held during the report (the AP's first handshake message) go up now
         KIRQL old;
@@ -679,6 +682,8 @@ static void CmdConnect(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
         d->set_ssid_status = 0;
         d->eapol_in = d->eapol_up = d->eapol_out = d->eapol_out_fail = 0;
         bcmw_console_more(d->w, 40);    // the firmware's own account of the join
+        bcmw_rx_log(d->w, 24);          // W2f: what (if anything) arrives after the association
+        bcmw_rx_state(d->w, "at the connect");
         d->connecting = 1;
         d->set_ssid_ok = 0;
         d->connect_started = Now(NULL);
@@ -708,6 +713,8 @@ static void Disconnected(DEVCTX *d, UINT32 reason, int by_host)
         by_host ? WDI_ASSOC_STATUS_DISASSOCIATED_BY_HOST : WDI_ASSOC_STATUS_PEER_DISASSOCIATED;
     if (GenerateWdiIndicationDisassociationFromIhv(&p, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen) == NDIS_STATUS_SUCCESS)
         Indicate(d, WDI_INDICATION_DISASSOCIATION, d->connect_port, 0, NDIS_STATUS_SUCCESS, gen, len);
+    bcmw_rx_state(d->w, "at the disassociation");
+    d->rx_check_at = 0;
     Sayf("wificx: disassociated (%s, 802.11 reason %lu); EAPOL so far: %ld in from the AP, %ld handed to Windows, "
          "%ld out from Windows (%ld not sent); frames in from the radio since the connect: %lu",
          by_host ? "by the host" : "by the access point", d->last_reason, d->eapol_in, d->eapol_up, d->eapol_out,
@@ -1070,6 +1077,10 @@ static void Worker(PVOID arg)
             Sayf("wificx: frames dropped so far: %lu out (no link or queue full), %lu in (queue full)", d->tx_dropped,
                  d->rx_dropped);
             d->tx_dropped_seen = d->tx_dropped, d->rx_dropped_seen = d->rx_dropped;
+        }
+        if (d->rx_check_at && Now(NULL) > d->rx_check_at) {
+            d->rx_check_at = 0;
+            bcmw_rx_state(d->w, "1.5 s after the association");
         }
         if (d->connected == 2) {
             d->connected = 1;

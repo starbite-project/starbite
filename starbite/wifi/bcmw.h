@@ -189,6 +189,11 @@ struct bcmw_bss {                   /* one access point from an escan result eve
     const uint8_t *ie;              /* its information elements (inside the event: copy them) */
     uint32_t ie_len;
 };
+/* the next n received data frames are logged (interface, ethertype, length, flags; no addresses or payload) */
+void bcmw_rx_log(struct bcmw *w, unsigned n);
+/* one line: the rx-post ring (our write index, the firmware's read index: how many of our buffers it took) and
+ * the rx-completion ring, the event and frame counts (W2e: after association the firmware dropped packets) */
+void bcmw_rx_state(struct bcmw *w, const char *when);
 /* n more firmware console lines go to the log (it stops after a quota, to keep the log short) */
 void bcmw_console_more(struct bcmw *w, unsigned n);
 /* the radio's own address (cur_etheraddr), for an OS that picks one per network; not while associated */
