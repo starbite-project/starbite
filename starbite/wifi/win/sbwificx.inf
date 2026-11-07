@@ -1,0 +1,76 @@
+; SPDX-License-Identifier: GPL-2.0-only
+; SbWifiCx: Wi-Fi for Windows 11 on the Galaxy S9 (BCM4361), stage W2 of docs/WIFI-BCM4361.md section 7.
+; A WiFiCx client (KMDF 1.33, NetAdapterCx 2.1, WiFiCx 1.0) on the ACPI device \_SB.WLAN (STBW4361) from
+; starbite/wifi/win/wlan.asl. The radio's firmware, NVRAM and CLM are NOT part of this package: they are copied
+; from the phone's own VENDOR to C:\Windows\System32\drivers\starbite\bcm4361\ (never shipped).
+; WiFiCx and NetAdapterCx are bound by their stub libraries (no Include/Needs: Windows has no wificx.inf).
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Net
+ClassGUID   = {4d36e972-e325-11ce-bfc1-08002be10318}
+Provider    = %Starbite%
+DriverVer   = 11/07/2026,0.2.0.0
+CatalogFile = sbwificx.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+sbwificx.sys = 1
+
+[Manufacturer]
+%Starbite% = Starbite, NTarm64
+
+[Starbite.NTarm64]
+%DeviceDesc% = SbWifiCx_Inst, ACPI\STBW4361
+
+[SbWifiCx_Inst.NT]
+Characteristics           = 0x84      ; NCF_PHYSICAL | NCF_HAS_UI
+BusType                   = 5         ; PCIBus (the radio is a PCIe endpoint behind the driver's own controller)
+*IfType                   = 71        ; IF_TYPE_IEEE80211
+*MediaType                = 16        ; NdisMediumNative802_11
+*PhysicalMediaType        = 9         ; NdisPhysicalMediumNative802_11
+NumberOfNetworkInterfaces = 1         ; the station only (no Wi-Fi Direct, no hotspot)
+*IfConnectorPresent       = 1
+*ConnectionType           = 1         ; NET_IF_CONNECTION_DEDICATED
+*DirectionType            = 0         ; NET_IF_DIRECTION_SENDRECEIVE
+*AccessType               = 2         ; NET_IF_ACCESS_BROADCAST
+*HardwareLoopback         = 0
+CopyFiles                 = SbWifiCx_Files
+AddReg                    = SbWifiCx_Ndi
+
+[SbWifiCx_Files]
+sbwificx.sys
+
+[SbWifiCx_Ndi]
+HKR, Ndi,            Service,    0, "sbwificx"
+HKR, Ndi\Interfaces, UpperRange, 0, "ndis5"
+HKR, Ndi\Interfaces, LowerRange, 0, "wlan,ethernet,vwifi"
+
+[SbWifiCx_Inst.NT.Services]
+AddService = sbwificx, 0x00000002, SbWifiCx_Service
+
+[SbWifiCx_Service]
+DisplayName    = %ServiceDesc%
+ServiceType    = 1                 ; SERVICE_KERNEL_DRIVER
+StartType      = 3                 ; SERVICE_DEMAND_START (PnP starts it)
+ErrorControl   = 0                 ; SERVICE_ERROR_IGNORE (a failure never stops the boot)
+ServiceBinary  = %13%\sbwificx.sys
+LoadOrderGroup = NDIS
+
+[SbWifiCx_Inst.NT.Wdf]
+KmdfService = sbwificx, SbWifiCx_WdfSect
+
+[SbWifiCx_WdfSect]
+KmdfLibraryVersion = 1.33
+
+[Strings]
+Starbite    = "Starbite"
+DiskName    = "Starbite Wi-Fi driver"
+DeviceDesc  = "Starbite Wi-Fi (Broadcom BCM4361)"
+ServiceDesc = "Starbite Wi-Fi (WiFiCx)"
