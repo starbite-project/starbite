@@ -116,7 +116,9 @@ __asm__(
     "    msr tpidr_el1, x20\n"
     "    mov x0, x19\n"
     "    bl g7_worker_main\n"
-    /* leaving: slot state WS_LEAVING was written by g7_worker_main; CPU_OFF does not return */
+    /* leaving: slot state WS_LEAVING was written by g7_worker_main; this core's own cache levels
+     * written back, then CPU_OFF (does not return) */
+    "    bl g7_dcache_private\n"
     "    mrs x20, tpidr_el1\n"
     "    movz w0, #0x8400, lsl #16\n"
     "    movk w0, #0x0002\n"
@@ -145,11 +147,59 @@ __asm__(
     "    str x1, [x0]\n"
     "    dsb sy\n"
     "    sev\n"
+    "    bl g7_dcache_private\n"
     "3:  movz w0, #0x8400, lsl #16\n"
     "    movk w0, #0x0002\n"
     "    smc #0\n"
     "4:  wfe\n"
     "    b 4b\n");
+
+/* g7_dcache_private: clean + invalidate by set/way every data cache level of this core below the
+ * last one before the point of coherency (on the A55: its private L1 and L2; the cluster's shared
+ * last level stays, core 0 keeps using it), so nothing this worker wrote is only in caches that
+ * power off with it. Registers only (x0-x11), no stack. */
+__asm__(
+    ".text\n"
+    ".balign 16\n"
+    ".global g7_dcache_private\n"
+    "g7_dcache_private:\n"
+    "    dsb sy\n"
+    "    mrs x0, clidr_el1\n"
+    "    ubfx x3, x0, #24, #3\n"             /* LoC */
+    "    sub x3, x3, #1\n"                   /* levels 1 .. LoC - 1 */
+    "    lsl x3, x3, #1\n"                   /* as level x 2 (CSSELR) */
+    "    cmp x3, #0\n"
+    "    b.le 5f\n"
+    "    mov x10, #0\n"
+    "1:  add x2, x10, x10, lsr #1\n"         /* level x 3: its Ctype field */
+    "    lsr x1, x0, x2\n"
+    "    and x1, x1, #7\n"
+    "    cmp x1, #2\n"
+    "    b.lt 4f\n"                          /* no data cache at this level */
+    "    msr csselr_el1, x10\n"
+    "    isb\n"
+    "    mrs x1, ccsidr_el1\n"
+    "    and x2, x1, #7\n"
+    "    add x2, x2, #4\n"                   /* log2 line bytes */
+    "    ubfx x4, x1, #3, #10\n"             /* ways - 1 */
+    "    clz w5, w4\n"                       /* way shift */
+    "    ubfx x7, x1, #13, #15\n"            /* sets - 1 */
+    "2:  mov x9, x4\n"
+    "3:  lsl x6, x9, x5\n"
+    "    orr x11, x10, x6\n"
+    "    lsl x6, x7, x2\n"
+    "    orr x11, x11, x6\n"
+    "    dc cisw, x11\n"
+    "    subs x9, x9, #1\n"
+    "    b.ge 3b\n"
+    "    subs x7, x7, #1\n"
+    "    b.ge 2b\n"
+    "4:  add x10, x10, #2\n"
+    "    cmp x3, x10\n"
+    "    b.gt 1b\n"
+    "5:  dsb sy\n"
+    "    isb\n"
+    "    ret\n");
 
 static int64_t psci(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
 {
