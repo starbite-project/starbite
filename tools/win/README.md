@@ -103,7 +103,7 @@ SecurityCookie = `__security_cookie`. Not yet run on Windows (needs the phone, b
 certificate. Key and certificate: `build/woa/ufs-sys/sign/starbite-test.{key,crt}` (`build/` is git-ignored; the key
 is mode 600; never print or commit it; override with `SB_SIGN_KEY`/`SB_SIGN_CERT`). Certificate: self-signed
 `CN=Starbite Test Signing`, CA:TRUE, EKU codeSigning, 2026-10-26 .. 2036-10-23, SHA-1 thumbprint
-`334F75CA7DA45E8F676F3568522F2CFCDADDCC0E`. Windows on the S9 already loads a driver signed with it (the
+`9F0C3A3346BAF11DABF4FC2EC001FC6C4034493C`. Windows on the S9 already loads a driver signed with it (the
 re-signed boot-start `Exynos9810Ufs.sys`, NOTES.md 2026-10-27): with testsigning on, kernel code integrity takes
 an embedded signature from any certificate.
 

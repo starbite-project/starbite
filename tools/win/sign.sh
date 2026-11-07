@@ -6,7 +6,7 @@
 #
 # The key and certificate are the ones Windows on the S9 already accepts under testsigning (NOTES.md
 # 2026-10-27: the re-signed Exynos9810Ufs.sys boots): self-signed "CN=Starbite Test Signing", CA:TRUE,
-# EKU codeSigning, valid 2026-10-26 .. 2036-10-23, SHA-1 thumbprint 334F75CA7DA45E8F676F3568522F2CFCDADDCC0E.
+# EKU codeSigning, valid 2026-10-26 .. 2036-10-23, SHA-1 thumbprint 9F0C3A3346BAF11DABF4FC2EC001FC6C4034493C.
 # They live in build/woa/ufs-sys/sign/ (build/ is git-ignored; never commit or print the key).
 # Override with SB_SIGN_KEY / SB_SIGN_CERT. No timestamp (test signing does not need one; nothing leaves the Mac).
 set -euo pipefail
