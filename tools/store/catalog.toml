@@ -126,13 +126,18 @@ root = "ufs:WINDOWS (NTFS)"
 
 [[entry]]
 key = "android"
-name = "Android 17"
-version = "Pixel-style LineageOS 24 · Linux 4.9"
+name = "One UI 8"
+version = "UN1CA 9810 · Android 16 · Linux 4.9"
 category = "android"
 method = "android"
 tag = "experimental"
-files = ["android.kernel", "android.ramdisk", "android.cmdline"]
-root = "ufs:SYSTEM + VENDOR + A16DATA"
+# docs/ANDROID-ONEUI.md: DS-ACK EROFS kernel + its DTBH (first-stage fstab), UN1CA's ramdisk with /data on
+# A16DATA (tools/android/oneui/mk-boot-files.py). Replaced the Pixel-style LineageOS entry on 2026-11-06.
+files = ["android.kernel", "android.ramdisk", "android.cmdline", "android.dtb"]
+root = "ufs:SYSTEM + VENDOR + ODM (EROFS) + A16DATA (ext4)"
+# The first boots: the loader's watchdog covers a hang before Samsung's driver probes (it then takes both
+# cluster watchdogs over and pets them); a reset in that window comes back as HANG on the crash screen.
+wdt = 60
 
 [[entry]]
 key = "chromeos"
