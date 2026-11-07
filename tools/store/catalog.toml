@@ -326,28 +326,6 @@ files = ["darwin.xnu"]
 root = "RAM disk (md0)"
 flags = ["hidden"]
 
-[[entry]]
-key = "sdprobe"
-name = "microSD probe"
-version = "XNU 12377 · read-only card check"
-category = "apple"
-method = "xnu"
-tag = "lab"
-files = ["xnu-sdprobe.xnu"]
-root = "none (probe, then reboot)"
-flags = ["hidden"]
-
-[[entry]]
-key = "ios26sdt"
-name = "iOS 26 card test"
-version = "26.6.2 · XNU 12377 · root on microSD"
-category = "lab"
-method = "xnu"
-tag = "lab"
-files = ["ios26-sdt.xnu"]
-root = "sd:lba 182888448+33554432 (HFSX 16 GiB, sdrw)"
-flags = ["hidden"]
-
 # Engineer OS (docs/ENGINEER-OS.md): a bare image on libsb, built by starbite/engineer/build.sh
 # (starbite/out/engineer.img). The menu's Lab row and dock button start it when it is ready; holding
 # Bixby still opens Engineer Lite (the loader's EngineerMode).
@@ -435,24 +413,6 @@ wdt = 30
 wdt_feed = "xnu"
 
 [[entry]]
-key = "xnuh-hang"
-name = "XNU watchdog: hang test"
-version = "XNU 12377+0399 · feeding stops at 60 s"
-category = "lab"
-method = "xnu"
-tag = "lab"
-files = ["mac13-health.xnu"]
-cmdline = "sbtesthang=60"
-root = "none (waits for a root device; no writes)"
-flags = ["hidden"]
-log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
-       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
-       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
-       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader"]
-wdt = 30
-wdt_feed = "xnu"
-
-[[entry]]
 key = "xnuh-panic"
 name = "XNU crash return: panic test"
 version = "XNU 12377+0399 · panic at 60 s"
@@ -494,7 +454,7 @@ wdt_feed = "xnu"
 [[entry]]
 key = "starbite-os"
 name = "Starbite OS"
-version = "0.1 · light, heat, SOS, clock, battery"
+version = "0.1.1 · light, heat, SOS, clock, battery"
 category = "starbite"
 method = "bare"
 tag = "experimental"
@@ -503,3 +463,47 @@ root = "none (RAM only)"
 wdt = 30
 wdt_feed = "own"
 
+# Wi-Fi bring-up test (docs/WIFI-BCM4361.md 9, branch claude/wifi-core-c56c49 eab2408): T1 PCIe link. Hold Volume Up 2 s
+# to start; no storage writes, VENDOR read only, radio unpowered at the end.
+[[entry]]
+key = "wifitest"
+name = "Wi-Fi test 6"
+version = "BCM4361 T1 PCIe link"
+category = "lab"
+method = "bare"
+tag = "lab"
+files = ["wifitest.img"]
+cmdline = "wifi_step=6"
+flags = ["hidden"]
+wdt = 30
+wdt_feed = "own"
+
+# Wi-Fi bring-up test (docs/WIFI-BCM4361.md 9, branch claude/wifi-core-c56c49 eab2408): T2 firmware boot. Hold Volume Up 2 s
+# to start; no storage writes, VENDOR read only, radio unpowered at the end.
+[[entry]]
+key = "wifitest-fw"
+name = "Wi-Fi test 9"
+version = "BCM4361 T2 firmware boot"
+category = "lab"
+method = "bare"
+tag = "lab"
+files = ["wifitest.img"]
+cmdline = "wifi_step=9"
+flags = ["hidden"]
+wdt = 30
+wdt_feed = "own"
+
+# Wi-Fi bring-up test (docs/WIFI-BCM4361.md 9, branch claude/wifi-core-c56c49 eab2408): T3 scan. Hold Volume Up 2 s
+# to start; no storage writes, VENDOR read only, radio unpowered at the end.
+[[entry]]
+key = "wifitest-scan"
+name = "Wi-Fi test 10"
+version = "BCM4361 T3 scan"
+category = "lab"
+method = "bare"
+tag = "lab"
+files = ["wifitest.img"]
+cmdline = "wifi_step=10"
+flags = ["hidden"]
+wdt = 30
+wdt_feed = "own"
