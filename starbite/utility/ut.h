@@ -2,6 +2,8 @@
  * Shared between the Utility OS's main.c and its tool pages (tools.c). */
 #pragma once
 
+/* a page that must stay visible (a running timer, Measure): no screen saver and no idle return */
+extern int ut_awake;
 void ut_service(void);          /* USB, the shell, the watchdog, the idle return: every loop turn */
 void ut_status_bar(void);
 void ut_measure(void);

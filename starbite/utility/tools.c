@@ -181,6 +181,7 @@ void ut_measure(void)
     page_init(&p, UI_VIEW_Y0, UI_H);
     uint64_t next = 0;
     int focus = -1;
+    ut_awake = 1;                                     /* live readings, the ruler, the colour fields: watched */
     for (;;) {
         if (sb_ms() >= next) {
             ui_fill(0, 0, UI_W, UI_VIEW_Y0, C_BG);
@@ -223,6 +224,7 @@ void ut_measure(void)
         }
         page_fling_step(&p);
     }
+    ut_awake = 0;
     page_free(&p);
 }
 
@@ -318,6 +320,8 @@ void ut_everyday(void)
             tm.left = 0;
             tm.done = 1;
         }
+        /* a running stopwatch or timer, or a finished timer for 10 minutes: no screen saver, no idle return */
+        ut_awake = sw.run || tm.run || (tm.done && now < tm.end + 10U * 60U * 1000U);
         if (now >= next) {
             everyday_draw(focus);
             ut_status_bar();
@@ -372,6 +376,7 @@ void ut_everyday(void)
             next = 0;
         }
     }
+    ut_awake = 0;
 }
 
 /* ---- Files (UO4, first part): SHA-256 + CRC32 of a partition or the card, read only --------------- */

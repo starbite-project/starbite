@@ -608,9 +608,11 @@ static void act(int a)
         ufs_offer(a == 4);
 }
 
+int ut_awake;
+
 static void idle_check(void)
 {
-    if (usb_ever || usbd_configured() || hash_job.state == HASH_RUNNING)
+    if (ut_awake || usb_ever || usbd_configured() || hash_job.state == HASH_RUNNING)
         return;
     uint64_t idle = ui_idle_ms();
     if (idle < IDLE_EXIT_MS)
@@ -661,7 +663,7 @@ static void saver_draw(unsigned k)
 
 static void saver_check(void)
 {
-    if (in_saver || saver_off || ui_idle_ms() < SAVER_MS)
+    if (in_saver || saver_off || ut_awake || ui_idle_ms() < SAVER_MS)
         return;
     uint64_t px = (uint64_t)UI_W * UI_H;
     if (!saver_buf && !(saver_buf = sb_alloc(px * 4U))) {

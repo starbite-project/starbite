@@ -1,0 +1,13 @@
+# The Utility OS macro pad (docs/UTILITY-OS.md): copy to /starbite/macros.toml on the microSD card.
+# Up to 8 buttons, read when Trackpad and keys opens; they replace the first two rows (the media row stays).
+# "Label" = "modifiers+key"   (cmd, ctrl, alt/option, shift; a-z, 0-9, f1-f12, enter, esc, tab, space,
+#                              backspace, up, down, left, right, minus, equal, comma, period, slash)
+# "Label" = "text:what to type"   (typed with the US layout: letters, digits and space are safe everywhere)
+"Copy" = "cmd+c"
+"Paste" = "cmd+v"
+"Undo" = "cmd+z"
+"Spotlight" = "cmd+space"
+"Close" = "cmd+w"
+"Screenshot" = "shift+cmd+4"
+"Lock" = "ctrl+cmd+q"
+"Sign-off" = "text:Best regards"
