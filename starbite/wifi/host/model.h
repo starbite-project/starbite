@@ -28,6 +28,11 @@ struct model {
     uint8_t mac_set[6], event_mask[16];
     char last_iovar[32];
     uint32_t dma_bytes;
+    /* Starbite OS's host preview (starbite/sbos/kern/wifi.c): the access point is open (no RSN, privacy off;
+     * SET_SSID with wsec 0 / wpa_auth 0 associates) and answers DHCP (DISCOVER: OFFER, REQUEST: ACK, address
+     * 192.168.4.23 from 192.168.4.1). 0 (the core's own test): WPA2 as before. */
+    int open_ap;
+    unsigned dhcp_offers, dhcp_acks;
 };
 extern struct model M;
 

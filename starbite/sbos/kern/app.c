@@ -751,6 +751,34 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         sos_status(&s);
         return user_out(a, arg[0], &s, sizeof(s)) ? 0 : SBOS_EINVAL;
     }
+    /* ---- Wi-Fi (0.4) ---- */
+    case SYS_NET_STATE: {
+        struct sbos_wifi ws;
+        if (!(p->perms & SBOS_P_NET))
+            return SBOS_EPERM;
+        wifi_status(&ws);
+        return user_out(a, arg[0], &ws, sizeof(ws)) ? 0 : SBOS_EINVAL;
+    }
+    case SYS_WIFI_POWER:
+        if (!(p->perms & SBOS_P_NET) || !front)
+            return SBOS_EPERM;
+        return wifi_power(arg[0] != 0);
+    case SYS_WIFI_SCAN:
+        if (!(p->perms & SBOS_P_NET) || !front)
+            return SBOS_EPERM;
+        return wifi_scan();
+    case SYS_WIFI_LIST: {
+        static struct sbos_wifi_net wl[SBOS_WIFI_NETS];
+        if (!(p->perms & SBOS_P_NET))
+            return SBOS_EPERM;
+        int max = arg[1] > SBOS_WIFI_NETS ? SBOS_WIFI_NETS : (int)arg[1];
+        int n = wifi_list(wl, max);
+        return user_out(a, arg[0], wl, sizeof(wl[0]) * (uint64_t)n) ? n : SBOS_EINVAL;
+    }
+    case SYS_WIFI_JOIN:
+        if (!(p->perms & SBOS_P_NET) || !front)
+            return SBOS_EPERM;
+        return wifi_join((int)arg[0]);
     case SYS_SENSOR_READ:
         if (!(p->perms & (SBOS_P_SENSORS | SBOS_P_HEAT)))
             return SBOS_EPERM;

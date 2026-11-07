@@ -8,11 +8,11 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.3.2"
+#define SBOS_VERSION "0.4"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
-enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_APP0 = 16 };
+enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_APP0 = 16 };
 #define KT_MAX 64
 #define KT_RESERVE 24                /* entries apps cannot take: the kernel's tasks always get theirs */
 struct ktimer {
@@ -285,6 +285,7 @@ int kui_screen(void);
 void ui_ktimer(unsigned id);
 void ui_kminute(void);
 int heater_running_ui(void);
+int heater_busy(void);              /* running, or its first-run confirmation is up */
 int heater_sensor(int id);          /* SYS_SENSOR_READ: 0.1 C or -1000 */
 void power_restart(int to_menu);
 void power_off_now(void);
@@ -323,4 +324,16 @@ extern uint32_t auto_off_min;       /* services.c: switch off after this many mi
 int power_auto_off(int rehearse);
 void power_screen_set(int on);
 void power_heater_took_clocks(void);
+/* Wi-Fi (wifi.c, 0.4) */
+struct sbos_wifi;
+struct sbos_wifi_net;
+int wifi_on(void);
+int wifi_power(int on);
+int wifi_scan(void);
+int wifi_join(int i);
+void wifi_status(struct sbos_wifi *s);
+int wifi_list(struct sbos_wifi_net *out, int max);
+int wifi_bar(void);
+void wifi_timer(unsigned id);
+int wifi_selftest_phase(int *done);
 void heatk_worker(unsigned w, void *arg);

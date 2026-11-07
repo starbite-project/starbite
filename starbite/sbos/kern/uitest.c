@@ -132,6 +132,8 @@ void selftest_input(void)
         return;
     active = 0;
     kt_cancel(KT_SELFTEST, 0);
+    if (phase == 13)
+        wifi_power(0);                      /* stopped during its Wi-Fi step: the radio off again */
     sb_log("selftest: a touch or key: stopped; back to the menu after 10 minutes without input");
 }
 
@@ -252,7 +254,16 @@ void selftest_timer(unsigned id)
         if (hw_a55_khz() < 1000000U)
             ++fails;
         kui_home();
-        phase = 12;
+        phase = 13;
+        sb_log("selftest: wifi: on, the bring-up and one scan (no join), then off");
+        break;
+    }
+    case 13: {                              /* Wi-Fi: on, the bring-up, one scan, off; never a join */
+        int done = 0;
+        if (!wifi_selftest_phase(&done))
+            ++fails;
+        if (done)
+            phase = 12;
         break;
     }
     case 12: {

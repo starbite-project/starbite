@@ -223,6 +223,86 @@ void model_ap_rekey(void)
     memcpy(A.gtk2, gtk2, 16);
 }
 
+/* ---- the open network's DHCP server (M.open_ap: Starbite OS's host preview) ------------------------- */
+static void dhcp_server(const uint8_t *f, unsigned len)
+{
+    const uint8_t *ip = f + 14, *udp, *b;
+    unsigned ihl, type = 0;
+    if (len >= 14 + 20 + 8 && len <= 14 + 1500 && ip[9] == 1 && ip[20] == 8) {     /* an echo request: answered */
+        uint8_t r[14 + 1500];
+        memcpy(r, f + 6, 6);
+        memcpy(r + 6, f, 6);
+        memcpy(r + 12, f + 12, len - 12);
+        memcpy(r + 14 + 12, f + 14 + 16, 4);    /* source and destination swapped */
+        memcpy(r + 14 + 16, f + 14 + 12, 4);
+        r[14 + 20] = 0;                         /* echo reply: the checksum moves by 0x0800 */
+        unsigned c = (unsigned)r[14 + 22] << 8 | r[14 + 23];
+        c += 0x0800;
+        c = (c & 0xffff) + (c >> 16);
+        r[14 + 22] = (uint8_t)(c >> 8), r[14 + 23] = (uint8_t)c;
+        model_rx(r, len);
+        return;
+    }
+    if (len < 14 + 20 + 8 + 240 || ip[9] != 17)
+        return;
+    ihl = (ip[0] & 15) * 4u;
+    udp = ip + ihl;
+    if (udp + 8 + 240 > f + len || udp[2] != 0 || udp[3] != 67)
+        return;
+    b = udp + 8;
+    if (b[0] != 1 || b[236] != 99 || b[237] != 130 || b[238] != 83 || b[239] != 99)
+        return;
+    for (const uint8_t *o = b + 240; o + 2 <= f + len && o[0] != 255;) {
+        if (o[0] == 0) {
+            o++;
+            continue;
+        }
+        if (o[0] == 53 && o[1] == 1)
+            type = o[2];
+        o += 2 + o[1];
+    }
+    if (type != 1 && type != 3)
+        return;
+    uint8_t r[14 + 20 + 8 + 300];
+    memset(r, 0, sizeof(r));
+    memcpy(r, f + 6, 6);                    /* to the station */
+    memcpy(r + 6, ap_bssid, 6);
+    r[12] = 0x08;
+    uint8_t *rip = r + 14, *rudp = rip + 20, *rb = rudp + 8;
+    rip[0] = 0x45, rip[8] = 64, rip[9] = 17;
+    rip[12] = 192, rip[13] = 168, rip[14] = 4, rip[15] = 1;
+    memset(rip + 16, 0xff, 4);
+    rudp[1] = 67, rudp[3] = 68;
+    rb[0] = 2, rb[1] = 1, rb[2] = 6;
+    memcpy(rb + 4, b + 4, 4);               /* xid */
+    rb[16] = 192, rb[17] = 168, rb[18] = 4, rb[19] = 23;    /* yiaddr */
+    memcpy(rb + 28, b + 28, 16);            /* chaddr */
+    rb[236] = 99, rb[237] = 130, rb[238] = 83, rb[239] = 99;
+    uint8_t *o = rb + 240;
+    *o++ = 53, *o++ = 1, *o++ = (uint8_t)(type == 1 ? 2 : 5);
+    *o++ = 54, *o++ = 4, *o++ = 192, *o++ = 168, *o++ = 4, *o++ = 1;
+    *o++ = 51, *o++ = 4, *o++ = 0, *o++ = 0, *o++ = 0x0e, *o++ = 0x10;     /* 3600 s */
+    *o++ = 1, *o++ = 4, *o++ = 255, *o++ = 255, *o++ = 255, *o++ = 0;
+    *o++ = 3, *o++ = 4, *o++ = 192, *o++ = 168, *o++ = 4, *o++ = 1;
+    *o++ = 6, *o++ = 4, *o++ = 192, *o++ = 168, *o++ = 4, *o++ = 1;
+    *o++ = 255;
+    unsigned blen = (unsigned)(o - rb), ulen = 8 + blen, tot = 20 + ulen;
+    rudp[4] = (uint8_t)(ulen >> 8), rudp[5] = (uint8_t)ulen;
+    rip[2] = (uint8_t)(tot >> 8), rip[3] = (uint8_t)tot;
+    uint32_t s = 0;
+    for (unsigned i = 0; i < 20; i += 2)
+        s += (uint32_t)rip[i] << 8 | rip[i + 1];
+    while (s >> 16)
+        s = (s & 0xffff) + (s >> 16);
+    s = ~s & 0xffff;
+    rip[10] = (uint8_t)(s >> 8), rip[11] = (uint8_t)s;
+    if (type == 1)
+        M.dhcp_offers++;
+    else
+        M.dhcp_acks++;
+    model_rx(r, 14 + tot);
+}
+
 /* a frame the station sent (the model's tx path) */
 void model_ap_tx(const uint8_t *f, unsigned len)
 {
@@ -231,9 +311,26 @@ void model_ap_tx(const uint8_t *f, unsigned len)
     uint8_t want[16];
 
     M.tx_seen++;
+    if (M.open_ap && len >= 14 + 28 && f[12] == 0x08 && f[13] == 0x06 && m[7] == 1 &&
+        m[24] == 192 && m[25] == 168 && m[26] == 4 && m[27] == 1) {     /* ARP: who has the router? */
+        uint8_t r[14 + 28];
+        memcpy(r, f + 6, 6);
+        memcpy(r + 6, ap_bssid, 6);
+        r[12] = 0x08, r[13] = 0x06;
+        memcpy(r + 14, m, 6);
+        r[14 + 6] = 0, r[14 + 7] = 2;           /* a reply */
+        memcpy(r + 14 + 8, ap_bssid, 6);
+        memcpy(r + 14 + 14, m + 24, 4);
+        memcpy(r + 14 + 18, m + 8, 10);         /* to the asker's address and IP */
+        model_rx(r, sizeof(r));
+        return;
+    }
     if (len < 14 || f[12] != 0x88 || f[13] != 0x8e) {
-        if (len >= 14 && f[12] == 0x08 && f[13] == 0x00)
+        if (len >= 14 && f[12] == 0x08 && f[13] == 0x00) {
             M.tx_ip++;
+            if (M.open_ap)
+                dhcp_server(f, len);
+        }
         return;
     }
     if (mlen < 99 || memcmp(f, ap_bssid, 6))
@@ -305,16 +402,17 @@ unsigned model_ap_scan_result(uint8_t *r, unsigned cap, uint16_t sync)
     put32(b, 109);
     put32(b + 4, blen);
     memcpy(b + 8, ap_bssid, 6);
-    put16(b + 16, 0x0011);              /* ESS, privacy */
+    put16(b + 16, M.open_ap ? 0x0001 : 0x0011);     /* ESS (, privacy) */
     b[18] = (uint8_t)strlen(ap_ssid);
     memcpy(b + 19, ap_ssid, strlen(ap_ssid));
     put16(b + 72, 0xd024);              /* a 5 GHz chanspec */
     put16(b + 78, (uint16_t)-48);
     put16(b + 116, 128);
-    put32(b + 120, 9 + sizeof(rsn));
+    put32(b + 120, 9 + (M.open_ap ? 0 : sizeof(rsn)));
     b[128] = 0, b[129] = 7;             /* the SSID element */
     memcpy(b + 130, ap_ssid, 7);
-    memcpy(b + 137, rsn, sizeof(rsn));
+    if (!M.open_ap)
+        memcpy(b + 137, rsn, sizeof(rsn));
     return total;
 }
 
@@ -382,7 +480,8 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
         if (dlen < 42 || le32(data) != strlen(ap_ssid) || memcmp(data + 4, ap_ssid, strlen(ap_ssid)) ||
             memcmp(data + 36, ap_bssid, 6))
             *status = (uint16_t)-1;
-        else if (A.wsec != 4 || A.wpa_auth != 0x80 || (A.sup_wpa != (M.fwsup ? 1u : 0u)))
+        else if (M.open_ap ? (A.wsec != 0 || A.wpa_auth != 0) :
+                             (A.wsec != 4 || A.wpa_auth != 0x80 || (A.sup_wpa != (M.fwsup ? 1u : 0u))))
             M.ap_errors |= 64;          /* the security settings */
         else
             A.joined = 1;
@@ -401,6 +500,8 @@ void model_ap_after(uint32_t cmd)
     memcpy(A.sta, M.mac_set[0] | M.mac_set[1] ? M.mac_set : sta, 6);
     model_event(BCMW_E_SET_SSID, 0, 0, 0, 0, 0);
     model_event(BCMW_E_LINK, 0, 1, 0, 0, 0);
+    if (M.open_ap)
+        return;                         /* open: associated is joined */
     if (M.fwsup)
         model_event(46, M.pmk_ok ? 6 : 4, 0, M.pmk_ok ? 0 : 14, 0, 0);    /* keyed, or a MIC failure */
     else

@@ -57,7 +57,7 @@ fi
 
 CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie -fvisibility=hidden \
 -nostdlib -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-plt -mstrict-align -mcpu=cortex-a55 \
--fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$here/kern -I$here/sdk -I$ut"
+-fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$here/kern -I$here/sdk -I$ut -I$root/starbite/wifi"
 V80FLAGS=$(echo "$CFLAGS" | sed 's/-mcpu=cortex-a55/-march=armv8-a+simd -mtune=cortex-a55/')
 LDFLAGS="-pie --no-dynamic-linker -z text -z norelro -z noexecstack --build-id=none --no-warn-rwx-segments --hash-style=gnu"
 
@@ -75,7 +75,7 @@ relocs_only_relative() {
 "${CROSS}gcc" $CFLAGS "$here/sdk/sbapp_lib.c" -o "$ob/app_lib.o"
 "${CROSS}gcc" $CFLAGS "$ut/tz.c" -o "$ob/app_tz.o"
 apps=""
-for a in emergency light heat sos info clock battery settings test-loop test-fault; do
+for a in emergency light heat sos info clock battery settings wifi test-loop test-fault; do
     "${CROSS}gcc" $CFLAGS "$here/apps/$a.c" -o "$ob/app_$a.o"
     extra=""
     [ "$a" = clock ] && extra="$ob/app_tz.o"
@@ -95,7 +95,10 @@ python3 "$here/tools/mk-sba.py" pack "$ob/apps.pack" $apps
 # ---- kernel ----------------------------------------------------------------------------------------
 objs=""
 v80objs=""
-for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$ut/exfat.c"; do
+wifi="$root/starbite/wifi"
+for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$ut/exfat.c" \
+           "$wifi/core.c" "$wifi/exynos_pcie.c" "$wifi/chip.c" "$wifi/fw.c" "$wifi/ring.c" "$wifi/msgbuf.c" "$wifi/link.c" \
+           "$wifi/wpa.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c"; do
     obj="$ob/k_$(basename "$src" | tr . _).o"
     flags=$CFLAGS
     case " smp.c heatk.c " in

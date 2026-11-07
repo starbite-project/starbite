@@ -601,6 +601,36 @@ running), the processor's and the cores, time left, why it stopped, an orange wa
 Display (brightness, screen-off time, refresh only on change, panel off), Alarm (the LED strobe), Heat (the GPU
 in High), About. **Emergency** (new, 9.3).
 
+### 9.4 Wi-Fi (0.4: open networks)
+
+The BCM4361 through the wifi-core session's portable core (`starbite/wifi`: bcmw, merged from
+`claude/wifi-core-c56c49`, docs/WIFI-BCM4361.md) and its IPv4 layer (sbnet: DHCP, ARP, ping, DNS), in
+`kern/wifi.c`, with the app **Wi-Fi** (id `wifi`, `SBOS_P_NET`):
+- The radio is off until the user turns it on. The bring-up runs one step per tick (the longest, the power
+  sequence, about 250 ms), then a scan; the networks are listed strongest first (open ones can be joined,
+  secured ones are shown with "Secured (later)"); a join is the non-blocking `bcmw_connect`, then DHCP, then
+  one ping of the router ("The router answers in N ms"). The status bar's Wi-Fi glyph lights when joined.
+- **Heat and Wi-Fi do not run together in 0.4**: the core's commands can wait up to 2 s for the chip, and the
+  heater's 250 ms safety ticks must never wait behind them; each refuses while the other is on.
+- Polling (every 20 ms with the screen on, 200 ms off); the chip's interrupt (SPI 253) later. Off, a restart and
+  the power-off hold the radio in reset and unpowered (`bcmw_quiesce`).
+- Writes only what `bcmw_write_allowed()` lists; the radio's files are read from VENDOR (read only). The pmsg ring
+  gets states, counts and times only: no network names, no addresses.
+- API: `SYS_NET_STATE` 140 (`struct sbos_wifi`), `SYS_WIFI_POWER` 141, `SYS_WIFI_SCAN` 142, `SYS_WIFI_LIST` 143,
+  `SYS_WIFI_JOIN` 144.
+- Host: the real core runs against the core's own register-level model (`starbite/wifi/host/model.c`), which gained
+  an open-network mode for Starbite OS's preview (`M.open_ap`: no RSN, DHCP, ARP and ping answered; the core's own
+  test keeps WPA2 and passes, 461 checks). Preview scenes `wifi`, `wifi-list`, `wifi-joined`.
+- The self-test image turns Wi-Fi on, waits for the bring-up and one scan, logs the count (`selftest: wifi:
+  networks heard: N`), and turns it off; it never joins.
+- Review (independent, of the glue): fixed before the phone request: the core's DMA blocks are reused across
+  on / off (the n-th request of a power-on gets the n-th block of the first; logged `wifi: DMA blocks: N new, M
+  reused`; host: 20 cycles, then a join); quiesce only after a successful init; DHCP starts from the tick, not
+  inside the event callback; the core's step errors reach the log (only the firmware's console is left out);
+  late scan results never change the list shown; a dead chip or a lost lease is noticed; FAILED does not block
+  the heater; the heater checks Wi-Fi again when its confirmation completes and Wi-Fi refuses while it is up; the
+  self test starts the radio from off and a touch during it turns the radio off.
+
 ### 9.3 Emergency (0.3: screens only)
 
 The red tile at the top of home. **Call 112** is a hold (1.2 s); in 0.3 it opens a page saying no call was
@@ -786,6 +816,11 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   Heat shows the temperature now, not the last session's; Brightness "Boot" after a change sends S-Boot's
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
+
+### 12.9 Version 0.4 (2026-11-08, overnight)
+
+- Wi-Fi (9.4): the core merged, the service, the app, open networks with DHCP and a router ping, the status bar's
+  glyph; heat and Wi-Fi exclusive; the self test scans once.
 
 ### 12.8 Version 0.3.2 (2026-11-07, overnight)
 
@@ -988,3 +1023,14 @@ forced restart). Cause and fixes: 8.6 and 12.5.
   dry run logged only, then saved sequence 1 to half 0, read back and picked: ok`. Then a pull of the store shows
   `SBOSSTA1` at the entry's first block and nothing else changed (compare with the backup outside the entry).
   Undo: flash the backup.
+
+### 14.7 Phone tests for 0.4 (unattended)
+
+- **T15 (the self test with Wi-Fi):** `starbite-os-0.4-selftest.img` as T11/T13. Beyond T13's lines, expect
+  `selftest: wifi: on, the bring-up and one scan (no join), then off`, the core's step lines (`wifi: pcie: ...`,
+  `wifi: chip: 7: chip 4361 revision 5`, `wifi: msgbuf: ...`), `wifi: up in N ms; scanning`, `wifi: the scan heard
+  N networks (names not logged)`, `selftest: wifi: networks heard: N`, `wifi: off (the radio held in reset and
+  unpowered)`, `selftest: passed: 25 screens, apps ok 9 ...`. The radio transmits only the scan's probe requests
+  (as T3 did). Undo: none needed (the radio is off at the end, and a reset unpowers it anyway).
+- **T16 (the user present, an open network):** the normal image; Wi-Fi → on → pick an open network (a phone's
+  hotspot without a password works) → expect "Connected", the address and "The router answers in N ms".

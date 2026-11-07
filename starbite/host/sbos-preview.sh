@@ -24,9 +24,9 @@ done
 V="limactl shell --workdir $root starbite"
 $V python3 starbite/tools/mkassets.py "$SB7" "$out/libsb-assets.sb7" >/dev/null
 $V python3 starbite/sbos/tools/mergeassets.py "$out/sbassets.sb7" "$out/libsb-assets.sb7" "$EXTRA" >/dev/null
-CF="-O1 -g -DSB_HOST -DSB_HOST_UTILITY -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I$lib -I$k -I$sdk -I$root/starbite/utility -I$root/starbite/engineer"
+CF="-O1 -g -DSB_HOST -DSB_HOST_UTILITY -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I$lib -I$k -I$sdk -I$root/starbite/utility -I$root/starbite/engineer -I$root/starbite/wifi"
 aobjs=""
-for a in emergency light heat sos info clock battery settings; do
+for a in emergency light heat sos info clock battery settings wifi; do
     $V gcc $CF -c -Dapp_event=${a}_app_event -Dsbapp_header=${a}_header -o "$out/app_$a.o" "$apps/$a.c"
     aobjs="$aobjs $out/app_$a.o"
 done
@@ -36,7 +36,10 @@ $V gcc $CF -DSBOS_KERNEL "-DSB_ASSETS=\"$out/sbassets.sb7\"" -o "$out/sbos-host"
     "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" \
     "$lib/dvfs_levels.c" "$lib/assets.S" \
     "$k/main.c" "$k/timer.c" "$k/appfmt.c" "$k/state.c" "$k/batmodel.c" "$k/heatctl.c" "$k/heater.c" "$k/heatk.c" \
-    "$k/services.c" "$k/input.c" "$k/ui.c" "$k/app.c" "$k/torch.c" "$k/panel.c" "$k/gpuheat.c" "$k/uitest.c" "$k/settings.c" "$k/slot.c" "$root/starbite/utility/tz.c" $aobjs -lm -lpthread
+    "$k/services.c" "$k/input.c" "$k/ui.c" "$k/app.c" "$k/torch.c" "$k/panel.c" "$k/gpuheat.c" "$k/uitest.c" "$k/settings.c" "$k/slot.c" "$k/wifi.c" \
+    "$root/starbite/wifi/core.c" "$root/starbite/wifi/exynos_pcie.c" "$root/starbite/wifi/chip.c" "$root/starbite/wifi/fw.c" \
+    "$root/starbite/wifi/ring.c" "$root/starbite/wifi/msgbuf.c" "$root/starbite/wifi/link.c" "$root/starbite/wifi/wpa.c" \
+    "$root/starbite/wifi/net.c" "$root/starbite/wifi/host/model.c" "$root/starbite/wifi/host/model_ap.c" "$root/starbite/utility/tz.c" $aobjs -lm -lpthread
 
 scene() {
     name=$1
@@ -77,6 +80,9 @@ scene settings-on   w:300 $OPEN t:382,2424 w:600 t:720,1789 w:300 t:720,2039 w:3
 scene settings-alarm w:300 $OPEN t:382,2424 w:600 t:557,670 w:400
 scene settings-heat w:300 $OPEN t:382,2424 w:600 t:882,670 w:400
 scene settings-about w:300 $OPEN t:382,2424 w:600 t:1207,670 w:400
+scene wifi          w:300 $OPEN t:1057,2424 w:600
+scene wifi-list     w:300 $OPEN t:1057,2424 w:600 t:720,625 w:3000
+scene wifi-joined   w:300 $OPEN t:1057,2424 w:600 t:720,625 w:3000 t:720,905 w:6000
 scene power-menu    w:300 h:p:1300 w:500
 scene focus-keys    w:300 $OPEN k:d w:200 k:d w:200 k:d w:300
 scene lock-hold     w:300 g:290,2310,0,300

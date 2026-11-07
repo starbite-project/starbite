@@ -34,6 +34,9 @@ static void dispatch_timer(unsigned owner, unsigned id)
     case KT_SOS:
         sos_timer(id);
         break;
+    case KT_WIFI:
+        wifi_timer(id);
+        break;
     case KT_STATE:
         settings_timer(id);
         break;

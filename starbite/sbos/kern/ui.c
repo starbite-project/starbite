@@ -472,6 +472,7 @@ static void build_status(void)
     ub_s(&sig, "|");
     ub_s(&sig, pill);
     ub_s(&sig, b.charger ? "|c" : "|-");
+    ub_dec(&sig, (uint64_t)wifi_bar());
     ub_dec(&sig, (uint64_t)(b.pct < 0 ? 0 : b.pct));
     if (!status_forced && !strcmp_k(sig.b, st_sig))
         return;
@@ -488,7 +489,7 @@ static void build_status(void)
         ui_text(F_STATUS, x, 76, right, C_L1);
     }
     x -= 70;
-    glyph_wifi(x, 36, 0);
+    glyph_wifi(x, 36, wifi_bar() == 2);
     x -= 78;
     glyph_signal(x, 36, 0);
     if (pill[0]) {

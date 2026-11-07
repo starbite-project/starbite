@@ -42,6 +42,11 @@ static struct heat_in last_in;
 static int stopping;                        /* stop checks in progress */
 static uint64_t stop_t;
 
+int heater_busy(void)
+{
+    return heater_running_ui() || ctl.state == HEAT_ST_CONFIRM;
+}
+
 int heater_running_ui(void)
 {
     return ctl.state == HEAT_ST_RUNNING || ctl.state == HEAT_ST_HOLDING || ctl.state == HEAT_ST_PAUSED;
@@ -630,6 +635,12 @@ void heater_timer(unsigned id)
 
 static void start_now(void)
 {
+    if (wifi_on()) {                        /* Wi-Fi came on while the confirmation was up */
+        sb_strcpy(ctl.why, sizeof(ctl.why), "Turn Wi-Fi off first (0.4: not both at once)");
+        ctl.state = HEAT_ST_REFUSED;
+        sb_log("heater: refused at the start: Wi-Fi is on");
+        return;
+    }
     struct heat_in in;
     read_inputs(&in);
     sb_mdelay(5);
@@ -701,6 +712,12 @@ int heater_request(int level, int minutes)
     }
     if (level > HEAT_HIGH)
         return SBOS_EINVAL;
+    if (wifi_on() && !heater_running_ui()) {
+        sb_strcpy(ctl.why, sizeof(ctl.why), "Turn Wi-Fi off first (0.4: not both at once)");
+        ctl.state = HEAT_ST_REFUSED;
+        sb_log("heater: refused: Wi-Fi is on");
+        return SBOS_EAGAIN;
+    }
     if (heater_running_ui()) {
         /* a level change: the controller keeps its state, the new ceiling applies */
         ctl.level = level;

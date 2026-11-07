@@ -38,7 +38,8 @@ enum {
     SYS_FILE_OPEN = 90, SYS_FILE_READ = 91,                 /* 91: added in 0.2 */
     SYS_SENSOR_READ = 100,                                  /* 0.3: temperatures */
     SYS_PHONE_STATE = 120, SYS_CALL_DIAL = 121, SYS_CALL_HANGUP = 122, SYS_SMS_SEND = 123, SYS_SMS_READ = 124,
-    SYS_NET_STATE = 140,
+    SYS_NET_STATE = 140,                                    /* 0.4: Wi-Fi's state (struct sbos_wifi) */
+    SYS_WIFI_POWER = 141, SYS_WIFI_SCAN = 142, SYS_WIFI_LIST = 143, SYS_WIFI_JOIN = 144,   /* 0.4 */
     SYS_CAM_OPEN = 160,
     SYS_MAX = 180
 };
@@ -138,6 +139,21 @@ struct sbos_sysinfo {
     int32_t screen_off_s, sleep_off_s;
 };
 
+/* Wi-Fi (0.4): open networks; secured ones are listed (their passphrase entry comes later) */
+enum { SBOS_WIFI_OFF = 0, SBOS_WIFI_STARTING, SBOS_WIFI_UP, SBOS_WIFI_SCANNING, SBOS_WIFI_JOINING, SBOS_WIFI_DHCP,
+       SBOS_WIFI_CONNECTED, SBOS_WIFI_FAILED };
+#define SBOS_WIFI_NETS 12
+struct sbos_wifi_net {
+    uint8_t ssid[33], ssid_len, bssid[6];
+    int32_t rssi, secure, channel, band5;
+};
+struct sbos_wifi {
+    int32_t state, nets, rssi, secs;    /* secs: in this state */
+    uint8_t ssid[33], ssid_len, ip[4], gateway[4];
+    int32_t ping_ms;                    /* the gateway's answer, -1 none yet */
+    char why[64];                       /* the last failure, in words */
+};
+
 /* settings (SYS_SETTING_GET / SET): until a restart in 0.2 */
 enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S = 4, SET_GPU_HEAT = 5,
        SET_BRIGHTNESS = 6 /* 0.3: 0 as the boot left it, 1 low, 2 medium, 3 normal, 4 high */,
@@ -220,6 +236,11 @@ static inline int setting_get(int id) { return (int)sbos_call(SYS_SETTING_GET, (
 static inline int setting_set(int id, int v) { return (int)sbos_call(SYS_SETTING_SET, (uint64_t)id, (uint64_t)(int64_t)v, 0, 0, 0); }
 /* the start of a file on the card (read only): bytes read, or < 0 */
 static inline int file_read(const char *path, void *buf, uint32_t cap) { return (int)sbos_call(SYS_FILE_READ, (uintptr_t)path, (uintptr_t)buf, cap, 0, 0); }
+static inline int wifi_state(struct sbos_wifi *s) { return (int)sbos_call(SYS_NET_STATE, (uintptr_t)s, 0, 0, 0, 0); }
+static inline int wifi_power(int on) { return (int)sbos_call(SYS_WIFI_POWER, (uint64_t)on, 0, 0, 0, 0); }
+static inline int wifi_scan(void) { return (int)sbos_call(SYS_WIFI_SCAN, 0, 0, 0, 0, 0); }
+static inline int wifi_list(struct sbos_wifi_net *n, int max) { return (int)sbos_call(SYS_WIFI_LIST, (uintptr_t)n, (uint64_t)max, 0, 0, 0); }
+static inline int wifi_join(int i) { return (int)sbos_call(SYS_WIFI_JOIN, (uint64_t)i, 0, 0, 0, 0); }
 static inline int sensor_read(int id) { return (int)sbos_call(SYS_SENSOR_READ, (uint64_t)id, 0, 0, 0, 0); }
 static inline int heat_request(int level, int minutes) { return (int)sbos_call(SYS_HEAT_REQUEST, (uint64_t)level, (uint64_t)minutes, 0, 0, 0); }
 static inline int heat_status(struct sbos_heat *h) { return (int)sbos_call(SYS_HEAT_STATUS, (uintptr_t)h, 0, 0, 0, 0); }
