@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../sbmali/sbm_core.h"
+#include "../common/sbw_acpm.h"
+#include "../../../xnu/src/starlte_gpu_tri.h"
 
 static int fails, checks;
 #define CHECK(c, ...)                                                                    \
@@ -37,6 +39,9 @@ struct fake {
     uint32_t dvfs_domain, dvfs_khz, dvfs_bad;
     int break_af;                         /* AArch64: treat leaves as missing AF */
     char lockaddr[64];
+    struct { uint64_t pa, size; uint8_t *host; } region[2];   /* extra memory: render target, tiler heap */
+    uint32_t tri_clear, tri_color;        /* the fake rasteriser paints x < y in tri_color on this clear */
+    int tiler_jobs;
 };
 
 static struct fake F;
@@ -89,7 +94,7 @@ static void acpm_ring(uint32_t id)
             F.dvfs_domain = cmd[0] & 0xffff;
             F.dvfs_khz = cmd[1];
             if (F.dvfs_domain != SBM_DVFS_G3D)
-                F.dvfs_bad++;
+                F.dvfs_bad += F.dvfs_domain != 2;
             F.pmic[1][SBM_BUCK6_REG] = 0x60;   /* ACPM sets its own table voltage */
         }
         uint32_t re = rxb + ESZ * g32(rxf);
@@ -106,6 +111,9 @@ static void acpm_ring(uint32_t id)
 
 static uint8_t *phys(uint64_t pa, unsigned len)
 {
+    for (int i = 0; i < 2; ++i)
+        if (F.region[i].host && pa >= F.region[i].pa && pa + len <= F.region[i].pa + F.region[i].size)
+            return F.region[i].host + (pa - F.region[i].pa);
     if (pa < MEM_PA || pa + len > MEM_PA + SBM_TEST_BYTES)
         return NULL;
     return F.mem + (pa - MEM_PA);
@@ -170,6 +178,8 @@ static void run_job(unsigned js)
         if (!p)
             return;
         memcpy(p, &imm, 8);
+    } else if (type == 7) {                       /* TILER: binning is not simulated */
+        F.tiler_jobs++;
     } else if (type == SBM_JOB_FRAGMENT) {
         uint64_t fbd = ((uint64_t)h[11] << 32 | h[10]) & ~0x3fULL;
         uint32_t *f = (uint32_t *)xlate(fbd, 192, 0);
@@ -180,9 +190,10 @@ static void run_job(unsigned js)
         for (unsigned y = 0; y < hh; ++y)
             for (unsigned x = 0; x < w; ++x) {
                 uint8_t *p = xlate(base + (uint64_t)y * f[42] + x * 4, 4, 1);
+                uint32_t v = (F.tri_clear && f[44] == F.tri_clear && x < y) ? F.tri_color : f[44];
                 if (!p)
                     return;
-                memcpy(p, &f[44], 4);
+                memcpy(p, &v, 4);
             }
     } else {
         R(0x1800 + js * 0x80 + 0x24) = 0x40;  /* JOB_CONFIG_FAULT */
@@ -269,6 +280,19 @@ static void fake_init(uint8_t *mem)
     acpm_init();
 }
 
+static int map_extra(void *ctx, struct sbm_pt *pt)
+{
+    struct { uint64_t rt_lo, rt_hi; } *c = ctx;
+    if (sbm_pt_map(pt, c->rt_lo, 0x900000000ULL, (unsigned)((c->rt_hi - c->rt_lo) / 4096), 1))
+        return -1;
+    return sbm_pt_map(pt, SG_TRI_HEAP_VA, 0x910000000ULL, SG_TRI_HEAP_BYTES / 4096, 1);
+}
+
+/* sbw_acpm accessors straight onto the fake (for the domain refusal test) */
+static uint32_t a_srd(void *c, uint32_t off) { (void)c; return g32(off); }
+static void a_swr(void *c, uint32_t off, uint32_t v) { (void)c; s32(off, v); }
+static void a_mwr(void *c, uint32_t off, uint32_t v) { (void)c; if (off == 0x08) for (uint32_t id = 0; id < 16; ++id) if (v & (1u << (id + 16))) acpm_ring(id); }
+
 int main(void)
 {
     static uint8_t mem[SBM_TEST_BYTES] __attribute__((aligned(4096)));
@@ -316,7 +340,7 @@ int main(void)
         memset(&res, 0, sizeof(res));
         int ok = 1;
         for (int i = 0; i < 20; ++i)
-            ok &= sbm_selftest_run(&io, (enum sbm_fmt)fmt, 0x5771777, mem, MEM_PA, &res);
+            ok &= sbm_selftest_run(&io, (enum sbm_fmt)fmt, 0x5771777, mem, MEM_PA, NULL, &res);
         CHECK(ok && res.write_ok == 20 && res.clear_ok == 20 && res.faults == 0, "fmt %d: 20 runs (%u/%u, %u faults)",
               fmt, res.write_ok, res.clear_ok, res.faults);
         CHECK(R(0x140) == 0 && R(0x150) == 0 && R(0x160) == 0, "fmt %d: cores off after the test", fmt);
@@ -326,7 +350,7 @@ int main(void)
     fake_init(mem);
     memset(&res, 0, sizeof(res));
     F.break_af = 1;
-    CHECK(sbm_selftest_run(&io, SBM_FMT_AARCH64, 0x5771777, mem, MEM_PA, &res) == 0 && res.faults == 1 &&
+    CHECK(sbm_selftest_run(&io, SBM_FMT_AARCH64, 0x5771777, mem, MEM_PA, NULL, &res) == 0 && res.faults == 1 &&
           res.last_as_fault == 0xc3 && res.last_as_addr == SBM_TEST_VA, "fault reported (%u, %#x @ %#llx)",
           res.faults, res.last_as_fault, (unsigned long long)res.last_as_addr);
     CHECK(R(0x1880 + 0x20) == 3, "JS1 hard-stopped");
@@ -363,6 +387,55 @@ int main(void)
               "minimum 32 KiB lock: %s", F.lockaddr);
     }
 
+    /* T8: XNU's Mesa-built triangle through both formats, heap and render target mapped by map_extra */
+    {
+        static uint8_t heap[SG_TRI_HEAP_BYTES];
+        uint64_t rt_va = 0x4000000ULL + (uint64_t)SG_TRI_RT_Y * 5760 + SG_TRI_RT_X * 4;
+        uint64_t rt_lo = rt_va & ~0xfffULL, rt_hi = (rt_va + (SG_TRI_FB_H - 1) * 5760ULL + SG_TRI_FB_W * 4 + 0xfff) & ~0xfffULL;
+        uint8_t *rt = aligned_alloc(4096, rt_hi - rt_lo);
+        struct tri_ctx { uint64_t rt_lo, rt_hi; } tc = { rt_lo, rt_hi };
+        struct sbm_tri t = { sg_tri_blob, SG_TRI_BLOB_WORDS, SG_TRI_BLOB_VA, SG_TRI_TILER_JOB, SG_TRI_FRAG_JOB, rt_va, 5760,
+                             SG_TRI_FB_W, SG_TRI_FB_H, (volatile uint32_t *)(rt + (rt_va - rt_lo)), SG_TRI_CLEAR,
+                             SG_TRI_COLOR, map_extra, &tc };
+        for (int fmt = 0; fmt < 2; ++fmt) {
+            fake_init(mem);
+            F.region[0].pa = 0x900000000ULL; F.region[0].size = rt_hi - rt_lo; F.region[0].host = rt;
+            F.region[1].pa = 0x910000000ULL; F.region[1].size = sizeof(heap); F.region[1].host = heap;
+            F.tri_clear = SG_TRI_CLEAR;
+            F.tri_color = SG_TRI_COLOR;
+            memset(&res, 0, sizeof(res));
+            int ok = 1;
+            for (int i = 0; i < 5; ++i)
+                ok &= sbm_selftest_run(&io, (enum sbm_fmt)fmt, 0x5771777, mem, MEM_PA, &t, &res);
+            CHECK(ok && res.tri_ok == 5 && res.tri_mismatch == 0 && res.tri_bad_px == 0 && F.tiler_jobs == 5,
+                  "fmt %d triangle: %u ok, %u px, %u bad, %d tiler jobs, %u faults", fmt, res.tri_ok, res.tri_px_first,
+                  res.tri_bad_px, F.tiler_jobs, res.faults);
+            CHECK(res.tri_px_first == SG_TRI_FB_W * (SG_TRI_FB_W - 1) / 2, "fake triangle pixel count %u", res.tri_px_first);
+        }
+        /* a fragment job that leaves foreign pixels is caught */
+        fake_init(mem);
+        F.region[0].pa = 0x900000000ULL; F.region[0].size = rt_hi - rt_lo; F.region[0].host = rt;
+        F.region[1].pa = 0x910000000ULL; F.region[1].size = sizeof(heap); F.region[1].host = heap;
+        F.tri_clear = SG_TRI_CLEAR;
+        F.tri_color = 0x12345678;
+        memset(&res, 0, sizeof(res));
+        CHECK(!sbm_selftest_run(&io, SBM_FMT_LEGACY, 0x5771777, mem, MEM_PA, &t, &res) && res.tri_bad_px > 0,
+              "foreign pixels caught (%u)", res.tri_bad_px);
+        free(rt);
+    }
+
+    /* DVFS: only domains 2, 3 and 4 ever reach ACPM (0 = MIF, 1 = INT never) */
+    fake_init(mem);
+    CHECK(sbm_gpu_dvfs(&io, 260000) == 0 && F.dvfs_domain == 4, "GPU DVFS uses domain 4");
+    CHECK(sbm_gpu_pll_khz(&io) == 260000, "PLL_G3D readback %u", sbm_gpu_pll_khz(&io));
+
+    {
+        struct sbw_acpm_io a = { NULL, a_srd, a_swr, a_mwr, NULL, NULL };
+        fake_init(mem);
+        CHECK(!sbw_acpm_dvfs(&a, 0, 1794000) && !sbw_acpm_dvfs(&a, 1, 534000) && !sbw_acpm_dvfs(&a, 5, 100000) &&
+              F.dvfs_khz == 0, "MIF (0), INT (1), others: refused before ACPM");
+        CHECK(sbw_acpm_dvfs(&a, 2, 1690000) && F.dvfs_domain == 2, "A55 (2) passes");
+    }
     CHECK(!strcmp(sbm_exc_name(0xc3), "TRANSLATION_FAULT") && !strcmp(sbm_exc_name(0x58), "DATA_INVALID_FAULT"), "names");
     printf("%d checks, %d failed\n", checks, fails);
     return fails != 0;

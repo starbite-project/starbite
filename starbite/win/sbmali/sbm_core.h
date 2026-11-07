@@ -140,10 +140,10 @@ void sbm_samples(sbm_u32 w[33]);
 
 /* ---- the T5 self-test ----------------------------------------------------------------------- */
 /* A work area the driver allocates: physically contiguous, CPU-uncached.
- *   +0x00000  page tables (16 tables)       +0x10000  data (64 KiB) at GPU VA SBM_TEST_VA */
-#define SBM_TEST_BYTES 0x20000U
-#define SBM_TEST_TABLES 16U
-#define SBM_TEST_DATA_OFF 0x10000U
+ *   +0x00000  page tables (32 tables)       +0x20000  data (64 KiB) at GPU VA SBM_TEST_VA */
+#define SBM_TEST_BYTES 0x30000U
+#define SBM_TEST_TABLES 32U
+#define SBM_TEST_DATA_OFF 0x20000U
 #define SBM_TEST_DATA_BYTES 0x10000U
 #define SBM_TEST_VA 0x02000000ULL
 #define SBM_TEST_W 64U
@@ -151,8 +151,25 @@ void sbm_samples(sbm_u32 w[33]);
 #define SBM_TEST_CLEAR 0xff00ff00U        /* opaque green as packed RGBA8 (R in the low byte) */
 #define SBM_TEST_MAGIC 0x4554494241425453ULL   /* "STARBITE" */
 
+/* T8: a real draw, XNU's Mesa-built triangle (xnu/src/starlte_gpu_tri.h): tiler job on JS1, fragment job on
+ * JS0. The blob is position dependent (its VAs are fixed), so the caller maps its tiler heap and a private
+ * render-target window through map_extra (called after the data pages are mapped). */
+struct sbm_pt;
+struct sbm_tri {
+    const sbm_u32 *blob;
+    unsigned words;
+    sbm_u64 blob_va, tiler_job, frag_job;         /* blob_va inside [SBM_TEST_VA, + SBM_TEST_DATA_BYTES) */
+    sbm_u64 rt_va;                                /* where the blob's render target starts */
+    unsigned rt_stride, w, h;
+    volatile sbm_u32 *rt_cpu;                     /* CPU view of rt_va (uncached) */
+    sbm_u32 clear, color;
+    int (*map_extra)(void *ctx, struct sbm_pt *pt);
+    void *ctx;
+};
+
 struct sbm_test_result {
     sbm_u32 runs, write_ok, clear_ok, faults, timeouts, reset_fail, power_fail, as_fail;
+    sbm_u32 tri_ok, tri_px_first, tri_px_last, tri_mismatch, tri_bad_px;
     sbm_u32 last_js_status, last_as_fault, last_gpu_fault;
     sbm_u64 last_as_addr;
     sbm_u32 max_us;
@@ -161,6 +178,9 @@ struct sbm_test_result {
 /* One run: reset, cores on, AS0 in fmt, WRITE_VALUE "STARBITE" (JS1) checked, a 64 x 64 fragment clear
  * (JS0) checked pixel by pixel, cores off. Returns 1 when both jobs ran right. */
 int sbm_selftest_run(const struct sbm_io *io, enum sbm_fmt fmt, sbm_u64 shaders, volatile sbm_u8 *mem_cpu,
-                     sbm_u64 mem_pa, struct sbm_test_result *res);
+                     sbm_u64 mem_pa, const struct sbm_tri *tri, struct sbm_test_result *res);
+
+/* PLL_G3D as read from CMU_G3D (domain on only), kHz. */
+sbm_u32 sbm_gpu_pll_khz(const struct sbm_io *io);
 
 #endif

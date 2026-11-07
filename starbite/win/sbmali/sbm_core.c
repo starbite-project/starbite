@@ -638,8 +638,68 @@ static void note_fail(struct sbm_test_result *res, const struct sbm_job_result *
     res->last_gpu_fault = r->gpu_fault;
 }
 
+sbm_u32 sbm_gpu_pll_khz(const struct sbm_io *io)
+{
+    sbm_u32 con0, m, p, s;
+    if (!sbm_domain_on(io))
+        return 0;
+    con0 = rd(io, SBM_CMU, 0x140U);
+    m = (con0 >> 16) & 0x3ffU;
+    p = (con0 >> 8) & 0x3fU;
+    s = con0 & 7U;
+    return (con0 & 0x10U) && p ? (sbm_u32)(26000ULL * m / ((sbm_u64)p << s)) : 26000U;
+}
+
+/* The triangle: blob copied fresh (the GPU rewrites its descriptors), render target pre-filled, tiler on
+ * JS1, fragment on JS0; every pixel of the w x h square must then be the clear or the triangle colour, and
+ * the triangle's pixel count the same in every run. */
+static int run_tri(const struct sbm_io *io, sbm_u64 shaders, volatile sbm_u8 *d, const struct sbm_tri *t,
+                   struct sbm_test_result *res)
+{
+    struct sbm_job_result r;
+    volatile sbm_u32 *blob = (volatile sbm_u32 *)(d + (t->blob_va - SBM_TEST_VA));
+    sbm_u32 color = 0, bad = 0;
+    int ok;
+    for (unsigned i = 0; i < t->words; ++i)
+        blob[i] = t->blob[i];
+    for (unsigned y = 0; y < t->h; ++y)
+        for (unsigned x = 0; x < t->w; ++x)
+            t->rt_cpu[y * (t->rt_stride / 4U) + x] = 0xa5a5a5a5U;
+    barrier(io);
+    ok = sbm_run(io, 1, 0, t->blob_va + t->tiler_job, (sbm_u32)shaders, 500000U, &r);
+    if (r.us > res->max_us)
+        res->max_us = r.us;
+    if (ok) {
+        ok = sbm_run(io, 0, 0, t->blob_va + t->frag_job, (sbm_u32)shaders, 500000U, &r);
+        if (r.us > res->max_us)
+            res->max_us = r.us;
+    }
+    if (!ok) {
+        note_fail(res, &r);
+        return 0;
+    }
+    for (unsigned y = 0; y < t->h; ++y)
+        for (unsigned x = 0; x < t->w; ++x) {
+            sbm_u32 v = t->rt_cpu[y * (t->rt_stride / 4U) + x];
+            if (v == t->color)
+                ++color;
+            else if (v != t->clear)
+                ++bad;
+        }
+    res->tri_bad_px += bad;
+    res->tri_px_last = color;
+    if (!res->tri_px_first)
+        res->tri_px_first = color;
+    else if (color != res->tri_px_first)
+        res->tri_mismatch++;
+    ok = !bad && color && color != t->w * t->h && color == res->tri_px_first;
+    if (ok)
+        res->tri_ok++;
+    return ok;
+}
+
 int sbm_selftest_run(const struct sbm_io *io, enum sbm_fmt fmt, sbm_u64 shaders, volatile sbm_u8 *mem_cpu,
-                     sbm_u64 mem_pa, struct sbm_test_result *res)
+                     sbm_u64 mem_pa, const struct sbm_tri *tri, struct sbm_test_result *res)
 {
     struct sbm_pt pt;
     struct sbm_job_result r;
@@ -662,7 +722,7 @@ int sbm_selftest_run(const struct sbm_io *io, enum sbm_fmt fmt, sbm_u64 shaders,
     }
     sbm_pt_init(&pt, fmt, (volatile sbm_u64 *)mem_cpu, mem_pa, SBM_TEST_TABLES);
     if (sbm_pt_map(&pt, SBM_TEST_VA, mem_pa + SBM_TEST_DATA_OFF, SBM_TEST_DATA_BYTES / 0x1000U, 0) ||
-        sbm_as_enable(io, 0, &pt)) {
+        (tri && tri->map_extra && tri->map_extra(tri->ctx, &pt)) || sbm_as_enable(io, 0, &pt)) {
         res->as_fail++;
         sbm_power_off(io);
         return 0;
@@ -710,6 +770,8 @@ int sbm_selftest_run(const struct sbm_io *io, enum sbm_fmt fmt, sbm_u64 shaders,
             res->clear_ok++;
     }
 
+    if (wv && clear && tri && tri->blob)
+        clear = run_tri(io, shaders, d, tri, res);
     sbm_power_off(io);
     return wv && clear;
 }

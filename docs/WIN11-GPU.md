@@ -246,6 +246,28 @@ runs WRITE_VALUE and fragment-clear jobs from the descriptors, and a fake ACPM/P
 but BUCK6 and any DVFS domain but 4. Mutation check: dropping AF from the AArch64 leaf makes all 20 fake
 runs fault.
 
+### 5.1b T8: the GPU clock and a real draw (as built)
+
+- **Clock:** `Parameters\GpuKhz` (default 572000; 0 = stay at S-Boot's 260 MHz) through ACPM DVFS **domain 4 =
+  `dvfs_g3d`**. Evidence (accepted 2026-11-07): Samsung's `cal-if/exynos9810/acpm_dvfs_exynos9810.h` orders
+  `enum acpm_dvfs_id` as mif 0, int 1, cpucl0 2, cpucl1 3, g3d 4; `cal-if.c` `cal_dfs_set_rate()` sends ACPM
+  `GET_IDX(id)`; the vendor DT gives the GPU `g3d_cmu_cal_id = <0xb040004>`; on the phone, domain 2 moved the A55
+  PLL (T6). **Code-level refusal:** `sbw_acpm_dvfs()`, the only DVFS path of every Starbite Windows driver, returns
+  without sending anything for a domain other than 2, 3 or 4 (host-tested: 0 = MIF, 1 = INT and 5 never reach
+  the fake ACPM). After each request BUCK6 goes back to 950 mV, and **PLL_G3D is read back** (CMU_G3D +0x140): if
+  it is not within 1 % of the request, 260 MHz is requested back and the test stops (`GpuClockMismatch`).
+- **Throttle**, per run from the watchdog: Warm (70 °C) 338 MHz, Hot (80 °C) 260 MHz, Stop (90 °C) ends the runs.
+  Afterwards 260 MHz first, then BUCK6 to the value found.
+- **Draw:** XNU's Mesa-built triangle blob (`xnu/src/starlte_gpu_tri.h`: tiler job on JS1, fragment job on JS0,
+  512 × 512, magenta on dark grey), copied fresh each run to its fixed VA 0x2008000; its 16 MiB tiler heap
+  (0x10000000) and its render target (the panel's VA window from 0x46AE740, stride 5760) are **the driver's own
+  pages** (`MmAllocatePagesForMdlEx`, uncached, mapped no-execute), never the panel. Every pixel of the square must
+  be the clear or the triangle colour, and the triangle's pixel count must be the same in every run.
+- **Runs:** `Parameters\Runs` default 200 per table format, each: WRITE_VALUE + 64 × 64 clear + triangle.
+- The watchdog gate now only needs a fresh reading (< 1 s; the watchdog stamps every reading), no 600 ms wait.
+- New State values: GpuKhzReq, GpuPllKhz, GpuDvfs, Throttles, GpuMaxMilliC, `*_TriOk`, `*_TriPx`,
+  `*_TriMismatch`, `*_TriBadPx`, TriAlloc, Triangle, GpuClockRestore.
+
 ### 5.2 Memory
 
 The GPU reads physical memory directly (no SysMMU in front of it on this SoC as configured by S-Boot;

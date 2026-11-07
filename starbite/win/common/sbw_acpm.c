@@ -95,7 +95,14 @@ int sbw_acpm_send(const struct sbw_acpm_io *io, sbw_u32 c, sbw_u32 cmd[4])
 
 int sbw_acpm_dvfs(const struct sbw_acpm_io *io, sbw_u32 domain, sbw_u32 khz)
 {
-    sbw_u32 c = sbw_acpm_chan(io, SBW_ACPM_DVFS_CH), cmd[4];
+    sbw_u32 c, cmd[4];
+    /* Domain ids are the indices of enum acpm_dvfs_id (Samsung kernel drivers/soc/samsung/cal-if/exynos9810/
+     * acpm_dvfs_exynos9810.h; cal-if.c cal_dfs_set_rate() sends GET_IDX(id)): 0 dvfs_mif, 1 dvfs_int,
+     * 2 dvfs_cpucl0 (A55), 3 dvfs_cpucl1 (M3), 4 dvfs_g3d (GPU). MIF and INT, and everything else, are never
+     * sent: the only domains this code will ever request are 2, 3 and 4. */
+    if (domain != 2U && domain != 3U && domain != 4U)
+        return 0;
+    c = sbw_acpm_chan(io, SBW_ACPM_DVFS_CH);
     cmd[0] = domain;
     cmd[1] = khz;
     cmd[2] = cmd[3] = 0;
