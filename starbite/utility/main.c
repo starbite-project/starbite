@@ -6,7 +6,9 @@
  *     card (read-only: it holds the Linux images and backups)
  * and a launcher (USB, Radio, Files, Measure, Everyday, Boot menu) in the menu's visual language.
  * Never writes UFS. Feeds the cluster-1 watchdog when the loader armed it (catalog wdt), so a hang comes
- * back to the loader's crash screen. */
+ * back to the loader's crash screen; with no USB host ever, no touch and no key for 10 minutes it restarts
+ * into the menu (a countdown shows in the status bar for the last minute), so an unattended start always
+ * comes back. */
 #include "sb.h"
 #include "sbui.h"
 #include "sbui_w.h"
@@ -170,7 +172,8 @@ static void card_setup(void)
 /* ---- USB -------------------------------------------------------------------------------------- */
 static char serial[33] = "STARBITE";
 static const char *usb_why = "";
-static int usb_up, usb_routed;
+static int usb_up, usb_routed, usb_ever;
+#define IDLE_EXIT_MS (10U * 60U * 1000U)               /* no host, no touch or key for 10 min: back to the menu */
 static uint64_t t_muic;
 
 static void usb_start(void)
@@ -341,13 +344,27 @@ static void act(int a)
         sb_power_off();
 }
 
+static void idle_check(void)
+{
+    if (usb_ever || usbd_configured())
+        return;
+    uint64_t idle = ui_idle_ms();
+    if (idle < IDLE_EXIT_MS)
+        return;
+    sb_log("utility: 10 minutes without a USB host, a touch or a key: back to the menu");
+    sb_reboot(SB_INFORM_NORMAL);
+}
+
 static void service(void)
 {
     struct usbd_ev e;
     wdt_feed();
+    idle_check();
     if (!usb_up)
         return;
     while (usbd_poll(&e)) {
+        if (e.type == USBD_EV_CONFIGURED && e.value == 1)
+            usb_ever = 1;
         msc_event(&e);
         if (e.type == USBD_EV_DONE && e.ep == P_ACM_OUT)
             sh_input((const volatile uint8_t *)ACM_RX, e.value);
@@ -389,9 +406,17 @@ static void status_bar(void)
     ub_s(&u, !usb_up ? "USB OFF" : usbd_configured() ? "USB: DRIVES + SHELL" : usbd_connected() ? "USB: CONNECTING" : "USB: NO HOST");
     ui_text(F_STATUS, 60, 74, u.b, usbd_configured() ? C_GREEN : C_L2);
     ub_init(&u);
-    ub_dec(&u, sb_ms() / 60000);
-    ub_s(&u, " min");
-    ui_text_r(F_STATUS, UI_W - 60, 74, u.b, C_L2);
+    uint64_t idle = ui_idle_ms();
+    int warn = !usb_ever && !usbd_configured() && idle + 60000U >= IDLE_EXIT_MS;
+    if (warn) {
+        ub_s(&u, "MENU IN ");
+        ub_dec(&u, (IDLE_EXIT_MS - (idle < IDLE_EXIT_MS ? idle : IDLE_EXIT_MS)) / 1000);
+        ub_s(&u, " S: TOUCH TO STAY");
+    } else {
+        ub_dec(&u, sb_ms() / 60000);
+        ub_s(&u, " min");
+    }
+    ui_text_r(F_STATUS, UI_W - 60, 74, u.b, warn ? C_ORANGE : C_L2);
     ui_dirty(0, 0, UI_W, UI_STATUS_H);
 }
 
