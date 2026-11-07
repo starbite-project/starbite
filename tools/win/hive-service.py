@@ -6,6 +6,7 @@
   hive-service.py IN OUT remove NAME           delete the service key
   hive-service.py IN OUT hiberboot 0|1         Control\\Session Manager\\Power\\HiberbootEnabled (fast startup)
   hive-service.py IN OUT usbfn VID:PID         Control USBFN key: one configuration, GenericUsbFn, bulk IN 0x81 + OUT 0x01
+  hive-service.py IN OUT ufx-autologger NAME   ETW boot trace of UfxSynopsys + Ufx01000 into LogFiles WMI NAME.etl
   hive-service.py IN check                     header sanity only (both sequence numbers equal = clean)
 
 IN is never modified; OUT is a new file. Defaults for add: Type 1 (kernel driver), Start 2 (auto: loaded by
@@ -178,6 +179,25 @@ def main(a):
         s += 'commit\n'
         hivexsh(work, s)
         shown = base + '\\Interfaces\\GenericUsbFn'
+    elif cmd == 'ufx-autologger':
+        # ETW boot autologger for UfxSynopsys + Ufx01000 (docs/WIN11-USB.md 5.2); arg = session name. Undo: delete the key.
+        base = f'{cs}\\Control\\WMI\\Autologger'
+        key = f'{base}\\{arg}'
+        if exists(h, key):
+            raise SystemExit(f'{key} exists already: nothing changed')
+        s = f'cd \\{base}\nadd {arg}\n'
+        s += setvals(None, key, {'Start': dword(1), 'GUID': sz(1, '{696fc72d-68b5-47e1-8806-aac101ebe127}'),
+                                 'FileName': sz(1, f'%SystemRoot%\\System32\\LogFiles\\WMI\\{arg}.etl'),
+                                 'LogFileMode': dword(0x10000001), 'MaxFileSize': dword(64),
+                                 'BufferSize': dword(64), 'FlushTimer': dword(1), 'ClockType': dword(2)})
+        for prov in ('{49b12c7c-4bd5-4f93-bb75-30fce739600b}', '{e98ebdbf-3058-4784-8521-47860b1d2b8e}'):
+            s += f'cd \\{key}\nadd {prov}\n'
+            s += setvals(None, f'{key}\\{prov}', {'Enabled': dword(1), 'EnableLevel': dword(5),
+                                                   'EnableFlags': dword(0xFFFFFFFF),
+                                                   'MatchAnyKeyword': (11, struct.pack('<Q', 0xFFFFFFFFFFFFFFFF))})
+        s += 'commit\n'
+        hivexsh(work, s)
+        shown = key
     else:
         raise SystemExit(__doc__)
 
