@@ -60,6 +60,9 @@ typedef struct _SD_DEVICE {
     FAST_MUTEX DsimLock;
     UCHAR Level;
     ULONG Presents, Flips, Fallbacks, BrightnessSets, BrightnessFails;
+    ULONG64 RateT0;                       /* presents per second, over 1 s windows */
+    ULONG RateCount, RateLast, RateMax;
+    BOOLEAN Timing60;                     /* Parameters\Timing60: report a full 60 Hz timing (see FillSignal) */
     ULONG64 Seen;
     HANDLE GuardThread;
     PKTHREAD GuardThreadObj;
@@ -239,17 +242,23 @@ static void FillSourceMode(PSD_DEVICE Dev, D3DKMDT_VIDPN_SOURCE_MODE *M)
     M->Format.Graphics.PixelValueAccessMode = D3DKMDT_PVAM_DIRECT;
 }
 
+/* The panel's own timing (vendor DT s6e3ha8_ddi: 60 Hz, h-porch 2/2/2, v-porch 15/3/1 -> 1446 x 2979 total at
+ * 1440 x 2960), scaled with the mode: with Timing60 for the monitor and the target mode; otherwise the target mode leaves the frequencies unspecified as Basic Display does (and Windows
+ * then shows "64 Hz", Basic Display's well-known figure; the panel refreshes at 60 Hz regardless: its TE). */
 static void FillSignal(PSD_DEVICE Dev, D3DKMDT_VIDEO_SIGNAL_INFO *S)
 {
+    /* without Timing60: exactly T7's proven signal (no blanking) */
+    ULONG ht = Dev->Lw + (Dev->Timing60 ? 6 / Dev->Scale : 0), vt = Dev->Lh + (Dev->Timing60 ? 19 / Dev->Scale : 0);
     S->VideoStandard = D3DKMDT_VSS_OTHER;
-    S->TotalSize.cx = Dev->Lw;
-    S->TotalSize.cy = Dev->Lh;
-    S->ActiveSize = S->TotalSize;
+    S->TotalSize.cx = ht;
+    S->TotalSize.cy = vt;
+    S->ActiveSize.cx = Dev->Lw;
+    S->ActiveSize.cy = Dev->Lh;
     S->VSyncFreq.Numerator = 60;
     S->VSyncFreq.Denominator = 1;
-    S->HSyncFreq.Numerator = 60 * Dev->Lh;
+    S->HSyncFreq.Numerator = 60 * vt;
     S->HSyncFreq.Denominator = 1;
-    S->PixelRate = (SIZE_T)Dev->Lw * Dev->Lh * 60;
+    S->PixelRate = (SIZE_T)ht * vt * 60;
     S->ScanLineOrdering = D3DDDI_VSSLO_PROGRESSIVE;
 }
 
@@ -400,6 +409,8 @@ NTSTATUS SdStartDevice(IN_CONST_PVOID MiniportDeviceContext, IN_PDXGK_START_INFO
                  dev->Fb.Pitch == dev->Fb.Width * 4 ? 2 : 1;
     dev->Lw = dev->Fb.Width / dev->Scale;
     dev->Lh = dev->Fb.Height / dev->Scale;
+    dev->Timing60 = Param(L"Timing60", 0) != 0;
+    Log(L"Timing60", dev->Timing60, FALSE);
     Log(L"Scale", dev->Scale, FALSE);
     Log(L"ModeWidth", dev->Lw, FALSE);
     Log(L"ModeHeight", dev->Lh, FALSE);
@@ -775,12 +786,15 @@ static NTSTATUS AddTargetMode(PSD_DEVICE Dev, const DXGK_VIDPN_INTERFACE *VidPn,
     st = setIf->pfnCreateNewModeInfo(set, &mode);
     if (NT_SUCCESS(st)) {
         FillSignal(Dev, &mode->VideoSignalInfo);
-        /* Frequencies unspecified, as Basic Display (malidod run 4: INVALID_FREQUENCY otherwise). */
+        if (!Dev->Timing60) {
+        /* Frequencies unspecified, as Basic Display (malidod run 4: INVALID_FREQUENCY otherwise, with a timing
+         * that had no blanking; Timing60 tries the panel's real one). */
         mode->VideoSignalInfo.VSyncFreq.Numerator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
         mode->VideoSignalInfo.VSyncFreq.Denominator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
         mode->VideoSignalInfo.HSyncFreq.Numerator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
         mode->VideoSignalInfo.HSyncFreq.Denominator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
         mode->VideoSignalInfo.PixelRate = D3DKMDT_FREQUENCY_NOTSPECIFIED;
+        }
         mode->Preference = D3DKMDT_MP_PREFERRED;
         st = setIf->pfnAddMode(set, mode);
         if (!NT_SUCCESS(st))
@@ -1036,9 +1050,24 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
 
     MmUnlockPages(mdl);
     IoFreeMdl(mdl);
+    {
+        ULONG64 now = KeQueryInterruptTime();
+        if (!dev->RateT0)
+            dev->RateT0 = now;
+        dev->RateCount++;
+        if (now - dev->RateT0 >= 10000000ULL) {
+            dev->RateLast = (ULONG)(dev->RateCount * 10000000ULL / (now - dev->RateT0));
+            if (dev->RateLast > dev->RateMax)
+                dev->RateMax = dev->RateLast;
+            dev->RateCount = 0;
+            dev->RateT0 = now;
+        }
+    }
     if (++dev->Presents == 1 || (dev->Presents & 1023) == 0) {
         Log(L"Presents", dev->Presents, dev->Presents == 1);
         Log(L"Flips", dev->Flips, FALSE);
+        Log(L"PresentsPerSecMax", dev->RateMax, FALSE);   /* how fast Windows really draws: the ceiling */
+        Log(L"PresentsPerSecLast", dev->RateLast, FALSE);
     }
     return STATUS_SUCCESS;
 }

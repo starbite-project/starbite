@@ -425,6 +425,45 @@ Windows' "turn off display" → `DxgkDdiSetPowerState` on the monitor child. Fir
 frame only (no DCS). Panel display-off/sleep (DCS 0x28 / 0x10, proven on Linux with a 120 ms wake delay)
 comes later behind a registry switch, since a panel that does not wake stays dark until reboot.
 
+### 7.6a Refresh rate: what Windows shows, and overclocking (research, 2026-11-07)
+
+**"64 Hz" in Windows is a label.** sbdisplay copies Basic Display: the target mode leaves its frequencies
+unspecified (malidod run 4 failed with a timing that had no blanking), and Windows then shows 64 Hz, the figure
+Basic Display is known for **[believed, not looked up]**. The panel refreshes at its own fixed rate whatever Windows says: it is
+a MIPI command-mode panel, and DECON sends a frame on each of the panel's TE pulses. `Parameters\Timing60` = 1
+reports the panel's real timing instead (vendor DT `s6e3ha8_ddi`: 60 Hz, h-porch 2/2/2, v-porch 15/3/1 → 1446 ×
+2979 total, scaled with the mode), so Windows shows 60 Hz; untested, so off by default (risk: a mode Windows
+rejects → black screen → guard/kill file). sbdisplay now also measures how often Windows really presents
+(`State\PresentsPerSecMax`, `PresentsPerSecLast`, over 1 s windows): if that stays under 60, a faster panel
+gives nothing.
+
+**Overclocking the panel (70 Hz+): facts.**
+- In command mode the refresh is the **panel's internal scan rate** (its oscillator and porches); DECON only
+  answers TE. The DSI link is not the limit: 4 lanes × 898 Mbps with 3:1 DSC move a 1440 × 2960 frame in about
+  10 ms (about 95 frames/s at most).
+- The S6E3HA8 in the S9 is a **60 Hz-only DDI**: the vendor DT says `timing,refresh = <60>`, and the vendor panel
+  driver (`ref/starlte-kernel/.../panel/s6e3ha8/`) has no frame-rate control, no VRR or high-refresh tables
+  (its only frame constant is "wait 1 frame in 60 Hz"). Samsung's 120 Hz panels of later phones change the rate
+  with oscillator/porch sequences behind the level-2/3 keys; for the HA8 those registers are not in any source
+  we have.
+- Risks on this OLED: gamma, AOR and ELVSS are calibrated (MTP) at 60 Hz, so another rate can shift brightness
+  and colour or flicker; a wrong register behind the level-3 key (`FC 5A 5A`) can reach the panel's OTP/MTP
+  and destroy its calibration (the brightness research's "never send" list). No safe overclock for the S9's
+  panel is known to us.
+- A setting would not persist: S-Boot re-initialises the panel at every boot, so a reboot always restores 60 Hz.
+
+**Plan if pursued (later, reviewed, user present, no DECON/DSIM writes before):** (1) measure first: Windows'
+real present rate (above) and the panel's TE period from DECON's frame-start interrupt timestamps (read-only);
+(2) read-only DCS reads of candidate DDI registers next to S-Boot's init sequence, to find the oscillator/porch
+setting; (3) only if a documented or clearly observable setting turns up: one runtime panel command from
+sbdisplay, `Parameters\RefreshHz` (default 60, so deleting the value or a reboot is the fallback), with the boot
+guard and the kill file. Until (1) shows Windows presenting at 60/s, the bigger gain is rendering on the GPU
+(stage 4).
+
+**Panel-side scaling (alternative to 2x copies):** the panel's DDI has its own scaler for the S9's
+WQHD+/FHD+/HD+ settings (vendor DT `mres`: 1440 × 2960, 1080 × 2220, 720 × 1480; panel command `BA ...`, CASET/
+PASET). Using it means reprogramming DECON, DSC and the panel: a later stage with the same care.
+
 ### 7.6 What it never does
 
 Reset or reconfigure DECON, DPP/IDMA formats or sizes, DSIM PLL/clock/lanes, DSC, the panel's init, gamma,
