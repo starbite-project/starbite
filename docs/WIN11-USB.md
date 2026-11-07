@@ -586,8 +586,15 @@ something by the reported cache line or cache size can then divide by zero. The 
 - Test image: **src38 + only that module** (no USB module, no blobs), `starbite-uefi-pptt-only-rel.bin`
   (`UEFI_TARGET=RELEASE PPTT=1 SUFFIX=-rel tools/woa/build-win-usbhost.sh`). Passes if OneDriveSetup
   and WerFault stop failing; Windows must still show 4 CPUs.
+- Windows' Application log (2026-11-07, `results-t5c`): every 0xC0000094 is in **xtajit64.dll**
+  10.0.22621.7582 (the x64/ARM64EC emulator) at offset 0x30C70, during its start, in DllHost,
+  backgroundTaskHost, tzsync and the Start menu's shell (MoAppCrash of MicrosoftWindows.Client.CBS):
+  x64/ARM64EC code anywhere dies. Not analysed inside the emulator; the PPTT image is the experiment.
+- Combined image for one boot with the L1 trace: `starbite-uefi-usb-ufn-device-gpu-pptt.bin`
+  (`ONLY=usb-ufn-device PPTT=1 EXTRA_AML=<StarbiteGpu.aml> SUFFIX=-gpu-pptt`): device role, `SBUSBUFN`,
+  `SBGPU` and the PPTT fix; it fits.
 - Space: the release's outer volume has a fixed slot for the compressed DXE volume (0x51000);
-  USB + SSDT/PPTT + the USB and GPU blobs are 88 bytes over. Before combining everything, room must
+  the host-role USB image + SSDT/PPTT + the USB and GPU blobs is 88 bytes over. Before combining everything, room must
   be made (candidates: the release's SerialDxe, which nothing consumes without a TerminalDxe, or
   shorter log strings in Star2LteUsbDxe).
 - Risk: CLIDR/CCSIDR reads at boot (our XNU and Linux read them on this phone too); a malformed PPTT

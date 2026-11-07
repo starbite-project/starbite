@@ -32,6 +32,8 @@ RTC=b336f62d-4135-4a55-ae4e-4971bbf0885d
 USBDXE=93eb628b-5eff-4ae2-834d-cf7aaf7bdc7c
 SSDTDXE=5dd14183-80d0-4d05-938e-f74bc42e4e6a
 PPTT=${PPTT:-0}                                   # 1: Star2LteSsdtDxe also fixes the PPTT (section 10)
+PPTT_ONLY=${PPTT_ONLY:-0}                         # 1: only the isolated PPTT image (src38 + that module)
+ONLY=${ONLY:-}                                    # build only this image name (e.g. usb-ufn-device)
 # Our modules' edk2 target. RELEASE drops their DEBUG (serial-only) output; their log goes to the
 # RAM rings either way (StarbiteLog.h). Needed when the volume is full: the release's outer FV has
 # a fixed slot for the compressed DXE volume.
@@ -81,6 +83,7 @@ echo "identity: byte-identical to src38.fd"
 export PATCHES='tools/woa/patches/000[125]-*.patch tools/woa/patches/001[89]-*.patch tools/woa/patches/002[0-4]-*.patch'
 image() {   # image NAME ROLE ACPI VBUS BLOB
     local name=$1 role=$2 acpi=$3 vbus=$4 blob=$5
+    [ -z "$ONLY" ] || [ "$ONLY" = "$name" ] || return 0
     echo "== $name: role $role, ACPI layout $acpi, VBUS $vbus, blob $blob"
     tools/woa/build-uefi.sh "$UEFI_TARGET" -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_USB_DXE=TRUE -D STAR2LTE_SSDT_DXE=TRUE \
         -D STARBITE_USB_ROLE=$role -D STARBITE_USB_ACPI=$acpi -D STARBITE_USB_VBUS=$vbus -D STARBITE_PPTT_FIX=$PPTT | tail -1
@@ -97,7 +100,7 @@ image() {   # image NAME ROLE ACPI VBUS BLOB
     python3 tools/woa/dxe-diff.py "$W/src38.fd" "$out/$name.fd"
     cat "$out/src38-bootshim.bin" "$out/$name.fd" > "$out/starbite-uefi-$name$SUFFIX.bin"
 }
-if [ "$PPTT" = 1 ]; then
+if [ "$PPTT_ONLY" = 1 ]; then
     # The PPTT experiment alone: src38 + Star2LteSsdtDxe with the PPTT fix, no USB module and no
     # blobs (the 0xC0000094 crashes happen on plain src38). The USB images with the fix don't fit
     # the release's DXE slot yet (section 10).
@@ -117,7 +120,7 @@ image usbh-vbus0 0 0 0 UsbXhc
 image usbh-vbus1 0 0 1 UsbXhc
 image usb-urs-auto 2 1 0 UsbUrs
 image usb-ufn-device 1 2 0 UsbUfn
-(cd "$out" && shasum -a 256 starbite-uefi-usbh-vbus0$SUFFIX.bin starbite-uefi-usbh-vbus1$SUFFIX.bin \
-    starbite-uefi-usb-urs-auto$SUFFIX.bin starbite-uefi-usb-ufn-device$SUFFIX.bin \
+(cd "$out" && shasum -a 256 $(ls starbite-uefi-usbh-vbus0$SUFFIX.bin starbite-uefi-usbh-vbus1$SUFFIX.bin \
+    starbite-uefi-usb-urs-auto$SUFFIX.bin starbite-uefi-usb-ufn-device$SUFFIX.bin 2>/dev/null) \
     acpi/*.aml ${EXTRA_AML:-} > usbh-SHA256SUMS$SUFFIX && cat usbh-SHA256SUMS$SUFFIX)
 rm -rf tools/woa/__pycache__
