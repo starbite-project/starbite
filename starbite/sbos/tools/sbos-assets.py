@@ -55,6 +55,11 @@ ICONS = {
     'menu': '<rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/>'
             '<rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/>',
     'lock': '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
+    # 0.3.2: Emergency (a handset with a cross), Wi-Fi (for the radio's tile when it comes)
+    'emergency': '<path d="M5.6 5.2h2.7l1.4 4.1-2 1.5a11 11 0 0 0 5.6 5.6l1.5-2 4.1 1.4v2.7a2 2 0 0 1-2.2 2'
+                 'A15.5 15.5 0 0 1 3.6 7.4a2 2 0 0 1 2-2.2z"/><path d="M18 2.5v5.5"/><path d="M15.25 5.25h5.5"/>',
+    'wifi': '<path d="M2.5 9a14 14 0 0 1 19 0"/><path d="M5.8 12.6a9.2 9.2 0 0 1 12.4 0"/>'
+            '<path d="M9.1 16.1a4.4 4.4 0 0 1 5.8 0"/><circle cx="12" cy="19.4" r=".6"/>',
 }
 # id: (icon, px, stroke in 24-unit) -- ids must match starbite/sbos/kern/ui.c ICON_*
 ICON_IDS = {
@@ -62,6 +67,7 @@ ICON_IDS = {
     204: ('battery', 150, 1.6), 205: ('settings', 150, 1.6), 206: ('info', 150, 1.6),
     220: ('back', 64, 2.4), 221: ('power', 96, 2.0), 222: ('moon', 96, 2.0), 223: ('restart', 96, 2.0),
     224: ('menu', 96, 2.0), 225: ('lock', 64, 2.2), 226: ('light', 96, 2.0), 227: ('sos', 96, 2.0),
+    207: ('emergency', 150, 1.6), 208: ('wifi', 150, 1.6), 228: ('emergency', 96, 2.0),
 }
 
 

@@ -86,6 +86,14 @@ int sb_blk_write(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const v
     return sb_fence_active() ? 0 : -99;
 }
 
+/* the volatile writer's path (FUA + cache flush): recorded the same way */
+static int sync_writes;
+int sb_blk_write_sync(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src)
+{
+    ++sync_writes;
+    return sb_blk_write(medium, lu, lba, n, src);
+}
+
 /* kern.c's worker helpers */
 static struct sb_wslot slots[SB_NCORES];
 struct sb_wslot *sb_smp_own_slot(unsigned w) { return w < SB_NCORES ? &slots[w] : 0; }
@@ -472,6 +480,34 @@ static void test_fence(void)
     complete(&a);
     CHECK(sb_gate_open(&a) && sb_write_store(SB_MED_UFS, base + 2000, 1, blk) == SB_W_AUTH, "SYSTEM authorisation does not cover the store");
     sb_gate_close();
+
+    /* the standing grant for one volatile store entry (Starbite OS's state slot): only the store's data area
+     * (never the header, settings or directory blocks 0..6), UFS only, at most 1024 blocks; writes only inside */
+    writes = sync_writes = 0;
+    CHECK(sb_write_volatile(SB_MED_UFS, base + 500, 1, blk) == SB_W_AUTH && writes == 0, "volatile write without a grant refused");
+    CHECK(!sb_volatile_grant(SB_MED_UFS, base + 1, 4, "x"), "a grant over the store header refused");
+    CHECK(!sb_volatile_grant(SB_MED_UFS, base + 3, 8, "x"), "a grant over the directory refused");
+    CHECK(!sb_volatile_grant(SB_MED_UFS, base + 990, 20, "x"), "a grant past the store's used end refused");
+    CHECK(!sb_volatile_grant(SB_MED_UFS, base + 7, 1025, "x"), "a grant of more than 1024 blocks refused");
+    CHECK(!sb_volatile_grant(SB_MED_SD, base + 500, 256, "x"), "a grant on the card refused");
+    CHECK(!sb_volatile_grant(SB_MED_UFS, 30000, 256, "x"), "a grant outside the store (SYSTEM) refused");
+    CHECK(sb_write_volatile(SB_MED_UFS, base + 500, 1, blk) == SB_W_AUTH && writes == 0, "a refused grant leaves none");
+    CHECK(sb_volatile_grant(SB_MED_UFS, base + 500, 256, "sbos-state"), "a grant of the entry's blocks");
+    CHECK(sb_write_volatile(SB_MED_UFS, base + 500, 1, blk) == 0 && writes == 1 && sync_writes == 1 &&
+          w_lba == base + 500, "a volatile write inside the grant (FUA + flush path)");
+    CHECK(sb_write_volatile(SB_MED_UFS, base + 755, 1, blk) == 0 && writes == 2, "the grant's last block");
+    CHECK(sb_write_volatile(SB_MED_UFS, base + 756, 1, blk) == SB_W_RANGE && writes == 2, "one past the grant refused");
+    CHECK(sb_write_volatile(SB_MED_UFS, base + 499, 2, blk) == SB_W_RANGE && writes == 2, "a write straddling the start refused");
+    CHECK(sb_write_volatile(SB_MED_UFS, base + 1, 1, blk) == SB_W_RANGE && writes == 2, "the store header through the grant refused");
+    CHECK(sb_write_volatile(SB_MED_UFS, base + 700, 0, blk) == SB_W_RANGE, "an empty volatile write refused");
+    CHECK(sb_write_volatile(SB_MED_UFS, ~0ULL - 1, 4, blk) == SB_W_RANGE && writes == 2, "a wrapping volatile write refused");
+    sb_fence_dry_run(1);
+    CHECK(sb_write_volatile(SB_MED_UFS, base + 600, 1, blk) == SB_W_DRYRUN && writes == 2, "a dry run writes nothing");
+    sb_fence_dry_run(0);
+    CHECK(sb_write(SB_MED_UFS, 0, base + 600, 1, blk) == SB_W_AUTH && writes == 2, "the grant is not a gate authorisation");
+    CHECK(sb_write_store(SB_MED_UFS, base + 600, 1, blk) == SB_W_AUTH && writes == 2, "nor a store authorisation");
+    sb_volatile_grant(SB_MED_UFS, 0, 0, 0);
+    CHECK(sb_write_volatile(SB_MED_UFS, base + 600, 1, blk) == SB_W_AUTH && writes == 2, "a cleared grant writes nothing");
 
     /* exhaustive: every partition x confirmed tier x every subset of steps */
     unsigned wrong = 0, ok_writes = 0;

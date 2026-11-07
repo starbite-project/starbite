@@ -16,6 +16,19 @@ int sb_blk_read(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, void *ds
     return -1;
 }
 
+/* The same with forced unit access, then the device's cache flushed (UFS only; the fence's volatile writer). */
+int sb_blk_write_sync(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src)
+{
+    if (medium != SB_MED_UFS)
+        return -1;
+    ufs_fua = 1;
+    int r = ufs_write_blocks(lu, lba, n, (uintptr_t)src);
+    ufs_fua = 0;
+    if (!r)
+        r = ufs_sync_cache(lu);
+    return r;
+}
+
 int sb_blk_write(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src)
 {
     if (medium == SB_MED_UFS)

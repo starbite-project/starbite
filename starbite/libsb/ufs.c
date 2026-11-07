@@ -48,6 +48,8 @@ static void u8w(uintptr_t a, uint8_t v)
 
 /* Run the UPIU at U_UCD in slot 0. dd: 0 none, 1 memory to device, 2 device to memory; len bytes
  * into buf in 4 KiB PRDT entries (16 bytes each). 0 on success. */
+static unsigned ufs_ring_s = 2;        /* a command's timeout, s (10 for SYNCHRONIZE CACHE) */
+
 static int ufs_ring(unsigned dd, uint32_t len, int scsi, uintptr_t buf)
 {
     volatile uint32_t *d = (volatile uint32_t *)U_UTRL;
@@ -74,7 +76,7 @@ static int ufs_ring(unsigned dd, uint32_t len, int scsi, uintptr_t buf)
     __asm__ volatile("dsb sy" : : : "memory");
     wr(UFS_NEXUS, scsi ? rd(UFS_NEXUS) | 1U : rd(UFS_NEXUS) & ~1U);
     wr(UFS + 0x58, 1);
-    uint64_t t0 = sb_ticks(), lim = sb_freq() * 2U;
+    uint64_t t0 = sb_ticks(), lim = sb_freq() * (uint64_t)ufs_ring_s;
     while (rd(UFS + 0x58) & 1U) {
         if (sb_ticks() - t0 > lim) {
             wr(UFS + 0x5c, 1U);
@@ -97,11 +99,18 @@ static int cdb_allowed(uint8_t op)
     return op == 0x00 || op == 0x12 || op == 0x1b || op == 0x28;
 }
 
+static int scsi_cmd(const uint8_t *cdb, unsigned cdb_len, uint32_t len, uintptr_t buf);
+
 /* SCSI command to ufs_lun; len bytes in (data direction device to memory) into buf. */
 static int ufs_scsi_to(const uint8_t *cdb, unsigned cdb_len, uint32_t len, uintptr_t buf)
 {
     if (!cdb_len || !cdb_allowed(cdb[0]))
         return -6;
+    return scsi_cmd(cdb, cdb_len, len, buf);
+}
+
+static int scsi_cmd(const uint8_t *cdb, unsigned cdb_len, uint32_t len, uintptr_t buf)
+{
     u_zero(U_UCD, 1024);
     u8w(U_UCD + 0, 0x01);
     u8w(U_UCD + 1, !len ? 0x00 : 0x40);
@@ -225,8 +234,8 @@ static int write10_one(uint64_t lba, uintptr_t src)
     for (unsigned i = 0; i < 512; ++i)
         st[i] = in[i];
     __asm__ volatile("dsb sy" : : : "memory");
-    uint8_t cdb[10] = { 0x2a, 0, (uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8),
-                        (uint8_t)lba, 0, 0, 1, 0 };
+    uint8_t cdb[10] = { 0x2a, ufs_fua ? 0x08 : 0, (uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8),
+                        (uint8_t)lba, 0, 0, 1, 0 };     /* FUA: the block is on the flash when the command ends */
     u_zero(U_UCD, 1024);
     u8w(U_UCD + 0, 0x01);
     u8w(U_UCD + 1, 0x20);                   /* write */
@@ -242,6 +251,26 @@ static int write10_one(uint64_t lba, uintptr_t src)
     if (r)
         return r;
     return (ufs_resp != 0x21 || ufs_qresp || ufs_status) ? -3 : 0;
+}
+
+int ufs_fua;
+
+/* SYNCHRONIZE CACHE(10) of the whole LU (no data): only inside the fence, after its writes. */
+int ufs_sync_cache(unsigned lu)
+{
+    if (!sb_fence_active() || lu > 7)
+        return -6;
+    if (!ufs_up())
+        return -5;
+    static const uint8_t cdb[10] = { 0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    ufs_lun = (uint8_t)lu;
+    int r = -1;
+    ufs_ring_s = 10;                        /* a flush of the whole LU may take longer than a read */
+    for (int a = 0; a < 3 && r; ++a)
+        r = scsi_cmd(cdb, sizeof(cdb), 0, 0);
+    ufs_ring_s = 2;
+    ufs_lun = 0;
+    return r;
 }
 
 int ufs_write_blocks(unsigned lu, uint64_t lba, uint64_t count, uintptr_t src)

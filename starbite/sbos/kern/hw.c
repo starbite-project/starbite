@@ -246,22 +246,6 @@ int hw_m3_on(void)
     return sb_m3_on();
 }
 
-/* The state slot (doc 6.2 / 6.3): none until the UFS writer for the "sbos-state" store entry exists. */
-int hw_slot_read(uint8_t *h0, uint8_t *h1)
-{
-    (void)h0;
-    (void)h1;
-    return 0;
-}
-
-int hw_slot_write(int half, const uint8_t *src, uint32_t n)
-{
-    (void)half;
-    (void)src;
-    (void)n;
-    return 0;
-}
-
 void hw_screen(int on)
 {
     panel_screen(on);                                   /* v0.2: the panel's own off / on (if turned on) */

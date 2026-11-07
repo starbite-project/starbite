@@ -223,6 +223,65 @@ static void set_state(int ps)
     }
 }
 
+/* ---- low power with the screen off (docs/STARBITE-OS.md 4.2, 0.3.2) -------------------------------------
+ * The A55 cluster drops to its lowest listed level (455 MHz) while the screen is off and nothing heats, and goes
+ * back to S-Boot's 1053 MHz when the screen comes on (the heater sets its own levels and restores 1053 itself).
+ * Through the listed ACPM path with a PLL read-back; never MIF or INT. */
+#define A55_LOW 455000U
+#define A55_NORMAL 1053000U
+static int a55_lowered;
+uint32_t auto_off_min;                      /* settings: switch off after this long with the screen off (0 never) */
+
+static void log_mhz(const char *a, uint32_t khz, const char *b)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, a);
+    ub_dec(&u, khz / 1000U);
+    ub_s(&u, b);
+    sb_log(u.b);
+}
+
+static int a55_near(uint32_t want)
+{
+    uint32_t got = hw_a55_khz();
+    return got && got <= want + want / 50U && got + want / 50U >= want;
+}
+
+static void a55_low(int low)
+{
+    if (low) {
+        if (heater_running_ui() || a55_lowered)
+            return;
+        uint32_t was = hw_a55_khz();
+        if (!hw_dvfs(DVFS_A55, A55_LOW)) {
+            sb_log("power: the A55 did not take 455 MHz (ACPM)");
+            return;
+        }
+        for (int i = 0; i < 5 && !a55_near(A55_LOW); ++i)
+            sb_mdelay(1);
+        a55_lowered = 1;
+        log_mhz(a55_near(A55_LOW) ? "power: A55 at 455 MHz with the screen off (was " :
+                                    "power: A55 asked for 455 MHz, the PLL does not show it (was ", was, " MHz)");
+        return;
+    }
+    if (!a55_lowered)
+        return;
+    a55_lowered = 0;
+    if (heater_running_ui())
+        return;                             /* the heater owns the clocks now */
+    if (!hw_dvfs(DVFS_A55, A55_NORMAL))
+        sb_log("power: the A55 did not take 1053 MHz back (ACPM)");
+    for (int i = 0; i < 5 && !a55_near(A55_NORMAL); ++i)
+        sb_mdelay(1);
+    log_mhz("power: A55 back at ", hw_a55_khz(), " MHz with the screen on");
+}
+
+void power_heater_took_clocks(void)
+{
+    a55_lowered = 0;
+}
+
 static void screen(int on)
 {
     if (K.screen_on == on)
@@ -237,10 +296,15 @@ static void screen(int on)
         set_state(heater_running_ui() ? PS_HEAT : PS_SCREEN_OFF);
         kt_cancel(KT_POWER, 1);
         sb_log("sbos: screen off");
+        a55_low(1);
+        if (auto_off_min)
+            kt_set(KT_POWER, 2, sb_ms(), auto_off_min * 60000U, 0);
     } else {
         set_state(heater_running_ui() ? PS_HEAT : PS_ACTIVE);
         kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+        kt_cancel(KT_POWER, 2);
         sb_log("sbos: screen on");
+        a55_low(0);
     }
     kt_set(KT_INPUT, 1, sb_ms(), on ? 16 : 100, 1);
     kt_set(KT_BATTERY, 1, sb_ms(), on ? 2000 : 60000, 0);
@@ -266,6 +330,12 @@ void power_key_short(void)
         kui_lock();
 }
 
+/* the self test: the screen off and on again as the Power key would */
+void power_screen_set(int on)
+{
+    screen(on);
+}
+
 void power_key_long(void)
 {
     if (!K.screen_on)
@@ -273,9 +343,46 @@ void power_key_long(void)
     kui_power_menu();
 }
 
+/* Switch off after auto_off_min minutes with the screen off (docs 4.4): only when nothing needs the phone on
+ * (no charger, no heat, alarm or light, the battery read and above 3 %), after every app got EV_APP_SAVE and the
+ * settings were written (FUA + cache flush, where the "sbos-state" entry exists). rehearse: everything but the
+ * power-off (the self-test image). 1 it would switch off / did, 0 something kept it on (logged). */
+int power_auto_off(int rehearse)
+{
+    const char *why = 0;
+    if (bat.ok && bat.charger)
+        why = "a charger is connected";
+    else if (heater_running_ui())
+        why = "heating";
+    else if (sos_active())
+        why = "the alarm runs";
+    else if (torch_on())
+        why = "the LED is on";
+    else if (!bat.ok || bat.pct <= 3)
+        why = "the battery is unknown or at the reserve";
+    if (why) {
+        sb_logf(rehearse ? "power: REHEARSAL: it would stay on: " : "power: not switching off: ", why);
+        if (!rehearse)
+            return 0;                       /* the rehearsal runs the save anyway (the phone is on USB) */
+    }
+    for (int a = 0; a < napps; ++a)
+        app_event_send(a, EV_APP_SAVE, 0, 0);
+    apps_service();                         /* their EV_APP_SAVE handlers run now */
+    settings_save_now();
+    sb_log(rehearse ? "power: REHEARSAL: saved; would switch off now (the self-test image never does)" :
+                      "power: saved; switching off after the screen was off");
+    if (!rehearse)
+        power_off_now();
+    return 1;
+}
+
 void power_timer(unsigned id)
 {
-    (void)id;
+    if (id == 2) {
+        if (!K.screen_on && auto_off_min && !power_auto_off(sbos_selftest_enabled))
+            kt_set(KT_POWER, 2, sb_ms(), 10U * 60000U, 0);  /* kept on: ask again in 10 minutes */
+        return;
+    }
     /* the screen-off timer: not while something must stay visible */
     if (!K.screen_on)
         return;

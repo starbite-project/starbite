@@ -60,8 +60,12 @@ static struct {
     uint64_t base, used, capacity;
 } live[2];
 
+static void vg_clear(void);
+
 void sb_fence_store(unsigned medium, uint64_t base, uint64_t used, uint64_t capacity)
 {
+    if (medium < 2 && (live[medium].base != base || live[medium].used != used))
+        vg_clear();                         /* a store read again: a standing grant must be asked for again */
     if (medium < 2) {
         live[medium].base = base;
         live[medium].used = used;
@@ -444,4 +448,68 @@ int sb_write_store(unsigned medium, uint64_t lba, uint64_t n, const void *src)
     int r = do_write(medium, 0, lba, n, src);
     log_write(r ? "FAILED" : "wrote", medium, 0, lba, n, &d, r ? "I/O error" : "store writer");
     return r;
+}
+
+/* ---- the standing write of one volatile store entry (docs/STARBITE-OS.md 6.5) ----------------------
+ * Not the gate: no confirmation per write. The consent is the entry itself: made on the Mac
+ * (sbstore2.py build --volatile NAME=BYTES) with the directory's volatile flag, like the loader's crash
+ * log, which the loader writes in place the same way. store.c grants exactly that entry's blocks after
+ * checking the flag; the grant must lie in the live store's data area (never its header, settings
+ * block or directory: blocks 0..6), UFS only, at most 4 MiB. Every write is logged, honours the dry
+ * run, uses forced unit access and ends with SYNCHRONIZE CACHE. A reboot clears the grant. */
+static struct {
+    int on;
+    unsigned medium;
+    uint64_t first, count;
+    char name[32];
+} vg;
+
+static void vg_clear(void)
+{
+    vg.on = 0;
+}
+
+int sb_volatile_grant(unsigned medium, uint64_t first, uint64_t count, const char *name)
+{
+    struct sb_wdecide d;
+    decide_init(&d);
+    sb_strcpy(d.part, sizeof(d.part), "volatile entry");
+    d.tier = SB_TIER1;
+    vg.on = 0;
+    if (!count)
+        return 0;
+    if (medium != SB_MED_UFS || count > 1024 || !live[medium].used || first < live[medium].base + 7 ||
+        first + count < first || first + count > live[medium].base + live[medium].used) {
+        log_write("refused a standing grant for", medium, 0, first, count, &d, "outside the store's data area");
+        return 0;
+    }
+    vg.on = 1;
+    vg.medium = medium;
+    vg.first = first;
+    vg.count = count;
+    sb_strcpy(vg.name, sizeof(vg.name), name ? name : "?");
+    log_write("standing grant for", medium, 0, first, count, &d, vg.name);
+    return 1;
+}
+
+int sb_write_volatile(unsigned medium, uint64_t lba, uint64_t n, const void *src)
+{
+    struct sb_wdecide d;
+    decide_init(&d);
+    sb_strcpy(d.part, sizeof(d.part), vg.on ? vg.name : "volatile entry");
+    d.tier = SB_TIER1;
+    if (!vg.on || medium != vg.medium || !n || !src || lba < vg.first || lba + n < lba ||
+        lba + n > vg.first + vg.count) {
+        log_write("refused", medium, 0, lba, n, &d, vg.on ? "outside the granted entry" : "no standing grant");
+        return vg.on ? SB_W_RANGE : SB_W_AUTH;
+    }
+    if (dry_run) {
+        log_write("would write", medium, 0, lba, n, &d, "DRY RUN, nothing written");
+        return SB_W_DRYRUN;
+    }
+    fence_active = 1;
+    int r = sb_blk_write_sync(medium, 0, lba, n, src);
+    fence_active = 0;
+    log_write(r ? "FAILED" : "wrote", medium, 0, lba, n, &d, r ? "I/O error" : "FUA + cache flush");
+    return r ? SB_W_IO : 0;
 }

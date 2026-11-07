@@ -475,6 +475,81 @@ int sb_blk_read(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, void *ds
     return 0;
 }
 
+/* Starbite OS's state slot on the host (SBOS_HOST_STATE=file): the fake store has a volatile "sbos-state" entry
+ * of 1 MiB, its blocks kept in that file across runs (read at the grant, written through on every write). */
+#define SLOT_LBA (16903808ULL + 400000ULL)
+#define SLOT_BLOCKS 256U
+unsigned host_slot_syncs;
+
+static void wb_put(unsigned med, unsigned lu, uint64_t lba, const void *src)
+{
+    struct wblk *w = wb_find(med, lu, lba);
+    if (!w) {
+        if (wb_n >= WB_MAX)
+            return;
+        w = &wb[wb_n++];
+        w->med = med;
+        w->lu = lu;
+        w->lba = lba;
+        w->data = malloc(4096);
+    }
+    memcpy(w->data, src, 4096);
+}
+
+static void slot_file_write(uint64_t lba, uint64_t n, const uint8_t *src)
+{
+    const char *f = getenv("SBOS_HOST_STATE");
+    if (!f || lba < SLOT_LBA || lba + n > SLOT_LBA + SLOT_BLOCKS)
+        return;
+    FILE *fp = fopen(f, "r+b");
+    if (!fp && (fp = fopen(f, "w+b")) != 0) {
+        static uint8_t z[4096];
+        for (unsigned i = 0; i < SLOT_BLOCKS; ++i)
+            fwrite(z, 1, 4096, fp);
+    }
+    if (!fp)
+        return;
+    if (!fseek(fp, (long)((lba - SLOT_LBA) * 4096U), SEEK_SET))
+        fwrite(src, 1, n * 4096U, fp);
+    fclose(fp);
+}
+
+int store_volatile_grant(const char *name, uint64_t min_bytes, struct store_ent *e)
+{
+    const char *f = getenv("SBOS_HOST_STATE");
+    if (!f || !sb_streq(name, "sbos-state") || min_bytes > SLOT_BLOCKS * 4096U)
+        return 0;
+    memset(e, 0, sizeof(*e));
+    sb_strcpy(e->name, 32, name);
+    e->lba = SLOT_LBA;
+    e->size = SLOT_BLOCKS * 4096U;
+    e->flags = 1;
+    store_open(STORE_UFS);                  /* the fence learns the live store */
+    FILE *fp = fopen(f, "rb");
+    static uint8_t b[4096];
+    for (unsigned i = 0; i < SLOT_BLOCKS; ++i) {
+        memset(b, 0, sizeof(b));
+        if (fp && fread(b, 1, 4096, fp) != 4096)
+            memset(b, 0, sizeof(b));
+        wb_put(SB_MED_UFS, 0, SLOT_LBA + i, b);
+    }
+    if (fp)
+        fclose(fp);
+    return sb_volatile_grant(SB_MED_UFS, e->lba, SLOT_BLOCKS, e->name);
+}
+
+int sb_blk_write_sync(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src)
+{
+    if (!sb_fence_active() || medium != SB_MED_UFS)
+        return -6;
+    int r = sb_blk_write(medium, lu, lba, n, src);
+    if (!r) {
+        ++host_slot_syncs;
+        slot_file_write(lba, n, src);
+    }
+    return r;
+}
+
 int sb_blk_write(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src)
 {
     if (!sb_fence_active())

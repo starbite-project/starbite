@@ -62,6 +62,10 @@ uint64_t store_base(unsigned medium);
 uint64_t store_capacity(unsigned medium);
 uint64_t store_used(unsigned medium);
 
+/* An OS's own volatile entry on UFS (flag 1, at least min_bytes, whole blocks): the fence's standing grant
+ * for exactly its blocks. 1 granted. */
+int store_volatile_grant(const char *name, uint64_t min_bytes, struct store_ent *e);
+
 /* Forget what store_open found, so the next call reads the medium again. */
 void store_reset(unsigned medium);
 

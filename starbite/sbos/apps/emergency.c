@@ -7,7 +7,7 @@
 #include "sbapp.h"
 #include "sbfmt.h"
 
-SBAPP_DEFINE("emergency", "Emergency", SBOS_P_ALARM | SBOS_P_LIGHT | SBOS_P_PHONE, 0xffff453aU, 202);
+SBAPP_DEFINE("emergency", "Emergency", SBOS_P_ALARM | SBOS_P_LIGHT | SBOS_P_PHONE, 0xffff453aU, 207);
 
 #define RED 0xffff453aU
 #define GREY 0xff8e8e93U

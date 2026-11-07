@@ -323,6 +323,7 @@ static void workers_apply(void)
 static void clocks_apply(void)
 {
     if (ctl.a55_khz && ctl.a55_khz != a55_set) {
+        power_heater_took_clocks();         /* the screen-off 455 MHz is the heater's to change now */
         if (!clock_set(DVFS_A55, ctl.a55_khz)) {
             heater_stop_all("The processor clock did not change as asked");
             return;

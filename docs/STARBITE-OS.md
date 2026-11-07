@@ -199,6 +199,15 @@ RTC power-on alarms are verified), **Stay reachable** (later: keeps the modem up
 
 ### 4.2 Deepest CPU idle
 
+0.3.2: with the screen off (and nothing heating) the A55 cluster drops to 455 MHz through the listed ACPM path
+(PLL read back) and returns to 1053 MHz when the screen comes on; the heater takes the clocks over when it starts.
+**Switch off when the screen has been off** (Settings > Display: Never (default), 5 min, 15 min, 1 h): when the
+time is up and no charger, heat, alarm or LED needs the phone and the battery is above 3 %, every app gets
+`EV_APP_SAVE`, the settings are written (FUA + flush) and the phone powers off; otherwise it asks again in 10
+minutes. Waking is the power key through S-Boot and the loader (Starbite OS as the loader's default entry). The
+self-test image rehearses it (everything but the power-off). Real RAM sleep (4.3) stays a research item: it needs
+the SoC's own suspend path and a phone test with the user present.
+
 v0.1: `wfi` with the virtual timer; clocks as S-Boot left them (all cores about 1050 MHz, measured by the iOS
 port, NOTES.md 2026-10-30). v0.2: A55 at its lowest table level (455 MHz) while idle through the listed DVFS
 path (8.3). v0.3: PSCI CPU_SUSPEND `c2` when the next deadline is more than 2 ms away, woken by the MCT.
@@ -337,6 +346,24 @@ damage; it is not a signature.
   exactly that entry's blocks; the kernel opens the gate only for that range.
 - State writes use force-unit-access or end with SYNCHRONIZE CACHE (4.4).
 - The first phone test of these writes is a dry run (`sb_fence_dry_run`) after a store backup.
+
+### 6.5 The state slot on the phone (0.3.2)
+
+- **The entry:** `sbos-state`, 1 MiB, the directory's volatile flag (like the loader's `crashlog`), made on the Mac
+  at a store rebuild: `tools/store/sbstore2.py build ... --volatile sbos-state=1048576` (zeros when new; `--import`
+  of the live store keeps its bytes and flag; tested in `tools/loader-test/test_sbstore2.py`). Its existence is the
+  install decision and the consent: without it Starbite OS writes nothing anywhere.
+- **libsb:** `store_volatile_grant` (store.c) finds the entry on UFS, checks the volatile flag and the size, and asks
+  the fence for a standing grant of exactly its blocks (`sb_volatile_grant`, fence.c: UFS only, inside the live
+  store's data area, never blocks 0..6 of the store (header, settings, directory), at most 1024 blocks).
+  `sb_write_volatile` writes only inside the grant, logs every write (`fence: wrote 1 blk at ufs:N (sbos-state,
+  tier 1): FUA + cache flush`), honours the dry run, and goes through `sb_blk_write_sync`: WRITE(10) with FUA,
+  then SYNCHRONIZE CACHE(10). The grant is not a gate authorisation: `sb_write` and `sb_write_store` still refuse
+  the same blocks (unit-tested: 546 checks).
+- **The kernel** (`kern/slot.c`): halves at blocks 0..127 and 128..255 of the entry, read after the first frame
+  (UFS on S-Boot's running host), every write read back and compared.
+- **The self-test image** (12.6): where the entry exists, a dry run of a save (logged only), then one real save,
+  both halves read again and the newer picked: `selftest: slot: ... read back and picked: ok`.
 
 ### 6.4 Settings across a restart (0.3.1: the kernel side)
 
@@ -760,6 +787,13 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.8 Version 0.3.2 (2026-11-07, overnight)
+
+- Settings saved on the phone through the `sbos-state` store entry (6.5); the screen-off A55 at 455 MHz and the
+  optional switch-off (4.2); the Emergency icon (a handset with a cross, `sbos-assets.py` 207/228) and a Wi-Fi icon
+  (208) for later.
+- The self test adds: the screen off and on (the A55 clock both ways), the switch-off rehearsal, the slot check.
+
 ### 12.7 Version 0.3.1 (2026-11-07)
 
 - T11 passed on the phone with 0.3 (14.5). The boot timing line (7) and the settings record (6.4, host only:
@@ -939,3 +973,18 @@ forced restart). Cause and fixes: 8.6 and 12.5.
   screen; Settings > Display > Brightness Low, then Normal (the first AOR command from Starbite OS: the screen
   goes darker, then back; a restart resets the panel anyway). Then T9 / T10 of 14.4 on 0.3 (the heater paths
   are unchanged since 0.2.1).
+
+### 14.6 Phone tests for 0.3.2 (unattended)
+
+- **T13 (the self test, no entry yet):** `starbite-os-0.3.2-selftest.img` as before (T11). Expect, beyond T11's lines:
+  `slot: no "sbos-state" store entry`, `selftest: slot: no "sbos-state" entry: nothing written`,
+  `power: A55 at 455 MHz with the screen off (was 1053 MHz)`, `selftest: screen off: A55 455 MHz`,
+  `power: REHEARSAL: it would stay on: a charger is connected` (on USB), `power: REHEARSAL: saved; would switch off
+  now`, `selftest: screen on: A55 1053 MHz`, `selftest: passed`. Writes: none (no entry).
+- **T14 (the slot, after a store backup):** pull a store backup (`tools/store/store-pull.sh`), rebuild the store with
+  `--import <the backup> --volatile sbos-state=1048576`, flash it (`store-flash.sh`), then T13 again. Expect
+  `fence: standing grant for 256 blk at ufs:N (volatile entry, tier 1): sbos-state`, the dry run's `fence: would
+  write 1 blk ... DRY RUN`, `fence: wrote 1 blk at ufs:N (sbos-state, tier 1): FUA + cache flush`, `selftest: slot:
+  dry run logged only, then saved sequence 1 to half 0, read back and picked: ok`. Then a pull of the store shows
+  `SBOSSTA1` at the entry's first block and nothing else changed (compare with the backup outside the entry).
+  Undo: flash the backup.

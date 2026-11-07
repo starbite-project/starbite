@@ -454,6 +454,14 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
                     "First test: only with someone watching the phone.",
                     "Hold to allow", gpu_confirm_done);
         return 0;
+    case SET_AUTO_OFF_MIN:
+        if (arg[1] != 0 && arg[1] != 5 && arg[1] != 15 && arg[1] != 60)
+            return SBOS_EINVAL;
+        auto_off_min = (uint32_t)arg[1];
+        sb_logx("settings: switch off after the screen is off, minutes (0 never): ", arg[1]);
+        if (!K.screen_on && auto_off_min)
+            kt_set(KT_POWER, 2, sb_ms(), auto_off_min * 60000U, 0);
+        return 0;
     case SET_BRIGHTNESS:
         if (arg[1] > 4)
             return SBOS_EINVAL;
@@ -698,6 +706,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_SCREEN_OFF_S: return (int64_t)K.screen_off_s;
         case SET_BRIGHTNESS: return panel_bright_level;
         case SET_SAVED: return settings_persistent();
+        case SET_AUTO_OFF_MIN: return (int64_t)auto_off_min;
         default: return SBOS_EINVAL;
         }
     case SYS_SETTING_SET: {

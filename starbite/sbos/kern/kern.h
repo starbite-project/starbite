@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.3.1"
+#define SBOS_VERSION "0.3.2"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -308,7 +308,8 @@ int64_t hw_heat_launch(unsigned w, void *cfg);    /* sb_smp_launch: never waits 
 void hw_heat_stop_all(void);
 unsigned hw_heat_running(void);
 int64_t hw_core_psci(unsigned w);   /* PSCI AFFINITY_INFO's raw answer for worker core w */
-/* the state slot (doc 6.2): 1 read both halves (STATE_HALF bytes each), 0 no slot; write: 1 written and read back */
+/* the state slot (doc 6.2): 1 read both halves (STATE_HALF bytes each), 0 no slot; write: 1 written and read back,
+ * 0 failed, -1 a dry run (nothing written) */
 int hw_slot_read(uint8_t *h0, uint8_t *h1);
 int hw_slot_write(int half, const uint8_t *src, uint32_t n);
 /* settings that last across a restart (settings.c) */
@@ -316,4 +317,10 @@ void settings_restore(void);
 void settings_changed(void);
 void settings_timer(unsigned id);
 int settings_persistent(void);
+int settings_selftest(void);       /* uitest.c: 1 passed, 0 failed, -1 no slot */
+void settings_save_now(void);       /* write the settings at once (switch-off), where the slot exists */
+extern uint32_t auto_off_min;       /* services.c: switch off after this many minutes with the screen off */
+int power_auto_off(int rehearse);
+void power_screen_set(int on);
+void power_heater_took_clocks(void);
 void heatk_worker(unsigned w, void *arg);

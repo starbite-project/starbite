@@ -63,6 +63,9 @@ static void show(void)
         ui_level(1, "15 s|30 s|1 min|2 min", cur);
         ui_toggle(2, "Refresh only on change", setting_get(SET_PANEL_SAVE) == 1);
         ui_toggle(3, "Panel off with the screen", setting_get(SET_PANEL_OFF) == 1);
+        int ao = setting_get(SET_AUTO_OFF_MIN);
+        ui_textline("Switch off when the screen has been off", GREY);
+        ui_level(7, "Never|5 min|15 min|1 h", ao == 5 ? 1 : ao == 15 ? 2 : ao == 60 ? 3 : 0);
     } else if (section == 1) {
         ui_toggle(4, "LED strobes in the alarm", setting_get(SET_SOS_LED) == 1);
         ui_textline("The alarm flashes the screen white and red. With this on, the LED on the back strobes too.", 0);
@@ -95,7 +98,10 @@ void app_event(const struct sbos_event *ev)
             section = ev->value;
         else if (ev->id == 1 && ev->value >= 0 && ev->value < 4)
             setting_set(SET_SCREEN_OFF_S, secs[ev->value]);
-        else if (ev->id == 6 && ev->value >= 0 && ev->value <= 4 && setting_set(SET_BRIGHTNESS, ev->value) < 0)
+        else if (ev->id == 7 && ev->value >= 0 && ev->value < 4) {
+            static const int mins[4] = { 0, 5, 15, 60 };
+            setting_set(SET_AUTO_OFF_MIN, mins[ev->value]);
+        } else if (ev->id == 6 && ev->value >= 0 && ev->value <= 4 && setting_set(SET_BRIGHTNESS, ev->value) < 0)
             ui_toast_app("The panel did not take it", 2500);
         show();
     }

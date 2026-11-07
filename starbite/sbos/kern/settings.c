@@ -29,6 +29,7 @@ static int slot_ok;                         /* 1 the slot exists and was read */
 static int cur_half = -1;                   /* the half that holds the newest valid copy */
 static uint64_t seq;
 static unsigned saves, save_fail;
+static int foreign;                         /* the newest copy is of another version: never overwrite it */
 
 int settings_persistent(void)
 {
@@ -44,6 +45,7 @@ static void fill(struct saved *s)
     s->panel_off = (uint8_t)(panel_off_on != 0);
     s->sos_led = (uint8_t)(sos_led_on != 0);
     s->bright = (uint8_t)panel_bright_level;
+    s->pad[0] = auto_off_min;               /* 0.3.2: was zero padding, so 0 (never) for older records */
 }
 
 void settings_restore(void)
@@ -73,7 +75,8 @@ void settings_restore(void)
     memset(&s, 0, sizeof(s));
     memcpy(&s, d, (unsigned)n < sizeof(s) ? (unsigned)n : sizeof(s));
     if (s.version != 1) {
-        sb_log("settings: a settings record of another version: defaults");
+        foreign = 1;
+        sb_log("settings: a settings record of another version: defaults, and it is not overwritten");
         return;
     }
     if (s.screen_off_s >= 10 && s.screen_off_s <= 600) {
@@ -85,6 +88,8 @@ void settings_restore(void)
     sos_led_on = s.sos_led != 0;
     if (s.bright >= 1 && s.bright <= 4)
         (void)panel_brightness(s.bright);
+    if (s.pad[0] == 5 || s.pad[0] == 15 || s.pad[0] == 60)
+        auto_off_min = s.pad[0];
     struct ub u;
     ub_init(&u);
     ub_s(&u, "settings: restored (slot sequence ");
@@ -99,6 +104,9 @@ void settings_restore(void)
     ub_s(&u, sos_led_on ? "on" : "off");
     ub_s(&u, ", brightness ");
     ub_dec(&u, s.bright);
+    ub_s(&u, ", switch off after ");
+    ub_dec(&u, auto_off_min);
+    ub_s(&u, " min");
     sb_log(u.b);
 }
 
@@ -115,6 +123,10 @@ void settings_timer(unsigned id)
     (void)id;
     if (!slot_ok)
         return;
+    if (foreign) {
+        sb_log("settings: not saved: the slot holds a newer version's settings");
+        return;
+    }
     /* keep every other record of the current half (later: the apps' states), replace ours */
     int to = cur_half < 0 ? 0 : 1 - cur_half;
     struct state_buf b;
@@ -126,7 +138,12 @@ void settings_timer(unsigned id)
         return;
     }
     uint32_t n = state_finish(&b);
-    if (!hw_slot_write(to, half[to], n)) {
+    int w = hw_slot_write(to, half[to], n);
+    if (w < 0) {
+        sb_log("settings: dry run: not written");
+        return;
+    }
+    if (!w) {
         ++save_fail;
         sb_log("settings: not saved: the slot write failed (the older copy stays)");
         return;
@@ -144,4 +161,54 @@ void settings_timer(unsigned id)
     ub_dec(&u, n);
     ub_s(&u, " bytes)");
     sb_log(u.b);
+}
+
+void settings_save_now(void)
+{
+    if (!slot_ok)
+        return;
+    kt_cancel(KT_STATE, 0);
+    settings_timer(0);
+}
+
+/* The self test's slot check (uitest.c): a dry run of a save (the fence logs the blocks it would write), then
+ * one real save of the current settings, both halves read again and the newer picked. 1 passed, 0 failed,
+ * -1 no slot (nothing written). */
+int settings_selftest(void)
+{
+    if (!slot_ok || foreign)
+        return -1;
+    uint64_t seq0 = seq;
+    int was_dry = sb_fence_is_dry_run();
+    sb_fence_dry_run(1);
+    settings_timer(0);                      /* "fence: would write ...", then "dry run: not written" */
+    sb_fence_dry_run(was_dry);
+    if (seq != seq0) {
+        sb_log("selftest: slot: the dry run changed the sequence");
+        return 0;
+    }
+    settings_timer(0);
+    if (seq != seq0 + 1) {
+        sb_log("selftest: slot: the save did not go through");
+        return 0;
+    }
+    if (!hw_slot_read(half[0], half[1])) {
+        sb_log("selftest: slot: the read after the save failed");
+        return 0;
+    }
+    int pick = state_pick(half[0], half[1]);
+    uint64_t s2 = 0;
+    if (pick != cur_half || !state_valid(half[pick], &s2) || s2 != seq) {
+        sb_log("selftest: slot: the newest copy is not the one just written");
+        return 0;
+    }
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "selftest: slot: dry run logged only, then saved sequence ");
+    ub_dec(&u, seq);
+    ub_s(&u, " to half ");
+    ub_dec(&u, (uint64_t)cur_half);
+    ub_s(&u, ", read back and picked: ok");
+    sb_log(u.b);
+    return 1;
 }

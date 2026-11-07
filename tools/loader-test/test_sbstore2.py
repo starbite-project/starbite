@@ -169,6 +169,30 @@ class Catalog(unittest.TestCase):
 
 
 class Build(unittest.TestCase):
+    def test_volatile_entry(self):
+        with tempfile.TemporaryDirectory() as t:
+            Path(t, 'k').write_bytes(b'K' * 5000)
+            r = run('build', f'{t}/s.img', f'linux.dtb={t}/k', '--medium', 'ufs', '--volatile', 'sbos-state=1048576')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            ents = {n: (b, fl) for n, _, b, fl in sb.read_store(f'{t}/s.img', with_flags=True)}
+            self.assertEqual(ents['sbos-state'], (bytes(1048576), sb.SF_VOLATILE))
+            self.assertNotIn(b'sbos-state', Path(t, 's.img').read_bytes()[:4096], 'not in the v1 view')
+            # written in place on the phone, then imported: the bytes and the flag stay
+            img = bytearray(Path(t, 's.img').read_bytes())
+            dirb = img[3 * 4096:4 * 4096]
+            for i in range(len(ents)):
+                name, blk, size = struct.unpack_from('<32sQQ', dirb, 64 * i)
+                if name.rstrip(b'\0') == b'sbos-state':
+                    img[blk * 4096:blk * 4096 + 8] = b'SBOSSTA1'
+            Path(t, 'live.img').write_bytes(bytes(img))
+            r = run('build', f'{t}/s2.img', '--medium', 'ufs', '--import', f'{t}/live.img', '--volatile', 'sbos-state=1048576')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            ents = {n: (b, fl) for n, _, b, fl in sb.read_store(f'{t}/s2.img', with_flags=True)}
+            self.assertEqual(ents['sbos-state'][0][:8], b'SBOSSTA1')
+            self.assertEqual(ents['sbos-state'][1], sb.SF_VOLATILE)
+            r = run('build', f'{t}/s3.img', '--medium', 'ufs', '--volatile', 'sbos-state=1000')
+            self.assertNotEqual(r.returncode, 0)
+
     def test_crashlog_entry(self):
         with tempfile.TemporaryDirectory() as t:
             Path(t, 'k').write_bytes(b'K' * 5000)

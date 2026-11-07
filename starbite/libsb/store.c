@@ -667,6 +667,10 @@ int store_verify(unsigned m, unsigned i, uint32_t *got)
     if (!opened(m) || i >= med[m].count)
         return -1;
     const struct store_ent *e = &med[m].ent[i];
+    if (e->flags & 1U) {                    /* volatile (crashlog, sbos-state): written in place, no CRC to check */
+        *got = e->crc;
+        return 0;
+    }
     uint64_t blocks = (e->size + 4095U) / 4096U;
     uint32_t c = 0xffffffffU;
     for (uint64_t b = 0; b < blocks; b += 64) {
@@ -678,4 +682,37 @@ int store_verify(unsigned m, unsigned i, uint32_t *got)
     }
     *got = ~c;
     return *got == e->crc ? 0 : 1;
+}
+
+/* An OS's own volatile entry (docs/STARBITE-OS.md 6.5): found on UFS, with the volatile directory flag
+ * (sbstore2.py --volatile), at least min_bytes; the fence then lets sb_write_volatile write exactly its
+ * blocks. 1 granted (*e filled), 0 no such entry (or not volatile, too small: nothing granted). */
+int store_volatile_grant(const char *name, uint64_t min_bytes, struct store_ent *e)
+{
+    char full[40] = "ufs:";
+    sb_strcpy(full + 4, sizeof(full) - 4, name);
+    if (!store_open(STORE_UFS) || !store_find(full, e) || e->medium != STORE_UFS || !(e->flags & 1U) ||
+        e->size < min_bytes || (e->size & 4095U))
+        return 0;
+    /* the layout as this store's header says it, not as assumed: never blocks 0..1 (the v1 view, the header),
+     * the settings block or the directory, and no other entry's blocks (a directory whose CRC is right can
+     * still list overlapping entries) */
+    const struct medium *s = &med[STORE_UFS];
+    uint64_t a = e->lba - s->base, n = e->size / 4096U;
+    if (s->version != 2 || e->lba < s->base || a < 2 || (s->settings >= a && s->settings < a + n) ||
+        (a < (uint64_t)s->dir + s->dir_blocks && a + n > s->dir)) {
+        sb_log("store: the volatile entry overlaps the store's header, settings or directory: not granted");
+        return 0;
+    }
+    for (unsigned i = 0; i < s->count; ++i) {
+        const struct store_ent *o = &s->ent[i];
+        uint64_t on = (o->size + 4095U) / 4096U;
+        if (o->lba == e->lba && name_is(o->name, e->name))
+            continue;
+        if (on && o->lba < e->lba + n && o->lba + on > e->lba) {
+            sb_logf("store: the volatile entry overlaps another entry, not granted: ", o->name);
+            return 0;
+        }
+    }
+    return sb_volatile_grant(SB_MED_UFS, e->lba, n, e->name);
 }

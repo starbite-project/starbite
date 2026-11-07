@@ -8,7 +8,9 @@
  * each did: "selftest: <screen>: N elements, X ms to draw, app ok / dead, fits / too tall". Then a summary
  * and a restart to the loader's menu (where `sbfb.py reboot recovery` brings TWRP back for the log).
  *
- * Never: the flashlight LED, the heater, the alarm, brightness or panel settings, a call or a message. Any
+ * Never: the flashlight LED, the heater, the alarm, brightness or panel settings, a call or a message.
+ * The only write: where the store has the volatile "sbos-state" entry, one save of the current settings into it
+ * (after a logged dry run), read back (settings.c settings_selftest). Any
  * touch or key stops the test at once (someone is there): the phone then just runs normally. */
 #include "sb.h"
 #include "kern.h"
@@ -226,8 +228,41 @@ void selftest_timer(unsigned id)
         kui_home();
         phase = 9;
         break;
-    case 9: {
+    case 9:
         logline("home again", -1);
+        power_screen_set(0);                /* the screen off as the Power key does it: the A55 drops to 455 MHz */
+        phase = 11;
+        break;
+    case 11: {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "selftest: screen off: A55 ");
+        ub_dec(&u, hw_a55_khz() / 1000U);
+        ub_s(&u, " MHz");
+        sb_log(u.b);
+        if (hw_a55_khz() > 470000U)
+            ++fails;
+        power_auto_off(1);                  /* the switch-off path up to the power-off: saved, "would switch off" */
+        power_screen_set(1);
+        ub_init(&u);
+        ub_s(&u, "selftest: screen on: A55 ");
+        ub_dec(&u, hw_a55_khz() / 1000U);
+        ub_s(&u, " MHz");
+        sb_log(u.b);
+        if (hw_a55_khz() < 1000000U)
+            ++fails;
+        kui_home();
+        phase = 12;
+        break;
+    }
+    case 12: {
+        {
+            int sr = settings_selftest();   /* the state slot: only where the "sbos-state" entry exists */
+            if (!sr)
+                ++fails;
+            if (sr < 0)
+                sb_log("selftest: slot: no \"sbos-state\" entry: nothing written");
+        }
         struct ub u;
         ub_init(&u);
         ub_s(&u, fails || overflows ? "selftest: FAILED: " : "selftest: passed: ");

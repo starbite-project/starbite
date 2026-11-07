@@ -37,6 +37,10 @@ int ufs_read_lu_to(unsigned lu, uint64_t lba, uint64_t count, uintptr_t dst);
 /* WRITE(10) of count 4 KiB blocks from src (any RAM), one block per command. -6 unless the write
  * fence is active (only sb_write calls it); 0 on success. */
 int ufs_write_blocks(unsigned lu, uint64_t lba, uint64_t count, uintptr_t src);
+/* Set by the fence around its volatile-entry writes: WRITE(10) with FUA (forced unit access). */
+extern int ufs_fua;
+/* SYNCHRONIZE CACHE(10) of the LU: -6 unless the fence is active. 0 done. */
+int ufs_sync_cache(unsigned lu);
 
 static inline uint8_t u8r(uintptr_t a)
 {

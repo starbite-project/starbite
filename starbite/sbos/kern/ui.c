@@ -605,7 +605,7 @@ static void build_home(void)
         e->id = (uint32_t)emerg;
         scopy(e->a, sizeof(e->a), app_name(emerg));
         scopy(e->b, sizeof(e->b), app_tile(emerg)[0] ? app_tile(emerg) : "Call, message, alarm");
-        e->icon = 227;
+        e->icon = 228;                          /* the handset with a cross (0.3.2) */
         e->color = C_RED;
         e->flags = 1;                           /* the wide emergency tile */
         e->x = MX, e->y = y0, e->w = CW, e->h = 210;

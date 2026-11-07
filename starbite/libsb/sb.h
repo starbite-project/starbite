@@ -382,6 +382,13 @@ int sb_write(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void 
 int sb_write_store(unsigned medium, uint64_t lba, uint64_t n, const void *src);
 /* store.c reports the live store region of a medium (raw writes into it need tier 2). */
 void sb_fence_store(unsigned medium, uint64_t base, uint64_t used, uint64_t capacity);
+/* A standing write permission for one volatile store entry (an OS's own state, written in place without a
+ * confirmation each time: the entry itself, made on the Mac with the volatile flag, is the consent). store.c's
+ * store_volatile_grant sets it after checking the entry; only UFS, only inside the live store's data area,
+ * at most 1024 blocks. One at a time; 0 count clears it. 1 granted. */
+int sb_volatile_grant(unsigned medium, uint64_t first, uint64_t count, const char *name);
+/* A write inside the granted range: FUA, then a cache flush. 0, SB_W_DRYRUN, SB_W_RANGE, SB_W_AUTH or SB_W_IO. */
+int sb_write_volatile(unsigned medium, uint64_t lba, uint64_t n, const void *src);
 /* 1 while sb_write runs a write (the storage drivers refuse otherwise). */
 int sb_fence_active(void);
 void sb_fence_dry_run(int on);
@@ -394,6 +401,8 @@ int sb_never_part(const char *name);
 int sb_blk_read(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, void *dst);
 /* Only from sb_write (the drivers check sb_fence_active). */
 int sb_blk_write(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src);
+/* The same with forced unit access and a cache flush after (UFS; only from sb_write_volatile). */
+int sb_blk_write_sync(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src);
 
 /* ---- secondary cores as workers (smp.c, crt0.S sb_worker_entry) -------------------------------
  * Core w (1..3 the other A55s, PSCI 1..3; 4..7 the Mongoose M3s, PSCI 0x100..0x103) runs fn(w, arg)

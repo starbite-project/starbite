@@ -7,16 +7,19 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/starbite/out/sboshost"
 st="$out/settings-test.bin"
 rm -f "$st"
-run() { limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 ${SLOT:+SBOS_HOST_STATE=$st} "$out/sbos-host" "$out" /dev/null "$@" s:settings-test q 2>&1 | grep 'settings:'; }
+run() { limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 ${SLOT:+SBOS_HOST_STATE=$st} "$out/sbos-host" "$out" /dev/null "$@" s:settings-test q 2>&1 | grep -E 'settings:|fence:|slot:'; }
 OPEN="w:300 g:1150,2310,0,700 w:400 t:382,2424 w:600"
 fails=0
 want() { if echo "$1" | grep -q -- "$2"; then echo "ok: $2"; else echo "FAIL: $2"; echo "$1" | sed 's/^/    /'; fails=$((fails + 1)); fi; }
 SLOT=1
 a=$(run $OPEN t:882,1494 w:300 t:720,1789 w:4000)          # 1 min, refresh only on change on
 want "$a" "saved (half 0, sequence 1"
+want "$a" "fence: standing grant for 256 blk at ufs:17303808"
+want "$a" "fence: wrote 1 blk at ufs:17303808 (sbos-state, tier 1): FUA + cache flush"
 b=$(run $OPEN t:720,2039 w:4000)                            # panel off with the screen on
 want "$b" "restored (slot sequence 1): screen off 60 s, refresh on change on"
 want "$b" "saved (half 1, sequence 2"
+want "$b" "fence: wrote 1 blk at ufs:17303936"
 c=$(run w:300)
 want "$c" "restored (slot sequence 2): screen off 60 s, refresh on change on, panel off on"
 # damage the newest half (sequence 2, half 1): the older copy (sequence 1) wins
@@ -25,7 +28,9 @@ d=$(run w:300)
 want "$d" "restored (slot sequence 1): screen off 60 s, refresh on change on, panel off off"
 SLOT=
 e=$(run $OPEN t:720,1789 w:4000)
+want "$e" "no \"sbos-state\" store entry"
 want "$e" "no state slot yet"
+if echo "$e" | grep -q "fence: wrote"; then echo "FAIL: a write without the entry"; fails=$((fails + 1)); fi
 if echo "$e" | grep -q "saved ("; then echo "FAIL: saved without a slot"; fails=$((fails + 1)); fi
 echo "settings test: $fails failed"
 [ "$fails" = 0 ]
