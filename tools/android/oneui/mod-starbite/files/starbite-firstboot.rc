@@ -1,0 +1,13 @@
+# Starbite first boot (tools/android/oneui/mod-starbite, docs/ANDROID-ONEUI.md): once Android has booted,
+# finish setup without the setup wizards (the same steps as tools/android/oneui/first-boot.sh over adb):
+# provisioned + setup complete, Samsung's and Google's wizards and the OMC agent disabled for user 0, home.
+# It does nothing once setup is complete. Shell user and domain, like `adb shell`.
+service starbite_firstboot /system/bin/sh /system/etc/starbite/firstboot.sh
+    user shell
+    group shell log readproc
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+on property:sys.boot_completed=1
+    start starbite_firstboot

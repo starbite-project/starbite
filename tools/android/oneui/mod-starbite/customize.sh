@@ -59,3 +59,17 @@ grep -q "^system/etc/starbite " "$WORK_DIR/configs/fs_config-system" ||
 grep -q "^system/etc/starbite/bootguard.sh " "$WORK_DIR/configs/fs_config-system" ||
     echo "system/etc/starbite/bootguard.sh 0 0 644 capabilities=0x0" >> "$WORK_DIR/configs/fs_config-system"
 SET_PROP "system" "ro.starbite.bootguard" "1200"
+
+# 5. First boot without setup: a one-shot shell-domain service at sys.boot_completed finishes setup (provisioned,
+#    setup complete, wizards and OMC agent disabled, home); UN1CA's vendor restore keeps the wizards enabled.
+LOG "- Starbite: first boot straight to the home screen (firstboot service)"
+EVAL "install -D -m 644 \"$MODPATH/files/starbite-firstboot.rc\" \"$WORK_DIR/system/system/etc/init/starbite-firstboot.rc\"" || return 1
+EVAL "install -D -m 644 \"$MODPATH/files/firstboot.sh\" \"$WORK_DIR/system/system/etc/starbite/firstboot.sh\"" || return 1
+for e in "/system/etc/init/starbite-firstboot\\.rc" "/system/etc/starbite/firstboot\\.sh"; do
+    grep -qF "$e " "$WORK_DIR/configs/file_context-system" ||
+        echo "$e u:object_r:system_file:s0" >> "$WORK_DIR/configs/file_context-system"
+done
+grep -q "^system/etc/init/starbite-firstboot.rc " "$WORK_DIR/configs/fs_config-system" ||
+    echo "system/etc/init/starbite-firstboot.rc 0 0 644 capabilities=0x0" >> "$WORK_DIR/configs/fs_config-system"
+grep -q "^system/etc/starbite/firstboot.sh " "$WORK_DIR/configs/fs_config-system" ||
+    echo "system/etc/starbite/firstboot.sh 0 0 644 capabilities=0x0" >> "$WORK_DIR/configs/fs_config-system"

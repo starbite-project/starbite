@@ -42,14 +42,19 @@ Host scripts: `build/oneui-dl.sh` (download + unzip, `SBI` env = device id), `bu
    `adb_keys_file`; the key file is generated into the checkout, never committed) and
    `persist.sys.usb.config=mtp,adb`. This is what lets every unattended boot come back
    (`adb reboot recovery`).
-3. **No setup**: `ro.setupwizard.mode=DISABLED` (Google's wizard). Samsung's wizard is finished by
-   `first-boot.sh` over adb (provisioned + setup complete, both wizards disabled for user 0, home
-   started) until a native way is proven.
+3. **No setup**: `ro.setupwizard.mode=DISABLED` (Google's wizard; UN1CA's vendor restore later sets it
+   OPTIONAL). Samsung's wizard: section 5 below on the phone, or `first-boot.sh` over adb (the same steps).
 4. **Boot guard**: `/system/etc/init/starbite-bootguard.rc` starts `/system/etc/starbite/bootguard.sh` (shell
    user and domain, like `adb shell reboot`). If `sys.boot_completed` is not 1 within `ro.starbite.bootguard`
    seconds (1200; 0 = off), it saves `logcat -b all` and the properties to `/data/local/tmp/starbite-bootguard.*`
    and restarts into recovery. A hang on the boot animation therefore always comes back without the buttons
    (`androidboot.init_fatal_reboot_target=recovery` in the cmdline covers init and critical-service crashes).
+5. **First boot straight to the home screen, natively** (2026-11-07): `/system/etc/init/starbite-firstboot.rc`
+   starts `/system/etc/starbite/firstboot.sh` (shell user and domain, like the boot guard, which ran on the
+   phone) at `sys.boot_completed=1`: provisioned + setup complete, Samsung's and Google's wizards and the OMC
+   agent disabled for user 0, home started; it does nothing once setup is complete. For an already built
+   work_dir: `tools/android/oneui/postfix-system.sh` (VM) applies the mod's missing parts and rebuilds
+   system.img.
 
 **After `make_rom`, always run `tools/android/oneui/postfix-vendor.sh` (VM).** UN1CA's
 `exynos9810_boot_restore` patch (build_order 20) runs after every mod and rewrites both vendor fstabs from a
