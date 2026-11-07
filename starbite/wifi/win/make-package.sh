@@ -51,8 +51,11 @@ XML
 fi
 
 # install.cmd: its first action is a log line (W2 note: sbpnp died twice within 3 s without a log). It finds its
-# files next to itself (%~dp0), so it also works tapped from anywhere ("Run as administrator"); run by hand it
-# shows its progress and pauses at the end; run by the sbpnp service (session 0, no SESSIONNAME) it stays silent.
+# files next to itself (%~dp0), so it works from any folder. Double-tapped without administrator rights it asks
+# for them itself (UAC, through PowerShell's Start-Process -Verb RunAs: long-press gives no context menu on the
+# phone) and the elevated copy does the work; run by hand it shows its progress and pauses at the end; run by the
+# sbpnp service (session 0, no SESSIONNAME) it stays silent. Admin check: fltmc (net session needs the Server
+# service, which may be off).
 cat > "$out/install.cmd.lf" <<'CMD'
 @echo off
 if not exist C:\starbite mkdir C:\starbite
@@ -62,12 +65,23 @@ set LOG=C:\starbite\pnp.log
 set PKG=%~dp0
 set INTERACTIVE=
 if defined SESSIONNAME set INTERACTIVE=1
+if /i "%~1"=="elevated" set INTERACTIVE=1
 call :say "Starbite Wi-Fi install: package folder %PKG%"
-net session >nul 2>&1
-if errorlevel 1 (
-    call :say "NOT AN ADMINISTRATOR: press and hold install.cmd, then Run as administrator"
+fltmc >nul 2>&1
+if not errorlevel 1 goto admin
+if /i "%~1"=="elevated" (
+    call :say "STILL NOT AN ADMINISTRATOR after the UAC prompt: Start, cmd, Run as administrator, then run %~f0"
     goto done
 )
+call :say "not an administrator: asking for it (UAC prompt: tap Yes); the new window does the install"
+powershell -NoProfile -Command "try { Start-Process -Verb RunAs -FilePath '%~f0' -ArgumentList 'elevated' -ErrorAction Stop; exit 0 } catch { exit 1 }"
+if errorlevel 1 (
+    call :say "UAC was declined or failed: nothing installed"
+    if defined INTERACTIVE pause
+)
+endlocal
+exit /b 0
+:admin
 sc query sbpnp >nul 2>&1 && sc config sbpnp start= disabled>> %LOG% 2>&1
 call :say "trusting the Starbite test certificate"
 certutil -addstore -f Root "%PKG%starbite-test.cer">> %LOG% 2>&1
