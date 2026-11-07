@@ -126,6 +126,8 @@ struct DEVCTX {
     HANDLE thread;
     KEVENT wake;
     volatile LONG stop;
+    int stopping;                   // under cmd_lock: no more requests are queued (answered NOT_READY)
+    int guard_cleared;              // the boot guard was cleared after the radio ran for 30 s
     volatile LONG rx_armed;         // NetAdapterCx asked to be told about new rx frames
     // WDI commands waiting for the worker
     KSPIN_LOCK cmd_lock;
@@ -405,6 +407,8 @@ static void CmdScan(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
     d->scan_txn = h->TransactionId;
     d->scan_port = h->PortId;
     d->nbss = 0;
+    d->scanning = 1;                // before the start: its ioctl wait already delivers results
+    d->scan_started = Now(NULL);
     int e = d->up ? bcmw_scan_start(d->w, ssid, ssid_len, SCAN_SYNC) : BCMW_E_STATE;
     CleanupParsedWdiTaskScanToIhv(&p);
     Answer(r, STATUS_SUCCESS);
@@ -412,10 +416,7 @@ static void CmdScan(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
         Sayf("wificx: the scan could not start (%d)", e);
         d->scanning = 1;
         ScanDone(d, NDIS_STATUS_FAILURE);
-        return;
     }
-    d->scanning = 1;
-    d->scan_started = Now(NULL);
 }
 
 // ---- connecting -----------------------------------------------------------------------------------------------------
@@ -438,6 +439,12 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
     UINT32 req_len = sizeof(req) - 4, resp_len = sizeof(resp) - 6;
     UINT8 reqf[520], respf[520];
     BSS *b = FindBss(d, d->bssid);
+    // the IEs first: a deauthentication arriving during that query (set_ssid_ok < 0) turns this into a failure
+    int have_ies = ok && bcmw_assoc_ies(d->w, req, &req_len, resp, &resp_len) == BCMW_OK;
+    if (ok && d->set_ssid_ok < 0) {
+        Say("wificx: deauthenticated right after associating");
+        ok = 0, reason = 1;
+    }
 
     RtlCopyMemory(res.BSSID.Address, d->bssid, 6);
     res.AssociationResultParameters.AssociationStatus = ok ? WDI_ASSOC_STATUS_SUCCESS : WDI_ASSOC_STATUS_FAILURE;
@@ -450,7 +457,7 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
     res.AssociationResultParameters.BandID = b && b->band5 ? WDI_BAND_ID_5000 : WDI_BAND_ID_2400;
     WDI_PHY_TYPE phy = b && b->band5 ? WDI_PHY_TYPE_VHT : WDI_PHY_TYPE_HT;    // required since WDI 1.1.4
     res.ActivePhyTypeList.SimpleAssign(&phy, 1);
-    if (ok && bcmw_assoc_ies(d->w, req, &req_len, resp, &resp_len) == BCMW_OK) {
+    if (ok && have_ies) {
         // the frames' bodies: request = capability, listen interval, elements; response = capability, status, AID, elements
         RtlZeroMemory(reqf, 4);
         reqf[0] = 0x31, reqf[1] = 0x04;         // ESS, privacy, short slot time
@@ -478,6 +485,8 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
         }
     }
     list.AssociationResults.SimpleAssign(&res, 1);
+    if (ok)
+        d->connected = 1;           // before Windows hears it: its handshake message 2 may follow at once
     if (GenerateWdiIndicationAssociationResultFromIhv(&list, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen) ==
         NDIS_STATUS_SUCCESS)
         Indicate(d, WDI_INDICATION_ASSOCIATION_RESULT, d->connect_port, d->connect_txn, NDIS_STATUS_SUCCESS, gen, len);
@@ -485,10 +494,6 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
         Say("wificx: the association result could not be generated");
     list.AssociationResults.SimpleAssign(NULL, 0);
     res.ActivePhyTypeList.SimpleAssign(NULL, 0);
-    if (ok) {
-        WifiAdapterAddPeer(d->adapter, (const NET_EUI48_ADDRESS *)d->bssid);
-        d->connected = 1;
-    }
     Indicate(d, WDI_INDICATION_CONNECT_COMPLETE, d->connect_port, d->connect_txn,
              ok ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE, NULL, 0);
     Sayf("wificx: connect %s", ok ? "COMPLETE (associated; Windows does the handshake now)" : "FAILED");
@@ -559,13 +564,21 @@ static void Disconnected(DEVCTX *d, UINT32 reason, int by_host)
         by_host ? WDI_ASSOC_STATUS_DISASSOCIATED_BY_HOST : WDI_ASSOC_STATUS_PEER_DISASSOCIATED;
     if (GenerateWdiIndicationDisassociationFromIhv(&p, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen) == NDIS_STATUS_SUCCESS)
         Indicate(d, WDI_INDICATION_DISASSOCIATION, d->connect_port, 0, NDIS_STATUS_SUCCESS, gen, len);
-    WifiAdapterRemovePeer(d->adapter, (const NET_EUI48_ADDRESS *)d->bssid);
     Sayf("wificx: disassociated (reason %u, %s)", reason, by_host ? "by the host" : "by the access point");
+}
+
+static void Forget(DEVCTX *d)
+{
+    // a reset or disconnect ends the scan and connect tasks: no late completions with their old transaction ids
+    d->scanning = 0;
+    d->connecting = 0;
+    d->set_ssid_ok = 0;
 }
 
 static void CmdDisconnect(DEVCTX *d, WIFIREQUEST r, const WDI_MESSAGE_HEADER *h)
 {
     Answer(r, STATUS_SUCCESS);
+    Forget(d);
     if (d->up)
         bcmw_leave(d->w);
     Disconnected(d, 3, 1);
@@ -632,6 +645,7 @@ static void Command(DEVCTX *d, WIFIREQUEST r)
         break;
     case WDI_TASK_DOT11_RESET:
         Answer(r, STATUS_SUCCESS);
+        Forget(d);
         if (d->connected && d->up)
             bcmw_leave(d->w);
         Disconnected(d, 3, 1);
@@ -732,21 +746,30 @@ static void OsRx(void *ctx, unsigned, const uint8_t *frame, uint32_t len)
     } else {
         d->rx_dropped++;
     }
-    KeReleaseSpinLock(&d->rx_lock, old);
-    if (d->rxq && InterlockedExchange(&d->rx_armed, 0))
+    if (d->rxq && InterlockedExchange(&d->rx_armed, 0))   // under the lock: the queue cannot go away meanwhile
         NetRxQueueNotifyMoreReceivedPacketsAvailable(d->rxq);
+    KeReleaseSpinLock(&d->rx_lock, old);
 }
 
 // ---- the worker ------------------------------------------------------------------------------------------------------------
 
+static void SetParam(PCWSTR name, ULONG v);
 static KSTART_ROUTINE Worker;
 static void Worker(PVOID arg)
 {
     DEVCTX *d = (DEVCTX *)arg;
     LARGE_INTEGER t;
     static UINT8 frame[FRAME_MAX];
+    UINT64 started = Now(NULL);
     t.QuadPart = -50000;            // 5 ms
     while (!d->stop) {
+        if (!d->guard_cleared && Now(NULL) - started > 30000000) {
+            // 30 s up without a crash: this start counts as clean (a registry write at shutdown may never reach
+            // the disk, so D0Exit's reset alone would let the count climb on ordinary restarts)
+            d->guard_cleared = 1;
+            SetParam(L"GuardBoots", 0);
+            Say("wificx: 30 s up: the boot guard is cleared");
+        }
         KIRQL old;
         KeWaitForSingleObject(&d->wake, Executive, KernelMode, FALSE, &t);
         // commands
@@ -935,8 +958,11 @@ static void QueueDestroy(WDFOBJECT o)
     if (c->d && c->d->txq == (NETPACKETQUEUE)o)
         c->d->txq = NULL;
     if (c->d && c->d->rxq == (NETPACKETQUEUE)o) {
+        KIRQL old;
+        KeAcquireSpinLock(&c->d->rx_lock, &old);
         InterlockedExchange(&c->d->rx_armed, 0);
         c->d->rxq = NULL;
+        KeReleaseSpinLock(&c->d->rx_lock, old);
     }
 }
 
@@ -1039,7 +1065,7 @@ static void SendCommand(WDFDEVICE device, WIFIREQUEST r)
     KIRQL old;
     int queued = 0;
     KeAcquireSpinLock(&d->cmd_lock, &old);
-    if (d->cmd_count < RTL_NUMBER_OF(d->cmd)) {
+    if (!d->stopping && d->thread && d->cmd_count < RTL_NUMBER_OF(d->cmd)) {
         d->cmd[(d->cmd_head + d->cmd_count) % RTL_NUMBER_OF(d->cmd)] = r;
         d->cmd_count++;
         queued = 1;
@@ -1175,10 +1201,18 @@ static NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST)
         return STATUS_DEVICE_NOT_READY;
     }
     SetParam(L"GuardBoots", guard + 1);
-    d->w = (struct bcmw *)ExAllocatePool2(POOL_FLAG_NON_PAGED, bcmw_size(), TAG);
-    d->bss = (BSS *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(BSS) * MAX_BSS, TAG);
-    d->tx = (FRAME *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(FRAME) * QLEN, TAG);
-    d->rx = (FRAME *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(FRAME) * QLEN, TAG);
+    // once per device (freed with it); a restart reuses them. The core's DMA buffers are not given back on a
+    // restart yet (bcmw has no free call): a few hundred KiB per restart, fine for the tests.
+    if (!d->w)
+        d->w = (struct bcmw *)ExAllocatePool2(POOL_FLAG_NON_PAGED, bcmw_size(), TAG);
+    if (!d->bss)
+        d->bss = (BSS *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(BSS) * MAX_BSS, TAG);
+    if (!d->tx)
+        d->tx = (FRAME *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(FRAME) * QLEN, TAG);
+    if (!d->rx)
+        d->rx = (FRAME *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(FRAME) * QLEN, TAG);
+    d->tx_head = d->tx_count = d->rx_head = d->rx_count = 0;
+    d->guard_cleared = 0;
     if (!d->w || !d->bss || !d->tx || !d->rx)
         return STATUS_INSUFFICIENT_RESOURCES;
     RtlZeroMemory(&os, sizeof(os));
@@ -1214,12 +1248,17 @@ static NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST)
     }
     // the worker
     d->stop = 0;
+    d->stopping = 0;
     st = PsCreateSystemThread(&d->thread, THREAD_ALL_ACCESS, NULL, NULL, NULL, Worker, d);
     return st;
 }
 
 static void Stop(DEVCTX *d)
 {
+    KIRQL old;
+    KeAcquireSpinLock(&d->cmd_lock, &old);
+    d->stopping = 1;
+    KeReleaseSpinLock(&d->cmd_lock, old);
     if (d->thread) {
         PVOID obj;
         d->stop = 1;
@@ -1230,6 +1269,20 @@ static void Stop(DEVCTX *d)
         }
         ZwClose(d->thread);
         d->thread = NULL;
+    }
+    // requests the worker did not take: answered, so WiFiCx never waits on them
+    for (;;) {
+        WIFIREQUEST r = NULL;
+        KeAcquireSpinLock(&d->cmd_lock, &old);
+        if (d->cmd_count) {
+            r = d->cmd[d->cmd_head];
+            d->cmd_head = (d->cmd_head + 1) % RTL_NUMBER_OF(d->cmd);
+            d->cmd_count--;
+        }
+        KeReleaseSpinLock(&d->cmd_lock, old);
+        if (!r)
+            break;
+        WifiRequestComplete(r, STATUS_DEVICE_NOT_READY, 0);
     }
     if (d->w && d->up) {
         bcmw_quiesce(d->w);         // the radio held in reset and unpowered
@@ -1257,9 +1310,21 @@ static NTSTATUS ReleaseHardware(WDFDEVICE device, WDFCMRESLIST)
     return STATUS_SUCCESS;
 }
 
+static EVT_WDF_OBJECT_CONTEXT_CLEANUP DeviceCleanup;
+static void DeviceCleanup(WDFOBJECT o)
+{
+    DEVCTX *d = Ctx((WDFDEVICE)o);
+    void *p[4] = { d->w, d->bss, d->tx, d->rx };
+    for (int i = 0; i < 4; i++)
+        if (p[i])
+            ExFreePoolWithTag(p[i], TAG);
+    d->w = NULL, d->bss = NULL, d->tx = NULL, d->rx = NULL;
+}
+
 static EVT_WDF_DRIVER_DEVICE_ADD DeviceAdd;
 static NTSTATUS DeviceAdd(WDFDRIVER, PWDFDEVICE_INIT init)
 {
+    LogOpen();
     NTSTATUS st = NetDeviceInitConfig(init);
     if (!NT_SUCCESS(st))
         return st;
@@ -1273,6 +1338,7 @@ static NTSTATUS DeviceAdd(WDFDRIVER, PWDFDEVICE_INIT init)
     WdfDeviceInitSetPnpPowerEventCallbacks(init, &pnp);
     WDF_OBJECT_ATTRIBUTES a;
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&a, DEVCTX);
+    a.EvtCleanupCallback = DeviceCleanup;
     WDFDEVICE device;
     if (!NT_SUCCESS(st = WdfDeviceCreate(&init, &a, &device)))
         return st;
@@ -1283,8 +1349,18 @@ static NTSTATUS DeviceAdd(WDFDRIVER, PWDFDEVICE_INIT init)
     KeInitializeSpinLock(&d->tx_lock);
     KeInitializeSpinLock(&d->rx_lock);
     WIFI_DEVICE_CONFIG wc;
-    WIFI_DEVICE_CONFIG_INIT(&wc, WDI_VERSION_LATEST, SendCommand, CreateAdapter, NULL);
-    return WifiDeviceInitialize(device, &wc);
+    // WDI 2.0.0: the WiFiCx baseline (the SDK's LATEST, 2.0.13, may be newer than 23H2's WiFiCx accepts);
+    // Parameters\WdiVersion overrides it for a retry without a rebuild
+    ULONG wdi = Param(L"WdiVersion", WDI_VERSION_2_0_0);
+    WIFI_DEVICE_CONFIG_INIT(&wc, wdi, SendCommand, CreateAdapter, NULL);
+    st = WifiDeviceInitialize(device, &wc);
+    Sayf("SbWifiCx build %s: device added; WDI %lu.%lu.%lu asked, WifiDeviceInitialize %08x", SB_BUILD_ID, wdi >> 16,
+         (wdi >> 8) & 0xff, wdi & 0xff, st);
+    if (NT_SUCCESS(st)) {
+        ULONG os = WifiDeviceGetOsWdiVersion(device);
+        Sayf("wificx: the OS speaks WDI %lu.%lu.%lu", os >> 16, (os >> 8) & 0xff, os & 0xff);
+    }
+    return st;
 }
 
 extern "C" DRIVER_INITIALIZE DriverEntry;
