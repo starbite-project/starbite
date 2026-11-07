@@ -23,6 +23,7 @@
  * refuses anything else. Nothing on storage. At the end (or Power) the radio is held in reset and
  * unpowered.
  */
+#include "../wifi/net.h"
 #include "sb.h"
 #include "sbui.h"
 #include "catalog.h"
@@ -93,78 +94,54 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
     }
 }
 
-/* ---- step 11: join, then a DHCP DISCOVER and its OFFER -------------------------------------------------- */
+/* ---- step 11: join, then sbnet (net.c): a DHCP lease, pings to the router, a DNS lookup --------------- */
 
-static uint8_t dhcp_mac[6];
-static uint32_t dhcp_xid;
-static unsigned rx_frames, dhcp_offers;
-static uint32_t dhcp_lease;
+static struct sbnet net;
+static struct bcmw *net_w;
+static int net_on;
+static unsigned rx_frames;
+static uint64_t net_seed;
 
 static void os_rx(void *ctx, unsigned ifidx, const uint8_t *f, uint32_t len)
 {
-    const uint8_t *ip = f + 14, *udp, *b;
-    unsigned ihl;
     (void)ctx;
     (void)ifidx;
     rx_frames++;
-    if (len < 14 + 20 + 8 + 240 || f[12] != 0x08 || f[13] != 0x00 || ip[9] != 17)
-        return;
-    ihl = (ip[0] & 15) * 4u;
-    udp = ip + ihl;
-    if (udp + 8 + 240 > f + len || udp[0] != 0 || udp[1] != 67 || udp[2] != 0 || udp[3] != 68)
-        return;
-    b = udp + 8;
-    if (b[0] != 2 || (uint32_t)(b[4] << 24 | b[5] << 16 | b[6] << 8 | b[7]) != dhcp_xid || memcmp(b + 28, dhcp_mac, 6))
-        return;
-    for (const uint8_t *o = b + 240; o < f + len && o[0] != 255;) {
-        if (o[0] == 0) {
-            o++;
-            continue;
+    if (net_on)
+        sbnet_rx(&net, f, len);
+}
+
+static int net_tx(void *ctx, const uint8_t *f, uint32_t len)
+{
+    (void)ctx;
+    return bcmw_tx(net_w, f, len) == BCMW_OK ? 0 : -1;
+}
+static uint64_t net_now(void *ctx) { (void)ctx; return sb_ms(); }
+static uint32_t net_random(void *ctx)
+{
+    (void)ctx;
+    net_seed ^= sb_us();
+    net_seed ^= net_seed << 13, net_seed ^= net_seed >> 7, net_seed ^= net_seed << 17;
+    return (uint32_t)(net_seed >> 16);
+}
+static void net_log(void *ctx, const char *l) { (void)ctx; line(l); }
+
+/* polls the radio and sbnet's timers for up to ms, or until done() */
+static void net_run(struct bcmw *w, uint64_t ms, int (*done)(void))
+{
+    uint64_t t0 = sb_ms(), tick = 0;
+    while (sb_ms() - t0 < ms && !(done && done())) {
+        bcmw_poll(w);
+        if (sb_ms() >= tick) {
+            sbnet_tick(&net);
+            tick = sb_ms() + 100;
         }
-        if (o + 2 > f + len || o + 2 + o[1] > f + len)
-            break;
-        if (o[0] == 53 && o[1] == 1 && o[2] == 2)
-            dhcp_offers++;
-        if (o[0] == 51 && o[1] == 4)
-            dhcp_lease = (uint32_t)o[2] << 24 | (uint32_t)o[3] << 16 | (uint32_t)o[4] << 8 | o[5];
-        o += 2 + o[1];
+        wdt_feed();
+        sb_mdelay(2);
     }
 }
-
-static void dhcp_discover(struct bcmw *w)
-{
-    uint8_t f[14 + 20 + 8 + 300];
-    uint8_t *ip = f + 14, *udp = ip + 20, *b = udp + 8;
-    uint32_t sum = 0;
-    unsigned o = 240;
-
-    memset(f, 0, sizeof(f));
-    memcpy(dhcp_mac, bcmw_info(w)->mac, 6);
-    dhcp_xid = (uint32_t)sb_us() ^ 0x5b17e000U;
-    memset(f, 0xff, 6);
-    memcpy(f + 6, dhcp_mac, 6);
-    f[12] = 0x08;
-    ip[0] = 0x45, ip[8] = 64, ip[9] = 17;
-    ip[2] = (uint8_t)((20 + 8 + 300) >> 8), ip[3] = (uint8_t)(20 + 8 + 300);
-    memset(ip + 16, 0xff, 4);
-    for (unsigned i = 0; i < 20; i += 2)
-        sum += (uint32_t)ip[i] << 8 | ip[i + 1];
-    while (sum >> 16)
-        sum = (sum & 0xffff) + (sum >> 16);
-    ip[10] = (uint8_t)(~sum >> 8), ip[11] = (uint8_t)~sum;
-    udp[1] = 68, udp[3] = 67;
-    udp[4] = (uint8_t)((8 + 300) >> 8), udp[5] = (uint8_t)(8 + 300);
-    b[0] = 1, b[1] = 1, b[2] = 6;
-    b[4] = (uint8_t)(dhcp_xid >> 24), b[5] = (uint8_t)(dhcp_xid >> 16), b[6] = (uint8_t)(dhcp_xid >> 8), b[7] = (uint8_t)dhcp_xid;
-    b[10] = 0x80;                           /* broadcast the answer */
-    memcpy(b + 28, dhcp_mac, 6);
-    b[236] = 0x63, b[237] = 0x82, b[238] = 0x53, b[239] = 0x63;
-    b[o++] = 53, b[o++] = 1, b[o++] = 1;    /* DISCOVER */
-    b[o++] = 55, b[o++] = 3, b[o++] = 1, b[o++] = 3, b[o++] = 6;
-    b[o++] = 255;
-    if (bcmw_tx(w, f, sizeof(f)) != BCMW_OK)
-        line("wifitest: the DHCP DISCOVER could not be sent");
-}
+static int net_bound(void) { return net.state == SBNET_BOUND; }
+static int net_dns_over(void) { return net.dns_state == SBNET_DNS_DONE || net.dns_state == SBNET_DNS_FAILED; }
 
 /* "wifinet" from the UFS store: two lines; 1 if read */
 static int wifinet(char ssid[33], unsigned *ssid_len, char pass[65])
@@ -197,7 +174,6 @@ static void join_test(struct bcmw *w)
     unsigned ssid_len, before;
     struct ub u;
     int e;
-    uint64_t t0;
 
     if (!wifinet(ssid, &ssid_len, pass)) {
         line("wifitest: 11: no store entry \"wifinet\" (name, passphrase): nothing to join");
@@ -217,15 +193,54 @@ static void join_test(struct bcmw *w)
         return;
     }
     before = rx_frames;
-    for (unsigned k = 0; k < 3 && !dhcp_offers; k++) {
-        line("wifitest: 11: a DHCP DISCOVER sent (broadcast)");
-        dhcp_discover(w);
-        t0 = sb_ms();
-        while (!dhcp_offers && sb_ms() - t0 < 3000) {
-            bcmw_poll(w);
-            wdt_feed();
-            sb_mdelay(2);
+    {
+        static const struct sbnet_os nos = { 0, net_tx, net_now, net_random, net_log, 0 };
+        uint32_t replies;
+        net_w = w;
+        net_seed = sb_us() | 1;
+        sbnet_init(&net, &nos, bcmw_info(w)->mac);
+        net_on = 1;
+        sbnet_start(&net);
+        net_run(w, 20000, net_bound);
+        ub_init(&u);
+        ub_s(&u, "wifitest: 11: ");
+        if (net.state == SBNET_BOUND) {
+            ub_s(&u, "LEASED (");
+            ub_dec(&u, net.lease_s);
+            ub_s(&u, " s; a router ");
+            ub_s(&u, net.gateway[0] ? "and" : "NOT given,");
+            ub_s(&u, net.dns[0] ? " a DNS server given; addresses not shown)" : " NO DNS server)");
+        } else {
+            ub_s(&u, "NO LEASE in 20 s (DHCP state ");
+            ub_dec(&u, (unsigned)net.state);
+            ub_s(&u, ")");
         }
+        line(u.b);
+        if (net.state == SBNET_BOUND && net.gateway[0]) {
+            for (unsigned k = 0; k < 3; k++) {
+                sbnet_ping(&net, net.gateway);
+                net_run(w, 1000, 0);
+            }
+            replies = net.ping_replies;
+            ub_init(&u);
+            ub_s(&u, "wifitest: 11: the router answered ");
+            ub_dec(&u, replies);
+            ub_s(&u, " of 3 pings");
+            if (replies) {
+                ub_s(&u, " (the last in ");
+                ub_dec(&u, net.ping_rtt_ms);
+                ub_s(&u, " ms)");
+            }
+            line(u.b);
+        }
+        if (net.state == SBNET_BOUND && net.dns[0]) {
+            sbnet_dns_query(&net, "example.com");
+            net_run(w, 6000, net_dns_over);
+            line(net.dns_state == SBNET_DNS_DONE ? "wifitest: 11: DNS ANSWERED (a lookup of example.com; the address not shown)"
+                                                 : "wifitest: 11: DNS: no answer");
+        }
+        net_on = 0;
+        sbnet_stop(&net);
     }
     ub_init(&u);
     ub_s(&u, "wifitest: 11: ");
@@ -236,14 +251,8 @@ static void join_test(struct bcmw *w)
     ub_dec(&u, bcmw_info(w)->tx_done);
     ub_s(&u, " done, ");
     ub_dec(&u, bcmw_info(w)->tx_errors);
-    ub_s(&u, " errors; ");
-    if (dhcp_offers) {
-        ub_s(&u, "A DHCP OFFER CAME BACK (lease ");
-        ub_dec(&u, dhcp_lease);
-        ub_s(&u, " s; the address is not shown): frames pass both ways");
-    } else {
-        ub_s(&u, "no DHCP offer");
-    }
+    ub_s(&u, " errors; sbnet ignored ");
+    ub_dec(&u, net.rx_ignored);
     line(u.b);
     bcmw_leave(w);
 }

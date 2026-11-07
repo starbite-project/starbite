@@ -41,7 +41,7 @@ CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie
 -fno-math-errno -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$wifi"
 objs=""
 for src in "$lib"/*.c "$lib"/*.S "$wifi/core.c" "$wifi/exynos_pcie.c" "$wifi/chip.c" "$wifi/fw.c" "$wifi/ring.c" \
-           "$wifi/msgbuf.c" "$wifi/link.c" "$wifi/wpa.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" "$here/main.c"; do
+           "$wifi/msgbuf.c" "$wifi/link.c" "$wifi/wpa.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" "$here/main.c"; do
     obj="$out/wt_$(basename "$src" | tr . _).o"
     # shellcheck disable=SC2086
     "${CROSS}gcc" $CFLAGS -DSB_ASSETS="\"$out/wt-sbassets.sb7\"" "$src" -o "$obj"

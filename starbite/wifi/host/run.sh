@@ -107,6 +107,10 @@ if [ -n "${BCMW_VENDOR_IMG:-}" ] && [ -n "${BCMW_VENDOR_REF:-}" ]; then
     # shellcheck disable=SC2086
     "$OUT/erofs-test" "$BCMW_VENDOR_IMG" "$BCMW_VENDOR_REF" $vf
 fi
+# sbnet (net.c): freestanding like the core, then its own test on a simulated LAN
+$CC -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -nostdlib -c -I"$core" "$core/net.c" -o "$OUT/net-free.o"
+$CC $flags "$core/net.c" "$here/net-test.c" -o "$OUT/net-test"
+"$OUT/net-test"
 if [ -n "$dir" ]; then
     echo "bcmw: the phone's files from $dir (read only)"
     "$OUT/bcmw-test" "$dir"
