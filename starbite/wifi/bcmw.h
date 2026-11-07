@@ -189,6 +189,10 @@ struct bcmw_bss {                   /* one access point from an escan result eve
     const uint8_t *ie;              /* its information elements (inside the event: copy them) */
     uint32_t ie_len;
 };
+/* n more firmware console lines go to the log (it stops after a quota, to keep the log short) */
+void bcmw_console_more(struct bcmw *w, unsigned n);
+/* the radio's own address (cur_etheraddr), for an OS that picks one per network; not while associated */
+int bcmw_set_mac(struct bcmw *w, const uint8_t mac[6]);
 /* the control (primary 20 MHz) channel of a d11ac chanspec (its low byte is the center for 40 MHz and wider) */
 unsigned bcmw_chanspec_channel(uint16_t chanspec);
 /* 1 if ev is an escan result carrying a BSS (status 8), into *b; *sync = the scan's sync id */

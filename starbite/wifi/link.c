@@ -735,6 +735,19 @@ int bcmw_connect(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const u
     return bcmw_ioctl(w, 0, BCMW_C_SET_SSID, j, sizeof(j), 1, &fwerr);
 }
 
+void bcmw_console_more(struct bcmw *w, unsigned n) { w->console_quota += n; }
+
+int bcmw_set_mac(struct bcmw *w, const uint8_t mac[6])
+{
+    int fwerr = 0, e;
+    if (w->step < BCMW_STEP_UP || w->dead)
+        return BCMW_E_STATE;
+    e = bcmw_iovar_set(w, "cur_etheraddr", mac, 6, &fwerr);
+    if (e == BCMW_OK)
+        bcmw_memcpy(w->info.mac, mac, 6);
+    return e;
+}
+
 int bcmw_set_key(struct bcmw *w, unsigned index, const uint8_t *key, unsigned len, unsigned algo, const uint8_t *ea,
                  const uint8_t *rsc)
 {

@@ -152,6 +152,11 @@ struct DEVCTX {
     // connection
     int connecting, connected;
     UINT32 connect_txn;
+    // W2d: the join step by step (Windows' handshake failed after association in W2c)
+    int ev_budget;                  // firmware events still logged in this connect
+    UINT32 last_reason, set_ssid_status;
+    volatile LONG eapol_in, eapol_up, eapol_out, eapol_out_fail;  // EAPOL frames: from the AP, to Windows, from Windows
+    ULONG tx_dropped_seen, rx_dropped_seen;
     UINT16 connect_port;
     UINT8 bssid[6], rsn[BCMW_RSN_OURS];
     UINT64 connect_started;
@@ -302,6 +307,48 @@ static int File(void *, const char *name, const uint8_t **data, uint32_t *len)
 }
 
 static void OsLog(void *, const char *line) { Say(line); }
+
+// an EAPOL-Key frame's key info and which of the four-way handshake's messages it is (0: not a key frame)
+static int EapolKey(const UINT8 *f, ULONG len, UINT16 *info)
+{
+    if (len < 14 + 4 + 3 || f[12] != 0x88 || f[13] != 0x8e)
+        return -1;                                  // not EAPOL
+    if (f[15] != 3)
+        return 0;                                   // EAPOL, not a key frame
+    UINT16 ki = (UINT16)(f[19] << 8 | f[20]);
+    *info = ki;
+    if (!(ki & 0x0008))
+        return 5;                                   // group key handshake
+    if ((ki & 0x0080) && !(ki & 0x0100))
+        return 1;
+    if ((ki & 0x0080) && (ki & 0x0040))
+        return 3;
+    if (!(ki & 0x0080) && (ki & 0x0100))
+        return (ki & 0x0200) ? 4 : 2;
+    return 0;
+}
+
+static const char *EvName(UINT32 t)
+{
+    switch (t) {
+    case 0: return "SET_SSID";
+    case 1: return "JOIN";
+    case 3: return "AUTH";
+    case 4: return "AUTH_IND";
+    case 5: return "DEAUTH";
+    case 6: return "DEAUTH_IND";
+    case 7: return "ASSOC";
+    case 8: return "ASSOC_IND";
+    case 9: return "REASSOC";
+    case 11: return "DISASSOC";
+    case 12: return "DISASSOC_IND";
+    case 16: return "LINK";
+    case 17: return "MIC_ERROR";
+    case 46: return "PSK_SUP";
+    case 52: return "PRUNE";
+    default: return "other";
+    }
+}
 
 static void OsEvent(void *ctx, const struct bcmw_event *ev);
 static void OsRx(void *ctx, unsigned ifidx, const uint8_t *frame, uint32_t len);
@@ -542,12 +589,29 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
         Indicate(d, WDI_INDICATION_ASSOCIATION_RESULT, d->connect_port, d->connect_txn, NDIS_STATUS_SUCCESS, gen, len);
     else
         Say("wificx: the association result could not be generated");
+    {
+        const UINT8 *our = d->rsn[0] ? d->rsn : NULL;
+        const UINT8 *sent = have_ies ? bcmw_ie_find(req, req_len, 48) : NULL;
+        Sayf("wificx: association result: %s, status code %lu; request elements %lu bytes (RSN %s), response %lu, "
+             "AP elements %lu (%s); set_ssid status %lu, last deauth reason %lu", ok ? "SUCCESS" : "FAILURE",
+             ok ? 0 : reason, have_ies ? req_len : 0, !our ? "none asked" : !sent ? "MISSING" :
+             (sent[1] == our[1] && RtlEqualMemory(sent, our, 2u + our[1])) ? "as set" : "DIFFERENT from what was set",
+             have_ies ? resp_len : 0, b ? b->ie_len : 0, b ? "from the scan" : "AP NOT IN THE SCAN LIST",
+             d->set_ssid_status, d->last_reason);
+    }
     list.AssociationResults.SimpleAssign(NULL, 0);
     res.ActivePhyTypeList.SimpleAssign(NULL, 0);
     Indicate(d, WDI_INDICATION_CONNECT_COMPLETE, d->connect_port, d->connect_txn,
              ok ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE, NULL, 0);
     Sayf("wificx: connect %s", ok ? "COMPLETE (associated; Windows does the handshake now)" : "FAILED");
     d->connecting = 0;
+    {   // the frames held during the report (the AP's first handshake message) go up now
+        KIRQL old;
+        KeAcquireSpinLock(&d->rx_lock, &old);
+        if (d->rx_count && d->rxq && InterlockedExchange(&d->rx_armed, 0))
+            NetRxQueueNotifyMoreReceivedPacketsAvailable(d->rxq);
+        KeReleaseSpinLock(&d->rx_lock, old);
+    }
 }
 
 static void CmdConnect(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
@@ -583,8 +647,15 @@ static void CmdConnect(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
             bcmw_rsn_ours(d->rsn, group);
             tkip = group == BCMW_CIPHER_TKIP;
         }
-        Sayf("wificx: connect: %s, %u BSS candidates (names not logged)", psk ? "WPA2-PSK (Windows' supplicant)" : "open",
-             p.PreferredBSSEntryList.ElementCount);
+        Sayf("wificx: connect: %s, %u BSS candidates (names not logged); the first: %s, channel %lu %s GHz, %ld dBm, "
+             "group cipher %s, RSN element %u bytes", psk ? "WPA2-PSK (Windows' supplicant)" : "open",
+             p.PreferredBSSEntryList.ElementCount, b ? "in the scan list" : "NOT in the scan list", b ? b->channel : 0,
+             b && b->band5 ? "5" : "2.4", b ? (long)b->rssi : 0L, tkip ? "TKIP" : "CCMP", psk ? 2u + d->rsn[1] : 0u);
+        d->ev_budget = 40;
+        d->last_reason = 0;
+        d->set_ssid_status = 0;
+        d->eapol_in = d->eapol_up = d->eapol_out = d->eapol_out_fail = 0;
+        bcmw_console_more(d->w, 40);    // the firmware's own account of the join
         d->connecting = 1;
         d->set_ssid_ok = 0;
         d->connect_started = Now(NULL);
@@ -614,7 +685,10 @@ static void Disconnected(DEVCTX *d, UINT32 reason, int by_host)
         by_host ? WDI_ASSOC_STATUS_DISASSOCIATED_BY_HOST : WDI_ASSOC_STATUS_PEER_DISASSOCIATED;
     if (GenerateWdiIndicationDisassociationFromIhv(&p, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen) == NDIS_STATUS_SUCCESS)
         Indicate(d, WDI_INDICATION_DISASSOCIATION, d->connect_port, 0, NDIS_STATUS_SUCCESS, gen, len);
-    Sayf("wificx: disassociated (reason %u, %s)", reason, by_host ? "by the host" : "by the access point");
+    Sayf("wificx: disassociated (%s, 802.11 reason %lu); EAPOL so far: %ld in from the AP, %ld handed to Windows, "
+         "%ld out from Windows (%ld not sent)", by_host ? "by the host" : "by the access point", d->last_reason,
+         d->eapol_in, d->eapol_up, d->eapol_out, d->eapol_out_fail);
+    UNREFERENCED_PARAMETER(reason);
 }
 
 static void Forget(DEVCTX *d)
@@ -670,6 +744,36 @@ static void CmdAddKeys(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
 
 // ---- the commands ------------------------------------------------------------------------------------------------------
 
+// A MAC address Windows configures (SET_ADAPTER_CONFIGURATION, DOT11_RESET): the radio takes it when it differs, so
+// the handshake's keys (computed by Windows from its address) match what the radio sends. No address is logged.
+static void ConfiguredMac(DEVCTX *d, const char *from, const UINT8 *mac)
+{
+    const UINT8 *own = bcmw_info(d->w)->mac;
+    if (RtlEqualMemory(mac, own, 6)) {
+        Sayf("wificx: %s: Windows' MAC address is the radio's", from);
+        return;
+    }
+    int e = d->up && !d->connected ? bcmw_set_mac(d->w, mac) : BCMW_E_STATE;
+    Sayf("wificx: %s: Windows configures a DIFFERENT MAC address (%s); given to the radio: %d", from,
+         (mac[0] & 2) ? "locally administered: randomized" : "a global one", e);
+    if (e == BCMW_OK) {
+        NET_ADAPTER_LINK_LAYER_ADDRESS a;
+        NET_ADAPTER_LINK_LAYER_ADDRESS_INIT(&a, 6, mac);
+        NetAdapterSetCurrentLinkLayerAddress(d->adapter, &a);
+    }
+}
+
+static void CmdAdapterConfig(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
+{
+    WDI_SET_FIRMWARE_CONFIGURATION_PARAMETERS p;
+    if (ParseWdiSetAdapterConfigurationToIhv(in - sizeof(*h), (UINT8 *)(h + 1), &d->tlv, &p) == NDIS_STATUS_SUCCESS) {
+        if (p.Optional.MacAddress_IsPresent)
+            ConfiguredMac(d, "adapter configuration", p.MacAddress.Address);
+        CleanupParsedWdiSetAdapterConfigurationToIhv(&p);
+    }
+    Answer(r, STATUS_SUCCESS);
+}
+
 // WDI_ABORT_TASK: a signal, answered with success at once; the task it names is completed as soon as possible (W2
 // answered NOT_SUPPORTED to the abort of the first scan, 30 ms after it began)
 static void CmdAbort(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
@@ -715,7 +819,17 @@ static void Command(DEVCTX *d, WIFIREQUEST r)
         Answer(r, STATUS_SUCCESS);
         Indicate(d, WDI_INDICATION_CLOSE_COMPLETE, hc.PortId, hc.TransactionId, NDIS_STATUS_SUCCESS, NULL, 0);
         break;
-    case WDI_TASK_DOT11_RESET:
+    case WDI_TASK_DOT11_RESET: {
+        WDI_TASK_DOT11_RESET_PARAMETERS rp;
+        if (ParseWdiTaskDot11ResetToIhv(in - sizeof(*h), (UINT8 *)(h + 1), &d->tlv, &rp) == NDIS_STATUS_SUCCESS) {
+            UINT8 mac[6];
+            int has = rp.Optional.ResetMACAddress_IsPresent;
+            if (has)
+                RtlCopyMemory(mac, rp.ResetMACAddress.Address, 6);
+            CleanupParsedWdiTaskDot11ResetToIhv(&rp);
+            if (has && !d->connected)
+                ConfiguredMac(d, "reset", mac);
+        }
         Answer(r, STATUS_SUCCESS);
         Forget(d);
         if (d->connected && d->up)
@@ -723,6 +837,7 @@ static void Command(DEVCTX *d, WIFIREQUEST r)
         Disconnected(d, 3, 1);
         Indicate(d, WDI_INDICATION_DOT11_RESET_COMPLETE, hc.PortId, hc.TransactionId, NDIS_STATUS_SUCCESS, NULL, 0);
         break;
+    }
     case WDI_TASK_SCAN:
         CmdScan(d, r, h, in);
         break;
@@ -738,8 +853,10 @@ static void Command(DEVCTX *d, WIFIREQUEST r)
     case WDI_ABORT_TASK:
         CmdAbort(d, r, h, in);
         break;
-    case WDI_SET_DELETE_CIPHER_KEYS:
     case WDI_SET_ADAPTER_CONFIGURATION:
+        CmdAdapterConfig(d, r, h, in);
+        break;
+    case WDI_SET_DELETE_CIPHER_KEYS:
     case WDI_SET_RECEIVE_PACKET_FILTER:
     case WDI_SET_MULTICAST_LIST:
     case WDI_SET_PRIVACY_EXEMPTION_LIST:
@@ -789,9 +906,15 @@ static void OsEvent(void *ctx, const struct bcmw_event *ev)
         }
         return;
     }
+    if ((d->connecting || d->connected) && d->ev_budget > 0) {
+        d->ev_budget--;
+        Sayf("wificx: fw event %lu %s: status %lu, reason %lu, flags %04x, auth %lu", ev->type, EvName(ev->type),
+             ev->status, ev->reason, ev->flags, ev->auth_type);
+    }
     switch (ev->type) {
     case BCMW_E_SET_SSID:
-        if (d->connecting)
+        d->set_ssid_status = ev->status;
+        if (d->connecting && d->set_ssid_ok != 2)   // the LINK event may come first: keep "associated"
             d->set_ssid_ok = ev->status == 0 ? 1 : -1;
         break;
     case BCMW_E_LINK:
@@ -803,6 +926,7 @@ static void OsEvent(void *ctx, const struct bcmw_event *ev)
     case BCMW_E_DEAUTH:
     case BCMW_E_DEAUTH_IND:
     case BCMW_E_DISASSOC_IND:
+        d->last_reason = ev->reason;
         if (d->connected)
             d->connected = 2;
         else if (d->connecting)
@@ -817,6 +941,16 @@ static void OsRx(void *ctx, unsigned, const uint8_t *frame, uint32_t len)
     KIRQL old;
     if (len > FRAME_MAX)
         return;
+    {
+        UINT16 ki = 0;
+        int m = EapolKey(frame, len, &ki);
+        if (m >= 0) {
+            InterlockedIncrement(&d->eapol_in);
+            Sayf("wificx: EAPOL in from the AP: %s%u, key info %04x, %lu bytes; %s", m == 5 ? "group " : "message ",
+                 m == 5 ? 1 : m, ki, len, !d->rxq ? "NO RX QUEUE (dropped later)" :
+                 d->connecting ? "held until Windows has the association" : "to Windows");
+        }
+    }
     KeAcquireSpinLock(&d->rx_lock, &old);
     if (d->rx_count < QLEN) {
         FRAME *f = &d->rx[(d->rx_head + d->rx_count) % QLEN];
@@ -826,7 +960,9 @@ static void OsRx(void *ctx, unsigned, const uint8_t *frame, uint32_t len)
     } else {
         d->rx_dropped++;
     }
-    if (d->rxq && InterlockedExchange(&d->rx_armed, 0))   // under the lock: the queue cannot go away meanwhile
+    // under the lock: the queue cannot go away meanwhile. Not while a connect is being reported: the AP's first
+    // handshake message comes within milliseconds of the association, before Windows has the association result
+    if (d->rxq && !d->connecting && InterlockedExchange(&d->rx_armed, 0))
         NetRxQueueNotifyMoreReceivedPacketsAvailable(d->rxq);
     KeReleaseSpinLock(&d->rx_lock, old);
 }
@@ -880,8 +1016,19 @@ static void Worker(PVOID arg)
             KeReleaseSpinLock(&d->tx_lock, old);
             if (!len)
                 break;
-            if (d->up && bcmw_tx(d->w, frame, len) != BCMW_OK)
+            UINT16 ki = 0;
+            int m = EapolKey(frame, len, &ki);
+            int te = d->up ? bcmw_tx(d->w, frame, len) : BCMW_E_STATE;
+            if (te != BCMW_OK)
                 d->tx_dropped++;
+            if (m >= 0) {
+                InterlockedIncrement(&d->eapol_out);
+                if (te != BCMW_OK)
+                    InterlockedIncrement(&d->eapol_out_fail);
+                Sayf("wificx: EAPOL out from Windows: %s%u, key info %04x, %lu bytes, source %s; sent: %d", m == 5 ? "group " : "message ",
+                     m == 5 ? 2 : m, ki, len, RtlEqualMemory(frame + 6, bcmw_info(d->w)->mac, 6) ? "the radio's address" :
+                     "NOT the radio's address", te);
+            }
         }
         if (!d->up)
             continue;
@@ -894,6 +1041,11 @@ static void Worker(PVOID arg)
                 ConnectDone(d, 1, 0);
             else if (d->set_ssid_ok < 0 || Now(NULL) - d->connect_started > 10000000)
                 ConnectDone(d, 0, 1);
+        }
+        if ((d->connected || d->connecting) && (d->tx_dropped != d->tx_dropped_seen || d->rx_dropped != d->rx_dropped_seen)) {
+            Sayf("wificx: frames dropped so far: %lu out (no link or queue full), %lu in (queue full)", d->tx_dropped,
+                 d->rx_dropped);
+            d->tx_dropped_seen = d->tx_dropped, d->rx_dropped_seen = d->rx_dropped;
         }
         if (d->connected == 2) {
             d->connected = 1;
@@ -986,12 +1138,16 @@ static void RxAdvance(NETPACKETQUEUE q)
         NET_FRAGMENT_VIRTUAL_ADDRESS *va = NetExtensionGetFragmentVirtualAddress(&c->va, fi);
         UINT32 n = f->len <= frag->Capacity ? f->len : (UINT32)frag->Capacity;
         RtlCopyMemory(va->VirtualAddress, f->data, n);
+        if (n >= 14 && f->data[12] == 0x88 && f->data[13] == 0x8e)
+            InterlockedIncrement(&d->eapol_up);
         frag->ValidLength = n;
         frag->Offset = 0;
         NET_PACKET *p = NetRingGetPacketAtIndex(pr, pi);
         p->FragmentIndex = fi;
         p->FragmentCount = 1;
         p->Layout = {};
+        p->Layout.Layer2Type = NetPacketLayer2TypeEthernet;
+        p->Layout.Layer2HeaderLength = 14;
         p->Ignore = 0;
         KeAcquireSpinLock(&d->rx_lock, &old);
         d->rx_head = (d->rx_head + 1) % QLEN;
@@ -1015,7 +1171,7 @@ static void RxNotify(NETPACKETQUEUE q, BOOLEAN on)
         KeAcquireSpinLock(&d->rx_lock, &old);
         n = d->rx_count;
         KeReleaseSpinLock(&d->rx_lock, old);
-        if (n && InterlockedExchange(&d->rx_armed, 0))
+        if (n && !d->connecting && InterlockedExchange(&d->rx_armed, 0))
             NetRxQueueNotifyMoreReceivedPacketsAvailable(q);   // frames came while it was not armed
     }
 }
