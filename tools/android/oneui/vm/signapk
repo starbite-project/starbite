@@ -22,5 +22,5 @@ CERT=$1 KEY=$2 IN=$3 OUT=$4
 T=$(mktemp -d -p "${TMP_DIR:-/mnt/oneui}" signapk.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 "$here/zipalign" -f -p 4 "$IN" "$T/aligned.apk"
-apksigner sign --v1-signing-enabled true --v2-signing-enabled true --cert "$CERT" --key "$KEY" ${MIN:+--min-sdk-version "$MIN"} --out "$T/signed.apk" "$T/aligned.apk"
+apksigner sign --v1-signer-name CERT --v1-signing-enabled true --v2-signing-enabled true --cert "$CERT" --key "$KEY" ${MIN:+--min-sdk-version "$MIN"} --out "$T/signed.apk" "$T/aligned.apk"
 mv -f "$T/signed.apk" "$OUT"
