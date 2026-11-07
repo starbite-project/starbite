@@ -2415,3 +2415,13 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   tools/win/samples/sbcpu (ARM64/x64/x86) + autotest hook. Images build/woa/cores/: C1 ppttoem 92e31266, C2/C3 c8
   977d149a, C4 c8x d7f0d966; request side-session-notes/.../win-cores-T-request.md. Open risk: Windows booting on an
   A55 may hand ARMv8.1/8.2 features to the M3s (C3 tells; fallback B3 or an ID-register mask).
+- 2026-11-07 22:00: **x86/x64 emulator crash PROVEN and fixed in the registry; mixed A55+M3 Windows proven impossible
+  as is** (X1 pull: xtajit64/xtajit/ntdll/ntoskrnl 22621.7582 in build/win/xta-x1). xtajit64 +0x30C5C reads CNTFRQ_EL0
+  itself and divides by it to scale the emulated TSC; brk #0xF004 at +0x30C70 = the log's offset (x86 xtajit the same
+  at +0x45A54). Both first read REG_DWORD ScaleRdtsc (HKLM\SOFTWARE\Microsoft\Wow64\amd64\xtajit64, ...\x86\xtajit);
+  0 skips the division -> tools/win/hive-scalerdtsc.py (offline SOFTWARE edit, request E1). The PPTT is not the cause.
+  Cores: ntoskrnl's (and every MSVC binary's) outline-atomics helpers pick LSE once per binary from ID_AA64ISAR0 of
+  whichever CPU calls first (user mode: PF 34); M3 has no LSE -> undefined instruction on the M3s whenever an A55 is
+  present, whichever core boots (B4 too). Secondaries must also match the boot CPU's BRPs/WRPs/AArch32-EL0 or 0x3E.
+  C3/C4 cancelled. Options: Windows on the 4 M3s only (B3 hand-off + Cores8 parking), or all 8 behind an EL2
+  ID-register trap on the A55s (needs per-core EL2 via SiP SMC 0xC2000400: unknown, probe first).
