@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Put a new PPTT into an existing Windows UEFI image and change nothing else (docs/WIN11-24H2-A55.md, "PPTT").
 #   tools/woa/pptt-swap.sh IN.bin OUT.bin [PPTT.aml]
+# A55_EFF0=1: also efficiency class 0 for the A55s in the APIC table and the DSDT _MAT copies (pptt-patch.py).
 # IN.bin: a starbite-uefi-*.bin (384-byte bootshim + FD). PPTT.aml defaults to tools/woa/pptt-gen.py's OEM-shaped table.
 # The platform ACPI file (FREEFORM 11111111-...-501: FACP, GTDT, APIC, PPTT, DSDT, SSDT) is taken from IN itself, its
 # PPTT section replaced (pptt-patch.py --table), the old file blanked to a pad file and the new one added; dxe-diff
@@ -16,7 +17,7 @@ python3 -I tools/woa/pptt-gen.py --decode "$t/pptt.aml" | head -1
 head -c 384 "$in" > "$t/shim.bin"
 tail -c +385 "$in" > "$t/in.fd"
 python3 tools/woa/dxe-replace.py "$t/in.fd" "$t/in.fd" /dev/null --extract "$ACPIFILE" "$t/acpi.ffs" >/dev/null
-python3 -I tools/woa/pptt-patch.py "$t/acpi.ffs" "$t/acpi-new.ffs" --table "$t/pptt.aml"
+python3 -I tools/woa/pptt-patch.py "$t/acpi.ffs" "$t/acpi-new.ffs" --table "$t/pptt.aml" ${A55_EFF0:+--a55-eff0}
 python3 tools/woa/dxe-replace.py "$t/in.fd" "$t/in.fd" "$t/out.fd" --kill-blank "$ACPIFILE" --add "$t/acpi-new.ffs" >/dev/null
 python3 tools/woa/dxe-diff.py "$t/in.fd" "$t/out.fd" --replaced "$ACPIFILE"
 cat "$t/shim.bin" "$t/out.fd" > "$out"

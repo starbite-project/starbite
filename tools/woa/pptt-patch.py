@@ -3,6 +3,9 @@
 
   pptt-patch.py ACPI.ffs OUT.ffs [--dump OUT.aml] [--table PPTT.aml]
 
+--a55-eff0: also give the A55 GICC entries (UIDs 0..3) efficiency class 0 in the APIC table and in the DSDT's
+CPU0..CPU3 _MAT copies (the release has 1 for all four; Windows then reported cpu0 as class 0 and cpus 1..3 as
+class 1 on C1, i.e. four identical A55s as two kinds; docs/WIN11-24H2-A55.md).
 --table: put this ready-made PPTT in (tools/woa/pptt-gen.py, the OEM-shaped table of
 docs/WIN11-24H2-A55.md) instead of PpttBuild's cache-augmented copy of the release's.
 
@@ -46,10 +49,34 @@ def sections(body):
     return out
 
 
+def a55_eff0(sec):
+    """Efficiency class 0 for GICC UIDs 0..3 (interface = UID): APIC entries, or DSDT _MAT buffers holding them."""
+    t = bytearray(sec[4:])
+    n = 0
+    start = 44 if t[:4] == b'APIC' else 36
+    for uid in range(4):
+        key = bytes([0x0B, 0x50, 0, 0]) + uid.to_bytes(4, 'little') + uid.to_bytes(4, 'little')
+        i = t.find(key, start)
+        hits = 0
+        while i >= 0:
+            t[i + 76] = 0
+            hits += 1
+            i = t.find(key, i + 1)
+        if hits != 1:
+            sys.exit(f'{t[:4].decode()}: {hits} GICC copies for UID {uid}, expected 1')
+        n += 1
+    t[9] = 0
+    t[9] = (-sum(t)) & 0xFF
+    print(f'{t[:4].decode()}: A55 UIDs 0..3 efficiency class 0 ({n} entries)')
+    return sec[:4] + bytes(t)
+
+
 def main():
     args = sys.argv[1:]
     dump = None
     table = None
+    eff0 = '--a55-eff0' in args
+    args = [a for a in args if a != '--a55-eff0']
     if '--table' in args:
         i = args.index('--table')
         table = open(args[i + 1], 'rb').read()
@@ -89,6 +116,9 @@ def main():
             new = open(dst, 'rb').read()
     if dump:
         open(dump, 'wb').write(new)
+    if eff0:
+        secs = [a55_eff0(x) if x[3] == RAW and x[4:8] in (b'APIC', b'DSDT') else x for x in secs]
+        pptt = [x for x in secs if x[3] == RAW and x[4:8] == b'PPTT']
     body = bytearray()
     for s in secs:
         if s is pptt[0]:

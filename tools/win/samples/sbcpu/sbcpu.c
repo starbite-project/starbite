@@ -88,7 +88,7 @@ static void Registry (void)
 {
     static const char *Names[] = { "CP 4000", "CP 4020", "CP 4021", "CP 4028", "CP 4030", "CP 4031", "CP 4038", "CP 4039", "CP 4001" };
     char key[80] = "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\";
-    int base = 46, cpu, i;
+    int base = (int)sizeof ("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\") - 1, cpu, i;
     for (cpu = 0; cpu < 16; cpu++) {
         HKEY k; char name[96]; DWORD sz, type; unsigned long long v; DWORD mhz;
         int n = base;
@@ -240,16 +240,15 @@ void __cdecl start (void)
     {
         // Last, after everything else is flushed: direct EL0 reads. CNTFRQ_EL0 is 0 on this phone (S-Boot never sets
         // it; the woa firmware patches the kernel's copy to 26 MHz) - code that divides by the register itself
-        // (an emulator's TSC scaling, say) would divide by zero. CTR_EL0 traps if SCTLR_EL1.UCT is off.
-        unsigned long long frq, v0, v1, ctr;
+        // (an emulator's TSC scaling, say) would divide by zero. (CTR_EL0 is not read: Windows keeps SCTLR_EL1.UCT
+        // off here, so an EL0 read is an illegal instruction, as the first run on the phone showed.)
+        unsigned long long frq, v0, v1;
         __asm__ volatile ("mrs %0, cntfrq_el0" : "=r"(frq));
         S ("CNTFRQ_EL0 (EL0 read) "); U (frq); S ("\n"); Flush ();
         __asm__ volatile ("isb; mrs %0, cntvct_el0" : "=r"(v0));
         Sleep (200);
         __asm__ volatile ("isb; mrs %0, cntvct_el0" : "=r"(v1));
-        S ("CNTVCT_EL0 advanced "); U (v1 - v0); S (" in 200 ms\n"); Flush ();
-        __asm__ volatile ("mrs %0, ctr_el0" : "=r"(ctr));
-        S ("CTR_EL0 "); X (ctr, 8); S ("\n");
+        S ("CNTVCT_EL0 advanced "); U (v1 - v0); S (" in 200 ms\n");
     }
 #endif
     S ("sbcpu done\n");
