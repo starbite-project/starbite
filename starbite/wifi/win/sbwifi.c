@@ -14,6 +14,7 @@
 #include <ntddk.h>
 #include <wdf.h>
 #include <ntstrsafe.h>
+#include <bcrypt.h>
 #include "../bcmw.h"
 
 #ifndef SB_BUILD_ID
@@ -209,6 +210,13 @@ static int File(void *ctx, const char *name, const uint8_t **data, uint32_t *len
     return 0;
 }
 
+/* the handshake's nonce: the system's RNG (kernel-mode CNG, cng.lib) */
+static int Random(void *ctx, uint8_t *out, uint32_t n)
+{
+    UNREFERENCED_PARAMETER(ctx);
+    return NT_SUCCESS(BCryptGenRandom(NULL, out, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG)) ? 0 : -1;
+}
+
 static void Log(void *ctx, const char *line)
 {
     UNREFERENCED_PARAMETER(ctx);
@@ -265,7 +273,7 @@ static void Run(PVOID arg)
     }
     RtlZeroMemory(&os, sizeof(os));
     os.rd32 = Rd32, os.wr32 = Wr32, os.rd16 = Rd16, os.wr16 = Wr16, os.wmb = Wmb, os.mb = Wmb, os.rmb = Wmb;
-    os.udelay = Delay, os.now_us = Now, os.dma_alloc = DmaAlloc, os.file = File, os.log = Log;
+    os.udelay = Delay, os.now_us = Now, os.dma_alloc = DmaAlloc, os.file = File, os.log = Log, os.random = Random;
     RtlZeroMemory(&cfg, sizeof(cfg));
     cfg.stop_after = step;
     cfg.link_speed = RegDword(L"Gen", 2);

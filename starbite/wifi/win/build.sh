@@ -13,7 +13,7 @@ done
 [ -n "$tw" ] || { echo "sbwifi: no tools/win (run on a checkout with it, or set TOOLS_WIN)" >&2; exit 1; }
 out="$root/starbite/out/win"
 mkdir -p "$out"
-"$tw/build.sh" kmdf "$out/sbwifi.sys" "$here/sbwifi.c" "$w/core.c" "$w/exynos_pcie.c" "$w/chip.c" "$w/fw.c" "$w/ring.c" \
+LIBS="${LIBS:-} cng.lib" "$tw/build.sh" kmdf "$out/sbwifi.sys" "$here/sbwifi.c" "$w/core.c" "$w/exynos_pcie.c" "$w/chip.c" "$w/fw.c" "$w/ring.c" \
     "$w/msgbuf.c" "$w/link.c" "$w/wpa.c"
 key=${SB_SIGN_KEY:-"$root/build/woa/ufs-sys/sign/starbite-test.key"}
 [ -f "$key" ] || key="$root/../../../build/woa/ufs-sys/sign/starbite-test.key"

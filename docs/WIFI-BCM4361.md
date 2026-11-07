@@ -120,6 +120,40 @@ the chip's DMA), then, if this run powered the PHY, the LTSSM off, the PHY power
 WLAN_REG_ON low. Configuration space is not touched then, so a dead link cannot hang it. In the test image a crash
 anywhere also drops PERST# and WLAN_REG_ON (libsb's new `sb_crash_hook`).
 
+## 4b. The data path and joining (link.c, wpa.c)
+
+After step 10 the core can send and receive frames and join a network:
+
+- **Tx:** one flow ring for everything (brcmfmac makes one per priority for a station; here all goes as best
+  effort, fifo 1): `FLOW_RING_CREATE` on the control ring (512 items of 48 bytes, flow ring id 2, its indices in
+  the slots after the two common H2D rings), answered by `FLOW_RING_CREATE_CMPLT`. A frame is a `TX_POST` item
+  (the Ethernet header in the item, the payload from one of 32 host buffers of 2 KiB), answered by `TX_STATUS`.
+  Flow ring items are stamped like every H2D item. `bcmw_tx()` copies the frame.
+- **Rx:** as before, on the rx completion ring to `os->rx`; EAPOL (0x888e) goes to the handshake while joining.
+- **Join** (`bcmw_join(ssid, passphrase)`): a directed escan (v1 or v2, as `scan_ver` says) picks the strongest
+  BSS of that name whose RSN element offers WPA2-PSK with CCMP (WPA3-only, TKIP-only and open networks are
+  refused unless the passphrase is empty, which asks for an open one); infrastructure, open-system
+  authentication, `wsec` AES, `wpa_auth` WPA2-PSK; the PMK from the passphrase (PBKDF2); then either
+  - the **firmware's supplicant** when `cap` lists `idsup` (`sup_wpa` 1, `WLC_SET_WSEC_PMK` with the 32-byte
+    PMK, done at `E_PSK_SUP` status 6), as the user's plan asked; or
+  - the **host's** (an earlier port's way on this phone; Samsung builds the firmware without `BCMSUP_4WAY_HANDSHAKE`):
+    `sup_wpa` 0, our RSN element as `wpaie`, the four-way handshake by `wpa.c` (an earlier port's `lx_wpa.c`, MIT) on the
+    EAPOL frames, its answers sent from the join loop, message 4 out before the keys go in (`wsec_key`:
+    pairwise index 0 with the AP's address, group key primary, as `brcmf_cfg80211_add_key`).
+  Which one the firmware has is only known from the phone (its iovar tables are in the chip's ROM: the image has
+  no names); the log says which was used. `WLC_SET_SSID` with the name and BSSID; `SET_SSID`, `LINK`, `DEAUTH`,
+  `DISASSOC`, `PSK_SUP` events. `bcmw_leave()` disassociates.
+- Nothing secret is logged (passphrase, PMK, keys), nor a network's name; of the AP's address only its maker's
+  half. The PMK is wiped after the join.
+- The nonce: `os->random`; the libsb and Windows shims do not give one yet, so the core's fallback (clock jitter,
+  hashed) is used. Good enough for a test; a real source is listed in section 6.
+
+Host test: the model's access point (`host/model_ap.c`, its own AES encryption and RFC 3394 key wrap checked
+against the RFC) answers a directed scan with an RSN element and plays the authenticator: message 1, message 2's
+MIC and RSN element checked, message 3 with the GTK wrapped, message 4's MIC; the keys the host installs must be
+its TK and GTK. Both supplicant paths, a wrong passphrase on each, 40 data frames out. PBKDF2 against the IEEE
+vectors, the PRF against Python's `hmac`.
+
 ## 5. The core
 
 `starbite/wifi/` (GPL-2.0-only; the files adapted from brcmfmac are ISC with Broadcom's notice):
@@ -193,6 +227,9 @@ the chip accepts our ring descriptors and stamping, DMA through the real SysMMU 
    and called a guess.
 4. Escan v1 vs v2: chosen by `scan_ver` as brcmfmac does; both are host-tested, neither has run on this firmware.
 5. Interrupts: polling first; INTx (SPI 253) when the OS has interrupts.
+7. Firmware supplicant or the host's: `cap` on the phone decides (T4 says which it used).
+8. A real random source for the handshake's nonce in the shims (libsb: e.g. the TRNG if reachable from EL1;
+   Windows: `BCryptGenRandom`).
 6. Deep sleep (`D2H_DEV_DS_ENTER_REQ`) is acknowledged as brcmfmac does; power saving is not set yet.
 
 ## 7. Windows 11
@@ -285,6 +322,14 @@ chip is only given addresses in the image's DMA window (uncached, 0xa6000000..0x
 bypass nothing enforces that beyond the protocol being right. A fault stops the image with the radio unpowered
 (the crash hook), and a reboot clears everything (WLAN_REG_ON is a GPIO and falls with the SoC). Nothing touches EFS, PARAM, the boot LUNs,
 RECOVERY, MIF/INT clocks or the PMIC. Undo: reboot.
+
+**T4 join** (`wifi_step=11`): needs the store entry `wifinet` (two lines: the network's name, its passphrase;
+made on the phone from the user's input, never committed). Expected: `link: joining a network ... WPA2-PSK, the
+firmware's supplicant` or `the host's supplicant`, `the access point xx:xx:xx:..:..:..`, `LINK UP`, then
+(host) `handshake message 1 ... message 3 ... both keys given to the firmware (keyed)` or (firmware)
+`the firmware's supplicant finished the handshake (keyed)`, `THE NETWORK IS JOINED`, `A DHCP OFFER CAME BACK`.
+If not: `no suitable access point` (name, or WPA3-only network), `MIC failure` / `message refused` (passphrase),
+`TIMEOUT: associated, but the handshake did not finish` (no EAPOL: the other supplicant path, `host_supplicant`).
 
 ### Run 1 (2026-11-07, launch #56, image 60f3d908)
 
