@@ -146,6 +146,7 @@ STATIC_ASSERT (sizeof (M3_BOOT_CTX) <= 0x400, "M3_BOOT_CTX size");
 UINT64  gM3BootCtx __attribute__ ((used));
 
 extern UINT8  M3BootVectors[];
+extern UINT8  M3BootCatchVectors[];
 extern UINT8  M3BootEntry[];
 extern UINT8  M3BootEnd[];
 
@@ -244,6 +245,26 @@ __asm__ (
   "  mov   x0, #1\n"
   "  ldr   x19, [x19, #0x00]\n"
   "  ret\n"
+  "  .p2align 11\n"                        // v5: the M3's vectors after the claim (until winload sets its own)
+  "  .globl M3BootCatchVectors\n"
+  "M3BootCatchVectors:\n"
+  "  .rept 16\n"
+  "  b     M3BootVcatch\n"
+  "  .p2align 7\n"
+  "  .endr\n"
+  "M3BootVcatch:\n"                       // record ESR/ELR/FAR + catch flag (Pad[2]) for the A55's watch line, then stop
+  "  adrp  x1, gM3BootCtx\n"
+  "  ldr   x19, [x1, :lo12:gM3BootCtx]\n"
+  "  mrs   x0, esr_el1\n  str x0, [x19, #0x398]\n"
+  "  mrs   x0, elr_el1\n  str x0, [x19, #0x3a0]\n"
+  "  mrs   x0, far_el1\n  str x0, [x19, #0x3a8]\n"
+  "  ldr   x0, [x19, #0x350]\n"
+  "  add   x0, x0, #1\n"
+  "  str   x0, [x19, #0x350]\n"
+  "  dsb   sy\n"
+  "9:\n"
+  "  wfe\n"
+  "  b     9b\n"
   "M3BootVfail:\n"                        // an exception before the claim
   "  adrp  x1, gM3BootCtx\n"
   "  ldr   x19, [x1, :lo12:gM3BootCtx]\n"
@@ -403,6 +424,7 @@ CpuOn (
 
 STATIC EFI_PHYSICAL_ADDRESS  mParkPage;
 STATIC M3_BOOT_CTX           *mCtx;
+STATIC EFI_PHYSICAL_ADDRESS  mWatchStack;      // v5: the A55 watcher's stack page (reserved)
 STATIC UINT64                mArmTtbr0, mArmTcr, mArmSctlr, mArmMair;
 STATIC EFI_EXIT_BOOT_SERVICES  mOrigEbs;
 STATIC BOOLEAN               mFired;
@@ -416,6 +438,148 @@ STATIC CONST struct {
   { 0x1088, 0xFF000000u, 0x8D000000u },
   { 0x2114, 3, 2 }, { 0x2180, 3, 2 }, { 0x21EC, 3, 2 }, { 0x2258, 3, 2 }, { 0x2384, 3, 2 },
 };
+
+//
+// v5 (after solo4: "=M3 state" printed on the M3, then nothing, not even the woa wrapper's =EBSOK): the A55 no longer
+// powers off right after the claim. It watches the M3 for 15 s, rewriting the hex fields of one zone-0 line
+// (=M3 watch, found when it was logged before the hand-off) about five times a second:
+//   beat   the A55's own count (alive)
+//   prog   the M3's progress: 1 leaving M3BootAfterEbs, 2 leaving M3BootEbsWrap (back into the woa wrapper)
+//   catch  exceptions the M3 took after the claim (M3BootCatchVectors), with the first's ESR / ELR / FAR
+//   pmsg   the pmsg ring's write index (woa's =EBSOK and anything else written there moves it)
+// Then CPU_OFF as before (whether an immediate CPU_OFF of core 0 hurt the M3 is one of the questions).
+//
+STATIC UINTN  mWatchDigits[7];          // beat prog catch esr elr far pmsg: addresses of the first digit, 0 = none
+
+STATIC
+VOID
+WatchHex (
+  IN UINTN   At,
+  IN UINT64  V,
+  IN UINTN   Digits
+  )
+{
+  UINTN  i;
+  UINT8  d;
+
+  if (At == 0) {
+    return;
+  }
+
+  for (i = Digits; i-- > 0;) {
+    d                                = (UINT8)(V & 0xF);
+    *(volatile UINT8 *)(At + i)      = (UINT8)((d < 10) ? ('0' + d) : ('A' + d - 10));
+    V                              >>= 4;
+  }
+}
+
+//
+// The address of Needle's first character in the zone-0 ring (StarbiteLog.h: data at SB_EVLOG_BASE + 12), or 0.
+//
+STATIC
+UINTN
+WatchRingFind (
+  IN CONST CHAR8  *Needle
+  )
+{
+  volatile UINT32  *W = (volatile UINT32 *)SB_EVLOG_BASE;
+  volatile UINT8   *B = (volatile UINT8 *)(SB_EVLOG_BASE + 12);
+  UINTN            Len;
+  UINTN            Pos;
+  UINTN            i;
+
+  Len = AsciiStrLen (Needle);
+  if ((W[0] != SB_DBGC) || (W[2] > SB_EVLOG_CAP) || (W[2] < Len)) {
+    return 0;
+  }
+
+  for (Pos = W[2] - Len + 1; Pos-- > 0;) {
+    for (i = 0; (i < Len) && (B[Pos + i] == (UINT8)Needle[i]); i++) {
+    }
+
+    if (i == Len) {
+      return (UINTN)(SB_EVLOG_BASE + 12 + Pos);
+    }
+  }
+
+  return 0;
+}
+
+VOID
+M3BootA55Watch (
+  M3_BOOT_CTX  *Ctx
+  ) __attribute__ ((used, noreturn));
+
+VOID
+M3BootA55Watch (
+  M3_BOOT_CTX  *Ctx
+  )
+{
+  UINT64  T0;
+  UINT64  Now;
+  UINT64  Last;
+  UINT32  Beat;
+  UINTN   A;
+
+  __asm__ __volatile__ ("mrs %0, cntvct_el0" : "=r" (T0));
+  Last = T0;
+  for (Beat = 0; ; ) {
+    __asm__ __volatile__ ("isb\n mrs %0, cntvct_el0" : "=r" (Now));
+    if (Now - Last < 5200000u) {        // 0.2 s at 26 MHz
+      continue;
+    }
+
+    Last = Now;
+    Beat++;
+    for (A = (UINTN)&Ctx->Pad[0]; A < (UINTN)Ctx + 0x400; A += 64) {
+      __asm__ __volatile__ ("dc civac, %0" : : "r" (A) : "memory");
+    }
+
+    __asm__ __volatile__ ("dsb sy" ::: "memory");
+    WatchHex (mWatchDigits[0], Beat, 8);
+    WatchHex (mWatchDigits[1], Ctx->Pad[1], 2);
+    WatchHex (mWatchDigits[2], Ctx->Pad[2], 2);
+    WatchHex (mWatchDigits[3], Ctx->DEsr, 8);
+    WatchHex (mWatchDigits[4], Ctx->DElr, 16);
+    WatchHex (mWatchDigits[5], Ctx->DFar, 16);
+    WatchHex (mWatchDigits[6], *(volatile UINT32 *)0xFED14008UL, 8);
+    __asm__ __volatile__ ("dsb sy" ::: "memory");
+    if (Now - T0 > 26000000ull * 15) {
+      break;
+    }
+  }
+
+  //
+  // 15 s are enough for the question (the M3 hangs within a second or two, or it is in Windows); this code lives in
+  // boot-services memory that Windows will reuse, so the A55 powers off now, as v4 did right away.
+  //
+  {
+    register UINT64  x0 __asm__ ("x0") = 0x84000002u;
+
+    __asm__ __volatile__ ("smc #0" : "+r" (x0) : : "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+  }
+
+  for ( ; ; ) {
+    __asm__ __volatile__ ("wfe");
+  }
+}
+
+STATIC
+VOID
+M3Progress (
+  IN UINT64  P
+  )
+{
+  UINT64  Mpidr;
+
+  __asm__ __volatile__ ("mrs %0, mpidr_el1" : "=r" (Mpidr));
+  if ((mCtx == NULL) || ((Mpidr & 0xFFFFFF) != BOOT_MPIDR)) {
+    return;                             // not on the M3 (no hand-off)
+  }
+
+  mCtx->Pad[1] = P;
+  __asm__ __volatile__ ("dc civac, %0\n dsb sy" : : "r" ((UINTN)&mCtx->Pad[1]) : "memory");
+}
 
 //
 // A55 side. x0 = context, x1 = the parked M3's Go word (v3; v1/v2 did a PSCI CPU_ON here), x2
@@ -516,10 +680,11 @@ M3BootHandoff (
     "stlxr w11, w10, [x22]\n"
     "cbnz  w11, 5b\n"
     "b     7f\n"
-    "6:\n"                                // claimed: the M3 is the boot CPU now; off, no stack
-    "mov   x0, #0x0002\n"
-    "movk  x0, #0x8400, lsl #16\n"
-    "smc   #0\n"
+    "6:\n"                                // claimed: the M3 is the boot CPU now. v5: no CPU_OFF; the
+    "ldr   x9, [x19, #0x358]\n"          // A55 becomes the M3's watcher on a stack of its own (Pad[3])
+    "mov   sp, x9\n"
+    "mov   x0, x19\n"
+    "bl    M3BootA55Watch\n"
     "8:\n"
     "wfe\n"
     "b     8b\n"
@@ -840,6 +1005,21 @@ M3BootAfterEbs (
   SbLog ("=M3 boot v4: handing the boot CPU to the parked M3 core 1 after ExitBootServices (Go, no SMC)");
   ZeroMem (mCtx, sizeof (*mCtx));
   mCtx->Timeout = TIMEOUT_TICKS;
+  mCtx->Pad[3]  = (UINT64)(mWatchStack + EFI_PAGE_SIZE - 16);
+  {
+    STATIC CONST CHAR8  *Fields[] = { " beat ", " prog ", " catch ", " esr ", " elr ", " far ", " pmsg " };
+    STATIC CONST CHAR8  Line[]    = "=M3 watch beat 00000000 prog 00 catch 00 esr 00000000 elr 0000000000000000 far 0000000000000000 pmsg 00000000";
+    UINTN               Base;
+    UINTN               k;
+    CHAR8               *Hit;
+
+    SbLog ("%a", Line);
+    Base = WatchRingFind (Line);
+    for (k = 0; k < ARRAY_SIZE (Fields); k++) {
+      Hit             = AsciiStrStr (Line, Fields[k]);
+      mWatchDigits[k] = ((Base != 0) && (Hit != NULL)) ? Base + (UINTN)(Hit - Line) + AsciiStrLen (Fields[k]) : 0;
+    }
+  }
   gM3BootCtx    = (UINT64)(UINTN)mCtx;
   WriteBackDataCache ();
   //
@@ -875,6 +1055,9 @@ M3BootAfterEbs (
         *(volatile UINT32 *)0x10102018UL
         );
     }
+
+    __asm__ __volatile__ ("msr vbar_el1, %0\n isb" : : "r" ((UINT64)(UINTN)M3BootCatchVectors) : "memory");
+    M3Progress (1);
  #if BOOT_BIG
     {
       UINT32  Off;
@@ -1075,6 +1258,7 @@ M3BootEbsWrap (
   mSbAfterEbs = TRUE;                   // gBS is zeroed now: the log must not use it
   SbLog ("=M3 boot v4: ExitBootServices returned %r on the A55; hand-off now", Status);
   M3BootAfterEbs ();
+  M3Progress (2);                       // on the M3 only: about to return into the woa wrapper
   return Status;
 }
 
@@ -1100,12 +1284,17 @@ M3BootArm (
   }
 
   CtxPage = 0xFFFFFFFFu;
-  if (EFI_ERROR (gBS->AllocatePages (AllocateMaxAddress, EfiBootServicesData, 1, &CtxPage))) {
+  if (EFI_ERROR (gBS->AllocatePages (AllocateMaxAddress, EfiReservedMemoryType, 1, &CtxPage))) {   // v5: the M3 writes it after EBS
     SbLog ("=M3 boot: no context page, not armed");
     return;
   }
 
   mCtx = (M3_BOOT_CTX *)(UINTN)CtxPage;
+  mWatchStack = 0xFFFFFFFFu;
+  if (EFI_ERROR (gBS->AllocatePages (AllocateMaxAddress, EfiReservedMemoryType, 1, &mWatchStack))) {
+    SbLog ("=M3 boot: no watch stack page, not armed");
+    return;
+  }
 
   //
   // v3: park M3 core 1 now, while PSCI calls still go straight to Samsung's EL3 (PSCI_VERSION
@@ -1177,7 +1366,7 @@ M3BootArm (
   gBS->Hdr.CRC32          = 0;
   Status                  = gBS->CalculateCrc32 ((UINT8 *)gBS, gBS->Hdr.HeaderSize, &gBS->Hdr.CRC32);
   SbLog (
-    "=M3 boot v4 armed (%a): entry %lx (vectors %lx..%lx in this image), context %lx, ExitBootServices wrapped (orig %lx, crc %r)",
+    "=M3 boot v5 armed (%a): entry %lx (vectors %lx..%lx in this image), context %lx, ExitBootServices wrapped (orig %lx, crc %r)",
     BOOT_SOLO ? "solo: M3 1 only" : (BOOT_BIG ? "big: M3 1 + parked M3s, no A55" : "M3 1 + A55 1..3"),
     (UINT64)(UINTN)M3BootEntry,
     (UINT64)(UINTN)M3BootVectors,

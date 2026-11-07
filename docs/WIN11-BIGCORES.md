@@ -400,3 +400,19 @@ Not changed: A55 core 0 still powers off through the shim (only that core uses t
 from the M3 goes to Samsung's EL3 directly, so restart/shutdown may misbehave (not a boot blocker).
 Images: solo4 a69941d4…, big3 17d5f1be…, big4 7c3a48a9….
 
+**solo4 (a69941d4) on the phone:** one step further. Timer probe on M3 core 2: crumb 8 (every CNTV/CNTP access fine at
+EL1 on an M3; vct-pct = -8), so the physical-timer theory is out. The LSE guard fired on winload ("image BB302000
+size 211000 stub +22400 latch +1AF000: 80000001 -> 80000000": a real latent bug, now neutralised). ExitBootServices
+returned Success on the A55, the hand-off claimed, "=M3 state: daif=2C0 isr=0 vct=261253EF gicc ctlr=1 pmr=F0
+hppir=3FF" printed on the M3, then nothing: no =EBSOK, no exception marker. The woa wrapper calls our wrapper at
+BdsDxe +0xAAF8 and goes almost straight to its =EBSOK print (+0xAB34; the print appends to pmsg while the index is
+below 0x3F00, and the ring wasn't full), so the M3 dies between our state line and that print, or the print never
+reaches memory.
+
+**v5** (solo5): the A55 stays alive after the claim for 15 s as the M3's watcher (own stack page, reserved) and
+rewrites one zone-0 line about 5 times a second:
+`=M3 watch beat <A55 count> prog <M3 progress: 1 leaving M3BootAfterEbs, 2 leaving our wrapper> catch <exceptions on
+the M3 after the claim> esr elr far <the first one's> pmsg <pmsg write index>`; then CPU_OFF as before. The M3 gets
+M3BootCatchVectors after the claim (records ESR/ELR/FAR, then waits), and the context page is reserved memory now.
+Image starbite-uefi-solo5-gpu.bin 4b47f25e….
+
