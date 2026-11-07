@@ -338,6 +338,48 @@ the bytes is published; the first L1 boot's Enum keys and the Mac's `ioreg` show
 endpoints came through]. With the key named `GenericUsbFn` the child is `USBFN\GenericUsbFn` and
 genericusbfn.sys binds inbox. L1's own endpoint layout replaces this one when it exists.
 
+### 5.2 Seeing inside the device stack: an ETW autologger (L1 diagnosis)
+
+L1 with `UFN0` revision 2 (image 7fe37f7e…) was still silent. Windows' PnP log says `ACPI\INT3445\0`
+was installed (event 400, ufxsynopsys.Install.NT) and **started without a problem** (event 410,
+Problem 0); still no `Enum\USBFN` child and no pull-up. The System log has no UFX events: both
+drivers log only to ETW manifest providers, which no default session records:
+
+| Provider | GUID | Useful events |
+|---|---|---|
+| Microsoft-WindowsPhone-UfxSynopsys (ufxsynopsys.sys) | `49b12c7c-4bd5-4f93-bb75-30fce739600b` | 101/102 every register READ/WRITE (offset, value), 302 charger detection error, 303 port type failed, 304 register information, 305 connected/port type/device state |
+| Microsoft-WindowsPhone-Ufx (ufx01000.sys) | `e98ebdbf-3058-4784-8521-47860b1d2b8e` | 108-116 its state machines (created, enqueue/dequeue of events, unhandled events), 101/104 failures, 118/119 notifications |
+
+UFX also reads, besides `Control\USBFN`: the MDM policy
+`HKLM\SOFTWARE\Microsoft\PolicyManager\{Default,Current\Device}\Connectivity\AllowUsbConnection`,
+`Control\USB\DualRoleFeatures` (+ `DualRoleFeaturesTestOverride`), `UcmIsPresent`,
+`Control\ManufacturingMode\Current\USBFN` and `Control\Usbfn\Settings`. Checking the policy
+needs the SOFTWARE hive.
+
+**Autologger** (offline, `HKLM\SYSTEM\ControlSet001\Control\WMI\Autologger\StarbiteUfx`,
+modelled on this image's own `Tpm` autologger; undo = delete the key):
+
+| Key | Value | Type | Data |
+|---|---|---|---|
+| `StarbiteUfx` | `Start` | DWORD | 1 |
+| | `GUID` | SZ | `{696fc72d-68b5-47e1-8806-aac101ebe127}` |
+| | `FileName` | SZ | `%SystemRoot%\System32\LogFiles\WMI\StarbiteUfx.etl` |
+| | `LogFileMode` | DWORD | 0x10000001 (sequential: keeps the start, where the init is) |
+| | `MaxFileSize` | DWORD | 64 (MB) |
+| | `BufferSize` | DWORD | 64 (KB) |
+| | `FlushTimer` | DWORD | 1 (s) |
+| | `ClockType` | DWORD | 2 |
+| `StarbiteUfx\{49b12c7c-4bd5-4f93-bb75-30fce739600b}` and `StarbiteUfx\{e98ebdbf-3058-4784-8521-47860b1d2b8e}` | `Enabled` | DWORD | 1 |
+| | `EnableLevel` | DWORD | 5 |
+| | `EnableFlags` | DWORD | 0xFFFFFFFF |
+| | `MatchAnyKeyword` | QWORD | 0xFFFFFFFFFFFFFFFF |
+
+After the run (same image, nothing else changed), pull
+`C:\Windows\System32\LogFiles\WMI\StarbiteUfx.etl` read-only from TWRP and decode it here:
+`tools/woa/ufx-etl.py decode StarbiteUfx.etl ufxsynopsys.sys ufx01000.sys` (the drivers from
+`build/woa/usb-inf/`; needs `etl-parser==1.0.1` in a venv). `ufx-etl.py manifest <driver>` lists
+each driver's events from its own embedded manifest (checked on both drivers).
+
 ## 6. Build
 
 ```sh
