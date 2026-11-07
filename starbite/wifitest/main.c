@@ -10,6 +10,8 @@
  *   wifi_gen=1      train for Gen1 instead of Gen2 (the mainline port links at Gen1)
  *   wifi_auto=1     start without the held Volume Up (an unattended run the user agreed to)
  *   wifi_return=S   S seconds after the end, reboot to the boot menu (default: wait for Power)
+ * Watchdog: fed (as the Utility OS feeds it) when the loader armed it (catalog wdt, wdt_feed "own"): a hang
+ * resets into the loader's crash screen, and the radio's GPIOs fall with the reset.
  * Writes: PCIe channel 0's own registers, the BCM4361's (through its BARs), WLAN_REG_ON and PERST#
  * (gpg0-5, gpf2-2), CLKREQ#'s function (gpf2-0), the PMU's PCIE_PHY_CONTROL bit 0, CMU_FSYS1's
  * PCIe and data-path gates (the SysMMU's clock on, its registers untouched): bcmw_write_allowed()
@@ -27,6 +29,7 @@ static char lines[LINES][COLS];
 static unsigned nl;
 static unsigned scan_aps, scan_done, events;
 static uint64_t mem[(1U << 18) / 8];        /* struct bcmw (checked against bcmw_size()) */
+static void wdt_feed(void);
 
 static void draw(const char *title, const char *foot)
 {
@@ -58,6 +61,7 @@ static void draw(const char *title, const char *foot)
 
 static void line(const char *s)
 {
+    wdt_feed();
     sb_strcpy(lines[nl % LINES], COLS, s);
     nl++;
     sb_log(s);
@@ -80,6 +84,19 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
         else
             scan_done = 1;
     }
+}
+
+/* the cluster-1 watchdog, when the loader armed it: WTCNT = WTDAT, at most once a second (utility/main.c) */
+static void wdt_feed(void)
+{
+    static uint64_t next;
+    volatile uint32_t *wd = (volatile uint32_t *)0x10060000UL;
+    uint64_t now = sb_ms();
+    if (now < next)
+        return;
+    next = now + 1000;
+    if (wd[0] & (1U << 5))
+        wd[2] = wd[1];
 }
 
 /* a crash anywhere: the radio held in reset and unpowered, by the two GPIO data bits alone */
@@ -117,6 +134,7 @@ static int held_up(unsigned ms)
         } else {
             t0 = 0;
         }
+        wdt_feed();
         sb_mdelay(10);
     }
 }
@@ -173,6 +191,7 @@ void sb_main(void)
         line("wifitest: polling for 10 s (events, the console)");
         while (sb_ms() - t0 < 10000 && !(sb_keys() & SB_K_POWER)) {
             bcmw_poll(w);
+            wdt_feed();
             sb_mdelay(5);
         }
         ub_init(&u);
@@ -198,8 +217,10 @@ void sb_main(void)
     {
         uint64_t t0 = sb_ms();
         sb_keys_release_wait();
-        while (!(sb_keys() & SB_K_POWER) && !(ret && sb_ms() - t0 >= ret * 1000ULL))
+        while (!(sb_keys() & SB_K_POWER) && !(ret && sb_ms() - t0 >= ret * 1000ULL)) {
+            wdt_feed();
             sb_mdelay(20);
+        }
     }
     sb_reboot(SB_INFORM_NORMAL);
 }
