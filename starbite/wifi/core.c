@@ -552,6 +552,7 @@ static int step_up(struct bcmw *w)
         bcmw_iovar_set(w, "event_msgs", mask, sizeof(mask), &fwerr);
     }
     bcmw_iovar_set_u32(w, "mpc", 0);
+    bcmw_iovar_set_u32(w, "roam_off", 1);   /* the host holds the keys of one AP (an earlier port, bcmdhd ROAM_ENABLE off) */
     v = 0;
     e = bcmw_ioctl(w, 0, BCMW_C_UP, &v, 4, 1, &fwerr);
     bcmw_sayx(w, "fw: 10: up: ", (uint32_t)e, e == BCMW_OK ? "(fine)" : "(FAILED)");
@@ -563,6 +564,7 @@ static int step_up(struct bcmw *w)
     w->scan_v2 = v2;
     n = bcmw_escan_params(w, p, 0, 0, 0x1234);
     e = bcmw_iovar_set(w, "escan", p, n, &fwerr);
+    w->scan_running = e == BCMW_OK;
     bcmw_sayx(w, "fw: 10: a scan asked for (escan): ", (uint32_t)e, e == BCMW_OK ? "(the results come as events)" : "(REFUSED)");
     return e;
 }
@@ -640,6 +642,7 @@ int bcmw_poll(struct bcmw *w)
     {
         int n = mb_process(w);
         chip_reg_wr(w, w->mb_mask, w->int_d2h_db | w->int_fn0);
+        link_service(w);                /* group-key renewals after a join */
         return n;
     }
 }
@@ -669,6 +672,8 @@ void bcmw_quiesce(struct bcmw *w)
     w->step = 0;
     w->flow_state = 0;
     w->join_phase = 0;
+    w->scan_running = 0;
+    w->eapol_out_len = 0;
     w->link_up = w->keyed = w->keys_due = 0;
     bcmw_memset(w->tx_busy, 0, sizeof(w->tx_busy));
     bcmw_memset(&w->wpa, 0, sizeof(w->wpa));

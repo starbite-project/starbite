@@ -646,8 +646,13 @@ answered:
     d2h_put(RING_D2H_CONTROL, it, sizeof(it));
     model_ap_after(cmd);
     if (scan == 2) {
-        uint8_t r[400];
-        unsigned n = model_ap_scan_result(r, sizeof(r));
+        uint8_t r[400], old[12];
+        uint16_t sync = (uint16_t)(in[strlen((const char *)in) + 1 + 6] | in[strlen((const char *)in) + 1 + 7] << 8);
+        unsigned n = model_ap_scan_result(r, sizeof(r), sync);
+        /* the earlier scan (step 10's, sync 0x1234) ended by the new one: status 9 (NEWSCAN) first */
+        memset(old, 0, sizeof(old));
+        put16le(old + 8, 0x1234);
+        model_event(BCMW_E_ESCAN_RESULT, 9, 0, 0, old, sizeof(old));
         model_event(BCMW_E_ESCAN_RESULT, 8, 0, 0, r, n);
         model_event(BCMW_E_ESCAN_RESULT, 0, 0, 0, r, 12);
     } else if (scan) {
@@ -655,6 +660,7 @@ answered:
         memset(r, 0, sizeof(r));
         put32le(r, sizeof(r));
         put32le(r + 4, 109);
+        put16le(r + 8, 0x1234);
         put16le(r + 10, 1);
         put32le(r + 12, 109);
         put32le(r + 16, 128);

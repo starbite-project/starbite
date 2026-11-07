@@ -83,7 +83,8 @@ struct bcmw_cfg {
     int any_files;          /* 1: files whose SHA-256 is not one of the phone's known ones are used too
                              * (default: refused, so a reader's mistake never reaches the chip) */
     uint8_t mac[6];         /* all zero: the firmware's own (NVRAM/OTP); else set as cur_etheraddr */
-    int host_supplicant;    /* 1: the host's four-way handshake even when the firmware has one (idsup) */
+    int fw_supplicant;      /* 1: the firmware's own supplicant when "cap" lists idsup (not yet seen on this
+                             * phone); 0 (default): the host's four-way handshake, as an earlier port joined */
 };
 
 enum {

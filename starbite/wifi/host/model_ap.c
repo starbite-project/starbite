@@ -20,7 +20,7 @@ static const char ap_pass[] = "correct horse";
 static const uint8_t gtk[16] = { 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f };
 
 static struct {
-    uint8_t pmk[32], anonce[32], snonce[32], sta[6], ptk[48], wpaie[64];
+    uint8_t pmk[32], anonce[32], snonce[32], sta[6], ptk[48], wpaie[64], gtk2[16];
     unsigned wpaie_len, wsec, wpa_auth, sup_wpa, step;
     int joined;
 } A;
@@ -199,6 +199,30 @@ static void message3(void)
     A.step = 3;
 }
 
+/* after the join: a group-key renewal (key index 2), and a message from another address first */
+void model_ap_rekey(void)
+{
+    static const uint8_t gtk2[16] = { 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f };
+    uint8_t plain[32], wrapped[40], m[200], f[300];
+    unsigned n = 0, len;
+    plain[n++] = 0xdd, plain[n++] = 22, plain[n++] = 0x00, plain[n++] = 0x0f, plain[n++] = 0xac, plain[n++] = 1;
+    plain[n++] = 2, plain[n++] = 0;
+    memcpy(plain + n, gtk2, 16);
+    n += 16;
+    wrap(A.ptk + 16, plain, n, wrapped);
+    len = key_msg(m, 0x1382, 3, wrapped, n + 8);
+    mic(m, len, m + 81);
+    /* the same frame from a stranger first: must be ignored */
+    memcpy(f, A.sta, 6);
+    memcpy(f + 6, "\x02\x99\x99\x99\x99\x99", 6);
+    f[12] = 0x88, f[13] = 0x8e;
+    memcpy(f + 14, m, len);
+    model_rx(f, 14 + len);
+    send_eapol(m, len);
+    A.step = 5;
+    memcpy(A.gtk2, gtk2, 16);
+}
+
 /* a frame the station sent (the model's tx path) */
 void model_ap_tx(const uint8_t *f, unsigned len)
 {
@@ -244,6 +268,15 @@ void model_ap_tx(const uint8_t *f, unsigned len)
         }
         A.step = 4;
         M.handshake_done = 1;
+        return;
+    }
+    if (A.step == 5 && (info & 0x0308) == 0x0300) {     /* the group message's answer: MIC, secure, not pairwise */
+        mic(m, mlen, want);
+        if (memcmp(want, m + 81, 16)) {
+            M.ap_errors |= 256;
+            return;
+        }
+        M.rekey_answered++;
     }
 }
 
@@ -257,7 +290,7 @@ void model_ap_reset(void)
 }
 
 /* a directed escan's result: one BSS of this name with an RSN element (WPA2-PSK, CCMP) */
-unsigned model_ap_scan_result(uint8_t *r, unsigned cap)
+unsigned model_ap_scan_result(uint8_t *r, unsigned cap, uint16_t sync)
 {
     static const uint8_t rsn[22] = { 48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2, 0, 0 };
     unsigned blen = 128 + 9 + sizeof(rsn), total = 12 + blen;
@@ -266,6 +299,7 @@ unsigned model_ap_scan_result(uint8_t *r, unsigned cap)
     memset(r, 0, total);
     put32(r, total);
     put32(r + 4, 109);
+    put16(r + 8, sync);
     put16(r + 10, 1);
     uint8_t *b = r + 12;
     put32(b, 109);
@@ -301,8 +335,11 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
             return A.wsec = v, 1;
         if (!strcmp(name, "wpa_auth"))
             return A.wpa_auth = v, 1;
-        if (!strcmp(name, "sup_wpa"))
+        if (!strcmp(name, "sup_wpa")) {
+            if (!M.fwsup)                   /* a firmware without its own supplicant does not know it */
+                return *status = (uint16_t)-23, 1;
             return A.sup_wpa = v, 1;
+        }
         if (!strcmp(name, "wpaie")) {
             A.wpaie_len = dlen < sizeof(A.wpaie) ? dlen : sizeof(A.wpaie);
             memcpy(A.wpaie, data, A.wpaie_len);
@@ -318,14 +355,22 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
                 M.keys_ok |= 1;
             else if (idx == 1 && len == 16 && !memcmp(data + 8, gtk, 16) && le32(data + 116) == 2)
                 M.keys_ok |= 2;
+            else if (idx == 2 && len == 16 && !memcmp(data + 8, A.gtk2, 16) && le32(data + 116) == 2)
+                M.keys_ok |= 4;
             else
                 M.ap_errors |= 16;      /* a key that is not ours */
             return 1;
         }
         return 0;
     }
-    if (cmd == BCMW_C_SET_INFRA || cmd == BCMW_C_SET_AUTH || cmd == 52)
+    if (cmd == BCMW_C_SET_INFRA || cmd == BCMW_C_SET_AUTH)
         return 1;
+    if (cmd == 52) {                        /* DISASSOC: brcmf_scb_val_le, 12 bytes */
+        if (dlen != 12)
+            M.ap_errors |= 128;
+        M.disassoc++;
+        return 1;
+    }
     if (cmd == BCMW_C_SET_WSEC_PMK) {
         if (dlen < 36 || le16(data) != 32 || memcmp(data + 4, A.pmk, 32))
             M.ap_errors |= 32;          /* not the network's PMK */

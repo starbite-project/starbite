@@ -235,6 +235,7 @@ void link_flow_created(struct bcmw *w, const uint8_t *it);
 void link_tx_status(struct bcmw *w, const uint8_t *it);
 void link_event(struct bcmw *w, const struct bcmw_event *ev);
 void link_eapol(struct bcmw *w, const uint8_t *frame, uint32_t len);
+void link_service(struct bcmw *w);
 
 /* ---- the state ---------------------------------------------------------------------------------- */
 
@@ -297,6 +298,7 @@ struct bcmw {
     uint8_t tx_busy[TX_BUFS];
     /* joining */
     int scan_v2;                    /* the firmware answered scan_ver: v2 escan parameters */
+    int scan_running;               /* step 10's escan has not ended yet */
     int join_phase;                 /* 0 idle, 1 scanning, 2 joining, 3 joined, -1 failed */
     int join_open, join_fwsup, join_found, join_scan_done, link_up, keyed, keys_due;
     unsigned join_unsuitable, join_group;

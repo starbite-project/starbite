@@ -12,6 +12,7 @@
  *                   never in git or the catalog) and ask for a DHCP offer, which shows frames going both ways.
  *                   Neither the name, the passphrase nor any address is logged.
  *   wifi_gen=1      train for Gen1 instead of Gen2 (the mainline port links at Gen1)
+ *   wifi_fwsup=1    step 11 with the firmware's own supplicant when "cap" lists idsup (default: the host's)
  *   wifi_auto=1     start without the held Volume Up (an unattended run the user agreed to)
  *   wifi_return=S   S seconds after the end, reboot to the boot menu (default: wait for Power)
  * Watchdog: fed (as the Utility OS feeds it) when the loader armed it (catalog wdt, wdt_feed "own"): a hang
@@ -115,11 +116,13 @@ static void os_rx(void *ctx, unsigned ifidx, const uint8_t *f, uint32_t len)
     b = udp + 8;
     if (b[0] != 2 || (uint32_t)(b[4] << 24 | b[5] << 16 | b[6] << 8 | b[7]) != dhcp_xid || memcmp(b + 28, dhcp_mac, 6))
         return;
-    for (const uint8_t *o = b + 240; o + 2 <= f + len && o[0] != 255;) {
+    for (const uint8_t *o = b + 240; o < f + len && o[0] != 255;) {
         if (o[0] == 0) {
             o++;
             continue;
         }
+        if (o + 2 > f + len || o + 2 + o[1] > f + len)
+            break;
         if (o[0] == 53 && o[1] == 1 && o[2] == 2)
             dhcp_offers++;
         if (o[0] == 51 && o[1] == 4)
@@ -164,7 +167,7 @@ static void dhcp_discover(struct bcmw *w)
 }
 
 /* "wifinet" from the UFS store: two lines; 1 if read */
-static int wifinet(char ssid[33], unsigned *ssid_len, char pass[64])
+static int wifinet(char ssid[33], unsigned *ssid_len, char pass[65])
 {
     static uint8_t buf[4096] __attribute__((aligned(4096)));
     struct store_ent e;
@@ -181,7 +184,7 @@ static int wifinet(char ssid[33], unsigned *ssid_len, char pass[64])
     while (buf[i] == '\r' || buf[i] == '\n')
         i++;
     n = 0;
-    while (buf[i] && buf[i] != '\n' && buf[i] != '\r' && n < 63)
+    while (buf[i] && buf[i] != '\n' && buf[i] != '\r' && n < 64)     /* 64: a hex PSK */
         pass[n++] = (char)buf[i++];
     pass[n] = 0;
     memset(buf, 0, sizeof(buf));
@@ -190,7 +193,7 @@ static int wifinet(char ssid[33], unsigned *ssid_len, char pass[64])
 
 static void join_test(struct bcmw *w)
 {
-    char ssid[33], pass[64];
+    char ssid[33], pass[65];
     unsigned ssid_len, before;
     struct ub u;
     int e;
@@ -444,6 +447,7 @@ void sb_main(void)
     cfg.stop_after = step > BCMW_STEP_ALL ? BCMW_STEP_ALL : step;
     cfg.link_speed = arg("wifi_gen", 2);
     cfg.link_tries = 3;
+    cfg.fw_supplicant = (int)arg("wifi_fwsup", 0);     /* 1: try the firmware's own supplicant if it has one */
     if (bcmw_init(w, &os, &cfg) != BCMW_OK) {
         line("wifitest: bcmw_init refused");
         sb_reboot(SB_INFORM_NORMAL);

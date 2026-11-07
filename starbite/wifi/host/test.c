@@ -483,6 +483,7 @@ static void run_bringup(int dma_idx)
     cfg.stop_after = BCMW_STEP_ALL;
     cfg.dma_indices = dma_idx;
     cfg.any_files = synthetic;
+    cfg.fw_supplicant = dma_idx;    /* the DMA-indices run tries the firmware's supplicant */
     memcpy(cfg.mac, "\x02\x11\x22\x33\x44\x55", 6);
     CHECK(bcmw_init(w, &os, &cfg) == BCMW_OK, "init");
     r = bcmw_bringup(w, 0);
@@ -547,6 +548,17 @@ static void run_bringup(int dma_idx)
         else
             CHECK(M.handshake_done && M.keys_ok == 3, "the handshake finished (%d) and both keys are the AP's (%x)", M.handshake_done, M.keys_ok);
         CHECK(M.flow_created == (dma_idx ? 0u : 1u), "flow rings made: %u", M.flow_created);
+        CHECK(M.disassoc == 1, "the failed join was left (DISASSOC %u)", M.disassoc);
+        if (!dma_idx) {
+            /* a group-key renewal after the join, answered from bcmw_poll; a stranger's copy ignored */
+            model_ap_rekey();
+            for (int i = 0; i < 10; i++) {
+                bcmw_poll(w);
+                M.now += 1000;
+            }
+            CHECK(M.rekey_answered == 1 && (M.keys_ok & 4), "the group-key renewal answered once (%u) and installed (%x)",
+                  M.rekey_answered, M.keys_ok);
+        }
         CHECK(!strstr(log_all, "correct horse") && !strstr(log_all, "test-ap"), "the passphrase or the name in the log");
         /* a data frame out */
         memset(ip, 0, sizeof(ip));

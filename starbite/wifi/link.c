@@ -11,11 +11,13 @@
  * finds the network (the strongest BSS of that name whose RSN element offers WPA2-PSK with CCMP), then
  *  - infrastructure, open-system authentication, wsec AES (and TKIP when the group cipher is TKIP), wpa_auth
  *    WPA2-PSK;
- *  - the firmware's own supplicant when the firmware says so ("cap" lists "idsup"): sup_wpa 1 and the PMK
- *    (WLC_SET_WSEC_PMK, 32 raw bytes); done at E_PSK_SUP status 6 (keyed);
- *  - otherwise the host's: sup_wpa 0, our RSN element as "wpaie", the four-way handshake by wpa.c on the
+ *  - by default the host's supplicant (the way an earlier port joined on this phone): our RSN element as "wpaie" (sup_wpa
+ *    is not touched: brcmfmac and bcmdhd set it only for a firmware supplicant), the four-way handshake by wpa.c on the
  *    EAPOL frames, message 2 and 4 sent as data, then the pairwise and group keys by "wsec_key"
- *    (Samsung's firmware is built without BCMSUP_4WAY_HANDSHAKE, an earlier port found; an earlier port joined this way);
+ *    (Samsung's firmware is built without BCMSUP_4WAY_HANDSHAKE, an earlier port found); group-key renewals after the
+ *    join are answered from bcmw_poll;
+ *  - with cfg.fw_supplicant and "cap" listing "idsup": the firmware's own supplicant, sup_wpa 1 and the PMK
+ *    (WLC_SET_WSEC_PMK, 32 raw bytes), done at E_PSK_SUP status 6 (keyed); not yet seen on this phone;
  *  - an open network: wsec 0, wpa_auth 0;
  * and WLC_SET_SSID with the name and the BSSID. Events: SET_SSID (status 0 joined), LINK (flag 1 up), DEAUTH,
  * DISASSOC, PSK_SUP. The passphrase, the PMK and the keys are never logged; nor are network names or addresses
@@ -27,7 +29,7 @@
 #define FLOW_ITEMS      512u
 #define FLOW_ITEM_SIZE  48u
 #define FLOW_ID         2u      /* BRCMF_H2D_MSGRING_FLOWRING_IDSTART + flow 0 */
-#define FLOW_FIFO       1u      /* brcmf_flowring_prio2fifo[0]: best effort */
+#define FLOW_FIFO       0u      /* brcmf_flowring_prio2fifo[0] = 0 (AC_BE; bcmdhd prio2ac[0] = 0) */
 
 #define E_PSK_SUP       46
 #define WSEC_AES        4u
@@ -208,7 +210,7 @@ static void scan_result(struct bcmw *w, const struct bcmw_event *ev)
         return;
     ie_off = le16(d + 116);
     ie_len = le32(d + 120);
-    if (ie_off + ie_len > blen)
+    if (ie_off > blen || ie_len > blen - ie_off)
         return;
     ie = d + ie_off;
     rsn = bcmw_ie_find(ie, ie_len, 48);
@@ -230,13 +232,23 @@ static void scan_result(struct bcmw *w, const struct bcmw_event *ev)
     }
 }
 
+#define SYNC_STEP10 0x1234
+#define SYNC_JOIN   0x4a4e
+
 void link_event(struct bcmw *w, const struct bcmw_event *ev)
 {
-    if (ev->type == BCMW_E_ESCAN_RESULT && w->join_phase == 1) {
-        if (ev->status == 8)
-            scan_result(w, ev);
-        else
-            w->join_scan_done = 1;
+    if (ev->type == BCMW_E_ESCAN_RESULT) {
+        /* the escan result's sync id (+8) says whose scan it is: step 10's may still be running when a join
+         * starts, and the firmware ends it with status 9 (NEWSCAN) when a new one pre-empts it */
+        uint16_t sync = ev->datalen >= 10 ? le16(ev->data + 8) : 0;
+        if (sync == SYNC_STEP10 && ev->status != 8)
+            w->scan_running = 0;
+        if (w->join_phase == 1 && sync == SYNC_JOIN) {
+            if (ev->status == 8)
+                scan_result(w, ev);
+            else
+                w->join_scan_done = 1;
+        }
         return;
     }
     if (w->join_phase < 2)
@@ -312,8 +324,9 @@ void link_eapol(struct bcmw *w, const uint8_t *frame, uint32_t len)
     const char *why = "";
     int r;
 
-    if (w->join_phase != 2 || w->join_fwsup || w->join_open || len < 14 + 4)
-        return;
+    if ((w->join_phase != 2 && w->join_phase != 3) || w->join_fwsup || w->join_open || len < 14 + 4 ||
+        bcmw_memcmp(frame + 6, w->join_bssid, 6))
+        return;                             /* only from the access point we joined (as an earlier port) */
     r = bcmw_wpa_message(&w->wpa, frame + 14, len - 14, reply + 14, &rlen, &why);
     if (r == BCMW_WPA_BAD) {
         struct bcmw_lb l;
@@ -338,19 +351,36 @@ void link_eapol(struct bcmw *w, const uint8_t *frame, uint32_t len)
     bcmw_memset(reply, 0, sizeof(reply));
 }
 
+static void install_keys(struct bcmw *w);
+
 static void send_eapol(struct bcmw *w)
 {
     int r = w->eapol_out_kind;
-    if (!w->eapol_out_len)
+    uint8_t f[sizeof(w->eapol_out)];
+    unsigned n = w->eapol_out_len;
+    if (!n)
         return;
-    if (bcmw_tx(w, w->eapol_out, w->eapol_out_len) != BCMW_OK) {
+    /* bcmw_tx may poll the rings (the flow ring's creation): a new answer may land in eapol_out meanwhile */
+    bcmw_memcpy(f, w->eapol_out, n);
+    bcmw_memset(w->eapol_out, 0, sizeof(w->eapol_out));
+    w->eapol_out_len = 0;
+    if (bcmw_tx(w, f, n) != BCMW_OK) {
         bcmw_say(w, "link: the handshake's answer could not be sent");
         w->join_phase = -1;
     } else if (r == BCMW_WPA_KEYS || r == BCMW_WPA_GROUP) {
         w->keys_due = r;
     }
-    bcmw_memset(w->eapol_out, 0, sizeof(w->eapol_out));
-    w->eapol_out_len = 0;
+    bcmw_memset(f, 0, sizeof(f));
+}
+
+/* after the join: group-key renewals (from bcmw_poll) */
+void link_service(struct bcmw *w)
+{
+    if (w->join_phase != 3 || w->in_process)
+        return;
+    send_eapol(w);
+    if (w->keys_due)
+        install_keys(w);
 }
 
 static void install_keys(struct bcmw *w)
@@ -371,7 +401,8 @@ static void install_keys(struct bcmw *w)
         bcmw_say(w, "link: both keys given to the firmware (keyed)");
     } else {
         bcmw_say(w, "link: the firmware refused a key");
-        w->join_phase = -1;
+        if (w->join_phase == 2)
+            w->join_phase = -1;
     }
 }
 
@@ -395,12 +426,24 @@ static int scan_for(struct bcmw *w)
     uint64_t t0;
     int e;
 
-    uint32_t n = bcmw_escan_params(w, p, w->join_ssid, w->join_ssid_len, 0x4a4e);
+    uint32_t n = bcmw_escan_params(w, p, w->join_ssid, w->join_ssid_len, SYNC_JOIN);
+    t0 = bcmw_now(w);
+    while (w->scan_running && bcmw_now(w) - t0 < 10000000) {    /* step 10's scan first */
+        mb_process(w);
+        bcmw_udelay(w, 1000);
+    }
     w->join_phase = 1;
     w->join_found = 0;
     w->join_scan_done = 0;
     w->join_unsuitable = 0;
-    if ((e = bcmw_iovar_set(w, "escan", p, n, 0)) != BCMW_OK)
+    for (unsigned k = 0; (e = bcmw_iovar_set(w, "escan", p, n, 0)) != BCMW_OK && k < 5; k++) {
+        bcmw_say(w, "link: the scan was refused (busy?): again in 500 ms");
+        for (unsigned d = 0; d < 500; d++) {
+            mb_process(w);
+            bcmw_udelay(w, 1000);
+        }
+    }
+    if (e != BCMW_OK)
         return e;
     t0 = bcmw_now(w);
     while (!w->join_scan_done && bcmw_now(w) - t0 < 8000000) {
@@ -420,7 +463,7 @@ int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char
 
     if (w->step < BCMW_STEP_UP || w->dead)
         return BCMW_E_STATE;
-    if (ssid_len == 0 || ssid_len > 32 || (pass_len && (pass_len < 8 || pass_len > 63)))
+    if (ssid_len == 0 || ssid_len > 32 || (pass_len && (pass_len < 8 || pass_len > 64)))
         return BCMW_E_REFUSED;
     bcmw_memset(&w->wpa, 0, sizeof(w->wpa));
     bcmw_memcpy(w->join_ssid, ssid, ssid_len);
@@ -428,11 +471,11 @@ int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char
     w->join_open = pass_len == 0;
     w->link_up = w->keyed = 0;
     w->keys_due = 0;
-    w->join_fwsup = !w->join_open && !w->cfg.host_supplicant && has_idsup(w);
+    w->join_fwsup = !w->join_open && w->cfg.fw_supplicant && has_idsup(w);
     lb_init(&l);
     lb_s(&l, "link: joining a network (name not logged): ");
     lb_s(&l, w->join_open ? "open" : w->join_fwsup ? "WPA2-PSK, the firmware's supplicant (cap: idsup)"
-                                                   : "WPA2-PSK, the host's supplicant (no idsup in cap)");
+                                                   : "WPA2-PSK, the host's supplicant");
     bcmw_say_lb(w, &l);
 
     if ((e = scan_for(w)) != BCMW_OK)
@@ -455,7 +498,20 @@ int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char
     lb_s(&l, w->join_open ? ", open" : w->join_group == BCMW_CIPHER_CCMP ? ", group cipher CCMP" : ", group cipher TKIP");
     bcmw_say_lb(w, &l);
 
-    if (!w->join_open) {
+    if (!w->join_open && pass_len == 64) {
+        /* 64 hex digits are the PSK itself (IEEE 802.11 M.4) */
+        for (unsigned i = 0; i < 64; i++) {
+            char c = pass[i];
+            unsigned v = c >= '0' && c <= '9' ? (unsigned)(c - '0') : c >= 'a' && c <= 'f' ? (unsigned)(c - 'a' + 10) :
+                         c >= 'A' && c <= 'F' ? (unsigned)(c - 'A' + 10) : 16;
+            if (v == 16) {
+                bcmw_say(w, "link: a 64-character passphrase that is not hex");
+                e = BCMW_E_REFUSED;
+                goto out;
+            }
+            w->wpa.pmk[i / 2] = (uint8_t)(w->wpa.pmk[i / 2] << 4 | v);
+        }
+    } else if (!w->join_open) {
         uint64_t p0 = bcmw_now(w);
         bcmw_wpa_pmk((const unsigned char *)pass, pass_len, ssid, ssid_len, w->wpa.pmk);
         lb_init(&l);
@@ -474,7 +530,8 @@ int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char
     if (e == BCMW_OK)
         e = bcmw_iovar_set_u32(w, "wpa_auth", w->join_open ? 0 : WPA2_AUTH_PSK);
     if (e == BCMW_OK && !w->join_open) {
-        e = bcmw_iovar_set_u32(w, "sup_wpa", w->join_fwsup ? 1 : 0);
+        if (w->join_fwsup)
+            e = bcmw_iovar_set_u32(w, "sup_wpa", 1);
         if (e == BCMW_OK && w->join_fwsup) {
             uint8_t pmk[132];
             bcmw_memset(pmk, 0, sizeof(pmk));
@@ -536,8 +593,11 @@ int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char
     bcmw_memset(w->wpa.pmk, 0, sizeof(w->wpa.pmk));
     return BCMW_OK;
 out:
-    if (w->join_phase != 3)
+    if (w->join_phase != 3) {
+        if (w->join_phase == 2 || w->join_phase == -1)
+            bcmw_leave(w);              /* the firmware would go on trying (an earlier port: station_leave) */
         w->join_phase = 0;
+    }
     bcmw_memset(w->wpa.pmk, 0, sizeof(w->wpa.pmk));
     return e;
 }
@@ -550,12 +610,15 @@ int bcmw_link_up(const struct bcmw *w)
 int bcmw_leave(struct bcmw *w)
 {
     int fwerr;
-    uint8_t ea[6];
+    uint8_t scb[12];                    /* brcmf_scb_val_le: reason, then the address */
     if (w->step < BCMW_STEP_UP)
         return BCMW_E_STATE;
-    bcmw_memcpy(ea, w->join_bssid, 6);
+    bcmw_memset(scb, 0, sizeof(scb));
+    put32(scb, 3);                      /* WLAN_REASON_DEAUTH_LEAVING */
+    bcmw_memcpy(scb + 4, w->join_bssid, 6);
     w->join_phase = 0;
     w->link_up = w->keyed = 0;
+    w->eapol_out_len = 0;
     bcmw_memset(&w->wpa, 0, sizeof(w->wpa));
-    return bcmw_ioctl(w, 0, C_DISASSOC, ea, 6, 1, &fwerr);
+    return bcmw_ioctl(w, 0, C_DISASSOC, scb, sizeof(scb), 1, &fwerr);
 }

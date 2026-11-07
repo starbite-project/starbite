@@ -504,7 +504,8 @@ static void process_item(struct bcmw *w, const uint8_t *it)
                 w->info.rx_frames++;
                 if (len >= 14 && be16(b + off + 12) == 0x886c)
                     got_event(w, b + off, len);
-                else if (len >= 14 && be16(b + off + 12) == 0x888e && w->join_phase == 2 && !w->join_fwsup)
+                else if (len >= 14 && be16(b + off + 12) == 0x888e && (w->join_phase == 2 || w->join_phase == 3) &&
+                         !w->join_fwsup)
                     link_eapol(w, b + off, len);
                 else if (w->os.rx)
                     w->os.rx(w->os.ctx, it[1], b + off, len);

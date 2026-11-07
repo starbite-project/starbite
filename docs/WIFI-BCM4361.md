@@ -133,13 +133,20 @@ After step 10 the core can send and receive frames and join a network:
 - **Join** (`bcmw_join(ssid, passphrase)`): a directed escan (v1 or v2, as `scan_ver` says) picks the strongest
   BSS of that name whose RSN element offers WPA2-PSK with CCMP (WPA3-only, TKIP-only and open networks are
   refused unless the passphrase is empty, which asks for an open one); infrastructure, open-system
-  authentication, `wsec` AES, `wpa_auth` WPA2-PSK; the PMK from the passphrase (PBKDF2); then either
-  - the **firmware's supplicant** when `cap` lists `idsup` (`sup_wpa` 1, `WLC_SET_WSEC_PMK` with the 32-byte
-    PMK, done at `E_PSK_SUP` status 6), as the user's plan asked; or
-  - the **host's** (an earlier port's way on this phone; Samsung builds the firmware without `BCMSUP_4WAY_HANDSHAKE`):
-    `sup_wpa` 0, our RSN element as `wpaie`, the four-way handshake by `wpa.c` (an earlier port's `lx_wpa.c`, MIT) on the
-    EAPOL frames, its answers sent from the join loop, message 4 out before the keys go in (`wsec_key`:
-    pairwise index 0 with the AP's address, group key primary, as `brcmf_cfg80211_add_key`).
+  authentication, `wsec` AES, `wpa_auth` WPA2-PSK; the PMK from the passphrase (PBKDF2; 64 hex digits are taken
+  as the PSK itself); then either
+  - the **host's supplicant**, the default (an earlier port's way on this phone; Samsung builds the firmware without
+    `BCMSUP_4WAY_HANDSHAKE`): our RSN element as `wpaie` (`sup_wpa` untouched: brcmfmac and bcmdhd set it only
+    for a firmware supplicant, and a firmware without one may not know it), the four-way handshake by `wpa.c`
+    (an earlier port's `lx_wpa.c`, MIT) on EAPOL frames from the chosen AP only, its answers sent from the join loop,
+    message 4 out before the keys go in (`wsec_key`: pairwise index 0 with the AP's address, flags 0; the
+    group key primary, as `brcmf_cfg80211_add_key`); group-key renewals later answered from `bcmw_poll`; or
+  - the **firmware's supplicant**, opt-in (`fw_supplicant`, wifitest `wifi_fwsup=1`) when `cap` lists `idsup`
+    (`sup_wpa` 1, `WLC_SET_WSEC_PMK` with the 32-byte PMK, done at `E_PSK_SUP` status 6), as the plan asked;
+    not used until the host path has worked on the phone.
+  A step-10 scan still running is waited for (escan events are told apart by their sync id; the firmware ends
+  an old scan with status 9 when a new one starts), a refused escan is retried. Roaming is off (`roam_off`: the
+  host holds one AP's keys). A failed join is left (`DISASSOC` with a 12-byte `scb_val`).
   Which one the firmware has is only known from the phone (its iovar tables are in the chip's ROM: the image has
   no names); the log says which was used. `WLC_SET_SSID` with the name and BSSID; `SET_SSID`, `LINK`, `DEAUTH`,
   `DISASSOC`, `PSK_SUP` events. `bcmw_leave()` disassociates.
@@ -227,7 +234,7 @@ the chip accepts our ring descriptors and stamping, DMA through the real SysMMU 
    and called a guess.
 4. Escan v1 vs v2: chosen by `scan_ver` as brcmfmac does; both are host-tested, neither has run on this firmware.
 5. Interrupts: polling first; INTx (SPI 253) when the OS has interrupts.
-7. Firmware supplicant or the host's: `cap` on the phone decides (T4 says which it used).
+7. The firmware's supplicant (`wifi_fwsup=1`) is untried; the host's is the default (T4).
 8. A real random source for the handshake's nonce in the shims (libsb: e.g. the TRNG if reachable from EL1;
    Windows: `BCryptGenRandom`).
 6. Deep sleep (`D2H_DEV_DS_ENTER_REQ`) is acknowledged as brcmfmac does; power saving is not set yet.
@@ -325,11 +332,11 @@ RECOVERY, MIF/INT clocks or the PMIC. Undo: reboot.
 
 **T4 join** (`wifi_step=11`): needs the store entry `wifinet` (two lines: the network's name, its passphrase;
 made on the phone from the user's input, never committed). Expected: `link: joining a network ... WPA2-PSK, the
-firmware's supplicant` or `the host's supplicant`, `the access point xx:xx:xx:..:..:..`, `LINK UP`, then
-(host) `handshake message 1 ... message 3 ... both keys given to the firmware (keyed)` or (firmware)
-`the firmware's supplicant finished the handshake (keyed)`, `THE NETWORK IS JOINED`, `A DHCP OFFER CAME BACK`.
-If not: `no suitable access point` (name, or WPA3-only network), `MIC failure` / `message refused` (passphrase),
-`TIMEOUT: associated, but the handshake did not finish` (no EAPOL: the other supplicant path, `host_supplicant`).
+host's supplicant`, `the access point xx:xx:xx:..:..:..`, `LINK UP`, `handshake message 1 ... message 3 ... both
+keys given to the firmware (keyed)`, `THE NETWORK IS JOINED`, `A DHCP OFFER CAME BACK`. If not:
+`no suitable access point` (the name, or a WPA3-only network), `a handshake message refused: its signature is not
+right` (the passphrase), `TIMEOUT: associated, but the handshake did not finish` (no EAPOL reached us: then a run
+with `wifi_fwsup=1`).
 
 ### Run 1 (2026-11-07, launch #56, image 60f3d908)
 
@@ -378,6 +385,14 @@ stale items, ioctl timeouts), the PHY left running into an unpowered chip at the
 not bounded, EROFS coverage not checked and its feature mask mislabelled, stamping after the cache clean, a late
 ioctl answer taken for the next request, the test image waiting forever in unattended runs and leaving the radio
 powered on a crash, two gates read late, and doc/comment mismatches.
+
+A second review (2026-11-07) of the data path and join, before any phone run, found that the join's scan could be
+ended by step 10's still-running scan (sync ids now told apart), that `sup_wpa 0` would fail the host path on a
+firmware without a supplicant (no longer set), that the untried firmware supplicant was the default (now opt-in),
+the flow ring's tid (0, best effort), no group-key renewals after the join (now from `bcmw_poll`) and roaming on
+(off), no disconnect after a failed join, an IE-length overflow, EAPOL accepted from any sender, a DHCP option
+read past the frame, and which key is the primary one (the model had made the same mistake). All fixed; the model
+now refuses `sup_wpa` without `idsup`, ends the old scan first, and renews the group key.
 
 ## 11. Sources and licences
 
