@@ -21,7 +21,7 @@ if grep -rIl "by-name/USERDATA" "$W/vendor" "$W/odm" 2>/dev/null | grep -q .; th
 fi
 grep -q "by-name/(userdata|A16DATA)?" "$V/selinux/vendor_file_contexts" || { echo "STOP: contexts not patched"; exit 1; }
 [ "$(grep -c "by-name/A16DATA" "$V/fstab.samsungexynos9810")" -ge 1 ] || { echo "STOP: fstab not patched"; exit 1; }
-source buildenv.sh starlte >/dev/null 2>&1
+set +eu; source buildenv.sh starlte >/dev/null 2>&1; set -eu      # buildenv is not errexit/nounset clean
 O=/mnt/oneui/imgs; mkdir -p "$O"; rm -f "$O/vendor.fixed.img"
 scripts/build_fs_image.sh erofs -o "$O/vendor.fixed.img" -s "$TARGET_VENDOR_PARTITION_SIZE" \
     "$W/vendor" "$W/configs/file_context-vendor" "$W/configs/fs_config-vendor" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | tail -4
