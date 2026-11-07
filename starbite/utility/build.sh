@@ -68,9 +68,13 @@ if [ "$native" = 1 ]; then
     # the QR encoder (starbite/tools/qr-test.c): every symbol's structure; with zbarimg, each decodes back
     gcc -O1 -Wall -Wextra -Werror -I"$here" -o "$out/qr-test" "$root/starbite/tools/qr-test.c" "$here/qr.c"
     rm -rf "$out/qr" && mkdir -p "$out/qr"
-    "$out/qr-test" "$out/qr" | tail -1
+    r=$("$out/qr-test" "$out/qr") || { echo "$r" | grep -v '^ok' >&2; echo "utility: QR test failed" >&2; exit 1; }
+    echo "$r" | tail -1
     if command -v zbarimg >/dev/null 2>&1; then
-        python3 "$root/starbite/tools/qr-check.py" "$out/qr" | tail -1
+        r=$(python3 "$root/starbite/tools/qr-check.py" "$out/qr") || { echo "$r" >&2; echo "utility: QR decode failed" >&2; exit 1; }
+        echo "$r" | tail -1
+    else
+        echo "utility: no zbarimg: the QR codes were not decoded (apt-get install zbar-tools)"
     fi
     rm -rf "$out/qr"
 fi

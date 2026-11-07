@@ -400,6 +400,10 @@ static void press_key(int i)
         uint32_t cp = st_shift ? k->scp : k->cp;
         struct kstroke s[2];
         int n = kbd_char(hid_layout, cp, s);
+        if ((unsigned)(2 * n) > hid_room()) {          /* both strokes of a dead key, or neither */
+            ++hid_stats.dropped;
+            return;
+        }
         uint8_t m = held_mods(0);
         for (int j = 0; j < n; ++j)
             hid_key((uint8_t)(s[j].mod | m), s[j].key);
@@ -456,13 +460,39 @@ static int hit_tab(int x, int y)
 /* ---- the screen ----------------------------------------------------------------------------------------- */
 enum { F_NONE, F_KEY, F_PAD };
 
+/* fingers on the trackpad now (counted, so a lost lift cannot leave the count wrong), but finger skip */
+static int pad_count(const int *what, const struct mt *m, int skip)
+{
+    int n = 0;
+    for (int f = 0; f < MT_N; ++f)
+        n += f != skip && what[f] == F_PAD && m->down[f];
+    return n;
+}
+
+/* held keys that repeat: characters, delete, the arrows, space, return, tab, page up/down; not the toggles
+ * (Caps Lock, Num Lock), F-keys, Esc and the like */
+static int repeats(int k)
+{
+    if (kb[k].kind == K_CHAR)
+        return 1;
+    if (kb[k].kind != K_KEY)
+        return 0;
+    switch (kb[k].usage) {
+    case 0x2a: case 0x4c: case 0x4f: case 0x50: case 0x51: case 0x52: case 0x2c: case 0x28: case 0x2b:
+    case 0x4b: case 0x4e: case 0x58:
+        return 1;
+    default:
+        return kb[k].usage >= 0x59 && kb[k].usage <= 0x63;   /* numpad digits and point */
+    }
+}
+
 void ut_kbd(void)
 {
     struct mt m;
     struct mt_ev ev[MT_N];
     int what[MT_N], kidx[MT_N], lx[MT_N], ly[MT_N];
     uint64_t rep_at[MT_N];
-    int pad_fingers = 0, pad_max = 0, pad_moved = 0, scroll_acc = 0;
+    int pad_max = 0, pad_moved = 0, scroll_acc = 0;
     uint64_t pad_t0 = 0;
     for (int i = 0; i < MT_N; ++i)
         what[i] = F_NONE;
@@ -483,12 +513,15 @@ void ut_kbd(void)
             hid_wheel(3);
         if (m.pressed & SB_K_DOWN)
             hid_wheel(-3);
-        for (int e = 0; e < n; ++e) {
+        int leave = 0;
+        for (int e = 0; e < n; ++e) {                 /* one pass, in order: a lift sees its finger's moves */
             int f = ev[e].id, x = ev[e].x, y = ev[e].y;
             if (ev[e].st == MT_DOWN) {
                 int t = hit_tab(x, y), k;
                 what[f] = F_NONE;
-                if (t >= 0) {
+                if (ui_header_back_hit(x, y)) {
+                    leave = 1;
+                } else if (t >= 0) {
                     if (t < L_N) {
                         layer = t;
                     } else {
@@ -507,32 +540,49 @@ void ut_kbd(void)
                     what[f] = F_KEY;
                     kidx[f] = k;
                     press_key(k);
-                    if (kb[k].kind == K_CHAR || kb[k].kind == K_KEY) {
+                    if (kb[k].kind == K_CHAR || kb[k].kind == K_KEY)
                         draw_key(k, 1);
-                        rep_at[f] = sb_ms() + 450;
-                    } else {
-                        rep_at[f] = ~0ULL;
-                    }
+                    rep_at[f] = repeats(k) ? sb_ms() + 450 : ~0ULL;
                 } else if (y >= PAD_Y0 && y < PAD_Y1) {
                     what[f] = F_PAD;
-                    if (!pad_fingers) {
+                    lx[f] = x;
+                    ly[f] = y;
+                    if (!pad_count(what, &m, f)) {   /* the first finger on the pad */
                         pad_max = 0;
                         pad_moved = 0;
                         scroll_acc = 0;
                         pad_t0 = sb_ms();
                         draw_pad(1);
                     }
-                    ++pad_fingers;
-                    if (pad_fingers > pad_max)
-                        pad_max = pad_fingers;
+                    int c = pad_count(what, &m, -1);
+                    if (c > pad_max)
+                        pad_max = c;
+                }
+            } else if (ev[e].st == MT_MOVE && what[f] == F_PAD) {
+                int dx = x - lx[f], dy = y - ly[f], c = pad_count(what, &m, -1);
+                lx[f] = x;
+                ly[f] = y;
+                pad_moved += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+                if (c >= 2) {
+                    scroll_acc += dy;                 /* two fingers: each finger's share */
+                    while (scroll_acc >= 40 * c) {
+                        hid_wheel(1);
+                        scroll_acc -= 40 * c;
+                    }
+                    while (scroll_acc <= -40 * c) {
+                        hid_wheel(-1);
+                        scroll_acc += 40 * c;
+                    }
+                } else {
+                    hid_move(dx * 3 / 2, dy * 3 / 2);
                 }
             } else if (ev[e].st == MT_UP) {
                 if (what[f] == F_KEY) {
                     if (kb[kidx[f]].kind == K_CHAR || kb[kidx[f]].kind == K_KEY)
                         draw_key(kidx[f], 0);
                 } else if (what[f] == F_PAD) {
-                    if (--pad_fingers <= 0) {
-                        pad_fingers = 0;
+                    what[f] = F_NONE;
+                    if (!pad_count(what, &m, -1)) {  /* the last finger left the pad */
                         if (pad_moved < 40 && sb_ms() - pad_t0 < 350)
                             hid_click(pad_max >= 2 ? HID_RIGHT : HID_LEFT);
                         draw_pad(0);
@@ -541,36 +591,8 @@ void ut_kbd(void)
                 what[f] = F_NONE;
             }
         }
-        /* pointer and scrolling from the moves */
-        for (int e = 0; e < n; ++e) {
-            int f = ev[e].id;
-            if (what[f] != F_PAD)
-                continue;
-            if (ev[e].st == MT_DOWN) {
-                lx[f] = ev[e].x;
-                ly[f] = ev[e].y;
-                continue;
-            }
-            if (ev[e].st != MT_MOVE)
-                continue;
-            int dx = ev[e].x - lx[f], dy = ev[e].y - ly[f];
-            lx[f] = ev[e].x;
-            ly[f] = ev[e].y;
-            pad_moved += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
-            if (pad_fingers >= 2) {
-                scroll_acc += dy;                     /* two fingers: each finger's share */
-                while (scroll_acc >= 40 * pad_fingers) {
-                    hid_wheel(1);
-                    scroll_acc -= 40 * pad_fingers;
-                }
-                while (scroll_acc <= -40 * pad_fingers) {
-                    hid_wheel(-1);
-                    scroll_acc += 40 * pad_fingers;
-                }
-            } else {
-                hid_move(dx * 3 / 2, dy * 3 / 2);
-            }
-        }
+        if (leave)
+            break;
         uint64_t now = sb_ms();
         for (int f = 0; f < MT_N; ++f)
             if (what[f] == F_KEY && m.down[f] && now >= rep_at[f]) {
@@ -587,5 +609,4 @@ void ut_kbd(void)
     }
     hid_reset();
     ui_input_reset();
-    sb_keys_release_wait();
 }

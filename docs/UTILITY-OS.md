@@ -17,12 +17,12 @@ milestones **UO1** (USB device mode with a serial shell) and **UO2** (the phone 
 | Status bar | USB state on the left; local time and battery on the right (the uptime if the RTC does not read) |
 | USB page | Connection state and speed, each drive with its traffic, SCSI command and error counters, the shell state |
 | Screen saver | After **2 minutes without a touch or key** the screen goes black (OLED: no burn-in, less battery) with a small dim status that moves every 30 s (USB drives, a running hash, or the countdown to the menu). A touch or key brings the page back as it was; that touch does nothing else. USB, the shell and hashing keep running. **Not while a page is watched**: Measure (and its ruler and colour fields), a running stopwatch or timer, a finished timer for 10 minutes; those also hold off the 10-minute return |
-| Leaving | The **Boot menu** tile (asks first), or the shell's `menu`. With **no computer ever connected and no touch or key for 10 minutes** (counted from the Utility OS's start, not the phone's) it returns to the menu by itself (the screen saver shows the countdown) |
+| Leaving | The **Boot menu** tile (asks first), or the shell's `menu`. With **no computer ever connected and no touch or key for 10 minutes** (counted from the Utility OS's start, not the phone's) it returns to the menu by itself (the screen saver shows the countdown). Pages that keep the screen on (the gamepad, live charts, QR codes, the multi-touch test) do so for 10 minutes without a touch or key (the presenter 30); then the saver and the return work again |
 
 | Measure | **USB charger tester** (live: input, VBUS, charge state, battery %, voltage, current in/out, power, the input and charge current limits; read only, Lab's MAX77705 readers), **Ruler** (cm on the left, inches on the right, at the panel's 570 ppi), **Colour fields** (white, black, red, green, blue, grey full screen for dead pixels; the label fades so nothing covers a pixel) |
 | Everyday | **Clock** (local time from the phone's RTC, which holds UTC; Helsinki with the EU summer-time rule; tap it for the **world clock**: UTC, London, Berlin, New York, Los Angeles, Tokyo), **Stopwatch** (Power start/stop, tap to reset when stopped), **Timer** (tap +1 min, Power start/pause; flashes when done), **Calculator** (scientific, in degrees, and programmer, 64-bit), **QR codes** (below) |
 | Remote | The phone as the computer's input over the same USB cable (section "Utility OS 2"): **Keyboard and trackpad**, **Trackpad and macros** (the screen above), **Gamepad**, **Media remote**, **Presenter**; and **the computer's keyboard layout** (US, Finnish (Mac), Finnish (PC)) |
-| Sensors | **Battery** (charge, mAh left of full, voltage, current, power, time to empty/full, design capacity, health, cycles, live charts), **Temperatures** (every TMU probe, the six thermistors, live charts), the two **hall sensors** (flip cover), the **keys** held, the **multi-touch test**; what needs power or firmware first is listed with the reason |
+| Sensors | **Battery** (charge, mAh left of full, voltage, current, power, time to empty/full, design capacity, health, cycles, live charts), **Temperatures** (the TMU probes of the big and little cores, the GPU and the ISP; the six thermistors; live charts), the two **hall sensors** (flip cover), the **keys** held, the **multi-touch test**; what needs power or firmware first is listed with the reason |
 
 Radio lists the radio chips and what comes next (section "Utility OS 2"); the flashlight is still to come.
 
@@ -63,7 +63,7 @@ are below with what each needs; a stage that powers something up waits for a pho
 | Remote: Presenter | Next and Back (the arrow keys: Keynote, PowerPoint, Google Slides, PDF viewers), Black (B), End show (Esc); **Volume Up next, Volume Down back**; the talk's time and slides forward; the screen stays on |
 | Remote: the computer's layout | **US**, **Finnish (Mac)**, **Finnish (PC)** (Windows and Linux; Swedish is the same). The phone sends key positions; the layout set here decides which presses type a character (`@` is Option+2 on a Mac, AltGr+2 on a PC). Default Finnish (Mac). For the session only (no settings file yet) |
 | Sensors | Battery health from the fuel gauge (FullCapRep 0x35, FullCapNom 0x23, DesignCap 0x18, Cycles 0x17 in hundredths, RepCap 0x05, TTE 0x11 / TTF 0x20 at 5.625 s) with current and voltage charts; temperatures (TMU, the thermistors) with charts; the hall sensors' pins (gpa3-6 flip cover, gpa0-2 the second; which level means "magnet" is to be seen on the phone); the keys; the multi-touch test (every finger, its trail, the most at once). The charts fill while the tile is open; a page with charts keeps the screen on |
-| Everyday: QR codes | One code per line of `/starbite/qr.txt` on the card (`Label = text`; `#` comments): a Wi-Fi login (`WIFI:T:WPA;S:name;P:pass;;`), a link, a note. ECC M (L when it does not fit), up to 271 bytes. The screen stays on |
+| Everyday: QR codes | One code per line of `/starbite/qr.txt` on the card (`Label = text`, the label short and without `:`; `#` comments; the first 12 lines and 4 KiB): a Wi-Fi login (`WIFI:T:WPA;S:name;P:pass;;`), a link, a note. ECC M (L when it does not fit), up to 271 bytes (a longer line says so, never a code of a cut text). The screen stays on |
 | Radio | The radio chips and buses, and what comes next (below) |
 
 Keyboard notes for the phone test: on the first connection macOS may open the **Keyboard Setup Assistant**
@@ -98,7 +98,7 @@ ACM to a second port, then NCM), a local on-screen keyboard for notes and QR tex
 ### Rules (unchanged)
 
 Read only towards the phone's identity areas; no UFS writes beyond what version 1 does (none). Nothing in
-batch 1 writes a PMIC or the MAX77705: the new screens read registers and send USB reports. Stages 2-3 use
+batch 1 writes a PMIC or the MAX77705: the new screens read registers (and run ADC conversions, as Measure does) and send USB reports. Stages 2-3 use
 libsb's gated writers only, with the user present for the first run.
 
 ## Safety

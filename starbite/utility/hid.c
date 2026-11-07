@@ -31,6 +31,7 @@ static void push(const uint8_t *b, unsigned n)
 }
 
 static unsigned room(void) { return (qh + QN - qt - 1) % QN; }
+unsigned hid_room(void) { return room(); }
 
 void hid_key(uint8_t mod, uint8_t key)
 {
@@ -69,6 +70,12 @@ static void text_feed(void)
 
 void hid_text(const char *s)
 {
+    if (pend_h) {                                     /* move what is still waiting to the front */
+        for (unsigned i = pend_h; i <= pend_t; ++i)
+            pend[i - pend_h] = pend[i];
+        pend_t -= pend_h;
+        pend_h = 0;
+    }
     for (; s && *s; ++s) {
         if (pend_t + 1 >= sizeof(pend)) {
             ++hid_stats.dropped;                      /* more than 159 bytes waiting */
@@ -84,7 +91,7 @@ int hid_text_pending(void) { return pend_t > pend_h; }
 
 /* The gamepad (report 4) is a state: the newest one is sent when the endpoint is free, before the queue. */
 static uint8_t pad_r[8] = { 4, 0, 0, 8, 0, 0, 0, 0 };
-static int pad_dirty;
+static int pad_dirty, pad_last;                       /* pad_last: the last report sent was the gamepad's */
 
 void hid_gamepad(const struct hid_pad *p)
 {
@@ -151,15 +158,17 @@ void hid_service(void)
     if (!usbd_configured() || usbd_busy(P_HID))
         return;
     volatile uint8_t *b = (volatile uint8_t *)HID_BUF;
-    if (pad_dirty) {
+    if (pad_dirty && (qh == qt || !pad_last)) {       /* the gamepad and the queue take turns */
         for (unsigned i = 0; i < 8; ++i)
             b[i] = pad_r[i];
         if (usbd_queue(P_HID, HID_BUF, 8) == 0) {
             pad_dirty = 0;
+            pad_last = 1;
             ++hid_stats.reports;
         }
         return;
     }
+    pad_last = 0;
     if (qh == qt && (mdx || mdy || mwheel)) {         /* motion only when no click/key is waiting */
         int dx = clamp(mdx), dy = clamp(mdy), w = clamp(mwheel);
         mdx -= dx;
@@ -177,15 +186,29 @@ void hid_service(void)
     }
 }
 
+/* Everything released: what was waiting is dropped, and if a press or a held button could still be down on
+ * the computer (reports were waiting, a drag held a button, the gamepad was not idle), all-released reports
+ * go out next, so leaving a screen in the middle of a macro or a drag leaves no key held. */
 void hid_reset(void)
 {
+    const uint8_t idle[8] = { 4, 0, 0, 8, 0, 0, 0, 0 };
+    int pad_busy = 0;
+    for (unsigned i = 0; i < 8; ++i)
+        pad_busy |= pad_r[i] != idle[i];
+    int held = qh != qt || buttons || pad_busy;
     qh = qt = 0;
     pend_h = pend_t = 0;
     pend[0] = 0;
-    const uint8_t idle[8] = { 4, 0, 0, 8, 0, 0, 0, 0 };
     for (unsigned i = 0; i < 8; ++i)
         pad_r[i] = idle[i];
-    pad_dirty = 0;
+    pad_dirty = pad_busy;
+    pad_last = 0;
     mdx = mdy = mwheel = 0;
     buttons = 0;
+    if (held) {
+        const uint8_t k[9] = { 1, 0, 0, 0, 0, 0, 0, 0, 0 }, m[5] = { 2, 0, 0, 0, 0 }, c[3] = { 3, 0, 0 };
+        push(k, 9);
+        push(m, 5);
+        push(c, 3);
+    }
 }

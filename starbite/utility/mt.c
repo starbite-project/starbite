@@ -9,6 +9,7 @@ void mt_reset(struct mt *m)
 {
     for (int i = 0; i < MT_N; ++i)
         m->down[i] = 0;
+    m->ignore = (1U << MT_N) - 1U;      /* fingers already on the glass count only after they lift */
     m->keys = sb_keys();                /* keys held now (the one that opened the screen) are not presses */
     m->pressed = m->released = 0;
     for (int i = 0; i < 4; ++i)
@@ -39,6 +40,7 @@ int mt_poll(struct mt *m, struct mt_ev *ev, int max)
     if (m->wakes != ut_saver_wakes) {   /* the saver polled through ui_poll: fingers and keys are stale */
         m->wakes = ut_saver_wakes;
         m->keys = sb_keys();
+        m->ignore = (1U << MT_N) - 1U;  /* the waking finger goes nowhere, also when it moves */
         return lift_all(m, ev, max);
     }
     unsigned k = sb_keys();
@@ -58,6 +60,20 @@ int mt_poll(struct mt *m, struct mt_ev *ev, int max)
         int f = id[i];
         if (f < 0 || f >= MT_N)
             continue;
+        if (st[i] == MT_DOWN) {
+            m->ignore &= ~(1U << f);
+        } else if (m->ignore & (1U << f)) {  /* a finger from before: its moves and lift go nowhere */
+            if (st[i] == MT_UP)
+                m->ignore &= ~(1U << f);
+            continue;
+        }
+        if (st[i] == MT_DOWN && m->down[f] && out < max) {
+            ev[out].id = f;                 /* down again without a lift (a lost event): lift it first */
+            ev[out].st = MT_UP;
+            ev[out].x = m->x[f];
+            ev[out].y = m->y[f];
+            ++out;
+        }
         if (st[i] == MT_DOWN || (st[i] == MT_MOVE && !m->down[f])) {
             m->down[f] = 1;
             m->x0[f] = x[i];
@@ -69,6 +85,8 @@ int mt_poll(struct mt *m, struct mt_ev *ev, int max)
                 continue;
             m->down[f] = 0;
         }
+        if (out >= max)
+            break;
         m->x[f] = x[i];
         m->y[f] = y[i];
         ev[out].id = f;

@@ -337,7 +337,9 @@ void usb_ch9_setup(struct usb_dev_state *s, const uint8_t st[8], struct ch9_res 
                 for (unsigned i = 0; i < 9 && i < sizeof(r->data); ++i)
                     r->data[i] = 0;
                 r->data[0] = (uint8_t)value;             /* report ID */
-                r->len = (value & 0xffU) == 1 ? 9 : (value & 0xffU) == 2 ? 5 : 3;
+                r->len = (value & 0xffU) == 1 ? 9 : (value & 0xffU) == 2 ? 5 : (value & 0xffU) == 4 ? 8 : 3;
+                if ((value & 0xffU) == 4)
+                    r->data[3] = 8;                      /* the gamepad's hat: centred (null) */
                 r->action = CH9_IN;
             }
             break;

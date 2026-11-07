@@ -17,6 +17,7 @@ struct mt {
     unsigned pressed, released;         /* since the last mt_poll */
     uint64_t kt0[4];                    /* ms each key (bit index) went down */
     unsigned wakes;                     /* ut_saver_wakes when last polled */
+    unsigned ignore;                    /* fingers down before the screen or a saver wake: until they lift */
 };
 
 void mt_reset(struct mt *m);

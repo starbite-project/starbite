@@ -117,12 +117,15 @@ static void draw_stick(int bu, int bv, int du, int dv, int active)
 
 static void draw_dpad(unsigned hat)
 {
-    int r = DP_L + 20;
+    static const int du[8] = { 0, 1, 1, 1, 0, -1, -1, -1 }, dv[8] = { -1, -1, 0, 1, 1, 1, 0, -1 };
+    int r = DP_L + 20, off = DP_L - DP_A, doff = off * 6 / 10;
+    for (int i = 1; i < 8; i += 2)                    /* the diagonal marks sit between the arms: erase them */
+        g_disc(DP_U + du[i] * doff, DP_V + dv[i] * doff, DP_A - 16, BG);
     g_round(DP_U - DP_L, DP_V - DP_A, 2 * DP_L, 2 * DP_A, 30, C_CARD2);
     g_round(DP_U - DP_A, DP_V - DP_L, 2 * DP_A, 2 * DP_L, 30, C_CARD2);
     if (hat < 8) {
-        static const int du[8] = { 0, 1, 1, 1, 0, -1, -1, -1 }, dv[8] = { -1, -1, 0, 1, 1, 1, 0, -1 };
-        g_disc(DP_U + du[hat] * (DP_L - DP_A), DP_V + dv[hat] * (DP_L - DP_A), DP_A - 20, C_STAR);
+        int o = hat & 1 ? doff : off;                 /* diagonals nearer the centre: clear of Home */
+        g_disc(DP_U + du[hat] * o, DP_V + dv[hat] * o, DP_A - 20, C_STAR);
     }
     ui_dirty(UI_W - DP_V - r, DP_U - r, 2 * r, 2 * r);
 }
@@ -153,7 +156,7 @@ void ut_gamepad(void)
         what[i] = G_NONE;
     hid_reset();
     mt_reset(&m);
-    ut_awake = 1;                                     /* a game: no screen saver */
+
     ui_fill(0, 0, UI_W, UI_H, BG);
     for (int i = 0; i < B_NB; ++i)
         draw_btn(i, 0);
@@ -165,11 +168,13 @@ void ut_gamepad(void)
     uint16_t last_btn = 0xffff;
     for (;;) {
         int n = mt_poll(&m, ev, MT_N);
+        ut_awake = ui_idle_ms() < UT_WATCH_MS;        /* a game: no saver while it is played */
         if (mt_held_ms(&m, SB_K_BIXBY) >= 500 || mt_held_ms(&m, SB_K_POWER) >= 1000)
             break;
         if (usbd_configured() != conf) {
             conf = usbd_configured();
             g_round(GU / 2 - 520, 250, 1040, 110, 0, BG);
+            ui_dirty(UI_W - 250 - 110, GU / 2 - 520, 110, 1040);
             g_text_c(F_SMALL, GU / 2, 300, conf ? "USB: connected    hold Bixby to leave" :
                      "USB: no computer    hold Bixby to leave", conf ? C_GREEN : C_ORANGE, BG);
         }
@@ -282,5 +287,4 @@ void ut_gamepad(void)
     ut_awake = 0;
     hid_reset();
     ui_input_reset();
-    sb_keys_release_wait();
 }

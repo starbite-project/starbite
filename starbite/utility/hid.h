@@ -35,6 +35,7 @@ void hid_key(uint8_t mod, uint8_t key);   /* press and release */
 extern int hid_layout;                    /* kbdmap.h KL_*: the computer's keyboard layout */
 void hid_text(const char *s);             /* UTF-8, as the key presses of hid_layout (kbdmap.c) */
 int hid_text_pending(void);
+unsigned hid_room(void);                  /* free report slots (a key press takes 2) */
 void hid_gamepad(const struct hid_pad *p);/* the new state; sent when it differs */
 void hid_move(int dx, int dy);            /* accumulated, sent in steps */
 void hid_wheel(int n);

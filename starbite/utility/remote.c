@@ -119,7 +119,6 @@ static void presenter(void)
         { "End show", 0, 0x29, 0, 60, UI_VIEW_Y0 + 2140, UI_W - 120, 280, C_CARD3 },
     };
     hid_reset();
-    ut_awake = 1;                                     /* the talk's clock stays on screen */
     uint64_t t0 = sb_ms(), next = 0;
     unsigned slides = 0;
     ui_fill(0, 0, UI_W, UI_H, C_BG);
@@ -151,6 +150,7 @@ static void presenter(void)
         struct ui_ev e;
         ui_poll(&e, 0);
         ut_service();
+        ut_awake = ui_idle_ms() < 3U * UT_WATCH_MS;   /* a talk: 30 minutes without a press */
         if (e.type == EV_BACK || e.type == EV_HOME || (e.type == EV_TAP && ui_header_back_hit(e.x, e.y)))
             break;
         int i = -1;

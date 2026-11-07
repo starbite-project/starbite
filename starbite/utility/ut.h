@@ -5,6 +5,8 @@ struct ui_ev;
 
 /* a page that must stay visible (a running timer, Measure): no screen saver and no idle return */
 extern int ut_awake;
+/* a watched page stays awake only this long without a touch or key: then the saver and the idle return */
+#define UT_WATCH_MS (10U * 60U * 1000U)
 extern unsigned ut_saver_wakes;         /* counts screen-saver wakes (the touch in progress was dropped) */
 void ut_service(void);          /* USB, the shell, the watchdog, the idle return: every loop turn */
 void ut_status_bar(void);

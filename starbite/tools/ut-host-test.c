@@ -464,21 +464,54 @@ int main(int argc, char **argv)
         hid_stats.dropped = 0;
         hid_text("\xc3\x84@~\xe2\x82\xac");             /* Ä @ ~ € */
         static const uint8_t want[][2] = { { 0x02, 0x34 }, { 0x40, 0x1f }, { 0x40, 0x30 }, { 0, 0x2c }, { 0x40, 0x22 } };
-        unsigned got = 0, bad = 0;
+        unsigned got = 0, bad = 0, ups = 0;
+        int down = 0;
         for (int i = 0; i < 200; ++i) {
             busy[ph] = 0;
             hid_service();
             if (!busy[ph] || qlen[ph] != 9)
                 continue;
             const volatile uint8_t *r = (const volatile uint8_t *)qbuf[ph];
-            if (!r[3])
+            if (!r[3]) {                              /* a release: only after a press */
+                bad += !down;
+                down = 0;
+                ++ups;
                 continue;
+            }
+            bad += down;                              /* a press while the last is still down */
+            down = 1;
             if (got < 5 && (r[1] != want[got][0] || r[3] != want[got][1]))
                 ++bad;
             ++got;
         }
-        CHECK(got == 5 && !bad && !hid_stats.dropped, "FI text: %u strokes, %u wrong", got, bad);
+        CHECK(got == 5 && ups == 5 && !bad && !hid_stats.dropped, "FI text: %u strokes, %u releases, %u wrong", got,
+              ups, bad);
         hid_layout = KL_FI_MAC;
+        busy[ph] = 0;
+    }
+    /* leaving in the middle of a macro: the waiting reports go, and all-released reports follow */
+    {
+        unsigned ph = USB_PHYS(USB_EP_HID_IN);
+        hid_reset();
+        busy[ph] = 0;
+        hid_text("abcdef");
+        hid_service();                                /* 'a' pressed */
+        busy[ph] = 0;
+        hid_reset();
+        unsigned ids = 0, n = 0;
+        for (int i = 0; i < 20; ++i) {
+            busy[ph] = 0;
+            hid_service();
+            if (!busy[ph])
+                continue;
+            const volatile uint8_t *r = (const volatile uint8_t *)qbuf[ph];
+            int zero = 1;
+            for (unsigned j = 1; j < qlen[ph]; ++j)
+                zero &= r[j] == 0;
+            ids |= zero ? 1U << r[0] : 0x100U;
+            ++n;
+        }
+        CHECK(ids == 0x0eU && n == 3, "after a reset: reports %#x (%u), want releases for 1, 2, 3 only", ids, n);
         busy[ph] = 0;
     }
     /* the report descriptor's input reports are the sizes hid.c sends: 1 keyboard 8 bytes, 2 mouse 4, 3

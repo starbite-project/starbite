@@ -10,8 +10,8 @@
 #include "qr.h"
 
 #define QMAX 12
-static struct { char label[40]; char text[272]; } q[QMAX];
-static int nq;
+static struct { char label[40]; char text[272]; int too_long; } q[QMAX];
+static int nq, nlines;                                /* nlines: codes in the file (more than QMAX are not shown) */
 
 static int is_sp(char c) { return c == ' ' || c == '\t'; }
 
@@ -22,10 +22,13 @@ static void add_line(const char *s, unsigned n)
         ++s, --n;
     while (n && (is_sp(s[n - 1]) || s[n - 1] == '\r'))
         --n;
-    if (!n || *s == '#' || nq >= QMAX)
+    if (!n || *s == '#')
         return;
+    if (++nlines > QMAX)
+        return;
+    /* a label is a short start without ':' before " = " (so "WIFI:...;S:a = b;;" stays one text) */
     unsigned eq = 0;
-    for (unsigned i = 0; i + 2 < n; ++i)
+    for (unsigned i = 0; i + 2 < n && i < sizeof(q[nq].label) && s[i] != ':'; ++i)
         if (s[i] == ' ' && s[i + 1] == '=' && s[i + 2] == ' ') {
             eq = i;
             break;
@@ -41,12 +44,13 @@ static void add_line(const char *s, unsigned n)
     for (i = 0; i < tn && i + 1 < sizeof(q[nq].text); ++i)
         q[nq].text[i] = t[i];
     q[nq].text[i] = 0;
+    q[nq].too_long = tn > qr_capacity(QR_ECC_L);       /* never a code of a cut text */
     ++nq;
 }
 
 static void load(void)
 {
-    nq = 0;
+    nq = nlines = 0;
     struct exfat *fs = ut_card();
     static struct exfat_ent scratch[40];
     static char src[4096] __attribute__((aligned(64)));
@@ -57,8 +61,12 @@ static void load(void)
             unsigned a = 0;
             if (n >= 3 && (uint8_t)src[0] == 0xef && (uint8_t)src[1] == 0xbb && (uint8_t)src[2] == 0xbf)
                 a = 3;                                /* UTF-8 byte order mark */
-            for (unsigned i = a; i <= n; ++i)
-                if (i == n || src[i] == '\n') {
+            unsigned end = n;
+            if (e.size > sizeof(src))                 /* read only so far: drop the cut last line */
+                while (end > a && src[end - 1] != '\n')
+                    --end;
+            for (unsigned i = a; i <= end; ++i)
+                if (i == end || src[i] == '\n') {
                     add_line(src + a, i - a);
                     a = i + 1;
                 }
@@ -76,8 +84,9 @@ static void show(int i, struct qr *c)
     while (q[i].text[len])
         ++len;
     ui_fill(0, UI_VIEW_Y0, UI_W, UI_H - UI_VIEW_Y0, C_BG);
-    if (!qr_encode((const uint8_t *)q[i].text, len, QR_ECC_M, c) &&
-        !qr_encode((const uint8_t *)q[i].text, len, QR_ECC_L, c)) {
+    if (q[i].too_long || (!qr_encode((const uint8_t *)q[i].text, len, QR_ECC_M, c) &&
+                          !qr_encode((const uint8_t *)q[i].text, len, QR_ECC_L, c))) {
+        ut_text(F_TITLE_S, 70, UI_VIEW_Y0 + 100, q[i].label, C_L1);
         ui_text(F_ROW, 70, UI_VIEW_Y0 + 200, "Too long for a code (271 bytes at most)", C_ORANGE);
         ui_dirty(0, UI_VIEW_Y0, UI_W, UI_H - UI_VIEW_Y0);
         return;
@@ -97,6 +106,11 @@ static void show(int i, struct qr *c)
     ub_dec(&u, (unsigned)i + 1);
     ub_s(&u, " of ");
     ub_dec(&u, (unsigned)nq);
+    if (nlines > nq) {
+        ub_s(&u, " (the file has ");
+        ub_dec(&u, (unsigned)nlines);
+        ub_s(&u, ")");
+    }
     ub_s(&u, "   version ");
     ub_dec(&u, (unsigned)c->ver);
     ub_s(&u, c->ecc == QR_ECC_M ? ", error correction M" : ", error correction L");
@@ -123,6 +137,7 @@ void ut_qr(void)
         ut_service();
         if (ut_back_event(&e))
             break;
+        ut_awake = ui_idle_ms() < UT_WATCH_MS;        /* not forever: a code on the OLED, a password under it */
         if (e.type == EV_UP || e.type == EV_DOWN || e.type == EV_TAP || e.type == EV_SELECT) {
             i = (i + (e.type == EV_UP ? nq - 1 : 1)) % nq;
             show(i, &c);

@@ -78,7 +78,7 @@ static void battery_fill(struct page *p)
     ub_fix(&u, (uint64_t)b.soc_x10 * 100U, 1);
     ub_s(&u, " %");
     page_big(p, "CHARGE", u.b, b.soc_pct < 15 ? C_RED : C_L1);
-    int rep = fgw(0x05, 1, 6000), full = fgw(0x35, 500, 6000), nom = fgw(0x23, 500, 6000);
+    int rep = fgw(0x05, 0, 6000), full = fgw(0x35, 500, 6000), nom = fgw(0x23, 500, 6000);
     int design = fgw(0x18, 500, 6000), cyc = fgw(0x17, 0, 0), tte = fgw(0x11, 0, 0), ttf = fgw(0x20, 0, 0);
     if (rep >= 0 && full > 0) {
         ub_init(&u);
@@ -143,13 +143,18 @@ static void battery_fill(struct page *p)
 }
 
 /* ---- temperatures ------------------------------------------------------------------------------------------- */
+/* the last sample (sample(): once a second): the page shows these instead of converting again */
+static struct sb_temps s_t;
+static struct sb_therm s_th[8];
+static int s_n = -1;
+static const char *s_why;
+
 static void temps_fill(struct page *p)
 {
-    struct sb_temps t;
-    struct sb_therm th[8];
-    const char *why = 0;
+    const struct sb_temps *tp = &s_t;
+    const struct sb_therm *th = s_th;
     struct ub u;
-    sb_temps_read(&t);
+#define t (*tp)
     page_hdr(p, "Processor (TMU)");
     static const char *const nm[5] = { "Big cores, probe 1", "Big cores, probe 2", "Big cores, probe 3",
                                        "Big cores, probe 4", "Big cores, probe 5" };
@@ -170,9 +175,9 @@ static void temps_fill(struct page *p)
         page_kv(p, more[i], u.b, v >= 80 ? C_RED : v >= 60 ? C_ORANGE : C_L1);
     }
     page_hdr(p, "Thermistors");
-    int n = sb_therms_read(th, 8, &why);
+    int n = s_n;
     if (n < 0)
-        page_kv(p, "ADC", why ? why : "not readable", C_ORANGE);
+        page_kv(p, "ADC", s_why ? s_why : "not readable", C_ORANGE);
     for (int i = 0; i < n; ++i) {
         ub_init(&u);
         if (th[i].ok)
@@ -186,6 +191,7 @@ static void temps_fill(struct page *p)
     kv_chart(p, 3);
     page_note(p, "TMU: the processor's own probes (median of 3). Thermistors: the board's NTCs on the ADC, "
                  "with the vendor's tables.", C_L3);
+#undef t
 }
 
 static void sample(void)
@@ -195,16 +201,14 @@ static void sample(void)
         chart_push(&ch[0].c, b.ma);
         chart_push(&ch[1].c, b.mv);
     }
-    struct sb_temps t;
-    sb_temps_read(&t);
-    if (t.hottest > -100)
-        chart_push(&ch[2].c, t.hottest);
-    struct sb_therm th[8];
-    const char *why;
-    int n = sb_therms_read(th, 8, &why);
-    for (int i = 0; i < n; ++i)
-        if (th[i].ok && th[i].ch == 4)                /* the battery's NTC */
-            chart_push(&ch[3].c, th[i].c10 / 10);
+    sb_temps_read(&s_t);
+    if (s_t.hottest > -100)
+        chart_push(&ch[2].c, s_t.hottest);
+    s_why = 0;
+    s_n = sb_therms_read(s_th, 8, &s_why);
+    for (int i = 0; i < s_n; ++i)
+        if (s_th[i].ok && s_th[i].ch == 4)            /* the battery's NTC */
+            chart_push(&ch[3].c, s_th[i].c10 / 10);
 }
 
 /* ---- the multi-touch test --------------------------------------------------------------------------------- */
@@ -216,11 +220,11 @@ static void touch_test(void)
     struct mt_ev ev[MT_N];
     int lx[MT_N], ly[MT_N], most = 0;
     mt_reset(&m);
-    ut_awake = 1;
     ui_fill(0, 0, UI_W, UI_H, C_BG);
     uint64_t next = 0;
     for (;;) {
         int n = mt_poll(&m, ev, MT_N);
+        ut_awake = ui_idle_ms() < UT_WATCH_MS;        /* touches restart the idle time (mt.c) */
         if ((m.pressed & SB_K_BIXBY) || mt_held_ms(&m, SB_K_POWER) >= UI_POWER_LONG_MS)
             break;
         if (m.pressed & (SB_K_UP | SB_K_DOWN)) {      /* Volume: clear */
@@ -279,7 +283,6 @@ static void touch_test(void)
     }
     ut_awake = 0;
     ui_input_reset();
-    sb_keys_release_wait();
 }
 
 /* ---- the Sensors page ---------------------------------------------------------------------------------------- */
@@ -382,7 +385,7 @@ void ut_sensors(void)
         struct ui_ev e;
         ui_poll(&e, 0);
         ut_service();
-        ut_awake = view != S_MAIN;                    /* live charts: watched */
+        ut_awake = view != S_MAIN && ui_idle_ms() < UT_WATCH_MS;   /* live charts: watched, for a while */
         if (ut_back_event(&e)) {
             if (view == S_MAIN)
                 break;
