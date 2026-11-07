@@ -158,7 +158,9 @@ struct DEVCTX {
     volatile LONG eapol_in, eapol_up, eapol_out, eapol_out_fail;  // EAPOL frames: from the AP, to Windows, from Windows
     ULONG tx_dropped_seen, rx_dropped_seen;
     ULONG rx_at_connect;
-    UINT64 rx_check_at;             // when to log the rx state again (1.5 s after an association)            // the core's received-frame count when the connect began
+    UINT64 rx_check_at;
+    volatile LONG data_out;         // data frames from Windows given to the radio since the connect
+    ULONG link_state;               // Parameters\LinkState: 1 (default) the adapter's link reported up/down             // when to log the rx state again (1.5 s after an association)            // the core's received-frame count when the connect began
     UINT16 connect_port;
     UINT8 bssid[6], rsn[BCMW_RSN_OURS];
     UINT64 connect_started;
@@ -528,6 +530,22 @@ static BSS *FindBss(DEVCTX *d, const UINT8 *bssid)
     return NULL;
 }
 
+// The adapter's media state for NDIS (W2f: on an open network Windows sent no frame at all in 22 s, no DHCP;
+// nothing ever reported the link up). Parameters\LinkState 0 leaves it to WiFiCx.
+static void LinkState(DEVCTX *d, int up)
+{
+    NET_ADAPTER_LINK_STATE ls;
+    if (!d->link_state || !d->adapter)
+        return;
+    if (up)
+        NET_ADAPTER_LINK_STATE_INIT(&ls, 150000000ull, MediaConnectStateConnected, MediaDuplexStateHalf,
+                                    NetAdapterPauseFunctionTypeUnsupported, NetAdapterAutoNegotiationFlagNone);
+    else
+        NET_ADAPTER_LINK_STATE_INIT_DISCONNECTED(&ls);
+    NetAdapterSetLinkState(d->adapter, &ls);
+    Sayf("wificx: the adapter's link reported %s", up ? "UP" : "down");
+}
+
 static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
 {
     WDI_INDICATION_ASSOCIATION_RESULT_LIST list;
@@ -603,6 +621,8 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
     }
     list.AssociationResults.SimpleAssign(NULL, 0);
     res.ActivePhyTypeList.SimpleAssign(NULL, 0);
+    if (ok)
+        LinkState(d, 1);
     Indicate(d, WDI_INDICATION_CONNECT_COMPLETE, d->connect_port, d->connect_txn,
              ok ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE, NULL, 0);
     Sayf("wificx: connect %s", ok ? "COMPLETE (associated; Windows does the handshake now)" : "FAILED");
@@ -624,7 +644,6 @@ static void CmdConnect(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
     int e = BCMW_E_REFUSED;
     d->connect_txn = h->TransactionId;
     d->connect_port = h->PortId;
-    RtlZeroMemory(d->rsn, sizeof(d->rsn));
     if (ParseWdiTaskConnectToIhv(in - sizeof(*h), (UINT8 *)(h + 1), &d->tlv, &p) != NDIS_STATUS_SUCCESS) {
         Answer(r, STATUS_INVALID_PARAMETER);
         return;
@@ -656,6 +675,19 @@ static void CmdConnect(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
             RtlStringCbPrintfA(t + o, sizeof(t) - o, " %lu", (ULONG)c->MulticastCipherAlgorithms.pElements[i]);
         Sayf("wificx: connect asked: %s (open %u, RSNA-PSK %u)", t, WDI_AUTH_ALGO_80211_OPEN, WDI_AUTH_ALGO_RSNA_PSK);
     }
+    if (d->connected == 1 && p.PreferredBSSEntryList.ElementCount >= 1 &&
+        RtlEqualMemory(p.PreferredBSSEntryList.pElements[0].BSSID.Address, d->bssid, 6)) {
+        // W2f: Windows asked again right after the association; a new SET_SSID aborted the one in progress
+        // (status 4) and lost the AP's first handshake message. The association stands: reported again.
+        Say("wificx: connect asked while associated with that access point: the association is reported again");
+        CleanupParsedWdiTaskConnectToIhv(&p);
+        Answer(r, STATUS_SUCCESS);
+        d->connecting = 1;
+        d->set_ssid_ok = 2;
+        ConnectDone(d, 1, 0);
+        return;
+    }
+    RtlZeroMemory(d->rsn, sizeof(d->rsn));     // after the repeat check above: a repeat keeps the link's RSN
     if (c->SSIDList.ElementCount >= 1 && p.PreferredBSSEntryList.ElementCount >= 1 && (psk || open) && d->up) {
         const WDI_SSID *s = &c->SSIDList.pElements[0];
         RtlCopyMemory(d->bssid, p.PreferredBSSEntryList.pElements[0].BSSID.Address, 6);
@@ -678,6 +710,13 @@ static void CmdConnect(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
              b && b->band5 ? "5" : "2.4", b ? (long)b->rssi : 0L, tkip ? "TKIP" : "CCMP", psk ? 2u + d->rsn[1] : 0u);
         d->ev_budget = 40;
         d->rx_at_connect = bcmw_info(d->w)->rx_frames;
+        d->data_out = 0;
+        {
+            UINT8 fwmac[6] = { 0 };
+            int me = bcmw_iovar_get(d->w, "cur_etheraddr", fwmac, 6, NULL);
+            Sayf("wificx: the radio's address (cur_etheraddr) %s the adapter's", me != BCMW_OK ? "UNREADABLE, compared with" :
+                 RtlEqualMemory(fwmac, bcmw_info(d->w)->mac, 6) ? "is" : "DIFFERS FROM");
+        }
         d->last_reason = 0;
         d->set_ssid_status = 0;
         d->eapol_in = d->eapol_up = d->eapol_out = d->eapol_out_fail = 0;
@@ -713,12 +752,13 @@ static void Disconnected(DEVCTX *d, UINT32 reason, int by_host)
         by_host ? WDI_ASSOC_STATUS_DISASSOCIATED_BY_HOST : WDI_ASSOC_STATUS_PEER_DISASSOCIATED;
     if (GenerateWdiIndicationDisassociationFromIhv(&p, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen) == NDIS_STATUS_SUCCESS)
         Indicate(d, WDI_INDICATION_DISASSOCIATION, d->connect_port, 0, NDIS_STATUS_SUCCESS, gen, len);
+    LinkState(d, 0);
     bcmw_rx_state(d->w, "at the disassociation");
     d->rx_check_at = 0;
     Sayf("wificx: disassociated (%s, 802.11 reason %lu); EAPOL so far: %ld in from the AP, %ld handed to Windows, "
-         "%ld out from Windows (%ld not sent); frames in from the radio since the connect: %lu",
-         by_host ? "by the host" : "by the access point", d->last_reason, d->eapol_in, d->eapol_up, d->eapol_out,
-         d->eapol_out_fail, (ULONG)(bcmw_info(d->w)->rx_frames - d->rx_at_connect));
+         "%ld out from Windows (%ld not sent); frames in from the radio since the connect: %lu, data frames out "
+         "from Windows: %ld", by_host ? "by the host" : "by the access point", d->last_reason, d->eapol_in, d->eapol_up,
+         d->eapol_out, d->eapol_out_fail, (ULONG)(bcmw_info(d->w)->rx_frames - d->rx_at_connect), d->data_out);
     UNREFERENCED_PARAMETER(reason);
 }
 
@@ -1050,6 +1090,9 @@ static void Worker(PVOID arg)
             UINT16 ki = 0;
             int m = EapolKey(frame, len, &ki);
             int te = d->up ? bcmw_tx(d->w, frame, len) : BCMW_E_STATE;
+            if (InterlockedIncrement(&d->data_out) == 1)
+                Sayf("wificx: the first data frame from Windows: ethertype %02x%02x, %lu bytes, sent: %d", frame[12],
+                     frame[13], len, te);
             if (te != BCMW_OK)
                 d->tx_dropped++;
             if (m >= 0) {
@@ -1497,6 +1540,7 @@ static NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST)
     cfg.rx_buffers = 128;
     cfg.diag = 1;                   // step 8 checked word by word until W2 has passed once
     d->bss_frame = Param(L"BssFrame", 0);
+    d->link_state = Param(L"LinkState", 1);
     if (bcmw_init(d->w, &os, &cfg) != BCMW_OK) {
         SetParam(L"GuardBoots", guard);
         return STATUS_DEVICE_CONFIGURATION_ERROR;

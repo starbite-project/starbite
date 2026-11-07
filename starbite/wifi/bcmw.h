@@ -250,6 +250,7 @@ int bcmw_write_allowed(uint64_t pa);
 #define BCMW_C_SET_INFRA        20
 #define BCMW_C_SET_AUTH         22
 #define BCMW_C_SET_SSID         26
+#define BCMW_C_GET_PM           85
 #define BCMW_C_SET_PM           86
 #define BCMW_C_SET_SCAN_CHANNEL_TIME   185
 #define BCMW_C_GET_VAR          262

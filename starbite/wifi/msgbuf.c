@@ -429,6 +429,12 @@ void bcmw_rx_state(struct bcmw *w, const char *when)
     lb_dec(&l, w->info.rx_frames);
     lb_s(&l, ", events ");
     lb_dec(&l, w->info.events);
+    lb_s(&l, "; tx frames ");
+    lb_dec(&l, w->info.tx_frames);
+    lb_s(&l, ", done ");
+    lb_dec(&l, w->info.tx_done);
+    lb_s(&l, ", errors ");
+    lb_dec(&l, w->info.tx_errors);
     bcmw_say_lb(w, &l);
 }
 

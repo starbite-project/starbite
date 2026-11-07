@@ -729,6 +729,17 @@ int bcmw_connect(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const u
         bcmw_sayx(w, "link: the firmware refused the security settings; its error ", (uint32_t)fwerr, NULL);
         return e;
     }
+    {
+        /* power save off for the join and the handshake, as bcmdhd does (it enables PM again later): W2f got the
+         * AP's broadcasts but no unicast frame at all (handshake message 1, DHCP), what an AP holding frames for
+         * a station it believes asleep looks like */
+        uint32_t pm = 0xffffffffu;
+        int ge = bcmw_ioctl(w, 0, BCMW_C_GET_PM, &pm, 4, 0, &fwerr);
+        uint32_t off = 0;
+        int se = bcmw_ioctl(w, 0, BCMW_C_SET_PM, &off, 4, 1, &fwerr);
+        bcmw_sayx(w, "link: power save before the join ", ge == BCMW_OK ? pm : 0xffffffffu,
+                  se == BCMW_OK ? "; now 0 (off: constantly awake)" : "; setting 0 REFUSED");
+    }
     bcmw_memset(j, 0, sizeof(j));
     put32(j, ssid_len);
     bcmw_memcpy(j + 4, ssid, ssid_len);
