@@ -310,6 +310,8 @@ void model_wr32(void *ctx, uint64_t pa, uint32_t v)
         M.t_pmu = M.now + 1;
     if (pa == EX_ELBI + 0x2C)
         M.linked = v == 1 && M.reg_on && M.perst_high;
+    if (pa == EX_PHY + 0x20 * 4)
+        M.phy_powered_down = v == 0xC1;
 }
 
 uint16_t model_rd16(void *ctx, uint64_t pa)
@@ -386,7 +388,7 @@ static void fw_boot(void)
         M.nvram_seen = words * 4;
     memset(tcm + SH, 0, 0x1000);
     w32(SH + 0, 7 | 0x10000000u | (M.offer_dma_idx ? 0x10000u | 0x100000u : 0));
-    w32(SH + 20, CONSOLE);
+    w32(SH + 20, M.bad_console ? 0x00400000u : CONSOLE);
     w16(SH + 34, 255);
     w32(SH + 36, 0);
     w32(SH + 40, HTOD_MB);
@@ -542,6 +544,8 @@ static void send_rx_frame(void)
     d2h_put(RING_D2H_RXCPL, it, sizeof(it));
 }
 
+static uint8_t held[24];
+
 static void answer(const uint8_t *req, uint16_t trans, uint32_t cmd, const uint8_t *in, uint16_t inlen, uint16_t outlen)
 {
     uint8_t ack[24] = { MSGBUF_TYPE_IOCTLPTR_REQ_ACK }, it[24] = { MSGBUF_TYPE_IOCTL_CMPLT };
@@ -615,6 +619,15 @@ static void answer(const uint8_t *req, uint16_t trans, uint32_t cmd, const uint8
     put16le(it + 12, rlen);
     put16le(it + 14, trans);
     put32le(it + 16, cmd);
+    if (M.hold_answer) {                /* kept back: sent before the next answer */
+        memcpy(held, it, sizeof(it));
+        M.hold_answer = 0;
+        return;
+    }
+    if (M.release_answer) {
+        d2h_put(RING_D2H_CONTROL, held, sizeof(held));
+        M.release_answer = 0;
+    }
     d2h_put(RING_D2H_CONTROL, it, sizeof(it));
     if (scan) {
         uint8_t r[12 + 128];

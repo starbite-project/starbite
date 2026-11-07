@@ -391,6 +391,31 @@ static int open_gates(struct bcmw *w)
     return open;
 }
 
+/* SYSREG_FSYS1's gate (step 4 writes its PHY words) and CMU_TOP's FSYS1_PCIE gate, read through the
+ * fault-catching read; SYSREG's forced open when closed (the mainline port forces both) */
+static int other_gates(struct bcmw *w)
+{
+    uint32_t v;
+    if (!careful_rd(w, EX_CMU_TOP + CMU_TOP_GATE_FSYS1_PCIE, &v)) {
+        bcmw_say(w, "pcie: 3: CMU_TOP's FSYS1_PCIE gate faulted on read: stopping");
+        w->dead = 1;
+        return 0;
+    }
+    bcmw_sayx(w, "pcie: 3: CMU_TOP GATE_CLKCMU_FSYS1_PCIE ", v, gate_closed(v) ? ": CLOSED (the mainline port forces it)" : NULL);
+    if (gate_closed(v) && w->cfg.ungate)
+        wr32(w, EX_CMU_TOP + CMU_TOP_GATE_FSYS1_PCIE, v | GATE_MANUAL | GATE_CG_VAL);
+    if (!careful_rd(w, EX_CMU_FSYS1 + 0x209c, &v)) {
+        bcmw_say(w, "pcie: 3: SYSREG_FSYS1's gate faulted on read: stopping");
+        w->dead = 1;
+        return 0;
+    }
+    if (gate_closed(v)) {
+        wr32(w, EX_CMU_FSYS1 + 0x209c, v | GATE_MANUAL | GATE_CG_VAL);
+        bcmw_sayx(w, "pcie: 3: SYSREG_FSYS1's gate was closed, forced on: ", rd32(w, EX_CMU_FSYS1 + 0x209c), NULL);
+    }
+    return 1;
+}
+
 int ex_phy(struct bcmw *w)
 {
     bcmw_say(w, "pcie: 3: the PHY out of isolation (PMU +0x71C bit 0)");
@@ -399,9 +424,10 @@ int ex_phy(struct bcmw *w)
         bcmw_say(w, "pcie: 3: PCIE_PHY_CONTROL does not read back 1: stopping");
         return 0;
     }
-    if (!open_gates(w))
+    if (!open_gates(w) || !other_gates(w))
         return 0;
     w->gates_open = 1;
+    w->phy_on = 1;
     bcmw_say(w, "pcie: 3: the PHY out of power-down, the LTSSM's history on");
     set32(w, EX_PCS + 0x100, 1u << 6, 0);
     set32(w, EX_PCS + 0x104, 1u << 7, 0);
@@ -423,7 +449,7 @@ static void phy_up(struct bcmw *w)
 {
     uint32_t pll, id;
 
-    bcmw_say(w, "pcie: 3: the core's soft reset, PERST# high (20 ms), L1 exit in hardware, no clock gating, the PHY's tables");
+    bcmw_say(w, "pcie: 4: the core's soft reset, PERST# high (20 ms), L1 exit in hardware, no clock gating, the PHY's tables");
     rx_elecidle_ignore(w, 1);
     wr32(w, EX_ELBI + ELBI_SOFT_CORE_RESET, 0);
     bcmw_udelay(w, 20);
@@ -440,7 +466,7 @@ static void phy_up(struct bcmw *w)
     {
         struct bcmw_lb l;
         lb_init(&l);
-        lb_s(&l, "pcie: 3: PHY PLL ");
+        lb_s(&l, "pcie: 4: PHY PLL ");
         lb_hex(&l, pll, 1);
         lb_s(&l, " (3: locked), the root port's own ID ");
         lb_hex(&l, id, 8);
@@ -704,11 +730,21 @@ void ex_quiesce(struct bcmw *w)
         wr32(w, EX_ELBI + ELBI_IRQ_EN_PULSE, 0);
         wr32(w, EX_ELBI + ELBI_IRQ_PULSE, rd32(w, EX_ELBI + ELBI_IRQ_PULSE));
     }
-    if (w->gates_open == 1)
-        wr32(w, EX_ELBI + ELBI_APP_LTSSM_ENABLE, 0);
-    /* PERST# is the chip's reset: it stops its DMA. Configuration space is not touched (the
+    /* Samsung's exynos_pcie_poweroff(): PERST# low (the chip's reset: it stops its DMA), the LTSSM
+     * off, the PHY powered down (exynos_phy_all_pwrdn: TRSV 0xFE, CMN 0xC1, the PCS's two power-down
+     * bits), the NCLK guard on; then dhd drops WLAN_REG_ON. The PHY is touched only when this run
+     * powered it up (its gates were seen open after the PMU). Configuration space is not touched (the
      * link may be down), so nothing here can hang on a request that never completes. */
     pin_out(w, BANK_GPF2, PIN_PERST, 0);
+    if (w->gates_open == 1 && w->phy_on) {
+        wr32(w, EX_ELBI + ELBI_APP_LTSSM_ENABLE, 0);
+        wr32(w, EX_PHY + 0x57 * 4, 0xFE);
+        wr32(w, EX_PHY + 0x20 * 4, 0xC1);
+        set32(w, EX_PCS + 0x100, 1u << 6, 1u << 6);
+        set32(w, EX_PCS + 0x104, 1u << 7, 1u << 7);
+        wr32(w, EX_ELBI + ELBI_L12ERR_CTRL, 1u << 2);
+        w->phy_on = 0;
+    }
     pin_out(w, BANK_GPG0, PIN_WLAN_EN, 0);
     w->reg_on = 0;
     w->linked = 0;

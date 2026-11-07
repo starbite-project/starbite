@@ -171,6 +171,22 @@ void bcmw_wmb(struct bcmw *w)
         w->os.wmb(w->os.ctx);
 }
 
+void bcmw_mb(struct bcmw *w)
+{
+    if (w->os.mb)
+        w->os.mb(w->os.ctx);
+    else if (w->os.wmb)
+        w->os.wmb(w->os.ctx);
+}
+
+void bcmw_rmb(struct bcmw *w)
+{
+    if (w->os.rmb)
+        w->os.rmb(w->os.ctx);
+    else
+        bcmw_mb(w);
+}
+
 /* ---- the device ----------------------------------------------------------------------------------- */
 
 uint32_t bcmw_size(void) { return sizeof(struct bcmw); }
@@ -240,6 +256,27 @@ static void choose_files(struct bcmw *w)
 
 /* ---- step 8: firmware and NVRAM ------------------------------------------------------------------- */
 
+/* the file's SHA-256 against the known ones: 1 to go on */
+static int file_known(struct bcmw *w, const char *name, const uint8_t *data, uint32_t len)
+{
+    uint8_t sum[32];
+    const char *what;
+    struct bcmw_lb l;
+
+    fw_sha256(data, len, sum);
+    what = fw_known(sum);
+    lb_init(&l);
+    lb_s(&l, "fw: 8: ");
+    lb_s(&l, name);
+    lb_s(&l, " sha256 ");
+    for (int i = 0; i < 8; i++)
+        lb_hex(&l, sum[i], 2);
+    lb_s(&l, "...: ");
+    lb_s(&l, what ? what : w->cfg.any_files ? "NOT a known file (any_files=1: used)" : "NOT a known file: REFUSED");
+    bcmw_say_lb(w, &l);
+    return what || w->cfg.any_files;
+}
+
 static int load_nvram(struct bcmw *w, uint32_t *nvlen)
 {
     static const char *const guesses[] = { "nvram.txt_r02a_b2", "nvram.txt_r02b_b2", "nvram.txt_murata_r041_b2" };
@@ -260,6 +297,8 @@ static int load_nvram(struct bcmw *w, uint32_t *nvlen)
         bcmw_say(w, "fw: 8: no NVRAM file");
         return BCMW_E_BADFILE;
     }
+    if (!file_known(w, w->info.nvram_name, text, len))
+        return BCMW_E_BADFILE;
     n = fw_nvram(text, len, w->nvram_bin, sizeof(w->nvram_bin), have_mac ? w->cfg.mac : 0);
     if (n <= 0) {
         bcmw_say(w, "fw: 8: the NVRAM does not parse");
@@ -308,10 +347,14 @@ static int step_firmware(struct bcmw *w)
         lb_s(&l, fi.version[0] ? fi.version : "no version banner");
         bcmw_say_lb(w, &l);
     }
+    if (!file_known(w, w->info.fw_name, fw, fwlen))
+        return BCMW_E_BADFILE;
     if ((e = load_nvram(w, &nvlen)) != BCMW_OK)
         return e;
     if (w->os.file(w->os.ctx, "bcmdhd_clm.blob", &w->clm, &w->clm_len) || !fw_clm_check(w->clm, w->clm_len)) {
         bcmw_say(w, "fw: 8: no CLM blob (bcmdhd_clm.blob): the radio would have no regulatory data; going on");
+        w->clm = 0;
+    } else if (!file_known(w, "bcmdhd_clm.blob", w->clm, w->clm_len)) {
         w->clm = 0;
     }
     ramsize = fi.ramsize_override ? fi.ramsize_override : w->info.ramsize;
@@ -402,10 +445,17 @@ static int step_rings(struct bcmw *w)
     uint8_t mac[6];
     int have_mac = 0;
 
-    w->ioctl_req = bcmw_dma(w, 2048, 64, &w->ioctl_req_bus);
-    w->ctl = bcmw_dma(w, CTL_BUFS * CTL_BUF_SIZE, 4096, &w->ctl_bus);
+    /* DMA memory once (a later bring-up after bcmw_quiesce reuses it); nothing is posted yet */
+    if (!w->ioctl_req)
+        w->ioctl_req = bcmw_dma(w, 2048, 64, &w->ioctl_req_bus);
+    if (!w->ctl)
+        w->ctl = bcmw_dma(w, CTL_BUFS * CTL_BUF_SIZE, 4096, &w->ctl_bus);
+    if (!w->rxb)
+        w->rxb = bcmw_dma(w, w->cfg.rx_buffers * RX_BUF_SIZE, 4096, &w->rxb_bus);
     w->nrx = w->cfg.rx_buffers < w->info.max_rxbufpost ? w->cfg.rx_buffers : w->info.max_rxbufpost;
-    w->rxb = bcmw_dma(w, w->nrx * RX_BUF_SIZE, 4096, &w->rxb_bus);
+    bcmw_memset(w->ctl_posted, 0, sizeof(w->ctl_posted));
+    bcmw_memset(w->rx_posted, 0, sizeof(w->rx_posted));
+    w->ioctl_done = 0;
     if (!w->ioctl_req || !w->ctl || !w->rxb)
         return BCMW_E_NOMEM;
     if ((e = mb_rings(w)) != BCMW_OK)

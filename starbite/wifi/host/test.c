@@ -156,6 +156,11 @@ static void test_files(void)
             CHECK(strstr(fi.version, "Version: 13.") != 0, "%s: banner '%s'", names[i], fi.version);
             CHECK(strstr(fi.version, i == 0 ? "4361b2" : "4361b0") != 0, "%s: chip in banner '%s'", names[i], fi.version);
             CHECK(fi.rstvec != 0 && fi.ramsize_override == 0, "%s: reset vector %08x", names[i], fi.rstvec);
+            {
+                uint8_t sum[32];
+                fw_sha256(f, len, sum);
+                CHECK(fw_known(sum) != 0, "%s: not a known file", names[i]);
+            }
             printf("files: %s: %u bytes, %s\n", names[i], len, fi.version);
             free(f);
         }
@@ -198,6 +203,20 @@ static void test_tables(void)
     CHECK(fw_cis_parse(cis, sizeof(cis), &m) == 0, "an empty OTP");
     CHECK(!strcmp(fw_rev_tag(5), "b2") && !strcmp(fw_rev_tag(4), "b0") && !fw_rev_tag(2), "revision tags");
 
+    {
+        uint8_t sum[32];
+        static const uint8_t abc[8] = { 0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea };
+        static const uint8_t empty[8] = { 0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14 };
+        static const uint8_t two[8] = { 0x24, 0x8d, 0x6a, 0x61, 0xd2, 0x06, 0x38, 0xb8 };
+        static const char m56[] = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        fw_sha256((const uint8_t *)"abc", 3, sum);
+        CHECK(!memcmp(sum, abc, 8), "sha256 abc");
+        fw_sha256((const uint8_t *)"", 0, sum);
+        CHECK(!memcmp(sum, empty, 8), "sha256 empty");
+        fw_sha256((const uint8_t *)m56, 56, sum);
+        CHECK(!memcmp(sum, two, 8), "sha256 56 bytes (two blocks)");
+        CHECK(!fw_known(sum), "a random sum is not known");
+    }
     CHECK(fw_iovar(buf, sizeof(buf), "ver", 0, 4) == 8 && !memcmp(buf, "ver\0\0\0\0\0", 8), "iovar get");
     CHECK(fw_iovar(buf, 6, "toolong", 0, 0) == 0, "iovar overflow");
     {
@@ -236,7 +255,7 @@ static void f_bell(struct bcmw_ring *r) { (void)r; bells++; }
 
 static void test_ring(void)
 {
-    static const struct bcmw_ring_ops ops = { f_rd, f_wr, f_bell };
+    static const struct bcmw_ring_ops ops = { f_rd, f_wr, f_bell, 0 };
     static uint8_t buf[8 * 16];
     struct bcmw_ring r;
     uint16_t got;
@@ -329,7 +348,9 @@ struct files {
     uint32_t fwlen, nvlen, clmlen;
 };
 static struct files F;
+static int synthetic;
 static unsigned n_escan, n_escan_done, n_rx, n_lines;
+static uint8_t log_ver[160];
 static char log_all[1 << 16];
 
 static int os_file(void *ctx, const char *name, const uint8_t **data, uint32_t *len)
@@ -398,6 +419,7 @@ static void synth_files(void)
     F.fw = fw, F.fwlen = sizeof(fw);
     F.nv = (uint8_t *)nv, F.nvlen = sizeof(nv) - 1;
     F.clm = clm, F.clmlen = sizeof(clm);
+    synthetic = 1;
 }
 
 static void run_bringup(int dma_idx)
@@ -423,6 +445,7 @@ static void run_bringup(int dma_idx)
     os.file = os_file, os.log = os_log, os.event = os_event, os.rx = os_rx;
     cfg.stop_after = BCMW_STEP_ALL;
     cfg.dma_indices = dma_idx;
+    cfg.any_files = synthetic;
     memcpy(cfg.mac, "\x02\x11\x22\x33\x44\x55", 6);
     CHECK(bcmw_init(w, &os, &cfg) == BCMW_OK, "init");
     r = bcmw_bringup(w, 0);
@@ -475,9 +498,31 @@ static void run_bringup(int dma_idx)
         CHECK(bcmw_iovar_get(w, "nonsense", &v, 4, &fwerr) == BCMW_E_FW && fwerr == -23, "an unsupported iovar (%d)", fwerr);
     }
     CHECK(M.fw_errors == 0 && M.errors == 0, "after the ioctls: model faults %x / %u", M.fw_errors, M.errors);
+    {
+        /* the model holds one answer back: the ioctl times out; the late answer then arrives during
+         * the next one and must not be taken for it */
+        uint32_t v = 0;
+        M.hold_answer = 1;
+        CHECK(bcmw_iovar_get_u32(w, "clmload_status", &v) == BCMW_E_TIMEOUT, "a held answer times out");
+        M.release_answer = 1;
+        CHECK(bcmw_iovar_get(w, "ver", log_ver, sizeof(log_ver) - 1, 0) == BCMW_OK && strstr((char *)log_ver, "13.50.37"),
+              "the next ioctl gets its own answer, not the late one");
+        CHECK(strstr(log_all, "late ioctl answer") != 0, "the late answer was dropped");
+    }
     bcmw_quiesce(w);
     CHECK(!M.reg_on && !M.perst_high, "the way back: WLAN_REG_ON %d PERST# %d", M.reg_on, M.perst_high);
+    CHECK(M.phy_powered_down, "the PHY powered down on the way back");
     bcmw_quiesce(w);
+    {
+        /* a second bring-up with the same state: no DMA memory leaks, it reaches step 10 again */
+        uint32_t used = M.dma_bytes;
+        int r2;
+        M.fw_running = 0;
+        r2 = bcmw_bringup(w, 0);
+        CHECK(r2 == BCMW_STEP_ALL, "a second bring-up after quiesce: %d", r2);
+        CHECK(M.dma_bytes == used, "the second bring-up allocated more DMA memory (%u -> %u)", used, M.dma_bytes);
+        bcmw_quiesce(w);
+    }
     if (verbose == 0 && fails)
         printf("%s", log_all);
 }
@@ -496,12 +541,24 @@ static void run_stops(void)
     os.udelay = model_udelay, os.now_us = model_now, os.dma_alloc = model_dma_alloc;
     os.file = os_file, os.log = os_log;
     cfg.stop_after = BCMW_STEP_RINGS;
+    cfg.any_files = synthetic;
     bcmw_init(w, &os, &cfg);
     for (unsigned s = 1; s <= BCMW_STEP_RINGS; s++)
         CHECK(bcmw_bringup(w, s) == (int)s, "step %u alone", s);
     CHECK(M.errors == 0 && M.fw_errors == 0, "stepwise: model faults %u %x", M.errors, M.fw_errors);
     bcmw_quiesce(w);
     CHECK(!M.reg_on && !M.perst_high, "stepwise: the way back");
+
+    /* a firmware whose shared area points outside its RAM: the core stops, reads nothing wild */
+    model_reset();
+    M.fw_rstvec = le32(F.fw);
+    M.bad_console = 1;
+    cfg.stop_after = BCMW_STEP_RINGS;
+    cfg.any_files = synthetic;
+    bcmw_init(w, &os, &cfg);
+    CHECK(bcmw_bringup(w, 0) == BCMW_E_PROTO, "a bad shared-area address is refused");
+    CHECK(M.errors == 0, "a bad shared-area address reached the bus (%u)", M.errors);
+    bcmw_quiesce(w);
 }
 
 int main(int argc, char **argv)

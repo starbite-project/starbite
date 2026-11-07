@@ -49,6 +49,8 @@ static void sb_wr16(void *ctx, uint64_t pa, uint16_t v)
 }
 static int sb_probe(void *ctx, uint64_t pa, uint32_t *v) { (void)ctx; return sb_probe32(pa, v); }
 static void sb_wmb(void *ctx) { (void)ctx; __asm__ volatile("dsb st" : : : "memory"); }
+static void sb_mb(void *ctx) { (void)ctx; __asm__ volatile("dsb sy" : : : "memory"); }
+static void sb_rmb(void *ctx) { (void)ctx; __asm__ volatile("dsb ld" : : : "memory"); }
 static void sb_delay(void *ctx, uint32_t us) { (void)ctx; sb_udelay(us); }
 static uint64_t sb_now(void *ctx) { (void)ctx; return sb_us(); }
 
@@ -182,6 +184,6 @@ void bcmw_sb_os(struct bcmw_os *os, void (*log)(void *, const char *), void (*ev
 {
     memset(os, 0, sizeof(*os));
     os->rd32 = sb_rd32, os->wr32 = sb_wr32, os->rd16 = sb_rd16, os->wr16 = sb_wr16;
-    os->probe32 = sb_probe, os->wmb = sb_wmb, os->udelay = sb_delay, os->now_us = sb_now;
+    os->probe32 = sb_probe, os->wmb = sb_wmb, os->mb = sb_mb, os->rmb = sb_rmb, os->udelay = sb_delay, os->now_us = sb_now;
     os->dma_alloc = sb_dma, os->file = sb_file, os->log = log, os->event = event;
 }

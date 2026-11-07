@@ -264,7 +264,7 @@ static void Run(PVOID arg)
         return;
     }
     RtlZeroMemory(&os, sizeof(os));
-    os.rd32 = Rd32, os.wr32 = Wr32, os.rd16 = Rd16, os.wr16 = Wr16, os.wmb = Wmb;
+    os.rd32 = Rd32, os.wr32 = Wr32, os.rd16 = Rd16, os.wr16 = Wr16, os.wmb = Wmb, os.mb = Wmb, os.rmb = Wmb;
     os.udelay = Delay, os.now_us = Now, os.dma_alloc = DmaAlloc, os.file = File, os.log = Log;
     RtlZeroMemory(&cfg, sizeof(cfg));
     cfg.stop_after = step;

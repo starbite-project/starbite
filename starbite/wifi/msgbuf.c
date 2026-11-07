@@ -74,19 +74,35 @@ static void mbreg_wr(struct bcmw *w, uint32_t off, uint32_t v)
 
 /* ---- where the indices live --------------------------------------------------------------------- */
 
-static uint16_t tcm_idx_rd(struct bcmw_ring *r, uint32_t where) { return tcm_rd16((struct bcmw *)r->ctx, where); }
-static void tcm_idx_wr(struct bcmw_ring *r, uint32_t where, uint16_t v) { tcm_wr16((struct bcmw *)r->ctx, where, v); }
+/* every index write is preceded by a full barrier, every index read followed by a read barrier
+ * (bcmw.h, struct bcmw_os mb/rmb): Linux's iowrite16/readw carry the same barriers for brcmfmac */
+static uint16_t tcm_idx_rd(struct bcmw_ring *r, uint32_t where)
+{
+    uint16_t v = tcm_rd16((struct bcmw *)r->ctx, where);
+    bcmw_rmb((struct bcmw *)r->ctx);
+    return v;
+}
+
+static void tcm_idx_wr(struct bcmw_ring *r, uint32_t where, uint16_t v)
+{
+    bcmw_mb((struct bcmw *)r->ctx);
+    tcm_wr16((struct bcmw *)r->ctx, where, v);
+}
 
 static uint16_t host_idx_rd(struct bcmw_ring *r, uint32_t where)
 {
     struct bcmw *w = r->ctx;
+    uint16_t v;
     bcmw_sync(w, w->idxbuf + where, w->idx_size, 0);
-    return w->idx_size == 2 ? le16(w->idxbuf + where) : (uint16_t)le32(w->idxbuf + where);
+    v = w->idx_size == 2 ? le16(w->idxbuf + where) : (uint16_t)le32(w->idxbuf + where);
+    bcmw_rmb(w);
+    return v;
 }
 
 static void host_idx_wr(struct bcmw_ring *r, uint32_t where, uint16_t v)
 {
     struct bcmw *w = r->ctx;
+    bcmw_mb(w);
     if (w->idx_size == 2)
         put16(w->idxbuf + where, v);
     else
@@ -101,8 +117,13 @@ static void ring_bell(struct bcmw_ring *r)
     mbreg_wr(w, w->h2d_mb0, 1);
 }
 
-static const struct bcmw_ring_ops tcm_ops = { tcm_idx_rd, tcm_idx_wr, ring_bell };
-static const struct bcmw_ring_ops host_ops = { host_idx_rd, host_idx_wr, ring_bell };
+static void ring_flush(struct bcmw_ring *r)
+{
+    bcmw_sync((struct bcmw *)r->ctx, r->buf, (uint32_t)r->depth * r->item_len, 1);
+}
+
+static const struct bcmw_ring_ops tcm_ops = { tcm_idx_rd, tcm_idx_wr, ring_bell, ring_flush };
+static const struct bcmw_ring_ops host_ops = { host_idx_rd, host_idx_wr, ring_bell, ring_flush };
 
 /* ---- the shared area ---------------------------------------------------------------------------- */
 
@@ -140,6 +161,8 @@ int mb_shared(struct bcmw *w, uint32_t a)
     w->dtoh_mb = tcm_rd32(w, a + SH_DTOH_MB_DATA_ADDR);
     w->ring_info = tcm_rd32(w, a + SH_RING_INFO_ADDR);
     w->console_base = tcm_rd32(w, a + SH_CONSOLE_ADDR);
+    w->console_ridx = 0;
+    w->console_n = 0;
     if (w->console_base) {
         w->console_buf = tcm_rd32(w, w->console_base + CON_BUFADDR);
         w->console_size = tcm_rd32(w, w->console_base + CON_BUFSIZE);
@@ -160,8 +183,21 @@ int mb_shared(struct bcmw *w, uint32_t a)
     lb_s(&l, (w->flags & SHARED_D2H_SYNC_SEQNUM) ? ", D2H sequence numbers" : "");
     lb_s(&l, (w->flags & SHARED_HOSTRDY_DB1) ? ", host-ready doorbell" : "");
     bcmw_say_lb(w, &l);
-    if (w->ring_info < w->info.rambase || w->ring_info >= w->info.rambase + w->info.ramsize)
-        return BCMW_E_PROTO;
+    {
+        /* every address the firmware gave must lie in its RAM (0 = none, for the optional ones) */
+        uint32_t lo = w->info.rambase, hi = w->info.rambase + w->info.ramsize;
+        const uint32_t must[] = { w->ring_info }, may[] = { w->htod_mb, w->dtoh_mb, w->console_base };
+        for (unsigned i = 0; i < 1; i++)
+            if (must[i] < lo || must[i] + RI_SIZE > hi)
+                return BCMW_E_PROTO;
+        for (unsigned i = 0; i < 3; i++)
+            if (may[i] && (may[i] < lo || may[i] + 20 > hi)) {
+                bcmw_sayx(w, "msgbuf: 8: a shared-area address outside the chip's RAM: ", may[i], NULL);
+                return BCMW_E_PROTO;
+            }
+        if (w->console_base && (w->console_buf < lo || w->console_buf + w->console_size > hi))
+            w->console_base = 0;            /* no console rather than a wild read */
+    }
     mb_console(w);
     return BCMW_OK;
 }
@@ -192,7 +228,10 @@ int mb_rings(struct bcmw *w)
     }
     if (w->idx_size) {
         uint32_t sz = (uint32_t)(w->max_sub + w->max_cpl) * w->idx_size * 2;
-        w->idxbuf = bcmw_dma(w, sz, 64, &w->idxbuf_bus);
+        if (!w->idxbuf || w->idxbuf_size < sz) {
+            w->idxbuf = bcmw_dma(w, sz, 64, &w->idxbuf_bus);
+            w->idxbuf_size = w->idxbuf ? sz : 0;
+        }
         if (!w->idxbuf)
             w->idx_size = 0;
         else
@@ -219,12 +258,27 @@ int mb_rings(struct bcmw *w)
         tcm_write(w, w->ring_info, ri, RI_SIZE);
     }
     ringmem = le32(ri + RI_RINGMEM);
+    {
+        uint32_t lo = w->info.rambase, hi = w->info.rambase + w->info.ramsize;
+        if (ringmem < lo || ringmem + RING_COMMON * RM_SIZE > hi ||
+            (w->idx_size == 0 && (h2d_w < lo || h2d_w + 4u * w->max_sub > hi || h2d_r < lo || h2d_r + 4u * w->max_sub > hi ||
+                                  d2h_w < lo || d2h_w + 4u * w->max_cpl > hi || d2h_r < lo || d2h_r + 4u * w->max_cpl > hi))) {
+            bcmw_say(w, "msgbuf: 9: the ring info points outside the chip's RAM");
+            return BCMW_E_PROTO;
+        }
+    }
     for (unsigned i = 0; i < RING_COMMON; i++) {
         struct bcmw_ring *r = &w->ring[i];
         uint32_t bytes = (uint32_t)ring_items[i] * sizes[i];
-        uint64_t bus;
-        uint8_t *buf = bcmw_dma(w, bytes, 4096, &bus);
         int h2d = i < 2;
+        uint8_t *buf;
+        uint64_t bus;
+
+        /* allocated for the largest item size (v7), once */
+        if (!w->ring_mem[i])
+            w->ring_mem[i] = bcmw_dma(w, (uint32_t)ring_items[i] * ring_size_v7[i], 4096, &w->ring_bus[i]);
+        buf = w->ring_mem[i];
+        bus = w->ring_bus[i];
 
         if (!buf)
             return BCMW_E_NOMEM;
@@ -247,8 +301,10 @@ int mb_rings(struct bcmw *w)
         ringmem += RM_SIZE;
     }
     /* the scratch and ring-update buffers the firmware may use */
-    w->scratch = bcmw_dma(w, 64, 64, &w->scratch_bus);
-    w->ringupd = bcmw_dma(w, 1024, 64, &w->ringupd_bus);
+    if (!w->scratch)
+        w->scratch = bcmw_dma(w, 64, 64, &w->scratch_bus);
+    if (!w->ringupd)
+        w->ringupd = bcmw_dma(w, 1024, 64, &w->ringupd_bus);
     if (!w->scratch || !w->ringupd)
         return BCMW_E_NOMEM;
     tcm_wr32(w, w->shared + SH_DMA_SCRATCH_ADDR, (uint32_t)w->scratch_bus);
@@ -300,10 +356,8 @@ static unsigned post_ctl(struct bcmw *w, int event, unsigned want)
         w->ctl_posted[slot] = 1;
         done++;
     }
-    if (done) {
-        bcmw_sync(w, r->buf, (uint32_t)r->depth * r->item_len, 1);
+    if (done)
         ring_commit(r);
-    }
     return done;
 }
 
@@ -333,10 +387,8 @@ static unsigned post_rx(struct bcmw *w)
         w->rx_posted[i] = 1;
         done++;
     }
-    if (done) {
-        bcmw_sync(w, r->buf, (uint32_t)r->depth * r->item_len, 1);
+    if (done)
         ring_commit(r);
-    }
     return done;
 }
 
@@ -412,11 +464,16 @@ static void process_item(struct bcmw *w, const uint8_t *it)
         break;
     case MSGBUF_TYPE_IOCTL_CMPLT: {
         uint16_t trans = le16(it + 14);
+        if (trans != w->trans_id || w->ioctl_done) {
+            /* a late answer to a request that timed out: its buffer back, and go on waiting */
+            bcmw_sayx(w, "msgbuf: a late ioctl answer (transaction ", trans, ") dropped");
+            ctl_take(w, id);
+            post_ctl(w, 0, 1);
+            break;
+        }
         w->ioctl_status = (int16_t)status;
         w->ioctl_len = le16(it + 12);
         w->ioctl_pktid = id;
-        if (trans != w->trans_id)
-            bcmw_sayx(w, "msgbuf: an ioctl answer for another request, transaction ", trans, NULL);
         w->ioctl_done = 1;
         break;
     }
@@ -567,7 +624,6 @@ int mb_ioctl(struct bcmw *w, unsigned ifidx, uint32_t cmd, void *buf, uint32_t l
     else
         bcmw_memset(w->ioctl_req, 0, in);
     bcmw_sync(w, w->ioctl_req, IOCTL_REQ_SIZE, 1);
-    bcmw_sync(w, r->buf, (uint32_t)r->depth * r->item_len, 1);
     w->ioctl_done = 0;
     ring_commit(r);
     w->info.ioctls++;

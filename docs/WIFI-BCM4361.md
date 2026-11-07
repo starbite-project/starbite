@@ -8,11 +8,11 @@ Status 2026-11-07:
 
 | Part | State |
 |---|---|
-| Core (`starbite/wifi/`: 3,400 lines, plus 850 for the VENDOR readers and the libsb shim) | Written. Host-tested on a register-level model (steps 1 to 10). Not yet run on the phone |
+| Core (`starbite/wifi/`: 3,600 lines, plus 870 for the VENDOR readers and the libsb shim) | Written, reviewed adversarially (section 10). Host-tested on a register-level model (steps 1 to 10). Not yet run on the phone |
 | NVRAM processing | Byte-identical to Linux's brcmfmac on all 10 of the phone's NVRAM files |
 | Reading the files from VENDOR | ext4 (LineageOS) and EROFS (One UI 8, S9 #1 now). The EROFS reader reads all 13 radio files from a copy of S9 #1's own VENDOR image, byte-identical |
 | libsb shim + test image `wifitest.img` | Built (4.1 MiB, header checked). First phone test requested (section 9) |
-| Windows driver | Plan (section 7). Build kit `tools/win` is on master; the skeleton is the next step |
+| Windows driver | `SbWifi.sys` (W1 skeleton, section 7) builds and signs with `tools/win`; not run (Windows on the phone is being repaired) |
 | Starbite OS | Shim done; integration plan in section 8, to agree with the `starbite-os` session |
 
 ## 1. The hardware
@@ -111,11 +111,14 @@ Each step logs what it does before it does it; `stop_after` stops after any step
    (`dma_indices=1`); scratch and ring-update buffers; mailbox interrupts unmasked; host ready; 8 ioctl response
    buffers, 8 event buffers (8 KiB each) and N rx buffers (2 KiB) posted. Then the first ioctls: `cur_etheraddr`
    (get; set to the phone's MAC if given), `ver`, and the CLM blob in 1400-byte `clmload` chunks, `clmload_status`.
-10. **Up**: `event_msgs` (join, auth, link, IF, escan result), `mpc` 0, `C_UP`, an `escan` (v1 parameters, all
-   channels). Results arrive as events.
+10. **Up**: `event_msgs` (join, auth, link, IF, escan result), `mpc` 0, `C_UP`, an `escan` on all channels:
+   the v2 parameters when the firmware answers `scan_ver`, else v1 (brcmfmac's rule). Results arrive as events.
 
-The way back (`bcmw_quiesce`, also on any stop): INTx off, the LTSSM off, PERST# low (stops the chip's DMA),
-WLAN_REG_ON low. Configuration space is not touched then, so a dead link cannot hang it.
+The way back (`bcmw_quiesce`, which the caller calls, also after a failed bring-up): INTx off, PERST# low (stops
+the chip's DMA), then, if this run powered the PHY, the LTSSM off, the PHY powered down and the NCLK guard on
+(Samsung's `exynos_pcie_poweroff`: TRSV 0xFE, CMN 0xC1, PCS +0x100 bit 6, +0x104 bit 7, ELBI L12ERR bit 2), then
+WLAN_REG_ON low. Configuration space is not touched then, so a dead link cannot hang it. In the test image a crash
+anywhere also drops PERST# and WLAN_REG_ON (libsb's new `sb_crash_hook`).
 
 ## 5. The core
 
@@ -137,20 +140,31 @@ WLAN_REG_ON low. Configuration space is not touched then, so a dead link cannot 
 What the OS gives (`struct bcmw_os`): 32/16-bit register reads and writes by physical address, optional
 `probe32` (a read that survives a bus fault), a store barrier, `udelay` and a microsecond clock, DMA memory
 (contiguous, below 4 GiB, uncached unless `coherent`), cache maintenance (if cached), a file by name, a log line,
-an event callback and a received-frame callback. The core allocates nothing after `bcmw_init` and needs 64 KiB
-for its state (mostly the NVRAM buffer) and about 370 KiB of DMA memory with 64 rx buffers.
+an event callback and a received-frame callback, and three barriers (`wmb`, `mb`, `rmb`). The core needs 64 KiB
+for its state (mostly the NVRAM buffer) and about 370 KiB of DMA memory with 64 rx buffers, asked for once at
+step 9 and reused by a later bring-up.
 
 Safety in the core:
 - Every register write goes through `bcmw_write_allowed()`: the PCIe block's own pages, the endpoint's memory
   window and config window, and named single words (PMU 0x1406071C, SYSREG_FSYS1 +0x1044/+0x1050/+0x700, CMU_TOP
-  +0x2074, 16 CMU_FSYS1 gates, the WLAN_REG_ON and PERST#/CLKREQ# GPIO words). Anything else stops the core
+  +0x2074, 15 CMU_FSYS1 gate words, the WLAN_REG_ON and PERST#/CLKREQ# GPIO words). Anything else stops the core
   ("REFUSED", `dead`). No MIF/INT clock, no PMIC, no storage, no SysMMU register, no RECOVERY. The libsb shim
-  checks the list again before each write.
-- DMA memory above 4 GiB is refused. Ring indices past the ring's end are ignored. A mailbox reading all ones
-  (link gone) or a firmware halt stops the core.
+  and the Windows driver check the list again before each write.
+- Every address the firmware hands over (shared area, ring info, ring memory, index arrays, mailbox words,
+  console) must lie in its RAM, and every access through the RAM window is bounded by the window: otherwise the
+  core stops once (`BCMW_E_PROTO`) rather than read or write elsewhere. BAR0 accesses stay inside its 4 KiB.
+- Ordering: a full barrier before every ring index the host writes, a read barrier after every index it reads
+  (DMA memory is Normal non-cacheable, the chip's RAM Device memory; Linux's `iowrite16`/`readw` carry the same
+  barriers for brcmfmac). H2D items are stamped before the ring's cache clean.
+- The firmware, NVRAM and CLM must match the SHA-256 of one of the phone's known files (13.50.37 / 13.50.28 /
+  B0, their NVRAMs and CLMs), so a file reader's mistake never reaches the chip; `any_files=1` lifts this.
+- DMA memory above 4 GiB is refused. Ring indices past the ring's end are ignored. A late ioctl answer (after a
+  timeout) is dropped and its buffer reposted, not taken for the next request. A mailbox reading all ones (link
+  gone) or a firmware halt stops the core.
 - The MAC address is never logged, not even its first half.
 
-The host test (`host/run.sh`; 260 checks on the Mac, the same in the VM):
+The host test (`host/run.sh`; 278 checks with S9 #1's files on the Mac and in the VM, 312 with the older vendor
+set and Linux's parser):
 - NVRAM: all `nvram.txt_*` files of a directory, against Linux's parser byte for byte with
   `BCMW_LINUX=<brcmfmac dir>` (10 files of the phone's two vendor releases: identical); synthetic edge cases.
 - The module table, iovars, clmload chunk flags, event frames, the allow-list (forbidden and allowed addresses).
@@ -160,15 +174,15 @@ The host test (`host/run.sh`; 260 checks on the Mac, the same in the VM):
   ioctls, events, a scan and a data frame: steps 1..10 with indices in the chip's RAM and by DMA, each step on its
   own, the power sequence's order and delays (REG_ON low 50 ms, PERST# 200 ms after REG_ON, the PMU before any
   CMU_FSYS1 access, the LTSSM after PERST#), no SysMMU access, no MAC in the log, buffers reposted (20 ioctls
-  after the bring-up).
+  after the bring-up), both escan versions, a late ioctl answer dropped, the PHY powered down on the way back, a
+  second bring-up after `quiesce` without new DMA memory, a shared area pointing outside the RAM refused.
 - ext4 on mke2fs images (4 KiB extents + 64-bit, 1 KiB block maps with double indirect, 4 KiB block maps); EROFS
   on mkfs.erofs images (lz4hc compact, lz4 full indexes, uncompressed) and, in the VM, on S9 #1's VENDOR image
   (`BCMW_VENDOR_IMG=/mnt/oneui/imgs/vendor.raw BCMW_VENDOR_REF=<fsck.erofs --extract>`).
 - The core also compiles freestanding (`-ffreestanding -fno-builtin`), with no C library calls.
 
-What the host test cannot show: the real PHY and link, real timing, whether the chip accepts our ring
-descriptors and stamping, the escan parameter version this firmware wants (v1 is sent; `scan_ver` is logged), DMA
-through the real SysMMU path.
+What the host test cannot show: the real PHY and link, real timing, memory ordering (the model has none), whether
+the chip accepts our ring descriptors and stamping, DMA through the real SysMMU path.
 
 ## 6. Open points (each is checked by a phone test, section 9)
 
@@ -177,7 +191,7 @@ through the real SysMMU path.
    faults, the log says so and the core stops.
 3. The module ID of S9 #1, so the right NVRAM: printed at step 7. Without one, the first B2 NVRAM present is taken
    and called a guess.
-4. Escan v1 vs v2: if `escan` is refused, the log has `scan_ver`; v2 is a small change in `step_up`.
+4. Escan v1 vs v2: chosen by `scan_ver` as brcmfmac does; both are host-tested, neither has run on this firmware.
 5. Interrupts: polling first; INTx (SPI 253) when the OS has interrupts.
 6. Deep sleep (`D2H_DEV_DS_ENTER_REQ`) is acknowledged as brcmfmac does; power saving is not set yet.
 
@@ -255,20 +269,33 @@ All on S9 #1 by the main session; the image is `starbite/out/wifitest.img` (`sh 
 VM), an OS-store entry with catalog key `wifitest` and a cmdline. The image writes nothing to storage; it reads
 VENDOR (read only). The user holds Volume Up 2 s to start (or `wifi_auto=1` when the user agreed to an
 unattended run); at the end the radio is unpowered and Power reboots to the menu (`wifi_return=S` does it after S
-seconds). Every line is on the screen and in pmsg (TWRP: `/sys/fs/pstore/pmsg-ramoops-0`).
+seconds; 30 s by default with `wifi_auto=1`). If VENDOR cannot be read, the run stops after step 7. Every line is
+on the screen and in pmsg (TWRP: `/sys/fs/pstore/pmsg-ramoops-0`); the firmware's console is cut after 48 lines
+so the 16 KiB pmsg ring keeps the start.
 
 | Test | cmdline | Expected | If not |
 |---|---|---|---|
 | T1 link | `wifi_step=6` | `pcie: 4: LINK UP after N us: Gen2 x1`, `1:00.0 is 14e4:441f (Broadcom)`, BAR0 32 KiB, BAR2 4096 KiB, `END: reached step 6` | no link: the LTSSM history in the log; again with `wifi_gen=1`. A gate fault: the log says which read |
 | T2 firmware | `wifi_step=9` | `chip 4361 revision 5`, the cores, `RAM ... KiB at 170000`, `the module's ID xx 33 (semco)`, `VENDOR is EROFS`, `read from VENDOR: /firmware/...`, `Firmware ... 13.50.37`, `the firmware is up after N ms`, `protocol version 6 or 7`, `Firmware: wl0: ... 13.50.37`, `CLM loaded` | `TIMEOUT: no answer to ioctl`: DMA does not reach memory (the SysMMU path; try `coherent`). BADOPTION: the stamping |
-| T3 scan | `wifi_step=10` | `up: 0 (fine)`, `a scan asked for`, `the scan heard N access points (complete)` | `escan` refused: `scan_ver` in the log → v2 parameters |
+| T3 scan | `wifi_step=10` | `scan_ver ...`, `up: 0 (fine)`, `a scan asked for`, `the scan heard N access points (complete)` | `escan` refused: the other parameter version |
 
-Risks: the radio and the PCIe block are powered and clocked by this image (as Android, an earlier port and Linux do), the
-chip DMAs only into the image's DMA window (uncached, 0xa6000000..0xa6800000), and a fault stops the image (a
-reboot clears everything: WLAN_REG_ON is a GPIO and falls with the SoC). Nothing touches EFS, PARAM, the boot LUNs,
+Risks: the radio and the PCIe block are powered and clocked by this image (as Android, an earlier port and Linux do). The
+chip is only given addresses in the image's DMA window (uncached, 0xa6000000..0xa6800000); with the SysMMU in
+bypass nothing enforces that beyond the protocol being right. A fault stops the image with the radio unpowered
+(the crash hook), and a reboot clears everything (WLAN_REG_ON is a GPIO and falls with the SoC). Nothing touches EFS, PARAM, the boot LUNs,
 RECOVERY, MIF/INT clocks or the PMIC. Undo: reboot.
 
-## 10. Sources and licences
+## 10. Review
+
+An independent review (2026-11-07) read the code against brcmfmac, bcmdhd, Samsung's PCIe driver, the mainline
+port and an earlier port. It confirmed the allow-list, the register sequences, the byte layouts and the stamping, and found
+nine problems, all fixed the same day: no barriers around the ring indices (the most likely first-run failure:
+stale items, ioctl timeouts), the PHY left running into an unpowered chip at the end, firmware-given addresses
+not bounded, EROFS coverage not checked and its feature mask mislabelled, stamping after the cache clean, a late
+ioctl answer taken for the next request, the test image waiting forever in unattended runs and leaving the radio
+powered on a crash, two gates read late, and doc/comment mismatches.
+
+## 11. Sources and licences
 
 - Samsung's GPL kernel for the S9 (`ref/starlte-kernel`): `drivers/pci/host/pci-exynos*.c`, `bcmdhd_100_10`
   (`dhd_custom_exynos.c`, `dhd_custom_cis.c`, `dhd_msgbuf.c`, `bcmpcie.h`, `bcmmsgbuf.h`): facts and Samsung's PHY
@@ -276,6 +303,7 @@ RECOVERY, MIF/INT clocks or the PMIC. Undo: reboot.
 - Linux brcmfmac (`drivers/net/wireless/broadcom/brcm80211/brcmfmac`, Linux 7.1, ISC, Broadcom): `chip.c`,
   `ring.c`, `msgbuf.c` are adaptations and keep the ISC notice; `fw.c` reproduces the NVRAM parser's behaviour.
 - Linux EROFS (`fs/erofs`, GPL-2.0): the on-disk format and the compact index decoding.
+- SHA-256 per FIPS 180-4, written here.
 - an earlier port (`build/refport/hackios-xnu-kernel`): `drivers/` is APSL 2.0, the rest MIT. Read for the sequence
   and the lessons; no code copied.
 - The mainline port `pcie-exynos9810.c` (GPL-2.0, SheroAbi): read for the differences in section 3.

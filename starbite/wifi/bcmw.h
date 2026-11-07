@@ -7,8 +7,9 @@
  * top).
  *
  * The OS gives the core a struct bcmw_os: register access by physical address, a delay and a
- * clock, DMA memory, files, a log line. Everything else is here. Nothing is allocated after
- * bcmw_init(); nothing blocks except the delays the hardware asks for and the bounded waits.
+ * clock, DMA memory, files, a log line. Everything else is here. DMA memory is asked for once, at
+ * step 9, and reused by a later bring-up after bcmw_quiesce(); nothing blocks except the delays the
+ * hardware asks for and the bounded waits.
  *
  * What it is modelled on (facts and sequences, credited at the top of each file):
  *  - Samsung's GPL kernel for the S9 (drivers/pci/host/pci-exynos*.c, bcmdhd_100_10), through
@@ -36,9 +37,15 @@ struct bcmw_os {
     /* optional: a read that survives a bus fault (libsb's sb_probe32): 1 read, 0 faulted. Used
      * for the first read of each block whose clock or power is not known to be on. */
     int (*probe32)(void *ctx, uint64_t pa, uint32_t *v);
-    /* a store barrier between DMA memory writes and the register write that tells the chip
-     * (dsb st on arm64); NULL on the host */
+    /* barriers (NULL on the host). wmb: DMA memory writes before the register write that tells the
+     * chip (dsb st). mb: everything before, before what follows (dsb sy): before every ring index the
+     * host writes, so the items are in memory before the chip sees the index, and the items read are
+     * read before the slots are given back. rmb: a ring index read before the items it covers are
+     * read (dsb ld). DMA memory is Normal non-cacheable and the chip's RAM is Device memory: their
+     * accesses are not ordered with each other without these. */
     void (*wmb)(void *ctx);
+    void (*mb)(void *ctx);
+    void (*rmb)(void *ctx);
     void (*udelay)(void *ctx, uint32_t us);
     uint64_t (*now_us)(void *ctx);
     /* DMA memory, physically contiguous, below 4 GiB, never freed. *bus is what the chip is
@@ -71,14 +78,16 @@ struct bcmw_cfg {
     unsigned rx_buffers;    /* rx data buffers posted (<= the firmware's max_rxbufpost; 64) */
     const char *nvram;      /* NULL: chosen from the module's ID in OTP (bcm4361_module_files) */
     const char *firmware;   /* NULL: bcmdhd_sta.bin_b2 / _b0 by the chip's revision */
+    int any_files;          /* 1: files whose SHA-256 is not one of the phone's known ones are used too
+                             * (default: refused, so a reader's mistake never reaches the chip) */
     uint8_t mac[6];         /* all zero: the firmware's own (NVRAM/OTP); else set as cur_etheraddr */
 };
 
 enum {
     BCMW_STEP_LOOK = 1,     /* reads only: PMU isolation, CMU gates, the pins */
     BCMW_STEP_POWER,        /* PERST# low, CLKREQ#, WLAN_REG_ON low 50 ms then high 200 ms */
-    BCMW_STEP_PHY,          /* PMU on, gates, PHY tables, resets */
-    BCMW_STEP_LINK,         /* root port set up, LTSSM: L0 */
+    BCMW_STEP_PHY,          /* PMU on, gates checked, the PHY out of power-down */
+    BCMW_STEP_LINK,         /* soft reset, PERST# high, PHY tables and resets, root port, LTSSM: L0 */
     BCMW_STEP_ENUM,         /* 1:00.0's ID, BARs placed */
     BCMW_STEP_DECODE,       /* memory decoding, bus mastering, the DMA path's gates */
     BCMW_STEP_CHIP,         /* BAR0 window: chip ID, cores, RAM size; the module's ID from OTP */
@@ -137,7 +146,9 @@ int bcmw_poll(struct bcmw *w);
  * until the next bcmw_poll, which unmasks). Clears the root complex's latch. */
 int bcmw_isr(struct bcmw *w);
 /* Take the chip down for a way back to the loader / unload: interrupts off, the chip held in
- * reset (PERST#) and unpowered (WLAN_REG_ON). Safe at any step, twice, and after a fault. */
+ * reset (PERST#), the PHY powered down, the chip unpowered (WLAN_REG_ON). Safe at any step, twice,
+ * and after a fault. The core never calls it by itself: the caller does, also after a failed
+ * bring-up. */
 void bcmw_quiesce(struct bcmw *w);
 
 /* Firmware commands, synchronous (they poll until the answer or 2 s). fwerr: the firmware's own

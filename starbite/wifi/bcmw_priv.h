@@ -41,6 +41,7 @@ struct bcmw_ring_ops {
     uint16_t (*rd_idx)(struct bcmw_ring *r, uint32_t where);
     void (*wr_idx)(struct bcmw_ring *r, uint32_t where, uint16_t v);
     void (*bell)(struct bcmw_ring *r);
+    void (*flush)(struct bcmw_ring *r);     /* the items to memory (cache clean), after stamping */
 };
 struct bcmw_ring {
     uint8_t *buf;               /* depth * item_len bytes of DMA memory */
@@ -166,12 +167,15 @@ struct fw_image_info {
     char version[96];
 };
 int fw_image_check(const uint8_t *fw, uint32_t len, struct fw_image_info *fi);
-/* CLM blob: is it one ("CLM DATA" at the start) */
+/* CLM blob: is it one (Broadcom's "BLOB" container at the start) */
 int fw_clm_check(const uint8_t *clm, uint32_t len);
 /* one clmload chunk: the iovar's payload (flag, type, len, crc, data). Returns its length. */
 uint32_t fw_clm_chunk(uint8_t *out, const uint8_t *data, uint32_t off, uint32_t total, uint32_t max_chunk);
 /* an iovar buffer: name\0 then data. Returns its length or 0 if it does not fit. */
 uint32_t fw_iovar(uint8_t *out, uint32_t cap, const char *name, const void *data, uint32_t len);
+/* SHA-256; and which of the phone's known radio files a sum is (NULL: not one of them) */
+void fw_sha256(const uint8_t *data, uint32_t len, uint8_t out[32]);
+const char *fw_known(const uint8_t sum[32]);
 /* a firmware event frame (Ethernet + Broadcom header + event message) parsed; 0 if it is one */
 int fw_event_parse(const uint8_t *frame, uint32_t len, struct bcmw_event *ev);
 
@@ -230,7 +234,7 @@ struct bcmw {
     unsigned step;
     int dead;                   /* a guard tripped: nothing more is attempted */
     /* root complex */
-    int reg_on, linked, handed_over, gates_open;
+    int reg_on, linked, handed_over, gates_open, phy_on;
     uint64_t bar_pa[6], bar_size[6];
     uint64_t bar0, bar1;        /* the chip's register window and its RAM window */
     uint64_t bar1_size;
@@ -249,6 +253,9 @@ struct bcmw {
     uint64_t idxbuf_bus;
     uint16_t max_sub, max_cpl;
     struct bcmw_ring ring[RING_COMMON];
+    uint8_t *ring_mem[RING_COMMON];     /* DMA memory is allocated once and reused by a later bring-up */
+    uint64_t ring_bus[RING_COMMON];
+    uint32_t idxbuf_size;
     /* buffers */
     uint8_t *ioctl_req;
     uint64_t ioctl_req_bus;
@@ -283,5 +290,7 @@ uint64_t bcmw_now(struct bcmw *w);
 void *bcmw_dma(struct bcmw *w, uint32_t size, uint32_t align, uint64_t *bus);
 void bcmw_sync(struct bcmw *w, const void *p, uint32_t len, int to_device);
 void bcmw_wmb(struct bcmw *w);
+void bcmw_mb(struct bcmw *w);
+void bcmw_rmb(struct bcmw *w);
 
 #endif

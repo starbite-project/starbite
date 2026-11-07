@@ -82,6 +82,15 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
     }
 }
 
+/* a crash anywhere: the radio held in reset and unpowered, by the two GPIO data bits alone */
+static void radio_off(void)
+{
+    volatile uint32_t *perst = (volatile uint32_t *)0x11430024UL, *reg_on = (volatile uint32_t *)0x10430084UL;
+    *perst &= ~(1U << 2);
+    *reg_on &= ~(1U << 5);
+    __asm__ volatile("dsb sy" : : : "memory");
+}
+
 static unsigned arg(const char *key, unsigned dflt)
 {
     char v[16];
@@ -117,7 +126,8 @@ void sb_main(void)
     struct bcmw *w = (struct bcmw *)mem;
     struct bcmw_os os;
     struct bcmw_cfg cfg;
-    unsigned step = arg("wifi_step", BCMW_STEP_RINGS), ret = arg("wifi_return", 0), reached;
+    unsigned step = arg("wifi_step", BCMW_STEP_RINGS), autostart = arg("wifi_auto", 0), reached;
+    unsigned ret = arg("wifi_return", autostart ? 30 : 0);  /* unattended: never wait forever */
     int r;
     struct ub u;
 
@@ -132,7 +142,7 @@ void sb_main(void)
     line(u.b);
     line("It powers the radio, trains PCIe channel 0 and talks to the chip. Nothing is written to storage.");
     line("At the end, or on Power, the radio is held in reset and unpowered.");
-    if (!arg("wifi_auto", 0)) {
+    if (!autostart) {
         draw("Wi-Fi test: BCM4361", "Hold Volume Up 2 s to start. Power: back.");
         if (!held_up(2000)) {
             line("wifitest: not started");
@@ -143,8 +153,11 @@ void sb_main(void)
         line("wifitest: struct bcmw does not fit");
         sb_reboot(SB_INFORM_NORMAL);
     }
-    if (step >= BCMW_STEP_FIRMWARE && !bcmw_sb_vendor(line))
-        line("wifitest: no files: the firmware step will stop");
+    if (step >= BCMW_STEP_FIRMWARE && !bcmw_sb_vendor(line)) {
+        line("wifitest: no files from VENDOR: only up to step 7 (the chip and its module)");
+        step = BCMW_STEP_CHIP;
+    }
+    sb_crash_hook = radio_off;
     bcmw_sb_os(&os, os_log, os_event);
     memset(&cfg, 0, sizeof(cfg));
     cfg.stop_after = step;
@@ -175,6 +188,7 @@ void sb_main(void)
     }
     reached = bcmw_step(w);
     bcmw_quiesce(w);
+    sb_crash_hook = 0;
     ub_init(&u);
     ub_s(&u, "wifitest: END: reached step ");
     ub_dec(&u, reached);

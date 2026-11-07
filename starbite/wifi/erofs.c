@@ -35,9 +35,16 @@ int erofs_open(struct erofs *fs)
     fs->root = g16(sb + 14);
     fs->meta = g32(sb + 40);
     fs->incompat = g32(sb + 80);
-    /* 0x1 zero padding (LZ4_0PADDING), 0x2 compr_cfgs, 0x4 big pcluster, 0x8 chunked, 0x10 devices,
-     * 0x20 ztailpacking, 0x40 fragments, 0x80 dedupe, 0x100 xattr prefixes, 0x200 48-bit, 0x400 metabox */
-    if (fs->incompat & (0x8u | 0x10u | 0x200u | 0x400u))
+    /* erofs_fs.h: 0x1 LZ4 zero padding, 0x2 compression configs / big pclusters, 0x4 chunked files,
+     * 0x8 device table / HEAD2, 0x10 ztailpacking, 0x20 fragments / dedupe, 0x40 xattr prefixes,
+     * 0x80 48-bit, 0x100 metabox. Per-file features (big pclusters, chunks, ztailpacking, fragments)
+     * are refused where a file uses them; 48-bit addresses and the metabox change where everything
+     * is, so they refuse the whole filesystem. */
+    if (fs->incompat & (0x80u | 0x100u))
+        return EROFS_E_UNSUPPORTED;
+    if (fs->incompat & ~0x7Fu)
+        return EROFS_E_UNSUPPORTED;
+    if (g16(sb + 86))                       /* extra devices: data elsewhere */
         return EROFS_E_UNSUPPORTED;
     return 0;
 }
@@ -259,9 +266,13 @@ static int read_compressed(struct erofs *fs, const struct erofs_inode *in, uint8
             la = ((uint64_t)lcn << fs->blkbits) + l.clusterofs;
             if (la >= in->size)
                 la = in->size;
+            if (!have && la != 0)
+                return EROFS_E_CORRUPT;         /* the first extent must start at 0: no gap left unread */
         } else {
             la = in->size;
         }
+        if (have && la < cur_la)
+            return EROFS_E_CORRUPT;             /* extents out of order */
         if (have && la > cur_la) {
             /* the extent [cur_la, la) of the head before */
             uint32_t llen = (uint32_t)(la - cur_la);
@@ -300,8 +311,11 @@ int erofs_read_all(struct erofs *fs, const struct erofs_inode *in, uint8_t *dst)
 {
     if (in->layout == 0 || in->layout == 2)
         return read_flat(fs, in, 0, dst, (uint32_t)in->size);
-    if (in->layout == 1 || in->layout == 3)
+    if (in->layout == 1 || in->layout == 3) {
+        for (uint64_t i = 0; i < in->size; i++)     /* nothing of the caller's memory can show through */
+            dst[i] = 0;
         return read_compressed(fs, in, dst);
+    }
     return EROFS_E_UNSUPPORTED;
 }
 

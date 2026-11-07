@@ -103,6 +103,8 @@ void ring_commit(struct bcmw_ring *r)
 {
     if (r->h2d)
         stamp(r);
+    if (r->ops && r->ops->flush)
+        r->ops->flush(r);
     if (r->ops) {
         r->ops->wr_idx(r, r->w_where, r->w);
         r->ops->bell(r);

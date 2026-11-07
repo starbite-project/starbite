@@ -144,21 +144,40 @@ void chip_select(struct bcmw *w, uint16_t id)
 
 uint32_t chip_reg_rd(struct bcmw *w, uint32_t off)
 {
-    return rd32(w, w->bar0 + off);
+    return off < 0x1000 ? rd32(w, w->bar0 + off) : 0xffffffffu;
 }
 
 void chip_reg_wr(struct bcmw *w, uint32_t off, uint32_t v)
 {
-    wr32(w, w->bar0 + off, v);
+    if (off < 0x1000)
+        wr32(w, w->bar0 + off, v);
 }
 
 /* ---- TCM: the chip's RAM through BAR1 (BAR2 by configuration slot) ------------------------------ */
 
-uint32_t tcm_rd32(struct bcmw *w, uint32_t a) { return rd32(w, w->bar1 + a); }
-void tcm_wr32(struct bcmw *w, uint32_t a, uint32_t v) { wr32(w, w->bar1 + a, v); }
+/* An address the firmware gave that lies outside the RAM window stops the core once: a read of it
+ * could reach any physical address (an unclocked block aborts the bus). */
+static int tcm_ok(struct bcmw *w, uint32_t a, uint32_t n)
+{
+    if (!w->dead && (uint64_t)a + n <= w->bar1_size && w->bar1)
+        return 1;
+    if (!w->dead)
+        bcmw_sayx(w, "chip: an access outside the chip's RAM window, at TCM ", a, "; nothing more is attempted");
+    w->dead = 1;
+    return 0;
+}
+
+uint32_t tcm_rd32(struct bcmw *w, uint32_t a) { return tcm_ok(w, a, 4) ? rd32(w, w->bar1 + a) : 0xffffffffu; }
+void tcm_wr32(struct bcmw *w, uint32_t a, uint32_t v)
+{
+    if (tcm_ok(w, a, 4))
+        wr32(w, w->bar1 + a, v);
+}
 
 uint16_t tcm_rd16(struct bcmw *w, uint32_t a)
 {
+    if (!tcm_ok(w, a, 2))
+        return 0xffff;
     if (w->os.rd16)
         return w->os.rd16(w->os.ctx, w->bar1 + a);
     return (uint16_t)(rd32(w, w->bar1 + (a & ~3u)) >> (8 * (a & 2)));
@@ -166,6 +185,8 @@ uint16_t tcm_rd16(struct bcmw *w, uint32_t a)
 
 void tcm_wr16(struct bcmw *w, uint32_t a, uint16_t v)
 {
+    if (!tcm_ok(w, a, 2))
+        return;
     if (w->os.wr16 && bcmw_write_allowed(w->bar1 + (a & ~3u))) {
         w->os.wr16(w->os.ctx, w->bar1 + a, v);
         return;
@@ -175,6 +196,8 @@ void tcm_wr16(struct bcmw *w, uint32_t a, uint16_t v)
 
 void tcm_write(struct bcmw *w, uint32_t a, const uint8_t *src, uint32_t len)
 {
+    if (!tcm_ok(w, a, len))
+        return;
     while (len && (a & 3)) {        /* a byte at a time to the first word boundary */
         uint32_t sh = 8 * (a & 3);
         set32(w, w->bar1 + (a & ~3u), 0xffu << sh, (uint32_t)*src << sh);
@@ -188,6 +211,10 @@ void tcm_write(struct bcmw *w, uint32_t a, const uint8_t *src, uint32_t len)
 
 void tcm_read(struct bcmw *w, uint32_t a, uint8_t *dst, uint32_t len)
 {
+    if (!tcm_ok(w, a, len)) {
+        bcmw_memset(dst, 0xff, len);
+        return;
+    }
     while (len) {
         uint32_t v = rd32(w, w->bar1 + (a & ~3u));
         for (uint32_t i = a & 3; i < 4 && len; i++, len--, a++)
