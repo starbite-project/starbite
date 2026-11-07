@@ -238,7 +238,9 @@ struct DEVCTX {
     ULONG wdi_version;
     ULONG rx_80211;                 // Parameters\RxFormat: 1 (default) 802.11 frames up, 0 Ethernet (W2a..W2k)
     ULONG tx_logged;
-    ULONG poll_rate;                // polls per second over the last 10 s              // the WDI version declared to WiFiCx; the TLV parser uses the same (W2k)            // when to send WDI's link state again while associated               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
+    ULONG poll_rate;
+    ULONG tx_full;                  // frames that found every tx buffer with the firmware (requeued)
+    ULONG max_per_poll;             // the most completions one poll handled (since the last heartbeat)                // polls per second over the last 10 s              // the WDI version declared to WiFiCx; the TLV parser uses the same (W2k)            // when to send WDI's link state again while associated               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
     ULONG link_state;
     ULONG assoc_txn_mode;           // Parameters\AssocTxn: 0 (default) the association result unsolicited, 1 the task's id               // Parameters\LinkState: 1 (default) the adapter's link reported up/down             // when to log the rx state again (1.5 s after an association)            // the core's received-frame count when the connect began
     UINT16 connect_port;
@@ -1352,6 +1354,7 @@ static void SendQueued(DEVCTX *d)
         KeReleaseSpinLock(&d->tx_lock, old);
         if (!len)
             break;
+        ULONG rawlen = len;
         {
             ULONG h = Dot11Header(raw, len);
             int dot11 = l2 == NetPacketLayer2TypeIeee80211 || h;
@@ -1379,6 +1382,24 @@ static void SendQueued(DEVCTX *d)
         UINT16 ki = 0;
         int m = EapolKey(frame, len, &ki);
         int te = d->up ? bcmw_tx(d->w, frame, len) : BCMW_E_STATE;
+        if (te == BCMW_E_NOMEM) {
+            // every tx buffer is with the firmware (its tx status lags on a busy channel): the frame goes back to
+            // the head of the queue and waits for the next poll instead of being dropped (W2m-b: 816 drops)
+            KeAcquireSpinLock(&d->tx_lock, &old);
+            int back = d->tx_count < QLEN;
+            if (back) {
+                d->tx_head = (d->tx_head + QLEN - 1) % QLEN;
+                FRAME *f = &d->tx[d->tx_head];
+                f->len = (UINT32)rawlen;
+                f->l2 = l2;
+                RtlCopyMemory(f->data, raw, rawlen);
+                d->tx_count++;
+            }
+            KeReleaseSpinLock(&d->tx_lock, old);
+            d->tx_full++;
+            if (back)
+                break;
+        }
         if (InterlockedIncrement(&d->data_out) == 1)
             Sayf("wificx: the first data frame from Windows: ethertype %02x%02x, %lu bytes, sent: %d", frame[12],
                  frame[13], len, te);
@@ -1450,7 +1471,11 @@ static void Worker(PVOID arg)
         SendQueued(d);
         if (!d->up)
             continue;
-        bcmw_poll(d->w);
+        {
+            int np = bcmw_poll(d->w);
+            if (np > 0 && (ULONG)np > d->max_per_poll)
+                d->max_per_poll = (ULONG)np;
+        }
         // what the events said
         if (d->scanning == 2 || (d->scanning == 1 && Now(NULL) - d->scan_started > 12000000))
             ScanDone(d, NDIS_STATUS_SUCCESS);
@@ -1490,6 +1515,9 @@ static void Worker(PVOID arg)
                  "out %lu; commands %lu", d->connected ? (d->keyed ? "associated, keyed" : "associated, no key yet") :
                  d->connecting ? "connecting" : "idle", in->polls, d->poll_rate, in->events, in->rx_frames, in->tx_frames,
                  in->tx_done, d->rx_dropped, d->tx_dropped, d->commands);
+            Sayf("wificx: load: the most completions in one poll %lu, tx waits for a free buffer %lu, frames waiting "
+                 "for Windows %lu, for the radio %lu", d->max_per_poll, d->tx_full, d->rx_count, d->tx_count);
+            d->max_per_poll = 0;
             Sayf("wificx: data path: tx queue made %ld, rx queue made %ld (now %s/%s); tx advances %ld, packets %ld, "
                  "notifications %ld; rx advances %ld, frames handed to Windows %ld", d->txq_made, d->rxq_made,
                  d->txq ? "tx" : "NO TX", d->rxq ? "rx" : "NO RX", d->tx_advances, d->tx_packets, d->tx_notifies,
