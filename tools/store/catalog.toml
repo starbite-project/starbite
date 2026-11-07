@@ -289,21 +289,6 @@ cmdline = "sb.root=/distros/kali.img sb.session=phosh s9p_decon.panel_mask=2 s9p
 root = "sd:p1 /distros/kali.img"
 flags = ["hidden"]
 
-# Rollback: the same kernel with the old CMA layout (tools/linux/mk-starlte-dts.py --legacy-cma).
-[[entry]]
-key = "linux-olddtb"
-name = "Starbite shell (old DTB)"
-version = "rollback · legacy CMA layout"
-category = "linux"
-method = "linux"
-tag = "lab"
-files = ["linux.image", "linux-old.dtb", "linux.initrd"]
-cmdline = "sb.root=none s9p_decon.panel_mask=2 s9p_decon.geom_log=0"
-root = "initramfs"
-flags = ["hidden"]
-# The UEFI Shell menu row (docs/UEFI-SHELL.md). Appended to a copy of the live store's catalog TOML:
-#   cat tools/woa/catalog-uefishell.toml >> build/store/catalog-shell.toml
-
 [[entry]]
 key = "uefishell"
 name = "UEFI Shell"
@@ -497,6 +482,20 @@ category = "lab"
 method = "uefi"
 tag = "lab"
 files = ["win11-usb.uefi"]
+root = "ufs:WINDOWS (NTFS)"
+flags = ["hidden"]
+
+# Windows 11 big-core probe B1 (docs/WIN11-BIGCORES.md, branch claude/win-usb-host-7efe60): src38 + the M3 probe only.
+# 0304's PMU writes, one CPU_ON per M3 core 1-3 into a witness stub; Windows still sees 4 CPUs. USER PRESENT ONLY:
+# a hang on the Samsung logo over 30 s = force reset (fine before the Windows logo).
+[[entry]]
+key = "win11-m3probe"
+name = "Windows 11 (big-core probe)"
+version = "B1: M3 cores 1-3 started once from UEFI"
+category = "lab"
+method = "uefi"
+tag = "lab"
+files = ["win11-m3probe.uefi"]
 root = "ufs:WINDOWS (NTFS)"
 flags = ["hidden"]
 
