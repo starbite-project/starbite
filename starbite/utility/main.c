@@ -205,7 +205,11 @@ static void ufs_offer(int on)
             struct msc_lun *l = &lun[nlun++];
             for (unsigned k = 0; k < sizeof(*l); ++k)
                 ((uint8_t *)l)[k] = 0;
-            name(l, "Starbite", ufs_allow[i], "SBUFS001");
+            char sn[9] = "SBUFS0";                    /* a serial per partition: SBUFS001.. */
+            sn[6] = (char)('0' + (i + 1) / 10);
+            sn[7] = (char)('0' + (i + 1) % 10);
+            sn[8] = 0;
+            name(l, "Starbite", ufs_allow[i], sn);
             l->blocks = (e - f + 1) * (4096 / MSC_BLOCK);
             l->ro = 1;
             l->present = 1;
