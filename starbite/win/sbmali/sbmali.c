@@ -6,8 +6,8 @@
  * When the device starts, a worker thread runs the self-test once and writes the results to
  *   HKLM\SYSTEM\CurrentControlSet\Services\sbmali\State
  *   1. the thermal gate: \Callback\StarbiteThermal (opened, never created) must answer, its seq must
- *      move, its reading must be fresh and its level Normal; else nothing is touched (waits up to 30 s
- *      for the watchdog to start)
+ *      move, its reading must be fresh and its level Normal; else nothing is touched (waits up to 10 min
+ *      for the watchdog, an auto-start service the SCM loads well after PnP starts this device)
  *   2. the read-only probe: G3D domain on (never switched), GPU_ID 0x6221
  *   3. vdd_g3d (BUCK6) to 950 mV through ACPM, read back; the clock stays at S-Boot's 260 MHz (no DVFS)
  *   4. Parameters\Runs (20) runs in each format of Parameters\Formats (bit 0 legacy Mali LPAE, bit 1
@@ -17,7 +17,7 @@
  * Polled (no interrupt lines in the stage 2/3 SSDT). It writes only: the Mali's registers, BUCK6 through
  * ACPM, its own memory. Never the PMU, CMU, MIF/INT or any clock.
  *
- * Boot guard Services\sbmali\GuardBoots (cleared when a test run completes); kill file
+ * Boot guard Services\sbmali\GuardBoots (cleared whenever the thread ends cleanly); kill file
  * \Windows\Starbite\sbmali.off; Start = 4 via tools/win/hive-service.py on a clean hive.
  */
 #include <ntddk.h>
@@ -154,7 +154,11 @@ static void IoBarrier(void *Ctx)
 
 /* ---- the thermal gate ----------------------------------------------------------------------- */
 
-/* 0 = the watchdog answers, is alive and Normal; otherwise a reason code (State\ThermalGate). */
+/* 0 = the watchdog answers, is alive and Normal; otherwise a reason code (State\ThermalGate):
+ *   1 \Callback\StarbiteThermal does not exist (sbthermal not loaded yet, or not installed)
+ *   2 the object exists but nothing answers the query (sbthermal gone)
+ *   3 the last reading is older than 1 s       4 the reading counter did not move
+ *   10 + level: alive but not Normal (11 Warm, 12 Hot, 13 Stop, 14 Critical) */
 static ULONG ThermalGate(PCALLBACK_OBJECT *Cb, struct sbth_state *Last)
 {
     struct sbth_state s;
@@ -189,6 +193,15 @@ static ULONG ThermalGate(PCALLBACK_OBJECT *Cb, struct sbth_state *Last)
 }
 
 /* ---- the test ------------------------------------------------------------------------------- */
+
+#define SM_GATE_WAIT_MS (10U * 60U * 1000U)
+
+/* Where the thread is, flushed (State\Step): 1 waiting for the watchdog, 2 probing (first GPU read),
+ * 3 BUCK6, 4 legacy runs, 5 AArch64 runs, 6 putting everything back, 7 finished. */
+static void Step(ULONG N)
+{
+    Log(L"Step", N, TRUE);
+}
 
 static void LogFormat(PCWSTR Prefix, const struct sbm_test_result *r)
 {
@@ -243,21 +256,38 @@ static VOID SmThread(PVOID Ctx)
     if (runs > 200)
         runs = 200;
 
-    /* 1. The watchdog: up to 30 s for it to start and report Normal. */
-    for (unsigned i = 0; i < 60 && gate; i++) {
-        gate = ThermalGate(&cb, &last);
-        if (!gate)
-            break;
-        t.QuadPart = -10000LL * 500;
-        if (KeWaitForSingleObject(&c->Stop, Executive, KernelMode, FALSE, &t) == STATUS_SUCCESS)
-            break;
+    /* 1. The watchdog. PnP starts this device early in boot; sbthermal (an auto-start service) is loaded by
+     * the Service Control Manager much later (T5 run 1: about 75 s after boot began, and this driver gave
+     * up after 30 s). Wait up to SM_GATE_WAIT_MS, reporting progress every 10 s. Nothing is touched
+     * before the gate opens. */
+    Step(1);
+    {
+        ULONG waited = 0, tries = 0;
+        for (;;) {
+            gate = ThermalGate(&cb, &last);
+            tries++;
+            if (!gate || waited >= SM_GATE_WAIT_MS)
+                break;
+            if (tries % 20 == 1) {
+                Log(L"ThermalGateLast", gate, FALSE);
+                Log(L"ThermalGateWaitMs", waited, TRUE);
+            }
+            t.QuadPart = -10000LL * 500;
+            if (KeWaitForSingleObject(&c->Stop, Executive, KernelMode, FALSE, &t) == STATUS_SUCCESS)
+                break;
+            waited += 500;
+        }
+        Log(L"ThermalGateTries", tries, FALSE);
+        Log(L"ThermalGateWaitMs", waited, FALSE);
     }
     Log(L"ThermalGate", gate, TRUE);
     if (gate)
         goto out;
     Log(L"GpuMilliCStart", (ULONG)last.gpu_mc, FALSE);
 
-    /* 2. Read only: the domain, the GPU. */
+    /* 2. Read only: the domain, the GPU. The step is flushed first: if the first GPU read faults (the
+     * TZPC case), Step 2 is the last thing the hive shows. */
+    Step(2);
     pr = sbm_probe(&c->Io, &inf);
     Log(L"Probe", (ULONG)pr, FALSE);
     Log(L"PmuStatus", inf.pmu_status, FALSE);
@@ -274,6 +304,7 @@ static VOID SmThread(PVOID Ctx)
         goto out;
 
     /* 3. vdd_g3d to 950 mV. */
+    Step(3);
     br = sbm_buck6_raise(&c->Io, &c->BuckOld);
     c->BuckRaised = br == 0 || br == -3;  /* -3: written but not read back as asked: restore anyway */
     Log(L"BuckOld", c->BuckOld, FALSE);
@@ -286,6 +317,7 @@ static VOID SmThread(PVOID Ctx)
         struct sbm_test_result r;
         if (!(formats & (1U << f)))
             continue;
+        Step(4 + f);
         RtlZeroMemory(&r, sizeof(r));
         for (ULONG i = 0; i < runs; i++) {
             gate = ThermalGate(&cb, &last);
@@ -295,6 +327,7 @@ static VOID SmThread(PVOID Ctx)
             }
             c->GpuTouched = TRUE;
             (void)sbm_selftest_run(&c->Io, (enum sbm_fmt)f, inf.shader_present, c->Mem, (sbm_u64)c->MemPa.QuadPart, &r);
+            Log(f ? L"A64_RunsDone" : L"Legacy_RunsDone", r.runs, TRUE);   /* progress, flushed per run */
             t.QuadPart = -10000LL * 50;
             if (KeWaitForSingleObject(&c->Stop, Executive, KernelMode, FALSE, &t) == STATUS_SUCCESS)
                 break;
@@ -305,15 +338,17 @@ static VOID SmThread(PVOID Ctx)
     }
     Log(L"GpuMilliCEnd", (ULONG)last.gpu_mc, FALSE);
     Log(L"Done", 1, TRUE);
-
-    /* A completed test clears the boot guard. */
+out:
+    Step(6);
+    Finish(c);
+    /* Reaching this point means no crash: clear the boot guard whether the test ran or the gate refused
+     * (a refusal is not a reason to stop loading next time). */
     if (NT_SUCCESS(OpenSvc(NULL, &h))) {
         PutDword(h, L"GuardBoots", 0);
         (void)ZwFlushKey(h);
         ZwClose(h);
     }
-out:
-    Finish(c);
+    Step(7);
     if (cb)
         ObDereferenceObject(cb);
     PsTerminateSystemThread(STATUS_SUCCESS);

@@ -224,8 +224,13 @@ spaces with Linux's lock-region encoding, polled jobs, libsb's job descriptors, 
 - **No DVFS**: the GPU stays at S-Boot's 260 MHz. `sbm_gpu_dvfs` exists (domain 4 only, table frequencies
   only, BUCK6 rewritten after) but T5 does not call it.
 - Thermal gate before anything and before every run: the callback object is **opened, never created**; the
-  answer must carry `version` 2, a fresh reading (< 1 s) and a `seq` that moves; level Normal. Up to 30 s
-  wait for the watchdog at boot.
+  answer must carry `version` 2, a fresh reading (< 1 s) and a `seq` that moves; level Normal. Up to
+  **10 minutes** wait for the watchdog at boot (T5 run 1: PnP started sbmali early in boot, the SCM loaded
+  sbthermal about 75 s later, and the first build gave up after 30 s). `State\ThermalGate` codes: 1 object
+  missing (watchdog not loaded yet), 2 no answer, 3 stale reading, 4 counter not moving, 10 + level when
+  not Normal. `State\Step` (flushed) says where the thread is: 1 gate, 2 probe (first GPU read), 3 BUCK6,
+  4/5 legacy/AArch64 runs (`*_RunsDone` flushed per run), 6 putting back, 7 finished. The boot guard is
+  cleared whenever the thread ends cleanly.
 - Per run (Parameters\Runs, default 20, per format of Parameters\Formats, default both): soft reset, L2 /
   18 shader cores / tiler on, AS0, WRITE_VALUE "STARBITE" on JS1 checked, a 64 × 64 clear-only fragment job
   on JS0 checked pixel by pixel, cores off; 50 ms (in practice ~650 ms, the watchdog's seq check) between runs.
@@ -507,6 +512,15 @@ has `Enum\ACPI\STRB0072\0` with HardwareID `ACPI\VEN_STRB&DEV_0072`, `ACPI\STRB0
 ConfigFlags 0x40 (no driver yet), and a BootConfig listing the four memory ranges from 0x16030000; the xHCI
 next to it kept working. The shared DXE now installs at dispatch (its ReadyToBoot installs never reached
 Windows). sbdisplay and sbmali can bind to it.
+
+**T5 run 1 (2026-11-07, sbmali 513dfbe8): stopped safely at the thermal gate, GPU untouched.** The
+self-installing service (`sbpnp`, cmd.exe as LocalSystem) died twice within 3 s without writing its log
+(System 7034; suspected the same 0xC0000094 process-start crash as other programs on this Windows), so the
+main session bound sbmali to `ACPI\STRB0072\0` offline (`tools/win/hive-service.py bind`; no certificate is
+needed for a kernel load under testsigning). The driver started (contiguous memory at 0x8_FFCC_0000) and
+wrote `ThermalGate 1`: the watchdog's callback object did not exist yet. System.evtx puts that boot at
+10:30:23-10:34:40 (~257 s) and sbthermal's 728 readings at ~182 s of it, so it came up ~75 s after boot
+began, after sbmali's 30 s wait. Fix: 10-minute wait, per-step breadcrumbs (§5.1a). No bugcheck.
 
 ## 11. Stages and done-when
 
