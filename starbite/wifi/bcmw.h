@@ -85,6 +85,9 @@ struct bcmw_cfg {
     uint8_t mac[6];         /* all zero: the firmware's own (NVRAM/OTP); else set as cur_etheraddr */
     int fw_supplicant;      /* 1: the firmware's own supplicant when "cap" lists idsup (not yet seen on this
                              * phone); 0 (default): the host's four-way handshake, as an earlier port joined */
+    int diag;               /* 1: step 8 verifies the whole download, dumps the RAM's tail and logs the ARM's
+                             * state while it waits for the firmware (W1b: the firmware did not start under
+                             * Windows) */
 };
 
 enum {

@@ -164,25 +164,35 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(ADAPTERCTX, AdapterCtx);
 
 // ---- bcmw_os on Windows (as sbwifi.c, W1) -------------------------------------------------------------------------
 
-#define MAPS 24
+// 1 MiB mappings, made on first use (W1 run 1: 64 KiB x 24 filled up during the firmware download and the end of
+// the chip's RAM was silently never written). A failure is said once, loudly.
+#define MAPS 48
+#define MAP_SIZE 0x100000ull
 static struct { ULONGLONG base; PUCHAR va; } maps[MAPS];
 static ULONG nmaps;
+static int map_failed;
 
 static volatile UCHAR *Va(ULONGLONG pa)
 {
-    ULONGLONG base = pa & ~0xFFFFull;
+    ULONGLONG base = pa & ~(MAP_SIZE - 1);
     for (ULONG i = 0; i < nmaps; i++)
         if (maps[i].base == base)
             return maps[i].va + (pa - base);
-    if (nmaps == MAPS)
-        return NULL;
-    PHYSICAL_ADDRESS p;
-    p.QuadPart = (LONGLONG)base;
-    maps[nmaps].va = (PUCHAR)MmMapIoSpaceEx(p, 0x10000, PAGE_READWRITE | PAGE_NOCACHE);
-    if (!maps[nmaps].va)
-        return NULL;
-    maps[nmaps].base = base;
-    return maps[nmaps++].va + (pa - base);
+    if (nmaps < MAPS) {
+        PHYSICAL_ADDRESS p;
+        p.QuadPart = (LONGLONG)base;
+        maps[nmaps].va = (PUCHAR)MmMapIoSpaceEx(p, MAP_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
+        if (maps[nmaps].va) {
+            maps[nmaps].base = base;
+            return maps[nmaps++].va + (pa - base);
+        }
+    }
+    if (!map_failed) {
+        map_failed = 1;
+        Sayf("wificx: MAPPING FAILED at %llx (%lu of %u mappings in use): accesses there are dropped",
+             (unsigned long long)pa, nmaps, MAPS);
+    }
+    return NULL;
 }
 
 static uint32_t Rd32(void *, uint64_t pa)
@@ -220,9 +230,8 @@ static void Delay(void *, uint32_t us)
 }
 static uint64_t Now(void *)
 {
-    ULONGLONG qit;
-    KeQueryInterruptTimePrecise(&qit);
-    return qit / 10;
+    ULONGLONG qpc;
+    return KeQueryInterruptTimePrecise(&qpc) / 10;     // the return value is the interrupt time; qpc is a QPC count
 }
 static void *DmaAlloc(void *, uint32_t size, uint32_t, uint64_t *bus)
 {
@@ -1181,6 +1190,7 @@ static NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST)
     cfg.stop_after = BCMW_STEP_UP;
     cfg.link_tries = 3;
     cfg.rx_buffers = 128;
+    cfg.diag = 1;                   // step 8 checked word by word until W2 has passed once
     if (bcmw_init(d->w, &os, &cfg) != BCMW_OK) {
         SetParam(L"GuardBoots", guard);
         return STATUS_DEVICE_CONFIGURATION_ERROR;

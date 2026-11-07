@@ -132,6 +132,7 @@ uint32_t chip_reg_rd(struct bcmw *w, uint32_t off);         /* the selected core
 void chip_reg_wr(struct bcmw *w, uint32_t off, uint32_t v);
 void chip_set_passive(struct bcmw *w);
 int chip_set_active(struct bcmw *w, uint32_t rstvec);
+void chip_cr4_state(struct bcmw *w, uint32_t *ioctl, uint32_t *resetctl, uint32_t *iost);
 int chip_read_cis(struct bcmw *w, uint8_t *cis, uint32_t len);
 void chip_watchdog_reset(struct bcmw *w);
 uint32_t tcm_rd32(struct bcmw *w, uint32_t a);

@@ -152,8 +152,93 @@ void bcmw_udelay(struct bcmw *w, uint32_t us) { w->os.udelay(w->os.ctx, us); }
 
 void bcmw_mdelay(struct bcmw *w, uint32_t ms)
 {
-    while (ms--)
-        w->os.udelay(w->os.ctx, 1000);
+    /* one sleep, not ms sleeps of 1 ms: under Windows each sleep rounds up to the 15.6 ms timer tick (W1: the
+     * "100 ms" watchdog wait took 1.6 s) */
+    while (ms) {
+        uint32_t n = ms > 1000 ? 1000 : ms;
+        w->os.udelay(w->os.ctx, n * 1000);
+        ms -= n;
+    }
+}
+
+/* ---- step 8 diagnostics (cfg.diag) ---------------------------------------------------------------------- */
+
+/* the whole download read back: mismatching words counted, the first three said */
+static void diag_verify(struct bcmw *w, const char *what, uint32_t a, const uint8_t *src, uint32_t len)
+{
+    uint32_t bad = 0, first = 0;
+    struct bcmw_lb l;
+    for (uint32_t i = 0; i + 4 <= len; i += 4) {
+        uint32_t want = (uint32_t)src[i] | (uint32_t)src[i + 1] << 8 | (uint32_t)src[i + 2] << 16 | (uint32_t)src[i + 3] << 24;
+        uint32_t got = tcm_rd32(w, a + i);
+        if (got != want) {
+            if (bad < 3) {
+                lb_init(&l);
+                lb_s(&l, "diag: 8: ");
+                lb_s(&l, what);
+                lb_s(&l, " differs at RAM ");
+                lb_hex(&l, a + i, 8);
+                lb_s(&l, ": reads ");
+                lb_hex(&l, got, 8);
+                lb_s(&l, ", written ");
+                lb_hex(&l, want, 8);
+                bcmw_say_lb(w, &l);
+            }
+            if (!bad)
+                first = a + i;
+            bad++;
+        }
+    }
+    lb_init(&l);
+    lb_s(&l, "diag: 8: ");
+    lb_s(&l, what);
+    lb_s(&l, " read back: ");
+    lb_dec(&l, len / 4);
+    lb_s(&l, " words, ");
+    lb_dec(&l, bad);
+    lb_s(&l, bad ? " WRONG, the first at " : " wrong");
+    if (bad)
+        lb_hex(&l, first, 8);
+    bcmw_say_lb(w, &l);
+}
+
+/* the last 64 bytes of RAM, 4 lines of 4 words (the NVRAM's end and its length token) */
+static void diag_tail(struct bcmw *w, uint32_t ramsize)
+{
+    for (uint32_t row = 0; row < 4; row++) {
+        struct bcmw_lb l;
+        uint32_t a = w->info.rambase + ramsize - 64 + row * 16;
+        lb_init(&l);
+        lb_s(&l, "diag: 8: RAM ");
+        lb_hex(&l, a, 8);
+        lb_s(&l, ":");
+        for (uint32_t i = 0; i < 16; i += 4) {
+            lb_s(&l, " ");
+            lb_hex(&l, tcm_rd32(w, a + i), 8);
+        }
+        bcmw_say_lb(w, &l);
+    }
+}
+
+static void diag_arm(struct bcmw *w, uint64_t t0, uint32_t last)
+{
+    uint32_t io, rc, st;
+    struct bcmw_lb l;
+    chip_cr4_state(w, &io, &rc, &st);
+    lb_init(&l);
+    lb_s(&l, "diag: 8: +");
+    lb_dec(&l, (bcmw_now(w) - t0) / 1000);
+    lb_s(&l, " ms: RAM's last word ");
+    lb_hex(&l, last, 8);
+    lb_s(&l, ", TCM 0 ");
+    lb_hex(&l, tcm_rd32(w, 0), 8);
+    lb_s(&l, ", CR4 ioctl ");
+    lb_hex(&l, io, 8);
+    lb_s(&l, " resetctl ");
+    lb_hex(&l, rc, 8);
+    lb_s(&l, " iostatus ");
+    lb_hex(&l, st, 8);
+    bcmw_say_lb(w, &l);
 }
 
 uint64_t bcmw_now(struct bcmw *w) { return w->os.now_us(w->os.ctx); }
@@ -387,13 +472,24 @@ static int step_firmware(struct bcmw *w)
     a = w->info.rambase + ramsize - nvlen;
     tcm_write(w, a, w->nvram_bin, nvlen);
     written = tcm_rd32(w, w->info.rambase + ramsize - 4);
+    if (w->cfg.diag) {
+        uint32_t io, rc, st;
+        diag_verify(w, "the firmware", w->info.rambase, fw, fwlen);
+        diag_verify(w, "the NVRAM", a, w->nvram_bin, nvlen);
+        diag_tail(w, ramsize);
+        chip_cr4_state(w, &io, &rc, &st);
+        bcmw_sayx(w, "diag: 8: before the start: CR4 ioctl ", io, NULL);
+        bcmw_sayx(w, "diag: 8: the reset vector ", fi.rstvec, " goes to TCM 0");
+    }
     bcmw_sayx(w, "fw: 8: the NVRAM at ", a, "; the ARM let go from its reset vector");
     chip_set_active(w, fi.rstvec);
     t0 = bcmw_now(w);
-    for (;;) {
+    for (unsigned polls = 0;; polls++) {
         uint32_t s;
         bcmw_mdelay(w, 50);
         s = tcm_rd32(w, w->info.rambase + ramsize - 4);
+        if (w->cfg.diag && (polls < 4 || polls % 10 == 0))
+            diag_arm(w, t0, s);
         if (s != written) {
             struct bcmw_lb l;
             lb_init(&l);
@@ -410,6 +506,8 @@ static int step_firmware(struct bcmw *w)
         }
         if (bcmw_now(w) - t0 > 5000000) {
             bcmw_say(w, "fw: 8: the firmware did not start in 5 s (no shared area)");
+            if (w->cfg.diag)
+                diag_tail(w, ramsize);
             return BCMW_E_TIMEOUT;
         }
     }

@@ -265,6 +265,18 @@ void chip_set_passive(struct bcmw *w)
             core_disable(w, &w->cores[i], D11_IOCTL_PHYRESET | D11_IOCTL_PHYCLOCKEN, D11_IOCTL_PHYCLOCKEN);
 }
 
+/* the ARM CR4's wrapper: ioctl (bit 0x20 = CPUHALT), reset control, I/O status (diagnostics) */
+void chip_cr4_state(struct bcmw *w, uint32_t *ioctl, uint32_t *resetctl, uint32_t *iost)
+{
+    struct bcmw_core *arm = chip_core(w, CORE_ARM_CR4);
+    *ioctl = *resetctl = *iost = 0xffffffffu;
+    if (!arm)
+        return;
+    *ioctl = chip_bp_rd(w, arm->wrap + BCMA_IOCTL);
+    *resetctl = chip_bp_rd(w, arm->wrap + BCMA_RESET_CTL);
+    *iost = chip_bp_rd(w, arm->wrap + 0x0500);
+}
+
 int chip_set_active(struct bcmw *w, uint32_t rstvec)
 {
     struct bcmw_core *arm = chip_core(w, CORE_ARM_CR4);

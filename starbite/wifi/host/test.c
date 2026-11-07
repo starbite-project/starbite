@@ -484,6 +484,7 @@ static void run_bringup(int dma_idx)
     cfg.dma_indices = dma_idx;
     cfg.any_files = synthetic;
     cfg.fw_supplicant = dma_idx;    /* the DMA-indices run tries the firmware's supplicant */
+    cfg.diag = dma_idx;             /* and the step 8 diagnostics (W1b) */
     memcpy(cfg.mac, "\x02\x11\x22\x33\x44\x55", 6);
     CHECK(bcmw_init(w, &os, &cfg) == BCMW_OK, "init");
     r = bcmw_bringup(w, 0);
@@ -518,6 +519,14 @@ static void run_bringup(int dma_idx)
     CHECK(M.event_mask[69 / 8] & (1u << (69 % 8)), "the escan event enabled");
     CHECK(strstr(log_all, "fw: fake fw: hello from the model") != 0, "the firmware's console read");
     CHECK(!strstr(log_all, "02:11:22") && !strstr(log_all, "33:44:55"), "the phone's address was logged");
+    if (dma_idx) {
+        CHECK(strstr(log_all, "diag: 8: the firmware read back: ") && strstr(log_all, "diag: 8: the NVRAM read back: "),
+              "diag: the read-backs");
+        CHECK(!strstr(log_all, "WRONG") && !strstr(log_all, " differs at RAM "), "diag: a download word reads back wrong");
+        CHECK(strstr(log_all, "diag: 8: +") && strstr(log_all, "CR4 ioctl "), "diag: the ARM's state while waiting");
+    } else {
+        CHECK(!strstr(log_all, "diag: "), "diag lines without cfg.diag");
+    }
     /* the scan's events and a frame arrive by polling */
     for (int i = 0; i < 20 && !n_escan_done; i++) {
         bcmw_poll(w);

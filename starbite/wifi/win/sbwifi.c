@@ -25,7 +25,8 @@ DRIVER_INITIALIZE DriverEntry;
 static EVT_WDF_DRIVER_UNLOAD SbWifiUnload;
 
 #define POOL_TAG 'iWbS'
-#define MAPS 24
+#define MAPS 48
+#define MAP_SIZE 0x100000ull
 static struct { ULONGLONG base; PUCHAR va; } maps[MAPS];
 static ULONG nmaps;
 static HANDLE logfile;
@@ -69,24 +70,35 @@ static void Say(const char *line)
 
 // ---- bcmw_os -------------------------------------------------------------------------------------------------
 
-// The register pages, mapped 64 KiB at a time on first use (Device memory, uncached).
+// The register pages, mapped 1 MiB at a time on first use (Device memory, uncached). W1 run 1 (2026-11-07)
+// mapped 64 KiB at a time into 24 slots: the firmware download alone needs 22 of BAR1, the table filled, and the
+// end of the chip's RAM (the NVRAM with it) was silently never written. A full table or a refused mapping is now
+// said once, loudly; the access is dropped (a read gives ffffffff).
+static int map_failed;
+
 static volatile UCHAR *Va(ULONGLONG pa)
 {
-    ULONGLONG base = pa & ~0xFFFFull;
+    ULONGLONG base = pa & ~(MAP_SIZE - 1);
     for (ULONG i = 0; i < nmaps; i++)
         if (maps[i].base == base)
             return maps[i].va + (pa - base);
-    if (nmaps == MAPS)
-        return NULL;
-    {
+    if (nmaps < MAPS) {
         PHYSICAL_ADDRESS p;
         p.QuadPart = (LONGLONG)base;
-        maps[nmaps].va = MmMapIoSpaceEx(p, 0x10000, PAGE_READWRITE | PAGE_NOCACHE);
-        if (!maps[nmaps].va)
-            return NULL;
-        maps[nmaps].base = base;
-        return maps[nmaps++].va + (pa - base);
+        maps[nmaps].va = MmMapIoSpaceEx(p, MAP_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
+        if (maps[nmaps].va) {
+            maps[nmaps].base = base;
+            return maps[nmaps++].va + (pa - base);
+        }
     }
+    if (!map_failed) {
+        char line[120];
+        map_failed = 1;
+        RtlStringCbPrintfA(line, sizeof(line), "SbWifi: MAPPING FAILED at %llx (%lu of %u mappings in use): accesses there are dropped",
+                           (unsigned long long)pa, nmaps, MAPS);
+        Say(line);
+    }
+    return NULL;
 }
 
 static uint32_t Rd32(void *ctx, uint64_t pa)
@@ -141,10 +153,11 @@ static void Delay(void *ctx, uint32_t us)
 
 static uint64_t Now(void *ctx)
 {
-    ULONGLONG qit;
+    ULONGLONG qpc;
     UNREFERENCED_PARAMETER(ctx);
-    KeQueryInterruptTimePrecise(&qit);
-    return qit / 10;
+    // the return value is the interrupt time (100 ns); the parameter only receives a QPC count (W1 run 1 used it:
+    // the core's clock ran ~1.5x fast)
+    return KeQueryInterruptTimePrecise(&qpc) / 10;
 }
 
 static void *DmaAlloc(void *ctx, uint32_t size, uint32_t align, uint64_t *bus)
@@ -292,6 +305,7 @@ static void Run(PVOID arg)
     cfg.stop_after = step;
     cfg.link_speed = RegDword(L"Gen", 2);
     cfg.link_tries = 3;
+    cfg.diag = (int)RegDword(L"Diag", 1);     // W1b: the download verified, the RAM tail and the ARM state logged
     if (bcmw_init(w, &os, &cfg) == BCMW_OK) {
         r = bcmw_bringup(w, 0);
         if (r >= BCMW_STEP_RINGS) {
