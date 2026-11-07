@@ -491,7 +491,7 @@ flags = ["hidden"]
 [[entry]]
 key = "win11-m3probe"
 name = "Windows 11 (big-core probe)"
-version = "solo5: M3 1 alone + A55 watcher"
+version = "solo6: M3 1 alone, hand-off outermost"
 category = "lab"
 method = "uefi"
 tag = "lab"
