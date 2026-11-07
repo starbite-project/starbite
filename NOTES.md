@@ -2354,3 +2354,8 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   backup/20261107-win-system, backup/20261107-win-hives. BBI (+ logs) is 0 bytes since 07:16 (the morning's chkdsk);
   Windows reached sign-in with it that way, left as is. Lesson: no forced resets while Windows runs (leave via Start ->
   Power -> Restart); turn off fast startup (HiberbootEnabled = 0) on the next offline visit.
+  12:00 follow-up: chkdsk ran, then a BSOD (registry, code not read) in the next boot. BBI + BBI.LOG1/2 were 0 bytes
+  (size lost with the first ntfsfix journal reset; Windows' own time stamps on this phone run 4 h behind TWRP's).
+  Moved aside as *.empty-20261107 so Windows creates a fresh BBI; CrashControl\AutoReboot = 0 in ControlSet001
+  (SYSTEM d74c8be4...) so a bugcheck stays on screen. ntfsfix again (the crashed boot died at hive load, little metadata
+  at stake). Other files emptied by the first reset: caches only (FontCache, spp cache.dat, notification db-shm).
