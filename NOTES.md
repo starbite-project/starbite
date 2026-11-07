@@ -2346,3 +2346,11 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   not empty after the resets, hiberfil.sys header RSTR) -> ntfsfix (journal emptied, dirty flag set: chkdsk on next boot),
   hiberfil.sys signature zeroed. Originals: backup/20261107-win-profile/ (BCD b63f0fb8, NTUSER, SYSTEM, SOFTWARE, BCD logs).
   The Windows UFS write fence (6613760..13518591) is wider than WINDOWS now (ends 12511999): tighten it.
+  11:45 follow-up: the next boot stopped at 0xc000014c (registry corrupt): SYSTEM was dirty too (600/599) and its
+  journals cannot complete it (LOG2 holds only seq 597, LOG1 is 0 bytes: the forced reset during the 11:00 boot, and
+  ntfsfix's journal reset may have lost LOG1's size update). Every hive was checked offline: both hive.py and regipy
+  walk them fully, every hbin divides into valid cells. Marked complete (seq2 = seq1 + checksum): SYSTEM (9a6041f5),
+  SECURITY, DEFAULT, Users\starbite UsrClass.dat, LocalService and NetworkService NTUSER.DAT. Originals:
+  backup/20261107-win-system, backup/20261107-win-hives. BBI (+ logs) is 0 bytes since 07:16 (the morning's chkdsk);
+  Windows reached sign-in with it that way, left as is. Lesson: no forced resets while Windows runs (leave via Start ->
+  Power -> Restart); turn off fast startup (HiberbootEnabled = 0) on the next offline visit.
