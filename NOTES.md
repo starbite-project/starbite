@@ -2425,3 +2425,7 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   present, whichever core boots (B4 too). Secondaries must also match the boot CPU's BRPs/WRPs/AArch32-EL0 or 0x3E.
   C3/C4 cancelled. Options: Windows on the 4 M3s only (B3 hand-off + Cores8 parking), or all 8 behind an EL2
   ID-register trap on the A55s (needs per-core EL2 via SiP SMC 0xC2000400: unknown, probe first).
+- 2026-11-07 22:30: **x86/x64 emulation works on the S9** (E1: SOFTWARE hive ScaleRdtsc = 0 for xtajit64 and xtajit,
+  tools/win/hive-scalerdtsc.py; seq 1709, backup backup/20261107-win-software-E1/). sbcpu x64 + x86 exit 0, SysWOW64
+  cmd.exe runs, no xtajit crashes (results-e1). C1 (OEM PPTT) also passed: cache relations in Windows. Big cores:
+  the user chose Windows on the M3s only; images big3 (64dde9e9) / big4 (301be1eb) wait for B3 v3 solo.
