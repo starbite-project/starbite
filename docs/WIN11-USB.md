@@ -34,7 +34,6 @@ under a role-switch parent. Microsoft's ACPI guidance for SoC USB: the xHCI cont
 | **Star2LteSsdtDxe** (shared with the GPU track) | `tools/woa/modules/Star2LteSsdtDxe/` | Installs every Starbite SSDT blob in the firmware volume at ReadyToBoot (section 4.1), logs `=SSDT` lines | once per Windows boot |
 | **USB blobs** (gated) | `tools/woa/acpi/UsbXhc.asl` (`SBUSBXHC`), `UsbUrs.asl` (`SBUSBURS`), `UsbUfn.asl` (`SBUSBUFN`) | Layout A: `\_SB.USB0` `PNP0D10` (Windows' xHCI driver, no INF of ours). Layout B: `\_SB.URS0` `PNP0CA1` with host and function children. Layout C: `\_SB.UFN0` `INT3445` (function only) (section 5) | read by Windows |
 | **Report script** | `tools/woa/winpe/usb-report.ps1` (+ `usb-report.cmd` for the Startup folder) | At logon: USB devices, driver bindings, the controller's resources, problem codes and ACPI path, every ACPI device, written to `C:\Starbite\usb\` | Windows |
-| Next: **URS host INF** | stage H4 | INF-only package matching `URS\PNP0CA1&HOST`, including `usbxhci.inf` (section 5) | Windows |
 | Next: **Star2LteUsbc** (KMDF) | stage H3 | MAX77705 at runtime over its own HSI2C mapping: D+/D- re-routing after each attach, VBUS when the MCU won't, the PHY's role column, a UCM connector that tells URS the role | Windows |
 
 Both modules and a copy of `starbite/s9usb` go into the build by patch 0024 (generated, under
@@ -211,32 +210,37 @@ sees no USB controller. Each image also carries only its layout's blob.
 ## 5. Role: one controller, host and device (with the Starbite Link, L1)
 
 The DWC3 and its PHY serve both this track (host) and the main track's device mode (L1). Facts
-from our image's SYSTEM hive (`DriverDatabase\DeviceIds`, Windows 22631) and Microsoft's "USB
-dual role driver stack architecture":
+from the phone's own files (2026-11-07: `usbxhci.inf`, `urssynopsys.inf`, `ufxsynopsys.inf`,
+`genericusbfn.inf`, `urscx01000.sys` 10.0.22621.2506, `ufxsynopsys.sys`, `ufx01000.sys`, copied
+read-only to `build/woa/usb-inf/` of the main checkout; the INFs are UTF-16), our image's SYSTEM
+hive (`DriverDatabase\DeviceIds`) and Microsoft's "USB dual role driver stack architecture" and
+"Bring up the dual-role controller for a USB Type-C Windows system":
 
-| ID | Inbox driver |
+| ID | Inbox match (INF section) |
 |---|---|
-| `ACPI\PNP0D10` (and `ACPI\PNP0D15`) | usbxhci.inf |
-| `ACPI\PNP0CA1` | **urssynopsys.inf** (the USB Role Switch driver's Synopsys client) |
-| `URS\PNP0CA1&FUNCTION` | **ufxsynopsys.inf** (then GenericUsbFn and the usbfn class on top) |
-| `URS\PNP0CA1&HOST` | **none**: Microsoft notes "work in progress to make URS driver assign the XHCI compatible ID for the host device"; until then a driver package that Includes/Needs usbxhci.inf and matches this ID is required |
-| `ACPI\INT3445` | ufxsynopsys.inf (a standalone function controller, Intel's ID) |
+| `ACPI\PNP0D10` | usbxhci.inf `Generic.Install` (hardware ID; adds the DebuggerSafe property) |
+| `ACPI\PNP0D15`, `PCI\CC_0C0330` | usbxhci.inf `Generic_NoDebug.Install` / `Generic.Install` |
+| `ACPI\PNP0CA1` | urssynopsys.inf `UrsSynopsys.Install` (service UrsSynopsys, depends on urscx01000) |
+| `URS\PNP0CA1&FUNCTION` | ufxsynopsys.inf `ufxsynopsys.Install`, as a **compatible** ID (then GenericUsbFn on top) |
+| `URS\PNP0CA1&HOST` | no INF lists it, **but** urscx01000.sys carries the compatible IDs `PCI\CC_0C0330` + `ACPI\PNP0D15` (and `PCI\CC_0C0320` + `ACPI\PNP0D20` for EHCI) next to its `&HOST`/`&FUNCTION` names: the "XHCI compatible ID for the host device" Microsoft's page calls work in progress is in this build. Both match usbxhci.inf, so **the host child binds inbox; no INF of ours is needed** [to confirm on the phone: the host child's driver in Device Manager] |
+| `ACPI\INT3445` | ufxsynopsys.inf `ufxsynopsys.Install`: the **same generic section** as the URS function child and Intel's PCI IDs; only Qualcomm's IDs get their own section (a lower filter). Nothing Intel-specific at INF level |
 
 The URS driver names its children from the parent's hardware ID (`URS\<HID>&HOST`,
 `URS\<HID>&FUNCTION`), finds their ACPI nodes by `_ADR` (0 = host, 1 = function), and loads only
-one stack at a time. On a Type-C port it takes the role from a UCM connector driver (UcmCx);
-there is no ID pin.
+one stack at a time. On a Type-C port the documented way to give it the role is a UCM connector
+driver (UcmCx): "That driver determines the role based on the CC pins and reports the results to
+the USB connector manager (UCM), which then sends the results to the role-switch drivers."
+urscx01000.sys also reads `RoleSwitchMode`, `OsDefaultRoleSwitchMode` (under
+`HKLM\SYSTEM\CurrentControlSet\Control\USB`) and `DisableVBusManagement`; none is documented,
+so nothing here depends on them.
 
-**Design (proposed to the main session 2026-11-07):**
+**Design (agreed with the main session 2026-11-07):**
 
 1. **Firmware** (Star2LteUsbDxe, built): brings up PHY + DWC3 in the boot role.
    `STARBITE_USB_ROLE` 0 host, 1 device, 2 **auto** = device when the MCU sees the phone as a sink
    with VBUS present (the Mac's cable at boot), otherwise host. `STARBITE_USB_ACPI` 0 = layout A
-   (host only, works with inbox drivers today), 1 = layout B (URS, both roles).
-2. **URS host INF** (stage H4, needs `tools/win/`, now on master): INF-only, matches
-   `URS\PNP0CA1&HOST`, `Include=usbxhci.inf`, `Needs=` its install sections, signed with the
-   Starbite test certificate. The exact section names come from the phone's `usbxhci.inf`
-   (requested from the main session, read-only from TWRP).
+   (host only), 1 = layout B (URS, both roles), 2 = layout C (device only).
+2. **No URS host INF**: the host child's compatible IDs reach usbxhci.inf inbox (table above).
 3. **Runtime role** (stage H3, KMDF `Star2LteUsbc`): a UCM connector client on the MAX77705
    (CCStat → UcmConnectorTypeCAttach as UFP/DFP, so URS switches stacks), plus what no inbox
    driver does: the PHY's host/device column (pull-downs, forced VBUS-valid, tuning), D+/D-
@@ -247,11 +251,11 @@ there is no ID pin.
    VBUS-valid and no pull-downs under the host stack, or pull-downs under the function stack.
    So `usb-urs-auto` is for an experiment (what role does URS choose with no detection?), built
    with VBUS off, not a working configuration.
-5. **Layout C, a fallback for L1 without URS:** `\_SB.UFN0` with `_HID INT3445`, which
-   ufxsynopsys.inf matches inbox, the firmware in device role (`usb-ufn-device`). The role is
-   then really fixed for the boot (no URS to change it). INT3445 is the ID of Intel's DWC3 device
-   controllers; whether ufxsynopsys does anything Intel-specific under it is unverified (the
-   phone's ufxsynopsys.inf will tell). Host tests keep using layout A.
+5. **Layout C, the device-mode route for L1 until 3 exists:** `\_SB.UFN0` with `_HID INT3445`
+   (`usb-ufn-device`, firmware in device role). It installs ufxsynopsys exactly as the URS function
+   child would (same INF section), and the role is really fixed for the boot (no URS to change
+   it). Whether ufxsynopsys.sys itself behaves differently by hardware ID is not visible from the
+   INF; the first L1 boot shows it. Host tests keep using layout A.
 
 ## 6. Build
 
@@ -297,7 +301,7 @@ both modules (the USB one with a copy of `starbite/s9usb`) and their DSC/FDF lin
 | **H1** | Star2LteUsbDxe + Star2LteSsdtDxe + blob `SBUSBXHC`, VBUS policy `off` and `mcu` (built) | Device Manager shows "USB xHCI Compliant Host Controller" working; a keyboard, a mouse and a stick work |
 | H2 | Root-hub port objects (`_UPC`/`_PLD`, USB 3 port not connectable) from H1's logged port numbers | Only one port shown; no phantom SuperSpeed port |
 | H3 | KMDF `Star2LteUsbc` (needs `tools/win/`): owns HSI2C 0x14360000, polls CC/BC every 250 ms, re-routes D+/D- after attach, AP boost if the MCU won't, boost off on sink/detach/shutdown | Hot-plug works any number of times; no VBUS with a charger |
-| H4 | Layout B (`SBUSBURS`, built) + the URS host INF + H3's UCM connector: host ↔ device at runtime (shared with L1) | Mac cable → Starbite Link, OTG adapter → host, without a reboot |
+| H4 | Layout B (`SBUSBURS`, built; the host child binds inbox usbxhci) + H3's UCM connector: host ↔ device at runtime (shared with L1) | Mac cable → Starbite Link, OTG adapter → host, without a reboot |
 | H5 | SuperSpeed: the USBDP combo PHY (0x110A0000/0x110B0000, CAL `sub_phy_version 0x400`) and lane orientation from the MCU | A stick reads at > 40 MB/s |
 
 ## 8. Risks

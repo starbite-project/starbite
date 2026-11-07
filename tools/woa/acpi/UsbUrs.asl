@@ -8,8 +8,9 @@
   the controller interrupt, Shared (only one stack is ever loaded, but nothing then depends on it)
   and its own _CCA 0 (the children do the DMA; ACPI says _CCA is inherited, stated anyway). IDs (our image's DriverDatabase):
   ACPI\PNP0CA1 -> urssynopsys.inf; the URS driver names the children URS\PNP0CA1&HOST and
-  URS\PNP0CA1&FUNCTION; the function child matches ufxsynopsys.inf inbox, the host child matches
-  nothing inbox (needs our INF that includes usbxhci.inf). No ID-pin GpioInt: a Type-C port, whose
+  URS\PNP0CA1&FUNCTION; the function child matches ufxsynopsys.inf inbox (compatible ID), the
+  host child gets the compatible IDs PCI\CC_0C0330 + ACPI\PNP0D15 from urscx01000.sys, which
+  usbxhci.inf matches inbox (docs/WIN11-USB.md section 5). No ID-pin GpioInt: a Type-C port, whose
   role comes from a UCM connector driver (stage H3/H4). Until that exists URS picks its own role,
   which need not be the firmware's boot role (docs/WIN11-USB.md section 5).
 
