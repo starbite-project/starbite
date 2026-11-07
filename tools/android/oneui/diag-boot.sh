@@ -42,14 +42,14 @@ for p in SYSTEM:1567348:7662390c VENDOR:170306:5572b8b7 ODM:9:-; do
     IFS=: read -r n cnt want <<<"$p"
     m=$(xo "dd if=$BN/$n bs=1 skip=1024 count=4 2>/dev/null" | xxd -p)
     h=$(sh "dd if=$BN/$n bs=4096 count=$cnt 2>/dev/null | sha256sum" | cut -c1-64)
-    v="sha256 $h"; [ "$want" = - ] || { case "$h" in "$want"*) v="$v OK" ;; *) v="$v MISMATCH (want $want...)" ;; esac; }
+    v="sha256 $h"; if [ "$want" = - ]; then v="$v (no reference hash: not checked)"; else case "$h" in "$want"*) v="$v OK" ;; *) v="$v MISMATCH (want $want...)" ;; esac; fi
     say "$n magic $m  $v"
 done
 # SYSTEM may hold the 08:45 firstboot rebuild (6419861504 B = 1567349 blocks, dedb499c...) instead
 grep -q "^SYSTEM.*MISMATCH" "$S" && h=$(sh "dd if=$BN/SYSTEM bs=4096 count=1567349 2>/dev/null | sha256sum" | cut -c1-64)
 case "$h" in dedb499c*) say "SYSTEM = the firstboot rebuild (dedb499c...)" ;; esac
 
-say "== A16DATA ext4"
+say "== A16DATA ext4 (times are UTC: local = UTC+2)"
 sm=$(xo "dd if=$BN/A16DATA bs=1 skip=1080 count=2 2>/dev/null" | xxd -p)
 say "superblock magic at 1080: $sm (53ef = ext4); first 4 KiB: $(xo "dd if=$BN/A16DATA bs=4096 count=1 2>/dev/null" | xxd -p | tr -d '\n' | cut -c1-64)..."
 f2=$(xo "dd if=$BN/A16DATA bs=1 skip=1024 count=4 2>/dev/null" | xxd -p)
