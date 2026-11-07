@@ -463,3 +463,15 @@ BB6E0000) on the A55 before ExitBootServices (`=M3 el2: woa PSCI payload at ...`
 state" makes the same SMC (`=M3 el2: SMC C2000400 ...`, then `rc= payload el= hcr= status=`: status 0 = installed),
 then the PSCI_VERSION probe: 10000 = the M3 has PSCI 1.0 like the A55. Image starbite-uefi-solo8-gpu.bin 4764ed60….
 
+**solo8 (4764ed60):** payload found at BB6E0000, but the SMC C2000400 from the M3 returned -1 (payload never ran:
+el 0); PSCI_VERSION still FFFFFFFF. Samsung's EL3 installs that EL2 payload once (on A55 core 0, by the shim) and
+refuses a second core. No way to EL2 on the M3 is known (a CPU_ON forwarded through the shim never reached our code in
+B3 v1/v2).
+
+**v9** (solo9): Windows on the M3 gets no PSCI at all. ntoskrnl issues PSCI through one generic SMC wrapper
+(0x1402000A0; the other SMCs are SMCCC_ARCH_WORKAROUND_1 0x80008000 in exception stubs) and decides from the FADT's
+ARM_BOOT_ARCH (offset 129: bit 0 PSCI_COMPLIANT, bit 1 PSCI_USE_HVC; the release has 0x1). v9 sets it to 0 at the
+commit point on the M3 (`=M3 fadt: ARM_BOOT_ARCH 1 -> 0`): secondaries by the ACPI parking protocol (the v1 mailboxes
+Windows already uses for the A55s and Cores8's M3s), restart by UEFI ResetSystem. The refused C2000400 attempt is
+gone; the PSCI_VERSION probe line stays. Image starbite-uefi-solo9-gpu.bin 90f6c304….
+

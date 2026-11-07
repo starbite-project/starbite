@@ -970,58 +970,9 @@ CleanToPoc (
 }
 
 //
-// v8: the woa PSCI EL2 shim (relmods/Star2LtePsciEl2ShimStage0Proven) for the M3. Samsung's EL3 answers PSCI_VERSION
-// with NOT_SUPPORTED (solo7: FFFFFFFF from the M3); on A55 core 0 the shim's EL2 payload answers 1.0 and translates
-// CPU_ON. The shim installs that payload with Samsung SiP SMC 0xC2000400 (x1 entry = base + 0x1800, x2 0x2000, x3 1,
-// x4 base, x5 0x8000); EL3 enters it at EL2 on the CALLING core, it sets VBAR_EL2 and HCR_EL2.TSC there and returns
-// with SMC 0xC2000401. v8 makes the same call on the M3, with the payload the shim already loaded. Its base moves
-// between boots, so it is found by its header: 'PSC2' at +0, 1 at +4, 0x1000 at +8, its own address at +0x10, and the
-// EL2 entry (MRS X9, CurrentEL) at +0x1800. Payload status words afterwards: +0xB8 CurrentEL at entry, +0xD8 HCR_EL2
-// after, +0xE8 0 = installed (0xFFFD VBAR mismatch, 0xFFFC TSC not set, 0xFFFF entered not at EL2).
+// v8 tried the woa shim's EL2 payload on the M3 (SiP SMC 0xC2000400 from the M3): EL3 refused (rc -1). v9 below
+// takes PSCI away from Windows on the M3 instead (FADT ARM_BOOT_ARCH).
 //
-STATIC UINT64  mShimBase;
-
-STATIC
-UINT64
-ShimFind (
-  VOID
-  )
-{
-  UINT64  P;
-
-  for (P = 0xA0000000ull; P < 0xC0000000ull; P += 0x1000) {
-    if ((*(volatile UINT32 *)(UINTN)P == 0x32435350u) && (*(volatile UINT32 *)(UINTN)(P + 8) == 0x1000u) &&
-        (*(volatile UINT64 *)(UINTN)(P + 0x10) == P) && (*(volatile UINT32 *)(UINTN)(P + 0x1800) == 0xD5384249u))
-    {
-      return P;
-    }
-  }
-
-  return 0;
-}
-
-STATIC
-UINT64
-SmcInstall (
-  IN UINT64  Base
-  )
-{
-  register UINT64  x0 __asm__ ("x0") = 0xC2000400u;
-  register UINT64  x1 __asm__ ("x1") = Base + 0x1800;
-  register UINT64  x2 __asm__ ("x2") = 0x2000;
-  register UINT64  x3 __asm__ ("x3") = 1;
-  register UINT64  x4 __asm__ ("x4") = Base;
-  register UINT64  x5 __asm__ ("x5") = 0x8000;
-
-  __asm__ __volatile__ (
-    "isb\n smc #0\n isb"
-    : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3), "+r" (x4), "+r" (x5)
-    :
-    : "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory"
-    );
-  return x0;
-}
-
 STATIC
 VOID
 M3BootAfterEbs (
@@ -1132,28 +1083,51 @@ M3BootAfterEbs (
     // v7: Windows calls PSCI early; from the M3 an SMC goes straight to Samsung's EL3 (no woa shim at EL2 there).
     // One PSCI_VERSION from here shows whether EL3 answers the M3 at all.
     //
-    if (mShimBase != 0) {
-      UINT64  Rc;
-      UINTN   A;
-
-      SbLog ("=M3 el2: SMC C2000400 (woa payload %lx) on the M3 ...", mShimBase);
-      Rc = SmcInstall (mShimBase);
-      for (A = (UINTN)mShimBase + 0xB8; A < (UINTN)mShimBase + 0xF0; A += 64) {
-        __asm__ __volatile__ ("dc civac, %0" : : "r" (A) : "memory");
-      }
-
-      __asm__ __volatile__ ("dsb sy" ::: "memory");
-      SbLog (
-        "=M3 el2: rc=%lx payload el=%lx hcr=%lx status=%lx",
-        Rc,
-        *(volatile UINT64 *)(UINTN)(mShimBase + 0xB8),
-        *(volatile UINT64 *)(UINTN)(mShimBase + 0xD8),
-        *(volatile UINT64 *)(UINTN)(mShimBase + 0xE8)
-        );
-    }
-
     SbLog ("=M3 psci: PSCI_VERSION from the M3 ...");
     SbLog ("=M3 psci: returned %lx", PsciVersion ());
+    //
+    // v9: Samsung's EL3 has no PSCI 0.2+ for the M3 (FFFFFFFF above; the woa shim gives A55 core 0 a 1.0 at EL2, and
+    // EL3 refuses to install it on a second core). So Windows on the M3 gets no PSCI at all: FADT ARM_BOOT_ARCH (offset
+    // 129, bit 0 PSCI_COMPLIANT, bit 1 PSCI_USE_HVC) := 0. Secondaries then start by the ACPI parking protocol (the
+    // MADT's v1 mailboxes, already what Windows uses) and restart goes through UEFI ResetSystem.
+    //
+    {
+      EFI_ACPI_2_0_ROOT_SYSTEM_DESCRIPTION_POINTER  *Rsdp;
+      EFI_ACPI_DESCRIPTION_HEADER                   *Xsdt;
+      EFI_ACPI_DESCRIPTION_HEADER                   *T;
+      UINT64                                        E;
+      UINTN                                         i;
+      UINT16                                        Old;
+
+      Rsdp = NULL;
+      for (i = 0; i < gST->NumberOfTableEntries; i++) {
+        if (CompareGuid (&gST->ConfigurationTable[i].VendorGuid, &mAcpi20Guid)) {
+          Rsdp = gST->ConfigurationTable[i].VendorTable;
+        }
+      }
+
+      T = NULL;
+      if ((Rsdp != NULL) && (Rsdp->XsdtAddress != 0)) {
+        Xsdt = (EFI_ACPI_DESCRIPTION_HEADER *)(UINTN)Rsdp->XsdtAddress;
+        for (i = 0; i < (Xsdt->Length - sizeof (*Xsdt)) / 8; i++) {
+          CopyMem (&E, (UINT8 *)(Xsdt + 1) + 8 * i, 8);
+          if ((E != 0) && (((EFI_ACPI_DESCRIPTION_HEADER *)(UINTN)E)->Signature == SIGNATURE_32 ('F', 'A', 'C', 'P'))) {
+            T = (EFI_ACPI_DESCRIPTION_HEADER *)(UINTN)E;
+          }
+        }
+      }
+
+      if ((T == NULL) || (T->Length < 131)) {
+        SbLog ("=M3 fadt: no FADT with ARM_BOOT_ARCH, unchanged");
+      } else {
+        CopyMem (&Old, (UINT8 *)T + 129, 2);
+        ((UINT8 *)T)[129] = 0;
+        ((UINT8 *)T)[130] = 0;
+        T->Checksum       = 0;
+        T->Checksum       = CalculateCheckSum8 ((UINT8 *)T, T->Length);
+        SbLog ("=M3 fadt: ARM_BOOT_ARCH %x -> 0 (no PSCI for Windows on the M3: parking protocol, UEFI ResetSystem)", Old);
+      }
+    }
     M3Progress (1);
  #if BOOT_BIG
     {
@@ -1346,8 +1320,6 @@ M3BootEbsWrap (
   if (!mFired) {
     SbLog ("=M3 boot v6: ExitBootServices wrapper called from %lx (winload = outermost, as intended)", (UINT64)(UINTN)__builtin_return_address (0));
     M3BootLseGuard ();                  // while boot services still exist; idempotent if winload retries
-    mShimBase = ShimFind ();
-    SbLog ("=M3 el2: woa PSCI payload at %lx", mShimBase);
   }
 
   Status = mOrigEbs (ImageHandle, MapKey);
@@ -1498,7 +1470,7 @@ M3BootArm (
 
   Status = gBS->CreateEventEx (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, M3BootOnReadyToBoot, NULL, &gEfiEventReadyToBootGuid, &mReadyToBoot);
   SbLog (
-    "=M3 boot v8 armed (%a): entry %lx (vectors %lx..%lx in this image), context %lx, ExitBootServices wrapped at ReadyToBoot (now %lx, event %r)",
+    "=M3 boot v9 armed (%a): entry %lx (vectors %lx..%lx in this image), context %lx, ExitBootServices wrapped at ReadyToBoot (now %lx, event %r)",
     BOOT_SOLO ? "solo: M3 1 only" : (BOOT_BIG ? "big: M3 1 + parked M3s, no A55" : "M3 1 + A55 1..3"),
     (UINT64)(UINTN)M3BootEntry,
     (UINT64)(UINTN)M3BootVectors,

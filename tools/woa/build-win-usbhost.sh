@@ -153,7 +153,7 @@ flags_ok() {   # flags_ok FFS
     [ "$has" = "$M3PARK" ] || { echo "$1: M3 park present=$has, wanted $M3PARK" >&2; exit 1; }
     if grep -aq "=M3 run v2" "$1"; then has=1; else has=0; fi
     [ "$has" = "$M3RUN" ] || { echo "$1: M3 run present=$has, wanted $M3RUN" >&2; exit 1; }
-    if grep -aq "=M3 boot v8 armed" "$1"; then has=1; else has=0; fi
+    if grep -aq "=M3 boot v9 armed" "$1"; then has=1; else has=0; fi
     [ "$has" = "$((M3BOOT > 0))" ] || { echo "$1: M3 boot present=$has, wanted $M3BOOT" >&2; exit 1; }
     if [ "$M3BOOT" = 2 ]; then grep -aq "solo: M3 1 only" "$1" || { echo "$1: not the solo build" >&2; exit 1; }; fi
     if [ "$M3BOOT" = 3 ]; then grep -aq "big: M3 1 + parked M3s" "$1" && grep -aq "=C8 v1 big" "$1" || { echo "$1: not the big-core build" >&2; exit 1; }; fi
