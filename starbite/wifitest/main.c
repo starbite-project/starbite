@@ -20,6 +20,7 @@
  */
 #include "sb.h"
 #include "sbui.h"
+#include "catalog.h"
 #include "../wifi/bcmw.h"
 #include "../wifi/sb/bcmw_sb.h"
 
@@ -108,15 +109,53 @@ static void radio_off(void)
     __asm__ volatile("dsb sy" : : : "memory");
 }
 
+/* The settings: the catalog row "wifitest"'s cmdline (the loader does not pass a bare entry's cmdline
+ * on: it enters bare images with S-Boot's FDT unchanged; run 1 ran at the default step because of it),
+ * then S-Boot's bootargs. key=value tokens, the first match wins. */
+static const char *cat_line;
+
+static int token(const char *s, const char *key, char *out, unsigned cap)
+{
+    unsigned kl = sb_strlen(key);
+    while (s && *s) {
+        const char *t;
+        while (*s == ' ')
+            s++;
+        t = s;
+        while (*s && *s != ' ')
+            s++;
+        if ((unsigned)(s - t) > kl && t[kl] == '=' && sb_prefix(t, key)) {
+            unsigned o = 0;
+            for (const char *v = t + kl + 1; v < s && o + 1 < cap; v++)
+                out[o++] = *v;
+            out[o] = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static unsigned arg(const char *key, unsigned dflt)
 {
     char v[16];
     unsigned n = 0;
-    if (!sb_bootarg(key, v, sizeof(v)))
+    if (!token(cat_line, key, v, sizeof(v)) && !sb_bootarg(key, v, sizeof(v)))
         return dflt;
     for (unsigned i = 0; v[i] >= '0' && v[i] <= '9'; i++)
         n = n * 10 + (unsigned)(v[i] - '0');
     return n;
+}
+
+static void settings(void)
+{
+    int i = cat_load() > 0 ? cat_find("wifitest") : -1;
+    const struct cat_ent *e = i >= 0 ? cat_get((unsigned)i) : 0;
+    struct ub u;
+    cat_line = e ? e->cmdline : 0;
+    ub_init(&u);
+    ub_s(&u, "wifitest: settings: ");
+    ub_s(&u, e ? (e->cmdline[0] ? e->cmdline : "(the catalog row has no cmdline)") : "(no catalog row \"wifitest\")");
+    line(u.b);
 }
 
 static int held_up(unsigned ms)
@@ -144,13 +183,16 @@ void sb_main(void)
     struct bcmw *w = (struct bcmw *)mem;
     struct bcmw_os os;
     struct bcmw_cfg cfg;
-    unsigned step = arg("wifi_step", BCMW_STEP_RINGS), autostart = arg("wifi_auto", 0), reached;
-    unsigned ret = arg("wifi_return", autostart ? 30 : 0);  /* unattended: never wait forever */
+    unsigned step, autostart, ret, reached;
     int r;
     struct ub u;
 
     if (!ui_init())
         sb_crash_show(ui_init_why(), 0);
+    settings();
+    step = arg("wifi_step", BCMW_STEP_RINGS);
+    autostart = arg("wifi_auto", 0);
+    ret = arg("wifi_return", autostart ? 30 : 0);       /* unattended: never wait forever */
     if (step < 1 || step > BCMW_STEP_ALL)
         step = BCMW_STEP_RINGS;
     ub_init(&u);

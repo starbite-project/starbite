@@ -266,7 +266,8 @@ The shim is `starbite/wifi/sb/bcmw_sb.c`; `starbite/wifitest/` is a test image o
 ## 9. The phone tests
 
 All on S9 #1 by the main session; the image is `starbite/out/wifitest.img` (`sh starbite/wifitest/build.sh` in the
-VM), an OS-store entry with catalog key `wifitest` and a cmdline. The image writes nothing to storage; it reads
+VM), an OS-store entry with catalog key `wifitest` and a cmdline (read by the image from its own catalog row:
+the loader does not pass a bare entry's cmdline on). The image writes nothing to storage; it reads
 VENDOR (read only). The user holds Volume Up 2 s to start (or `wifi_auto=1` when the user agreed to an
 unattended run); at the end the radio is unpowered and Power reboots to the menu (`wifi_return=S` does it after S
 seconds; 30 s by default with `wifi_auto=1`). If VENDOR cannot be read, the run stops after step 7. Every line is
@@ -284,6 +285,18 @@ chip is only given addresses in the image's DMA window (uncached, 0xa6000000..0x
 bypass nothing enforces that beyond the protocol being right. A fault stops the image with the radio unpowered
 (the crash hook), and a reboot clears everything (WLAN_REG_ON is a GPIO and falls with the SoC). Nothing touches EFS, PARAM, the boot LUNs,
 RECOVERY, MIF/INT clocks or the PMIC. Undo: reboot.
+
+### Run 1 (2026-11-07, launch #56, image 60f3d908)
+
+T1 passed and T2 reached step 8: PHY PLL locked, **LINK UP after 70 us: Gen1 x1** (Gen2 was asked for; the mainline
+port also links at Gen1), 14e4:441f class 028000 rev 05, BAR0 32 KiB at 0x11800000, BAR2 4 MiB at 0x11c00000; chip
+4361 rev 5, every core found, watchdog reset, **RAM 1344 KiB** at 0x170000; **module ID a1 33 (SEMCO)** →
+`nvram.txt_r02b_b2`; firmware 13.50.37 known. Then the NVRAM was refused: the known-sums table had a hand-typed
+prefix wrong (`...c3af` for `...c2af`). The radio was unpowered on the way back; clean restart.
+Fixed after run 1: the table is generated from full `sha256sum` output and compares all 32 bytes, and the host test
+now requires every NVRAM and CLM file of the directory to be in it. The image also ran at the default step: the
+loader enters bare images with S-Boot's FDT unchanged, so a catalog row's `cmdline` never reached `sb_bootarg`.
+`wifitest` now reads its own catalog row (`cat_find("wifitest")`) first, then the bootargs, and logs the settings.
 
 ## 10. Review
 

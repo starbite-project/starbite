@@ -128,6 +128,9 @@ static void test_files(void)
                 continue;
             t = slurp(fwdir, e->d_name, &len);
             if (t) {
+                uint8_t sum[32];
+                fw_sha256(t, len, sum);
+                CHECK(fw_known(sum) != 0, "%s: its SHA-256 is not in the known list", e->d_name);
                 check_nvram(e->d_name, t, len);
                 nv++;
                 free(t);
@@ -167,8 +170,12 @@ static void test_files(void)
     }
     {
         uint32_t len;
-        uint8_t *c = slurp(fwdir, "bcmdhd_clm.blob", &len);
+        uint8_t *c = slurp(fwdir, "bcmdhd_clm.blob", &len), sum[32];
         CHECK(c && fw_clm_check(c, len), "bcmdhd_clm.blob missing or not a CLM blob");
+        if (c) {
+            fw_sha256(c, len, sum);
+            CHECK(fw_known(sum) != 0, "bcmdhd_clm.blob: its SHA-256 is not in the known list");
+        }
         free(c);
     }
 }
