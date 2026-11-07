@@ -17,7 +17,9 @@
  * Polled (no interrupt lines in the stage 2/3 SSDT). It writes only: the Mali's registers, BUCK6 through
  * ACPM, its own memory. Never the PMU, CMU, MIF/INT or any clock.
  *
- * Boot guard Services\sbmali\GuardBoots (cleared whenever the thread ends cleanly); kill file
+ * Boot guard Services\sbmali\GuardBoots: armed (+1, flushed) only right before the first GPU access and
+ * cleared after everything is put back, so waiting for the watchdog never counts; at 2 the driver does not
+ * load. At power-down (D0Exit, also at shutdown) the thread is stopped and puts everything back. Kill file
  * \Windows\Starbite\sbmali.off; Start = 4 via tools/win/hive-service.py on a clean hive.
  */
 #include <ntddk.h>
@@ -53,6 +55,7 @@ DRIVER_INITIALIZE DriverEntry;
 static EVT_WDF_DRIVER_DEVICE_ADD SmDeviceAdd;
 static EVT_WDF_DEVICE_PREPARE_HARDWARE SmPrepareHardware;
 static EVT_WDF_DEVICE_RELEASE_HARDWARE SmReleaseHardware;
+static EVT_WDF_DEVICE_D0_EXIT SmD0Exit;
 static KSTART_ROUTINE SmThread;
 
 static UNICODE_STRING SmSvc;
@@ -317,6 +320,13 @@ static VOID SmThread(PVOID Ctx)
 
     /* 2. Read only: the domain, the GPU. The step is flushed first: if the first GPU read faults (the
      * TZPC case), Step 2 is the last thing the hive shows. */
+    /* Arm the boot guard: from here on a crash counts (T5 rounds 1-3: guard counted waits that a shutdown
+     * interrupted, and the driver refused itself). */
+    if (NT_SUCCESS(OpenSvc(NULL, &h))) {
+        PutDword(h, L"GuardBoots", GetDword(h, L"GuardBoots", 0) + 1);
+        (void)ZwFlushKey(h);
+        ZwClose(h);
+    }
     Step(2);
     pr = sbm_probe(&c->Io, &inf);
     Log(L"Probe", (ULONG)pr, FALSE);
@@ -379,8 +389,7 @@ static VOID SmThread(PVOID Ctx)
 out:
     Step(6);
     Finish(c);
-    /* Reaching this point means no crash: clear the boot guard whether the test ran or the gate refused
-     * (a refusal is not a reason to stop loading next time). */
+    /* Reaching this point means no crash: clear the boot guard (also when it was never armed). */
     if (NT_SUCCESS(OpenSvc(NULL, &h))) {
         PutDword(h, L"GuardBoots", 0);
         (void)ZwFlushKey(h);
@@ -468,10 +477,9 @@ static NTSTATUS SmPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw, WDFCMRESLI
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS SmReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
+/* Stop the test thread; it puts the GPU and BUCK6 back and clears the guard before it ends. */
+static void StopThread(PSM_CTX c)
 {
-    PSM_CTX c = SmGetCtx(Device);
-    UNREFERENCED_PARAMETER(Translated);
     if (c->ThreadObj) {
         KeSetEvent(&c->Stop, IO_NO_INCREMENT, FALSE);
         (void)KeWaitForSingleObject(c->ThreadObj, Executive, KernelMode, FALSE, NULL);
@@ -482,6 +490,21 @@ static NTSTATUS SmReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
         ZwClose(c->Thread);
         c->Thread = NULL;
     }
+}
+
+/* Power-down, including system shutdown (KMDF does not release hardware then). */
+static NTSTATUS SmD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
+{
+    UNREFERENCED_PARAMETER(TargetState);
+    StopThread(SmGetCtx(Device));
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS SmReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
+{
+    PSM_CTX c = SmGetCtx(Device);
+    UNREFERENCED_PARAMETER(Translated);
+    StopThread(c);
     Finish(c);                            /* no-op when the thread already put everything back */
     if (c->Cb) {
         ObDereferenceObject(c->Cb);
@@ -507,6 +530,7 @@ static NTSTATUS SmDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT Init)
     WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnp);
     pnp.EvtDevicePrepareHardware = SmPrepareHardware;
     pnp.EvtDeviceReleaseHardware = SmReleaseHardware;
+    pnp.EvtDeviceD0Exit = SmD0Exit;
     WdfDeviceInitSetPnpPowerEventCallbacks(Init, &pnp);
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attr, SM_CTX);
     st = WdfDeviceCreate(&Init, &attr, &dev);
@@ -544,9 +568,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
             ZwClose(h);
             return STATUS_DEVICE_CONFIGURATION_ERROR;
         }
-        PutDword(h, L"GuardBoots", guard + 1);
-        (void)ZwFlushKey(h);
-        ZwClose(h);
+        ZwClose(h);                       /* armed later, right before the first GPU access */
     }
     {
         UNICODE_STRING n;

@@ -571,6 +571,14 @@ watchdog Level 0, GPU 41.6 °C, hottest 43.3 °C, highest seen 49.8 °C over 728
 Manager's "base speed" still reads 1.05 GHz: a static figure, not the clock. Next: CpuKhz 1950000 (the user
 asked for the maximum; temperatures at 1690 MHz were fine).
 
+**Round 3 (sbthermal 280e851e + sbmali 8877ddec, CpuKhz 1950000; `build/win/results-r3/SYSTEM-r`):** ACPM
+granted the A55s' top level: A55Khz **1950000**, CpuLevel 0, CpuFailures 0, highest seen 55.0 °C, hottest at the
+end 47.8 °C, GPU 42.6 °C. sbmali did not run: its own guard refused it (GuardBoots 2). The guard was raised in
+`DriverEntry` and cleared only when the test thread ended, and KMDF does not release hardware at system
+shutdown, so the earlier waits for the watchdog, cut short by restarts, counted as crashes. Fixed: the guard is
+armed only right before the first GPU access, and a D0Exit callback (also at shutdown) stops the thread,
+which puts the GPU and BUCK6 back and clears the guard.
+
 ## 11. Stages and done-when
 
 | Stage | Done when |
