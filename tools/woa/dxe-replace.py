@@ -81,6 +81,8 @@ def main():
     ap.add_argument('release_fd')
     ap.add_argument('out_fd')
     ap.add_argument('--kill', action='append', default=[])
+    ap.add_argument('--kill-blank', action='append', default=[],
+                    help='like --kill, and the body becomes 0xFF too, so it costs nothing compressed')
     ap.add_argument('--add', action='append', default=[])
     ap.add_argument('--extract', nargs=2, metavar=('GUID', 'OUT'))
     args = ap.parse_args()
@@ -113,12 +115,17 @@ def main():
         print(f'extracted {g} {f["size"]:#x} bytes, attr {f["attr"]:#x}')
         return
 
-    for k in args.kill:
+    for k in args.kill + args.kill_blank:
         g = uuid.UUID(k)
         f = next(f for f in files if f['guid'] == g and f['type'] != PAD)
         raw[f['off'] + 18] = PAD
+        if k in args.kill_blank:
+            raw[f['off'] + f['hdr']:f['off'] + f['size']] = b'\xff' * (f['size'] - f['hdr'])
+            raw[f['off'] + 19] &= ~0x40        # FFS_ATTRIB_CHECKSUM off ...
+            raw[f['off'] + 17] = 0xAA          # ... so the file checksum byte is the fixed 0xAA
         raw[f['off'] + 16] = header_checksum(raw, f['off'], f['hdr'])
-        print(f'killed {g} at {f["off"] - fvoff:#x} ({f["size"]:#x} bytes) -> pad file')
+        print(f'killed {g} at {f["off"] - fvoff:#x} ({f["size"]:#x} bytes) -> pad file'
+              + (' (blanked)' if k in args.kill_blank else ''))
 
     for path in args.add:
         new = open(path, 'rb').read()

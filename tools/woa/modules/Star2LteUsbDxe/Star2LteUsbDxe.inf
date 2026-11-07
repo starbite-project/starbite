@@ -1,0 +1,46 @@
+## @file
+#  Star2LteUsbDxe: the S9's DWC3 in the boot role (host or device) for Windows; enables the one
+#  gated USB SSDT blob of its layout once its checks passed (docs/WIN11-USB.md). Added to the release DXE volume with
+#  tools/woa/dxe-replace.py --add; built by tools/woa/build-win-usbhost.sh (patch 0024,
+#  -D STAR2LTE_USB_DXE -D STARBITE_USB_ROLE=r -D STARBITE_USB_ACPI=a -D STARBITE_USB_VBUS=v).
+#  s9usb/ is a copy of starbite/s9usb made by tools/woa/patches/gen-0024.py.
+#
+#  Copyright (c) 2026, Starbite. SPDX-License-Identifier: GPL-2.0-only
+##
+
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = Star2LteUsbDxe
+  FILE_GUID                      = 93eb628b-5eff-4ae2-834d-cf7aaf7bdc7c
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UsbDxeEntry
+
+[Sources]
+  UsbDxe.c
+  StarbiteLog.h
+  s9usb/s9usb.h
+  s9usb/s9usb_io.h
+  s9usb/s9usb_phy.c
+  s9usb/s9usb_dwc3.c
+  s9usb/s9usb_max77705.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  DxeServicesTableLib
+  PrintLib
+  TimerLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Depex]
+  gEfiCpuArchProtocolGuid
+
+[BuildOptions]
+  *_*_*_CC_FLAGS = -DS9USB_EDK2
