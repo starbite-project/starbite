@@ -375,7 +375,8 @@ static void layout_flow(struct el *l, int n, int y)
         default: e->h = 120; break;
         }
         e->y = y;
-        y += e->h + (e->kind == E_TEXT ? 4 : 40);
+        /* text lines sit close together; a control after text gets air (0.4.1) */
+        y += e->h + (e->kind == E_TEXT ? (i + 1 < n && l[i + 1].kind != E_TEXT ? 30 : 4) : 40);
     }
 }
 
@@ -862,16 +863,19 @@ static void draw_el(const struct el *e, int idx)
         break;
     }
     case E_HOLD: {
-        uint32_t ac = (e->flags & UI_RED) ? C_RED : C_STAR;
+        /* 0.4.1: a red hold (Call 112, the alarm) is a filled red-tinted card with a light label, so it reads as the
+         * one emergency action on its screen; the fill grows brighter while it is held */
+        int red = (e->flags & UI_RED) != 0;
+        uint32_t ac = red ? C_RED : C_STAR, base = red ? 0xff3d1210U : C_CARD;
         if (f || key_hold_armed == idx)
             ui_round(e->x - 8, e->y - 8, e->w + 16, e->h + 16, 68, key_hold_armed == idx ? C_ORANGE : C_STAR);
-        ui_round(e->x, e->y, e->w, e->h, 60, C_CARD);
+        ui_round(e->x, e->y, e->w, e->h, 60, base);
         unsigned pw = hold_prog(e, idx, (unsigned)e->w);
         if (pw >= 120)
-            ui_round(e->x, e->y, (int)pw, e->h, 60, ui_mix(ac, C_CARD, 110));
+            ui_round(e->x, e->y, (int)pw, e->h, 60, ui_mix(ac, base, red ? 150 : 110));
         else if (pw)
-            ui_round(e->x, e->y, 120, e->h, 60, ui_mix(ac, C_CARD, (unsigned)(110 * pw / 120)));
-        ui_text_c(F_TITLE_S, e->x + e->w / 2, e->y + e->h / 2 + 26, e->a, ac);
+            ui_round(e->x, e->y, 120, e->h, 60, ui_mix(ac, base, (unsigned)((red ? 150 : 110) * pw / 120)));
+        ui_text_c(F_TITLE_S, e->x + e->w / 2, e->y + e->h / 2 + 26, e->a, red ? 0xffffd6d2U : ac);
         if (key_hold_armed == idx)
             ui_text_c(F_SMALL, e->x + e->w / 2, e->y + e->h - 24, "press Bixby again", C_ORANGE);
         break;

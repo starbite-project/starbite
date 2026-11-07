@@ -817,6 +817,11 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.10 Version 0.4.1 (2026-11-08, overnight)
+
+- UI: red hold buttons (Call 112, the alarm) are filled red-tinted cards with a light label; a control after a text
+  line gets air (30 px); the SOS app's title is "SOS" like its tile.
+
 ### 12.9 Version 0.4 (2026-11-08, overnight)
 
 - Wi-Fi (9.4): the core merged, the service, the app, open networks with DHCP and a router ping, the status bar's

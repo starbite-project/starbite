@@ -10,7 +10,7 @@ static void show(void)
 {
     int led = setting_get(SET_SOS_LED) == 1;
     ui_begin();
-    ui_title("Alarm");
+    ui_title("SOS");
     ui_hold(1, "Hold to start the alarm", 1000, UI_RED);
     ui_textline("The screen flashes white and red with a big SOS so people can find you.", 0xffffffffU);
     ui_textline(led ? "The flashlight strobes with it." : "The flashlight can strobe with it: Settings > Alarm.", 0);
