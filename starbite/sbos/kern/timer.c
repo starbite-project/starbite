@@ -37,6 +37,13 @@ int kt_set(unsigned owner, unsigned id, uint64_t now, uint32_t ms, int repeat)
     }
     if (!f)
         return -1;
+    if (!f->used && owner >= KT_APP0) {     /* apps never take the last KT_RESERVE free entries */
+        unsigned free_n = 0;
+        for (unsigned i = 0; i < KT_MAX; ++i)
+            free_n += !kt[i].used;
+        if (free_n <= KT_RESERVE)
+            return -1;
+    }
     if (repeat && ms == 0)
         ms = 1;
     f->at = now + ms;

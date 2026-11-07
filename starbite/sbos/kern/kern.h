@@ -14,6 +14,7 @@
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
 enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_APP0 = 16 };
 #define KT_MAX 64
+#define KT_RESERVE 24                /* entries apps cannot take: the kernel's tasks always get theirs */
 struct ktimer {
     uint64_t at;                    /* ms (sb_ms) */
     uint32_t period;                /* 0 one-shot */
@@ -248,6 +249,7 @@ uint32_t hw_a55_khz(void), hw_m3_khz(void);
 int hw_m3_on(void);
 void hw_screen(int on);             /* v0.1: nothing (the UI draws black); v0.2: panel sleep */
 void hw_app_map(uintptr_t slot, int on);
+void hw_tls_clear(void);           /* TPIDR_EL0 / TPIDRRO_EL0 zero for a new handler frame */
 void hw_code_sync(uintptr_t a, uint64_t n);
 int hw_heat_start(unsigned w, void *cfg);
 void hw_heat_stop_all(void);

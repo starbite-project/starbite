@@ -55,6 +55,7 @@ uint32_t hw_m3_khz(void) { int off; uint64_t h = sb_m3_hz(&off); return off ? 0 
 int hw_m3_on(void) { return sb_m3_on(); }
 void hw_screen(int on) { (void)on; }
 void hw_app_map(uintptr_t slot, int on) { (void)slot; (void)on; }
+void hw_tls_clear(void) {}
 void hw_code_sync(uintptr_t a, uint64_t n) { (void)a; (void)n; }
 int hw_heat_start(unsigned w, void *cfg) { return (int)sb_smp_start(w, heatk_worker, cfg); }
 void hw_heat_stop_all(void) { (void)sb_smp_stop(500); }

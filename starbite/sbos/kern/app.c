@@ -158,6 +158,7 @@ static void app_add(const struct sbapp_header *h, uintptr_t slot, void (*host_en
     p->perms = h->permissions;
     p->color = h->color;
     p->icon = h->icon;
+    p->entry = h->entry;
     if (app_by_id(p->id) >= 0) {            /* built-in by origin: a second app with the same id is refused */
         sb_logf("sbos: app id twice, refused: ", p->id);
         return;
@@ -165,6 +166,8 @@ static void app_add(const struct sbapp_header *h, uintptr_t slot, void (*host_en
     uint64_t stack = h->stack_size ? h->stack_size : (64U << 10);
     p->heap = slot ? ((slot + h->file_size + h->bss_size + 15U) & ~15ULL) : 0;
     p->heap_end = slot ? slot + APP_SLOT_SIZE - APP_MAILBOX - stack : 0;
+    if (p->heap > p->heap_end)
+        p->heap = p->heap_end;
     ++napps;
     if (!app_hidden(napps - 1) || K.irq_mode)
         app_event_send(napps - 1, EV_APP_START, 0, 0);
@@ -276,8 +279,9 @@ static void frame_start(struct kapp *p, const struct sbos_event *e)
     memset(&p->fr, 0, sizeof(p->fr));
     p->fr.x[0] = mbox;
     p->fr.sp = mbox;                        /* the stack grows down from the mailbox */
-    p->fr.elr = p->slot + p->hdr->entry;
-    p->fr.spsr = 0;                         /* EL0t, DAIF clear */
+    p->fr.elr = p->slot + p->entry;
+    p->fr.spsr = K.irq_mode ? 0 : 0x80;     /* EL0t, DAIF clear (I set in polling mode: the GIC is off) */
+    hw_tls_clear();
     p->running = 1;
     p->used_ms = 0;
 }

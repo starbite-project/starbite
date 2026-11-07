@@ -62,6 +62,9 @@ void heatk_worker(unsigned w, void *arg)
     if (!s || w >= 8)
         return;
     uint64_t iters = 0;
+#ifndef SB_HOST
+    __asm__ volatile("msr fpcr, xzr" ::: "memory");   /* the same FP mode as the boot core's reference */
+#endif
     for (;;) {
         line_civac(c);
         if (!c->run[w] || sb_worker_stop())

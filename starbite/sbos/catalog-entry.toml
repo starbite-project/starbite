@@ -1,0 +1,18 @@
+# The catalog row for Starbite OS (docs/STARBITE-OS.md 1, 14). Not yet in tools/store/catalog.toml: the
+# catalog is at the loader's limit of 32 entries (CAT_MAX in shim/starlte/catalog.h and starbite/libsb/catalog.h;
+# sbstore2.py refuses a 33rd). Add it in place of a hidden row, or after raising the limit.
+# Starbite OS (docs/STARBITE-OS.md, plan 2026-11-07 track A): our own minimal OS on libsb, no Linux: lock screen,
+# big-tile home, Light, Heat, SOS, Clock, Battery, Settings; apps are separate .sba files at EL0. Version 0.1
+# writes no storage. It feeds the cluster-1 watchdog from its loop (30 s), so a hang returns to the crash screen.
+[[entry]]
+key = "starbite-os"
+name = "Starbite OS"
+version = "0.1 · light, heat, SOS, clock, battery"
+category = "starbite"
+method = "bare"
+tag = "experimental"
+files = ["ufs:starbite-os.img|sd:starbite-os.img"]
+root = "none (RAM only)"
+wdt = 30
+wdt_feed = "own"
+

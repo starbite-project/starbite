@@ -32,8 +32,10 @@ power key ─► S-Boot ─► Starbite loader (menu, or the default / one-shot 
    EL0  apps (.sba files) ── svc #0 ──► fixed API                        │ UFS, PMIC, gauge, TMU, ADC, SMP)
 ```
 
-- Catalog entry (`tools/store/catalog.toml`): key `starbite-os`, category `starbite`, method `bare`, files
-  `ufs:starbite-os.img|sd:starbite-os.img`, `wdt = 30`, `wdt_feed = "own"`.
+- Catalog row (`starbite/sbos/catalog-entry.toml`): key `starbite-os`, category `starbite`, method `bare`,
+  files `ufs:starbite-os.img|sd:starbite-os.img`, `wdt = 30`, `wdt_feed = "own"`. Not yet in
+  `tools/store/catalog.toml`: the catalog is at the loader's limit of 32 rows (`CAT_MAX`); it goes in place of
+  a hidden row or after the limit is raised (the main session's choice).
 - The loader enters it like the Utility OS (EL1, MMU off, x0 = FDT, panel scanning out 0xcc000000); libsb's
   crt0 relocates, maps memory and calls `sb_main`, the kernel's entry.
 - Code: `starbite/sbos/` — `kern/` (kernel), `apps/` (built-in apps), `sdk/` (the app API, MIT licensed),
@@ -362,8 +364,13 @@ stop) and the load resumes when it is unplugged and everything else holds.
 **The load cannot outlive its controller:**
 - workers check a **heartbeat** that only the controller writes, after a complete valid evaluation; older
   than 1 s: the worker stops and its core turns off;
-- after every stop the kernel asks PSCI AFFINITY_INFO for each worker core: a core not off within 1.5 s means
-  the clocks are restored and the phone restarts (`sb_reboot`);
+- after every stop the kernel checks every worker core: PSCI AFFINITY_INFO where the firmware has it (this
+  phone's DT lists PSCI 0.1 ids only, so it likely answers NOT_SUPPORTED), else the worker's own slot (it left
+  the work, parked or faulted; a core whose start timed out counts as possibly on and hung): a core not off
+  within 1.5 s means the clocks are restored and the phone restarts (`sb_reboot`); a worker that stopped by
+  itself (the heartbeat) is noticed and started again;
+- the kernel's own timers are reserved (apps can never take the last 24 entries of the timer list), and a
+  heater timer that cannot be set stops the heater;
 - the kernel feeds the watchdog only from its loop: a hung kernel resets within 30 s (catalog `wdt = 30`);
 - the TMU's hardware trip (115 °C, armed by S-Boot, never seen firing) stays the last line; nothing writes
   the TMU.
@@ -416,12 +423,33 @@ shown and logged.
 
 | App | v0.1 | Later |
 |---|---|---|
-| **Light** | screen light: white, warm or red at full screen, off after 10 minutes or at a touch | the LED torch: S2MPB02 (I2C 0x59 on HSI2C 0x10920000, torch GPIO; vendor `leds-s2mpb02.c`, GPL-2.0), 3 levels |
+| **Light** | screen light: white, warm or red at full screen, off after 10 minutes or at a touch | the LED torch (9.1), 3 levels |
 | **Heat** | Off / Low / Medium / High, time left, battery / skin / SoC temperatures, the state and why | the GPU in High |
 | **SOS** | hold 1 s, 3 s countdown, then the screen flashes white / red at 2 Hz with a big "SOS" and the time; a hold stops it | the siren (audio codec), vibration (haptic PWM), Morse SOS on the torch |
 | **Clock** | local time (Helsinki, the Utility OS's `tz.c`), world clock, stopwatch, timer | alarm clock with RTC power-on |
 | **Battery** | %, mAh left, current, temperature, the estimates per state, learned or typical | history |
 | **Settings** | screen-off time, interrupt mode, first-frame time, versions, clocks | persistent settings (v0.2) |
+
+### 9.1 The flashlight LED (v0.2 plan, researched 2026-11-07, not yet run)
+
+From LineageOS `android_kernel_samsung_exynos9810` (lineage-20, commit 6a9461f; GPL-2.0:
+`drivers/leds/leds-s2mpb02.c`, `include/linux/leds-s2mpb02.h`, `include/linux/mfd/s2mpb02-private.h`,
+`drivers/mfd/s2mpb02-core.c`) and the vendor DT. The S9's own torch (the Settings tile) is **switched by a GPIO**;
+the S2MPB02 (I2C 0x59 on HSI2C 0x10920000) only sets the current.
+
+| What | Where | Value |
+|---|---|---|
+| torch current | S2MPB02 FLED_CUR1 (0x14) bits 3:0, read-modify-write | n x 20 mA; the levels 2 / 4 / 7 (40, 80, 140 mA), at most 0x0C (240 mA) |
+| torch on / off | torch1-gpio: gpg2 pin 4, PERIC0 `pinctrl@10430000` bank +0xC0 (CON 0x104300C0 bits 19:16 = 1 output, DAT 0x104300C4 bit 4) | high = on, low = off |
+| flash pin | flash1-gpio: gpg3 pin 5 (0x108300C0): **kept low** (high = 1250 mA flash) | 0 |
+| chip check | BST_CTRL2 (0x1D) reads 0x90 (rev 1) | read only |
+
+Order: both pins outputs at 0 → read back 0x1D and 0x12..0x15 → CUR1 low nibble → torch pin high; off: pin low
+first. Never written: FLED_CTRL2 (0x13) and 0x16..0x1B (the iris IR LED: an eye-safety risk), 0x63, the
+camera rails (0x0B..0x11, 0x1E..0x32), the flash pin. Samsung's own driver writes INT1 (0x01) by mistake on the
+off path (L140): not copied. Unknown without a datasheet: FLED_CTRL2's bits, whether the torch timeout applies
+in GPIO mode, whether gpg3-5's other pin groups (hsi2c27, spi12, uart13) are in use. The first run is a phone
+test with the user present (lowest level first, the read-back logged before any write).
 
 ## 10. Later (research and design first)
 
@@ -492,8 +520,9 @@ Two things only for 0.1, for the first phone runs:
 - The build: only R_AARCH64_RELATIVE relocations (kernel and apps), nothing indirect before relocation, the
   worker code ARMv8.0 only, no host paths, the relocation test, every packed app passes the kernel's check.
 
-Results (2026-11-07): host test 305 checks (with the 8 built apps and their broken copies), 0 failed; the
-preview's 19 scenes, 0 px unpresented; image 5177344 bytes.
+Results (2026-11-07): host test 315 checks (with the 8 built apps and their broken copies), 0 failed; the
+preview's 19 scenes, 0 px unpresented; image 5181440 bytes, sha256 124cf3f6864b5e5de10edb351722716d730c95cc8d3ab747779a502d933af39f
+(reproducible: two builds give the same bytes).
 
 ### 12.3 Engineer OS 2.2
 
@@ -522,11 +551,22 @@ above; the main changes:
 - **UX:** Power is the screen key, Bixby selects; holds on the lock screen; a cancellable SOS countdown;
   emergency call behind hold + confirm and compiled out of test builds (3.1).
 
+A fourth review read the built phone-only code (vec.S, hw.c, app.c, heater.c, the libsb changes): no blocker;
+the frame layout, the EL0 entry and exit, the vector forwarding, the SCTLR bits, the GIC order and the pointer
+checks verified. Fixed: the A55 clock left high when the M3 setup failed; apps could fill the timer list (now
+24 entries reserved for the kernel); the app's FPCR leaking into the kernel (the heat kernel's reference);
+an SError latched by the kernel blamed on an app (now taken by libsb before each `eret`); polling mode left the
+GIC on; SCTLR's SPAN / WXN and PAN set explicitly; SPSel pinned first thing; the worker stop check with PSCI 0.1
+(start timeouts, parked cores, self-stopped workers restarted); the app's entry copied at load (the header in
+the slot is app-writable); a relocation offset overflow in the file check; the heap bounds; PXN on the slot
+window at all times; TPIDR_EL0 kept across preemption.
+
 ## 14. Phone test requests
 
-Starbite OS 0.1 writes no storage. Putting it on the phone means the usual store update by the main session
-(`starbite-os.img` and the new catalog into the UFS store, with its routine backup first). Boot it by its
-catalog key, never by the file name.
+Starbite OS 0.1 writes no storage. Putting it on the phone means the usual store update by the main session:
+`starbite-os.img` into the UFS store and the row of `starbite/sbos/catalog-entry.toml` into the catalog (it is
+full at 32 rows: one hidden row has to make room, or `CAT_MAX` is raised in the loader), with the routine
+backup first. Boot it by its catalog key, never by the file name.
 
 **T1: first boot, unattended is fine** (about 11 minutes; no writes; comes back by itself)
 - `sh tools/store/boot-next.sh starbite-os` (or `tools/store/sbfb.py next starbite-os` from the menu).

@@ -101,8 +101,11 @@ static void el0_harden(void)
                (1ULL << 18) |   /* nTWE */
                (1ULL << 24) |   /* E0E */
                (1ULL << 26));   /* UCI */
-    sctlr |= (1ULL << 4);       /* SA0 */
+    sctlr &= ~(1ULL << 19);     /* WXN: app code is writable and executable at EL0 */
+    sctlr |= (1ULL << 4) |      /* SA0 */
+             (1ULL << 23);      /* SPAN = 1: an exception does not set PAN (the kernel reads app memory) */
     __asm__ volatile("msr sctlr_el1, %0\n\tisb" : : "r"(sctlr) : "memory");
+    __asm__ volatile("msr pan, #0\n\tisb" ::: "memory");      /* cpu0 is an A55 (ARMv8.2) */
     __asm__ volatile("msr cntkctl_el1, xzr\n\tisb" ::: "memory");
     uint64_t v;
     if (SB_SAFE_MRS(pmuserenr_el0, &v))
@@ -147,6 +150,7 @@ int hw_irq_init(void)
     if (got != 1 || other) {
         sb_logx("sbos: timer interrupt test failed, others ", other);
         vtimer_off();
+        wr(GICC + 0x00, 0);                             /* polling mode: no interrupt reaches the CPU */
         K.irq_mode = 0;
         return 0;
     }
@@ -159,6 +163,7 @@ int hw_irq_init(void)
     vtimer_off();
     if (slept < 8 * per_ms) {
         sb_logx("sbos: wfi returned early, ticks ", slept);
+        wr(GICC + 0x00, 0);
         K.irq_mode = 0;
         return 0;
     }
@@ -246,6 +251,11 @@ void hw_screen(int on)
     (void)on;                                           /* v0.1: the UI draws black; v0.2: the panel sleeps */
 }
 
+void hw_tls_clear(void)
+{
+    __asm__ volatile("msr tpidr_el0, xzr\n\tmsr tpidrro_el0, xzr" ::: "memory");
+}
+
 void hw_app_map(uintptr_t slot, int on)
 {
     sb_mmu_el0(slot, on);
@@ -288,8 +298,9 @@ int hw_core_off(unsigned w)
     if (r == 1)
         return 1;
     if (r < 0) {                                        /* PSCI 0.1 without AFFINITY_INFO: the slot's word */
-        const struct sb_wslot *s = sb_smp_slot(w);
-        return s && (s->state == SB_WK_DONE || s->state == SB_WK_IDLE || s->state == SB_WK_FAULT);
+        const struct sb_wslot *s = sb_smp_slot(w);      /* (a start that timed out is tracked by the heater) */
+        return s && (s->state == SB_WK_DONE || s->state == SB_WK_PARKED || s->state == SB_WK_IDLE ||
+                     s->state == SB_WK_FAULT);
     }
     return 0;
 }

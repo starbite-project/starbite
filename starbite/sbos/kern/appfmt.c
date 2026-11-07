@@ -75,7 +75,7 @@ const char *app_check(const void *file, uint64_t n, uint64_t slot_size)
         for (uint32_t i = 0; i < h->rela_count; ++i) {
             if ((uint32_t)r[i].info != R_AARCH64_RELATIVE)
                 return "relocation type";
-            if (r[i].off < sizeof(*h) || r[i].off + 8 > n || (r[i].off & 7U))
+            if (r[i].off < sizeof(*h) || r[i].off > n - 8 || (r[i].off & 7U))
                 return "relocation target";
             if (r[i].add < 0 || (uint64_t)r[i].add > image)
                 return "relocation value";

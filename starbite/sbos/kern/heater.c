@@ -13,6 +13,7 @@
 static struct heat_ctl ctl;
 static struct heatk_cfg cfg __attribute__((aligned(64)));
 static int running[8];                      /* workers started (1..7) */
+static int start_fail[8];                   /* a start timed out: the core may be on and hung */
 static uint32_t a55_set, m3_set;            /* what we asked ACPM for (0: never) */
 static int m3_prepped, confirmed;
 static uint64_t bad0[8];
@@ -78,6 +79,10 @@ static void read_inputs(struct heat_in *in)
         const struct sb_wslot *s = sb_smp_slot(w);
         if (!s || !running[w])
             continue;
+        if (s->state == SB_WK_DONE || s->state == SB_WK_PARKED) {
+            running[w] = 0;                     /* it stopped by itself (the dead man's switch): restart it */
+            continue;
+        }
         if (s->errors > bad0[w])
             in->bad_results = 1;
         if (s->state == SB_WK_FAULT)
@@ -126,7 +131,7 @@ static void workers_apply(void)
             continue;                               /* still leaving: next step */
         if (w >= 4 && !m3_prepped) {
             if (!hw_m3_prep()) {
-                heat_ctl_request(&ctl, 0, 0, &last_in);
+                heater_stop_all("The big cores could not be prepared");
                 return;
             }
             m3_prepped = 1;
@@ -136,6 +141,8 @@ static void workers_apply(void)
         int r = hw_heat_start(w, &cfg);
         if (r) {
             sb_logx("heater: core did not start, worker ", w);
+            if (r == -100)
+                start_fail[w] = 1;
             cfg.run[w] = 0;
             if (w >= 4) {                           /* no M3 cores: the level stays at what runs */
                 ctl.max_cores = (int)w - 1;
@@ -195,7 +202,7 @@ static void stop_check(void)
 {
     int all = 1;
     for (unsigned w = 1; w < 8; ++w)
-        if (!hw_core_off(w))
+        if (!hw_core_off(w) || start_fail[w])
             all = 0;
     if (all) {
         stopping = 0;
@@ -273,11 +280,17 @@ static void start_now(void)
         return;
     }
     if (heat_ctl_request(&ctl, pending_level, pending_minutes, &in) == 0) {
+#ifndef SB_HOST
+        __asm__ volatile("msr fpcr, xzr" ::: "memory");   /* the reference in the workers' FP mode */
+#endif
         cfg.gold = heatk_batch();
         cfg.max_age = sb_freq();                    /* 1 s */
         cfg.heartbeat = sb_ticks();
         sb_dcache_clean_inval(&cfg, sizeof(cfg));
-        kt_set(KT_HEATER, 1, sb_ms(), 250, 1);
+        if (kt_set(KT_HEATER, 1, sb_ms(), 250, 1)) {
+            heater_stop_all("No timer for the heater");
+            return;
+        }
         sb_logx("heater: start, level ", (uint64_t)pending_level);
         workers_apply();
         clocks_apply();

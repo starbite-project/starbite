@@ -95,6 +95,7 @@ el0_save:
     mrs x2, fpsr
     mrs x3, fpcr
     stp x2, x3, [x1]                    /* x1 = frame + 800 after the q stores */
+    msr fpcr, xzr                       /* the kernel's own FP mode, not the app's */
     mov x0, x19
     /* back to the kernel: restore the context sbos_app_resume saved and return from it with x0 */
     adrp x9, sbos_kctx
@@ -130,6 +131,10 @@ sbos_app_resume:
     stp d10, d11, [x9, #128]
     stp d12, d13, [x9, #144]
     stp d14, d15, [x9, #160]
+    /* an SError the kernel's own device accesses latched is taken here, by libsb, not blamed on the app */
+    msr daifclr, #4
+    isb
+    msr daifset, #4
     adrp x1, sbos_cur_frame
     str x0, [x1, :lo12:sbos_cur_frame]
     ldr x1, [x0, #248]
@@ -158,8 +163,6 @@ sbos_app_resume:
     ldp x2, x3, [x1]                    /* frame + 800 */
     msr fpsr, x2
     msr fpcr, x3
-    msr tpidr_el0, xzr
-    msr tpidrro_el0, xzr
     ldp x2, x3, [x0, #16]
     ldp x4, x5, [x0, #32]
     ldp x6, x7, [x0, #48]

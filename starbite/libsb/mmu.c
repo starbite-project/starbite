@@ -48,6 +48,8 @@ extern void sb_dcache_all(unsigned op) __attribute__((visibility("hidden")));
 
 static uint64_t l2_desc(uint64_t pa)
 {
+    if (pa >= 0xa8000000ULL && pa < 0xaf000000ULL)
+        return WB | PXN | pa;                   /* Starbite OS's app slots: never executable at EL1 */
     if (pa >= 0xa0000000ULL && pa < 0xa8000000ULL)
         return NC | pa;
     if (pa >= 0xaf000000ULL && pa < 0xaf800000ULL)

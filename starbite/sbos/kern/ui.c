@@ -477,7 +477,7 @@ static void build_lock(void)
         e->icon = ic[i];
         e->color = col[i];
         e->ms = ms[i];
-        e->x = 140 + i * 430 - 0, e->y = 2160, e->w = 300, e->h = 420;
+        e->x = 110 + i * 430, e->y = 2130, e->w = 360, e->h = 450;   /* the box holds the 169 px ring */
     }
     e = add(cur, &ncur, E_CTEXT);
     scopy(e->b, sizeof(e->b), "Hold a button");
@@ -804,29 +804,23 @@ static void draw_el(const struct el *e, int idx)
         break;
     }
     case E_ROUND: {
-        int cx = e->x + e->w / 2, cy = e->y + 150;
+        int cx = e->x + e->w / 2, cy = e->y + 180;
         if (f)
             ui_ring(cx, cy, 168, 10, C_STAR);
         ui_disc(cx, cy, 150, p ? C_CARD3 : C_CARD);
         unsigned pr = hold_prog(e, idx, 360);
-        if (pr) {
-            /* the ring fills clockwise from the top while held */
-            for (unsigned a = 0; a < pr; a += 3) {
-                static const int16_t s16[25] = { 0, 4, 8, 12, 16, 20, 24, 28, 31, 34, 37, 39, 41, 43, 44, 45, 46,
-                                                 46, 47, 47, 47, 47, 47, 47, 47 };
-                (void)s16;
-                /* integer sine via a quarter-wave table (one entry per 3.75 degrees) */
-                static const int16_t q[25] = { 0, 65, 131, 195, 259, 321, 383, 442, 500, 556, 609, 659, 707, 752,
-                                               793, 831, 866, 897, 924, 947, 966, 981, 991, 998, 1000 };
-                unsigned d = a % 360, qd = d % 90, i = qd * 24U / 90U;
-                int sv = q[i], cv = q[24 - i];
-                int sn, cs;
-                if (d < 90) { sn = sv; cs = cv; }
-                else if (d < 180) { sn = cv; cs = -sv; }
-                else if (d < 270) { sn = -sv; cs = -cv; }
-                else { sn = -cv; cs = sv; }
-                ui_disc(cx + 160 * sn / 1000, cy - 160 * cs / 1000, 9, e->color);
-            }
+        /* the ring fills clockwise from the top while held: dots every 3 degrees, an integer quarter-wave
+         * sine table (one entry per 3.75 degrees, x1000) */
+        static const int16_t q[25] = { 0, 65, 131, 195, 259, 321, 383, 442, 500, 556, 609, 659, 707, 752,
+                                       793, 831, 866, 897, 924, 947, 966, 981, 991, 998, 1000 };
+        for (unsigned a = 0; a < pr; a += 3) {
+            unsigned d = a % 360, i = (d % 90) * 24U / 90U;
+            int sv = q[i], cv = q[24 - i], sn, cs;
+            if (d < 90) { sn = sv; cs = cv; }
+            else if (d < 180) { sn = cv; cs = -sv; }
+            else if (d < 270) { sn = -sv; cs = -cv; }
+            else { sn = -cv; cs = sv; }
+            ui_disc(cx + 160 * sn / 1000, cy - 160 * cs / 1000, 9, e->color);
         }
         ui_icon(e->icon, cx - 48, cy - 48, e->color);
         ui_text_c(F_BTN, cx, e->y + e->h - 40, e->a, C_L1);

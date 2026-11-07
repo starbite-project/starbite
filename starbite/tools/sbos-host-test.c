@@ -52,10 +52,18 @@ static void t_timers(void)
     CHECK(kt_next() == 5200, "re-set replaces the timer");
     kt_cancel(KT_HEATER, 1);
     CHECK(kt_next() == UINT64_MAX, "cancel");
+    unsigned got = 0;
     for (unsigned i = 0; i < KT_MAX; ++i)
-        kt_set(KT_APP0, i, 0, 100 + i, 0);
-    CHECK(kt_set(KT_APP0 + 1, 0, 0, 1, 0) == -1, "the list is full at KT_MAX");
-    kt_cancel_owner(KT_APP0);
+        got += kt_set(KT_APP0 + i / 16, i % 16, 0, 100 + i, 0) == 0;
+    CHECK(got == KT_MAX - KT_RESERVE, "apps get at most KT_MAX - KT_RESERVE timers (%u)", got);
+    CHECK(kt_set(KT_APP0 + 1, 99, 0, 1, 0) == -1, "a further app timer is refused");
+    CHECK(kt_set(KT_APP0, 0, 0, 5, 0) == 0, "an app may re-set a timer it has");
+    for (unsigned i = 0; i < 8; ++i)
+        CHECK(kt_set(i, 0, 0, 10, 1) == 0, "kernel task %u still gets its timer", i);
+    for (unsigned i = 0; i < 4; ++i)
+        kt_cancel_owner(KT_APP0 + i);
+    for (unsigned i = 0; i < 8; ++i)
+        kt_cancel_owner(i);
     CHECK(kt_next() == UINT64_MAX, "cancel_owner");
 }
 

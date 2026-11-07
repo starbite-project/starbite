@@ -20,6 +20,7 @@ struct kapp {
     void (*host_entry)(const struct sbos_event *);    /* the host build's app function */
     char id[24], name[24];
     uint32_t perms, color, icon;
+    uint32_t entry;                 /* copied at load: the header in the slot is app-writable */
     uint64_t heap, heap_end;
     int dead;                       /* stopped (fault or budget): no more events */
     int running;                    /* a handler frame exists */

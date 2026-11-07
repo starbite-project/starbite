@@ -80,8 +80,15 @@ static void handle_input(void)
     }
 }
 
+#ifndef SB_HOST
+void sbos_spsel1(void);
+#endif
+
 void sb_main(void)
 {
+#ifndef SB_HOST
+    sbos_spsel1();                          /* first: libsb's probe and crash vectors then use SP_EL1 */
+#endif
     if (!ui_init())
         sb_crash_show(ui_init_why(), 0);
     sb_log("Starbite OS " SBOS_VERSION);
