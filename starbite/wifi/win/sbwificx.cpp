@@ -164,7 +164,10 @@ struct DEVCTX {
     int keyed;                      // Windows' pairwise key reached the firmware
     int join_failed;                // the firmware's SET_SSID failed after the association (reported from the worker)
     UINT64 heartbeat_at;
-    ULONG sta_budget;               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
+    ULONG sta_budget;
+    // W2i: the data path's callbacks, counted (they may run at DISPATCH, where nothing is logged)
+    volatile LONG txq_made, rxq_made, tx_advances, tx_packets, tx_notifies, rx_advances, rx_up;
+    UINT64 linkstate_at;            // when to send WDI's link state again while associated               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
     ULONG link_state;               // Parameters\LinkState: 1 (default) the adapter's link reported up/down             // when to log the rx state again (1.5 s after an association)            // the core's received-frame count when the connect began
     UINT16 connect_port;
     UINT8 bssid[6], rsn[BCMW_RSN_OURS];
@@ -172,6 +175,7 @@ struct DEVCTX {
     int set_ssid_ok;
     // the log of commands seen (each id once)
     UINT8 seen[512];
+    int seen_stats;
     ULONG commands;
     TLV_CONTEXT tlv;
 };
@@ -403,6 +407,25 @@ static void Answer(WIFIREQUEST r, NTSTATUS st)
     WifiRequestComplete(r, st, n);
 }
 
+// a GET answered with a generated message (header space reserved, as for indications)
+static void AnswerData(WIFIREQUEST r, UINT8 *gen, ULONG len)
+{
+    UINT in = 0, out = 0;
+    WDI_MESSAGE_HEADER *h = (WDI_MESSAGE_HEADER *)WifiRequestGetInOutBuffer(r, &in, &out);
+    if (!h || !gen || len > out || len < sizeof(*h)) {
+        if (gen)
+            FreeGenerated(gen);
+        Answer(r, STATUS_BUFFER_TOO_SMALL);
+        return;
+    }
+    WDI_MESSAGE_HEADER hc = *h;
+    RtlCopyMemory(h, gen, len);
+    *h = hc;
+    h->Status = NDIS_STATUS_SUCCESS;
+    WifiRequestComplete(r, STATUS_SUCCESS, len);
+    FreeGenerated(gen);
+}
+
 // ---- scanning ------------------------------------------------------------------------------------------------------
 
 static const UINT16 SCAN_SYNC = 0x5743;     // "WC": plus the scan's number, so a cancelled scan's late end event
@@ -564,6 +587,82 @@ static void StaInfo(DEVCTX *d, const char *when)
 #undef U32
 }
 
+// WDI_GET_STATISTICS (W2h: asked 3 times right after the association, answered NOT_SUPPORTED, then Windows reset
+// the port 28 s later without sending a frame): the AP's and the broadcast counts, one PHY
+static void CmdStatistics(DEVCTX *d, WIFIREQUEST r)
+{
+    const struct bcmw_info *in = bcmw_info(d->w);
+    WDI_GET_STATISTICS_PARAMETERS p;
+    WDI_MAC_STATISTICS_CONTAINER m[2];
+    WDI_PHY_STATISTICS_CONTAINER phy;
+    UINT8 *gen = NULL;
+    ULONG len = 0;
+    ULONG n = 0;
+    RtlZeroMemory(m, sizeof(m));
+    RtlZeroMemory(&phy, sizeof(phy));
+    if (d->connected) {
+        RtlCopyMemory(m[n].MACAddress.Address, d->bssid, 6);
+        m[n].TransmittedFrameCount = in->tx_done;
+        m[n].ReceivedFrameCount = in->rx_frames;
+        n++;
+    }
+    RtlFillMemory(m[n].MACAddress.Address, 6, 0xff);
+    n++;
+    BSS *b = d->connected ? FindBss(d, d->bssid) : NULL;
+    phy.PhyType = b && b->band5 ? WDI_PHY_TYPE_VHT : WDI_PHY_TYPE_HT;
+    phy.TransmittedFrameCount = in->tx_done;
+    phy.FailedCount = in->tx_errors;
+    phy.ReceivedFrameCount = in->rx_frames;
+    p.PeerMACStatistics.SimpleAssign(m, n);
+    p.PhyStatistics.SimpleAssign(&phy, 1);
+    NDIS_STATUS gs = GenerateWdiGetStatisticsFromIhv(&p, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen);
+    p.PeerMACStatistics.SimpleAssign(NULL, 0);
+    p.PhyStatistics.SimpleAssign(NULL, 0);
+    if (gs != NDIS_STATUS_SUCCESS) {
+        Sayf("wificx: statistics could not be generated (%08x)", gs);
+        Answer(r, STATUS_NOT_SUPPORTED);
+        return;
+    }
+    if (!d->seen_stats) {
+        d->seen_stats = 1;
+        Sayf("wificx: statistics answered (%lu bytes)", len);
+    }
+    AnswerData(r, gen, len);
+}
+
+// WDI_INDICATION_LINK_STATE_CHANGE: the link's speed and quality, after the association and then every 30 s
+// (nothing sent it before W2i)
+static void LinkStateWdi(DEVCTX *d)
+{
+    WDI_INDICATION_LINK_STATE_CHANGE_PARAMETERS p;
+    WDI_LINK_INFO_CONTAINER li;
+    UINT8 *gen = NULL;
+    ULONG len = 0;
+    BSS *b = FindBss(d, d->bssid);
+    INT32 rssi = b ? b->rssi : -60;
+    UINT8 q = rssi >= -50 ? 100 : rssi <= -100 ? 0 : (UINT8)(2 * (rssi + 100));
+    UINT32 kbps = b && b->band5 ? 433300 : 144400;
+    RtlCopyMemory(p.LinkStateChangeParameters.PeerMACAddress.Address, d->bssid, 6);
+    p.LinkStateChangeParameters.TxLinkSpeed = kbps;
+    p.LinkStateChangeParameters.RxLinkSpeed = kbps;
+    p.LinkStateChangeParameters.LinkQuality = q;
+    RtlZeroMemory(&li, sizeof(li));
+    RtlCopyMemory(li.LocalLinkMACAddress.Address, bcmw_info(d->w)->mac, 6);
+    RtlCopyMemory(li.PeerLinkMACAddress.Address, d->bssid, 6);
+    li.ChannelNumber = b ? b->channel : 0;
+    li.BandId = b && b->band5 ? WDI_BAND_ID_5000 : WDI_BAND_ID_2400;
+    li.RSSI = rssi;
+    li.Bandwidth = b && b->band5 ? 80 : 20;
+    p.LinkInfo.SimpleAssign(&li, 1);
+    NDIS_STATUS gs = GenerateWdiIndicationLinkStateChangeFromIhv(&p, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen);
+    p.LinkInfo.SimpleAssign(NULL, 0);
+    if (gs == NDIS_STATUS_SUCCESS)
+        Indicate(d, WDI_INDICATION_LINK_STATE_CHANGE, d->connect_port, WDI_TRANSACTION_ID_UNSOLICIT, NDIS_STATUS_SUCCESS,
+                 gen, len);
+    Sayf("wificx: WDI link state: %lu kbps, quality %u, %s", kbps, q, gs == NDIS_STATUS_SUCCESS ? "indicated" : "NOT generated");
+    d->linkstate_at = Now(NULL) + 30000000;
+}
+
 // The adapter's media state for NDIS (W2f: on an open network Windows sent no frame at all in 22 s, no DHCP;
 // nothing ever reported the link up). Parameters\LinkState 0 leaves it to WiFiCx.
 static void LinkState(DEVCTX *d, int up)
@@ -665,6 +764,10 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
     Indicate(d, WDI_INDICATION_CONNECT_COMPLETE, d->connect_port, d->connect_txn,
              ok ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE, NULL, 0);
     Sayf("wificx: connect %s", ok ? "COMPLETE (associated; Windows does the handshake now)" : "FAILED");
+    if (ok) {
+        LinkStateWdi(d);
+        d->heartbeat_at = 0;        // the 10 s heartbeat starts now
+    }
     bcmw_rx_state(d->w, "at the association result");
     d->rx_check_at = ok ? Now(NULL) + 1500000 : 0;
     d->connecting = 0;
@@ -969,6 +1072,9 @@ static void Command(DEVCTX *d, WIFIREQUEST r)
     case WDI_ABORT_TASK:
         CmdAbort(d, r, h, in);
         break;
+    case WDI_GET_STATISTICS:
+        CmdStatistics(d, r);
+        break;
     case WDI_SET_ADAPTER_CONFIGURATION:
         CmdAdapterConfig(d, r, h, in);
         break;
@@ -1184,6 +1290,8 @@ static void Worker(PVOID arg)
                 bcmw_leave(d->w);
             Disconnected(d, d->set_ssid_status, 0);
         }
+        if (d->connected == 1 && d->linkstate_at && Now(NULL) > d->linkstate_at)
+            LinkStateWdi(d);
         if (Now(NULL) > d->heartbeat_at) {
             const struct bcmw_info *in = bcmw_info(d->w);
             d->heartbeat_at = Now(NULL) + (d->connected || d->connecting ? 10000000 : 60000000);
@@ -1191,6 +1299,10 @@ static void Worker(PVOID arg)
                  d->connected ? (d->keyed ? "associated, keyed" : "associated, no key yet") :
                  d->connecting ? "connecting" : "idle", in->polls, in->events, in->rx_frames, in->tx_frames, in->tx_done,
                  d->commands);
+            Sayf("wificx: data path: tx queue made %ld, rx queue made %ld (now %s/%s); tx advances %ld, packets %ld, "
+                 "notifications %ld; rx advances %ld, frames handed to Windows %ld", d->txq_made, d->rxq_made,
+                 d->txq ? "tx" : "NO TX", d->rxq ? "rx" : "NO RX", d->tx_advances, d->tx_packets, d->tx_notifies,
+                 d->rx_advances, d->rx_up);
         }
         if (d->connected == 2) {
             d->connected = 1;
@@ -1216,9 +1328,11 @@ static void TxAdvance(NETPACKETQUEUE q)
     DEVCTX *d = c->d;
     NET_RING *pr = NetRingCollectionGetPacketRing(c->rings), *fr = NetRingCollectionGetFragmentRing(c->rings);
     UINT32 i = pr->BeginIndex;
+    InterlockedIncrement(&d->tx_advances);
     while (i != pr->EndIndex) {
         NET_PACKET *p = NetRingGetPacketAtIndex(pr, i);
         if (!p->Ignore) {
+            InterlockedIncrement(&d->tx_packets);
             // copied straight into the next free slot (under the lock: at most one frame, ~1.5 KiB)
             KIRQL old;
             KeAcquireSpinLock(&d->tx_lock, &old);
@@ -1250,7 +1364,10 @@ static void TxAdvance(NETPACKETQUEUE q)
 }
 
 static EVT_PACKET_QUEUE_SET_NOTIFICATION_ENABLED TxNotify;
-static void TxNotify(NETPACKETQUEUE, BOOLEAN) {}
+static void TxNotify(NETPACKETQUEUE q, BOOLEAN)
+{
+    InterlockedIncrement(&QueueCtx(q)->d->tx_notifies);
+}
 
 static EVT_PACKET_QUEUE_CANCEL TxCancel;
 static void TxCancel(NETPACKETQUEUE q)
@@ -1270,6 +1387,7 @@ static void RxAdvance(NETPACKETQUEUE q)
     DEVCTX *d = c->d;
     NET_RING *pr = NetRingCollectionGetPacketRing(c->rings), *fr = NetRingCollectionGetFragmentRing(c->rings);
     UINT32 pi = pr->BeginIndex, fi = fr->BeginIndex;
+    InterlockedIncrement(&d->rx_advances);
     while (pi != pr->EndIndex && fi != fr->EndIndex) {
         KIRQL old;
         FRAME *f = NULL;
@@ -1283,6 +1401,7 @@ static void RxAdvance(NETPACKETQUEUE q)
         NET_FRAGMENT_VIRTUAL_ADDRESS *va = NetExtensionGetFragmentVirtualAddress(&c->va, fi);
         UINT32 n = f->len <= frag->Capacity ? f->len : (UINT32)frag->Capacity;
         RtlCopyMemory(va->VirtualAddress, f->data, n);
+        InterlockedIncrement(&d->rx_up);
         if (n >= 14 && f->data[12] == 0x88 && f->data[13] == 0x8e)
             InterlockedIncrement(&d->eapol_up);
         frag->ValidLength = n;
@@ -1367,6 +1486,8 @@ static NTSTATUS CreateTxQueue(NETADAPTER adapter, NETTXQUEUE_INIT *init)
                              NetExtensionTypeFragment);
     NetTxQueueGetExtension(q, &qy, &c->va);
     c->d->txq = q;
+    InterlockedIncrement(&c->d->txq_made);
+    Say("wificx: data path: the tx queue was created");
     return STATUS_SUCCESS;
 }
 
@@ -1390,6 +1511,8 @@ static NTSTATUS CreateRxQueue(NETADAPTER adapter, NETRXQUEUE_INIT *init)
                              NetExtensionTypeFragment);
     NetRxQueueGetExtension(q, &qy, &c->va);
     c->d->rxq = q;
+    InterlockedIncrement(&c->d->rxq_made);
+    Say("wificx: data path: the rx queue was created");
     return STATUS_SUCCESS;
 }
 
