@@ -358,7 +358,22 @@ values go under the configuration's key.
 | `USBFN\Configurations\StarbiteLink` | `bmAttributes` | DWORD | 0xC0 (self-powered; bit 7 must be set) |
 | `USBFN\Configurations\StarbiteLink` | `bMaxPower` | DWORD | 0x32 (100 mA in 2 mA units) |
 
-No `Configurations\Default` (only used with `IncludeDefaultCfg = 1`).
+**And `Configurations\Default`** (found with the nopptt trace, section 9.1). ufx01000 loads every
+`Configurations` subkey and then insists that two of them exist: the current one and one named
+`Default`. Without it: "registry.c line 2397" and again no descriptors. (Microsoft's doc says the
+default configuration is only *used* with `IncludeDefaultCfg = 1`; it must exist either way.) Each
+configuration needs an `InterfaceList` of 1..255 names; `bmAttributes` and `bMaxPower` are only
+range-checked (≤ 0xFF).
+
+| Key | Value | Type | Data |
+|---|---|---|---|
+| `USBFN\Configurations\Default` | `InterfaceList` | MULTI_SZ | `GenericUsbFn` |
+| `USBFN\Configurations\Default` | `bmAttributes` | DWORD | 0xC0 |
+| `USBFN\Configurations\Default` | `bMaxPower` | DWORD | 0x32 |
+
+`IncludeDefaultCfg` stays 0, so `Default`'s list isn't merged into `StarbiteLink`'s. If the stack
+merged it anyway, `GenericUsbFn` would appear twice and the next trace would show a duplicate
+interface.
 
 ### 5.2 Seeing inside the device stack: an ETW autologger (L1 diagnosis)
 
@@ -595,6 +610,16 @@ Microsoft-owned sub-key" with the device defaults; Windows 10 Mobile shipped it,
 doesn't. Missing values inside it are tolerated (each query accepts "not found"). Other failures in
 the trace are harmless: the SMBIOS UUID (for a generated serial number), the user-prompt settings,
 the charging arbitration driver. Fix: the `USBFN\Default` keys in section 5.1 (no firmware change).
+
+**L1 with `USBFN\Default` (2026-11-07, nopptt fb7ce0b0, `results-nopptt`): one step further, the
+Mac still sees nothing.** The trace: the `Default` key opens now (no line 1437), and the device
+values are read. Then the descriptor-set check reports "registry.c line 2397", and
+`UfxRegistryDeviceRead` fails 0xC0000001 on line 1615 -> `BuildDescriptors` -> "Failed to read
+current configuration". Same outcome: no descriptors, no child, no Run/Stop. Line 2397 (read in
+ufx01000's ARM64 code, one function): over the loaded configurations it looks for two names, the
+current configuration (found: `StarbiteLink`) and the default configuration's name, which falls back to
+"Default" (not found; 2396 would mean the current one is missing). Fix: `Configurations\Default`
+(section 5.1).
 
 ## 10. Side finding: the PPTT has no caches (the 0xC0000094 crashes)
 
