@@ -18,6 +18,7 @@
 #include "calc.h"
 #include "exfat.h"
 #include "macros.h"
+#include "tz.h"
 
 static int busy[16];
 static uintptr_t qbuf[16];
@@ -308,6 +309,29 @@ int main(int argc, char **argv)
         CHECK(n >= 5 && !strcmp(m[2].text, "Best regards") && !m[2].key, "text macro");
         CHECK(n >= 5 && m[3].key == 0x3e && !m[3].mod, "f5");
         CHECK(n >= 5 && m[4].mod == 0x02 && m[4].key == 0x2b, "shift+tab");
+    }
+    /* time zones (tz.c; checked against zoneinfo for 2000-2099 when written): the 2026 transitions */
+    {
+        static const struct { long long t; int z, h, mi, s, dst; const char *abbr; } tc[] = {
+            { 1774745999LL, 0, 2, 59, 59, 0, "EET" },
+            { 1774746000LL, 0, 4, 0, 0, 1, "EEST" },
+            { 1792889999LL, 0, 3, 59, 59, 1, "EEST" },
+            { 1792890000LL, 0, 3, 0, 0, 0, "EET" },
+            { 1772953199LL, 4, 1, 59, 59, 0, "EST" },
+            { 1772953200LL, 4, 3, 0, 0, 1, "EDT" },
+            { 1793512799LL, 4, 1, 59, 59, 1, "EDT" },
+            { 1793512800LL, 4, 1, 0, 0, 0, "EST" },
+            { 1794034800LL, 6, 16, 0, 0, 0, "JST" },
+        };
+        for (unsigned i = 0; i < sizeof(tc) / sizeof(tc[0]); ++i) {
+            struct tz_time o;
+            tz_local(&tz_zones[tc[i].z], tc[i].t, &o);
+            CHECK(o.h == tc[i].h && o.mi == tc[i].mi && o.s == tc[i].s && o.dst == tc[i].dst && !strcmp(o.abbr, tc[i].abbr),
+                  "tz %s at %lld: %02d:%02d:%02d %s", tz_zones[tc[i].z].city, tc[i].t, o.h, o.mi, o.s, o.abbr);
+        }
+        struct tz_time o;
+        tz_civil(951782400LL, &o);                     /* 2000-02-29, a Tuesday */
+        CHECK(o.y == 2000 && o.mo == 2 && o.d == 29 && o.wday == 2, "civil 2000-02-29");
     }
     /* the configuration descriptor, both speeds */
     for (int fs = 0; fs < 2; ++fs) {
