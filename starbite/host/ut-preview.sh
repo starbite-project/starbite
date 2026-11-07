@@ -3,6 +3,7 @@
 # and sbui code built for aarch64 Linux (the Lima VM) on host.c's fake hardware, driven by scripted keys
 # and taps, PNGs to starbite/utility/preview/.  Run on the Mac from the repo root:
 #   sh starbite/host/ut-preview.sh          every scene
+#   ONLY="kbd gamepad" sh starbite/host/ut-preview.sh    only those scenes
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/starbite/out/uthost"
@@ -23,40 +24,57 @@ limactl shell --workdir "$root" starbite gcc -O1 -g -DSB_HOST -DSB_HOST_UTILITY 
     -o "$out/ut-host" "$root/starbite/host/host.c" "$root/starbite/host/ut-host-stubs.c" \
     "$lib/str.c" "$lib/log.c" "$lib/sbui.c" "$lib/sbui_input.c" "$lib/sbui_page.c" "$lib/sbui_w.c" "$lib/sb7.c" \
     "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" \
-    "$lib/assets.S" "$ut/main.c" "$ut/msc.c" "$ut/fat.c" "$ut/tools.c" "$ut/pad.c" "$ut/hid.c" "$ut/hash.c" "$ut/sha256.c" "$ut/calc.c" "$ut/calcmath.c" "$ut/exfat.c" "$ut/macros.c" "$ut/tz.c" "$ut/clock.c" -lm -lpthread
+    "$lib/assets.S" "$ut/main.c" "$ut/msc.c" "$ut/fat.c" "$ut/tools.c" "$ut/pad.c" "$ut/hid.c" "$ut/hash.c" "$ut/sha256.c" "$ut/calc.c" "$ut/calcmath.c" "$ut/exfat.c" "$ut/macros.c" "$ut/tz.c" "$ut/clock.c" "$ut/kbdmap.c" "$ut/kbd.c" "$ut/mt.c" "$ut/text.c" "$ut/remote.c" "$ut/gamepad.c" "$ut/sensors.c" "$ut/qr.c" "$ut/qrpage.c" -lm -lpthread
 
 limactl shell --workdir "$root" starbite sh -c "gzip -dc starbite/tools/fixtures/exfat-card.img.gz > $out/exfat-card.img"
 scene() {
     name=$1
     env=$2
     shift 2
+    if [ -n "${ONLY:-}" ]; then
+        case " $ONLY " in *" $name "*) ;; *) return 0 ;; esac
+    fi
     limactl shell --workdir "$root" starbite env $env UT_HOST_CARD="$out/exfat-card.img" "$out/ut-host" "$out" /dev/null "$@" "s:$name" q | grep -E "panel|FAIL|host:" || true
     "$py" -c "from PIL import Image; Image.open('$out/$name.ppm').save('$png/$name.png')"
 }
 scene home        UT_HOST_USB=0 w:500
 scene home-usb    UT_HOST_USB=1 w:1500
 scene usb         UT_HOST_USB=1 w:500 k:p w:800
-scene radio       UT_HOST_USB=1 w:500 k:d w:200 k:p w:800
+scene radio       UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:p w:800
 scene leave       UT_HOST_USB=1 w:500 k:u w:200 k:p w:800
-scene measure     UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:p w:1500
-scene ruler       UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:p w:1500 k:d w:300 k:p w:800
-scene colours     UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:p w:1500 k:d w:300 k:d w:300 k:p w:500 k:u w:400
-scene everyday    UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:p w:3400
+scene measure     UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1500
+scene ruler       UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1500 k:d w:300 k:p w:800
+scene colours     UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1500 k:d w:300 k:d w:300 k:p w:500 k:u w:400
+scene everyday    UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:p w:3400
 scene pad         UT_HOST_USB=1 w:500 k:p w:800 k:d w:300 k:p w:800 t:700,900 w:300
-scene files       UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200
-scene files-hash  UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:4000
-scene everyday4    UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:d w:200 k:d w:300
-scene calc        UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:d w:200 k:d w:200 k:p w:600 t:450,2245 w:150 t:1290,1165 w:150 t:170,2245 w:150 t:170,2515 w:150 t:1290,2515 w:400
-scene browse      UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200
-scene browse-dir  UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:p w:800
-scene file-hash   UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:3000
-scene file-text   UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1500
-scene file-hex    UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1500
-scene part-card   UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:p w:1500
-scene part-efs    UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1500
-scene world       UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:u w:200 k:p w:1500
-scene timer-awake UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:d w:200 k:p w:200 w:130000
+scene files       UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200
+scene files-hash  UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:4000
+scene everyday4    UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:d w:200 k:d w:300
+scene calc        UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:d w:200 k:d w:200 k:p w:600 t:450,2245 w:150 t:1290,1165 w:150 t:170,2245 w:150 t:170,2515 w:150 t:1290,2515 w:400
+scene browse      UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200
+scene browse-dir  UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:p w:800
+scene file-hash   UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:3000
+scene file-text   UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1500
+scene file-hex    UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1500
+scene part-card   UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:p w:1500
+scene part-efs    UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1500
+scene world       UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:u w:200 k:p w:1500
+scene timer-awake UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:d w:200 k:p w:200 w:130000
 scene saver       UT_HOST_USB=1 w:500 k:p w:800 w:125000
 scene saver-wake  UT_HOST_USB=1 w:500 k:p w:800 w:125000 t:720,2170 w:800
 scene idle-warn   UT_HOST_USB=0 w:550000
+scene remote      UT_HOST_USB=1 w:500 k:d w:200 k:p w:800
+scene kbd         UT_HOST_USB=1 w:500 k:d w:200 k:p w:800 k:p w:800 t:662,2226 t:430,1954 t:778,2226 t:1242,2226 t:82,2498 t:1126,2226 w:300
+scene kbd-sym     UT_HOST_USB=1 w:500 k:d w:200 k:p w:800 k:p w:800 t:444,1468 w:300
+scene kbd-fn      UT_HOST_USB=1 w:500 k:d w:200 k:p w:800 k:p w:800 t:719,1468 w:300
+scene kbd-num     UT_HOST_USB=1 w:500 k:d w:200 k:p w:800 k:p w:800 t:994,1468 w:300
+scene kbd-us      UT_HOST_USB=1 w:500 k:d w:200 k:p w:800 k:p w:800 t:1269,1468 t:1269,1468 t:82,2498 w:300
+scene gamepad     UT_HOST_USB=1 w:500 k:d w:200 k:p w:800 k:d w:200 k:d w:200 k:p w:800
+scene media       UT_HOST_USB=1 w:500 k:d w:200 k:p w:800 k:d w:200 k:d w:200 k:d w:200 k:p w:800
+scene presenter   UT_HOST_USB=1 w:500 k:d w:200 k:p w:800 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:800 k:u w:300 k:u w:2500
+scene sensors     UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1500
+scene battery     UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:800 k:p w:5000
+scene temps       UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:800 k:d w:200 k:p w:5000
+scene touch       UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:800 k:d w:200 k:d w:200 k:p w:800 t:400,900 g:700,1200,600,400 t:1000,2200 w:300
+scene qr          UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:d w:200 k:d w:200 k:d w:200 k:p w:800
 echo "PNGs in $png"

@@ -24,7 +24,7 @@
 #include "hash.h"
 #include "ufs.h"
 
-#define UT_VERSION "1.1"
+#define UT_VERSION "2.0"
 
 #define BANK2        0x880000000ULL
 #define RAMDISK_MAX  (1ULL << 30)
@@ -791,9 +791,13 @@ void ut_service(void)
 
 
 /* ---- UI ------------------------------------------------------------------------------------- */
-static const char *const tile_name[6] = { "USB", "Radio", "Files", "Measure", "Everyday", "Boot menu" };
-static const char *const tile_sub[6] = {
-    "Drives and shell", "Scans (v2)", "Card, partitions, hashes", "Charger, ruler, pixels", "Clocks, timer, calculator", "Leave Utility",
+#define NTILE 8
+enum { T_USB, T_REMOTE, T_SENSORS, T_RADIO, T_FILES, T_MEASURE, T_EVERYDAY, T_LEAVE };
+static const char *const tile_name[NTILE] = { "USB", "Remote", "Sensors", "Radio", "Files", "Measure", "Everyday",
+                                              "Boot menu" };
+static const char *const tile_sub[NTILE] = {
+    "Drives and shell", "Keys, gamepad, media", "Battery, heat, touch", "Chips and plans", "Card, partitions, hashes",
+    "Charger, ruler, pixels", "Clocks, calculator, QR", "Leave Utility",
 };
 static int focus;
 
@@ -823,9 +827,9 @@ void ut_status_bar(void)
 static void tile_rect(int i, int *x, int *y, int *w, int *h)
 {
     *w = 620;
-    *h = 520;
+    *h = 470;
     *x = 70 + (i % 2) * (*w + 60);
-    *y = 560 + (i / 2) * (*h + 60);
+    *y = 520 + (i / 2) * (*h + 46);
 }
 
 static void draw_home(void)
@@ -833,16 +837,16 @@ static void draw_home(void)
     ui_fill(0, UI_STATUS_H, UI_W, UI_H - UI_STATUS_H, C_BG);
     ui_text(F_TITLE, 70, 330, "Utility", C_L1);
     ui_text(F_DETAIL, 72, 430, "Starbite Utility OS " UT_VERSION, C_L2);
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < NTILE; ++i) {
         int x, y, w, h;
         tile_rect(i, &x, &y, &w, &h);
         if (i == focus)
             ui_round(x - 8, y - 8, w + 16, h + 16, 56, C_STAR);   /* rounded focus ring */
         ui_round(x, y, w, h, 48, i == focus ? C_CARD2 : C_CARD);
-        ui_text(F_TITLE_S, x + 50, y + 200, tile_name[i], i == 5 ? C_ORANGE : C_L1);
-        ui_text(F_DETAIL, x + 52, y + 300, tile_sub[i], C_L2);
-        if (i == 0)
-            ui_text(F_SMALL, x + 52, y + 420, usbd_configured() ? "connected" : "waiting for a computer",
+        ui_text(F_TITLE_S, x + 50, y + 180, tile_name[i], i == T_LEAVE ? C_ORANGE : C_L1);
+        ui_text_cut(F_DETAIL, x + 52, y + 280, tile_sub[i], w - 80, C_L2);
+        if (i == T_USB)
+            ui_text(F_SMALL, x + 52, y + 390, usbd_configured() ? "connected" : "waiting for a computer",
                     usbd_configured() ? C_GREEN : C_L3);
     }
     ui_text(F_SMALL, 70, UI_H - 120, "Volume: move   Power: open   tap a tile", C_L3);
@@ -909,19 +913,19 @@ static void usb_fill(struct page *p)
 
 static void info_fill(struct page *p, int tile)
 {
-    page_hdr(p, tile_name[tile]);
-    if (tile == 1) {
-        page_note(p, "Wi-Fi, Bluetooth LE and NFC scanners need bare-metal radio drivers (v2). Until then "
-                     "this tab shows what other OSes recorded.", C_L2);
-    } else if (tile == 2) {
-        page_note(p, "File manager (UFS read-only, card exFAT read-write), hashing, disk imaging and the hex "
-                     "viewer: milestone UO4.", C_L2);
-    } else if (tile == 3) {
-        page_note(p, "USB charger tester, screen ruler at the panel's real ppi, dead-pixel test and colour "
-                     "fields: next.", C_L2);
-    } else {
-        page_note(p, "Stopwatch, timer, world clock, scientific and programmer calculator, flashlight: next.",
-                  C_L2);
+    if (tile == T_RADIO) {
+        page_hdr(p, "What the phone has");
+        page_kv(p, "Wi-Fi + Bluetooth", "BCM4361 on PCIe and a UART", C_L1);
+        page_kv(p, "NFC", "Samsung sec-nfc chip on I2C (0x27)", C_L1);
+        page_kv(p, "GNSS + sensor hub", "BCM4775 on SPI", C_L1);
+        page_kv(p, "Cellular", "Shannon modem", C_L1);
+        page_hdr(p, "Coming");
+        page_note(p, "Wi-Fi scan: a portable BCM4361 core is being written (its firmware loads from VENDOR); "
+                     "then this tile lists the networks around, read only.", C_L2);
+        page_note(p, "NFC tag reader: needs its power rail (LDO38), the clock and the GPIO expander's VEN pin "
+                     "switched on with you present the first time; then tag type and UID, NDEF text and links. "
+                     "Never payment cards.", C_L2);
+        page_note(p, "Bluetooth LE scan after Wi-Fi (the same chip). The modem stays off: no transmitting.", C_L2);
     }
 }
 
@@ -986,23 +990,31 @@ static void page_screen(const char *title, int tile)
 
 static void open_tile(int i)
 {
-    if (i == 5) {
+    if (i == T_LEAVE) {
         if (ui_dialog("Leave Utility?", "The phone restarts into the Starbite menu.",
                       ram_bytes ? "The RAM disk and its files are gone after the restart." : "",
                       "Restart", C_ORANGE))
             act(1);
         return;
     }
-    if (i == 2) {
+    if (i == T_FILES) {
         ut_files();
         return;
     }
-    if (i == 3) {
+    if (i == T_MEASURE) {
         ut_measure();
         return;
     }
-    if (i == 4) {
+    if (i == T_EVERYDAY) {
         ut_everyday();
+        return;
+    }
+    if (i == T_REMOTE) {
+        ut_remote();
+        return;
+    }
+    if (i == T_SENSORS) {
+        ut_sensors();
         return;
     }
     page_screen(tile_name[i], i);
@@ -1048,12 +1060,12 @@ void sb_main(void)
         ut_service();
         int open = -1;
         if (e.type == EV_UP || e.type == EV_DOWN) {
-            focus = (focus + (e.type == EV_UP ? 5 : 1)) % 6;
+            focus = (focus + (e.type == EV_UP ? NTILE - 1 : 1)) % NTILE;
             draw_home();
         } else if (e.type == EV_SELECT) {
             open = focus;
         } else if (e.type == EV_TAP) {
-            for (int i = 0; i < 6; ++i) {
+            for (int i = 0; i < NTILE; ++i) {
                 int x, y, w, h;
                 tile_rect(i, &x, &y, &w, &h);
                 if (e.x >= x && e.x < x + w && e.y >= y && e.y < y + h)

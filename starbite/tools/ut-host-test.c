@@ -20,6 +20,7 @@
 #include "macros.h"
 #include "tz.h"
 #include "hid.h"
+#include "kbdmap.h"
 
 static int busy[16];
 static uintptr_t qbuf[16];
@@ -400,6 +401,127 @@ int main(int argc, char **argv)
             i += 1U + (sz == 3 ? 4U : sz);
         }
         CHECK(depth == 0, "report descriptor collections unbalanced (%d)", depth);
+    }
+
+    /* keyboard layouts (kbdmap.c): every layout types all of printable ASCII, Finnish also the Nordic letters
+     * and the euro sign; no two characters share a key press; every key is within the report's 0..0x65 */
+    {
+        static const uint32_t nordic[] = { 0xe4, 0xf6, 0xe5, 0xc4, 0xd6, 0xc5, 0x20ac };
+        for (int l = 0; l < KL_N; ++l) {
+            static uint32_t owner[256][256];
+            memset(owner, 0, sizeof(owner));
+            for (uint32_t cp = 0x20; cp < 0x7f + 7; ++cp) {
+                uint32_t c = cp < 0x7f ? cp : nordic[cp - 0x7f];
+                struct kstroke k[2];
+                int n = kbd_char(l, c, k);
+                if (cp >= 0x7f && l == KL_US) {
+                    CHECK(n == 0, "layout %s types U+%04X", kbd_layout_name[l], c);
+                    continue;
+                }
+                CHECK(n >= 1, "layout %s cannot type U+%04X", kbd_layout_name[l], c);
+                for (int i = 0; i < n; ++i)
+                    CHECK(k[i].key >= 4 && k[i].key <= 0x65 && !(k[i].mod & ~0x42U), "layout %s U+%04X: key %#x mod %#x",
+                          kbd_layout_name[l], c, k[i].key, k[i].mod);
+                if (n == 2)
+                    CHECK(k[1].key == 0x2c && !k[1].mod, "dead key U+%04X not followed by Space", c);
+                if (n == 1) {
+                    uint32_t *o = &owner[k[0].mod][k[0].key];
+                    CHECK(!*o, "layout %s: U+%04X and U+%04X are the same key press", kbd_layout_name[l], *o, c);
+                    *o = c;
+                } else if (n == 2) {
+                    uint32_t *o = &owner[k[0].mod | 0x80][k[0].key];
+                    CHECK(!*o, "layout %s: dead U+%04X and U+%04X are the same key", kbd_layout_name[l], *o, c);
+                    *o = c;
+                }
+            }
+        }
+        static const struct { int l; uint32_t cp; uint8_t mod, key; int n; } kc[] = {
+            { KL_US, '{', 0x02, 0x2f, 1 },    { KL_US, '@', 0x02, 0x1f, 1 },     { KL_US, '\\', 0, 0x31, 1 },
+            { KL_FI_MAC, '@', 0x40, 0x1f, 1 }, { KL_FI_MAC, '{', 0x42, 0x25, 1 }, { KL_FI_MAC, '|', 0x40, 0x24, 1 },
+            { KL_FI_MAC, 0x20ac, 0x02, 0x21, 1 }, { KL_FI_MAC, '$', 0x40, 0x21, 1 }, { KL_FI_MAC, '~', 0x40, 0x30, 2 },
+            { KL_FI_PC, '{', 0x40, 0x24, 1 }, { KL_FI_PC, 0x20ac, 0x40, 0x22, 1 }, { KL_FI_PC, '\\', 0x40, 0x2d, 1 },
+            { KL_FI_PC, '|', 0x40, 0x64, 1 }, { KL_FI_PC, '<', 0, 0x64, 1 },     { KL_FI_MAC, 0xe4, 0, 0x34, 1 },
+            { KL_FI_PC, 0xd6, 0x02, 0x33, 1 }, { KL_FI_MAC, 0xc5, 0x02, 0x2f, 1 }, { KL_FI_PC, '^', 0x02, 0x30, 2 },
+            { KL_FI_MAC, '\'', 0, 0x31, 1 },  { KL_FI_PC, '=', 0x02, 0x27, 1 },  { KL_FI_MAC, '-', 0, 0x38, 1 },
+        };
+        for (unsigned i = 0; i < sizeof(kc) / sizeof(kc[0]); ++i) {
+            struct kstroke k[2];
+            int n = kbd_char(kc[i].l, kc[i].cp, k);
+            CHECK(n == kc[i].n && k[0].mod == kc[i].mod && k[0].key == kc[i].key, "layout %s U+%04X: %d strokes, %#x+%#x",
+                  kbd_layout_name[kc[i].l], kc[i].cp, n, k[0].mod, k[0].key);
+        }
+        CHECK(kbd_layout_find("FI-mac", 6) == KL_FI_MAC && kbd_layout_find("us", 2) == KL_US &&
+              kbd_layout_find("fi", 2) == -1, "kbd_layout_find");
+        uint32_t cp;
+        CHECK(kbd_utf8("\xe2\x82\xac", &cp) == 3 && cp == 0x20ac && kbd_utf8("\xc3\xa4", &cp) == 2 && cp == 0xe4 &&
+              kbd_utf8("\xc3", &cp) == 1 && cp == 0xfffd, "kbd_utf8");
+    }
+    /* HID text in UTF-8 on the Finnish (PC) layout: the strokes, with a dead key's Space */
+    {
+        unsigned ph = USB_PHYS(USB_EP_HID_IN);
+        hid_layout = KL_FI_PC;
+        hid_reset();
+        hid_stats.dropped = 0;
+        hid_text("\xc3\x84@~\xe2\x82\xac");             /* Ä @ ~ € */
+        static const uint8_t want[][2] = { { 0x02, 0x34 }, { 0x40, 0x1f }, { 0x40, 0x30 }, { 0, 0x2c }, { 0x40, 0x22 } };
+        unsigned got = 0, bad = 0;
+        for (int i = 0; i < 200; ++i) {
+            busy[ph] = 0;
+            hid_service();
+            if (!busy[ph] || qlen[ph] != 9)
+                continue;
+            const volatile uint8_t *r = (const volatile uint8_t *)qbuf[ph];
+            if (!r[3])
+                continue;
+            if (got < 5 && (r[1] != want[got][0] || r[3] != want[got][1]))
+                ++bad;
+            ++got;
+        }
+        CHECK(got == 5 && !bad && !hid_stats.dropped, "FI text: %u strokes, %u wrong", got, bad);
+        hid_layout = KL_FI_MAC;
+        busy[ph] = 0;
+    }
+    /* the report descriptor's input reports are the sizes hid.c sends: 1 keyboard 8 bytes, 2 mouse 4, 3
+     * consumer 2, 4 gamepad 7 (+ the ID) */
+    {
+        uint8_t rep[256];
+        unsigned rn = usb_hid_report_desc(rep), size = 0, count = 0, id = 0, bits[8] = { 0 };
+        for (unsigned i = 0; i < rn;) {
+            uint8_t b = rep[i], sz = (uint8_t)(b & 3U), n = sz == 3 ? 4 : sz;
+            unsigned v = 0;
+            for (unsigned j = 0; j < n; ++j)
+                v |= (unsigned)rep[i + 1 + j] << (8 * j);
+            if ((b & 0xfcU) == 0x74U) size = v;
+            if ((b & 0xfcU) == 0x94U) count = v;
+            if ((b & 0xfcU) == 0x84U) id = v;
+            if ((b & 0xfcU) == 0x80U && id < 8) bits[id] += size * count;
+            i += 1U + n;
+        }
+        CHECK(bits[1] == 64 && bits[2] == 32 && bits[3] == 16 && bits[4] == 56, "input report bits: %u %u %u %u",
+              bits[1], bits[2], bits[3], bits[4]);
+    }
+    /* the gamepad: a state is sent once, before queued keys; the same state again sends nothing */
+    {
+        unsigned ph = USB_PHYS(USB_EP_HID_IN);
+        hid_reset();
+        busy[ph] = 0;
+        struct hid_pad gp = { 0x8005, 2, -127, 64, 0, 127 };
+        hid_gamepad(&gp);
+        hid_key(0, 0x04);
+        hid_service();
+        const volatile uint8_t *r = (const volatile uint8_t *)qbuf[ph];
+        CHECK(busy[ph] && qlen[ph] == 8 && r[0] == 4 && r[1] == 0x05 && r[2] == 0x80 && r[3] == 2 && r[4] == 0x81 &&
+              r[5] == 64 && r[7] == 127, "gamepad report");
+        busy[ph] = 0;
+        hid_service();
+        CHECK(busy[ph] && qlen[ph] == 9 && r[0] == 1, "the key after the gamepad state");
+        busy[ph] = 0;
+        hid_service();
+        busy[ph] = 0;
+        hid_gamepad(&gp);
+        hid_service();
+        CHECK(!busy[ph], "an unchanged gamepad state was sent again");
+        hid_reset();
     }
     printf("%s: %llu commands, %d failed checks\n", fails ? "FAILED" : "PASSED", (unsigned long long)msc_stats.cmds, fails);
     return fails != 0;

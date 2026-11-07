@@ -54,7 +54,7 @@ echo "utility: assets from $(basename "$SB7"), sha256 $(sha256sum "$SB7" | cut -
 # failure stops the build.
 if [ "$native" = 1 ]; then
     gcc -O1 -Wall -Wextra -Werror -I"$here" -I"$lib" -o "$out/ut-host-test" "$root/starbite/tools/ut-host-test.c" \
-        "$here/msc.c" "$here/fat.c" "$here/usb_desc.c" "$here/sha256.c" "$here/calcmath.c" "$here/exfat.c" "$here/macros.c" "$here/tz.c" "$here/hid.c" "$lib/str.c" -lm
+        "$here/msc.c" "$here/fat.c" "$here/usb_desc.c" "$here/sha256.c" "$here/calcmath.c" "$here/exfat.c" "$here/macros.c" "$here/tz.c" "$here/hid.c" "$here/kbdmap.c" "$here/qr.c" "$lib/str.c" -lm
     gzip -dc "$root/starbite/tools/fixtures/exfat-card.img.gz" > "$out/exfat-card.img"
     UT_EXFAT="$out/exfat-card.img" "$out/ut-host-test" "$out/ut-fat.img"
     # the formatted RAM disk with its files must pass fsck.fat, and hold them
@@ -65,6 +65,14 @@ if [ "$native" = 1 ]; then
         echo "utility: RAM disk image: fsck.fat clean, 3 files"
         rm -f "$out/ut-fat.img"
     fi
+    # the QR encoder (starbite/tools/qr-test.c): every symbol's structure; with zbarimg, each decodes back
+    gcc -O1 -Wall -Wextra -Werror -I"$here" -o "$out/qr-test" "$root/starbite/tools/qr-test.c" "$here/qr.c"
+    rm -rf "$out/qr" && mkdir -p "$out/qr"
+    "$out/qr-test" "$out/qr" | tail -1
+    if command -v zbarimg >/dev/null 2>&1; then
+        python3 "$root/starbite/tools/qr-check.py" "$out/qr" | tail -1
+    fi
+    rm -rf "$out/qr"
 fi
 
 CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie -fvisibility=hidden \

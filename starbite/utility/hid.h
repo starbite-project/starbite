@@ -19,11 +19,23 @@
 #define HID_NEXT     0x00b5U
 #define HID_PREV     0x00b6U
 
+#define HID_RALT  0x40U               /* right Alt: AltGr on a PC, Option on a Mac */
+#define HID_STOP     0x00b7U
+#define HID_EJECT    0x00b8U
+#define HID_BRIGHT_UP   0x006fU
+#define HID_BRIGHT_DOWN 0x0070U
+
+/* gamepad (report 4): 16 buttons, a hat (0 up, clockwise to 7; 8 centred), sticks X/Y and Z/Rz */
+struct hid_pad { uint16_t buttons; uint8_t hat; int8_t x, y, z, rz; };
+
 struct hid_stats { uint64_t reports, keys, clicks, dropped; };
 extern struct hid_stats hid_stats;
 
 void hid_key(uint8_t mod, uint8_t key);   /* press and release */
-void hid_text(const char *s);             /* letters, digits, space, newline, . , - / (US layout) */
+extern int hid_layout;                    /* kbdmap.h KL_*: the computer's keyboard layout */
+void hid_text(const char *s);             /* UTF-8, as the key presses of hid_layout (kbdmap.c) */
+int hid_text_pending(void);
+void hid_gamepad(const struct hid_pad *p);/* the new state; sent when it differs */
 void hid_move(int dx, int dy);            /* accumulated, sent in steps */
 void hid_wheel(int n);
 void hid_click(uint8_t btn);

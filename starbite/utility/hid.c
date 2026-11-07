@@ -5,6 +5,7 @@
 #include "hid.h"
 #include "usb_desc.h"
 #include "usb_dwc3.h"
+#include "kbdmap.h"
 
 #define P_HID   USB_PHYS(USB_EP_HID_IN)
 #define HID_BUF (USB_DMA_BASE + 0xb000UL)            /* 16 bytes, in the non-cacheable window */
@@ -45,54 +46,55 @@ void hid_key(uint8_t mod, uint8_t key)
 }
 
 /* Text waits here and goes into the report queue as room frees up (hid_service), so a macro longer than
- * the queue is typed whole; 4 slots stay free for clicks and keys pressed meanwhile. */
-static char pend[128];
+ * the queue is typed whole; 4 slots stay free for clicks and keys pressed meanwhile. UTF-8, typed as the
+ * key presses that give each character on the computer's layout (kbdmap.c); characters it has none for
+ * are skipped. */
+int hid_layout = KL_FI_MAC;
+static char pend[160];                                /* 0-terminated: a cut UTF-8 sequence stops at the 0 */
 static unsigned pend_h, pend_t;
 
 static void text_feed(void)
 {
-    while (pend_h < pend_t && room() >= 4) {
-        char c = pend[pend_h++];
-        uint8_t mod = 0, k = 0;
-        if (c >= 'a' && c <= 'z') {
-            k = (uint8_t)(0x04 + c - 'a');
-        } else if (c >= 'A' && c <= 'Z') {
-            k = (uint8_t)(0x04 + c - 'A');
-            mod = HID_SHIFT;
-        } else if (c >= '1' && c <= '9') {
-            k = (uint8_t)(0x1e + c - '1');
-        } else if (c == '0') {
-            k = 0x27;
-        } else if (c == ' ') {
-            k = 0x2c;
-        } else if (c == '\n') {
-            k = 0x28;
-        } else if (c == '.') {
-            k = 0x37;
-        } else if (c == ',') {
-            k = 0x36;
-        } else if (c == '-') {
-            k = 0x2d;
-        } else if (c == '/') {
-            k = 0x38;
-        }
-        if (k)
-            hid_key(mod, k);
+    while (pend_h < pend_t && room() >= 8) {
+        uint32_t cp;
+        pend_h += kbd_utf8(pend + pend_h, &cp);
+        struct kstroke k[2];
+        int n = kbd_char(hid_layout, cp, k);
+        for (int i = 0; i < n; ++i)
+            hid_key(k[i].mod, k[i].key);
     }
-    if (pend_h == pend_t)
+    if (pend_h >= pend_t)
         pend_h = pend_t = 0;
 }
 
 void hid_text(const char *s)
 {
     for (; s && *s; ++s) {
-        if (pend_t >= sizeof(pend)) {
-            ++hid_stats.dropped;                      /* more than 128 characters waiting */
+        if (pend_t + 1 >= sizeof(pend)) {
+            ++hid_stats.dropped;                      /* more than 159 bytes waiting */
             break;
         }
         pend[pend_t++] = *s;
     }
+    pend[pend_t] = 0;
     text_feed();
+}
+
+int hid_text_pending(void) { return pend_t > pend_h; }
+
+/* The gamepad (report 4) is a state: the newest one is sent when the endpoint is free, before the queue. */
+static uint8_t pad_r[8] = { 4, 0, 0, 8, 0, 0, 0, 0 };
+static int pad_dirty;
+
+void hid_gamepad(const struct hid_pad *p)
+{
+    const uint8_t r[8] = { 4, (uint8_t)p->buttons, (uint8_t)(p->buttons >> 8), (uint8_t)(p->hat > 8 ? 8 : p->hat),
+                           (uint8_t)p->x, (uint8_t)p->y, (uint8_t)p->z, (uint8_t)p->rz };
+    for (unsigned i = 0; i < 8; ++i) {
+        if (pad_r[i] != r[i])
+            pad_dirty = 1;
+        pad_r[i] = r[i];
+    }
 }
 
 void hid_move(int dx, int dy)
@@ -148,6 +150,16 @@ void hid_service(void)
     text_feed();
     if (!usbd_configured() || usbd_busy(P_HID))
         return;
+    volatile uint8_t *b = (volatile uint8_t *)HID_BUF;
+    if (pad_dirty) {
+        for (unsigned i = 0; i < 8; ++i)
+            b[i] = pad_r[i];
+        if (usbd_queue(P_HID, HID_BUF, 8) == 0) {
+            pad_dirty = 0;
+            ++hid_stats.reports;
+        }
+        return;
+    }
     if (qh == qt && (mdx || mdy || mwheel)) {         /* motion only when no click/key is waiting */
         int dx = clamp(mdx), dy = clamp(mdy), w = clamp(mwheel);
         mdx -= dx;
@@ -157,7 +169,6 @@ void hid_service(void)
     }
     if (qh == qt)
         return;
-    volatile uint8_t *b = (volatile uint8_t *)HID_BUF;
     for (unsigned i = 0; i < q[qh].n; ++i)
         b[i] = q[qh].b[i];
     if (usbd_queue(P_HID, HID_BUF, q[qh].n) == 0) {
@@ -170,6 +181,11 @@ void hid_reset(void)
 {
     qh = qt = 0;
     pend_h = pend_t = 0;
+    pend[0] = 0;
+    const uint8_t idle[8] = { 4, 0, 0, 8, 0, 0, 0, 0 };
+    for (unsigned i = 0; i < 8; ++i)
+        pad_r[i] = idle[i];
+    pad_dirty = 0;
     mdx = mdy = mwheel = 0;
     buttons = 0;
 }

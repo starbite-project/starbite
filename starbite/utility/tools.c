@@ -16,6 +16,8 @@ static int back_event(const struct ui_ev *e)
            (e->type == EV_TAP && ui_header_back_hit(e->x, e->y));
 }
 
+int ut_back_event(const struct ui_ev *e) { return back_event(e); }
+
 /* ---- Measure: the charger tester page with two full-screen tools --------------------------------- */
 static const char *chg_state(int d)
 {
@@ -245,8 +247,9 @@ static void hms(struct ub *u, uint64_t ms, int tenths)
     }
 }
 
-#define EV_ROW_Y(i) (UI_VIEW_Y0 + 40 + (i) * 580)
-#define EV_ROW_H 520
+#define EV_ROW_Y(i) (UI_VIEW_Y0 + 30 + (i) * 482)
+#define EV_ROW_H 440
+#define EV_N 5
 
 static struct { int run; uint64_t t0, acc; } sw;                 /* stopwatch */
 static struct { int run, done; uint64_t end, left, set; } tm = { 0, 0, 0, 0, 5 * 60 * 1000 };
@@ -257,9 +260,9 @@ static void card(int i, const char *title, const char *big, const char *hint, ui
     if (focused)
         ui_round(52, y - 8, UI_W - 104, EV_ROW_H + 16, 56, C_STAR);
     ui_round(60, y, UI_W - 120, EV_ROW_H, 48, focused ? C_CARD2 : C_CARD);
-    ui_text(F_HEAD, 110, y + 80, title, C_L2);
-    ui_text(F_BIG, 110, y + 260, big, c);
-    ui_text(F_SMALL, 110, y + 450, hint, C_L3);
+    ui_text(F_HEAD, 110, y + 72, title, C_L2);
+    ui_text(F_BIG, 110, y + 236, big, c);
+    ui_text(F_SMALL, 110, y + 390, hint, C_L3);
 }
 
 static void everyday_draw(int focus)
@@ -282,6 +285,7 @@ static void everyday_draw(int focus)
          tm.run ? "Power: pause" : "Power: start   tap: +1 min   Bixby: back",
          tm.done ? (flash ? C_ORANGE : C_RED) : tm.run ? C_GREEN : C_L1, focus == 2);
     card(3, "CALCULATOR", "Open", "scientific (degrees) and programmer (64-bit)", C_STAR, focus == 3);
+    card(4, "QR CODES", "Show", "Wi-Fi logins, links, notes from /starbite/qr.txt", C_STAR, focus == 4);
     ui_dirty(0, UI_VIEW_Y0, UI_W, UI_H - UI_VIEW_Y0);
 }
 
@@ -312,16 +316,22 @@ void ut_everyday(void)
         if (back_event(&e))
             break;
         if (e.type == EV_UP || e.type == EV_DOWN) {
-            focus = (focus + (e.type == EV_UP ? 3 : 1)) % 4;
+            focus = (focus + (e.type == EV_UP ? EV_N - 1 : 1)) % EV_N;
         } else if (e.type == EV_SELECT || e.type == EV_TAP) {
             int which = focus;
             if (e.type == EV_TAP)
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < EV_N; ++i)
                     if (e.y >= EV_ROW_Y(i) && e.y < EV_ROW_Y(i) + EV_ROW_H)
                         which = focus = i;
             if (which == 0) {
                 ut_awake = 0;                         /* recomputed by this loop; not held on other pages */
                 ut_world();
+                ui_input_reset();
+                ui_fill(0, 0, UI_W, UI_H, C_BG);
+                ui_header_draw("Everyday", "Utility", "", 0);
+            } else if (which == 4) {
+                ut_awake = 0;
+                ut_qr();
                 ui_input_reset();
                 ui_fill(0, 0, UI_W, UI_H, C_BG);
                 ui_header_draw("Everyday", "Utility", "", 0);
