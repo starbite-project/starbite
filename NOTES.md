@@ -2363,3 +2363,11 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   is read). Original BBI taken from the install image on the card, read-only over adb (scratch vhdx-extract.py: the VHDX
   BAT + the inner GPT + $MFT scan): BBI 8192 B (seq 2/2 clean, root key only, 1143e1d2...), BBI.LOG1 8192 B, LOG2 0.
   Copies in build/woa/vhdx-orig/. Written to config/ after one more ntfsfix (the crashed boot died at hive load).
+  12:30 ROOT CAUSE FOUND: the Windows UFS driver's bugcheck hook in the pmsg ring (TWRP /sys/fs/pstore/pmsg-ramoops-0)
+  logged "=UFSBUGCHECK BC=0x51 B1=0x13 ... B4=0xc000007f": REGISTRY_ERROR with STATUS_DISK_FULL. Reserved Storage is
+  on (ReserveManager: BaseHardReserveSize 5 GiB + BaseSoftReserveSize 1.5 GiB, ShippedWithReserves 1) and the volume
+  had 6.1 GiB free, so every ordinary write failed: the morning's Welcome-screen hang at 1.4 GB free, the profile error
+  and the registry bugchecks are all this. (The screen shows nothing: the crash reset is a normal RPON software reset.)
+  Fix: SOFTWARE ShippedWithReserves 0 + PassedPolicy 0 (9f4d904c); SYSTEM HibernateEnabledDefault 0 + HiberbootEnabled
+  0 (e530c047); hiberfil.sys and temp files deleted: 7206 MiB free. Lesson: read the pmsg ring FIRST after any Windows
+  crash (=UFSBUGCHECK). Tools: tools/woa/hive-check.py, hive-replay.py.
