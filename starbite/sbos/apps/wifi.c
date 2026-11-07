@@ -86,10 +86,10 @@ static void show(void)
         for (int i = 0; i < shown; ++i) {
             name_of(nm, sizeof(nm), nets[i].ssid, nets[i].ssid_len);
             fmt_init(&f);
-            fmt_s(&f, nets[i].secure ? "Secured (later) \xc2\xb7 " : "Open \xc2\xb7 ");
+            fmt_s(&f, nets[i].saved ? "Saved \xc2\xb7 " : nets[i].secure ? "Secured (later) \xc2\xb7 " : "Open \xc2\xb7 ");
             fmt_s(&f, strength(nets[i].rssi));
             fmt_s(&f, nets[i].band5 ? " \xc2\xb7 5 GHz" : " \xc2\xb7 2.4 GHz");
-            ui_button((uint32_t)(10 + i), nm, f.b, nets[i].secure ? UI_DIM : 0);
+            ui_button((uint32_t)(10 + i), nm, f.b, nets[i].saved ? UI_ACCENT : nets[i].secure ? UI_DIM : 0);
         }
         if (s.state == SBOS_WIFI_UP && !nn)
             ui_textline("No networks heard.", GREY);

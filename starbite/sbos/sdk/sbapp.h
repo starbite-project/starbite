@@ -146,6 +146,7 @@ enum { SBOS_WIFI_OFF = 0, SBOS_WIFI_STARTING, SBOS_WIFI_UP, SBOS_WIFI_SCANNING, 
 struct sbos_wifi_net {
     uint8_t ssid[33], ssid_len, bssid[6];
     int32_t rssi, secure, channel, band5;
+    int32_t saved;                      /* 0.4.2: the phone's saved network (store entry "wifinet"): joinable */
 };
 struct sbos_wifi {
     int32_t state, nets, rssi, secs;    /* secs: in this state */

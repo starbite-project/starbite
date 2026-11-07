@@ -21,7 +21,9 @@
 #include "bcmw.h"
 #include "bcmw_priv.h"                      /* w->dead: the chip stopped answering */
 #include "net.h"
+#include "store.h"
 #ifdef SB_HOST
+#include <stdlib.h>
 #include "host/model.h"
 #else
 #include "sb/bcmw_sb.h"
@@ -45,6 +47,12 @@ static int nnets, scan_heard;
 static uint16_t sync;
 static int joined = -1;
 static int pinged;
+/* the saved network (0.4.2): the store entry "wifinet", two lines (name, WPA2 passphrase or empty), made on the
+ * Mac from the user's input for the Wi-Fi tests; read only, never logged, never shown (the passphrase) */
+static uint8_t sv_ssid[33];
+static unsigned sv_len;
+static char sv_pass[65];
+static int sv_ok, join_pending;
 static int w_ready;                         /* bcmw_init succeeded on w (quiesce and leave only then) */
 static int dhcp_go;                         /* the link came up inside a callback: DHCP starts from the tick */
 
@@ -121,6 +129,40 @@ static void os_log(void *ctx, const char *line)
     sb_logf("wifi: ", line);
 }
 
+static void load_saved(void)
+{
+    static uint8_t buf[4096] __attribute__((aligned(4096)));
+    unsigned i = 0, n = 0;
+    sv_ok = 0;
+#ifdef SB_HOST
+    unsigned len = 0;
+    const char *h = getenv("SBOS_HOST_WIFINET");    /* "name\npassphrase" */
+    if (!h)
+        return;
+    while (h[len] && len + 1 < sizeof(buf))
+        buf[len] = (uint8_t)h[len], ++len;
+    buf[len] = 0;
+#else
+    struct store_ent e;
+    if (!store_find("ufs:wifinet", &e) || !e.size || e.size >= sizeof(buf) || store_load(&e, (uintptr_t)buf, sizeof(buf)))
+        return;
+    buf[e.size] = 0;
+#endif
+    while (buf[i] && buf[i] != '\n' && buf[i] != '\r' && n < 32)
+        sv_ssid[n++] = buf[i++];
+    sv_len = n;
+    while (buf[i] == '\r' || buf[i] == '\n')
+        ++i;
+    n = 0;
+    while (buf[i] && buf[i] != '\n' && buf[i] != '\r' && n < 64)
+        sv_pass[n++] = (char)buf[i++];
+    sv_pass[n] = 0;
+    memset(buf, 0, sizeof(buf));
+    sv_ok = sv_len > 0 && (n == 0 || (n >= 8 && n <= 64));
+    sb_log(sv_ok ? "wifi: a saved network is set (name and passphrase not logged)" :
+                   "wifi: the saved network entry is not usable (name, or a passphrase of 8..64 characters)");
+}
+
 static void add_bss(const struct bcmw_bss *b)
 {
     if (!b->ssid_len)
@@ -153,6 +195,7 @@ static void add_bss(const struct bcmw_bss *b)
     memcpy(n->bssid, b->bssid, 6);
     n->rssi = b->rssi;
     n->secure = secure;
+    n->saved = sv_ok && sv_len == b->ssid_len && !memcmp(sv_ssid, b->ssid, sv_len);
     n->channel = (int32_t)b->channel;
     n->band5 = (int32_t)b->band5;
 }
@@ -194,7 +237,7 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
     } else if (ev->type == BCMW_E_LINK) {
         if (ev->flags & 1) {
             if (st == SBOS_WIFI_JOINING) {
-                logn("wifi: joined an open network in ", sb_ms() - t_state, " ms; asking for an address (DHCP)");
+                logn("wifi: the link is up after ", sb_ms() - t_state, " ms; asking for an address (DHCP)");
                 set_state(SBOS_WIFI_DHCP, "");
                 dhcp_go = 1;                /* not from inside bcmw_poll: the first frame opens the tx flow ring */
             }
@@ -320,7 +363,8 @@ int wifi_power(int on)
     dk_next = dk_new = dk_reused = 0;      /* the DMA blocks of the first power-on, again in order */
 #ifdef SB_HOST
     model_reset();
-    M.open_ap = 1;
+    M.open_ap = getenv("SBOS_HOST_WIFINET") == 0;  /* with a saved network: the model's WPA2 "test-ap" */
+    M.echo_sync = 1;
     memset(&os, 0, sizeof(os));
     os.rd32 = model_rd32, os.wr32 = model_wr32, os.rd16 = model_rd16, os.wr16 = model_wr16;
     os.udelay = model_udelay, os.now_us = model_now, os.dma_alloc = model_dma_alloc;
@@ -339,6 +383,7 @@ int wifi_power(int on)
     cfg.stop_after = BCMW_STEP_UP;
 #ifdef SB_HOST
     cfg.any_files = 1;
+    memcpy(cfg.mac, "\x02\x11\x22\x33\x44\x55", 6);   /* the station address the model's access point expects */
 #endif
     if (bcmw_init(w, &os, &cfg) != BCMW_OK) {
         set_state(SBOS_WIFI_FAILED, "The Wi-Fi core did not start");
@@ -346,6 +391,8 @@ int wifi_power(int on)
     }
     w_ready = 1;
     dhcp_go = 0;
+    join_pending = 0;
+    load_saved();
     step = 0;
     nnets = 0;
     joined = -1;
@@ -379,8 +426,20 @@ int wifi_join(int i)
 {
     if (st != SBOS_WIFI_UP || i < 0 || i >= nnets)
         return SBOS_EAGAIN;
-    if (nets[i].secure)
-        return SBOS_EPERM;                  /* 0.4: open networks only */
+    if (nets[i].secure && !nets[i].saved)
+        return SBOS_EPERM;                  /* secured: only the saved network (0.4.2) */
+    if (nets[i].saved) {
+        /* bcmw_join does the WPA2 handshake and blocks (up to 15 s): the screen shows "Joining" first, the join
+         * runs on the next tick (the heater is never on with Wi-Fi) */
+        const struct bcmw_info *in = bcmw_info(w);
+        struct sbnet_os no = { 0, net_tx, net_now, net_random, net_log, 0 };
+        sbnet_init(&net, &no, in->mac);
+        joined = i;
+        join_pending = 1;
+        sb_log("wifi: joining the saved network (name not logged)");
+        set_state(SBOS_WIFI_JOINING, "");
+        return 0;
+    }
     const struct bcmw_info *in = bcmw_info(w);
     struct sbnet_os no = { 0, net_tx, net_now, net_random, net_log, 0 };
     sbnet_init(&net, &no, in->mac);
@@ -470,6 +529,22 @@ void wifi_timer(unsigned id)
             set_state(SBOS_WIFI_FAILED, "The radio stopped answering (logged)");
             return;
         }
+        if (join_pending && st == SBOS_WIFI_JOINING && now - t_state >= 100) {
+            join_pending = 0;
+            uint64_t t0 = sb_ms();
+            int r = bcmw_join(w, sv_ssid, sv_len, sv_pass, 15000);
+            if (r != BCMW_OK) {
+                logn("wifi: the saved network did not take the phone after ", sb_ms() - t0, " ms");
+                joined = -1;
+                dhcp_go = 0;                /* a LINK event may have come before the handshake failed */
+                set_state(SBOS_WIFI_UP, "Could not join: the passphrase, or too far away");
+            } else if (st == SBOS_WIFI_JOINING) {
+                logn("wifi: joined the saved network in ", sb_ms() - t0, " ms; asking for an address (DHCP)");
+                set_state(SBOS_WIFI_DHCP, "");
+                dhcp_go = 1;
+            }
+            now = sb_ms();                  /* the join blocked: states were set after the tick's start */
+        }
         if (dhcp_go && st == SBOS_WIFI_DHCP) {
             dhcp_go = 0;
             sbnet_start(&net);
@@ -479,7 +554,7 @@ void wifi_timer(unsigned id)
             logn("wifi: the scan timed out with ", (uint64_t)nnets, " networks");
             set_state(SBOS_WIFI_UP, "");
         }
-        if (st == SBOS_WIFI_JOINING && now - t_state > JOIN_MS) {
+        if (st == SBOS_WIFI_JOINING && !join_pending && now - t_state > JOIN_MS) {
             sb_log("wifi: the join timed out");
             (void)bcmw_leave(w);
             joined = -1;

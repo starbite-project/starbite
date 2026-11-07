@@ -817,6 +817,19 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.11 Version 0.4.2 (2026-11-08, overnight)
+
+- Wi-Fi: **the saved network**: the store entry `wifinet` (two lines: the name, the WPA2 passphrase or nothing; the
+  same entry the Wi-Fi core's T4 test reads, made on the Mac from the user's input, never in git) is read at Wi-Fi
+  on, never logged; its network is listed as "Saved" and joins with the core's WPA2 handshake (`bcmw_join`, which
+  blocks up to 15 s: the screen shows "Joining" first, the join runs on the next tick; the heater is never on
+  then). A wrong passphrase is refused ("Could not join: the passphrase, or too far away").
+- Fixed: after a blocking join the tick re-reads the clock (a stale time made the DHCP timeout fire at once).
+- `starbite/host/sbos-wifi-test.sh`: open and saved joins with DHCP and the router's ping, a wrong passphrase,
+  20 on / off cycles (DMA blocks reused), the heater refused while Wi-Fi is on, no names or addresses logged
+  (17 checks). The model's Starbite OS mode (`M.echo_sync`) answers scans with their sync id and DHCP / ARP / ping
+  on the WPA2 network too.
+
 ### 12.10 Version 0.4.1 (2026-11-08, overnight)
 
 - UI: red hold buttons (Call 112, the alarm) are filled red-tinted cards with a light label; a control after a text
@@ -1039,3 +1052,7 @@ forced restart). Cause and fixes: 8.6 and 12.5.
   (as T3 did). Undo: none needed (the radio is off at the end, and a reset unpowers it anyway).
 - **T16 (the user present, an open network):** the normal image; Wi-Fi → on → pick an open network (a phone's
   hotspot without a password works) → expect "Connected", the address and "The router answers in N ms".
+- **T17 (0.4.2, the saved network):** with the store's `wifinet` entry (the Wi-Fi core's T4 entry), Wi-Fi → on →
+  the network marked "Saved" → expect `wifi: joining the saved network (name not logged)`, `link: ... JOINED`, an
+  address and the router's ping. This one can run unattended only with the user's agreement (it transmits on their
+  network, as T4 did).

@@ -311,7 +311,7 @@ void model_ap_tx(const uint8_t *f, unsigned len)
     uint8_t want[16];
 
     M.tx_seen++;
-    if (M.open_ap && len >= 14 + 28 && f[12] == 0x08 && f[13] == 0x06 && m[7] == 1 &&
+    if ((M.open_ap || M.echo_sync) && len >= 14 + 28 && f[12] == 0x08 && f[13] == 0x06 && m[7] == 1 &&
         m[24] == 192 && m[25] == 168 && m[26] == 4 && m[27] == 1) {     /* ARP: who has the router? */
         uint8_t r[14 + 28];
         memcpy(r, f + 6, 6);
@@ -328,7 +328,7 @@ void model_ap_tx(const uint8_t *f, unsigned len)
     if (len < 14 || f[12] != 0x88 || f[13] != 0x8e) {
         if (len >= 14 && f[12] == 0x08 && f[13] == 0x00) {
             M.tx_ip++;
-            if (M.open_ap)
+            if (M.open_ap || M.echo_sync)
                 dhcp_server(f, len);
         }
         return;

@@ -32,6 +32,8 @@ struct model {
      * SET_SSID with wsec 0 / wpa_auth 0 associates) and answers DHCP (DISCOVER: OFFER, REQUEST: ACK, address
      * 192.168.4.23 from 192.168.4.1). 0 (the core's own test): WPA2 as before. */
     int open_ap;
+    int echo_sync;                      /* Starbite OS's preview: undirected scans answered with their own sync id, and
+                                         * DHCP, ARP and ping answered also on the WPA2 network */
     unsigned dhcp_offers, dhcp_acks;
 };
 extern struct model M;
