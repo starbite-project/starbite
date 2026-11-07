@@ -257,6 +257,42 @@ so nothing here depends on them.
    it). Whether ufxsynopsys.sys itself behaves differently by hardware ID is not visible from the
    INF; the first L1 boot shows it. Host tests keep using layout A.
 
+### 5.1 Device mode needs a USBFN configuration (proposal for L1)
+
+Our image's SYSTEM hive (`build/win/hive/SYSTEM-hk-th`, 2026-11-07) has **no
+`Control\USBFN` key at all**: desktop Windows ships the function stack (ufx01000, ufxsynopsys,
+genericusbfn are installed) but no configuration. Microsoft's "USB registry settings for a function
+controller driver" says every device must set `idVendor`, `idProduct`, `ManufacturerString` and
+`ProductString`, and that a custom interface needs `CurrentConfiguration` pointing at a
+`Configurations\<name>` whose `InterfaceList` names `Interfaces\<name>` keys; **the interface key's
+name becomes the child's hardware ID** (`USBFN\<name>`). genericusbfn.inf matches
+`USBFN\GENERICUSBFN` (plain install, no ACL), `USBFN\MTP`, `USBFN\IpOverUSB`, `USBFN\UOSFlashing`,
+`USBFN\MainOSFlashing`. (`Control\USB` already has `DualRoleFeatures = 1` and
+`OsDefaultRoleSwitchMode = 6`; they don't matter without URS.)
+
+Proposed keys (all under `HKLM\SYSTEM\ControlSet001\Control\USBFN`; written offline by the main
+session, clean hive only):
+
+| Key | Value | Type | Data |
+|---|---|---|---|
+| `USBFN` | `idVendor` | DWORD | L1's choice. The Mac stalls on a never-seen VID:PID until the user approves it (memory note): the first L1 boot is attended, so a new ID is fine there; 1209:0001 (the Utility OS's) is known to the Mac |
+| `USBFN` | `idProduct` | DWORD | as above |
+| `USBFN` | `ManufacturerString` | SZ | `Starbite` |
+| `USBFN` | `ProductString` | SZ | `Starbite Link` |
+| `USBFN` | `CurrentConfiguration` | SZ | `StarbiteLink` |
+| `USBFN` | `IncludeDefaultCfg` | DWORD | 0 |
+| `USBFN\Configurations\StarbiteLink` | `InterfaceList` | MULTI_SZ | `GenericUsbFn` |
+| `USBFN\Interfaces\GenericUsbFn` | `InterfaceGUID` | SZ | `{d274dae6-37b0-4c76-bf10-3a9681346dd1}` (new; the user-mode side finds the interface by it) |
+| `USBFN\Interfaces\GenericUsbFn` | `InterfaceDescriptor` | BINARY | `09 04 00 00 02 FF 00 00 00  07 05 81 02 00 02 00  07 05 01 02 00 02 00` |
+
+The descriptor: one vendor-class interface (FF/00/00) with bulk IN 0x81 and bulk OUT 0x01, 512
+bytes. The stack fills in `bInterfaceNumber` and `iInterface`. The doc calls the value "a binary
+representation of an interface descriptor" and says class-specific descriptors can be part of the
+set, so the endpoint descriptors are given right behind it [unverified: no Microsoft sample of
+the bytes is published; the first L1 boot's Enum keys and the Mac's `ioreg` show whether the
+endpoints came through]. With the key named `GenericUsbFn` the child is `USBFN\GenericUsbFn` and
+genericusbfn.sys binds inbox. L1's own endpoint layout replaces this one when it exists.
+
 ## 6. Build
 
 ```sh
@@ -285,7 +321,10 @@ edk2 and iasl in the lima VM `starbite`):
 | `usbh-vbus0` | host | A (`SBUSBXHC`) | off | T1 |
 | `usbh-vbus1` | host | A (`SBUSBXHC`) | MCU | T2-T5 |
 | `usb-urs-auto` | auto | B (`SBUSBURS`) | off | URS experiment (section 5, item 4) |
-| `usb-ufn-device` | device | C (`SBUSBUFN`) | off | L1 without URS (section 5, item 5) |
+| `usb-ufn-device` | device | C (`SBUSBUFN`) | off | L1 without URS (section 5, item 5; run by the main session) |
+
+`SUFFIX=-gpu EXTRA_AML=<StarbiteGpu.aml>` builds the same four with the GPU track's `SBGPU` blob as
+`starbite-uefi-<name>-gpu.bin` (sha256s in `build/woa/usbh-SHA256SUMS-gpu`).
 
 A fresh edk2 build is not byte-reproducible (`__DATE__`, `__TIME__` and BUILD_EPOCH move strings
 and constants, which changes the SEC/PEI layout), which is why only the new modules come from it.

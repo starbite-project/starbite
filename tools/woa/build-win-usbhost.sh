@@ -2,7 +2,9 @@
 # Windows UEFI images with USB (Star2LteUsbDxe) and the shared SSDT installer (Star2LteSsdtDxe);
 # docs/WIN11-USB.md sections 4.1 and 6.
 #   tools/woa/build-win-usbhost.sh                    the three USB images below
-#   EXTRA_AML="a.aml b.aml" tools/woa/build-win-usbhost.sh   + other tracks' blobs in every image
+#   EXTRA_AML="a.aml b.aml" SUFFIX=-gpu tools/woa/build-win-usbhost.sh
+#                                                     + other tracks' blobs in every image, names
+#                                                       starbite-uefi-<name><SUFFIX>.bin
 # Every image is today's Windows UEFI (src38) plus added files only:
 #   - SEC/PEI, the bootshim and our PMIC RTC module are src38's own files (build/woa of the main
 #     checkout: Star2LtePkg-src38.fd, pmic-rtc.ffs, the first 384 bytes of starbite-uefi-src38.bin).
@@ -30,6 +32,8 @@ RTC=b336f62d-4135-4a55-ae4e-4971bbf0885d
 USBDXE=93eb628b-5eff-4ae2-834d-cf7aaf7bdc7c
 SSDTDXE=5dd14183-80d0-4d05-938e-f74bc42e4e6a
 out=build/woa
+SUFFIX=${SUFFIX:-}
+[ -z "${EXTRA_AML:-}" ] || [ -n "$SUFFIX" ] || { echo "EXTRA_AML needs a SUFFIX so the plain images are kept" >&2; exit 1; }
 for f in "$rel" "$W/Star2LtePkg-src38.fd" "$W/pmic-rtc.ffs" "$W/src38.fd" "$W/starbite-uefi-src38.bin"; do
     [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
 done
@@ -81,13 +85,13 @@ image() {   # image NAME ROLE ACPI VBUS BLOB
         --kill "$RTC" --add "$W/pmic-rtc.ffs" --add "$out/$name-usb.ffs" --add "$out/$name-ssdt.ffs" \
         --add "$out/acpi/$blob.ffs" ${extra[@]+"${extra[@]}"} >/dev/null
     python3 tools/woa/dxe-diff.py "$W/src38.fd" "$out/$name.fd"
-    cat "$out/src38-bootshim.bin" "$out/$name.fd" > "$out/starbite-uefi-$name.bin"
+    cat "$out/src38-bootshim.bin" "$out/$name.fd" > "$out/starbite-uefi-$name$SUFFIX.bin"
 }
 image usbh-vbus0 0 0 0 UsbXhc
 image usbh-vbus1 0 0 1 UsbXhc
 image usb-urs-auto 2 1 0 UsbUrs
 image usb-ufn-device 1 2 0 UsbUfn
-(cd "$out" && shasum -a 256 starbite-uefi-usbh-vbus0.bin starbite-uefi-usbh-vbus1.bin starbite-uefi-usb-urs-auto.bin \
-    starbite-uefi-usb-ufn-device.bin \
-    acpi/*.aml > usbh-SHA256SUMS && cat usbh-SHA256SUMS)
+(cd "$out" && shasum -a 256 starbite-uefi-usbh-vbus0$SUFFIX.bin starbite-uefi-usbh-vbus1$SUFFIX.bin \
+    starbite-uefi-usb-urs-auto$SUFFIX.bin starbite-uefi-usb-ufn-device$SUFFIX.bin \
+    acpi/*.aml ${EXTRA_AML:-} > usbh-SHA256SUMS$SUFFIX && cat usbh-SHA256SUMS$SUFFIX)
 rm -rf tools/woa/__pycache__
