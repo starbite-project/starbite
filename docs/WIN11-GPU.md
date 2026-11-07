@@ -627,6 +627,16 @@ after 120 s) counted them, so the CPU stayed at 1.05 GHz and sbmali (standalone)
 sbthermal's guard clears after 10 s, by which time its own risky steps (the first TMU/CMU reads, the CPU
 boost request at ~2 s) are done.
 
+**T8 run 1 (sbmali 3fc6376a standalone next to Basic Display, m3probe firmware; `build/win/results-m3probe/SYSTEM-r`):
+the real draw works under Windows, and the 572 MHz clock path too.** Step 7, Done 1, TriAlloc 7, Triangle 1;
+legacy and AArch64 20 runs each (Parameters\Runs was still 20 from the T5 bind): WRITE_VALUE, clear and XNU's
+Mesa triangle (tiler + fragment) 20/20, the triangle's 86528 pixels identical in every run, 0 foreign pixels,
+0 faults, slowest job 90 µs; GPU at most 43.6 °C, 0 throttles; GPU clock and BUCK6 restored. The clock: the
+GPU ran at 572 MHz. `GpuClockRestore` is only written after a successful raise, and the raise passed the
+PLL_G3D cross-check (no `GpuClockMismatch`); the `GpuKhzReq`/`GpuPllKhz` 260000 seen afterwards were the
+restore writing the same value names, now separate (`RestoreKhzReq`, `RestorePllKhz`, plus `GpuPllKhzMax`).
+To do: 200 runs per format (Runs 200 or the value deleted) for the page-table comparison.
+
 ### 10.2 Next phone tests
 
 | # | Test | What it proves | Risk |

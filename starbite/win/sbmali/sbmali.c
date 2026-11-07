@@ -51,6 +51,7 @@ typedef struct _SM_CTX {
     BOOLEAN BuckRaised;
     BOOLEAN GpuClockRaised;               /* a DVFS request above S-Boot's 260 MHz is in effect */
     ULONG GpuKhzNow;
+    ULONG GpuPllMax;                      /* the highest PLL_G3D read back after a raise */
     PMDL HeapMdl, RtMdl;                  /* T8: the blob's tiler heap (16 MiB) and its render-target window */
     PVOID RtVa;                           /* CPU view of the render-target window (uncached) */
     UCHAR BuckOld;
@@ -262,7 +263,7 @@ static void AcpmUnlock(PSM_CTX c, BOOLEAN Locked)
 /* The GPU clock through ACPM DVFS domain 4 (the GPU; sbw_acpm refuses anything but 2, 3 and 4), BUCK6 back
  * to 950 mV after it, then PLL_G3D read back: it must land on the request (within 1 %). Returns 0 when it
  * did; logs GpuKhzReq / GpuPllKhz / GpuDvfs. */
-static int SetGpuClock(PSM_CTX c, ULONG Khz)
+static int SetGpuClock(PSM_CTX c, ULONG Khz, BOOLEAN Restore)
 {
     BOOLEAN locked;
     int rc;
@@ -273,9 +274,12 @@ static int SetGpuClock(PSM_CTX c, ULONG Khz)
     AcpmUnlock(c, locked);
     KeStallExecutionProcessor(1000);
     pll = sbm_gpu_pll_khz(&c->Io);
-    Log(L"GpuKhzReq", Khz, FALSE);
-    Log(L"GpuPllKhz", pll, FALSE);
-    Log(L"GpuDvfs", (ULONG)rc, TRUE);
+    /* separate names for the raise/throttle and for the final restore (run 1 of T8 overwrote one with the other) */
+    Log(Restore ? L"RestoreKhzReq" : L"GpuKhzReq", Khz, FALSE);
+    Log(Restore ? L"RestorePllKhz" : L"GpuPllKhz", pll, FALSE);
+    Log(Restore ? L"RestoreDvfs" : L"GpuDvfs", (ULONG)rc, TRUE);
+    if (!Restore && pll > c->GpuPllMax)
+        c->GpuPllMax = pll;
     if (rc)
         return rc;
     c->GpuKhzNow = Khz;
@@ -291,7 +295,7 @@ static void Finish(PSM_CTX c)
         c->GpuTouched = FALSE;
     }
     if (c->GpuClockRaised)
-        Log(L"GpuClockRestore", (ULONG)SetGpuClock(c, 260000), TRUE);   /* S-Boot's clock, before BUCK6 */
+        Log(L"GpuClockRestore", (ULONG)SetGpuClock(c, 260000, TRUE), TRUE);   /* S-Boot's clock, before BUCK6 */
     if (c->BuckRaised) {
         BOOLEAN locked;
         if (AcpmLock(c, &locked)) {
@@ -434,7 +438,7 @@ static VOID SmThread(PVOID Ctx)
 
     /* 3b. The GPU clock (T8): domain 4, cross-checked on PLL_G3D; a miss puts 260 MHz back and stops. */
     if (gpukhz) {
-        int g = SetGpuClock(c, gpukhz);
+        int g = SetGpuClock(c, gpukhz, FALSE);
         if (g) {
             Log(L"GpuClockMismatch", (ULONG)g, TRUE);
             goto out;
@@ -462,7 +466,7 @@ static VOID SmThread(PVOID Ctx)
                 want = gpukhz;
             if (gpukhz && want != c->GpuKhzNow) {
                 throttles++;
-                if (SetGpuClock(c, want)) {
+                if (SetGpuClock(c, want, FALSE)) {
                     gate = 30;
                     Log(L"ThermalStop", gate, TRUE);
                     break;
@@ -482,6 +486,7 @@ static VOID SmThread(PVOID Ctx)
     Log(L"GpuMilliCEnd", (ULONG)last.gpu_mc, FALSE);
     Log(L"GpuMaxMilliC", (ULONG)last.max_gpu_mc, FALSE);
     Log(L"Throttles", throttles, FALSE);
+    Log(L"GpuPllKhzMax", c->GpuPllMax, FALSE);
     Log(L"Done", 1, TRUE);
 out:
     Step(6);
