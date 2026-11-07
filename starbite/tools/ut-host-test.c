@@ -17,6 +17,7 @@
 #include "hash.h"
 #include "calc.h"
 #include "exfat.h"
+#include "macros.h"
 
 static int busy[16];
 static uintptr_t qbuf[16];
@@ -282,9 +283,31 @@ int main(int argc, char **argv)
             ok &= fb[i] == (uint8_t)((i + 199999) * 13 + 5);
         CHECK(ok, "frag.bin piece content");
         CHECK(exfat_walk(&fs, "/nope", &e, ents, 32) != 0, "missing path refused");
+        /* the macro pad's file, as pad.c reads it */
+        CHECK(exfat_walk(&fs, "/starbite/macros.toml", &e, ents, 32) == 0 && !e.dir && e.size < 4096 &&
+              exfat_read_chain(&fs, e.first, e.nofat, 0, fb, e.size) == 0, "macros.toml on the card");
+        {
+            struct macro m[8];
+            int k = macros_parse((const char *)fb, (unsigned)e.size, m, 8);
+            CHECK(k == 4 && !strcmp(m[2].label, "Sign-off") && m[3].mod == 0x0a && m[3].key == 0x21,
+                  "card macros: %d", k);
+        }
         fclose(card);
     } else {
         printf("exFAT: no UT_EXFAT fixture, skipped\n");
+    }
+    /* macros.toml */
+    {
+        const char *src = "# my buttons\n\"Copy\" = \"cmd+c\"\r\n  \"Lock\" = \"ctrl+cmd+q\"\n\"Sig\" = \"text:Best regards\"\n"
+                          "\"Bad\" = \"hyper+x\"\n\"F5\" = \"f5\"\n\"Tab back\" = \"shift+tab\"\nnot a line\n";
+        struct macro m[8];
+        int n = macros_parse(src, (unsigned)strlen(src), m, 8);
+        CHECK(n == 5, "macros: %d parsed (want 5)", n);
+        CHECK(n >= 5 && !strcmp(m[0].label, "Copy") && m[0].mod == 0x08 && m[0].key == 0x06, "cmd+c");
+        CHECK(n >= 5 && m[1].mod == 0x09 && m[1].key == 0x14, "ctrl+cmd+q");
+        CHECK(n >= 5 && !strcmp(m[2].text, "Best regards") && !m[2].key, "text macro");
+        CHECK(n >= 5 && m[3].key == 0x3e && !m[3].mod, "f5");
+        CHECK(n >= 5 && m[4].mod == 0x02 && m[4].key == 0x2b, "shift+tab");
     }
     /* the configuration descriptor, both speeds */
     for (int fs = 0; fs < 2; ++fs) {

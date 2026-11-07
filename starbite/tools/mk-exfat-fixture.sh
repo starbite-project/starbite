@@ -1,7 +1,7 @@
 #!/bin/sh
 # Makes starbite/tools/fixtures/exfat-card.img.gz for the Utility OS host test (exfat.c): a 16 MiB "card"
 # (exfat-fuse) with an MBR, an exFAT partition (type 0x07) at sector 2048 with 4 KiB clusters, and known files, among
-# them a fragmented one. Needs the VM's root (loop mount). Run once; the result is committed:
+# them a fragmented one and /starbite/macros.toml (the macro pad). Needs the VM's root (loop mount). Run once; the result is committed:
 #   limactl shell starbite -- sudo sh /Users/dev/project-starbite/starbite/tools/mk-exfat-fixture.sh
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
@@ -25,6 +25,9 @@ sync
 rm "$mnt/f1"
 sync
 python3 -c "import sys; sys.stdout.buffer.write(bytes((i*13+5)&255 for i in range(500000)))" > "$mnt/frag.bin"
+sync
+mkdir -p "$mnt/starbite"
+printf '# the macro pad (docs/UTILITY-OS.md)\n"Copy" = "cmd+c"\n"Lock" = "ctrl+cmd+q"\n"Sign-off" = "text:Best regards"\n"Shot" = "shift+cmd+4"\n' > "$mnt/starbite/macros.toml"
 sync
 umount "$mnt"
 losetup -d "$dev"

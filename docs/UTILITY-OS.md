@@ -11,17 +11,31 @@ milestones **UO1** (USB device mode with a serial shell) and **UO2** (the phone 
 | Launcher | Tiles **USB**, **Radio**, **Files**, **Measure**, **Everyday**, **Boot menu**. Volume moves, Power opens, tap works; Power held / Bixby / swipe right goes back |
 | USB drives | Plug the phone into a computer: two drives appear. **RAM disk**: FAT32, label `STARBITE`, read-write, up to 1 GiB of DRAM bank 2 (gone when the phone restarts: copy files off first). It starts with `README.TXT`, `PHONE.TXT` (serial, memory banks, the card, every UFS partition with its blocks), `PMSG.TXT` (**the previous boot's log**: the loader's lines and the OS before, from the pmsg ring) and `LOG.TXT` (this start). **microSD (ro)**: the whole card, **read-only** (it holds the Linux images and backups) |
 | UFS partitions | USB page → **Offer UFS partitions as drives** (or the shell's `ufs on` / `ufs off`): BOOT, SYSTEM, VENDOR, ODM, WINESP, WINDOWS, A16DATA and USERDATA become extra **read-only** drives (512-byte blocks over UFS's 4 KiB ones), to copy them to the computer (`dd` from `/dev/rdiskN`, then compare with the phone's `hash`). USB reconnects when the set changes. EFS, PARAM, KEYSTORAGE and the other never-touch partitions are never offered |
-| Trackpad and keys | USB page → **Trackpad and keys** (UO3): the screen is a trackpad (drag moves the pointer, tap clicks, hold still 0.6 s right-clicks, Volume scrolls), with buttons Copy, Paste, Undo, Cmd Tab, Space, Return, Esc, Mission Control and the media keys Vol -, Play, Vol +, Mute (Mac shortcuts: Command is the HID GUI key). Bixby leaves |
+| Trackpad and keys | USB page → **Trackpad and keys** (UO3): the screen is a trackpad (drag moves the pointer, tap clicks, hold still 0.6 s right-clicks, Volume scrolls), with buttons Copy, Paste, Undo, Cmd Tab, Space, Return, Esc, Mission Control and the media keys Vol -, Play, Vol +, Mute (Mac shortcuts: Command is the HID GUI key). **Your own buttons**: up to 8 macros from `/starbite/macros.toml` on the card replace the first two rows (below). Bixby leaves |
 | Files | **Browse the card** (read only: folders and files on the card's exFAT partition; pick a file for its SHA-256 + CRC32) and **Hash** every UFS partition or the whole card (live progress, MB/s, time left; keeps running if you leave the page) |
 | Shell | A USB serial port (`/dev/cu.usbmodem*` on a Mac, 115200 8N1, any terminal): `help`, `info`, `drives` (sizes, traffic, SCSI counters), `parts` (UFS partitions and sizes), `ufs on|off`, `hash NAME [BYTES]` (SHA-256 + CRC32 of a partition or `card`, or of their first BYTES: e.g. `hash SYSTEM 6419857408` checks One UI's system image), `log`, `menu` (restart into the Starbite menu), `maint` (Starbite Maintenance), `off` |
 | USB page | Connection state and speed, each drive with its traffic, SCSI command and error counters, the shell state |
 | Leaving | The **Boot menu** tile (asks first), or the shell's `menu`. With **no computer ever connected and no touch or key for 10 minutes** it returns to the menu by itself (a countdown shows in the status bar for the last minute) |
 
 | Measure | **USB charger tester** (live: input, VBUS, charge state, battery %, voltage, current in/out, power, the input and charge current limits; read only, Lab's MAX77705 readers), **Ruler** (cm on the left, inches on the right, at the panel's 570 ppi), **Colour fields** (white, black, red, green, blue, grey full screen for dead pixels; the label fades so nothing covers a pixel) |
-| Everyday | **Clock** (the phone's RTC, UTC), **Stopwatch** (Power start/stop, tap to reset when stopped), **Timer** (tap +1 min, Power start/pause; flashes when done) |
+| Everyday | **Clock** (the phone's RTC, UTC), **Stopwatch** (Power start/stop, tap to reset when stopped), **Timer** (tap +1 min, Power start/pause; flashes when done), **Calculator** (+ − × /, powers, roots, ln, brackets) |
 
 Radio and Files show what comes next (master plan 4.4): file manager, hashing and imaging (UO4), then the
-radio tools once bare-metal drivers exist; a calculator and the flashlight are still to come.
+radio tools once bare-metal drivers exist; the flashlight is still to come.
+
+**Macro pad file** (`/starbite/macros.toml` on the card's exFAT partition, read when the trackpad screen
+opens): one button per line, `"Label" = "keys"` or `"Label" = "text:what to type"`. Keys are modifiers joined
+with `+` (`cmd`/`command`, `ctrl`, `alt`/`option`, `shift`) and one key (`a`-`z`, `0`-`9`, `f1`-`f12`, `enter`,
+`esc`, `tab`, `space`, `backspace`, `up`/`down`/`left`/`right`, `minus`, `equal`, `comma`, `period`, `slash`).
+Text is typed with the US layout. Lines starting with `#` and lines it cannot read are skipped; labels show up
+to 15 characters. Without the file (or without a card) the default buttons stay.
+
+```toml
+"Copy" = "cmd+c"
+"Lock" = "ctrl+cmd+q"
+"Shot" = "shift+cmd+4"
+"Sign-off" = "text:Best regards"
+```
 
 **First connection to a Mac**: the USB identity is new (`1209:0001`, "Starbite Utility (Galaxy S9)"), so macOS
 may hold it until you allow the accessory (System Settings, Privacy & Security, "Allow accessories to
@@ -48,11 +62,12 @@ tile, or wait for the 10-minute return).
 | `exfat.c`, `exfat.h` | Read-only exFAT: the MBR's type 0x07 partition, the boot sector, directory entry sets (UTF-16 names), reads at any offset over FAT chains or NoFatChain runs, consecutive clusters read together |
 | `hash.c`, `hash.h`, `sha256.c` | The hash job (1 MiB per service-loop step, UFS through `ufs_read_to`, the card through `sd_read4k`) and pure SHA-256 / CRC32 (zlib's) |
 | `hid.c`, `hid.h`, `pad.c` | UO3: the HID report queue (pointer motion accumulated and sent in steps of at most 127), the trackpad and key screen; libsb's `ui_touch_raw` (every move an EV_DRAG, no swipes) makes the trackpad |
+| `macros.c`, `macros.h` | The macro pad file's parser (pure C; the host test parses examples and the fixture's file) |
 | `hw.h`, `fastboot.h`, `tb.c` | The few loader helpers those drivers use, on libsb |
 | `build.sh` | Lab's build (same flags and checks: relocations, pre-relocation code, host paths), output `starbite/out/utility.img`; on a native aarch64 host it first runs the host test |
-| `tools.c`, `ut.h` | Measure and Everyday |
+| `tools.c`, `ut.h` | Measure, Everyday, Files (the card browser; `ut_card` gives other screens the card's exFAT) |
 | `starbite/host/ut-preview.sh` | Host preview (the fake card is the exFAT fixture): the real Utility OS and sbui code on `host.c`'s fake hardware (plus `ut-host-stubs.c` for USB), scripted keys, PNGs to `starbite/utility/preview/` (home, USB, Radio, leave dialog, Measure, ruler, colour fields, Everyday, the idle countdown); every frame is checked fully presented |
-| `starbite/tools/ut-host-test.c` | Host test: a fake controller plays the host through 13 SCSI commands (write and read back across chunks, padding and residue, sense, the read-only refusal, out of range, a bulk-only reset); the FAT32 image it formats passes `fsck.fat -n`; the configuration descriptor at both speeds (length 123 = wTotalLength, the descriptor chain: 4 interfaces, 6 endpoints, the HID descriptor's report length, balanced collections) |
+| `starbite/tools/ut-host-test.c` | Host test: a fake controller plays the host through 13 SCSI commands (write and read back across chunks, padding and residue, sense, the read-only refusal, out of range, a bulk-only reset); the FAT32 image it formats passes `fsck.fat -n`; the configuration descriptor at both speeds (length 123 = wTotalLength, the descriptor chain: 4 interfaces, 6 endpoints, the HID descriptor's report length, balanced collections); exFAT against the fixture card (MBR, a fragmented file, a deep path); the calculator; the macro parser |
 
 DMA layout in the window (`USB_DMA_BASE` 0xa7000000): the driver's event buffer, TRBs and ep0 in the first
 16 KiB; the CBW at +0x8000, the CSW at +0x8400, the shell's buffers at +0x9000 / +0xa000, the drive data
@@ -65,7 +80,7 @@ DMA layout in the window (`USB_DMA_BASE` 0xa7000000): the driver's event buffer,
   approval). The drives and the shell were not reached yet; that build had no idle return (added since).
 - Since then (not yet on the phone): Measure, Everyday, UO3 keyboard/mouse/media keys with the trackpad
   screen, Files hashing (+ shell `parts`, `hash`), the card browser, the calculator, UFS partitions as
-  read-only drives, the idle return; all previewed on the host.
+  read-only drives, the idle return, the macro pad file; all previewed on the host.
 - Next on the phone, with the accessory allowed: UO2's check (both drives mount; a copied file's hash matches
   after an unmount and remount), the shell, then UO3 (the pointer moves, a key arrives); then UO4 (file
   manager, hashing, imaging) and the calculator.

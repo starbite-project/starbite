@@ -8,6 +8,8 @@
 #include "hid.h"
 #include "ut.h"
 #include "usb_dwc3.h"
+#include "exfat.h"
+#include "macros.h"
 
 #define PAD_Y0 (UI_VIEW_Y0 + 20)
 #define PAD_Y1 1860
@@ -16,12 +18,46 @@
 #define BTN_GAP 30
 
 struct mbtn { const char *label; uint8_t mod, key; uint16_t media; };
-static const struct mbtn btns[12] = {
+static const struct mbtn defaults[12] = {
     { "Copy", HID_GUI, 0x06, 0 },      { "Paste", HID_GUI, 0x19, 0 },     { "Undo", HID_GUI, 0x1d, 0 },
     { "Cmd Tab", HID_GUI, 0x2b, 0 },   { "Space", 0, 0x2c, 0 },           { "Return", 0, 0x28, 0 },
     { "Esc", 0, 0x29, 0 },             { "Mission", HID_CTRL, 0x52, 0 },  { "Vol -", 0, 0, HID_VOL_DOWN },
     { "Play", 0, 0, HID_PLAY },        { "Vol +", 0, 0, HID_VOL_UP },     { "Mute", 0, 0, HID_MUTE },
 };
+static struct { char label[16]; uint8_t mod, key; uint16_t media; char text[48]; } btns[12];
+static int user_macros;                               /* how many came from the card */
+
+/* the defaults, then up to 8 macros from /starbite/macros.toml on the card (rows 1 and 2) */
+static void load_buttons(void)
+{
+    for (int i = 0; i < 12; ++i) {
+        sb_strcpy(btns[i].label, sizeof(btns[i].label), defaults[i].label);
+        btns[i].mod = defaults[i].mod;
+        btns[i].key = defaults[i].key;
+        btns[i].media = defaults[i].media;
+        btns[i].text[0] = 0;
+    }
+    user_macros = 0;
+    struct exfat *fs = ut_card();
+    static struct exfat_ent scratch[40];
+    struct exfat_ent e;
+    static char src[4096];
+    if (!fs || exfat_walk(fs, "/starbite/macros.toml", &e, scratch, 40) || e.dir)
+        return;
+    uint32_t n = e.size < sizeof(src) ? (uint32_t)e.size : (uint32_t)sizeof(src);
+    if (exfat_read_chain(fs, e.first, e.nofat, 0, (uint8_t *)src, n))
+        return;
+    struct macro m[8];
+    int k = macros_parse(src, n, m, 8);
+    for (int i = 0; i < k; ++i) {
+        sb_strcpy(btns[i].label, sizeof(btns[i].label), m[i].label);
+        btns[i].mod = m[i].mod;
+        btns[i].key = m[i].key;
+        btns[i].media = 0;
+        sb_strcpy(btns[i].text, sizeof(btns[i].text), m[i].text);
+    }
+    user_macros = k;
+}
 
 static void btn_rect(int i, int *x, int *y, int *w, int *h)
 {
@@ -47,7 +83,8 @@ static void draw_pad(int touching)
     ui_round(50, PAD_Y0, UI_W - 100, PAD_Y1 - PAD_Y0, 56, touching ? C_CARD2 : C_CARD);
     ui_text(F_DETAIL, 110, PAD_Y0 + 100, "Trackpad", C_L2);
     ui_text(F_SMALL, 110, PAD_Y1 - 150, "drag: move   tap: click   hold: right click", C_L3);
-    ui_text(F_SMALL, 110, PAD_Y1 - 80, "Volume: scroll   Bixby: back", C_L3);
+    ui_text(F_SMALL, 110, PAD_Y1 - 80, user_macros ? "Volume: scroll   Bixby: back   macros: the card"
+                                                   : "Volume: scroll   Bixby: back", C_L3);
     ui_dirty(50, PAD_Y0, UI_W - 100, PAD_Y1 - PAD_Y0);
 }
 
@@ -76,7 +113,9 @@ static int hit_btn(int x, int y)
 
 static void press(int i)
 {
-    if (btns[i].media)
+    if (btns[i].text[0])
+        hid_text(btns[i].text);
+    else if (btns[i].media)
         hid_media(btns[i].media);
     else
         hid_key(btns[i].mod, btns[i].key);
@@ -88,6 +127,7 @@ static void press(int i)
 
 void ut_pad(void)
 {
+    load_buttons();
     hid_reset();
     ui_touch_raw(1);
     ui_input_reset();

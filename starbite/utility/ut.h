@@ -8,3 +8,5 @@ void ut_measure(void);
 void ut_everyday(void);
 void ut_pad(void);
 void ut_files(void);
+struct exfat;
+struct exfat *ut_card(void);           /* the card's exFAT (tools.c), 0 if not readable */

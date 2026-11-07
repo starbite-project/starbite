@@ -414,6 +414,12 @@ static int card_mount(void)
     return cfs_state > 0;
 }
 
+/* the card's exFAT for other screens (the macro pad): 0 when not readable */
+struct exfat *ut_card(void)
+{
+    return card_mount() ? &cfs : 0;
+}
+
 static void browse_fill(struct page *p)
 {
     struct ub u;
