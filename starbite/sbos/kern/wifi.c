@@ -53,6 +53,37 @@ static uint8_t sv_ssid[33];
 static unsigned sv_len;
 static char sv_pass[65];
 static int sv_ok, join_pending;
+/* 0.5: networks joined with a typed passphrase this session (RAM only: gone at a restart; never logged) */
+#define REMEMBER 4
+static struct { uint8_t ssid[33]; unsigned len; char pass[65]; } rem[REMEMBER];
+static unsigned nrem;
+static char jp_pass[65];                    /* the passphrase of the pending join */
+
+static const char *known_pass(const uint8_t *ssid, unsigned len)
+{
+    for (unsigned i = 0; i < nrem; ++i)
+        if (rem[i].len == len && !memcmp(rem[i].ssid, ssid, len))
+            return rem[i].pass;
+    if (sv_ok && sv_len == len && !memcmp(sv_ssid, ssid, len))
+        return sv_pass;
+    return 0;
+}
+
+static void remember(const uint8_t *ssid, unsigned len, const char *pass)
+{
+    unsigned i = 0;
+    while (i < nrem && !(rem[i].len == len && !memcmp(rem[i].ssid, ssid, len)))
+        ++i;
+    if (i == nrem) {
+        if (nrem < REMEMBER)
+            ++nrem;
+        else
+            i = REMEMBER - 1;               /* full: the last one goes */
+    }
+    memcpy(rem[i].ssid, ssid, len);
+    rem[i].len = len;
+    sb_strcpy(rem[i].pass, sizeof(rem[i].pass), pass);
+}
 static int w_ready;                         /* bcmw_init succeeded on w (quiesce and leave only then) */
 static int dhcp_go;                         /* the link came up inside a callback: DHCP starts from the tick */
 
@@ -195,7 +226,7 @@ static void add_bss(const struct bcmw_bss *b)
     memcpy(n->bssid, b->bssid, 6);
     n->rssi = b->rssi;
     n->secure = secure;
-    n->saved = sv_ok && sv_len == b->ssid_len && !memcmp(sv_ssid, b->ssid, sv_len);
+    n->saved = secure && known_pass(b->ssid, b->ssid_len) != 0;
     n->channel = (int32_t)b->channel;
     n->band5 = (int32_t)b->band5;
 }
@@ -363,7 +394,7 @@ int wifi_power(int on)
     dk_next = dk_new = dk_reused = 0;      /* the DMA blocks of the first power-on, again in order */
 #ifdef SB_HOST
     model_reset();
-    M.open_ap = getenv("SBOS_HOST_WIFINET") == 0;  /* with a saved network: the model's WPA2 "test-ap" */
+    M.open_ap = !getenv("SBOS_HOST_WIFINET") && !getenv("SBOS_HOST_WPA2");   /* else the model's WPA2 "test-ap" */
     M.echo_sync = 1;
     memset(&os, 0, sizeof(os));
     os.rd32 = model_rd32, os.wr32 = model_wr32, os.rd16 = model_rd16, os.wr16 = model_wr16;
@@ -422,13 +453,20 @@ int wifi_scan(void)
     return 0;
 }
 
-int wifi_join(int i)
+int wifi_join(int i, const char *pass)
 {
     if (st != SBOS_WIFI_UP || i < 0 || i >= nnets)
         return SBOS_EAGAIN;
-    if (nets[i].secure && !nets[i].saved)
-        return SBOS_EPERM;                  /* secured: only the saved network (0.4.2) */
-    if (nets[i].saved) {
+    if (nets[i].secure) {
+        const char *k = pass && pass[0] ? pass : known_pass(nets[i].ssid, nets[i].ssid_len);
+        unsigned n = k ? sb_strlen(k) : 0;
+        if (!k)
+            return SBOS_EPERM;              /* secured, no passphrase known: the app asks for one */
+        if (n < 8 || n > 64)
+            return SBOS_EINVAL;
+        sb_strcpy(jp_pass, sizeof(jp_pass), k);
+    }
+    if (nets[i].secure) {
         /* bcmw_join does the WPA2 handshake and blocks (up to 15 s): the screen shows "Joining" first, the join
          * runs on the next tick (the heater is never on with Wi-Fi) */
         const struct bcmw_info *in = bcmw_info(w);
@@ -436,7 +474,7 @@ int wifi_join(int i)
         sbnet_init(&net, &no, in->mac);
         joined = i;
         join_pending = 1;
-        sb_log("wifi: joining the saved network (name not logged)");
+        sb_log("wifi: joining a secured network (name and passphrase not logged)");
         set_state(SBOS_WIFI_JOINING, "");
         return 0;
     }
@@ -532,14 +570,17 @@ void wifi_timer(unsigned id)
         if (join_pending && st == SBOS_WIFI_JOINING && now - t_state >= 100) {
             join_pending = 0;
             uint64_t t0 = sb_ms();
-            int r = bcmw_join(w, sv_ssid, sv_len, sv_pass, 15000);
+            int r = joined >= 0 ? bcmw_join(w, nets[joined].ssid, nets[joined].ssid_len, jp_pass, 15000) : BCMW_E_STATE;
+            if (r == BCMW_OK && joined >= 0)
+                remember(nets[joined].ssid, nets[joined].ssid_len, jp_pass);
+            memset(jp_pass, 0, sizeof(jp_pass));
             if (r != BCMW_OK) {
-                logn("wifi: the saved network did not take the phone after ", sb_ms() - t0, " ms");
+                logn("wifi: the network did not take the phone after ", sb_ms() - t0, " ms");
                 joined = -1;
                 dhcp_go = 0;                /* a LINK event may have come before the handshake failed */
                 set_state(SBOS_WIFI_UP, "Could not join: the passphrase, or too far away");
             } else if (st == SBOS_WIFI_JOINING) {
-                logn("wifi: joined the saved network in ", sb_ms() - t0, " ms; asking for an address (DHCP)");
+                logn("wifi: joined a secured network in ", sb_ms() - t0, " ms; asking for an address (DHCP)");
                 set_state(SBOS_WIFI_DHCP, "");
                 dhcp_go = 1;
             }

@@ -153,6 +153,10 @@ plus two large fonts of the same family (`sbos-assets.py`: Inter Tight 300 at 38
 - **Transitions (0.3):** a screen change between the lock screen, home and apps is presented in 4 vertical
   bands about 16 ms apart, from the right going in and from the left going back (one full draw, then 4
   partial presents: no extra drawing). Full-screen light and SOS appear at once.
+- **Keyboard (0.5):** a screen that asks for text (`ui_input`) gets a field (dots for a secret, "Show" / "Hide")
+  and an on-screen keyboard across the bottom 800 px: letters (shift: one capital), digits and signs ("123"),
+  more signs ("#+="), space, Delete and the action key (Join). The text stays in the kernel until the app reads
+  it, is wiped when the app leaves the front, and is never logged. Touch only (the keys do not type).
 - **Style:** black background, cards #1c1c1e with 72 px corners, Inter / Inter Tight, white primary text and
   three greys, one accent per app (its tile colour), red only for emergency and danger, orange for warnings.
 - **App screens:** built from a few elements the kernel draws: a title, buttons (full or half width), a big
@@ -264,7 +268,7 @@ which runs down to 2 %. A start below 3 % shows the lock screen with Light and S
 | Nr | Group | Calls |
 |---|---|---|
 | 0..4 | core | `SYS_RETURN`, `SYS_LOG`, `SYS_VERSION`, `SYS_ALLOC`, `SYS_EXIT` |
-| 10..29 | UI | `ui_begin`, `ui_title`, `ui_button(id, label, sub, flags)`, `ui_big(caption, value, colour)`, `ui_textline`, `ui_level(id, "Off|Low|...", current)`, `ui_toggle`, `ui_hold(id, label, ms, flags)`, `ui_end`, `ui_toast`, `ui_light(argb)` (full-screen colour), `ui_awake`; 0.3: `ui_tile(line)` (22, the home tile's status line, any time), `ui_gauge(caption, value, permille, colour)` (23, a ring) |
+| 10..29 | UI | `ui_input(id, label, flags, max)` (24, 0.5: a text field and the on-screen keyboard), `ui_input_get(buf, cap)` (25), `ui_begin`, `ui_title`, `ui_button(id, label, sub, flags)`, `ui_big(caption, value, colour)`, `ui_textline`, `ui_level(id, "Off|Low|...", current)`, `ui_toggle`, `ui_hold(id, label, ms, flags)`, `ui_end`, `ui_toast`, `ui_light(argb)` (full-screen colour), `ui_awake`; 0.3: `ui_tile(line)` (22, the home tile's status line, any time), `ui_gauge(caption, value, permille, colour)` (23, a ring) |
 | 30..39 | time | `time_now(struct sbos_time*)`, `timer_set(id, ms, repeat)`, `timer_cancel`, `uptime_ms` |
 | 40..49 | power | `battery`, `estimate`, `power_request`, `sysinfo`, `setting_get` / `setting_set` (0.2; 0.3 adds `SET_BRIGHTNESS`: 0 as the boot left it, 1..4 low..high) |
 | 50..59 | light | `torch(level)` (`SBOS_ENOSYS` until the LED driver exists), `strobe` |
@@ -816,6 +820,13 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   Heat shows the temperature now, not the last session's; Brightness "Boot" after a change sends S-Boot's
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
+
+### 12.12 Version 0.5 (2026-11-08, overnight)
+
+- The on-screen keyboard and text fields (3.1, API 24/25).
+- Wi-Fi: any secured network can be joined by typing its passphrase (8..63 characters); a joined one is remembered
+  in RAM ("Saved") until a restart; the store's `wifinet` network stays saved; passphrases never logged. Host:
+  `sbos-wifi-test.sh` types "correct horse" on the keyboard against the model's WPA2 network (21 checks).
 
 ### 12.11 Version 0.4.2 (2026-11-08, overnight)
 

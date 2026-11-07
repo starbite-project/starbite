@@ -31,7 +31,7 @@ static int getenv_dbg(void) { return getenv("SBOS_DBG") != 0; }
 #define ICON_SOS_S 227
 
 enum { E_TITLE = 1, E_BACK, E_BUTTON, E_BIG, E_TEXT, E_LEVEL, E_TOGGLE, E_HOLD, E_CLOCK, E_TILE, E_ROUND,
-       E_FIELD, E_TOAST, E_CTEXT, E_GAUGE };
+       E_FIELD, E_TOAST, E_CTEXT, E_GAUGE, E_INPUT, E_KEYS };
 enum { SCR_LOCK = 1, SCR_HOME, SCR_APP, SCR_POWER, SCR_CONFIRM, SCR_LIGHT, SCR_SOS, SCR_OFF };
 
 struct el {
@@ -116,7 +116,7 @@ static struct el *add(struct el *list, int *n, int kind)
     memset(e, 0, sizeof(*e));
     e->kind = (uint8_t)kind;
     e->interactive = kind == E_BACK || kind == E_BUTTON || kind == E_LEVEL || kind == E_TOGGLE ||
-                     kind == E_HOLD || kind == E_TILE || kind == E_ROUND;
+                     kind == E_HOLD || kind == E_TILE || kind == E_ROUND || kind == E_INPUT || kind == E_KEYS;
     return e;
 }
 
@@ -212,6 +212,140 @@ void kui_gauge(const char *caption, const char *value, int permille, uint32_t c)
     e->color = c ? c : C_GREEN;
 }
 
+/* ---- text input (0.5): one field per screen and the on-screen keyboard -------------------------------------
+ * The text stays in the kernel (kb_text) until the app reads it with SYS_UI_INPUT_GET; it is wiped when the app
+ * leaves the front, and never logged. Layers: 0 lower case, 1 upper case (one letter, then back), 2 digits and
+ * signs, 3 more signs. Keys: touch only (Volume and Bixby do not type). */
+static char kb_text[65];
+static int kb_len, kb_layer, kb_secret, kb_show, kb_max, kb_on;
+static uint32_t kb_id;
+
+void kui_input_wipe(void)
+{
+    memset(kb_text, 0, sizeof(kb_text));
+    kb_len = kb_layer = kb_show = kb_on = 0;
+    kb_id = 0;
+}
+
+void kui_input(uint32_t id, const char *label, uint32_t flags, int max)
+{
+    if (kb_id != id) {                      /* another field: a fresh text */
+        kui_input_wipe();
+        kb_id = id;
+    }
+    kb_on = 1;
+    kb_secret = (flags & 1U) != 0;
+    kb_max = max < 1 ? 1 : max > 64 ? 64 : max;
+    struct el *e = add(app_els, &napp_els, E_INPUT);
+    if (e) {
+        e->id = id;
+        scopy(e->a, sizeof(e->a), label);
+        e->value = kb_len;
+        e->flags = (uint32_t)(kb_secret && !kb_show);
+        unsigned k = 0;
+        for (; k < (unsigned)kb_len && k + 1 < sizeof(e->b); ++k)    /* what is shown: dots while hidden */
+            e->b[k] = e->flags ? '*' : kb_text[k];
+        e->b[k] = 0;
+        e->n = kb_secret;
+    }
+    struct el *k = add(app_els, &napp_els, E_KEYS);
+    if (k) {
+        k->id = id;
+        k->value = kb_layer;
+    }
+}
+
+int kui_input_get(char *out, unsigned cap)
+{
+    unsigned n = (unsigned)kb_len < cap - 1 ? (unsigned)kb_len : cap - 1;
+    memcpy(out, kb_text, n);
+    out[n] = 0;
+    return (int)n;
+}
+
+/* the keyboard's rows: caps (one byte each; \x01 shift, \x02 delete, \x03 123/abc, \x04 the action key,
+ * \x05 space, \x06 more signs) and widths in half keys */
+struct krow { const char *cap; const uint8_t *w; };
+static const uint8_t W10[10] = { 2, 2, 2, 2, 2, 2, 2, 2, 2, 2 }, W9[9] = { 2, 2, 2, 2, 2, 2, 2, 2, 2 },
+                     W9b[9] = { 3, 2, 2, 2, 2, 2, 2, 2, 3 }, W4[4] = { 3, 9, 3, 5 };
+static const struct krow kb_rows[4][4] = {
+    { { "qwertyuiop", W10 }, { "asdfghjkl", W9 }, { "\x01zxcvbnm\x02", W9b }, { "\x03\x05.\x04", W4 } },
+    { { "QWERTYUIOP", W10 }, { "ASDFGHJKL", W9 }, { "\x01ZXCVBNM\x02", W9b }, { "\x03\x05.\x04", W4 } },
+    { { "1234567890", W10 }, { "-/:;()$&@", W9 }, { "\x06.,?!'\"_\x02", W9b }, { "\x03\x05#\x04", W4 } },
+    { { "[]{}#%^*+=", W10 }, { "_\\|~<>`\xa3@", W9 }, { "\x06.,?!'\"-\x02", W9b }, { "\x03\x05+\x04", W4 } },
+};
+#define KB_TOP (UI_H - 800)
+#define KB_ROW 172
+#define KB_GAP 16
+#define KB_UNIT 70                          /* a half key, px: 20 half keys = 1400 */
+
+/* the key at x, y (its byte, 0 none) and its box */
+static int kb_key(int layer, int x, int y, int *bx, int *by, int *bw)
+{
+    int r = (y - KB_TOP) / (KB_ROW + KB_GAP);
+    if (y < KB_TOP || r < 0 || r > 3)
+        return 0;
+    const struct krow *row = &kb_rows[layer & 3][r];
+    int n = (int)sb_strlen(row->cap), tot = 0;
+    for (int i = 0; i < n; ++i)
+        tot += row->w[i];
+    int kx = 20 + (20 - tot) * KB_UNIT / 2;
+    for (int i = 0; i < n; ++i) {
+        int w = row->w[i] * KB_UNIT;
+        if (x >= kx && x < kx + w) {
+            *bx = kx, *by = KB_TOP + r * (KB_ROW + KB_GAP), *bw = w;
+            return (uint8_t)row->cap[i];
+        }
+        kx += w;
+    }
+    return 0;
+}
+
+/* the field and the keyboard on the screen follow kb_* without a round trip to the app */
+static void kb_refresh(void)
+{
+    for (int i = 0; i < napp_els; ++i) {
+        struct el *e = &app_els[i];
+        if (e->kind == E_INPUT) {
+            e->value = kb_len;
+            e->flags = (uint32_t)(kb_secret && !kb_show);
+            unsigned k = 0;
+            for (; k < (unsigned)kb_len && k + 1 < sizeof(e->b); ++k)
+                e->b[k] = e->flags ? '*' : kb_text[k];
+            e->b[k] = 0;
+        } else if (e->kind == E_KEYS) {
+            e->value = kb_layer;
+        }
+    }
+    dirty = 1;
+}
+
+static void kb_press(int x, int y)
+{
+    int bx, by, bw, c = kb_key(kb_layer, x, y, &bx, &by, &bw);
+    if (!c)
+        return;
+    if (c == 1)
+        kb_layer = kb_layer >= 2 ? (kb_layer == 2 ? 3 : 2) : (kb_layer ? 0 : 1);
+    else if (c == 6)
+        kb_layer = kb_layer == 3 ? 2 : 3;
+    else if (c == 3)
+        kb_layer = kb_layer >= 2 ? 0 : 2;
+    else if (c == 2) {
+        if (kb_len > 0)
+            kb_text[--kb_len] = 0;
+    } else if (c == 4) {
+        if (app_front >= 0)
+            app_event_send(app_front, EV_APP_BUTTON, kb_id, kb_len);
+    } else if (kb_len < kb_max) {
+        kb_text[kb_len++] = c == 5 ? ' ' : (char)c;
+        kb_text[kb_len] = 0;
+        if (kb_layer == 1)
+            kb_layer = 0;                   /* one capital, then lower case again */
+    }
+    kb_refresh();
+}
+
 void kui_end(void)
 {
     app_building = 0;
@@ -262,6 +396,7 @@ void kui_open_app(int a)
         return;
     if (app_front >= 0 && app_front != a)
         app_event_send(app_front, EV_APP_HIDE, 0, 0);
+    kui_input_wipe();
     app_front = a;
     app_awake = 0;
     screen = SCR_APP;
@@ -274,6 +409,7 @@ void kui_open_app(int a)
 
 void kui_home(void)
 {
+    kui_input_wipe();                       /* typed text never outlives its screen */
     if (app_front >= 0)
         app_event_send(app_front, EV_APP_HIDE, 0, 0);
     app_front = -1;
@@ -372,6 +508,10 @@ static void layout_flow(struct el *l, int n, int y)
         case E_LEVEL: e->h = 300; break;
         case E_TOGGLE: e->h = 210; break;
         case E_GAUGE: e->h = 640; break;
+        case E_INPUT: e->h = 250; break;
+        case E_KEYS:
+            e->x = 0, e->y = KB_TOP - 20, e->w = UI_W, e->h = UI_H - KB_TOP + 20;
+            continue;                       /* fixed at the bottom: the flow above it goes on */
         default: e->h = 120; break;
         }
         e->y = y;
@@ -1010,6 +1150,66 @@ static void draw_el(const struct el *e, int idx)
         }
         break;
     }
+    case E_INPUT: {                             /* the field: its label, the text (or dots), a cursor, Show / Hide */
+        ui_text(F_HEAD, e->x + 4, e->y + 40, e->a, C_L2);
+        ui_round(e->x, e->y + 64, e->w, e->h - 64, 48, card);
+        int tx = e->x + 50, ty = e->y + 64 + (e->h - 64) / 2 + 24;
+        int shown_w = 0;
+        if (e->flags) {
+            for (int i = 0; i < e->value && i < 40; ++i)
+                ui_disc(tx + 18 + i * 44, ty - 18, 14, C_L1);
+            shown_w = (e->value < 40 ? e->value : 40) * 44;
+        } else if (e->b[0]) {
+            shown_w = ui_text_cut(F_TITLE_S, tx, ty, e->b, e->w - 330, C_L1);
+            shown_w = ui_text_w(F_TITLE_S, e->b) > e->w - 330 ? e->w - 330 : ui_text_w(F_TITLE_S, e->b);
+        }
+        ui_fill(tx + shown_w + 8, ty - 52, 5, 64, C_STAR);              /* the cursor */
+        if (e->n)
+            ui_text_c(F_HEAD, e->x + e->w - 120, ty - 6, e->flags ? "Show" : "Hide", C_STAR);
+        break;
+    }
+    case E_KEYS: {
+        ui_fill(0, e->y, UI_W, e->h, 0xff101012U);
+        for (int r = 0; r < 4; ++r) {
+            const struct krow *row = &kb_rows[e->value & 3][r];
+            int n = (int)sb_strlen(row->cap), tot = 0;
+            for (int i = 0; i < n; ++i)
+                tot += row->w[i];
+            int kx = 20 + (20 - tot) * KB_UNIT / 2, ky = KB_TOP + r * (KB_ROW + KB_GAP);
+            for (int i = 0; i < n; ++i) {
+                int w = row->w[i] * KB_UNIT;
+                uint8_t c = (uint8_t)row->cap[i];
+                int special = c < 7;
+                uint32_t bg = c == 4 ? C_STAR : special ? C_CARD3 : C_CARD;
+                ui_round(kx + 6, ky, w - 12, KB_ROW, 26, bg);
+                char s[4] = { (char)c, 0, 0, 0 };
+                const char *lab = s;
+                if (c == 0xa3)
+                    lab = "\xc2\xa3";
+                if (c == 1)
+                    lab = e->value >= 2 ? (e->value == 2 ? "#+=" : "123") : e->value == 1 ? "ABC" : "abc";
+                if (c == 6)
+                    lab = e->value == 3 ? "123" : "#+=";
+                if (c == 2)
+                    lab = "Delete";
+                if (c == 3)
+                    lab = e->value >= 2 ? "abc" : "123";
+                if (c == 4)
+                    lab = "Join";
+                if (c == 5)
+                    lab = "space";
+                if (c == 1 && e->value < 2)
+                    lab = e->value == 1 ? "SHIFT" : "shift";
+                int fnt = special ? F_HEAD : F_TITLE_S;
+                if (!ui_has_font(fnt))
+                    fnt = F_ROW;
+                ui_text_c(fnt, kx + w / 2, ky + KB_ROW / 2 + (special ? 14 : 24), lab,
+                          c == 4 ? 0xff000000U : c == 1 && e->value == 1 ? C_STAR : C_L1);
+                kx += w;
+            }
+        }
+        break;
+    }
     case E_TOAST:
         ui_round(e->x, e->y, e->w, e->h, 75, C_CARD3);
         ui_text_c(F_ROW_M, e->x + e->w / 2, e->y + 98, e->b, C_L1);
@@ -1173,7 +1373,7 @@ static int focus_el(void)
 static void power_menu_pick(int id);
 static void lock_pick(int id);
 
-static void activate(int i, int x)
+static void activate(int i, int x, int y)
 {
     const struct el *e = &cur[i];
     switch (screen) {
@@ -1212,6 +1412,14 @@ static void activate(int i, int x)
             app_event_send(app_front, EV_APP_HOLD, e->id, 0);
         } else if (e->kind == E_TOGGLE) {
             app_event_send(app_front, EV_APP_TOGGLE, e->id, !e->value);
+        } else if (e->kind == E_KEYS) {
+            if (x >= 0)
+                kb_press(x, y);
+        } else if (e->kind == E_INPUT) {
+            if (x >= e->x + e->w - 260 && e->n) {   /* Show / Hide */
+                kb_show = !kb_show;
+                kb_refresh();
+            }
         } else if (e->kind == E_LEVEL) {
             int n = e->n < 1 ? 1 : e->n, v;
             if (x < 0)
@@ -1376,7 +1584,7 @@ void ui_kevent(const void *evp)
             if (e->kind == E_HOLD || e->kind == E_ROUND)
                 kui_toast(e->kind == E_ROUND ? "Hold the button" : "Keep holding until the bar is full", 1500);
             else if (ev->x >= e->x && ev->x < e->x + e->w && ev->y >= e->y && ev->y < e->y + e->h)
-                activate(i, ev->x);
+                activate(i, ev->x, ev->y);
         }
         pressed = -1;
         dirty = 1;
@@ -1415,14 +1623,14 @@ void ui_kevent(const void *evp)
         if (e->kind == E_HOLD || e->kind == E_ROUND) {
             if (key_hold_armed == i && sb_ms() < key_hold_until) {
                 key_hold_armed = -1;
-                activate(i, -1);
+                activate(i, -1, -1);
             } else {
                 key_hold_armed = i;
                 key_hold_until = sb_ms() + 3000;
                 kt_set(KT_UI, 5, sb_ms(), 3100, 0);
             }
         } else {
-            activate(i, -1);
+            activate(i, -1, -1);
         }
         dirty = 1;
         break;
@@ -1447,7 +1655,7 @@ void ui_ktimer(unsigned id)
             int i = pressed;
             press_done = 1;
             pressed = -1;
-            activate(i, -1);
+            activate(i, -1, -1);
         }
         dirty = 1;
     } else if (id == 6) {

@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.4.2"
+#define SBOS_VERSION "0.5"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -267,6 +267,9 @@ extern const int sbos_selftest_enabled;
 void selftest_start(void);
 void selftest_timer(unsigned id);
 void selftest_input(void);
+void kui_input(uint32_t id, const char *label, uint32_t flags, int max);
+int kui_input_get(char *out, unsigned cap);
+void kui_input_wipe(void);
 void kui_gauge(const char *caption, const char *value, int permille, uint32_t c);
 const char *app_tile(int a);        /* the line an app shows under its home tile */
 void kui_toast(const char *t, uint32_t ms);
@@ -330,7 +333,7 @@ struct sbos_wifi_net;
 int wifi_on(void);
 int wifi_power(int on);
 int wifi_scan(void);
-int wifi_join(int i);
+int wifi_join(int i, const char *pass);    /* pass: NULL open / saved */
 void wifi_status(struct sbos_wifi *s);
 int wifi_list(struct sbos_wifi_net *out, int max);
 int wifi_bar(void);

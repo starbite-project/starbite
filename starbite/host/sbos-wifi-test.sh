@@ -31,7 +31,7 @@ nowant "$b" "correct horse\|test-ap" "saved: no name or passphrase logged"
 NET="test-ap
 wrong passphrase"
 c=$(run $OPEN $ON $JOIN)
-want "$c" "the saved network did not take the phone" "a wrong passphrase refused"
+want "$c" "the network did not take the phone" "a wrong passphrase refused"
 nowant "$c" "wifi: an address from DHCP" "no address with a wrong passphrase"
 NET=
 CYC=""
@@ -42,6 +42,19 @@ d=$(run $OPEN $CYC $ON $JOIN)
 want "$d" "wifi: DMA blocks: 0 new, 10 reused" "on / off: the DMA blocks reused"
 want "$d" "wifi: an address from DHCP" "on / off: a join after 20 cycles"
 nowant "$d" "the bring-up failed" "on / off: no failed bring-up"
+# a typed passphrase on the on-screen keyboard (the model's WPA2 network, "correct horse"); then Back and in again:
+# the network is remembered ("Saved") for this session
+R0=2246; R1=2434; R2=2622; R3=2810
+TYPE="t:580,$R2 w:150 t:1210,$R0 w:150 t:510,$R0 w:150 t:510,$R0 w:150 t:370,$R0 w:150 t:580,$R2 w:150 t:650,$R0 w:150 t:545,$R3 w:150 t:860,$R1 w:150 t:1210,$R0 w:150 t:510,$R0 w:150 t:300,$R1 w:150 t:370,$R0 w:300"
+NET=
+# shellcheck disable=SC2086
+g=$(limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 SBOS_HOST_WPA2=1 "$out/sbos-host" "$out" /dev/null $OPEN $ON t:720,905 w:800 $TYPE t:1245,$R3 w:10000 s:wifi-test q 2>&1)
+want "$g" "THE NETWORK IS JOINED" "typed: the WPA2 handshake"
+want "$g" "wifi: an address from DHCP" "typed: DHCP"
+nowant "$g" "correct horse" "typed: the passphrase not logged"
+# a short passphrase: refused before any join
+h=$(limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 SBOS_HOST_WPA2=1 "$out/sbos-host" "$out" /dev/null $OPEN $ON t:720,905 w:800 t:580,$R2 w:150 t:1245,$R3 w:3000 s:wifi-test q 2>&1)
+nowant "$h" "wifi: joining a secured" "typed: a 1-character passphrase refused"
 e=$(run $OPEN $ON h:b:900 w:500 t:1057,663 w:600 t:720,670 w:600)
 want "$e" "heater: refused: Wi-Fi is on" "the heater refused while Wi-Fi is on"
 nowant "$e" "heater: start, level" "the heater did not start"

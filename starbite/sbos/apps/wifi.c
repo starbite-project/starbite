@@ -12,6 +12,7 @@ SBAPP_DEFINE("wifi", "Wi-Fi", SBOS_P_NET, 0xff0a84ffU, 208);
 
 static struct sbos_wifi_net nets[SBOS_WIFI_NETS];
 static int nn, visible;
+static int page, pick = -1;                 /* page 1: the passphrase for nets[pick] */
 
 static void name_of(char *o, unsigned cap, const uint8_t *s, unsigned n)
 {
@@ -48,6 +49,18 @@ static void show(void)
     nn = s.state >= SBOS_WIFI_UP && s.state != SBOS_WIFI_FAILED ? wifi_list(nets, SBOS_WIFI_NETS) : 0;
     if (nn < 0)
         nn = 0;
+    if (page == 1 && pick >= 0 && pick < nn && s.state == SBOS_WIFI_UP) {
+        ui_begin();
+        ui_title("Join a network");
+        name_of(nm, sizeof(nm), nets[pick].ssid, nets[pick].ssid_len);
+        ui_big("SECURED NETWORK", nm, 0);
+        ui_input(5, "Passphrase", 1, 63);
+        ui_textline("Kept in this phone's memory until a restart. Never written to the log.", GREY);
+        ui_button(3, "Cancel", 0, UI_HALF);
+        ui_end();
+        return;
+    }
+    page = 0;
     ui_begin();
     ui_title("Wi-Fi");
     ui_toggle(1, "Wi-Fi", s.state != SBOS_WIFI_OFF && s.state != SBOS_WIFI_FAILED);
@@ -74,7 +87,7 @@ static void show(void)
             ui_textline(f.b, s.ping_ms >= 0 ? GREEN : GREY);
         }
     } else if (s.state == SBOS_WIFI_OFF) {
-        ui_textline("Turn Wi-Fi on to see the networks around. Open networks can be joined; secured ones come later.", GREY);
+        ui_textline("Turn Wi-Fi on to see the networks around and join one.", GREY);
         ui_textline("Heating and Wi-Fi do not run at the same time in this version.", GREY);
     } else if (s.state == SBOS_WIFI_FAILED) {
         ui_textline(s.why[0] ? s.why : "The radio did not start.", ORANGE);
@@ -86,10 +99,10 @@ static void show(void)
         for (int i = 0; i < shown; ++i) {
             name_of(nm, sizeof(nm), nets[i].ssid, nets[i].ssid_len);
             fmt_init(&f);
-            fmt_s(&f, nets[i].saved ? "Saved \xc2\xb7 " : nets[i].secure ? "Secured (later) \xc2\xb7 " : "Open \xc2\xb7 ");
+            fmt_s(&f, nets[i].saved ? "Saved \xc2\xb7 " : nets[i].secure ? "Secured \xc2\xb7 " : "Open \xc2\xb7 ");
             fmt_s(&f, strength(nets[i].rssi));
             fmt_s(&f, nets[i].band5 ? " \xc2\xb7 5 GHz" : " \xc2\xb7 2.4 GHz");
-            ui_button((uint32_t)(10 + i), nm, f.b, nets[i].saved ? UI_ACCENT : nets[i].secure ? UI_DIM : 0);
+            ui_button((uint32_t)(10 + i), nm, f.b, nets[i].saved ? UI_ACCENT : 0);
         }
         if (s.state == SBOS_WIFI_UP && !nn)
             ui_textline("No networks heard.", GREY);
@@ -114,6 +127,7 @@ void app_event(const struct sbos_event *ev)
         break;
     case EV_APP_HIDE:
         visible = 0;
+        page = 0;
         break;
     case EV_APP_TOGGLE:
         if (ev->id == 1 && wifi_power(ev->value) == SBOS_EAGAIN)
@@ -121,12 +135,26 @@ void app_event(const struct sbos_event *ev)
         show();
         break;
     case EV_APP_BUTTON:
-        if (ev->id == 2)
+        if (ev->id == 2) {
             wifi_scan();
-        else if (ev->id >= 10 && ev->id < 10 + (uint32_t)nn) {
-            int r = wifi_join((int)ev->id - 10);
-            if (r == SBOS_EPERM)
-                ui_toast_app("Secured networks come later", 2500);
+        } else if (ev->id == 3) {
+            page = 0;
+        } else if (ev->id == 5 && page == 1) {          /* the keyboard's Join */
+            char pw[65];
+            int n = ui_input_get(pw, sizeof(pw));
+            int r = n >= 8 ? wifi_join(pick, pw) : SBOS_EINVAL;
+            for (unsigned i = 0; i < sizeof(pw); ++i)
+                pw[i] = 0;
+            if (r == SBOS_EINVAL)
+                ui_toast_app("A passphrase has 8 to 63 characters", 2500);
+            else
+                page = 0;
+        } else if (ev->id >= 10 && ev->id < 10 + (uint32_t)nn) {
+            int r = wifi_join((int)ev->id - 10, 0);
+            if (r == SBOS_EPERM) {                      /* secured, no passphrase known: ask for it */
+                page = 1;
+                pick = (int)ev->id - 10;
+            }
         }
         show();
         break;

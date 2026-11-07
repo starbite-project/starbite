@@ -20,6 +20,7 @@ enum {
     SYS_UI_LEVEL = 15, SYS_UI_TOGGLE = 16, SYS_UI_HOLD = 17, SYS_UI_END = 18, SYS_UI_TOAST = 19,
     SYS_UI_LIGHT = 20, SYS_UI_AWAKE = 21,
     SYS_UI_TILE = 22, SYS_UI_GAUGE = 23,                   /* API 1, added in 0.3 */
+    SYS_UI_INPUT = 24, SYS_UI_INPUT_GET = 25,              /* 0.5: a text field and the keyboard */
     /* time 30..39 */
     SYS_TIME_NOW = 30, SYS_TIMER_SET = 31, SYS_TIMER_CANCEL = 32, SYS_UPTIME_MS = 33,
     /* power 40..49 */
@@ -213,6 +214,14 @@ static inline void ui_toast_app(const char *t, uint32_t ms) { sbos_call(SYS_UI_T
  * gets EV_APP_SHOW again). */
 static inline void ui_light(uint32_t argb) { sbos_call(SYS_UI_LIGHT, argb, 0, 0, 0, 0); }
 static inline void ui_awake(int on) { sbos_call(SYS_UI_AWAKE, (uint64_t)on, 0, 0, 0, 0); }
+/* A text field with the on-screen keyboard (0.5): id (not 0) names it; flags 1 = secret (dots, with Show); max
+ * characters (1..64). The keyboard's action key sends EV_APP_BUTTON with this id (value: the length). The text
+ * stays in the kernel: ui_input_get copies it (and it is wiped when the app leaves the front). */
+static inline void ui_input(uint32_t id, const char *label, uint32_t flags, int max)
+{
+    sbos_call(SYS_UI_INPUT, id, (uintptr_t)label, flags, (uint64_t)max, 0);
+}
+static inline int ui_input_get(char *buf, uint32_t cap) { return (int)sbos_call(SYS_UI_INPUT_GET, (uintptr_t)buf, cap, 0, 0, 0); }
 /* the short line under the app's tile on home (any time, front or not; "" clears it) */
 static inline void ui_tile(const char *line) { sbos_call(SYS_UI_TILE, (uintptr_t)line, 0, 0, 0, 0); }
 /* a ring gauge: permille 0..1000 of the ring in argb, value inside, caption under it */
@@ -241,7 +250,8 @@ static inline int wifi_state(struct sbos_wifi *s) { return (int)sbos_call(SYS_NE
 static inline int wifi_power(int on) { return (int)sbos_call(SYS_WIFI_POWER, (uint64_t)on, 0, 0, 0, 0); }
 static inline int wifi_scan(void) { return (int)sbos_call(SYS_WIFI_SCAN, 0, 0, 0, 0, 0); }
 static inline int wifi_list(struct sbos_wifi_net *n, int max) { return (int)sbos_call(SYS_WIFI_LIST, (uintptr_t)n, (uint64_t)max, 0, 0, 0); }
-static inline int wifi_join(int i) { return (int)sbos_call(SYS_WIFI_JOIN, (uint64_t)i, 0, 0, 0, 0); }
+/* pass: NULL for an open or the saved network, else the WPA2 passphrase (8..63 characters, or 64 hex) */
+static inline int wifi_join(int i, const char *pass) { return (int)sbos_call(SYS_WIFI_JOIN, (uint64_t)i, (uintptr_t)pass, 0, 0, 0); }
 static inline int sensor_read(int id) { return (int)sbos_call(SYS_SENSOR_READ, (uint64_t)id, 0, 0, 0, 0); }
 static inline int heat_request(int level, int minutes) { return (int)sbos_call(SYS_HEAT_REQUEST, (uint64_t)level, (uint64_t)minutes, 0, 0, 0); }
 static inline int heat_status(struct sbos_heat *h) { return (int)sbos_call(SYS_HEAT_STATUS, (uintptr_t)h, 0, 0, 0, 0); }

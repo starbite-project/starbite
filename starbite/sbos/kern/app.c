@@ -616,6 +616,24 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
             ui_mark_dirty();
         }
         return 0;
+    case SYS_UI_INPUT:
+        if (!front || !arg[0] || !user_str(a, arg[1], s1, sizeof(s1)))
+            return SBOS_EINVAL;
+        kui_input((uint32_t)arg[0], s1, (uint32_t)arg[2], (int)arg[3]);
+        return 0;
+    case SYS_UI_INPUT_GET: {
+        char t[65];
+        if (!front || !arg[1])
+            return SBOS_EINVAL;
+        int n = kui_input_get(t, sizeof(t));
+        uint64_t cap = arg[1] > sizeof(t) ? sizeof(t) : arg[1];
+        if ((uint64_t)n + 1 > cap)
+            n = (int)cap - 1;
+        t[n] = 0;
+        int ok = user_out(a, arg[0], t, (uint64_t)n + 1);
+        memset(t, 0, sizeof(t));
+        return ok ? n : SBOS_EINVAL;
+    }
     case SYS_UI_GAUGE:
         if (!front || !user_str(a, arg[0], s1, sizeof(s1)) || !user_str(a, arg[1], s2, sizeof(s2)))
             return SBOS_EINVAL;
@@ -775,10 +793,17 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         int n = wifi_list(wl, max);
         return user_out(a, arg[0], wl, sizeof(wl[0]) * (uint64_t)n) ? n : SBOS_EINVAL;
     }
-    case SYS_WIFI_JOIN:
+    case SYS_WIFI_JOIN: {
         if (!(p->perms & SBOS_P_NET) || !front)
             return SBOS_EPERM;
-        return wifi_join((int)arg[0]);
+        char pw[72];
+        pw[0] = 0;
+        if (arg[1] && !user_str(a, arg[1], pw, sizeof(pw)))
+            return SBOS_EINVAL;
+        int r = wifi_join((int)arg[0], arg[1] ? pw : 0);
+        memset(pw, 0, sizeof(pw));
+        return r;
+    }
     case SYS_SENSOR_READ:
         if (!(p->perms & (SBOS_P_SENSORS | SBOS_P_HEAT)))
             return SBOS_EPERM;
