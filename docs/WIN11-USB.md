@@ -685,6 +685,39 @@ Separately, the PPTT gave the instruction caches allocation type 1 (write alloca
 (read allocate). That is unlikely to crash anything and is fixed in the source (host test: 290 checks); combo2 and combo3
 still have it, so rebuild before any reuse.
 
+**Bisect (2026-11-07): the PPTT caused the 0x7E.** usbh0-v3 with the same hive and drivers booted
+clean; nopptt (fb7ce0b0) reaches the desktop. **The build-time PPTT is shelved** until the crash is
+explained. Combo3 is rebuilt without it: `starbite-uefi-usb-ufn-device-gpu-nopptt-wlan.bin`
+(ce48fc70…, nopptt + `WLAN4361`; src38 + added files only).
+
+What the checks rule out:
+- **The ACPI processor IDs** match: the A55 leaves have IDs 0..3 (MADT GICC UIDs 0..3, the four
+  Windows uses), the M3 leaves 4..7. Unchanged from the release; only the A55 leaves got caches.
+- **The release modules that read the tables:** "P" and the PSCI shim touch only the MADT. The
+  unnamed platform module 98100003-…-9041 checks FACP 276, APIC 708, GTDT 104 and **PPTT 256**
+  bytes exactly, but only after the XSDT has exactly 4 entries (length 0x44). The platform always
+  has 5 (its own SSDT), so that check fails on every image, src38 included, before the PPTT size
+  matters. Not the cause.
+- **The table's structure:** iasl parses it; lengths, checksum, parent offsets, cache IDs 1..9
+  (unique) and flags 0xFF (all fields valid, revision 3) are right. Two things are different from what
+  Windows has seen so far. (a) The instruction caches said "write allocate" (fixed in the source,
+  not in the crashed image). (b) The layout: each leaf lists only its L1s, the L2 is reached via
+  "next level" **and** listed under the cluster node (ACPI 6.4 and Linux style). Windows-on-Arm
+  firmware PPTTs that are known to work (edk2 DynamicTables) use the same scheme, but I haven't
+  checked what Windows does with a cache that is both a "next level" and a cluster resource.
+- **Timing:** the crash came before the login screen, after the ETW autologger had started (≈2.5 min
+  of trace session). Windows reads the PPTT at the very start of kernel init, long before that, so a
+  parse failure there would have hit earlier. More likely a later consumer of the new
+  cache topology faulted (0x7E = an unhandled exception in a system thread), such as power
+  management or the scheduler, or a driver that queries cache relationships (the new drivers were in
+  that boot too; the PPTT never booted with any driver set).
+
+Needed to explain it rather than guess: the bugcheck **parameters** (exception code and address,
+which give the module). Dumps are off, so there is no `=UFSBUGCHECK` line. When the PPTT comes back:
+one boot with crash dumps on (the pstore path), and a minimal variant as a second data point
+(per-core L1D/L1I only, no L2). Then a boot of the PPTT image with the Starbite drivers disabled,
+to split kernel vs driver.
+
 ## 11. Licences and credits
 
 - `starbite/s9usb/*` and the DXE module: GPL-2.0-only, like the libsb/loader code they come from
