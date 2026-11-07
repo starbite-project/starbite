@@ -20,6 +20,7 @@
 #include <dirent.h>
 #include "../bcmw_priv.h"
 #include "model.h"
+#include "../wpa.h"
 
 static int fails, checks;
 
@@ -223,6 +224,35 @@ static void test_tables(void)
         fw_sha256((const uint8_t *)m56, 56, sum);
         CHECK(!memcmp(sum, two, 8), "sha256 56 bytes (two blocks)");
         CHECK(!fw_known(sum), "a random sum is not known");
+    }
+    {
+        /* PBKDF2 (IEEE 802.11-2020 J.4.2 vectors), the PRF against Python's hmac for fixed inputs,
+         * the model's AES key wrap against RFC 3394 4.1 */
+        static const uint8_t v1[8] = { 0xf4, 0x2c, 0x6f, 0xc5, 0x2d, 0xf0, 0xeb, 0xef };
+        static const uint8_t v2[8] = { 0x0d, 0xc0, 0xd6, 0xeb, 0x90, 0x55, 0x5e, 0xd6 };
+        static const uint8_t pmk_test[8] = { 0xc5, 0xb6, 0x41, 0x2d, 0x5c, 0x37, 0xa9, 0x30 };
+        static const uint8_t ptk_test[8] = { 0xdc, 0x2f, 0x55, 0x4b, 0x4b, 0xb4, 0x6c, 0x21 };
+        uint8_t pmk[32], ptk[48], data[76], aa[6] = { 2, 0x11, 0x22, 0x33, 0x44, 0x5a }, sa[6] = { 2, 0x11, 0x22, 0x33, 0x44, 0x55 };
+        bcmw_wpa_pmk((const unsigned char *)"password", 8, (const unsigned char *)"IEEE", 4, pmk);
+        CHECK(!memcmp(pmk, v1, 8), "PBKDF2 vector 1");
+        bcmw_wpa_pmk((const unsigned char *)"ThisIsAPassword", 15, (const unsigned char *)"ThisIsASSID", 11, pmk);
+        CHECK(!memcmp(pmk, v2, 8), "PBKDF2 vector 2");
+        bcmw_wpa_pmk((const unsigned char *)"correct horse", 13, (const unsigned char *)"test-ap", 7, pmk);
+        CHECK(!memcmp(pmk, pmk_test, 8), "the model network's PMK");
+        memcpy(data, sa, 6), memcpy(data + 6, aa, 6);
+        for (int i = 0; i < 64; i++)
+            data[12 + i] = (uint8_t)i;
+        bcmw_prf(pmk, 32, "Pairwise key expansion", data, 76, ptk, 48);
+        CHECK(!memcmp(ptk, ptk_test, 8), "the PRF against Python's hmac");
+        CHECK(model_ap_selftest(), "the model's AES key wrap against RFC 3394");
+    }
+    {
+        uint8_t ours[BCMW_RSN_OURS];
+        unsigned g = 0;
+        bcmw_rsn_ours(ours, BCMW_CIPHER_CCMP);
+        CHECK(bcmw_rsn_check(ours, sizeof(ours), &g) == 0 && g == BCMW_CIPHER_CCMP, "our RSN element is one we join");
+        ours[19] = 8;                       /* SAE only (WPA3) */
+        CHECK(bcmw_rsn_check(ours, sizeof(ours), &g) != 0, "a WPA3-only network is refused");
     }
     CHECK(fw_iovar(buf, sizeof(buf), "ver", 0, 4) == 8 && !memcmp(buf, "ver\0\0\0\0\0", 8), "iovar get");
     CHECK(fw_iovar(buf, 6, "toolong", 0, 0) == 0, "iovar overflow");
@@ -494,6 +524,42 @@ static void run_bringup(int dma_idx)
     }
     CHECK(n_escan == 1 && n_escan_done == 1, "escan events %u/%u", n_escan, n_escan_done);
     CHECK(n_rx == 1, "received frames %u", n_rx);
+    {
+        /* joining the model's network: the host's handshake in one run, the firmware's in the other */
+        int jr;
+        uint8_t ip[60];
+        M.fwsup = dma_idx;
+        jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "wrong passphrase!", 2000);
+        if (dma_idx)
+            CHECK(jr != BCMW_OK && !M.pmk_ok, "the firmware's supplicant: a wrong passphrase gives a wrong PMK");
+        else
+            CHECK(jr != BCMW_OK && (M.ap_errors & 1) && !M.handshake_done, "the host's handshake: a wrong passphrase fails at message 2");
+        if (!dma_idx) {
+            const char *a = strstr(log_all, "message 1 from the access point"), *b = a ? strstr(a + 1, "message 1 from the access point") : 0;
+            CHECK(a && (!b || strstr(b, "joining a network")), "message 1 answered once");
+        }
+        M.ap_errors = 0;
+        jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "correct horse", 0);
+        CHECK(jr == BCMW_OK && bcmw_link_up(w), "joining the model's network (%s): %d", dma_idx ? "the firmware's supplicant" : "the host's handshake", jr);
+        CHECK(M.ap_errors == 0, "the access point found faults %x", M.ap_errors);
+        if (dma_idx)
+            CHECK(M.pmk_ok, "the PMK given to the firmware is the network's");
+        else
+            CHECK(M.handshake_done && M.keys_ok == 3, "the handshake finished (%d) and both keys are the AP's (%x)", M.handshake_done, M.keys_ok);
+        CHECK(M.flow_created == (dma_idx ? 0u : 1u), "flow rings made: %u", M.flow_created);
+        CHECK(!strstr(log_all, "correct horse") && !strstr(log_all, "test-ap"), "the passphrase or the name in the log");
+        /* a data frame out */
+        memset(ip, 0, sizeof(ip));
+        memcpy(ip, "\x02\x11\x22\x33\x44\x5a", 6);
+        memcpy(ip + 6, "\x02\x11\x22\x33\x44\x55", 6);
+        ip[12] = 0x08;
+        for (int i = 0; i < 40; i++)
+            CHECK(bcmw_tx(w, ip, sizeof(ip)) == BCMW_OK, "tx %d", i);
+        bcmw_poll(w);
+        CHECK(M.tx_ip == 40 && bcmw_info(w)->tx_done == bcmw_info(w)->tx_frames, "40 frames out (%u), all done (%u/%u)", M.tx_ip,
+              bcmw_info(w)->tx_done, bcmw_info(w)->tx_frames);
+        CHECK(M.badoption == 0 && M.fw_errors == 0, "after the data: BADOPTION %u, faults %x", M.badoption, M.fw_errors);
+    }
     /* buffers are reposted: 20 more ioctls without running out */
     for (int i = 0; i < 20; i++) {
         uint32_t v;

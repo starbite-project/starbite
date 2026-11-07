@@ -63,6 +63,8 @@ struct bcmw_os {
     /* the firmware's events and received frames (may be NULL) */
     void (*event)(void *ctx, const struct bcmw_event *ev);
     void (*rx)(void *ctx, unsigned ifidx, const uint8_t *frame, uint32_t len);
+    /* n random bytes (the handshake's nonce); 0 on success. NULL: a weak timing-jitter fallback is used */
+    int (*random)(void *ctx, uint8_t *out, uint32_t n);
 };
 
 /* ---- configuration ----------------------------------------------------------------------------- */
@@ -81,6 +83,7 @@ struct bcmw_cfg {
     int any_files;          /* 1: files whose SHA-256 is not one of the phone's known ones are used too
                              * (default: refused, so a reader's mistake never reaches the chip) */
     uint8_t mac[6];         /* all zero: the firmware's own (NVRAM/OTP); else set as cur_etheraddr */
+    int host_supplicant;    /* 1: the host's four-way handshake even when the firmware has one (idsup) */
 };
 
 enum {
@@ -159,6 +162,19 @@ int bcmw_iovar_set(struct bcmw *w, const char *name, const void *buf, uint32_t l
 int bcmw_iovar_get_u32(struct bcmw *w, const char *name, uint32_t *v);
 int bcmw_iovar_set_u32(struct bcmw *w, const char *name, uint32_t v);
 
+/* ---- the data path and joining (link.c); after step 10 (up) ------------------------------------- */
+
+/* An Ethernet frame (header included, at most 14 + 2048 bytes) to send; copied, so the caller keeps it.
+ * The first one creates the tx flow ring (waits up to 2 s for it). Not from inside the event/rx callbacks
+ * before the flow ring is open (BCMW_E_STATE): those run inside bcmw_poll. */
+int bcmw_tx(struct bcmw *w, const uint8_t *frame, uint32_t len);
+/* Join a network: pass "" for an open one, else a WPA2 passphrase (8..63 characters). Synchronous: scans for
+ * the name, joins the strongest suitable access point, does the handshake (the firmware's if it has one, else
+ * the host's), installs the keys. timeout_ms 0: 15 s. The passphrase and keys are never logged. */
+int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char *pass, unsigned timeout_ms);
+int bcmw_leave(struct bcmw *w);
+int bcmw_link_up(const struct bcmw *w);
+
 /* what the bring-up learned */
 struct bcmw_info {
     uint16_t vendor, device;    /* PCI IDs of 1:00.0 */
@@ -172,6 +188,7 @@ struct bcmw_info {
     char fw_version[160];       /* the "ver" iovar */
     uint8_t mac[6];
     uint32_t polls, interrupts, ioctls, events, rx_frames, console_lines;
+    uint32_t tx_frames, tx_done, tx_errors;
 };
 const struct bcmw_info *bcmw_info(const struct bcmw *w);
 

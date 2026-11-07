@@ -4,6 +4,7 @@
 #ifndef BCMW_PRIV_H
 #define BCMW_PRIV_H
 #include "bcmw.h"
+#include "wpa.h"
 
 /* ---- the log: a line builder without a C library ---------------------------------------------- */
 
@@ -25,6 +26,7 @@ uint32_t bcmw_strlen(const char *s);
 int bcmw_strneq(const char *a, const char *b, uint32_t n);
 void bcmw_memcpy(void *d, const void *s, uint32_t n);
 void bcmw_memset(void *d, int c, uint32_t n);
+int bcmw_memcmp(const void *a, const void *b, uint32_t n);
 void bcmw_strlcpy(char *d, const char *s, uint32_t cap);
 
 static inline uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
@@ -216,14 +218,23 @@ int fw_event_parse(const uint8_t *frame, uint32_t len, struct bcmw_event *ev);
 #define RX_BUF_SIZE    2048u
 #define RX_BUFS_MAX    256u
 #define IOCTL_REQ_SIZE 1518u    /* BRCMF_TX_IOCTL_MAX_MSG_SIZE */
-#define PKTID_CTL      0x4000u  /* request ids: CTL buffers 0x4000 + i, rx data buffers i */
+#define PKTID_CTL      0x4000u
+#define TX_BUFS        32u
+#define TX_BUF_SIZE    2048u  /* request ids: CTL buffers 0x4000 + i, rx data buffers i */
 
 int mb_shared(struct bcmw *w, uint32_t shared_addr);
+uint32_t bcmw_escan_params(struct bcmw *w, uint8_t *p, const uint8_t *ssid, unsigned ssid_len, uint16_t sync);
 int mb_rings(struct bcmw *w);
 int mb_post_all(struct bcmw *w);
 int mb_process(struct bcmw *w);
 int mb_ioctl(struct bcmw *w, unsigned ifidx, uint32_t cmd, void *buf, uint32_t len, int *fwerr);
 void mb_console(struct bcmw *w);
+
+/* ---- link.c: the completions and events it needs ------------------------------------------------- */
+void link_flow_created(struct bcmw *w, const uint8_t *it);
+void link_tx_status(struct bcmw *w, const uint8_t *it);
+void link_event(struct bcmw *w, const struct bcmw_event *ev);
+void link_eapol(struct bcmw *w, const uint8_t *frame, uint32_t len);
 
 /* ---- the state ---------------------------------------------------------------------------------- */
 
@@ -277,6 +288,27 @@ struct bcmw {
     /* files kept for the CLM step */
     const uint8_t *clm;
     uint32_t clm_len;
+    /* the data path */
+    struct bcmw_ring flow;
+    uint8_t *flow_mem, *txb;
+    uint64_t flow_bus, txb_bus;
+    uint32_t flow_w_where, flow_r_where;
+    int flow_state;                 /* 0 none, 1 asked for, 2 open, -1 refused */
+    uint8_t tx_busy[TX_BUFS];
+    /* joining */
+    int scan_v2;                    /* the firmware answered scan_ver: v2 escan parameters */
+    int join_phase;                 /* 0 idle, 1 scanning, 2 joining, 3 joined, -1 failed */
+    int join_open, join_fwsup, join_found, join_scan_done, link_up, keyed, keys_due;
+    unsigned join_unsuitable, join_group;
+    int join_rssi;
+    uint8_t join_ssid[32], join_ssid_len, join_bssid[6];
+    uint16_t join_chanspec;
+    uint8_t rsn_ours[BCMW_RSN_OURS];
+    struct bcmw_wpa wpa;
+    uint8_t eapol_out[14 + BCMW_WPA_REPLY_MOST];    /* a handshake answer waiting to go (sent outside the completions) */
+    unsigned eapol_out_len;
+    int eapol_out_kind;
+    int in_process;                 /* mb_process is running: it does not run again inside itself */
     uint8_t nvram_bin[BCMW_NVRAM_MAX + 32];
 };
 

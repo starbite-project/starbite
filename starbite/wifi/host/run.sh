@@ -22,7 +22,7 @@ if [ -z "$dir" ]; then
     done
 fi
 flags="-std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined -I$core"
-src="$core/core.c $core/exynos_pcie.c $core/chip.c $core/fw.c $core/ring.c $core/msgbuf.c $here/model.c $here/test.c"
+src="$core/core.c $core/exynos_pcie.c $core/chip.c $core/fw.c $core/ring.c $core/msgbuf.c $core/link.c $core/wpa.c $here/model.c $here/model_ap.c $here/test.c"
 extra=""
 if [ -n "${BCMW_LINUX:-}" ] && [ -f "$BCMW_LINUX/firmware.c" ]; then
     # Linux's parser, from firmware.c's start to the end of brcmf_fw_nvram_strip(), on a small shim
@@ -34,8 +34,8 @@ if [ -n "${BCMW_LINUX:-}" ] && [ -f "$BCMW_LINUX/firmware.c" ]; then
 fi
 # the core alone must build freestanding, without a C library (as in libsb and a Windows driver)
 $CC -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -nostdlib -c -I"$core" \
-    "$core/core.c" "$core/exynos_pcie.c" "$core/chip.c" "$core/fw.c" "$core/ring.c" "$core/msgbuf.c" -o /dev/null 2>/dev/null ||
-    for f in core exynos_pcie chip fw ring msgbuf; do
+    "$core/core.c" "$core/exynos_pcie.c" "$core/chip.c" "$core/fw.c" "$core/ring.c" "$core/msgbuf.c" "$core/link.c" "$core/wpa.c" -o /dev/null 2>/dev/null ||
+    for f in core exynos_pcie chip fw ring msgbuf link wpa; do
         $CC -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -c -I"$core" "$core/$f.c" -o "$OUT/$f.o"
     done
 # shellcheck disable=SC2086

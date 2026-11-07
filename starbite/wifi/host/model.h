@@ -17,6 +17,9 @@ struct model {
     /* the chip */
     uint32_t cr4_ioctl, cr4_reset, mailboxint;
     int start_fw, fw_running, offer_dma_idx, up, scan_v2, hold_answer, release_answer, bad_console, phy_powered_down;
+    /* the access point (model_ap.c) */
+    int fwsup, handshake_done, pmk_ok;
+    unsigned tx_seen, tx_ip, ap_errors, keys_ok, flow_created;
     unsigned watchdog_resets, boots, doorbells, hostready, ioctls, badoption;
     unsigned fw_errors;                 /* bits: what the model's firmware found wrong */
     uint32_t fw_rstvec, nvram_seen, clm_done;
@@ -36,5 +39,14 @@ void model_wr16(void *ctx, uint64_t pa, uint16_t v);
 void model_udelay(void *ctx, uint32_t us);
 uint64_t model_now(void *ctx);
 void *model_dma_alloc(void *ctx, uint32_t size, uint32_t align, uint64_t *bus);
+void model_rx(const uint8_t *f, uint32_t len);
+void model_event(uint32_t type, uint32_t status, uint16_t flags, uint32_t reason, const uint8_t *data, uint32_t dlen);
+void model_ap_reset(void);
+int model_ap_selftest(void);
+void model_ap_tx(const uint8_t *f, unsigned len);
+unsigned model_ap_scan_result(uint8_t *r, unsigned cap);
+int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t dlen, uint8_t *out, uint16_t *rlen,
+                   uint16_t *status);
+void model_ap_after(uint32_t cmd);
 
 #endif

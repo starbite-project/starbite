@@ -14,7 +14,7 @@ done
 out="$root/starbite/out/win"
 mkdir -p "$out"
 "$tw/build.sh" kmdf "$out/sbwifi.sys" "$here/sbwifi.c" "$w/core.c" "$w/exynos_pcie.c" "$w/chip.c" "$w/fw.c" "$w/ring.c" \
-    "$w/msgbuf.c"
+    "$w/msgbuf.c" "$w/link.c" "$w/wpa.c"
 key=${SB_SIGN_KEY:-"$root/build/woa/ufs-sys/sign/starbite-test.key"}
 [ -f "$key" ] || key="$root/../../../build/woa/ufs-sys/sign/starbite-test.key"
 SB_SIGN_KEY=$key SB_SIGN_CERT=${SB_SIGN_CERT:-"$(dirname "$key")/starbite-test.crt"} "$tw/sign.sh" "$out/sbwifi.sys"

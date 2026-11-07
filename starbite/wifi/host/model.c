@@ -21,6 +21,7 @@
 #include <string.h>
 #include "../bcmw_priv.h"
 #include "model.h"
+#include "../wpa.h"
 
 struct model M;
 
@@ -366,7 +367,7 @@ static void w16(uint32_t a, uint16_t v) { tcm[a] = (uint8_t)v; tcm[a + 1] = (uin
 #define HTOD_MB  (SH + 0x480)
 #define DTOH_MB  (SH + 0x484)
 
-static struct { uint8_t *buf; uint16_t items, size, r, w; uint32_t seq; uint8_t phase; } ring[5];
+static struct { uint8_t *buf; uint16_t items, size, r, w; uint32_t seq; uint8_t phase; } ring[6];   /* 5: the flow ring */
 static struct { uint32_t pktid; uint64_t bus; uint16_t len; } ctlq[2][16], rxq[300];
 static unsigned nctl[2], nrx;
 static uint8_t clm_got[65536];
@@ -407,6 +408,7 @@ static void fw_boot(void)
     memcpy(tcm + CONBUF, msg, strlen(msg));
     w32(CONSOLE + 16, (uint32_t)strlen(msg));
     memset(ring, 0, sizeof(ring));
+    model_ap_reset();
     nctl[0] = nctl[1] = nrx = 0;
     clm_len = 0;
     w32(RAMBASE + RAMSIZE - 4, SH);
@@ -493,7 +495,7 @@ static int take_ctl(int event, uint32_t *pktid, uint8_t **buf, uint16_t *len)
     return *buf != 0;
 }
 
-static void send_event(uint32_t type, uint32_t status, const uint8_t *data, uint32_t dlen)
+void model_event(uint32_t type, uint32_t status, uint16_t flags, uint32_t reason, const uint8_t *data, uint32_t dlen)
 {
     uint32_t pktid;
     uint8_t *b, it[24] = { MSGBUF_TYPE_WL_EVENT };
@@ -515,6 +517,8 @@ static void send_event(uint32_t type, uint32_t status, const uint8_t *data, uint
     put16be(b + 24, 2);
     put32be(b + 28, type);
     put32be(b + 32, status);
+    put16be(b + 26, flags);
+    put32be(b + 36, reason);
     put32be(b + 44, dlen);
     memcpy(b + 54, "wlan0", 5);
     memcpy(b + 72, data, dlen);
@@ -523,7 +527,7 @@ static void send_event(uint32_t type, uint32_t status, const uint8_t *data, uint
     d2h_put(RING_D2H_CONTROL, it, sizeof(it));
 }
 
-static void send_rx_frame(void)
+void model_rx(const uint8_t *f, uint32_t len)
 {
     uint8_t it[40] = { MSGBUF_TYPE_RX_CMPLT }, *b;
     if (!nrx) {
@@ -531,17 +535,24 @@ static void send_rx_frame(void)
         return;
     }
     b = bus_ptr(rxq[0].bus, rxq[0].len);
-    if (!b)
+    if (!b || len > rxq[0].len)
         return;
-    memset(b, 0, 60);
-    memset(b, 0xff, 6);
-    b[6] = 0x02;
-    put16be(b + 12, 0x0806);            /* an ARP frame */
+    memcpy(b, f, len);
     put32le(it + 4, rxq[0].pktid);
-    put16le(it + 14, 60);
+    put16le(it + 14, (uint16_t)len);
     put16le(it + 16, 0);
     memmove(&rxq[0], &rxq[1], sizeof(rxq[0]) * --nrx);
     d2h_put(RING_D2H_RXCPL, it, sizeof(it));
+}
+
+static void send_rx_frame(void)
+{
+    uint8_t f[60];
+    memset(f, 0, sizeof(f));
+    memset(f, 0xff, 6);
+    f[6] = 0x02;
+    put16be(f + 12, 0x0806);            /* an ARP frame */
+    model_rx(f, sizeof(f));
 }
 
 static uint8_t held[24];
@@ -563,6 +574,9 @@ static void answer(const uint8_t *req, uint16_t trans, uint32_t cmd, const uint8
         const char *name = (const char *)in;
         const uint8_t *data = in + strlen(name) + 1;
         uint32_t dlen = inlen - (uint32_t)(strlen(name) + 1);
+        if (model_ap_ioctl(cmd, name, data, dlen, out, &rlen, &status)) {
+            goto answered;
+        }
         for (unsigned k = 0; k + 1 < sizeof(M.last_iovar); k++)
             if (!(M.last_iovar[k] = name[k]))
                 break;
@@ -597,16 +611,17 @@ static void answer(const uint8_t *req, uint16_t trans, uint32_t cmd, const uint8
                           : (dlen < 72 || ver != 1 || data[8 + 42] != 2))
                 status = (uint16_t)-1, M.fw_errors |= 1024;
             else
-                scan = 1;
+                scan = (ver == 2 ? data[12] : data[8]) ? 2 : 1;  /* a name in the parameters: a directed scan */
         } else if (!strcmp(name, "mpc")) {
         } else {
             status = (uint16_t)-23;     /* BCME_UNSUPPORTED */
         }
     } else if (cmd == BCMW_C_UP) {
         M.up = 1;
-    } else {
+    } else if (!model_ap_ioctl(cmd, "", in, inlen, out, &rlen, &status)) {
         status = (uint16_t)-23;
     }
+answered:
     if (outlen < rlen)
         rlen = outlen;
     if (!take_ctl(0, &pktid, &b, &blen)) {
@@ -629,7 +644,13 @@ static void answer(const uint8_t *req, uint16_t trans, uint32_t cmd, const uint8
         M.release_answer = 0;
     }
     d2h_put(RING_D2H_CONTROL, it, sizeof(it));
-    if (scan) {
+    model_ap_after(cmd);
+    if (scan == 2) {
+        uint8_t r[400];
+        unsigned n = model_ap_scan_result(r, sizeof(r));
+        model_event(BCMW_E_ESCAN_RESULT, 8, 0, 0, r, n);
+        model_event(BCMW_E_ESCAN_RESULT, 0, 0, 0, r, 12);
+    } else if (scan) {
         uint8_t r[12 + 128];
         memset(r, 0, sizeof(r));
         put32le(r, sizeof(r));
@@ -642,8 +663,8 @@ static void answer(const uint8_t *req, uint16_t trans, uint32_t cmd, const uint8
         memcpy(r + 12 + 19, "test-ap", 7);
         put16le(r + 12 + 72, 0x1006);
         put16le(r + 12 + 78, (uint16_t)-52);
-        send_event(BCMW_E_ESCAN_RESULT, 8, r, sizeof(r));
-        send_event(BCMW_E_ESCAN_RESULT, 0, r, 12);
+        model_event(BCMW_E_ESCAN_RESULT, 8, 0, 0, r, sizeof(r));
+        model_event(BCMW_E_ESCAN_RESULT, 0, 0, 0, r, 12);
         send_rx_frame();
     }
 }
@@ -663,6 +684,40 @@ static void h2d_item(int r, uint8_t *it)
         return;
     }
     switch (it[0]) {
+    case MSGBUF_TYPE_FLOW_RING_CREATE: {
+        uint8_t c[24] = { MSGBUF_TYPE_FLOW_RING_CREATE_CMPLT };
+        uint64_t bus = (uint64_t)((uint32_t)it[32] | it[33] << 8 | it[34] << 16 | (uint32_t)it[35] << 24);
+        ring[5].items = (uint16_t)(it[28] | it[29] << 8);
+        ring[5].size = (uint16_t)(it[30] | it[31] << 8);
+        ring[5].buf = bus_ptr(bus, (uint32_t)ring[5].items * ring[5].size);
+        ring[5].r = ring[5].w = 0;
+        ring[5].seq = 254;
+        ring[5].phase = 0;
+        if ((it[22] | it[23] << 8) != 2 || ring[5].size != 48 || !ring[5].buf)
+            M.fw_errors |= 2048;
+        put16le(c + 8, 0);
+        put16le(c + 10, 2);
+        d2h_put(RING_D2H_CONTROL, c, sizeof(c));
+        M.flow_created++;
+        break;
+    }
+    case MSGBUF_TYPE_TX_POST: {
+        uint8_t f[2100], s[24] = { MSGBUF_TYPE_TX_STATUS };
+        uint16_t dl = (uint16_t)(it[42] | it[43] << 8);
+        uint64_t bus = (uint64_t)((uint32_t)it[32] | it[33] << 8 | it[34] << 16 | (uint32_t)it[35] << 24);
+        uint8_t *p = bus_ptr(bus, dl ? dl : 1);
+        if (r != 5 || !p || dl > 2048 || it[23] != 1 || (it[22] & 7) != 1) {
+            M.fw_errors |= 4096;
+            break;
+        }
+        memcpy(f, it + 8, 14);
+        memcpy(f + 14, p, dl);
+        memcpy(s + 4, it + 4, 4);
+        put16le(s + 10, 2);
+        d2h_put(RING_D2H_TXCPL, s, sizeof(s));
+        model_ap_tx(f, 14u + dl);
+        break;
+    }
     case MSGBUF_TYPE_IOCTLRESP_BUF_POST:
     case MSGBUF_TYPE_EVENT_BUF_POST: {
         int ev = it[0] == MSGBUF_TYPE_EVENT_BUF_POST;
@@ -715,5 +770,14 @@ static void fw_run(void)
                 ring[r].r = 0;
         }
         idx_wr(1, r, ring[r].r);
+    }
+    if (ring[5].buf) {                  /* the flow ring: H2D index slot 2 */
+        uint16_t w = idx_rd(0, 2);
+        while (ring[5].r != w) {
+            h2d_item(5, ring[5].buf + (uint32_t)ring[5].r * ring[5].size);
+            if (++ring[5].r == ring[5].items)
+                ring[5].r = 0;
+        }
+        idx_wr(1, 2, ring[5].r);
     }
 }

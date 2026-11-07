@@ -6,7 +6,11 @@
  * and in the pmsg ring (TWRP: /sys/fs/pstore/pmsg-ramoops-0).
  *
  * Boot arguments (the store entry's cmdline):
- *   wifi_step=N     the last step (1..10, default 9: rings and the first ioctls; bcmw.h BCMW_STEP_*)
+ *   wifi_step=N     the last step (1..10, default 9: rings and the first ioctls; bcmw.h BCMW_STEP_*);
+ *                   11: after step 10, join the network of the store entry "wifinet" (two lines: its name,
+ *                   its WPA2 passphrase or nothing for an open one; made on the phone from the user's input,
+ *                   never in git or the catalog) and ask for a DHCP offer, which shows frames going both ways.
+ *                   Neither the name, the passphrase nor any address is logged.
  *   wifi_gen=1      train for Gen1 instead of Gen2 (the mainline port links at Gen1)
  *   wifi_auto=1     start without the held Volume Up (an unattended run the user agreed to)
  *   wifi_return=S   S seconds after the end, reboot to the boot menu (default: wait for Power)
@@ -86,6 +90,159 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
         else
             scan_done = 1;
     }
+}
+
+/* ---- step 11: join, then a DHCP DISCOVER and its OFFER -------------------------------------------------- */
+
+static uint8_t dhcp_mac[6];
+static uint32_t dhcp_xid;
+static unsigned rx_frames, dhcp_offers;
+static uint32_t dhcp_lease;
+
+static void os_rx(void *ctx, unsigned ifidx, const uint8_t *f, uint32_t len)
+{
+    const uint8_t *ip = f + 14, *udp, *b;
+    unsigned ihl;
+    (void)ctx;
+    (void)ifidx;
+    rx_frames++;
+    if (len < 14 + 20 + 8 + 240 || f[12] != 0x08 || f[13] != 0x00 || ip[9] != 17)
+        return;
+    ihl = (ip[0] & 15) * 4u;
+    udp = ip + ihl;
+    if (udp + 8 + 240 > f + len || udp[0] != 0 || udp[1] != 67 || udp[2] != 0 || udp[3] != 68)
+        return;
+    b = udp + 8;
+    if (b[0] != 2 || (uint32_t)(b[4] << 24 | b[5] << 16 | b[6] << 8 | b[7]) != dhcp_xid || memcmp(b + 28, dhcp_mac, 6))
+        return;
+    for (const uint8_t *o = b + 240; o + 2 <= f + len && o[0] != 255;) {
+        if (o[0] == 0) {
+            o++;
+            continue;
+        }
+        if (o[0] == 53 && o[1] == 1 && o[2] == 2)
+            dhcp_offers++;
+        if (o[0] == 51 && o[1] == 4)
+            dhcp_lease = (uint32_t)o[2] << 24 | (uint32_t)o[3] << 16 | (uint32_t)o[4] << 8 | o[5];
+        o += 2 + o[1];
+    }
+}
+
+static void dhcp_discover(struct bcmw *w)
+{
+    uint8_t f[14 + 20 + 8 + 300];
+    uint8_t *ip = f + 14, *udp = ip + 20, *b = udp + 8;
+    uint32_t sum = 0;
+    unsigned o = 240;
+
+    memset(f, 0, sizeof(f));
+    memcpy(dhcp_mac, bcmw_info(w)->mac, 6);
+    dhcp_xid = (uint32_t)sb_us() ^ 0x5b17e000U;
+    memset(f, 0xff, 6);
+    memcpy(f + 6, dhcp_mac, 6);
+    f[12] = 0x08;
+    ip[0] = 0x45, ip[8] = 64, ip[9] = 17;
+    ip[2] = (uint8_t)((20 + 8 + 300) >> 8), ip[3] = (uint8_t)(20 + 8 + 300);
+    memset(ip + 16, 0xff, 4);
+    for (unsigned i = 0; i < 20; i += 2)
+        sum += (uint32_t)ip[i] << 8 | ip[i + 1];
+    while (sum >> 16)
+        sum = (sum & 0xffff) + (sum >> 16);
+    ip[10] = (uint8_t)(~sum >> 8), ip[11] = (uint8_t)~sum;
+    udp[1] = 68, udp[3] = 67;
+    udp[4] = (uint8_t)((8 + 300) >> 8), udp[5] = (uint8_t)(8 + 300);
+    b[0] = 1, b[1] = 1, b[2] = 6;
+    b[4] = (uint8_t)(dhcp_xid >> 24), b[5] = (uint8_t)(dhcp_xid >> 16), b[6] = (uint8_t)(dhcp_xid >> 8), b[7] = (uint8_t)dhcp_xid;
+    b[10] = 0x80;                           /* broadcast the answer */
+    memcpy(b + 28, dhcp_mac, 6);
+    b[236] = 0x63, b[237] = 0x82, b[238] = 0x53, b[239] = 0x63;
+    b[o++] = 53, b[o++] = 1, b[o++] = 1;    /* DISCOVER */
+    b[o++] = 55, b[o++] = 3, b[o++] = 1, b[o++] = 3, b[o++] = 6;
+    b[o++] = 255;
+    if (bcmw_tx(w, f, sizeof(f)) != BCMW_OK)
+        line("wifitest: the DHCP DISCOVER could not be sent");
+}
+
+/* "wifinet" from the UFS store: two lines; 1 if read */
+static int wifinet(char ssid[33], unsigned *ssid_len, char pass[64])
+{
+    static uint8_t buf[4096] __attribute__((aligned(4096)));
+    struct store_ent e;
+    unsigned i = 0, n = 0;
+    ssid[0] = pass[0] = 0;
+    *ssid_len = 0;
+    if (!store_find("ufs:wifinet", &e) || e.size == 0 || e.size >= sizeof(buf) || store_load(&e, (uintptr_t)buf, sizeof(buf)))
+        return 0;
+    buf[e.size] = 0;
+    while (buf[i] && buf[i] != '\n' && buf[i] != '\r' && n < 32)
+        ssid[n++] = (char)buf[i++];
+    ssid[n] = 0;
+    *ssid_len = n;
+    while (buf[i] == '\r' || buf[i] == '\n')
+        i++;
+    n = 0;
+    while (buf[i] && buf[i] != '\n' && buf[i] != '\r' && n < 63)
+        pass[n++] = (char)buf[i++];
+    pass[n] = 0;
+    memset(buf, 0, sizeof(buf));
+    return *ssid_len > 0;
+}
+
+static void join_test(struct bcmw *w)
+{
+    char ssid[33], pass[64];
+    unsigned ssid_len, before;
+    struct ub u;
+    int e;
+    uint64_t t0;
+
+    if (!wifinet(ssid, &ssid_len, pass)) {
+        line("wifitest: 11: no store entry \"wifinet\" (name, passphrase): nothing to join");
+        return;
+    }
+    line(pass[0] ? "wifitest: 11: joining the network of \"wifinet\" (WPA2; name and passphrase not shown)"
+                 : "wifitest: 11: joining the network of \"wifinet\" (open; its name not shown)");
+    e = bcmw_join(w, (const uint8_t *)ssid, ssid_len, pass, 20000);
+    memset(pass, 0, sizeof(pass));
+    memset(ssid, 0, sizeof(ssid));
+    if (e != BCMW_OK) {
+        ub_init(&u);
+        ub_s(&u, "wifitest: 11: NOT JOINED (");
+        ub_sdec(&u, e);
+        ub_s(&u, ")");
+        line(u.b);
+        return;
+    }
+    before = rx_frames;
+    for (unsigned k = 0; k < 3 && !dhcp_offers; k++) {
+        line("wifitest: 11: a DHCP DISCOVER sent (broadcast)");
+        dhcp_discover(w);
+        t0 = sb_ms();
+        while (!dhcp_offers && sb_ms() - t0 < 3000) {
+            bcmw_poll(w);
+            wdt_feed();
+            sb_mdelay(2);
+        }
+    }
+    ub_init(&u);
+    ub_s(&u, "wifitest: 11: ");
+    ub_dec(&u, rx_frames - before);
+    ub_s(&u, " frames received; ");
+    ub_dec(&u, bcmw_info(w)->tx_frames);
+    ub_s(&u, " sent, ");
+    ub_dec(&u, bcmw_info(w)->tx_done);
+    ub_s(&u, " done, ");
+    ub_dec(&u, bcmw_info(w)->tx_errors);
+    ub_s(&u, " errors; ");
+    if (dhcp_offers) {
+        ub_s(&u, "A DHCP OFFER CAME BACK (lease ");
+        ub_dec(&u, dhcp_lease);
+        ub_s(&u, " s; the address is not shown): frames pass both ways");
+    } else {
+        ub_s(&u, "no DHCP offer");
+    }
+    line(u.b);
+    bcmw_leave(w);
 }
 
 /* the cluster-1 watchdog, when the loader armed it: WTCNT = WTDAT, at most once a second (utility/main.c) */
@@ -256,7 +413,7 @@ void sb_main(void)
     step = arg("wifi_step", BCMW_STEP_RINGS);
     autostart = arg("wifi_auto", 0);
     ret = arg("wifi_return", autostart ? 30 : 0);       /* unattended: never wait forever */
-    if (step < 1 || step > BCMW_STEP_ALL)
+    if (step < 1 || step > BCMW_STEP_ALL + 1)
         step = BCMW_STEP_RINGS;
     ub_init(&u);
     ub_s(&u, "wifitest: up to step ");
@@ -282,8 +439,9 @@ void sb_main(void)
     }
     sb_crash_hook = radio_off;
     bcmw_sb_os(&os, os_log, os_event);
+    os.rx = os_rx;
     memset(&cfg, 0, sizeof(cfg));
-    cfg.stop_after = step;
+    cfg.stop_after = step > BCMW_STEP_ALL ? BCMW_STEP_ALL : step;
     cfg.link_speed = arg("wifi_gen", 2);
     cfg.link_tries = 3;
     if (bcmw_init(w, &os, &cfg) != BCMW_OK) {
@@ -291,6 +449,8 @@ void sb_main(void)
         sb_reboot(SB_INFORM_NORMAL);
     }
     r = bcmw_bringup(w, 0);
+    if (r >= BCMW_STEP_UP && step > BCMW_STEP_ALL)
+        join_test(w);
     if (r >= BCMW_STEP_RINGS) {
         uint64_t t0 = sb_ms();
         line("wifitest: polling for 10 s (events, the console)");

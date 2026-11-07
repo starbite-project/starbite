@@ -258,6 +258,9 @@ int mb_rings(struct bcmw *w)
         tcm_write(w, w->ring_info, ri, RI_SIZE);
     }
     ringmem = le32(ri + RI_RINGMEM);
+    /* the flow rings' indices follow the two common H2D rings' (brcmf_pcie_init_ringbuffers) */
+    w->flow_w_where = h2d_w + 2 * step;
+    w->flow_r_where = h2d_r + 2 * step;
     {
         uint32_t lo = w->info.rambase, hi = w->info.rambase + w->info.ramsize;
         if (ringmem < lo || ringmem + RING_COMMON * RM_SIZE > hi ||
@@ -430,6 +433,7 @@ static void got_event(struct bcmw *w, const uint8_t *frame, uint32_t len)
         return;
     }
     w->info.events++;
+    link_event(w, &ev);
     if (w->os.event)
         w->os.event(w->os.ctx, &ev);
 }
@@ -500,6 +504,8 @@ static void process_item(struct bcmw *w, const uint8_t *it)
                 w->info.rx_frames++;
                 if (len >= 14 && be16(b + off + 12) == 0x886c)
                     got_event(w, b + off, len);
+                else if (len >= 14 && be16(b + off + 12) == 0x888e && w->join_phase == 2 && !w->join_fwsup)
+                    link_eapol(w, b + off, len);
                 else if (w->os.rx)
                     w->os.rx(w->os.ctx, it[1], b + off, len);
             }
@@ -510,7 +516,11 @@ static void process_item(struct bcmw *w, const uint8_t *it)
         break;
     }
     case MSGBUF_TYPE_TX_STATUS:
+        link_tx_status(w, it);
+        break;
     case MSGBUF_TYPE_FLOW_RING_CREATE_CMPLT:
+        link_flow_created(w, it);
+        break;
     case MSGBUF_TYPE_FLOW_RING_DELETE_CMPLT:
         break;
     default:
@@ -570,13 +580,15 @@ int mb_process(struct bcmw *w)
     uint32_t st;
     int n = 0;
 
-    if (w->dead)
+    if (w->dead || w->in_process)
         return 0;
+    w->in_process = 1;
     w->info.polls++;
     st = mbreg_rd(w, w->mb_int);
     if (st == 0xffffffffu) {
         bcmw_say(w, "msgbuf: the mailbox reads all ones: the link is gone");
         w->dead = 1;
+        w->in_process = 0;
         return 0;
     }
     if (st)
@@ -588,6 +600,7 @@ int mb_process(struct bcmw *w)
     n += drain(w, &w->ring[RING_D2H_TXCPL]);
     n += drain(w, &w->ring[RING_D2H_CONTROL]);
     mb_console(w);
+    w->in_process = 0;
     return n;
 }
 

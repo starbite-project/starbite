@@ -38,6 +38,15 @@ void bcmw_memcpy(void *d, const void *s, uint32_t n)
         *dp++ = *sp++;
 }
 
+int bcmw_memcmp(const void *a, const void *b, uint32_t n)
+{
+    const uint8_t *x = a, *y = b;
+    for (uint32_t i = 0; i < n; i++)
+        if (x[i] != y[i])
+            return x[i] < y[i] ? -1 : 1;
+    return 0;
+}
+
 void bcmw_memset(void *d, int c, uint32_t n)
 {
     uint8_t *dp = d;
@@ -503,16 +512,41 @@ static int step_rings(struct bcmw *w)
 
 /* ---- step 10: up and a scan ------------------------------------------------------------------------- */
 
+/* escan parameters into p (80 bytes): version (v2 when the firmware answered scan_ver), start, sync id; a name
+ * (or any), bssid broadcast, any BSS type, active, the firmware's times, every channel. Returns the length. */
+uint32_t bcmw_escan_params(struct bcmw *w, uint8_t *p, const uint8_t *ssid, unsigned ssid_len, uint16_t sync)
+{
+    unsigned o = w->scan_v2 ? 4 : 0;        /* v2: version and length before the name */
+    bcmw_memset(p, 0, 80);
+    put32(p, w->scan_v2 ? 2 : 1);
+    put16(p + 4, 1);
+    put16(p + 6, sync);
+    if (w->scan_v2) {
+        put16(p + 8, 2);                    /* BRCMF_SCAN_PARAMS_VERSION_V2 */
+        put16(p + 10, 72);                  /* BRCMF_SCAN_PARAMS_V2_FIXED_SIZE */
+    }
+    put32(p + 8 + o, ssid_len);
+    if (ssid_len)
+        bcmw_memcpy(p + 12 + o, ssid, ssid_len);
+    bcmw_memset(p + 8 + o + 36, 0xff, 6);
+    p[8 + o + 42] = 2;                      /* any BSS type */
+    /* v1: scan_type (u8) at 43; v2: a pad byte, then scan_type (u32, 0 active) at 48: zero either way */
+    for (unsigned i = 0; i < 4; i++)
+        put32(p + 8 + (w->scan_v2 ? 52 : 44) + 4 * i, 0xffffffffu);
+    return w->scan_v2 ? 80 : 72;
+}
+
 static int step_up(struct bcmw *w)
 {
     uint8_t mask[16], p[80];
-    uint32_t v = 0;
+    uint32_t v = 0, n;
     int fwerr = 0, e, v2;
 
     bcmw_memset(mask, 0, sizeof(mask));
     if (bcmw_iovar_get(w, "event_msgs", mask, sizeof(mask), &fwerr) == BCMW_OK) {
         static const uint8_t ev[] = { BCMW_E_SET_SSID, BCMW_E_JOIN, BCMW_E_AUTH, BCMW_E_DEAUTH, BCMW_E_DEAUTH_IND,
-                                      BCMW_E_ASSOC, BCMW_E_DISASSOC_IND, BCMW_E_LINK, BCMW_E_IF, BCMW_E_ESCAN_RESULT };
+                                      BCMW_E_ASSOC, BCMW_E_DISASSOC_IND, BCMW_E_LINK, BCMW_E_IF, BCMW_E_ESCAN_RESULT,
+                                      46 /* PSK_SUP */ };
         for (unsigned i = 0; i < sizeof(ev); i++)
             mask[ev[i] / 8] |= (uint8_t)(1u << (ev[i] % 8));
         bcmw_iovar_set(w, "event_msgs", mask, sizeof(mask), &fwerr);
@@ -526,30 +560,9 @@ static int step_up(struct bcmw *w)
     /* brcmfmac's rule (feature.c, cfg80211.c): the v2 parameters when the firmware answers "scan_ver" at all */
     v2 = bcmw_iovar_get_u32(w, "scan_ver", &v) == BCMW_OK;
     bcmw_sayx(w, "fw: 10: scan_ver ", v2 ? v : 0xffffffffu, v2 ? "(the v2 escan parameters)" : "(unsupported: v1 parameters)");
-    /* escan: version, action start, sync id; then ssid any, bssid broadcast, any BSS type, active, the
-     * firmware's own times, every channel */
-    bcmw_memset(p, 0, sizeof(p));
-    put32(p, v2 ? 2 : 1);
-    put16(p + 4, 1);
-    put16(p + 6, 0x1234);
-    if (v2) {
-        put16(p + 8, 2);                    /* BRCMF_SCAN_PARAMS_VERSION_V2 */
-        put16(p + 10, 72);                  /* BRCMF_SCAN_PARAMS_V2_FIXED_SIZE */
-        bcmw_memset(p + 8 + 40, 0xff, 6);
-        p[8 + 46] = 2;
-        put32(p + 8 + 48, 0);               /* active */
-        for (unsigned i = 0; i < 4; i++)
-            put32(p + 8 + 52 + 4 * i, 0xffffffffu);
-        put32(p + 8 + 68, 0);
-    } else {
-        bcmw_memset(p + 8 + 36, 0xff, 6);
-        p[8 + 42] = 2;
-        p[8 + 43] = 0;
-        for (unsigned i = 0; i < 4; i++)
-            put32(p + 8 + 44 + 4 * i, 0xffffffffu);
-        put32(p + 8 + 60, 0);
-    }
-    e = bcmw_iovar_set(w, "escan", p, v2 ? 80 : 72, &fwerr);
+    w->scan_v2 = v2;
+    n = bcmw_escan_params(w, p, 0, 0, 0x1234);
+    e = bcmw_iovar_set(w, "escan", p, n, &fwerr);
     bcmw_sayx(w, "fw: 10: a scan asked for (escan): ", (uint32_t)e, e == BCMW_OK ? "(the results come as events)" : "(REFUSED)");
     return e;
 }
@@ -654,6 +667,11 @@ void bcmw_quiesce(struct bcmw *w)
     }
     ex_quiesce(w);
     w->step = 0;
+    w->flow_state = 0;
+    w->join_phase = 0;
+    w->link_up = w->keyed = w->keys_due = 0;
+    bcmw_memset(w->tx_busy, 0, sizeof(w->tx_busy));
+    bcmw_memset(&w->wpa, 0, sizeof(w->wpa));
 }
 
 /* ---- commands --------------------------------------------------------------------------------------- */
