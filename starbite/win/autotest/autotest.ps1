@@ -10,6 +10,7 @@ function IfLines {
         ForEach-Object { $_ -replace '\s+:\s+', '=' }
 }
 L "autotest.ps1 start (pid $PID)"
+if (Test-Path C:\starbite\auto\cputest.ps1) { try { & C:\starbite\auto\cputest.ps1 } catch { L "cputest.ps1: $($_.Exception.Message)" } }
 function Soak($gw) {
     # throughput: 20 MB from Cloudflare's speed endpoint, then 4 minutes of gateway pings, then 3 reconnects
     foreach ($mb in 5, 20) {
