@@ -224,6 +224,33 @@ static void clean_range(const volatile void *p, uint64_t n)
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
+void star_pmsg(const char *s);     /* xnu_boot.c: the pmsg ring (survives a warm reset) */
+static void smp_note(const char *s) { star_pmsg(s); }
+static void note_core(int w, const char *what, int64_t r)
+{
+    char b[96];
+    const char *p = "STARBITE v7 smp: core ";
+    unsigned n = 0;
+    while (*p)
+        b[n++] = *p++;
+    b[n++] = (char)('0' + w);
+    b[n++] = ' ';
+    for (p = what; *p && n < 80;)
+        b[n++] = *p++;
+    b[n++] = ' ';
+    uint64_t v = (uint64_t)(r < 0 ? -r : r);
+    if (r < 0)
+        b[n++] = '-';
+    char d[20];
+    int k = 0;
+    do { d[k++] = (char)('0' + v % 10U); v /= 10U; } while (v && k < 19);
+    while (k)
+        b[n++] = d[--k];
+    b[n++] = '\n';
+    b[n] = 0;
+    star_pmsg(b);
+}
+
 static uint64_t ms_now(void)
 {
     uint64_t f = hw_freq() ? hw_freq() : 26000000U;
@@ -294,6 +321,7 @@ int g7_smp_start(int want)
         clean_range(g7_wboot, sizeof(g7_wboot));
         clean_range(s, sizeof(*s));
         clean_range(&J, sizeof(J));
+        note_core(w, "CPU_ON ...", 0);  /* before the SMC: a hang inside it leaves this as the last line */
         int64_t r = -5;
         for (int a = 0; a < 10; ++a) {   /* ALREADY_ON / ON_PENDING: a CPU_OFF still finishing */
             r = psci(0xc4000003U, (uint64_t)w, (uint64_t)(uintptr_t)g7_worker_entry, 0);
@@ -302,12 +330,14 @@ int g7_smp_start(int want)
             hw_wait_us(2000);
         }
         if (r) {
+            note_core(w, "CPU_ON failed, rc", r);
             s->state = WS_OFF;
             break;
         }
         uint64_t t0 = ms_now();
         while (__atomic_load_n(&s->state, __ATOMIC_ACQUIRE) == WS_STARTING && ms_now() - t0 < 100)
             hw_wait_us(50);
+        note_core(w, s->state == WS_IDLE ? "checked in after ms" : "did not check in, ms", (int64_t)(ms_now() - t0));
         if (s->state != WS_IDLE) {
             /* it never took its start record (or faulted): it is somewhere we cannot reach */
             smp_broken = 1;
@@ -344,8 +374,10 @@ int g7_smp_stop(void)
         started[w] = 0;
     }
     g7_smp_on = 1;
-    if (bad)
+    if (bad) {
         smp_broken = 1;              /* a core we could not turn off: never start more */
+        note_core(0, "stop: cores whose CPU_OFF failed (bits)", bad);
+    }
     return bad;
 }
 
@@ -385,25 +417,27 @@ void g7_par(g7_rows_fn fn, void *ctx, int y0, int y1, int grain)
     __asm__ volatile("dsb ish\n sev" ::: "memory");
     g7_smp_stat[0]++;
     run_chunks(0);
-    uint64_t t0 = 0;
-    unsigned spins = 0;
+    /* No WFE here: with interrupts masked a WFE wakes only on another core's SEV, so a worker that
+     * stopped without one would hold core 0 for good. A bounded spin instead (the chunks still out
+     * are a few rows of work: microseconds to milliseconds). */
+    uint64_t t0 = hw_ticks(), f = hw_freq() ? hw_freq() : 26000000U, lim = f * 4U / 10U;   /* 400 ms */
     while (__atomic_load_n(&J.done, __ATOMIC_ACQUIRE) < (uint32_t)nchunk) {
         int faulted = 0;
         for (int w = 1; w < g7_smp_on; ++w)
-            faulted |= WS[w].state == WS_FAULT;
-        if (++spins == 64)
-            t0 = ms_now();
-        if (faulted || (spins > 64 && ms_now() - t0 > 400)) {
+            faulted |= __atomic_load_n(&WS[w].state, __ATOMIC_ACQUIRE) == WS_FAULT;
+        if (faulted || hw_ticks() - t0 > lim) {
             /* a worker died with a chunk: core 0 alone from now on. The lost chunks cannot be
              * told apart from finished ones, so the whole job runs again on core 0 (each fn writes
              * only its own rows: running a chunk twice gives the same pixels). */
             smp_broken = 1;
             g7_smp_stat[2]++;
             g7_smp_on = 1;
+            smp_note(faulted ? "STARBITE v7 smp: a worker faulted; core 0 alone from now on\n"
+                             : "STARBITE v7 smp: a job timed out (400 ms); core 0 alone from now on\n");
             fn(ctx, y0, y1, 0);
             return;
         }
-        __asm__ volatile("wfe" ::: "memory");
+        __asm__ volatile("yield" ::: "memory");
     }
 }
 

@@ -15,12 +15,14 @@ _start:
     .quad 0, 0, 0
     .byte 0x41, 0x52, 0x4d, 0x64
     .long 0
-    /* +64: the chain header (pack.py): magic, loader off, loader len, rd off, rd len, loader entry */
+    /* +64: the chain header (pack.py): magic, loader off, loader len, rd off, rd len, loader entry,
+     * watchdog counts (0: none) */
 .global chain_hdr
 chain_hdr:
     .quad 0x314e49414843374dULL   /* "M7CHAIN1" */
     .quad 0, 0, 0, 0
     .quad 0x80080000
+    .quad 0
 entry:
     msr daifset, #15
     mov x19, x0

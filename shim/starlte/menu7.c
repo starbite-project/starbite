@@ -4616,7 +4616,10 @@ static void frame_wait(double t0)
 }
 
 /* Lab (dock Lab, Hold Bixby, the Starbite Lab row): EngineerMode, then the menu again */
-static int m_cores = 4;             /* boot-arg starcores=N: render on N A55 cores (1: core 0 alone) */
+#ifndef M7_DEF_CORES
+#define M7_DEF_CORES 4
+#endif
+static int m_cores = M7_DEF_CORES;  /* boot-arg starcores=N: render on N A55 cores (1: core 0 alone) */
 
 static void run_lab(void)
 {
@@ -4852,9 +4855,18 @@ static int menu7_main_in(const struct star_info *in, char *cmdline, unsigned len
             m7_report(!mode ? "off (starmenu7=0)" : !menu7_ready() ? "no assets (SB7ASSET/fonts)" : "g7_init failed");
             return -1;              /* nothing drawn: menu v6 runs */
         }
-        m_cores = cmd_num(cmdline, "starcores", 4);
+        m_cores = cmd_num(cmdline, "starcores", M7_DEF_CORES);
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+        star_pmsg("STARBITE v7 bench: menu7 up, starting cores\n");
+#endif
         g7_smp_start(m_cores);
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+        star_pmsg("STARBITE v7 bench: cores done, baking\n");
+#endif
         g7_bake();
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+        star_pmsg("STARBITE v7 bench: bake done\n");
+#endif
         /* Speed check (nothing drawn yet: S-Boot's splash is still on the panel, so v6 can take
          * over with its own intro). The bake is per-pixel float work like a frame's glass. */
         struct g7_stats gb;
@@ -4897,6 +4909,9 @@ static int menu7_main_in(const struct star_info *in, char *cmdline, unsigned len
         g7_get_stats(&g0);
         IN.render = 1;
         int r = intro7_run();
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+        star_pmsg("STARBITE v7 bench: intro done\n");
+#endif
         g7_get_stats(&g1);
         ST.intro_frames = g1.frames - g0.frames;
         ST.intro_worst = g1.worst_us / 1000U;
