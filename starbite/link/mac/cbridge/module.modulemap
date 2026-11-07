@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// The C side of the Mac viewer (link.h -> sbv.h -> ../proto/sblink.h) as a Swift module.
+module SBLinkC {
+    header "../link.h"
+    export *
+}
