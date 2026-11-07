@@ -288,6 +288,20 @@ so nothing here depends on them.
    it). Whether ufxsynopsys.sys itself behaves differently by hardware ID is not visible from the
    INF; the first L1 boot shows it. Host tests keep using layout A.
 
+**Attach notification (layout C, learned on the phone 2026-11-07).** With `UFN0` revision 1
+(no `_DSM`) ufxsynopsys bound (`Enum\ACPI\INT3445\0`, ConfigFlags 0) but never connected: no
+pull-up, the Mac saw nothing, no `Enum\USBFN` child. ufxsynopsys.sys carries Intel's xDCI `_DSM`
+GUID `732b85d5-b7a7-4a1b-9ba0-4bbd00ffd511` (the one Linux's dwc3-pci.c calls PCI_INTEL_BXT_DSM)
+and waits for the platform to report attach. Intel's xDCI ACPI (Slim Bootloader's Apollo Lake
+`ScXdci.asl` and Tiger Lake `PchXdci.asl`, BSD-2-Clause-Patent) documents the functions: 1
+"Attach/Detach and Port Detection Properties" (bit 0 = 1: the platform notifies attach/detach),
+5 "Attach Notification Enabled" (the function stack is ready; the platform answers with
+`Notify (XDCI, 0x80)` attached or `0x81` detached), 3 xDCI status, 4/7 Intel's PMU power state.
+`UFN0` revision 2 (`tools/woa/acpi/UsbUfn.asl`) implements 0, 1, 3, 4, 5, 7 and reports
+**attached** at function 5 (the blob is enabled only in device role, which L1 boots with the Mac's
+cable plugged); detach isn't reported until stage H3's Type-C driver can. Plus `_UPC` Type-C USB2,
+as Microsoft's function-controller bring-up page asks.
+
 ### 5.1 Device mode needs a USBFN configuration (proposal for L1)
 
 Our image's SYSTEM hive (`build/win/hive/SYSTEM-hk-th`, 2026-11-07) has **no
@@ -496,6 +510,12 @@ of the main checkout; 1040 bytes and nothing else in zone 0 after the Windows se
 | MAX77705 | HW 0x13, FW 0x32; BC 0x81 (VBUSDet), CC_STATUS0 0x71 (CCStat 1: sink, the Mac) | read fine |
 | MUIC | CONTROL1 read back 0x09 (routed); opcode 0x54 data 0x00 answered "54 00"; 0 I2C errors | |
 | SSDT | UsbDxe ran first: `SBUSBXHC` installed "gated, at dispatch", `SBGPU` "at dispatch", 2 of 2 | |
+
+**L1 v3 (2026-11-07, main session, `win11-usb`, image 75467bf2…, `UFN0` revision 1, USBFN keys
+1209:0002 written offline): driver bound, no connection.** Zone 0: role device, PHY device column
+(utmi 0x30, hsp 0x10003300), GCTL 0x30C12404 (PRTCAPDIR 2), MUIC routed, `SBUSBUFN` installed.
+Windows: `Enum\ACPI\INT3445\0` service ufxsynopsys, ConfigFlags 0; no `Enum\USBFN`; the Mac saw
+no device. Cause and fix: the attach `_DSM` above (`UFN0` revision 2, image 7fe37f7e…).
 
 ## 10. Licences and credits
 
