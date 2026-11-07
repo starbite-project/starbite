@@ -33,32 +33,63 @@ int g7_smp_on;                       /* cores running jobs now (1 = core 0 only)
 static int smp_broken;               /* a worker faulted or timed out: core 0 alone from then on */
 uint64_t g7_smp_stat[4];             /* jobs, chunks run by workers, worker faults, CPU_OFF returned */
 
+/* The job: its fields are written by core 0 only while no chunk of any job is claimable, and read
+ * by a core only after it claimed a chunk of that job. CLAIM is the one word cores race on:
+ * generation << 32 | chunks << 16 | next chunk. A core that comes back to claim after its job ended
+ * finds a newer generation (or next == chunks) and takes nothing: it can never run a chunk of the
+ * next job with fields half written, nor count one twice (TSan, 2026-11-08). */
 struct job {
     g7_rows_fn fn;
     void *ctx;
     int y0, y1, grain, nchunk;
-    uint32_t next;                   /* the next chunk to take (atomic) */
     uint32_t done;                   /* chunks finished (atomic) */
-    uint64_t gen;                    /* bumped for every job */
     uint32_t stop;                   /* workers leave */
 } __attribute__((aligned(64)));
 
 static struct job J;
+static uint64_t CLAIM __attribute__((aligned(64)));
 
-static void run_chunks(int core)
+static inline uint32_t claim_gen(void) { return (uint32_t)(__atomic_load_n(&CLAIM, __ATOMIC_ACQUIRE) >> 32); }
+
+static void run_chunks(int core, uint32_t gen)
 {
     for (;;) {
-        uint32_t c = __atomic_fetch_add(&J.next, 1U, __ATOMIC_ACQ_REL);
-        if ((int)c >= J.nchunk)
-            return;
-        int a = J.y0 + (int)c * J.grain, b = a + J.grain;
+        uint64_t c = __atomic_load_n(&CLAIM, __ATOMIC_ACQUIRE);
+        unsigned idx;
+        for (;;) {
+            if ((uint32_t)(c >> 32) != gen)
+                return;
+            unsigned nch = (unsigned)(c >> 16) & 0xffffU, nx = (unsigned)c & 0xffffU;
+            if (nx >= nch)
+                return;
+            if (__atomic_compare_exchange_n(&CLAIM, &c, c + 1U, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                idx = nx;
+                break;
+            }
+        }
+        int a = J.y0 + (int)idx * J.grain, b = a + J.grain;
         if (b > J.y1)
             b = J.y1;
         J.fn(J.ctx, a, b, core);
         if (core)
-            g7_smp_stat[1]++;        /* (a race between workers only loses counts) */
+            __atomic_fetch_add(&g7_smp_stat[1], 1U, __ATOMIC_RELAXED);
         __atomic_fetch_add(&J.done, 1U, __ATOMIC_ACQ_REL);
     }
+}
+
+/* core 0: publish a job (fields first, then the claim word); returns its generation */
+static uint32_t job_publish(g7_rows_fn fn, void *ctx, int y0, int y1, int grain, int nchunk)
+{
+    J.fn = fn;
+    J.ctx = ctx;
+    J.y0 = y0;
+    J.y1 = y1;
+    J.grain = grain;
+    J.nchunk = nchunk;
+    __atomic_store_n(&J.done, 0U, __ATOMIC_RELAXED);
+    uint32_t gen = claim_gen() + 1U;
+    __atomic_store_n(&CLAIM, (uint64_t)gen << 32 | (uint64_t)(unsigned)nchunk << 16, __ATOMIC_RELEASE);
+    return gen;
 }
 
 #ifndef M7_PREVIEW
@@ -263,16 +294,16 @@ void g7_worker_main(uint64_t w)
     uint64_t mpidr, seen;
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
     s->mpidr = mpidr;
-    seen = __atomic_load_n(&J.gen, __ATOMIC_ACQUIRE);
+    seen = claim_gen();
     __atomic_store_n(&s->state, (uint64_t)WS_IDLE, __ATOMIC_RELEASE);
     __asm__ volatile("dsb ish\n sev" ::: "memory");
     for (;;) {
-        while (__atomic_load_n(&J.gen, __ATOMIC_ACQUIRE) == seen && !__atomic_load_n(&J.stop, __ATOMIC_ACQUIRE))
+        while (claim_gen() == seen && !__atomic_load_n(&J.stop, __ATOMIC_ACQUIRE))
             __asm__ volatile("wfe" ::: "memory");
         if (__atomic_load_n(&J.stop, __ATOMIC_ACQUIRE))
             break;
-        seen = __atomic_load_n(&J.gen, __ATOMIC_ACQUIRE);
-        run_chunks((int)w);
+        seen = claim_gen();
+        run_chunks((int)w, seen);
         __asm__ volatile("dsb ish\n sev" ::: "memory");
     }
     __atomic_store_n(&s->state, (uint64_t)WS_LEAVING, __ATOMIC_RELEASE);
@@ -399,24 +430,17 @@ void g7_par(g7_rows_fn fn, void *ctx, int y0, int y1, int grain)
         return;
     if (grain < 1)
         grain = 1;
+    while ((y1 - y0 + grain - 1) / grain > 0xffff)
+        grain *= 2;                  /* (the claim word holds 16-bit chunk counts) */
     int nchunk = (y1 - y0 + grain - 1) / grain;
     if (g7_smp_on <= 1 || nchunk < 2) {
         fn(ctx, y0, y1, 0);
         return;
     }
-    J.fn = fn;
-    J.ctx = ctx;
-    J.y0 = y0;
-    J.y1 = y1;
-    J.grain = grain;
-    J.nchunk = nchunk;
-    __atomic_store_n(&J.done, 0U, __ATOMIC_RELAXED);
-    /* release: a worker still leaving the last job that takes chunk 0 here sees the new fields */
-    __atomic_store_n(&J.next, 0U, __ATOMIC_RELEASE);
-    __atomic_fetch_add(&J.gen, 1U, __ATOMIC_RELEASE);
+    uint32_t gen = job_publish(fn, ctx, y0, y1, grain, nchunk);
     __asm__ volatile("dsb ish\n sev" ::: "memory");
     g7_smp_stat[0]++;
-    run_chunks(0);
+    run_chunks(0, gen);
     /* No WFE here: with interrupts masked a WFE wakes only on another core's SEV, so a worker that
      * stopped without one would hold core 0 for good. A bounded spin instead (the chunks still out
      * are a few rows of work: microseconds to milliseconds). */
@@ -432,6 +456,7 @@ void g7_par(g7_rows_fn fn, void *ctx, int y0, int y1, int grain)
             smp_broken = 1;
             g7_smp_stat[2]++;
             g7_smp_on = 1;
+            __atomic_store_n(&CLAIM, (uint64_t)(gen + 1U) << 32, __ATOMIC_RELEASE);   /* nothing left to claim */
             smp_note(faulted ? "STARBITE v7 smp: a worker faulted; core 0 alone from now on\n"
                              : "STARBITE v7 smp: a job timed out (400 ms); core 0 alone from now on\n");
             fn(ctx, y0, y1, 0);
@@ -461,16 +486,16 @@ static void *worker(void *arg)
 {
     int w = (int)(intptr_t)arg;
     my_core = w;
-    uint64_t seen = 0;
+    uint32_t seen = 0;
     pthread_mutex_lock(&mu);
     for (;;) {
-        while (J.gen == seen && !J.stop)
+        while (claim_gen() == seen && !J.stop)
             pthread_cond_wait(&cv, &mu);
         if (J.stop)
             break;
-        seen = J.gen;
+        seen = claim_gen();
         pthread_mutex_unlock(&mu);
-        run_chunks(w);
+        run_chunks(w, seen);
         pthread_mutex_lock(&mu);
         pthread_cond_broadcast(&cv_done);
     }
@@ -519,25 +544,19 @@ void g7_par(g7_rows_fn fn, void *ctx, int y0, int y1, int grain)
         return;
     if (grain < 1)
         grain = 1;
+    while ((y1 - y0 + grain - 1) / grain > 0xffff)
+        grain *= 2;                  /* (the claim word holds 16-bit chunk counts) */
     int nchunk = (y1 - y0 + grain - 1) / grain;
     if (g7_smp_on <= 1 || nchunk < 2) {
         fn(ctx, y0, y1, 0);
         return;
     }
     pthread_mutex_lock(&mu);
-    J.fn = fn;
-    J.ctx = ctx;
-    J.y0 = y0;
-    J.y1 = y1;
-    J.grain = grain;
-    J.nchunk = nchunk;
-    J.done = 0;
-    __atomic_store_n(&J.next, 0U, __ATOMIC_RELEASE);
-    J.gen++;
+    uint32_t gen = job_publish(fn, ctx, y0, y1, grain, nchunk);
     g7_smp_stat[0]++;
     pthread_cond_broadcast(&cv);
     pthread_mutex_unlock(&mu);
-    run_chunks(0);
+    run_chunks(0, gen);
     pthread_mutex_lock(&mu);
     while (__atomic_load_n(&J.done, __ATOMIC_ACQUIRE) < (uint32_t)nchunk)
         pthread_cond_wait(&cv_done, &mu);
