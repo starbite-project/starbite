@@ -37,13 +37,12 @@
 #include <Library/TimerLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 
-#include "StarbiteLog.h"
-
 #ifndef STARBITE_M3_RUN
 #define STARBITE_M3_RUN 0
 #endif
 
 #if STARBITE_M3_RUN
+#include "StarbiteLog.h"
 #include "M3RunStub.h"
 
 #define PMU_BASE      0x14060000UL

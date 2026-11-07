@@ -159,6 +159,13 @@ cores were most likely alive. B2b (image edb78134…) would still tell (b)/(c)/(
 parking stub polls instead of using WFE (Windows takes the cores within seconds of kernel start),
 so the answer doesn't change the design. B2b is optional; the 8-core path skips it.
 
+**B2b result anyway (2026-11-07, image edb78134, a few minutes of Windows): PASSED.** Core 1: `el 1
+frq 00000000 kctl 000000F4 spin 00000008 wake 00032300 t 00012B40`; cores 2 and 3 alike (wake
+00030400 / 00030100, t 00012B29 / 00012B0C). CNTFRQ is 0 as expected. The event stream is
+configured, and WFE returns about 1,060 times a second (more than the ~400/s stream alone, so
+Windows' SEVs wake them too). All three lived 0x12B40 × 2.52 ms ≈ 193 s, the whole session. So
+parked M3s can sleep in WFE through a Windows session; B4's stubs may use WFE + polling.
+
 ## 5. The way to 7 and 8 cores in Windows
 
 Order and why: Windows must **boot on an M3** (B3) before the cores are mixed (B4). Booting on an
@@ -206,6 +213,12 @@ At ExitBootServices (our own event, registered by Star2LteSsdtDxe), on A55 core 
    doesn't come within 1 s, the A55 sets Cancel (the resume stub checks it first and powers off)
    and returns normally. The MADT was never touched, so Windows boots on the A55 as today. Either
    way, one line in zone 0.
+
+Built: `M3Boot.c` + `M3BootStub.S` (`STARBITE_M3_BOOT=1`); image `starbite-uefi-m3boot-gpu.bin`,
+sha256 91109c72… (`SOLO=m3boot M3BOOT=1 EXTRA_AML=<StarbiteGpu.aml> SUFFIX=-gpu`). The live MADT is
+logged at ExitBootServices (`=M3 boot MADT gicc uid=… if=… flags=… mpidr=… park v… eff=…`): the
+first view of what P leaves. **Held until B3a passes** (its GIC interface bits and coherency
+results gate this image).
 
 `numproc 4` stays. Checks: Windows boots; Task Manager shows 4 CPUs; System Information / `wmic
 cpu` shows the Mongoose (MIDR 0x531f0020) as CPU 0; a CPU-heavy run; Start -> Restart works.
