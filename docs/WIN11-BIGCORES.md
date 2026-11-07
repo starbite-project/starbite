@@ -416,3 +416,15 @@ the M3 after the claim> esr elr far <the first one's> pmsg <pmsg write index>`; 
 M3BootCatchVectors after the claim (records ESR/ELR/FAR, then waits), and the context page is reserved memory now.
 Image starbite-uefi-solo5-gpu.bin 4b47f25e….
 
+**solo5 (4b47f25e):** `=M3 watch beat 0000004C prog 02 catch 00 ... pmsg 000031DD`: the A55 lived the full 15 s, the
+M3 left our wrapper (prog 2) without any exception, and the pmsg index never moved after "=M3 state" (0x31DD = right
+after that line). So the M3 returned into the woa hook (BdsDxe +0x9CBC, the call at +0xAAF8) and never reached its
+=EBSOK print (+0xAB34), with no exception at EL1 (IRQ/FIQ are masked there, so an SGI can't sample its PC). Only
+BdsDxe replaces gBS->ExitBootServices (its store at +0x428C, early in BDS); ours was installed at dispatch, i.e.
+INSIDE woa's.
+
+**v6** (solo6): our wrapper is installed at ReadyToBoot, after BdsDxe's hook, so it is the outermost: winload -> ours
+-> woa's -> the real one. woa's post-EBS code (=EBSOK) runs on the A55 before the hand-off; the M3 returns straight
+into winload. The wrapper logs its caller (`=M3 boot v6: ExitBootServices wrapper called from ...`: winload's
+address expected, 0x90F4xxxx). Watch line as in v5. Image starbite-uefi-solo6-gpu.bin 0be43045….
+

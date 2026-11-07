@@ -63,6 +63,7 @@
 #include <Library/TimerLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Protocol/LoadedImage.h>
+#include <Guid/EventGroup.h>
 
 #ifndef STARBITE_M3_BOOT
 #define STARBITE_M3_BOOT 0
@@ -1247,6 +1248,7 @@ M3BootEbsWrap (
   EFI_STATUS  Status;
 
   if (!mFired) {
+    SbLog ("=M3 boot v6: ExitBootServices wrapper called from %lx (winload = outermost, as intended)", (UINT64)(UINTN)__builtin_return_address (0));
     M3BootLseGuard ();                  // while boot services still exist; idempotent if winload retries
   }
 
@@ -1260,6 +1262,35 @@ M3BootEbsWrap (
   M3BootAfterEbs ();
   M3Progress (2);                       // on the M3 only: about to return into the woa wrapper
   return Status;
+}
+
+//
+// v6: wrap gBS->ExitBootServices at ReadyToBoot, after the release BdsDxe installed its own hook (BdsDxe +0x428C,
+// early in BDS), so ours is the OUTERMOST: winload -> ours -> woa's -> the real one. The woa hook's post-EBS code
+// (=EBSOK, its latches) then runs on the A55 before the hand-off, and the M3 returns straight into winload. (v4/v5
+// wrapped at dispatch: ours was inside woa's, the M3 returned into woa's hook and never printed =EBSOK.)
+//
+STATIC EFI_EVENT  mReadyToBoot;
+
+STATIC
+VOID
+EFIAPI
+M3BootOnReadyToBoot (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  EFI_STATUS  Status;
+
+  if (gBS->ExitBootServices == M3BootEbsWrap) {
+    return;                             // ReadyToBoot again (another boot option): already wrapped
+  }
+
+  mOrigEbs              = gBS->ExitBootServices;
+  gBS->ExitBootServices = M3BootEbsWrap;
+  gBS->Hdr.CRC32        = 0;
+  Status                = gBS->CalculateCrc32 ((UINT8 *)gBS, gBS->Hdr.HeaderSize, &gBS->Hdr.CRC32);
+  SbLog ("=M3 boot v6: ReadyToBoot: ExitBootServices %lx wrapped by ours %lx (crc %r)", (UINT64)(UINTN)mOrigEbs, (UINT64)(UINTN)M3BootEbsWrap, Status);
 }
 
 VOID
@@ -1361,18 +1392,15 @@ M3BootArm (
   __asm__ __volatile__ ("mrs %0, sctlr_el1" : "=r" (mArmSctlr));
   __asm__ __volatile__ ("mrs %0, mair_el1" : "=r" (mArmMair));
 
-  mOrigEbs                = gBS->ExitBootServices;
-  gBS->ExitBootServices   = M3BootEbsWrap;
-  gBS->Hdr.CRC32          = 0;
-  Status                  = gBS->CalculateCrc32 ((UINT8 *)gBS, gBS->Hdr.HeaderSize, &gBS->Hdr.CRC32);
+  Status = gBS->CreateEventEx (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, M3BootOnReadyToBoot, NULL, &gEfiEventReadyToBootGuid, &mReadyToBoot);
   SbLog (
-    "=M3 boot v5 armed (%a): entry %lx (vectors %lx..%lx in this image), context %lx, ExitBootServices wrapped (orig %lx, crc %r)",
+    "=M3 boot v6 armed (%a): entry %lx (vectors %lx..%lx in this image), context %lx, ExitBootServices wrapped at ReadyToBoot (now %lx, event %r)",
     BOOT_SOLO ? "solo: M3 1 only" : (BOOT_BIG ? "big: M3 1 + parked M3s, no A55" : "M3 1 + A55 1..3"),
     (UINT64)(UINTN)M3BootEntry,
     (UINT64)(UINTN)M3BootVectors,
     (UINT64)(UINTN)M3BootEnd,
     (UINT64)(UINTN)mCtx,
-    (UINT64)(UINTN)mOrigEbs,
+    (UINT64)(UINTN)gBS->ExitBootServices,
     Status
     );
 }
