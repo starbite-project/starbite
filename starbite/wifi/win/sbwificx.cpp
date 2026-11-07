@@ -168,7 +168,8 @@ struct DEVCTX {
     // W2i: the data path's callbacks, counted (they may run at DISPATCH, where nothing is logged)
     volatile LONG txq_made, rxq_made, tx_advances, tx_packets, tx_notifies, rx_advances, rx_up;
     UINT64 linkstate_at;            // when to send WDI's link state again while associated               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
-    ULONG link_state;               // Parameters\LinkState: 1 (default) the adapter's link reported up/down             // when to log the rx state again (1.5 s after an association)            // the core's received-frame count when the connect began
+    ULONG link_state;
+    ULONG assoc_txn_mode;           // Parameters\AssocTxn: 0 (default) the association result unsolicited, 1 the task's id               // Parameters\LinkState: 1 (default) the adapter's link reported up/down             // when to log the rx state again (1.5 s after an association)            // the core's received-frame count when the connect began
     UINT16 connect_port;
     UINT8 bssid[6], rsn[BCMW_RSN_OURS];
     UINT64 connect_started;
@@ -739,7 +740,12 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
         d->connected = 1;           // before Windows hears it: its handshake message 2 may follow at once
     if (GenerateWdiIndicationAssociationResultFromIhv(&list, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen) ==
         NDIS_STATUS_SUCCESS)
-        Indicate(d, WDI_INDICATION_ASSOCIATION_RESULT, d->connect_port, d->connect_txn, NDIS_STATUS_SUCCESS, gen, len);
+        // WDI lists the association result among the connect task's UNSOLICITED indications (transaction id 0),
+        // like the BSS list. W2a..W2i sent the task's id: AutoConfig logged every attempt as 8002 "the specific
+        // network is not available" (0x2800B, RSSI 255) the moment it came, never an association.
+        // Parameters\AssocTxn 1: the task's id again.
+        Indicate(d, WDI_INDICATION_ASSOCIATION_RESULT, d->connect_port,
+                 d->assoc_txn_mode ? d->connect_txn : WDI_TRANSACTION_ID_UNSOLICIT, NDIS_STATUS_SUCCESS, gen, len);
     else
         Say("wificx: the association result could not be generated");
     {
@@ -763,7 +769,9 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
     }
     Indicate(d, WDI_INDICATION_CONNECT_COMPLETE, d->connect_port, d->connect_txn,
              ok ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE, NULL, 0);
-    Sayf("wificx: connect %s", ok ? "COMPLETE (associated; Windows does the handshake now)" : "FAILED");
+    Sayf("wificx: connect %s (association result %s, then the task's completion)", ok ?
+         "COMPLETE (associated; Windows does the handshake now)" : "FAILED", d->assoc_txn_mode ? "with the task's id" :
+         "unsolicited");
     if (ok) {
         LinkStateWdi(d);
         d->heartbeat_at = 0;        // the 10 s heartbeat starts now
@@ -1731,6 +1739,10 @@ static NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST)
     cfg.diag = 1;                   // step 8 checked word by word until W2 has passed once
     d->bss_frame = Param(L"BssFrame", 0);
     d->link_state = Param(L"LinkState", 1);
+    d->assoc_txn_mode = Param(L"AssocTxn", 0);
+    Sayf("wificx: settings: association result %s, link state %s, BSS frames %s",
+         d->assoc_txn_mode ? "with the task's id" : "unsolicited", d->link_state ? "reported" : "left to WiFiCx",
+         d->bss_frame == 1 ? "with MAC header" : "body");
     if (bcmw_init(d->w, &os, &cfg) != BCMW_OK) {
         SetParam(L"GuardBoots", guard);
         return STATUS_DEVICE_CONFIGURATION_ERROR;
