@@ -183,6 +183,12 @@ void ui_dirty_all(void)
 void host_present_rect(const uint32_t *bb, int x, int y, int w, int h);
 #endif
 
+/* Forget the dirty rectangles without presenting them (a caller presents the screen in its own steps). */
+void ui_dirty_clear(void)
+{
+    ndirty = 0;
+}
+
 uint64_t ui_present(void)
 {
     uint64_t t0 = sb_us(), px = 0;

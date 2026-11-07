@@ -36,6 +36,11 @@ const char *app_name(int a)
     return a >= 0 && a < napps ? apps[a].name : "";
 }
 
+const char *app_tile(int a)
+{
+    return a >= 0 && a < napps ? apps[a].tile : "";
+}
+
 uint32_t app_color(int a)
 {
     return a >= 0 && a < napps ? apps[a].color : 0;
@@ -542,6 +547,28 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
             return SBOS_EPERM;
         kui_awake((int)arg[0]);
         return 0;
+    case SYS_UI_TILE:
+        if (!user_str(a, arg[0], s1, sizeof(s1)))
+            return SBOS_EINVAL;
+        unsigned cut = sizeof(p->tile) - 1;
+        if (sb_strlen(s1) > cut) {
+            while (cut > 0 && ((uint8_t)s1[cut] & 0xc0U) == 0x80U)
+                --cut;                          /* not inside a UTF-8 character */
+            s1[cut] = 0;
+        }
+        unsigned k = 0;
+        while (p->tile[k] && p->tile[k] == s1[k])
+            ++k;
+        if (p->tile[k] != s1[k]) {
+            sb_strcpy(p->tile, sizeof(p->tile), s1);
+            ui_mark_dirty();
+        }
+        return 0;
+    case SYS_UI_GAUGE:
+        if (!front || !user_str(a, arg[0], s1, sizeof(s1)) || !user_str(a, arg[1], s2, sizeof(s2)))
+            return SBOS_EINVAL;
+        kui_gauge(s1, s2, (int)arg[2], (uint32_t)arg[3]);
+        return 0;
     /* ---- time ---- */
     case SYS_TIME_NOW: {
         struct sbos_time t;
@@ -625,6 +652,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_SOS_LED: return sos_led_on;
         case SET_GPU_HEAT: return gpu_heat_allowed;
         case SET_SCREEN_OFF_S: return (int64_t)K.screen_off_s;
+        case SET_BRIGHTNESS: return panel_bright_level;
         default: return SBOS_EINVAL;
         }
     case SYS_SETTING_SET:
@@ -651,6 +679,10 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
                         "First test: only with someone watching the phone.",
                         "Hold to allow", gpu_confirm_done);
             return 0;
+        case SET_BRIGHTNESS:
+            if (arg[1] > 4)
+                return SBOS_EINVAL;
+            return panel_brightness((int)arg[1]) ? 0 : SBOS_EAGAIN;
         case SET_SOS_LED:
             sos_led_on = arg[1] != 0;
             sb_log(arg[1] ? "settings: LED in SOS: on" : "settings: LED in SOS: off");
@@ -698,6 +730,10 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         sos_status(&s);
         return user_out(a, arg[0], &s, sizeof(s)) ? 0 : SBOS_EINVAL;
     }
+    case SYS_SENSOR_READ:
+        if (!(p->perms & (SBOS_P_SENSORS | SBOS_P_HEAT)))
+            return SBOS_EPERM;
+        return heater_sensor((int)arg[0]);
     case SYS_VIBRATE:
     case SYS_ALARM_SET:
     case SYS_ALARM_CANCEL:

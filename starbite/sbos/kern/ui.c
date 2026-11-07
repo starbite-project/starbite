@@ -31,7 +31,7 @@ static int getenv_dbg(void) { return getenv("SBOS_DBG") != 0; }
 #define ICON_SOS_S 227
 
 enum { E_TITLE = 1, E_BACK, E_BUTTON, E_BIG, E_TEXT, E_LEVEL, E_TOGGLE, E_HOLD, E_CLOCK, E_TILE, E_ROUND,
-       E_FIELD, E_TOAST, E_CTEXT };
+       E_FIELD, E_TOAST, E_CTEXT, E_GAUGE };
 enum { SCR_LOCK = 1, SCR_HOME, SCR_APP, SCR_POWER, SCR_CONFIRM, SCR_LIGHT, SCR_SOS, SCR_OFF };
 
 struct el {
@@ -58,7 +58,6 @@ static uint64_t light_hint_until, light_off_at;
 static char toast[64];
 static uint64_t toast_until;
 static int app_awake;
-static struct ui_status st_shown;
 static int status_forced = 1;
 
 /* the app's elements, built between kui_begin and kui_end */
@@ -72,6 +71,14 @@ static void (*cf_done)(int ok);
 static int cf_return;
 
 int app_front = -1;
+int ui_overflow;                    /* the last app screen built did not fit (the self test reads it) */
+
+static int strcmp_k(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        ++a, ++b;
+    return (unsigned char)*a - (unsigned char)*b;
+}
 
 static uint32_t fnv(uint32_t h, const void *p, unsigned n)
 {
@@ -192,6 +199,17 @@ void kui_hold(uint32_t id, const char *label, uint32_t ms, uint32_t flags)
     e->flags = flags;
     e->ms = ms < 300 ? 300 : ms > 5000 ? 5000 : ms;
     scopy(e->a, sizeof(e->a), label);
+}
+
+void kui_gauge(const char *caption, const char *value, int permille, uint32_t c)
+{
+    struct el *e = add(app_els, &napp_els, E_GAUGE);
+    if (!e)
+        return;
+    scopy(e->a, sizeof(e->a), caption);
+    scopy(e->b, sizeof(e->b), value);
+    e->value = permille;
+    e->color = c ? c : C_GREEN;
 }
 
 void kui_end(void)
@@ -353,6 +371,7 @@ static void layout_flow(struct el *l, int n, int y)
             break;
         case E_LEVEL: e->h = 300; break;
         case E_TOGGLE: e->h = 210; break;
+        case E_GAUGE: e->h = 640; break;
         default: e->h = 120; break;
         }
         e->y = y;
@@ -360,36 +379,124 @@ static void layout_flow(struct el *l, int n, int y)
     }
 }
 
+/* ---- the status bar (0.3): the time on the left; on the right the mobile signal and Wi-Fi (both shown off until
+ * their drivers exist: an outline only), the battery % with the estimate and a battery glyph; a small pill in the
+ * middle while a service runs (HEATING, SOS, LED). Drawn only when its content changes. */
+static char st_sig[96];
+
+static void glyph_signal(int x, int y, int on)
+{
+    for (int i = 0; i < 4; ++i) {
+        int h = 12 + i * 8;
+        uint32_t c = on ? C_L1 : C_L3;
+        if (on)
+            ui_round(x + i * 15, y + 40 - h, 10, h, 3, c);
+        else
+            ui_round(x + i * 15, y + 40 - h, 10, h, 3, ui_mix(C_L1, C_BG, 60));
+    }
+}
+
+static void glyph_wifi(int x, int y, int on)
+{
+    uint32_t c = on ? C_L1 : ui_mix(C_L1, C_BG, 60);
+    int cx = x + 24, cy = y + 40;
+    ui_disc(cx, cy - 4, 5, c);
+    for (int r = 16; r <= 36; r += 10)
+        for (int d = -50; d <= 50; d += 4) {
+            /* an arc of dots, -50..50 degrees around straight up (integer sine table) */
+            static const int16_t q[14] = { 0, 70, 139, 208, 276, 342, 407, 469, 530, 588, 643, 695, 743, 788 };
+            int ad = d < 0 ? -d : d, sv = q[ad / 4 < 14 ? ad / 4 : 13] * (d < 0 ? -1 : 1);
+            int cv = 1000 - (ad * ad) / 6;
+            ui_disc(cx + r * sv / 1000, cy - 4 - r * cv / 1000, 2, c);
+        }
+}
+
+static void glyph_battery(int x, int y, int pct, int charging)
+{
+    uint32_t fill = pct < 10 ? C_RED : pct < 20 ? C_ORANGE : charging ? C_GREEN : C_L1;
+    ui_round(x, y, 74, 38, 9, ui_mix(C_L1, C_BG, 110));
+    ui_round(x + 3, y + 3, 68, 32, 7, C_BG);
+    int w = pct < 0 ? 0 : 62 * (pct > 100 ? 100 : pct) / 100;
+    if (w > 0)
+        ui_round(x + 6, y + 6, w < 6 ? 6 : w, 26, 5, fill);
+    ui_round(x + 76, y + 12, 6, 14, 3, ui_mix(C_L1, C_BG, 110));
+}
+
 static void build_status(void)
 {
-    struct ui_status s;
-    memset(&s, 0, sizeof(s));
     struct sbos_time t;
+    struct sbos_battery b;
+    struct sbos_estimate est;
+    char tm[8] = "--:--", right[32] = "", pill[16] = "";
     if (clock_now(&t)) {
         struct ub u;
         ub_init(&u);
         ub_dec2(&u, (unsigned)t.h);
         ub_c(&u, ':');
         ub_dec2(&u, (unsigned)t.mi);
-        scopy(s.left, sizeof(s.left), u.b);
+        scopy(tm, sizeof(tm), u.b);
     }
-    struct sbos_battery b;
     battery_get(&b);
-    s.bat = b.ok ? b.pct : -1;
-    s.charging = b.charger != 0;
-    if (heater_running_ui())
-        scopy(s.mid, sizeof(s.mid), "HEATING");
-    s.mid_c = C_ORANGE;
+    battery_estimate(&est);
     if (b.ok) {
         struct ub u;
         ub_init(&u);
         ub_dec(&u, (uint64_t)(b.pct < 0 ? 0 : b.pct));
         ub_s(&u, " %");
-        scopy(s.right, sizeof(s.right), u.b);
+        if (!b.charger && est.now_min > 0) {
+            ub_s(&u, "  ");
+            if (est.now_min >= 48 * 60) {
+                ub_dec(&u, (uint64_t)(est.now_min / (24 * 60)));
+                ub_s(&u, " d");
+            } else if (est.now_min >= 90) {
+                ub_dec(&u, (uint64_t)((est.now_min + 30) / 60));
+                ub_s(&u, " h");
+            } else {
+                ub_dec(&u, (uint64_t)est.now_min);
+                ub_s(&u, " min");
+            }
+        }
+        scopy(right, sizeof(right), u.b);
     }
-    ui_status_draw(&s, status_forced);
+    if (sos_active())
+        scopy(pill, sizeof(pill), "SOS");
+    else if (heater_running_ui())
+        scopy(pill, sizeof(pill), "HEATING");
+    else if (torch_on())
+        scopy(pill, sizeof(pill), "LED ON");
+    struct ub sig;
+    ub_init(&sig);
+    ub_s(&sig, tm);
+    ub_s(&sig, "|");
+    ub_s(&sig, right);
+    ub_s(&sig, "|");
+    ub_s(&sig, pill);
+    ub_s(&sig, b.charger ? "|c" : "|-");
+    ub_dec(&sig, (uint64_t)(b.pct < 0 ? 0 : b.pct));
+    if (!status_forced && !strcmp_k(sig.b, st_sig))
+        return;
+    scopy(st_sig, sizeof(st_sig), sig.b);
     status_forced = 0;
-    st_shown = s;
+    ui_fill(0, 0, UI_W, UI_STATUS_H, C_BG);
+    ui_text(F_STATUS, 64, 76, tm, C_L1);
+    int x = UI_W - 64 - 84;
+    if (b.ok)
+        glyph_battery(x, 42, b.pct, b.charger != 0);
+    if (right[0]) {
+        int w = ui_text_w(F_STATUS, right);
+        x -= w + 18;
+        ui_text(F_STATUS, x, 76, right, C_L1);
+    }
+    x -= 70;
+    glyph_wifi(x, 36, 0);
+    x -= 78;
+    glyph_signal(x, 36, 0);
+    if (pill[0]) {
+        int w = ui_text_w(F_HEAD, pill) + 48;
+        ui_round((UI_W - w) / 2, 30, w, 56, 28, ui_mix(C_ORANGE, C_BG, 70));
+        ui_text_c(F_HEAD, UI_W / 2, 70, pill, C_ORANGE);
+    }
+    ui_dirty(0, 0, UI_W, UI_STATUS_H);
 }
 
 static void fmt_clock(char *o, unsigned cap, int sec)
@@ -486,15 +593,32 @@ static void build_lock(void)
     e->x = 0, e->y = 2660, e->w = UI_W, e->h = 80;
 }
 
+/* Home (0.3): the Emergency tile across the top (red), then the apps in two columns of large tiles, each with its
+ * icon, its name and a live line the app sets (SYS_UI_TILE) or the kernel adds (heating, LED, SOS). */
 static void build_home(void)
 {
+    int emerg = app_by_id("emergency");
     int heat = app_by_id("heat"), sos_a = app_by_id("sos"), light = app_by_id("light");
+    int y0 = 140;
+    if (emerg >= 0) {
+        struct el *e = add(cur, &ncur, E_TILE);
+        e->id = (uint32_t)emerg;
+        scopy(e->a, sizeof(e->a), app_name(emerg));
+        scopy(e->b, sizeof(e->b), app_tile(emerg)[0] ? app_tile(emerg) : "Call, message, alarm");
+        e->icon = 227;
+        e->color = C_RED;
+        e->flags = 1;                           /* the wide emergency tile */
+        e->x = MX, e->y = y0, e->w = CW, e->h = 210;
+        y0 += 210 + 40;
+    }
     int shown_n = 0;
     for (int i = 0; i < napps; ++i)
-        shown_n += !app_hidden(i);
-    int th = shown_n > 6 ? 470 : 600;          /* 3 rows of big tiles, 4 rows when there are more apps */
+        shown_n += !app_hidden(i) && i != emerg;
+    int rows = (shown_n + 1) / 2, th = rows > 3 ? (2700 - y0 - (rows - 1) * 40) / rows : 600;
+    if (th > 600)
+        th = 600;
     for (int i = 0, t = 0; i < napps && t < 8; ++i) {
-        if (app_hidden(i))
+        if (app_hidden(i) || i == emerg)
             continue;
         struct el *e = add(cur, &ncur, E_TILE);
         e->id = (uint32_t)i;
@@ -504,20 +628,21 @@ static void build_home(void)
         e->w = 625;
         e->h = th;
         e->x = MX + (t % 2) * (625 + 50);
-        e->y = 300 + (t / 2) * (th + 50);
+        e->y = y0 + (t / 2) * (th + 40);
         ++t;
+        scopy(e->b, sizeof(e->b), app_tile(i));
         if (i == light && torch_on())
             scopy(e->b, sizeof(e->b), "LED on");
         if (i == heat && heater_running_ui())
             scopy(e->b, sizeof(e->b), "Heating");
         if (i == sos_a && sos_active())
-            scopy(e->b, sizeof(e->b), "On");
+            scopy(e->b, sizeof(e->b), "Alarm on");
     }
     struct el *e = add(cur, &ncur, E_CTEXT);
     scopy(e->b, sizeof(e->b), "Bixby: open  " U_DOT "  Power: screen off  " U_DOT "  hold Power: menu");
     e->value = F_SMALL;
     e->color = C_L3;
-    e->x = 0, e->y = 300 + ((shown_n + 1) / 2) * (th + 50) + 20, e->w = UI_W, e->h = 80;
+    e->x = 0, e->y = y0 + rows * (th + 40) + 4, e->w = UI_W, e->h = 80;
 }
 
 static void build_app(void)
@@ -532,6 +657,15 @@ static void build_app(void)
     for (int i = 0; i < napp_els && ncur < EL_MAX - 1; ++i)
         cur[ncur++] = app_els[i];
     layout_flow(cur + base, ncur - base, 520);
+    /* an app screen taller than the panel: logged once per app (the self test counts it) */
+    static uint32_t over_logged;
+    if (ncur > base && cur[ncur - 1].y + cur[ncur - 1].h > UI_H - 20) {
+        ui_overflow = 1;
+        if (app_front >= 0 && app_front < 32 && !(over_logged & (1U << app_front))) {
+            over_logged |= 1U << app_front;
+            sb_logf("ui: app screen taller than the panel: ", app_name(app_front));
+        }
+    }
 }
 
 static void build_power(void)
@@ -800,14 +934,41 @@ static void draw_el(const struct el *e, int idx)
     case E_TILE: {
         if (f)
             ui_round(e->x - 10, e->y - 10, e->w + 20, e->h + 20, 82, C_STAR);
+        if (e->flags & 1) {                     /* the Emergency tile: red, the icon left, two lines */
+            ui_round(e->x, e->y, e->w, e->h, 72, p ? 0xff5a1a16U : 0xff3d1210U);
+            ui_disc(e->x + 120, e->y + e->h / 2, 74, ui_mix(C_RED, 0xff3d1210U, 90));
+            ui_icon(e->icon, e->x + 72, e->y + e->h / 2 - 48, 0xffffd0ccU);
+            ui_text(F_TITLE, e->x + 240, e->y + 112, e->a, C_L1);
+            ui_text_cut(F_DETAIL, e->x + 244, e->y + 170, e->b, e->w - 300, 0xffffb0a8U);
+            break;
+        }
         ui_round(e->x, e->y, e->w, e->h, 72, card);
-        int iy = e->h < 560 ? e->y + 125 : e->y + 160;
-        ui_disc(e->x + 150, iy, 100, ui_mix(e->color, C_CARD, 60));
+        int big = e->h >= 520, ic = big ? 160 : 130;
+        ui_disc(e->x + 150, e->y + ic, 100, ui_mix(e->color, C_CARD, 60));
         if (e->icon)
-            ui_icon(e->icon, e->x + 75, iy - 75, e->color);
-        ui_text_cut(F_TITLE, e->x + 70, e->y + e->h - 110, e->a, e->w - 120, C_L1);
+            ui_icon(e->icon, e->x + 75, e->y + ic - 75, e->color);
+        ui_text_cut(F_TITLE, e->x + 70, e->y + e->h - (e->b[0] ? 120 : 80), e->a, e->w - 120, C_L1);
         if (e->b[0])
-            ui_text(F_DETAIL, e->x + 72, e->y + e->h - 40, e->b, C_ORANGE);
+            ui_text_cut(F_DETAIL, e->x + 72, e->y + e->h - 48, e->b, e->w - 130, ui_mix(e->color, C_L1, 140));
+        break;
+    }
+    case E_GAUGE: {                             /* a ring with the value inside (Battery) */
+        int cx = e->x + e->w / 2, cy = e->y + 300, r = 250;
+        ui_ring(cx, cy, r, 36, ui_mix(e->color, C_BG, 50));
+        unsigned deg = (unsigned)(e->value < 0 ? 0 : e->value > 1000 ? 1000 : e->value) * 360U / 1000U;
+        static const int16_t q[25] = { 0, 65, 131, 195, 259, 321, 383, 442, 500, 556, 609, 659, 707, 752,
+                                       793, 831, 866, 897, 924, 947, 966, 981, 991, 998, 1000 };
+        for (unsigned a = 0; a < deg; a += 1) {
+            unsigned d = a % 360, i = (d % 90) * 24U / 90U;
+            int sv = q[i], cv = q[24 - i], sn, cs;
+            if (d < 90) { sn = sv; cs = cv; }
+            else if (d < 180) { sn = cv; cs = -sv; }
+            else if (d < 270) { sn = -sv; cs = -cv; }
+            else { sn = -cv; cs = sv; }
+            ui_disc(cx + r * sn / 1000, cy - r * cs / 1000, 18, e->color);
+        }
+        ui_text_c(ui_has_font(F_VALUE) ? F_VALUE : F_BIG, cx, cy + 50, e->b, C_L1);
+        ui_text_c(F_HEAD, cx, cy + 120, e->a, C_L2);
         break;
     }
     case E_ROUND: {
@@ -871,6 +1032,24 @@ static int overlaps(const struct el *a, const struct el *b)
            b->y - m < a->y + a->h + m;
 }
 
+/* the last drawn frame, for the self test */
+int kui_stat_n, kui_stat_ms, kui_stat_frames;
+
+const char *kui_screen_name(void)
+{
+    switch (screen) {
+    case SCR_LOCK: return "lock";
+    case SCR_HOME: return "home";
+    case SCR_APP: return "app";
+    case SCR_POWER: return "power menu";
+    case SCR_CONFIRM: return "confirm";
+    case SCR_LIGHT: return "light";
+    case SCR_SOS: return "sos";
+    case SCR_OFF: return "off";
+    default: return "?";
+    }
+}
+
 void ui_kdraw(void)
 {
     if (screen == SCR_OFF)
@@ -878,13 +1057,20 @@ void ui_kdraw(void)
     if (!dirty && pressed < 0)
         return;
     dirty = 0;
+    uint64_t t_draw = sb_ms();
     if (screen != shown_screen && shown_screen) {
         focus = -1;                             /* a new screen starts without a key focus */
         key_hold_armed = -1;
     }
     build();
     int fullscreen = screen == SCR_LIGHT || screen == SCR_SOS;
+    int wipe = 0;
     if (full || screen != shown_screen) {
+        /* a screen change between the lock screen, home and the apps slides in (a wipe in 4 bands, about 70 ms):
+         * forward from the right, back from the left; full-screen fields and the first frame appear at once */
+        if (screen != shown_screen && shown_screen && shown_screen != SCR_OFF && !fullscreen &&
+            shown_screen != SCR_LIGHT && shown_screen != SCR_SOS)
+            wipe = (screen == SCR_LOCK || (screen == SCR_HOME && shown_screen == SCR_APP)) ? -1 : 1;
         ui_noclip();
         ui_fill(0, 0, UI_W, UI_H, C_BG);
         status_forced = 1;
@@ -923,11 +1109,26 @@ void ui_kdraw(void)
     shown_screen = screen;
     memcpy(shown, cur, sizeof(cur[0]) * (size_t)ncur);
     nshown = ncur;
-    uint64_t px = ui_present();
+    if (wipe) {
+        ui_dirty_clear();
+        for (int k = 0; k < 4; ++k) {
+            int bw = UI_W / 4, bx = wipe > 0 ? UI_W - (k + 1) * bw : k * bw;
+            ui_dirty(bx, 0, bw, UI_H);
+            (void)ui_present();
+            panel_kick();
+            if (k < 3)
+                sb_mdelay(16);
+        }
+    }
+    uint64_t px = wipe ? (uint64_t)UI_W * UI_H : ui_present();
     if (px)
         panel_kick();
     if (px && !K.first_frame_ms)
         K.first_frame_ms = sb_ms() ? sb_ms() : 1;
+    kui_stat_n = ncur;
+    if ((int)(sb_ms() - t_draw) > kui_stat_ms)
+        kui_stat_ms = (int)(sb_ms() - t_draw);   /* the slowest since the self test last read it */
+    ++kui_stat_frames;
     if (pressed >= 0 && !kt_pending(KT_UI, 1))
         kt_set(KT_UI, 1, sb_ms(), 40, 0);   /* animate the hold (not re-armed while pending: it would never fire) */
 }
@@ -1078,6 +1279,7 @@ void kui_screen_changed(int on)
         key_hold_armed = -1;
         if (screen != SCR_SOS) {
             screen = SCR_OFF;
+            shown_screen = SCR_OFF;                 /* the wake draws at once (no transition from black) */
             ui_noclip();
             ui_fill(0, 0, UI_W, UI_H, 0xff000000U);   /* v0.1: a black screen (OLED: those pixels are off) */
             ui_dirty_all();

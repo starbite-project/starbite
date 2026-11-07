@@ -85,6 +85,7 @@ int64_t hw_core_psci(unsigned w) { (void)w; return 0xffffffffLL; }   /* as the p
 #define APP(n)                                                                                                 \
     extern const struct sbapp_header n##_header;                                                               \
     void n##_app_event(const struct sbos_event *ev);
+APP(emergency)
 APP(light)
 APP(heat)
 APP(sos)
@@ -97,7 +98,7 @@ struct host_app {
     void (*entry)(const struct sbos_event *);
 };
 const struct host_app sbos_host_apps[] = {
-    { &light_header, light_app_event }, { &heat_header, heat_app_event }, { &sos_header, sos_app_event }, { &info_header, info_app_event },
+    { &emergency_header, emergency_app_event }, { &light_header, light_app_event }, { &heat_header, heat_app_event }, { &sos_header, sos_app_event }, { &info_header, info_app_event },
     { &clock_header, clock_app_event }, { &battery_header, battery_app_event }, { &settings_header, settings_app_event },
 };
-const int sbos_host_napps = 7;
+const int sbos_host_napps = 8;

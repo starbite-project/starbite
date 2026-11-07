@@ -142,8 +142,19 @@ plus two large fonts of the same family (`sbos-assets.py`: Inter Tight 300 at 38
   countdown that a hold cancels), **Open** (0.4 s, to home). Holding protects against pocket touches; the
   ring around a button fills while it is held. A later **Emergency call** button needs a hold and a
   confirmation, and is compiled out of test builds (calls are never tested).
-- **Home:** 2 columns of large tiles (icon + name, 625 x 600 px), 6 per page: Light, Heat, SOS, Clock,
-  Battery, Settings.
+- **Home (0.3):** a full-width red **Emergency** tile on top (call, message, alarm), then the apps in 2
+  columns of large tiles (625 px wide, up to 600 px tall: an icon in a tinted disc, the name, and a live
+  status line the app sets with `ui_tile`, e.g. "Off 26.2 °C", "76 % about 3 h"; the kernel adds "Heating",
+  "LED on", "Alarm on" itself). A key hint line at the bottom.
+- **Status bar (0.3):** the time on the left; a pill in the middle while a service runs (HEATING, SOS, LED
+  ON); on the right the mobile signal and Wi-Fi glyphs (outlines only until their drivers exist), the battery
+  % with the estimate ("3 h", "2 d", "45 min") and a battery glyph (green charging, orange under 20 %, red
+  under 10 %). Redrawn only when its text changes.
+- **Transitions (0.3):** a screen change between the lock screen, home and apps is presented in 4 vertical
+  bands about 16 ms apart, from the right going in and from the left going back (one full draw, then 4
+  partial presents: no extra drawing). Full-screen light and SOS appear at once.
+- **Style:** black background, cards #1c1c1e with 72 px corners, Inter / Inter Tight, white primary text and
+  three greys, one accent per app (its tile colour), red only for emergency and danger, orange for warnings.
 - **App screens:** built from a few elements the kernel draws: a title, buttons (full or half width), a big
   value, a text line, a level picker (Off / Low / Medium / High), a toggle, a hold button (a bar fills). Every
   target is at least 210 px tall (about 9 mm).
@@ -244,21 +255,43 @@ which runs down to 2 %. A start below 3 % shows the lock screen with Light and S
 | Nr | Group | Calls |
 |---|---|---|
 | 0..4 | core | `SYS_RETURN`, `SYS_LOG`, `SYS_VERSION`, `SYS_ALLOC`, `SYS_EXIT` |
-| 10..29 | UI | `ui_begin`, `ui_title`, `ui_button(id, label, sub, flags)`, `ui_big(caption, value, colour)`, `ui_textline`, `ui_level(id, "Off|Low|...", current)`, `ui_toggle`, `ui_hold(id, label, ms, flags)`, `ui_end`, `ui_toast`, `ui_light(argb)` (full-screen colour), `ui_awake` |
+| 10..29 | UI | `ui_begin`, `ui_title`, `ui_button(id, label, sub, flags)`, `ui_big(caption, value, colour)`, `ui_textline`, `ui_level(id, "Off|Low|...", current)`, `ui_toggle`, `ui_hold(id, label, ms, flags)`, `ui_end`, `ui_toast`, `ui_light(argb)` (full-screen colour), `ui_awake`; 0.3: `ui_tile(line)` (22, the home tile's status line, any time), `ui_gauge(caption, value, permille, colour)` (23, a ring) |
 | 30..39 | time | `time_now(struct sbos_time*)`, `timer_set(id, ms, repeat)`, `timer_cancel`, `uptime_ms` |
-| 40..49 | power | `battery`, `estimate`, `power_request`, `sysinfo` |
+| 40..49 | power | `battery`, `estimate`, `power_request`, `sysinfo`, `setting_get` / `setting_set` (0.2; 0.3 adds `SET_BRIGHTNESS`: 0 as the boot left it, 1..4 low..high) |
 | 50..59 | light | `torch(level)` (`SBOS_ENOSYS` until the LED driver exists), `strobe` |
 | 60..69 | heat | `heat_request(level, minutes)`, `heat_status` |
 | 70..79 | alarm | `sos(on)`, `vibrate`, `alarm_set`, `alarm_cancel`, `sos_status` |
 | 80..89 | state | `state_put`, `state_get` (4 KiB per app) |
 | 90..99 | files | read-only card files (reserved) |
-| 100..119 | sensors | reserved |
+| 100..119 | sensors | 0.3: `sensor_read(id)` (100): battery, skin, SoC, GPU temperature in 0.1 °C, -1000 unknown (`SBOS_P_SENSORS` or `SBOS_P_HEAT`) |
 | 120..139 | phone | `phone_state`, `call_dial`, `call_hangup`, `sms_send`, `sms_read` (reserved) |
 | 140..159 | network | reserved |
 | 160..179 | camera | reserved |
 
 Events: `EV_APP_START`, `SHOW`, `HIDE`, `BUTTON(id)`, `LEVEL(id, value)`, `TOGGLE(id, on)`, `HOLD(id)`,
 `TIMER(id)`, `BACK`, `SAVE`, `POWER(state)`, `SERVICE(id)`.
+
+### 5.1 Writing an app (0.3)
+
+An app is one C file and one manifest line. `starbite/sbos/apps/template/hello.c` is a complete example.
+
+1. **The manifest:** `SBAPP_DEFINE("id", "Name", permissions, tile colour, icon)` at the top of the file
+   becomes the app's 256-byte header (6.1): a unique id, the tile's name, the `SBOS_P_*` permissions it needs
+   (a call outside them answers `SBOS_EPERM`), the tile's accent colour and one of the system's icons.
+2. **The entry point:** `void app_event(const struct sbos_event *ev)`. `EV_APP_START` comes once after
+   loading (set the tile line, start a slow timer), `EV_APP_SHOW` each time the app comes to the front:
+   describe the screen between `ui_begin()` and `ui_end()`. Taps arrive as `EV_APP_BUTTON` / `LEVEL` /
+   `TOGGLE` / `HOLD` with the element's id; describe the screen again after a change (the kernel redraws only
+   what differs). Back always returns home (the app gets `EV_APP_BACK`, then `EV_APP_HIDE`).
+3. **The screen:** elements flow from the top: a title, buttons (`UI_HALF` puts two in a row), big values,
+   text lines (up to 3 lines each), level pickers (also good as section tabs: Settings), toggles, hold
+   buttons, a gauge. A screen taller than the panel is logged ("ui: app screen taller than the panel") and
+   fails the self test: split it into sections.
+4. **Build:** add the id to the app list in `starbite/sbos/build.sh` (and for the host preview to
+   `starbite/host/sbos-preview.sh` and `sbos-host-stubs.c`). `mk-sba.py` checks and packs it; the kernel
+   checks it again at load (CRC, sizes, relocations).
+
+Each handler has 500 ms; one that faults or runs over is stopped (its tile stays, it gets no more events).
 
 ## 6. App files and the state slot
 
@@ -512,6 +545,22 @@ shown and logged.
 | **Battery** | %, mAh left, current, temperature, the estimates per state, learned or typical | history |
 | **Settings** | screen-off time, interrupt mode, first-frame time, versions, clocks | persistent settings (v0.2) |
 
+0.3 screens: **Light** the LED on/off (a GPIO: no current levels until 9.2), the screen light at Low / Half /
+Full in white, warm or red. **Heat** Off / Low / High, the battery temperature big (with the 42 °C stop while
+running), the processor's and the cores, time left, why it stopped, an orange warning (hot to hold, battery use).
+**SOS** is called "Alarm" on its screen: flash, the LED strobe if Settings allows, "sound: not available yet".
+**Battery** a ring gauge with the %, the estimate big, screen-off and details. **Settings** in four sections:
+Display (brightness, screen-off time, refresh only on change, panel off), Alarm (the LED strobe), Heat (the GPU
+in High), About. **Emergency** (new, 9.3).
+
+### 9.3 Emergency (0.3: screens only)
+
+The red tile at the top of home. **Call 112** is a hold (1.2 s); in 0.3 it opens a page saying no call was
+made: there is no modem driver, and the app contains no call or message request at all (no `SYS_CALL_DIAL`,
+no `SYS_SMS_SEND`; the kernel answers `SBOS_ENOSYS` to them anyway). **Message** offers three fixed texts
+(need help / safe / hurt, cannot talk) and says "not sent". **Hold for the alarm** starts SOS. When the modem
+work starts (doc 10), dialling goes behind its own hold and confirmation, and is never part of a test.
+
 ### 9.1 The flashlight LED (0.2: the GPIO part is built, `kern/torch.c`; not yet run on the phone)
 
 From LineageOS `android_kernel_samsung_exynos9810` (lineage-20, commit 6a9461f; GPL-2.0:
@@ -668,6 +717,28 @@ Results (2026-11-07): host test 326 checks (with the 8 built apps and their brok
 preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea405c9c99dc6d04ed3ba1f872de96c37a3c3e64292dca36f32a958 (0.1.1)
 (reproducible: two builds give the same bytes).
 
+### 12.6 Version 0.3: the interface (2026-11-07)
+
+- The look (3.1): the status bar, the Emergency tile, live tile lines, the band transitions; the app screens
+  of 9; `ui_tile`, `ui_gauge`, `sensor_read`, `SET_BRIGHTNESS` (S-Boot's AOR command, as Engineer OS sends it;
+  nothing is sent until a level is picked in Settings); "Writing an app" (5.1) and the template.
+- **The self test** (`kern/uitest.c`): only in `starbite-os-selftest.img` (build.sh links `uitest.c` a
+  second time with `-DSBOS_SELFTEST_ON`; the normal image has `sbos_selftest_enabled = 0`). 5 s after the start
+  it opens the lock screen, home, every app and a few of their pages (Emergency's message and Call pages,
+  Light's strengths, the world clock, Settings' sections), the power menu and the screen light, one step every
+  0.7 s, and logs to pmsg one line per screen: `selftest: app heat: app, 7 elements, slowest draw 4 ms, app
+  ok, fits, handler 0 ms so far`; then `selftest: passed: ...` or `selftest: FAILED: ...` (an app dead, a
+  screen empty or too tall) with the slowest draw and loop turn, and a restart to the loader's menu after 3 s.
+  It never touches the LED, the heater, the alarm, the brightness or panel settings, and never calls or sends;
+  any touch or key stops it. On the host: `SBOS_HOST_SELFTEST=1`.
+- Host: `sbos-preview.sh` 31 scenes; `sbos-contact.py` makes one contact sheet of them; the soak's key paths
+  follow the new home (Emergency first) and Settings' sections, and it fails if the brightness was ever sent.
+- Review (an independent read of the 0.3 diff, no blocker), fixed before the phone request: in the self-test
+  image a stray touch no longer turns off the 10-minute return to the menu (it counts from the last input);
+  Heat shows the temperature now, not the last session's; Brightness "Boot" after a change sends S-Boot's
+  normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
+  on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
+
 ### 12.4 Version 0.2 (2026-11-07)
 
 - **Heater run log**: every 10 s while heating `heater: N s bat B skin S soc C C, cores K, A55/M3 MHz, mV mA %`,
@@ -823,3 +894,18 @@ forced restart). Cause and fixes: 8.6 and 12.5.
   share. Undo: Off; a restart resets vdd_g3d anyway.
 - Then T6 (panel power) and T8 (Info) of 14.2, which 0.2 did not reach.
 
+
+### 14.5 Phone tests for 0.3
+
+- **T11 (unattended, the self test):** put `starbite-os-0.3-selftest.img` in the store as the `starbite-os`
+  payload and boot it by its catalog key. It needs nobody: 5 s after the first frame it walks every screen
+  (about 25 s, one step each 0.7 s), logs to pmsg, then restarts to the loader's menu; from there
+  `python3 tools/store/sbfb.py reboot recovery` brings TWRP back and the pstore's pmsg has the lines
+  `selftest: ...`. Expect `selftest: passed: 24 screens, apps ok 8, dead 0, too tall 0, problems 0, ...` and no
+  `a loop turn took`. Never touched: the LED, the heater, the alarm, the brightness and panel settings, calls,
+  messages. A touch or key stops it (the phone then runs normally and returns to the menu after 10 minutes
+  without input). Undo: put the normal `starbite-os-0.3.img` back.
+- **T12 (the user present, the look):** the normal image. Home, the tile lines, the transitions, every app's
+  screen; Settings > Display > Brightness Low, then Normal (the first AOR command from Starbite OS: the screen
+  goes darker, then back; a restart resets the panel anyway). Then T9 / T10 of 14.4 on 0.3 (the heater paths
+  are unchanged since 0.2.1).

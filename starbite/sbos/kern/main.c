@@ -34,10 +34,13 @@ static void dispatch_timer(unsigned owner, unsigned id)
     case KT_SOS:
         sos_timer(id);
         break;
+    case KT_SELFTEST:
+        selftest_timer(id);
+        break;
     case KT_HOUSE:
         hw_wdt_feed();
         /* 0.1: started and never touched for 10 minutes (an unattended test boot): back to the menu */
-        if (!K.any_input && !heater_running_ui() && !sos_active() && sb_ms() - boot_ms >= 600000U) {
+        if (!K.any_input && !heater_running_ui() && !sos_active() && sb_ms() - K.deadman_t0 >= 600000U) {
             sb_log("sbos: no touch or key for 10 minutes since the start: back to the menu");
             sb_reboot(SB_INFORM_NORMAL);
         }
@@ -65,6 +68,7 @@ static void handle_input(void)
     struct kin e;
     while (kin_pop(&e)) {
         K.any_input = 1;
+        selftest_input();
         if (e.type == KIN_POWER) {
             power_key_short();
             continue;
@@ -107,6 +111,7 @@ void sb_main(void)
         sb_log(u.b);
     }
     boot_ms = sb_ms();
+    K.deadman_t0 = boot_ms;
     hw_irq_init();
     if (!sb_touch_start())
         sb_log("sbos: no touch");
@@ -115,6 +120,7 @@ void sb_main(void)
     heater_init();
     sos_init();
     apps_load_builtin();
+    selftest_start();                       /* the self-test image only */
     kt_set(KT_HOUSE, 0, sb_ms(), 1000, 0);
     kt_set(KT_CLOCK, 0, sb_ms(), 1000, 0);
     hw_wdt_feed();

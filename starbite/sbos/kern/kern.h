@@ -8,11 +8,11 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.2.1"
+#define SBOS_VERSION "0.3"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
-enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_APP0 = 16 };
+enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_APP0 = 16 };
 #define KT_MAX 64
 #define KT_RESERVE 24                /* entries apps cannot take: the kernel's tasks always get theirs */
 struct ktimer {
@@ -185,6 +185,8 @@ struct kstate {
     int heat_confirmed;             /* the first-run heater confirmation this boot */
     int any_input;                  /* a touch or key since the start (the 0.1 dead-man return) */
     uint32_t slow_turn_ms;          /* the slowest loop turn so far */
+    uint64_t deadman_t0;            /* the 10-minute return to the menu counts from here (the start; the self-test
+                                     * image: the last input) */
 };
 extern struct kstate K;
 
@@ -228,6 +230,8 @@ void panel_idle(void);
 void panel_save_set(int on);
 void panel_screen(int on);
 unsigned panel_dcs_failures(void);
+extern int panel_bright_level;
+int panel_brightness(int level);    /* 0 untouched, 1..4 low..high: 1 sent */
 /* files on the card, read only (files.c) */
 int kfile_read(const char *path, void *dst, uint32_t cap);
 extern int sos_led_on;              /* settings: the LED flashes with SOS */
@@ -256,6 +260,15 @@ void kui_level(uint32_t id, const char *labels, int cur);
 void kui_toggle(uint32_t id, const char *label, int on);
 void kui_hold(uint32_t id, const char *label, uint32_t ms, uint32_t flags);
 void kui_end(void);
+extern int kui_stat_n, kui_stat_ms, kui_stat_frames, ui_overflow;
+const char *kui_screen_name(void);
+/* the self test (uitest.c, docs/STARBITE-OS.md 12.6): only in starbite-os-selftest.img */
+extern const int sbos_selftest_enabled;
+void selftest_start(void);
+void selftest_timer(unsigned id);
+void selftest_input(void);
+void kui_gauge(const char *caption, const char *value, int permille, uint32_t c);
+const char *app_tile(int a);        /* the line an app shows under its home tile */
 void kui_toast(const char *t, uint32_t ms);
 void kui_light(uint32_t argb);
 void kui_awake(int on);
@@ -272,6 +285,7 @@ int kui_screen(void);
 void ui_ktimer(unsigned id);
 void ui_kminute(void);
 int heater_running_ui(void);
+int heater_sensor(int id);          /* SYS_SENSOR_READ: 0.1 C or -1000 */
 void power_restart(int to_menu);
 void power_off_now(void);
 void power_key_long(void);

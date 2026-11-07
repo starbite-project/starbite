@@ -26,7 +26,7 @@ $V python3 starbite/tools/mkassets.py "$SB7" "$out/libsb-assets.sb7" >/dev/null
 $V python3 starbite/sbos/tools/mergeassets.py "$out/sbassets.sb7" "$out/libsb-assets.sb7" "$EXTRA" >/dev/null
 CF="-O1 -g -DSB_HOST -DSB_HOST_UTILITY -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I$lib -I$k -I$sdk -I$root/starbite/utility -I$root/starbite/engineer"
 aobjs=""
-for a in light heat sos info clock battery settings; do
+for a in emergency light heat sos info clock battery settings; do
     $V gcc $CF -c -Dapp_event=${a}_app_event -Dsbapp_header=${a}_header -o "$out/app_$a.o" "$apps/$a.c"
     aobjs="$aobjs $out/app_$a.o"
 done
@@ -36,7 +36,7 @@ $V gcc $CF -DSBOS_KERNEL "-DSB_ASSETS=\"$out/sbassets.sb7\"" -o "$out/sbos-host"
     "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" \
     "$lib/dvfs_levels.c" "$lib/assets.S" \
     "$k/main.c" "$k/timer.c" "$k/appfmt.c" "$k/state.c" "$k/batmodel.c" "$k/heatctl.c" "$k/heater.c" "$k/heatk.c" \
-    "$k/services.c" "$k/input.c" "$k/ui.c" "$k/app.c" "$k/torch.c" "$k/panel.c" "$k/gpuheat.c" "$root/starbite/utility/tz.c" $aobjs -lm -lpthread
+    "$k/services.c" "$k/input.c" "$k/ui.c" "$k/app.c" "$k/torch.c" "$k/panel.c" "$k/gpuheat.c" "$k/uitest.c" "$root/starbite/utility/tz.c" $aobjs -lm -lpthread
 
 scene() {
     name=$1
@@ -47,27 +47,43 @@ scene() {
 }
 OPEN="g:1150,2310,0,700 w:400"                      # hold Open on the lock screen
 BACK="h:b:900 w:300"                                # Bixby held: Back
+# home (0.3): Emergency across the top (720,245); tiles: Light 382,663 Heat 1057,663 SOS 382,1250 Info 1057,1250
+# Clock 382,1837 Battery 1057,1837 Settings 382,2424
 scene lock          w:600
 scene home          w:300 $OPEN
-scene light         w:300 $OPEN t:380,535 w:400
-scene light-on      w:300 $OPEN t:380,535 w:400 t:720,960 w:400
-scene heat          w:300 $OPEN t:1050,535 w:600
-scene heat-confirm  w:300 $OPEN t:1050,535 w:600 t:550,670 w:400
-scene heat-running  w:300 $OPEN t:1050,535 w:600 t:550,670 w:400 g:720,1070,0,1900 w:6000
-scene heat-off      w:300 $OPEN t:1050,535 w:600 t:550,670 w:400 g:720,1070,0,1900 w:4000 t:220,670 w:3000
-scene sos           w:300 $OPEN t:380,1055 w:500
-scene sos-countdown w:300 $OPEN t:380,1055 w:500 g:720,815,0,1300 w:600
-scene sos-flash     w:300 $OPEN t:380,1055 w:500 g:720,815,0,1300 w:3600
-scene info          w:300 $OPEN t:1050,1055 w:600
-scene clock         w:300 $OPEN t:380,1575 w:600
-scene world         w:300 $OPEN t:380,1575 w:600 t:720,1100 w:500
-scene stopwatch     w:300 $OPEN t:380,1575 w:600 t:380,1400 w:500 t:720,950 w:2300
-scene timer         w:300 $OPEN t:380,1575 w:600 t:1050,1400 w:500 t:380,950 w:300 t:720,1220 w:2300
-scene battery       w:300 $OPEN t:1050,1575 w:600
-scene settings      w:300 $OPEN t:380,2095 w:600
-scene light-led     w:300 $OPEN t:380,535 w:400 t:720,650 w:600
-scene settings-on   w:300 $OPEN t:380,2095 w:600 t:720,1000 w:300 t:720,1230 w:300
+scene emergency     w:300 $OPEN t:720,245 w:500
+scene emergency-call w:300 $OPEN t:720,245 w:500 g:720,635,0,1500 w:500
+scene emergency-msg w:300 $OPEN t:720,245 w:500 t:382,925 w:400 t:720,725 w:400
+scene light         w:300 $OPEN t:382,663 w:400
+scene light-on      w:300 $OPEN t:382,663 w:400 t:720,1395 w:400
+scene light-red-low w:300 $OPEN t:382,663 w:400 t:220,1070 w:300 t:1057,1705 w:400
+scene light-led     w:300 $OPEN t:382,663 w:400 t:720,655 w:600
+scene heat          w:300 $OPEN t:1057,663 w:600
+scene heat-confirm  w:300 $OPEN t:1057,663 w:600 t:720,670 w:400
+scene heat-running  w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:6000
+scene home-busy     w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:3000 $BACK w:1200
+scene heat-off      w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:4000 t:220,670 w:3000
+scene sos           w:300 $OPEN t:382,1250 w:500
+scene sos-countdown w:300 $OPEN t:382,1250 w:500 g:720,635,0,1300 w:600
+scene sos-flash     w:300 $OPEN t:382,1250 w:500 g:720,635,0,1300 w:3600
+scene info          w:300 $OPEN t:1057,1250 w:600
+scene clock         w:300 $OPEN t:382,1837 w:600
+scene world         w:300 $OPEN t:382,1837 w:600 t:720,1100 w:500
+scene stopwatch     w:300 $OPEN t:382,1837 w:600 t:380,1400 w:500 t:720,950 w:2300
+scene timer         w:300 $OPEN t:382,1837 w:600 t:1050,1400 w:500 t:380,950 w:300 t:720,1220 w:2300
+scene battery       w:300 $OPEN t:1057,1837 w:600
+scene settings      w:300 $OPEN t:382,2424 w:600
+scene settings-on   w:300 $OPEN t:382,2424 w:600 t:720,1789 w:300 t:720,2039 w:300
+scene settings-alarm w:300 $OPEN t:382,2424 w:600 t:557,670 w:400
+scene settings-heat w:300 $OPEN t:382,2424 w:600 t:882,670 w:400
+scene settings-about w:300 $OPEN t:382,2424 w:600 t:1207,670 w:400
 scene power-menu    w:300 h:p:1300 w:500
 scene focus-keys    w:300 $OPEN k:d w:200 k:d w:200 k:d w:300
 scene lock-hold     w:300 g:290,2310,0,300
 echo "PNGs in $png"
+# SBOS_SCREENS=DIR: every screen and one contact sheet there too (the main checkout's build/starbite-os/screens/)
+if [ -n "${SBOS_SCREENS:-}" ]; then
+    mkdir -p "$SBOS_SCREENS"
+    cp "$png"/*.png "$SBOS_SCREENS"/
+    "$py" "$root/starbite/host/sbos-contact.py" "$SBOS_SCREENS/contact-sheet.png" "$SBOS_SCREENS" 8 288
+fi

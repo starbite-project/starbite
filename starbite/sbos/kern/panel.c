@@ -173,6 +173,56 @@ void panel_screen(int on)
         trig(0);
 }
 
+/* 3. Brightness (0.3): S-Boot's own AOR dimming, as Engineer OS's Tests > Brightness sends it
+ * (build/em-research-brightness.md): F0 5A 5A, B1 hi lo, F7 03, F0 A5 A5, DCS long writes. Never gamma, ELVSS or
+ * voltages. Level 0 sends nothing (the boot's own level stays); the panel keeps the value until the next OS
+ * initialises it. A larger AOR value is darker. */
+int panel_bright_level;
+
+int panel_brightness(int level)
+{
+    static const uint16_t aor[5] = { 0x0440, 0x0b7c, 0x0800, 0x0440, 0x0200 };
+    static int sent;
+    static const uint8_t key_on[3] = { 0xf0, 0x5a, 0x5a }, commit[2] = { 0xf7, 0x03 }, key_off[3] = { 0xf0, 0xa5, 0xa5 };
+    if (level < 0 || level > 4)
+        return 0;
+    if (level == 0 && !sent) {
+        panel_bright_level = 0;                 /* nothing sent yet: the panel keeps the boot's level */
+        return 1;
+    }                                           /* after a change, "Boot" is S-Boot's normal AOR (0x0440) */
+    if (!dsim_ready())
+        return 0;
+    const uint8_t b1[3] = { 0xb1, (uint8_t)(aor[level] >> 8), (uint8_t)aor[level] };
+    int r = -1;
+    for (int attempt = 0; attempt < 2 && r; ++attempt) {
+        r = dcs_long(key_on, 3);
+        if (!r)
+            r = dcs_long(b1, 3);
+        if (!r)
+            r = dcs_long(commit, 2);
+        (void)dcs_long(key_off, 3);             /* always lock again */
+        if (r)
+            sb_mdelay(20);
+    }
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "settings: brightness ");
+    ub_dec(&u, (uint64_t)level);
+    ub_s(&u, r ? " not sent (DSI)" : " sent, AOR ");
+    if (!r)
+        ub_hex(&u, aor[level], 4);
+    sb_log(u.b);
+    if (r) {
+        ++dcs_fail;
+        return 0;
+    }
+    panel_bright_level = level;
+    sent = 1;
+    if (panel_save_on)
+        panel_kick();                           /* the next refresh carries it */
+    return 1;
+}
+
 unsigned panel_dcs_failures(void)
 {
     return dcs_fail;

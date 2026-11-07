@@ -19,6 +19,7 @@ enum {
     SYS_UI_BEGIN = 10, SYS_UI_TITLE = 11, SYS_UI_BUTTON = 12, SYS_UI_BIG = 13, SYS_UI_TEXT = 14,
     SYS_UI_LEVEL = 15, SYS_UI_TOGGLE = 16, SYS_UI_HOLD = 17, SYS_UI_END = 18, SYS_UI_TOAST = 19,
     SYS_UI_LIGHT = 20, SYS_UI_AWAKE = 21,
+    SYS_UI_TILE = 22, SYS_UI_GAUGE = 23,                   /* API 1, added in 0.3 */
     /* time 30..39 */
     SYS_TIME_NOW = 30, SYS_TIMER_SET = 31, SYS_TIMER_CANCEL = 32, SYS_UPTIME_MS = 33,
     /* power 40..49 */
@@ -35,7 +36,7 @@ enum {
     /* files 90..99 (read only), sensors 100..119, phone 120..139, network 140..159, camera 160..179:
      * reserved, SBOS_ENOSYS in API 1 */
     SYS_FILE_OPEN = 90, SYS_FILE_READ = 91,                 /* 91: added in 0.2 */
-    SYS_SENSOR_READ = 100,
+    SYS_SENSOR_READ = 100,                                  /* 0.3: temperatures */
     SYS_PHONE_STATE = 120, SYS_CALL_DIAL = 121, SYS_CALL_HANGUP = 122, SYS_SMS_SEND = 123, SYS_SMS_READ = 124,
     SYS_NET_STATE = 140,
     SYS_CAM_OPEN = 160,
@@ -138,7 +139,11 @@ struct sbos_sysinfo {
 };
 
 /* settings (SYS_SETTING_GET / SET): until a restart in 0.2 */
-enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S = 4, SET_GPU_HEAT = 5 };
+enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S = 4, SET_GPU_HEAT = 5,
+       SET_BRIGHTNESS = 6 /* 0.3: 0 as the boot left it, 1 low, 2 medium, 3 normal, 4 high */ };
+
+/* sensor_read ids (0.3): temperatures in 0.1 C, -1000 unknown */
+enum { SENSOR_BATTERY_C10 = 1, SENSOR_SKIN_C10 = 2, SENSOR_SOC_C10 = 3, SENSOR_GPU_C10 = 4 };
 
 /* power_request what */
 enum { PWR_SCREEN_OFF = 1, PWR_SET_SCREEN_OFF_S = 2, PWR_SET_SLEEP_OFF_S = 3 };
@@ -189,6 +194,13 @@ static inline void ui_toast_app(const char *t, uint32_t ms) { sbos_call(SYS_UI_T
  * gets EV_APP_SHOW again). */
 static inline void ui_light(uint32_t argb) { sbos_call(SYS_UI_LIGHT, argb, 0, 0, 0, 0); }
 static inline void ui_awake(int on) { sbos_call(SYS_UI_AWAKE, (uint64_t)on, 0, 0, 0, 0); }
+/* the short line under the app's tile on home (any time, front or not; "" clears it) */
+static inline void ui_tile(const char *line) { sbos_call(SYS_UI_TILE, (uintptr_t)line, 0, 0, 0, 0); }
+/* a ring gauge: permille 0..1000 of the ring in argb, value inside, caption under it */
+static inline void ui_gauge(const char *caption, const char *value, int permille, uint32_t argb)
+{
+    sbos_call(SYS_UI_GAUGE, (uintptr_t)caption, (uintptr_t)value, (uint64_t)(int64_t)permille, argb, 0);
+}
 
 static inline int time_now(struct sbos_time *t) { return (int)sbos_call(SYS_TIME_NOW, (uintptr_t)t, 0, 0, 0, 0); }
 static inline int timer_set(uint32_t id, uint32_t ms, int repeat) { return (int)sbos_call(SYS_TIMER_SET, id, ms, (uint64_t)repeat, 0, 0); }
@@ -206,6 +218,7 @@ static inline int setting_get(int id) { return (int)sbos_call(SYS_SETTING_GET, (
 static inline int setting_set(int id, int v) { return (int)sbos_call(SYS_SETTING_SET, (uint64_t)id, (uint64_t)(int64_t)v, 0, 0, 0); }
 /* the start of a file on the card (read only): bytes read, or < 0 */
 static inline int file_read(const char *path, void *buf, uint32_t cap) { return (int)sbos_call(SYS_FILE_READ, (uintptr_t)path, (uintptr_t)buf, cap, 0, 0); }
+static inline int sensor_read(int id) { return (int)sbos_call(SYS_SENSOR_READ, (uint64_t)id, 0, 0, 0, 0); }
 static inline int heat_request(int level, int minutes) { return (int)sbos_call(SYS_HEAT_REQUEST, (uint64_t)level, (uint64_t)minutes, 0, 0, 0); }
 static inline int heat_status(struct sbos_heat *h) { return (int)sbos_call(SYS_HEAT_STATUS, (uintptr_t)h, 0, 0, 0, 0); }
 static inline int sos(int on) { return (int)sbos_call(SYS_SIREN, (uint64_t)on, 0, 0, 0, 0); }

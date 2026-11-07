@@ -62,7 +62,9 @@ static void show(void)
 
 void app_event(const struct sbos_event *ev)
 {
-    if (ev->type == EV_APP_SHOW) {
+    if (ev->type == EV_APP_START) {
+        ui_tile("Emergency card");
+    } else if (ev->type == EV_APP_SHOW) {
         if (n < 0)
             load();
         show();

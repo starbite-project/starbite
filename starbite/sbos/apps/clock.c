@@ -149,6 +149,9 @@ static void tick(void)
 void app_event(const struct sbos_event *ev)
 {
     switch (ev->type) {
+    case EV_APP_START:
+        ui_tile("World, stopwatch, timer");
+        break;
     case EV_APP_SHOW:
         visible = 1;
         tick();
@@ -196,6 +199,7 @@ void app_event(const struct sbos_event *ev)
                 tm_run = 1;
                 tm_done = 0;
                 timer_set(2, (uint32_t)tm_left_ms, 0);
+                ui_tile("Timer running");
             }
             break;
         case 23:
@@ -219,6 +223,7 @@ void app_event(const struct sbos_event *ev)
             tm_done = 1;
             tm_left_ms = 0;
             ui_toast_app("The timer is done", 4000);
+            ui_tile("Timer done");
         }
         if (visible)
             show();

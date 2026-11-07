@@ -724,6 +724,39 @@ int heater_request(int level, int minutes)
     return ctl.state == HEAT_ST_RUNNING ? 0 : SBOS_EAGAIN;
 }
 
+/* SYS_SENSOR_READ (0.3): a temperature in 0.1 C, or -1000 unknown. While the heater runs, its own last
+ * samples (no extra ADC reads beside the controller's); otherwise a fresh read at most once a second
+ * (no charger reads: those belong to the controller's debounce). id 1 battery, 2 skin (AP), 3 SoC, 4 GPU. */
+int heater_sensor(int id)
+{
+    static uint64_t t_read;
+    static int c[5] = { -1000, -1000, -1000, -1000, -1000 };
+    uint64_t now = sb_ms();
+    if (id < 1 || id > 4)
+        return -1000;
+    if (heater_running_ui() || stopping) {
+        if (id == 1)
+            return last_in.bat_ok ? last_in.bat_c10 : -1000;
+        if (id == 2)
+            return last_in.skin_ok ? last_in.skin_c10 : -1000;
+        if (id == 3)
+            return last_in.soc_ok ? last_in.soc_c10 : -1000;
+        return c[4];                            /* the GPU: the last value from before the start */
+    }
+    if (!t_read || now - t_read >= 1000) {
+        t_read = now;
+        int v = adc_c10(4, 1, 0);
+        c[1] = v > -300 && v < 1000 ? v : -1000;
+        v = adc_c10(0, 0, 0);
+        c[2] = v > -300 && v < 1200 ? v : -1000;
+        struct sb_temps t;
+        sb_temps_read(&t);
+        c[3] = t.top == 1 && t.hottest > -30 && t.hottest < 150 ? t.hottest * 10 : -1000;
+        c[4] = t.sub == 1 && t.gpu > -30 && t.gpu < 150 ? t.gpu * 10 : -1000;
+    }
+    return c[id];
+}
+
 void heater_status(struct sbos_heat *h)
 {
     memset(h, 0, sizeof(*h));
@@ -732,6 +765,10 @@ void heater_status(struct sbos_heat *h)
     h->cores = cores_running();             /* the workers and cpu0, as the log counts them */
     h->bat_c10 = last_in.bat_ok ? last_in.bat_c10 : -1000;
     h->soc_c10 = last_in.soc_ok ? last_in.soc_c10 : -1000;
+    if (!heater_running_ui() && !stopping) {    /* off: now, not the last session's values */
+        h->bat_c10 = heater_sensor(1);
+        h->soc_c10 = heater_sensor(3);
+    }
     uint64_t now = sb_ms();
     h->secs_left = heater_running_ui() && ctl.t_end > now ? (int32_t)((ctl.t_end - now) / 1000U) : 0;
     h->secs_run = heater_running_ui() ? (int32_t)((now - ctl.t_start) / 1000U) : 0;

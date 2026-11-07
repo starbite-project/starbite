@@ -14,19 +14,25 @@ SEL="k:b w:400"
 BACK="h:b:900 w:500"
 HOLDSEL="k:b w:200 k:b w:600"                  # a hold element by keys: Bixby twice
 home_to() { n=$1; s=""; i=0; while [ $i -le "$n" ]; do s="$s $D"; i=$((i + 1)); done; echo "$s $SEL w:400"; }
-HEAT=$(home_to 1)
-SOSA=$(home_to 2)
-INFO=$(home_to 3)
-CLOCK=$(home_to 4)
-BATT=$(home_to 5)
-SETT=$(home_to 6)
-LIGHT=$(home_to 0)
-# heat: focus the level (Back is 0), Bixby steps Off -> Low; the confirmation's hold by keys
+U="k:u w:150"
+# home (0.3): the Emergency tile first, then the apps
+EMERG=$(home_to 0)
+LIGHT=$(home_to 1)
+HEAT=$(home_to 2)
+SOSA=$(home_to 3)
+INFO=$(home_to 4)
+CLOCK=$(home_to 5)
+BATT=$(home_to 6)
+SETT=$(home_to 7)
+# heat: focus the level (Back is 0), Bixby steps Off -> Low -> High -> Off; the confirmation's hold by keys
 HEAT_LOW="$HEAT $D $D $SEL $D $HOLDSEL w:500"
 LEVEL_UP="$D $D $SEL"
-SCRIPT="w:600 $OPEN $HEAT_LOW w:5000 $LEVEL_UP w:300 $SEL w:15000 $BACK
- $SETT $D $D $D $SEL $D $SEL $D $SEL w:800 $BACK
- $LIGHT $D $D $SEL w:800 $SEL w:300 $D $SEL w:1200 $SEL w:400 $BACK
+# Settings (0.3): Back, the section level, then Display's brightness (never selected here), screen-off level,
+# the two panel toggles; the Alarm section's LED toggle
+SCRIPT="w:600 $OPEN $HEAT_LOW w:5000 $LEVEL_UP w:15300 $BACK
+ $EMERG $D $D $HOLDSEL w:600 $BACK $EMERG $D $D $D $SEL w:400 $D $SEL w:400 $BACK
+ $SETT $D $D $D $D $D $SEL $D $SEL $U $U $U $U $SEL $D $SEL w:800 $BACK
+ $LIGHT $D $D $SEL w:800 $SEL w:300 $D $SEL w:300 $D $SEL w:1200 $SEL w:400 $BACK
  $CLOCK $D $D $D $SEL $D $D $SEL w:2500 $SEL w:300 $BACK
  $BATT w:3000 $BACK $INFO w:800 $BACK
  $SOSA $D $D $HOLDSEL w:500 $D $HOLDSEL w:800
@@ -35,12 +41,12 @@ SCRIPT="w:600 $OPEN $HEAT_LOW w:5000 $LEVEL_UP w:300 $SEL w:15000 $BACK
  $HEAT w:2000 $D $D $SEL w:600 $SEL w:600 $SEL w:6000
  h:p:1300 w:500 $D $D $D $SEL w:2000"
 # the GPU case: Settings' GPU switch (focus 5) and its confirmation first, then Heat Low -> High
-GPU_SCRIPT="w:600 $OPEN $SETT $D $D $D $D $D $D $SEL $D $HOLDSEL w:800 $BACK
- $HEAT_LOW w:3000 $LEVEL_UP w:300 $SEL w:20000 $BACK
+GPU_SCRIPT="w:600 $OPEN $SETT $D $D $SEL $SEL $D $SEL $D $HOLDSEL w:800 $BACK
+ $HEAT_LOW w:3000 $LEVEL_UP w:20300 $BACK
  h:p:1300 w:500 $D $D $D $SEL w:2000"
 # the parked case: Low, then Off (core 1 leaves and, injected, parks), then Low again (its relaunch must be refused
 # at once as parked, the other cores start), then the power menu's Boot menu while heating
-PARKED_SCRIPT="w:600 $OPEN $HEAT_LOW w:5000 $D $D $SEL w:600 $SEL w:600 $SEL w:3000 $SEL w:6000
+PARKED_SCRIPT="w:600 $OPEN $HEAT_LOW w:5000 $D $D $SEL w:600 $SEL w:3000 $SEL w:6000
  h:p:1300 w:500 $D $D $D $SEL w:2000"
 fails=0
 run_case() {
@@ -57,6 +63,7 @@ run_case() {
     grep -q "host: reboot" "$log" || bad="$bad [no reboot from the power menu]"
     grep -q "CRASH" "$log" && bad="$bad [crash]"
     grep -q "event queue full" "$log" && bad="$bad [event queue full]"
+    grep -q "settings: brightness" "$log" && bad="$bad [the brightness was sent]"
     grep -q "a loop turn took" "$log" && bad="$bad [slow loop: $(grep -m1 'a loop turn took' "$log" | sed 's/.*took //')]"
     grep "panel vs back buffer" "$log" | grep -v " 0 px differ" | grep -q . && bad="$bad [unpresented pixels]"
     grep -q "heater: start, level" "$log" || bad="$bad [the heater never started]"
@@ -77,7 +84,7 @@ run_case() {
         echo "soak $name: ok ($(grep -c '^log: ' "$log") log lines, max cores $(grep -o 'cores [0-9]' "$log" | sort -k2 -n | tail -1))"
     fi
 }
-run_case clean "" "settings: panel refresh only on change: on" "settings: LED in SOS: on" "sos: countdown" "sos: off"
+run_case clean "" "settings: panel refresh only on change: on" "settings: panel off with the screen: on" "settings: LED in SOS: on" "sos: countdown" "sos: off" "emergency: Call 112 held"
 run_case all8 "m3" "core 7 (M3) running, 8 cores with cpu0"
 run_case timeout1 "timeout:1" "core 1: no check-in within 1 s (code -100): trying again later" "core 2 (A55) running" "core 1: no check-in within 1 s (code -100): not used until a restart"
 run_case timeout1noctx "timeout:1,noctx" "core 1: no check-in within 1 s; no more cores start in this session"

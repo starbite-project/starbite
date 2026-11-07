@@ -90,6 +90,8 @@ void ui_dirty(int x, int y, int w, int h);
 void ui_dirty_all(void);
 /* Copy the dirty rectangles to the panel; returns the pixels copied. */
 uint64_t ui_present(void);
+/* Drop the dirty list without copying (Starbite OS's transitions present the screen in bands). */
+void ui_dirty_clear(void);
 /* Move rows [y0, y1) of the back buffer by dy (scrolling): the rows that come into view are left
  * as they were and must be drawn by the caller. */
 void ui_scroll_rows(int y0, int y1, int dy);

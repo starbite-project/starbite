@@ -19,6 +19,7 @@ struct kapp {
     const struct sbapp_header *hdr;
     void (*host_entry)(const struct sbos_event *);    /* the host build's app function */
     char id[24], name[24];
+    char tile[40];                  /* the line under the home tile (SYS_UI_TILE) */
     uint32_t perms, color, icon;
     uint32_t entry;                 /* copied at load: the header in the slot is app-writable */
     uint64_t heap, heap_end;

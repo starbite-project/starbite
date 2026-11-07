@@ -75,7 +75,7 @@ relocs_only_relative() {
 "${CROSS}gcc" $CFLAGS "$here/sdk/sbapp_lib.c" -o "$ob/app_lib.o"
 "${CROSS}gcc" $CFLAGS "$ut/tz.c" -o "$ob/app_tz.o"
 apps=""
-for a in light heat sos info clock battery settings test-loop test-fault; do
+for a in emergency light heat sos info clock battery settings test-loop test-fault; do
     "${CROSS}gcc" $CFLAGS "$here/apps/$a.c" -o "$ob/app_$a.o"
     extra=""
     [ "$a" = clock ] && extra="$ob/app_tz.o"
@@ -106,6 +106,13 @@ for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$
     "${CROSS}gcc" $flags -DSBOS_KERNEL -DSB_ASSETS="\"$ob/sbassets.sb7\"" -DSBOS_APPS="\"$ob/apps.pack\"" "$src" -o "$obj"
     objs="$objs $obj"
 done
+# the self-test variant (docs/STARBITE-OS.md 12.6): the same objects with uitest.c built to run
+"${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON "$here/kern/uitest.c" -o "$ob/k_uitest_on.o"
+stobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_on.o#")
+if [ "$stobjs" = "$objs" ]; then
+    echo "sbos: the self-test variant did not get k_uitest_on.o" >&2
+    exit 1
+fi
 for o in $v80objs; do
     d=$("${CROSS}objdump" -d --no-show-raw-insn "$o")
     if ! echo "$d" | grep -E -q '\bret\b'; then
@@ -145,8 +152,17 @@ done
 "${CROSS}objcopy" -O binary "$out/starbite-os-at40.elf" "$out/starbite-os-at40.bin"
 "${CROSS}nm" "$out/starbite-os.elf" | sort > "$out/starbite-os.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os.bin" "$out/starbite-os.img" "$out/starbite-os.map"
+"${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $stobjs -o "$out/starbite-os-selftest.elf"
+relocs_only_relative "$out/starbite-os-selftest.elf"
+"${CROSS}objcopy" -O binary "$out/starbite-os-selftest.elf" "$out/starbite-os-selftest.bin"
+"${CROSS}nm" "$out/starbite-os-selftest.elf" | sort > "$out/starbite-os-selftest.map"
+python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-selftest.bin" "$out/starbite-os-selftest.img" "$out/starbite-os-selftest.map"
+if ! "${CROSS}nm" "$out/starbite-os.elf" | grep -q ' sbos_selftest_enabled$'; then
+    echo "sbos: no sbos_selftest_enabled in the image" >&2
+    exit 1
+fi
 
-leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" | head -3 || true)
+leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" | head -3 || true)
 if [ -n "$leak" ]; then
     echo "sbos: the image contains build-host paths:" >&2
     echo "$leak" >&2
@@ -160,4 +176,6 @@ if [ "$native" = 1 ]; then
     sh "$root/starbite/tools/sbos-host-test.sh" $apps
 fi
 sha256sum "$out/starbite-os.img" | sed "s#  .*#  starbite-os.img#" > "$out/starbite-os.img.sha256"
+sha256sum "$out/starbite-os-selftest.img" | sed "s#  .*#  starbite-os-selftest.img#" > "$out/starbite-os-selftest.img.sha256"
+echo "sbos: $(cat "$out/starbite-os-selftest.img.sha256") (self-test variant)"
 echo "sbos: $(cat "$out/starbite-os.img.sha256") ($(wc -c < "$out/starbite-os.img") bytes)"
