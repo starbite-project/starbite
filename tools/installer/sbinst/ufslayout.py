@@ -203,22 +203,36 @@ def _starbite_a16g():
                          'installer writes WINDOWS fresh from the bundle anyway.',))
 
 
+ONEUI_SYSTEM = 1609984        # SYSTEM grows over the old VENDOR + ODM: 68736..1678719 (6.14 GiB; up to CACHE)
+ONEUI_VENDOR = 262144         # 1 GiB  (set from the built image: tools/android/oneui, docs/ANDROID-ONEUI.md 4)
+ONEUI_ODM = 16384             # 64 MiB
+
+
 def _starbite_oneui():
-    """One UI 8 as the main Android (docs/ANDROID-ONEUI.md, 2026-11-06): WINDOWS exactly 18 GiB (its NTFS was
-    shrunk with ntfsresize to 18 GiB - 64 MiB first; the partition must never be smaller than the NTFS),
-    A16DATA from there to the last usable block (~15.84 GiB, Linux data). SYSTEM / VENDOR / ODM stay where
-    they are (One UI's EROFS images are written into them)."""
+    """One UI 8 as the main Android (docs/ANDROID-ONEUI.md, 2026-11-07). One UI's EROFS system image is 5.98 GiB:
+    SYSTEM takes the whole region in front of CACHE (where SYSTEM, VENDOR and ODM were), and VENDOR and ODM move
+    behind WINDOWS, keeping their names (the first-stage fstab finds them by name) and their entry numbers
+    (sda19, sda20: no other partition is renumbered). WINDOWS exactly 18 GiB (its NTFS was shrunk with
+    ntfsresize to 18 GiB - 64 MiB first; the partition must never be smaller than the NTFS), then VENDOR, ODM,
+    and A16DATA to the last usable block (Linux data, ext4)."""
     a = _starbite_a()
     rows = list(a.parts)
     win_blocks = 18 << 18                              # 18 GiB in 4 KiB blocks = 4718592
+    back = 6744832 + win_blocks                        # 11463424, right after WINDOWS
+    rows[17] = replace(rows[17], blocks=ONEUI_SYSTEM)
+    rows[18] = replace(rows[18], start=back, blocks=ONEUI_VENDOR, role='One UI /vendor (EROFS)')
+    rows[19] = replace(rows[19], start=back + ONEUI_VENDOR, blocks=ONEUI_ODM, role='One UI /odm (EROFS)')
     rows[26] = replace(rows[26], blocks=win_blocks)
-    rows[27] = replace(rows[27], start=6744832 + win_blocks, type=LINUX_DATA)
-    return Layout('starbite-oneui', 'Starbite layout for One UI 8: WINDOWS 18 GiB, A16DATA ~15.84 GiB (Linux data)',
+    rows[27] = replace(rows[27], start=back + ONEUI_VENDOR + ONEUI_ODM, type=LINUX_DATA,
+                       role='One UI /data (ext4, the fs ends 5 blocks early: length=-20480)')
+    return Layout('starbite-oneui', 'Starbite layout for One UI 8: SYSTEM 6.14 GiB in front, WINDOWS 18 GiB, '
+                  'VENDOR + ODM behind it, A16DATA ~14.8 GiB (Linux data)',
                   tuple(rows), min_blocks=15616000,
                   notes=('WINDOWS must be shrunk with ntfsresize to <= 18 GiB BEFORE this table is written.',
+                         'VENDOR (sda19) and ODM (sda20) lie after WINDOWS: the GPT entries are not in block order.',
                          'The Windows UFS driver write fence still spans 6613760..13518591 (old WINDOWS end): NTFS '
-                         'only writes inside its 18 GiB volume, so A16DATA from 11463424 is safe while Windows does '
-                         'not grow its volume.'))
+                         'only writes inside its 18 GiB volume, so VENDOR, ODM and A16DATA from 11463424 are safe '
+                         'while Windows does not grow its volume.'))
 
 
 LAYOUTS = {L.name: L for L in (_stock(), _starbite_a(), _starbite_a16g(), _starbite_oneui())}
@@ -298,13 +312,20 @@ def validate(L, first_usable=6, last_usable=None):
     if len(set(guids)) != len(guids):
         raise LayoutError(f'{L.name}: two rows have the same unique GUID')
     rows = L.resolve(first_usable, last_usable)
-    prev = first_usable - 1
     for i, p, s, e in rows:
-        if s <= prev:
-            raise LayoutError(f'{L.name}: {p.name} starts at {s}, inside the previous row (ends {prev})')
-        if e < s or e > last_usable:
+        if s < first_usable or e < s or e > last_usable:
             raise LayoutError(f'{L.name}: {p.name} {s}..{e} is outside the usable blocks {first_usable}..{last_usable}')
-        prev = e
+    # A GPT may list its entries in any block order (the index is the sdaN number, which other OSes rely on,
+    # so moving a partition must not renumber the rest). A row out of block order needs an explicit start.
+    prev_e, prev_n = first_usable - 1, None
+    for i, p, s, e in sorted(rows, key=lambda r: r[2]):
+        if s <= prev_e:
+            raise LayoutError(f'{L.name}: {p.name} starts at {s}, inside {prev_n or "the GPT"} (ends {prev_e})')
+        prev_e, prev_n = e, p.name
+    starts = [s for _, _, s, _ in rows]
+    for k, (i, p, s, e) in enumerate(rows):
+        if p.start is None and k and s < max(starts[:k]):
+            raise LayoutError(f'{L.name}: {p.name} is out of block order and has no explicit start')
     return rows
 
 
