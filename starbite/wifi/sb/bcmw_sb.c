@@ -7,13 +7,15 @@
  *    0xa7ffffff, the RAM test window; a Wi-Fi image does not run the RAM test). Uncached, so no
  *    cache maintenance. Below 4 GiB; the chip is given the physical address (the PCIe SysMMU in
  *    bypass). Starbite OS proper should give the radio its own carve-out: see docs/WIFI-BCM4361.md;
- *  - files: read-only from the phone's own VENDOR partition (GPT name "VENDOR"), ext4, /firmware/
- *    (LineageOS) or /etc/wifi/ (Samsung's Android), into the arena. Never shipped in an image.
+ *  - files: read-only from the phone's own VENDOR partition (GPT name "VENDOR"): ext4 (LineageOS) or
+ *    EROFS (One UI 8, S9 #1 since 2026-11-07), /firmware/ or /etc/wifi/, into the arena. Never
+ *    shipped in an image.
  */
 #include "sb.h"
 #include "ufs.h"
 #include "../bcmw.h"
 #include "../ext4.h"
+#include "../erofs.h"
 #include "bcmw_sb.h"
 
 #define DMA_BASE 0xa6000000UL
@@ -24,7 +26,8 @@ _Static_assert(DMA_END <= 0xa7000000UL, "the radio's DMA meets the Utility OS's 
 static uintptr_t dma_next = DMA_BASE;
 static uint64_t vendor_first, vendor_last;
 static struct ext4 fs;
-static int fs_state;                /* 0 not tried, 1 open, -1 failed */
+static struct erofs efs;
+static int fs_state;                /* 0 not tried, 1 ext4, 2 EROFS, -1 failed */
 static uint8_t *blk;
 static uint64_t blk_lba = ~0ULL;
 static struct { char name[40]; const uint8_t *data; uint32_t len; } files[8];
@@ -97,15 +100,51 @@ int bcmw_sb_vendor(void (*say)(const char *))
     }
     blk = sb_alloc(4096);
     fs.read = vendor_read;
+    efs.read = vendor_read;
     e = ext4_open(&fs);
-    if (e) {
-        say(e == EXT4_E_NOTEXT4 ? "wifi: VENDOR is not ext4 (EROFS?): its files cannot be read here"
-                                : "wifi: VENDOR's ext4 does not open");
-        return 0;
+    if (e == 0) {
+        say("wifi: VENDOR is ext4: the radio's files are read from it (read only)");
+        fs_state = 1;
+        return 1;
     }
-    say("wifi: VENDOR is ext4: the radio's files are read from it (read only)");
-    fs_state = 1;
-    return 1;
+    e = erofs_open(&efs);
+    if (e == 0) {
+        say("wifi: VENDOR is EROFS: the radio's files are read from it (read only)");
+        fs_state = 2;
+        return 1;
+    }
+    say(e == EROFS_E_NOTEROFS ? "wifi: VENDOR is neither ext4 nor EROFS: its files cannot be read here"
+                              : "wifi: VENDOR is EROFS with features this reader does not have");
+    return 0;
+}
+
+/* the whole file at path in VENDOR, into the arena; NULL if it is not there */
+static uint8_t *vendor_file(const char *path, uint32_t *len)
+{
+    uint8_t *buf;
+    if (fs_state == 1) {
+        uint32_t ino;
+        uint8_t inode[EXT4_INODE_MAX];
+        uint64_t size;
+        if (ext4_lookup(&fs, path, &ino) || ext4_inode(&fs, ino, inode))
+            return 0;
+        size = ext4_size(inode);
+        if (size == 0 || size > (4U << 20) || !(buf = sb_alloc(size)) || ext4_read(&fs, inode, 0, buf, (uint32_t)size))
+            return 0;
+        *len = (uint32_t)size;
+        return buf;
+    }
+    if (fs_state == 2) {
+        uint64_t nid;
+        struct erofs_inode in;
+        if (erofs_lookup(&efs, path, &nid) || erofs_inode(&efs, nid, &in))
+            return 0;
+        if (in.size == 0 || in.size > (4U << 20) || !(buf = sb_alloc(in.size)) || erofs_read_all(&efs, &in, buf))
+            return 0;
+        *len = (uint32_t)in.size;
+        return buf;
+    }
+    return 0;
 }
 
 static int sb_file(void *ctx, const char *name, const uint8_t **data, uint32_t *len)
@@ -121,24 +160,18 @@ static int sb_file(void *ctx, const char *name, const uint8_t **data, uint32_t *
         return -1;
     for (unsigned d = 0; d < 2; d++) {
         char path[64];
-        uint32_t ino;
-        uint8_t inode[EXT4_INODE_MAX];
-        uint64_t size;
+        uint32_t size = 0;
         uint8_t *buf;
         sb_strcpy(path, sizeof(path), dirs[d]);
         sb_strcpy(path + sb_strlen(path), sizeof(path) - sb_strlen(path), name);
-        if (ext4_lookup(&fs, path, &ino) || ext4_inode(&fs, ino, inode))
+        buf = vendor_file(path, &size);
+        if (!buf)
             continue;
-        size = ext4_size(inode);
-        if (size == 0 || size > (4U << 20) || !(buf = sb_alloc(size)))
-            return -1;
-        if (ext4_read(&fs, inode, 0, buf, (uint32_t)size))
-            return -1;
         sb_strcpy(files[nfiles].name, sizeof(files[nfiles].name), name);
         files[nfiles].data = buf;
-        files[nfiles].len = (uint32_t)size;
+        files[nfiles].len = size;
         nfiles++;
-        *data = buf, *len = (uint32_t)size;
+        *data = buf, *len = size;
         sb_logf("wifi: read from VENDOR: /", path);
         return 0;
     }

@@ -41,6 +41,7 @@ $CC -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -nostdlib -c 
 # shellcheck disable=SC2086
 $CC $flags $extra -o "$OUT/bcmw-test" $src
 $CC $flags -o "$OUT/ext4-test" "$core/ext4.c" "$here/ext4-test.c"
+$CC $flags -o "$OUT/erofs-test" "$core/erofs.c" "$here/erofs-test.c"
 
 # ext4: images made by mke2fs -d from a tree like VENDOR's: /firmware (300 files, a hashed directory)
 # and /etc/wifi, with the phone's files when given (else stand-ins), a sparse file, a 3 MiB file;
@@ -69,6 +70,42 @@ if command -v mke2fs >/dev/null 2>&1; then
     rm -rf "$t" "$OUT/v.img"
 else
     echo "bcmw: no mke2fs: the ext4 reader's test is skipped"
+fi
+
+# EROFS: images made by mkfs.erofs from the same kind of tree: lz4hc with compact indexes (One UI's
+# VENDOR), lz4 with full indexes, uncompressed; then, with BCMW_VENDOR_IMG=<a copy of the phone's
+# VENDOR image> and BCMW_VENDOR_REF=<what fsck.erofs --extract made of it>, the radio's files in it
+if command -v mkfs.erofs >/dev/null 2>&1; then
+    t="$OUT/erofs-tree"
+    rm -rf "$t" && mkdir -p "$t/firmware" "$t/etc/wifi"
+    i=0
+    while [ $i -lt 300 ]; do echo "file $i" > "$t/firmware/f$i.txt"; i=$((i + 1)); done
+    files=""
+    for f in bcmdhd_sta.bin_b2 nvram.txt_r02a_b2 bcmdhd_clm.blob; do
+        if [ -n "$dir" ] && [ -f "$dir/$f" ]; then cp "$dir/$f" "$t/firmware/$f"; else head -c 70000 /dev/urandom > "$t/firmware/$f"; fi
+        cp "$t/firmware/$f" "$t/etc/wifi/$f"
+        files="$files firmware/$f etc/wifi/$f"
+    done
+    head -c 3145728 /dev/urandom > "$t/firmware/random.bin"
+    yes "the same line, compressible" | head -c 200000 > "$t/firmware/text.txt"
+    for opts in "-z lz4hc,9 -b 4096" "-z lz4 -E legacy-compress -b 4096" "-b 4096"; do
+        rm -f "$OUT/v.erofs"
+        # shellcheck disable=SC2086
+        mkfs.erofs --quiet $opts "$OUT/v.erofs" "$t" >/dev/null
+        # shellcheck disable=SC2086
+        "$OUT/erofs-test" "$OUT/v.erofs" "$t" $files firmware/f0.txt firmware/f299.txt firmware/random.bin firmware/text.txt
+    done
+    rm -rf "$t" "$OUT/v.erofs"
+else
+    echo "bcmw: no mkfs.erofs: the EROFS reader's test is skipped (run it in the VM)"
+fi
+if [ -n "${BCMW_VENDOR_IMG:-}" ] && [ -n "${BCMW_VENDOR_REF:-}" ]; then
+    vf=""
+    for f in "$BCMW_VENDOR_REF"/firmware/bcmdhd* "$BCMW_VENDOR_REF"/firmware/nvram.txt* "$BCMW_VENDOR_REF"/etc/wifi/*; do
+        [ -f "$f" ] && vf="$vf ${f#"$BCMW_VENDOR_REF"/}"
+    done
+    # shellcheck disable=SC2086
+    "$OUT/erofs-test" "$BCMW_VENDOR_IMG" "$BCMW_VENDOR_REF" $vf
 fi
 if [ -n "$dir" ]; then
     echo "bcmw: the phone's files from $dir (read only)"
