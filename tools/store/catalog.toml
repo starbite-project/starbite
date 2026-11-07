@@ -418,7 +418,7 @@ wdt_feed = "xnu"
 [[entry]]
 key = "starbite-os"
 name = "Starbite OS"
-version = "0.1.1 · light, heat, SOS, clock, battery"
+version = "0.2 · light, heat, SOS, info, battery"
 category = "starbite"
 method = "bare"
 tag = "experimental"
