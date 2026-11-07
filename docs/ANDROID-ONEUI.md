@@ -107,6 +107,8 @@ numbers, so no other partition is renumbered: the GPT lists them out of block or
 
 Images: `tools/android/oneui/sparse2raw.py IMAGE | tools/android/pixel/part-write.py NAME - --size N`
 (64 MiB chunks read back on the phone + a whole-range SHA-256). System sha256 7662390c..., vendor 5572b8b7...
+on the phone. The rebuild with the firstboot service (postfix-system.sh, 2026-11-07 08:45) is 6419861504 B,
+sha256 dedb499c...; it is for fresh installs (the installer) and is not on S9 #1, whose setup was finished by hand.
 
 **Windows at 18 GiB was too small (2026-11-07 morning):** the shrink left it 1.4 GB free; after two chkdsk runs it
 hung at the Welcome screen. WINDOWS went to 22 GiB (VENDOR/ODM rewritten 4 GiB further on, A16DATA re-created at
