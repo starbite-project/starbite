@@ -116,7 +116,10 @@ struct sb7_kern {
 #define SB7_F_JB500_40  27U   /* JetBrains Mono 500 40  sheet mono values                    text */
 #define SB7_F_JB500_36  28U   /* JetBrains Mono 500 36  error code line                      text */
 #define SB7_F_JB500_34  29U   /* JetBrains Mono 500 34  launch detail, end screen mono       text */
-#define SB7_F_COUNT     30U   /* ids are 1 .. SB7_F_COUNT - 1 */
+/* Starbite OS's own (starbite/sbos/tools/sbos-assets.py; absent from the other images' containers) */
+#define SB7_F_IT300_380  30U   /* Inter Tight 300 380  lock screen clock                    subset: 0-9 : (tnum) */
+#define SB7_F_IT600_150  31U   /* Inter Tight 600 150  big values                           subset: 0-9 A-Z a-z % ° : . - + / */
+#define SB7_F_COUNT     32U   /* ids are 1 .. SB7_F_COUNT - 1 */
 
 /* ---- images ------------------------------------------------------------------------------- */
 

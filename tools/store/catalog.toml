@@ -366,7 +366,7 @@ flags = ["hidden"]
 [[entry]]
 key = "engineer"
 name = "Engineer OS"
-version = "Starbite Lab 2.1 · tiers 1-4 · CPU/GPU"
+version = "Starbite Lab 2.2 · tiers 1-4 · CPU/GPU"
 category = "starbite"
 method = "bare"
 tag = "beta"
@@ -386,6 +386,21 @@ tag = "beta"
 files = ["ufs:utility.img|sd:utility.img"]
 root = "none (RAM only)"
 wdt = 60
+wdt_feed = "own"
+
+# Starbite OS (docs/STARBITE-OS.md, plan 2026-11-07 track A): our own minimal OS on libsb, no Linux: lock screen,
+# big-tile home, Light, Heat, SOS, Clock, Battery, Settings; apps are separate .sba files at EL0. Version 0.1
+# writes no storage. It feeds the cluster-1 watchdog from its loop (30 s), so a hang returns to the crash screen.
+[[entry]]
+key = "starbite-os"
+name = "Starbite OS"
+version = "0.1 · light, heat, SOS, clock, battery"
+category = "starbite"
+method = "bare"
+tag = "experimental"
+files = ["ufs:starbite-os.img|sd:starbite-os.img"]
+root = "none (RAM only)"
+wdt = 30
 wdt_feed = "own"
 
 # 2026-11-05: Linux display black-bars diagnostic kernel (patch-mainline step 6e), hidden; boot by key only.

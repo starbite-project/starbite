@@ -1,0 +1,309 @@
+/* SPDX-License-Identifier: GPL-2.0-only
+ * Starbite OS small services: SOS (docs 9), the clock (the Utility OS's tz.c), the battery and its model
+ * (docs 4.5), and power (docs 4.1, 4.6). */
+#include "sb.h"
+#include "kern.h"
+#include "kinput.h"
+#include "tz.h"
+
+/* ---- SOS ------------------------------------------------------------------------------------- */
+/* state 0 off, 2 the countdown (3 s, a hold cancels), 1 flashing: white / red at 2 Hz */
+static int sos_st;
+static uint64_t sos_t0, sos_phase_t;
+static int sos_phase;
+
+int sos_active(void)
+{
+    return sos_st != 0;
+}
+
+int sos_set(int on)
+{
+    if (on && !sos_st) {
+        sos_st = 2;
+        sos_t0 = sb_ms() + 3000;
+        sos_phase = 0;
+        kt_set(KT_SOS, 1, sb_ms(), 250, 1);
+        sb_log("sos: countdown");
+    } else if (!on && sos_st) {
+        sos_st = 0;
+        kt_cancel(KT_SOS, 1);
+        sb_log("sos: off");
+    }
+    kui_sos_changed();
+    app_event_send(app_by_id("sos"), EV_APP_SERVICE, 2, sos_st);
+    return 0;
+}
+
+void sos_timer(unsigned id)
+{
+    (void)id;
+    uint64_t now = sb_ms();
+    if (sos_st == 2 && now >= sos_t0) {
+        sos_st = 1;
+        sos_phase_t = now;
+        sb_log("sos: flashing");
+        app_event_send(app_by_id("sos"), EV_APP_SERVICE, 2, sos_st);
+    }
+    if (sos_st == 1)
+        sos_phase = (int)(((now - sos_phase_t) / 250U) & 1U);
+    ui_mark_dirty();
+}
+
+int sos_frame(uint32_t *argb)
+{
+    if (!sos_st)
+        return 0;
+    *argb = sos_st == 2 ? 0xff1c0606U : sos_phase ? 0xffff1a1aU : 0xffffffffU;
+    return 1;
+}
+
+void sos_status(struct sbos_sos *s)
+{
+    memset(s, 0, sizeof(*s));
+    s->state = sos_st;
+    uint64_t now = sb_ms();
+    if (sos_st == 2)
+        s->secs = -(int32_t)((sos_t0 - now + 999U) / 1000U);
+    else if (sos_st == 1)
+        s->secs = (int32_t)((now - sos_phase_t) / 1000U);
+    s->torch = 0;
+    s->siren = 0;
+}
+
+void sos_init(void)
+{
+    sos_st = 0;
+}
+
+/* ---- clock: the RTC (UTC) once a minute, the counter in between --------------------------------- */
+static int64_t rtc_t;
+static uint64_t rtc_ms, rtc_try;
+static int rtc_state;
+
+int clock_now(struct sbos_time *t)
+{
+    uint64_t now = sb_ms();
+    if (!rtc_state || now - rtc_try >= 60000U) {
+        uint64_t e;
+        rtc_try = now;
+        if (sb_rtc_epoch(&e) && e > 1577836800ULL) {
+            rtc_t = (int64_t)e;
+            rtc_ms = now;
+            rtc_state = 1;
+        } else if (rtc_state != 1) {
+            rtc_state = -1;
+        }
+    }
+    memset(t, 0, sizeof(*t));
+    if (rtc_state != 1)
+        return 0;
+    int64_t utc = rtc_t + (int64_t)((now - rtc_ms) / 1000U);
+    struct tz_time l;
+    tz_local(&tz_zones[0], utc, &l);
+    t->utc = utc;
+    t->y = l.y;
+    t->mo = l.mo;
+    t->d = l.d;
+    t->h = l.h;
+    t->mi = l.mi;
+    t->s = l.s;
+    t->wday = l.wday;
+    t->dst = l.dst;
+    t->off_min = tz_zones[0].off_min + (l.dst ? 60 : 0);
+    sb_strcpy(t->abbr, sizeof(t->abbr), l.abbr);
+    sb_strcpy(t->zone, sizeof(t->zone), tz_zones[0].city);
+    return 1;
+}
+
+/* ---- battery ------------------------------------------------------------------------------- */
+static struct bat_model model;
+static struct sbos_battery bat;
+static int full_mah = 3000;
+
+static void bat_read(void)
+{
+    struct sb_bat b;
+    memset(&bat, 0, sizeof(bat));
+    bat.temp_c10 = -1000;
+    if (!sb_bat_read(&b) || !b.ok)
+        return;
+    bat.ok = 1;
+    bat.pct = b.soc_pct;
+    bat.pct_x10 = b.soc_x10;
+    bat.mv = b.mv;
+    bat.ma = b.ma;
+    bat.avg_ma = b.avg_ma;
+    bat.charger = b.input;
+    uint16_t v;
+    /* RepCap (0x05) and FullCapRep (0x10): ModelGauge 0.5 mAh per LSB with the 10 mOhm sense resistor */
+    if (sb_fg_word_checked(0x05, &v, 0, 0))
+        bat.cap_mah = v / 2;
+    if (sb_fg_word_checked(0x10, &v, 0, 0) && v / 2 > 1000 && v / 2 < 4500)
+        full_mah = v / 2;
+    bat.full_mah = full_mah;
+    if (!bat.cap_mah)
+        bat.cap_mah = full_mah * bat.pct / 100;
+    int r = sb_adc_filtered(4, 0, 0, 0);
+    if (r >= 0)
+        bat.temp_c10 = sb_therm_convert(1, r);
+}
+
+void battery_get(struct sbos_battery *b)
+{
+    *b = bat;
+}
+
+static int32_t cold_adjust(int32_t min)
+{
+    if (bat.temp_c10 > -1000 && bat.temp_c10 < 0)
+        return min * 6 / 10;
+    if (bat.temp_c10 > -1000 && bat.temp_c10 < 100)
+        return min * 8 / 10;
+    return min;
+}
+
+void battery_estimate(struct sbos_estimate *e)
+{
+    memset(e, 0, sizeof(*e));
+    if (!bat.ok)
+        return;
+    /* to the 5 % cut-off, not to empty */
+    int usable = bat.cap_mah - full_mah * 5 / 100;
+    if (usable < 0)
+        usable = 0;
+    int learned_now = 0, learned_off = 0;
+    int st = heater_running_ui() ? PS_HEAT : PS_ACTIVE;
+    e->now_ma = bat_model_ma(&model, st, &learned_now);
+    e->screen_off_ma = bat_model_ma(&model, PS_SCREEN_OFF, &learned_off);
+    e->now_min = cold_adjust(bat_minutes(usable, e->now_ma));
+    e->screen_off_min = cold_adjust(bat_minutes(usable, e->screen_off_ma));
+    e->off_days = 180;                              /* typical self-discharge: shown as typical only */
+    e->learned = learned_now && learned_off;
+}
+
+void battery_timer(unsigned id)
+{
+    (void)id;
+    bat_read();
+    if (bat.ok)
+        bat_model_feed(&model, K.power_state, bat.avg_ma, sb_ms() - K.state_since);
+    ui_kminute();
+    kt_set(KT_BATTERY, 1, sb_ms(), K.screen_on ? 10000 : 60000, 0);
+    /* the reserve (docs 4.6): below 3 % off, unless SOS runs (down to 2 %) */
+    if (bat.ok && !bat.charger && ((bat.pct < 3 && !sos_active()) || bat.pct < 2)) {
+        sb_log("sbos: battery reserve reached: power off");
+        power_off_now();
+    }
+}
+
+void battery_init(void)
+{
+    bat_model_init(&model);
+    bat_read();
+}
+
+/* ---- power ------------------------------------------------------------------------------- */
+static void set_state(int ps)
+{
+    if (K.power_state != ps) {
+        K.power_state = ps;
+        K.state_since = sb_ms();
+    }
+}
+
+static void screen(int on)
+{
+    if (K.screen_on == on)
+        return;
+    K.screen_on = on;
+    hw_screen(on);
+    kui_screen_changed(on);
+    if (!on) {
+        /* v0.1: black, nothing drawn until the Power key */
+        uint32_t *bb = 0;
+        (void)bb;
+        set_state(heater_running_ui() ? PS_HEAT : PS_SCREEN_OFF);
+        kt_cancel(KT_POWER, 1);
+        sb_log("sbos: screen off");
+    } else {
+        set_state(heater_running_ui() ? PS_HEAT : PS_ACTIVE);
+        kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+        sb_log("sbos: screen on");
+    }
+    kt_set(KT_INPUT, 1, sb_ms(), on ? 16 : 100, 1);
+    kt_set(KT_BATTERY, 1, sb_ms(), on ? 2000 : 60000, 0);
+    for (int a = 0; a < napps; ++a)
+        app_event_send(a, EV_APP_POWER, 0, on);
+}
+
+void power_input(void)
+{
+    if (K.screen_on)
+        kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+}
+
+void power_key_short(void)
+{
+    if (sos_active() || kui_screen() == 6 /* SCR_LIGHT */) {
+        if (!K.screen_on)
+            screen(1);
+        return;                                     /* SOS and the light keep the screen */
+    }
+    screen(!K.screen_on);
+    if (K.screen_on)
+        kui_lock();
+}
+
+void power_key_long(void)
+{
+    if (!K.screen_on)
+        screen(1);
+    kui_power_menu();
+}
+
+void power_timer(unsigned id)
+{
+    (void)id;
+    /* the screen-off timer: not while something must stay visible */
+    if (!K.screen_on)
+        return;
+    int down = 0;
+    kin_touch_held(&down);
+    if (kui_awake_on() || sos_active() || down) {
+        kt_set(KT_POWER, 1, sb_ms(), 5000, 0);
+        return;
+    }
+    screen(0);
+}
+
+void power_restart(int to_menu)
+{
+    heater_stop_all("Restarting");
+    sb_mdelay(200);
+    if (to_menu)
+        sb_reboot(SB_INFORM_NORMAL);
+    sb_boot_next("starbite-os");
+}
+
+void power_off_now(void)
+{
+    if (heater_running_ui())
+        heater_stop_all("Switching off");
+    sb_mdelay(200);
+    sb_power_off();
+    /* still here: a cable keeps the PMIC on. Stay on, screen off. */
+    sb_log("sbos: power off returned (cable): staying on");
+    screen(0);
+}
+
+void power_init(void)
+{
+    K.screen_on = 1;
+    K.screen_off_s = 30;
+    K.sleep_off_s = 300;
+    set_state(PS_ACTIVE);
+    kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+    kt_set(KT_INPUT, 1, sb_ms(), 16, 1);
+    kt_set(KT_BATTERY, 1, sb_ms(), 10000, 0);
+}

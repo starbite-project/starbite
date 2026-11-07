@@ -1216,7 +1216,7 @@ static void labtour_generate(void)
     lt_row(1);
     tadd("T:CPU stress");
     lt_row(0);
-    lt_run("CPU stress", 4, 6000, "CPU stress result", 3);
+    lt_run("CPU stress", 5, 6000, "CPU stress result", 3);   /* 2.2: the Clocks row is row 2 */
     tadd("L:test CPU stress: PASS");
     /* memory stress, passes until stopped (row 1 three times: 1 -> 3 -> 10 -> until stopped) */
     lt_tab(1);
@@ -1229,7 +1229,7 @@ static void labtour_generate(void)
     /* thermal test: 10 s baseline, then the load; stopped during the load */
     lt_tab(1);
     lt_row(3);
-    lt_run("Thermal test", 5, 16000, "Thermal test result", 3);
+    lt_run("Thermal test", 6, 16000, "Thermal test result", 3);
     tadd("L:test Thermal test");
     /* battery: discharge (all A55 cores + white screen), then the sag test */
     lt_tab(1);
@@ -1299,12 +1299,13 @@ static void labtour_generate(void)
     tadd("w:1500");
     tadd("L:fence: refused");
     lt_home(2);
-    /* "no limit": CPU stress, Stop at cycled 85 -> 90 -> 95 -> the warning, cancelled (back to 70) */
+    /* "no limit": CPU stress, Stop at (row 4 since 2.2's Clocks row) cycled 85 -> 90 -> 95 -> the warning,
+     * cancelled (back to 70) */
     lt_tab(1);
     lt_row(1);
-    lt_row(3);
-    lt_row(3);
-    lt_row(3);
+    lt_row(4);
+    lt_row(4);
+    lt_row(4);
     tadd("T:Before you write");
     tadd("x:lab.nolimit");
     tadd(TOUR_BACK);

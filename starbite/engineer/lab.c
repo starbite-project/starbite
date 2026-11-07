@@ -19,12 +19,18 @@ static const char *const dur_name[] = { "30 s", "1 min", "5 min", "15 min", "30 
 static const int limit_c[LIMIT_N] = { 70, 75, 80, 85, 90, 95, 1000 };
 static const char *const core_name[] = { "all 8 (A55 + M3)", "the 4 A55 cores", "the 4 M3 cores + cpu0", "cpu0 only" };
 static const unsigned core_mask[] = { 0xffU, 0x0fU, 0xf1U, 0x01U };
-static const char *const kern_name[] = { "INT + FP + NEON + memory", "integer", "floating point", "NEON", "memory (caches)" };
-static const unsigned kern_mask[] = { KERN_INT | KERN_FP | KERN_NEON | KERN_MEM, KERN_INT, KERN_FP, KERN_NEON, KERN_MEM };
+/* 2.2: the heat kernel first (the default): the old default mix spent most of each batch waiting on DRAM in
+ * the memory kernel, one reason the stress stayed cool (docs/STARBITE-OS.md 8.5) */
+#define KERN_N 6
+static const char *const kern_name[KERN_N] = { "heat (FMA streams, most power)", "INT + FP + NEON + memory", "integer",
+                                               "floating point", "NEON", "memory (caches)" };
+static const unsigned kern_mask[KERN_N] = { KERN_HEAT, KERN_INT | KERN_FP | KERN_NEON | KERN_MEM, KERN_INT, KERN_FP,
+                                            KERN_NEON, KERN_MEM };
 
 static struct {
-    int cores, kern, dur, limit;
-} opt = { 0, 0, 1, 3 };
+    int cores, kern, dur, limit, clk;
+} opt = { 0, 0, 1, 3, 0 };
+static const char *const clk_name[2] = { "as S-Boot left them (about 1050 MHz)", "full: 1794 MHz (tier 3, ACPM)" };
 
 static int nxt(int v, int n)
 {
@@ -444,6 +450,89 @@ static int m3_confirm(void)
     return lab_confirm(&a, &m3_auth);
 }
 
+/* 2.2: full CPU clocks for the load tests (docs/STARBITE-OS.md 8.5). ACPM DVFS domains 2 (A55) and 3 (M3) at
+ * 1794 MHz, the vendor's all-core level (DT quad_freq / policy-max), the M3 domain only while M3 cores run;
+ * tier 3, confirmed once per session. When the load stops: the M3 domain back to 1066 MHz before its cores go
+ * off, the A55 domain to 1053 MHz (both table levels; S-Boot's ~1050 MHz is not one). */
+static int clk_state;                       /* 0 not confirmed, 1 confirmed */
+static int clk_a55_up, clk_m3_up;
+static struct sb_auth clk_auth;
+
+static int clk_confirm(void)
+{
+    const char *why;
+    struct action a;
+    a.title = "Full CPU clocks";
+    a.target = "CPUCL";
+    a.happens[0] = "ACPM DVFS requests: the A55 cluster (domain 2) and, while M3 cores run, the M3 cluster (3)";
+    a.happens[1] = "to 1794 MHz, the vendor's all-core level; ACPM sets the PLL and the voltage from its table";
+    a.happens[2] = "When the load stops: M3 back to 1066 MHz, A55 to 1053 MHz (table levels)";
+    a.happens[3] = 0;
+    a.undo = "the test restores them; a reboot too";
+    a.old_v = "about 1050 MHz";
+    a.new_v = "1794 MHz";
+    a.backup = "";
+    a.tier = dvfs_tier(2, 1794000, &why);
+    a.space = SB_SP_DVFS;
+    a.lu = 0;
+    a.kind = 0;
+    a.first = 2;
+    a.count = 2;
+    return lab_confirm(&a, &clk_auth);
+}
+
+static void clk_log(const char *what, int ok)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, what);
+    ub_s(&u, ok ? ": ACPM answered; now " : ": ACPM did not answer; now ");
+    ub_dec(&u, sb_a55_hz() / 1000000U);
+    ub_s(&u, " MHz A55");
+    if (sb_m3_on()) {
+        int off;
+        ub_s(&u, ", ");
+        ub_dec(&u, sb_m3_hz(&off) / 1000000U);
+        ub_s(&u, " MHz M3");
+    }
+    audit_line(u.b);
+}
+
+static void clk_raise(unsigned mask)
+{
+    if (!opt.clk || clk_state <= 0)
+        return;
+    if (!sb_gate_open(&clk_auth)) {
+        audit_line("full clocks: the confirmation is no longer valid");
+        return;
+    }
+    clk_a55_up = sb_acpm_dvfs(2, 1794000, SB_TIER3);
+    if ((mask & 0xf0U) && sb_m3_on())
+        clk_m3_up = sb_acpm_dvfs(3, 1794000, SB_TIER3);
+    sb_gate_close();
+    sb_mdelay(2);
+    clk_log("full clocks requested", clk_a55_up);
+}
+
+static void clk_restore(int m3_only)
+{
+    if (!clk_a55_up && !clk_m3_up)
+        return;
+    if (!sb_gate_open(&clk_auth))
+        return;
+    if (clk_m3_up && sb_m3_on()) {
+        (void)sb_acpm_dvfs(3, 1066000, SB_TIER3);
+        clk_m3_up = 0;
+    }
+    if (!m3_only && clk_a55_up) {
+        (void)sb_acpm_dvfs(2, 1053000, SB_TIER3);
+        clk_a55_up = 0;
+    }
+    sb_gate_close();
+    if (!m3_only)
+        clk_log("clocks restored", 1);
+}
+
 static void load_alloc(unsigned kmask)
 {
     K.mask = kmask;
@@ -466,6 +555,15 @@ static void fill_starting(void)
 /* Start the requested cores (bit w = core w; bit 0 is this core, which works between frames). */
 static unsigned load_start(unsigned mask, unsigned kmask)
 {
+    if (opt.clk && clk_state <= 0) {
+        if (clk_confirm()) {
+            clk_state = 1;
+            audit_line("full CPU clocks confirmed for this session");
+        } else {
+            opt.clk = 0;
+            audit_line("full CPU clocks not confirmed: the test runs at S-Boot's clocks");
+        }
+    }
     load_alloc(kmask);
     it0 = err0 = 0;
     for (unsigned w = 0; w < SB_NCORES; ++w) {
@@ -488,6 +586,7 @@ static unsigned load_start(unsigned mask, unsigned kmask)
                 for (unsigned v = w + 1; v < SB_NCORES; ++v)
                     mask &= ~(1U << v);
         }
+    clk_raise(mask);
     ui_input_reset();
     lab_stop_reset();
     if (live_open) {                    /* a prompt or the start page drew over the live page */
@@ -573,7 +672,9 @@ static unsigned cores_offer(unsigned mask, const char *test)
 
 static void load_stop(void)
 {
+    clk_restore(1);                             /* the M3 domain while its cores still run */
     unsigned left = sb_smp_stop(1500);
+    clk_restore(0);
     if (left)
         audit_line("a worker core did not stop within 1.5 s (reboot before starting an OS)");
 }
@@ -985,6 +1086,7 @@ static void build_cpu(void)
     kv_hdr("OPTIONS (POWER CHANGES)");
     row_value("Cores", core_name[opt.cores], 0);
     row_value("Kernels", kern_name[opt.kern], 0);
+    row_value("Clocks", clk_name[opt.clk], opt.clk ? R_WARN : 0);
     row_value("Duration", dur_name[opt.dur], 0);
     row_value("Stop at", lab_limit_label(opt.limit), opt.limit == LIMIT_NONE ? R_RED : 0);
     kv_hdr("RUN");
@@ -994,8 +1096,9 @@ static void build_cpu(void)
     row_add("Last result", cs_done ? cs_detail : "not run", cs_done ? 0 : R_DIS);
     row_add("M3 cores (cpu4-7)", m3_state > 0 ? "enabled for this session" : "off: enable them now (tier 3, PMU)",
             m3_state > 0 ? R_DIS : R_RED);
-    kv_note("Each core runs integer, floating-point, NEON and cache kernels and compares every result with "
-            "the reference. The M3 cores need 6 PMU registers set first (the vendor sequence Linux and iOS use): "
+    kv_note("Each core runs the chosen kernels and compares every result with the reference. The heat kernel "
+            "keeps every FP pipe busy (the most power); Clocks full asks ACPM for 1794 MHz (tier 3) and restores "
+            "1053 / 1066 MHz afterwards. The M3 cores need 6 PMU registers set first (the vendor sequence Linux and iOS use): "
             "a test that uses them offers that step when it starts, or enable them here.");
 }
 
@@ -1003,12 +1106,13 @@ static int act_cpu(int i)
 {
     switch (i) {
     case 0: opt.cores = nxt(opt.cores, 4); break;
-    case 1: opt.kern = nxt(opt.kern, 5); break;
-    case 2: opt.dur = nxt(opt.dur, 7); break;
-    case 3: opt.limit = lab_limit_next(opt.limit); break;
-    case 4: cpu_run(); break;
-    case 5: info_screen("CPU stress result", fill_cpu_result, 0); break;
-    case 6: m3_enable_now(); break;
+    case 1: opt.kern = nxt(opt.kern, KERN_N); break;
+    case 2: opt.clk = !opt.clk; break;
+    case 3: opt.dur = nxt(opt.dur, 7); break;
+    case 4: opt.limit = lab_limit_next(opt.limit); break;
+    case 5: cpu_run(); break;
+    case 6: info_screen("CPU stress result", fill_cpu_result, 0); break;
+    case 7: m3_enable_now(); break;
     default: break;
     }
     return 0;
@@ -1275,6 +1379,7 @@ static void build_th(void)
     kv_hdr("OPTIONS (POWER CHANGES)");
     row_value("Load on", core_name[opt.cores], 0);
     row_value("Load", kern_name[opt.kern], 0);
+    row_value("Clocks", clk_name[opt.clk], opt.clk ? R_WARN : 0);
     row_value("Load for", dur_name[opt.dur], 0);
     row_value("Stop at", lab_limit_label(opt.limit), opt.limit == LIMIT_NONE ? R_RED : 0);
     row_value("Cool-down", th_cool ? "60 s, recorded" : "no", 0);
@@ -1293,14 +1398,15 @@ static int act_th(int i)
 {
     switch (i) {
     case 0: opt.cores = nxt(opt.cores, 4); break;
-    case 1: opt.kern = nxt(opt.kern, 5); break;
-    case 2: opt.dur = nxt(opt.dur, 7); break;
-    case 3: opt.limit = lab_limit_next(opt.limit); break;
-    case 4: th_cool = !th_cool; break;
-    case 5: th_run(); break;
-    case 6: info_screen("Thermal test result", fill_th_result, 0); break;
-    case 7: lab_sensors(); break;
-    case 8: m3_enable_now(); break;
+    case 1: opt.kern = nxt(opt.kern, KERN_N); break;
+    case 2: opt.clk = !opt.clk; break;
+    case 3: opt.dur = nxt(opt.dur, 7); break;
+    case 4: opt.limit = lab_limit_next(opt.limit); break;
+    case 5: th_cool = !th_cool; break;
+    case 6: th_run(); break;
+    case 7: info_screen("Thermal test result", fill_th_result, 0); break;
+    case 8: lab_sensors(); break;
+    case 9: m3_enable_now(); break;
     default: break;
     }
     return 0;

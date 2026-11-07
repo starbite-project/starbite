@@ -649,7 +649,7 @@ struct icon {
     uint8_t fmt;
     const uint8_t *px;              /* decoded: w * h bytes (A8) or w * h * 4 (ARGB premultiplied) */
 };
-#define MAX_ICON 128U
+#define MAX_ICON 256U               /* menu v7 below 128, Starbite OS 200.. */
 static struct icon icons[MAX_ICON];
 
 static const struct icon *icon_get(unsigned id)

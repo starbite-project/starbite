@@ -151,6 +151,41 @@ int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg)
     return -100;
 }
 
+/* The vendor PMU defaults for the M3 cluster (sb.h; the values of engineer/lab.c m3_pmu). Plain MMIO to
+ * those six PMU registers' fields only. */
+static const struct {
+    uint32_t off, mask, val;
+} m3_pmu[] = { { 0x1088, 0xff000000U, 0x8d000000U }, { 0x2114, 3, 2 }, { 0x2180, 3, 2 }, { 0x21ec, 3, 2 },
+               { 0x2258, 3, 2 }, { 0x2384, 3, 2 } };
+
+int sb_m3_pmu_defaults(void)
+{
+    int ok = 1;
+    for (unsigned i = 0; i < sizeof(m3_pmu) / sizeof(m3_pmu[0]); ++i) {
+        uint64_t a = SB_PMU + m3_pmu[i].off;
+        uint32_t v = 0;
+        if (!sb_probe32(a, &v)) {
+            ok = 0;
+            continue;
+        }
+        if ((v & m3_pmu[i].mask) == m3_pmu[i].val)
+            continue;
+        *(volatile uint32_t *)a = (v & ~m3_pmu[i].mask) | m3_pmu[i].val;
+        __asm__ volatile("dsb sy" ::: "memory");
+        if (!sb_probe32(a, &v) || (v & m3_pmu[i].mask) != m3_pmu[i].val)
+            ok = 0;
+    }
+    sb_log(ok ? "m3 pmu defaults: set" : "m3 pmu defaults: a register did not read back");
+    return ok;
+}
+
+int64_t sb_smp_affinity(unsigned w)
+{
+    if (w >= SB_NCORES)
+        return -2;
+    return sb_psci(0xc4000004U, sb_smp_target(w), 0, 0);
+}
+
 unsigned sb_smp_running(void)
 {
     unsigned n = 0;

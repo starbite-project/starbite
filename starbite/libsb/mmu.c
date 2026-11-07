@@ -28,7 +28,12 @@
 #define AF         (1ULL << 10)
 #define XN         ((1ULL << 53) | (1ULL << 54))
 #define DEV        (BLOCK | ATTR(0) | AF | XN)
-#define WB         (BLOCK | ATTR(1) | SH_INNER | AF)
+#define UXN        (1ULL << 54)
+#define PXN        (1ULL << 53)
+#define AP_EL0     (1ULL << 6)        /* AP[1]: EL0 read/write (with AP[2] = 0) */
+/* UXN on every kernel block: no EL1 memory is executable from EL0 (Starbite OS runs apps at EL0; the
+ * other images never enter EL0, for them the bit changes nothing). */
+#define WB         (BLOCK | ATTR(1) | SH_INNER | AF | UXN)
 #define NC         (BLOCK | ATTR(2) | SH_INNER | AF | XN)
 #define MAIR       ((0x44ULL << 16) | (0xffULL << 8) | 0x00ULL)
 #define TCR        (28ULL | (1ULL << 8) | (1ULL << 10) | (3ULL << 12) | (1ULL << 23) | (1ULL << 32))
@@ -89,6 +94,24 @@ void sb_mmu_enable(void)
     sctlr &= ~(1ULL << 1);                          /* A: no alignment checks on normal memory */
     __asm__ volatile("msr sctlr_el1, %0\nisb" :: "r"(sctlr) : "memory");
     mmu_on = 1;
+}
+
+/* Starbite OS app slots (docs/STARBITE-OS.md 2.3): the 2 MiB write-back blocks of 0xa8000000..0xaeffffff
+ * become EL0 read/write and EL0-executable (EL1 never executes them: PXN, and EL0-writable memory is
+ * implicitly PXN anyway) or kernel-only again. A permission-only change of a valid block: no
+ * break-before-make, the TLB entry invalidated by address on every core. 0 done, -1 outside the window. */
+int sb_mmu_el0(uint64_t pa, int on)
+{
+    if (!mmu_on || pa < 0xa8000000ULL || pa >= 0xaf000000ULL)
+        return -1;
+    unsigned i = (unsigned)((pa - 0x80000000ULL) >> 21);
+    uint64_t d = l2_desc(pa & ~0x1fffffULL);
+    if (on)
+        d = (d & ~UXN) | AP_EL0 | PXN;
+    l2_low[i] = d;
+    uint64_t va = (pa & ~0x1fffffULL) >> 12;
+    __asm__ volatile("dsb ishst\n\ttlbi vae1is, %0\n\tdsb ish\n\tisb" : : "r"(va) : "memory");
+    return 0;
 }
 
 int sb_map_kind(uint64_t pa)

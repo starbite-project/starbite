@@ -15,6 +15,8 @@
  *   FP    double precision: Horner polynomials, square roots, divisions
  *   NEON  128-bit integer multiply-accumulate and single-precision fused multiply-add lanes
  *   MEM   a per-core buffer (larger than L2) written with an address hash and read back
+ *   HEAT  (2.2) eight independent single-precision FMA streams, no memory traffic: every FP pipe busy every
+ *         cycle, the most power a core draws (the others are dependency chains or wait on DRAM)
  */
 #include <arm_neon.h>
 #include "eng.h"
@@ -84,6 +86,28 @@ static uint64_t k_neon(uint64_t s)
            ((uint64_t)vgetq_lane_u32(m, 2) << 16) ^ ((uint64_t)vgetq_lane_u32(m, 3) << 48);
 }
 
+static uint64_t k_heat(void)
+{
+    float32x4_t k0 = vdupq_n_f32(0.99991f), k1 = vdupq_n_f32(1.00007f), d = vdupq_n_f32(0.00013f);
+    float32x4_t a0 = vdupq_n_f32(1.0f), a1 = vdupq_n_f32(1.5f), a2 = vdupq_n_f32(2.0f), a3 = vdupq_n_f32(2.5f);
+    float32x4_t a4 = vdupq_n_f32(3.0f), a5 = vdupq_n_f32(3.5f), a6 = vdupq_n_f32(4.0f), a7 = vdupq_n_f32(4.5f);
+    for (unsigned i = 0; i < 24000U; ++i) {
+        float32x4_t k = (i & 1U) ? k1 : k0;
+        a0 = vfmaq_f32(d, a0, k);
+        a1 = vfmaq_f32(d, a1, k);
+        a2 = vfmaq_f32(d, a2, k);
+        a3 = vfmaq_f32(d, a3, k);
+        a4 = vfmaq_f32(d, a4, k);
+        a5 = vfmaq_f32(d, a5, k);
+        a6 = vfmaq_f32(d, a6, k);
+        a7 = vfmaq_f32(d, a7, k);
+    }
+    float32x4_t t = vaddq_f32(vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3)), vaddq_f32(vaddq_f32(a4, a5), vaddq_f32(a6, a7)));
+    uint32x4_t u = vreinterpretq_u32_f32(t);
+    return ((uint64_t)vgetq_lane_u32(u, 0) << 32 | vgetq_lane_u32(u, 1)) ^
+           ((uint64_t)vgetq_lane_u32(u, 2) << 16) ^ ((uint64_t)vgetq_lane_u32(u, 3) << 40);
+}
+
 static uint64_t hash64(uint64_t x)
 {
     x ^= x >> 33;
@@ -108,7 +132,7 @@ void kern_gold(struct kern_cfg *c)
     c->gold[0] = k_int(SEED_INT);
     c->gold[1] = k_fp(SEED_FP);
     c->gold[2] = k_neon(SEED_NEON);
-    c->gold[3] = 0;
+    c->gold[3] = k_heat();
 }
 
 unsigned kern_batch(struct kern_cfg *c, unsigned core, uint64_t *iters)
@@ -123,6 +147,8 @@ unsigned kern_batch(struct kern_cfg *c, unsigned core, uint64_t *iters)
         bad += k_fp(SEED_FP) != c->gold[1];
     if (c->mask & KERN_NEON)
         bad += k_neon(SEED_NEON) != c->gold[2];
+    if (c->mask & KERN_HEAT)
+        bad += k_heat() != c->gold[3];
     if ((c->mask & KERN_MEM) && core < SB_NCORES && c->buf[core] && c->words)
         bad += k_mem(c->buf[core], c->words, *iters * 0x9e3779b97f4a7c15ULL + core);
     ++*iters;

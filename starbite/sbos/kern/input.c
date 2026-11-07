@@ -1,0 +1,153 @@
+/* SPDX-License-Identifier: GPL-2.0-only
+ * Starbite OS input (docs/STARBITE-OS.md 2.1, 3.1): keys and touch read on the input task's timer and turned
+ * into kernel input events. v0.1 polls (16 ms with the screen on; only the Power key, every 100 ms, with
+ * the screen off); v0.2 moves both to their interrupt lines.
+ *
+ * Keys: Volume Up / Down move the focus (auto-repeat), Bixby short selects, Bixby held 0.7 s is Back,
+ * Power short turns the screen off / on, Power held 1 s opens the power menu. Touch: press, move, release
+ * with the position; the UI decides what is a tap or a hold. A key needs two polls in the same state
+ * (debounce). */
+#include "sb.h"
+#include "kern.h"
+#include "kinput.h"
+
+#define POWER_LONG_MS 1000U
+#define BIXBY_LONG_MS 700U
+
+static struct kin q[32];
+static unsigned qh, qt;
+static unsigned keys_stable, keys_last, keys_seen;
+static uint64_t t_power, t_bixby, vol_next;
+static unsigned vol_key;
+static int power_long_sent, bixby_long_sent, t_down;
+static uint64_t last_input;
+
+void kin_push(int type, int x, int y)
+{
+    unsigned n = (qh + 1) % 32;
+    if (n == qt)
+        return;
+    q[qh].type = type;
+    q[qh].x = x;
+    q[qh].y = y;
+    qh = n;
+}
+
+int kin_pop(struct kin *e)
+{
+    if (qt == qh)
+        return 0;
+    *e = q[qt];
+    qt = (qt + 1) % 32;
+    return 1;
+}
+
+uint64_t kin_idle_ms(void)
+{
+    return sb_ms() - last_input;
+}
+
+void kin_touch_held(int *down)
+{
+    *down = t_down;
+}
+
+void input_init(void)
+{
+    keys_stable = keys_last = sb_keys();
+    keys_seen = keys_stable;            /* keys held at start are ignored until released */
+    last_input = sb_ms();
+    qh = qt = 0;
+    t_down = 0;
+    sb_touch_clear();
+}
+
+static void keys_poll(uint64_t now)
+{
+    unsigned k = sb_keys();
+    unsigned stable = (k == keys_last) ? k : keys_stable;
+    keys_last = k;
+    unsigned pressed = stable & ~keys_stable, released = keys_stable & ~stable;
+    keys_stable = stable;
+    pressed &= ~keys_seen;              /* still held from before the start or a reset */
+    keys_seen &= stable;
+    if (pressed | released)
+        last_input = now;
+    if (pressed & SB_K_POWER) {
+        t_power = now;
+        power_long_sent = 0;
+        keys_seen |= 0;
+    }
+    if ((stable & SB_K_POWER) && !power_long_sent && t_power && now - t_power >= POWER_LONG_MS) {
+        power_long_sent = 1;
+        kin_push(KIN_POWER_LONG, 0, 0);
+    }
+    if ((released & SB_K_POWER) && t_power) {
+        if (!power_long_sent)
+            kin_push(KIN_POWER, 0, 0);
+        t_power = 0;
+    }
+    if (pressed & SB_K_BIXBY) {
+        t_bixby = now;
+        bixby_long_sent = 0;
+    }
+    if ((stable & SB_K_BIXBY) && t_bixby && !bixby_long_sent && now - t_bixby >= BIXBY_LONG_MS) {
+        bixby_long_sent = 1;
+        kin_push(KIN_BACK, 0, 0);
+    }
+    if ((released & SB_K_BIXBY) && t_bixby) {
+        if (!bixby_long_sent)
+            kin_push(KIN_SELECT, 0, 0);
+        t_bixby = 0;
+    }
+    if (pressed & (SB_K_UP | SB_K_DOWN)) {
+        vol_key = pressed & SB_K_UP ? SB_K_UP : SB_K_DOWN;
+        kin_push(vol_key == SB_K_UP ? KIN_UP : KIN_DOWN, 0, 0);
+        vol_next = now + 420;
+    }
+    if (vol_key && !(stable & vol_key))
+        vol_key = 0;
+    if (vol_key && now >= vol_next) {
+        kin_push(vol_key == SB_K_UP ? KIN_UP : KIN_DOWN, 0, 0);
+        vol_next = now + 120;
+    }
+}
+
+static void touch_poll(uint64_t now)
+{
+    int st, x, y;
+    for (unsigned n = 0; n < 16 && sb_touch_event(&st, &x, &y); ++n) {
+        last_input = now;
+        if (st == 1) {
+            t_down = 1;
+            kin_push(KIN_PRESS, x, y);
+        } else if (st == 2 && t_down) {
+            kin_push(KIN_MOVE, x, y);
+        } else if (st == 3 && t_down) {
+            t_down = 0;
+            kin_push(KIN_RELEASE, x, y);
+        }
+    }
+}
+
+int input_poll(void)
+{
+    uint64_t now = sb_ms();
+    unsigned before = qh;
+    keys_poll(now);
+    if (K.screen_on)
+        touch_poll(now);
+    else
+        sb_touch_clear();
+    return qh != before;
+}
+
+void input_reset(void)
+{
+    keys_seen = keys_stable = keys_last = sb_keys();
+    vol_key = 0;
+    t_power = t_bixby = 0;
+    t_down = 0;
+    qh = qt = 0;
+    sb_touch_clear();
+}

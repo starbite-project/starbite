@@ -169,6 +169,33 @@ int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier)
     return ok;
 }
 
+int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz)
+{
+    if (!sb_dvfs_level_listed(domain, khz)) {
+        sb_logx("acpm dvfs (listed) refused, domain ", domain);
+        return 0;
+    }
+    uint32_t chans = ard(ACPM_INITDATA + 0x08), ap_max = ard(ACPM_INITDATA + 0x18), cmd[4];
+    if (!ap_max || ap_max > 32 || chans >= ACPM_SRAM_SIZE - ap_max * 0x48)
+        return 0;
+    uint32_t q = ard(chans + 0x34), e = ard(chans + 0x38), id = ard(chans);
+    if (!q || q > 64 || e < 16 || e > 64 || (e & 3U) || id > 31)
+        return 0;
+    cmd[0] = domain;
+    cmd[1] = khz;
+    cmd[2] = cmd[3] = 0;
+    int ok = acpm_send(chans, id, cmd);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "acpm dvfs domain ");
+    ub_dec(&u, domain);
+    ub_s(&u, " to ");
+    ub_dec(&u, khz);
+    ub_s(&u, ok ? " kHz (listed): answered" : " kHz (listed): no answer");
+    sb_log(u.b);
+    return ok;
+}
+
 int sb_acpm_build(char out[25])
 {
     if (!acpm_find(ACPM_PMIC_CH)) {

@@ -46,6 +46,22 @@ menu): the rescue tool that works when the store is broken.
   Every tier 3 / 4 action is written to the pmsg ring *before* it runs (Test history). Only what cannot
   be expressed is impossible (section 8.1).
 
+**v2.2 (2026-11-07, from the Starbite OS heater work, docs/STARBITE-OS.md 8.5): the CPU stress stayed cool.**
+Found in the code: the default kernel mix included the memory kernel (512 KiB written and checked per core
+per batch: the cores mostly waited on DRAM), no CPU clock was ever requested (every core at S-Boot's ~1050
+MHz; only the GPU used ACPM DVFS), the M3 cores ran only after the PMU step, and the INT / NEON kernels are
+single dependency chains. Now:
+- a **heat kernel** (eight independent single-precision FMA streams, no memory traffic, checked against the
+  reference like the others) is the first and default **Kernels** choice of the CPU stress and the thermal
+  test (the battery tests' load too); the old mix is the second choice;
+- a **Clocks** row on the CPU stress and thermal pages: "as S-Boot left them" or "full: 1794 MHz" — ACPM DVFS
+  domains 2 (A55) and 3 (M3, only while M3 cores run) at the vendor's all-core level, tier 3 (a listed
+  level of `sb_dvfs_level_listed`; other CPU levels stay tier 4), confirmed once per session; when the load
+  stops the M3 domain goes back to 1066 MHz before its cores turn off and the A55 domain to 1053 MHz (table
+  levels); what ACPM did is logged with the PLLs read back.
+Host: unit tests, the keys-only tour (84 pages) and the Lab tour (22, its rows moved by one) pass. Not on
+the phone yet.
+
 Status (2026-11-06, v2.1): **built and checked on the host only** (526 unit checks, the reproducible
 build, the relocation test, the keys-only tour of 84 pages, the Lab tour of every test including the
 GPU tests on a fake Mali that walks the real page tables, a tier 4 write to the red screen). v2.0 ran on

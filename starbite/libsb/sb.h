@@ -114,6 +114,9 @@ int sb_map_kind(uint64_t pa);
  * sb_mmu_unmap_temp afterwards), 0 already mapped, -1 not mappable. */
 int sb_mmu_map_temp(uint64_t pa);
 void sb_mmu_unmap_temp(void);
+/* Starbite OS app slots: the 2 MiB block holding pa (0xa8000000..0xaeffffff only) EL0 read/write/execute
+ * (on) or kernel-only (off). Every other block is EL1-only and UXN. 0, or -1 outside the window. */
+int sb_mmu_el0(uint64_t pa, int on);
 
 /* ---- faults (crt0.S vectors) ----------------------------------------------------------------- */
 
@@ -414,6 +417,14 @@ typedef void (*sb_m3_prep_fn)(void);
 /* Called before CPU_ON of an M3 core when set (the vendor PMU defaults: the application sets it
  * once the user confirmed those PMU writes). */
 extern sb_m3_prep_fn sb_smp_m3_prep;
+/* The vendor PMU defaults the M3 cluster needs before CPU_ON (xnu patch 0304; the values Engineer OS writes
+ * after its tier 3 confirmation): CPU_QCH_CLUSTER1_NONCPU_SYS_PWR_REG [31:24] = 0x8d, MEMORY_CLUSTER1 CPU0..3
+ * and NONCPU OPTION [1:0] = 2. Only those fields of those six registers, only when they differ. For Starbite
+ * OS's heater, after the user confirmed the first use. 1 all as wanted (read back), 0 a read failed. */
+int sb_m3_pmu_defaults(void);
+/* PSCI AFFINITY_INFO of core w: 0 on, 1 off, 2 on pending, < 0 PSCI error (the DT lists PSCI 0.1 ids only:
+ * NOT_SUPPORTED (-1) is possible; then the worker slots are the evidence). */
+int64_t sb_smp_affinity(unsigned w);
 /* Start core w on fn (after the previous fn has stopped). 0, a PSCI error (< 0), or -100 when the
  * core did not check in within 1 s. */
 int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg);
@@ -477,6 +488,11 @@ int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier);
  * and Starbite's iOS port send it; g3d = 4), with the gate: SB_SP_DVFS, first = domain, at the
  * caller's tier (at least 3). 1 sent and answered. */
 int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier);
+/* Starbite OS (docs/STARBITE-OS.md 8.3): ACPM DVFS without the gate, but only for the exact vendor table
+ * levels of domain 2 (A55: 455..1794 MHz) and 3 (M3: 650..1794 MHz); MIF (0), INT (1), the GPU and any
+ * other level are refused here, whoever asks. 1 sent and answered (not proof it applied: read the PLL). */
+int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz);
+int sb_dvfs_level_listed(uint32_t domain, uint32_t khz);   /* pure: 1 if khz is a listed level of domain */
 
 /* ---- the Mali-G72 (mali.c, mali_desc.c) ------------------------------------------------------- */
 

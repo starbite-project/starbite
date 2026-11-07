@@ -31,7 +31,7 @@ limactl shell --workdir "$root" starbite gcc -O1 -g -DSB_HOST "-DSB_ASSETS=\"$ou
     -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I"$lib" -I"$eng" \
     -o "$out/engineer-host" "$root/starbite/host/host.c" \
     "$lib/str.c" "$lib/log.c" "$lib/sbui.c" "$lib/sbui_input.c" "$lib/sbui_page.c" "$lib/sbui_w.c" "$lib/sb7.c" \
-    "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" "$lib/assets.S" "$eng"/*.c -lm -lpthread
+    "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" "$lib/dvfs_levels.c" "$lib/assets.S" "$eng"/*.c -lm -lpthread
 
 # scene name, then the script (taps: tab bar at y 2824, tab t at x 90 + 180 t)
 scene() {

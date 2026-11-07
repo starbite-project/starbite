@@ -318,6 +318,10 @@ int dvfs_tier(unsigned domain, unsigned khz, const char **why)
 {
     const char *w = "a DVFS level outside the GPU's vendor table (or another domain: MIF froze the phone on iOS)";
     int t = TIER4;
+    if ((domain == 2 || domain == 3) && sb_dvfs_level_listed(domain, khz)) {
+        t = TIER3;
+        w = "a CPU cluster's clock through ACPM DVFS, a level of the vendor table (2.2: the CPU stress's full clocks)";
+    }
     if (domain == 4)
         for (unsigned i = 0; i < GPU_NLEVELS; ++i)
             if (gpu_levels_khz[i] == khz) {

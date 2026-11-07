@@ -13,7 +13,7 @@
 #include "catalog.h"
 #include "sd.h"
 
-#define ENG_VERSION "2.1"
+#define ENG_VERSION "2.2"
 #define ENG_BUILD "Starbite Lab (v2.1: tiers 1-4, stress, thermal, battery, GPU, utilities)"
 
 /* em.c's colour names on menu v7's palette */
@@ -253,9 +253,10 @@ unsigned lab_report_lines(char (*out)[96], unsigned max);
 #define KERN_FP 2U
 #define KERN_NEON 4U
 #define KERN_MEM 8U
+#define KERN_HEAT 16U                   /* 2.2: independent FMA streams, the most power per core */
 struct kern_cfg {
     unsigned mask;
-    uint64_t gold[4];                   /* reference results (the boot core computes them) */
+    uint64_t gold[4];                   /* reference results (the boot core computes them; [3] the heat kernel) */
     uint64_t *buf[SB_NCORES];           /* KERN_MEM: per-core buffer */
     uint64_t words;                     /* per buffer */
     volatile uint32_t inject;           /* unit test / self test: corrupt one result */
