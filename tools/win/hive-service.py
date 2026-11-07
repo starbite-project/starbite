@@ -5,6 +5,7 @@
   hive-service.py IN OUT disable NAME          Start = 4 (the service is skipped at boot; files stay)
   hive-service.py IN OUT remove NAME           delete the service key
   hive-service.py IN OUT hiberboot 0|1         Control\\Session Manager\\Power\\HiberbootEnabled (fast startup)
+  hive-service.py IN OUT usbfn VID:PID         Control USBFN key: one configuration, GenericUsbFn, bulk IN 0x81 + OUT 0x01
   hive-service.py IN check                     header sanity only (both sequence numbers equal = clean)
 
 IN is never modified; OUT is a new file. Defaults for add: Type 1 (kernel driver), Start 2 (auto: loaded by
@@ -155,6 +156,28 @@ def main(a):
         key = f'{cs}\\Control\\Session Manager\\Power'
         hivexsh(work, setvals(h, key, {'HiberbootEnabled': dword(int(arg))}) + 'commit\n')
         shown = key
+    elif cmd == 'usbfn':
+        # USB function controller configuration (docs/WIN11-USB.md 5.1): VID:PID, one configuration with
+        # Windows' GenericUsbFn on a vendor interface with bulk IN 0x81 + bulk OUT 0x01 (512 bytes).
+        vid, pid = (int(x, 16) for x in arg.split(':'))
+        base = f'{cs}\\Control\\USBFN'
+        if exists(h, base):
+            raise SystemExit(f'{base} exists already: edit by hand, nothing changed')
+        desc = bytes.fromhex('090400000 2FF000000 0705810200020 0 0705010200020 0'.replace(' ', ''))
+        multi = ('GenericUsbFn\0\0').encode('utf-16-le')
+        s = f'cd \\{cs}\\Control\nadd USBFN\n'
+        s += setvals(None, base, {'idVendor': dword(vid), 'idProduct': dword(pid),
+                                  'ManufacturerString': sz(1, 'Starbite'), 'ProductString': sz(1, 'Starbite Link'),
+                                  'CurrentConfiguration': sz(1, 'StarbiteLink'), 'IncludeDefaultCfg': dword(0)})
+        s += f'cd \\{base}\nadd Configurations\ncd \\{base}\\Configurations\nadd StarbiteLink\n'
+        s += setvals(None, base + '\\Configurations\\StarbiteLink', {'InterfaceList': (7, multi)})
+        s += f'cd \\{base}\nadd Interfaces\ncd \\{base}\\Interfaces\nadd GenericUsbFn\n'
+        s += setvals(None, base + '\\Interfaces\\GenericUsbFn',
+                     {'InterfaceGUID': sz(1, '{d274dae6-37b0-4c76-bf10-3a9681346dd1}'),
+                      'InterfaceDescriptor': (3, desc)})
+        s += 'commit\n'
+        hivexsh(work, s)
+        shown = base + '\\Interfaces\\GenericUsbFn'
     else:
         raise SystemExit(__doc__)
 
