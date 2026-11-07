@@ -19,6 +19,7 @@
 #include "max77705_muic.h"
 #include "msc.h"
 #include "fat.h"
+#include "ut.h"
 
 #define UT_VERSION "1 (UO1 + UO2)"
 
@@ -355,7 +356,7 @@ static void idle_check(void)
     sb_reboot(SB_INFORM_NORMAL);
 }
 
-static void service(void)
+void ut_service(void)
 {
     struct usbd_ev e;
     wdt_feed();
@@ -393,11 +394,11 @@ static void service(void)
 /* ---- UI ------------------------------------------------------------------------------------- */
 static const char *const tile_name[6] = { "USB", "Radio", "Files", "Measure", "Everyday", "Boot menu" };
 static const char *const tile_sub[6] = {
-    "Drives and shell", "Scans (v2)", "Card and UFS (UO4)", "Charger, ruler (v1)", "Clock, calculator", "Leave Utility",
+    "Drives and shell", "Scans (v2)", "Card and UFS (UO4)", "Charger, ruler, pixels", "Clock, stopwatch, timer", "Leave Utility",
 };
 static int focus;
 
-static void status_bar(void)
+void ut_status_bar(void)
 {
     ui_fill(0, 0, UI_W, UI_STATUS_H, C_BG);
     struct ub u;
@@ -447,7 +448,7 @@ static void draw_home(void)
     }
     ui_text(F_SMALL, 70, UI_H - 120, "Volume: move   Power: open   tap a tile", C_L3);
     ui_dirty_all();
-    status_bar();
+    ut_status_bar();
 }
 
 static void kv(struct page *p, const char *k, const char *v, uint32_t c) { page_kv(p, k, v, c); }
@@ -525,13 +526,13 @@ static void page_screen(const char *title, int tile)
                 info_fill(&p, tile);
             page_end(&p);
             page_redraw(&p);
-            status_bar();
+            ut_status_bar();
             ui_present();
             next = sb_ms() + 500;
         }
         struct ui_ev e;
         ui_poll(&e, 0);
-        service();
+        ut_service();
         if (e.type == EV_BACK || e.type == EV_SWIPE_R || e.type == EV_HOME ||
             (e.type == EV_TAP && ui_header_back_hit(e.x, e.y)))
             break;
@@ -555,6 +556,14 @@ static void open_tile(int i)
             act(1);
         return;
     }
+    if (i == 3) {
+        ut_measure();
+        return;
+    }
+    if (i == 4) {
+        ut_everyday();
+        return;
+    }
     page_screen(tile_name[i], i);
 }
 
@@ -569,7 +578,7 @@ void sb_main(void)
 {
     if (!ui_init())
         sb_crash_show(ui_init_why(), 0);
-    ui_tick = service;
+    ui_tick = ut_service;
     sb_log("Starbite Utility OS " UT_VERSION);
     wdt_feed();
     if (!sb_touch_start())
@@ -590,7 +599,7 @@ void sb_main(void)
     for (;;) {
         struct ui_ev e;
         ui_poll(&e, 0);
-        service();
+        ut_service();
         int open = -1;
         if (e.type == EV_UP || e.type == EV_DOWN) {
             focus = (focus + (e.type == EV_UP ? 5 : 1)) % 6;
@@ -612,7 +621,7 @@ void sb_main(void)
             draw_home();
         }
         if (sb_ms() >= next) {
-            status_bar();
+            ut_status_bar();
             next = sb_ms() + 1000;
         }
         ui_present();

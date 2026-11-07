@@ -14,8 +14,11 @@ milestones **UO1** (USB device mode with a serial shell) and **UO2** (the phone 
 | USB page | Connection state and speed, each drive with its traffic, SCSI command and error counters, the shell state |
 | Leaving | The **Boot menu** tile (asks first), or the shell's `menu`. With **no computer ever connected and no touch or key for 10 minutes** it returns to the menu by itself (a countdown shows in the status bar for the last minute) |
 
-Radio, Files, Measure and Everyday show what comes next (master plan 4.4): file manager, hashing and imaging
-(UO4), charger tester and screen tools, clock and calculator, then the radio tools once bare-metal drivers exist.
+| Measure | **USB charger tester** (live: input, VBUS, charge state, battery %, voltage, current in/out, power, the input and charge current limits; read only, Lab's MAX77705 readers), **Ruler** (cm on the left, inches on the right, at the panel's 570 ppi), **Colour fields** (white, black, red, green, blue, grey full screen for dead pixels; the label fades so nothing covers a pixel) |
+| Everyday | **Clock** (the phone's RTC, UTC), **Stopwatch** (Power start/stop, tap to reset when stopped), **Timer** (tap +1 min, Power start/pause; flashes when done) |
+
+Radio and Files show what comes next (master plan 4.4): file manager, hashing and imaging (UO4), then the
+radio tools once bare-metal drivers exist; a calculator and the flashlight are still to come.
 
 **First connection to a Mac**: the USB identity is new (`1209:0001`, "Starbite Utility (Galaxy S9)"), so macOS
 may hold it until you allow the accessory (System Settings, Privacy & Security, "Allow accessories to
@@ -41,6 +44,8 @@ tile, or wait for the 10-minute return).
 | `usb_desc.c`, `usb_desc.h` | The loader's descriptors with interface 2 as mass storage (class 08/06/50) on the fastboot endpoints 0x83/0x03, so the DWC3 driver configures the same five endpoints; Get Max LUN and the bulk-only reset; VID:PID 1209:0001 |
 | `hw.h`, `fastboot.h`, `tb.c` | The few loader helpers those drivers use, on libsb |
 | `build.sh` | Lab's build (same flags and checks: relocations, pre-relocation code, host paths), output `starbite/out/utility.img`; on a native aarch64 host it first runs the host test |
+| `tools.c`, `ut.h` | Measure and Everyday |
+| `starbite/host/ut-preview.sh` | Host preview: the real Utility OS and sbui code on `host.c`'s fake hardware (plus `ut-host-stubs.c` for USB), scripted keys, PNGs to `starbite/utility/preview/` (home, USB, Radio, leave dialog, Measure, ruler, colour fields, Everyday, the idle countdown); every frame is checked fully presented |
 | `starbite/tools/ut-host-test.c` | Host test: a fake controller plays the host through 13 SCSI commands (write and read back across chunks, padding and residue, sense, the read-only refusal, out of range, a bulk-only reset); the FAT32 image it formats passes `fsck.fat -n` |
 
 DMA layout in the window (`USB_DMA_BASE` 0xa7000000): the driver's event buffer, TRBs and ep0 in the first
