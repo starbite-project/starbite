@@ -54,7 +54,7 @@
 typedef struct {
   UINT64    Sctlr, Tcr, Ttbr0, Mair, Vbar, Cpacr, Sp, Fn;   // 0x00: set by the A55
   UINT64    El, Mpidr;                                     // 0x40: by the stub
-  UINT32    Done, Pad;                                     // 0x50: by the stub
+  UINT32    Done, Stage;                                   // 0x50: by the stub (Stage: 1 MMU off, 2 MMU on, 3 test done)
   UINT64    Esr, Elr, Far;                                 // 0x58: by its vectors (Done 3)
   //
   // By M3RunTest, on the M3:
@@ -69,6 +69,7 @@ STATIC_ASSERT (OFFSET_OF (M3_RUN_CTX, Fn) == 0x38, "M3RunStub.S CTX_FN");
 STATIC_ASSERT (OFFSET_OF (M3_RUN_CTX, El) == 0x40, "M3RunStub.S CTX_EL");
 STATIC_ASSERT (OFFSET_OF (M3_RUN_CTX, Mpidr) == 0x48, "M3RunStub.S CTX_MPIDR");
 STATIC_ASSERT (OFFSET_OF (M3_RUN_CTX, Done) == 0x50, "M3RunStub.S CTX_DONE");
+STATIC_ASSERT (OFFSET_OF (M3_RUN_CTX, Stage) == 0x54, "M3RunStub.S CTX_STAGE");
 STATIC_ASSERT (OFFSET_OF (M3_RUN_CTX, Far) == 0x68, "M3RunStub.S CTX_FAR");
 
 STATIC CONST struct {
@@ -156,17 +157,23 @@ M3RunTest (
 STATIC
 VOID
 RunPmuDefaults (
-  VOID
+  IN BOOLEAN  Log
   )
 {
   volatile UINT32  *Pmu = (volatile UINT32 *)PMU_BASE;
+  UINT32           Before;
+  UINT32           After;
   UINTN            i;
 
   for (i = 0; i < ARRAY_SIZE (mRunPmu); i++) {
-    Pmu[mRunPmu[i].Offset / 4] = (Pmu[mRunPmu[i].Offset / 4] & ~mRunPmu[i].Mask) | mRunPmu[i].Value;
+    Before                    = Pmu[mRunPmu[i].Offset / 4];
+    Pmu[mRunPmu[i].Offset / 4] = (Before & ~mRunPmu[i].Mask) | mRunPmu[i].Value;
+    __asm__ __volatile__ ("dsb sy" ::: "memory");
+    After = Pmu[mRunPmu[i].Offset / 4];
+    if (Log || ((After & mRunPmu[i].Mask) != mRunPmu[i].Value)) {
+      SbLog ("=M3 pmu %04x %08x -> %08x%a", mRunPmu[i].Offset, Before, After, ((After & mRunPmu[i].Mask) == mRunPmu[i].Value) ? "" : " NOT SET");
+    }
   }
-
-  __asm__ __volatile__ ("dsb sy" ::: "memory");
 }
 
 VOID
@@ -188,7 +195,7 @@ M3Run (
   EFI_TPL               OldTpl;
 
   SbLog (
-    "=M3 run v1 (B3a): A55 ctr=%lx isar0=%lx isar1=%lx pfr0=%lx mmfr0=%lx mmfr1=%lx sctlr=%lx",
+    "=M3 run v2 (B3a): A55 ctr=%lx isar0=%lx isar1=%lx pfr0=%lx mmfr0=%lx mmfr1=%lx sctlr=%lx",
     MRS (ctr_el0),
     MRS (id_aa64isar0_el1),
     MRS (id_aa64isar1_el1),
@@ -236,15 +243,24 @@ M3Run (
     C->Sp      = (Stack + STACK_PAGES * EFI_PAGE_SIZE) & ~(UINT64)15;
     C->Fn      = (UINT64)(UINTN)M3RunTest;
 
+    RunPmuDefaults ((BOOLEAN)(Core == 1));      // logged before TPL_HIGH (SbLog uses boot services)
     OldTpl = gBS->RaiseTPL (TPL_HIGH_LEVEL);
     WriteBackDataCache ();
-    InvalidateInstructionCacheRange ((VOID *)(UINTN)StubPage, EFI_PAGE_SIZE);
+    //
+    // What the M3 reads with its MMU off (the stub page with its literal, the context) to the
+    // point of coherency by address, as B1/B2 did: set/way and PoU cleaning are not enough (B3a v1
+    // never got its first store in). The pattern page is written after this and left dirty on
+    // purpose (the coherency test).
+    //
+    RunCivac ((UINTN)StubPage, EFI_PAGE_SIZE);
+    RunCivac ((UINTN)CtxPage, EFI_PAGE_SIZE);
+    RunCivac ((UINTN)CtxPage + 2 * EFI_PAGE_SIZE, EFI_PAGE_SIZE);
+    __asm__ __volatile__ ("ic iallu\n dsb sy\n isb" ::: "memory");
     for (Expect = 0, i = 0; i < PATTERN_WORDS; i++) {
       C->Pattern[i] = 0x5A5A000000000000ull | ((UINT64)Core << 32) | (i * 0x9E3779B1u);   // dirty in the A55 only
       Expect       += C->Pattern[i];
     }
 
-    RunPmuDefaults ();
     Rc = RunSmc (PSCI_CPU_ON, 0x100 + Core, StubPage + M3_RUN_STUB_ENTRY, 0);
     for (Ms = 0; Ms < 1000; Ms++) {
       RunCivac ((UINTN)&C->Done, sizeof (C->Done));
@@ -256,6 +272,7 @@ M3Run (
     }
 
     gBS->RestoreTPL (OldTpl);
+    RunCivac ((UINTN)C, 0x80);                  // El, Mpidr, Done, Stage, Esr.. as the M3 left them
 
     for (BackOk = 1, i = 0; i < PATTERN_WORDS; i++) {
       if (C->Back[i] != ~C->Pattern[i]) {
@@ -265,11 +282,12 @@ M3Run (
     }
 
     SbLog (
-      "=M3 run core %d target %x: CPU_ON rc=%lx, done=%d after %d ms, el=%ld, mpidr=%lx",
+      "=M3 run core %d target %x: CPU_ON rc=%lx, done=%d stage=%d after %d ms, el=%ld, mpidr=%lx",
       Core,
       0x100 + Core,
       Rc,
       C->Done,
+      C->Stage,
       Ms,
       C->El,
       C->Mpidr

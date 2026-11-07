@@ -53,7 +53,7 @@ typedef struct {
   UINT64    SpEl0, SpEl1, SpSel, Daif, Nzcv, Fpcr, Fpsr;            // 0x060
   UINT64    Sctlr, Tcr, Ttbr0, Ttbr1, Mair, Amair, Vbar, Cpacr;     // 0x098
   UINT64    ContextId, Tpidr0, Tpidr1, TpidrRo, Cntkctl;            // 0x0d8
-  UINT32    State, Pad;                                             // 0x100
+  UINT32    State, Stage;                                           // 0x100 (Stage: 1 MMU off, 2 MMU on, 3 claimed)
   UINT64    El, Mpidr, Timeout, Rc, Esr, Elr, Far;                  // 0x108
   UINT64    Q[64];                                                  // 0x140 q0..q31
 } M3_BOOT_CTX;
@@ -62,6 +62,7 @@ STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, SpEl0) == 0x060, "CTX_SP_EL0");
 STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, Sctlr) == 0x098, "CTX_SCTLR");
 STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, Cntkctl) == 0x0f8, "CTX_CNTKCTL");
 STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, State) == 0x100, "CTX_STATE");
+STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, Stage) == 0x104, "CTX_STAGE");
 STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, Timeout) == 0x118, "CTX_TIMEOUT");
 STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, Rc) == 0x120, "CTX_RC");
 STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, Far) == 0x138, "CTX_FAR");
@@ -370,7 +371,10 @@ OnExitBootServices (
   volatile UINT32  *Pmu = (volatile UINT32 *)0x14060000UL;
   UINT64           Ret;
   UINT64           Mpidr;
+  UINT32           Before;
+  UINT32           After;
   UINTN            i;
+  UINTN            A;
 
   if (mFired) {
     return;
@@ -384,13 +388,26 @@ OnExitBootServices (
 
   SbLog ("=M3 boot v1: handing the boot CPU to M3 core 1 at ExitBootServices");
   for (i = 0; i < ARRAY_SIZE (mBootPmu); i++) {
-    Pmu[mBootPmu[i].Offset / 4] = (Pmu[mBootPmu[i].Offset / 4] & ~mBootPmu[i].Mask) | mBootPmu[i].Value;
+    Before                      = Pmu[mBootPmu[i].Offset / 4];
+    Pmu[mBootPmu[i].Offset / 4] = (Before & ~mBootPmu[i].Mask) | mBootPmu[i].Value;
+    __asm__ __volatile__ ("dsb sy" ::: "memory");
+    After = Pmu[mBootPmu[i].Offset / 4];
+    SbLog ("=M3 pmu %04x %08x -> %08x%a", mBootPmu[i].Offset, Before, After, ((After & mBootPmu[i].Mask) == mBootPmu[i].Value) ? "" : " NOT SET");
   }
 
   ZeroMem (mCtx, sizeof (*mCtx));
   mCtx->Timeout = TIMEOUT_TICKS;
   WriteBackDataCache ();
-  InvalidateInstructionCacheRange ((VOID *)(UINTN)mStub, EFI_PAGE_SIZE);
+  //
+  // The stub page (code + literal) to the point of coherency by address: the M3 fetches it with
+  // its MMU off (set/way and PoU cleaning were not enough in B3a v1). M3BootHandoff cleans the
+  // context the same way after filling it.
+  //
+  for (A = (UINTN)mStub; A < (UINTN)mStub + EFI_PAGE_SIZE; A += 64) {
+    __asm__ __volatile__ ("dc civac, %0" : : "r" (A) : "memory");
+  }
+
+  __asm__ __volatile__ ("dsb sy\n ic iallu\n dsb sy\n isb" ::: "memory");
 
   Ret = M3BootHandoff (mCtx, BOOT_TARGET, mStub + M3_BOOT_STUB_ENTRY);
   if (Ret == 1) {
@@ -403,10 +420,16 @@ OnExitBootServices (
     return;
   }
 
+  for (A = (UINTN)mCtx; A < (UINTN)mCtx + 0x140; A += 64) {
+    __asm__ __volatile__ ("dc civac, %0" : : "r" (A) : "memory");    // what the M3 wrote MMU off
+  }
+
+  __asm__ __volatile__ ("dsb sy" ::: "memory");
   SbLog (
-    "=M3 boot: hand-off not taken (CPU_ON rc=%lx, state=%d, el=%ld, mpidr=%lx, esr=%lx elr=%lx far=%lx); staying on A55 core 0, MADT untouched",
+    "=M3 boot: hand-off not taken (CPU_ON rc=%lx, state=%d, stage=%d, el=%ld, mpidr=%lx, esr=%lx elr=%lx far=%lx); staying on A55 core 0, MADT untouched",
     mCtx->Rc,
     mCtx->State,
+    mCtx->Stage,
     mCtx->El,
     mCtx->Mpidr,
     mCtx->Esr,

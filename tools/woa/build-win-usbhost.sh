@@ -131,7 +131,7 @@ flags_ok() {   # flags_ok FFS
     [ "$has" = "$M3" ] || { echo "$1: M3 probe present=$has, wanted $M3" >&2; exit 1; }
     if grep -aq "=M3 park v2" "$1"; then has=1; else has=0; fi
     [ "$has" = "$M3PARK" ] || { echo "$1: M3 park present=$has, wanted $M3PARK" >&2; exit 1; }
-    if grep -aq "=M3 run v1" "$1"; then has=1; else has=0; fi
+    if grep -aq "=M3 run v2" "$1"; then has=1; else has=0; fi
     [ "$has" = "$M3RUN" ] || { echo "$1: M3 run present=$has, wanted $M3RUN" >&2; exit 1; }
     if grep -aq "=M3 boot v1 armed" "$1"; then has=1; else has=0; fi
     [ "$has" = "$M3BOOT" ] || { echo "$1: M3 boot present=$has, wanted $M3BOOT" >&2; exit 1; }

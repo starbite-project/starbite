@@ -37,6 +37,7 @@
         .equ    CTX_TPIDRRO, 0x0f0
         .equ    CTX_CNTKCTL, 0x0f8
         .equ    CTX_STATE,   0x100
+        .equ    CTX_STAGE,   0x104
         .equ    CTX_EL,      0x108
         .equ    CTX_MPIDR,   0x110
         .equ    CTX_ESR,     0x128
@@ -56,6 +57,9 @@ vectors:
 m3boot_stub:
         adr     x1, lit
         ldr     x19, [x1]               // context
+        mov     w0, #1                  // Stage 1: running, MMU off (before any context load)
+        str     w0, [x19, #CTX_STAGE]
+        dsb     sy
         mrs     x0, CurrentEL
         lsr     x0, x0, #2
         str     x0, [x19, #CTX_EL]
@@ -97,6 +101,8 @@ m3boot_stub:
         ldr     x0, [x19, #CTX_SCTLR]
         msr     sctlr_el1, x0
         isb
+        mov     w0, #2                  // Stage 2: MMU and caches on
+        str     w0, [x19, #CTX_STAGE]
 
         add     x2, x19, #CTX_STATE     // claim: 0 -> 1
 1:      ldaxr   w0, [x2]
@@ -105,6 +111,8 @@ m3boot_stub:
         stlxr   w3, w1, [x2]
         cbnz    w3, 1b
         dmb     ish
+        mov     w0, #3                  // Stage 3: claimed
+        str     w0, [x19, #CTX_STAGE]
 
         ldr     x0, [x19, #CTX_VBAR]    // claimed: the rest of the boot CPU's state
         msr     vbar_el1, x0

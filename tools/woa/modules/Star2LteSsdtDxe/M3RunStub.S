@@ -27,6 +27,7 @@
         .equ    CTX_EL,    0x40
         .equ    CTX_MPIDR, 0x48
         .equ    CTX_DONE,  0x50
+        .equ    CTX_STAGE, 0x54
         .equ    CTX_ESR,   0x58
         .equ    CTX_ELR,   0x60
         .equ    CTX_FAR,   0x68
@@ -43,6 +44,9 @@ vectors:
 m3run_stub:
         adr     x1, lit
         ldr     x19, [x1]               // context
+        mov     w0, #1                  // Stage 1: running, MMU off (before any context load)
+        str     w0, [x19, #CTX_STAGE]
+        dsb     sy
         mrs     x0, CurrentEL
         lsr     x0, x0, #2
         str     x0, [x19, #CTX_EL]
@@ -70,11 +74,15 @@ m3run_stub:
         ldr     x0, [x19, #CTX_SCTLR]
         msr     sctlr_el1, x0
         isb
+        mov     w0, #2                  // Stage 2: MMU and caches on
+        str     w0, [x19, #CTX_STAGE]
         ldr     x0, [x19, #CTX_SP]
         mov     sp, x0
         mov     x0, x19
         ldr     x1, [x19, #CTX_FN]
         blr     x1
+        mov     w0, #3                  // Stage 3: the test returned
+        str     w0, [x19, #CTX_STAGE]
         mov     w0, #1
         b       3f
 

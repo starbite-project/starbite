@@ -195,6 +195,21 @@ Image `starbite-uefi-m3run-gpu.bin`, sha256 efbdeaa6… (`SOLO=m3run M3RUN=1 EXT
 SUFFIX=-gpu`): src38 + Star2LteSsdtDxe (B3a only) + `SBGPU`. Checked: the test function compiled to
 a leaf with no stack, calls or globals; stub 0x8E0 bytes (vectors at 0, entry at 0x800).
 
+**v1 result (2026-11-07, efbdeaa6): failed safely.** Windows booted normally. Core 1: `CPU_ON rc=0,
+done=0 after 1000 ms, el=0, mpidr=0`, so the stub never got its first store in. The PMU writes did
+happen (silently; the binary has the loop right before the SMC). The difference from B1/B2, which
+worked: they cleaned the stub page *by address to the point of coherency* (DC CIVAC). B3a cleaned by
+set/way (WriteBackDataCache) and only to the point of unification (InvalidateInstructionCacheRange).
+The M3, fetching with its MMU off, most likely saw a stale page. The A55's TCR (0x280803518: 4K, 40-bit
+IPS, no HA/HD/TBI), MAIR and SCTLR (v8.1/v8.2 bits RES1 on v8.0) are fine for an ARMv8.0 core.
+**v2** (`starbite-uefi-m3run2-gpu.bin`, 3d6c0158…):
+- DC CIVAC by address over the stub page and the context (the coherency pattern stays dirty on
+  purpose);
+- the PMU writes logged as in B1;
+- a **Stage** breadcrumb: 1 written first thing with the MMU off, 2 after MMU-on, 3 after the test.
+
+B3 got the same fixes (image 702c1f22…, Stage 3 = claimed).
+
 ### 5.2 B3: Windows boots on M3 core 1 (4 CPUs: M3 1 + A55 1..3)
 
 At ExitBootServices (our own event, registered by Star2LteSsdtDxe), on A55 core 0:
@@ -215,7 +230,7 @@ At ExitBootServices (our own event, registered by Star2LteSsdtDxe), on A55 core 
    way, one line in zone 0.
 
 Built: `M3Boot.c` + `M3BootStub.S` (`STARBITE_M3_BOOT=1`); image `starbite-uefi-m3boot-gpu.bin`,
-sha256 91109c72… (`SOLO=m3boot M3BOOT=1 EXTRA_AML=<StarbiteGpu.aml> SUFFIX=-gpu`). The live MADT is
+sha256 702c1f22… (with the B3a v2 fixes) (`SOLO=m3boot M3BOOT=1 EXTRA_AML=<StarbiteGpu.aml> SUFFIX=-gpu`). The live MADT is
 logged at ExitBootServices (`=M3 boot MADT gicc uid=… if=… flags=… mpidr=… park v… eff=…`): the
 first view of what P leaves. **Held until B3a passes** (its GIC interface bits and coherency
 results gate this image).
