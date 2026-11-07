@@ -52,10 +52,10 @@ static int iabs(int v)
 int heat_core_state(int64_t psci, unsigned slot, int start_fail)
 {
     int32_t r = (int32_t)psci;                  /* w0 */
-    if (start_fail)
-        return 0;                               /* never checked in: it may be on and hung */
     if (slot == 1U /* SB_WK_RUNNING */)
         return 0;                               /* still in the heat kernel */
+    if (start_fail)
+        return 2;                               /* never checked in: no load of ours there; logged, no restart */
     if (r == 1)
         return 1;                               /* PSCI: off */
     if (r == 0 || r == 2)

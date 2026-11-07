@@ -27,6 +27,54 @@ static int fails, checks;
 /* libsb bits the pure files use */
 void sb_log(const char *s) { (void)s; }
 void sb_logx(const char *a, uint64_t v) { (void)a; (void)v; }
+/* heatk.c's worker side (not run here) */
+struct sb_wslot *sb_smp_own_slot(unsigned w) { (void)w; return 0; }
+int sb_worker_stop(void) { return 1; }
+void sb_worker_publish(struct sb_wslot *s) { (void)s; }
+uint64_t sb_ticks(void) { return 0; }
+
+/* ---- the heat batch: inside its buffer, deterministic reference, no NaN ---- */
+#include <math.h>
+static void t_heatk(void)
+{
+    static struct heatk_cfg c;
+    uint64_t guard = 64;
+    uint64_t *mem = malloc((HEATK_WORDS + 2 * guard) * 8);
+    for (uint64_t i = 0; i < HEATK_WORDS + 2 * guard; ++i)
+        mem[i] = 0x5a5a5a5a5a5a5a5aULL ^ i;
+    c.buf[1] = mem + guard;
+    c.gold = heatk_batch();
+    CHECK(heatk_batch() == c.gold, "the reference block is deterministic");
+    unsigned bad = 0;
+    for (uint64_t it = 0; it < 400; ++it)
+        bad += heatk_mixed(&c, 1, it);
+    CHECK(bad == 0, "400 batches, the reference block matched every time (%u)", bad);
+    int intact = 1;
+    for (uint64_t i = 0; i < guard; ++i)
+        intact &= mem[i] == (0x5a5a5a5a5a5a5a5aULL ^ i) &&
+                  mem[guard + HEATK_WORDS + i] == (0x5a5a5a5a5a5a5a5aULL ^ (guard + HEATK_WORDS + i));
+    CHECK(intact, "the batches stay inside the core's 4 MiB buffer");
+    uint64_t changed = 0;
+    for (uint64_t i = 0; i < HEATK_WORDS; i += 4096)
+        changed += c.buf[1][i] != (0x5a5a5a5a5a5a5a5aULL ^ (guard + i));
+    CHECK(changed > HEATK_WORDS / 4096 / 2, "the data changes from batch to batch (%llu of %u sampled words)",
+          (unsigned long long)changed, HEATK_WORDS / 4096);
+    /* never periodic: after 4 full rounds of the far batches (each far slot visited 4 more times, where the
+     * plain xorshift steps had come back to the same data) the words differ again */
+    static uint64_t snap[HEATK_WORDS / 4096];
+    for (uint64_t i = 0; i < HEATK_WORDS; i += 4096)
+        snap[i / 4096] = c.buf[1][i];
+    for (uint64_t it = 400; it < 400 + 16 * 7 * 4; ++it)
+        bad += heatk_mixed(&c, 1, it);
+    uint64_t again = 0, sampled = 0;
+    for (uint64_t i = 0; i < 256U * 1024U / 8U + 7U * 512U * 1024U / 8U; i += 4096, ++sampled)
+        again += c.buf[1][i] == snap[i / 4096];
+    CHECK(again == 0, "the data never comes back (%llu of %llu sampled words repeated)", (unsigned long long)again,
+          (unsigned long long)sampled);
+    c.gold ^= 1;
+    CHECK(heatk_mixed(&c, 1, 16) == 1, "a wrong reference is reported");
+    free(mem);
+}
 
 /* ---- timers ---------------------------------------------------------------------------------- */
 static void t_timers(void)
@@ -171,9 +219,12 @@ static void t_dvfs(void)
     CHECK(!sb_dvfs_level_listed(3, 2704000) && !sb_dvfs_level_listed(3, 1924000), "M3 above the all-core 1794 never");
     CHECK(!sb_dvfs_level_listed(3, 455000), "455 MHz is not an M3 level");
     CHECK(!sb_dvfs_level_listed(2, 1794001), "only exact levels");
+    CHECK(sb_dvfs_level_listed(4, 572000) && sb_dvfs_level_listed(4, 260000), "GPU 572 / 260 MHz listed");
+    CHECK(!sb_dvfs_level_listed(4, 650000) && !sb_dvfs_level_listed(4, 1794000), "GPU above 572 MHz never");
     for (unsigned d = 0; d < 16; ++d)
-        if (d != 2 && d != 3)
-            CHECK(!sb_dvfs_level_listed(d, 1794000) && !sb_dvfs_level_listed(d, 455000), "domain %u refused", d);
+        if (d != 2 && d != 3 && d != 4)
+            CHECK(!sb_dvfs_level_listed(d, 1794000) && !sb_dvfs_level_listed(d, 455000) &&
+                  !sb_dvfs_level_listed(d, 572000), "domain %u refused (MIF 0, INT 1 among them)", d);
 }
 
 /* ---- heater controller ------------------------------------------------------------------------- */
@@ -382,7 +433,8 @@ static void t_heater(void)
     CHECK(heat_core_state(0, 0, 0) == 1, "never started, PSCI on (a firmware quirk): off");
     CHECK(heat_core_state(0, 4, 0) == 2, "parked while PSCI says on: logged, no restart");
     CHECK(heat_core_state(2, 2, 0) == 2, "CPU_OFF pending: logged, no restart");
-    CHECK(heat_core_state(0xffffffffLL, 0, 1) == 0, "a start that timed out: unknown, a restart");
+    CHECK(heat_core_state(0xffffffffLL, 0, 1) == 2, "a core that never checked in: logged, no restart");
+    CHECK(heat_core_state(0xffffffffLL, 1, 1) == 0, "running the heat kernel: a restart after 1.5 s");
     CHECK(heat_core_state(0x100000001LL, 2, 0) == 1, "only w0 counts");
 
     /* the minutes are capped */
@@ -455,6 +507,7 @@ int main(int argc, char **argv)
         return bad ? 1 : 0;
     }
     t_timers();
+    t_heatk();
     t_dvfs();
     t_heater();
     t_battery();

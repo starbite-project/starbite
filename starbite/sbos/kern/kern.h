@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.2"
+#define SBOS_VERSION "0.2.1"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -109,19 +109,36 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
 void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in);
 int heat_max_cores(int level);      /* Low 3, Medium 5, High 7 */
 /* After a stop: is worker core w's load gone? psci = AFFINITY_INFO's raw x0 (only w0 counts), slot = the
- * worker's SB_WK_* state, start_fail = its start timed out. 1 off, 2 the load left but PSCI says the core is
- * still on (parked in wfe or CPU_OFF pending: logged, harmless), 0 still loading or unknown (a restart after
+ * worker's SB_WK_* state, start_fail = CPU_ON said yes but the core never checked in. 1 off, 2 no load of ours
+ * but PSCI says on / the core never checked in (logged, harmless), 0 still in the heat kernel (a restart after
  * 1.5 s). */
 int heat_core_state(int64_t psci, unsigned slot, int start_fail);
 
 struct heatk_cfg {
     volatile uint64_t heartbeat;    /* counter ticks of the controller's last valid evaluation */
-    uint64_t max_age;               /* ticks: older heartbeat stops a worker (1 s) */
-    uint64_t gold;                  /* the heat kernel's reference result */
+    uint64_t max_age;               /* ticks: older heartbeat stops a worker (2 s) */
+    uint64_t gold;                  /* the fixed reference block's result */
     volatile uint32_t run[8];       /* per worker: 1 keep going */
-    uint64_t pad[2];
+    uint64_t pad[1];
+    /* second line: written before any launch (the image is cleaned to DRAM at every launch) */
+    uint64_t *buf[8];               /* per core (0 = cpu0): HEATK_WORDS words, write-back RAM */
 };
-uint64_t heatk_batch(void);         /* one batch (the boot core computes the reference with it) */
+#define HEATK_WORDS (512U * 1024U)  /* 4 MiB per core: larger than the L2s and the shared L3 */
+uint64_t heatk_batch(void);         /* the fixed reference block (the boot core computes the gold with it) */
+/* One streaming batch on core w's buffer: 512 KiB read, mixed into eight FMA streams and written back changed
+ * (the data never repeats); every 16th call also runs the reference block: 1 if it did not match. */
+unsigned heatk_mixed(struct heatk_cfg *c, unsigned w, uint64_t it);
+int heater_cpu0_active(void);
+/* the GPU's share on High (gpuheat.c), off until Settings allows it */
+extern int gpu_heat_allowed;
+int gpuheat_start(void);
+void gpuheat_tick(void);
+void gpuheat_stop(void);
+void gpuheat_fail_stop(const char *why);
+int gpuheat_on(void);
+unsigned gpuheat_mhz(void);
+void gpuheat_new_session(void);
+void heater_cpu0_run(uint64_t until_ms);  /* cpu0's share between the kernel's events */
 
 /* ---- battery model (battery.c, pure part) ---------------------------------------------------------- */
 enum { PS_ACTIVE = 0, PS_SCREEN_OFF, PS_HEAT, PS_N };
@@ -167,6 +184,7 @@ struct kstate {
     int power_state;                /* PS_* for the battery model */
     int heat_confirmed;             /* the first-run heater confirmation this boot */
     int any_input;                  /* a touch or key since the start (the 0.1 dead-man return) */
+    uint32_t slow_turn_ms;          /* the slowest loop turn so far */
 };
 extern struct kstate K;
 
@@ -272,7 +290,7 @@ void hw_screen(int on);             /* v0.1: nothing (the UI draws black); v0.2:
 void hw_app_map(uintptr_t slot, int on);
 void hw_tls_clear(void);           /* TPIDR_EL0 / TPIDRRO_EL0 zero for a new handler frame */
 void hw_code_sync(uintptr_t a, uint64_t n);
-int hw_heat_start(unsigned w, void *cfg);
+int64_t hw_heat_launch(unsigned w, void *cfg);    /* sb_smp_launch: never waits for the core */
 void hw_heat_stop_all(void);
 unsigned hw_heat_running(void);
 int64_t hw_core_psci(unsigned w);   /* PSCI AFFINITY_INFO's raw answer for worker core w */

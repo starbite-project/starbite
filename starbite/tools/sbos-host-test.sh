@@ -10,7 +10,7 @@ mkdir -p "$out"
 k="$root/starbite/sbos/kern"
 gcc -O1 -g -Wall -Wextra -Werror -DSB_HOST -DSBOS_KERNEL -fsanitize=address,undefined -fno-sanitize-recover=all \
     -I"$root/starbite/libsb" -I"$k" -I"$root/starbite/sbos/sdk" -o "$out/sbos-host-test" \
-    "$root/starbite/tools/sbos-host-test.c" "$k/timer.c" "$k/appfmt.c" "$k/state.c" "$k/batmodel.c" "$k/heatctl.c" \
+    "$root/starbite/tools/sbos-host-test.c" "$k/timer.c" "$k/appfmt.c" "$k/state.c" "$k/batmodel.c" "$k/heatctl.c" "$k/heatk.c" \
     "$root/starbite/libsb/dvfs_levels.c"
 cp "$out/sbos-host-test" "$out/sbos-apptest"
 apps=${*:-}

@@ -32,6 +32,8 @@ int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz)
     printf("host: acpm dvfs domain %u to %u kHz (listed)\n", domain, khz);
     if (domain == 2)                                     /* the fake A55 PLL: 26 MHz * M / 2 */
         *(volatile uint32_t *)0x1d000140UL = 0xa0000010U | (khz / 13000U) << 16 | 2U << 8;
+    if (domain == 4)                                     /* the fake G3D PLL: 26 MHz * M / (4 << 2) */
+        *(volatile uint32_t *)0x17400140UL = 0xa0000010U | (khz * 16U / 26000U) << 16 | 4U << 8 | 2U;
     return 1;
 }
 
@@ -74,8 +76,8 @@ void hw_screen(int on) { panel_screen(on); }
 void hw_app_map(uintptr_t slot, int on) { (void)slot; (void)on; }
 void hw_tls_clear(void) {}
 void hw_code_sync(uintptr_t a, uint64_t n) { (void)a; (void)n; }
-int hw_heat_start(unsigned w, void *cfg) { return (int)sb_smp_start(w, heatk_worker, cfg); }
-void hw_heat_stop_all(void) { (void)sb_smp_stop(500); }
+int64_t hw_heat_launch(unsigned w, void *cfg) { return sb_smp_launch(w, heatk_worker, cfg); }
+void hw_heat_stop_all(void) { (void)sb_smp_stop(0); }
 unsigned hw_heat_running(void) { return sb_smp_running(); }
 int64_t hw_core_psci(unsigned w) { (void)w; return 0xffffffffLL; }   /* as the phone: not supported, in w0 */
 

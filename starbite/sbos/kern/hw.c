@@ -277,14 +277,16 @@ uint64_t hw_app_resume(struct aframe *f)
 }
 
 /* ---- heater workers --------------------------------------------------------------------------- */
-int hw_heat_start(unsigned w, void *cfg)
+int64_t hw_heat_launch(unsigned w, void *cfg)
 {
-    return (int)sb_smp_start(w, heatk_worker, cfg);
+    return sb_smp_launch(w, heatk_worker, cfg);
 }
 
+/* signal every worker to leave and return at once: the heater's stop check confirms on its later ticks that each
+ * core left (within 1.5 s), so the loop never waits here */
 void hw_heat_stop_all(void)
 {
-    (void)sb_smp_stop(500);
+    (void)sb_smp_stop(0);
 }
 
 unsigned hw_heat_running(void)

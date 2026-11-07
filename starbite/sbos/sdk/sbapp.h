@@ -138,7 +138,7 @@ struct sbos_sysinfo {
 };
 
 /* settings (SYS_SETTING_GET / SET): until a restart in 0.2 */
-enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S = 4 };
+enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S = 4, SET_GPU_HEAT = 5 };
 
 /* power_request what */
 enum { PWR_SCREEN_OFF = 1, PWR_SET_SCREEN_OFF_S = 2, PWR_SET_SLEEP_OFF_S = 3 };

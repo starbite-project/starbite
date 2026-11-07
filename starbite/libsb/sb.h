@@ -428,6 +428,10 @@ int64_t sb_smp_affinity(unsigned w);
 /* Start core w on fn (after the previous fn has stopped). 0, a PSCI error (< 0), or -100 when the
  * core did not check in within 1 s. */
 int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg);
+/* The same without waiting (Starbite OS: the kernel's loop never blocks for a core): one CPU_ON, the answer
+ * decoded from w0 (-4 ALREADY_ON, -5 ON_PENDING: try again later). 0 launched: the slot leaves SB_WK_IDLE when
+ * the core checks in (RUNNING, or FAULT). */
+int64_t sb_smp_launch(unsigned w, sb_work_fn fn, void *arg);
 /* PSCI target of core w. */
 uint64_t sb_smp_target(unsigned w);
 /* The slot of core w as the worker last published it (0 = this core: fill it yourself). */
@@ -441,6 +445,9 @@ int sb_worker_stop(void);
 void sb_worker_publish(struct sb_wslot *s);
 extern char sb_worker_entry[];
 extern volatile uint64_t sb_worker_boot[8];
+extern volatile uint64_t sb_worker_rec[64];        /* per core: the start record crt0.S uses with PSCI's context id */
+/* 1 if core w's last start used its own record: the firmware passes PSCI CPU_ON's context id */
+int sb_smp_own_record(unsigned w);
 
 /* ---- CMGP ADC and thermistors (adc.c) --------------------------------------------------------- */
 
@@ -489,8 +496,9 @@ int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier);
  * caller's tier (at least 3). 1 sent and answered. */
 int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier);
 /* Starbite OS (docs/STARBITE-OS.md 8.3): ACPM DVFS without the gate, but only for the exact vendor table
- * levels of domain 2 (A55: 455..1794 MHz) and 3 (M3: 650..1794 MHz); MIF (0), INT (1), the GPU and any
- * other level are refused here, whoever asks. 1 sent and answered (not proof it applied: read the PLL). */
+ * levels of domain 2 (A55: 455..1794 MHz), 3 (M3: 650..1794 MHz) and 4 (the GPU: 260..572 MHz); MIF (0), INT
+ * (1) and any other level are refused here, whoever asks. 1 sent and answered (not proof it applied: read the
+ * PLL). */
 int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz);
 int sb_dvfs_level_listed(uint32_t domain, uint32_t khz);   /* pure: 1 if khz is a listed level of domain */
 

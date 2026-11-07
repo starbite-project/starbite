@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only
  * Starbite OS heat kernel (docs/STARBITE-OS.md 8.1): what the heater's worker cores run. Eight independent
  * NEON FMA streams (no dependency between them, so the FP pipes stay busy every cycle), no memory traffic,
- * about 0.5 ms per batch at 1.8 GHz; every batch's result must equal the reference the boot core computed,
+ * a few tens of microseconds per batch; every batch's result must equal the reference the boot core computed,
  * else the core is unstable and the heater stops.
  *
  * Built with -march=armv8-a (the Mongoose M3 cores are ARMv8.0; build.sh checks the object). The worker stops
@@ -33,6 +33,78 @@ uint64_t heatk_batch(void)
     uint32x4_t u = vreinterpretq_u32_f32(s);
     return ((uint64_t)vgetq_lane_u32(u, 0) << 32 | vgetq_lane_u32(u, 1)) ^
            ((uint64_t)vgetq_lane_u32(u, 2) << 16) ^ ((uint64_t)vgetq_lane_u32(u, 3) << 40);
+}
+
+/* The heat batch (0.2.1, after the review: a DRAM-streaming kernel keeps the cores waiting on memory, the very
+ * thing that kept Engineer OS's stress cool). Most batches work inside a 256 KiB window of the core's buffer (the
+ * caches hold it): every 64 bytes are converted and scaled into a bounded range (no NaN, no denormals), feed
+ * eight FMA streams for 16 rounds (192 FMAs per 64 bytes in 12 streams: the FP pipes stay full) and are written back changed
+ * (an xorshift step), so no batch repeats the last. Every 16th batch instead streams 512 KiB from the far part of
+ * the 4 MiB buffer (DRAM, the memory system's share of the heat) and runs the fixed reference block, whose result
+ * must equal the boot core's. */
+#define WIN_WORDS (256U * 1024U / 8U)       /* the cache-resident window */
+#define CHUNK_WORDS (32U * 1024U / 8U)      /* 32 KiB per normal batch */
+#define FAR_WORDS (512U * 1024U / 8U)       /* 512 KiB per far batch */
+_Static_assert(WIN_WORDS + ((HEATK_WORDS - WIN_WORDS) / FAR_WORDS) * FAR_WORDS <= HEATK_WORDS, "far batches stay in the buffer");
+_Static_assert(WIN_WORDS % CHUNK_WORDS == 0, "chunks tile the window");
+
+static float32x4_t acc[8][12] __attribute__((aligned(64)));  /* per core: no shared lines */
+
+static void mix(unsigned w, uint64_t *b, uint64_t words, unsigned rounds, uint64_t it)
+{
+    float32x4_t k0 = vdupq_n_f32(0.99991f), sc = vdupq_n_f32(1.0e-9f);
+    /* the xorshift steps alone are linear over GF(2) and cycle (x ^= x << 13 four times is the identity on 32-bit
+     * lanes): a seed that differs per batch and per core is added, so the data never comes back */
+    uint32x4_t seed = vdupq_n_u32((uint32_t)(it * 0x9e3779b97f4a7c15ULL >> 32) ^ (w * 0x85ebca6bU));
+    /* 12 independent streams: an M3 has three FMA pipes of about 4 cycles' latency, so 12 keep it full */
+    float32x4_t *A = acc[w & 7U];
+    float32x4_t a0 = A[0], a1 = A[1], a2 = A[2], a3 = A[3], a4 = A[4], a5 = A[5], a6 = A[6], a7 = A[7];
+    float32x4_t a8 = A[8], a9 = A[9], a10 = A[10], a11 = A[11];
+    for (uint64_t i = 0; i < words; i += 8) {
+        uint64_t *p = b + i;
+        uint32x4_t v0 = vld1q_u32((const uint32_t *)p), v1 = vld1q_u32((const uint32_t *)(p + 2));
+        uint32x4_t v2 = vld1q_u32((const uint32_t *)(p + 4)), v3 = vld1q_u32((const uint32_t *)(p + 6));
+        float32x4_t d0 = vmulq_f32(vcvtq_f32_u32(vshrq_n_u32(v0, 8)), sc);
+        float32x4_t d1 = vmulq_f32(vcvtq_f32_u32(vshrq_n_u32(v1, 8)), sc);
+        float32x4_t d2 = vmulq_f32(vcvtq_f32_u32(vshrq_n_u32(v2, 8)), sc);
+        float32x4_t d3 = vmulq_f32(vcvtq_f32_u32(vshrq_n_u32(v3, 8)), sc);
+        for (unsigned r = 0; r < rounds; ++r) {
+            a0 = vfmaq_f32(d0, a0, k0);
+            a1 = vfmaq_f32(d1, a1, k0);
+            a2 = vfmaq_f32(d2, a2, k0);
+            a3 = vfmaq_f32(d3, a3, k0);
+            a4 = vfmaq_f32(d0, a4, k0);
+            a5 = vfmaq_f32(d1, a5, k0);
+            a6 = vfmaq_f32(d2, a6, k0);
+            a7 = vfmaq_f32(d3, a7, k0);
+            a8 = vfmaq_f32(d0, a8, k0);
+            a9 = vfmaq_f32(d1, a9, k0);
+            a10 = vfmaq_f32(d2, a10, k0);
+            a11 = vfmaq_f32(d3, a11, k0);
+        }
+        vst1q_u32((uint32_t *)p, vaddq_u32(veorq_u32(v0, vshlq_n_u32(v0, 13)), seed));
+        vst1q_u32((uint32_t *)(p + 2), vaddq_u32(veorq_u32(v1, vshrq_n_u32(v1, 7)), seed));
+        vst1q_u32((uint32_t *)(p + 4), vaddq_u32(veorq_u32(v2, vshlq_n_u32(v2, 5)), seed));
+        vst1q_u32((uint32_t *)(p + 6), vaddq_u32(v3, veorq_u32(seed, vdupq_n_u32(0x9e3779b9U))));
+    }
+    /* the accumulators stay bounded (|a| < 1 / (1 - 0.99991) x 0.0168): carried to the next batch */
+    A[0] = a0, A[1] = a1, A[2] = a2, A[3] = a3, A[4] = a4, A[5] = a5, A[6] = a6, A[7] = a7;
+    A[8] = a8, A[9] = a9, A[10] = a10, A[11] = a11;
+}
+
+unsigned heatk_mixed(struct heatk_cfg *c, unsigned w, uint64_t it)
+{
+    uint64_t *b = c->buf[w];
+    if ((it & 15U) == 0) {
+        unsigned bad = heatk_batch() != c->gold;
+        if (b)
+            mix(w, b + WIN_WORDS + ((it >> 4) % ((HEATK_WORDS - WIN_WORDS) / FAR_WORDS)) * FAR_WORDS, FAR_WORDS, 1, it);
+        return bad;
+    }
+    if (!b)
+        return heatk_batch() != c->gold;
+    mix(w, b + (it * CHUNK_WORDS) % WIN_WORDS, CHUNK_WORDS, 16, it);
+    return 0;
 }
 
 static void line_civac(const volatile void *p)
@@ -74,9 +146,7 @@ void heatk_worker(unsigned w, void *arg)
             s->v[0] = 1;                        /* stopped by the dead man's switch */
             break;
         }
-        uint64_t r = heatk_batch();
-        if (r != c->gold)
-            s->errors++;
+        s->errors += heatk_mixed(c, w, iters);
         s->iters = ++iters;
         sb_worker_publish(s);
         if (s->errors)

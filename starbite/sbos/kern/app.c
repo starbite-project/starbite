@@ -46,14 +46,41 @@ uint32_t app_icon(int a)
     return a >= 0 && a < napps ? apps[a].icon : 0;
 }
 
+/* State-like events (a timer firing, a service's state, the power state): one of a kind is enough in the
+ * queue; a newer one updates it in place. A busy service can therefore never fill an app's queue (0.2 on the
+ * phone: hundreds of "event queue full: heat"). Input-driven events (buttons, levels, toggles, holds, back,
+ * show / hide) are always queued; the queue keeps room for them: state events take at most half of it. */
+static int coalesced(uint32_t type)
+{
+    return type == EV_APP_TIMER || type == EV_APP_SERVICE || type == EV_APP_POWER;
+}
+
 void app_event_send(int a, uint32_t type, uint32_t id, int32_t value)
 {
     if (a < 0 || a >= napps || apps[a].dead)
         return;
     struct kapp *p = &apps[a];
+    unsigned queued = (p->qh + APP_QLEN - p->qt) % APP_QLEN;
+    if (coalesced(type)) {
+        for (unsigned i = p->qt; i != p->qh; i = (i + 1) % APP_QLEN)
+            if (p->q[i].type == type && p->q[i].id == id) {
+                p->q[i].value = value;
+                p->q[i].uptime_ms = sb_ms();
+                return;
+            }
+        if (queued >= APP_QLEN / 2) {
+            ++p->dropped;
+            return;
+        }
+    }
     unsigned n = (p->qh + 1) % APP_QLEN;
     if (n == p->qt) {
-        sb_logf("sbos: event queue full: ", p->id);
+        ++p->dropped;
+        uint64_t now = sb_ms();
+        if (now - p->drop_logged >= 10000U || !p->drop_logged) {
+            p->drop_logged = now ? now : 1;
+            sb_logf("sbos: event queue full: ", p->id);
+        }
         return;
     }
     struct sbos_event *e = &p->q[p->qh];
@@ -388,6 +415,15 @@ static unsigned timers_of(int a)
     return n;
 }
 
+static void gpu_confirm_done(int ok)
+{
+    gpu_heat_allowed = ok;
+    sb_log(ok ? "settings: GPU in High: on (confirmed)" : "settings: GPU in High: not confirmed");
+    int s = app_by_id("settings");
+    if (s >= 0)
+        app_event_send(s, EV_APP_SHOW, 0, 0);
+}
+
 int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
 {
     struct kapp *p = &apps[a];
@@ -587,6 +623,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_PANEL_SAVE: return panel_save_on;
         case SET_PANEL_OFF: return panel_off_on;
         case SET_SOS_LED: return sos_led_on;
+        case SET_GPU_HEAT: return gpu_heat_allowed;
         case SET_SCREEN_OFF_S: return (int64_t)K.screen_off_s;
         default: return SBOS_EINVAL;
         }
@@ -601,6 +638,18 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_PANEL_OFF:
             panel_off_on = arg[1] != 0;
             sb_log(arg[1] ? "settings: panel off with the screen: on" : "settings: panel off with the screen: off");
+            return 0;
+        case SET_GPU_HEAT:
+            if (!arg[1]) {
+                gpu_heat_allowed = 0;
+                sb_log("settings: GPU in High: off");
+                return 0;
+            }
+            kui_confirm("Let High use the GPU?",
+                        "High also runs the graphics processor: more heat, more battery.",
+                        "Its voltage is set to 950 mV (as iOS on this phone) and put back when it stops.",
+                        "First test: only with someone watching the phone.",
+                        "Hold to allow", gpu_confirm_done);
             return 0;
         case SET_SOS_LED:
             sos_led_on = arg[1] != 0;

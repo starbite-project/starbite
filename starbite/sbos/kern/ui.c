@@ -878,6 +878,10 @@ void ui_kdraw(void)
     if (!dirty && pressed < 0)
         return;
     dirty = 0;
+    if (screen != shown_screen && shown_screen) {
+        focus = -1;                             /* a new screen starts without a key focus */
+        key_hold_armed = -1;
+    }
     build();
     int fullscreen = screen == SCR_LIGHT || screen == SCR_SOS;
     if (full || screen != shown_screen) {
@@ -980,6 +984,7 @@ static void activate(int i, int x)
         void (*d)(int) = cf_done;
         cf_done = 0;
         screen = cf_return;
+        focus = -1;                             /* the focus was the confirmation's, not this screen's */
         full = dirty = 1;
         if (d)
             d(e->kind == E_HOLD && e->id == 1);
@@ -1093,6 +1098,8 @@ void kui_sos_changed(void)
         screen = cf_return == SCR_SOS || cf_return == SCR_OFF ? SCR_LOCK : cf_return;
     }
     pressed = -1;
+    focus = -1;
+    key_hold_armed = -1;
     full = dirty = 1;
 }
 

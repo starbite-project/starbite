@@ -29,6 +29,7 @@ struct kapp {
     struct sbos_event q[APP_QLEN];
     unsigned qh, qt;
     unsigned timers;                /* active timer count */
+    uint64_t dropped, drop_logged;  /* events not queued; when that was last logged */
     uint64_t log_window, log_n;
     uint8_t state[STATE_REC_MAX];
     uint32_t state_n;

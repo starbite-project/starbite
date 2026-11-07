@@ -94,7 +94,8 @@ struct sb_wslot *sb_smp_own_slot(unsigned w)
     return w < SB_NCORES ? &slots[w] : 0;
 }
 
-int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg)
+/* The start record and the slot for core w (no CPU_ON yet). 0, or -2 / -4 (still running) / -102. */
+static int64_t prepare(unsigned w, sb_work_fn fn, void *arg)
 {
     if (w == 0 || w >= SB_NCORES || !fn)
         return -2;
@@ -116,10 +117,6 @@ int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg)
     line_civac((const void *)sb_boot.base, (uint64_t)((uintptr_t)_image_end - sb_boot.base));
     stop_line[0] = 0;
     line_civac(stop_line, 64);
-    volatile uint64_t *z = (volatile uint64_t *)&slots[w];
-    for (unsigned i = 0; i < sizeof(slots[w]) / 8; ++i)
-        z[i] = 0;
-    line_civac(&slots[w], sizeof(slots[w]));
     uint64_t mair, tcr, ttbr, sctlr;
     __asm__ volatile("mrs %0, mair_el1\n\tmrs %1, tcr_el1\n\tmrs %2, ttbr0_el1\n\tmrs %3, sctlr_el1"
                      : "=r"(mair), "=r"(tcr), "=r"(ttbr), "=r"(sctlr));
@@ -131,11 +128,62 @@ int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg)
     sb_worker_boot[5] = stacks[w];
     sb_worker_boot[6] = 0x52454b524f574253ULL;     /* "SBWORKER" */
     line_civac(sb_worker_boot, 64);
+    volatile uint64_t *rec = &sb_worker_rec[8 * w];   /* the core's own record (crt0.S: with PSCI's context id) */
+    for (unsigned i = 0; i < 8; ++i)
+        rec[i] = sb_worker_boot[i];
+    rec[7] = 0;                                     /* the entry writes "OWN" when it used this record */
+    line_civac(rec, 64);
     if (w >= 4 && sb_smp_m3_prep)
         sb_smp_m3_prep();
-    int64_t r = -5;
+    return 0;
+}
+
+/* One CPU_ON; the slot is cleared only when PSCI accepted it (a refused start keeps a PARKED / DONE marker) */
+static int64_t cpu_on(unsigned w)
+{
+    volatile uint64_t *z = (volatile uint64_t *)&slots[w];
+    uint64_t was[sizeof(slots[w]) / 8];
+    for (unsigned i = 0; i < sizeof(slots[w]) / 8; ++i) {
+        was[i] = z[i];
+        z[i] = 0;
+    }
+    line_civac(&slots[w], sizeof(slots[w]));
+    int64_t r = (int32_t)sb_psci(SB_PSCI_CPU_ON, sb_smp_target(w), (uint64_t)(uintptr_t)sb_worker_entry,
+                                 0x5b5b5b00ULL | w);
+    if (r) {
+        for (unsigned i = 0; i < sizeof(slots[w]) / 8; ++i)
+            z[i] = was[i];
+        line_civac(&slots[w], sizeof(slots[w]));
+    }
+    return r;
+}
+
+/* Launch core w on fn without waiting for it (sb.h): the start record, one PSCI CPU_ON. PSCI answers in
+ * w0: on this phone an error comes back as 0xfffffffc etc. with the upper half zero, so the answer is read as a
+ * 32-bit number (a 64-bit compare with -4 never matched: ALREADY_ON was never retried). 0 launched (poll
+ * sb_smp_slot for the check-in), < 0 the PSCI error or -2 / -4 / -102 as sb_smp_start. */
+int64_t sb_smp_launch(unsigned w, sb_work_fn fn, void *arg)
+{
+    int64_t r = prepare(w, fn, arg);
+    return r ? r : cpu_on(w);
+}
+
+/* 1 if core w's last start used its own record (the firmware passed PSCI's context id), 0 not (yet) */
+int sb_smp_own_record(unsigned w)
+{
+    if (w == 0 || w >= SB_NCORES)
+        return 0;
+    line_civac(&sb_worker_rec[8 * w], 64);
+    return sb_worker_rec[8 * w + 7] == 0x4f4e57ULL;
+}
+
+int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg)
+{
+    int64_t r = prepare(w, fn, arg);
+    if (r)
+        return r;
     for (unsigned a = 0; a < 20; ++a) {             /* ALREADY_ON / ON_PENDING: the last CPU_OFF is not done */
-        r = sb_psci(SB_PSCI_CPU_ON, sb_smp_target(w), (uint64_t)(uintptr_t)sb_worker_entry, 0);
+        r = cpu_on(w);
         if (r != -4 && r != -5)
             break;
         sb_mdelay(10);

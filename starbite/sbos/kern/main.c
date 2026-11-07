@@ -118,10 +118,11 @@ void sb_main(void)
     kt_set(KT_HOUSE, 0, sb_ms(), 1000, 0);
     kt_set(KT_CLOCK, 0, sb_ms(), 1000, 0);
     hw_wdt_feed();
+    uint64_t slow_logged = 0;
     for (;;) {
         hw_irq_poll();
         unsigned owner, id;
-        uint64_t now = sb_ms();
+        uint64_t now = sb_ms(), turn0 = now;
         for (unsigned n = 0; n < 32 && kt_pop(now, &owner, &id); ++n)
             dispatch_timer(owner, id);
         handle_input();
@@ -129,8 +130,25 @@ void sb_main(void)
         handle_input();
         ui_kdraw();
         hw_irq_poll();
+        /* a loop turn that takes long starves the UI and the watchdog: log it (at most once a second) */
+        uint64_t took = sb_ms() - turn0;
+        if (took > K.slow_turn_ms)
+            K.slow_turn_ms = (uint32_t)took;
+        if (took >= 200 && sb_ms() - slow_logged >= 1000) {
+            slow_logged = sb_ms();
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "sbos: a loop turn took ");
+            ub_dec(&u, took);
+            ub_s(&u, " ms");
+            sb_log(u.b);
+        }
         uint64_t next = kt_next();
-        if (next > sb_ms())
-            hw_sleep_until(next);
+        if (next > sb_ms()) {
+            if (heater_cpu0_active())
+                heater_cpu0_run(next);          /* heating: cpu0 works instead of sleeping */
+            else
+                hw_sleep_until(next);
+        }
     }
 }

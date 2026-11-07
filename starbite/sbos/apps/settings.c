@@ -24,6 +24,7 @@ static void show(void)
     ui_toggle(2, "Refresh only on change", setting_get(SET_PANEL_SAVE) == 1);
     ui_toggle(3, "Panel off with the screen", setting_get(SET_PANEL_OFF) == 1);
     ui_toggle(4, "LED flashes with SOS", setting_get(SET_SOS_LED) == 1);
+    ui_toggle(5, "GPU in Heat High (test)", setting_get(SET_GPU_HEAT) == 1);
     ui_textline("These last until the next restart (saving them comes later).", 0);
     ui_textline(s.version, 0xffffffffU);
     fmt_init(&f);
@@ -57,7 +58,8 @@ void app_event(const struct sbos_event *ev)
     if (ev->type == EV_APP_SHOW) {
         show();
     } else if (ev->type == EV_APP_TOGGLE) {
-        int id = ev->id == 2 ? SET_PANEL_SAVE : ev->id == 3 ? SET_PANEL_OFF : ev->id == 4 ? SET_SOS_LED : 0;
+        int id = ev->id == 2 ? SET_PANEL_SAVE : ev->id == 3 ? SET_PANEL_OFF : ev->id == 4 ? SET_SOS_LED :
+                 ev->id == 5 ? SET_GPU_HEAT : 0;
         if (id)
             setting_set(id, ev->value);
         show();

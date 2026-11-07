@@ -32,6 +32,7 @@
 #include <signal.h>
 #include <ucontext.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "sbui.h"
 #include "ufs.h"
@@ -136,8 +137,16 @@ void sb_crash_show(const char *why, const uint64_t *regs)
 static unsigned keys_now;
 unsigned sb_keys(void) { host_step(); return keys_now; }
 void sb_keys_release_wait(void) { while (sb_keys()) sb_mdelay(20); }
-void sb_reboot(uint32_t inform3) { printf("host: reboot (inform3 %#x)\n", inform3); exit(0); }
-void sb_power_off(void) { printf("host: power off\n"); exit(0); }
+/* SBOS_HOST_DUMPLOG=1: the whole log ring at the end (Starbite OS's soak checks it) */
+static void dump_log(void)
+{
+    if (!getenv("SBOS_HOST_DUMPLOG"))
+        return;
+    for (unsigned i = 0; i < sb_log_count(); ++i)
+        printf("log: %s\n", sb_log_line(i));
+}
+void sb_reboot(uint32_t inform3) { dump_log(); printf("host: reboot (inform3 %#x)\n", inform3); exit(0); }
+void sb_power_off(void) { dump_log(); printf("host: power off\n"); exit(0); }
 void sb_boot_next(const char *key) { printf("host: boot-next %s\n", key); exit(0); }
 int sb_boot_next_peek(char key[24]) { key[0] = 0; return 0; }
 void sb_boot_next_clear(void) { printf("host: boot-next cleared\n"); }
@@ -837,6 +846,27 @@ static void hg_run(unsigned js)
     HG(0x1000) |= 1U << js;
 }
 
+#ifdef SB_HOST_UTILITY
+/* Starbite OS's host build: a job chain runs on its own thread, as the real GPU runs it beside the CPU (the
+ * synchronous fake cleared 1 GiB inside one register write and showed as a 200 ms kernel loop turn) */
+#include <pthread.h>
+static void *hg_thread(void *p)
+{
+    hg_run((unsigned)(uintptr_t)p);
+    return 0;
+}
+static void hg_start(unsigned js)
+{
+    pthread_t t;
+    if (pthread_create(&t, 0, hg_thread, (void *)(uintptr_t)js) == 0)
+        pthread_detach(t);
+    else
+        hg_run(js);
+}
+#else
+static void hg_start(unsigned js) { hg_run(js); }
+#endif
+
 void host_gpu_write(unsigned off, uint32_t v);
 void host_gpu_write(unsigned off, uint32_t v)
 {
@@ -864,7 +894,7 @@ void host_gpu_write(unsigned off, uint32_t v)
     case 0x2004: HG(0x2000) &= ~v; break;
     default:
         if (off >= 0x1800 && off < 0x2000 && (off & 0x7fU) == 0x60 && v == 1)
-            hg_run((off - 0x1800U) / 0x80U);
+            hg_start((off - 0x1800U) / 0x80U);
         break;
     }
     /* the job interrupt line at the GIC: GICD_ISPENDR9 bit 26 (SPI 282) while masked-in and raised */
@@ -895,6 +925,7 @@ int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier)
 /* ---- the CMGP ADC (libsb adc.c asks host_adc under SB_HOST) ---------------------------------- */
 
 static int host_load;                   /* worker cores running: the fake temperatures rise */
+static double host_temp_now(void);
 /* The phone's v2.0 glitch reproduced: every 5th conversion reads raw 0 (a conversion read before
  * it finished). The filter must reject it: unfiltered, the battery thermistor would read 90 C and
  * stop the Lab tour's battery tests at the 45 C guard. */
@@ -904,8 +935,15 @@ int host_adc(unsigned ch)
     if (++host_adc_n % 5U == 0)
         return 0;
     switch (ch) {
+#ifdef SB_HOST_UTILITY
+    /* Starbite OS's heater soak: the thermistors follow the SoC's thermal model (slowly) and wander by a few
+     * codes, as real ones do (a raw value that never moves trips the heater's stuck-sensor stop) */
+    case 4: return 1950 - (int)((host_temp_now() - 41.0) * 8.0) + (int)(3.0 * sin((double)now_us / 7.3e6));
+    case 0: return 1700 - (int)((host_temp_now() - 41.0) * 10.0) + (int)(3.0 * sin((double)now_us / 5.1e6));
+#else
     case 4: return 1950 - host_load * 25;   /* battery ~26 C, warmer under load */
     case 0: return 1700 - host_load * 40;
+#endif
     case 1: return 1900;
     case 2: return 1800;
     case 10: return 0x800;
@@ -933,15 +971,22 @@ static void *hrun(void *p)
     hslot[w].state = SB_WK_RUNNING;
     hfn[w](w, harg[w]);
     hslot[w].state = SB_WK_DONE;
+    if (__atomic_load_n(&host_load, __ATOMIC_RELAXED) > 0)
+        __atomic_fetch_sub(&host_load, 1, __ATOMIC_RELAXED);
     return 0;
 }
 uint64_t sb_smp_target(unsigned w) { return w < 4 ? w : 0x100U + (w - 4U); }
 const struct sb_wslot *sb_smp_slot(unsigned w) { return w < SB_NCORES ? &hslot[w] : 0; }
 struct sb_wslot *sb_smp_own_slot(unsigned w) { return w < SB_NCORES ? &hslot[w] : 0; }
+static int smp_inject(const char *what, unsigned w);
 int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg)
 {
     if (w == 0 || w >= SB_NCORES || !fn)
         return -2;
+    if (smp_inject("timeout", w)) {             /* as on the phone: the check-in wait runs out, 1 s */
+        sb_mdelay(1000);
+        return -100;
+    }
     if (w >= 4) {
         if (sb_smp_m3_prep)
             sb_smp_m3_prep();
@@ -961,6 +1006,64 @@ int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg)
     ++host_load;
     return hth_on[w] ? 0 : -100;
 }
+/* Starbite OS's non-blocking launch, with failure injection for its host tests: SBOS_HOST_SMP="timeout:1,
+ * already_on:2, fault:3, m3" (core 1 never checks in; core 2 answers ALREADY_ON; core 3 faults at once; the
+ * M3 cores start like the A55s instead of PSCI DENIED). */
+static int smp_inject(const char *what, unsigned w)
+{
+    const char *e = getenv("SBOS_HOST_SMP");
+    if (!e)
+        return 0;
+    char key[32];
+    snprintf(key, sizeof(key), "%s:%u", what, w);
+    return strstr(e, key) != 0;
+}
+static int smp_m3(void)
+{
+    const char *e = getenv("SBOS_HOST_SMP");
+    return e && strstr(e, "m3");
+}
+static void *hrun_fault(void *p)
+{
+    unsigned w = (unsigned)(uintptr_t)p;
+    hslot[w].esr = 0x96000000U;
+    hslot[w].state = SB_WK_FAULT;
+    return 0;
+}
+int64_t sb_smp_launch(unsigned w, sb_work_fn fn, void *arg)
+{
+    if (w == 0 || w >= SB_NCORES || !fn)
+        return -2;
+    if (hslot[w].state == SB_WK_RUNNING)
+        return -4;
+    if (smp_inject("already_on", w))
+        return -4;
+    /* parked:W: the core runs once; after it leaves, its CPU_OFF "returned": it waits in wfe, PSCI says on */
+    if (smp_inject("parked", w) && (hslot[w].state == SB_WK_DONE || hslot[w].state == SB_WK_PARKED)) {
+        hslot[w].state = SB_WK_PARKED;
+        return -4;
+    }
+    if (w >= 4 && !smp_m3()) {
+        if (sb_smp_m3_prep)
+            sb_smp_m3_prep();
+        return -3;
+    }
+    if (w >= 4 && sb_smp_m3_prep)
+        sb_smp_m3_prep();
+    if (hth_on[w])
+        pthread_join(hth[w], 0);
+    hth_on[w] = 0;
+    memset(&hslot[w], 0, sizeof(hslot[w]));
+    if (smp_inject("timeout", w))
+        return 0;                               /* PSCI said yes; the core never checks in */
+    hfn[w] = fn;
+    harg[w] = arg;
+    hstop = 0;
+    hth_on[w] = !pthread_create(&hth[w], 0, smp_inject("fault", w) ? hrun_fault : hrun, (void *)(uintptr_t)w);
+    ++host_load;
+    return hth_on[w] ? 0 : -1;
+}
+
 unsigned sb_smp_running(void)
 {
     unsigned n = 0;
@@ -968,10 +1071,21 @@ unsigned sb_smp_running(void)
         n += hslot[w].state == SB_WK_RUNNING;
     return n;
 }
+/* SBOS_HOST_SMP "noctx": the firmware does not pass PSCI's context id */
+int sb_smp_own_record(unsigned w)
+{
+    const char *e = getenv("SBOS_HOST_SMP");
+    return w > 0 && w < SB_NCORES && !(e && strstr(e, "noctx")) && hslot[w].state != SB_WK_IDLE;
+}
 unsigned sb_smp_stop(unsigned ms)
 {
-    (void)ms;
     hstop = 1;
+    if (ms == 0) {                              /* signal only (Starbite OS's heater): the threads leave on their own */
+        unsigned n = 0;
+        for (unsigned w = 1; w < SB_NCORES; ++w)
+            n += hslot[w].state == SB_WK_RUNNING;
+        return n;
+    }
     for (unsigned w = 1; w < SB_NCORES; ++w)
         if (hth_on[w]) {
             pthread_join(hth[w], 0);
@@ -981,7 +1095,13 @@ unsigned sb_smp_stop(unsigned ms)
     return 0;
 }
 int sb_worker_stop(void) { return hstop; }
+#ifdef SB_HOST_UTILITY
+/* Starbite OS's soak: the fake workers leave the VM's CPUs to the kernel's thread now and then (seven spinning
+ * threads on 8 vCPUs descheduled it for hundreds of ms, and the fake clock follows real time) */
+void sb_worker_publish(struct sb_wslot *s) { s->beats++; if (!(s->beats & 7U)) usleep(200); }
+#else
 void sb_worker_publish(struct sb_wslot *s) { s->beats++; }
+#endif
 
 struct sd_report sd_rep;
 #ifndef SB_HOST_UTILITY
@@ -1425,6 +1545,7 @@ static unsigned key_held;
  * code = temperature + 25). */
 static double host_temp = 41.0;
 static uint64_t host_temp_t;
+static __attribute__((unused)) double host_temp_now(void) { return host_temp; }
 static void w32(uint64_t a, uint32_t v);
 
 static void host_thermal(void)
@@ -1561,11 +1682,13 @@ static void host_step(void)
             }
             next_t = now_us;
         } else if (c[0] == 'q') {
+            dump_log();
             printf("host: done at %.2f s, %llu frames\n", (double)now_us / 1e6, (unsigned long long)ui_stats.frames);
             exit(0);
         }
     }
     if (ci >= ncmd && !key_held && now_us >= next_t) {
+        dump_log();
         printf("host: script ended\n");
         exit(0);
     }
@@ -1726,6 +1849,9 @@ static void seed(void)
     w32(0x11121100, 0x8000000cU);
     /* DSIM: command mode, ready */
     w32(0x16080020, 1U << 20);
+#ifdef SB_HOST_UTILITY
+    w32(0x16080050, 1U << 28);              /* INTSRC: the header FIFO drained (Starbite OS's DCS commands) */
+#endif
     w32(0x16030070, 0x1281U);
     /* PMIC: TOP id, LDO controls on, touch rails on, card rails off, BUCK6 */
     pmic[0][0x00] = 0x11;

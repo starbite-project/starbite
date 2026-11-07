@@ -340,14 +340,21 @@ app only asks for a level and shows the status.
 
 ### 8.1 How it makes heat
 
-| Level | Load (cpu0 keeps the kernel) |
+| Level | Load (since 0.2.1; cpu0 works between the kernel's events instead of sleeping) |
 |---|---|
-| Low | cpu1-3 (A55) at 1794 MHz (ACPM domain 2) |
+| Low | cpu0-3 (all four A55) at 1794 MHz (ACPM domain 2) |
 | Medium | Low + cpu4-5 (M3) at 1469 MHz, then 1794 MHz after 60 s if the battery voltage holds (domain 3) |
-| High | Low + cpu4-7 (M3), the same ramp; v0.3: + the GPU at 572 MHz (domain 4) |
+| High | all 8 cores, the same ramp; + the GPU at 572 MHz (domain 4) when Settings allows it (8.6) |
 
-- **Heat kernel** (`kern/heatk.c`, ARMv8.0): eight independent NEON FMA streams per core, about 1 ms per
-  batch, every batch's result compared with a reference (a wrong result stops the heater: an unstable core).
+- **Heat kernel** (`kern/heatk.c`, ARMv8.0), since 0.2.1 **non-repeating and compute-bound**: each core owns a
+  4 MiB buffer. Normal batches work inside a 256 KiB window of it (held by the caches): every 64 bytes are
+  converted and scaled into a bounded range (no NaN, no denormals), feed twelve NEON FMA streams for 16 rounds
+  (192 FMAs per 64 bytes: an M3's three FMA pipes stay full) and are written back changed: an xorshift step plus a seed
+  that differs per batch and per core (the xorshift alone is linear over GF(2) and came back to the same data
+  after 4 passes; a host test caught it). Every 16th batch streams 512 KiB from the rest of the buffer (DRAM: the
+  memory system's share) and runs the fixed reference block, compared with the boot core's result (a wrong result
+  stops the heater: an unstable core). A first version streamed everything from DRAM: the review pointed out
+  that eight cores would then mostly wait on memory, the very thing that kept Engineer OS cool (8.5).
 - **1794 MHz** is the M3s' `quad_freq` / cpufreq `policy-max` / `max-freq-wo-ocp` (DT): the vendor's
   all-core level for real workloads. Without the vendor's OCP driver nothing handles the over-current
   warning, so the M3s ramp up and the controller watches the battery current and voltage.
@@ -424,6 +431,54 @@ stop) and the load resumes when it is unplugged and everything else holds.
 Low for 2 minutes with the Heat screen open, then Medium, then High, each stopped by hand; then a hard stop
 with the battery limit lowered to the current temperature + 2 °C (a test build).
 
+### 8.6 Worker cores never block the kernel (0.2.1, after the 0.2 phone run)
+
+0.2 started workers with libsb's `sb_smp_start`, which waits up to 1 s for a core's check-in. On the phone a
+core never checked in (its PSCI state left over from the earlier Medium / High run), and the heater retried it on
+every 4 Hz tick: the kernel's single loop was blocked about 1 s per tick, the running workers' dead man's switch
+(1 s) fired, the Heat app's events piled up ("event queue full"), the screen-off timer, the wake and the power
+menu starved. Reproduced on the Mac (14.3) and fixed:
+- libsb `sb_smp_launch`: one PSCI CPU_ON, never a wait; the answer read from w0 (ALREADY_ON / ON_PENDING are
+  recognised now; the old 64-bit compare never matched them).
+- The heater runs a state machine per core: launched → (check-in within 1 s) running, or failed. A failure is
+  retried after 2 s, then 4 s; the third disables that core until a restart. Each failure is logged once with its
+  reason and code; each core that starts is logged (`heater: core 5 (M3) running, 6 cores with cpu0`). When no
+  core of the level can run, the heater stops and the Heat screen says so ("The processor cores did not start
+  (code -100). A restart fixes it.").
+- A stop only signals the workers and returns (`sb_smp_stop(0)`); the stop check on the next ticks confirms
+  every core left within 1.5 s. (Waiting there blocked the loop up to 500 ms on the phone; the soak caught it.)
+- At most one CPU_ON per tick, and none while a core has not yet checked in. **Every core has its own start
+  record** (libsb `sb_worker_rec`): CPU_ON passes PSCI's context id `0x5B5B5B00 | core`, and the worker entry
+  (`crt0.S`) uses the core's own record when that id and the record's magic check out, else the old shared
+  record. The first check-in tells which the firmware does (`heater: the firmware passes / drops PSCI's
+  context id`). With shared records a core that boots late could take a newer core's record and stack, so then,
+  after a check-in timeout, no further core starts in that heater session (the running ones go on), nor in later
+  sessions until a restart. Every running core's slot identity (the MPIDR it wrote at check-in) is checked on
+  every tick: a second core writing the same slot (a late core on a shared record) stops the heater; this needs
+  no assumption about the MPIDR's format. A refused CPU_ON leaves the slot as it was (its PARKED marker). A core whose last CPU_OFF returned (parked) while PSCI calls it on is unusable until a restart, at
+  once. Failures reset at a new session; a give-up never leaves a raised clock behind. The dead man's switch
+  at 2 s; every loop turn of 200 ms or more is logged
+  (`sbos: a loop turn took N ms`).
+- App events that describe a state (a timer, a service, the power) are coalesced (one of a kind in the queue,
+  updated in place) and take at most half of an app's queue: a busy service can no longer fill it; "queue full"
+  is logged at most every 10 s.
+- The charger reading changes only when two reads in a row agree, and every change is logged with the raw
+  CHG_INT_OK byte and the current (to settle "paused although unplugged").
+
+**The GPU's share on High** (`kern/gpuheat.c`): libsb's Mali job path has run on the host's fake Mali only
+(Engineer OS 2.1's GPU tests are not yet run on the phone), and it needs vdd_g3d (BUCK6) at 950 mV, a PMIC write.
+So it is **off until Settings → "GPU in Heat High (test)" is confirmed** (a warning and a hold, which also form
+the write fence's authorisation for that one register). Then on High: the G3D domain must already be on, GPU_ID
+a Mali-G72, PLL_G3D locked, TMU_SUB's trip armed, BUCK6 in its known range → 950 mV read back, libsb's GPU
+session, reset and cores, ACPM domain 4 at 572 MHz; chains of clear-only fragment jobs over a 1024 x 1024 target on
+job slot 0, resubmitted from the 4 Hz tick (never waited for), doubled until one chain lasts 200 ms, a few pixels
+checked after each; the GPU's TMU zone counts in the SoC limits. Any failure or fault: the GPU's share stops for
+the session (logged), the CPU load goes on; an unreadable GPU probe or the Settings switch turned off stop it
+too. Every stop: job slot 0 hard-stopped and waited for (5 ms at most), a GPU soft reset, the cores off, domain 4
+to 260 MHz, then BUCK6 back (also after a failure half-way through the bring-up). The GPU's share starts once
+three workers run on High and stops only when the load stops (holding, paused, a stop), so the regulation's
+core-by-core steps do not switch vdd_g3d up and down.
+
 ### 8.5 Why Engineer OS's CPU stress stayed cool (from the code)
 
 1. **The memory kernel dominates the default mix** ("INT + FP + NEON + memory", `lab.c` kern_mask[0]): each
@@ -483,6 +538,32 @@ off path (L140): not copied. Unknown without a datasheet: FLED_CTRL2's bits, whe
 in GPIO mode, whether gpg3-5's other pin groups (hsi2c27, spi12, uart13) are in use. The first run is a phone
 test with the user present (lowest level first, the read-back logged before any write).
 
+### 9.2 A brighter "boost" light (design, 2026-11-07; needs the S2MPB02's I2C first)
+
+What the LED driver allows (leds-s2mpb02.c / .h, 9.1): the **torch** channel at 20..300 mA (FLED_CUR1 bits 3:0,
+n x 20 mA) for continuous light, and the **flash** channel at 150..1550 mA (bits 7:4, 50 + 100 n mA) with a
+hardware timer FLED_TIME1 bits 7:4 of 62.5 x (n + 1) ms that cuts the flash off by itself. Samsung's own torch
+never exceeds 180 mA (its torch table), its camera flash is 1250 mA for 500 ms.
+
+0.2 cannot do either safely: it switches the torch pin only, at whatever current the chip holds. Driving the
+flash pin without having set the flash current and its timer over I2C would mean an unknown current for an
+unknown time, so the flash pin stays untouched until the I2C bring-up (USI 0x10920000: CMU gate, SYSREG USI mode,
+pin-mux; a reviewed step with its own phone test) has written and read back CUR1 and TIME1.
+
+The choice, once I2C works:
+- **Bright** (continuous light): the torch channel at **300 mA**, the chip's own ceiling for continuous light,
+  1.7x Samsung's brightest torch (180 mA). Because the LED and the camera module heat up, Bright lasts **2 minutes**,
+  then steps down to 180 mA for a **3-minute cooldown** before Bright can be used again; it stops early when the AP
+  thermistor (the back) reaches 43 C, the battery is below 15 % or VCELL below 3.5 V. A brighter steady light is
+  not offered: the flash channel is not rated for continuous current, and a pulsed "steady" light would flicker.
+- **Beacon** (to be found, not to light the way): the flash channel at **1000 mA** for **100 ms once a second**
+  (10 % duty: 100 mA on average, a third of the torch's ceiling), with the hardware timer set to **125 ms** (n = 1),
+  so a stuck pin or a hung kernel can never hold more than one 125 ms pulse. Up to 10 minutes per session, then a
+  2-minute rest; the same temperature and battery stops; never at the same time as the torch. 1000 mA rather than
+  the camera's 1250 mA: a margin below Samsung's own setting, still about 3x the torch's brightness per pulse.
+- Both through the Light app's buttons and SOS (the beacon pattern doubles as SOS's light), the current read back
+  over I2C before the pin is driven and logged.
+
 ## 10. Later (research and design first)
 
 - **Modem (Shannon):** CP boot (firmware from the RADIO partition into the CP's reserved memory, the PMU's CP
@@ -539,6 +620,37 @@ Two things only for 0.1, for the first phone runs:
 | `sdk/` | `sbapp.h` (the API), `sbfmt.h`, the app runtime, the link script (MIT) |
 | `apps/` | the built-in apps; `clock.c` links the Utility OS's `tz.c` |
 | `tools/` | `sbos-assets.py` (fonts and icons, on the Mac), `mergeassets.py`, `mk-sba.py` (app header, pack) |
+
+### 12.5 Version 0.2.1: the 0.2 phone failure fixed (2026-11-07)
+
+The heater and the UI failed on the phone in 0.2 (14.3). Each bug was reproduced on the Mac before it was fixed,
+the fixes were reviewed by an independent adversarial review (11 findings, all fixed: 8.6), and the whole UI
+was soaked in the host preview:
+- **Reproduction**: `host.c` gained PSCI failure injection (`SBOS_HOST_SMP=timeout:1,already_on:2,fault:3,
+  parked:1,m3`). The 0.2 kernel with `timeout:1` shows the phone's log line for line ("core did not start,
+  worker 1" once a second, cores 0), only 42 frames in 260 s and a power menu that never reboots.
+- **The soak** (`starbite/host/sbos-soak.sh`): about 2 minutes of fake time per case, driven by keys and holds:
+  the heater Low → High, every Settings switch, the LED and the screen light, the stopwatch, Battery, Info, SOS
+  start and cancel, the power menu (Cancel), screen off / on, the heater on again, then the power menu's Boot
+  menu with the heater running. It passes only with a reboot from the power menu while heating, no crash, every
+  frame presented, no "event queue full", no loop turn of 200 ms or more, no A55 clock left raised, and each
+  case's own lines. Cases: clean, all8 (the M3s available: `core 7 (M3) running, 8 cores with cpu0`),
+  timeout1 (the phone's failure: the other cores start around it), timeout1noctx (the firmware drops PSCI's
+  context id: launches held), alreadyon2, fault3, parked1 (Off, then a relaunch refused at once as parked),
+  allfail (the give-up message), gpu (the GPU's share confirmed in Settings, 572 MHz, chains, stopped cleanly).
+- Host fakes made honest where they hid or invented problems: the thermistors follow the thermal model (a raw
+  value that never moved tripped the heater's stuck-sensor stop), the fake Mali runs chains on a thread (it had
+  cleared 1 GiB inside one register write), the fake ACPM moves the fake GPU PLL.
+- Image `starbite/out/starbite-os.img` 0.2.1: 5222400 bytes, sha256
+  1b7e962a63fad4381a66e114134ef3b52b18da16e52d8d5a1e02f908cbc71c07, reproducible.
+- `sbos-host-test`: 358 checks (new: the heat batch stays inside its buffer, never repeats, reports a wrong
+  reference; the GPU's DVFS levels; the stop-check decisions).
+- **A second independent review** checked the 11 fixes (10 verified, the start-record race only half closed) and
+  the new per-core start records in `crt0.S` (correct: registers, the magic, the MMU-off store and its visibility,
+  the fallback); its remaining points are fixed: the slot-identity check, launches held across sessions with shared
+  records after a missing core, the GPU starting on running (not requested) workers, `buck_restore` never
+  claiming success after a failed read, `sb_smp_start` retrying only the CPU_ON, a refused CPU_ON keeping the
+  slot, 12 FMA streams (an M3 has three FMA pipes of about 4 cycles' latency).
 
 ### 12.2 Host checks
 
@@ -687,4 +799,27 @@ restore. Compare with a run at "as S-Boot left them".
 - **T7 (heater Medium, then High, 2 minutes each):** the log now has the temperatures every 10 s and the peaks.
 - **T8 (Info):** with `/starbite/emergency.txt` on the card (copy `starbite/sbos/examples/starbite/emergency.txt`):
   the card shows; without it: "Not set up". Read only.
+
+### 14.3 Results of 0.2 (2026-11-07): the LED works; the heater and the UI failed
+
+The user: the flashlight LED works and is good; the rest was "total slop". From `build/sbos/pmsg-0.2.bin` (the
+ring had wrapped; the start of the session is lost): the heater's worker core 1 "did not start" about once a
+second for minutes, every 10 s line `cores 0, 1794/1066 MHz` (the M3 cluster still powered at its restore level
+from an earlier Medium / High run in the same boot), battery current flat around -400 mA, temperatures flat; hundreds
+of "event queue full: heat"; the screen black, a wake "super laggy", the power menu's Boot menu did nothing (a
+forced restart). Cause and fixes: 8.6 and 12.5.
+
+### 14.4 Phone tests for 0.2.1 (the user present)
+
+- **T9 (the heater, Low then High, CPU only):** Heat → Low 2 minutes → High 3 minutes → Off. Expect in the log
+  one `heater: core N (A55|M3) running, K cores with cpu0` per core (up to 8), the 10 s lines with `cores 8`,
+  the battery current far beyond -400 mA (up to about 3 A: the regulation takes a core off above 3.2 A), the
+  temperatures rising, and every Settings switch,
+  the power menu and the UI working while it heats (the soak's path). If a core fails, its line says why
+  (`no check-in within 1 s`, `PSCI says it is still on`, `parked ...`) and the heater goes on with the rest.
+- **T10 (the GPU's share, only after Engineer OS's GPU tests have passed on the phone):** Settings → "GPU in Heat
+  High (test)" → hold to allow; Heat → High. Expect `heater: gpu on, 572 MHz`, `gpu 572` in the 10 s lines, and at
+  Off `heater: gpu off`, `heater: gpu: vdd_g3d back`. Any `heater: gpu: ...` failure line stops only the GPU's
+  share. Undo: Off; a restart resets vdd_g3d anyway.
+- Then T6 (panel power) and T8 (Info) of 14.2, which 0.2 did not reach.
 

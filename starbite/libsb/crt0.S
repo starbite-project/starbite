@@ -227,9 +227,39 @@ sb_core_entry:
 sb_worker_entry:
     msr daifset, #15
     msr tpidr_el1, xzr
-    adrp x9, sb_worker_boot
+    /* x0: PSCI's context id, 0x5B5B5B00 | index when the firmware passes it. Then the core's own start record
+     * sb_worker_rec[index] (its magic checked), marked "used" at +56; else the shared sb_worker_boot (a core that
+     * boots late could take a newer core's shared record: the heater is careful in that case) */
+    lsr x11, x0, #8
+    movz x12, #0x5b5b
+    movk x12, #0x5b, lsl #16
+    cmp x11, x12
+    b.ne 1f
+    and x13, x0, #0xff
+    cbz x13, 1f
+    cmp x13, #8
+    b.hs 1f
+    adrp x9, sb_worker_rec
+    add x9, x9, :lo12:sb_worker_rec
+    add x9, x9, x13, lsl #6
+    ldr x10, [x9, #48]
+    movz x12, #0x4253
+    movk x12, #0x4f57, lsl #16
+    movk x12, #0x4b52, lsl #32
+    movk x12, #0x5245, lsl #48
+    cmp x10, x12
+    b.ne 1f
+    ldr x10, [x9]
+    cmp x10, x13
+    b.ne 1f
+    movz x10, #0x4e57
+    movk x10, #0x4f, lsl #16                /* "OWN" */
+    str x10, [x9, #56]
+    dsb sy
+    b 2f
+1:  adrp x9, sb_worker_boot
     add x9, x9, :lo12:sb_worker_boot
-    ldr x19, [x9]
+2:  ldr x19, [x9]
     adr x10, sb_worker_vectors
     msr vbar_el1, x10
     mrs x10, cpacr_el1
@@ -358,6 +388,10 @@ sb_crash_regs:
 .global sb_worker_boot
 sb_worker_boot:
     .fill 8, 8, 0
+.global sb_worker_rec
+.balign 64
+sb_worker_rec:
+    .fill 64, 8, 0
 
 .section .bss
 .balign 16
