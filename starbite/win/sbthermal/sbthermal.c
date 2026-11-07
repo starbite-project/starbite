@@ -19,7 +19,7 @@
  * Boot guard: ...\Services\sbthermal\GuardBoots counts starts that did not reach 120 s of running;
  * at 2 the driver refuses to load. Kill switches, outside the registry first (an offline hive edit
  * can be undone by Windows replaying a dirty hive's logs): the file \Windows\Starbite\sbthermal.off
- * (created from TWRP), then Start = 4 (offline with hivexsh, after checking the hive is clean).
+ * (created from TWRP), then Start = 4 (tools/win/hive-service.py disable, clean hives only).
  */
 #include <ntddk.h>
 #include "sbth_core.h"

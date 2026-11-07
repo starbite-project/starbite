@@ -95,7 +95,7 @@ driver. The last stage is research: whether DWM accepts a D3D10-only user-mode d
 
 | Driver | Kind | Binds | Writes to hardware |
 |---|---|---|---|
-| `sbthermal.sys` | WDM, non-PnP, service started at boot (Start = 1, ErrorControl = 0), cannot be unloaded | nothing (maps TMU MMIO itself) | **nothing** (read-only TMU) |
+| `sbthermal.sys` | WDM, non-PnP, service (Start = 2, auto: loaded by the SCM once C: exists, so its kill file can be checked; ErrorControl = 0), cannot be unloaded | nothing (maps TMU MMIO itself) | **nothing** (read-only TMU) |
 | `sbdisplay.sys` | WDDM 1.2 display-only (KMDOD) | `ACPI\STRB0072` | DECON: IDMA ch0 base (+0x40, +0x44 as s9p-decon), SHADOW_UPDATE_REQ (window bit), HW_SW_TRIG_CONTROL (RMW, two bits, only if not already enabled/unmasked). DSIM: payload/header FIFO, INTSRC W1C. Nothing else (the interrupt registers only once interrupts are added) |
 | `sbmali.sys` | KMDF, stage 3 test driver | `ACPI\STRB0072` instead of sbdisplay | Mali registers; PMIC BUCK6 (0x2b) and DVFS domain 4 through ACPM |
 | `sbwddm.sys` + `sbumd.dll` | WDDM 1.3 full driver + Mesa UMD | `ACPI\STRB0072` | both of the above |
@@ -142,13 +142,14 @@ signed (clang-cl, lld-link, the "Starbite Test Signing" certificate, test signin
 it. What this track adds:
 
 - `sbthermal` is a plain service: copy the `.sys` to `Windows\System32\drivers`, add
-  `Services\sbthermal` (Type 1, Start 1, ErrorControl 0, ImagePath) to the current ControlSet with
-  `starbite/win/offline-service.sh install` (hivexsh in lima, refuses a dirty hive); the SYSTEM hive and
+  `Services\sbthermal` (Type 1, Start 2, ErrorControl 0, ImagePath) to the current ControlSet with the
+  shared `tools/win/hive-service.py ... add sbthermal --oneshot 0` (hivexsh in lima, refuses a dirty hive); the SYSTEM hive and
   the file go through TWRP's ntfs-3g as for the UFS driver (NOTES 2026-10-27). ErrorControl 0: a load
   failure never stops boot.
 - `sbdisplay` is a PnP driver: it needs a driver package (INF + catalog) installed into the driver store,
-  which `pnputil` does from inside Windows; making and signing the catalog on the Mac is L0's job
-  (`tools/win/`).
+  which `pnputil` does from inside Windows (the catalog is made and signed on the Mac by `starbite/win/build.sh`
+  with `tools/win/makecat.py`; the certificate must be in Root + TrustedPublisher first; L0's planned
+  one-shot install service does both).
 There is no network under Windows on this phone (no Wi-Fi, no RDP), so a black screen cannot be fixed
 from inside Windows. Undo paths, in the order to use them:
 
@@ -156,7 +157,7 @@ from inside Windows. Undo paths, in the order to use them:
    Basic Display keeps the screen. No NTFS or registry write needed.
 2. **Kill file:** `\Windows\Starbite\<driver>.off` created from TWRP (ntfs-3g); every driver here checks it in
    `DriverEntry` and does not load. ntfs-3g may refuse a volume left dirty by a forced power-off; then 1.
-3. **Registry:** `Services\<driver>\Start` = 4 with `hivexsh`, **only on a clean hive**: after a forced
+3. **Registry:** `Services\<driver>\Start` = 4 (`tools/win/hive-service.py IN OUT disable <driver>`), **only on a clean hive**: after a forced
    power-off the SYSTEM hive is often dirty, and Windows replays SYSTEM.LOG1/LOG2 over offline edits.
    Check the base block's two sequence numbers are equal first (`tools/woa/hive.py` reads the primary
    file only).
@@ -432,8 +433,8 @@ The thermal core (`sbth_core.c`: conversion, filter, level machine) is plain C, 
 | DECON flip sequencing, dirty-rect union of two presents, rotation blits, AOR table and the DSIM packet words | host test against a fake register file that checks the order of writes and that only allowed offsets are written | same |
 | Mali page tables (AArch64 4K and legacy), VA allocator | host test: walk the tables like the GPU and compare | stage 3 |
 | Job descriptors | already: libsb's mesa-golden test | `starbite/tools/unit-test.c` |
-| Drivers compile and link for ARM64 (only ntoskrnl and HAL imports), test-signed | `starbite/win/build.sh`: clang-cl + lld-link against Microsoft's WDK/SDK 10.0.26100 NuGet packages (72 MB extracted on iCloud overflow, `WDK_KIT`); osslsigncode with the Starbite test certificate | Mac, done |
-| Offline service install / disable on a SYSTEM hive copy, with the dirty-hive check | `starbite/win/offline-service.sh` (hivexsh in lima) | lima, done on an old hive copy |
+| Drivers compile and link for ARM64 (only ntoskrnl and HAL imports, load config with the security cookie), test-signed, sbdisplay's catalog | `starbite/win/build.sh` over the shared L0 kit: `tools/win/build.sh wdm`, `sign.sh`, `makecat.py` (`$SBWIN`, WDK/SDK 10.0.26100.6584) | Mac, done |
+| Offline service install / disable on a SYSTEM hive copy, with the dirty-hive check | shared `tools/win/hive-service.py` | lima, done on an old hive copy |
 | INF syntax | `infverif` needs Windows; we check by hand and on the phone | — |
 | Mesa 26.2 + patches build for Windows ARM64 | meson cross build | lima / iCloud overflow |
 | Panfrost on v6 through the WDDM shim | Linux on the phone already runs the same Mesa on the G72: a Linux-side `pan_kmod` test of the command format (same job chains, DRM backend) | phone under Linux (main session) |
