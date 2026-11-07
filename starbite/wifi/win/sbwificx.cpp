@@ -113,8 +113,72 @@ struct BSS {
 
 struct FRAME {
     UINT32 len;
+    UINT8 l2;                       // tx: the packet's Layout.Layer2Type as Windows gave it
     UINT8 data[FRAME_MAX];
 };
+
+// ---- 802.11 <-> Ethernet (W2l): WiFiCx's data path carries 802.11 data frames with an LLC/SNAP header, as WDI's
+// did (W2j-a: Windows' first frame was 60 bytes = an ARP in 802.11 form, read as Ethernet its "ethertype" was
+// e1f5, two bytes of an address; Windows counted 0 bytes received from the Ethernet frames handed up). The radio
+// (msgbuf) takes and gives Ethernet frames.
+
+// the 802.11 data header's length, or 0 when this is not a data frame with an LLC/SNAP header
+static ULONG Dot11Header(const UINT8 *f, ULONG len)
+{
+    if (len < 24 + 8 || (f[0] & 0x0c) != 0x08)
+        return 0;                               // not a data frame
+    ULONG h = 24;
+    if ((f[1] & 3) == 3)
+        h += 6;                                 // four addresses
+    if (f[0] & 0x80) {
+        h += 2;                                 // QoS control
+        if (f[1] & 0x80)
+            h += 4;                             // HT control (order bit on a QoS frame)
+    }
+    if (len < h + 8 || f[h] != 0xaa || f[h + 1] != 0xaa || f[h + 2] != 0x03)
+        return 0;
+    return h;
+}
+
+// an 802.11 data frame (to the AP) as the Ethernet frame the radio takes; 0 if it cannot be
+static ULONG Dot11ToEth(const UINT8 *f, ULONG len, UINT8 *out)
+{
+    ULONG h = Dot11Header(f, len);
+    if (!h || (f[1] & 0x40))
+        return 0;                               // not convertible, or already protected
+    const UINT8 *da, *sa;
+    switch (f[1] & 3) {
+    case 1: da = f + 16, sa = f + 10; break;    // to the DS: A1 BSSID, A2 SA, A3 DA
+    case 2: da = f + 4, sa = f + 16; break;     // from the DS
+    case 3: da = f + 16, sa = f + 24; break;
+    default: da = f + 4, sa = f + 10; break;
+    }
+    RtlCopyMemory(out, da, 6);
+    RtlCopyMemory(out + 6, sa, 6);
+    out[12] = f[h + 6], out[13] = f[h + 7];     // the ethertype after the SNAP header
+    RtlCopyMemory(out + 14, f + h + 8, len - h - 8);
+    return 14 + len - h - 8;
+}
+
+// an Ethernet frame from the radio as an 802.11 data frame from the AP (FromDS: A1 DA, A2 BSSID, A3 SA)
+static ULONG EthToDot11(const UINT8 *e, ULONG len, const UINT8 *bssid, UINT8 *out, ULONG cap)
+{
+    if (len < 14 || len - 14 + 32 > cap)
+        return 0;
+    UINT16 t = (UINT16)(e[12] << 8 | e[13]);
+    RtlZeroMemory(out, 32);
+    out[0] = 0x08;                              // data
+    out[1] = 0x02;                              // from the DS
+    RtlCopyMemory(out + 4, e, 6);
+    RtlCopyMemory(out + 10, bssid, 6);
+    RtlCopyMemory(out + 16, e + 6, 6);
+    out[24] = 0xaa, out[25] = 0xaa, out[26] = 0x03;
+    if (t == 0x80f3 || t == 0x8137)
+        out[29] = 0xf8;                         // bridge tunnel encapsulation (802.1H)
+    out[30] = e[12], out[31] = e[13];
+    RtlCopyMemory(out + 32, e + 14, len - 14);
+    return 32 + len - 14;
+}
 
 struct DEVCTX {
     WDFDEVICE device;
@@ -171,7 +235,9 @@ struct DEVCTX {
     BSS cur;                        // the associated AP's entry, kept apart from the scan list (W2k)
     int have_cur;
     int scan_cached;                // this scan was refused: the cached list is indicated, marked cached
-    ULONG wdi_version;              // the WDI version declared to WiFiCx; the TLV parser uses the same (W2k)            // when to send WDI's link state again while associated               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
+    ULONG wdi_version;
+    ULONG rx_80211;                 // Parameters\RxFormat: 1 (default) 802.11 frames up, 0 Ethernet (W2a..W2k)
+    ULONG tx_logged;              // the WDI version declared to WiFiCx; the TLV parser uses the same (W2k)            // when to send WDI's link state again while associated               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
     ULONG link_state;
     ULONG assoc_txn_mode;           // Parameters\AssocTxn: 0 (default) the association result unsolicited, 1 the task's id               // Parameters\LinkState: 1 (default) the adapter's link reported up/down             // when to log the rx state again (1.5 s after an association)            // the core's received-frame count when the connect began
     UINT16 connect_port;
@@ -1245,21 +1311,47 @@ static void OsRx(void *ctx, unsigned, const uint8_t *frame, uint32_t len)
 // message leaves unencrypted)
 static void SendQueued(DEVCTX *d)
 {
-    static UINT8 frame[FRAME_MAX];
+    static UINT8 frame[FRAME_MAX], raw[FRAME_MAX];
     KIRQL old;
     for (;;) {
         ULONG len = 0;
+        UINT8 l2 = 0;
         KeAcquireSpinLock(&d->tx_lock, &old);
         if (d->tx_count) {
             FRAME *f = &d->tx[d->tx_head];
             len = f->len;
-            RtlCopyMemory(frame, f->data, len);
+            l2 = f->l2;
+            RtlCopyMemory(raw, f->data, len);
             d->tx_head = (d->tx_head + 1) % QLEN;
             d->tx_count--;
         }
         KeReleaseSpinLock(&d->tx_lock, old);
         if (!len)
             break;
+        {
+            ULONG h = Dot11Header(raw, len);
+            int dot11 = l2 == NetPacketLayer2TypeIeee80211 || h;
+            ULONG elen = dot11 ? Dot11ToEth(raw, len, frame) : 0;
+            if (d->tx_logged < 5) {
+                // no addresses: the frame control, the header length, the LLC/SNAP and the ethertype
+                d->tx_logged++;
+                Sayf("wificx: tx frame %lu: layout type %u, %lu bytes, frame control %02x%02x, %s, header %lu, "
+                     "LLC %02x %02x %02x %02x %02x %02x, ethertype %02x%02x -> %s %lu bytes", d->tx_logged, l2, len,
+                     raw[0], raw[1], dot11 ? "802.11" : "Ethernet", h, h ? raw[h] : 0, h ? raw[h + 1] : 0,
+                     h ? raw[h + 2] : 0, h ? raw[h + 3] : 0, h ? raw[h + 4] : 0, h ? raw[h + 5] : 0,
+                     h ? raw[h + 6] : raw[12], h ? raw[h + 7] : raw[13], dot11 ? (elen ? "Ethernet" : "NOT CONVERTED")
+                     : "as is", dot11 ? elen : len);
+            }
+            if (dot11) {
+                if (!elen) {
+                    d->tx_dropped++;
+                    continue;
+                }
+                len = elen;
+            } else {
+                RtlCopyMemory(frame, raw, len);
+            }
+        }
         UINT16 ki = 0;
         int m = EapolKey(frame, len, &ki);
         int te = d->up ? bcmw_tx(d->w, frame, len) : BCMW_E_STATE;
@@ -1404,6 +1496,7 @@ static void TxAdvance(NETPACKETQUEUE q)
                 }
                 if (len >= 14 && len <= FRAME_MAX) {
                     out->len = len;
+                    out->l2 = (UINT8)p->Layout.Layer2Type;
                     d->tx_count++;
                 }
             } else {
@@ -1454,8 +1547,21 @@ static void RxAdvance(NETPACKETQUEUE q)
             break;
         NET_FRAGMENT *frag = NetRingGetFragmentAtIndex(fr, fi);
         NET_FRAGMENT_VIRTUAL_ADDRESS *va = NetExtensionGetFragmentVirtualAddress(&c->va, fi);
-        UINT32 n = f->len <= frag->Capacity ? f->len : (UINT32)frag->Capacity;
-        RtlCopyMemory(va->VirtualAddress, f->data, n);
+        UINT32 n;
+        if (d->rx_80211) {
+            n = EthToDot11(f->data, f->len, d->bssid, (UINT8 *)va->VirtualAddress, (ULONG)frag->Capacity);
+            if (!n) {                               // does not fit: dropped
+                KeAcquireSpinLock(&d->rx_lock, &old);
+                d->rx_head = (d->rx_head + 1) % QLEN;
+                d->rx_count--;
+                d->rx_dropped++;
+                KeReleaseSpinLock(&d->rx_lock, old);
+                continue;
+            }
+        } else {
+            n = f->len <= frag->Capacity ? f->len : (UINT32)frag->Capacity;
+            RtlCopyMemory(va->VirtualAddress, f->data, n);
+        }
         InterlockedIncrement(&d->rx_up);
         if (n >= 14 && f->data[12] == 0x88 && f->data[13] == 0x8e)
             InterlockedIncrement(&d->eapol_up);
@@ -1465,8 +1571,8 @@ static void RxAdvance(NETPACKETQUEUE q)
         p->FragmentIndex = fi;
         p->FragmentCount = 1;
         p->Layout = {};
-        p->Layout.Layer2Type = NetPacketLayer2TypeEthernet;
-        p->Layout.Layer2HeaderLength = 14;
+        p->Layout.Layer2Type = d->rx_80211 ? NetPacketLayer2TypeIeee80211 : NetPacketLayer2TypeEthernet;
+        p->Layout.Layer2HeaderLength = d->rx_80211 ? 32 : 14;     // to the network header (802.11 + LLC/SNAP)
         p->Ignore = 0;
         KeAcquireSpinLock(&d->rx_lock, &old);
         d->rx_head = (d->rx_head + 1) % QLEN;
@@ -1787,9 +1893,10 @@ static NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST)
     d->bss_frame = Param(L"BssFrame", 0);
     d->link_state = Param(L"LinkState", 0);    // W2k: left to WiFiCx (Microsoft's sample does not set it)
     d->assoc_txn_mode = Param(L"AssocTxn", 0);
-    Sayf("wificx: settings: association result %s, link state %s, BSS frames %s",
+    d->rx_80211 = Param(L"RxFormat", 1);
+    Sayf("wificx: settings: association result %s, link state %s, BSS frames %s, received frames up as %s",
          d->assoc_txn_mode ? "with the task's id" : "unsolicited", d->link_state ? "reported" : "left to WiFiCx",
-         d->bss_frame == 1 ? "with MAC header" : "body");
+         d->bss_frame == 1 ? "with MAC header" : "body", d->rx_80211 ? "802.11" : "Ethernet");
     if (bcmw_init(d->w, &os, &cfg) != BCMW_OK) {
         SetParam(L"GuardBoots", guard);
         return STATUS_DEVICE_CONFIGURATION_ERROR;
@@ -1807,7 +1914,11 @@ static NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST)
         // W2k: the TLV parser/generator speaks the version declared to WiFiCx (it converts to and from the OS's);
         // W2a..W2j used the OS's (2.0.3) against a declared 2.0.0
         ULONG os = WifiDeviceGetOsWdiVersion(device);
-        d->tlv.PeerVersion = d->wdi_version && d->wdi_version < os ? d->wdi_version : os;
+#ifndef SB_TLV_OS
+#define SB_TLV_OS 1     // the OS's version (W2j-a associated with it); 0 = the declared one (W2k)
+#endif
+        // Parameters\WdiTlv 1: the OS's version, as W2a..W2j (W2j-a associated with that)
+        d->tlv.PeerVersion = !Param(L"WdiTlv", SB_TLV_OS) && d->wdi_version && d->wdi_version < os ? d->wdi_version : os;
         Sayf("wificx: WDI: declared %lx, the OS %lx, the TLVs speak %lx", d->wdi_version, os, d->tlv.PeerVersion);
     }
     NTSTATUS st = SetCapabilities(d);
