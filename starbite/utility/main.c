@@ -145,6 +145,16 @@ static void ramdisk_setup(void)
         ram_bytes = 0;
         return;
     }
+    /* the previous OS's memory must not reach a connected computer: zero what the format left (data clusters) */
+    {
+        uint64_t from = ((uint64_t)fi.data_sector + 8) * MSC_BLOCK;
+        volatile uint64_t *q = (volatile uint64_t *)(ram_base + from);
+        for (uint64_t i = 0, n = (ram_bytes - from) / 8; i < n; ++i) {
+            q[i] = 0;
+            if (!(i & 0x7fffffU))                     /* every 64 MiB */
+                wdt_feed();
+        }
+    }
     struct msc_lun *l = &lun[nlun++];
     name(l, "Starbite", "RAM disk", "SBRAM001");
     l->blocks = ram_bytes / MSC_BLOCK;
@@ -492,6 +502,7 @@ static void sh_run(const char *c)
 }
 
 static int sh_pending_action;
+static uint64_t sh_action_at;                         /* when the action runs at the latest */
 
 static uint64_t sh_num(const char *s)
 {
@@ -536,8 +547,10 @@ static void sh_input(const volatile uint8_t *d, uint32_t n)
             sh_put("\n");
             sh_line[sh_n] = 0;
             sh_run(sh_line);
-            if ((unsigned char)sh_line[0] <= 5 && sh_line[0])
+            if ((unsigned char)sh_line[0] <= 5 && sh_line[0]) {
                 sh_pending_action = sh_line[0];
+                sh_action_at = sb_ms() + 300;         /* even if the host stops reading the reply */
+            }
             sh_n = 0;
             sh_put("utility> ");
         } else if ((ch == 0x7f || ch == 0x08) && sh_n) {
@@ -551,6 +564,15 @@ static void sh_input(const volatile uint8_t *d, uint32_t n)
     }
 }
 
+/* a copy into the DMA window, not inlined: with the window's fixed address folded into the loop, the
+ * compiler built a base pointer "array - 0xa700a000" whose relocation lies outside the image (check-image) */
+static void __attribute__((noipa)) to_dma(uintptr_t dst, const char *src, unsigned n)
+{
+    volatile uint8_t *d = (volatile uint8_t *)dst;
+    for (unsigned i = 0; i < n; ++i)
+        d[i] = (uint8_t)src[i];
+}
+
 static void sh_service(void)
 {
     if (!usbd_configured())
@@ -558,10 +580,10 @@ static void sh_service(void)
     if (!usbd_busy(P_ACM_OUT))
         (void)usbd_queue(P_ACM_OUT, ACM_RX, 512);
     if (sh_out_n && !usbd_busy(P_ACM_IN)) {
-        unsigned k = sh_out_n > 1024 ? 1024 : sh_out_n;
-        volatile uint8_t *tx = (volatile uint8_t *)ACM_TX;
-        for (unsigned i = 0; i < k; ++i)
-            tx[i] = (uint8_t)sh_out[i];
+        unsigned k = sh_out_n > 511 ? 511 : sh_out_n;    /* never a multiple of 512 (high speed) */
+        if (usbd_full_speed() && k > 1 && k % 64 == 0)
+            --k;                                          /* nor of 64 (full speed): no zero-length packet */
+        to_dma(ACM_TX, sh_out, k);
         for (unsigned i = k; i < sh_out_n; ++i)
             sh_out[i - k] = sh_out[i];
         sh_out_n -= k;
@@ -578,13 +600,13 @@ static void act(int a)
         sb_boot_next("maint");
     if (a == 3)
         sb_power_off();
-    if ((a == 4 || a == 5) && !msc_busy())
+    if (a == 4 || a == 5)
         ufs_offer(a == 4);
 }
 
 static void idle_check(void)
 {
-    if (usb_ever || usbd_configured())
+    if (usb_ever || usbd_configured() || hash_job.state == HASH_RUNNING)
         return;
     uint64_t idle = ui_idle_ms();
     if (idle < IDLE_EXIT_MS)
@@ -598,6 +620,17 @@ void ut_service(void)
     struct usbd_ev e;
     wdt_feed();
     idle_check();
+    uint64_t now = sb_ms();
+    if (now - t_muic >= 500) {                        /* max77705_muic.c's schedule */
+        t_muic = now;
+        /* a replug (VBUS is forced valid in the PHY, so the core never sees it: the PHY and the core from
+         * the start, as the loader does) or a start that failed earlier */
+        if (muic_poll() == 2 || !usb_up) {
+            msc_setup(lun, nlun);
+            hid_reset();
+            usb_start();
+        }
+    }
     if (!usb_up)
         return;
     while (usbd_poll(&e)) {
@@ -618,18 +651,18 @@ void ut_service(void)
     hash_step();
     sh_hash_report();
     sh_service();
-    if (sh_pending_action && !sh_out_n && !usbd_busy(P_ACM_IN)) {
-        sb_mdelay(50);
-        act(sh_pending_action);
-        sh_pending_action = 0;
-    }
-    uint64_t now = sb_ms();
-    if (now - t_muic > 250) {
-        t_muic = now;
-        if (muic_poll() == 2 && !msc_busy())          /* a replug: PHY and core from the start */
-            usb_start();
+    if (sh_pending_action && ((!sh_out_n && !usbd_busy(P_ACM_IN)) || sb_ms() >= sh_action_at)) {
+        int a = sh_pending_action;
+        if ((a == 4 || a == 5) && msc_busy() && sb_ms() < sh_action_at + 2000) {
+            ;                                         /* UFS drives: wait for the drive transfer, 2 s at most */
+        } else {
+            sh_pending_action = 0;
+            sb_mdelay(50);
+            act(a);
+        }
     }
 }
+
 
 /* ---- UI ------------------------------------------------------------------------------------- */
 static const char *const tile_name[6] = { "USB", "Radio", "Files", "Measure", "Everyday", "Boot menu" };

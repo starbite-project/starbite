@@ -25,6 +25,7 @@ void usbd_stop(void) {}
 int usbd_poll(struct usbd_ev *ev) { (void)ev; return 0; }
 int usbd_queue(unsigned phys, uintptr_t buf, uint32_t len) { (void)phys; (void)buf; (void)len; return 0; }
 int usbd_busy(unsigned phys) { (void)phys; return 1; }
+void usbd_cancel(unsigned phys) { (void)phys; }
 int usbd_configured(void) { return host(); }
 int usbd_full_speed(void) { return 0; }
 int usbd_connected(void) { return host(); }

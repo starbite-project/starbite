@@ -260,8 +260,7 @@ static void send_csw(void)
     b[8] = (uint8_t)res; b[9] = (uint8_t)(res >> 8); b[10] = (uint8_t)(res >> 16); b[11] = (uint8_t)(res >> 24);
     b[12] = M.status;
     mcopy(p, b, 13);
-    if (usbd_queue(P_IN, CSW_BUF, 13) == 0)
-        M.state = S_CSW;
+    M.state = usbd_queue(P_IN, CSW_BUF, 13) == 0 ? S_CSW : S_IDLE;
 }
 
 /* The next data-in chunk: block I/O first, then the reply, then zeros up to dCBWDataTransferLength. */
@@ -292,8 +291,7 @@ static void next_in(void)
     for (; k < n; ++k)
         d[k] = 0;
     M.chunk = n;
-    if (usbd_queue(P_IN, DATA_BUF, n) == 0)
-        M.state = S_DIN;
+    M.state = usbd_queue(P_IN, DATA_BUF, n) == 0 ? S_DIN : S_IDLE;
 }
 
 static void next_out(void)
@@ -305,8 +303,7 @@ static void next_out(void)
     if (q > MSC_CHUNK)
         q = MSC_CHUNK;
     M.chunk = n;
-    if (usbd_queue(P_OUT, DATA_BUF, q) == 0)
-        M.state = S_DOUT;
+    M.state = usbd_queue(P_OUT, DATA_BUF, q) == 0 ? S_DOUT : S_IDLE;
 }
 
 static void start_data(int in)
@@ -416,15 +413,17 @@ void msc_event(const struct usbd_ev *e)
 
 void msc_service(void)
 {
-    if (usb_msc_reset) {                                   /* Bulk-Only Mass Storage Reset */
-        usb_msc_reset = 0;
+    if (usb_msc_reset) {                                   /* Bulk-Only Mass Storage Reset: end what is in */
+        usb_msc_reset = 0;                                 /* flight (the host clears the halts next) */
         ++msc_stats.resets;
-        if (M.state != S_CBW)
-            M.state = S_IDLE;
+        usbd_cancel(P_IN);
+        usbd_cancel(P_OUT);
+        M.state = S_IDLE;
     }
-    if (!usbd_configured() || !M.n)
+    if (!usbd_configured())
         return;
-    if (M.state == S_IDLE && !usbd_busy(P_OUT)) {
+    /* a CBW is armed whenever nothing else is queued (with no drives, commands fail cleanly: lun >= M.n) */
+    if ((M.state == S_IDLE || M.state == S_CBW) && !usbd_busy(P_OUT)) {
         if (usbd_queue(P_OUT, CBW_BUF, 512) == 0)
             M.state = S_CBW;
     }

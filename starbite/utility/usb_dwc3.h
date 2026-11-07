@@ -40,6 +40,7 @@ int usbd_poll(struct usbd_ev *ev);
  * packet size). 0 queued, -1 busy or not configured. */
 int usbd_queue(unsigned phys, uintptr_t buf, uint32_t len);
 int usbd_busy(unsigned phys);
+void usbd_cancel(unsigned phys);          /* Utility OS: end a transfer in flight */
 int usbd_configured(void);
 int usbd_full_speed(void);
 int usbd_connected(void);

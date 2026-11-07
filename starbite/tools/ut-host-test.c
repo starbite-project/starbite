@@ -23,6 +23,7 @@ static uintptr_t qbuf[16];
 static uint32_t qlen[16];
 int usbd_queue(unsigned phys, uintptr_t buf, uint32_t len) { if (busy[phys]) return -1; busy[phys] = 1; qbuf[phys] = buf; qlen[phys] = len; return 0; }
 int usbd_busy(unsigned phys) { return busy[phys]; }
+void usbd_cancel(unsigned phys) { busy[phys] = 0; }
 int usbd_configured(void) { return 1; }
 int usbd_full_speed(void) { return 0; }
 

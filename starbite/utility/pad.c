@@ -118,7 +118,7 @@ void ut_pad(void)
             moved += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
             hid_move(dx * 3 / 2, dy * 3 / 2);         /* 570 ppi panel: 1.5 Mac points per pixel */
         } else if (e.type == EV_TAP) {
-            if (in_pad && !held)
+            if (in_pad && !held && moved < 30)
                 hid_click(HID_LEFT);
             else if (!in_pad) {
                 int b = hit_btn(e.x, e.y);

@@ -146,9 +146,11 @@ int exfat_list(struct exfat *fs, const struct exfat_ent *dir, struct exfat_ent *
     unsigned namelen = 0, nl = 0;
     uint32_t c = first;
     uint64_t pos = 0;
-    for (;;) {
+    for (uint32_t guard = 0;; ++guard) {
         if (size && pos >= size)
             break;
+        if (guard > fs->clusters)
+            break;                                     /* a cycle in the FAT (a corrupt card) */
         if (!valid(fs, c))
             break;
         if (fs->rd(cl_sector(fs, c), 1U << fs->spc_shift, fs->buf))

@@ -315,7 +315,7 @@ static void configure(unsigned cfg)
             unsigned intr = usb_ep_interval(a, d.st.full_speed);
             if (p >= EPN)
                 continue;
-            if (ep_cfg(p, intr ? 3U : 2U, usb_ep_mps(a, d.st.full_speed), CFG_ACTION_INIT, intr) ||
+            if (ep_cfg(p, intr ? 3U : 2U, usb_ep_mps(a, d.st.full_speed), CFG_ACTION_INIT, intr > 13 ? 9U : intr) ||
                 depcmd(p, CMD_SETXFERRES, 1, 0, 0)) {
                 d.why = "endpoint configuration failed";
                 continue;
@@ -546,6 +546,13 @@ int usbd_queue(unsigned phys, uintptr_t buf, uint32_t len)
 }
 
 int usbd_busy(unsigned phys) { return phys < EPN && d.ep[phys].busy; }
+
+/* Utility OS: end a transfer in flight (a Bulk-Only Mass Storage Reset) */
+void usbd_cancel(unsigned phys)
+{
+    if (phys >= 2 && phys < EPN && d.ep[phys].on)
+        ep_end(phys);
+}
 int usbd_configured(void) { return d.started && d.st.config == 1; }
 int usbd_full_speed(void) { return d.st.full_speed; }
 int usbd_connected(void) { return d.connected; }

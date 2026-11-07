@@ -35,6 +35,8 @@ double cm_ln(double x)
         return 0.0 / 0.0;
     if (x == 0)
         return -1.0 / 0.0;
+    if (x != x || x > 1.7e308)
+        return x;                                     /* NaN, infinity: no endless halving */
     int k = 0;
     while (x > 1.5) { x /= 2; ++k; }
     while (x < 0.75) { x *= 2; --k; }
