@@ -12,6 +12,14 @@ track: they need LSE atomics, which the M3s lack (docs/WIN11-24H2-A55.md).
 Not for unattended boots: a CPU_ON that never returns needs a forced reset (the watchdog doesn't
 rescue it).
 
+**2026-11-07 night, ownership and a second path.** The MADT/PPTT/M3 firmware (M3*.c, Pptt*.c, pptt-patch.py,
+this document, the M3/PPTT flags in build-win-usbhost.sh and gen-0024.py) moved to the "Windows 8 cores + x64
+emulator" session (branch claude/laughing-pare-2ca469); the USB/SSDT parts stay with win-usb-host. Next to B3/B4 it
+adds **Cores8** (docs/WIN11-24H2-A55.md, "All 8 cores"): Windows keeps booting on A55 0 and the M3s join as
+parked secondaries (B2's dispatch-time parking, v1 mailboxes, MADT and DSDT _MAT updated at ExitBootServices).
+It skips the boot-CPU hand-off and its shim problem, but it depends on Windows handling the A55/M3 feature
+difference (test C3). If that fails, B3 v3 (b5ac1e78, not yet run) is the way around it.
+
 ## 1. What stands in the way
 
 | # | Problem | Evidence |
