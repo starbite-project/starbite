@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.5"
+#define SBOS_VERSION "0.5.1"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -339,4 +339,6 @@ int wifi_list(struct sbos_wifi_net *out, int max);
 int wifi_bar(void);
 void wifi_timer(unsigned id);
 int wifi_selftest_phase(int *done);
+void wifi_irq(void);                /* hw.c's interrupt drain: the radio's INTx */
+int hw_spi(unsigned intid, int on); /* one device interrupt (level, cpu0) on or off: 1 done, 0 no interrupts */
 void heatk_worker(unsigned w, void *arg);

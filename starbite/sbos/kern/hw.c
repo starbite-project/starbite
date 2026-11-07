@@ -38,6 +38,38 @@ static void vtimer_off(void)
     __asm__ volatile("msr cntv_ctl_el0, xzr\n\tisb" ::: "memory");
 }
 
+/* 0.5: one device interrupt besides the timer: the Wi-Fi chip's INTx, SPI 253 = INTID 285, level, cpu0 */
+static unsigned spi_on;
+
+int hw_spi(unsigned intid, int on)
+{
+    if (!K.irq_mode || intid < 32 || intid >= 1020)
+        return 0;
+    unsigned bit = 1U << (intid % 32);
+    if (!on) {
+        wr(GICD + 0x180 + 4 * (intid / 32), bit);         /* ICENABLER */
+        wr(GICD + 0x280 + 4 * (intid / 32), bit);         /* ICPENDR */
+        if (spi_on == intid)
+            spi_on = 0;
+        return 1;
+    }
+    uintptr_t cfg = GICD + 0xc00 + 4 * (intid / 16);
+    wr(cfg, rd(cfg) & ~(2U << (2 * (intid % 16))));       /* ICFGR: level-sensitive */
+    uintptr_t tg = GICD + 0x800 + (intid & ~3U);
+    unsigned sh = 8 * (intid & 3U);
+    uint32_t me = rd(GICD + 0x800) & 0xffU;                /* ITARGETSR0 byte 0: this CPU interface's own bit */
+    if (!me)
+        me = 1;
+    wr(tg, (rd(tg) & ~(0xffU << sh)) | (me << sh));        /* ITARGETSR: this cpu */
+    spi_on = intid;
+    wr(GICD + 0x100 + 4 * (intid / 32), bit);             /* ISENABLER */
+    if (!(rd(GICD + 0x100 + 4 * (intid / 32)) & bit)) {    /* not taken (a secure-group line?): polling only */
+        spi_on = 0;
+        return 0;
+    }
+    return 1;
+}
+
 /* every interrupt pending at the CPU interface acknowledged; the timer's disabled (the loop re-arms it) */
 static unsigned irq_drain(void)
 {
@@ -50,6 +82,8 @@ static unsigned irq_drain(void)
         if (id == INTID_VTIMER) {
             vtimer_off();
             K.timer_irqs++;
+        } else if (id == spi_on && id) {
+            wifi_irq();                     /* the radio (SPI 253): the chip masked, the tick run at once */
         } else {
             /* nothing else is enabled: a stray from before the reset; disable it again */
             if (id >= 16)

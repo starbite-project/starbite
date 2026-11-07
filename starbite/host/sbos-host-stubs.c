@@ -73,6 +73,7 @@ uint32_t hw_a55_khz(void) { return (uint32_t)(sb_a55_hz() / 1000U); }
 uint32_t hw_m3_khz(void) { int off; uint64_t h = sb_m3_hz(&off); return off ? 0 : (uint32_t)(h / 1000U); }
 int hw_m3_on(void) { return sb_m3_on(); }
 void hw_screen(int on) { panel_screen(on); }
+int hw_spi(unsigned intid, int on) { (void)intid; (void)on; return 0; }   /* the host polls */
 
 
 void hw_app_map(uintptr_t slot, int on) { (void)slot; (void)on; }

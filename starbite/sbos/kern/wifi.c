@@ -84,7 +84,13 @@ static void remember(const uint8_t *ssid, unsigned len, const char *pass)
     rem[i].len = len;
     sb_strcpy(rem[i].pass, sizeof(rem[i].pass), pass);
 }
-static int w_ready;                         /* bcmw_init succeeded on w (quiesce and leave only then) */
+static int w_ready;
+/* 0.5: the chip's INTx (SPI 253 = INTID 285); polling stays as the fallback and relaxes once interrupts arrive */
+#define WIFI_INTID 285U
+static int irq_on, irq_kicked, irq_trusted;
+static unsigned irq_n, irq_window_n, irq_storms, irq_missed;
+static uint64_t irq_window_t;
+static void irq_stop(void);                         /* bcmw_init succeeded on w (quiesce and leave only then) */
 static int dhcp_go;                         /* the link came up inside a callback: DHCP starts from the tick */
 
 /* ---- DMA memory reused across on / off (the review of 0.4: bcmw_init forgets the core's blocks, and the shim's
@@ -364,6 +370,8 @@ int wifi_power(int on)
     if (!on) {
         if (st == SBOS_WIFI_OFF)
             return 0;
+        irq_stop();
+        logn("wifi: interrupts while on: ", irq_n, "");
         if (w_ready) {
             sbnet_stop(&net);
             if (joined >= 0 && !w->dead)
@@ -391,6 +399,8 @@ int wifi_power(int on)
         memset(w, 0, bcmw_size());
     }
     w_ready = 0;
+    irq_n = irq_missed = 0;
+    irq_trusted = irq_kicked = 0;
     dk_next = dk_new = dk_reused = 0;      /* the DMA blocks of the first power-on, again in order */
 #ifdef SB_HOST
     model_reset();
@@ -444,6 +454,7 @@ int wifi_scan(void)
     scan_heard = 0;
     if (was == SBOS_WIFI_UP)
         set_state(SBOS_WIFI_SCANNING, "");  /* first: the scan's events can arrive while the command waits */
+    kt_set(KT_WIFI, 0, sb_ms(), 10, 0);    /* the tick soon: the scan's events */
     if (bcmw_scan_start(w, 0, 0, ++sync) != BCMW_OK) {
         sb_log("wifi: the scan did not start");
         if (was == SBOS_WIFI_UP)
@@ -457,6 +468,7 @@ int wifi_join(int i, const char *pass)
 {
     if (st != SBOS_WIFI_UP || i < 0 || i >= nnets)
         return SBOS_EAGAIN;
+    kt_set(KT_WIFI, 0, sb_ms(), 10, 0);    /* the tick soon (a relaxed poll may be pending) */
     if (nets[i].secure) {
         const char *k = pass && pass[0] ? pass : known_pass(nets[i].ssid, nets[i].ssid_len);
         unsigned n = k ? sb_strlen(k) : 0;
@@ -525,6 +537,46 @@ int wifi_bar(void)
     return st == SBOS_WIFI_CONNECTED ? 2 : st == SBOS_WIFI_OFF || st == SBOS_WIFI_FAILED ? 0 : 1;
 }
 
+void wifi_irq(void)
+{
+    uint64_t now = sb_ms();
+    ++irq_n;
+    if (now - irq_window_t >= 1000) {
+        irq_window_t = now;
+        irq_window_n = 0;
+    }
+    if (++irq_window_n > 2000) {            /* a storm: the line stays asserted; back to polling */
+        hw_spi(WIFI_INTID, 0);
+        irq_on = 0;
+        ++irq_storms;
+        sb_log("wifi: an interrupt storm (over 2000 in a second): interrupts off, polling");
+        return;
+    }
+    if (w && w_ready)
+        (void)bcmw_isr(w);                  /* the chip's mailbox masked until the next poll; the latch cleared */
+    irq_kicked = 1;
+    if (st != SBOS_WIFI_OFF)
+        kt_set(KT_WIFI, 0, now, 0, 0);      /* the tick (bcmw_poll) at once */
+}
+
+static void irq_start(void)
+{
+    if (irq_on || irq_storms)
+        return;
+    ex_intx(w, 1);                          /* the root complex's INTx enable (ELBI), the core's own sequence */
+    if (hw_spi(WIFI_INTID, 1)) {
+        irq_on = 1;
+        sb_log("wifi: interrupts on (SPI 253); polling stays as the fallback");
+    }
+}
+
+static void irq_stop(void)
+{
+    if (irq_on)
+        hw_spi(WIFI_INTID, 0);
+    irq_on = 0;
+}
+
 void wifi_timer(unsigned id)
 {
     (void)id;
@@ -537,6 +589,7 @@ void wifi_timer(unsigned id)
         uint64_t took = sb_ms() - t0;
         if (r < 0) {
             logn("wifi: the bring-up failed at step ", (uint64_t)step + 1U, "");
+            irq_stop();
             bcmw_quiesce(w);
             set_state(SBOS_WIFI_FAILED, "The radio did not start (logged)");
             return;
@@ -545,6 +598,7 @@ void wifi_timer(unsigned id)
         if (took >= 150)
             logn("wifi: a bring-up step took ", took, " ms");
         if (step >= BCMW_STEP_UP) {
+            irq_start();
             logn("wifi: up in ", now - t_on, " ms; scanning");
             struct ub u;
             ub_init(&u);
@@ -558,8 +612,19 @@ void wifi_timer(unsigned id)
             (void)wifi_scan();
         }
     } else {
-        bcmw_poll(w);
+        int kicked = irq_kicked;
+        irq_kicked = 0;
+        int got = bcmw_poll(w);
+        if (got > 0 && !kicked && irq_on && irq_n && irq_trusted) {
+            /* work no interrupt announced: the line is not reliable; poll fast again (logged once) */
+            irq_trusted = 0;
+            if (!irq_missed++)
+                sb_log("wifi: work arrived without an interrupt: polling at the normal rate again");
+        } else if (kicked && got > 0 && !irq_missed) {
+            irq_trusted = 1;
+        }
         if (w->dead) {
+            irq_stop();
             sb_log("wifi: the chip stopped answering: off");
             bcmw_quiesce(w);
             joined = -1;
@@ -631,7 +696,13 @@ void wifi_timer(unsigned id)
             }
         }
     }
-    kt_set(KT_WIFI, 0, sb_ms(), st == SBOS_WIFI_STARTING ? 10U : K.screen_on ? TICK_ON_MS : TICK_OFF_MS, 0);
+    int busy = st == SBOS_WIFI_STARTING || st == SBOS_WIFI_SCANNING || st == SBOS_WIFI_JOINING || st == SBOS_WIFI_DHCP ||
+               join_pending || dhcp_go;
+    uint32_t every = st == SBOS_WIFI_STARTING ? 10U : K.screen_on ? TICK_ON_MS : TICK_OFF_MS;
+    if (irq_on && irq_n && irq_trusted && !busy)
+        every = st == SBOS_WIFI_CONNECTED ? 250U : 1000U;   /* interrupts wake it; sbnet's timers need 250 ms */
+    if (st != SBOS_WIFI_OFF && st != SBOS_WIFI_FAILED && !kt_pending(KT_WIFI, 0))
+        kt_set(KT_WIFI, 0, sb_ms(), every, 0);
 }
 
 /* the self test: on, the bring-up, one scan, off (never a join): 1 passed, 0 failed */
@@ -657,6 +728,10 @@ int wifi_selftest_phase(int *done)
     if (st == SBOS_WIFI_UP) {
         logn("selftest: wifi: up and scanned in ", sb_ms() - t_on, " ms");
         logn("selftest: wifi: networks heard: ", (uint64_t)nnets, " (names not logged)");
+        logn("selftest: wifi: interrupts during the bring-up and scan: ", irq_n,
+             irq_storms ? " (a STORM: off, polling)" : irq_on ? " (on)" : " (polling)");
+        if (irq_missed)
+            logn("selftest: wifi: work found without an interrupt, times: ", irq_missed, "");
         wifi_power(0);
         *done = 1;
         return 1;
