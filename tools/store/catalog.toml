@@ -491,7 +491,7 @@ flags = ["hidden"]
 [[entry]]
 key = "win11-m3probe"
 name = "Windows 11 (big-core probe)"
-version = "B3a: M3 cores run with the UEFI context (test only) + SBGPU"
+version = "B3a: M3 run test (UEFI context) + SBGPU"
 category = "lab"
 method = "uefi"
 tag = "lab"
