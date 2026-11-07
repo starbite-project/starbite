@@ -18,6 +18,7 @@
 
 [Sources]
   UsbDxe.c
+  StarbiteLog.h
   s9usb/s9usb.h
   s9usb/s9usb_io.h
   s9usb/s9usb_phy.c

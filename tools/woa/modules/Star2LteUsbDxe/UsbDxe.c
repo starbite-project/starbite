@@ -29,8 +29,8 @@
                        only when nothing powers VBUS and the phone isn't a sink at boot; after
                        that the MCU decides alone by its Type-C rules until its next reset
 
-  Log: every line starts with "=USB" and goes to the pmsg ring at 0xFED14000 (patch 0003's
-  format) and to DEBUG.
+  Log: every line starts with "=USB" (StarbiteLog.h: the pmsg ring, the zone-0 evidence ring that
+  survives a Windows session, DEBUG).
 
   Copyright (c) 2026, Starbite. SPDX-License-Identifier: GPL-2.0-only
 **/
@@ -45,6 +45,7 @@
 #include <Library/UefiBootServicesTableLib.h>
 
 #include "s9usb/s9usb.h"
+#include "StarbiteLog.h"
 
 #ifndef STARBITE_USB_ROLE
 #define STARBITE_USB_ROLE 0
@@ -65,7 +66,7 @@
 #error STARBITE_USB_VBUS must be 0 (off) or 1 (MCU auto-VBUS)
 #endif
 
-#define USB_VERSION  3
+#define USB_VERSION  4
 #define USB_STR2(x)  #x
 #define USB_STR(x)   USB_STR2 (x)
 // also the marker tools/woa/build-win-usbhost.sh looks for in each variant's module
@@ -88,64 +89,6 @@ STATIC EFI_GUID  mBlobUfn = {
   0x53534454, 0x5342, 0x4754, { 'S', 'B', 'U', 'S', 'B', 'U', 'F', 'N' }
 };
 
-#define STARBITE_RING_BASE  0xFED14000UL
-#define STARBITE_RING_CAP   0x3F00u
-
-STATIC
-VOID
-RingWrite (
-  IN CONST CHAR8  *Buffer,
-  IN UINTN        NumberOfBytes
-  )
-{
-  volatile UINT32  *W = (volatile UINT32 *)STARBITE_RING_BASE;
-  volatile UINT8   *B = (volatile UINT8 *)(STARBITE_RING_BASE + 12);
-  UINTN            Index;
-  UINT32           Pos;
-
-  if ((W[0] != 0x43474244u) || (W[1] >= STARBITE_RING_CAP) || (W[2] > STARBITE_RING_CAP)) {
-    W[0] = 0x43474244u;
-    W[1] = 0;
-    W[2] = 0;
-  }
-
-  for (Index = 0; Index < NumberOfBytes; Index++) {
-    if (W[2] < STARBITE_RING_CAP) {
-      Pos  = W[2];
-      W[2] = Pos + 1;
-      W[1] = (Pos + 1) % STARBITE_RING_CAP;
-    } else {
-      Pos  = W[1];
-      W[1] = (Pos + 1) % STARBITE_RING_CAP;
-    }
-
-    B[Pos] = (UINT8)Buffer[Index];
-  }
-
-  __asm__ __volatile__ ("dsb sy" ::: "memory");
-}
-
-STATIC
-VOID
-EFIAPI
-Log (
-  IN CONST CHAR8  *Format,
-  ...
-  )
-{
-  CHAR8    Line[200];
-  VA_LIST  Args;
-  UINTN    Len;
-
-  VA_START (Args, Format);
-  Len = AsciiVSPrint (Line, sizeof (Line) - 1, Format, Args);
-  VA_END (Args);
-  Line[Len++] = '\n';
-  Line[Len]   = 0;
-  RingWrite (Line, Len);
-  DEBUG ((DEBUG_INFO, "%a", Line));
-}
-
 STATIC
 VOID
 UsbDelay (
@@ -167,7 +110,7 @@ Enable (
 
   Handle = NULL;
   Status = gBS->InstallProtocolInterface (&Handle, Blob, EFI_NATIVE_INTERFACE, NULL);
-  Log ("=USB enable %a: %r", Name, Status);
+  SbLog ("=USB enable %a: %r", Name, Status);
 }
 
 //
@@ -179,7 +122,7 @@ Fail (
   IN CONST CHAR8  *Why
   )
 {
-  Log ("=USB FAIL %a (no USB blob enabled)", Why);
+  SbLog ("=USB FAIL %a (no USB blob enabled)", Why);
   return EFI_UNSUPPORTED;
 }
 
@@ -265,7 +208,7 @@ UsbDxeEntry (
   int                     VbusAnswered;
   enum s9usb_role         Role;
 
-  Log ("=USB v%d %a", USB_VERSION, USB_POLICY);
+  SbLog ("=USB v%d %a", USB_VERSION, USB_POLICY);
 
   for (Index = 0; Index < S9_NBLK; Index++) {
     Status = MapMmio (s9usb_phys[Index], s9usb_size[Index]);
@@ -284,14 +227,14 @@ UsbDxeEntry (
   // USBCON read before the PHY init touches it.
   //
   s9usb_snapshot (&P, Snap, S9USB_SNAP_CLOCKS);
-  Log (
+  SbLog (
     "=USB found top=%08x/%08x/%08x fsys=%08x/%08x/%08x/%08x pmu=%08x/%08x",
     Snap[0], Snap[1], Snap[2], Snap[3], Snap[4], Snap[5], Snap[6], Snap[12], Snap[13]
     );
-  Log ("=USB found qch=%08x/%08x/%08x/%08x/%08x", Snap[7], Snap[8], Snap[9], Snap[10], Snap[11]);
+  SbLog ("=USB found qch=%08x/%08x/%08x/%08x/%08x", Snap[7], Snap[8], Snap[9], Snap[10], Snap[11]);
   s9usb_clocks_on (&P);
   s9usb_snapshot (&P, Snap, S9USB_SNAP_N);
-  Log (
+  SbLog (
     "=USB found usbcon ver=%08x link=%08x clkrst=%08x utmi=%08x hsp=%08x tune=%08x test=%08x",
     Snap[14], Snap[15], Snap[16], Snap[17], Snap[18], Snap[19], Snap[20]
     );
@@ -304,12 +247,12 @@ UsbDxeEntry (
   Sink  = 0;
   if (MaxUp) {
     Sink = s9usb_max_vbusdet (&Max) && (s9usb_max_ccstat (&Max) == S9USB_CC_SINK);
-    Log (
+    SbLog (
       "=USB max hw=%02x fw=%02x usbc1=%02x bc=%02x cc0=%02x ccstat=%d vbusdet=%d",
       Max.hw, Max.fw, Max.usbc1, Max.bc, Max.cc0, s9usb_max_ccstat (&Max), s9usb_max_vbusdet (&Max)
       );
   } else {
-    Log ("=USB max: no answer on HSI2C 0x14360000 (bus=%d i2c_errors=%d)", Max.bus, Max.errors);
+    SbLog ("=USB max: no answer on HSI2C 0x14360000 (bus=%d i2c_errors=%d)", Max.bus, Max.errors);
   }
 
   if (STARBITE_USB_ROLE == 1) {
@@ -326,7 +269,7 @@ UsbDxeEntry (
     Reason = MaxUp ? "auto: not a sink with VBUS" : "auto: MCU silent";
   }
 
-  Log ("=USB role %a (%a)", Role == S9USB_HOST ? "host" : "device", Reason);
+  SbLog ("=USB role %a (%a)", Role == S9USB_HOST ? "host" : "device", Reason);
 
   //
   // Controller: PHY (the role's column), DWC3 core (the role), xHCI checks in host role.
@@ -337,7 +280,7 @@ UsbDxeEntry (
   }
 
   s9usb_snapshot (&P, Snap, S9USB_SNAP_N);
-  Log (
+  SbLog (
     "=USB phy link=%08x clkrst=%08x utmi=%08x hsp=%08x tune=%08x test=%08x line=%a",
     Snap[15], Snap[16], Snap[17], Snap[18], Snap[19], Snap[20], s9usb_phy_line (&P)
     );
@@ -347,7 +290,7 @@ UsbDxeEntry (
     return Fail (Why);
   }
 
-  Log (
+  SbLog (
     "=USB dwc3 snpsid=%08x gctl=%08x gusb2=%08x gusb3=%08x guctl=%08x guctl1=%08x bus0=%08x fladj=%08x%a",
     Dwc.snpsid, Dwc.gctl, Dwc.gusb2, Dwc.gusb3, Dwc.guctl, Dwc.guctl1, Dwc.gsbuscfg0, Dwc.gfladj,
     Dwc.was_host ? " (was a host: halted + core reset)" : ""
@@ -362,7 +305,7 @@ UsbDxeEntry (
       return Fail (Why);
     }
 
-    Log (
+    SbLog (
       "=USB xhci caplen=%x hciver=%04x ports=%d ac64=%d usbsts=%08x usb2=%d+%d usb3=%d+%d",
       Xhci.caplen, Xhci.hciver, Xhci.ports, Xhci.ac64, Xhci.usbsts,
       Xhci.usb2_first, Xhci.usb2_count, Xhci.usb3_first, Xhci.usb3_count
@@ -378,12 +321,12 @@ UsbDxeEntry (
     VbusOn = STARBITE_USB_VBUS && (Role == S9USB_HOST);
     if (VbusOn && (s9usb_max_vbusdet (&Max) || (s9usb_max_ccstat (&Max) == S9USB_CC_SINK))) {
       VbusOn = 0;
-      Log ("=USB vbus policy 1 -> 0 for this boot: vbusdet=%d ccstat=%d", s9usb_max_vbusdet (&Max), s9usb_max_ccstat (&Max));
+      SbLog ("=USB vbus policy 1 -> 0 for this boot: vbusdet=%d ccstat=%d", s9usb_max_vbusdet (&Max), s9usb_max_ccstat (&Max));
     }
 
     Routed       = s9usb_max_route_usb (&P, &Max);
     VbusAnswered = s9usb_max_auto_vbus (&P, &Max, VbusOn);
-    Log (
+    SbLog (
       "=USB muic ctrl1=%02x (%a) op54 data=%02x answer=%02x %02x %02x %02x (%a) i2c_errors=%d",
       (UINT32)(Max.ctrl1 & 0xFF), Routed ? "routed" : "NOT routed", VbusOn ? 2 : 0,
       Max.answer[0], Max.answer[1], Max.answer[2], Max.answer[3],
@@ -401,9 +344,9 @@ UsbDxeEntry (
   } else if ((STARBITE_USB_ACPI == 2) && (Role == S9USB_DEVICE)) {
     Enable (&mBlobUfn, "SBUSBUFN");
   } else {
-    Log ("=USB no blob: layout %d has nothing for the %a role", STARBITE_USB_ACPI, Role == S9USB_HOST ? "host" : "device");
+    SbLog ("=USB no blob: layout %d has nothing for the %a role", STARBITE_USB_ACPI, Role == S9USB_HOST ? "host" : "device");
   }
 
-  Log ("=USB ready, line=%a", s9usb_phy_line (&P));
+  SbLog ("=USB ready, line=%a", s9usb_phy_line (&P));
   return EFI_SUCCESS;
 }

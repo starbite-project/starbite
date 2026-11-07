@@ -31,7 +31,7 @@ under a role-switch parent. Microsoft's ACPI guidance for SoC USB: the xHCI cont
 |---|---|---|---|
 | **s9usb** (shared) | `starbite/s9usb/` | Portable C, no OS: USB clocks + PMU isolation, the USB 2.0 PHY (device or host column), the DWC3 core init common to both roles, the MAX77705 bus (HSI2C 0x14360000) with the Type-C MCU's opcodes. Register access through a small platform table (`s9usb.h`) so UEFI, a KMDF driver and libsb can all use it | everywhere |
 | **Star2LteUsbDxe** | `tools/woa/modules/Star2LteUsbDxe/` | UEFI DXE module. Maps the register blocks the firmware leaves unmapped, reads the Type-C state, picks the boot role (host/device/auto), runs s9usb, checks the xHCI in host role, routes D+/D- to the AP, sets the VBUS policy, logs `=USB` lines, and **enables** the one gated USB blob of its layout once every check passed (section 4.1) | once per Windows boot |
-| **Star2LteSsdtDxe** (shared with the GPU track) | `tools/woa/modules/Star2LteSsdtDxe/` | Installs every Starbite SSDT blob in the firmware volume at ReadyToBoot (section 4.1), logs `=SSDT` lines | once per Windows boot |
+| **Star2LteSsdtDxe** (shared with the GPU track) | `tools/woa/modules/Star2LteSsdtDxe/` | Installs every Starbite SSDT blob in the firmware volume during DXE dispatch (section 4.1), logs `=SSDT` lines | once per Windows boot |
 | **USB blobs** (gated) | `tools/woa/acpi/UsbXhc.asl` (`SBUSBXHC`), `UsbUrs.asl` (`SBUSBURS`), `UsbUfn.asl` (`SBUSBUFN`) | Layout A: `\_SB.USB0` `PNP0D10` (Windows' xHCI driver, no INF of ours). Layout B: `\_SB.URS0` `PNP0CA1` with host and function children. Layout C: `\_SB.UFN0` `INT3445` (function only) (section 5) | read by Windows |
 | **Report script** | `tools/woa/winpe/usb-report.ps1` (+ `usb-report.cmd` for the Startup folder) | At logon: USB devices, driver bindings, the controller's resources, problem codes and ACPI path, every ACPI device, written to `C:\Starbite\usb\` | Windows |
 | Next: **Star2LteUsbc** (KMDF) | stage H3 | MAX77705 at runtime over its own HSI2C mapping: D+/D- re-routing after each attach, VBUS when the MCU won't, the PHY's role column, a UCM connector that tells URS the role | Windows |
@@ -190,22 +190,47 @@ without the blob is the kill switch.
 |---|---|
 | Table | `DefinitionBlock ("", "SSDT", 2, "STRBTE", "<Table ID>", rev)`. OEM ID **STRBTE**; the **OEM Table ID is the blob's name** and must be unique (taken: `SBUSBXHC`, `SBUSBURS`, `SBGPU`). Self-contained: only `External`s of what the release DSDT has (`\_SB`) |
 | FFS file | type FREEFORM (0x02); name GUID **`53534454-5342-5445-<the 8 Table ID bytes>`** for a plain blob, **`53534454-5342-4754-<...>`** for a gated one (`ssdt-ffs.py [--gated] --guid X.aml` prints it); a RAW section with the table, a UI section `SSDT <id>` / `Gated SSDT <id>` |
-| Installed | at ReadyToBoot, **TPL_CALLBACK - 1**, through `EFI_ACPI_TABLE_PROTOCOL.InstallAcpiTable`, checksum recomputed; at most 32 blobs |
+| Installed | **during DXE dispatch**, through `EFI_ACPI_TABLE_PROTOCOL.InstallAcpiTable`, checksum recomputed; at most 32 blobs. Plain blobs at the installer's entry; gated blobs at its entry if already enabled, else from a protocol notification the moment their driver enables them (dispatch order doesn't matter) |
 | Skipped | not "SSDT"; Length < 36 or larger than the section; OEM ID not STRBTE; Table ID ≠ the GUID's last 8 bytes; a Table ID already installed |
-| Plain blob (`ssdt-ffs.py X.aml`) | installed unless **vetoed**: a driver that finds its hardware unusable installs a NULL protocol whose GUID is the blob's file GUID (`gBS->InstallProtocolInterface (&h, &BlobGuid, EFI_NATIVE_INTERFACE, NULL)`) before ReadyToBoot. A plain blob without a driver is always installed (fine for memory-only devices such as the GPU's) |
+| Plain blob (`ssdt-ffs.py X.aml`) | installed unless **vetoed**: a driver that finds its hardware unusable installs a NULL protocol whose GUID is the blob's file GUID (`gBS->InstallProtocolInterface (&h, &BlobGuid, EFI_NATIVE_INTERFACE, NULL)`); a veto that comes after the install uninstalls the table again. A plain blob without a driver is always installed (fine for memory-only devices such as the GPU's) |
 | Gated blob (`ssdt-ffs.py --gated X.aml`) | installed only when **enabled**: its driver installs that NULL protocol after checking the hardware. No driver, or a failed check: not installed. Fails closed: use it for anything whose clocks or power a driver must turn on first |
-| Log | one line per blob in the pmsg ring (0xFED14000, patch 0003's format) and DEBUG: `=SSDT installed <id> (<len> bytes, rev <n>)`, `=SSDT skip <id>: <reason>`, `=SSDT done: <n> installed of <m> blobs`. Read from TWRP: `pmsg-ramoops-0`, `grep -a '=SSDT'` |
+| Log | one line per blob (`=SSDT installed <id> (<len> bytes, rev <n>[, gated], <when>)`, `=SSDT skip <id>: <reason>`, `=SSDT dispatch done: ...`) through `StarbiteLog.h` (section 4.2) |
 
-**Why ReadyToBoot at TPL_CALLBACK - 1:** the release's `Star2LteGpioHandoffDxe` (touch, file
-98100003-...) checks at ReadyToBoot, TPL_CALLBACK, that the XSDT holds exactly its 4 expected
-tables (`GpioHandoffDxe.c`: `if(entries!=4)AUTH_FAIL(6)`) and publishes nothing otherwise. Any
-SSDT installed earlier (at dispatch) would cost Windows its touch screen. A lower TPL runs after
-every TPL_CALLBACK notification of the event group, so the blobs come after the GPIO module's own.
+**Why during dispatch (v3; v2 used ReadyToBoot at TPL_CALLBACK - 1).** The first phone run (T1,
+2026-11-07, `win11-usbh0` with v2) booted Windows, but Windows' Enum had neither the USB controller
+nor the GPU track's plain `SBGPU` device: nothing installed at ReadyToBoot reached Windows. The
+same holds for the release's own GPIO module, whose ReadyToBoot SSDTs (`RWOA0761`, `RWOA0003`, ...)
+appear in no hive we have, while the platform module's dispatch-time SSDT `RAMRET01` (`RWOA03E0`)
+is in every one. The release modules "P" and the PSCI EL2 shim reference ReadyToBoot and the ACPI
+2.0 configuration table but not the table protocol: they work on the published tables at
+ReadyToBoot, so tables added after them are lost. The GPIO module's exactly-4-tables check that v2
+waited for fails on every boot anyway (the platform installs FACP, GTDT, APIC, PPTT and RAMRET01:
+5), so installing during dispatch takes nothing away; touch comes from the DSDT's `TSP0`
+(`SCSY0761`). Open risk: if P or the shim insisted on an exact table count, the extra tables would
+upset them; RAMRET01 shows they live with at least 5. T1 again checks the CPU count (4) and that
+Windows starts.
 
 **USB's blobs are gated** (Star2LteUsbDxe enables one, after every check): layout A →
 `SBUSBXHC` in host role; layout B → `SBUSBURS`; layout C → `SBUSBUFN` in device role. Any failure,
 no USB module in the image, or a role the layout doesn't cover: nothing is enabled, and Windows
 sees no USB controller. Each image also carries only its layout's blob.
+
+### 4.2 Logs that survive a Windows session
+
+During Windows, Windows' own UFS driver fills the pmsg ring (`=UFSWRIT` lines), so the modules'
+lines there are gone by the next TWRP visit (T1: 63 `=UFSWRIT` lines, nothing else). `StarbiteLog.h`
+therefore writes every line to three places: the pmsg ring (as before), an **evidence ring in
+ramoops zone 0** (0xFED10000, the same "DBGC" header format; Windows doesn't write it), and DEBUG.
+The evidence ring: data capped at 0x3700 bytes so it ends at 0xFED1370C, below the woa records
+(low WDT 0xFED13800, RWD1 0xFED13D80, P3 0xFED13E80); never wraps; reset by the first line of each
+boot (a per-boot protocol flag). The page tables map 0xFED10000..0xFED20000 (PlatformMemoryMapLib's
+ramoops window).
+
+**Reading it:** after Windows, restart into the **loader menu** (not TWRP first) and run
+`fastboot oem log dmesg` then `fastboot get_staged <file>`: the loader's `fbp_log` shows the
+zone-0 ring as text. TWRP's 4.9 ramoops discards a zone-0 record without a Linux kmsg header, so
+reading in TWRP first loses it. The loader's crash check only counts zone 0 as Linux evidence when
+it starts with `====` after a Linux launch; these lines start with `=SB`/`=USB`/`=SSDT`.
 
 ## 5. Role: one controller, host and device (with the Starbite Link, L1)
 
@@ -413,11 +438,12 @@ handoff still published its devices). Undo: delete both files. Without it, photo
 | T5 | vbus1 | With a power meter if available: unplug everything; the port should show no voltage. Then Restart into TWRP before any charger is plugged | 0 V with nothing attached | VBUS stays on with nothing attached: unplug, report |
 
 **Logs after the tests** (next boot to TWRP, as for the earlier Windows runs): the pstore ring
-(`pmsg-ramoops-0`) holds both modules' lines, `grep -a -E '=USB|=SSDT'`:
+(`pmsg-ramoops-0`) holds both modules' lines unless Windows' UFS driver flooded it; the zone-0
+evidence ring (section 4.2, `fastboot oem log dmesg` at the menu, before TWRP) always does:
 
 ```
-=SSDT v2 armed for ReadyToBoot: Success
-=USB v3 usb-policy role=0 acpi=0 vbus=<0|1>
+=SSDT v3 at dispatch
+=USB v4 usb-policy role=0 acpi=0 vbus=<0|1>
 =USB found top=../../.. fsys=../../../.. pmu=../..           (clocks and PMU as the loader left them)
 =USB found qch=../../../../..
 =USB found usbcon ver=.. link=.. clkrst=.. utmi=.. hsp=.. tune=.. test=..
@@ -430,12 +456,12 @@ handoff still published its devices). Undo: delete both files. Without it, photo
 =USB muic ctrl1=09 (routed) op54 data=<00|02> answer=54 .. .. .. (answered) i2c_errors=0
 =USB enable SBUSBXHC: Success
 =USB ready, line=..
-=SSDT installed SBUSBXHC (120 bytes, rev 1, gated)
-=SSDT done: 1 installed of 1 blobs
+=SSDT installed SBUSBXHC (120 bytes, rev 1, gated, enabled by its driver)   (or "at dispatch")
+=SSDT dispatch done: ...
 ```
 
-A failure shows as `=USB FAIL <step>: <why> (no USB blob enabled)`, and then
-`=SSDT skip SBUSBXHC: gated, not enabled by its driver`.
+A failure shows as `=USB FAIL <step>: <why> (no USB blob enabled)`, and the SSDT installer's line
+`=SSDT SBUSBXHC waits for its driver's enable at dispatch` is then the last word on that blob.
 
 **Undo:** put `starbite-uefi-src38.bin` back as the Windows UEFI. The module writes no variables,
 files or storage. The MCU keeps its auto-VBUS setting until its next reset (TWRP's shutdown) or the

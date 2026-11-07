@@ -4,7 +4,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 
 --- /dev/null
 +++ b/Platform/Star2LtePkg/Drivers/Star2LteUsbDxe/Star2LteUsbDxe.inf
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,46 @@
 +## @file
 +#  Star2LteUsbDxe: the S9's DWC3 in the boot role (host or device) for Windows; enables the one
 +#  gated USB SSDT blob of its layout once its checks passed (docs/WIN11-USB.md). Added to the release DXE volume with
@@ -25,6 +25,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +
 +[Sources]
 +  UsbDxe.c
++  StarbiteLog.h
 +  s9usb/s9usb.h
 +  s9usb/s9usb_io.h
 +  s9usb/s9usb_phy.c
@@ -52,7 +53,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +  *_*_*_CC_FLAGS = -DS9USB_EDK2
 --- /dev/null
 +++ b/Platform/Star2LtePkg/Drivers/Star2LteUsbDxe/UsbDxe.c
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,352 @@
 +/** @file
 +  Star2LteUsbDxe: brings up the S9's USB controller for Windows in the boot role, host or device
 +  (docs/WIN11-USB.md). Installs no ACPI table itself: the USB blobs are gated, and Star2LteSsdtDxe
@@ -84,8 +85,8 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +                       only when nothing powers VBUS and the phone isn't a sink at boot; after
 +                       that the MCU decides alone by its Type-C rules until its next reset
 +
-+  Log: every line starts with "=USB" and goes to the pmsg ring at 0xFED14000 (patch 0003's
-+  format) and to DEBUG.
++  Log: every line starts with "=USB" (StarbiteLog.h: the pmsg ring, the zone-0 evidence ring that
++  survives a Windows session, DEBUG).
 +
 +  Copyright (c) 2026, Starbite. SPDX-License-Identifier: GPL-2.0-only
 +**/
@@ -100,6 +101,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +#include <Library/UefiBootServicesTableLib.h>
 +
 +#include "s9usb/s9usb.h"
++#include "StarbiteLog.h"
 +
 +#ifndef STARBITE_USB_ROLE
 +#define STARBITE_USB_ROLE 0
@@ -120,7 +122,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +#error STARBITE_USB_VBUS must be 0 (off) or 1 (MCU auto-VBUS)
 +#endif
 +
-+#define USB_VERSION  3
++#define USB_VERSION  4
 +#define USB_STR2(x)  #x
 +#define USB_STR(x)   USB_STR2 (x)
 +// also the marker tools/woa/build-win-usbhost.sh looks for in each variant's module
@@ -143,64 +145,6 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +  0x53534454, 0x5342, 0x4754, { 'S', 'B', 'U', 'S', 'B', 'U', 'F', 'N' }
 +};
 +
-+#define STARBITE_RING_BASE  0xFED14000UL
-+#define STARBITE_RING_CAP   0x3F00u
-+
-+STATIC
-+VOID
-+RingWrite (
-+  IN CONST CHAR8  *Buffer,
-+  IN UINTN        NumberOfBytes
-+  )
-+{
-+  volatile UINT32  *W = (volatile UINT32 *)STARBITE_RING_BASE;
-+  volatile UINT8   *B = (volatile UINT8 *)(STARBITE_RING_BASE + 12);
-+  UINTN            Index;
-+  UINT32           Pos;
-+
-+  if ((W[0] != 0x43474244u) || (W[1] >= STARBITE_RING_CAP) || (W[2] > STARBITE_RING_CAP)) {
-+    W[0] = 0x43474244u;
-+    W[1] = 0;
-+    W[2] = 0;
-+  }
-+
-+  for (Index = 0; Index < NumberOfBytes; Index++) {
-+    if (W[2] < STARBITE_RING_CAP) {
-+      Pos  = W[2];
-+      W[2] = Pos + 1;
-+      W[1] = (Pos + 1) % STARBITE_RING_CAP;
-+    } else {
-+      Pos  = W[1];
-+      W[1] = (Pos + 1) % STARBITE_RING_CAP;
-+    }
-+
-+    B[Pos] = (UINT8)Buffer[Index];
-+  }
-+
-+  __asm__ __volatile__ ("dsb sy" ::: "memory");
-+}
-+
-+STATIC
-+VOID
-+EFIAPI
-+Log (
-+  IN CONST CHAR8  *Format,
-+  ...
-+  )
-+{
-+  CHAR8    Line[200];
-+  VA_LIST  Args;
-+  UINTN    Len;
-+
-+  VA_START (Args, Format);
-+  Len = AsciiVSPrint (Line, sizeof (Line) - 1, Format, Args);
-+  VA_END (Args);
-+  Line[Len++] = '\n';
-+  Line[Len]   = 0;
-+  RingWrite (Line, Len);
-+  DEBUG ((DEBUG_INFO, "%a", Line));
-+}
-+
 +STATIC
 +VOID
 +UsbDelay (
@@ -222,7 +166,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +
 +  Handle = NULL;
 +  Status = gBS->InstallProtocolInterface (&Handle, Blob, EFI_NATIVE_INTERFACE, NULL);
-+  Log ("=USB enable %a: %r", Name, Status);
++  SbLog ("=USB enable %a: %r", Name, Status);
 +}
 +
 +//
@@ -234,7 +178,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +  IN CONST CHAR8  *Why
 +  )
 +{
-+  Log ("=USB FAIL %a (no USB blob enabled)", Why);
++  SbLog ("=USB FAIL %a (no USB blob enabled)", Why);
 +  return EFI_UNSUPPORTED;
 +}
 +
@@ -320,7 +264,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +  int                     VbusAnswered;
 +  enum s9usb_role         Role;
 +
-+  Log ("=USB v%d %a", USB_VERSION, USB_POLICY);
++  SbLog ("=USB v%d %a", USB_VERSION, USB_POLICY);
 +
 +  for (Index = 0; Index < S9_NBLK; Index++) {
 +    Status = MapMmio (s9usb_phys[Index], s9usb_size[Index]);
@@ -339,14 +283,14 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +  // USBCON read before the PHY init touches it.
 +  //
 +  s9usb_snapshot (&P, Snap, S9USB_SNAP_CLOCKS);
-+  Log (
++  SbLog (
 +    "=USB found top=%08x/%08x/%08x fsys=%08x/%08x/%08x/%08x pmu=%08x/%08x",
 +    Snap[0], Snap[1], Snap[2], Snap[3], Snap[4], Snap[5], Snap[6], Snap[12], Snap[13]
 +    );
-+  Log ("=USB found qch=%08x/%08x/%08x/%08x/%08x", Snap[7], Snap[8], Snap[9], Snap[10], Snap[11]);
++  SbLog ("=USB found qch=%08x/%08x/%08x/%08x/%08x", Snap[7], Snap[8], Snap[9], Snap[10], Snap[11]);
 +  s9usb_clocks_on (&P);
 +  s9usb_snapshot (&P, Snap, S9USB_SNAP_N);
-+  Log (
++  SbLog (
 +    "=USB found usbcon ver=%08x link=%08x clkrst=%08x utmi=%08x hsp=%08x tune=%08x test=%08x",
 +    Snap[14], Snap[15], Snap[16], Snap[17], Snap[18], Snap[19], Snap[20]
 +    );
@@ -359,12 +303,12 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +  Sink  = 0;
 +  if (MaxUp) {
 +    Sink = s9usb_max_vbusdet (&Max) && (s9usb_max_ccstat (&Max) == S9USB_CC_SINK);
-+    Log (
++    SbLog (
 +      "=USB max hw=%02x fw=%02x usbc1=%02x bc=%02x cc0=%02x ccstat=%d vbusdet=%d",
 +      Max.hw, Max.fw, Max.usbc1, Max.bc, Max.cc0, s9usb_max_ccstat (&Max), s9usb_max_vbusdet (&Max)
 +      );
 +  } else {
-+    Log ("=USB max: no answer on HSI2C 0x14360000 (bus=%d i2c_errors=%d)", Max.bus, Max.errors);
++    SbLog ("=USB max: no answer on HSI2C 0x14360000 (bus=%d i2c_errors=%d)", Max.bus, Max.errors);
 +  }
 +
 +  if (STARBITE_USB_ROLE == 1) {
@@ -381,7 +325,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +    Reason = MaxUp ? "auto: not a sink with VBUS" : "auto: MCU silent";
 +  }
 +
-+  Log ("=USB role %a (%a)", Role == S9USB_HOST ? "host" : "device", Reason);
++  SbLog ("=USB role %a (%a)", Role == S9USB_HOST ? "host" : "device", Reason);
 +
 +  //
 +  // Controller: PHY (the role's column), DWC3 core (the role), xHCI checks in host role.
@@ -392,7 +336,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +  }
 +
 +  s9usb_snapshot (&P, Snap, S9USB_SNAP_N);
-+  Log (
++  SbLog (
 +    "=USB phy link=%08x clkrst=%08x utmi=%08x hsp=%08x tune=%08x test=%08x line=%a",
 +    Snap[15], Snap[16], Snap[17], Snap[18], Snap[19], Snap[20], s9usb_phy_line (&P)
 +    );
@@ -402,7 +346,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +    return Fail (Why);
 +  }
 +
-+  Log (
++  SbLog (
 +    "=USB dwc3 snpsid=%08x gctl=%08x gusb2=%08x gusb3=%08x guctl=%08x guctl1=%08x bus0=%08x fladj=%08x%a",
 +    Dwc.snpsid, Dwc.gctl, Dwc.gusb2, Dwc.gusb3, Dwc.guctl, Dwc.guctl1, Dwc.gsbuscfg0, Dwc.gfladj,
 +    Dwc.was_host ? " (was a host: halted + core reset)" : ""
@@ -417,7 +361,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +      return Fail (Why);
 +    }
 +
-+    Log (
++    SbLog (
 +      "=USB xhci caplen=%x hciver=%04x ports=%d ac64=%d usbsts=%08x usb2=%d+%d usb3=%d+%d",
 +      Xhci.caplen, Xhci.hciver, Xhci.ports, Xhci.ac64, Xhci.usbsts,
 +      Xhci.usb2_first, Xhci.usb2_count, Xhci.usb3_first, Xhci.usb3_count
@@ -433,12 +377,12 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +    VbusOn = STARBITE_USB_VBUS && (Role == S9USB_HOST);
 +    if (VbusOn && (s9usb_max_vbusdet (&Max) || (s9usb_max_ccstat (&Max) == S9USB_CC_SINK))) {
 +      VbusOn = 0;
-+      Log ("=USB vbus policy 1 -> 0 for this boot: vbusdet=%d ccstat=%d", s9usb_max_vbusdet (&Max), s9usb_max_ccstat (&Max));
++      SbLog ("=USB vbus policy 1 -> 0 for this boot: vbusdet=%d ccstat=%d", s9usb_max_vbusdet (&Max), s9usb_max_ccstat (&Max));
 +    }
 +
 +    Routed       = s9usb_max_route_usb (&P, &Max);
 +    VbusAnswered = s9usb_max_auto_vbus (&P, &Max, VbusOn);
-+    Log (
++    SbLog (
 +      "=USB muic ctrl1=%02x (%a) op54 data=%02x answer=%02x %02x %02x %02x (%a) i2c_errors=%d",
 +      (UINT32)(Max.ctrl1 & 0xFF), Routed ? "routed" : "NOT routed", VbusOn ? 2 : 0,
 +      Max.answer[0], Max.answer[1], Max.answer[2], Max.answer[3],
@@ -456,12 +400,150 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +  } else if ((STARBITE_USB_ACPI == 2) && (Role == S9USB_DEVICE)) {
 +    Enable (&mBlobUfn, "SBUSBUFN");
 +  } else {
-+    Log ("=USB no blob: layout %d has nothing for the %a role", STARBITE_USB_ACPI, Role == S9USB_HOST ? "host" : "device");
++    SbLog ("=USB no blob: layout %d has nothing for the %a role", STARBITE_USB_ACPI, Role == S9USB_HOST ? "host" : "device");
 +  }
 +
-+  Log ("=USB ready, line=%a", s9usb_phy_line (&P));
++  SbLog ("=USB ready, line=%a", s9usb_phy_line (&P));
 +  return EFI_SUCCESS;
 +}
+--- /dev/null
++++ b/Platform/Star2LtePkg/Drivers/Star2LteUsbDxe/StarbiteLog.h
+@@ -0,0 +1,135 @@
++/** @file
++  Logging shared by the Starbite DXE modules (Star2LteUsbDxe, Star2LteSsdtDxe); copied into each
++  module by tools/woa/patches/gen-0024.py. Every line goes to three places:
++
++  1. the pmsg ring at 0xFED14000 (patch 0003's format): read in TWRP as pmsg-ramoops-0. Windows'
++     UFS driver fills this ring during a Windows session, so after Windows it is usually gone;
++  2. the evidence ring at 0xFED10000, ramoops zone 0 (same "DBGC" header, start, size format):
++     Windows doesn't write it. Capped at 0x3700 bytes of data so it ends at 0xFED1370C, below the
++     records the woa firmware keeps from 0xFED13800 up (low WDT 0xFED13800, RWD1 0xFED13D80, P3
++     0xFED13E80); never wraps (later lines are dropped when full); reset by the first line of each
++     boot. Read it at the loader menu with "fastboot oem log dmesg" (fastboot_dev.c ring_text),
++     BEFORE TWRP: TWRP's ramoops discards a zone-0 record without a kmsg header. The loader's crash
++     check only treats zone 0 as Linux evidence when it starts with "====" after a Linux launch,
++     so these lines (they start "=SB", "=USB", "=SSDT") never count as a crash;
++  3. DEBUG (serial).
++
++  Copyright (c) 2026, Starbite. SPDX-License-Identifier: GPL-2.0-only
++**/
++
++#ifndef STARBITE_LOG_H_
++#define STARBITE_LOG_H_
++
++#include <Library/BaseLib.h>
++#include <Library/DebugLib.h>
++#include <Library/PrintLib.h>
++#include <Library/UefiBootServicesTableLib.h>
++
++#define SB_PMSG_BASE   0xFED14000UL
++#define SB_PMSG_CAP    0x3F00u
++#define SB_EVLOG_BASE  0xFED10000UL
++#define SB_EVLOG_CAP   0x3700u
++#define SB_DBGC        0x43474244u
++
++//
++// Installed (NULL interface) by the first module that logs in a boot: later modules append.
++//
++STATIC EFI_GUID  mSbEvlogBootGuid = {
++  0xdb4e476d, 0xe4d0, 0x4515, { 0x8d, 0x4a, 0x41, 0x4a, 0xa6, 0xfb, 0x8f, 0x7a }
++};
++
++STATIC
++VOID
++SbRingWrite (
++  IN CONST CHAR8  *Buffer,
++  IN UINTN        NumberOfBytes
++  )
++{
++  volatile UINT32  *W = (volatile UINT32 *)SB_PMSG_BASE;
++  volatile UINT8   *B = (volatile UINT8 *)(SB_PMSG_BASE + 12);
++  UINTN            Index;
++  UINT32           Pos;
++
++  if ((W[0] != SB_DBGC) || (W[1] >= SB_PMSG_CAP) || (W[2] > SB_PMSG_CAP)) {
++    W[0] = SB_DBGC;
++    W[1] = 0;
++    W[2] = 0;
++  }
++
++  for (Index = 0; Index < NumberOfBytes; Index++) {
++    if (W[2] < SB_PMSG_CAP) {
++      Pos  = W[2];
++      W[2] = Pos + 1;
++      W[1] = (Pos + 1) % SB_PMSG_CAP;
++    } else {
++      Pos  = W[1];
++      W[1] = (Pos + 1) % SB_PMSG_CAP;
++    }
++
++    B[Pos] = (UINT8)Buffer[Index];
++  }
++
++  __asm__ __volatile__ ("dsb sy" ::: "memory");
++}
++
++STATIC
++VOID
++SbEvlogWrite (
++  IN CONST CHAR8  *Buffer,
++  IN UINTN        NumberOfBytes
++  )
++{
++  volatile UINT32  *W = (volatile UINT32 *)SB_EVLOG_BASE;
++  volatile UINT8   *B = (volatile UINT8 *)(SB_EVLOG_BASE + 12);
++  EFI_HANDLE       Handle;
++  VOID             *Flag;
++  UINTN            Index;
++  UINT32           Pos;
++
++  if (EFI_ERROR (gBS->LocateProtocol (&mSbEvlogBootGuid, NULL, &Flag)) ||
++      (W[0] != SB_DBGC) || (W[2] > SB_EVLOG_CAP) || (W[1] != W[2]))
++  {
++    W[0]   = SB_DBGC;
++    W[1]   = 0;
++    W[2]   = 0;
++    Handle = NULL;
++    gBS->InstallProtocolInterface (&Handle, &mSbEvlogBootGuid, EFI_NATIVE_INTERFACE, NULL);
++  }
++
++  Pos = W[2];
++  if (Pos + NumberOfBytes > SB_EVLOG_CAP) {
++    return;                         // full: never wrap into the firmware's records
++  }
++
++  for (Index = 0; Index < NumberOfBytes; Index++) {
++    B[Pos + Index] = (UINT8)Buffer[Index];
++  }
++
++  W[2] = Pos + (UINT32)NumberOfBytes;
++  W[1] = W[2];                      // start == size: a ring that never wrapped
++  __asm__ __volatile__ ("dsb sy" ::: "memory");
++}
++
++STATIC
++VOID
++EFIAPI
++SbLog (
++  IN CONST CHAR8  *Format,
++  ...
++  )
++{
++  CHAR8    Line[200];
++  VA_LIST  Args;
++  UINTN    Len;
++
++  VA_START (Args, Format);
++  Len = AsciiVSPrint (Line, sizeof (Line) - 1, Format, Args);
++  VA_END (Args);
++  Line[Len++] = '\n';
++  Line[Len]   = 0;
++  SbRingWrite (Line, Len);
++  SbEvlogWrite (Line, Len);
++  DEBUG ((DEBUG_INFO, "%a", Line));
++}
++
++#endif
 --- /dev/null
 +++ b/Platform/Star2LtePkg/Drivers/Star2LteUsbDxe/s9usb/s9usb.h
 @@ -0,0 +1,133 @@
@@ -1340,36 +1422,41 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +}
 --- /dev/null
 +++ b/Platform/Star2LtePkg/Drivers/Star2LteSsdtDxe/SsdtDxe.c
-@@ -0,0 +1,296 @@
+@@ -0,0 +1,333 @@
 +/** @file
-+  Star2LteSsdtDxe: installs every Starbite SSDT blob found in the firmware volumes, at ReadyToBoot
-+  (docs/WIN11-USB.md section 4.1). Shared by the USB and the display/GPU tracks: each ships a
-+  self-contained .aml, packed by tools/woa/ssdt-ffs.py.
++  Star2LteSsdtDxe: installs the Starbite SSDT blobs found in the firmware volumes, during DXE
++  dispatch (docs/WIN11-USB.md section 4.1). Shared by the USB and the display/GPU tracks: each
++  ships a self-contained .aml, packed by tools/woa/ssdt-ffs.py.
 +
 +  A blob is an FFS file of type FREEFORM whose name GUID is 53534454-5342-5445-<8 bytes> (plain)
 +  or 53534454-5342-4754-<8 bytes> (gated), the 8 bytes being the table's OEM Table ID; its RAW
 +  section is the table. Rules, per blob:
 +    - skipped unless: signature "SSDT", 36 <= Length <= the section size, OEM ID "STRBTE", the
-+      OEM Table ID equal to the GUID's last 8 bytes, not a Table ID already installed;
-+    - plain: vetoed (skipped) when a protocol whose GUID is the blob's file GUID is installed (a
-+      driver that found its hardware dead installs a NULL interface under that GUID);
-+    - gated: installed only when that protocol IS installed (its driver checked the hardware and
-+      enabled it), so a gated blob without its driver never appears: fails closed;
++      OEM Table ID equal to the GUID's last 8 bytes, not a Table ID already seen;
++    - plain: installed at this module's entry unless a protocol whose GUID is the blob's file
++      GUID is installed (a veto); a veto that comes later uninstalls it again;
++    - gated: installed only once that protocol IS installed (its driver checked the hardware
++      and enabled it): at entry if it already is, else from a protocol notification the moment
++      it appears. A gated blob without its driver never appears: fails closed;
 +    - the checksum is recomputed, then EFI_ACPI_TABLE_PROTOCOL.InstallAcpiTable;
 +    - at most 32 blobs.
-+  Every decision is logged as an "=SSDT" line to the pmsg ring at 0xFED14000 (patch 0003's format)
-+  and to DEBUG.
++  So the order of dispatch between this module and the drivers doesn't matter.
 +
-+  Why ReadyToBoot at TPL_CALLBACK - 1: the release's Star2LteGpioHandoffDxe (touch) checks at
-+  ReadyToBoot, TPL_CALLBACK, that the XSDT holds exactly its 4 expected tables and publishes
-+  nothing otherwise (GpioHandoffDxe.c "if(entries!=4)AUTH_FAIL(6)"). A lower TPL runs after every
-+  TPL_CALLBACK notification of the group, so our tables come after its own.
++  Why during dispatch and not at ReadyToBoot (v2 did ReadyToBoot, TPL_CALLBACK - 1): on the phone
++  (2026-11-07, T1) neither our ReadyToBoot tables nor the release GPIO module's ReadyToBoot SSDTs
++  ever reached Windows, while the platform module's dispatch-time SSDT (RAMRET01, RWOA03E0) does.
++  The release modules "P" and the PSCI EL2 shim both work on the published tables at ReadyToBoot
++  (they reference ReadyToBoot and the ACPI 2.0 configuration table, not the table protocol), so
++  anything installed after them is lost. The GPIO module's exactly-4-tables check that v2 waited
++  for already fails on every boot (the platform installs 5), so dispatch costs nothing.
++
++  Every decision is logged as an "=SSDT" line (StarbiteLog.h: pmsg ring, the zone-0 evidence ring,
++  DEBUG).
 +
 +  Copyright (c) 2026, Starbite. SPDX-License-Identifier: GPL-2.0-only
 +**/
 +
 +#include <PiDxe.h>
-+#include <Guid/EventGroup.h>
 +#include <IndustryStandard/Acpi.h>
 +#include <Library/BaseLib.h>
 +#include <Library/BaseMemoryLib.h>
@@ -1380,75 +1467,33 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +#include <Protocol/AcpiTable.h>
 +#include <Protocol/FirmwareVolume2.h>
 +
++#include "StarbiteLog.h"
++
++#define SSDT_VERSION    3
 +#define SSDT_MAX_BLOBS  32
 +
 +//
 +// 53534454-5342-5445-xxxx-xxxxxxxxxxxx: "SSDT", "SB", "TE" (Starbite), then the Table ID
 +//
-+#define BLOB_DATA1  0x53534454u
-+#define BLOB_DATA2  0x5342u
-+#define BLOB_DATA3  0x5445u      // plain
-+#define GATED_DATA3 0x4754u      // gated
++#define BLOB_DATA1   0x53534454u
++#define BLOB_DATA2   0x5342u
++#define BLOB_DATA3   0x5445u      // plain
++#define GATED_DATA3  0x4754u      // gated
 +
-+#define STARBITE_RING_BASE  0xFED14000UL
-+#define STARBITE_RING_CAP   0x3F00u
++typedef struct {
++  EFI_GUID                       Name;
++  EFI_ACPI_DESCRIPTION_HEADER    *Table;       // pool copy, kept for a later install
++  BOOLEAN                        Gated;
++  BOOLEAN                        Installed;
++  UINTN                          Key;
++  CHAR8                          Id[9];
++  EFI_EVENT                      Event;
++  VOID                           *Registration;
++} BLOB;
 +
-+STATIC EFI_EVENT  mReadyEvent;
-+
-+STATIC
-+VOID
-+RingWrite (
-+  IN CONST CHAR8  *Buffer,
-+  IN UINTN        NumberOfBytes
-+  )
-+{
-+  volatile UINT32  *W = (volatile UINT32 *)STARBITE_RING_BASE;
-+  volatile UINT8   *B = (volatile UINT8 *)(STARBITE_RING_BASE + 12);
-+  UINTN            Index;
-+  UINT32           Pos;
-+
-+  if ((W[0] != 0x43474244u) || (W[1] >= STARBITE_RING_CAP) || (W[2] > STARBITE_RING_CAP)) {
-+    W[0] = 0x43474244u;
-+    W[1] = 0;
-+    W[2] = 0;
-+  }
-+
-+  for (Index = 0; Index < NumberOfBytes; Index++) {
-+    if (W[2] < STARBITE_RING_CAP) {
-+      Pos  = W[2];
-+      W[2] = Pos + 1;
-+      W[1] = (Pos + 1) % STARBITE_RING_CAP;
-+    } else {
-+      Pos  = W[1];
-+      W[1] = (Pos + 1) % STARBITE_RING_CAP;
-+    }
-+
-+    B[Pos] = (UINT8)Buffer[Index];
-+  }
-+
-+  __asm__ __volatile__ ("dsb sy" ::: "memory");
-+}
-+
-+STATIC
-+VOID
-+EFIAPI
-+Log (
-+  IN CONST CHAR8  *Format,
-+  ...
-+  )
-+{
-+  CHAR8    Line[160];
-+  VA_LIST  Args;
-+  UINTN    Len;
-+
-+  VA_START (Args, Format);
-+  Len = AsciiVSPrint (Line, sizeof (Line) - 1, Format, Args);
-+  VA_END (Args);
-+  Line[Len++] = '\n';
-+  Line[Len]   = 0;
-+  RingWrite (Line, Len);
-+  DEBUG ((DEBUG_INFO, "%a", Line));
-+}
++STATIC EFI_ACPI_TABLE_PROTOCOL  *mAcpiTable;
++STATIC BLOB                     mBlobs[SSDT_MAX_BLOBS];
++STATIC UINTN                    mCount;
 +
 +STATIC
 +BOOLEAN
@@ -1485,14 +1530,158 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +}
 +
 +STATIC
++BOOLEAN
++Flagged (
++  IN BLOB  *Blob
++  )
++{
++  VOID  *Flag;
++
++  return (BOOLEAN)!EFI_ERROR (gBS->LocateProtocol (&Blob->Name, NULL, &Flag));
++}
++
++STATIC
++VOID
++Install (
++  IN BLOB         *Blob,
++  IN CONST CHAR8  *When
++  )
++{
++  EFI_STATUS  Status;
++
++  if (Blob->Installed) {
++    return;
++  }
++
++  Blob->Table->Checksum = 0;
++  Blob->Table->Checksum = CalculateCheckSum8 ((UINT8 *)Blob->Table, Blob->Table->Length);
++  Status                = mAcpiTable->InstallAcpiTable (mAcpiTable, Blob->Table, Blob->Table->Length, &Blob->Key);
++  if (EFI_ERROR (Status)) {
++    SbLog ("=SSDT FAIL %a: InstallAcpiTable %r", Blob->Id, Status);
++    return;
++  }
++
++  Blob->Installed = TRUE;
++  SbLog (
++    "=SSDT installed %a (%d bytes, rev %d%a, %a)",
++    Blob->Id,
++    Blob->Table->Length,
++    Blob->Table->OemRevision,
++    Blob->Gated ? ", gated" : "",
++    When
++    );
++}
++
++//
++// The blob's protocol appeared: a gated blob is enabled, a plain one vetoed.
++//
++STATIC
 +VOID
 +EFIAPI
-+InstallBlobs (
++OnFlag (
 +  IN EFI_EVENT  Event,
 +  IN VOID       *Context
 +  )
 +{
-+  EFI_ACPI_TABLE_PROTOCOL        *AcpiTable;
++  BLOB        *Blob;
++  EFI_STATUS  Status;
++
++  Blob = (BLOB *)Context;
++  if (!Flagged (Blob)) {
++    return;                         // the registration's first, spurious signal
++  }
++
++  if (Blob->Gated) {
++    Install (Blob, "enabled by its driver");
++  } else if (Blob->Installed) {
++    Status = mAcpiTable->UninstallAcpiTable (mAcpiTable, Blob->Key);
++    if (!EFI_ERROR (Status)) {
++      Blob->Installed = FALSE;
++    }
++
++    SbLog ("=SSDT vetoed %a after install: uninstalled %r", Blob->Id, Status);
++  }
++
++  gBS->CloseEvent (Event);
++}
++
++STATIC
++VOID
++Take (
++  IN EFI_GUID  *Name,
++  IN VOID      *Buffer,
++  IN UINTN     BufferSize
++  )
++{
++  EFI_ACPI_DESCRIPTION_HEADER  *Table;
++  BLOB                         *Blob;
++  CONST CHAR8                  *Skip;
++  CHAR8                        Id[9];
++  UINTN                        Index;
++  EFI_STATUS                   Status;
++
++  TableIdText (Name->Data4, Id);
++  Table = (EFI_ACPI_DESCRIPTION_HEADER *)Buffer;
++  Skip  = NULL;
++  if ((BufferSize < sizeof (*Table)) || (Table->Length < sizeof (*Table)) || (Table->Length > BufferSize)) {
++    Skip = "bad length";
++  } else if (Table->Signature != EFI_ACPI_6_3_SECONDARY_SYSTEM_DESCRIPTION_TABLE_SIGNATURE) {
++    Skip = "not an SSDT";
++  } else if (CompareMem (Table->OemId, "STRBTE", 6) != 0) {
++    Skip = "OEM ID is not STRBTE";
++  } else if (CompareMem (&Table->OemTableId, Name->Data4, 8) != 0) {
++    Skip = "Table ID differs from the file GUID";
++  } else if (mCount == SSDT_MAX_BLOBS) {
++    Skip = "more than 32 blobs";
++  } else {
++    for (Index = 0; Index < mCount; Index++) {
++      if (mBlobs[Index].Table->OemTableId == Table->OemTableId) {
++        Skip = "Table ID already seen";
++      }
++    }
++  }
++
++  if (Skip != NULL) {
++    SbLog ("=SSDT skip %a: %a", Id, Skip);
++    FreePool (Buffer);
++    return;
++  }
++
++  Blob = &mBlobs[mCount++];
++  CopyGuid (&Blob->Name, Name);
++  CopyMem (Blob->Id, Id, sizeof (Id));
++  Blob->Table     = Table;          // kept: a gated blob may be installed later
++  Blob->Gated     = (BOOLEAN)(Name->Data3 == GATED_DATA3);
++  Blob->Installed = FALSE;
++
++  if (Blob->Gated ? Flagged (Blob) : !Flagged (Blob)) {
++    Install (Blob, "at dispatch");
++  } else {
++    SbLog ("=SSDT %a %a at dispatch", Id, Blob->Gated ? "waits for its driver's enable" : "vetoed");
++  }
++
++  //
++  // Gated and not yet installed: wait for the enable. Plain and installed: watch for a veto.
++  //
++  if ((Blob->Gated && !Blob->Installed) || (!Blob->Gated && Blob->Installed)) {
++    Status = gBS->CreateEvent (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, OnFlag, Blob, &Blob->Event);
++    if (!EFI_ERROR (Status)) {
++      Status = gBS->RegisterProtocolNotify (&Blob->Name, Blob->Event, &Blob->Registration);
++    }
++
++    if (EFI_ERROR (Status)) {
++      SbLog ("=SSDT %a: no notification (%r)", Id, Status);
++    }
++  }
++}
++
++EFI_STATUS
++EFIAPI
++SsdtDxeEntry (
++  IN EFI_HANDLE        ImageHandle,
++  IN EFI_SYSTEM_TABLE  *SystemTable
++  )
++{
 +  EFI_HANDLE                     *Handles;
 +  UINTN                          HandleCount;
 +  UINTN                          FvIndex;
@@ -1505,35 +1694,24 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +  VOID                           *Buffer;
 +  UINTN                          BufferSize;
 +  UINT32                         AuthStatus;
-+  EFI_ACPI_DESCRIPTION_HEADER    *Table;
-+  UINT64                         Installed[SSDT_MAX_BLOBS];
-+  UINTN                          InstalledCount;
-+  UINTN                          Seen;
-+  UINTN                          Index;
-+  UINTN                          TableKey;
-+  VOID                           *Flag;
-+  BOOLEAN                        Gated;
-+  BOOLEAN                        Flagged;
-+  CHAR8                          Id[9];
-+  CONST CHAR8                    *Skip;
 +  EFI_STATUS                     Status;
++  UINTN                          Index;
++  UINTN                          Installed;
 +
-+  gBS->CloseEvent (Event);
-+  Status = gBS->LocateProtocol (&gEfiAcpiTableProtocolGuid, NULL, (VOID **)&AcpiTable);
++  SbLog ("=SSDT v%d at dispatch", SSDT_VERSION);
++  Status = gBS->LocateProtocol (&gEfiAcpiTableProtocolGuid, NULL, (VOID **)&mAcpiTable);
 +  if (EFI_ERROR (Status)) {
-+    Log ("=SSDT FAIL no ACPI table protocol: %r", Status);
-+    return;
++    SbLog ("=SSDT FAIL no ACPI table protocol: %r", Status);
++    return Status;
 +  }
 +
 +  Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiFirmwareVolume2ProtocolGuid, NULL, &HandleCount, &Handles);
 +  if (EFI_ERROR (Status)) {
-+    Log ("=SSDT FAIL no firmware volumes: %r", Status);
-+    return;
++    SbLog ("=SSDT FAIL no firmware volumes: %r", Status);
++    return Status;
 +  }
 +
-+  InstalledCount = 0;
-+  Seen           = 0;
-+  for (FvIndex = 0; FvIndex < HandleCount && Seen < SSDT_MAX_BLOBS; FvIndex++) {
++  for (FvIndex = 0; FvIndex < HandleCount; FvIndex++) {
 +    Status = gBS->HandleProtocol (Handles[FvIndex], &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv);
 +    if (EFI_ERROR (Status)) {
 +      continue;
@@ -1555,94 +1733,35 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +        continue;
 +      }
 +
-+      if (++Seen > SSDT_MAX_BLOBS) {
-+        Log ("=SSDT more than %d blobs, the rest ignored", SSDT_MAX_BLOBS);
-+        break;
-+      }
-+
-+      TableIdText (Name.Data4, Id);
 +      Buffer     = NULL;
 +      BufferSize = 0;
 +      Status     = Fv->ReadSection (Fv, &Name, EFI_SECTION_RAW, 0, &Buffer, &BufferSize, &AuthStatus);
 +      if (EFI_ERROR (Status)) {
-+        Log ("=SSDT skip %a: no RAW section (%r)", Id, Status);
++        SbLog ("=SSDT skip %g: no RAW section (%r)", &Name, Status);
 +        continue;
 +      }
 +
-+      Table   = (EFI_ACPI_DESCRIPTION_HEADER *)Buffer;
-+      Skip    = NULL;
-+      Gated   = (BOOLEAN)(Name.Data3 == GATED_DATA3);
-+      Flagged = (BOOLEAN)!EFI_ERROR (gBS->LocateProtocol (&Name, NULL, &Flag));
-+      if ((BufferSize < sizeof (*Table)) || (Table->Length < sizeof (*Table)) || (Table->Length > BufferSize)) {
-+        Skip = "bad length";
-+      } else if (Table->Signature != EFI_ACPI_6_3_SECONDARY_SYSTEM_DESCRIPTION_TABLE_SIGNATURE) {
-+        Skip = "not an SSDT";
-+      } else if (CompareMem (Table->OemId, "STRBTE", 6) != 0) {
-+        Skip = "OEM ID is not STRBTE";
-+      } else if (CompareMem (&Table->OemTableId, Name.Data4, 8) != 0) {
-+        Skip = "Table ID differs from the file GUID";
-+      } else if (!Gated && Flagged) {
-+        Skip = "vetoed by its driver";
-+      } else if (Gated && !Flagged) {
-+        Skip = "gated, not enabled by its driver";
-+      } else {
-+        for (Index = 0; Index < InstalledCount; Index++) {
-+          if (Installed[Index] == Table->OemTableId) {
-+            Skip = "Table ID already installed";
-+          }
-+        }
-+      }
-+
-+      if (Skip == NULL) {
-+        Table->Checksum = 0;
-+        Table->Checksum = CalculateCheckSum8 ((UINT8 *)Table, Table->Length);
-+        Status          = AcpiTable->InstallAcpiTable (AcpiTable, Table, Table->Length, &TableKey);
-+        if (EFI_ERROR (Status)) {
-+          Log ("=SSDT FAIL %a: InstallAcpiTable %r", Id, Status);
-+        } else {
-+          Installed[InstalledCount++] = Table->OemTableId;
-+          Log ("=SSDT installed %a (%d bytes, rev %d%a)", Id, Table->Length, Table->OemRevision, Gated ? ", gated" : "");
-+        }
-+      } else {
-+        Log ("=SSDT skip %a: %a", Id, Skip);
-+      }
-+
-+      FreePool (Buffer);
++      Take (&Name, Buffer, BufferSize);
 +    }
 +
 +    FreePool (Key);
 +  }
 +
 +  FreePool (Handles);
-+  Log ("=SSDT done: %d installed of %d blobs", (UINT32)InstalledCount, (UINT32)MIN (Seen, SSDT_MAX_BLOBS));
-+}
++  Installed = 0;
++  for (Index = 0; Index < mCount; Index++) {
++    Installed += mBlobs[Index].Installed ? 1 : 0;
++  }
 +
-+EFI_STATUS
-+EFIAPI
-+SsdtDxeEntry (
-+  IN EFI_HANDLE        ImageHandle,
-+  IN EFI_SYSTEM_TABLE  *SystemTable
-+  )
-+{
-+  EFI_STATUS  Status;
-+
-+  Status = gBS->CreateEventEx (
-+                  EVT_NOTIFY_SIGNAL,
-+                  TPL_CALLBACK - 1,
-+                  InstallBlobs,
-+                  NULL,
-+                  &gEfiEventReadyToBootGuid,
-+                  &mReadyEvent
-+                  );
-+  Log ("=SSDT v2 armed for ReadyToBoot: %r", Status);
-+  return Status;
++  SbLog ("=SSDT dispatch done: %d blobs, %d installed now", (UINT32)mCount, (UINT32)Installed);
++  return EFI_SUCCESS;
 +}
 --- /dev/null
 +++ b/Platform/Star2LtePkg/Drivers/Star2LteSsdtDxe/Star2LteSsdtDxe.inf
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,40 @@
 +## @file
 +#  Star2LteSsdtDxe: installs every Starbite SSDT blob (FREEFORM FFS files 53534454-5342-5445-<id>,
-+#  made by tools/woa/ssdt-ffs.py) at ReadyToBoot (docs/WIN11-USB.md section 4.1). Added to the
++#  made by tools/woa/ssdt-ffs.py) during DXE dispatch (docs/WIN11-USB.md section 4.1). Added to the
 +#  release DXE volume with tools/woa/dxe-replace.py --add; built by patch 0024 under
 +#  -D STAR2LTE_SSDT_DXE.
 +#
@@ -1659,6 +1778,7 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +
 +[Sources]
 +  SsdtDxe.c
++  StarbiteLog.h
 +
 +[Packages]
 +  MdePkg/MdePkg.dec
@@ -1677,11 +1797,146 @@ Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D ST
 +  gEfiAcpiTableProtocolGuid                     ## CONSUMES
 +  gEfiFirmwareVolume2ProtocolGuid               ## CONSUMES
 +
-+[Guids]
-+  gEfiEventReadyToBootGuid                      ## CONSUMES ## Event
-+
 +[Depex]
 +  gEfiAcpiTableProtocolGuid
+--- /dev/null
++++ b/Platform/Star2LtePkg/Drivers/Star2LteSsdtDxe/StarbiteLog.h
+@@ -0,0 +1,135 @@
++/** @file
++  Logging shared by the Starbite DXE modules (Star2LteUsbDxe, Star2LteSsdtDxe); copied into each
++  module by tools/woa/patches/gen-0024.py. Every line goes to three places:
++
++  1. the pmsg ring at 0xFED14000 (patch 0003's format): read in TWRP as pmsg-ramoops-0. Windows'
++     UFS driver fills this ring during a Windows session, so after Windows it is usually gone;
++  2. the evidence ring at 0xFED10000, ramoops zone 0 (same "DBGC" header, start, size format):
++     Windows doesn't write it. Capped at 0x3700 bytes of data so it ends at 0xFED1370C, below the
++     records the woa firmware keeps from 0xFED13800 up (low WDT 0xFED13800, RWD1 0xFED13D80, P3
++     0xFED13E80); never wraps (later lines are dropped when full); reset by the first line of each
++     boot. Read it at the loader menu with "fastboot oem log dmesg" (fastboot_dev.c ring_text),
++     BEFORE TWRP: TWRP's ramoops discards a zone-0 record without a kmsg header. The loader's crash
++     check only treats zone 0 as Linux evidence when it starts with "====" after a Linux launch,
++     so these lines (they start "=SB", "=USB", "=SSDT") never count as a crash;
++  3. DEBUG (serial).
++
++  Copyright (c) 2026, Starbite. SPDX-License-Identifier: GPL-2.0-only
++**/
++
++#ifndef STARBITE_LOG_H_
++#define STARBITE_LOG_H_
++
++#include <Library/BaseLib.h>
++#include <Library/DebugLib.h>
++#include <Library/PrintLib.h>
++#include <Library/UefiBootServicesTableLib.h>
++
++#define SB_PMSG_BASE   0xFED14000UL
++#define SB_PMSG_CAP    0x3F00u
++#define SB_EVLOG_BASE  0xFED10000UL
++#define SB_EVLOG_CAP   0x3700u
++#define SB_DBGC        0x43474244u
++
++//
++// Installed (NULL interface) by the first module that logs in a boot: later modules append.
++//
++STATIC EFI_GUID  mSbEvlogBootGuid = {
++  0xdb4e476d, 0xe4d0, 0x4515, { 0x8d, 0x4a, 0x41, 0x4a, 0xa6, 0xfb, 0x8f, 0x7a }
++};
++
++STATIC
++VOID
++SbRingWrite (
++  IN CONST CHAR8  *Buffer,
++  IN UINTN        NumberOfBytes
++  )
++{
++  volatile UINT32  *W = (volatile UINT32 *)SB_PMSG_BASE;
++  volatile UINT8   *B = (volatile UINT8 *)(SB_PMSG_BASE + 12);
++  UINTN            Index;
++  UINT32           Pos;
++
++  if ((W[0] != SB_DBGC) || (W[1] >= SB_PMSG_CAP) || (W[2] > SB_PMSG_CAP)) {
++    W[0] = SB_DBGC;
++    W[1] = 0;
++    W[2] = 0;
++  }
++
++  for (Index = 0; Index < NumberOfBytes; Index++) {
++    if (W[2] < SB_PMSG_CAP) {
++      Pos  = W[2];
++      W[2] = Pos + 1;
++      W[1] = (Pos + 1) % SB_PMSG_CAP;
++    } else {
++      Pos  = W[1];
++      W[1] = (Pos + 1) % SB_PMSG_CAP;
++    }
++
++    B[Pos] = (UINT8)Buffer[Index];
++  }
++
++  __asm__ __volatile__ ("dsb sy" ::: "memory");
++}
++
++STATIC
++VOID
++SbEvlogWrite (
++  IN CONST CHAR8  *Buffer,
++  IN UINTN        NumberOfBytes
++  )
++{
++  volatile UINT32  *W = (volatile UINT32 *)SB_EVLOG_BASE;
++  volatile UINT8   *B = (volatile UINT8 *)(SB_EVLOG_BASE + 12);
++  EFI_HANDLE       Handle;
++  VOID             *Flag;
++  UINTN            Index;
++  UINT32           Pos;
++
++  if (EFI_ERROR (gBS->LocateProtocol (&mSbEvlogBootGuid, NULL, &Flag)) ||
++      (W[0] != SB_DBGC) || (W[2] > SB_EVLOG_CAP) || (W[1] != W[2]))
++  {
++    W[0]   = SB_DBGC;
++    W[1]   = 0;
++    W[2]   = 0;
++    Handle = NULL;
++    gBS->InstallProtocolInterface (&Handle, &mSbEvlogBootGuid, EFI_NATIVE_INTERFACE, NULL);
++  }
++
++  Pos = W[2];
++  if (Pos + NumberOfBytes > SB_EVLOG_CAP) {
++    return;                         // full: never wrap into the firmware's records
++  }
++
++  for (Index = 0; Index < NumberOfBytes; Index++) {
++    B[Pos + Index] = (UINT8)Buffer[Index];
++  }
++
++  W[2] = Pos + (UINT32)NumberOfBytes;
++  W[1] = W[2];                      // start == size: a ring that never wrapped
++  __asm__ __volatile__ ("dsb sy" ::: "memory");
++}
++
++STATIC
++VOID
++EFIAPI
++SbLog (
++  IN CONST CHAR8  *Format,
++  ...
++  )
++{
++  CHAR8    Line[200];
++  VA_LIST  Args;
++  UINTN    Len;
++
++  VA_START (Args, Format);
++  Len = AsciiVSPrint (Line, sizeof (Line) - 1, Format, Args);
++  VA_END (Args);
++  Line[Len++] = '\n';
++  Line[Len]   = 0;
++  SbRingWrite (Line, Len);
++  SbEvlogWrite (Line, Len);
++  DEBUG ((DEBUG_INFO, "%a", Line));
++}
++
++#endif
 --- a/Platform/Star2LtePkg/Star2LtePkg.dsc
 +++ b/Platform/Star2LtePkg/Star2LtePkg.dsc
 @@ -392,4 +392,13 @@

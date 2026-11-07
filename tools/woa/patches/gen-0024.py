@@ -4,7 +4,8 @@
   tools/woa/patches/gen-0024.py [--check]
 
 Sources of truth: tools/woa/modules/Star2LteUsbDxe/, tools/woa/modules/Star2LteSsdtDxe/ and
-starbite/s9usb/. The patch adds both modules (the USB one with a copy of starbite/s9usb) as new
+starbite/s9usb/. The patch adds both modules (the USB one with a copy of starbite/s9usb, both with
+tools/woa/modules/common/StarbiteLog.h) as new
 files under Platform/Star2LtePkg/Drivers/, and their DSC/FDF lines under
 "!ifdef STAR2LTE_USB_DXE" / "!ifdef STAR2LTE_SSDT_DXE", so builds without those defines are
 unchanged. The SSDT blobs are not part of it: tools/woa/acpi/*.asl -> iasl -> tools/woa/ssdt-ffs.py
@@ -57,8 +58,10 @@ def build_patch():
            'Built only with -D STAR2LTE_USB_DXE (+ STARBITE_USB_ROLE/ACPI/VBUS) and/or -D STAR2LTE_SSDT_DXE.',
            '']
     out += files_of(os.path.join(MODS, 'Star2LteUsbDxe'), USB)
+    out += files_of(os.path.join(MODS, 'common'), USB)
     out += files_of(S9, f'{USB}/s9usb', ('.c', '.h'))
     out += files_of(os.path.join(MODS, 'Star2LteSsdtDxe'), SSDT)
+    out += files_of(os.path.join(MODS, 'common'), SSDT)
     out += insert_between('Platform/Star2LtePkg/Star2LtePkg.dsc', 392, [
         '  Platform/Star2LtePkg/Drivers/Star2LteUfsHcDxe/Star2LteUfsHcDxe.inf',
         '  MdeModulePkg/Bus/Ufs/UfsPassThruDxe/UfsPassThruDxe.inf',

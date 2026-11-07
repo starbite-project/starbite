@@ -1,32 +1,37 @@
 /** @file
-  Star2LteSsdtDxe: installs every Starbite SSDT blob found in the firmware volumes, at ReadyToBoot
-  (docs/WIN11-USB.md section 4.1). Shared by the USB and the display/GPU tracks: each ships a
-  self-contained .aml, packed by tools/woa/ssdt-ffs.py.
+  Star2LteSsdtDxe: installs the Starbite SSDT blobs found in the firmware volumes, during DXE
+  dispatch (docs/WIN11-USB.md section 4.1). Shared by the USB and the display/GPU tracks: each
+  ships a self-contained .aml, packed by tools/woa/ssdt-ffs.py.
 
   A blob is an FFS file of type FREEFORM whose name GUID is 53534454-5342-5445-<8 bytes> (plain)
   or 53534454-5342-4754-<8 bytes> (gated), the 8 bytes being the table's OEM Table ID; its RAW
   section is the table. Rules, per blob:
     - skipped unless: signature "SSDT", 36 <= Length <= the section size, OEM ID "STRBTE", the
-      OEM Table ID equal to the GUID's last 8 bytes, not a Table ID already installed;
-    - plain: vetoed (skipped) when a protocol whose GUID is the blob's file GUID is installed (a
-      driver that found its hardware dead installs a NULL interface under that GUID);
-    - gated: installed only when that protocol IS installed (its driver checked the hardware and
-      enabled it), so a gated blob without its driver never appears: fails closed;
+      OEM Table ID equal to the GUID's last 8 bytes, not a Table ID already seen;
+    - plain: installed at this module's entry unless a protocol whose GUID is the blob's file
+      GUID is installed (a veto); a veto that comes later uninstalls it again;
+    - gated: installed only once that protocol IS installed (its driver checked the hardware
+      and enabled it): at entry if it already is, else from a protocol notification the moment
+      it appears. A gated blob without its driver never appears: fails closed;
     - the checksum is recomputed, then EFI_ACPI_TABLE_PROTOCOL.InstallAcpiTable;
     - at most 32 blobs.
-  Every decision is logged as an "=SSDT" line to the pmsg ring at 0xFED14000 (patch 0003's format)
-  and to DEBUG.
+  So the order of dispatch between this module and the drivers doesn't matter.
 
-  Why ReadyToBoot at TPL_CALLBACK - 1: the release's Star2LteGpioHandoffDxe (touch) checks at
-  ReadyToBoot, TPL_CALLBACK, that the XSDT holds exactly its 4 expected tables and publishes
-  nothing otherwise (GpioHandoffDxe.c "if(entries!=4)AUTH_FAIL(6)"). A lower TPL runs after every
-  TPL_CALLBACK notification of the group, so our tables come after its own.
+  Why during dispatch and not at ReadyToBoot (v2 did ReadyToBoot, TPL_CALLBACK - 1): on the phone
+  (2026-11-07, T1) neither our ReadyToBoot tables nor the release GPIO module's ReadyToBoot SSDTs
+  ever reached Windows, while the platform module's dispatch-time SSDT (RAMRET01, RWOA03E0) does.
+  The release modules "P" and the PSCI EL2 shim both work on the published tables at ReadyToBoot
+  (they reference ReadyToBoot and the ACPI 2.0 configuration table, not the table protocol), so
+  anything installed after them is lost. The GPIO module's exactly-4-tables check that v2 waited
+  for already fails on every boot (the platform installs 5), so dispatch costs nothing.
+
+  Every decision is logged as an "=SSDT" line (StarbiteLog.h: pmsg ring, the zone-0 evidence ring,
+  DEBUG).
 
   Copyright (c) 2026, Starbite. SPDX-License-Identifier: GPL-2.0-only
 **/
 
 #include <PiDxe.h>
-#include <Guid/EventGroup.h>
 #include <IndustryStandard/Acpi.h>
 #include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
@@ -37,75 +42,33 @@
 #include <Protocol/AcpiTable.h>
 #include <Protocol/FirmwareVolume2.h>
 
+#include "StarbiteLog.h"
+
+#define SSDT_VERSION    3
 #define SSDT_MAX_BLOBS  32
 
 //
 // 53534454-5342-5445-xxxx-xxxxxxxxxxxx: "SSDT", "SB", "TE" (Starbite), then the Table ID
 //
-#define BLOB_DATA1  0x53534454u
-#define BLOB_DATA2  0x5342u
-#define BLOB_DATA3  0x5445u      // plain
-#define GATED_DATA3 0x4754u      // gated
+#define BLOB_DATA1   0x53534454u
+#define BLOB_DATA2   0x5342u
+#define BLOB_DATA3   0x5445u      // plain
+#define GATED_DATA3  0x4754u      // gated
 
-#define STARBITE_RING_BASE  0xFED14000UL
-#define STARBITE_RING_CAP   0x3F00u
+typedef struct {
+  EFI_GUID                       Name;
+  EFI_ACPI_DESCRIPTION_HEADER    *Table;       // pool copy, kept for a later install
+  BOOLEAN                        Gated;
+  BOOLEAN                        Installed;
+  UINTN                          Key;
+  CHAR8                          Id[9];
+  EFI_EVENT                      Event;
+  VOID                           *Registration;
+} BLOB;
 
-STATIC EFI_EVENT  mReadyEvent;
-
-STATIC
-VOID
-RingWrite (
-  IN CONST CHAR8  *Buffer,
-  IN UINTN        NumberOfBytes
-  )
-{
-  volatile UINT32  *W = (volatile UINT32 *)STARBITE_RING_BASE;
-  volatile UINT8   *B = (volatile UINT8 *)(STARBITE_RING_BASE + 12);
-  UINTN            Index;
-  UINT32           Pos;
-
-  if ((W[0] != 0x43474244u) || (W[1] >= STARBITE_RING_CAP) || (W[2] > STARBITE_RING_CAP)) {
-    W[0] = 0x43474244u;
-    W[1] = 0;
-    W[2] = 0;
-  }
-
-  for (Index = 0; Index < NumberOfBytes; Index++) {
-    if (W[2] < STARBITE_RING_CAP) {
-      Pos  = W[2];
-      W[2] = Pos + 1;
-      W[1] = (Pos + 1) % STARBITE_RING_CAP;
-    } else {
-      Pos  = W[1];
-      W[1] = (Pos + 1) % STARBITE_RING_CAP;
-    }
-
-    B[Pos] = (UINT8)Buffer[Index];
-  }
-
-  __asm__ __volatile__ ("dsb sy" ::: "memory");
-}
-
-STATIC
-VOID
-EFIAPI
-Log (
-  IN CONST CHAR8  *Format,
-  ...
-  )
-{
-  CHAR8    Line[160];
-  VA_LIST  Args;
-  UINTN    Len;
-
-  VA_START (Args, Format);
-  Len = AsciiVSPrint (Line, sizeof (Line) - 1, Format, Args);
-  VA_END (Args);
-  Line[Len++] = '\n';
-  Line[Len]   = 0;
-  RingWrite (Line, Len);
-  DEBUG ((DEBUG_INFO, "%a", Line));
-}
+STATIC EFI_ACPI_TABLE_PROTOCOL  *mAcpiTable;
+STATIC BLOB                     mBlobs[SSDT_MAX_BLOBS];
+STATIC UINTN                    mCount;
 
 STATIC
 BOOLEAN
@@ -142,14 +105,158 @@ TableIdText (
 }
 
 STATIC
+BOOLEAN
+Flagged (
+  IN BLOB  *Blob
+  )
+{
+  VOID  *Flag;
+
+  return (BOOLEAN)!EFI_ERROR (gBS->LocateProtocol (&Blob->Name, NULL, &Flag));
+}
+
+STATIC
+VOID
+Install (
+  IN BLOB         *Blob,
+  IN CONST CHAR8  *When
+  )
+{
+  EFI_STATUS  Status;
+
+  if (Blob->Installed) {
+    return;
+  }
+
+  Blob->Table->Checksum = 0;
+  Blob->Table->Checksum = CalculateCheckSum8 ((UINT8 *)Blob->Table, Blob->Table->Length);
+  Status                = mAcpiTable->InstallAcpiTable (mAcpiTable, Blob->Table, Blob->Table->Length, &Blob->Key);
+  if (EFI_ERROR (Status)) {
+    SbLog ("=SSDT FAIL %a: InstallAcpiTable %r", Blob->Id, Status);
+    return;
+  }
+
+  Blob->Installed = TRUE;
+  SbLog (
+    "=SSDT installed %a (%d bytes, rev %d%a, %a)",
+    Blob->Id,
+    Blob->Table->Length,
+    Blob->Table->OemRevision,
+    Blob->Gated ? ", gated" : "",
+    When
+    );
+}
+
+//
+// The blob's protocol appeared: a gated blob is enabled, a plain one vetoed.
+//
+STATIC
 VOID
 EFIAPI
-InstallBlobs (
+OnFlag (
   IN EFI_EVENT  Event,
   IN VOID       *Context
   )
 {
-  EFI_ACPI_TABLE_PROTOCOL        *AcpiTable;
+  BLOB        *Blob;
+  EFI_STATUS  Status;
+
+  Blob = (BLOB *)Context;
+  if (!Flagged (Blob)) {
+    return;                         // the registration's first, spurious signal
+  }
+
+  if (Blob->Gated) {
+    Install (Blob, "enabled by its driver");
+  } else if (Blob->Installed) {
+    Status = mAcpiTable->UninstallAcpiTable (mAcpiTable, Blob->Key);
+    if (!EFI_ERROR (Status)) {
+      Blob->Installed = FALSE;
+    }
+
+    SbLog ("=SSDT vetoed %a after install: uninstalled %r", Blob->Id, Status);
+  }
+
+  gBS->CloseEvent (Event);
+}
+
+STATIC
+VOID
+Take (
+  IN EFI_GUID  *Name,
+  IN VOID      *Buffer,
+  IN UINTN     BufferSize
+  )
+{
+  EFI_ACPI_DESCRIPTION_HEADER  *Table;
+  BLOB                         *Blob;
+  CONST CHAR8                  *Skip;
+  CHAR8                        Id[9];
+  UINTN                        Index;
+  EFI_STATUS                   Status;
+
+  TableIdText (Name->Data4, Id);
+  Table = (EFI_ACPI_DESCRIPTION_HEADER *)Buffer;
+  Skip  = NULL;
+  if ((BufferSize < sizeof (*Table)) || (Table->Length < sizeof (*Table)) || (Table->Length > BufferSize)) {
+    Skip = "bad length";
+  } else if (Table->Signature != EFI_ACPI_6_3_SECONDARY_SYSTEM_DESCRIPTION_TABLE_SIGNATURE) {
+    Skip = "not an SSDT";
+  } else if (CompareMem (Table->OemId, "STRBTE", 6) != 0) {
+    Skip = "OEM ID is not STRBTE";
+  } else if (CompareMem (&Table->OemTableId, Name->Data4, 8) != 0) {
+    Skip = "Table ID differs from the file GUID";
+  } else if (mCount == SSDT_MAX_BLOBS) {
+    Skip = "more than 32 blobs";
+  } else {
+    for (Index = 0; Index < mCount; Index++) {
+      if (mBlobs[Index].Table->OemTableId == Table->OemTableId) {
+        Skip = "Table ID already seen";
+      }
+    }
+  }
+
+  if (Skip != NULL) {
+    SbLog ("=SSDT skip %a: %a", Id, Skip);
+    FreePool (Buffer);
+    return;
+  }
+
+  Blob = &mBlobs[mCount++];
+  CopyGuid (&Blob->Name, Name);
+  CopyMem (Blob->Id, Id, sizeof (Id));
+  Blob->Table     = Table;          // kept: a gated blob may be installed later
+  Blob->Gated     = (BOOLEAN)(Name->Data3 == GATED_DATA3);
+  Blob->Installed = FALSE;
+
+  if (Blob->Gated ? Flagged (Blob) : !Flagged (Blob)) {
+    Install (Blob, "at dispatch");
+  } else {
+    SbLog ("=SSDT %a %a at dispatch", Id, Blob->Gated ? "waits for its driver's enable" : "vetoed");
+  }
+
+  //
+  // Gated and not yet installed: wait for the enable. Plain and installed: watch for a veto.
+  //
+  if ((Blob->Gated && !Blob->Installed) || (!Blob->Gated && Blob->Installed)) {
+    Status = gBS->CreateEvent (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, OnFlag, Blob, &Blob->Event);
+    if (!EFI_ERROR (Status)) {
+      Status = gBS->RegisterProtocolNotify (&Blob->Name, Blob->Event, &Blob->Registration);
+    }
+
+    if (EFI_ERROR (Status)) {
+      SbLog ("=SSDT %a: no notification (%r)", Id, Status);
+    }
+  }
+}
+
+EFI_STATUS
+EFIAPI
+SsdtDxeEntry (
+  IN EFI_HANDLE        ImageHandle,
+  IN EFI_SYSTEM_TABLE  *SystemTable
+  )
+{
   EFI_HANDLE                     *Handles;
   UINTN                          HandleCount;
   UINTN                          FvIndex;
@@ -162,35 +269,24 @@ InstallBlobs (
   VOID                           *Buffer;
   UINTN                          BufferSize;
   UINT32                         AuthStatus;
-  EFI_ACPI_DESCRIPTION_HEADER    *Table;
-  UINT64                         Installed[SSDT_MAX_BLOBS];
-  UINTN                          InstalledCount;
-  UINTN                          Seen;
-  UINTN                          Index;
-  UINTN                          TableKey;
-  VOID                           *Flag;
-  BOOLEAN                        Gated;
-  BOOLEAN                        Flagged;
-  CHAR8                          Id[9];
-  CONST CHAR8                    *Skip;
   EFI_STATUS                     Status;
+  UINTN                          Index;
+  UINTN                          Installed;
 
-  gBS->CloseEvent (Event);
-  Status = gBS->LocateProtocol (&gEfiAcpiTableProtocolGuid, NULL, (VOID **)&AcpiTable);
+  SbLog ("=SSDT v%d at dispatch", SSDT_VERSION);
+  Status = gBS->LocateProtocol (&gEfiAcpiTableProtocolGuid, NULL, (VOID **)&mAcpiTable);
   if (EFI_ERROR (Status)) {
-    Log ("=SSDT FAIL no ACPI table protocol: %r", Status);
-    return;
+    SbLog ("=SSDT FAIL no ACPI table protocol: %r", Status);
+    return Status;
   }
 
   Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiFirmwareVolume2ProtocolGuid, NULL, &HandleCount, &Handles);
   if (EFI_ERROR (Status)) {
-    Log ("=SSDT FAIL no firmware volumes: %r", Status);
-    return;
+    SbLog ("=SSDT FAIL no firmware volumes: %r", Status);
+    return Status;
   }
 
-  InstalledCount = 0;
-  Seen           = 0;
-  for (FvIndex = 0; FvIndex < HandleCount && Seen < SSDT_MAX_BLOBS; FvIndex++) {
+  for (FvIndex = 0; FvIndex < HandleCount; FvIndex++) {
     Status = gBS->HandleProtocol (Handles[FvIndex], &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv);
     if (EFI_ERROR (Status)) {
       continue;
@@ -212,85 +308,26 @@ InstallBlobs (
         continue;
       }
 
-      if (++Seen > SSDT_MAX_BLOBS) {
-        Log ("=SSDT more than %d blobs, the rest ignored", SSDT_MAX_BLOBS);
-        break;
-      }
-
-      TableIdText (Name.Data4, Id);
       Buffer     = NULL;
       BufferSize = 0;
       Status     = Fv->ReadSection (Fv, &Name, EFI_SECTION_RAW, 0, &Buffer, &BufferSize, &AuthStatus);
       if (EFI_ERROR (Status)) {
-        Log ("=SSDT skip %a: no RAW section (%r)", Id, Status);
+        SbLog ("=SSDT skip %g: no RAW section (%r)", &Name, Status);
         continue;
       }
 
-      Table   = (EFI_ACPI_DESCRIPTION_HEADER *)Buffer;
-      Skip    = NULL;
-      Gated   = (BOOLEAN)(Name.Data3 == GATED_DATA3);
-      Flagged = (BOOLEAN)!EFI_ERROR (gBS->LocateProtocol (&Name, NULL, &Flag));
-      if ((BufferSize < sizeof (*Table)) || (Table->Length < sizeof (*Table)) || (Table->Length > BufferSize)) {
-        Skip = "bad length";
-      } else if (Table->Signature != EFI_ACPI_6_3_SECONDARY_SYSTEM_DESCRIPTION_TABLE_SIGNATURE) {
-        Skip = "not an SSDT";
-      } else if (CompareMem (Table->OemId, "STRBTE", 6) != 0) {
-        Skip = "OEM ID is not STRBTE";
-      } else if (CompareMem (&Table->OemTableId, Name.Data4, 8) != 0) {
-        Skip = "Table ID differs from the file GUID";
-      } else if (!Gated && Flagged) {
-        Skip = "vetoed by its driver";
-      } else if (Gated && !Flagged) {
-        Skip = "gated, not enabled by its driver";
-      } else {
-        for (Index = 0; Index < InstalledCount; Index++) {
-          if (Installed[Index] == Table->OemTableId) {
-            Skip = "Table ID already installed";
-          }
-        }
-      }
-
-      if (Skip == NULL) {
-        Table->Checksum = 0;
-        Table->Checksum = CalculateCheckSum8 ((UINT8 *)Table, Table->Length);
-        Status          = AcpiTable->InstallAcpiTable (AcpiTable, Table, Table->Length, &TableKey);
-        if (EFI_ERROR (Status)) {
-          Log ("=SSDT FAIL %a: InstallAcpiTable %r", Id, Status);
-        } else {
-          Installed[InstalledCount++] = Table->OemTableId;
-          Log ("=SSDT installed %a (%d bytes, rev %d%a)", Id, Table->Length, Table->OemRevision, Gated ? ", gated" : "");
-        }
-      } else {
-        Log ("=SSDT skip %a: %a", Id, Skip);
-      }
-
-      FreePool (Buffer);
+      Take (&Name, Buffer, BufferSize);
     }
 
     FreePool (Key);
   }
 
   FreePool (Handles);
-  Log ("=SSDT done: %d installed of %d blobs", (UINT32)InstalledCount, (UINT32)MIN (Seen, SSDT_MAX_BLOBS));
-}
+  Installed = 0;
+  for (Index = 0; Index < mCount; Index++) {
+    Installed += mBlobs[Index].Installed ? 1 : 0;
+  }
 
-EFI_STATUS
-EFIAPI
-SsdtDxeEntry (
-  IN EFI_HANDLE        ImageHandle,
-  IN EFI_SYSTEM_TABLE  *SystemTable
-  )
-{
-  EFI_STATUS  Status;
-
-  Status = gBS->CreateEventEx (
-                  EVT_NOTIFY_SIGNAL,
-                  TPL_CALLBACK - 1,
-                  InstallBlobs,
-                  NULL,
-                  &gEfiEventReadyToBootGuid,
-                  &mReadyEvent
-                  );
-  Log ("=SSDT v2 armed for ReadyToBoot: %r", Status);
-  return Status;
+  SbLog ("=SSDT dispatch done: %d blobs, %d installed now", (UINT32)mCount, (UINT32)Installed);
+  return EFI_SUCCESS;
 }
