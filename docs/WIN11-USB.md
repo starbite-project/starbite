@@ -702,9 +702,9 @@ What the checks rule out:
   (unique) and flags 0xFF (all fields valid, revision 3) are right. Two things are different from what
   Windows has seen so far. (a) The instruction caches said "write allocate" (fixed in the source,
   not in the crashed image). (b) The layout: each leaf lists only its L1s, the L2 is reached via
-  "next level" **and** listed under the cluster node (ACPI 6.4 and Linux style). Windows-on-Arm
-  firmware PPTTs that are known to work (edk2 DynamicTables) use the same scheme, but I haven't
-  checked what Windows does with a cache that is both a "next level" and a cluster resource.
+  "next level" **and** listed under the cluster node (ACPI 6.4 and Linux style; edk2's
+  DynamicTables generator builds the same scheme). Not checked: what Windows does with a cache that
+  is both a "next level" and a cluster resource.
 - **Timing:** the crash came before the login screen, after the ETW autologger had started (≈2.5 min
   of trace session). Windows reads the PPTT at the very start of kernel init, long before that, so a
   parse failure there would have hit earlier. More likely a later consumer of the new
