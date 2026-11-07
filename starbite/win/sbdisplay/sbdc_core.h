@@ -146,6 +146,14 @@ int sbdc_swap_back(const struct sbdc_swap *s);
 /* After the back buffer was brought up to date and flipped: it is the front now. */
 void sbdc_swap_flipped(struct sbdc_swap *s);
 
+/* ---- scaled copies (WG1 in software: Windows draws w/scale x h/scale, the panel shows it doubled) -------- */
+
+/* Copy rectangle r (in SOURCE pixels, already clipped to the source) of a 32-bit image into dst, each
+ * source pixel becoming a scale x scale block (scale 1 or 2). Never reads dst (write-combined memory is
+ * slow to read). */
+void sbdc_blit(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+               unsigned scale);
+
 /* ---- brightness (S6E3HA8 AOR) ------------------------------------------------------------ */
 
 /* Windows level 0..100 -> AOR (higher AOR = darker), through S-Boot's and the vendor's points. */

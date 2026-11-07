@@ -57,6 +57,7 @@ AddReg        = SbDisplay_Params
 ; boot, which would send panel commands nobody asked for).
 HKR, Parameters, Flip,       %REG_DWORD%, 0   ; 1 = tear-free flips (writes DECON: IDMA ch0 base, shadow request, trigger)
 HKR, Parameters, Brightness, %REG_DWORD%, 0   ; 1 = brightness slider sends S-Boot's AOR sequence over DSIM
+HKR, Parameters, Scale,      %REG_DWORD%, 2   ; 2 = Windows draws 720x1480, shown doubled (4x fewer pixels for WARP); 1 = native
 
 [SbDisplay_EventLog]
 AddReg = SbDisplay_EventLog_AddReg

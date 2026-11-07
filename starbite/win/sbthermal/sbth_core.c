@@ -188,3 +188,63 @@ int sbth_levels_step(struct sbth_levels *s, int gpu_mc, int hottest_mc)
     }
     return s->level != old;
 }
+
+/* ---- the A55 clock ------------------------------------------------------------------------------ */
+
+static sbth_u32 crd(const struct sbth_io *io, sbth_u64 pa)
+{
+    if (pa >= SBTH_CMU_TOP_PA && pa < SBTH_CMU_TOP_PA + SBTH_CMU_SIZE)
+        return io->rd(io->ctx, 2, (unsigned)(pa - SBTH_CMU_TOP_PA));
+    if (pa >= SBTH_CMU_CPUCL0_PA && pa < SBTH_CMU_CPUCL0_PA + SBTH_CMU_SIZE)
+        return io->rd(io->ctx, 3, (unsigned)(pa - SBTH_CMU_CPUCL0_PA));
+    return 0;
+}
+
+/* PLL_CON0: [31] enable, [29] locked, [25:16] M, [13:8] P, [4] mux (0 = 26 MHz), [2:0] S. In kHz. */
+static sbth_u64 pll_khz(const struct sbth_io *io, sbth_u64 con0)
+{
+    sbth_u32 v = crd(io, con0);
+    sbth_u64 m = (v >> 16) & 0x3ffU, p = (v >> 8) & 0x3fU, s = v & 7U;
+    if (!(v & 0x10U))
+        return 26000U;
+    if (!(v & 0x80000000U) || !p)
+        return 0;
+    return 26000ULL * m / (p << s);
+}
+
+static sbth_u64 top_switch(const struct sbth_io *io, sbth_u64 user, sbth_u64 mux, sbth_u64 div)
+{
+    sbth_u64 src;
+    if (!((crd(io, user) >> 4) & 1U))
+        return 26000U;
+    switch (crd(io, mux) & 3U) {
+    case 0: src = pll_khz(io, 0x1a240120ULL) / ((crd(io, 0x1a2418d4ULL) & 1U) + 1U); break;
+    case 1: src = pll_khz(io, 0x1a2401a0ULL) / ((crd(io, 0x1a2418e0ULL) & 1U) + 1U); break;
+    case 2: src = pll_khz(io, 0x1a240220ULL); break;
+    default: src = pll_khz(io, 0x1a240320ULL); break;
+    }
+    return src / ((crd(io, div) & 7U) + 1U);
+}
+
+sbth_u32 sbth_a55_khz(const struct sbth_io *io)
+{
+    sbth_u64 src = (crd(io, 0x1d00100cULL) & 1U) ? top_switch(io, 0x1d000120ULL, 0x1a241034ULL, 0x1a241830ULL)
+                                                  : pll_khz(io, 0x1d000140ULL);
+    return (sbth_u32)(src / ((crd(io, 0x1d001818ULL) & 0xfffU) + 1U));
+}
+
+int sbth_a55_allowed(sbth_u32 khz)
+{
+    return khz == 1690000U || khz == 1456000U || khz == 1248000U || khz == 1053000U;
+}
+
+sbth_u32 sbth_cpu_target(enum sbth_level cpu_level, sbth_u32 boost_khz)
+{
+    if (!boost_khz || !sbth_a55_allowed(boost_khz))
+        return 0;
+    if (cpu_level == SBTH_NORMAL)
+        return boost_khz;
+    if (cpu_level == SBTH_WARM)
+        return boost_khz < SBTH_A55_WARM_KHZ ? boost_khz : SBTH_A55_WARM_KHZ;
+    return SBTH_A55_SBOOT_KHZ;
+}

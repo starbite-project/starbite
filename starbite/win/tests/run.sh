@@ -7,5 +7,5 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -fsanitize=address,undefined \
     -o "$out" "$here/host_test.c" "$here/../sbthermal/sbth_core.c" "$here/../sbdisplay/sbdc_core.c"
 "$out"
 cc -std=c11 -Wall -Wextra -Werror -O1 -fsanitize=address,undefined \
-    -o "$out-mali" "$here/mali_test.c" "$here/../sbmali/sbm_core.c"
+    -o "$out-mali" "$here/mali_test.c" "$here/../sbmali/sbm_core.c" "$here/../common/sbw_acpm.c"
 "$out-mali"

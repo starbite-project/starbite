@@ -3,6 +3,7 @@
  * mali_desc.c and acpm.c; AArch64 table bits and MEMATTR as Linux panfrost_mmu.c / io-pgtable-arm.c.
  */
 #include "sbm_core.h"
+#include "../common/sbw_acpm.h"
 
 /* GPU registers (panfrost_regs.h) */
 #define GPU_ID 0x000U
@@ -149,81 +150,53 @@ const char *sbm_exc_name(sbm_u32 code)
 
 /* ---- ACPM ------------------------------------------------------------------------------------- */
 
-#define ACPM_INITDATA 0x7f00U
-#define ACPM_PMIC_CH 2U
+#define ACPM_PMIC_CH SBW_ACPM_PMIC_CH
 
-static sbm_u32 ard(const struct sbm_io *io, sbm_u32 off)
+/* sbm_io's ACPM blocks as the shared ACPM code's accessors (common/sbw_acpm.c). */
+static sbw_u32 a_srd(void *ctx, sbw_u32 off)
 {
-    return off + 4U <= SBM_ACPM_SRAM_SIZE ? rd(io, SBM_ACPM_SRAM, off) : 0;
+    const struct sbm_io *io = ctx;
+    return io->rd(io->ctx, SBM_ACPM_SRAM, off);
 }
 
-static void awr(const struct sbm_io *io, sbm_u32 off, sbm_u32 v)
+static void a_swr(void *ctx, sbw_u32 off, sbw_u32 v)
 {
-    if (off + 4U <= SBM_ACPM_SRAM_SIZE)
-        wr(io, SBM_ACPM_SRAM, off, v);
+    const struct sbm_io *io = ctx;
+    io->wr(io->ctx, SBM_ACPM_SRAM, off, v);
 }
 
-static sbm_u32 acpm_seq;
+static void a_mwr(void *ctx, sbw_u32 off, sbw_u32 v)
+{
+    const struct sbm_io *io = ctx;
+    io->wr(io->ctx, SBM_ACPM_MBOX, off, v);
+}
 
-/* The channel entry whose id is `id`; with id = ~0 the first one (the DVFS channel). 0 = none. */
+static void a_delay(void *ctx, unsigned us)
+{
+    udelay((const struct sbm_io *)ctx, us);
+}
+
+static void a_barrier(void *ctx)
+{
+    barrier((const struct sbm_io *)ctx);
+}
+
+static struct sbw_acpm_io acpm_io(const struct sbm_io *io)
+{
+    struct sbw_acpm_io a = { (void *)io, a_srd, a_swr, a_mwr, a_delay, a_barrier };
+    return a;
+}
+
 static sbm_u32 acpm_chan(const struct sbm_io *io, sbm_u32 id)
 {
-    sbm_u32 chans = ard(io, ACPM_INITDATA + 0x08U), ap_max = ard(io, ACPM_INITDATA + 0x18U);
-    if (!ap_max || ap_max > 32U || chans >= SBM_ACPM_SRAM_SIZE - ap_max * 0x48U)
-        return 0;
-    for (sbm_u32 i = 0; i < ap_max; ++i) {
-        sbm_u32 c = chans + i * 0x48U;
-        if (id == ~0U || ard(io, c) == id) {
-            sbm_u32 q = ard(io, c + 0x34U), e = ard(io, c + 0x38U);
-            return (q && q <= 64U && e >= 16U && e <= 64U && !(e & 3U) && ard(io, c) <= 31U) ? c : 0;
-        }
-    }
-    return 0;
+    struct sbw_acpm_io a = acpm_io(io);
+    return sbw_acpm_chan(&a, id);
 }
 
 static int acpm_send(const struct sbm_io *io, sbm_u32 c, sbm_u32 cmd[4])
 {
-    sbm_u32 id = ard(io, c), qlen = ard(io, c + 0x34U), esz = ard(io, c + 0x38U);
-    sbm_u32 tx_rear = ard(io, c + 0x10U), tx_front = ard(io, c + 0x14U), tx_base = ard(io, c + 0x18U);
-    sbm_u32 rx_rear = ard(io, c + 0x28U), rx_front = ard(io, c + 0x2cU), rx_base = ard(io, c + 0x30U);
-    sbm_u32 front = ard(io, tx_front), next = (front + 1U) % qlen, seq, slot;
-    for (unsigned us = 0; next == ard(io, tx_rear); ++us) {
-        if (us > 100000U)
-            return 0;
-        udelay(io, 1);
-    }
-    if (++acpm_seq >= 64U)
-        acpm_seq = 1;
-    seq = acpm_seq;
-    cmd[0] = (cmd[0] & ~(0x3fU << 16)) | (seq << 16);
-    slot = tx_base + esz * front;
-    for (sbm_u32 i = 0; i < esz / 4U; ++i)
-        awr(io, slot + 4U * i, i < 4U ? cmd[i] : 0);
-    barrier(io);
-    awr(io, tx_front, next);
-    barrier(io);
-    wr(io, SBM_ACPM_MBOX, 0x08U, (1U << id) << 16);          /* INTGR0 */
-    for (unsigned us = 0; us < 100000U; ++us) {
-        sbm_u32 rear = ard(io, rx_rear), rfront = ard(io, rx_front);
-        for (sbm_u32 i = rear; i != rfront; i = (i + 1U) % qlen) {
-            sbm_u32 e = rx_base + esz * i;
-            if (((ard(io, e) >> 16) & 0x3fU) != seq)
-                continue;
-            for (sbm_u32 w = 0; w < 4U; ++w)
-                cmd[w] = ard(io, e + 4U * w);
-            if (i != rear)
-                for (sbm_u32 w = 0; w < esz / 4U; ++w)
-                    awr(io, e + 4U * w, ard(io, rx_base + esz * rear + 4U * w));
-            rear = (rear + 1U) % qlen;
-            awr(io, rx_rear, rear);
-            barrier(io);
-            if (rear == ard(io, rx_front))
-                wr(io, SBM_ACPM_MBOX, 0x20U, 1U << id);       /* INTCR1 */
-            return 1;
-        }
-        udelay(io, 1);
-    }
-    return 0;
+    struct sbw_acpm_io a = acpm_io(io);
+    return sbw_acpm_send(&a, c, cmd);
 }
 
 int sbm_pmic_read(const struct sbm_io *io, sbm_u32 type, sbm_u32 reg, sbm_u8 *val)
@@ -277,17 +250,12 @@ int sbm_buck6_restore(const struct sbm_io *io, sbm_u8 old)
 int sbm_gpu_dvfs(const struct sbm_io *io, sbm_u32 khz)
 {
     static const sbm_u32 levels[] = { 572000, 546000, 455000, 338000, 299000, 260000 };
-    sbm_u32 c = acpm_chan(io, ~0U), cmd[4];
+    struct sbw_acpm_io a = acpm_io(io);
     sbm_u8 old = 0;
     int ok = 0;
     for (unsigned i = 0; i < sizeof(levels) / sizeof(levels[0]); ++i)
         ok |= khz == levels[i];
-    if (!ok || !c)
-        return -1;
-    cmd[0] = SBM_DVFS_G3D;                /* domain: the GPU's, never another */
-    cmd[1] = khz;
-    cmd[2] = cmd[3] = 0;
-    if (!acpm_send(io, c, cmd))
+    if (!ok || !sbw_acpm_dvfs(&a, SBM_DVFS_G3D, khz))   /* domain: the GPU's, never another */
         return -1;
     return sbm_buck6_raise(io, &old);     /* ACPM set its own table voltage: back to 950 mV */
 }

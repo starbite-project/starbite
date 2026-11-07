@@ -463,6 +463,35 @@ that with the Windows USB track). Until then the GPU driver also limits a contin
 
 The thermal core (`sbth_core.c`: conversion, filter, level machine) is plain C, shared with a host test.
 
+### 8.4 CPU boost and the ACPM owner (smoothness, 2026-11-07)
+
+Windows runs only on the four A55s, and nothing in our Windows does CPU DVFS, so they stay at what S-Boot
+left (about 1.05 GHz). XNU raises them to 1690 MHz through ACPM DVFS domain 2 on every boot (measured
+1689 MHz). sbthermal now does the same under its watchdog:
+
+- `Parameters\CpuKhz` (default 1690000; 0 = never touch the clock; only 1690000, 1456000, 1248000 or 1053000).
+- A second level machine on the **hottest** probe (same thresholds and hysteresis): Normal → CpuKhz, Warm
+  (≥ 70 °C) → at most 1456 MHz, Hot and above (≥ 80 °C) → S-Boot's 1053 MHz. It starts at Stop, so the boost
+  comes after 2 s of cool readings. Three unanswered requests and the boost gives up for that boot.
+- The clock is read back from the CMU (read only, `sbth_a55_khz`, libsb's decode): `State\A55KhzBoot`
+  (before any change), `A55Khz`, `CpuTargetKhz`, `CpuLevel`, `CpuRequests`, `CpuFailures`.
+- Domain 2 only; ACPM sets the voltage from its own table, as on iOS. sbthermal is now the **single ACPM owner**
+  in Windows: all ACPM IPC code is one file (`starbite/win/common/sbw_acpm.c`), and every transaction, its
+  own and sbmali's BUCK6 writes, runs under one kernel mutex (`SBTH_CB_ACPM_LOCK/UNLOCK` on the callback
+  object, taken in the caller's thread). `struct sbth_state` is frozen (a driver already built passes exactly
+  that size); the CPU data has its own query, `SBTH_CB_QUERY_CPU`.
+
+### 8.5 The 2x scaled desktop (WG1 in software)
+
+sbdisplay with `Parameters\Scale` = 2 (the INF's default) reports one 720 × 1480 mode. WARP and DWM then draw
+a quarter of the pixels; each present doubles the changed rectangles 2 × 2 into the 1440 × 2960 firmware
+framebuffer (`sbdc_blit`: one 64-bit store per source pixel per row, never reading the write-combined
+destination). Copy mode only (no DECON or DSIM writes); text is half as sharp (about 285 ppi). Hardware
+scaling in DECON would need a scaler-capable DPP channel reprogrammed (S-Boot's channel 0 is a G-type, the
+registers are unresearched, and reads of clock-gated channels wedge the SoC), and a smaller firmware GOP
+mode gains nothing without that scaler, so both wait. Page flips remove tearing but copy the same bytes,
+so they come after this.
+
 ## 9. What can be tested off the phone
 
 | What | How | Where |
@@ -489,6 +518,8 @@ the GPU itself.
 | T3a | `sbdisplay` replaces Basic Display, **copy mode** (Flip 0, Brightness 0: no DECON/DSIM write) | T2 + sbdisplay | desktop unchanged; `State`: Started 1, Identify 0, Window 5, Mode 1, CommitStatus 0, Presents counting | black screen possible: person forces restarts (§4.3), kill file, older BOOT |
 | T3b | flips on (Parameters\Flip = 1) | T3a passed | no tearing when dragging windows; `State`: Mode 2, FirstFlip, Flips counting, no FlipLatchTimeout | as T3a; a latch failure falls back to copy by itself |
 | T4 | Brightness slider (Parameters\Brightness = 1) | T3a | Settings shows a slider; 100 → 0 dims the panel; `BrightnessResult` 0 | AOR-only, S-Boot's sequence; worst case the panel stays at one brightness until reboot |
+| T6 | CPU boost (swap sbthermal.sys; `Parameters\CpuKhz` absent = 1690000) | T1 | `State`: A55KhzBoot ≈ 1053000, A55Khz ≈ 1690000, CpuTargetKhz 1690000, CpuFailures 0, CpuLevel 0; Windows visibly snappier | low-moderate: the little cluster runs warmer (the watchdog throttles at 70/80 °C); an ACPM hang is not expected (it answered every request on iOS); undo CpuKhz 0, the old .sys, kill file |
+| T7 | 2x scaled desktop: sbdisplay copy mode, `Scale` 2 (bound instead of sbmali) | T2, after T5 | Windows at 720 × 1480 (Settings > Display), `State`: Scale 2, ModeWidth 720, Mode 1, Presents counting; smoother | a new display driver may black-screen: person forces restarts (§4.3), kill file, old BOOT |
 | T5 | `sbmali` bring-up (replaces sbdisplay for the test) | T1, T2, the PnP install route | `State`: ThermalGate 0, Probe 0, GpuId 0x62210010, ShaderPresent 0x5771777, BuckOld 0x33, BuckRaise 0, `Legacy_*` and `A64_*`: Runs 20, WriteOk 20, ClearOk 20, Faults 0; Done 1, BuckRestore 0 | 950 mV on vdd_g3d (as iOS since 2026-10-28), 260 MHz, ~40 short runs; watchdog gates it. If Windows' boot path left the G3D domain power-cycled without the TZPC restore, the first GPU read is an SError (bugcheck): the boot guard then disables the driver after two tries; kill file; Start = 4 |
 
 Each request to the main session lists exact files, commands, expected values and the undo.

@@ -41,6 +41,7 @@ typedef struct _SM_CTX {
     BOOLEAN BuckRaised;
     UCHAR BuckOld;
     BOOLEAN GpuTouched;
+    PCALLBACK_OBJECT Cb;                  /* \Callback\StarbiteThermal, opened by the thread */
     HANDLE Thread;
     PKTHREAD ThreadObj;
     KEVENT Started, Stop;
@@ -222,6 +223,30 @@ static void LogFormat(PCWSTR Prefix, const struct sbm_test_result *r)
     }
 }
 
+/* sbthermal owns ACPM: take its lock around every ACPM sequence. A watchdog that predates the lock (it
+ * answers no CPU query, and never touches ACPM itself) needs none. TRUE = go ahead. */
+static BOOLEAN AcpmLock(PSM_CTX c, BOOLEAN *Locked)
+{
+    struct sbth_cpu cpu;
+    LONG ok = 0;
+    *Locked = FALSE;
+    if (!c->Cb)
+        return FALSE;
+    RtlZeroMemory(&cpu, sizeof(cpu));
+    ExNotifyCallback(c->Cb, SBTH_CB_QUERY_CPU, &cpu);
+    if (cpu.version == 0)
+        return TRUE;                      /* old sbthermal: no other ACPM user in Windows */
+    ExNotifyCallback(c->Cb, SBTH_CB_ACPM_LOCK, &ok);
+    *Locked = ok != 0;
+    return *Locked;
+}
+
+static void AcpmUnlock(PSM_CTX c, BOOLEAN Locked)
+{
+    if (Locked)
+        ExNotifyCallback(c->Cb, SBTH_CB_ACPM_UNLOCK, NULL);
+}
+
 static void Finish(PSM_CTX c)
 {
     if (c->GpuTouched) {
@@ -230,7 +255,13 @@ static void Finish(PSM_CTX c)
         c->GpuTouched = FALSE;
     }
     if (c->BuckRaised) {
-        Log(L"BuckRestore", (ULONG)sbm_buck6_restore(&c->Io, c->BuckOld), TRUE);
+        BOOLEAN locked;
+        if (AcpmLock(c, &locked)) {
+            Log(L"BuckRestore", (ULONG)sbm_buck6_restore(&c->Io, c->BuckOld), TRUE);
+            AcpmUnlock(c, locked);
+        } else {
+            Log(L"BuckRestore", 0xfffffffeU, TRUE);   /* lock not taken: S-Boot resets BUCK6 at reboot */
+        }
         c->BuckRaised = FALSE;
     }
 }
@@ -238,7 +269,6 @@ static void Finish(PSM_CTX c)
 static VOID SmThread(PVOID Ctx)
 {
     PSM_CTX c = (PSM_CTX)Ctx;
-    PCALLBACK_OBJECT cb = NULL;
     struct sbth_state last;
     struct sbm_info inf;
     ULONG gate = 1, runs, formats;
@@ -264,7 +294,7 @@ static VOID SmThread(PVOID Ctx)
     {
         ULONG waited = 0, tries = 0;
         for (;;) {
-            gate = ThermalGate(&cb, &last);
+            gate = ThermalGate(&c->Cb, &last);
             tries++;
             if (!gate || waited >= SM_GATE_WAIT_MS)
                 break;
@@ -305,7 +335,15 @@ static VOID SmThread(PVOID Ctx)
 
     /* 3. vdd_g3d to 950 mV. */
     Step(3);
-    br = sbm_buck6_raise(&c->Io, &c->BuckOld);
+    {
+        BOOLEAN locked;
+        if (!AcpmLock(c, &locked)) {
+            Log(L"AcpmLock", 0, TRUE);
+            goto out;
+        }
+        br = sbm_buck6_raise(&c->Io, &c->BuckOld);
+        AcpmUnlock(c, locked);
+    }
     c->BuckRaised = br == 0 || br == -3;  /* -3: written but not read back as asked: restore anyway */
     Log(L"BuckOld", c->BuckOld, FALSE);
     Log(L"BuckRaise", (ULONG)br, TRUE);
@@ -320,7 +358,7 @@ static VOID SmThread(PVOID Ctx)
         Step(4 + f);
         RtlZeroMemory(&r, sizeof(r));
         for (ULONG i = 0; i < runs; i++) {
-            gate = ThermalGate(&cb, &last);
+            gate = ThermalGate(&c->Cb, &last);
             if (gate) {
                 Log(L"ThermalStop", gate, TRUE);
                 break;
@@ -349,8 +387,6 @@ out:
         ZwClose(h);
     }
     Step(7);
-    if (cb)
-        ObDereferenceObject(cb);
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -447,6 +483,10 @@ static NTSTATUS SmReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
         c->Thread = NULL;
     }
     Finish(c);                            /* no-op when the thread already put everything back */
+    if (c->Cb) {
+        ObDereferenceObject(c->Cb);
+        c->Cb = NULL;
+    }
     /* The GPU is reset and its cores are off: nothing reads the work area any more. */
     if (c->Mem) {
         MmFreeContiguousMemory(c->Mem);

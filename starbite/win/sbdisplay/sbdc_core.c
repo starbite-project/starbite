@@ -210,6 +210,32 @@ void sbdc_swap_flipped(struct sbdc_swap *s)
     s->front = b;
 }
 
+/* ---- scaled copies ---------------------------------------------------------------------------- */
+
+void sbdc_blit(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+               unsigned scale)
+{
+    if (r.r <= r.l || r.b <= r.t)
+        return;
+    for (int y = r.t; y < r.b; ++y) {
+        const sbdc_u32 *s = (const sbdc_u32 *)(src + (unsigned)y * src_pitch) + r.l;
+        if (scale == 2) {
+            /* one 64-bit store per source pixel per row: the pixel twice */
+            unsigned long long *d0 = (unsigned long long *)(dst + (unsigned)(2 * y) * dst_pitch) + r.l;
+            unsigned long long *d1 = (unsigned long long *)(dst + (unsigned)(2 * y + 1) * dst_pitch) + r.l;
+            for (int x = 0; x < r.r - r.l; ++x) {
+                unsigned long long v = (unsigned long long)s[x] | (unsigned long long)s[x] << 32;
+                d0[x] = v;
+                d1[x] = v;
+            }
+        } else {
+            sbdc_u32 *d = (sbdc_u32 *)(dst + (unsigned)y * dst_pitch) + r.l;
+            for (int x = 0; x < r.r - r.l; ++x)
+                d[x] = s[x];
+        }
+    }
+}
+
 /* ---- brightness ---------------------------------------------------------------------------- */
 
 sbdc_u32 sbdc_level_to_aor(unsigned level)

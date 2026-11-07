@@ -131,6 +131,8 @@ struct sbth_state {
     sbth_u32 blocks_live;                 /* bit 0 TOP, bit 1 SUB */
     sbth_u64 changes;                     /* level changes since start */
 };
+/* FROZEN: drivers already built pass a buffer of exactly this size to SBTH_CB_QUERY. Never grow it; new
+ * data gets its own query and struct (SBTH_CB_QUERY_CPU). */
 
 /* The callback object other drivers use: \Callback\StarbiteThermal.
  * Open it with ExCreateCallback(..., Create = FALSE, ...): a consumer that creates it would make an
@@ -144,6 +146,39 @@ struct sbth_state {
 #define SBTH_CALLBACK_NAME L"\\Callback\\StarbiteThermal"
 #define SBTH_CB_QUERY ((void *)(sbth_u64)0x53425451U)   /* 'SBTQ' */
 #define SBTH_CB_LEVEL ((void *)(sbth_u64)0x5342544cU)   /* 'SBTL' */
+/* The ACPM lock (sbthermal owns ACPM in Windows): a driver brackets each ACPM transaction sequence with
+ * ExNotifyCallback(obj, SBTH_CB_ACPM_LOCK, &ok) ... ExNotifyCallback(obj, SBTH_CB_ACPM_UNLOCK, NULL), in
+ * the same thread at PASSIVE_LEVEL. ok (a LONG) is set to 1 when the lock was taken (waits up to 1 s). */
+/* ExNotifyCallback(obj, SBTH_CB_QUERY_CPU, struct sbth_cpu *): the CPU side. */
+#define SBTH_CB_QUERY_CPU ((void *)(sbth_u64)0x53425443U)  /* 'SBTC' */
+struct sbth_cpu {
+    sbth_u32 version;                     /* 1 */
+    sbth_u32 a55_khz_boot;                /* read before any change */
+    sbth_u32 a55_khz;                     /* read after the last change */
+    sbth_u32 target_khz;                  /* last requested, 0 = never touched */
+    sbth_u32 level;                       /* the CPU level machine (hottest probe) */
+    sbth_u32 requests, failures;          /* ACPM DVFS requests and the ones not answered */
+};
+#define SBTH_CB_ACPM_LOCK ((void *)(sbth_u64)0x53424131U)   /* 'SBA1' */
+#define SBTH_CB_ACPM_UNLOCK ((void *)(sbth_u64)0x53424130U) /* 'SBA0' */
+
+/* ---- the A55 clock (Windows runs only on the four A55s) ----------------------------------------
+ * Read only: blocks 2 = CMU_TOP 0x1a240000, 3 = CMU_CPUCL0 0x1d000000 (libsb tmu.c sb_a55_hz). Set only
+ * through ACPM DVFS domain 2 (the A55 cluster: allowed by docs/PLAN-2026-11-07.md), one of the vendor DT's
+ * levels up to 1690000 kHz (what XNU sets on every boot, measured 1689 MHz). ACPM sets the voltage. */
+#define SBTH_CMU_TOP_PA 0x1a240000ULL
+#define SBTH_CMU_CPUCL0_PA 0x1d000000ULL
+#define SBTH_CMU_SIZE 0x2000U
+#define SBTH_DVFS_A55 2U
+#define SBTH_A55_SBOOT_KHZ 1053000U       /* what S-Boot leaves (and the Hot level's clock) */
+#define SBTH_A55_WARM_KHZ 1456000U
+#define SBTH_A55_MAX_KHZ 1690000U
+
+sbth_u32 sbth_a55_khz(const struct sbth_io *io);
+int sbth_a55_allowed(sbth_u32 khz);
+/* The A55 clock for a CPU level (a level machine fed with the hottest CPU/GPU probe): boost at Normal,
+ * at most SBTH_A55_WARM_KHZ at Warm, S-Boot's clock from Hot up. 0 = boost off: never touch the clock. */
+sbth_u32 sbth_cpu_target(enum sbth_level cpu_level, sbth_u32 boost_khz);
 
 /* \\.\StarbiteThermal: METHOD_BUFFERED, FILE_READ_ACCESS, returns struct sbth_state. */
 #define SBTH_DEVICE_TYPE 0x8253U

@@ -49,6 +49,8 @@ typedef struct _SD_DEVICE {
     BOOLEAN Hw;                           /* DECON registers mapped and the pipeline identified */
     BOOLEAN SourceVisible, PathActive;
     BOOLEAN FullCopy;                     /* next copy-mode present redraws the whole frame */
+    ULONG Scale;                          /* 1, or 2: Windows draws Lw x Lh, each pixel shown as 2 x 2 */
+    ULONG Lw, Lh;                         /* the mode Windows sees (= Fb.Width/Height at scale 1) */
     volatile UCHAR *Mmio[SBDC_BLOCKS];
     SIZE_T MmioSize[SBDC_BLOCKS];
     struct sbdc_io Io;
@@ -227,10 +229,10 @@ static UINT BytesPerPixel(D3DDDIFORMAT F)
 static void FillSourceMode(PSD_DEVICE Dev, D3DKMDT_VIDPN_SOURCE_MODE *M)
 {
     M->Type = D3DKMDT_RMT_GRAPHICS;
-    M->Format.Graphics.PrimSurfSize.cx = Dev->Fb.Width;
-    M->Format.Graphics.PrimSurfSize.cy = Dev->Fb.Height;
+    M->Format.Graphics.PrimSurfSize.cx = Dev->Lw;
+    M->Format.Graphics.PrimSurfSize.cy = Dev->Lh;
     M->Format.Graphics.VisibleRegionSize = M->Format.Graphics.PrimSurfSize;
-    M->Format.Graphics.Stride = Dev->Fb.Pitch;
+    M->Format.Graphics.Stride = Dev->Scale == 1 ? Dev->Fb.Pitch : Dev->Lw * 4;
     M->Format.Graphics.PixelFormat = D3DDDIFMT_A8R8G8B8;
     M->Format.Graphics.ColorBasis = D3DKMDT_CB_SRGB;
     M->Format.Graphics.PixelValueAccessMode = D3DKMDT_PVAM_DIRECT;
@@ -239,29 +241,26 @@ static void FillSourceMode(PSD_DEVICE Dev, D3DKMDT_VIDPN_SOURCE_MODE *M)
 static void FillSignal(PSD_DEVICE Dev, D3DKMDT_VIDEO_SIGNAL_INFO *S)
 {
     S->VideoStandard = D3DKMDT_VSS_OTHER;
-    S->TotalSize.cx = Dev->Fb.Width;
-    S->TotalSize.cy = Dev->Fb.Height;
+    S->TotalSize.cx = Dev->Lw;
+    S->TotalSize.cy = Dev->Lh;
     S->ActiveSize = S->TotalSize;
     S->VSyncFreq.Numerator = 60;
     S->VSyncFreq.Denominator = 1;
-    S->HSyncFreq.Numerator = 60 * Dev->Fb.Height;
+    S->HSyncFreq.Numerator = 60 * Dev->Lh;
     S->HSyncFreq.Denominator = 1;
-    S->PixelRate = (SIZE_T)Dev->Fb.Width * Dev->Fb.Height * 60;
+    S->PixelRate = (SIZE_T)Dev->Lw * Dev->Lh * 60;
     S->ScanLineOrdering = D3DDDI_VSSLO_PROGRESSIVE;
 }
 
 /* ---- scanout ownership ----------------------------------------------------------------------- */
 
 /* Copy rectangles of the source image into buffer i. */
+/* Copy rectangles of the source image (source pixels) into buffer i, scaled by Dev->Scale (flip mode and the
+ * buffer-to-buffer restore always run at scale 1). */
 static void CopyRects(PSD_DEVICE Dev, int I, const UCHAR *Src, LONG SrcPitch, const struct sbdc_rects *R)
 {
-    for (unsigned k = 0; k < R->n; k++) {
-        const struct sbdc_rect *r = &R->r[k];
-        SIZE_T bytes = (SIZE_T)(r->r - r->l) * 4;
-        for (LONG y = r->t; y < r->b; y++)
-            RtlCopyMemory(Dev->Va[I] + (SIZE_T)y * Dev->Fb.Pitch + (SIZE_T)r->l * 4,
-                          Src + (SIZE_T)y * SrcPitch + (SIZE_T)r->l * 4, bytes);
-    }
+    for (unsigned k = 0; k < R->n; k++)
+        sbdc_blit(Dev->Va[I], Dev->Fb.Pitch, Src, (unsigned)SrcPitch, R->r[k], Dev->Scale);
 }
 
 /* Leave flip mode: DECON back on the firmware framebuffer with the current image in it. Returns
@@ -394,6 +393,16 @@ NTSTATUS SdStartDevice(IN_CONST_PVOID MiniportDeviceContext, IN_PDXGK_START_INFO
     if (dev->Va[0] == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
 
+    /* Scale 2 (Parameters\Scale, default 2): Windows gets a half-size mode and draws a quarter of the pixels;
+     * the present doubles them. Only for an even-sized, packed framebuffer; it implies copy mode. */
+    dev->Scale = Param(L"Scale", 2) == 2 && !(dev->Fb.Width & 1) && !(dev->Fb.Height & 1) &&
+                 dev->Fb.Pitch == dev->Fb.Width * 4 ? 2 : 1;
+    dev->Lw = dev->Fb.Width / dev->Scale;
+    dev->Lh = dev->Fb.Height / dev->Scale;
+    Log(L"Scale", dev->Scale, FALSE);
+    Log(L"ModeWidth", dev->Lw, FALSE);
+    Log(L"ModeHeight", dev->Lh, FALSE);
+
     /* Flip mode only when everything is exactly as S-Boot left it. */
     MapResources(dev);
     if (dev->Mmio[SBDC_DECON] && dev->Mmio[SBDC_DMA] && dev->Fb.PhysicAddress.QuadPart < 0x100000000LL &&
@@ -405,7 +414,7 @@ NTSTATUS SdStartDevice(IN_CONST_PVOID MiniportDeviceContext, IN_PDXGK_START_INFO
         Log(L"Window", dev->Dc.win, FALSE);
         Log(L"TrigInherited", dev->Dc.trig_inherited, FALSE);
     }
-    if (dev->Hw && Param(L"Flip", 0)) {
+    if (dev->Hw && dev->Scale == 1 && Param(L"Flip", 0)) {
         lo.QuadPart = 0;
         hi.QuadPart = 0xffffffffLL;       /* DECON's IDMA base registers are 32 bits */
         skip.QuadPart = 0;
@@ -688,8 +697,8 @@ static NTSTATUS SdIsSupportedVidPnImpl(IN_CONST_HANDLE hAdapter, DXGKARG_ISSUPPO
     st = setIf->pfnAcquirePinnedModeInfo(set, &pinned);
     if (NT_SUCCESS(st)) {
         Arg->IsVidPnSupported = pinned == NULL ||
-            (pinned->Type == D3DKMDT_RMT_GRAPHICS && pinned->Format.Graphics.PrimSurfSize.cx == dev->Fb.Width &&
-             pinned->Format.Graphics.PrimSurfSize.cy == dev->Fb.Height);
+            (pinned->Type == D3DKMDT_RMT_GRAPHICS && pinned->Format.Graphics.PrimSurfSize.cx == dev->Lw &&
+             pinned->Format.Graphics.PrimSurfSize.cy == dev->Lh);
         if (pinned != NULL)
             setIf->pfnReleaseModeInfo(set, pinned);
     }
@@ -876,8 +885,8 @@ static NTSTATUS SdCommitVidPnImpl(IN_CONST_HANDLE hAdapter, const DXGKARG_COMMIT
     }
     st = setIf->pfnAcquirePinnedModeInfo(set, &pinned);
     if (NT_SUCCESS(st) && pinned != NULL) {
-        BOOLEAN ours = pinned->Type == D3DKMDT_RMT_GRAPHICS && pinned->Format.Graphics.PrimSurfSize.cx == dev->Fb.Width &&
-                       pinned->Format.Graphics.PrimSurfSize.cy == dev->Fb.Height;
+        BOOLEAN ours = pinned->Type == D3DKMDT_RMT_GRAPHICS && pinned->Format.Graphics.PrimSurfSize.cx == dev->Lw &&
+                       pinned->Format.Graphics.PrimSurfSize.cy == dev->Lh;
         setIf->pfnReleaseModeInfo(set, pinned);
         st = ours ? STATUS_SUCCESS : STATUS_GRAPHICS_INVALID_VIDPN;
         dev->PathActive = ours;
@@ -954,7 +963,7 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
     if (Arg->BytesPerPixel != 4 || Arg->Flags.Rotate)
         return STATUS_NOT_SUPPORTED;
 
-    size = (SIZE_T)Arg->Pitch * dev->Fb.Height;
+    size = (SIZE_T)Arg->Pitch * dev->Lh;
     mdl = IoAllocateMdl(Arg->pSource, (ULONG)size, FALSE, FALSE, NULL);
     if (mdl == NULL)
         return STATUS_NO_MEMORY;
@@ -989,8 +998,8 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
     }
     if (n == SBDC_MAX_RECTS && Arg->NumMoves + Arg->NumDirtyRects > SBDC_MAX_RECTS) {
         rect[0].l = rect[0].t = 0;
-        rect[0].r = (int)dev->Fb.Width;
-        rect[0].b = (int)dev->Fb.Height;
+        rect[0].r = (int)dev->Lw;
+        rect[0].b = (int)dev->Lh;
         n = 1;
     }
 
@@ -1014,11 +1023,11 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
     } else {
         sbdc_rects_clear(&copy);
         if (dev->FullCopy) {
-            sbdc_rects_full(&copy, dev->Fb.Width, dev->Fb.Height);
+            sbdc_rects_full(&copy, dev->Lw, dev->Lh);
             dev->FullCopy = FALSE;
         }
         for (unsigned i = 0; i < n; i++)
-            sbdc_rects_add(&copy, rect[i], dev->Fb.Width, dev->Fb.Height);
+            sbdc_rects_add(&copy, rect[i], dev->Lw, dev->Lh);
         CopyRects(dev, 0, src, Arg->Pitch, &copy);
         if (dev->Va[1])                   /* after a fallback: DECON may scan either buffer */
             CopyRects(dev, 1, src, Arg->Pitch, &copy);

@@ -28,6 +28,7 @@ static int fails, checks;
 
 struct ftmu {
     uint32_t reg[2][0x400];
+    uint32_t cmu[2][0x800];               /* block 2 CMU_TOP, block 3 CMU_CPUCL0 */
     int glitch;                           /* return code 0 for the next n CURRENT_TEMP reads */
     int writes;
 };
@@ -35,6 +36,8 @@ struct ftmu {
 static uint32_t ftmu_rd(void *ctx, unsigned b, unsigned off)
 {
     struct ftmu *t = ctx;
+    if ((b == 2 || b == 3) && off < 0x2000 && !(off & 3))
+        return t->cmu[b - 2][off / 4];
     if (b > 1 || off >= 0x1000 || (off & 3)) {
         printf("FAIL: TMU read out of range %u:%#x\n", b, off);
         ++fails;
@@ -174,6 +177,38 @@ static void test_thermal(void)
     CHECK(lv.level == SBTH_STOP, "start: still stop after 7");
     sbth_levels_step(&lv, 40000, 40000);
     CHECK(lv.level == SBTH_NORMAL, "start: normal after 8");
+
+    /* the A55 clock: PLL_CPUCL0 CON0 0x1d000140 (enabled, mux on, M 81, P 2, S 0) = 1053 MHz, divider 1 */
+    ftmu_init(&t);
+    t.cmu[1][0x140 / 4] = 0x80000000u | 0x10u | 81u << 16 | 2u << 8;
+    CHECK(sbth_a55_khz(&io) == 1053000, "A55 at S-Boot's 1053 MHz, got %u", sbth_a55_khz(&io));
+    t.cmu[1][0x140 / 4] = 0x80000000u | 0x10u | 130u << 16 | 2u << 8;
+    CHECK(sbth_a55_khz(&io) == 1690000, "A55 at 1690 MHz, got %u", sbth_a55_khz(&io));
+    t.cmu[1][0x1818 / 4] = 1;
+    CHECK(sbth_a55_khz(&io) == 845000, "divider 2 -> 845 MHz, got %u", sbth_a55_khz(&io));
+    /* through the TOP switch: CPUCL0 mux 0x1d00100c bit 0, user mux 0x1d000120 bit 4, TOP mux 0x1a241034 = 2
+     * (PLL_SHARED2 0x1a240220 = 800 MHz: M 400 P 13 S 0), TOP divider 0x1a241830 = 0 */
+    ftmu_init(&t);
+    t.cmu[1][0x100c / 4] = 1;
+    t.cmu[1][0x120 / 4] = 0x10;
+    t.cmu[0][0x1034 / 4] = 2;
+    t.cmu[0][0x220 / 4] = 0x80000000u | 0x10u | 400u << 16 | 13u << 8;
+    CHECK(sbth_a55_khz(&io) == 800000, "A55 on the TOP switch: 800 MHz, got %u", sbth_a55_khz(&io));
+
+    /* the boost policy */
+    CHECK(sbth_cpu_target(SBTH_NORMAL, 1690000) == 1690000, "Normal -> boost");
+    CHECK(sbth_cpu_target(SBTH_WARM, 1690000) == 1456000, "Warm -> 1456 MHz");
+    CHECK(sbth_cpu_target(SBTH_WARM, 1248000) == 1248000, "Warm keeps a lower boost");
+    CHECK(sbth_cpu_target(SBTH_HOT, 1690000) == 1053000 && sbth_cpu_target(SBTH_CRITICAL, 1690000) == 1053000,
+          "Hot and above -> S-Boot's clock");
+    CHECK(sbth_cpu_target(SBTH_NORMAL, 0) == 0 && sbth_cpu_target(SBTH_HOT, 0) == 0, "boost 0: never touch");
+    CHECK(sbth_cpu_target(SBTH_NORMAL, 1950000) == 0 && sbth_cpu_target(SBTH_NORMAL, 1700000) == 0,
+          "levels above 1690 MHz or not in the table: refused");
+    /* the CPU level machine runs on the hottest probe: a hot little cluster with a cool GPU throttles */
+    sbth_levels_init(&lv);
+    for (int i = 0; i < 2; ++i)
+        sbth_levels_step(&lv, 82000, 82000);
+    CHECK(sbth_cpu_target(lv.level, 1690000) == 1053000, "82 C on the cluster -> 1053 MHz");
 
     /* IOCTL code = CTL_CODE(0x8253, 0x801, METHOD_BUFFERED, FILE_READ_ACCESS) */
     CHECK(SBTH_IOCTL_GET_STATE == 0x82536004u, "ioctl %#x", SBTH_IOCTL_GET_STATE);
@@ -376,6 +411,51 @@ static void test_display(void)
               sbdc_rects_area(&sw.stale[0]));
         sbdc_swap_flipped(&sw);
         CHECK(sbdc_rects_area(&sw.stale[1]) == 100 * 100, "ours needs only present 2");
+    }
+
+    /* 2x blit: each source pixel -> a 2 x 2 block; nothing outside the rectangle's image changes */
+    {
+        static uint32_t src[8 * 6], dst[16 * 12];
+        struct sbdc_rect r = { 2, 1, 5, 4 };
+        int ok = 1;
+        for (int i = 0; i < 8 * 6; ++i)
+            src[i] = 0x10000u + (uint32_t)i;
+        for (int i = 0; i < 16 * 12; ++i)
+            dst[i] = 0xdeadbeef;
+        sbdc_blit((uint8_t *)dst, 16 * 4, (const uint8_t *)src, 8 * 4, r, 2);
+        for (int y = 0; y < 12; ++y)
+            for (int x = 0; x < 16; ++x) {
+                int in = x >= 4 && x < 10 && y >= 2 && y < 8;
+                uint32_t want = in ? src[(y / 2) * 8 + x / 2] : 0xdeadbeef;
+                if (dst[y * 16 + x] != want)
+                    ok = 0;
+            }
+        CHECK(ok, "2x blit");
+        for (int i = 0; i < 16 * 12; ++i)
+            dst[i] = 0xdeadbeef;
+        sbdc_blit((uint8_t *)dst, 16 * 4, (const uint8_t *)src, 8 * 4, r, 1);
+        ok = 1;
+        for (int y = 0; y < 12; ++y)
+            for (int x = 0; x < 16; ++x) {
+                int in = x >= 2 && x < 5 && y >= 1 && y < 4;
+                if (dst[y * 16 + x] != (in ? src[y * 8 + x] : 0xdeadbeef))
+                    ok = 0;
+            }
+        CHECK(ok, "1x blit");
+        struct sbdc_rect e = { 3, 3, 3, 9 };
+        sbdc_blit((uint8_t *)dst, 16 * 4, (const uint8_t *)src, 8 * 4, e, 2);
+        CHECK(1, "empty rect is a no-op");
+        /* the whole 720 x 1480 frame into 1440 x 2960 */
+        uint32_t *big_src = malloc(720 * 1480 * 4), *big_dst = malloc(1440 * 2960 * 4);
+        struct sbdc_rect full = { 0, 0, 720, 1480 };
+        for (int i = 0; i < 720 * 1480; ++i)
+            big_src[i] = (uint32_t)i * 2654435761u;
+        sbdc_blit((uint8_t *)big_dst, 1440 * 4, (const uint8_t *)big_src, 720 * 4, full, 2);
+        ok = big_dst[0] == big_src[0] && big_dst[1440 * 2960 - 1] == big_src[720 * 1480 - 1] &&
+             big_dst[2961 * 2 * 0 + 1440 * 2 * 1000 + 2 * 500 + 1441] == big_src[1000 * 720 + 500];
+        CHECK(ok, "full frame 720x1480 -> 1440x2960");
+        free(big_src);
+        free(big_dst);
     }
 
     /* brightness */
