@@ -615,11 +615,95 @@ static void idle_check(void)
     sb_reboot(SB_INFORM_NORMAL);
 }
 
+/* ---- screen saver ---------------------------------------------------------------------------- */
+/* After 2 minutes without a touch or key the panel goes black (OLED: those pixels are off, so nothing burns
+ * in and the battery lasts) with a dim status that moves every 30 s. A touch or key brings the page back as
+ * it was (the back buffer is kept aside) and goes no further. USB, the shell, hashing, the idle return and
+ * the watchdog keep running: the saver's loop polls through ui_poll, whose tick is ut_service. */
+#define SAVER_MS (2U * 60U * 1000U)
+static int in_saver, saver_off;
+static uint32_t *saver_buf;
+
+static void saver_draw(unsigned k)
+{
+    int x = 60 + (int)((k * 397U) % 520U), y = 260 + (int)((k * 911U) % 2300U);
+    struct ub u;
+    ui_fill(0, 0, UI_W, UI_H, 0xff000000U);
+    ui_text(F_SMALL, x, y, "Starbite Utility", C_L3);
+    ub_init(&u);
+    if (hash_job.state == HASH_RUNNING) {
+        ub_s(&u, "hashing ");
+        ub_s(&u, hash_job.name);
+        ub_s(&u, "  ");
+        ub_dec(&u, hash_job.bytes ? hash_job.done * 100U / hash_job.bytes : 0);
+        ub_s(&u, " %");
+    } else if (usbd_configured()) {
+        ub_s(&u, "USB: ");
+        ub_dec(&u, nlun);
+        ub_s(&u, nlun == 1 ? " drive + shell" : " drives + shell");
+    } else if (!usb_ever) {
+        uint64_t idle = ui_idle_ms();
+        ub_s(&u, "no computer: back to the menu in ");
+        ub_dec(&u, (IDLE_EXIT_MS - (idle < IDLE_EXIT_MS ? idle : IDLE_EXIT_MS)) / 1000U);
+        ub_s(&u, " s");
+    } else {
+        ub_s(&u, "USB: unplugged");
+    }
+    ui_text(F_SMALL, x, y + 70, u.b, C_L3);
+    ui_text(F_SMALL, x, y + 140, "touch or press a key", C_L3);
+    ui_dirty_all();
+    ui_present();
+}
+
+static void saver_check(void)
+{
+    if (in_saver || saver_off || ui_idle_ms() < SAVER_MS)
+        return;
+    uint64_t px = (uint64_t)UI_W * UI_H;
+    if (!saver_buf && !(saver_buf = sb_alloc(px * 4U))) {
+        saver_off = 1;                                /* no room in the arena: no saver */
+        sb_log("utility: no memory for the screen saver");
+        return;
+    }
+    in_saver = 1;
+    uint32_t *bb = ui_back();
+    for (uint64_t i = 0; i < px; ++i)
+        saver_buf[i] = bb[i];
+    struct ui_rect clip = ui_get_clip();
+    ui_noclip();
+    sb_log("utility: screen saver");
+    unsigned k = 0;
+    uint64_t next = 0, move = sb_ms() + 30000U;
+    for (;;) {
+        if (sb_ms() >= move) {
+            ++k;
+            move = sb_ms() + 30000U;
+            next = 0;
+        }
+        if (sb_ms() >= next) {
+            saver_draw(k);
+            next = sb_ms() + 1000U;
+        }
+        struct ui_ev e;
+        ui_poll(&e, 100);
+        if (e.type != EV_NONE)
+            break;
+    }
+    ui_input_reset();                                 /* the waking touch or key goes nowhere */
+    for (uint64_t i = 0; i < px; ++i)
+        bb[i] = saver_buf[i];
+    ui_set_clip(clip);
+    ui_dirty_all();
+    ui_present();
+    in_saver = 0;
+}
+
 void ut_service(void)
 {
     struct usbd_ev e;
     wdt_feed();
     idle_check();
+    saver_check();
     uint64_t now = sb_ms();
     if (now - t_muic >= 500) {                        /* max77705_muic.c's schedule */
         t_muic = now;
@@ -912,6 +996,7 @@ void sb_main(void)
         sb_log("utility: MAX77705 did not answer (D+/D- route)");
     usb_start();
     ui_input_reset();
+    ui_idle_restart();                                /* idle from here: the menu's time does not count */
     draw_home();
     ui_present();
     uint64_t next = sb_ms() + 1000;

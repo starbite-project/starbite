@@ -48,6 +48,11 @@ uint64_t ui_idle_ms(void)
     return sb_ms() - last_input;
 }
 
+void ui_idle_restart(void)
+{
+    last_input = sb_ms();
+}
+
 void ui_input_reset(void)
 {
     qh = qt = 0;

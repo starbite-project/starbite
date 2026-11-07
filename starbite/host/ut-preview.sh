@@ -50,5 +50,7 @@ scene calc        UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:
 scene browse      UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200
 scene browse-dir  UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:p w:800
 scene file-hash   UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:3000
-scene idle-warn   UT_HOST_USB=0 w:150000
+scene saver       UT_HOST_USB=1 w:500 k:p w:800 w:125000
+scene saver-wake  UT_HOST_USB=1 w:500 k:p w:800 w:125000 t:720,2170 w:800
+scene idle-warn   UT_HOST_USB=0 w:550000
 echo "PNGs in $png"

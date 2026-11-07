@@ -15,7 +15,8 @@ milestones **UO1** (USB device mode with a serial shell) and **UO2** (the phone 
 | Files | **Browse the card** (read only: folders and files on the card's exFAT partition; pick a file for its SHA-256 + CRC32) and **Hash** every UFS partition or the whole card (live progress, MB/s, time left; keeps running if you leave the page) |
 | Shell | A USB serial port (`/dev/cu.usbmodem*` on a Mac, 115200 8N1, any terminal): `help`, `info`, `drives` (sizes, traffic, SCSI counters), `parts` (UFS partitions and sizes), `ufs on|off`, `hash NAME [BYTES]` (SHA-256 + CRC32 of a partition or `card`, or of their first BYTES: e.g. `hash SYSTEM 6419857408` checks One UI's system image), `log`, `menu` (restart into the Starbite menu), `maint` (Starbite Maintenance), `off` |
 | USB page | Connection state and speed, each drive with its traffic, SCSI command and error counters, the shell state |
-| Leaving | The **Boot menu** tile (asks first), or the shell's `menu`. With **no computer ever connected and no touch or key for 10 minutes** it returns to the menu by itself (a countdown shows in the status bar for the last minute) |
+| Screen saver | After **2 minutes without a touch or key** the screen goes black (OLED: no burn-in, less battery) with a small dim status that moves every 30 s (USB drives, a running hash, or the countdown to the menu). A touch or key brings the page back as it was; that touch does nothing else. USB, the shell and hashing keep running |
+| Leaving | The **Boot menu** tile (asks first), or the shell's `menu`. With **no computer ever connected and no touch or key for 10 minutes** (counted from the Utility OS's start, not the phone's) it returns to the menu by itself (the screen saver shows the countdown) |
 
 | Measure | **USB charger tester** (live: input, VBUS, charge state, battery %, voltage, current in/out, power, the input and charge current limits; read only, Lab's MAX77705 readers), **Ruler** (cm on the left, inches on the right, at the panel's 570 ppi), **Colour fields** (white, black, red, green, blue, grey full screen for dead pixels; the label fades so nothing covers a pixel) |
 | Everyday | **Clock** (the phone's RTC, UTC), **Stopwatch** (Power start/stop, tap to reset when stopped), **Timer** (tap +1 min, Power start/pause; flashes when done), **Calculator** (+ − × /, powers, roots, ln, brackets) |
@@ -80,7 +81,7 @@ DMA layout in the window (`USB_DMA_BASE` 0xa7000000): the driver's event buffer,
   approval). The drives and the shell were not reached yet; that build had no idle return (added since).
 - Since then (not yet on the phone): Measure, Everyday, UO3 keyboard/mouse/media keys with the trackpad
   screen, Files hashing (+ shell `parts`, `hash`), the card browser, the calculator, UFS partitions as
-  read-only drives, the idle return, the macro pad file; all previewed on the host.
+  read-only drives, the idle return, the macro pad file, the screen saver; all previewed on the host.
 - Next on the phone, with the accessory allowed: UO2's check (both drives mount; a copied file's hash matches
   after an unmount and remount), the shell, then UO3 (the pointer moves, a key arrives); then UO4 (file
   manager, hashing, imaging) and the calculator.

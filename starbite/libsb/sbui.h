@@ -154,5 +154,7 @@ void ui_input_reset(void);
 unsigned ui_keys(void);
 /* ms since the last key or touch event (auto-disarm, idle). */
 uint64_t ui_idle_ms(void);
+/* Count idle time from now (an OS's start: the timer runs from power-on, the menu's time is not idle). */
+void ui_idle_restart(void);
 /* Called once per ui_poll loop turn (the armed-mode timer, live status bar). */
 extern void (*ui_tick)(void);
