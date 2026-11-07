@@ -65,6 +65,17 @@ void input_init(void)
 static void keys_poll(uint64_t now)
 {
     unsigned k = sb_keys();
+    /* 0.5.2: with the screen off, Power wakes on its first sight (keys are read every 50 ms then; the two-read
+     * debounce made a quick press of under about 200 ms go unseen). Its release is not a second press. */
+    if (!K.screen_on && (k & SB_K_POWER) && !(keys_stable & SB_K_POWER) && !(keys_seen & SB_K_POWER)) {
+        keys_stable |= SB_K_POWER;
+        keys_last = k;
+        keys_seen |= SB_K_POWER;            /* held: not pressed again until released */
+        t_power = 0;
+        last_input = now;
+        kin_push(KIN_POWER, 0, 0);
+        return;
+    }
     unsigned stable = (k == keys_last) ? k : keys_stable;
     keys_last = k;
     unsigned pressed = stable & ~keys_stable, released = keys_stable & ~stable;

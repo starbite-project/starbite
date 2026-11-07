@@ -306,7 +306,7 @@ static void screen(int on)
         sb_log("sbos: screen on");
         a55_low(0);
     }
-    kt_set(KT_INPUT, 1, sb_ms(), on ? 16 : 100, 1);
+    kt_set(KT_INPUT, 1, sb_ms(), on ? 16 : 50, 1);    /* off: 50 ms, so a quick Power press is seen */
     kt_set(KT_BATTERY, 1, sb_ms(), on ? 2000 : 60000, 0);
     for (int a = 0; a < napps; ++a)
         app_event_send(a, EV_APP_POWER, 0, on);
