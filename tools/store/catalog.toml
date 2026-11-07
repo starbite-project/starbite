@@ -379,7 +379,7 @@ root = "none (RAM only)"
 [[entry]]
 key = "utility"
 name = "Utility"
-version = "Starbite Utility OS 1 · USB drives + shell"
+version = "Starbite Utility OS 1.1 · drives, shell, files"
 category = "starbite"
 method = "bare"
 tag = "beta"

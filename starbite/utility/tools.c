@@ -454,7 +454,178 @@ static void browse_fill(struct page *p)
     }
     if (!bn)
         page_note(p, "Empty folder.", C_L3);
-    page_note(p, "Read only. Pick a file for its SHA-256 (shown under Files); Bixby goes up.", C_L3);
+    page_note(p, "Read only. Pick a file to read it (text, or its bytes) or hash it; Bixby goes up.", C_L3);
+}
+
+/* ---- one card file: its details, a text or hex view of its start, the hash ---- */
+#define VIEW_MAX (64U << 10)                           /* text: the first 64 KiB */
+#define VIEW_HEX (8U << 10)                            /* bytes: the first 8 KiB, 8 per line */
+#define VIEW_W   (UI_W - 2 * 40 - 60)                  /* sbui_page's mono line width, with room */
+static uint8_t *vbuf;
+
+/* text: no NUL and at most 2 % other control bytes in the start */
+static int is_text(const uint8_t *b, uint32_t n)
+{
+    uint32_t bad = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!b[i])
+            return 0;
+        if (b[i] < 0x20 && b[i] != '\n' && b[i] != '\r' && b[i] != '\t' && b[i] != 0x0c)
+            ++bad;
+    }
+    return bad * 50U <= n;
+}
+
+static int view_text(struct page *p, const uint8_t *b, uint32_t n)
+{
+    static char line[1024];
+    int rows = 0;
+    uint32_t i = 0;
+    while (i < n && p->n < PAGE_MAX - 8) {
+        unsigned k = 0;
+        while (i < n && b[i] != '\n' && k + 8 < sizeof(line)) {
+            uint8_t c = b[i++];
+            if (c == '\r')
+                continue;
+            if (c == '\t') {
+                do
+                    line[k++] = ' ';
+                while (k & 3U);
+            } else {
+                line[k++] = c < 0x20 ? '.' : (char)c;
+            }
+        }
+        if (i < n && b[i] == '\n')
+            ++i;
+        line[k] = 0;
+        const char *s = line;
+        do {                                          /* wrap at the panel width, whole UTF-8 characters */
+            unsigned f = ui_text_fit(F_MONO, s, VIEW_W);
+            if (f > 170)
+                f = 170;
+            while (f && ((uint8_t)s[f] & 0xc0U) == 0x80U)
+                --f;
+            if (!f && *s)
+                f = 1;
+            char row[176];
+            for (unsigned j = 0; j < f; ++j)
+                row[j] = s[j];
+            row[f] = 0;
+            page_mono(p, row, C_L1);
+            ++rows;
+            s += f;
+        } while (*s && p->n < PAGE_MAX - 8);
+    }
+    return rows;
+}
+
+static int view_hex(struct page *p, const uint8_t *b, uint32_t n)
+{
+    static const char hx[] = "0123456789abcdef";
+    int rows = 0;
+    for (uint32_t o = 0; o < n && p->n < PAGE_MAX - 8; o += 8) {
+        char row[64];
+        unsigned k = 0;
+        for (int sh = 28; sh >= 0; sh -= 4)
+            row[k++] = hx[(o >> sh) & 15U];
+        row[k++] = ' ';
+        row[k++] = ' ';
+        for (uint32_t j = 0; j < 8; ++j) {
+            row[k++] = o + j < n ? hx[b[o + j] >> 4] : ' ';
+            row[k++] = o + j < n ? hx[b[o + j] & 15U] : ' ';
+            row[k++] = ' ';
+        }
+        row[k++] = ' ';
+        for (uint32_t j = 0; j < 8 && o + j < n; ++j)
+            row[k++] = b[o + j] >= 0x20 && b[o + j] < 0x7f ? (char)b[o + j] : '.';
+        row[k] = 0;
+        page_mono(p, row, C_L1);
+        ++rows;
+    }
+    return rows;
+}
+
+/* 1 when the hash started (Files shows its progress) */
+static int ut_file(const struct exfat_ent *f)
+{
+    if (!vbuf)
+        vbuf = sb_alloc(VIEW_MAX);
+    uint32_t n = f->size < VIEW_MAX ? (uint32_t)f->size : VIEW_MAX;
+    int err = !vbuf ? -1 : n ? exfat_read_chain(&cfs, f->first, f->nofat, 0, vbuf, n) : 0;
+    int text = !err && is_text(vbuf, n < 4096U ? n : 4096U);
+    if (!err && !text && n > VIEW_HEX)
+        n = VIEW_HEX;
+    struct page p;
+    page_init(&p, UI_VIEW_Y0, UI_H);
+    int focus = -1, redo = 1, hrow = -1;
+    ui_fill(0, 0, UI_W, UI_H, C_BG);
+    for (;;) {
+        if (redo) {
+            ui_fill(0, 0, UI_W, UI_VIEW_Y0, C_BG);
+            ui_header_draw("File", "Card files", "READ ONLY", C_L2);
+            ut_status_bar();
+            page_begin(&p);
+            struct ub u;
+            page_hdr(&p, "File");
+            page_kv(&p, "Name", f->name, 0);
+            ub_init(&u);
+            ub_size(&u, f->size);
+            if (f->size >= 1024U) {
+                ub_s(&u, " (");
+                ub_dec(&u, f->size);
+                ub_s(&u, " bytes)");
+            }
+            page_kv(&p, "Size", u.b, 0);
+            page_kv(&p, "Stored", f->nofat ? "one run (no FAT chain)" : "FAT chain", 0);
+            hrow = page_button(&p, hash_job.state == HASH_RUNNING ? "A hash is running" : "SHA-256 + CRC32 of the file",
+                               hash_job.state == HASH_RUNNING ? C_L3 : C_STAR);
+            if (err) {
+                page_note(&p, "The card did not read.", C_ORANGE);
+            } else if (!n) {
+                page_note(&p, "Empty file.", C_L3);
+            } else {
+                page_hdr(&p, text ? "Text" : "Bytes (hex)");
+                int rows = text ? view_text(&p, vbuf, n) : view_hex(&p, vbuf, n);
+                if (f->size > n || p.n >= PAGE_MAX - 8) {
+                    ub_init(&u);
+                    ub_s(&u, "The start of the file: ");
+                    ub_dec(&u, (uint64_t)rows);
+                    ub_s(&u, " lines.");
+                    page_note(&p, u.b, C_L3);
+                }
+            }
+            page_end(&p);
+            page_set_focus(&p, focus);
+            page_redraw(&p);
+            ui_present();
+            redo = 0;
+        }
+        struct ui_ev e;
+        ui_poll(&e, 20);
+        ut_service();
+        if (e.type == EV_BACK || e.type == EV_HOME || e.type == EV_SWIPE_R || (e.type == EV_TAP && ui_header_back_hit(e.x, e.y)))
+            break;
+        int pick = -1;
+        if (page_scroll_event(&p, &e)) {
+            ;
+        } else if (e.type == EV_UP || e.type == EV_DOWN) {
+            focus = focus < 0 ? hrow : -1;
+            page_set_focus(&p, focus);
+            ui_present();
+        } else if (e.type == EV_SELECT && focus >= 0) {
+            pick = focus;
+        } else if (e.type == EV_TAP) {
+            pick = page_hit(&p, e.x, e.y, 0);
+        }
+        if (pick == hrow && hrow >= 0 && hash_job.state != HASH_RUNNING) {
+            (void)hash_start_file(&cfs, f);
+            page_free(&p);
+            return 1;
+        }
+        page_fling_step(&p);
+    }
+    page_free(&p);
+    return 0;
 }
 
 static void ut_browse(void)
@@ -515,10 +686,15 @@ static void ut_browse(void)
                 focus = -1;
                 page_set_scroll(&p, 0);
                 redo = 1;
-            } else if (!bents[i].dir && hash_job.state != HASH_RUNNING) {
-                (void)hash_start_file(&cfs, &bents[i]);
-                page_free(&p);
-                return;                                  /* Files shows the progress */
+            } else if (!bents[i].dir) {
+                struct exfat_ent f = bents[i];
+                if (ut_file(&f)) {
+                    page_free(&p);
+                    return;                              /* Files shows the hash's progress */
+                }
+                ui_input_reset();
+                ui_fill(0, 0, UI_W, UI_H, C_BG);
+                redo = 1;
             }
         }
         page_fling_step(&p);

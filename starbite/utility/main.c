@@ -24,7 +24,7 @@
 #include "hash.h"
 #include "ufs.h"
 
-#define UT_VERSION "1 (UO1 + UO2)"
+#define UT_VERSION "1.1"
 
 #define BANK2        0x880000000ULL
 #define RAMDISK_MAX  (1ULL << 30)

@@ -41,7 +41,7 @@ static void load_buttons(void)
     struct exfat *fs = ut_card();
     static struct exfat_ent scratch[40];
     struct exfat_ent e;
-    static char src[4096];
+    static char src[4096] __attribute__((aligned(64)));
     if (!fs || exfat_walk(fs, "/starbite/macros.toml", &e, scratch, 40) || e.dir)
         return;
     uint32_t n = e.size < sizeof(src) ? (uint32_t)e.size : (uint32_t)sizeof(src);
