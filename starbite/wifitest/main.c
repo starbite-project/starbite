@@ -1,0 +1,191 @@
+/* SPDX-License-Identifier: GPL-2.0-only
+ * Wi-Fi test image (docs/WIFI-BCM4361.md, "The first phone test"): a bare-metal libsb image that
+ * runs starbite/wifi's core on the phone: the BCM4361's power, PCIe channel 0's PHY and link, the
+ * chip's ID and cores, its firmware and NVRAM from the phone's own VENDOR (read only), the msgbuf
+ * rings and the first commands; with wifi_step=10 also "up" and a scan. Every line is on the screen
+ * and in the pmsg ring (TWRP: /sys/fs/pstore/pmsg-ramoops-0).
+ *
+ * Boot arguments (the store entry's cmdline):
+ *   wifi_step=N     the last step (1..10, default 9: rings and the first ioctls; bcmw.h BCMW_STEP_*)
+ *   wifi_gen=1      train for Gen1 instead of Gen2 (the mainline port links at Gen1)
+ *   wifi_auto=1     start without the held Volume Up (an unattended run the user agreed to)
+ *   wifi_return=S   S seconds after the end, reboot to the boot menu (default: wait for Power)
+ * Writes: PCIe channel 0's own registers, the BCM4361's (through its BARs), WLAN_REG_ON and PERST#
+ * (gpg0-5, gpf2-2), CLKREQ#'s function (gpf2-0), the PMU's PCIE_PHY_CONTROL bit 0, CMU_FSYS1's
+ * PCIe and data-path gates (the SysMMU's clock on, its registers untouched): bcmw_write_allowed()
+ * refuses anything else. Nothing on storage. At the end (or Power) the radio is held in reset and
+ * unpowered.
+ */
+#include "sb.h"
+#include "sbui.h"
+#include "../wifi/bcmw.h"
+#include "../wifi/sb/bcmw_sb.h"
+
+#define LINES 64U
+#define COLS 200U
+static char lines[LINES][COLS];
+static unsigned nl;
+static unsigned scan_aps, scan_done, events;
+static uint64_t mem[(1U << 18) / 8];        /* struct bcmw (checked against bcmw_size()) */
+
+static void draw(const char *title, const char *foot)
+{
+    int y = 140, px = ui_px(F_SMALL) + 6;
+    unsigned first = nl > 52 ? nl - 52 : 0;
+
+    ui_fill(0, 0, SB_FB_W, SB_FB_H, C_BG);
+    ui_text(F_TITLE_S, 40, 100, title, C_L1);
+    for (unsigned i = first; i < nl; i++) {
+        const char *s = lines[i % LINES];
+        while (*s && y < (int)SB_FB_H - 160) {
+            unsigned n = ui_text_fit(F_SMALL, s, (int)SB_FB_W - 80);
+            char part[COLS];
+            if (n == 0)
+                n = 1;
+            for (unsigned k = 0; k < n && k + 1 < COLS; k++)
+                part[k] = s[k];
+            part[n < COLS ? n : COLS - 1] = 0;
+            ui_text(F_SMALL, 40, y + px, part, sb_prefix(s, "fw: ") ? C_L2 : C_L1);
+            y += px;
+            s += n;
+        }
+    }
+    if (foot)
+        ui_text(F_ROW, 40, (int)SB_FB_H - 70, foot, C_STAR);
+    ui_dirty_all();
+    ui_present();
+}
+
+static void line(const char *s)
+{
+    sb_strcpy(lines[nl % LINES], COLS, s);
+    nl++;
+    sb_log(s);
+    draw("Wi-Fi test: BCM4361", 0);
+}
+
+static void os_log(void *ctx, const char *s)
+{
+    (void)ctx;
+    line(s);
+}
+
+static void os_event(void *ctx, const struct bcmw_event *ev)
+{
+    (void)ctx;
+    events++;
+    if (ev->type == BCMW_E_ESCAN_RESULT) {
+        if (ev->status == 8 && ev->datalen >= 12)
+            scan_aps += ev->data[10] | ev->data[11] << 8;   /* bss_count; names are not shown */
+        else
+            scan_done = 1;
+    }
+}
+
+static unsigned arg(const char *key, unsigned dflt)
+{
+    char v[16];
+    unsigned n = 0;
+    if (!sb_bootarg(key, v, sizeof(v)))
+        return dflt;
+    for (unsigned i = 0; v[i] >= '0' && v[i] <= '9'; i++)
+        n = n * 10 + (unsigned)(v[i] - '0');
+    return n;
+}
+
+static int held_up(unsigned ms)
+{
+    uint64_t t0 = 0;
+    for (;;) {
+        unsigned k = sb_keys();
+        if (k & SB_K_POWER)
+            return 0;
+        if (k & SB_K_UP) {
+            if (!t0)
+                t0 = sb_ms();
+            if (sb_ms() - t0 >= ms)
+                return 1;
+        } else {
+            t0 = 0;
+        }
+        sb_mdelay(10);
+    }
+}
+
+void sb_main(void)
+{
+    struct bcmw *w = (struct bcmw *)mem;
+    struct bcmw_os os;
+    struct bcmw_cfg cfg;
+    unsigned step = arg("wifi_step", BCMW_STEP_RINGS), ret = arg("wifi_return", 0), reached;
+    int r;
+    struct ub u;
+
+    if (!ui_init())
+        sb_crash_show(ui_init_why(), 0);
+    if (step < 1 || step > BCMW_STEP_ALL)
+        step = BCMW_STEP_RINGS;
+    ub_init(&u);
+    ub_s(&u, "wifitest: up to step ");
+    ub_dec(&u, step);
+    ub_s(&u, step >= BCMW_STEP_FIRMWARE ? " (the firmware from VENDOR, read only)" : "");
+    line(u.b);
+    line("It powers the radio, trains PCIe channel 0 and talks to the chip. Nothing is written to storage.");
+    line("At the end, or on Power, the radio is held in reset and unpowered.");
+    if (!arg("wifi_auto", 0)) {
+        draw("Wi-Fi test: BCM4361", "Hold Volume Up 2 s to start. Power: back.");
+        if (!held_up(2000)) {
+            line("wifitest: not started");
+            sb_reboot(SB_INFORM_NORMAL);
+        }
+    }
+    if (bcmw_size() > sizeof(mem)) {
+        line("wifitest: struct bcmw does not fit");
+        sb_reboot(SB_INFORM_NORMAL);
+    }
+    if (step >= BCMW_STEP_FIRMWARE && !bcmw_sb_vendor(line))
+        line("wifitest: no files: the firmware step will stop");
+    bcmw_sb_os(&os, os_log, os_event);
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.stop_after = step;
+    cfg.link_speed = arg("wifi_gen", 2);
+    cfg.link_tries = 3;
+    if (bcmw_init(w, &os, &cfg) != BCMW_OK) {
+        line("wifitest: bcmw_init refused");
+        sb_reboot(SB_INFORM_NORMAL);
+    }
+    r = bcmw_bringup(w, 0);
+    if (r >= BCMW_STEP_RINGS) {
+        uint64_t t0 = sb_ms();
+        line("wifitest: polling for 10 s (events, the console)");
+        while (sb_ms() - t0 < 10000 && !(sb_keys() & SB_K_POWER)) {
+            bcmw_poll(w);
+            sb_mdelay(5);
+        }
+        ub_init(&u);
+        ub_s(&u, "wifitest: ");
+        ub_dec(&u, events);
+        ub_s(&u, " events");
+        if (step >= BCMW_STEP_UP) {
+            ub_s(&u, "; the scan heard ");
+            ub_dec(&u, scan_aps);
+            ub_s(&u, scan_done ? " access points (complete)" : " access points (NOT complete)");
+        }
+        line(u.b);
+    }
+    reached = bcmw_step(w);
+    bcmw_quiesce(w);
+    ub_init(&u);
+    ub_s(&u, "wifitest: END: reached step ");
+    ub_dec(&u, reached);
+    ub_s(&u, r < 0 ? " (stopped: the lines above say why)" : " (as asked)");
+    line(u.b);
+    draw("Wi-Fi test: BCM4361", ret ? "Rebooting to the menu soon. Power: now." : "Power: reboot to the boot menu.");
+    {
+        uint64_t t0 = sb_ms();
+        sb_keys_release_wait();
+        while (!(sb_keys() & SB_K_POWER) && !(ret && sb_ms() - t0 >= ret * 1000ULL))
+            sb_mdelay(20);
+    }
+    sb_reboot(SB_INFORM_NORMAL);
+}

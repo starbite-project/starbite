@@ -40,6 +40,36 @@ $CC -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -nostdlib -c 
     done
 # shellcheck disable=SC2086
 $CC $flags $extra -o "$OUT/bcmw-test" $src
+$CC $flags -o "$OUT/ext4-test" "$core/ext4.c" "$here/ext4-test.c"
+
+# ext4: images made by mke2fs -d from a tree like VENDOR's: /firmware (300 files, a hashed directory)
+# and /etc/wifi, with the phone's files when given (else stand-ins), a sparse file, a 3 MiB file;
+# 4 KiB blocks with extents and 64-bit descriptors (VENDOR's layout), 1 KiB blocks, no extents
+if command -v mke2fs >/dev/null 2>&1; then
+    t="$OUT/ext4-tree"
+    rm -rf "$t" && mkdir -p "$t/firmware" "$t/etc/wifi"
+    i=0
+    while [ $i -lt 300 ]; do echo "file $i" > "$t/firmware/f$i.txt"; i=$((i + 1)); done
+    files=""
+    for f in bcmdhd_sta.bin_b2 nvram.txt_r02a_b2 bcmdhd_clm.blob; do
+        if [ -n "$dir" ] && [ -f "$dir/$f" ]; then cp "$dir/$f" "$t/firmware/$f"; else head -c 70000 /dev/urandom > "$t/firmware/$f"; fi
+        cp "$t/firmware/$f" "$t/etc/wifi/$f"
+        files="$files firmware/$f etc/wifi/$f"
+    done
+    head -c 3145728 /dev/urandom > "$t/firmware/big.bin"
+    dd if=/dev/urandom of="$t/firmware/sparse.bin" bs=4096 count=1 seek=300 2>/dev/null
+    for opts in "-b 4096 -O extent,64bit" "-b 1024 -O ^extent,^64bit,^flex_bg" "-b 4096 -O ^extent -I 128"; do
+        rm -f "$OUT/v.img"
+        # shellcheck disable=SC2086
+        mke2fs -q -F -t ext4 $opts -d "$t" "$OUT/v.img" 64M >/dev/null 2>&1 ||
+            mke2fs -q -F $opts -d "$t" "$OUT/v.img" 64M
+        # shellcheck disable=SC2086
+        "$OUT/ext4-test" "$OUT/v.img" "$t" $files firmware/f0.txt firmware/f299.txt firmware/big.bin firmware/sparse.bin
+    done
+    rm -rf "$t" "$OUT/v.img"
+else
+    echo "bcmw: no mke2fs: the ext4 reader's test is skipped"
+fi
 if [ -n "$dir" ]; then
     echo "bcmw: the phone's files from $dir (read only)"
     "$OUT/bcmw-test" "$dir"

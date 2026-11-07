@@ -559,8 +559,10 @@ static void answer(const uint8_t *req, uint16_t trans, uint32_t cmd, const uint8
         const char *name = (const char *)in;
         const uint8_t *data = in + strlen(name) + 1;
         uint32_t dlen = inlen - (uint32_t)(strlen(name) + 1);
-        M.last_iovar[0] = 0;
-        snprintf(M.last_iovar, sizeof(M.last_iovar), "%s", name);
+        for (unsigned k = 0; k + 1 < sizeof(M.last_iovar); k++)
+            if (!(M.last_iovar[k] = name[k]))
+                break;
+        M.last_iovar[sizeof(M.last_iovar) - 1] = 0;
         if (cmd == BCMW_C_GET_VAR && !strcmp(name, "cur_etheraddr")) {
             memcpy(out, "\x00\x90\x4c\x12\xd0\x01", 6), rlen = 6;
         } else if (cmd == BCMW_C_SET_VAR && !strcmp(name, "cur_etheraddr")) {
