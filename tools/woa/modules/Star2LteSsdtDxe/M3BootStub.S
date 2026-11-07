@@ -103,6 +103,11 @@ m3boot_stub:
         isb
         mov     w0, #2                  // Stage 2: MMU and caches on
         str     w0, [x19, #CTX_STAGE]
+        mrs     x0, CurrentEL           // again, cacheable: the MMU-off stores above can be lost to a
+        lsr     x0, x0, #2              // stale clean copy of this line in the A55's cache (B3a v2:
+        str     x0, [x19, #CTX_EL]      // el=0 mpidr=0 despite stage 3)
+        mrs     x0, mpidr_el1
+        str     x0, [x19, #CTX_MPIDR]
 
         add     x2, x19, #CTX_STATE     // claim: 0 -> 1
 1:      ldaxr   w0, [x2]

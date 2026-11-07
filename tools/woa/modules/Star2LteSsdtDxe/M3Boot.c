@@ -40,6 +40,11 @@
 #include "StarbiteLog.h"
 #include "M3BootStub.h"
 
+//
+// STARBITE_M3_BOOT=1: M3 1 + A55 1..3 (4 CPUs); =2 ("solo"): M3 1 alone, every other GICC disabled,
+// to split "Windows on an M3" from "an M3 boot CPU with A55 secondaries" if 1 fails.
+//
+#define BOOT_SOLO       (STARBITE_M3_BOOT == 2)
 #define BOOT_UID        5u                  // M3 core 1 (the release MADT: A55 0..3, M3 4..7)
 #define BOOT_MPIDR      0x101u
 #define BOOT_TARGET     0x101u              // PSCI target of M3 core 1
@@ -331,7 +336,7 @@ PrepareMadt (
 
         CopyMem (Out, E, GICC_LEN);
         Uid = Rd32 (E + 8);
-        if ((Uid >= 1) && (Uid <= 3)) {
+        if ((Uid >= 1) && (Uid <= 3) && !BOOT_SOLO) {
           Out[76] = 0;                              // A55 1..3: as P left them, class 0
         } else {
           Wr32 (Out + 12, Rd32 (Out + 12) & ~1u);   // A55 0, M3 0/2/3: disabled
@@ -466,6 +471,12 @@ M3BootArm (
   *Lit = (UINT64)(UINTN)mCtx;
 
   Status = gBS->CreateEvent (EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY, OnExitBootServices, NULL, &mEbsEvent);
-  SbLog ("=M3 boot v1 armed: stub %lx, context %lx, ExitBootServices event %r", mStub, (UINT64)(UINTN)mCtx, Status);
+  SbLog (
+    "=M3 boot v1 armed (%a): stub %lx, context %lx, ExitBootServices event %r",
+    BOOT_SOLO ? "solo: M3 1 only" : "M3 1 + A55 1..3",
+    mStub,
+    (UINT64)(UINTN)mCtx,
+    Status
+    );
 }
 #endif

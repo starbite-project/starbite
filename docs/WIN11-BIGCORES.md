@@ -210,6 +210,22 @@ IPS, no HA/HD/TBI), MAIR and SCTLR (v8.1/v8.2 bits RES1 on v8.0) are fine for an
 
 B3 got the same fixes (image 702c1f22…, Stage 3 = claimed).
 
+**v2 result (2026-11-07, 3d6c0158): PASSED.**
+- PMU writes as in B1. Cores 1, 2, 3: `CPU_ON rc=0, done=1 stage=3 after 1 ms`.
+- SCTLR 0x30C5183D on the M3 (M, C, I on: UEFI's page tables work there). Coherency A55->M3 and
+  M3->A55 ok on all three.
+- **GIC interface bits 0x20/0x40/0x80**: M3 core n = CPU interface 4 + n, as the MADT says.
+- M3 ids: MIDR 0x531F0020, **CTR 0x84448004 (the same as the A55's)**, ISAR0 0x11120 (no LSE;
+  A55 0x10211120), ISAR1 0 (A55 0x100001), PFR0 0x2222, MMFR0 0x101122, MMFR1 0 (no PAN, VHE,
+  LOR, HPDS; A55 0x10212122), MMFR2 0, CLIDR 0xB200123 (L1 I+D, L2, L3).
+- CNTFRQ 0.
+- Windows booted normally afterwards.
+
+`el=0 mpidr=0` was a reporting artefact. The stub writes them with the MMU off, so not through any
+cache. The A55's polling held a clean, stale copy of that line, and the M3's first cacheable store
+to the line (Stage) could be filled from that copy. Both stubs now record EL and MPIDR again right
+after MMU-on.
+
 ### 5.2 B3: Windows boots on M3 core 1 (4 CPUs: M3 1 + A55 1..3)
 
 At ExitBootServices (our own event, registered by Star2LteSsdtDxe), on A55 core 0:
@@ -230,7 +246,9 @@ At ExitBootServices (our own event, registered by Star2LteSsdtDxe), on A55 core 
    way, one line in zone 0.
 
 Built: `M3Boot.c` + `M3BootStub.S` (`STARBITE_M3_BOOT=1`); image `starbite-uefi-m3boot-gpu.bin`,
-sha256 702c1f22… (with the B3a v2 fixes) (`SOLO=m3boot M3BOOT=1 EXTRA_AML=<StarbiteGpu.aml> SUFFIX=-gpu`). The live MADT is
+sha256 27dd38b9… (with the B3a v2 fixes and EL/MPIDR recorded after MMU-on). Fallback
+`starbite-uefi-m3bootsolo-gpu.bin` (cadc59d3…, `M3BOOT=2`): the same with M3 1 the only enabled
+GICC, to split "Windows on an M3" from "M3 boot CPU + A55 secondaries" if B3 fails after the claim (`SOLO=m3boot M3BOOT=1 EXTRA_AML=<StarbiteGpu.aml> SUFFIX=-gpu`). The live MADT is
 logged at ExitBootServices (`=M3 boot MADT gicc uid=… if=… flags=… mpidr=… park v… eff=…`): the
 first view of what P leaves. **Held until B3a passes** (its GIC interface bits and coherency
 results gate this image).
@@ -240,6 +258,17 @@ cpu` shows the Mongoose (MIDR 0x531f0020) as CPU 0; a CPU-heavy run; Start -> Re
 Risks: a fault on the M3 after the commit point is a hang/bugcheck before the logo (forced reset fine,
 boot src38). Unknowns: whether the release's EL2/PSCI shim or the handoff code cares which CPU runs
 the handoff.
+
+**Mixed features: B3 already tests them.** With M3 core 1 as the boot CPU, the kernel's global
+feature set comes from the M3: no LSE, no PAN, no RDM/DotProd/FP16/LRCPC/DPB. IsProcessorFeaturePresent
+reports that, and so does the x64 emulator's choice of atomics. A55 1..3 as secondaries are a strict
+superset, so nothing Windows decides to use can be missing on any core. What B3 answers:
+- whether 23H2 accepts secondaries whose ID registers differ from the boot CPU's (a refusal would be a
+  bugcheck such as 0x3E MULTIPROCESSOR_CONFIGURATION_NOT_SUPPORTED);
+- whether it handles PAN per CPU (present on the A55s only) or from the boot CPU alone.
+
+If B3 fails that way, the solo image shows Windows itself runs on an M3. The way out would then need
+EL2 (trapping ID registers is uH's).
 
 ### 5.3 B4: 7 cores (A55 0..3 + M3 1..3)
 

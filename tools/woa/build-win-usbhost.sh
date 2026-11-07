@@ -39,7 +39,8 @@ ACPIFILE=11111111-2222-3333-4444-555555555501
 M3=${M3:-0}                                       # 1: Star2LteSsdtDxe also runs the M3 probe (WIN11-BIGCORES B1)
 M3PARK=${M3PARK:-0}                               # 1: Star2LteSsdtDxe parks M3 cores 1..3 for the OS (B2)
 M3RUN=${M3RUN:-0}                                 # 1: each M3 runs a test in the UEFI context (B3a)
-M3BOOT=${M3BOOT:-0}                               # 1: M3 core 1 becomes the boot CPU at ExitBootServices (B3)
+M3BOOT=${M3BOOT:-0}                               # 1: M3 core 1 becomes the boot CPU at ExitBootServices (B3,
+                                                  #    with A55 1..3); 2: the same, M3 1 alone ("solo")
 SOLO=${SOLO:-}                                    # name: only the isolated image src38 + Star2LteSsdtDxe
                                                   # (with the PPTT/M3 flags above), no USB, no blobs
 KILL_SERIAL=${KILL_SERIAL:-0}                     # 1: drop the release's SerialDxe (room in the DXE slot)
@@ -53,7 +54,7 @@ out=build/woa
 SUFFIX=${SUFFIX:-}
 [ -z "${EXTRA_AML:-}" ] || [ -n "$SUFFIX" ] || { echo "EXTRA_AML needs a SUFFIX so the plain images are kept" >&2; exit 1; }
 [ "$PPTT" = 0 ] || [ -n "$SUFFIX" ] || { echo "PPTT=1 needs a SUFFIX so the plain images are kept" >&2; exit 1; }
-[ $((M3 + M3PARK + M3RUN + M3BOOT)) -le 1 ] || { echo "one M3 experiment per image (M3, M3PARK, M3RUN, M3BOOT)" >&2; exit 1; }
+[ $((M3 + M3PARK + M3RUN + (M3BOOT > 0))) -le 1 ] || { echo "one M3 experiment per image (M3, M3PARK, M3RUN, M3BOOT)" >&2; exit 1; }
 [ "$PPTT_STATIC" = 0 ] || [ -n "$SUFFIX" ] || { echo "PPTT_STATIC=1 needs a SUFFIX so the plain images are kept" >&2; exit 1; }
 for f in "$rel" "$W/Star2LtePkg-src38.fd" "$W/pmic-rtc.ffs" "$W/src38.fd" "$W/starbite-uefi-src38.bin"; do
     [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
@@ -134,7 +135,8 @@ flags_ok() {   # flags_ok FFS
     if grep -aq "=M3 run v2" "$1"; then has=1; else has=0; fi
     [ "$has" = "$M3RUN" ] || { echo "$1: M3 run present=$has, wanted $M3RUN" >&2; exit 1; }
     if grep -aq "=M3 boot v1 armed" "$1"; then has=1; else has=0; fi
-    [ "$has" = "$M3BOOT" ] || { echo "$1: M3 boot present=$has, wanted $M3BOOT" >&2; exit 1; }
+    [ "$has" = "$((M3BOOT > 0))" ] || { echo "$1: M3 boot present=$has, wanted $M3BOOT" >&2; exit 1; }
+    if [ "$M3BOOT" = 2 ]; then grep -aq "solo: M3 1 only" "$1" || { echo "$1: not the solo build" >&2; exit 1; }; fi
 }
 if [ -n "$SOLO" ]; then
     # An experiment alone: src38 + Star2LteSsdtDxe with the chosen flags, no USB module; only the
