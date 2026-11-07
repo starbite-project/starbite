@@ -21,6 +21,8 @@
 #include "fat.h"
 #include "ut.h"
 #include "hid.h"
+#include "hash.h"
+#include "ufs.h"
 
 #define UT_VERSION "1 (UO1 + UO2)"
 
@@ -199,6 +201,8 @@ static unsigned sh_n;
 static char sh_out[8192];
 static unsigned sh_out_n;
 static int sh_banner;
+static int sh_hash_watch;                             /* the shell started the running hash job */
+static uint64_t sh_num(const char *s);
 
 static void sh_put(const char *s)
 {
@@ -252,11 +256,28 @@ static void sh_drives(void)
     sh_put("\n");
 }
 
+static void sh_parts(void)
+{
+    if (!ufs_up() || gpt_load() <= 0) {
+        sh_put("UFS: not readable\n");
+        return;
+    }
+    for (int i = 0; i < gpt_n; ++i) {
+        sh_put("  ");
+        sh_put(gpt_name[i]);
+        sh_put("  ");
+        sh_dec((gpt_last[i] - gpt_first[i] + 1) * 4096ULL);
+        sh_put(" bytes\n");
+    }
+}
+
 static void sh_run(const char *c)
 {
     if (!c[0]) {
     } else if (sb_streq(c, "help")) {
         sh_put("help     this list\ninfo     version, uptime, watchdog\ndrives   the USB drives\n"
+               "parts    the UFS partitions (read only)\nhash NAME [BYTES]  SHA-256 + CRC32 of a partition, "
+               "card, or their first BYTES\n"
                "log      the Utility OS log\nmenu     restart into the Starbite menu\n"
                "maint    restart into Starbite Maintenance\noff      power off\n");
     } else if (sb_streq(c, "info")) {
@@ -271,6 +292,29 @@ static void sh_run(const char *c)
         sh_put(ram_why[0] ? ")\n" : "\n");
     } else if (sb_streq(c, "drives")) {
         sh_drives();
+    } else if (sb_streq(c, "parts")) {
+        sh_parts();
+    } else if (sb_prefix(c, "hash ")) {
+        char name[24];
+        unsigned k = 0;
+        const char *a = c + 5;
+        while (*a == ' ')
+            ++a;
+        while (*a && *a != ' ' && k + 1 < sizeof(name))
+            name[k++] = *a++;
+        name[k] = 0;
+        while (*a == ' ')
+            ++a;
+        uint64_t bytes = sh_num(a);
+        int r = sb_streq(name, "microSD") || sb_streq(name, "card") ? hash_start_card(bytes)
+                                                                      : hash_start_part(name, bytes);
+        if (r == 0) {
+            sh_hash_watch = 1;
+            sh_put("hashing (read only)... the result follows\n");
+        } else {
+            sh_put(r == -1 ? "a hash is already running\n" : r == -4 ? "no such partition (parts lists them)\n"
+                                                                     : "cannot read it\n");
+        }
     } else if (sb_streq(c, "log")) {
         unsigned n = sb_log_count();
         for (unsigned i = n > 40 ? n - 40 : 0; i < n; ++i) {
@@ -292,6 +336,40 @@ static void sh_run(const char *c)
 }
 
 static int sh_pending_action;
+
+static uint64_t sh_num(const char *s)
+{
+    uint64_t v = 0;
+    while (*s >= '0' && *s <= '9')
+        v = v * 10 + (uint64_t)(*s++ - '0');
+    return v;
+}
+
+static void sh_hash_report(void)
+{
+    if (!sh_hash_watch || hash_job.state == HASH_RUNNING)
+        return;
+    sh_hash_watch = 0;
+    if (hash_job.state == HASH_DONE) {
+        char hex[65];
+        hash_hex(hex);
+        sh_put(hex);
+        sh_put("  ");
+        sh_put(hash_job.name);
+        sh_put(" (");
+        sh_dec(hash_job.bytes);
+        sh_put(" bytes, crc32 ");
+        struct ub u;
+        ub_init(&u);
+        ub_hexn(&u, hash_job.crc, 8);
+        sh_put(u.b);
+        sh_put(", ");
+        sh_dec(hash_job.t1 > hash_job.t0 ? hash_job.bytes / 1000 / (hash_job.t1 - hash_job.t0) : 0);
+        sh_put(" MB/s)\nutility> ");
+    } else {
+        sh_put("hash: stopped (read error or cancelled)\nutility> ");
+    }
+}
 
 static void sh_input(const volatile uint8_t *d, uint32_t n)
 {
@@ -379,6 +457,8 @@ void ut_service(void)
     }
     msc_service();
     hid_service();
+    hash_step();
+    sh_hash_report();
     sh_service();
     if (sh_pending_action && !sh_out_n && !usbd_busy(P_ACM_IN)) {
         sb_mdelay(50);
@@ -396,7 +476,7 @@ void ut_service(void)
 /* ---- UI ------------------------------------------------------------------------------------- */
 static const char *const tile_name[6] = { "USB", "Radio", "Files", "Measure", "Everyday", "Boot menu" };
 static const char *const tile_sub[6] = {
-    "Drives and shell", "Scans (v2)", "Card and UFS (UO4)", "Charger, ruler, pixels", "Clock, stopwatch, timer", "Leave Utility",
+    "Drives and shell", "Scans (v2)", "Hash partitions", "Charger, ruler, pixels", "Clock, stopwatch, timer", "Leave Utility",
 };
 static int focus;
 
@@ -583,6 +663,10 @@ static void open_tile(int i)
                       ram_bytes ? "The RAM disk and its files are gone after the restart." : "",
                       "Restart", C_ORANGE))
             act(1);
+        return;
+    }
+    if (i == 2) {
+        ut_files();
         return;
     }
     if (i == 3) {

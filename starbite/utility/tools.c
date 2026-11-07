@@ -365,3 +365,133 @@ void ut_everyday(void)
         }
     }
 }
+
+/* ---- Files (UO4, first part): SHA-256 + CRC32 of a partition or the card, read only --------------- */
+#include "hash.h"
+#include "ufs.h"
+#include "sd.h"
+
+static int files_rows[GPT_MAX + 1];
+static int files_nrows;
+
+static void files_fill(struct page *p)
+{
+    struct ub u;
+    const struct hash_job *j = &hash_job;
+    page_hdr(p, "Hash (read only)");
+    if (j->state == HASH_IDLE) {
+        page_note(p, "Pick a partition or the card: its SHA-256 and CRC32 are computed without writing anything. "
+                     "The shell's `hash NAME BYTES` hashes only the first BYTES (to compare with an image).", C_L2);
+    } else {
+        page_kv(p, "Target", j->name, C_L1);
+        ub_init(&u);
+        ub_size(&u, j->done);
+        ub_s(&u, " of ");
+        ub_size(&u, j->bytes);
+        page_kv(p, "Read", u.b, C_L1);
+        uint64_t ms = (j->state == HASH_RUNNING ? sb_ms() : j->t1) - j->t0;
+        if (ms) {
+            ub_init(&u);
+            ub_dec(&u, j->done / 1000 / ms);
+            ub_s(&u, " MB/s");
+            if (j->state == HASH_RUNNING && j->done) {
+                ub_s(&u, ", ");
+                ub_dec(&u, (j->bytes - j->done) / (j->done / ms + 1) / 1000);
+                ub_s(&u, " s left");
+            }
+            page_kv(p, "Speed", u.b, C_L2);
+        }
+        if (j->state == HASH_DONE) {
+            char hex[65];
+            hash_hex(hex);
+            page_kv(p, "State", "done", C_GREEN);
+            char a[33], b[33];
+            for (int i = 0; i < 32; ++i) {
+                a[i] = hex[i];
+                b[i] = hex[32 + i];
+            }
+            a[32] = b[32] = 0;
+            page_mono(p, "SHA-256", C_L2);
+            page_mono(p, a, C_L1);
+            page_mono(p, b, C_L1);
+            ub_init(&u);
+            ub_hexn(&u, j->crc, 8);
+            page_kv(p, "CRC32", u.b, C_L1);
+        } else {
+            page_kv(p, "State", j->state == HASH_RUNNING ? "hashing" : j->state == HASH_FAILED ? "read error" : "cancelled",
+                    j->state == HASH_RUNNING ? C_STAR : C_ORANGE);
+        }
+    }
+    page_hdr(p, "Targets");
+    files_nrows = 0;
+    uint64_t card = sd_sectors_hint() * 512ULL;
+    ub_init(&u);
+    ub_size(&u, card);
+    files_rows[files_nrows++] = page_row(p, "microSD card", card ? u.b : "-", 0);
+    if (ufs_up() && gpt_load() > 0) {
+        for (int i = 0; i < gpt_n && files_nrows <= GPT_MAX; ++i) {
+            ub_init(&u);
+            ub_size(&u, (gpt_last[i] - gpt_first[i] + 1) * 4096ULL);
+            files_rows[files_nrows++] = page_row(p, gpt_name[i], u.b, 0);
+        }
+    } else {
+        page_note(p, "UFS: not readable", C_ORANGE);
+    }
+}
+
+void ut_files(void)
+{
+    struct page p;
+    page_init(&p, UI_VIEW_Y0, UI_H);
+    uint64_t next = 0;
+    int focus = -1;
+    ui_fill(0, 0, UI_W, UI_H, C_BG);
+    for (;;) {
+        if (sb_ms() >= next) {
+            ui_header_draw("Files", "Utility", hash_job.state == HASH_RUNNING ? "HASHING" : "",
+                           hash_job.state == HASH_RUNNING ? C_STAR : 0);
+            ut_status_bar();
+            page_begin(&p);
+            files_fill(&p);
+            page_end(&p);
+            page_set_focus(&p, focus);
+            page_redraw(&p);
+            ui_present();
+            next = sb_ms() + 500;
+        }
+        struct ui_ev e;
+        ui_poll(&e, 0);
+        ut_service();
+        if (back_event(&e))
+            break;
+        int pick = -1;
+        if (page_scroll_event(&p, &e)) {
+            ;
+        } else if (e.type == EV_UP || e.type == EV_DOWN) {
+            int i = 0;
+            while (i < files_nrows && files_rows[i] != focus)
+                ++i;
+            i = focus < 0 ? 0 : (i + (e.type == EV_UP ? files_nrows - 1 : 1)) % files_nrows;
+            focus = files_rows[i];
+            page_set_focus(&p, focus);
+            page_keep_visible(&p, focus);
+            ui_present();
+        } else if (e.type == EV_SELECT && focus >= 0) {
+            pick = focus;
+        } else if (e.type == EV_TAP) {
+            pick = page_hit(&p, e.x, e.y, 0);
+        }
+        if (pick >= 0 && hash_job.state != HASH_RUNNING) {
+            for (int i = 0; i < files_nrows; ++i)
+                if (files_rows[i] == pick) {
+                    if (i == 0)
+                        (void)hash_start_card(0);
+                    else
+                        (void)hash_start_part(gpt_name[i - 1], 0);
+                    next = 0;
+                }
+        }
+        page_fling_step(&p);
+    }
+    page_free(&p);
+}

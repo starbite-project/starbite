@@ -14,6 +14,7 @@
 #include "msc.h"
 #include "fat.h"
 #include "usb_desc.h"
+#include "hash.h"
 
 static int busy[16];
 static uintptr_t qbuf[16];
@@ -163,6 +164,32 @@ int main(int argc, char **argv)
     usb_msc_reset = 1;
     msc_service();
     CHECK(cmd(0, 1, 36, inq, 6, buf, 0, &res) == 0, "INQUIRY after reset");
+    /* SHA-256 (FIPS 180-2 examples) and CRC32 ("123456789" -> cbf43926) */
+    {
+        struct sha256 h;
+        uint8_t d[32];
+        static const uint8_t abc[32] = { 0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde,
+                                         0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+                                         0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad };
+        static const uint8_t mil[32] = { 0xcd, 0xc7, 0x6e, 0x5c, 0x99, 0x14, 0xfb, 0x92, 0x81, 0xa1, 0xc7, 0xe2,
+                                         0x84, 0xd7, 0x3e, 0x67, 0xf1, 0x80, 0x9a, 0x48, 0xa4, 0x97, 0x20, 0x0e,
+                                         0x04, 0x6d, 0x39, 0xcc, 0xc7, 0x11, 0x2c, 0xd0 };
+        sha256_init(&h);
+        sha256_update(&h, (const uint8_t *)"abc", 3);
+        sha256_final(&h, d);
+        CHECK(memcmp(d, abc, 32) == 0, "sha256(abc)");
+        static uint8_t a[1000000];
+        memset(a, 'a', sizeof(a));
+        sha256_init(&h);
+        sha256_update(&h, a, 333333);                 /* in uneven pieces */
+        sha256_update(&h, a + 333333, 1);
+        sha256_update(&h, a + 333334, sizeof(a) - 333334);
+        sha256_final(&h, d);
+        CHECK(memcmp(d, mil, 32) == 0, "sha256(1M x a)");
+        CHECK(crc32_update(0, (const uint8_t *)"123456789", 9) == 0xcbf43926U, "crc32");
+        CHECK(crc32_update(crc32_update(0, (const uint8_t *)"1234", 4), (const uint8_t *)"56789", 5) == 0xcbf43926U,
+              "crc32 in two parts");
+    }
     /* the configuration descriptor, both speeds */
     for (int fs = 0; fs < 2; ++fs) {
         uint8_t cfg[256];

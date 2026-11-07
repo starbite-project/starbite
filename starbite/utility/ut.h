@@ -7,3 +7,4 @@ void ut_status_bar(void);
 void ut_measure(void);
 void ut_everyday(void);
 void ut_pad(void);
+void ut_files(void);

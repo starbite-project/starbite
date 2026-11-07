@@ -11,7 +11,8 @@ milestones **UO1** (USB device mode with a serial shell) and **UO2** (the phone 
 | Launcher | Tiles **USB**, **Radio**, **Files**, **Measure**, **Everyday**, **Boot menu**. Volume moves, Power opens, tap works; Power held / Bixby / swipe right goes back |
 | USB drives | Plug the phone into a computer: two drives appear. **RAM disk**: FAT32, label `STARBITE`, read-write, up to 1 GiB of DRAM bank 2 (gone when the phone restarts: copy files off first). **microSD (ro)**: the whole card, **read-only** (it holds the Linux images and backups) |
 | Trackpad and keys | USB page → **Trackpad and keys** (UO3): the screen is a trackpad (drag moves the pointer, tap clicks, hold still 0.6 s right-clicks, Volume scrolls), with buttons Copy, Paste, Undo, Cmd Tab, Space, Return, Esc, Mission Control and the media keys Vol -, Play, Vol +, Mute (Mac shortcuts: Command is the HID GUI key). Bixby leaves |
-| Shell | A USB serial port (`/dev/cu.usbmodem*` on a Mac, 115200 8N1, any terminal): `help`, `info`, `drives` (sizes, traffic, SCSI counters), `log`, `menu` (restart into the Starbite menu), `maint` (Starbite Maintenance), `off` |
+| Files | **Hash** (UO4, first part): every UFS partition and the microSD card, read only; pick one for its SHA-256 and CRC32 (live progress, MB/s, time left). It keeps running if you leave the page |
+| Shell | A USB serial port (`/dev/cu.usbmodem*` on a Mac, 115200 8N1, any terminal): `help`, `info`, `drives` (sizes, traffic, SCSI counters), `parts` (UFS partitions and sizes), `hash NAME [BYTES]` (SHA-256 + CRC32 of a partition or `card`, or of their first BYTES: e.g. `hash SYSTEM 6419857408` checks One UI's system image), `log`, `menu` (restart into the Starbite menu), `maint` (Starbite Maintenance), `off` |
 | USB page | Connection state and speed, each drive with its traffic, SCSI command and error counters, the shell state |
 | Leaving | The **Boot menu** tile (asks first), or the shell's `menu`. With **no computer ever connected and no touch or key for 10 minutes** it returns to the menu by itself (a countdown shows in the status bar for the last minute) |
 
@@ -43,6 +44,7 @@ tile, or wait for the 10-minute return).
 | `fat.c`, `fat.h` | FAT32 formatter for the RAM disk (no partition table, 4 KiB clusters) |
 | `usb_dwc3.c`, `usb_phy.c`, `max77705_muic.c` | The loader's drivers (shim/starlte). Changed in the copy: the DMA window at 0xa7000000 (libsb's non-cacheable range) instead of 0x91000000; 10 physical endpoints instead of 8; SET_CONFIGURATION configures the descriptor file's endpoint list (`usb_desc_eps`, `usb_ep_interval`) |
 | `usb_desc.c`, `usb_desc.h` | The loader's descriptors with interface 2 as mass storage (class 08/06/50) on the fastboot endpoints 0x83/0x03, and interface 3 as HID (keyboard report 1, mouse report 2 with wheel, consumer control report 3) on interrupt endpoint 0x84 (1 ms); Get Max LUN, the bulk-only reset, the HID class requests; the endpoint list the DWC3 driver configures (`usb_desc_eps`); VID:PID 1209:0001 |
+| `hash.c`, `hash.h`, `sha256.c` | The hash job (1 MiB per service-loop step, UFS through `ufs_read_to`, the card through `sd_read4k`) and pure SHA-256 / CRC32 (zlib's) |
 | `hid.c`, `hid.h`, `pad.c` | UO3: the HID report queue (pointer motion accumulated and sent in steps of at most 127), the trackpad and key screen; libsb's `ui_touch_raw` (every move an EV_DRAG, no swipes) makes the trackpad |
 | `hw.h`, `fastboot.h`, `tb.c` | The few loader helpers those drivers use, on libsb |
 | `build.sh` | Lab's build (same flags and checks: relocations, pre-relocation code, host paths), output `starbite/out/utility.img`; on a native aarch64 host it first runs the host test |
@@ -60,7 +62,7 @@ DMA layout in the window (`USB_DMA_BASE` 0xa7000000): the driver's event buffer,
   S9)", high speed) and read every descriptor, then held it unregistered (most likely the new-accessory
   approval). The drives and the shell were not reached yet; that build had no idle return (added since).
 - Since then (not yet on the phone): Measure, Everyday, UO3 keyboard/mouse/media keys with the trackpad
-  screen, the idle return; all previewed on the host.
+  screen, Files hashing (+ shell `parts`, `hash`), the idle return; all previewed on the host.
 - Next on the phone, with the accessory allowed: UO2's check (both drives mount; a copied file's hash matches
   after an unmount and remount), the shell, then UO3 (the pointer moves, a key arrives); then UO4 (file
   manager, hashing, imaging) and the calculator.
