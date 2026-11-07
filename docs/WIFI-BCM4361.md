@@ -8,10 +8,10 @@ Status 2026-11-07:
 
 | Part | State |
 |---|---|
-| Core (`starbite/wifi/`: 3,600 lines, plus 870 for the VENDOR readers and the libsb shim) | Written, reviewed adversarially (section 10). Host-tested on a register-level model (steps 1 to 10). Not yet run on the phone |
+| Core (`starbite/wifi/`: 3,600 lines, plus 870 for the VENDOR readers and the libsb shim) | **Works on S9 #1 to a scan** (2026-11-07, runs 2 and 3: firmware up, CLM loaded, 29 access points heard). Reviewed adversarially (section 10), host-tested on a register-level model |
 | NVRAM processing | Byte-identical to Linux's brcmfmac on all 10 of the phone's NVRAM files |
 | Reading the files from VENDOR | ext4 (LineageOS) and EROFS (One UI 8, S9 #1 now). The EROFS reader reads all 13 radio files from a copy of S9 #1's own VENDOR image, byte-identical |
-| libsb shim + test image `wifitest.img` | Built (4.1 MiB, header checked). First phone test requested (section 9) |
+| libsb shim + test image `wifitest.img` | T1, T2, T3 passed on the phone (section 9) |
 | Windows driver | `SbWifi.sys` (W1 skeleton, section 7) builds and signs with `tools/win`; not run (Windows on the phone is being repaired) |
 | Starbite OS | Shim done; integration plan in section 8, to agree with the `starbite-os` session |
 
@@ -301,6 +301,28 @@ loader enters bare images with S-Boot's FDT unchanged, so a catalog row's `cmdli
 of the store's `crashlog`: "SBCRASH1", CRC, state running, method bare), else the last `STARBITE: launch <key>`
 line in pmsg, else `wifitest`, and only a key starting with `wifitest` is trusted; then the bootargs. The first
 lines say `wifitest: settings: <key>: <cmdline>` and where the key came from.
+
+### Runs 2 and 3 (2026-11-07, launches #59 and #60, image 57148abf, commit 5115467): T2 and T3 passed
+
+- Settings from the loader's launch record (`wifitest-fw: wifi_step=9`, `wifitest-scan: wifi_step=10`).
+- Files from VENDOR (EROFS): firmware 13.50.37 (e3c66440...), `nvram.txt_r02b_b2` (68cb9039..., 7723 bytes of
+  text, 5544 for the chip, boardrev 0x1101), CLM 1c147786...; all known.
+- **The firmware up after 150 ms**; shared area 0x2012e4, flags 0x30040007 (protocol 7, D2H XOR-checksum sync,
+  host-ready support, no DMA indices), max rx buffers 511, console 2 KiB; ring info 0x244b18, 40 flow rings.
+- Console: `wl1: Broadcom BCM4361 802.11 Wireless Controller 13.50.37 (B2 Network/rsdb)`, ThreadX v5.6, some
+  `MALLOC warning` lines and `dngl_sendpkt: dropped pkt` (at boot, before the host has posted anything, and once
+  after the first commands), `Hostready Enabled?N`.
+- First ioctls answered: `cur_etheraddr`, `ver` = `wl0: Aug  9 2021 21:48:22 version 13.50.37 (B2 Network/rsdb)
+  FWID 01-c47464bc`; CLM loaded in 1400-byte chunks, `clmload_status` 0.
+- T3: `scan_ver` unsupported → **escan v1** accepted; 32 events, **29 access points heard, scan complete**; the
+  radio unpowered at the end, clean restart. (Network names and addresses are not logged.)
+- So on this phone: link at Gen1 with Samsung's tables, DMA through the SysMMU's bypass with uncached memory,
+  ring indices in the chip's RAM, DHD's stamping (no BADOPTION), polling.
+
+Open from these runs: `OTP Control 1` reads back 0 after the write (the CIS was read anyway); the
+`dngl_sendpkt: dropped pkt` lines (probably events with no event buffer posted yet: to check once events matter
+for joining); the D2H XOR-checksum sync mode the firmware announces is not verified by the host (brcmfmac does
+not either).
 
 ## 10. Review
 
