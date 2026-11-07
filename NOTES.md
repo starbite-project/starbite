@@ -2337,3 +2337,12 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   recovery transitions, slow frames, a stopped start, POST gap, off, back-off, unconfigured, no VBUS (loader-test
   365 checks; usb-fastboot 392; clang ASan/UBSan and VM gcc; xnu-health-test 911). Loader Image 2488043d...;
   BOOT out/xnu-boot-health6.img babb570226cc5092d8bee99c5fadce64988cd7995dcf111ed64e899572781dc9 (same recipe).
+- 2026-11-07 11:30: **Windows 11 after the 22 GiB resize: profile + recovery fix (offline, from TWRP).** First boot reached
+  sign-in but "User Profile Service failed the sign-in"; the next boot hit WinRE's "not enough memory to create a ramdisk
+  device 0xc0000017". Causes: Users\starbite\NTUSER.DAT dirty (seq 203/202) with empty LOG1/LOG2 (the morning's hang at
+  Welcome + forced resets); the Windows 11 loader {a446ff58...} had recoveryenabled (16000009) = 1, and WinRE's ramdisk
+  cannot load with our memory map. Fixes: BCD 16000009 -> 0 (1 byte at file 0x5f4c, sha 7c71fea3...); NTUSER.DAT seq2 =
+  seq1 + header checksum (sha bc35c6e9...; the whole hive parses: 3026 keys); NTFS refused rw ("unsafe state": $LogFile
+  not empty after the resets, hiberfil.sys header RSTR) -> ntfsfix (journal emptied, dirty flag set: chkdsk on next boot),
+  hiberfil.sys signature zeroed. Originals: backup/20261107-win-profile/ (BCD b63f0fb8, NTUSER, SYSTEM, SOFTWARE, BCD logs).
+  The Windows UFS write fence (6613760..13518591) is wider than WINDOWS now (ends 12511999): tighten it.
