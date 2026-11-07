@@ -500,6 +500,14 @@ for 60 °C, so one code = 1.034 °C and 42586 = 17 codes above 25 °C: probes at
 same code. The trip decodes to exactly 115 °C (S-Boot's te1 + 87), which cross-checks the conversion. The
 big cores (Windows never runs on them) and the idle GPU sit at the same temperature; ISP (slot 10) 43.305 °C.
 
+**T2 passed (2026-11-07, main session; the win-usb-host track's v3 firmware with our blob):** pmsg zone 0
+`=SSDT installed SBGPU (159 bytes, rev 1, at dispatch)` (= `build/win-gpu/StarbiteGpu.aml`, the interrupt-free
+stage 2 table); Windows 22631's offline SYSTEM (`build/win/results-usbh0-v3/SYSTEM-r` in the main checkout)
+has `Enum\ACPI\STRB0072\0` with HardwareID `ACPI\VEN_STRB&DEV_0072`, `ACPI\STRB0072`, `*STRB0072`,
+ConfigFlags 0x40 (no driver yet), and a BootConfig listing the four memory ranges from 0x16030000; the xHCI
+next to it kept working. The shared DXE now installs at dispatch (its ReadyToBoot installs never reached
+Windows). sbdisplay and sbmali can bind to it.
+
 ## 11. Stages and done-when
 
 | Stage | Done when |
