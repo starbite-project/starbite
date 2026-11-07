@@ -670,6 +670,21 @@ Images built with it (`ONLY=usb-ufn-device PPTT_STATIC=1 EXTRA_AML=...`, both fi
 (f6aec063…; combo2 + the Wi-Fi session's plain `WLAN4361` blob, `wlan.aml` 3f1b86b2…, for Wi-Fi W2;
 OEM ID STRBTE, resources clear of the DSDT, USB and GPU).
 
+**Combo2 on the phone (2026-11-07, with the `USBFN\Default` keys): bugcheck 0x7E
+SYSTEM_THREAD_EXCEPTION_NOT_HANDLED** (no "What failed" module on the screen; it stayed up until the
+watchdog reset; dumps are off, so there's no pstore line). Zone 0 is normal: device role, `SBUSBUFN` and `SBGPU`
+installed. `StarbiteUfx.etl` has only its header buffer: session start 11:21:01 UTC, at the boot,
+end time 11:23:32, 1 buffer written, 0 lost, **no UFX events**. The autologger has no flush timer,
+so events stay in memory until a buffer fills or the session stops, and a crash loses them. The trace
+can't place the crash. Two changes went in together, the PPTT and `USBFN\Default` (which lets UFX
+go on past the descriptors). Bisect image: **`starbite-uefi-usb-ufn-device-gpu-nopptt.bin`
+(fb7ce0b0…)**: combo2 with the release's own ACPI file, everything else identical (dxe-diff: the
+only difference is `11111111-…-501`). Same hive. Boots = the PPTT; crashes = the device path.
+For the next trace: `FlushTimer` = 1 on the autologger, so events reach the file every second.
+Separately, the PPTT gave the instruction caches allocation type 1 (write allocate) instead of 0
+(read allocate). That is unlikely to crash anything and is fixed in the source (host test: 290 checks); combo2 and combo3
+still have it, so rebuild before any reuse.
+
 ## 11. Licences and credits
 
 - `starbite/s9usb/*` and the DXE module: GPL-2.0-only, like the libsb/loader code they come from

@@ -5,7 +5,7 @@
   resources: flags, parent offset, ACPI processor ID, then the offsets of its private resources);
   a cache type structure is type 1, 24 bytes, or 28 in table revision 3 (with a cache ID). Flags
   of a cache: bit 0 size, 1 sets, 2 associativity, 3 allocation type, 4 cache type, 5 write
-  policy, 6 line size, 7 cache ID valid. Attributes: bits 1:0 allocation (1 read, 3 read/write),
+  policy, 6 line size, 7 cache ID valid. Attributes: bits 1:0 allocation (0 read, 1 write, 2/3 read+write),
   bits 3:2 type (0 data, 1 instruction, 2 unified), bit 4 write policy (0 write-back).
   Layout as Linux's ACPI cacheinfo reads it and ACPI 6.4 describes it: a leaf lists its private
   (per-core) caches' level 1, each cache points at the next level through "next level of cache",
@@ -256,7 +256,7 @@ PpttAddCaches (
   for (k = 0; k < NumOc; k++) {
     const PB_CACHE  *C = Oc[k].C;
     pb_u8           *P = Out + Oc[k].Off;
-    pb_u32          Alloc = (C->Kind == PB_INSTRUCTION) ? 0x1u : 0x3u;
+    pb_u32          Alloc = (C->Kind == PB_INSTRUCTION) ? 0x0u : 0x3u;   // I: read allocate
 
     P[0] = 1;
     P[1] = (pb_u8)CacheLen;

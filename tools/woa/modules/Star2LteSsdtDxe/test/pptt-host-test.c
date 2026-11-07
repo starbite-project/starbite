@@ -62,6 +62,11 @@ static void walk(const char *name, const uint8_t *out, uint32_t len, unsigned le
             ++caches;
             check("cache length (rev 3)", out[o + 1], 28);
             check("cache flags (all valid)", rd32(out + o + 4), 0xff);
+            {   /* attributes: I = read allocate, D/unified = read+write allocate; write-back */
+                unsigned at = out[o + 21], kind = (at >> 2) & 3;
+                check("allocation by kind", at & 3, kind == 1 ? 0 : 3);
+                check("write-back", (at >> 4) & 1, 0);
+            }
         }
     }
     /* the cluster node lists the shared cache(s) */
