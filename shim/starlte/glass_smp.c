@@ -396,8 +396,9 @@ int g7_smp_stop(void)
         while (__atomic_load_n(&WS[w].state, __ATOMIC_ACQUIRE) != WS_LEAVING &&
                __atomic_load_n(&WS[w].state, __ATOMIC_ACQUIRE) != WS_FAULT && ms_now() - t0 < 50)
             hw_wait_us(50);
-        /* CPU_OFF itself: give it a moment, then see whether it came back */
-        hw_wait_us(2000);
+        /* its cache levels written back, then CPU_OFF: 10 ms for both (PSCI 0.1 has no AFFINITY_INFO to
+         * ask), then see whether the SMC came back */
+        hw_wait_us(10000);
         if (WS[w].state == WS_PARKED || (WS[w].state != WS_LEAVING && WS[w].state != WS_FAULT)) {
             bad |= 1 << w;
             g7_smp_stat[3]++;
