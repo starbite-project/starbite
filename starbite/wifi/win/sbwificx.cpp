@@ -167,7 +167,11 @@ struct DEVCTX {
     ULONG sta_budget;
     // W2i: the data path's callbacks, counted (they may run at DISPATCH, where nothing is logged)
     volatile LONG txq_made, rxq_made, tx_advances, tx_packets, tx_notifies, rx_advances, rx_up;
-    UINT64 linkstate_at;            // when to send WDI's link state again while associated               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
+    UINT64 linkstate_at;
+    BSS cur;                        // the associated AP's entry, kept apart from the scan list (W2k)
+    int have_cur;
+    int scan_cached;                // this scan was refused: the cached list is indicated, marked cached
+    ULONG wdi_version;              // the WDI version declared to WiFiCx; the TLV parser uses the same (W2k)            // when to send WDI's link state again while associated               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
     ULONG link_state;
     ULONG assoc_txn_mode;           // Parameters\AssocTxn: 0 (default) the association result unsolicited, 1 the task's id               // Parameters\LinkState: 1 (default) the adapter's link reported up/down             // when to log the rx state again (1.5 s after an association)            // the core's received-frame count when the connect began
     UINT16 connect_port;
@@ -468,7 +472,7 @@ static void ScanDone(DEVCTX *d, NDIS_STATUS status)
                 }
                 e[i].Optional.EntryAgeInfo_IsPresent = 1;
                 e[i].EntryAgeInfo.HostTimeStamp = b->seen;
-                e[i].EntryAgeInfo.CachedInformation = FALSE;  // heard in this scan
+                e[i].EntryAgeInfo.CachedInformation = d->scan_cached ? TRUE : FALSE;
                 e[i].SignalInfo.RSSI = b->rssi;
                 e[i].SignalInfo.LinkQuality = b->rssi >= -50 ? 100 : b->rssi <= -100 ? 0 : (UINT32)(2 * (b->rssi + 100));
                 e[i].ChannelInfo.ChannelNumber = b->channel;
@@ -536,18 +540,24 @@ static void CmdScan(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
     d->scan_port = h->PortId;
     d->scans++;
     Sayf("wificx: scan %lu asked (transaction %lu, %s)", d->scans, h->TransactionId, ssid ? "one name" : "all networks");
-    d->nbss = 0;
+    // not during a join or the 15 s after the association while no key is in (bcmdhd and brcmfmac refuse scans
+    // while connecting): the firmware is not asked, the list kept (W2h..W2j wiped it here), and the cached list is
+    // indicated as cached with a successful completion
+    int busy = d->connecting || (d->connected && !d->keyed && Now(NULL) - d->assoc_at < 15000000);
     d->scanning = 1;                // before the start: its ioctl wait already delivers results
     d->scan_started = Now(NULL);
     d->scan_sync = (UINT16)(SCAN_SYNC + d->scans);
-    // not during a join or the 15 s after the association while no key is in (bcmdhd and brcmfmac refuse scans
-    // while connecting): the firmware is not asked at all
-    int busy = d->connecting || (d->connected && !d->keyed && Now(NULL) - d->assoc_at < 15000000);
-    if (busy)
-        Sayf("wificx: scan %lu refused: a join is in progress", d->scans);
-    int e = busy ? BCMW_E_STATE : d->up ? bcmw_scan_start(d->w, ssid, ssid_len, d->scan_sync) : BCMW_E_STATE;
+    d->scan_cached = busy;
+    if (!busy)
+        d->nbss = 0;
+    int e = busy ? BCMW_OK : d->up ? bcmw_scan_start(d->w, ssid, ssid_len, d->scan_sync) : BCMW_E_STATE;
     CleanupParsedWdiTaskScanToIhv(&p);
     Answer(r, STATUS_SUCCESS);
+    if (busy) {
+        Sayf("wificx: scan %lu during a join: the cached list (%lu) indicated instead", d->scans, d->nbss);
+        ScanDone(d, NDIS_STATUS_SUCCESS);
+        return;
+    }
     if (e != BCMW_OK) {
         Sayf("wificx: the scan could not start (%d)", e);
         d->scanning = 1;
@@ -609,7 +619,7 @@ static void CmdStatistics(DEVCTX *d, WIFIREQUEST r)
     }
     RtlFillMemory(m[n].MACAddress.Address, 6, 0xff);
     n++;
-    BSS *b = d->connected ? FindBss(d, d->bssid) : NULL;
+    BSS *b = d->connected && d->have_cur ? &d->cur : NULL;
     phy.PhyType = b && b->band5 ? WDI_PHY_TYPE_VHT : WDI_PHY_TYPE_HT;
     phy.TransmittedFrameCount = in->tx_done;
     phy.FailedCount = in->tx_errors;
@@ -639,7 +649,7 @@ static void LinkStateWdi(DEVCTX *d)
     WDI_LINK_INFO_CONTAINER li;
     UINT8 *gen = NULL;
     ULONG len = 0;
-    BSS *b = FindBss(d, d->bssid);
+    BSS *b = d->have_cur ? &d->cur : FindBss(d, d->bssid);
     INT32 rssi = b ? b->rssi : -60;
     UINT8 q = rssi >= -50 ? 100 : rssi <= -100 ? 0 : (UINT8)(2 * (rssi + 100));
     UINT32 kbps = b && b->band5 ? 433300 : 144400;
@@ -690,6 +700,14 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
     UINT32 req_len = sizeof(req) - 4, resp_len = sizeof(resp) - 6;
     UINT8 reqf[520], respf[520];
     BSS *b = FindBss(d, d->bssid);
+    if (b) {
+        d->cur = *b;
+        d->have_cur = 1;
+    } else if (d->have_cur && RtlEqualMemory(d->cur.bssid, d->bssid, 6)) {
+        b = &d->cur;                // a repeated connect after the list changed
+    } else {
+        d->have_cur = 0;
+    }
     // the IEs first: a deauthentication arriving during that query (set_ssid_ok < 0) turns this into a failure
     int have_ies = ok && bcmw_assoc_ies(d->w, req, &req_len, resp, &resp_len) == BCMW_OK;
     if (ok && d->set_ssid_ok < 0) {
@@ -706,12 +724,19 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
         !d->rsn[0] ? WDI_CIPHER_ALGO_NONE : d->rsn[7] == BCMW_CIPHER_TKIP ? WDI_CIPHER_ALGO_TKIP : WDI_CIPHER_ALGO_CCMP;
     res.AssociationResultParameters.MulticastMgmtCipherAlgorithm = WDI_CIPHER_ALGO_NONE;
     res.AssociationResultParameters.BandID = b && b->band5 ? WDI_BAND_ID_5000 : WDI_BAND_ID_2400;
+    if (b) {
+        // WMM negotiated when the AP advertises it (vendor element 00:50:F2 type 2): the firmware uses it then
+        for (UINT32 o = 0; o + 2 <= b->ie_len && o + 2u + b->ie[o + 1] <= b->ie_len; o += 2u + b->ie[o + 1])
+            if (b->ie[o] == 221 && b->ie[o + 1] >= 4 && b->ie[o + 2] == 0x00 && b->ie[o + 3] == 0x50 &&
+                b->ie[o + 4] == 0xf2 && b->ie[o + 5] == 2)
+                res.AssociationResultParameters.WMMQoSEnabled = TRUE;
+    }
     WDI_PHY_TYPE phy = b && b->band5 ? WDI_PHY_TYPE_VHT : WDI_PHY_TYPE_HT;    // required since WDI 1.1.4
     res.ActivePhyTypeList.SimpleAssign(&phy, 1);
     if (ok && have_ies) {
         // the frames' bodies: request = capability, listen interval, elements; response = capability, status, AID, elements
         RtlZeroMemory(reqf, 4);
-        reqf[0] = 0x31, reqf[1] = 0x04;         // ESS, privacy, short slot time
+        reqf[0] = d->rsn[0] ? 0x31 : 0x21, reqf[1] = 0x04;     // ESS, (privacy,) short slot time
         reqf[2] = 10;                           // listen interval
         RtlCopyMemory(reqf + 4, req, req_len);
         res.Optional.AssociationRequestFrame_IsPresent = 1;
@@ -762,6 +787,7 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
     res.ActivePhyTypeList.SimpleAssign(NULL, 0);
     if (ok) {
         LinkState(d, 1);
+        LinkStateWdi(d);            // before the task's completion, as Microsoft's sample does
         d->assoc_at = Now(NULL);
         d->keyed = 0;
         d->join_failed = 0;
@@ -772,10 +798,8 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
     Sayf("wificx: connect %s (association result %s, then the task's completion)", ok ?
          "COMPLETE (associated; Windows does the handshake now)" : "FAILED", d->assoc_txn_mode ? "with the task's id" :
          "unsolicited");
-    if (ok) {
-        LinkStateWdi(d);
+    if (ok)
         d->heartbeat_at = 0;        // the 10 s heartbeat starts now
-    }
     bcmw_rx_state(d->w, "at the association result");
     d->rx_check_at = ok ? Now(NULL) + 1500000 : 0;
     d->connecting = 0;
@@ -931,8 +955,24 @@ static void CmdDisconnect(DEVCTX *d, WIFIREQUEST r, const WDI_MESSAGE_HEADER *h)
     Indicate(d, WDI_INDICATION_DISCONNECT_COMPLETE, h->PortId, h->TransactionId, NDIS_STATUS_SUCCESS, NULL, 0);
 }
 
+static void SendQueued(DEVCTX *d);
+
 static void CmdAddKeys(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
 {
+    {
+        // Windows sends message 4, then the keys; commands run before queued frames, so message 4 is sent now and
+        // the radio given up to 500 ms to put it on the air before the key goes in (brcmfmac waits on pend_8021x),
+        // or it would leave encrypted and the AP would drop it
+        SendQueued(d);
+        const struct bcmw_info *bi = bcmw_info(d->w);
+        UINT64 t0 = Now(NULL);
+        while (d->up && bi->tx_done < bi->tx_frames && Now(NULL) - t0 < 500000) {
+            bcmw_poll(d->w);
+            Delay(NULL, 2000);
+        }
+        if (bi->tx_done < bi->tx_frames)
+            Sayf("wificx: keys: %lu frames still in the radio after 500 ms", bi->tx_frames - bi->tx_done);
+    }
     WDI_SET_ADD_CIPHER_KEYS_PARAMETERS p;
     NTSTATUS st = STATUS_SUCCESS;
     if (ParseWdiSetAddCipherKeysToIhv(in - sizeof(*h), (UINT8 *)(h + 1), &d->tlv, &p) != NDIS_STATUS_SUCCESS) {
@@ -1201,13 +1241,50 @@ static void OsRx(void *ctx, unsigned, const uint8_t *frame, uint32_t len)
 
 // ---- the worker ------------------------------------------------------------------------------------------------------------
 
+// the frames Windows queued, to the radio (from the worker; also before a key goes in, so the handshake's last
+// message leaves unencrypted)
+static void SendQueued(DEVCTX *d)
+{
+    static UINT8 frame[FRAME_MAX];
+    KIRQL old;
+    for (;;) {
+        ULONG len = 0;
+        KeAcquireSpinLock(&d->tx_lock, &old);
+        if (d->tx_count) {
+            FRAME *f = &d->tx[d->tx_head];
+            len = f->len;
+            RtlCopyMemory(frame, f->data, len);
+            d->tx_head = (d->tx_head + 1) % QLEN;
+            d->tx_count--;
+        }
+        KeReleaseSpinLock(&d->tx_lock, old);
+        if (!len)
+            break;
+        UINT16 ki = 0;
+        int m = EapolKey(frame, len, &ki);
+        int te = d->up ? bcmw_tx(d->w, frame, len) : BCMW_E_STATE;
+        if (InterlockedIncrement(&d->data_out) == 1)
+            Sayf("wificx: the first data frame from Windows: ethertype %02x%02x, %lu bytes, sent: %d", frame[12],
+                 frame[13], len, te);
+        if (te != BCMW_OK)
+            d->tx_dropped++;
+        if (m >= 0) {
+            InterlockedIncrement(&d->eapol_out);
+            if (te != BCMW_OK)
+                InterlockedIncrement(&d->eapol_out_fail);
+            Sayf("wificx: EAPOL out from Windows: %s%u, key info %04x, %lu bytes, source %s; sent: %d", m == 5 ? "group " : "message ",
+                 m == 5 ? 2 : m, ki, len, RtlEqualMemory(frame + 6, bcmw_info(d->w)->mac, 6) ? "the radio's address" :
+                 "NOT the radio's address", te);
+        }
+    }
+}
+
 static void SetParam(PCWSTR name, ULONG v);
 static KSTART_ROUTINE Worker;
 static void Worker(PVOID arg)
 {
     DEVCTX *d = (DEVCTX *)arg;
     LARGE_INTEGER t;
-    static UINT8 frame[FRAME_MAX];
     UINT64 started = Now(NULL);
     t.QuadPart = -50000;            // 5 ms
     while (!d->stop) {
@@ -1234,37 +1311,7 @@ static void Worker(PVOID arg)
                 break;
             Command(d, r);
         }
-        // frames out
-        for (;;) {
-            ULONG len = 0;
-            KeAcquireSpinLock(&d->tx_lock, &old);
-            if (d->tx_count) {
-                FRAME *f = &d->tx[d->tx_head];
-                len = f->len;
-                RtlCopyMemory(frame, f->data, len);
-                d->tx_head = (d->tx_head + 1) % QLEN;
-                d->tx_count--;
-            }
-            KeReleaseSpinLock(&d->tx_lock, old);
-            if (!len)
-                break;
-            UINT16 ki = 0;
-            int m = EapolKey(frame, len, &ki);
-            int te = d->up ? bcmw_tx(d->w, frame, len) : BCMW_E_STATE;
-            if (InterlockedIncrement(&d->data_out) == 1)
-                Sayf("wificx: the first data frame from Windows: ethertype %02x%02x, %lu bytes, sent: %d", frame[12],
-                     frame[13], len, te);
-            if (te != BCMW_OK)
-                d->tx_dropped++;
-            if (m >= 0) {
-                InterlockedIncrement(&d->eapol_out);
-                if (te != BCMW_OK)
-                    InterlockedIncrement(&d->eapol_out_fail);
-                Sayf("wificx: EAPOL out from Windows: %s%u, key info %04x, %lu bytes, source %s; sent: %d", m == 5 ? "group " : "message ",
-                     m == 5 ? 2 : m, ki, len, RtlEqualMemory(frame + 6, bcmw_info(d->w)->mac, 6) ? "the radio's address" :
-                     "NOT the radio's address", te);
-            }
-        }
+        SendQueued(d);
         if (!d->up)
             continue;
         bcmw_poll(d->w);
@@ -1738,7 +1785,7 @@ static NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST)
     cfg.rx_buffers = 128;
     cfg.diag = 1;                   // step 8 checked word by word until W2 has passed once
     d->bss_frame = Param(L"BssFrame", 0);
-    d->link_state = Param(L"LinkState", 1);
+    d->link_state = Param(L"LinkState", 0);    // W2k: left to WiFiCx (Microsoft's sample does not set it)
     d->assoc_txn_mode = Param(L"AssocTxn", 0);
     Sayf("wificx: settings: association result %s, link state %s, BSS frames %s",
          d->assoc_txn_mode ? "with the task's id" : "unsolicited", d->link_state ? "reported" : "left to WiFiCx",
@@ -1756,7 +1803,13 @@ static NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST)
         return STATUS_DEVICE_NOT_READY;
     }
     d->tlv.AllocationContext = 0;
-    d->tlv.PeerVersion = WifiDeviceGetOsWdiVersion(device);
+    {
+        // W2k: the TLV parser/generator speaks the version declared to WiFiCx (it converts to and from the OS's);
+        // W2a..W2j used the OS's (2.0.3) against a declared 2.0.0
+        ULONG os = WifiDeviceGetOsWdiVersion(device);
+        d->tlv.PeerVersion = d->wdi_version && d->wdi_version < os ? d->wdi_version : os;
+        Sayf("wificx: WDI: declared %lx, the OS %lx, the TLVs speak %lx", d->wdi_version, os, d->tlv.PeerVersion);
+    }
     NTSTATUS st = SetCapabilities(d);
     if (!NT_SUCCESS(st)) {
         bcmw_quiesce(d->w);
@@ -1869,7 +1922,11 @@ static NTSTATUS DeviceAdd(WDFDRIVER, PWDFDEVICE_INIT init)
     WIFI_DEVICE_CONFIG wc;
     // WDI 2.0.0: the WiFiCx baseline (the SDK's LATEST, 2.0.13, may be newer than 23H2's WiFiCx accepts);
     // Parameters\WdiVersion overrides it for a retry without a rebuild
-    ULONG wdi = Param(L"WdiVersion", WDI_VERSION_2_0_0);
+#ifndef SB_WDI_DEFAULT
+#define SB_WDI_DEFAULT WDI_VERSION_2_0_0
+#endif
+    ULONG wdi = Param(L"WdiVersion", SB_WDI_DEFAULT);
+    Ctx(device)->wdi_version = wdi;
     WIFI_DEVICE_CONFIG_INIT(&wc, wdi, SendCommand, CreateAdapter, NULL);
     st = WifiDeviceInitialize(device, &wc);
     Sayf("SbWifiCx build %s: device added; WDI %lu.%lu.%lu asked, WifiDeviceInitialize %08x", SB_BUILD_ID, wdi >> 16,
