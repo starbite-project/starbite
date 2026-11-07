@@ -45,6 +45,15 @@
 
 #include "StarbiteLog.h"
 
+#ifndef STARBITE_PPTT_FIX
+#define STARBITE_PPTT_FIX 0
+#endif
+
+VOID
+PpttFix (
+  VOID
+  );
+
 #define SSDT_VERSION    3
 #define SSDT_MAX_BLOBS  32
 
@@ -274,7 +283,11 @@ SsdtDxeEntry (
   UINTN                          Index;
   UINTN                          Installed;
 
-  SbLog ("=SSDT v%d at dispatch", SSDT_VERSION);
+  SbLog ("=SSDT v%d at dispatch, PPTT fix %d", SSDT_VERSION, STARBITE_PPTT_FIX);
+  if (STARBITE_PPTT_FIX) {
+    PpttFix ();
+  }
+
   Status = gBS->LocateProtocol (&gEfiAcpiTableProtocolGuid, NULL, (VOID **)&mAcpiTable);
   if (EFI_ERROR (Status)) {
     SbLog ("=SSDT FAIL no ACPI table protocol: %r", Status);

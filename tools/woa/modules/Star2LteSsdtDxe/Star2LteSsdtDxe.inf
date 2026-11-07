@@ -1,6 +1,7 @@
 ## @file
 #  Star2LteSsdtDxe: installs every Starbite SSDT blob (FREEFORM FFS files 53534454-5342-5445-<id>,
-#  made by tools/woa/ssdt-ffs.py) during DXE dispatch (docs/WIN11-USB.md section 4.1). Added to the
+#  made by tools/woa/ssdt-ffs.py) during DXE dispatch (docs/WIN11-USB.md section 4.1); with
+#  STARBITE_PPTT_FIX=1 it first gives the PPTT the CPU's caches (PpttFix.c, section 10). Added to the
 #  release DXE volume with tools/woa/dxe-replace.py --add; built by patch 0024 under
 #  -D STAR2LTE_SSDT_DXE.
 #
@@ -17,6 +18,9 @@
 
 [Sources]
   SsdtDxe.c
+  PpttFix.c
+  PpttBuild.c
+  PpttBuild.h
   StarbiteLog.h
 
 [Packages]
@@ -35,6 +39,10 @@
 [Protocols]
   gEfiAcpiTableProtocolGuid                     ## CONSUMES
   gEfiFirmwareVolume2ProtocolGuid               ## CONSUMES
+  gEfiAcpiSdtProtocolGuid                       ## SOMETIMES_CONSUMES (PpttFix; not in the depex)
 
 [Depex]
   gEfiAcpiTableProtocolGuid
+
+[BuildOptions]
+  *_*_*_CC_FLAGS = -DPPTT_EDK2

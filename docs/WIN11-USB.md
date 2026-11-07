@@ -559,7 +559,41 @@ of the main checkout; 1040 bytes and nothing else in zone 0 after the Windows se
 Windows: `Enum\ACPI\INT3445\0` service ufxsynopsys, ConfigFlags 0; no `Enum\USBFN`; the Mac saw
 no device. Cause and fix: the attach `_DSM` above (`UFN0` revision 2, image 7fe37f7e…).
 
-## 10. Licences and credits
+## 10. Side finding: the PPTT has no caches (the 0xC0000094 crashes)
+
+Windows' System log shows `OneDriveSetup.exe` and then the `WerFault.exe` started for it failing at
+start with **0xC0000094** (STATUS_INTEGER_DIVIDE_BY_ZERO) on almost every boot **since the first
+desktop boot after the install**, long before any of this track's firmware (27 boots in the log,
+every firmware since August). OneDriveSetup is an x86 program (ARM64's x86 emulation); a test of an
+x86 against an ARM64 program would show whether only emulated programs are hit (asked of the main
+session, with Application.evtx).
+
+The release PPTT (the platform module's, woa `Pptt.aslc`, the same in src38: 256 bytes, revision 3)
+has the package, two clusters and eight leaf cores, and **no cache structures**. Code that sizes
+something by the reported cache line or cache size can then divide by zero. The fix under test:
+
+- `PpttBuild.c` (portable, host test `tools/woa/modules/Star2LteSsdtDxe/test/run.sh`: 94 checks on
+  the release's own PPTT, plus iasl's disassembler as an independent parse) adds, for every core of
+  the cluster holding ACPI processor ID 0 (the A55s, the only cores Windows runs here), its level-1
+  and level-2 caches and one shared level-3 cache, chained by "next level of cache"; the M3 nodes
+  stay as they were. Revision-3 cache structures with cache IDs.
+- `PpttFix.c`, part of `Star2LteSsdtDxe` when built with `STARBITE_PPTT_FIX=1` (a third module didn't
+  fit the release's fixed DXE slot): during dispatch it reads the real geometry from the boot CPU
+  (CLIDR_EL1, then CSSELR/CCSIDR_EL1 per cache, both CCSIDR formats per ID_AA64MMFR2_EL1.CCIDX),
+  logs it (`=PPTT L1 data line 64 ways 4 sets 128 = 32 KiB` ...), builds the new table and swaps it
+  (uninstall + install through the ACPI table protocol; the old table goes back if the install
+  fails). Anything unexpected leaves the PPTT unchanged.
+- Test image: **src38 + only that module** (no USB module, no blobs), `starbite-uefi-pptt-only-rel.bin`
+  (`UEFI_TARGET=RELEASE PPTT=1 SUFFIX=-rel tools/woa/build-win-usbhost.sh`). Passes if OneDriveSetup
+  and WerFault stop failing; Windows must still show 4 CPUs.
+- Space: the release's outer volume has a fixed slot for the compressed DXE volume (0x51000);
+  USB + SSDT/PPTT + the USB and GPU blobs are 88 bytes over. Before combining everything, room must
+  be made (candidates: the release's SerialDxe, which nothing consumes without a TerminalDxe, or
+  shorter log strings in Star2LteUsbDxe).
+- Risk: CLIDR/CCSIDR reads at boot (our XNU and Linux read them on this phone too); a malformed PPTT
+  would stop Windows early (hidden test entry; forced reset is fine before the logo).
+
+## 11. Licences and credits
 
 - `starbite/s9usb/*` and the DXE module: GPL-2.0-only, like the libsb/loader code they come from
   (which follows Samsung's GPL-2.0 kernel: CAL PHY sequence, MAX77705 headers, DT tuning values).
@@ -571,4 +605,6 @@ no device. Cause and fix: the attach `_DSM` above (`UFN0` revision 2, image 7fe3
   Microsoft "Other ACPI namespace objects" for the xHCI compatible ID; Samsung's MAX77705 driver
   as published in LineageOS `android_kernel_samsung_universal9810` (lineage-17.1, GPL-2.0;
   read, not copied) for the auto-VBUS opcode; woa's `GpioHandoffDxe.c` and
-  `Star2LteResetSystemLib.c` (BSD-2-Clause-Patent) for the constraints in section 4 and risk 8.
+  `Star2LteResetSystemLib.c` (BSD-2-Clause-Patent) for the constraints in section 4 and risk 8;
+  Intel's xDCI ACPI in Slim Bootloader (BSD-2-Clause-Patent; read, not copied) for the attach
+  `_DSM`; `test/release-pptt.bin` is the woa release's PPTT (BSD-2-Clause-Patent), a test fixture.

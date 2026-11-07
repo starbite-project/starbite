@@ -31,9 +31,15 @@ rel=$W/release-7582.fd
 RTC=b336f62d-4135-4a55-ae4e-4971bbf0885d
 USBDXE=93eb628b-5eff-4ae2-834d-cf7aaf7bdc7c
 SSDTDXE=5dd14183-80d0-4d05-938e-f74bc42e4e6a
+PPTT=${PPTT:-0}                                   # 1: Star2LteSsdtDxe also fixes the PPTT (section 10)
+# Our modules' edk2 target. RELEASE drops their DEBUG (serial-only) output; their log goes to the
+# RAM rings either way (StarbiteLog.h). Needed when the volume is full: the release's outer FV has
+# a fixed slot for the compressed DXE volume.
+UEFI_TARGET=${UEFI_TARGET:-DEBUG}
 out=build/woa
 SUFFIX=${SUFFIX:-}
 [ -z "${EXTRA_AML:-}" ] || [ -n "$SUFFIX" ] || { echo "EXTRA_AML needs a SUFFIX so the plain images are kept" >&2; exit 1; }
+[ "$PPTT" = 0 ] || [ -n "$SUFFIX" ] || { echo "PPTT=1 needs a SUFFIX so the plain images are kept" >&2; exit 1; }
 for f in "$rel" "$W/Star2LtePkg-src38.fd" "$W/pmic-rtc.ffs" "$W/src38.fd" "$W/starbite-uefi-src38.bin"; do
     [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
 done
@@ -42,6 +48,7 @@ if limactl shell starbite -- pgrep -f 'build -a AARCH64' >/dev/null; then
     echo "another edk2 build is running in the VM; try again later" >&2; exit 1
 fi
 starbite/s9usb/test/run.sh | tail -1
+tools/woa/modules/Star2LteSsdtDxe/test/run.sh | head -1
 python3 tools/woa/patches/gen-0024.py --check
 mkdir -p "$out/acpi"
 head -c 384 "$W/starbite-uefi-src38.bin" > "$out/src38-bootshim.bin"
@@ -75,18 +82,37 @@ export PATCHES='tools/woa/patches/000[125]-*.patch tools/woa/patches/001[89]-*.p
 image() {   # image NAME ROLE ACPI VBUS BLOB
     local name=$1 role=$2 acpi=$3 vbus=$4 blob=$5
     echo "== $name: role $role, ACPI layout $acpi, VBUS $vbus, blob $blob"
-    tools/woa/build-uefi.sh DEBUG -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_USB_DXE=TRUE -D STAR2LTE_SSDT_DXE=TRUE \
-        -D STARBITE_USB_ROLE=$role -D STARBITE_USB_ACPI=$acpi -D STARBITE_USB_VBUS=$vbus | tail -1
+    tools/woa/build-uefi.sh "$UEFI_TARGET" -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_USB_DXE=TRUE -D STAR2LTE_SSDT_DXE=TRUE \
+        -D STARBITE_USB_ROLE=$role -D STARBITE_USB_ACPI=$acpi -D STARBITE_USB_VBUS=$vbus -D STARBITE_PPTT_FIX=$PPTT | tail -1
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$USBDXE" "$out/$name-usb.ffs"
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$SSDTDXE" "$out/$name-ssdt.ffs"
     grep -aq "usb-policy role=$role acpi=$acpi vbus=$vbus" "$out/$name-usb.ffs" ||
         { echo "$name-usb.ffs lacks its policy marker: the -D values did not reach the module" >&2; exit 1; }
+    # PpttFix is linked in only with STARBITE_PPTT_FIX=1 (LTO drops it otherwise)
+    if grep -aq "=PPTT v%d" "$out/$name-ssdt.ffs"; then has=1; else has=0; fi
+    [ "$has" = "$PPTT" ] || { echo "$name-ssdt.ffs: PPTT fix present=$has, wanted $PPTT" >&2; exit 1; }
     python3 tools/woa/dxe-replace.py "$W/Star2LtePkg-src38.fd" "$rel" "$out/$name.fd" \
         --kill "$RTC" --add "$W/pmic-rtc.ffs" --add "$out/$name-usb.ffs" --add "$out/$name-ssdt.ffs" \
         --add "$out/acpi/$blob.ffs" ${extra[@]+"${extra[@]}"} >/dev/null
     python3 tools/woa/dxe-diff.py "$W/src38.fd" "$out/$name.fd"
     cat "$out/src38-bootshim.bin" "$out/$name.fd" > "$out/starbite-uefi-$name$SUFFIX.bin"
 }
+if [ "$PPTT" = 1 ]; then
+    # The PPTT experiment alone: src38 + Star2LteSsdtDxe with the PPTT fix, no USB module and no
+    # blobs (the 0xC0000094 crashes happen on plain src38). The USB images with the fix don't fit
+    # the release's DXE slot yet (section 10).
+    echo "== pptt-only: Star2LteSsdtDxe with the PPTT fix, nothing else"
+    tools/woa/build-uefi.sh "$UEFI_TARGET" -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_SSDT_DXE=TRUE -D STARBITE_PPTT_FIX=1 | tail -1
+    python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$SSDTDXE" "$out/pptt-only-ssdt.ffs"
+    grep -aq "=PPTT v%d" "$out/pptt-only-ssdt.ffs" || { echo "pptt-only-ssdt.ffs lacks the PPTT fix" >&2; exit 1; }
+    python3 tools/woa/dxe-replace.py "$W/Star2LtePkg-src38.fd" "$rel" "$out/pptt-only.fd" \
+        --kill "$RTC" --add "$W/pmic-rtc.ffs" --add "$out/pptt-only-ssdt.ffs" >/dev/null
+    python3 tools/woa/dxe-diff.py "$W/src38.fd" "$out/pptt-only.fd"
+    cat "$out/src38-bootshim.bin" "$out/pptt-only.fd" > "$out/starbite-uefi-pptt-only$SUFFIX.bin"
+    (cd "$out" && shasum -a 256 "starbite-uefi-pptt-only$SUFFIX.bin" | tee "usbh-SHA256SUMS$SUFFIX")
+    rm -rf tools/woa/__pycache__
+    exit 0
+fi
 image usbh-vbus0 0 0 0 UsbXhc
 image usbh-vbus1 0 0 1 UsbXhc
 image usb-urs-auto 2 1 0 UsbUrs
