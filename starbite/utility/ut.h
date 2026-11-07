@@ -6,3 +6,4 @@ void ut_service(void);          /* USB, the shell, the watchdog, the idle return
 void ut_status_bar(void);
 void ut_measure(void);
 void ut_everyday(void);
+void ut_pad(void);

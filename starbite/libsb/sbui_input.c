@@ -60,6 +60,11 @@ void ui_input_reset(void)
     sb_touch_clear();
 }
 
+/* Raw touch (ui_touch_raw): EV_PRESS, an EV_DRAG for every move (x, y = the position), EV_TAP for a short
+ * still touch, EV_TOUCH_UP; never EV_SWIPE_*. For full-screen trackpads; off by default. */
+static int t_raw;
+void ui_touch_raw(int on) { t_raw = on; }
+
 static int iabs(int v)
 {
     return v < 0 ? -v : v;
@@ -134,6 +139,12 @@ static void poll_touch(void)
             t_vy = 0;
             t_lt = now;
             push(EV_PRESS, x, y, 0);
+        } else if (st == 2 && t_down && t_raw) {
+            /* raw mode (a trackpad): every move is a drag with its position; no scroll/swipe modes */
+            if (x != t_lx || y != t_ly)
+                push(EV_DRAG, x, y, y - t_ly);
+            t_lx = x;
+            t_ly = y;
         } else if (st == 2 && t_down) {
             if (!t_mode && iabs(y - t_y0) > 36)
                 t_mode = 1;

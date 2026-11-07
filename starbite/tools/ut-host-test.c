@@ -3,7 +3,9 @@
  *   gcc -O1 -Wall -Wextra -Istarbite/utility -o ut-test starbite/tools/ut-host-test.c starbite/utility/msc.c starbite/utility/fat.c && ./ut-test [fat.img]
  * (starbite/utility/build.sh runs it on a native aarch64 host before building the image)
  * The DMA window is mapped at its real address (0xa7000000); a fake controller records the queued
- * transfers and the test plays the host. fat.img: the formatted 512 MiB image, for fsck.fat -n. */
+ * transfers and the test plays the host. fat.img: the formatted 512 MiB image, for fsck.fat -n.
+ * Also: the configuration descriptor (usb_desc.c: total length, the descriptor chain, the HID report
+ * descriptor's length and collections). */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,7 +15,6 @@
 #include "fat.h"
 #include "usb_desc.h"
 
-volatile unsigned usb_msc_max_lun, usb_msc_reset;
 static int busy[16];
 static uintptr_t qbuf[16];
 static uint32_t qlen[16];
@@ -162,6 +163,41 @@ int main(int argc, char **argv)
     usb_msc_reset = 1;
     msc_service();
     CHECK(cmd(0, 1, 36, inq, 6, buf, 0, &res) == 0, "INQUIRY after reset");
+    /* the configuration descriptor, both speeds */
+    for (int fs = 0; fs < 2; ++fs) {
+        uint8_t cfg[256];
+        unsigned n = usb_desc_config(cfg, fs, 2);
+        CHECK(n == USB_CONFIG_LEN && (unsigned)(cfg[2] | cfg[3] << 8) == n, "config length %u (wTotalLength %u, want %u)",
+              n, cfg[2] | cfg[3] << 8, USB_CONFIG_LEN);
+        CHECK(cfg[4] == USB_IF_COUNT, "bNumInterfaces %u", cfg[4]);
+        unsigned off = 0, ifs = 0, eps = 0, hid_len = 0;
+        while (off < n) {
+            CHECK(cfg[off] >= 2 && off + cfg[off] <= n, "descriptor chain broken at %u", off);
+            if (cfg[off] < 2)
+                break;
+            if (cfg[off + 1] == 4)
+                ++ifs;
+            if (cfg[off + 1] == 5)
+                ++eps;
+            if (cfg[off + 1] == 0x21)
+                hid_len = (unsigned)(cfg[off + 7] | cfg[off + 8] << 8);
+            off += cfg[off];
+        }
+        CHECK(off == n && ifs == 4 && eps == 6, "chain: end %u, %u interfaces, %u endpoints", off, ifs, eps);
+        uint8_t rep[256];
+        unsigned rn = usb_hid_report_desc(rep);
+        CHECK(hid_len == rn, "HID descriptor says %u, report descriptor is %u", hid_len, rn);
+        int depth = 0;
+        for (unsigned i = 0; i < rn;) {               /* short items: size bits 0..1 = 0,1,2,4 bytes */
+            uint8_t b = rep[i], sz = (uint8_t)(b & 3U);
+            if ((b & 0xfcU) == 0xa0U)
+                ++depth;
+            if (b == 0xc0)
+                --depth;
+            i += 1U + (sz == 3 ? 4U : sz);
+        }
+        CHECK(depth == 0, "report descriptor collections unbalanced (%d)", depth);
+    }
     printf("%s: %llu commands, %d failed checks\n", fails ? "FAILED" : "PASSED", (unsigned long long)msc_stats.cmds, fails);
     return fails != 0;
 }

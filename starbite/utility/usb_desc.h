@@ -20,7 +20,8 @@
 #define USB_IF_ACM_DATA 1U
 #define USB_IF_FASTBOOT 2U         /* Utility OS: USB mass storage (bulk-only) on the same interface/endpoints */
 #define USB_IF_MSC USB_IF_FASTBOOT
-#define USB_IF_COUNT    3U
+#define USB_IF_HID      3U         /* Utility OS: keyboard, mouse, media keys (report IDs 1, 2, 3) */
+#define USB_IF_COUNT    4U
 #define USB_EP_ACM_NOTIFY 0x81U
 #define USB_EP_ACM_IN     0x82U
 #define USB_EP_ACM_OUT    0x02U
@@ -28,6 +29,8 @@
 #define USB_EP_FB_OUT     0x03U
 #define USB_EP_MSC_IN  USB_EP_FB_IN
 #define USB_EP_MSC_OUT USB_EP_FB_OUT
+#define USB_EP_HID_IN  0x84U
+#define USB_HID_MPS    16U
 /* Mass storage class requests, answered from msc.c's state */
 extern volatile unsigned usb_msc_max_lun;   /* GET_MAX_LUN answer */
 extern volatile unsigned usb_msc_reset;     /* set by Bulk-Only Mass Storage Reset */
@@ -36,7 +39,7 @@ extern volatile unsigned usb_msc_reset;     /* set by Bulk-Only Mass Storage Res
 #define USB_PHYS(addr) ((((unsigned)(addr) & 0x0fU) << 1) | (((unsigned)(addr) & 0x80U) ? 1U : 0U))
 
 #define USB_EP0_MPS 64U
-#define USB_CONFIG_LEN 98U
+#define USB_CONFIG_LEN 123U        /* + HID: interface 9, HID descriptor 9, endpoint 7 */
 
 /* what the control endpoint does with a setup packet */
 #define CH9_STALL 0
@@ -75,3 +78,8 @@ unsigned usb_desc_qualifier(uint8_t *out);
 unsigned usb_desc_string(uint8_t *out, unsigned i, const char *serial);
 /* max packet size of a USB endpoint address at this speed */
 unsigned usb_ep_mps(unsigned addr, int full_speed);
+/* interrupt endpoints: the bInterval the descriptor gives (0: a bulk endpoint) */
+unsigned usb_ep_interval(unsigned addr, int full_speed);
+/* the endpoints the configuration uses, for the DWC3 driver's SET_CONFIGURATION */
+unsigned usb_desc_eps(const uint8_t **list);
+unsigned usb_hid_report_desc(uint8_t *out);

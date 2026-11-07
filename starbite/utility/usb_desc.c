@@ -27,9 +27,62 @@ static void b2(struct w *w, unsigned v) { b1(w, v & 0xffU); b1(w, (v >> 8) & 0xf
 
 unsigned usb_ep_mps(unsigned addr, int fs)
 {
-    if (addr == USB_EP_ACM_NOTIFY)
+    if (addr == USB_EP_ACM_NOTIFY || addr == USB_EP_HID_IN)
         return 16U;
     return fs ? 64U : 512U;
+}
+
+unsigned usb_ep_interval(unsigned addr, int fs)
+{
+    if (addr == USB_EP_ACM_NOTIFY)
+        return fs ? 32U : 9U;                         /* 32 ms either way */
+    if (addr == USB_EP_HID_IN)
+        return fs ? 1U : 4U;                          /* 1 ms either way (HS: 2^(4-1) microframes) */
+    return 0U;
+}
+
+unsigned usb_desc_eps(const uint8_t **list)
+{
+    static const uint8_t eps[6] = { USB_EP_ACM_NOTIFY, USB_EP_ACM_IN, USB_EP_ACM_OUT,
+                                    USB_EP_MSC_IN, USB_EP_MSC_OUT, USB_EP_HID_IN };
+    *list = eps;
+    return 6;
+}
+
+/* Keyboard (report 1: modifiers, reserved, 6 keys; LEDs out), mouse (report 2: 3 buttons, X, Y, wheel),
+ * consumer control (report 3: one 16-bit usage: volume, play, ...). HID 1.11, HUT 1.12. */
+unsigned usb_hid_report_desc(uint8_t *out)
+{
+    static const uint8_t d[] = {
+        0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x85, 0x01,             /* keyboard */
+        0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x95, 0x01, 0x75, 0x08, 0x81, 0x01,
+        0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91, 0x02,
+        0x95, 0x01, 0x75, 0x03, 0x91, 0x01,
+        0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00,
+        0xc0,
+        0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x02, 0x09, 0x01, 0xa1, 0x00,   /* mouse */
+        0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02,
+        0x95, 0x01, 0x75, 0x05, 0x81, 0x01,
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x03,
+        0x81, 0x06,
+        0xc0, 0xc0,
+        0x05, 0x0c, 0x09, 0x01, 0xa1, 0x01, 0x85, 0x03,             /* consumer control */
+        0x15, 0x00, 0x26, 0xff, 0x03, 0x19, 0x00, 0x2a, 0xff, 0x03, 0x75, 0x10, 0x95, 0x01, 0x81, 0x00,
+        0xc0,
+    };
+    for (unsigned i = 0; i < sizeof(d); ++i)
+        out[i] = d[i];
+    return sizeof(d);
+}
+
+static void hid_desc(uint8_t *o)
+{
+    uint8_t tmp[256];
+    unsigned n = usb_hid_report_desc(tmp);
+    const uint8_t h[9] = { 9, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, (uint8_t)n, (uint8_t)(n >> 8) };
+    for (unsigned i = 0; i < 9; ++i)
+        o[i] = h[i];
 }
 
 unsigned usb_desc_device(uint8_t *out)
@@ -84,6 +137,12 @@ unsigned usb_desc_config(uint8_t *out, int fs, uint8_t type)
     b1(&w, 0x08); b1(&w, 0x06); b1(&w, 0x50); b1(&w, 5);
     ep(&w, USB_EP_MSC_IN, 0x02, fs, 0);
     ep(&w, USB_EP_MSC_OUT, 0x02, fs, 0);
+    /* HID: keyboard + mouse + media keys, no boot protocol */
+    b1(&w, 9); b1(&w, DT_INTERFACE); b1(&w, USB_IF_HID); b1(&w, 0); b1(&w, 1);
+    b1(&w, 0x03); b1(&w, 0x00); b1(&w, 0x00); b1(&w, 6);
+    hid_desc(w.o + w.n);
+    w.n += 9;
+    ep(&w, USB_EP_HID_IN, 0x03, fs, usb_ep_interval(USB_EP_HID_IN, fs));
     return w.n;
 }
 
@@ -107,6 +166,8 @@ unsigned usb_desc_string(uint8_t *out, unsigned i, const char *serial)
         s = "Starbite shell";
     else if (i == 5)
         s = "Starbite drives";
+    else if (i == 6)
+        s = "Starbite keyboard and mouse";
     else
         return 0;
     unsigned n = 0;
@@ -197,6 +258,12 @@ void usb_ch9_setup(struct usb_dev_state *s, const uint8_t st[8], struct ch9_res 
                 n = usb_desc_qualifier(r->data);
             else if (dt == DT_STRING)
                 n = usb_desc_string(r->data, di, s->serial);
+            else if (rcpt == 1 && (index & 0xffU) == USB_IF_HID && dt == 0x22)
+                n = usb_hid_report_desc(r->data);         /* HID report descriptor */
+            else if (rcpt == 1 && (index & 0xffU) == USB_IF_HID && dt == 0x21) {
+                hid_desc(r->data);                        /* HID descriptor */
+                n = 9;
+            }
             if (!n)
                 break;                                   /* BOS (bcdUSB 2.00: none) and the rest */
             r->len = n;
@@ -250,6 +317,39 @@ void usb_ch9_setup(struct usb_dev_state *s, const uint8_t st[8], struct ch9_res 
             break;
         case 0x23:                                       /* SEND_BREAK */
             r->action = CH9_ACK;
+            break;
+        default:
+            break;
+        }
+    } else if ((type & 0x60U) == 0x20U && rcpt == 1 && (index & 0xffU) == USB_IF_HID) {
+        switch (req) {                                   /* HID class requests */
+        case 0x01:                                       /* GET_REPORT: an idle report */
+            if (type & 0x80U) {
+                for (unsigned i = 0; i < 9 && i < sizeof(r->data); ++i)
+                    r->data[i] = 0;
+                r->data[0] = (uint8_t)value;             /* report ID */
+                r->len = (value & 0xffU) == 1 ? 9 : (value & 0xffU) == 2 ? 5 : 3;
+                r->action = CH9_IN;
+            }
+            break;
+        case 0x02:                                       /* GET_IDLE */
+        case 0x03:                                       /* GET_PROTOCOL: report protocol */
+            if (type & 0x80U) {
+                r->data[0] = req == 0x03 ? 1 : 0;
+                r->len = 1;
+                r->action = CH9_IN;
+            }
+            break;
+        case 0x09:                                       /* SET_REPORT: the keyboard LEDs */
+            if (!(type & 0x80U) && length && length <= 8) {
+                r->len = length;
+                r->action = CH9_OUT;
+            }
+            break;
+        case 0x0a:                                       /* SET_IDLE */
+        case 0x0b:                                       /* SET_PROTOCOL */
+            if (!(type & 0x80U))
+                r->action = CH9_ACK;
             break;
         default:
             break;

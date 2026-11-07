@@ -107,7 +107,7 @@
 #define SETUP_BUF (USB_DMA_BASE + 0x1200UL)
 #define EP0_BUF   (USB_DMA_BASE + 0x1400UL)   /* 512 bytes */
 
-#define EPN 8U    /* physical endpoints used: 0..7 (ep0, 0x81, 0x02/0x82, 0x03/0x83) */
+#define EPN 10U   /* physical endpoints used: 0..9 (ep0, 0x81, 0x02/0x82, 0x03/0x83, 0x84: the Utility OS HID) */
 #define QN 16U
 
 #define E0_SETUP  0
@@ -300,8 +300,8 @@ static void e0_wait_status(void)
 
 static void configure(unsigned cfg)
 {
-    static const uint8_t list[5] = { USB_EP_ACM_NOTIFY, USB_EP_ACM_IN, USB_EP_ACM_OUT,
-                                     USB_EP_FB_IN, USB_EP_FB_OUT };
+    const uint8_t *list;
+    unsigned nlist = usb_desc_eps(&list);             /* the Utility OS: the descriptor file's endpoints */
     for (unsigned p = 2; p < EPN; ++p) {
         ep_end(p);
         d.ep[p].on = 0;
@@ -310,10 +310,12 @@ static void configure(unsigned cfg)
     if (cfg == 1) {
         (void)depcmd(0, CMD_STARTCFG | CMD_PARAM(2), 0, 0, 0);
         uint32_t ena = 3;
-        for (unsigned i = 0; i < 5; ++i) {
+        for (unsigned i = 0; i < nlist; ++i) {
             unsigned a = list[i], p = USB_PHYS(a);
-            unsigned intr = a == USB_EP_ACM_NOTIFY;
-            if (ep_cfg(p, intr ? 3U : 2U, usb_ep_mps(a, d.st.full_speed), CFG_ACTION_INIT, intr ? 9U : 0U) ||
+            unsigned intr = usb_ep_interval(a, d.st.full_speed);
+            if (p >= EPN)
+                continue;
+            if (ep_cfg(p, intr ? 3U : 2U, usb_ep_mps(a, d.st.full_speed), CFG_ACTION_INIT, intr) ||
                 depcmd(p, CMD_SETXFERRES, 1, 0, 0)) {
                 d.why = "endpoint configuration failed";
                 continue;

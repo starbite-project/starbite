@@ -146,6 +146,8 @@ struct ui_ev {
 };
 /* Next event; EV_NONE after timeout_ms (0: poll once). Keys and touch are polled every 4 ms. */
 void ui_poll(struct ui_ev *e, unsigned timeout_ms);
+/* Raw touch mode for trackpads (1 on, 0 off): every move is an EV_DRAG with its x, y; no swipes. */
+void ui_touch_raw(int on);
 /* Drop every held key and touch: the next press is a new one. */
 void ui_input_reset(void);
 /* Raw keys (sb_keys) for hold gestures. */

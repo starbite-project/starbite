@@ -20,6 +20,7 @@
 #include "msc.h"
 #include "fat.h"
 #include "ut.h"
+#include "hid.h"
 
 #define UT_VERSION "1 (UO1 + UO2)"
 
@@ -377,6 +378,7 @@ void ut_service(void)
             sh_banner = 0;
     }
     msc_service();
+    hid_service();
     sh_service();
     if (sh_pending_action && !sh_out_n && !usbd_busy(P_ACM_IN)) {
         sb_mdelay(50);
@@ -452,6 +454,7 @@ static void draw_home(void)
 }
 
 static void kv(struct page *p, const char *k, const char *v, uint32_t c) { page_kv(p, k, v, c); }
+static int row_pad = -1;
 
 static void usb_fill(struct page *p)
 {
@@ -488,6 +491,16 @@ static void usb_fill(struct page *p)
     kv(p, "SCSI", u.b, C_L2);
     page_hdr(p, "Shell");
     kv(p, "Serial port", sh_banner ? "open" : "closed", sh_banner ? C_GREEN : C_L2);
+    page_hdr(p, "Keyboard and mouse");
+    ub_init(&u);
+    ub_dec(&u, hid_stats.reports);
+    ub_s(&u, " reports, ");
+    ub_dec(&u, hid_stats.keys);
+    ub_s(&u, " keys, ");
+    ub_dec(&u, hid_stats.clicks);
+    ub_s(&u, " clicks");
+    kv(p, "HID", u.b, C_L2);
+    row_pad = page_button(p, "Trackpad and keys", C_STAR);
     page_note(p, "On a Mac: the STARBITE disk appears in Finder; the shell is /dev/cu.usbmodem*. "
                  "Eject the disk before leaving: the RAM disk is gone when the phone restarts.", C_L3);
 }
@@ -536,11 +549,27 @@ static void page_screen(const char *title, int tile)
         if (e.type == EV_BACK || e.type == EV_SWIPE_R || e.type == EV_HOME ||
             (e.type == EV_TAP && ui_header_back_hit(e.x, e.y)))
             break;
+        int pick = -1;
         if (!page_scroll_event(&p, &e)) {
-            if (e.type == EV_UP)
+            if (tile == 0 && row_pad >= 0 && (e.type == EV_UP || e.type == EV_DOWN)) {
+                page_set_focus(&p, row_pad);
+                page_keep_visible(&p, row_pad);
+                ui_present();
+            } else if (e.type == EV_UP) {
                 page_set_scroll(&p, p.scroll - 400);
-            else if (e.type == EV_DOWN)
+            } else if (e.type == EV_DOWN) {
                 page_set_scroll(&p, p.scroll + 400);
+            } else if (e.type == EV_SELECT && tile == 0 && p.focus == row_pad) {
+                pick = row_pad;
+            } else if (e.type == EV_TAP && tile == 0) {
+                pick = page_hit(&p, e.x, e.y, 0);
+            }
+        }
+        if (tile == 0 && pick >= 0 && pick == row_pad) {
+            ut_pad();
+            ui_fill(0, 0, UI_W, UI_H, C_BG);
+            ui_header_draw(title, "Utility", "", 0);
+            next = 0;
         }
         page_fling_step(&p);
     }
