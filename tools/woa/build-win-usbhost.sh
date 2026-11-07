@@ -40,7 +40,9 @@ M3=${M3:-0}                                       # 1: Star2LteSsdtDxe also runs
 M3PARK=${M3PARK:-0}                               # 1: Star2LteSsdtDxe parks M3 cores 1..3 for the OS (B2)
 M3RUN=${M3RUN:-0}                                 # 1: each M3 runs a test in the UEFI context (B3a)
 M3BOOT=${M3BOOT:-0}                               # 1: M3 core 1 becomes the boot CPU at ExitBootServices (B3,
-                                                  #    with A55 1..3); 2: the same, M3 1 alone ("solo")
+                                                  #    with A55 1..3); 2: the same, M3 1 alone ("solo");
+                                                  #    3: "big", with CORES8: M3 1 boots, the parked M3s are its
+                                                  #    secondaries, no A55 (CORES8=1: 3 M3s, =2: all 4)
 CORES8=${CORES8:-0}                               # 1: M3 cores 1..3 parked for Windows + MADT/_MAT at EBS (7 CPUs);
                                                   #    2: also M3 core 0 (8 CPUs); docs/WIN11-24H2-A55.md
 PPTT_OEM=${PPTT_OEM:-0}                           # 1: the platform ACPI file with the OEM-shaped PPTT (tools/woa/pptt-gen.py)
@@ -57,7 +59,12 @@ out=build/woa
 SUFFIX=${SUFFIX:-}
 [ -z "${EXTRA_AML:-}" ] || [ -n "$SUFFIX" ] || { echo "EXTRA_AML needs a SUFFIX so the plain images are kept" >&2; exit 1; }
 [ "$PPTT" = 0 ] || [ -n "$SUFFIX" ] || { echo "PPTT=1 needs a SUFFIX so the plain images are kept" >&2; exit 1; }
-[ $((M3 + M3PARK + M3RUN + (M3BOOT > 0) + (CORES8 > 0))) -le 1 ] || { echo "one M3 experiment per image (M3, M3PARK, M3RUN, M3BOOT, CORES8)" >&2; exit 1; }
+if [ "$M3BOOT" = 3 ]; then
+    # big cores (docs/WIN11-24H2-A55.md): the B3 hand-off to M3 1 plus Cores8's parked M3s, nothing else
+    [ "$CORES8" -ge 1 ] && [ $((M3 + M3PARK + M3RUN)) = 0 ] || { echo "M3BOOT=3 needs CORES8=1|2 and no other M3 experiment" >&2; exit 1; }
+else
+    [ $((M3 + M3PARK + M3RUN + (M3BOOT > 0) + (CORES8 > 0))) -le 1 ] || { echo "one M3 experiment per image (M3, M3PARK, M3RUN, M3BOOT, CORES8)" >&2; exit 1; }
+fi
 [ $((PPTT_STATIC + PPTT_OEM)) -le 1 ] || { echo "PPTT_STATIC and PPTT_OEM exclude each other" >&2; exit 1; }
 [ "$PPTT_STATIC" = 0 ] || [ -n "$SUFFIX" ] || { echo "PPTT_STATIC=1 needs a SUFFIX so the plain images are kept" >&2; exit 1; }
 for f in "$rel" "$W/Star2LtePkg-src38.fd" "$W/pmic-rtc.ffs" "$W/src38.fd" "$W/starbite-uefi-src38.bin"; do
@@ -149,7 +156,8 @@ flags_ok() {   # flags_ok FFS
     if grep -aq "=M3 boot v3 armed" "$1"; then has=1; else has=0; fi
     [ "$has" = "$((M3BOOT > 0))" ] || { echo "$1: M3 boot present=$has, wanted $M3BOOT" >&2; exit 1; }
     if [ "$M3BOOT" = 2 ]; then grep -aq "solo: M3 1 only" "$1" || { echo "$1: not the solo build" >&2; exit 1; }; fi
-    if grep -aq "=C8 v1: M3 cores" "$1"; then has=1; else has=0; fi
+    if [ "$M3BOOT" = 3 ]; then grep -aq "big: M3 1 + parked M3s" "$1" && grep -aq "=C8 v1 big" "$1" || { echo "$1: not the big-core build" >&2; exit 1; }; fi
+    if grep -aq "=C8 v1" "$1"; then has=1; else has=0; fi
     [ "$has" = "$((CORES8 > 0))" ] || { echo "$1: cores8 present=$has, wanted $CORES8" >&2; exit 1; }
 }
 if [ -n "$SOLO" ]; then

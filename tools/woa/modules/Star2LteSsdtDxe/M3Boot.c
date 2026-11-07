@@ -61,6 +61,13 @@
 // to split "Windows on an M3" from "an M3 boot CPU with A55 secondaries" if 1 fails.
 //
 #define BOOT_SOLO       (STARBITE_M3_BOOT == 2)
+//
+// =3 ("big", docs/WIN11-24H2-A55.md "Windows on the 4 M3s"): M3 1 boots, the M3s Cores8.c parked at dispatch (2, 3,
+// and 0 with STARBITE_CORES8=2) are its secondaries through their parking-protocol mailboxes, all four A55s are
+// disabled (a mixed A55 + M3 Windows runs LSE atomics on the M3s), every efficiency class 0 (one kind of core).
+// The DSDT's _MAT copies are made equal to the new MADT at the commit point (Cores8SyncMat).
+//
+#define BOOT_BIG        (STARBITE_M3_BOOT == 3)
 #define BOOT_UID        5u                  // M3 core 1 (the release MADT: A55 0..3, M3 4..7)
 #define BOOT_MPIDR      0x101u
 #define BOOT_TARGET     0x101u              // PSCI target of M3 core 1
@@ -68,6 +75,19 @@
 #define MADT_MAX        1024u
 #define GICC_TYPE       0x0B
 #define GICC_LEN        80u
+
+#if BOOT_BIG
+UINT64
+Cores8Mailbox (
+  IN UINTN  Core
+  );
+
+UINT32
+Cores8SyncMat (
+  IN CONST UINT8  *Madt,
+  IN UINT32       MadtLen
+  );
+#endif
 
 typedef struct {
   UINT64    X[12];                                   // 0x000 x19..x30
@@ -553,7 +573,7 @@ PrepareMadt (
     }
   }
 
-  if ((Boot == NULL) || (Mailboxes != 3)) {
+  if ((Boot == NULL) || ((Mailboxes != 3) && !BOOT_BIG)) {
     SbLog ("=M3 boot: MADT not as expected (M3 1 entry %a, A55 1..3 mailboxes %d)", Boot ? "found" : "MISSING", Mailboxes);
     return FALSE;
   }
@@ -576,7 +596,7 @@ PrepareMadt (
         Wr32 (Out + 12, Rd32 (Out + 12) | 1);       // enabled
         Wr32 (Out + 16, 0);                         // the boot CPU needs no mailbox
         Wr64 (Out + 24, 0);
-        Out[76] = 1;                                // efficiency class: M3 above A55
+        Out[76] = BOOT_BIG ? 0 : 1;                 // efficiency class: M3 above A55 (big: all M3, all 0)
       } else if (Pass == 1) {
         if ((E[0] != GICC_TYPE) || (E[1] != GICC_LEN) || (E == Boot)) {
           continue;
@@ -584,11 +604,23 @@ PrepareMadt (
 
         CopyMem (Out, E, GICC_LEN);
         Uid = Rd32 (E + 8);
+ #if BOOT_BIG
+        Out[76] = 0;
+        Wr32 (Out + 12, Rd32 (Out + 12) & ~1u);     // A55 0..3 and unparked M3s: disabled
+        if ((Uid >= 4) && (Uid <= 7) && (Rd32 (E + 4) == Uid) && (Rd64 (E + 68) == 0x100u + (Uid - 4)) &&
+            (Cores8Mailbox (Uid - 4) != 0))
+        {
+          Wr32 (Out + 12, Rd32 (Out + 12) | 1);     // a parked M3: enabled, parking protocol v1, its mailbox
+          Wr32 (Out + 16, 1);
+          Wr64 (Out + 24, Cores8Mailbox (Uid - 4));
+        }
+ #else
         if ((Uid >= 1) && (Uid <= 3) && !BOOT_SOLO) {
           Out[76] = 0;                              // A55 1..3: as P left them, class 0
         } else {
           Wr32 (Out + 12, Rd32 (Out + 12) & ~1u);   // A55 0, M3 0/2/3: disabled
         }
+ #endif
       } else {
         if ((E[0] == GICC_TYPE) && (E[1] == GICC_LEN)) {
           continue;
@@ -768,6 +800,22 @@ OnExitBootServices (
     CopyMem (mMadt, mNewMadt, mMadtLen);
     __asm__ __volatile__ ("mrs %0, mpidr_el1" : "=r" (Mpidr));
     SbLog ("=M3 boot: now on mpidr=%lx (el %ld), MADT committed (UID %d first); winload continues here", Mpidr, mCtx->DEl, BOOT_UID);
+ #if BOOT_BIG
+    {
+      UINT32  Off;
+      UINT8   *E;
+
+      for (Off = 44; Off + 2 <= mMadtLen && mMadt[Off + 1] != 0; Off += mMadt[Off + 1]) {
+        E = mMadt + Off;
+        if ((E[0] == GICC_TYPE) && (E[1] == GICC_LEN)) {
+          SbLog ("=M3 boot big MADT uid=%d if=%d flags=%x mpidr=%lx park v%d %lx eff=%d", Rd32 (E + 8), Rd32 (E + 4),
+            Rd32 (E + 12), Rd64 (E + 68), Rd32 (E + 16), Rd64 (E + 24), E[76]);
+        }
+      }
+
+      SbLog ("=M3 boot big: %d DSDT _MAT copies synced to the new MADT", Cores8SyncMat (mMadt, mMadtLen));
+    }
+ #endif
     return;
   }
 
@@ -879,7 +927,7 @@ M3BootArm (
   Status = gBS->CreateEvent (EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY, OnExitBootServices, NULL, &mEbsEvent);
   SbLog (
     "=M3 boot v3 armed (%a): entry %lx (vectors %lx..%lx in this image), context %lx, ExitBootServices event %r",
-    BOOT_SOLO ? "solo: M3 1 only" : "M3 1 + A55 1..3",
+    BOOT_SOLO ? "solo: M3 1 only" : (BOOT_BIG ? "big: M3 1 + parked M3s, no A55" : "M3 1 + A55 1..3"),
     (UINT64)(UINTN)M3BootEntry,
     (UINT64)(UINTN)M3BootVectors,
     (UINT64)(UINTN)M3BootEnd,

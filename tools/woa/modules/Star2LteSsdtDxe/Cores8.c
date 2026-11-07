@@ -47,6 +47,16 @@
 #ifndef STARBITE_CORES8
 #define STARBITE_CORES8 0
 #endif
+#ifndef STARBITE_M3_BOOT
+#define STARBITE_M3_BOOT 0
+#endif
+
+//
+// Big-core mode (STARBITE_M3_BOOT=3, docs/WIN11-24H2-A55.md "Windows on the 4 M3s"): M3Boot.c parks M3 core 1 and
+// hands Windows' boot CPU to it at ExitBootServices; Cores8 parks only the other M3s (2, 3, and 0 with
+// STARBITE_CORES8=2) and leaves the MADT to M3Boot, which reads the mailboxes through Cores8Mailbox().
+//
+#define C8_BIG  (STARBITE_M3_BOOT == 3)
 
 #if STARBITE_CORES8
 #include "Cores8ParkStub.h"
@@ -70,7 +80,9 @@ STATIC CONST struct {
 };
 
 STATIC UINT64     mMailbox[4];            // per M3 core: its mailbox page, 0 = not parked
+#if !C8_BIG
 STATIC EFI_EVENT  mC8Ebs;
+#endif
 STATIC EFI_GUID   mC8Acpi20 = EFI_ACPI_20_TABLE_GUID;
 
 STATIC
@@ -281,7 +293,9 @@ C8FindTable (
 STATIC UINT32 C8Rd32 (CONST UINT8 *p) { UINT32 v; CopyMem (&v, p, 4); return v; }
 STATIC UINT64 C8Rd64 (CONST UINT8 *p) { UINT64 v; CopyMem (&v, p, 8); return v; }
 STATIC VOID   C8Wr32 (UINT8 *p, UINT32 v) { CopyMem (p, &v, 4); }
+#if !C8_BIG
 STATIC VOID   C8Wr64 (UINT8 *p, UINT64 v) { CopyMem (p, &v, 8); }
+#endif
 
 STATIC
 VOID
@@ -294,9 +308,78 @@ C8Checksum (
 }
 
 //
+// The DSDT's processor devices CPU0..CPU7 carry a copy of their GICC entry in _MAT (Buffer (0x50) { GICC }, woa's
+// DSDT: located by the first 12 bytes, type 0x0B, length 0x50, interface = UID). Make every copy equal to the GICC
+// with that UID in Madt (the table about to be or just published), then fix the DSDT checksum. Returns the number
+// of copies written.
+//
+UINT32
+Cores8SyncMat (
+  IN CONST UINT8  *Madt,
+  IN UINT32       MadtLen
+  )
+{
+  EFI_ACPI_DESCRIPTION_HEADER  *Fadt;
+  EFI_ACPI_DESCRIPTION_HEADER  *Dsdt;
+  UINT8                        *D;
+  CONST UINT8                  *E;
+  UINT32                       Off;
+  UINT32                       Uid;
+  UINT32                       Pos;
+  UINT32                       Mats;
+  UINT8                        Key[12];
+
+  Fadt = C8FindTable (SIGNATURE_32 ('F', 'A', 'C', 'P'));
+  Dsdt = NULL;
+  if (Fadt != NULL) {
+    if ((Fadt->Length >= 148) && (C8Rd64 ((UINT8 *)Fadt + 140) != 0)) {
+      Dsdt = (EFI_ACPI_DESCRIPTION_HEADER *)(UINTN)C8Rd64 ((UINT8 *)Fadt + 140);
+    } else if (Fadt->Length >= 44) {
+      Dsdt = (EFI_ACPI_DESCRIPTION_HEADER *)(UINTN)C8Rd32 ((UINT8 *)Fadt + 40);
+    }
+  }
+
+  if ((Dsdt == NULL) || (Dsdt->Signature != SIGNATURE_32 ('D', 'S', 'D', 'T'))) {
+    return 0;
+  }
+
+  D    = (UINT8 *)Dsdt;
+  Mats = 0;
+  for (Off = 44; Off + 2 <= MadtLen && Madt[Off + 1] != 0; Off += Madt[Off + 1]) {
+    E = Madt + Off;
+    if ((E[0] != C8_GICC_TYPE) || (E[1] != C8_GICC_LEN)) {
+      continue;
+    }
+
+    Uid    = C8Rd32 (E + 8);
+    Key[0] = C8_GICC_TYPE;
+    Key[1] = C8_GICC_LEN;
+    Key[2] = 0;
+    Key[3] = 0;
+    C8Wr32 (Key + 4, Uid);
+    C8Wr32 (Key + 8, Uid);
+    if ((Uid >= 8) || (C8Rd32 (E + 4) != Uid)) {
+      continue;
+    }
+
+    for (Pos = sizeof (EFI_ACPI_DESCRIPTION_HEADER); Pos + C8_GICC_LEN <= Dsdt->Length; Pos++) {
+      if (CompareMem (D + Pos, Key, sizeof (Key)) == 0) {
+        CopyMem (D + Pos, E, C8_GICC_LEN);
+        Mats++;
+        break;
+      }
+    }
+  }
+
+  C8Checksum (Dsdt);
+  return Mats;
+}
+
+//
 // GICC (ACPI 6.0+, 80 bytes): +4 CPU interface number, +8 UID, +12 flags, +16 parking protocol version,
 // +24 parked address, +68 MPIDR, +76 efficiency class.
 //
+#if !C8_BIG
 STATIC
 VOID
 EFIAPI
@@ -436,20 +519,38 @@ C8OnExitBootServices (
 
   SbLog ("=C8 EBS: %d M3 entries enabled (A55 eff 0, M3 eff 1), %d _MAT copies updated", Enabled, Mats);
 }
+#endif
+
+UINT64
+Cores8Mailbox (
+  IN UINTN  Core
+  )
+{
+  return (Core < 4) ? mMailbox[Core] : 0;
+}
 
 VOID
 Cores8Arm (
   VOID
   )
 {
+ #if C8_BIG
+  UINTN       Order[3] = { 2, 3, 0 };       // M3 core 1 is M3Boot's (the boot CPU)
+ #else
   UINTN       Order[4] = { 1, 2, 3, 0 };
+ #endif
   UINTN       Count;
   UINTN       Index;
   UINTN       Parked;
   EFI_STATUS  Status;
 
+ #if C8_BIG
+  Count = (STARBITE_CORES8 >= 2) ? 3 : 2;
+  SbLog ("=C8 v1 big: M3 cores %a into parking stubs for M3Boot's MADT", (Count == 3) ? "2,3,0" : "2,3");
+ #else
   Count = (STARBITE_CORES8 >= 2) ? 4 : 3;
   SbLog ("=C8 v1: M3 cores %a into parking stubs, MADT at ExitBootServices", (Count == 4) ? "1,2,3,0" : "1,2,3");
+ #endif
   Parked = 0;
   for (Index = 0; Index < Count; Index++) {
     if (!C8ParkOne (Order[Index], (BOOLEAN)(Index == 0))) {
@@ -462,13 +563,18 @@ Cores8Arm (
   }
 
   SbLog ("=C8 parked %d of %d M3 cores", Parked, Count);
-  if (Parked == 0) {
+  if (C8_BIG || (Parked == 0)) {
     return;
   }
 
+#if !C8_BIG
   Status = gBS->CreateEvent (EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY, C8OnExitBootServices, NULL, &mC8Ebs);
   if (EFI_ERROR (Status)) {
     SbLog ("=C8 no ExitBootServices event (%r): MADT stays 4 CPUs", Status);
   }
+#else
+  Status = EFI_SUCCESS;
+  (VOID)Status;
+#endif
 }
 #endif
