@@ -92,17 +92,34 @@ static void field_at(float ti, float tj, float out[3])
 #define FQ 4
 #define FGW (WW / FQ + 1)
 #define FGH (WH / FQ + 1)
+static void field_grid_rows(void *ctx, int b0, int b1, int core);
+static void field_tex_rows(void *ctx, int j0, int j1, int core);
+static void gw_field_stars(void);
 void gw_field(void)
 {
-    uint32_t *F = TEX(P_FIELD);
     float *G = (float *)P_SOFT;                         /* the grid: FGW x FGH rgb (bake temp) */
-    for (int b = 0; b < FGH; b++) {
+    g7_par(field_grid_rows, G, 0, FGH, 4);
+    g7_par(field_tex_rows, G, 0, WH, 16);
+    gw_field_stars();
+}
+/* the field's grid rows and texture rows, on every core (g7_par) */
+static void field_grid_rows(void *ctx, int b0, int b1, int core)
+{
+    float *G = (float *)ctx;
+    (void)core;
+    for (int b = b0; b < b1; b++) {
         if (!(b & 31))
             g7_poll();
         for (int a = 0; a < FGW; a++)
             field_at((float)(a * FQ), (float)(b * FQ), G + 3 * (b * FGW + a));
     }
-    for (int j = 0; j < WH; j++) {
+}
+static void field_tex_rows(void *ctx, int j0, int j1, int core)
+{
+    const float *G = (const float *)ctx;
+    uint32_t *F = TEX(P_FIELD);
+    (void)core;
+    for (int j = j0; j < j1; j++) {
         if (!(j & 63))
             g7_poll();
         int b = j / FQ;
@@ -125,6 +142,9 @@ void gw_field(void)
             (void)vfy;
         }
     }
+}
+static void gw_field_stars(void)
+{
     /* the tiny stars */
     nstar = 0;
     for (int cy = 0; cy * 46 < 2960; cy++)
@@ -165,18 +185,31 @@ int gw_wall_same(const struct g7_wall *a, const struct g7_wall *b)
 
 #define RT_STEP 4.f                     /* radial table: 1/4 px */
 #define RT_N 14000                      /* 0 .. 3500 px */
+_Static_assert(0x98000UL + 12UL * WW <= 0xC0000UL, "gw_wall per-core row overflow");
 
-void gw_wall(const struct g7_wall *w)
+/* the wallpaper's rows on every core (g7_par); the radial table first, on every core too */
+struct gwjob { const struct g7_wall *w; float *rt, *cx1, *cx2, *cp, R, si, amb, ssw, cor, cog, cob; };
+static void gw_rt_rows(void *ctx, int k0, int k1, int core)
 {
-    float *rt = (float *)P_TAB;                         /* RT_N x {lit, halo, m} */
-    float *cx1 = rt + 3 * RT_N, *cx2 = cx1 + WW, *cp = cx2 + WW;    /* columns */
-    float R = g_max(w->sr, 1.f), si = w->si, amb = w->amb;
-    for (int k = 0; k < RT_N; k++) {
+    const struct gwjob *J = (const struct gwjob *)ctx;
+    const struct g7_wall *w = J->w;
+    float *rt = J->rt, R = J->R, si = J->si, amb = J->amb;
+    (void)core;
+    for (int k = k0; k < k1; k++) {
         float r = (float)k / RT_STEP;
         rt[3 * k] = 1.f + g_exp(-r / 700.f) * si * 1.2f;
         rt[3 * k + 1] = g_exp(-r / (R * 1.5f)) * .85f + g_exp(-r / (R * 6.f)) * .36f + g_exp(-r / (R * 22.f)) * .2f;
         rt[3 * k + 2] = (1.f - g_smooth(w->rr - w->rf, w->rr, r)) * amb;
     }
+}
+static void gw_wall_rows(void *ctx, int j0, int j1, int core);
+void gw_wall(const struct g7_wall *w)
+{
+    float *rt = (float *)P_TAB;                         /* RT_N x {lit, halo, m} */
+    float *cx1 = rt + 3 * RT_N, *cx2 = cx1 + WW, *cp = cx2 + WW;    /* columns */
+    float R = g_max(w->sr, 1.f), si = w->si, amb = w->amb;
+    struct gwjob J = { w, rt, 0, 0, 0, R, si, amb, 0, 0, 0, 0 };
+    g7_par(gw_rt_rows, &J, 0, RT_N, 1000);
     for (int i = 0; i < WW; i++) {
         float dx = g_abs((i + .5f) * 2.f - w->sx);
         cx1[i] = g_exp(-dx / (R * 1.25f));
@@ -186,10 +219,27 @@ void gw_wall(const struct g7_wall *w)
     const float scr = .40f, scg = .64f, scb = 1.f;
     float ssw = g_smooth(0.f, 1.f, w->sw * 1.6f + .15f);
     float cor = g_mix(scr, 1.f, w->sw) * 1.05f, cog = g_mix(scg, 1.f, w->sw) * 1.05f, cob = g_mix(scb, 1.f, w->sw) * 1.05f;
-    float *row = g_row_tmp;                             /* 3 x WW */
+    J.cx1 = cx1;
+    J.cx2 = cx2;
+    J.cp = cp;
+    J.ssw = ssw;
+    J.cor = cor;
+    J.cog = cog;
+    J.cob = cob;
+    g7_par(gw_wall_rows, &J, 0, WH, 8);
+}
+static void gw_wall_rows(void *ctx, int j0, int j1, int core)
+{
+    const struct gwjob *J = (const struct gwjob *)ctx;
+    const struct g7_wall *w = J->w;
+    const float *rt = J->rt, *cx1 = J->cx1, *cx2 = J->cx2, *cp = J->cp;
+    float R = J->R, si = J->si, amb = J->amb, ssw = J->ssw, cor = J->cor, cog = J->cog, cob = J->cob;
+    const float scr = .40f, scg = .64f, scb = 1.f;
+    float *row = (float *)G7_CS(0x98000UL, g_row_tmp);  /* 3 x WW (per core) */
     uint32_t *T = TEX(P_TMP);
     const uint32_t *F = TEX(P_FIELD);
-    for (int j = 0; j < WH; j++) {
+    (void)core;
+    for (int j = j0; j < j1; j++) {
         float py = (j + .5f) * 2.f, dy = py - w->sy, ady = g_abs(dy);
         g7_poll();
         float ry1 = g_exp(-ady / (R * 1.25f)), ry2 = g_exp(-ady / (R * .035f));
@@ -314,14 +364,29 @@ static inline uint32_t q8(float r, float g, float b)
  * same order as a tap-by-tap loop, but on float rows (planar, clamp-to-edge padding) so the inner
  * loops are straight multiply-adds. */
 #define BPAD 16
-static float BL[3][2 * WW + 2 * BPAD], BACC[3][WW];
+static float BL_0[3][2 * WW + 2 * BPAD], BACC_0[3][WW];
+#define BL ((float (*)[2 * WW + 2 * BPAD])G7_CS(0xB0000UL, BL_0))     /* per core (glass_smp.c) */
+#define BACC ((float (*)[WW])G7_CS(0xB5000UL, BACC_0))
+_Static_assert(0xB0000UL + 12UL * (2 * WW + 2 * BPAD) <= 0xB5000UL && 0xB5000UL + 12UL * WW <= 0xC0000UL, "blur scratch");
+struct bjob { const uint32_t *src; int sw, sh; uint32_t *dst; int dw, dh, horiz, ratio; struct kern k; };
+static void blur_rows(void *ctx, int j0, int j1, int core);
 static void blur_pass(const uint32_t *src, int sw, int sh, uint32_t *dst, int dw, int dh, int horiz, float d)
 {
-    int ratio = sw / dw;
-    struct kern k;
+    struct bjob J = { src, sw, sh, dst, dw, dh, horiz, sw / dw, { 0, { 0 }, { 0 } } };
     /* centre along the axis for dst index 0: (0 + .5) * ratio - .5 */
-    mk_kern(&k, .5f * (float)ratio - .5f, d);
-    for (int j = 0; j < dh; j++) {
+    mk_kern(&J.k, .5f * (float)J.ratio - .5f, d);
+    g7_par(blur_rows, &J, 0, dh, 8);
+}
+/* the pass's rows on every core (g7_par) */
+static void blur_rows(void *ctx, int j0, int j1, int core)
+{
+    const struct bjob *J = (const struct bjob *)ctx;
+    const uint32_t *src = J->src;
+    uint32_t *dst = J->dst;
+    int sw = J->sw, sh = J->sh, dw = J->dw, horiz = J->horiz, ratio = J->ratio;
+    const struct kern k = J->k;
+    (void)core;
+    for (int j = j0; j < j1; j++) {
         if (!(j & 15))
             g7_poll();
         for (int c = 0; c < 3; c++)
@@ -402,6 +467,7 @@ static void blur_pass(const uint32_t *src, int sw, int sh, uint32_t *dst, int dw
     }
 }
 
+static void frost_rows(void *ctx, int j0, int j1, int core);
 void gw_blur(void)
 {
     gw_planes();                    /* the canvas-grid frost planes are this blur's again */
@@ -416,9 +482,15 @@ void gw_blur(void)
     blur_pass(b1, BW, BH, b2, BW, BH, 0, 1.6f);
     blur_pass(b2, BW, BH, b1, BW, BH, 1, 1.6f);
     blur_pass(b1, BW, BH, b2, BW, BH, 0, 1.6f);
-    /* frost(): A * .36 + the four diagonal taps at +-12 panel px = +-3 texels of A, * .16 */
+    g7_par(frost_rows, a2, 0, AH, 16);
+}
+/* frost(): A * .36 + the four diagonal taps at +-12 panel px = +-3 texels of A, * .16 (rows on every core) */
+static void frost_rows(void *ctx, int j0, int j1, int core)
+{
+    const uint32_t *a2 = (const uint32_t *)ctx;
     uint32_t *a5 = TEX(P_A5);
-    for (int j = 0; j < AH; j++) {
+    (void)core;
+    for (int j = j0; j < j1; j++) {
         int jm = j - 3 < 0 ? 0 : j - 3, jp = j + 3 >= AH ? AH - 1 : j + 3;
         const uint32_t *rc = a2 + j * AW, *rm = a2 + jm * AW, *rp = a2 + jp * AW;
         const float32x4_t k36 = vdupq_n_f32(.36f / 255.f), k16 = vdupq_n_f32(.16f / 255.f), z = vdupq_n_f32(0.f),
@@ -454,7 +526,9 @@ void gw_blur(void)
 
 /* ---- BASE: the wallpaper texture bilinear at panel pixel centres (texel x / 2 - .25) ---- */
 
-static float WV[3][WW + 2];
+static float WV_0[3][WW + 2];
+#define WV ((float (*)[WW + 2])G7_CS(0x80000UL, WV_0))   /* per core (glass_smp.c) */
+_Static_assert(3UL * (WW + 2) * 4UL <= 0x8000UL, "WV scratch");
 /* the texture's two rows for panel row y blended (fy), texels t0 - 1 .. t1 + 1 clamped, into WV */
 static void wall_vrow(const uint32_t *T, int y, int t0, int t1)
 {
@@ -647,7 +721,8 @@ void gw_sample_b(float px, float py, float out[3]) { bil8(TEX(P_B), BW, BH, px *
 
 /* rows at any spacing (half resolution: dpx 2): the two texel rows blended once (vrow), then one
  * lerp per sample */
-static float vrow[3][AW + 4];
+static float vrow_0[3][AW + 4];
+#define vrow ((float (*)[AW + 4])G7_CS(0x88000UL, vrow_0))
 static void row_at(const uint32_t *T, int tw, int th, int pp, int ten, float py, int n, float px0, float dpx,
                    float *rgb)
 {
@@ -689,7 +764,8 @@ static void row_at(const uint32_t *T, int tw, int th, int pp, int ten, float py,
 /* the half-resolution grid (panel x = 2g + 1): the texel rows blended 4 texels a NEON step, then the
  * grid's fixed weights, 8 samples a step. A (pp 4): g = 2m at .75 between texels m - 1, m and
  * g = 2m + 1 at .25 between m, m + 1. B (pp 8): g = 4m + j at .625, .875 (m - 1, m), .125, .375 (m, m + 1). */
-static float hrow[3][AW + 16];
+static float hrow_0[3][AW + 16];
+#define hrow ((float (*)[AW + 16])G7_CS(0x8C000UL, hrow_0))
 static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float py, int n, int g0, float *rgb, int sh)
 {
     float cy = py / (float)pp - .5f;
@@ -748,7 +824,9 @@ static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float p
 _Static_assert(0x840000UL + 4UL * CW * CH <= G7_BASE - G7_SHARP, "canvas frost planes overflow G7_SHARP");
 static uint8_t PROW[2][CH];         /* the plane's row is built (gw_blur clears it) */
 static void row_half(const uint32_t *T, int tw, int th, int pp, int ten, float py, int n, int g0, float *rgb, int sh);
-static float PRT[3 * CW];
+static float PRT_0[3 * CW];
+#define PRT ((float *)G7_CS(0x90000UL, PRT_0))
+_Static_assert(0x90000UL + 12UL * CW <= 0xC0000UL, "glass_wall per-core scratch overflow");
 static void plane_build(int p, int j)
 {
     if (p)
@@ -764,7 +842,7 @@ static void plane_build(int p, int j)
         uint32x4_t b = vcvtq_u32_f32(vfmaq_f32(h, vminq_f32(vmaxq_f32(c.val[2], z), o), k));
         vst1q_u32(d + i, vorrq_u32(vorrq_u32(vshlq_n_u32(r, 20), vshlq_n_u32(g, 10)), b));
     }
-    PROW[p][j] = 1;
+    __atomic_store_n(&PROW[p][j], (uint8_t)1, __ATOMIC_RELEASE);   /* after the row (other cores) */
 }
 void gw_planes(void)
 {
@@ -774,8 +852,8 @@ void gw_planes(void)
 /* n samples of the canvas-grid plane p's row j from column g0, unpacked to rgb triplets */
 static void plane_row(int p, int j, int g0, int n, float *rgb)
 {
-    if (!PROW[p][j])
-        plane_build(p, j);
+    if (!__atomic_load_n(&PROW[p][j], __ATOMIC_ACQUIRE))
+        plane_build(p, j);         /* two cores may build one row at once: the same bytes */
     const uint32_t *s = (p ? BCP : A5C) + (unsigned)j * CW + g0;
     const uint32x4_t m = vdupq_n_u32(1023U);
     const float32x4_t k = vdupq_n_f32(1.f / 1023.f);
