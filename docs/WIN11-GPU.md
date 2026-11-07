@@ -17,7 +17,7 @@ checked by us; **[unverified]** = our reading of a document or source, not yet t
 | 1 | This document | done, adversarially reviewed (§13) |
 | 2a | `sbthermal.sys`: temperature watchdog (TMU), the gate every GPU driver must pass | **done: T1 passed on the phone 2026-11-07** (§10.1); stays installed (Start 2) |
 | 2b | `sbdisplay.sys`: display-only driver for DECON (one mode, presents, tear-free flips at TE, brightness) | written (`starbite/win/sbdisplay`), host tests pass, builds and is test-signed; ACPI table `starbite/win/acpi` compiles with iasl; needs the SSDT in the firmware (T2) before T3 |
-| 3 | `sbmali.sys`: KMDF bring-up (power, MMU, a job) ported from StarbiteMali | written (`starbite/win/sbmali`): portable core + KMDF driver + INF/catalog, builds clean at /W4, host test against a table-walking fake Mali (32 checks); phone test T5 waits for T2 and the PnP install route |
+| 3 | `sbmali.sys`: KMDF bring-up (power, MMU, a job) ported from StarbiteMali | **done: T5 passed on the phone 2026-11-07**: the first Mali jobs under Windows, 20/20 in both page-table formats, 0 faults (§10.1) |
 | 4 | `sbwddm.sys` + Mesa 26.2 UMD: Direct3D 11 → DWM on the Mali | designed (§6), research |
 
 The plan in one paragraph: Windows already runs on the S9 with Microsoft's Basic Display driver copying
@@ -578,6 +578,24 @@ end 47.8 °C, GPU 42.6 °C. sbmali did not run: its own guard refused it (GuardB
 shutdown, so the earlier waits for the watchdog, cut short by restarts, counted as crashes. Fixed: the guard is
 armed only right before the first GPU access, and a D0Exit callback (also at shutdown) stops the thread,
 which puts the GPU and BUCK6 back and clears the guard.
+
+**T5 passed (2026-11-07, sbmali 8877ddec + sbthermal 280e851e, A55 at 1950 MHz; `build/win/results-r4/SYSTEM-r`):
+the Mali-G72 ran its first jobs under Windows.** Step 7, ThermalGate 0 after 41 s (83 tries; the watchdog loaded
+late and sat at its start level Stop for its first 2 s), Probe 0, PmuStatus 0x10000f, GpuId 0x62210010 (r0p1),
+ShaderPresent 0x5771777, MmuFeatures 0x2830, AsPresent 0xff, JsPresent 7, Coherency 0, PLL 260 MHz, BUCK6
+0x33 → 0x68 → restored (BuckRestore 0). Legacy and AArch64: 20 runs each, WRITE_VALUE and 64 × 64 fragment
+clear 20/20, 0 faults, 0 timeouts, every job done within the 20 µs polling step. GPU 44.7 °C at most; clean
+restart, no bugcheck, GuardBoots 0. Both table formats work for these jobs; the exynos-linux failures were
+with real workloads, so the comparison continues with a real draw (T8).
+
+### 10.2 Next phone tests
+
+| # | Test | What it proves | Risk |
+|---|---|---|---|
+| T7 | 2x scaled desktop (sbdisplay, copy mode) | smoother desktop (4x fewer pixels for WARP/DWM); Desktop Duplication on our display-only driver | a new display driver may black-screen (§4.3) |
+| T8 | sbmali v2: the GPU clock and a real draw. ACPM DVFS domain 4 to 572 MHz (BUCK6 rewritten after it), XNU's Mesa-built triangle (tiler + vertex + fragment, `xnu/src/starlte_gpu_tri.h`, proven on this phone under iOS) into a private buffer checked pixel by pixel, 200 runs per table format with clear + triangle, temperatures throughout | the clock path, the tiler, shaders, and the legacy-versus-AArch64 decision on a real workload | sustained GPU load for ~1 min at 572 MHz: the watchdog throttles (338 MHz at 70 °C, 260 at 80, stop at 90); otherwise as T5 |
+| T9 | Mesa on Windows without WDDM (wddm-mali-g52's M3/M4 shape): Mesa 26.2 + their patches cross-built for ARM64, Panfrost reaching sbmali through a Panfrost-style IOCTL interface (CREATE_BO, SUBMIT, WAIT_BO, ...), a D3D11 test program using Mesa's d3d10umd as a software driver | D3D11 rendered by the Mali under Windows | a user-mode program has to be started (the user taps it; services running cmd.exe crash on this Windows) |
+| 4a | sbwddm skeleton (WDDM 1.3, display half = sbdisplay incl. 2x scaling) | Windows accepts our full driver | black desktop possible (wddm-mali-g52 run 6) |
 
 ## 11. Stages and done-when
 
