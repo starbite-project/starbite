@@ -8,11 +8,11 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.3"
+#define SBOS_VERSION "0.3.1"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
-enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_APP0 = 16 };
+enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_APP0 = 16 };
 #define KT_MAX 64
 #define KT_RESERVE 24                /* entries apps cannot take: the kernel's tasks always get theirs */
 struct ktimer {
@@ -308,4 +308,12 @@ int64_t hw_heat_launch(unsigned w, void *cfg);    /* sb_smp_launch: never waits 
 void hw_heat_stop_all(void);
 unsigned hw_heat_running(void);
 int64_t hw_core_psci(unsigned w);   /* PSCI AFFINITY_INFO's raw answer for worker core w */
+/* the state slot (doc 6.2): 1 read both halves (STATE_HALF bytes each), 0 no slot; write: 1 written and read back */
+int hw_slot_read(uint8_t *h0, uint8_t *h1);
+int hw_slot_write(int half, const uint8_t *src, uint32_t n);
+/* settings that last across a restart (settings.c) */
+void settings_restore(void);
+void settings_changed(void);
+void settings_timer(unsigned id);
+int settings_persistent(void);
 void heatk_worker(unsigned w, void *arg);

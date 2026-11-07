@@ -73,6 +73,43 @@ uint32_t hw_a55_khz(void) { return (uint32_t)(sb_a55_hz() / 1000U); }
 uint32_t hw_m3_khz(void) { int off; uint64_t h = sb_m3_hz(&off); return off ? 0 : (uint32_t)(h / 1000U); }
 int hw_m3_on(void) { return sb_m3_on(); }
 void hw_screen(int on) { panel_screen(on); }
+
+/* the state slot on the host: a 1 MiB file named by SBOS_HOST_STATE (none without it, as on the phone today) */
+int hw_slot_read(uint8_t *h0, uint8_t *h1)
+{
+    const char *f = getenv("SBOS_HOST_STATE");
+    if (!f)
+        return 0;
+    memset(h0, 0, STATE_HALF);
+    memset(h1, 0, STATE_HALF);
+    FILE *fp = fopen(f, "rb");
+    if (fp) {
+        size_t a = fread(h0, 1, STATE_HALF, fp), b = fread(h1, 1, STATE_HALF, fp);
+        (void)a;
+        (void)b;
+        fclose(fp);
+    }
+    return 1;
+}
+
+int hw_slot_write(int half, const uint8_t *src, uint32_t n)
+{
+    const char *f = getenv("SBOS_HOST_STATE");
+    if (!f || half < 0 || half > 1 || n > STATE_HALF)
+        return 0;
+    FILE *fp = fopen(f, "r+b");
+    if (!fp) {
+        fp = fopen(f, "w+b");
+        if (!fp)
+            return 0;
+        static uint8_t zero[STATE_HALF];
+        fwrite(zero, 1, STATE_HALF, fp);
+        fwrite(zero, 1, STATE_HALF, fp);
+    }
+    int ok = fseek(fp, (long)half * (long)STATE_HALF, SEEK_SET) == 0 && fwrite(src, 1, n, fp) == n;
+    fclose(fp);
+    return ok;
+}
 void hw_app_map(uintptr_t slot, int on) { (void)slot; (void)on; }
 void hw_tls_clear(void) {}
 void hw_code_sync(uintptr_t a, uint64_t n) { (void)a; (void)n; }

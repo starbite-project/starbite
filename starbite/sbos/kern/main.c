@@ -34,6 +34,9 @@ static void dispatch_timer(unsigned owner, unsigned id)
     case KT_SOS:
         sos_timer(id);
         break;
+    case KT_STATE:
+        settings_timer(id);
+        break;
     case KT_SELFTEST:
         selftest_timer(id);
         break;
@@ -93,21 +96,34 @@ void sb_main(void)
 #ifndef SB_HOST
     sbos_spsel1();                          /* first: libsb's probe and crash vectors then use SP_EL1 */
 #endif
+    uint64_t t_entry = sb_ms();             /* the counter runs from power-on: S-Boot and the loader before this */
     if (!ui_init())
         sb_crash_show(ui_init_why(), 0);
+    uint64_t t_ui = sb_ms();
     sb_log("Starbite OS " SBOS_VERSION);
     hw_wdt_feed();
     kt_reset();
     K.screen_on = 1;
     battery_init();                         /* one gauge read so the lock screen has the battery */
+    uint64_t t_bat = sb_ms();
     ui_kinit();
     ui_kdraw();                             /* the first frame */
     {
+        /* where the time to the first frame went: before Starbite OS (S-Boot, the loader's POST and launch),
+         * then each of its own steps (docs/STARBITE-OS.md 7) */
         struct ub u;
         ub_init(&u);
         ub_s(&u, "sbos: first frame at ");
         ub_dec(&u, K.first_frame_ms);
-        ub_s(&u, " ms since power-on");
+        ub_s(&u, " ms since power-on: started at ");
+        ub_dec(&u, t_entry);
+        ub_s(&u, ", fonts and back buffer ");
+        ub_dec(&u, t_ui - t_entry);
+        ub_s(&u, ", battery ");
+        ub_dec(&u, t_bat - t_ui);
+        ub_s(&u, ", draw ");
+        ub_dec(&u, K.first_frame_ms > t_bat ? K.first_frame_ms - t_bat : 0);
+        ub_s(&u, " ms");
         sb_log(u.b);
     }
     boot_ms = sb_ms();
@@ -119,7 +135,16 @@ void sb_main(void)
     power_init();
     heater_init();
     sos_init();
+    settings_restore();                     /* after power_init: the screen-off time it restores re-arms the timer */
     apps_load_builtin();
+    {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "sbos: ready (interrupts, touch, apps) at ");
+        ub_dec(&u, sb_ms());
+        ub_s(&u, " ms");
+        sb_log(u.b);
+    }
     selftest_start();                       /* the self-test image only */
     kt_set(KT_HOUSE, 0, sb_ms(), 1000, 0);
     kt_set(KT_CLOCK, 0, sb_ms(), 1000, 0);

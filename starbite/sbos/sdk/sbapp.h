@@ -140,7 +140,8 @@ struct sbos_sysinfo {
 
 /* settings (SYS_SETTING_GET / SET): until a restart in 0.2 */
 enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S = 4, SET_GPU_HEAT = 5,
-       SET_BRIGHTNESS = 6 /* 0.3: 0 as the boot left it, 1 low, 2 medium, 3 normal, 4 high */ };
+       SET_BRIGHTNESS = 6 /* 0.3: 0 as the boot left it, 1 low, 2 medium, 3 normal, 4 high */,
+       SET_SAVED = 7 /* 0.3.1, read only: 1 settings are saved across a restart on this phone */ };
 
 /* sensor_read ids (0.3): temperatures in 0.1 C, -1000 unknown */
 enum { SENSOR_BATTERY_C10 = 1, SENSOR_SKIN_C10 = 2, SENSOR_SOC_C10 = 3, SENSOR_GPU_C10 = 4 };

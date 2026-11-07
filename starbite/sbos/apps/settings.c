@@ -74,7 +74,7 @@ static void show(void)
     } else {
         about();
     }
-    ui_textline("Settings last until a restart.", GREY);
+    ui_textline(setting_get(SET_SAVED) == 1 ? "Saved on this phone." : "Settings last until a restart (no save slot yet).", GREY);
     ui_end();
 }
 

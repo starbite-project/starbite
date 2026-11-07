@@ -429,6 +429,50 @@ static void gpu_confirm_done(int ok)
         app_event_send(s, EV_APP_SHOW, 0, 0);
 }
 
+/* SYS_SETTING_SET for the app in front: 0 done */
+static int64_t setting_set_k(uint64_t id, uint64_t v)
+{
+    uint64_t arg[2] = { id, v };
+    switch (arg[0]) {
+    case SET_PANEL_SAVE:
+        panel_save_set(arg[1] != 0);
+        sb_log(arg[1] ? "settings: panel refresh only on change: on" : "settings: panel refresh only on change: off");
+        return 0;
+    case SET_PANEL_OFF:
+        panel_off_on = arg[1] != 0;
+        sb_log(arg[1] ? "settings: panel off with the screen: on" : "settings: panel off with the screen: off");
+        return 0;
+    case SET_GPU_HEAT:
+        if (!arg[1]) {
+            gpu_heat_allowed = 0;
+            sb_log("settings: GPU in High: off");
+            return 0;
+        }
+        kui_confirm("Let High use the GPU?",
+                    "High also runs the graphics processor: more heat, more battery.",
+                    "Its voltage is set to 950 mV (as iOS on this phone) and put back when it stops.",
+                    "First test: only with someone watching the phone.",
+                    "Hold to allow", gpu_confirm_done);
+        return 0;
+    case SET_BRIGHTNESS:
+        if (arg[1] > 4)
+            return SBOS_EINVAL;
+        return panel_brightness((int)arg[1]) ? 0 : SBOS_EAGAIN;
+    case SET_SOS_LED:
+        sos_led_on = arg[1] != 0;
+        sb_log(arg[1] ? "settings: LED in SOS: on" : "settings: LED in SOS: off");
+        return 0;
+    case SET_SCREEN_OFF_S:
+        if (arg[1] < 10 || arg[1] > 600)
+            return SBOS_EINVAL;
+        K.screen_off_s = (uint32_t)arg[1];
+        power_input();
+        return 0;
+    default:
+        return SBOS_EINVAL;
+    }
+}
+
 int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
 {
     struct kapp *p = &apps[a];
@@ -653,49 +697,17 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_GPU_HEAT: return gpu_heat_allowed;
         case SET_SCREEN_OFF_S: return (int64_t)K.screen_off_s;
         case SET_BRIGHTNESS: return panel_bright_level;
+        case SET_SAVED: return settings_persistent();
         default: return SBOS_EINVAL;
         }
-    case SYS_SETTING_SET:
+    case SYS_SETTING_SET: {
         if (!front)
             return SBOS_EPERM;
-        switch (arg[0]) {
-        case SET_PANEL_SAVE:
-            panel_save_set(arg[1] != 0);
-            sb_log(arg[1] ? "settings: panel refresh only on change: on" : "settings: panel refresh only on change: off");
-            return 0;
-        case SET_PANEL_OFF:
-            panel_off_on = arg[1] != 0;
-            sb_log(arg[1] ? "settings: panel off with the screen: on" : "settings: panel off with the screen: off");
-            return 0;
-        case SET_GPU_HEAT:
-            if (!arg[1]) {
-                gpu_heat_allowed = 0;
-                sb_log("settings: GPU in High: off");
-                return 0;
-            }
-            kui_confirm("Let High use the GPU?",
-                        "High also runs the graphics processor: more heat, more battery.",
-                        "Its voltage is set to 950 mV (as iOS on this phone) and put back when it stops.",
-                        "First test: only with someone watching the phone.",
-                        "Hold to allow", gpu_confirm_done);
-            return 0;
-        case SET_BRIGHTNESS:
-            if (arg[1] > 4)
-                return SBOS_EINVAL;
-            return panel_brightness((int)arg[1]) ? 0 : SBOS_EAGAIN;
-        case SET_SOS_LED:
-            sos_led_on = arg[1] != 0;
-            sb_log(arg[1] ? "settings: LED in SOS: on" : "settings: LED in SOS: off");
-            return 0;
-        case SET_SCREEN_OFF_S:
-            if (arg[1] < 10 || arg[1] > 600)
-                return SBOS_EINVAL;
-            K.screen_off_s = (uint32_t)arg[1];
-            power_input();
-            return 0;
-        default:
-            return SBOS_EINVAL;
-        }
+        int64_t r = setting_set_k(arg[0], arg[1]);
+        if (r == 0 && arg[0] != SET_GPU_HEAT)
+            settings_changed();             /* saved in 3 s where there is a state slot (the GPU never is) */
+        return r;
+    }
     case SYS_FILE_READ: {
         if (!(p->perms & SBOS_P_FILES))
             return SBOS_EPERM;

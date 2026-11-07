@@ -338,6 +338,19 @@ damage; it is not a signature.
 - State writes use force-unit-access or end with SYNCHRONIZE CACHE (4.4).
 - The first phone test of these writes is a dry run (`sb_fence_dry_run`) after a store backup.
 
+### 6.4 Settings across a restart (0.3.1: the kernel side)
+
+`kern/settings.c` keeps the record `sbos.settings` (version 1: the screen-off time, refresh only on change, the
+panel off with the screen, the LED in the alarm, the brightness) in the state slot of 6.2. A change is saved
+3 s after the last one, into the half that does not hold the newest valid copy (a damaged write leaves the
+older copy); the start restores it after `power_init`. Never saved: the GPU in High and the heater's first-run
+confirmation (asked again every start). The slot is behind `hw_slot_read` / `hw_slot_write`: the host preview
+keeps it in a file (`SBOS_HOST_STATE`, tested by `starbite/host/sbos-settings-test.sh`: save, restore, a damaged
+newest half, no slot); **on the phone there is no slot yet**: steps 1 to 4 of 6.3 (the `sbos-state` entry, the
+fence's range check, the volatile writer, UFS with FUA and a cache flush) come first, and the kernel does not
+bring UFS up today. Until then the phone logs `settings: no state slot yet` and Settings says the settings last
+until a restart.
+
 ### 6.3 Save and power off: the implementation plan (v0.3)
 
 The order, each step reviewed and host-tested before the next, the phone only with a store backup:
@@ -363,7 +376,15 @@ The order, each step reviewed and host-tested before the next, the phone only wi
 Order: libsb's start, `ui_init` (fonts, the 17 MB back buffer cleared), the lock screen drawn and presented,
 *then* the GIC and the timer test, touch, the gauge, the built-in apps. The time zone is the home zone
 (Helsinki) until the state slot exists. The kernel logs `sbos: first frame at N ms` (counted from power-on
-by the counter, so it includes S-Boot and the loader). The image is about 5 MiB (4.3 MiB of it fonts and
+by the counter, so it includes S-Boot and the loader); from 0.3.1 the same line splits it: when Starbite OS
+started, then fonts and back buffer, the battery read and the first draw; `sbos: ready ... at N ms` follows
+once interrupts, touch and the apps are up.
+
+The 0.3 self test on the phone (T11) had its first frame at 12508 ms after power-on. Most of that is before
+Starbite OS: the loader's **full POST took 7514 ms** in the same log (`STARBITE: POST full 7514ms`), on top of
+S-Boot. The loader's quick POST takes about 0.3 s (docs/STARBITE-HEALTH.md 2.1: a loader setting, Bixby at boot
+→ STARTUP SETTINGS → POST AT BOOT, or `sbstore2.py settings ... --post quick`); that one setting would bring the
+first frame to about 5 s. It is the user's loader setting, not Starbite OS's to change. The image is about 5 MiB (4.3 MiB of it fonts and
 icons) for the loader to read.
 
 ## 8. Heater
@@ -739,6 +760,11 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.7 Version 0.3.1 (2026-11-07)
+
+- T11 passed on the phone with 0.3 (14.5). The boot timing line (7) and the settings record (6.4, host only:
+  no slot on the phone yet). Settings shows "Saved on this phone" only where a slot exists.
+
 ### 12.4 Version 0.2 (2026-11-07)
 
 - **Heater run log**: every 10 s while heating `heater: N s bat B skin S soc C C, cores K, A55/M3 MHz, mV mA %`,
@@ -905,6 +931,10 @@ forced restart). Cause and fixes: 8.6 and 12.5.
   `a loop turn took`. Never touched: the LED, the heater, the alarm, the brightness and panel settings, calls,
   messages. A touch or key stops it (the phone then runs normally and returns to the menu after 10 minutes
   without input). Undo: put the normal `starbite-os-0.3.img` back.
+- **T11 result (2026-11-07, 0.3):** passed: `selftest: passed: 24 screens, apps ok 8, dead 0, too tall 0,
+  problems 0, slowest draw 133 ms, slowest loop turn 133 ms, 22 s`; first frame 12508 ms (the loader's full
+  POST 7514 ms of it, 7); it restarted to the menu. The slowest draws: home 133 ms, Battery 100 ms (the ring),
+  the screen light 86 ms, the power menu 81 ms.
 - **T12 (the user present, the look):** the normal image. Home, the tile lines, the transitions, every app's
   screen; Settings > Display > Brightness Low, then Normal (the first AOR command from Starbite OS: the screen
   goes darker, then back; a restart resets the panel anyway). Then T9 / T10 of 14.4 on 0.3 (the heater paths
