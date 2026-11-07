@@ -140,6 +140,9 @@ int sb_probe32(uint64_t addr, uint32_t *v);
         sb_fault.count == _c;                                                         \
     })
 void sb_crash_show(const char *why, const uint64_t *regs);   /* never returns */
+/* Called once at the start of sb_crash_show, interrupts masked: an image puts hardware it drives into a
+ * safe state (wifitest: the radio's PERST# and WLAN_REG_ON low). Plain register writes only. */
+extern void (*sb_crash_hook)(void);
 
 /* ---- log ring (log.c) -------------------------------------------------------------------------
  * In RAM for this session, every line also appended to the pmsg ring (TWRP shows it as

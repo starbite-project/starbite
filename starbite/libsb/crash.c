@@ -105,11 +105,18 @@ static void line_hex(struct ub *u, const char *k, uint64_t v)
     ub_hexn(u, v, 16);
 }
 
+void (*sb_crash_hook)(void);
+
 void sb_crash_show(const char *why, const uint64_t *regs)
 {
     volatile uint32_t *fb = (volatile uint32_t *)SB_FB;
     struct ub u;
     __asm__ volatile("msr daifset, #15");
+    if (sb_crash_hook) {                    /* once: an image's hardware made safe (e.g. a radio unpowered) */
+        void (*h)(void) = sb_crash_hook;
+        sb_crash_hook = 0;
+        h();
+    }
     *(volatile uint32_t *)0x16030070UL = 0x1281U;    /* DECON free-running: reach the panel */
     for (unsigned i = 0; i < SB_FB_W * SB_FB_H; ++i)
         fb[i] = C_BG;
