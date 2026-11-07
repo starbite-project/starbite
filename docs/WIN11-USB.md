@@ -4,9 +4,10 @@ Started 2026-11-07. Goal: USB keyboards, mice, sticks and hubs work in Windows 1
 (23H2, 22631.7584, our UEFI = our SEC/PEI + the woa release DXE volume + our added modules).
 Today Windows has no USB at all (`docs/STARBITE-MASTER-PLAN.md` 3.6).
 
-**Status (2026-11-07):** design written and reviewed, firmware module and shared code built and
-host-tested, the test images are src38 + one module (checked). **Nothing has run on the phone
-yet.** The first phone test is section 9.
+**Status (2026-11-07):** **T1 passed on the phone** (v3, image f4432dde…): the DWC3 runs as a
+USB host under Windows' inbox xHCI driver ("USB xHCI Compliant Host Controller" + "USB Root Hub
+(USB 3.0)", no problem codes), touch and restart unchanged. Tests with devices plugged in (T2-T5)
+need the user, an OTG adapter and devices. Section 9.1 has the measured values.
 
 ## 1. The idea in one paragraph
 
@@ -471,6 +472,30 @@ A failure shows as `=USB FAIL <step>: <why> (no USB blob enabled)`, and the SSDT
 **Undo:** put `starbite-uefi-src38.bin` back as the Windows UEFI. The module writes no variables,
 files or storage. The MCU keeps its auto-VBUS setting until its next reset (TWRP's shutdown) or the
 next OS that sets it (section 3.4).
+
+### 9.1 Results
+
+**T1 v2 (2026-11-07, image 7cfacbbd…): inconclusive.** Windows booted, but neither `PNP0D10` nor
+the GPU track's plain `SBGPU` appeared in Windows' Enum; the pmsg lines were overwritten by Windows'
+UFS driver. Led to v3: tables installed during dispatch (section 4.1) and the zone-0 log (4.2).
+
+**T1 v3 (2026-11-07, `win11-usbh0`, image f4432dde…, the Mac's cable plugged at boot): passed.**
+Windows: `Enum\ACPI\PNP0D10\0` service USBXHCI "USB xHCI Compliant Host Controller",
+`Enum\USB\ROOT_HUB30\...` USBHUB3 "USB Root Hub (USB 3.0)", both ConfigFlags 0;
+`Enum\ACPI\STRB0072\0` present (the GPU track's, no driver yet); touch fine; Start → Restart
+worked (offline SYSTEM clean). The zone-0 log (read at the menu, `build/win/results-usbh0-v3/zone0.bin`
+of the main checkout; 1040 bytes and nothing else in zone 0 after the Windows session):
+
+| Item | Value | Meaning |
+|---|---|---|
+| found (loader's state) | utmi 0x30, hsp 0x10003300, tune 0xD16F3433, link 0x53FF0 | the loader's device-mode PHY, as expected |
+| PHY after | utmi 0x0C, hsp 0x10000300, tune 0x712F3637, line SE0 | host column; fields outside the tune mask kept |
+| GSNPSID | **0x5533310A = DWC_usb3 3.10a** | GUCTL1 FORCE_20_CLK applies (≥ 2.90a); no broken-port-PED quirk (> 3.00a) |
+| GCTL / GUCTL / GUCTL1 / GSBUSCFG0 / GFLADJ | 0x30C11404 / 0x0500C010 / 0x0400018A / 0x22220009 / 0xA0 | as designed (PRTCAPDIR 1) |
+| xHCI | CAPLENGTH 0x20, HCIVERSION 1.10, 2 ports, AC64 1, USBSTS halted | **USB 2.0 = port 1, USB 3 = port 2** (for H2's port objects) |
+| MAX77705 | HW 0x13, FW 0x32; BC 0x81 (VBUSDet), CC_STATUS0 0x71 (CCStat 1: sink, the Mac) | read fine |
+| MUIC | CONTROL1 read back 0x09 (routed); opcode 0x54 data 0x00 answered "54 00"; 0 I2C errors | |
+| SSDT | UsbDxe ran first: `SBUSBXHC` installed "gated, at dispatch", `SBGPU` "at dispatch", 2 of 2 | |
 
 ## 10. Licences and credits
 
