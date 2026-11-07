@@ -1,0 +1,42 @@
+## @file
+#  Star2LteSsdtDxe: installs every Starbite SSDT blob (FREEFORM FFS files 53534454-5342-5445-<id>,
+#  made by tools/woa/ssdt-ffs.py) at ReadyToBoot (docs/WIN11-USB.md section 4.1). Added to the
+#  release DXE volume with tools/woa/dxe-replace.py --add; built by patch 0024 under
+#  -D STAR2LTE_SSDT_DXE.
+#
+#  Copyright (c) 2026, Starbite. SPDX-License-Identifier: GPL-2.0-only
+##
+
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = Star2LteSsdtDxe
+  FILE_GUID                      = 5dd14183-80d0-4d05-938e-f74bc42e4e6a
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = SsdtDxeEntry
+
+[Sources]
+  SsdtDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  MemoryAllocationLib
+  PrintLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Protocols]
+  gEfiAcpiTableProtocolGuid                     ## CONSUMES
+  gEfiFirmwareVolume2ProtocolGuid               ## CONSUMES
+
+[Guids]
+  gEfiEventReadyToBootGuid                      ## CONSUMES ## Event
+
+[Depex]
+  gEfiAcpiTableProtocolGuid

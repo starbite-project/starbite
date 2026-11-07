@@ -1,18 +1,18 @@
 /** @file
-  SSDT for the S9's USB host (docs/WIN11-USB.md section 4), installed by Star2LteUsbHostDxe only
-  after the controller is in host role and its xHCI answered.
+  Blob SBUSBXHC: the S9's DWC3 as a plain xHCI host (docs/WIN11-USB.md section 4, layout A).
+  Gated: Star2LteSsdtDxe installs it only when Star2LteUsbDxe enabled it (host role, layout A,
+  every controller check passed). Packed by tools/woa/ssdt-ffs.py --gated.
 
   \_SB.USB0: the xHCI inside the DWC3 at 0x10C00000 (xHCI at +0, DWC3 globals at +0xC100; the
-  whole 64 KiB window, as other DWC3 ACPI descriptions give it), GIC SPI 244
-  (INTREQ__USB30DRD_Interrupt_00, Samsung exynos9810.dtsi) = GSIV 276, level high. _HID PNP0D10
-  is the generic xHCI ID Windows' inbox usbxhci.sys binds to (the Raspberry Pi edk2 Xhci.asl
-  pattern). _CCA 0: not cache-coherent (Linux has no dma-coherent for this controller).
+  whole 64 KiB window), GIC SPI 244 (INTREQ__USB30DRD_Interrupt_00, Samsung exynos9810.dtsi) =
+  GSIV 276, level high. _HID PNP0D10: Windows 22631's usbxhci.inf matches ACPI\PNP0D10 (our
+  image's DriverDatabase). _CCA 0: not cache-coherent (Linux has no dma-coherent for it).
   No _S0W/_PRW (no wake), no root-hub port objects yet (stage H2).
 
   Copyright (c) 2026, Starbite. SPDX-License-Identifier: GPL-2.0-only
 **/
 
-DefinitionBlock ("UsbHostSsdt.aml", "SSDT", 2, "STRBTE", "STRBUSBH", 0x00000001)
+DefinitionBlock ("UsbXhc.aml", "SSDT", 2, "STRBTE", "SBUSBXHC", 0x00000001)
 {
     Scope (\_SB)
     {

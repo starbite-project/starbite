@@ -30,10 +30,15 @@ under a role-switch parent. Microsoft's ACPI guidance for SoC USB: the xHCI cont
 | Piece | Where | What | Runs |
 |---|---|---|---|
 | **s9usb** (shared) | `starbite/s9usb/` | Portable C, no OS: USB clocks + PMU isolation, the USB 2.0 PHY (device or host column), the DWC3 core init common to both roles, the MAX77705 bus (HSI2C 0x14360000) with the Type-C MCU's opcodes. Register access through a small platform table (`s9usb.h`) so UEFI, a KMDF driver and libsb can all use it | everywhere |
-| **Star2LteUsbHostDxe** | `tools/woa/modules/Star2LteUsbHostDxe/` (into the build by patch 0024) | UEFI DXE module added to the release DXE volume with `dxe-replace.py --add`. Maps the register blocks the firmware leaves unmapped, runs s9usb in host mode, checks the xHCI answers, routes D+/D- to the AP, sets the VBUS policy, logs everything, and installs the SSDT at ReadyToBoot **only if every check passed** | once per Windows boot, before Windows |
-| **SSDT `STRBUSBH`** | `tools/woa/modules/Star2LteUsbHostDxe/UsbHostSsdt.asl` | `\_SB.USB0`: `_HID "PNP0D10"`, MMIO 0x10C00000 + 64 KiB, GIC SPI 244 = GSIV 276 level-high, `_CCA 0` | read by Windows |
-| **Report script** | `tools/woa/winpe/usb-report.ps1` (+ `usb-report.cmd` for the Startup folder) | At logon: USB devices, driver bindings, the xHCI's resources and problem codes, the ACPI tables, written to `C:\Starbite\usb\` | Windows |
-| Later: **Star2LteUsbc** (KMDF) | stage H3 | Polls the MAX77705 MCU at runtime: D+/D- re-routing after each attach, VBUS when the MCU won't, later a UCM connector for role switching | Windows |
+| **Star2LteUsbDxe** | `tools/woa/modules/Star2LteUsbDxe/` | UEFI DXE module. Maps the register blocks the firmware leaves unmapped, reads the Type-C state, picks the boot role (host/device/auto), runs s9usb, checks the xHCI in host role, routes D+/D- to the AP, sets the VBUS policy, logs `=USB` lines, and **enables** the one gated USB blob of its layout once every check passed (section 4.1) | once per Windows boot |
+| **Star2LteSsdtDxe** (shared with the GPU track) | `tools/woa/modules/Star2LteSsdtDxe/` | Installs every Starbite SSDT blob in the firmware volume at ReadyToBoot (section 4.1), logs `=SSDT` lines | once per Windows boot |
+| **USB blobs** (gated) | `tools/woa/acpi/UsbXhc.asl` (`SBUSBXHC`), `UsbUrs.asl` (`SBUSBURS`), `UsbUfn.asl` (`SBUSBUFN`) | Layout A: `\_SB.USB0` `PNP0D10` (Windows' xHCI driver, no INF of ours). Layout B: `\_SB.URS0` `PNP0CA1` with host and function children. Layout C: `\_SB.UFN0` `INT3445` (function only) (section 5) | read by Windows |
+| **Report script** | `tools/woa/winpe/usb-report.ps1` (+ `usb-report.cmd` for the Startup folder) | At logon: USB devices, driver bindings, the controller's resources, problem codes and ACPI path, every ACPI device, written to `C:\Starbite\usb\` | Windows |
+| Next: **URS host INF** | stage H4 | INF-only package matching `URS\PNP0CA1&HOST`, including `usbxhci.inf` (section 5) | Windows |
+| Next: **Star2LteUsbc** (KMDF) | stage H3 | MAX77705 at runtime over its own HSI2C mapping: D+/D- re-routing after each attach, VBUS when the MCU won't, the PHY's role column, a UCM connector that tells URS the role | Windows |
+
+Both modules and a copy of `starbite/s9usb` go into the build by patch 0024 (generated, under
+`!ifdef`); `dxe-replace.py --add` puts the modules and the blobs into the release DXE volume.
 
 What s9usb replaces: `starbite/utility/usb_phy.c` + the core part of `usb_dwc3.c` +
 `max77705_muic.c` (all ours, GPL-2.0-only, proven on this phone in device mode) are the source
@@ -129,7 +134,7 @@ AP_DATAOUT0 (0x21..), the end marker at AP_DATAOUT32 (0x41), the answer in AP_DA
 | D+/D- | opcode 0x06 CONTROL1_WRITE, data 0x09 COM_USB, read back with 0x05 | the switches are open after any MCU reset (TWRP's shutdown resets it) |
 | VBUS | opcode **0x54** with 0x00 (auto-VBUS off) or 0x02 (on); answer logged | see below |
 
-**VBUS policy** (build-time, `STARBITE_USBH_VBUS`):
+**VBUS policy** (build-time, `STARBITE_USB_VBUS`; only ever offered in host role):
 
 | Value | Name | Effect | Used for |
 |---|---|---|---|
@@ -158,76 +163,141 @@ driver, which can poll and switch it off.
 
 ## 4. ACPI
 
-`UsbHostSsdt.asl`, compiled with the VM's iasl into `UsbHostSsdtAml.h` (by `gen-0024.py`) and
-installed with `EFI_ACPI_TABLE_PROTOCOL` (the release's AcpiTableDxe) **at ReadyToBoot, TPL
-CALLBACK - 1**. The timing matters: the release's `Star2LteGpioHandoffDxe` (touch and buttons,
+Nothing here edits the DSDT: every Starbite device comes in its own SSDT blob, installed by
+Star2LteSsdtDxe. The USB blobs:
+
+```
+SBUSBXHC (layout A)                         SBUSBURS (layout B)
+Scope (\_SB) Device (USB0)                  Scope (\_SB) Device (URS0)
+  _HID "PNP0D10", _UID 0, _CCA 0               _HID "PNP0CA1", _UID 0, _CCA 0
+  _CRS Memory32Fixed 0x10C00000 0x10000        _CRS Memory32Fixed 0x10C00000 0x10000
+       Interrupt Level High Excl 276           Device (USB0) _ADR 0   _CRS Interrupt ... 276   host
+                                               Device (UFN0) _ADR 1   _CRS Interrupt ... 276   function
+```
+
+`_CCA 0`: not cache-coherent (Linux has no dma-coherent for this controller). No `_S0W`/`_PRW`:
+no wake, so Windows keeps the controller in D0 while devices are attached. No root-hub port
+objects (`RHUB`, `_UPC`, `_PLD`) yet: the DXE logs the xHCI's port numbering, and stage H2 adds
+them (the USB 3 port marked not connectable).
+
+### 4.1 Star2LteSsdtDxe: the blob interface (shared by every track)
+
+**A blob** is one `.aml` (an SSDT exactly as iasl writes it), packed by
+`tools/woa/ssdt-ffs.py X.aml X.ffs` into one FFS file and added to the release DXE volume with
+`tools/woa/dxe-replace.py ... --add X.ffs`. Adding a device = adding its blob; a BOOT image
+without the blob is the kill switch.
+
+| Rule | Detail |
+|---|---|
+| Table | `DefinitionBlock ("", "SSDT", 2, "STRBTE", "<Table ID>", rev)`. OEM ID **STRBTE**; the **OEM Table ID is the blob's name** and must be unique (taken: `SBUSBXHC`, `SBUSBURS`, `SBGPU`). Self-contained: only `External`s of what the release DSDT has (`\_SB`) |
+| FFS file | type FREEFORM (0x02); name GUID **`53534454-5342-5445-<the 8 Table ID bytes>`** for a plain blob, **`53534454-5342-4754-<...>`** for a gated one (`ssdt-ffs.py [--gated] --guid X.aml` prints it); a RAW section with the table, a UI section `SSDT <id>` / `Gated SSDT <id>` |
+| Installed | at ReadyToBoot, **TPL_CALLBACK - 1**, through `EFI_ACPI_TABLE_PROTOCOL.InstallAcpiTable`, checksum recomputed; at most 32 blobs |
+| Skipped | not "SSDT"; Length < 36 or larger than the section; OEM ID not STRBTE; Table ID ≠ the GUID's last 8 bytes; a Table ID already installed |
+| Plain blob (`ssdt-ffs.py X.aml`) | installed unless **vetoed**: a driver that finds its hardware unusable installs a NULL protocol whose GUID is the blob's file GUID (`gBS->InstallProtocolInterface (&h, &BlobGuid, EFI_NATIVE_INTERFACE, NULL)`) before ReadyToBoot. A plain blob without a driver is always installed (fine for memory-only devices such as the GPU's) |
+| Gated blob (`ssdt-ffs.py --gated X.aml`) | installed only when **enabled**: its driver installs that NULL protocol after checking the hardware. No driver, or a failed check: not installed. Fails closed: use it for anything whose clocks or power a driver must turn on first |
+| Log | one line per blob in the pmsg ring (0xFED14000, patch 0003's format) and DEBUG: `=SSDT installed <id> (<len> bytes, rev <n>)`, `=SSDT skip <id>: <reason>`, `=SSDT done: <n> installed of <m> blobs`. Read from TWRP: `pmsg-ramoops-0`, `grep -a '=SSDT'` |
+
+**Why ReadyToBoot at TPL_CALLBACK - 1:** the release's `Star2LteGpioHandoffDxe` (touch, file
 98100003-...) checks at ReadyToBoot, TPL_CALLBACK, that the XSDT holds exactly its 4 expected
-tables (`GpioHandoffDxe.c`: `if(entries!=4)AUTH_FAIL(6)`) and publishes nothing otherwise. An
-SSDT installed at dispatch would cost Windows its touch screen. A lower TPL runs after
-every TPL_CALLBACK notification of the event group, so ours comes after the GPIO module's.
+tables (`GpioHandoffDxe.c`: `if(entries!=4)AUTH_FAIL(6)`) and publishes nothing otherwise. Any
+SSDT installed earlier (at dispatch) would cost Windows its touch screen. A lower TPL runs after
+every TPL_CALLBACK notification of the event group, so the blobs come after the GPIO module's own.
 
-```
-DefinitionBlock ("", "SSDT", 2, "STRBTE", "STRBUSBH", 1)
-  Scope (\_SB) Device (USB0)
-    _HID "PNP0D10", _UID 0, _CCA 0 (not cache-coherent, as Linux treats it: no dma-coherent)
-    _CRS: Memory32Fixed 0x10C00000 0x10000; Interrupt Level ActiveHigh Exclusive 276
-    _STA 0x0F
-```
+**USB's blobs are gated** (Star2LteUsbDxe enables one, after every check): layout A →
+`SBUSBXHC` in host role; layout B → `SBUSBURS`; layout C → `SBUSBUFN` in device role. Any failure,
+no USB module in the image, or a role the layout doesn't cover: nothing is enabled, and Windows
+sees no USB controller. Each image also carries only its layout's blob.
 
-No `_S0W`/`_PRW`: Windows can't wake the controller, so it keeps it in D0 while devices are
-attached. No root-hub port objects (`RHUB`, `_UPC`, `_PLD`) yet: guessing the port numbers wrong
-could hide the real port. The DXE logs the xHCI's port numbering, and stage H2 adds the objects
-(the USB 3 port marked not connectable).
+## 5. Role: one controller, host and device (with the Starbite Link, L1)
 
-## 5. Role: host vs. device (coordination with the Starbite Link, L1)
+The DWC3 and its PHY serve both this track (host) and the main track's device mode (L1). Facts
+from our image's SYSTEM hive (`DriverDatabase\DeviceIds`, Windows 22631) and Microsoft's "USB
+dual role driver stack architecture":
 
-The controller and PHY are shared with the main track's device mode. Until a runtime switch
-exists, **the role is chosen at boot, by the firmware image**:
+| ID | Inbox driver |
+|---|---|
+| `ACPI\PNP0D10` (and `ACPI\PNP0D15`) | usbxhci.inf |
+| `ACPI\PNP0CA1` | **urssynopsys.inf** (the USB Role Switch driver's Synopsys client) |
+| `URS\PNP0CA1&FUNCTION` | **ufxsynopsys.inf** (then GenericUsbFn and the usbfn class on top) |
+| `URS\PNP0CA1&HOST` | **none**: Microsoft notes "work in progress to make URS driver assign the XHCI compatible ID for the host device"; until then a driver package that Includes/Needs usbxhci.inf and matches this ID is required |
+| `ACPI\INT3445` | ufxsynopsys.inf (a standalone function controller, Intel's ID) |
 
-- `windows.uefi` today: no USB module. L1 can add its own ACPI device for device mode.
-- `windows-usbh.uefi` (this track's test images): host role, `\_SB.USB0` published.
+The URS driver names its children from the parent's hardware ID (`URS\<HID>&HOST`,
+`URS\<HID>&FUNCTION`), finds their ACPI nodes by `_ADR` (0 = host, 1 = function), and loads only
+one stack at a time. On a Type-C port it takes the role from a UCM connector driver (UcmCx);
+there is no ID pin.
 
-Proposal for the next step (main session's call): one module, `Star2LteUsbDxe`, does s9usb for
-both roles and publishes either `USB0` (host, `PNP0D10`) or L1's device node, picked at boot by
-the Type-C state: CCStat = sink with VBUS (a computer or charger) → device; anything else
-→ host. Later (H4) both become children of one Windows USB Role Switch parent (`_CID PNP0CA1`)
-with a UCM connector driver (H3's Star2LteUsbc) telling Windows which role to take, so
-plugging the Mac in at runtime switches Windows to the Starbite Link.
+**Design (proposed to the main session 2026-11-07):**
+
+1. **Firmware** (Star2LteUsbDxe, built): brings up PHY + DWC3 in the boot role.
+   `STARBITE_USB_ROLE` 0 host, 1 device, 2 **auto** = device when the MCU sees the phone as a sink
+   with VBUS present (the Mac's cable at boot), otherwise host. `STARBITE_USB_ACPI` 0 = layout A
+   (host only, works with inbox drivers today), 1 = layout B (URS, both roles).
+2. **URS host INF** (stage H4, needs `tools/win/`, now on master): INF-only, matches
+   `URS\PNP0CA1&HOST`, `Include=usbxhci.inf`, `Needs=` its install sections, signed with the
+   Starbite test certificate. The exact section names come from the phone's `usbxhci.inf`
+   (requested from the main session, read-only from TWRP).
+3. **Runtime role** (stage H3, KMDF `Star2LteUsbc`): a UCM connector client on the MAX77705
+   (CCStat → UcmConnectorTypeCAttach as UFP/DFP, so URS switches stacks), plus what no inbox
+   driver does: the PHY's host/device column (pull-downs, forced VBUS-valid, tuning), D+/D-
+   re-routing after each attach, and VBUS. L1 needs the D+/D- part in device mode too.
+4. **Until 3 exists, URS can't be told the role.** With no ID pin and no UCM connector, urssynopsys
+   picks its own initial role and programs the DWC3's role register itself; that need not be
+   the firmware's boot role, and the PHY column (only our code sets it) then mismatches: forced
+   VBUS-valid and no pull-downs under the host stack, or pull-downs under the function stack.
+   So `usb-urs-auto` is for an experiment (what role does URS choose with no detection?), built
+   with VBUS off, not a working configuration.
+5. **Layout C, a fallback for L1 without URS:** `\_SB.UFN0` with `_HID INT3445`, which
+   ufxsynopsys.inf matches inbox, the firmware in device role (`usb-ufn-device`). The role is
+   then really fixed for the boot (no URS to change it). INT3445 is the ID of Intel's DWC3 device
+   controllers; whether ufxsynopsys does anything Intel-specific under it is unverified (the
+   phone's ufxsynopsys.inf will tell). Host tests keep using layout A.
 
 ## 6. Build
 
 ```sh
-tools/woa/build-win-usbhost.sh            # both variants + the identity check
+tools/woa/build-win-usbhost.sh                          # the three USB images + all checks
+EXTRA_AML="other.aml ..." tools/woa/build-win-usbhost.sh # + other tracks' blobs in every image
 ```
 
-The test images are **today's Windows UEFI (src38) plus one file**. The script (Mac side, edk2
-in the lima VM `starbite`):
+Every image is **today's Windows UEFI (src38) plus added files only**. The script (Mac side,
+edk2 and iasl in the lima VM `starbite`):
 1. runs the s9usb host test and checks patch 0024 is up to date (`gen-0024.py --check`);
-2. re-makes src38 from src38's own pieces (its SEC/PEI FD `Star2LtePkg-src38.fd`, the release
+2. compiles `tools/woa/acpi/*.asl` with iasl and packs each with `ssdt-ffs.py` (plus
+   `EXTRA_AML`; the USB blobs gated), and checks their GUIDs equal the enable GUIDs compiled into UsbDxe.c;
+3. re-makes src38 from src38's own pieces (its SEC/PEI FD `Star2LtePkg-src38.fd`, the release
    DXE volume with the release RTC killed and `pmic-rtc.ffs` added) and requires it to equal
    `src38.fd` **byte for byte**;
-3. for VBUS policy 0 and 1: builds Star2LtePkg like src38 (patches 0001, 0002, 0005, 0018-0024,
-   `STAR2LTE_RAM_STAGE=3`, DEBUG) with `-D STAR2LTE_USB_HOST_DXE=TRUE -D STARBITE_USBH_VBUS=<n>`,
-   extracts only the USB module (`dxe-replace.py --extract`), adds it to step 2's recipe, and
-   checks with `dxe-diff.py` that the result is src38 with that one file added (SEC/PEI identical,
-   every other DXE file identical);
-4. writes `build/woa/starbite-uefi-usbh-vbus{0,1}.bin` (src38's bootshim + the FD) and sha256s.
+4. per image: builds Star2LtePkg like src38 (patches 0001, 0002, 0005, 0018-0024,
+   `STAR2LTE_RAM_STAGE=3`, DEBUG) with `-D STAR2LTE_USB_DXE=TRUE -D STAR2LTE_SSDT_DXE=TRUE` and
+   the image's `STARBITE_USB_ROLE/ACPI/VBUS`; extracts the two modules, checks the policy marker
+   string (`usb-policy role=r acpi=a vbus=v`) in the USB module, adds the modules and the blob(s)
+   to step 3's recipe, and checks with `dxe-diff.py` that the result is src38 plus exactly those
+   files (SEC/PEI identical, every other DXE file identical);
+5. writes `build/woa/starbite-uefi-<image>.bin` (src38's bootshim + the FD) and sha256s.
+
+| Image | Role | ACPI | VBUS | For |
+|---|---|---|---|---|
+| `usbh-vbus0` | host | A (`SBUSBXHC`) | off | T1 |
+| `usbh-vbus1` | host | A (`SBUSBXHC`) | MCU | T2-T5 |
+| `usb-urs-auto` | auto | B (`SBUSBURS`) | off | URS experiment (section 5, item 4) |
+| `usb-ufn-device` | device | C (`SBUSBUFN`) | off | L1 without URS (section 5, item 5) |
 
 A fresh edk2 build is not byte-reproducible (`__DATE__`, `__TIME__` and BUILD_EPOCH move strings
-and constants, which changes the SEC/PEI layout), which is why only the new module comes from it.
+and constants, which changes the SEC/PEI layout), which is why only the new modules come from it.
 
-Patch 0024 is generated (`tools/woa/patches/gen-0024.py`): it carries the module and a copy of
-`starbite/s9usb`, compiles the SSDT with the VM's iasl into `UsbHostSsdtAml.h`, and adds the
-DSC/FDF lines under `!ifdef STAR2LTE_USB_HOST_DXE`, so every other build is unchanged.
+Patch 0024 (`0024-starbite-usb-ssdt-dxe.patch`) is generated by `tools/woa/patches/gen-0024.py`:
+both modules (the USB one with a copy of `starbite/s9usb`) and their DSC/FDF lines under
+`!ifdef STAR2LTE_USB_DXE` / `!ifdef STAR2LTE_SSDT_DXE`, so every other build is unchanged.
 
 ## 7. Stages
 
 | # | What | Done when |
 |---|---|---|
-| **H1** | This firmware module + SSDT, VBUS policy `off` and `mcu` | Device Manager shows "USB xHCI Compliant Host Controller" working; a keyboard, a mouse and a stick work |
+| **H1** | Star2LteUsbDxe + Star2LteSsdtDxe + blob `SBUSBXHC`, VBUS policy `off` and `mcu` (built) | Device Manager shows "USB xHCI Compliant Host Controller" working; a keyboard, a mouse and a stick work |
 | H2 | Root-hub port objects (`_UPC`/`_PLD`, USB 3 port not connectable) from H1's logged port numbers | Only one port shown; no phantom SuperSpeed port |
 | H3 | KMDF `Star2LteUsbc` (needs `tools/win/`): owns HSI2C 0x14360000, polls CC/BC every 250 ms, re-routes D+/D- after attach, AP boost if the MCU won't, boost off on sink/detach/shutdown | Hot-plug works any number of times; no VBUS with a charger |
-| H4 | URS parent + UCM connector: host ↔ device at runtime (shared with L1) | Mac cable → Starbite Link, OTG adapter → host, without a reboot |
+| H4 | Layout B (`SBUSBURS`, built) + the URS host INF + H3's UCM connector: host ↔ device at runtime (shared with L1) | Mac cable → Starbite Link, OTG adapter → host, without a reboot |
 | H5 | SuperSpeed: the USBDP combo PHY (0x110A0000/0x110B0000, CAL `sub_phy_version 0x400`) and lane orientation from the MCU | A stick reads at > 40 MB/s |
 
 ## 8. Risks
@@ -253,7 +323,7 @@ DSC/FDF lines under `!ifdef STAR2LTE_USB_HOST_DXE`, so every other build is unch
    anyway.
 6. **Boot hang.** Touching DWC3 or USBCON with its clock off can hang the bus. The gates are
    opened before USBCON or DWC3 is read, exactly as the loader does on every boot. A hang shows as
-   a stall before the Windows logo, with the last `=USBH` line in the pstore ring telling which
+   a stall before the Windows logo, with the last `=USB` line in the pstore ring telling which
    step. The worst case of slow I2C (an MCU that doesn't answer) is about 2-3 s of retries.
 7. **Other release modules that read the XSDT.** The release's "P" module (APIC/XSDT) and the PSCI
    EL2 shim (`acpi=`) look at the tables too; they already live with the GPIO module's SSDTs, and
@@ -270,8 +340,8 @@ DSC/FDF lines under `!ifdef STAR2LTE_USB_HOST_DXE`, so every other build is unch
 
 **Images** (`build/woa/` of this worktree, sha256 in `build/woa/usbh-SHA256SUMS`):
 `starbite-uefi-usbh-vbus0.bin` (VBUS off) and `starbite-uefi-usbh-vbus1.bin` (MCU auto-VBUS).
-Each is today's Windows UEFI (`starbite-uefi-src38.bin`) plus the one module (section 6), same
-size. They replace it for the test boots. How a UEFI image gets to the phone (store entry, catalog
+Each is today's Windows UEFI (`starbite-uefi-src38.bin`) plus Star2LteUsbDxe, Star2LteSsdtDxe and
+the blob `SBUSBXHC` (section 6), same size. They replace it for the test boots. How a UEFI image gets to the phone (store entry, catalog
 key `win11`) is the main session's flow; nothing else changes.
 
 **Rules:** leave Windows **only via Start → Power → Restart** (NOTES 2026-11-07: forced resets
@@ -293,31 +363,36 @@ handoff still published its devices). Undo: delete both files. Without it, photo
 
 | Test | Image | Do | Expect | If not |
 |---|---|---|---|---|
-| **T1** | vbus0 | Boot Windows, nothing plugged | Desktop as today; **touch works as before** (keys never worked in Windows). Device Manager → Universal Serial Bus controllers: "USB xHCI Compliant Host Controller" and "USB Root Hub (USB 3.0)", no yellow mark. Then Start → Restart: **the restart works** | Touch gone: the GPIO handoff saw our table (section 4), report it. Yellow mark: its code. No controller: the module refused (`=USBH` lines). Restart broken: the PMU mapping (risk 8) |
-| **T2** | vbus1 | **User present.** Desktop up, then the OTG adapter + keyboard alone | VBUS on (keyboard LEDs flash), the keyboard types (Notepad) | Nothing: unplug. The `=USBH` lines tell whether the MCU answered 0x54; no VBUS → stage H3 |
+| **T1** | vbus0 | Boot Windows, nothing plugged | Desktop as today; **touch works as before** (keys never worked in Windows). Device Manager → Universal Serial Bus controllers: "USB xHCI Compliant Host Controller" and "USB Root Hub (USB 3.0)", no yellow mark. Then Start → Restart: **the restart works** | Touch gone: the GPIO handoff saw our table (section 4), report it. Yellow mark: its code. No controller: the module refused (`=USB` lines). Restart broken: the PMU mapping (risk 8) |
+| **T2** | vbus1 | **User present.** Desktop up, then the OTG adapter + keyboard alone | VBUS on (keyboard LEDs flash), the keyboard types (Notepad) | Nothing: unplug. The `=USB` lines tell whether the MCU answered 0x54; no VBUS → stage H3 |
 | **T3** | vbus1 | Unplug the keyboard, plug it back; then a mouse | Each comes back / works | Only the first plug works: D+/D- (risk 4) → H3 |
 | **T4** | vbus1 | The stick through the adapter: copy a ~200 MB file onto it and back, `certutil -hashfile <file> SHA256` both | Same hash both ways | Risks 1/2 |
 | T5 | vbus1 | With a power meter if available: unplug everything; the port should show no voltage. Then Restart into TWRP before any charger is plugged | 0 V with nothing attached | VBUS stays on with nothing attached: unplug, report |
 
 **Logs after the tests** (next boot to TWRP, as for the earlier Windows runs): the pstore ring
-(`pmsg-ramoops-0`) holds the module's lines, `grep -a '=USBH'`:
+(`pmsg-ramoops-0`) holds both modules' lines, `grep -a -E '=USB|=SSDT'`:
 
 ```
-=USBH v2 usbh-policy vbus=<0|1> role=host
-=USBH found top=../../.. fsys=../../../.. pmu=../..          (clocks and PMU as the loader left them)
-=USBH found qch=../../../../..
-=USBH found usbcon ver=.. link=.. clkrst=.. utmi=.. hsp=.. tune=.. test=..
-=USBH max hw=.. fw=.. usbc1=.. bc=.. cc0=.. ccstat=<n> vbusdet=<0|1>
-=USBH phy host link=.. clkrst=00000004 utmi=0000000c hsp=.. tune=712c0607 test=.. line=SE0
-=USBH dwc3 snpsid=5533xxxx gctl=..1... gusb2=.. gusb3=.. guctl=05004000 guctl1=.. bus0=.. fladj=..
-=USBH xhci caplen=.. hciver=.. ports=2 ac64=1 usbsts=00000001 usb2=1+1 usb3=2+1
-=USBH vbus policy 1 -> 0 for this boot: ...                      (only if VBUS was already powered)
-=USBH muic ctrl1=09 (routed) op54 data=<00|02> answer=54 .. .. .. (answered) i2c_errors=0
-=USBH ready, SSDT armed for ReadyToBoot, line=..
-=USBH ssdt installed at ReadyToBoot (key .., 120 bytes)
+=SSDT v2 armed for ReadyToBoot: Success
+=USB v3 usb-policy role=0 acpi=0 vbus=<0|1>
+=USB found top=../../.. fsys=../../../.. pmu=../..           (clocks and PMU as the loader left them)
+=USB found qch=../../../../..
+=USB found usbcon ver=.. link=.. clkrst=.. utmi=.. hsp=.. tune=.. test=..
+=USB max hw=.. fw=.. usbc1=.. bc=.. cc0=.. ccstat=<n> vbusdet=<0|1>
+=USB role host (build)
+=USB phy link=.. clkrst=00000004 utmi=0000000c hsp=.. tune=712c0607 test=.. line=SE0
+=USB dwc3 snpsid=5533xxxx gctl=..1... gusb2=.. gusb3=.. guctl=05004000 guctl1=.. bus0=.. fladj=..
+=USB xhci caplen=.. hciver=.. ports=2 ac64=1 usbsts=00000001 usb2=1+1 usb3=2+1
+=USB vbus policy 1 -> 0 for this boot: ...                      (only if VBUS was already powered)
+=USB muic ctrl1=09 (routed) op54 data=<00|02> answer=54 .. .. .. (answered) i2c_errors=0
+=USB enable SBUSBXHC: Success
+=USB ready, line=..
+=SSDT installed SBUSBXHC (120 bytes, rev 1, gated)
+=SSDT done: 1 installed of 1 blobs
 ```
 
-A failure shows as `=USBH FAIL <step>: <why> (no SSDT)` and stops there.
+A failure shows as `=USB FAIL <step>: <why> (no USB blob enabled)`, and then
+`=SSDT skip SBUSBXHC: gated, not enabled by its driver`.
 
 **Undo:** put `starbite-uefi-src38.bin` back as the Windows UEFI. The module writes no variables,
 files or storage. The MCU keeps its auto-VBUS setting until its next reset (TWRP's shutdown) or the
