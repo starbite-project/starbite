@@ -80,35 +80,43 @@ section, packed from LineageOS's dt.img).
 
 The other DS-ACK package in `installer/kernel_dtb/` has an **ext4** first-stage fstab: wrong for this build.
 
-## 4. UFS layout
+## 4. UFS layout (`starbite-oneui`, on S9 #1 since 2026-11-07)
 
-USERDATA (iOS slot + OS store) sits right after SYSTEM .. CP_DEBUG and is never moved, so One UI's partitions
-cannot grow in place. The plan, once the built image sizes are known:
+USERDATA (iOS slot + OS store) sits right after SYSTEM .. CP_DEBUG and is never moved. One UI's EROFS images
+(build of 2026-11-07): **system 6419857408 B (5.98 GiB)**, vendor 697573376 B (665 MiB, after
+postfix-vendor.sh), odm 36864 B. System does not fit the S9's SYSTEM (4.75 GiB), so:
 
-- If system <= 4.75 GiB, vendor <= 0.71 GiB and odm <= 0.68 GiB, One UI uses today's SYSTEM / VENDOR / ODM and
-  only A16DATA grows.
-- Otherwise the larger ones get new partitions in the space freed from Windows (named so the DT fstab finds
-  them, or the DT fstab in `android.dtb` is pointed at them).
-- WINDOWS: NTFS 17.9 GB in use; shrink to about 18.5 GB with `ntfsresize` (dry run first). Backup:
-  `WINDOWS.ntfsclone.gz` on the card (backup/20261106-oneui/WINDOWS.sha256; verified by a full decompress).
-- A16DATA: about 16 GiB, fresh **ext4** (One UI's /data line: `ext4 ... wait,check,encryptable=footer,quota,
-  reservedsize=128M,length=-20480`; no file-based encryption, so TWRP and Maintenance can read it). The
-  filesystem ends 20 KiB before the partition (`length=-20480`).
-- CACHE (12 MiB) and HIDDEN are already ext4 (One UI mounts /cache with `errors=panic`). ODM held LineageOS's
-  /metadata; One UI overwrites it.
-- UN1CA's sizes (SYSTEM 9500 MiB, VENDOR 1300 MiB, ODM 700 MiB, CACHE 600 MiB) are its ext4 reservations; the
-  EROFS images are what count. Source sizes for comparison: S22 system 8.0 GB + product 1.9 GB unpacked (both
-  end up in the S9's system), S9 vendor 549 MB unpacked.
-- The table change goes through the installer's GPT engine (`tools/installer/sbinst/ufslayout.py`, both GPT
-  copies backed up first: backup/20261106-oneui/sda-head-4M.img and sda-tail-4M.img).
+| # | Name | Blocks (4 KiB) | Size | Holds |
+|---|---|---|---|---|
+| 18 | SYSTEM | 68736..1678719 | 6.14 GiB | One UI system (EROFS); grew over the old VENDOR + ODM |
+| 19 | VENDOR | 11463424..11725567 | 1 GiB | One UI vendor (EROFS), behind WINDOWS |
+| 20 | ODM | 11725568..11741951 | 64 MiB | One UI odm (EROFS) |
+| 21-25 | CACHE .. USERDATA | unchanged | | CACHE = One UI /cache (ext4, 12 MiB) |
+| 26-27 | WINESP, WINDOWS | 6613760..11463423 | 0.5 + 18 GiB | WINDOWS shrunk (ntfsresize first: NTFS 19260243968 B) |
+| 28 | A16DATA | 11741952..15615994 | 14.78 GiB | One UI /data (ext4, 3874038 blocks: 5 short of the partition, `length=-20480`) |
 
-## 5. Status (2026-11-06, night)
+VENDOR and ODM keep their names (the first-stage fstab in `android.dtb` finds them by name) and their entry
+numbers, so no other partition is renumbered: the GPT lists them out of block order, which
+`ufslayout.validate` now allows (overlaps are still refused). Written with `build/oneui-gpt.py starbite-oneui
+--write` (the installer's gpt.py; both original copies in backup/20261106-oneui/gpt/), then a TWRP restart.
 
-- Done on S9 #1 (TWRP): NTFS shrunk to 19260243968 B (18 GiB - 64 MiB, no relocations); LineageOS's A16DATA
-  saved raw (`A16DATA-lineage.raw.gz` on the card, sha256 03f46a87... = the partition's); both GPT copies
-  saved (`backup/20261106-oneui/gpt/orig-head.bin`, `orig-tail.bin`, hashed on the phone and here).
-- The `starbite-oneui` table plans cleanly from the phone's GPT (WINDOWS resized in place keeping its type and
-  unique GUID, A16DATA moved; nothing else changes): `python3 -m sbinst.gpt plan orig-head.bin orig-tail.bin
-  starbite-oneui --blocks 15616000` in tools/installer.
-- The loader on the phone (health6) already reads `android.dtb`.
-- `make_rom` (EROFS) re-running with the boot guard; then: image sizes -> final table -> writes -> first boot.
+Images: `tools/android/oneui/sparse2raw.py IMAGE | tools/android/pixel/part-write.py NAME - --size N`
+(64 MiB chunks read back on the phone + a whole-range SHA-256). System sha256 7662390c..., vendor 5572b8b7...
+
+## 5. Status (2026-11-07, 05:20): One UI 8 boots on S9 #1
+
+- Build: UN1CA 3.2.1 (`ro.unica.version` 1.5 stable), S22 base `S901BXXSOGZH3`, DS-ACK 4.9.337 KSU kernel,
+  SELinux enforcing. Three build fixes on the arm64 VM (patchelf, the signapk stand-in, CERT.SF naming) and
+  the vendor post-fix (section 2).
+- First boot (`tools/store/boot-next.sh android`): boot completed in about 2.5 min, the setup wizard started,
+  then One UI restarted once on its own (normal reboot, no wipe: Samsung's first-boot restart; bootstat records
+  that boot as `reboot,factory_reset`). A normal reboot lands in the loader menu (no default OS), from where
+  `sbfb.py boot android` (or `sbfb.py reboot recovery` for TWRP) works over USB.
+- Second boot: home in about 50 s; `first-boot.sh` disabled both setup wizards and OMC agent, provisioned=1:
+  One UI Home. Later boots go to the lock screen (swipe), no setup.
+- Checked: /data = A16DATA ext4 (14 GB, 13 GB free); vendor/odm EROFS from sda19/sda20; USERDATA not mounted;
+  system_server started once, empty crash buffer; Wi-Fi scans (10 networks); sensor hub sensors listed; boot
+  guard ran (`/data/local/tmp/starbite-boot-ok`).
+- Open: `ro.adb.secure=0` (UN1CA's vendor default: adb without authorization); setup skip is over adb, not yet
+  native; One UI is not the menu's default OS; not tested yet: SIM/calls (never emergency), camera, audio,
+  fingerprint, NFC, battery life; the installer does not yet install One UI on a stock phone.
