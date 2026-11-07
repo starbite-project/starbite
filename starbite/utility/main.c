@@ -436,9 +436,9 @@ static void draw_home(void)
     for (int i = 0; i < 6; ++i) {
         int x, y, w, h;
         tile_rect(i, &x, &y, &w, &h);
-        ui_round(x, y, w, h, 48, i == focus ? C_CARD2 : C_CARD);
         if (i == focus)
-            ui_frame(x, y, w, h, 6, C_STAR);
+            ui_round(x - 8, y - 8, w + 16, h + 16, 56, C_STAR);   /* rounded focus ring */
+        ui_round(x, y, w, h, 48, i == focus ? C_CARD2 : C_CARD);
         ui_text(F_TITLE_S, x + 50, y + 200, tile_name[i], i == 5 ? C_ORANGE : C_L1);
         ui_text(F_DETAIL, x + 52, y + 300, tile_sub[i], C_L2);
         if (i == 0)

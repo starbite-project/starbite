@@ -1810,6 +1810,9 @@ int main(int argc, char **argv)
     map(0x10000000ULL, 0x0e000000ULL);
     map(0x80000000ULL, 0x80000000ULL);
     map(SB_GPU_MEM, SB_GPU_MEM_SIZE);       /* the GPU tests' memory in bank 2 */
+#ifdef SB_HOST_UTILITY
+    map(0x880000000ULL, 0x40000000ULL);     /* the Utility OS RAM disk (ut-preview.sh) */
+#endif
     arena = mmap(0, ARENA, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     panel = calloc((size_t)UI_W * UI_H, 4);
     seed();
