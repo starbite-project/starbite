@@ -21,7 +21,8 @@
  *   \\.\StarbiteThermal        IOCTL SBTH_IOCTL_GET_STATE -> struct sbth_state
  *   ...\Services\sbthermal\State  registry values (every 60 s and on level changes, flushed)
  *
- * Boot guard: ...\Services\sbthermal\GuardBoots counts starts that did not reach 120 s of running;
+ * Boot guard: ...\Services\sbthermal\GuardBoots counts starts that did not reach 10 s of running (the
+ * first TMU/CMU reads and the CPU boost request all happen within ~3 s; a crash later in boot is not ours);
  * at 2 the driver refuses to load. Kill switches, outside the registry first (an offline hive edit
  * can be undone by Windows replaying a dirty hive's logs): the file \Windows\Starbite\sbthermal.off
  * (created from TWRP), then Start = 4 (tools/win/hive-service.py disable, clean hives only).
@@ -32,7 +33,9 @@
 
 #define SBTH_TAG 'htBS'
 #define SBTH_PERIOD_MS 250
-#define SBTH_GUARD_CLEAR_MS 120000
+#define SBTH_GUARD_CLEAR_MS 10000        /* was 120 s: bugchecks elsewhere early in boot (the combo2 firmware's PPTT)
+                                         * counted against the watchdog, which then refused itself, leaving
+                                         * the CPU at 1.05 GHz and every GPU test without its gate */
 #define SBTH_STATE_EVERY_MS 60000
 #define SBTH_GUARD_LIMIT 2
 
@@ -479,7 +482,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
     if (kill_file(L"\\SystemRoot\\Starbite\\sbthermal.off"))
         return STATUS_DEVICE_CONFIGURATION_ERROR;
 
-    /* Boot guard: two starts in a row that did not run 120 s -> stay off. */
+    /* Boot guard: two starts in a row that did not run 10 s -> stay off. */
     st = open_key(NULL, &h);
     if (!NT_SUCCESS(st))
         return st;

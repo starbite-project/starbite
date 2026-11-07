@@ -621,6 +621,12 @@ user's daily display driver. Its guard now clears after 1 minute of presents (10
 shorter daily session); sbmali can run as a standalone service (Start 1/2) next to it, mapping the Mali
 itself, so T8 needs no rebinding.
 
+**T8 attempt 1 (combo2 firmware; `build/win/results-nopptt/SYSTEM-r`): not run.** sbthermal refused itself
+(GuardBoots 2): the firmware's PPTT made two boots bugcheck early, and the watchdog's guard (cleared only
+after 120 s) counted them, so the CPU stayed at 1.05 GHz and sbmali (standalone) waited at the gate. Fix:
+sbthermal's guard clears after 10 s, by which time its own risky steps (the first TMU/CMU reads, the CPU
+boost request at ~2 s) are done.
+
 ### 10.2 Next phone tests
 
 | # | Test | What it proves | Risk |
