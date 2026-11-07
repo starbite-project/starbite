@@ -1,0 +1,118 @@
+# installer-manifest.toml: One UI 8 (UN1CA 9810) as the phone's Android (EXAMPLE).
+# The starbite-oneui UFS layout (tools/installer/sbinst/ufslayout.py, docs/ANDROID-ONEUI.md 4) and the four
+# One UI items. A full phone set adds the other OSes' items from installer-manifest.example.toml unchanged
+# (the Apple slot, the card store, Windows, the card roots, the Linux images), but NOT its [[layout]] rows or
+# its Android items: those are LineageOS on layout A. docs/INSTALLER.md 3 and 14. Copy it into a bundle as
+# installer-manifest.toml, then --update-hashes and --verify-bundle. Sizes are the build of 2026-11-07;
+# hashes are placeholders.
+#
+# The One UI images come from tools/android/oneui (docs/ANDROID-ONEUI.md 2), as raw images
+# (tools/android/oneui/sparse2raw.py IMAGE > FILE). The VENDOR image MUST be tools/android/oneui/postfix-vendor.sh's
+# output. The vendor.img in UN1CA's target-files zip mounts /data on USERDATA (the iOS 16.5 slot and the OS
+# store): never put it in a bundle. The boot files (android.kernel, android.ramdisk, android.cmdline,
+# android.dtb from mk-boot-files.py) go into the UFS store, not into an item of their own.
+#
+# Personal bundles only (docs/STARBITE-MASTER-PLAN.md 1.2.11 and 5.5).
+
+format = 1
+name = "Starbite S9 - One UI 8 set (example)"
+catalog = "store/catalog.toml"          # a copy of tools/store/catalog.toml (its "android" entry is One UI 8)
+
+[phone]
+models = ["SM-G960F"]
+devices = ["starlte"]
+ufs_blocks = 15616000                   # UFS LU0 in 4 KiB blocks
+min_battery = 50
+
+[card]
+min_bytes = 60000000000                 # these items do not touch the card; the 64 GB rule holds anyway
+
+[ufs]
+layout = "starbite-oneui"               # SYSTEM 6.14 GiB in front, WINDOWS 22 GiB, then VENDOR (sda19) and ODM (sda20),
+                                        # A16DATA to the end. A phone with another table: --repartition (docs/INSTALLER.md 9).
+                                        # No [[layout]] rows: the layout gives them.
+
+[env]
+cmdline = "sb.installer=1"
+
+[[item]]
+key = "env-kernel"
+title = "Installer environment: Linux 7.1 kernel (arm64 Image)"
+os = "starbite"
+file = "env/installer.image"
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "env:kernel"
+
+[[item]]
+key = "env-initrd"
+title = "Installer environment: initramfs (busybox, dropbear, sgdisk, mkfs.exfat/f2fs/ext4)"
+os = "starbite"
+file = "env/installer.initrd"
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "env:initrd"
+
+[[item]]
+key = "env-dtb"
+title = "Installer environment: device tree (SM-G960F, USB device mode)"
+os = "starbite"
+file = "env/installer.dtb"
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "env:dtb"
+
+[[item]]
+key = "boot"
+title = "Starbite loader + menu (BOOT)"
+os = "starbite"
+file = "boot/starbite-boot.img"         # a loader with the android method's optional 4th file (android.dtb)
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "part:BOOT"
+
+[[item]]
+key = "ufs-store"
+title = "OS store (UFS): catalog, One UI boot files, kernels, payloads, Engineer OS, rescue system"
+os = "starbite"
+file = "store/ufs-store.img"            # sbstore2.py build --medium ufs ... android.kernel= android.ramdisk= android.cmdline= android.dtb=
+size = 4096
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "store:ufs"
+
+# ---- One UI 8. Written in this order whatever the order here: SYSTEM, VENDOR, ODM, then /data is made.
+
+[[item]]
+key = "oneui-system"
+title = "One UI 8 system (EROFS)"
+os = "android"
+file = "android/oneui-system.img"       # make_rom -F erofs, raw (sparse2raw.py)
+size = 6419857408
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "part:SYSTEM"
+
+[[item]]
+key = "oneui-vendor"
+title = "One UI 8 vendor (EROFS, post-fixed: /data on A16DATA)"
+os = "android"
+file = "android/oneui-vendor.img"       # ONLY postfix-vendor.sh's output; never the target-files zip's vendor.img
+size = 697573376
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "part:VENDOR"
+
+[[item]]
+key = "oneui-odm"
+title = "One UI 8 odm (EROFS)"
+os = "android"
+file = "android/oneui-odm.img"
+size = 36864
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+dest = "part:ODM"                       # an image only with [ufs] layout = "starbite-oneui" (otherwise ODM is /metadata)
+
+[[item]]
+key = "oneui-data"
+title = "One UI 8 /data (fresh ext4 on A16DATA)"
+os = "android"
+dest = "part:A16DATA"
+action = "mkfs-oneui-data"              # on the phone: mke2fs -t ext4 -F -L data -b 4096 <node> <partition blocks - 5>
+                                        # (no file; user data: an A16DATA with data is kept unless --replace oneui-data)

@@ -5,6 +5,11 @@ roots from tests/fixtures; the XNU payloads of the card-root entries as SWEETXNU
 packed boot-args carry the root's sdroot=). Windows and iOS 26 are left out on purpose (optional items).
 
   mkbundle.py OUT_DIR [--layout sd128|sd64]
+  mkbundle.py OUT_DIR --oneui
+
+--oneui makes the One UI 8 bundle of installer-manifest.oneui.example.toml instead (the starbite-oneui UFS
+layout: the environment, BOOT, the UFS store, One UI's system/vendor/odm images as small fake images, and
+A16DATA made on the phone by mkfs-oneui-data).
 
 --layout sd64 makes the bundle for any card of at least 64 GB the way a real bundle builder would
 (docs/INSTALLER.md 11.4): the catalog's roots from `cardlayout.py catalog sd64` (iOS 26 hidden),
@@ -77,12 +82,12 @@ def manifest_for(text, layout):
     return ''.join(keep)
 
 
-def main(out, layout='sd128'):
+def main(out, layout='sd128', oneui=False):
     b = Path(out)
     if b.exists():
         shutil.rmtree(b)
     b.mkdir(parents=True)
-    text = (INST / 'installer-manifest.example.toml').read_text()
+    text = (INST / ('installer-manifest.oneui.example.toml' if oneui else 'installer-manifest.example.toml')).read_text()
     if layout != 'sd128':
         text = manifest_for(text, layout)
     (b / mf.MANIFEST_NAME).write_text(text)
@@ -126,9 +131,17 @@ def main(out, layout='sd128'):
     subprocess.run(sb + [str(b / 'store' / 'ufs-store.img'), '--medium', 'ufs', '--catalog', str(b / 'store' / 'catalog.toml'),
                          *args], check=True, stdout=subprocess.DEVNULL)
     medium = 'sd' if layout == 'sd128' else layout
-    subprocess.run(sb + [str(b / 'store' / 'sd-store.img'), '--medium', medium, f'engineer.img={payload / "engineer.img"}'],
-                   check=True, stdout=subprocess.DEVNULL)
+    if 'dest = "store:sd"' in text:
+        subprocess.run(sb + [str(b / 'store' / 'sd-store.img'), '--medium', medium,
+                             f'engineer.img={payload / "engineer.img"}'], check=True, stdout=subprocess.DEVNULL)
     shutil.rmtree(payload)
+    if oneui:
+        # One UI: SYSTEM spans two 64 MiB chunks; VENDOR a few MiB; ODM 36864 B as the real one (9 blocks);
+        # A16DATA has no file (mkfs-oneui-data)
+        sparse_image(b / 'android' / 'oneui-system.img', 65 * MIB, [(0, 8 * MIB), (64 * MIB, MIB)])
+        put(b / 'android' / 'oneui-vendor.img', os.urandom(3 * MIB))
+        put(b / 'android' / 'oneui-odm.img', os.urandom(36864))
+        return finish(b, 'Starbite S9 - One UI 8 set (example)', 'One UI 8 set, starbite-oneui UFS layout')
     # iOS 16 slot: an APFS container superblock ("NXSB" at 32, block size, block count) as store-flash.sh expects
     slot = bytearray(os.urandom(2 * MIB))
     slot[32:36] = b'NXSB'
@@ -145,16 +158,19 @@ def main(out, layout='sd128'):
     put(b / 'card' / 'distros' / 'pmos.img', gzip.decompress((fx / 'linux-nopin.ext4.gz').read_bytes()))
     put(b / 'card' / 'distros' / 'ubuntu.img', gzip.decompress((fx / 'linux-pin.ext4.gz').read_bytes()))
     put(b / 'card' / 'distros' / 'chromeos.img', os.urandom(2 * MIB))
+    finish(b, 'Starbite S9 - main phone set (example)', f'{layout} card layout')
+
+
+def finish(b, example_name, what):
     text = (b / mf.MANIFEST_NAME).read_text().replace(
-        'name = "Starbite S9 - main phone set (example)"',
-        f'name = "Starbite S9 - REHEARSAL bundle (fake images, {layout} card layout)"')
+        f'name = "{example_name}"', f'name = "Starbite S9 - REHEARSAL bundle (fake images, {what})"')
     (b / mf.MANIFEST_NAME).write_text(text)
     for f in mf.update_hashes(b):
         print(f'  {f}')
-    print(f'rehearsal bundle in {b} ({layout} card layout)')
+    print(f'rehearsal bundle in {b} ({what})')
 
 
 if __name__ == '__main__':
     a = sys.argv[1:]
     lay = a[a.index('--layout') + 1] if '--layout' in a else 'sd128'
-    main(a[0], lay)
+    main(a[0], lay, oneui='--oneui' in a)

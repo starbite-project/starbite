@@ -16,7 +16,12 @@ from .common import (MIB, MODELS, DEVICES, MIN_CARD_BYTES, NATIVE_PARTS, PART_WR
 
 MANIFEST_NAME = 'installer-manifest.toml'
 SLOT_BYTES = 16 << 30                     # USERDATA 0..16 GiB: the Apple (an earlier port iOS 16) slot
-ACTIONS = ('write', 'mkfs-metadata')
+# write: an image from the bundle. mkfs-metadata: LineageOS's /metadata on ODM, made fresh (metadata-reset.sh).
+# mkfs-oneui-data: One UI 8's /data on A16DATA, a fresh ext4 made on the phone (steps.py). The mkfs actions
+# take no file and always count as user data.
+ACTIONS = ('write', 'mkfs-metadata', 'mkfs-oneui-data')
+MKFS_ACTIONS = ('mkfs-metadata', 'mkfs-oneui-data')
+ONEUI_LAYOUT = 'starbite-oneui'          # the only UFS layout where ODM is an image (One UI's /odm)
 _HEX64 = re.compile(r'^[0-9a-f]{64}$')
 _KEY = re.compile(r'^[a-z0-9][a-z0-9-]{0,31}$')
 _CARD_PATH = re.compile(r'^/[A-Za-z0-9._/-]+$')
@@ -199,14 +204,22 @@ def load(bundle):
             raise Refused(f'item {key}: action {action!r} is not one of {ACTIONS}')
         if action == 'mkfs-metadata' and str(dest) != 'part:ODM':
             raise Refused(f'item {key}: mkfs-metadata only applies to part:ODM')
-        if str(dest) == 'part:ODM' and action != 'mkfs-metadata':
-            raise Refused(f'item {key}: ODM (Android /metadata) is only ever made fresh (action = "mkfs-metadata")')
+        if action == 'mkfs-oneui-data' and str(dest) != 'part:A16DATA':
+            raise Refused(f'item {key}: mkfs-oneui-data only applies to part:A16DATA (One UI\'s /data)')
+        if action in MKFS_ACTIONS and 'file' in it:
+            raise Refused(f'item {key}: action {action} makes a file system on the phone and takes no file')
+        oneui = m.ufs_layout is not None and m.ufs_layout.name == ONEUI_LAYOUT
+        if str(dest) == 'part:ODM' and action != 'mkfs-metadata' and not (oneui and action == 'write'):
+            raise Refused(f'item {key}: ODM (Android /metadata) is only ever made fresh (action = "mkfs-metadata"); '
+                          f'an ODM image (One UI\'s /odm, action = "write") needs [ufs] layout = "{ONEUI_LAYOUT}"'
+                          + (f' (this bundle\'s is "{m.ufs_layout.name}")' if m.ufs_layout is not None else
+                             ' (this bundle names no [ufs] layout)'))
         if str(dest) in seen_dest:
             raise Refused(f'item {key}: destination {dest} is also used by item {seen_dest[str(dest)]}')
         seen_dest[str(dest)] = key
         item = Item(key=key, title=it.get('title', key), os=it.get('os', 'starbite'), dest=dest,
-                    action=action, data=bool(it.get('data', False)) or action == 'mkfs-metadata', optional=bool(it.get('optional', False)),
-                    note=it.get('note', ''))
+                    action=action, data=bool(it.get('data', False)) or action in MKFS_ACTIONS,
+                    optional=bool(it.get('optional', False)), note=it.get('note', ''))
         if action == 'write':
             item.file = _need(it, 'file', str, f'item {key}')
             item.size = _need(it, 'size', int, f'item {key}')
@@ -225,6 +238,11 @@ def load(bundle):
             if dest.kind == 'slot' and dest.offset + item.size > SLOT_BYTES:
                 raise Refused(f'item {key}: {dest.offset}+{item.size} runs past the 16 GiB Apple slot')
         m.items.append(item)
+    by_action = {i.action: i.key for i in m.items}
+    if 'mkfs-oneui-data' in by_action and 'mkfs-metadata' in by_action:
+        raise Refused(f'items {by_action["mkfs-oneui-data"]} and {by_action["mkfs-metadata"]}: One UI\'s /data '
+                      '(mkfs-oneui-data) has no /metadata partition; mkfs-metadata (LineageOS\'s /metadata on ODM) '
+                      'belongs to a LineageOS set. On the One UI layout ODM is One UI\'s /odm image (action = "write")')
     _check_card_ranges(m)
     if m.ufs_layout is not None:
         names = {p.name for p in m.ufs_layout.parts}
@@ -546,6 +564,8 @@ def writer_of(item):
         return 'fastboot boot (RAM)'
     if item.action == 'mkfs-metadata':
         return 'tools/android/pixel/metadata-reset.sh'
+    if item.action == 'mkfs-oneui-data':
+        return 'mke2fs on the phone (installer)'
     if d.kind == 'part' and d.name in PART_WRITE_PY:
         return 'tools/android/pixel/part-write.py'
     if d.kind == 'part' and d.name in NATIVE_PARTS:

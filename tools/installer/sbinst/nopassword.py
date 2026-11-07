@@ -67,21 +67,28 @@ def report(manifest, journal=None, plan=None):
     items = {i.dest.kind + ':' + (i.dest.name or str(i.dest.offset)): i for i in (manifest.items if manifest else [])}
     out = []
 
-    # Android
+    # Android: LineageOS (an A16DATA image + a fresh /metadata on ODM) or One UI 8 (A16DATA made fresh on the
+    # phone, mkfs-oneui-data; no /metadata)
     a16 = items.get('part:A16DATA')
     if a16 is None:
         out.append(Check('Android 17', 'fresh /data (A16DATA) and /metadata (ODM)', 'n/a', 'not in this bundle'))
     else:
+        oneui = a16.action == 'mkfs-oneui-data'
+        name = 'One UI 8' if oneui else 'Android 17'
         rec = journal.item_rec(a16) if journal else None
         planned = (plan or {}).get(a16.key)
         fresh = bool(rec and rec.get('fresh'))
         if (planned == 'keep' and not fresh) or (rec and rec.get('status') == 'kept'):
             st, ev = 'OPEN', 'existing Android data kept: a screen lock set earlier stays (Settings > Security > Screen lock > None)'
         elif fresh:
-            st, ev = 'ok', 'A16DATA and ODM written fresh by this install: no lock credential exists'
+            st, ev = 'ok', ('A16DATA made fresh (mke2fs) by this install: no lock credential exists' if oneui else
+                            'A16DATA and ODM written fresh by this install: no lock credential exists')
         else:
-            st, ev = 'by-design', 'empty f2fs from make-a16data.sh + fresh ODM: no lock credential exists'
-        out.append(Check('Android 17', 'fresh /data + /metadata; the setup wizard\'s "Screen lock" page: Skip', st, ev))
+            st, ev = 'by-design', ('a fresh ext4 made on the phone: no lock credential exists' if oneui else
+                                   'empty f2fs from make-a16data.sh + fresh ODM: no lock credential exists')
+        how = ('fresh /data (no /metadata); setup finished by first-boot.sh (docs/ANDROID-ONEUI.md 2)' if oneui else
+               'fresh /data + /metadata; the setup wizard\'s "Screen lock" page: Skip')
+        out.append(Check(name, how, st, ev))
 
     # Linux images on the card
     for i in (manifest.items if manifest else []):

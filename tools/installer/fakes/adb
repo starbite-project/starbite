@@ -25,7 +25,31 @@ FUNCS = r'''
 R=%(R)s
 getprop() { sed -n "s/^$1=//p" "$R/props"; }
 blockdev() { case $1 in --getsize64) wc -c < "$2" | tr -d ' ' ;; --rereadpt) case $2 in *sda) python3 "%(fp)s" rereadpt-sda "$R" ;; *) python3 "%(fp)s" rereadpt "$R" ;; esac ;; *) ;; esac; }
-mke2fs() { for d; do :; done; printf 'TYPE="ext4" LABEL="metadata"\n' > "$R/blkid/$(basename "$d")"; echo "fake mke2fs: ext4 'metadata' on ${d#$R}"; }
+# mke2fs [-t T] [-F] [-L LABEL] [-b BS] [-m N] DEVICE [BLOCKS]: records blkid's TYPE/LABEL and the superblock's
+# block count/size (what dumpe2fs -h / tune2fs -l show), and puts a stand-in superblock at byte 1024
+mke2fs() {
+  local lab= bs=4096 dev= cnt= n size
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -L) lab=$2; shift 2 ;;
+      -b) bs=$2; shift 2 ;;
+      -t|-m|-O|-E|-N|-I|-i|-U) shift 2 ;;
+      -*) shift ;;
+      *) if [ -z "$dev" ]; then dev=$1; else cnt=$1; fi; shift ;;
+    esac
+  done
+  size=$(( $(wc -c < "$dev") / bs ))
+  [ -n "$cnt" ] || cnt=$size
+  [ "$cnt" -le "$size" ] || { echo "mke2fs: $cnt blocks: the device has only $size" >&2; return 1; }
+  n=$(basename "$dev")
+  printf 'TYPE="ext4" LABEL="%%s"\n' "$lab" > "$R/blkid/$n"
+  printf 'Filesystem volume name:   %%s\nBlock count:              %%s\nBlock size:               %%s\n' \
+    "$lab" "$cnt" "$bs" > "$R/blkid/$n.sb"
+  printf 'fake ext4 superblock' | command dd of="$dev" bs=1024 seek=1 conv=notrunc 2>/dev/null
+  echo "fake mke2fs: ext4 '$lab' on ${dev#$R}, $cnt blocks of $bs"
+}
+dumpe2fs() { for d; do :; done; cat "$R/blkid/$(basename "$d").sb" 2>/dev/null || { echo "dumpe2fs: Bad magic number in super-block while trying to open ${d#$R}" >&2; return 1; }; }
+tune2fs() { [ "$1" = -l ] && dumpe2fs -h "$2"; }
 e2fsck() { echo "fake e2fsck: clean"; }
 sb-reboot() { python3 "%(fp)s" set-state "$R" "$1"; }       # the installer environment's reboot (menu|fastboot|download)
 sb-byname() { :; }                                          # the environment's /dev/block/by-name links: rereadpt makes them

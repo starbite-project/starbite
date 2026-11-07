@@ -47,11 +47,17 @@ PROTECTED = ('EFS', 'CPEFS', 'PARAM', 'UP_PARAM', 'KEYSTORAGE', 'PERSISTENT', 'S
 PROTECTED_RAW = ('sda', 'sdb', 'sdc', 'sdd', 'sde')
 
 # Partitions the installer may write, and the writer each one goes through.
-#   part-write.py (tools/android/pixel/): SYSTEM VENDOR A16DATA (ODM through metadata-reset.sh)
+#   part-write.py (tools/android/pixel/): SYSTEM VENDOR ODM A16DATA. ODM only takes an image with the
+#     starbite-oneui UFS layout (One UI's /odm, manifest.py); otherwise it is LineageOS's /metadata, made
+#     fresh by metadata-reset.sh. A16DATA for One UI is made fresh on the phone (mke2fs, steps.py).
 #   the installer's own chunk writer: BOOT WINESP WINDOWS (never RECOVERY)
-PART_WRITE_PY = ('SYSTEM', 'VENDOR', 'A16DATA')
+PART_WRITE_PY = ('SYSTEM', 'VENDOR', 'ODM', 'A16DATA')
 NATIVE_PARTS = ('BOOT', 'WINESP', 'WINDOWS')
-WRITABLE_PARTS = PART_WRITE_PY + NATIVE_PARTS + ('ODM',)
+WRITABLE_PARTS = PART_WRITE_PY + NATIVE_PARTS
+
+# One UI 8's /data (A16DATA, action mkfs-oneui-data): its fstab says length=-20480, so the ext4 ends this many
+# 4 KiB blocks before the partition's end (docs/ANDROID-ONEUI.md 4).
+ONEUI_DATA_RESERVE = 5
 
 # Backed up (read only) before anything is written: the protected partitions, plus the small ones
 # the install overwrites, plus what the master plan lists (RADIO, OMR, MISC). Missing optional

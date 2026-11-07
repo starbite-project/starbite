@@ -3,6 +3,7 @@ then the steps. Every step is idempotent (it checks the target first), resumable
 per-item chunk state) and verified (read-back SHA-256 on the phone)."""
 import hashlib
 import os
+import re
 import struct
 import sys
 import time
@@ -11,10 +12,11 @@ from pathlib import Path
 
 from . import nopassword, pit, repart, rescue
 from .common import (BACKUP_OPTIONAL, BACKUP_RAW, BACKUP_REQUIRED, DOWNLOAD_MODE_USB, GIB, MIB, NATIVE_PARTS,
-                     PART_WRITE_PY, PROTECTED, REPO, Refused, Stopped, cardlayout, default_state_dir, human)
+                     ONEUI_DATA_RESERVE, PART_WRITE_PY, PROTECTED, REPO, Refused, Stopped, cardlayout,
+                     default_state_dir, human)
 from .device import Heimdall, InstallerEnv, Phone, android_props, chunk_write, is_stock_samsung, usb_ids
 from .journal import Journal
-from .manifest import coverage, writer_of
+from .manifest import MKFS_ACTIONS, coverage, writer_of
 
 STORE_UFS_OFFSET = 16 * GIB                 # store-flash.sh: USERDATA + 16 GiB
 TOOL = {k: str(REPO / v) for k, v in {
@@ -30,15 +32,17 @@ TOOL = {k: str(REPO / v) for k, v in {
 def rank(item):
     """Install order. BOOT is last: until it is written, the phone still starts its old loader (on a stock
     phone BOOT was written first, in Download mode, and is then skipped as identical). RECOVERY is never
-    written (manifest.parse_dest refuses it)."""
+    written (manifest.parse_dest refuses it). Android: SYSTEM, VENDOR, then LineageOS's /data image and its
+    fresh /metadata (ODM, mkfs-metadata) together; One UI's ODM image (action write) comes before its /data
+    (A16DATA, mkfs-oneui-data), so the images are all in before the file system is made."""
     d = item.dest
     if d.kind == 'slot':
         return 10
     if d.kind == 'store':
         return 20 if d.name == 'ufs' else 50
     if d.kind == 'part':
-        return {'SYSTEM': 30, 'VENDOR': 31, 'A16DATA': 32, 'ODM': 33, 'WINESP': 40, 'WINDOWS': 41,
-                'BOOT': 99}[d.name]
+        r = {'SYSTEM': 30, 'VENDOR': 31, 'A16DATA': 33, 'ODM': 34, 'WINESP': 40, 'WINDOWS': 41, 'BOOT': 99}[d.name]
+        return 32 if d.name == 'ODM' and getattr(item, 'action', 'write') == 'write' else r
     return 60 if d.kind == 'card-lba' else 70
 
 
@@ -467,18 +471,20 @@ class Installer:
         if item.dest.kind == 'card-file':
             out = self.phone.sh(f'[ -f {node} ] && sha256sum {node}', check=False).split()
             return bool(out) and out[0] == item.sha256
-        if item.action == 'mkfs-metadata':
+        if item.action in MKFS_ACTIONS:           # a file system made on the phone is never "the same bytes"
             return False
         return self.phone.range_sha(node, off, item.size) == item.sha256
 
     def probe(self, item):
-        """blank | data | differs | missing | too-big"""
+        """blank | data | differs | missing | too-big | no-part"""
         node, off = self.target(item)
         d = item.dest
         if d.kind == 'part' and item.action == 'write':
             psize = self.facts.size(d.name)
             if psize is None or item.size > psize:
                 return 'too-big'
+        if item.action in MKFS_ACTIONS and self.facts.size(d.name) is None:
+            return 'no-part'
         if d.kind == 'card-file':
             if not self.facts.mount_of('/external_sd'):
                 return 'missing'
@@ -490,7 +496,7 @@ class Installer:
             return 'blank' if hdr == hashlib.sha256(bytes(12288)).hexdigest() else 'differs'
         if d.kind == 'card-lba' and not self.card_ready():
             return 'blank'
-        size = self.facts.size('ODM') if item.action == 'mkfs-metadata' else item.size
+        size = self.facts.size(d.name) if item.action in MKFS_ACTIONS else item.size    # mkfs: the whole partition
         if self.phone.is_blank(node, off, size):
             return 'blank'
         return 'data' if item.data else 'differs'
@@ -529,8 +535,10 @@ class Installer:
         steps += self.plan_card()
         items = sorted([i for i in self.m.items if i.dest.kind != 'env'], key=rank)   # env: RAM only
         cls = {i.key: self.classify(i) for i in items}
-        # Android's /data and /metadata belong together: /metadata holds /data's encryption keys
-        a16 = next((i for i in items if str(i.dest) == 'part:A16DATA'), None)
+        # LineageOS's /data (an A16DATA image) and /metadata (ODM, mkfs-metadata) belong together: /metadata holds
+        # /data's encryption keys. Only that pair: One UI's /data (mkfs-oneui-data) has no /metadata, and its ODM
+        # is an image (action write), classified on its own.
+        a16 = next((i for i in items if str(i.dest) == 'part:A16DATA' and i.action == 'write'), None)
         odm = next((i for i in items if i.action == 'mkfs-metadata'), None)
         if a16 and odm:
             renew = ('write', 'resume', 'replace')
@@ -570,6 +578,8 @@ class Installer:
         p = self.probe(i)
         if p == 'too-big':
             return 'BLOCKED', f'image ({human(i.size)}) is larger than {i.dest.name}'
+        if p == 'no-part':
+            return 'BLOCKED', f'the phone has no {i.dest.name} partition'
         if p in ('blank', 'missing'):
             return 'write', 'target is empty'
         if not i.data and self.matches(i):
@@ -904,14 +914,60 @@ class Installer:
         if not self.facts.mount_of('/external_sd'):
             raise Stopped('could not mount microSD p1 at /external_sd')
 
-    def unmount_target(self, node):
-        hit = [mp for dev, mp, _ in self.facts.mounts if dev == node or dev.endswith('/' + node.rsplit('/', 1)[-1])]
+    def unmount_target(self, node, name=None):
+        """Unmount whatever is mounted from node (or, given the partition name, from its by-name link)."""
+        devs = {node} | ({f'/dev/block/by-name/{name}'} if name else set())
+        hit = [mp for dev, mp, _ in self.facts.mounts if dev in devs or dev.endswith('/' + node.rsplit('/', 1)[-1])]
         for mp in hit:
             self.phone.sh(f'umount {mp}', write=True)
         if hit and self.mode != 'dry-run':
             self.facts = self.phone.facts()
-            if [m for m in self.facts.mounts if m[0] == node]:
+            if [m for m in self.facts.mounts if m[0] in devs]:
                 raise Stopped(f'{node} is still mounted after umount: stopping')
+
+    # One UI's /data: a fresh ext4 that ends ONEUI_DATA_RESERVE blocks before the partition's end (its fstab:
+    # length=-20480). The command is docs/ANDROID-ONEUI.md 4's, run by the phone's own mke2fs (the installer
+    # environment's e2fsprogs with its 4.9-kernel mke2fs.conf, or TWRP's).
+    def oneui_data_blocks(self, item, node):
+        """(partition blocks, file system blocks), 4 KiB blocks: the phone's own blockdev in a real run, the
+        planned table in a dry run (the partition may only exist after the GPT step)."""
+        if self.mode == 'dry-run':
+            size = self.planned_size(item.dest.name)
+        else:
+            out = self.phone.sh(f'blockdev --getsize64 {node}', check=False)
+            size = int(out) if out.isdigit() else None
+        if not size or size % 4096 or size // 4096 <= ONEUI_DATA_RESERVE:
+            raise Stopped(f'{item.key}: cannot tell the size of {item.dest.name} ({node}: {size!r} bytes): stopping')
+        return size // 4096, size // 4096 - ONEUI_DATA_RESERVE
+
+    @staticmethod
+    def oneui_data_cmd(node, fs_blocks):
+        return f'mke2fs -t ext4 -F -L data -b 4096 {node} {fs_blocks}'
+
+    def mkfs_oneui_data(self, item, node):
+        u = self.ui
+        part, fs = self.oneui_data_blocks(item, node)
+        u.info(f'{item.dest.name} = {node}: {part} blocks of 4 KiB; ext4 "data" of {fs} blocks '
+               f'({ONEUI_DATA_RESERVE} blocks = {ONEUI_DATA_RESERVE * 4096} bytes left free: One UI\'s length=-20480)')
+        if 'mke2fs' not in self.facts.tools:
+            if self.mode == 'dry-run':
+                u.warn('the phone shows no mke2fs: the real run would stop here')
+            else:
+                raise Stopped(f'{item.key}: the phone has no mke2fs (the installer environment carries e2fsprogs)')
+        out = self.phone.sh(self.oneui_data_cmd(node, fs), write=True)
+        if out:
+            u.info('| ' + out.splitlines()[-1])
+
+    def ext4_superblock(self, node):
+        """(TYPE, LABEL, block count, block size) as blkid and dumpe2fs -h (or tune2fs -l) see node."""
+        out = self.phone.sh(f'blkid {node}', check=False)
+        typ = re.search(r'(?<![A-Z_])TYPE="([^"]*)"', out)
+        lab = re.search(r'(?<![A-Z_])LABEL="([^"]*)"', out)
+        sb = self.phone.sh(f'dumpe2fs -h {node} 2>/dev/null || tune2fs -l {node}', check=False)
+        cnt = re.search(r'^Block count:\s*(\d+)', sb, re.M)
+        bsz = re.search(r'^Block size:\s*(\d+)', sb, re.M)
+        return (typ.group(1) if typ else '', lab.group(1) if lab else '',
+                int(cnt.group(1)) if cnt else None, int(bsz.group(1)) if bsz else None)
 
     def do_item(self, s):
         i, u, j, p = s.item, self.ui, self.journal, self.phone
@@ -932,6 +988,9 @@ class Installer:
             self.unmount_target(node)
             bk = Path(j.step('backup').get('dir', '')) / 'backups.txt'
             self.r.run(['bash', TOOL['metadata-reset']], write=True, env_extra={'BACKUP_LOG': str(bk)}, stream=True)
+        elif i.action == 'mkfs-oneui-data':
+            self.unmount_target(node, d.name)
+            self.mkfs_oneui_data(i, node)
         elif d.kind == 'part' and d.name in PART_WRITE_PY:
             self.r.run([*py, TOOL['part-write'], d.name, i.path, '--state', state], write=True, stream=True)
         elif d.kind == 'part' and d.name in NATIVE_PARTS:
@@ -981,6 +1040,10 @@ class Installer:
     def verify_text(self, i, node, off):
         if i.action == 'mkfs-metadata':
             return f'verify: metadata-reset.sh checks blkid TYPE="ext4" LABEL="metadata" on {node}'
+        if i.action == 'mkfs-oneui-data':
+            part, fs = self.oneui_data_blocks(i, node)
+            return (f'verify: adb shell "blkid {node}" has TYPE="ext4" LABEL="data"; adb shell "dumpe2fs -h {node}" '
+                    f'(or tune2fs -l) has Block count {fs} (= {part} - {ONEUI_DATA_RESERVE}), Block size 4096')
         if i.dest.kind == 'store':
             return 'verify: the store area on the phone == the image, except block 2 (the phone\'s settings record, kept)'
         if i.dest.kind == 'card-file':
@@ -992,6 +1055,12 @@ class Installer:
             out = self.phone.sh(f'blkid {node}', check=False)
             ok = 'TYPE="ext4"' in out and 'LABEL="metadata"' in out
             what = out
+        elif i.action == 'mkfs-oneui-data':
+            part, fs = self.oneui_data_blocks(i, node)
+            typ, label, count, bsize = self.ext4_superblock(node)
+            ok = (typ, label, count, bsize) == ('ext4', 'data', fs, 4096)
+            what = f'TYPE {typ or "?"} LABEL {label or "?"}, {count} blocks of {bsize}' + \
+                ('' if ok else f'; want ext4 "data", {fs} (= {part} - {ONEUI_DATA_RESERVE}) blocks of 4096')
         elif i.dest.kind == 'card-file':
             out = self.phone.sh(f'sha256sum {node}').split()
             ok, what = bool(out) and out[0] == i.sha256, out[0] if out else ''
@@ -999,8 +1068,8 @@ class Installer:
             ok = self.matches(i)
             what = '' if ok else 'store differs' if i.dest.kind == 'store' else self.phone.range_sha(node, off, i.size)
         if not ok:
-            raise Stopped(f'{i.key}: VERIFY FAILED on the phone ({what[:64]}): stopping. A re-run writes it again.')
-        self.ui.ok(f'{i.key}: verified on the phone (read back)')
+            raise Stopped(f'{i.key}: VERIFY FAILED on the phone ({what[:160]}): stopping. A re-run writes it again.')
+        self.ui.ok(f'{i.key}: verified on the phone (read back)' + (f': {what}' if i.action == 'mkfs-oneui-data' else ''))
 
     def do_no_password(self, s):
         u = self.ui

@@ -77,14 +77,16 @@ starbite-install ──ssh (USB ECM 172.16.42.1)───────► the ins
 - **Safety rules, enforced in code:**
   - the only way anything is written is an item destination (`sbinst/manifest.py parse_dest`), and the
     grammar cannot name EFS, CPEFS, PARAM, UP_PARAM, KEYSTORAGE, PERSISTENT, STEADY, BOTA*, DTB, DTBO, the
-    raw disks (GPT) or the boot LUNs; ODM only as a fresh `mkfs`; card sector 0 only through the card
+    raw disks (GPT) or the boot LUNs; ODM only as a fresh `mkfs` (LineageOS's /metadata), or as One UI's
+    odm image with the `starbite-oneui` UFS layout (section 14); card sector 0 only through the card
     layout step;
   - backup first: the protected areas, BOOT, RECOVERY, MISC, RADIO, OMR, ODM, the first 4 MiB of sda
     (protective MBR, GPT, PIT area), the backup GPT and the boot LUNs sdb-sde go to
     `build/installer/<phone-id>/backups/<time>/`, each hashed on the phone and on the computer;
   - data is never replaced silently: an item marked `data = true` (OS roots, Android /data, Windows, card
     images) is written only if its target is blank, or was written by this installer and interrupted, or
-    with `--replace KEY` / `--replace-all`. Android /data and /metadata are renewed together or not at all;
+    with `--replace KEY` / `--replace-all`. LineageOS's /data and /metadata are renewed together or not at
+    all (One UI has no /metadata: its /data stands alone);
   - every write is read back (SHA-256 computed on the phone); a mismatch stops the run (`STOPPED`, exit 3);
   - BOOT is written last (on a stock phone it was written first, in Download mode, and is then skipped as
     identical); RECOVERY is never written (refused as a destination, by the heimdall wrapper and by the
@@ -106,13 +108,14 @@ starbite-install ──ssh (USB ECM 172.16.42.1)───────► the ins
 Files: `tools/installer/starbite-install` (entry), `sbinst/` (`cli.py` options, `steps.py` the flow,
 `manifest.py`, `journal.py`, `device.py` adb/fastboot/state/facts/chunk writer, `disks.py` rescue disk
 safety, `rescue.py`, `nopassword.py`, `ext4.py` read-only ext4 reader, `tomlmini.py`, `ui.py`),
-`installer-manifest.example.toml`, `fakes/` (fake phone, adb, fastboot, heimdall, rehearsal bundle),
-`tests/`, `rehearse.sh`.
+`installer-manifest.example.toml`, `installer-manifest.oneui.example.toml` (section 14), `fakes/` (fake phone,
+adb, fastboot, heimdall, ssh, rehearsal bundles), `tests/`, `rehearse.sh`.
 
 ## 3. The manifest (`installer-manifest.toml`, format 1)
 
 A bundle is a directory: `installer-manifest.toml` plus the files it names. Full example (the main phone's
-set): `tools/installer/installer-manifest.example.toml`.
+set): `tools/installer/installer-manifest.example.toml`. One UI 8 on the `starbite-oneui` layout:
+`tools/installer/installer-manifest.oneui.example.toml` (section 14).
 
 | Key | Meaning |
 |---|---|
@@ -121,7 +124,7 @@ set): `tools/installer/installer-manifest.example.toml`.
 | `catalog` | optional: a copy of `tools/store/catalog.toml` in the bundle. Then the plan lists every visible menu entry as `covered` or `MISSING` (its store files must be in the bundle's stores, read with `sbstore2.py`; its root must be an item) and warns when the UFS store's catalog differs from it |
 | `[phone]` | `models` (SM-G960F), `devices` (starlte), `ufs_blocks` (15616000), `min_battery` (50) |
 | `[card]` | `min_bytes` (at least 60,000,000,000: a card sold as 64 GB holds 61.9-64.1 GB), `layout` (`"sd128"` S9 #1's 128 GB card, `"sd64"` any card of at least 64 GB: section 11; p1, p2 and the root sectors then come from `tools/store/cardlayout.py`, and `--verify-bundle` checks the catalog roots and the payloads' `sdroot=` against it), `sectors` (the exact card this layout was made for; card roots sit at fixed sectors in payload command lines; not with `sd64`), `p1`/`p2` `{type, start, sectors[, label]}`: the MBR the card layout step writes (with `layout`: may be left out, must agree if given) |
-| `[ufs]` | `layout`: a target of `sbinst/ufslayout.py` (`starbite-a`, `starbite-a16g`). The phone is repartitioned to it with `--repartition` (section 9) |
+| `[ufs]` | `layout`: a target of `sbinst/ufslayout.py` (`starbite-a`, `starbite-a16g`, `starbite-oneui`). The phone is repartitioned to it with `--repartition` (section 9) |
 | `[env]` | `cmdline` for the installer environment (default `sb.installer=1`) |
 | `[[layout]]` | `name`, `node`, `start`, `blocks` (4 KiB blocks): v1's check. With `[ufs] layout` optional and must agree with it (the filling row by start only) |
 | `[[item]]` | one thing to install, below |
@@ -131,14 +134,16 @@ set): `tools/installer/installer-manifest.example.toml`.
 | `key` | unique, `[a-z0-9-]`; `--replace KEY` names it |
 | `title`, `os`, `note` | shown; `os` (starbite, android, linux, chromeos, windows, macos, ios) drives the no-password list |
 | `file`, `size`, `sha256` | path inside the bundle (no `..`, no symlink out), byte size, SHA-256. `--update-hashes` fills the last two |
-| `dest` | `part:NAME` (BOOT SYSTEM VENDOR A16DATA WINESP WINDOWS; ODM only with `action = "mkfs-metadata"`; never RECOVERY), `env:kernel|initrd|dtb` (the installer environment, RAM only), `slot:USERDATA@OFFSET` (the 16 GiB Apple slot), `store:ufs`, `store:sd`, `card:lba:SECTOR` (inside `[card] p2`, 1 MiB aligned, no overlaps; with a card layout inside one of its root slots), `card:root:KEY` (with `[card] layout`: the root slot of KEY, e.g. `card:root:mac13`, resolved to `card:lba:` at load), `card:file:/PATH` (a file on card p1's exFAT) |
-| `action` | `write` (default) or `mkfs-metadata` (ODM, no file) |
+| `dest` | `part:NAME` (BOOT SYSTEM VENDOR A16DATA WINESP WINDOWS; ODM only with `action = "mkfs-metadata"`, or with `action = "write"` when `[ufs] layout = "starbite-oneui"`; never RECOVERY), `env:kernel|initrd|dtb` (the installer environment, RAM only), `slot:USERDATA@OFFSET` (the 16 GiB Apple slot), `store:ufs`, `store:sd`, `card:lba:SECTOR` (inside `[card] p2`, 1 MiB aligned, no overlaps; with a card layout inside one of its root slots), `card:root:KEY` (with `[card] layout`: the root slot of KEY, e.g. `card:root:mac13`, resolved to `card:lba:` at load), `card:file:/PATH` (a file on card p1's exFAT) |
+| `action` | `write` (default); `mkfs-metadata` (ODM only: LineageOS's /metadata, a fresh ext4 by `metadata-reset.sh`); `mkfs-oneui-data` (A16DATA only: One UI's /data, a fresh ext4 made on the phone, section 14). The two `mkfs` actions take no `file` and are always user data (`data` is forced on) |
 | `data` | `true`: the target holds user data once its OS runs (never replaced without `--replace`) |
 | `optional` | `true`: a missing file skips the item instead of refusing the bundle |
 
 Checks at load: unknown destination or a protected name refuses; sizes must be 4096-aligned for UFS and
 MiB-aligned for card ranges; slot items stay below 16 GiB; card ranges inside p2 and not overlapping;
-duplicate keys or destinations refuse. `--verify-bundle` then checks presence, size and SHA-256 of every
+duplicate keys or destinations refuse; an unknown action, a `mkfs` action on another partition or with a
+`file`, an ODM image without `[ufs] layout = "starbite-oneui"`, and `mkfs-oneui-data` together with
+`mkfs-metadata` in one bundle refuse. `--verify-bundle` then checks presence, size and SHA-256 of every
 file (hashes cached in `build/installer/hash-cache.json` by path, size and mtime).
 
 ## 4. The steps (fixed order)
@@ -152,7 +157,8 @@ file (hashes cached in `build/installer/hash-cache.json` by path, size and mtime
 | 5 | Apple slot (iOS 16.5) | USERDATA 0..16 GiB | `tools/refport/slot-write.py` | range SHA-256 on the phone |
 | 6 | UFS OS store | USERDATA +16 GiB | `tools/store/store-flash.sh` (keeps the phone's settings block) | store area == image except block 2 |
 | 7-8 | SYSTEM, VENDOR | partitions | `tools/android/pixel/part-write.py --state` | the tool, then range SHA-256 again |
-| 9-10 | A16DATA, ODM | partitions | `part-write.py`; `metadata-reset.sh` (the environment's mke2fs) | range SHA-256; `blkid` TYPE ext4 LABEL metadata |
+| 9-10 | LineageOS: A16DATA, ODM | partitions | `part-write.py`; `metadata-reset.sh` (the environment's mke2fs) | range SHA-256; `blkid` TYPE ext4 LABEL metadata |
+| 9-10 | One UI: ODM, then A16DATA | partitions | `part-write.py` (the odm image); the phone's `mke2fs -t ext4 -F -L data -b 4096 NODE BLOCKS-5` (section 14) | range SHA-256; `blkid` TYPE ext4 LABEL data + `dumpe2fs -h` Block count == partition blocks - 5 |
 | 11-12 | WINESP, WINDOWS | partitions | installer chunk writer | range SHA-256 |
 | 13 | card OS store | card p2 | `tools/store/store-flash-sd.sh` | store area == image except block 2 |
 | 14-15 | macOS Ventura, iOS 26 roots | card sector ranges | `tools/macos/card-range-flash.py --state` | range SHA-256 |
@@ -190,6 +196,7 @@ after the install (`sbinst/nopassword.py`).
 | OS | How | Implemented | Checked by the installer |
 |---|---|---|---|
 | Android 17 | A16DATA is an empty f2fs (`make-a16data.sh`) and ODM (/metadata) is made fresh, together: no lock-screen credential can exist. The setup wizard offers "Screen lock": Skip | yes (fresh-data pairing in the plan) | journal: A16DATA written fresh in this install → `ok`; existing data kept → `OPEN` (a lock set earlier stays) |
+| One UI 8 | A16DATA is a fresh ext4 made on the phone (`mkfs-oneui-data`); no /metadata. Setup is finished by `tools/android/oneui/first-boot.sh` (docs/ANDROID-ONEUI.md 2) | yes | the same journal check as Android 17 |
 | postmarketOS, Ubuntu (Phosh) | user "user" with an **empty** password, and the GNOME/Phosh lock screen off (`org.gnome.desktop.screensaver lock-enabled=false`, `org.gnome.desktop.lockdown disable-lock-screen=true` as a gschema override); greetd/tinydm autologin as before | **new**: `SB_NO_PIN=1` for `mk-payload.sh` writes `pin none`; `sb-integrate.sh` then runs `passwd -d user`, writes `/etc/starbite/login` = `none` and the override (removed again if `glib-compile-schemas` rejects it); `mkroot-pmos.sh` and `check-root.sh` accept and check it. Without `SB_NO_PIN=1` nothing changes (a 6-digit PIN as before) | yes: reads `/etc/shadow` and `/etc/starbite/login` straight out of the ext4 image in the bundle (`sbinst/ext4.py`); a PIN or a locked account → `OPEN` |
 | ChromiumOS | test image (cros_debug); Guest mode, no account | by design | listed (`by-design`) |
 | Windows 11 | unattend: local account `starbite`, empty password, AutoLogon (`tools/woa/vm/build-image.ps1`) | in the image build | the unattend in the repo has an empty `<Password>` and AutoLogon → `ok`. No clean Windows image exists yet |
@@ -223,15 +230,15 @@ the person at the phone; a lock set later by the user; macOS as above.
 
 ## 8. Tests and the rehearsal
 
-- Unit tests (`python3 -m unittest discover -s tools/installer/tests`, 111 tests): v1's (disk safety with
+- Unit tests (`python3 -m unittest discover -s tools/installer/tests`, 137 tests): v1's (disk safety with
   recorded diskutil plists and fake sysfs trees, the destination allowlist, manifest and bundle checks,
   the TOML parser, the ext4 reader and no-password checks, journal / chunk state / resume, plan
   classification, MBR round trip, the card layouts of section 11) plus `test_gpt.py` (the GPT engine on
   S9 #1's real backup and on independently written stock GPTs, the layout table's rules, every
   interrupted-write state, the PIT check: section 9.4), `test_bundler.py` (the deny list, streaming with
   holes and the zeroed settings block, `--from-local` with a hard link and a .gz source, `[ufs]` in a
-  manifest) and `test_no_recovery.py` (RECOVERY refused as a destination, by the heimdall wrapper, by the
-  transport shim; no code path flashes or boots it).
+  manifest), `test_no_recovery.py` (RECOVERY refused as a destination, by the heimdall wrapper, by the
+  transport shim; no code path flashes or boots it) and `test_oneui.py` (One UI 8: section 14.4).
 - `tools/installer/rehearse.sh`: the real flow end to end against fake phones and fake disks
   (`fakes/fakephone.py`: a sparse 64 GB UFS file holding a real GPT, built from `ufslayout.py`, with the
   partition nodes made from it the way Linux 4.9's efi.c does (an invalid primary = no partitions);
@@ -239,13 +246,15 @@ the person at the phone; a lock set later by the user; macOS as above.
   Starbite firmware) through the fake `adb`, `fastboot` (`boot` of the installer environment, `oem
   boot-next`), `heimdall` (sessions, `download-pit`, BOOT only) and `ssh` (the environment; only the key
   appended to the initrd). The existing writers run unchanged through `transport/adb`. Fake limits:
-  partition nodes are separate files, `[ -b` is read as `[ -e`, mke2fs/blkid/mount/mkfs.exfat/getprop/
-  blockdev are stand-ins, and the environment is the host's bash, not the real initramfs.
+  partition nodes are separate files, `[ -b` is read as `[ -e`, mke2fs/dumpe2fs/tune2fs/blkid/mount/
+  mkfs.exfat/getprop/blockdev are stand-ins, and the environment is the host's bash, not the real initramfs.
   Sections: 1-9 the main phone's bundle (refusals, dry run, a cable pull in SYSTEM and the resume, nothing
   left to do, the phone without a journal); 10 Download mode (BOOT only, RECOVERY untouched); 11 the
   loader's fastboot and the legacy TWRP transport; 12 preflight refusals; 13 the rescue stick; 14 the 64 GB
-  card; **15 a stock phone, the whole way** (excerpt below).
+  card; **15 a stock phone, the whole way** (excerpt below); 16 One UI 8 on the `starbite-oneui` layout
+  (section 14.4).
 
+Result 2026-11-07 (macOS, with section 16): **175 rehearsal checks passed, 0 failed; 137 unit tests OK**.
 Result 2026-11-06 (macOS): **144 rehearsal checks passed, 0 failed; 111 unit tests OK**. Section 15 as it printed (plan rows and
 warnings left out; paths shortened):
 
@@ -422,6 +431,7 @@ prints one, `... check` validates all.
 | `stock` | Samsung's table: rows 1-24 + USERDATA to the end | reference only (the fake stock phone; never written) |
 | `starbite-a` | S9 #1 today (layout A, docs/ANDROID-PIXEL.md 2.1). `ACTIVE` | yes |
 | `starbite-a16g` | Phase 2 of docs/ANDROID-PIXEL.md 2.3: WINDOWS 17.84 GiB, A16DATA 16 GiB (Linux data type) | yes |
+| `starbite-oneui` | One UI 8 (docs/ANDROID-ONEUI.md 4; S9 #1 since 2026-11-07): SYSTEM 6.14 GiB, WINDOWS 22 GiB, VENDOR (sda19) and ODM (sda20) behind WINDOWS (entries out of block order), A16DATA 10.78 GiB (Linux data type). Its bundles: section 14 | yes |
 
 A row is `Part(name, start, blocks, content, role, type, guid, attrs)`, in 4 KiB blocks (sda's logical
 block: its GPT header sits at byte 4096; `/sys/block/sda/queue/logical_block_size` = 4096, checked in
@@ -442,9 +452,9 @@ so a phone laid out with `starbite-a` gets **the same GPT bytes as S9 #1** (chec
 backup, 9.4); a new row without a pinned GUID gets one derived from its name, the same on every phone. A
 bundle made from the main phone (Windows' BCD, any `root=PARTUUID=`) therefore holds on every phone.
 
-**For the One UI 8 redesign:** copy `_starbite_a()`, edit the rows from SYSTEM on (never `SAMSUNG_HEAD`),
-register it in `LAYOUTS` and `TARGETS`, point `ACTIVE` at it (or name it in a bundle: `[ufs] layout =
-"NAME"`), run `ufslayout.py check` and the unit tests. If SAMSUNG's CACHE/HIDDEN/OMR/CP_DEBUG have to
+**A new layout** (as `starbite-oneui` was made): copy `_starbite_a()`, edit the rows from SYSTEM on (never
+`SAMSUNG_HEAD`), register it in `LAYOUTS` and `TARGETS`, point `ACTIVE` at it (or name it in a bundle: `[ufs]
+layout = "NAME"`), run `ufslayout.py check` and the unit tests. If SAMSUNG's CACHE/HIDDEN/OMR/CP_DEBUG have to
 move, change their `content` to `scratch` on purpose; the engine refuses otherwise.
 
 ### 9.2 The engine: `tools/installer/sbinst/gpt.py`
@@ -567,6 +577,7 @@ transport shim, in the fakes; tests/test_no_recovery.py).
 7. Speed of every multi-GiB write and of `--build-bundle --from-phone` over USB networking.
 8. v1's list items 5-13 (card formatter, mounts, the final reboot into the menu, no-password checks, the
    rescue stick), now in the environment instead of TWRP.
+9. One UI 8 on the `starbite-oneui` layout: section 14.5.
 
 ## 11. microSD card layouts: the 128 GB card and any card of 64 GB or more
 
@@ -925,3 +936,123 @@ installed phone can start the environment from the menu without a computer-side 
 installer`; and dropping the loader's `fastboot reboot recovery` / the recovery menu's TWRP item, which
 the installer no longer uses. Engineer OS may host on-phone parts later; for v2 the Linux environment is
 the engine.
+
+## 14. One UI 8 on the `starbite-oneui` layout
+
+Written 2026-11-07. One UI 8 (UN1CA 9810, docs/ANDROID-ONEUI.md) is the main Android, on the UFS layout
+`starbite-oneui` (section 9.1; S9 #1 has it since 2026-11-07). The installer installs it from a bundle whose
+`[ufs] layout` is `starbite-oneui`. Example: `tools/installer/installer-manifest.oneui.example.toml`.
+
+### 14.1 The items
+
+| Example key | `dest` | `action` | File | Made by |
+|---|---|---|---|---|
+| `oneui-system` | `part:SYSTEM` | `write` | One UI's system, EROFS, raw: 6419857408 B (build of 2026-11-07) | `make_rom -F erofs`, then `tools/android/oneui/sparse2raw.py` |
+| `oneui-vendor` | `part:VENDOR` | `write` | the **post-fixed** vendor, EROFS, raw: 697573376 B | `tools/android/oneui/postfix-vendor.sh` only (below) |
+| `oneui-odm` | `part:ODM` | `write` | One UI's odm, EROFS, raw: 36864 B | `make_rom` |
+| `oneui-data` | `part:A16DATA` | `mkfs-oneui-data` | none | the phone's `mke2fs` (14.3) |
+
+The boot files (`android.kernel`, `android.ramdisk`, `android.cmdline`, `android.dtb` from
+`tools/android/oneui/mk-boot-files.py`) go into the UFS store (`store:ufs`, built with `sbstore2.py`), as for
+every other OS: no item of their own. The example holds the installer environment, BOOT, the UFS store and the
+four items. A full phone set adds the other OSes' items from `installer-manifest.example.toml` unchanged, but
+not its `[[layout]]` rows (layout A's numbers; `[ufs] layout` gives the rows) and not its LineageOS items. The
+UFS store needs the iOS 16.5 slot in front of it (`store-flash.sh` refuses otherwise), so on a phone that does
+not have the slot yet the bundle carries `ios16-slot` too.
+
+**The vendor image must be `postfix-vendor.sh`'s output.** UN1CA's `exynos9810_boot_restore` patch rewrites
+both vendor fstabs with /data on USERDATA after every mod (docs/ANDROID-ONEUI.md 2). The vendor.img in UN1CA's
+target-files zip, and `make_rom`'s own vendor.img, therefore mount /data on USERDATA, which on a Starbite phone
+holds the iOS 16.5 slot and the OS store. **Never put that image in a bundle.** Only the image
+`postfix-vendor.sh` rebuilds (fstabs on A16DATA, USERDATA without the `userdata_block_device` label, checked by
+the script) goes into `oneui-vendor`. The installer cannot tell the two apart (both are EROFS of a similar
+size); the manifest's SHA-256 is the link, so take it from the post-fixed file (S9 #1's: `5572b8b7...`,
+docs/ANDROID-ONEUI.md 4).
+
+Install order (`steps.rank`): SYSTEM, VENDOR, ODM, then A16DATA is made, BOOT last. LineageOS keeps its own
+order (its A16DATA image, then the fresh /metadata on ODM).
+
+### 14.2 ODM
+
+ODM means two things. On `starbite-a` and `starbite-a16g` it is LineageOS's /metadata (the encryption keys of
+A16DATA) and is only ever made fresh (`mkfs-metadata`, `metadata-reset.sh`). On `starbite-oneui` it is One UI's
+/odm, an EROFS image the first-stage fstab mounts by name. So:
+
+- `part:ODM` with `action = "write"` loads only when the bundle's `[ufs] layout` is `starbite-oneui`. With
+  another layout, or none, it refuses: `ODM (Android /metadata) is only ever made fresh (action =
+  "mkfs-metadata"); an ODM image (One UI's /odm, action = "write") needs [ufs] layout = "starbite-oneui" (this
+  bundle's is "starbite-a")`.
+- `mkfs-metadata` is unchanged (any layout: LineageOS can run on `starbite-oneui` as the fallback). A bundle
+  with both `mkfs-oneui-data` and `mkfs-metadata` refuses (One UI has no /metadata).
+- The plan's /data + /metadata pairing (renewed together or not at all) applies only to LineageOS: an
+  A16DATA image with `mkfs-metadata`. One UI's ODM image is planned on its own: it holds no user data, so an
+  ODM that differs is overwritten, an identical one is skipped.
+- ODM is written by `tools/android/pixel/part-write.py`, whose allowlist names ODM -> sda20 (`starbite-oneui`
+  keeps VENDOR at sda19 and ODM at sda20; `PART_WRITE_PY` in `sbinst/common.py` now lists ODM). The step-1
+  backup still takes ODM.
+
+### 14.3 `mkfs-oneui-data`: One UI's /data on A16DATA
+
+One UI's fstab says `length=-20480` for /data: the file system ends 5 blocks of 4 KiB before the partition's end.
+The step (`steps.py mkfs_oneui_data`):
+
+1. The size of A16DATA in 4 KiB blocks: in a real run the phone's own `blockdev --getsize64` on the node; in a
+   dry run the planned table's A16DATA (the GPT step of the same run may create it). File system blocks =
+   partition blocks - 5. On a 15616000-block UFS: 2825467 - 5 = 2825462, as on S9 #1.
+2. Whatever is mounted from the node or its by-name link is unmounted (checked again).
+3. `mke2fs -t ext4 -F -L data -b 4096 /dev/block/sda28 2825462`, by the phone's own mke2fs: the installer
+   environment's e2fsprogs with its `/etc/mke2fs.conf` (an ext4 feature set Android's 4.9 kernel mounts,
+   checked when `mk-maint.sh` builds it), or TWRP's with `--transport twrp`. A phone without `mke2fs` stops the
+   step before `mke2fs` would run.
+4. Verified: `blkid` says `TYPE="ext4"` and `LABEL="data"` (not PARTLABEL), and `dumpe2fs -h` (or `tune2fs -l`)
+   says `Block count` = partition blocks - 5 and `Block size` 4096. Anything else stops the run (`STOPPED`); a
+   re-run makes the file system again.
+
+A dry run prints the unmount, the exact `mke2fs` line and the check, and runs nothing. The item is always user
+data (`data` is forced on) and is never "identical". The plan:
+
+| A16DATA on the phone | plan |
+|---|---|
+| blank (first and last MiB zero) | `write` |
+| moved or resized by the GPT step of this install (`--repartition`) | `write`, no `--replace` needed |
+| anything else (One UI's data, LineageOS's f2fs, stale bytes) | `keep`, "has data: kept (--replace oneui-data overwrites it)" |
+| the same, with `--replace oneui-data` or `--replace-all` | `REPLACE` |
+| made and verified by this installer earlier | `keep`, not read again |
+| made by this installer, interrupted before the check | `resume`: made again |
+| no A16DATA partition | `BLOCKED` |
+
+The no-password check (section 6) lists One UI 8 with the journal check of Android 17.
+
+### 14.4 Tests
+
+- `tests/test_oneui.py` (23 tests): the manifest (the action accepted only on `part:A16DATA`, no file, `data`
+  forced; an ODM image only with `starbite-oneui`, refused with `starbite-a`, `starbite-a16g` and without a
+  layout; `mkfs-metadata` unchanged; the two mkfs actions not in one bundle; RECOVERY still refused; the example
+  parses with tomllib and the fallback parser, and its order is SYSTEM, VENDOR, ODM, A16DATA, BOOT; LineageOS's
+  order and pairing unchanged), and the A16DATA step against a phone held in memory that answers blockdev,
+  blkid, dumpe2fs, mke2fs and umount: plan and classification (every row of the table above), the dry-run
+  lines, the block count taken from the planned table before a repartition, the real step and its check, a
+  file system that fills the partition stopped by the block-count check, a phone without mke2fs.
+- `rehearse.sh` section 16 (fake phones): the One UI bundle (`fakes/mkbundle.py --oneui`) verified; an ODM image
+  in a `starbite-a` bundle refused; a layout-A phone: the GPT step BLOCKED without `--repartition`, a dry run with
+  it (old and new tables, the exact `mke2fs` line, the order, the phone byte-identical), the rehearsal
+  (repartition, SYSTEM/VENDOR/ODM images read back, A16DATA's ext4 "data" of 2825462 blocks, protected areas
+  untouched, the GPT equal to `starbite-oneui`), a re-run with nothing to do; a phone already on
+  `starbite-oneui` without a journal keeps its /data, and with `--replace oneui-data` the plan makes it new.
+  The fake `mke2fs` now reads its options (label, block size, block count) and the fakes have `dumpe2fs` and
+  `tune2fs -l`.
+
+### 14.5 Not done, and what needs the real phone
+
+- **The bundle builder (section 12) still makes LineageOS bundles** for `ufslayout.ACTIVE` (`starbite-a`): a One
+  UI bundle is put together from the example, with the images from the local One UI build. `--from-phone` never
+  reads ODM or A16DATA (`bundler.NEVER`). `ACTIVE` is unchanged.
+- **Repartitioning a layout-A phone to `starbite-oneui` shrinks WINDOWS** (25.84 to 22 GiB): its NTFS must be
+  shrunk with `ntfsresize` first (the layout's notes); the installer does not do that. Without a `windows` item
+  the partition is not written, and an NTFS larger than it would be broken.
+- A partial bundle such as the example makes the plan warn that the other menu entries "will not boot from this
+  bundle" (section 3 `catalog`): they are not in it; what is on the phone stays.
+- **Needs the real phone:** the environment's `mke2fs` making One UI's /data, and One UI booting on it (S9 #1's
+  /data was made by hand, docs/ANDROID-ONEUI.md 4); `blockdev --getsize64`, `blkid` and `dumpe2fs -h` in the
+  environment as the step reads them; `part-write.py` writing the 36864-byte ODM image (one short chunk) and
+  the 6 GiB system over USB networking; a full install from a stock phone with the One UI set.

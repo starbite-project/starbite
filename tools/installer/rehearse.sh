@@ -18,6 +18,9 @@
 #     the installer environment -> dry run -> repartition
 #     (with a cable pull between the two GPT copies) -> the full install -> a re-run with nothing to do;
 #     an S9+ refused by its PIT; --restore-gpt; the bundle builder reading the installed phone
+#   - One UI 8 (the starbite-oneui UFS layout): an ODM image refused with another layout; a layout-A phone
+#     repartitioned to starbite-oneui, SYSTEM/VENDOR/ODM images and /data made on the phone (mkfs-oneui-data:
+#     ext4 "data", partition blocks - 5), nothing left to do; a phone already on starbite-oneui keeps its /data
 # About 450 MB in WORKDIR (default build/installer-rehearsal; sparse files), removed at the end unless KEEP=1.
 # Long runs are shown in summary (headers, plan rows, ok/WARN/REFUSED/STOPPED lines); their full logs
 # are in WORKDIR/state*/logs/.
@@ -438,6 +441,78 @@ has 'installer-manifest.toml: 7 items' "manifest written"
 run 0 "...and it verifies as a bundle" -- "${SI[@]}" --verify-bundle "$BB" --state-dir "$SS"
 has 'card layout sd64: catalog roots and payload sdroot= match' "its stores carry the sd64 card layout"
 rm -rf "$BB"
+
+hdr "16. One UI 8: the starbite-oneui UFS layout; SYSTEM, VENDOR, ODM images, /data made on the phone (docs/INSTALLER.md 14)"
+rm -rf "$PS" "$SS"
+BO=$W/bundle-oneui PO=$W/phone-oneui SO=$W/state-oneui
+python3 -B tools/installer/fakes/mkbundle.py "$BO" --oneui | tail -1
+run 0 "One UI bundle verified" -- "${SI[@]}" --verify-bundle "$BO" --state-dir "$SO"
+has 'oneui-data +mkfs-oneui-data +-> part:A16DATA' "oneui-data has no file: A16DATA is made on the phone"
+has 'bundle verified: 9 items$' "9 items (3 of them the installer environment)"
+cp -R "$BO" "$W/bo-a"; sed -i.bak 's/^layout = "starbite-oneui"/layout = "starbite-a"/' "$W/bo-a/installer-manifest.toml"
+run 2 "an ODM image in a bundle for another UFS layout is refused" -- "${SI[@]}" --verify-bundle "$W/bo-a" --state-dir "$SO"
+has 'ODM \(Android /metadata\) is only ever made fresh .*needs \[ufs\] layout = "starbite-oneui" \(this bundle.s is "starbite-a"\)' "...because ODM is /metadata there"
+rm -rf "$W/bo-a"
+"${FP[@]}" create "$PO" --card starbite      # a Starbite phone on layout A (LineageOS)
+python3 - "$PO" <<'PY'      # its Apple slot (iOS 16's APFS: store-flash.sh wants it in front of the store)
+import os, sys
+with open(os.path.join(sys.argv[1], 'dev', 'block', 'by-name', 'USERDATA'), 'r+b') as f:
+    f.seek(32); f.write(b'NXSB' + (4096).to_bytes(4, 'little') + (512).to_bytes(8, 'little'))
+PY
+CO=(--bundle "$BO" --fake-root "$PO" --state-dir "$SO")
+run 2 "dry run without --repartition: the GPT step is BLOCKED" -- "${SI[@]}" "${CO[@]}" --dry-run --yes
+has 'BLOCKED  UFS partition table \(starbite-oneui\)' "layout A -> starbite-oneui needs --repartition"
+before=$(fakehash "$PO")
+run 0 "dry run with --repartition" -- "${SI[@]}" "${CO[@]}" --dry-run --yes --repartition
+[ "$(fakehash "$PO")" = "$before" ] && ok "dry run: the fake phone is byte-identical" || bad "dry run changed the fake phone"
+has '19 VENDOR +1313920\.\.1499519 .*\| 19 VENDOR +12512000\.\.12774143 .*\| moved' "VENDOR moves behind WINDOWS and stays sda19"
+has '28 A16DATA +13518592\.\.15615994 .*\| 28 A16DATA +12790528\.\.15615994 .*\| moved' "A16DATA moves (10.78 GiB) and stays sda28"
+has "adb shell 'mke2fs -t ext4 -F -L data -b 4096 /dev/block/sda28 2825462'  \[dry run: not run\]" "the exact mke2fs: the new A16DATA's 2825467 blocks - 5"
+has 'Block count 2825462 \(= 2825467 - 5\), Block size 4096' "...and how it is verified"
+order=$(grep -oE 'Step [0-9]+/[0-9]+: One UI 8 (system|vendor|odm|/data)' "$W/last.txt" | sed -E 's/.*One UI 8 //' | tr '\n' ' ')
+[ "$order" = "system vendor odm /data " ] && ok "order: SYSTEM, VENDOR, ODM, then /data is made" || bad "order: $order"
+prot=$(protected_nogpt "$PO")
+run 0 "rehearsal: repartition to starbite-oneui, then One UI" -- "${SI[@]}" "${CO[@]}" --rehearse --yes --repartition --no-reboot
+has 'the kernel sees the starbite-oneui table' "the kernel sees the new table"
+has 'oneui-odm: verified on the phone' "the ODM image written (part-write.py) and read back"
+has 'oneui-data: verified on the phone \(read back\): TYPE ext4 LABEL data, 2825462 blocks of 4096' "/data: ext4 \"data\", 2825462 blocks"
+has 'One UI 8: ok: A16DATA made fresh' "no password: One UI's /data is new"
+[ "$(protected_nogpt "$PO")" = "$prot" ] && ok "protected areas, Samsung's other partitions, sda's PIT area, sdb-sde: byte-identical" || bad "a protected area changed"
+python3 - "$BO" "$PO" <<'PY' && ok "the GPT is starbite-oneui; SYSTEM, VENDOR, ODM hold the images; A16DATA's ext4 ends 5 blocks early" || bad "One UI phone differs"
+import hashlib, os, sys, tomllib
+sys.path.insert(0, 'tools/installer')
+from sbinst import gpt, ufslayout
+b, p = sys.argv[1:]
+dev = os.path.join(p, 'dev', 'block')
+with open(os.path.join(dev, 'sda'), 'rb') as f:
+    head = f.read(6 * 4096); f.seek(-5 * 4096, 2); tail = f.read()
+d = gpt.read(head, tail, 15616000)
+assert d.valid and not gpt.plan(d, ufslayout.get('starbite-oneui')).changed
+for it in tomllib.loads(open(os.path.join(b, 'installer-manifest.toml')).read())['item']:
+    if it.get('file') and it['dest'] in ('part:SYSTEM', 'part:VENDOR', 'part:ODM'):
+        with open(os.path.join(dev, 'by-name', it['dest'][5:]), 'rb') as fh:
+            assert hashlib.sha256(fh.read(it['size'])).hexdigest() == it['sha256'], it['key']
+        print(f'  {it["key"]:<14} {it["dest"]:<12} ok')
+node = os.path.basename(os.readlink(os.path.join(dev, 'by-name', 'A16DATA')))
+blocks = os.path.getsize(os.path.join(dev, node)) // 4096
+sb = open(os.path.join(p, 'blkid', node + '.sb')).read()
+assert open(os.path.join(p, 'blkid', node)).read().strip() == 'TYPE="ext4" LABEL="data"'
+assert f'Block count:              {blocks - 5}\n' in sb, sb
+print(f'  A16DATA = {node}: {blocks} blocks, ext4 "data" of {blocks - 5}')
+PY
+run 0 "and again: nothing left to do" -- "${SI[@]}" "${CO[@]}" --rehearse --yes --no-reboot
+has 'keep  One UI 8 /data' "/data: kept (made by this installer, in use)"
+has '; 0 write commands ran' "0 write commands"
+"${FP[@]}" create "$W/phone-oneui1" --gpt starbite-oneui --card starbite >/dev/null
+O1=(--bundle "$BO" --fake-root "$W/phone-oneui1" --state-dir "$W/state-oneui1")
+run 0 "a phone already on starbite-oneui (S9 #1 today), no journal: dry run" -- "${SI[@]}" "${O1[@]}" --dry-run --yes
+has 'skip  UFS partition table \(starbite-oneui\)' "the GPT step: skip"
+has 'keep  One UI 8 /data' "A16DATA holds data: kept"
+has 'has data: kept \(--replace oneui-data overwrites it\)' "...and says how to make it new on purpose"
+run 0 "...with --replace oneui-data" -- "${SI[@]}" "${O1[@]}" --dry-run --yes --replace oneui-data
+has 'REPLACE  One UI 8 /data' "/data: REPLACE"
+has "mke2fs -t ext4 -F -L data -b 4096 /dev/block/sda28 2825462'" "the same mke2fs"
+rm -rf "$W/phone-oneui1" "$W/state-oneui1"
 
 hdr "result: $pass passed, $fail failed"
 [ "${KEEP:-0}" = 1 ] || rm -rf "$W"
