@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Give the release's PPTT the A55 caches at build time (docs/WIN11-USB.md section 10).
 
-  pptt-patch.py ACPI.ffs OUT.ffs [--dump OUT.aml]
+  pptt-patch.py ACPI.ffs OUT.ffs [--dump OUT.aml] [--table PPTT.aml]
+
+--table: put this ready-made PPTT in (tools/woa/pptt-gen.py, the OEM-shaped table of
+docs/WIN11-24H2-A55.md) instead of PpttBuild's cache-augmented copy of the release's.
 
 ACPI.ffs is the woa release's platform table file (FREEFORM 11111111-2222-3333-4444-555555555501,
 one RAW section per table: FACP, GTDT, APIC, PPTT, DSDT, SSDT), as `dxe-replace.py --extract`
@@ -46,6 +49,13 @@ def sections(body):
 def main():
     args = sys.argv[1:]
     dump = None
+    table = None
+    if '--table' in args:
+        i = args.index('--table')
+        table = open(args[i + 1], 'rb').read()
+        del args[i:i + 2]
+        if table[:4] != b'PPTT' or int.from_bytes(table[4:8], 'little') != len(table) or sum(table) & 0xFF:
+            sys.exit('--table: not a PPTT with a valid length and checksum')
     if '--dump' in args:
         i = args.index('--dump')
         dump = args[i + 1]
@@ -66,14 +76,17 @@ def main():
     if len(pptt) != 1:
         sys.exit(f'{len(pptt)} PPTT sections')
     old = pptt[0][4:]
-    with tempfile.TemporaryDirectory() as td:
-        tool = os.path.join(td, 'pptt-tool')
-        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-o', tool,
-                        os.path.join(MOD, 'test/pptt-tool.c'), os.path.join(MOD, 'PpttBuild.c')], check=True)
-        src, dst = os.path.join(td, 'old.aml'), os.path.join(td, 'new.aml')
-        open(src, 'wb').write(old)
-        subprocess.run([tool, src, dst, PRIVATE_LEVELS] + CACHES, check=True, stdout=subprocess.DEVNULL)
-        new = open(dst, 'rb').read()
+    if table is not None:
+        new = table
+    else:
+        with tempfile.TemporaryDirectory() as td:
+            tool = os.path.join(td, 'pptt-tool')
+            subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-o', tool,
+                            os.path.join(MOD, 'test/pptt-tool.c'), os.path.join(MOD, 'PpttBuild.c')], check=True)
+            src, dst = os.path.join(td, 'old.aml'), os.path.join(td, 'new.aml')
+            open(src, 'wb').write(old)
+            subprocess.run([tool, src, dst, PRIVATE_LEVELS] + CACHES, check=True, stdout=subprocess.DEVNULL)
+            new = open(dst, 'rb').read()
     if dump:
         open(dump, 'wb').write(new)
     body = bytearray()

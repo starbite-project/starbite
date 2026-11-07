@@ -41,6 +41,9 @@ M3PARK=${M3PARK:-0}                               # 1: Star2LteSsdtDxe parks M3 
 M3RUN=${M3RUN:-0}                                 # 1: each M3 runs a test in the UEFI context (B3a)
 M3BOOT=${M3BOOT:-0}                               # 1: M3 core 1 becomes the boot CPU at ExitBootServices (B3,
                                                   #    with A55 1..3); 2: the same, M3 1 alone ("solo")
+CORES8=${CORES8:-0}                               # 1: M3 cores 1..3 parked for Windows + MADT/_MAT at EBS (7 CPUs);
+                                                  #    2: also M3 core 0 (8 CPUs); docs/WIN11-24H2-A55.md
+PPTT_OEM=${PPTT_OEM:-0}                           # 1: the platform ACPI file with the OEM-shaped PPTT (tools/woa/pptt-gen.py)
 SOLO=${SOLO:-}                                    # name: only the isolated image src38 + Star2LteSsdtDxe
                                                   # (with the PPTT/M3 flags above), no USB, no blobs
 KILL_SERIAL=${KILL_SERIAL:-0}                     # 1: drop the release's SerialDxe (room in the DXE slot)
@@ -54,7 +57,8 @@ out=build/woa
 SUFFIX=${SUFFIX:-}
 [ -z "${EXTRA_AML:-}" ] || [ -n "$SUFFIX" ] || { echo "EXTRA_AML needs a SUFFIX so the plain images are kept" >&2; exit 1; }
 [ "$PPTT" = 0 ] || [ -n "$SUFFIX" ] || { echo "PPTT=1 needs a SUFFIX so the plain images are kept" >&2; exit 1; }
-[ $((M3 + M3PARK + M3RUN + (M3BOOT > 0))) -le 1 ] || { echo "one M3 experiment per image (M3, M3PARK, M3RUN, M3BOOT)" >&2; exit 1; }
+[ $((M3 + M3PARK + M3RUN + (M3BOOT > 0) + (CORES8 > 0))) -le 1 ] || { echo "one M3 experiment per image (M3, M3PARK, M3RUN, M3BOOT, CORES8)" >&2; exit 1; }
+[ $((PPTT_STATIC + PPTT_OEM)) -le 1 ] || { echo "PPTT_STATIC and PPTT_OEM exclude each other" >&2; exit 1; }
 [ "$PPTT_STATIC" = 0 ] || [ -n "$SUFFIX" ] || { echo "PPTT_STATIC=1 needs a SUFFIX so the plain images are kept" >&2; exit 1; }
 for f in "$rel" "$W/Star2LtePkg-src38.fd" "$W/pmic-rtc.ffs" "$W/src38.fd" "$W/starbite-uefi-src38.bin"; do
     [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
@@ -102,7 +106,8 @@ image() {   # image NAME ROLE ACPI VBUS BLOB
     echo "== $name: role $role, ACPI layout $acpi, VBUS $vbus, blob $blob"
     tools/woa/build-uefi.sh "$UEFI_TARGET" -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_USB_DXE=TRUE -D STAR2LTE_SSDT_DXE=TRUE \
         -D STARBITE_USB_ROLE=$role -D STARBITE_USB_ACPI=$acpi -D STARBITE_USB_VBUS=$vbus -D STARBITE_PPTT_FIX=$PPTT \
-        -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK -D STARBITE_M3_RUN=$M3RUN -D STARBITE_M3_BOOT=$M3BOOT | tail -1
+        -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK -D STARBITE_M3_RUN=$M3RUN -D STARBITE_M3_BOOT=$M3BOOT \
+        -D STARBITE_CORES8=$CORES8 | tail -1
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$USBDXE" "$out/$name-usb.ffs"
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$SSDTDXE" "$out/$name-ssdt.ffs"
     grep -aq "usb-policy role=$role acpi=$acpi vbus=$vbus" "$out/$name-usb.ffs" ||
@@ -123,6 +128,13 @@ if [ "$PPTT_STATIC" = 1 ]; then
     python3 -I tools/woa/pptt-patch.py "$out/acpi/release-tables.ffs" "$out/acpi/release-tables-pptt.ffs" --dump "$out/acpi/pptt-s9.aml"
     serial+=(--kill-blank "$ACPIFILE" --add "$out/acpi/release-tables-pptt.ffs"); unserial+=(--replaced "$ACPIFILE")
 fi
+if [ "$PPTT_OEM" = 1 ]; then
+    # the OEM-shaped PPTT (docs/WIN11-24H2-A55.md): rev 1, placeholder caches per core type, A55 UIDs 0..3, M3 4..7
+    python3 tools/woa/dxe-replace.py "$rel" "$rel" /dev/null --extract "$ACPIFILE" "$out/acpi/release-tables.ffs" >/dev/null
+    python3 -I tools/woa/pptt-gen.py "$out/acpi/pptt-oem.aml"
+    python3 -I tools/woa/pptt-patch.py "$out/acpi/release-tables.ffs" "$out/acpi/release-tables-ppttoem.ffs" --table "$out/acpi/pptt-oem.aml"
+    serial+=(--kill-blank "$ACPIFILE" --add "$out/acpi/release-tables-ppttoem.ffs"); unserial+=(--replaced "$ACPIFILE")
+fi
 # the M3 probe / PPTT fix code is linked in only with its flag (LTO drops it otherwise)
 flags_ok() {   # flags_ok FFS
     local has
@@ -137,13 +149,15 @@ flags_ok() {   # flags_ok FFS
     if grep -aq "=M3 boot v3 armed" "$1"; then has=1; else has=0; fi
     [ "$has" = "$((M3BOOT > 0))" ] || { echo "$1: M3 boot present=$has, wanted $M3BOOT" >&2; exit 1; }
     if [ "$M3BOOT" = 2 ]; then grep -aq "solo: M3 1 only" "$1" || { echo "$1: not the solo build" >&2; exit 1; }; fi
+    if grep -aq "=C8 v1: M3 cores" "$1"; then has=1; else has=0; fi
+    [ "$has" = "$((CORES8 > 0))" ] || { echo "$1: cores8 present=$has, wanted $CORES8" >&2; exit 1; }
 }
 if [ -n "$SOLO" ]; then
     # An experiment alone: src38 + Star2LteSsdtDxe with the chosen flags, no USB module; only the
     # EXTRA_AML blobs (e.g. SBGPU, so Windows keeps its display driver on these boots).
-    echo "== $SOLO: Star2LteSsdtDxe alone (PPTT fix $PPTT, M3 probe $M3, M3 park $M3PARK, M3 run $M3RUN, M3 boot $M3BOOT)"
+    echo "== $SOLO: Star2LteSsdtDxe alone (PPTT fix $PPTT, M3 probe $M3, M3 park $M3PARK, M3 run $M3RUN, M3 boot $M3BOOT, cores8 $CORES8, PPTT OEM $PPTT_OEM)"
     tools/woa/build-uefi.sh "$UEFI_TARGET" -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_SSDT_DXE=TRUE \
-        -D STARBITE_PPTT_FIX=$PPTT -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK -D STARBITE_M3_RUN=$M3RUN -D STARBITE_M3_BOOT=$M3BOOT | tail -1
+        -D STARBITE_PPTT_FIX=$PPTT -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK -D STARBITE_M3_RUN=$M3RUN -D STARBITE_M3_BOOT=$M3BOOT -D STARBITE_CORES8=$CORES8 | tail -1
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$SSDTDXE" "$out/$SOLO-ssdt.ffs"
     flags_ok "$out/$SOLO-ssdt.ffs"
     python3 tools/woa/dxe-replace.py "$W/Star2LtePkg-src38.fd" "$rel" "$out/$SOLO.fd" \

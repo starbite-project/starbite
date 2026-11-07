@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble the M3 stubs into C headers (docs/WIN11-BIGCORES.md stages B2, B3a).
+"""Assemble the M3 stubs into C headers (docs/WIN11-BIGCORES.md stages B2, B3a; docs/WIN11-24H2-A55.md, all 8 cores).
 
   gen-stubs.py [--check]
 
@@ -18,7 +18,8 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 STUBS = [('M3ParkStub', 64, 'M3_PARK_STUB_LIT',
           'literals (mailbox, UID, then the digits of el, frq, kctl, spin, wake, t; 8 bytes each)'),
-         ('M3RunStub', 8, 'M3_RUN_STUB_LIT', 'literal (the context address, 8 bytes)')]
+         ('M3RunStub', 8, 'M3_RUN_STUB_LIT', 'literal (the context address, 8 bytes)'),
+         ('Cores8ParkStub', 24, 'CORES8_PARK_STUB_LIT', 'literals (mailbox, UID, state digit address; 8 bytes each)')]
 
 
 def elf_sections(elf):

@@ -60,6 +60,9 @@
 #ifndef STARBITE_M3_PROBE
 #define STARBITE_M3_PROBE 0
 #endif
+#ifndef STARBITE_CORES8
+#define STARBITE_CORES8 0
+#endif
 
 VOID
 PpttFix (
@@ -83,6 +86,11 @@ M3Run (
 
 VOID
 M3BootArm (
+  VOID
+  );
+
+VOID
+Cores8Arm (
   VOID
   );
 
@@ -316,13 +324,14 @@ SsdtDxeEntry (
   UINTN                          Installed;
 
   SbLog (
-    "=SSDT v%d at dispatch, PPTT fix %d, M3 probe %d, M3 park %d, M3 run %d, M3 boot %d",
+    "=SSDT v%d at dispatch, PPTT fix %d, M3 probe %d, M3 park %d, M3 run %d, M3 boot %d, cores8 %d",
     SSDT_VERSION,
     STARBITE_PPTT_FIX,
     STARBITE_M3_PROBE,
     STARBITE_M3_PARK,
     STARBITE_M3_RUN,
-    STARBITE_M3_BOOT
+    STARBITE_M3_BOOT,
+    STARBITE_CORES8
     );
   if (STARBITE_M3_PROBE) {
     M3Probe ();
@@ -336,6 +345,9 @@ SsdtDxeEntry (
  #endif
  #if STARBITE_M3_PARK
   M3Park ();          // after the probe, never with it (build-win-usbhost.sh refuses both)
+ #endif
+ #if STARBITE_CORES8
+  Cores8Arm ();       // the M3s for Windows (docs/WIN11-24H2-A55.md); alone, like the other M3 experiments
  #endif
   if (STARBITE_PPTT_FIX) {
     PpttFix ();
