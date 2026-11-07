@@ -381,6 +381,144 @@ void ut_everyday(void)
 
 static int files_rows[GPT_MAX + 1];
 static int files_nrows;
+static int row_browse = -1;
+
+/* ---- the card browser (read only) ---- */
+#include "exfat.h"
+static struct exfat cfs;
+static uint8_t *cbuf;
+static int cfs_state;                                    /* 0 not tried, 1 mounted, < 0 the error */
+#define BMAX 120
+static struct exfat_ent bents[BMAX];
+static struct exfat_ent bstack[8];
+static int bdepth, bn, btotal, brow[BMAX];
+
+static int card_rd(uint64_t sector, uint32_t count, void *dst) { return sd_read(sector, count, (uintptr_t)dst); }
+
+static int card_mount(void)
+{
+    if (cfs_state > 0)
+        return 1;
+    if (!cbuf)
+        cbuf = sb_alloc(1U << 17);
+    uint64_t start;
+    sd_allow();
+    if (!cbuf || !sd_up()) {
+        cfs_state = -1;
+        return 0;
+    }
+    int r = exfat_find_volume(card_rd, cbuf, &start);
+    if (!r)
+        r = exfat_mount(&cfs, card_rd, start, cbuf, 1U << 17);
+    cfs_state = r ? (r < 0 ? r : -9) - 10 : 1;
+    return cfs_state > 0;
+}
+
+static void browse_fill(struct page *p)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "/");
+    for (int i = 0; i < bdepth; ++i) {
+        ub_s(&u, bstack[i].name);
+        ub_s(&u, "/");
+    }
+    page_hdr(p, u.b);
+    if (!card_mount()) {
+        page_note(p, "The card is not readable (no card, or not exFAT).", C_ORANGE);
+        bn = 0;
+        return;
+    }
+    bn = exfat_list(&cfs, bdepth ? &bstack[bdepth - 1] : 0, bents, BMAX, &btotal);
+    if (bn < 0)
+        bn = 0;
+    for (int i = 0; i < bn; ++i) {
+        ub_init(&u);
+        if (bents[i].dir)
+            ub_s(&u, "folder");
+        else
+            ub_size(&u, bents[i].size);
+        brow[i] = page_row(p, bents[i].name, u.b, 0);
+    }
+    if (btotal > bn) {
+        ub_init(&u);
+        ub_dec(&u, (uint64_t)(btotal - bn));
+        ub_s(&u, " more entries not shown");
+        page_note(p, u.b, C_L3);
+    }
+    if (!bn)
+        page_note(p, "Empty folder.", C_L3);
+    page_note(p, "Read only. Pick a file for its SHA-256 (shown under Files); Bixby goes up.", C_L3);
+}
+
+static void ut_browse(void)
+{
+    struct page p;
+    page_init(&p, UI_VIEW_Y0, UI_H);
+    int focus = -1, redo = 1;
+    ui_fill(0, 0, UI_W, UI_H, C_BG);
+    for (;;) {
+        if (redo) {
+            ui_fill(0, 0, UI_W, UI_VIEW_Y0, C_BG);
+            ui_header_draw("Card files", "Files", "READ ONLY", C_L2);
+            ut_status_bar();
+            page_begin(&p);
+            browse_fill(&p);
+            page_end(&p);
+            page_set_focus(&p, focus);
+            page_redraw(&p);
+            ui_present();
+            redo = 0;
+        }
+        struct ui_ev e;
+        ui_poll(&e, 20);
+        ut_service();
+        if (e.type == EV_BACK || e.type == EV_SWIPE_R || (e.type == EV_TAP && ui_header_back_hit(e.x, e.y))) {
+            if (!bdepth)
+                break;
+            --bdepth;
+            focus = -1;
+            page_set_scroll(&p, 0);
+            redo = 1;
+            continue;
+        }
+        if (e.type == EV_HOME)
+            break;
+        int pick = -1;
+        if (page_scroll_event(&p, &e)) {
+            ;
+        } else if ((e.type == EV_UP || e.type == EV_DOWN) && bn) {
+            int i = 0;
+            while (i < bn && brow[i] != focus)
+                ++i;
+            i = focus < 0 ? 0 : (i + (e.type == EV_UP ? bn - 1 : 1)) % bn;
+            focus = brow[i];
+            page_set_focus(&p, focus);
+            page_keep_visible(&p, focus);
+            ui_present();
+        } else if (e.type == EV_SELECT && focus >= 0) {
+            pick = focus;
+        } else if (e.type == EV_TAP) {
+            pick = page_hit(&p, e.x, e.y, 0);
+        }
+        for (int i = 0; pick >= 0 && i < bn; ++i) {
+            if (brow[i] != pick)
+                continue;
+            if (bents[i].dir && bdepth < 8) {
+                bstack[bdepth++] = bents[i];
+                focus = -1;
+                page_set_scroll(&p, 0);
+                redo = 1;
+            } else if (!bents[i].dir && hash_job.state != HASH_RUNNING) {
+                (void)hash_start_file(&cfs, &bents[i]);
+                page_free(&p);
+                return;                                  /* Files shows the progress */
+            }
+        }
+        page_fling_step(&p);
+    }
+    page_free(&p);
+}
 
 static void files_fill(struct page *p)
 {
@@ -430,6 +568,8 @@ static void files_fill(struct page *p)
                     j->state == HASH_RUNNING ? C_STAR : C_ORANGE);
         }
     }
+    page_hdr(p, "Card files");
+    row_browse = page_button(p, "Browse the card (read only)", C_STAR);
     page_hdr(p, "Targets");
     files_nrows = 0;
     uint64_t card = sd_sectors_hint() * 512ULL;
@@ -477,10 +617,14 @@ void ut_files(void)
             ;
         } else if (e.type == EV_UP || e.type == EV_DOWN) {
             int i = 0;
-            while (i < files_nrows && files_rows[i] != focus)
-                ++i;
-            i = focus < 0 ? 0 : (i + (e.type == EV_UP ? files_nrows - 1 : 1)) % files_nrows;
-            focus = files_rows[i];
+            if (focus == row_browse)
+                i = e.type == EV_DOWN ? 0 : files_nrows - 1;
+            else {
+                while (i < files_nrows && files_rows[i] != focus)
+                    ++i;
+                i = focus < 0 ? -1 : i + (e.type == EV_UP ? -1 : 1);
+            }
+            focus = i < 0 || i >= files_nrows ? row_browse : files_rows[i];
             page_set_focus(&p, focus);
             page_keep_visible(&p, focus);
             ui_present();
@@ -488,6 +632,13 @@ void ut_files(void)
             pick = focus;
         } else if (e.type == EV_TAP) {
             pick = page_hit(&p, e.x, e.y, 0);
+        }
+        if (pick >= 0 && pick == row_browse) {
+            ut_browse();
+            ui_input_reset();
+            ui_fill(0, 0, UI_W, UI_H, C_BG);
+            next = 0;
+            pick = -1;
         }
         if (pick >= 0 && hash_job.state != HASH_RUNNING) {
             for (int i = 0; i < files_nrows; ++i)

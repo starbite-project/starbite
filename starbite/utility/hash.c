@@ -7,6 +7,7 @@
 #include "hash.h"
 #include "ufs.h"
 #include "sd.h"
+#include "exfat.h"
 
 #define STEP_BLOCKS 256U                               /* 1 MiB per step (4 KiB blocks) */
 
@@ -58,6 +59,22 @@ int hash_start_card(uint64_t bytes)
     return hash_start(HASH_SD, "microSD", 0, bytes);
 }
 
+int hash_start_file(struct exfat *fs, const struct exfat_ent *e)
+{
+    int r = hash_start(HASH_FILE, e->name, 0, e->size);
+    if (r)
+        return r;
+    hash_job.fs = fs;
+    hash_job.first = e->first;
+    hash_job.nofat = e->nofat;
+    if (!e->size) {                                      /* empty file: done at once */
+        sha256_final(&hash_job.sha, hash_job.digest);
+        hash_job.t1 = sb_ms();
+        hash_job.state = HASH_DONE;
+    }
+    return 0;
+}
+
 void hash_step(void)
 {
     struct hash_job *j = &hash_job;
@@ -67,7 +84,8 @@ void hash_step(void)
     uint64_t want = left < STEP_BLOCKS * 4096ULL ? left : STEP_BLOCKS * 4096ULL;
     uint64_t blocks = (want + 4095) / 4096;
     int r = j->medium == HASH_UFS ? ufs_read_to(j->lba, blocks, (uintptr_t)buf)
-                                  : sd_read4k(j->lba, blocks, (uintptr_t)buf);
+          : j->medium == HASH_SD  ? sd_read4k(j->lba, blocks, (uintptr_t)buf)
+                                  : exfat_read_chain(j->fs, j->first, j->nofat, j->done, buf, want);
     if (r) {
         j->err = r;
         j->state = HASH_FAILED;

@@ -16,6 +16,7 @@
 #include "usb_desc.h"
 #include "hash.h"
 #include "calc.h"
+#include "exfat.h"
 
 static int busy[16];
 static uintptr_t qbuf[16];
@@ -31,6 +32,13 @@ static int fails;
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); ++fails; } } while (0)
 
 static uint8_t *ram;
+static FILE *card;
+static int card_rd(uint64_t sector, uint32_t count, void *dst)
+{
+    if (fseek(card, (long)(sector * 512), SEEK_SET))
+        return -1;
+    return fread(dst, 512, count, card) == count ? 0 : -1;
+}
 static int rd(struct msc_lun *l, uint64_t lba, uint32_t n, uint8_t *d) { (void)l; memcpy(d, ram + lba * 512, n * 512); return 0; }
 static int wr(struct msc_lun *l, uint64_t lba, uint32_t n, const uint8_t *s) { (void)l; memcpy(ram + lba * 512, s, n * 512); return 0; }
 static int nowr(struct msc_lun *l, uint64_t lba, uint32_t n, const uint8_t *s) { (void)l; (void)lba; (void)n; (void)s; return -1; }
@@ -219,6 +227,55 @@ int main(int argc, char **argv)
         CHECK(strcmp(o, "0.000001234") == 0, "format 0.000001234: %s", o);
         calc_format(0.0000001234, o, sizeof(o));
         CHECK(strcmp(o, "1.234e-7") == 0, "format 1.234e-7: %s", o);
+    }
+    /* read-only exFAT against a real mkfs.exfat card image (UT_EXFAT: starbite/tools/fixtures, via build.sh) */
+    const char *cardpath = getenv("UT_EXFAT");
+    if (cardpath && (card = fopen(cardpath, "rb"))) {
+        static uint8_t sec[512], cl[1 << 17], fb[600000];
+        static struct exfat fs;
+        struct exfat_ent ents[32], e;
+        uint64_t start = 0;
+        int total = 0;
+        CHECK(exfat_find_volume(card_rd, sec, &start) == 0 && start == 2048, "exFAT volume at %llu", (unsigned long long)start);
+        CHECK(exfat_mount(&fs, card_rd, start, cl, sizeof(cl)) == 0 && fs.cluster_bytes == 4096, "mount");
+        int n = exfat_list(&fs, 0, ents, 32, &total);
+        int seen = 0;
+        for (int i = 0; i < n; ++i)
+            seen += !strcmp(ents[i].name, "hello.txt") + !strcmp(ents[i].name, "distros") * 2 +
+                    !strcmp(ents[i].name, "A very long file name with spaces.txt") * 4 + !strcmp(ents[i].name, "frag.bin") * 8;
+        CHECK(seen == 15 && n == total, "root listing (%d entries, seen %d)", n, seen);
+        CHECK(exfat_walk(&fs, "/HELLO.TXT", &e, ents, 32) == 0 && e.size == 15 &&
+              exfat_read_chain(&fs, e.first, e.nofat, 0, fb, e.size) == 0 && !memcmp(fb, "hello starbite\n", 15),
+              "hello.txt");
+        CHECK(exfat_walk(&fs, "/deep/a/b/c.txt", &e, ents, 32) == 0 && e.size == 5 &&
+              exfat_read_chain(&fs, e.first, e.nofat, 0, fb, 5) == 0 && !memcmp(fb, "deep\n", 5), "deep path");
+        CHECK(exfat_walk(&fs, "/distros/small.bin", &e, ents, 32) == 0 && e.size == 300000, "small.bin size");
+        CHECK(exfat_read_chain(&fs, e.first, e.nofat, 0, fb, e.size) == 0, "small.bin read");
+        int ok = 1;
+        for (unsigned i = 0; i < 300000; ++i)
+            ok &= fb[i] == (uint8_t)(i * 7 + 3);
+        CHECK(ok, "small.bin content");
+        CHECK(exfat_read_chain(&fs, e.first, e.nofat, 12345, fb, 70000) == 0, "small.bin odd offset");
+        ok = 1;
+        for (unsigned i = 0; i < 70000; ++i)
+            ok &= fb[i] == (uint8_t)((i + 12345) * 7 + 3);
+        CHECK(ok, "small.bin odd offset content");
+        CHECK(exfat_walk(&fs, "/frag.bin", &e, ents, 32) == 0 && e.size == 500000, "frag.bin");
+        printf("exFAT: frag.bin %s, first cluster %u\n", e.nofat ? "contiguous (NoFatChain)" : "on a FAT chain", e.first);
+        CHECK(exfat_read_chain(&fs, e.first, e.nofat, 0, fb, e.size) == 0, "frag.bin read");
+        ok = 1;
+        for (unsigned i = 0; i < 500000; ++i)
+            ok &= fb[i] == (uint8_t)(i * 13 + 5);
+        CHECK(ok, "frag.bin content");
+        CHECK(exfat_read_chain(&fs, e.first, e.nofat, 199999, fb, 100003) == 0, "frag.bin piece");
+        ok = 1;
+        for (unsigned i = 0; i < 100003; ++i)
+            ok &= fb[i] == (uint8_t)((i + 199999) * 13 + 5);
+        CHECK(ok, "frag.bin piece content");
+        CHECK(exfat_walk(&fs, "/nope", &e, ents, 32) != 0, "missing path refused");
+        fclose(card);
+    } else {
+        printf("exFAT: no UT_EXFAT fixture, skipped\n");
     }
     /* the configuration descriptor, both speeds */
     for (int fs = 0; fs < 2; ++fs) {

@@ -984,6 +984,7 @@ int sb_worker_stop(void) { return hstop; }
 void sb_worker_publish(struct sb_wslot *s) { s->beats++; }
 
 struct sd_report sd_rep;
+#ifndef SB_HOST_UTILITY
 static int sd_ok;
 void sd_allow(void) { sd_ok = 1; }
 int sd_allowed(void) { return sd_ok; }
@@ -1002,6 +1003,8 @@ int sd_read4k(uint64_t l, uint64_t c, uintptr_t d) { (void)l; (void)c; (void)d; 
 int sd_write(uint64_t s, uint32_t c, uintptr_t d) { (void)s; (void)c; (void)d; return sb_fence_active() ? -1 : -9; }
 int sd_write4k(uint64_t l, uint64_t c, uintptr_t d) { (void)l; (void)c; (void)d; return sb_fence_active() ? -1 : -9; }
 uint64_t sd_sectors_hint(void) { return 249999360ULL; }
+#endif
+
 
 /* ---- present: the panel the host sees ------------------------------------------------------- */
 

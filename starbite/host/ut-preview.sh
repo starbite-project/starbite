@@ -23,13 +23,14 @@ limactl shell --workdir "$root" starbite gcc -O1 -g -DSB_HOST -DSB_HOST_UTILITY 
     -o "$out/ut-host" "$root/starbite/host/host.c" "$root/starbite/host/ut-host-stubs.c" \
     "$lib/str.c" "$lib/log.c" "$lib/sbui.c" "$lib/sbui_input.c" "$lib/sbui_page.c" "$lib/sbui_w.c" "$lib/sb7.c" \
     "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" \
-    "$lib/assets.S" "$ut/main.c" "$ut/msc.c" "$ut/fat.c" "$ut/tools.c" "$ut/pad.c" "$ut/hid.c" "$ut/hash.c" "$ut/sha256.c" "$ut/calc.c" "$ut/calcmath.c" -lm -lpthread
+    "$lib/assets.S" "$ut/main.c" "$ut/msc.c" "$ut/fat.c" "$ut/tools.c" "$ut/pad.c" "$ut/hid.c" "$ut/hash.c" "$ut/sha256.c" "$ut/calc.c" "$ut/calcmath.c" "$ut/exfat.c" -lm -lpthread
 
+limactl shell --workdir "$root" starbite sh -c "gzip -dc starbite/tools/fixtures/exfat-card.img.gz > $out/exfat-card.img"
 scene() {
     name=$1
     env=$2
     shift 2
-    limactl shell --workdir "$root" starbite env $env "$out/ut-host" "$out" /dev/null "$@" "s:$name" q | grep -E "panel|FAIL|host:" || true
+    limactl shell --workdir "$root" starbite env $env UT_HOST_CARD="$out/exfat-card.img" "$out/ut-host" "$out" /dev/null "$@" "s:$name" q | grep -E "panel|FAIL|host:" || true
     "$py" -c "from PIL import Image; Image.open('$out/$name.ppm').save('$png/$name.png')"
 }
 scene home        UT_HOST_USB=0 w:500
@@ -46,5 +47,8 @@ scene files       UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200
 scene files-hash  UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:p w:4000
 scene everyday4    UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:d w:200 k:d w:300
 scene calc        UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:d w:200 k:d w:200 k:p w:600 t:450,2245 w:150 t:1290,1165 w:150 t:170,2245 w:150 t:170,2515 w:150 t:1290,2515 w:400
+scene browse      UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200
+scene browse-dir  UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:p w:800
+scene file-hash   UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:3000
 scene idle-warn   UT_HOST_USB=0 w:150000
 echo "PNGs in $png"

@@ -54,8 +54,9 @@ echo "utility: assets from $(basename "$SB7"), sha256 $(sha256sum "$SB7" | cut -
 # failure stops the build.
 if [ "$native" = 1 ]; then
     gcc -O1 -Wall -Wextra -Werror -I"$here" -I"$lib" -o "$out/ut-host-test" "$root/starbite/tools/ut-host-test.c" \
-        "$here/msc.c" "$here/fat.c" "$here/usb_desc.c" "$here/sha256.c" "$here/calcmath.c" "$lib/str.c" -lm
-    "$out/ut-host-test"
+        "$here/msc.c" "$here/fat.c" "$here/usb_desc.c" "$here/sha256.c" "$here/calcmath.c" "$here/exfat.c" "$lib/str.c" -lm
+    gzip -dc "$root/starbite/tools/fixtures/exfat-card.img.gz" > "$out/exfat-card.img"
+    UT_EXFAT="$out/exfat-card.img" "$out/ut-host-test"
 fi
 
 CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie -fvisibility=hidden \
