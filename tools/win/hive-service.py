@@ -262,6 +262,18 @@ def main(a):
         s += 'commit\n'
         hivexsh(work, s)
         shown = ekey
+    elif cmd == 'usbfn-config':
+        # usbfn-config NAME: add Control\USBFN\Configurations\<NAME> with InterfaceList GenericUsbFn, bmAttributes 0xC0,
+        # bMaxPower 0x32. ufx01000 requires the default configuration ("Default") to exist too (docs/WIN11-USB.md, 16:20).
+        base = f'{cs}\\Control\\USBFN\\Configurations'
+        if not exists(h, base):
+            raise SystemExit('run usbfn first')
+        if exists(h, f'{base}\\{arg}'):
+            raise SystemExit(f'{base}\\{arg} exists already: nothing changed')
+        s = f'cd \\{base}\nadd {arg}\n' + setvals(None, f'{base}\\{arg}', {
+            'InterfaceList': (7, 'GenericUsbFn\0\0'.encode('utf-16-le')), 'bmAttributes': dword(0xC0), 'bMaxPower': dword(0x32)})
+        hivexsh(work, s + 'commit\n')
+        shown = f'{base}\\{arg}'
     elif cmd == 'usbfn-default':
         # usbfn-default VID:PID: the Control\USBFN\Default key ufx01000 opens first (fatal 0xC0000034 without it,
         # docs/WIN11-USB.md 5.2), plus bmAttributes/bMaxPower on Configurations\StarbiteLink. No Configurations\Default.
