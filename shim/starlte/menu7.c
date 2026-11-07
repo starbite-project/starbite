@@ -3348,6 +3348,39 @@ static void build_cards(unsigned vp, float ma)
                 b2 = 0;
             }
         }
+        /* too long: the system names give way (whole names, then an ellipsis) so the count stays
+         * whole, as every other line in the menu ends ("3 Systems", never "3 Syst") */
+        if (b2 && (nready ? 36 : 0) + textw + 16 + w2 > 858 && arena_n + 160 <= sizeof(ARENA)) {
+            float room = 858 - (nready ? 36 : 0) - 16 - w2;
+            char *nb = ARENA + arena_n;
+            unsigned bl = slen(b);
+            for (;;) {
+                unsigned cut = 0;
+                for (unsigned q = 0; q + 1 < bl; ++q)
+                    if (b[q] == ',' && b[q + 1] == ' ')
+                        cut = q;
+                if (!cut && bl > 1)     /* one name left: one character (UTF-8) less */
+                    for (cut = bl - 1; cut > 1 && ((uint8_t)b[cut] & 0xc0) == 0x80; --cut)
+                        ;
+                if (!cut)
+                    break;
+                bl = cut;
+                unsigned m = bl < 150 ? bl : 150;
+                for (unsigned q = 0; q < m; ++q)
+                    nb[q] = b[q];
+                nb[m] = (char)0xe2;     /* U+2026 */
+                nb[m + 1] = (char)0x80;
+                nb[m + 2] = (char)0xa6;
+                nb[m + 3] = 0;
+                if (tw(SB7_F_IN400_44, nb, 0) <= room)
+                    break;
+            }
+            if (bl < slen(b)) {
+                b = nb;
+                arena_n += slen(nb) + 1;
+                textw = tw(SB7_F_IN400_44, b, 0);
+            }
+        }
         float total = (nready ? 36 : 0) + textw + (b2 ? 16 + w2 : 0);
         if (total > 858) {
             struct rc pr = xf_rc(EX, rcv(px, cy + 194.5f, 858, 54));
@@ -5047,6 +5080,13 @@ int m7_preview_state(const char *st, float p)
         if (lin >= 0)
             set_focus(FK(F_P, lin, 0), 0);
         SP.scroll.t = 0;
+    } else if (st[0] == 's' && st[1] == 'e' && st[2] == 'c' && st[3] == '-' && st[4] >= '0' && st[4] <= '9') {
+        /* sec-N: section N open, its first row focused (the label audit, docs/BOOT-MENU-OVERNIGHT.md) */
+        unsigned n = (unsigned)(st[4] - '0');
+        if (n >= NS)
+            return 0;
+        open_prov((int)n, SEC[n].n ? rkey(SEC[n].r0) : FK(F_P, n, 0));
+        ensure_visible_now();
     } else if (seq(st, "apple")) {
         int a = sec_by_cat(CAT_APPLE), r = prow("ios26", 0);
         if (a >= 0)

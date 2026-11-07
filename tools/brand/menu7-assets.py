@@ -529,6 +529,12 @@ EXTRA_G = {
     'g:other': ('<circle cx="50" cy="50" r="25" fill="none" stroke="#fff" stroke-width="5"/>'
                 '<circle cx="38" cy="50" r="4.2" fill="#fff"/><circle cx="50" cy="50" r="4.2" '
                 'fill="#fff"/><circle cx="62" cy="50" r="4.2" fill="#fff"/>'),
+    # Starbite Utility OS: three sliders (its keys, gamepad and sensor pages), white on teal
+    'g:utility': ('<g stroke="#fff" stroke-width="5" stroke-linecap="round">'
+                  '<line x1="28" y1="36" x2="72" y2="36"/><line x1="28" y1="50" x2="72" y2="50"/>'
+                  '<line x1="28" y1="64" x2="72" y2="64"/></g>'
+                  '<circle cx="58" cy="36" r="7" fill="#fff"/><circle cx="40" cy="50" r="7" fill="#fff"/>'
+                  '<circle cx="64" cy="64" r="7" fill="#fff"/>'),
 }
 
 
@@ -635,6 +641,8 @@ def tile_table(art):
         'mac13': add('mac13', '#6a1d45', '#f7a03a', 'L:apple'),
         'chromeos': add('chromeos', '#ffffff', '#dfe8f7', 'L:chromium', True),
         'engineer': add('engineer', '#06121f', '#1b4a6e', 'X:engineer'),       # Starbite's own
+        'utility': add('utility', '#062a2e', '#1a8f96', 'g:utility'),          # Starbite's own
+        'starbite-os': add('starbite-os', '#030918', '#0f2f73', 'star'),       # the Starbite star
         'win11': add('win11', '#ffffff', '#dbe4f0', 'L:win11', True),
         'android': add('android', '#05202c', '#0b4a5e', 'L:android'),          # #073042: Android navy
         'ubuntu': add('linux-ubuntu', '#c13a0d', '#f47b3c', 'L:ubuntu'),
@@ -662,7 +670,7 @@ def tile_table(art):
     # today's catalog (docs/MENU7-PORT.md 4.4)
     real = [
         ('ios16', logo['ios16']), ('mac13', logo['mac13']), ('chromeos', logo['chromeos']),
-        ('engineer', logo['engineer']),
+        ('engineer', logo['engineer']), ('utility', logo['utility']), ('starbite-os', logo['starbite-os']),
         ('ios26', logo['ios26']), ('win11', logo['win11']), ('android', logo['android']),
         ('linux-ubuntu', logo['ubuntu']), ('linux', logo['ubuntu']),
         ('linux-ubuntu-gnome', logo['gnome']), ('linux-ubuntu-lomiri', logo['lomiri']),
@@ -675,6 +683,10 @@ def tile_table(art):
     # tile's colours; without the file the vendor-logo tile above stays
     rel = {}
     for k, tid in real:
+        # 'android' is One UI 8 (Android 16) today: the Android 17 badge would name the wrong
+        # release, so it keeps the Android logo tile (docs/BOOT-MENU-OVERNIGHT.md)
+        if k == 'android':
+            continue
         if not CONCEPT_ART and k in menu7_logos.RELEASE and menu7_logos.release_file(k):
             name, c1, c2, g, dark = tiles[tid - 1]
             rel[k] = add(k + ':release', c1, c2, 'R:' + k, dark)

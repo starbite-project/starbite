@@ -129,8 +129,8 @@ static void builtin(void)
 {
     cat_n = 0;
     def("ios26", "iOS 26", "26.6.2 " UI_DOT " XNU 12377", CAT_APPLE, M_XNU, TAG_BETA, "@boot", 0, 0);
-    def("win11", "Windows 11", "23H2", CAT_MICROSOFT, M_UEFI, TAG_EXPERIMENTAL, "windows.uefi|@bundle", 0, 0);
-    def("android", "Android 17", "LineageOS 24.0", CAT_ANDROID, M_ANDROID, TAG_EXPERIMENTAL,
+    def("win11", "Windows 11", "23H2 " UI_DOT " build 22631", CAT_MICROSOFT, M_UEFI, TAG_EXPERIMENTAL, "windows.uefi|@bundle", 0, 0);
+    def("android", "One UI 8", "Android 16 " UI_DOT " UN1CA 9810 " UI_DOT " Linux 4.9", CAT_ANDROID, M_ANDROID, TAG_EXPERIMENTAL,
         "android.kernel", "android.ramdisk", "android.cmdline");
     def("linux", "Linux", "rescue shell", CAT_LINUX, M_LINUX, TAG_EXPERIMENTAL, "linux.image", "linux.dtb",
         "linux.initrd");
