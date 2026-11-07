@@ -61,7 +61,7 @@ def build_patch():
     out += files_of(os.path.join(MODS, 'Star2LteUsbDxe'), USB)
     out += files_of(os.path.join(MODS, 'common'), USB)
     out += files_of(S9, f'{USB}/s9usb', ('.c', '.h'))
-    out += files_of(os.path.join(MODS, 'Star2LteSsdtDxe'), SSDT)
+    out += files_of(os.path.join(MODS, 'Star2LteSsdtDxe'), SSDT, ('.c', '.h', '.inf'))   # not the stub's .S/generator
     out += files_of(os.path.join(MODS, 'common'), SSDT)
     out += insert_between('Platform/Star2LtePkg/Star2LtePkg.dsc', 392, [
         '  Platform/Star2LtePkg/Drivers/Star2LteUfsHcDxe/Star2LteUfsHcDxe.inf',
@@ -76,7 +76,7 @@ def build_patch():
         '!ifdef STAR2LTE_SSDT_DXE',
         f'  {SSDT}/Star2LteSsdtDxe.inf {{',
         '    <BuildOptions>',
-        '      *_*_*_CC_FLAGS = -DSTARBITE_PPTT_FIX=$(STARBITE_PPTT_FIX) -DSTARBITE_M3_PROBE=$(STARBITE_M3_PROBE)',
+        '      *_*_*_CC_FLAGS = -DSTARBITE_PPTT_FIX=$(STARBITE_PPTT_FIX) -DSTARBITE_M3_PROBE=$(STARBITE_M3_PROBE) -DSTARBITE_M3_PARK=$(STARBITE_M3_PARK)',
         '  }',
         '!endif',
     ], ['  MdeModulePkg/Bus/Scsi/ScsiBusDxe/ScsiBusDxe.inf',

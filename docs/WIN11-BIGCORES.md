@@ -4,8 +4,9 @@ Started 2026-11-07, on the user's request: "make Windows 11 run on the big cores
 maximum clock speed". Owner of the firmware side (MADT, PPTT, CPU bring-up): the win-usb-host
 session (it owns the Windows ACPI tables, docs/WIN11-USB.md 4.1 and 10). The clocks belong to the
 GPU session's `sbthermal`, the single ACPM owner (domain 3 = M3), coordinated through the main
-session. **Status: stage B1 built and reviewed, nothing run on the phone.** Not for unattended boots: a
-CPU_ON that never returns needs a forced reset (the watchdog doesn't rescue it).
+session. **Status: B1 passed on the phone (2026-11-07): the M3s run from UEFI. B2 built, not run.**
+Not for unattended boots: a CPU_ON that never returns needs a forced reset (the watchdog doesn't
+rescue it).
 
 ## 1. What stands in the way
 
@@ -59,6 +60,53 @@ Star2LteSsdtDxe with only the probe (no USB, no blobs, no PPTT fix), checked fil
 Samsung logo, then Windows as usual (4 CPUs). If it stops on the Samsung logo for more than 30 s: a
 CPU_ON hang (problem 1); force reset (fine before the Windows logo), boot src38. Afterwards read
 zone 0 at the loader menu (`fastboot oem log dmesg`, before TWRP): the `=M3` lines answer B1.
+
+**Result (2026-11-07, main session, user present, image 87df200c): B1 PASSED.** No hang; Windows
+desktop as before. Zone 0: the PMU writes took (1088 `C7150000 -> 8D150000`, the five option
+registers `00000001 -> 00000002`), then for each of M3 cores 1, 2, 3: `CPU_ON rc=0, ARRIVED after
+1 ms, mpidr=8000010n`, and "cores 1..3 ran and powered off again". The XNU PMU sequence is what
+woa's attempts lacked.
+
+## 3.1 Stage B2: park the M3s for the whole Windows session
+
+`M3Park` (in `M3Probe.c`, `STARBITE_M3_PARK=1`; never together with the probe) during dispatch,
+for M3 cores 1, 2, 3:
+
+1. one reserved page below 4 GiB (`EfiReservedMemoryType`, Windows leaves it alone) as the core's
+   **ACPI parking-protocol mailbox** (ACPI 6.4 5.2.12.14: CpuId at +0, JumpAddress at +8, the OS's
+   half to +0x7FF, the firmware's from +0x800);
+2. the line `=M3 park core n mbox <page> up 00000000 s (hex)` in the zone-0 ring; its digits'
+   address is found in the ring (it is never moved: the ring only appends);
+3. the stub (`M3ParkStub.S`, 200 bytes, assembled by `gen-m3park-stub.py` into `M3ParkStub.h`;
+   position independent, aligned accesses only because the MMU is off) copied to mailbox + 0x800
+   with three literals: the mailbox, the digits' address, the UID (MADT GICC UIDs: M3 core n =
+   4 + n); the page cleaned to the point of coherency, the I-cache invalidated;
+4. the PMU defaults, one CPU_ON (target 0x100 + n, entry mailbox + 0x800), poll 200 ms for the
+   stub's arrival mark (MPIDR at mailbox + 0xFF8); stop at the first core that doesn't park, as in B1.
+
+The stub: arrival mark; timer event stream on (CNTKCTL_EL1 EVNTEN, EVNTI 15: a wake-up every
+2^16 ticks of CNTVCT, ~2.5 ms at 26 MHz; CNTVCT because EL2 may trap the physical count);
+then `WFE` forever. Every 1024 wake-ups (~2.6 s) it writes the seconds since parking
+(CNTVCT delta / CNTFRQ) as 8 hex digits into its zone-0 line. After every wake-up it reads the
+mailbox: JumpAddress != 0 and CpuId == its UID -> JumpAddress = 0, jump with x0 = the mailbox
+(the parking protocol, for B4). In B2 the MADT is unchanged, so Windows never writes these
+mailboxes: the cores just stay parked, asleep in WFE (no busy loop, so no heat).
+
+**Evidence without a new reader:** after the Windows session, Start -> Restart into the loader menu,
+`fastboot oem log dmesg`: the `=M3 park core n ... up XXXXXXXX s` lines hold how long each core
+stayed alive (hex seconds, frozen at the reset). About the session length = parked all along;
+00000000 = the core never woke from WFE (no event stream) or died early.
+
+Image: `starbite-uefi-m3park.bin` (`SOLO=m3park M3PARK=1 tools/woa/build-win-usbhost.sh`): src38 +
+Star2LteSsdtDxe with only the parking (no USB, no blobs, no PPTT); sha256 c813d8df…. Checked: the
+module holds the reviewed 200-byte stub once, and neither the probe nor the PPTT code.
+
+Risks: as B1 for each CPU_ON (one per core, PMU defaults first; B1 showed all three arrive in 1 ms).
+New: three cores stay powered for the whole session, outside Windows' knowledge. They are asleep in
+WFE with interrupts masked; Windows programs the GIC for its four CPUs only; restart is PSCI
+SYSTEM_RESET, which resets them too. Unknown: whether Samsung's uH (EL2) traps WFE (HCR_EL2.TWE). The digits
+would show it (00000000 or a stuck value), and the A55s are not involved. If Windows misbehaves (hangs, slowdowns, heat), force reset
+is not needed: Start -> Restart, then boot src38.
 
 ## 4. Sources
 

@@ -35,6 +35,10 @@
 
 #include "StarbiteLog.h"
 
+#ifndef STARBITE_M3_PARK
+#define STARBITE_M3_PARK 0
+#endif
+
 #define PMU_BASE        0x14060000UL
 #define PSCI_CPU_ON     0xC4000003UL
 #define M3_OK           0x4D334F4Bu        // "KO3M" in memory order, reads 0x4D334F4B
@@ -222,3 +226,128 @@ M3Probe (
 
   SbLog ("=M3 probe done: cores 1..3 ran and powered off again");
 }
+
+#if STARBITE_M3_PARK
+#include "M3ParkStub.h"
+
+//
+// Stage B2 (docs/WIN11-BIGCORES.md): park M3 cores 1..3 for the whole Windows session. Each gets
+// one reserved page below 4 GiB as its ACPI parking-protocol mailbox, the stub (M3ParkStub.S) in
+// the mailbox's firmware half at +0x800, and a "=M3 park" line in the zone-0 ring whose 8 hex
+// digits the stub keeps rewriting with the seconds it has been parked. The MADT is not touched:
+// Windows still runs on the four A55s and never writes these mailboxes.
+//
+#define M3_PARK_UID_BASE  4u          // the release MADT's GICC UIDs: A55 0..3, M3 4..7
+
+//
+// The address of Needle's first character in the zone-0 ring's data, or 0 (StarbiteLog.h: data
+// at SB_EVLOG_BASE + 12, W[2] bytes, never wrapped).
+//
+STATIC
+UINTN
+M3RingFind (
+  IN CONST CHAR8  *Needle
+  )
+{
+  volatile UINT32  *W = (volatile UINT32 *)SB_EVLOG_BASE;
+  volatile UINT8   *B = (volatile UINT8 *)(SB_EVLOG_BASE + 12);
+  UINTN            Len;
+  UINTN            Pos;
+  UINTN            i;
+
+  Len = AsciiStrLen (Needle);
+  if ((W[0] != SB_DBGC) || (W[2] > SB_EVLOG_CAP) || (W[2] < Len)) {
+    return 0;
+  }
+
+  for (Pos = W[2] - Len + 1; Pos-- > 0;) {
+    for (i = 0; (i < Len) && (B[Pos + i] == (UINT8)Needle[i]); i++) {
+    }
+
+    if (i == Len) {
+      return (UINTN)(SB_EVLOG_BASE + 12 + Pos);
+    }
+  }
+
+  return 0;
+}
+
+VOID
+M3Park (
+  VOID
+  )
+{
+  EFI_PHYSICAL_ADDRESS  Page;
+  volatile UINT64       *Arrived;
+  UINT64                *Lit;
+  UINT64                Rc;
+  UINTN                 Core;
+  UINTN                 Ms;
+  UINTN                 Digits;
+  UINTN                 Parked;
+  EFI_STATUS            Status;
+  CHAR8                 Needle[48];
+
+  SbLog ("=M3 park v1: PMU defaults, then M3 cores 1..3 into parking stubs (B2)");
+  Parked = 0;
+  for (Core = 1; Core <= 3; Core++) {
+    Page   = 0xFFFFFFFFu;
+    Status = gBS->AllocatePages (AllocateMaxAddress, EfiReservedMemoryType, 1, &Page);
+    if (EFI_ERROR (Status)) {
+      SbLog ("=M3 park core %d: no page (%r), stop", Core, Status);
+      break;
+    }
+
+    //
+    // The line the stub keeps up to date, then where its digits are.
+    //
+    SbLog ("=M3 park core %d mbox %08lx up 00000000 s (hex)", Core, Page);
+    AsciiSPrint (Needle, sizeof (Needle), "=M3 park core %d mbox %08lx up ", Core, Page);
+    Digits = M3RingFind (Needle);
+    if (Digits != 0) {
+      Digits += AsciiStrLen (Needle);
+    }
+
+    ZeroMem ((VOID *)(UINTN)Page, EFI_PAGE_SIZE);
+    CopyMem ((VOID *)(UINTN)(Page + 0x800), mM3ParkStub, sizeof (mM3ParkStub));
+    Lit    = (UINT64 *)(UINTN)(Page + 0x800 + M3_PARK_STUB_LIT);
+    Lit[0] = Page;
+    Lit[1] = Digits;
+    Lit[2] = M3_PARK_UID_BASE + Core;
+    CleanInvalidate ((UINTN)Page, EFI_PAGE_SIZE);
+    __asm__ __volatile__ ("ic iallu\n dsb sy\n isb" ::: "memory");
+
+    Arrived = (volatile UINT64 *)(UINTN)(Page + 0xFF8);
+    M3PmuDefaults ((BOOLEAN)(Core == 1));
+    Rc = Smc (PSCI_CPU_ON, 0x100 + Core, Page + 0x800, 0);
+    for (Ms = 0; Ms < POLL_MS; Ms++) {
+      CleanInvalidate ((UINTN)(Page + 0xFF8), 8);
+      if (*Arrived != 0) {
+        break;
+      }
+
+      MicroSecondDelay (1000);
+    }
+
+    SbLog (
+      "=M3 park core %d target %x: CPU_ON rc=%lx, %a after %d ms, mpidr=%lx, digits %a",
+      Core,
+      0x100 + Core,
+      Rc,
+      (*Arrived != 0) ? "PARKED" : "no mark",
+      Ms,
+      *Arrived,
+      (Digits != 0) ? "found" : "NOT found"
+      );
+    if ((Rc != 0) || (*Arrived == 0)) {
+      SbLog ("=M3 park stop: no further CPU_ON this boot");
+      break;
+    }
+
+    Parked++;
+    MicroSecondDelay (50000);
+  }
+
+  SbLog ("=M3 park done: %d of 3 M3 cores parked for the OS session", Parked);
+}
+#endif
