@@ -451,3 +451,15 @@ called from 90F47638" (winload), the LSE latch 80000001 -> 80000000, =EBSOK now 
 "=M3 state", watch `beat 4C prog 02 catch 00`. No =UFS line, no bugcheck: the M3 is in winload/ntoskrnl and hangs
 there, with no EL1 exception during the 15 s watch; the A55 then did CPU_OFF (removed in v7).
 
+**solo7 (95402dec, the 15 s build):** `=M3 psci: returned FFFFFFFF`: Samsung's EL3 answers the M3's PSCI_VERSION with
+NOT_SUPPORTED (A55 0 sees the shim's 10000). Watch `beat 4C prog 02 catch 00 pmsg 34C5`, =EBSOK on the A55, no CPU_OFF
+this time, still no =UFS. So Windows on the M3 finds no PSCI 0.2+ (the HAL makes about a dozen PSCI calls early);
+the prime suspect now.
+
+**v8** (solo8): the M3 gets the woa shim's EL2 payload too. The shim installs it with Samsung SiP SMC 0xC2000400
+(x1 = base + 0x1800, x2 0x2000, x3 1, x4 base, x5 0x8000; EL3 runs it at EL2 on the calling core: VBAR_EL2, HCR_EL2.TSC,
+back with SMC 0xC2000401). v8 finds the already loaded payload by its header (base moves between boots: BBC10000,
+BB6E0000) on the A55 before ExitBootServices (`=M3 el2: woa PSCI payload at ...`), and on the M3 right after "=M3
+state" makes the same SMC (`=M3 el2: SMC C2000400 ...`, then `rc= payload el= hcr= status=`: status 0 = installed),
+then the PSCI_VERSION probe: 10000 = the M3 has PSCI 1.0 like the A55. Image starbite-uefi-solo8-gpu.bin 4764ed60….
+
