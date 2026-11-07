@@ -299,7 +299,7 @@ never leave the phone). The MAC is the firmware's (`cur_etheraddr`, from the OTP
 | Stage | What | State |
 |---|---|---|
 | W1 | `sbwifi.sys`: the bring-up under Windows up to a scan | **passed** (W1b, 2026-11-07: 23 access points) |
-| W2 | `sbwificx.sys`: WiFiCx client, Windows lists networks and joins WPA2 | built, request sent |
+| W2 | `sbwificx.sys`: WiFiCx client, Windows lists networks and joins WPA2 | **open networks pass** (W2l-a, 2026-11-07); WPA2 next |
 | W3 | interrupts (WdfInterrupt), roaming, statistics, WPA3-SAE | after W2 |
 | W4 | Power: PM2/`mpc`, D3 on idle, the radio off when Wi-Fi is turned off | after W3 |
 
@@ -406,6 +406,25 @@ before and after the start. Also the clock used `KeQueryInterruptTimePrecise`'s 
 at +154 ms: `the firmware is up after 160 ms` (bare metal 150 ms), protocol 7, `26 events; the scan heard 23 access
 points (complete)`, step 10, clean restart. Under Windows every sleep rounds up to the 15.6 ms timer tick (W1's
 "10 s" of 5 ms polls took 35 s; SbWifiCx's worker polls every ~16 ms); the full read-back costs 1.9 s.
+
+### W2: SbWifiCx under Windows 11 (2026-11-07) — open networks WORK with W2l-a
+
+Baseline: **W2l-a**, commit aa4a8ef (tag `wifi-w2l-a`), sbwificx.sys `4296f319…` (driver 0.3.1.0). On the open
+network: AutoConfig connected, DHCP, gateway ping, DNS and HTTP 200 within 12 s of the connect. Found and fixed on
+the way (each one blocked everything after it):
+
+| Build | What was wrong | Evidence |
+|---|---|---|
+| W2b | the BSS list was indicated with the scan's transaction id; WDI defines it as unsolicited (id 0) | Windows listed 0 networks while the radio heard 10-13 |
+| W2c | every scan used one escan sync id: a cancelled scan's late end event ended the next ones | scans 2 and 3 "complete" at once, empty |
+| W2e | `assoc_info` asked with 8 bytes (brcmfmac: 512); the association's elements never reached Windows | "request elements 0 bytes" |
+| W2j | the **association result** was sent with the connect task's id; the connect task lists it as unsolicited | AutoConfig 8002 "the specific network is not available" (0x2800B, RSSI 255) the moment it came, every attempt |
+| W2l | WiFiCx's data path carries **802.11 frames** (24-byte header + LLC/SNAP), as WDI's did; the radio takes and gives Ethernet | Windows' first frame: 60 bytes (an ARP in 802.11 form), "ethertype" e1f5; Windows counted 0 bytes received |
+
+Diagnostics that settled them: Windows' own `Microsoft-Windows-WLAN-AutoConfig/Operational` log (pulled offline),
+the firmware's `sta_info` for the AP, the rx/tx ring state, and a per-join log of every firmware event and WDI
+command. W2m (9545b0d) hardens the WPA2 key path (parsing in either WDI version, pairwise keys without an address,
+IGTK accepted); WPA2 has not been tested yet.
 
 ## 10. Review
 
