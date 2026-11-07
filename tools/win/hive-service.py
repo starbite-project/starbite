@@ -179,6 +179,47 @@ def main(a):
         s += 'commit\n'
         hivexsh(work, s)
         shown = base + '\\Interfaces\\GenericUsbFn'
+    elif cmd == 'bind':
+        # Offline PnP install of a KMDF driver onto an existing device instance, what pnputil would leave
+        # behind: Services\<svc> (demand start, Parameters, Parameters\Wdf\KmdfLibraryVersion), the device's
+        # Enum key pointing at it, and its Control\Class\{guid}\NNNN driver key.
+        #   bind ENUM_INSTANCE --service S --class-guid {G} --class NAME --desc TEXT [--kmdf 1.33]
+        #        [--param NAME=DWORD ...]   (--param repeatable as Name=Value,Name=Value)
+        inst = arg
+        svc = opts['--service']
+        guid = opts['--class-guid'].lower()
+        ekey = f'{cs}\\Enum\\{inst}'
+        if not exists(h, ekey):
+            raise SystemExit(f'no device {ekey}')
+        skey = f'{cs}\\Services\\{svc}'
+        if exists(h, skey):
+            raise SystemExit(f'{skey} exists already: nothing changed')
+        ckey = f'{cs}\\Control\\Class\\{guid}'
+        _, ck = h.find(ckey)
+        used = {sk['name'] for _, sk in h.subkeys(ck)}
+        n = next(i for i in range(10000) if f'{i:04d}' not in used)
+        drv = f'{n:04d}'
+        params = {}
+        for kv in opts.get('--param', '').split(','):
+            if kv:
+                k_, v_ = kv.split('=')
+                params[k_] = dword(int(v_, 0))
+        s = f'cd \\{cs}\\Services\nadd {svc}\n'
+        s += setvals(None, skey, {'Type': dword(1), 'Start': dword(3), 'ErrorControl': dword(0),
+                                  'ImagePath': sz(2, f'\\SystemRoot\\System32\\drivers\\{svc}.sys'),
+                                  'DisplayName': sz(1, opts.get('--desc', svc))})
+        s += f'cd \\{skey}\nadd Parameters\n' + setvals(None, skey + '\\Parameters', params)
+        s += f'cd \\{skey}\\Parameters\nadd Wdf\n' + setvals(None, skey + '\\Parameters\\Wdf',
+                                                         {'KmdfLibraryVersion': sz(1, opts.get('--kmdf', '1.33'))})
+        s += f'cd \\{ckey}\nadd {drv}\n' + setvals(None, f'{ckey}\\{drv}', {
+            'DriverDesc': sz(1, opts.get('--desc', svc)), 'ProviderName': sz(1, 'Starbite'),
+            'DriverVersion': sz(1, '0.1.0.0'), 'MatchingDeviceId': sz(1, inst.rsplit('\\', 1)[0].lower())})
+        s += setvals(h, ekey, {'Service': sz(1, svc), 'ClassGUID': sz(1, guid), 'Class': sz(1, opts.get('--class', 'System')),
+                               'Driver': sz(1, f'{guid}\\{drv}'), 'ConfigFlags': dword(0),
+                               'DeviceDesc': sz(1, opts.get('--desc', svc))})
+        s += 'commit\n'
+        hivexsh(work, s)
+        shown = ekey
     elif cmd == 'ufx-autologger':
         # ETW boot autologger for UfxSynopsys + Ufx01000 (docs/WIN11-USB.md 5.2); arg = session name. Undo: delete the key.
         base = f'{cs}\\Control\\WMI\\Autologger'
