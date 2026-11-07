@@ -55,6 +55,7 @@
   gEfiAcpiTableProtocolGuid                     ## CONSUMES
   gEfiFirmwareVolume2ProtocolGuid               ## CONSUMES
   gEfiAcpiSdtProtocolGuid                       ## SOMETIMES_CONSUMES (PpttFix; not in the depex)
+  gEfiLoadedImageProtocolGuid                   ## SOMETIMES_CONSUMES (M3Boot v4 LSE latch guard)
 
 [Depex]
   gEfiAcpiTableProtocolGuid

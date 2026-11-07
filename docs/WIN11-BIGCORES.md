@@ -386,3 +386,17 @@ Reading a v4 solo boot: crumb 8 and =EBSOK then a Windows hang = something later
 traps on the M3 (crumb 2: CNTPCT, 3: CNTP_CTL read, 4: CNTP_CTL write), and Windows needs the virtual timer path
 everywhere, or EL2 set up on the M3.
 
+**v4b** (after an independent review of v4, relayed by the main session):
+- **winload's LSE latch.** winload.efi (md5 116bff41) carries the same outline-atomics helpers as ntoskrnl (init stub
+  at RVA 0x3B10, latch word at RVA 0x210000: bit 31 initialised, bit 0 LSE) and initialises them on the A55 before
+  ExitBootServices, so after the hand-off its interlocked calls would execute LSE on the M3. M3BootLseGuard, in the
+  wrapper before the real ExitBootServices, finds every EfiLoaderCode image's init stub (MOVZ X16,#0x80000000; ADRP
+  X17; STR W16,[X17]; MOVZ X16,#0; MRS X16,CurrentEL), sets its latch to 0x80000000 (initialised, no LSE: LL/SC,
+  fine on both cores) and logs `=M3 boot lse: image ... latch +... old -> 80000000`. ntoskrnl and the drivers first
+  run on the M3 and latch "no LSE" by themselves.
+- x18 (the platform register) saved and restored with the rest of the context (Pad[0], +0x340).
+- `=M3 state: daif isr vct gicc ctlr pmr hppir` on the M3 right after the commit.
+Not changed: A55 core 0 still powers off through the shim (only that core uses the shim; the M3 has none); PSCI
+from the M3 goes to Samsung's EL3 directly, so restart/shutdown may misbehave (not a boot blocker).
+Images: solo4 a69941d4…, big3 17d5f1be…, big4 7c3a48a9….
+
