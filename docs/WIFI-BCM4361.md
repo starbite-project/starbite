@@ -301,7 +301,7 @@ never leave the phone). The MAC is the firmware's (`cur_etheraddr`, from the OTP
 | W1 | `sbwifi.sys`: the bring-up under Windows up to a scan | **passed** (W1b, 2026-11-07: 23 access points) |
 | W2 | `sbwificx.sys`: WiFiCx client, Windows lists networks and joins WPA2 | **open networks pass** (W2l-a, 2026-11-07); WPA2 next |
 | W3 | interrupts (WdfInterrupt), roaming, statistics, WPA3-SAE | after W2 |
-| W4 | Power: PM2/`mpc`, D3 on idle, the radio off when Wi-Fi is turned off | after W3 |
+| W4 | Power: PM2/`mpc`, D3 on idle, the radio off when Wi-Fi is turned off | radio switch done (W2o: WDI_TASK_SET_RADIO_STATE, WLC_DOWN/UP); PM2 and D3 open |
 
 ## 8. Starbite OS
 
@@ -314,8 +314,12 @@ The shim is `starbite/wifi/sb/bcmw_sb.c`; `starbite/wifitest/` is a test image o
   then, polling every few ms (as an earlier port did).
 - **Files**: VENDOR read at the first Wi-Fi use (ext4 or EROFS), kept in RAM (about 870 KiB) or not at all after
   the firmware is up (the chip keeps it).
-- **Network**: the flow rings and frames (as for Windows), the four-way handshake (port an earlier port's `lx_wpa.c`, MIT),
-  then a small IPv4 stack (ARP, DHCP, UDP, DNS, TCP) or lwIP (BSD). The app API: scan, join, status, sockets.
+- **Network**: the flow rings and frames (as for Windows), the four-way handshake (`wpa.c`, from an earlier port's `lx_wpa.c`,
+  MIT), then **sbnet** (`net.c`/`net.h`, 2026-11-07, MIT, freestanding): DHCP with renewal/rebinding/NAK/expiry,
+  ARP (8-entry cache, one packet held per resolution), ICMP echo both ways, UDP with a receive callback, DNS A
+  queries. Host test `host/net-test.c` on a simulated LAN (31 checks, 25,000 mangled frames under ASan/UBSan).
+  TCP is not there yet. The app API: scan, join, status, sockets. `wifitest` step 11 uses sbnet: lease, three
+  pings to the router, a DNS lookup (test T4-open).
 - **Power**: the radio off (PERST# low, WLAN_REG_ON low) unless an app needs it; `quiesce` on suspend and on the
   way back to the loader; PM2 while associated.
 - **Safety**: the bring-up writes only the allow-list. libsb's rule that register pokes need a confirmed
@@ -424,7 +428,11 @@ the way (each one blocked everything after it):
 Diagnostics that settled them: Windows' own `Microsoft-Windows-WLAN-AutoConfig/Operational` log (pulled offline),
 the firmware's `sta_info` for the AP, the rx/tx ring state, and a per-join log of every firmware event and WDI
 command. W2m (9545b0d) hardens the WPA2 key path (parsing in either WDI version, pairwise keys without an address,
-IGTK accepted); WPA2 has not been tested yet.
+IGTK accepted). W2m-b/W2n: 1 ms polling, 256 rx / 128 tx buffers, frames requeued instead of dropped when every tx
+buffer is with the firmware (the open test network itself caps at ~4 Mbit/s: the host was idle). W2o (8bbdde7):
+the radio switch (airplane mode). WPA2 is host-tested end to end on Windows' path (bcmw_connect, the handshake
+outside the core through os->rx/bcmw_tx, keys through bcmw_set_key, a group-key renewal) against the model AP;
+not yet on a real WPA2 network (needs the user's hotspot).
 
 ## 10. Review
 
