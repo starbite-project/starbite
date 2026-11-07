@@ -21,6 +21,7 @@
 #include "sb.h"
 #include "sbui.h"
 #include "catalog.h"
+#include "store.h"
 #include "../wifi/bcmw.h"
 #include "../wifi/sb/bcmw_sb.h"
 
@@ -109,7 +110,7 @@ static void radio_off(void)
     __asm__ volatile("dsb sy" : : : "memory");
 }
 
-/* The settings: the catalog row "wifitest"'s cmdline (the loader does not pass a bare entry's cmdline
+/* The settings: the launched catalog row's cmdline (the loader does not pass a bare entry's cmdline
  * on: it enters bare images with S-Boot's FDT unchanged; run 1 ran at the default step because of it),
  * then S-Boot's bootargs. key=value tokens, the first match wins. */
 static const char *cat_line;
@@ -146,15 +147,77 @@ static unsigned arg(const char *key, unsigned dflt)
     return n;
 }
 
+/* The key the loader launched: several hidden rows share this image (wifitest, wifitest-fw, wifitest-scan),
+ * each with its own cmdline. 1. the loader's launch record, block 0 of the store's "crashlog" entry
+ * (shim/starlte/sbfmt.h: "SBCRASH1", version 1, CRC32 of bytes 16..1023 at 12, launch_state 40 = 1 running,
+ * method 44 = 5 bare, key at 48); 2. the last "STARBITE: launch <key> #" line of the pmsg ring, which the
+ * loader writes right before it starts an OS; 3. "wifitest". */
+static const char *launched_key(char key[24])
+{
+    struct store_ent e;
+    static uint8_t blk[4096] __attribute__((aligned(64)));
+    if (store_find("ufs:crashlog", &e) && e.size >= 4096 && !sb_blk_read(SB_MED_UFS, 0, e.lba, 1, blk)) {
+        static const char magic[8] = { 'S', 'B', 'C', 'R', 'A', 'S', 'H', '1' };
+        uint32_t crc = (uint32_t)blk[12] | (uint32_t)blk[13] << 8 | (uint32_t)blk[14] << 16 | (uint32_t)blk[15] << 24;
+        if (!memcmp(blk, magic, 8) && blk[8] == 1 && sb_crc32(blk + 16, 1024 - 16) == crc && blk[40] == 1 &&
+            blk[44] == 5 && blk[48]) {
+            unsigned i = 0;
+            for (; i < 23 && blk[48 + i]; i++)
+                key[i] = (char)blk[48 + i];
+            key[i] = 0;
+            if (sb_prefix(key, "wifitest"))     /* a stale record of another OS is not ours */
+                return "the loader's launch record";
+        }
+    }
+    {
+        /* the pmsg ring (log.c's layout): "DBGC", start, size, data from +12, 0x3F00 bytes */
+        static const char pre[] = "STARBITE: launch ";
+        volatile uint32_t *h = (volatile uint32_t *)SB_PMSG;
+        volatile const char *d = (volatile const char *)(SB_PMSG + 12);
+        uint32_t size = h[2] <= 0x3F00U ? h[2] : 0, start = h[1] % 0x3F00U, first = (start + 0x3F00U - size) % 0x3F00U;
+        int found = 0;
+        for (uint32_t k = 0; k + sizeof(pre) - 1 < size; k++) {
+            unsigned m = 0;
+            while (m < sizeof(pre) - 1 && d[(first + k + m) % 0x3F00U] == pre[m])
+                m++;
+            if (m == sizeof(pre) - 1) {
+                unsigned i = 0;
+                uint32_t at = k + m;
+                while (i < 23 && at < size) {
+                    char c = d[(first + at) % 0x3F00U];
+                    if (c == ' ' || c == '\n' || c == 0)
+                        break;
+                    key[i++] = c;
+                    at++;
+                }
+                key[i] = 0;
+                found = i > 0 && sb_prefix(key, "wifitest");
+            }
+        }
+        if (found)
+            return "the last launch line in pmsg";
+    }
+    sb_strcpy(key, 24, "wifitest");
+    return "neither the launch record nor pmsg said: the default";
+}
+
 static void settings(void)
 {
-    int i = cat_load() > 0 ? cat_find("wifitest") : -1;
+    char key[24];
+    const char *from = launched_key(key);
+    int i = cat_load() > 0 ? cat_find(key) : -1;
     const struct cat_ent *e = i >= 0 ? cat_get((unsigned)i) : 0;
     struct ub u;
     cat_line = e ? e->cmdline : 0;
     ub_init(&u);
     ub_s(&u, "wifitest: settings: ");
-    ub_s(&u, e ? (e->cmdline[0] ? e->cmdline : "(the catalog row has no cmdline)") : "(no catalog row \"wifitest\")");
+    ub_s(&u, key);
+    ub_s(&u, ": ");
+    ub_s(&u, e ? (e->cmdline[0] ? e->cmdline : "(the catalog row has no cmdline)") : "(no catalog row with this key)");
+    line(u.b);
+    ub_init(&u);
+    ub_s(&u, "wifitest: the key from ");
+    ub_s(&u, from);
     line(u.b);
 }
 

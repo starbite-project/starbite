@@ -266,8 +266,8 @@ The shim is `starbite/wifi/sb/bcmw_sb.c`; `starbite/wifitest/` is a test image o
 ## 9. The phone tests
 
 All on S9 #1 by the main session; the image is `starbite/out/wifitest.img` (`sh starbite/wifitest/build.sh` in the
-VM), an OS-store entry with catalog key `wifitest` and a cmdline (read by the image from its own catalog row:
-the loader does not pass a bare entry's cmdline on). The image writes nothing to storage; it reads
+VM), OS-store entries `wifitest` / `wifitest-fw` / `wifitest-scan` sharing the image, each with its cmdline
+(read by the image from the launched row: the loader does not pass a bare entry's cmdline on). The image writes nothing to storage; it reads
 VENDOR (read only). The user holds Volume Up 2 s to start (or `wifi_auto=1` when the user agreed to an
 unattended run); at the end the radio is unpowered and Power reboots to the menu (`wifi_return=S` does it after S
 seconds; 30 s by default with `wifi_auto=1`). If VENDOR cannot be read, the run stops after step 7. Every line is
@@ -296,7 +296,11 @@ prefix wrong (`...c3af` for `...c2af`). The radio was unpowered on the way back;
 Fixed after run 1: the table is generated from full `sha256sum` output and compares all 32 bytes, and the host test
 now requires every NVRAM and CLM file of the directory to be in it. The image also ran at the default step: the
 loader enters bare images with S-Boot's FDT unchanged, so a catalog row's `cmdline` never reached `sb_bootarg`.
-`wifitest` now reads its own catalog row (`cat_find("wifitest")`) first, then the bootargs, and logs the settings.
+`wifitest` now reads the cmdline of the catalog row the loader launched (several hidden rows share the image:
+`wifitest` step 6, `wifitest-fw` 9, `wifitest-scan` 10). The key comes from the loader's launch record (block 0
+of the store's `crashlog`: "SBCRASH1", CRC, state running, method bare), else the last `STARBITE: launch <key>`
+line in pmsg, else `wifitest`, and only a key starting with `wifitest` is trusted; then the bootargs. The first
+lines say `wifitest: settings: <key>: <cmdline>` and where the key came from.
 
 ## 10. Review
 
