@@ -112,7 +112,10 @@ def main(a):
     if len(a) < 4:
         raise SystemExit(__doc__)
     src, out, cmd, arg = a[0], a[1], a[2], a[3]
+    flags = {x for x in a if x == '--display-class'}
+    a = [x for x in a if x != '--display-class']
     opts = dict(zip(a[4::2], a[5::2]))
+    a = a + sorted(flags)
     check(src)
     h = Hive(src)
     cs = control_set(h)
@@ -250,7 +253,9 @@ def main(a):
                                                          {'KmdfLibraryVersion': sz(1, opts.get('--kmdf', '1.33'))})
         s += f'cd \\{ckey}\nadd {drv}\n' + setvals(None, f'{ckey}\\{drv}', {
             'DriverDesc': sz(1, opts.get('--desc', svc)), 'ProviderName': sz(1, 'Starbite'),
-            'DriverVersion': sz(1, '0.1.0.0'), 'MatchingDeviceId': sz(1, inst.rsplit('\\', 1)[0].lower())})
+            'DriverVersion': sz(1, '0.1.0.0'), 'MatchingDeviceId': sz(1, inst.rsplit('\\', 1)[0].lower()),
+            **({'InstalledDisplayDrivers': (7, (svc + '\0\0').encode('utf-16-le')), 'VideoDebugLevel': dword(0),
+                'FeatureScore': dword(0xF9)} if '--display-class' in a else {})})
         s += setvals(h, ekey, {'Service': sz(1, svc), 'ClassGUID': sz(1, guid), 'Class': sz(1, opts.get('--class', 'System')),
                                'Driver': sz(1, f'{guid}\\{drv}'), 'ConfigFlags': dword(0),
                                'DeviceDesc': sz(1, opts.get('--desc', svc))})
