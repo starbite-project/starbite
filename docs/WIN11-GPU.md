@@ -563,6 +563,14 @@ namespace when its last handle closes, and `ExCreateCallback` closes its own han
 driver could ever open it. Fixed: `OBJ_PERMANENT` again (consumers still treat a stale `seq`/time as Blind,
 and sbthermal has no unload routine). GPU untouched both times, no bugcheck.
 
+**T6 passed (2026-11-07, sbthermal b5ad89cf; SYSTEM copy `build/win/results-combo1/SYSTEM-r` in the main
+checkout):** A55KhzBoot 1053000 (Windows really ran the A55s at S-Boot's 1.05 GHz until now), A55Khz 1690000
+(CMU readback after the ACPM request), CpuTargetKhz 1690000, CpuRequests 2 (the CPU level machine starts at
+Stop, so its first request is S-Boot's own 1053000, then 1690000 once cool), CpuFailures 0, CpuLevel 0;
+watchdog Level 0, GPU 41.6 °C, hottest 43.3 °C, highest seen 49.8 °C over 728 readings, 0 rejected. Task
+Manager's "base speed" still reads 1.05 GHz: a static figure, not the clock. Next: CpuKhz 1950000 (the user
+asked for the maximum; temperatures at 1690 MHz were fine).
+
 ## 11. Stages and done-when
 
 | Stage | Done when |
