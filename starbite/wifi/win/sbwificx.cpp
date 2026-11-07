@@ -157,6 +157,7 @@ struct DEVCTX {
     UINT32 last_reason, set_ssid_status;
     volatile LONG eapol_in, eapol_up, eapol_out, eapol_out_fail;  // EAPOL frames: from the AP, to Windows, from Windows
     ULONG tx_dropped_seen, rx_dropped_seen;
+    ULONG rx_at_connect;            // the core's received-frame count when the connect began
     UINT16 connect_port;
     UINT8 bssid[6], rsn[BCMW_RSN_OURS];
     UINT64 connect_started;
@@ -633,10 +634,31 @@ static void CmdConnect(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
     }
     for (UINT32 i = 0; i < c->MulticastCipherAlgorithms.ElementCount; i++)
         tkip |= c->MulticastCipherAlgorithms.pElements[i] == WDI_CIPHER_ALGO_TKIP;
+    {
+        // what Windows asked, as numbers (WDI_AUTH_ALGORITHM / WDI_CIPHER_ALGORITHM; W2d: joins logged as "open")
+        char t[160];
+        size_t o = 0;
+        t[0] = 0;
+        RtlStringCbPrintfA(t + o, sizeof(t) - o, "auth");
+        o = strlen(t);
+        for (UINT32 i = 0; i < c->AuthenticationAlgorithms.ElementCount && i < 6 && o < sizeof(t) - 12; i++, o = strlen(t))
+            RtlStringCbPrintfA(t + o, sizeof(t) - o, " %lu", (ULONG)c->AuthenticationAlgorithms.pElements[i]);
+        RtlStringCbPrintfA(t + o, sizeof(t) - o, "; unicast");
+        o = strlen(t);
+        for (UINT32 i = 0; i < c->UnicastCipherAlgorithms.ElementCount && i < 6 && o < sizeof(t) - 12; i++, o = strlen(t))
+            RtlStringCbPrintfA(t + o, sizeof(t) - o, " %lu", (ULONG)c->UnicastCipherAlgorithms.pElements[i]);
+        RtlStringCbPrintfA(t + o, sizeof(t) - o, "; multicast");
+        o = strlen(t);
+        for (UINT32 i = 0; i < c->MulticastCipherAlgorithms.ElementCount && i < 6 && o < sizeof(t) - 12; i++, o = strlen(t))
+            RtlStringCbPrintfA(t + o, sizeof(t) - o, " %lu", (ULONG)c->MulticastCipherAlgorithms.pElements[i]);
+        Sayf("wificx: connect asked: %s (open %u, RSNA-PSK %u)", t, WDI_AUTH_ALGO_80211_OPEN, WDI_AUTH_ALGO_RSNA_PSK);
+    }
     if (c->SSIDList.ElementCount >= 1 && p.PreferredBSSEntryList.ElementCount >= 1 && (psk || open) && d->up) {
         const WDI_SSID *s = &c->SSIDList.pElements[0];
         RtlCopyMemory(d->bssid, p.PreferredBSSEntryList.pElements[0].BSSID.Address, 6);
         BSS *b = FindBss(d, d->bssid);
+        if (b && !psk && bcmw_ie_find(b->ie, b->ie_len, 48))
+            Say("wificx: connect: Windows asks an OPEN join, but this access point advertises RSN (WPA2/3)");
         if (psk) {
             unsigned group = BCMW_CIPHER_CCMP;
             if (b) {
@@ -652,6 +674,7 @@ static void CmdConnect(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
              p.PreferredBSSEntryList.ElementCount, b ? "in the scan list" : "NOT in the scan list", b ? b->channel : 0,
              b && b->band5 ? "5" : "2.4", b ? (long)b->rssi : 0L, tkip ? "TKIP" : "CCMP", psk ? 2u + d->rsn[1] : 0u);
         d->ev_budget = 40;
+        d->rx_at_connect = bcmw_info(d->w)->rx_frames;
         d->last_reason = 0;
         d->set_ssid_status = 0;
         d->eapol_in = d->eapol_up = d->eapol_out = d->eapol_out_fail = 0;
@@ -686,8 +709,9 @@ static void Disconnected(DEVCTX *d, UINT32 reason, int by_host)
     if (GenerateWdiIndicationDisassociationFromIhv(&p, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen) == NDIS_STATUS_SUCCESS)
         Indicate(d, WDI_INDICATION_DISASSOCIATION, d->connect_port, 0, NDIS_STATUS_SUCCESS, gen, len);
     Sayf("wificx: disassociated (%s, 802.11 reason %lu); EAPOL so far: %ld in from the AP, %ld handed to Windows, "
-         "%ld out from Windows (%ld not sent)", by_host ? "by the host" : "by the access point", d->last_reason,
-         d->eapol_in, d->eapol_up, d->eapol_out, d->eapol_out_fail);
+         "%ld out from Windows (%ld not sent); frames in from the radio since the connect: %lu",
+         by_host ? "by the host" : "by the access point", d->last_reason, d->eapol_in, d->eapol_up, d->eapol_out,
+         d->eapol_out_fail, (ULONG)(bcmw_info(d->w)->rx_frames - d->rx_at_connect));
     UNREFERENCED_PARAMETER(reason);
 }
 

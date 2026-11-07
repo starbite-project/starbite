@@ -717,8 +717,14 @@ int bcmw_connect(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const u
     e = bcmw_iovar_set_u32(w, "wsec", rsn_ie ? WSEC_AES | (group_tkip ? WSEC_TKIP : 0) : 0);
     if (e == BCMW_OK)
         e = bcmw_iovar_set_u32(w, "wpa_auth", rsn_ie ? WPA2_AUTH_PSK : 0);
-    if (e == BCMW_OK && rsn_ie)
+    if (e == BCMW_OK && rsn_ie) {
+        /* the OS runs the handshake: the firmware's own supplicant off, as bcmdhd does for a host supplicant (if
+         * it ran, it would keep the AP's EAPOL frames: W2d saw none). A firmware without one refuses: fine. */
+        int sup = bcmw_iovar_set_u32(w, "sup_wpa", 0);
+        bcmw_sayx(w, "link: sup_wpa 0 (the OS's supplicant): ", sup == BCMW_OK ? 0 : 0xffffffffu,
+                  sup == BCMW_OK ? " (set)" : " (refused: no firmware supplicant)");
         e = bcmw_iovar_set(w, "wpaie", rsn_ie, rsn_len, &fwerr);
+    }
     if (e != BCMW_OK) {
         bcmw_sayx(w, "link: the firmware refused the security settings; its error ", (uint32_t)fwerr, NULL);
         return e;
@@ -758,26 +764,33 @@ int bcmw_set_key(struct bcmw *w, unsigned index, const uint8_t *key, unsigned le
 
 int bcmw_assoc_ies(struct bcmw *w, uint8_t *req, uint32_t *req_len, uint8_t *resp, uint32_t *resp_len)
 {
-    uint8_t info[8], buf[1024];
+    uint8_t info[512], buf[1024];   /* assoc_info: brcmfmac asks with WL_ASSOC_INFO_MAX (512); the firmware's
+                                     * struct is longer than the two lengths read here (W2d: an 8-byte ask failed) */
     uint32_t rq, rs;
-    int e;
+    int e, fwerr = 0;
     if (w->step < BCMW_STEP_UP || w->dead)
         return BCMW_E_STATE;
     bcmw_memset(info, 0, sizeof(info));
-    if ((e = bcmw_iovar_get(w, "assoc_info", info, sizeof(info), 0)) != BCMW_OK)  /* brcmf_cfg80211_assoc_ielen_le */
+    if ((e = bcmw_iovar_get(w, "assoc_info", info, sizeof(info), &fwerr)) != BCMW_OK) {  /* brcmf_cfg80211_assoc_ielen_le */
+        bcmw_sayx(w, "link: assoc_info refused; the firmware's error ", (uint32_t)fwerr, NULL);
         return e;
+    }
     rq = le32(info);
     rs = le32(info + 4);
     if (rq > sizeof(buf) || rs > sizeof(buf))
         return BCMW_E_PROTO;
-    if (rq && (e = bcmw_iovar_get(w, "assoc_req_ies", buf, rq, 0)) != BCMW_OK)
+    if (rq && (e = bcmw_iovar_get(w, "assoc_req_ies", buf, sizeof(buf), &fwerr)) != BCMW_OK) {
+        bcmw_sayx(w, "link: assoc_req_ies refused; the firmware's error ", (uint32_t)fwerr, NULL);
         return e;
+    }
     if (rq > *req_len)
         rq = *req_len;
     bcmw_memcpy(req, buf, rq);
     *req_len = rq;
-    if (rs && (e = bcmw_iovar_get(w, "assoc_resp_ies", buf, rs, 0)) != BCMW_OK)
+    if (rs && (e = bcmw_iovar_get(w, "assoc_resp_ies", buf, sizeof(buf), &fwerr)) != BCMW_OK) {
+        bcmw_sayx(w, "link: assoc_resp_ies refused; the firmware's error ", (uint32_t)fwerr, NULL);
         return e;
+    }
     if (rs > *resp_len)
         rs = *resp_len;
     bcmw_memcpy(resp, buf, rs);
