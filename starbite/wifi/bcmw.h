@@ -164,6 +164,9 @@ int bcmw_ioctl(struct bcmw *w, unsigned ifidx, uint32_t cmd, void *buf, uint32_t
 int bcmw_iovar_get(struct bcmw *w, const char *name, void *buf, uint32_t len, int *fwerr);
 int bcmw_iovar_set(struct bcmw *w, const char *name, const void *buf, uint32_t len, int *fwerr);
 int bcmw_iovar_get_u32(struct bcmw *w, const char *name, uint32_t *v);
+/* a get whose request carries input after the name (e.g. "sta_info" + the peer's address) */
+int bcmw_iovar_getbuf(struct bcmw *w, const char *name, const void *in, uint32_t inlen, void *out, uint32_t outlen,
+                      int *fwerr);
 int bcmw_iovar_set_u32(struct bcmw *w, const char *name, uint32_t v);
 
 /* ---- the data path and joining (link.c); after step 10 (up) ------------------------------------- */

@@ -159,7 +159,12 @@ struct DEVCTX {
     ULONG tx_dropped_seen, rx_dropped_seen;
     ULONG rx_at_connect;
     UINT64 rx_check_at;
-    volatile LONG data_out;         // data frames from Windows given to the radio since the connect
+    volatile LONG data_out;
+    UINT64 assoc_at;                // when the association was reported (scans are refused for a while after)
+    int keyed;                      // Windows' pairwise key reached the firmware
+    int join_failed;                // the firmware's SET_SSID failed after the association (reported from the worker)
+    UINT64 heartbeat_at;
+    ULONG sta_budget;               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
     ULONG link_state;               // Parameters\LinkState: 1 (default) the adapter's link reported up/down             // when to log the rx state again (1.5 s after an association)            // the core's received-frame count when the connect began
     UINT16 connect_port;
     UINT8 bssid[6], rsn[BCMW_RSN_OURS];
@@ -167,6 +172,7 @@ struct DEVCTX {
     int set_ssid_ok;
     // the log of commands seen (each id once)
     UINT8 seen[512];
+    ULONG commands;
     TLV_CONTEXT tlv;
 };
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVCTX, Ctx);
@@ -510,7 +516,12 @@ static void CmdScan(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
     d->scanning = 1;                // before the start: its ioctl wait already delivers results
     d->scan_started = Now(NULL);
     d->scan_sync = (UINT16)(SCAN_SYNC + d->scans);
-    int e = d->up ? bcmw_scan_start(d->w, ssid, ssid_len, d->scan_sync) : BCMW_E_STATE;
+    // not during a join or the 15 s after the association while no key is in (bcmdhd and brcmfmac refuse scans
+    // while connecting): the firmware is not asked at all
+    int busy = d->connecting || (d->connected && !d->keyed && Now(NULL) - d->assoc_at < 15000000);
+    if (busy)
+        Sayf("wificx: scan %lu refused: a join is in progress", d->scans);
+    int e = busy ? BCMW_E_STATE : d->up ? bcmw_scan_start(d->w, ssid, ssid_len, d->scan_sync) : BCMW_E_STATE;
     CleanupParsedWdiTaskScanToIhv(&p);
     Answer(r, STATUS_SUCCESS);
     if (e != BCMW_OK) {
@@ -528,6 +539,29 @@ static BSS *FindBss(DEVCTX *d, const UINT8 *bssid)
         if (RtlEqualMemory(d->bss[i].bssid, bssid, 6))
             return &d->bss[i];
     return NULL;
+}
+
+// The firmware's own view of the AP (sta_info, brcmf_sta_info_le, natural alignment): whether unicast frames from
+// it arrive at all (rx_ucast) or are dropped later; flags: 0x8 authenticated, 0x10 associated, 0x20 authorized,
+// 0x100 power save (as the AP sees us). No address is logged.
+static void StaInfo(DEVCTX *d, const char *when)
+{
+    UINT8 b[256];
+    int fwerr = 0;
+    if (!d->up || !d->sta_budget)
+        return;
+    d->sta_budget--;
+    RtlZeroMemory(b, sizeof(b));
+    int e = bcmw_iovar_getbuf(d->w, "sta_info", d->bssid, 6, b, sizeof(b), &fwerr);
+    if (e != BCMW_OK) {
+        Sayf("wificx: sta_info %s: refused (%d, firmware error %d)", when, e, fwerr);
+        return;
+    }
+#define U32(o) ((ULONG)b[o] | (ULONG)b[(o) + 1] << 8 | (ULONG)b[(o) + 2] << 16 | (ULONG)b[(o) + 3] << 24)
+    Sayf("wificx: sta_info %s: version %u, flags %08lx, idle %lu, associated %lu s; tx %lu (failed %lu); rx unicast %lu, "
+         "multicast %lu; decrypted %lu, decrypt failures %lu", when, b[0] | b[1] << 8, U32(8), U32(12), U32(44), U32(52),
+         U32(56), U32(60), U32(64), U32(76), U32(80));
+#undef U32
 }
 
 // The adapter's media state for NDIS (W2f: on an open network Windows sent no frame at all in 22 s, no DHCP;
@@ -621,8 +655,13 @@ static void ConnectDone(DEVCTX *d, int ok, UINT32 reason)
     }
     list.AssociationResults.SimpleAssign(NULL, 0);
     res.ActivePhyTypeList.SimpleAssign(NULL, 0);
-    if (ok)
+    if (ok) {
         LinkState(d, 1);
+        d->assoc_at = Now(NULL);
+        d->keyed = 0;
+        d->join_failed = 0;
+        d->sta_budget = 6;
+    }
     Indicate(d, WDI_INDICATION_CONNECT_COMPLETE, d->connect_port, d->connect_txn,
              ok ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE, NULL, 0);
     Sayf("wificx: connect %s", ok ? "COMPLETE (associated; Windows does the handshake now)" : "FAILED");
@@ -753,6 +792,7 @@ static void Disconnected(DEVCTX *d, UINT32 reason, int by_host)
     if (GenerateWdiIndicationDisassociationFromIhv(&p, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen) == NDIS_STATUS_SUCCESS)
         Indicate(d, WDI_INDICATION_DISASSOCIATION, d->connect_port, 0, NDIS_STATUS_SUCCESS, gen, len);
     LinkState(d, 0);
+    StaInfo(d, "at the disassociation");
     bcmw_rx_state(d->w, "at the disassociation");
     d->rx_check_at = 0;
     Sayf("wificx: disassociated (%s, 802.11 reason %lu); EAPOL so far: %ld in from the AP, %ld handed to Windows, "
@@ -806,6 +846,8 @@ static void CmdAddKeys(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
             RtlSecureZeroMemory(t, sizeof(t));
         }
         Sayf("wificx: a %s key %s", ea ? "pairwise" : "group", e == BCMW_OK ? "given to the firmware" : "REFUSED");
+        if (ea && e == BCMW_OK)
+            d->keyed = 1;
         if (e != BCMW_OK)
             st = STATUS_UNSUCCESSFUL;
     }
@@ -872,9 +914,12 @@ static void Command(DEVCTX *d, WIFIREQUEST r)
     UINT in = 0, out = 0;
     UINT16 id = WifiRequestGetMessageId(r);
     WDI_MESSAGE_HEADER *h = (WDI_MESSAGE_HEADER *)WifiRequestGetInOutBuffer(r, &in, &out);
+    d->commands++;
     if (id < sizeof(d->seen) && !d->seen[id]) {
         d->seen[id] = 1;
         Sayf("wificx: command %u (first time), %u bytes in, %u out", id, in, out);
+    } else if ((d->connecting || d->connected) && id != WDI_TASK_SCAN && id != WDI_ABORT_TASK) {
+        Sayf("wificx: command %u, %u bytes in", id, in);     // during a join, every command (W2g: what Windows did)
     }
     if (!h || in < sizeof(*h)) {
         WifiRequestComplete(r, STATUS_INVALID_PARAMETER, 0);
@@ -987,6 +1032,8 @@ static void OsEvent(void *ctx, const struct bcmw_event *ev)
         d->set_ssid_status = ev->status;
         if (d->connecting && d->set_ssid_ok != 2)   // the LINK event may come first: keep "associated"
             d->set_ssid_ok = ev->status == 0 ? 1 : -1;
+        else if (d->connected == 1 && ev->status != 0)
+            d->join_failed = 1;                     // reported from the worker loop
         break;
     case BCMW_E_LINK:
         if (d->connecting && (ev->flags & 1))
@@ -1124,6 +1171,26 @@ static void Worker(PVOID arg)
         if (d->rx_check_at && Now(NULL) > d->rx_check_at) {
             d->rx_check_at = 0;
             bcmw_rx_state(d->w, "1.5 s after the association");
+            StaInfo(d, "1.5 s after the association");
+        }
+        if (d->join_failed && d->connected == 1) {
+            // the firmware gave up its join after the association (W2g: SET_SSID status 2 two seconds later,
+            // then nothing): Windows hears of a lost link instead of waiting on a dead one
+            d->join_failed = 0;
+            StaInfo(d, "when the firmware's join failed");
+            Sayf("wificx: the firmware's join FAILED after the association (SET_SSID status %lu): reported as a lost link",
+                 d->set_ssid_status);
+            if (d->up)
+                bcmw_leave(d->w);
+            Disconnected(d, d->set_ssid_status, 0);
+        }
+        if (Now(NULL) > d->heartbeat_at) {
+            const struct bcmw_info *in = bcmw_info(d->w);
+            d->heartbeat_at = Now(NULL) + (d->connected || d->connecting ? 10000000 : 60000000);
+            Sayf("wificx: alive: %s; polls %lu, events %lu, frames in %lu, out %lu (done %lu); commands %lu",
+                 d->connected ? (d->keyed ? "associated, keyed" : "associated, no key yet") :
+                 d->connecting ? "connecting" : "idle", in->polls, in->events, in->rx_frames, in->tx_frames, in->tx_done,
+                 d->commands);
         }
         if (d->connected == 2) {
             d->connected = 1;

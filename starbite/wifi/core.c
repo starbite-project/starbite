@@ -805,6 +805,22 @@ int bcmw_iovar_get(struct bcmw *w, const char *name, void *buf, uint32_t len, in
     return e;
 }
 
+int bcmw_iovar_getbuf(struct bcmw *w, const char *name, const void *in, uint32_t inlen, void *out, uint32_t outlen,
+                      int *fwerr)
+{
+    uint8_t t[IOCTL_REQ_SIZE];
+    uint32_t n = fw_iovar(t, sizeof(t), name, in, inlen);
+    uint32_t want = outlen > n ? outlen : n;
+    int e;
+    if (!n || want > sizeof(t))
+        return BCMW_E_NOMEM;
+    bcmw_memset(t + n, 0, want - n);
+    e = bcmw_ioctl(w, 0, BCMW_C_GET_VAR, t, want, 0, fwerr);
+    if (e == BCMW_OK)
+        bcmw_memcpy(out, t, outlen);
+    return e;
+}
+
 int bcmw_iovar_set(struct bcmw *w, const char *name, const void *buf, uint32_t len, int *fwerr)
 {
     uint8_t t[IOCTL_REQ_SIZE];
