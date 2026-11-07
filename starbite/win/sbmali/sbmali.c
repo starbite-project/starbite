@@ -514,23 +514,18 @@ static void Unmap(PSM_CTX c)
         }
 }
 
-static NTSTATUS SmPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw, WDFCMRESLIST Translated)
+/* Map the fixed SoC blocks (the Mali too when Standalone: no ACPI resources then), allocate the work memory,
+ * start the test thread. Shared by the PnP path (PrepareHardware) and the standalone service. */
+static NTSTATUS StartHw(PSM_CTX c, BOOLEAN Standalone)
 {
-    PSM_CTX c = SmGetCtx(Device);
     PHYSICAL_ADDRESS lo, hi, skip;
     OBJECT_ATTRIBUTES oa;
-    ULONG n = WdfCmResourceListGetCount(Translated);
-    UNREFERENCED_PARAMETER(Raw);
 
-    /* The Mali from the ACPI resources; the rest are fixed SoC blocks the SSDT does not list. */
-    for (ULONG i = 0; i < n; i++) {
-        PCM_PARTIAL_RESOURCE_DESCRIPTOR d = WdfCmResourceListGetDescriptor(Translated, i);
-        if (d && d->Type == CmResourceTypeMemory && (ULONG64)d->u.Memory.Start.QuadPart == SBM_GPU_PA &&
-            d->u.Memory.Length >= SBM_GPU_SIZE && !c->Mmio[SBM_GPU]) {
-            c->Mmio[SBM_GPU] = (volatile UCHAR *)MmMapIoSpaceEx(d->u.Memory.Start, SBM_GPU_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
-            c->MmioSize[SBM_GPU] = SBM_GPU_SIZE;
-        }
+    if (Standalone) {
+        c->Mmio[SBM_GPU] = (volatile UCHAR *)MapPa(SBM_GPU_PA, SBM_GPU_SIZE);
+        c->MmioSize[SBM_GPU] = SBM_GPU_SIZE;
     }
+    Log(L"Standalone", Standalone, FALSE);
     c->Mmio[SBM_PMU] = (volatile UCHAR *)MapPa(SBM_PMU_PA, SBM_PMU_SIZE);
     c->MmioSize[SBM_PMU] = SBM_PMU_SIZE;
     c->Mmio[SBM_CMU] = (volatile UCHAR *)MapPa(SBM_CMU_PA, SBM_CMU_SIZE);
@@ -588,6 +583,24 @@ static NTSTATUS SmPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw, WDFCMRESLI
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS SmPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw, WDFCMRESLIST Translated)
+{
+    PSM_CTX c = SmGetCtx(Device);
+    ULONG n = WdfCmResourceListGetCount(Translated);
+    UNREFERENCED_PARAMETER(Raw);
+
+    /* The Mali from the ACPI resources; the rest are fixed SoC blocks the SSDT does not list. */
+    for (ULONG i = 0; i < n; i++) {
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR d = WdfCmResourceListGetDescriptor(Translated, i);
+        if (d && d->Type == CmResourceTypeMemory && (ULONG64)d->u.Memory.Start.QuadPart == SBM_GPU_PA &&
+            d->u.Memory.Length >= SBM_GPU_SIZE && !c->Mmio[SBM_GPU]) {
+            c->Mmio[SBM_GPU] = (volatile UCHAR *)MmMapIoSpaceEx(d->u.Memory.Start, SBM_GPU_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
+            c->MmioSize[SBM_GPU] = SBM_GPU_SIZE;
+        }
+    }
+    return StartHw(c, FALSE);
+}
+
 /* Stop the test thread; it puts the GPU and BUCK6 back and clears the guard before it ends. */
 static void StopThread(PSM_CTX c)
 {
@@ -611,10 +624,8 @@ static NTSTATUS SmD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS SmReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
+static void StopHw(PSM_CTX c)
 {
-    PSM_CTX c = SmGetCtx(Device);
-    UNREFERENCED_PARAMETER(Translated);
     StopThread(c);
     Finish(c);                            /* no-op when the thread already put everything back */
     if (c->Cb) {
@@ -641,7 +652,24 @@ static NTSTATUS SmReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
         c->HeapMdl = NULL;
     }
     Unmap(c);
+}
+
+static NTSTATUS SmReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
+{
+    UNREFERENCED_PARAMETER(Translated);
+    StopHw(SmGetCtx(Device));
     return STATUS_SUCCESS;
+}
+
+/* Standalone service (Services\sbmali\Start 1 or 2, e.g. tools/win/hive-service.py add): no device, so it
+ * coexists with sbdisplay bound to ACPI\STRB0072. The test runs once per load; unload puts everything back.
+ * (No shutdown notification: a shutdown during the ~40 s of runs leaves the guard armed once.) */
+static SM_CTX SmStandalone;
+
+static VOID SmUnload(WDFDRIVER Driver)
+{
+    UNREFERENCED_PARAMETER(Driver);
+    StopHw(&SmStandalone);
 }
 
 static NTSTATUS SmDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT Init)
@@ -678,7 +706,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 {
     WDF_DRIVER_CONFIG cfg;
     HANDLE h;
-    ULONG guard;
+    ULONG guard, start = 3;
 
     if (KillFile(L"\\SystemRoot\\Starbite\\sbmali.off"))
         return STATUS_DEVICE_CONFIGURATION_ERROR;
@@ -704,6 +732,20 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
             (void)ZwSetValueKey(s, &n, 0, REG_BINARY, (PVOID)id, sizeof(id));
             ZwClose(s);
         }
+    }
+    if (NT_SUCCESS(OpenSvc(NULL, &h))) {
+        start = GetDword(h, L"Start", 3);
+        ZwClose(h);
+    }
+    if (start <= 2) {                     /* boot/system/auto: the standalone service */
+        NTSTATUS st;
+        WDF_DRIVER_CONFIG_INIT(&cfg, WDF_NO_EVENT_CALLBACK);
+        cfg.DriverInitFlags |= WdfDriverInitNonPnpDriver;
+        cfg.EvtDriverUnload = SmUnload;
+        st = WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &cfg, WDF_NO_HANDLE);
+        if (NT_SUCCESS(st))
+            st = StartHw(&SmStandalone, TRUE);
+        return st;
     }
     WDF_DRIVER_CONFIG_INIT(&cfg, SmDeviceAdd);
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &cfg, WDF_NO_HANDLE);

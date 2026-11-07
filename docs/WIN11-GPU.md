@@ -610,12 +610,23 @@ clear 20/20, 0 faults, 0 timeouts, every job done within the 20 µs polling step
 restart, no bugcheck, GuardBoots 0. Both table formats work for these jobs; the exynos-linux failures were
 with real workloads, so the comparison continues with a real draw (T8).
 
+**T7 passed (2026-11-07, sbdisplay 5fbece03, Scale 2; `build/win/results-t7/SYSTEM-r`): the user: "it is working
+faster".** State: Started 1, Mode 1 (copy), Scale 2, ModeWidth × ModeHeight 720 × 1480 on the 1440 × 2960
+framebuffer (pitch 5760, format 22 = X8R8G8B8, 0xCC000000), MmioMapped 7, Identify ok (Window 5, trigger
+0x3061 = enabled and unmasked as the UEFI left it), CommitStatus 0, Presents counting (1024 logged), Flips 0,
+BrightnessInterface 1 (Windows asked for it; Brightness 0, so no DSIM writes). The failures logged are the
+expected ones: QueryInterface 0xC00000BB (STATUS_NOT_SUPPORTED) for interfaces other than brightness (QAI 47),
+QueryDeviceDescriptor 0xC01D0001 (no EDID). Clean restart, no bugcheck. sbdisplay stays bound as the
+user's daily display driver. Its guard now clears after 1 minute of presents (10 minutes would count every
+shorter daily session); sbmali can run as a standalone service (Start 1/2) next to it, mapping the Mali
+itself, so T8 needs no rebinding.
+
 ### 10.2 Next phone tests
 
 | # | Test | What it proves | Risk |
 |---|---|---|---|
 | T7 | 2x scaled desktop (sbdisplay, copy mode) | smoother desktop (4x fewer pixels for WARP/DWM); Desktop Duplication on our display-only driver | a new display driver may black-screen (§4.3) |
-| T8 | sbmali v2: the GPU clock and a real draw. ACPM DVFS domain 4 to 572 MHz (BUCK6 rewritten after it), XNU's Mesa-built triangle (tiler + vertex + fragment, `xnu/src/starlte_gpu_tri.h`, proven on this phone under iOS) into a private buffer checked pixel by pixel, 200 runs per table format with clear + triangle, temperatures throughout | the clock path, the tiler, shaders, and the legacy-versus-AArch64 decision on a real workload | sustained GPU load for ~1 min at 572 MHz: the watchdog throttles (338 MHz at 70 °C, 260 at 80, stop at 90); otherwise as T5 |
+| T8 | sbmali v2 as a standalone service (`hive-service.py add sbmali`, next to sbdisplay): the GPU clock and a real draw. ACPM DVFS domain 4 to 572 MHz (BUCK6 rewritten after it), XNU's Mesa-built triangle (tiler + vertex + fragment, `xnu/src/starlte_gpu_tri.h`, proven on this phone under iOS) into a private buffer checked pixel by pixel, 200 runs per table format with clear + triangle, temperatures throughout | the clock path, the tiler, shaders, and the legacy-versus-AArch64 decision on a real workload | sustained GPU load for ~1 min at 572 MHz: the watchdog throttles (338 MHz at 70 °C, 260 at 80, stop at 90); otherwise as T5 |
 | T9 | Mesa on Windows without WDDM (wddm-mali-g52's M3/M4 shape): Mesa 26.2 + their patches cross-built for ARM64, Panfrost reaching sbmali through a Panfrost-style IOCTL interface (CREATE_BO, SUBMIT, WAIT_BO, ...), a D3D11 test program using Mesa's d3d10umd as a software driver | D3D11 rendered by the Mali under Windows | a user-mode program has to be started (the user taps it; services running cmd.exe crash on this Windows) |
 | 4a | sbwddm skeleton (WDDM 1.3, display half = sbdisplay incl. 2x scaling) | Windows accepts our full driver | black desktop possible (wddm-mali-g52 run 6) |
 

@@ -17,9 +17,9 @@
  * after a flip failed to latch within 50 ms.
  *
  * Progress: HKLM\SYSTEM\CurrentControlSet\Services\sbdisplay\State (values, flushed at milestones).
- * Boot guard: Services\sbdisplay\GuardBoots counts starts; it is cleared only after 10 minutes with
+ * Boot guard: Services\sbdisplay\GuardBoots counts starts; it is cleared only after 1 minute with
  * presents arriving and no flip failure. A screen that is wrong (black, frozen, garbled) is a
- * person's call: force a restart within 10 minutes, twice, and the third boot runs Basic Display.
+ * person's call: force a restart within 1 minute, twice, and the third boot runs Basic Display.
  * Kill switches, in the order to use them: the BOOT image without the Starbite SSDT (no device, no
  * driver), the file \Windows\Starbite\sbdisplay.off (from TWRP), Start = 4 (offline hive edit, only
  * on a clean hive: Windows replays a dirty hive's logs over offline edits).
@@ -31,7 +31,8 @@
 
 #define SD_TAG 'dDbS'
 #define SD_GUARD_LIMIT 2
-#define SD_GUARD_CLEAR_MS 600000        /* 10 min: time for a person to see a bad screen and force a restart */
+#define SD_GUARD_CLEAR_MS 60000         /* 1 min of presents (was 10 min for the first test, T7: proven on the
+                                         * phone, and daily sessions shorter than 10 min would count) */
 #define SD_LATCH_TIMEOUT_US 50000
 #define SD_DEFAULT_LEVEL 64               /* S-Boot's normal AOR 0x0440, assumed until Windows sets one */
 
@@ -320,7 +321,7 @@ static VOID GuardThread(PVOID Ctx)
     KeSetEvent(&dev->GuardStarted, IO_NO_INCREMENT, FALSE);
     t.QuadPart = -10000LL * SD_GUARD_CLEAR_MS;
     if (KeWaitForSingleObject(&dev->GuardStop, Executive, KernelMode, FALSE, &t) == STATUS_TIMEOUT) {
-        /* Healthy = Windows has been presenting through us for 10 minutes without a flip failure. */
+        /* Healthy = Windows has been presenting through us for a minute without a flip failure. */
         Log(L"PresentsAtGuard", dev->Presents, TRUE);
         if (dev->Presents > 0 && dev->Fallbacks == 0 && NT_SUCCESS(OpenSvc(NULL, &h))) {
             PutDword(h, L"GuardBoots", 0);
