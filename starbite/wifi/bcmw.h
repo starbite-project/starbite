@@ -176,6 +176,35 @@ int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char
 int bcmw_leave(struct bcmw *w);
 int bcmw_link_up(const struct bcmw *w);
 
+/* ---- the pieces, for an OS with its own supplicant and connection manager (Windows' WiFiCx) ------ */
+
+struct bcmw_bss {                   /* one access point from an escan result event */
+    uint8_t bssid[6], ssid[32], ssid_len;
+    uint16_t chanspec, capability, beacon_period;
+    unsigned channel, band5;        /* channel number; 1 for 5 GHz */
+    int rssi;
+    const uint8_t *ie;              /* its information elements (inside the event: copy them) */
+    uint32_t ie_len;
+};
+/* 1 if ev is an escan result carrying a BSS (status 8), into *b; *sync = the scan's sync id */
+int bcmw_bss_parse(const struct bcmw_event *ev, struct bcmw_bss *b, uint16_t *sync);
+/* 1 if ev ends the escan with this sync id (status other than 8) */
+int bcmw_scan_ended(const struct bcmw_event *ev, uint16_t sync);
+/* start an escan (all channels; a name or none); results and its end come as events */
+int bcmw_scan_start(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, uint16_t sync);
+/* Associate without the core's own handshake: open (rsn_ie NULL) or WPA2-PSK with the OS's supplicant
+ * (rsn_ie = the RSN element for the association request; group TKIP allowed: wsec gets TKIP too).
+ * Non-blocking: SET_SSID, LINK, DEAUTH... come as events; EAPOL frames go to os->rx. */
+int bcmw_connect(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const uint8_t bssid[6], const uint8_t *rsn_ie,
+                 unsigned rsn_len, int group_tkip);
+/* a key into the firmware (wsec_key): pairwise with the peer's address (flags 0), group without (primary);
+ * algo: 4 AES-CCM, 2 TKIP; rsc: the 6-byte receive sequence counter or NULL */
+int bcmw_set_key(struct bcmw *w, unsigned index, const uint8_t *key, unsigned len, unsigned algo, const uint8_t *ea,
+                 const uint8_t *rsc);
+/* the association's request and response IEs as the firmware sent / got them (assoc_info, assoc_req_ies,
+ * assoc_resp_ies); lengths in and out */
+int bcmw_assoc_ies(struct bcmw *w, uint8_t *req, uint32_t *req_len, uint8_t *resp, uint32_t *resp_len);
+
 /* what the bring-up learned */
 struct bcmw_info {
     uint16_t vendor, device;    /* PCI IDs of 1:00.0 */

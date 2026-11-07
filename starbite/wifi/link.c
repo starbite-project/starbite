@@ -292,8 +292,17 @@ void link_event(struct bcmw *w, const struct bcmw_event *ev)
     }
 }
 
+static int set_key_algo(struct bcmw *w, unsigned index, const uint8_t *key, unsigned len, unsigned algo,
+                        const uint8_t *ea, const uint8_t *rsc);
+
 static int set_key(struct bcmw *w, unsigned index, const uint8_t *key, unsigned len, const uint8_t *ea,
                    const uint8_t *rsc)
+{
+    return set_key_algo(w, index, key, len, ALGO_AES_CCM, ea, rsc);
+}
+
+static int set_key_algo(struct bcmw *w, unsigned index, const uint8_t *key, unsigned len, unsigned algo,
+                        const uint8_t *ea, const uint8_t *rsc)
 {
     uint8_t k[164];
     int fwerr = 0, e;
@@ -301,7 +310,9 @@ static int set_key(struct bcmw *w, unsigned index, const uint8_t *key, unsigned 
     put32(k + 0, index);
     put32(k + 4, len);
     bcmw_memcpy(k + 8, key, len);
-    put32(k + 112, ALGO_AES_CCM);
+    if (len > 32)
+        return BCMW_E_REFUSED;
+    put32(k + 112, algo);
     /* brcmf_cfg80211_add_key: a key given with the peer's address (the pairwise one) is an "ext key",
      * flags 0 and ea = the peer; one without (the group key) is the primary key */
     put32(k + 116, ea ? 0 : PRIMARY_KEY);
@@ -621,4 +632,125 @@ int bcmw_leave(struct bcmw *w)
     w->eapol_out_len = 0;
     bcmw_memset(&w->wpa, 0, sizeof(w->wpa));
     return bcmw_ioctl(w, 0, C_DISASSOC, scb, sizeof(scb), 1, &fwerr);
+}
+
+/* ---- the pieces, for an OS with its own supplicant (bcmw.h) --------------------------------------------- */
+
+int bcmw_bss_parse(const struct bcmw_event *ev, struct bcmw_bss *b, uint16_t *sync)
+{
+    const uint8_t *d = ev->data;
+    uint32_t blen, ie_off, ie_len;
+
+    if (ev->type != BCMW_E_ESCAN_RESULT || ev->datalen < 12)
+        return 0;
+    if (sync)
+        *sync = le16(d + 8);
+    if (ev->status != 8 || ev->datalen < 12 + 128 || le16(d + 10) < 1)
+        return 0;
+    d += 12;
+    blen = le32(d + 4);
+    if (blen < 128 || blen > ev->datalen - 12 || d[18] > 32)
+        return 0;
+    ie_off = le16(d + 116);
+    ie_len = le32(d + 120);
+    if (ie_off > blen || ie_len > blen - ie_off)
+        return 0;
+    bcmw_memset(b, 0, sizeof(*b));
+    bcmw_memcpy(b->bssid, d + 8, 6);
+    b->beacon_period = le16(d + 14);
+    b->capability = le16(d + 16);
+    b->ssid_len = d[18];
+    bcmw_memcpy(b->ssid, d + 19, b->ssid_len);
+    b->chanspec = le16(d + 72);
+    b->channel = b->chanspec & 0xff;
+    b->band5 = (b->chanspec & 0xc000) == 0xc000;   /* d11ac chanspec: band bits 15:14, 5 GHz = 3 */
+    b->rssi = (int16_t)le16(d + 78);
+    b->ie = d + ie_off;
+    b->ie_len = ie_len;
+    return 1;
+}
+
+int bcmw_scan_ended(const struct bcmw_event *ev, uint16_t sync)
+{
+    return ev->type == BCMW_E_ESCAN_RESULT && ev->status != 8 && ev->datalen >= 10 && le16(ev->data + 8) == sync;
+}
+
+int bcmw_scan_start(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, uint16_t sync)
+{
+    uint8_t p[80];
+    uint32_t n;
+    if (w->step < BCMW_STEP_UP || w->dead || ssid_len > 32)
+        return BCMW_E_STATE;
+    n = bcmw_escan_params(w, p, ssid, ssid_len, sync);
+    return bcmw_iovar_set(w, "escan", p, n, 0);
+}
+
+int bcmw_connect(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const uint8_t bssid[6], const uint8_t *rsn_ie,
+                 unsigned rsn_len, int group_tkip)
+{
+    uint8_t j[48];
+    uint32_t v;
+    int e, fwerr = 0;
+    if (w->step < BCMW_STEP_UP || w->dead || !ssid_len || ssid_len > 32)
+        return BCMW_E_STATE;
+    v = 1;
+    bcmw_ioctl(w, 0, BCMW_C_SET_INFRA, &v, 4, 1, &fwerr);
+    v = 0;
+    bcmw_ioctl(w, 0, BCMW_C_SET_AUTH, &v, 4, 1, &fwerr);
+    e = bcmw_iovar_set_u32(w, "wsec", rsn_ie ? WSEC_AES | (group_tkip ? WSEC_TKIP : 0) : 0);
+    if (e == BCMW_OK)
+        e = bcmw_iovar_set_u32(w, "wpa_auth", rsn_ie ? WPA2_AUTH_PSK : 0);
+    if (e == BCMW_OK && rsn_ie)
+        e = bcmw_iovar_set(w, "wpaie", rsn_ie, rsn_len, &fwerr);
+    if (e != BCMW_OK) {
+        bcmw_sayx(w, "link: the firmware refused the security settings; its error ", (uint32_t)fwerr, NULL);
+        return e;
+    }
+    bcmw_memset(j, 0, sizeof(j));
+    put32(j, ssid_len);
+    bcmw_memcpy(j + 4, ssid, ssid_len);
+    if (bssid)
+        bcmw_memcpy(j + 36, bssid, 6);
+    else
+        bcmw_memset(j + 36, 0xff, 6);
+    if (bssid)
+        bcmw_memcpy(w->join_bssid, bssid, 6);
+    return bcmw_ioctl(w, 0, BCMW_C_SET_SSID, j, sizeof(j), 1, &fwerr);
+}
+
+int bcmw_set_key(struct bcmw *w, unsigned index, const uint8_t *key, unsigned len, unsigned algo, const uint8_t *ea,
+                 const uint8_t *rsc)
+{
+    if (w->step < BCMW_STEP_UP || w->dead)
+        return BCMW_E_STATE;
+    return set_key_algo(w, index, key, len, algo, ea, rsc);
+}
+
+int bcmw_assoc_ies(struct bcmw *w, uint8_t *req, uint32_t *req_len, uint8_t *resp, uint32_t *resp_len)
+{
+    uint8_t info[8], buf[1024];
+    uint32_t rq, rs;
+    int e;
+    if (w->step < BCMW_STEP_UP || w->dead)
+        return BCMW_E_STATE;
+    bcmw_memset(info, 0, sizeof(info));
+    if ((e = bcmw_iovar_get(w, "assoc_info", info, sizeof(info), 0)) != BCMW_OK)  /* brcmf_cfg80211_assoc_ielen_le */
+        return e;
+    rq = le32(info);
+    rs = le32(info + 4);
+    if (rq > sizeof(buf) || rs > sizeof(buf))
+        return BCMW_E_PROTO;
+    if (rq && (e = bcmw_iovar_get(w, "assoc_req_ies", buf, rq, 0)) != BCMW_OK)
+        return e;
+    if (rq > *req_len)
+        rq = *req_len;
+    bcmw_memcpy(req, buf, rq);
+    *req_len = rq;
+    if (rs && (e = bcmw_iovar_get(w, "assoc_resp_ies", buf, rs, 0)) != BCMW_OK)
+        return e;
+    if (rs > *resp_len)
+        rs = *resp_len;
+    bcmw_memcpy(resp, buf, rs);
+    *resp_len = rs;
+    return BCMW_OK;
 }
