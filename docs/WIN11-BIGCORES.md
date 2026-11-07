@@ -442,6 +442,12 @@ which go straight to EL3 (no shim there).
 **v7** (solo7, on top of v6): the A55 never calls CPU_OFF: after its 15 s watch it parks in a WFI loop in its reserved
 page with the MMU and caches off. The M3 calls PSCI_VERSION once after "=M3 state" (`=M3 psci: ...` before and after:
 a missing second line = EL3 doesn't answer the M3). The watcher invalidates the pmsg header before reading it.
-WriteBackDataCache (ASSERT(FALSE)/no-op in edk2 on ARM) is gone. Image starbite-uefi-solo7-gpu.bin 95402dec….
+WriteBackDataCache (ASSERT(FALSE)/no-op in edk2 on ARM) is gone. The watch lasts 60 s (solo6 below). Image
+starbite-uefi-solo7-gpu.bin 71e88218… (an earlier 15 s build, 95402dec…, was never run).
 The loader's pmsg append fix (append at W[2] while unwrapped) is the main session's.
+
+**solo6 (0be43045):** the order works as designed: "ReadyToBoot: ExitBootServices BBD27CBC wrapped by ours", "wrapper
+called from 90F47638" (winload), the LSE latch 80000001 -> 80000000, =EBSOK now printed on the A55, the hand-off,
+"=M3 state", watch `beat 4C prog 02 catch 00`. No =UFS line, no bugcheck: the M3 is in winload/ntoskrnl and hangs
+there, with no EL1 exception during the 15 s watch; the A55 then did CPU_OFF (removed in v7).
 
