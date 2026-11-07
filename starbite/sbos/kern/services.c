@@ -9,6 +9,7 @@
 /* ---- SOS ------------------------------------------------------------------------------------- */
 /* state 0 off, 2 the countdown (3 s, a hold cancels), 1 flashing: white / red at 2 Hz */
 static int sos_st;
+int sos_led_on;
 static uint64_t sos_t0, sos_phase_t;
 static int sos_phase;
 
@@ -28,6 +29,8 @@ int sos_set(int on)
     } else if (!on && sos_st) {
         sos_st = 0;
         kt_cancel(KT_SOS, 1);
+        if (sos_led_on)
+            torch_set(0);
         sb_log("sos: off");
     }
     kui_sos_changed();
@@ -37,7 +40,10 @@ int sos_set(int on)
 
 void sos_timer(unsigned id)
 {
-    (void)id;
+    if (id == 9) {
+        torch_timer(id);
+        return;
+    }
     uint64_t now = sb_ms();
     if (sos_st == 2 && now >= sos_t0) {
         sos_st = 1;
@@ -45,8 +51,11 @@ void sos_timer(unsigned id)
         sb_log("sos: flashing");
         app_event_send(app_by_id("sos"), EV_APP_SERVICE, 2, sos_st);
     }
-    if (sos_st == 1)
+    if (sos_st == 1) {
         sos_phase = (int)(((now - sos_phase_t) / 250U) & 1U);
+        if (sos_led_on)
+            torch_set(!sos_phase);              /* the LED with the white phase */
+    }
     ui_mark_dirty();
 }
 
@@ -67,7 +76,7 @@ void sos_status(struct sbos_sos *s)
         s->secs = -(int32_t)((sos_t0 - now + 999U) / 1000U);
     else if (sos_st == 1)
         s->secs = (int32_t)((now - sos_phase_t) / 1000U);
-    s->torch = 0;
+    s->torch = sos_led_on && torch_ready();
     s->siren = 0;
 }
 
@@ -191,6 +200,8 @@ void battery_timer(unsigned id)
     ui_kminute();
     kt_set(KT_BATTERY, 1, sb_ms(), K.screen_on ? 10000 : 60000, 0);
     /* the reserve (docs 4.6): below 3 % off, unless SOS runs (down to 2 %) */
+    if (bat.ok && bat.pct < 2 && torch_on())
+        torch_set(0);
     if (bat.ok && !bat.charger && ((bat.pct < 3 && !sos_active()) || bat.pct < 2)) {
         sb_log("sbos: battery reserve reached: power off");
         power_off_now();
@@ -279,6 +290,7 @@ void power_timer(unsigned id)
 
 void power_restart(int to_menu)
 {
+    torch_set(0);
     heater_stop_all("Restarting");
     sb_mdelay(200);
     if (to_menu)
@@ -288,6 +300,7 @@ void power_restart(int to_menu)
 
 void power_off_now(void)
 {
+    torch_set(0);
     if (heater_running_ui())
         heater_stop_all("Switching off");
     sb_mdelay(200);

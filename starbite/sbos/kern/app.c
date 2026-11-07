@@ -570,9 +570,59 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         }
         return SBOS_EINVAL;
     /* ---- light ---- */
-    case SYS_TORCH:
+    case SYS_TORCH: {
+        if (!(p->perms & SBOS_P_LIGHT))
+            return SBOS_EPERM;
+        int64_t lv = (int64_t)arg[0];
+        if (lv < 0)
+            return torch_ready() ? torch_on() : SBOS_EAGAIN;
+        if (lv > 0 && !front)
+            return SBOS_EPERM;                  /* switching on needs the app in front */
+        return torch_set(lv > 0);
+    }
     case SYS_STROBE:
         return (p->perms & SBOS_P_LIGHT) ? SBOS_ENOSYS : SBOS_EPERM;
+    case SYS_SETTING_GET:
+        switch (arg[0]) {
+        case SET_PANEL_SAVE: return panel_save_on;
+        case SET_PANEL_OFF: return panel_off_on;
+        case SET_SOS_LED: return sos_led_on;
+        case SET_SCREEN_OFF_S: return (int64_t)K.screen_off_s;
+        default: return SBOS_EINVAL;
+        }
+    case SYS_SETTING_SET:
+        if (!front)
+            return SBOS_EPERM;
+        switch (arg[0]) {
+        case SET_PANEL_SAVE:
+            panel_save_set(arg[1] != 0);
+            sb_log(arg[1] ? "settings: panel refresh only on change: on" : "settings: panel refresh only on change: off");
+            return 0;
+        case SET_PANEL_OFF:
+            panel_off_on = arg[1] != 0;
+            sb_log(arg[1] ? "settings: panel off with the screen: on" : "settings: panel off with the screen: off");
+            return 0;
+        case SET_SOS_LED:
+            sos_led_on = arg[1] != 0;
+            sb_log(arg[1] ? "settings: LED in SOS: on" : "settings: LED in SOS: off");
+            return 0;
+        case SET_SCREEN_OFF_S:
+            if (arg[1] < 10 || arg[1] > 600)
+                return SBOS_EINVAL;
+            K.screen_off_s = (uint32_t)arg[1];
+            power_input();
+            return 0;
+        default:
+            return SBOS_EINVAL;
+        }
+    case SYS_FILE_READ: {
+        if (!(p->perms & SBOS_P_FILES))
+            return SBOS_EPERM;
+        uint64_t cap = arg[2] > 65536 ? 65536 : arg[2];
+        if (!user_str(a, arg[0], s1, sizeof(s1)) || !user_buf(a, arg[1], cap))
+            return SBOS_EINVAL;
+        return kfile_read(s1, (void *)(uintptr_t)arg[1], (uint32_t)cap);
+    }
     /* ---- heat ---- */
     case SYS_HEAT_REQUEST:
         if (!(p->perms & SBOS_P_HEAT))

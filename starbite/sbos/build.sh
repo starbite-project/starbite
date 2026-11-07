@@ -75,7 +75,7 @@ relocs_only_relative() {
 "${CROSS}gcc" $CFLAGS "$here/sdk/sbapp_lib.c" -o "$ob/app_lib.o"
 "${CROSS}gcc" $CFLAGS "$ut/tz.c" -o "$ob/app_tz.o"
 apps=""
-for a in light heat sos clock battery settings test-loop test-fault; do
+for a in light heat sos info clock battery settings test-loop test-fault; do
     "${CROSS}gcc" $CFLAGS "$here/apps/$a.c" -o "$ob/app_$a.o"
     extra=""
     [ "$a" = clock ] && extra="$ob/app_tz.o"
@@ -95,7 +95,7 @@ python3 "$here/tools/mk-sba.py" pack "$ob/apps.pack" $apps
 # ---- kernel ----------------------------------------------------------------------------------------
 objs=""
 v80objs=""
-for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c"; do
+for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$ut/exfat.c"; do
     obj="$ob/k_$(basename "$src" | tr . _).o"
     flags=$CFLAGS
     case " smp.c heatk.c " in

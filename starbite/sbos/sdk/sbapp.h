@@ -23,6 +23,7 @@ enum {
     SYS_TIME_NOW = 30, SYS_TIMER_SET = 31, SYS_TIMER_CANCEL = 32, SYS_UPTIME_MS = 33,
     /* power 40..49 */
     SYS_BATTERY = 40, SYS_ESTIMATE = 41, SYS_POWER_REQUEST = 42, SYS_SYSINFO = 43,
+    SYS_SETTING_GET = 44, SYS_SETTING_SET = 45,            /* API 1, added in 0.2 */
     /* light 50..59 */
     SYS_TORCH = 50, SYS_STROBE = 51,
     /* heat 60..69 */
@@ -33,7 +34,7 @@ enum {
     SYS_STATE_PUT = 80, SYS_STATE_GET = 81,
     /* files 90..99 (read only), sensors 100..119, phone 120..139, network 140..159, camera 160..179:
      * reserved, SBOS_ENOSYS in API 1 */
-    SYS_FILE_OPEN = 90,
+    SYS_FILE_OPEN = 90, SYS_FILE_READ = 91,                 /* 91: added in 0.2 */
     SYS_SENSOR_READ = 100,
     SYS_PHONE_STATE = 120, SYS_CALL_DIAL = 121, SYS_CALL_HANGUP = 122, SYS_SMS_SEND = 123, SYS_SMS_READ = 124,
     SYS_NET_STATE = 140,
@@ -136,6 +137,9 @@ struct sbos_sysinfo {
     int32_t screen_off_s, sleep_off_s;
 };
 
+/* settings (SYS_SETTING_GET / SET): until a restart in 0.2 */
+enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S = 4 };
+
 /* power_request what */
 enum { PWR_SCREEN_OFF = 1, PWR_SET_SCREEN_OFF_S = 2, PWR_SET_SLEEP_OFF_S = 3 };
 
@@ -196,7 +200,12 @@ static inline int estimate(struct sbos_estimate *e) { return (int)sbos_call(SYS_
 static inline int sysinfo(struct sbos_sysinfo *s) { return (int)sbos_call(SYS_SYSINFO, (uintptr_t)s, 0, 0, 0, 0); }
 static inline int power_request(int what, int value) { return (int)sbos_call(SYS_POWER_REQUEST, (uint64_t)what, (uint64_t)value, 0, 0, 0); }
 
-static inline int torch(int level) { return (int)sbos_call(SYS_TORCH, (uint64_t)level, 0, 0, 0, 0); }
+/* torch(1..3) on, torch(0) off, torch(-1): 1 on / 0 off; SBOS_EAGAIN refused (no safe LED), SBOS_ENOSYS none */
+static inline int torch(int level) { return (int)sbos_call(SYS_TORCH, (uint64_t)(int64_t)level, 0, 0, 0, 0); }
+static inline int setting_get(int id) { return (int)sbos_call(SYS_SETTING_GET, (uint64_t)id, 0, 0, 0, 0); }
+static inline int setting_set(int id, int v) { return (int)sbos_call(SYS_SETTING_SET, (uint64_t)id, (uint64_t)(int64_t)v, 0, 0, 0); }
+/* the start of a file on the card (read only): bytes read, or < 0 */
+static inline int file_read(const char *path, void *buf, uint32_t cap) { return (int)sbos_call(SYS_FILE_READ, (uintptr_t)path, (uintptr_t)buf, cap, 0, 0); }
 static inline int heat_request(int level, int minutes) { return (int)sbos_call(SYS_HEAT_REQUEST, (uint64_t)level, (uint64_t)minutes, 0, 0, 0); }
 static inline int heat_status(struct sbos_heat *h) { return (int)sbos_call(SYS_HEAT_STATUS, (uintptr_t)h, 0, 0, 0, 0); }
 static inline int sos(int on) { return (int)sbos_call(SYS_SIREN, (uint64_t)on, 0, 0, 0, 0); }

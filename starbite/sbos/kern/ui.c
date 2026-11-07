@@ -488,8 +488,12 @@ static void build_lock(void)
 
 static void build_home(void)
 {
-    int heat = app_by_id("heat"), sos_a = app_by_id("sos");
-    for (int i = 0, t = 0; i < napps && t < 6; ++i) {
+    int heat = app_by_id("heat"), sos_a = app_by_id("sos"), light = app_by_id("light");
+    int shown_n = 0;
+    for (int i = 0; i < napps; ++i)
+        shown_n += !app_hidden(i);
+    int th = shown_n > 6 ? 470 : 600;          /* 3 rows of big tiles, 4 rows when there are more apps */
+    for (int i = 0, t = 0; i < napps && t < 8; ++i) {
         if (app_hidden(i))
             continue;
         struct el *e = add(cur, &ncur, E_TILE);
@@ -498,10 +502,12 @@ static void build_home(void)
         e->icon = app_icon(i);
         e->color = app_color(i) ? app_color(i) : C_STAR;
         e->w = 625;
-        e->h = 600;
+        e->h = th;
         e->x = MX + (t % 2) * (625 + 50);
-        e->y = 300 + (t / 2) * (600 + 50);
+        e->y = 300 + (t / 2) * (th + 50);
         ++t;
+        if (i == light && torch_on())
+            scopy(e->b, sizeof(e->b), "LED on");
         if (i == heat && heater_running_ui())
             scopy(e->b, sizeof(e->b), "Heating");
         if (i == sos_a && sos_active())
@@ -511,7 +517,7 @@ static void build_home(void)
     scopy(e->b, sizeof(e->b), "Bixby: open  " U_DOT "  Power: screen off  " U_DOT "  hold Power: menu");
     e->value = F_SMALL;
     e->color = C_L3;
-    e->x = 0, e->y = 2290, e->w = UI_W, e->h = 80;
+    e->x = 0, e->y = 300 + ((shown_n + 1) / 2) * (th + 50) + 20, e->w = UI_W, e->h = 80;
 }
 
 static void build_app(void)
@@ -795,9 +801,10 @@ static void draw_el(const struct el *e, int idx)
         if (f)
             ui_round(e->x - 10, e->y - 10, e->w + 20, e->h + 20, 82, C_STAR);
         ui_round(e->x, e->y, e->w, e->h, 72, card);
-        ui_disc(e->x + 150, e->y + 160, 100, ui_mix(e->color, C_CARD, 60));
+        int iy = e->h < 560 ? e->y + 125 : e->y + 160;
+        ui_disc(e->x + 150, iy, 100, ui_mix(e->color, C_CARD, 60));
         if (e->icon)
-            ui_icon(e->icon, e->x + 75, e->y + 85, e->color);
+            ui_icon(e->icon, e->x + 75, iy - 75, e->color);
         ui_text_cut(F_TITLE, e->x + 70, e->y + e->h - 110, e->a, e->w - 120, C_L1);
         if (e->b[0])
             ui_text(F_DETAIL, e->x + 72, e->y + e->h - 40, e->b, C_ORANGE);
@@ -913,6 +920,8 @@ void ui_kdraw(void)
     memcpy(shown, cur, sizeof(cur[0]) * (size_t)ncur);
     nshown = ncur;
     uint64_t px = ui_present();
+    if (px)
+        panel_kick();
     if (px && !K.first_frame_ms)
         K.first_frame_ms = sb_ms() ? sb_ms() : 1;
     if (pressed >= 0 && !kt_pending(KT_UI, 1))
@@ -1068,6 +1077,7 @@ void kui_screen_changed(int on)
             ui_fill(0, 0, UI_W, UI_H, 0xff000000U);   /* v0.1: a black screen (OLED: those pixels are off) */
             ui_dirty_all();
             ui_present();
+            panel_kick();                       /* the black frame must reach the panel */
             nshown = 0;
         }
     }
@@ -1226,6 +1236,8 @@ void ui_ktimer(unsigned id)
             activate(i, -1);
         }
         dirty = 1;
+    } else if (id == 6) {
+        panel_idle();
     } else if (id == 4 && screen == SCR_LIGHT) {
         kui_light(0);
     } else if (id == 5) {

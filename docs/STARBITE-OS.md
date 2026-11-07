@@ -160,10 +160,14 @@ A ticking clock redraws one element. Later (v0.4): a **canvas** element for the 
 
 - v0.1 keeps libsb's display path: the loader leaves DECON free-running at 60 Hz, so the panel is refreshed
   from DRAM every frame even when nothing changed, and "screen off" is a black screen.
-- v0.2: **DECON software trigger** (a frame only per present), brightness through S-Boot's own AOR sequence
-  (`F0 5A 5A`, `B1 hi lo`, `F7 03`, `F0 A5 A5`; build/em-research-brightness.md) with dimming after 15 s,
-  **display off + sleep in** (DCS 0x28, 0x10) for screen off and **sleep out + display on** (0x11, 0x29).
-  Engineer OS's DSI command sender is the starting point. Each is a phone test of its own.
+- v0.2 (built; **off until Settings turns it on**, `kern/panel.c`): **refresh only on change**: S-Boot itself
+  leaves DECON_F's trigger masked (0x3070); the loader makes it free-running (0x1281). The kernel masks it
+  (HW_TRIG_MASK_DECON, bit 4, as the vendor driver's `decon_reg_set_trigger`) while the screen is still, and
+  every present unmasks it for 60 ms (two TE periods); **panel off with the screen**: the vendor's own
+  display-off / display-on (level-1 key `9F A5 A5`, DCS 0x28 / 0x29, `9F 5A 5A`), never sleep-in (its way back
+  needs the full panel init). DCS through DSIM as Engineer OS's brightness page sends it.
+- Later: brightness through S-Boot's own AOR sequence (`F0 5A 5A`, `B1 hi lo`, `F7 03`, `F0 A5 A5`;
+  build/em-research-brightness.md) with dimming after 15 s. Each is a phone test of its own.
 
 ## 4. Power
 

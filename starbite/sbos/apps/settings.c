@@ -21,7 +21,10 @@ static void show(void)
     ui_title("Settings");
     ui_textline("Screen off after", 0);
     ui_level(1, "15 s|30 s|1 min|2 min", cur);
-    ui_textline("Until the next restart (saving comes in 0.2).", 0);
+    ui_toggle(2, "Refresh only on change", setting_get(SET_PANEL_SAVE) == 1);
+    ui_toggle(3, "Panel off with the screen", setting_get(SET_PANEL_OFF) == 1);
+    ui_toggle(4, "LED flashes with SOS", setting_get(SET_SOS_LED) == 1);
+    ui_textline("These last until the next restart (saving them comes later).", 0);
     ui_textline(s.version, 0xffffffffU);
     fmt_init(&f);
     fmt_s(&f, s.irq_mode ? "Interrupts: on (the CPU sleeps)" : "Interrupts: polling (not saving power)");
@@ -53,8 +56,13 @@ void app_event(const struct sbos_event *ev)
 {
     if (ev->type == EV_APP_SHOW) {
         show();
+    } else if (ev->type == EV_APP_TOGGLE) {
+        int id = ev->id == 2 ? SET_PANEL_SAVE : ev->id == 3 ? SET_PANEL_OFF : ev->id == 4 ? SET_SOS_LED : 0;
+        if (id)
+            setting_set(id, ev->value);
+        show();
     } else if (ev->type == EV_APP_LEVEL && ev->id == 1 && ev->value >= 0 && ev->value < 4) {
-        power_request(PWR_SET_SCREEN_OFF_S, secs[ev->value]);
+        setting_set(SET_SCREEN_OFF_S, secs[ev->value]);
         show();
     }
 }

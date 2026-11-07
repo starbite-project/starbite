@@ -178,6 +178,111 @@ static void clocks_apply(void)
     }
 }
 
+/* ---- the run's log: every 10 s while heating, and the peaks at the stop ---- */
+static struct {
+    int bat, skin, soc, ma, mv;             /* peaks (mv: the lowest) */
+    uint64_t t0, next;
+    int on;
+} pk;
+
+static void ub_c10(struct ub *u, int ok, int c10)
+{
+    if (!ok) {
+        ub_s(u, "--");
+        return;
+    }
+    if (c10 < 0) {
+        ub_c(u, '-');
+        c10 = -c10;
+    }
+    ub_dec(u, (uint64_t)(c10 / 10));
+    ub_c(u, '.');
+    ub_c(u, (char)('0' + c10 % 10));
+}
+
+static int cores_running(void)
+{
+    int n = 0;
+    for (unsigned w = 1; w < 8; ++w)
+        n += running[w];
+    return n;
+}
+
+static void run_track(const struct heat_in *in)
+{
+    if (!pk.on) {
+        pk.on = 1;
+        pk.t0 = in->now;
+        pk.next = in->now;
+        pk.bat = pk.skin = pk.soc = -10000;
+        pk.ma = 0;
+        pk.mv = 100000;
+    }
+    if (in->bat_ok && in->bat_c10 > pk.bat)
+        pk.bat = in->bat_c10;
+    if (in->skin_ok && in->skin_c10 > pk.skin)
+        pk.skin = in->skin_c10;
+    if (in->soc_ok && in->soc_c10 > pk.soc)
+        pk.soc = in->soc_c10;
+    if (in->gauge_ok) {
+        int a = in->ma < 0 ? -in->ma : in->ma;
+        if (a > pk.ma)
+            pk.ma = a;
+        if (in->mv > 0 && in->mv < pk.mv)
+            pk.mv = in->mv;
+    }
+    if (in->now < pk.next)
+        return;
+    pk.next = in->now + 10000;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "heater: ");
+    ub_dec(&u, (in->now - pk.t0) / 1000U);
+    ub_s(&u, " s bat ");
+    ub_c10(&u, in->bat_ok, in->bat_c10);
+    ub_s(&u, " skin ");
+    ub_c10(&u, in->skin_ok, in->skin_c10);
+    ub_s(&u, " soc ");
+    ub_c10(&u, in->soc_ok, in->soc_c10);
+    ub_s(&u, " C, cores ");
+    ub_dec(&u, (uint64_t)cores_running());
+    ub_s(&u, ", ");
+    ub_dec(&u, hw_a55_khz() / 1000U);
+    ub_s(&u, "/");
+    ub_dec(&u, hw_m3_khz() / 1000U);
+    ub_s(&u, " MHz, ");
+    ub_dec(&u, (uint64_t)(in->mv > 0 ? in->mv : 0));
+    ub_s(&u, " mV ");
+    ub_sdec(&u, in->ma);
+    ub_s(&u, " mA ");
+    ub_dec(&u, (uint64_t)(in->pct > 0 ? in->pct : 0));
+    ub_s(&u, " %");
+    sb_log(u.b);
+}
+
+static void run_summary(void)
+{
+    if (!pk.on)
+        return;
+    pk.on = 0;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "heater: peak bat ");
+    ub_c10(&u, pk.bat > -10000, pk.bat);
+    ub_s(&u, " skin ");
+    ub_c10(&u, pk.skin > -10000, pk.skin);
+    ub_s(&u, " soc ");
+    ub_c10(&u, pk.soc > -10000, pk.soc);
+    ub_s(&u, " C, max ");
+    ub_dec(&u, (uint64_t)pk.ma);
+    ub_s(&u, " mA, min ");
+    ub_dec(&u, (uint64_t)(pk.mv < 100000 ? pk.mv : 0));
+    ub_s(&u, " mV, ran ");
+    ub_dec(&u, (sb_ms() - pk.t0) / 1000U);
+    ub_s(&u, " s");
+    sb_log(u.b);
+}
+
 static void restore_and_check(void)
 {
     for (unsigned w = 1; w < 8; ++w)
@@ -199,6 +304,7 @@ static void restore_and_check(void)
     for (unsigned w = 0; w < 8; ++w)
         parked_logged[w] = 0;
     sb_logf("heater: stopped: ", ctl.why[0] ? ctl.why : "?");
+    run_summary();
 }
 
 /* every worker core must be off within 1.5 s of a stop */
@@ -286,6 +392,7 @@ void heater_timer(unsigned id)
     read_inputs(&in);
     last_in = in;
     int before = ctl.state;
+    run_track(&in);
     heat_ctl_step(&ctl, &in);
     if (!heater_running_ui()) {
         restore_and_check();

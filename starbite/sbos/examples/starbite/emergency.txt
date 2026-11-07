@@ -1,0 +1,9 @@
+# Example emergency card for Starbite OS (copy to the microSD card as /starbite/emergency.txt and edit it).
+# Lines starting with # are not shown. The first line is shown big.
+Alex Example
+Born 1 January 1990
+Blood type: 0+
+Allergies: penicillin
+Medicines: none
+Conditions: asthma (inhaler in the left pocket)
+Call: Sam Example, +358 40 000 0000

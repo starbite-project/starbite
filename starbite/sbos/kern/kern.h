@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.1.1"
+#define SBOS_VERSION "0.2"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -197,6 +197,22 @@ void sos_status(struct sbos_sos *s);
 int sos_active(void);
 int sos_frame(uint32_t *argb);      /* 1 while SOS owns the screen: the colour to show */
 int clock_now(struct sbos_time *t);
+/* the flashlight LED (torch.c) */
+int torch_ready(void);
+const char *torch_why(void);
+int torch_on(void);
+int torch_set(int lit);
+void torch_timer(unsigned id);
+/* the panel's power (panel.c), settings off until turned on */
+extern int panel_save_on, panel_off_on;
+void panel_kick(void);
+void panel_idle(void);
+void panel_save_set(int on);
+void panel_screen(int on);
+unsigned panel_dcs_failures(void);
+/* files on the card, read only (files.c) */
+int kfile_read(const char *path, void *dst, uint32_t cap);
+extern int sos_led_on;              /* settings: the LED flashes with SOS */
 
 /* apps (app.c; struct kapp in kapp.h) */
 #define APP_MAX 12

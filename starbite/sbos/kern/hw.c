@@ -248,7 +248,7 @@ int hw_m3_on(void)
 
 void hw_screen(int on)
 {
-    (void)on;                                           /* v0.1: the UI draws black; v0.2: the panel sleeps */
+    panel_screen(on);                                   /* v0.2: the panel's own off / on (if turned on) */
 }
 
 void hw_tls_clear(void)

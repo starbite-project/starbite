@@ -46,6 +46,8 @@ ICONS = {
     'settings': '<path d="M4 6.5h9"/><path d="M17 6.5h3"/><circle cx="15" cy="6.5" r="2"/>'
                 '<path d="M4 12h3"/><path d="M11 12h9"/><circle cx="9" cy="12" r="2"/>'
                 '<path d="M4 17.5h11"/><path d="M19 17.5h1"/><circle cx="17" cy="17.5" r="2"/>',
+    'info': '<rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M9 9.2v5.6"/><path d="M6.2 12h5.6"/>'
+            '<path d="M14.5 10h3"/><path d="M14.5 14h3"/>',
     'back': '<path d="M15 4.5L7.5 12l7.5 7.5"/>',
     'power': '<path d="M12 3v8"/><path d="M7.2 6.3a7.5 7.5 0 1 0 9.6 0"/>',
     'moon': '<path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z"/>',
@@ -57,7 +59,7 @@ ICONS = {
 # id: (icon, px, stroke in 24-unit) -- ids must match starbite/sbos/kern/ui.c ICON_*
 ICON_IDS = {
     200: ('light', 150, 1.6), 201: ('heat', 150, 1.6), 202: ('sos', 150, 1.6), 203: ('clock', 150, 1.6),
-    204: ('battery', 150, 1.6), 205: ('settings', 150, 1.6),
+    204: ('battery', 150, 1.6), 205: ('settings', 150, 1.6), 206: ('info', 150, 1.6),
     220: ('back', 64, 2.4), 221: ('power', 96, 2.0), 222: ('moon', 96, 2.0), 223: ('restart', 96, 2.0),
     224: ('menu', 96, 2.0), 225: ('lock', 64, 2.2), 226: ('light', 96, 2.0), 227: ('sos', 96, 2.0),
 }

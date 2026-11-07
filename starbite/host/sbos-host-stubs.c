@@ -35,6 +35,23 @@ int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz)
     return 1;
 }
 
+/* the card's files: SBOS_HOST_FILES=dir maps "/starbite/emergency.txt" to dir/starbite/emergency.txt */
+#include <stdlib.h>
+int kfile_read(const char *path, void *dst, uint32_t cap)
+{
+    const char *dir = getenv("SBOS_HOST_FILES");
+    if (!dir)
+        return SBOS_EINVAL;
+    char p[512];
+    snprintf(p, sizeof(p), "%s%s", dir, path);
+    FILE *f = fopen(p, "rb");
+    if (!f)
+        return SBOS_EINVAL;
+    size_t n = fread(dst, 1, cap, f);
+    fclose(f);
+    return (int)n;
+}
+
 /* ---- the kernel's hardware layer ---- */
 int hw_irq_init(void) { K.irq_mode = 1; return 1; }
 void hw_irq_poll(void) {}
@@ -53,7 +70,7 @@ int hw_m3_prep(void) { return sb_m3_pmu_defaults(); }
 uint32_t hw_a55_khz(void) { return (uint32_t)(sb_a55_hz() / 1000U); }
 uint32_t hw_m3_khz(void) { int off; uint64_t h = sb_m3_hz(&off); return off ? 0 : (uint32_t)(h / 1000U); }
 int hw_m3_on(void) { return sb_m3_on(); }
-void hw_screen(int on) { (void)on; }
+void hw_screen(int on) { panel_screen(on); }
 void hw_app_map(uintptr_t slot, int on) { (void)slot; (void)on; }
 void hw_tls_clear(void) {}
 void hw_code_sync(uintptr_t a, uint64_t n) { (void)a; (void)n; }
@@ -69,6 +86,7 @@ int64_t hw_core_psci(unsigned w) { (void)w; return 0xffffffffLL; }   /* as the p
 APP(light)
 APP(heat)
 APP(sos)
+APP(info)
 APP(clock)
 APP(battery)
 APP(settings)
@@ -77,7 +95,7 @@ struct host_app {
     void (*entry)(const struct sbos_event *);
 };
 const struct host_app sbos_host_apps[] = {
-    { &light_header, light_app_event }, { &heat_header, heat_app_event }, { &sos_header, sos_app_event },
+    { &light_header, light_app_event }, { &heat_header, heat_app_event }, { &sos_header, sos_app_event }, { &info_header, info_app_event },
     { &clock_header, clock_app_event }, { &battery_header, battery_app_event }, { &settings_header, settings_app_event },
 };
-const int sbos_host_napps = 6;
+const int sbos_host_napps = 7;
