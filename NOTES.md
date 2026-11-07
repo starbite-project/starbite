@@ -2371,3 +2371,11 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   Fix: SOFTWARE ShippedWithReserves 0 + PassedPolicy 0 (9f4d904c); SYSTEM HibernateEnabledDefault 0 + HiberbootEnabled
   0 (e530c047); hiberfil.sys and temp files deleted: 7206 MiB free. Lesson: read the pmsg ring FIRST after any Windows
   crash (=UFSBUGCHECK). Tools: tools/woa/hive-check.py, hive-replay.py.
+- 2026-11-07 16:00: **Windows safety: drive letters and the UFS fence.** Task Manager showed drive letters C:..Z:: Windows had
+  mounted every UFS partition (D: BOTA0 .. F: EFS, G: PARAM, I: KEYSTORAGE, N: RECOVERY, O: RADIO, Q: PERSISTENT,
+  S: STEADY, ...). Writes there were always refused by the UFS driver's fence, but the fence still ended at 13518591
+  (layout v1), past WINDOWS' new end 12511999 into VENDOR/ODM/A16DATA. Fixed: MountedDevices keeps only C:
+  (hive-service.py letters C), mountmgr NoAutoMount = 1, and Exynos9810Ufs.sys protB_first (file 0x3f18)
+  13518592 -> 12512000, re-signed (2db63e45..., PE checksum valid; the previous 2d6c64ff kept in build/woa/ufs-sys).
+  Writable now exactly WINESP + WINDOWS = 6613760..12511999. Also today: A55 1053 -> 1950 MHz through sbthermal (ACPM
+  domain 2), confirmed from the CMU.

@@ -192,6 +192,30 @@ def main(a):
         s = setvals(h, pkey, upd) if exists(h, pkey) else f'cd \\{key}\nadd Parameters\n' + setvals(None, pkey, upd)
         hivexsh(work, s + 'commit\n')
         shown = pkey
+    elif cmd == 'setkey':
+        # setkey KEY --set Name=DWORD,...   (KEY relative to the current control set, e.g. Services\mountmgr)
+        key = f'{cs}\\{arg}'
+        if not exists(h, key):
+            raise SystemExit(f'no key {key}')
+        upd = {}
+        for kv in opts['--set'].split(','):
+            k_, v_ = kv.split('=')
+            upd[k_] = dword(int(v_, 0))
+        hivexsh(work, setvals(h, key, upd) + 'commit\n')
+        shown = key
+    elif cmd == 'letters':
+        # letters keep C   : drop every \DosDevices\X: drive letter except the listed ones from MountedDevices
+        # (the volume GUID entries stay). Phone partitions (EFS, PARAM, ...) lose their drive letters.
+        keep = {f'\\DosDevices\\{x.upper()}:' for x in arg.split(',')}
+        _, k = h.find('MountedDevices')
+        vals = h.values(k)
+        kept = [(n, t, d) for n, t, d in vals if not (n.startswith('\\DosDevices\\') and n not in keep)]
+        s = f'cd \\MountedDevices\nsetval {len(kept)}\n'
+        for n, t, d in kept:
+            s += n + '\n' + f'hex:{t}:' + ','.join(f'{b:02x}' for b in d) + '\n'
+        hivexsh(work, s + 'commit\n')
+        print(f'MountedDevices: {len(vals)} -> {len(kept)} values')
+        shown = 'MountedDevices'
     elif cmd == 'bind':
         # Offline PnP install of a KMDF driver onto an existing device instance, what pnputil would leave
         # behind: Services\<svc> (demand start, Parameters, Parameters\Wdf\KmdfLibraryVersion), the device's
