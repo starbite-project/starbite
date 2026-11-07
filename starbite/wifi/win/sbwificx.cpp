@@ -99,7 +99,7 @@ static void Sayf(const char *fmt, ...)
 
 #define MAX_BSS     48
 #define BSS_IE_MAX  768
-#define QLEN        64
+#define QLEN        512     // W2m-b: a 1 ms poll's worth of frames at full rate, with room (was 64)
 #define FRAME_MAX   (14 + 2048)
 
 struct BSS {
@@ -237,7 +237,8 @@ struct DEVCTX {
     int scan_cached;                // this scan was refused: the cached list is indicated, marked cached
     ULONG wdi_version;
     ULONG rx_80211;                 // Parameters\RxFormat: 1 (default) 802.11 frames up, 0 Ethernet (W2a..W2k)
-    ULONG tx_logged;              // the WDI version declared to WiFiCx; the TLV parser uses the same (W2k)            // when to send WDI's link state again while associated               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
+    ULONG tx_logged;
+    ULONG poll_rate;                // polls per second over the last 10 s              // the WDI version declared to WiFiCx; the TLV parser uses the same (W2k)            // when to send WDI's link state again while associated               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
     ULONG link_state;
     ULONG assoc_txn_mode;           // Parameters\AssocTxn: 0 (default) the association result unsolicited, 1 the task's id               // Parameters\LinkState: 1 (default) the adapter's link reported up/down             // when to log the rx state again (1.5 s after an association)            // the core's received-frame count when the connect began
     UINT16 connect_port;
@@ -1400,9 +1401,29 @@ static void Worker(PVOID arg)
 {
     DEVCTX *d = (DEVCTX *)arg;
     LARGE_INTEGER t;
-    UINT64 started = Now(NULL);
-    t.QuadPart = -50000;            // 5 ms
+    UINT64 started = Now(NULL), busy_until = 0;
+    ULONG last_frames = 0, last_polls = 0;
+    UINT64 rate_at = Now(NULL);
+    // W2m-b: polled every 1 ms while associated or moving frames (5 ms when idle). Windows' timer tick is 15.6 ms
+    // unless asked: W2l-a polled ~100 times a second (19 ms gateway ping, 3-4 Mbit/s); 1 ms resolution while the
+    // driver runs.
+    ULONG res = ExSetTimerResolution(10000, TRUE);
+    Sayf("wificx: timer resolution %lu.%lu ms; polling every 1 ms while associated or busy, 5 ms idle", res / 10000,
+         (res / 1000) % 10);
     while (!d->stop) {
+        {
+            const struct bcmw_info *bi = bcmw_info(d->w);
+            ULONG fr = bi->rx_frames + bi->tx_frames;
+            if (fr != last_frames)
+                busy_until = Now(NULL) + 200000;
+            last_frames = fr;
+            t.QuadPart = d->connected || d->connecting || Now(NULL) < busy_until ? -10000 : -50000;
+            if (Now(NULL) - rate_at >= 10000000) {
+                d->poll_rate = (bi->polls - last_polls) * 1000000ull / (Now(NULL) - rate_at);
+                last_polls = bi->polls;
+                rate_at = Now(NULL);
+            }
+        }
         if (!d->guard_cleared && Now(NULL) - started > 30000000) {
             // 30 s up without a crash: this start counts as clean (a registry write at shutdown may never reach
             // the disk, so D0Exit's reset alone would let the count climb on ordinary restarts)
@@ -1465,10 +1486,10 @@ static void Worker(PVOID arg)
         if (Now(NULL) > d->heartbeat_at) {
             const struct bcmw_info *in = bcmw_info(d->w);
             d->heartbeat_at = Now(NULL) + (d->connected || d->connecting ? 10000000 : 60000000);
-            Sayf("wificx: alive: %s; polls %lu, events %lu, frames in %lu, out %lu (done %lu); commands %lu",
-                 d->connected ? (d->keyed ? "associated, keyed" : "associated, no key yet") :
-                 d->connecting ? "connecting" : "idle", in->polls, in->events, in->rx_frames, in->tx_frames, in->tx_done,
-                 d->commands);
+            Sayf("wificx: alive: %s; polls %lu (%lu/s), events %lu, frames in %lu, out %lu (done %lu); dropped in %lu, "
+                 "out %lu; commands %lu", d->connected ? (d->keyed ? "associated, keyed" : "associated, no key yet") :
+                 d->connecting ? "connecting" : "idle", in->polls, d->poll_rate, in->events, in->rx_frames, in->tx_frames,
+                 in->tx_done, d->rx_dropped, d->tx_dropped, d->commands);
             Sayf("wificx: data path: tx queue made %ld, rx queue made %ld (now %s/%s); tx advances %ld, packets %ld, "
                  "notifications %ld; rx advances %ld, frames handed to Windows %ld", d->txq_made, d->rxq_made,
                  d->txq ? "tx" : "NO TX", d->rxq ? "rx" : "NO RX", d->tx_advances, d->tx_packets, d->tx_notifies,
@@ -1479,6 +1500,7 @@ static void Worker(PVOID arg)
             Disconnected(d, 4, 0);
         }
     }
+    ExSetTimerResolution(0, FALSE);
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -1911,7 +1933,8 @@ static NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST)
     RtlZeroMemory(&cfg, sizeof(cfg));
     cfg.stop_after = BCMW_STEP_UP;
     cfg.link_tries = 3;
-    cfg.rx_buffers = 128;
+    cfg.rx_buffers = 256;           // W2m-b: the firmware's receive buffers (the core's maximum; was 128): an AP's
+                                    // burst between two polls overran 128 and the firmware dropped frames
     cfg.diag = 1;                   // step 8 checked word by word until W2 has passed once
     d->bss_frame = Param(L"BssFrame", 0);
     d->link_state = Param(L"LinkState", 0);    // W2k: left to WiFiCx (Microsoft's sample does not set it)
