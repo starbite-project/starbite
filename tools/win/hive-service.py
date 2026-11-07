@@ -179,6 +179,19 @@ def main(a):
         s += 'commit\n'
         hivexsh(work, s)
         shown = base + '\\Interfaces\\GenericUsbFn'
+    elif cmd == 'param':
+        # param SERVICE --set Name=DWORD[,Name=DWORD...]: Services\<svc>\Parameters values (created if missing)
+        key = f'{cs}\\Services\\{arg}'
+        if not exists(h, key):
+            raise SystemExit(f'no service {arg}')
+        upd = {}
+        for kv in opts['--set'].split(','):
+            k_, v_ = kv.split('=')
+            upd[k_] = dword(int(v_, 0))
+        pkey = key + '\\Parameters'
+        s = setvals(h, pkey, upd) if exists(h, pkey) else f'cd \\{key}\nadd Parameters\n' + setvals(None, pkey, upd)
+        hivexsh(work, s + 'commit\n')
+        shown = pkey
     elif cmd == 'bind':
         # Offline PnP install of a KMDF driver onto an existing device instance, what pnputil would leave
         # behind: Services\<svc> (demand start, Parameters, Parameters\Wdf\KmdfLibraryVersion), the device's
