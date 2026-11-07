@@ -377,7 +377,11 @@ static inline int g7_core(void)
 {
     uint64_t m;
     __asm__("mrs %0, mpidr_el1" : "=r"(m));
+#ifdef G7_SMP_QEMU
+    return (int)(m & 3U);
+#else
     return (int)((m >> 8) & 3U);
+#endif
 }
 #endif
 /* per-core row scratch for cores 1..3: 1 MiB each at the top of G7_CANVAS (0xE00000 .. 0x1100000;

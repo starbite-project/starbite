@@ -28,6 +28,12 @@
 #include "glass_int.h"
 
 #define NW G7_NCORES
+/* tools/menu/smptest (QEMU virt, -smp 4): PSCI through HVC, cores numbered by Aff0. The phone: SMC, Aff1. */
+#ifdef G7_SMP_QEMU
+#define G7_CONDUIT "hvc #0"
+#else
+#define G7_CONDUIT "smc #0"
+#endif
 
 int g7_smp_on;                       /* cores running jobs now (1 = core 0 only) */
 static int smp_broken;               /* a worker faulted or timed out: core 0 alone from then on */
@@ -153,7 +159,7 @@ __asm__(
     "    mrs x20, tpidr_el1\n"
     "    movz w0, #0x8400, lsl #16\n"
     "    movk w0, #0x0002\n"
-    "    smc #0\n"
+    "    " G7_CONDUIT "\n"
     "    str x0, [x20, #40]\n"
     "    mov x1, #5\n"                       /* WS_PARKED: CPU_OFF returned */
     "    str x1, [x20]\n"
@@ -181,7 +187,7 @@ __asm__(
     "    bl g7_dcache_private\n"
     "3:  movz w0, #0x8400, lsl #16\n"
     "    movk w0, #0x0002\n"
-    "    smc #0\n"
+    "    " G7_CONDUIT "\n"
     "4:  wfe\n"
     "    b 4b\n");
 
@@ -238,7 +244,7 @@ static int64_t psci(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
     register uint64_t x1 __asm__("x1") = a1;
     register uint64_t x2 __asm__("x2") = a2;
     register uint64_t x3 __asm__("x3") = a3;
-    __asm__ volatile("smc #0"
+    __asm__ volatile(G7_CONDUIT
                      : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
                      :
                      : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
