@@ -618,6 +618,93 @@ static int ut_file(const struct exfat_ent *f)
     return 0;
 }
 
+/* ---- a partition or the whole card: size, its first 8 KiB as hex (only what the USB drives may offer), the hash ---- */
+/* 1 when the hash started */
+static int ut_part(int gi)                               /* gi: GPT index, -1 the card */
+{
+    if (!vbuf)
+        vbuf = sb_alloc(VIEW_MAX);
+    const char *name = gi < 0 ? "microSD card" : gpt_name[gi];
+    uint64_t bytes = gi < 0 ? sd_sectors_hint() * 512ULL : (gpt_last[gi] - gpt_first[gi] + 1) * 4096ULL;
+    int show = gi < 0 || ut_ufs_allowed(gpt_name[gi]);
+    int err = 0;
+    if (gi < 0)
+        sd_allow();
+    if (show && vbuf)
+        err = gi < 0 ? (sd_up() ? sd_read(0, VIEW_HEX / 512U, (uintptr_t)vbuf) : -1)
+                     : ufs_read_to(gpt_first[gi], VIEW_HEX / 4096U, (uintptr_t)vbuf);
+    struct page p;
+    page_init(&p, UI_VIEW_Y0, UI_H);
+    int focus = -1, redo = 1, hrow = -1;
+    ui_fill(0, 0, UI_W, UI_H, C_BG);
+    for (;;) {
+        if (redo) {
+            ui_fill(0, 0, UI_W, UI_VIEW_Y0, C_BG);
+            ui_header_draw(gi < 0 ? "Card" : "Partition", "Files", "READ ONLY", C_L2);
+            ut_status_bar();
+            page_begin(&p);
+            struct ub u;
+            page_hdr(&p, gi < 0 ? "Card" : "Partition");
+            page_kv(&p, "Name", name, 0);
+            ub_init(&u);
+            ub_size(&u, bytes);
+            page_kv(&p, "Size", u.b, 0);
+            if (gi >= 0) {
+                ub_init(&u);
+                ub_dec(&u, gpt_first[gi]);
+                ub_s(&u, " .. ");
+                ub_dec(&u, gpt_last[gi]);
+                page_kv(&p, "UFS blocks (4 KiB)", u.b, 0);
+            }
+            hrow = page_button(&p, hash_job.state == HASH_RUNNING ? "A hash is running" : "SHA-256 + CRC32 of all of it",
+                               hash_job.state == HASH_RUNNING ? C_L3 : C_STAR);
+            if (!show) {
+                page_note(&p, "Bytes are shown only for what the USB drives may offer (BOOT, SYSTEM, VENDOR, ODM, WINESP, "
+                              "WINDOWS, A16DATA, USERDATA) and the card.", C_L3);
+                page_note(&p, "EFS, PARAM and the like hold the phone's identity: hash only.", C_L3);
+            } else if (err || !vbuf) {
+                page_note(&p, "It did not read.", C_ORANGE);
+            } else {
+                page_hdr(&p, "The first 8 KiB (hex)");
+                (void)view_hex(&p, vbuf, VIEW_HEX);
+            }
+            page_end(&p);
+            page_set_focus(&p, focus);
+            page_redraw(&p);
+            ui_present();
+            redo = 0;
+        }
+        struct ui_ev e;
+        ui_poll(&e, 20);
+        ut_service();
+        if (e.type == EV_BACK || e.type == EV_HOME || e.type == EV_SWIPE_R || (e.type == EV_TAP && ui_header_back_hit(e.x, e.y)))
+            break;
+        int pick = -1;
+        if (page_scroll_event(&p, &e)) {
+            ;
+        } else if (e.type == EV_UP || e.type == EV_DOWN) {
+            focus = focus < 0 ? hrow : -1;
+            page_set_focus(&p, focus);
+            ui_present();
+        } else if (e.type == EV_SELECT && focus >= 0) {
+            pick = focus;
+        } else if (e.type == EV_TAP) {
+            pick = page_hit(&p, e.x, e.y, 0);
+        }
+        if (pick == hrow && hrow >= 0 && hash_job.state != HASH_RUNNING) {
+            if (gi < 0)
+                (void)hash_start_card(0);
+            else
+                (void)hash_start_part(gpt_name[gi], 0);
+            page_free(&p);
+            return 1;
+        }
+        page_fling_step(&p);
+    }
+    page_free(&p);
+    return 0;
+}
+
 static void ut_browse(void)
 {
     struct page p;
@@ -698,8 +785,8 @@ static void files_fill(struct page *p)
     const struct hash_job *j = &hash_job;
     page_hdr(p, "Hash (read only)");
     if (j->state == HASH_IDLE) {
-        page_note(p, "Pick a partition or the card: its SHA-256 and CRC32 are computed without writing anything. "
-                     "The shell's `hash NAME BYTES` hashes only the first BYTES (to compare with an image).", C_L2);
+        page_note(p, "Pick a partition or the card for its size, first bytes and SHA-256 + CRC32, all read only. "
+                     "The shell's `hash NAME BYTES` hashes just the first BYTES.", C_L2);
     } else {
         page_kv(p, "Target", j->name, C_L1);
         ub_init(&u);
@@ -812,16 +899,14 @@ void ut_files(void)
             next = 0;
             pick = -1;
         }
-        if (pick >= 0 && hash_job.state != HASH_RUNNING) {
-            for (int i = 0; i < files_nrows; ++i)
-                if (files_rows[i] == pick) {
-                    if (i == 0)
-                        (void)hash_start_card(0);
-                    else
-                        (void)hash_start_part(gpt_name[i - 1], 0);
-                    next = 0;
-                }
-        }
+        for (int i = 0; pick >= 0 && i < files_nrows; ++i)
+            if (files_rows[i] == pick) {
+                (void)ut_part(i - 1);                 /* its page: the bytes and the hash button */
+                ui_input_reset();
+                ui_fill(0, 0, UI_W, UI_H, C_BG);
+                next = 0;
+                break;
+            }
         page_fling_step(&p);
     }
     page_free(&p);

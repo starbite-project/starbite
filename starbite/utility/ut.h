@@ -15,5 +15,6 @@ int ut_now(int64_t *t);                 /* UTC epoch from the RTC (clock.c), 0 i
 void ut_clock_status(struct ub *u);     /* "14:41 EET   87%" for the status bar */
 void ut_clock_card(char *big, unsigned big_n, char *small, unsigned small_n);
 void ut_world(void);                    /* the world clock page */
+int ut_ufs_allowed(const char *name);   /* main.c's allow-list: drives and the hex view */
 struct exfat;
 struct exfat *ut_card(void);           /* the card's exFAT (tools.c), 0 if not readable */

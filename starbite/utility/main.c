@@ -58,6 +58,15 @@ static unsigned nlun, nlun_base;                      /* nlun_base: RAM disk + c
 static int ufs_offered;
 /* UFS partitions offered as read-only drives (master plan 4.4: never-touch ones are not offered) */
 static const char *const ufs_allow[] = { "BOOT", "SYSTEM", "VENDOR", "ODM", "WINESP", "WINDOWS", "A16DATA", "USERDATA" };
+
+/* 1 for a partition the USB drives may offer (and Files may show the bytes of) */
+int ut_ufs_allowed(const char *name)
+{
+    for (unsigned i = 0; i < sizeof(ufs_allow) / sizeof(ufs_allow[0]); ++i)
+        if (sb_streq(name, ufs_allow[i]))
+            return 1;
+    return 0;
+}
 static uint64_t ram_base, ram_bytes;
 static const char *ram_why = "";
 static int card_state;                                /* 0 not tried, 1 up, -1 failed */
