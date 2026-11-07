@@ -2379,3 +2379,23 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   13518592 -> 12512000, re-signed (2db63e45..., PE checksum valid; the previous 2d6c64ff kept in build/woa/ufs-sys).
   Writable now exactly WINESP + WINDOWS = 6613760..12511999. Also today: A55 1053 -> 1950 MHz through sbthermal (ACPM
   domain 2), confirmed from the CMU.
+- 2026-11-07 evening: **Windows 11 on the S9, today's firsts** (all with the user present; details in each track's doc):
+  - A55 clock 1053 -> 1950 MHz through ACPM domain 2 (sbthermal, CpuKhz; CMU read-back), max 55 °C. Task Manager keeps
+    showing its 1.05 GHz base-speed label.
+  - Half-resolution desktop: sbdisplay (display-only, copy mode, Scale 2: Windows draws 720x1480, doubled; no DECON/DSIM
+    writes) bound offline to ACPI\STRB0072 (hive-service.py bind --display-class). User: "working faster". 64 Hz shown =
+    a label; the S6E3HA8 is 60 Hz only (no safe overclock known, docs/WIN11-GPU.md 7.6a).
+  - Mali-G72 under Windows: sbmali T5 40/40 WRITE_VALUE + clears; T8 400/400 Mesa triangles (86528 px each) at 572 MHz
+    (ACPM domain 4 = G3D, proven from acpm_dvfs_exynos9810.h; MIF/INT refused in code), 0 faults, 43.6 °C.
+  - USB host: SBUSBXHC SSDT -> inbox usbxhci + USB 3.0 root hub. Firmware SSDTs must install at dispatch (ReadyToBoot
+    installs never reach Windows); module logs survive Windows in zone 0 (fastboot oem log dmesg at the menu).
+  - USB device (Starbite Link L1): INT3445 -> ufxsynopsys needed the Intel xDCI _DSM (attach), then Control\USBFN\Default
+    and USBFN\Configurations\Default (ufx01000, found with an ETW autologger); Enum\USBFN\GenericUsbFn now exists. The
+    bus connects only after IOCTL_GENERICUSBFN_ACTIVATE_USB_BUS from the sender (sblinkd, in the Startup folder).
+  - Wi-Fi: the bare-metal core in a Windows service (W1b) boots the BCM4361 in 160 ms and scans 23 APs; SbWifiCx (W2,
+    ACPI\STBW4361 via the WLAN4361 SSDT) installs, the adapter shows, scans see 10-13 APs, but Windows lists 0 (result
+    indication format, being fixed).
+  - Big cores: B1 probe, 0304 PMU writes + one CPU_ON each: M3 cores 1-3 ARRIVED in 1 ms (woa never got them running).
+  - Safety: phone partitions lose drive letters (MountedDevices C: only, NoAutoMount); UFS fence end tightened to
+    12511999. The build-time PPTT caused an early 0x7E (shelved). One-shot services running cmd.exe die (7034); offline
+    binds and hand-run self-elevating installers work. xtajit64.dll crashes (0xC0000094) predate us; PPTT fix pending.
