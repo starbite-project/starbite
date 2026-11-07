@@ -415,17 +415,17 @@ wdt_feed = "own"
 # Wi-Fi bring-up test (docs/WIFI-BCM4361.md 9, branch claude/wifi-core-c56c49 eab2408): T1 PCIe link. Hold Volume Up 2 s
 # to start; no storage writes, VENDOR read only, radio unpowered at the end.
 [[entry]]
-key = "wifitest"
-name = "Wi-Fi test 6"
-version = "BCM4361 T1 PCIe link"
+key = "menubench"
+name = "Menu bench"
+version = "v7 1-vs-4-core bench 1"
 category = "lab"
 method = "bare"
 tag = "lab"
-files = ["wifitest.img"]
-cmdline = "wifi_step=6"
+files = ["menubench.img"]
 flags = ["hidden"]
-wdt = 30
+wdt = 60
 wdt_feed = "own"
+no_launch = true
 
 # Wi-Fi bring-up test (docs/WIFI-BCM4361.md 9, branch claude/wifi-core-c56c49 eab2408): T2 firmware boot. Hold Volume Up 2 s
 # to start; no storage writes, VENDOR read only, radio unpowered at the end.
