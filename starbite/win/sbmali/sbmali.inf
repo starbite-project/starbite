@@ -1,0 +1,62 @@
+; SPDX-License-Identifier: GPL-2.0-only
+; sbmali: the Mali-G72 bring-up test driver (docs/WIN11-GPU.md stage 3, phone test T5), KMDF 1.33.
+; Binds the same ACPI device as sbdisplay (\_SB.GPU0, STRB0072): install one of the two at a time.
+; It runs its self-test once per start and reports in Services\sbmali\State.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGUID   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %Starbite%
+DriverVer   = 11/07/2026,0.1.0.0
+CatalogFile = sbmali.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+sbmali.sys = 1
+
+[Manufacturer]
+%Starbite% = Starbite, NTarm64
+
+[Starbite.NTarm64]
+%DeviceDesc% = SbMali_Inst, ACPI\STRB0072
+
+[SbMali_Inst]
+CopyFiles = SbMali_Files
+
+[SbMali_Files]
+sbmali.sys
+
+[SbMali_Inst.Services]
+AddService = sbmali, 0x00000002, SbMali_Service
+
+[SbMali_Service]
+DisplayName   = %ServiceDesc%
+ServiceType   = 1                 ; SERVICE_KERNEL_DRIVER
+StartType     = 3                 ; SERVICE_DEMAND_START (PnP starts it)
+ErrorControl  = 0                 ; SERVICE_ERROR_IGNORE
+ServiceBinary = %13%\sbmali.sys
+AddReg        = SbMali_Params
+
+[SbMali_Params]
+HKR, Parameters, Runs,    %REG_DWORD%, 20     ; runs per table format
+HKR, Parameters, Formats, %REG_DWORD%, 3      ; bit 0 legacy Mali LPAE, bit 1 AArch64 4K
+
+[SbMali_Inst.Wdf]
+KmdfService = sbmali, SbMali_WdfSect
+
+[SbMali_WdfSect]
+KmdfLibraryVersion = 1.33
+
+[Strings]
+Starbite    = "Starbite"
+DiskName    = "Starbite Mali bring-up driver"
+DeviceDesc  = "Starbite Mali-G72 (bring-up test)"
+ServiceDesc = "Starbite Mali bring-up test driver"
+REG_DWORD   = 0x00010001

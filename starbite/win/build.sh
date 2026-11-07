@@ -4,7 +4,8 @@
 #
 #   starbite/win/build.sh [out-dir]          default: build/win-gpu (git-ignored)
 #
-# Out: sbthermal.sys (non-PnP service), sbdisplay.{sys,inf,cat} (PnP package for ACPI\STRB0072), StarbiteGpu.aml,
+# Out: sbthermal.sys (non-PnP service), sbdisplay.{sys,inf,cat} and sbmali.{sys,inf,cat} (PnP packages for
+# ACPI\STRB0072, one installed at a time), StarbiteGpu.aml,
 # all signed with the Starbite test certificate, plus SHA256SUMS.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -22,11 +23,15 @@ export SB_SIGN_CERT=${SB_SIGN_CERT:-$main/build/woa/ufs-sys/sign/starbite-test.c
 LIBS="displib.lib ntstrsafe.lib libcntpr.lib" \
     "$win/build.sh" wdm "$out/sbdisplay.sys" "$here/sbdisplay/sbdisplay.c" "$here/sbdisplay/sbdc_core.c"
 
-cp "$here/sbdisplay/sbdisplay.inf" "$out/"
-"$win/sign.sh" "$out/sbthermal.sys" "$out/sbdisplay.sys"
-python3 "$win/makecat.py" "$out/sbdisplay.cat" "$out/sbdisplay.inf" "$out/sbdisplay.sys" --hwid 'acpi\strb0072'
-"$win/sign.sh" "$out/sbdisplay.cat"
+"$win/build.sh" kmdf "$out/sbmali.sys" "$here/sbmali/sbmali.c" "$here/sbmali/sbm_core.c"
+
+cp "$here/sbdisplay/sbdisplay.inf" "$here/sbmali/sbmali.inf" "$out/"
+"$win/sign.sh" "$out/sbthermal.sys" "$out/sbdisplay.sys" "$out/sbmali.sys"
+for p in sbdisplay sbmali; do
+    python3 "$win/makecat.py" "$out/$p.cat" "$out/$p.inf" "$out/$p.sys" --hwid 'acpi\strb0072'
+    "$win/sign.sh" "$out/$p.cat"
+done
 # The ACPI device as a self-contained SSDT (iasl in the lima VM, which sees this tree at the same path), for the
 # shared SSDT-installing firmware DXE (owned by the win-usb-host track; one BOOT flash for all SSDTs).
 limactl shell starbite -- bash -c "cd '$out' && cp '$here/acpi/StarbiteGpu.asl' . && iasl -vs -p StarbiteGpu StarbiteGpu.asl >/dev/null && rm StarbiteGpu.asl"
-(cd "$out" && shasum -a 256 sbthermal.sys sbdisplay.sys sbdisplay.inf sbdisplay.cat StarbiteGpu.aml > SHA256SUMS && cat SHA256SUMS)
+(cd "$out" && shasum -a 256 sbthermal.sys sbdisplay.sys sbdisplay.inf sbdisplay.cat sbmali.sys sbmali.inf sbmali.cat StarbiteGpu.aml > SHA256SUMS && cat SHA256SUMS)

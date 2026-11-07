@@ -17,7 +17,7 @@ checked by us; **[unverified]** = our reading of a document or source, not yet t
 | 1 | This document | done, adversarially reviewed (§13) |
 | 2a | `sbthermal.sys`: temperature watchdog (TMU), the gate every GPU driver must pass | **done: T1 passed on the phone 2026-11-07** (§10.1); stays installed (Start 2) |
 | 2b | `sbdisplay.sys`: display-only driver for DECON (one mode, presents, tear-free flips at TE, brightness) | written (`starbite/win/sbdisplay`), host tests pass, builds and is test-signed; ACPI table `starbite/win/acpi` compiles with iasl; needs the SSDT in the firmware (T2) before T3 |
-| 3 | `sbmali.sys`: KMDF bring-up (power, MMU, a job) ported from StarbiteMali | designed (§5) |
+| 3 | `sbmali.sys`: KMDF bring-up (power, MMU, a job) ported from StarbiteMali | written (`starbite/win/sbmali`): portable core + KMDF driver + INF/catalog, builds clean at /W4, host test against a table-walking fake Mali (32 checks); phone test T5 waits for T2 and the PnP install route |
 | 4 | `sbwddm.sys` + Mesa 26.2 UMD: Direct3D 11 → DWM on the Mali | designed (§6), research |
 
 The plan in one paragraph: Windows already runs on the S9 with Microsoft's Basic Display driver copying
@@ -213,6 +213,33 @@ wddm-mali-g52's `malikm`. Done when a WRITE_VALUE job and a fragment clear run f
 The watchdog may not be running yet when a PnP driver starts (start order is not guaranteed): the GPU
 driver waits up to 30 s for `\Callback\StarbiteThermal` (opened with `Create = FALSE`), then stays off.
 It treats a state whose `seq` stops moving or whose `time_100ns` is older than 1 s as Blind.
+
+### 5.1a What the T5 driver actually does (as built)
+
+`starbite/win/sbmali/`: `sbm_core.c` (portable: probe, ACPM, reset/power, both table formats, address
+spaces with Linux's lock-region encoding, polled jobs, libsb's job descriptors, the self-test) and
+`sbmali.c` (KMDF, binds `ACPI\STRB0072`). Narrower than §5.1 on purpose for the first phone test:
+
+- **Polled, no interrupts** (the stage 2/3 SSDT has none; interrupts come with stage 4), exactly as XNU runs it.
+- **No DVFS**: the GPU stays at S-Boot's 260 MHz. `sbm_gpu_dvfs` exists (domain 4 only, table frequencies
+  only, BUCK6 rewritten after) but T5 does not call it.
+- Thermal gate before anything and before every run: the callback object is **opened, never created**; the
+  answer must carry `version` 2, a fresh reading (< 1 s) and a `seq` that moves; level Normal. Up to 30 s
+  wait for the watchdog at boot.
+- Per run (Parameters\Runs, default 20, per format of Parameters\Formats, default both): soft reset, L2 /
+  18 shader cores / tiler on, AS0, WRITE_VALUE "STARBITE" on JS1 checked, a 64 × 64 clear-only fragment job
+  on JS0 checked pixel by pixel, cores off; 50 ms (in practice ~650 ms, the watchdog's seq check) between runs.
+- Afterwards: soft reset, cores off, BUCK6 back to the value found (read back), State\Done 1, GuardBoots 0.
+- Memory: one 128 KiB contiguous uncached block (< 2^40): 16 tables + 64 KiB of data at GPU VA 0x02000000.
+  Nothing maps the panel.
+- Writes only Mali registers, the ACPM queues/mailbox (BUCK6 and nothing else; the core refuses any other
+  PMIC register) and its own memory. The PMU and CMU_G3D are mapped but writes to them are dropped.
+
+Host test (`starbite/win/tests/mali_test.c`): a fake G72 that walks the page tables in the format AS0 is set
+to (legacy: table 3 / leaf 1 + RW; AArch64: page 3 + AF + AttrIdx 1 + AP_UNPRIV, exact TRANSCFG and MEMATTR),
+runs WRITE_VALUE and fragment-clear jobs from the descriptors, and a fake ACPM/PMIC that fails on any write
+but BUCK6 and any DVFS domain but 4. Mutation check: dropping AF from the AArch64 leaf makes all 20 fake
+runs fault.
 
 ### 5.2 Memory
 
@@ -457,7 +484,7 @@ the GPU itself.
 | T3a | `sbdisplay` replaces Basic Display, **copy mode** (Flip 0, Brightness 0: no DECON/DSIM write) | T2 + sbdisplay | desktop unchanged; `State`: Started 1, Identify 0, Window 5, Mode 1, CommitStatus 0, Presents counting | black screen possible: person forces restarts (§4.3), kill file, older BOOT |
 | T3b | flips on (Parameters\Flip = 1) | T3a passed | no tearing when dragging windows; `State`: Mode 2, FirstFlip, Flips counting, no FlipLatchTimeout | as T3a; a latch failure falls back to copy by itself |
 | T4 | Brightness slider (Parameters\Brightness = 1) | T3a | Settings shows a slider; 100 → 0 dims the panel; `BrightnessResult` 0 | AOR-only, S-Boot's sequence; worst case the panel stays at one brightness until reboot |
-| T5 | `sbmali` bring-up (replaces sbdisplay for the test) | T1, T2 | GPU_ID 0x6221, cores ready, WRITE_VALUE ok, fragment clear of a buffer ok, legacy and AArch64 tables 20 runs each with 0 faults | 950 mV on vdd_g3d (as iOS since 2026-10-28); watchdog gates it; undo Start = 4 |
+| T5 | `sbmali` bring-up (replaces sbdisplay for the test) | T1, T2, the PnP install route | `State`: ThermalGate 0, Probe 0, GpuId 0x62210010, ShaderPresent 0x5771777, BuckOld 0x33, BuckRaise 0, `Legacy_*` and `A64_*`: Runs 20, WriteOk 20, ClearOk 20, Faults 0; Done 1, BuckRestore 0 | 950 mV on vdd_g3d (as iOS since 2026-10-28), 260 MHz, ~40 short runs; watchdog gates it. If Windows' boot path left the G3D domain power-cycled without the TZPC restore, the first GPU read is an SError (bugcheck): the boot guard then disables the driver after two tries; kill file; Start = 4 |
 
 Each request to the main session lists exact files, commands, expected values and the undo.
 
