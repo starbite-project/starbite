@@ -201,10 +201,13 @@ without the blob is the kill switch.
 nor the GPU track's plain `SBGPU` device: nothing installed at ReadyToBoot reached Windows. The
 same holds for the release's own GPIO module, whose ReadyToBoot SSDTs (`RWOA0761`, `RWOA0003`, ...)
 appear in no hive we have, while the platform module's dispatch-time SSDT `RAMRET01` (`RWOA03E0`)
-is in every one. The release modules "P" and the PSCI EL2 shim reference ReadyToBoot and the ACPI
-2.0 configuration table but not the table protocol: they work on the published tables at
-ReadyToBoot, so tables added after them are lost. The GPIO module's exactly-4-tables check that v2
-waited for fails on every boot anyway (the platform installs FACP, GTDT, APIC, PPTT and RAMRET01:
+is in every one (but the GPIO module's absence is explained by its own failing check, below, so it
+says nothing about timing). Why v2's tables were lost is not proven, since v2's log was
+overwritten. The likely reason: the release modules "P" and the PSCI EL2 shim reference ReadyToBoot
+and the ACPI 2.0 configuration table but not the table protocol, so they work on the published
+tables at ReadyToBoot and tables added after them may be lost; ReadyToBoot not being signalled as
+expected would fit too. Dispatch is the path proven to reach Windows either way. The GPIO module's
+exactly-4-tables check that v2 waited for fails on every boot anyway (the platform installs FACP, GTDT, APIC, PPTT and RAMRET01:
 5), so installing during dispatch takes nothing away; touch comes from the DSDT's `TSP0`
 (`SCSY0761`). Open risk: if P or the shim insisted on an exact table count, the extra tables would
 upset them; RAMRET01 shows they live with at least 5. T1 again checks the CPU count (4) and that
@@ -221,9 +224,11 @@ During Windows, Windows' own UFS driver fills the pmsg ring (`=UFSWRIT` lines), 
 lines there are gone by the next TWRP visit (T1: 63 `=UFSWRIT` lines, nothing else). `StarbiteLog.h`
 therefore writes every line to three places: the pmsg ring (as before), an **evidence ring in
 ramoops zone 0** (0xFED10000, the same "DBGC" header format; Windows doesn't write it), and DEBUG.
-The evidence ring: data capped at 0x3700 bytes so it ends at 0xFED1370C, below the woa records
-(low WDT 0xFED13800, RWD1 0xFED13D80, P3 0xFED13E80); never wraps; reset by the first line of each
-boot (a per-boot protocol flag). The page tables map 0xFED10000..0xFED20000 (PlatformMemoryMapLib's
+The evidence ring: data capped at 0x2FF4 bytes so it ends at 0xFED13000, below the woa
+firmware's diagnostic block (the release UFS module writes from 0xFED13000, the release BDS at
+0xFED136D0/13800/13B00/13F00; RWD1 0xFED13D80, P3 0xFED13E80); never wraps (the first line that
+doesn't fit becomes `=SB log full` and the ring stops for that boot); reset by the first line of
+each boot (a per-boot protocol flag). Today's log is about 3 KB. The page tables map 0xFED10000..0xFED20000 (PlatformMemoryMapLib's
 ramoops window).
 
 **Reading it:** after Windows, restart into the **loader menu** (not TWRP first) and run

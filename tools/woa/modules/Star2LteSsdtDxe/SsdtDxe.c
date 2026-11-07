@@ -18,12 +18,13 @@
   So the order of dispatch between this module and the drivers doesn't matter.
 
   Why during dispatch and not at ReadyToBoot (v2 did ReadyToBoot, TPL_CALLBACK - 1): on the phone
-  (2026-11-07, T1) neither our ReadyToBoot tables nor the release GPIO module's ReadyToBoot SSDTs
-  ever reached Windows, while the platform module's dispatch-time SSDT (RAMRET01, RWOA03E0) does.
-  The release modules "P" and the PSCI EL2 shim both work on the published tables at ReadyToBoot
-  (they reference ReadyToBoot and the ACPI 2.0 configuration table, not the table protocol), so
-  anything installed after them is lost. The GPIO module's exactly-4-tables check that v2 waited
-  for already fails on every boot (the platform installs 5), so dispatch costs nothing.
+  (2026-11-07, T1) none of v2's tables reached Windows, while the platform module's dispatch-time
+  SSDT (RAMRET01, RWOA03E0) always does. Why v2's were lost is not proven (v2's log was
+  overwritten): the release modules "P" and the PSCI EL2 shim work on the published tables at
+  ReadyToBoot (they reference ReadyToBoot and the ACPI 2.0 configuration table, not the table
+  protocol), or ReadyToBoot may not be signalled as expected. Dispatch is the path proven to reach
+  Windows either way. The GPIO module's exactly-4-tables check that v2 waited for already fails on
+  every boot (the platform installs 5), so dispatch costs nothing.
 
   Every decision is logged as an "=SSDT" line (StarbiteLog.h: pmsg ring, the zone-0 evidence ring,
   DEBUG).
@@ -163,7 +164,7 @@ OnFlag (
 
   Blob = (BLOB *)Context;
   if (!Flagged (Blob)) {
-    return;                         // the registration's first, spurious signal
+    return;                         // defensive: RegisterProtocolNotify doesn't signal on its own
   }
 
   if (Blob->Gated) {
