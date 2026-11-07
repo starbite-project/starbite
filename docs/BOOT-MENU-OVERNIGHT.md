@@ -123,6 +123,9 @@ Run 3a first, and 3b only if 3a came back by itself. Before either, save pmsg fr
    `side-session-notes/…/menu-trial-request.md`). New loader + new ramdisk (icons) from the store, user
    driving: scroll, open sections, options menu, then start Linux (check that all 4 CPUs are online),
    One UI, Windows, iOS. If it misbehaves, `starcores=1` gives the single-core renderer.
+   Fallback with the same labels and icons but the old single-core renderer: `menutrial-1core.img`
+   (sha256 0cd893bbd727bafaacf13534bb71397710ec5a4dfdbaf6c9c0c454fc24391d67; loader
+   `build/menu/loader-1core/xnu_boot.Image`, built with `M7_DEF_CORES=1`; `starcores=4` turns the cores on).
 4. Only then flash BOOT: `build/menu/loader-new/xnu_boot.Image` + `build/menu/menu-v7.sbm`, with the
    usual verified backup. If SMP ever hung at boot from BOOT, the way back is download mode (the old BOOT
    backup), so do it with the user present.
