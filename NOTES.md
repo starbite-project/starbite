@@ -2359,3 +2359,7 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   Moved aside as *.empty-20261107 so Windows creates a fresh BBI; CrashControl\AutoReboot = 0 in ControlSet001
   (SYSTEM d74c8be4...) so a bugcheck stays on screen. ntfsfix again (the crashed boot died at hive load, little metadata
   at stake). Other files emptied by the first reset: caches only (FontCache, spp cache.dat, notification db-shm).
+  12:20 follow-up: still a registry BSOD with BBI missing (the screen shows ~3 frames: the crash is before CrashControl
+  is read). Original BBI taken from the install image on the card, read-only over adb (scratch vhdx-extract.py: the VHDX
+  BAT + the inner GPT + $MFT scan): BBI 8192 B (seq 2/2 clean, root key only, 1143e1d2...), BBI.LOG1 8192 B, LOG2 0.
+  Copies in build/woa/vhdx-orig/. Written to config/ after one more ntfsfix (the crashed boot died at hive load).
