@@ -205,10 +205,101 @@ static void ufs_offer(int on)
         }
         ufs_offered = nlun > nlun_base;
     }
-    nlun_base = nlun;
     msc_setup(lun, nlun);
     usb_start();
     sb_logx("utility: USB drives now ", nlun);
+}
+
+static char serial[33];                               /* defined with the USB code below */
+static void ramdisk_files(void);
+
+/* ---- files on the RAM disk: README, the phone, the previous boot's log (pmsg), this log -------------- */
+#define PMSG_DATA 0x3F00U
+static char pmsg_snap[PMSG_DATA + 64];
+static unsigned pmsg_len;
+
+/* the pmsg ring as it was when the Utility OS started: the loader's lines and the previous OS's */
+static void pmsg_snapshot(void)
+{
+    const volatile uint32_t *h = (const volatile uint32_t *)SB_PMSG;
+    const volatile uint8_t *d = (const volatile uint8_t *)(SB_PMSG + 12);
+    pmsg_len = 0;
+    if (h[0] != 0x43474244U || h[1] >= PMSG_DATA || h[2] > PMSG_DATA)
+        return;
+    uint32_t start = h[1], size = h[2];
+    uint32_t from = size < PMSG_DATA ? (start + PMSG_DATA - size) % PMSG_DATA : start;
+    for (uint32_t i = 0; i < size; ++i) {
+        uint8_t c = d[(from + i) % PMSG_DATA];
+        pmsg_snap[pmsg_len++] = (char)(c == '\n' || (c >= 0x20 && c < 0x7f) ? c : '.');
+    }
+}
+
+static char fbuf[16384];
+static unsigned fn;
+static void fs_(const char *s) { while (s && *s && fn + 1 < sizeof(fbuf)) fbuf[fn++] = *s++; }
+static void fd_(uint64_t v) { struct ub u; ub_init(&u); ub_dec(&u, v); fs_(u.b); }
+static void fz_(uint64_t v) { struct ub u; ub_init(&u); ub_size(&u, v); fs_(u.b); }
+static void fh_(uint64_t v, unsigned d) { struct ub u; ub_init(&u); ub_hex(&u, v, d); fs_(u.b); }
+
+static void ramdisk_files(void)
+{
+    struct sb_rtc r;
+    sb_rtc_read(&r);
+    if (r.ok)
+        fat32_set_date(r.y, r.mo, r.d);
+    fn = 0;
+    fs_("Starbite Utility OS " UT_VERSION "\r\n\r\nThis drive is the phone's RAM: read-write, gone when the phone restarts.\r\n"
+        "PHONE.TXT  the phone, its memory and its UFS partitions\r\nPMSG.TXT   the log of the previous boot (the "
+        "loader and the OS before this one)\r\nLOG.TXT    this Utility OS's log at start\r\n\r\nThe shell is the "
+        "USB serial port (on a Mac /dev/cu.usbmodem*): type help.\r\n");
+    (void)fat32_add_file("README.TXT", (const uint8_t *)fbuf, fn);
+    fn = 0;
+    fs_("Starbite Utility OS " UT_VERSION "\r\nserial ");
+    fs_(serial);
+    fs_("\r\n\r\nmemory banks (FDT)\r\n");
+    uint64_t base[8], size[8];
+    int nb = fdt_memory_banks(sb_boot.fdt, base, size, 8);
+    for (int i = 0; i < nb; ++i) {
+        fs_("  ");
+        fh_(base[i], 9);
+        fs_("  ");
+        fz_(size[i]);
+        fs_("\r\n");
+    }
+    fs_("RAM disk at 0x880000000: ");
+    fz_(ram_bytes);
+    fs_("\r\nmicroSD: ");
+    if (card_state > 0) {
+        fz_(sd_sectors_hint() * 512ULL);
+        fs_(" (read-only drive)");
+    } else {
+        fs_("not available");
+    }
+    fs_("\r\n\r\nUFS partitions (LU0 GPT, 4 KiB blocks)\r\n");
+    if (ufs_up() && gpt_load() > 0) {
+        for (int i = 0; i < gpt_n; ++i) {
+            fs_("  ");
+            fs_(gpt_name[i]);
+            fs_("  first ");
+            fd_(gpt_first[i]);
+            fs_("  blocks ");
+            fd_(gpt_last[i] - gpt_first[i] + 1);
+            fs_("  ");
+            fz_((gpt_last[i] - gpt_first[i] + 1) * 4096ULL);
+            fs_("\r\n");
+        }
+    } else {
+        fs_("  UFS not readable\r\n");
+    }
+    (void)fat32_add_file("PHONE.TXT", (const uint8_t *)fbuf, fn);
+    if (pmsg_len)
+        (void)fat32_add_file("PMSG.TXT", (const uint8_t *)pmsg_snap, pmsg_len);
+    fn = 0;
+    for (unsigned i = 0; i < sb_log_count(); ++i) {
+        fs_(sb_log_line(i));
+        fs_("\r\n");
+    }
+    (void)fat32_add_file("LOG.TXT", (const uint8_t *)fbuf, fn);
 }
 
 static void card_setup(void)
@@ -767,6 +858,7 @@ static void find_serial(void)
 
 void sb_main(void)
 {
+    pmsg_snapshot();                                  /* before this OS adds its own lines */
     if (!ui_init())
         sb_crash_show(ui_init_why(), 0);
     ui_tick = ut_service;
@@ -778,6 +870,9 @@ void sb_main(void)
     ramdisk_setup();
     wdt_feed();
     card_setup();
+    if (ram_bytes)
+        ramdisk_files();
+    nlun_base = nlun;                                 /* RAM disk + card: what ufs_offer(0) returns to */
     msc_setup(lun, nlun);
     usb_routed = muic_route_usb();
     if (!usb_routed)

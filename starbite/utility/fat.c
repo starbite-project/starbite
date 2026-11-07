@@ -25,6 +25,13 @@ static void text(volatile uint8_t *p, const char *s, unsigned n)
         p[i] = ' ';
 }
 
+static struct {
+    volatile uint8_t *disk;
+    uint32_t fatsz, clusters, next, entries;
+    uint64_t data0;
+    uint16_t date;
+} F;
+
 int fat32_format(volatile uint8_t *disk, uint64_t sectors, const char *label, uint32_t serial, struct fat32_info *out)
 {
     const unsigned spc = 8, rsvd = 32, nfat = 2;
@@ -77,10 +84,72 @@ int fat32_format(volatile uint8_t *disk, uint64_t sectors, const char *label, ui
     text(root, label, 11);
     root[11] = 0x08;
 
+    F.disk = disk;
+    F.fatsz = fatsz;
+    F.clusters = clusters;
+    F.next = 3;                                        /* cluster 2 is the root directory */
+    F.entries = 1;                                     /* entry 0 is the volume label */
+    F.data0 = data0;
+    F.date = (uint16_t)((2026 - 1980) << 9 | 11 << 5 | 7);
     if (out) {
         out->clusters = clusters;
         out->fat_sectors = fatsz;
         out->data_sector = (uint32_t)data0;
     }
+    return 0;
+}
+
+void fat32_set_date(unsigned y, unsigned m, unsigned d)
+{
+    if (y >= 1980 && y < 2108 && m >= 1 && m <= 12 && d >= 1 && d <= 31)
+        F.date = (uint16_t)((y - 1980) << 9 | m << 5 | d);
+}
+
+/* A file in the root directory of the disk fat32_format made last: name in 8.3 ("README.TXT"), contiguous
+ * clusters after the previous file. 0 on success, -1 when the root cluster or the disk is full. */
+int fat32_add_file(const char *name83, const uint8_t *data, uint32_t len)
+{
+    const unsigned spc = 8, rsvd = 32;
+    volatile uint8_t *disk = F.disk;
+    if (!disk || F.entries >= 4096 / 32)
+        return -1;
+    uint32_t n = (len + 4095) / 4096;
+    if (F.next + n > F.clusters + 2)
+        return -1;
+    uint32_t first = n ? F.next : 0;
+    for (uint32_t i = 0; i < len; ++i)
+        disk[(F.data0 + (uint64_t)(first - 2) * spc) * 512ULL + i] = data[i];
+    for (unsigned f = 0; f < 2; ++f) {
+        volatile uint8_t *fat = disk + (rsvd + (uint64_t)f * F.fatsz) * 512ULL;
+        for (uint32_t i = 0; i < n; ++i)
+            w32(fat + (uint64_t)(first + i) * 4, i + 1 == n ? 0x0fffffffU : first + i + 1);
+    }
+    F.next += n;
+    volatile uint8_t *e = disk + F.data0 * 512ULL + 32ULL * F.entries++;
+    char nm[11];
+    for (unsigned i = 0; i < 11; ++i)
+        nm[i] = ' ';
+    unsigned k = 0, i = 0;
+    for (; name83[i] && name83[i] != '.' && k < 8; ++i)
+        nm[k++] = (char)(name83[i] >= 'a' && name83[i] <= 'z' ? name83[i] - 32 : name83[i]);
+    while (name83[i] && name83[i] != '.')
+        ++i;
+    if (name83[i] == '.')
+        for (++i, k = 8; name83[i] && k < 11; ++i)
+            nm[k++] = (char)(name83[i] >= 'a' && name83[i] <= 'z' ? name83[i] - 32 : name83[i]);
+    for (unsigned j = 0; j < 11; ++j)
+        e[j] = (uint8_t)nm[j];
+    e[11] = 0x20;                                      /* archive */
+    w16(e + 16, F.date);                               /* created */
+    w16(e + 18, F.date);                               /* accessed */
+    w16(e + 20, (uint16_t)(first >> 16));
+    w16(e + 24, F.date);                               /* written */
+    w16(e + 26, (uint16_t)first);
+    w32(e + 28, len);
+    volatile uint8_t *fi = disk + 512;                 /* FSInfo: free count and the next free hint */
+    w32(fi + 488, F.clusters - (F.next - 2));
+    w32(fi + 492, F.next);
+    for (unsigned j = 0; j < 512; ++j)                 /* and its backup (sector 7) */
+        disk[7 * 512 + j] = disk[512 + j];
     return 0;
 }

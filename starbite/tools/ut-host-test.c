@@ -113,12 +113,20 @@ int main(int argc, char **argv)
     CHECK(fat32_format(ram, bytes / 512, "STARBITE", 0x12345678, &fi) == 0, "format");
     CHECK(ram[510] == 0x55 && ram[511] == 0xaa && memcmp(ram + 82, "FAT32", 5) == 0, "boot sector");
     CHECK(fi.clusters >= 65525, "clusters %u", fi.clusters);
-    CHECK(fat32_format(ram, (128ULL << 20) / 512, "X", 1, 0) == -1, "128 MiB must be refused");
+    CHECK(fat32_add_file("README.TXT", (const uint8_t *)"hello\r\n", 7) == 0, "add README.TXT");
+    {
+        static uint8_t big[10000];
+        for (unsigned i = 0; i < sizeof(big); ++i)
+            big[i] = (uint8_t)i;
+        CHECK(fat32_add_file("big.bin", big, sizeof(big)) == 0, "add BIG.BIN (3 clusters)");
+        CHECK(fat32_add_file("EMPTY.TXT", 0, 0) == 0, "add an empty file");
+    }
     if (argc > 1) {
         FILE *f = fopen(argv[1], "wb");
         fwrite(ram, 1, bytes, f);
         fclose(f);
     }
+    CHECK(fat32_format(ram, (128ULL << 20) / 512, "X", 1, 0) == -1, "128 MiB must be refused");
 
     struct msc_lun l[2];
     memset(l, 0, sizeof(l));

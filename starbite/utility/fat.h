@@ -8,3 +8,7 @@ struct fat32_info { uint32_t clusters, fat_sectors, data_sector; };
 /* Format sectors x 512 bytes at disk as FAT32 (no partition table). label: 11 characters or fewer
  * (padded). 0 on success, -1 if the size cannot hold FAT32 (< 256 MiB or >= 2 TiB). */
 int fat32_format(volatile uint8_t *disk, uint64_t sectors, const char *label, uint32_t serial, struct fat32_info *out);
+
+/* Files in the root directory of the disk formatted last (8.3 names, contiguous clusters). */
+void fat32_set_date(unsigned y, unsigned m, unsigned d);
+int fat32_add_file(const char *name83, const uint8_t *data, uint32_t len);

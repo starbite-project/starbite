@@ -56,7 +56,15 @@ if [ "$native" = 1 ]; then
     gcc -O1 -Wall -Wextra -Werror -I"$here" -I"$lib" -o "$out/ut-host-test" "$root/starbite/tools/ut-host-test.c" \
         "$here/msc.c" "$here/fat.c" "$here/usb_desc.c" "$here/sha256.c" "$here/calcmath.c" "$here/exfat.c" "$lib/str.c" -lm
     gzip -dc "$root/starbite/tools/fixtures/exfat-card.img.gz" > "$out/exfat-card.img"
-    UT_EXFAT="$out/exfat-card.img" "$out/ut-host-test"
+    UT_EXFAT="$out/exfat-card.img" "$out/ut-host-test" "$out/ut-fat.img"
+    # the formatted RAM disk with its files must pass fsck.fat, and hold them
+    if command -v fsck.fat >/dev/null 2>&1 || [ -x /usr/sbin/fsck.fat ]; then
+        PATH=$PATH:/usr/sbin fsck.fat -n "$out/ut-fat.img" >/dev/null || { echo "utility: the RAM disk image fails fsck.fat" >&2; exit 1; }
+        files=$(PATH=$PATH:/usr/sbin fsck.fat -n -l "$out/ut-fat.img" | grep -c -E "/(README.TXT|BIG.BIN|EMPTY.TXT)" || true)
+        [ "$files" = 3 ] || { echo "utility: fsck.fat lists $files of the 3 files" >&2; exit 1; }
+        echo "utility: RAM disk image: fsck.fat clean, 3 files"
+        rm -f "$out/ut-fat.img"
+    fi
 fi
 
 CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie -fvisibility=hidden \
