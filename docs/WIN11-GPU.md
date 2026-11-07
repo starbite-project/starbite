@@ -124,9 +124,15 @@ driver that connects a line clears its block's status (DECON EXTRA: 0x50 added t
 
 Two ways to publish it, both offline-preparable:
 
-1. **Firmware (preferred, permanent):** a tiny DXE driver that installs this as an SSDT through
-   `EFI_ACPI_TABLE_PROTOCOL`, added to the release DXE volume with `tools/woa/dxe-replace.py --add`, the way
-   the PMIC RTC module was (src38). Needs a BOOT image flash by the main session.
+1. **Firmware (chosen):** the shared `Star2LteSsdtDxe` of the win-usb-host track (commit 6e4c398 on
+   `claude/win-usb-host-7efe60`, its `docs/WIN11-USB.md` §4.1) installs every SSDT blob it carries at
+   ReadyToBoot, TPL_CALLBACK − 1 (after the release's GPIO/touch handoff, which needs to see exactly its
+   own 4 tables). Ours is a **plain** blob (memory-only device, nothing to power first):
+   `build/win-gpu/StarbiteGpu.aml` packed by `tools/woa/ssdt-ffs.py` into FREEFORM FFS
+   `53534454-5342-5445-5342-475055000000` (Table ID `SBGPU`), added with `tools/woa/dxe-replace.py --add`
+   (`EXTRA_AML=build/win-gpu/StarbiteGpu.aml tools/woa/build-win-usbhost.sh` adds it to every USB image).
+   One BOOT flash for all tracks; a BOOT image without the blob is kill switch 1. The pmsg ring
+   (`pmsg-ramoops-0`, `grep -a '=SSDT'`) shows `=SSDT installed SBGPU` or `=SSDT skip SBGPU: <reason>`.
 2. **Registry override (fast test path):** Windows can replace the DSDT from the registry when test signing
    is on (`asl.exe /loadtable`; it can override an existing table, it cannot add an SSDT). We would dump the
    release DSDT (`tools/woa/winpe/acpi-dump.ps1`), append the device, and write the key offline with
@@ -447,7 +453,7 @@ the GPU itself.
 | # | Test | Needs | Expect | Risk / undo |
 |---|---|---|---|---|
 | T1 | `sbthermal` loads at boot | sbthermal.sys + service key | `State`: Level 0 (Normal), GPU ~35-50 °C idle, TripArmed 3, TripC 115, few rejects | read-only driver; undo Start = 4 offline |
-| T2 | ACPI device present | SSDT (§4.2) | `ACPI\STRB0072` in Device Manager, no driver (code 28) | firmware flash; undo: previous BOOT image |
+| T2 | ACPI device present | a BOOT image with the SBGPU blob (§4.2) | pmsg `=SSDT installed SBGPU`; touch still works; `ACPI\STRB0072` exists with no driver (Enum\ACPI\STRB0072 in the offline SYSTEM hive) | firmware flash; undo: previous BOOT image |
 | T3a | `sbdisplay` replaces Basic Display, **copy mode** (Flip 0, Brightness 0: no DECON/DSIM write) | T2 + sbdisplay | desktop unchanged; `State`: Started 1, Identify 0, Window 5, Mode 1, CommitStatus 0, Presents counting | black screen possible: person forces restarts (§4.3), kill file, older BOOT |
 | T3b | flips on (Parameters\Flip = 1) | T3a passed | no tearing when dragging windows; `State`: Mode 2, FirstFlip, Flips counting, no FlipLatchTimeout | as T3a; a latch failure falls back to copy by itself |
 | T4 | Brightness slider (Parameters\Brightness = 1) | T3a | Settings shows a slider; 100 → 0 dims the panel; `BrightnessResult` 0 | AOR-only, S-Boot's sequence; worst case the panel stays at one brightness until reboot |
