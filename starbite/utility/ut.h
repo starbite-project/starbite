@@ -10,5 +10,10 @@ void ut_measure(void);
 void ut_everyday(void);
 void ut_pad(void);
 void ut_files(void);
+struct ub;
+int ut_now(int64_t *t);                 /* UTC epoch from the RTC (clock.c), 0 if it did not read */
+void ut_clock_status(struct ub *u);     /* "14:41 EET   87%" for the status bar */
+void ut_clock_card(char *big, unsigned big_n, char *small, unsigned small_n);
+void ut_world(void);                    /* the world clock page */
 struct exfat;
 struct exfat *ut_card(void);           /* the card's exFAT (tools.c), 0 if not readable */

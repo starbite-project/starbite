@@ -102,6 +102,8 @@ int macros_parse(const char *src, unsigned len, struct macro *out, int max)
 {
     int n = 0;
     const char *p = src, *end = src + len;
+    if (len >= 3 && (uint8_t)src[0] == 0xef && (uint8_t)src[1] == 0xbb && (uint8_t)src[2] == 0xbf)
+        p += 3;                                       /* a UTF-8 byte order mark (Windows editors) */
     while (p < end && n < max) {
         const char *eol = p;
         while (eol < end && *eol != '\n')

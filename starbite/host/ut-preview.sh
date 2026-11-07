@@ -23,7 +23,7 @@ limactl shell --workdir "$root" starbite gcc -O1 -g -DSB_HOST -DSB_HOST_UTILITY 
     -o "$out/ut-host" "$root/starbite/host/host.c" "$root/starbite/host/ut-host-stubs.c" \
     "$lib/str.c" "$lib/log.c" "$lib/sbui.c" "$lib/sbui_input.c" "$lib/sbui_page.c" "$lib/sbui_w.c" "$lib/sb7.c" \
     "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" \
-    "$lib/assets.S" "$ut/main.c" "$ut/msc.c" "$ut/fat.c" "$ut/tools.c" "$ut/pad.c" "$ut/hid.c" "$ut/hash.c" "$ut/sha256.c" "$ut/calc.c" "$ut/calcmath.c" "$ut/exfat.c" "$ut/macros.c" -lm -lpthread
+    "$lib/assets.S" "$ut/main.c" "$ut/msc.c" "$ut/fat.c" "$ut/tools.c" "$ut/pad.c" "$ut/hid.c" "$ut/hash.c" "$ut/sha256.c" "$ut/calc.c" "$ut/calcmath.c" "$ut/exfat.c" "$ut/macros.c" "$ut/tz.c" "$ut/clock.c" -lm -lpthread
 
 limactl shell --workdir "$root" starbite sh -c "gzip -dc starbite/tools/fixtures/exfat-card.img.gz > $out/exfat-card.img"
 scene() {
@@ -52,6 +52,7 @@ scene browse-dir  UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k
 scene file-hash   UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:3000
 scene file-text   UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1500
 scene file-hex    UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:1500
+scene world       UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:u w:200 k:p w:1500
 scene timer-awake UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:d w:200 k:p w:200 w:130000
 scene saver       UT_HOST_USB=1 w:500 k:p w:800 w:125000
 scene saver-wake  UT_HOST_USB=1 w:500 k:p w:800 w:125000 t:720,2170 w:800

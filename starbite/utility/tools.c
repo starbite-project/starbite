@@ -265,32 +265,10 @@ static void card(int i, const char *title, const char *big, const char *hint, ui
 static void everyday_draw(int focus)
 {
     struct ub u;
-    struct sb_rtc r;
+    char big[16], small[96];
     ui_fill(0, UI_VIEW_Y0, UI_W, UI_H - UI_VIEW_Y0, C_BG);
-    sb_rtc_read(&r);
-    ub_init(&u);
-    if (r.ok) {
-        ub_dec2(&u, r.h);
-        ub_c(&u, ':');
-        ub_dec2(&u, r.mi);
-        ub_c(&u, ':');
-        ub_dec2(&u, r.s);
-    } else {
-        ub_s(&u, "--:--:--");
-    }
-    struct ub d;
-    ub_init(&d);
-    if (r.ok) {
-        ub_dec(&d, r.y);
-        ub_c(&d, '-');
-        ub_dec2(&d, r.mo);
-        ub_c(&d, '-');
-        ub_dec2(&d, r.d);
-        ub_s(&d, "  (the phone's RTC, UTC)");
-    } else {
-        ub_s(&d, "the RTC did not answer");
-    }
-    card(0, "CLOCK", u.b, d.b, C_L1, focus == 0);
+    ut_clock_card(big, sizeof(big), small, sizeof(small));     /* local time (clock.c, tz.c) */
+    card(0, "CLOCK", big, small, C_L1, focus == 0);
     uint64_t now = sb_ms();
     ub_init(&u);
     hms(&u, sw.acc + (sw.run ? now - sw.t0 : 0), 1);
@@ -341,7 +319,14 @@ void ut_everyday(void)
                 for (int i = 0; i < 4; ++i)
                     if (e.y >= EV_ROW_Y(i) && e.y < EV_ROW_Y(i) + EV_ROW_H)
                         which = focus = i;
-            if (which == 3) {
+            if (which == 0) {
+                ut_awake = 0;                         /* recomputed by this loop; not held on other pages */
+                ut_world();
+                ui_input_reset();
+                ui_fill(0, 0, UI_W, UI_H, C_BG);
+                ui_header_draw("Everyday", "Utility", "", 0);
+            } else if (which == 3) {
+                ut_awake = 0;
                 ut_calc();
                 ui_input_reset();
                 ui_fill(0, 0, UI_W, UI_H, C_BG);

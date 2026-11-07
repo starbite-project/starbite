@@ -19,6 +19,7 @@
 #include "exfat.h"
 #include "macros.h"
 #include "tz.h"
+#include "hid.h"
 
 static int busy[16];
 static uintptr_t qbuf[16];
@@ -309,6 +310,38 @@ int main(int argc, char **argv)
         CHECK(n >= 5 && !strcmp(m[2].text, "Best regards") && !m[2].key, "text macro");
         CHECK(n >= 5 && m[3].key == 0x3e && !m[3].mod, "f5");
         CHECK(n >= 5 && m[4].mod == 0x02 && m[4].key == 0x2b, "shift+tab");
+    }
+    /* a UTF-8 byte order mark before the first macro (Windows editors) */
+    {
+        const char *src = "\xef\xbb\xbf\"Copy\" = \"cmd+c\"\n\"Paste\" = \"cmd+v\"\n";
+        struct macro m[8];
+        int n = macros_parse(src, (unsigned)strlen(src), m, 8);
+        CHECK(n == 2 && !strcmp(m[0].label, "Copy"), "macros after a BOM: %d", n);
+    }
+    /* HID text longer than the report queue (63 reports, 2 per key) is typed whole (hid.c's pending text) */
+    {
+        unsigned ph = USB_PHYS(USB_EP_HID_IN);
+        const char *t = "Best regards, Jonathan Appleseed and the whole team";
+        hid_reset();
+        hid_stats.dropped = 0;
+        hid_text(t);
+        char got[96];
+        unsigned gn = 0;
+        for (int i = 0; i < 2000; ++i) {
+            busy[ph] = 0;
+            hid_service();
+            if (!busy[ph] || qlen[ph] != 9)
+                continue;
+            const volatile uint8_t *r = (const volatile uint8_t *)qbuf[ph];
+            if (r[0] != 1 || !r[3] || gn + 1 >= sizeof(got))
+                continue;
+            char c = r[3] >= 0x04 && r[3] <= 0x1d ? (char)((r[1] & 0x22 ? 'A' : 'a') + r[3] - 0x04)
+                   : r[3] == 0x2c ? ' ' : r[3] == 0x36 ? ',' : '?';
+            got[gn++] = c;
+        }
+        got[gn] = 0;
+        CHECK(!strcmp(got, t) && hid_stats.dropped == 0, "HID text: '%s' (%u dropped)", got, (unsigned)hid_stats.dropped);
+        busy[ph] = 0;
     }
     /* time zones (tz.c; checked against zoneinfo for 2000-2099 when written): the 2026 transitions */
     {

@@ -44,10 +44,15 @@ void hid_key(uint8_t mod, uint8_t key)
     ++hid_stats.keys;
 }
 
-void hid_text(const char *s)
+/* Text waits here and goes into the report queue as room frees up (hid_service), so a macro longer than
+ * the queue is typed whole; 4 slots stay free for clicks and keys pressed meanwhile. */
+static char pend[128];
+static unsigned pend_h, pend_t;
+
+static void text_feed(void)
 {
-    for (; s && *s; ++s) {
-        char c = *s;
+    while (pend_h < pend_t && room() >= 4) {
+        char c = pend[pend_h++];
         uint8_t mod = 0, k = 0;
         if (c >= 'a' && c <= 'z') {
             k = (uint8_t)(0x04 + c - 'a');
@@ -74,6 +79,20 @@ void hid_text(const char *s)
         if (k)
             hid_key(mod, k);
     }
+    if (pend_h == pend_t)
+        pend_h = pend_t = 0;
+}
+
+void hid_text(const char *s)
+{
+    for (; s && *s; ++s) {
+        if (pend_t >= sizeof(pend)) {
+            ++hid_stats.dropped;                      /* more than 128 characters waiting */
+            break;
+        }
+        pend[pend_t++] = *s;
+    }
+    text_feed();
 }
 
 void hid_move(int dx, int dy)
@@ -126,6 +145,7 @@ static int clamp(int v) { return v > 127 ? 127 : v < -127 ? -127 : v; }
 
 void hid_service(void)
 {
+    text_feed();
     if (!usbd_configured() || usbd_busy(P_HID))
         return;
     if (qh == qt && (mdx || mdy || mwheel)) {         /* motion only when no click/key is waiting */
@@ -149,6 +169,7 @@ void hid_service(void)
 void hid_reset(void)
 {
     qh = qt = 0;
+    pend_h = pend_t = 0;
     mdx = mdy = mwheel = 0;
     buttons = 0;
 }

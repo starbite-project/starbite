@@ -136,7 +136,19 @@ int exfat_read_chain(struct exfat *fs, uint32_t first, int nofat, uint64_t off, 
     return 0;
 }
 
-int exfat_list(struct exfat *fs, const struct exfat_ent *dir, struct exfat_ent *out, int max, int *total)
+/* names compare case-insensitively (ASCII), as exFAT's up-case table does for these */
+static int name_eq(const char *a, const char *b)
+{
+    while (*a && *b && (*a | 0x20) == (*b | 0x20)) {
+        ++a;
+        ++b;
+    }
+    return !*a && !*b;
+}
+
+/* the directory's entries into out (at most max); with match, only the entries of that name */
+static int list_impl(struct exfat *fs, const struct exfat_ent *dir, struct exfat_ent *out, int max, int *total,
+                     const char *match)
 {
     uint32_t first = dir ? dir->first : fs->root;
     int nofat = dir ? dir->nofat : 0;
@@ -198,8 +210,12 @@ int exfat_list(struct exfat *fs, const struct exfat_ent *dir, struct exfat_ent *
             }
             if (got_name) {
                 got_name = 0;
-                if (n < max)
-                    out[n++] = cur;
+                if (!match || name_eq(cur.name, match)) {
+                    if (n < max)
+                        out[n++] = cur;
+                    if (match && n >= max)
+                        goto end;                      /* found: the rest of the folder is not needed */
+                }
                 ++count;
             }
         }
@@ -212,6 +228,11 @@ end:
     if (total)
         *total = count;
     return n;
+}
+
+int exfat_list(struct exfat *fs, const struct exfat_ent *dir, struct exfat_ent *out, int max, int *total)
+{
+    return list_impl(fs, dir, out, max, total, 0);
 }
 
 int exfat_walk(struct exfat *fs, const char *path, struct exfat_ent *out, struct exfat_ent *scratch, int scratch_n)
@@ -228,16 +249,11 @@ int exfat_walk(struct exfat *fs, const char *path, struct exfat_ent *out, struct
         while (*p && *p != '/' && k + 1 < sizeof(part))
             part[k++] = *p++;
         part[k] = 0;
-        int n = exfat_list(fs, dp, scratch, scratch_n, 0);
-        int hit = -1;
-        for (int i = 0; i < n && hit < 0; ++i) {
-            const char *a = scratch[i].name, *b = part;
-            while (*a && *b && (*a | 0x20) == (*b | 0x20)) { ++a; ++b; }   /* case-insensitive, ASCII */
-            if (!*a && !*b)
-                hit = i;
-        }
-        if (hit < 0)
+        /* matched while listing: a folder of any size, scratch holds just the hit */
+        (void)scratch_n;
+        if (list_impl(fs, dp, scratch, 1, 0, part) < 1)
             return -2;
+        int hit = 0;
         while (*p == '/')
             ++p;
         if (!*p) {

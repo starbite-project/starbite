@@ -456,6 +456,28 @@ static void sh_run(const char *c)
         sh_put(ram_why[0] ? " (" : "");
         sh_put(ram_why);
         sh_put(ram_why[0] ? ")\n" : "\n");
+        struct sb_rtc r;                              /* raw, as the RTC holds it (UTC unless Windows set it) */
+        sb_rtc_read(&r);
+        struct ub u;
+        ub_init(&u);
+        if (r.ok) {
+            ub_s(&u, "rtc ");
+            ub_dec(&u, r.y);
+            ub_c(&u, '-');
+            ub_dec2(&u, r.mo);
+            ub_c(&u, '-');
+            ub_dec2(&u, r.d);
+            ub_c(&u, ' ');
+            ub_dec2(&u, r.h);
+            ub_c(&u, ':');
+            ub_dec2(&u, r.mi);
+            ub_c(&u, ':');
+            ub_dec2(&u, r.s);
+            ub_s(&u, " (raw)\n");
+        } else {
+            ub_s(&u, "rtc: no answer\n");
+        }
+        sh_put(u.b);
     } else if (sb_streq(c, "drives")) {
         sh_drives();
     } else if (sb_streq(c, "ufs on") || sb_streq(c, "ufs off")) {
@@ -632,10 +654,13 @@ static uint32_t *saver_buf;
 
 static void saver_draw(unsigned k)
 {
-    int x = 60 + (int)((k * 397U) % 520U), y = 260 + (int)((k * 911U) % 2300U);
+    int x = 60 + (int)((k * 397U) % 400U), y = 260 + (int)((k * 911U) % 2300U);
     struct ub u;
     ui_fill(0, 0, UI_W, UI_H, 0xff000000U);
-    ui_text(F_SMALL, x, y, "Starbite Utility", C_L3);
+    ub_init(&u);
+    ub_s(&u, "Starbite Utility   ");
+    ut_clock_status(&u);                              /* local time and battery */
+    ui_text(F_SMALL, x, y, u.b, C_L3);
     ub_init(&u);
     if (hash_job.state == HASH_RUNNING) {
         ub_s(&u, "hashing ");
@@ -771,14 +796,14 @@ void ut_status_bar(void)
     ui_text(F_STATUS, 60, 74, u.b, usbd_configured() ? C_GREEN : C_L2);
     ub_init(&u);
     uint64_t idle = ui_idle_ms();
-    int warn = !usb_ever && !usbd_configured() && idle + 60000U >= IDLE_EXIT_MS;
+    int warn = !ut_awake && hash_job.state != HASH_RUNNING && !usb_ever && !usbd_configured() &&
+               idle + 60000U >= IDLE_EXIT_MS;            /* the same conditions as idle_check */
     if (warn) {
         ub_s(&u, "MENU IN ");
         ub_dec(&u, (IDLE_EXIT_MS - (idle < IDLE_EXIT_MS ? idle : IDLE_EXIT_MS)) / 1000);
         ub_s(&u, " S: TOUCH TO STAY");
     } else {
-        ub_dec(&u, sb_ms() / 60000);
-        ub_s(&u, " min");
+        ut_clock_status(&u);                          /* local time and battery (clock.c) */
     }
     ui_text_r(F_STATUS, UI_W - 60, 74, u.b, warn ? C_ORANGE : C_L2);
     ui_dirty(0, 0, UI_W, UI_STATUS_H);
