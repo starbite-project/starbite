@@ -412,42 +412,6 @@ log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader
 wdt = 30
 wdt_feed = "xnu"
 
-[[entry]]
-key = "xnuh-panic"
-name = "XNU crash return: panic test"
-version = "XNU 12377+0399 · panic at 60 s"
-category = "lab"
-method = "xnu"
-tag = "lab"
-files = ["mac13-health.xnu"]
-cmdline = "sbtestpanic=60"
-root = "none (waits for a root device; no writes)"
-flags = ["hidden"]
-log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
-       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
-       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader",
-       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet sbcrash=loader"]
-wdt = 30
-wdt_feed = "xnu"
-
-[[entry]]
-key = "xnuh-panic-spin"
-name = "XNU stuck panic test"
-version = "XNU 12377+0399 · panic, then watchdog"
-category = "lab"
-method = "xnu"
-tag = "lab"
-files = ["mac13-health.xnu"]
-cmdline = "sbtestpanic=60"
-root = "none (waits for a root device; no writes)"
-flags = ["hidden"]
-log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet",
-       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet",
-       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet",
-       "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet"]
-wdt = 30
-wdt_feed = "xnu"
-
 # Starbite OS (docs/STARBITE-OS.md, plan 2026-11-07 track A): our own minimal OS on libsb, no Linux: lock screen,
 # big-tile home, Light, Heat, SOS, Clock, Battery, Settings; apps are separate .sba files at EL0. Version 0.1
 # writes no storage. It feeds the cluster-1 watchdog from its loop (30 s), so a hang returns to the crash screen.
@@ -507,3 +471,32 @@ cmdline = "wifi_step=10"
 flags = ["hidden"]
 wdt = 30
 wdt_feed = "own"
+
+# Windows 11 with a USB test firmware (docs/WIN11-USB.md, branch claude/win-usb-host-7efe60 9c14682): today's src38 UEFI
+# + Star2LteUsbDxe + Star2LteSsdtDxe + one gated USB blob + the GPU session's SBGPU. Leave Windows via Start or Run
+# "shutdown /r /t 0" only. The normal win11 row is unchanged.
+[[entry]]
+key = "win11-usbh0"
+name = "Windows 11 (USB test)"
+version = "USB host test T1 (VBUS off)"
+category = "lab"
+method = "uefi"
+tag = "lab"
+files = ["win11-usbh0.uefi"]
+root = "ufs:WINDOWS (NTFS)"
+flags = ["hidden"]
+
+# Windows 11 with a USB test firmware (docs/WIN11-USB.md, branch claude/win-usb-host-7efe60 9c14682): today's src38 UEFI
+# + Star2LteUsbDxe + Star2LteSsdtDxe + one gated USB blob + the GPU session's SBGPU. Leave Windows via Start or Run
+# "shutdown /r /t 0" only. The normal win11 row is unchanged.
+[[entry]]
+key = "win11-usb"
+name = "Windows 11 (USB test)"
+version = "USB device test L1 (Starbite Link)"
+category = "lab"
+method = "uefi"
+tag = "lab"
+files = ["win11-usb.uefi"]
+root = "ufs:WINDOWS (NTFS)"
+flags = ["hidden"]
+
