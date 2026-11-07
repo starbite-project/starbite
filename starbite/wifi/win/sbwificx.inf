@@ -10,7 +10,7 @@ Signature   = "$WINDOWS NT$"
 Class       = Net
 ClassGUID   = {4d36e972-e325-11ce-bfc1-08002be10318}
 Provider    = %Starbite%
-DriverVer   = 11/07/2026,0.3.5.0
+DriverVer   = 11/07/2026,0.3.6.0
 CatalogFile = sbwificx.cat
 PnpLockdown = 1
 

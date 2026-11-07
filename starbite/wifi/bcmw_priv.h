@@ -220,7 +220,7 @@ int fw_event_parse(const uint8_t *frame, uint32_t len, struct bcmw_event *ev);
 #define RX_BUFS_MAX    256u
 #define IOCTL_REQ_SIZE 1518u    /* BRCMF_TX_IOCTL_MAX_MSG_SIZE */
 #define PKTID_CTL      0x4000u
-#define TX_BUFS        128u     /* in flight to the firmware (W2n: 32 ran out when tx status lagged on a busy channel) */
+#define TX_BUFS        256u     /* in flight to the firmware (W2n: 32 ran out when tx status lagged; W2p: 256) */
 #define TX_BUF_SIZE    2048u  /* request ids: CTL buffers 0x4000 + i, rx data buffers i */
 
 int mb_shared(struct bcmw *w, uint32_t shared_addr);

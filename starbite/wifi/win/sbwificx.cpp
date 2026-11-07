@@ -170,6 +170,7 @@ struct DEVCTX {
     ULONG sta_budget;
     // W2i: the data path's callbacks, counted (they may run at DISPATCH, where nothing is logged)
     volatile LONG txq_made, rxq_made, tx_advances, tx_packets, tx_notifies, rx_advances, rx_up;
+    volatile LONG tx_armed, tx_backpressure, tx_held;    // W2p: Windows waits for our signal; times the queue was full
     UINT64 linkstate_at;
     BSS cur;                        // the associated AP's entry, kept apart from the scan list (W2k)
     int have_cur;
@@ -1448,6 +1449,12 @@ static void Worker(PVOID arg)
             Command(d, r);
         }
         SendQueued(d);
+        // only after a full queue held Windows' packets back (it arms the notification whenever it goes idle)
+        if (d->txq && d->tx_held && d->tx_count < QLEN / 2) {
+            InterlockedExchange(&d->tx_held, 0);
+            if (InterlockedExchange(&d->tx_armed, 0))
+                NetTxQueueNotifyMoreCompletedPacketsAvailable(d->txq);  // room again: Windows' ring is taken up
+        }
         if (!d->up)
             continue;
         {
@@ -1495,7 +1502,8 @@ static void Worker(PVOID arg)
                  d->connecting ? "connecting" : "idle", in->polls, d->poll_rate, in->events, in->rx_frames, in->tx_frames,
                  in->tx_done, d->rx_dropped, d->tx_dropped, d->commands);
             Sayf("wificx: load: the most completions in one poll %lu, tx waits for a free buffer %lu, frames waiting "
-                 "for Windows %lu, for the radio %lu", d->max_per_poll, d->tx_full, d->rx_count, d->tx_count);
+                 "for Windows %lu, for the radio %lu; the tx queue full %ld times (Windows held its frames)",
+                 d->max_per_poll, d->tx_full, d->rx_count, d->tx_count, d->tx_backpressure);
             d->max_per_poll = 0;
             Sayf("wificx: data path: tx queue made %ld, rx queue made %ld (now %s/%s); tx advances %ld, packets %ld, "
                  "notifications %ld; rx advances %ld, frames handed to Windows %ld", d->txq_made, d->rxq_made,
@@ -1531,10 +1539,18 @@ static void TxAdvance(NETPACKETQUEUE q)
     while (i != pr->EndIndex) {
         NET_PACKET *p = NetRingGetPacketAtIndex(pr, i);
         if (!p->Ignore) {
-            InterlockedIncrement(&d->tx_packets);
             // copied straight into the next free slot (under the lock: at most one frame, ~1.5 KiB)
             KIRQL old;
             KeAcquireSpinLock(&d->tx_lock, &old);
+            if (d->tx_count >= QLEN && d->connected) {
+                // the queue is full: the rest stays in Windows' ring until the worker has sent some (W2p: back
+                // pressure instead of the W2n soak's 300 drops); the worker signals through TxNotify's arming
+                KeReleaseSpinLock(&d->tx_lock, old);
+                InterlockedIncrement(&d->tx_backpressure);
+                InterlockedExchange(&d->tx_held, 1);
+                break;
+            }
+            InterlockedIncrement(&d->tx_packets);
             if (d->tx_count < QLEN && d->connected) {
                 FRAME *out = &d->tx[(d->tx_head + d->tx_count) % QLEN];
                 UINT32 len = 0, fi = p->FragmentIndex;
@@ -1564,9 +1580,11 @@ static void TxAdvance(NETPACKETQUEUE q)
 }
 
 static EVT_PACKET_QUEUE_SET_NOTIFICATION_ENABLED TxNotify;
-static void TxNotify(NETPACKETQUEUE q, BOOLEAN)
+static void TxNotify(NETPACKETQUEUE q, BOOLEAN on)
 {
-    InterlockedIncrement(&QueueCtx(q)->d->tx_notifies);
+    DEVCTX *d = QueueCtx(q)->d;
+    InterlockedIncrement(&d->tx_notifies);
+    InterlockedExchange(&d->tx_armed, on ? 1 : 0);
 }
 
 static EVT_PACKET_QUEUE_CANCEL TxCancel;
