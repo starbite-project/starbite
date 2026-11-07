@@ -4,7 +4,8 @@ Started 2026-11-07, on the user's request: "make Windows 11 run on the big cores
 maximum clock speed". Owner of the firmware side (MADT, PPTT, CPU bring-up): the win-usb-host
 session (it owns the Windows ACPI tables, docs/WIN11-USB.md 4.1 and 10). The clocks belong to the
 GPU session's `sbthermal`, the single ACPM owner (domain 3 = M3), coordinated through the main
-session. **Status: B1 passed on the phone (2026-11-07): the M3s run from UEFI. B2 built, not run.**
+session. **Status (2026-11-07): B1 passed (the M3s run from UEFI). B2 parked all three, but their
+uptime stayed 0. B2b (diagnostics) built, not run.**
 Not for unattended boots: a CPU_ON that never returns needs a forced reset (the watchdog doesn't
 rescue it).
 
@@ -107,6 +108,46 @@ WFE with interrupts masked; Windows programs the GIC for its four CPUs only; res
 SYSTEM_RESET, which resets them too. Unknown: whether Samsung's uH (EL2) traps WFE (HCR_EL2.TWE). The digits
 would show it (00000000 or a stuck value), and the A55s are not involved. If Windows misbehaves (hangs, slowdowns, heat), force reset
 is not needed: Start -> Restart, then boot src38.
+
+**Result (2026-11-07, main session, user present, image c813d8df): parked, uptime 0.** Windows ran
+normally for several minutes and restarted cleanly (Basic Display that boot: the B images had no
+`SBGPU`). Zone 0: PMU defaults as in B1, then for cores 1, 2, 3 `CPU_ON rc=0, PARKED after 1 ms,
+mpidr=8000010n, digits found`, "3 of 3 M3 cores parked". But every core's line still read
+`up 00000000 s`. Possible causes:
+(a) CNTFRQ_EL0 is 0 on a freshly powered M3 (EL3 programs it per core; `udiv` by 0 gives 0 without
+trapping), so a live core would keep writing 00000000. This one is likeliest: B2's uptime divided by
+CNTFRQ.
+(b) No event stream reaches the core, so WFE never returns.
+(c) uH traps WFE (HCR_EL2.TWE) and doesn't resume the core.
+(d) The core died right after its arrival mark.
+
+## 3.2 Stage B2b: tell those apart
+
+Same parking (`M3Park` v2, `STARBITE_M3_PARK=1`), with a diagnostic stub (`M3ParkStub.S`, 392
+bytes) and one zone-0 line per core with hex fields, each 0 until the stub writes it:
+
+`=M3 park core n mbox XXXXXXXX el E frq FFFFFFFF kctl KKKKKKKK spin SSSSSSSS wake WWWWWWWW t TTTTTTTT`
+
+| Field | Written | Reading |
+|---|---|---|
+| `el` | at entry: CurrentEL >> 2 | 1 expected (UEFI is EL1 under uH); 0 = the core never got this far |
+| `frq` | CNTFRQ_EL0 as read | 018CBA80 = 26 MHz, set; **00000000 = cause (a)** |
+| `kctl` | CNTKCTL_EL1 read back after setting EVNTEN + EVNTI 15 | low byte F4 (or F7) = the event stream is configured |
+| `spin` | phase A: 8 rounds of 2^26 `YIELD` iterations, no WFE (about a second in all), after each round | 00000008 = the core runs code; less = it died in phase A |
+| `wake` | phase B: WFE wake-ups, every 256 | about 400 per second of session (5 min ≈ 0001D4C0) = event stream works; **00000000 with spin 8 = WFE never returns, (b) or (c)**; small = only SEVs from Windows |
+| `t` | (CNTVCT - t0) >> 16 (2.52 ms units at 26 MHz), after each spin round and each wake update | grows with the session = the counter runs; with `wake` it dates the core's last sign of life |
+
+What each outcome means for B2/B4:
+- (a): the parking works. The stub (and Windows, later) must not rely on CNTFRQ; the firmware can set it per core (EL1 can't write CNTFRQ_EL0; ask EL3, or use 26 MHz as a constant).
+- (b): the event stream is unavailable; use SEV from the A55 side, or a bounded `YIELD` spin with a long sleep instead.
+- (c): WFE is not an option under uH; a `YIELD` spin it is, with its heat cost measured.
+- (d): the parking itself needs work before B4.
+
+Image `starbite-uefi-m3park2-gpu.bin`, sha256 edb78134… (`SOLO=m3park2 M3PARK=1 EXTRA_AML=<StarbiteGpu.aml>
+SUFFIX=-gpu`): src38 + Star2LteSsdtDxe (parking only) + `SBGPU`, so Windows keeps its display driver
+(no Basic Display fallback, no resolution flip). Same test as B2: user present, several minutes
+of Windows, Start -> Restart into the loader menu, `fastboot oem log dmesg`. Risks: as B2. New: phase
+A spins each M3 for about a second at boot (negligible heat).
 
 ## 4. Sources
 

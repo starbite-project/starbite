@@ -4,7 +4,7 @@
   gen-m3park-stub.py [--check]
 
 clang -target aarch64-none-elf assembles the stub; its .text is taken from the ELF object and
-checked: no relocations (position independent), 4-byte aligned, the three 8-byte literals at the
+checked: no relocations (position independent), 4-byte aligned, the eight 8-byte literals at the
 end. The header holds the bytes and the literals' offset, with the disassembly as a comment for
 review. --check: fail if the committed header differs.
 """
@@ -17,7 +17,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, 'M3ParkStub.S')
 OUT = os.path.join(HERE, 'M3ParkStub.h')
-LIT_SIZE = 24
+LIT_SIZE = 64
 
 
 def elf_sections(elf):
@@ -59,7 +59,8 @@ def build():
 #define M3_PARK_STUB_H_
 
 //
-// {len(text)} bytes; literals (mailbox, hex digits address, UID; 8 bytes each) at offset
+// {len(text)} bytes; literals (mailbox, UID, then the digits of el, frq, kctl, spin, wake, t;
+// 8 bytes each) at offset
 // M3_PARK_STUB_LIT. Disassembly (clang):
 """ + ''.join(f'//   {ln}\n' for ln in lines) + f"""//
 #define M3_PARK_STUB_LIT  {len(text) - LIT_SIZE}u

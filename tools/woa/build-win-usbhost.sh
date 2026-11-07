@@ -127,18 +127,20 @@ flags_ok() {   # flags_ok FFS
     [ "$has" = "$PPTT" ] || { echo "$1: PPTT fix present=$has, wanted $PPTT" >&2; exit 1; }
     if grep -aq "=M3 probe v1" "$1"; then has=1; else has=0; fi
     [ "$has" = "$M3" ] || { echo "$1: M3 probe present=$has, wanted $M3" >&2; exit 1; }
-    if grep -aq "=M3 park v1" "$1"; then has=1; else has=0; fi
+    if grep -aq "=M3 park v2" "$1"; then has=1; else has=0; fi
     [ "$has" = "$M3PARK" ] || { echo "$1: M3 park present=$has, wanted $M3PARK" >&2; exit 1; }
 }
 if [ -n "$SOLO" ]; then
-    # An experiment alone: src38 + Star2LteSsdtDxe with the chosen flags, no USB module, no blobs.
+    # An experiment alone: src38 + Star2LteSsdtDxe with the chosen flags, no USB module; only the
+    # EXTRA_AML blobs (e.g. SBGPU, so Windows keeps its display driver on these boots).
     echo "== $SOLO: Star2LteSsdtDxe alone (PPTT fix $PPTT, M3 probe $M3, M3 park $M3PARK)"
     tools/woa/build-uefi.sh "$UEFI_TARGET" -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_SSDT_DXE=TRUE \
         -D STARBITE_PPTT_FIX=$PPTT -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK | tail -1
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$SSDTDXE" "$out/$SOLO-ssdt.ffs"
     flags_ok "$out/$SOLO-ssdt.ffs"
     python3 tools/woa/dxe-replace.py "$W/Star2LtePkg-src38.fd" "$rel" "$out/$SOLO.fd" \
-        --kill "$RTC" ${serial[@]+"${serial[@]}"} --add "$W/pmic-rtc.ffs" --add "$out/$SOLO-ssdt.ffs" >/dev/null
+        --kill "$RTC" ${serial[@]+"${serial[@]}"} --add "$W/pmic-rtc.ffs" --add "$out/$SOLO-ssdt.ffs" \
+        ${extra[@]+"${extra[@]}"} >/dev/null
     python3 tools/woa/dxe-diff.py "$W/src38.fd" "$out/$SOLO.fd" ${unserial[@]+"${unserial[@]}"}
     cat "$out/src38-bootshim.bin" "$out/$SOLO.fd" > "$out/starbite-uefi-$SOLO$SUFFIX.bin"
     (cd "$out" && shasum -a 256 "starbite-uefi-$SOLO$SUFFIX.bin" | tee "usbh-SHA256SUMS-$SOLO$SUFFIX")

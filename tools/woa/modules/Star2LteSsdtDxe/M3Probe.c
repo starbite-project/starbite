@@ -233,9 +233,10 @@ M3Probe (
 //
 // Stage B2 (docs/WIN11-BIGCORES.md): park M3 cores 1..3 for the whole Windows session. Each gets
 // one reserved page below 4 GiB as its ACPI parking-protocol mailbox, the stub (M3ParkStub.S) in
-// the mailbox's firmware half at +0x800, and a "=M3 park" line in the zone-0 ring whose 8 hex
-// digits the stub keeps rewriting with the seconds it has been parked. The MADT is not touched:
-// Windows still runs on the four A55s and never writes these mailboxes.
+// the mailbox's firmware half at +0x800, and a "=M3 park" line in the zone-0 ring whose hex fields
+// the stub fills in (B2b: CurrentEL, CNTFRQ, CNTKCTL, spin rounds, WFE wake-ups, counter ticks; B2's
+// uptime-only line stayed 0). The MADT is not touched: Windows still runs on the four A55s and
+// never writes these mailboxes.
 //
 #define M3_PARK_UID_BASE  4u          // the release MADT's GICC UIDs: A55 0..3, M3 4..7
 
@@ -277,18 +278,21 @@ M3Park (
   VOID
   )
 {
+  STATIC CONST CHAR8    *Fields[] = { " el ", " frq ", " kctl ", " spin ", " wake ", " t " };
   EFI_PHYSICAL_ADDRESS  Page;
   volatile UINT64       *Arrived;
   UINT64                *Lit;
   UINT64                Rc;
   UINTN                 Core;
   UINTN                 Ms;
-  UINTN                 Digits;
+  UINTN                 Base;
+  UINTN                 Index;
   UINTN                 Parked;
+  CHAR8                 *Hit;
   EFI_STATUS            Status;
-  CHAR8                 Needle[48];
+  CHAR8                 Line[160];
 
-  SbLog ("=M3 park v1: PMU defaults, then M3 cores 1..3 into parking stubs (B2)");
+  SbLog ("=M3 park v2: PMU defaults, then M3 cores 1..3 into parking stubs with diagnostics (B2b)");
   Parked = 0;
   for (Core = 1; Core <= 3; Core++) {
     Page   = 0xFFFFFFFFu;
@@ -299,21 +303,29 @@ M3Park (
     }
 
     //
-    // The line the stub keeps up to date, then where its digits are.
+    // The line the stub fills in (M3ParkStub.S: every field is hex, 0 until the stub writes it),
+    // then where it landed in the ring and where each field's digits are.
     //
-    SbLog ("=M3 park core %d mbox %08lx up 00000000 s (hex)", Core, Page);
-    AsciiSPrint (Needle, sizeof (Needle), "=M3 park core %d mbox %08lx up ", Core, Page);
-    Digits = M3RingFind (Needle);
-    if (Digits != 0) {
-      Digits += AsciiStrLen (Needle);
-    }
+    AsciiSPrint (
+      Line,
+      sizeof (Line),
+      "=M3 park core %d mbox %08lx el 0 frq 00000000 kctl 00000000 spin 00000000 wake 00000000 t 00000000",
+      Core,
+      Page
+      );
+    SbLog ("%a", Line);
+    Base = M3RingFind (Line);
 
     ZeroMem ((VOID *)(UINTN)Page, EFI_PAGE_SIZE);
     CopyMem ((VOID *)(UINTN)(Page + 0x800), mM3ParkStub, sizeof (mM3ParkStub));
     Lit    = (UINT64 *)(UINTN)(Page + 0x800 + M3_PARK_STUB_LIT);
     Lit[0] = Page;
-    Lit[1] = Digits;
-    Lit[2] = M3_PARK_UID_BASE + Core;
+    Lit[1] = M3_PARK_UID_BASE + Core;
+    for (Index = 0; Index < ARRAY_SIZE (Fields); Index++) {
+      Hit            = AsciiStrStr (Line, Fields[Index]);
+      Lit[2 + Index] = ((Base != 0) && (Hit != NULL)) ? Base + (UINTN)(Hit - Line) + AsciiStrLen (Fields[Index]) : 0;
+    }
+
     CleanInvalidate ((UINTN)Page, EFI_PAGE_SIZE);
     __asm__ __volatile__ ("ic iallu\n dsb sy\n isb" ::: "memory");
 
@@ -330,14 +342,14 @@ M3Park (
     }
 
     SbLog (
-      "=M3 park core %d target %x: CPU_ON rc=%lx, %a after %d ms, mpidr=%lx, digits %a",
+      "=M3 park core %d target %x: CPU_ON rc=%lx, %a after %d ms, mpidr=%lx, fields %a",
       Core,
       0x100 + Core,
       Rc,
       (*Arrived != 0) ? "PARKED" : "no mark",
       Ms,
       *Arrived,
-      (Digits != 0) ? "found" : "NOT found"
+      (Base != 0) ? "found" : "NOT found"
       );
     if ((Rc != 0) || (*Arrived == 0)) {
       SbLog ("=M3 park stop: no further CPU_ON this boot");
