@@ -289,18 +289,6 @@ cmdline = "sb.root=/distros/kali.img sb.session=phosh s9p_decon.panel_mask=2 s9p
 root = "sd:p1 /distros/kali.img"
 flags = ["hidden"]
 
-# Lab: proves that a failed start comes back to the menu (its file is not an arm64 Image).
-[[entry]]
-key = "lab-failtest"
-name = "Fail-back test"
-version = "always fails, menu comes back"
-category = "lab"
-method = "bare"
-tag = "lab"
-files = ["catalog"]
-flags = ["hidden"]
-no_launch = true
-
 # Rollback: the same kernel with the old CMA layout (tools/linux/mk-starlte-dts.py --legacy-cma).
 [[entry]]
 key = "linux-olddtb"
@@ -379,7 +367,7 @@ root = "none (RAM only)"
 [[entry]]
 key = "utility"
 name = "Utility"
-version = "Starbite Utility OS 1.1 · drives, shell, files"
+version = "Utility OS 2.0 · keys, gamepad, sensors"
 category = "starbite"
 method = "bare"
 tag = "beta"
@@ -499,3 +487,19 @@ log = ["!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet",
        "!rd !sdrw !sdlog !sweetreboot !a5fb_noconsole !sweetquiet"]
 wdt = 30
 wdt_feed = "xnu"
+
+# Starbite OS (docs/STARBITE-OS.md, plan 2026-11-07 track A): our own minimal OS on libsb, no Linux: lock screen,
+# big-tile home, Light, Heat, SOS, Clock, Battery, Settings; apps are separate .sba files at EL0. Version 0.1
+# writes no storage. It feeds the cluster-1 watchdog from its loop (30 s), so a hang returns to the crash screen.
+[[entry]]
+key = "starbite-os"
+name = "Starbite OS"
+version = "0.1 · light, heat, SOS, clock, battery"
+category = "starbite"
+method = "bare"
+tag = "experimental"
+files = ["ufs:starbite-os.img|sd:starbite-os.img"]
+root = "none (RAM only)"
+wdt = 30
+wdt_feed = "own"
+
