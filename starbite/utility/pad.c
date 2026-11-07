@@ -136,10 +136,17 @@ void ut_pad(void)
     int touching = 0, in_pad = 0, moved = 0, held = 0, lx = 0, ly = 0;
     uint64_t t_down = 0, next = sb_ms() + 1000;
     int conf = usbd_configured();
+    unsigned wakes = ut_saver_wakes;
     for (;;) {
         struct ui_ev e;
         ui_poll(&e, 0);
         ut_service();
+        if (wakes != ut_saver_wakes) {                /* the screen saver dropped the touch in progress */
+            wakes = ut_saver_wakes;
+            if (touching && in_pad)
+                draw_pad(0);
+            touching = in_pad = 0;
+        }
         if (e.type == EV_BACK || e.type == EV_HOME || (e.type == EV_TAP && ui_header_back_hit(e.x, e.y)))
             break;
         if (e.type == EV_PRESS) {

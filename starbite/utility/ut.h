@@ -4,6 +4,7 @@
 
 /* a page that must stay visible (a running timer, Measure): no screen saver and no idle return */
 extern int ut_awake;
+extern unsigned ut_saver_wakes;         /* counts screen-saver wakes (the touch in progress was dropped) */
 void ut_service(void);          /* USB, the shell, the watchdog, the idle return: every loop turn */
 void ut_status_bar(void);
 void ut_measure(void);

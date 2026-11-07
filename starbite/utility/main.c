@@ -659,6 +659,7 @@ static void idle_check(void)
  * the watchdog keep running: the saver's loop polls through ui_poll, whose tick is ut_service. */
 #define SAVER_MS (2U * 60U * 1000U)
 static int in_saver, saver_off;
+unsigned ut_saver_wakes;                              /* pages that track a touch reset it when this moves */
 static uint32_t *saver_buf;
 
 static void saver_draw(unsigned k)
@@ -730,6 +731,7 @@ static void saver_check(void)
             break;
     }
     ui_input_reset();                                 /* the waking touch or key goes nowhere */
+    ++ut_saver_wakes;
     for (uint64_t i = 0; i < px; ++i)
         bb[i] = saver_buf[i];
     ui_set_clip(clip);
@@ -791,7 +793,7 @@ void ut_service(void)
 /* ---- UI ------------------------------------------------------------------------------------- */
 static const char *const tile_name[6] = { "USB", "Radio", "Files", "Measure", "Everyday", "Boot menu" };
 static const char *const tile_sub[6] = {
-    "Drives and shell", "Scans (v2)", "Hash partitions", "Charger, ruler, pixels", "Clock, stopwatch, timer", "Leave Utility",
+    "Drives and shell", "Scans (v2)", "Card, partitions, hashes", "Charger, ruler, pixels", "Clocks, timer, calculator", "Leave Utility",
 };
 static int focus;
 
