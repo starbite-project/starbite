@@ -235,7 +235,10 @@ sbth_u32 sbth_a55_khz(const struct sbth_io *io)
 
 int sbth_a55_allowed(sbth_u32 khz)
 {
-    return khz == 1690000U || khz == 1456000U || khz == 1248000U || khz == 1053000U;
+    /* The A55 (cpucl0) levels of the vendor DT that are at or above S-Boot's clock; the top three only on
+     * request (Parameters\CpuKhz), the default stays 1690000. ACPM may clamp: the CMU readback tells. */
+    return khz == 1950000U || khz == 1898000U || khz == 1794000U || khz == 1690000U || khz == 1456000U ||
+           khz == 1248000U || khz == 1053000U;
 }
 
 sbth_u32 sbth_cpu_target(enum sbth_level cpu_level, sbth_u32 boost_khz)

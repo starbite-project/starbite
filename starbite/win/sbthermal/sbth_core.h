@@ -165,14 +165,16 @@ struct sbth_cpu {
 /* ---- the A55 clock (Windows runs only on the four A55s) ----------------------------------------
  * Read only: blocks 2 = CMU_TOP 0x1a240000, 3 = CMU_CPUCL0 0x1d000000 (libsb tmu.c sb_a55_hz). Set only
  * through ACPM DVFS domain 2 (the A55 cluster: allowed by docs/PLAN-2026-11-07.md), one of the vendor DT's
- * levels up to 1690000 kHz (what XNU sets on every boot, measured 1689 MHz). ACPM sets the voltage. */
+ * levels: default 1690000 kHz (what XNU sets on every boot, measured 1689 MHz), on request up to the top
+ * level 1950000. ACPM sets the voltage from its own table; nothing beyond the table (no overclocking). */
 #define SBTH_CMU_TOP_PA 0x1a240000ULL
 #define SBTH_CMU_CPUCL0_PA 0x1d000000ULL
 #define SBTH_CMU_SIZE 0x2000U
 #define SBTH_DVFS_A55 2U
 #define SBTH_A55_SBOOT_KHZ 1053000U       /* what S-Boot leaves (and the Hot level's clock) */
 #define SBTH_A55_WARM_KHZ 1456000U
-#define SBTH_A55_MAX_KHZ 1690000U
+#define SBTH_A55_MAX_KHZ 1690000U        /* the default boost; Parameters\CpuKhz may ask up to 1950000 */
+#define SBTH_A55_TOP_KHZ 1950000U        /* the vendor DT's top A55 level */
 
 sbth_u32 sbth_a55_khz(const struct sbth_io *io);
 int sbth_a55_allowed(sbth_u32 khz);

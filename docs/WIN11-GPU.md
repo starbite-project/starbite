@@ -469,7 +469,10 @@ Windows runs only on the four A55s, and nothing in our Windows does CPU DVFS, so
 left (about 1.05 GHz). XNU raises them to 1690 MHz through ACPM DVFS domain 2 on every boot (measured
 1689 MHz). sbthermal now does the same under its watchdog:
 
-- `Parameters\CpuKhz` (default 1690000; 0 = never touch the clock; only 1690000, 1456000, 1248000 or 1053000).
+- `Parameters\CpuKhz` (default 1690000; 0 = never touch the clock). Allowed: the vendor DT's A55 levels from
+  S-Boot's clock up, 1053000, 1248000, 1456000, 1690000, 1794000, 1898000, **1950000 (the top level)**. ACPM
+  sets the voltage from its own table and may clamp; `State\A55Khz` (CMU readback) shows what it really ran.
+  Nothing beyond the table: no overclocking (that would need voltage tables we cannot safely change).
 - A second level machine on the **hottest** probe (same thresholds and hysteresis): Normal → CpuKhz, Warm
   (≥ 70 °C) → at most 1456 MHz, Hot and above (≥ 80 °C) → S-Boot's 1053 MHz. It starts at Stop, so the boost
   comes after 2 s of cool readings. Three unanswered requests and the boost gives up for that boot.
@@ -552,6 +555,13 @@ needed for a kernel load under testsigning). The driver started (contiguous memo
 wrote `ThermalGate 1`: the watchdog's callback object did not exist yet. System.evtx puts that boot at
 10:30:23-10:34:40 (~257 s) and sbthermal's 728 readings at ~182 s of it, so it came up ~75 s after boot
 began, after sbmali's 30 s wait. Fix: 10-minute wait, per-step breadcrumbs (§5.1a). No bugcheck.
+
+**T5 run 2 (sbmali 3ca3fd09, sbthermal 0af2c9d6): again ThermalGate 1, after a 370 s wait, while sbthermal
+ran the whole boot (1208 readings).** Cause: sbthermal created `\Callback\StarbiteThermal` without
+`OBJ_PERMANENT` (removed during the review, §13.1 #10). A named object that is not permanent leaves the
+namespace when its last handle closes, and `ExCreateCallback` closes its own handle at once, so no other
+driver could ever open it. Fixed: `OBJ_PERMANENT` again (consumers still treat a stale `seq`/time as Blind,
+and sbthermal has no unload routine). GPU untouched both times, no bugcheck.
 
 ## 11. Stages and done-when
 

@@ -202,8 +202,10 @@ static void test_thermal(void)
     CHECK(sbth_cpu_target(SBTH_HOT, 1690000) == 1053000 && sbth_cpu_target(SBTH_CRITICAL, 1690000) == 1053000,
           "Hot and above -> S-Boot's clock");
     CHECK(sbth_cpu_target(SBTH_NORMAL, 0) == 0 && sbth_cpu_target(SBTH_HOT, 0) == 0, "boost 0: never touch");
-    CHECK(sbth_cpu_target(SBTH_NORMAL, 1950000) == 0 && sbth_cpu_target(SBTH_NORMAL, 1700000) == 0,
-          "levels above 1690 MHz or not in the table: refused");
+    CHECK(sbth_cpu_target(SBTH_NORMAL, 1950000) == 1950000 && sbth_cpu_target(SBTH_WARM, 1950000) == 1456000,
+          "the vendor top level on request, still throttled");
+    CHECK(sbth_cpu_target(SBTH_NORMAL, 2100000) == 0 && sbth_cpu_target(SBTH_NORMAL, 1700000) == 0 &&
+          sbth_cpu_target(SBTH_NORMAL, 949000) == 0, "not a table level, above the table or below S-Boot's: refused");
     /* the CPU level machine runs on the hottest probe: a hot little cluster with a cool GPU throttles */
     sbth_levels_init(&lv);
     for (int i = 0; i < 2; ++i)

@@ -544,7 +544,11 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
     g.link = NT_SUCCESS(IoCreateSymbolicLink(&link, &name));
 
     RtlInitUnicodeString(&cbname, SBTH_CALLBACK_NAME);
-    InitializeObjectAttributes(&oa, &cbname, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    /* OBJ_PERMANENT is required: a named object that is not permanent leaves the namespace when its last
+     * handle closes, and ExCreateCallback closes its own handle at once, so nobody else could open it
+     * (T5 runs 1-2: sbmali waited 6 min for an object that never appeared while sbthermal ran). Stale
+     * answers are caught by the consumers' seq/time checks; sbthermal has no unload routine anyway. */
+    InitializeObjectAttributes(&oa, &cbname, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_PERMANENT, NULL, NULL);
     st = ExCreateCallback(&g.cb, &oa, TRUE, TRUE);
     if (!NT_SUCCESS(st)) {
         cleanup();
