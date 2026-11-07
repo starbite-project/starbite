@@ -355,6 +355,30 @@ static int unadopt(usb_ctx *u, rx_slot **rx, const char *what, DWORD e)
     return r;
 }
 
+/* an OUT read completed cancelled (error ERROR_OPERATION_ABORTED, not by us) or with 0 bytes. A few in a row
+ * are normal (a cancel before a bus event, a zero-length packet); many in a row mean the driver completes
+ * every read at once and reposting would spin this thread. Adopted pipes: give them up after RX_EMPTY_MAX
+ * (back to waiting for a bus event). Pipes from a real Configured event: from then on wait 50 ms before
+ * reposting (stop and bus events still wake it). Returns -1 when a cancel failed (the caller bails out). */
+#define RX_EMPTY_MAX 8
+static int rx_empty_spin(usb_ctx *u, rx_slot **rx, int *run, int *logged, DWORD e)
+{
+    if (++*run < RX_EMPTY_MAX) return 0;
+    if (u->adopted) {
+        *run = 0;
+        *logged = 0;
+        return unadopt(u, rx, e ? "OUT reads keep completing cancelled" : "OUT reads keep completing empty",
+                       e ? e : ERROR_NO_DATA);
+    }
+    if (!*logged) {
+        *logged = 1;
+        sbl_log("usb: %d OUT reads in a row completed %s (last error %lu): reposting every 50 ms until data or a "
+                "bus event comes", *run, e ? "cancelled" : "empty", e);
+    }
+    WaitForSingleObject(u->stop_ev, 50);
+    return 0;
+}
+
 /* is a session up on this link? (for the "waiting" log) */
 static int has_session(usb_ctx *u)
 {
@@ -387,6 +411,7 @@ static void serve(usb_ctx *u)
     u->txov = calloc(1, sizeof *u->txov);
     int rx_next = 0, prev_full = 0, ev_posted = 0, events_seen = 0;
     int adopted_rx_logged = 0, adopted_quiet_logged = 0;
+    int rx_empty_run = 0, rx_spin_logged = 0;   /* consecutive OUT reads that completed aborted or empty */
     uint64_t next_state_log = t_act + 30000000u, adopted_at = 0;
     DWORD n = 0;
     if (evov) evov->hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -489,7 +514,14 @@ static void serve(usb_ctx *u)
             if (!ok) {
                 DWORD e = GetLastError();
                 prev_full = 0;
-                if (e == ERROR_OPERATION_ABORTED) continue;
+                if (e == ERROR_OPERATION_ABORTED) {
+                    /* the driver cancelled a read we did not cancel: a bus event usually follows. Reposting
+                     * at once would spin a core if it keeps cancelling (adopted pipes the driver purged, a
+                     * stale configured marker): give adopted pipes up, otherwise throttle (review, round 8) */
+                    if (rx_empty_spin(u, rx, &rx_empty_run, &rx_spin_logged, e) < 0) goto out;
+                    if (!u->configured) rx_next = 0;
+                    continue;
+                }
                 if (u->adopted) {
                     if (unadopt(u, rx, "an OUT read failed", e) < 0) goto out;
                     rx_next = 0;
@@ -499,6 +531,14 @@ static void serve(usb_ctx *u)
                 snprintf(why, sizeof why, "OUT transfer failed (%lu)", e);
                 request_recycle(u, why);
                 break;
+            }
+            if (!n) {
+                /* a zero-length packet ends a transfer that filled whole reads; many in a row are not data */
+                if (rx_empty_spin(u, rx, &rx_empty_run, &rx_spin_logged, 0) < 0) goto out;
+                if (!u->configured) { rx_next = 0; prev_full = 0; continue; }
+            } else {
+                rx_empty_run = 0;
+                rx_spin_logged = 0;
             }
             if (n) {
                 InterlockedIncrement64(&u->out_xfers);

@@ -66,6 +66,12 @@ static void usage(void)
 
 #ifdef _WIN32
 #define SHUTDOWN_JOIN_MS 1500   /* how long an exit waits for the USB teardown (well under Windows' 5 s) */
+#define EXIT_SESSION_ENDING 4   /* service_win.c: this helper's session is ending, start no new one in it */
+
+/* set before the session-end teardown so that every exit path (this handler, or sbl_main returning when the
+ * main loop sees stop) reports EXIT_SESSION_ENDING: an exit code 0 made the service relaunch a helper into
+ * the dying session 1 s later, before its WTS_SESSION_LOGOFF arrived (review, round 8) */
+static volatile LONG g_session_ending;
 
 /* WM_QUERYENDSESSION / WM_ENDSESSION lParam: a sign-out or a shutdown/restart (round 7: the logs could not
  * tell the three session ends apart) */
@@ -88,11 +94,14 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_ENDSESSION:
         sbl_log("Windows %s the session: %s", wp ? "is ending" : "cancelled ending", end_kind(lp, k, sizeof k));
         if (wp) {
+            InterlockedExchange(&g_session_ending, 1);
             sbl_sender_bye(&g_s, SBLK_BYE_SHUTDOWN, (lp & ENDSESSION_LOGOFF) ? "Windows user is signing out"
                                                                               : "Windows is shutting down");
             /* the process is killed soon after this returns (exit 0x40010004): tear USB down first */
             sbl_sender_shutdown(&g_s, SHUTDOWN_JOIN_MS);
-            sbl_log("session end: USB torn down, exiting");
+            sbl_log("session end: USB torn down, exiting (code %u: the service starts no helper in this session)",
+                    EXIT_SESSION_ENDING);
+            ExitProcess(EXIT_SESSION_ENDING);
         }
         return 0;
     case WM_POWERBROADCAST:
@@ -124,6 +133,7 @@ static void msg_thread(void *arg)
 
 static BOOL WINAPI ctrl_handler(DWORD t)
 {
+    if (t == CTRL_LOGOFF_EVENT || t == CTRL_SHUTDOWN_EVENT) InterlockedExchange(&g_session_ending, 1);
     sbl_log("console control %lu (%s): BYE(SHUTDOWN)", t, t == CTRL_LOGOFF_EVENT ? "logoff" : t == CTRL_SHUTDOWN_EVENT
                                                             ? "shutdown" : t == CTRL_CLOSE_EVENT ? "close" : "break");
     sbl_sender_bye(&g_s, SBLK_BYE_SHUTDOWN, "sblinkd stopped");
@@ -282,7 +292,7 @@ static int sbl_main(int argc, char **argv)
                 (int)GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()));
     if (g_helper && GetSystemMetrics(SM_SHUTTINGDOWN)) {
         sbl_log("this session is ending (SM_SHUTTINGDOWN): not starting");
-        return 4;   /* service_win.c: no new helper in this session */
+        return EXIT_SESSION_ENDING;   /* service_win.c: no new helper in this session */
     }
     if (!g_helper && sbl_service_is_running()) {
         sbl_log("the StarbiteLink service is running and serves this session: this instance exits");
@@ -315,6 +325,12 @@ static int sbl_main(int argc, char **argv)
 
     sbl_sender_run(&g_s);
     sbl_sender_shutdown(&g_s, 1500);   /* the USB thread cancels, deactivates and closes before we exit */
+#ifdef _WIN32
+    if (g_helper && g_session_ending) {
+        sbl_log("sblinkd stopped: the session is ending (exit %u)", EXIT_SESSION_ENDING);
+        return EXIT_SESSION_ENDING;
+    }
+#endif
     sbl_log("sblinkd stopped");
     return 0;
 }

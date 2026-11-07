@@ -271,14 +271,20 @@ Found in the round-7 logs (build 649fd02), and fixed:
   so it outlives every helper; Reset / Detach / UnConfigured clear it). A helper that activates the bus while
   it is set and gets no event within 1.5 s adopts the pipes (`usb: adopted pipes IN x OUT y`), and logs
   `usb: the adopted pipes work: first OUT transfer ...` when the Mac's HELLO arrives. If an adopted read
-  fails it does not re-activate the function (that cannot help) but waits for a bus event.
+  fails it does not re-activate the function (that cannot help) but waits for a bus event. Reads the driver
+  keeps completing cancelled or empty (8 in a row) also give adopted pipes up (`OUT reads keep completing
+  cancelled`), and on pipes from a real Configured event they are reposted every 50 ms instead of at once,
+  so a driver that cancels every read cannot spin a core.
 - **The Mac app never escalated.** It now sends SET_INTERFACE on the 3rd restart without a HELLO answer
   (or after two OUT timeouts in a row), and resets the USB device from the 5th (at most every 30 s,
   doubling to 5 min); the phone then gets real Reset / Configured / SetInterface events. "Reconnect" in the
   menu also resets the device. PROTOCOL.md 6.4.
 - **Teardown before exit.** `sbl_sender_stop` wakes the USB thread at once; on logoff (`WM_ENDSESSION`), a
   console control, the service's quit event and a normal exit, the helper waits up to 1.5 s for the USB
-  thread to cancel its requests, deactivate the bus (result logged) and close the handle.
+  thread to cancel its requests, deactivate the bus (result logged) and close the handle. A helper ended by
+  `WM_ENDSESSION` (or a logoff/shutdown console control) then exits with code 4, never 0, so the service
+  does not start a new helper into the dying session in the 2-3 s before its `WTS_SESSION_LOGOFF` arrives
+  (`helper exited (code 0x4: its session is ending)`).
 - **Session lifecycle in the service.** Every control is logged by name with its session id (`session change
   6 LOGOFF (session 1, now active; console session 1)`), and every helper end-of-session message with its
   meaning (`the user is signing out` = `ENDSESSION_LOGOFF`, or `shutting down or restarting`). The service no
