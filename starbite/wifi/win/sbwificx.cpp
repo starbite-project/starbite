@@ -146,6 +146,7 @@ struct DEVCTX {
     UINT32 scan_txn;
     UINT16 scan_port;
     UINT64 scan_started;
+    UINT16 scan_sync;               // the running escan's sync id
     ULONG scans;                    // scan tasks so far (each is logged: W2 showed 0 networks in Windows)
     ULONG bss_frame;                // Parameters\BssFrame: 0 the frame body (from the timestamp), 1 with a MAC header
     // connection
@@ -347,7 +348,8 @@ static void Answer(WIFIREQUEST r, NTSTATUS st)
 
 // ---- scanning ------------------------------------------------------------------------------------------------------
 
-static const UINT16 SCAN_SYNC = 0x5743;     // "WC"
+static const UINT16 SCAN_SYNC = 0x5743;     // "WC": plus the scan's number, so a cancelled scan's late end event
+                                            // cannot end the next one (W2b: scans 2 and 3 ended at once, empty)
 
 static void ScanDone(DEVCTX *d, NDIS_STATUS status)
 {
@@ -408,7 +410,31 @@ static void ScanDone(DEVCTX *d, NDIS_STATUS status)
             delete[] e;
         }
     }
-    Sayf("wificx: scan %lu complete: %lu access points, status %08x", d->scans, n, status);
+    {
+        // what Windows can list: one line per network NAME (hidden ones: no name). Counts only, no names.
+        ULONG names = 0, hidden = 0, b5 = 0;
+        for (ULONG i = 0; i < n; i++) {
+            BSS *b = &d->bss[i];
+            int blank = 1;
+            for (ULONG k = 0; k < b->ssid_len; k++)
+                if (b->ssid[k])
+                    blank = 0;
+            if (b->band5)
+                b5++;
+            if (blank) {
+                hidden++;
+                continue;
+            }
+            ULONG j;
+            for (j = 0; j < i; j++)
+                if (d->bss[j].ssid_len == b->ssid_len && RtlEqualMemory(d->bss[j].ssid, b->ssid, b->ssid_len))
+                    break;
+            if (j == i)
+                names++;
+        }
+        Sayf("wificx: scan %lu complete: %lu access points (%lu on 5 GHz) = %lu network names + %lu hidden, status %08x",
+             d->scans, n, b5, names, hidden, status);
+    }
     Indicate(d, WDI_INDICATION_SCAN_COMPLETE, d->scan_port, d->scan_txn, status, NULL, 0);
     d->scanning = 0;
 }
@@ -432,7 +458,8 @@ static void CmdScan(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
     d->nbss = 0;
     d->scanning = 1;                // before the start: its ioctl wait already delivers results
     d->scan_started = Now(NULL);
-    int e = d->up ? bcmw_scan_start(d->w, ssid, ssid_len, SCAN_SYNC) : BCMW_E_STATE;
+    d->scan_sync = (UINT16)(SCAN_SYNC + d->scans);
+    int e = d->up ? bcmw_scan_start(d->w, ssid, ssid_len, d->scan_sync) : BCMW_E_STATE;
     CleanupParsedWdiTaskScanToIhv(&p);
     Answer(r, STATUS_SUCCESS);
     if (e != BCMW_OK) {
@@ -736,7 +763,7 @@ static void OsEvent(void *ctx, const struct bcmw_event *ev)
     struct bcmw_bss b;
     UINT16 sync = 0;
     if (ev->type == BCMW_E_ESCAN_RESULT) {
-        if (bcmw_bss_parse(ev, &b, &sync) && sync == SCAN_SYNC && d->scanning) {
+        if (bcmw_bss_parse(ev, &b, &sync) && sync == d->scan_sync && d->scanning) {
             BSS *e = FindBss(d, b.bssid);
             if (!e && d->nbss < MAX_BSS)
                 e = &d->bss[d->nbss++];
@@ -757,7 +784,7 @@ static void OsEvent(void *ctx, const struct bcmw_event *ev)
                 e->ie_len = b.ie_len < BSS_IE_MAX ? b.ie_len : BSS_IE_MAX;
                 RtlCopyMemory(e->ie, b.ie, e->ie_len);
             }
-        } else if (bcmw_scan_ended(ev, SCAN_SYNC) && d->scanning) {
+        } else if (bcmw_scan_ended(ev, d->scan_sync) && d->scanning) {
             d->scanning = 2;            // reported from the worker loop
         }
         return;
