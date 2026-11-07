@@ -89,11 +89,11 @@ postfix-vendor.sh), odm 36864 B. System does not fit the S9's SYSTEM (4.75 GiB),
 | # | Name | Blocks (4 KiB) | Size | Holds |
 |---|---|---|---|---|
 | 18 | SYSTEM | 68736..1678719 | 6.14 GiB | One UI system (EROFS); grew over the old VENDOR + ODM |
-| 19 | VENDOR | 11463424..11725567 | 1 GiB | One UI vendor (EROFS), behind WINDOWS |
-| 20 | ODM | 11725568..11741951 | 64 MiB | One UI odm (EROFS) |
+| 19 | VENDOR | 12512000..12774143 | 1 GiB | One UI vendor (EROFS), behind WINDOWS |
+| 20 | ODM | 12774144..12790527 | 64 MiB | One UI odm (EROFS) |
 | 21-25 | CACHE .. USERDATA | unchanged | | CACHE = One UI /cache (ext4, 12 MiB) |
-| 26-27 | WINESP, WINDOWS | 6613760..11463423 | 0.5 + 18 GiB | WINDOWS shrunk (ntfsresize first: NTFS 19260243968 B) |
-| 28 | A16DATA | 11741952..15615994 | 14.78 GiB | One UI /data (ext4, 3874038 blocks: 5 short of the partition, `length=-20480`) |
+| 26-27 | WINESP, WINDOWS | 6613760..12511999 | 0.5 + 22 GiB | NTFS 23622320128 B (17.2 GB used, 6.4 GB free) |
+| 28 | A16DATA | 12790528..15615994 | 10.78 GiB | One UI /data (ext4, 2825462 blocks: 5 short of the partition, `length=-20480`) |
 
 VENDOR and ODM keep their names (the first-stage fstab in `android.dtb` finds them by name) and their entry
 numbers, so no other partition is renumbered: the GPT lists them out of block order, which
@@ -102,6 +102,10 @@ numbers, so no other partition is renumbered: the GPT lists them out of block or
 
 Images: `tools/android/oneui/sparse2raw.py IMAGE | tools/android/pixel/part-write.py NAME - --size N`
 (64 MiB chunks read back on the phone + a whole-range SHA-256). System sha256 7662390c..., vendor 5572b8b7...
+
+**Windows at 18 GiB was too small (2026-11-07 morning):** the shrink left it 1.4 GB free; after two chkdsk runs it
+hung at the Welcome screen. WINDOWS went to 22 GiB (VENDOR/ODM rewritten 4 GiB further on, A16DATA re-created at
+10.78 GiB) and `ntfsresize` grew the NTFS to fill it (it resets the journal and schedules one more chkdsk).
 
 ## 5. Status (2026-11-07, 05:20): One UI 8 boots on S9 #1
 

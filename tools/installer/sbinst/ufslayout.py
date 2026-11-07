@@ -206,6 +206,7 @@ def _starbite_a16g():
 ONEUI_SYSTEM = 1609984        # SYSTEM grows over the old VENDOR + ODM: 68736..1678719 (6.14 GiB; up to CACHE)
 ONEUI_VENDOR = 262144         # 1 GiB  (set from the built image: tools/android/oneui, docs/ANDROID-ONEUI.md 4)
 ONEUI_ODM = 16384             # 64 MiB
+ONEUI_WINDOWS = 22 << 18      # 22 GiB = 5767168 blocks (Windows 11 uses 17.2 GB: about 6.4 GB free; 18 GiB hung at login)
 
 
 def _starbite_oneui():
@@ -213,26 +214,28 @@ def _starbite_oneui():
     SYSTEM takes the whole region in front of CACHE (where SYSTEM, VENDOR and ODM were), and VENDOR and ODM move
     behind WINDOWS, keeping their names (the first-stage fstab finds them by name) and their entry numbers
     (sda19, sda20: no other partition is renumbered). WINDOWS exactly 18 GiB (its NTFS was shrunk with
-    ntfsresize to 18 GiB - 64 MiB first; the partition must never be smaller than the NTFS), then VENDOR, ODM,
-    and A16DATA to the last usable block (Linux data, ext4)."""
+    ntfsresize to 18 GiB - 64 MiB on 2026-11-06, which left Windows 1.4 GB free and hanging at the Welcome
+    screen; on 2026-11-07 WINDOWS grew to 22 GiB and the NTFS was grown to fill it), then VENDOR, ODM, and A16DATA
+    to the last usable block (Linux data, ext4)."""
     a = _starbite_a()
     rows = list(a.parts)
-    win_blocks = 18 << 18                              # 18 GiB in 4 KiB blocks = 4718592
-    back = 6744832 + win_blocks                        # 11463424, right after WINDOWS
+    win_blocks = ONEUI_WINDOWS
+    back = 6744832 + win_blocks                        # 12512000, right after WINDOWS
     rows[17] = replace(rows[17], blocks=ONEUI_SYSTEM)
     rows[18] = replace(rows[18], start=back, blocks=ONEUI_VENDOR, role='One UI /vendor (EROFS)')
     rows[19] = replace(rows[19], start=back + ONEUI_VENDOR, blocks=ONEUI_ODM, role='One UI /odm (EROFS)')
     rows[26] = replace(rows[26], blocks=win_blocks)
     rows[27] = replace(rows[27], start=back + ONEUI_VENDOR + ONEUI_ODM, type=LINUX_DATA,
                        role='One UI /data (ext4, the fs ends 5 blocks early: length=-20480)')
-    return Layout('starbite-oneui', 'Starbite layout for One UI 8: SYSTEM 6.14 GiB in front, WINDOWS 18 GiB, '
-                  'VENDOR + ODM behind it, A16DATA ~14.8 GiB (Linux data)',
+    return Layout('starbite-oneui', 'Starbite layout for One UI 8: SYSTEM 6.14 GiB in front, WINDOWS 22 GiB, '
+                  'VENDOR + ODM behind it, A16DATA ~10.8 GiB (Linux data)',
                   tuple(rows), min_blocks=15616000,
-                  notes=('WINDOWS must be shrunk with ntfsresize to <= 18 GiB BEFORE this table is written.',
+                  notes=('WINDOWS must hold its NTFS: shrink it with ntfsresize BEFORE this table is written if it is '
+                         'larger than 22 GiB; grow it with ntfsresize afterwards to use the whole partition.',
                          'VENDOR (sda19) and ODM (sda20) lie after WINDOWS: the GPT entries are not in block order.',
                          'The Windows UFS driver write fence still spans 6613760..13518591 (old WINDOWS end): NTFS '
-                         'only writes inside its 18 GiB volume, so VENDOR, ODM and A16DATA from 11463424 are safe '
-                         'while Windows does not grow its volume.'))
+                         'only writes inside its 22 GiB volume, so VENDOR, ODM and A16DATA from 12512000 are safe '
+                         'while Windows does not grow its volume past the partition.'))
 
 
 LAYOUTS = {L.name: L for L in (_stock(), _starbite_a(), _starbite_a16g(), _starbite_oneui())}
