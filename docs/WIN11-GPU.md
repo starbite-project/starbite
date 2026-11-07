@@ -15,7 +15,7 @@ checked by us; **[unverified]** = our reading of a document or source, not yet t
 | Stage | What | State |
 |---|---|---|
 | 1 | This document | done, adversarially reviewed (§13) |
-| 2a | `sbthermal.sys`: temperature watchdog (TMU), the gate every GPU driver must pass | written (`starbite/win/sbthermal`), host tests pass, builds for ARM64 and is test-signed; phone test T1 requested |
+| 2a | `sbthermal.sys`: temperature watchdog (TMU), the gate every GPU driver must pass | **done: T1 passed on the phone 2026-11-07** (§10.1); stays installed (Start 2) |
 | 2b | `sbdisplay.sys`: display-only driver for DECON (one mode, presents, tear-free flips at TE, brightness) | written (`starbite/win/sbdisplay`), host tests pass, builds and is test-signed; ACPI table `starbite/win/acpi` compiles with iasl; needs the SSDT in the firmware (T2) before T3 |
 | 3 | `sbmali.sys`: KMDF bring-up (power, MMU, a job) ported from StarbiteMali | designed (§5) |
 | 4 | `sbwddm.sys` + Mesa 26.2 UMD: Direct3D 11 → DWM on the Mali | designed (§6), research |
@@ -460,6 +460,18 @@ the GPU itself.
 | T5 | `sbmali` bring-up (replaces sbdisplay for the test) | T1, T2 | GPU_ID 0x6221, cores ready, WRITE_VALUE ok, fragment clear of a buffer ok, legacy and AArch64 tables 20 runs each with 0 faults | 950 mV on vdd_g3d (as iOS since 2026-10-28); watchdog gates it; undo Start = 4 |
 
 Each request to the main session lists exact files, commands, expected values and the undo.
+
+### 10.1 Results
+
+**T1 passed (2026-11-07, main session; Windows 22631, sbthermal.sys sha256 0af2c9d6…, ~5 min at the desktop,
+clean restart; offline SYSTEM copy `build/win/results-1/SYSTEM` in the main checkout, clean 678/678).**
+`State`: Level 0, GPU 42.586 °C, hottest 43.620 °C (slot 5, the little cluster Windows runs on), max seen
+45.689 °C (boot), Readings 1208, Rejected 0, BlindEvents 0, BlocksLive 3, TripArmed 3, trip 115.000 °C on
+both blocks, LevelChanges 1 (Stop → Normal at start), GuardBoots 0. No bugcheck in pmsg.
+Reading of the values: nine probes report exactly 42586 m°C. The trim is two-point with te2 − te1 = 58 codes
+for 60 °C, so one code = 1.034 °C and 42586 = 17 codes above 25 °C: probes at the same temperature give the
+same code. The trip decodes to exactly 115 °C (S-Boot's te1 + 87), which cross-checks the conversion. The
+big cores (Windows never runs on them) and the idle GPU sit at the same temperature; ISP (slot 10) 43.305 °C.
 
 ## 11. Stages and done-when
 
