@@ -28,7 +28,6 @@
   M3Run.c
   M3RunStub.h
   M3Boot.c
-  M3BootStub.h
   PpttBuild.c
   PpttBuild.h
   StarbiteLog.h

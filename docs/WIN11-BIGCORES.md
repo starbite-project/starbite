@@ -248,7 +248,32 @@ At ExitBootServices (our own event, registered by Star2LteSsdtDxe), on A55 core 
 Built: `M3Boot.c` + `M3BootStub.S` (`STARBITE_M3_BOOT=1`); image `starbite-uefi-m3boot-gpu.bin`,
 sha256 27dd38b9… (with the B3a v2 fixes and EL/MPIDR recorded after MMU-on). Fallback
 `starbite-uefi-m3bootsolo-gpu.bin` (cadc59d3…, `M3BOOT=2`): the same with M3 1 the only enabled
-GICC, to split "Windows on an M3" from "M3 boot CPU + A55 secondaries" if B3 fails after the claim (`SOLO=m3boot M3BOOT=1 EXTRA_AML=<StarbiteGpu.aml> SUFFIX=-gpu`). The live MADT is
+GICC, to split "Windows on an M3" from "M3 boot CPU + A55 secondaries" if B3 fails after the claim.
+
+**B3 v1 result (2026-11-07, 27dd38b9): fail-safe worked, hand-off not taken.** Windows booted on the
+A55 as usual (4 CPUs) and restarted cleanly.
+- P's MADT, seen for the first time: UIDs 0..3 = A55 0..3 (interfaces 0..3, flags 1, MPIDR
+  0..3, parking v0 for UID 0, v1 with mailboxes 0xBBC70000/71000/72000 for UIDs 1..3, efficiency
+  class 1); UIDs 4..7 = M3 0..3 (interfaces 4..7, **flags 0 = disabled**, MPIDR 0x100..0x103, no
+  mailboxes, class 0).
+- PMU writes as in B3a.
+- `CPU_ON rc=0, state=2` (the A55 gave up after 1 s), and `stage/el/mpidr = 0`. Those breadcrumbs
+  are not evidence: they shared a cache line with State/Rc, which the A55 writes (Rc, right after
+  CPU_ON), so its dirty copy written back over the M3's MMU-off stores.
+
+The difference from B3a, which worked during dispatch: v1 ran the M3 from a separately allocated
+page, and at ExitBootServices that page may not be executable in the active tables. Then the
+first fetch after MMU-on faults, the vectors (same page) fault too, and the core hangs silently.
+**v2:**
+- The entry code and vectors are in this image's own .text (2 KiB-aligned vectors at RVA 0x1800,
+  entry 0x2000), which the A55 is running from at that moment. The context pointer is in .data,
+  cleaned to PoC.
+- The breadcrumbs (DStage/DEl/DMpidr/DEsr/DElr/DFar) have their own cache line at context +0x380,
+  which the A55 never writes after cleaning it.
+- At ExitBootServices the A55 logs TTBR0/TCR/SCTLR/MAIR next to their values at arming, and the
+  page-table entries of the entry code, the context and the stack.
+
+Images: `starbite-uefi-m3boot-gpu.bin` 52c744d1…, solo `starbite-uefi-m3bootsolo-gpu.bin` 086f9a8c…. (`SOLO=m3boot M3BOOT=1 EXTRA_AML=<StarbiteGpu.aml> SUFFIX=-gpu`). The live MADT is
 logged at ExitBootServices (`=M3 boot MADT gicc uid=… if=… flags=… mpidr=… park v… eff=…`): the
 first view of what P leaves. **Held until B3a passes** (its GIC interface bits and coherency
 results gate this image).

@@ -10,7 +10,7 @@
          - A55 0 and M3 0/2/3 disabled.
        Anything unexpected (no M3 1 entry with MPIDR 0x101, an A55 1..3 entry without a mailbox)
        -> nothing happens, Windows boots on A55 core 0 as today;
-    2. M3BootHandoff saves the A55's EL1 state, CPU_ONs M3 core 1 into M3BootStub.S and waits on
+    2. M3BootHandoff saves the A55's EL1 state, CPU_ONs M3 core 1 into M3BootEntry and waits on
        Context.State without its stack: the M3 restores the state, claims (State 0 -> 1) and
        returns 1 from M3BootHandoff on the M3; the A55 then powers itself off (PSCI CPU_OFF). If
        no claim within 1 s, the A55 sets State 2 (the M3 powers off if it gets there later) and
@@ -18,6 +18,15 @@
     3. on the M3: the prepared MADT is copied into the table (the commit point), logged, and
        ExitBootServices returns into winload on the M3.
   `numproc 4` stays: Windows runs on M3 1 + A55 1..3.
+
+  v2 (after B3 v1 on the phone: CPU_ON rc=0, no claim in 1 s): the M3's entry code and vectors are
+  part of this driver's own .text (M3BootEntry below), which is mapped and executable in whatever
+  translation tables are active at ExitBootServices, because the A55 is running from it at that moment.
+  v1 used a separately allocated page. The breadcrumbs (Stage, EL, MPIDR, ESR/ELR/FAR) have a
+  cache line of their own that the A55 never writes after cleaning it (v1's shared the line with
+  State/Rc, which the A55 writes, so its write-back could erase them). The A55 also logs its
+  TTBR0/TCR/SCTLR/MAIR at arming and at ExitBootServices, and the page-table entries of the entry
+  code, the context and the stack.
 
   Copyright (c) 2026, Starbite. SPDX-License-Identifier: GPL-2.0-only
 **/
@@ -38,7 +47,6 @@
 
 #if STARBITE_M3_BOOT
 #include "StarbiteLog.h"
-#include "M3BootStub.h"
 
 //
 // STARBITE_M3_BOOT=1: M3 1 + A55 1..3 (4 CPUs); =2 ("solo"): M3 1 alone, every other GICC disabled,
@@ -61,6 +69,12 @@ typedef struct {
   UINT32    State, Stage;                                           // 0x100 (Stage: 1 MMU off, 2 MMU on, 3 claimed)
   UINT64    El, Mpidr, Timeout, Rc, Esr, Elr, Far;                  // 0x108
   UINT64    Q[64];                                                  // 0x140 q0..q31
+  UINT64    Pad[8];                                                 // 0x340
+  //
+  // 0x380, a cache line of its own: written only by the M3 (MMU off or on); the A55 cleans it
+  // before CPU_ON and only reads it (after clean+invalidate) when it gives up.
+  //
+  UINT64    DStage, DEl, DMpidr, DEsr, DElr, DFar;                  // 0x380
 } M3_BOOT_CTX;
 
 STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, SpEl0) == 0x060, "CTX_SP_EL0");
@@ -72,14 +86,144 @@ STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, Timeout) == 0x118, "CTX_TIMEOUT");
 STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, Rc) == 0x120, "CTX_RC");
 STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, Far) == 0x138, "CTX_FAR");
 STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, Q) == 0x140, "CTX_Q0");
-STATIC_ASSERT (sizeof (M3_BOOT_CTX) == 0x340, "M3_BOOT_CTX size");
+STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, DStage) == 0x380, "CTX_DSTAGE");
+STATIC_ASSERT (OFFSET_OF (M3_BOOT_CTX, DFar) == 0x3a8, "CTX_DFAR");
+STATIC_ASSERT (sizeof (M3_BOOT_CTX) <= 0x400, "M3_BOOT_CTX size");
+
+//
+// The M3's side, in this image's .text (v2). Entered by PSCI CPU_ON: MMU and caches off, DAIF
+// masked, SPSel 1. gM3BootCtx (this image's .data, cleaned to PoC before CPU_ON) holds the context.
+//   DStage 1: running, MMU off; not EL1 -> CPU_OFF.
+//   VBAR = M3BootVectors (any exception before the claim: ESR/ELR/FAR into the context, CPU_OFF);
+//   MAIR, TCR, TTBR0/1, AMAIR, CPACR, CONTEXTIDR, CNTKCTL, TPIDRs; SCTLR (MMU and caches on).
+//   DStage 2 (+ EL, MPIDR again, cacheable); claim State 0 -> 1 with exclusives (2 = the A55 gave up:
+//   CPU_OFF). DStage 3: UEFI's VBAR, FPCR/FPSR, q0-q31, SPs/SPSel, NZCV, x19-x30, DAIF; return 1 to
+//   M3BootHandoff's caller.
+//
+UINT64  gM3BootCtx __attribute__ ((used));
+
+extern UINT8  M3BootVectors[];
+extern UINT8  M3BootEntry[];
+extern UINT8  M3BootEnd[];
+
+__asm__ (
+  "  .text\n"
+  "  .p2align 11\n"
+  "  .globl M3BootVectors\n"
+  "M3BootVectors:\n"
+  "  .rept 16\n"
+  "  b     M3BootVfail\n"
+  "  .p2align 7\n"
+  "  .endr\n"
+  "  .globl M3BootEntry\n"
+  "M3BootEntry:\n"
+  "  adrp  x1, gM3BootCtx\n"
+  "  ldr   x19, [x1, :lo12:gM3BootCtx]\n"
+  "  mov   x0, #1\n"
+  "  str   x0, [x19, #0x380]\n"          // DStage 1
+  "  mrs   x0, CurrentEL\n"
+  "  lsr   x0, x0, #2\n"
+  "  str   x0, [x19, #0x388]\n"
+  "  mrs   x2, mpidr_el1\n"
+  "  str   x2, [x19, #0x390]\n"
+  "  dsb   sy\n"
+  "  cmp   x0, #1\n"
+  "  b.ne  M3BootOff\n"
+  "  tlbi  vmalle1\n"
+  "  dsb   nsh\n"
+  "  ic    iallu\n"
+  "  dsb   nsh\n"
+  "  isb\n"
+  "  adr   x0, M3BootVectors\n"
+  "  msr   vbar_el1, x0\n"
+  "  ldr   x0, [x19, #0xb8]\n  msr mair_el1, x0\n"
+  "  ldr   x0, [x19, #0xa0]\n  msr tcr_el1, x0\n"
+  "  ldr   x0, [x19, #0xa8]\n  msr ttbr0_el1, x0\n"
+  "  ldr   x0, [x19, #0xb0]\n  msr ttbr1_el1, x0\n"
+  "  ldr   x0, [x19, #0xc0]\n  msr amair_el1, x0\n"
+  "  ldr   x0, [x19, #0xd0]\n  msr cpacr_el1, x0\n"
+  "  ldr   x0, [x19, #0xd8]\n  msr contextidr_el1, x0\n"
+  "  ldr   x0, [x19, #0xf8]\n  msr cntkctl_el1, x0\n"
+  "  ldr   x0, [x19, #0xe0]\n  msr tpidr_el0, x0\n"
+  "  ldr   x0, [x19, #0xe8]\n  msr tpidr_el1, x0\n"
+  "  ldr   x0, [x19, #0xf0]\n  msr tpidrro_el0, x0\n"
+  "  isb\n"
+  "  ldr   x0, [x19, #0x98]\n"
+  "  msr   sctlr_el1, x0\n"
+  "  isb\n"
+  "  mov   x0, #2\n"
+  "  str   x0, [x19, #0x380]\n"          // DStage 2, EL and MPIDR again (cacheable now)
+  "  mrs   x0, CurrentEL\n"
+  "  lsr   x0, x0, #2\n"
+  "  str   x0, [x19, #0x388]\n"
+  "  mrs   x0, mpidr_el1\n"
+  "  str   x0, [x19, #0x390]\n"
+  "  add   x2, x19, #0x100\n"            // claim: State 0 -> 1
+  "1:\n"
+  "  ldaxr w0, [x2]\n"
+  "  cbnz  w0, M3BootOff\n"
+  "  mov   w1, #1\n"
+  "  stlxr w3, w1, [x2]\n"
+  "  cbnz  w3, 1b\n"
+  "  dmb   ish\n"
+  "  mov   x0, #3\n"
+  "  str   x0, [x19, #0x380]\n"          // DStage 3: claimed
+  "  ldr   x0, [x19, #0xc8]\n  msr vbar_el1, x0\n"
+  "  ldr   x0, [x19, #0x88]\n  msr fpcr, x0\n"
+  "  ldr   x0, [x19, #0x90]\n  msr fpsr, x0\n"
+  "  add   x1, x19, #0x140\n"
+  "  ldp   q0, q1, [x1, #0x000]\n   ldp q2, q3, [x1, #0x020]\n"
+  "  ldp   q4, q5, [x1, #0x040]\n   ldp q6, q7, [x1, #0x060]\n"
+  "  ldp   q8, q9, [x1, #0x080]\n   ldp q10, q11, [x1, #0x0a0]\n"
+  "  ldp   q12, q13, [x1, #0x0c0]\n ldp q14, q15, [x1, #0x0e0]\n"
+  "  ldp   q16, q17, [x1, #0x100]\n ldp q18, q19, [x1, #0x120]\n"
+  "  ldp   q20, q21, [x1, #0x140]\n ldp q22, q23, [x1, #0x160]\n"
+  "  ldp   q24, q25, [x1, #0x180]\n ldp q26, q27, [x1, #0x1a0]\n"
+  "  ldp   q28, q29, [x1, #0x1c0]\n ldp q30, q31, [x1, #0x1e0]\n"
+  "  msr   spsel, #1\n"
+  "  ldr   x0, [x19, #0x68]\n"
+  "  mov   sp, x0\n"
+  "  ldr   x0, [x19, #0x60]\n"
+  "  msr   sp_el0, x0\n"
+  "  ldr   x0, [x19, #0x70]\n"
+  "  msr   spsel, x0\n"
+  "  isb\n"
+  "  ldr   x0, [x19, #0x80]\n  msr nzcv, x0\n"
+  "  ldp   x20, x21, [x19, #0x08]\n"
+  "  ldp   x22, x23, [x19, #0x18]\n"
+  "  ldp   x24, x25, [x19, #0x28]\n"
+  "  ldp   x26, x27, [x19, #0x38]\n"
+  "  ldp   x28, x29, [x19, #0x48]\n"
+  "  ldr   x30, [x19, #0x58]\n"
+  "  ldr   x0, [x19, #0x78]\n"
+  "  msr   daif, x0\n"
+  "  mov   x0, #1\n"
+  "  ldr   x19, [x19, #0x00]\n"
+  "  ret\n"
+  "M3BootVfail:\n"                        // an exception before the claim
+  "  adrp  x1, gM3BootCtx\n"
+  "  ldr   x19, [x1, :lo12:gM3BootCtx]\n"
+  "  mrs   x0, esr_el1\n  str x0, [x19, #0x398]\n"
+  "  mrs   x0, elr_el1\n  str x0, [x19, #0x3a0]\n"
+  "  mrs   x0, far_el1\n  str x0, [x19, #0x3a8]\n"
+  "  dsb   sy\n"
+  "M3BootOff:\n"
+  "  mov   w0, #0x0002\n"                // PSCI CPU_OFF 0x84000002
+  "  movk  w0, #0x8400, lsl #16\n"
+  "  smc   #0\n"
+  "2:\n"
+  "  wfe\n"
+  "  b     2b\n"
+  "  .globl M3BootEnd\n"
+  "M3BootEnd:\n"
+  );
 
 STATIC EFI_GUID  mAcpi20Guid = {
   0x8868e871, 0xe4f1, 0x11d3, { 0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 }
 };
 
 STATIC M3_BOOT_CTX           *mCtx;
-STATIC EFI_PHYSICAL_ADDRESS  mStub;
+STATIC UINT64                mArmTtbr0, mArmTcr, mArmSctlr, mArmMair;
 STATIC EFI_EVENT             mEbsEvent;
 STATIC BOOLEAN               mFired;
 STATIC UINT8                 *mMadt;
@@ -158,7 +302,7 @@ M3BootHandoff (
     "msr   daifset, #0xf\n"
     "str   wzr, [x0, #0x100]\n"           // State 0
     "mov   x9, x0\n"                      // the context to the point of coherency (the stub reads it MMU off)
-    "add   x10, x0, #0x340\n"
+    "add   x10, x0, #0x400\n"
     "3:\n"
     "dc    civac, x9\n"
     "add   x9, x9, #64\n"
@@ -365,6 +509,87 @@ PrepareMadt (
   return TRUE;
 }
 
+//
+// The stage-1 descriptor that maps Va in the current TTBR0_EL1 tables (4 KiB granule), for the
+// log: 0 when unmapped. *Level gets the level of the leaf.
+//
+STATIC
+UINT64
+WalkVa (
+  IN  UINT64  Va,
+  OUT UINTN   *Level
+  )
+{
+  UINT64  Ttbr0;
+  UINT64  Tcr;
+  UINT64  *Table;
+  UINT64  Desc;
+  UINTN   T0sz;
+  UINTN   Lvl;
+
+  __asm__ __volatile__ ("mrs %0, ttbr0_el1" : "=r" (Ttbr0));
+  __asm__ __volatile__ ("mrs %0, tcr_el1" : "=r" (Tcr));
+  T0sz   = (UINTN)(Tcr & 0x3F);
+  Lvl    = (T0sz <= 24) ? 0 : ((T0sz <= 33) ? 1 : 2);
+  Table  = (UINT64 *)(UINTN)(Ttbr0 & 0x0000FFFFFFFFF000ull);
+  *Level = Lvl;
+  for ( ; Lvl <= 3; Lvl++) {
+    Desc   = Table[(Va >> (39 - 9 * Lvl)) & 0x1FF];
+    *Level = Lvl;
+    if ((Desc & 1) == 0) {
+      return 0;
+    }
+
+    if ((Lvl == 3) || ((Desc & 2) == 0)) {
+      return Desc;                        // page (level 3) or block
+    }
+
+    Table = (UINT64 *)(UINTN)(Desc & 0x0000FFFFFFFFF000ull);
+  }
+
+  return 0;
+}
+
+STATIC
+VOID
+LogMapping (
+  IN CONST CHAR8  *What,
+  IN UINT64       Va
+  )
+{
+  UINT64  Desc;
+  UINTN   Level;
+
+  Desc = WalkVa (Va, &Level);
+  SbLog (
+    "=M3 boot map %a %lx: L%d desc=%lx attridx=%d sh=%d af=%d pxn=%d",
+    What,
+    Va,
+    Level,
+    Desc,
+    (UINT32)((Desc >> 2) & 7),
+    (UINT32)((Desc >> 8) & 3),
+    (UINT32)((Desc >> 10) & 1),
+    (UINT32)((Desc >> 53) & 1)
+    );
+}
+
+STATIC
+VOID
+CleanToPoc (
+  IN UINTN  Start,
+  IN UINTN  End
+  )
+{
+  UINTN  A;
+
+  for (A = Start & ~(UINTN)63; A < End; A += 64) {
+    __asm__ __volatile__ ("dc civac, %0" : : "r" (A) : "memory");
+  }
+
+  __asm__ __volatile__ ("dsb sy" ::: "memory");
+}
+
 STATIC
 VOID
 EFIAPI
@@ -376,22 +601,41 @@ OnExitBootServices (
   volatile UINT32  *Pmu = (volatile UINT32 *)0x14060000UL;
   UINT64           Ret;
   UINT64           Mpidr;
+  UINT64           Ttbr0, Tcr, Sctlr, Mair;
   UINT32           Before;
   UINT32           After;
   UINTN            i;
-  UINTN            A;
 
   if (mFired) {
     return;
   }
 
   mFired = TRUE;
+  __asm__ __volatile__ ("mrs %0, ttbr0_el1" : "=r" (Ttbr0));
+  __asm__ __volatile__ ("mrs %0, tcr_el1" : "=r" (Tcr));
+  __asm__ __volatile__ ("mrs %0, sctlr_el1" : "=r" (Sctlr));
+  __asm__ __volatile__ ("mrs %0, mair_el1" : "=r" (Mair));
+  SbLog (
+    "=M3 boot at ExitBootServices: ttbr0=%lx tcr=%lx sctlr=%lx mair=%lx (armed with %lx %lx %lx %lx)",
+    Ttbr0,
+    Tcr,
+    Sctlr,
+    Mair,
+    mArmTtbr0,
+    mArmTcr,
+    mArmSctlr,
+    mArmMair
+    );
+  LogMapping ("entry", (UINT64)(UINTN)M3BootEntry);
+  LogMapping ("context", (UINT64)(UINTN)mCtx);
+  LogMapping ("stack", (UINT64)(UINTN)&Ret);
+
   if (!PrepareMadt ()) {
     SbLog ("=M3 boot: staying on A55 core 0 (Windows boots as before)");
     return;
   }
 
-  SbLog ("=M3 boot v1: handing the boot CPU to M3 core 1 at ExitBootServices");
+  SbLog ("=M3 boot v2: handing the boot CPU to M3 core 1 at ExitBootServices");
   for (i = 0; i < ARRAY_SIZE (mBootPmu); i++) {
     Before                      = Pmu[mBootPmu[i].Offset / 4];
     Pmu[mBootPmu[i].Offset / 4] = (Before & ~mBootPmu[i].Mask) | mBootPmu[i].Value;
@@ -402,44 +646,39 @@ OnExitBootServices (
 
   ZeroMem (mCtx, sizeof (*mCtx));
   mCtx->Timeout = TIMEOUT_TICKS;
+  gM3BootCtx    = (UINT64)(UINTN)mCtx;
   WriteBackDataCache ();
   //
-  // The stub page (code + literal) to the point of coherency by address: the M3 fetches it with
-  // its MMU off (set/way and PoU cleaning were not enough in B3a v1). M3BootHandoff cleans the
-  // context the same way after filling it.
+  // What the M3 reads with its MMU off, to the point of coherency by address: its code (this
+  // image's .text, M3BootVectors..M3BootEnd) and gM3BootCtx. M3BootHandoff cleans the context
+  // (0x400 bytes, the breadcrumb line included) after filling it.
   //
-  for (A = (UINTN)mStub; A < (UINTN)mStub + EFI_PAGE_SIZE; A += 64) {
-    __asm__ __volatile__ ("dc civac, %0" : : "r" (A) : "memory");
-  }
+  CleanToPoc ((UINTN)M3BootVectors, (UINTN)M3BootEnd);
+  CleanToPoc ((UINTN)&gM3BootCtx, (UINTN)&gM3BootCtx + sizeof (gM3BootCtx));
+  __asm__ __volatile__ ("ic iallu\n dsb sy\n isb" ::: "memory");
 
-  __asm__ __volatile__ ("dsb sy\n ic iallu\n dsb sy\n isb" ::: "memory");
-
-  Ret = M3BootHandoff (mCtx, BOOT_TARGET, mStub + M3_BOOT_STUB_ENTRY);
+  Ret = M3BootHandoff (mCtx, BOOT_TARGET, (UINT64)(UINTN)M3BootEntry);
   if (Ret == 1) {
     //
     // On M3 core 1 now; A55 core 0 is powering off. The commit point.
     //
     CopyMem (mMadt, mNewMadt, mMadtLen);
     __asm__ __volatile__ ("mrs %0, mpidr_el1" : "=r" (Mpidr));
-    SbLog ("=M3 boot: now on mpidr=%lx (el %ld), MADT committed (UID %d first); winload continues here", Mpidr, mCtx->El, BOOT_UID);
+    SbLog ("=M3 boot: now on mpidr=%lx (el %ld), MADT committed (UID %d first); winload continues here", Mpidr, mCtx->DEl, BOOT_UID);
     return;
   }
 
-  for (A = (UINTN)mCtx; A < (UINTN)mCtx + 0x140; A += 64) {
-    __asm__ __volatile__ ("dc civac, %0" : : "r" (A) : "memory");    // what the M3 wrote MMU off
-  }
-
-  __asm__ __volatile__ ("dsb sy" ::: "memory");
+  CleanToPoc ((UINTN)&mCtx->DStage, (UINTN)&mCtx->DFar + 8);     // the M3's own line
   SbLog (
-    "=M3 boot: hand-off not taken (CPU_ON rc=%lx, state=%d, stage=%d, el=%ld, mpidr=%lx, esr=%lx elr=%lx far=%lx); staying on A55 core 0, MADT untouched",
+    "=M3 boot: hand-off not taken (CPU_ON rc=%lx, state=%d, stage=%ld, el=%ld, mpidr=%lx, esr=%lx elr=%lx far=%lx); staying on A55 core 0, MADT untouched",
     mCtx->Rc,
     mCtx->State,
-    mCtx->Stage,
-    mCtx->El,
-    mCtx->Mpidr,
-    mCtx->Esr,
-    mCtx->Elr,
-    mCtx->Far
+    mCtx->DStage,
+    mCtx->DEl,
+    mCtx->DMpidr,
+    mCtx->DEsr,
+    mCtx->DElr,
+    mCtx->DFar
     );
 }
 
@@ -448,33 +687,33 @@ M3BootArm (
   VOID
   )
 {
-  UINT64                *Lit;
   EFI_PHYSICAL_ADDRESS  CtxPage;
   EFI_STATUS            Status;
 
-  mStub   = 0xFFFFFFFFu;
-  CtxPage = 0xFFFFFFFFu;
-  if (EFI_ERROR (gBS->AllocatePages (AllocateMaxAddress, EfiBootServicesCode, 1, &mStub))) {
-    SbLog ("=M3 boot: no stub page, not armed");
+  if (((UINTN)M3BootVectors & 0x7FF) != 0) {
+    SbLog ("=M3 boot: vectors at %lx are not 2 KiB aligned, not armed", (UINT64)(UINTN)M3BootVectors);
     return;
   }
 
+  CtxPage = 0xFFFFFFFFu;
   if (EFI_ERROR (gBS->AllocatePages (AllocateMaxAddress, EfiBootServicesData, 1, &CtxPage))) {
     SbLog ("=M3 boot: no context page, not armed");
     return;
   }
 
   mCtx = (M3_BOOT_CTX *)(UINTN)CtxPage;
-
-  CopyMem ((VOID *)(UINTN)mStub, mM3BootStub, sizeof (mM3BootStub));
-  Lit  = (UINT64 *)(UINTN)(mStub + M3_BOOT_STUB_LIT);
-  *Lit = (UINT64)(UINTN)mCtx;
+  __asm__ __volatile__ ("mrs %0, ttbr0_el1" : "=r" (mArmTtbr0));
+  __asm__ __volatile__ ("mrs %0, tcr_el1" : "=r" (mArmTcr));
+  __asm__ __volatile__ ("mrs %0, sctlr_el1" : "=r" (mArmSctlr));
+  __asm__ __volatile__ ("mrs %0, mair_el1" : "=r" (mArmMair));
 
   Status = gBS->CreateEvent (EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY, OnExitBootServices, NULL, &mEbsEvent);
   SbLog (
-    "=M3 boot v1 armed (%a): stub %lx, context %lx, ExitBootServices event %r",
+    "=M3 boot v2 armed (%a): entry %lx (vectors %lx..%lx in this image), context %lx, ExitBootServices event %r",
     BOOT_SOLO ? "solo: M3 1 only" : "M3 1 + A55 1..3",
-    mStub,
+    (UINT64)(UINTN)M3BootEntry,
+    (UINT64)(UINTN)M3BootVectors,
+    (UINT64)(UINTN)M3BootEnd,
     (UINT64)(UINTN)mCtx,
     Status
     );
