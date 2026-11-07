@@ -664,6 +664,12 @@ bytes, file 0xB86 -> 0xCA6. The image build blanks the old file (`--kill-blank`;
 by-name lookups skip pad files, edk2 `FwVolRead.c`) and adds the new one; `dxe-diff.py --replaced`
 accepts exactly that file as changed. The runtime path (`PPTT=1`) stays for measuring only.
 
+Images built with it (`ONLY=usb-ufn-device PPTT_STATIC=1 EXTRA_AML=...`, both fit without
+`KILL_SERIAL`): **combo2** `starbite-uefi-usb-ufn-device-gpu-ppttS.bin` (5f3f3af1…; device role,
+`SBUSBUFN`, `SBGPU`, the new PPTT) and **combo3** `starbite-uefi-usb-ufn-device-gpu-ppttS-wlan.bin`
+(f6aec063…; combo2 + the Wi-Fi session's plain `WLAN4361` blob, `wlan.aml` 3f1b86b2…, for Wi-Fi W2;
+OEM ID STRBTE, resources clear of the DSDT, USB and GPU).
+
 ## 11. Licences and credits
 
 - `starbite/s9usb/*` and the DXE module: GPL-2.0-only, like the libsb/loader code they come from
