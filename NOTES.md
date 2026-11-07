@@ -2399,3 +2399,19 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   - Safety: phone partitions lose drive letters (MountedDevices C: only, NoAutoMount); UFS fence end tightened to
     12511999. The build-time PPTT caused an early 0x7E (shelved). One-shot services running cmd.exe die (7034); offline
     binds and hand-run self-elevating installers work. xtajit64.dll crashes (0xC0000094) predate us; PPTT fix pending.
+- 2026-11-07 night: **Windows 8 cores + x86/x64 emulator: built, waiting for the phone** (docs/WIN11-24H2-A55.md, branch
+  claude/laughing-pare-2ca469 on top of claude/win-usb-host-7efe60). Emulator: all 14 Application-log crashes are
+  xtajit64.dll 22621.7582 +0x30C70 0xC0000094 (DllHost, backgroundTaskHost, tzsync); OneDriveSetup (x86) likewise, so
+  Steam's x86 installer is the same. Suspects from our firmware: the release PPTT has no cache nodes at all, and
+  CNTFRQ_EL0 = 0 read from user mode. DLL pull X1 requested (read-only; the symbol server doesn't have this build).
+  Found: every Qualcomm Windows device ships the same PPTT (rev 1, flat package, cache nodes with all fields 0; Windows
+  takes geometry from CLIDR/CCSIDR) -> tools/woa/pptt-gen.py builds ours that way (A55 L1I/L1D->L2, M3 ->L2->L3; the
+  combo2 0x7E table was rev 3 with real geometry and clusters, a shape no OEM uses). Cores: P's MADT lists M3 UIDs 4..7
+  disabled with MPIDR 0x100..0x103 (= Samsung's PSCI targets; unique, so no collision with the A55s' P values 0..3) and
+  the DSDT has CPU0..7 with _MAT copies; woa's PSCI shim (disassembled: SiP SMC 0xC2000400 installs its EL2 payload on
+  the boot core only; CPU_ON goes through its slot trampoline) never got M3s up for lack of 0304's PMU writes.
+  Star2LteSsdtDxe Cores8 (STARBITE_CORES8=1/2): M3 1..3 (then 0) parked at dispatch as B2, at EBS their GICCs enabled
+  with v1 mailboxes, efficiency A55 0 / M3 1, _MAT updated. tools/woa/bcd-numproc.py (numproc at 0x409c). Test program
+  tools/win/samples/sbcpu (ARM64/x64/x86) + autotest hook. Images build/woa/cores/: C1 ppttoem 92e31266, C2/C3 c8
+  977d149a, C4 c8x d7f0d966; request side-session-notes/.../win-cores-T-request.md. Open risk: Windows booting on an
+  A55 may hand ARMv8.1/8.2 features to the M3s (C3 tells; fallback B3 or an ID-register mask).
