@@ -49,6 +49,20 @@ static int iabs(int v)
     return v < 0 ? -v : v;
 }
 
+int heat_core_state(int64_t psci, unsigned slot, int start_fail)
+{
+    int32_t r = (int32_t)psci;                  /* w0 */
+    if (start_fail)
+        return 0;                               /* never checked in: it may be on and hung */
+    if (slot == 1U /* SB_WK_RUNNING */)
+        return 0;                               /* still in the heat kernel */
+    if (r == 1)
+        return 1;                               /* PSCI: off */
+    if (r == 0 || r == 2)
+        return slot == 0U /* SB_WK_IDLE: never started */ ? 1 : 2;
+    return 1;                                   /* AFFINITY_INFO not supported (PSCI 0.1): the slot says it left */
+}
+
 int heat_max_cores(int level)
 {
     return level == HEAT_LOW ? 3 : level == HEAT_MEDIUM ? 5 : level == HEAT_HIGH ? 7 : 0;

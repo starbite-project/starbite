@@ -372,6 +372,19 @@ static void t_heater(void)
     run(&c, &in, 50250, 10000, m_cold);
     CHECK(c.cores > 3, "then the M3s join (%d)", c.cores);
 
+    /* the stop check (PSCI 0.1 on this phone: AFFINITY_INFO unknown, answered in w0) */
+    CHECK(heat_core_state(0xffffffffLL, 0, 0) == 1, "never started, PSCI not supported (w0 = -1): off");
+    CHECK(heat_core_state(0xffffffffLL, 2, 0) == 1, "left the load, PSCI not supported: off");
+    CHECK(heat_core_state(-1, 4, 0) == 1, "parked, PSCI -1: off");
+    CHECK(heat_core_state(0xffffffffLL, 1, 0) == 0, "still running: on (a restart after 1.5 s)");
+    CHECK(heat_core_state(1, 1, 0) == 0, "running although PSCI says off: trust the slot");
+    CHECK(heat_core_state(1, 2, 0) == 1, "PSCI off: off");
+    CHECK(heat_core_state(0, 0, 0) == 1, "never started, PSCI on (a firmware quirk): off");
+    CHECK(heat_core_state(0, 4, 0) == 2, "parked while PSCI says on: logged, no restart");
+    CHECK(heat_core_state(2, 2, 0) == 2, "CPU_OFF pending: logged, no restart");
+    CHECK(heat_core_state(0xffffffffLL, 0, 1) == 0, "a start that timed out: unknown, a restart");
+    CHECK(heat_core_state(0x100000001LL, 2, 0) == 1, "only w0 counts");
+
     /* the minutes are capped */
     heat_ctl_init(&c, 0);
     in = base_in(0);

@@ -5,8 +5,8 @@ written from the lowest level up on libsb. Not Linux, not based on anything else
 low power; it has what you want in an emergency without being called an emergency OS: a flashlight, a
 heater, a loud alarm, a clock, honest battery estimates and, later, calls, texts and basic networking.
 
-Status (2026-11-07): design reviewed (section 13); version 0.1 built and host-tested (section 12); not yet
-on the phone (section 14 has the test request).
+Status (2026-11-07): design reviewed (section 13); version 0.1 built and host-tested (section 12); **first
+boot on S9 #1 passed** (section 14.1); one heater bug found there and fixed (0.1.1).
 
 ---
 
@@ -520,8 +520,8 @@ Two things only for 0.1, for the first phone runs:
 - The build: only R_AARCH64_RELATIVE relocations (kernel and apps), nothing indirect before relocation, the
   worker code ARMv8.0 only, no host paths, the relocation test, every packed app passes the kernel's check.
 
-Results (2026-11-07): host test 315 checks (with the 8 built apps and their broken copies), 0 failed; the
-preview's 19 scenes, 0 px unpresented; image 5181440 bytes, sha256 124cf3f6864b5e5de10edb351722716d730c95cc8d3ab747779a502d933af39f
+Results (2026-11-07): host test 326 checks (with the 8 built apps and their broken copies), 0 failed; the
+preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea405c9c99dc6d04ed3ba1f872de96c37a3c3e64292dca36f32a958 (0.1.1)
 (reproducible: two builds give the same bytes).
 
 ### 12.3 Engineer OS 2.2
@@ -601,3 +601,27 @@ screen; Power held 1 s → power menu → Boot menu (back to the Starbite menu).
 **T4: Engineer OS 2.2, the user present** — CPU stress with Kernels "heat" and Clocks "full" (tier 3), A55
 cores 2 minutes, then all 8: the page shows the clocks it got and the temperature; afterwards the log shows the
 restore. Compare with a run at "as S-Boot left them".
+
+### 14.1 Results on S9 #1 (2026-11-07, image 124cf3f6, launch #53)
+
+- **T1 / T2 passed.** The user: "works", "it's like beta 0.1 so it doesn't have much but great". pmsg:
+  first frame 12963 ms after power-on (S-Boot and the loader's full POST, 7.5 s of it, included); the
+  interrupt self test passed (`GIC + virtual timer, wfi sleeps`); touch up; 8 apps; **the EL0 self tests
+  passed**: the spinning app was stopped by its budget, the kernel-memory read faulted (ESR 0x9200000E: a
+  data abort from EL0, permission fault level 2) and nothing was read. SOS: countdown, flashing, off.
+- **The heater ran once, on High** (`heater: start, level 3`): A55 to 1794 MHz answered, the M3 PMU defaults
+  set, the M3s to 1469 MHz answered; then a stop (its reason was not logged in 0.1), the restores to 1066 / 1053
+  MHz answered, and then **the stop check restarted the phone** ("a worker core did not turn off"): a clean
+  restart, no crash, no watchdog.
+- **Cause:** this firmware is PSCI 0.1. AFFINITY_INFO is not implemented and answers in w0 (`0xffffffff`
+  with the upper half zero); the 0.1 code read x0 as a 64-bit number, took it for "on" and counted every worker
+  core (even the never-started ones) as still running. **Fix (0.1.1):** `sb_smp_affinity` sign-extends w0; the
+  decision is a pure, host-tested function (`heat_core_state`): a core whose slot says it left the heat kernel
+  is off, a core PSCI still calls on while its slot is parked is logged and left alone (no load), only a core
+  still in the heat kernel or one whose start timed out restarts the phone. Every stop now logs its reason
+  (`heater: stopped: ...`, `heater: Off (asked)`), each state change too, and the per-core PSCI answer and
+  slot state when a core is blamed. The host preview's `heat-off` scene stops a running heater with the
+  phone's PSCI answer and must not restart.
+- The dead-man return did not fire because there had been input (by design: it is only for boots nobody
+  touched).
+

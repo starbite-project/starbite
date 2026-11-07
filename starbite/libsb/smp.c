@@ -183,7 +183,9 @@ int64_t sb_smp_affinity(unsigned w)
 {
     if (w >= SB_NCORES)
         return -2;
-    return sb_psci(0xc4000004U, sb_smp_target(w), 0, 0);
+    /* PSCI answers in w0: on this phone an unknown function (PSCI 0.1 has no AFFINITY_INFO) comes back as
+     * 0xffffffff with the upper half zero, which a 64-bit read takes for a large positive number */
+    return (int32_t)sb_psci(0xc4000004U, sb_smp_target(w), 0, 0);
 }
 
 unsigned sb_smp_running(void)

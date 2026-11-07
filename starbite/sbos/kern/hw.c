@@ -292,17 +292,9 @@ unsigned hw_heat_running(void)
     return sb_smp_running();
 }
 
-int hw_core_off(unsigned w)
+int64_t hw_core_psci(unsigned w)
 {
-    int64_t r = sb_smp_affinity(w);
-    if (r == 1)
-        return 1;
-    if (r < 0) {                                        /* PSCI 0.1 without AFFINITY_INFO: the slot's word */
-        const struct sb_wslot *s = sb_smp_slot(w);      /* (a start that timed out is tracked by the heater) */
-        return s && (s->state == SB_WK_DONE || s->state == SB_WK_PARKED || s->state == SB_WK_IDLE ||
-                     s->state == SB_WK_FAULT);
-    }
-    return 0;
+    return sb_smp_affinity(w);
 }
 
 const struct sb_wslot *hw_worker_slot(unsigned w)

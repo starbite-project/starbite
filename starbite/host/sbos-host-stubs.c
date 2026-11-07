@@ -60,11 +60,7 @@ void hw_code_sync(uintptr_t a, uint64_t n) { (void)a; (void)n; }
 int hw_heat_start(unsigned w, void *cfg) { return (int)sb_smp_start(w, heatk_worker, cfg); }
 void hw_heat_stop_all(void) { (void)sb_smp_stop(500); }
 unsigned hw_heat_running(void) { return sb_smp_running(); }
-int hw_core_off(unsigned w)
-{
-    const struct sb_wslot *s = sb_smp_slot(w);
-    return !s || s->state != SB_WK_RUNNING;
-}
+int64_t hw_core_psci(unsigned w) { (void)w; return 0xffffffffLL; }   /* as the phone: not supported, in w0 */
 
 /* ---- the apps linked in (sbos-preview.sh renames each app's symbols) ---- */
 #define APP(n)                                                                                                 \

@@ -14,6 +14,7 @@ static struct heat_ctl ctl;
 static struct heatk_cfg cfg __attribute__((aligned(64)));
 static int running[8];                      /* workers started (1..7) */
 static int start_fail[8];                   /* a start timed out: the core may be on and hung */
+static int parked_logged[8];
 static uint32_t a55_set, m3_set;            /* what we asked ACPM for (0: never) */
 static int m3_prepped, confirmed;
 static uint64_t bad0[8];
@@ -195,22 +196,50 @@ static void restore_and_check(void)
     }
     stopping = 1;
     stop_t = sb_ms();
+    for (unsigned w = 0; w < 8; ++w)
+        parked_logged[w] = 0;
+    sb_logf("heater: stopped: ", ctl.why[0] ? ctl.why : "?");
 }
 
 /* every worker core must be off within 1.5 s of a stop */
+static void core_log(const char *what, unsigned w, int64_t psci, unsigned slot)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, what);
+    ub_dec(&u, w);
+    ub_s(&u, ": psci ");
+    ub_hex(&u, (uint64_t)psci, 8);
+    ub_s(&u, ", slot ");
+    ub_dec(&u, slot);
+    sb_log(u.b);
+}
+
 static void stop_check(void)
 {
-    int all = 1;
-    for (unsigned w = 1; w < 8; ++w)
-        if (!hw_core_off(w) || start_fail[w])
+    int all = 1, late = sb_ms() - stop_t >= 1500;
+    for (unsigned w = 1; w < 8; ++w) {
+        const struct sb_wslot *s = sb_smp_slot(w);
+        unsigned slot = s ? (unsigned)s->state : 0;
+        int64_t r = hw_core_psci(w);
+        int st = heat_core_state(r, slot, start_fail[w]);
+        if (st == 0) {
             all = 0;
+            if (late)
+                core_log("heater: worker still loading or unknown, core ", w, r, slot);
+        } else if (st == 2 && !parked_logged[w]) {
+            parked_logged[w] = 1;
+            core_log("heater: worker left the load, PSCI still says on (parked), core ", w, r, slot);
+        }
+    }
     if (all) {
         stopping = 0;
+        sb_log("heater: every worker core left the load");
         if (hw_m3_on())
             sb_log("heater: the M3 cluster still reads powered after the stop");
         return;
     }
-    if (sb_ms() - stop_t >= 1500) {
+    if (late) {
         sb_log("heater: a worker core did not turn off: restarting the phone");
         (void)hw_dvfs(DVFS_A55, A55_RESTORE);
         sb_reboot(SB_INFORM_NORMAL);
@@ -220,6 +249,11 @@ static void stop_check(void)
 void heater_stop_all(const char *why)
 {
     int was = heater_running_ui();
+    int any = a55_set || m3_set;
+    for (unsigned w = 1; w < 8; ++w)
+        any |= running[w];
+    if (!was && !any)
+        return;                                 /* nothing to stop (a restart, a power-off) */
     if (was) {
         ctl.state = HEAT_ST_STOPPED;
         ctl.cores = 0;
@@ -264,8 +298,11 @@ void heater_timer(unsigned id)
         workers_apply();
         clocks_apply();
     }
-    if (before != ctl.state)
+    if (before != ctl.state) {
+        if (heater_running_ui())
+            sb_logf("heater: ", ctl.why);       /* holding / paused / heating again (a stop logs itself) */
         app_event_send(app_by_id("heat"), EV_APP_SERVICE, 1, ctl.state);
+    }
     ui_mark_dirty();
 }
 
@@ -317,6 +354,7 @@ int heater_request(int level, int minutes)
     if (level <= 0) {
         if (heater_running_ui()) {
             heat_ctl_request(&ctl, 0, 0, &last_in);
+            sb_log("heater: Off (asked)");
             restore_and_check();
             kt_cancel(KT_HEATER, 1);
             kt_set(KT_HEATER, 2, sb_ms(), 250, 1);

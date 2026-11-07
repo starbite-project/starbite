@@ -53,7 +53,8 @@ scene light         w:300 $OPEN t:380,600 w:400
 scene light-on      w:300 $OPEN t:380,600 w:400 t:720,650 w:400
 scene heat          w:300 $OPEN t:1050,600 w:600
 scene heat-confirm  w:300 $OPEN t:1050,600 w:600 t:550,670 w:400
-scene heat-running  w:300 $OPEN t:1050,600 w:600 t:550,670 w:400 g:720,935,0,1900 w:6000
+scene heat-running  w:300 $OPEN t:1050,600 w:600 t:550,670 w:400 g:720,1070,0,1900 w:6000
+scene heat-off      w:300 $OPEN t:1050,600 w:600 t:550,670 w:400 g:720,1070,0,1900 w:4000 t:220,670 w:3000
 scene sos           w:300 $OPEN t:380,1250 w:500
 scene sos-countdown w:300 $OPEN t:380,1250 w:500 g:720,815,0,1300 w:600
 scene sos-flash     w:300 $OPEN t:380,1250 w:500 g:720,815,0,1300 w:3600

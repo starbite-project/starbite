@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.1"
+#define SBOS_VERSION "0.1.1"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -108,6 +108,11 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
 /* 4 Hz with fresh readings: state, cores, clocks, why. */
 void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in);
 int heat_max_cores(int level);      /* Low 3, Medium 5, High 7 */
+/* After a stop: is worker core w's load gone? psci = AFFINITY_INFO's raw x0 (only w0 counts), slot = the
+ * worker's SB_WK_* state, start_fail = its start timed out. 1 off, 2 the load left but PSCI says the core is
+ * still on (parked in wfe or CPU_OFF pending: logged, harmless), 0 still loading or unknown (a restart after
+ * 1.5 s). */
+int heat_core_state(int64_t psci, unsigned slot, int start_fail);
 
 struct heatk_cfg {
     volatile uint64_t heartbeat;    /* counter ticks of the controller's last valid evaluation */
@@ -254,5 +259,5 @@ void hw_code_sync(uintptr_t a, uint64_t n);
 int hw_heat_start(unsigned w, void *cfg);
 void hw_heat_stop_all(void);
 unsigned hw_heat_running(void);
-int hw_core_off(unsigned w);        /* 1 the core is off (PSCI AFFINITY_INFO, or its slot says so) */
+int64_t hw_core_psci(unsigned w);   /* PSCI AFFINITY_INFO's raw answer for worker core w */
 void heatk_worker(unsigned w, void *arg);
