@@ -593,10 +593,13 @@ something by the reported cache line or cache size can then divide by zero. The 
 - Combined image for one boot with the L1 trace: `starbite-uefi-usb-ufn-device-gpu-pptt.bin`
   (`ONLY=usb-ufn-device PPTT=1 EXTRA_AML=<StarbiteGpu.aml> SUFFIX=-gpu-pptt`): device role, `SBUSBUFN`,
   `SBGPU` and the PPTT fix; it fits.
-- Space: the release's outer volume has a fixed slot for the compressed DXE volume (0x51000);
-  the host-role USB image + SSDT/PPTT + the USB and GPU blobs is 88 bytes over. Before combining everything, room must
-  be made (candidates: the release's SerialDxe, which nothing consumes without a TerminalDxe, or
-  shorter log strings in Star2LteUsbDxe).
+- Space: the release's outer volume has a fixed slot for the compressed DXE volume (0x51000); the
+  host-role USB image + SSDT/PPTT + the USB and GPU blobs was 88 bytes over. Solved with
+  `KILL_SERIAL=1`: the release's SerialDxe (nothing consumes its SerialIo without a TerminalDxe)
+  becomes a pad file whose body is blanked to 0xFF (`dxe-replace.py --kill-blank`; a plain `--kill`
+  keeps the bytes and saves almost nothing). `dxe-diff.py --removed <guid>` accepts the removal.
+  Checked: `starbite-uefi-usbh-vbus0-gpu-pptt-ks.bin` fits and is src38 + added files - SerialDxe.
+
 - Risk: CLIDR/CCSIDR reads at boot (our XNU and Linux read them on this phone too); a malformed PPTT
   would stop Windows early (hidden test entry; forced reset is fine before the logo).
 

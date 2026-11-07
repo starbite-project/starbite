@@ -48,9 +48,17 @@
 #ifndef STARBITE_PPTT_FIX
 #define STARBITE_PPTT_FIX 0
 #endif
+#ifndef STARBITE_M3_PROBE
+#define STARBITE_M3_PROBE 0
+#endif
 
 VOID
 PpttFix (
+  VOID
+  );
+
+VOID
+M3Probe (
   VOID
   );
 
@@ -283,7 +291,10 @@ SsdtDxeEntry (
   UINTN                          Index;
   UINTN                          Installed;
 
-  SbLog ("=SSDT v%d at dispatch, PPTT fix %d", SSDT_VERSION, STARBITE_PPTT_FIX);
+  SbLog ("=SSDT v%d at dispatch, PPTT fix %d, M3 probe %d", SSDT_VERSION, STARBITE_PPTT_FIX, STARBITE_M3_PROBE);
+  if (STARBITE_M3_PROBE) {
+    M3Probe ();
+  }
   if (STARBITE_PPTT_FIX) {
     PpttFix ();
   }

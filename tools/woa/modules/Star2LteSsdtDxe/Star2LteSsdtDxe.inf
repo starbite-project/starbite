@@ -1,7 +1,8 @@
 ## @file
 #  Star2LteSsdtDxe: installs every Starbite SSDT blob (FREEFORM FFS files 53534454-5342-5445-<id>,
 #  made by tools/woa/ssdt-ffs.py) during DXE dispatch (docs/WIN11-USB.md section 4.1); with
-#  STARBITE_PPTT_FIX=1 it first gives the PPTT the CPU's caches (PpttFix.c, section 10). Added to the
+#  STARBITE_PPTT_FIX=1 it first gives the PPTT the CPU's caches (PpttFix.c, section 10); with
+#  STARBITE_M3_PROBE=1 it first tries the M3 cores (M3Probe.c, docs/WIN11-BIGCORES.md stage B1). Added to the
 #  release DXE volume with tools/woa/dxe-replace.py --add; built by patch 0024 under
 #  -D STAR2LTE_SSDT_DXE.
 #
@@ -19,6 +20,7 @@
 [Sources]
   SsdtDxe.c
   PpttFix.c
+  M3Probe.c
   PpttBuild.c
   PpttBuild.h
   StarbiteLog.h
@@ -33,6 +35,7 @@
   DebugLib
   MemoryAllocationLib
   PrintLib
+  TimerLib
   UefiBootServicesTableLib
   UefiDriverEntryPoint
 
