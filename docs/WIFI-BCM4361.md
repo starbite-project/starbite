@@ -246,47 +246,62 @@ through the iATU's 4 KiB viewport, one function at a time), the link must be tra
 powered by a GPIO, and the ACPI tables of our UEFI (`ref/exynos9810-woa/.../AcpiTables`) describe no PCIe host. So
 the driver runs the controller itself and Windows sees one ACPI device, not a PCI bus.
 
-**Device.** A DSDT entry in our UEFI, e.g. `\_SB.WLAN` with `_HID "STBW4361"`, `_CCA 0` (non-coherent DMA),
-`_CRS`: memory ELBI/PCS/PHY/DBI/config (one 4 KiB page each), the 16 MiB memory window, the PMU, SYSREG, CMU_FSYS1
-and GPIO pages (only the words in the allow-list are written), and `Interrupt(ResourceConsumer, Level,
-ActiveHigh, Exclusive) {285}`. Until the UEFI change lands, a root-enumerated test driver can map the same
-physical pages (testsigning).
+**Device.** `starbite/wifi/win/wlan.asl`: an SSDT (OEM `STRBTE`, table `WLAN4361`) with `\_SB.WLAN`, `_HID`/`_CID`
+`STBW4361`, `_UID 0` (instance `ACPI\STBW4361\0`), `_CCA 0` (non-coherent DMA), `_CRS`: the PCIe block's
+ELBI/PCS/PHY/DBI pages, the endpoint's BAR window (0x11800000, 15 MiB), the configuration window and
+`Interrupt(Level, ActiveHigh, Exclusive) {285}`. The PMU, SYSREG, CMU_FSYS1 and GPIO words are mapped by the driver
+(single words of pages that belong to other DSDT devices). Installed as a plain blob by the USB session's
+`Star2LteSsdtDxe`.
 
-**Driver.** `SbWifi.sys`, KMDF, built with `tools/win` (`build.sh kmdf`), signed with the Starbite test
-certificate. Its `struct bcmw_os`:
+**Drivers** (both built on the Mac with `tools/win`, signed with the Starbite test certificate):
+
+| | W1 `sbwifi.sys` (`build.sh`) | W2 `sbwificx.sys` (`build-cx.sh`) |
+|---|---|---|
+| Kind | one-shot KMDF service, no device | KMDF + NetAdapterCx 2.1 + WiFiCx 1.0 client on `ACPI\STBW4361` |
+| Does | bring-up to `Parameters\Step` (default 10: a scan), logs, radio off | bring-up in PrepareHardware, WDI commands, data path: Windows shows Wi-Fi, scans, joins |
+| Log | `C:\starbite\sbwifi.txt` | `C:\starbite\sbwificx.txt` (every WDI command id once; no names, keys or addresses) |
+| Install | `hive-service.py add sbwifi` | `make-package.sh` package + the one-shot `sbpnp` service (pnputil) |
+
+Their `struct bcmw_os`:
 
 | bcmw_os | Windows |
 |---|---|
-| rd32/wr32/rd16/wr16 | `MmMapIoSpaceEx(PAGE_READWRITE \| PAGE_NOCACHE)` once per page, `READ/WRITE_REGISTER_ULONG/USHORT` |
-| probe32 | none (the core then reads directly; the gates are read only after the PMU) |
-| wmb | `KeMemoryBarrier()` (dsb) |
-| udelay / now_us | `KeStallExecutionProcessor` (short), `KeDelayExecutionThread` for the ms waits at PASSIVE; `KeQueryInterruptTimePrecise` / 10 |
-| dma_alloc | `MmAllocateContiguousNodeMemory` (or `MmAllocateContiguousMemorySpecifyCache`) with `MmNonCached`, highest 0xFFFFFFFF; bus address = `MmGetPhysicalAddress` (no IOMMU on this path: SysMMU in bypass). Later a WDF common buffer if Windows' DMA remapping must know |
-| file | `ZwCreateFile`/`ZwReadFile` from `\SystemRoot\System32\drivers\StarbiteWifi\` (below) |
-| log | `DbgPrintEx` + an in-memory ring a user tool reads (IOCTL), as the GPU session's |
-| interrupts | `WdfInterruptCreate` on GSIV 285; ISR = `bcmw_isr()`, DPC = `bcmw_poll()` |
+| rd32/wr32/rd16/wr16 | `MmMapIoSpaceEx(PAGE_READWRITE \| PAGE_NOCACHE)` once per 64 KiB, `READ/WRITE_REGISTER_*`; writes only through the core's allow-list |
+| probe32 | none (the core reads the gates only after the PMU step) |
+| wmb/mb/rmb | `KeMemoryBarrier()` |
+| udelay / now_us | `KeStallExecutionProcessor` (< 1 ms), `KeDelayExecutionThread`; `KeQueryInterruptTimePrecise` / 10 |
+| dma_alloc | `MmAllocateContiguousMemorySpecifyCache(MmNonCached)` below 4 GiB, bus address = `MmGetPhysicalAddress` (SysMMU in bypass) |
+| file | `\SystemRoot\System32\drivers\starbite\bcm4361\` (below) |
+| random | `BCryptGenRandom` (system RNG) |
+| interrupts | none yet: the worker polls every 5 ms (W3: WdfInterrupt on GSIV 285) |
 
-**Files.** Windows cannot read EROFS or ext4. The driver package carries no Broadcom file. A small tool
-(`sbwifi-fetch.exe`, user mode, run once as administrator on the phone) opens the phone's own disk raw
-(`\\.\PhysicalDrive0`, the GPT entry named VENDOR), reads the three files with `ext4.c`/`erofs.c` (the same code),
-and the MAC from EFS (`/efs/wifi/.mac.info`, read only), and writes them to
-`C:\Windows\System32\drivers\StarbiteWifi\`. They never leave the phone. (Alternative later: our UEFI reads them
-at boot and hands them over in memory.)
+**Files.** Windows cannot read EROFS. The packages carry no Broadcom file: the firmware, NVRAM and CLM are copied
+offline from the phone's own VENDOR into `C:\Windows\System32\drivers\starbite\bcm4361\` (never committed,
+never leave the phone). The MAC is the firmware's (`cur_etheraddr`, from the OTP), never logged.
 
-**Network stack, in stages:**
+**SbWifiCx design** (`starbite/wifi/win/sbwificx.cpp`):
+- One worker thread owns the core: every `bcmw_*` call happens there at PASSIVE. It takes WDI requests queued by
+  `EvtWifiDeviceSendCommand`, frames queued by the tx queue, calls `bcmw_poll`, and turns what the events said
+  (scan done, associated, link lost) into WDI indications. The core's callbacks (`os->event`, `os->rx`) only
+  record and queue.
+- WDI: `OPEN`/`CLOSE`/`DOT11_RESET` answered at once; `SCAN` → `bcmw_scan_start` (escan, one directed name at
+  most), every result kept (beacon body rebuilt from the escan's fixed fields + IEs) and given as one
+  `BSS_ENTRY_LIST` + `SCAN_COMPLETE`; `CONNECT` (open or WPA2-PSK, CCMP; TKIP group) → `bcmw_connect`
+  (`wsec`/`wpa_auth`/`wpaie` + `SET_SSID`), `ASSOCIATION_RESULT` with the request/response IEs from `assoc_info`;
+  `ADD_CIPHER_KEYS` → `bcmw_set_key` (pairwise/group, with the RSC); `DISCONNECT` → `bcmw_leave`. Everything else
+  is answered NOT_SUPPORTED (or success for the harmless sets) and its id logged once.
+- Windows' own supplicant does the four-way handshake: EAPOL frames go through the data path (the core passes
+  them to `os->rx` when it is not joining by itself).
+- Data path: 802.3 frames, NetAdapterCx tx/rx queues copied to and from 64-frame rings; tx only while associated.
+- Boot guard: `Services\sbwificx\Parameters\GuardBoots` counts starts without a clean power-down; at 2 the driver
+  leaves the hardware alone (Windows boots without Wi-Fi) until it is set to 0. `Parameters\Off = 1` also.
 
-| Stage | What | Done when |
+| Stage | What | State |
 |---|---|---|
-| W1 | The driver loads, maps the hardware, runs bcmw to step 9 from a registry value (`Step`, default 0 = nothing), logs | The firmware's `ver` in the log under Windows |
-| W2 | INTx by WdfInterrupt, a scan by a test IOCTL | Access points counted under Windows |
-| W3 | **WiFiCx** client (`km/wificx` headers in the kit; NetAdapterCx underneath): the WDI command set mapped onto brcmfmac's iovars (scan → escan, connect → `wsec`/`wpa_auth`/`join` or `SET_SSID`, keys → `wsec_key`), the host's 802.1X/WPA supplicant (Windows does the four-way handshake; the firmware has no supplicant), NetAdapter Tx/Rx queues on flow rings and the rx completion ring | Settings lists networks and joins WPA2 |
-| W4 | Power: PM2/`mpc`, D3 on idle, the radio off when Wi-Fi is turned off | Battery cost measured |
-
-Data path (W3): tx needs flow rings (`FLOW_RING_CREATE` per destination/priority, 512 x 48-byte items,
-`TX_POST` with the Ethernet header in the item and the payload by address); the core has the ring code, the
-flow-ring messages are the next core step. Before WiFiCx, a fallback that gives Windows networking earlier: an
-"Ethernet" NetAdapter whose link comes up when the driver has joined a network named in the registry, with the
-four-way handshake in the driver (an earlier port's `lx_wpa.c`, MIT, can be ported).
+| W1 | `sbwifi.sys`: the bring-up under Windows up to a scan | request sent |
+| W2 | `sbwificx.sys`: WiFiCx client, Windows lists networks and joins WPA2 | built, request sent |
+| W3 | interrupts (WdfInterrupt), roaming, statistics, WPA3-SAE | after W2 |
+| W4 | Power: PM2/`mpc`, D3 on idle, the radio off when Wi-Fi is turned off | after W3 |
 
 ## 8. Starbite OS
 
