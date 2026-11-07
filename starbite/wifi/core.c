@@ -751,9 +751,11 @@ int bcmw_poll(struct bcmw *w)
 int bcmw_isr(struct bcmw *w)
 {
     uint32_t st;
+    /* first: a level INTx must drop even when the chip is not up (or dead). Safe early: ex_intx_ack touches the
+     * controller's ELBI only once it was handed over (clocked), and quiesce clears that (starbite-os 25659bc) */
+    ex_intx_ack(w);
     if (w->step < BCMW_STEP_RINGS || w->dead)
         return 0;
-    ex_intx_ack(w);
     chip_select(w, CORE_PCIE2);
     st = chip_reg_rd(w, w->mb_int);
     if (!st || st == 0xffffffffu)
