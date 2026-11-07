@@ -6,7 +6,9 @@ low power; it has what you want in an emergency without being called an emergenc
 heater, a loud alarm, a clock, honest battery estimates and, later, calls, texts and basic networking.
 
 Status (2026-11-07): design reviewed (section 13); version 0.1 built and host-tested (section 12); **first
-boot on S9 #1 passed** (section 14.1); one heater bug found there and fixed (0.1.1).
+boot on S9 #1 passed** (section 14.1); one heater bug found there and fixed (0.1.1); heater Low passed on
+the phone (14.1). **0.2** (built and host-tested, not yet on the phone): the flashlight LED, the Info
+(emergency card) app, the panel's power saving (off until switched on), the heater's run log; section 12.4.
 
 ---
 
@@ -289,7 +291,7 @@ origin** (packed into the kernel image by `mk-sba.py`), not by id: an app from t
 id of a built-in is refused, and its permissions are shown once before its first start. The CRC detects
 damage; it is not a signature.
 
-### 6.2 State slot (v0.2)
+### 6.2 State slot (v0.3; was planned for 0.2)
 
 - One store entry `sbos-state`, 1 MiB, **created on the Mac** by `tools/store/sbstore2.py` with the
   `SF_VOLATILE` flag (as the loader's crash log), so the store's whole-entry CRC does not apply to it. On UFS
@@ -302,6 +304,26 @@ damage; it is not a signature.
   exactly that entry's blocks; the kernel opens the gate only for that range.
 - State writes use force-unit-access or end with SYNCHRONIZE CACHE (4.4).
 - The first phone test of these writes is a dry run (`sb_fence_dry_run`) after a store backup.
+
+### 6.3 Save and power off: the implementation plan (v0.3)
+
+The order, each step reviewed and host-tested before the next, the phone only with a store backup:
+1. **The entry** (the Mac, an install step): `sbstore2.py` gets `sbos-state` (256 blocks, directory flag 1 =
+   volatile, like `crashlog`), added to the UFS store by the main session. Its existence is the user's install
+   decision; Starbite OS never creates or grows entries.
+2. **libsb `fence.c`**: `sb_write_store` checks the open authorisation's own range (first / count), not only
+   "inside the store" (a review finding: today the header, directory and settings would pass).
+3. **libsb `store.c`**: `store_volatile_write(medium, name, block, src, n)`: only an entry with the volatile flag,
+   only blocks inside it, through `sb_write_store`, read back.
+4. **libsb `ufs.c`**: WRITE(10) with FUA for these blocks, then SYNCHRONIZE CACHE(10) and START STOP UNIT
+   (power condition: sleep) before `sb_power_off`, so nothing waits in the device's cache when the power goes.
+5. **The kernel**: a Settings switch "Save and switch off after 5 minutes" (the standing consent, itself saved in
+   the slot; off on a fresh slot), `EV_APP_SAVE`, A/B halves (`state.c`, already host-tested), the restore at
+   start (never services; skipped after an unclean reset or with Volume Down held).
+6. **Waking**: the user makes Starbite OS the loader's default entry with the quick POST once (a loader setting);
+   the kernel writes nothing to the settings block.
+7. Phone: a dry run (`sb_fence_dry_run`) that logs every block it would write, then one real save with the
+   blocks read back on the Mac, then the power-off cycle.
 
 ## 7. Boot speed
 
@@ -427,14 +449,15 @@ shown and logged.
 
 | App | v0.1 | Later |
 |---|---|---|
-| **Light** | screen light: white, warm or red at full screen, off after 10 minutes or at a touch | the LED torch (9.1), 3 levels |
+| **Light** | screen light: white, warm or red at full screen, off after 10 minutes or at a touch; **0.2: the LED** (9.1), on / off, off after 10 minutes | 3 LED levels (the S2MPB02's current over I2C) |
+| **Info** (0.2) | the emergency card: `/starbite/emergency.txt` on the card (read only), the first line big (the name), one fact per line; an example in `starbite/sbos/examples/` | a lock-screen shortcut |
 | **Heat** | Off / Low / Medium / High, time left, battery / skin / SoC temperatures, the state and why | the GPU in High |
 | **SOS** | hold 1 s, 3 s countdown, then the screen flashes white / red at 2 Hz with a big "SOS" and the time; a hold stops it | the siren (audio codec), vibration (haptic PWM), Morse SOS on the torch |
 | **Clock** | local time (Helsinki, the Utility OS's `tz.c`), world clock, stopwatch, timer | alarm clock with RTC power-on |
 | **Battery** | %, mAh left, current, temperature, the estimates per state, learned or typical | history |
 | **Settings** | screen-off time, interrupt mode, first-frame time, versions, clocks | persistent settings (v0.2) |
 
-### 9.1 The flashlight LED (v0.2 plan, researched 2026-11-07, not yet run)
+### 9.1 The flashlight LED (0.2: the GPIO part is built, `kern/torch.c`; not yet run on the phone)
 
 From LineageOS `android_kernel_samsung_exynos9810` (lineage-20, commit 6a9461f; GPL-2.0:
 `drivers/leds/leds-s2mpb02.c`, `include/linux/leds-s2mpb02.h`, `include/linux/mfd/s2mpb02-private.h`,
@@ -448,8 +471,13 @@ the S2MPB02 (I2C 0x59 on HSI2C 0x10920000) only sets the current.
 | flash pin | flash1-gpio: gpg3 pin 5 (0x108300C0): **kept low** (high = 1250 mA flash) | 0 |
 | chip check | BST_CTRL2 (0x1D) reads 0x90 (rev 1) | read only |
 
-Order: both pins outputs at 0 → read back 0x1D and 0x12..0x15 → CUR1 low nibble → torch pin high; off: pin low
-first. Never written: FLED_CTRL2 (0x13) and 0x16..0x1B (the iris IR LED: an eye-safety risk), 0x63, the
+0.2 switches **the GPIO only**: the S2MPB02's I2C bus (USI at 0x10920000) was not brought up by S-Boot, and
+bringing it up means CMU gate, SYSREG USI-mode and pin-mux writes (a step of its own, later); the torch channel
+cannot exceed 300 mA whatever the chip holds. Before the first switch it reads both banks (a probe) and logs
+them, and refuses when they do not read or when the flash pin is an output driven high; the flash pin is never
+written. The SOS screen can flash the LED too (Settings, off by default). The full order with the current set
+(later): both pins outputs at 0 → read back 0x1D and 0x12..0x15 → CUR1 low nibble → torch pin high; off: pin
+low first. Never written: FLED_CTRL2 (0x13) and 0x16..0x1B (the iris IR LED: an eye-safety risk), 0x63, the
 camera rails (0x0B..0x11, 0x1E..0x32), the flash pin. Samsung's own driver writes INT1 (0x01) by mistake on the
 off path (L140): not copied. Unknown without a datasheet: FLED_CTRL2's bits, whether the torch timeout applies
 in GPIO mode, whether gpg3-5's other pin groups (hsi2c27, spi12, uart13) are in use. The first run is a phone
@@ -527,6 +555,20 @@ Two things only for 0.1, for the first phone runs:
 Results (2026-11-07): host test 326 checks (with the 8 built apps and their broken copies), 0 failed; the
 preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea405c9c99dc6d04ed3ba1f872de96c37a3c3e64292dca36f32a958 (0.1.1)
 (reproducible: two builds give the same bytes).
+
+### 12.4 Version 0.2 (2026-11-07)
+
+- **Heater run log**: every 10 s while heating `heater: N s bat B skin S soc C C, cores K, A55/M3 MHz, mV mA %`,
+  and at the stop `heater: peak bat ... skin ... soc ... C, max mA, min mV, ran N s` (the main session's request
+  after T3 Low).
+- **The flashlight LED** (9.1) in Light, and optionally with SOS.
+- **Info**, the emergency card (read-only card file; `kern/files.c` brings the card up on the first read).
+- **The panel's power** (3.3), off until Settings turns it on; Settings: "Refresh only on change", "Panel off
+  with the screen", "LED flashes with SOS" (until a restart).
+- API 1 grew (numbers never reused): `SYS_SETTING_GET` 44 / `SET` 45, `SYS_FILE_READ` 91, `torch(-1)` asks the
+  state. Home lays out 4 rows of tiles when there are more than 6 apps.
+- Host: 350 checks; the preview 23 scenes (new: info, light-led, settings-on, heat-off); image 5210112 bytes,
+  sha256 720fdbea45ac8f2f6fa0dda71d8db8da1184d56bbab7a313662c7291c52824e1, reproducible.
 
 ### 12.3 Engineer OS 2.2
 
@@ -628,4 +670,21 @@ restore. Compare with a run at "as S-Boot left them".
   phone's PSCI answer and must not restart.
 - The dead-man return did not fire because there had been input (by design: it is only for boots nobody
   touched).
+- **T3 step 1 (0.1.1, launch #61): Heat Low ~2 minutes, then Off: passed** ("works"). The log: start level 1,
+  screen off / on three times while heating, `heater: Off (asked)`, `heater: stopped: Stopped`, `heater: every
+  worker core left the load`, a clean restart from the power menu. No temperatures were logged (0.2 logs them).
+
+### 14.2 Phone tests for 0.2 (the user present for T5..T7)
+
+- **T5 (the LED):** Light → "Flashlight LED". The log shows `torch: gpg2 con ... dat ..., gpg3 con ... dat ...`
+  before anything is switched. Expect the rear LED on; tap again: off. If the log says `torch: refused`, nothing
+  was written. Undo: tap again, or any restart (the pin resets low).
+- **T6 (panel power):** Settings → "Refresh only on change" on; use the apps a minute (everything must still
+  update: the clock, a stopwatch, holds). Then "Panel off with the screen" on; Power short (screen off), wait 10 s,
+  Power short (it must come back with the lock screen). If it stays dark: hold Power 1 s (the power menu is there
+  but unseen) or force a restart (Power + Volume Down 7 s). The log shows `panel: display on did not go out`
+  when a DCS write failed. Measure if possible: the current on the Battery screen with each setting.
+- **T7 (heater Medium, then High, 2 minutes each):** the log now has the temperatures every 10 s and the peaks.
+- **T8 (Info):** with `/starbite/emergency.txt` on the card (copy `starbite/sbos/examples/starbite/emergency.txt`):
+  the card shows; without it: "Not set up". Read only.
 
