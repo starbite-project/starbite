@@ -262,6 +262,23 @@ def main(a):
         s += 'commit\n'
         hivexsh(work, s)
         shown = ekey
+    elif cmd == 'usbfn-default':
+        # usbfn-default VID:PID: the Control\USBFN\Default key ufx01000 opens first (fatal 0xC0000034 without it,
+        # docs/WIN11-USB.md 5.2), plus bmAttributes/bMaxPower on Configurations\StarbiteLink. No Configurations\Default.
+        vid, pid = (int(x, 16) for x in arg.split(':'))
+        base = f'{cs}\\Control\\USBFN'
+        if not exists(h, base + '\\Configurations\\StarbiteLink'):
+            raise SystemExit('run usbfn first (no Configurations\\StarbiteLink)')
+        if exists(h, base + '\\Default'):
+            raise SystemExit(f'{base}\\Default exists already: nothing changed')
+        s = f'cd \\{base}\nadd Default\n'
+        s += setvals(None, base + '\\Default', {'idVendor': dword(vid), 'idProduct': dword(pid), 'bcdDevice': dword(0x0100),
+                                                'bDeviceClass': dword(0), 'bDeviceSubclass': dword(0), 'bDeviceProtocol': dword(0),
+                                                'ManufacturerString': sz(1, 'Starbite'), 'ProductString': sz(1, 'Starbite Link'),
+                                                'iSerialNumber': dword(0), 'IncludeDefaultCfg': dword(0)})
+        s += setvals(h, base + '\\Configurations\\StarbiteLink', {'bmAttributes': dword(0xC0), 'bMaxPower': dword(0x32)})
+        hivexsh(work, s + 'commit\n')
+        shown = base + '\\Default'
     elif cmd == 'ufx-autologger':
         # ETW boot autologger for UfxSynopsys + Ufx01000 (docs/WIN11-USB.md 5.2); arg = session name. Undo: delete the key.
         base = f'{cs}\\Control\\WMI\\Autologger'
