@@ -2337,3 +2337,12 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   recovery transitions, slow frames, a stopped start, POST gap, off, back-off, unconfigured, no VBUS (loader-test
   365 checks; usb-fastboot 392; clang ASan/UBSan and VM gcc; xnu-health-test 911). Loader Image 2488043d...;
   BOOT out/xnu-boot-health6.img babb570226cc5092d8bee99c5fadce64988cd7995dcf111ed64e899572781dc9 (same recipe).
+- 2026-11-07: **Wi-Fi in Windows 11 works on open networks (SbWifiCx W2l-a).** The WiFiCx driver for the BCM4361
+  (`starbite/wifi/win/sbwificx.cpp` on the shared core `starbite/wifi/`), commit aa4a8ef, tag `wifi-w2l-a`,
+  sbwificx.sys 4296f319... (0.3.1.0): in the unattended Windows loop the open network connected in 3 s, DHCP,
+  gateway ping, DNS and HTTP 200 within 12 s (35 KB / 519 KB). Five bugs blocked it, each hiding the next: the BSS
+  list and the association result must be WDI *unsolicited* indications (transaction id 0), one escan sync id per
+  scan, `assoc_info` asked with 512 bytes, and WiFiCx's data path carries 802.11 frames (24-byte header +
+  LLC/SNAP) which the driver converts to and from the radio's Ethernet frames. The decisive evidence was Windows'
+  WLAN-AutoConfig log (8002 "network not available" at the association result) and Windows' first frame (60
+  bytes, "ethertype" e1f5). Details: docs/WIFI-BCM4361.md, W2. WPA2: W2m (9545b0d) hardens the key path; untested.
