@@ -7,15 +7,18 @@
 # WLAN-AutoConfig event log. Exit 2 if the phone does not come back (then it needs the user).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-out=${1:?usage: autotest-cycle.sh OUTDIR [--wifi-sys F] [--sblinkd F] [--key K]}; shift
-wsys= ; lnk= ; key=win11-usb
-while [ $# -gt 0 ]; do case $1 in --wifi-sys) wsys=$2; shift 2;; --sblinkd) lnk=$2; shift 2;; --key) key=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
+out=${1:?usage: autotest-cycle.sh OUTDIR [--wifi-sys F] [--sblinkd F] [--key K] [--soak] [--wifi-xml F]}; shift
+wsys= ; lnk= ; key=win11-usb; soak=0; wxml=
+while [ $# -gt 0 ]; do case $1 in --wifi-sys) wsys=$2; shift 2;; --sblinkd) lnk=$2; shift 2;; --key) key=$2; shift 2;; --soak) soak=1; shift;; --wifi-xml) wxml=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
 [ "$(adb get-state 2>/dev/null)" = recovery ] || { echo "phone not in TWRP"; exit 1; }
 mkdir -p "$out"
 DS=/tmp/wwin/Windows/System32/DriverStore/FileRepository/sbwificx.inf_arm64_54945f5add3c8c52
 SU="/tmp/wwin/Users/starbite/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup"
 adb shell 'mkdir -p /tmp/wwin; umount /tmp/wwin 2>/dev/null; mount.ntfs -o rw,inherit /dev/block/sda27 /tmp/wwin' >/dev/null
-adb shell 'mkdir -p /tmp/wwin/starbite/auto; rm -f /tmp/wwin/starbite/auto/run.log'
+adb shell 'mkdir -p /tmp/wwin/starbite/auto; rm -f /tmp/wwin/starbite/auto/run.log /tmp/wwin/starbite/auto/soak'
+[ "$soak" = 1 ] && adb shell 'echo on > /tmp/wwin/starbite/auto/soak'
+# the user's own secured profile (made by make-package.sh --profile in their terminal): pushed unread, deleted by the test
+[ -n "$wxml" ] && adb push "$wxml" /tmp/wwin/starbite/auto/wifi.xml >/dev/null
 adb push starbite/win/autotest/autotest.ps1 /tmp/wwin/starbite/auto/autotest.ps1 >/dev/null
 adb push starbite/win/autotest/sb-autotest.cmd "$SU/sb-autotest.cmd" >/dev/null
 if [ -n "$wsys" ]; then adb push "$wsys" "$DS/sbwificx.sys" >/dev/null; adb push "$wsys" /tmp/wwin/starbite/wifi/sbwificx/sbwificx.sys >/dev/null; fi
@@ -28,7 +31,7 @@ timeout 25 tools/store/boot-next.sh "$key" 5 >/dev/null 2>&1 || true
 echo "booted $key at $(date +%H:%M:%S); waiting for the menu"
 sleep 90
 until fastboot devices 2>/dev/null | grep -q fastboot; do
-    [ $(( $(date +%s) - start )) -gt 1080 ] && { echo "NO MENU after 18 min: phone stuck (needs the user)"; exit 2; }
+    [ $(( $(date +%s) - start )) -gt 1800 ] && { echo "NO MENU after 30 min: phone stuck (needs the user)"; exit 2; }
     sleep 5
 done
 echo "menu after $(( $(date +%s) - start )) s"

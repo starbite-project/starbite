@@ -10,6 +10,38 @@ function IfLines {
         ForEach-Object { $_ -replace '\s+:\s+', '=' }
 }
 L "autotest.ps1 start (pid $PID)"
+function Soak($gw) {
+    # throughput: 20 MB from Cloudflare's speed endpoint, then 4 minutes of gateway pings, then 3 reconnects
+    foreach ($mb in 5, 20) {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            $f = "C:\starbite\auto\dl.bin"
+            Invoke-WebRequest -UseBasicParsing -TimeoutSec 120 -OutFile $f "https://speed.cloudflare.com/__down?bytes=$($mb * 1000000)"
+            $len = (Get-Item $f).Length; Remove-Item -Force $f
+            L ("soak: download $mb MB: {0} bytes in {1:N1} s = {2:N1} Mbit/s" -f $len, $sw.Elapsed.TotalSeconds, ($len * 8 / 1e6 / $sw.Elapsed.TotalSeconds))
+        } catch { L "soak: download $mb MB FAILED after $([int]$sw.Elapsed.TotalSeconds) s: $($_.Exception.Message)" }
+    }
+    $ok = 0; $bad = 0; $rtt = @()
+    for ($k = 0; $k -lt 48; $k++) {
+        $p = Test-Connection -ComputerName $gw -Count 1 -ErrorAction SilentlyContinue
+        if ($p) { $ok++; $rtt += $p.ResponseTime } else { $bad++ }
+        if ($k % 12 -eq 11) { L "soak: pings $ok ok / $bad lost; rtt avg $([int](($rtt | Measure-Object -Average).Average)) ms max $(($rtt | Measure-Object -Maximum).Maximum) ms | $((IfLines) -join ', ')" }
+        Start-Sleep 4
+    }
+    foreach ($c in 1..3) {
+        netsh wlan disconnect interface="$($a.Name)" | Out-Null; Start-Sleep 4
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        netsh wlan connect name=$script:pname interface="$($a.Name)" | Out-Null
+        $got = $false
+        while ($sw.Elapsed.TotalSeconds -lt 40) {
+            Start-Sleep 1
+            $ip = Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ((Get-NetAdapter -InterfaceIndex $a.ifIndex).MediaConnectionState -eq 'Connected' -and $ip -and $ip.IPAddress -notlike '169.254.*') { $got = $true; break }
+        }
+        $p = if ($got) { [bool](Test-Connection -ComputerName $gw -Count 2 -Quiet -ErrorAction SilentlyContinue) } else { $false }
+        L ("soak: reconnect {0}: {1} after {2:N1} s, gateway ping {3}" -f $c, $(if ($got) { 'IPv4 back' } else { 'NO IPv4' }), $sw.Elapsed.TotalSeconds, $p)
+    }
+}
 $a = $null
 for ($i = 0; $i -lt 45; $i++) {
     $a = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -like '*Starbite Wi-Fi*' }
@@ -18,6 +50,14 @@ for ($i = 0; $i -lt 45; $i++) {
 if (-not $a) { L 'no Starbite Wi-Fi adapter'; exit 2 }
 L "adapter: status=$($a.Status) media=$($a.MediaConnectionState) ifIndex=$($a.ifIndex)"
 Start-Sleep 25    # let WLAN AutoConfig scan a few times
+$pname = 'starbite-autotest'
+$userxml = 'C:\starbite\auto\wifi.xml'
+if (Test-Path $userxml) {
+    # the user's own secured profile (profile name "starbite-test"); its contents are never logged, and it is deleted
+    $r = netsh wlan add profile filename="$userxml" user=current; Remove-Item -Force $userxml
+    L "secured profile from wifi.xml: $((($r -join ' ').Trim()) -replace 'Profile \S+ is', 'Profile is')"
+    $pname = 'starbite-test'; $best = @{ name = '' }
+}
 $best = $null; $cur = $null; $n = 0
 foreach ($line in (netsh wlan show networks mode=bssid)) {
     if ($line -match '^SSID \d+ : (.*)$') { $cur = @{ name = $Matches[1]; auth = ''; enc = ''; sig = 0; ch = '' }; if ($cur.name) { $n++ } }
@@ -30,6 +70,7 @@ foreach ($line in (netsh wlan show networks mode=bssid)) {
     }
     elseif ($cur -and $line -match '^\s+Channel\s+:\s+(\d+)') { if ($best -eq $cur) { $cur.ch = $Matches[1] } }
 }
+if ($pname -eq 'starbite-autotest') {
 L "scan: $n named networks; open candidate: $(if ($best) { "signal $($best.sig)%, channel $($best.ch)" } else { 'none' })"
 if (-not $best) { L 'no open network in range: nothing to join'; exit 3 }
 $esc = [System.Security.SecurityElement]::Escape($best.name)
@@ -47,9 +88,10 @@ $pf = 'C:\starbite\auto\p.xml'
 $xml | Out-File -Encoding ascii $pf
 $r = netsh wlan add profile filename="$pf" user=current; Remove-Item -Force $pf
 L "add profile: $(($r -join ' ').Trim() -replace [regex]::Escape($best.name), '<net>')"
+}
 foreach ($try in 1..2) {
     $before = Get-NetAdapterStatistics -Name $a.Name -ErrorAction SilentlyContinue
-    $r = netsh wlan connect name=starbite-autotest interface="$($a.Name)"
+    $r = netsh wlan connect name=$pname interface="$($a.Name)"
     L "try ${try}: connect: $(($r -join ' ').Trim())"
     $ip = $null
     for ($t = 0; $t -lt 30; $t++) {
@@ -68,12 +110,13 @@ foreach ($try in 1..2) {
         if ($gw) { $p = Test-Connection -ComputerName $gw -Count 3 -Quiet -ErrorAction SilentlyContinue; L "ping gateway: $p" }
         try { $d = Resolve-DnsName -Name www.msftconnecttest.com -Type A -ErrorAction Stop | Select-Object -First 1; L "dns: ok" } catch { L "dns: FAILED $($_.Exception.Message)" }
         try { $w = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 http://www.msftconnecttest.com/connecttest.txt; L "http: $($w.StatusCode) '$($w.Content.Trim())'" } catch { L "http: FAILED $($_.Exception.Message)" }
+        if (Test-Path 'C:\starbite\auto\soak') { Soak $gw }
         break
     }
     netsh wlan disconnect interface="$($a.Name)" | Out-Null
     Start-Sleep 5
 }
 netsh wlan disconnect interface="$($a.Name)" | Out-Null
-$r = netsh wlan delete profile name=starbite-autotest
+$r = netsh wlan delete profile name=$pname
 L "delete profile: $(($r -join ' ').Trim())"
 L 'autotest.ps1 done'
