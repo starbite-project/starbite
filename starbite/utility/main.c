@@ -52,8 +52,12 @@ static void wdt_feed(void)
 }
 
 /* ---- drives ----------------------------------------------------------------------------------- */
-static struct msc_lun lun[2];
-static unsigned nlun;
+#define MAX_LUN 10
+static struct msc_lun lun[MAX_LUN];
+static unsigned nlun, nlun_base;                      /* nlun_base: RAM disk + card; the rest: UFS (opt-in) */
+static int ufs_offered;
+/* UFS partitions offered as read-only drives (master plan 4.4: never-touch ones are not offered) */
+static const char *const ufs_allow[] = { "BOOT", "SYSTEM", "VENDOR", "ODM", "WINESP", "WINDOWS", "A16DATA", "USERDATA" };
 static uint64_t ram_base, ram_bytes;
 static const char *ram_why = "";
 static int card_state;                                /* 0 not tried, 1 up, -1 failed */
@@ -149,6 +153,62 @@ static void ramdisk_setup(void)
     l->read = ram_read;
     l->write = ram_write;
     sb_logx("utility: RAM disk bytes ", ram_bytes);
+}
+
+/* a UFS partition as 512-byte blocks: reads cover whole 4 KiB blocks into a staging buffer */
+static uint8_t *ufs_stage;                            /* MSC_CHUNK + 8 KiB, cacheable */
+
+static int ufs_lun_read(struct msc_lun *l, uint64_t lba, uint32_t n, uint8_t *dst)
+{
+    uint64_t first = l->ctx;                          /* the partition's first 4 KiB block */
+    while (n) {
+        uint64_t byte = lba * MSC_BLOCK;
+        uint32_t k = n > MSC_CHUNK / MSC_BLOCK ? MSC_CHUNK / MSC_BLOCK : n;
+        uint64_t b0 = byte / 4096, b1 = (byte + (uint64_t)k * MSC_BLOCK + 4095) / 4096;
+        if (ufs_read_to(first + b0, b1 - b0, (uintptr_t)ufs_stage))
+            return -1;
+        const uint8_t *src = ufs_stage + (byte - b0 * 4096);
+        volatile uint8_t *d = dst;
+        for (uint32_t i = 0; i < k * MSC_BLOCK; ++i)
+            d[i] = src[i];
+        dst += k * MSC_BLOCK;
+        lba += k;
+        n -= k;
+    }
+    return 0;
+}
+
+/* Offer (on = 1) or withdraw the allow-listed UFS partitions as read-only drives; USB reconnects so the host
+ * reads the new LUN count. */
+static void usb_start(void);
+static void ufs_offer(int on)
+{
+    nlun = nlun_base;
+    ufs_offered = 0;
+    if (on && ufs_up() && gpt_load() > 0) {
+        if (!ufs_stage)
+            ufs_stage = sb_alloc(MSC_CHUNK + 8192);
+        for (unsigned i = 0; i < sizeof(ufs_allow) / sizeof(ufs_allow[0]) && nlun < MAX_LUN && ufs_stage; ++i) {
+            uint64_t f, e;
+            if (!gpt_find(ufs_allow[i], &f, &e))
+                continue;
+            struct msc_lun *l = &lun[nlun++];
+            for (unsigned k = 0; k < sizeof(*l); ++k)
+                ((uint8_t *)l)[k] = 0;
+            name(l, "Starbite", ufs_allow[i], "SBUFS001");
+            l->blocks = (e - f + 1) * (4096 / MSC_BLOCK);
+            l->ro = 1;
+            l->present = 1;
+            l->read = ufs_lun_read;
+            l->write = no_write;
+            l->ctx = f;
+        }
+        ufs_offered = nlun > nlun_base;
+    }
+    nlun_base = nlun;
+    msc_setup(lun, nlun);
+    usb_start();
+    sb_logx("utility: USB drives now ", nlun);
 }
 
 static void card_setup(void)
@@ -276,6 +336,7 @@ static void sh_run(const char *c)
     if (!c[0]) {
     } else if (sb_streq(c, "help")) {
         sh_put("help     this list\ninfo     version, uptime, watchdog\ndrives   the USB drives\n"
+               "ufs on|off  offer the UFS partitions as read-only drives (USB reconnects)\n"
                "parts    the UFS partitions (read only)\nhash NAME [BYTES]  SHA-256 + CRC32 of a partition, "
                "card, or their first BYTES\n"
                "log      the Utility OS log\nmenu     restart into the Starbite menu\n"
@@ -292,6 +353,10 @@ static void sh_run(const char *c)
         sh_put(ram_why[0] ? ")\n" : "\n");
     } else if (sb_streq(c, "drives")) {
         sh_drives();
+    } else if (sb_streq(c, "ufs on") || sb_streq(c, "ufs off")) {
+        sh_put(c[5] == 'n' ? "offering the UFS partitions read-only: USB reconnects\n"
+                           : "withdrawing the UFS partitions: USB reconnects\n");
+        sh_line[0] = c[5] == 'n' ? 4 : 5;
     } else if (sb_streq(c, "parts")) {
         sh_parts();
     } else if (sb_prefix(c, "hash ")) {
@@ -380,7 +445,7 @@ static void sh_input(const volatile uint8_t *d, uint32_t n)
             sh_put("\n");
             sh_line[sh_n] = 0;
             sh_run(sh_line);
-            if ((unsigned char)sh_line[0] <= 3 && sh_line[0])
+            if ((unsigned char)sh_line[0] <= 5 && sh_line[0])
                 sh_pending_action = sh_line[0];
             sh_n = 0;
             sh_put("utility> ");
@@ -422,6 +487,8 @@ static void act(int a)
         sb_boot_next("maint");
     if (a == 3)
         sb_power_off();
+    if ((a == 4 || a == 5) && !msc_busy())
+        ufs_offer(a == 4);
 }
 
 static void idle_check(void)
@@ -534,7 +601,7 @@ static void draw_home(void)
 }
 
 static void kv(struct page *p, const char *k, const char *v, uint32_t c) { page_kv(p, k, v, c); }
-static int row_pad = -1;
+static int row_pad = -1, row_ufs = -1;
 
 static void usb_fill(struct page *p)
 {
@@ -581,6 +648,11 @@ static void usb_fill(struct page *p)
     ub_s(&u, " clicks");
     kv(p, "HID", u.b, C_L2);
     row_pad = page_button(p, "Trackpad and keys", C_STAR);
+    page_hdr(p, "UFS partitions (read only)");
+    row_ufs = page_button(p, ufs_offered ? "Stop offering UFS partitions" : "Offer UFS partitions as drives",
+                          ufs_offered ? C_ORANGE : C_STAR);
+    page_note(p, "BOOT, SYSTEM, VENDOR, ODM, WINESP, WINDOWS, A16DATA, USERDATA, read only. USB reconnects. "
+                 "EFS, PARAM and the like are never offered.", C_L3);
     page_note(p, "On a Mac: the STARBITE disk appears in Finder; the shell is /dev/cu.usbmodem*. "
                  "Eject the disk before leaving: the RAM disk is gone when the phone restarts.", C_L3);
 }
@@ -632,18 +704,24 @@ static void page_screen(const char *title, int tile)
         int pick = -1;
         if (!page_scroll_event(&p, &e)) {
             if (tile == 0 && row_pad >= 0 && (e.type == EV_UP || e.type == EV_DOWN)) {
-                page_set_focus(&p, row_pad);
-                page_keep_visible(&p, row_pad);
+                int f = p.focus == row_pad ? row_ufs : row_pad;
+                page_set_focus(&p, f);
+                page_keep_visible(&p, f);
                 ui_present();
             } else if (e.type == EV_UP) {
                 page_set_scroll(&p, p.scroll - 400);
             } else if (e.type == EV_DOWN) {
                 page_set_scroll(&p, p.scroll + 400);
-            } else if (e.type == EV_SELECT && tile == 0 && p.focus == row_pad) {
-                pick = row_pad;
+            } else if (e.type == EV_SELECT && tile == 0 && (p.focus == row_pad || p.focus == row_ufs)) {
+                pick = p.focus;
             } else if (e.type == EV_TAP && tile == 0) {
                 pick = page_hit(&p, e.x, e.y, 0);
             }
+        }
+        if (tile == 0 && pick >= 0 && pick == row_ufs) {
+            if (!msc_busy())
+                ufs_offer(!ufs_offered);
+            next = 0;
         }
         if (tile == 0 && pick >= 0 && pick == row_pad) {
             ut_pad();
