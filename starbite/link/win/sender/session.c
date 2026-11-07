@@ -56,6 +56,15 @@ void sbl_sender_stop(sbl_sender *s)
 {
     s->stop = 1;
     plat_event_set(s->wake);
+    if (s->stop_hook) s->stop_hook(s->stop_hook_ctx);
+}
+
+int sbl_sender_shutdown(sbl_sender *s, int ms)
+{
+    sbl_sender_stop(s);
+    for (int t = 0; s->alive > 0 && t < ms; t += 10) plat_sleep_ms(10);
+    if (s->alive > 0) { sbl_log("shutdown: transports still tearing down after %d ms", ms); return -1; }
+    return 0;
 }
 
 /* ---- sending (txlk held) -------------------------------------------------------------------------- */
@@ -228,6 +237,7 @@ static int on_hello(sbl_sender *s, sbl_link *l, const sblk_hello *h)
     s->st_frames = s->st_bytes = s->st_enc_us = s->st_rects = s->st_blocked = s->st_keys = 0;
     s->st_stalls = s->st_ack_bad = 0;
     s->st_t0 = plat_now_us();
+    s->in_logged = 0;
     char name[33];
     memcpy(name, h->name, 32);
     name[32] = 0;
@@ -281,6 +291,11 @@ static int on_msg(sbl_sender *s, sbl_link *l, const sblk_msg *m)
         return -2;
     }
     if (!mine) {
+        if (m->type == SBLK_T_INPUT_KEY || m->type == SBLK_T_INPUT_POINTER || m->type == SBLK_T_INPUT_TEXT) {
+            plat_mutex_lock(&s->lk);
+            s->in_win.early++;
+            plat_mutex_unlock(&s->lk);
+        }
         if (l->is_usb && s->owner && s->owner != l) return 0;   /* someone else's session: ignore */
         sbl_log("%s: %s before HELLO", l->name, sblk_type_name(m->type));
         return -1;
@@ -302,33 +317,62 @@ static int on_msg(sbl_sender *s, sbl_link *l, const sblk_msg *m)
         plat_event_set(s->wake);
         return 0;
 
-    case SBLK_T_INPUT_KEY:
-        if (!(s->caps & SBLK_CAP_INPUT_KEY)) return 0;
+    case SBLK_T_INPUT_KEY: {
         plat_mutex_lock(&s->lk);
+        s->in_last_us = plat_now_us();
+        if (!(s->caps & SBLK_CAP_INPUT_KEY)) { s->in_win.nocap++; plat_mutex_unlock(&s->lk); return 0; }
+        s->in_win.key++;
         n = sbl_in_key(&s->in, &m->u.key, ev, SBL_MAX_EV_KEY);
-        if (n) sbl_inject(ev, n);
+        int done = n ? sbl_inject(ev, n) : 0;
+        s->in_win.evs += (uint32_t)n;
         plat_mutex_unlock(&s->lk);
         if (s->cfg.verbose)
-            sbl_log("key page %x usage %x %s mods %x -> %d events", m->u.key.usage_page, m->u.key.usage,
-                    m->u.key.down ? "down" : "up", m->u.key.modifiers, n);
+            sbl_log("key page %x usage %x %s mods %x -> %d events, %d injected", m->u.key.usage_page, m->u.key.usage,
+                    m->u.key.down ? "down" : "up", m->u.key.modifiers, n, done);
         return 0;
+    }
 
-    case SBLK_T_INPUT_POINTER:
-        if (!(s->caps & SBLK_CAP_INPUT_PTR)) return 0;
+    case SBLK_T_INPUT_POINTER: {
         plat_mutex_lock(&s->lk);
+        s->in_last_us = plat_now_us();
+        if (!(s->caps & SBLK_CAP_INPUT_PTR)) { s->in_win.nocap++; plat_mutex_unlock(&s->lk); return 0; }
+        uint32_t edges = (m->u.pointer.buttons ^ s->in.buttons) & 0x1Fu;
+        s->in_win.ptr++;
+        for (uint32_t b = edges; b; b &= b - 1) s->in_win.btn++;
+        if (m->u.pointer.wheel_dx || m->u.pointer.wheel_dy) s->in_win.whl++;
         sbl_inject_geom(&s->geom);
         n = sbl_in_pointer(&s->in, &m->u.pointer, &s->geom, ev, SBL_MAX_EV_PTR);
-        if (n) sbl_inject(ev, n);
+        int done = n ? sbl_inject(ev, n) : 0;
+        s->in_win.evs += (uint32_t)n;
+        /* one line per session each for the first pointer message and the first button edge: proof that
+         * the Mac's input arrived, where it was mapped to, and whether SendInput took it */
+        int first_ptr = !(s->in_logged & 1), first_btn = edges && !(s->in_logged & 2);
+        s->in_logged |= 1 | (edges ? 2 : 0);
+        sbl_geom g = s->geom;
         plat_mutex_unlock(&s->lk);
+        if (first_ptr || first_btn)
+            sbl_log("input: first %s this session: display (%d,%d) buttons 0x%x wheel %d,%d -> normalized (%d,%d) "
+                    "of virtual desktop (%d,%d) %dx%d, output (%d,%d) %dx%d, frame %ux%u; %d of %d events injected",
+                    first_btn ? "button edge" : "pointer", m->u.pointer.x, m->u.pointer.y, m->u.pointer.buttons,
+                    m->u.pointer.wheel_dx, m->u.pointer.wheel_dy, n ? ev[0].x : -1, n ? ev[0].y : -1, g.virt_x,
+                    g.virt_y, g.virt_w, g.virt_h, g.out_x, g.out_y, g.out_w, g.out_h, g.disp_w, g.disp_h, done, n);
         return 0;
+    }
 
-    case SBLK_T_INPUT_TEXT:
-        if (!(s->caps & SBLK_CAP_INPUT_TEXT)) return 0;
+    case SBLK_T_INPUT_TEXT: {
+        plat_mutex_lock(&s->lk);
+        s->in_last_us = plat_now_us();
+        int ok = (s->caps & SBLK_CAP_INPUT_TEXT) != 0;
+        if (ok) s->in_win.txt++; else s->in_win.nocap++;
+        plat_mutex_unlock(&s->lk);
+        if (!ok) return 0;
         n = sbl_in_text(m->u.text.utf8, m->u.text.len, ev, (int)(sizeof ev / sizeof ev[0]));
         plat_mutex_lock(&s->lk);
         if (n) sbl_inject(ev, n);
+        s->in_win.evs += (uint32_t)n;
         plat_mutex_unlock(&s->lk);
         return 0;
+    }
 
     case SBLK_T_MODE:
         if (m->u.mode.status != SBLK_MODE_REQUEST) {
@@ -595,6 +639,46 @@ static void log_stats(sbl_sender *s, uint64_t now, sbl_cap *cap, sbl_cap_stats *
     *prev = cs;
 }
 
+static void add_counts(sbl_in_counts *t, const sbl_in_counts *w)
+{
+    t->ptr += w->ptr; t->btn += w->btn; t->whl += w->whl; t->key += w->key; t->txt += w->txt;
+    t->nocap += w->nocap; t->early += w->early; t->evs += w->evs;
+}
+
+void sbl_input_counts(sbl_sender *s, sbl_in_counts *out)
+{
+    plat_mutex_lock(&s->lk);
+    *out = s->in_total;
+    add_counts(out, &s->in_win);
+    plat_mutex_unlock(&s->lk);
+}
+
+/* every 10 s while a viewer is connected: what input arrived and what SendInput made of it, so a log
+ * tells "the Mac sent nothing" from "SendInput refused it" (round 7: clicks, no trace either way) */
+static void log_input_stats(sbl_sender *s)
+{
+    sbl_inj_stats is;
+    sbl_inject_take_stats(&is);
+    plat_mutex_lock(&s->lk);
+    sbl_in_counts w = s->in_win;
+    add_counts(&s->in_total, &w);
+    memset(&s->in_win, 0, sizeof s->in_win);
+    sbl_link *l = s->active ? s->owner : NULL;
+    plat_mutex_unlock(&s->lk);
+    char cur[96] = "no cursor info";
+    if (is.cur_valid)
+        snprintf(cur, sizeof cur, "cursor (%d,%d) %s, mouse present %d", is.cur_x, is.cur_y,
+                 is.cur_flags & 1 ? "showing" : is.cur_flags & 2 ? "suppressed (touch)" : "hidden", is.mouse_present);
+    char link[160] = "";
+    if (l && l->describe) { link[0] = ';'; link[1] = ' '; l->describe(l, link + 2, sizeof link - 2); }
+    sbl_log("input: last 10 s: ptr %u (btn edges %u, wheel %u), key %u, text %u, no-cap %u, before-HELLO %u -> "
+            "%u events; SendInput %u calls, %u of %u injected, %u short (first error %u, last %u); desktop \"%s\" "
+            "(moves %u, failures %u, error %u); %s%s",
+            w.ptr, w.btn, w.whl, w.key, w.txt, w.nocap, w.early, w.evs, is.calls, is.injected, is.events,
+            is.short_calls, is.first_err, is.last_err, is.desk[0] ? is.desk : "?", is.desk_moves, is.desk_fails,
+            is.desk_err, cur, link);
+}
+
 void sbl_sender_run(sbl_sender *s)
 {
     sbl_cap *cap = NULL;
@@ -606,6 +690,7 @@ void sbl_sender_run(sbl_sender *s)
     uint64_t opened_at = 0;
     uint32_t told_w = 0, told_h = 0, told_gen = 0xFFFFFFFFu, armed_gen = 0xFFFFFFFFu;
     int blocked_logged = 0, open_fail_logged = 0, reset_logged = 0;
+    uint64_t denied_since = 0;      /* DuplicateOutput denied (session start, secure desktop): fast retries */
     sbl_cap_stats cst;
     memset(&cst, 0, sizeof cst);
 
@@ -621,18 +706,30 @@ void sbl_sender_run(sbl_sender *s)
         /* (re)open the capture; kept open without a viewer too, so HELLO can announce the size (an
          * idle duplication costs nothing: no frames are acquired without a session) */
         if (!cap && now >= reopen_at) {
-            if (sbl_cap_open(&cap, &s->cfg, &ci) < 0) {
+            int oe = sbl_cap_open(&cap, &s->cfg, &ci);
+            if (oe < 0) {
                 cap = NULL;
                 /* every attempt builds a DXGI factory + D3D11 device (software rendering here): with no
                  * viewer (e.g. the lock screen after the Mac left) retry only every 10 s; a HELLO
-                 * re-arms it at once (below) */
+                 * re-arms it at once (below). Access denied (-2) is usually a short transition (a new
+                 * session's desktop not ready yet, round 7: 10 s lost after each sign-in): every 1 s for
+                 * the first 30 s of such a streak */
                 plat_mutex_lock(&s->lk);
                 int watched = s->active;
                 plat_mutex_unlock(&s->lk);
-                reopen_at = now + (watched ? 2000000u : 10000000u);
+                if (oe == -2 && !denied_since) {
+                    denied_since = now;
+                    sbl_log("capture: access denied (desktop switching or session starting): retrying every 1 s for 30 s");
+                }
+                int fast = oe == -2 && now - denied_since < 30000000u;
+                reopen_at = now + (fast ? 1000000u : watched ? 2000000u : 10000000u);
                 if (!open_fail_logged) sbl_log("capture: not available, retrying every 2 s (10 s without a viewer)");
                 open_fail_logged = 1;
             } else {
+                if (denied_since)
+                    sbl_log("capture: available again after %llu ms of access denied",
+                            (unsigned long long)((now - denied_since) / 1000u));
+                denied_since = 0;
                 open_fail_logged = 0;
                 opened_at = plat_now_us();
                 sbl_log("capture: %s, \"%s\" %ux%u @ %u mHz at (%d,%d)%s", ci.method, ci.name, ci.width,
@@ -766,6 +863,7 @@ void sbl_sender_run(sbl_sender *s)
 
         if (now - last_stats > 10000000u) {
             if (s->st_frames) log_stats(s, now, cap, &cst);
+            log_input_stats(s);
             last_stats = now;
         }
 

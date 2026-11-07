@@ -79,6 +79,9 @@ void sbl_link_release_all(sbl_link *l, uint16_t locks);
 void sbl_link_request_mode(sbl_link *l, uint16_t w, uint16_t h);
 void sbl_link_ping(sbl_link *l);
 void sbl_link_request_keyframe(sbl_link *l);
+/* USB: reset the device (it re-enumerates; the phone's sender gets Reset + Configured) and open the
+ * interface again. For "Reconnect" when the phone does not answer. No-op in TCP mode. */
+void sbl_link_reset_usb(sbl_link *l);
 /* Runs block-free work on the link queue and waits for it: everything queued before has been sent. */
 void sbl_link_flush(sbl_link *l);
 

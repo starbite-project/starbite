@@ -1,6 +1,18 @@
 /* SPDX-License-Identifier: GPL-2.0-only
  * Starbite Link, Mac viewer: the link. USB (IOUSBHost) and TCP transports around one sbv session,
  * on one serial queue. See link.h and starbite/link/PROTOCOL.md (sections 1, 4, 5, 6).
+ *
+ * USB recovery ladder (round 7, 2026-11-07: Windows ended the user session, the phone's new sender never
+ * saw a bus event and posted no OUT read, and this app looped "OUT transfer failed (0xe00002d6)" / "link
+ * dead" for 2 minutes with the interface open): every restart without a HELLO from the phone counts.
+ *   1-2  abort, clear halt on both pipes, drain, HELLO again (PROTOCOL.md 6.4), after 0.2-1 s
+ *   3    the same after SET_INTERFACE (alternate setting 0): the phone gets a SetInterface bus event and
+ *        takes the pipes again. Also as soon as two HELLO OUT transfers in a row time out (the phone has no
+ *        read posted). Back-off 2, 4, then 8 s between tries
+ *   5+   USB device reset (IOUSBHostDevice -resetWithError:): the phone re-enumerates (Reset, Configured),
+ *        this app gets a new interface by matching. At most every 30 s, doubling to 5 min
+ * A HELLO from the phone resets the ladder. Every step is logged. The "Reconnect" menu item resets the
+ * device too (sbl_link_reset_usb).
  */
 #import <Foundation/Foundation.h>
 #import <IOKit/IOKitLib.h>
@@ -74,6 +86,17 @@ static uint64_t mono_us(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) /
     _Atomic long usb_out_pending;
     int usb_hunt;                  /* after our HELLO: skip IN transfers until one starts with HELLO/BYE */
     uint64_t usb_skipped;
+    /* recovery ladder (top of the file) */
+    int usb_fail_streak;           /* restarts since the phone's last HELLO */
+    int usb_out_timeouts;          /* consecutive OUT transfers that timed out */
+    int usb_altset_done;           /* SET_INTERFACE tried in this streak */
+    uint64_t last_reset_us;
+    double reset_interval_s;       /* 30 s, doubling to 300 s */
+    int reset_pending;             /* Reconnect: reset as soon as the interface is open */
+
+    /* input handed to the session in the current 10 s window (logged by tick) */
+    uint32_t in_ptr, in_btn, in_whl, in_key, in_txt, in_drop;
+    uint64_t in_win_t;
 
     dispatch_source_t timer;
     os_unfair_lock lock;
@@ -150,6 +173,12 @@ static void cb_event(void *ctx, int ev, const char *text)
     if (ev == SBV_EV_PONG && !L->cfg.verbose) return;   /* once a second: too chatty */
     if (ev == SBV_EV_ERROR) set_error(L, text);
     if (ev == SBV_EV_HELLO) {
+        if (L->usb_fail_streak)
+            logf_(L, "USB: the phone answered after %d session restart(s): recovery done", L->usb_fail_streak);
+        L->usb_fail_streak = 0;
+        L->usb_out_timeouts = 0;
+        L->usb_altset_done = 0;
+        L->reset_interval_s = 30;
         set_conn(L, SBL_CONN_RUNNING);
         os_unfair_lock_lock(&L->lock);
         memcpy(L->st.peer, L->s.peer.name, 32);
@@ -166,6 +195,7 @@ static void cb_event(void *ctx, int ev, const char *text)
 
 static void tcp_close(SBLLink *L, const char *why);
 static void usb_recover(SBLLink *L, const char *why, double delay_s);
+static void usb_reset_device(SBLLink *L, const char *why, int asked);
 static void tcp_attempt(SBLLink *L);
 
 static void session_ended(SBLLink *L, int err)
@@ -360,9 +390,14 @@ static int usb_send(SBLLink *L, const uint8_t *p, size_t n)
                            completionHandler:^(IOReturn status, NSUInteger done) {
         (void)done;
         atomic_fetch_sub(&L->usb_out_pending, (long)n);
+        if (gen == L->usb_gen) {
+            if (status == kIOReturnSuccess) L->usb_out_timeouts = 0;
+            else if (status == kIOReturnTimeout) L->usb_out_timeouts++;
+        }
         if (status != kIOReturnSuccess && status != kIOReturnAborted && gen == L->usb_gen) {
             char why[64];
-            snprintf(why, sizeof why, "OUT transfer failed (0x%08x)", status);
+            snprintf(why, sizeof why, "OUT transfer failed (0x%08x%s)", status,
+                     status == kIOReturnTimeout ? ": timeout, the phone is not reading" : "");
             usb_recover(L, why, RETRY_S);
         }
     }];
@@ -461,29 +496,74 @@ static void usb_session_start(SBLLink *L)
     usb_drain_then_start(L, d, gen, 256);
 }
 
-/* PROTOCOL.md 6.4: abort, clear halt on both pipes (resets the toggles), drain, HELLO again */
+/* re-acquires both pipes after SET_INTERFACE (which invalidates the old pipe objects) */
+static int usb_copy_pipes(SBLLink *L)
+{
+    NSError *e1 = nil, *e2 = nil;
+    IOUSBHostPipe *pin = [L->intf copyPipeWithAddress:SBLK_USB_EP_IN error:&e1];
+    IOUSBHostPipe *pout = [L->intf copyPipeWithAddress:SBLK_USB_EP_OUT error:&e2];
+    if (!pin || !pout) {
+        logf_(L, "USB: endpoints 0x81/0x01 missing after SET_INTERFACE (%s)", (e1 ?: e2).localizedDescription.UTF8String);
+        return -1;
+    }
+    L->pin = pin;
+    L->pout = pout;
+    return 0;
+}
+
+/* PROTOCOL.md 6.4: abort, clear halt on both pipes (resets the toggles), drain, HELLO again; escalating to
+ * SET_INTERFACE and a device reset when the phone keeps not answering (top of the file) */
 static void usb_recover(SBLLink *L, const char *why, double delay_s)
 {
     if (L->transport != TR_USB) return;
     uint64_t t = mono_us();
     if (t - L->last_recover_us < 3000000u && delay_s < RETRY_S) delay_s = RETRY_S;   /* no tight loops */
     L->last_recover_us = t;
-    logf_(L, "USB session restart: %s", why);
-    set_error(L, why);
+    int k = ++L->usb_fail_streak;
+    if (L->usb_out_timeouts >= 2 && k < 3) k = L->usb_fail_streak = 3;   /* the phone has no read posted */
+    if (k >= 3) {
+        double b = k >= 5 ? 8.0 : (double)(1 << (k - 2));
+        if (delay_s < b) delay_s = b;
+    }
     if (L->s.state == SBV_RUNNING || L->s.state == SBV_HELLO_SENT) sbv_bye(&L->s, SBLK_BYE_PROTOCOL, why);
+    if (!L->reset_interval_s) L->reset_interval_s = 30;
+    if (k >= 5 && (!L->last_reset_us || t - L->last_reset_us >= (uint64_t)(L->reset_interval_s * 1e6))) {
+        logf_(L, "USB session restart #%d: %s", k, why);
+        usb_reset_device(L, why, 0);
+        return;
+    }
+    int altset = k >= 3 && !L->usb_altset_done;
+    if (altset) L->usb_altset_done = 1;
+    logf_(L, "USB session restart #%d: %s (%snext HELLO in %.1f s)", k, why,
+          altset ? "SET_INTERFACE first, " : "", delay_s);
+    set_error(L, why);
     uint64_t gen = ++L->usb_gen;
     [L->pin abortWithOption:IOUSBHostAbortOptionAsynchronous error:nil];
     [L->pout abortWithOption:IOUSBHostAbortOptionAsynchronous error:nil];
     set_conn(L, SBL_CONN_SEARCHING);
     IOUSBHostPipe *pin = L->pin, *pout = L->pout;
+    IOUSBHostInterface *intf = L->intf;
     dispatch_queue_t q = L->q;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay_s * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         /* synchronous control requests: off the link queue */
-        [pin clearStallWithError:nil];
-        [pout clearStallWithError:nil];
+        NSError *err = nil;
+        BOOL alt_ok = NO;
+        if (altset) alt_ok = [intf selectAlternateSetting:0 error:&err];
+        else {
+            [pin clearStallWithError:nil];
+            [pout clearStallWithError:nil];
+        }
+        NSString *errS = err ? err.localizedDescription : @"";
         dispatch_async(q, ^{
-            if (gen != L->usb_gen || L->transport != TR_USB || !L->running) return;
+            if (altset)
+                logf_(L, "USB: SET_INTERFACE (alternate setting 0) so the phone gets a bus event and takes the pipes "
+                         "again: %s", alt_ok ? "ok" : errS.UTF8String);
+            if (gen != L->usb_gen || L->transport != TR_USB || !L->running || L->intf != intf) return;
+            if (altset && usb_copy_pipes(L) < 0) {
+                usb_reset_device(L, "no pipes after SET_INTERFACE", 0);
+                return;
+            }
             usb_session_start(L);
         });
     });
@@ -519,6 +599,9 @@ static void usb_interface_appeared(SBLLink *L, io_service_t svc)
                 SBLLink *S = weak;
                 if (S && S->intf == obj) {
                     usb_close(S, "device unplugged");
+                    S->usb_fail_streak = 0;
+                    S->usb_out_timeouts = 0;
+                    S->usb_altset_done = 0;
                     tcp_attempt(S);
                 }
             });
@@ -548,8 +631,112 @@ static void usb_interface_appeared(SBLLink *L, io_service_t svc)
     L->transport = TR_USB;
     L->usb_gen++;
     snprintf(L->tdesc, sizeof L->tdesc, "USB %04x:%04x", SBLK_USB_VID, SBLK_USB_PID);
-    logf_(L, "USB: Starbite Link interface opened");
+    logf_(L, "USB: Starbite Link interface opened%s", L->usb_fail_streak ? " (recovering: no HELLO from the phone yet)" : "");
+    if (L->reset_pending) {
+        L->reset_pending = 0;
+        usb_reset_device(L, "Reconnect", 1);
+        return;
+    }
     usb_session_start(L);
+}
+
+static CFMutableDictionaryRef if_match_dict(void)
+{
+    return [IOUSBHostInterface createMatchingDictionaryWithVendorID:@(SBLK_USB_VID) productID:@(SBLK_USB_PID)
+        bcdDevice:nil interfaceNumber:@0 configurationValue:@1 interfaceClass:nil interfaceSubclass:nil
+        interfaceProtocol:nil speed:nil productIDArray:nil];
+}
+
+/* opens the interface if it exists but no match notification will come for it (after this app closed it
+ * itself, e.g. a device reset that failed) */
+static void usb_rescan(SBLLink *L)
+{
+    if (L->intf || !L->running || L->cfg.mode == SBL_MODE_TCP) return;
+    io_iterator_t it = 0;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, if_match_dict(), &it) != KERN_SUCCESS) return;
+    io_service_t svc;
+    int n = 0;
+    while ((svc = IOIteratorNext(it))) { n++; usb_interface_appeared(L, svc); }
+    IOObjectRelease(it);
+    logf_(L, "USB: re-scan for the Starbite Link interface: %d found", n);
+}
+
+/* the IOUSBHostDevice above an interface (interface <- composite driver <- device), retained; 0 = none */
+static io_service_t usb_device_above(io_service_t svc)
+{
+    io_service_t cur = svc;
+    IOObjectRetain(cur);
+    for (int i = 0; i < 4 && cur; i++) {
+        io_registry_entry_t parent = 0;
+        kern_return_t kr = IORegistryEntryGetParentEntry(cur, kIOServicePlane, &parent);
+        IOObjectRelease(cur);
+        cur = kr == KERN_SUCCESS ? parent : 0;
+        if (cur && IOObjectConformsTo(cur, "IOUSBHostDevice")) return cur;
+    }
+    if (cur) IOObjectRelease(cur);
+    return 0;
+}
+
+/* The phone does not answer HELLO even after SET_INTERFACE (round 7: its sender has no OUT read posted and
+ * got no bus event). Reset the device: it re-enumerates, Windows' GenericUsbFn gets Reset + Configured and
+ * the sender takes the new pipes; this app gets a new interface through matching (if_matched). If the
+ * reset cannot be done the interface is re-opened by a re-scan. asked: the user chose Reconnect. */
+static void usb_reset_device(SBLLink *L, const char *why, int asked)
+{
+    uint64_t t = mono_us();
+    if (asked && L->last_reset_us && t - L->last_reset_us < 5000000u) {
+        logf_(L, "USB: device reset skipped (one %.1f s ago)", (double)(t - L->last_reset_us) / 1e6);
+        if (L->intf && L->transport == TR_USB) usb_session_start(L);
+        return;
+    }
+    io_service_t dev = L->intf ? usb_device_above(L->intf.ioService) : 0;
+    L->last_reset_us = t;
+    if (!asked) {
+        if (!L->reset_interval_s) L->reset_interval_s = 30;
+        logf_(L, "USB: the phone does not answer (%s): resetting the USB device so it re-enumerates "
+                 "(next reset not before %.0f s)", why, L->reset_interval_s);
+        L->reset_interval_s = L->reset_interval_s * 2 > 300 ? 300 : L->reset_interval_s * 2;
+    } else logf_(L, "USB: %s: resetting the USB device", why);
+    set_error(L, "phone not answering: resetting USB");
+    usb_close(L, "USB device reset");
+    dispatch_queue_t q = L->q;
+    IOUSBHostDevice *own = L->dev;   /* set when this app configured the device itself */
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *err = nil;
+        const char *how = "";
+        BOOL ok = NO;
+        if (own) {
+            how = "own device object";
+            ok = [own resetWithError:&err];
+        } else if (dev) {
+            IOUSBHostDevice *d = [[IOUSBHostDevice alloc] initWithIOService:dev
+                options:IOUSBHostObjectInitOptionsNone queue:q error:&err interestHandler:nil];
+            how = "shared";
+            if (!d) {
+                NSError *e2 = nil;
+                d = [[IOUSBHostDevice alloc] initWithIOService:dev options:IOUSBHostObjectInitOptionsDeviceSeize
+                                                         queue:q error:&e2 interestHandler:nil];
+                how = "seized";
+                if (!d) err = e2 ?: err;
+            }
+            if (d) {
+                err = nil;
+                ok = [d resetWithError:&err];
+                [d destroy];
+            }
+        } else how = "no device found above the interface";
+        if (dev) IOObjectRelease(dev);
+        NSString *errS = err ? [NSString stringWithFormat:@"%@ (0x%08lx)", err.localizedDescription, (long)err.code]
+                             : @"no error";
+        dispatch_async(q, ^{
+            logf_(L, "USB: device reset (%s): %s", how, ok ? "done, waiting for the phone to come back"
+                                                           : errS.UTF8String);
+        });
+        /* a reset brings a new interface by matching; if none came (reset refused), open the old one again */
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ok ? 6 : 1) * NSEC_PER_SEC), q, ^{
+            if (!L->intf) usb_rescan(L);
+        });
+    });
 }
 
 static void if_matched(void *refcon, io_iterator_t it)
@@ -605,9 +792,7 @@ static void usb_setup(SBLLink *L)
     L->nport = IONotificationPortCreate(kIOMainPortDefault);
     IONotificationPortSetDispatchQueue(L->nport, L->q);
     NSNumber *vid = @(SBLK_USB_VID), *pid = @(SBLK_USB_PID);
-    CFMutableDictionaryRef d = [IOUSBHostInterface createMatchingDictionaryWithVendorID:vid productID:pid
-        bcdDevice:nil interfaceNumber:@0 configurationValue:@1 interfaceClass:nil interfaceSubclass:nil
-        interfaceProtocol:nil speed:nil productIDArray:nil];
+    CFMutableDictionaryRef d = if_match_dict();
     kern_return_t kr = IOServiceAddMatchingNotification(L->nport, kIOFirstMatchNotification, d, if_matched,
                                                         (__bridge void *)L, &L->it_if);
     if (kr == KERN_SUCCESS) if_matched((__bridge void *)L, L->it_if);
@@ -634,6 +819,14 @@ static void tick(SBLLink *L)
         if (e < 0) session_ended(L, e);
     }
     uint64_t t = mono_us();
+    if (!L->in_win_t) L->in_win_t = t;
+    if (t - L->in_win_t >= 10000000u) {   /* what input left this Mac (the phone logs what arrived) */
+        if (L->in_ptr || L->in_key || L->in_txt || L->in_drop)
+            logf_(L, "input sent (last 10 s): pointer %u (button edges %u, wheel %u), keys %u, text %u; "
+                     "dropped (no session) %u", L->in_ptr, L->in_btn, L->in_whl, L->in_key, L->in_txt, L->in_drop);
+        L->in_ptr = L->in_btn = L->in_whl = L->in_key = L->in_txt = L->in_drop = 0;
+        L->in_win_t = t;
+    }
     if (!L->win_t) { L->win_t = t; L->win_frames = L->win_bytes = 0; }   /* first window starts now */
     double dt = (double)(t - L->win_t) / 1e6;
     os_unfair_lock_lock(&L->lock);
@@ -744,20 +937,56 @@ void sbl_link_status(sbl_link *l, sbl_status *out)
 #define ON_LINK(body) do { SBLLink *L = LL(l); dispatch_async(L->q, ^{ int e_ = (body); \
     if (e_ < 0 && L->transport != TR_NONE) session_ended(L, e_); }); } while (0)
 
+/* counts input handed to a running session (sent) or dropped (no session / capability) */
+static int count_in(SBLLink *L, uint32_t cap, uint32_t *ctr)
+{
+    if (L->s.state == SBV_RUNNING && (L->s.caps & cap)) { (*ctr)++; return 1; }
+    L->in_drop++;
+    return 0;
+}
+
 void sbl_link_key(sbl_link *l, uint16_t page, uint16_t usage, int down, uint16_t locks)
 {
-    ON_LINK(sbv_key(&L->s, page, usage, down, locks));
+    SBLLink *L = LL(l);
+    dispatch_async(L->q, ^{
+        count_in(L, SBLK_CAP_INPUT_KEY, &L->in_key);
+        int e = sbv_key(&L->s, page, usage, down, locks);
+        if (e < 0 && L->transport != TR_NONE) session_ended(L, e);
+    });
 }
 
 void sbl_link_pointer(sbl_link *l, int32_t x, int32_t y, uint32_t buttons, int16_t wdx, int16_t wdy)
 {
-    ON_LINK(sbv_pointer(&L->s, x, y, buttons, wdx, wdy));
+    SBLLink *L = LL(l);
+    dispatch_async(L->q, ^{
+        if (count_in(L, SBLK_CAP_INPUT_PTR, &L->in_ptr)) {
+            L->in_btn += (uint32_t)__builtin_popcount((L->s.buttons ^ buttons) & 0x1Fu);
+            if (wdx || wdy) L->in_whl++;
+        }
+        int e = sbv_pointer(&L->s, x, y, buttons, wdx, wdy);
+        if (e < 0 && L->transport != TR_NONE) session_ended(L, e);
+    });
 }
 
 void sbl_link_text(sbl_link *l, const char *utf8)
 {
+    SBLLink *L = LL(l);
     NSData *copy = [NSData dataWithBytes:utf8 length:strlen(utf8)];
-    ON_LINK(sbv_text(&L->s, copy.bytes, copy.length));
+    dispatch_async(L->q, ^{
+        count_in(L, SBLK_CAP_INPUT_TEXT, &L->in_txt);
+        int e = sbv_text(&L->s, copy.bytes, copy.length);
+        if (e < 0 && L->transport != TR_NONE) session_ended(L, e);
+    });
+}
+
+void sbl_link_reset_usb(sbl_link *l)
+{
+    SBLLink *L = LL(l);
+    dispatch_async(L->q, ^{
+        if (!L->running || L->cfg.mode == SBL_MODE_TCP) return;
+        if (L->intf) usb_reset_device(L, "Reconnect", 1);
+        else L->reset_pending = 1;   /* when the interface opens */
+    });
 }
 
 void sbl_link_release_all(sbl_link *l, uint16_t locks) { ON_LINK(sbv_release_all(&L->s, locks)); }

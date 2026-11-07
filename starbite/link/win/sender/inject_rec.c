@@ -3,6 +3,7 @@
  */
 #include "host.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #define REC_MAX 8192
@@ -28,7 +29,9 @@ int rec_get(sbl_ev *out, int max)
     return n;
 }
 
-void sbl_inject(const sbl_ev *ev, int n)
+static sbl_inj_stats rst;
+
+int sbl_inject(const sbl_ev *ev, int n)
 {
     once();
     plat_mutex_lock(&rk);
@@ -38,6 +41,21 @@ void sbl_inject(const sbl_ev *ev, int n)
             sbl_log("inject: kind %u code 0x%x flags %u x %d y %d data %d", ev[i].kind, ev[i].code, ev[i].flags,
                     ev[i].x, ev[i].y, ev[i].data);
     }
+    rst.calls++;
+    rst.events += (uint32_t)n;
+    rst.injected += (uint32_t)n;
+    snprintf(rst.desk, sizeof rst.desk, "host");
+    plat_mutex_unlock(&rk);
+    return n;
+}
+
+void sbl_inject_take_stats(sbl_inj_stats *out)
+{
+    once();
+    plat_mutex_lock(&rk);
+    *out = rst;
+    rst.calls = rst.events = rst.injected = rst.short_calls = rst.first_err = rst.last_err = 0;
+    rst.desk_moves = rst.desk_fails = 0;
     plat_mutex_unlock(&rk);
 }
 

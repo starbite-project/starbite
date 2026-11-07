@@ -88,6 +88,16 @@ sblinkd.exe --no-keep-awake     do not keep Windows awake while the Mac is conne
   control blocked, stall timeouts, and what DXGI handed over in the last 10 s (`os` frames acquired, `acc`
   frames DWM presented, `ptr` pointer-only frames, `move`/`dirty` rects, `full` whole-image copies, `no-meta`
   presents without metadata).
+- While a Mac is connected it also logs an `input: last 10 s:` line every 10 s: POINTER messages, button
+  edges, wheel steps, KEY and TEXT messages received, messages ignored because the capability was not agreed
+  (`no-cap`) or because no session was up (`before-HELLO`), the events produced; then what `SendInput` did
+  with them (calls, injected of asked, short calls with the `GetLastError()` taken right after the first
+  and the last short call), the desktop the injecting thread was on (`Default`, `Winlogon`), desktop moves
+  and failures, where the cursor is (`GetCursorInfo`: showing, suppressed by touch, hidden) and
+  `SM_MOUSEPRESENT`, and the USB state. The first pointer message and the first button edge of each
+  session get a line of their own with the mapping (display pixel, normalized coordinate, virtual desktop,
+  output) and the injected count. So "the Mac sent nothing", "the input was refused" and "the input landed"
+  can be told apart from the log alone.
 - Only one instance runs on the machine (mutex `Global\StarbiteLinkSender`).
 - While a Mac is connected it calls `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED |
   ES_DISPLAY_REQUIRED)` and releases it when the Mac goes (logged as `power: ...`). This phone's Windows has no
@@ -223,8 +233,9 @@ Found on the S9 on 2026-11-07, and fixed:
   otherwise it is queued for the capture loop. A new HELLO is therefore read even while a frame send hangs.
 - **USB: no unbounded waits on the driver.** An IN transfer that times out after 5 s (the Mac app died) or
   fails, or an OUT transfer that fails, leads to a full re-activation of the USB function: cancel everything,
-  `DEACTIVATE_USB_BUS` (the Mac sees an unplug), reopen, `ACTIVATE_USB_BUS`. The Mac app then reopens the
-  interface. Before this fix, after such a cancel the phone never completed another OUT transfer, and the
+  `DEACTIVATE_USB_BUS`, reopen, `ACTIVATE_USB_BUS`. (`DEACTIVATE_USB_BUS` is documented as unsupported and
+  has never been seen to make the Mac see an unplug; when no bus event follows, the new handle adopts the
+  configured bus, see "Round 7" below, and the Mac app's SET_INTERFACE / device reset produce real events.) Before this fix, after such a cancel the phone never completed another OUT transfer, and the
   new Mac app got "link dead" forever. A request that does not complete within 3 s of its cancel is leaked,
   never reused, and leads to a process restart.
 - **Watchdog.** A thread checks every 2 s for a send that has not returned for 20 s, a USB receive loop that
@@ -246,6 +257,45 @@ Found on the S9 on 2026-11-07, and fixed:
 - the watchdog
 
 Against the old ordering, the first scenario delivered 6 frames in 1.5 s instead of 60 or more.
+
+### Round 7 (2026-11-07): sign-outs, a helper that never saw the Mac again, input diagnostics
+
+Found in the round-7 logs (build 649fd02), and fixed:
+
+- **A new helper on a configured bus waited forever.** Windows ended the user session three times; each
+  time the helper was killed (exit `0x40010004`, `DBG_TERMINATE_PROCESS`) and a new one started. The bus
+  stayed attached and configured (closing the handle does not drop the pull-up, and
+  `DEACTIVATE_USB_BUS` is documented as not supported), so the new helper's `ACTIVATE_USB_BUS` produced
+  no bus event, it never posted an OUT read, and the Mac's HELLO timed out (`0xe00002d6`) for 2 minutes.
+  Now the helper that sees Configured sets `Global\StarbiteLinkUsbConfigured` (the service holds a handle,
+  so it outlives every helper; Reset / Detach / UnConfigured clear it). A helper that activates the bus while
+  it is set and gets no event within 1.5 s adopts the pipes (`usb: adopted pipes IN x OUT y`), and logs
+  `usb: the adopted pipes work: first OUT transfer ...` when the Mac's HELLO arrives. If an adopted read
+  fails it does not re-activate the function (that cannot help) but waits for a bus event.
+- **The Mac app never escalated.** It now sends SET_INTERFACE on the 3rd restart without a HELLO answer
+  (or after two OUT timeouts in a row), and resets the USB device from the 5th (at most every 30 s,
+  doubling to 5 min); the phone then gets real Reset / Configured / SetInterface events. "Reconnect" in the
+  menu also resets the device. PROTOCOL.md 6.4.
+- **Teardown before exit.** `sbl_sender_stop` wakes the USB thread at once; on logoff (`WM_ENDSESSION`), a
+  console control, the service's quit event and a normal exit, the helper waits up to 1.5 s for the USB
+  thread to cancel its requests, deactivate the bus (result logged) and close the handle.
+- **Session lifecycle in the service.** Every control is logged by name with its session id (`session change
+  6 LOGOFF (session 1, now active; console session 1)`), and every helper end-of-session message with its
+  meaning (`the user is signing out` = `ENDSESSION_LOGOFF`, or `shutting down or restarting`). The service no
+  longer starts a helper into a session that is being logged off (LOGOFF seen, or its helper was killed with
+  `0x40010004`, or exited with 4 because `SM_SHUTTINGDOWN` was set), nor into one that is not yet connected
+  to the console (`WTSActive` / `WTSConnected` only): those launches were killed within 0.1-0.4 s, and the
+  early ones got `SetProcessDpiAwarenessContext` error 5 and `DuplicateOutput` access denied.
+- **DPI.** The process call is now the first thing `sbl_main` does, and every thread that injects or
+  captures switches itself to per-monitor v2 (`SetThreadDpiAwarenessContext`), so a process left
+  DPI-unaware cannot scale pointer positions (logical `SM_CXVIRTUALSCREEN` against the physical DXGI rect).
+- **Capture after a sign-in** retries every 1 s for 30 s when `DuplicateOutput` is denied, instead of 10 s.
+- **SendInput errors** are read right after the call, before the desktop retry overwrote them, and a
+  desktop-follow failure is logged whenever its error or the desktop changes, not once per thread.
+
+Not changed: Windows' own power and session behaviour. Why Windows signed the user out (instead of
+restarting) is now visible in the helper's log (`Windows asks to end the session: the user is signing out`)
+and the service log (LOGOFF with the session id).
 
 ### Start at logon (choose one)
 

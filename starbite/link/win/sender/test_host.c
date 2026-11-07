@@ -783,6 +783,11 @@ static void test_e2e(void)
 
     /* input */
     rec_clear();
+    sbl_in_counts ic0, ic1;
+    sbl_input_counts(&g_s, &ic0);
+    sbl_inj_stats is0;
+    sbl_inject_take_stats(&is0);
+    g_s.in_logged = 0;
     memset(&m, 0, sizeof m);
     m.type = SBLK_T_INPUT_POINTER;
     m.u.pointer.x = 100; m.u.pointer.y = 50; m.u.pointer.buttons = SBLK_BTN_LEFT;
@@ -815,6 +820,20 @@ static void test_e2e(void)
               ev_is(&ev[7], SBL_EV_KEY_SCAN, 0x30, 0));
         CHECK(ev_is(&ev[8], SBL_EV_UNICODE, 'o', 0) && ev_is(&ev[10], SBL_EV_UNICODE, 'k', 0) &&
               ev_is(&ev[12], SBL_EV_KEY_VK, 0x0D, 0) && ev_is(&ev[13], SBL_EV_KEY_VK, 0x0D, SBL_EVF_UP));
+    }
+    /* the counters behind the 10 s "input:" stats line: 2 POINTERs (left down, then up with a wheel step),
+     * 2 KEYs, 1 TEXT, 14 events; the first pointer and the first button edge were logged */
+    sbl_input_counts(&g_s, &ic1);
+    CHECKF(ic1.ptr - ic0.ptr == 2 && ic1.btn - ic0.btn == 2 && ic1.whl - ic0.whl == 1 && ic1.key - ic0.key == 2 &&
+           ic1.txt - ic0.txt == 1 && ic1.evs - ic0.evs == 14 && ic1.nocap == ic0.nocap,
+           "ptr %u btn %u whl %u key %u txt %u evs %u nocap %u", ic1.ptr - ic0.ptr, ic1.btn - ic0.btn,
+           ic1.whl - ic0.whl, ic1.key - ic0.key, ic1.txt - ic0.txt, ic1.evs - ic0.evs, ic1.nocap - ic0.nocap);
+    CHECK(g_s.in_logged == 3);
+    {
+        sbl_inj_stats is1;
+        sbl_inject_take_stats(&is1);   /* the capture loop may have taken some: at most 14 here */
+        CHECKF(is1.injected <= 14 && is1.injected == is1.events && is1.short_calls == 0 && !strcmp(is1.desk, "host"),
+               "injected %u of %u, short %u, desk %s", is1.injected, is1.events, is1.short_calls, is1.desk);
     }
     /* (B is still held: the session restart below must release it) */
 
@@ -850,7 +869,8 @@ static void test_e2e(void)
     tv_pump(&v, 2000, u_hello);
     CHECK(v.got_hello && v.hello.width == 640);
     tv_settle(&v, 200, 3000);
-    CHECK(v.keyframes == k0 + 1 && tv_matches(&v, synth_scene()));
+    CHECKF(v.keyframes == k0 + 1 && tv_matches(&v, synth_scene()), "keyframes %u -> %u, matches %d, %ux%u",
+           k0, v.keyframes, tv_matches(&v, synth_scene()), v.w, v.h);
     CHECK(wait_events(1, 1000));
     n = rec_get(ev, 64);
     CHECK(n == 1 && ev_is(&ev[0], SBL_EV_KEY_SCAN, 0x30, SBL_EVF_UP));
@@ -859,9 +879,13 @@ static void test_e2e(void)
     memset(&m, 0, sizeof m);
     m.type = SBLK_T_INPUT_KEY;
     m.u.key.usage_page = 7; m.u.key.usage = 0x04; m.u.key.down = 1;
+    sbl_input_counts(&g_s, &ic0);
     tv_send(&v, &m);
     plat_sleep_ms(200);
     CHECK(rec_get(ev, 64) == 0);
+    sbl_input_counts(&g_s, &ic1);
+    CHECKF(ic1.nocap - ic0.nocap == 1 && ic1.key == ic0.key, "nocap +%u key +%u", ic1.nocap - ic0.nocap,
+           ic1.key - ic0.key);
     CHECK(v.seq_bad == 0 && v.bad == 0);
 
     /* garbage: BYE(PROTOCOL) and close; then a new viewer gets in */
@@ -1204,6 +1228,40 @@ static void test_recover(void)
     CHECKF(rv.ack_wait_timeouts < 5, "%u ACK waits timed out", rv.ack_wait_timeouts);
 }
 
+/* sbl_sender_shutdown: stop reaches the transport's hook at once, and the caller waits for its teardown
+ * (the USB thread cancels, deactivates and closes before the helper exits), bounded */
+static sbl_sender sd;
+static volatile int sd_hooked;
+static void sd_hook(void *ctx) { (void)ctx; sd_hooked++; }
+static void sd_transport(void *a)
+{
+    sbl_sender *s = a;
+    while (!s->stop) plat_sleep_ms(5);
+    plat_sleep_ms(100);              /* teardown */
+    __atomic_sub_fetch(&s->alive, 1, __ATOMIC_SEQ_CST);
+}
+static void test_shutdown(void)
+{
+    sbl_cfg cfg;
+    sbl_cfg_default(&cfg);
+    CHECK(sbl_sender_init(&sd, &cfg) == 0);
+    sd.stop_hook = sd_hook;
+    sd.alive = 1;
+    plat_thread(sd_transport, &sd);
+    uint64_t t0 = plat_now_us();
+    CHECK(sbl_sender_shutdown(&sd, 1500) == 0);
+    uint64_t dt = plat_now_us() - t0;
+    CHECKF(sd_hooked == 1 && sd.alive == 0 && dt >= 90000 && dt < 1000000, "hook %d alive %ld %llu us", sd_hooked,
+           sd.alive, (unsigned long long)dt);
+    /* a transport that never finishes: bounded */
+    sd.alive = 1;
+    t0 = plat_now_us();
+    CHECK(sbl_sender_shutdown(&sd, 200) == -1);
+    dt = plat_now_us() - t0;
+    CHECKF(dt >= 190000 && dt < 1000000, "%llu us", (unsigned long long)dt);
+    CHECK(sbl_sender_shutdown(&sd, 0) == -1 && sd_hooked == 3);
+}
+
 int main(void)
 {
     plat_log_open(NULL, getenv("SBL_TEST_LOG") != NULL);
@@ -1216,6 +1274,7 @@ int main(void)
     sbl_sender_stop(&g_s);
     plat_sleep_ms(200);
     printf("recovery (USB-style link, viewer ACKs before send returns)\n"); test_recover();
+    printf("shutdown (stop hook, bounded wait for the transports)\n"); test_shutdown();
     printf("%ld checks, %ld failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

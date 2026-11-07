@@ -450,10 +450,10 @@ static int cap_open(sbl_cap **cp, const sbl_cfg *cfg, sbl_cap_info *info)
     int r = -1;
     if (!cfg->force_gdi) {
         r = dxgi_open(c, &p);
-        if (r == -2) {   /* secure desktop: try again later rather than falling back */
+        if (r == -2) {   /* secure desktop / session starting: try again soon (session.c) rather than GDI */
             IDXGIOutput_Release(p.out); IDXGIAdapter1_Release(p.ad);
             sbl_cap_close(c);
-            return -1;
+            return -2;
         }
         if (r < 0) {
             if (c->dup) IDXGIOutputDuplication_Release(c->dup);

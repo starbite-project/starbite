@@ -65,16 +65,34 @@ static void usage(void)
 }
 
 #ifdef _WIN32
+#define SHUTDOWN_JOIN_MS 1500   /* how long an exit waits for the USB teardown (well under Windows' 5 s) */
+
+/* WM_QUERYENDSESSION / WM_ENDSESSION lParam: a sign-out or a shutdown/restart (round 7: the logs could not
+ * tell the three session ends apart) */
+static const char *end_kind(LPARAM lp, char *b, size_t n)
+{
+    snprintf(b, n, "%s%s%s (lParam 0x%llx, SM_SHUTTINGDOWN %d)",
+             (lp & ENDSESSION_LOGOFF) ? "the user is signing out" : "Windows is shutting down or restarting",
+             (lp & ENDSESSION_CRITICAL) ? ", critical" : "", (lp & ENDSESSION_CLOSEAPP) ? ", close app" : "",
+             (unsigned long long)(ULONG_PTR)lp, GetSystemMetrics(SM_SHUTTINGDOWN));
+    return b;
+}
+
 static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
+    char k[160];
     switch (msg) {
     case WM_QUERYENDSESSION:
+        sbl_log("Windows asks to end the session: %s", end_kind(lp, k, sizeof k));
         return TRUE;
     case WM_ENDSESSION:
+        sbl_log("Windows %s the session: %s", wp ? "is ending" : "cancelled ending", end_kind(lp, k, sizeof k));
         if (wp) {
-            sbl_log("Windows is ending the session: BYE(SHUTDOWN)");
-            sbl_sender_bye(&g_s, SBLK_BYE_SHUTDOWN, "Windows is shutting down");
-            sbl_sender_stop(&g_s);
+            sbl_sender_bye(&g_s, SBLK_BYE_SHUTDOWN, (lp & ENDSESSION_LOGOFF) ? "Windows user is signing out"
+                                                                              : "Windows is shutting down");
+            /* the process is killed soon after this returns (exit 0x40010004): tear USB down first */
+            sbl_sender_shutdown(&g_s, SHUTDOWN_JOIN_MS);
+            sbl_log("session end: USB torn down, exiting");
         }
         return 0;
     case WM_POWERBROADCAST:
@@ -106,9 +124,10 @@ static void msg_thread(void *arg)
 
 static BOOL WINAPI ctrl_handler(DWORD t)
 {
-    (void)t;
+    sbl_log("console control %lu (%s): BYE(SHUTDOWN)", t, t == CTRL_LOGOFF_EVENT ? "logoff" : t == CTRL_SHUTDOWN_EVENT
+                                                            ? "shutdown" : t == CTRL_CLOSE_EVENT ? "close" : "break");
     sbl_sender_bye(&g_s, SBLK_BYE_SHUTDOWN, "sblinkd stopped");
-    sbl_sender_stop(&g_s);
+    sbl_sender_shutdown(&g_s, SHUTDOWN_JOIN_MS);
     return TRUE;
 }
 
@@ -119,7 +138,7 @@ static void quit_thread(void *arg)
     WaitForSingleObject(g_quit_ev, INFINITE);
     sbl_log("the service asks this helper to stop: BYE(SHUTDOWN)");
     sbl_sender_bye(&g_s, SBLK_BYE_SHUTDOWN, "Starbite Link service stopping");
-    sbl_sender_stop(&g_s);
+    sbl_sender_shutdown(&g_s, SHUTDOWN_JOIN_MS);
 }
 
 /* Something is stuck beyond what the loops can recover from (sbl_watchdog): a new process. The helper
@@ -178,6 +197,11 @@ static int single_instance(void)
 
 static int sbl_main(int argc, char **argv)
 {
+#ifdef _WIN32
+    /* desktop coordinates in real pixels on every monitor (DXGI rects, SendInput, GDI): first of all, before
+     * any thread or user32 call. Logged below, once the log is open. */
+    DWORD dpi_err = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) ? 0 : GetLastError();
+#endif
     sbl_cfg cfg;
     sbl_cfg_default(&cfg);
 #ifdef _WIN32
@@ -252,6 +276,14 @@ static int sbl_main(int argc, char **argv)
         sbl_log("--tcp ignored: this helper injects input as SYSTEM (UAC included); --unsafe-tcp allows it");
         cfg.tcp_port = 0;
     }
+    if (dpi_err)
+        sbl_log("SetProcessDpiAwarenessContext failed (%lu): the process is DPI awareness %d; injecting and capturing "
+                "threads switch to per-monitor v2 themselves", dpi_err,
+                (int)GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()));
+    if (g_helper && GetSystemMetrics(SM_SHUTTINGDOWN)) {
+        sbl_log("this session is ending (SM_SHUTTINGDOWN): not starting");
+        return 4;   /* service_win.c: no new helper in this session */
+    }
     if (!g_helper && sbl_service_is_running()) {
         sbl_log("the StarbiteLink service is running and serves this session: this instance exits");
         return 0;
@@ -264,9 +296,6 @@ static int sbl_main(int argc, char **argv)
 #endif
 
 #ifdef _WIN32
-    /* desktop coordinates in real pixels on every monitor (DXGI rects, SendInput, GDI) */
-    if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
-        sbl_log("SetProcessDpiAwarenessContext failed (%lu)", GetLastError());
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
 #endif
 
@@ -285,6 +314,7 @@ static int sbl_main(int argc, char **argv)
     if (!transports) { sbl_log("no transport could start: exiting"); return 1; }
 
     sbl_sender_run(&g_s);
+    sbl_sender_shutdown(&g_s, 1500);   /* the USB thread cancels, deactivates and closes before we exit */
     sbl_log("sblinkd stopped");
     return 0;
 }

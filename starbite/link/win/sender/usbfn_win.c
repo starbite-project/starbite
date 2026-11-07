@@ -21,6 +21,24 @@
  *   - a request that does not even complete after a cancel leaves its buffer with the driver: it is
  *     leaked, never reused, and the process asks to be restarted (sbl_request_restart; main.c);
  *   - the receive loop stamps rx_beat_us at least every second for the watchdog.
+ *
+ * Round 7 (2026-11-07, service mode): Windows ended the user session, killed the helper (exit 0x40010004)
+ * and the service started a new one. The bus stayed attached and configured (closing the handle does not
+ * drop the pull-up, and IOCTL_GENERICUSBFN_DEACTIVATE_USB_BUS is documented as not supported: no log ever
+ * showed it make the Mac see an unplug), so the new helper's ACTIVATE_USB_BUS produced no Attach / Reset /
+ * Configured event at all, it never posted an OUT read, and the Mac's HELLO timed out for 2 minutes.
+ * Bus events are edges; UFX does not replay them to a new handle and has no "query state" IOCTL. Now:
+ *   - adopting a configured bus: whoever sees Configured sets the named event
+ *     Global\StarbiteLinkUsbConfigured (the service holds a handle, so it outlives every helper), and
+ *     Reset / Detach / UnConfigured / BusTearDown clear it. A helper that activates the bus while it is
+ *     set and gets no bus event within ADOPT_MS takes the pipe ids from GET_CLASS_INFO and posts its OUT
+ *     reads ("adopted"). If an adopted read fails it does not re-activate (that cannot help): it goes back
+ *     to waiting for events. The Mac's side (link.m) escalates to SET_INTERFACE and a USB device reset when
+ *     HELLO gets no answer, and either one produces real bus events here;
+ *   - stop wakes this thread at once (stop_hook), and serve() tears down (cancel, DEACTIVATE, close)
+ *     before the process exits: main.c waits for it (sbl_sender_shutdown) on logoff, quit and service stop;
+ *   - every bus event and every recovery step is logged, and the stats line / a 30 s "waiting" line carry
+ *     the bus state (sbl_link.describe).
  */
 #include "sender.h"
 
@@ -39,6 +57,8 @@ static const GUID SBL_USBFN_IF = { 0xd274dae6, 0x37b0, 0x4c76, { 0xbf, 0x10, 0x3
 #define RX_SIZE  (64u * 1024u)     /* multiple of 512 */
 #define TX_TIMEOUT_MS 5000
 #define CANCEL_MS 3000             /* a cancelled request must complete within this */
+#define ADOPT_MS 1500              /* no bus event this long after ACTIVATE on a configured bus: adopt it */
+#define HINT_NAME L"Global\\StarbiteLinkUsbConfigured"
 
 typedef struct usb_ctx {
     sbl_link link;                 /* first: sbl_link * == usb_ctx * */
@@ -53,7 +73,42 @@ typedef struct usb_ctx {
     volatile LONG recycle;
     char recycle_why[96];
     volatile LONG wedged;          /* a request never completed: only a process restart helps */
+    HANDLE stop_ev;                /* manual reset: the sender is stopping (sbl_sender_stop) */
+    HANDLE hint_ev;                /* Global\StarbiteLinkUsbConfigured (see the top) */
+    int hint;                      /* the same, in this process (when the named event cannot be had) */
+    volatile LONG adopted;         /* configured by adoption, not by a Configured event */
+    /* state for the logs (describe) */
+    volatile LONG activated;
+    uint64_t activated_us, last_ev_us, configured_us;
+    const char *last_ev;
+    volatile LONG64 out_xfers, out_bytes;   /* since configured */
 } usb_ctx;
+
+static void hint_set(usb_ctx *u, int on)
+{
+    u->hint = on;
+    if (u->hint_ev) { if (on) SetEvent(u->hint_ev); else ResetEvent(u->hint_ev); }
+}
+
+static int hint_get(usb_ctx *u)
+{
+    if (u->hint_ev) return WaitForSingleObject(u->hint_ev, 0) == WAIT_OBJECT_0;
+    return u->hint;
+}
+
+static void usb_describe(sbl_link *l, char *b, size_t n)
+{
+    usb_ctx *u = (usb_ctx *)l;
+    uint64_t now = plat_now_us();
+    char ev[64] = "no bus event yet";
+    if (u->last_ev) snprintf(ev, sizeof ev, "last bus event %s %llu s ago", u->last_ev,
+                             (unsigned long long)((now - u->last_ev_us) / 1000000u));
+    snprintf(b, n, "usb: %s%s%s, %s, OUT %lld transfers %lld KiB since configured, bus %s",
+             !u->activated ? "not activated" : u->configured ? (u->adopted ? "configured (adopted)" : "configured")
+                                                             : "activated, not configured",
+             u->suspended ? ", suspended" : "", u->wedged ? ", WEDGED" : "", ev, (long long)u->out_xfers,
+             (long long)(u->out_bytes >> 10), hint_get(u) ? "marked configured" : "not marked configured");
+}
 
 static void request_recycle(usb_ctx *u, const char *why)
 {
@@ -153,10 +208,11 @@ static int usb_send(sbl_link *l, const uint8_t *p, size_t n)
             err = GetLastError();
             if (err == ERROR_IO_PENDING) {
                 err = 0;
-                HANDLE w[2] = { ov->hEvent, u->recycle_ev };
-                DWORD r = WaitForMultipleObjects(2, w, FALSE, TX_TIMEOUT_MS);
+                HANDLE w[3] = { ov->hEvent, u->recycle_ev, u->stop_ev };
+                DWORD r = WaitForMultipleObjects(3, w, FALSE, TX_TIMEOUT_MS);
                 if (r != WAIT_OBJECT_0) {
-                    /* the Mac is not reading (killed, asleep), or the function is being re-activated */
+                    /* the Mac is not reading (killed, asleep), the function is being re-activated, or the
+                     * sender stops */
                     CancelIoEx(u->h, ov);
                     err = r == WAIT_TIMEOUT ? WAIT_TIMEOUT : ERROR_OPERATION_ABORTED;
                     if (finish_cancelled(u->h, ov, &done) < 0) {
@@ -286,6 +342,28 @@ static int rx_cancel(usb_ctx *u, rx_slot **slot)
     return ok;
 }
 
+/* adopted pipes that do not work from this handle: back to waiting for a bus event (re-activating the
+ * function cannot help: it does not detach; the Mac's SET_INTERFACE / device reset makes real events) */
+static int unadopt(usb_ctx *u, rx_slot **rx, const char *what, DWORD e)
+{
+    sbl_log("usb: %s on the adopted pipes (error %lu): not usable from this handle; waiting for a bus event "
+            "(the Mac app resets the device when HELLO gets no answer)", what, e);
+    InterlockedExchange(&u->configured, 0);
+    InterlockedExchange(&u->adopted, 0);
+    int r = rx_cancel(u, rx);
+    sbl_link_end(u->s, &u->link, "adopted pipes failed");
+    return r;
+}
+
+/* is a session up on this link? (for the "waiting" log) */
+static int has_session(usb_ctx *u)
+{
+    plat_mutex_lock(&u->s->lk);
+    int on = u->s->active && u->s->owner == &u->link;
+    plat_mutex_unlock(&u->s->lk);
+    return on;
+}
+
 /* runs one opened device until it goes away or must be re-activated; returns to re-discover */
 static void serve(usb_ctx *u)
 {
@@ -293,13 +371,23 @@ static void serve(usb_ctx *u)
     u->link.rx_beat_us = plat_now_us();
     DWORD err = ioctl_wait(u, IOCTL_GENERICUSBFN_ACTIVATE_USB_BUS, NULL, 0, NULL, 0, NULL, 5000);
     if (err) { sbl_log("usb: ACTIVATE_USB_BUS error %lu", err); return; }
-    sbl_log("usb: bus activated, waiting for the Mac");
+    uint64_t t_act = plat_now_us();
+    u->activated_us = t_act;
+    u->last_ev = NULL;
+    InterlockedExchange(&u->adopted, 0);
+    InterlockedExchange(&u->activated, 1);
+    int was_configured = hint_get(u);
+    uint64_t adopt_at = was_configured ? t_act + ADOPT_MS * 1000ull : 0;
+    sbl_log("usb: bus activated, waiting for the Mac%s", was_configured
+            ? " (the bus was configured before this handle: its pipes are adopted if no bus event comes within 1.5 s)" : "");
 
     USBFN_NOTIFICATION *note = calloc(1, sizeof *note);
     OVERLAPPED *evov = calloc(1, sizeof *evov);
     rx_slot *rx[2] = { rx_new(), rx_new() };
     u->txov = calloc(1, sizeof *u->txov);
-    int rx_next = 0, prev_full = 0, ev_posted = 0;
+    int rx_next = 0, prev_full = 0, ev_posted = 0, events_seen = 0;
+    int adopted_rx_logged = 0, adopted_quiet_logged = 0;
+    uint64_t next_state_log = t_act + 30000000u, adopted_at = 0;
     DWORD n = 0;
     if (evov) evov->hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (u->txov) u->txov->hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -309,7 +397,20 @@ static void serve(usb_ctx *u)
     }
 
     while (!s->stop && !u->recycle) {
-        u->link.rx_beat_us = plat_now_us();
+        uint64_t now = plat_now_us();
+        u->link.rx_beat_us = now;
+        if (now >= next_state_log) {   /* a helper stuck without a session is obvious in the log */
+            next_state_log = now + 30000000u;
+            if (!has_session(u)) {
+                char d[200];
+                usb_describe(&u->link, d, sizeof d);
+                sbl_log("usb: waiting, no session: %s", d);
+            }
+        }
+        if (u->adopted && !adopted_rx_logged && !adopted_quiet_logged && now - adopted_at > 30000000u) {
+            adopted_quiet_logged = 1;
+            sbl_log("usb: adopted pipes, but no OUT data from the Mac for 30 s (still waiting for HELLO or a bus event)");
+        }
         if (!ev_posted) {
             ResetEvent(evov->hEvent);
             memset(note, 0, sizeof *note);
@@ -320,28 +421,66 @@ static void serve(usb_ctx *u)
             }
             ev_posted = 1;
         }
+        if (adopt_at && now >= adopt_at) {
+            adopt_at = 0;
+            if (!events_seen && !u->configured) {
+                sbl_log("usb: no bus event %llu ms after ACTIVATE, and the bus was configured before (the previous "
+                        "helper ended without a detach): adopting its pipes", (unsigned long long)((now - t_act) / 1000u));
+                if (get_pipes_once(u, 1) == 0) {
+                    sbl_link_end(s, &u->link, "USB pipes adopted");
+                    u->out_xfers = u->out_bytes = 0;
+                    u->configured_us = now;
+                    adopted_at = now;
+                    adopted_rx_logged = adopted_quiet_logged = 0;
+                    InterlockedExchange(&u->adopted, 1);
+                    InterlockedExchange(&u->configured, 1);
+                    InterlockedExchange(&u->suspended, 0);
+                    sbl_log("usb: adopted pipes IN %lu OUT %lu: OUT reads posted, waiting for HELLO (the Mac sends it "
+                            "again every few seconds)", (unsigned long)u->pin, (unsigned long)u->pout);
+                } else {
+                    sbl_log("usb: no pipes to adopt: waiting for a bus event (the Mac app resets the device when HELLO "
+                            "gets no answer)");
+                }
+            }
+        }
         if (u->configured) {
+            int failed = 0;
             for (int i = 0; i < 2; i++) {
                 if (rx[i]->posted) continue;
                 ResetEvent(rx[i]->ov.hEvent);
                 if (!DeviceIoControl(u->h, IOCTL_GENERICUSBFN_TRANSFER_OUT, &u->pout, sizeof u->pout, rx[i]->buf, RX_SIZE, NULL, &rx[i]->ov) &&
                     GetLastError() != ERROR_IO_PENDING) {
+                    DWORD e = GetLastError();
+                    if (u->adopted) {
+                        if (unadopt(u, rx, "an OUT read could not be queued", e) < 0) goto out;
+                        rx_next = 0;
+                        prev_full = 0;
+                        failed = 1;
+                        break;
+                    }
                     char why[64];
-                    snprintf(why, sizeof why, "OUT transfer could not be queued (%lu)", GetLastError());
+                    snprintf(why, sizeof why, "OUT transfer could not be queued (%lu)", e);
                     request_recycle(u, why);
                     break;
                 }
                 rx[i]->posted = 1;
             }
             if (u->recycle) break;
+            if (failed) continue;
         }
-        HANDLE w[3] = { evov->hEvent, u->recycle_ev, rx[rx_next]->ov.hEvent };
-        DWORD r = WaitForMultipleObjects(rx[rx_next]->posted ? 3 : 2, w, FALSE, 1000);
+        DWORD ms = 1000;
+        if (adopt_at) {
+            uint64_t t = plat_now_us();
+            uint64_t left = adopt_at > t ? (adopt_at - t) / 1000u + 1 : 0;
+            if (left < ms) ms = (DWORD)left;
+        }
+        HANDLE w[4] = { evov->hEvent, u->recycle_ev, u->stop_ev, rx[rx_next]->ov.hEvent };
+        DWORD r = WaitForMultipleObjects(rx[rx_next]->posted ? 4 : 3, w, FALSE, ms);
         u->link.rx_beat_us = plat_now_us();
-        if (s->stop || u->recycle) break;
+        if (s->stop || u->recycle || r == WAIT_OBJECT_0 + 2) break;
         if (r == WAIT_TIMEOUT) continue;
 
-        if (r == WAIT_OBJECT_0 + 2) {   /* OUT data, completed in the order posted */
+        if (r == WAIT_OBJECT_0 + 3) {   /* OUT data, completed in the order posted */
             n = 0;
             BOOL ok = GetOverlappedResult(u->h, &rx[rx_next]->ov, &n, FALSE);
             rx[rx_next]->posted = 0;
@@ -351,12 +490,27 @@ static void serve(usb_ctx *u)
                 DWORD e = GetLastError();
                 prev_full = 0;
                 if (e == ERROR_OPERATION_ABORTED) continue;
+                if (u->adopted) {
+                    if (unadopt(u, rx, "an OUT read failed", e) < 0) goto out;
+                    rx_next = 0;
+                    continue;
+                }
                 char why[64];
                 snprintf(why, sizeof why, "OUT transfer failed (%lu)", e);
                 request_recycle(u, why);
                 break;
             }
-            if (n) sbl_rx(s, &u->link, rx[i]->buf, n, !prev_full);
+            if (n) {
+                InterlockedIncrement64(&u->out_xfers);
+                InterlockedAdd64(&u->out_bytes, (LONG64)n);
+                if (u->adopted && !adopted_rx_logged) {
+                    adopted_rx_logged = 1;
+                    sbl_log("usb: the adopted pipes work: first OUT transfer %lu bytes%s, %llu ms after adopting", n,
+                            n >= 6 && rx[i]->buf[0] == 'S' && rx[i]->buf[5] == SBLK_T_HELLO ? " (HELLO)" : "",
+                            (unsigned long long)((plat_now_us() - adopted_at) / 1000u));
+                }
+                sbl_rx(s, &u->link, rx[i]->buf, n, !prev_full);
+            }
             prev_full = n == RX_SIZE;   /* a full read: the transfer may continue in the next one */
             continue;
         }
@@ -368,7 +522,12 @@ static void serve(usb_ctx *u)
             sbl_log("usb: bus event wait failed %lu: device gone", GetLastError());
             break;
         }
-        sbl_log("usb: event %s", ev_name(note->Event));
+        uint64_t te = plat_now_us();
+        events_seen = 1;
+        u->last_ev = ev_name(note->Event);
+        u->last_ev_us = te;
+        sbl_log("usb: event %s (%llu ms after ACTIVATE%s)", ev_name(note->Event), (unsigned long long)((te - t_act) / 1000u),
+                u->adopted ? ", pipes were adopted" : "");
         switch (note->Event) {
         case UsbfnEventConfigured:
         case UsbfnEventSetInterface:
@@ -380,13 +539,19 @@ static void serve(usb_ctx *u)
                 rx_next = 0;
                 prev_full = 0;
             }
+            InterlockedExchange(&u->adopted, 0);
             sbl_link_end(s, &u->link, ev_name(note->Event));
             static int pipe_fails;   /* consecutive: recycle at most 3 times in a row, then just wait */
             if (get_pipes(u) == 0) {
                 pipe_fails = 0;
+                u->out_xfers = u->out_bytes = 0;
+                u->configured_us = te;
                 InterlockedExchange(&u->configured, 1);
                 InterlockedExchange(&u->suspended, 0);
-                sbl_log("usb: configured (value %u), waiting for HELLO", note->u.ConfigurationValue);
+                hint_set(u, 1);
+                sbl_log("usb: configured (value %u), pipes IN %lu OUT %lu, waiting for HELLO",
+                        note->Event == UsbfnEventConfigured ? note->u.ConfigurationValue : 0, (unsigned long)u->pin,
+                        (unsigned long)u->pout);
             } else {
                 /* configured without pipes = no session ever: start the function over rather than sit here */
                 if (++pipe_fails <= 3) request_recycle(u, "no usable pipes after Configured");
@@ -402,6 +567,8 @@ static void serve(usb_ctx *u)
                 rx_next = 0;
                 prev_full = 0;
             }
+            InterlockedExchange(&u->adopted, 0);
+            hint_set(u, 0);
             sbl_link_end(s, &u->link, ev_name(note->Event));
             break;
         case UsbfnEventSuspend:
@@ -425,18 +592,23 @@ static void serve(usb_ctx *u)
     }
 
 out:
-    if (u->recycle) sbl_log("usb: %s: re-activating the USB function (the Mac sees an unplug and a replug)", u->recycle_why);
+    if (u->recycle) sbl_log("usb: %s: re-activating the USB function", u->recycle_why);
+    else if (s->stop) sbl_log("usb: the sender is stopping: cancelling USB requests and deactivating the bus");
     InterlockedExchange(&u->configured, 0);
+    InterlockedExchange(&u->adopted, 0);
     /* the session first: a send in progress sees recycle_ev and returns (txlk is then free) */
     SetEvent(u->recycle_ev);
-    sbl_link_end(s, &u->link, u->recycle ? "USB function re-activated" : "device closed");
+    sbl_link_end(s, &u->link, u->recycle ? "USB function re-activated" : s->stop ? "sender stopping" : "device closed");
     /* every request back from the driver before its memory is freed; what it keeps is leaked */
     if (rx[0] && rx[1]) rx_cancel(u, rx);
     if (ev_posted && evov) {
         CancelIoEx(u->h, evov);
         if (finish_cancelled(u->h, evov, &n) < 0) { evov = NULL; note = NULL; set_wedged(u, "the bus event request"); }
     }
-    ioctl_wait(u, IOCTL_GENERICUSBFN_DEACTIVATE_USB_BUS, NULL, 0, NULL, 0, NULL, 2000);
+    /* documented as unsupported by GenericUsbFn; kept, and its result logged, to see what this build does */
+    err = ioctl_wait(u, IOCTL_GENERICUSBFN_DEACTIVATE_USB_BUS, NULL, 0, NULL, 0, NULL, 2000);
+    sbl_log("usb: DEACTIVATE_USB_BUS: %s (%lu)", err ? "error" : "ok", err);
+    InterlockedExchange(&u->activated, 0);
     if (evov) { if (evov->hEvent) CloseHandle(evov->hEvent); free(evov); }
     free(note);
     rx_free(rx[0]);
@@ -456,14 +628,14 @@ static void usb_thread(void *arg)
     while (!u->s->stop) {
         u->link.rx_beat_us = plat_now_us();
         if (u->wedged) {   /* only a new process helps; main.c's watchdog restarts it */
-            plat_sleep_ms(1000);
+            WaitForSingleObject(u->stop_ev, 1000);
             continue;
         }
         WCHAR path[512];
         if (find_interface(path, 512) < 0) {
             if (!logged) sbl_log("usb: no GenericUsbFn interface {d274dae6-...} yet (USB device mode off?); checking every 2 s");
             logged = 1;
-            plat_sleep_ms(2000);
+            WaitForSingleObject(u->stop_ev, 2000);
             continue;
         }
         logged = 0;
@@ -471,7 +643,7 @@ static void usb_thread(void *arg)
                            FILE_FLAG_OVERLAPPED, NULL);
         if (u->h == INVALID_HANDLE_VALUE) {
             sbl_log("usb: cannot open the interface (%lu)", GetLastError());
-            plat_sleep_ms(2000);
+            WaitForSingleObject(u->stop_ev, 2000);
             continue;
         }
         char p8[512];
@@ -483,9 +655,17 @@ static void usb_thread(void *arg)
         int recycled = u->recycle != 0;
         CloseHandle(u->h);
         u->h = INVALID_HANDLE_VALUE;
-        /* after a re-activation stay off the bus long enough for the Mac to see the unplug */
-        plat_sleep_ms(recycled ? 2000 : 1000);
+        if (u->s->stop) { sbl_log("usb: interface closed (sender stopping)"); break; }
+        /* after a re-activation stay off the bus a while (in case DEACTIVATE did detach) */
+        WaitForSingleObject(u->stop_ev, recycled ? 2000 : 1000);
     }
+    InterlockedDecrement(&u->s->alive);
+}
+
+static void usb_stop_hook(void *ctx)
+{
+    usb_ctx *u = ctx;
+    SetEvent(u->stop_ev);
 }
 
 int sbl_usb_start(sbl_sender *s)
@@ -495,13 +675,25 @@ int sbl_usb_start(sbl_sender *s)
     sbl_link_init(&u->link, "usb", 1);
     u->link.send = usb_send;
     u->link.close = usb_close;
+    u->link.describe = usb_describe;
     u->link.ctx = u;
     u->s = s;
     u->h = INVALID_HANDLE_VALUE;
     u->chunk = s->cfg.usb_chunk;
     u->recycle_ev = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (!u->recycle_ev || plat_thread(usb_thread, u) < 0) { free(u); return -1; }
-    sbl_log("usb: GenericUsbFn transport started (VID %04x PID %04x, IN 0x%02x OUT 0x%02x)", SBLK_USB_VID,
-            SBLK_USB_PID, SBLK_USB_EP_IN, SBLK_USB_EP_OUT);
+    u->stop_ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    /* the service created it (and keeps it); a Startup-folder instance gets a private one */
+    u->hint_ev = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, HINT_NAME);
+    DWORD he = u->hint_ev ? 0 : GetLastError();
+    if (!u->hint_ev) u->hint_ev = CreateEventW(NULL, TRUE, FALSE, HINT_NAME);
+    if (!u->recycle_ev || !u->stop_ev) { free(u); return -1; }
+    s->stop_hook = usb_stop_hook;
+    s->stop_hook_ctx = u;
+    InterlockedIncrement(&s->alive);
+    if (plat_thread(usb_thread, u) < 0) { InterlockedDecrement(&s->alive); s->stop_hook = NULL; free(u); return -1; }
+    sbl_log("usb: GenericUsbFn transport started (VID %04x PID %04x, IN 0x%02x OUT 0x%02x); configured-bus marker %s%s",
+            SBLK_USB_VID, SBLK_USB_PID, SBLK_USB_EP_IN, SBLK_USB_EP_OUT,
+            !u->hint_ev ? "unavailable" : he ? "created here" : "from the service",
+            u->hint_ev && hint_get(u) ? " (set: the bus was configured by an earlier helper)" : "");
     return 0;
 }

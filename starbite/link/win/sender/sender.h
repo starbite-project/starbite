@@ -147,9 +147,29 @@ int sbl_in_release_all(sbl_input *st, sbl_ev *out, int max);
 #define SBL_MAX_EV_RELEASE (256 + 8 + 5)
 
 /* platform injector (inject_win.c / inject_rec.c) */
-void sbl_inject(const sbl_ev *ev, int n);
-void sbl_inject_geom(sbl_geom *g);           /* fills virt_* */
+int  sbl_inject(const sbl_ev *ev, int n);    /* returns the events injected (SendInput's count) */
+void sbl_inject_geom(sbl_geom *g);           /* fills virt_* (physical pixels: the thread is made DPI aware) */
 int  sbl_follow_input_desktop(int force);    /* Windows: thread onto the input desktop (inject_win.c); host: 0 */
+
+/* What the injector did since the last take (the 10 s stats line). Counters reset on each take; the
+ * desktop and cursor fields keep their last value. */
+typedef struct sbl_inj_stats {
+    uint32_t calls;            /* SendInput batches */
+    uint32_t events;           /* events handed to SendInput */
+    uint32_t injected;         /* events SendInput reported as injected */
+    uint32_t short_calls;      /* batches where fewer were injected */
+    uint32_t first_err;        /* GetLastError right after the first short SendInput (before any other call) */
+    uint32_t last_err;         /* ... after the last short one (or after its retry) */
+    uint32_t desk_moves;       /* injecting threads moved to another desktop */
+    uint32_t desk_fails;       /* OpenInputDesktop / SetThreadDesktop failures */
+    uint32_t desk_err;         /* the last such failure's error */
+    char     desk[32];         /* desktop of the thread that injected last ("Default", "Winlogon") */
+    int      cur_valid;        /* GetCursorInfo worked (at most once a second after pointer events) */
+    int32_t  cur_x, cur_y;
+    uint32_t cur_flags;        /* CURSOR_SHOWING 1, CURSOR_SUPPRESSED 2; 0 = hidden */
+    int      mouse_present;    /* GetSystemMetrics(SM_MOUSEPRESENT) */
+} sbl_inj_stats;
+void sbl_inject_take_stats(sbl_inj_stats *out);
 
 /* ---- configuration ------------------------------------------------------------------------------- */
 
@@ -188,6 +208,7 @@ typedef struct sbl_cap_info {
 
 #define SBL_CAP_RESET (-100)   /* re-open the capture (access lost, mode changed, desktop switch) */
 
+/* 0 = open, -2 = access denied (secure desktop, a session not ready yet: retry soon), other < 0 = error */
 int  sbl_cap_open(sbl_cap **c, const sbl_cfg *cfg, sbl_cap_info *info);
 void sbl_cap_close(sbl_cap *c);
 /* Waits up to timeout_ms for the next OS frame and adds its changed areas to *dirty.
@@ -229,8 +250,18 @@ struct sbl_link {
      * rx_beat_us on every turn; one that stops turning is stuck in the driver or on a lock */
     int      watch_rx;
     volatile uint64_t rx_beat_us;
+    /* optional: one line of transport state for the stats line (USB: bus state, last event) */
+    void (*describe)(sbl_link *l, char *buf, size_t n);
 };
 void sbl_link_init(sbl_link *l, const char *name, int is_usb);
+
+/* input received in one stats window */
+typedef struct sbl_in_counts {
+    uint32_t ptr, btn, whl, key, txt;   /* POINTER messages, button edges, wheel steps, KEY, TEXT */
+    uint32_t nocap;                     /* INPUT_* ignored: the capability was not agreed */
+    uint32_t early;                     /* INPUT_* from a link without a session (before HELLO) */
+    uint32_t evs;                       /* injection events produced */
+} sbl_in_counts;
 
 typedef struct sbl_sender {
     sbl_cfg cfg;
@@ -269,6 +300,11 @@ typedef struct sbl_sender {
     uint64_t st_stalls;        /* flow control stalls broken by the stall timeout */
     uint64_t st_ack_bad;       /* ACKs for frames not in flight (logged the first few times) */
     uint64_t st_t0;
+    /* input received in the current 10 s window (lk; logged and reset by the stats line) */
+    sbl_in_counts in_win;
+    sbl_in_counts in_total;    /* earlier windows (sbl_input_counts adds the current one) */
+    int      in_logged;        /* this session: 1 = first pointer logged, 2 = first button edge logged */
+    uint64_t in_last_us;       /* last input message (any session) */
 
     /* watchdog (sbl_watchdog) */
     volatile uint64_t loop_beat_us;    /* the capture loop's last turn */
@@ -277,12 +313,23 @@ typedef struct sbl_sender {
     int      nwatch;
     char     restart_why[96];  /* set by a transport that cannot recover by itself (sbl_request_restart) */
     int      awake;            /* keep-awake currently requested */
+
+    /* shutdown: sbl_sender_stop calls stop_hook (the USB thread's wait wakes at once); transports that
+     * must tear down before the process exits count themselves in alive (sbl_sender_shutdown waits) */
+    void   (*stop_hook)(void *ctx);
+    void    *stop_hook_ctx;
+    volatile long alive;
 } sbl_sender;
 
 int  sbl_sender_init(sbl_sender *s, const sbl_cfg *cfg);
 void sbl_sender_run(sbl_sender *s);          /* the capture/send loop; returns after sbl_sender_stop */
 void sbl_sender_stop(sbl_sender *s);
 void sbl_sender_bye(sbl_sender *s, uint32_t reason, const char *text);   /* BYE + end session */
+/* stop + wait up to ms for the transports to tear down (USB: requests cancelled, bus deactivated, handle
+ * closed). 0 = all down, -1 = timed out. Safe to call more than once. */
+int  sbl_sender_shutdown(sbl_sender *s, int ms);
+/* input received since sbl_sender_init (all windows) */
+void sbl_input_counts(sbl_sender *s, sbl_in_counts *out);
 
 /* Watchdog. Transports register links whose receive loop must keep turning. sbl_watchdog() returns 1 (and
  * the reason) when something is stuck beyond recovery inside the process: a send that has not returned

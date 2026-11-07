@@ -304,7 +304,17 @@ There is no connection, so:
   **ignores OUT transfers until one begins with a valid HELLO header** (magic, version 1, type HELLO). Because
   the Mac always sends HELLO as its own transfer (6.3), this always recovers without unplugging.
 - USB reset, detach, or a new SET_CONFIGURATION (GenericUsbFn bus events) = the session is gone: both sides
-  drop state; the Mac starts again at 6.3 when the device comes back.
+  drop state; the Mac starts again at 6.3 when the device comes back. A SET_INTERFACE (alternate setting 0)
+  is handled like SET_CONFIGURATION: the phone takes the pipes again and waits for HELLO.
+- **The phone does not answer HELLO** (no OUT read posted: its link service restarted on a bus that stayed
+  configured, so it saw no bus event). The Mac escalates; each restart without a HELLO answer counts and a
+  HELLO answer resets the count: restarts 1-2 as above; restart 3 (or at once after two HELLO OUT transfers
+  in a row time out) sends SET_INTERFACE first; from restart 5 the Mac resets the USB device (it
+  re-enumerates: the phone sees Reset and Configured), at most every 30 s, doubling to 5 minutes. Retries
+  back off to 8 s. No message or wire format changes.
+- The **phone**, when its link service starts on a bus that a previous instance had configured and no bus
+  event arrives within 1.5 s, adopts the pipes (GET_CLASS_INFO) and posts its OUT reads, so the Mac's next
+  HELLO is read without any reset.
 
 ## 7. Versioning
 

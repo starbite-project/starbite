@@ -423,7 +423,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func requestKeyframe() { if let l = link { sbl_link_request_keyframe(l) } }
     @objc func setMode(_ it: NSMenuItem) { options.mode = Int32(it.tag); restartLink() }
     @objc func setCmd(_ it: NSMenuItem) { view.releaseAll(); options.cmdAsCtrl = it.tag == 1; view.options = options; options.save() }
-    @objc func reconnect() { restartLink() }
+    // Reconnect also resets the USB device: the phone then gets fresh bus events (Reset, Configured), which a
+    // sender that lost them (round 7: a new helper after a sign-out) needs; an interface reopen alone cannot help
+    @objc func reconnect() {
+        restartLink()
+        if let l = link { sbl_link_reset_usb(l) }
+    }
 
     @objc func askHost() {
         let a = NSAlert()
