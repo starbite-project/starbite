@@ -4,8 +4,11 @@ Started 2026-11-07, on the user's request: "make Windows 11 run on the big cores
 maximum clock speed". Owner of the firmware side (MADT, PPTT, CPU bring-up): the win-usb-host
 session (it owns the Windows ACPI tables, docs/WIN11-USB.md 4.1 and 10). The clocks belong to the
 GPU session's `sbthermal`, the single ACPM owner (domain 3 = M3), coordinated through the main
-session. **Status (2026-11-07): B1 passed (the M3s run from UEFI). B2 parked all three, but their
-uptime stayed 0. B2b (diagnostics) built, not run.**
+session. **Status (2026-11-07): B1 passed (the M3s run from UEFI). B2 parked all three (uptime
+showed 0: CNTFRQ_EL0 is 0 on this platform, see 3.2). Goal from the user: "actually 8 cores fully
+in Windows". Path: B3a (built, not run) -> B3 -> B4 (7 cores) -> WC2 (8, research); section 5.**
+Windows here is **23H2 (22631.7584)**, which runs on ARMv8.0. A 24H2/25H2 upgrade would end this
+track: they need LSE atomics, which the M3s lack (docs/WIN11-24H2-A55.md).
 Not for unattended boots: a CPU_ON that never returns needs a forced reset (the watchdog doesn't
 rescue it).
 
@@ -78,7 +81,7 @@ for M3 cores 1, 2, 3:
    half to +0x7FF, the firmware's from +0x800);
 2. the line `=M3 park core n mbox <page> up 00000000 s (hex)` in the zone-0 ring; its digits'
    address is found in the ring (it is never moved: the ring only appends);
-3. the stub (`M3ParkStub.S`, 200 bytes, assembled by `gen-m3park-stub.py` into `M3ParkStub.h`;
+3. the stub (`M3ParkStub.S`, 200 bytes, assembled by `gen-stubs.py` into `M3ParkStub.h`;
    position independent, aligned accesses only because the MMU is off) copied to mailbox + 0x800
    with three literals: the mailbox, the digits' address, the UID (MADT GICC UIDs: M3 core n =
    4 + n); the page cleaned to the point of coherency, the I-cache invalidated;
@@ -148,6 +151,89 @@ SUFFIX=-gpu`): src38 + Star2LteSsdtDxe (parking only) + `SBGPU`, so Windows keep
 (no Basic Display fallback, no resolution flip). Same test as B2: user present, several minutes
 of Windows, Start -> Restart into the loader menu, `fastboot oem log dmesg`. Risks: as B2. New: phase
 A spins each M3 for about a second at boot (negligible heat).
+
+**Not needed after all:** NOTES.md (2026-10-2x) has `CNTFRQ_EL0 = 0` on this firmware on *every*
+core (S-Boot leaves it unset). TimerDxe gets 26 MHz from a patch, and the woa release patches winload
+and ntoskrnl in memory at the handoff to use 26 MHz too. So B2's zeros were the divide (a), and the
+cores were most likely alive. B2b (image edb78134…) would still tell (b)/(c)/(d) apart, but B4's
+parking stub polls instead of using WFE (Windows takes the cores within seconds of kernel start),
+so the answer doesn't change the design. B2b is optional; the 8-core path skips it.
+
+## 5. The way to 7 and 8 cores in Windows
+
+Order and why: Windows must **boot on an M3** (B3) before the cores are mixed (B4). Booting on an
+A55 would make the kernel and apps use v8.1/v8.2 instructions (LSE atomics and more) that an M3
+can't execute.
+
+### 5.1 B3a: borrow an M3 in the UEFI context (invisible to Windows)
+
+`M3Run.c` + `M3RunStub.S` (`STARBITE_M3_RUN=1`). For each M3 core 1..3, during dispatch: A55 core
+0 raises to TPL_HIGH_LEVEL, writes back its data cache, and hands its EL1 context (SCTLR, TCR,
+TTBR0, MAIR, CPACR; a stack of its own) to the M3. The M3 turns its MMU and caches on with UEFI's page
+tables and runs a C test:
+- ID registers, CTR_EL0, CLIDR;
+- SCTLR (M, C and I really on);
+- CNTFRQ;
+- GICD_ITARGETSR0 byte 0, its own GIC CPU interface bit, which is the MADT's "CPU Interface Number";
+- coherency both ways (a pattern the A55 wrote *after* the write-back, so only in its cache, summed
+  on the M3; the M3's inverted copy checked on the A55).
+
+Then Done = 1 and CPU_OFF. The A55 waits up to 1 s, then logs everything. The stub's own vector table
+catches any exception on the M3 (ESR/ELR/FAR logged, Done = 3, CPU_OFF), so a failed M3 never stays
+inside UEFI code. This proves B3's mechanism with nothing left behind and answers what B3/B4 need:
+interface numbers (expected 0x10/0x20/0x40 for M3 1/2/3 = interfaces 4+n), CTR line sizes
+(DminLine/IminLine must be safe for Windows' cache maintenance on mixed cores), feature registers.
+
+Image `starbite-uefi-m3run-gpu.bin`, sha256 efbdeaa6… (`SOLO=m3run M3RUN=1 EXTRA_AML=<StarbiteGpu.aml>
+SUFFIX=-gpu`): src38 + Star2LteSsdtDxe (B3a only) + `SBGPU`. Checked: the test function compiled to
+a leaf with no stack, calls or globals; stub 0x8E0 bytes (vectors at 0, entry at 0x800).
+
+### 5.2 B3: Windows boots on M3 core 1 (4 CPUs: M3 1 + A55 1..3)
+
+At ExitBootServices (our own event, registered by Star2LteSsdtDxe), on A55 core 0:
+1. Build the new MADT contents in a buffer (not yet in the table):
+   - M3 core 1's GICC entry first (UID 5, MPIDR 0x101, interface 5, enabled, efficiency class 1);
+   - A55 1..3 as the release's "P" left them (their parked addresses and mailboxes, enabled, class 0);
+   - A55 0 and M3 0/2/3 disabled.
+   The checksum is recomputed.
+2. Save the full EL1 state: GPRs, SP_EL0/SP_EL1, SPSel, DAIF, NZCV, FPCR/FPSR, q0-q31, SCTLR, TCR,
+   TTBR0/1, MAIR, AMAIR, VBAR, CPACR, CONTEXTIDR, TPIDR_EL0/EL1, TPIDRRO_EL0, CNTKCTL. Write back
+   the data cache. CPU_ON M3 core 1 into a resume stub (reserved memory).
+3. The M3 restores everything (VBAR = UEFI's this time). It copies the prepared MADT into the
+   table (the commit point), sets Resumed, and returns from the callback into ExitBootServices and
+   winload: from here winload and the kernel run on the M3.
+4. A55 core 0 spins without its stack until Resumed, then PSCI CPU_OFF. **Fail-safe:** if Resumed
+   doesn't come within 1 s, the A55 sets Cancel (the resume stub checks it first and powers off)
+   and returns normally. The MADT was never touched, so Windows boots on the A55 as today. Either
+   way, one line in zone 0.
+
+`numproc 4` stays. Checks: Windows boots; Task Manager shows 4 CPUs; System Information / `wmic
+cpu` shows the Mongoose (MIDR 0x531f0020) as CPU 0; a CPU-heavy run; Start -> Restart works.
+Risks: a fault on the M3 after the commit point is a hang/bugcheck before the logo (forced reset fine,
+boot src38). Unknowns: whether the release's EL2/PSCI shim or the handoff code cares which CPU runs
+the handoff.
+
+### 5.3 B4: 7 cores (A55 0..3 + M3 1..3)
+
+On top of B3:
+- After resuming, the M3 CPU_ONs A55 core 0 and M3 cores 2 and 3 into **polling** parking stubs
+  (B2's mailbox layout, no WFE), mailboxes in reserved memory.
+- MADT: 7 enabled GICC entries, the boot CPU first. Distinct affinities: M3 1..3 = 0x101..0x103;
+  A55 0..3 = 0x000/0x100/0x200/0x300 (A55 1 and M3 0 share 0x100, so M3 0 stays out).
+  Parking protocol version 1 with the mailbox addresses. Efficiency class A55 = 0, M3 = 1.
+- BCD `numproc 7` (main session, offline).
+- PPTT: the release's, which already has leaves 0..7 in two clusters.
+- Blobs: SBGPU, USB and WLAN carried, so the fast display and links stay.
+
+Checks: Task Manager 7 CPUs; a 10-minute all-core load (temperatures watched: sbthermal owns M3
+DVFS later, domain 3); x64 apps run (xtajit); restart.
+
+### 5.4 WC2: the 8th core (research)
+
+M3 core 0 has the same Aff1:Aff0 as A55 core 1 (0x100). The MADT holds only Aff3..Aff0, so Windows
+can't tell them apart. Options to study later: does Windows compare the MT bit (MPIDR bit 24)? A
+GICC entry with Aff2 or Aff3 set would need the core to report it, which only EL2 can fake (VMPIDR_EL2,
+Samsung's uH).
 
 ## 4. Sources
 

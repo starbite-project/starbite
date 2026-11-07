@@ -1,7 +1,7 @@
 // M3ParkStub: the parking loop of an M3 core, with diagnostics (docs/WIN11-BIGCORES.md stages B2/B2b).
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// Assembled by gen-m3park-stub.py into M3ParkStub.h (a byte array); M3Park (M3Probe.c) copies it to
+// Assembled by gen-stubs.py into M3ParkStub.h (a byte array); M3Park (M3Probe.c) copies it to
 // mailbox + 0x800 (the firmware half of an ACPI parking-protocol mailbox) and fills the literals at
 // its end. Entered by PSCI CPU_ON: MMU and caches off (every data access is Device memory: aligned
 // accesses only, bytes are fine), DAIF masked. No stack; x30 only for the leaf `hex`.

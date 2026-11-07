@@ -51,6 +51,9 @@
 #ifndef STARBITE_M3_PARK
 #define STARBITE_M3_PARK 0
 #endif
+#ifndef STARBITE_M3_RUN
+#define STARBITE_M3_RUN 0
+#endif
 #ifndef STARBITE_M3_PROBE
 #define STARBITE_M3_PROBE 0
 #endif
@@ -67,6 +70,11 @@ M3Probe (
 
 VOID
 M3Park (
+  VOID
+  );
+
+VOID
+M3Run (
   VOID
   );
 
@@ -300,16 +308,20 @@ SsdtDxeEntry (
   UINTN                          Installed;
 
   SbLog (
-    "=SSDT v%d at dispatch, PPTT fix %d, M3 probe %d, M3 park %d",
+    "=SSDT v%d at dispatch, PPTT fix %d, M3 probe %d, M3 park %d, M3 run %d",
     SSDT_VERSION,
     STARBITE_PPTT_FIX,
     STARBITE_M3_PROBE,
-    STARBITE_M3_PARK
+    STARBITE_M3_PARK,
+    STARBITE_M3_RUN
     );
   if (STARBITE_M3_PROBE) {
     M3Probe ();
   }
 
+ #if STARBITE_M3_RUN
+  M3Run ();           // B3a: alone (build-win-usbhost.sh allows one M3 experiment per image)
+ #endif
  #if STARBITE_M3_PARK
   M3Park ();          // after the probe, never with it (build-win-usbhost.sh refuses both)
  #endif

@@ -38,6 +38,7 @@ PPTT_STATIC=${PPTT_STATIC:-0}                     # 1: the release's platform AC
 ACPIFILE=11111111-2222-3333-4444-555555555501
 M3=${M3:-0}                                       # 1: Star2LteSsdtDxe also runs the M3 probe (WIN11-BIGCORES B1)
 M3PARK=${M3PARK:-0}                               # 1: Star2LteSsdtDxe parks M3 cores 1..3 for the OS (B2)
+M3RUN=${M3RUN:-0}                                 # 1: each M3 runs a test in the UEFI context (B3a)
 SOLO=${SOLO:-}                                    # name: only the isolated image src38 + Star2LteSsdtDxe
                                                   # (with the PPTT/M3 flags above), no USB, no blobs
 KILL_SERIAL=${KILL_SERIAL:-0}                     # 1: drop the release's SerialDxe (room in the DXE slot)
@@ -51,7 +52,7 @@ out=build/woa
 SUFFIX=${SUFFIX:-}
 [ -z "${EXTRA_AML:-}" ] || [ -n "$SUFFIX" ] || { echo "EXTRA_AML needs a SUFFIX so the plain images are kept" >&2; exit 1; }
 [ "$PPTT" = 0 ] || [ -n "$SUFFIX" ] || { echo "PPTT=1 needs a SUFFIX so the plain images are kept" >&2; exit 1; }
-[ "$M3" = 0 ] || [ "$M3PARK" = 0 ] || { echo "M3=1 (probe) and M3PARK=1 (park) never together" >&2; exit 1; }
+[ $((M3 + M3PARK + M3RUN)) -le 1 ] || { echo "one M3 experiment per image (M3, M3PARK, M3RUN)" >&2; exit 1; }
 [ "$PPTT_STATIC" = 0 ] || [ -n "$SUFFIX" ] || { echo "PPTT_STATIC=1 needs a SUFFIX so the plain images are kept" >&2; exit 1; }
 for f in "$rel" "$W/Star2LtePkg-src38.fd" "$W/pmic-rtc.ffs" "$W/src38.fd" "$W/starbite-uefi-src38.bin"; do
     [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
@@ -63,7 +64,7 @@ fi
 starbite/s9usb/test/run.sh | tail -1
 tools/woa/modules/Star2LteSsdtDxe/test/run.sh | grep -E "checks|FAIL"
 python3 tools/woa/patches/gen-0024.py --check
-python3 tools/woa/modules/Star2LteSsdtDxe/gen-m3park-stub.py --check
+python3 tools/woa/modules/Star2LteSsdtDxe/gen-stubs.py --check
 mkdir -p "$out/acpi"
 head -c 384 "$W/starbite-uefi-src38.bin" > "$out/src38-bootshim.bin"
 
@@ -99,7 +100,7 @@ image() {   # image NAME ROLE ACPI VBUS BLOB
     echo "== $name: role $role, ACPI layout $acpi, VBUS $vbus, blob $blob"
     tools/woa/build-uefi.sh "$UEFI_TARGET" -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_USB_DXE=TRUE -D STAR2LTE_SSDT_DXE=TRUE \
         -D STARBITE_USB_ROLE=$role -D STARBITE_USB_ACPI=$acpi -D STARBITE_USB_VBUS=$vbus -D STARBITE_PPTT_FIX=$PPTT \
-        -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK | tail -1
+        -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK -D STARBITE_M3_RUN=$M3RUN | tail -1
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$USBDXE" "$out/$name-usb.ffs"
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$SSDTDXE" "$out/$name-ssdt.ffs"
     grep -aq "usb-policy role=$role acpi=$acpi vbus=$vbus" "$out/$name-usb.ffs" ||
@@ -129,13 +130,15 @@ flags_ok() {   # flags_ok FFS
     [ "$has" = "$M3" ] || { echo "$1: M3 probe present=$has, wanted $M3" >&2; exit 1; }
     if grep -aq "=M3 park v2" "$1"; then has=1; else has=0; fi
     [ "$has" = "$M3PARK" ] || { echo "$1: M3 park present=$has, wanted $M3PARK" >&2; exit 1; }
+    if grep -aq "=M3 run v1" "$1"; then has=1; else has=0; fi
+    [ "$has" = "$M3RUN" ] || { echo "$1: M3 run present=$has, wanted $M3RUN" >&2; exit 1; }
 }
 if [ -n "$SOLO" ]; then
     # An experiment alone: src38 + Star2LteSsdtDxe with the chosen flags, no USB module; only the
     # EXTRA_AML blobs (e.g. SBGPU, so Windows keeps its display driver on these boots).
-    echo "== $SOLO: Star2LteSsdtDxe alone (PPTT fix $PPTT, M3 probe $M3, M3 park $M3PARK)"
+    echo "== $SOLO: Star2LteSsdtDxe alone (PPTT fix $PPTT, M3 probe $M3, M3 park $M3PARK, M3 run $M3RUN)"
     tools/woa/build-uefi.sh "$UEFI_TARGET" -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_SSDT_DXE=TRUE \
-        -D STARBITE_PPTT_FIX=$PPTT -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK | tail -1
+        -D STARBITE_PPTT_FIX=$PPTT -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK -D STARBITE_M3_RUN=$M3RUN | tail -1
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$SSDTDXE" "$out/$SOLO-ssdt.ffs"
     flags_ok "$out/$SOLO-ssdt.ffs"
     python3 tools/woa/dxe-replace.py "$W/Star2LtePkg-src38.fd" "$rel" "$out/$SOLO.fd" \

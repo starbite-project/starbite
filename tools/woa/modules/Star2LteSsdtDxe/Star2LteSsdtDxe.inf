@@ -3,7 +3,8 @@
 #  made by tools/woa/ssdt-ffs.py) during DXE dispatch (docs/WIN11-USB.md section 4.1); with
 #  STARBITE_PPTT_FIX=1 it first gives the PPTT the CPU's caches (PpttFix.c, section 10); with
 #  STARBITE_M3_PROBE=1 it first tries the M3 cores (M3Probe.c, docs/WIN11-BIGCORES.md stage B1); with
-#  STARBITE_M3_PARK=1 it parks M3 cores 1..3 for the OS session (stage B2, M3ParkStub.S). Added to the
+#  STARBITE_M3_PARK=1 it parks M3 cores 1..3 for the OS session (stage B2, M3ParkStub.S); with
+#  STARBITE_M3_RUN=1 each M3 runs a test in the boot CPU's UEFI context (B3a, M3Run.c). Added to the
 #  release DXE volume with tools/woa/dxe-replace.py --add; built by patch 0024 under
 #  -D STAR2LTE_SSDT_DXE.
 #
@@ -23,6 +24,8 @@
   PpttFix.c
   M3Probe.c
   M3ParkStub.h
+  M3Run.c
+  M3RunStub.h
   PpttBuild.c
   PpttBuild.h
   StarbiteLog.h
@@ -34,6 +37,7 @@
 [LibraryClasses]
   BaseLib
   BaseMemoryLib
+  CacheMaintenanceLib
   DebugLib
   MemoryAllocationLib
   PrintLib
