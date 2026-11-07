@@ -50,42 +50,67 @@ XML
     echo "wifi.xml written (holds the passphrase: never commit it; install.cmd deletes it on the phone)"
 fi
 
-{
-printf '%s\r\n' \
-'@echo off' \
-'rem Starbite one-shot PnP install of SbWifiCx (starbite/wifi/win/make-package.sh). Runs once as LocalSystem.' \
-'set LOG=C:\starbite\pnp.log' \
-'echo ==== %DATE% %TIME% sbpnp start (sbwificx)>> %LOG%' \
-'sc config sbpnp start= disabled>> %LOG% 2>&1' \
-'certutil -addstore -f Root C:\starbite\pnp\starbite-test.cer>> %LOG% 2>&1' \
-'echo certutil Root rc=%ERRORLEVEL%>> %LOG%' \
-'certutil -addstore -f TrustedPublisher C:\starbite\pnp\starbite-test.cer>> %LOG% 2>&1' \
-'echo certutil TrustedPublisher rc=%ERRORLEVEL%>> %LOG%' \
-'pnputil /add-driver C:\starbite\pnp\sbwificx\sbwificx.inf /install>> %LOG% 2>&1' \
-'echo pnputil add-driver rc=%ERRORLEVEL%>> %LOG%' \
-'pnputil /enum-devices /instanceid "ACPI\STBW4361\0" /drivers>> %LOG% 2>&1' \
-'rem the radio comes up in ~1-2 s; WLAN AutoConfig then opens the adapter and scans' \
-'ping -n 31 127.0.0.1 >nul' \
-'echo ---- netsh wlan show drivers>> %LOG%' \
-'netsh wlan show drivers>> %LOG% 2>&1' \
-'echo ---- netsh wlan show interfaces (names and addresses left out)>> %LOG%' \
-'netsh wlan show interfaces | findstr /v /i /c:"SSID" /c:"address" /c:"Profile">> %LOG% 2>&1' \
-'echo ---- networks heard (count only):>> %LOG%' \
-'netsh wlan show networks | find /c "SSID ">> %LOG% 2>&1' \
-'if not exist C:\starbite\pnp\wifi.xml goto done' \
-'netsh wlan add profile filename=C:\starbite\pnp\wifi.xml user=all>> %LOG% 2>&1' \
-'echo netsh add profile rc=%ERRORLEVEL%>> %LOG%' \
-'del /f /q C:\starbite\pnp\wifi.xml' \
-'if exist C:\starbite\pnp\wifi.xml echo WIFI.XML NOT DELETED>> %LOG%' \
-'netsh wlan connect name=starbite-test>> %LOG% 2>&1' \
-'echo netsh connect rc=%ERRORLEVEL%>> %LOG%' \
-'ping -n 31 127.0.0.1 >nul' \
-'netsh wlan show interfaces | findstr /i /c:" State">> %LOG% 2>&1' \
-'echo ---- ping 1.1.1.1 (summary)>> %LOG%' \
-'ping -n 4 1.1.1.1 | findstr /i /c:"Lost">> %LOG% 2>&1' \
-':done' \
-'echo ==== %DATE% %TIME% sbpnp end>> %LOG%'
-} > "$out/install.cmd"
+# install.cmd: its first action is a log line (W2 note: sbpnp died twice within 3 s without a log). It finds its
+# files next to itself (%~dp0), so it also works tapped from anywhere ("Run as administrator"); run by hand it
+# shows its progress and pauses at the end; run by the sbpnp service (session 0, no SESSIONNAME) it stays silent.
+cat > "$out/install.cmd.lf" <<'CMD'
+@echo off
+if not exist C:\starbite mkdir C:\starbite
+>>C:\starbite\pnp.log echo ==== %DATE% %TIME% sbwificx install.cmd started, session "%SESSIONNAME%"
+setlocal
+set LOG=C:\starbite\pnp.log
+set PKG=%~dp0
+set INTERACTIVE=
+if defined SESSIONNAME set INTERACTIVE=1
+call :say "Starbite Wi-Fi install: package folder %PKG%"
+net session >nul 2>&1
+if errorlevel 1 (
+    call :say "NOT AN ADMINISTRATOR: press and hold install.cmd, then Run as administrator"
+    goto done
+)
+sc query sbpnp >nul 2>&1 && sc config sbpnp start= disabled>> %LOG% 2>&1
+call :say "trusting the Starbite test certificate"
+certutil -addstore -f Root "%PKG%starbite-test.cer">> %LOG% 2>&1
+call :say "certutil Root rc=%ERRORLEVEL%"
+certutil -addstore -f TrustedPublisher "%PKG%starbite-test.cer">> %LOG% 2>&1
+call :say "certutil TrustedPublisher rc=%ERRORLEVEL%"
+call :say "installing the driver with pnputil"
+pnputil /add-driver "%PKG%sbwificx\sbwificx.inf" /install>> %LOG% 2>&1
+call :say "pnputil add-driver rc=%ERRORLEVEL%"
+pnputil /enum-devices /instanceid "ACPI\STBW4361\0" /drivers>> %LOG% 2>&1
+call :say "waiting 30 s for the radio and WLAN AutoConfig"
+ping -n 31 127.0.0.1 >nul
+>>%LOG% echo ---- netsh wlan show drivers
+netsh wlan show drivers>> %LOG% 2>&1
+>>%LOG% echo ---- netsh wlan show interfaces, names and addresses left out
+netsh wlan show interfaces | findstr /v /i /c:"SSID" /c:"address" /c:"Profile">> %LOG% 2>&1
+>>%LOG% echo ---- networks heard, count only:
+netsh wlan show networks | find /c "SSID ">> %LOG% 2>&1
+if not exist "%PKG%wifi.xml" goto done
+call :say "adding the Wi-Fi profile and joining"
+netsh wlan add profile filename="%PKG%wifi.xml" user=all>> %LOG% 2>&1
+call :say "netsh add profile rc=%ERRORLEVEL%"
+del /f /q "%PKG%wifi.xml"
+if exist "%PKG%wifi.xml" call :say "WIFI.XML NOT DELETED: delete it by hand, it holds the passphrase"
+netsh wlan connect name=starbite-test>> %LOG% 2>&1
+call :say "netsh connect rc=%ERRORLEVEL%, waiting 30 s"
+ping -n 31 127.0.0.1 >nul
+netsh wlan show interfaces | findstr /i /c:" State">> %LOG% 2>&1
+>>%LOG% echo ---- ping 1.1.1.1, summary
+ping -n 4 1.1.1.1 | findstr /i /c:"Lost">> %LOG% 2>&1
+:done
+call :say "==== %DATE% %TIME% install.cmd end; the details are in C:\starbite\pnp.log"
+if defined INTERACTIVE pause
+endlocal
+exit /b 0
+
+:say
+>>%LOG% echo %~1
+if defined INTERACTIVE echo %~1
+goto :eof
+CMD
+sed 's/$/\r/' "$out/install.cmd.lf" > "$out/install.cmd"
+rm -f "$out/install.cmd.lf"
 (cd "$out" && find . -type f ! -name SHA256SUMS ! -name wifi.xml | sort | xargs shasum -a 256 > SHA256SUMS)
 cat "$out/SHA256SUMS"
 [ -f "$out/wifi.xml" ] && echo "(+ wifi.xml: not listed, holds the passphrase)"
