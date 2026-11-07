@@ -298,7 +298,7 @@ never leave the phone). The MAC is the firmware's (`cur_etheraddr`, from the OTP
 
 | Stage | What | State |
 |---|---|---|
-| W1 | `sbwifi.sys`: the bring-up under Windows up to a scan | request sent |
+| W1 | `sbwifi.sys`: the bring-up under Windows up to a scan | **passed** (W1b, 2026-11-07: 23 access points) |
 | W2 | `sbwificx.sys`: WiFiCx client, Windows lists networks and joins WPA2 | built, request sent |
 | W3 | interrupts (WdfInterrupt), roaming, statistics, WPA3-SAE | after W2 |
 | W4 | Power: PM2/`mpc`, D3 on idle, the radio off when Wi-Fi is turned off | after W3 |
@@ -390,6 +390,22 @@ Open from these runs: `OTP Control 1` reads back 0 after the write (the CIS was 
 `dngl_sendpkt: dropped pkt` lines (probably events with no event buffer posted yet: to check once events matter
 for joining); the D2H XOR-checksum sync mode the firmware announces is not verified by the host (brcmfmac does
 not either).
+
+### Windows runs (2026-11-07): W1 failed at step 8, W1b PASSED
+
+**W1** (`sbwifi.sys` d88e5098, plain service, radio files in `drivers\starbite\bcm4361`): steps 4-7 as on bare
+metal (LINK UP Gen1 x1, 14e4:441f, chip 4361 rev 5, module a1 33), the download "read back" (its first 64 bytes),
+then `the firmware did not start in 5 s (no shared area)`. Cause, in the Windows glue only: registers were mapped
+64 KiB at a time into a 24-slot table, and a full table dropped accesses silently. The download needs ~22 slots of
+BAR1 alone, so the end of the RAM (the NVRAM with it) was never written and the shared-area word read ffffffff
+before and after the start. Also the clock used `KeQueryInterruptTimePrecise`'s QPC out-parameter (~1.5x fast).
+
+**W1b** (`sbwifi.sys` 6c7bffc0, commit 1726559: 1 MiB mappings x 48, a full table logged, the right clock,
+`cfg.diag`): `the firmware read back: 212825 words, 0 wrong`, `the NVRAM read back: 1386 words, 0 wrong`, CR4 ioctl
+21 (halted) before the start and 01 after, the RAM's last word the NVRAM token `fa960569` at +73 ms and `002012e4`
+at +154 ms: `the firmware is up after 160 ms` (bare metal 150 ms), protocol 7, `26 events; the scan heard 23 access
+points (complete)`, step 10, clean restart. Under Windows every sleep rounds up to the 15.6 ms timer tick (W1's
+"10 s" of 5 ms polls took 35 s; SbWifiCx's worker polls every ~16 ms); the full read-back costs 1.9 s.
 
 ## 10. Review
 
