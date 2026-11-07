@@ -1,0 +1,413 @@
+/* SPDX-License-Identifier: GPL-2.0-only
+ * sbthermal.sys: the Starbite temperature watchdog for Windows 11 on the Galaxy S9 (Exynos 9810).
+ * docs/WIN11-GPU.md section 8. Stage 2a of track D.
+ *
+ * A plain (non-PnP) WDM driver, started as a service at boot. Every 250 ms it reads the two TMU
+ * blocks (TOP 0x10070000: big and little cores; SUB 0x10074000: GPU and ISP) and runs the level
+ * machine of sbth_core.c. It writes nothing to the hardware: the TMU registers are only read, and
+ * the hardware over-temperature trip S-Boot armed at 115 C is only reported, never changed.
+ *
+ * Others see it through
+ *   \Callback\StarbiteThermal   ExNotifyCallback(obj, SBTH_CB_QUERY, &state) fills the state;
+ *                               registered callbacks get (SBTH_CB_LEVEL, &state) on level changes.
+ *                               A GPU driver must not power the GPU when this object is missing or
+ *                               a query leaves state.version 0 (the watchdog is gone: the object
+ *                               can outlive us while another driver holds a reference).
+ *   \\.\StarbiteThermal        IOCTL SBTH_IOCTL_GET_STATE -> struct sbth_state
+ *   ...\Services\sbthermal\State  registry values (every 60 s and on level changes, flushed)
+ *
+ * Boot guard: ...\Services\sbthermal\GuardBoots counts starts that did not reach 120 s of running;
+ * at 2 the driver refuses to load. Kill switches, outside the registry first (an offline hive edit
+ * can be undone by Windows replaying a dirty hive's logs): the file \Windows\Starbite\sbthermal.off
+ * (created from TWRP), then Start = 4 (offline with hivexsh, after checking the hive is clean).
+ */
+#include <ntddk.h>
+#include "sbth_core.h"
+
+#define SBTH_TAG 'htBS'
+#define SBTH_PERIOD_MS 250
+#define SBTH_GUARD_CLEAR_MS 120000
+#define SBTH_STATE_EVERY_MS 60000
+#define SBTH_GUARD_LIMIT 2
+
+DRIVER_INITIALIZE DriverEntry;
+static DRIVER_DISPATCH SbthCreateClose;
+static DRIVER_DISPATCH SbthIoctl;
+static KSTART_ROUTINE SbthThread;
+static CALLBACK_FUNCTION SbthQueryCallback;
+
+static struct {
+    PDEVICE_OBJECT dev;
+    BOOLEAN link;
+    volatile UCHAR *tmu[2];
+    PCALLBACK_OBJECT cb;
+    PVOID cb_reg;
+    HANDLE thread;
+    PKTHREAD thread_obj;
+    KEVENT stop;
+    KEVENT started;
+    KSPIN_LOCK lock;
+    struct sbth_state st;                 /* under lock */
+    struct sbth_levels lv;                /* thread only */
+    UNICODE_STRING svc;                   /* the service key path */
+    WCHAR svc_buf[256];
+} g;
+
+/* ---- registry ---------------------------------------------------------------------------- */
+
+static NTSTATUS open_key(PCWSTR sub, HANDLE *h)
+{
+    WCHAR buf[300];
+    UNICODE_STRING path;
+    OBJECT_ATTRIBUTES oa;
+    ULONG disp;
+    RtlInitEmptyUnicodeString(&path, buf, sizeof(buf));
+    if (!NT_SUCCESS(RtlAppendUnicodeStringToString(&path, &g.svc)))
+        return STATUS_NAME_TOO_LONG;
+    if (sub && (!NT_SUCCESS(RtlAppendUnicodeToString(&path, L"\\")) ||
+                !NT_SUCCESS(RtlAppendUnicodeToString(&path, sub))))
+        return STATUS_NAME_TOO_LONG;
+    InitializeObjectAttributes(&oa, &path, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    return ZwCreateKey(h, KEY_READ | KEY_WRITE, &oa, 0, NULL, REG_OPTION_NON_VOLATILE, &disp);
+}
+
+static void put_dword(HANDLE h, PCWSTR name, ULONG v)
+{
+    UNICODE_STRING n;
+    RtlInitUnicodeString(&n, name);
+    (void)ZwSetValueKey(h, &n, 0, REG_DWORD, &v, sizeof(v));
+}
+
+static ULONG get_dword(HANDLE h, PCWSTR name, ULONG dflt)
+{
+    UNICODE_STRING n;
+    UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION info = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+    ULONG len;
+    RtlInitUnicodeString(&n, name);
+    if (NT_SUCCESS(ZwQueryValueKey(h, &n, KeyValuePartialInformation, info, sizeof(buf), &len)) &&
+        info->Type == REG_DWORD && info->DataLength == sizeof(ULONG))
+        return *(ULONG *)info->Data;
+    return dflt;
+}
+
+/* Temperatures go to the registry as signed m C in a DWORD (two's complement). */
+static void write_state(const struct sbth_state *s, BOOLEAN flush)
+{
+    HANDLE h;
+    WCHAR name[16];
+    UNICODE_STRING us;
+    if (!NT_SUCCESS(open_key(L"State", &h)))
+        return;
+    put_dword(h, L"Level", s->level);
+    put_dword(h, L"GpuMilliC", (ULONG)s->gpu_mc);
+    put_dword(h, L"HottestMilliC", (ULONG)s->hottest_mc);
+    put_dword(h, L"MaxGpuMilliC", (ULONG)s->max_gpu_mc);
+    put_dword(h, L"MaxAnyMilliC", (ULONG)s->max_any_mc);
+    put_dword(h, L"Readings", s->readings);
+    put_dword(h, L"Rejected", s->rejected);
+    put_dword(h, L"BlindEvents", s->blind_events);
+    put_dword(h, L"TripArmed", s->trip_armed);
+    put_dword(h, L"TripTopMilliC", (ULONG)s->trip_top_mc);
+    put_dword(h, L"TripSubMilliC", (ULONG)s->trip_sub_mc);
+    put_dword(h, L"BlocksLive", s->blocks_live);
+    put_dword(h, L"LevelChanges", (ULONG)s->changes);
+    for (unsigned i = 0; i < SBTH_SLOTS; ++i) {
+        RtlInitEmptyUnicodeString(&us, name, sizeof(name));
+        if (NT_SUCCESS(RtlIntegerToUnicodeString(i, 10, &us)) &&
+            NT_SUCCESS(RtlAppendUnicodeToString(&us, L"_mC"))) {
+            name[us.Length / sizeof(WCHAR)] = 0;
+            put_dword(h, name, (ULONG)s->mc[i]);
+        }
+    }
+    if (flush)
+        (void)ZwFlushKey(h);
+    ZwClose(h);
+}
+
+/* ---- TMU access ------------------------------------------------------------------------- */
+
+static sbth_u32 tmu_rd(void *ctx, unsigned block, unsigned off)
+{
+    UNREFERENCED_PARAMETER(ctx);
+    if (block > 1 || off >= SBTH_TMU_SIZE || !g.tmu[block])
+        return 0;
+    return READ_REGISTER_ULONG((volatile ULONG *)(g.tmu[block] + off));
+}
+
+static void tmu_delay(void *ctx, unsigned us)
+{
+    UNREFERENCED_PARAMETER(ctx);
+    KeStallExecutionProcessor(us);
+}
+
+static const struct sbth_io tmu_io = { NULL, tmu_rd, tmu_delay };
+
+/* ---- the watchdog thread ----------------------------------------------------------------- */
+
+static void snapshot(struct sbth_state *out)
+{
+    KIRQL irql;
+    KeAcquireSpinLock(&g.lock, &irql);
+    *out = g.st;
+    KeReleaseSpinLock(&g.lock, irql);
+}
+
+static VOID SbthThread(PVOID ctx)
+{
+    LARGE_INTEGER period;
+    ULONG elapsed = 0, since_state = 0;
+    BOOLEAN guard_cleared = FALSE;
+    struct sbth_reading r;
+    struct sbth_state s;
+    UNREFERENCED_PARAMETER(ctx);
+
+    /* The thread object, referenced by the thread itself so DriverEntry can always wait on it. */
+    ObReferenceObject(KeGetCurrentThread());
+    g.thread_obj = KeGetCurrentThread();
+    KeSetEvent(&g.started, IO_NO_INCREMENT, FALSE);
+
+    period.QuadPart = -10000LL * SBTH_PERIOD_MS;
+    for (;;) {
+        BOOLEAN changed, was_blind = g.lv.blind >= SBTH_BLIND_READINGS;
+        KIRQL irql;
+
+        sbth_read_all(&tmu_io, &r);
+        changed = sbth_levels_step(&g.lv, r.gpu_mc, r.hottest_mc) != 0;
+
+        KeAcquireSpinLock(&g.lock, &irql);
+        g.st.level = g.lv.level;
+        g.st.gpu_mc = r.gpu_mc;
+        g.st.hottest_mc = r.hottest_mc;
+        g.st.max_gpu_mc = g.lv.max_gpu_mc;
+        g.st.max_any_mc = g.lv.max_any_mc;
+        for (unsigned i = 0; i < SBTH_SLOTS; ++i)
+            g.st.mc[i] = r.mc[i];
+        g.st.readings++;
+        g.st.seq++;
+        g.st.time_100ns = KeQueryInterruptTime();
+        g.st.rejected += r.rejected;
+        if (!was_blind && g.lv.blind >= SBTH_BLIND_READINGS)
+            g.st.blind_events++;
+        if (changed)
+            g.st.changes++;
+        s = g.st;
+        KeReleaseSpinLock(&g.lock, irql);
+
+        if (changed) {
+            DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "sbthermal: level %u, GPU %d mC, hottest %d mC\n",
+                       s.level, s.gpu_mc, s.hottest_mc);
+            ExNotifyCallback(g.cb, SBTH_CB_LEVEL, &s);
+            write_state(&s, TRUE);
+            since_state = 0;
+        } else if (since_state >= SBTH_STATE_EVERY_MS) {
+            write_state(&s, FALSE);
+            since_state = 0;
+        }
+
+        if (!guard_cleared && elapsed >= SBTH_GUARD_CLEAR_MS) {
+            HANDLE h;
+            if (NT_SUCCESS(open_key(NULL, &h))) {
+                put_dword(h, L"GuardBoots", 0);
+                (void)ZwFlushKey(h);
+                ZwClose(h);
+            }
+            guard_cleared = TRUE;
+        }
+
+        if (KeWaitForSingleObject(&g.stop, Executive, KernelMode, FALSE, &period) == STATUS_SUCCESS)
+            break;
+        elapsed += SBTH_PERIOD_MS;
+        since_state += SBTH_PERIOD_MS;
+    }
+    snapshot(&s);
+    write_state(&s, TRUE);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+/* Registered on our own callback object: answers SBTH_CB_QUERY for any caller. */
+static VOID SbthQueryCallback(PVOID ctx, PVOID arg1, PVOID arg2)
+{
+    UNREFERENCED_PARAMETER(ctx);
+    if (arg1 == SBTH_CB_QUERY && arg2 != NULL)
+        snapshot((struct sbth_state *)arg2);
+}
+
+/* ---- device ------------------------------------------------------------------------------ */
+
+static NTSTATUS SbthCreateClose(PDEVICE_OBJECT dev, PIRP irp)
+{
+    UNREFERENCED_PARAMETER(dev);
+    irp->IoStatus.Status = STATUS_SUCCESS;
+    irp->IoStatus.Information = 0;
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS SbthIoctl(PDEVICE_OBJECT dev, PIRP irp)
+{
+    PIO_STACK_LOCATION sp = IoGetCurrentIrpStackLocation(irp);
+    NTSTATUS st = STATUS_INVALID_DEVICE_REQUEST;
+    ULONG_PTR info = 0;
+    UNREFERENCED_PARAMETER(dev);
+    if (sp->Parameters.DeviceIoControl.IoControlCode == SBTH_IOCTL_GET_STATE) {
+        if (sp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(struct sbth_state)) {
+            st = STATUS_BUFFER_TOO_SMALL;
+        } else {
+            snapshot((struct sbth_state *)irp->AssociatedIrp.SystemBuffer);
+            info = sizeof(struct sbth_state);
+            st = STATUS_SUCCESS;
+        }
+    }
+    irp->IoStatus.Status = st;
+    irp->IoStatus.Information = info;
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    return st;
+}
+
+/* ---- load / unload ----------------------------------------------------------------------- */
+
+static void cleanup(void)
+{
+    UNICODE_STRING link;
+    if (g.thread_obj) {
+        KeSetEvent(&g.stop, IO_NO_INCREMENT, FALSE);
+        (void)KeWaitForSingleObject(g.thread_obj, Executive, KernelMode, FALSE, NULL);
+        ObDereferenceObject(g.thread_obj);
+        g.thread_obj = NULL;
+    }
+    if (g.thread) {
+        ZwClose(g.thread);
+        g.thread = NULL;
+    }
+    if (g.cb_reg) {
+        ExUnregisterCallback(g.cb_reg);
+        g.cb_reg = NULL;
+    }
+    if (g.cb) {
+        ObDereferenceObject(g.cb);
+        g.cb = NULL;
+    }
+    if (g.link) {
+        RtlInitUnicodeString(&link, L"\\DosDevices\\StarbiteThermal");
+        (void)IoDeleteSymbolicLink(&link);
+        g.link = FALSE;
+    }
+    if (g.dev) {
+        IoDeleteDevice(g.dev);
+        g.dev = NULL;
+    }
+    for (unsigned b = 0; b < 2; ++b)
+        if (g.tmu[b]) {
+            MmUnmapIoSpace((PVOID)g.tmu[b], SBTH_TMU_SIZE);
+            g.tmu[b] = NULL;
+        }
+}
+
+/* A kill switch that needs no registry: \SystemRoot\Starbite\<name>.off exists -> do not load. */
+static BOOLEAN kill_file(PCWSTR path)
+{
+    UNICODE_STRING us;
+    OBJECT_ATTRIBUTES oa;
+    FILE_NETWORK_OPEN_INFORMATION fi;
+    RtlInitUnicodeString(&us, path);
+    InitializeObjectAttributes(&oa, &us, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    return NT_SUCCESS(ZwQueryFullAttributesFile(&oa, &fi));
+}
+
+NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
+{
+    static const ULONG64 pa[2] = { SBTH_TMU_TOP_PA, SBTH_TMU_SUB_PA };
+    UNICODE_STRING name, link, cbname;
+    OBJECT_ATTRIBUTES oa;
+    HANDLE h;
+    NTSTATUS st;
+    ULONG guard;
+
+    RtlZeroMemory(&g, sizeof(g));
+    KeInitializeSpinLock(&g.lock);
+    KeInitializeEvent(&g.stop, NotificationEvent, FALSE);
+    KeInitializeEvent(&g.started, NotificationEvent, FALSE);
+    RtlInitEmptyUnicodeString(&g.svc, g.svc_buf, sizeof(g.svc_buf));
+    st = RtlAppendUnicodeStringToString(&g.svc, reg);
+    if (!NT_SUCCESS(st))
+        return st;
+
+    if (kill_file(L"\\SystemRoot\\Starbite\\sbthermal.off"))
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+
+    /* Boot guard: two starts in a row that did not run 120 s -> stay off. */
+    st = open_key(NULL, &h);
+    if (!NT_SUCCESS(st))
+        return st;
+    guard = get_dword(h, L"GuardBoots", 0);
+    if (guard >= SBTH_GUARD_LIMIT) {
+        put_dword(h, L"GuardRefused", guard);
+        (void)ZwFlushKey(h);
+        ZwClose(h);
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+    put_dword(h, L"GuardBoots", guard + 1);
+    (void)ZwFlushKey(h);
+    ZwClose(h);
+
+    for (unsigned b = 0; b < 2; ++b) {
+        PHYSICAL_ADDRESS p;
+        p.QuadPart = (LONGLONG)pa[b];
+        g.tmu[b] = (volatile UCHAR *)MmMapIoSpaceEx(p, SBTH_TMU_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
+        if (!g.tmu[b]) {
+            cleanup();
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+
+    /* What S-Boot left: blocks on, the hardware trip and its temperature. */
+    sbth_levels_init(&g.lv);
+    g.st.version = SBTH_STATE_VERSION;
+    g.st.level = SBTH_STOP;               /* until the first readings say otherwise */
+    g.lv.level = SBTH_STOP;
+    g.st.blocks_live = (sbth_block_live(&tmu_io, 0) ? 1U : 0U) | (sbth_block_live(&tmu_io, 1) ? 2U : 0U);
+    g.st.trip_armed = (sbth_trip_armed(&tmu_io, 0) ? 1U : 0U) | (sbth_trip_armed(&tmu_io, 1) ? 2U : 0U);
+    g.st.trip_top_mc = sbth_trip_mc(&tmu_io, 0);
+    g.st.trip_sub_mc = sbth_trip_mc(&tmu_io, 1);
+    g.st.gpu_mc = g.st.hottest_mc = g.st.max_gpu_mc = g.st.max_any_mc = SBTH_NO_TEMP;
+    for (unsigned i = 0; i < SBTH_SLOTS; ++i)
+        g.st.mc[i] = SBTH_NO_TEMP;
+
+    RtlInitUnicodeString(&name, L"\\Device\\StarbiteThermal");
+    st = IoCreateDevice(drv, 0, &name, SBTH_DEVICE_TYPE, FILE_DEVICE_SECURE_OPEN, FALSE, &g.dev);
+    if (!NT_SUCCESS(st)) {
+        cleanup();
+        return st;
+    }
+    RtlInitUnicodeString(&link, L"\\DosDevices\\StarbiteThermal");
+    g.link = NT_SUCCESS(IoCreateSymbolicLink(&link, &name));
+
+    RtlInitUnicodeString(&cbname, SBTH_CALLBACK_NAME);
+    InitializeObjectAttributes(&oa, &cbname, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    st = ExCreateCallback(&g.cb, &oa, TRUE, TRUE);
+    if (!NT_SUCCESS(st)) {
+        cleanup();
+        return st;
+    }
+    g.cb_reg = ExRegisterCallback(g.cb, SbthQueryCallback, NULL);
+    if (!g.cb_reg) {
+        cleanup();
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    drv->MajorFunction[IRP_MJ_CREATE] = SbthCreateClose;
+    drv->MajorFunction[IRP_MJ_CLOSE] = SbthCreateClose;
+    drv->MajorFunction[IRP_MJ_DEVICE_CONTROL] = SbthIoctl;
+    /* No DriverUnload: the watchdog cannot be stopped while Windows runs (a GPU driver relies on it). */
+
+    InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    st = PsCreateSystemThread(&g.thread, THREAD_ALL_ACCESS, &oa, NULL, NULL, SbthThread, NULL);
+    if (!NT_SUCCESS(st)) {
+        cleanup();
+        return st;
+    }
+    (void)KeWaitForSingleObject(&g.started, Executive, KernelMode, FALSE, NULL);
+    write_state(&g.st, TRUE);
+    return STATUS_SUCCESS;
+}

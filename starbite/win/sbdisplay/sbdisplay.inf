@@ -1,0 +1,75 @@
+; SPDX-License-Identifier: GPL-2.0-only
+; sbdisplay: display-only driver for the Galaxy S9's DECON (Exynos 9810), Windows 11 ARM64.
+; docs/WIN11-GPU.md section 7. Binds the ACPI device \_SB.GPU0 (_HID STRB0072) that the Starbite
+; firmware or the registry override publishes (docs/WIN11-GPU.md 4.2).
+; Shape of Microsoft's KMDOD sample INF and wddm-mali-g52's malidod.inf.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Display
+ClassGUID   = {4d36e968-e325-11ce-bfc1-08002be10318}
+Provider    = %Starbite%
+DriverVer   = 11/07/2026,0.1.0.0
+CatalogFile = sbdisplay.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+sbdisplay.sys = 1
+
+[Manufacturer]
+%Starbite% = Starbite, NTarm64
+
+[Starbite.NTarm64]
+%DeviceDesc% = SbDisplay_Inst, ACPI\STRB0072
+
+[SbDisplay_Inst]
+FeatureScore = F9
+CopyFiles    = SbDisplay_Files
+AddReg       = SbDisplay_SoftwareReg
+
+[SbDisplay_Files]
+sbdisplay.sys
+
+[SbDisplay_SoftwareReg]
+HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, sbdisplay
+HKR,, VideoDebugLevel, %REG_DWORD%, 0
+
+[SbDisplay_Inst.Services]
+AddService = sbdisplay, 0x00000002, SbDisplay_Service, SbDisplay_EventLog
+
+[SbDisplay_Service]
+DisplayName   = %ServiceDesc%
+ServiceType   = 1                 ; SERVICE_KERNEL_DRIVER
+StartType     = 3                 ; SERVICE_DEMAND_START (PnP starts it)
+ErrorControl  = 0                 ; SERVICE_ERROR_IGNORE: a failure never stops boot
+ServiceBinary = %13%\sbdisplay.sys
+AddReg        = SbDisplay_Params
+
+[SbDisplay_Params]
+; First phone test (T3a) runs with both off: copy mode, Basic Display's behaviour, no DECON or DSIM
+; write at all. T3b sets Flip = 1, T4 sets Brightness = 1 (Windows may restore a saved brightness at
+; boot, which would send panel commands nobody asked for).
+HKR, Parameters, Flip,       %REG_DWORD%, 0   ; 1 = tear-free flips (writes DECON: IDMA ch0 base, shadow request, trigger)
+HKR, Parameters, Brightness, %REG_DWORD%, 0   ; 1 = brightness slider sends S-Boot's AOR sequence over DSIM
+
+[SbDisplay_EventLog]
+AddReg = SbDisplay_EventLog_AddReg
+
+[SbDisplay_EventLog_AddReg]
+HKR,, EventMessageFile, %REG_EXPAND_SZ%, "%%SystemRoot%%\System32\IoLogMsg.dll"
+HKR,, TypesSupported,   %REG_DWORD%, 7
+
+[Strings]
+Starbite      = "Starbite"
+DiskName      = "Starbite display driver"
+DeviceDesc    = "Starbite Display (Galaxy S9 DECON)"
+ServiceDesc   = "Starbite display-only driver"
+REG_MULTI_SZ  = 0x00010000
+REG_DWORD     = 0x00010001
+REG_EXPAND_SZ = 0x00020000
