@@ -53,8 +53,8 @@ echo "utility: assets from $(basename "$SB7"), sha256 $(sha256sum "$SB7" | cut -
 # Host test of the USB mass storage and the FAT32 formatter (starbite/tools/ut-host-test.c): a
 # failure stops the build.
 if [ "$native" = 1 ]; then
-    gcc -O1 -Wall -Wextra -Werror -I"$here" -o "$out/ut-host-test" "$root/starbite/tools/ut-host-test.c" \
-        "$here/msc.c" "$here/fat.c" "$here/usb_desc.c" "$here/sha256.c"
+    gcc -O1 -Wall -Wextra -Werror -I"$here" -I"$lib" -o "$out/ut-host-test" "$root/starbite/tools/ut-host-test.c" \
+        "$here/msc.c" "$here/fat.c" "$here/usb_desc.c" "$here/sha256.c" "$here/calcmath.c" "$lib/str.c" -lm
     "$out/ut-host-test"
 fi
 

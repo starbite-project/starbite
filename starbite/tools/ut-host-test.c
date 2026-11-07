@@ -15,6 +15,7 @@
 #include "fat.h"
 #include "usb_desc.h"
 #include "hash.h"
+#include "calc.h"
 
 static int busy[16];
 static uintptr_t qbuf[16];
@@ -189,6 +190,35 @@ int main(int argc, char **argv)
         CHECK(crc32_update(0, (const uint8_t *)"123456789", 9) == 0xcbf43926U, "crc32");
         CHECK(crc32_update(crc32_update(0, (const uint8_t *)"1234", 4), (const uint8_t *)"56789", 5) == 0xcbf43926U,
               "crc32 in two parts");
+    }
+    /* the calculator's math and parser */
+    {
+        double v;
+        struct { const char *e; double want; } t[] = {
+            { "2+3*4", 14 }, { "(2+3)*4", 20 }, { "2^10", 1024 }, { "2^0.5", 1.41421356237309505 },
+            { "sqrt(2)", 1.41421356237309505 }, { "sin(30)", 0.5 }, { "cos(60)", 0.5 }, { "tan(45)", 1 },
+            { "ln(e)", 1 }, { "log(1000)", 3 }, { "-3+10/4", -0.5 }, { "pi*2", 6.28318530717958648 },
+            { "sin(390)", 0.5 }, { "1/3*3", 1 },
+        };
+        for (unsigned i = 0; i < sizeof(t) / sizeof(t[0]); ++i) {
+            int r = calc_eval(t[i].e, &v);
+            double d = v - t[i].want;
+            CHECK(r == 0 && d < 1e-10 && d > -1e-10, "calc %s = %.15g (want %.15g)", t[i].e, v, t[i].want);
+        }
+        CHECK(calc_eval("2+", &v) != 0 && calc_eval("(1", &v) != 0, "malformed expressions refused");
+        double ex = cm_exp(1) - 2.718281828459045, lx = cm_ln(1e-5) + 11.512925464970229;
+        CHECK(ex < 1e-13 && ex > -1e-13 && lx < 1e-11 && lx > -1e-11, "exp / ln");
+        char o[64];
+        calc_format(1.0 / 3, o, sizeof(o));
+        CHECK(strcmp(o, "0.333333333333") == 0, "format 1/3: %s", o);
+        calc_format(1234567.5, o, sizeof(o));
+        CHECK(strcmp(o, "1234567.5") == 0, "format 1234567.5: %s", o);
+        calc_format(-2.5e20, o, sizeof(o));
+        CHECK(strcmp(o, "-2.5e20") == 0, "format -2.5e20: %s", o);
+        calc_format(0.000001234, o, sizeof(o));
+        CHECK(strcmp(o, "0.000001234") == 0, "format 0.000001234: %s", o);
+        calc_format(0.0000001234, o, sizeof(o));
+        CHECK(strcmp(o, "1.234e-7") == 0, "format 1.234e-7: %s", o);
     }
     /* the configuration descriptor, both speeds */
     for (int fs = 0; fs < 2; ++fs) {

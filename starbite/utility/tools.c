@@ -6,6 +6,7 @@
 #include "sbui.h"
 #include "sbui_w.h"
 #include "ut.h"
+#include "calc.h"
 
 #define PPI 570U                                  /* Galaxy S9: 1440 x 2960, 5.8 in (Samsung: 570 ppi) */
 
@@ -242,7 +243,8 @@ static void hms(struct ub *u, uint64_t ms, int tenths)
     }
 }
 
-#define EV_ROW_Y(i) (UI_VIEW_Y0 + 60 + (i) * 700)
+#define EV_ROW_Y(i) (UI_VIEW_Y0 + 40 + (i) * 580)
+#define EV_ROW_H 520
 
 static struct { int run; uint64_t t0, acc; } sw;                 /* stopwatch */
 static struct { int run, done; uint64_t end, left, set; } tm = { 0, 0, 0, 0, 5 * 60 * 1000 };
@@ -251,11 +253,11 @@ static void card(int i, const char *title, const char *big, const char *hint, ui
 {
     int y = EV_ROW_Y(i);
     if (focused)
-        ui_round(52, y - 8, UI_W - 104, 640 + 16, 56, C_STAR);
-    ui_round(60, y, UI_W - 120, 640, 48, focused ? C_CARD2 : C_CARD);
+        ui_round(52, y - 8, UI_W - 104, EV_ROW_H + 16, 56, C_STAR);
+    ui_round(60, y, UI_W - 120, EV_ROW_H, 48, focused ? C_CARD2 : C_CARD);
     ui_text(F_HEAD, 110, y + 80, title, C_L2);
-    ui_text(F_BIG, 110, y + 280, big, c);
-    ui_text(F_SMALL, 110, y + 560, hint, C_L3);
+    ui_text(F_BIG, 110, y + 260, big, c);
+    ui_text(F_SMALL, 110, y + 450, hint, C_L3);
 }
 
 static void everyday_draw(int focus)
@@ -299,6 +301,7 @@ static void everyday_draw(int focus)
     card(2, tm.done ? "TIMER: TIME!" : "TIMER", u.b,
          tm.run ? "Power: pause" : "Power: start   tap: +1 min   Bixby: back",
          tm.done ? (flash ? C_ORANGE : C_RED) : tm.run ? C_GREEN : C_L1, focus == 2);
+    card(3, "CALCULATOR", "Open", "scientific (degrees) and programmer (64-bit)", C_STAR, focus == 3);
     ui_dirty(0, UI_VIEW_Y0, UI_W, UI_H - UI_VIEW_Y0);
 }
 
@@ -327,14 +330,19 @@ void ut_everyday(void)
         if (back_event(&e))
             break;
         if (e.type == EV_UP || e.type == EV_DOWN) {
-            focus = (focus + (e.type == EV_UP ? 2 : 1)) % 3;
+            focus = (focus + (e.type == EV_UP ? 3 : 1)) % 4;
         } else if (e.type == EV_SELECT || e.type == EV_TAP) {
             int which = focus;
             if (e.type == EV_TAP)
-                for (int i = 0; i < 3; ++i)
-                    if (e.y >= EV_ROW_Y(i) && e.y < EV_ROW_Y(i) + 640)
+                for (int i = 0; i < 4; ++i)
+                    if (e.y >= EV_ROW_Y(i) && e.y < EV_ROW_Y(i) + EV_ROW_H)
                         which = focus = i;
-            if (which == 1) {
+            if (which == 3) {
+                ut_calc();
+                ui_input_reset();
+                ui_fill(0, 0, UI_W, UI_H, C_BG);
+                ui_header_draw("Everyday", "Utility", "", 0);
+            } else if (which == 1) {
                 if (e.type == EV_TAP && !sw.run && sw.acc) {
                     sw.acc = 0;                       /* tap when stopped: reset */
                 } else if (sw.run) {

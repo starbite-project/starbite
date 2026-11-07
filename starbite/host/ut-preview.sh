@@ -23,7 +23,7 @@ limactl shell --workdir "$root" starbite gcc -O1 -g -DSB_HOST -DSB_HOST_UTILITY 
     -o "$out/ut-host" "$root/starbite/host/host.c" "$root/starbite/host/ut-host-stubs.c" \
     "$lib/str.c" "$lib/log.c" "$lib/sbui.c" "$lib/sbui_input.c" "$lib/sbui_page.c" "$lib/sbui_w.c" "$lib/sb7.c" \
     "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" \
-    "$lib/assets.S" "$ut/main.c" "$ut/msc.c" "$ut/fat.c" "$ut/tools.c" "$ut/pad.c" "$ut/hid.c" "$ut/hash.c" "$ut/sha256.c" -lm -lpthread
+    "$lib/assets.S" "$ut/main.c" "$ut/msc.c" "$ut/fat.c" "$ut/tools.c" "$ut/pad.c" "$ut/hid.c" "$ut/hash.c" "$ut/sha256.c" "$ut/calc.c" "$ut/calcmath.c" -lm -lpthread
 
 scene() {
     name=$1
@@ -44,5 +44,7 @@ scene everyday    UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:
 scene pad         UT_HOST_USB=1 w:500 k:p w:800 k:d w:300 k:p w:800 t:700,900 w:300
 scene files       UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200
 scene files-hash  UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:p w:1200 k:d w:200 k:d w:200 k:p w:4000
+scene everyday4    UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:d w:200 k:d w:300
+scene calc        UT_HOST_USB=1 w:500 k:d w:200 k:d w:200 k:d w:200 k:d w:200 k:p w:600 k:d w:200 k:d w:200 k:p w:600 t:450,2245 w:150 t:1290,1165 w:150 t:170,2245 w:150 t:170,2515 w:150 t:1290,2515 w:400
 scene idle-warn   UT_HOST_USB=0 w:150000
 echo "PNGs in $png"
