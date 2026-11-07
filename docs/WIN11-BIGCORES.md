@@ -273,7 +273,33 @@ first fetch after MMU-on faults, the vectors (same page) fault too, and the core
 - At ExitBootServices the A55 logs TTBR0/TCR/SCTLR/MAIR next to their values at arming, and the
   page-table entries of the entry code, the context and the stack.
 
-Images: `starbite-uefi-m3boot-gpu.bin` 52c744d1…, solo `starbite-uefi-m3bootsolo-gpu.bin` 086f9a8c…. (`SOLO=m3boot M3BOOT=1 EXTRA_AML=<StarbiteGpu.aml> SUFFIX=-gpu`). The live MADT is
+Images: `starbite-uefi-m3boot-gpu.bin` 52c744d1…, solo `starbite-uefi-m3bootsolo-gpu.bin` 086f9a8c….
+
+**B3 v2 result (2026-11-07, 52c744d1): not taken again, now with reliable evidence.**
+- Translation tables at ExitBootServices: the same as at arming (ttbr0 0xBC7EF000, tcr, sctlr, mair
+  all unchanged).
+- The entry code is mapped as normal memory, executable (L3 desc 0xBBD4478F, attridx 3, pxn 0);
+  the context and stack likewise.
+- `CPU_ON rc=0`, but **stage=0**: the M3 never ran a single instruction of ours.
+
+**The cause: the release's PSCI EL2 shim** (`Star2LtePsciEl2ShimStage0Proven`, NOTES 2026-10-26).
+It installs during DXE: `=PSCI2 el=4 ... INSTALL1 ... hcr=80080002 ... post ver=0x10000`, where
+`pre ver` was 0xFFFFFFFF. HCR_EL2.TSC=1, so from then on every SMC from EL1 traps into woa's EL2
+payload, which acts as a PSCI 1.0. B1, B2 and B3a issued their CPU_ONs from our module's
+dispatch, before the shim, so straight to Samsung's EL3 (PSCI 0.1), and they worked. At
+ExitBootServices the shim takes the CPU_ON, returns 0, and the M3 never reaches our entry (likely
+started in the shim's own EL2 code, built for the A55).
+
+**v3:** M3 core 1 is CPU_ON'd at dispatch, only while PSCI_VERSION is still 0xFFFFFFFF, into a
+parking loop (`M3ParkGo`) in reserved memory: MMU off, WFE with the event stream (as B2b), polling a
+Go word. At ExitBootServices the A55 saves its context as before, then sets Go, cleans it and SEVs.
+No SMC; the parked M3 jumps into the v2 entry in .text. On timeout: State 2 and Go back to 0, so the
+core stays parked (reserved memory, harmless as in B2).
+**New risk:** Windows' boot CPU then has no shim at EL2. Its PSCI calls (version/features at boot,
+SYSTEM_RESET at restart) go to Samsung's EL3 directly, which is PSCI 0.1-like. A hang or bugcheck
+after `now on mpidr=80000101` would point there; the next step would then be the shim's EL2 setup on
+the M3.
+Images: `starbite-uefi-m3boot-gpu.bin` b5ac1e78…, solo `starbite-uefi-m3bootsolo-gpu.bin` 620eace0…. (`SOLO=m3boot M3BOOT=1 EXTRA_AML=<StarbiteGpu.aml> SUFFIX=-gpu`). The live MADT is
 logged at ExitBootServices (`=M3 boot MADT gicc uid=… if=… flags=… mpidr=… park v… eff=…`): the
 first view of what P leaves. **Held until B3a passes** (its GIC interface bits and coherency
 results gate this image).
