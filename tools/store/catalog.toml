@@ -373,6 +373,21 @@ tag = "beta"
 files = ["ufs:engineer.img|sd:engineer.img"]
 root = "none (RAM only)"
 
+# Starbite Utility OS (docs/UTILITY-OS.md, master plan 4.4): no Linux; the phone as USB drives (RAM disk
+# FAT32 read-write, microSD read-only) + the Starbite shell on a USB serial port. It feeds the cluster-1
+# watchdog, so a hang returns to the crash screen.
+[[entry]]
+key = "utility"
+name = "Utility"
+version = "Starbite Utility OS 1 · USB drives + shell"
+category = "starbite"
+method = "bare"
+tag = "beta"
+files = ["ufs:utility.img|sd:utility.img"]
+root = "none (RAM only)"
+wdt = 60
+wdt_feed = "own"
+
 # 2026-11-05: Linux display black-bars diagnostic kernel (patch-mainline step 6e), hidden; boot by key only.
 
 # 2026-11-06: the previous Linux kernel (before the panel self-mask fix), hidden; boot by key if the new one regresses.
