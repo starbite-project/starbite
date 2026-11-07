@@ -12,12 +12,18 @@
        CSSELR_EL1/CCSIDR_EL1 per cache (line size, ways, sets; both CCSIDR formats, chosen by
        ID_AA64MMFR2_EL1.CCIDX). The boot CPU is an A55, the only kind Windows runs on here;
     2. finds the installed PPTT (EFI_ACPI_SDT_PROTOCOL), builds a copy with cache structures for
-       every core of the boot CPU's cluster (PpttBuild.c: level 1 and 2 per core, level 3 and up
-       shared, chained "next level of cache"; the M3 cores' nodes unchanged);
+       every core of the boot CPU's cluster (PpttBuild.c: level 1 per core, level 2 shared by the
+       cluster, chained "next level of cache"; the M3 cores' nodes unchanged);
     3. uninstalls the old table and installs the new one; if that install fails the old table is
        installed again.
   Anything unexpected (no PPTT yet, a PPTT that already has caches, implausible geometry) leaves
   the table as it is. Every step is logged as an "=PPTT" line (StarbiteLog.h).
+
+  On the phone (combined image 059f406f, 2026-11-07) step 1 works and step 2 doesn't: the woa
+  release has no EFI_ACPI_SDT_PROTOCOL at all, so "=PPTT skip: no ACPI protocols (Not Found)".
+  Images therefore patch the PPTT at build time instead (tools/woa/pptt-patch.py, the same
+  PpttBuild.c with the values step 1 measured); this runtime path stays as the measuring tool
+  (STARBITE_PPTT_FIX=1 logs the CPU's caches) for firmware that does have the protocol.
 
   Copyright (c) 2026, Starbite. SPDX-License-Identifier: GPL-2.0-only
 **/
@@ -199,7 +205,11 @@ PpttFix (
     return;
   }
 
-  NewLen = PpttAddCaches (Old, OldLen, Caches, NumCaches, New, PPTT_OUT_MAX, &Why);
+  //
+  // PrivateLevels 1: on the S9's A55 cluster only L1 is per core; CLIDR reports no L3, and the
+  // 512 KiB L2 is the cluster's shared cache (docs/WIN11-USB.md section 10).
+  //
+  NewLen = PpttAddCaches (Old, OldLen, Caches, NumCaches, 1, New, PPTT_OUT_MAX, &Why);
   if (NewLen == 0) {
     SbLog ("=PPTT skip: %a (unchanged, %d bytes)", Why, OldLen);
     return;

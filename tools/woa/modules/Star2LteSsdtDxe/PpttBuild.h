@@ -27,7 +27,9 @@ typedef uint32_t  pb_u32;
 
 //
 // One cache as the CPU reports it (CLIDR + CCSIDR), for the cores of the boot CPU's cluster.
-// Levels 1 and 2 are private to each core; level 3 and up is shared by the cluster.
+// Levels up to PrivateLevels are private to each core; the levels above are shared by the
+// cluster. The S9's A55 cluster: PrivateLevels 1 (CLIDR 0x82000023: L1 I+D, one unified L2 of
+// 512 KiB, no L3; the L2 is the cluster's shared cache).
 //
 typedef struct {
   pb_u8     Level;        // 1..7
@@ -40,9 +42,10 @@ typedef struct {
 //
 // Build into Out (capacity OutCap) a copy of the PPTT In with cache structures for every leaf
 // processor in the cluster that holds ACPI processor ID 0 (the boot CPU, an A55 here): each such
-// core gets its own level-1 and level-2 caches, referenced from the leaf (level 1) and chained
-// through "next level of cache" to level 2 and then to one shared level-3 cache. Other nodes are
-// copied unchanged (parent offsets remapped). Returns the new length, or 0 with *Why set when the
+// core gets its own caches of levels 1..PrivateLevels, referenced from the leaf (level 1) and
+// chained through "next level of cache"; the higher levels exist once, listed as the cluster
+// node's private resources and reached from the last per-core level. Other nodes are copied
+// unchanged (parent offsets remapped). Returns the new length, or 0 with *Why set when the
 // input isn't a plain processor-only PPTT this understands (then nothing should change).
 //
 pb_u32
@@ -51,6 +54,7 @@ PpttAddCaches (
   pb_u32          InLen,
   const PB_CACHE  *Caches,
   pb_u32          NumCaches,
+  pb_u32          PrivateLevels,
   pb_u8           *Out,
   pb_u32          OutCap,
   const char      **Why

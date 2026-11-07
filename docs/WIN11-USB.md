@@ -338,6 +338,28 @@ the bytes is published; the first L1 boot's Enum keys and the Mac's `ioreg` show
 endpoints came through]. With the key named `GenericUsbFn` the child is `USBFN\GenericUsbFn` and
 genericusbfn.sys binds inbox. L1's own endpoint layout replaces this one when it exists.
 
+**Also needed: `USBFN\Default`** (found with the ETW trace, section 9.1). ufx01000 opens it before
+anything else and fails without it. It reads the device values from `Default` first, then lets
+the same values under `USBFN` override them; a value missing from both stays 0. Per-configuration
+values go under the configuration's key.
+
+| Key | Value | Type | Data |
+|---|---|---|---|
+| `USBFN\Default` | `idVendor` | DWORD | 0x1209 (the same as `USBFN`) |
+| `USBFN\Default` | `idProduct` | DWORD | 0x0002 |
+| `USBFN\Default` | `bcdDevice` | DWORD | 0x0100 |
+| `USBFN\Default` | `bDeviceClass` | DWORD | 0 (class per interface) |
+| `USBFN\Default` | `bDeviceSubclass` | DWORD | 0 |
+| `USBFN\Default` | `bDeviceProtocol` | DWORD | 0 |
+| `USBFN\Default` | `ManufacturerString` | SZ | `Starbite` |
+| `USBFN\Default` | `ProductString` | SZ | `Starbite Link` |
+| `USBFN\Default` | `iSerialNumber` | DWORD | 0 (no serial; a generated one needs the SMBIOS UUID, which fails here) |
+| `USBFN\Default` | `IncludeDefaultCfg` | DWORD | 0 |
+| `USBFN\Configurations\StarbiteLink` | `bmAttributes` | DWORD | 0xC0 (self-powered; bit 7 must be set) |
+| `USBFN\Configurations\StarbiteLink` | `bMaxPower` | DWORD | 0x32 (100 mA in 2 mA units) |
+
+No `Configurations\Default` (only used with `IncludeDefaultCfg = 1`).
+
 ### 5.2 Seeing inside the device stack: an ETW autologger (L1 diagnosis)
 
 L1 with `UFN0` revision 2 (image 7fe37f7e…) was still silent. Windows' PnP log says `ACPI\INT3445\0`
@@ -559,6 +581,21 @@ of the main checkout; 1040 bytes and nothing else in zone 0 after the Windows se
 Windows: `Enum\ACPI\INT3445\0` service ufxsynopsys, ConfigFlags 0; no `Enum\USBFN`; the Mac saw
 no device. Cause and fix: the attach `_DSM` above (`UFN0` revision 2, image 7fe37f7e…).
 
+**L1 with the ETW trace (2026-11-07, combined image 059f406f…, `results-combo1`): the stack stops
+reading the registry.** `tools/woa/ufx-etl.py decode` on `StarbiteUfx.etl` (108 events):
+ufxsynopsys reads the controller (GSNPSID 0x5533310A), reports HARDWARE READY, then ATTACH,
+connected 1, port type unknown, 500 mA; the device state machine reaches WaitForBusUp and the bus
+machine waits in `WaitForEvtChildListCreateDevice` for a child that never comes. Before that, at
+start: `UfxRegistryDeviceRead` failed 0xC0000034 (not found) on line 1437 -> `BuildDescriptors` ->
+`UfxDescriptorCreate` -> "FF_BusInitialize: Failed to read current configuration". So no descriptors
+and no `USBFN\GenericUsbFn` child, and DCTL Run/Stop is never set (the Mac sees nothing). Line
+1437 is ufx01000's open of the subkey **`Default`** of `Control\USBFN` (the string table, one call
+site, read in its ARM64 code), and the failure is fatal. Microsoft's doc calls `USBFN\Default` "a
+Microsoft-owned sub-key" with the device defaults; Windows 10 Mobile shipped it, desktop Windows
+doesn't. Missing values inside it are tolerated (each query accepts "not found"). Other failures in
+the trace are harmless: the SMBIOS UUID (for a generated serial number), the user-prompt settings,
+the charging arbitration driver. Fix: the `USBFN\Default` keys in section 5.1 (no firmware change).
+
 ## 10. Side finding: the PPTT has no caches (the 0xC0000094 crashes)
 
 Windows' System log shows `OneDriveSetup.exe` and then the `WerFault.exe` started for it failing at
@@ -572,11 +609,12 @@ The release PPTT (the platform module's, woa `Pptt.aslc`, the same in src38: 256
 has the package, two clusters and eight leaf cores, and **no cache structures**. Code that sizes
 something by the reported cache line or cache size can then divide by zero. The fix under test:
 
-- `PpttBuild.c` (portable, host test `tools/woa/modules/Star2LteSsdtDxe/test/run.sh`: 94 checks on
-  the release's own PPTT, plus iasl's disassembler as an independent parse) adds, for every core of
-  the cluster holding ACPI processor ID 0 (the A55s, the only cores Windows runs here), its level-1
-  and level-2 caches and one shared level-3 cache, chained by "next level of cache"; the M3 nodes
-  stay as they were. Revision-3 cache structures with cache IDs.
+- `PpttBuild.c` (portable, host test `tools/woa/modules/Star2LteSsdtDxe/test/run.sh` on the
+  release's own PPTT, plus iasl's disassembler as an independent parse) adds, for every core of
+  the cluster holding ACPI processor ID 0 (the A55s, the only cores Windows runs here), its private
+  caches, and the shared ones once, under the cluster node, chained by "next level of cache"; the
+  M3 nodes stay as they were. Revision-3 cache structures with cache IDs. (First version: L1 + L2
+  per core and a shared L3; corrected after the measurement below.)
 - `PpttFix.c`, part of `Star2LteSsdtDxe` when built with `STARBITE_PPTT_FIX=1` (a third module didn't
   fit the release's fixed DXE slot): during dispatch it reads the real geometry from the boot CPU
   (CLIDR_EL1, then CSSELR/CCSIDR_EL1 per cache, both CCSIDR formats per ID_AA64MMFR2_EL1.CCIDX),
@@ -602,6 +640,29 @@ something by the reported cache line or cache size can then divide by zero. The 
 
 - Risk: CLIDR/CCSIDR reads at boot (our XNU and Linux read them on this phone too); a malformed PPTT
   would stop Windows early (hidden test entry; forced reset is fine before the logo).
+
+**Result of the combined image (059f406f…, 2026-11-07): the runtime fix measured the caches, but
+couldn't swap the table.** Zone 0: `=PPTT v1 clidr=82000023 ccidx=0`, L1 data and instruction 64-byte
+lines, 4 ways, 128 sets (32 KiB each), L2 unified 64-byte lines, 16 ways, 512 sets (512 KiB), then
+`=PPTT skip: no ACPI protocols (Not Found)`. The woa release has **no EFI_ACPI_SDT_PROTOCOL** (only
+the table protocol), so the installed PPTT can't be found at run time, and waiting for the protocol
+wouldn't help.
+
+**No L3.** CLIDR 0x82000023 lists level 1 (separate I+D) and level 2 (unified) and nothing above
+(Ctype3 = 0, LoC 2). The A55s here have no private L2: the 512 KiB, 16-way level 2 is the cluster's
+shared cache. So `PpttBuild` now takes `PrivateLevels`. Here it is 1: each A55 leaf lists its own L1D and
+L1I, and both point to one L2 that the A55 cluster node lists as its private resource (ACPI 6.4: a
+cache shared by a cluster is the cluster node's private resource). The M3s stay without caches
+(Windows doesn't run on them yet). The host test (`test/run.sh`, 246 checks) covers this layout and
+a deeper one (private L1+L2, shared L3).
+
+**Build-time fix (`PPTT_STATIC=1`).** `tools/woa/pptt-patch.py` takes the release's platform table
+file (FREEFORM `11111111-2222-3333-4444-555555555501`, one RAW section per table: FACP, GTDT, APIC,
+PPTT, DSDT, SSDT), replaces the PPTT section with PpttBuild's output for the measured caches (the
+same C through `test/pptt-tool.c`), and copies everything else byte for byte. PPTT 256 -> 544
+bytes, file 0xB86 -> 0xCA6. The image build blanks the old file (`--kill-blank`; the DXE core's
+by-name lookups skip pad files, edk2 `FwVolRead.c`) and adds the new one; `dxe-diff.py --replaced`
+accepts exactly that file as changed. The runtime path (`PPTT=1`) stays for measuring only.
 
 ## 11. Licences and credits
 

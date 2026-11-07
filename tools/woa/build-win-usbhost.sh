@@ -31,7 +31,11 @@ rel=$W/release-7582.fd
 RTC=b336f62d-4135-4a55-ae4e-4971bbf0885d
 USBDXE=93eb628b-5eff-4ae2-834d-cf7aaf7bdc7c
 SSDTDXE=5dd14183-80d0-4d05-938e-f74bc42e4e6a
-PPTT=${PPTT:-0}                                   # 1: Star2LteSsdtDxe also fixes the PPTT (section 10)
+PPTT=${PPTT:-0}                                   # 1: Star2LteSsdtDxe also fixes the PPTT at run time (section 10;
+                                                  #    the release has no SDT protocol, so on the phone it only logs the caches)
+PPTT_STATIC=${PPTT_STATIC:-0}                     # 1: the release's platform ACPI file with the cache-augmented PPTT
+                                                  #    (tools/woa/pptt-patch.py, build time; section 10)
+ACPIFILE=11111111-2222-3333-4444-555555555501
 M3=${M3:-0}                                       # 1: Star2LteSsdtDxe also runs the M3 probe (WIN11-BIGCORES B1)
 SOLO=${SOLO:-}                                    # name: only the isolated image src38 + Star2LteSsdtDxe
                                                   # (with the PPTT/M3 flags above), no USB, no blobs
@@ -46,6 +50,7 @@ out=build/woa
 SUFFIX=${SUFFIX:-}
 [ -z "${EXTRA_AML:-}" ] || [ -n "$SUFFIX" ] || { echo "EXTRA_AML needs a SUFFIX so the plain images are kept" >&2; exit 1; }
 [ "$PPTT" = 0 ] || [ -n "$SUFFIX" ] || { echo "PPTT=1 needs a SUFFIX so the plain images are kept" >&2; exit 1; }
+[ "$PPTT_STATIC" = 0 ] || [ -n "$SUFFIX" ] || { echo "PPTT_STATIC=1 needs a SUFFIX so the plain images are kept" >&2; exit 1; }
 for f in "$rel" "$W/Star2LtePkg-src38.fd" "$W/pmic-rtc.ffs" "$W/src38.fd" "$W/starbite-uefi-src38.bin"; do
     [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
 done
@@ -54,7 +59,7 @@ if limactl shell starbite -- pgrep -f 'build -a AARCH64' >/dev/null; then
     echo "another edk2 build is running in the VM; try again later" >&2; exit 1
 fi
 starbite/s9usb/test/run.sh | tail -1
-tools/woa/modules/Star2LteSsdtDxe/test/run.sh | head -1
+tools/woa/modules/Star2LteSsdtDxe/test/run.sh | grep -E "checks|FAIL"
 python3 tools/woa/patches/gen-0024.py --check
 mkdir -p "$out/acpi"
 head -c 384 "$W/starbite-uefi-src38.bin" > "$out/src38-bootshim.bin"
@@ -105,6 +110,13 @@ image() {   # image NAME ROLE ACPI VBUS BLOB
 }
 serial=() unserial=()
 [ "$KILL_SERIAL" = 0 ] || { serial=(--kill-blank "$SERIAL"); unserial=(--removed "$SERIAL"); }
+if [ "$PPTT_STATIC" = 1 ]; then
+    # the release's table file with the new PPTT replaces the old one (killed to a blank pad file,
+    # which the DXE core's by-name lookups skip); dxe-diff accepts exactly that file as changed
+    python3 tools/woa/dxe-replace.py "$rel" "$rel" /dev/null --extract "$ACPIFILE" "$out/acpi/release-tables.ffs" >/dev/null
+    python3 -I tools/woa/pptt-patch.py "$out/acpi/release-tables.ffs" "$out/acpi/release-tables-pptt.ffs" --dump "$out/acpi/pptt-s9.aml"
+    serial+=(--kill-blank "$ACPIFILE" --add "$out/acpi/release-tables-pptt.ffs"); unserial+=(--replaced "$ACPIFILE")
+fi
 # the M3 probe / PPTT fix code is linked in only with its flag (LTO drops it otherwise)
 flags_ok() {   # flags_ok FFS
     local has

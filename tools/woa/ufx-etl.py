@@ -214,6 +214,7 @@ def main():
             def on_event_record(self, ev):
                 h = ev.source.event_header
                 p = h.provider_id
+                p = getattr(p, 'inner', p)        # etl-parser 1.0.1 nests the fields in "inner"
                 g = uuid.UUID(fields=(p.data1, p.data2, p.data3, p.data4[0], p.data4[1],
                                       int.from_bytes(bytes(p.data4[2:]), 'big')))
                 if g not in provs:

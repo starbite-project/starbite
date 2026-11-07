@@ -2,10 +2,12 @@
 """List the DXE volume of a UEFI FD, or compare two FDs file by file.
 
   dxe-diff.py A.fd            the files of A's DXE volume (GUID, type, size, UI name)
-  dxe-diff.py A.fd B.fd [--removed GUID ...]
+  dxe-diff.py A.fd B.fd [--removed GUID ...] [--replaced GUID ...]
                               files only in A, only in B, and in both but different; also
                               whether the outer FVs (SEC/PEI) are byte-identical. --removed: files
-                              deliberately dropped from B (e.g. a killed module), not an error
+                              deliberately dropped from B (e.g. a killed module), not an error;
+                              --replaced: files deliberately changed in B (e.g. the platform ACPI
+                              tables with the patched PPTT), not an error
 
 The DXE volume is the last file of the outer FV (an LZMA section holding the inner FV), as
 tools/woa/dxe-replace.py builds it. Exit 1 when B differs from A in anything but added files.
@@ -57,11 +59,12 @@ def load(path):
 
 def main():
     args = sys.argv[1:]
-    removed = set()
-    while '--removed' in args:
-        i = args.index('--removed')
-        removed.add(args[i + 1].lower())
-        del args[i:i + 2]
+    removed, replaced = set(), set()
+    for opt, into in (('--removed', removed), ('--replaced', replaced)):
+        while opt in args:
+            i = args.index(opt)
+            into.add(args[i + 1].lower())
+            del args[i:i + 2]
     sys.argv = [sys.argv[0]] + args
     oa, a = load(sys.argv[1])
     if len(sys.argv) == 2:
@@ -80,12 +83,14 @@ def main():
             print(f'only in A: {g} {a[g][2]}' + (' (removed on purpose)' if g in removed else ''))
             bad = bad or g not in removed
         elif a[g][:2] != b[g][:2]:
-            print(f'changed:   {g} {a[g][2]} ({len(a[g][1]):#x} -> {len(b[g][1]):#x} bytes)')
-            bad = True
+            print(f'changed:   {g} {a[g][2]} ({len(a[g][1]):#x} -> {len(b[g][1]):#x} bytes)'
+                  + (' (replaced on purpose)' if g in replaced else ''))
+            bad = bad or g not in replaced
     for g in b:
         if g not in a:
             print(f'added:     {g} {b[g][2]} ({len(b[g][1]):#x} bytes)')
-    print(('B = A + added files' + (' - removed files' if removed else '')) if not bad else 'B differs from A beyond added files')
+    print(('B = A + added files' + (' - removed files' if removed else '') + (' with replaced files' if replaced else ''))
+          if not bad else 'B differs from A beyond added files')
     sys.exit(1 if bad else 0)
 
 
