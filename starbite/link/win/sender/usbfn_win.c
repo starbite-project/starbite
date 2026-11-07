@@ -126,7 +126,9 @@ static DWORD ioctl_wait(usb_ctx *u, DWORD code, void *in, DWORD inl, void *out, 
         }
     }
     if (!err && !GetOverlappedResult(u->h, ov, &n, TRUE)) err = GetLastError();   /* completed: no wait */
-    if (!err && out && n <= outl) memcpy(out, obuf, n);
+    /* the whole buffer, not n bytes: GenericUsbFn completes GET_CLASS_INFO with 0 bytes reported (seen on
+     * the S9 with d175117: every PipeCount read as 0, "no bulk IN + OUT pipe pair", no session) */
+    if (!err && out) memcpy(out, obuf, outl);
     CloseHandle(ov->hEvent);
     free(ov);
     free(obuf);
@@ -208,12 +210,16 @@ static int find_interface(WCHAR *path, size_t cap)
     return r;
 }
 
-static int get_pipes(usb_ctx *u)
+static int get_pipes_once(usb_ctx *u, int attempt)
 {
     USBFN_CLASS_INFORMATION_PACKET ci;
     memset(&ci, 0, sizeof ci);
     DWORD n = 0, err = ioctl_wait(u, IOCTL_GENERICUSBFN_GET_CLASS_INFO, NULL, 0, &ci, sizeof ci, &n, 2000);
-    if (err) { sbl_log("usb: GET_CLASS_INFO error %lu", err); return -1; }
+    if (err) { sbl_log("usb: GET_CLASS_INFO error %lu (attempt %d)", err, attempt); return -1; }
+    if (attempt > 1 || !ci.HighSpeedClassInterface.PipeCount)
+        sbl_log("usb: GET_CLASS_INFO attempt %d: %lu of %u bytes, pipes HS %u FS %u SS %u, interface %u", attempt,
+                n, (unsigned)sizeof ci, ci.HighSpeedClassInterface.PipeCount, ci.FullSpeedClassInterface.PipeCount,
+                ci.SuperSpeedClassInterface.PipeCount, ci.HighSpeedClassInterface.InterfaceNumber);
     const USBFN_CLASS_INTERFACE *ifs[3] = { &ci.HighSpeedClassInterface, &ci.FullSpeedClassInterface,
                                             &ci.SuperSpeedClassInterface };
     int have_in = 0, have_out = 0;
@@ -228,8 +234,20 @@ static int get_pipes(usb_ctx *u)
             if (!(ep->bEndpointAddress & 0x80) && !have_out) { u->pout = ci1->PipeArr[i].PipeId; have_out = 1; }
         }
     }
-    if (!have_in || !have_out) { sbl_log("usb: no bulk IN + OUT pipe pair"); return -1; }
+    if (!have_in || !have_out) { sbl_log("usb: no bulk IN + OUT pipe pair (attempt %d)", attempt); return -1; }
     return 0;
+}
+
+/* on Configured: the class information may lag the event; retry with a short backoff (50 .. 800 ms) */
+static int get_pipes(usb_ctx *u)
+{
+    for (int a = 1; a <= 5; a++) {
+        if (get_pipes_once(u, a) == 0) return 0;
+        if (u->s->stop || u->wedged) break;
+        plat_sleep_ms(50 << (a - 1));
+        u->link.rx_beat_us = plat_now_us();
+    }
+    return -1;
 }
 
 /* the two OUT reads: buffers and OVERLAPPEDs on the heap, so a read the driver never returns can be
@@ -363,10 +381,15 @@ static void serve(usb_ctx *u)
                 prev_full = 0;
             }
             sbl_link_end(s, &u->link, ev_name(note->Event));
+            static int pipe_fails;   /* consecutive: recycle at most 3 times in a row, then just wait */
             if (get_pipes(u) == 0) {
+                pipe_fails = 0;
                 InterlockedExchange(&u->configured, 1);
                 InterlockedExchange(&u->suspended, 0);
                 sbl_log("usb: configured (value %u), waiting for HELLO", note->u.ConfigurationValue);
+            } else {
+                /* configured without pipes = no session ever: start the function over rather than sit here */
+                if (++pipe_fails <= 3) request_recycle(u, "no usable pipes after Configured");
             }
             break;
         case UsbfnEventReset:
