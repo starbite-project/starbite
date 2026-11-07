@@ -25,6 +25,7 @@ typedef struct plat_event_s *plat_event;
 void plat_mutex_init(plat_mutex *m);
 void plat_mutex_lock(plat_mutex *m);
 void plat_mutex_unlock(plat_mutex *m);
+int  plat_mutex_trylock(plat_mutex *m);        /* 1 = locked */
 
 plat_event plat_event_new(void);               /* auto-reset, initially clear */
 void plat_event_set(plat_event e);
@@ -33,6 +34,12 @@ int  plat_event_wait(plat_event e, int ms);    /* 1 signalled, 0 timeout */
 int  plat_thread(void (*fn)(void *), void *arg);   /* detached; 0 ok */
 uint64_t plat_now_us(void);                    /* monotonic */
 void plat_sleep_ms(int ms);
+
+/* Keep the system and the display awake (on = 1) or let them sleep again (on = 0). Windows:
+ * SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED), which belongs to the
+ * calling thread: always call it from the same long-lived thread (the capture loop). Host: recorded. */
+void plat_keep_awake(int on);
+int  plat_keep_awake_state(void);              /* last value set (host tests) */
 
 /* Log: path NULL = the default (Windows: C:\starbite\link\sblinkd.log, else %LOCALAPPDATA%\Starbite\Link;
  * host: none). to_stderr: also print. Returns 0 if the file is open. */

@@ -1,10 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0-only
  * sblinkd: the Starbite Link sender. Shows the phone's Windows desktop (the "Starbite Display" when the
  * IddCx virtual monitor is there, else the primary screen) in the Mac app and takes the Mac's keyboard
- * and mouse. Runs in the user's session (Startup folder or a logon task; README.md), no admin needed.
+ * and mouse.
  *
- *   sblinkd.exe                      USB (GenericUsbFn, the phone in device mode)
+ *   sblinkd.exe                      USB (GenericUsbFn, the phone in device mode), as the logged-on user
+ *                                    (Startup folder / Run key / logon task: the fallback mode)
  *   sblinkd.exe --tcp [PORT]         also TCP (default 47474) on 127.0.0.1; --bind 0.0.0.0 for the network
+ *   sblinkd.exe --service [ARGS]     the "StarbiteLink" LocalSystem service (service_win.c): starts
+ *                                    "sblinkd.exe --session-helper ARGS" in the active console session with
+ *                                    a SYSTEM token, so input reaches elevated windows, the flyouts, UAC and
+ *                                    the lock/logon screen, and restarts it on session changes or exits
+ * A watchdog thread restarts the process when the USB driver or a loop is stuck (sbl_watchdog).
  * Host build (Mac): sblinkd-host serves a synthetic desktop over TCP for developing the viewer.
  */
 #include "sender.h"
@@ -21,6 +27,13 @@
 #endif
 
 static sbl_sender g_s;
+#ifdef _WIN32
+static int g_helper;             /* --session-helper: started by the service as SYSTEM */
+static HANDLE g_quit_ev;         /* --quit-event: the service asks the helper to say BYE and exit */
+static HANDLE g_one;             /* the single-instance mutex */
+int sbl_service_main(int argc, wchar_t **wargv);   /* service_win.c */
+int sbl_service_is_running(void);
+#endif
 
 static void usage(void)
 {
@@ -38,6 +51,13 @@ static void usage(void)
         "  --log PATH       log file (default C:\\starbite\\link\\sblinkd.log)\n"
         "  --console        also log to a console\n"
         "  -v               log every frame and key\n"
+        "  --diag           log every OS frame's move/dirty rects (capture diagnostics)\n"
+        "  --stall-ms N     forget unacknowledged frames after N ms and send a keyframe (default 3000)\n"
+        "  --no-keep-awake  let Windows sleep while the Mac is connected\n"
+#ifdef _WIN32
+        "  --service [ARGS] run as the StarbiteLink service (LocalSystem); ARGS go to the session helper\n"
+        "  --unsafe-tcp     allow --tcp in the SYSTEM session helper (any local program could drive UAC!)\n"
+#endif
 #ifndef _WIN32
         "  host build: --synth-auto FPS (animate the synthetic desktop), --synth-size WxH, --print-input\n"
 #endif
@@ -91,6 +111,69 @@ static BOOL WINAPI ctrl_handler(DWORD t)
     sbl_sender_stop(&g_s);
     return TRUE;
 }
+
+/* the helper: the service set the quit event (stop, shutdown, console session moved) */
+static void quit_thread(void *arg)
+{
+    (void)arg;
+    WaitForSingleObject(g_quit_ev, INFINITE);
+    sbl_log("the service asks this helper to stop: BYE(SHUTDOWN)");
+    sbl_sender_bye(&g_s, SBLK_BYE_SHUTDOWN, "Starbite Link service stopping");
+    sbl_sender_stop(&g_s);
+}
+
+/* Something is stuck beyond what the loops can recover from (sbl_watchdog): a new process. The helper
+ * just exits (the service starts a new one at once); a Startup-folder instance starts its own copy. */
+static void restart_self(const char *why)
+{
+    sbl_log("watchdog: %s: restarting sblinkd%s", why, g_helper ? " (the service starts a new helper)" : "");
+    if (g_helper) ExitProcess(3);
+    if (g_one) { ReleaseMutex(g_one); CloseHandle(g_one); g_one = NULL; }
+    wchar_t exe[MAX_PATH];
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    wchar_t *cl = _wcsdup(GetCommandLineW());
+    if (cl && GetModuleFileNameW(NULL, exe, MAX_PATH) &&
+        CreateProcessW(exe, cl, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    } else sbl_log("watchdog: could not start a new sblinkd (%lu)", GetLastError());
+    ExitProcess(3);
+}
+
+static void watchdog_thread(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        Sleep(2000);
+        char why[128];
+        if (sbl_watchdog(&g_s, plat_now_us(), why, sizeof why)) restart_self(why);
+    }
+}
+
+/* one sender per machine (USB has one interface): Global\ so the SYSTEM helper and a Startup-folder
+ * instance in the same session see each other. Returns 0 = ours. */
+static int single_instance(void)
+{
+    const wchar_t *name = L"Global\\StarbiteLinkSender";
+    g_one = CreateMutexW(NULL, TRUE, name);
+    DWORD e = GetLastError();
+    if (g_one && e != ERROR_ALREADY_EXISTS) return 0;
+    if (!g_helper) {
+        /* ERROR_ACCESS_DENIED: the SYSTEM helper holds it */
+        sbl_log("another sblinkd is running (%s): exiting", e == ERROR_ACCESS_DENIED ? "the service's helper" : "this or another session");
+        return -1;
+    }
+    /* the helper: a Startup-folder instance got there first; take over when it exits */
+    if (!g_one) g_one = OpenMutexW(SYNCHRONIZE, FALSE, name);
+    if (!g_one) { sbl_log("single instance mutex: %lu", GetLastError()); return -1; }
+    sbl_log("a Startup-folder sblinkd is running: waiting for it to exit");
+    HANDLE w[2] = { g_one, g_quit_ev };
+    DWORD r = WaitForMultipleObjects(g_quit_ev ? 2 : 1, w, FALSE, INFINITE);
+    return r == WAIT_OBJECT_0 || r == WAIT_ABANDONED_0 ? 0 : -1;
+}
 #endif
 
 static int sbl_main(int argc, char **argv)
@@ -104,7 +187,8 @@ static int sbl_main(int argc, char **argv)
     int synth_auto = 0, print_input = 0;
 #endif
     const char *log_path = NULL;
-    int console = 0;
+    int console = 0, unsafe_tcp = 0;
+    (void)unsafe_tcp;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -123,6 +207,14 @@ static int sbl_main(int argc, char **argv)
         else if (!strcmp(a, "--log") && v) { log_path = v; i++; }
         else if (!strcmp(a, "--console")) console = 1;
         else if (!strcmp(a, "-v")) cfg.verbose = 1;
+        else if (!strcmp(a, "--diag")) cfg.diag = 1;
+        else if (!strcmp(a, "--stall-ms") && has_num) cfg.stall_ms = atoi(argv[++i]);
+        else if (!strcmp(a, "--no-keep-awake")) cfg.keep_awake = 0;
+#ifdef _WIN32
+        else if (!strcmp(a, "--session-helper")) g_helper = 1;
+        else if (!strcmp(a, "--quit-event") && v) { g_quit_ev = (HANDLE)(uintptr_t)strtoull(v, NULL, 0); i++; }
+        else if (!strcmp(a, "--unsafe-tcp")) unsafe_tcp = 1;
+#endif
 #ifndef _WIN32
         else if (!strcmp(a, "--synth-auto") && has_num) synth_auto = atoi(argv[++i]);
         else if (!strcmp(a, "--synth-size") && v) {
@@ -138,6 +230,7 @@ static int sbl_main(int argc, char **argv)
     if (cfg.fps > 60) cfg.fps = 60;
     if (cfg.gdi_fps < 1) cfg.gdi_fps = 1;
     if (cfg.usb_chunk < 4096) cfg.usb_chunk = 4096;
+    if (cfg.stall_ms < 500) cfg.stall_ms = 500;
     cfg.usb_chunk &= ~511;
 
 #ifdef _WIN32
@@ -149,15 +242,28 @@ static int sbl_main(int argc, char **argv)
     (void)console;
 #endif
 
+#ifdef _WIN32
+    DWORD sid = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &sid);
+    sbl_log("sblinkd build %s starting (SBLINK v%u.%u), %s, session %lu%s", SB_BUILD_ID, SBLK_PROTO_MAJOR,
+            SBLK_PROTO_MINOR, g_helper ? "service session helper (SYSTEM)" : "user mode", sid,
+            *plat_log_path() ? "" : " (no log file)");
+    if (g_helper && cfg.tcp_port > 0 && !unsafe_tcp) {
+        sbl_log("--tcp ignored: this helper injects input as SYSTEM (UAC included); --unsafe-tcp allows it");
+        cfg.tcp_port = 0;
+    }
+    if (!g_helper && sbl_service_is_running()) {
+        sbl_log("the StarbiteLink service is running and serves this session: this instance exits");
+        return 0;
+    }
+    if (single_instance() < 0) return 1;
+    plat_thread(watchdog_thread, NULL);
+#else
     sbl_log("sblinkd build %s starting (SBLINK v%u.%u)%s", SB_BUILD_ID, SBLK_PROTO_MAJOR, SBLK_PROTO_MINOR,
             *plat_log_path() ? "" : " (no log file)");
+#endif
 
 #ifdef _WIN32
-    HANDLE one = CreateMutexW(NULL, TRUE, L"Local\\StarbiteLinkSender");
-    if (one && GetLastError() == ERROR_ALREADY_EXISTS) {
-        sbl_log("another sblinkd is running in this session: exiting");
-        return 1;
-    }
     /* desktop coordinates in real pixels on every monitor (DXGI rects, SendInput, GDI) */
     if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
         sbl_log("SetProcessDpiAwarenessContext failed (%lu)", GetLastError());
@@ -167,6 +273,7 @@ static int sbl_main(int argc, char **argv)
     if (sbl_sender_init(&g_s, &cfg) < 0) { sbl_log("init failed"); return 1; }
 #ifdef _WIN32
     plat_thread(msg_thread, NULL);
+    if (g_quit_ev) plat_thread(quit_thread, NULL);
 #else
     if (synth_auto) synth_set_auto(synth_auto);
     rec_set_print(print_input);
@@ -185,6 +292,7 @@ static int sbl_main(int argc, char **argv)
 #ifdef _WIN32
 int wmain(int argc, wchar_t **wargv)
 {
+    if (argc >= 2 && !wcscmp(wargv[1], L"--service")) return sbl_service_main(argc, wargv);
     char **argv = calloc((size_t)argc + 1, sizeof *argv);
     if (!argv) return 1;
     for (int i = 0; i < argc; i++) {

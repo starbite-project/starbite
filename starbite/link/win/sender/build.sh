@@ -50,11 +50,11 @@ if [ $win = 1 ]; then
         echo "windows: skipped (no kit at $kit; tools/win/setup.sh)"
     else
         wsrc=""
-        for f in main.c $portable capture_win.c inject_win.c usbfn_win.c; do wsrc="$wsrc $here/$f"; done
+        for f in main.c $portable capture_win.c inject_win.c usbfn_win.c service_win.c; do wsrc="$wsrc $here/$f"; done
         # windows subsystem: no console window when started at logon (--console attaches one)
         # shellcheck disable=SC2086
         LDFLAGS="/subsystem:windows,10.00 /entry:wmainCRTStartup" \
-        LIBS="user32.lib gdi32.lib d3d11.lib dxgi.lib dxguid.lib ws2_32.lib cfgmgr32.lib" \
+        LIBS="user32.lib gdi32.lib d3d11.lib dxgi.lib dxguid.lib ws2_32.lib cfgmgr32.lib advapi32.lib powrprof.lib" \
         CFLAGS="-Wno-unused-function -D_CRT_SECURE_NO_WARNINGS" \
             "$root/tools/win/build.sh" exe "$out/sblinkd.exe" $wsrc "$proto/sblink.c" "$proto/lz4/lz4.c"
         "$root/tools/win/sign.sh" "$out/sblinkd.exe"
@@ -63,7 +63,7 @@ if [ $win = 1 ]; then
         echo "$hdr" | grep -q 'Machine: IMAGE_FILE_MACHINE_ARM64 ' || { echo "PE: not ARM64"; exit 1; }
         echo "$hdr" | grep -q 'Subsystem: IMAGE_SUBSYSTEM_WINDOWS_GUI' || { echo "PE: not the WINDOWS subsystem"; exit 1; }
         dlls=$("$SB_READOBJ" --coff-imports "$out/sblinkd.exe" | sed -n 's/^ *Name: //p' | sort -u)
-        bad=$(echo "$dlls" | grep -v -i -E '^(kernel32|user32|gdi32|d3d11|dxgi|ws2_32|cfgmgr32|advapi32|ntdll|api-ms-win-crt-[a-z0-9-]+)\.dll$' || true)
+        bad=$(echo "$dlls" | grep -v -i -E '^(kernel32|user32|gdi32|d3d11|dxgi|ws2_32|cfgmgr32|advapi32|powrprof|ntdll|api-ms-win-crt-[a-z0-9-]+)\.dll$' || true)
         echo "PE: ARM64, WINDOWS_GUI, imports: $(echo $dlls | tr '\n' ' ')"
         [ -z "$bad" ] || { echo "PE: unexpected imports: $bad"; exit 1; }
         (cd "$out" && shasum -a 256 sblinkd.exe > sblinkd.exe.sha256)

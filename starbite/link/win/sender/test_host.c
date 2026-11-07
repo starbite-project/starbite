@@ -6,6 +6,9 @@
  *   end to end: the real session + TCP code with the synthetic capture and a test viewer on loopback:
  *         HELLO, keyframe, pixel-exact images, 2-frames-in-flight, ACK(0), PING/PONG, input, BUSY,
  *         MODE, new HELLO, protocol error, dead link, idle cost
+ *   recovery: a USB-style link whose viewer ACKs before send() returns, dropped ACKs (stall timeout), the
+ *         Mac app killed mid-session and restarted, HELLO during a hung send, queued PONGs, keep-awake,
+ *         the watchdog
  * Build/run: build.sh in this directory.
  */
 #include "host.h"
@@ -226,8 +229,8 @@ static void test_flow(void)
     sbl_flow_reset(&f);
     CHECK(sbl_flow_can_send(&f) && f.n == 0);
     CHECK(sbl_flow_ack(&f, 1) == -1);          /* nothing sent yet */
-    uint32_t a = sbl_flow_take_id(&f); sbl_flow_sent(&f, a);
-    uint32_t b = sbl_flow_take_id(&f); sbl_flow_sent(&f, b);
+    uint32_t a = sbl_flow_take_id(&f); sbl_flow_sent(&f, a, 0);
+    uint32_t b = sbl_flow_take_id(&f); sbl_flow_sent(&f, b, 0);
     CHECK(a == 1 && b == 2 && !sbl_flow_can_send(&f));
     CHECK(sbl_flow_ack(&f, 3) == -1 && f.n == 2);   /* never sent */
     CHECK(sbl_flow_ack(&f, 1) == 1 && f.n == 1 && sbl_flow_can_send(&f));
@@ -240,7 +243,7 @@ static void test_flow(void)
     uint32_t ids[4];
     for (int i = 0; i < 4; i++) {
         ids[i] = sbl_flow_take_id(&f);
-        sbl_flow_sent(&f, ids[i]);
+        sbl_flow_sent(&f, ids[i], 0);
         if (f.n == 2) CHECK(sbl_flow_ack(&f, ids[i - 1]) == 1);
     }
     CHECK(ids[0] == 0xFFFFFFFEu && ids[1] == 0xFFFFFFFFu && ids[2] == 1 && ids[3] == 2);
@@ -248,8 +251,8 @@ static void test_flow(void)
     /* two in flight across the wrap: counted as 2 (last_sent - last_acked would say 3) */
     sbl_flow_reset(&f);
     f.next_id = 0xFFFFFFFFu;
-    a = sbl_flow_take_id(&f); sbl_flow_sent(&f, a);
-    b = sbl_flow_take_id(&f); sbl_flow_sent(&f, b);
+    a = sbl_flow_take_id(&f); sbl_flow_sent(&f, a, 0);
+    b = sbl_flow_take_id(&f); sbl_flow_sent(&f, b, 0);
     CHECK(a == 0xFFFFFFFFu && b == 1 && f.n == 2 && !sbl_flow_can_send(&f));
     CHECK(sbl_flow_ack(&f, 1) == 1 && f.n == 0);   /* cumulative across the wrap */
 }
@@ -923,6 +926,284 @@ static void test_e2e(void)
     tv_close(&v);
 }
 
+
+/* ---- recovery: a USB-style link with a viewer in the same process ---------------------------------
+ * The viewer's OUT messages go through one thread (like the USB receive thread) that calls sbl_rx() with
+ * transfer boundaries. The link's send() decodes what the phone sends; on FRAME_END the viewer ACKs and
+ * send() waits until that ACK has been handled, i.e. the ACK arrives before send() returns (what a fast
+ * Mac does on the S9). Modes: the Mac stops reading (send fails after a while, like the IN timeout), the
+ * viewer drops its ACKs. */
+
+typedef struct rq_item { uint8_t b[256]; size_t n; } rq_item;
+static struct {
+    plat_mutex lk;
+    plat_event ev;
+    rq_item q[256];
+    unsigned head, tail;            /* tail - head = queued */
+    volatile unsigned done;         /* items handled */
+    volatile int stop;
+    sbl_sender *s;
+    sbl_link *l;
+    /* viewer state (written by send(), serialized by the sender's txlk) */
+    sblk_parser p;
+    uint8_t *pbuf;
+    volatile uint32_t hellos, frames, keyframes, pongs, byes, last_id, ack_wait_timeouts;
+    uint32_t in_frame;
+    /* modes */
+    volatile int dead_ms;           /* > 0: send() fails after this long without delivering (Mac not reading) */
+    volatile int drop_acks;
+    volatile int pinging;
+} rv;
+
+static uint32_t rv_tx_seq;
+static unsigned rv_post(sblk_msg *m)
+{
+    rq_item it;
+    m->seq = rv_tx_seq++;
+    long n = sblk_encode(m, it.b, sizeof it.b);
+    if (n <= 0) return 0;
+    it.n = (size_t)n;
+    plat_mutex_lock(&rv.lk);
+    unsigned t = rv.tail;
+    if (rv.tail - rv.head < 256) { rv.q[rv.tail % 256] = it; rv.tail++; t = rv.tail; }
+    plat_mutex_unlock(&rv.lk);
+    plat_event_set(rv.ev);
+    return t;
+}
+static void rv_post_raw(const uint8_t *p, size_t n)
+{
+    rq_item it;
+    memcpy(it.b, p, n);
+    it.n = n;
+    plat_mutex_lock(&rv.lk);
+    rv.q[rv.tail % 256] = it;
+    rv.tail++;
+    plat_mutex_unlock(&rv.lk);
+    plat_event_set(rv.ev);
+}
+static void rv_rx_thread(void *a)
+{
+    (void)a;
+    while (!rv.stop) {
+        plat_mutex_lock(&rv.lk);
+        int have = rv.tail != rv.head;
+        rq_item it;
+        if (have) { it = rv.q[rv.head % 256]; rv.head++; }
+        plat_mutex_unlock(&rv.lk);
+        if (!have) { rv.l->rx_beat_us = plat_now_us(); plat_event_wait(rv.ev, 50); continue; }
+        rv.l->rx_beat_us = plat_now_us();
+        sbl_rx(rv.s, rv.l, it.b, it.n, 1);
+        rv.done++;
+    }
+}
+static void rv_ping_thread(void *a)
+{
+    (void)a;
+    uint32_t id = 0;
+    while (!rv.stop) {
+        if (rv.pinging) {
+            sblk_msg m;
+            memset(&m, 0, sizeof m);
+            m.type = SBLK_T_PING;
+            m.u.ping.id = ++id;
+            m.u.ping.t_us = plat_now_us();
+            rv_post(&m);
+        }
+        plat_sleep_ms(40);
+    }
+}
+static int rv_send(sbl_link *l, const uint8_t *p, size_t n)
+{
+    (void)l;
+    if (rv.dead_ms > 0) { plat_sleep_ms(rv.dead_ms); return -1; }   /* the Mac stopped reading: IN timeout */
+    while (n) {
+        size_t used = 0;
+        sblk_msg m;
+        int r = sblk_parser_feed(&rv.p, p, n, &used, &m);
+        p += used;
+        n -= used;
+        if (r <= 0) break;
+        switch (m.type) {
+        case SBLK_T_HELLO: rv.hellos++; rv.in_frame = 0; rv_tx_seq = 0; break;
+        case SBLK_T_FRAME_BEGIN:
+            rv.in_frame = m.u.frame_begin.frame_id;
+            if (m.u.frame_begin.fflags & SBLK_FB_KEYFRAME) rv.keyframes++;
+            break;
+        case SBLK_T_FRAME_END: {
+            rv.frames++;
+            rv.last_id = m.u.frame_end.frame_id;
+            rv.in_frame = 0;
+            if (rv.drop_acks) break;
+            sblk_msg a;
+            memset(&a, 0, sizeof a);
+            a.type = SBLK_T_ACK;
+            a.u.ack.frame_id = m.u.frame_end.frame_id;
+            unsigned t = rv_post(&a);
+            /* the ACK is handled before this send returns (up to 200 ms; the receive thread may be
+             * waiting for txlk with a HELLO, then it is not) */
+            for (int i = 0; i < 200 && rv.done < t; i++) plat_sleep_ms(1);
+            if (rv.done < t) rv.ack_wait_timeouts++;
+            break;
+        }
+        case SBLK_T_PONG: rv.pongs++; break;
+        case SBLK_T_BYE: rv.byes++; break;
+        }
+    }
+    return 0;
+}
+static void rv_close(sbl_link *l) { (void)l; }
+static void rv_hello(void)
+{
+    sblk_msg m;
+    memset(&m, 0, sizeof m);
+    m.type = SBLK_T_HELLO;
+    m.u.hello.role = SBLK_ROLE_VIEWER;
+    m.u.hello.proto_major = 1;
+    m.u.hello.caps = SBLK_CAP_V1_ALL;
+    m.u.hello.pixel_format = SBLK_PIXFMT_BGRA8888;
+    m.u.hello.max_payload = SBLK_MAX_PAYLOAD;
+    rv_tx_seq = 0;
+    rv_post(&m);
+}
+static int rv_wait(volatile uint32_t *v, uint32_t atleast, int ms)
+{
+    for (int t = 0; t < ms; t += 5) { if (*v >= atleast) return 1; plat_sleep_ms(5); }
+    return *v >= atleast;
+}
+
+static sbl_sender rs;
+static sbl_link rl;
+static void test_recover(void)
+{
+    sbl_cfg cfg;
+    sbl_cfg_default(&cfg);
+    cfg.dead_ms = 1500;
+    cfg.ping_ms = 200;
+    cfg.stall_ms = 600;
+    cfg.fps = 60;
+    synth_set_auto(0);
+    CHECK(sbl_sender_init(&rs, &cfg) == 0);
+    sbl_link_init(&rl, "usb loop", 1);
+    rl.send = rv_send;
+    rl.close = rv_close;
+    plat_mutex_init(&rv.lk);
+    rv.ev = plat_event_new();
+    rv.s = &rs;
+    rv.l = &rl;
+    rv.pbuf = malloc(SBLK_MAX_PAYLOAD);
+    sblk_parser_init(&rv.p, rv.pbuf, SBLK_MAX_PAYLOAD);
+    sbl_watch_link(&rs, &rl);
+    plat_thread(rv_rx_thread, NULL);
+    plat_thread(rv_ping_thread, NULL);
+    plat_thread(run_thread, &rs);
+    plat_sleep_ms(100);
+    CHECK(plat_keep_awake_state() == 0);
+
+    /* 1. ACKs that arrive before send() returns: frames must keep flowing (before the fix: 2 frames, then
+     * "ACK(n) for a frame not sent" and flow control blocked for good) */
+    rv.pinging = 1;
+    rv_hello();
+    CHECK(rv_wait(&rv.keyframes, 1, 2000) && rs.active);
+    CHECK(plat_keep_awake_state() == 1);
+    uint32_t gen0 = rs.gen;
+    synth_set_auto(50);
+    plat_sleep_ms(1500);
+    uint32_t f1 = rv.frames;
+    CHECKF(f1 >= 30, "only %u frames in 1.5 s with immediate ACKs (flow control stuck?)", f1);
+    CHECKF(rs.st_ack_bad == 0 && rs.st_stalls == 0, "%llu ACKs not in flight, %llu stalls",
+           (unsigned long long)rs.st_ack_bad, (unsigned long long)rs.st_stalls);
+    /* 2. no false "link dead" with traffic every 40 ms (the now/last_rx wrap) */
+    CHECKF(rs.active && rs.gen == gen0, "session ended during traffic (gen %u -> %u)", gen0, rs.gen);
+    printf("  recover: %u frames in 1.5 s with ACKs racing the send, session intact\n", f1);
+
+    /* 3. stalled flow control: the viewer drops its ACKs; after stall_ms the in-flight frames are
+     * forgotten and a keyframe resynchronises; frames keep coming */
+    uint32_t k0 = rv.keyframes;
+    rv.drop_acks = 1;
+    plat_sleep_ms(1500);
+    rv.drop_acks = 0;
+    uint32_t f2 = rv.frames;
+    plat_sleep_ms(1200);    /* the 2 frames sent while ACKs were dropped time out first (stall_ms) */
+    CHECKF(rs.st_stalls >= 1 && rv.keyframes > k0 && rv.frames > f2 + 10,
+           "stalls %llu, keyframes %u -> %u, frames %u -> %u", (unsigned long long)rs.st_stalls, k0, rv.keyframes,
+           f2, rv.frames);
+    printf("  recover: ACKs dropped for 1.5 s: %llu stall timeouts, frames resumed with a keyframe\n",
+           (unsigned long long)rs.st_stalls);
+
+    /* 4. the Mac app is killed mid-session: no more PINGs/ACKs, the IN transfer times out. The session
+     * ends, the link hunts for HELLO. A new app sends a cut-off message, then HELLO as its own transfer:
+     * a new session, keyframe, frames flow, and a late ACK of the old session changes nothing. */
+    rv.pinging = 0;
+    rv.dead_ms = 300;
+    uint32_t gen1 = rs.gen;
+    for (int t = 0; t < 3000 && rs.active; t += 10) plat_sleep_ms(10);
+    CHECKF(!rs.active && rs.owner == NULL && rl.hunting, "after the Mac died: active %d owner %p hunting %d",
+           rs.active, (void *)rs.owner, rl.hunting);
+    for (int t = 0; t < 2000 && plat_keep_awake_state(); t += 10) plat_sleep_ms(10);
+    CHECK(plat_keep_awake_state() == 0);
+    rv.dead_ms = 0;
+    uint32_t old_last = rv.last_id, h0 = rv.hellos;
+    k0 = rv.keyframes;
+    static const uint8_t cut[] = { 'S', 'B', 'L', 'K', 1, SBLK_T_INPUT_TEXT, 0, 0, 100, 0, 0, 0 };
+    rv_post_raw(cut, sizeof cut);
+    rv.pinging = 1;
+    rv_hello();
+    CHECK(rv_wait(&rv.hellos, h0 + 1, 2000) && rv_wait(&rv.keyframes, k0 + 1, 2000));
+    CHECK(rs.active && rs.gen != gen1 && !rl.hunting);
+    sblk_msg a;
+    memset(&a, 0, sizeof a);
+    a.type = SBLK_T_ACK;
+    a.u.ack.frame_id = old_last;     /* stale: ids go on across sessions, so it is behind all new frames */
+    rv_post(&a);
+    uint32_t f3 = rv.frames;
+    plat_sleep_ms(800);
+    CHECKF(rs.active && rv.frames > f3 + 15, "after the restart: active %d, frames %u -> %u", rs.active, f3, rv.frames);
+    CHECK(rv.last_id != old_last && rs.st_ack_bad == 0);
+    printf("  recover: Mac killed mid-session, new app: session %u -> %u, frames flowing again\n", gen1, rs.gen);
+
+    /* 5. HELLO arrives while a send hangs (the old Mac stopped reading, the new one already sent HELLO):
+     * the send fails and ends the old session, then the waiting HELLO starts the new one; the receive
+     * thread must keep reading afterwards (before: the failed send set hunting AFTER the HELLO was
+     * taken, so every later ACK/PING was ignored and the new session died) */
+    rv.dead_ms = 600;
+    plat_sleep_ms(100);            /* the capture loop is now inside a failing send */
+    h0 = rv.hellos;
+    rv_hello();
+    plat_sleep_ms(50);
+    rv.dead_ms = 0;
+    CHECK(rv_wait(&rv.hellos, h0 + 1, 3000));
+    uint32_t f4 = rv.frames;
+    plat_sleep_ms(1000);
+    CHECKF(rs.active && !rl.hunting && rv.frames > f4 + 15, "after HELLO during a hung send: active %d hunting %d frames %u -> %u",
+           rs.active, rl.hunting, f4, rv.frames);
+    /* 6. PINGs while a send hangs are answered after it (queued PONG), not lost and not blocking */
+    uint32_t p0 = rv.pongs;
+    plat_sleep_ms(500);
+    CHECK(rv.pongs > p0);
+
+    /* 7. watchdog */
+    char why[128];
+    uint64_t now = plat_now_us();
+    CHECK(sbl_watchdog(&rs, now, why, sizeof why) == 0);
+    rs.send_since_us = now - SBL_WD_SEND_US - 1000000u;
+    CHECK(sbl_watchdog(&rs, now, why, sizeof why) == 1 && strstr(why, "send"));
+    rs.send_since_us = 0;
+    rl.rx_beat_us = now - SBL_WD_RX_US - 1000000u;
+    CHECK(sbl_watchdog(&rs, now, why, sizeof why) == 1 && strstr(why, "receive"));
+    rl.rx_beat_us = now;
+
+    synth_set_auto(0);
+    rv.pinging = 0;
+    sbl_sender_stop(&rs);
+    plat_sleep_ms(300);
+    CHECK(plat_keep_awake_state() == 0);
+    sbl_request_restart(&rs, "usb: test");
+    CHECK(sbl_watchdog(&rs, plat_now_us(), why, sizeof why) == 1 && strstr(why, "usb: test"));
+    rv.stop = 1;
+    plat_sleep_ms(100);
+    CHECKF(rv.ack_wait_timeouts < 5, "%u ACK waits timed out", rv.ack_wait_timeouts);
+}
+
 int main(void)
 {
     plat_log_open(NULL, getenv("SBL_TEST_LOG") != NULL);
@@ -933,6 +1214,8 @@ int main(void)
     printf("usb receive (transfer boundaries)\n"); test_usb_rx();
     printf("end to end (TCP loopback, synthetic desktop)\n"); test_e2e();
     sbl_sender_stop(&g_s);
+    plat_sleep_ms(200);
+    printf("recovery (USB-style link, viewer ACKs before send returns)\n"); test_recover();
     printf("%ld checks, %ld failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

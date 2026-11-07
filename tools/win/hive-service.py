@@ -2,6 +2,7 @@
 """Add, disable or remove a driver service in an OFFLINE Windows SYSTEM hive (a copy pulled from the phone).
 
   hive-service.py IN OUT add NAME [--image PATH] [--start N] [--type N] [--oneshot 0|1] [--display TEXT]
+                                   [--object-name ACCOUNT]   (Win32 services: Type 16, ObjectName LocalSystem)
   hive-service.py IN OUT disable NAME          Start = 4 (the service is skipped at boot; files stay)
   hive-service.py IN OUT remove NAME           delete the service key
   hive-service.py IN OUT hiberboot 0|1         Control\\Session Manager\\Power\\HiberbootEnabled (fast startup)
@@ -135,6 +136,8 @@ def main(a):
             vals = {'Type': dword(int(opts.get('--type', '1'))), 'Start': dword(int(opts.get('--start', '2'))),
                     'ErrorControl': dword(0), 'ImagePath': sz(2, image),
                     'DisplayName': sz(1, opts.get('--display', 'Starbite ' + arg))}
+            if '--object-name' in opts:          # Win32 service account, e.g. LocalSystem
+                vals['ObjectName'] = sz(1, opts['--object-name'])
             par = {'OneShot': dword(int(opts.get('--oneshot', '1')))}
             # an existing key is updated in place (its other values kept); never delete + re-add
             if have:

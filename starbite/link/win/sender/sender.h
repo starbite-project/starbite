@@ -75,13 +75,20 @@ typedef struct sbl_flow {
     uint32_t last_sent;        /* valid when sent_any */
     int      sent_any;
     uint32_t ids[SBLK_MAX_IN_FLIGHT];
+    uint64_t ts[SBLK_MAX_IN_FLIGHT];   /* when each one was sent (plat_now_us) */
     int      n;                /* frames in flight */
 } sbl_flow;
 
-void sbl_flow_reset(sbl_flow *f);
+void sbl_flow_reset(sbl_flow *f);            /* ids start again at 1 */
+/* A new session: nothing in flight, but the ids go on from where they were, so an ACK the old session's
+ * viewer sent late (or a stale one after a restart) can never acknowledge one of the new frames. */
+void sbl_flow_restart(sbl_flow *f);
 static inline int sbl_flow_can_send(const sbl_flow *f) { return f->n < (int)SBLK_MAX_IN_FLIGHT; }
 uint32_t sbl_flow_take_id(sbl_flow *f);      /* the id for the next frame (call only when it is sent) */
-void sbl_flow_sent(sbl_flow *f, uint32_t id);
+/* Record a frame as in flight BEFORE it is handed to the link: a fast viewer's ACK can arrive while the
+ * send is still returning (seen on the S9: "ACK(35) for a frame not sent", then flow control stuck). */
+void sbl_flow_sent(sbl_flow *f, uint32_t id, uint64_t now_us);
+static inline uint64_t sbl_flow_oldest_us(const sbl_flow *f) { return f->n ? f->ts[0] : 0; }
 /* ACK(id), id != 0: 1 = frames acknowledged, 0 = old/duplicate ACK, -1 = id never sent */
 int  sbl_flow_ack(sbl_flow *f, uint32_t id);
 
@@ -142,6 +149,7 @@ int sbl_in_release_all(sbl_input *st, sbl_ev *out, int max);
 /* platform injector (inject_win.c / inject_rec.c) */
 void sbl_inject(const sbl_ev *ev, int n);
 void sbl_inject_geom(sbl_geom *g);           /* fills virt_* */
+int  sbl_follow_input_desktop(int force);    /* Windows: thread onto the input desktop (inject_win.c); host: 0 */
 
 /* ---- configuration ------------------------------------------------------------------------------- */
 
@@ -152,6 +160,9 @@ typedef struct sbl_cfg {
     int  fps;                  /* frame rate cap (30) */
     int  gdi_fps;              /* GDI fallback poll rate (10) */
     int  dead_ms;              /* no message for this long = link dead (5000) */
+    int  stall_ms;             /* frames in flight unacknowledged this long = forget them, keyframe (3000) */
+    int  keep_awake;           /* keep Windows and the display awake while a viewer is connected (1) */
+    int  diag;                 /* log every OS frame's dirty/move rects (--diag) */
     int  ping_ms;              /* PING when nothing was sent for this long (1000) */
     int  lz4_accel;            /* 1 */
     int  force_gdi;
@@ -188,6 +199,17 @@ void sbl_cap_unmap(sbl_cap *c);
 /* 1 = change started (sbl_cap_next will return SBL_CAP_RESET), 0 = already that size, < 0 = refused. */
 int  sbl_cap_set_mode(sbl_cap *c, uint32_t w, uint32_t h, uint32_t refresh_mhz);
 
+/* capture diagnostics, cumulative since the open (for the stats line and --diag) */
+typedef struct sbl_cap_stats {
+    uint64_t os_frames;        /* AcquireNextFrame calls that returned a frame */
+    uint64_t accumulated;      /* sum of AccumulatedFrames (> os_frames: DWM presented more than we took) */
+    uint64_t ptr_only;         /* frames with only a pointer update */
+    uint64_t move_rects, dirty_rects;
+    uint64_t full;             /* whole-image copies (first frame, metadata missing or unreadable) */
+    uint64_t no_meta;          /* presents without any metadata (handled as full) */
+} sbl_cap_stats;
+void sbl_cap_get_stats(sbl_cap *c, sbl_cap_stats *st);
+
 /* ---- links and the sender ------------------------------------------------------------------------ */
 
 #define SBL_RXBUF (64u * 1024u)   /* largest viewer payload accepted (HELLO max_payload) */
@@ -203,6 +225,10 @@ struct sbl_link {
     sblk_parser parser;
     uint8_t  pbuf[SBL_RXBUF];
     int      hunting;          /* USB: ignore OUT data until a transfer starts with HELLO */
+    /* watchdog: a receive loop that wakes at least every few seconds (USB) sets watch_rx and stamps
+     * rx_beat_us on every turn; one that stops turning is stuck in the driver or on a lock */
+    int      watch_rx;
+    volatile uint64_t rx_beat_us;
 };
 void sbl_link_init(sbl_link *l, const char *name, int is_usb);
 
@@ -226,6 +252,8 @@ typedef struct sbl_sender {
     int      mode_pending;     /* a mode change is under way: answer APPLIED after the re-open */
     uint64_t last_rx_us, last_tx_us;
     uint32_t ping_id;
+    int      pong_pending;     /* a PONG the receive thread could not send (txlk busy): the loop sends it */
+    sblk_pong pong_q;
     sbl_input in;
     sbl_geom geom;
 
@@ -238,13 +266,34 @@ typedef struct sbl_sender {
     /* statistics */
     uint64_t st_frames, st_bytes, st_enc_us, st_rects, st_blocked, st_keys;
     uint64_t st_renumbered;    /* frames renumbered because a PONG/MODE went out while encoding */
+    uint64_t st_stalls;        /* flow control stalls broken by the stall timeout */
+    uint64_t st_ack_bad;       /* ACKs for frames not in flight (logged the first few times) */
     uint64_t st_t0;
+
+    /* watchdog (sbl_watchdog) */
+    volatile uint64_t loop_beat_us;    /* the capture loop's last turn */
+    volatile uint64_t send_since_us;   /* a link send in progress since (0 = none) */
+    sbl_link *watch[4];
+    int      nwatch;
+    char     restart_why[96];  /* set by a transport that cannot recover by itself (sbl_request_restart) */
+    int      awake;            /* keep-awake currently requested */
 } sbl_sender;
 
 int  sbl_sender_init(sbl_sender *s, const sbl_cfg *cfg);
 void sbl_sender_run(sbl_sender *s);          /* the capture/send loop; returns after sbl_sender_stop */
 void sbl_sender_stop(sbl_sender *s);
 void sbl_sender_bye(sbl_sender *s, uint32_t reason, const char *text);   /* BYE + end session */
+
+/* Watchdog. Transports register links whose receive loop must keep turning. sbl_watchdog() returns 1 (and
+ * the reason) when something is stuck beyond recovery inside the process: a send that has not returned
+ * for 20 s, a receive loop that has not turned for 20 s, a capture loop that has not turned for 30 s, or
+ * a transport's request. The caller then restarts the process (main.c). */
+void sbl_watch_link(sbl_sender *s, sbl_link *l);
+void sbl_request_restart(sbl_sender *s, const char *why);
+int  sbl_watchdog(sbl_sender *s, uint64_t now_us, char *why, size_t n);
+#define SBL_WD_SEND_US (20000000u)
+#define SBL_WD_RX_US   (20000000u)
+#define SBL_WD_LOOP_US (30000000u)
 
 /* called by the transports */
 int  sbl_link_begin(sbl_sender *s, sbl_link *l);     /* TCP connection: 0 = ours, < 0 = busy (BYE sent) */

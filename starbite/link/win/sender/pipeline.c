@@ -211,9 +211,16 @@ uint32_t sbl_flow_take_id(sbl_flow *f)
     return id;
 }
 
-void sbl_flow_sent(sbl_flow *f, uint32_t id)
+void sbl_flow_restart(sbl_flow *f)
 {
-    if (f->n < (int)SBLK_MAX_IN_FLIGHT) f->ids[f->n++] = id;
+    uint32_t next = f->next_id ? f->next_id : 1u;
+    memset(f, 0, sizeof *f);
+    f->next_id = next;
+}
+
+void sbl_flow_sent(sbl_flow *f, uint32_t id, uint64_t now_us)
+{
+    if (f->n < (int)SBLK_MAX_IN_FLIGHT) { f->ids[f->n] = id; f->ts[f->n] = now_us; f->n++; }
     f->last_sent = id;
     f->sent_any = 1;
 }
@@ -230,6 +237,7 @@ int sbl_flow_ack(sbl_flow *f, uint32_t id)
         if (serial_diff(id, f->ids[i]) >= 0) k = i;
     if (k < 0) return 0;
     memmove(f->ids, f->ids + k + 1, (size_t)(f->n - k - 1) * sizeof f->ids[0]);
+    memmove(f->ts, f->ts + k + 1, (size_t)(f->n - k - 1) * sizeof f->ts[0]);
     f->n -= k + 1;
     return 1;
 }

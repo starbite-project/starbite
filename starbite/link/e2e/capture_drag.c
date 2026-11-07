@@ -140,6 +140,8 @@ int sbl_cap_map(sbl_cap *c, const uint8_t **px, size_t *stride)
 }
 void sbl_cap_unmap(sbl_cap *c) { (void)c; }
 
+void sbl_cap_get_stats(sbl_cap *c, sbl_cap_stats *st) { (void)c; memset(st, 0, sizeof *st); }
+
 int sbl_cap_set_mode(sbl_cap *c, uint32_t w, uint32_t h, uint32_t refresh_mhz)
 {
     (void)refresh_mhz;

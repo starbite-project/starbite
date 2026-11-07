@@ -86,10 +86,9 @@ grep -E '^drag ' "$work/encbench-ecore.txt" | sed 's/^/       /'
 
 step "live: sblinkd (drag scene) -> TCP -> viewbench"
 for size in 1280x720 1920x1080; do
-    for snd in sblinkd-drag-fix sblinkd-drag; do
-        [ -x "$B/e2e/$snd" ] || continue
+    for snd in sblinkd-drag; do
         d="$work/live-$size-$snd"; mkdir -p "$d"; P=$((P + 1))
-        ihz=10; [ $snd = sblinkd-drag ] && ihz=0   # the unfixed sender drops the link on input (race)
+        ihz=10
         SBLINK_SCENE_STOP=13 SBLINK_SCENE_HASH="$d/hash.txt" "$B/e2e/$snd" --tcp $P --synth-auto 60 --synth-size $size \
             --print-input --log "$d/sender.log" >/dev/null 2>&1 & S=$!
         sleep 0.5

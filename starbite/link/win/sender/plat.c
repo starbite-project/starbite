@@ -20,6 +20,7 @@ static char log_path[512];
 void plat_mutex_init(plat_mutex *m) { InitializeCriticalSection(m); }
 void plat_mutex_lock(plat_mutex *m) { EnterCriticalSection(m); }
 void plat_mutex_unlock(plat_mutex *m) { LeaveCriticalSection(m); }
+int plat_mutex_trylock(plat_mutex *m) { return TryEnterCriticalSection(m) ? 1 : 0; }
 
 plat_event plat_event_new(void) { return CreateEventW(NULL, FALSE, FALSE, NULL); }
 void plat_event_set(plat_event e) { SetEvent(e); }
@@ -57,6 +58,17 @@ uint64_t plat_now_us(void)
            (uint64_t)(c.QuadPart % f.QuadPart) * 1000000u / (uint64_t)f.QuadPart;
 }
 void plat_sleep_ms(int ms) { Sleep((DWORD)ms); }
+
+static int g_awake;
+void plat_keep_awake(int on)
+{
+    EXECUTION_STATE r = SetThreadExecutionState(on ? (ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)
+                                                   : ES_CONTINUOUS);
+    g_awake = on;
+    sbl_log("power: %s (SetThreadExecutionState %s)", on ? "keeping Windows and the display awake while the Mac is connected"
+                                                         : "Windows may sleep again", r ? "ok" : "failed");
+}
+int plat_keep_awake_state(void) { return g_awake; }
 
 static HANDLE log_h = INVALID_HANDLE_VALUE;
 
@@ -130,6 +142,7 @@ struct plat_event_s { pthread_mutex_t m; pthread_cond_t c; int set; };
 void plat_mutex_init(plat_mutex *m) { pthread_mutex_init(m, NULL); }
 void plat_mutex_lock(plat_mutex *m) { pthread_mutex_lock(m); }
 void plat_mutex_unlock(plat_mutex *m) { pthread_mutex_unlock(m); }
+int plat_mutex_trylock(plat_mutex *m) { return pthread_mutex_trylock(m) == 0; }
 
 plat_event plat_event_new(void)
 {
@@ -194,6 +207,10 @@ uint64_t plat_now_us(void)
     return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 void plat_sleep_ms(int ms) { usleep((useconds_t)ms * 1000u); }
+
+static volatile int g_awake;
+void plat_keep_awake(int on) { g_awake = on; }
+int plat_keep_awake_state(void) { return g_awake; }
 
 static FILE *log_f;
 int plat_log_open(const char *path, int to_stderr)

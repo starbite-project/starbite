@@ -8,6 +8,13 @@
  * texture) into our own buffer, and handed to the encoder as its regions of interest. Without a viewer
  * or with 2 frames in flight the capture loop does not call sbl_cap_next at all: DXGI keeps
  * accumulating the dirty rects meanwhile, so the next frame covers everything.
+ *
+ * The alpha byte of the desktop image is undefined (DXGI_ALPHA_MODE_IGNORE): where DWM composed
+ * translucent layers (the quick settings / Control Center flyout, Start, acrylic) it is not 0xFF, and a
+ * viewer that composites the BGRA image shows those areas see-through. Every copied pixel gets alpha 0xFF
+ * (same cost as the plain copy), which also keeps invisible alpha changes out of the tile compare.
+ * A present that comes without metadata is copied whole (the tile compare still sends only what
+ * changed) instead of being dropped. sbl_cap_get_stats() counts all of it; --diag logs every OS frame.
  */
 #define COBJMACROS
 #include "sender.h"
@@ -38,6 +45,7 @@ struct sbl_cap {
     DXGI_OUTDUPL_DESC dd;
     uint8_t *meta;
     UINT     metacap;
+    sbl_cap_stats st;
 
     /* GDI */
     HDC      screen, mem;
@@ -215,11 +223,15 @@ static int dxgi_open(sbl_cap *c, pick *p)
     return 0;
 }
 
+/* copies a rect and makes it opaque (alpha 0xFF): a plain loop the compiler vectorizes (NEON) */
 static void copy_rows(uint8_t *dst, size_t dstride, const uint8_t *src, size_t sstride, const RECT *r)
 {
-    size_t n = (size_t)(r->right - r->left) * 4;
-    for (LONG y = r->top; y < r->bottom; y++)
-        memcpy(dst + (size_t)y * dstride + (size_t)r->left * 4, src + (size_t)y * sstride + (size_t)r->left * 4, n);
+    size_t n = (size_t)(r->right - r->left);
+    for (LONG y = r->top; y < r->bottom; y++) {
+        uint32_t *d = (uint32_t *)(dst + (size_t)y * dstride + (size_t)r->left * 4);
+        const uint32_t *sp = (const uint32_t *)(src + (size_t)y * sstride + (size_t)r->left * 4);
+        for (size_t i = 0; i < n; i++) d[i] = sp[i] | 0xFF000000u;
+    }
 }
 
 static int clip_rect(const sbl_cap *c, RECT *r)
@@ -243,8 +255,15 @@ static int dxgi_next(sbl_cap *c, int timeout_ms, sbl_region *dirty, uint64_t *ca
 
     /* metadata: move rects then dirty rects, all in desktop-image coordinates */
     RECT *rects = NULL;
-    UINT nrects = 0;
+    UINT nrects = 0, nmove = 0;
     int full = !c->valid;
+    c->st.os_frames++;
+    c->st.accumulated += fi.AccumulatedFrames;
+    if (!full && fi.LastPresentTime.QuadPart != 0 && fi.TotalMetadataBufferSize == 0) {
+        /* a new image without a word about what changed: copy it all rather than miss it */
+        c->st.no_meta++;
+        full = 1;
+    }
     if (!full && fi.TotalMetadataBufferSize) {
         if (fi.TotalMetadataBufferSize > c->metacap) {
             free(c->meta);
@@ -255,7 +274,7 @@ static int dxgi_next(sbl_cap *c, int timeout_ms, sbl_region *dirty, uint64_t *ca
         UINT used = 0, need = 0;
         if (c->meta && SUCCEEDED(IDXGIOutputDuplication_GetFrameMoveRects(c->dup, c->metacap, (DXGI_OUTDUPL_MOVE_RECT *)c->meta, &used))) {
             /* the destination of a move changed; the desktop image already shows the result */
-            UINT nmove = used / sizeof(DXGI_OUTDUPL_MOVE_RECT);
+            nmove = used / sizeof(DXGI_OUTDUPL_MOVE_RECT);
             DXGI_OUTDUPL_MOVE_RECT *mv = (DXGI_OUTDUPL_MOVE_RECT *)c->meta;
             RECT *dst = (RECT *)c->meta;   /* compact in place: a RECT is smaller than a MOVE_RECT */
             for (UINT i = 0; i < nmove; i++) { RECT t = mv[i].DestinationRect; dst[i] = t; }
@@ -267,13 +286,27 @@ static int dxgi_next(sbl_cap *c, int timeout_ms, sbl_region *dirty, uint64_t *ca
             rects = (RECT *)c->meta;
         } else full = 1;
     }
+    if (c->cfg.diag) {
+        RECT bb = { 0, 0, 0, 0 };
+        for (UINT i = 0; !full && i < nrects; i++) {
+            if (i == 0) bb = rects[0];
+            else UnionRect(&bb, &bb, &rects[i]);
+        }
+        sbl_log("diag: os frame acc %u present %d ptr %d meta %u: %u move + %u dirty rects, bbox (%ld,%ld)-(%ld,%ld)%s",
+                fi.AccumulatedFrames, fi.LastPresentTime.QuadPart != 0, fi.LastMouseUpdateTime.QuadPart != 0,
+                fi.TotalMetadataBufferSize, nmove, nrects - nmove, bb.left, bb.top, bb.right, bb.bottom,
+                full ? " FULL" : "");
+    }
     if (!full && fi.LastPresentTime.QuadPart == 0 && nrects == 0) {   /* only the pointer moved */
+        c->st.ptr_only++;
         if (res) IDXGIResource_Release(res);
         IDXGIOutputDuplication_ReleaseFrame(c->dup);
         return 0;
     }
     RECT all = { 0, 0, (LONG)c->w, (LONG)c->h };
-    if (full) { rects = &all; nrects = 1; }
+    if (full) { rects = &all; nrects = 1; nmove = 0; c->st.full++; }
+    c->st.move_rects += nmove;
+    c->st.dirty_rects += nrects - nmove;
 
     int ret = 1;
     if (c->dd.DesktopImageInSystemMemory) {
@@ -376,6 +409,11 @@ static int gdi_next(sbl_cap *c, int timeout_ms, sbl_region *dirty, uint64_t *cap
         return SBL_CAP_RESET;
     }
     GdiFlush();
+    /* BitBlt leaves alpha 0: opaque, like the DXGI path */
+    uint32_t *px = (uint32_t *)c->bits;
+    for (size_t i = 0, np = (size_t)c->w * c->h; i < np; i++) px[i] |= 0xFF000000u;
+    c->st.os_frames++;
+    c->st.full++;
     /* no OS dirty rects with GDI: the encoder compares the whole frame (tiles) */
     sbl_region_full(dirty, c->w, c->h);
     *capture_us = c->last_gdi;
@@ -397,6 +435,9 @@ int sbl_cap_open(sbl_cap **cp, const sbl_cfg *cfg, sbl_cap_info *info)
 static int cap_open(sbl_cap **cp, const sbl_cfg *cfg, sbl_cap_info *info)
 {
     pick p;
+    /* duplicate the desktop that has the input now (Winlogon for UAC / lock screen when the session
+     * helper runs as SYSTEM); DXGI reports ACCESS_LOST when it switches, which re-opens here */
+    sbl_follow_input_desktop(1);
     if (find_output(cfg, &p) < 0) return -1;
     sbl_cap *c = calloc(1, sizeof *c);
     if (!c) { IDXGIOutput_Release(p.out); IDXGIAdapter1_Release(p.ad); return -1; }
@@ -484,6 +525,12 @@ int sbl_cap_map(sbl_cap *c, const uint8_t **px, size_t *stride)
 }
 
 void sbl_cap_unmap(sbl_cap *c) { (void)c; }
+
+void sbl_cap_get_stats(sbl_cap *c, sbl_cap_stats *st)
+{
+    if (c) *st = c->st;
+    else memset(st, 0, sizeof *st);
+}
 
 int sbl_cap_set_mode(sbl_cap *c, uint32_t w, uint32_t h, uint32_t refresh_mhz)
 {

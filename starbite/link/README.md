@@ -136,11 +136,15 @@ slow, it simply sends fewer, larger updates.
    extended.
 3. **Offline install of sblinkd:**
    - copy `build/link/sender/sblinkd.exe` to `C:\starbite\link\sblinkd.exe`
-   - start it at logon with the per-user Run key: `StarbiteLink` = `"C:\starbite\link\sblinkd.exe"` in the user's
-     `NTUSER.DAT`, written offline
+   - recommended: the StarbiteLink LocalSystem service (`hive-service.py add StarbiteLink --type 16 ...`, see
+     "Service mode" in `win/sender/README.md`). Input then reaches Control Center, elevated windows, UAC and
+     the logon screen, and Windows never sleeps
+   - fallback: start it at logon with the per-user Run key: `StarbiteLink` = `"C:\starbite\link\sblinkd.exe"`
+     in the user's `NTUSER.DAT`, written offline. This needs no admin rights, but UIPI blocks elevated and
+     UIAccess windows
 
-   It needs no admin rights. Its log goes to `C:\starbite\link\sblinkd.log`, with a stats line every 10 s: fps,
-   KiB/s, ms of encoding per frame.
+   Its log goes to `C:\starbite\link\sblinkd.log`, with a stats line every 10 s: fps, KiB/s, ms of encoding per
+   frame, and DXGI rect counts.
 4. **First boot checks** (the phone-only list in `win/sender/README.md` and `win/idd/INSTALL.md`):
    - Does IddCx come up on the Basic Render (WARP) adapter?
    - Does DXGI duplication of the IddCx output work, or does sblinkd fall back to GDI?
@@ -150,16 +154,12 @@ slow, it simply sends fewer, larger updates.
 
 ## Known issues found by this check
 
-- **Fixed in a copy only: sblinkd dropped the session on input.** This was in `win/sender/session.c`, the
-  capture loop's dead-link test, `if (owner && now - last_rx > ...)`:
-  - **Cause:** the loop reads `now` *before* it waits for `s->lk`. If the receive thread handles input in the
-    meantime, `last_rx` is later than `now`, the unsigned difference wraps, and the session ends at once with
-    "nothing received for 5000 ms: link dead".
-  - **Reproduced:** `viewbench --input-hz 20/30` against both `sblinkd-host` and `sblinkd-drag`. The session
-    dropped in 9 of 11 runs (sblinkd-host 3 of 3), at the first or second input burst.
-  - **Fix:** `if (owner && now > last_rx && now - last_rx > ...)`. `e2e/build.sh` builds that fix into a copy,
-    `sblinkd-drag-fix`, which passed 5 of 5 runs and every run of `check.sh`, with input at 10-30 bursts/s.
-  - **Still to do:** apply the fix to `session.c`. `check.sh` uses the unfixed sender only without input.
+- **Fixed (2026-11-07): sblinkd dropped the session on input.** The capture loop read `now` before it took
+  `last_rx`. When an input or ACK message arrived in between, `now - last_rx` wrapped around and the session
+  ended at once with "link dead". This was also seen on the phone. The fix is in `session.c`: `now` is read
+  again, and the condition is checked again under the locks. `check.sh` now sends input to the real sender.
+  The other phone findings of that day are listed under "Recovery" in `win/sender/README.md`: frozen flow
+  control, the stuck USB link after the Mac app was killed, sleep, and Control Center.
 - **Dragging resends the window.** SBLINK v1 has no copy-rect or move message, so a dragged or scrolled window
   is sent again in full: old plus new area, about 28 % of the screen per frame in the test above. DXGI already
   reports move rects. A MOVE message in a later minor version would cut a drag to a few KiB per frame.

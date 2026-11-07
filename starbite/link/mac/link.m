@@ -72,6 +72,8 @@ static uint64_t mono_us(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) /
     int usb_present;
     uint64_t last_recover_us;
     _Atomic long usb_out_pending;
+    int usb_hunt;                  /* after our HELLO: skip IN transfers until one starts with HELLO/BYE */
+    uint64_t usb_skipped;
 
     dispatch_source_t timer;
     os_unfair_lock lock;
@@ -392,6 +394,24 @@ static void usb_post_read(SBLLink *L, NSMutableData *d, uint64_t gen)
             usb_recover(L, why, RETRY_S);
             return;
         }
+        if (n && L->usb_hunt) {
+            /* the phone may still finish a frame of the session we just left (it was sending when this
+             * app died or restarted); its HELLO answer always starts an IN transfer of its own, so skip
+             * whole transfers until one starts with HELLO (or BYE) instead of failing on "message before
+             * HELLO" and restarting again (PROTOCOL.md 6.3) */
+            const uint8_t *b = d.bytes;
+            int start = n >= SBLK_HDR_SIZE && b[0] == 'S' && b[1] == 'B' && b[2] == 'L' && b[3] == 'K' &&
+                        b[4] == SBLK_VERSION && (b[5] == SBLK_T_HELLO || b[5] == SBLK_T_BYE);
+            if (!start) {
+                L->usb_skipped += n;
+                usb_post_read(L, d, gen);
+                return;
+            }
+            if (L->usb_skipped)
+                logf_(L, "USB: skipped %llu bytes of the previous session before the phone's HELLO",
+                      (unsigned long long)L->usb_skipped);
+            L->usb_hunt = 0;
+        }
         if (n) {
             L->win_bytes += n;
             int e = sbv_feed(&L->s, d.bytes, n);
@@ -436,6 +456,8 @@ static void usb_session_start(SBLLink *L)
     uint64_t gen = L->usb_gen;
     NSMutableData *d = usb_buf(L);
     set_conn(L, SBL_CONN_HANDSHAKE);
+    L->usb_hunt = 1;
+    L->usb_skipped = 0;
     usb_drain_then_start(L, d, gen, 256);
 }
 

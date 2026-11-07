@@ -46,3 +46,5 @@ void sbl_inject_geom(sbl_geom *g)
     if (vw > 0) { g->virt_x = vx; g->virt_y = vy; g->virt_w = vw; g->virt_h = vh; }
     else { g->virt_x = g->out_x; g->virt_y = g->out_y; g->virt_w = g->out_w; g->virt_h = g->out_h; }
 }
+
+int sbl_follow_input_desktop(int force) { (void)force; return 0; }

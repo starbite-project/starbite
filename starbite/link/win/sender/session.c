@@ -22,6 +22,8 @@ void sbl_cfg_default(sbl_cfg *c)
     c->fps = 30;
     c->gdi_fps = 10;
     c->dead_ms = 5000;
+    c->stall_ms = 3000;
+    c->keep_awake = 1;
     c->ping_ms = 1000;
     c->lz4_accel = 1;
     c->usb_chunk = 64 * 1024;    /* matches the Mac's 64 KiB reads; UFX completed 256 KiB transfers short on the S9 */
@@ -58,13 +60,22 @@ void sbl_sender_stop(sbl_sender *s)
 
 /* ---- sending (txlk held) -------------------------------------------------------------------------- */
 
+/* every send goes through here (txlk held): the watchdog sees a send that never returns */
+static int link_send_tx(sbl_sender *s, sbl_link *l, const uint8_t *p, size_t n)
+{
+    s->send_since_us = plat_now_us();
+    int r = l->send(l, p, n);
+    s->send_since_us = 0;
+    return r;
+}
+
 static int send_msg_tx(sbl_sender *s, sbl_link *l, sblk_msg *m, uint32_t seq)
 {
     uint8_t b[SBLK_HDR_SIZE + 512];
     m->seq = seq;
     long n = sblk_encode(m, b, sizeof b);
     if (n < 0) { sbl_log("encode %s: %s", sblk_type_name(m->type), sblk_strerror((int)n)); return (int)n; }
-    int r = l->send(l, b, (size_t)n);
+    int r = link_send_tx(s, l, b, (size_t)n);
     if (r == 0) {
         plat_mutex_lock(&s->lk);
         s->last_tx_us = plat_now_us();
@@ -129,9 +140,10 @@ static void end_session_locked(sbl_sender *s, const char *why)
     release_input_locked(s);
     s->active = 0;
     s->gen++;
-    sbl_flow_reset(&s->flow);
+    sbl_flow_restart(&s->flow);
     s->mode_req = 0;
     s->mode_pending = 0;
+    s->pong_pending = 0;
     plat_event_set(s->wake);
 }
 
@@ -199,17 +211,22 @@ static int on_hello(sbl_sender *s, sbl_link *l, const sblk_hello *h)
     }
     if (s->active) end_session_locked(s, "new HELLO");
     s->owner = l;
+    /* USB: whoever ended the last session may have set hunting meanwhile (the capture loop on a failed
+     * send while this HELLO waited for txlk): this transfer started the new session, keep reading */
+    l->hunting = 0;
     s->active = 1;
     s->gen++;
     s->peer = *h;
     s->caps = (s->our_caps & h->caps) | SBLK_CAP_ENC_RAW;
     s->tx_seq = 0;
-    sbl_flow_reset(&s->flow);
+    sbl_flow_restart(&s->flow);
+    s->pong_pending = 0;
     s->need_key = 1;
     s->mode_req = 0;
     s->mode_pending = 0;
     s->last_rx_us = plat_now_us();
     s->st_frames = s->st_bytes = s->st_enc_us = s->st_rects = s->st_blocked = s->st_keys = 0;
+    s->st_stalls = s->st_ack_bad = 0;
     s->st_t0 = plat_now_us();
     char name[33];
     memcpy(name, h->name, 32);
@@ -276,7 +293,10 @@ static int on_msg(sbl_sender *s, sbl_link *l, const sblk_msg *m)
             s->need_key = 1;
         } else {
             r = sbl_flow_ack(&s->flow, m->u.ack.frame_id);
-            if (r < 0) sbl_log("%s: ACK(%u) for a frame not sent (ignored)", l->name, m->u.ack.frame_id);
+            /* r == 0: an old or repeated ACK (an earlier session's included: ids go on across sessions) */
+            if (r < 0 && s->st_ack_bad++ < 5)
+                sbl_log("%s: ACK(%u) ignored: not in flight (last sent %u, %d in flight)", l->name,
+                        m->u.ack.frame_id, s->flow.sent_any ? s->flow.last_sent : 0, s->flow.n);
         }
         plat_mutex_unlock(&s->lk);
         plat_event_set(s->wake);
@@ -329,7 +349,16 @@ static int on_msg(sbl_sender *s, sbl_link *l, const sblk_msg *m)
         p.u.pong.id = m->u.ping.id;
         p.u.pong.echo_us = m->u.ping.t_us;
         p.u.pong.t_us = plat_now_us();
-        plat_mutex_lock(&s->txlk);
+        /* never wait for txlk here: the capture loop may be inside a long send (USB: up to 5 s when the
+         * Mac stopped reading) and this thread must keep reading OUT, above all for a new HELLO */
+        if (!plat_mutex_trylock(&s->txlk)) {
+            plat_mutex_lock(&s->lk);
+            s->pong_q = p.u.pong;
+            s->pong_pending = 1;
+            plat_mutex_unlock(&s->lk);
+            plat_event_set(s->wake);
+            return 0;
+        }
         r = send_session_tx(s, &p);
         plat_mutex_unlock(&s->txlk);
         return r < 0 ? -3 : 0;
@@ -438,7 +467,81 @@ void sbl_sender_bye(sbl_sender *s, uint32_t reason, const char *text)
     plat_mutex_unlock(&s->txlk);
 }
 
+/* ---- watchdog ------------------------------------------------------------------------------------- */
+
+void sbl_watch_link(sbl_sender *s, sbl_link *l)
+{
+    plat_mutex_lock(&s->lk);
+    l->watch_rx = 1;
+    l->rx_beat_us = plat_now_us();
+    if (s->nwatch < (int)(sizeof s->watch / sizeof s->watch[0])) s->watch[s->nwatch++] = l;
+    plat_mutex_unlock(&s->lk);
+}
+
+void sbl_request_restart(sbl_sender *s, const char *why)
+{
+    plat_mutex_lock(&s->lk);
+    if (!s->restart_why[0]) snprintf(s->restart_why, sizeof s->restart_why, "%s", why);
+    plat_mutex_unlock(&s->lk);
+}
+
+int sbl_watchdog(sbl_sender *s, uint64_t now, char *why, size_t n)
+{
+    /* no locks taken: whatever is stuck may be holding them */
+    if (s->restart_why[0]) { snprintf(why, n, "%s", s->restart_why); return 1; }
+    uint64_t t = s->send_since_us;
+    if (t && now > t && now - t > SBL_WD_SEND_US) {
+        snprintf(why, n, "a send has not returned for %llu s", (unsigned long long)((now - t) / 1000000u));
+        return 1;
+    }
+    t = s->loop_beat_us;
+    if (t && now > t && now - t > SBL_WD_LOOP_US) {
+        snprintf(why, n, "the capture loop has not turned for %llu s", (unsigned long long)((now - t) / 1000000u));
+        return 1;
+    }
+    for (int i = 0; i < s->nwatch; i++) {
+        sbl_link *l = s->watch[i];
+        t = l->rx_beat_us;
+        if (l->watch_rx && t && now > t && now - t > SBL_WD_RX_US) {
+            snprintf(why, n, "%s: the receive loop has not turned for %llu s", l->name,
+                     (unsigned long long)((now - t) / 1000000u));
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* ---- the capture/send loop ------------------------------------------------------------------------- */
+
+/* a PONG the receive thread queued because txlk was busy (txlk held) */
+static void flush_pong_tx(sbl_sender *s)
+{
+    plat_mutex_lock(&s->lk);
+    int have = s->pong_pending && s->active;
+    sblk_msg p;
+    memset(&p, 0, sizeof p);
+    p.type = SBLK_T_PONG;
+    p.u.pong = s->pong_q;
+    s->pong_pending = 0;
+    plat_mutex_unlock(&s->lk);
+    if (!have) return;
+    p.u.pong.t_us = plat_now_us();
+    send_session_tx(s, &p);
+}
+
+/* a send failed (txlk held): end the session; USB has no connection to close, it hunts for HELLO */
+static void fail_send_tx(sbl_sender *s, sbl_link *l, uint32_t gen, const char *why)
+{
+    plat_mutex_lock(&s->lk);
+    int still = s->active && s->gen == gen && s->owner == l;
+    if (still) {
+        sbl_log("%s: %s", l->name, why);
+        end_session_locked(s, why);
+        if (l->is_usb) { s->owner = NULL; l->hunting = 1; }
+    }
+    plat_mutex_unlock(&s->lk);
+    if (still && !l->is_usb) l->close(l);
+}
 
 static void set_display(sbl_sender *s, const sbl_cap_info *ci)
 {
@@ -470,14 +573,26 @@ static void send_mode_tx(sbl_sender *s, uint32_t w, uint32_t h, uint32_t refresh
     sbl_log("MODE %s %ux%u", status == SBLK_MODE_APPLIED ? "APPLIED" : "REJECTED", w, h);
 }
 
-static void log_stats(sbl_sender *s, uint64_t now)
+/* every 10 s while frames flow: this session's averages, plus what the OS handed the capture in the last
+ * 10 s (os = frames acquired, acc = frames DWM presented, move/dirty rects, full = whole-image copies) */
+static void log_stats(sbl_sender *s, uint64_t now, sbl_cap *cap, sbl_cap_stats *prev)
 {
     double secs = (double)(now - s->st_t0) / 1e6;
     if (secs <= 0) return;
-    sbl_log("stats: %.1f fps, %.0f KiB/s, %.2f ms encode/frame, %.1f rects/frame, %llu blocked by flow control",
+    sbl_cap_stats cs;
+    memset(&cs, 0, sizeof cs);
+    if (cap) sbl_cap_get_stats(cap, &cs);
+    if (cs.os_frames < prev->os_frames) memset(prev, 0, sizeof *prev);   /* the capture was re-opened */
+    sbl_log("stats: %.1f fps, %.0f KiB/s, %.2f ms encode/frame, %.1f rects/frame, %llu blocked by flow control, "
+            "%llu stalls; last 10 s: os %llu (acc %llu, ptr %llu), move %llu, dirty %llu, full %llu, no-meta %llu",
             (double)s->st_frames / secs, (double)s->st_bytes / 1024.0 / secs,
             s->st_frames ? (double)s->st_enc_us / 1000.0 / (double)s->st_frames : 0.0,
-            s->st_frames ? (double)s->st_rects / (double)s->st_frames : 0.0, (unsigned long long)s->st_blocked);
+            s->st_frames ? (double)s->st_rects / (double)s->st_frames : 0.0, (unsigned long long)s->st_blocked,
+            (unsigned long long)s->st_stalls, (unsigned long long)(cs.os_frames - prev->os_frames),
+            (unsigned long long)(cs.accumulated - prev->accumulated), (unsigned long long)(cs.ptr_only - prev->ptr_only),
+            (unsigned long long)(cs.move_rects - prev->move_rects), (unsigned long long)(cs.dirty_rects - prev->dirty_rects),
+            (unsigned long long)(cs.full - prev->full), (unsigned long long)(cs.no_meta - prev->no_meta));
+    *prev = cs;
 }
 
 void sbl_sender_run(sbl_sender *s)
@@ -491,6 +606,8 @@ void sbl_sender_run(sbl_sender *s)
     uint64_t opened_at = 0;
     uint32_t told_w = 0, told_h = 0, told_gen = 0xFFFFFFFFu, armed_gen = 0xFFFFFFFFu;
     int blocked_logged = 0, open_fail_logged = 0, reset_logged = 0;
+    sbl_cap_stats cst;
+    memset(&cst, 0, sizeof cst);
 
     memset(&ci, 0, sizeof ci);
     if (sbl_enc_init(&enc, s->cfg.lz4_accel) < 0) { sbl_log("out of memory"); return; }
@@ -499,6 +616,7 @@ void sbl_sender_run(sbl_sender *s)
 
     while (!s->stop) {
         uint64_t now = plat_now_us();
+        s->loop_beat_us = now;
 
         /* (re)open the capture; kept open without a viewer too, so HELLO can announce the size (an
          * idle duplication costs nothing: no frames are acquired without a session) */
@@ -542,20 +660,36 @@ void sbl_sender_run(sbl_sender *s)
         sbl_link *owner = s->owner;
         uint64_t last_rx = s->last_rx_us, last_tx = s->last_tx_us;
         uint32_t hello_w = s->hello_w, hello_h = s->hello_h;
+        int pong_pending = s->pong_pending;
+        uint64_t oldest = sbl_flow_oldest_us(&s->flow);
+        int inflight = s->flow.n;
+        uint32_t first_id = s->flow.n ? s->flow.ids[0] : 0, last_id = s->flow.last_sent;
         plat_mutex_unlock(&s->lk);
+        /* now again, AFTER reading last_rx: the receive thread may have stamped last_rx since the top of
+         * the loop, and an older now made now - last_rx wrap to ~2^64 = "link dead" at once (seen on the
+         * S9: "nothing received for 5000 ms: link dead" 16 ms after a HELLO, and after ACKs) */
+        now = plat_now_us();
+
+        /* keep Windows awake while a viewer is connected (this thread owns the execution state) */
+        if (s->cfg.keep_awake && s->awake != active) {
+            s->awake = active;
+            plat_keep_awake(active);
+        }
 
         /* dead link: nothing received for dead_ms (also a connection that never said HELLO) */
-        if (owner && now - last_rx > (uint64_t)s->cfg.dead_ms * 1000u) {
+        if (owner && now > last_rx && now - last_rx > (uint64_t)s->cfg.dead_ms * 1000u) {
             plat_mutex_lock(&s->txlk);
             plat_mutex_lock(&s->lk);
-            if (s->owner == owner) {
+            uint64_t t = plat_now_us();   /* still dead now that we hold the locks (no HELLO meanwhile)? */
+            int dead = s->owner == owner && t > s->last_rx_us && t - s->last_rx_us > (uint64_t)s->cfg.dead_ms * 1000u;
+            if (dead) {
                 sbl_log("%s: nothing received for %d ms: link dead", owner->name, s->cfg.dead_ms);
                 end_session_locked(s, "link dead");
                 if (owner->is_usb) { s->owner = NULL; owner->hunting = 1; }
                 else s->last_rx_us = plat_now_us();   /* until the receive thread sees the close */
             }
             plat_mutex_unlock(&s->lk);
-            if (s->owner == owner && !owner->is_usb) owner->close(owner);   /* under txlk: link still alive */
+            if (dead && s->owner == owner && !owner->is_usb) owner->close(owner);   /* under txlk: link still alive */
             plat_mutex_unlock(&s->txlk);
             continue;
         }
@@ -613,19 +747,25 @@ void sbl_sender_run(sbl_sender *s)
             continue;
         }
 
-        if (now - last_tx >= (uint64_t)s->cfg.ping_ms * 1000u) {
+        if (pong_pending) {
+            plat_mutex_lock(&s->txlk);
+            flush_pong_tx(s);
+            plat_mutex_unlock(&s->txlk);
+        }
+
+        if (now > last_tx && now - last_tx >= (uint64_t)s->cfg.ping_ms * 1000u) {
             sblk_msg m;
             memset(&m, 0, sizeof m);
             m.type = SBLK_T_PING;
             m.u.ping.id = ++s->ping_id;
             m.u.ping.t_us = now;
             plat_mutex_lock(&s->txlk);
-            send_session_tx(s, &m);
+            if (send_session_tx(s, &m) < 0 && owner) fail_send_tx(s, owner, gen, "PING could not be sent: session ends");
             plat_mutex_unlock(&s->txlk);
         }
 
         if (now - last_stats > 10000000u) {
-            if (s->st_frames) log_stats(s, now);
+            if (s->st_frames) log_stats(s, now, cap, &cst);
             last_stats = now;
         }
 
@@ -635,6 +775,22 @@ void sbl_sender_run(sbl_sender *s)
             /* 2 frames in flight: do not even ask the OS for frames; it keeps accumulating the dirty
              * area (DXGI) and the next frame covers everything that changed meanwhile */
             if (!blocked_logged) { s->st_blocked++; blocked_logged = 1; }
+            /* stall: the viewer is alive (the dead timer has not fired) but has not acknowledged them for
+             * stall_ms. An ACK was lost or never matched: forget them and resynchronise with a keyframe
+             * rather than freeze the picture for the rest of the session */
+            if (oldest && now > oldest && now - oldest > (uint64_t)s->cfg.stall_ms * 1000u) {
+                plat_mutex_lock(&s->lk);
+                if (s->active && s->gen == gen && sbl_flow_oldest_us(&s->flow) == oldest) {
+                    s->st_stalls++;
+                    sbl_log("flow: %d frames (%u..%u) unacknowledged for %llu ms: forgetting them, keyframe next "
+                            "(stall %llu this session)", inflight, first_id, last_id,
+                            (unsigned long long)((now - oldest) / 1000u), (unsigned long long)s->st_stalls);
+                    sbl_flow_restart(&s->flow);
+                    s->need_key = 1;
+                }
+                plat_mutex_unlock(&s->lk);
+                continue;
+            }
             plat_event_wait(s->wake, s->cfg.ping_ms);
             continue;
         }
@@ -692,17 +848,22 @@ void sbl_sender_run(sbl_sender *s)
             plat_mutex_lock(&s->txlk);
             plat_mutex_lock(&s->lk);
             /* same session as when the frame was taken? (else the new one starts with a keyframe) */
-            int still = s->active && s->gen == gen && s->owner == l;
+            int still = s->active && s->gen == gen && s->owner == l && s->flow.next_id == id;
             uint32_t seq_now = s->tx_seq;
-            plat_mutex_unlock(&s->lk);
             if (still && len > 0) {
                 if (seq_now != seq0) {
                     renumber(enc.out, (size_t)len, seq_now);
                     seq = seq_now + (seq - seq0);
                     s->st_renumbered++;
                 }
-                sent = l->send(l, enc.out, (size_t)len);
+                /* in flight and numbered BEFORE the send: the viewer's ACK for it can arrive on the receive
+                 * thread before l->send() returns; recorded afterwards it was "not sent", ignored, and the
+                 * frame stayed in flight for good (the S9's frozen picture) */
+                s->tx_seq = seq;
+                sbl_flow_sent(&s->flow, sbl_flow_take_id(&s->flow), plat_now_us());
             }
+            plat_mutex_unlock(&s->lk);
+            if (still && len > 0) sent = link_send_tx(s, l, enc.out, (size_t)len);
             if (still && len < 0) {
                 sbl_log("encode failed: %s", sblk_strerror((int)len));
                 plat_mutex_lock(&s->lk);
@@ -717,8 +878,6 @@ void sbl_sender_run(sbl_sender *s)
                 end_session_locked(s, len < 0 ? "encode failed" : "send failed");
                 if (l->is_usb) { s->owner = NULL; l->hunting = 1; }   /* USB: no close; wait for HELLO */
             } else if (len > 0) {
-                s->tx_seq = seq;
-                sbl_flow_sent(&s->flow, sbl_flow_take_id(&s->flow));
                 s->last_tx_us = plat_now_us();
                 if (enc.keyframe) s->st_keys++;
                 s->st_frames++;
@@ -732,6 +891,7 @@ void sbl_sender_run(sbl_sender *s)
                         enc.keyframe ? " key" : "", enc.nrects, enc.nsolid, enc.nlz4, enc.nraw,
                         (unsigned long long)enc.area, len, (double)(t1 - t0) / 1000.0);
             if (still && (len < 0 || (len > 0 && sent < 0)) && !l->is_usb) l->close(l);   /* under txlk */
+            if (still && len > 0 && sent == 0) flush_pong_tx(s);   /* a PING that came in during the send */
             plat_mutex_unlock(&s->txlk);
         }
         sbl_cap_unmap(cap);
@@ -741,4 +901,6 @@ void sbl_sender_run(sbl_sender *s)
     }
     if (cap) sbl_cap_close(cap);
     sbl_enc_free(&enc);
+    if (s->awake) { s->awake = 0; plat_keep_awake(0); }
+    s->loop_beat_us = 0;
 }
