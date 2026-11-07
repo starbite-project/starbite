@@ -4,7 +4,8 @@ Started 2026-11-07, on the user's request: "make Windows 11 run on the big cores
 maximum clock speed". Owner of the firmware side (MADT, PPTT, CPU bring-up): the win-usb-host
 session (it owns the Windows ACPI tables, docs/WIN11-USB.md 4.1 and 10). The clocks belong to the
 GPU session's `sbthermal`, the single ACPM owner (domain 3 = M3), coordinated through the main
-session. **Status: stage B1 built, nothing run on the phone.**
+session. **Status: stage B1 built and reviewed, nothing run on the phone.** Not for unattended boots: a
+CPU_ON that never returns needs a forced reset (the watchdog doesn't rescue it).
 
 ## 1. What stands in the way
 
@@ -38,16 +39,20 @@ CPU_ON (woa's approach), still one CPU_ON per boot.
 `tools/woa/modules/Star2LteSsdtDxe/M3Probe.c`, called first in Star2LteSsdtDxe's entry when built
 with `STARBITE_M3_PROBE=1`:
 
-1. the six PMU writes (read, modify, read back; each logged `=M3 pmu <off> <before> -> <after>`);
+1. the six PMU writes (read, modify, read back; logged `=M3 pmu <off> <before> -> <after>` on the
+   first pass), **re-applied before every CPU_ON** as XNU and the Linux port do;
 2. for M3 core 1, 2, 3: one reserved page below 4 GiB, the 17-instruction witness stub at +0x800
    (page address baked in, `MRS MPIDR` stored at +0x10, marker 0x4D334F4B at +0x08, DSB, DC CIVAC,
    DSB, `SMC` CPU_OFF 0x84000002, then WFE forever), the page cleaned to the point of coherency and
    the I-cache invalidated, then **one** CPU_ON (target 0x100 + n, entry = the stub, context 0);
 3. poll the marker for 200 ms (clean + invalidate the line before each read); log
    `=M3 core n target 10n: CPU_ON rc=..., ARRIVED|no mark after .. ms, mpidr=...`;
-4. stop at the first core that returns an error or doesn't arrive: never a second CPU_ON.
+4. stop at the first core that returns an error or doesn't arrive: never a second CPU_ON; 50 ms
+   between cores so a core's CPU_OFF finishes before its sibling's CPU_ON (PSCI 0.1 has no
+   AFFINITY_INFO to ask). The SMC helper declares x4..x17 clobbered (pre-SMCCC-1.1 firmware), as
+   `shim/starlte/em.c` does. Reviewed (encodings assembled and compared with clang).
 
-Image: `starbite-uefi-m3probe.bin` (`SOLO=m3probe M3=1 tools/woa/build-win-usbhost.sh`): src38 +
+Image: `starbite-uefi-m3probe.bin` (sha256 87df200c…) (`SOLO=m3probe M3=1 tools/woa/build-win-usbhost.sh`): src38 +
 Star2LteSsdtDxe with only the probe (no USB, no blobs, no PPTT fix), checked file by file.
 
 **Phone test (user present):** boot it as a hidden Windows entry with nothing plugged. Expect the

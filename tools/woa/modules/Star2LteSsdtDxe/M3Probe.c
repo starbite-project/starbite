@@ -65,7 +65,16 @@ Smc (
   register UINT64  x2 __asm__ ("x2") = A2;
   register UINT64  x3 __asm__ ("x3") = A3;
 
-  __asm__ __volatile__ ("smc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : : "memory");
+  //
+  // PSCI 0.1 firmware (older than SMCCC 1.1) may change x4..x17: clobbered, as shim/starlte/em.c
+  // psci_call and XNU's 0300 declare them.
+  //
+  __asm__ __volatile__ (
+    "smc #0"
+    : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3)
+    :
+    : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory"
+    );
   return x0;
 }
 
@@ -117,38 +126,53 @@ EmitStub (
   Code[i++] = 0x17FFFFFFu;                                                       // B    .-4
 }
 
+//
+// The six writes, before EVERY M3 CPU_ON as XNU 0304 and the Linux port do (the cluster may power
+// down after a core's CPU_OFF and its option registers with it). Logged on the first pass only.
+//
+STATIC
 VOID
-M3Probe (
-  VOID
+M3PmuDefaults (
+  IN BOOLEAN  Log
   )
 {
-  EFI_PHYSICAL_ADDRESS  Page;
-  volatile UINT32       *Pmu;
-  volatile UINT32       *Marker;
-  volatile UINT64       *Mpidr;
-  UINT32                Before;
-  UINT32                After;
-  UINT64                Rc;
-  UINTN                 Core;
-  UINTN                 Ms;
-  UINTN                 Index;
-  EFI_STATUS            Status;
+  volatile UINT32  *Pmu;
+  UINT32           Before;
+  UINT32           After;
+  UINTN            Index;
 
-  SbLog ("=M3 probe v1: PMU defaults, then one CPU_ON per M3 core 1..3");
   Pmu = (volatile UINT32 *)PMU_BASE;
   for (Index = 0; Index < ARRAY_SIZE (mM3Pmu); Index++) {
     Before = Pmu[mM3Pmu[Index].Offset / 4];
     Pmu[mM3Pmu[Index].Offset / 4] = (Before & ~mM3Pmu[Index].Mask) | mM3Pmu[Index].Value;
     __asm__ __volatile__ ("dsb sy" ::: "memory");
     After = Pmu[mM3Pmu[Index].Offset / 4];
-    SbLog (
-      "=M3 pmu %04x %08x -> %08x%a",
-      mM3Pmu[Index].Offset,
-      Before,
-      After,
-      ((After & mM3Pmu[Index].Mask) == mM3Pmu[Index].Value) ? "" : " NOT SET"
-      );
+    if (Log || ((After & mM3Pmu[Index].Mask) != mM3Pmu[Index].Value)) {
+      SbLog (
+        "=M3 pmu %04x %08x -> %08x%a",
+        mM3Pmu[Index].Offset,
+        Before,
+        After,
+        ((After & mM3Pmu[Index].Mask) == mM3Pmu[Index].Value) ? "" : " NOT SET"
+        );
+    }
   }
+}
+
+VOID
+M3Probe (
+  VOID
+  )
+{
+  EFI_PHYSICAL_ADDRESS  Page;
+  volatile UINT32       *Marker;
+  volatile UINT64       *Mpidr;
+  UINT64                Rc;
+  UINTN                 Core;
+  UINTN                 Ms;
+  EFI_STATUS            Status;
+
+  SbLog ("=M3 probe v1: PMU defaults, then one CPU_ON per M3 core 1..3");
 
   for (Core = 1; Core <= 3; Core++) {
     Page   = 0xFFFFFFFFu;
@@ -165,7 +189,8 @@ M3Probe (
 
     Marker = (volatile UINT32 *)(UINTN)(Page + 0x08);
     Mpidr  = (volatile UINT64 *)(UINTN)(Page + 0x10);
-    Rc     = Smc (PSCI_CPU_ON, 0x100 + Core, Page + 0x800, 0);
+    M3PmuDefaults ((BOOLEAN)(Core == 1));
+    Rc = Smc (PSCI_CPU_ON, 0x100 + Core, Page + 0x800, 0);
     for (Ms = 0; Ms < POLL_MS; Ms++) {
       CleanInvalidate ((UINTN)Page, 64);
       if (*Marker == M3_OK) {
@@ -187,6 +212,12 @@ M3Probe (
       SbLog ("=M3 stop: no further CPU_ON this boot");
       return;
     }
+
+    //
+    // Let the core finish its CPU_OFF before the next CPU_ON in the same cluster (PSCI 0.1: no
+    // AFFINITY_INFO to ask; woa saw a power transaction in flight block a CPU_ON for good).
+    //
+    MicroSecondDelay (50000);
   }
 
   SbLog ("=M3 probe done: cores 1..3 ran and powered off again");
