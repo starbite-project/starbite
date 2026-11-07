@@ -621,6 +621,26 @@ current configuration (found: `StarbiteLink`) and the default configuration's na
 "Default" (not found; 2396 would mean the current one is missing). Fix: `Configurations\Default`
 (section 5.1).
 
+**L1 with `Configurations\Default` (2026-11-07, combo3 ce48fc70, `results-w2`): the device stack is
+complete and waits for its client.** The trace has no registry or descriptor errors left (only the
+harmless SMBIOS UUID, user-prompt, connector-ID and charging-arbitration ones). HARDWARE READY,
+ATTACH, connected, bus enumerate, `FrameworkEvtChildListCreateDevice` -> `BusChildDevicesCreated`,
+then the bus machine waits in **`WaitForBusClassDriverActivateRequest`**. Every 2 minutes its
+activation timer runs `PartialBusActivation`, which activates nothing because no function asked,
+and it goes back to waiting. That is UFX waiting for a class driver's client to activate the bus;
+until then it doesn't set Run/Stop, so the Mac seeing nothing is expected. genericusbfn has
+already talked to UFX (internal IOCTL 0x2AC022). Windows: `Enum\USBFN\GenericUsbFn\3&39c12f51&0&00`
+(service genericusbfn, ConfigFlags 0) and the device interface
+`{d274dae6-37b0-4c76-bf10-3a9681346dd1}` registered under `Control\DeviceClasses`: what the
+Starbite Link sender (`starbite/link/win/sender/usbfn_win.c`) opens before
+`IOCTL_GENERICUSBFN_ACTIVATE_USB_BUS`. The descriptor set it will present is the registry's (UFX
+logs no descriptor bytes; `UfxDescriptorCreate` now succeeds): device 1209:0002, bcdDevice 0x0100,
+class 0, strings "Starbite"/"Starbite Link", no serial number; one configuration (bmAttributes 0xC0,
+bMaxPower 0x32 = 100 mA) with one vendor interface (FF/00/00, bNumEndpoints 2), bulk IN 0x81 and
+bulk OUT 0x01, 512 bytes each. That matches the sender's pipe choice (the first bulk IN and OUT from
+GET_CLASS_INFO). Next: run sblinkd. The Mac enumerates 1209:0002 for the first time, so the user
+may have to allow it.
+
 ## 10. Side finding: the PPTT has no caches (the 0xC0000094 crashes)
 
 Windows' System log shows `OneDriveSetup.exe` and then the `WerFault.exe` started for it failing at
