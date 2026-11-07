@@ -117,68 +117,7 @@ struct FRAME {
     UINT8 data[FRAME_MAX];
 };
 
-// ---- 802.11 <-> Ethernet (W2l): WiFiCx's data path carries 802.11 data frames with an LLC/SNAP header, as WDI's
-// did (W2j-a: Windows' first frame was 60 bytes = an ARP in 802.11 form, read as Ethernet its "ethertype" was
-// e1f5, two bytes of an address; Windows counted 0 bytes received from the Ethernet frames handed up). The radio
-// (msgbuf) takes and gives Ethernet frames.
-
-// the 802.11 data header's length, or 0 when this is not a data frame with an LLC/SNAP header
-static ULONG Dot11Header(const UINT8 *f, ULONG len)
-{
-    if (len < 24 + 8 || (f[0] & 0x0c) != 0x08)
-        return 0;                               // not a data frame
-    ULONG h = 24;
-    if ((f[1] & 3) == 3)
-        h += 6;                                 // four addresses
-    if (f[0] & 0x80) {
-        h += 2;                                 // QoS control
-        if (f[1] & 0x80)
-            h += 4;                             // HT control (order bit on a QoS frame)
-    }
-    if (len < h + 8 || f[h] != 0xaa || f[h + 1] != 0xaa || f[h + 2] != 0x03)
-        return 0;
-    return h;
-}
-
-// an 802.11 data frame (to the AP) as the Ethernet frame the radio takes; 0 if it cannot be
-static ULONG Dot11ToEth(const UINT8 *f, ULONG len, UINT8 *out)
-{
-    ULONG h = Dot11Header(f, len);
-    if (!h || (f[1] & 0x40))
-        return 0;                               // not convertible, or already protected
-    const UINT8 *da, *sa;
-    switch (f[1] & 3) {
-    case 1: da = f + 16, sa = f + 10; break;    // to the DS: A1 BSSID, A2 SA, A3 DA
-    case 2: da = f + 4, sa = f + 16; break;     // from the DS
-    case 3: da = f + 16, sa = f + 24; break;
-    default: da = f + 4, sa = f + 10; break;
-    }
-    RtlCopyMemory(out, da, 6);
-    RtlCopyMemory(out + 6, sa, 6);
-    out[12] = f[h + 6], out[13] = f[h + 7];     // the ethertype after the SNAP header
-    RtlCopyMemory(out + 14, f + h + 8, len - h - 8);
-    return 14 + len - h - 8;
-}
-
-// an Ethernet frame from the radio as an 802.11 data frame from the AP (FromDS: A1 DA, A2 BSSID, A3 SA)
-static ULONG EthToDot11(const UINT8 *e, ULONG len, const UINT8 *bssid, UINT8 *out, ULONG cap)
-{
-    if (len < 14 || len - 14 + 32 > cap)
-        return 0;
-    UINT16 t = (UINT16)(e[12] << 8 | e[13]);
-    RtlZeroMemory(out, 32);
-    out[0] = 0x08;                              // data
-    out[1] = 0x02;                              // from the DS
-    RtlCopyMemory(out + 4, e, 6);
-    RtlCopyMemory(out + 10, bssid, 6);
-    RtlCopyMemory(out + 16, e + 6, 6);
-    out[24] = 0xaa, out[25] = 0xaa, out[26] = 0x03;
-    if (t == 0x80f3 || t == 0x8137)
-        out[29] = 0xf8;                         // bridge tunnel encapsulation (802.1H)
-    out[30] = e[12], out[31] = e[13];
-    RtlCopyMemory(out + 32, e + 14, len - 14);
-    return 32 + len - 14;
-}
+#include "dot11.h"
 
 struct DEVCTX {
     WDFDEVICE device;
@@ -239,7 +178,8 @@ struct DEVCTX {
     ULONG rx_80211;                 // Parameters\RxFormat: 1 (default) 802.11 frames up, 0 Ethernet (W2a..W2k)
     ULONG tx_logged;
     ULONG poll_rate;
-    ULONG tx_full;                  // frames that found every tx buffer with the firmware (requeued)
+    ULONG tx_full;
+    int radio_off;                  // Windows switched the radio off (WDI_TASK_SET_RADIO_STATE)                  // frames that found every tx buffer with the firmware (requeued)
     ULONG max_per_poll;             // the most completions one poll handled (since the last heartbeat)                // polls per second over the last 10 s              // the WDI version declared to WiFiCx; the TLV parser uses the same (W2k)            // when to send WDI's link state again while associated               // sta_info lines still logged in this connect         // data frames from Windows given to the radio since the connect
     ULONG link_state;
     ULONG assoc_txn_mode;           // Parameters\AssocTxn: 0 (default) the association result unsolicited, 1 the task's id               // Parameters\LinkState: 1 (default) the adapter's link reported up/down             // when to log the rx state again (1.5 s after an association)            // the core's received-frame count when the connect began
@@ -396,25 +336,6 @@ static int File(void *, const char *name, const uint8_t **data, uint32_t *len)
 
 static void OsLog(void *, const char *line) { Say(line); }
 
-// an EAPOL-Key frame's key info and which of the four-way handshake's messages it is (0: not a key frame)
-static int EapolKey(const UINT8 *f, ULONG len, UINT16 *info)
-{
-    if (len < 14 + 4 + 3 || f[12] != 0x88 || f[13] != 0x8e)
-        return -1;                                  // not EAPOL
-    if (f[15] != 3)
-        return 0;                                   // EAPOL, not a key frame
-    UINT16 ki = (UINT16)(f[19] << 8 | f[20]);
-    *info = ki;
-    if (!(ki & 0x0008))
-        return 5;                                   // group key handshake
-    if ((ki & 0x0080) && !(ki & 0x0100))
-        return 1;
-    if ((ki & 0x0080) && (ki & 0x0040))
-        return 3;
-    if (!(ki & 0x0080) && (ki & 0x0100))
-        return (ki & 0x0200) ? 4 : 2;
-    return 0;
-}
 
 static const char *EvName(UINT32 t)
 {
@@ -613,6 +534,14 @@ static void CmdScan(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
     // while connecting): the firmware is not asked, the list kept (W2h..W2j wiped it here), and the cached list is
     // indicated as cached with a successful completion
     int busy = d->connecting || (d->connected && !d->keyed && Now(NULL) - d->assoc_at < 15000000);
+    if (d->radio_off) {
+        CleanupParsedWdiTaskScanToIhv(&p);
+        Answer(r, STATUS_SUCCESS);
+        d->scanning = 1;
+        d->scan_cached = 0;
+        ScanDone(d, NDIS_STATUS_FAILURE);      // the radio is off: nothing heard
+        return;
+    }
     d->scanning = 1;                // before the start: its ioctl wait already delivers results
     d->scan_started = Now(NULL);
     d->scan_sync = (UINT16)(SCAN_SYNC + d->scans);
@@ -931,7 +860,10 @@ static void CmdConnect(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
         return;
     }
     RtlZeroMemory(d->rsn, sizeof(d->rsn));     // after the repeat check above: a repeat keeps the link's RSN
-    if (c->SSIDList.ElementCount >= 1 && p.PreferredBSSEntryList.ElementCount >= 1 && (psk || open) && d->up) {
+    if (d->radio_off)
+        Say("wificx: connect refused: the radio is switched off");
+    if (c->SSIDList.ElementCount >= 1 && p.PreferredBSSEntryList.ElementCount >= 1 && (psk || open) && d->up &&
+        !d->radio_off) {
         const WDI_SSID *s = &c->SSIDList.pElements[0];
         RtlCopyMemory(d->bssid, p.PreferredBSSEntryList.pElements[0].BSSID.Address, 6);
         BSS *b = FindBss(d, d->bssid);
@@ -1130,6 +1062,50 @@ static void CmdAdapterConfig(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UI
     Answer(r, STATUS_SUCCESS);
 }
 
+// WDI_TASK_SET_RADIO_STATE: Wi-Fi off/on in Windows and airplane mode (W2o; before: NOT_SUPPORTED). Off: a join
+// in progress is ended, an association left (reported to Windows), the firmware down (WLC_DOWN: the radio stops
+// transmitting); on: WLC_UP. Then the task's completion and the radio's state as an unsolicited indication.
+static void CmdRadio(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
+{
+    WDI_SET_RADIO_STATE_PARAMETERS p;
+    const WDI_MESSAGE_HEADER hc = *h;
+    int on = 1;
+    if (ParseWdiTaskSetRadioStateToIhv(in - sizeof(*h), (UINT8 *)(h + 1), &d->tlv, &p) == NDIS_STATUS_SUCCESS) {
+        on = p.SoftwareRadioState != 0;
+        CleanupParsedWdiTaskSetRadioStateToIhv(&p);
+    }
+    Answer(r, STATUS_SUCCESS);
+    int fwerr = 0, e = BCMW_OK;
+    uint32_t v = 0;
+    if (!on) {
+        if (d->scanning)
+            ScanDone(d, NDIS_STATUS_REQUEST_ABORTED);
+        if (d->connecting)
+            ConnectDone(d, 0, 1);
+        if (d->connected && d->up)
+            bcmw_leave(d->w);
+        Disconnected(d, 3, 1);
+        Forget(d);
+        if (d->up)
+            e = bcmw_ioctl(d->w, 0, BCMW_C_DOWN, &v, 4, 1, &fwerr);
+    } else if (d->up) {
+        e = bcmw_ioctl(d->w, 0, BCMW_C_UP, &v, 4, 1, &fwerr);
+    }
+    d->radio_off = !on;
+    Sayf("wificx: radio %s (Windows' switch): firmware %s %d", on ? "ON" : "OFF", on ? "up" : "down", e);
+    Indicate(d, WDI_INDICATION_SET_RADIO_STATE_COMPLETE, hc.PortId, hc.TransactionId,
+             e == BCMW_OK ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE, NULL, 0);
+    {
+        WDI_INDICATION_RADIO_STATUS_PARAMETERS rs;
+        UINT8 *gen = NULL;
+        ULONG len = 0;
+        rs.RadioState.HardwareState = TRUE;
+        rs.RadioState.SoftwareState = on ? TRUE : FALSE;
+        if (GenerateWdiIndicationRadioStatusFromIhv(&rs, sizeof(WDI_MESSAGE_HEADER), &d->tlv, &len, &gen) == NDIS_STATUS_SUCCESS)
+            Indicate(d, WDI_INDICATION_RADIO_STATUS, hc.PortId, WDI_TRANSACTION_ID_UNSOLICIT, NDIS_STATUS_SUCCESS, gen, len);
+    }
+}
+
 // WDI_ABORT_TASK: a signal, answered with success at once; the task it names is completed as soon as possible (W2
 // answered NOT_SUPPORTED to the abort of the first scan, 30 ms after it began)
 static void CmdAbort(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
@@ -1214,6 +1190,9 @@ static void Command(DEVCTX *d, WIFIREQUEST r)
         break;
     case WDI_GET_STATISTICS:
         CmdStatistics(d, r);
+        break;
+    case WDI_TASK_SET_RADIO_STATE:
+        CmdRadio(d, r, h, in);
         break;
     case WDI_SET_ADAPTER_CONFIGURATION:
         CmdAdapterConfig(d, r, h, in);

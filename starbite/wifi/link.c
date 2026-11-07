@@ -710,6 +710,10 @@ int bcmw_connect(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const u
     int e, fwerr = 0;
     if (w->step < BCMW_STEP_UP || w->dead || !ssid_len || ssid_len > 32)
         return BCMW_E_STATE;
+    /* the OS runs the handshake: EAPOL frames go to os->rx, never to the core's own (a bcmw_join before leaves
+     * join_phase at 3, which would keep them) */
+    w->join_phase = 0;
+    w->join_fwsup = 0;
     v = 1;
     bcmw_ioctl(w, 0, BCMW_C_SET_INFRA, &v, 4, 1, &fwerr);
     v = 0;

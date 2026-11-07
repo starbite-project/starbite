@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#include "../win/dot11.h"
 #include "../bcmw_priv.h"
 #include "model.h"
 #include "../wpa.h"
@@ -445,12 +446,140 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
     }
 }
 
+/* the OS's side of a join (SbWifiCx: Windows' supplicant): EAPOL frames kept here instead of checked */
+static int os_sup;
+static uint8_t os_eapol[4][400];
+static unsigned os_eapol_len[4], os_eapol_n;
+
 static void os_rx(void *ctx, unsigned ifidx, const uint8_t *frame, uint32_t len)
 {
     (void)ctx;
     (void)ifidx;
+    if (os_sup && len >= 14 && frame[12] == 0x88 && frame[13] == 0x8e) {
+        if (os_eapol_n < 4 && len <= sizeof(os_eapol[0])) {
+            memcpy(os_eapol[os_eapol_n], frame, len);
+            os_eapol_len[os_eapol_n] = len;
+        }
+        os_eapol_n++;
+        return;
+    }
     n_rx++;
     CHECK(len == 60 && frame[12] == 0x08 && frame[13] == 0x06, "the received frame");
+}
+
+static void poll_for(struct bcmw *w, unsigned *counter, unsigned want)
+{
+    for (int i = 0; i < 40 && *counter < want; i++) {
+        bcmw_poll(w);
+        M.now += 1000;
+    }
+}
+
+/* an EAPOL frame from the OS's supplicant, as SbWifiCx hands Windows' frame to the radio (Ethernet) */
+static int os_send(struct bcmw *w, const uint8_t *ap, const uint8_t *own, const uint8_t *msg, unsigned len)
+{
+    uint8_t f[14 + BCMW_WPA_REPLY_MOST];
+    memcpy(f, ap, 6);
+    memcpy(f + 6, own, 6);
+    f[12] = 0x88, f[13] = 0x8e;
+    memcpy(f + 14, msg, len);
+    return bcmw_tx(w, f, 14 + len);
+}
+
+/* SbWifiCx's way (W2m): bcmw_connect with our RSN element; the OS runs the four-way handshake on frames from
+ * os->rx and sends its answers with bcmw_tx (converted from 802.11, checked below); the keys come back through
+ * bcmw_set_key as ADD_CIPHER_KEYS gives them (pairwise: index 0 and the AP's address; group: its index and RSC);
+ * then a group-key renewal, with a stranger's copy that the OS must ignore. */
+static void test_os_supplicant(struct bcmw *w)
+{
+    static const uint8_t ap[6] = { 0x02, 0x11, 0x22, 0x33, 0x44, 0x5a };
+    struct bcmw_wpa sup;
+    uint8_t rsn[BCMW_RSN_OURS], reply[BCMW_WPA_REPLY_MOST], dot11[600], back[600];
+    unsigned rl = 0, n, seen;
+    const char *why = 0;
+    int r;
+    uint16_t ki = 0;
+
+    CHECK(bcmw_leave(w) == BCMW_OK, "os supplicant: leaving the first join");
+    model_ap_reset();
+    M.handshake_done = 0, M.keys_ok = 0, M.rekey_answered = 0, M.ap_errors = 0;
+    bcmw_rsn_ours(rsn, BCMW_CIPHER_CCMP);
+    memset(&sup, 0, sizeof(sup));
+    bcmw_wpa_pmk((const unsigned char *)"correct horse", 13, (const unsigned char *)"test-ap", 7, sup.pmk);
+    memcpy(sup.own, bcmw_info(w)->mac, 6);
+    memcpy(sup.peer, ap, 6);
+    for (unsigned i = 0; i < 32; i++)
+        sup.own_nonce[i] = (uint8_t)(0xa5 ^ i * 13);
+    sup.rsn = rsn, sup.rsn_length = BCMW_RSN_OURS;
+    os_sup = 1, os_eapol_n = 0;
+
+    CHECK(bcmw_connect(w, (const uint8_t *)"test-ap", 7, ap, rsn, BCMW_RSN_OURS, 0) == BCMW_OK, "os supplicant: bcmw_connect");
+    poll_for(w, &os_eapol_n, 1);
+    CHECK(os_eapol_n == 1, "os supplicant: message 1 reached os->rx (%u), not the core's handshake", os_eapol_n);
+    CHECK(EapolKey(os_eapol[0], os_eapol_len[0], &ki) == 1, "message 1 classified as 1 (key info %04x)", ki);
+
+    /* the frame as Windows gets it (802.11 from the AP) and back: the same Ethernet frame */
+    n = EthToDot11(os_eapol[0], os_eapol_len[0], ap, dot11, sizeof(dot11));
+    CHECK(n == os_eapol_len[0] + 18 && dot11[0] == 0x08 && dot11[1] == 0x02 && !memcmp(dot11 + 10, ap, 6) &&
+          !memcmp(dot11 + 24, "\xaa\xaa\x03\x00\x00\x00\x88\x8e", 8), "message 1 as an 802.11 frame from the AP");
+    CHECK(Dot11Header(dot11, n) == 24, "its 802.11 header: 24 bytes");
+
+    r = bcmw_wpa_message(&sup, os_eapol[0] + 14, os_eapol_len[0] - 14, reply, &rl, &why);
+    CHECK(r == BCMW_WPA_ANSWER, "os supplicant: message 1 answered (%d, %s)", r, why ? why : "");
+    {
+        /* message 2 as Windows sends it: an 802.11 data frame to the DS, converted for the radio */
+        uint8_t f[14 + BCMW_WPA_REPLY_MOST];
+        memcpy(f, ap, 6), memcpy(f + 6, sup.own, 6), f[12] = 0x88, f[13] = 0x8e, memcpy(f + 14, reply, rl);
+        n = EthToDot11(f, 14 + rl, ap, dot11, sizeof(dot11));
+        memcpy(dot11 + 4, ap, 6), memcpy(dot11 + 10, sup.own, 6), memcpy(dot11 + 16, ap, 6);   /* A1 BSSID, A2 SA, A3 DA */
+        dot11[1] = 0x01;                                                                      /* to the DS */
+        CHECK(Dot11ToEth(dot11, n, back) == 14 + rl && !memcmp(back, f, 14 + rl), "message 2 from 802.11 to Ethernet");
+        CHECK(EapolKey(back, 14 + rl, &ki) == 2, "message 2 classified as 2 (key info %04x)", ki);
+        dot11[0] = 0x88, memmove(dot11 + 26, dot11 + 24, n - 24), dot11[24] = dot11[25] = 0;  /* the same as QoS data */
+        CHECK(Dot11Header(dot11, n + 2) == 26 && Dot11ToEth(dot11, n + 2, back) == 14 + rl && !memcmp(back, f, 14 + rl),
+              "message 2 as QoS data from 802.11 to Ethernet");
+    }
+    CHECK(os_send(w, ap, sup.own, reply, rl) == BCMW_OK, "os supplicant: message 2 sent");
+    poll_for(w, &os_eapol_n, 2);
+    CHECK(os_eapol_n == 2 && EapolKey(os_eapol[1], os_eapol_len[1], &ki) == 3, "message 3 reached os->rx (%u, key info %04x)",
+          os_eapol_n, ki);
+    r = bcmw_wpa_message(&sup, os_eapol[1] + 14, os_eapol_len[1] - 14, reply, &rl, &why);
+    CHECK(r == BCMW_WPA_KEYS, "os supplicant: message 3 gives the keys (%d, %s)", r, why ? why : "");
+    CHECK(os_send(w, ap, sup.own, reply, rl) == BCMW_OK, "os supplicant: message 4 sent");
+    seen = 0;
+    for (int i = 0; i < 20 && bcmw_info(w)->tx_done < bcmw_info(w)->tx_frames; i++) {   /* SbWifiCx: message 4 out first */
+        bcmw_poll(w);
+        M.now += 1000;
+    }
+    CHECK(M.handshake_done == 1, "os supplicant: the AP took message 4");
+    CHECK(bcmw_set_key(w, 0, sup.pairwise, 16, 4, ap, NULL) == BCMW_OK, "os supplicant: the pairwise key");
+    CHECK(bcmw_set_key(w, sup.group_index, sup.group, sup.group_length, 4, NULL, sup.group_counter) == BCMW_OK,
+          "os supplicant: the group key (index %u)", sup.group_index);
+    CHECK(M.keys_ok == 3 && M.ap_errors == 0, "os supplicant: both keys are the AP's (%x), AP faults %x", M.keys_ok, M.ap_errors);
+
+    /* a group-key renewal: the stranger's copy first (the OS ignores frames not from its AP) */
+    os_eapol_n = 0;
+    model_ap_rekey();
+    poll_for(w, &os_eapol_n, 2);
+    CHECK(os_eapol_n == 2, "the renewal's two frames reached os->rx (%u)", os_eapol_n);
+    for (unsigned k = 0; k < os_eapol_n && k < 4; k++) {
+        if (memcmp(os_eapol[k] + 6, ap, 6))
+            continue;                                   /* the stranger's */
+        CHECK(EapolKey(os_eapol[k], os_eapol_len[k], &ki) == 5, "the renewal classified as group (key info %04x)", ki);
+        r = bcmw_wpa_message(&sup, os_eapol[k] + 14, os_eapol_len[k] - 14, reply, &rl, &why);
+        CHECK(r == BCMW_WPA_GROUP, "os supplicant: the renewal answered (%d, %s)", r, why ? why : "");
+        CHECK(os_send(w, ap, sup.own, reply, rl) == BCMW_OK, "os supplicant: the renewal's answer sent");
+        seen++;
+        for (int i = 0; i < 20 && bcmw_info(w)->tx_done < bcmw_info(w)->tx_frames; i++) {
+            bcmw_poll(w);
+            M.now += 1000;
+        }
+        CHECK(bcmw_set_key(w, sup.group_index, sup.group, sup.group_length, 4, NULL, sup.group_counter) == BCMW_OK,
+              "os supplicant: the new group key (index %u)", sup.group_index);
+    }
+    CHECK(seen == 1 && M.rekey_answered == 1 && (M.keys_ok & 4) && M.ap_errors == 0,
+          "os supplicant: renewal answered once (%u), installed (%x), AP faults %x", M.rekey_answered, M.keys_ok, M.ap_errors);
+    os_sup = 0;
 }
 
 static void synth_files(void)
@@ -591,6 +720,8 @@ static void run_bringup(int dma_idx)
         CHECK(M.tx_ip == 40 && bcmw_info(w)->tx_done == bcmw_info(w)->tx_frames, "40 frames out (%u), all done (%u/%u)", M.tx_ip,
               bcmw_info(w)->tx_done, bcmw_info(w)->tx_frames);
         CHECK(M.badoption == 0 && M.fw_errors == 0, "after the data: BADOPTION %u, faults %x", M.badoption, M.fw_errors);
+        if (!dma_idx)
+            test_os_supplicant(w);
     }
     /* buffers are reposted: 20 more ioctls without running out */
     for (int i = 0; i < 20; i++) {
