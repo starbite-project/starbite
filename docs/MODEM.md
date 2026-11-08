@@ -168,6 +168,14 @@ Catalog rows the main session adds (bare, hidden, lab):
 Volume Up). Results: pmsg (`/sys/fs/pstore/pmsg-ramoops-0` in TWRP) lines starting `modemprobe:` / `PMU:` /
 `MBOX:` / `SHM:`.
 
+### Result T1 (2026-11-08 17:52, image 509a2fa, `build/test-boots/20261108-175151-modemprobe/loader-pmsg.txt`)
+Under the loader (S-Boot ran, Android did not): verdict **cp-off**, 0 faulted reads, no SError. The on-phone
+self-test was ok. PMU: RESET_SEQUENCER_STATUS 0 (not 5: `cp_init` never ran), CENTRAL_SEQ_CP_CONFIGURATION
+0x00010000 (bit 16 set: not held by a reset-assert), CENTRAL_SEQ_CP_STATUS 0x00, CP_STAT 0x1, CP_DEBUG 0. The
+mailbox is clocked and AP-readable (MCUCTLR, the interrupt registers and ISSR0-15 all 0), so stage 4's polling path
+needs no clock work. In short, S-Boot leaves the CP powered but never started, and stage 3 must run the `cp_init`
+sequence itself. T2 (the carve-out reads) is next.
+
 ## 6. Next stages (not started)
 
 3. CP boot: copy BOOT/MAIN/VSS + NV from RAM copies (RADIO, EFS `nv_data.bin`, read once) per `sbm_plan`, the
