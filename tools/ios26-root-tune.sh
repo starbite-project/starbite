@@ -50,6 +50,12 @@ A="$out/private__var__mobile__Library__Preferences__com.apple.Accessibility.plis
 [ -s "$D" ] || D=-
 mode=${TUNE:-full}
 mkdir -p "$out/tune"
+# every pulled plist the chosen mode reads must parse (a stale host read gives garbage: refuse, no traceback)
+plist_ok() { [ "$1" = - ] || python3 -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$1" 2>/dev/null; }
+need=("$A"); [ "$mode" = full ] && need+=("$L" "$D"); [ "$mode" = launchd-log ] && need+=("$L")
+for f in "${need[@]}"; do
+    plist_ok "$f" || { echo "$f does not parse (stale host read?): refusing; nothing queued"; exit 1; }
+done
 # The host reads raw blocks without replaying the journal, so a recently rewritten launchd.plist can read back
 # stale (2026-11-08). Only edit the known-good original (sha below, pulled 17:06 and restored by --undo).
 GOOD_LAUNCHD=5d8bc695
@@ -61,7 +67,8 @@ files=()
 case "$mode" in
 prefs) ;;
 launchd-log)
-    python3 tools/ios26-launchd-tune.py "$L" "$D" "$out/tune" --log PosterBoard
+    # no job removed: launchd-disabled.plist is neither read nor written (it can read back stale)
+    python3 tools/ios26-launchd-tune.py "$L" - "$out/tune" --log PosterBoard
     files+=("$out/tune/launchd.plist=/System/Library/xpc/launchd.plist:644") ;;
 full)
     logs=(--log PosterBoard); for n in ${LOG:-}; do logs+=(--log "$n"); done
