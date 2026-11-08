@@ -31,11 +31,11 @@ static int getenv_dbg(void) { return getenv("SBOS_DBG") != 0; }
 #define ICON_SOS_S 227
 
 enum { E_TITLE = 1, E_BACK, E_BUTTON, E_BIG, E_TEXT, E_LEVEL, E_TOGGLE, E_HOLD, E_CLOCK, E_TILE, E_ROUND,
-       E_FIELD, E_TOAST, E_CTEXT, E_GAUGE, E_INPUT, E_KEYS, E_CHART, E_ICON, E_WIDGET };
+       E_FIELD, E_TOAST, E_CTEXT, E_GAUGE, E_INPUT, E_KEYS, E_CHART, E_ICON, E_WIDGET, E_SCROLLBAR };
 enum { SCR_LOCK = 1, SCR_HOME, SCR_APP, SCR_POWER, SCR_CONFIRM, SCR_LIGHT, SCR_SOS, SCR_OFF, SCR_CONTROL };
 
 struct el {
-    uint8_t kind, interactive;
+    uint8_t kind, interactive, scrolled;    /* scrolled (0.6.2): an app page's element, drawn below SCROLL_TOP only */
     uint32_t id, flags, color, ms, icon;
     int value, n;
     char a[48], b[128];
@@ -53,6 +53,11 @@ static int press_y = -1;                    /* where the last press started (a s
 static int key_hold_armed = -1;             /* a hold element selected once with Bixby */
 static uint64_t key_hold_until;
 static int dirty = 1, full = 1;
+/* 0.6.2: app pages taller than the panel scroll (a vertical drag; the key focus scrolls to its element). Back stays;
+ * the title and the content move under it */
+#define SCROLL_TOP 300
+static int app_scroll, scroll_max, scroll_drag, scroll_from, focus_follow;
+int ui_scroll_max;                          /* the last app page's scroll range (the self test logs it) */
 static int light_return = SCR_LOCK;
 static uint32_t light_argb;
 static uint64_t light_hint_until, light_off_at;
@@ -981,11 +986,53 @@ static void build_app(void)
         if (cur[i].y + cur[i].h > bottom)
             bottom = cur[i].y + cur[i].h;
     }
-    if (ncur > base && bottom > (keys ? KB_TOP - 20 : UI_H - 20)) {
+    /* 0.6.2: taller than the panel scrolls; what still cannot be shown is elements beyond EL_MAX (cut off) */
+    if (napp_els > EL_MAX - 1 - base) {
         ui_overflow = 1;
         if (app_front >= 0 && app_front < 32 && !(over_logged & (1U << app_front))) {
             over_logged |= 1U << app_front;
-            sb_logf("ui: app screen taller than the panel: ", app_name(app_front));
+            sb_logf("ui: app page has more elements than fit (some cut off): ", app_name(app_front));
+        }
+    }
+    static int last_app = -2;
+    if (app_front != last_app) {
+        last_app = app_front;
+        app_scroll = 0;
+    }
+    int vb = keys ? KB_TOP - 20 : UI_H - 40;
+    scroll_max = bottom > vb ? bottom - vb : 0;
+    ui_scroll_max = scroll_max;
+    if (focus_follow) {
+        focus_follow = 0;
+        int k = 0;
+        for (int i = 0; i < ncur; ++i)
+            if (cur[i].interactive) {
+                if (k == focus && i >= base) {
+                    if (cur[i].y - app_scroll < SCROLL_TOP + 20)
+                        app_scroll = cur[i].y - SCROLL_TOP - 20;
+                    else if (cur[i].y + cur[i].h - app_scroll > vb)
+                        app_scroll = cur[i].y + cur[i].h - vb;
+                }
+                ++k;
+            }
+    }
+    if (app_scroll > scroll_max)
+        app_scroll = scroll_max;
+    if (app_scroll < 0)
+        app_scroll = 0;
+    if (scroll_max > 0) {
+        for (int i = base - 1; i < ncur; ++i)
+            if (cur[i].kind != E_KEYS) {
+                cur[i].y -= app_scroll;
+                cur[i].scrolled = 1;
+            }
+        struct el *e = add(cur, &ncur, E_SCROLLBAR);
+        if (e) {
+            int view = vb - SCROLL_TOP, total = scroll_max + view;
+            e->interactive = 0;
+            e->x = UI_W - 22, e->w = 10;
+            e->h = view * view / total;
+            e->y = SCROLL_TOP + (view - e->h) * app_scroll / (scroll_max ? scroll_max : 1);
         }
     }
 }
@@ -1304,7 +1351,21 @@ static void card_disc(int cx, int cy, int r, uint32_t c)
         ui_disc(cx, cy, r, c);
 }
 
+static void draw_el_raw(const struct el *e, int idx);
+
+/* 0.6.2: a scrolled element is clipped below SCROLL_TOP (Back stays above it) */
 static void draw_el(const struct el *e, int idx)
+{
+    if (e->scrolled) {
+        ui_clip(0, SCROLL_TOP, UI_W, UI_H - SCROLL_TOP);
+        draw_el_raw(e, idx);
+        ui_noclip();
+    } else {
+        draw_el_raw(e, idx);
+    }
+}
+
+static void draw_el_raw(const struct el *e, int idx)
 {
     int f = is_focused(idx), p = idx == pressed;
     uint32_t card = p ? C_CARD3 : f ? C_CARD2 : C_CARD;
@@ -1539,6 +1600,9 @@ static void draw_el(const struct el *e, int idx)
         ui_text_c(F_DETAIL, e->x + e->w / 2, iy + s + 64, e->a, C_L1);
         break;
     }
+    case E_SCROLLBAR:
+        ui_round(e->x, e->y, e->w, e->h, e->w / 2, C_L3);
+        break;
     case E_WIDGET: {                            /* 0.6: the clock widget */
         look_glass(e->x, e->y, e->w, e->h, 72, 0xffffffffU, 40);
         ui_text(ui_has_font(F_VALUE) ? F_VALUE : F_BIG, e->x + 70, e->y + 200, e->a, C_L1);
@@ -1650,6 +1714,8 @@ static void clear_rect(const struct el *e)
 {
     int m = 14;
     int x = e->x - m, y = e->y - m, w = e->w + 2 * m, h = e->h + 2 * m;
+    if (e->scrolled && y < SCROLL_TOP)
+        h -= SCROLL_TOP - y, y = SCROLL_TOP;
     if (y < UI_STATUS_H && screen != SCR_LIGHT && screen != SCR_SOS)
         y = UI_STATUS_H, h -= UI_STATUS_H - (e->y - m);
     if (h > 0)
@@ -1771,7 +1837,8 @@ static int hit(int x, int y)
 {
     for (int i = ncur - 1; i >= 0; --i) {
         const struct el *e = &cur[i];
-        if (e->interactive && x >= e->x && x < e->x + e->w && y >= e->y && y < e->y + e->h)
+        if (e->interactive && x >= e->x && x < e->x + e->w && y >= e->y && y < e->y + e->h &&
+            !(e->scrolled && y < SCROLL_TOP))
             return i;
     }
     return -1;
@@ -2006,11 +2073,30 @@ void ui_kevent(const void *evp)
         key_hold_armed = -1;
         pressed = hit(ev->x, ev->y);
         press_y = ev->y;
+        scroll_drag = 0;
         t_press = sb_ms();
         press_done = 0;
         dirty = 1;
         break;
     case KIN_MOVE:
+        if (screen == SCR_APP && scroll_max > 0 && press_y >= SCROLL_TOP &&
+            (pressed < 0 || cur[pressed].kind != E_KEYS)) {
+            int dy = ev->y - press_y;
+            if (!scroll_drag && (dy > 40 || dy < -40)) {
+                scroll_drag = 1;            /* a drag, not a tap: the page scrolls */
+                scroll_from = app_scroll;
+                pressed = -1;
+            }
+            if (scroll_drag) {
+                int s = scroll_from - dy;
+                s = s < 0 ? 0 : s > scroll_max ? scroll_max : s;
+                if (s != app_scroll) {
+                    app_scroll = s;
+                    full = dirty = 1;
+                }
+                break;
+            }
+        }
         if (pressed >= 0) {
             const struct el *e = &cur[pressed];
             if (ev->x < e->x - 60 || ev->x > e->x + e->w + 60 || ev->y < e->y - 60 || ev->y > e->y + e->h + 60) {
@@ -2023,6 +2109,13 @@ void ui_kevent(const void *evp)
 #ifdef SB_HOST
         if (getenv_dbg()) printf("dbg release %d,%d at %llu pressed %d\n", ev->x, ev->y, (unsigned long long)sb_ms(), pressed);
 #endif
+        if (scroll_drag) {
+            scroll_drag = 0;
+            pressed = -1;
+            press_y = -1;
+            dirty = 1;
+            break;
+        }
         if (pressed < 0 && press_y >= 0 && press_y < UI_STATUS_H + 20 && ev->y < UI_STATUS_H + 200) {
             press_y = -1;
             kui_control_open();             /* 0.6: a tap on the status bar */
@@ -2053,6 +2146,7 @@ void ui_kevent(const void *evp)
             focus = ev->type == KIN_DOWN ? 0 : n - 1;
         else
             focus = (focus + (ev->type == KIN_DOWN ? 1 : n - 1)) % n;
+        focus_follow = 1;                   /* 0.6.2: a long page scrolls to the focused element */
         key_hold_armed = -1;
         dirty = 1;
         break;

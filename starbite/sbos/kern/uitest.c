@@ -5,7 +5,8 @@
  *
  * 5 s after the start it opens the lock screen, home, every app (and a few of their own pages through the
  * same events a tap sends), the power menu and the screen light, one step every 700 ms, and logs to pmsg what
- * each did: "selftest: <screen>: N elements, X ms to draw, app ok / dead, fits / too tall". Then a summary
+ * each did: "selftest: <screen>: N elements, X ms to draw, app ok / dead, fits / scrolls N px / ELEMENTS CUT OFF" (0.6.2: pages scroll; "too tall" in the summary
+ * now counts pages that lost elements). Then a summary
  * and a restart to the loader's menu (where `sbfb.py reboot recovery` brings TWRP back for the log).
  *
  * Never: the flashlight LED, the heater, the alarm, brightness or panel settings, a call or a message.
@@ -45,6 +46,8 @@ static const struct st_ev script[] = {
     { "light", "screen light strength low", EV_APP_LEVEL, 5, 0 },
     { "light", "screen light strength full", EV_APP_LEVEL, 5, 2 },
     { "clock", "world clock", EV_APP_BUTTON, 1, 0 },
+    { "heat", "the Manual page (nothing started)", EV_APP_BUTTON, 9, 0 },
+    { "heat", "the Manual page closed", EV_APP_BUTTON, 14, 0 },
     { "settings", "section Alarm", EV_APP_LEVEL, 9, 1 },
     { "settings", "section Heat", EV_APP_LEVEL, 9, 2 },
     { "settings", "section About", EV_APP_LEVEL, 9, 3 },
@@ -94,7 +97,12 @@ static void logline(const char *what, int a)
         slow_max = kui_stat_ms;
     if (a >= 0) {
         ub_s(&u, apps[a].dead ? ", app DEAD" : ", app ok");
-        ub_s(&u, ui_overflow ? ", TOO TALL" : ", fits");
+        ub_s(&u, ui_overflow ? ", ELEMENTS CUT OFF" : ui_scroll_max > 0 ? ", scrolls" : ", fits");
+        if (!ui_overflow && ui_scroll_max > 0) {
+            ub_c(&u, ' ');
+            ub_dec(&u, (uint64_t)ui_scroll_max);
+            ub_s(&u, " px");
+        }
         ub_s(&u, ", handler ");
         ub_dec(&u, apps[a].used_ms);
         ub_s(&u, " ms so far");

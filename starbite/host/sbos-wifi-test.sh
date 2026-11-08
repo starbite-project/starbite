@@ -31,8 +31,9 @@ want "$b" "wifi: the gateway answers a ping" "saved: the router's ping"
 nowant "$b" "correct horse\|test-ap" "saved: no name or passphrase logged"
 NET="test-ap
 wrong passphrase"
-c=$(run $OPEN $ON $JOIN)
+c=$(run $OPEN $ON t:720,905 w:17000)                            # 0.6.1: the join's 15 s timeout runs in the loop
 want "$c" "the network did not take the phone" "a wrong passphrase refused"
+nowant "$c" "a loop turn took" "a wrong passphrase: the loop never blocked during the join (0.6.1)"
 nowant "$c" "wifi: an address from DHCP" "no address with a wrong passphrase"
 NET=
 CYC=""

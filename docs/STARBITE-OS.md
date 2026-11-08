@@ -829,13 +829,48 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.15 Version 0.6.2: emergency heat without software limits (2026-11-08)
+
+The user's scenario (Lapland, -35 °C, the phone is all they have), agreed with the main session:
+- **Extreme, Manual and Keep warm have no software limits** but the battery's **55 °C** (its fire safety), the
+  readings that stop needs (a lost or stuck battery/SoC reading), a core fault, the 3.5 A battery current (on by
+  default; Manual has a hold to turn it off, the user's request), the SoC's hardware trip reading unarmed (it is the
+  protection now: S-Boot arms it at 115 °C, libsb only reads the TMU, and the heater refuses to start without it; the
+  GPU's zone too while the GPU runs), and a **call / SOS reserve**
+  (5 / 15 / 30 %, default 15; a hold on "Hold to go on below the reserve" overrides it until a restart). Gone for
+  these levels: our SoC stop (S-Boot's 115 °C hardware trip stays armed), the 3.45 V floor (the PMIC's and the fuel
+  gauge's own protections stay), the 40 % start minimum. Starts below 50 °C battery.
+- **Keep the battery warm** (`HEAT_KEEPWARM`): a battery target (10 / 20 / 30 °C): every core while the battery is
+  more than 0.5 °C below it, one off per second above +0.5 °C; the cores alone (no GPU). In deep cold a warm cell
+  keeps its capacity and its current.
+- **The estimate first**: each confirmation says about how many minutes of full heat the charge above the reserve
+  gives at 1.9 A (the 0.6 tour's draw). While heating: the measured current and power (A, W) and the minutes left to
+  the reserve (3000 mAh). One line explains that the heat is the battery's power (~7 W), not the clocks.
+- **Clock steps from the chip's own ECT** (`build/em-research-g3d-ect.md`, read from S-Boot's ECT; the VG4 boot-LUN
+  backup holds the same bytes): the A55's cap is **1794 MHz** (GEN `MINMAX_dvfs_cpucl0`, every ASV version), so
+  0.6.1's 1950 MHz for Extreme was above Samsung's own limit: Extreme is back at 1794. Manual offers 1898 / 1950 MHz
+  (in the table with the ECT's own ASV voltages) with a warning, as the main session decided (Windows runs its A55s
+  at 1950 since 2026-11-07); 2002 MHz never. The GPU's ECT top is **598 MHz** with its own ASV voltages (inside `MINMAX_dvfs_g3d`; Android's
+  DT caps it at 572): offered in Manual. No 650 / 702 MHz level exists in this chip's ECT.
+- **The live readout** on the Heat screen while heating, every second: the battery current (mA) and power (W, V x I
+  from the fuel gauge), the minutes to the reserve, the temperatures (battery, SoC, the back).
+- **The 3.5 A stop** stays on by default (it never limited heat: the tour peaked at 1.8 A); Manual has a hold to turn
+  it off (`SET_HEAT_CURRENT_STOP`, until a restart), the user's request.
+- **App pages scroll** (the user: the Manual page's bottom was cut off): a vertical drag scrolls a page taller than
+  the panel (Back stays; the title and content move under it, clipped below y 300; a scroll bar); the key focus
+  scrolls to its element. The self test logs "scrolls N px" per page and counts a page that lost elements (more
+  than fit) as "too tall"; it now also opens Heat's Manual page (30 screens).
+- Wi-Fi: wifi-core's e14fca2 (`join_pm_off`, the log of a handshake frame from another address) folded into the
+  split join; `sbos-wifi-test.sh` waits for the polled join's 15 s timeout (it failed on 0.6.1 for that reason
+  only) and checks that the loop never blocks during it.
+
 ### 12.14 Version 0.6.1: Extreme flat out, Manual heat, WPA2, Emergency Mode's power profile (2026-11-08)
 
 From the user's tour of 0.6 (`build/starbite-os/tour06/pmsg.txt`):
 - **Extreme was a thermostat by design** (the user: it shed 8 → 4 → 2 → 1 cores at a 43 °C skin band and the
   voltage-sag rule while the battery was at 35 °C; the GPU stopped when every worker was shed). Now Extreme (and
   Manual) have **no regulation**: every worker joins one per second and stays; the A55s at the table's top
-  (1950 MHz, now listed in libsb), the M3s at 1794 MHz at once (the DT's `exynos-ocp` node allows the steps above
+  (0.6.1: 1950 MHz; above the ECT's cap, back to 1794 in 0.6.2), the M3s at 1794 MHz at once (the DT's `exynos-ocp` node allows the steps above
   1794 MHz only with Samsung's over-current handler, which Starbite does not have yet), the GPU for the whole
   session, no timer. The stops left: **battery 55 °C** (its safety), the SoC at 110 °C (a clean stop just below
   S-Boot's 115 °C hardware trip, which stays armed), a lost or stuck battery/SoC reading, a core fault, the 15 %

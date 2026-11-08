@@ -479,6 +479,22 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         sb_logx("settings: Manual heat step (kHz): ", arg[1]);
         return 0;
     }
+    case SET_HEAT_RESERVE:
+        if (arg[1] > 50)
+            return SBOS_EINVAL;
+        heat_reserve_pct = (int)arg[1];
+        sb_logx("settings: the call / SOS reserve for full heat, % (0 overridden): ", arg[1]);
+        return 0;
+    case SET_HEAT_CURRENT_STOP:
+        heat_no_current_stop = arg[1] == 0;
+        sb_log(arg[1] ? "settings: Manual's 3.5 A battery-current stop: on" :
+                        "settings: Manual's 3.5 A battery-current stop: OFF (the user's choice)");
+        return 0;
+    case SET_HEAT_TARGET_C10:
+        if (arg[1] < 50 || arg[1] > 350)
+            return SBOS_EINVAL;
+        heat_target_c10 = (int)arg[1];
+        return 0;
     case SET_BRIGHTNESS:
         if (arg[1] > 4)
             return SBOS_EINVAL;
@@ -780,6 +796,9 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_MAN_A55: return heat_man_a55;
         case SET_HEAT_MAN_M3: return heat_man_m3;
         case SET_HEAT_MAN_GPU: return heat_man_gpu;
+        case SET_HEAT_RESERVE: return heat_reserve_pct;
+        case SET_HEAT_TARGET_C10: return heat_target_c10;
+        case SET_HEAT_CURRENT_STOP: return !heat_no_current_stop;
         case SET_SAVED: return settings_persistent();
         case SET_AUTO_OFF_MIN: return (int64_t)auto_off_min;
         default: return SBOS_EINVAL;

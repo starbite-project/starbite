@@ -28,6 +28,7 @@ static int hung_ever;                       /* a core never checked in (or was s
 static int running[8];                      /* the heat kernel runs on core w (cs == CS_RUN) */
 static int charger_now = -1, charger_seen = -2, charger_raw = -1;   /* unknown until two reads agree */
 static int gpu_probe_ok;
+static int trip_top_c;                      /* the hardware trip's decoded temperature (logged at a start) */
 static int launch_hold;
 static int ctx_ok;                          /* 1 workers use their own start records, -1 the shared one, 0 unknown */                     /* a core never checked in: no more launches this session */
 static int64_t last_code;                   /* the latest failure's code, for the screen */
@@ -92,7 +93,8 @@ static void read_inputs(struct heat_in *in)
     gpu_probe_ok = t.sub == 1 && t.gpu > -30 && t.gpu < 150;
     if (gpuheat_on() && gpu_probe_ok && t.gpu * 10 > in->soc_c10)
         in->soc_c10 = t.gpu * 10;               /* the GPU's zone (TMU_SUB) counts while it heats */
-    in->trip_armed = (t.trip_armed & 1) != 0;
+    in->trip_armed = (t.trip_armed & 1) && (!gpuheat_on() || (t.trip_armed & 2));   /* the GPU's zone too while it runs */
+    trip_top_c = t.trip_c;
     struct sb_bat b;
     in->gauge_ok = sb_bat_read(&b) && b.ok;
     in->pct = b.soc_pct;
@@ -697,6 +699,7 @@ static void start_now(void)
             return;
         }
         sb_logx("heater: start, level ", (uint64_t)pending_level);
+        sb_logx("heater: the SoC's own hardware heat trip is armed (S-Boot's), decoded C: ", (uint64_t)trip_top_c);
         gpuheat_new_session();
         /* a new session tries every usable core again, except with shared start records after a core went
          * missing: it could still boot late and take a newer core's record */
@@ -719,6 +722,9 @@ static void start_now(void)
 
 /* Manual (0.6.1): the picked ACPM steps (kHz; 0 = the top normal step; GPU 0 = not used) */
 uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;
+/* 0.6.2: the call / SOS reserve for Extreme / Manual / Keep warm (0 = overridden), Keep warm's battery target */
+int heat_reserve_pct = 15, heat_target_c10 = 200, heat_no_current_stop;
+#define FLAT_MA 1900                        /* the 0.6 tour's full-heat draw (1.8 A), for the estimates */
 
 static void extreme_confirm_done(int ok)
 {
@@ -730,7 +736,14 @@ static void extreme_confirm_done(int ok)
     }
     confirmed = 1;
     K.heat_confirmed = 1;
-    if (pending_level == HEAT_MANUAL) {
+    ctl.reserve_pct = heat_reserve_pct;
+    ctl.target_c10 = heat_target_c10;
+    ctl.no_current_stop = pending_level == HEAT_MANUAL && heat_no_current_stop;
+    if (pending_level == HEAT_KEEPWARM) {
+        ctl.man_a55 = ctl.man_m3 = 0;
+        gpu_heat_session = 0;               /* the cores alone keep a battery warm */
+        sb_log("heater: Keep warm confirmed (the battery's target)");
+    } else if (pending_level == HEAT_MANUAL) {
         ctl.man_a55 = heat_man_a55;
         ctl.man_m3 = heat_man_m3;
         gpuheat_khz = heat_man_gpu ? heat_man_gpu : 572000U;
@@ -773,7 +786,7 @@ int heater_request(int level, int minutes)
         }
         return 0;
     }
-    if (level > HEAT_MANUAL)
+    if (level > HEAT_KEEPWARM)
         return SBOS_EINVAL;
     if (wifi_on() && !heater_running_ui()) {
         sb_strcpy(ctl.why, sizeof(ctl.why), "Turn Wi-Fi off first (0.4: not both at once)");
@@ -790,17 +803,50 @@ int heater_request(int level, int minutes)
         pending_level = level;
         pending_minutes = minutes;
         ctl.state = HEAT_ST_CONFIRM;
+        /* the estimate first (0.6.2): the battery's charge above the reserve at the tour's full-heat draw */
+        static char est[128];
+        {
+            struct heat_in in;
+            read_inputs(&in);
+            int usable = in.gauge_ok ? in.pct - (heat_reserve_pct > 0 ? heat_reserve_pct : 0) : -1;
+            struct ub u;
+            ub_init(&u);
+            if (usable > 0) {
+                ub_s(&u, "About ");
+                ub_dec(&u, (uint64_t)(usable * 30 * 60 / FLAT_MA));
+                ub_s(&u, heat_reserve_pct > 0 ? " minutes of full heat before the call / SOS reserve (" :
+                                                " minutes of full heat until the battery is empty (");
+                ub_dec(&u, (uint64_t)in.pct);
+                ub_s(&u, " % now, about 1.9 A).");
+            } else {
+                ub_s(&u, in.gauge_ok ? "The battery is at the call / SOS reserve." : "The battery's charge is unknown.");
+            }
+            sb_strcpy(est, sizeof(est), u.b);
+        }
+        if (level == HEAT_KEEPWARM) {
+            static char tl[128];
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "Keeps the battery near ");
+            ub_dec(&u, (uint64_t)(heat_target_c10 / 10));
+            ub_s(&u, " \xc2\xb0" "C: a cold battery loses its charge; all cores while it is colder, none while warmer.");
+            sb_strcpy(tl, sizeof(tl), u.b);
+            kui_confirm("Keep the battery warm?", tl, est,
+                        "No other limits: it stops only at 55 \xc2\xb0" "C battery or the reserve.",
+                        "Hold to start", extreme_confirm_done);
+            return 0;
+        }
         if (level == HEAT_EXTREME)
             kui_confirm("Extreme heat?",
-                        "Every processor core at its top table step, the graphics processor, the screen at its top level and the LED.",
-                        "No regulation: it stays flat out until you stop it. It stops only at 55 \xc2\xb0" "C battery, 110 \xc2\xb0" "C inside, 15 % battery or a sensor fault.",
-                        "It gets hot quickly, also on the back: hold it only through a pocket or a glove. About 2 % a minute.",
+                        "Every core at its top table step, the GPU, the screen at its top and the LED: flat out until you stop it.",
+                        est,
+                        "Stops only at 55 \xc2\xb0" "C battery or the reserve. The back gets hot: hold it through a pocket or a glove.",
                         "Hold for Extreme", extreme_confirm_done);
         else
             kui_confirm("Manual heat?",
-                        "The clocks you picked for the small cores, the big cores and the graphics processor, flat out.",
-                        "No regulation: it runs until you stop it. It stops only at 55 \xc2\xb0" "C battery, 110 \xc2\xb0" "C inside, 15 % battery or a sensor fault.",
-                        "It gets hot quickly, also on the back: hold it only through a pocket or a glove.",
+                        "The clocks you picked for the small cores, the big cores and the GPU, flat out until you stop it.",
+                        est,
+                        "Stops only at 55 \xc2\xb0" "C battery or the reserve. The back gets hot: hold it through a pocket or a glove.",
                         "Hold for Manual", extreme_confirm_done);
         return 0;
     }
@@ -885,6 +931,12 @@ void heater_status(struct sbos_heat *h)
     sb_strcpy(h->why, sizeof(h->why), ctl.why);
     h->skin_c10 = last_in.skin_ok && heater_running_ui() ? last_in.skin_c10 : -1000;
     h->gpu_mhz = (int32_t)gpuheat_mhz();
+    h->ma = last_in.gauge_ok && heater_running_ui() ? last_in.ma : 0;
+    h->mv = last_in.gauge_ok && heater_running_ui() ? last_in.mv : 0;
+    h->pct = last_in.gauge_ok ? last_in.pct : -1;
+    h->reserve_pct = heat_reserve_pct;
+    h->target_c10 = heat_target_c10;
+    h->no_current_stop = heat_no_current_stop;
 }
 
 void heater_init(void)

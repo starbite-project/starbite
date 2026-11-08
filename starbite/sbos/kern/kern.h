@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.6.1"
+#define SBOS_VERSION "0.6.2"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -65,7 +65,7 @@ struct heat_limits {
     int soft_ma, hard_ma;           /* |current|: 3200 a core off, 3500 stop */
     int soft_sag_mv, cold_sag_mv;   /* VCELL below its resting value: 300 a core off, 150 the cold limit */
     int min_mv;                     /* stop below (3450) */
-    int min_pct[6];                 /* per level to start */
+    int min_pct[7];                 /* per level to start */
     /* Extreme and Manual (0.6.1): no regulation, everything flat out until the user stops it; the stops left: the
      * battery (55 C, its safety), the SoC just below its 115 C hardware trip (a clean stop instead of a reset), the
      * sensors' integrity, a core fault, the 15 % reserve, the voltage floor and the current limit */
@@ -97,6 +97,9 @@ struct heat_ctl {
     int cores, max_cores;           /* worker cores wanted now / for the level (A55 1-3, then M3 4-7) */
     uint32_t a55_khz, m3_khz;       /* clocks wanted (0: leave / restore) */
     uint32_t man_a55, man_m3;       /* Manual (0.6.1): the picked steps (0: the top normal step) */
+    int reserve_pct;                /* 0.6.2: stop at this charge (a call / SOS reserve; 0 = overridden) */
+    int target_c10;                 /* 0.6.2: Keep warm's battery target */
+    int no_current_stop;            /* 0.6.2: Manual only: the 3.5 A battery-current stop turned off by the user */
     int cold;
     uint64_t t_start, t_end, t_step, t_ramp, last_bat_ok, last_soc_ok;
     int rest_mv;
@@ -138,6 +141,7 @@ int heater_cpu0_active(void);
 extern int gpu_heat_allowed;
 extern uint32_t gpuheat_khz;        /* 0.6.1: the GPU's table step for the session */
 extern uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;    /* 0.6.1: Manual's picks (kHz) */
+extern int heat_reserve_pct, heat_target_c10, heat_no_current_stop;   /* 0.6.2 */
 extern int gpu_heat_session;        /* 0.6: Extreme's own confirmation allows the GPU for that session */
 int gpuheat_start(void);
 void gpuheat_tick(void);
@@ -273,7 +277,7 @@ void kui_level(uint32_t id, const char *labels, int cur);
 void kui_toggle(uint32_t id, const char *label, int on);
 void kui_hold(uint32_t id, const char *label, uint32_t ms, uint32_t flags);
 void kui_end(void);
-extern int kui_stat_n, kui_stat_ms, kui_stat_frames, ui_overflow;
+extern int kui_stat_n, kui_stat_ms, kui_stat_frames, ui_overflow, ui_scroll_max;
 const char *kui_screen_name(void);
 /* the self test (uitest.c, docs/STARBITE-OS.md 12.6): only in starbite-os-selftest.img */
 extern const int sbos_selftest_enabled;

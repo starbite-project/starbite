@@ -1,4 +1,4 @@
-# Starbite OS: a short guide (0.6.1)
+# Starbite OS: a short guide (0.6.2)
 
 Starbite OS is the Galaxy S9's own emergency system: a light, a heater, an alarm, the battery, a medical card and
 Wi-Fi, with big buttons and plain words. The design and the tests are in `docs/STARBITE-OS.md`.
@@ -26,7 +26,10 @@ is only refreshed when something changes.
   dials), **Message** (three ready texts, not sent yet), **Hold for the alarm**, **Medical card**.
 - **Light**: the flashlight LED, or the screen as a light (white, warm, red; low, half, full).
 - **Heat**: Off, Low, High, **Extreme** (every part at its top table step, flat out until you press Off; asks
-  each time; stops only at 55 °C battery, 15 % or a sensor fault), and **Manual** (pick the clocks yourself). The screen stays on while it heats; after the screen-off time touch locks (a pocket):
+  each time with the minutes it lasts; stops only at 55 °C battery or the call / SOS reserve), **Manual** (pick the
+  clocks yourself) and **Keep the battery warm** (a target of 10, 20 or 30 °C: a cold battery loses its charge).
+  The **reserve** (5, 15 or 30 %, default 15) keeps enough for a call or SOS; hold "go on below the reserve" to
+  override it. While heating it shows the current, the power and the minutes left. The screen stays on while it heats; after the screen-off time touch locks (a pocket):
   press **Power** to unlock.
 - **Heat** (Low, High): The phone gets hot to hold: keep it in a pocket or a glove. It stops by itself at
   42 °C battery, 46 °C on the back, 15 % battery or after 30 minutes, and not while charging. A curve shows the

@@ -214,7 +214,7 @@ static void t_dvfs(void)
     CHECK(sb_dvfs_level_listed(2, 1794000), "A55 1794 MHz listed");
     CHECK(sb_dvfs_level_listed(2, 1053000) && sb_dvfs_level_listed(2, 1248000), "A55 restore and cold levels");
     CHECK(sb_dvfs_level_listed(2, 1898000) && sb_dvfs_level_listed(2, 1950000) && !sb_dvfs_level_listed(2, 2002000),
-          "A55: the table's top 1950 MHz listed (0.6.1), nothing above");
+          "A55: 1898 / 1950 MHz listed (Manual only, above the ECT's 1794 cap), 2002 never");
     CHECK(!sb_dvfs_level_listed(3, 1924000) && !sb_dvfs_level_listed(3, 2704000), "M3 above 1794 MHz never (no OCP handler)");
     CHECK(sb_dvfs_level_listed(3, 1794000) && sb_dvfs_level_listed(3, 1469000) && sb_dvfs_level_listed(3, 1066000),
           "M3 heater and restore levels listed");
@@ -222,7 +222,9 @@ static void t_dvfs(void)
     CHECK(!sb_dvfs_level_listed(3, 455000), "455 MHz is not an M3 level");
     CHECK(!sb_dvfs_level_listed(2, 1794001), "only exact levels");
     CHECK(sb_dvfs_level_listed(4, 572000) && sb_dvfs_level_listed(4, 260000), "GPU 572 / 260 MHz listed");
-    CHECK(!sb_dvfs_level_listed(4, 650000) && !sb_dvfs_level_listed(4, 1794000), "GPU above 572 MHz never");
+    CHECK(sb_dvfs_level_listed(4, 598000), "GPU 598 MHz listed (the ECT's top, 0.6.2)");
+    CHECK(!sb_dvfs_level_listed(4, 611000) && !sb_dvfs_level_listed(4, 650000) && !sb_dvfs_level_listed(4, 702000) &&
+          !sb_dvfs_level_listed(4, 1794000), "GPU above 598 MHz never");
     for (unsigned d = 0; d < 16; ++d)
         if (d != 2 && d != 3 && d != 4)
             CHECK(!sb_dvfs_level_listed(d, 1794000) && !sb_dvfs_level_listed(d, 455000) &&
@@ -342,7 +344,7 @@ static void t_heater(void)
      * band, the skin, a hot SoC, the sag or the soft current; no timer; the stops: 55 C battery, 110 C SoC */
     heat_ctl_init(&c, 0);
     in = base_in(0);
-    CHECK(heat_ctl_request(&c, HEAT_EXTREME, 30, &in) == 0 && c.a55_khz == 1950000, "Extreme: the A55s at 1950 MHz");
+    CHECK(heat_ctl_request(&c, HEAT_EXTREME, 30, &in) == 0 && c.a55_khz == 1794000, "Extreme: the A55s at 1794 MHz (the ECT's cap)");
     run(&c, &in, 0, 10000, 0);
     CHECK(c.cores == 7 && c.m3_khz == 1794000, "Extreme: 7 workers, the M3s at 1794 MHz at once (%d, %u)", c.cores, c.m3_khz);
     in.bat_c10 = 520; in.skin_c10 = 490; in.soc_c10 = 1000; in.mv = 3500; in.ma = -3300;
@@ -357,10 +359,62 @@ static void t_heater(void)
     in = base_in(0); in.bat_c10 = 450; in.usb_c10 = 450; in.chg_c10 = 450;
     heat_ctl_init(&c, 0);
     CHECK(heat_ctl_request(&c, HEAT_EXTREME, 30, &in) == 0, "Extreme starts at 45 C battery (Low would not)");
-    in.soc_c10 = 1100;
+    in.soc_c10 = 1120; in.mv = 3300; in.ma = -3400;
+    run(&c, &in, 0, 10000, 0);
+    CHECK(c.state == HEAT_ST_RUNNING && c.cores == 7, "Extreme (0.6.2): no stop of ours at 112 C inside (the hardware "
+          "trip's) or 3.3 V (state %d, \"%s\")", c.state, c.why);
+    in.ma = -3600;
+    run(&c, &in, 10250, 1000, 0);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "3.5 A"), "Extreme: the 3.5 A stop stays (\"%s\")", c.why);
+    heat_ctl_init(&c, 0);
+    in = base_in(0);
+    c.no_current_stop = 1;
+    heat_ctl_request(&c, HEAT_EXTREME, 0, &in);
+    in.ma = -3600;
+    run(&c, &in, 0, 2000, 0);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "3.5 A"), "Extreme: the switch is Manual's only");
+    heat_ctl_init(&c, 0);
+    in = base_in(0);
+    c.no_current_stop = 1;
+    heat_ctl_request(&c, HEAT_MANUAL, 0, &in);
+    in.ma = -4500;
+    run(&c, &in, 0, 5000, 0);
+    CHECK(c.state == HEAT_ST_RUNNING, "Manual with the current stop off: runs at 4.5 A");
+    in = base_in(0);
+    heat_ctl_init(&c, 0);
+    heat_ctl_request(&c, HEAT_EXTREME, 0, &in);
+    in.trip_armed = 0;
     run(&c, &in, 0, 1000, 0);
-    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "110"), "Extreme: stops at 110 C inside (\"%s\")", c.why);
-    in = base_in(0); in.pct = 39; refuse(in, HEAT_EXTREME, "39 % for Extreme");
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "trip"), "Extreme stops if the hardware trip reads unarmed (\"%s\")", c.why);
+    in = base_in(0); in.pct = 15; refuse(in, HEAT_EXTREME, "15 % (the reserve) for Extreme");
+    in = base_in(0); in.pct = 16;
+    heat_ctl_init(&c, 0);
+    CHECK(heat_ctl_request(&c, HEAT_EXTREME, 30, &in) == 0, "Extreme starts at 16 %% (above the reserve)");
+    in.pct = 14;
+    run(&c, &in, 0, 1000, 0);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "Reserve"), "Extreme stops at the reserve (\"%s\")", c.why);
+    heat_ctl_init(&c, 0);
+    c.reserve_pct = 0;                      /* the user's override */
+    in.pct = 14;
+    CHECK(heat_ctl_request(&c, HEAT_EXTREME, 30, &in) == 0, "Extreme at 14 %% with the reserve overridden");
+    in.pct = 2;
+    run(&c, &in, 0, 5000, 0);
+    CHECK(c.state == HEAT_ST_RUNNING, "the overridden reserve: runs at 2 %%");
+    /* Keep warm: the battery's target */
+    heat_ctl_init(&c, 0);
+    in = base_in(0); in.bat_c10 = 50; in.usb_c10 = 50; in.chg_c10 = 50;
+    c.target_c10 = 200;
+    CHECK(heat_ctl_request(&c, HEAT_KEEPWARM, 0, &in) == 0, "Keep warm starts");
+    run(&c, &in, 0, 10000, 0);
+    CHECK(c.cores == 7, "Keep warm: every core while the battery is below its target (%d)", c.cores);
+    in.bat_c10 = 215;
+    run(&c, &in, 10250, 10000, 0);
+    CHECK(c.cores < 7 && c.state != HEAT_ST_STOPPED, "Keep warm: cores off above the target (%d)", c.cores);
+    run(&c, &in, 20250, 10000, 0);
+    CHECK(c.cores == 0 && c.state == HEAT_ST_HOLDING, "Keep warm: holding at the target (%d, %d)", c.cores, c.state);
+    in.bat_c10 = 180;
+    run(&c, &in, 30250, 3000, 0);
+    CHECK(c.cores > 0 && c.state == HEAT_ST_RUNNING, "Keep warm: warming again below the target");
     in = base_in(0); in.bat_c10 = 500; refuse(in, HEAT_EXTREME, "the battery is 50 C for Extreme");
     /* Manual: the picked steps */
     heat_ctl_init(&c, 0);

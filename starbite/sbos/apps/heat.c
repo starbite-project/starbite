@@ -44,14 +44,16 @@ static void temp(struct fmt *f, int c10)
     fmt_s(f, " \xc2\xb0" "C");
 }
 
-static const char *const lvl[6] = { "Off", "Low", "Medium", "High", "Extreme", "Manual" };
+static const char *const lvl[7] = { "Off", "Low", "Medium", "High", "Extreme", "Manual", "Keep warm" };
+static const int targets[3] = { 100, 200, 300 };    /* Keep warm's battery targets, 0.1 C */
+static const int reserves[3] = { 5, 15, 30 };       /* the call / SOS reserve, % (0: overridden by a hold) */
 
 /* Manual (0.6.1): the vendor tables' steps (the kernel checks them again); 0 = the top normal step / GPU not used */
 static const int st_a55[] = { 0, 455000, 598000, 715000, 832000, 949000, 1053000, 1248000, 1456000, 1690000, 1794000,
                               1898000, 1950000 };
 static const int st_m3[] = { 0, 650000, 741000, 858000, 962000, 1066000, 1170000, 1261000, 1469000, 1586000, 1690000,
                              1794000 };
-static const int st_gpu[] = { 0, 260000, 299000, 338000, 455000, 546000, 572000 };
+static const int st_gpu[] = { 0, 260000, 299000, 338000, 455000, 546000, 572000, 598000 };
 static int ma55, mm3, mgpu = 6;            /* indices into the tables */
 static int manual_page;                     /* the Manual set-up page (picked in the level row) */
 
@@ -70,19 +72,31 @@ static void show_manual(int running)
     struct fmt f;
     ui_textline(running ? "Manual runs with these steps. Off stops it." : "Pick a table step for each part, then Start.", GREY);
     fmt_init(&f);
-    step_text(&f, st_a55[ma55], "top (1950 MHz)");
+    step_text(&f, st_a55[ma55], "1794 MHz (Samsung's cap)");
+    if (st_a55[ma55] > 1794000)
+        fmt_s(&f, ": above Samsung's 1794 cap");
     ui_button(10, "Small cores (A55)", f.b, 0);
     fmt_init(&f);
-    step_text(&f, st_m3[mm3], "top (1794 MHz)");
+    step_text(&f, st_m3[mm3], "1794 MHz (the top without OCP)");
     ui_button(11, "Big cores (M3)", f.b, 0);
     fmt_init(&f);
     step_text(&f, st_gpu[mgpu], "not used");
+    if (st_gpu[mgpu] == 598000)
+        fmt_s(&f, ": above Android's 572 cap");
     ui_button(12, "Graphics (GPU)", f.b, 0);
     if (!running) {
+        struct sbos_heat h;
+        heat_status(&h);
+        if (!h.no_current_stop) {
+            ui_hold(20, "Hold: turn the 3.5 A current stop off", 1500, 0);
+            ui_textline("The 3.5 A stop catches a short or a failing cell. Off, nothing of ours stops a runaway current.", GREY);
+        } else {
+            ui_button(21, "Current stop: OFF", "Tap to turn the 3.5 A stop back on", 0);
+        }
         ui_button(13, "Start Manual", 0, UI_HALF);
         ui_button(14, "Cancel", 0, UI_HALF);
     }
-    ui_textline("Only the vendor tables' steps (big cores above 1794 MHz: not yet).", GREY);
+    ui_textline("Only the chip's own table steps with its own voltages. Above a cap: may crash, which stops the heat.", GREY);
 }
 
 static void tile(const struct sbos_heat *h, int on)
@@ -90,7 +104,7 @@ static void tile(const struct sbos_heat *h, int on)
     struct fmt f;
     fmt_init(&f);
     if (on) {
-        fmt_s(&f, lvl[h->level >= 0 && h->level <= 5 ? h->level : 0]);
+        fmt_s(&f, lvl[h->level >= 0 && h->level <= 6 ? h->level : 0]);
         if (h->level < HEAT_EXTREME) {
             fmt_s(&f, "  ");
             fmt_d(&f, (h->secs_left + 59) / 60);
@@ -125,9 +139,31 @@ static void show(void)
     int flat = on && h.level >= HEAT_EXTREME;
     if (on)
         manual_page = 0;
-    ui_level(1, "Off|Low|High|Extreme", on ? (h.level >= HEAT_EXTREME ? 3 : h.level >= HEAT_HIGH ? 2 : 1) : 0);
-    if (!on && !manual_page)
-        ui_button(9, "Manual", "Pick the clocks yourself", UI_HALF);
+    ui_level(1, "Off|Low|High|Extreme", on ? (h.level == HEAT_EXTREME || h.level == HEAT_MANUAL ? 3 :
+                                              h.level == HEAT_KEEPWARM ? 0 : h.level >= HEAT_HIGH ? 2 : 1) : 0);
+    if (on && h.level == HEAT_KEEPWARM)
+        ui_button(19, "Stop keeping warm", 0, UI_HALF);
+    if (!on && !manual_page) {
+        fmt_init(&f);
+        fmt_s(&f, "Near ");
+        fmt_d(&f, h.target_c10 / 10);
+        fmt_s(&f, " \xc2\xb0" "C (tap Target to change)");
+        ui_button(15, "Keep the battery warm", f.b, 0);
+        fmt_init(&f);
+        fmt_s(&f, "Target ");
+        fmt_d(&f, h.target_c10 / 10);
+        fmt_s(&f, " \xc2\xb0" "C");
+        ui_button(16, f.b, 0, UI_HALF);
+        ui_button(9, "Manual", "Pick the clocks", UI_HALF);
+        fmt_init(&f);
+        if (h.reserve_pct > 0) {
+            fmt_d(&f, h.reserve_pct);
+            fmt_s(&f, " % kept for a call / SOS (tap: 5, 15, 30)");
+        } else {
+            fmt_s(&f, "OFF: full heat runs the battery empty (tap: 15 %)");
+        }
+        ui_button(17, "Call / SOS reserve", f.b, 0);
+    }
     fmt_init(&f);
     temp(&f, h.bat_c10);
     ui_big(on ? (flat ? "BATTERY  (STOPS AT 55 \xc2\xb0" "C)" : "BATTERY  (STOPS AT 42 \xc2\xb0" "C)") : "BATTERY",
@@ -157,8 +193,42 @@ static void show(void)
         fmt_s(&f, " min");
         ui_textline(f.b, 0xff30d158U);
     } else if (flat) {
-        ui_textline("Flat out until you press Off. Stops only at 55 \xc2\xb0" "C battery or 15 %.", 0xff30d158U);
+        fmt_init(&f);
+        fmt_s(&f, h.level == HEAT_KEEPWARM ? "Until you stop it. " : "Flat out until you press Off. ");
+        fmt_s(&f, "Stops only at 55 \xc2\xb0" "C battery");
+        if (h.reserve_pct > 0) {
+            fmt_s(&f, " or ");
+            fmt_d(&f, h.reserve_pct);
+            fmt_s(&f, " %.");
+        } else {
+            fmt_s(&f, " (no reserve).");
+        }
+        ui_textline(f.b, 0xff30d158U);
     }
+    if (on && h.ma < -50 && h.mv > 0) {
+        /* 0.6.2: what it draws and how long that lasts (3000 mAh; to the reserve) */
+        int a = -h.ma;
+        fmt_init(&f);
+        fmt_s(&f, "Drawing ");
+        fmt_d(&f, a);
+        fmt_s(&f, " mA, ");
+        int mw = (int)((int64_t)a * h.mv / 1000);
+        fmt_d(&f, mw / 1000);
+        fmt_c(&f, '.');
+        fmt_c(&f, (char)('0' + mw % 1000 / 100));
+        fmt_s(&f, " W");
+        int usable = h.pct - (h.reserve_pct > 0 ? h.reserve_pct : 0);
+        if (h.pct >= 0 && usable > 0) {
+            fmt_s(&f, "   about ");
+            fmt_d(&f, usable * 30 * 60 / a);
+            fmt_s(&f, h.reserve_pct > 0 ? " min to the reserve" : " min to empty");
+        }
+        ui_textline(f.b, 0xffffffffU);
+    }
+    if (flat || manual_page)
+        ui_textline("The heat is the battery's power (about 7 W at most), not the clocks: faster clocks would not warm more.", GREY);
+    if (!on && h.state == HEAT_ST_STOPPED && h.why[0] == 'R')     /* "Reserve reached" */
+        ui_hold(18, "Hold to go on below the reserve", 1500, 0);
     if (manual_page || (on && h.level == HEAT_MANUAL))
         show_manual(on);
     if (h.why[0])
@@ -201,14 +271,52 @@ void app_event(const struct sbos_event *ev)
         break;
     case EV_APP_LEVEL:
         manual_page = 0;
+        if (ev->value == 0) {
+            struct sbos_heat h;
+            heat_status(&h);
+            if (h.level == HEAT_KEEPWARM) {
+                heat_request(HEAT_OFF, 0);
+                show();
+                break;
+            }
+        }
         heat_request(ev->value == 3 ? HEAT_EXTREME : ev->value == 2 ? HEAT_HIGH : ev->value == 1 ? HEAT_LOW : HEAT_OFF, 30);
+        show();
+        break;
+    case EV_APP_HOLD:
+        if (ev->id == 20)
+            setting_set(SET_HEAT_CURRENT_STOP, 0);
+        if (ev->id == 18) {
+            struct sbos_heat h;
+            heat_status(&h);
+            setting_set(SET_HEAT_RESERVE, 0);   /* the explicit override (a hold) */
+            heat_request(h.level >= HEAT_EXTREME ? h.level : HEAT_EXTREME, 0);
+        }
         show();
         break;
     case EV_APP_BUTTON: {
         struct sbos_heat h;
         heat_status(&h);
         int running = h.state == HEAT_ST_RUNNING || h.state == HEAT_ST_HOLDING || h.state == HEAT_ST_PAUSED;
-        if (!running && ev->id == 9)
+        if (ev->id == 21 && !running)
+            setting_set(SET_HEAT_CURRENT_STOP, 1);
+        else if (ev->id == 19 && running)
+            heat_request(HEAT_OFF, 0);
+        else if (!running && ev->id == 15)
+            heat_request(HEAT_KEEPWARM, 0);
+        else if (!running && ev->id == 16) {
+            int k = 0;
+            for (int i = 0; i < 3; ++i)
+                if (targets[i] == h.target_c10)
+                    k = i;
+            setting_set(SET_HEAT_TARGET_C10, targets[(k + 1) % 3]);
+        } else if (!running && ev->id == 17) {
+            int k = -1;
+            for (int i = 0; i < 3; ++i)
+                if (reserves[i] == h.reserve_pct)
+                    k = i;
+            setting_set(SET_HEAT_RESERVE, k < 0 ? 15 : reserves[(k + 1) % 3]);
+        } else if (!running && ev->id == 9)
             manual_page = 1;
         else if (!running && ev->id == 14)
             manual_page = 0;

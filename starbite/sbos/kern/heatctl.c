@@ -20,7 +20,7 @@ const struct heat_limits heat_default_limits = {
     .soft_sag_mv = 300,
     .cold_sag_mv = 150,
     .min_mv = 3450,
-    .min_pct = { 0, 20, 30, 30, 40, 40 },
+    .min_pct = { 0, 20, 30, 30, 0, 0, 0 },     /* 0.6.2: Extreme / Manual / Keep warm: only the reserve */
     .ext_hard_bat_c10 = 550,
     .ext_hard_soc_c10 = 1100,
     .ext_start_bat_max_c10 = 500,
@@ -35,7 +35,7 @@ const struct heat_limits heat_default_limits = {
 };
 
 #define A55_FULL 1794000U
-#define A55_TOP 1950000U                    /* the A55 table's top (Extreme) */
+#define A55_TOP 1794000U                    /* the A55's top: the ECT's MINMAX_dvfs_cpucl0 cap (0.6.1's 1950 was above it) */
 #define A55_COLD 1248000U
 #define M3_START 1469000U
 #define M3_FULL 1794000U
@@ -69,7 +69,7 @@ int heat_core_state(int64_t psci, unsigned slot, int start_fail)
 
 int heat_max_cores(int level)
 {
-    return level == HEAT_LOW ? 3 : level == HEAT_MEDIUM ? 5 : level >= HEAT_HIGH && level <= HEAT_MANUAL ? 7 : 0;
+    return level == HEAT_LOW ? 3 : level == HEAT_MEDIUM ? 5 : level >= HEAT_HIGH && level <= HEAT_KEEPWARM ? 7 : 0;
 }
 
 void heat_ctl_init(struct heat_ctl *c, const struct heat_limits *lim)
@@ -79,6 +79,8 @@ void heat_ctl_init(struct heat_ctl *c, const struct heat_limits *lim)
         p[i] = 0;
     c->lim = lim ? lim : &heat_default_limits;
     c->state = HEAT_ST_OFF;
+    c->reserve_pct = c->lim->stop_pct;      /* 15 % for a call / SOS until the user overrides it */
+    c->target_c10 = 200;                    /* Keep warm: 20 C */
 }
 
 static uint32_t flat_a55(const struct heat_ctl *c)
@@ -108,7 +110,7 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
             stop(c, HEAT_ST_OFF, "Stopped");
         return 0;
     }
-    if (level > HEAT_MANUAL)
+    if (level > HEAT_KEEPWARM)
         return SBOS_EINVAL;
     int flat = level >= HEAT_EXTREME;
     const char *no = 0;
@@ -128,7 +130,9 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
     else if (!in->gauge_ok)
         no = "No battery reading";
     else if (in->pct < L->min_pct[level])
-        no = level == HEAT_LOW ? "Battery below 20 %" : flat ? "Battery below 40 % (try High)" : "Battery below 30 % (try Low)";
+        no = level == HEAT_LOW ? "Battery below 20 %" : "Battery below 30 % (try Low)";
+    else if (flat && c->reserve_pct > 0 && in->pct <= c->reserve_pct)
+        no = "At the call / SOS reserve (hold Continue below the reserve to go on)";
     else if (in->charger > 0)
         no = "Unplug the charger first";
     else if (in->charger < 0)
@@ -184,7 +188,11 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         stop(c, HEAT_ST_STOPPED, "Lost the processor temperature");
         return;
     }
-    int flat = c->level >= HEAT_EXTREME;    /* Extreme / Manual (0.6.1): flat out, only the safety stops */
+    /* Extreme / Manual / Keep warm (0.6.1, 0.6.2): no software limits but the battery's 55 C (its fire safety), the
+     * readings that stop needs, a core fault, the call / SOS reserve (overridable) and the 3.5 A battery current (a
+     * short or a failing cell; the user can turn it off in Manual only); the SoC's own 115 C hardware trip stays
+     * armed; the voltage is the PMIC's and the fuel gauge's own business */
+    int flat = c->level >= HEAT_EXTREME;
     int hard_bat = flat ? L->ext_hard_bat_c10 : L->hard_bat_c10;
     int band_bat = L->band_bat_c10;
     int soft_soc = L->soft_soc_c10;
@@ -193,8 +201,14 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         stop(c, HEAT_ST_STOPPED, flat ? "Battery reached 55 \xc2\xb0" "C (its safety limit)" : "Battery reached 42 \xc2\xb0" "C");
         return;
     }
-    if (in->soc_ok && in->soc_c10 >= (flat ? L->ext_hard_soc_c10 : L->hard_soc_c10)) {
-        stop(c, HEAT_ST_STOPPED, flat ? "Processor reached 110 \xc2\xb0" "C" : "Processor reached 85 \xc2\xb0" "C");
+    if (flat && !in->trip_armed) {
+        /* no stop of ours for the SoC's temperature in these levels: the hardware trip is the protection, so it
+         * must stay armed the whole time (it was checked at the start) */
+        stop(c, HEAT_ST_STOPPED, "The processor's hardware heat trip is not armed");
+        return;
+    }
+    if (!flat && in->soc_ok && in->soc_c10 >= L->hard_soc_c10) {
+        stop(c, HEAT_ST_STOPPED, "Processor reached 85 \xc2\xb0" "C");
         return;
     }
     if (!flat && in->skin_ok && in->skin_c10 >= L->hard_skin_c10) {
@@ -209,7 +223,15 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         stop(c, HEAT_ST_STOPPED, "A core stopped with a fault");
         return;
     }
-    if (in->gauge_ok) {
+    if (flat && in->gauge_ok && c->reserve_pct > 0 && in->pct < c->reserve_pct) {
+        stop(c, HEAT_ST_STOPPED, "Reserve reached: kept for a call or SOS");
+        return;
+    }
+    if (flat && in->gauge_ok && !(c->level == HEAT_MANUAL && c->no_current_stop) && iabs(in->ma) > L->hard_ma) {
+        stop(c, HEAT_ST_STOPPED, "Battery current above 3.5 A (a short or a failing cell?)");
+        return;
+    }
+    if (!flat && in->gauge_ok) {
         if (in->pct < L->stop_pct) {
             stop(c, HEAT_ST_STOPPED, "Battery below 15 %: kept for Light and SOS");
             return;
@@ -267,9 +289,15 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
     /* ---- regulation: one core off when anything is over its soft limit, one on when all are below ---- */
     int sag = in->gauge_ok && c->rest_mv > 0 ? c->rest_mv - in->mv : 0;
     if (flat) {
-        /* no regulation: one core more per step until all run, then they stay; the clocks at once */
-        if (now - c->t_step >= L->step_ms && c->cores < c->max_cores && !(c->cold && c->cores >= 3)) {
+        /* no regulation: one core more per step until all run, then they stay; the clocks at once. Keep warm: one
+         * core more below the battery's target, one less above it (the battery's warmth is the goal) */
+        int want_more = c->level != HEAT_KEEPWARM || (in->bat_ok && in->bat_c10 < c->target_c10 - 5);
+        int want_less = c->level == HEAT_KEEPWARM && in->bat_ok && in->bat_c10 > c->target_c10 + 5;
+        if (now - c->t_step >= L->step_ms && want_more && c->cores < c->max_cores && !(c->cold && c->cores >= 3)) {
             c->cores++;
+            c->t_step = now;
+        } else if (now - c->t_step >= L->step_ms && want_less && c->cores > 0) {
+            c->cores--;
             c->t_step = now;
         }
         if (c->cold && now - c->t_start >= 30000U) {
@@ -277,8 +305,10 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
             c->a55_khz = flat_a55(c);
         }
         c->m3_khz = c->cores > 3 ? flat_m3(c) : 0;
-        c->state = HEAT_ST_RUNNING;
-        why(c, c->cold ? "Starting gently (cold)" : c->level == HEAT_MANUAL ? "Manual: flat out" : "Extreme: flat out");
+        c->state = c->cores ? HEAT_ST_RUNNING : HEAT_ST_HOLDING;
+        why(c, c->cold ? "Starting gently (cold)" : c->level == HEAT_MANUAL ? "Manual: flat out" :
+               c->level == HEAT_KEEPWARM ? (c->cores ? "Warming the battery" : "The battery is at its target") :
+               "Extreme: flat out");
         return;
     }
     if (now - c->t_step >= L->step_ms) {

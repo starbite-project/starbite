@@ -112,7 +112,8 @@ struct sbos_estimate {
 };
 
 enum { HEAT_OFF = 0, HEAT_LOW, HEAT_MEDIUM, HEAT_HIGH, HEAT_EXTREME /* 0.6: everything at its rated top */,
-       HEAT_MANUAL /* 0.6.1: the clocks picked per cluster, flat out as Extreme */ };
+       HEAT_MANUAL /* 0.6.1: the clocks picked per cluster, flat out as Extreme */,
+       HEAT_KEEPWARM /* 0.6.2: the battery kept at a temperature target (deep cold), no other limits */ };
 enum {
     HEAT_ST_OFF = 0, HEAT_ST_RUNNING, HEAT_ST_HOLDING, /* at the target temperature, load paused */
     HEAT_ST_PAUSED,             /* a charger is connected */
@@ -127,6 +128,9 @@ struct sbos_heat {
     int32_t a55_mhz, m3_mhz;
     char why[64];
     int32_t skin_c10, gpu_mhz;  /* 0.6.1: the back of the phone (-1000 unknown); the GPU's clock while it heats */
+    int32_t ma, mv, pct;        /* 0.6.2: the battery's current (- discharging) and voltage while it heats; charge % */
+    int32_t reserve_pct, target_c10;    /* 0.6.2: the call / SOS reserve (0 overridden); Keep warm's target */
+    int32_t no_current_stop;    /* 0.6.2: Manual's 3.5 A stop turned off */
 };
 
 enum { SOS_OFF = 0, SOS_FLASH = 1 };
@@ -169,7 +173,10 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
        SET_SAVED = 7 /* 0.3.1, read only: 1 settings are saved across a restart on this phone */,
        SET_AUTO_OFF_MIN = 8 /* 0.3.2: switch off after this many minutes with the screen off: 0 never, 5, 15, 60 */,
        SET_HEAT_MAN_A55 = 9, SET_HEAT_MAN_M3 = 10, SET_HEAT_MAN_GPU = 11 /* 0.6.1: Manual's ACPM steps in kHz (a table
-       step; A55/M3 0 = the top normal step, GPU 0 = not used); until a restart */ };
+       step; A55/M3 0 = the top normal step, GPU 0 = not used); until a restart */,
+       SET_HEAT_RESERVE = 12 /* 0.6.2: the call / SOS reserve for full heat, % (0 = overridden, at most 50) */,
+       SET_HEAT_TARGET_C10 = 13 /* 0.6.2: Keep warm's battery target, 0.1 C (50..350) */,
+       SET_HEAT_CURRENT_STOP = 14 /* 0.6.2: Manual's 3.5 A battery-current stop: 1 on (default), 0 off; until a restart */ };
 
 /* sensor_read ids (0.3): temperatures in 0.1 C, -1000 unknown */
 enum { SENSOR_BATTERY_C10 = 1, SENSOR_SKIN_C10 = 2, SENSOR_SOC_C10 = 3, SENSOR_GPU_C10 = 4 };
