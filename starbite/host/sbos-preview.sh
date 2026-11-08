@@ -63,7 +63,7 @@ scene light-red-low w:300 $OPEN t:382,663 w:400 t:220,1070 w:300 t:1057,1705 w:4
 scene light-led     w:300 $OPEN t:382,663 w:400 t:720,655 w:600
 scene heat          w:300 $OPEN t:1057,663 w:600
 scene heat-confirm  w:300 $OPEN t:1057,663 w:600 t:720,670 w:400
-scene heat-running  w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:6000
+scene heat-running  w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:25000
 scene home-busy     w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:3000 $BACK w:1200
 scene heat-off      w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:4000 t:220,670 w:3000
 scene sos           w:300 $OPEN t:382,1250 w:500

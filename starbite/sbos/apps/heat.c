@@ -10,6 +10,27 @@ SBAPP_DEFINE("heat", "Heat", SBOS_P_HEAT, 0xffff9f0aU, 201);
 #define GREY 0xff8e8e93U
 
 static int visible;
+/* 0.5.6: the battery's temperature during this heating session, every 10 s (the last 10 minutes) */
+static int16_t th[60];
+static int thn, was_on;
+static uint64_t th_t;
+
+static void sample(const struct sbos_heat *h, int on)
+{
+    uint64_t now = uptime_ms();
+    if (on && !was_on)
+        thn = 0;                            /* a new session: a new curve */
+    was_on = on;
+    if (!on || h->bat_c10 <= -1000 || (thn && now - th_t < 10000))
+        return;
+    if (thn == 60) {
+        for (int i = 1; i < 60; ++i)
+            th[i - 1] = th[i];
+        --thn;
+    }
+    th[thn++] = (int16_t)h->bat_c10;
+    th_t = now;
+}
 
 static void temp(struct fmt *f, int c10)
 {
@@ -52,6 +73,7 @@ static void show(void)
     if (h.soc_c10 <= -1000)
         h.soc_c10 = sensor_read(SENSOR_SOC_C10);
     tile(&h, on);
+    sample(&h, on);
     if (!visible)
         return;
     ui_begin();
@@ -80,6 +102,13 @@ static void show(void)
     if (h.why[0])
         ui_textline(h.why, h.state == HEAT_ST_STOPPED || h.state == HEAT_ST_REFUSED ? ORANGE :
                            h.state == HEAT_ST_PAUSED ? 0xffffd60aU : 0xff30d158U);
+    if (thn >= 2) {
+        struct fmt lr;
+        fmt_init(&lr);
+        fmt_d(&lr, (thn - 1) * 10 / 60 ? (thn - 1) * 10 / 60 : (thn - 1) * 10);
+        fmt_s(&lr, (thn - 1) * 10 / 60 ? " min ago|now (stops at 42)" : " s ago|now (stops at 42)");
+        ui_chart("BATTERY TEMPERATURE", th, thn, 200, 450, ORANGE, lr.b);
+    }
     ui_textline("WARNING: the phone gets hot to hold. Keep it in a pocket or a glove, not on bare skin.", ORANGE);
     ui_textline("Uses the battery fast: about 1 % a minute on High. Not while charging.", GREY);
     ui_end();
@@ -89,7 +118,7 @@ void app_event(const struct sbos_event *ev)
 {
     switch (ev->type) {
     case EV_APP_START:
-        timer_set(2, 60000, 1);             /* the home tile's line */
+        timer_set(2, 10000, 1);             /* the home tile's line and the temperature curve */
         show();
         break;
     case EV_APP_SHOW:
