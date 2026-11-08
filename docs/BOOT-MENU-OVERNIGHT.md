@@ -171,6 +171,18 @@ are powered on and off once (PSCI CPU_ON/CPU_OFF), and Samsung's kernel does not
 Fix staged: **BOOT-1core.img** (sha256 5c32e2c0…5950), the same UI fixes with cores 1-3 never touched (M7_DEF_CORES=1).
 Details and the data needed to keep 4 cores: side-session-notes/…/boot-menu-latest.md.
 
+### 6.2 The fix: Samsung's FlexPMU hotplug sequences on the workers (commit 24e65da), MH1 passed
+Samsung's kernel (ref/starlte-kernel, exynos-powermode.c and cal-if/exynos9810/flexpmu_cal_cpu_exynos9810.h)
+runs a per-core FlexPMU sequence on the core itself, under one lock: `cal_cpu_enable` when the core starts, and the
+CPU_INFORM C2 hint plus `cal_cpu_disable` right before PSCI CPU_OFF. Our workers skipped both. The workers now run
+the same sequences. MH1 (`menuhandoff-1.img`: 4-core menu, then One UI started by itself): One UI ran 433 s+,
+`cpu/online` = 0-7, cpu1-3 clocked at 455-598 MHz, no reset. BOOT-smp2.img (d3a31942…) = the 4-core BOOT with the fix.
+PMU registers (GRP2_BID_EN, GRP2 pending, GRP1 pending, EVT_EN_GRP2, CPU_INFORM 1-3, CPU1-3 status):
+- before the first CPU_ON (cold, from S-Boot): `0 ef 0 ffffffff 10000 10000 0 880000 880000 880000`
+- cores up (after the "on" sequence): `0 0f 0 ffffff1f 0 0 0 100f0f 100f0f 100f0f`
+The "after off" line was overwritten in that run's pmsg. After "off" the bits for cores 1-3 match Linux's own hotplug-out
+state (BID_EN and EVT_EN bits set, CPU_INFORM = C2), which is where Samsung's kernel CPU_ONs from at runtime.
+
 ## 7. Not done / next
 
 - GPU (Mali-G72) composition: the right long-term answer for 60 fps (MV5). The win-mali-gpu track can
