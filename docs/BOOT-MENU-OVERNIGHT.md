@@ -140,7 +140,26 @@ Run 3a first, and 3b only if 3a came back by itself. Before either, save pmsg fr
 
 ## 6. Results from the phone
 
-None yet: the phone has been off USB since the MB1 hang. Host results are in section 2. Screens:
+**MB3a and MB3b passed (2026-11-08 morning; both came back by themselves; pmsg in `build/menu/mb3a-pmsg.txt`,
+`mb3b-pmsg.txt`).** 3b: CPU_ON 0 for cores 1-3, all checked in within 0-1 ms, 616 jobs, 18869 chunks run by
+workers, 0 faults, all cores off again (no CPU_OFF returned). Mean frame time on the A55, the same run alternating
+1-core and 4-core frames (MB3b):
+
+| class | 1 core | 4 cores | speed-up | 4-core fps |
+|---|---|---|---|---|
+| intro (wallpaper) | 160 ms | 49 ms | 3.3× | 20 |
+| intro (glass) | 324 ms | 99 ms | 3.3× | 10 |
+| lens (focus moves) | 47 ms | 14 ms | 3.3× | 69 |
+| list (scroll) | 234 ms | 74 ms | 3.2× | 13.5 |
+| expand (section opens) | 298 ms | 129 ms | 2.3× | 8 |
+| bake (before the intro) | 499 ms (3a) | 129 ms | 3.9× | — |
+
+So the focus/lens is now smooth. Scrolling and sections are about 3× better but still well under 30 fps: the
+remaining work is per-pixel (2x upscale and glass) at S-Boot's 1.05 GHz on four in-order cores. Next levers, in
+order: the expand path (only 2.3×: its serial part, the opening section's own glass and item drawing), then fewer
+presented pixels while moving, then the GPU (section 7).
+
+Screens:
 `build/menu/screens/{before,after,real-before,real-after}/*.png` and the contact sheet
 `build/menu/screens/contact.png` (26 before/after pairs: 16 concept states, 10 with the real catalog;
 `tools/menu/contact.py`).
