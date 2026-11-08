@@ -82,6 +82,13 @@ while :; do
             adb shell getprop </dev/null > "$out/getprop-$n.txt" 2>/dev/null
             adb shell 'dmesg 2>&1 || su -c dmesg' </dev/null > "$out/dmesg-$n.txt" 2>/dev/null
         fi
+        if [ $((now - ${tth:--99})) -ge 30 ]; then   # every 30 s: temperatures, CPU/GPU clocks, uptime, load
+            tth=$now
+            adb shell 'echo "== $(date +%T) up $(cut -d" " -f1 /proc/uptime) load $(cut -d" " -f1-3 /proc/loadavg)"
+                for z in /sys/class/thermal/thermal_zone*; do printf "%s=%s " "$(cat $z/type)" "$(cat $z/temp)"; done; echo
+                for c in /sys/devices/system/cpu/cpu[0-9]*; do printf "%s:%s " "${c##*cpu}" "$(cat $c/cpufreq/scaling_cur_freq 2>/dev/null || echo off)"; done; echo
+                cat /sys/kernel/gpu/gpu_clock /sys/kernel/gpu/gpu_busy 2>/dev/null | tr "\n" " "; echo' </dev/null >> "$out/thermal.txt" 2>/dev/null
+        fi
         case "$s" in *bc=1*)
             if [ "${HOLD_S:-0}" -gt 0 ]; then   # keep streaming while the user uses the phone
                 [ -n "${tbc:-}" ] || { tbc=$now; say "boot_completed after ${now}s: holding ${HOLD_S}s, logcat streaming (use the phone now)"; }
