@@ -23,7 +23,7 @@
 #define SBW_HEALTHY_MS 60000U
 #define SBW_HEALTHY_FLIPS 30U             /* frames with pixels that reached the panel (ContentFrames) */
 #define SBW_HEALTHY_JOBS 30U
-#define SBW_LIVE_MAX 64U
+#define SBW_LIVE_MAX 96U
 
 NTSTATUS SdDriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath);   /* sbdisplay (sd_embed.c) */
 
@@ -100,7 +100,12 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         { L"Live_PrimaryBltsToScan", a->PrimaryBltsToScan }, { L"Live_PrimaryBltsOther", a->PrimaryBltsOther },
         { L"Live_Refreshes", a->Refreshes }, { L"Live_RefreshSkipsBlack", a->RefreshSkipsBlack },
         { L"Live_RefreshSkipsNoScan", a->RefreshSkipsNoScan }, { L"Live_RefreshUsMax", a->RefreshUsMax },
-        { L"Live_ScanContent", a->ScanContent }, { L"Live_RefreshFromBltDst", a->RefreshFromBltDst },
+        { L"Live_ScanContent", a->ScanContent }, { L"Live_EmuFlips", a->EmuFlips },
+        { L"Live_EmuFlipsNotPrimary", a->EmuFlipsNotPrimary }, { L"Live_RefreshUsLast", a->RefreshUsLast },
+        { L"Live_RefreshesPeriodic", a->RefreshesPeriodic }, { L"Live_RefSrcTag", a->RefSrcTag },
+        { L"Live_RefPx0", a->RefPx[0] }, { L"Live_RefPx1", a->RefPx[1] }, { L"Live_RefPx2", a->RefPx[2] },
+        { L"Live_RefPx3", a->RefPx[3] }, { L"Live_RefPx4", a->RefPx[4] }, { L"Live_RefPx5", a->RefPx[5] },
+        { L"Live_RefPx6", a->RefPx[6] }, { L"Live_RefPx7", a->RefPx[7] },
         /* T13f: what DECON scans (read only; sbdisplay's registers): IDMA channel 0's base address, live and
          * shadow, its image size, the trigger control, the window enables and a pending shadow update */
         { L"Live_DeconBaseY", Rd(a->DeconDmaVa, SBDC_CH0 + SBDC_IDMA_BASE_Y) },
@@ -133,8 +138,8 @@ static VOID GuardThread(PVOID Ctx)
     ULONG testBand = S9GetDword(L"Parameters", L"TestBand", 0);     /* T13f: seen by the user; off now */
     /* T13g: the emulated scanout's period (MwRefreshScanout), 0 = off */
     ULONG refreshMs = S9GetDword(L"Parameters", L"RefreshMs", 200);
-    ULONG64 nextSec = KeQueryInterruptTime() + 10000000ULL, lastWork = (ULONG64)-1;
-    MW_ALLOCATION *lastScan = NULL;
+    ULONG64 nextSec = KeQueryInterruptTime() + 10000000ULL, lastWork = (ULONG64)-1, lastPeriodic = 0;
+    LONG lastGen = -1;
     if (refreshMs != 0 && refreshMs < 50)
         refreshMs = 50;
 
@@ -144,11 +149,19 @@ static VOID GuardThread(PVOID Ctx)
         if (KeWaitForSingleObject(&a->GuardStop, Executive, KernelMode, FALSE, &t) != STATUS_TIMEOUT)
             break;
         if (refreshMs) {
-            /* anything new on the GPU or presented, or another primary scanned: refresh the panel */
-            ULONG64 work = (ULONG64)a->JobsDone << 32 | (a->Presents + a->Flips);
-            if (work != lastWork || a->ScanAlloc != lastScan) {
+            /* T13h: a flip or another allocation shown: copy it now. Otherwise, when GPU work completed (it may
+             * draw straight into the shown primary), at most every 2 s: one whole copy costs up to 0.7 s. */
+            ULONG64 now = KeQueryInterruptTime(), work = (ULONG64)a->JobsDone << 32 | a->Presents;
+            LONG gen = a->ShowGen;
+            if (gen != lastGen) {
+                lastGen = gen;
                 lastWork = work;
-                lastScan = a->ScanAlloc;
+                lastPeriodic = now;
+                MwRefreshScanout(a);
+            } else if (work != lastWork && now - lastPeriodic >= 20000000ULL) {
+                lastWork = work;
+                lastPeriodic = now;
+                a->RefreshesPeriodic++;
                 MwRefreshScanout(a);
             }
         }

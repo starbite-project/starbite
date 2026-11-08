@@ -813,6 +813,34 @@ Display-only mode's 1080x2220 is a scaled mode of sbdisplay's own and plays no p
   is in a primary at all (`ScanContent`). If it is not, the composed frame must be elsewhere, for example
   rendered only into a back buffer that is never presented whole.
 
+### 6.16 T13g: a green stripe; DWM flips and we ignored it; T13h carries flips out (2026-11-08)
+
+**T13g (21:32).** The panel went logo, then spinner, then black, then a bright green stripe down the right
+~25%, full height.
+
+The census:
+- **Presents:** 94 flips and 215 blts. The blts were the spinner's rectangle, from a 1440x2960 surface into
+  the scanned primary.
+- **Flips:** only the 4 mode-set SetVidPnSourceAddress calls. dxgkrnl does not follow a WDDM 1.3 Flip present
+  with SetVidPnSourceAddress here, and `MwPresent` (upstream: "flips are not handled yet") did nothing with it.
+- **The panel:** it showed DWM's SetDisplayMode primary throughout, and that primary held the stripe
+  (ScanContent 1). DWM's composed frames went into its other two primaries.
+- **The cost:** a whole-frame copy from write-combined pages took up to 0.7 s. That is far too slow for the
+  vsync DPC's flip copy, which T13h moves to the guard thread.
+
+**T13h:**
+- **Flips:** a Flip present is recorded (with a patch entry, so its source is resident) and carried out when
+  it reaches the queue. `MwShow` makes its source the allocation the panel shows.
+- **The shown allocation:** a blt into a primary, or SetVidPnSourceAddress, also makes that allocation the
+  one shown; whichever came last wins.
+- **The copy:** the guard thread copies the shown allocation whole when it changes or a flip arrives, and
+  otherwise at most every 2 s.
+- **The green:** 8 pixels of each copy's middle row are logged to identify it.
+
+**Next:** take the copy off the CPU. Two candidates:
+- the Mali copies into the framebuffer (map its pages into the GPU VA space);
+- primaries rendered straight into the framebuffer.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

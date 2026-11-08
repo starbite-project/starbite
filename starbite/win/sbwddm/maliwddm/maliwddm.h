@@ -80,6 +80,7 @@ typedef struct _MW_CONTEXT {
 #define MW_PRESENT_NONE         0
 #define MW_PRESENT_BLT          1
 #define MW_PRESENT_FILL         2
+#define MW_PRESENT_FLIP         3       /* S9 port (T13h): DWM's flips, emulated (the panel shows Src) */
 #define MW_MAX_RECTS            16
 
 typedef struct _MW_PRESENT_OP {
@@ -184,10 +185,14 @@ struct _MW_ADAPTER {
     ULONG PrimaryBltsToScan, PrimaryBltsOther;
     ULONG Refreshes, RefreshSkipsBlack, RefreshSkipsNoScan, RefreshUsMax, ScanContent;
     ULONG PresentLogged;
-    /* the primary the last blt to the panel went into: what the panel shows since then (cleared by a flip
-     * and when that allocation is destroyed); the refresh copies it, else ScanAlloc */
-    struct _MW_ALLOCATION *volatile LastPrimaryDst;
-    ULONG RefreshFromBltDst;
+    /* T13h: what the panel should show: the source of DWM's latest flip, the primary the latest blt to the
+     * panel went into, or the one SetVidPnSourceAddress made current, whichever came last. ShowGen counts
+     * changes of content (every flip, any change of allocation); the guard thread copies it whole to the
+     * framebuffer at PASSIVE_LEVEL (T13g: one whole copy took up to 0.7 s, far too long for the vsync DPC). */
+    struct _MW_ALLOCATION *volatile ShowAlloc;
+    volatile LONG ShowGen;
+    ULONG EmuFlips, EmuFlipsNotPrimary, RefreshUsLast, RefreshesPeriodic;
+    ULONG RefPx[8], RefSrcTag;
     ULONG CoherentMaps, CpuMapFails;            /* presents copied before the queue drained (200 ms bound) */                    /* presents whose destination is the primary: pixels on the panel */                     /* renders refused: a chain outside the render's allocations */                     /* interrupt resources the device has (the stage-4 SSDT: the Mali's 3) */
 
     /* Counters for the trace. */
@@ -264,6 +269,7 @@ BOOLEAN MwJobInterrupt(MW_ADAPTER *A);    /* from the ISR, at DIRQL */
 void MwCommandInit(MW_ADAPTER *A);
 void MwCommandStop(MW_ADAPTER *A);
 void MwRefreshScanout(MW_ADAPTER *A);
+void MwShow(MW_ADAPTER *A, struct _MW_ALLOCATION *P, BOOLEAN NewContent);
 void MwArmPoll(MW_ADAPTER *A);
 
 /* S9 port (guard.c) */

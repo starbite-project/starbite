@@ -185,7 +185,21 @@ NTSTATUS APIENTRY MwPresent(IN_CONST_HANDLE hContext, DXGKARG_PRESENT *Arg)
         MwLog(a, nr[i], Arg->SubRectCnt);
 #undef SB_ALLOC_TAG
     }
-    if (Arg->Flags.Blt || Arg->Flags.ColorFill) {
+    if (Arg->Flags.Flip) {
+        /* S9 port (T13h): T13g's DWM sent 94 flips and dxgkrnl never followed them with
+         * SetVidPnSourceAddress, so the panel kept showing the primary of DWM's SetDisplayMode while its frames
+         * went to the other two. The flip is carried out when it reaches the queue (DoPresent). */
+        MW_PRESENT_OP *op = &priv->Present;
+        op->Kind = MW_PRESENT_FLIP;
+        op->Src = (MW_ALLOCATION *)Arg->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].hDeviceSpecificAllocation;
+        if (op->Src != NULL && Arg->PatchLocationListOutSize > 0) {
+            RtlZeroMemory(Arg->pPatchLocationListOut, sizeof(*Arg->pPatchLocationListOut));
+            Arg->pPatchLocationListOut->AllocationIndex = DXGK_PRESENT_SOURCE_INDEX;
+            Arg->pPatchLocationListOut->SlotId = DXGK_PRESENT_SOURCE_INDEX;
+            Arg->pPatchLocationListOut++;
+            Arg->PatchLocationListOutSize--;
+        }
+    } else if (Arg->Flags.Blt || Arg->Flags.ColorFill) {
         MW_PRESENT_OP *op = &priv->Present;
         op->Kind = Arg->Flags.ColorFill ? MW_PRESENT_FILL : MW_PRESENT_BLT;
         op->Color = Arg->Color;
@@ -310,6 +324,15 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
     RECT last = { 0, 0, 0, 0 };
     ULONG64 px;
 
+    if (Op->Kind == MW_PRESENT_FLIP) {
+        A->EmuFlips++;
+        if (Op->Src == NULL || !(Op->Src->Flags & MW_ALLOC_PRIMARY))
+            A->EmuFlipsNotPrimary++;
+        if (Op->Src != NULL)
+            MwShow(A, Op->Src, TRUE);     /* the guard thread copies it to the panel */
+        return;
+    }
+
     if (Op->Kind == MW_PRESENT_BLT) {
         src = AllocationVa(A, Op->Src);
         if (src == NULL) {
@@ -340,7 +363,8 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
             A->PrimaryBltsToScan++;
         else
             A->PrimaryBltsOther++;
-        A->LastPrimaryDst = Op->Dst;
+        MwShow(A, Op->Dst, FALSE);        /* the blt itself drew into the framebuffer: no new copy unless
+                                           * the panel showed another allocation until now */
         px = CopyRects(Op, A->FbVa, (LONG)A->Fb.Width, (LONG)A->Fb.Height, (LONG)A->Fb.Pitch, src, srcW, srcH,
                        srcPitch, &last);
         A->FbPixels += px;
@@ -565,48 +589,23 @@ static BOOLEAN SyncVsync(PVOID Context)
     return TRUE;
 }
 
-/* The primary just made current, to the framebuffer: there is no scanout
- * engine pointed at our allocations, so a flip is a CPU copy. Only when the
- * primary changes, not on every vsync. */
-static void ShowPrimary(MW_ADAPTER *A, MW_ALLOCATION *P)
+/* T13h: what the panel should show from now on. NewContent: a flip (new pixels even in the same allocation). */
+void MwShow(MW_ADAPTER *A, MW_ALLOCATION *P, BOOLEAN NewContent)
 {
-    PUCHAR src;
-    ULONG w, h, pitch;
-
-    if (A->FbVa == NULL || P->Mdl == NULL) {
-        A->FlipCopySkips++;
-        return;
-    }
-    src = AllocationVa(A, P);             /* S9 port: the view with the pages' own caching */
-    if (src == NULL) {
-        A->FlipCopySkips++;
-        return;
-    }
-    w = min(P->Width ? P->Width : A->Fb.Width, A->Fb.Width);
-    h = min(P->Height ? P->Height : A->Fb.Height, A->Fb.Height);
-    pitch = P->Pitch ? P->Pitch : w * 4;
-    for (ULONG y = 0; y < h; y++)
-        RtlCopyMemory(A->FbVa + (SIZE_T)y * A->Fb.Pitch, src + (SIZE_T)y * pitch, (SIZE_T)w * 4);
-    A->FlipCopies++;
-    if (NotBlack(src, (LONG)pitch, 0, 0, (LONG)w, (LONG)h))
-        A->ContentFrames++;
+    if (InterlockedExchangePointer((PVOID volatile *)&A->ShowAlloc, P) != P || NewContent)
+        InterlockedIncrement(&A->ShowGen);
 }
 
-/* T13g: the emulated scanout. A display engine would show the scanned primary's pages; our framebuffer only
- * got what was blted into it (DWM's dirty rectangles: T13f wrote ~1/6 of one frame in a minute). Called at
- * PASSIVE_LEVEL by the guard thread when work completed since the last call: the whole scanned primary to
- * the framebuffer, unless it is all black (so it can never blank what the blts drew). */
+/* T13g/T13h: the emulated scanout, at PASSIVE_LEVEL from the guard thread. A display engine would show the
+ * allocation the latest flip or blt made current; our framebuffer only gets what is copied into it. Copies
+ * ShowAlloc whole, unless it is all black (so it never blanks what the blts drew). Its middle row is sampled
+ * into RefPx[] (T13g's panel showed a green stripe: what are those pixels?). */
 void MwRefreshScanout(MW_ADAPTER *A)
 {
-    MW_ALLOCATION *p = A->LastPrimaryDst;
+    MW_ALLOCATION *p = A->ShowAlloc;
     PUCHAR src;
     ULONG w, h, pitch;
     ULONG64 t0;
-
-    if (p != NULL)
-        A->RefreshFromBltDst++;
-    else
-        p = A->ScanAlloc;
 
     if (A->FbVa == NULL || p == NULL || !p->Mapped || p->Mdl == NULL || !A->SourceVisible || A->Stopping) {
         A->RefreshSkipsNoScan++;
@@ -620,6 +619,10 @@ void MwRefreshScanout(MW_ADAPTER *A)
     w = min(p->Width ? p->Width : A->Fb.Width, A->Fb.Width);
     h = min(p->Height ? p->Height : A->Fb.Height, A->Fb.Height);
     pitch = p->Pitch ? p->Pitch : w * 4;
+    A->RefSrcTag = p->Width << 16 | (p->Height & 0x3FFF) | ((p->Flags & MW_ALLOC_PRIMARY) ? 0x8000u : 0) |
+                   (p == A->ScanAlloc ? 0x4000u : 0);
+    for (ULONG i = 0; i < 8; i++)
+        A->RefPx[i] = ((const ULONG *)(src + (SIZE_T)(h / 2) * pitch))[(w * (2 * i + 1)) / 16];
     A->ScanContent = NotBlack(src, (LONG)pitch, 0, 0, (LONG)w, (LONG)h);
     if (!A->ScanContent) {
         A->RefreshSkipsBlack++;
@@ -629,9 +632,11 @@ void MwRefreshScanout(MW_ADAPTER *A)
     for (ULONG y = 0; y < h; y++)
         RtlCopyMemory(A->FbVa + (SIZE_T)y * A->Fb.Pitch, src + (SIZE_T)y * pitch, (SIZE_T)w * 4);
     t0 = (KeQueryInterruptTime() - t0) / 10;
+    A->RefreshUsLast = (ULONG)t0;
     if (t0 > A->RefreshUsMax)
         A->RefreshUsMax = (ULONG)t0;
     A->Refreshes++;
+    A->FlipCopies++;
 }
 
 static VOID VsyncDpc(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
@@ -646,7 +651,8 @@ static VOID VsyncDpc(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
         return;
     p = a->ScanAlloc;
     if (p != NULL && p != a->ShownAlloc && a->SourceVisible) {
-        ShowPrimary(a, p);
+        /* T13h: a primary made current by SetVidPnSourceAddress; copied by the guard thread, not here */
+        MwShow(a, p, TRUE);
         a->ShownAlloc = p;
     }
     a->Vsyncs++;
