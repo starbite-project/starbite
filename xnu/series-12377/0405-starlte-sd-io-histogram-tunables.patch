@@ -1,0 +1,104 @@
+From 4303af247f9b59d766b13a20698dceb57dcb234a Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Sun, 8 Nov 2026 17:07:15 +0200
+Subject: [PATCH] patch: 0405-starlte-sd-io-histogram-tunables.patch - read
+ sizes per minute in the io line; sdmaxio=KiB / sdssd=0|1 to A/B 0400's I/O
+ attributes (defaults unchanged: 1024 KiB, solid state)
+
+---
+ bsd/dev/starlte_sd.c | 44 +++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 39 insertions(+), 5 deletions(-)
+
+diff --git a/bsd/dev/starlte_sd.c b/bsd/dev/starlte_sd.c
+index 66ae49b5..ad20ff0c 100644
+--- a/bsd/dev/starlte_sd.c
++++ b/bsd/dev/starlte_sd.c
+@@ -1656,8 +1656,35 @@ starlte_sd_close(__unused dev_t dev, __unused int flags, __unused int devtype, _
+ 	return 0;
+ }
+ 
++/* 0405: sdmaxio=KiB (default 1024, 128 = the pre-0400 size) and sdssd=0/1 (default 1), to A/B 0400's attributes */
++static uint32_t
++sd_maxio(void)
++{
++	static uint32_t v;
++	if (v == 0) {
++		uint32_t k = 1024;
++		PE_parse_boot_argn("sdmaxio", &k, sizeof(k));
++		k = k < 64 ? 64 : k > 4096 ? 4096 : k;
++		v = k << 10;
++	}
++	return v;
++}
++
++static uint32_t
++sd_ssd(void)
++{
++	static int v = -1;
++	if (v < 0) {
++		uint32_t on = 1;
++		PE_parse_boot_argn("sdssd", &on, sizeof(on));
++		v = on != 0;
++	}
++	return (uint32_t)v;
++}
++
+ /* One buf, start to finish, in the calling thread (the old strategy; now the queue worker's step). */
+ static uint64_t sdq_rbytes, sdq_wbytes, sdq_rus, sdq_wus, sdq_nr, sdq_nw;
++static uint64_t sdq_rhist[4];  /* 0405: reads <= 16 KiB, <= 64 KiB, <= 256 KiB, larger */
+ 
+ static void
+ sd_do_buf(buf_t bp)
+@@ -1732,6 +1759,7 @@ sd_do_buf(buf_t bp)
+ 		sdq_rbytes += count;
+ 		sdq_rus += elapsed_us(t0);
+ 		sdq_nr++;
++		sdq_rhist[count <= 16384 ? 0 : count <= 65536 ? 1 : count <= 262144 ? 2 : 3]++;
+ 	}
+ done:
+ 	if (error) {
+@@ -1934,12 +1962,18 @@ static thread_call_t sdq_stats_call;
+ static void
+ sdq_stats(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+ {
+-	static uint64_t lrb, lwb, lru, lwu, lnr, lnw;
++	static uint64_t lrb, lwb, lru, lwu, lnr, lnw, lh[4];
+ 	uint64_t rb = sdq_rbytes - lrb, wb = sdq_wbytes - lwb, ru = sdq_rus - lru, wu = sdq_wus - lwu;
+ 	printf("STARBITE SD: io 60s: read %llu KiB in %llu bufs, %llu ms busy (%llu KB/s); write %llu KiB in %llu bufs, "
+ 	    "%llu ms busy (%llu KB/s); queue max %u, %llu kHz%s, recovers %llu\n", rb >> 10, sdq_nr - lnr, ru / 1000,
+ 	    ru ? rb * 1000 / ru : 0, wb >> 10, sdq_nw - lnw, wu / 1000, wu ? wb * 1000 / wu : 0, sdq_maxlen,
+ 	    sd.card_hz / 1000, sd_mode_name(), sd.nrecover);
++	printf("STARBITE SD: io 60s: read sizes <=16K %llu, <=64K %llu, <=256K %llu, larger %llu (max io %u KiB, %s)\n",
++	    sdq_rhist[0] - lh[0], sdq_rhist[1] - lh[1], sdq_rhist[2] - lh[2], sdq_rhist[3] - lh[3], sd_maxio() >> 10,
++	    sd_ssd() ? "solid state" : "not solid state");
++	for (int i = 0; i < 4; i++) {
++		lh[i] = sdq_rhist[i];
++	}
+ 	lrb = sdq_rbytes; lwb = sdq_wbytes; lru = sdq_rus; lwu = sdq_wus; lnr = sdq_nr; lnw = sdq_nw;
+ 	sdq_maxlen = 0;
+ 	uint64_t deadline;
+@@ -1981,20 +2015,20 @@ starlte_sd_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag
+ 		*f = 0;
+ 		return 0;
+ 	case DKIOCISSOLIDSTATE:
+-		*f = 1;
++		*f = sd_ssd();
+ 		return 0;
+ 	case DKIOCISVIRTUAL:
+ 		*f = 0;
+ 		return 0;
+ 	case DKIOCGETMAXBLOCKCOUNTREAD:
+-		*o = SD_MAXIO / SECTOR;
++		*o = sd_maxio() / SECTOR;
+ 		return 0;
+ 	case DKIOCGETMAXBLOCKCOUNTWRITE:
+-		*o = sd.writable ? SD_MAXIO / SECTOR : 0;
++		*o = sd.writable ? sd_maxio() / SECTOR : 0;
+ 		return 0;
+ 	case DKIOCGETMAXSEGMENTCOUNTREAD:
+ 	case DKIOCGETMAXSEGMENTCOUNTWRITE:
+-		*o = SD_MAXIO / PAGE_SIZE;
++		*o = sd_maxio() / PAGE_SIZE;
+ 		return 0;
+ 	case DKIOCGETMAXBYTECOUNTREAD:
+ 	case DKIOCGETMAXBYTECOUNTWRITE:

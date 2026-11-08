@@ -1,0 +1,74 @@
+; SPDX-License-Identifier: GPL-2.0-only
+;
+; Starbite Display: UMDF 2 IddCx indirect display driver (one virtual monitor for Starbite Link).
+; Root-enumerated: hardware id Root\StarbiteDisplay (devnode made by tools/sbdevnode.exe, or offline: INSTALL.md).
+; Windows 11 ARM64 (22631), UMDF 2.33, IddCx 1.4 or later.
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = Display
+ClassGuid   = {4d36e968-e325-11ce-bfc1-08002be10318}
+ClassVer    = 2.0
+Provider    = %Mfg%
+CatalogFile = StarbiteDisplay.cat
+DriverVer   = 11/07/2026,0.1.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = Starbite, NTarm64
+
+[Starbite.NTarm64]
+%DeviceDesc% = StarbiteDisplay_Install, Root\StarbiteDisplay
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+StarbiteDisplay.dll = 1
+
+[DestinationDirs]
+StarbiteDisplay_Files = 12, UMDF          ; %SystemRoot%\System32\drivers\UMDF
+
+[StarbiteDisplay_Install.NT]
+CopyFiles = StarbiteDisplay_Files
+
+[StarbiteDisplay_Files]
+StarbiteDisplay.dll
+
+[StarbiteDisplay_Install.NT.HW]
+AddReg = StarbiteDisplay_HW_AddReg
+
+[StarbiteDisplay_HW_AddReg]
+; IndirectKmd is the in-box kernel half of every indirect display (Services\IndirectKmd exists on the phone).
+HKR, , UpperFilters, 0x00010000, "IndirectKmd"
+
+[StarbiteDisplay_Install.NT.Services]
+; Function driver = the UMDF reflector; 0x1fa = SPSVCINST_ASSOCSERVICE | no-clobber flags (keep the in-box service).
+AddService = WUDFRd, 0x000001fa, WUDFRD_ServiceInstall
+
+[WUDFRD_ServiceInstall]
+DisplayName   = %WudfRdDisplayName%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %12%\WUDFRd.sys
+
+[StarbiteDisplay_Install.NT.Wdf]
+UmdfService                 = StarbiteDisplay, StarbiteDisplay_UmdfInstall
+UmdfServiceOrder            = StarbiteDisplay
+UmdfKernelModeClientPolicy  = AllowKernelModeClients
+UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
+UmdfMethodNeitherAction     = Copy
+UmdfFsContextUsePolicy      = CanUseFsContext2
+UmdfHostProcessSharing      = ProcessSharingDisabled
+
+[StarbiteDisplay_UmdfInstall]
+UmdfLibraryVersion = 2.33.0
+ServiceBinary      = %12%\UMDF\StarbiteDisplay.dll
+UmdfExtensions     = IddCx0102
+
+[Strings]
+Mfg               = "Starbite"
+DeviceDesc        = "Starbite Display"
+DiskName          = "Starbite Display driver"
+WudfRdDisplayName = "Windows Driver Foundation - User-mode Driver Framework Reflector"

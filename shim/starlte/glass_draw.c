@@ -242,8 +242,8 @@ static struct ce *cache_find(unsigned kind, unsigned id, unsigned size)
 static struct ce *image_get(unsigned id)
 {
     struct ce *e = cache_find(1, id, 0);
-    if (e)
-        return e;
+    if (e || !g7_is_core0())
+        return e;                   /* a worker core never decodes (gd_prewarm did) */
     uint32_t sz;
     const struct sb7_image *im = (const struct sb7_image *)sb7_get(SB7_T_IMAGE, id, &sz);
     if (!im || sz < sizeof(*im) || !im->w || !im->h)
@@ -317,8 +317,8 @@ static struct ce *tile_get(unsigned tid, unsigned si)
     if (si > 3)
         si = 3;
     struct ce *e = cache_find(2, tid, si);
-    if (e)
-        return e;
+    if (e || !g7_is_core0())
+        return e;                   /* a worker core never renders a tile (gd_prewarm did) */
     uint32_t sz;
     const struct sb7_tile *tl = (const struct sb7_tile *)sb7_get(SB7_T_TILE, tid, &sz);
     if (!tl || sz < sizeof(*tl))
@@ -1204,6 +1204,33 @@ static void draw_item(const struct g7_layer *l, const int16_t (*bounds)[4], cons
         }
     }
 }
+/* core 0, before items are drawn on several cores: decode every image and render every tile the
+ * listed items show. 1 when all of them are in the cache together afterwards (a cache that filled
+ * up meanwhile threw the first ones out: 0, and the caller draws on core 0 alone). */
+int gd_prewarm(const struct g7_layer *l, const uint16_t *idx, unsigned n)
+{
+    for (unsigned k = 0; k < n; k++) {
+        const struct g7_item *it = idx[k] < l->nitem ? &l->item[idx[k]] : 0;
+        if (it && it->a > 0.f && it->kind == G7_IMAGE)
+            (void)image_get(it->u.image.id);
+        else if (it && it->a > 0.f && it->kind == G7_TILE)
+            (void)tile_get(it->u.tile.tile, it->u.tile.size);
+    }
+    for (unsigned k = 0; k < n; k++) {
+        const struct g7_item *it = idx[k] < l->nitem ? &l->item[idx[k]] : 0;
+        uint32_t sz;
+        if (!it || it->a <= 0.f)
+            continue;
+        /* missing although the container has it: thrown out (or not decodable): core 0 alone */
+        if (it->kind == G7_IMAGE && !cache_find(1, it->u.image.id, 0) && sb7_get(SB7_T_IMAGE, it->u.image.id, &sz))
+            return 0;
+        if (it->kind == G7_TILE && !cache_find(2, it->u.tile.tile, it->u.tile.size > 3 ? 3U : it->u.tile.size) &&
+            sb7_get(SB7_T_TILE, it->u.tile.tile, &sz))
+            return 0;
+    }
+    return 1;
+}
+
 void gd_items_range(const struct g7_layer *l, const int16_t (*bounds)[4], const struct gd_target *t, unsigned i0,
                     unsigned i1)
 {

@@ -25,7 +25,7 @@ static const uint32_t lv_g3d[] = { 260000, 299000, 338000, 455000, 546000, 57200
  * OS oc8, 4 x 2886). The cluster has one clock, so every M3 core runs at the same level. */
 uint32_t sb_m3_ocp_max_khz(unsigned busy)
 {
-    return busy <= 1 ? 2704000U : busy == 2 ? 2314000U : 1794000U;
+    return busy <= 1 ? SB_M3_MAX_KHZ : busy == 2 ? SB_M3_DUAL_KHZ : SB_M3_QUAD_KHZ;   /* sb.h (master's ocp.c) */
 }
 
 /* the M3 levels above the list (ECT dvfs_cpucl1 steps, their own ASV voltages), each only with few enough busy cores */
@@ -33,7 +33,7 @@ int sb_m3_ocp_level_ok(uint32_t khz, unsigned busy)
 {
     if (sb_dvfs_level_listed(3, khz))
         return 1;
-    return (khz == 2314000U || khz == 2704000U) && khz <= sb_m3_ocp_max_khz(busy);
+    return (khz == SB_M3_DUAL_KHZ || khz == SB_M3_MAX_KHZ) && khz <= sb_m3_ocp_max_khz(busy);
 }
 
 int sb_dvfs_level_listed(uint32_t domain, uint32_t khz)

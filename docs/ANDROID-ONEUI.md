@@ -131,3 +131,16 @@ hung at the Welcome screen. WINDOWS went to 22 GiB (VENDOR/ODM rewritten 4 GiB f
 - Open: `ro.adb.secure=0` (UN1CA's vendor default: adb without authorization); setup skip is over adb, not yet
   native; One UI is not the menu's default OS; not tested yet: SIM/calls (never emergency), camera, audio,
   fingerprint, NFC, battery life; the installer does not yet install One UI on a stock phone.
+
+## 6. Bootloop triage (2026-11-07 night)
+
+One UI booted at 05:15 (layout v2) and was never booted again after layout v3 (07:31: VENDOR/ODM moved behind
+WINDOWS, A16DATA re-made at 12790528). Until 16:00 the Windows UFS driver's write fence still allowed
+12512000..13518591, i.e. all of VENDOR, ODM and the first 2.8 GiB of A16DATA, while Windows had a drive letter
+on every partition and went through the disk-full registry crashes, chkdsk and ntfsfix (NOTES.md 2026-11-07).
+/data is ext4 with `errors=panic` (vendor fstab, plus an f2fs fallback line), so a damaged A16DATA panics every
+boot. Read-only check from TWRP: `tools/android/oneui/diag-boot.sh` (GPT v3 ranges, EROFS hashes of SYSTEM /
+VENDOR / ODM, A16DATA superblock + `e2fsck -n`, the store's android.* files against build/oneui-boot, MISC,
+/cache/recovery, pstore, boot guard logcat, tombstones, dropbox). If only A16DATA is bad:
+`tools/android/pixel/part-backup.sh card A16DATA TAG`, then `tools/android/oneui/a16data-ext4.sh TAG`
+(refuses without that verified backup), then a first boot as in section 5.

@@ -9,6 +9,8 @@
 # the main checkout); without one the build is skipped (exit 0) so the loader build is unaffected.
 #   sh starbite/engineer/build.sh --repro    build twice (the second into out/repro) and require
 #                                            byte-identical images
+# ENG_DEFS adds compiler defines to every object (ENG_DEFS=-DOC_SELFTEST: the read-only
+# Overclocking self-test image, docs/ENGINEER-OS.md section 14; use it with its own ENG_OUT).
 # On a native aarch64 host the build first runs the host unit tests (starbite/tools/unit-test.c)
 # and stops if one fails. ENG_OUT=dir changes the output directory.
 set -eu
@@ -54,7 +56,8 @@ echo "engineer: assets from $(basename "$SB7"), sha256 $(sha256sum "$SB7" | cut 
 if [ "$native" = 1 ]; then
     gcc -O1 -Wall -Wextra -Werror -Wno-unused-parameter -I"$lib" -I"$here" -o "$out/unit-test" \
         "$root/starbite/tools/unit-test.c" "$lib/str.c" "$lib/fence.c" "$lib/sbui_input.c" "$lib/mmu.c" \
-        "$lib/adc.c" "$lib/sd.c" "$lib/mali_desc.c" "$lib/dvfs_levels.c" "$here/policy.c" "$here/kern.c"
+        "$lib/adc.c" "$lib/sd.c" "$lib/mali_desc.c" "$lib/dvfs_levels.c" "$here/policy.c" "$here/kern.c" \
+        "$here/octab.c" "$root/starbite/host/oc-fake.c"
     "$out/unit-test"
 fi
 
@@ -62,8 +65,8 @@ CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie
 -nostdlib -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-plt -mstrict-align -mcpu=cortex-a55 \
 -fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$here"
 # Code that runs on the worker cores (the Mongoose M3s are ARMv8.0: no LSE, RDM, DotProd, FP16,
-# LRCPC) is built for plain armv8-a and checked below: libsb/smp.c and engineer/kern.c.
-V80=" smp.c kern.c "
+# LRCPC) is built for plain armv8-a and checked below: libsb/smp.c, libsb/ocp.c and engineer/kern.c.
+V80=" smp.c kern.c ocp.c "
 objs=""
 v80objs=""
 for src in "$lib"/*.c "$lib"/*.S "$here"/*.c; do
@@ -74,7 +77,7 @@ for src in "$lib"/*.c "$lib"/*.S "$here"/*.c; do
         flags=$(echo "$CFLAGS" | sed 's/-mcpu=cortex-a55/-march=armv8-a+simd -mtune=cortex-a55/')
         v80objs="$v80objs $obj" ;;
     esac
-    "${CROSS}gcc" $flags -DSB_ASSETS="\"$out/sbassets.sb7\"" "$src" -o "$obj"
+    "${CROSS}gcc" $flags ${ENG_DEFS:-} -DSB_ASSETS="\"$out/sbassets.sb7\"" "$src" -o "$obj"
     objs="$objs $obj"
 done
 # The worker code must not contain an instruction the M3 cores lack (ARMv8.1+: LSE atomics, RDM,

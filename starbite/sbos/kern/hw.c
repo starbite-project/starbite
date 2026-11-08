@@ -372,64 +372,30 @@ uint64_t hw_app_resume(struct aframe *f)
 #define FP_GRP2_BID 0x14070200UL
 #define FP_EVT_GRP2 0x14067f08UL
 #define FP_MBOX 0x14100010UL
-static void fp_rmw(uintptr_t a, uint32_t clr, uint32_t set)
-{
-    volatile uint32_t *r = (volatile uint32_t *)a;
-    *r = (*r & ~clr) | set;
-    __asm__ volatile("dsb sy" ::: "memory");
-}
-
+/* 1.1-beta7: the steps themselves are libsb's (smp.c sb_m3_fp_*, shared with Engineer OS since master f8ad4a9): one
+ * implementation; the heater decides per core (it launches and sheds single M3 cores) */
 void hw_m3_core_on(unsigned w, int first)
 {
-    if (w < 4 || w > 7)
-        return;
-    uint32_t b = 1U << (w - 4U);
-    if (first)
-        fp_rmw(FP_MBOX, 1U << 24, 0);
-    *(volatile uint32_t *)FP_INFORM(w) = 0;
-    fp_rmw(FP_GRP2_BID, b, 0);
-    fp_rmw(FP_EVT_GRP2, b, 0);
+    if (w >= 4 && w <= 7)
+        sb_m3_fp_on(w, first);
 }
 
-/* 1.1-beta3: the core-off hint only (C2 and its bits). beta2 also sent the cluster-off request for the last core
- * (CPD, MAILBOX_APM2AP bit 24 = 1): the cluster still read powered after the stop, and the next session hung at
- * its start (before its first loop turn; the watchdog reset it): a cluster power-down asked for and never done
- * leaves the firmware waiting. No CPD, no bit 24 = 1: the cluster stays on between sessions (as in beta1). */
 void hw_m3_core_off(unsigned w, int last)
 {
-    (void)last;
-    if (w < 4 || w > 7)
-        return;
-    uint32_t b = 1U << (w - 4U);
-    *(volatile uint32_t *)FP_INFORM(w) = 1U;
-    fp_rmw(FP_GRP2_BID, 0, b);
-    fp_rmw(FP_EVT_GRP2, 0, b);
-    __asm__ volatile("dsb sy" ::: "memory");
+    (void)last;                             /* only the C2 hint, never the cluster-off request (1.1-beta3) */
+    if (w >= 4 && w <= 7)
+        sb_m3_fp_off(w);
 }
 
-/* 1.1-beta3: before a session's first PSCI or ACPM call: the M3 words back to the state the boot had (19:2x run 1:
- * inform 0/0/0/0, the M3 bits clear, bit 24 clear), whatever a session or another OS left. 1 if anything changed. */
+/* before a session's first PSCI / ACPM call: the M3 words back to the boot state (1: they were not there) */
 int hw_m3_fp_reset(void)
 {
-    int changed = 0;
+    int changed = (*(volatile uint32_t *)FP_GRP2_BID & 0xfU) || (*(volatile uint32_t *)FP_EVT_GRP2 & 0xfU) ||
+                  (*(volatile uint32_t *)FP_MBOX & (1U << 24));
     for (unsigned p = 4; p < 8; ++p)
-        if (*(volatile uint32_t *)FP_INFORM(p)) {
-            *(volatile uint32_t *)FP_INFORM(p) = 0;
-            changed = 1;
-        }
-    if (*(volatile uint32_t *)FP_GRP2_BID & 0xfU) {
-        fp_rmw(FP_GRP2_BID, 0xfU, 0);
-        changed = 1;
-    }
-    if (*(volatile uint32_t *)FP_EVT_GRP2 & 0xfU) {
-        fp_rmw(FP_EVT_GRP2, 0xfU, 0);
-        changed = 1;
-    }
-    if (*(volatile uint32_t *)FP_MBOX & (1U << 24)) {
-        fp_rmw(FP_MBOX, 1U << 24, 0);
-        changed = 1;
-    }
-    __asm__ volatile("dsb sy" ::: "memory");
+        changed |= *(volatile uint32_t *)FP_INFORM(p) != 0;
+    if (changed)
+        sb_m3_fp_reset();
     return changed;
 }
 

@@ -382,9 +382,10 @@ int gs_classes(int layer, float py, int s1, struct gs_cls *o, int max)
                 break;
             }
         /* cut [a, b) out of the spans so far, then insert it in order */
-        static struct gs_cls keep[2 * G7_MAX_SHAPES + 2];      /* not on the 8 KiB stack */
+        static struct gs_cls keep_c[G7_NCORES][2 * G7_MAX_SHAPES + 2];   /* not on the 8 KiB stack; per core */
+        struct gs_cls *keep = keep_c[g7_core()];
         int m = 0;
-        for (int k = 0; k < n && m + 2 <= (int)(sizeof keep / sizeof keep[0]); k++) {
+        for (int k = 0; k < n && m + 2 <= 2 * G7_MAX_SHAPES + 2; k++) {
             if (o[k].x1 <= a || o[k].x0 >= b) {
                 keep[m++] = o[k];
                 continue;
@@ -691,7 +692,12 @@ static void px_interior(const struct rowc *R, int i0, int i1, float *acc, float 
 /* A straight top or bottom rim band: pixels where GLASS_FS's normal is (0, +-1) and d the same for
  * the whole row (|qx| <= hbx - r - 1.5, and the row past the corner centre or well inside it). The
  * refracted samples are then rows: frost at y + oy, dispersion at y + oy +- dy, 4 pixels a step. */
-static float BF5[3 * GW], BFB[3 * GW], BAP[3 * GW], BAM[3 * GW];
+static float BF5_0[3 * GW], BFB_0[3 * GW], BAP_0[3 * GW], BAM_0[3 * GW];
+/* per core (glass_smp.c): cores 1..3 use their scratch slot */
+#define BF5 ((float *)G7_CS(0x40000UL, BF5_0))
+#define BFB ((float *)G7_CS(0x40000UL + 12UL * GW, BFB_0))
+#define BAP ((float *)G7_CS(0x40000UL + 24UL * GW, BAP_0))
+#define BAM ((float *)G7_CS(0x40000UL + 36UL * GW, BAM_0))
 static void px_band(const struct rowc *R, int i0, int i1, float *acc, float *al, const float *rowa5,
                     const float *rowb)
 {
@@ -793,7 +799,11 @@ static void px_band(const struct rowc *R, int i0, int i1, float *acc, float *al,
  * refracted samples move along the row: A5, B and A of the row are blended vertically once (VS*)
  * and every sample is one lerp, instead of 4 bilinear samples and 5 SDF evaluations a pixel. */
 #define VSN (AW + 8)
-static float VS5[3 * VSN], VSA[3 * VSN], VSB[3 * VSN];
+static float VS5_0[3 * VSN], VSA_0[3 * VSN], VSB_0[3 * VSN];
+#define VS5 ((float *)G7_CS(0x52000UL, VS5_0))
+#define VSA ((float *)G7_CS(0x52000UL + 12UL * VSN, VSA_0))
+#define VSB ((float *)G7_CS(0x52000UL + 24UL * VSN, VSB_0))
+_Static_assert(0x52000UL + 36UL * VSN <= 0x80000UL, "glass_shade per-core scratch overflow");
 static inline void vs_at(const float *V, int t0, int n, float cx, float o[3])
 {
     int x0 = g_ifloor(cx);

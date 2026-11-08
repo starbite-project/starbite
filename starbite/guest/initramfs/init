@@ -1,0 +1,19 @@
+#!/bin/busybox sh
+# The guest Linux's init on the M3 cluster (starbite/guest, docs/STARBITE-OS-LINUX-M3.md 6): mount the
+# kernel file systems, load sbguest.ko (power off without SYSTEM_OFF, /dev/sbshm), start guestd.
+# The full OS's guest (a distro root, a compositor bridge) replaces this; the contract stays sbshm.h.
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+echo "guest-init: $(uname -r) on $(grep -c ^processor /proc/cpuinfo) CPUs" > /dev/kmsg
+if [ -f /sbguest.ko ] && ! grep -q sbguest.nomod /proc/cmdline; then
+    insmod /sbguest.ko && echo "guest-init: sbguest.ko loaded" > /dev/kmsg
+fi
+burn=0
+for a in $(cat /proc/cmdline); do
+    case "$a" in sbguest.burn=*) burn=${a#sbguest.burn=} ;; esac
+done
+/guestd --burn "$burn"
+echo "guest-init: guestd exited ($?)" > /dev/kmsg
+exec /bin/sh

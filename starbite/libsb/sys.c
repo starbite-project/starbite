@@ -66,9 +66,20 @@ void sb_keys_release_wait(void)
 
 /* ---- reset, power off, boot-next --------------------------------------------------------------- */
 
+void (*sb_before_reset)(void);
+
+static void before_reset(void)
+{
+    void (*f)(void) = sb_before_reset;
+    sb_before_reset = 0;                    /* once, even if it resets itself */
+    if (f)
+        f();
+}
+
 void sb_reboot(uint32_t inform3)
 {
     volatile uint32_t *pmu = (volatile uint32_t *)SB_PMU;
+    before_reset();
     sb_log("reboot");
     sb_touch_clear();
     pmu[0x808 / 4] = 0x12345678U;       /* INFORM2 */
@@ -84,6 +95,7 @@ void sb_reboot(uint32_t inform3)
 void sb_power_off(void)
 {
     volatile uint32_t *ps = (volatile uint32_t *)(SB_PMU + 0x330c);
+    before_reset();
     sb_log("power off (PS_HOLD low)");
     sb_touch_clear();
     if (!sb_wait_released(sb_keys, sb_mdelay, 20, 5000))   /* 1.0-rc2 (review): a stuck key never blocks the power-off */
@@ -125,6 +137,7 @@ void sb_boot_next(const char *key)
     volatile uint64_t *mb = (volatile uint64_t *)SB_NEXT_MBOX;
     volatile char *k = (volatile char *)(SB_NEXT_MBOX + 8);
     unsigned i = 0;
+    before_reset();
     for (; i < 23 && key[i]; ++i)
         k[i] = key[i];
     for (; i < 24; ++i)

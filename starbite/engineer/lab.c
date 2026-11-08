@@ -11,6 +11,7 @@
  * battery tests), a worker core that faults, the time limit. Every hardware wait below is bounded.
  */
 #include "eng.h"
+#include "oc.h"
 
 /* ---- options shared by the load tests ------------------------------------------------------ */
 
@@ -403,6 +404,7 @@ static const char *psci_name(int64_t r)
 static struct kern_cfg K;
 static int64_t core_res[SB_NCORES];
 static uint64_t it0, err0, last_it[SB_NCORES], rate[SB_NCORES], rate_total;
+unsigned lab_m3_max_cores = 4;              /* oc.c: Samsung's busy-core limit while M3 is overclocked */
 static int m3_state;                        /* 0 not enabled, 1 enabled (confirmed), -1 the PMU write failed */
 static unsigned run_mask;                   /* the cores the running test uses (after the offer) */
 static struct sb_auth m3_auth;
@@ -414,6 +416,8 @@ static const struct {
     uint32_t off, mask, val;
 } m3_pmu[] = { { 0x1088, 0xff000000U, 0x8d000000U }, { 0x2114, 3, 2 }, { 0x2180, 3, 2 }, { 0x21ec, 3, 2 },
                { 0x2258, 3, 2 }, { 0x2384, 3, 2 } };
+
+static int m3_enable(void);
 
 static void m3_prep(void)
 {
@@ -435,7 +439,8 @@ static int m3_confirm(void)
     a.target = "PMU";
     a.happens[0] = "Writes the vendor PMU defaults for the Mongoose M3 cluster: 6 registers, as Linux and iOS do";
     a.happens[1] = "on this phone before every M3 CPU_ON (PMU 0x1088, 0x2114, 0x2180, 0x21EC, 0x2258, 0x2384)";
-    a.happens[2] = "Then PSCI CPU_ON 0x100..0x103 starts the four M3 cores on the stress kernels";
+    a.happens[2] = "Then, per M3 core, Samsung's FlexPMU words (CPU_INFORM, GRP2 bits, APM mailbox bit 24) and PSCI "
+                   "CPU_ON; before CPU_OFF only the C2 hint (never a cluster power-down)";
     a.happens[3] = 0;
     a.undo = "a reboot resets the PMU; Engineer OS turns the cores off when the test ends";
     a.old_v = "";
@@ -574,6 +579,17 @@ static unsigned load_start(unsigned mask, unsigned kmask)
         mask &= 0x0fU;
         audit_line("M3 cores not started (not enabled)");
     }
+    {                                       /* Overclocking: Samsung's busy-core limit above 1794 MHz */
+        unsigned keep = 0, n3 = 0;
+        for (unsigned w = 4; w < SB_NCORES; ++w)
+            if ((mask & (1U << w)) && n3 < lab_m3_max_cores) {
+                keep |= 1U << w;
+                ++n3;
+            }
+        if ((mask & 0xf0U) != keep)
+            audit_line("M3 cores limited by the overclocked M3 step (Samsung's busy-core limit)");
+        mask = (mask & 0x0fU) | keep;
+    }
     sb_smp_m3_prep = m3_state > 0 ? m3_prep : 0;
     show_now("Starting cores", fill_starting);
     unsigned n = 0;
@@ -631,6 +647,58 @@ static void build_offer(void)
 static int act_offer(int i)
 {
     offer_pick = i;
+    return 1;
+}
+
+/* The OCP probe (oc.c): core 4 (the first M3) reads the GCU / OCP system registers (libsb sb_ocp_worker)
+ * and stops. may_ask: 1 the M3 PMU step may be confirmed now (Lab's tier 3 "Start the M3 cores"),
+ * 0 (the unattended self-test): only when S-Boot already left the six PMU registers at the vendor
+ * values, so nothing is written. 1 read (v[0..5], see kern.c), 0 faulted (*esr), -1 not started
+ * (*why); v[] as libsb ocp.c. */
+int lab_oc_m3_probe(int may_ask, uint64_t v[6], uint64_t *esr, const char **why)
+{
+    unsigned diff = 0;
+    for (unsigned i = 0; i < sizeof(m3_pmu) / sizeof(m3_pmu[0]); ++i) {
+        uint32_t r = 0;
+        if (!sb_probe32(SB_PMU + m3_pmu[i].off, &r) || (r & m3_pmu[i].mask) != m3_pmu[i].val)
+            ++diff;
+    }
+    *esr = 0;
+    if ((diff || may_ask) && m3_state <= 0) {
+        if (!may_ask) {
+            *why = "the M3 PMU registers are not at the vendor values (needs the confirmed PMU step)";
+            return -1;
+        }
+        if (!m3_enable()) {
+            *why = "the M3 PMU step was not confirmed";
+            return -1;
+        }
+    }
+    sb_smp_m3_prep = m3_state > 0 ? m3_prep : 0;
+    struct sb_wslot *s = sb_smp_own_slot(4);
+    if (s)
+        for (unsigned k = 0; k < 8; ++k)
+            s->v[k] = 0;
+    int64_t r = sb_smp_start(4, sb_ocp_worker, 0);
+    if (r) {
+        *why = r == -100 ? "the M3 core did not check in" : "PSCI CPU_ON refused";
+        return -1;
+    }
+    const struct sb_wslot *g = 0;
+    for (unsigned ms = 0; ms < 1000; ++ms) {
+        g = sb_smp_slot(4);
+        if (g && (g->v[7] || g->state == SB_WK_FAULT || g->state == SB_WK_DONE || g->state == SB_WK_PARKED))
+            break;
+        sb_mdelay(1);
+    }
+    (void)sb_smp_stop(200);
+    if (!g || g->state == SB_WK_FAULT || !g->v[7]) {
+        *esr = g ? g->esr : 0;
+        *why = "the read faulted (trapped) or did not finish";
+        return 0;
+    }
+    for (unsigned k = 0; k < 6; ++k)
+        v[k] = g->v[k];
     return 1;
 }
 
@@ -1641,6 +1709,184 @@ static int act_ms(int i)
 void lab_mem_stress(void)
 {
     list_screen("Memory stress", build_ms, act_ms);
+}
+
+/* ---- overclocking stability checks (oc.c) -------------------------------------------------------
+ * The same kernels and patterns as the CPU and memory stress pages, run for a fixed time on a
+ * clock that was just changed. 1 pass, 0 fail (errors, a fault), -2 inconclusive (the temperature
+ * limit: 95 C for these runs unless the user set a higher one), -1 not
+ * run (no cores, cancelled, no temperature guard declined). Nothing goes to the result pages. */
+
+/* Overclocking runs: every TMU probe to the log once a second (the first 30 s, then every 10 s), so
+ * a temperature stop can be told apart from a misreading probe (2026-11-08: M3 runs stopped "at
+ * once", while A55 1950 MHz on four cores held 65 C). at = ms into the run; ~0 = the stop line. */
+static void oc_temps_log(uint64_t at)
+{
+    struct ub u;
+    uint64_t s = at / 1000U;
+    if (at != ~0ULL && s > 30 && s % 10U)
+        return;
+    ub_init(&u);
+    ub_s(&u, at == ~0ULL ? "oc temps STOP:" : "oc temps ");
+    if (at != ~0ULL) {
+        ub_dec(&u, s);
+        ub_s(&u, "s:");
+    }
+    static const char *const nm[5] = { " big1 ", " big2 ", " big3 ", " big4 ", " big6 " };
+    static const unsigned bp[5] = { 1, 2, 3, 4, 6 };
+    for (unsigned i = 0; i < 5; ++i) {
+        ub_s(&u, nm[i]);
+        ub_sdec(&u, T.big[i]);
+        ub_c(&u, '/');
+        ub_dec(&u, (unsigned)T.code_top[bp[i]]);
+    }
+    ub_s(&u, " lit ");
+    ub_sdec(&u, T.little);
+    ub_s(&u, " gpu ");
+    ub_sdec(&u, T.gpu);
+    ub_s(&u, " isp ");
+    ub_sdec(&u, T.isp);
+    ub_s(&u, sb_m3_on() ? " M3 on " : " M3 off ");
+    ub_dec(&u, sb_m3_hz(&(int){ 0 }) / 1000000U);
+    sb_log(u.b);
+}
+
+int lab_oc_cpu(unsigned mask, unsigned secs, char *detail, unsigned cap)
+{
+    struct ub u;
+    /* an overclocked core reaches Lab's default 85 C in seconds (A55 1950 MHz, 4 cores: 2 s on
+     * 2026-11-08): 95 C for this run unless the user set a higher one; "no limit" is never used here */
+    int lim = opt.limit;
+    if (opt.limit == LIMIT_NONE || opt.limit < 5)
+        opt.limit = 5;
+    if (!guard_ok("Stability test (CPU)")) {
+        opt.limit = lim;
+        return -1;
+    }
+    unsigned want = mask;
+    mask = cores_offer(mask, "Overclocking stability test");
+    if (!mask || (!(want & 0x0fU) && !(mask & 0xf0U))) {
+        opt.limit = lim;
+        return -1;                          /* an M3 test without the M3 cores is not a test */
+    }
+    cs_dur = secs;
+    ch_reset(CH_TEMP, "HOTTEST SENSOR (" U_DEG "C)", C_ORANGE, secs);
+    ch_reset(CH_RATE, "WORK (BATCHES PER SECOND, ALL CORES)", C_GREEN, secs);
+    unsigned started = load_start(mask, KERN_INT | KERN_FP | KERN_NEON | KERN_MEM), over = 0;
+    temps_sample(0);
+    oc_temps_log(0);                        /* right after the cores started: every probe */
+    live_begin("Stability test (CPU)");
+    cs_t0 = sb_ms();
+    cs_stop = 0;
+    cs_peak = -100;
+    uint64_t next_s = sb_ms() + 1000;
+    temps_sample(0);
+    clocks_sample();
+    while (!cs_stop) {
+        load_slice(20);
+        if (live_poll(fill_cpu_live, 250))
+            cs_stop = 1;
+        if (sb_ms() >= next_s) {
+            next_s += 1000;
+            temps_sample(0);
+            clocks_sample();
+            load_rates();
+            ch_push(CH_TEMP, T.hottest);
+            ch_push(CH_RATE, (int32_t)rate_total);
+            if (T.hottest > cs_peak)
+                cs_peak = T.hottest;
+            oc_temps_log(sb_ms() - cs_t0);
+            /* two samples in a row over the limit (one stuck probe right after the M3 cluster powers up
+             * must not end the run; the TMU's own trip at 115 C stays armed) */
+            over = over_limit(T.hottest) ? over + 1 : 0;
+            if (over >= 2) {
+                cs_stop = 2;
+                oc_temps_log(~0ULL);            /* the stop: every probe, which one tripped */
+            }
+            if (load_faults() || load_errors())
+                cs_stop = 4;
+        }
+        if (sb_ms() - cs_t0 >= (uint64_t)secs * 1000U)
+            cs_stop = 3;
+    }
+    load_stop();
+    live_end();
+    uint64_t e = load_errors();
+    unsigned f = load_faults(), n = 0;
+    for (unsigned w = 0; w < SB_NCORES; ++w)
+        n += !core_res[w];
+    ub_init(&u);
+    ub_dec(&u, n);
+    ub_s(&u, " cores (");
+    ub_dec(&u, started + ((mask & 1U) ? 1U : 0U));
+    ub_s(&u, " asked), ");
+    fmt_mmss(&u, (sb_ms() - cs_t0) / 1000U);
+    ub_s(&u, ", ");
+    ub_dec(&u, e);
+    ub_s(&u, " errors, ");
+    ub_dec(&u, f);
+    ub_s(&u, " faults, peak ");
+    ub_sdec(&u, cs_peak);
+    ub_s(&u, " C");
+    if (cs_stop == 1)
+        ub_s(&u, " (stopped by hand)");
+    if (cs_stop == 2) {
+        ub_s(&u, " (temperature limit ");
+        ub_dec(&u, (uint64_t)limit_c[opt.limit]);
+        ub_s(&u, " C)");
+    }
+    sb_strcpy(detail, cap, u.b);
+    opt.limit = lim;
+    if (cs_stop == 1)
+        return -1;
+    if (cs_stop == 2 && !e && !f)
+        return -2;                          /* inconclusive: the temperature limit, not an error */
+    return !e && !f && n > 0 && cs_stop == 3;
+}
+
+int lab_oc_mem(unsigned size_idx, unsigned passes, char *detail, unsigned cap, unsigned *bw_read)
+{
+    int sz = ms_sz, np = ms_np;
+    ms_sz = size_idx < 3 ? (int)size_idx : 0;
+    ms_np = passes >= 10 ? 2 : passes >= 3 ? 1 : 0;
+    ms_err = ms_first_bad = 0;
+    ms_stop = 0;
+    ms_pos = 0;
+    ch_reset(CH_BW, "DRAM READ BANDWIDTH PER PASS (MiB/s)", C_STAR, 16);
+    live_begin("Stability test (memory)");
+    ms_t0 = sb_ms();
+    for (ms_pass = 0; !ms_stop && ms_pass < passes; ++ms_pass) {
+        ms_bandwidth();
+        for (unsigned p = 0; p < NPAT && !ms_stop && !ms_err; ++p)
+            if (ms_pattern(p, ms_pass * 0x2545f4914f6cdd1dULL + p + 0x0c))
+                ms_stop = 1;
+        if (ms_err)
+            break;
+    }
+    live_end();
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, ms_size_name[ms_sz]);
+    ub_s(&u, ", ");
+    ub_dec(&u, ms_pass);
+    ub_s(&u, ms_pass == 1 ? " pass, " : " passes, ");
+    ub_dec(&u, ms_err);
+    ub_s(&u, " bad words, read ");
+    ub_dec(&u, ms_bw_r);
+    ub_s(&u, " MiB/s");
+    if (ms_err) {
+        ub_s(&u, ", first at ");
+        ub_hex(&u, ms_first_bad, 9);
+    }
+    if (ms_stop)
+        ub_s(&u, " (stopped by hand)");
+    sb_strcpy(detail, cap, u.b);
+    if (bw_read)
+        *bw_read = (unsigned)ms_bw_r;
+    int r = ms_err ? 0 : ms_stop ? -1 : 1;
+    ms_sz = sz;
+    ms_np = np;
+    return r;
 }
 
 /* ---- display stress (no GPU: CPU fills and scrolls) ------------------------------------------- */

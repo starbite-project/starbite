@@ -1,0 +1,155 @@
+From 3d636a7d69ebb5d5e89bb128459ca92bb4ac5787 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Sun, 8 Nov 2026 17:32:06 +0200
+Subject: [PATCH] patch: 0407-starbite-mali-holders.patch - every 10 s a
+ STARLTE GPU HOLDERS line: our buffers by size class, and each client's
+ buffers/surfaces/host MiB and buffer count by process
+
+---
+ iokit/Kernel/arm/StarbiteMali.cpp | 68 ++++++++++++++++++++++++++++---
+ 1 file changed, 62 insertions(+), 6 deletions(-)
+
+diff --git a/iokit/Kernel/arm/StarbiteMali.cpp b/iokit/Kernel/arm/StarbiteMali.cpp
+index 222a13b9..4a333d44 100644
+--- a/iokit/Kernel/arm/StarbiteMali.cpp
++++ b/iokit/Kernel/arm/StarbiteMali.cpp
+@@ -30,6 +30,8 @@
+ #include <sys/errno.h>
+ 
+ #include "SweetSurface.h"
++extern "C" int proc_pid(struct proc *);
++extern "C" void proc_name(int pid, char *buf, int size);
+ 
+ extern "C" void sweet_memstat_gpu_client(struct proc *p);  /* bsd/kern/kern_memorystatus.c */
+ extern "C" void *get_bsdtask_info(task_t);
+@@ -198,10 +200,36 @@ sbm_bo_kind(const sbm_bo *bo)
+ 	return bo->host ? 2 : bo->surface != 0 ? 1 : 0;
+ }
+ 
++/* 0407: who holds them (one slot per open client, by process) and in what sizes (our own buffers) */
++#define SBM_SLOTS 16
++static struct {
++	int pid;
++	char name[17];
++	int64_t pages[3];
++	int64_t bos;
++} sbm_slot[SBM_SLOTS];
++static int64_t sbm_size_bos[4], sbm_size_pages[4];     /* <= 64 KiB, <= 1 MiB, <= 8 MiB, larger */
++
++static unsigned
++sbm_size_class(uint32_t pages)
++{
++	return pages <= 16 ? 0 : pages <= 256 ? 1 : pages <= 2048 ? 2 : 3;
++}
++
+ static void
+-sbm_count_pages(const sbm_bo *bo, int64_t sign)
++sbm_count_pages(const sbm_bo *bo, int64_t sign, int slot = -1)
+ {
+-	OSAddAtomic64(sign * (int64_t)bo->pages, &sbm_live_pages[sbm_bo_kind(bo)]);
++	unsigned kind = sbm_bo_kind(bo);
++	OSAddAtomic64(sign * (int64_t)bo->pages, &sbm_live_pages[kind]);
++	if (slot >= 0 && slot < SBM_SLOTS) {
++		OSAddAtomic64(sign * (int64_t)bo->pages, &sbm_slot[slot].pages[kind]);
++		OSAddAtomic64(sign, &sbm_slot[slot].bos);
++	}
++	if (kind == 0) {
++		unsigned c = sbm_size_class(bo->pages);
++		OSAddAtomic64(sign, &sbm_size_bos[c]);
++		OSAddAtomic64(sign * (int64_t)bo->pages, &sbm_size_pages[c]);
++	}
+ }
+ 
+ class StarbiteMali : public IOService {
+@@ -213,6 +241,7 @@ OSDefineMetaClassAndStructors(StarbiteMali, IOService);
+ class StarbiteMaliUserClient : public IOUserClient {
+ 	OSDeclareDefaultStructors(StarbiteMaliUserClient);
+ 	task_t fTask = NULL;
++	int fSlot = -1;                 /* 0407: sbm_slot[] */
+ 	IOLock *fLock = NULL;
+ 	sbm_bo *fBos = NULL;            /* handle h is fBos[h - 1] */
+ 	uint32_t fCount = 0;
+@@ -247,6 +276,14 @@ StarbiteMaliUserClient::initWithTask(task_t owningTask, void *securityID, UInt32
+ 	fTask = owningTask;
+ 	if (void *bsd = get_bsdtask_info(owningTask)) {
+ 		sweet_memstat_gpu_client((struct proc *)bsd);
++		for (int i = 0; i < SBM_SLOTS; i++) {
++			if (OSCompareAndSwap(0, 1, (volatile UInt32 *)&sbm_slot[i].pid)) {
++				sbm_slot[i].pid = proc_pid((struct proc *)bsd);
++				proc_name(sbm_slot[i].pid, sbm_slot[i].name, sizeof(sbm_slot[i].name));
++				fSlot = i;
++				break;
++			}
++		}
+ 	}
+ 	fLock = IOLockAlloc();
+ 	fBos = (sbm_bo *)IOMallocZeroData(SBM_MAX_BOS * sizeof(sbm_bo));
+@@ -269,7 +306,7 @@ StarbiteMaliUserClient::lookup(uint32_t handle)
+ void
+ StarbiteMaliUserClient::closeBO(sbm_bo *bo)
+ {
+-	sbm_count_pages(bo, -1);
++	sbm_count_pages(bo, -1, fSlot);
+ 	starlte_gpu_user_unmap(bo->va, bo->pages);
+ 	sbm_va_free(bo->va, (uint64_t)bo->pages * 0x1000);
+ 	OSSafeReleaseNULL(bo->map);
+@@ -355,7 +392,7 @@ StarbiteMaliUserClient::createBO(sbm_create_bo *a)
+ 		return kIOReturnVMError;
+ 	}
+ 	fBos[handle - 1] = (sbm_bo){ .mem = mem, .map = NULL, .va = va, .pages = pages };
+-	sbm_count_pages(&fBos[handle - 1], 1);
++	sbm_count_pages(&fBos[handle - 1], 1, fSlot);
+ 	a->handle = handle;
+ 	a->offset = va;
+ 	return kIOReturnSuccess;
+@@ -443,7 +480,7 @@ StarbiteMaliUserClient::importSurface(sbm_surface *a)
+ 	s->memory->retain();
+ 	fBos[handle - 1] = (sbm_bo){ .mem = s->memory, .map = NULL, .va = va, .pages = pages,
+ 		                     .surface = a->surface };
+-	sbm_count_pages(&fBos[handle - 1], 1);
++	sbm_count_pages(&fBos[handle - 1], 1, fSlot);
+ 	a->handle = handle;
+ 	s->release();
+ 	return kIOReturnSuccess;
+@@ -510,7 +547,7 @@ StarbiteMaliUserClient::importHost(sbm_import_host *a)
+ 		return va ? kIOReturnVMError : kIOReturnNoSpace;
+ 	}
+ 	fBos[handle - 1] = (sbm_bo){ .mem = mem, .map = NULL, .va = va, .pages = pages, .surface = 0, .host = true };
+-	sbm_count_pages(&fBos[handle - 1], 1);
++	sbm_count_pages(&fBos[handle - 1], 1, fSlot);
+ 	a->handle = handle;
+ 	a->va = va;
+ 	return kIOReturnSuccess;
+@@ -712,6 +749,21 @@ StarbiteMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArgume
+ 		sbm_calls_since = t1;
+ 		IOLockUnlock(sbm_va_lock);
+ 		IOLog("%s\n", line);
++		{
++			char who[400];
++			int m = snprintf(who, sizeof(who), "STARLTE GPU HOLDERS: sizes <=64K %lld (%lld MiB) <=1M %lld (%lld MiB) "
++			    "<=8M %lld (%lld MiB) larger %lld (%lld MiB); by client:", sbm_size_bos[0], sbm_size_pages[0] / 256,
++			    sbm_size_bos[1], sbm_size_pages[1] / 256, sbm_size_bos[2], sbm_size_pages[2] / 256, sbm_size_bos[3],
++			    sbm_size_pages[3] / 256);
++			for (int i = 0; i < SBM_SLOTS && m < (int)sizeof(who) - 40; i++) {
++				if (sbm_slot[i].pid > 1) {
++					m += snprintf(who + m, sizeof(who) - (size_t)m, " %s[%d] %lld/%lld/%lld MiB %lld bos",
++					    sbm_slot[i].name, sbm_slot[i].pid, sbm_slot[i].pages[0] / 256, sbm_slot[i].pages[1] / 256,
++					    sbm_slot[i].pages[2] / 256, sbm_slot[i].bos);
++				}
++			}
++			IOLog("%s\n", who);
++		}
+ 		return ret;
+ 	}
+ 	IOLockUnlock(sbm_va_lock);
+@@ -735,6 +787,10 @@ StarbiteMaliUserClient::clientClose(void)
+ void
+ StarbiteMaliUserClient::free(void)
+ {
++	if (fSlot >= 0) {
++		bzero(&sbm_slot[fSlot], sizeof(sbm_slot[fSlot]));   /* its buffers were closed in clientClose */
++		fSlot = -1;
++	}
+ 	if (fBos != NULL) {
+ 		IOFreeData(fBos, SBM_MAX_BOS * sizeof(sbm_bo));
+ 	}

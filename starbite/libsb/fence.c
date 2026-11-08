@@ -387,8 +387,30 @@ static void log_write(const char *verb, unsigned medium, unsigned lu, uint64_t l
     sb_log(u.b);
 }
 
+static const char *hold_why;
+
+void sb_storage_hold(const char *why)
+{
+    if (why && !hold_why) {
+        struct ub u;                        /* sb_log only: the host unit tests stub it alone */
+        ub_init(&u);
+        ub_s(&u, "storage held: ");
+        ub_s(&u, why);
+        sb_log(u.b);
+    } else if (!why && hold_why)
+        sb_log("storage hold lifted");
+    hold_why = why;
+}
+
+const char *sb_storage_held(void)
+{
+    return hold_why;
+}
+
 static int do_write(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src)
 {
+    if (hold_why)
+        return SB_W_HOLD;
     fence_active = 1;
     int r = sb_blk_write(medium, lu, lba, n, src);
     fence_active = 0;
@@ -403,6 +425,10 @@ int sb_write(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void 
     if (r) {
         log_write("refused", medium, lu, lba, n, &d, d.why);
         return r;
+    }
+    if (hold_why) {
+        log_write("refused", medium, lu, lba, n, &d, hold_why);
+        return SB_W_HOLD;
     }
     r = sb_gate_check(medium, lu, lba, n, d.tier, &why);
     if (r) {
@@ -440,6 +466,10 @@ int sb_write_store(unsigned medium, uint64_t lba, uint64_t n, const void *src)
     if (!gate_open || !sb_auth_complete(&gate) || !(gate.kind & SB_KIND_STORE)) {
         log_write("refused", medium, 0, lba, n, &d, "no confirmed authorisation names the store");
         return SB_W_AUTH;
+    }
+    if (hold_why) {
+        log_write("refused", medium, 0, lba, n, &d, hold_why);
+        return SB_W_HOLD;
     }
     if (dry_run) {
         log_write("would write", medium, 0, lba, n, &d, "DRY RUN, nothing written");

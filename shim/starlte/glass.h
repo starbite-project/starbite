@@ -253,6 +253,16 @@ struct g7_stats {
 };
 void g7_get_stats(struct g7_stats *s);
 
+/* ---- the other A55 cores (glass_smp.c) ---- */
+/* Start up to want - 1 worker cores (PSCI CPU_ON); returns the cores rendering now (1 = core 0 alone).
+ * Idempotent. g7_smp_stop: every worker powered off again (PSCI CPU_OFF), before any code that may
+ * start cores itself (an OS, Lab); returns a bit per core whose CPU_OFF came back (0 = all off). */
+int g7_smp_start(int want);
+int g7_smp_stop(void);
+uint64_t g7_smp_report(void);                   /* cores | broken << 4 | worker states | jobs << 24 */
+extern uint64_t g7_smp_stat[4];
+extern int g7_smp_on;                           /* cores taking row chunks now */
+
 /* ---- list helpers (no libc: plain loops) ---- */
 
 static inline void g7_layer_reset(struct g7_layer *l)

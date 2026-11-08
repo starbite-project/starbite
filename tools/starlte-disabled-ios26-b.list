@@ -1,0 +1,39 @@
+# iOS 26 on the S9, round 2 (2026-11-08): program-name prefixes for tools/ios26-launchd-tune.py --off-list.
+# From STARLTE TOP over the Nov 4 card boot (23 samples, average % of one core) plus their siblings.
+# Each also costs 5-15 MB of the 1792 MiB. Kept on purpose (SpringBoard / app launch talk to them
+# synchronously): pkd, chronod, profiled, ScreenTimeAgent, callservicesd, searchd, runningboardd,
+# locationd, coreduetd, mediaremoted, nsurlsessiond, PosterBoard, iconservicesagent.
+biomed                      # 7.4 %  Biome streams
+nehelper                    # 4.3 %, 82 % at 170 s  NetworkExtension helper (no VPN, no Wi-Fi)
+homed                       # 4.0 %  HomeKit
+eligibilityd                # 2.9 %, 47 % at 120 s  Apple Intelligence eligibility
+modelcatalogd               # 2.4 %  on-device models
+modelmanagerd               # 0.6 %
+generativeexperiencesd      # 0.6 %
+IntelligencePlatformCom     # 0.9 %  IntelligencePlatformComputeService
+intelligentroutingd         # 0.4 %
+HeuristicInterpreter        # 7 % at 270 s
+duetexpertd                 # 1.9 %  Siri suggestions experts
+identityservicesd           # 1.6 %  iMessage / FaceTime identity (no network)
+nfcd                        # 1.6 %  no NFC hardware here
+routined                    # 1.6 %  significant locations
+destinationd                # 1.4 %
+linkd                       # 1.3 %, 31 % at 270 s  App Intents indexing
+atc                         # 1.1 %  AirTraffic sync
+contextstored               # 1.0 %
+axassetsd                   # 0.9 %  accessibility asset downloads
+mapssyncd                   # 0.5 %
+transparencyd               # 0.4 %
+corespeechd                 # 0.4 %  "Hey Siri" (no microphone driver)
+suggestd                    # 0.4 %
+syncdefaultsd               # 0.4 %
+assistantd                  # Siri
+siriknowledged
+knowledgeconstructiond
+spotlightknowledged
+photoanalysisd
+mediaanalysisd
+cloudd                      # iCloud, no account
+bird                        # iCloud Drive
+installcoordinat            # installcoordinationd: SIGABRT loop, 13x in 300 s (EACCES creating its data directory)
+managedappdistri            # managedappdistributiond: SIGTRAP loop (MDM app distribution)

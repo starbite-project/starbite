@@ -356,8 +356,41 @@ void gd_items_list(const struct g7_layer *l, const int16_t (*bounds)[4], const s
 /* an item's drawn bounds in panel px (x0, y0, x1, y1), 0 if it draws nothing */
 int gd_bounds(const struct g7_layer *l, const struct g7_item *it, int16_t b[4]);
 int gd_init(void);
+int gd_prewarm(const struct g7_layer *l, const uint16_t *idx, unsigned n);  /* core 0: decode what idx shows */
 const struct sb7_font *gd_font(unsigned id);
 
 /* ---- glass.c ---- */
 void g7_poll(void);                             /* the g7_set_poll hook, between rows (glass.c) */
 extern float g_row_tmp[];                       /* shared row scratch (see glass.c) */
+
+/* ---- glass_smp.c: the other A55 cores as row workers ---- */
+#define G7_NCORES 4
+typedef void (*g7_rows_fn)(void *ctx, int y0, int y1, int core);
+void hw_wait_us(uint64_t us);
+/* the core running this code: 0 the boot core, 1..3 workers (MPIDR Aff1 on the phone; a thread
+ * index in the preview). Not volatile: the same within a call. */
+#ifdef M7_PREVIEW
+extern __thread int g7_cur_core;
+static inline int g7_core(void) { return g7_cur_core; }
+#else
+static inline int g7_core(void)
+{
+    uint64_t m;
+    __asm__("mrs %0, mpidr_el1" : "=r"(m));
+#ifdef G7_SMP_QEMU
+    return (int)(m & 3U);
+#else
+    return (int)((m >> 8) & 3U);
+#endif
+}
+#endif
+/* per-core row scratch for cores 1..3: 1 MiB each at the top of G7_CANVAS (0xE00000 .. 0x1100000;
+ * glass.c 0 .. 0x40000, glass_shade.c 0x40000 .., glass_wall.c 0x80000 ..). Core 0 keeps the
+ * buffers it always had. G7_CS(off, p0): this core's copy of the buffer p0. */
+#define G7_CSCR(k) (G7_CANVAS + 0xD00000UL + (uintptr_t)(k) * 0x100000UL)
+#define G7_CS(off, p0) (g7_core() ? (void *)(G7_CSCR(g7_core()) + (off)) : (void *)(p0))
+extern int g7_smp_on;                           /* cores taking chunks now (1: core 0 alone) */
+int g7_is_core0(void);
+/* rows [y0, y1) in chunks of grain rows, on every running core; returns when all are done. fn must
+ * write only its own rows' pixels and use per-core scratch (core = 0 .. G7_NCORES - 1). */
+void g7_par(g7_rows_fn fn, void *ctx, int y0, int y1, int grain);

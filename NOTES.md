@@ -2346,3 +2346,80 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   LLC/SNAP) which the driver converts to and from the radio's Ethernet frames. The decisive evidence was Windows'
   WLAN-AutoConfig log (8002 "network not available" at the association result) and Windows' first frame (60
   bytes, "ethertype" e1f5). Details: docs/WIFI-BCM4361.md, W2. WPA2: W2m (9545b0d) hardens the key path; untested.
+- 2026-11-07 11:30: **Windows 11 after the 22 GiB resize: profile + recovery fix (offline, from TWRP).** First boot reached
+  sign-in but "User Profile Service failed the sign-in"; the next boot hit WinRE's "not enough memory to create a ramdisk
+  device 0xc0000017". Causes: Users\starbite\NTUSER.DAT dirty (seq 203/202) with empty LOG1/LOG2 (the morning's hang at
+  Welcome + forced resets); the Windows 11 loader {a446ff58...} had recoveryenabled (16000009) = 1, and WinRE's ramdisk
+  cannot load with our memory map. Fixes: BCD 16000009 -> 0 (1 byte at file 0x5f4c, sha 7c71fea3...); NTUSER.DAT seq2 =
+  seq1 + header checksum (sha bc35c6e9...; the whole hive parses: 3026 keys); NTFS refused rw ("unsafe state": $LogFile
+  not empty after the resets, hiberfil.sys header RSTR) -> ntfsfix (journal emptied, dirty flag set: chkdsk on next boot),
+  hiberfil.sys signature zeroed. Originals: backup/20261107-win-profile/ (BCD b63f0fb8, NTUSER, SYSTEM, SOFTWARE, BCD logs).
+  The Windows UFS write fence (6613760..13518591) is wider than WINDOWS now (ends 12511999): tighten it.
+  11:45 follow-up: the next boot stopped at 0xc000014c (registry corrupt): SYSTEM was dirty too (600/599) and its
+  journals cannot complete it (LOG2 holds only seq 597, LOG1 is 0 bytes: the forced reset during the 11:00 boot, and
+  ntfsfix's journal reset may have lost LOG1's size update). Every hive was checked offline: both hive.py and regipy
+  walk them fully, every hbin divides into valid cells. Marked complete (seq2 = seq1 + checksum): SYSTEM (9a6041f5),
+  SECURITY, DEFAULT, Users\starbite UsrClass.dat, LocalService and NetworkService NTUSER.DAT. Originals:
+  backup/20261107-win-system, backup/20261107-win-hives. BBI (+ logs) is 0 bytes since 07:16 (the morning's chkdsk);
+  Windows reached sign-in with it that way, left as is. Lesson: no forced resets while Windows runs (leave via Start ->
+  Power -> Restart); turn off fast startup (HiberbootEnabled = 0) on the next offline visit.
+  12:00 follow-up: chkdsk ran, then a BSOD (registry, code not read) in the next boot. BBI + BBI.LOG1/2 were 0 bytes
+  (size lost with the first ntfsfix journal reset; Windows' own time stamps on this phone run 4 h behind TWRP's).
+  Moved aside as *.empty-20261107 so Windows creates a fresh BBI; CrashControl\AutoReboot = 0 in ControlSet001
+  (SYSTEM d74c8be4...) so a bugcheck stays on screen. ntfsfix again (the crashed boot died at hive load, little metadata
+  at stake). Other files emptied by the first reset: caches only (FontCache, spp cache.dat, notification db-shm).
+  12:20 follow-up: still a registry BSOD with BBI missing (the screen shows ~3 frames: the crash is before CrashControl
+  is read). Original BBI taken from the install image on the card, read-only over adb (scratch vhdx-extract.py: the VHDX
+  BAT + the inner GPT + $MFT scan): BBI 8192 B (seq 2/2 clean, root key only, 1143e1d2...), BBI.LOG1 8192 B, LOG2 0.
+  Copies in build/woa/vhdx-orig/. Written to config/ after one more ntfsfix (the crashed boot died at hive load).
+  12:30 ROOT CAUSE FOUND: the Windows UFS driver's bugcheck hook in the pmsg ring (TWRP /sys/fs/pstore/pmsg-ramoops-0)
+  logged "=UFSBUGCHECK BC=0x51 B1=0x13 ... B4=0xc000007f": REGISTRY_ERROR with STATUS_DISK_FULL. Reserved Storage is
+  on (ReserveManager: BaseHardReserveSize 5 GiB + BaseSoftReserveSize 1.5 GiB, ShippedWithReserves 1) and the volume
+  had 6.1 GiB free, so every ordinary write failed: the morning's Welcome-screen hang at 1.4 GB free, the profile error
+  and the registry bugchecks are all this. (The screen shows nothing: the crash reset is a normal RPON software reset.)
+  Fix: SOFTWARE ShippedWithReserves 0 + PassedPolicy 0 (9f4d904c); SYSTEM HibernateEnabledDefault 0 + HiberbootEnabled
+  0 (e530c047); hiberfil.sys and temp files deleted: 7206 MiB free. Lesson: read the pmsg ring FIRST after any Windows
+  crash (=UFSBUGCHECK). Tools: tools/woa/hive-check.py, hive-replay.py.
+- 2026-11-07 16:00: **Windows safety: drive letters and the UFS fence.** Task Manager showed drive letters C:..Z:: Windows had
+  mounted every UFS partition (D: BOTA0 .. F: EFS, G: PARAM, I: KEYSTORAGE, N: RECOVERY, O: RADIO, Q: PERSISTENT,
+  S: STEADY, ...). Writes there were always refused by the UFS driver's fence, but the fence still ended at 13518591
+  (layout v1), past WINDOWS' new end 12511999 into VENDOR/ODM/A16DATA. Fixed: MountedDevices keeps only C:
+  (hive-service.py letters C), mountmgr NoAutoMount = 1, and Exynos9810Ufs.sys protB_first (file 0x3f18)
+  13518592 -> 12512000, re-signed (2db63e45..., PE checksum valid; the previous 2d6c64ff kept in build/woa/ufs-sys).
+  Writable now exactly WINESP + WINDOWS = 6613760..12511999. Also today: A55 1053 -> 1950 MHz through sbthermal (ACPM
+  domain 2), confirmed from the CMU.
+- 2026-11-07 evening: **Windows 11 on the S9, today's firsts** (all with the user present; details in each track's doc):
+  - A55 clock 1053 -> 1950 MHz through ACPM domain 2 (sbthermal, CpuKhz; CMU read-back), max 55 °C. Task Manager keeps
+    showing its 1.05 GHz base-speed label.
+  - Half-resolution desktop: sbdisplay (display-only, copy mode, Scale 2: Windows draws 720x1480, doubled; no DECON/DSIM
+    writes) bound offline to ACPI\STRB0072 (hive-service.py bind --display-class). User: "working faster". 64 Hz shown =
+    a label; the S6E3HA8 is 60 Hz only (no safe overclock known, docs/WIN11-GPU.md 7.6a).
+  - Mali-G72 under Windows: sbmali T5 40/40 WRITE_VALUE + clears; T8 400/400 Mesa triangles (86528 px each) at 572 MHz
+    (ACPM domain 4 = G3D, proven from acpm_dvfs_exynos9810.h; MIF/INT refused in code), 0 faults, 43.6 °C.
+  - USB host: SBUSBXHC SSDT -> inbox usbxhci + USB 3.0 root hub. Firmware SSDTs must install at dispatch (ReadyToBoot
+    installs never reach Windows); module logs survive Windows in zone 0 (fastboot oem log dmesg at the menu).
+  - USB device (Starbite Link L1): INT3445 -> ufxsynopsys needed the Intel xDCI _DSM (attach), then Control\USBFN\Default
+    and USBFN\Configurations\Default (ufx01000, found with an ETW autologger); Enum\USBFN\GenericUsbFn now exists. The
+    bus connects only after IOCTL_GENERICUSBFN_ACTIVATE_USB_BUS from the sender (sblinkd, in the Startup folder).
+  - Wi-Fi: the bare-metal core in a Windows service (W1b) boots the BCM4361 in 160 ms and scans 23 APs; SbWifiCx (W2,
+    ACPI\STBW4361 via the WLAN4361 SSDT) installs, the adapter shows, scans see 10-13 APs, but Windows lists 0 (result
+    indication format, being fixed).
+  - Big cores: B1 probe, 0304 PMU writes + one CPU_ON each: M3 cores 1-3 ARRIVED in 1 ms (woa never got them running).
+  - Safety: phone partitions lose drive letters (MountedDevices C: only, NoAutoMount); UFS fence end tightened to
+    12511999. The build-time PPTT caused an early 0x7E (shelved). One-shot services running cmd.exe die (7034); offline
+    binds and hand-run self-elevating installers work. xtajit64.dll crashes (0xC0000094) predate us; PPTT fix pending.
+
+## 2026-11-08: new boot menu in BOOT (4-core renderer, new tiles, uniform labels)
+
+BOOT = build/menu/BOOT-new.img (sha256 1eaf6e21…), built from the verified backup
+backup/20261108-boot-before-menu7smp/BOOT.img (1cdeea25…) with only the loader (5ae4b95d…) and menu-v7.sbm (f7cda13c…)
+changed. First boot: menu after 15 s, cores 1-3 checked in at 0 ms. Phone measurements (MB3b): focus 47 → 14 ms,
+scroll 234 → 74 ms, intro glass 324 → 99 ms, bake 499 → 129 ms. Way back: dd the backup from TWRP (or Download mode).
+Lesson from the night before: catalog rows with no_launch = true get no loader watchdog; chain images arm their own.
+
+## 2026-11-08: 4-core menu fixed for One UI (FlexPMU hand-off)
+
+The first 4-core BOOT left A55 cores 1-3 in a FlexPMU state Samsung's 4.9 kernel couldn't online (cpu1-3 offline,
+reset within ~2 min). The workers now run Samsung's cal_cpu_enable / CPU_INFORM C2 + cal_cpu_disable sequence around
+PSCI CPU_ON/OFF. BOOT = build/menu/BOOT-smp2.img (d3a31942…): One UI ran with cpu 0-7 online and no reset (MH1 433 s;
+confirming boot held 5 min). Fallback: build/menu/BOOT-1core.img (5c32e2c0…); original: backup/20261108-boot-before-menu7smp.

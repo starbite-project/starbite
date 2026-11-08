@@ -1,0 +1,194 @@
+From d633b75a4808744d2ae1abf587f8e446485af432 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Sun, 8 Nov 2026 15:53:09 +0200
+Subject: [PATCH] patch: 0404-starlte-reset-quiesce-defaults.patch - the timed
+ reset never touches the card without its lock and parks it only when quiet;
+ test-boot defaults free the command line; versioned card overlay stamp
+
+- starlte_sd_dump_log: a bounded try-lock (2 s); without the lock no card log (-2) instead of writing
+  anyway (0377), which could land inside the worker's CMD25 to a root sector. The lock is kept until the
+  reset and sd.ready cleared, so no further root write starts.
+- starlte_sd_park: takes the lock itself when the card log did not (2 s, else no park), stops new
+  transfers, waits up to 1 s for DAT0 (programming) before LDO31 off, else no park.
+- reboot timer: starlte_dump_file before the card log (it reads through the queue).
+- sdlog defaults to 1 and msgbuf to 8 MiB when sweetreboot=N is set; the app-sandbox rename (0379)
+  only on a Mac device tree (sweetappsandbox=0/1 still forces it): 55 bytes of iOS test boot-args freed,
+  so the loader's " sbcrash=loader sbwdt=60" fits and its watchdog is armed.
+- card overlay stamp /private/var/db/starbite-overlay-sd4: a stamp from a kernel before 0403 (files
+  written as root) no longer counts as installed.
+---
+ bsd/dev/herolte_ufs.c     |  4 +++-
+ bsd/dev/starlte_overlay.c |  2 +-
+ bsd/dev/starlte_sd.c      | 46 +++++++++++++++++++++++++++++++--------
+ bsd/kern/kern_proc.c      | 11 +++++++++-
+ bsd/kern/subr_log.c       | 10 +++++++++
+ 5 files changed, 61 insertions(+), 12 deletions(-)
+
+diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
+index 73b8207d..951db04b 100644
+--- a/bsd/dev/herolte_ufs.c
++++ b/bsd/dev/herolte_ufs.c
+@@ -1272,6 +1272,9 @@ starlte_reboot_timer_thread(__unused void *arg, __unused wait_result_t wr)
+ 		return;                 /* herolte_log_thread flushes and resets itself */
+ 	}
+ 	printf("HEROLTE LOG: sweetreboot=%u reached with no UFS log: console tail to pmsg, reset to recovery\n", secs);
++	/* 0404: the file dump first: it reads through the card queue, and the card log below keeps the card
++	 * lock until the reset */
++	starlte_dump_file();
+ 	{
+ 		/* sdlog=1: the whole kernel log ring to the card's test range too (starlte_sd.c) */
+ 		extern struct msgbuf *msgbufp;
+@@ -1279,7 +1282,6 @@ starlte_reboot_timer_thread(__unused void *arg, __unused wait_result_t wr)
+ 		int lr = starlte_sd_dump_log(msgbufp->msg_bufc, (uint32_t)msgbufp->msg_size, (uint32_t)msgbufp->msg_bufx);
+ 		printf("HEROLTE LOG: kernel log to card: %d\n", lr);
+ 	}
+-	starlte_dump_file();
+ 	{
+ 		extern void starlte_sd_park(void);      /* 0401: a 1.8 V card powered off for TWRP */
+ 		starlte_sd_park();
+diff --git a/bsd/dev/starlte_overlay.c b/bsd/dev/starlte_overlay.c
+index 4bba22a1..13e23741 100644
+--- a/bsd/dev/starlte_overlay.c
++++ b/bsd/dev/starlte_overlay.c
+@@ -113,7 +113,7 @@ so_write_file(const char *path, uint32_t mode, const void *data, uint32_t size,
+ 	return err;
+ }
+ 
+-#define SO_STAMP_SD     "/private/var/db/starbite-overlay-sd"
++#define SO_STAMP_SD     "/private/var/db/starbite-overlay-sd4"   /* 0404: versioned (owners since 0403) */
+ 
+ /* The overlay CRC from the last install, or 0. */
+ static uint32_t
+diff --git a/bsd/dev/starlte_sd.c b/bsd/dev/starlte_sd.c
+index 6fdc6d99..66ae49b5 100644
+--- a/bsd/dev/starlte_sd.c
++++ b/bsd/dev/starlte_sd.c
+@@ -352,6 +352,7 @@ csd_sectors(const uint32_t c[4])
+ static bool sd_uhs_failed;      /* the 1.8 V switch failed once this boot: never again */
+ static bool sd_v18;             /* the card signals at 1.8 V */
+ static int sd_mode;             /* 0 default speed, 1 high speed (3.3 V), 2 SDR25, 3 SDR50 */
++static bool sd_reset_locked;    /* 0404: the reset path holds starlte_sd_lock for good */
+ static uint8_t sd_tune_mask, sd_tune_phase;
+ 
+ static const char *
+@@ -921,18 +922,31 @@ int starlte_sd_dump_log(const void *ring, uint32_t size, uint32_t bufx);
+ int
+ starlte_sd_dump_log(const void *ring, uint32_t size, uint32_t bufx)
+ {
+-	uint32_t on = 0;
+-	PE_parse_boot_argn("sdlog", &on, sizeof(on));
++	uint32_t on = 0, reboot_s = 0;
++	if (!PE_parse_boot_argn("sdlog", &on, sizeof(on))) {
++		/* 0404: a timed test boot (sweetreboot=N) saves its log unless sdlog=0 */
++		on = PE_parse_boot_argn("sweetreboot", &reboot_s, sizeof(reboot_s)) && reboot_s;
++	}
+ 	if (!on || sd.state != 1 || sd.card_sectors != 249999360ULL || ((uintptr_t)ring & 7) ||
+ 	    size == 0 || size > (64u << 20) - SECTOR) {
+ 		return -1;
+ 	}
+-	/* a busy desktop is often mid-transfer at the reset (boot 150628: -2, no log): wait up to
+-	 * 500 ms for the lock, then write anyway; the interrupted transfer is lost to the reset regardless */
++	/*
++	 * 0404: never touch the controller without the lock (0377 wrote anyway after 500 ms, and could land
++	 * in the middle of the worker's CMD25 to a root sector). Wait up to 2 s for the worker to finish its
++	 * buf; if it does not, no card log (pmsg keeps the tail). Once taken the lock is kept: the reset
++	 * follows, and no further root write may start (starlte_sd_park relies on it).
++	 */
+ 	bool locked = false;
+-	for (int i = 0; i < 500 && !(locked = lck_mtx_try_lock(&starlte_sd_lock)); i++) {
++	for (int i = 0; i < 2000 && !(locked = lck_mtx_try_lock(&starlte_sd_lock)); i++) {
+ 		delay(1000);
+ 	}
++	if (!locked) {
++		printf("STARBITE SD: card log skipped: the card stayed busy for 2 s\n");
++		return -2;
++	}
++	sd_reset_locked = true;
++	sd.ready = false;
+ 	const uint64_t first = 249868288ULL, count = 131072ULL;
+ 	uint64_t hdr[SECTOR / 8] = { 0 };
+ 	memcpy(hdr, "SBLOG001", 8);
+@@ -975,10 +989,7 @@ starlte_sd_dump_log(const void *ring, uint32_t size, uint32_t bufx)
+ 		r = write_chunk(first + 1 + done, n, (const uint64_t *)(const void *)(p + (size_t)done * SECTOR));
+ 		done += n;
+ 	}
+-	if (locked) {
+-		lck_mtx_unlock(&starlte_sd_lock);
+-	}
+-	return r;
++	return r;                       /* the lock stays held until the reset (0404) */
+ }
+ 
+ /*
+@@ -1327,6 +1338,23 @@ starlte_sd_park(void)
+ 	if (!sd_v18) {
+ 		return;
+ 	}
++	/* 0404: quiesce first: hold the lock (taken by the card log already, or here within 2 s; kept until
++	 * the reset), no new transfers, and the card done programming (DAT0 released, at most 1 s). Otherwise
++	 * no park: the loader and TWRP power-cycle the card themselves. */
++	if (!sd_reset_locked) {
++		for (int i = 0; i < 2000 && !(sd_reset_locked = lck_mtx_try_lock(&starlte_sd_lock)); i++) {
++			delay(1000);
++		}
++		if (!sd_reset_locked) {
++			printf("STARBITE SD: park skipped: the card stayed busy for 2 s\n");
++			return;
++		}
++	}
++	sd.ready = false;
++	if (sd.state == 1 && wait_reg(STATUS, 1U << 9, 0, 1000)) {
++		printf("STARBITE SD: park skipped: the card is still programming after 1 s\n");
++		return;
++	}
+ 	bool ok = starlte_pmic_write(1, 0x68, 0x28) && starlte_pmic_write(1, 0x4a, 0x3c);
+ 	printf("STARBITE SD: card parked for the reset (LDO31 off, LDO2 3.3 V off)%s\n", ok ? "" : ": ACPM write failed");
+ }
+diff --git a/bsd/kern/kern_proc.c b/bsd/kern/kern_proc.c
+index e8b493a5..663f3f6a 100644
+--- a/bsd/kern/kern_proc.c
++++ b/bsd/kern/kern_proc.c
+@@ -3677,12 +3677,21 @@ csops_audittoken(__unused proc_t p, struct csops_audittoken_args *uap, __unused
+  * Only a process asking about itself (libsecinit) gets the renamed copy: hiding the key from
+  * WindowServer's checks of its clients left it spinning before its first frame (boot 152643).
+  */
++#include <pexpert/device_tree.h>
+ static void
+ sweet_strip_app_sandbox(uint8_t *buf, size_t len)
+ {
+ 	static int keep = -1;
+ 	if (keep < 0) {
+-		keep = 0;
++		/* 0404: only macOS userland needs it: on any other device tree (iOS) keep the entitlement unless
++		 * sweetappsandbox=0, as the "model" test of 0367 / 0373 does */
++		DTEntry root;
++		const void *model = NULL;
++		unsigned int msize = 0;
++		bool mac = SecureDTLookupEntry(NULL, "/", &root) == kSuccess &&
++		    SecureDTGetProperty(root, "model", &model, &msize) == kSuccess && msize >= 3 &&
++		    memcmp(model, "Mac", 3) == 0;
++		keep = mac ? 0 : 1;
+ 		PE_parse_boot_argn("sweetappsandbox", &keep, sizeof(keep));
+ 	}
+ 	static const char key[] = "com.apple.security.app-sandbox";
+diff --git a/bsd/kern/subr_log.c b/bsd/kern/subr_log.c
+index 53aba1c5..a58d52e7 100644
+--- a/bsd/kern/subr_log.c
++++ b/bsd/kern/subr_log.c
+@@ -841,6 +841,16 @@ oslog_init_msgbuf(void)
+ 	if (PE_parse_boot_argn("msgbuf", &msgbuf_size, sizeof(msgbuf_size))) {
+ 		(void) log_setsize(msgbuf_size);
+ 	}
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	/* Starbite (0404): a timed test boot (sweetreboot=N) gets the 8 MiB ring the card log (sdlog) saves,
++	 * without msgbuf= on the 607-byte command line */
++	else {
++		uint32_t reboot_s = 0;
++		if (PE_parse_boot_argn("sweetreboot", &reboot_s, sizeof(reboot_s)) && reboot_s) {
++			(void) log_setsize(8 * 1024 * 1024);
++		}
++	}
++#endif
+ }
+ STARTUP(OSLOG, STARTUP_RANK_SECOND, oslog_init_msgbuf);
+ 

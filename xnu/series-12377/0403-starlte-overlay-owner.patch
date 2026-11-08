@@ -1,0 +1,76 @@
+From 862bea53207d66f682cf7011c314e3f8e3305ee2 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Sun, 8 Nov 2026 14:32:36 +0200
+Subject: [PATCH] patch: 0403-starlte-overlay-owner.patch - overlay entries
+ carry uid/gid in their 8 reserved bytes (0 = root:wheel as before), so files
+ under /private/var/mobile keep the mobile owner
+
+---
+ bsd/dev/starlte_overlay.c | 19 ++++++++++---------
+ 1 file changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/bsd/dev/starlte_overlay.c b/bsd/dev/starlte_overlay.c
+index 74586d04..4bba22a1 100644
+--- a/bsd/dev/starlte_overlay.c
++++ b/bsd/dev/starlte_overlay.c
+@@ -7,7 +7,8 @@
+  *
+  *   "SBOVL001", u32 count, u32 version (1), then count x 256 bytes:
+  *   char path[232] (absolute, NUL padded), u32 mode, u32 size, u32 CRC32,
+- *   u32 offset (from the overlay start, 4 KiB aligned), 8 bytes zero
++ *   u32 offset (from the overlay start, 4 KiB aligned), u32 uid, u32 gid
++ *   (0403: the owner; 0 = root:wheel, which is what older overlays carry there)
+  *
+  * Each file is read whole, checked against its CRC32 and written over the
+  * old one (O_TRUNC); only into directories that already exist. The store
+@@ -43,7 +44,7 @@ void starlte_overlay_install(void);
+ struct so_entry {
+ 	char            path[232];
+ 	uint32_t        mode, size, crc, offset;
+-	uint8_t         zero[8];
++	uint32_t        uid, gid;               /* 0403 */
+ };
+ 
+ static uint32_t so_crc_table[256];
+@@ -85,7 +86,7 @@ so_read(vnode_t dev, vfs_context_t ctx, void *buf, uint32_t len, uint64_t off)
+ }
+ 
+ static int
+-so_write_file(const char *path, uint32_t mode, const void *data, uint32_t size, vfs_context_t ctx)
++so_write_file(const char *path, uint32_t mode, const void *data, uint32_t size, vfs_context_t ctx, uint32_t uid, uint32_t gid)
+ {
+ 	vnode_t vp = NULLVP;
+ 	int err = vnode_open(path, O_CREAT | O_TRUNC | FWRITE, (int)(mode & 07777), 0, &vp, ctx);
+@@ -104,8 +105,8 @@ so_write_file(const char *path, uint32_t mode, const void *data, uint32_t size,
+ 		struct vnode_attr va;
+ 		VATTR_INIT(&va);
+ 		VATTR_SET(&va, va_mode, mode & 07777);
+-		VATTR_SET(&va, va_uid, 0);
+-		VATTR_SET(&va, va_gid, 0);
++		VATTR_SET(&va, va_uid, uid);
++		VATTR_SET(&va, va_gid, gid);
+ 		err = vnode_setattr(vp, &va, ctx);
+ 	}
+ 	(void)vnode_close(vp, FWRITE, ctx);
+@@ -291,9 +292,9 @@ so_apply(vnode_t dev, vfs_context_t ctx, uint64_t ov_off, uint64_t ov_size, uint
+ 			failed++;
+ 			continue;
+ 		}
+-		err = so_write_file(path, e->mode, data, e->size, ctx);
+-		printf("STARLTE OVERLAY: %s (%u bytes, mode %o) %s %d\n", path, e->size, e->mode,
+-		    err ? "FAILED" : "written", err);
++		err = so_write_file(path, e->mode, data, e->size, ctx, e->uid, e->gid);
++		printf("STARLTE OVERLAY: %s (%u bytes, mode %o, owner %u:%u) %s %d\n", path, e->size, e->mode,
++		    e->uid, e->gid, err ? "FAILED" : "written", err);
+ 		if (err) {
+ 			failed++;
+ 		} else {
+@@ -303,7 +304,7 @@ so_apply(vnode_t dev, vfs_context_t ctx, uint64_t ov_off, uint64_t ov_size, uint
+ 	if (failed == 0) {
+ 		char text[9];
+ 		snprintf(text, sizeof(text), "%08x", ov_crc);
+-		(void)so_write_file(so_card ? SO_STAMP_SD : SO_STAMP, 0644, text, 8, ctx);
++		(void)so_write_file(so_card ? SO_STAMP_SD : SO_STAMP, 0644, text, 8, ctx, 0, 0);
+ 	}
+ 	printf("STARLTE OVERLAY: %s overlay %08x: %u files written, %u failed\n", so_card ? "card" : "store", ov_crc,
+ 	    written, failed);

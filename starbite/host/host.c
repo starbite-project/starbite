@@ -145,9 +145,20 @@ static void dump_log(void)
     for (unsigned i = 0; i < sb_log_count(); ++i)
         printf("log: %s\n", sb_log_line(i));
 }
-void sb_reboot(uint32_t inform3) { dump_log(); printf("host: reboot (inform3 %#x)\n", inform3); exit(0); }
-void sb_power_off(void) { dump_log(); printf("host: power off\n"); exit(0); }
-void sb_boot_next(const char *key) { printf("host: boot-next %s\n", key); exit(0); }
+void (*sb_before_reset)(void);
+static void host_before_reset(void)
+{
+    void (*f)(void) = sb_before_reset;
+    sb_before_reset = 0;
+    if (f)
+        f();
+    if (getenv("HOST_LOGTAIL"))                 /* the log so far, for scripts that end in a reset */
+        for (unsigned i = 0; i < sb_log_count(); ++i)
+            printf("log: %s\n", sb_log_line(i));
+}
+void sb_reboot(uint32_t inform3) { host_before_reset(); dump_log(); sb_log("reboot"); printf("host: reboot (inform3 %#x)\n", inform3); exit(0); }
+void sb_power_off(void) { host_before_reset(); dump_log(); printf("host: power off\n"); exit(0); }
+void sb_boot_next(const char *key) { host_before_reset(); printf("host: boot-next %s\n", key); exit(0); }
 int sb_boot_next_peek(char key[24]) { key[0] = 0; return 0; }
 void sb_boot_next_clear(void) { printf("host: boot-next cleared\n"); }
 
@@ -833,6 +844,85 @@ int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier)
     sb_log(domain == 4 ? "acpm dvfs domain 4 (host)" : "acpm dvfs (host)");
     return 1;
 }
+/* APM SRAM reads (Overclocking): the fake SRAM at 0x02039000 (seed() puts oc-fake.c's fvmap there) */
+int sb_acpm_sram_read(uint32_t off, void *dst, uint32_t len)
+{
+    if ((off & 3U) || (len & 3U) || off >= 0x30000U || len > 0x30000U - off)
+        return 0;
+    memcpy(dst, (const void *)(0x02039000UL + off), len);
+    return 1;
+}
+/* ACPM DVFS for Overclocking: a fake current step per domain (FREQ_GET), requests by listed step only */
+static uint32_t dvfs_now[16] = { 1794000, 534000, 1794000, 1066000, 260000, 690000, 336000, 690000, 534000,
+                                 1180000, 534000, 534000, 950000 };
+static uint32_t dvfs_base[16];
+static uint8_t dvfs_base_ok[16];
+int sb_acpm_dvfs_get(uint32_t domain, uint32_t *khz)
+{
+    if (domain >= 13)
+        return 0;
+    *khz = 0;                               /* as the phone's ACPM (ocself-3, 2026-11-08): FREQ_GET answers 0 */
+    return 1;
+}
+int sb_acpm_dvfs_baseline(uint32_t domain, uint32_t *khz)
+{
+    if (domain >= 13 || !dvfs_base_ok[domain])
+        return 0;
+    *khz = dvfs_base[domain];
+    return 1;
+}
+static void dvfs_set(uint32_t domain, uint32_t khz)
+{
+    dvfs_now[domain] = khz;
+    if (domain == 4)
+        w32(0x17400140, pll(khz * 16U / 26000U, 4, 2));
+    if (domain == 2)
+        w32(0x1d000140, pll(khz * 2U / 26000U, 2, 0));
+    if (domain == 0)
+        w32(0x1b800120, pll(khz * 4U / 26000U, 2, 0));
+}
+int sb_acpm_dvfs_step(uint32_t domain, uint32_t khz, int tier, const uint32_t *steps, unsigned n)
+{
+    const char *why;
+    int listed = 0;
+    for (unsigned i = 0; i < n && i < 32; ++i)
+        listed |= steps[i] == khz && khz;
+    if (domain >= 13 || !listed || sb_gate_check(SB_SP_DVFS, 0, domain, 1, tier < 3 ? 3 : tier, &why))
+        return 0;
+    dvfs_set(domain, khz);
+    sb_log("acpm dvfs (listed step) (host)");
+    return 1;
+}
+unsigned sb_acpm_dvfs_untrusted(void) { return 0; }
+/* libsb ocp.c (M3 system registers): never reached here (the preview has no M3 cores) */
+void sb_ocp_worker(unsigned w, void *arg) { (void)w; (void)arg; }
+int sb_acpm_dvfs_set_baseline(uint32_t domain, uint32_t khz)
+{
+    if (domain >= 13 || !khz)
+        return 0;
+    if (dvfs_base_ok[domain])
+        return dvfs_base[domain] == khz;
+    dvfs_base[domain] = khz;
+    dvfs_base_ok[domain] = 1;
+    return 1;
+}
+int sb_acpm_dvfs_revert(uint32_t domain)
+{
+    if (domain >= 13 || !dvfs_base_ok[domain])
+        return 0;
+    dvfs_set(domain, dvfs_base[domain]);
+    sb_log("acpm dvfs revert (host)");
+    return 1;
+}
+/* the watchdog: state only */
+static int wdt_host;
+unsigned sb_wdt_arm(unsigned secs) { if (!wdt_host) sb_log("watchdog: armed (host)"); wdt_host = 1; return secs; }
+void sb_wdt_feed(int now) { (void)now; }
+void sb_wdt_disarm(void) { if (wdt_host) sb_log("watchdog: disarmed (host)"); wdt_host = 0; }
+int sb_wdt_armed(void) { return wdt_host; }
+/* oc-fake.c (linked by preview.sh only; the Utility OS preview leaves it out) */
+uint32_t oc_fake_ect(uint8_t *buf, uint32_t cap) __attribute__((weak));
+uint32_t oc_fake_fvmap(uint8_t *buf, uint32_t cap) __attribute__((weak));
 /* tier 4 attempts: the preview cannot map anything (the fake probe faults unmapped addresses) */
 int sb_mmu_map_temp(uint64_t pa) { (void)pa; return -1; }
 void sb_mmu_unmap_temp(void) {}
@@ -1630,6 +1720,49 @@ static void labtour_generate(void)
     tadd("L:audit: cancelled at the red warning: Register write");
     tadd("x:lab.tier4");
     lt_home(3);
+    /* Overclocking end to end: Clocks > Overclocking > A55, step 1456 MHz (tier 3: warning, Continue,
+     * "A55" typed, slide, Power held 3 s), kept with Power, the stability test declined; then the
+     * guards must be on; "Back to the default step" (row 15) must revert and lift them */
+    lt_tab(3);
+    lt_row(6);
+    tadd("T:Overclocking");
+    lt_row(2);
+    tadd("T:A55 steps");
+    lt_row(3);
+    tadd("T:Before you write");             /* the journal, once per session: tier 1 (Continue, slide) */
+    lt_row(0);
+    tadd("h:u:1900");
+    tadd("w:900");
+    tadd("T:Before you write");             /* then the request itself: tier 3 */
+    lt_row(0);
+    tadd("w:600");
+    tadd("t:120,1585");
+    tadd("t:360,2435");
+    tadd("t:360,2435");
+    tadd("t:1080,2605");
+    tadd("w:900");
+    tadd("h:u:1900");
+    tadd("w:900");
+    tadd("h:p:3500");
+    tadd("w:2500");
+    tadd("L:oc journal: allowed for this session");
+    tadd("L:oc journal: written ufs:ocj-");
+    tadd("L:oc request A55 1456000 kHz");      /* row 3: 1950, 1794, 1690, 1456 (2002 is above Samsung's max) */
+    tadd("L:watchdog: armed (host)");
+    tadd("L:storage held: overclocking");
+    tadd("k:p");
+    tadd("w:900");
+    tadd("k:u");
+    tadd("k:p");
+    tadd("w:900");
+    tadd("L:kept");
+    lt_row(15);
+    tadd("w:900");
+    tadd("L:oc reverted (PLL agrees) A55 1794000 kHz");
+    tadd("L:oc baseline (PLL) A55 1794000 kHz");
+    tadd("L:watchdog: disarmed (host)");
+    tadd("L:storage hold lifted");
+    lt_home(3);
     tadd("Q");
     cmds = tl;
     ncmd = tn;
@@ -1920,6 +2053,26 @@ static void seed(void)
     w32(0x10070048, (uint32_t)(top[5] + 25) | (uint32_t)(top[6] + 25) << 9 | (uint32_t)(top[7] + 25) << 18);
     w32(0x10074040, (uint32_t)(sub[0] + 25) | (uint32_t)(sub[1] + 25) << 9);
     w32(0x10074044, (uint32_t)(sub[2] + 25));
+    /* Overclocking: a synthetic ECT at 0xA0000000 and ACPM's plugin table and fvmap in APM SRAM */
+    if (oc_fake_ect && oc_fake_fvmap) {
+        (void)oc_fake_ect((uint8_t *)0xa0000000UL, 0x100000U);
+        /* ACPM's plugin table as vendor acpm.c reads it (initdata +0x7F00: plugins, num_plugins; 0x30 bytes
+         * each: id, base_addr | 1, ..., size at +0x24, fw_name at +0x2C): PMIC, then DVFS at 0x10000 with its
+         * name at an unaligned offset; the fvmap at the DVFS plugin + 0x6700 */
+        w32(0x02039000UL + 0x7f00, 0x7000);
+        w32(0x02039000UL + 0x7f04, 2);
+        w32(0x02039000UL + 0x7000, 0);
+        w32(0x02039000UL + 0x7004, 0x4001);
+        w32(0x02039000UL + 0x7024, 0x2000);
+        w32(0x02039000UL + 0x702c, 0x7100);
+        memcpy((void *)(0x02039000UL + 0x7100), "PMIC", 5);
+        w32(0x02039000UL + 0x7030, 1);
+        w32(0x02039000UL + 0x7034, 0x10001);
+        w32(0x02039000UL + 0x7054, 0x6000);
+        w32(0x02039000UL + 0x705c, 0x7111);
+        memcpy((void *)(0x02039000UL + 0x7111), "ACPM_DVFS", 10);
+        (void)oc_fake_fvmap((uint8_t *)(0x02039000UL + 0x10000U + 0x6700U), 0x2000U);
+    }
     /* clocks: A55 on its PLL (1794 MHz), shared PLLs, MIF, G3D */
     w32(0x1d000140, pll(138, 2, 0));
     w32(0x17400140, pll(160, 4, 2));        /* PLL_G3D: S-Boot's 260 MHz */

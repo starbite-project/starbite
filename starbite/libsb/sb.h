@@ -385,6 +385,7 @@ int sb_gate_check(unsigned space, unsigned lu, uint64_t first, uint64_t count, i
 #define SB_W_AUTH    -104                   /* no confirmed authorisation covers it */
 #define SB_W_IO      -105                   /* the device reported an error */
 #define SB_W_BACKUP  -106                   /* tier 3 storage without a verified backup */
+#define SB_W_HOLD    -107                   /* storage held (overclocking active): nothing written */
 struct sb_wdecide {
     int tier;                               /* 1, 2, 3 (SB_TIER_NO when refused) */
     char part[24];                          /* GPT partition, "boot LU n", "microSD" */
@@ -443,6 +444,12 @@ typedef void (*sb_m3_prep_fn)(void);
 /* Called before CPU_ON of an M3 core when set (the vendor PMU defaults: the application sets it
  * once the user confirmed those PMU writes). */
 extern sb_m3_prep_fn sb_smp_m3_prep;
+/* Samsung's FlexPMU steps for the M3 cores (smp.c; one implementation for sb_smp_start / sb_smp_stop and
+ * Starbite OS's heater, which launches and sheds single M3 cores): the boot state, core n on (first: the
+ * cluster), core n's C2 hint before its CPU_OFF (never the cluster-off request). The boot core only. */
+void sb_m3_fp_reset(void);
+void sb_m3_fp_on(unsigned w, int first);
+void sb_m3_fp_off(unsigned w);
 /* The vendor PMU defaults the M3 cluster needs before CPU_ON (xnu patch 0304; the values Engineer OS writes
  * after its tier 3 confirmation): CPU_QCH_CLUSTER1_NONCPU_SYS_PWR_REG [31:24] = 0x8d, MEMORY_CLUSTER1 CPU0..3
  * and NONCPU OPTION [1:0] = 2. Only those fields of those six registers, only when they differ. For Starbite
@@ -474,6 +481,28 @@ extern volatile uint64_t sb_worker_boot[8];
 extern volatile uint64_t sb_worker_rec[64];        /* per core: the start record crt0.S uses with PSCI's context id */
 /* 1 if core w's last start used its own record: the firmware passes PSCI CPU_ON's context id */
 int sb_smp_own_record(unsigned w);
+
+/* ---- M3 over-current protection, read side (ocp.c; vendor exynos-ocp.c) -------------------------
+ * Shared by Engineer OS Overclocking and Starbite OS. The M3 system registers (implementation
+ * defined, M3 only): OCPTHROTTCTL S3_0_C15_C12_7 (TEW bit 2, TRW bits 7:3, BPC 20:16, TCRST 23:21,
+ * OCPBPCHIT bit 26, OCPTHROTTERRA bit 27), OCPTHROTTCNTA S3_0_C15_C14_4 (TDCEN bit 0, TDT 31:20),
+ * OCPINTCTL S3_0_C15_C12_5 (IRP bits 9:4), GCUCTL S3_1_C15_C11_0 (OCPTHROTTERRAEN bit 24, OCPBPCEN
+ * bit 25), OCPTIDEPBOTTHRESH S3_0_C15_C15_1 (BPT 23:0). Samsung's limits (exynos9810.dtsi): M3
+ * max-freq-wo-ocp 1794000; busy M3 cores 1 -> 2704000 (cpufreq max; no BIGTURBO in this ECT),
+ * 2 -> 2314000, 3-4 -> 1794000; A55 max 1950000. */
+#define SB_OCP_PMIC_WARN1 0xd3U             /* S2MPS18 PMIC: bit 7 enable, 6 reset, 4:0 level */
+#define SB_OCP_PMIC_WARN2 0xd4U
+#define SB_OCP_THROTTERRA (1ULL << 27)      /* OCPTHROTTCTL: the GCU throttled (write 0 to clear) */
+#define SB_OCP_IRP_SHIFT 4U
+#define SB_OCP_IRP_MASK 0x3fU
+#define SB_OCP_FMIN_KHZ 650000U             /* cpufreq domain1 min-freq, the IRP formula's f_min */
+#define SB_M3_MAX_KHZ 2704000U
+#define SB_M3_DUAL_KHZ 2314000U
+#define SB_M3_QUAD_KHZ 1794000U
+#define SB_A55_MAX_KHZ 1950000U
+int sb_ocp_pmic(uint8_t *warn1, uint8_t *warn2);   /* 1 both read */
+unsigned sb_ocp_irp(uint32_t khz, uint32_t min_khz);  /* 2 * f / f_min - 2, clamped to 0..63 */
+void sb_ocp_worker(unsigned w, void *arg);  /* on an M3 worker: reads the registers (see ocp.c) */
 
 /* ---- CMGP ADC and thermistors (adc.c) --------------------------------------------------------- */
 
@@ -530,6 +559,45 @@ int sb_dvfs_level_listed(uint32_t domain, uint32_t khz);   /* pure: 1 if khz is 
 uint32_t sb_m3_ocp_max_khz(unsigned busy);          /* 1.1-beta6, pure: Samsung's M3 core-count table */
 int sb_m3_ocp_level_ok(uint32_t khz, unsigned busy); /* pure: a listed M3 level, or 2314 / 2704 within the table */
 int sb_acpm_dvfs_m3_ocp(uint32_t khz, unsigned busy);
+/* Master plan rule 3 (amended 2026-11-08): sb_acpm_dvfs refuses MIF (0) and INT (1); only
+ * sb_acpm_dvfs_step may name them, and only with a step of the table the caller passes (Engineer
+ * OS's Overclocking category: the ECT levels ACPM's fvmap also lists).
+ * Overclocking (engineer/oc.c). FREQ_GET { domain, 0, 1, 0 }: the domain's current kHz (no
+ * write; domains 0-12). The first successful read of a domain, or the read sb_acpm_dvfs makes before its first
+ * request, is recorded as that domain's baseline; sb_acpm_dvfs_revert sends exactly that value,
+ * without an authorisation (it can only restore what was there). */
+#define SB_DVFS_NDOM 16U
+#define SB_DVFS_DOMAINS 13U                 /* ACPM DVFS ids 0 MIF .. 12 CP */
+int sb_acpm_dvfs_step(uint32_t domain, uint32_t khz, int tier, const uint32_t *steps, unsigned n);
+int sb_acpm_dvfs_get(uint32_t domain, uint32_t *khz);
+int sb_acpm_dvfs_baseline(uint32_t domain, uint32_t *khz);
+int sb_acpm_dvfs_revert(uint32_t domain);
+/* The baseline from the caller (the PLL's step: this firmware answers FREQ_GET with 0): set once,
+ * only before any request named the domain; 1 set or already equal. */
+int sb_acpm_dvfs_set_baseline(uint32_t domain, uint32_t khz);
+/* Non-zero once a DVFS message timed out or a late reply was dropped (acpm_send drains stale
+ * replies before each request): FREQ_GET is then not proof on its own. */
+unsigned sb_acpm_dvfs_untrusted(void);
+/* Read-only: len bytes of APM SRAM from offset off (both 4-aligned); 0 if out of range or a word
+ * faulted. */
+int sb_acpm_sram_read(uint32_t off, void *dst, uint32_t len);
+/* The AP channel table entry i: id, field, owner, type. */
+int sb_acpm_chan_info(unsigned i, uint32_t out[4]);
+/* Storage hold: while why is set, sb_write and sb_write_store refuse every block write
+ * (SB_W_HOLD), whatever the authorisation (overclocking: no storage write while a clock is off
+ * its default step). 0 lifts it. */
+void sb_storage_hold(const char *why);
+const char *sb_storage_held(void);
+/* The cluster 1 hardware watchdog as a dead-man (wdt.c): arm for secs (10..82; if the loader
+ * armed it already, only fed), feed (at most once a second unless now), disarm (back to exactly
+ * what was there; left armed if it was the loader's). */
+unsigned sb_wdt_arm(unsigned secs);
+void sb_wdt_feed(int now);
+void sb_wdt_disarm(void);
+int sb_wdt_armed(void);
+/* Called first by sb_reboot, sb_power_off and sb_boot_next when set (Overclocking: every domain
+ * back to its default step, the watchdog disarmed). */
+extern void (*sb_before_reset)(void);
 
 /* ---- the Mali-G72 (mali.c, mali_desc.c) ------------------------------------------------------- */
 

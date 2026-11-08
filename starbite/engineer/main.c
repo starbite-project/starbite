@@ -9,6 +9,7 @@
  * Tools > Exit to the boot menu; Tools > Reboot and power for the other modes).
  */
 #include "eng.h"
+#include "oc.h"
 
 struct eng E;
 int cur_tab;
@@ -95,6 +96,7 @@ static void tick(void)
 {
     uint64_t now = sb_ms();
     armed_tick();
+    oc_tick();                          /* the overclocking watchdog feed */
     if (now - tick_last >= 1000) {
         tick_last = now;
         dash_sample();                  /* the dashboard's and the battery graph's history */
@@ -483,6 +485,9 @@ void sb_main(void)
     ui_input_reset();
     E.tab_req = -1;
     cur_tab = 0;
+#ifdef OC_SELFTEST
+    oc_selftest_boot();                     /* read only: tables to pmsg, then recovery (no return) */
+#endif
     for (;;) {
         E.home = 0;
         E.depth = 0;

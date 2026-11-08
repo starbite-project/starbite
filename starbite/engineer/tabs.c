@@ -4,6 +4,7 @@
  * Starbite Lab tests (lab.c) and utilities (util.c) of v2.
  */
 #include "eng.h"
+#include "oc.h"
 
 static const char *const tab_hint[NTABS] = {
     "",
@@ -84,6 +85,7 @@ void tab_build(int t)
         row_add("Every thermal sensor", "all TMU probes, thermistors, fuel gauge", 0);
         row_add("GPU (Mali-G72)", "power, voltage, ID, cores (read only)", 0);
         row_add("GPU tests", "power up, jobs, fill, stress, DVFS", R_WARN);
+        row_add("Overclocking", "every DVFS domain: steps, voltages, caps (read only)", 0);
         kv_hdr("TIME");
         row_add("Real-time clock", "S2MPS18 RTC, live", 0);
         row_add("Timer", "generic timer vs RTC", 0);
@@ -202,8 +204,9 @@ void tab_open(int t, int i)
     case 0x63: lab_sensors(); break;
     case 0x64: info_screen("GPU (Mali-G72)", fill_gpu, 1000); break;
     case 0x65: lab_gpu(); break;
-    case 0x66: info_screen("Real-time clock", fill_rtc, 500); break;
-    case 0x67:
+    case 0x66: oc_page(); break;
+    case 0x67: info_screen("Real-time clock", fill_rtc, 500); break;
+    case 0x68:
         measure_timer();
         info_screen("Timer", fill_timer, 500);
         break;

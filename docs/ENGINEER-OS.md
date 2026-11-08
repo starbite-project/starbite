@@ -223,7 +223,7 @@ display test, touch paint, keys) read the keys directly for the same reason.
 | Dashboard | TABS (every other tab, for keys), LEAVE; live tiles (A55 / M3 MHz, hottest °C, GPU, battery, current, RAM, uptime), current graph; Device information, SoC and CPU, Memory map, Reset and boot reason, Battery graph |
 | Tests | **STARBITE LAB**: Full health check, CPU stress, Memory stress, Thermal test, Battery tests, Storage test, Display stress, Touch grid, **GPU tests** (v2.1). **QUICK TESTS** (v1): Core bring-up test, Memory test, Memory bandwidth, Display test, Display panel, Brightness, Touch screen, Keys, Speed test. **RESULTS**: Test history (v2.1: with the tier 3 / 4 actions), Save report to the OS store |
 | Power | Battery and charger, Battery graph, **Battery tests**, PMIC regulators, PMIC register dump, Touch rails (tier 1, real), **PMIC and charger writes**, Reboot and power |
-| Clocks | CPU, Clocks, Temperatures, **Every thermal sensor**, GPU (Mali-G72), **GPU tests**, Real-time clock, Timer |
+| Clocks | CPU, Clocks, Temperatures, **Every thermal sensor**, GPU (Mali-G72), **GPU tests**, **Overclocking** (read only, section 14), Real-time clock, Timer |
 | Storage | UFS host controller, UFS device and health, Partitions, GPT viewer, **Partitions and LUs**, Sector viewer (**any medium / LU, edit**), Speed test, **Storage test**, microSD card (**power and clock it up**), Card store at boot (**real settings write**) |
 | Starbite | **OS store** (inspect, verify, copy, rename, remove), Catalog, Settings record, **Settings editor**, Start an OS, Write fence, Apple, iOS boot options, Android 17, Linux, Windows 11 |
 | Logs | Engineer OS log, Boot log (pmsg), Loader handoff, Test history, Audit log, Retained records, Kernel command lines, Registers |
@@ -644,3 +644,93 @@ lines) before starting another OS.
   reader**: no drivers in libsb (Radio is a "coming" page).
 - **Measure the display's frame rate or brightness curve** precisely: no vsync source is used.
 - **Run anything from v2.1 on the phone yet**: every v2.1 feature is host-tested only (section 10).
+
+## 14. Overclocking
+
+Clocks > **Overclocking** (`engineer/oc.c`, tables parsed by `engineer/octab.c`). For every ACPM DVFS
+domain (0 MIF, 1 INT, 2 A55, 3 M3, 4 G3D, 5 INTCAM, 6 FSYS0, 7 CAM, 8 DISP, 9 AUD, 10 IVA, 11 SCORE,
+12 CP) it shows:
+
+- the frequency steps from **S-Boot's ECT** (DRAM 0xA0000000, read in place, never written: the DVFS
+  block's level lists) and **Samsung's caps** (the GEN block's `MINMAX_<domain>` rows, one per ASV table
+  version; until this chip's version is read, the lowest cap over the rows is shown);
+- **ACPM's voltage per step** from its fvmap in APM SRAM. Vendor `acpm/acpm.c`: SRAM + (the DVFS plugin's
+  `base_addr` & ~1) + `fvmap_offset` 0x6700 (+ the plugin's size for a dynamic plugin); the plugin is found
+  by name in `initdata->plugins` (0x30-byte entries, `fw_name` at +0x2C). Else a scan of the SRAM that skips
+  unreadable 4 KiB blocks. A block is accepted only if its A55, M3 and G3D rates are the ECT's. (SRAM +
+  0x6700 alone, the first guess, is not it: ocself-3 on the phone, 2026-11-08.)
+- **FREQ_GET does not work on this ACPM firmware**: it answers in time with 0 kHz for every domain
+  (ocself-3, 2026-11-08; the iOS port saw the same). 9810 Linux never asks it (cal-if reads the CMU), and
+  sends DVFS on channel index 0 (`acpm_dvfs.ch_num` is never set; channel id 5 is the MIF notification
+  channel). Every "current step" below therefore comes from the PLL, not from ACPM;
+- the **current step** where a PLL can be read (A55, M3, G3D, MIF: PLL_MIF runs at twice the MIF step).
+
+Clock tab rows after it moved: Real-time clock 0x67, Timer 0x68.
+
+**Changing a step (step 2; master plan 1.2 rule 3 as amended 2026-11-08, this category only).** MIF, INT,
+A55, M3 and G3D list their steps as rows; the other eight domains are read only (none of their blocks runs
+in Engineer OS, so a step could not be tested). Tapping a step:
+
+1. refuses anything that is not in both the ECT and the fvmap, or that ACPM gives less voltage than a
+   slower step (`oct_undervolted`: on this phone MIF 2002 / 2093 / 2094 MHz get 712.5 mV against 1794 MHz's
+   737.5 mV, and M3 2886 MHz 1225 mV against 2860 MHz's 1237.5 mV; iOS froze at MIF 2093 MHz) (`oct_allowed`; libsb's
+   `sb_acpm_dvfs_step` checks the list again; `sb_acpm_dvfs` refuses MIF / INT outright);
+2. takes the way back from the PLL: the listed step the PLL shows (MIF and A55 must be readable; INT, and
+   M3 or G3D while powered off, have no PLL here: their ECT boot step is assumed), at or below Samsung's
+   cap, set once in libsb before any request names the domain (`sb_acpm_dvfs_set_baseline`), and only
+   while every ACPM answer so far came in time;
+3. G3D: powers the GPU first (the GPU page's tier 1 power-up);
+4. confirms: tier 3 for A55 / M3 / G3D up to Samsung's cap, **tier 4 for MIF, INT and every above-cap step**;
+5. arms the cluster 1 watchdog (40 s, `libsb/wdt.c`, fed from `ui_tick`) and **holds storage**
+   (`sb_storage_hold`: every `sb_write` / `sb_write_store` returns `SB_W_HOLD`), then sends the request;
+6. reads the PLL back; a PLL showing another step reverts at once. A domain with no PLL to read (INT, a
+   powered-off M3) cannot be verified: it is allowed, and storage stays held until restart;
+7. counts down 15 s: **Power keeps it**; Volume, Back or the timeout reverts;
+8. offers the stability test: A55 / M3 CPU stress on that cluster for 60 s, G3D GPU stress for 60 s,
+   MIF / INT memory patterns (64 MiB, 3 passes). A failure reverts the domain.
+
+A revert counts as confirmed only when the PLL shows the baseline (MIF and A55 always); for a domain with no
+PLL to read, ACPM taking the request is all there is, and storage then stays held until restart. `acpm_send` drops replies left in
+RX by timed-out requests before each send, and counts them (`sb_acpm_dvfs_untrusted`).
+
+The storage hold stays until the next restart (not only until the revert) once MIF or INT was changed, an
+above-cap step was used, a stability test failed, a revert was not confirmed, or ACPM answered late.
+
+**Samsung's own limits** (vendor exynos9810.dtsi): the cpufreq ceilings A55 1950 MHz and M3 2704 MHz (ECT
+levels above them, A55 2002 and M3 2860 / 2886, belong to other SKUs and are never offered), and the M3
+busy-core limits: 1 core up to 2704 MHz (this ECT has no BIGTURBO table), 2 cores up to 2314 MHz, 3-4 cores
+up to 1794 MHz. While M3 is set above 1794 MHz, the stability test runs that many M3 cores and Lab starts
+no more than that (`lab_m3_max_cores`). 4 M3 cores at 2886 MHz cut the phone's power on 2026-11-08 (the
+buck's hard over-current limit). The PMIC's OCP_WARN is left as S-Boot set it (ON: 0xD3 = 0x80, ocself-5);
+the M3 GCU's IRP setting and throttle polling (vendor exynos-ocp.c) wait for the attended probe below. Overclocking > **Over-current (OCP) probe** reads 0xD3 / 0xD4
+and the M3 system registers OCPTHROTTCTL, OCPTHROTTCNTA, OCPINTCTL, GCUCTL and OCPTIDEPBOTTHRESH on core 4
+(`kern_ocp_probe`; after Lab's tier 3 M3 PMU step). Reads only.
+
+**M3 cores (libsb smp.c, oc8).** Before each M3 CPU_ON, Samsung's FlexPMU words (CPU_INFORM 0, the core's
+GRP2 bits clear, APM2AP mailbox bit 24 clear for the first core; reset to the boot state before the session's
+first M3 start), and before an M3 core's CPU_OFF only the C2 hint (never the cluster-off request): Starbite OS
+1.1-beta2/3's fix (be868f6). Without them, oc7's M3 tests started 1 of 2 cores and then none (2026-11-08).
+They run only under Lab's confirmed tier 3 "Start the M3 cores".
+
+**Stability runs** stop at 95 C (unless the user's Lab limit is higher; never "no limit"); a stop at that
+limit without errors is **inconclusive**, not a failure: no revert, no storage taint (A55 1950 MHz on four
+cores reached 85 C in 2 s on 2026-11-08).
+
+**Journal.** Before each request (once-per-session tier 1 confirmation, asked before the first request's
+own confirmation), one text entry `ocj-<time>-<n>.txt` is appended to the OS store with the request and
+the last 30 log lines, so a power cut does not lose what was asked. While storage is held, nothing more is
+written that boot (the first request of each boot is always journaled).
+
+The watchdog and the storage hold stay on until every domain is back (Overclocking > Every domain back,
+or each domain's "Back to the default step"). Reboot, boot-next and power off revert every domain first
+(`sb_before_reset`). The green-screen freeze (NOTES.md 2026-10-30) came from asking ACPM for MIF 2093000 /
+INT 667000 kHz; 667000 is not an INT step, which the list now makes impossible to send.
+
+Not yet verified on the phone: that a watchdog reset fires while the memory bus is hung, ACPM's answer
+for a cluster that is powered off (M3 between tests), and the ASV table version row.
+
+**Self-test image** (`ENG_DEFS=-DOC_SELFTEST ENG_OUT=starbite/out/ocself sh starbite/engineer/build.sh`):
+at start it logs every domain's table to pmsg (`oc <DOM>: ect N fv N init N cap kHz boot kHz now kHz rows
+...`, then `kHz:uV` pairs six a line), then asks ACPM **FREQ_GET** for A55, M3, G3D, MIF and INT, each logged next to
+its PLL step, boot step and fvmap init step (`oc selftest: FREQ_GET MIF = ... step n; pll ... step m; boot
+... init ...`), then opens the page. It requests no step. Its log is the go / no-go for step 2.

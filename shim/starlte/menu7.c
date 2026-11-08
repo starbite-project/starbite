@@ -206,6 +206,20 @@ enum { SH_CLOSE, SH_DEF, SH_START };                                  /* sh:* */
 enum { E_RETRY, E_BACK };                                             /* e:* */
 
 enum { MD_BOOT, MD_SPLASH, MD_INTRO, MD_MENU, MD_LAUNCH, MD_END };
+#if defined(M7_AUTOLAUNCH_ANDROID) && !defined(M7_AUTOLAUNCH)
+#define M7_AUTOLAUNCH "android"     /* (a define with quotes does not survive the build's shell) */
+#endif
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+/* Bench build (tools/menu/build-bench.sh, docs/BOOT-MENU-OVERNIGHT.md): chain-loaded from the BOOT
+ * loader as a bare test entry, it plays a fixed key script over the intro and the menu, alternating
+ * frames between core 0 alone and every core, writes the frame times to pmsg and reboots. It never
+ * starts an OS, Lab, an alert or a setting: any key that would ends the bench at once. */
+static void bench_end(const char *why);
+static unsigned bench_keys(uint64_t now);
+/* M7_AUTOLAUNCH "key": after the script, start that catalog entry instead of rebooting (the 4-core
+ * hand-off test: cores up, menu frames, cores off, then the OS). 1 = due, 2 = started. */
+static int bench_auto;
+#endif
 enum { OV_NONE, OV_CTX, OV_ALERT, OV_SHEET };
 enum { AL_POWER, AL_RECOVERY, AL_DOWNLOAD };
 enum { EN_HANDOFF, EN_OFF, EN_RESTART, EN_RECOVERY, EN_DOWNLOAD, EN_OFF_FAILED };
@@ -1904,6 +1918,10 @@ static void pill_rect(struct rc *r);
 
 static void launch(int cat, int row, int src, uint32_t src_key, const struct rc *src_rect)
 {
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+    if (bench_auto != 2)
+        bench_end("bench: launch");
+#endif
     close_overlays(1);
     S.mode = MD_LAUNCH;
     S.run_on = 1;
@@ -2225,6 +2243,13 @@ enum { K_UP_, K_DOWN_, K_POWER_, K_BIXBY_, K_POWERHOLD_, K_LAB_ };
 
 static void key(int k)
 {
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+    if ((k == K_POWER_ || k == K_POWERHOLD_ || k == K_LAB_) &&
+        (S.cd || S.ov || S.mode != MD_MENU || FKIND(S.focus) != F_P)) {
+        bench_end("bench: a key that would act");
+        return;
+    }
+#endif
     if (S.mode == MD_BOOT || S.mode == MD_SPLASH || S.mode == MD_INTRO)
         return;                     /* intro7_run handles the intro's keys */
     if (S.mode == MD_END)
@@ -3330,6 +3355,39 @@ static void build_cards(unsigned vp, float ma)
                 b2 = 0;
             }
         }
+        /* too long: the system names give way (whole names, then an ellipsis) so the count stays
+         * whole, as every other line in the menu ends ("3 Systems", never "3 Syst") */
+        if (b2 && (nready ? 36 : 0) + textw + 16 + w2 > 858 && arena_n + 160 <= sizeof(ARENA)) {
+            float room = 858 - (nready ? 36 : 0) - 16 - w2;
+            char *nb = ARENA + arena_n;
+            unsigned bl = slen(b);
+            for (;;) {
+                unsigned cut = 0;
+                for (unsigned q = 0; q + 1 < bl; ++q)
+                    if (b[q] == ',' && b[q + 1] == ' ')
+                        cut = q;
+                if (!cut && bl > 1)     /* one name left: one character (UTF-8) less */
+                    for (cut = bl - 1; cut > 1 && ((uint8_t)b[cut] & 0xc0) == 0x80; --cut)
+                        ;
+                if (!cut)
+                    break;
+                bl = cut;
+                unsigned m = bl < 150 ? bl : 150;
+                for (unsigned q = 0; q < m; ++q)
+                    nb[q] = b[q];
+                nb[m] = (char)0xe2;     /* U+2026 */
+                nb[m + 1] = (char)0x80;
+                nb[m + 2] = (char)0xa6;
+                nb[m + 3] = 0;
+                if (tw(SB7_F_IN400_44, nb, 0) <= room)
+                    break;
+            }
+            if (bl < slen(b)) {
+                b = nb;
+                arena_n += slen(nb) + 1;
+                textw = tw(SB7_F_IN400_44, b, 0);
+            }
+        }
         float total = (nready ? 36 : 0) + textw + (b2 ? 16 + w2 : 0);
         if (total > 858) {
             struct rc pr = xf_rc(EX, rcv(px, cy + 194.5f, 858, 54));
@@ -4064,6 +4122,9 @@ static void in_keys(uint64_t now)
         in_ignore_held();
     }
     unsigned k = hw_keys();
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+    k |= bench_keys(now);
+#endif
     if (k != IN.raw) {
         unsigned ch = k ^ IN.raw;
         if (ch & K_POWER)
@@ -4276,6 +4337,8 @@ void m7_report(const char *why)
         rep_str(b, &n, k ? "," : " ");
         rep_hex(b, &n, v);
     }
+    rep_str(b, &n, " smp ");
+    rep_hex(b, &n, g7_smp_report());
     rep_str(b, &n, " sctlr ");
     rep_hex(b, &n, sc);
     rep_str(b, &n, " slots");
@@ -4317,6 +4380,11 @@ static void stats_log(void)
 #define M7_RSTAMP 0x4d563401ULL      /* "MV4", 1: canvas 720 x 1480, 2x present, items at panel resolution */
 int m7_phase_last;
 static struct { uint32_t n, worst; uint64_t total_us; } PHS[M7_PH_N];
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+static struct { uint32_t n; uint64_t us, px; } BEN[M7_PH_N][2];
+extern uint64_t g7_prof[12];
+static uint64_t BENP[M7_PH_N][4];  /* all-core frames: setup, base glass, over glass, present (ticks) */
+#endif
 static uint64_t px_total;
 static int phase_sync = -1;          /* menu7_progress / menu7_handoff frames */
 
@@ -4325,12 +4393,36 @@ uint32_t m7_frame_timed(const struct g7_frame *f, int ph)
     if (ph < 0 || ph >= M7_PH_N)
         ph = M7_PH_IDLE;
     m7_phase_last = ph;
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+    static unsigned bench_alt;
+    int all = g7_smp_on;
+    if (all > 1 && (++bench_alt & 1))
+        g7_smp_on = 1;              /* every other frame on core 0 alone (workers idle) */
+    int ncore = g7_smp_on;
+#endif
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+    uint64_t pp0 = g7_prof[0], pp1 = g7_prof[1], pp4 = g7_prof[4], pp7 = g7_prof[7];
+#endif
     uint64_t t0 = m7_now_us();
     uint32_t px = g7_frame(f);
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+    g7_smp_on = all;
+    if (ncore > 1 && ph >= 0 && ph < M7_PH_N) {
+        BENP[ph][0] += g7_prof[0] - pp0;
+        BENP[ph][1] += g7_prof[1] - pp1;
+        BENP[ph][2] += g7_prof[4] - pp4;
+        BENP[ph][3] += g7_prof[7] - pp7;
+    }
+#endif
     if (!px)
         return 0;
     uint64_t us = m7_now_us() - t0;
     uint32_t ms = (uint32_t)((us + 500) / 1000);
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+    BEN[ph][ncore > 1].n++;
+    BEN[ph][ncore > 1].us += us;
+    BEN[ph][ncore > 1].px += px;
+#endif
     PHS[ph].n++;
     PHS[ph].total_us += us;
     if (ms > PHS[ph].worst)
@@ -4343,6 +4435,107 @@ uint32_t m7_frame_timed(const struct g7_frame *f, int ph)
     log_put(139, M7_RSTAMP << 32 | ((px_total >> 10) & 0xffffffffULL));
     return px;
 }
+
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+/* the script: { ms after the first key poll, keys, ms held }: scenario A of build/menu7-work/scen.sh
+ * (intro, countdown cancelled, lens, a section opening, list motion), then more list motion */
+static const struct { uint32_t t, k, d; } BKS[] = {
+    { 3200, K_DOWN, 80 }, { 4200, K_DOWN, 80 }, { 5200, K_UP, 80 }, { 6200, K_BIXBY, 80 },
+    { 7600, K_POWER, 80 }, { 9000, K_DOWN, 80 }, { 9800, K_DOWN, 80 }, { 10600, K_DOWN, 80 },
+    { 11400, K_DOWN, 80 }, { 12500, K_DOWN, 80 }, { 13300, K_DOWN, 80 }, { 14100, K_UP, 80 },
+    { 14900, K_UP, 80 }, { 15700, K_UP, 80 }, { 16500, K_UP, 80 }, { 17300, K_UP, 80 },
+};
+#define BENCH_END_MS 19500U
+static uint64_t bench_t0;
+static int bench_over;
+
+static unsigned bench_keys(uint64_t now)
+{
+    if (!bench_t0)
+        bench_t0 = now;
+    uint64_t ms = (now - bench_t0) / 1000U;
+    if (ms >= BENCH_END_MS && !bench_over)
+        bench_end("bench: done");
+    unsigned k = 0;
+    for (unsigned i = 0; i < sizeof(BKS) / sizeof(BKS[0]); ++i)
+        if (ms >= BKS[i].t && ms < BKS[i].t + BKS[i].d)
+            k |= BKS[i].k;
+    return k;
+}
+
+/* pmsg: "STARBITE v7 bench: <why> cores <n> class <ph>:<frames 1 core>,<ms 1 core>,<frames all>,
+ * <ms all>,<kpx/frame> ...", the usual m7_report line, then a reboot to the BOOT loader */
+static void bench_end(const char *why)
+{
+    static char b[1024];
+    unsigned n = 0;
+    bench_over = 1;
+    rep_str(b, &n, "STARBITE v7 bench: ");
+    rep_str(b, &n, why);
+    rep_str(b, &n, " smp ");
+    rep_hex(b, &n, g7_smp_report());
+    rep_str(b, &n, " jobs,wchunks,faults,offret ");
+    for (int k = 0; k < 4; ++k) {
+        rep_str(b, &n, k ? "," : "");
+        rep_hex(b, &n, g7_smp_stat[k]);
+    }
+    rep_str(b, &n, " class n1,us1,nN,usN,kpx");
+    for (int ph = 0; ph < M7_PH_N; ++ph) {
+        if (!BEN[ph][0].n && !BEN[ph][1].n)
+            continue;
+        rep_str(b, &n, " ");
+        rep_hex(b, &n, (uint64_t)ph);
+        rep_str(b, &n, ":");
+        rep_hex(b, &n, BEN[ph][0].n);
+        rep_str(b, &n, ",");
+        rep_hex(b, &n, BEN[ph][0].n ? BEN[ph][0].us / BEN[ph][0].n : 0);
+        rep_str(b, &n, ",");
+        rep_hex(b, &n, BEN[ph][1].n);
+        rep_str(b, &n, ",");
+        rep_hex(b, &n, BEN[ph][1].n ? BEN[ph][1].us / BEN[ph][1].n : 0);
+        rep_str(b, &n, ",");
+        uint32_t nn = BEN[ph][0].n + BEN[ph][1].n;
+        rep_hex(b, &n, nn ? (BEN[ph][0].px + BEN[ph][1].px) / nn / 1000U : 0);
+    }
+    b[n++] = '\n';
+    b[n] = 0;
+    star_pmsg(b);
+    /* all-core frames per class: setup, base glass, over glass, present, in us (26 ticks / us) */
+    n = 0;
+    rep_str(b, &n, "STARBITE v7 bench: phases us/frame (setup,glass,over,present)");
+    for (int ph = 0; ph < M7_PH_N; ++ph) {
+        if (!BEN[ph][1].n)
+            continue;
+        rep_str(b, &n, " ");
+        rep_hex(b, &n, (uint64_t)ph);
+        for (int k = 0; k < 4; ++k) {
+            rep_str(b, &n, k ? "," : ":");
+            rep_hex(b, &n, BENP[ph][k] / 26U / BEN[ph][1].n);
+        }
+    }
+    b[n++] = '\n';
+    b[n] = 0;
+    star_pmsg(b);
+    m7_report(why);
+#ifdef M7_AUTOLAUNCH
+    if (!bench_auto && why[7] == 'd') {     /* "bench: done": hand off through the menu's own return */
+        bench_auto = 1;
+        return;
+    }
+#endif
+    int bad = g7_smp_stop();
+    n = 0;
+    rep_str(b, &n, "STARBITE v7 bench: cores off ");
+    rep_hex(b, &n, (uint64_t)bad);
+    rep_str(b, &n, " smp ");
+    rep_hex(b, &n, g7_smp_report());
+    rep_str(b, &n, ", rebooting\n");
+    b[n] = 0;
+    star_pmsg(b);
+    hw_wait_us(100000);
+    hw_reboot(INFORM_NORMAL);
+}
+#endif
 
 static int moving_any(const struct m7_spring *s, unsigned n)
 {
@@ -4463,6 +4656,23 @@ static void frame_wait(double t0)
 }
 
 /* Lab (dock Lab, Hold Bixby, the Starbite Lab row): EngineerMode, then the menu again */
+/* A worker core is not cleanly off (glass_smp.c): only a SoC reset puts it back as S-Boot leaves it
+ * (the FlexPMU state One UI needs), so no OS, Lab or USB image gets the phone; the user is back
+ * at the menu after the reset. */
+static void m7_cores_bad(void)
+{
+#ifndef M7_PREVIEW
+    star_pmsg("STARBITE v7 smp: a core is not cleanly off; resetting instead of handing over\n");
+    hw_wait_us(50000);
+    hw_reboot(INFORM_NORMAL);
+#endif
+}
+
+#ifndef M7_DEF_CORES
+#define M7_DEF_CORES 4
+#endif
+static int m_cores = M7_DEF_CORES;  /* boot-arg starcores=N: render on N A55 cores (1: core 0 alone) */
+
 static void run_lab(void)
 {
     ST.flags |= 4;
@@ -4470,7 +4680,10 @@ static void run_lab(void)
      * picked entry below (r = entry + 1); otherwise Engineer Lite (em_main) as before. */
     int eng = lab_os ? cat_find("engineer") : -1;
     lab_os = 0;
+    if (g7_smp_stop())              /* Lab's core test starts cores itself */
+        m7_cores_bad();
     int r = eng >= 0 && star_entry_ready((unsigned)eng, 0) ? eng + 1 : em_main(M_in, M_cmd, M_len);
+    g7_smp_start(m_cores);
     for (unsigned i = 0; i < NR; ++i)
         row_state(&R[i]);           /* Lab may have mounted the SD store */
     in_ignore_held();
@@ -4537,6 +4750,20 @@ static int run_loop(void)
             dispatch(&ev);
             had = 1;
         }
+#if defined(M7_BENCH) && defined(M7_AUTOLAUNCH) && !defined(M7_PREVIEW)
+        if (bench_auto == 1) {
+            int c = cat_find(M7_AUTOLAUNCH);
+            bench_auto = 2;
+            star_pmsg(c >= 0 ? "STARBITE v7 bench: auto-launch " M7_AUTOLAUNCH "\n" : "STARBITE v7 bench: auto-launch key not found\n");
+            if (c >= 0) {
+                S.now = t0;
+                launch(c, row_by_cat(c), SRC_PILL, 0, 0);
+                had = 1;
+            } else {
+                hw_reboot(INFORM_NORMAL);
+            }
+        }
+#endif
         float dt = (float)((t0 - last) / 1000.0);
         last = t0;
         m7_advance(dt);
@@ -4680,7 +4907,7 @@ static int cmd_num(const char *c, const char *key, int dflt)
 
 static int M_off;                   /* v7 declined to run (speed check, starmenu7=0): v6 runs */
 
-int menu7_main(const struct star_info *in, char *cmdline, unsigned len)
+static int menu7_main_in(const struct star_info *in, char *cmdline, unsigned len)
 {
     const char *fname, *fwhy;
     M_in = in;
@@ -4689,13 +4916,30 @@ int menu7_main(const struct star_info *in, char *cmdline, unsigned len)
     if (M_off)
         return -1;
     if (!M_inited) {
-        int mode = cmd_num(cmdline, "starmenu7", 1);
+        /* M7_MODE_DEFAULT 2: test loaders chained from the store (tools/menu/chain) do not get BOOT's
+         * command line, so its starmenu7=2 is missing; without it the speed check sent the
+         * 2026-11-07 bench to menu v6, which has no background USB (it sat there until reset) */
+#ifndef M7_MODE_DEFAULT
+#define M7_MODE_DEFAULT 1
+#endif
+        int mode = cmd_num(cmdline, "starmenu7", M7_MODE_DEFAULT);
         if (!mode || !menu7_ready() || !g7_init()) {
             M_off = 1;
             m7_report(!mode ? "off (starmenu7=0)" : !menu7_ready() ? "no assets (SB7ASSET/fonts)" : "g7_init failed");
             return -1;              /* nothing drawn: menu v6 runs */
         }
+        m_cores = cmd_num(cmdline, "starcores", M7_DEF_CORES);
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+        star_pmsg("STARBITE v7 bench: menu7 up, starting cores\n");
+#endif
+        g7_smp_start(m_cores);
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+        star_pmsg("STARBITE v7 bench: cores done, baking\n");
+#endif
         g7_bake();
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+        star_pmsg("STARBITE v7 bench: bake done\n");
+#endif
         /* Speed check (nothing drawn yet: S-Boot's splash is still on the panel, so v6 can take
          * over with its own intro). The bake is per-pixel float work like a frame's glass. */
         struct g7_stats gb;
@@ -4738,6 +4982,9 @@ int menu7_main(const struct star_info *in, char *cmdline, unsigned len)
         g7_get_stats(&g0);
         IN.render = 1;
         int r = intro7_run();
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+        star_pmsg("STARBITE v7 bench: intro done\n");
+#endif
         g7_get_stats(&g1);
         ST.intro_frames = g1.frames - g0.frames;
         ST.intro_worst = g1.worst_us / 1000U;
@@ -4770,6 +5017,18 @@ int menu7_main(const struct star_info *in, char *cmdline, unsigned len)
     if (S.mode != MD_MENU)
         to_menu();
     return run_loop();
+}
+
+/* every return to the loader powers the worker cores off again (an OS starts its own) */
+int menu7_main(const struct star_info *in, char *cmdline, unsigned len)
+{
+    if (M_inited && !M_off)
+        g7_smp_start(m_cores);
+    int r = menu7_main_in(in, cmdline, len);
+    if (g7_smp_stop())
+        m7_cores_bad();                 /* never hand a core that is not cleanly off to an OS or a USB image */
+    log_put(157, g7_smp_report());
+    return r;
 }
 
 /* synchronous frames while the loader works (no input: the pick is made) */
@@ -4910,6 +5169,13 @@ int m7_preview_state(const char *st, float p)
         if (lin >= 0)
             set_focus(FK(F_P, lin, 0), 0);
         SP.scroll.t = 0;
+    } else if (st[0] == 's' && st[1] == 'e' && st[2] == 'c' && st[3] == '-' && st[4] >= '0' && st[4] <= '9') {
+        /* sec-N: section N open, its first row focused (the label audit, docs/BOOT-MENU-OVERNIGHT.md) */
+        unsigned n = (unsigned)(st[4] - '0');
+        if (n >= NS)
+            return 0;
+        open_prov((int)n, SEC[n].n ? rkey(SEC[n].r0) : FK(F_P, n, 0));
+        ensure_visible_now();
     } else if (seq(st, "apple")) {
         int a = sec_by_cat(CAT_APPLE), r = prow("ios26", 0);
         if (a >= 0)

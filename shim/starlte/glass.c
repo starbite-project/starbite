@@ -34,12 +34,16 @@
  * canvas rows blended vertically (PVR), padded by a texel each side */
 #define CANV ((uint32_t *)G7_CANVAS)
 #define PB_ROWS 16
-#define PBUF ((uint32_t *)(G7_CANVAS + 0x420000UL))
-#define PVR (PBUF + PB_ROWS * GW)
 #define PVR_W (CW + 16)
-#define PVO (PVR + 2 * PVR_W)       /* a panel row of the over glass, 2x (over_row_p) */
+/* one band buffer per core (glass_smp.c): PB_ROWS panel rows, PVR (two canvas rows blended), PVO (a
+ * panel row of the over glass, 2x: over_row_p) */
+#define PB_CORE (PB_ROWS * GW + 2 * PVR_W + GW)
+#define PBUFc(k) ((uint32_t *)(G7_CANVAS + 0x420000UL) + (unsigned)(k) * PB_CORE)
+#define PVRc(k) (PBUFc(k) + PB_ROWS * GW)
+#define PVOc(k) (PVRc(k) + 2 * PVR_W)
+#define PBUF PBUFc(0)
 _Static_assert(4UL * CW * CH <= 0x420000UL, "canvas overflows into the band buffer");
-_Static_assert(0x420000UL + 4UL * (PB_ROWS * GW + 2 * PVR_W + GW) <= G7_SHARP - G7_CANVAS, "band buffer overflow");
+_Static_assert(0x420000UL + 4UL * G7_NCORES * PB_CORE <= 0x500000UL, "band buffers overflow into CURT");
 
 /* preview builds: time per phase (h7 H7_PROF=1). 0 frame setup, 1 base glass, 2 base items,
  * 3 frozen crossfade, 4 over glass, 5 over items, 6 edge, 7 present, 8 freeze, 9 the intro's
@@ -60,7 +64,7 @@ float g_row_tmp[4 * GW];
 /* row buffers in the glass pool's table area (P_TAB), not .bss: the frost rows of a panel row,
  * the shader's accumulator (rgb, alpha) */
 #define TAB_ROWS (P_TAB + 0x2C000UL)          /* after gw_wall's radial and column tables (.. 0x2B200) */
-#define RA5 ((float *)TAB_ROWS)
+#define RA5 ((float *)G7_CS(0x2C000UL, TAB_ROWS))    /* per core (glass_smp.c): RA5, RB, ACC, AL */
 #define RB (RA5 + 3 * GW)
 #define ACC (RB + 3 * GW)
 #define AL (ACC + 3 * GW)
@@ -79,9 +83,20 @@ static int bg8_ok;                  /* G7_BASE holds BG8 for the final wallpaper
 static void (*poll_fn)(void);
 
 void g7_set_poll(void (*fn)(void)) { poll_fn = fn; }
+#ifdef M7_PREVIEW
+#include <stdlib.h>
+static int nopoll = -1;             /* H7_NOPOLL=1: no key polls inside frames (the fake clock then does
+                                     * not depend on how many bands core 0 ran: 1 vs n cores compare) */
+#endif
 void g7_poll(void)
 {
-    if (poll_fn)
+#ifdef M7_PREVIEW
+    if (nopoll < 0)
+        nopoll = getenv("H7_NOPOLL") != 0;
+    if (nopoll)
+        return;
+#endif
+    if (poll_fn && g7_is_core0())
         poll_fn();
 }
 
@@ -633,16 +648,52 @@ static void shift_detect(const struct pent *prev, int np, const struct sext *px,
  * at 4j + 2, where A5's texel row j is), against the same point dy above. DFA / DFB: A5 / B. */
 /* the shift's scratch rows live in the pool's table area, after the half-resolution rows (see
  * TAB_HALF; not .bss): DFA, DFB, DT, DT2, DBA, DBB (3 x AW floats each), then JDX (3 x GW int16) */
-#define TAB_SHIFT (P_TAB + 0xF0000UL)
+#define TAB_SHIFT ((uintptr_t)G7_CS(0xA0000UL, P_TAB + 0xF0000UL))   /* per core (glass_smp.c) */
 #define DFA ((float (*)[AW])(TAB_SHIFT))
 #define DFB (DFA + 3)
 #define DT (DFA + 6)
 #define DT2 (DFA + 9)
 #define DBA (DFA + 12)
 #define DBB (DFA + 15)
-#define JDX ((int16_t (*)[GW])(TAB_SHIFT + 18UL * AW * 4UL))
+/* JDX, pixel-interleaved like the canvas's bytes (B, G, R, 0 per canvas pixel) so the shift's NEON loop
+ * needs no 4-way structure loads (slow on the A55): JX(c, x), c 0 R, 1 G, 2 B, at byte lane 2 - c */
+#define JI ((int16_t *)(TAB_SHIFT + 18UL * AW * 4UL))
+#define JX(c, x) JI[(unsigned)(x) * 4U + 2U - (unsigned)(c)]
+_Static_assert(18UL * AW * 4UL + 4UL * CW * 2UL <= 0x10000UL, "interleaved JDX overflow");
 _Static_assert(0xF0000UL + 18UL * AW * 4UL + 3UL * GW * 2UL <= 0x100000UL, "glass shift scratch overflow");
-static int df_j = -1, df_dy, df_b;
+_Static_assert(0xA0000UL + 18UL * AW * 4UL + 3UL * GW * 2UL <= 0xC0000UL, "per-core shift scratch overflow");
+/* the shift's per-core state (glass_smp.c): the correction's caches between rows */
+struct shc {
+    int jd_ia, jd_ib, jd_j, df_j, df_dy, df_b, df_ia, df_ib;
+    uint32_t jd_mask;
+    struct gs_cls cls[2 * G7_MAX_SHAPES];
+    float covb[GW + 4];
+    float bv[3][BW];
+};
+static struct shc SHC[G7_NCORES] = { { .jd_j = -1, .df_j = -1 }, { .jd_j = -1, .df_j = -1 },
+                                     { .jd_j = -1, .df_j = -1 }, { .jd_j = -1, .df_j = -1 } };
+_Static_assert(G7_NCORES == 4, "SHC initialiser");
+#define SC (&SHC[g7_core()])
+#define df_j (SC->df_j)
+#define df_dy (SC->df_dy)
+#define df_b (SC->df_b)
+#define df_ia (SC->df_ia)
+#define df_ib (SC->df_ib)
+#define jd_ia (SC->jd_ia)
+#define jd_ib (SC->jd_ib)
+#define jd_j (SC->jd_j)
+#define jd_mask (SC->jd_mask)
+#define CLS (SC->cls)
+/* a fresh start of this core's caches (JDX all zero, nothing cached) */
+static void shc_reset(void)
+{
+    for (unsigned x = 0; x < 4U * CW; x++)
+        JI[x] = 0;
+    jd_ia = jd_ib = 0;
+    jd_j = -1;
+    jd_mask = 0xffffffffU;
+    df_j = -1;
+}
 static void a5_row_at(float py, float out[3][AW], int ia, int ib)
 {
     float cy = py * .25f - .5f;
@@ -670,7 +721,7 @@ static void b_row_at(float py, float out[3][AW], int ia, int ib)
     float f = cy - (float)j0;
     int ja = j0 < 0 ? 0 : j0 >= BH ? BH - 1 : j0, jb = j0 + 1 < 0 ? 0 : j0 + 1 >= BH ? BH - 1 : j0 + 1;
     const uint32_t *A = (const uint32_t *)P_B + (unsigned)ja * BW, *B = (const uint32_t *)P_B + (unsigned)jb * BW;
-    static float v[3][BW];
+    float (*v)[BW] = SC->bv;
     for (int t = 0; t < BW; t++) {
         uint32_t a = A[t], b = B[t];
         v[0][t] = ((float)CR(a) + ((float)CR(b) - (float)CR(a)) * f) * (1.f / 255.f);
@@ -686,7 +737,6 @@ static void b_row_at(float py, float out[3][AW], int ia, int ib)
             out[c][i] = v[c][ta] + (v[c][tb] - v[c][ta]) * fx;
     }
 }
-static int df_ia, df_ib;
 static void df_rows(int j, int dy, int needb, int ia, int ib)
 {
     if (df_j == j && df_dy == dy && (df_b || !needb) && ia >= df_ia && ib <= df_ib)
@@ -717,18 +767,15 @@ static void df_rows(int j, int dy, int needb, int ia, int ib)
 /* GLB row y = GLB row y - dy moved down by dy (TPL with it), corrected (above). y - dy is read before
  * anything writes it (the caller's order). */
 /* JDX: this row's frost correction per pixel, in 1/8 of a unit (x 255) */
-static int jd_ia, jd_ib;            /* the blocks JDX holds non-zero values for */
-static struct gs_cls CLS[2 * G7_MAX_SHAPES];
-static uint32_t jd_mask;
-static int jd_j = -1;
-static void glb_shift_row(int y, int dy)
+/* (jd_ia, jd_ib: the blocks JDX holds non-zero values for; per core, above). src / ts: the source
+ * row's GLB and TPL (GLB / TPL row y - dy, or the copy the parallel shift kept of it) */
+static void glb_shift_row(int y, int dy, const uint32_t *src, const uint8_t *ts)
 {
     /* canvas rows (y, dy); the correction's blocks are 4 x 4 panel px = 2 x 2 canvas px, block row
      * y >> 1, and the frost is read in panel px (pdy) */
     int s = y - dy, pdy = 2 * dy;
-    const uint32_t *src = GLB + (unsigned)s * CW, *b1 = BG8P + (unsigned)y * CW, *b0 = BG8P + (unsigned)s * CW;
+    const uint32_t *b1 = BG8P + (unsigned)y * CW, *b0 = BG8P + (unsigned)s * CW;
     uint32_t *dst = GLB + (unsigned)y * CW;
-    const uint8_t *ts = TPL + (unsigned)s * CW;
     uint8_t *td = TPL + (unsigned)y * CW;
     float py = 2.f * (float)y + 1.f;
     int npre = gs_npre(0);
@@ -750,9 +797,9 @@ static void glb_shift_row(int y, int dy)
         /* clear what the last rows set outside this row's span */
         for (int c = 0; c < 3; c++) {
             for (int x = 2 * jd_ia; x < 2 * ia && x < 2 * jd_ib; x++)
-                JDX[c][x] = 0;
+                JX(c, x) = 0;
             for (int x = 2 * (ib > jd_ia ? ib : jd_ia); x < 2 * jd_ib; x++)
-                JDX[c][x] = 0;
+                JX(c, x) = 0;
         }
         jd_ia = ia;
         jd_ib = ib;
@@ -766,7 +813,7 @@ static void glb_shift_row(int y, int dy)
                 i1 = AW;
             for (; at < i0; at++)                               /* gaps between spans */
                 for (int c = 0; c < 3; c++)
-                    JDX[c][2 * at] = JDX[c][2 * at + 1] = 0;
+                    JX(c, 2 * at) = JX(c, 2 * at + 1) = 0;
             float m = C->mixf, om = 1.f - m;
             int ba = i1, bb = i1;
             if (C->oy != 0.f) {
@@ -787,11 +834,71 @@ static void glb_shift_row(int y, int dy)
             }
             /* a shape on another (a tile on its card): per pixel cov x its J + (1 - cov) x the
              * one under it, so the box's corners outside the shape (and an alpha < 1) take the card's */
-            static float COVB[GW + 4];
+            float *COVB = SC->covb;
             int pu = C->has_u && i1 > i0;
             if (pu && gs_cover_row_g(0, C->si, py, 4.f * (float)i0 + 1.f, 2.f, 2 * (i1 - i0), COVB))
                 band = 1;           /* (a corner row: the coverage changes from row to row) */
             for (int i = i0; i < i1; i++) {
+                int inb = i >= ba && i + 4 <= bb;      /* 4 blocks all in the rim band */
+                if (i + 4 <= i1 && (i + 4 <= ba || i >= bb || inb)) {
+                    /* 4 blocks a NEON step outside a rim band (the common case): the same sums, then
+                     * into the pixel-interleaved JDX (each block twice; a shape on another weighs its
+                     * two pixels by their coverage) */
+                    const float32x4_t lo = vdupq_n_f32(-32000.f), hi = vdupq_n_f32(32000.f), k2040 = vdupq_n_f32(255.f * 8.f);
+                    const float32x4_t ph = vdupq_n_f32(.5f), nh = vdupq_n_f32(-.5f), z = vdupq_n_f32(0.f);
+                    float32x4_t fv[3], v[3];
+                    for (int c = 0; c < 3; c++) {
+                        float32x4_t t;
+                        if (inb) {          /* the band's own refracted rows */
+                            t = vmulq_n_f32(vsubq_f32(vld1q_f32(DBA[c] + i), vld1q_f32(DT[c] + i)), om);
+                            if (m > 0.f)
+                                t = vaddq_f32(t, vmulq_n_f32(vsubq_f32(vld1q_f32(DBB[c] + i), vld1q_f32(DT2[c] + i)), m));
+                        } else {
+                            t = vmulq_n_f32(vld1q_f32(DFA[c] + i), om);
+                            if (m > 0.f)
+                                t = vaddq_f32(t, vmulq_n_f32(vld1q_f32(DFB[c] + i), m));
+                        }
+                        fv[c] = vmulq_f32(t, k2040);
+                    }
+                    for (int c = 0; c < 3; c++)
+                        v[c] = vminq_f32(vmaxq_f32(vaddq_f32(vaddq_f32(vmulq_n_f32(fv[0], C->J[3 * c]), vmulq_n_f32(fv[1], C->J[3 * c + 1])),
+                                                             vmulq_n_f32(fv[2], C->J[3 * c + 2])), lo), hi);
+                    int16x4x2_t qq[3];
+                    if (!pu) {
+                        for (int c = 0; c < 3; c++) {
+                            float32x4_t w = vaddq_f32(v[c], vbslq_f32(vcltq_f32(v[c], z), nh, ph));
+                            int16x4_t q = vmovn_s32(vcvtq_s32_f32(w));
+                            qq[c] = vzip_s16(q, q);
+                        }
+                    } else {
+                        float um = C->umixf, uom = 1.f - um;
+                        float32x4_t fu4[3];
+                        for (int c = 0; c < 3; c++) {
+                            float32x4_t t = vmulq_n_f32(vld1q_f32(DFA[c] + i), uom);
+                            if (um > 0.f)
+                                t = vaddq_f32(t, vmulq_n_f32(vld1q_f32(DFB[c] + i), um));
+                            fu4[c] = vmulq_f32(t, k2040);
+                        }
+                        float32x4x2_t cov = vld2q_f32(COVB + 2 * (i - i0));   /* pixel 2i + 0, 2i + 1 */
+                        for (int c = 0; c < 3; c++) {
+                            float32x4_t u = vminq_f32(vmaxq_f32(vaddq_f32(vaddq_f32(vmulq_n_f32(fu4[0], C->uJ[3 * c]),
+                                                                                    vmulq_n_f32(fu4[1], C->uJ[3 * c + 1])),
+                                                                          vmulq_n_f32(fu4[2], C->uJ[3 * c + 2])), lo), hi);
+                            float32x4_t d = vsubq_f32(v[c], u), w0 = vaddq_f32(u, vmulq_f32(d, cov.val[0])),
+                                        w1 = vaddq_f32(u, vmulq_f32(d, cov.val[1]));
+                            w0 = vaddq_f32(w0, vbslq_f32(vcltq_f32(w0, z), nh, ph));
+                            w1 = vaddq_f32(w1, vbslq_f32(vcltq_f32(w1, z), nh, ph));
+                            qq[c] = vzip_s16(vmovn_s32(vcvtq_s32_f32(w0)), vmovn_s32(vcvtq_s32_f32(w1)));
+                        }
+                    }
+                    int16x4_t zz = vdup_n_s16(0);
+                    for (int h = 0; h < 2; h++) {
+                        int16x4x4_t px4 = { { qq[2].val[h], qq[1].val[h], qq[0].val[h], zz } };   /* bytes B, G, R, A */
+                        vst4_s16(JI + (unsigned)(2 * i + 4 * h) * 4U, px4);
+                    }
+                    i += 3;
+                    continue;
+                }
                 float f[3], fu[3];
                 for (int c = 0; c < 3; c++)
                     fu[c] = (DFA[c][i] * om + (m > 0.f ? DFB[c][i] * m : 0.f)) * (255.f * 8.f);
@@ -810,13 +917,13 @@ static void glb_shift_row(int y, int dy)
                     float v = g_clamp(C->J[3 * c] * f[0] + C->J[3 * c + 1] * f[1] + C->J[3 * c + 2] * f[2], -32000.f, 32000.f);
                     if (!pu) {
                         int16_t q = (int16_t)(v < 0.f ? v - .5f : v + .5f);
-                        JDX[c][2 * i] = JDX[c][2 * i + 1] = q;
+                        JX(c, 2 * i) = JX(c, 2 * i + 1) = q;
                         continue;
                     }
                     float u = g_clamp(C->uJ[3 * c] * fu[0] + C->uJ[3 * c + 1] * fu[1] + C->uJ[3 * c + 2] * fu[2], -32000.f, 32000.f);
                     for (int k = 0; k < 2; k++) {
                         float w = u + (v - u) * COVB[2 * (i - i0) + k];
-                        JDX[c][2 * i + k] = (int16_t)(w < 0.f ? w - .5f : w + .5f);
+                        JX(c, 2 * i + k) = (int16_t)(w < 0.f ? w - .5f : w + .5f);
                     }
                 }
             }
@@ -848,35 +955,122 @@ static void glb_shift_row(int y, int dy)
         }
     }
 #endif
-    /* 16 pixels a step, in 16-bit lanes: out = g + d T / 256 + JD (255 - T) / 256 (JD in 1/8) */
-    for (int x = 0; x < CW; x += 16) {
-        uint8x16x4_t g = vld4q_u8((const uint8_t *)(src + x)), n = vld4q_u8((const uint8_t *)(b1 + x)),
-                     o = vld4q_u8((const uint8_t *)(b0 + x)), r;
-        uint8x16_t t = vld1q_u8(ts + x);
-        vst1q_u8(td + x, t);
-        int16x8_t tb[2], wb[2];
-        tb[0] = vreinterpretq_s16_u16(vshll_n_u8(vget_low_u8(t), 7));
-        tb[1] = vreinterpretq_s16_u16(vshll_n_u8(vget_high_u8(t), 7));
+    /* 4 pixels (16 bytes, B G R A) a step, every byte lane the same: out = g + d T / 256 + JD (255 - T) / 256
+     * (JD in 1/8; T per pixel spread to its 4 lanes); alpha stays 255 (d and JD are 0 there) */
+    static const uint8_t spread[16] = { 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3 };
+    const uint8x16_t sp = vld1q_u8(spread);
+    const uint32x4_t opaque = vdupq_n_u32(0xff000000U);
+    for (int x = 0; x < CW; x += 16)
+        vst1q_u8(td + x, vld1q_u8(ts + x));
+    for (int x = 0; x < CW; x += 4) {
+        uint8x16_t g = vld1q_u8((const uint8_t *)(src + x)), n = vld1q_u8((const uint8_t *)(b1 + x)),
+                   o = vld1q_u8((const uint8_t *)(b0 + x));
+        uint8x16_t t = vqtbl1q_u8(vreinterpretq_u8_u32(vld1q_dup_u32((const uint32_t *)(const void *)(ts + x))), sp);
         uint8x16_t it = vmvnq_u8(t);
-        wb[0] = vreinterpretq_s16_u16(vshll_n_u8(vget_low_u8(it), 7));
-        wb[1] = vreinterpretq_s16_u16(vshll_n_u8(vget_high_u8(it), 7));
-        for (int c = 0; c < 3; c++) {          /* byte plane c: B, G, R = JDX[2 - c] */
-            const int16_t *j = JDX[2 - c] + x;
-            int16x8_t v[2];
-            for (int h = 0; h < 2; h++) {
-                uint8x8_t gn = h ? vget_high_u8(n.val[c]) : vget_low_u8(n.val[c]);
-                uint8x8_t go = h ? vget_high_u8(o.val[c]) : vget_low_u8(o.val[c]);
-                uint8x8_t gg = h ? vget_high_u8(g.val[c]) : vget_low_u8(g.val[c]);
-                int16x8_t d = vreinterpretq_s16_u16(vsubl_u8(gn, go));
-                int16x8_t c1 = vqrdmulhq_s16(d, tb[h]);
-                int16x8_t c2 = vrshrq_n_s16(vqrdmulhq_s16(vld1q_s16(j + 8 * h), wb[h]), 3);
-                v[h] = vaddq_s16(vaddq_s16(vreinterpretq_s16_u16(vmovl_u8(gg)), c1), c2);
-            }
-            r.val[c] = vcombine_u8(vqmovun_s16(v[0]), vqmovun_s16(v[1]));
+        const int16_t *j = JI + (unsigned)x * 4U;
+        int16x8_t v[2];
+        for (int h = 0; h < 2; h++) {
+            uint8x8_t gn = h ? vget_high_u8(n) : vget_low_u8(n), go = h ? vget_high_u8(o) : vget_low_u8(o);
+            uint8x8_t gg = h ? vget_high_u8(g) : vget_low_u8(g);
+            int16x8_t tb = vreinterpretq_s16_u16(vshll_n_u8(h ? vget_high_u8(t) : vget_low_u8(t), 7));
+            int16x8_t wb = vreinterpretq_s16_u16(vshll_n_u8(h ? vget_high_u8(it) : vget_low_u8(it), 7));
+            int16x8_t d = vreinterpretq_s16_u16(vsubl_u8(gn, go));
+            int16x8_t c1 = vqrdmulhq_s16(d, tb);
+            int16x8_t c2 = vrshrq_n_s16(vqrdmulhq_s16(vld1q_s16(j + 8 * h), wb), 3);
+            v[h] = vaddq_s16(vaddq_s16(vreinterpretq_s16_u16(vmovl_u8(gg)), c1), c2);
         }
-        r.val[3] = vdupq_n_u8(255);
-        vst4q_u8((uint8_t *)(dst + x), r);
+        uint32x4_t r = vreinterpretq_u32_u8(vcombine_u8(vqmovun_s16(v[0]), vqmovun_s16(v[1])));
+        vst1q_u32(dst + x, vorrq_u32(r, opaque));
     }
+}
+
+/* The rows marked AFF 2 above get their pixels: GLB / TPL row y from row y - dy, in place. One core
+ * goes from the far end (dy > 0: bottom up) so each source is read before it is written. On n
+ * cores the canvas is cut into n bands, each walked the same way; the source rows a band reads
+ * from its neighbour band (|dy| rows at each cut) are copied first (into the freeze's quarter
+ * planes, scratch until a freeze), so no band reads a row another band already moved. */
+#define SNAP ((uint32_t *)(G7_CANVAS + 0x920000UL))
+#define SNAP_MAX 120                /* rows per cut; a larger dy is moved by core 0 alone */
+#define SHIFT_NB 8                  /* bands (cut by count of rows to move: they bunch up), chunks for g7_par */
+_Static_assert((SHIFT_NB - 1UL) * SNAP_MAX * (CW * 4UL + CW) <= 0xC60000UL - 0x920000UL, "shift snapshot overflow");
+struct sjob { int dy, nb, cut[SHIFT_NB + 1]; };
+static void shift_band(void *ctx, int b0, int b1, int core)
+{
+    const struct sjob *J = (const struct sjob *)ctx;
+    int dy = J->dy, ady = dy < 0 ? -dy : dy;
+    (void)core;
+    for (int b = b0; b < b1; b++) {
+        int a = J->cut[b], e = J->cut[b + 1];
+        if (J->nb > 1)
+            shc_reset();
+        /* the cut this band reads across: dy > 0 reads up to dy rows above a, dy < 0 below e */
+        int ca = dy > 0 ? a - dy : e, ci = dy > 0 ? b - 1 : b;   /* first row of the copy, its cut index */
+        int y0 = dy > 0 ? e - 1 : a, y1 = dy > 0 ? a - 1 : e, st = dy > 0 ? -1 : 1;
+        for (int y = y0; y != y1; y += st) {
+            if (AFF[y] != 2)
+                continue;
+            if (!(y & 3))
+                g7_poll();
+            int s = y - dy;
+            const uint32_t *src = GLB + (unsigned)s * CW;
+            const uint8_t *ts = TPL + (unsigned)s * CW;
+            if (J->nb > 1 && ((dy > 0 && s < a && b > 0) || (dy < 0 && s >= e && b < J->nb - 1))) {
+                uint32_t *sn = SNAP + (unsigned)ci * SNAP_MAX * (CW + CW / 4);
+                src = sn + (unsigned)(s - ca) * CW;
+                ts = (const uint8_t *)(sn + (unsigned)SNAP_MAX * CW) + (unsigned)(s - ca) * CW;
+            }
+            (void)ady;
+            glb_shift_row(y, dy, src, ts);
+        }
+    }
+}
+static void shift_pixels_in(int dy);
+static void shift_pixels(int dy)
+{
+    PROF0;
+    shift_pixels_in(dy);
+    PROF(6);                        /* (inside setup: the shifted rows' pixels) */
+}
+static void shift_pixels_in(int dy)
+{
+    struct sjob J;
+    int ady = dy < 0 ? -dy : dy, nb = g7_smp_on > 1 ? SHIFT_NB : 1, k = 0;
+    for (int y = 0; y < CH; y++)
+        k += AFF[y] == 2;
+    if (nb > 1 && (ady > SNAP_MAX || k < 8 * nb))
+        nb = 1;
+    J.dy = dy;
+    J.nb = nb;
+    /* the cuts: each band gets about k / nb rows to move (a band reading across its cut takes the
+     * source rows there from the copy made below, so a band may be shorter than dy) */
+    J.cut[0] = 0;
+    J.cut[nb] = CH;
+    for (int b = 1, y = 0, c = 0; b < nb; b++) {
+        int want = k * b / nb;
+        while (y < CH && c < want)
+            c += AFF[y++] == 2;
+        J.cut[b] = y;
+    }
+    if (nb > 1)
+        for (int c = 1; c < nb; c++) {
+            /* cut c: dy > 0: rows [cut - dy, cut) (read by band c); dy < 0: [cut, cut - dy) (band c - 1);
+             * either way kept in slot c - 1 */
+            int r0 = dy > 0 ? J.cut[c] - dy : J.cut[c];
+            uint32_t *sn = SNAP + (unsigned)(c - 1) * SNAP_MAX * (CW + CW / 4);   /* slot c - 1 */
+            for (int r = 0; r < ady; r++) {
+                int y = r0 + r;
+                if (y < 0 || y >= CH)
+                    continue;
+                g_copy32(sn + (unsigned)r * CW, GLB + (unsigned)y * CW, CW);
+                uint8_t *t = (uint8_t *)(sn + (unsigned)SNAP_MAX * CW) + (unsigned)r * CW;
+                const uint8_t *f = TPL + (unsigned)y * CW;
+                for (int x = 0; x < CW; x++)
+                    t[x] = f[x];
+            }
+        }
+    g7_par(shift_band, &J, 0, nb, 1);
+    if (nb > 1)
+        shc_reset();                /* core 0's caches: the other bands' rows came between */
 }
 
 /* after the diff: the rows the moving shapes touched, shifted where nothing else is, the rest
@@ -934,12 +1128,8 @@ static void shift_apply(void)
             ok = 0;
         if (!ok)
             continue;
-        if (!(y & 3))
-            g7_poll();
         GSN[y] = (uint8_t)(GSN[s] + (dy != 0));
         GOF[y] = of;
-        if (dy)
-            glb_shift_row(y, dy);
         GV0[y] = 0;
         GV1[y] = CW;
         if (!GAPX[y]) {
@@ -951,6 +1141,8 @@ static void shift_apply(void)
         g7_prof[10]++;
 #endif
     }
+    if (dy)
+        shift_pixels(dy);
 #ifdef M7_PREVIEW
     {
         extern int h7_dbg;
@@ -1052,7 +1244,11 @@ static void over_hold(int ns)
 static void layer_diff_save(int li, const struct g7_layer *l, int check)
 {
     int ns, ni;
-    layer_entries(li, l, &ns, &ni);
+    {
+        PROF0;
+        layer_entries(li, l, &ns, &ni);
+        PROF(5);                    /* (inside setup: the layers' entries, bounds and hashes) */
+    }
     if (check) {
         sh_dy = sh_on = 0;
         if (li == 0 && shift_on)
@@ -1150,13 +1346,15 @@ static void word_row(uint32_t *d, int y, int x0, int x1, int wx0, int wx1)
  * row, so a rest frame equals a full redraw (--check-full). */
 struct hrow { int j, ia, n, s0, s1, empty; float C[3 * (GW / 2 + 4)], M[GW / 2 + 4]; };
 #define TAB_HALF (P_TAB + 0xDD000UL)          /* after the specular tables (.. 0xDCA00) */
-#define HR ((struct hrow *)TAB_HALF)          /* base half rows [2], over half rows HO [2] */
+#define HR ((struct hrow *)G7_CS(0x0UL, TAB_HALF))   /* base half rows [2], over half rows HO [2] (per core) */
 #define HO (HR + 2)
 #define RA5H ((float *)(HR + 4))
 #define RBH (RA5H + 3 * (GW / 2 + 4))
 _Static_assert(0xDD000UL + 4UL * sizeof(struct hrow) + 6UL * (GW / 2 + 4) * 4UL <= 0xF0000UL,
                "glass half-row buffers overflow (TAB_SHIFT follows)");
-#define HL ((struct hrow *)(P_TAB + 0xF8800UL))  /* the lens's half rows [2], after TAB_SHIFT (.. 0xF8700) */
+#define HL ((struct hrow *)G7_CS(0x10000UL, P_TAB + 0xF8800UL))  /* the lens's half rows [2], after TAB_SHIFT (.. 0xF8700) */
+_Static_assert(4UL * sizeof(struct hrow) + 6UL * (GW / 2 + 4) * 4UL <= 0x10000UL &&
+               0x10000UL + 2UL * sizeof(struct hrow) <= 0x18000UL, "per-core half rows overflow");
 _Static_assert(0xF8800UL + 2UL * sizeof(struct hrow) <= P_TAB_BYTES, "glass lens half rows overflow the table area");
 static void hr_reset(void) { HR[0].n = HR[1].n = HL[0].n = HL[1].n = -1; }
 static const struct hrow *half_row(struct hrow *H, int j, int ia, int n, int s0, int s1)
@@ -1249,7 +1447,12 @@ static void base_glass_c(uint32_t *d, int y, int x0, int x1, int s0, int s1, uin
  * uniforms: one grid step of anti-aliasing), C and M bilinear 2x to the canvas (the 1/4 - 3/4
  * weights, as the canvas to the panel). Those rows are marked (GAPX base, OAPX over) and drawn exactly
  * once the glass rests, a band per g7_idle. */
-#define QROWS ((struct hrow *)(G7_CANVAS + 0xC60000UL))   /* base [2], over [2] */
+#define QROWS ((struct hrow *)G7_CS(0x18000UL, G7_CANVAS + 0xC60000UL))   /* base [2], over [2] (per core) */
+_Static_assert(0x18000UL + 4UL * sizeof(struct hrow) + 4UL * (GW / 2 + 8) * 4UL + 6UL * (GW / 2 + 4) * 4UL <= 0x2C000UL,
+               "per-core quarter rows overflow");
+_Static_assert(0x2C000UL + 10UL * GW * 4UL <= 0x40000UL, "per-core row buffers overflow");
+_Static_assert(0xC60000UL + 4UL * sizeof(struct hrow) + 4UL * (GW / 2 + 8) * 4UL + 6UL * (GW / 2 + 4) * 4UL <= 0xD00000UL,
+               "quarter rows overflow into the per-core scratch");
 #define QHV ((float (*)[GW / 2 + 8])(QROWS + 4))          /* the two quarter rows blended, planar r g b m */
 #define QA5 ((float *)(QHV + 4))
 #define QB5 (QA5 + 3 * (GW / 2 + 4))
@@ -1438,26 +1641,23 @@ static void over_glass_q(uint32_t *d, int y, int x0, int x1, float al0)
 
 /* the base layer for the canvas rect into dst (stride CW). glb: use and keep GLB. items: 0 none (they
  * are drawn at present time), 1 the base items too, on the canvas grid (the freeze: SHARP) */
-static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb, int items)
+/* compose_base's rows on every core (g7_par): each row writes only its own canvas, GLB, TPL and
+ * per-row flags; the per-core half and quarter row caches start empty in every chunk (they only save
+ * work between neighbouring rows), and GAPX's count is taken again afterwards */
+struct cbjob { uint32_t *dst; int x0, x1, glb, word, wy0, wy1, wx0, wx1, npre, nsh, qm; };
+static void compose_base_rows(void *ctx, int y0, int y1, int core)
 {
-    int n = x1 - x0, wy0 = 0, wy1 = 0, wx0 = 0, wx1 = 0;
-    int word = gs_word_rows(&wy0, &wy1, &wx0, &wx1);
-    if (word) {
-        wy0 = c_lo(wy0, CH);
-        wy1 = c_hi(wy1, CH);
-        wx0 = c_lo(wx0, CW);
-        wx1 = c_hi(wx1, CW);
-    }
-    int npre = LB ? gs_npre(GS_HALF) : 0, nsh = LB ? gs_nshapes(GS_HALF) : 0;
-    PROF0;
+    const struct cbjob *J = (const struct cbjob *)ctx;
+    uint32_t *dst = J->dst;
+    int x0 = J->x0, x1 = J->x1, n = x1 - x0, glb = J->glb, npre = J->npre, nsh = J->nsh, qm = J->qm;
+    (void)core;
     hr_reset();
     qr_reset();
-    int qm = motion_qb && dst == CANV;
     for (int y = y0; y < y1; y++) {
         uint32_t *d = dst + (unsigned)y * CW + x0;
         if (!(y & 1))
             g7_poll();
-        int wd = word && y >= wy0 && y < wy1;
+        int wd = J->word && y >= J->wy0 && y < J->wy1;
         if (glb && GV0[y] <= x0 && x1 <= GV1[y]) {
             const uint32_t *g = GLB + (unsigned)y * CW + x0;
             if (g != d)
@@ -1481,20 +1681,41 @@ static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb,
                 }
                 glb_valid(y, x0, x1);
             }
-            if (qm) {
-                if (!GAPX[y]) {     /* on the quarter grid: drawn exactly at rest */
-                    GAPX[y] = 1;
-                    napx++;
-                }
-            } else if ((glb || dst == CANV) && GAPX[y] && x0 == 0 && x1 == CW) {
+            if (qm)
+                GAPX[y] = 1;        /* on the quarter grid: drawn exactly at rest */
+            else if ((glb || dst == CANV) && GAPX[y] && x0 == 0 && x1 == CW)
                 GAPX[y] = 0;        /* shaded again where the glass is: no longer shifted */
-                napx--;
-            }
         }
         if (nsh > npre)
             base_glass_c(d, y, x0, x1, npre, nsh, 0, HL);      /* the lens over the base */
         if (wd)
-            word_row(d, y, x0, x1, wx0, wx1);
+            word_row(d, y, x0, x1, J->wx0, J->wx1);
+    }
+}
+static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb, int items)
+{
+    struct cbjob J = { dst, x0, x1, glb, 0, 0, 0, 0, 0, 0, 0, 0 };
+    J.word = gs_word_rows(&J.wy0, &J.wy1, &J.wx0, &J.wx1);
+    if (J.word) {
+        J.wy0 = c_lo(J.wy0, CH);
+        J.wy1 = c_hi(J.wy1, CH);
+        J.wx0 = c_lo(J.wx0, CW);
+        J.wx1 = c_hi(J.wx1, CW);
+    }
+    J.npre = LB ? gs_npre(GS_HALF) : 0;
+    J.nsh = LB ? gs_nshapes(GS_HALF) : 0;
+    PROF0;
+    J.qm = motion_qb && dst == CANV;
+    if (base_ok && CBASE.dim == .8f && !bg8_ok) {
+        gw_base();                  /* BG8 once, here on core 0 (base_bg_row) */
+        bg8_ok = 1;
+    }
+    int had = napx;
+    g7_par(compose_base_rows, &J, y0, y1, 8);
+    if (J.qm || had) {              /* GAPX changed row by row: count it again */
+        napx = 0;
+        for (int y = 0; y < CH; y++)
+            napx += GAPX[y];
     }
     PROF(1);
     if (LB && items) {
@@ -1505,8 +1726,13 @@ static void compose_base(uint32_t *dst, int x0, int y0, int x1, int y1, int glb,
 }
 
 /* behind an overlay: mix(SHARP, SOFT, back), both on the canvas grid, in 256ths */
-static void compose_frozen(uint32_t *dst, int x0, int y0, int x1, int y1)
+struct cfjob { uint32_t *dst; int x0, x1; };
+static void compose_frozen_rows(void *ctx, int y0, int y1, int core)
 {
+    const struct cfjob *J = (const struct cfjob *)ctx;
+    uint32_t *dst = J->dst;
+    int x0 = J->x0, x1 = J->x1;
+    (void)core;
     const uint32_t *sharp = (const uint32_t *)G7_SHARP, *soft = (const uint32_t *)P_SOFT;
     float k = g_sat(back_now);
     uint32_t K = (uint32_t)(k * 256.f + .5f), IK = 256U - K;
@@ -1534,6 +1760,11 @@ static void compose_frozen(uint32_t *dst, int x0, int y0, int x1, int y1)
             d[x] = o;
         }
     }
+}
+static void compose_frozen(uint32_t *dst, int x0, int y0, int x1, int y1)
+{
+    struct cfjob J = { dst, x0, x1 };
+    g7_par(compose_frozen_rows, &J, y0, y1, 16);
 }
 
 /* the over layer's canvas row j: backdrop and every over shape, (A, al) */
@@ -1595,13 +1826,78 @@ static void ovp_store(uint32_t *d, int y, int x0, int n, const float *acc, const
 }
 
 /* the over glass on the canvas (frozen: premultiplied over it; else into OVP); its items are drawn
- * at present time */
+ * at present time. Its rows run on every core (g7_par); OAPX's count is taken again afterwards. */
+struct cojob { uint32_t *dst; int x0, x1, any; float al0; };
+static void over_open_rows(void *ctx, int y0, int y1, int core)
+{
+    const struct cojob *J = (const struct cojob *)ctx;
+    int x0 = J->x0, x1 = J->x1, n = x1 - x0, any = J->any;
+    float al0 = J->al0;
+    (void)core;
+    HO[0].n = HO[1].n = -1;
+    for (int y = y0; y < y1; y++) {
+        int touch = any && (al0 > 0.f || shapes_touch_row(LO, 2.f * (float)y + 1.f));
+        uint32_t *d = OVP + (unsigned)y * CW + x0;
+        if (!touch) {
+            if (OVR[y]) {
+                for (int i = 0; i < n; i++)
+                    d[i] = 0;
+                if (x0 == 0 && x1 == CW)
+                    OVR[y] = 0;
+            }
+            continue;
+        }
+        if (!(y & 1))
+            g7_poll();
+        const struct hrow *A = half_over_row(y, x0, n, al0);
+        ovp_store(d, y, x0, n, A->C, A->M);
+        if (!OVR[y]) {          /* the rest of the row: none */
+            uint32_t *r = OVP + (unsigned)y * CW;
+            for (int i = 0; i < x0; i++)
+                r[i] = 0;
+            for (int i = x1; i < CW; i++)
+                r[i] = 0;
+            OVR[y] = 1;
+        }
+    }
+}
+static void over_frozen_rows(void *ctx, int y0, int y1, int core)
+{
+    const struct cojob *J = (const struct cojob *)ctx;
+    uint32_t *dst = J->dst;
+    int x0 = J->x0, x1 = J->x1, n = x1 - x0;
+    float al0 = J->al0;
+    (void)core;
+    HO[0].n = HO[1].n = -1;
+    qr_reset();
+    for (int y = y0; y < y1; y++) {
+        if (!(y & 1))
+            g7_poll();
+        int touch = shapes_touch_row(LO, 2.f * (float)y + 1.f);
+        if (!touch && al0 <= 0.f)
+            continue;
+        uint32_t *d = dst + (unsigned)y * CW + x0;
+        if (touch && motion_qo) {
+            over_glass_q(d, y, x0, x1, al0);
+            OAPX[y] = 1;            /* on the quarter grid: drawn exactly at rest */
+        } else if (touch) {
+            const struct hrow *A = half_over_row(y, x0, n, al0);
+            gs_over_row(d, y, x0, n, A->C, A->M);
+        } else {
+            for (int i = 0; i < n; i++) {
+                ACC[3 * i] = 0.f;
+                ACC[3 * i + 1] = .004f;
+                ACC[3 * i + 2] = .014f;
+                AL[i] = al0;
+            }
+            gs_over_row(d, y, x0, n, ACC, AL);
+        }
+    }
+}
 static void compose_over(uint32_t *dst, int x0, int y0, int x1, int y1)
 {
-    int n = x1 - x0;
     float al0 = COVER.back * .45f;
     PROF0;
-    HO[0].n = HO[1].n = -1;
     /* every over row is drawn here as at rest: a held row (OAPX) is then exact */
     if (noapx && x0 == 0 && x1 == CW)
         for (int y = y0; y < y1; y++)
@@ -1610,63 +1906,20 @@ static void compose_over(uint32_t *dst, int x0, int y0, int x1, int y1)
                 noapx--;
             }
     int any = LO && (LO->nshape || al0 > 0.f);
-    qr_reset();
+    struct cojob J = { dst, x0, x1, any, al0 };
     if (!frozen) {
-        for (int y = y0; y < y1; y++) {
-            int touch = any && (al0 > 0.f || shapes_touch_row(LO, 2.f * (float)y + 1.f));
-            uint32_t *d = OVP + (unsigned)y * CW + x0;
-            if (!touch) {
-                if (OVR[y]) {
-                    for (int i = 0; i < n; i++)
-                        d[i] = 0;
-                    if (x0 == 0 && x1 == CW)
-                        OVR[y] = 0;
-                }
-                continue;
-            }
-            if (!(y & 1))
-                g7_poll();
-            const struct hrow *A = half_over_row(y, x0, n, al0);
-            ovp_store(d, y, x0, n, A->C, A->M);
-            if (!OVR[y]) {          /* the rest of the row: none */
-                uint32_t *r = OVP + (unsigned)y * CW;
-                for (int i = 0; i < x0; i++)
-                    r[i] = 0;
-                for (int i = x1; i < CW; i++)
-                    r[i] = 0;
-                OVR[y] = 1;
-            }
-        }
+        g7_par(over_open_rows, &J, y0, y1, 8);
         PROF(4);
         return;
     }
-    if (any)
-        for (int y = y0; y < y1; y++) {
-            if (!(y & 1))
-                g7_poll();
-            int touch = shapes_touch_row(LO, 2.f * (float)y + 1.f);
-            if (!touch && al0 <= 0.f)
-                continue;
-            uint32_t *d = dst + (unsigned)y * CW + x0;
-            if (touch && motion_qo) {
-                over_glass_q(d, y, x0, x1, al0);
-                if (!OAPX[y]) {      /* on the quarter grid: drawn exactly at rest */
-                    OAPX[y] = 1;
-                    noapx++;
-                }
-            } else if (touch) {
-                const struct hrow *A = half_over_row(y, x0, n, al0);
-                gs_over_row(d, y, x0, n, A->C, A->M);
-            } else {
-                for (int i = 0; i < n; i++) {
-                    ACC[3 * i] = 0.f;
-                    ACC[3 * i + 1] = .004f;
-                    ACC[3 * i + 2] = .014f;
-                    AL[i] = al0;
-                }
-                gs_over_row(d, y, x0, n, ACC, AL);
-            }
+    if (any) {
+        g7_par(over_frozen_rows, &J, y0, y1, 8);
+        if (motion_qo) {
+            noapx = 0;
+            for (int y = 0; y < CH; y++)
+                noapx += OAPX[y];
         }
+    }
     if (LO && curt_k >= 0) {         /* the curtain and what is below it (frozen) */
         struct gd_target t = { dst, CW, x0, y0, x1, y1, .5f, 0.f, 0.f, 0 };
         gd_items_range(LO, (const int16_t (*)[4])BND[1], &t, 0, (unsigned)curt_k);
@@ -1721,7 +1974,7 @@ static void compose_p(const int16_t r[4])
  * then the over items), then the curved-edge shade, a band of PB_ROWS rows at a time in PBUF (write-
  * back RAM), and the band to the framebuffer. A canvas rect [i0, i1) x [j0, j1) changes the panel
  * rect [2 i0 - 1, 2 i1 + 1) x [2 j0 - 1, 2 j1 + 1). */
-static uint16_t PIL[2][G7_MAX_ITEMS], BIL[2][G7_MAX_ITEMS];
+static uint16_t PIL[2][G7_MAX_ITEMS];
 static uint8_t EK[36];              /* the edge shade's factor x 256 for x = 0 .. 34 (35: 256) */
 static void edge_init(void)
 {
@@ -1746,7 +1999,7 @@ static void edge_row(uint32_t *row, int X0, int X1)
 }
 /* row y, columns [X0, X1), of the 2x of the pw x ph plane P (its pixel (i, j) at (2i + 1, 2j + 1)) into
  * out[X0 .. X1): the present (the canvas to the panel), the freeze (the quarter grid to the canvas) */
-static void up2_row(uint32_t *out, const uint32_t *P, int pw, int ph, int y, int X0, int X1)
+static void up2_row(uint32_t *out, const uint32_t *P, int pw, int ph, int y, int X0, int X1, int core)
 {
     int m = y >> 1, near = m, far = (y & 1) ? m + 1 : m - 1;
     if (far < 0) far = 0;
@@ -1754,7 +2007,7 @@ static void up2_row(uint32_t *out, const uint32_t *P, int pw, int ph, int y, int
     const uint32_t *N = P + (unsigned)near * (unsigned)pw, *F = P + (unsigned)far * (unsigned)pw;
     int ca = (X0 - 1) >> 1, cb = X1 >> 1;   /* canvas columns used: ca .. cb */
     int a = ca < 0 ? 0 : ca, b = cb > pw - 1 ? pw - 1 : cb;
-    uint32_t *V = PVR + 8;          /* V[c] for c in -1 .. CW */
+    uint32_t *V = PVRc(core) + 8;   /* V[c] for c in -1 .. CW */
     int c = a;
     for (; c + 4 <= b + 1; c += 4) {
         uint8x16_t n = vld1q_u8((const uint8_t *)(N + c)), f = vld1q_u8((const uint8_t *)(F + c));
@@ -1792,15 +2045,44 @@ static void up2_row(uint32_t *out, const uint32_t *P, int pw, int ph, int y, int
         out[x] = vget_lane_u32(vreinterpret_u32_u8(vhadd_u8(v, vrhadd_u8(v, s))), 0);
     }
 }
-static inline void up_row(uint32_t *out, const uint32_t *P, int y, int X0, int X1)
+/* Motion frames (the glass moved: list, sections, overlays) present the canvas 2x by pixel doubling
+ * instead of the bilinear 1/4-3/4 weights: a load, a zip and two stores per 8 panel pixels instead of
+ * about 16 NEON operations. The content items are still drawn at panel resolution (text stays sharp).
+ * The rows are marked (PAPX) and presented again exactly at rest, a band per g7_idle, as the glass's
+ * half-resolution rows are. G7_FASTPRESENT 0: always bilinear. */
+#ifndef G7_FASTPRESENT
+#define G7_FASTPRESENT 1
+#endif
+static int pfast;                   /* this present: pixel doubling */
+static uint8_t PAPX[CH];            /* canvas row presented by pixel doubling: present it again at rest */
+static int npapx;
+static void up2_near(uint32_t *out, const uint32_t *P, int y, int X0, int X1)
 {
-    up2_row(out, P, CW, CH, y, X0, X1);
+    const uint32_t *N = P + (unsigned)(y >> 1) * CW;
+    int x = X0;
+    for (; x < X1 && (x & 7); x++)
+        out[x] = N[x >> 1];
+    for (; x + 8 <= X1; x += 8) {
+        uint32x4_t v = vld1q_u32(N + (x >> 1));
+        uint32x4x2_t z = vzipq_u32(v, v);
+        vst1q_u32(out + x, z.val[0]);
+        vst1q_u32(out + x + 4, z.val[1]);
+    }
+    for (; x < X1; x++)
+        out[x] = N[x >> 1];
+}
+static inline void up_row(uint32_t *out, const uint32_t *P, int y, int X0, int X1, int core)
+{
+    if (pfast && P == CANV)
+        up2_near(out, P, y, X0, X1);
+    else
+        up2_row(out, P, CW, CH, y, X0, X1, core);
 }
 /* the over glass (OVP, 2x) premultiplied over a panel row: d = P + d (255 - A) / 255 */
-static void over_row_p(uint32_t *row, int y, int X0, int X1)
+static void over_row_p(uint32_t *row, int y, int X0, int X1, int core)
 {
-    uint32_t *o = PVO - X0;
-    up_row(o, OVP, y, X0, X1);
+    uint32_t *o = PVOc(core) - X0;
+    up_row(o, OVP, y, X0, X1, core);
     int x = X0;
     for (; x + 8 <= X1; x += 8) {
         uint8x8x4_t p = vld4_u8((const uint8_t *)(o + x));
@@ -1833,7 +2115,108 @@ static inline int over_at(int y)
     int m = y >> 1, f = (y & 1) ? m + 1 : m - 1;
     return OVR[m] || (f >= 0 && f < CH && OVR[f]);
 }
-/* the canvas rect [i0, i1) x [j0, j1) to the panel; returns the panel pixels written */
+/* the canvas rect [i0, i1) x [j0, j1) to the panel; returns the panel pixels written. Its bands
+ * (PB_ROWS panel rows) run on every core (g7_par): each core has its own band buffer, and the images
+ * and tiles the items show are decoded first, on core 0 (gd_prewarm). */
+struct pjob { int X0, X1, Y0, Y1, np[2], edge, w; };
+static uint16_t BILc[G7_NCORES][2][G7_MAX_ITEMS];
+static void present_band(const struct pjob *J, int yb, int ye, int core)
+{
+    int X0 = J->X0, X1 = J->X1, w = J->w, edge = J->edge;
+    uint32_t *fb = G7_FB;
+    g7_poll();
+    int nb[2] = { 0, 0 }, ov = 0;
+    for (int l = 0; l < 2; l++) {
+        const int16_t (*B)[4] = BND[l];
+        for (int k = 0; k < J->np[l]; k++)
+            if (B[PIL[l][k]][1] < ye && B[PIL[l][k]][3] > yb)
+                BILc[core][l][nb[l]++] = PIL[l][k];
+    }
+    if (!frozen)
+        for (int y = yb; y < ye && !ov; y++)
+            ov = over_at(y);
+    if (!nb[0] && !nb[1]) {
+        /* no item here: each row straight to the framebuffer; the edge shade's columns (and an
+         * over glass row) through the band buffer */
+        int ea = X0 < 36 ? 36 : X0, eb = X1 > GW - 36 ? GW - 36 : X1;
+        for (int y = yb; y < ye; y++) {
+            uint32_t *f = fb + (unsigned)y * GW, *row = PBUFc(core) - X0;
+            if ((ov && over_at(y)) || ea >= eb) {
+                up_row(row, CANV, y, X0, X1, core);
+                if (ov && over_at(y))
+                    over_row_p(row, y, X0, X1, core);
+                if (edge)
+                    edge_row(row, X0, X1);
+                g_copy32(f + X0, row + X0, w);
+                continue;
+            }
+            up_row(f, CANV, y, ea, eb, core);
+            if (X0 < ea) {
+                up_row(row, CANV, y, X0, ea, core);
+                edge_row(row, X0, ea);
+                g_copy32(f + X0, row + X0, ea - X0);
+            }
+            if (eb < X1) {
+                up_row(row, CANV, y, eb, X1, core);
+                edge_row(row, eb, X1);
+                g_copy32(f + eb, row + eb, X1 - eb);
+            }
+        }
+        return;
+    }
+    if (pfast && !ov) {
+        /* a motion frame: the items at canvas resolution (a quarter of the pixels; text is softer
+         * while it moves, exact again at rest: these rows are PAPX), on a copy of the canvas rows,
+         * then pixel-doubled to the panel */
+        int cy0 = yb >> 1, cy1 = (ye + 1) >> 1, cx0 = X0 >> 1, cx1 = (X1 + 1) >> 1;
+        if (cx1 > CW) cx1 = CW;
+        if (cy1 > CH) cy1 = CH;
+        uint32_t *tmp = PBUFc(core);                         /* (cy1 - cy0) x CW */
+        uint32_t *row = PBUFc(core) + (unsigned)(PB_ROWS / 2 + 1) * CW - X0;   /* one panel row */
+        _Static_assert((PB_ROWS / 2 + 1) * CW + GW <= PB_ROWS * GW, "half-resolution band overflow");
+        for (int j = cy0; j < cy1; j++)
+            g_copy32(tmp + (unsigned)(j - cy0) * CW + cx0, CANV + (unsigned)j * CW + cx0, cx1 - cx0);
+        struct gd_target t = { tmp - (unsigned)cy0 * CW, CW, cx0, cy0, cx1, cy1, .5f, 0.f, 0.f, 0 };
+        if (nb[0])
+            gd_items_list(LB, (const int16_t (*)[4])BND[0], &t, BILc[core][0], (unsigned)nb[0]);
+        if (nb[1])
+            gd_items_list(LO, (const int16_t (*)[4])BND[1], &t, BILc[core][1], (unsigned)nb[1]);
+        for (int y = yb; y < ye; y++) {
+            up2_near(row, tmp - (unsigned)cy0 * CW, y, X0, X1);
+            if (edge)
+                edge_row(row, X0, X1);
+            g_copy32(fb + (unsigned)y * GW + X0, row + X0, w);
+        }
+        return;
+    }
+    uint32_t *band = PBUFc(core) - X0;   /* band[(y - yb) * GW + x] */
+    for (int y = yb; y < ye; y++)
+        up_row(band + (unsigned)(y - yb) * GW, CANV, y, X0, X1, core);
+    struct gd_target t = { band, GW, X0, 0, X1, ye - yb, 1.f, 0.f, (float)-yb, 0 };
+    if (nb[0])
+        gd_items_list(LB, (const int16_t (*)[4])BND[0], &t, BILc[core][0], (unsigned)nb[0]);
+    if (ov)
+        for (int y = yb; y < ye; y++)
+            if (over_at(y))
+                over_row_p(band + (unsigned)(y - yb) * GW, y, X0, X1, core);
+    if (nb[1])
+        gd_items_list(LO, (const int16_t (*)[4])BND[1], &t, BILc[core][1], (unsigned)nb[1]);
+    for (int y = yb; y < ye; y++) {
+        uint32_t *row = band + (unsigned)(y - yb) * GW;
+        if (edge)
+            edge_row(row, X0, X1);
+        g_copy32(fb + (unsigned)y * GW + X0, row + X0, w);
+    }
+}
+static void present_rows(void *ctx, int c0, int c1, int core)
+{
+    /* chunks are band indices */
+    const struct pjob *J = (const struct pjob *)ctx;
+    for (int c = c0; c < c1; c++) {
+        int yb = J->Y0 + c * PB_ROWS, ye = yb + PB_ROWS > J->Y1 ? J->Y1 : yb + PB_ROWS;
+        present_band(J, yb, ye, core);
+    }
+}
 static uint32_t present_c(int i0, int j0, int i1, int j1)
 {
     int X0 = 2 * i0 - 1, X1 = 2 * i1 + 1, Y0 = 2 * j0 - 1, Y1 = 2 * j1 + 1;
@@ -1845,83 +2228,42 @@ static uint32_t present_c(int i0, int j0, int i1, int j1)
         return 0;
     PROF0;
     /* the items this rect shows */
-    int np[2] = { 0, 0 };
+    struct pjob J = { X0, X1, Y0, Y1, { 0, 0 }, X0 < 35 || X1 > GW - 35, X1 - X0 };
     if (LB && !frozen)
         for (unsigned i = 0; i < LB->nitem && i < G7_MAX_ITEMS; i++)
             if (LB->item[i].a > 0.f && meets(BND[0][i], X0, Y0, X1, Y1))
-                PIL[0][np[0]++] = (uint16_t)i;
+                PIL[0][J.np[0]++] = (uint16_t)i;
     if (LO)
         for (unsigned i = (unsigned)(curt_k + 1); i < LO->nitem && i < G7_MAX_ITEMS; i++)
             if (LO->item[i].a > 0.f && meets(BND[1][i], X0, Y0, X1, Y1))
-                PIL[1][np[1]++] = (uint16_t)i;
-    int edge = X0 < 35 || X1 > GW - 35, w = X1 - X0;
-    uint32_t *fb = G7_FB;
-    for (int yb = Y0; yb < Y1; yb += PB_ROWS) {
-        int ye = yb + PB_ROWS > Y1 ? Y1 : yb + PB_ROWS;
-        g7_poll();
-        int nb[2] = { 0, 0 }, ov = 0;
-        for (int l = 0; l < 2; l++) {
-            const int16_t (*B)[4] = BND[l];
-            for (int k = 0; k < np[l]; k++)
-                if (B[PIL[l][k]][1] < ye && B[PIL[l][k]][3] > yb)
-                    BIL[l][nb[l]++] = PIL[l][k];
-        }
-        if (!frozen)
-            for (int y = yb; y < ye && !ov; y++)
-                ov = over_at(y);
-        if (!nb[0] && !nb[1]) {
-            /* no item here: each row straight to the framebuffer; the edge shade's columns (and an
-             * over glass row) through the band buffer */
-            int ea = X0 < 36 ? 36 : X0, eb = X1 > GW - 36 ? GW - 36 : X1;
-            for (int y = yb; y < ye; y++) {
-                uint32_t *f = fb + (unsigned)y * GW, *row = PBUF - X0;
-                if ((ov && over_at(y)) || ea >= eb) {
-                    up_row(row, CANV, y, X0, X1);
-                    if (ov && over_at(y))
-                        over_row_p(row, y, X0, X1);
-                    if (edge)
-                        edge_row(row, X0, X1);
-                    g_copy32(f + X0, row + X0, w);
-                    continue;
-                }
-                up_row(f, CANV, y, ea, eb);
-                if (X0 < ea) {
-                    up_row(row, CANV, y, X0, ea);
-                    edge_row(row, X0, ea);
-                    g_copy32(f + X0, row + X0, ea - X0);
-                }
-                if (eb < X1) {
-                    up_row(row, CANV, y, eb, X1);
-                    edge_row(row, eb, X1);
-                    g_copy32(f + eb, row + eb, X1 - eb);
-                }
+                PIL[1][J.np[1]++] = (uint16_t)i;
+    int nband = (Y1 - Y0 + PB_ROWS - 1) / PB_ROWS;
+    if (pfast) {
+        for (int j = j0; j < j1 && j < CH; j++)
+            if (!PAPX[j]) {
+                PAPX[j] = 1;
+                npapx++;
             }
-            continue;
-        }
-        uint32_t *band = PBUF - X0;  /* band[(y - yb) * GW + x] */
-        for (int y = yb; y < ye; y++)
-            up_row(band + (unsigned)(y - yb) * GW, CANV, y, X0, X1);
-        struct gd_target t = { band, GW, X0, 0, X1, ye - yb, 1.f, 0.f, (float)-yb, 0 };
-        if (nb[0])
-            gd_items_list(LB, (const int16_t (*)[4])BND[0], &t, BIL[0], (unsigned)nb[0]);
-        if (ov)
-            for (int y = yb; y < ye; y++)
-                if (over_at(y))
-                    over_row_p(band + (unsigned)(y - yb) * GW, y, X0, X1);
-        if (nb[1])
-            gd_items_list(LO, (const int16_t (*)[4])BND[1], &t, BIL[1], (unsigned)nb[1]);
-        for (int y = yb; y < ye; y++) {
-            uint32_t *row = band + (unsigned)(y - yb) * GW;
-            if (edge)
-                edge_row(row, X0, X1);
-            g_copy32(fb + (unsigned)y * GW + X0, row + X0, w);
-        }
+    } else if (i0 <= 0 && i1 >= CW && npapx) {
+        for (int j = j0 > 0 ? j0 - 1 : 0; j < j1 + 1 && j < CH; j++)
+            if (PAPX[j] && j >= j0 && j < j1) {
+                PAPX[j] = 0;
+                npapx--;
+            }
     }
+    /* images and tiles decoded on core 0 first; if they do not all fit in the cache at once, this
+     * rect is presented by core 0 alone (which decodes as it goes, as before) */
+    int par = g7_smp_on > 1 && nband > 1 && (!J.np[0] || gd_prewarm(LB, PIL[0], (unsigned)J.np[0])) &&
+              (!J.np[1] || gd_prewarm(LO, PIL[1], (unsigned)J.np[1]));
+    if (par)
+        g7_par(present_rows, &J, 0, nband, 1);
+    else
+        present_rows(&J, 0, nband, 0);
 #ifndef M7_PREVIEW
     __asm__ volatile("dsb st" : : : "memory");
 #endif
     PROF(7);
-    return (uint32_t)w * (uint32_t)(Y1 - Y0);
+    return (uint32_t)J.w * (uint32_t)(Y1 - Y0);
 }
 static uint32_t present_p(const int16_t r[4])
 {
@@ -1942,10 +2284,16 @@ static inline uint8x8_t box_div(uint16x8_t sum, uint32_t w)
     uint32x4_t lo = vmulq_u32(vaddw_u16(hw, vget_low_u16(sum)), m), hi = vmulq_u32(vaddw_u16(hw, vget_high_u16(sum)), m);
     return vmovn_u16(vcombine_u16(vshrn_n_u32(lo, 16), vshrn_n_u32(hi, 16)));
 }
-static void box_h(const uint32_t *src, uint32_t *dst, int r, int bw, int bh)
+struct boxjob { const uint32_t *src; uint32_t *dst; int r, bw, bh; };
+static void box_h_rows(void *ctx, int y0, int y1, int core)
 {
+    const struct boxjob *J = (const struct boxjob *)ctx;
+    const uint32_t *src = J->src;
+    uint32_t *dst = J->dst;
+    int r = J->r, bw = J->bw;
+    (void)core;
     uint32_t w = 2U * (uint32_t)r + 1U;
-    for (int y = 0; y < bh; y++) {
+    for (int y = y0; y < y1; y++) {
         const uint32_t *s = src + (unsigned)y * bw;
         if (!(y & 15))
             g7_poll();
@@ -1963,32 +2311,49 @@ static void box_h(const uint32_t *src, uint32_t *dst, int r, int bw, int bh)
         }
     }
 }
-static void box_v(const uint32_t *src, uint32_t *dst, int r, int bw, int bh)
+static void box_h(const uint32_t *src, uint32_t *dst, int r, int bw, int bh)
 {
-    static uint16_t sum[4 * CW];
+    struct boxjob J = { src, dst, r, bw, bh };
+    g7_par(box_h_rows, &J, 0, bh, 16);
+}
+/* box_v by column bands (chunks of 16 columns), each core with its own running sums */
+static uint16_t BOXSUM[G7_NCORES][4 * CW];
+static void box_v_cols(void *ctx, int c0, int c1, int core)
+{
+    const struct boxjob *J = (const struct boxjob *)ctx;
+    const uint32_t *src = J->src;
+    uint32_t *dst = J->dst;
+    int r = J->r, bw = J->bw, bh = J->bh;
+    int xa = c0 * 16, xb = c1 * 16 > bw ? bw : c1 * 16;
+    uint16_t *sum = BOXSUM[core];
     uint32_t w = 2U * (uint32_t)r + 1U;
-    for (int i = 0; i < 4 * bw; i++)
+    for (int i = 4 * xa; i < 4 * xb; i++)
         sum[i] = 0;
     for (int y = 0; y < r && y < bh; y++)
-        for (int x = 0; x < bw; x += 2)
+        for (int x = xa; x < xb; x += 2)
             vst1q_u16(sum + 4 * x, vaddw_u8(vld1q_u16(sum + 4 * x), vld1_u8((const uint8_t *)(src + (unsigned)y * bw + x))));
     for (int y = 0; y < bh; y++) {
         if (y + r < bh) {
             const uint8_t *p = (const uint8_t *)(src + (unsigned)(y + r) * bw);
-            for (int x = 0; x < bw; x += 2)
+            for (int x = xa; x < xb; x += 2)
                 vst1q_u16(sum + 4 * x, vaddw_u8(vld1q_u16(sum + 4 * x), vld1_u8(p + 4 * x)));
         }
         uint8_t *d = (uint8_t *)(dst + (unsigned)y * bw);
         if (!(y & 15))
             g7_poll();
-        for (int x = 0; x < bw; x += 2)
+        for (int x = xa; x < xb; x += 2)
             vst1_u8(d + 4 * x, box_div(vld1q_u16(sum + 4 * x), w));
         if (y - r >= 0) {
             const uint8_t *p = (const uint8_t *)(src + (unsigned)(y - r) * bw);
-            for (int x = 0; x < bw; x += 2)
+            for (int x = xa; x < xb; x += 2)
                 vst1q_u16(sum + 4 * x, vsubw_u8(vld1q_u16(sum + 4 * x), vld1_u8(p + 4 * x)));
         }
     }
+}
+static void box_v(const uint32_t *src, uint32_t *dst, int r, int bw, int bh)
+{
+    struct boxjob J = { src, dst, r, bw, bh };
+    g7_par(box_v_cols, &J, 0, (bw + 15) / 16, 2);
 }
 
 /* the freeze's quarter-grid planes, in G7_CANVAS after CURT */
@@ -1996,6 +2361,42 @@ static void box_v(const uint32_t *src, uint32_t *dst, int r, int bw, int bh)
 #define QCT (QGL + QW * QH)
 #define QTM (QCT + QW * QH)
 _Static_assert(0x920000UL + 3UL * 4UL * QW * QH <= G7_SHARP - G7_CANVAS, "freeze quarter planes overflow G7_CANVAS");
+/* the freeze's soft glass rows on the quarter grid, and SOFT's rows (its 2x): on every core */
+static struct gs_ctx soft_cs;
+static void soft_rows(void *ctx, int j0, int j1, int core)
+{
+    uint32_t *qg = (uint32_t *)ctx;
+    const struct gs_ctx *cs = &soft_cs;
+    (void)core;
+    for (int j = j0; j < j1; j++) {
+        float py = 4.f * (float)j + 2.f;
+        if (!(j & 3))
+            g7_poll();
+        gw_row_b_at(py, QW, 2.f, 4.f, RB);
+        for (int i = 0; i < QW; i++) {
+            ACC[3 * i] = RB[3 * i] * cs->dim;
+            ACC[3 * i + 1] = RB[3 * i + 1] * cs->dim;
+            ACC[3 * i + 2] = RB[3 * i + 2] * cs->dim;
+            AL[i] = 1.f;
+        }
+        gw_row_a5_at(py, QW, 2.f, 4.f, RA5);
+        gs_row(GS_SOFT, cs, py, 2.f, QW, ACC, AL, RA5, RB, 0, G7_MAX_SHAPES);
+        uint32_t *d = qg + (unsigned)j * QW;
+        for (int i = 0; i < QW; i++)
+            d[i] = 0xff000000U | (uint32_t)(g_sat(ACC[3 * i]) * 255.f + .5f) << 16 |
+                   (uint32_t)(g_sat(ACC[3 * i + 1]) * 255.f + .5f) << 8 | (uint32_t)(g_sat(ACC[3 * i + 2]) * 255.f + .5f);
+    }
+}
+static void soft_up_rows(void *ctx, int j0, int j1, int core)
+{
+    const uint32_t *qg = (const uint32_t *)ctx;
+    uint32_t *soft = (uint32_t *)P_SOFT;
+    for (int j = j0; j < j1; j++) {
+        if (!(j & 31))
+            g7_poll();
+        up2_row(soft + (unsigned)j * CW, qg, QW, QH, j, 0, CW, core);
+    }
+}
 static void freeze(void)
 {
     uint64_t t0 = hw_ticks();
@@ -2038,24 +2439,8 @@ static void freeze(void)
     const float zoom = .965f;
     gs_prepare(GS_SOFT, LB ? LB->shape : 0, LB ? LB->nshape : 0, &cs, zoom);
     uint32_t *qg = QGL, *ct = QCT, *tmp = QTM;
-    for (int j = 0; j < QH; j++) {
-        float py = 4.f * (float)j + 2.f;
-        if (!(j & 3))
-            g7_poll();
-        gw_row_b_at(py, QW, 2.f, 4.f, RB);
-        for (int i = 0; i < QW; i++) {
-            ACC[3 * i] = RB[3 * i] * cs.dim;
-            ACC[3 * i + 1] = RB[3 * i + 1] * cs.dim;
-            ACC[3 * i + 2] = RB[3 * i + 2] * cs.dim;
-            AL[i] = 1.f;
-        }
-        gw_row_a5_at(py, QW, 2.f, 4.f, RA5);
-        gs_row(GS_SOFT, &cs, py, 2.f, QW, ACC, AL, RA5, RB, 0, G7_MAX_SHAPES);
-        uint32_t *d = qg + (unsigned)j * QW;
-        for (int i = 0; i < QW; i++)
-            d[i] = 0xff000000U | (uint32_t)(g_sat(ACC[3 * i]) * 255.f + .5f) << 16 |
-                   (uint32_t)(g_sat(ACC[3 * i + 1]) * 255.f + .5f) << 8 | (uint32_t)(g_sat(ACC[3 * i + 2]) * 255.f + .5f);
-    }
+    soft_cs = cs;
+    g7_par(soft_rows, qg, 0, QH, 8);
 #ifdef M7_PREVIEW
     uint64_t fz2 = h7_ns();
 #endif
@@ -2085,12 +2470,7 @@ static void freeze(void)
         }
     }
     /* 2x to the canvas grid: SOFT */
-    uint32_t *soft = (uint32_t *)P_SOFT;
-    for (int j = 0; j < CH; j++) {
-        if (!(j & 31))
-            g7_poll();
-        up2_row(soft + (unsigned)j * CW, qg, QW, QH, j, 0, CW);
-    }
+    g7_par(soft_up_rows, qg, 0, CH, 32);
     ST.freeze_us = (uint32_t)us_since(t0);
 #ifdef M7_PREVIEW
     {
@@ -2126,9 +2506,8 @@ int g7_init(void)
     }
     /* glb_shift_row adds JDX across the whole row and clears only what earlier rows set, so JDX
      * starts zero (the pool holds garbage at boot: the panel's side columns took it as stripes) */
-    for (int c = 0; c < 3; c++)
-        for (int x = 0; x < GW; x++)
-            JDX[c][x] = 0;
+    for (unsigned x = 0; x < 4U * CW; x++)
+        JI[x] = 0;
     jd_ia = jd_ib = 0;
     jd_j = -1;
     inited = 1;
@@ -2341,7 +2720,8 @@ uint32_t g7_frame(const struct g7_frame *f)
         motion_half = !forced && (wide || glass_area * 8U > (uint64_t)GW * GH || (sh_on && sh_dy != 0));
         gs_prepare(GS_HALF, LB ? LB->shape : 0, LB ? LB->nshape : 0, &CBASE, 1.f);
         /* the glass changes over more than a quarter of the panel: those rows on the quarter grid */
-        motion_qb = G7_QMOTION && motion_half && glass_area * 4U > (uint64_t)GW * GH;
+        motion_qb = G7_QMOTION && motion_half && (glass_area * 4U > (uint64_t)GW * GH || (sh_on && sh_dy != 0));
+        /* (a shifting frame's rows shaded again, the moving edges: the quarter grid too, exact at rest) */
         if (motion_qb)
             gs_prepare(GS_QB, LB ? LB->shape : 0, LB ? LB->nshape : 0, &CBASE, 1.f);
     } else {
@@ -2406,6 +2786,7 @@ uint32_t g7_frame(const struct g7_frame *f)
                     (unsigned long long)over_area, napx, sh_on, sh_dy, bg8_ok, base_ok);
     }
 #endif
+    pfast = G7_FASTPRESENT && !forced && (motion_half || motion_over);
     if (all_dirty) {
         compose(0, 0, CW, CH);
         px = present_c(0, 0, CW, CH);
@@ -2437,6 +2818,7 @@ uint32_t g7_frame(const struct g7_frame *f)
         }
     }
     nxr = 0;
+    pfast = 0;
     if (curt_cap) {
         curt_ok = 1;
         curt_cap = 0;
@@ -2521,6 +2903,19 @@ int g7_idle(void)
         flag = GAPX;
     else if (noapx)
         flag = OAPX;
+    if (!flag && npapx) {
+        /* the glass is exact: rows a motion frame presented by pixel doubling, presented again */
+        int y0 = 0;
+        while (y0 < CH && !PAPX[y0])
+            y0++;
+        if (y0 >= CH) {
+            npapx = 0;
+            return 0;
+        }
+        int y1 = y0 + IDLE_ROWS > CH ? CH : y0 + IDLE_ROWS;
+        (void)present_c(0, y0, CW, y1);
+        return npapx != 0;
+    }
     if (!flag)
         return 0;
     int y0 = 0;
@@ -2531,7 +2926,7 @@ int g7_idle(void)
             napx = 0;
         else
             noapx = 0;
-        return napx || noapx;
+        return napx || noapx || npapx;
     }
     int y1 = y0 + IDLE_ROWS > CH ? CH : y0 + IDLE_ROWS;
     if (flag == GAPX)
@@ -2545,7 +2940,7 @@ int g7_idle(void)
     motion_over = mo;
     motion_qb = qb;
     motion_qo = qo;
-    return napx || noapx;
+    return napx || noapx || npapx;
 }
 
 void g7_present_all(void)
