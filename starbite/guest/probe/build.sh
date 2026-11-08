@@ -1,6 +1,7 @@
 #!/bin/sh
 # guest-probe P1 and P2 (docs/STARBITE-OS-LINUX-M3.md 10): bare libsb payloads for the OS store / catalog.
-#   limactl shell starbite -- /Users/dev/project-starbite/starbite/guest/probe/build.sh [p1|p2|all]
+#   limactl shell starbite -- /Users/dev/project-starbite/starbite/guest/probe/build.sh [p1|p2|all|bundle]
+# bundle: guest-linux.img / .dtb / -rd.img for the OS store (P3, Starbite OS kern/guest.c), in $OUT/bundle.
 # libsb comes from git at LIBSB_REF (default aed0ce1, Starbite OS 1.0-rc2's libsb, proven on the phone), never
 # from a working tree other sessions edit. Outputs in $OUT: guest-probe.img (P1), guest-p2.img (P2), + .sha256.
 # P1's doorbell candidates skip the S9 DT's SPIs (probe.c dt_used, from ~/distros/_kernel/exynos9810-starlte.dtb).
@@ -66,6 +67,19 @@ link() {  # link NAME OBJS...: $OUT/NAME.img
 
 if [ "$what" = p1 ] || [ "$what" = all ]; then
     link guest-probe "$(cc "$here/probe.c")" "$(cc "$here/m3stub.S")"
+fi
+if [ "$what" = bundle ]; then          # P3: the three store files Starbite OS's kern/guest.c loads
+    [ -f "$P2_IMAGE" ] || { echo "bundle: no $P2_IMAGE (starbite/guest/linux/build-patched.sh)" >&2; exit 1; }
+    BUILD_ONLY=1 WORK="$WORK" "$here/../run-qemu.sh" >/dev/null
+    rdf="$WORK/out/initrd.cpio.gz"
+    B="$OUT/bundle"
+    mkdir -p "$B"
+    python3 "$here/../mk-guest-dts.py" --profile s9 --rd-size "$(stat -c %s "$rdf")" --db-guest 511 "$B/guest-linux.dts" >/dev/null
+    dtc -q -I dts -O dtb -o "$B/guest-linux.dtb" "$B/guest-linux.dts"
+    cp "$P2_IMAGE" "$B/guest-linux.img"
+    cp "$rdf" "$B/guest-linux-rd.img"
+    (cd "$B" && sha256sum guest-linux.img guest-linux.dtb guest-linux-rd.img > SHA256SUMS && cat SHA256SUMS)
+    exit 0
 fi
 if [ "$what" = p2 ] || [ "$what" = all ]; then
     [ -f "$P2_IMAGE" ] || { echo "guest-p2: no $P2_IMAGE (starbite/guest/linux/build-patched.sh)" >&2; exit 1; }

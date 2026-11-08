@@ -247,7 +247,10 @@ driver is upstream's, so this Image can replace the daily one once the phone sta
   the panel between the bars (720×1440 → 1440×2880 + 2 × 40), sends a scripted tap, shows the app for 8 s,
   stops the guest and checks the cluster's PMU state. Doorbells off (polling) until P1 names the lines
   (`P2_DB_GUEST` / `P2_DB_HOST`). Reproducible (`build.sh p2` twice, same hash).
-- **P3 — inside Starbite OS** (with the starbite-os session): `kern/guest.c` = the `sbghost` shim (`hw_m3_prep`,
+- **P3 — inside Starbite OS** (with the starbite-os session). The drop-in is ready:
+  `starbite/guest/sbos/guest.{c,h}` plus `starbite/guest/sbos/INTEGRATION.md` (the 10 edits in Starbite OS's
+  files) and `probe/build.sh bundle` (the store files). It compiles clean against 1.1-beta7b. Originally planned
+  as: `kern/guest.c` = the `sbghost` shim (`hw_m3_prep`,
   `sb_psci`, `sb_m3_on`, the kernel log); the surface element; touch routing with focus; the `hw_spi` byte-write
   change; a launcher tile ("Linux") that starts and stops the guest.
 

@@ -58,6 +58,11 @@ void sbg_gic_prepare(void);
 /* Copy the guest in (word copies) and write the header. 0, or < 0 (and stats.why). */
 int sbg_load(const void *image, uint64_t image_size, const void *dtb, uint64_t dtb_size, const void *initrd,
              uint64_t initrd_size);
+/* The same when the host already put the files at their places (Starbite OS: store_load straight into the
+ * carve-out): the Image at linux_base + SBG_IMAGE_AT (its text_offset must be that), the DTB at + SBG_DTB_OFF,
+ * the initrd at + SBG_RD_OFF. Checks the Image's header, then the shared region and the header as sbg_load. */
+#define SBG_IMAGE_AT 0x80000ULL
+int sbg_load_placed(uint64_t image_size, uint64_t dtb_size, uint64_t initrd_size);
 int sbg_start(void);
 /* From the host's tick: the guest's messages and log, state changes, timeouts, the line checks. */
 void sbg_poll(void);
