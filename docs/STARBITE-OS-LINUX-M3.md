@@ -42,6 +42,7 @@ Code: `starbite/guest/` (all new, owned by this work).
 | **Linux 7.1 on all four M3 cores**: HELLO 119 ms after CPU_ON, 4 CPUs, GIC interfaces 0xf0, first frame 124 ms, 45 frames, touch, MSG_STOP → the guest's CPUs in CPU_OFF | **phone, P2b** (18:50) |
 | The cluster powering down after the guest's CPU_OFFs | **phone, P2c** (22:48): off 55 ms after MSG_STOP, with Samsung's FlexPMU core/cluster sequences (7); without them (P2b) it stayed on |
 | Start / stop / start in one boot, the M3s under load | **phone, P2d** (23:24): 3/3 cycles, each a cold start after a real cluster power-down (HELLO 118 ms, 4 CPUs, touch, cluster off 65..141 ms); four threads for 6 s at the M3's boot clock 1066 MHz: big cores 45 C |
+| **Linux started from inside Starbite OS** (1.2-alpha1, the starbite-os session's wiring of starbite/guest/sbos) | **phone, P3a** (2026-11-09 00:14): store read 495 ms, copy into the carve-out 362 ms, CPU_ON 0, HELLO 118 ms with 4 CPUs (0xf0), the heater refused meanwhile, cluster off 60 ms after MSG_STOP; guestd received the tap. The self test's own pixel check timed out (it waited for a moment with no frame pending; guestd publishes faster than the 2x view draws): fixed in P3b |
 | PSCI's context id reaches x0 | **no** on the phone (x0 = 0xBFFFF01C): the trampoline's DTB literal is required |
 | Linux on the phone's M3s | **yes**: P2b..P2d; P3 (inside Starbite OS) next |
 
@@ -174,6 +175,10 @@ volume. Any Linux toolkit sees an ordinary touchscreen. Focus and screen on/off 
 - **Clocks**: the guest runs at whatever the M3s were left at (P2d: the boot step, 1066 MHz). Starbite OS owns
   ACPM, so the clock policy is the host's: `dvfs_request(DVFS_M3, khz)` when the Linux view is shown, low when it is
   hidden, and the heat stops cover the big cores' sensors. No real heat sample yet at the top clock.
+- **Frame rate vs the view (P3a):** guestd republishes the whole 720x1440 surface about 20 times a second and the
+  host's 2x copy (1440x2880, read from non-cacheable memory) is slower than that, so the host always has a newer
+  frame pending. Next on the guest side: publish only on change and fill the header's damage rectangle, so the
+  host copies just the changed rows (the contract already has `damage_*`; guestd sends w = 0 = whole surface).
 - **Off until needed.** The M3 cluster stays powered down while Starbite OS runs alone. The first heavy app
   starts the guest: load, then CPU_ON. The guest's boot time is the start cost; on QEMU HELLO came after
   2.1 s with an idle host.
