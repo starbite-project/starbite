@@ -42,8 +42,15 @@ static void show(void)
     struct fmt f;
     char nm[40];
     wifi_state(&s);
-    ui_tile(s.state == SBOS_WIFI_CONNECTED ? "Connected" : s.state == SBOS_WIFI_OFF ? "Off" :
-            s.state == SBOS_WIFI_FAILED ? "Did not start" : "On");
+    if (s.state == SBOS_WIFI_CONNECTED && s.ssid_len) {
+        char t[40];
+        name_of(t, sizeof(t), s.ssid, s.ssid_len <= 32 ? s.ssid_len : 32);
+        ui_tile(t);                         /* the network's name under the tile */
+    } else {
+        ui_tile(s.state == SBOS_WIFI_CONNECTED ? "Connected" : s.state == SBOS_WIFI_OFF ? "Off" :
+                s.state == SBOS_WIFI_FAILED ? "Did not start" : s.state == SBOS_WIFI_JOINING ||
+                s.state == SBOS_WIFI_DHCP ? "Joining" : "On");
+    }
     if (!visible)
         return;
     nn = s.state >= SBOS_WIFI_UP && s.state != SBOS_WIFI_FAILED ? wifi_list(nets, SBOS_WIFI_NETS) : 0;

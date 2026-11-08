@@ -27,6 +27,8 @@ SETT=$(home_to 7)
 # heat: focus the level (Back is 0), Bixby steps Off -> Low -> High -> Off; the confirmation's hold by keys
 HEAT_LOW="$HEAT $D $D $SEL $D $HOLDSEL w:500"
 LEVEL_UP="$D $D $SEL"
+# the last heat step taps Low (0.5.13): a first session that hit a hard stop (the model's 85 C) left the level at Off,
+# and three Bixby presses then ended on Off instead of a running level
 # Settings (0.3): Back, the section level, then Display's brightness (never selected here), screen-off level,
 # the two panel toggles; the Alarm section's LED toggle
 SCRIPT="w:600 $OPEN $HEAT_LOW w:5000 $LEVEL_UP w:15300 $BACK
@@ -38,7 +40,7 @@ SCRIPT="w:600 $OPEN $HEAT_LOW w:5000 $LEVEL_UP w:15300 $BACK
  $SOSA $D $D $HOLDSEL w:500 $D $HOLDSEL w:800
  h:p:1300 w:500 $D $D $D $D $D $SEL w:500
  k:p w:4000 k:p w:800 $OPEN
- $HEAT w:2000 $D $D $SEL w:600 $SEL w:600 $SEL w:6000
+ $HEAT w:2000 t:720,670 w:6000
  h:p:1300 w:500 $D $D $D $SEL w:2000"
 # the GPU case: Settings' GPU switch (focus 5) and its confirmation first, then Heat Low -> High
 GPU_SCRIPT="w:600 $OPEN $SETT $D $D $SEL $SEL $D $SEL $D $HOLDSEL w:800 $BACK
