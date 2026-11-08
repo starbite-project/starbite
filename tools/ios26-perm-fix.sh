@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Queue the fix for every damaged container folder/file the scan found (SBOVL002 owner/mode operations, kernel
 # 0406+: T4 / v3; older kernels ignore them). Phone in TWRP.
-#   tools/ios26-perm-fix.sh [SCAN]           default build/ios26/perm-scan.txt (from tools/ios26-perm-scan.py)
+#   tools/ios26-perm-fix.sh [SCAN]           default build/ios26/perm-scan.txt (from tools/ios26-perm-scan.py);
+#                                            another SCAN file gets its own build/ios26/perm-fix-<name>/
 #   tools/ios26-perm-fix.sh --undo [SCAN]    queue the values the scan read
 set -euo pipefail
 cd "$(dirname "$0")/.."
 undo=0; [ "${1:-}" = --undo ] && { undo=1; shift; }
 scan=${1:-build/ios26/perm-scan.txt}
 out=build/ios26/perm-fix
+# each scan keeps its own fix / undo lists (the first one, perm-scan.txt, in build/ios26/perm-fix)
+[ "$(basename "$scan" .txt)" = perm-scan ] || out=build/ios26/perm-fix-$(basename "$scan" .txt)
 python3 tools/ios26-perm-fix.py "$scan" "$out"
 f=$out/fix.args; [ $undo = 1 ] && f=$out/undo.args
 args=(); while IFS= read -r l; do [ -n "$l" ] && args+=("$l"); done < "$f"

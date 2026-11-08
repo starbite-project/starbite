@@ -14,7 +14,10 @@ spec = importlib.util.spec_from_file_location('hfsread', Path(__file__).with_nam
 hr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(hr)
 BASES = ['/private/var/containers/Shared/SystemGroup', '/private/var/mobile/Containers/Shared/AppGroup',
-         '/private/var/mobile/Containers/Data/Application']
+         '/private/var/mobile/Containers/Data/Application',
+         # 2026-11-08 T6: lsd's database lives in a System data container; app extensions have their own
+         '/private/var/containers/Data/System', '/private/var/containers/Data/InternalDaemon',
+         '/private/var/mobile/Containers/Data/PluginKitPlugin', '/private/var/mobile/Containers/Data/InternalDaemon']
 META = '.com.apple.mobile_container_manager.metadata.plist'
 BAD_UID = 4294967294
 

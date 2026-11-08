@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Find files/folders by name on iOS 26's card root (TWRP + adb, read only; HFS_CARD=1 hfs-read).
     tools/ios26-find.py PATTERN [ROOT ...] [--depth N]     fnmatch pattern, e.g. '*.csstore'
-Default roots: /private/var/containers/Shared/SystemGroup /private/var/mobile/Library, depth 5."""
+Default roots: /private/var/containers/Data/System (lsd's database), /private/var/containers/Shared/SystemGroup,
+/private/var/mobile/Library; depth 5."""
 import fnmatch
 import importlib.util
 import os
@@ -38,7 +39,8 @@ def main():
         del args[i:i + 2]
     if not args:
         sys.exit(__doc__)
-    pat, roots = args[0], args[1:] or ['/private/var/containers/Shared/SystemGroup', '/private/var/mobile/Library']
+    pat, roots = args[0], args[1:] or ['/private/var/containers/Data/System', '/private/var/containers/Shared/SystemGroup',
+                                       '/private/var/mobile/Library']
     vol = hr.Volume()
     for r in roots:
         walk(vol, r, pat, depth)
