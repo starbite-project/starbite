@@ -486,3 +486,12 @@ back after the SMC. Checked on the pulled ntoskrnl mapped by RVA: SMC +0x2000A8 
 The FADT stays PSCI-compliant in v10. Log `=M3 psciemu: ntoskrnl ... SMC wrapper +2000A8 -> emulator +5D7D10`.
 Image starbite-uefi-solo10-gpu.bin 1d195086…. big3/big4 rebuilt on v9: b47427bb… / bc8a9afa….
 
+**solo9 (90f6c304):** still a hang and a watchdog reset at ~2 min (watch `beat 12D prog 02 catch 00`, PSCI_VERSION
+FFFFFFFF, no =UFS). The log read `=M3 fadt: ARM_BOOT_ARCH 0 -> 0`: the live FADT already had 0 there, although the
+release's platform table file has 0x1 at offset 129 (FACP rev 6, 276 bytes). So the FADT Windows gets is not that
+static table byte for byte (something rewrites or replaces it before ExitBootServices), and the no-PSCI change was
+a no-op. Open firmware-level question: which module publishes the live FADT and with what flags.
+
+Status 2026-11-08: the big-core hand-off reaches Windows' loader on the M3, which then hangs silently. Further
+work on this path is paused pending the user's decision (see the session's last report).
+
