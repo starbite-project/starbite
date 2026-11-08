@@ -2399,3 +2399,11 @@ Goal: a "full" iPadOS 18 (all stock apps, wallpaper), later the iPhone UI, later
   - Safety: phone partitions lose drive letters (MountedDevices C: only, NoAutoMount); UFS fence end tightened to
     12511999. The build-time PPTT caused an early 0x7E (shelved). One-shot services running cmd.exe die (7034); offline
     binds and hand-run self-elevating installers work. xtajit64.dll crashes (0xC0000094) predate us; PPTT fix pending.
+
+## 2026-11-08: new boot menu in BOOT (4-core renderer, new tiles, uniform labels)
+
+BOOT = build/menu/BOOT-new.img (sha256 1eaf6e21…), built from the verified backup
+backup/20261108-boot-before-menu7smp/BOOT.img (1cdeea25…) with only the loader (5ae4b95d…) and menu-v7.sbm (f7cda13c…)
+changed. First boot: menu after 15 s, cores 1-3 checked in at 0 ms. Phone measurements (MB3b): focus 47 → 14 ms,
+scroll 234 → 74 ms, intro glass 324 → 99 ms, bake 499 → 129 ms. Way back: dd the backup from TWRP (or Download mode).
+Lesson from the night before: catalog rows with no_launch = true get no loader watchdog; chain images arm their own.
