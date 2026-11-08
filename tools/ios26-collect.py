@@ -85,6 +85,7 @@ def main():
     except SystemExit:
         pass
     pulls += [('/System/Library/xpc/launchd.plist', 0), ('/System/Library/xpc/launchd-disabled.plist', 0)]
+    pulls += [('/private/var/mobile/Library/Preferences/com.apple.Accessibility.plist', 0)]
     for path, size in pulls:
         dest = out / path.lstrip('/').replace('/', '__')
         try:

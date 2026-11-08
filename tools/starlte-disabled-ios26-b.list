@@ -35,3 +35,5 @@ photoanalysisd
 mediaanalysisd
 cloudd                      # iCloud, no account
 bird                        # iCloud Drive
+installcoordinat            # installcoordinationd: SIGABRT loop, 13x in 300 s (EACCES creating its data directory)
+managedappdistri            # managedappdistributiond: SIGTRAP loop (MDM app distribution)
