@@ -491,7 +491,7 @@ flags = ["hidden"]
 [[entry]]
 key = "win11-m3probe"
 name = "Windows 11 (big-core probe)"
-version = "solo9: M3 1 alone, FADT says no PSCI"
+version = "solo10: M3 1 alone + PSCI emu in ntoskrnl"
 category = "lab"
 method = "uefi"
 tag = "lab"
