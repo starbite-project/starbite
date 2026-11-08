@@ -545,6 +545,26 @@ its rule is applied now on the kernel side (below).
   InstalledDisplayDrivers, UserModeDriverName). `param NAME --root` resets FullGuardBoots. Install and
   rollback were tested on a copy of the latest hive.
 
+**T13a passed (2026-11-08 19:13, user present, sbwddm-60fe1ef8; `build/win/results/t13a`).** Boot 1, full mode:
+- dxgkrnl ran the full driver's DriverEntry, AddDevice and StartDevice.
+- The G72 came up under WDDM (Step 6 READY, GpuId 0x62210010, GpuUp 1), with the watchdog alive (S9ThermalGate
+  0: sbthermal as a system-start service was up in time) and the rail raised.
+- Then the designed refusal: S9Interrupts 0, S9NoInterrupt 1, Fail_StartGpu 0xC00000A3. Basic Display took the
+  desktop.
+Boot 2: display-only by the guard (WddmMode 0, FullModeWanted 1, FullGuardBootsAtStart 1, FullRefused 1), and
+the user saw the normal desktop.
+**T11a passed in the same boot (by hand):** the cross-built d3d10umd drew the triangle through the phone's
+D3D11 runtime (softpipe PASS). The Panfrost build fell back cleanly with no Mali adapter (PASS). When Windows
+loads it as the hardware UMD, the shim binds through the runtime's callbacks and finds sbwddm by its GPU-info
+escape (`malikm_bind_d3dddi`). The `\\.\MaliG52` / maliwddm names in its messages belong only to the
+software-adapter path.
+**T13b's firmware:** `build/win/stage/windows-t13b.uefi` (sha256 7f915969…). This is combo3b (the store's
+windows.uefi, CRC-32 c0d50c84) with only the SBGPU blob swapped for StarbiteGpu4 (`ssdt-ffs.py` +
+`dxe-replace.py --kill-blank/--add`). Checked:
+- `dxe-diff` shows the outer FV identical and only SBGPU changed.
+- The boot shim and everything before the DXE volume are byte-identical, and the size is the same.
+- There is one live SBGPU blob, holding StarbiteGpu4 byte for byte.
+
 **T13a (no firmware change, safe): full mode's bring-up under WDDM.** sbwddm bound with FullMode = 1 on the
 stage-2 SSDT: the whole GPU bring-up runs under dxgkrnl and is logged (Enum\ACPI\STRB0072\0\Device
 Parameters\sbwddm). Then the start is refused for want of interrupts, and that boot runs Basic Display.
