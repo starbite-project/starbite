@@ -2,6 +2,8 @@
 """Find an app's data container(s) on iOS 26's card root by bundle ID and list its tree with owners and modes,
 from TWRP over adb, read only (HFS_CARD=1 tools/overlay/hfs-read.py).
     tools/ios26-container.py com.apple.PosterBoard [DEPTH]      default depth 5
+    tools/ios26-container.py --path /private/var/containers/Shared/SystemGroup [DEPTH]   any folder, with
+                                 the owner and mode of every folder on the way down to it
 Every container whose .com.apple.mobile_container_manager.metadata.plist names the bundle is listed: more
 than one means containermanagerd made new ones (apps starting empty)."""
 import importlib.util
@@ -33,9 +35,34 @@ def tree(vol, path, depth, indent=''):
             tree(vol, f'{path}/{name}', depth - 1, indent + '    ')
 
 
+def path_chain(vol, path):
+    """owner/mode of each folder from / down to path (a non-searchable one blocks the user below it)"""
+    parts = [p for p in path.split('/') if p]
+    cur = ''
+    for name in parts:
+        try:
+            ents = vol.listdir(cur or '/')
+        except SystemExit as e:
+            print(f'  {e}')
+            return
+        uid, gid, mode = vol.perms.get(name, (None, None, None))
+        if uid is None:
+            print(f'  {cur}/{name}: not found')
+            return
+        print(f'  {mode & 0o7777:04o} {uid}:{gid} {cur}/{name}')
+        cur = f'{cur}/{name}'
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
+    if sys.argv[1] == '--path':
+        vol = hr.Volume()
+        print('the way down:')
+        path_chain(vol, sys.argv[2])
+        print('inside:')
+        tree(vol, sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 2, '  ')
+        return
     want = sys.argv[1].lower()
     depth = int(sys.argv[2]) if len(sys.argv) > 2 else 5
     vol = hr.Volume()
