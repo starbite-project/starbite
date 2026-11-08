@@ -50,6 +50,13 @@ A="$out/private__var__mobile__Library__Preferences__com.apple.Accessibility.plis
 [ -s "$D" ] || D=-
 mode=${TUNE:-full}
 mkdir -p "$out/tune"
+# The host reads raw blocks without replaying the journal, so a recently rewritten launchd.plist can read back
+# stale (2026-11-08). Only edit the known-good original (sha below, pulled 17:06 and restored by --undo).
+GOOD_LAUNCHD=5d8bc695
+if [ "$mode" != prefs ]; then
+    got=$(shasum -a 256 "$L" | cut -c1-8)
+    [ "$got" = "$GOOD_LAUNCHD" ] || { echo "pulled launchd.plist is $got, not the known-good $GOOD_LAUNCHD (stale read?): refusing to edit it"; exit 1; }
+fi
 files=()
 case "$mode" in
 prefs) ;;
