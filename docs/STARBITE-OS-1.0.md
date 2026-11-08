@@ -1,10 +1,39 @@
-# Starbite OS 1.0-rc2: release note (2026-11-08)
+# Starbite OS 1.0-rc3: release note (2026-11-08)
 
 Starbite OS is the Galaxy S9's (SM-G960F, Exynos 9810) own small system: an emergency phone that boots in a
 fraction of a second after the loader, with a light, a heater, an alarm, a medical card, Wi-Fi, a clock and the
 battery, in a normal-mode phone shell with an Emergency Mode one switch away. It runs bare on libsb (no Linux),
 from RAM; it writes only its own save slot. Guide: `docs/STARBITE-OS-GUIDE.md`; design and tests:
 `docs/STARBITE-OS.md` (12.13 .. 12.19 for 0.6 .. 1.0); the plan after 1.0: `docs/STARBITE-OS-PLAN-0.6-0.9.md`.
+
+## rc3: from rc2's first run on the phone (2026-11-08, 17:31-17:40)
+
+Everything worked except two things; rc3 changes only these (and the self-test images' names).
+
+1. **Settings > Alarm > LED at rated power** was refused ("The LED chip did not answer"); the log went with the
+   hardware power cut. From the code: S-Boot never sets up the LED chip's bus (USI10 at 0x10920000), unlike the touch
+   and charger buses libsb already drives, so its IP clock is in its reset state. Linux sets it with
+   `clk_set_rate(200 MHz)` (CMU_PERIC1's IP_USER mux and the USI10 divider); fled.c only reads the CMU (it checked
+   only the four gates' manual-closed state) and used timing for 200 MHz. No power-up or enable step is missing on
+   the chip's side (its supply is always on and it has no enable pin); the address (0x59) and the bus (hsi2c_24) are
+   the vendor DT's. Also, every refusal showed the same text, and a refusal stuck until a restart. rc3:
+   - the log has everything that decides it: the CMU_PERIC1 gates, IP_USER mux, divider and Q-channel, CMU_TOP's
+     PERIC1_IP gate / divider / mux, the controller's registers before and after the bring-up, the SCL / SDA levels
+     before the pins are switched, and after a failed read the controller's INT_STAT / FIFO / TRANS_STATUS (no ACK =
+     the bus ran and the chip did not answer; nothing at all = the controller never clocked);
+   - Settings says which: the clock closed, the bus ran but no ACK, the bus never ran, another chip, an unexpected
+     mode; each switch-on tries again;
+   - `starbite-os-1.0-rc3-ledprobe.img`: a one-shot image that runs only that probe (the bus bring-up and the chip's
+     reads; nothing written to the chip, no heat, no screens, no Wi-Fi), logs to pmsg and restarts to the menu after
+     about 8 s (`selftest: passed: LED probe` or `selftest: FAILED: LED probe: <why>`).
+   Host-tested (`starbite/host/sbos-led-test.sh`: the chip answering, no ACK, no clock, the retry).
+2. **The minutes-left estimates** used 1.9 A and 30 mAh per percent, which promised about twice the time. The run's
+   record (the sbos-state slot): Manual flat out, 7 cores, 2.8 A at 3.67 V (about 10 W, peak 2.86 A); the gauge fell
+   100 -> 91 % in 183 s and to 90 % at the hardware cut: about 3 % a minute. In coulombs that is about 5 % of
+   3000 mAh, so under this load the gauge's percent is worth about 16 mAh. Both estimates (the confirmation and the
+   live "min to the reserve") now use 2.8 A and 16 mAh per percent (`sbapp.h` SBOS_HEAT_FULL_MA /
+   SBOS_HEAT_MAH_PER_PCT): from 100 % with the 15 % reserve, about 29 minutes instead of 80. One run from a full
+   charge; more runs refine it. The "about 7 W" line now says 10 W.
 
 ## rc2: fixes from an independent safety review of rc1
 
@@ -100,19 +129,19 @@ Wi-Fi core, being built by the iOS 16 cellular session). The 1.0 seams for that:
 
 ## Install (one step: the store payload)
 
-Files (`build/store/`): `starbite-os-1.0-rc2.img` (the OS) and `starbite-os-1.0-rc2-selftest.img` (the self test),
-each with a `.sha256`. The build is reproducible (`starbite/sbos/build.sh --repro` gives the same sha256).
+Files (`build/store/`): `starbite-os-1.0-rc3.img` (the OS), `starbite-os-1.0-rc3-selftest.img` (the self test) and
+`starbite-os-1.0-rc3-ledprobe.img` (the one-shot LED probe, installed like the self test), each with a `.sha256`. The build is reproducible (`starbite/sbos/build.sh --repro` gives the same sha256).
 
-1. The OS store (UFS) entry `starbite-os.img` = `starbite-os-1.0-rc2.img`, keeping the volatile `sbos-state`
+1. The OS store (UFS) entry `starbite-os.img` = `starbite-os-1.0-rc3.img`, keeping the volatile `sbos-state`
    entry (1 MiB, the save slot; made once by `sbstore2.py build --volatile sbos-state=1048576`). For example, from a
-   pulled store: `tools/store/sbstore2.py build --import store.img --volatile sbos-state=1048576 ... starbite-os.img=build/store/starbite-os-1.0-rc2.img`
+   pulled store: `tools/store/sbstore2.py build --import store.img --volatile sbos-state=1048576 ... starbite-os.img=build/store/starbite-os-1.0-rc3.img`
    (as for 0.6.3, T14), then write the store as usual.
 2. The catalog entry (catalog-live.toml), unchanged except the version line:
    ```toml
    [[entry]]
    key = "starbite-os"
    name = "Starbite OS"
-   version = "1.0-rc2 · heat, light, alarm, card, Wi-Fi"
+   version = "1.0-rc3 · heat, light, alarm, card, Wi-Fi"
    category = "starbite"
    method = "bare"
    tag = "beta"
@@ -125,4 +154,4 @@ each with a `.sha256`. The build is reproducible (`starbite/sbos/build.sh --repr
    into the `ufs-store` image it builds (`sbstore2.py build --medium ufs --catalog store/catalog.toml ...`); nothing
    else in the manifest changes.
 
-Undo: the previous payload (`starbite-os-0.6.5.img`) in the same entry; the save slot is kept either way.
+Undo: the previous payload (`starbite-os-1.0-rc2.img`) in the same entry; the save slot is kept either way.

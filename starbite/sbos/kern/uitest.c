@@ -9,6 +9,9 @@
  * now counts pages that lost elements). Then a summary
  * and a restart to the loader's menu (where `sbfb.py reboot recovery` brings TWRP back for the log).
  *
+ * 1.0-rc3: the LED-probe variant (starbite-os-ledprobe.img: also -DSBOS_SELFTEST_LED) runs only fled_probe() (the
+ * S2MPB02's bus bring-up and its reads; nothing written to the chip, no screens, no heat, no Wi-Fi) and restarts.
+ *
  * Never: the flashlight LED, the heater, the alarm, brightness or panel settings, a call or a message.
  * The only write: where the store has the volatile "sbos-state" entry, one save of the current settings into it
  * (after a logged dry run), read back (settings.c settings_selftest). Any
@@ -168,9 +171,22 @@ void selftest_timer(unsigned id)
         ub_s(&u, " apps, entered at EL");
         ub_dec(&u, (sb_boot.el >> 2) & 3U);     /* 1.0: the exception level the loader handed over (EL2 = a hypervisor) */
         sb_log(u.b);
+#ifdef SBOS_SELFTEST_LED
+        sb_log("selftest: LED probe only: the S2MPB02's bus (USI10) and its reads; nothing written to the chip, no heat");
+        if (fled_probe()) {
+            sb_log("selftest: passed: LED probe: the chip answers");
+        } else {
+            sb_logf("selftest: FAILED: LED probe: ", fled_why());
+        }
+        sb_log("selftest: restart to the menu in 3 s");
+        phase = 10;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+        return;
+#else
         kui_lock();
         phase = 1;
         break;
+#endif
     }
     case 1:
         logline("lock screen", -1);

@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.0-rc2"
+#define SBOS_VERSION "1.0-rc3"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -150,6 +150,10 @@ extern int heat_soc_stop_c10;       /* 0.6.3: Manual's optional SoC stop (0 off)
 extern int led_full;                /* Settings > Alarm: 0 the pins only as before (default), 1 the rated currents */
 int fled_init(void);
 const char *fled_why(void);
+int fled_code(void);                /* 1.0-rc3: 0 ok or untried, else the refusal (FLED_*), for Settings */
+void fled_retry(void);              /* 1.0-rc3: a refused chip is tried again at the next request */
+int fled_probe(void);               /* 1.0-rc3: the bring-up and the chip's reads only (no chip writes), logged */
+enum { FLED_GATE = 1, FLED_NOANSWER_NOACK, FLED_NOANSWER_NOCLOCK, FLED_NOANSWER, FLED_NOTCHIP, FLED_R63, FLED_CTRL1, FLED_FLASHSET };
 int fled_torch_max(void);
 int fled_pulse(void);
 void fled_timer(void);

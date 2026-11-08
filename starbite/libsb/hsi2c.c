@@ -21,6 +21,8 @@ static void wr(uintptr_t a, uint32_t v)
     *(volatile uint32_t *)a = v;
 }
 
+uint32_t sb_i2c_fail_irq, sb_i2c_fail_fifo, sb_i2c_fail_trans;
+
 void sb_i2c_bus(struct sb_i2c *b)
 {
     uintptr_t B = b->base;
@@ -43,6 +45,7 @@ int sb_i2c_msg(struct sb_i2c *b, unsigned addr, int receive, uint8_t *bytes, uns
     uintptr_t B = b->base;
     int xfer_done = 0;
     unsigned done = 0, settle = 0;
+    uint32_t seen = 0;
     if (!count || count > 32)
         return 0;
     unsigned trig = count < 8 ? count : 8;
@@ -56,6 +59,7 @@ int sb_i2c_msg(struct sb_i2c *b, unsigned addr, int receive, uint8_t *bytes, uns
         uint32_t irq = rd(B + 0x24);
         if (irq)
             wr(B + 0x24, irq);
+        seen |= irq;
         if (irq & 0xf00U)
             break;
         if (irq & 0x80U)
@@ -82,6 +86,9 @@ int sb_i2c_msg(struct sb_i2c *b, unsigned addr, int receive, uint8_t *bytes, uns
         }
         sb_udelay(1);
     }
+    sb_i2c_fail_irq = seen;
+    sb_i2c_fail_fifo = rd(B + 0x30);
+    sb_i2c_fail_trans = rd(B + 0x50);
     wr(B + 0x20, 0);
     sb_i2c_bus(b);
     return 0;

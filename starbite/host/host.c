@@ -177,6 +177,7 @@ int sb_sd_rails(uint8_t *l31, uint8_t *l2) { *l31 = pmic[1][0x68]; *l2 = pmic[1]
 
 struct sb_i2c sb_max_bus = { 0x14360000UL, 0x000000e0, 0x00f00000, 0x00210000, 1 };
 const char *sb_max_why;
+uint32_t sb_i2c_fail_irq, sb_i2c_fail_fifo, sb_i2c_fail_trans;
 void sb_i2c_bus(struct sb_i2c *b) { (void)b; }
 /* 0.6.3: the S2MPB02 (0x59): its probe registers, and what fled.c writes (never 0x13, 0x16..0x1B, 0x63) */
 static uint8_t s2mpb02[256] = { [0x14] = 0xcc, [0x15] = 0x7f, [0x1d] = 0x90, [0x63] = 0x7f };
@@ -251,7 +252,18 @@ int sb_i2c_read(struct sb_i2c *b, unsigned addr, uint8_t reg, uint8_t *data, uns
     if (addr == 0x36 && len == 2) { uint16_t w; sb_fg_word(reg, &w); data[0] = (uint8_t)w; data[1] = (uint8_t)(w >> 8); return 1; }
     if (addr == 0x69 && len == 1) return sb_chg_read(reg, data);
     if (addr == 0x66 && len == 1) { *data = reg == 0 ? 0x05 : 0x09; return 1; }
-    if (addr == 0x59 && len == 1) { *data = s2mpb02[reg]; return 1; }
+    if (addr == 0x59 && len == 1) {
+        /* 1.0-rc3: SBOS_HOST_FLED=noack / noclock: the chip does not acknowledge / the controller never runs */
+        const char *f = getenv("SBOS_HOST_FLED");
+        if (f && (!strcmp(f, "noack") || !strcmp(f, "noclock"))) {
+            sb_i2c_fail_irq = !strcmp(f, "noack") ? 0x401U : 0x1U;
+            sb_i2c_fail_fifo = 0x00000100U;
+            sb_i2c_fail_trans = !strcmp(f, "noack") ? 0x4U : 0x20000U;
+            return 0;
+        }
+        *data = s2mpb02[reg];
+        return 1;
+    }
     return 0;
 }
 int sb_max_init(void) { return 1; }

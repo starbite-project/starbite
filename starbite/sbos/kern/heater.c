@@ -769,7 +769,7 @@ static void record(const struct heat_in *in, int running)
         settings_changed();                 /* the slot's save, later (at most one write in 10 s; never in a stop's way) */
     }
 }
-#define FLAT_MA 1900                        /* the 0.6 tour's full-heat draw (1.8 A), for the estimates */
+#define FLAT_MA SBOS_HEAT_FULL_MA           /* 1.0-rc3: the measured full-heat draw (sbapp.h: 2.8 A, ~3 % a minute) */
 
 static void extreme_confirm_done(int ok)
 {
@@ -850,7 +850,7 @@ int heater_request(int level, int minutes)
         pending_level = level;
         pending_minutes = minutes;
         ctl.state = HEAT_ST_CONFIRM;
-        /* the estimate first (0.6.2): the battery's charge above the reserve at the tour's full-heat draw */
+        /* the estimate first (0.6.2): the battery's charge above the reserve at the measured full-heat rate */
         static char est[128], stops[128];
         int res = heat_reserve_override ? 0 : heat_reserve_pct;     /* 1.0-rc2: this session's reserve */
         sb_strcpy(stops, sizeof(stops), res > 0 ? "Stops only at 55 \xc2\xb0" "C battery or the reserve. The back gets hot: hold it through a pocket or a glove." :
@@ -863,11 +863,11 @@ int heater_request(int level, int minutes)
             ub_init(&u);
             if (usable > 0) {
                 ub_s(&u, "About ");
-                ub_dec(&u, (uint64_t)(usable * 30 * 60 / FLAT_MA));
+                ub_dec(&u, (uint64_t)(usable * SBOS_HEAT_MAH_PER_PCT * 60 / FLAT_MA));
                 ub_s(&u, res > 0 ? " minutes of full heat before the call / SOS reserve (" :
                                                 " minutes of full heat until the battery is empty (");
                 ub_dec(&u, (uint64_t)in.pct);
-                ub_s(&u, " % now, about 1.9 A).");
+                ub_s(&u, " % now, about 2.8 A: about 3 % a minute).");
             } else {
                 ub_s(&u, in.gauge_ok ? "The battery is at the call / SOS reserve." : "The battery's charge is unknown.");
             }

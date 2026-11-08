@@ -501,6 +501,8 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         led_full = arg[1] != 0;
         sb_log(led_full ? "settings: the LED at its rated currents (S2MPB02 over I2C): on" :
                           "settings: the LED at its rated currents: off (the pins only)");
+        if (led_full)
+            fled_retry();                   /* 1.0-rc3: a refusal is tried again at each switch-on (reads first) */
         if (led_full && !fled_init()) {
             led_full = 0;
             return SBOS_EAGAIN;             /* the chip did not answer (logged) */
@@ -822,7 +824,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_TARGET_C10: return heat_target_c10;
         case SET_HEAT_CURRENT_STOP: return !heat_no_current_stop;
         case SET_HEAT_SOC_STOP_C10: return heat_soc_stop_c10;
-        case SET_LED_FULL: return led_full;
+        case SET_LED_FULL: return led_full ? 1 : -fled_code();     /* 1.0-rc3: negative = why the chip was refused */
         case SET_SAVED: return settings_persistent();
         case SET_AUTO_OFF_MIN: return (int64_t)auto_off_min;
         default: return SBOS_EINVAL;

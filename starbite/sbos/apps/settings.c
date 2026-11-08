@@ -45,6 +45,21 @@ static void about(void)
 }
 
 static int led_refused;
+
+/* 1.0-rc3: why the chip was refused (FLED_* in kern.h: setting_get gives it negated), not one text for every reason */
+static const char *led_why(int lf)
+{
+    switch (-lf) {
+    case 1: return "Its bus's clock is closed: the LED stays as it was (logged).";
+    case 2: return "The bus runs but the LED chip did not answer: the LED stays as it was (logged).";
+    case 3: return "The bus did not run (its clock?): the LED stays as it was (logged).";
+    case 5: return "A different chip answered: nothing was written (logged).";
+    case 6: return "The LED chip is in an unexpected mode: nothing was written (logged).";
+    case 7: return "The LED chip did not take its setting (logged).";
+    case 8: return "The flash setting did not read back: no flash pulses (logged).";
+    default: return "The LED chip did not answer: the LED stays as it was (logged).";
+    }
+}
 static int dump_r;                          /* 0.6.5: the panel read: 1 done, -1 not */                     /* 0.6.3: the LED chip did not answer */
 
 static void show(void)
@@ -72,8 +87,9 @@ static void show(void)
     } else if (section == 1) {
         ui_toggle(4, "LED strobes in the alarm", setting_get(SET_SOS_LED) == 1);
         ui_textline("The alarm flashes the screen white and red. With this on, the LED on the back strobes too.", 0);
-        ui_toggle(8, "LED at rated power", setting_get(SET_LED_FULL) == 1);
-        ui_textline(led_refused ? "The LED chip did not answer: the LED stays as it was (logged)." :
+        int lf = setting_get(SET_LED_FULL);
+        ui_toggle(8, "LED at rated power", lf == 1);
+        ui_textline(led_refused ? led_why(lf) :
                     "The light at 240 mA and, in the alarm, 1250 mA camera-flash pulses once a second (Samsung's values). Until a restart.",
                     led_refused ? 0xffff9f0aU : GREY);
         ui_textline("Sound and vibration: coming soon.", GREY);

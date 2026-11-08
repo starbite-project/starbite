@@ -233,7 +233,8 @@ static void show(void)
         ui_textline(f.b, 0xff30d158U);
     }
     if (on && h.ma < -50 && h.mv > 0) {
-        /* 0.6.2: what it draws and how long that lasts (3000 mAh; to the reserve) */
+        /* 0.6.2: what it draws and how long that lasts (to the reserve); 1.0-rc3: the gauge's measured percent under
+         * full heat (sbapp.h SBOS_HEAT_MAH_PER_PCT, 16 mAh), not 30 */
         int a = -h.ma;
         fmt_init(&f);
         fmt_s(&f, "Drawing ");
@@ -247,13 +248,13 @@ static void show(void)
         int usable = h.pct - (h.reserve_pct > 0 ? h.reserve_pct : 0);
         if (h.pct >= 0 && usable > 0) {
             fmt_s(&f, "   about ");
-            fmt_d(&f, usable * 30 * 60 / a);
+            fmt_d(&f, usable * SBOS_HEAT_MAH_PER_PCT * 60 / a);
             fmt_s(&f, h.reserve_pct > 0 ? " min to the reserve" : " min to empty");
         }
         ui_textline(f.b, 0xffffffffU);
     }
     if (flat || manual_page)
-        ui_textline("The heat is the battery's power (about 7 W at most), not the clocks: faster clocks would not warm more.", GREY);
+        ui_textline("The heat is the battery's power (about 10 W at most), not the clocks: faster clocks would not warm more.", GREY);
     if (!on && h.state == HEAT_ST_STOPPED && h.why[0] == 'R')     /* "Reserve reached" */
         ui_hold(18, "Hold to go on below the reserve", 1500, 0);
     if (manual_page || (on && h.level == HEAT_MANUAL))

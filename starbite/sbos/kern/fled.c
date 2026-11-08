@@ -3,7 +3,9 @@
  * LineageOS android_kernel_samsung_exynos9810, GPL-2.0, read for the register meanings only).
  *
  * The chip sits on HSI2C 0x10920000 (USI10, PERIC1) at 0x59. What this file may touch:
- * - read only: CMU_PERIC1's USI10 gates (a closed gate refuses: libsb never writes CMU blocks);
+ * - read only: CMU_PERIC1's USI10 gates (a closed gate refuses: libsb never writes CMU blocks), and for the log
+ *   (1.0-rc3) CMU_PERIC1's IP_USER mux, USI10 divider and Q-channel, CMU_TOP's PERIC1_IP gate / divider / mux, the
+ *   controller's registers and the gpp6 line levels before the pins are switched;
  * - SYSREG_PERIC1 0x1081103C (USI10 mode: I2C = 4) and gpp6 pins 0/1 (CON 0x10830040 bits 7:0 = 0x22, PUD bits 7:0
  *   = 0), each written only if it differs;
  * - the chip: FLED_CTRL1 0x12 bits 7:6 and 3 (00: the pins drive the LED; the low-voltage function off, as Samsung's
@@ -81,19 +83,108 @@ static void flash_pin(int high)
     wr_if(FLASH_DAT, high ? (d | (1U << FLASH_PIN)) : (d & ~(1U << FLASH_PIN)));
 }
 
+/* 1.0-rc3 (rc2's first run on the phone: "did not answer", the log lost to the power cut): everything that decides
+ * whether USI10 can clock a byte, logged before and after the bring-up. S-Boot never sets this bus up (unlike the touch
+ * and charger buses libsb already drives), so its IP clock is in its reset state: Linux's clk_set_rate(200 MHz) moves
+ * CMU_PERIC1's IP_USER mux (0x0120) to CMU_TOP's PERIC1_IP clock and sets the USI10 divider (0x1828); we only read them.
+ * Read with sb_probe32 (an abort is logged, never taken). */
+static uint32_t pr(uintptr_t a)
+{
+    uint32_t v = 0;
+    return sb_probe32(a, &v) ? v : 0xdeadbeefU;
+}
+
+static void log_clocks(void)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "fled: CMU_PERIC1 gates USI10 ");
+    ub_hex(&u, pr(0x10802048UL), 8);
+    ub_s(&u, " rstn ");
+    ub_hex(&u, pr(0x108020acUL), 8);
+    ub_s(&u, " ipclk ");
+    ub_hex(&u, pr(0x10802114UL), 8);
+    ub_s(&u, " pclk ");
+    ub_hex(&u, pr(0x10802118UL), 8);
+    ub_s(&u, ", IP_USER mux ");
+    ub_hex(&u, pr(0x10800120UL), 8);     /* bit 4: 0 = OSCCLK (26 MHz), 1 = CMU_TOP's PERIC1_IP */
+    ub_s(&u, " div ");
+    ub_hex(&u, pr(0x10801828UL), 8);
+    ub_s(&u, " qch ");
+    ub_hex(&u, pr(0x10803050UL), 8);
+    ub_s(&u, "; CMU_TOP PERIC1_IP gate ");
+    ub_hex(&u, pr(0x1a2420c4UL), 8);
+    ub_s(&u, " div ");
+    ub_hex(&u, pr(0x1a2418bcUL), 8);
+    ub_s(&u, " mux ");
+    ub_hex(&u, pr(0x1a2410b8UL), 8);
+    sb_log(u.b);
+}
+
+static void log_ctrl(const char *when)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "fled: USI10 ");
+    ub_s(&u, when);
+    ub_s(&u, ": ctl ");
+    ub_hex(&u, pr(BUS + 0x00), 8);
+    ub_s(&u, " conf ");
+    ub_hex(&u, pr(BUS + 0x40), 8);
+    ub_s(&u, " usi_con ");
+    ub_hex(&u, pr(BUS + 0xc4), 8);
+    ub_s(&u, " usi_opt ");
+    ub_hex(&u, pr(BUS + 0xc8), 8);
+    ub_s(&u, " fs ");
+    ub_hex(&u, pr(BUS + 0x60), 8);
+    ub_c(&u, '/');
+    ub_hex(&u, pr(BUS + 0x64), 8);
+    ub_c(&u, '/');
+    ub_hex(&u, pr(BUS + 0x68), 8);
+    ub_s(&u, " trans ");
+    ub_hex(&u, pr(BUS + 0x50), 8);
+    sb_log(u.b);
+}
+
+static int code;
+static int probe_only;                      /* fled_probe: no chip writes */
+
+static void refuse(int c, const char *w)
+{
+    st = -1, code = c, why = w;
+}
+
 int fled_init(void)
 {
     if (st)
         return st > 0;
     static const uint32_t gates[4] = { 0x2048, 0x20ac, 0x2114, 0x2118 };
+    log_clocks();
     for (unsigned i = 0; i < 4; ++i)
-        if ((rd(0x10800000UL + gates[i]) & 0x00300000U) == 0x00100000U) {
-            st = -1;
-            why = "CMU_PERIC1's USI10 gate is closed (not opened from here)";
+        if ((pr(0x10800000UL + gates[i]) & 0x00300000U) == 0x00100000U) {
+            refuse(FLED_GATE, "CMU_PERIC1's USI10 gate is closed (not opened from here)");
             sb_logf("fled: refused: ", why);
             return 0;
         }
-    uint32_t mode = rd(0x1081103CUL), con = rd(0x10830040UL), pud = rd(0x10830048UL);
+    uint32_t mode = rd(0x1081103CUL), con = rd(0x10830040UL), dat = rd(0x10830044UL), pud = rd(0x10830048UL);
+    {
+        /* the lines before the pins become the bus's: with gpp6-0/1 still inputs, DAT shows SCL / SDA (high = the
+         * chip side's pull-ups are powered; low with no device holding them = no pull-up rail, or a stuck bus) */
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "fled: before: usi mode ");
+        ub_hex(&u, mode, 2);
+        ub_s(&u, ", gpp6 con ");
+        ub_hex(&u, con & 0xffU, 2);
+        ub_s(&u, " pud ");
+        ub_hex(&u, pud & 0xffU, 2);
+        ub_s(&u, (con & 0xffU) == 0 ? ", inputs: SCL " : ", (not inputs) SCL ");
+        ub_hex(&u, dat & 1U, 1);
+        ub_s(&u, " SDA ");
+        ub_hex(&u, dat >> 1 & 1U, 1);
+        sb_log(u.b);
+    }
+    log_ctrl("before");
     wr_if(0x1081103CUL, 4U);
     wr_if(0x10830040UL, (con & ~0xffU) | 0x22U);
     wr_if(0x10830048UL, pud & ~0xffU);
@@ -104,15 +195,28 @@ int fled_init(void)
         bus.fs3 = 0x00210000U;
     }
     sb_i2c_bus(&bus);
+    log_ctrl("after the bring-up");
     uint8_t id = 0, c1 = 0, cur = 0, tim = 0, r63 = 0;
-    int ok = reg_rd(R_BST2, &id) && reg_rd(R_CTRL1, &c1) && reg_rd(R_CUR1, &cur) && reg_rd(R_TIME1, &tim) &&
-             reg_rd(R_63, &r63);
+    int ok = reg_rd(R_BST2, &id);
+    if (!ok) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "fled: the first read failed: int_stat seen ");
+        ub_hex(&u, sb_i2c_fail_irq, 8);
+        ub_s(&u, " fifo ");
+        ub_hex(&u, sb_i2c_fail_fifo, 8);
+        ub_s(&u, " trans ");
+        ub_hex(&u, sb_i2c_fail_trans, 8);
+        sb_log(u.b);
+        log_ctrl("after the failure");
+    }
+    ok = ok && reg_rd(R_CTRL1, &c1) && reg_rd(R_CUR1, &cur) && reg_rd(R_TIME1, &tim) && reg_rd(R_63, &r63);
     struct ub u;
     ub_init(&u);
     ub_s(&u, "fled: usi mode ");
-    ub_hex(&u, mode, 2);
+    ub_hex(&u, rd(0x1081103CUL), 2);
     ub_s(&u, ", gpp6 con ");
-    ub_hex(&u, con & 0xffU, 2);
+    ub_hex(&u, rd(0x10830040UL) & 0xffU, 2);
     ub_s(&u, "; S2MPB02 0x1D ");
     ub_hex(&u, id, 2);
     ub_s(&u, " CTRL1 ");
@@ -125,19 +229,52 @@ int fled_init(void)
     ub_hex(&u, r63, 2);
     sb_log(u.b);
     if (!ok) {
-        st = -1, why = "the LED chip does not answer on I2C";
+        /* NODEV (INT_STAT bit 10 / TRANS_STATUS bits 3:2): the bus ran and nobody acknowledged 0x59 (the chip's power
+         * or address); no transfer-done and no error at all: the controller never clocked (its IP clock) */
+        if ((sb_i2c_fail_irq & 0x400U) || (sb_i2c_fail_trans & 0xcU))
+            refuse(FLED_NOANSWER_NOACK, "the bus runs but no chip acknowledged 0x59");
+        else if (!(sb_i2c_fail_irq & 0xf80U))
+            refuse(FLED_NOANSWER_NOCLOCK, "the I2C controller never ran (its clock?)");
+        else
+            refuse(FLED_NOANSWER, "the LED chip does not answer on I2C");
     } else if (id != 0x90U) {
-        st = -1, why = "the LED chip is not the expected S2MPB02 (0x1D)";
+        refuse(FLED_NOTCHIP, "the LED chip is not the expected S2MPB02 (0x1D)");
     } else if (r63 != 0x7fU) {
-        st = -1, why = "the LED chip's register 0x63 is not its default (a continuous flash mode?)";
+        refuse(FLED_R63, "the LED chip's register 0x63 is not its default (a continuous flash mode?)");
+    } else if (probe_only) {
+        st = 0, code = 0, why = "probe only";
+        sb_log("fled: probe: the S2MPB02 answers as expected (nothing written to it)");
+        return 1;
     } else if (!reg_upd(R_CTRL1, 0xc8U, 0x00U)) {
-        st = -1, why = "the LED chip did not take its pin mode";
+        refuse(FLED_CTRL1, "the LED chip did not take its pin mode");
     } else {
-        st = 1, why = 0;
+        st = 1, code = 0, why = 0;
     }
     if (st < 0)
         sb_logf("fled: refused: ", why);
     return st > 0;
+}
+
+int fled_code(void)
+{
+    return st < 0 ? code : 0;
+}
+
+void fled_retry(void)
+{
+    if (st < 0 && !pulse_on)
+        st = 0;
+}
+
+int fled_probe(void)
+{
+    if (st > 0)
+        return 1;
+    st = 0;
+    probe_only = 1;
+    int r = fled_init();
+    probe_only = 0;
+    return r;
 }
 
 const char *fled_why(void)
@@ -165,7 +302,7 @@ int fled_pulse(void)
     if (!set) {
         if (!reg_upd(R_CUR1, 0xf0U, (uint8_t)(FLASH_MAX << 4)) || !reg_upd(R_TIME1, 0xf0U, (uint8_t)(FLASH_T125 << 4))) {
             sb_log("fled: the flash current or timer did not read back: no pulses");
-            st = -1, why = "the flash settings did not read back";
+            refuse(FLED_FLASHSET, "the flash settings did not read back");
             return 0;
         }
         set = 1;

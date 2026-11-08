@@ -233,6 +233,9 @@ struct sb_i2c {
     uint32_t fs1, fs2, fs3;             /* timing saved from S-Boot */
     int state;                          /* 0 untouched, 1 up, -1 no answer */
 };
+/* the last failed message on any bus: the INT_STAT bits seen, FIFO_STAT and TRANS_STATUS before the controller's
+ * reset (INT_STAT bit 10 NODEV = no ACK; no transfer-done and no error bit = the controller never clocked) */
+extern uint32_t sb_i2c_fail_irq, sb_i2c_fail_fifo, sb_i2c_fail_trans;
 void sb_i2c_bus(struct sb_i2c *b);
 int sb_i2c_msg(struct sb_i2c *b, unsigned addr, int receive, uint8_t *bytes, unsigned count, int stop);
 int sb_i2c_read(struct sb_i2c *b, unsigned addr, uint8_t reg, uint8_t *data, unsigned len);
