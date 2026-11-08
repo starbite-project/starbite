@@ -417,7 +417,7 @@ wdt_feed = "own"
 [[entry]]
 key = "menubench"
 name = "Menu bench"
-version = "v7 bench 3a (1 core, own watchdog)"
+version = "v7 bench 3b (4 cores, own watchdog)"
 category = "lab"
 method = "bare"
 tag = "lab"
