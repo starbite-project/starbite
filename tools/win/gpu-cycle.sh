@@ -26,7 +26,7 @@
 #  6. Checks the hive is clean, pulls OUT/post/SYSTEM, then sets Unattended=0 (unless --keep-unattended).
 # The phone ends in TWRP. Exit: 0 done; 1 usage or precondition (phone untouched or still in TWRP); 2 the phone
 # did not come back (it needs the user); 3 the hive is dirty (run --clean-only first); 4 an install read-back
-# failed (phone in TWRP, files as listed).
+# failed (phone in TWRP, files as listed); 5 --deadman-test: no WATCHDOG reset (the hang protection is not proven).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 here=$(pwd)
@@ -194,19 +194,44 @@ clean-only)
     finish
     exit 0 ;;
 deadman-test)
-    # sbwdog loaded but not feeding: the loader's watchdog must reset the phone back to the menu by itself,
-    # then a clean display-only boot repairs the hive
+    # sbwdog arms the watchdog and never feeds it, nothing else runs: the phone must be reset by the WATCHDOG
+    # (the loader's record "crash: last launch KEY (uefi): HANG (WATCHDOG) rst 0x00800000"). A CLEAN RESTART or
+    # anything else is a failure (exit 5). Then a display-only boot repairs the hive.
     need_unattended
     mount_rw
-    adb shell "mkdir -p $W/Windows/Starbite; echo test > $W/Windows/Starbite/sbwdog.off" >/dev/null
+    adb pull "$W/$HIVE" "$tmp/SYSTEM" >/dev/null
+    if hive_clean "$tmp/SYSTEM"; then
+        # the one-shot registry switch: seen at boot-start (sbwdog clears it at once)
+        python3 "$HS" "$tmp/SYSTEM" "$tmp/S1" param sbwdog DeadmanTest=1 >/dev/null
+        push_check "$tmp/S1" "$W/$HIVE" || { umount_w; exit 4; }
+        how="DeadmanTest=1"
+    else
+        adb shell "mkdir -p $W/Windows/Starbite; echo test > $W/Windows/Starbite/sbwdog.off" >/dev/null
+        how="sbwdog.off (the hive is dirty)"
+    fi
     umount_w
-    log "dead-man test: sbwdog.off in place, booting $ckey; sbwdog arms the watchdog and never feeds it: expect the menu ~82 s after it starts"
+    log "dead-man test ($how): booting $ckey; sbwdog arms the watchdog and never feeds it: expect a WATCHDOG reset ~82 s after it starts"
     boot_and_return "$ckey" 400 "$out/deadman"
-    mount_rw; adb shell "rm -f $W/Windows/Starbite/sbwdog.off" >/dev/null; umount_w
-    log "dead-man test passed: the phone came back by itself"
+    # the verdict: the loader's record of the last launch
+    rec=$(grep -a -h "crash: last launch" "$out/deadman/loader-dmesg.txt" "$out/deadman/loader-pmsg.txt" 2>/dev/null | tail -1 || true)
+    log "loader: ${rec:-no 'crash: last launch' record}"
+    # the test boot's hive, before the clean boot overwrites it
+    mount_rw
+    pull_hive "$out/deadman"
+    adb shell "rm -f $W/Windows/Starbite/sbwdog.off" >/dev/null
+    umount_w
+    if python3 "$main/tools/woa/hive-replay.py" "$out/deadman/SYSTEM" "$out/deadman/SYSTEM.replayed" "$out/deadman/SYSTEM.LOG1" "$out/deadman/SYSTEM.LOG2" >/dev/null 2>&1; then
+        gap_report "$out/deadman/SYSTEM.replayed"
+        grep -E "DeadmanTest|KillFile|ArmWt|ArmedNow|Dm10|Dm20|Seconds|Feeds" "$out/deadman/SYSTEM.replayed.sbwdog.txt" | sed 's/^/  /' | tee -a "$out/cycle.log" || true
+    else
+        log "hive replay failed: raw hive in deadman/"
+    fi
     clean_boot || exit 3
     keep=1; finish
-    exit 0 ;;
+    case $rec in
+    *"$ckey"*WATCHDOG*) log "DEAD-MAN TEST PASSED: the watchdog reset the phone"; exit 0 ;;
+    *) log "DEAD-MAN TEST FAILED: the last launch did not end in a watchdog reset"; exit 5 ;;
+    esac ;;
 esac
 
 # ---- install ---------------------------------------------------------------------------------------------

@@ -882,6 +882,15 @@ The census:
 - **T13j:** in Unattended boots sbwdog arms the watchdog itself when it finds it stopped, and re-arms it if
   anything stops it later. The user's own boots stay unarmed. A hang before sbwdog starts is a known gap until
   there is a UEFI-side feeder.
+- **deadman-1 (22:19) proved nothing.** The loader recorded a CLEAN RESTART: T13j checked the kill file in
+  DriverEntry, where a boot-start driver cannot see files yet, so sbwdog ran its normal restart.
+  - Arming did take: WTCON read back enabled.
+  - UptimeMsAtStart was 26.8 s, so the boot gap is well inside 82 s.
+- **T13k:**
+  - **Dead-man mode:** a one-shot registry switch, `DeadmanTest`. The watchdog is armed and never fed, with no
+    restart and no cap. WTCNT is sampled at 10 s and 20 s to show the counter runs.
+  - **Verdict:** `--deadman-test` passes only on the loader's `HANG (WATCHDOG)` record, and pulls the test
+    boot's hive first.
 - **Not yet shown on the phone:** that winload loads a Start 0 service from `System32\drivers`, that the UEFI
   leaves cluster 1 armed (sbwdog's ArmedAtStart and WtDat say), and that `NtShutdownSystem` from a driver
   leaves the hive and NTFS clean.

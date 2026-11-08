@@ -28,8 +28,12 @@
  * State (Services\sbwdog\State, flushed): ArmedAtStart, WtCon, WtDat, WtCntAtStart, PmuDisable, PmuMask,
  * GapMsAtStart, UptimeMsAtStart, CntFrq, ArmedBySelf, ArmedNow, Rearms,
  * Mode (0 display-only, 1 full, 2 unknown), Seconds, Feeds, RestartAt, RestartStatus, CapAt.
- * Kill file: C:\Windows\Starbite\sbwdog.off: armed as usual (Unattended), then never fed: the phone must reset
- * ~82 s after sbwdog starts. Only for testing the dead-man itself (gpu-cycle.sh --deadman-test).
+ * Dead-man test (gpu-cycle.sh --deadman-test): Parameters\DeadmanTest = 1 (one-shot: cleared, flushed, at start)
+ * or the kill file C:\Windows\Starbite\sbwdog.off. The watchdog is armed and never fed, and nothing else runs
+ * (no restart, no cap): the phone must reset ~82 s after sbwdog starts, which the loader then reports as
+ * HANG (WATCHDOG). WtCon/WtCnt are written (flushed) right after arming and at 10 s and 20 s, to show the counter
+ * runs. The kill file is looked for during the first 60 s: T13j checked it in DriverEntry, where a boot-start
+ * driver cannot see files yet, and the test boot restarted cleanly instead.
  */
 #include <ntddk.h>
 
@@ -140,6 +144,18 @@ static BOOLEAN FileExists(PCWSTR Path)
     return NT_SUCCESS(ZwQueryFullAttributesFile(&oa, &fi));
 }
 
+static void ParamPut(PCWSTR Name, ULONG Value)
+{
+    HANDLE h;
+    UNICODE_STRING n;
+    if (!NT_SUCCESS(OpenSub(L"Parameters", &h)))
+        return;
+    RtlInitUnicodeString(&n, Name);
+    (void)ZwSetValueKey(h, &n, 0, REG_DWORD, &Value, sizeof(Value));
+    (void)ZwFlushKey(h);
+    ZwClose(h);
+}
+
 /* ---- the watchdog ------------------------------------------------------------------------------------- */
 
 static ULONG Rd(volatile UCHAR *B, ULONG Off)
@@ -203,14 +219,14 @@ static VOID RestartThread(PVOID Ctx)
 
 static VOID FeedThread(PVOID Ctx)
 {
+    BOOLEAN dead = Ctx != NULL;           /* DeadmanTest (registry) */
     ULONG period = Param(L"PeriodMs", 5000);
     ULONG unattended = Param(L"Unattended", 0);
     ULONG restartSec = 0, capSec = 0, mode = 2, secs = 0, feeds = 0, rearms = 0;
-    ULONG armSec = unattended ? Param(L"ArmSec", 82) : 0;
-    BOOLEAN feeding = TRUE, restarted = FALSE, decided = FALSE, armed;
+    ULONG armSec = (unattended || dead) ? Param(L"ArmSec", 82) : 0;
+    BOOLEAN feeding = !dead, restarted = FALSE, decided = FALSE, armed, sampled10 = FALSE, sampled20 = FALSE;
     ULONG64 t0 = KeQueryInterruptTime();
     LARGE_INTEGER t;
-    UNREFERENCED_PARAMETER(Ctx);
 
     KeSetPriorityThread(KeGetCurrentThread(), LOW_REALTIME_PRIORITY + 14);
     if (period < 500 || period > 10000)
@@ -218,6 +234,10 @@ static VOID FeedThread(PVOID Ctx)
     armed = Armed();
     for (;;) {
         ULONG elapsed;
+        if (dead && armSec && !Armed()) {
+            armed = Arm(armSec);          /* the test needs it running: armed, never fed */
+            State(L"Rearms", ++rearms, TRUE);
+        }
         if (feeding && armSec && !Armed()) {
             /* stopped by someone after us (or never armed): arm again; the dead-man comes first */
             armed = Arm(armSec);
@@ -228,6 +248,34 @@ static VOID FeedThread(PVOID Ctx)
         t.QuadPart = -10000LL * period;
         KeDelayExecutionThread(KernelMode, FALSE, &t);
         elapsed = (ULONG)((KeQueryInterruptTime() - t0) / 10000000ULL);
+        /* the kill file, once the file system answers (not in DriverEntry: boot-start, too early) */
+        if (!dead && elapsed < 60 && FileExists(L"\\SystemRoot\\Starbite\\sbwdog.off")) {
+            dead = TRUE;
+            feeding = FALSE;
+            State(L"KillFile", 1, TRUE);
+            State(L"KillFileSeenAt", elapsed, TRUE);
+            if (!Armed() && Param(L"ArmSec", 82)) {
+                armSec = Param(L"ArmSec", 82);
+                armed = Arm(armSec);
+                State(L"ArmedNow", armed, TRUE);
+            }
+        }
+        if (dead) {
+            /* a pure dead-man: does the counter run? (82 s = 65063 counts; 10 s = 7935) */
+            if (!sampled10 && elapsed >= 10) {
+                sampled10 = TRUE;
+                State(L"Dm10WtCon", Rd(g.Wdt, WTCON), FALSE);
+                State(L"Dm10WtCnt", Rd(g.Wdt, WTCNT), TRUE);
+            }
+            if (!sampled20 && elapsed >= 20) {
+                sampled20 = TRUE;
+                State(L"Dm20WtCon", Rd(g.Wdt, WTCON), FALSE);
+                State(L"Dm20WtCnt", Rd(g.Wdt, WTCNT), TRUE);
+            }
+            State(L"Seconds", elapsed, TRUE);   /* the last one written is how long Windows lived */
+            secs = elapsed;
+            continue;                     /* no restart, no cap, no feeding */
+        }
         if (!decided && elapsed >= 60) {
             /* sbwddm has started by now in every boot that has it */
             decided = TRUE;
@@ -268,6 +316,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT Drv, PUNICODE_STRING Reg)
     OBJECT_ATTRIBUTES oa;
     HANDLE th;
     ULONG armSec;
+    BOOLEAN dead;
     NTSTATUS st;
     UNREFERENCED_PARAMETER(Drv);
 
@@ -275,7 +324,11 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT Drv, PUNICODE_STRING Reg)
     (void)RtlAppendUnicodeStringToString(&g.Svc, Reg);
     pa.QuadPart = (LONGLONG)WDT1_PA;
     g.Wdt = (volatile UCHAR *)MmMapIoSpaceEx(pa, PAGE_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
-    armSec = Param(L"Unattended", 0) ? Param(L"ArmSec", 82) : 0;   /* only automation boots arm it */
+    dead = Param(L"DeadmanTest", 0) != 0;
+    if (dead)
+        ParamPut(L"DeadmanTest", 0);      /* one-shot: the boot after the test is a normal one */
+    /* only automation boots (and the dead-man test) arm it */
+    armSec = (Param(L"Unattended", 0) || dead) ? Param(L"ArmSec", 82) : 0;
     pa.QuadPart = (LONGLONG)PMU_PA;
     g.PmuWritable = armSec != 0;          /* the PMU is written only to arm (ArmSec), and only bit 23 */
     g.Pmu = (volatile UCHAR *)MmMapIoSpaceEx(pa, PAGE_SIZE, PAGE_NOCACHE | (g.PmuWritable ? PAGE_READWRITE : PAGE_READONLY));
@@ -312,14 +365,16 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT Drv, PUNICODE_STRING Reg)
     else
         State(L"ArmedBySelf", 0, FALSE);
     State(L"ArmedNow", Armed(), FALSE);
+    State(L"ArmWtCon", Rd(g.Wdt, WTCON), FALSE);
+    State(L"ArmWtCnt", Rd(g.Wdt, WTCNT), FALSE);
     State(L"Rearms", 0, FALSE);
-    if (FileExists(L"\\SystemRoot\\Starbite\\sbwdog.off")) {
-        State(L"KillFile", 1, TRUE);
-        return STATUS_SUCCESS;            /* loaded, feeds nothing */
-    }
-    State(L"KillFile", 0, TRUE);
+    State(L"KillFile", 0, FALSE);
+    State(L"KillFileSeenAt", 0, FALSE);
+    State(L"Dm10WtCnt", 0, FALSE);
+    State(L"Dm20WtCnt", 0, FALSE);
+    State(L"DeadmanTest", dead, TRUE);
     InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
-    st = PsCreateSystemThread(&th, THREAD_ALL_ACCESS, &oa, NULL, NULL, FeedThread, NULL);
+    st = PsCreateSystemThread(&th, THREAD_ALL_ACCESS, &oa, NULL, NULL, FeedThread, dead ? (PVOID)1 : NULL);
     if (!NT_SUCCESS(st))
         return st;
     ZwClose(th);
