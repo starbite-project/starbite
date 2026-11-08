@@ -5,7 +5,8 @@ for the card overlay: take jobs out by program name, and give chosen jobs an os_
 IN_DISABLED is the root's launchd-disabled.plist ("-" when it has none); removed jobs are kept there, as
 tools/starlte-disable-jobs.py does, so they can be put back. A job matches --off-list / --log NAME when the
 basename of its Program / ProgramArguments[0] starts with NAME (STARLTE TOP's process names), or its Label
-equals NAME. --log adds OS_ACTIVITY_DT_MODE=YES and StandardErrorPath /private/var/tmp/NAME.log.
+equals NAME. --log adds OS_ACTIVITY_DT_MODE=YES and StandardErrorPath /private/var/tmp/NAME.log
+(LOGDEST=console: /dev/console, which kernel 0371 copies into the kernel log with sweetcontee=1).
 Writes OUTDIR/launchd.plist, OUTDIR/launchd-disabled.plist, OUTDIR/report.txt. Then:
     python3 tools/overlay/sboverlay.py OUT.bin OUTDIR/launchd.plist=/System/Library/xpc/launchd.plist:644 \\
         OUTDIR/launchd-disabled.plist=/System/Library/xpc/launchd-disabled.plist:644
@@ -55,9 +56,9 @@ def main():
         if n:
             env = job.setdefault('EnvironmentVariables', {})
             env['OS_ACTIVITY_DT_MODE'] = 'YES'
-            job['StandardErrorPath'] = f'/private/var/tmp/{n}.log'
+            job['StandardErrorPath'] = '/dev/console' if os.environ.get('LOGDEST') == 'console' else f'/private/var/tmp/{n}.log'
             hit.add(n)
-            report.append(f'log  {job.get("Label")} ({prog(job)}) -> /private/var/tmp/{n}.log')
+            report.append(f'log  {job.get("Label")} ({prog(job)}) -> {job["StandardErrorPath"]}')
     for n in off + a.log:
         if n not in hit:
             report.append(f'none {n}: no job with that program or label (already off, or not a launchd job)')
