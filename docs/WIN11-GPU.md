@@ -949,6 +949,19 @@ read black in the KMD.
 - **Across two processes, as DWM:** the second process opens it, copies it, samples it, and sees a later clear
   by the producer.
 
+**cycle-t13o-1 (00:15):**
+- **Shared runtime-backed surfaces work in one process,** and a second process samples the opened surface
+  correctly on the GPU.
+- **CopyResource from the opened surface is wrong:** it read zeros, then stale contents after the producer's
+  update.
+- **Cause:** Panfrost copies textures on the CPU (`util_resource_copy_region`) through both BOs' mappings. The
+  consumer's CPU view (a persistent pfnLockCb) doesn't track GPU writes to the shared pages.
+- **The same CPU path carries all of DWM's copies,** including d3d10umd's `RotateResourceIdentities`: four
+  full-frame copies per flip, through write-combined memory.
+
+**T13p (sb-patches/0105):** same-format 2D colour copies go through `pctx->blit` (GPU); everything else keeps
+the CPU path. sbshare adds a GPU re-sample after the producer's update.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

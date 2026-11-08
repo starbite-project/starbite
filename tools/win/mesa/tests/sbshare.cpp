@@ -17,7 +17,8 @@
 //   open-copy     CopyResource to staging, read                (the UMD's OpenResource import, read by the GPU)
 //   open-sample   sample it in a shader into its own target    (what DWM's composition does)
 // Then the producer clears its texture red, flushes, and the consumer (waiting on an event) reads again:
-//   open-update   the producer's later GPU write seen by the consumer
+//   open-update   the producer's later GPU write seen by the consumer (CopyResource)
+//   open-samp-red the same, sampled by the consumer's GPU
 // Lines "TEST name: PASS|FAIL got ... want ..."; exit code = failures (100 + n: setup failed).
 //
 #include <windows.h>
@@ -246,9 +247,15 @@ static int consumer(HANDLE h)
     HANDLE go = OpenEventA(SYNCHRONIZE, FALSE, "Local\\sbshare-red"), done = OpenEventA(EVENT_MODIFY_STATE, FALSE, "Local\\sbshare-next");
     if (done)
         SetEvent(done);
-    if (go && WaitForSingleObject(go, 20000) == WAIT_OBJECT_0)
+    if (go && WaitForSingleObject(go, 20000) == WAIT_OBJECT_0) {
         check("open-update", t, RED);
-    else {
+        /* T13p: the same update seen by the GPU (DWM samples window surfaces apps keep redrawing) */
+        if (mine && srv) {
+            clear(mine, 0.5f, 0.5f, 0.5f);
+            draw(mine, "ps_sample", srv);
+            check("open-samp-red", mine, RED);
+        }
+    } else {
         out("TEST open-update: FAIL (no signal from the producer)\n");
         failures++;
     }

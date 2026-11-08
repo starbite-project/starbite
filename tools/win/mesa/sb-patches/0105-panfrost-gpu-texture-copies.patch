@@ -1,0 +1,65 @@
+diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
+index 6a5f4dc..7d9661a 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -26,6 +26,7 @@
+ #include "frontend/winsys_handle.h"
+ #include "util/format/u_format.h"
+ #include "util/os_misc.h"
++#include "util/box.h"
+ #include "util/u_debug_image.h"
+ #include "util/u_drm.h"
+ #include "util/u_gen_mipmap.h"
+@@ -2611,6 +2612,43 @@ panfrost_resource_screen_destroy(struct pipe_screen *pscreen)
+    u_transfer_helper_destroy(pscreen->transfer_helper);
+ }
+ 
++/* Starbite (sbumd, sb-patches/0105, docs/WIN11-GPU.md 6.18): texture copies on the GPU. Panfrost copied them
++ * on the CPU (util_resource_copy_region) through both BOs mappings. On Windows that path is wrong for a surface
++ * opened from another process (T13o: its CPU view read zeros, then stale contents, while GPU sampling of it was
++ * right), and slow for everything: the mappings are write-combined, and d3d10umd RotateResourceIdentities
++ * copies whole 1440x2960 frames after every DWM flip. Same-format 2D colour copies go through pctx->blit; the
++ * rest (buffers, overlapping copies within one resource, MSAA, depth/stencil, compressed) keep the CPU path. */
++static void
++sb_resource_copy_region(struct pipe_context *pctx, struct pipe_resource *dst, unsigned dst_level,
++                        unsigned dstx, unsigned dsty, unsigned dstz, struct pipe_resource *src,
++                        unsigned src_level, const struct pipe_box *src_box)
++{
++   struct pipe_screen *screen = pctx->screen;
++   bool tex2d = (dst->target == PIPE_TEXTURE_2D || dst->target == PIPE_TEXTURE_RECT) &&
++                (src->target == PIPE_TEXTURE_2D || src->target == PIPE_TEXTURE_RECT);
++
++   if (tex2d && dst != src && dst->format == src->format && dst->nr_samples <= 1 && src->nr_samples <= 1 &&
++       !util_format_is_depth_or_stencil(src->format) && !util_format_is_compressed(src->format) &&
++       screen->is_format_supported(screen, dst->format, dst->target, 0, 0, PIPE_BIND_RENDER_TARGET) &&
++       screen->is_format_supported(screen, src->format, src->target, 0, 0, PIPE_BIND_SAMPLER_VIEW)) {
++      struct pipe_blit_info b;
++      memset(&b, 0, sizeof b);
++      b.src.resource = src;
++      b.src.level = src_level;
++      b.src.box = *src_box;
++      b.src.format = src->format;
++      b.dst.resource = dst;
++      b.dst.level = dst_level;
++      u_box_3d(dstx, dsty, dstz, src_box->width, src_box->height, src_box->depth, &b.dst.box);
++      b.dst.format = dst->format;
++      b.mask = PIPE_MASK_RGBA;
++      b.filter = PIPE_TEX_FILTER_NEAREST;
++      pctx->blit(pctx, &b);
++      return;
++   }
++   util_resource_copy_region(pctx, dst, dst_level, dstx, dsty, dstz, src, src_level, src_box);
++}
++
+ void
+ panfrost_resource_context_init(struct pipe_context *pctx)
+ {
+@@ -2618,7 +2656,7 @@ panfrost_resource_context_init(struct pipe_context *pctx)
+    pctx->buffer_unmap = u_transfer_helper_transfer_unmap;
+    pctx->texture_map = u_transfer_helper_transfer_map;
+    pctx->texture_unmap = u_transfer_helper_transfer_unmap;
+-   pctx->resource_copy_region = util_resource_copy_region;
++   pctx->resource_copy_region = sb_resource_copy_region;   /* Starbite: GPU copies (0105) */
+    pctx->blit = panfrost_blit;
+    pctx->generate_mipmap = panfrost_generate_mipmap;
+    pctx->flush_resource = panfrost_flush_resource;
