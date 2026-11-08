@@ -67,6 +67,8 @@ scene heat-running  w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,19
 scene heat-manual   w:300 $OPEN t:1057,663 w:600 t:1057,1302 w:500
 scene heat-manual-2 w:300 $OPEN t:1057,663 w:600 t:1057,1302 w:500 t:720,1150 w:300 t:720,1150 w:300
 scene heat-manual-scrolled w:300 $OPEN t:1057,663 w:600 t:1057,1302 w:500 g:720,2400,-1500,600 w:400
+scene control-em    w:300 $OPEN t:700,50 w:500
+scene aod-clock     w:300 $OPEN t:700,50 w:500 t:1184,1066 w:400 t:220,215 w:400 w:33000
 scene heat-pocket   w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:36000 t:720,1400 w:400
 scene heat-unlocked w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:36000 k:p w:500
 scene home-busy     w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:3000 $BACK w:1200

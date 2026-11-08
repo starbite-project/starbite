@@ -829,6 +829,20 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.18 Version 0.6.5: Emergency Mode's dim clock (the panel's low-power mode), the panel's registers read (2026-11-08)
+
+- **The dim clock** (the control center in Emergency Mode: "Dim clock when off (new)", off by default, until a
+  restart): when the screen would go off, a mostly black picture (the clock, the charge, "press Power") goes to
+  the panel, then the panel's own low-power mode (ALPM, 10 nits) with Samsung's star_a3_s1 enter table exactly
+  (`build/em-research-panel-hbm-lowpower.md` 2.2: AOR 0B 74, one frame, BB 07 0C 9B EE 4F 84, AVS on (B0 2B, FD 03,
+  level-3 key), 53 02, AVC2 off (F4 .. 8A), F7 03). The clock is redrawn once a minute (frames still go out in the
+  low-power mode). Everything else is the screen-off state (the A55 lowered, Power wakes, the 5-minute switch-off).
+  The wake: the exit table (BB 03, AVC2 on, 53 00), then our AOR again. Never with sleep-in or display-off.
+- **The panel's registers, read only** (Settings > About > "Read the panel's registers"): the DSI read path (set the
+  return size 0x37, DCS read 0x06 with the bus turnaround, the RX FIFO), frames paused around it: the ID (04), CA
+  (gamma, 34), B3 (HBM gamma, 34), B5 (ELVSS, 23), F4 (VINT), B1 (AOR), B8 from offset 18 (IRC, 17), logged. HBM
+  itself waits for these values (it writes CA / B5 / F4 / B8 as one set built from them, and must restore them).
+
 ### 12.17 Version 0.6.4: the Wi-Fi join never blocks (2026-11-08)
 
 - T14 passed on the phone with 0.6.3's self test (the `sbos-state` entry made; the fence's standing grant; a dry run,

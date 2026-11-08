@@ -181,7 +181,8 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
        SET_HEAT_TARGET_C10 = 13 /* 0.6.2: Keep warm's battery target, 0.1 C (50..350) */,
        SET_HEAT_CURRENT_STOP = 14 /* 0.6.2: Manual's 3.5 A battery-current stop: 1 on (default), 0 off; until a restart */,
        SET_HEAT_SOC_STOP_C10 = 15 /* 0.6.3: Manual's SoC stop, 0.1 C: 0 off (default) or 700..1250 */,
-       SET_LED_FULL = 16 /* 0.6.3: the LED at its rated currents over I2C (torch 240 mA, SOS flash pulses 1250 mA) */ };
+       SET_LED_FULL = 16 /* 0.6.3: the LED at its rated currents over I2C (torch 240 mA, SOS flash pulses 1250 mA) */,
+       SET_PANEL_DUMP = 17 /* 0.6.5: write 1: read the panel's registers (read only, logged) */ };
 
 /* sensor_read ids (0.3): temperatures in 0.1 C, -1000 unknown */
 enum { SENSOR_BATTERY_C10 = 1, SENSOR_SKIN_C10 = 2, SENSOR_SOC_C10 = 3, SENSOR_GPU_C10 = 4 };

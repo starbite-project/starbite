@@ -367,8 +367,19 @@ static void screen(int on)
         return;
     pocket_lock = 0;
     K.screen_on = on;
-    hw_screen(on);
+    int aod = !on && em_aod && look_emergency && !sos_active();
+    if (on && panel_in_lpm) {
+        (void)panel_lpm(0);                 /* 0.6.5: out of the dim clock first */
+        kt_cancel(KT_POWER, 3);
+    }
+    if (!aod)
+        hw_screen(on);                      /* (the dim clock keeps the panel on, in its low-power mode) */
     kui_screen_changed(on);
+    if (aod) {
+        sb_mdelay(40);                      /* the clock's frame into the panel's RAM first */
+        (void)panel_lpm(1);
+        kt_set(KT_POWER, 3, sb_ms(), 60000, 1);     /* the clock, once a minute */
+    }
     if (!on) {
         /* v0.1: black, nothing drawn until the Power key */
         uint32_t *bb = 0;
@@ -467,6 +478,13 @@ int power_auto_off(int rehearse)
 
 void power_timer(unsigned id)
 {
+    if (id == 3) {
+        if (!K.screen_on && panel_in_lpm)
+            kui_aod_frame();                /* 0.6.5: the dim clock's minute */
+        else
+            kt_cancel(KT_POWER, 3);
+        return;
+    }
     if (id == 2) {
         if (!K.screen_on && auto_off_min && !power_auto_off(sbos_selftest_enabled))
             kt_set(KT_POWER, 2, sb_ms(), 10U * 60000U, 0);  /* kept on: ask again in 10 minutes */

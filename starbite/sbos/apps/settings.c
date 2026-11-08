@@ -44,7 +44,8 @@ static void about(void)
     ui_textline("Calls and messages need the modem driver: not in this version.", GREY);
 }
 
-static int led_refused;                     /* 0.6.3: the LED chip did not answer */
+static int led_refused;
+static int dump_r;                          /* 0.6.5: the panel read: 1 done, -1 not */                     /* 0.6.3: the LED chip did not answer */
 
 static void show(void)
 {
@@ -82,6 +83,8 @@ static void show(void)
         ui_textline("Heat stops by itself at 42 \xc2\xb0" "C battery, 46 \xc2\xb0" "C case, 15 % battery or after 30 minutes.", GREY);
     } else {
         about();
+        ui_button(10, "Read the panel's registers", dump_r == 1 ? "Done: in the log (read only)" :
+                  dump_r < 0 ? "Did not complete (logged)" : "For the brighter-screen work: logged, read only", 0);
     }
     ui_textline(setting_get(SET_SAVED) == 1 ? "Saved on this phone." : "Settings last until a restart (no save slot yet).", GREY);
     ui_end();
@@ -92,6 +95,9 @@ void app_event(const struct sbos_event *ev)
     if (ev->type == EV_APP_START) {
         ui_tile("Display, alarm, about");
     } else if (ev->type == EV_APP_SHOW) {
+        show();
+    } else if (ev->type == EV_APP_BUTTON && ev->id == 10) {
+        dump_r = setting_set(SET_PANEL_DUMP, 1) == 0 ? 1 : -1;
         show();
     } else if (ev->type == EV_APP_TOGGLE) {
         int id = ev->id == 2 ? SET_PANEL_SAVE : ev->id == 3 ? SET_PANEL_OFF : ev->id == 4 ? SET_SOS_LED :

@@ -199,6 +199,180 @@ static int effective(int level)
     return level;
 }
 
+/* 0.6.5: a DCS read (the kernel's dsim_read flow, build/em-research-brightness.md 4): the return size, the read with
+ * the bus turnaround, the answer from the RX FIFO. Frames are paused around it. Returns the bytes read or -1. */
+static int dcs_read(uint8_t reg, uint8_t *buf, unsigned n)
+{
+    if (n > 64 || !dsim_ready())
+        return -1;
+    if (((rd(DSIM_FIFOCTRL) >> 16) & 0x3fU) && dsim_wait())
+        return -1;
+    wr(DSIM_INTSRC, 1U << 18);                          /* RX_DATA_DONE */
+    wr(DSIM_INTSRC, DSIM_PH_EMPTY);
+    dsim_hdr(0x37, n, 0);                               /* set the maximum return size */
+    if (dsim_wait())
+        return -1;
+    uint32_t v = rd(DSIM_PKTHDR) & 0xfe000000U;
+    wr(DSIM_PKTHDR, v | (1U << 24) | ((uint32_t)reg << 8) | 0x06U);   /* DCS read, BTA */
+    unsigned t = 0;
+    for (; t < 100000 && !(rd(DSIM_INTSRC) & (1U << 18)); t += 10)
+        sb_udelay(10);
+    if (t >= 100000)
+        return -1;
+    wr(DSIM_INTSRC, 1U << 18);
+    int got = 0;
+    for (unsigned k = 0; k < 64 && !(rd(DSIM_FIFOCTRL) & (1U << 12)); ++k) {
+        uint32_t w = rd(DSIM + 0x60);
+        uint32_t type = w & 0xffU;
+        if (type == 0x1c || type == 0x1a) {             /* a long answer: the word count, then the data */
+            unsigned wc = (w >> 8) & 0xffffU;
+            for (unsigned i = 0; i < wc; i += 4) {
+                uint32_t d = rd(DSIM + 0x60);
+                for (unsigned b = 0; b < 4 && i + b < wc; ++b)
+                    if ((unsigned)got < n)
+                        buf[got++] = (uint8_t)(d >> (8 * b));
+            }
+        } else if (type == 0x21 || type == 0x11) {
+            buf[got++] = (uint8_t)(w >> 8);
+        } else if (type == 0x22 || type == 0x12) {
+            buf[got++] = (uint8_t)(w >> 8);
+            if ((unsigned)got < n)
+                buf[got++] = (uint8_t)(w >> 16);
+        } else if (type == 0x02) {
+            sb_logx("panel: read: an error report from the panel ", (w >> 8) & 0xffffU);
+        }
+    }
+    return got;
+}
+
+static void log_hex(const char *what, const uint8_t *b, int n)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "panel: ");
+    ub_s(&u, what);
+    if (n < 0) {
+        ub_s(&u, ": no answer");
+    } else {
+        ub_s(&u, ":");
+        for (int i = 0; i < n; ++i) {
+            ub_c(&u, ' ');
+            ub_hex(&u, b[i], 2);
+        }
+    }
+    sb_log(u.b);
+}
+
+/* 0.6.5: read only (Settings > About): the panel's ID and the registers HBM would need (gamma CA, the HBM gamma B3,
+ * ELVSS B5, VINT F4, IRC B8 from offset 18); logged for the HBM decision. Writes only the level keys and B0 offsets. */
+int panel_dump(void)
+{
+    static const uint8_t k1on[3] = { 0x9f, 0xa5, 0xa5 }, k1off[3] = { 0x9f, 0x5a, 0x5a };
+    static const uint8_t k2on[3] = { 0xf0, 0x5a, 0x5a }, k2off[3] = { 0xf0, 0xa5, 0xa5 };
+    static const uint8_t k3on[3] = { 0xfc, 0x5a, 0x5a }, k3off[3] = { 0xfc, 0xa5, 0xa5 };
+    static const uint8_t off18[2] = { 0xb0, 18 };
+    if (!dsim_ready()) {
+        sb_log("panel: read: the link is not in command mode: nothing read");
+        return 0;
+    }
+    int was_masked = masked;
+    trig(1);                                            /* no frames during the reads */
+    sb_mdelay(20);
+    uint8_t b[64];
+    int n = dcs_read(0x04, b, 3);
+    log_hex("ID (04)", b, n);
+    int ok = n == 3;
+    if (!dcs_long(k1on, 3) && !dcs_long(k2on, 3) && !dcs_long(k3on, 3)) {
+        n = dcs_read(0xca, b, 34);
+        log_hex("gamma (CA)", b, n);
+        n = dcs_read(0xb3, b, 34);
+        log_hex("HBM gamma (B3)", b, n);
+        n = dcs_read(0xb5, b, 23);
+        log_hex("ELVSS (B5)", b, n);
+        n = dcs_read(0xf4, b, 6);
+        log_hex("VINT (F4)", b, n);
+        n = dcs_read(0xb1, b, 2);
+        log_hex("AOR (B1)", b, n);
+        if (!dcs_long(off18, 2)) {
+            n = dcs_read(0xb8, b, 17);
+            log_hex("IRC (B8 from 18)", b, n);
+        }
+    } else {
+        ok = 0;
+    }
+    (void)dcs_long(k3off, 3);
+    (void)dcs_long(k2off, 3);
+    (void)dcs_long(k1off, 3);
+    if (!was_masked)
+        trig(0);
+    else
+        panel_kick();
+    sb_log(ok ? "panel: registers read (read only)" : "panel: the register read did not complete");
+    return ok;
+}
+
+/* 0.6.5: the panel's own low-power mode (ALPM, 10 nits), Samsung's star_a3_s1 enter / exit tables exactly
+ * (build/em-research-panel-hbm-lowpower.md 2.2): the picture in the panel's RAM stays; frames may still be sent.
+ * Every enter is paired with an exit; the exit re-sends our AOR (the enter replaced it with 0B 74). */
+int panel_in_lpm;
+
+static int seq(const uint8_t *const *cmds, const uint8_t *lens, unsigned n)
+{
+    int r = 0;
+    for (unsigned i = 0; i < n && !r; ++i)
+        r = dcs_long(cmds[i], lens[i]);
+    return r;
+}
+
+int panel_lpm(int on)
+{
+    static const uint8_t k2on[3] = { 0xf0, 0x5a, 0x5a }, k2off[3] = { 0xf0, 0xa5, 0xa5 };
+    static const uint8_t k3on[3] = { 0xfc, 0x5a, 0x5a }, k3off[3] = { 0xfc, 0xa5, 0xa5 };
+    static const uint8_t aor[3] = { 0xb1, 0x0b, 0x74 }, upd[2] = { 0xf7, 0x03 };
+    static const uint8_t nit[7] = { 0xbb, 0x07, 0x0c, 0x9b, 0xee, 0x4f, 0x84 };     /* ALPM 10 nits */
+    static const uint8_t avs_off[2] = { 0xb0, 0x2b }, avs[2] = { 0xfd, 0x03 };
+    static const uint8_t mode[2] = { 0x53, 0x02 }, mode_off[2] = { 0x53, 0x00 };
+    static const uint8_t avc2_off[6] = { 0xf4, 0xeb, 0x23, 0x0b, 0x17, 0x8a }, avc2_on[6] = { 0xf4, 0xeb, 0x23, 0x0b, 0x17, 0xca };
+    static const uint8_t bb_exit[2] = { 0xbb, 0x03 };
+    on = !!on;
+    if (on == panel_in_lpm)
+        return 1;
+    if (!dsim_ready())
+        return 0;
+    int r;
+    if (on) {
+        const uint8_t *a[] = { k2on, aor, upd, k2off };
+        const uint8_t al[] = { 3, 3, 2, 3 };
+        r = seq(a, al, 4);
+        if (!r) {
+            sb_mdelay(17);                  /* one frame at 60 Hz */
+            const uint8_t *b[] = { k2on, nit, k3on, avs_off, avs, k3off, mode, avc2_off, upd };
+            const uint8_t bl[] = { 3, 7, 3, 2, 2, 3, 2, 6, 2 };
+            r = seq(b, bl, 9);
+        }
+        (void)dcs_long(k3off, 3);
+        (void)dcs_long(k2off, 3);           /* the keys closed, even after a failure */
+        panel_in_lpm = 1;                   /* a partial enter is undone by the exit too */
+    } else {
+        const uint8_t *a[] = { k2on, bb_exit, avc2_on, mode_off };
+        const uint8_t al[] = { 3, 2, 6, 2 };
+        r = seq(a, al, 4);
+        (void)dcs_long(k2off, 3);
+        if (!r)
+            panel_in_lpm = 0;
+        applied = -2;                       /* our AOR again (the enter replaced it) */
+        (void)send_level(effective(panel_bright_level) ? effective(panel_bright_level) : 0);
+    }
+    if (r)
+        ++dcs_fail;
+    sb_log(on ? (r ? "panel: the low-power mode's enter did NOT go out (the exit follows at the wake)" :
+                     "panel: low-power mode (ALPM, 10 nits): the dim clock")
+              : (r ? "panel: the low-power mode's exit did NOT go out" : "panel: low-power mode off, our brightness back"));
+    if (on && !r && SAVE_ON)
+        panel_kick();
+    return !r;
+}
+
 void panel_emergency(int on)
 {
     on = !!on;

@@ -1096,6 +1096,12 @@ static void build_control(void)
     scopy(e->b, sizeof(e->b), look_emergency ? "On: the big emergency screens; the phone saves and switches off 5 minutes after the screen goes off."
                                              : "The big emergency screens, and the phone saves and switches off 5 minutes after the screen goes off.");
     e->color = look_emergency ? C_RED : C_L2;
+    if (look_emergency) {
+        e = add(cur, &ncur, E_TOGGLE);
+        e->id = 6;
+        scopy(e->a, sizeof(e->a), "Dim clock when off (new)");
+        e->value = em_aod;
+    }
     e = add(cur, &ncur, E_TOGGLE);
     e->id = 2;
     scopy(e->a, sizeof(e->a), "Flashlight");
@@ -1134,6 +1140,11 @@ static void control_pick(const struct el *e, int x)
     if (e->kind == E_TOGGLE) {
         if (e->id == 1)
             kui_set_emergency(!e->value);
+        else if (e->id == 6) {
+            em_aod = !e->value;             /* 0.6.5: until a restart (a first run with the user) */
+            sb_log(em_aod ? "ui: Emergency Mode's dim clock when the screen is off: on (the panel's low-power mode)"
+                          : "ui: Emergency Mode's dim clock: off (black)");
+        }
         else if (e->id == 2) {
             if (torch_set(!e->value) != 0 && !e->value)
                 kui_toast("The LED is not available", 2000);
@@ -1987,6 +1998,45 @@ void kui_power_menu(void)
     full = dirty = 1;
 }
 
+/* 0.6.5: the dim clock for Emergency Mode's screen-off (the panel's low-power mode shows it): mostly black */
+int em_aod;
+
+void kui_aod_frame(void)
+{
+    struct el els[3];
+    memset(els, 0, sizeof(els));
+    els[0].kind = E_CLOCK;
+    fmt_clock(els[0].b, sizeof(els[0].b), 0);
+    els[0].x = 0, els[0].y = 1000, els[0].w = UI_W, els[0].h = 460;
+    struct sbos_battery b;
+    battery_get(&b);
+    els[1].kind = E_CTEXT;
+    {
+        struct ub u;
+        ub_init(&u);
+        if (b.ok) {
+            ub_dec(&u, (uint64_t)(b.pct < 0 ? 0 : b.pct));
+            ub_s(&u, " %");
+        }
+        scopy(els[1].b, sizeof(els[1].b), u.b);
+    }
+    els[1].value = F_ROW_M;
+    els[1].color = C_L2;
+    els[1].x = 0, els[1].y = 1500, els[1].w = UI_W, els[1].h = 100;
+    els[2].kind = E_CTEXT;
+    scopy(els[2].b, sizeof(els[2].b), "Emergency Mode: press Power");
+    els[2].value = F_SMALL;
+    els[2].color = C_L3;
+    els[2].x = 0, els[2].y = 2500, els[2].w = UI_W, els[2].h = 80;
+    ui_noclip();
+    ui_fill(0, 0, UI_W, UI_H, 0xff000000U);
+    for (int i = 0; i < 3; ++i)
+        draw_el(&els[i], -1);
+    ui_dirty_all();
+    ui_present();
+    panel_kick();
+}
+
 void kui_screen_changed(int on)
 {
     if (on) {
@@ -1999,11 +2049,15 @@ void kui_screen_changed(int on)
         if (screen != SCR_SOS) {
             screen = SCR_OFF;
             shown_screen = SCR_OFF;                 /* the wake draws at once (no transition from black) */
-            ui_noclip();
-            ui_fill(0, 0, UI_W, UI_H, 0xff000000U);   /* v0.1: a black screen (OLED: those pixels are off) */
-            ui_dirty_all();
-            ui_present();
-            panel_kick();                       /* the black frame must reach the panel */
+            if (em_aod && look_emergency) {
+                kui_aod_frame();                /* 0.6.5: the dim clock (services.c puts the panel in low power) */
+            } else {
+                ui_noclip();
+                ui_fill(0, 0, UI_W, UI_H, 0xff000000U);   /* v0.1: a black screen (OLED: those pixels are off) */
+                ui_dirty_all();
+                ui_present();
+                panel_kick();                   /* the black frame must reach the panel */
+            }
             nshown = 0;
         }
     }
