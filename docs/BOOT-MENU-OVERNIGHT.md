@@ -195,6 +195,11 @@ The setup (the frame's diff and shift bookkeeping, mostly on core 0) is the next
 17 setup (≈ the row shift) + 25 glass + 2 over + 13 present. MB6 (05d2f17) vectorises the shift's correction (host 2.2x on
 the shift, frames byte-identical); BOOT-smp5 (5c43b37d…) staged.
 
+### 6.5 MB6 (vectorised shift correction), 18:35: passed
+4 cores: scroll 52 ms (~19 fps; setup 17 -> 9 ms), sections 80 ms, focus 14 ms. Scroll frame ≈ 9 setup + 27 glass + 1 over +
+15 present. BOOT-smp5 (5c43b37d…) flashed tonight with the user. MB7 (9966844: moving edges' rows on the quarter grid while
+scrolling) and BOOT-smp6 (1e6faeac…) staged for a later slot.
+
 ## 7. Not done / next
 
 - GPU (Mali-G72) composition: the right long-term answer for 60 fps (MV5). The win-mali-gpu track can
