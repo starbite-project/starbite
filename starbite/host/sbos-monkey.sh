@@ -34,7 +34,7 @@ PY
 )
     log="$out/monkey-$s.txt"
     # shellcheck disable=SC2086
-    limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 "$out/sbos-host" "$out" /dev/null $script "s:monkey-$s" q > "$log" 2>&1
+    limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 ${MONKEY_NORMAL:+SBOS_HOST_NORMAL=1} "$out/sbos-host" "$out" /dev/null $script "s:monkey-$s" q > "$log" 2>&1
     bad=""
     grep -q "CRASH\|Segmentation\|Abort\|AddressSanitizer\|runtime error" "$log" && bad="$bad [crash]"
     grep -q "event queue full" "$log" && bad="$bad [event queue full]"

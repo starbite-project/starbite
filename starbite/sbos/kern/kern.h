@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.5.14"
+#define SBOS_VERSION "0.6"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -65,7 +65,8 @@ struct heat_limits {
     int soft_ma, hard_ma;           /* |current|: 3200 a core off, 3500 stop */
     int soft_sag_mv, cold_sag_mv;   /* VCELL below its resting value: 300 a core off, 150 the cold limit */
     int min_mv;                     /* stop below (3450) */
-    int min_pct[4];                 /* per level to start */
+    int min_pct[5];                 /* per level to start */
+    int ext_band_bat_c10, ext_hard_bat_c10, ext_soft_soc_c10;   /* Extreme (0.6): 43, 45, 78 C */
     int stop_pct;                   /* stop below (15) */
     unsigned blind_ms;              /* no valid battery or SoC sample this long: stop (3000) */
     unsigned stuck_ms;              /* the same battery raw value this long while the SoC moved 5 C (60000) */
@@ -131,6 +132,7 @@ unsigned heatk_mixed(struct heatk_cfg *c, unsigned w, uint64_t it);
 int heater_cpu0_active(void);
 /* the GPU's share on High (gpuheat.c), off until Settings allows it */
 extern int gpu_heat_allowed;
+extern int gpu_heat_session;        /* 0.6: Extreme's own confirmation allows the GPU for that session */
 int gpuheat_start(void);
 void gpuheat_tick(void);
 void gpuheat_stop(void);
@@ -189,6 +191,7 @@ struct kstate {
                                      * image: the last input) */
 };
 extern struct kstate K;
+extern int pocket_lock;             /* 0.6: heating with the screen kept on: touch and keys locked until Power */
 
 /* tasks */
 void input_init(void);
@@ -233,7 +236,8 @@ void panel_save_set(int on);
 void panel_screen(int on);
 unsigned panel_dcs_failures(void);
 extern int panel_bright_level;
-int panel_brightness(int level);    /* 0 untouched, 1..4 low..high: 1 sent */
+int panel_brightness(int level);    /* the user's level: 0 untouched, 1..4 low..high: 1 done */
+void panel_boost(int who, int on);  /* 1 Extreme, 2 SOS: the top level while any asks */
 /* files on the card, read only (files.c) */
 int kfile_read(const char *path, void *dst, uint32_t cap);
 extern int sos_led_on;              /* settings: the LED flashes with SOS */
@@ -273,6 +277,20 @@ void kui_input(uint32_t id, const char *label, uint32_t flags, int max, const ch
 int kui_input_get(char *out, unsigned cap);
 void kui_input_wipe(void);
 void kui_chart(const char *caption, const int16_t *v, int n, int lo, int hi, uint32_t c, const char *lr);
+/* look.c (0.6): the normal mode's wallpaper and glass */
+extern int look_emergency;
+int look_glass_on(void);
+int look_style(void);
+int look_is_ready(void);
+extern int look_saved_style;
+extern int em_set_auto;             /* Emergency Mode turned the 5-minute switch-off on (it takes it back) */
+void look_init(int style);
+void look_bg(int x, int y, int w, int h);
+void look_glass(int x, int y, int w, int h, int r, uint32_t tint, unsigned a);
+void look_glass_disc(int cx, int cy, int r, uint32_t tint, unsigned a);
+void kui_redraw_all(void);
+void kui_control_open(void);
+void kui_set_emergency(int on);
 void kui_gauge(const char *caption, const char *value, int permille, uint32_t c);
 const char *app_tile(int a);        /* the line an app shows under its home tile */
 void kui_toast(const char *t, uint32_t ms);

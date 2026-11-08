@@ -48,7 +48,8 @@ GPU_SCRIPT="w:600 $OPEN $SETT $D $D $SEL $SEL $D $SEL $D $HOLDSEL w:800 $BACK
  h:p:1300 w:500 $D $D $D $SEL w:2000"
 # the parked case: Low, then Off (core 1 leaves and, injected, parks), then Low again (its relaunch must be refused
 # at once as parked, the other cores start), then the power menu's Boot menu while heating
-PARKED_SCRIPT="w:600 $OPEN $HEAT_LOW w:5000 $D $D $SEL w:600 $SEL w:3000 $SEL w:6000
+# 0.6: the level row is Off|Low|High|Extreme: Off then Low by touch (keys would pass Extreme's confirmation)
+PARKED_SCRIPT="w:600 $OPEN $HEAT_LOW w:5000 t:220,670 w:3000 t:550,670 w:6000
  h:p:1300 w:500 $D $D $D $SEL w:2000"
 fails=0
 run_case() {

@@ -18,6 +18,8 @@ int sos_active(void)
     return sos_st != 0;
 }
 
+/* 0.6: SOS flashes at the panel's top brightness level (its own maximum, within its rating): panel_boost */
+
 int sos_set(int on)
 {
     if (on && !sos_st) {
@@ -31,6 +33,7 @@ int sos_set(int on)
         kt_cancel(KT_SOS, 1);
         if (sos_led_on)
             torch_set(0);
+        panel_boost(2, 0);
         sb_log("sos: off");
     }
     kui_sos_changed();
@@ -48,6 +51,7 @@ void sos_timer(unsigned id)
     if (sos_st == 2 && now >= sos_t0) {
         sos_st = 1;
         sos_phase_t = now;
+        panel_boost(2, 1);                  /* the brightest flashes the panel is rated for */
         sb_log("sos: flashing");
         app_event_send(app_by_id("sos"), EV_APP_SERVICE, 2, sos_st);
     }
@@ -349,10 +353,13 @@ void power_heater_took_clocks(void)
     a55_lowered = 0;
 }
 
+int pocket_lock;
+
 static void screen(int on)
 {
     if (K.screen_on == on)
         return;
+    pocket_lock = 0;
     K.screen_on = on;
     hw_screen(on);
     kui_screen_changed(on);
@@ -406,6 +413,7 @@ void power_screen_set(int on)
 
 void power_key_long(void)
 {
+    pocket_lock = 0;                                /* the power menu needs touch */
     if (!K.screen_on)
         screen(1);
     kui_power_menu();
@@ -464,6 +472,17 @@ void power_timer(unsigned id)
     int down = 0;
     kin_touch_held(&down);
     if (kui_awake_on() || sos_active() || down) {
+        kt_set(KT_POWER, 1, sb_ms(), 5000, 0);
+        return;
+    }
+    if (heater_running_ui()) {
+        /* 0.6: heating keeps the screen on (it is part of the heat); after the screen-off time the lock screen with
+         * touch and keys locked (a pocket), until a short Power press */
+        if (!pocket_lock) {
+            pocket_lock = 1;
+            kui_lock();
+            sb_log("power: heating: the screen stays on; touch locked until Power");
+        }
         kt_set(KT_POWER, 1, sb_ms(), 5000, 0);
         return;
     }

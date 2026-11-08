@@ -44,14 +44,14 @@ static void temp(struct fmt *f, int c10)
     fmt_s(f, " \xc2\xb0" "C");
 }
 
-static const char *const lvl[4] = { "Off", "Low", "Medium", "High" };
+static const char *const lvl[5] = { "Off", "Low", "Medium", "High", "Extreme" };
 
 static void tile(const struct sbos_heat *h, int on)
 {
     struct fmt f;
     fmt_init(&f);
     if (on) {
-        fmt_s(&f, lvl[h->level & 3]);
+        fmt_s(&f, lvl[h->level >= 0 && h->level <= 4 ? h->level : 0]);
         fmt_s(&f, "  ");
         fmt_d(&f, (h->secs_left + 59) / 60);
         fmt_s(&f, " min");
@@ -81,10 +81,11 @@ static void show(void)
         return;
     ui_begin();
     ui_title("Heat");
-    ui_level(1, "Off|Low|High", on ? (h.level >= HEAT_HIGH ? 2 : 1) : 0);
+    ui_level(1, "Off|Low|High|Extreme", on ? (h.level == HEAT_EXTREME ? 3 : h.level >= HEAT_HIGH ? 2 : 1) : 0);
     fmt_init(&f);
     temp(&f, h.bat_c10);
-    ui_big(on ? "BATTERY  (STOPS AT 42 \xc2\xb0" "C)" : "BATTERY", f.b, h.bat_c10 >= 390 ? ORANGE : 0);
+    ui_big(on ? (h.level == HEAT_EXTREME ? "BATTERY  (STOPS AT 45 \xc2\xb0" "C)" : "BATTERY  (STOPS AT 42 \xc2\xb0" "C)") : "BATTERY",
+           f.b, h.bat_c10 >= 390 ? ORANGE : 0);
     fmt_init(&f);
     fmt_s(&f, "Processor ");
     temp(&f, h.soc_c10);
@@ -96,7 +97,7 @@ static void show(void)
     ui_textline(f.b, 0xffffffffU);
     fmt_init(&f);
     if (on) {
-        fmt_s(&f, lvl[h.level & 3]);
+        fmt_s(&f, lvl[h.level >= 0 && h.level <= 4 ? h.level : 0]);
         fmt_s(&f, ": stops by itself in ");
         fmt_d(&f, (h.secs_left + 59) / 60);
         fmt_s(&f, " min");
@@ -119,7 +120,7 @@ static void show(void)
         ui_chart("BATTERY TEMPERATURE", th, thn, lo, 450, ORANGE, lr.b);
     }
     ui_textline("WARNING: the phone gets hot to hold. Keep it in a pocket or a glove, not on bare skin.", ORANGE);
-    ui_textline("Uses the battery fast: about 1 % a minute on High. Not while charging.", GREY);
+    ui_textline("Uses the battery fast: about 1 % a minute on High, 2 % on Extreme. Not while charging. The screen stays on while it heats.", GREY);
     ui_end();
 }
 
@@ -140,7 +141,7 @@ void app_event(const struct sbos_event *ev)
         timer_cancel(1);
         break;
     case EV_APP_LEVEL:
-        heat_request(ev->value == 2 ? HEAT_HIGH : ev->value == 1 ? HEAT_LOW : HEAT_OFF, 30);
+        heat_request(ev->value == 3 ? HEAT_EXTREME : ev->value == 2 ? HEAT_HIGH : ev->value == 1 ? HEAT_LOW : HEAT_OFF, 30);
         show();
         break;
     case EV_APP_TIMER:

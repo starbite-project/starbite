@@ -20,7 +20,10 @@ const struct heat_limits heat_default_limits = {
     .soft_sag_mv = 300,
     .cold_sag_mv = 150,
     .min_mv = 3450,
-    .min_pct = { 0, 20, 30, 30 },
+    .min_pct = { 0, 20, 30, 30, 40 },
+    .ext_band_bat_c10 = 430,
+    .ext_hard_bat_c10 = 450,
+    .ext_soft_soc_c10 = 780,
     .stop_pct = 15,
     .blind_ms = 3000,
     .stuck_ms = 60000,
@@ -65,7 +68,7 @@ int heat_core_state(int64_t psci, unsigned slot, int start_fail)
 
 int heat_max_cores(int level)
 {
-    return level == HEAT_LOW ? 3 : level == HEAT_MEDIUM ? 5 : level == HEAT_HIGH ? 7 : 0;
+    return level == HEAT_LOW ? 3 : level == HEAT_MEDIUM ? 5 : level >= HEAT_HIGH && level <= HEAT_EXTREME ? 7 : 0;
 }
 
 void heat_ctl_init(struct heat_ctl *c, const struct heat_limits *lim)
@@ -94,7 +97,7 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
             stop(c, HEAT_ST_OFF, "Stopped");
         return 0;
     }
-    if (level > HEAT_HIGH)
+    if (level > HEAT_EXTREME)
         return SBOS_EINVAL;
     const char *no = 0;
     if (!in->bat_ok)
@@ -113,7 +116,7 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
     else if (!in->gauge_ok)
         no = "No battery reading";
     else if (in->pct < L->min_pct[level])
-        no = level == HEAT_LOW ? "Battery below 20 %" : "Battery below 30 % (try Low)";
+        no = level == HEAT_LOW ? "Battery below 20 %" : level == HEAT_EXTREME ? "Battery below 40 % (try High)" : "Battery below 30 % (try Low)";
     else if (in->charger > 0)
         no = "Unplug the charger first";
     else if (in->charger < 0)
@@ -169,9 +172,13 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         stop(c, HEAT_ST_STOPPED, "Lost the processor temperature");
         return;
     }
-    if (in->bat_ok && in->bat_c10 >= L->hard_bat_c10) {
+    int ext = c->level == HEAT_EXTREME;     /* Extreme (0.6): the battery to 45 C, the processor's band at 78 C */
+    int hard_bat = ext ? L->ext_hard_bat_c10 : L->hard_bat_c10;
+    int band_bat = ext ? L->ext_band_bat_c10 : L->band_bat_c10;
+    int soft_soc = ext ? L->ext_soft_soc_c10 : L->soft_soc_c10;
+    if (in->bat_ok && in->bat_c10 >= hard_bat) {
         c->bat_latched = 1;
-        stop(c, HEAT_ST_STOPPED, "Battery reached 42 \xc2\xb0" "C");
+        stop(c, HEAT_ST_STOPPED, ext ? "Battery reached 45 \xc2\xb0" "C" : "Battery reached 42 \xc2\xb0" "C");
         return;
     }
     if (in->soc_ok && in->soc_c10 >= L->hard_soc_c10) {
@@ -248,13 +255,13 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
     /* ---- regulation: one core off when anything is over its soft limit, one on when all are below ---- */
     int sag = in->gauge_ok && c->rest_mv > 0 ? c->rest_mv - in->mv : 0;
     if (now - c->t_step >= L->step_ms) {
-        int over = (in->bat_ok && in->bat_c10 >= L->band_bat_c10) ||
+        int over = (in->bat_ok && in->bat_c10 >= band_bat) ||
                    (in->skin_ok && in->skin_c10 >= L->soft_skin_c10) ||
-                   (in->soc_ok && in->soc_c10 >= L->soft_soc_c10) ||
+                   (in->soc_ok && in->soc_c10 >= soft_soc) ||
                    (in->gauge_ok && (iabs(in->ma) > L->soft_ma || sag > L->soft_sag_mv));
-        int under = in->bat_ok && in->bat_c10 < L->band_bat_c10 - 10 &&
+        int under = in->bat_ok && in->bat_c10 < band_bat - 10 &&
                     (!in->skin_ok || in->skin_c10 < L->soft_skin_c10 - 10) &&
-                    in->soc_ok && in->soc_c10 < L->soft_soc_c10 - 10 &&
+                    in->soc_ok && in->soc_c10 < soft_soc - 10 &&
                     in->gauge_ok && iabs(in->ma) < L->soft_ma - 200 && sag < L->soft_sag_mv - 50;
         if (over && c->cores > 0) {
             c->cores--;

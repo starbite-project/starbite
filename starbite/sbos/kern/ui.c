@@ -31,8 +31,8 @@ static int getenv_dbg(void) { return getenv("SBOS_DBG") != 0; }
 #define ICON_SOS_S 227
 
 enum { E_TITLE = 1, E_BACK, E_BUTTON, E_BIG, E_TEXT, E_LEVEL, E_TOGGLE, E_HOLD, E_CLOCK, E_TILE, E_ROUND,
-       E_FIELD, E_TOAST, E_CTEXT, E_GAUGE, E_INPUT, E_KEYS, E_CHART };
-enum { SCR_LOCK = 1, SCR_HOME, SCR_APP, SCR_POWER, SCR_CONFIRM, SCR_LIGHT, SCR_SOS, SCR_OFF };
+       E_FIELD, E_TOAST, E_CTEXT, E_GAUGE, E_INPUT, E_KEYS, E_CHART, E_ICON, E_WIDGET };
+enum { SCR_LOCK = 1, SCR_HOME, SCR_APP, SCR_POWER, SCR_CONFIRM, SCR_LIGHT, SCR_SOS, SCR_OFF, SCR_CONTROL };
 
 struct el {
     uint8_t kind, interactive;
@@ -49,6 +49,7 @@ static int screen = SCR_LOCK, shown_screen;
 static int focus = -1, pressed = -1;
 static uint64_t t_press;
 static int press_done;
+static int press_y = -1;                    /* where the last press started (a status-bar tap opens the control center) */
 static int key_hold_armed = -1;             /* a hold element selected once with Bixby */
 static uint64_t key_hold_until;
 static int dirty = 1, full = 1;
@@ -109,6 +110,11 @@ void ui_mark_dirty(void)
     dirty = 1;
 }
 
+void kui_redraw_all(void)
+{
+    full = dirty = 1;
+}
+
 int kui_awake_on(void)
 {
     return app_awake || screen == SCR_LIGHT || screen == SCR_SOS || pressed >= 0;
@@ -124,7 +130,8 @@ static struct el *add(struct el *list, int *n, int kind)
     memset(e, 0, sizeof(*e));
     e->kind = (uint8_t)kind;
     e->interactive = kind == E_BACK || kind == E_BUTTON || kind == E_LEVEL || kind == E_TOGGLE ||
-                     kind == E_HOLD || kind == E_TILE || kind == E_ROUND || kind == E_INPUT || kind == E_KEYS;
+                     kind == E_HOLD || kind == E_TILE || kind == E_ROUND || kind == E_INPUT || kind == E_KEYS ||
+                     kind == E_ICON;
     return e;
 }
 
@@ -682,7 +689,7 @@ static void build_status(void)
         return;
     scopy(st_sig, sizeof(st_sig), sig.b);
     status_forced = 0;
-    ui_fill(0, 0, UI_W, UI_STATUS_H, C_BG);
+    look_bg(0, 0, UI_W, UI_STATUS_H);
     ui_text(F_STATUS, 64, 76, tm, C_L1);
     int x = UI_W - 64 - 84;
     if (b.ok)
@@ -792,9 +799,9 @@ static void build_lock(void)
         e->x = 110 + i * 430, e->y = 2130, e->w = 360, e->h = 450;   /* the box holds the 169 px ring */
     }
     e = add(cur, &ncur, E_CTEXT);
-    scopy(e->b, sizeof(e->b), "Hold a button");
+    scopy(e->b, sizeof(e->b), pocket_lock ? "Heating: touch is locked. Press Power" : "Hold a button");
     e->value = F_SMALL;
-    e->color = C_L3;
+    e->color = pocket_lock ? C_L1 : C_L3;
     e->x = 0, e->y = 2660, e->w = UI_W, e->h = 80;
     /* 0.5.4: the medical card for whoever finds the phone (as iPhone's Medical ID): shown only when Info has a
      * card; a tap opens it (read only there: editing is a page further) */
@@ -868,6 +875,89 @@ static void build_home(void)
     e->x = 0, e->y = y0 + rows * (th + 40) + 4, e->w = UI_W, e->h = 80;
 }
 
+/* 0.6: home in normal mode: a clock widget, the apps as glass icons in four columns, Emergency as a pill near the
+ * bottom (within the thumb's reach), the control center's hint */
+static void build_home_normal(void)
+{
+    int emerg = app_by_id("emergency");
+    struct el *e = add(cur, &ncur, E_WIDGET);
+    struct sbos_time t;
+    char tm[8] = "--:--";
+    if (clock_now(&t)) {
+        struct ub u;
+        ub_init(&u);
+        ub_dec2(&u, (unsigned)t.h);
+        ub_c(&u, ':');
+        ub_dec2(&u, (unsigned)t.mi);
+        scopy(tm, sizeof(tm), u.b);
+        ub_init(&u);
+        if (t.mo >= 1 && t.mo <= 12) {
+            ub_s(&u, wd[t.wday % 7]);
+            ub_c(&u, ' ');
+            ub_dec(&u, (uint64_t)t.d);
+            ub_c(&u, ' ');
+            ub_s(&u, mn[t.mo - 1]);
+        }
+        scopy(e->b, sizeof(e->b), u.b);
+    }
+    scopy(e->a, sizeof(e->a), tm);
+    {
+        struct sbos_battery b;
+        struct sbos_estimate est;
+        battery_get(&b);
+        battery_estimate(&est);
+        if (b.ok) {                         /* the battery at the widget's right: "76 %" and the estimate */
+            struct ub u;
+            ub_init(&u);
+            ub_dec(&u, (uint64_t)(b.pct < 0 ? 0 : b.pct));
+            ub_s(&u, " %");
+            if (b.charger)
+                ub_s(&u, "|charging");
+            else if (est.now_min > 0) {
+                ub_s(&u, "|about ");
+                if (est.now_min >= 48 * 60) {
+                    ub_dec(&u, (uint64_t)(est.now_min / (24 * 60)));
+                    ub_s(&u, " days");
+                } else {
+                    ub_dec(&u, (uint64_t)((est.now_min + 30) / 60));
+                    ub_s(&u, " h");
+                }
+            }
+            scopy(e->b + 64, sizeof(e->b) - 64, u.b);
+        }
+    }
+    e->x = MX, e->y = 150, e->w = CW, e->h = 360;
+    int k = 0;
+    for (int i = 0; i < napps && k < 12; ++i) {
+        if (app_hidden(i) || i == emerg)
+            continue;
+        e = add(cur, &ncur, E_ICON);
+        if (!e)
+            break;
+        e->id = (uint32_t)i;
+        scopy(e->a, sizeof(e->a), app_name(i));
+        e->icon = app_icon(i);
+        e->color = app_color(i) ? app_color(i) : C_STAR;
+        e->x = MX + (k % 4) * 325, e->y = 600 + (k / 4) * 360, e->w = 325, e->h = 340;
+        ++k;
+    }
+    if (emerg >= 0) {
+        e = add(cur, &ncur, E_TILE);
+        e->id = (uint32_t)emerg;
+        scopy(e->a, sizeof(e->a), app_name(emerg));
+        scopy(e->b, sizeof(e->b), app_tile(emerg)[0] ? app_tile(emerg) : "Call, message, alarm");
+        e->icon = 228;
+        e->color = C_RED;
+        e->flags = 1;
+        e->x = MX, e->y = 2420, e->w = CW, e->h = 210;
+    }
+    e = add(cur, &ncur, E_CTEXT);
+    scopy(e->b, sizeof(e->b), "Tap the top bar: control center");
+    e->value = F_SMALL;
+    e->color = C_L2;
+    e->x = 0, e->y = 2700, e->w = UI_W, e->h = 80;
+}
+
 static void build_app(void)
 {
     struct el *e = add(cur, &ncur, E_BACK);
@@ -898,6 +988,128 @@ static void build_app(void)
             sb_logf("ui: app screen taller than the panel: ", app_name(app_front));
         }
     }
+}
+
+/* ---- the control center (0.6): a tap on the status bar; Emergency Mode, the LED, Wi-Fi, brightness, the wallpaper ---- */
+static int cc_return = SCR_HOME;
+int em_set_auto;                            /* Emergency Mode set the 5-minute switch-off (and takes it back; saved) */
+static const char *const wp_names = "Aurora|Dusk|Ocean|Graphite";
+
+void kui_control_open(void)
+{
+    if (screen == SCR_CONTROL || screen == SCR_SOS || screen == SCR_LIGHT || screen == SCR_CONFIRM || screen == SCR_OFF ||
+        screen == SCR_POWER)
+        return;
+    cc_return = screen;
+    screen = SCR_CONTROL;
+    focus = -1;
+    full = dirty = 1;
+}
+
+static void control_close(void)
+{
+    screen = cc_return == SCR_CONTROL ? SCR_HOME : cc_return;
+    full = dirty = 1;
+}
+
+void kui_set_emergency(int on)
+{
+    on = !!on;
+    if (on == look_emergency)
+        return;
+    look_emergency = on;
+    if (on && !auto_off_min) {
+        auto_off_min = 5;                   /* Emergency Mode: save and switch off 5 minutes after the screen goes off */
+        em_set_auto = 1;
+    } else if (!on && em_set_auto) {
+        auto_off_min = 0;
+        em_set_auto = 0;
+    }
+    sb_log(on ? "ui: Emergency Mode on (the emergency screens; save and switch off 5 min after the screen goes off)"
+              : "ui: Emergency Mode off (normal mode)");
+    settings_changed();
+    full = dirty = 1;
+}
+
+static void build_control(void)
+{
+    struct el *e = add(cur, &ncur, E_BACK);
+    scopy(e->a, sizeof(e->a), "Close");
+    e->x = 50, e->y = 140, e->w = 340, e->h = 150;
+    e = add(cur, &ncur, E_TITLE);
+    scopy(e->a, sizeof(e->a), "Control center");
+    e->x = MX, e->y = 330, e->w = CW, e->h = 140;
+    int base = ncur;
+    e = add(cur, &ncur, E_TOGGLE);
+    e->id = 1;
+    scopy(e->a, sizeof(e->a), "Emergency Mode");
+    e->value = look_emergency;
+    e = add(cur, &ncur, E_TEXT);
+    scopy(e->b, sizeof(e->b), look_emergency ? "On: the big emergency screens; the phone saves and switches off 5 minutes after the screen goes off."
+                                             : "The big emergency screens, and the phone saves and switches off 5 minutes after the screen goes off.");
+    e->color = look_emergency ? C_RED : C_L2;
+    e = add(cur, &ncur, E_TOGGLE);
+    e->id = 2;
+    scopy(e->a, sizeof(e->a), "Flashlight");
+    e->value = torch_on();
+    e = add(cur, &ncur, E_TOGGLE);
+    e->id = 3;
+    scopy(e->a, sizeof(e->a), "Wi-Fi");
+    e->value = wifi_on();
+    e = add(cur, &ncur, E_TEXT);
+    scopy(e->b, sizeof(e->b), "Brightness");
+    e->color = C_L2;
+    e = add(cur, &ncur, E_LEVEL);
+    e->id = 4;
+    scopy(e->b, sizeof(e->b), "Boot|Low|Mid|Normal|High");
+    e->n = 5;
+    e->value = panel_bright_level;
+    if (!look_emergency) {
+        e = add(cur, &ncur, E_TEXT);
+        scopy(e->b, sizeof(e->b), "Wallpaper");
+        e->color = C_L2;
+        e = add(cur, &ncur, E_LEVEL);
+        e->id = 5;
+        scopy(e->b, sizeof(e->b), wp_names);
+        e->n = 4;
+        e->value = look_style();
+    }
+    layout_flow(cur + base, ncur - base, 520);
+}
+
+static void control_pick(const struct el *e, int x)
+{
+    if (e->kind == E_BACK) {
+        control_close();
+        return;
+    }
+    if (e->kind == E_TOGGLE) {
+        if (e->id == 1)
+            kui_set_emergency(!e->value);
+        else if (e->id == 2) {
+            if (torch_set(!e->value) != 0 && !e->value)
+                kui_toast("The LED is not available", 2000);
+        } else if (e->id == 3) {
+            if (wifi_power(!e->value) == SBOS_EAGAIN)
+                kui_toast("Not now (heating?)", 2000);
+        }
+    } else if (e->kind == E_LEVEL) {
+        int n = e->n < 1 ? 1 : e->n, v = x < 0 ? (e->value + 1) % n : (x - e->x) * n / (e->w > 0 ? e->w : 1);
+        v = v < 0 ? 0 : v >= n ? n - 1 : v;
+        if (e->id == 4) {
+            if (!panel_brightness(v))
+                kui_toast("The panel did not take it", 2000);
+            settings_changed();
+        } else if (e->id == 5) {
+            if (heater_running_ui()) {
+                kui_toast("Not while heating", 2000);   /* making one keeps the loop busy for a moment */
+            } else {
+                look_init(v);
+                settings_changed();
+            }
+        }
+    }
+    full = dirty = 1;
 }
 
 static void build_power(void)
@@ -990,9 +1202,15 @@ static void build(void)
     ncur = 0;
     switch (screen) {
     case SCR_LOCK: build_lock(); break;
-    case SCR_HOME: build_home(); break;
+    case SCR_HOME:
+        if (look_glass_on())
+            build_home_normal();            /* 0.6: normal mode */
+        else
+            build_home();                   /* Emergency Mode (and before the wallpaper exists) */
+        break;
     case SCR_APP: build_app(); break;
     case SCR_POWER: build_power(); break;
+    case SCR_CONTROL: build_control(); break;
     case SCR_CONFIRM: build_confirm(); break;
     case SCR_LIGHT: build_light(); break;
     case SCR_SOS: build_sos(); break;
@@ -1068,6 +1286,23 @@ static unsigned hold_prog(const struct el *e, int idx, unsigned scale)
     return d >= e->ms ? scale : (unsigned)(d * scale / e->ms);
 }
 
+/* 0.6: grey cards are glass over the wallpaper in normal mode; every other colour (accents, red) stays solid */
+static void card_round(int x, int y, int w, int h, int r, uint32_t c)
+{
+    if (look_glass_on() && (c == C_CARD || c == C_CARD2 || c == C_CARD3))
+        look_glass(x, y, w, h, r, 0xffffffffU, c == C_CARD3 ? 96 : c == C_CARD2 ? 72 : 46);
+    else
+        ui_round(x, y, w, h, r, c);
+}
+
+static void card_disc(int cx, int cy, int r, uint32_t c)
+{
+    if (look_glass_on() && (c == C_CARD || c == C_CARD2 || c == C_CARD3))
+        look_glass_disc(cx, cy, r, 0xffffffffU, c == C_CARD3 ? 96 : 46);
+    else
+        ui_disc(cx, cy, r, c);
+}
+
 static void draw_el(const struct el *e, int idx)
 {
     int f = is_focused(idx), p = idx == pressed;
@@ -1078,16 +1313,16 @@ static void draw_el(const struct el *e, int idx)
         break;
     case E_BACK:
         if (f)
-            ui_round(e->x - 8, e->y - 8, e->w + 16, e->h + 16, 83, C_STAR);
-        ui_round(e->x, e->y, e->w, e->h, 75, card);
+            card_round(e->x - 8, e->y - 8, e->w + 16, e->h + 16, 83, C_STAR);
+        card_round(e->x, e->y, e->w, e->h, 75, card);
         ui_icon(ICON_BACK, e->x + 50, e->y + (e->h - 64) / 2, C_STAR);
         ui_text(F_BTN, e->x + 140, e->y + 96, e->a, C_STAR);
         break;
     case E_BUTTON: {
         uint32_t lc = (e->flags & UI_RED) ? C_RED : (e->flags & UI_ACCENT) ? C_STAR : (e->flags & UI_DIM) ? C_L3 : C_L1;
         if (f)
-            ui_round(e->x - 8, e->y - 8, e->w + 16, e->h + 16, 68, C_STAR);
-        ui_round(e->x, e->y, e->w, e->h, 60, (e->flags & UI_RED) && !p ? 0xff2a0f0eU : card);
+            card_round(e->x - 8, e->y - 8, e->w + 16, e->h + 16, 68, C_STAR);
+        card_round(e->x, e->y, e->w, e->h, 60, (e->flags & UI_RED) && !p ? 0xff2a0f0eU : card);
         int ty = e->b[0] ? e->y + 118 : e->y + e->h / 2 + 26;
         ui_text_cut(F_TITLE_S, e->x + 70, ty, e->a, e->w - 140, lc);
         if (e->b[0])
@@ -1100,13 +1335,13 @@ static void draw_el(const struct el *e, int idx)
         int red = (e->flags & UI_RED) != 0;
         uint32_t ac = red ? C_RED : C_STAR, base = red ? 0xff3d1210U : C_CARD;
         if (f || key_hold_armed == idx)
-            ui_round(e->x - 8, e->y - 8, e->w + 16, e->h + 16, 68, key_hold_armed == idx ? C_ORANGE : C_STAR);
-        ui_round(e->x, e->y, e->w, e->h, 60, base);
+            card_round(e->x - 8, e->y - 8, e->w + 16, e->h + 16, 68, key_hold_armed == idx ? C_ORANGE : C_STAR);
+        card_round(e->x, e->y, e->w, e->h, 60, base);
         unsigned pw = hold_prog(e, idx, (unsigned)e->w);
         if (pw >= 120)
-            ui_round(e->x, e->y, (int)pw, e->h, 60, ui_mix(ac, base, red ? 150 : 110));
+            card_round(e->x, e->y, (int)pw, e->h, 60, ui_mix(ac, base, red ? 150 : 110));
         else if (pw)
-            ui_round(e->x, e->y, 120, e->h, 60, ui_mix(ac, base, (unsigned)((red ? 150 : 110) * pw / 120)));
+            card_round(e->x, e->y, 120, e->h, 60, ui_mix(ac, base, (unsigned)((red ? 150 : 110) * pw / 120)));
         ui_text_c(F_TITLE_S, e->x + e->w / 2, e->y + e->h / 2 + 26, e->a, red ? 0xffffd6d2U : ac);
         if (key_hold_armed == idx)
             ui_text_c(F_SMALL, e->x + e->w / 2, e->y + e->h - 24, "press Bixby again", C_ORANGE);
@@ -1138,7 +1373,7 @@ static void draw_el(const struct el *e, int idx)
         int n = e->n < 1 ? 1 : e->n, gap = 24, sw = (e->w - gap * (n - 1)) / n;
         const char *p0 = e->b;
         if (f)
-            ui_round(e->x - 8, e->y - 8, e->w + 16, e->h + 16, 68, C_STAR);
+            card_round(e->x - 8, e->y - 8, e->w + 16, e->h + 16, 68, C_STAR);
         for (int i = 0; i < n; ++i) {
             char lab[24];
             unsigned k2 = 0;
@@ -1149,17 +1384,17 @@ static void draw_el(const struct el *e, int idx)
                 ++p0;
             int x = e->x + i * (sw + gap), on = i == e->value;
             uint32_t bg = on ? (i == 0 ? C_CARD3 : C_ORANGE) : (p ? C_CARD2 : C_CARD);
-            ui_round(x, e->y, sw, e->h, 56, bg);
+            card_round(x, e->y, sw, e->h, 56, bg);
             ui_text_c(F_TITLE_S, x + sw / 2, e->y + e->h / 2 + 26, lab, on && i ? 0xff1a1000U : C_L1);
         }
         break;
     }
     case E_TOGGLE:
         if (f)
-            ui_round(e->x - 8, e->y - 8, e->w + 16, e->h + 16, 68, C_STAR);
-        ui_round(e->x, e->y, e->w, e->h, 60, card);
+            card_round(e->x - 8, e->y - 8, e->w + 16, e->h + 16, 68, C_STAR);
+        card_round(e->x, e->y, e->w, e->h, 60, card);
         ui_text_cut(F_TITLE_S, e->x + 70, e->y + e->h / 2 + 26, e->a, e->w - 420, C_L1);
-        ui_round(e->x + e->w - 300, e->y + (e->h - 130) / 2, 230, 130, 65, e->value ? C_GREEN : C_CARD3);
+        card_round(e->x + e->w - 300, e->y + (e->h - 130) / 2, 230, 130, 65, e->value ? C_GREEN : C_CARD3);
         ui_disc(e->x + e->w - (e->value ? 135 : 235), e->y + e->h / 2, 55, C_L1);
         break;
     case E_CLOCK:
@@ -1170,16 +1405,16 @@ static void draw_el(const struct el *e, int idx)
         break;
     case E_TILE: {
         if (f)
-            ui_round(e->x - 10, e->y - 10, e->w + 20, e->h + 20, 82, C_STAR);
+            card_round(e->x - 10, e->y - 10, e->w + 20, e->h + 20, 82, C_STAR);
         if (e->flags & 1) {                     /* the Emergency tile: red, the icon left, two lines */
-            ui_round(e->x, e->y, e->w, e->h, 72, p ? 0xff5a1a16U : 0xff3d1210U);
+            card_round(e->x, e->y, e->w, e->h, 72, p ? 0xff5a1a16U : 0xff3d1210U);
             ui_disc(e->x + 120, e->y + e->h / 2, 74, ui_mix(C_RED, 0xff3d1210U, 90));
             ui_icon(e->icon, e->x + 72, e->y + e->h / 2 - 48, 0xffffd0ccU);
             ui_text(F_TITLE, e->x + 240, e->y + 112, e->a, C_L1);
             ui_text_cut(F_DETAIL, e->x + 244, e->y + 170, e->b, e->w - 300, 0xffffb0a8U);
             break;
         }
-        ui_round(e->x, e->y, e->w, e->h, 72, card);
+        card_round(e->x, e->y, e->w, e->h, 72, card);
         int big = e->h >= 520, ic = big ? 160 : 130;
         ui_disc(e->x + 150, e->y + ic, 100, ui_mix(e->color, C_CARD, 60));
         if (e->icon)
@@ -1212,7 +1447,7 @@ static void draw_el(const struct el *e, int idx)
         int cx = e->x + e->w / 2, cy = e->y + 180;
         if (f)
             ui_ring(cx, cy, 168, 10, C_STAR);
-        ui_disc(cx, cy, 150, p ? C_CARD3 : C_CARD);
+        card_disc(cx, cy, 150, p ? C_CARD3 : C_CARD);
         unsigned pr = hold_prog(e, idx, 360);
         /* the ring fills clockwise from the top while held: dots every 3 degrees, an integer quarter-wave
          * sine table (one entry per 3.75 degrees, x1000) */
@@ -1263,7 +1498,7 @@ static void draw_el(const struct el *e, int idx)
         rgt[k] = 0;
         ui_text(F_HEAD, e->x + 4, e->y + 40, cap, C_L2);
         int cx = e->x, cy = e->y + 64, cw = e->w, ch = e->h - 64 - 60;
-        ui_round(cx, cy, cw, ch, 40, card);
+        card_round(cx, cy, cw, ch, 40, card);
         for (int g = 1; g < 4; ++g)             /* quarter lines */
             ui_fill(cx + 30, cy + ch * g / 4, cw - 60, 2, ui_mix(C_L3, card, 60));
         int16_t v[60];
@@ -1293,9 +1528,40 @@ static void draw_el(const struct el *e, int idx)
         ui_text_r(F_SMALL, e->x + e->w - 8, e->y + e->h - 14, rgt, C_L3);
         break;
     }
+    case E_ICON: {                              /* 0.6: an app on the normal-mode home: tinted glass, a white glyph, the name */
+        int s = 240, ix = e->x + (e->w - s) / 2, iy = e->y + 10;
+        if (f)
+            ui_round(ix - 10, iy - 10, s + 20, s + 20, 70, C_STAR);
+        look_glass(ix, iy, s, s, 62, e->color, p ? 210 : 165);
+        if (e->icon)
+            ui_icon(e->icon, ix + (s - 150) / 2, iy + (s - 150) / 2, 0xffffffffU);
+        ui_text_c(F_DETAIL, e->x + e->w / 2, iy + s + 64, e->a, C_L1);
+        break;
+    }
+    case E_WIDGET: {                            /* 0.6: the clock widget */
+        look_glass(e->x, e->y, e->w, e->h, 72, 0xffffffffU, 40);
+        ui_text(ui_has_font(F_VALUE) ? F_VALUE : F_BIG, e->x + 70, e->y + 200, e->a, C_L1);
+        ui_text(F_TITLE_S, e->x + 74, e->y + 290, e->b, C_L2);
+        if (e->b[64]) {                         /* the battery: "76 %|about 3 h" */
+            char pc[24], est2[40];
+            unsigned k = 0, j = 0;
+            const char *s2 = e->b + 64;
+            while (s2[k] && s2[k] != '|' && k + 1 < sizeof(pc))
+                pc[k] = s2[k], ++k;
+            pc[k] = 0;
+            if (s2[k] == '|')
+                ++k;
+            while (s2[k] && j + 1 < sizeof(est2))
+                est2[j++] = s2[k++];
+            est2[j] = 0;
+            ui_text_r(F_TITLE, e->x + e->w - 70, e->y + 190, pc, C_L1);
+            ui_text_r(F_DETAIL, e->x + e->w - 72, e->y + 270, est2, C_L2);
+        }
+        break;
+    }
     case E_INPUT: {                             /* the field: its label, the text (or dots), a cursor, Show / Hide */
         ui_text(F_HEAD, e->x + 4, e->y + 40, e->a, C_L2);
-        ui_round(e->x, e->y + 64, e->w, e->h - 64, 48, card);
+        card_round(e->x, e->y + 64, e->w, e->h - 64, 48, card);
         int tx = e->x + 50, ty = e->y + 64 + (e->h - 64) / 2 + 24;
         int shown_w = 0;
         int room = e->w - 330;
@@ -1327,7 +1593,10 @@ static void draw_el(const struct el *e, int idx)
         break;
     }
     case E_KEYS: {
-        ui_fill(0, e->y, UI_W, e->h, 0xff101012U);
+        if (look_glass_on())
+            look_glass(0, e->y, UI_W, e->h, 0, 0xff000000U, 120);
+        else
+            ui_fill(0, e->y, UI_W, e->h, 0xff101012U);
         for (int r = 0; r < 4; ++r) {
             const struct krow *row = &kb_rows[e->value & 3][r];
             int n = (int)sb_strlen(row->cap), tot = 0;
@@ -1339,7 +1608,7 @@ static void draw_el(const struct el *e, int idx)
                 uint8_t c = (uint8_t)row->cap[i];
                 int special = c < 7;
                 uint32_t bg = c == 4 ? C_STAR : special ? C_CARD3 : C_CARD;
-                ui_round(kx + 6, ky, w - 12, KB_ROW, 26, bg);
+                card_round(kx + 6, ky, w - 12, KB_ROW, 26, bg);
                 char s[4] = { (char)c, 0, 0, 0 };
                 const char *lab = s;
                 if (c == 1)
@@ -1367,7 +1636,7 @@ static void draw_el(const struct el *e, int idx)
         break;
     }
     case E_TOAST:
-        ui_round(e->x, e->y, e->w, e->h, 75, C_CARD3);
+        card_round(e->x, e->y, e->w, e->h, 75, C_CARD3);
         ui_text_c(F_ROW_M, e->x + e->w / 2, e->y + 98, e->b, C_L1);
         break;
     default:
@@ -1383,7 +1652,7 @@ static void clear_rect(const struct el *e)
     if (y < UI_STATUS_H && screen != SCR_LIGHT && screen != SCR_SOS)
         y = UI_STATUS_H, h -= UI_STATUS_H - (e->y - m);
     if (h > 0)
-        ui_fill(x, y, w, h, C_BG);
+        look_bg(x, y, w, h);
 }
 
 static int overlaps(const struct el *a, const struct el *b)
@@ -1407,6 +1676,7 @@ const char *kui_screen_name(void)
     case SCR_LIGHT: return "light";
     case SCR_SOS: return "sos";
     case SCR_OFF: return "off";
+    case SCR_CONTROL: return "control center";
     default: return "?";
     }
 }
@@ -1433,7 +1703,7 @@ void ui_kdraw(void)
             shown_screen != SCR_LIGHT && shown_screen != SCR_SOS)
             wipe = (screen == SCR_LOCK || (screen == SCR_HOME && shown_screen == SCR_APP)) ? -1 : 1;
         ui_noclip();
-        ui_fill(0, 0, UI_W, UI_H, C_BG);
+        look_bg(0, 0, UI_W, UI_H);
         status_forced = 1;
         for (int i = 0; i < ncur; ++i)
             draw_el(&cur[i], i);
@@ -1533,6 +1803,9 @@ static void activate(int i, int x, int y)
 {
     const struct el *e = &cur[i];
     switch (screen) {
+    case SCR_CONTROL:
+        control_pick(e, x);
+        break;
     case SCR_LOCK:
         lock_pick((int)e->id);
         break;
@@ -1601,6 +1874,9 @@ static void activate(int i, int x, int y)
 static void back(void)
 {
     switch (screen) {
+    case SCR_CONTROL:
+        control_close();
+        break;
     case SCR_APP:
         if (app_front >= 0)
             app_event_send(app_front, EV_APP_BACK, 0, 0);
@@ -1728,6 +2004,7 @@ void ui_kevent(const void *evp)
         }
         key_hold_armed = -1;
         pressed = hit(ev->x, ev->y);
+        press_y = ev->y;
         t_press = sb_ms();
         press_done = 0;
         dirty = 1;
@@ -1745,6 +2022,11 @@ void ui_kevent(const void *evp)
 #ifdef SB_HOST
         if (getenv_dbg()) printf("dbg release %d,%d at %llu pressed %d\n", ev->x, ev->y, (unsigned long long)sb_ms(), pressed);
 #endif
+        if (pressed < 0 && press_y >= 0 && press_y < UI_STATUS_H + 20 && ev->y < UI_STATUS_H + 200) {
+            press_y = -1;
+            kui_control_open();             /* 0.6: a tap on the status bar */
+            break;
+        }
         if (pressed >= 0 && !press_done) {
             int i = pressed;
             const struct el *e = &cur[i];

@@ -829,6 +829,30 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.13 Version 0.6: normal mode, Emergency Mode, Extreme heat (2026-11-08)
+
+The plan is `docs/STARBITE-OS-PLAN-0.6-0.9.md`.
+
+- **Normal mode** (the default): a wallpaper generated once at start (`kern/look.c`: Aurora, Dusk, Ocean,
+  Graphite; no image files), a blurred copy made once (16 x 16 cells, a 5 x 5 box twice, a bilinear scale back),
+  and "glass" cards: the blurred copy under each card, tinted, a lighter top edge. No live blur. Home: a clock and
+  battery widget, the apps as glass icons in 4 columns, Emergency as a red pill.
+- **The control center** (a tap on the status bar): Emergency Mode, the flashlight, Wi-Fi, the brightness, the
+  wallpaper (not while heating: making one keeps the loop busy for a moment).
+- **Emergency Mode**: the black big-tile screens of 0.5, and the switch-off 5 minutes after the screen goes off
+  (only if the user had none; leaving Emergency Mode takes back only the one it set). The mode, whether it set
+  the switch-off, and the wallpaper are in the settings record (`pad[1]` = 0x100 | mode | set << 1, `pad[2]`).
+- **Extreme heat** (Heat: Off, Low, High, Extreme), within ratings only: all 8 cores at their top table steps, the
+  GPU at its top step with the non-repeating workload (the confirmation names it), the panel at its top brightness
+  level and the LED (once per session; its own 10-minute limit holds) for the whole session. Battery band 43 °C,
+  stop 45 °C; SoC soft 78 °C; skin and current limits unchanged; needs 40 % battery.
+- **The heater keeps the screen on.** After the screen-off time it shows the lock screen with touch and the
+  Volume/Bixby keys locked ("Heating: touch is locked. Press Power"); a short Power press unlocks, a long one
+  opens the power menu.
+- **One brightness arbiter** (`panel.c`): the user's level (saved) and a boost from SOS or Extreme to the panel's
+  top level while either runs; the user's level comes back when both end, and the boost is never saved.
+- Host: 13 normal-mode scenes (`n-*`), `heat-pocket`/`heat-unlocked`, `MONKEY_NORMAL=1` for the monkey.
+
 ### 12.12 Version 0.5 (2026-11-08, overnight)
 
 - The on-screen keyboard and text fields (3.1, API 24/25).
@@ -1091,3 +1115,11 @@ forced restart). Cause and fixes: 8.6 and 12.5.
   charger) and saved.
 - **Slot**: no `sbos-state` entry, nothing written.
 - The bare-metal wifitest T4 (open network join, DHCP lease, 3/3 pings, DNS) passed too: the same core joins for real.
+
+### 14.9 Phone tests for 0.6
+
+- **T18 (unattended, the self test)**: `starbite-os-0.6-selftest.img`; the phone starts in normal mode: expect
+  `look: the wallpaper made in N ms` (the A55 makes it once after the first frame) and `selftest: passed: 28 screens`.
+  Draw times will be higher than in 0.5 (the glass): the slowest draw is in the summary line.
+- **T19 (with the user)**: the tour of normal mode (lock, home, the control center, wallpapers, Emergency Mode on and
+  off) and Extreme heat (watched: it heats faster; the stops at 45 °C battery and 85 °C inside; the screen stays on).

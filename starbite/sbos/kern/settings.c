@@ -49,6 +49,8 @@ static void fill(struct saved *s)
     s->sos_led = (uint8_t)(sos_led_on != 0);
     s->bright = (uint8_t)panel_bright_level;
     s->pad[0] = auto_off_min;               /* 0.3.2: was zero padding, so 0 (never) for older records */
+    s->pad[1] = 0x100U | (uint32_t)(look_emergency != 0) | (uint32_t)(em_set_auto != 0) << 1;    /* 0.6 */
+    s->pad[2] = (uint32_t)(look_is_ready() ? look_style() : look_saved_style) + 1U;
     if (sbos_selftest_enabled && have_loaded) {     /* not applied there: kept as they were saved (0.5.12) */
         s->panel_save = loaded.panel_save;
         s->panel_off = loaded.panel_off;
@@ -107,6 +109,14 @@ void settings_restore(void)
     }
     if (s.pad[0] == 5 || s.pad[0] == 15 || s.pad[0] == 60)
         auto_off_min = s.pad[0];
+    if ((s.pad[1] & ~3U) == 0x100U) {        /* 0.6: the mode, and whether it set the 5-minute switch-off */
+        look_emergency = (int)(s.pad[1] & 1U);
+        em_set_auto = (int)(s.pad[1] >> 1 & 1U) && look_emergency && auto_off_min == 5;
+    } else if (s.pad[1] == 1 || s.pad[1] == 2) {
+        look_emergency = (int)s.pad[1] - 1;  /* an early 0.6 record */
+    }
+    if (s.pad[2] >= 1 && s.pad[2] <= 4)
+        look_saved_style = (int)s.pad[2] - 1;   /* main makes it once, after this */
     struct ub u;
     ub_init(&u);
     ub_s(&u, "settings: restored (slot sequence ");

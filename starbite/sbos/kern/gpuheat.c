@@ -24,6 +24,7 @@
 #define VA(o) (SB_GPU_VA + (uint64_t)(o))
 
 int gpu_heat_allowed;                       /* Settings, after its confirmation (until a restart) */
+int gpu_heat_session;                       /* 0.6: this Extreme session (its own confirmation names the GPU) */
 static struct sb_auth au;
 static int on, failed_session;
 static uint8_t buck_was;
@@ -115,7 +116,7 @@ int gpuheat_start(void)
 {
     struct ub u;
     ticks_waiting = 0;
-    if (on || !gpu_heat_allowed || failed_session)
+    if (on || !(gpu_heat_allowed || gpu_heat_session) || failed_session)
         return on;
     if (!sb_gpu_domain()) {
         fail("the G3D power domain is off: not switched on from here");

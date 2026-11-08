@@ -36,7 +36,7 @@ $V gcc $CF -DSBOS_KERNEL "-DSB_ASSETS=\"$out/sbassets.sb7\"" -o "$out/sbos-host"
     "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" \
     "$lib/dvfs_levels.c" "$lib/assets.S" \
     "$k/main.c" "$k/timer.c" "$k/appfmt.c" "$k/state.c" "$k/batmodel.c" "$k/heatctl.c" "$k/heater.c" "$k/heatk.c" \
-    "$k/services.c" "$k/input.c" "$k/ui.c" "$k/app.c" "$k/torch.c" "$k/panel.c" "$k/gpuheat.c" "$k/uitest.c" "$k/settings.c" "$k/slot.c" "$k/wifi.c" \
+    "$k/services.c" "$k/input.c" "$k/ui.c" "$k/app.c" "$k/torch.c" "$k/panel.c" "$k/gpuheat.c" "$k/uitest.c" "$k/settings.c" "$k/slot.c" "$k/wifi.c" "$k/look.c" \
     "$root/starbite/wifi/core.c" "$root/starbite/wifi/exynos_pcie.c" "$root/starbite/wifi/chip.c" "$root/starbite/wifi/fw.c" \
     "$root/starbite/wifi/ring.c" "$root/starbite/wifi/msgbuf.c" "$root/starbite/wifi/link.c" "$root/starbite/wifi/wpa.c" \
     "$root/starbite/wifi/net.c" "$root/starbite/wifi/host/model.c" "$root/starbite/wifi/host/model_ap.c" "$root/starbite/utility/tz.c" $aobjs -lm -lpthread
@@ -64,6 +64,8 @@ scene light-led     w:300 $OPEN t:382,663 w:400 t:720,655 w:600
 scene heat          w:300 $OPEN t:1057,663 w:600
 scene heat-confirm  w:300 $OPEN t:1057,663 w:600 t:720,670 w:400
 scene heat-running  w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:25000
+scene heat-pocket   w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:36000 t:720,1400 w:400
+scene heat-unlocked w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:36000 k:p w:500
 scene home-busy     w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:3000 $BACK w:1200
 scene heat-off      w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:4000 t:220,670 w:3000
 scene sos           w:300 $OPEN t:382,1250 w:500
@@ -94,6 +96,21 @@ scene info-field    w:300 $OPEN t:1057,1250 w:600 t:720,1150 w:500 t:720,655 w:5
 CARD="t:1057,1250 w:600 t:720,1150 w:500 t:720,655 w:500 t:930,2434 w:150 t:1210,2246 w:150 t:1245,2810 w:400 t:720,965 w:500 t:125,2810 w:150 t:1350,2246 w:150 t:1245,2810 w:400 t:382,2515 w:500"
 scene lock-card     w:300 $OPEN $CARD k:p w:600 k:p w:800
 scene lock-card-open w:300 $OPEN $CARD k:p w:600 k:p w:800 g:720,1715,0,900 w:600
+SCENE_ENV=SBOS_HOST_NORMAL=1
+# 0.6: normal mode (wallpaper, glass); home icons: Light 232,730 Heat 557,730 SOS 882,730 Info 1207,730
+# Clock 232,1090 Battery 557,1090 Settings 882,1090 Wi-Fi 1207,1090; Emergency pill 720,2525; status bar tap 700,50
+scene n-lock        w:600
+scene n-home        w:300 $OPEN
+scene n-control     w:300 $OPEN t:700,50 w:500
+scene n-heat        w:300 $OPEN t:557,730 w:600
+scene n-light       w:300 $OPEN t:232,730 w:600
+scene n-battery     w:300 $OPEN t:557,1090 w:600
+scene n-settings    w:300 $OPEN t:882,1090 w:600
+scene n-wifi-list   w:300 $OPEN t:1207,1090 w:600 t:720,625 w:3000
+scene n-emergency   w:300 $OPEN t:720,2525 w:600
+scene n-emergency-mode w:300 $OPEN t:700,50 w:500 t:1220,625 w:500 h:b:900 w:1000
+scene n-dusk        w:300 $OPEN t:700,50 w:500 t:551,2182 w:800 h:b:900 w:1000
+scene n-ocean-lock  w:300 $OPEN t:700,50 w:500 t:882,2182 w:800 h:b:900 w:800 k:p w:600 k:p w:800
 SCENE_ENV=
 scene power-menu    w:300 h:p:1300 w:500
 scene focus-keys    w:300 $OPEN k:d w:200 k:d w:200 k:d w:300

@@ -8,6 +8,9 @@
 #include "sb.h"
 #include "sbui.h"
 #include "kern.h"
+#ifdef SB_HOST
+#include <stdlib.h>
+#endif
 #include "kinput.h"
 
 struct kstate K;
@@ -75,6 +78,13 @@ static void handle_input(void)
     while (kin_pop(&e)) {
         K.any_input = 1;
         selftest_input();
+        if (e.type == KIN_POWER && pocket_lock && K.screen_on) {
+            pocket_lock = 0;                /* the heating pocket lock: Power unlocks (the screen stays on) */
+            sb_log("power: touch unlocked (Power)");
+            power_input();
+            kui_redraw_all();
+            continue;
+        }
         if (e.type == KIN_POWER) {
             power_key_short();
             continue;
@@ -83,8 +93,8 @@ static void handle_input(void)
             power_key_long();
             continue;
         }
-        if (!K.screen_on)
-            continue;                       /* the screen is off: only the Power key counts */
+        if (!K.screen_on || pocket_lock)
+            continue;                       /* the screen is off, or touch locked: only the Power key counts */
         power_input();
         ui_kevent(&e);
     }
@@ -139,6 +149,11 @@ void sb_main(void)
     heater_init();
     sos_init();
     settings_restore();                     /* after power_init: the screen-off time it restores re-arms the timer */
+#ifdef SB_HOST
+    look_emergency = getenv("SBOS_HOST_NORMAL") ? 0 : 1;   /* the host tests' layout (Emergency Mode) unless asked */
+#endif
+    look_init(look_saved_style);            /* 0.6: the wallpaper, once, after the first frame (the saved one) */
+    kui_redraw_all();
     apps_load_builtin();
     {
         struct ub u;

@@ -42,6 +42,30 @@ for first runs of anything that heats, transmits beyond scans, drives a new rail
 7. The flashlight's rated maximum (S2MPB02: torch current register, flash pulses with the chip's own timer):
    designed in doc 9.2; needs the I2C bring-up and a phone test with the user present.
 
+## 0.6.x: bursts in Emergency Mode, and a power budget (the user's tour of 0.5.14, 2026-11-08)
+
+Short bursts that push harder, **within the parts' pulse/burst ratings and absolute maximums, never above them, and
+never overriding the battery's or the charger's protections** (the fuel gauge's and PMIC's limits stay in charge):
+
+1. **The SOS strobe at the LED's flash-pulse current** (the S2MPB02's camera-flash rating, its flash timer ending each
+   pulse in hardware; the duty cycle the datasheet allows). Needs the S2MPB02 driver (doc 9.2) and a first run with
+   the user present.
+2. **The panel's high-brightness mode in bursts**, only as Samsung's own panel driver uses it (its HBM command and
+   ELVSS/gamma tables for this panel, its time limits); the S9 driver's sources are read first. Until then the top
+   normal level (0.6).
+3. **The M3's top boost step for 1-2 cores with the others off**: only a step in Samsung's own ACPM table for this
+   SoC (the boost entries the vendor kernel uses with fewer cores online), never a made-up voltage or clock; the
+   heater's thermal and current caps stay.
+4. **A power-budget manager** for the bursts: before a burst it switches off what is not essential (Wi-Fi, the extra
+   cores, the GPU; the cameras and the modem once they exist) so the battery voltage stays stable for the burst,
+   and puts them back after. The budget uses the fuel gauge's voltage and current; a burst is refused below a
+   battery voltage and charge floor, and in the heat.
+
+**Extreme heat conserves nothing** (the user's clarification): every core including all 4 M3s at their top normal
+step, the GPU, the panel, the LED, and the cameras and radios as their drivers arrive, all on at once. The shedding
+above is for the brightness/strobe bursts only. The same limits hold: within ratings, the battery (45 °C) and
+thermal hard caps kept.
+
 ## 0.7: sound
 
 - The S9's audio path (to be confirmed from the vendor sources): the codec (Cirrus Logic "Madera" family on the

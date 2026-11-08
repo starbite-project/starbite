@@ -1,7 +1,14 @@
-# Starbite OS: a short guide (0.5.14)
+# Starbite OS: a short guide (0.6)
 
 Starbite OS is the Galaxy S9's own emergency system: a light, a heater, an alarm, the battery, a medical card and
 Wi-Fi, with big buttons and plain words. The design and the tests are in `docs/STARBITE-OS.md`.
+
+## Normal mode and Emergency Mode
+
+Starbite OS starts in **normal mode**: a wallpaper, glass buttons, the apps as icons on home, Emergency as a red
+pill at the bottom. **Tap the top bar** for the **control center**: Emergency Mode, the flashlight, Wi-Fi, the
+brightness and the wallpaper. **Emergency Mode** shows the big black emergency screens and, to save the battery,
+saves and switches the phone off 5 minutes after the screen goes off.
 
 ## The lock screen
 
@@ -17,7 +24,10 @@ Wi-Fi, with big buttons and plain words. The design and the tests are in `docs/S
 - **Emergency** (red, at the top): **Call 112** shows what would happen (there is no modem driver yet: it never
   dials), **Message** (three ready texts, not sent yet), **Hold for the alarm**, **Medical card**.
 - **Light**: the flashlight LED, or the screen as a light (white, warm, red; low, half, full).
-- **Heat**: Off, Low, High. The phone gets hot to hold: keep it in a pocket or a glove. It stops by itself at
+- **Heat**: Off, Low, High, **Extreme** (everything at its top rated level, asks each time; stops at 45 °C
+  battery). The screen stays on while it heats; after the screen-off time touch locks (a pocket):
+  press **Power** to unlock.
+- **Heat** (Low, High): The phone gets hot to hold: keep it in a pocket or a glove. It stops by itself at
   42 °C battery, 46 °C on the back, 15 % battery or after 30 minutes, and not while charging. A curve shows the
   battery's temperature. Heat and Wi-Fi do not run at the same time yet.
 - **SOS**: the screen flashes white and red with a big SOS; the LED can strobe with it (Settings > Alarm).

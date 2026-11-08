@@ -177,19 +177,45 @@ void panel_screen(int on)
  * (build/em-research-brightness.md): F0 5A 5A, B1 hi lo, F7 03, F0 A5 A5, DCS long writes. Never gamma, ELVSS or
  * voltages. Level 0 sends nothing (the boot's own level stays); the panel keeps the value until the next OS
  * initialises it. A larger AOR value is darker. */
-int panel_bright_level;
+int panel_bright_level;                     /* the user's level (Settings, the control center; saved) */
+static int applied = -1, boost;             /* the level on the panel; who asks for the top (1 Extreme, 2 SOS) */
 
+static int send_level(int level);
+
+/* 0.6: the user's level; the panel shows it unless SOS or Extreme asks for the top level */
 int panel_brightness(int level)
 {
-    static const uint16_t aor[5] = { 0x0440, 0x0b7c, 0x0800, 0x0440, 0x0200 };
-    static int sent;
-    static const uint8_t key_on[3] = { 0xf0, 0x5a, 0x5a }, commit[2] = { 0xf7, 0x03 }, key_off[3] = { 0xf0, 0xa5, 0xa5 };
     if (level < 0 || level > 4)
         return 0;
-    if (level == 0 && !sent) {
-        panel_bright_level = 0;                 /* nothing sent yet: the panel keeps the boot's level */
-        return 1;
-    }                                           /* after a change, "Boot" is S-Boot's normal AOR (0x0440) */
+    int was = panel_bright_level;
+    panel_bright_level = level;
+    int eff = boost ? 4 : level;
+    if (eff == applied || (eff == 0 && applied < 0))
+        return 1;                           /* already there (or the boot's level, nothing sent yet) */
+    if (!send_level(eff)) {
+        panel_bright_level = was;
+        return 0;
+    }
+    return 1;
+}
+
+/* SOS and Extreme: the panel's top level while either runs, the user's level after (never saved as the user's) */
+void panel_boost(int who, int on)
+{
+    int b = on ? (boost | who) : (boost & ~who);
+    if (b == boost)
+        return;
+    boost = b;
+    int eff = boost ? 4 : panel_bright_level;
+    if (eff != applied && !(eff == 0 && applied < 0))
+        (void)send_level(eff);
+}
+
+static int send_level(int level)
+{
+    static const uint16_t aor[5] = { 0x0440, 0x0b7c, 0x0800, 0x0440, 0x0200 };
+    static const uint8_t key_on[3] = { 0xf0, 0x5a, 0x5a }, commit[2] = { 0xf7, 0x03 }, key_off[3] = { 0xf0, 0xa5, 0xa5 };
+    /* level 0 after a change is S-Boot's normal AOR (0x0440) */
     if (!dsim_ready())
         return 0;
     const uint8_t b1[3] = { 0xb1, (uint8_t)(aor[level] >> 8), (uint8_t)aor[level] };
@@ -216,8 +242,7 @@ int panel_brightness(int level)
         ++dcs_fail;
         return 0;
     }
-    panel_bright_level = level;
-    sent = 1;
+    applied = level;
     if (panel_save_on)
         panel_kick();                           /* the next refresh carries it */
     return 1;

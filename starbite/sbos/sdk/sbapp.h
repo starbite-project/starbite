@@ -111,7 +111,7 @@ struct sbos_estimate {
     int32_t now_ma, screen_off_ma;
 };
 
-enum { HEAT_OFF = 0, HEAT_LOW, HEAT_MEDIUM, HEAT_HIGH };
+enum { HEAT_OFF = 0, HEAT_LOW, HEAT_MEDIUM, HEAT_HIGH, HEAT_EXTREME /* 0.6: everything at its rated top */ };
 enum {
     HEAT_ST_OFF = 0, HEAT_ST_RUNNING, HEAT_ST_HOLDING, /* at the target temperature, load paused */
     HEAT_ST_PAUSED,             /* a charger is connected */

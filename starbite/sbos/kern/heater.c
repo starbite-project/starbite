@@ -475,8 +475,39 @@ static void run_summary(void)
     sb_log(u.b);
 }
 
+/* Extreme's extra heat (0.6), all within ratings: the panel at its top brightness level and the LED on (its torch
+ * current: the GPIO driver has one); both put back when Extreme stops or holds */
+static int ext_on, ext_led, ext_led_used;
+static void extreme_confirm_done(int ok);
+
+/* on for the whole Extreme session (through HOLDING: no switching every few seconds at the band); the LED once per
+ * session (its own 10-minute limit then holds) */
+static void extreme_extras(int on)
+{
+    if (on == ext_on)
+        return;
+    ext_on = on;
+    if (on) {
+        panel_boost(1, 1);
+        if (!ext_led_used) {
+            ext_led_used = 1;
+            ext_led = !torch_on() && torch_ready() && torch_set(1) == 0;
+        }
+        sb_log(ext_led ? "heater: Extreme: the panel at its top level, the LED on" : "heater: Extreme: the panel at its top level");
+    } else {
+        panel_boost(1, 0);
+        if (ext_led)
+            torch_set(0);
+        ext_led = 0;
+        sb_log("heater: Extreme's panel level and LED put back");
+    }
+}
+
 static void restore_and_check(void)
 {
+    extreme_extras(0);
+    ext_led_used = 0;                       /* a new session may light it again */
+    gpu_heat_session = 0;
     for (unsigned w = 1; w < 8; ++w)
         cfg.run[w] = 0;
     sb_dcache_clean_inval(&cfg, sizeof(cfg));
@@ -615,7 +646,9 @@ void heater_timer(unsigned id)
         /* the GPU on High while the load runs (not while holding or paused) */
         /* the GPU on High: on once 3 workers run, off only when the load stops (holding, paused, a stop), so the
          * regulation's core-by-core steps do not switch vdd_g3d up and down */
-        if (ctl.level == HEAT_HIGH && ctl.state == HEAT_ST_RUNNING && gpu_heat_allowed) {
+        extreme_extras(ctl.level == HEAT_EXTREME && heater_running_ui());
+        if (((ctl.level == HEAT_HIGH && gpu_heat_allowed) || (ctl.level == HEAT_EXTREME && gpu_heat_session)) &&
+            ctl.state == HEAT_ST_RUNNING) {
             if (!gpuheat_on() && cores_running() - cpu0_on >= 3)
                 (void)gpuheat_start();
             else if (gpuheat_on() && !gpu_probe_ok)
@@ -684,6 +717,23 @@ static void start_now(void)
     ui_mark_dirty();
 }
 
+static void extreme_confirm_done(int ok)
+{
+    if (!ok) {
+        ctl.state = HEAT_ST_OFF;
+        sb_strcpy(ctl.why, sizeof(ctl.why), "Not started");
+        app_event_send(app_by_id("heat"), EV_APP_SERVICE, 1, ctl.state);
+        return;
+    }
+    confirmed = 1;
+    K.heat_confirmed = 1;
+    gpu_heat_session = 1;                   /* this confirmation named the GPU */
+    sb_log("heater: Extreme confirmed (CPU, GPU, panel, LED within their ratings)");
+    start_now();
+    if (!heater_running_ui())
+        gpu_heat_session = 0;               /* refused: no session to cover */
+}
+
 static void confirm_done(int ok)
 {
     if (!ok) {
@@ -710,7 +760,7 @@ int heater_request(int level, int minutes)
         }
         return 0;
     }
-    if (level > HEAT_HIGH)
+    if (level > HEAT_EXTREME)
         return SBOS_EINVAL;
     if (wifi_on() && !heater_running_ui()) {
         sb_strcpy(ctl.why, sizeof(ctl.why), "Turn Wi-Fi off first (0.4: not both at once)");
@@ -718,8 +768,26 @@ int heater_request(int level, int minutes)
         sb_log("heater: refused: Wi-Fi is on");
         return SBOS_EAGAIN;
     }
+    if (heater_running_ui() && level == HEAT_EXTREME && ctl.level != HEAT_EXTREME) {
+        heater_request(0, 0);               /* to Extreme from a running level: stop, then ask (its own confirmation) */
+    }
+    if (level == HEAT_EXTREME && !heater_running_ui()) {
+        pending_level = level;
+        pending_minutes = minutes;
+        ctl.state = HEAT_ST_CONFIRM;
+        kui_confirm("Extreme heat?",
+                    "Every processor core, the graphics processor and the screen at their top rated levels.",
+                    "It stops by itself at 45 \xc2\xb0" "C battery, 46 \xc2\xb0" "C on the back, 85 \xc2\xb0" "C inside or 15 % battery.",
+                    "The phone gets hot quickly: hold it only through a pocket or a glove. About 2 % a minute.",
+                    "Hold for Extreme", extreme_confirm_done);
+        return 0;
+    }
     if (heater_running_ui()) {
         /* a level change: the controller keeps its state, the new ceiling applies */
+        if (ctl.level == HEAT_EXTREME && level != HEAT_EXTREME) {
+            extreme_extras(0);
+            gpu_heat_session = 0;
+        }
         ctl.level = level;
         ctl.max_cores = heat_max_cores(level);
         if (ctl.cores > ctl.max_cores)

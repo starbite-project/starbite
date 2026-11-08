@@ -459,6 +459,7 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         if (arg[1] != 0 && arg[1] != 5 && arg[1] != 15 && arg[1] != 60)
             return SBOS_EINVAL;
         auto_off_min = (uint32_t)arg[1];
+        em_set_auto = 0;                    /* the user's own choice now: leaving Emergency Mode keeps it */
         sb_logx("settings: switch off after the screen is off, minutes (0 never): ", arg[1]);
         if (!K.screen_on && auto_off_min)
             kt_set(KT_POWER, 2, sb_ms(), auto_off_min * 60000U, 0);
