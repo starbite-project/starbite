@@ -1,0 +1,148 @@
+From 4648bf54c52346af43eefad25f07714a3fc9b582 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Sun, 8 Nov 2026 17:20:32 +0200
+Subject: [PATCH] patch: 0406-starlte-overlay-ops.patch - SBOVL002 card
+ overlays may rename (move aside, undoable) and set owner/mode; kernels before
+ 0406 ignore 002
+
+---
+ bsd/dev/starlte_overlay.c | 63 +++++++++++++++++++++++++++++++++++++--
+ bsd/vfs/vfs_syscalls.c    | 16 ++++++++++
+ 2 files changed, 77 insertions(+), 2 deletions(-)
+
+diff --git a/bsd/dev/starlte_overlay.c b/bsd/dev/starlte_overlay.c
+index 13e23741..c37645c3 100644
+--- a/bsd/dev/starlte_overlay.c
++++ b/bsd/dev/starlte_overlay.c
+@@ -12,6 +12,11 @@
+  *
+  * Each file is read whole, checked against its CRC32 and written over the
+  * old one (O_TRUNC); only into directories that already exist. The store
++ * 0406: "SBOVL002" overlays may also carry operations, flagged by bit 31 of mode (kernels before 0406
++ * do not read 002 at all, so they never mistake an operation for file data):
++ *   op 1 (mode 0x81000000): rename path -> the NUL-terminated path in the entry's data (a "reset" that
++ *        can be undone: the old tree is moved aside, the app makes a new one)
++ *   op 2 (mode 0x82000000 | perms): set owner uid:gid and the low 12 mode bits of path (no data)
+  * entry's CRC is kept in /private/var/db/starbite-overlay: an unchanged
+  * overlay is not written again. Needs the root mounted read-write by the
+  * kernel (rootrw=1, vfs_subr.c). Boot-arg sboverlay=0 skips it.
+@@ -69,6 +74,26 @@ so_crc32(uint32_t crc, const uint8_t *p, size_t n)
+ }
+ 
+ extern int starlte_sd_overlay_read(uint64_t off, void *buf, uint32_t len);
++extern int starlte_kern_rename(const char *from, const char *to);
++static bool so_v2;                      /* 0406: the overlay being applied is SBOVL002 (operations allowed) */
++
++static int
++so_setattr(const char *path, uint32_t mode, uint32_t uid, uint32_t gid, vfs_context_t ctx)
++{
++	vnode_t vp = NULLVP;
++	int err = vnode_lookup(path, 0, &vp, ctx);
++	if (err) {
++		return err;
++	}
++	struct vnode_attr va;
++	VATTR_INIT(&va);
++	VATTR_SET(&va, va_mode, mode & 07777);
++	VATTR_SET(&va, va_uid, uid);
++	VATTR_SET(&va, va_gid, gid);
++	err = vnode_setattr(vp, &va, ctx);
++	vnode_put(vp);
++	return err;
++}
+ static bool so_card;                    /* 0401: so_read reads the card area, not the raw UFS device */
+ 
+ /* Read len bytes (rounded up to 4 KiB) at byte offset off of the raw device. */
+@@ -148,7 +173,9 @@ so_install_card(vfs_context_t ctx)
+ 		return;
+ 	}
+ 	so_card = true;
+-	if (starlte_sd_overlay_read(0, blk, SO_BLOCK) == 0 && memcmp(blk, "SBOVL001", 8) == 0) {
++	if (starlte_sd_overlay_read(0, blk, SO_BLOCK) == 0 &&
++	    (memcmp(blk, "SBOVL001", 8) == 0 || memcmp(blk, "SBOVL002", 8) == 0)) {
++		so_v2 = memcmp(blk, "SBOVL002", 8) == 0;
+ 		uint32_t files = *(uint32_t *)(blk + 8);
+ 		uint32_t hdr_len = (16 + files * (uint32_t)sizeof(struct so_entry) + SO_BLOCK - 1) & ~(SO_BLOCK - 1);
+ 		uint8_t *hdr = (files && files <= SO_MAX_FILES) ? kalloc_data(hdr_len, Z_WAITOK | Z_ZERO) : NULL;
+@@ -173,6 +200,7 @@ so_install_card(vfs_context_t ctx)
+ 		}
+ 	}
+ 	so_card = false;
++	so_v2 = false;
+ 	kfree_data(blk, SO_BLOCK);
+ }
+ 
+@@ -243,7 +271,8 @@ so_apply(vnode_t dev, vfs_context_t ctx, uint64_t ov_off, uint64_t ov_size, uint
+ 		goto out;
+ 	}
+ 	/* Header: magic, count, version, then 256-byte entries. */
+-	if (so_read(dev, ctx, blk, SO_BLOCK, (so_card ? 0 : SO_STORE_OFF) + ov_off) || memcmp(blk, "SBOVL001", 8)) {
++	if (so_read(dev, ctx, blk, SO_BLOCK, (so_card ? 0 : SO_STORE_OFF) + ov_off) ||
++	    (memcmp(blk, "SBOVL001", 8) && !(so_card && so_v2 && memcmp(blk, "SBOVL002", 8) == 0))) {
+ 		printf("STARLTE OVERLAY: bad overlay header\n");
+ 		goto out;
+ 	}
+@@ -292,6 +321,36 @@ so_apply(vnode_t dev, vfs_context_t ctx, uint64_t ov_off, uint64_t ov_size, uint
+ 			failed++;
+ 			continue;
+ 		}
++		if (e->mode & 0x80000000U) {
++			uint32_t op = (e->mode >> 24) & 0x7fU;
++			if (!so_v2 || (op != 1 && op != 2)) {
++				printf("STARLTE OVERLAY: %s: operation %u refused (overlay v%d)\n", path, op, so_v2 ? 2 : 1);
++				failed++;
++				continue;
++			}
++			if (op == 1) {
++				char to[sizeof(e->path) + 1];
++				uint32_t n = e->size < sizeof(e->path) ? e->size : sizeof(e->path);
++				memcpy(to, data, n);
++				to[n] = 0;
++				err = to[0] == '/' ? starlte_kern_rename(path, to) : EINVAL;
++				printf("STARLTE OVERLAY: rename %s -> %s: %d\n", path, to, err);
++			} else {
++				err = so_setattr(path, e->mode, e->uid, e->gid, ctx);
++				printf("STARLTE OVERLAY: setattr %s mode %o owner %u:%u: %d\n", path, e->mode & 07777, e->uid,
++				    e->gid, err);
++			}
++			/* a rename whose source is already gone (applied before) is not a failure */
++			if (err == ENOENT && op == 1) {
++				err = 0;
++			}
++			if (err) {
++				failed++;
++			} else {
++				written++;
++			}
++			continue;
++		}
+ 		err = so_write_file(path, e->mode, data, e->size, ctx, e->uid, e->gid);
+ 		printf("STARLTE OVERLAY: %s (%u bytes, mode %o, owner %u:%u) %s %d\n", path, e->size, e->mode,
+ 		    e->uid, e->gid, err ? "FAILED" : "written", err);
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+index 942dc249..ef0fb601 100644
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -9517,6 +9517,22 @@ rename_submounts_callback(mount_t mp, void *arg)
+  * Rename files.  Source and destination must either both be directories,
+  * or both not be directories.  If target is a directory, it must be empty.
+  */
++/* ARGSUSED */
++static int
++renameat_internal(vfs_context_t ctx, int fromfd, user_addr_t from,
++    int tofd, user_addr_t to, int segflg, u_int uflags);
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++/* Starbite (0406): a kernel-path rename for the iOS overlay installer (starlte_overlay.c) */
++int starlte_kern_rename(const char *from, const char *to);
++int
++starlte_kern_rename(const char *from, const char *to)
++{
++	return renameat_internal(vfs_context_kernel(), AT_FDCWD, CAST_USER_ADDR_T(from), AT_FDCWD,
++	           CAST_USER_ADDR_T(to), UIO_SYSSPACE, 0);
++}
++#endif
++
+ /* ARGSUSED */
+ static int
+ renameat_internal(vfs_context_t ctx, int fromfd, user_addr_t from,

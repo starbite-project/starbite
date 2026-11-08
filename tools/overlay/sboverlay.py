@@ -7,6 +7,9 @@ Layout: "SBOVL001", u32 count, u32 version 1, then count x 256 bytes:
 char path[232], u32 mode, u32 size, u32 CRC32, u32 offset (4 KiB aligned,
 from the overlay start), u32 uid, u32 gid (0 = root:wheel; kernels before 0403 ignore them); data after the header, 4 KiB aligned.
 Target directories must already exist on the iOS root.
+Operations (kernel 0406+, card overlay only; the file then says "SBOVL002", which older kernels ignore):
+    rename:/from=/to                 move a file or folder aside (undo: rename:/to=/from)
+    attr:/path:MODE:UID[:GID]        set owner and mode of an existing file or folder
 """
 import struct
 import sys
@@ -20,7 +23,24 @@ def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     files = []
+    ops = False
     for arg in sys.argv[2:]:
+        if arg.startswith('rename:'):
+            src, _, dst = arg[7:].partition('=')
+            if not src.startswith('/') or not dst.startswith('/') or len(src.encode()) >= 232 or len(dst.encode()) >= 232:
+                sys.exit(f'bad rename {arg!r}')
+            files.append((src, 0x81000000, dst.encode(), 0, 0))
+            ops = True
+            continue
+        if arg.startswith('attr:'):
+            path, _, rest = arg[5:].partition(':')
+            mode, _, owner = rest.partition(':')
+            uid, _, gid = owner.partition(':')
+            if not path.startswith('/') or not mode or not uid:
+                sys.exit(f'bad attr {arg!r}')
+            files.append((path, 0x82000000 | (int(mode, 8) & 0o7777), b'', int(uid), int(gid or uid)))
+            ops = True
+            continue
         local, _, target = arg.partition('=')
         path, _, rest = target.partition(':')
         mode, _, owner = rest.partition(':')
@@ -36,7 +56,8 @@ def main():
         pad = (-len(blob)) % BLOCK
         data += blob + bytes(pad)
         off += len(blob) + pad
-    out = struct.pack('<8sII', b'SBOVL001', len(files), 1) + entries      # entries at byte 16 (starlte_overlay.c)
+    magic = b'SBOVL002' if ops else b'SBOVL001'
+    out = struct.pack('<8sII', magic, len(files), 2 if ops else 1) + entries      # entries at byte 16 (starlte_overlay.c)
     out += bytes((-len(out)) % BLOCK) + data
     Path(sys.argv[1]).parent.mkdir(parents=True, exist_ok=True)
     Path(sys.argv[1]).write_bytes(out)

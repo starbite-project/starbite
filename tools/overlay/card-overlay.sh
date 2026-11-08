@@ -17,7 +17,7 @@ if [ "${1:-}" = --clear ]; then
     head -c 4096 /dev/zero > "$tmp/ovl.bin"
 else
     src=${1:?usage: card-overlay.sh OVERLAY.bin | --clear}
-    [ "$(head -c 8 "$src")" = SBOVL001 ] || { echo "$src: not an SBOVL001 overlay"; exit 1; }
+    case "$(head -c 8 "$src")" in SBOVL001|SBOVL002) ;; *) echo "$src: not an SBOVL overlay"; exit 1 ;; esac
     cp "$src" "$tmp/ovl.bin"
     n=$(stat -f %z "$tmp/ovl.bin")
     pad=$(( (512 - n % 512) % 512 )); [ $pad -eq 0 ] || head -c $pad /dev/zero >> "$tmp/ovl.bin"
