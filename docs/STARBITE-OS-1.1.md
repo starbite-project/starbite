@@ -1,4 +1,20 @@
-# Starbite OS 1.1-beta6: Survival heat (2026-11-08)
+# Starbite OS 1.1-beta7: Survival heat (2026-11-08)
+
+## beta7: master merged, the OCP probe (read only), a tighter hold, the hard limits
+
+- **Hard limits** (docs/STARBITE-OS.md 8.0): the SoC at most **145 °C** (the trip-off hold), the battery at most
+  **60 °C**; the code refuses anything higher (unit-tested). 175 and 155 °C were asked for on 2026-11-08 and declined.
+- **The trip-off hold** swung 133 .. 142 °C at 145 in the beta6 run: now one load off a second near the limit (every
+  250 ms from 2 °C over), one back a second below the limit minus 1 °C (a lagging-reading simulation: 112.9 .. 131.5
+  before, 126.2 .. 131.7 °C now, at 131).
+- **The M3's OCP registers, read only**: Settings > About > "Read the big cores' power limits" runs master's
+  `sb_ocp_worker` on M3 core 4 and reads the PMIC's OCP_WARN; it logs `ocp probe:` lines (MIDR, OCPTHROTTCTL with TEW /
+  TRW / THROTTERRA, OCPINTCTL with IRP, GCUCTL, BPT). A trap stays in that core and is reported. Nothing is written.
+  Survival's 4-core OCP mode (above 1794 MHz with the hardware throttle) is not in beta7: it waits for engineer-oc-2's
+  oc9 probe and these readings; until then Survival stays inside Samsung's core-count table.
+- **master merged** (libsb `ocp.c`, `wdt.c`, `sb_acpm_dvfs_step`): Samsung's FlexPMU steps exist once (libsb `smp.c`,
+  `sb_m3_fp_*`), used by Engineer OS and by Starbite's heater.
+
 
 ## beta6: the big cores by measured watts, inside Samsung's core-count table
 
@@ -81,5 +97,5 @@ strobes as the light instead. 0x63 is never written. Settings says so.
 - Not in 1.1: the M3 above 1794 MHz (past the cluster buck's current rating without Samsung's over-current handler),
   camera sensors, HBM, Wi-Fi TX, a shader workload (`docs/STARBITE-OS.md` 12.21 says why).
 
-Install: as 1.0-rc3, with `starbite-os-1.1-beta6.img` in the `starbite-os.img` entry and the catalog's version line
-`"1.1-beta6 · heat, light, alarm, card, Wi-Fi"`. Undo: `starbite-os-1.0-rc3.img` in the same entry.
+Install: as 1.0-rc3, with `starbite-os-1.1-beta7.img` in the `starbite-os.img` entry and the catalog's version line
+`"1.1-beta7 · heat, light, alarm, card, Wi-Fi"`. Undo: `starbite-os-1.0-rc3.img` in the same entry.

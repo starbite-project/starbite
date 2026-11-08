@@ -93,6 +93,16 @@ void hw_wdt_feed_heat(void)
     host_wdt_fed = now;
 }
 int hw_dvfs(unsigned domain, uint32_t khz) { return sb_acpm_dvfs_listed(domain, khz); }
+/* 1.1-beta7: libsb ocp.c's PMIC read and IRP formula (host.c has its own sb_ocp_worker fake for Engineer OS) */
+int sb_ocp_pmic(uint8_t *warn1, uint8_t *warn2) { *warn1 = 0x80; *warn2 = 0xc0; return 1; }
+unsigned sb_ocp_irp(uint32_t khz, uint32_t min_khz)
+{
+    if (!min_khz)
+        min_khz = SB_OCP_FMIN_KHZ;
+    uint64_t irp = (uint64_t)khz * 2U / min_khz;
+    irp = irp >= 2 ? irp - 2 : 0;
+    return irp > SB_OCP_IRP_MASK ? SB_OCP_IRP_MASK : (unsigned)irp;
+}
 /* 1.1-beta7: the OCP probe on the host: fake register values (the real mrs would trap here);
  * SBOS_HOST_OCP=trap: the worker faults as an undefined register would */
 static void host_ocp_fake(unsigned w, void *arg)
@@ -104,7 +114,9 @@ static void host_ocp_fake(unsigned w, void *arg)
     if (getenv("SBOS_HOST_OCP") && !strcmp(getenv("SBOS_HOST_OCP"), "trap")) {
         s->v[0] = 0x531f0020U;
         s->esr = 0x02000000U;
-        s->state = SB_WK_FAULT;
+        s->state = SB_WK_FAULT;             /* held until the stop (the host's wrapper marks DONE when we return) */
+        while (!sb_worker_stop())
+            ;
         return;
     }
     s->v[0] = 0x531f0020U, s->v[1] = 0x0000007cU, s->v[2] = 0x1, s->v[3] = 0x30U, s->v[4] = 0x01000000U, s->v[5] = 0x100U;
@@ -113,7 +125,19 @@ static void host_ocp_fake(unsigned w, void *arg)
     while (!sb_worker_stop())
         ;
 }
-int64_t hw_ocp_launch(unsigned w) { return sb_smp_launch(w, host_ocp_fake, 0); }
+#include <unistd.h>
+int64_t hw_ocp_launch(unsigned w)
+{
+    int64_t r = sb_smp_launch(w, host_ocp_fake, 0);
+    /* the host's sb_mdelay is the simulated clock: give the fake worker thread real time to report */
+    for (unsigned i = 0; r == 0 && i < 200; ++i) {
+        const struct sb_wslot *s = sb_smp_slot(w);
+        if (s && (s->v[7] == 1 || s->state == SB_WK_FAULT))
+            break;
+        usleep(5000);
+    }
+    return r;
+}
 int hw_dvfs_m3_ocp(uint32_t khz, unsigned busy)
 {
     if (!sb_m3_ocp_level_ok(khz, busy)) {

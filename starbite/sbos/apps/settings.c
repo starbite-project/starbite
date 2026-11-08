@@ -15,7 +15,11 @@ static void about(void)
     struct sbos_sysinfo s;
     struct fmt f;
     sysinfo(&s);
-    ui_big("STARBITE OS", s.version, 0);
+    /* 1.1-beta7: the version alone in the big line ("Starbite OS 1.1-beta7" did not fit) */
+    const char *v = s.version;
+    if (v[0] == 'S' && v[1] == 't' && v[8] == ' ' && v[9] == 'O' && v[10] == 'S' && v[11] == ' ')
+        v += 12;
+    ui_big("STARBITE OS", v, 0);
     ui_textline("An emergency system for the Galaxy S9: light, heat, alarm, battery, the emergency card.", 0xffffffffU);
     fmt_init(&f);
     fmt_s(&f, s.irq_mode ? "Interrupts on: the processor sleeps between events" : "Polling: not saving power");

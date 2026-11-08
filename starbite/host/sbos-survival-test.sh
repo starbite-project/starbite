@@ -78,5 +78,22 @@ done
 want "$r" "heater: survival M3 pick:" "the pick logged"
 never "$r" "M3 OCP TABLE VIOLATION" "never more M3 cores than the table allows at the clock asked"
 never "$r" "acpm dvfs (m3 ocp table) refused" "the libsb table never had to refuse"
+# 1.1-beta7: the read-only OCP probe (Settings > About): readable, trapped, no M3 core
+SETT_ABOUT="w:300 g:1150,2310,0,700 w:400 t:382,2424 w:800 t:1216,671 w:600"
+PROBE="t:723,2252 w:1500"
+ENVS=SBOS_HOST_SMP=m3
+r=$(run $SETT_ABOUT $PROBE)
+want "$r" "ocp probe: PMIC OCP_WARN1 0xD3 0x80" "the PMIC's OCP_WARN read"
+want "$r" "ocp probe: MIDR 0x531F0020 OCPTHROTTCTL" "the M3 registers read on core 4"
+want "$r" "readable on the M3 (nothing written)" "reported readable"
+want "$r" "ocp probe: flexpmu before" "FlexPMU around the probe core"
+never "$r" "TRAPPED" "no trap reported"
+ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_OCP=trap"
+r=$(run $SETT_ABOUT $PROBE)
+want "$r" "ocp probe: TRAPPED on the M3" "a trap is caught and reported"
+want "$r" "Survival stays inside Samsung's core-count table" "and the fallback said"
+ENVS=
+r=$(run $SETT_ABOUT $PROBE)
+want "$r" "ocp probe: the M3 core did not report" "no M3 core: reported, nothing read"
 echo "survival test: $fails failed"
 [ "$fails" = 0 ]
