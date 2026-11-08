@@ -641,34 +641,60 @@ static void sim_run(struct heat_ctl *c, struct sim *s, int trip_armed, int max_s
 
 static void t_survival(void)
 {
-    /* 1.1-beta7: the ABSOLUTE limits: no hold, target or setting above 145 C SoC or 60 C battery */
+    /* 1.1-beta7: the ABSOLUTE FINAL limits (150 C SoC agreed 2026-11-08, 60 C battery): no setting, target, hold or
+     * stop may be at or above a 150 C reading (it is invalid there), nothing above 60 C battery */
     {
         struct heat_ctl c;
         struct heat_in in = base_in(0);
         heat_ctl_init(&c, 0);
-        c.surv_stop_c10 = 1451;
-        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == SBOS_EAGAIN, "hard limit: a 145.1 C hold is refused");
+        c.surv_stop_c10 = 1501;
+        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == SBOS_EAGAIN, "hard limit: a 150.1 C limit is refused");
         c.surv_stop_c10 = 1550;
-        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == SBOS_EAGAIN, "hard limit: 155 C (asked 2026-11-08) refused");
+        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == SBOS_EAGAIN, "hard limit: 155 C refused");
+        c.surv_stop_c10 = 1750;
+        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == SBOS_EAGAIN, "hard limit: 175 C refused");
         heat_ctl_init(&c, 0);
-        c.surv_stop_c10 = 1450;
-        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == 0, "hard limit: 145 C itself is accepted");
-        c.surv_stop_c10 = 1750;                 /* corrupted after the start: the hold still never passes 145 */
-        c.level = HEAT_SURVIVAL_X;
-        CHECK(heat_surv_target(&c) == SBOS_HEAT_SOC_HARD_C10 && heat_surv_estop(&c) <= 1490,
-              "hard limit: a corrupted limit holds at 145 C (target %d, stop %d)", heat_surv_target(&c), heat_surv_estop(&c));
+        c.surv_stop_c10 = 1500;
+        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == 0, "hard limit: 150 C itself is accepted");
+        CHECK(heat_surv_target(&c) == 1480 && heat_surv_estop(&c) == 1490, "150 C: held at 148, the stop at 149 (%d, %d)",
+              heat_surv_target(&c), heat_surv_estop(&c));
+        /* every value an int can hold: the hold and the stop stay below a 150 C reading */
+        int worst_t = 0, worst_e = 0;
+        for (int v = -100000; v <= 100000; v += 7) {
+            c.surv_stop_c10 = v;
+            if (heat_surv_target(&c) > worst_t)
+                worst_t = heat_surv_target(&c);
+            if (heat_surv_estop(&c) > worst_e)
+                worst_e = heat_surv_estop(&c);
+        }
+        CHECK(worst_t <= 1480 && worst_e <= 1490, "nothing above 150: for any limit the hold <= 148, the stop <= 149 (%d, %d)",
+              worst_t, worst_e);
+        c.surv_stop_c10 = 1750;                 /* corrupted after the start */
         c.trip_off = 1;
         c.cal = 5;
         run(&c, &in, 0, 10000, 0);
-        in.soc_c10 = 1455;
+        in.soc_c10 = 1482;
         int before = c.cores + c.gpu_want;
         run(&c, &in, 10250, 1000, 0);
-        CHECK(c.cores + c.gpu_want < before, "hard limit: at 145.5 C it sheds even with a 175 C setting (%d -> %d)", before,
+        CHECK(c.cores + c.gpu_want < before, "hard limit: at 148.2 C it sheds even with a 175 C limit (%d -> %d)", before,
               c.cores + c.gpu_want);
+        in.soc_c10 = 1491;
+        run(&c, &in, 11500, 300, 0);
+        CHECK(stopped_with(&c, HEAT_ST_STOPPED, "past your limit"), "hard limit: 149.1 C stops (%s)", c.why);
         heat_ctl_init(&c, 0);
+        in = base_in(0);
+        heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+        c.trip_off = 1;
+        run(&c, &in, 0, 2000, 0);
+        in.soc_ok = 0;                          /* 150 C or more: read_inputs marks it invalid */
+        run(&c, &in, 2250, 4000, 0);
+        CHECK(stopped_with(&c, HEAT_ST_STOPPED, "processor temperature"), "a 150 C reading (invalid) ends it (%s)", c.why);
+        heat_ctl_init(&c, 0);
+        in = base_in(0);
         c.surv_bat_c10 = 610;
         CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == SBOS_EAGAIN, "hard limit: a 61 C battery limit is refused");
-        CHECK(SBOS_HEAT_SOC_HARD_C10 == 1450 && SBOS_HEAT_BAT_HARD_C10 == 600, "hard limits: 145 C SoC, 60 C battery");
+        CHECK(SBOS_HEAT_SOC_HARD_C10 == 1500 && SBOS_HEAT_SOC_HOLD_MAX_C10 == 1480 && SBOS_HEAT_BAT_HARD_C10 == 600,
+              "hard limits: 150 C SoC (held at 148 at most), 60 C battery");
     }
     struct heat_ctl c;
     struct heat_in in = base_in(0);
@@ -690,8 +716,8 @@ static void t_survival(void)
     refuse(in, HEAT_SURVIVAL_X, "the trip is not armed at the start (trip-off Survival too)");
     in = base_in(0);
     heat_ctl_init(&c, 0);
-    c.surv_stop_c10 = 1500;
-    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == SBOS_EAGAIN, "trip-off Survival refuses a limit above 145 C");
+    c.surv_stop_c10 = 1510;
+    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == SBOS_EAGAIN, "trip-off Survival refuses a limit above 150 C");
     heat_ctl_init(&c, 0);
     CHECK(c.surv_stop_c10 == 1350 && heat_surv_estop(&c) == 1400, "trip off: the default limit 135 C, the stop 140 C");
     c.surv_stop_c10 = 1450;

@@ -2,8 +2,9 @@
 
 ## beta7: master merged, the OCP probe (read only), a tighter hold, the hard limits
 
-- **Hard limits** (docs/STARBITE-OS.md 8.0): the SoC at most **145 °C** (the trip-off hold), the battery at most
-  **60 °C**; the code refuses anything higher (unit-tested). 175 and 155 °C were asked for on 2026-11-08 and declined.
+- **Hard limits** (docs/STARBITE-OS.md 8.0): the SoC limit at most **150 °C**, final (choices 125 .. 150; at 150 the
+  hold targets 148 °C and the stop is at 149, since a 150 °C reading is invalid), the battery at most **60 °C**; the
+  code refuses anything higher (unit-tested). 175 and 155 °C were asked for on 2026-11-08 and declined; 150 was agreed.
 - **The trip-off hold** swung 133 .. 142 °C at 145 in the beta6 run: now one load off a second near the limit (every
   250 ms from 2 °C over), one back a second below the limit minus 1 °C (a lagging-reading simulation: 112.9 .. 131.5
   before, 126.2 .. 131.7 °C now, at 131).

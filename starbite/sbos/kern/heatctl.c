@@ -86,7 +86,7 @@ int heat_max_cores(int level)
 
 int heat_surv_estop(const struct heat_ctl *c)
 {
-    int lim = c->surv_stop_c10 < SBOS_HEAT_SOC_HARD_C10 ? c->surv_stop_c10 : SBOS_HEAT_SOC_HARD_C10;
+    int lim = c->surv_stop_c10 < SBOS_HEAT_SOC_HOLD_MAX_C10 ? c->surv_stop_c10 : SBOS_HEAT_SOC_HOLD_MAX_C10;
     int e = lim + 50;                       /* a stop 5 C past the held limit (the hold itself never above 145) */
     return e > 1490 ? 1490 : e;
 }
@@ -95,7 +95,7 @@ int heat_surv_target(const struct heat_ctl *c)
 {
     if (c->level != HEAT_SURVIVAL_X)
         return c->lim->surv_target_c10;
-    return c->surv_stop_c10 < SBOS_HEAT_SOC_HARD_C10 ? c->surv_stop_c10 : SBOS_HEAT_SOC_HARD_C10;  /* the hold, <= 145 C */
+    return c->surv_stop_c10 < SBOS_HEAT_SOC_HOLD_MAX_C10 ? c->surv_stop_c10 : SBOS_HEAT_SOC_HOLD_MAX_C10;  /* <= 148 C */
 }
 
 void heat_ctl_init(struct heat_ctl *c, const struct heat_limits *lim)
@@ -437,7 +437,7 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
              * until 2 % battery: at or above the limit one load off per 250 ms (two at 2 C over): the M3s first, then
              * the GPU, then the A55s; back on one a second below the limit minus 2 C in the reverse order. No other
              * shedding (the current and the voltage: the 4.5 A stop and the PMIC's own) */
-            int lim = c->surv_stop_c10 < SBOS_HEAT_SOC_HARD_C10 ? c->surv_stop_c10 : SBOS_HEAT_SOC_HARD_C10;   /* never above 145 C */
+            int lim = heat_surv_target(c);  /* the user's limit, the hold never above 148 C (a 150 limit holds at 148) */
             /* 1.1-beta5: the battery is held too: from its limit minus 3 C (the stop is at the limit itself) */
             int bhot = in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 30;
             int hot = (in->soc_ok && in->soc_c10 >= lim) || bhot;

@@ -195,7 +195,8 @@ static void show(void)
             fmt_init(&f);
             fmt_s(&f, "Limit ");
             fmt_d(&f, h.surv_stop_c10 / 10);
-            fmt_s(&f, " \xc2\xb0" "C (tap: 125 to 145)");
+            fmt_s(&f, h.surv_stop_c10 >= SBOS_HEAT_SOC_HARD_C10 ? " \xc2\xb0" "C: held at 148 (tap: 125 to 150)" :
+                                                                  " \xc2\xb0" "C (tap: 125 to 150)");
             ui_button(25, f.b, 0, 0);
         }
     }
@@ -384,7 +385,7 @@ void app_event(const struct sbos_event *ev)
         else if (ev->id == 26 && !running)
             setting_set(SET_HEAT_SURV_BAT_C10, h.surv_bat_c10 >= 600 ? 550 : h.surv_bat_c10 >= 580 ? 600 : 580);
         else if (ev->id == 25 && !running)
-            setting_set(SET_HEAT_SURV_STOP_C10, h.surv_stop_c10 >= 1450 ? 1250 : (h.surv_stop_c10 / 50 + 1) * 50);
+            setting_set(SET_HEAT_SURV_STOP_C10, h.surv_stop_c10 >= SBOS_HEAT_SOC_HARD_C10 ? 1250 : (h.surv_stop_c10 / 50 + 1) * 50);
         else if (ev->id == 22 && !running) {
             int k = 0;
             for (int i = 0; i < 5; ++i)

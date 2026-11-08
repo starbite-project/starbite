@@ -542,7 +542,7 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         return 0;
     case SET_HEAT_SURV_STOP_C10:
         if (arg[1] < 1250 || arg[1] > SBOS_HEAT_SOC_HARD_C10)
-            return SBOS_EINVAL;             /* 145 C: the absolute limit (docs "Hard limits") */
+            return SBOS_EINVAL;             /* 150 C: the absolute final limit (docs "Hard limits") */
         heat_surv_stop_c10 = (int)arg[1];
         sb_logx("settings: Survival (trip off)'s SoC stop, 0.1 C: ", arg[1]);
         return 0;

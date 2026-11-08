@@ -34,11 +34,11 @@ is only refreshed when something changes.
 - **Survival heat** (1.1, a last resort for a survival situation; asks three times): the most heat the phone can
   make, held just below the chip's own power cut, until the battery is at 2 % (nothing is kept for a call, the light
   or SOS). **Survival heat, trip OFF** (asks four times) also switches the chip's own heat power cut off and stops at
-  the processor temperature you set (125, 128 or 131 °C); it may damage the processor. Both stop at 55 °C battery,
+  the processor limit you set (125 to 150 °C); it may damage the processor. Both stop at 55 °C battery,
   and Off or Power stops them at any time. Hold the phone through a pocket or a glove.
-- **Hard limits** (never raised): the processor at most **145 °C** (Survival with the trip off) and the battery at
-  most **60 °C**. Above 145 °C the processor's sensor is past its range and the back of the phone is hot enough to
-  burn; 155 and 175 °C were asked for on 2026-11-08 and declined.
+- **Hard limits** (final, never raised): the processor limit at most **150 °C** (Survival with the trip off; at 150
+  it holds about 148 °C, because the sensor's reading is not valid at 150) and the battery at most **60 °C**. 175 and
+  155 °C were asked for on 2026-11-08 and declined; 150 °C was agreed.
 - **Heat** (Low, High): The phone gets hot to hold: keep it in a pocket or a glove. It stops by itself at
   42 °C battery, 46 °C on the back, 15 % battery or after 30 minutes, and not while charging. A curve shows the
   battery's temperature. Heat and Wi-Fi do not run at the same time yet.

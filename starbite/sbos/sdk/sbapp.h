@@ -195,7 +195,7 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
                             1.1-beta2: 2 on for the torch only (the flash pulses off: the chip's flash timer unconfirmed) */,
        SET_PANEL_DUMP = 17 /* 0.6.5: write 1: read the panel's registers (read only, logged) */,
        SET_HEAT_RESERVE_ONCE = 18 /* 1.0-rc2: write 1: the next full-heat session runs without the reserve (once) */,
-       SET_HEAT_SURV_STOP_C10 = 19 /* 1.1: Survival (trip off)'s SoC limit, 0.1 C: 1250..1450 (1.1-beta4: held there; default 1350) */,
+       SET_HEAT_SURV_STOP_C10 = 19 /* 1.1: Survival (trip off)'s SoC limit, 0.1 C: 1250..1500 (held there, 150 held at 148; default 1350) */,
        SET_HEAT_SURV_BAT_C10 = 20 /* 1.1-beta5: Survival's battery limit, 0.1 C: 550 / 580 / 600; above 550 the kernel asks first */,
        SET_OCP_PROBE = 21 /* 1.1-beta7: write 1: read the M3 OCP registers on one M3 core (read only, logged); reads the result:
                              0 not run, 1 readable, -1 trapped, -2 the core did not start */ };
@@ -206,11 +206,13 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
  * only about 5 % of 3000 mAh, so the gauge's percent under this load is worth about 16 mAh, not 30: the estimates use
  * 16 (half what the 0.6.2 estimate assumed, so they no longer promise twice the time). The 0.6.2 tour (Extreme, at the
  * caps) drew the same ~10 W. One run from a full charge: the gauge may fall faster near 100 %; more runs refine it. */
-/* 1.1-beta7: the ABSOLUTE limits (docs/STARBITE-OS.md "Hard limits"): Survival with the trip off holds the SoC at
- * most here, the battery limit is at most 60 C. Nothing in the code may set, hold or regulate above them (unit-tested).
- * The user asked for 175 and then 155 C on 2026-11-08: declined (the TMU reading counts as invalid at 150 C, the sensor
- * is specified only to 125 C, and the back of the phone was already 74.5 C at 145 C). */
-#define SBOS_HEAT_SOC_HARD_C10 1450
+/* 1.1-beta7: the ABSOLUTE FINAL limits (docs/STARBITE-OS.md 8.0 "Hard limits"): the SoC limit setting is at most
+ * 150 C, the battery limit at most 60 C; nothing in the code may set, hold or regulate above them (unit-tested). The
+ * user asked for 175, then 155 C; 150 C was agreed on 2026-11-08 with the main session. A SoC reading of 150 C or
+ * more counts as invalid (the lost-reading stop), so the hold itself never targets above 148 C (HOLD_MAX) and the
+ * stop past it is at most 149 C. */
+#define SBOS_HEAT_SOC_HARD_C10 1500
+#define SBOS_HEAT_SOC_HOLD_MAX_C10 1480
 #define SBOS_HEAT_BAT_HARD_C10 600
 #define SBOS_HEAT_FULL_MA 2800
 #define SBOS_HEAT_MAH_PER_PCT 16

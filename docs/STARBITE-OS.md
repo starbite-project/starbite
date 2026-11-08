@@ -426,20 +426,25 @@ S-Boot. The loader's quick POST takes about 0.3 s (docs/STARBITE-HEALTH.md 2.1: 
 first frame to about 5 s. It is the user's loader setting, not Starbite OS's to change. The image is about 5 MiB (4.3 MiB of it fonts and
 icons) for the loader to read.
 
-## 8.0 Hard limits (absolute; 2026-11-08)
+## 8.0 Hard limits (absolute and final; 2026-11-08)
 
 These are the heater's outer bounds. **No mode, setting, measurement or regulation may go past them**; the code
-refuses anything higher (`SBOS_HEAT_SOC_HARD_C10`, `SBOS_HEAT_BAT_HARD_C10` in `sdk/sbapp.h`; checked in
-`heatctl.c`, `app.c` and by `sbos-host-test.c`'s "hard limit" checks: a 145.1 °C or 155 °C setting is refused, and a
-corrupted limit still holds at 145 °C).
+refuses anything higher (`SBOS_HEAT_SOC_HARD_C10`, `SBOS_HEAT_SOC_HOLD_MAX_C10`, `SBOS_HEAT_BAT_HARD_C10` in
+`sdk/sbapp.h`; checked in `heatctl.c`, `app.c` and by `sbos-host-test.c`'s "hard limit" checks: 150.1, 155 and 175 °C
+are refused, and for every possible limit value the hold stays at or below 148 °C and the stop at or below 149 °C).
 
-| What | Absolute limit | Why |
+| What | Absolute limit | How it is enforced |
 |---|---|---|
-| SoC (Survival with the chip's trip off: the held limit) | **145 °C** (on our TMU reading) | The TMU reading counts as invalid at 150 °C (the sample filter's range and `read_inputs`), the sensor is specified only to 125 °C, and at 145 °C the back of the phone was already 74.5 °C (beta6, 2026-11-08). The stop 5 °C past the held limit (at most 149 °C) is a stop, never a target. |
-| Battery (Survival's selectable limit) | **60 °C** | The usual top of a lithium-ion cell's discharge rating; 55 °C is the default, 58 / 60 °C only after their own confirmation. |
+| SoC (Survival with the chip's trip off: the user's limit) | **150 °C**, final | The limit is chosen from 125 / 130 / 135 / 140 / 145 / 150 °C. A TMU reading of 150 °C or more counts as invalid and ends the heat through the lost-reading stop, so at the 150 setting the hold targets **148 °C** and the stop past the hold is at **149 °C** (always at most 149). |
+| Battery (Survival's selectable limit) | **60 °C** | 55 °C default; 58 / 60 °C only after their own confirmation. The load is held from 3 °C below the limit, the stop is at the limit. |
 
-**Declined on 2026-11-08:** the user asked for a 175 °C and then a 155 °C SoC limit. Both were declined for the
-reasons above, by the main session and here. 145 °C is the final limit; it is not to be raised by a later request.
+Why: the TMU's reading is only valid below 150 °C (the sample filter's range and `read_inputs`); the sensor is
+specified only to 125 °C, so 125 .. 150 °C is already an extrapolation; the back of the phone was 74.5 °C at a 145 °C
+hold (beta6, 2026-11-08), hot enough to burn skin; and the lithium cell sits next to the SoC. 60 °C is the usual top of
+a lithium-ion cell's discharge rating.
+
+**Agreed on 2026-11-08:** the user asked for a 175 °C and then a 155 °C SoC limit; both were declined, and 150 °C was
+agreed with the main session as the absolute final limit. It is not to be raised by a later request.
 
 ## 8. Heater
 
@@ -851,7 +856,7 @@ beta7: master merged (libsb `ocp.c`, `wdt.c`, `sb_acpm_dvfs_step`; the FlexPMU s
 limits": master's `sb_ocp_worker` on M3 core 4, the S2MPS18 OCP_WARN registers; a trap stays in that core); the
 trip-off hold tightened (one load a second near the limit, every 250 ms from 2 °C over; back below the limit minus
 1 °C, one a second: beta6 swung 133 .. 142 °C at 145; a lagging-reading simulation went from 112.9 .. 131.5 to
-126.2 .. 131.7 °C at 131); the hard limits (8.0).
+126.2 .. 131.7 °C at 131); the hard limits (8.0: SoC 150 °C final, held at 148 at most; battery 60 °C).
 
 beta6: the M3 by measured watts within Samsung's core-count table (`sb_m3_ocp_max_khz`: 1 core 2704, 2 cores 2314,
 3-4 cores 1794; `heat_m3_cands`; `surv_calibrate` in heatctl.c, 4 s per candidate, the mean of the last 2.5 s);
