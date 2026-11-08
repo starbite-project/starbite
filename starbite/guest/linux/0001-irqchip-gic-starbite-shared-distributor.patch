@@ -1,0 +1,59 @@
+--- a/drivers/irqchip/irq-gic.c	2026-11-08 15:24:38.526598641 +0200
++++ b/drivers/irqchip/irq-gic.c	2026-11-08 15:24:38.557599928 +0200
+@@ -461,6 +461,15 @@
+ }
+ 
+ 
++/*
++ * "starbite,shared-distributor": this kernel runs on some of the CPUs next to another kernel (Starbite OS,
++ * no hypervisor) that owns the distributor. Leave GICD_CTLR and every SPI's target, priority, enable and
++ * trigger alone at boot and across cluster power-down; the other kernel configured our SPIs before it
++ * started us. Per-CPU state (SGIs, PPIs, the CPU interface) is banked and set up as usual; the SPIs this
++ * kernel requests are still enabled and routed (byte writes and write-1-to-set registers only).
++ */
++static bool gic_dist_shared;
++
+ static void gic_dist_init(struct gic_chip_data *gic)
+ {
+ 	unsigned int i;
+@@ -468,6 +477,12 @@
+ 	unsigned int gic_irqs = gic->gic_irqs;
+ 	void __iomem *base = gic_data_dist_base(gic);
+ 
++	if (gic_dist_shared) {
++		pr_info("GIC: shared distributor (starbite,shared-distributor), CTLR %#x left as found\n",
++			readl_relaxed(base + GIC_DIST_CTRL));
++		return;
++	}
++
+ 	writel_relaxed(GICD_DISABLE, base + GIC_DIST_CTRL);
+ 
+ 	/*
+@@ -553,6 +568,8 @@
+ 	void __iomem *dist_base;
+ 	int i;
+ 
++	if (gic_dist_shared)
++		return;
+ 	if (WARN_ON(!gic))
+ 		return;
+ 
+@@ -592,6 +609,8 @@
+ 	unsigned int i;
+ 	void __iomem *dist_base;
+ 
++	if (gic_dist_shared)
++		return;
+ 	if (WARN_ON(!gic))
+ 		return;
+ 
+@@ -1490,6 +1509,9 @@
+ 	if (gic_cnt == 0 && !gic_check_eoimode(node, &gic->raw_cpu_base))
+ 		static_branch_disable(&supports_deactivate_key);
+ 
++	if (gic_cnt == 0)
++		gic_dist_shared = of_property_read_bool(node, "starbite,shared-distributor");
++
+ 	ret = __gic_init_bases(gic, &node->fwnode);
+ 	if (ret) {
+ 		gic_teardown(gic);
