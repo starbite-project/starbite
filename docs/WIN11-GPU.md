@@ -334,13 +334,45 @@ buffer's GPU address when it creates it, and WDDM 1.x lets the driver keep its o
   built on GitHub's Windows runners; we cannot push, so the cross build is ours to make work **[unverified]**.
   Fallback: llvm-mingw `aarch64-w64-mingw32` if its DDI headers suffice **[unverified]**.
 
-### 6.3 The open question that can stop stage 4
+### 6.3 The open question that can stop stage 4: answered (research 2026-11-08): go
 
-**Does DWM composite on an adapter whose UMD has only the D3D10/10.1 DDI?** Microsoft's certification rules
-require D3D9, D3D10 and D3D11.1 DDIs for D3D10-class hardware; DWM's own requirement is not documented.
-viogpu3d's WinUI 3 apps imply yes **[claim]**. If not, d3d10umd needs a D3D11 DDI table (large, on an
-unmaintained frontend), or a D3D9 one. Test (cheap once stage 4 loads): run a D3D11 hardware-adapter
-program, then check with `dxdiag` / ETW which adapter DWM uses.
+**Does DWM composite on an adapter whose UMD has only the D3D10/10.1 DDI?** On Windows 10, yes **[shown]**:
+viogpu3d (virtio-win PR 943, unmerged; WDDM 1.3 KMD + Mesa d3d10umd on virgl) has DWM composing through
+`dwmcore → d2d1 → d3d11 → viogpu_d3d10`. The author's verdict: DWM is "mostly fine with just D3D10" (WinUI 3
+glitches, Electron windows black). The D3D11 runtime drives D3D10.0/10.1 DDI UMDs directly at feature level
+10_x (`OpenAdapter10_2` version negotiation **[MS]**; Mesa's own d3d10umd test creates a D3D11 device at 10_0,
+and wddm-mali-g52 did so on Panfrost **[shown]**). Not shown on **Windows 11**: viogpu3d's 22H2 reports are mixed
+(black screens, one very slow desktop). The G72 under Panfrost has no geometry shaders, so "10_0" is nominal.
+DWM does not use them **[inferred]**.
+
+What this changes in the plan:
+- **One full driver.** A render-only Mali driver next to sbdisplay would serve apps that choose it. DWM
+  composes on the display adapter and would stay on WARP. Microsoft documents render-only + display-only
+  pairing only for paravirtualised VMs (WDDM 2.4+). wddm-mali-g52's render-only attempt was refused with
+  `STATUS_GRAPHICS_INVALID_DRIVER_MODEL` **[shown]**. So sbwddm owns both the Mali and the scanout: sbdisplay's
+  display half moves into it.
+- **No WARP fallback when the UMD fails.** A KMD that fails to start falls back to Basic Display + Basic
+  Render **[MS]**. A KMD that starts with a broken UMD gives a black desktop (wddm-mali-g52 run 6: "desktop
+  and RDP black") **[shown]**. Every stage-4 boot needs the kill file, the boot guard and a dead-man way back.
+- **WDDM 1.2's mandatory features** (Windows refuses the adapter otherwise **[MS]**): preemption (DMA-buffer
+  granularity, the minimum, fits sbg's in-order queue; viogpu3d disabled preemption system-wide), offer/
+  reclaim, TDR (sbg_tick + ResetFromTimeout), Direct Flip (full drivers). Windows 11 does not appear to
+  enforce WDDM 2.0 for a driver to load. "WDDM 2.0" is a hardware requirement in the spec **[inferred]**,
+  and our WDDM 1.2 display-only driver already loads on 23H2.
+- **The UMD:** d3d10umd frozen at **Mesa 26.2.x** (removed upstream by commit 1f9af627, MR 44717,
+  2026-09-30; absent from 26.3). Start from the viogpu3d lineage (arehnman/virtio-win-mesa: WDDM
+  allocations, flip presents, swap-effect fixes, `SUPPORT_D3D10_1` on) and replace its virgl winsys with a
+  Panfrost one talking to sbwddm through private data (sbg underneath). We keep a TGSI frontend that
+  upstream deleted.
+- **The real blocker** is the plumbing DWM needs and test programs do not: shared redirection surfaces
+  opened across processes, primary flips, residency, preemption, TDR. Any of it wrong = black desktop.
+- Other routes, ruled out: D3D9 via Gallium Nine (VirtualBox's route; Nine removed in Mesa 25.2), D3D12 /
+  11On12 (needs 11_0 + WDDM 2.0), D3D11-DDI → DXVK → PanVK (a far larger stack; Dozen goes the wrong way).
+
+Sources: github.com/virtio-win/kvm-guest-drivers-windows/pull/943; github.com/arehnman/virtio-win-mesa;
+github.com/gahingwoo/wddm-mali-g52; learn.microsoft.com (version discovery, D3D11 DDI init, WDDM 1.2 features
+and enforcement, Basic Display, GPU paravirtualization, hybrid cross-adapter resources, IddCx);
+gitlab.freedesktop.org/mesa/mesa MR 44717; phoronix.com (d3d10umd and Nine removals).
 
 Other stage 4 risks, in order: primaries (§6.1, open); the TDR without preemption on 18 cores at
 260-572 MHz; a WDDM 1.3 full driver on installed 23H2 (it loaded on wddm-mali-g52's installed Windows, but
