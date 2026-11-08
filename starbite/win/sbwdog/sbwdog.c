@@ -269,6 +269,19 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT Drv, PUNICODE_STRING Reg)
         State(L"MapFailed", (g.Wdt == NULL) | (g.Pmu == NULL) << 1, TRUE);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+    {
+        /* T13i: how long Windows took to get here, the margin every armed boot depends on.
+         * GapMsAtStart: since the loader armed the watchdog (its 16-bit count, valid only while it has not run
+         * out, i.e. < WTDAT / 793.457 Hz = 82 s); UptimeMsAtStart: since the SoC's reset by the generic timer
+         * (S-Boot and the loader included, so an upper bound of the gap even in a boot nothing armed). */
+        ULONG64 cnt = _ReadStatusReg(ARM64_CNTVCT), frq = _ReadStatusReg(ARM64_CNTFRQ_EL0);
+        ULONG dat = Rd(g.Wdt, WTDAT), now = Rd(g.Wdt, WTCNT);
+        State(L"CntFrq", (ULONG)frq, FALSE);
+        State(L"UptimeMsAtStart", frq ? (ULONG)(cnt * 1000ULL / frq) : 0, FALSE);
+        State(L"GapMsAtStart", Armed() && dat >= now ? (ULONG)((ULONG64)(dat - now) * 1000000ULL / WDT_HZ_X1000) : 0,
+              FALSE);
+        State(L"WtCntAtStart", now, FALSE);
+    }
     State(L"ArmedAtStart", Armed(), FALSE);
     State(L"WtCon", Rd(g.Wdt, WTCON), FALSE);
     State(L"WtDat", Rd(g.Wdt, WTDAT), FALSE);

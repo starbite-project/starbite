@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # One unattended Windows GPU test cycle (docs/WIN11-GPU.md 6.17), started with the phone in TWRP:
 #
-#   tools/win/gpu-cycle.sh STAGE OUT [--test-key win11-gpu] [--clean-key win11] [--keep-unattended]
-#   tools/win/gpu-cycle.sh --clean-only OUT [--clean-key win11]     a dirty hive -> one clean display-only boot
-#   tools/win/gpu-cycle.sh --deadman-test OUT [--clean-key win11]   proves the dead-man: sbwdog.off, expect a reset
+#   tools/win/gpu-cycle.sh STAGE OUT [--test-key win11-gpu] [--clean-key win11-auto] [--keep-unattended]
+#   tools/win/gpu-cycle.sh --clean-only OUT [--clean-key win11-auto]    a dirty hive -> one clean display-only boot
+#   tools/win/gpu-cycle.sh --measure STAGE OUT                          first run: sbwdog alone, one display-only boot
+#                                                                       that must restart itself; the boot-time gap
+#   tools/win/gpu-cycle.sh --deadman-test OUT [--clean-key win11-auto]  proves the dead-man: sbwdog.off, expect a reset
+#
+# The two keys are hidden catalog rows with the loader's watchdog (wdt = 82, wdt_feed = "own"): win11-gpu (the
+# GPU firmware) and win11-auto (the same files as win11). The user's own win11 row keeps no watchdog, so a normal
+# boot can never be reset by it (e.g. at a boot-manager screen waiting for a key).
 #
 # STAGE = a build/win/stage/sbwddm-t13x directory (sbwddm.sys, optional sbumd.dll, sbwdog.sys, SHA256SUMS).
 #  1. Refuses unless both catalog rows (build/store/catalog-live.toml) arm the loader's watchdog for Windows
@@ -15,7 +21,7 @@
 #  3. Boots TEST_KEY (one-shot "next", tools/store/boot-next.sh), waits for the loader menu (Windows restarted
 #     itself, or the watchdog reset it), saves the loader's logs, goes back to TWRP.
 #  4. Pulls OUT/pre/: SYSTEM + SYSTEM.LOG1/LOG2, umdlog, Temp sbumd logs, pmsg; sbwdog/sbwddm state summary.
-#  5. Boots CLEAN_KEY (the combo3b row: no GPU interrupts, so sbwddm cannot go full mode; the guard says
+#  5. Boots CLEAN_KEY (the combo3b firmware: no GPU interrupts, so sbwddm cannot go full mode; the guard says
 #     display-only anyway), which restarts itself cleanly at ~120 s; waits for the menu; back to TWRP.
 #  6. Checks the hive is clean, pulls OUT/post/SYSTEM, then sets Unattended=0 (unless --keep-unattended).
 # The phone ends in TWRP. Exit: 0 done; 1 usage or precondition (phone untouched or still in TWRP); 2 the phone
@@ -26,9 +32,13 @@ cd "$(dirname "$0")/../.."
 here=$(pwd)
 main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)     # build/store lives in the main checkout
 mode=cycle
-if [ "${1:-}" = --clean-only ] || [ "${1:-}" = --deadman-test ]; then mode=${1#--}; shift; stage=; else stage=${1:?usage: gpu-cycle.sh STAGE OUT [...]}; shift; fi
+case "${1:-}" in
+--clean-only|--deadman-test) mode=${1#--}; shift; stage= ;;
+--measure) mode=measure; stage=${2:?usage: gpu-cycle.sh --measure STAGE OUT}; shift 2 ;;
+*) stage=${1:?usage: gpu-cycle.sh STAGE OUT [...]}; shift ;;
+esac
 out=${1:?usage: gpu-cycle.sh STAGE OUT [...]}; shift
-tkey=win11-gpu; ckey=win11; keep=0
+tkey=win11-gpu; ckey=win11-auto; keep=0
 while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; *) echo "bad arg $1"; exit 1;; esac; done
 mkdir -p "$out"
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$out/cycle.log"; }
@@ -63,6 +73,7 @@ PY
 if [ "$mode" = cycle ]; then
     for f in sbwddm.sys sbwdog.sys; do [ -f "$stage/$f" ] || { log "no $stage/$f"; exit 1; }; done
 fi
+[ "$mode" != measure ] || [ -f "$stage/sbwdog.sys" ] || { log "no $stage/sbwdog.sys"; exit 1; }
 
 mount_rw() { adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null; }
 mount_ro() { adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o ro $NTFS $W" >/dev/null; }
@@ -121,42 +132,79 @@ clean_boot() {  # display-only boot that restarts itself; ends in TWRP with the 
     if hive_clean "$out/post/SYSTEM"; then log "hive clean after the display-only boot"; else log "hive STILL DIRTY after the display-only boot"; return 3; fi
 }
 
+# the hive's sbwdog parameter (read only; works on a dirty hive too): prints the value or nothing
+wdog_param() { python3 tools/woa/hive.py "$1" 'ControlSet001\Services\sbwdog\Parameters' 2>/dev/null | awk -v n="$2" '$1 == n { print $NF }' | tr -d '()'; }
+need_unattended() {  # the display-only boot restarts itself only with sbwdog installed and Unattended=1
+    mount_ro; adb pull "$W/$HIVE" "$tmp/cur" >/dev/null; umount_w
+    [ "$(wdog_param "$tmp/cur" Unattended)" = 1 ] || { log "sbwdog is not installed with Unattended=1: a display-only boot would not restart itself (run --measure from a clean hive first)"; exit 1; }
+}
+gap_report() {  # $1 = hive
+    python3 tools/woa/hive.py "$1" 'ControlSet001\Services\sbwdog\State' > "$1.sbwdog.txt" 2>&1 || true
+    log "sbwdog: $(grep -E 'ArmedAtStart|GapMsAtStart|UptimeMsAtStart|WtDat |Mode |RestartAt|RestartStatus|CapAt|KillFile' "$1.sbwdog.txt" | sed 's/DWORD 0x[0-9a-f]* //' | tr -s ' ' | tr '\n' ' ')"
+}
+# install into the mounted (rw) volume: $1 = 1 with the GPU driver files, 0 sbwdog only
+install() {
+    adb pull "$W/$HIVE" "$tmp/SYSTEM" >/dev/null
+    if ! hive_clean "$tmp/SYSTEM"; then umount_w; log "the hive is dirty (the last Windows boot did not end cleanly): run --clean-only, or restart Windows cleanly once"; exit 3; fi
+    mkdir -p "$out/hive-before"; cp "$tmp/SYSTEM" "$out/hive-before/SYSTEM"
+    if [ "$1" = 1 ]; then python3 "$HS" "$tmp/SYSTEM" "$tmp/S1" param sbwddm --root FullGuardBoots=0 >/dev/null; else cp "$tmp/SYSTEM" "$tmp/S1"; fi
+    if python3 tools/woa/hive.py "$tmp/S1" 'ControlSet001\Services\sbwdog' 2>/dev/null | grep -q "Start"; then cp "$tmp/S1" "$tmp/S2"
+    else python3 "$HS" "$tmp/S1" "$tmp/S2" add sbwdog --start 0 --oneshot 0 --image 'System32\drivers\sbwdog.sys' --display "Starbite watchdog feeder" >/dev/null; fi
+    python3 "$HS" "$tmp/S2" "$tmp/S3" param sbwdog Unattended=1 FullRestartSec=300 FullCapSec=360 DisplayRestartSec=120 DisplayCapSec=180 >/dev/null
+    local rc=0
+    push_check "$tmp/S3" "$W/$HIVE" || rc=4
+    push_check "$stage/sbwdog.sys" "$W/Windows/System32/drivers/sbwdog.sys" || rc=4
+    if [ "$1" = 1 ]; then
+        push_check "$stage/sbwddm.sys" "$W/Windows/System32/drivers/sbwddm.sys" || rc=4
+        [ -f "$stage/sbumd.dll" ] && { push_check "$stage/sbumd.dll" "$W/Windows/System32/sbumd.dll" || rc=4; }
+        adb shell "rm -f $W/Windows/Starbite/sbwddm.full.off $W/Windows/Temp/sbumd-*.log; mkdir -p $W/ProgramData/Starbite/umdlog; cd $W/ProgramData/Starbite/umdlog && for f in *; do [ \"\$f\" = trace ] || rm -f \"\$f\"; done; touch trace" >/dev/null
+    fi
+    adb shell "rm -f $W/Windows/Starbite/sbwdog.off" >/dev/null
+    umount_w
+    [ $rc = 0 ] || { log "install read-back failed: phone left in TWRP"; exit 4; }
+    log "installed from $(basename "$stage"): sbwdog (Start 0, Unattended=1)$([ "$1" = 1 ] && echo ", sbwddm/sbumd, FullGuardBoots=0")"
+}
+finish() {  # after a clean display-only boot: disarm unless asked not to
+    if [ $keep = 0 ]; then mount_rw; set_unattended 0 || true; umount_w; log "Unattended=0"; fi
+    log "done; phone in TWRP"
+}
+
 # ---- modes -----------------------------------------------------------------------------------------------
-if [ "$mode" = clean-only ]; then
+case $mode in
+measure)
+    # sbwdog alone, then one display-only boot of CLEAN_KEY: it must restart itself cleanly at ~120 s.
+    # Measures the loader -> Windows gap (GapMsAtStart) the 82 s watchdog has to cover. If the gap is longer,
+    # the watchdog resets the phone before Windows and it comes back to the menu all the same.
+    mount_rw
+    install 0
+    clean_boot || { gap_report "$out/post/SYSTEM"; log "the self-restart did not leave the hive clean"; exit 3; }
+    gap_report "$out/post/SYSTEM"
+    keep=1; finish
+    exit 0 ;;
+clean-only)
+    need_unattended
     clean_boot
-    exit 0
-fi
-if [ "$mode" = deadman-test ]; then
-    # sbwdog loaded but not feeding: the loader's watchdog must reset the phone back to the menu by itself
+    finish
+    exit 0 ;;
+deadman-test)
+    # sbwdog loaded but not feeding: the loader's watchdog must reset the phone back to the menu by itself,
+    # then a clean display-only boot repairs the hive
+    need_unattended
     mount_rw
     adb shell "mkdir -p $W/Windows/Starbite; echo test > $W/Windows/Starbite/sbwdog.off" >/dev/null
     umount_w
     log "dead-man test: sbwdog.off in place, booting $ckey; expect the menu ~82 s after the loader"
     boot_and_return "$ckey" 400 "$out/deadman"
     mount_rw; adb shell "rm -f $W/Windows/Starbite/sbwdog.off" >/dev/null; umount_w
-    log "dead-man test passed (the phone came back by itself); the hive is now dirty: run --clean-only next"
-    exit 0
-fi
+    log "dead-man test passed: the phone came back by itself"
+    clean_boot || exit 3
+    keep=1; finish
+    exit 0 ;;
+esac
 
 # ---- install ---------------------------------------------------------------------------------------------
 mount_rw
-adb pull "$W/$HIVE" "$tmp/SYSTEM" >/dev/null
-if ! hive_clean "$tmp/SYSTEM"; then umount_w; log "the hive is dirty (last Windows boot did not end cleanly): run --clean-only first"; exit 3; fi
-mkdir -p "$out/hive-before"; cp "$tmp/SYSTEM" "$out/hive-before/SYSTEM"
-args=(param sbwddm --root FullGuardBoots=0)
-python3 "$HS" "$tmp/SYSTEM" "$tmp/S1" "${args[@]}" >/dev/null
-if python3 tools/woa/hive.py "$tmp/S1" 'ControlSet001\Services\sbwdog' 2>/dev/null | grep -q "Start"; then cp "$tmp/S1" "$tmp/S2"
-else python3 "$HS" "$tmp/S1" "$tmp/S2" add sbwdog --start 0 --oneshot 0 --image 'System32\drivers\sbwdog.sys' --display "Starbite watchdog feeder" >/dev/null; fi
-python3 "$HS" "$tmp/S2" "$tmp/S3" param sbwdog Unattended=1 FullRestartSec=300 FullCapSec=360 DisplayRestartSec=120 DisplayCapSec=180 >/dev/null
-rc=0
-push_check "$tmp/S3" "$W/$HIVE" || rc=4
-push_check "$stage/sbwddm.sys" "$W/Windows/System32/drivers/sbwddm.sys" || rc=4
-push_check "$stage/sbwdog.sys" "$W/Windows/System32/drivers/sbwdog.sys" || rc=4
-[ -f "$stage/sbumd.dll" ] && { push_check "$stage/sbumd.dll" "$W/Windows/System32/sbumd.dll" || rc=4; }
-adb shell "rm -f $W/Windows/Starbite/sbwddm.full.off $W/Windows/Starbite/sbwdog.off $W/Windows/Temp/sbumd-*.log; mkdir -p $W/ProgramData/Starbite/umdlog; cd $W/ProgramData/Starbite/umdlog && for f in *; do [ \"\$f\" = trace ] || rm -f \"\$f\"; done; touch trace" >/dev/null
-umount_w
-[ $rc = 0 ] || { log "install read-back failed: phone left in TWRP"; exit 4; }
-log "installed $(basename "$stage"); FullGuardBoots=0, sbwdog Unattended=1"
+install 1
 
 # ---- the test boot, the pull, the clean boot ----------------------------------------------------------------
 # full mode: Windows restarts itself at 300 s, the feeder stops at 360 s, the watchdog fires <= 82 s later
@@ -167,8 +215,7 @@ mkdir -p "$out/pre/umdlog"
 adb pull "$W/ProgramData/Starbite/umdlog/." "$out/pre/umdlog/" >/dev/null 2>&1 || true
 adb shell "ls $W/Windows/Temp/ | grep '^sbumd-'" 2>/dev/null | tr -d '\r' | while read -r f; do adb pull "$W/Windows/Temp/$f" "$out/pre/umdlog/" >/dev/null 2>&1; done || true
 umount_w
-python3 tools/woa/hive.py "$out/pre/SYSTEM" 'ControlSet001\Services\sbwdog\State' > "$out/pre/sbwdog-state.txt" 2>&1 || true
-log "pulled pre/ ($(du -sh "$out/pre" | cut -f1)); sbwdog (unreplayed): $(grep -E 'ArmedAtStart|RestartAt|CapAt' "$out/pre/sbwdog-state.txt" | tr -s ' ' | tr '\n' ' ')"
+log "pulled pre/ ($(du -sh "$out/pre" | cut -f1)); the values below are from the unreplayed hive"
+gap_report "$out/pre/SYSTEM"
 clean_boot || { log "leaving Unattended=1: the hive is dirty (run --clean-only)"; exit 3; }
-if [ $keep = 0 ]; then mount_rw; set_unattended 0 || true; umount_w; log "Unattended=0"; fi
-log "cycle done; phone in TWRP"
+finish
