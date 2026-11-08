@@ -925,6 +925,13 @@ armed by gpu-cycle.sh, runs:
 
 Results land in `pre/gputest/`.
 
+**cycle-t13l-1 (23:00):**
+- **The hardware tests never started:** the phone's adapter 0 is ours (vendor 0x42525453), but its description
+  is the device's old DeviceDesc, "Starbite Display (Galaxy S9 DECON)", so "Mali" matched nothing.
+- **The softpipe reference passed all 9 sbtex tests.**
+- **The camera at +70 s showed black.**
+- **T13m:** the tests pick the adapter by vendor (or "Mali"/"Starbite"), and are otherwise unchanged.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

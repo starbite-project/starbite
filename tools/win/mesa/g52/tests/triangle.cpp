@@ -59,13 +59,16 @@ int main(int argc, char **argv)
             printf("adapter %u: %ls (vendor 0x%04x device 0x%04x, luid %08lx:%08lx, flags 0x%x)\n", i,
                    d.Description, d.VendorId, d.DeviceId, d.AdapterLuid.HighPart, d.AdapterLuid.LowPart,
                    d.Flags);
-            if (!pick && wcsstr(d.Description, L"Mali"))
+            /* S9 (T13m): our adapter is ACPI\\STRB0072, vendor "STRB" (0x42525453); its description is the device's
+             * DeviceDesc ("Starbite Display (Galaxy S9 DECON)" on the phone), so the name alone misses it */
+            if (!pick && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+                (d.VendorId == 0x42525453 || wcsstr(d.Description, L"Mali") || wcsstr(d.Description, L"Starbite")))
                 pick = a;
             else
                 a->Release();
         }
         if (!pick) {
-            printf("FAIL no adapter named Mali\n");
+            printf("FAIL no Starbite/Mali adapter (vendor 0x42525453)\n");
             return 1;
         }
         CHECK(D3D11CreateDevice(pick, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, &fl, 1,
