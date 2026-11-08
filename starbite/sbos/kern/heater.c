@@ -53,6 +53,7 @@ static int trip_off;                        /* the trip is off now (we cleared i
 static uint32_t trip_saved[2];              /* TMU_TOP / TMU_SUB CONTROL as S-Boot left them */
 static uint64_t trip_restore_due;           /* after a stop: back on once cool, at the latest at this time */
 static int surv_step;                       /* the confirmation being shown (0 .. 2 / 3) */
+static int trip_tried;                      /* 1.1-beta3: this session's trip-off attempt was made */
 
 static uint32_t mrd(uintptr_t a)
 {
@@ -274,8 +275,11 @@ static void read_inputs(struct heat_in *in)
 /* ask ACPM, then check the PLL within 5 ms: more than 2 % above the request is a stop */
 static int clock_set(unsigned domain, uint32_t khz)
 {
-    if (!hw_dvfs(domain, khz))
+    sb_logx(domain == DVFS_A55 ? "heater: step: ACPM A55 kHz " : "heater: step: ACPM M3 kHz ", khz);
+    if (!hw_dvfs(domain, khz)) {
+        sb_log("heater: step: ACPM did not answer");
         return 0;
+    }
     for (unsigned i = 0; i < 5; ++i) {
         sb_mdelay(1);
         uint32_t got = domain == DVFS_A55 ? hw_a55_khz() : hw_m3_khz();
@@ -454,7 +458,9 @@ static void workers_apply(void)
         }
         cfg.run[w] = 1;
         sb_dcache_clean_inval(&cfg, sizeof(cfg));
+        sb_logx("heater: step: PSCI CPU_ON core ", w);       /* 1.1-beta3: breadcrumbs for a hang */
         int64_t r = hw_heat_launch(w, &cfg);
+        sb_logx("heater: step: PSCI CPU_ON returned, core ", w);
         if (r == 0) {
             launched = 1;                           /* one successful CPU_ON per tick */
             cs[w].st = CS_LAUNCHED;
@@ -821,6 +827,20 @@ void heater_timer(unsigned id)
         cfg.heartbeat = sb_ticks();
         if (trip_off)
             hw_wdt_feed_heat();                 /* 1.1: the only feed while the chip's trip is off */
+        /* 1.1-beta3: the trip goes off only here, after a whole loop turn of the session (the start's PSCI and ACPM
+         * calls ran with the trip on and the loader's 30 s watchdog), then the short watchdog is fed at once */
+        if (ctl.level == HEAT_SURVIVAL_X && !trip_off && !trip_tried && ctl.state == HEAT_ST_RUNNING) {
+            const char *no = 0;
+            trip_tried = 1;
+            if (!trip_disable(&no)) {
+                sb_logf("heater: Survival (trip off) refused: ", no);
+                heater_stop_all(no);
+                ctl.state = HEAT_ST_REFUSED;
+                return;
+            }
+            hw_wdt_feed_heat();
+            sb_log("heater: step: trip off, the watchdog fed; on with the loop");
+        }
         sb_dcache_clean_inval(&cfg, sizeof(cfg));
         workers_apply();
         if (heater_running_ui())
@@ -832,7 +852,11 @@ void heater_timer(unsigned id)
         if (((ctl.level == HEAT_HIGH && gpu_heat_allowed) || (ctl.level >= HEAT_EXTREME && gpu_heat_session)) &&
             ctl.gpu_want && ctl.state == HEAT_ST_RUNNING) {
             if (!gpuheat_on() && cores_running() - cpu0_on >= 3)
+            {
+                sb_log("heater: step: gpu start");
                 (void)gpuheat_start();
+                sb_log("heater: step: gpu start returned");
+            }
             else if (gpuheat_on() && !gpu_probe_ok)
                 gpuheat_fail_stop("its temperature probe (TMU_SUB) does not read: the GPU's share stops");
         } else if (gpuheat_on()) {
@@ -869,6 +893,10 @@ static void start_now(void)
     if (pending_level != HEAT_MANUAL && pending_level < HEAT_SURVIVAL)
         gpuheat_khz = 572000U;              /* 1.0-rc2 (review): Manual's GPU step never carries over */
     if (heat_ctl_request(&ctl, pending_level, pending_minutes, &in) == 0) {
+        /* 1.1-beta3: before this session's first PSCI or ACPM call: the M3 FlexPMU words as the boot had them */
+        hw_m3_fp_log("heater: flexpmu at the start");
+        if (hw_m3_fp_reset())
+            hw_m3_fp_log("heater: flexpmu put back to the boot state");
 #ifndef SB_HOST
         __asm__ volatile("msr fpcr, xzr" ::: "memory");   /* the reference in the workers' FP mode */
 #endif
@@ -881,6 +909,7 @@ static void start_now(void)
             return;
         }
         sb_logx("heater: start, level ", (uint64_t)pending_level);
+        trip_tried = 0;
         memset(&heat_rec, 0, sizeof(heat_rec));
         heat_rec.peak_bat_c10 = heat_rec.peak_soc_c10 = -1000;
         heat_rec.trip_c = trip_top_c;
@@ -897,15 +926,6 @@ static void start_now(void)
                 cs[w].fails = 0;
                 cs[w].maybe_hung = 0;
             }
-        if (pending_level == HEAT_SURVIVAL_X) {
-            const char *no = 0;
-            if (!trip_disable(&no)) {
-                heater_stop_all(no);
-                ctl.state = HEAT_ST_REFUSED;
-                sb_logf("heater: Survival (trip off) refused: ", no);
-                return;
-            }
-        }
         workers_apply();
         if (heater_running_ui())
             clocks_apply();

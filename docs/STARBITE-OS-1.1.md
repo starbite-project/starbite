@@ -1,4 +1,15 @@
-# Starbite OS 1.1-beta2: Survival heat (2026-11-08)
+# Starbite OS 1.1-beta3: Survival heat (2026-11-08)
+
+## beta3: the hang of beta2's trip-off session (19:31, a watchdog reset)
+
+beta2's stop asked for the M3 cluster's power-down (the last core's CPD hint and the APM mailbox's bit 24); the
+cluster still read on, and the next session hung at its first PSCI call (no loop turn: the 5 s watchdog reset it,
+S-Boot re-armed the trip). beta3: the stop gives each M3 core only its C2 hint (no cluster-off request: the cluster
+stays on between sessions, as in beta1); every start puts the M3 FlexPMU words back to the boot state before its
+first PSCI / ACPM call; the trip goes off only after the session's first full loop turn (the start's calls run with
+the trip on and the loader's 30 s watchdog), and the short watchdog is fed right after the write; breadcrumbs to
+pmsg around every CPU_ON, ACPM request and the GPU start.
+
 
 1.0-rc3 (`docs/STARBITE-OS-1.0.md`) plus **Survival heat**, the user's last resort for the most heat in a survival
 situation. Beta: its first phone runs are user-attended (request T23 in the shared notes). Design and limits:
@@ -41,5 +52,5 @@ strobes as the light instead. 0x63 is never written. Settings says so.
 - Not in 1.1: the M3 above 1794 MHz (past the cluster buck's current rating without Samsung's over-current handler),
   camera sensors, HBM, Wi-Fi TX, a shader workload (`docs/STARBITE-OS.md` 12.21 says why).
 
-Install: as 1.0-rc3, with `starbite-os-1.1-beta2.img` in the `starbite-os.img` entry and the catalog's version line
-`"1.1-beta2 · heat, light, alarm, card, Wi-Fi"`. Undo: `starbite-os-1.0-rc3.img` in the same entry.
+Install: as 1.0-rc3, with `starbite-os-1.1-beta3.img` in the `starbite-os.img` entry and the catalog's version line
+`"1.1-beta3 · heat, light, alarm, card, Wi-Fi"`. Undo: `starbite-os-1.0-rc3.img` in the same entry.

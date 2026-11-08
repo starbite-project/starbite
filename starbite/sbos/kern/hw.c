@@ -386,17 +386,46 @@ void hw_m3_core_on(unsigned w, int first)
     fp_rmw(FP_EVT_GRP2, b, 0);
 }
 
+/* 1.1-beta3: the core-off hint only (C2 and its bits). beta2 also sent the cluster-off request for the last core
+ * (CPD, MAILBOX_APM2AP bit 24 = 1): the cluster still read powered after the stop, and the next session hung at
+ * its start (before its first loop turn; the watchdog reset it): a cluster power-down asked for and never done
+ * leaves the firmware waiting. No CPD, no bit 24 = 1: the cluster stays on between sessions (as in beta1). */
 void hw_m3_core_off(unsigned w, int last)
 {
+    (void)last;
     if (w < 4 || w > 7)
         return;
     uint32_t b = 1U << (w - 4U);
-    *(volatile uint32_t *)FP_INFORM(w) = last ? 2U : 1U;
+    *(volatile uint32_t *)FP_INFORM(w) = 1U;
     fp_rmw(FP_GRP2_BID, 0, b);
     fp_rmw(FP_EVT_GRP2, 0, b);
-    if (last)
-        fp_rmw(FP_MBOX, 0, 1U << 24);
     __asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* 1.1-beta3: before a session's first PSCI or ACPM call: the M3 words back to the state the boot had (19:2x run 1:
+ * inform 0/0/0/0, the M3 bits clear, bit 24 clear), whatever a session or another OS left. 1 if anything changed. */
+int hw_m3_fp_reset(void)
+{
+    int changed = 0;
+    for (unsigned p = 4; p < 8; ++p)
+        if (*(volatile uint32_t *)FP_INFORM(p)) {
+            *(volatile uint32_t *)FP_INFORM(p) = 0;
+            changed = 1;
+        }
+    if (*(volatile uint32_t *)FP_GRP2_BID & 0xfU) {
+        fp_rmw(FP_GRP2_BID, 0xfU, 0);
+        changed = 1;
+    }
+    if (*(volatile uint32_t *)FP_EVT_GRP2 & 0xfU) {
+        fp_rmw(FP_EVT_GRP2, 0xfU, 0);
+        changed = 1;
+    }
+    if (*(volatile uint32_t *)FP_MBOX & (1U << 24)) {
+        fp_rmw(FP_MBOX, 1U << 24, 0);
+        changed = 1;
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    return changed;
 }
 
 void hw_m3_fp_log(const char *what)

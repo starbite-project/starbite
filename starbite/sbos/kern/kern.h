@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.1-beta2"
+#define SBOS_VERSION "1.1-beta3"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -386,6 +386,7 @@ void hw_wdt_feed(void);
 void hw_m3_core_on(unsigned w, int first);  /* 1.1-beta2: FlexPMU before an M3 worker's CPU_ON (first: cluster on) */
 void hw_m3_core_off(unsigned w, int last);  /* 1.1-beta2: FlexPMU before it leaves (last: cluster off) */
 void hw_m3_fp_log(const char *what);
+int hw_m3_fp_reset(void);           /* 1.1-beta3: the M3 FlexPMU words back to the boot state (1 if changed) */
 int heater_trip_off(void);          /* 1.1-beta2: the chip's trip is off by Survival's switch now */
 void hw_wdt_feed_heat(void);        /* 1.1: the heat loop's feed (the only one while the trip is off) */
 unsigned hw_wdt_short(unsigned secs);   /* 1.1: the loader's watchdog shortened (0: back); 0 = refused */

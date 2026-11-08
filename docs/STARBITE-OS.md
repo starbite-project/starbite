@@ -831,6 +831,11 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
 
 ### 12.21 Version 1.1-beta1 / beta2: Survival heat; the LED chip's 0x63 (2026-11-08)
 
+beta3: beta2's last-core CPD + MAILBOX_APM2AP bit 24 left the cluster on and the next session's first PSCI call hung
+(a watchdog reset): the stop now gives only C2 per core (`hw_m3_core_off`), each start puts the M3 words back to the
+boot state first (`hw_m3_fp_reset`), the trip goes off only after the session's first loop turn, and the heater
+logs `heater: step:` breadcrumbs around every CPU_ON, ACPM request and the GPU start.
+
 beta2 from the user's 19:03 run: the M3s' FlexPMU bookkeeping (`hw_m3_core_on` / `hw_m3_core_off`, cpu0 only:
 CPU_INFORM 0x14060860 + 4 x phycpu, GRP2_INTR_BID_ENABLE 0x14070200, EVENT_ENABLE_GRP2 0x14067f08, MAILBOX_APM2AP
 0x14100010 bit 24; docs/STARBITE-OS-LINUX-M3.md 7) because the cluster stayed powered after a stop and core 4 did

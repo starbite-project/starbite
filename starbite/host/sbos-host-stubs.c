@@ -68,7 +68,8 @@ void hw_sleep_until(uint64_t at_ms)
 void hw_arm_until(uint64_t at_ms) { (void)at_ms; }
 void hw_wdt_feed(void) {}
 void hw_m3_core_on(unsigned w, int first) { printf("host: flexpmu core %u on%s\n", w, first ? " (first: cluster on)" : ""); }
-void hw_m3_core_off(unsigned w, int last) { printf("host: flexpmu core %u off%s\n", w, last ? " (last: cluster off)" : ""); }
+void hw_m3_core_off(unsigned w, int last) { (void)last; printf("host: flexpmu core %u off (C2)\n", w); }
+int hw_m3_fp_reset(void) { printf("host: flexpmu reset to the boot state\n"); return 0; }
 void hw_m3_fp_log(const char *what) { sb_logf(what, ": (host)"); }
 /* 1.1: the short watchdog (Survival, trip off): SBOS_HOST_NOWDT=1 = the loader armed none */
 static int host_wdt_short;
