@@ -183,6 +183,13 @@ PMU registers (GRP2_BID_EN, GRP2 pending, GRP1 pending, EVT_EN_GRP2, CPU_INFORM 
 The "after off" line was overwritten in that run's pmsg. After "off" the bits for cores 1-3 match Linux's own hotplug-out
 state (BID_EN and EVT_EN bits set, CPU_INFORM = C2), which is where Samsung's kernel CPU_ONs from at runtime.
 
+### 6.3 MB4 (pixel doubling while moving, preflight fixes), 2026-11-08 17:45: passed
+4-core / 1-core mean frame on the A55: focus 14 / 48 ms (~70 fps), scroll 68 / 224 ms (~15 fps), section opening
+99 / 244 ms (~10 fps), intro wallpaper 34 / 137 ms, intro glass 101 / 280 ms, bake 129 ms. Cores off cleanly, no taint.
+Where a 4-core frame goes (setup / glass / over / present, ms): scroll 24 / 26 / 2 / 17; section 20 / 38 / 7 / 34.
+The setup (the frame's diff and shift bookkeeping, mostly on core 0) is the next lever. Verdict: BOOT-smp3
+(825d22f6…) goes in after a One UI check.
+
 ## 7. Not done / next
 
 - GPU (Mali-G72) composition: the right long-term answer for 60 fps (MV5). The win-mali-gpu track can
