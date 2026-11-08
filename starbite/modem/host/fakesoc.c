@@ -104,6 +104,13 @@ static void link_tick(struct fakesoc *s)
     if (s->link == L_PHONE_SOON && s->clock_us >= s->link_at_us && !(s->mbox[SBM_MBOX_INTSR0 / 4] & (1u << 16))) {
         cp_msg(s, SBM_CMD2INT(s->crash_after_pif ? SBM_CMD_CRASH_RESET : SBM_CMD_PHONE_START));
         s->link = L_DONE;
+        s->link_at_us = s->clock_us + 500000;
+    }
+    /* no INIT_END: the CP asks again every 500 ms (Android's log shows the repeats until rild is ready) */
+    if (s->link == L_DONE && !s->crash_after_pif && s->clock_us >= s->link_at_us &&
+        !(s->mbox[SBM_MBOX_INTSR0 / 4] & (1u << 16))) {
+        cp_msg(s, SBM_CMD2INT(SBM_CMD_PHONE_START));
+        s->link_at_us = s->clock_us + 500000;
     }
 }
 

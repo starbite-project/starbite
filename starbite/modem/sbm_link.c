@@ -162,6 +162,49 @@ static int udl_exchange(const struct sbm_plat *p, struct sbm_boot *b, uint32_t r
     return SBM_ETIME;
 }
 
+/* After PHONE_START, optionally: stay, send nothing, and watch. The CP repeats PHONE_START while it waits for
+ * INIT_END (Android's log: "rild_ready" not yet); every DL ring's pointers are compared, nothing is consumed. */
+static int hold(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd)
+{
+    uint32_t last = 0;
+    sbm_logf(p, "link: holding %u ms before the park: sending nothing, consuming nothing", b->hold_ms);
+    for (uint32_t ms = 1; ms <= b->hold_ms; ++ms) {
+        uint32_t v;
+        if (msg_take(p, &v)) {
+            if ((v & 0xFF) == SBM_CMD2INT(SBM_CMD_PHONE_START)) {
+                b->phone_start_repeats++;
+                b->phone_start_gap_ms = ms - last;
+                last = ms;
+                if (b->phone_start_repeats <= 3)
+                    sbm_logf(p, "link: PHONE_START again at +%u ms", ms);
+            } else {
+                b->other_cmds++;
+                note_msg(p, b, v, "hold");
+                if (b->crash_cmd)
+                    return SBM_EIO;
+            }
+        }
+        if (!(ms % 1000)) {
+            uint32_t waiting = 0;
+            for (unsigned id = 0; id < sbd->n; ++id) {
+                uint16_t rp = sbm_sbd_rp(sbd, id, SBM_DL), wp = sbm_sbd_wp(sbd, id, SBM_DL);
+                uint16_t len = sbd->r[id][SBM_DL].len;
+                if (rp < len && wp < len && rp != wp) {
+                    uint32_t n = wp > rp ? (uint32_t)wp - rp : (uint32_t)len - rp + wp;
+                    waiting += n;
+                    if (ms == b->hold_ms || n != 0)
+                        sbm_logf(p, "link: +%u s: DL ring ch %u has %u frame(s) waiting (not read)", ms / 1000,
+                                 sbd->r[id][SBM_DL].ch, n);
+                }
+            }
+            b->dl_frames_seen = waiting;
+            feed(p);
+        }
+        delay(p, 1000);
+    }
+    return 0;
+}
+
 /* ---- the whole stage --------------------------------------------------------------------------- */
 
 static int wait_cmd(const struct sbm_plat *p, struct sbm_boot *b, uint32_t want, uint32_t timeout_ms, uint32_t *ms_out,
@@ -240,5 +283,7 @@ int sbm_link_boot(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boo
     }
     b->phone_start = 1;
     sbm_logf(p, "link: PHONE_START after %u ms. Stage 4 stops here: no INIT_END, the CP is parked", b->phone_start_ms);
+    if (b->hold_ms)
+        return hold(p, b, &sbd);
     return 0;
 }

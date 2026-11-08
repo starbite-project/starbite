@@ -1299,6 +1299,24 @@ static void test_boot(void)
         fakesoc_free(&s);
     }
 
+    /* LINK + hold: 3 s after PHONE_START, sending nothing; the CP's repeats are counted, then parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_LINK;
+    b.hold_ms = 3000;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+    CHECKEQ(b.hold_ms, 3000);
+    CHECK(b.phone_start_repeats >= 5 && b.phone_start_repeats <= 6);
+    CHECK(b.phone_start_gap_ms >= 490 && b.phone_start_gap_ms <= 520);
+    CHECKEQ(b.other_cmds, 0);
+    CHECKEQ(b.dl_frames_seen, 0);
+    CHECKEQ(s.n_ap_msgs, 1);                           /* still only PIF_INIT_DONE */
+    CHECK(b.parked);
+    check_parked(&s);
+    check_allowed(&s);
+    fakesoc_free(&s);
+    b.hold_ms = 0;
+
     /* LINK without an IPC view: refused before anything is touched */
     fakesoc_init(&s, &im.plan, boot_crc, main_crc);
     fakesoc_plat(&s, &p, tlog);

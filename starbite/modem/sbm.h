@@ -635,7 +635,9 @@ struct sbm_boot {
     uint32_t cp_status_ms;               /* how long until ISSR3 cp_status != 0 (RUN) */
     uint32_t issr[4];                    /* after power on */
     /* stage 4 */
+    uint32_t hold_ms;                    /* input (LINK): stay after PHONE_START this long, watching, sending nothing */
     int udl_done, init_start, pif_sent, phone_start;
+    uint32_t phone_start_repeats, phone_start_gap_ms, dl_frames_seen, other_cmds;
     uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;
     uint64_t sec0_us;
     int err;                             /* 0, or the SBM_E* that stopped it */

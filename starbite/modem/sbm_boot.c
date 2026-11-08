@@ -318,8 +318,10 @@ static int stop(const struct sbm_plat *p, struct sbm_boot *b, int err, const cha
 int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot *b)
 {
     enum sbm_boot_stop want = b->stop;
+    uint32_t hold = b->hold_ms;
     sbm_memset(b, 0, sizeof(*b));
     b->stop = want;
+    b->hold_ms = hold > 60000 ? 60000 : hold;
     b->stopped_at = "-";
     sbm_logf(p, "boot: stage 3 up to %s", want == SBM_BOOT_DRY ? "the RAM check" : want == SBM_BOOT_SEC
              ? "EL3's signature check (the CP CPU is not started)" : want == SBM_BOOT_RUN
@@ -401,5 +403,8 @@ void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
         sbm_logf(p, "LINK: udl %u (0x%04x 0x%04x) init_start %u (%u ms) pif %u phone_start %u (%u ms) msgs %u crash 0x%x",
                  b->udl_done, b->udl_resp[0], b->udl_resp[1], b->init_start, b->init_start_ms, b->pif_sent,
                  b->phone_start, b->phone_start_ms, b->n_msgs, b->crash_cmd);
+    if (b->stop == SBM_BOOT_LINK && b->hold_ms)
+        sbm_logf(p, "HOLD: %u ms: PHONE_START repeated %u times (last gap %u ms), other commands %u, DL frames waiting %u",
+                 b->hold_ms, b->phone_start_repeats, b->phone_start_gap_ms, b->other_cmds, b->dl_frames_seen);
     sbm_logf(p, "BOOT: sequencer before %u, after %u", b->reset_seq_before, b->reset_seq_after);
 }

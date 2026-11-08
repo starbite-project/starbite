@@ -280,7 +280,7 @@ static void stage3(const char *key)
     struct sbm_boot b;
     struct sbm_probe pr;
     char s[COLS];
-    enum sbm_boot_stop stop = sb_streq(key, "modemlink-boot") ? SBM_BOOT_LINK
+    enum sbm_boot_stop stop = sb_prefix(key, "modemlink") ? SBM_BOOT_LINK
                             : sb_streq(key, "modemload-run") ? SBM_BOOT_RUN
                             : sb_streq(key, "modemload-sec") ? SBM_BOOT_SEC : SBM_BOOT_DRY;
 
@@ -311,6 +311,7 @@ static void stage3(const char *key)
         sb_before_reset = park_hook;
     }
     b.stop = stop;
+    b.hold_ms = sb_streq(key, "modemlink-hold") ? 1000u * arg("modem_hold", 20) : 0;
     sbm_boot_run(&park_plat, &im, &b);
     park_armed = b.inited && !b.parked;  /* the core parked already; the hook only retries a failed park */
     sbm_boot_report(&park_plat, &b);
@@ -416,7 +417,7 @@ void sb_main(void)
 end:
     {
         char s[COLS];
-        if (sb_prefix(key, "modemload"))
+        if (is_load)
             sbm_fmt(s, sizeof(s), "modemload: END; faults: sync %u, SError %u (stale before a read: %u)",
                     (unsigned)sb_fault.count, (unsigned)sb_fault.serror_count, sbm_sb_stale_serrors());
         else

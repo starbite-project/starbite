@@ -370,10 +370,39 @@ Safety additions over 6.2:
 - Host tests (fake CP): the exact UDL frames; ISSR2 0x6ba2; PIF_INIT_DONE is the only command ever sent, and
   0xC2 never; a silent boot loader, a wrong answer and a crash command all end parked.
 
-## 7. Later stages (not started)
+### Result T8 (2026-11-08 21:53, warm boot, 265e926, `build/test-boots/modemlink-boot-2156/loader-pmsg.txt`)
+**The link comes up to PHONE_START from our own code.** DL_START; UDL 0x900D -> 0xA00D and 0x9F00 -> 0xAF00 on
+ch 215, each with a CP data message 0x0083 first; BOOT_OFF; INIT_START (0xC1) after 1055 ms (Android: about 1.2
+s); the SBD layout; PIF_INIT_DONE; PHONE_START (0xC8) at once. Parked, 0 faults, mode 0 0x00 in 206 ms. Two
+cosmetic bugs in the image's report are fixed since: the END line for modemlink keys printed an unfilled probe
+verdict, and the post-park probe said "cp-running" (the reset sequencer stays 5 while the central sequencer
+reports 0x80; the verdict now checks 0x80 first).
 
-4. Link: mailbox doorbells + polling, INIT_START → PIF_INIT_DONE → PHONE_START → INIT_END, the ECT clock table.
-5. RFS server on ch 245 against a RAM copy of EFS/CPEFS (CP writes land in RAM only). Without it the CP never
-   goes online.
+### 6.6 Tonight, unattended: T8 hold soak (`modemlink-hold`)
+T8, plus holding 20 s after PHONE_START (`modem_hold=S`, at most 60) while sending nothing and consuming
+nothing: it counts the CP's PHONE_START repeats and compares every DL ring's pointers each second, then parks.
+Several runs in a row (warm reboots between them, the guard from bd8cc1b) show that the cycle is repeatable and
+that the CP is stable and quiet in its pre-online state. No One UI check is needed for that: each run's "before"
+line is the check (sequencer 0, CP_START clear).
+
+## 7. Stage 5: online without RIL (plan; morning, user present)
+INIT_END makes the CP go online. Two things are unknown, and both decide safety:
+- **R1, RFS.** After INIT_END the CP reads (and writes) its NV files over ch 245, and without an answer it
+  never settles. None of our captures contain a ch 245 frame (the kernel logs only FMT), so the RFS opcodes and
+  framing are unknown. Plan: in daytime One UI (KernelSU), trace the RFS daemon's reads and writes on
+  /dev/umts_rfs0 (headers, lengths and file names only, never contents), and pull its binary read-only like cbd.
+- **R2, the radio.** Does the CP switch its RF on by itself after INIT_END, or only when RIL asks? The SIM-less
+  phone camps for emergency-only service under Android, which is RX, and attach is impossible without a SIM. We
+  need to know which IPC message turns RF on (pull libsec-ril / trace rild's first FMT frames), so that stage 5
+  can keep RF off or send the "low power mode" request explicitly (one more allow-listed SET, radio *off* only).
+Stage 5 = T9 `modemlink-online`: INIT_END, an RFS server against the RAM copy of EFS/CPEFS (the CP's writes go to
+RAM only), FMT receive-only with sbm_cell decoding (no request sent unless R2 requires the LPM one), 30 s, park.
+Safety additions: never any SMS/CALL/SS (the builder's allow-list); RFS writes only to RAM; a crash command or the
+CP's watchdog interrupt parks at once; first run attended.
+
+## 8. Later stages (not started)
+
+
+(Stage 4 and stage 5's plan are above.) Then the ECT clock table write that Android does before INIT_END.
 6. Status in the UI (SIM, registration, bars); then data (PDP), and SMS to the user's own number only.
 7. Voice: research only. Emergency numbers stay refused before any frame is built.
