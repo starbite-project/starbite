@@ -37,6 +37,7 @@ P = 'S9' if a.profile == 's9' else 'QEMU'
 LB, LS = c(f'SBG_{P}_LINUX_BASE'), c(f'SBG_{P}_LINUX_SIZE')
 SB, SS = c(f'SBG_{P}_SHM_BASE'), c(f'SBG_{P}_SHM_SIZE')
 GICD, GICC = c(f'SBG_{P}_GICD'), c(f'SBG_{P}_GICC')
+TRAMP = c(f'SBG_{P}_TRAMP') + c('SBG_TRAMP_GUEST_OFF')
 DTB_OFF, RD_OFF = c('SBG_DTB_OFF'), c('SBG_RD_OFF')
 OOPS_OFF, OOPS_SIZE, SURF_OFF = c('SBSHM_OOPS_OFF'), c('SBSHM_OOPS_SIZE'), c('SBSHM_SURF_OFF')
 assert LB % (2 << 20) == 0 and LB + LS == SB, 'the shared region must follow the guest RAM'
@@ -70,6 +71,11 @@ else:
 # initcall_blacklist: the S9 port's s9p_acpm_init needs no DT node; on the phone it would find the APM table
 # and power-cycle the touch LDOs through ACPM (Starbite OS's touch rails, and its ACPM mailbox). The port's
 # other initcalls look for their DT nodes or for compatible "samsung,exynos9810" (not this guest's).
+# the guest's own CPU_ONs (its secondaries, hotplug) through a slot below 4 GiB (linux/0002 patch; P2 on the
+# phone: secondary_entry in the 0x8_8000_0000 bank never ran). QEMU uses it for every CPU_ON, to exercise it.
+psci_body += (f'\n\t\tstarbite,cpu-on-trampoline = /bits/ 64 <{TRAMP:#x}>;' +
+              ('\n\t\tstarbite,cpu-on-trampoline-always;' if a.profile == 'qemu' else ''))
+
 bootargs = ('loglevel=7 printk.devkmsg=on rdinit=/init nokaslr cpuidle.off=1 '
             'initcall_blacklist=s9p_acpm_init '
             f'maxcpus=4 nr_cpus=4 {a.bootargs_extra}').strip()

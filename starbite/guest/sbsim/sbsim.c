@@ -513,7 +513,7 @@ void sbsim_main(void)
     struct sbg_cfg cfg = {
         .linux_base = SBG_QEMU_LINUX_BASE, .linux_size = SBG_QEMU_LINUX_SIZE,
         .shm_base = SBG_QEMU_SHM_BASE, .shm_size = SBG_QEMU_SHM_SIZE,
-        .gicd = GICD, .first_mpidr = 4,
+        .gicd = GICD, .first_mpidr = 4, .tramp_pa = SBG_QEMU_TRAMP,
         .surf_w = mf->surf_w, .surf_h = mf->surf_h,
         .db_guest = mf->db_guest, .db_host = mf->db_host,
         .host_lines = {INTID_OWN, 0},

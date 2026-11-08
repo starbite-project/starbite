@@ -70,7 +70,8 @@ static void guest_log(const char *l)
     ++seen;
     static const char *const keep[] = {"guestd", "sbguest", "guest-init", "GIC", "psci", "smp:", "SMP:", "panic",
                                        "Oops", "BUG", "Unable", "rror", "ail", "Kernel command", "Run /init",
-                                       "Memory:", "Machine model", "arch_timer", "Booted secondary", "reboot"};
+                                       "Memory:", "Machine model", "arch_timer", "Booted secondary", "reboot", "killed",
+                                       "shut down", "trampoline", "online"};
     int k = seen <= 3;
     for (unsigned i = 0; !k && i < sizeof(keep) / sizeof(keep[0]); ++i)
         k = has(l, keep[i]);
@@ -121,6 +122,41 @@ static void composite(const volatile uint32_t *px, uint32_t stride)
     }
 }
 
+/* P2b: the PMU's cluster-1 window, read only (fault-safe), before the start and after the stop: the words that
+ * change tell which status registers follow the M3 cores and the cluster */
+#define PMU_WIN 0x14062000UL
+#define PMU_N 256U
+static uint32_t pmu0[PMU_N];
+static uint8_t pmu0_ok[PMU_N];
+static void pmu_snap(void)
+{
+    for (unsigned i = 0; i < PMU_N; ++i)
+        pmu0_ok[i] = (uint8_t)sb_probe32(PMU_WIN + 4U * i, &pmu0[i]);
+}
+static void pmu_diff(void)
+{
+    unsigned n = 0;
+    ub_s(&u, "PMU 0x14062000.. changed:");
+    for (unsigned i = 0; i < PMU_N && n < 24; ++i) {
+        uint32_t v;
+        if (!pmu0_ok[i] || !sb_probe32(PMU_WIN + 4U * i, &v) || v == pmu0[i])
+            continue;
+        ub_s(&u, " +");
+        ub_hexn(&u, 0x2000U + 4U * i, 4);
+        ub_c(&u, ':');
+        ub_hexn(&u, pmu0[i], 8);
+        ub_s(&u, "->");
+        ub_hexn(&u, v, 8);
+        if (++n % 4 == 0) {
+            L();
+            ub_s(&u, "PMU  ");
+        }
+    }
+    if (!n)
+        ub_s(&u, " none");
+    L();
+}
+
 static void wait_ms(unsigned n)
 {
     for (unsigned i = 0; i < n; ++i) {
@@ -134,7 +170,7 @@ void sb_main(void)
 {
     ub_init(&u);
     ub_s(&u, "gp2: ");
-    ub_s(&u, "guest-probe P2 (Linux on the M3 cluster, no Starbite OS): EL");
+    ub_s(&u, "guest-probe P2b (Linux on the M3 cluster, no Starbite OS): EL");
     ub_dec(&u, (sb_boot.el >> 2) & 3U);
     ub_s(&u, ", guest Image ");
     ub_dec(&u, (uint64_t)(p2_image_end - p2_image));
@@ -177,7 +213,7 @@ void sb_main(void)
         .linux_base = SBG_S9_LINUX_BASE, .linux_size = SBG_S9_LINUX_SIZE,
         .shm_base = SBG_S9_SHM_BASE, .shm_size = SBG_S9_SHM_SIZE,
         .gicd = GICD, .first_mpidr = 0x100,
-        .tramp_pa = SB_TEST_BASE,                   /* below 4 GiB, non-cacheable here (P1: a high entry is lost) */
+        .tramp_pa = SBG_S9_TRAMP,                   /* below 4 GiB, non-cacheable here (P1b: a high entry is lost) */
         .surf_w = SW, .surf_h = SH,
         .db_guest = P2_DB_GUEST, .db_host = P2_DB_HOST,
         .host_lines = {0},
@@ -186,6 +222,7 @@ void sb_main(void)
     };
     sbg_init(&shim, &cfg, me);
     sbg_gic_prepare();
+    pmu_snap();
     uint64_t t_load = sb_ms();
     int r = sbg_load(p2_image, (uint64_t)(p2_image_end - p2_image), p2_dtb, (uint64_t)(p2_dtb_end - p2_dtb),
                      p2_rd, (uint64_t)(p2_rd_end - p2_rd));
@@ -276,7 +313,21 @@ void sb_main(void)
             L();
         }
     }
-    wait_ms(200);
+    /* the cluster's power over 2 s after the stop: does the firmware take it down once every core is off? */
+    ub_s(&u, "after the stop: guest_state ");
+    ub_dec(&u, h->guest_state);
+    ub_s(&u, ", guest CPUs online at the end ");
+    ub_dec(&u, h->guest_ncpus);
+    ub_s(&u, ", M3 cluster at +0/100/500/2000 ms:");
+    static const unsigned at[] = {0, 100, 400, 1500};
+    for (unsigned i = 0; i < 4; ++i) {
+        wait_ms(at[i]);
+        ub_s(&u, sb_m3_on() ? " on" : " off");
+    }
+    ub_s(&u, ", PMU 0x14062044 ");
+    ub_hex(&u, rd(0x14062044UL), 8);
+    L();
+    pmu_diff();
     int off = !sb_m3_on();
     int pass = r == 0 && s->state == SBG_OFF && s->hello && frames >= 5 && touch_ok && off;
     ub_s(&u, "RESULT ");

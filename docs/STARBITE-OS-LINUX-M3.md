@@ -14,7 +14,7 @@ Code: `starbite/guest/` (all new, owned by this work).
 | `host/sbghost.{h,c}` | Starbite OS's side as an OS-independent core with a shim (like the Wi-Fi core) |
 | `mk-guest-dts.py` | the guest's device tree (`--profile s9` or `qemu`) |
 | `linux/sbguest.c` | guest kernel module: power off without SYSTEM_OFF, `/dev/sbshm` (mmap + doorbells) |
-| `linux/mk-gic-patch.py`, `linux/0001-…patch`, `linux/build-patched.sh` | the GIC shared-distributor patch |
+| `linux/mk-gic-patch.py`, `linux/mk-psci-patch.py`, `linux/0001-…`, `linux/0002-…`, `linux/build-patched.sh` | the GIC shared-distributor patch; the CPU_ON trampoline patch |
 | `guestd/guestd.c` | guest user space: maps the region, draws the demo app, uinput, stop |
 | `initramfs/init` | the guest's init (busybox) |
 | `sbsim/` | Starbite OS's stand-in on QEMU; `run-qemu.sh` builds everything and runs the scenarios |
@@ -37,6 +37,8 @@ Code: `starbite/guest/` (all new, owned by this work).
 | Doorbell SPIs: INTIDs 511 (to the guest) and 510 (to the host): idle, non-secure, software-pendable | **phone, P1** |
 | A CPU_ON entry above 4 GiB never runs; below 4 GiB the M3 runs at once | **phone, P1b**: the high entry's first instruction never runs; the low stub and the low trampoline → high-bank stub check in at EL1 in 1 ms |
 | The M3s: GIC CPU interfaces 0x20 / 0x40 (0x101 / 0x102), WFI woken by doorbell 511, PSCI CPU_OFF | **phone, P1b** |
+| Both doorbells, M3 → A55 (510) included | **phone, P1c** (back ok from 0x101 and 0x102) |
+| Linux 7.1 on M3 0x100: boot, HELLO, 45 frames composited, touch reached the app, MSG_STOP → power down | **phone, P2** (secondaries lost: high entry; fixed in P2b) |
 | PSCI's context id reaches x0 | **no** on the phone (x0 = 0xBFFFF01C): the trampoline's DTB literal is required |
 | Linux on the phone's M3s | not yet: P1b → P2 → P3 (10) |
 
@@ -54,7 +56,13 @@ Code: `starbite/guest/` (all new, owned by this work).
    breadcrumb, sets x0 = the DTB and x1..x3 = 0, and branches to the Image in the high bank (a 64-bit
    register branch is fine). The context id isn't relied on.
 4. Linux brings up 0x101..0x103 itself with PSCI 0.1 `cpu_on` from its DT. The guest's DT is not
-   `samsung,exynos9810`, so the S9 port's per-core PMU writes stay off.
+   `samsung,exynos9810`, so the S9 port's per-core PMU writes stay off. **Its own CPU_ONs need the 4 GiB rule
+   too**: P2 on the phone (18:32) booted on 0x100, but `secondary_entry` is in the high bank, so CPU1..3
+   "failed to come online" (5 s each) and the three powered-but-lost cores kept the cluster on at the stop.
+   `linux/0002-arm64-psci-starbite-cpu-on-trampoline.patch`: `/psci` `starbite,cpu-on-trampoline =
+   <0xa0100040>` (a second 64-byte slot in Starbite OS's trampoline page). `cpu_psci_cpu_boot` writes the same
+   trampoline there with the real entry and CPU_ONs it; any entry below 4 GiB passes through unchanged unless
+   `starbite,cpu-on-trampoline-always` (QEMU, to exercise it). Hotplug re-onlining uses it too.
 
 Why this should work on the M3s: the mainline Linux on this phone already runs on the M3 cores from the same
 loader path (EL1, SMC to EL3's PSCI, WFI idle), and Starbite OS's heater runs code there. What is new is the M3

@@ -34,6 +34,7 @@
 #define SBG_S9_SHM_SIZE     0x004000000ULL      /* 64 MiB */
 #define SBG_S9_GICD         0x10101000ULL       /* GIC-400 */
 #define SBG_S9_GICC         0x10102000ULL
+#define SBG_S9_TRAMP        0x0a0100000ULL      /* below 4 GiB: Starbite's non-cacheable window (P1b) */
 
 /* QEMU virt (gic-version=2, -m 2048: RAM 0x4000_0000..0xBFFF_FFFF); the "store" (what Starbite OS reads
  * from UFS on the phone) is put in RAM by -device loader at SBG_QEMU_STORE. */
@@ -44,6 +45,10 @@
 #define SBG_QEMU_GICD       0x08000000ULL
 #define SBG_QEMU_GICC       0x08010000ULL
 #define SBG_QEMU_STORE      0x048000000ULL      /* manifest page, then Image, DTB, initrd */
+#define SBG_QEMU_TRAMP      0x047000000ULL      /* sbsim's page for the trampolines (outside the guest's RAM) */
+/* in the trampoline page: +0 the host's boot trampoline (sbg_tramp), +SBG_TRAMP_GUEST_OFF the slot the guest
+ * kernel writes for its own CPU_ONs (linux/0002 patch, DT /psci "starbite,cpu-on-trampoline") */
+#define SBG_TRAMP_GUEST_OFF 0x40U
 
 /* inside the guest's RAM */
 #define SBG_DTB_OFF         0x08000000ULL       /* +128 MiB: past any Image + BSS */
