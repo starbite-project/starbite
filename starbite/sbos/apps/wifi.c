@@ -54,7 +54,7 @@ static void show(void)
         ui_title("Join a network");
         name_of(nm, sizeof(nm), nets[pick].ssid, nets[pick].ssid_len);
         ui_big("SECURED NETWORK", nm, 0);
-        ui_input(5, "Passphrase", 1 | 2, 63);
+        ui_input((uint32_t)(100 + pick), "Passphrase", 1 | 2, 63);     /* one field per network: no carry-over */
         ui_textline("Kept in this phone's memory until a restart. Never written to the log.", GREY);
         ui_button(3, "Cancel", 0, UI_HALF);
         ui_end();
@@ -139,7 +139,7 @@ void app_event(const struct sbos_event *ev)
             wifi_scan();
         } else if (ev->id == 3) {
             page = 0;
-        } else if (ev->id == 5 && page == 1) {          /* the keyboard's Join */
+        } else if (ev->id == (uint32_t)(100 + pick) && page == 1) {     /* the keyboard's Join */
             char pw[65];
             int n = ui_input_get(pw, sizeof(pw));
             int r = n >= 8 ? wifi_join(pick, pw) : SBOS_EINVAL;

@@ -34,7 +34,7 @@ static int foreign;                         /* the newest copy is of another ver
 
 int settings_persistent(void)
 {
-    return slot_ok;
+    return slot_ok && !foreign;
 }
 
 static void fill(struct saved *s)
@@ -112,11 +112,16 @@ void settings_restore(void)
 }
 
 /* a setting changed: save in 3 s (a later change moves the save) */
+static uint64_t last_save;
+
 void settings_changed(void)
 {
-    if (!slot_ok)
-        return;
-    kt_set(KT_STATE, 0, sb_ms(), SAVE_DELAY_MS, 0);
+    if (!slot_ok || kt_pending(KT_STATE, 0))
+        return;                             /* a save is coming: it takes whatever is current then */
+    uint64_t now = sb_ms(), at = now + SAVE_DELAY_MS;
+    if (last_save && at < last_save + 10000U)
+        at = last_save + 10000U;            /* at most one write in 10 s, whatever an app does */
+    kt_set(KT_STATE, 0, now, (uint32_t)(at - now), 0);
 }
 
 void settings_timer(unsigned id)
@@ -161,6 +166,7 @@ void settings_timer(unsigned id)
     cur_half = to;
     ++seq;
     ++saves;
+    last_save = sb_ms();
     struct ub u;
     ub_init(&u);
     ub_s(&u, "settings: saved (half ");

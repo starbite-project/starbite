@@ -28,6 +28,7 @@ static struct {
     char f[NF][FL + 1];
 } card;
 static int page, field = -1;                /* page 0 the card, 1 the editor, 2 one field being typed */
+static int readonly;                        /* opened from the lock screen's medical card: nothing to edit */
 
 static int has_card(void)
 {
@@ -127,8 +128,10 @@ static void show(void)
                 l[k] = 0;
                 ui_textline(l, 0xffffffffU);
             }
-        ui_button(2, "Edit the card", 0, UI_HALF);
-        ui_textline(setting_get(SET_SAVED) == 1 ? "Saved on this phone." : "Kept until a restart (no save slot yet).", GREY);
+        if (!readonly) {
+            ui_button(2, "Edit the card", 0, UI_HALF);
+            ui_textline(setting_get(SET_SAVED) == 1 ? "Saved on this phone." : "Kept until a restart (no save slot yet).", GREY);
+        }
     } else {
         ui_big("EMERGENCY CARD", "Not set up", ORANGE);
         ui_textline("Write it here: your name, blood type, allergies, medicines, conditions and whom to call.", 0);
@@ -148,19 +151,27 @@ void app_event(const struct sbos_event *ev)
         ui_tile(has_card() ? "Emergency card" : "Not set up");
         break;
     case EV_APP_SHOW:
+        readonly = ev->value == 1;          /* the lock screen's medical card */
+        if (readonly || ev->value == 0)
+            page = readonly ? 0 : page;
+        if (readonly)
+            field = -1;
         if (n < 0)
             load();
+        if (n >= 0)
+            ui_tile("Emergency card");      /* a card file counts too (the lock screen shows the card then) */
         show();
         break;
     case EV_APP_HIDE:
     case EV_APP_BACK:
         page = 0;
         field = -1;
+        readonly = 0;
         break;
     case EV_APP_BUTTON:
         if (ev->id == 1) {
             load();
-        } else if (ev->id == 2) {
+        } else if (ev->id == 2 && !readonly) {
             page = 1;
         } else if (ev->id == 3) {
             page = 0;

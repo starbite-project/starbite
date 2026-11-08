@@ -55,6 +55,11 @@ nowant "$g" "correct horse" "typed: the passphrase not logged"
 # a short passphrase: refused before any join
 h=$(limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 SBOS_HOST_WPA2=1 "$out/sbos-host" "$out" /dev/null $OPEN $ON t:720,905 w:800 t:580,$R2 w:150 t:1245,$R3 w:3000 s:wifi-test q 2>&1)
 nowant "$h" "wifi: joining a secured" "typed: a 1-character passphrase refused"
+# no carry-over (0.5.5): 13 characters typed, Cancel, the same network again, Join at once: nothing joins
+# (the field came back empty: under 8 characters is refused before any join)
+CANCEL="t:382,1437 w:500"
+k=$(limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 SBOS_HOST_WPA2=1 "$out/sbos-host" "$out" /dev/null $OPEN $ON t:720,905 w:800 $TYPE $CANCEL t:720,905 w:800 t:1245,$R3 w:3000 s:wifi-test q 2>&1)
+nowant "$k" "wifi: joining a secured" "typed: the passphrase does not carry over after Cancel"
 e=$(run $OPEN $ON h:b:900 w:500 t:1057,663 w:600 t:720,670 w:600)
 want "$e" "heater: refused: Wi-Fi is on" "the heater refused while Wi-Fi is on"
 nowant "$e" "heater: start, level" "the heater did not start"

@@ -820,10 +820,19 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         return (p->perms & SBOS_P_ALARM) ? SBOS_ENOSYS : SBOS_EPERM;
     /* ---- state (kept in RAM in v0.1; saved from v0.2) ---- */
     case SYS_STATE_PUT:
-        if (arg[1] > STATE_REC_MAX || !user_in(a, arg[0], p->state, arg[1]))
+    {
+        static uint8_t tmp[STATE_REC_MAX];
+        if (arg[1] > STATE_REC_MAX || !user_in(a, arg[0], tmp, arg[1]))
             return SBOS_EINVAL;
-        p->state_n = (uint32_t)arg[1];
-        settings_changed();                 /* 0.5.3: saved with the settings (3 s later) where the slot exists */
+        int same = p->state_n == arg[1];
+        for (uint64_t i = 0; same && i < arg[1]; ++i)
+            same = p->state[i] == tmp[i];
+        if (!same) {
+            memcpy(p->state, tmp, arg[1]);
+            p->state_n = (uint32_t)arg[1];
+            settings_changed();             /* 0.5.3: saved with the settings where the slot exists */
+        }
+    }
         return 0;
     case SYS_STATE_GET: {
         uint64_t n = p->state_n < arg[1] ? p->state_n : arg[1];

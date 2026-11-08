@@ -71,6 +71,7 @@ static void (*cf_done)(int ok);
 static int cf_return;
 
 int app_front = -1;
+static int from_lock;                       /* the front app was opened from the lock screen (the medical card) */
 int ui_overflow;                    /* the last app screen built did not fit (the self test reads it) */
 
 static int sb_strcmp_eq(const char *a, const char *b)
@@ -227,11 +228,21 @@ static char kb_text[65];
 static int kb_len, kb_layer, kb_secret, kb_show, kb_max, kb_on, kb_caps;
 static uint32_t kb_id;
 
+static void scrub_inputs(struct el *l, int n)
+{
+    for (int i = 0; i < n; ++i)
+        if (l[i].kind == E_INPUT)
+            memset(l[i].b, 0, sizeof(l[i].b));
+}
+
 void kui_input_wipe(void)
 {
     memset(kb_text, 0, sizeof(kb_text));
     kb_len = kb_layer = kb_show = kb_on = 0;
     kb_id = 0;
+    scrub_inputs(app_els, napp_els);        /* the shown copies of the field too (Show reveals the text) */
+    scrub_inputs(cur, ncur);
+    scrub_inputs(shown, nshown);
 }
 
 void kui_input(uint32_t id, const char *label, uint32_t flags, int max, const char *init)
@@ -290,7 +301,7 @@ static const struct krow kb_rows[4][4] = {
     { { "qwertyuiop", W10 }, { "asdfghjkl", W9 }, { "\x01zxcvbnm\x02", W9b }, { "\x03\x05.\x04", W4 } },
     { { "QWERTYUIOP", W10 }, { "ASDFGHJKL", W9 }, { "\x01ZXCVBNM\x02", W9b }, { "\x03\x05.\x04", W4 } },
     { { "1234567890", W10 }, { "-/:;()$&@", W9 }, { "\x06.,?!'\"_\x02", W9b }, { "\x03\x05#\x04", W4 } },
-    { { "[]{}#%^*+=", W10 }, { "_\\|~<>`\xa3@", W9 }, { "\x06.,?!'\"-\x02", W9b }, { "\x03\x05+\x04", W4 } },
+    { { "[]{}#%^*+=", W10 }, { "_\\|~<>`$@", W9 }, { "\x06.,?!'\"-\x02", W9b }, { "\x03\x05+\x04", W4 } },
 };
 #define KB_TOP (UI_H - 800)
 #define KB_ROW 172
@@ -368,6 +379,11 @@ static void kb_press(int x, int y)
 
 void kui_end(void)
 {
+    int keep = 0;                           /* the typed text lives only while its field is on the screen */
+    for (int i = 0; i < napp_els; ++i)
+        keep |= app_els[i].kind == E_INPUT && app_els[i].id == kb_id;
+    if (!keep && kb_id)
+        kui_input_wipe();
     app_building = 0;
     if (screen == SCR_APP)
         dirty = 1;
@@ -417,6 +433,7 @@ void kui_open_app(int a)
     if (app_front >= 0 && app_front != a)
         app_event_send(app_front, EV_APP_HIDE, 0, 0);
     kui_input_wipe();
+    from_lock = 0;
     app_front = a;
     app_awake = 0;
     screen = SCR_APP;
@@ -429,7 +446,8 @@ void kui_open_app(int a)
 
 void kui_home(void)
 {
-    kui_input_wipe();                       /* typed text never outlives its screen */
+    kui_input_wipe();
+    from_lock = 0;                       /* typed text never outlives its screen */
     if (app_front >= 0)
         app_event_send(app_front, EV_APP_HIDE, 0, 0);
     app_front = -1;
@@ -441,6 +459,8 @@ void kui_home(void)
 
 void kui_lock(void)
 {
+    kui_input_wipe();
+    from_lock = 0;
     if (app_front >= 0)
         app_event_send(app_front, EV_APP_HIDE, 0, 0);
     app_front = -1;
@@ -757,12 +777,12 @@ static void build_lock(void)
      * card; a tap opens it (read only there: editing is a page further) */
     int info = app_by_id("info");
     if (info >= 0 && !sb_strcmp_eq(app_tile(info), "Emergency card")) {
-        e = add(cur, &ncur, E_BUTTON);
+        e = add(cur, &ncur, E_HOLD);       /* a hold, as the other lock-screen buttons (pockets) */
         e->id = 3;
-        scopy(e->a, sizeof(e->a), "Medical card");
-        scopy(e->b, sizeof(e->b), "For whoever finds this phone");
+        scopy(e->a, sizeof(e->a), "Hold for the medical card");
         e->flags = UI_RED;
-        e->x = 270, e->y = 1560, e->w = UI_W - 540, e->h = 270;
+        e->ms = 600;
+        e->x = 170, e->y = 1600, e->w = UI_W - 340, e->h = 230;
     }
 }
 
@@ -832,7 +852,16 @@ static void build_app(void)
     layout_flow(cur + base, ncur - base, 520);
     /* an app screen taller than the panel: logged once per app (the self test counts it) */
     static uint32_t over_logged;
-    if (ncur > base && cur[ncur - 1].y + cur[ncur - 1].h > UI_H - 20) {
+    int bottom = 0, keys = 0;
+    for (int i = base; i < ncur; ++i) {
+        if (cur[i].kind == E_KEYS) {
+            keys = 1;
+            continue;
+        }
+        if (cur[i].y + cur[i].h > bottom)
+            bottom = cur[i].y + cur[i].h;
+    }
+    if (ncur > base && bottom > (keys ? KB_TOP - 20 : UI_H - 20)) {
         ui_overflow = 1;
         if (app_front >= 0 && app_front < 32 && !(over_logged & (1U << app_front))) {
             over_logged |= 1U << app_front;
@@ -1186,13 +1215,28 @@ static void draw_el(const struct el *e, int idx)
         ui_round(e->x, e->y + 64, e->w, e->h - 64, 48, card);
         int tx = e->x + 50, ty = e->y + 64 + (e->h - 64) / 2 + 24;
         int shown_w = 0;
+        int room = e->w - 330;
         if (e->flags) {
-            for (int i = 0; i < e->value && i < 40; ++i)
+            int d = e->value < 20 ? e->value : 20;
+            for (int i = 0; i < d; ++i)
                 ui_disc(tx + 18 + i * 44, ty - 18, 14, C_L1);
-            shown_w = (e->value < 40 ? e->value : 40) * 44;
+            shown_w = d * 44;
+            if (e->value > 20) {            /* more than fit: the count after the dots */
+                char cnt[8] = { ' ', '(', 0 };
+                int v = e->value, k = 2;
+                if (v >= 10)
+                    cnt[k++] = (char)('0' + v / 10);
+                cnt[k++] = (char)('0' + v % 10);
+                cnt[k++] = ')';
+                cnt[k] = 0;
+                shown_w += ui_text(F_HEAD, tx + shown_w, ty - 6, cnt, C_L2);
+            }
         } else if (e->b[0]) {
-            shown_w = ui_text_cut(F_TITLE_S, tx, ty, e->b, e->w - 330, C_L1);
-            shown_w = ui_text_w(F_TITLE_S, e->b) > e->w - 330 ? e->w - 330 : ui_text_w(F_TITLE_S, e->b);
+            const char *t = e->b;           /* the end of the text stays in view (where the typing is) */
+            while (*t && ui_text_w(F_TITLE_S, t) > room)
+                ++t;
+            ui_text(F_TITLE_S, tx, ty, t, C_L1);
+            shown_w = ui_text_w(F_TITLE_S, t);
         }
         ui_fill(tx + shown_w + 8, ty - 52, 5, 64, C_STAR);              /* the cursor */
         if (e->n)
@@ -1215,8 +1259,6 @@ static void draw_el(const struct el *e, int idx)
                 ui_round(kx + 6, ky, w - 12, KB_ROW, 26, bg);
                 char s[4] = { (char)c, 0, 0, 0 };
                 const char *lab = s;
-                if (c == 0xa3)
-                    lab = "\xc2\xa3";
                 if (c == 1)
                     lab = e->value >= 2 ? (e->value == 2 ? "#+=" : "123") : e->value == 1 ? "ABC" : "abc";
                 if (c == 6)
@@ -1436,7 +1478,10 @@ static void activate(int i, int x, int y)
             break;
         if (e->kind == E_BACK) {
             app_event_send(app_front, EV_APP_BACK, 0, 0);
-            kui_home();
+            if (from_lock)
+                kui_lock();                 /* the card was opened from the lock screen: back there */
+            else
+                kui_home();
         } else if (e->kind == E_BUTTON) {
             app_event_send(app_front, EV_APP_BUTTON, e->id, 0);
         } else if (e->kind == E_HOLD) {
@@ -1476,7 +1521,10 @@ static void back(void)
     case SCR_APP:
         if (app_front >= 0)
             app_event_send(app_front, EV_APP_BACK, 0, 0);
-        kui_home();
+        if (from_lock)
+            kui_lock();
+        else
+            kui_home();
         break;
     case SCR_HOME:
         kui_lock();
@@ -1555,8 +1603,12 @@ static void lock_pick(int id)
         light_on(SBOS_COLOR_WHITE, SCR_LOCK, 10);
     else if (id == 1)
         sos_set(1);
-    else if (id == 3 && app_by_id("info") >= 0)
-        kui_open_app(app_by_id("info"));    /* the medical card */
+    else if (id == 3 && app_by_id("info") >= 0) {
+        /* the medical card, read only: the app is told (EV_APP_SHOW value 1) and Back returns here */
+        kui_open_app(app_by_id("info"));
+        from_lock = 1;
+        app_event_send(app_front, EV_APP_SHOW, 0, 1);
+    }
     else
         kui_home();
 }

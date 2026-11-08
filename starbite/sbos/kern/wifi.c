@@ -380,6 +380,8 @@ int wifi_power(int on)
         }
         kt_cancel(KT_WIFI, 0);
         dhcp_go = 0;
+        join_pending = 0;
+        memset(jp_pass, 0, sizeof(jp_pass));
         joined = -1;
         nnets = 0;
         logn("wifi: off (the radio held in reset and unpowered) after ", (sb_ms() - t_on) / 1000U, " s");
