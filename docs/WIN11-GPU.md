@@ -841,6 +841,32 @@ The census:
 - the Mali copies into the framebuffer (map its pages into the GPU VA space);
 - primaries rendered straight into the framebuffer.
 
+### 6.17 T13h; the stale-present bug; a dead-man for unattended cycles (2026-11-08)
+
+**T13h (21:46): black after the logo.**
+- **Stale presents:** `MwRender` (from upstream) never cleared `MW_DMA_PRIVATE.Present`, and the runtime reuses
+  DMA private-data buffers. So render submissions replayed old presents: 853 flips carried out for 92 flip
+  presents, 1,137 blts for 458, through allocation pointers that might since have been freed. Fixed: the
+  present op is zeroed in every render.
+- **Black sources:** every allocation the panel was told to show read back all black (RefPx 0, 217 refreshes
+  skipped as black). Whether DWM's real flips carry pixels is the next question.
+
+**The dead-man (for unattended cycles).**
+- **The loader:** it already arms cluster 1's watchdog for uefi rows with `wdt` > 0 and
+  `wdt_feed = "own"` (`launch_prepare`: CW_OWN fits any method). The win11 rows had no `wdt`.
+- **sbwdog.sys** (`starbite/win/sbwdog`), a boot-start service:
+  - **Feeding:** a real-time thread writes WTCNT = WTDAT every 5 s.
+  - **Unattended:** a clean `NtShutdownSystem(ShutdownReboot)` at 300 s in full mode (120 s display-only),
+    called from a second thread so feeding continues. Feeding stops at 360 s (180 s).
+  - **Never arms on its own:** unless `ArmSec` is set, the loader stays the only owner. Cluster 0 belongs to
+    the woa UEFI and the UFS driver (RWD1).
+- **`tools/win/gpu-cycle.sh`:** install (refused without catalog watchdogs or with a dirty hive), the test
+  boot, the pull, a self-restarting display-only boot, a hive check, and disarm. Also `--deadman-test` and
+  `--clean-only`.
+- **Not yet shown on the phone:** that winload loads a Start 0 service from `System32\drivers`, that the UEFI
+  leaves cluster 1 armed (sbwdog's ArmedAtStart and WtDat say), and that `NtShutdownSystem` from a driver
+  leaves the hive and NTFS clean.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

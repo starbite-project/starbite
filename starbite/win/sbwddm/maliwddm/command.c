@@ -129,6 +129,10 @@ NTSTATUS APIENTRY MwRender(IN_CONST_HANDLE hContext, DXGKARG_RENDER *Arg)
     }
     priv->Count = count;
     priv->Reserved = MW_DMA_MAGIC;
+    /* S9 port (T13i): the runtime reuses DMA private-data buffers. Upstream left a previous present's op in
+     * place, so render submissions replayed stale presents (T13h: 853 flips carried out for 92 flip presents,
+     * 1,137 blts for 458), through allocation pointers that may since have been freed. */
+    RtlZeroMemory(&priv->Present, sizeof(priv->Present));
 
     PatchEveryAllocation(Arg->AllocationListSize, &Arg->pPatchLocationListOut, Arg->PatchLocationListOutSize);
     MarkDmaBuffer(&Arg->pDmaBuffer);

@@ -20,6 +20,8 @@ export SB_SIGN_CERT=${SB_SIGN_CERT:-$main/build/woa/ufs-sys/sign/starbite-test.c
 
 # Both are plain WDM-style kernel images (GsDriverEntry); sbdisplay is a display miniport through displib.
 "$win/build.sh" wdm "$out/sbthermal.sys" "$here/sbthermal/sbthermal.c" "$here/sbthermal/sbth_core.c" "$here/common/sbw_acpm.c"
+# the dead-man feeder for unattended boots (the loader's cluster-1 watchdog), a boot-start service
+"$win/build.sh" wdm "$out/sbwdog.sys" "$here/sbwdog/sbwdog.c"
 LIBS="displib.lib ntstrsafe.lib libcntpr.lib" \
     "$win/build.sh" wdm "$out/sbdisplay.sys" "$here/sbdisplay/sbdisplay.c" "$here/sbdisplay/sbdc_core.c"
 
@@ -37,8 +39,8 @@ umd=$root/build/win/mesa/libgallium_d3d10-panfrost.dll
 
 cp "$here/sbdisplay/sbdisplay.inf" "$here/sbmali/sbmali.inf" "$w/sbwddm.inf" "$out/"
 # no image may branch to itself (T12's first sbmali did: an endless loop in a helper calling itself)
-"$win/check-selfloop.sh" "$out/sbthermal.sys" "$out/sbdisplay.sys" "$out/sbmali.sys" "$out/sbwddm.sys"
-"$win/sign.sh" "$out/sbthermal.sys" "$out/sbdisplay.sys" "$out/sbmali.sys" "$out/sbwddm.sys"
+"$win/check-selfloop.sh" "$out/sbthermal.sys" "$out/sbwdog.sys" "$out/sbdisplay.sys" "$out/sbmali.sys" "$out/sbwddm.sys"
+"$win/sign.sh" "$out/sbthermal.sys" "$out/sbwdog.sys" "$out/sbdisplay.sys" "$out/sbmali.sys" "$out/sbwddm.sys"
 if [ -f "$out/sbumd.dll" ]; then
     "$win/check-selfloop.sh" "$out/sbumd.dll"
     "$win/sign.sh" "$out/sbumd.dll"
@@ -54,4 +56,4 @@ done
 limactl shell starbite -- bash -c "cd '$out' && cp '$here/acpi/StarbiteGpu.asl' . && iasl -vs -p StarbiteGpu StarbiteGpu.asl >/dev/null && rm StarbiteGpu.asl"
 # stage 4's variant with the Mali's interrupt lines (sbwddm full mode)
 limactl shell starbite -- bash -c "cd '$out' && cp '$here/acpi/StarbiteGpu4.asl' . && iasl -vs -p StarbiteGpu4 StarbiteGpu4.asl >/dev/null && rm StarbiteGpu4.asl"
-(cd "$out" && shasum -a 256 sbthermal.sys sbdisplay.sys sbdisplay.inf sbdisplay.cat sbmali.sys sbmali.inf sbmali.cat sbwddm.sys sbwddm.inf $(cd "$out" && ls sbumd.dll sbwddm.cat 2>/dev/null) StarbiteGpu.aml StarbiteGpu4.aml > SHA256SUMS && cat SHA256SUMS)
+(cd "$out" && shasum -a 256 sbthermal.sys sbwdog.sys sbdisplay.sys sbdisplay.inf sbdisplay.cat sbmali.sys sbmali.inf sbmali.cat sbwddm.sys sbwddm.inf $(cd "$out" && ls sbumd.dll sbwddm.cat 2>/dev/null) StarbiteGpu.aml StarbiteGpu4.aml > SHA256SUMS && cat SHA256SUMS)
