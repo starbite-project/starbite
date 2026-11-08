@@ -334,6 +334,17 @@ static int m3_core(unsigned c, int mode, unsigned db_guest, unsigned db_host, ui
         ub_s(&u, " us in the stub, ");
     }
     ub_s(&u, host_ok ? "host doorbell back ok" : "host doorbell NOT back");
+    if (!host_ok && db_host) {
+        ub_s(&u, " (line ");
+        ub_dec(&u, db_host);
+        ub_s(&u, ": enabled ");
+        ub_dec(&u, (uint64_t)bit(GICD + 0x100, db_host));
+        ub_s(&u, ", pending ");
+        ub_dec(&u, (uint64_t)bit(GICD + 0x200, db_host));
+        ub_s(&u, ", target ");
+        ub_hex(&u, rdb(GICD + 0x800 + db_host), 2);
+        ub_c(&u, ')');
+    }
     if (b->state == 3) {
         ub_s(&u, ", CPU_OFF RETURNED ");
         ub_sdec(&u, (int64_t)(int32_t)b->off_ret);
@@ -350,7 +361,7 @@ void sb_main(void)
     ub_s(&u, "gprobe: ");
     uint64_t mpidr;
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-    ub_s(&u, "guest-probe P1b (Starbite OS 0.9 app support, no Linux): EL");
+    ub_s(&u, "guest-probe P1c (Starbite OS 0.9 app support, no Linux): EL");
     ub_dec(&u, (sb_boot.el >> 2) & 3U);
     ub_s(&u, ", MPIDR ");
     hx(mpidr);
@@ -438,12 +449,34 @@ void sb_main(void)
     L();
     int res[4] = {0, 0, 0, 0};
     uint8_t cif[4] = {0};
+    /* P1c: the host's doorbell must be routed to this core and ENABLED for the M3s' pend to arrive (P1b: the
+     * candidate scan left 510 disabled -- line_restore -- so every "host doorbell back" failed; the M3 side had
+     * written GICD_ISPENDR). As sbghost's sbg_gic_prepare does for Starbite OS. */
+    uint32_t hcfg0 = 0;
+    uint8_t htg0 = 0;
+    if (db[1]) {
+        uintptr_t cfga = GICD + 0xc00 + 4 * (db[1] / 16);
+        hcfg0 = rd(cfga);
+        htg0 = rdb(GICD + 0x800 + db[1]);
+        wr(GICD + 0x280 + 4 * (db[1] / 32), 1U << (db[1] % 32));       /* nothing stale pending */
+        wr(cfga, hcfg0 | (2U << (2 * (db[1] % 16))));
+        wrb(GICD + 0x800 + db[1], me);
+        wr(GICD + 0x100 + 4 * (db[1] / 32), 1U << (db[1] % 32));
+        ub_s(&u, "host doorbell ");
+        ub_dec(&u, db[1]);
+        ub_s(&u, ": edge, to interface ");
+        ub_hex(&u, me, 2);
+        ub_s(&u, bit(GICD + 0x100, db[1]) ? ", enabled" : ", NOT enabled");
+        L();
+    }
     if (pmu)
         for (unsigned c = 0; c < 4; ++c) {          /* every path runs: each answers its own question */
             res[c] = m3_core(c, (int)c, db[0], db[1], &cif[c]);
             feed();
         }
     wait_ms(50);
+    if (db[1])
+        line_restore(db[1], hcfg0, htg0);
 
     /* 5. after */
     ub_s(&u, "after: M3 cluster ");

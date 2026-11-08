@@ -35,7 +35,9 @@ Code: `starbite/guest/` (all new, owned by this work).
 | The probe's M3 stub (x0, interface bit, WFI wake on the doorbell, host doorbell, CPU_OFF) | **QEMU, 4/4 CPUs**; phone: P1 staged (10) |
 | The high bank: free, read/write from the A55 (100 × 16 MiB) | **phone, P1** |
 | Doorbell SPIs: INTIDs 511 (to the guest) and 510 (to the host): idle, non-secure, software-pendable | **phone, P1** |
-| A CPU_ON entry above 4 GiB never runs | **phone, P1** (core lost); P1b checks the fix |
+| A CPU_ON entry above 4 GiB never runs; below 4 GiB the M3 runs at once | **phone, P1b**: the high entry's first instruction never runs; the low stub and the low trampoline → high-bank stub check in at EL1 in 1 ms |
+| The M3s: GIC CPU interfaces 0x20 / 0x40 (0x101 / 0x102), WFI woken by doorbell 511, PSCI CPU_OFF | **phone, P1b** |
+| PSCI's context id reaches x0 | **no** on the phone (x0 = 0xBFFFF01C): the trampoline's DTB literal is required |
 | Linux on the phone's M3s | not yet: P1b → P2 → P3 (10) |
 
 ## 2. Starting the M3 cluster with Linux

@@ -24,7 +24,7 @@ TIMEOUT=${TIMEOUT:-900}
 SURF=${SURF:-720x1440}
 BUSYBOX=${BUSYBOX:-/mnt/build/out/busybox-arm64}
 DB_GUEST=132        # SPI 100: host -> guest doorbell (QEMU virt leaves SPIs 64.. unused)
-DB_HOST=133         # SPI 101: guest -> host doorbell
+DB_HOST=${DB_HOST:-133}         # SPI 101: guest -> host doorbell
 mkdir -p "$WORK"/{sbsim,mod,rd/bin,out}
 cd "$WORK"
 
