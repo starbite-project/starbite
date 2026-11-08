@@ -297,6 +297,33 @@ mounted after fsync-only commits, with and without metadata_csum. Without the re
 data; with it, the newest nv_data.bin. Clean images read correctly too. Not exercised by the fixture: revoke
 records (the code follows jbd2's rule: a revoke in transaction T masks the block in transactions up to T).
 
+### Result T5b (2026-11-08 21:13, 0ec0bb4, `build/test-boots/modemload-dry-2113/loader-pmsg.txt`)
+Clean, 0 faults. EFS: needs_recovery no, 47 root names, nv_data.bin inode 45 (1 MiB, crc 0xf93b2ff6, as on the
+backup). BOOT 0x73672490, MAIN 0xa98496b5 and VSS 0x5e715799 all match the TOC. `BOOT: ok (done (dry))`. The
+whole image is in RAM and verified; T6 is next.
+
+### Result T6 (2026-11-08 21:15, 0ec0bb4, `build/test-boots/modemload-sec-2116/loader-pmsg.txt`)
+Clean, 0 faults. **EL3 accepted our load:** cp_init (CP_CTRL_NS 0x002016a0 -> 0x002016a2, CP_CTRL_S 0 -> 8,
+sequencer 5), mode 2 0x0b as on Android, four sections copied and read back from DRAM with matching CRCs, **mode
+0 0x00 in 206 ms**, called from CPU 0 (Android: 127 ms, off CPU 0). That answers unknown #8: CPU 0 is fine. Then
+the park: the full ss310ap_off sequence, CENTRAL_SEQ_CP_STATUS 0x80. Differences from Android's log:
+- the GICD pending bit (0x10101238 bit 28) never showed (Android: set). PMUCAL only waits for it; probably the
+  GIC is set up differently under the loader;
+- CP_CTRL_S reads 0 again after cp_init (CP_START looks self-clearing once the sequencer runs);
+- CP_CTRL_NS gained bits 31:30 while up (0xc02016a2) and lost them in reset;
+- after the park CP_CTRL_NS is 0x002216a6 (+ CP_RESET_SET, + dump_pc_no_pg), and RESET_SEQUENCER_STATUS still
+  reads 5 while the central sequencer reports 0x80 (in reset).
+Rule 2's check is next: One UI's own cbd must bring the modem up after this.
+
+### After T6: One UI, then T7 (2026-11-08 21:21)
+One UI brought the modem up normally after T6 (ril.RildInit 1,1, modemSettingDone OK, ril.cpreset 0, SIM
+ABSENT,ABSENT: no SIM inserted). **Rule 2 holds.** T7 right after that warm reboot refused as designed: sequencer
+0, CP_CTRL_S 0, **CP_CTRL_NS 0x002016a2**. A warm reboot resets the CP's sequencer but keeps CP_PWRON in
+CP_CTRL_NS. That corrects 6.2: CP_CTRL bits do survive a warm reboot, and only a cold boot clears them (T1/T4
+had run after cold boots). Android's cbd treats exactly this state as "CP first Init" and re-runs cal_cp_init,
+which sets CP_PWRON again (no change) and CP_START. Since commit after 252c6a0 the guard follows Android: it
+refuses only when the sequencer is up or CP_START is set, and logs a leftover CP_PWRON.
+
 ### 6.2 Safety review (hazard -> what prevents it -> how it is tested)
 | hazard | prevention | test |
 |---|---|---|
@@ -305,7 +332,7 @@ records (the code follows jbd2's rule: a revoke in transaction T masks the block
 | an EL3 call we did not mean | glue allow-list: CP_CTRL read; CP_CTRL write only when it differs from EL3's freshly read value in bits 1/2/3/17 alone; SSS clock 0/1; security mode 2 (2,0,0) and mode 0 (0xF0000000, BOOT <= 64 KiB, MAIN within the CP memory). Nothing else reaches `smc` | host: every recorded call audited against that list, in every scenario |
 | a stray MMIO store | glue allow-list: PMU 0x1320-0x1338 and 0x280, ISSR0-63, INTGR1 = 2, AP2CP_CFG = 1 | host: every recorded store audited |
 | the CP left running or half-started | every exit after cp_init goes through park (`stop()`); `sb_before_reset` parks again if a park failed (end, Power, the crash screen's reboot); a hang trips the 30 s watchdog, a system reset. T1 (17:52) ran after the morning's Android boots and read CP_CTRL_NS without CP_PWRON, AP2CP_CFG 0 on Android's own boots, so this state does not survive a reboot; T1 after T6/T7 confirms it | host: never-answering CP, EL3 refusal, copy refusal: all end parked (central status 0x80, CP_CTRL_NS bits 2 and 17, SSS clock off) |
-| touching a CP someone else started | refuses unless sequencer 0 and CP_START / CP_PWRON clear | host: "started before" -> only read calls, no store |
+| touching a CP someone else started | refuses unless sequencer 0 and CP_START clear (a CP_PWRON left by a warm reboot is accepted, as Android does) | host: "started before" -> only read calls, no store; "warm PWRON" -> runs and parks |
 | network activity, SIM use, a call | no IPC at all in stage 3: no BOOT magic, no UDL, no INIT_END, so the CP never reaches the phase where RIL powers the radio; the IPC builder's allow-list (GETs only, CALL/SMS/SS/SAT/identity refused) is unchanged; nothing in stage 3 builds a frame | the existing exhaustive allow-list test |
 | identifiers in logs | nv_data.bin only as size + CRC; logs redacted as before | existing redaction tests |
 | a hang without a clue | a "boot: ..." line before every step, in pmsg | host: breadcrumb tests |
@@ -313,10 +340,74 @@ records (the code follows jbd2's rule: a revoke in transaction T masks the block
 
 Not done by any key: a write to RADIO/EFS/CPEFS; an IPC message; the CP's network phase.
 
-## 7. Later stages (not started)
+### Result T7 (2026-11-08 21:27, cold boot, 0ec0bb4, `build/test-boots/modemload-run-2127/loader-pmsg.txt`)
+**The CP booted from our load.** AP2CP_CFG 0 -> 1, cp_status set at once (ISSR3 0x2), ISSR2 0x6ba0 as on Android,
+mode 0 0x00 in 205 ms. It was parked (`released 1 parked 1`, CP_CTRL_NS 0x002216a6), 0 faults.
 
-4. Link: mailbox doorbells + polling, INIT_START → PIF_INIT_DONE → PHONE_START → INIT_END, the ECT clock table.
-5. RFS server on ch 245 against a RAM copy of EFS/CPEFS (CP writes land in RAM only). Without it the CP never
-   goes online.
+## 6.5 Stage 4: the link up to PHONE_START (T8)
+`sbm_link.c`, key `modemlink-boot` (stop `SBM_BOOT_LINK`), runs after T7's power-on, in Android's order
+(this phone's log 19.2105-20.49; `shmem_start_download`, `xmit_udl`, `cmd_init_start_handler`, `ss310ap_boot_off`):
+1. DL_START: the legacy map's eight queue words = 0, magic "BOOT" at IPC + 0 (read back), ap_status = 1 in ISSR2
+   (0x6ba2, Android's value).
+2. UDL handshake on ch 215 through the legacy RAW queue (`shmem_4mb_phys_map` without LEGACY_QOS: raw tx
+   head/tail at +24/+28, buffer +12288 (2084864 bytes); raw rx head/tail +32/+36, buffer +2097152 (2 MiB)).
+   Frames are SIPC5, config 0xFC (start + PADDING: the boot link is BOOT_ALIGNED), padded to 8.
+   0x900D -> 0xA00D, then 0x9F00 -> 0xAF00, 2 s each (Android: 2.4 ms). **Confirmed in cbd** (One UI's
+   `/vendor/bin/cbd`, pulled read-only to the git-ignored build/oneui-cbd/; stripped arm64, function at 0x54680):
+   `std_udl_req_resp(fd, req, exp)` writes the u32 `req` with `write(fd, &req, 4)`, polls, then reads a 4-byte
+   answer and compares it with `exp`. With umts_boot0's SIPC5 header the wire frame is `fc d7 08 00 0d 90 00 00`.
+3. BOOT_OFF: dump_pc_no_pg off (CP_CTRL_NS bit 17 = 0 via EL3), then wait for the CP's message (15 s).
+4. INIT_START (0xC1 in ISSR1, INTSR0 bit 16, acknowledged through INTCR0): `sbm_sbd_init` (the layout matched
+   against this phone's log), then PIF_INIT_DONE (0xCD in ISSR0, INTGR1 bit 0).
+5. PHONE_START (0xC8): logged; **stage 4 stops**. It sends no INIT_END and opens no RIL/RFS channel, so the CP
+   never goes online. Then the park, as in stage 3. A CP crash command (0x07 / 0x09) stops it at once and parks.
+
+Safety additions over 6.2:
+- The glue allows two more stores, only with the stage 4 key: INTGR1 = 1 (the message doorbell) and
+  INTCR0 = 1 << 16 (acknowledge).
+- The IPC region is written directly (the legacy words, the SBD descriptors). That is the region designed for
+  this; stage 3 never touched it.
+- Host tests (fake CP): the exact UDL frames; ISSR2 0x6ba2; PIF_INIT_DONE is the only command ever sent, and
+  0xC2 never; a silent boot loader, a wrong answer and a crash command all end parked.
+
+### Result T8 (2026-11-08 21:53, warm boot, 265e926, `build/test-boots/modemlink-boot-2156/loader-pmsg.txt`)
+**The link comes up to PHONE_START from our own code.** DL_START; UDL 0x900D -> 0xA00D and 0x9F00 -> 0xAF00 on
+ch 215, each with a CP data message 0x0083 first; BOOT_OFF; INIT_START (0xC1) after 1055 ms (Android: about 1.2
+s); the SBD layout; PIF_INIT_DONE; PHONE_START (0xC8) at once. Parked, 0 faults, mode 0 0x00 in 206 ms. Two
+cosmetic bugs in the image's report are fixed since: the END line for modemlink keys printed an unfilled probe
+verdict, and the post-park probe said "cp-running" (the reset sequencer stays 5 while the central sequencer
+reports 0x80; the verdict now checks 0x80 first).
+
+### 6.6 Tonight, unattended: T8 hold soak (`modemlink-hold`)
+T8, plus holding 20 s after PHONE_START (`modem_hold=S`, at most 60) while sending nothing and consuming
+nothing: it counts the CP's PHONE_START repeats and compares every DL ring's pointers each second, then parks.
+Several runs in a row (warm reboots between them, the guard from bd8cc1b) show that the cycle is repeatable and
+that the CP is stable and quiet in its pre-online state. No One UI check is needed for that: each run's "before"
+line is the check (sequencer 0, CP_START clear).
+
+Result (2026-11-08 22:28-22:32, 1fbce47, `build/test-boots/modemlink-hold-{1,2,3}-*`): **3 runs, identical and
+clean**, warm boots back to back, about 66 s each, back to the loader on their own. `HOLD: 20000 ms: PHONE_START
+repeated 203 times (last gap 100 ms), other commands 0, DL frames waiting 0`; parked, after-probe `cp-in-reset`,
+0 faults. While it waits for INIT_END, the CP repeats PHONE_START every 100 ms and sends nothing on any ring.
+
+## 7. Stage 5: online without RIL (plan; morning, user present)
+INIT_END makes the CP go online. Two things are unknown, and both decide safety:
+- **R1, RFS.** After INIT_END the CP reads (and writes) its NV files over ch 245, and without an answer it
+  never settles. None of our captures contain a ch 245 frame (the kernel logs only FMT), so the RFS opcodes and
+  framing are unknown. Plan: in daytime One UI (KernelSU), trace the RFS daemon's reads and writes on
+  /dev/umts_rfs0 (headers, lengths and file names only, never contents), and pull its binary read-only like cbd.
+- **R2, the radio.** Does the CP switch its RF on by itself after INIT_END, or only when RIL asks? The SIM-less
+  phone camps for emergency-only service under Android, which is RX, and attach is impossible without a SIM. We
+  need to know which IPC message turns RF on (pull libsec-ril / trace rild's first FMT frames), so that stage 5
+  can keep RF off or send the "low power mode" request explicitly (one more allow-listed SET, radio *off* only).
+Stage 5 = T9 `modemlink-online`: the ECT clock table (`sbm_clk.c`, ready: this phone's 52 frequencies at IPC + 40, host-tested against its log), INIT_END, an RFS server against the RAM copy of EFS/CPEFS (the CP's writes go to
+RAM only), FMT receive-only with sbm_cell decoding (no request sent unless R2 requires the LPM one), 30 s, park.
+Safety additions: never any SMS/CALL/SS (the builder's allow-list); RFS writes only to RAM; a crash command or the
+CP's watchdog interrupt parks at once; first run attended.
+
+## 8. Later stages (not started)
+
+
+(Stage 4 and stage 5's plan are above.) Then the ECT clock table write that Android does before INIT_END.
 6. Status in the UI (SIM, registration, bars); then data (PDP), and SMS to the user's own number only.
 7. Voice: research only. Emergency numbers stay refused before any frame is built.

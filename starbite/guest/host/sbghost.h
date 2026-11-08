@@ -46,6 +46,7 @@ enum { SBG_OFF = 0, SBG_LOADED, SBG_BOOTING, SBG_RUNNING, SBG_STOPPING, SBG_FAIL
 struct sbg_stats {
     uint32_t state, boots, hello, frames, touches_sent, msgs_in, lines_lost, lines_repaired;
     uint32_t doorbells_out, guest_state, guest_ncpus, guest_cpuif;
+    uint32_t hello_ncpus;                           /* CPUs online at HELLO (guest_ncpus: at the last update) */
     uint64_t t_cpu_on, t_hello, t_first_frame, t_stop, t_off;  /* ms since sbg_start (t_off: since sbg_stop) */
     const char *why;                                /* SBG_FAILED: the reason */
 };
@@ -57,6 +58,11 @@ void sbg_gic_prepare(void);
 /* Copy the guest in (word copies) and write the header. 0, or < 0 (and stats.why). */
 int sbg_load(const void *image, uint64_t image_size, const void *dtb, uint64_t dtb_size, const void *initrd,
              uint64_t initrd_size);
+/* The same when the host already put the files at their places (Starbite OS: store_load straight into the
+ * carve-out): the Image at linux_base + SBG_IMAGE_AT (its text_offset must be that), the DTB at + SBG_DTB_OFF,
+ * the initrd at + SBG_RD_OFF. Checks the Image's header, then the shared region and the header as sbg_load. */
+#define SBG_IMAGE_AT 0x80000ULL
+int sbg_load_placed(uint64_t image_size, uint64_t dtb_size, uint64_t initrd_size);
 int sbg_start(void);
 /* From the host's tick: the guest's messages and log, state changes, timeouts, the line checks. */
 void sbg_poll(void);
@@ -67,6 +73,8 @@ int sbg_frame(uint32_t *seq, const volatile uint32_t **pixels, uint32_t *stride_
 int sbg_touch(uint32_t slot, uint32_t phase, int32_t x, int32_t y);
 int sbg_key(uint32_t code, int down);
 int sbg_screen(int on);
+/* Any host -> guest message (SBG_MSG_*), with the doorbell. 1 queued, 0 not (not running, or the ring full). */
+int sbg_send(uint16_t type, uint32_t a, uint32_t b);
 int sbg_stop(void);
 const struct sbg_stats *sbg_stats(void);
 volatile struct sbshm_hdr *sbg_hdr(void);

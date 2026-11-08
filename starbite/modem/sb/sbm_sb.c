@@ -16,7 +16,9 @@
  *         read back (PMUCAL's CP_PWRON, CP_RESET_SET, CP_START, dump_pc_no_pg); the SSS clock on/off; the
  *         security call mode 2 (2, 0, 0) and mode 0 (0xF0000000, BOOT size, MAIN size within the CP memory).
  *    mmio_wr32: PMU 0x1320-0x1338 and 0x280 (cal_cp_reset_assert), mailbox ISSR0-63, INTGR1 = 2 (the wakeup
- *         interrupt), AP2CP_CFG = 1. Nothing else.
+ *         interrupt), AP2CP_CFG = 1; stage 4 also INTGR1 = 1 (the message interrupt) and INTCR0 = 1 << 16
+ *         (acknowledging the CP's message). Nothing else.
+ *    ipc (stage 4): the IPC region, modem_if + the map's ipc_off, for the legacy queue words and the SBD layout.
  *    carve_write / carve_read: modem_if + [0, 0x8000000) only (the CP memory and VSS; never the IPC region,
  *         never cp_ram_logging), a store fault or SError makes it fail.
  *  - Partitions: RADIO and EFS are read through sb_blk_read only; this file has no block-write call (host/run.sh
@@ -105,13 +107,16 @@ static uint64_t smc3(void *ctx, uint64_t id, uint64_t a1, uint64_t a2, uint64_t 
     return 0xFFFF;
 }
 
+static int link_on;                     /* stage 4 only: the message interrupt and its acknowledge */
 static int mmio_wr(void *ctx, uint64_t pa, uint32_t v)
 {
     (void)ctx;
     int ok = (pa >= SBM_PMU_PA + 0x1320 && pa <= SBM_PMU_PA + 0x1338 && !(pa & 3)) ||
              pa == SBM_PMU_PA + SBM_PMU_CENTRAL_SEQ_CP_CFG ||
              (pa >= SBM_MBOX_PA + SBM_MBOX_ISSR(0) && pa <= SBM_MBOX_PA + SBM_MBOX_ISSR(63) && !(pa & 3)) ||
-             (pa == SBM_MBOX_PA + SBM_MBOX_INTGR1 && v == 2) || (pa == SBM_AP2CP_CFG_PA && v == 1);
+             (pa == SBM_MBOX_PA + SBM_MBOX_INTGR1 && (v == 2 || (v == 1 && link_on))) ||
+             (pa == SBM_MBOX_PA + SBM_MBOX_INTCR0 && v == (1u << 16) && link_on) ||
+             (pa == SBM_AP2CP_CFG_PA && v == 1);
     if (!ok)
         return 0;
     *(volatile uint32_t *)(uintptr_t)pa = v;
@@ -249,6 +254,13 @@ void sbm_sb_plat_step4(struct sbm_plat *p)
 {
     p->smc = smc;
     p->poke32 = poke;
+}
+
+void sbm_sb_plat_stage4(struct sbm_plat *p, uint32_t ipc_off)
+{
+    sbm_sb_plat_stage3(p);
+    link_on = 1;
+    p->ipc = (uint8_t *)(uintptr_t)(SBM_MODEM_IF_PA + ipc_off);   /* non-cacheable in libsb's map */
 }
 
 void sbm_sb_plat_stage3(struct sbm_plat *p)

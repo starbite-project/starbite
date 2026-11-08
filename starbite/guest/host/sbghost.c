@@ -167,8 +167,27 @@ const struct sbg_stats *sbg_stats(void)
     return &st;
 }
 
+static int load(const void *image, uint64_t image_size, const void *dtb, uint64_t dtb_size, const void *initrd,
+                uint64_t initrd_size, int placed);
+
 int sbg_load(const void *image, uint64_t image_size, const void *dtb, uint64_t dtb_size, const void *initrd,
              uint64_t initrd_size)
+{
+    return load(image, image_size, dtb, dtb_size, initrd, initrd_size, 0);
+}
+
+int sbg_load_placed(uint64_t image_size, uint64_t dtb_size, uint64_t initrd_size)
+{
+    const void *img = (const void *)(uintptr_t)(cfg.linux_base + SBG_IMAGE_AT);
+    if (((const volatile uint64_t *)img)[1] != SBG_IMAGE_AT) {
+        fail("the placed Image's text_offset is not 0x80000");
+        return -5;
+    }
+    return load(img, image_size, 0, dtb_size, 0, initrd_size, 1);
+}
+
+static int load(const void *image, uint64_t image_size, const void *dtb, uint64_t dtb_size, const void *initrd,
+                uint64_t initrd_size, int placed)
 {
     if (st.state != SBG_OFF && st.state != SBG_FAILED && st.state != SBG_LOADED)
         return -1;
@@ -194,10 +213,12 @@ int sbg_load(const void *image, uint64_t image_size, const void *dtb, uint64_t d
     zero_words(SHM(0), SBSHM_SURF_OFF);              /* header, rings, the ramoops zone: a fresh log */
     zero_words(SHM(SBSHM_SURF_OFF), 2 * surf);
     img_pa = cfg.linux_base + text_off;
-    copy_words((uintptr_t)img_pa, image, image_size);
-    copy_words((uintptr_t)(cfg.linux_base + SBG_DTB_OFF), dtb, dtb_size);
-    if (initrd_size)
-        copy_words((uintptr_t)(cfg.linux_base + SBG_RD_OFF), initrd, initrd_size);
+    if (!placed) {
+        copy_words((uintptr_t)img_pa, image, image_size);
+        copy_words((uintptr_t)(cfg.linux_base + SBG_DTB_OFF), dtb, dtb_size);
+        if (initrd_size)
+            copy_words((uintptr_t)(cfg.linux_base + SBG_RD_OFF), initrd, initrd_size);
+    }
     volatile struct sbshm_hdr *h = HDR;
     h->magic = SBSHM_MAGIC;
     h->version = SBSHM_VERSION;
@@ -228,7 +249,7 @@ int sbg_load(const void *image, uint64_t image_size, const void *dtb, uint64_t d
     sbshm_dmb();
     h->host_state = SBG_HOST_LOADED;
     st.state = SBG_LOADED;
-    st.hello = st.frames = 0;
+    st.hello = st.frames = st.hello_ncpus = 0;
     st.t_hello = st.t_first_frame = st.t_off = st.t_stop = 0;
     log_pos = 0;
     log_seen = 0;
@@ -325,6 +346,7 @@ int sbg_touch(uint32_t slot, uint32_t phase, int32_t x, int32_t y)
     return r;
 }
 int sbg_key(uint32_t code, int down) { return put(SBG_MSG_KEY, code, down ? 1U : 0U, 0, 0); }
+int sbg_send(uint16_t type, uint32_t a, uint32_t b) { return put(type, a, b, 0, 0); }
 int sbg_screen(int on)
 {
     HDR->screen_on = on ? 1U : 0U;
@@ -380,6 +402,7 @@ void sbg_poll(void)
         st.msgs_in++;
         if (m.type == SBG_MSG_HELLO && !st.hello) {
             st.hello = 1;
+            st.hello_ncpus = m.a;
             st.t_hello = t - t_start;
             if (st.state == SBG_BOOTING)
                 st.state = SBG_RUNNING;

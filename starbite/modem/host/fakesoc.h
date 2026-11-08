@@ -21,7 +21,17 @@ struct fakesoc {
     struct { uint32_t off, size; uint8_t *mem; } reg[FS_REGIONS];
     unsigned nreg;
     /* faults to inject */
-    int refuse_el3_write, refuse_carve, never_status, started_before;
+    int refuse_el3_write, refuse_carve, never_status, started_before, warm_pwron;
+    /* stage 4: the IPC region, and the fake CP's side of the handshake */
+    uint8_t *ipc;
+    uint32_t ipc_size;
+    enum { L_IDLE, L_UDL, L_INIT_SOON, L_WAIT_PIF, L_PHONE_SOON, L_DONE } link;
+    uint64_t link_at_us;
+    int udl_silent, udl_wrong, crash_after_pif, layout_ok;
+    uint8_t udl_frames[4][16];
+    unsigned n_udl;
+    uint32_t ap_msgs[32];                /* every ISSR0 value sent with INTGR1 bit 0 */
+    unsigned n_ap_msgs;
     /* records */
     struct { uint64_t pa; uint32_t v; } wr[FS_MAXREC];
     unsigned nwr;

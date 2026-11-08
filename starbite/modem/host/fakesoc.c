@@ -27,6 +27,8 @@ void fakesoc_init(struct fakesoc *s, const struct sbm_plan *plan, uint32_t boot_
         s->reg[i].mem = calloc(1, plan->l[i].size);
     }
     s->nreg = plan->n;
+    s->ipc_size = SBM_DT_IPC_SIZE;
+    s->ipc = calloc(1, s->ipc_size);
 }
 
 void fakesoc_free(struct fakesoc *s)
@@ -34,6 +36,8 @@ void fakesoc_free(struct fakesoc *s)
     for (unsigned i = 0; i < s->nreg; ++i)
         free(s->reg[i].mem);
     s->nreg = 0;
+    free(s->ipc);
+    s->ipc = 0;
 }
 
 static uint8_t *carve(struct fakesoc *s, uint32_t off, uint32_t len)
@@ -44,8 +48,91 @@ static uint8_t *carve(struct fakesoc *s, uint32_t off, uint32_t len)
     return 0;
 }
 
+/* the fake CP's link side --------------------------------------------------------------------- */
+static uint32_t l32(struct fakesoc *s, uint32_t o) { return sbm_le32(s->ipc + o); }
+static void cp_msg(struct fakesoc *s, uint32_t v)
+{
+    s->mbox[SBM_MBOX_ISSR(SBM_MBX_CP2AP_MSG) / 4] = v;
+    s->mbox[SBM_MBOX_INTSR0 / 4] |= 1u << 16;
+}
+static void raw_rx_push(struct fakesoc *s, uint32_t word)
+{
+    uint8_t f[8] = { 0xFC, SBM_CH_BOOT0, 8, 0 };
+    sbm_put32(f + 4, word);
+    uint32_t in = l32(s, SBM_LEG_RAW_RX_HEAD);
+    for (unsigned i = 0; i < 8; ++i)
+        s->ipc[SBM_LEG_RAW_RX_BUFF + (in + i) % SBM_LEG_RAW_RX_SIZE] = f[i];
+    sbm_put32(s->ipc + SBM_LEG_RAW_RX_HEAD, (in + 8) % SBM_LEG_RAW_RX_SIZE);
+    cp_msg(s, SBM_INT_VALID | 0x10);     /* a data message, as for RAW */
+}
+static void link_tick(struct fakesoc *s)
+{
+    if (!s->cp_running || !s->ipc)
+        return;
+    uint32_t ap = s->mbox[SBM_MBOX_ISSR(SBM_MBX_AP2CP_STATUS) / 4];
+    if (s->link == L_IDLE && l32(s, SBM_LEG_MAGIC) == SBM_BOOT_MAGIC && SBM_AP_STATUS(ap) == 1)
+        s->link = L_UDL;
+    if (s->link == L_UDL) {
+        uint32_t in = l32(s, SBM_LEG_RAW_TX_HEAD), out = l32(s, SBM_LEG_RAW_TX_TAIL);
+        while (out != in) {
+            uint8_t f[16];
+            for (unsigned i = 0; i < 16; ++i)
+                f[i] = s->ipc[SBM_LEG_RAW_TX_BUFF + (out + i) % SBM_LEG_RAW_TX_SIZE];
+            uint32_t len = sbm_le16(f + 2), total = (len + 7) & ~7u;
+            if (s->n_udl < 4)
+                for (unsigned i = 0; i < 16; ++i)
+                    s->udl_frames[s->n_udl][i] = i < total ? f[i] : 0;
+            s->n_udl++;
+            out = (out + total) % SBM_LEG_RAW_TX_SIZE;
+            sbm_put32(s->ipc + SBM_LEG_RAW_TX_TAIL, out);
+            uint32_t w = sbm_le32(f + 4);
+            if (s->udl_silent || f[1] != SBM_CH_BOOT0)
+                continue;
+            if (w == SBM_UDL_BOOT_DONE)
+                raw_rx_push(s, s->udl_wrong ? 0xBAD0 : SBM_UDL_BOOT_DONE_OK);
+            else if (w == SBM_UDL_FIN) {
+                raw_rx_push(s, SBM_UDL_FIN_OK);
+                s->link = L_INIT_SOON;
+                s->link_at_us = s->clock_us + 40000;
+            }
+        }
+    }
+    if (s->link == L_INIT_SOON && s->clock_us >= s->link_at_us && !(s->mbox[SBM_MBOX_INTSR0 / 4] & (1u << 16))) {
+        cp_msg(s, SBM_CMD2INT(SBM_CMD_INIT_START));
+        s->link = L_WAIT_PIF;
+    }
+    if (s->link == L_PHONE_SOON && s->clock_us >= s->link_at_us && !(s->mbox[SBM_MBOX_INTSR0 / 4] & (1u << 16))) {
+        cp_msg(s, SBM_CMD2INT(s->crash_after_pif ? SBM_CMD_CRASH_RESET : SBM_CMD_PHONE_START));
+        s->link = L_DONE;
+        s->link_at_us = s->clock_us + 100000;
+    }
+    /* no INIT_END: the CP asks again every 100 ms (measured on the phone, modemlink-hold 2026-11-08) */
+    if (s->link == L_DONE && !s->crash_after_pif && s->clock_us >= s->link_at_us &&
+        !(s->mbox[SBM_MBOX_INTSR0 / 4] & (1u << 16))) {
+        cp_msg(s, SBM_CMD2INT(SBM_CMD_PHONE_START));
+        s->link_at_us = s->clock_us + 100000;
+    }
+}
+
+static void ap_msg(struct fakesoc *s)
+{
+    uint32_t v = s->mbox[SBM_MBOX_ISSR(SBM_MBX_AP2CP_MSG) / 4];
+    if (s->n_ap_msgs < 32)
+        s->ap_msgs[s->n_ap_msgs] = v;
+    s->n_ap_msgs++;
+    if (s->link == L_WAIT_PIF && v == SBM_CMD2INT(SBM_CMD_PIF_INIT_DONE)) {
+        struct sbm_sbd cp;
+        s->layout_ok = sbm_sbd_attach(&cp, s->ipc, s->ipc_size) == 0 && cp.n == 9 && cp.rbps_off == 3852;
+        if (s->layout_ok) {
+            s->link = L_PHONE_SOON;
+            s->link_at_us = s->clock_us + 30000;
+        }
+    }
+}
+
 static void tick(struct fakesoc *s)
 {
+    link_tick(s);
     uint32_t pwr = s->ctrl[SBM_CP_CTRL_NS] & 2, start = s->ctrl[SBM_CP_CTRL_S] & 8;
     if (pwr && start && (s->pmu[PMU_CCFG] & (1u << 16))) {
         s->pmu[PMU_RSEQ] = 5;
@@ -99,8 +186,14 @@ static int mmio_wr(void *ctx, uint64_t pa, uint32_t v)
             return 0;
         s->pmu[(pa - SBM_PMU_PA) / 4] = v;
     } else if (pa >= SBM_MBOX_PA && pa < SBM_MBOX_PA + SBM_MBOX_SIZE) {
-        if (pa != SBM_MBOX_PA + SBM_MBOX_INTGR1)
+        if (pa == SBM_MBOX_PA + SBM_MBOX_INTGR1) {
+            if (v & 1)
+                ap_msg(s);
+        } else if (pa == SBM_MBOX_PA + SBM_MBOX_INTCR0) {
+            s->mbox[SBM_MBOX_INTSR0 / 4] &= ~v;
+        } else {
             s->mbox[(pa - SBM_MBOX_PA) / 4] = v;
+        }
     } else if (pa == SBM_AP2CP_CFG_PA) {
         s->ap2cp_cfg = v;
         if ((v & 1) && s->validated && s->pmu[PMU_RSEQ] == 5) {
@@ -199,6 +292,9 @@ void fakesoc_plat(struct fakesoc *s, struct sbm_plat *p, void (*log)(void *, con
     p->carve_read = cr;
     p->udelay = udelay;
     p->now_us = now_us;
+    p->ipc = s->ipc;
+    if (s->warm_pwron)                   /* after a warm reboot from Android: PWRON kept, sequencer 0 */
+        s->ctrl[SBM_CP_CTRL_NS] = 0x002016a2;
     if (s->started_before) {
         s->pmu[PMU_RSEQ] = 5;
         s->ctrl[SBM_CP_CTRL_S] = 8;

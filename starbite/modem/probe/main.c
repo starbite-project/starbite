@@ -152,7 +152,7 @@ static const char *launched_key(char key[24])
             for (; i < 23 && blk[48 + i]; i++)
                 key[i] = (char)blk[48 + i];
             key[i] = 0;
-            if (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload"))
+            if (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink"))
                 return "the loader's launch record";
         }
     }
@@ -177,7 +177,7 @@ static const char *launched_key(char key[24])
                     at++;
                 }
                 key[i] = 0;
-                found = i > 0 && (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload"));
+                found = i > 0 && (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink"));
             }
         }
         if (found)
@@ -280,16 +280,19 @@ static void stage3(const char *key)
     struct sbm_boot b;
     struct sbm_probe pr;
     char s[COLS];
-    enum sbm_boot_stop stop = sb_streq(key, "modemload-run") ? SBM_BOOT_RUN
+    enum sbm_boot_stop stop = sb_prefix(key, "modemlink") ? SBM_BOOT_LINK
+                            : sb_streq(key, "modemload-run") ? SBM_BOOT_RUN
                             : sb_streq(key, "modemload-sec") ? SBM_BOOT_SEC : SBM_BOOT_DRY;
 
     sb_storage_hold("modem test: no storage writes");
     sbm_fmt(s, sizeof(s), "modemload: %s; storage writes held; watchdog %u s (own: armed or fed here)",
-            stop == SBM_BOOT_RUN ? "RUN: load, EL3 check, start the CP, first status, park"
+            stop == SBM_BOOT_LINK ? "LINK: stage 3, then DL_START, UDL, INIT_START, PIF_INIT_DONE, PHONE_START, park"
+            : stop == SBM_BOOT_RUN ? "RUN: load, EL3 check, start the CP, first status, park"
             : stop == SBM_BOOT_SEC ? "SEC: load, EL3 check, park (the CP CPU is not started)" : "DRY: RAM only",
             sb_wdt_arm(30));
     line(s);
-    line("modemload: no IPC is sent: no network search, no attach, no SIM use, no call of any kind");
+    line(stop == SBM_BOOT_LINK ? "modemlink: link commands only, never INIT_END: the CP never goes online (no RIL, network, SIM or call)"
+                               : "modemload: no IPC is sent: no network search, no attach, no SIM use, no call of any kind");
     sbm_sb_plat(&park_plat, plog);
     sbm_probe_run(&park_plat, SBM_PROBE_REGS, &pr);
     sbm_probe_report(&park_plat, &pr);
@@ -300,11 +303,15 @@ static void stage3(const char *key)
         return;
     }
     if (stop >= SBM_BOOT_SEC) {
-        sbm_sb_plat_stage3(&park_plat);
+        if (stop == SBM_BOOT_LINK)
+            sbm_sb_plat_stage4(&park_plat, im.mm.ipc_off);
+        else
+            sbm_sb_plat_stage3(&park_plat);
         park_armed = 1;
         sb_before_reset = park_hook;
     }
     b.stop = stop;
+    b.hold_ms = sb_streq(key, "modemlink-hold") ? 1000u * arg("modem_hold", 20) : 0;
     sbm_boot_run(&park_plat, &im, &b);
     park_armed = b.inited && !b.parked;  /* the core parked already; the hook only retries a failed park */
     sbm_boot_report(&park_plat, &b);
@@ -346,7 +353,7 @@ void sb_main(void)
         step = 1;
     autostart = arg("modem_auto", 0);
     ret = arg("modem_return", autostart ? 30 : 0);
-    is_load = sb_prefix(key, "modemload");
+    is_load = sb_prefix(key, "modemload") || sb_prefix(key, "modemlink");
     if (is_load) {
         line("modemload: stage 3 test (docs/MODEM.md 6). RADIO and EFS are only read; every partition write is held.");
         line("modemload: -sec / -run start the CP's power sequence through EL3 and always end with the CP parked.");
@@ -410,7 +417,7 @@ void sb_main(void)
 end:
     {
         char s[COLS];
-        if (sb_prefix(key, "modemload"))
+        if (is_load)
             sbm_fmt(s, sizeof(s), "modemload: END; faults: sync %u, SError %u (stale before a read: %u)",
                     (unsigned)sb_fault.count, (unsigned)sb_fault.serror_count, sbm_sb_stale_serrors());
         else

@@ -116,8 +116,10 @@ const char *sbm_probe_verdict(const struct sbm_probe *pr)
         return "shm-zero-ambiguous";
     if (pr->shm_ipc_ok && pr->ipc_magic == SBM_CRASH_MAGIC)
         return "cp-crashed";
+    if (((pr->central_st >> 16) & 0xFF) == 0x80)
+        return "cp-in-reset";            /* parked: the reset sequencer may still read 5 (T6-T8) */
     if ((pr->reset_seq & 7) != 5)
-        return ((pr->central_st >> 16) & 0xFF) == 0x80 ? "cp-in-reset" : "cp-off";
+        return "cp-off";
     if (pr->shm_ipc_ok && pr->ipc_magic == SBM_IPC_MAGIC && pr->ipc_access == 1)
         return "cp-online";
     if (pr->shm_ipc_ok && pr->ipc_magic == SBM_BOOT_MAGIC)

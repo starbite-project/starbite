@@ -13,7 +13,8 @@ BAD = 4294967294
 
 
 def container(path):
-    m = re.match(r'(/private/var/containers/Shared/SystemGroup/[^/]+|/private/var/mobile/Containers/[^/]+/[^/]+/[^/]+)', path)
+    m = re.match(r'(/private/var/containers/Shared/SystemGroup/[^/]+|/private/var/containers/Data/[^/]+/[^/]+|'
+                 r'/private/var/mobile/Containers/[^/]+/[^/]+/[^/]+)', path)
     return m.group(1) if m else path
 
 

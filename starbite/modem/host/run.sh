@@ -19,7 +19,7 @@ if [ -z "$radio" ]; then
         if [ -f "$c" ]; then radio=$c; break; fi
     done
 fi
-src="$core/sbm_util.c $core/sbm_toc.c $core/sbm_sipc5.c $core/sbm_sbd.c $core/sbm_ipc.c $core/sbm_cell.c $core/sbm_probe.c $core/sbm_probe2.c $core/sbm_boot.c"
+src="$core/sbm_util.c $core/sbm_toc.c $core/sbm_sipc5.c $core/sbm_sbd.c $core/sbm_ipc.c $core/sbm_cell.c $core/sbm_probe.c $core/sbm_probe2.c $core/sbm_boot.c $core/sbm_link.c $core/sbm_clk.c"
 # the core alone must build freestanding, without a C library (libsb images, an XNU kext)
 for f in $src; do
     $CC -std=c99 -O2 -Wall -Wextra -Werror -Wshadow -Wcast-align -ffreestanding -fno-builtin -c -I"$core" "$f" \

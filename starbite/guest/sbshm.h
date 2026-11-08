@@ -127,6 +127,7 @@ enum {
     SBG_MSG_SCREEN = 3,     /* a = 1 on / 0 off */
     SBG_MSG_STOP = 4,       /* power the cluster off (a = reason) */
     SBG_MSG_FOCUS = 5,      /* a = 1: the surface is shown full screen / 0: in the background */
+    SBG_MSG_LOAD = 6,       /* test load: a = threads spinning for b seconds (P2d: the M3s under load) */
     /* guest -> host */
     SBG_MSG_HELLO = 64,     /* a = ncpus, b = surface ready */
     SBG_MSG_BYE = 65,       /* user space done; the kernel powers the CPUs off next */
