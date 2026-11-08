@@ -10,6 +10,7 @@
 /* state 0 off, 2 the countdown (3 s, a hold cancels), 1 flashing: white / red at 2 Hz */
 static int sos_st;
 int sos_led_on;
+int led_full;                               /* 0.6.3: Settings > Alarm (RAM only until the first run is done) */
 static uint64_t sos_t0, sos_phase_t;
 static int sos_phase;
 
@@ -33,6 +34,7 @@ int sos_set(int on)
         kt_cancel(KT_SOS, 1);
         if (sos_led_on)
             torch_set(0);
+        fled_off();
         panel_boost(2, 0);
         sb_log("sos: off");
     }
@@ -57,8 +59,12 @@ void sos_timer(unsigned id)
     }
     if (sos_st == 1) {
         sos_phase = (int)(((now - sos_phase_t) / 250U) & 1U);
-        if (sos_led_on)
+        if (sos_led_on && led_full && fled_init()) {
+            if (!sos_phase)
+                (void)fled_pulse();         /* 0.6.3: a 1250 mA flash pulse with the white phase, at most 1 a second */
+        } else if (sos_led_on) {
             torch_set(!sos_phase);              /* the LED with the white phase */
+        }
     }
     ui_mark_dirty();
 }

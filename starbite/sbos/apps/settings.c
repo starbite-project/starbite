@@ -44,6 +44,8 @@ static void about(void)
     ui_textline("Calls and messages need the modem driver: not in this version.", GREY);
 }
 
+static int led_refused;                     /* 0.6.3: the LED chip did not answer */
+
 static void show(void)
 {
     ui_begin();
@@ -69,6 +71,10 @@ static void show(void)
     } else if (section == 1) {
         ui_toggle(4, "LED strobes in the alarm", setting_get(SET_SOS_LED) == 1);
         ui_textline("The alarm flashes the screen white and red. With this on, the LED on the back strobes too.", 0);
+        ui_toggle(8, "LED at rated power", setting_get(SET_LED_FULL) == 1);
+        ui_textline(led_refused ? "The LED chip did not answer: the LED stays as it was (logged)." :
+                    "The light at 240 mA and, in the alarm, 1250 mA camera-flash pulses once a second (Samsung's values). Until a restart.",
+                    led_refused ? 0xffff9f0aU : GREY);
         ui_textline("Sound and vibration: not available yet.", GREY);
     } else if (section == 2) {
         ui_toggle(5, "GPU in Heat High (test)", setting_get(SET_GPU_HEAT) == 1);
@@ -89,9 +95,12 @@ void app_event(const struct sbos_event *ev)
         show();
     } else if (ev->type == EV_APP_TOGGLE) {
         int id = ev->id == 2 ? SET_PANEL_SAVE : ev->id == 3 ? SET_PANEL_OFF : ev->id == 4 ? SET_SOS_LED :
-                 ev->id == 5 ? SET_GPU_HEAT : 0;
-        if (id)
-            setting_set(id, ev->value);
+                 ev->id == 5 ? SET_GPU_HEAT : ev->id == 8 ? SET_LED_FULL : 0;
+        if (id) {
+            int r = setting_set(id, ev->value);
+            if (id == SET_LED_FULL)
+                led_refused = ev->value && r != 0;
+        }
         show();
     } else if (ev->type == EV_APP_LEVEL) {
         if (ev->id == 9 && ev->value >= 0 && ev->value < 4)

@@ -829,6 +829,27 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.16 Version 0.6.3: the heat record, Manual's SoC stop, the LED at its rated currents (2026-11-08)
+
+From the user's 0.6.2 tour: about 10 W at most, and "at 128 °C it force shut off" (the SoC reading on screen; the
+loader then logged a POWER ON reset, so the RAM log was lost). The chip's own power cut acted near 128 °C on our
+reading, not at the 115 °C we decode from THD_TEMP0 (either the decode or our probe conversion differs; noted, not
+yet explained).
+- **The heat record** (`struct heat_record`, the slot's "heat" record): the level, time, cores, the last and the peak
+  temperatures, current, voltage, charge, the decoded trip and the reason, saved every 30 s while heating (through
+  the settings' save: at most one write in 10 s) and at the stop. A record still marked "running" at the next start
+  is logged (`heater: the last session ended without a stop (a forced power-off?) ...`) and shown on the Heat screen.
+  Needs the `sbos-state` store entry (T14's install step); without it nothing is written.
+- The Heat screen shows the chip's power-cut temperature as decoded, with "it acted at 128 °C in a test".
+- **Manual's SoC stop** (`SET_HEAT_SOC_STOP_C10`): off by default (the user's wish), or 90 / 100 / 110 / 120 °C.
+- **The LED at its rated currents** (`kern/fled.c`, Settings > Alarm "LED at rated power", off by default and until a
+  restart: a first run with the user present): the S2MPB02 over HSI2C 0x10920000 (USI10) at 0x59
+  (`build/em-research-flash-led.md`). Probes 0x1D = 0x90 and 0x63 = 0x7F first, reads the USI10 gates (never
+  writes CMU), writes the USI mode and gpp6-0/1 only if they differ, and of the chip only CTRL1 bits 7:6 / 3, CUR1
+  and TIME1[7:4]. The torch at 240 mA (Samsung's highest continuous), the alarm's LED as 1250 mA flash pulses (the
+  camera flash) ended by the chip's 125 ms timer, at most one a second, never with the torch pin high. The host has a
+  model of the chip that flags a forbidden register.
+
 ### 12.15 Version 0.6.2: emergency heat without software limits (2026-11-08)
 
 The user's scenario (Lapland, -35 °C, the phone is all they have), agreed with the main session:

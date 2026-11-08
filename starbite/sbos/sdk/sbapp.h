@@ -131,6 +131,9 @@ struct sbos_heat {
     int32_t ma, mv, pct;        /* 0.6.2: the battery's current (- discharging) and voltage while it heats; charge % */
     int32_t reserve_pct, target_c10;    /* 0.6.2: the call / SOS reserve (0 overridden); Keep warm's target */
     int32_t no_current_stop;    /* 0.6.2: Manual's 3.5 A stop turned off */
+    int32_t trip_c;             /* 0.6.3: the SoC's hardware trip as decoded (C; the 0.6.2 tour saw the power cut at 128) */
+    int32_t soc_stop_c10;       /* 0.6.3: Manual's SoC stop (0 off) */
+    int32_t last_unclean, last_peak_soc_c10, last_secs;     /* 0.6.3: the last session ended without a stop */
 };
 
 enum { SOS_OFF = 0, SOS_FLASH = 1 };
@@ -176,7 +179,9 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
        step; A55/M3 0 = the top normal step, GPU 0 = not used); until a restart */,
        SET_HEAT_RESERVE = 12 /* 0.6.2: the call / SOS reserve for full heat, % (0 = overridden, at most 50) */,
        SET_HEAT_TARGET_C10 = 13 /* 0.6.2: Keep warm's battery target, 0.1 C (50..350) */,
-       SET_HEAT_CURRENT_STOP = 14 /* 0.6.2: Manual's 3.5 A battery-current stop: 1 on (default), 0 off; until a restart */ };
+       SET_HEAT_CURRENT_STOP = 14 /* 0.6.2: Manual's 3.5 A battery-current stop: 1 on (default), 0 off; until a restart */,
+       SET_HEAT_SOC_STOP_C10 = 15 /* 0.6.3: Manual's SoC stop, 0.1 C: 0 off (default) or 700..1250 */,
+       SET_LED_FULL = 16 /* 0.6.3: the LED at its rated currents over I2C (torch 240 mA, SOS flash pulses 1250 mA) */ };
 
 /* sensor_read ids (0.3): temperatures in 0.1 C, -1000 unknown */
 enum { SENSOR_BATTERY_C10 = 1, SENSOR_SKIN_C10 = 2, SENSOR_SOC_C10 = 3, SENSOR_GPU_C10 = 4 };

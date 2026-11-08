@@ -178,7 +178,20 @@ int sb_sd_rails(uint8_t *l31, uint8_t *l2) { *l31 = pmic[1][0x68]; *l2 = pmic[1]
 struct sb_i2c sb_max_bus = { 0x14360000UL, 0x000000e0, 0x00f00000, 0x00210000, 1 };
 const char *sb_max_why;
 void sb_i2c_bus(struct sb_i2c *b) { (void)b; }
-int sb_i2c_msg(struct sb_i2c *b, unsigned a, int r, uint8_t *d, unsigned n, int s) { (void)b; (void)a; (void)r; (void)d; (void)n; (void)s; return 1; }
+/* 0.6.3: the S2MPB02 (0x59): its probe registers, and what fled.c writes (never 0x13, 0x16..0x1B, 0x63) */
+static uint8_t s2mpb02[256] = { [0x14] = 0xcc, [0x15] = 0x7f, [0x1d] = 0x90, [0x63] = 0x7f };
+int sb_i2c_msg(struct sb_i2c *b, unsigned a, int r, uint8_t *d, unsigned n, int s)
+{
+    (void)b; (void)s;
+    if (a == 0x59 && !r && n == 2) {
+        if (d[0] == 0x13 || (d[0] >= 0x16 && d[0] <= 0x1b) || d[0] == 0x63)
+            printf("host: S2MPB02 FORBIDDEN register %#x written\n", d[0]);
+        s2mpb02[d[0]] = d[1];
+        if (d[0] == 0x14)
+            printf("host: S2MPB02 CUR1 = %#04x (flash %u mA, torch %u mA)\n", d[1], 50U + 100U * (d[1] >> 4), 20U * (d[1] & 15U));
+    }
+    return 1;
+}
 static int fake_ma(void)
 {
     double t = (double)now_us / 1e6;
@@ -238,6 +251,7 @@ int sb_i2c_read(struct sb_i2c *b, unsigned addr, uint8_t reg, uint8_t *data, uns
     if (addr == 0x36 && len == 2) { uint16_t w; sb_fg_word(reg, &w); data[0] = (uint8_t)w; data[1] = (uint8_t)(w >> 8); return 1; }
     if (addr == 0x69 && len == 1) return sb_chg_read(reg, data);
     if (addr == 0x66 && len == 1) { *data = reg == 0 ? 0x05 : 0x09; return 1; }
+    if (addr == 0x59 && len == 1) { *data = s2mpb02[reg]; return 1; }
     return 0;
 }
 int sb_max_init(void) { return 1; }

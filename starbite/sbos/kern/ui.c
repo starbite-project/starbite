@@ -2205,6 +2205,8 @@ void ui_ktimer(unsigned id)
         dirty = 1;
     } else if (id == 6) {
         panel_idle();
+    } else if (id == 7) {
+        fled_timer();                       /* 0.6.3: the flash pin low after the pulse */
     } else if (id == 4 && screen == SCR_LIGHT) {
         kui_light(0);
     } else if (id == 5) {

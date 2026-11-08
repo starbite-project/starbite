@@ -47,6 +47,7 @@ static void temp(struct fmt *f, int c10)
 static const char *const lvl[7] = { "Off", "Low", "Medium", "High", "Extreme", "Manual", "Keep warm" };
 static const int targets[3] = { 100, 200, 300 };    /* Keep warm's battery targets, 0.1 C */
 static const int reserves[3] = { 5, 15, 30 };       /* the call / SOS reserve, % (0: overridden by a hold) */
+static const int socstops[5] = { 0, 900, 1000, 1100, 1200 };   /* Manual's SoC stop, 0.1 C (0 off) */
 
 /* Manual (0.6.1): the vendor tables' steps (the kernel checks them again); 0 = the top normal step / GPU not used */
 static const int st_a55[] = { 0, 455000, 598000, 715000, 832000, 949000, 1053000, 1248000, 1456000, 1690000, 1794000,
@@ -93,6 +94,16 @@ static void show_manual(int running)
         } else {
             ui_button(21, "Current stop: OFF", "Tap to turn the 3.5 A stop back on", 0);
         }
+        struct fmt g;
+        fmt_init(&g);
+        if (h.soc_stop_c10 > 0) {
+            fmt_s(&g, "Stops at ");
+            fmt_d(&g, h.soc_stop_c10 / 10);
+            fmt_s(&g, " \xc2\xb0" "C inside (tap: off, 90..120)");
+        } else {
+            fmt_s(&g, "Off: the chip's own power cut only (tap: 90..120)");
+        }
+        ui_button(22, "SoC stop", g.b, 0);
         ui_button(13, "Start Manual", 0, UI_HALF);
         ui_button(14, "Cancel", 0, UI_HALF);
     }
@@ -177,6 +188,22 @@ static void show(void)
         fmt_s(&f, h.cores == 1 ? " core" : " cores");
     }
     ui_textline(f.b, 0xffffffffU);
+    if (h.trip_c > 0) {
+        fmt_init(&f);
+        fmt_s(&f, "The chip's own power cut: reads ");
+        fmt_d(&f, h.trip_c);
+        fmt_s(&f, " \xc2\xb0" "C (it acted at 128 \xc2\xb0" "C in a test)");
+        ui_textline(f.b, h.soc_c10 >= 1050 ? ORANGE : GREY);
+    }
+    if (!on && h.last_unclean) {
+        fmt_init(&f);
+        fmt_s(&f, "Last time the phone switched itself off while heating: ");
+        fmt_d(&f, h.last_peak_soc_c10 / 10);
+        fmt_s(&f, " \xc2\xb0" "C inside after ");
+        fmt_d(&f, (h.last_secs + 59) / 60);
+        fmt_s(&f, " min.");
+        ui_textline(f.b, ORANGE);
+    }
     if (h.skin_c10 > -1000) {
         fmt_init(&f);
         fmt_s(&f, "Back of the phone ");
@@ -298,7 +325,13 @@ void app_event(const struct sbos_event *ev)
         struct sbos_heat h;
         heat_status(&h);
         int running = h.state == HEAT_ST_RUNNING || h.state == HEAT_ST_HOLDING || h.state == HEAT_ST_PAUSED;
-        if (ev->id == 21 && !running)
+        if (ev->id == 22 && !running) {
+            int k = 0;
+            for (int i = 0; i < 5; ++i)
+                if (socstops[i] == h.soc_stop_c10)
+                    k = i;
+            setting_set(SET_HEAT_SOC_STOP_C10, socstops[(k + 1) % 5]);
+        } else if (ev->id == 21 && !running)
             setting_set(SET_HEAT_CURRENT_STOP, 1);
         else if (ev->id == 19 && running)
             heat_request(HEAT_OFF, 0);

@@ -76,6 +76,40 @@ void settings_restore(void)
     }
     (void)state_valid(half[cur_half], &seq);
     const uint8_t *d = 0;
+    {
+        /* 0.6.3: the last heating session's record: still "running" means the power went while it heated */
+        int hn = state_find(half[cur_half], "heat", &d);
+        if (hn == (int)sizeof(heat_last) && d) {
+            memcpy(&heat_last, d, sizeof(heat_last));
+            heat_last.why[sizeof(heat_last.why) - 1] = 0;
+            if (heat_last.magic == 0x31435248U && heat_last.running) {
+                heat_last_unclean = 1;
+                struct ub u;
+                ub_init(&u);
+                ub_s(&u, "heater: the last session ended without a stop (a forced power-off?) after ");
+                ub_dec(&u, (uint64_t)(heat_last.secs > 0 ? heat_last.secs : 0));
+                ub_s(&u, " s: level ");
+                ub_dec(&u, (uint64_t)(heat_last.level > 0 ? heat_last.level : 0));
+                ub_s(&u, ", SoC ");
+                ub_dec(&u, (uint64_t)(heat_last.soc_c10 > 0 ? heat_last.soc_c10 / 10 : 0));
+                ub_s(&u, " C (peak ");
+                ub_dec(&u, (uint64_t)(heat_last.peak_soc_c10 > 0 ? heat_last.peak_soc_c10 / 10 : 0));
+                ub_s(&u, "), battery ");
+                ub_dec(&u, (uint64_t)(heat_last.bat_c10 > 0 ? heat_last.bat_c10 / 10 : 0));
+                ub_s(&u, " C, ");
+                ub_dec(&u, (uint64_t)(heat_last.ma < 0 ? -heat_last.ma : heat_last.ma));
+                ub_s(&u, " mA, ");
+                ub_dec(&u, (uint64_t)(heat_last.pct > 0 ? heat_last.pct : 0));
+                ub_s(&u, " %, the hardware trip read ");
+                ub_dec(&u, (uint64_t)(heat_last.trip_c > 0 ? heat_last.trip_c : 0));
+                ub_s(&u, " C");
+                sb_log(u.b);
+            }
+            heat_rec = heat_last;           /* kept in the slot until the next session replaces it */
+            heat_rec.running = 0;
+        }
+        d = 0;
+    }
     int n = state_find(half[cur_half], REC, &d);
     struct saved s;
     if (n < (int)sizeof(uint32_t) * 2 + 4 || !d) {
@@ -169,6 +203,8 @@ void settings_timer(unsigned id)
         sb_log("settings: not saved: the record did not fit");
         return;
     }
+    if (heat_rec.magic == 0x31435248U && state_add(&b, "heat", &heat_rec, sizeof(heat_rec)) < 0)
+        sb_log("settings: the heat record did not fit");
     /* 0.5.3: each app's own state (SYS_STATE_PUT, up to 4 KiB), as "app:<id>" */
     for (int a = 0; a < napps; ++a) {
         if (!apps[a].state_n)

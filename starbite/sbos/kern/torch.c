@@ -98,6 +98,9 @@ int torch_set(int lit)
         return SBOS_EAGAIN;
     if (on)
         return 0;
+    fled_off();                             /* 0.6.3: never the flash pin and the torch pin high together */
+    if (led_full)
+        (void)fled_torch_max();             /* 240 mA, once the chip answers (else as the chip holds it) */
     uint32_t d = *(volatile uint32_t *)TORCH_DAT, c = *(volatile uint32_t *)TORCH_CON;
     wr32(TORCH_DAT, d & ~(1U << TORCH_PIN));                         /* low before it becomes an output */
     wr32(TORCH_CON, (c & ~(0xfU << (4 * TORCH_PIN))) | (1U << (4 * TORCH_PIN)));

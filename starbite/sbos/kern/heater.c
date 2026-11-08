@@ -29,6 +29,8 @@ static int running[8];                      /* the heat kernel runs on core w (c
 static int charger_now = -1, charger_seen = -2, charger_raw = -1;   /* unknown until two reads agree */
 static int gpu_probe_ok;
 static int trip_top_c;                      /* the hardware trip's decoded temperature (logged at a start) */
+static void record(const struct heat_in *in, int running);
+static uint64_t rec_saved_at;
 static int launch_hold;
 static int ctx_ok;                          /* 1 workers use their own start records, -1 the shared one, 0 unknown */                     /* a core never checked in: no more launches this session */
 static int64_t last_code;                   /* the latest failure's code, for the screen */
@@ -493,7 +495,7 @@ static void extreme_extras(int on)
         panel_boost(1, 1);
         if (!ext_led_used) {
             ext_led_used = 1;
-            ext_led = !torch_on() && torch_ready() && torch_set(1) == 0;
+            ext_led = !torch_on() && torch_ready() && torch_set(1) == 0;   /* 240 mA with Settings' full LED (0.6.3) */
         }
         sb_log(ext_led ? "heater: Extreme: the panel at its top level, the LED on" : "heater: Extreme: the panel at its top level");
     } else {
@@ -507,6 +509,8 @@ static void extreme_extras(int on)
 
 static void restore_and_check(void)
 {
+    if (heat_rec.running)
+        record(&last_in, 0);                /* the stop, with its reason */
     extreme_extras(0);
     ext_led_used = 0;                       /* a new session may light it again */
     gpu_heat_session = 0;
@@ -634,6 +638,8 @@ void heater_timer(unsigned id)
     int before = ctl.state;
     run_track(&in);
     heat_ctl_step(&ctl, &in);
+    if (heater_running_ui())
+        record(&in, 1);
     if (!heater_running_ui()) {
         restore_and_check();
         kt_cancel(KT_HEATER, 1);
@@ -699,6 +705,11 @@ static void start_now(void)
             return;
         }
         sb_logx("heater: start, level ", (uint64_t)pending_level);
+        memset(&heat_rec, 0, sizeof(heat_rec));
+        heat_rec.peak_bat_c10 = heat_rec.peak_soc_c10 = -1000;
+        heat_rec.trip_c = trip_top_c;
+        heat_last_unclean = 0;
+        rec_saved_at = 0;                   /* the first record at once */
         sb_logx("heater: the SoC's own hardware heat trip is armed (S-Boot's), decoded C: ", (uint64_t)trip_top_c);
         gpuheat_new_session();
         /* a new session tries every usable core again, except with shared start records after a core went
@@ -724,6 +735,39 @@ static void start_now(void)
 uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;
 /* 0.6.2: the call / SOS reserve for Extreme / Manual / Keep warm (0 = overridden), Keep warm's battery target */
 int heat_reserve_pct = 15, heat_target_c10 = 200, heat_no_current_stop;
+int heat_soc_stop_c10;                      /* 0.6.3: Manual's SoC stop (0 off: the user's default) */
+struct heat_record heat_rec, heat_last;
+int heat_last_unclean;
+
+/* 0.6.3: the session's record; saved every 30 s while heating and at the stop (where the slot exists) */
+static void record(const struct heat_in *in, int running)
+{
+    heat_rec.magic = 0x31435248U;           /* "HRC1" */
+    heat_rec.running = (uint32_t)running;
+    heat_rec.level = ctl.level;
+    heat_rec.secs = running || ctl.t_start ? (int32_t)((sb_ms() - ctl.t_start) / 1000U) : 0;
+    heat_rec.cores = ctl.cores;
+    if (in) {
+        heat_rec.bat_c10 = in->bat_ok ? in->bat_c10 : -1000;
+        heat_rec.skin_c10 = in->skin_ok ? in->skin_c10 : -1000;
+        heat_rec.soc_c10 = in->soc_ok ? in->soc_c10 : -1000;
+        heat_rec.ma = in->ma, heat_rec.mv = in->mv, heat_rec.pct = in->pct;
+        if (in->bat_ok && in->bat_c10 > heat_rec.peak_bat_c10)
+            heat_rec.peak_bat_c10 = in->bat_c10;
+        if (in->soc_ok && in->soc_c10 > heat_rec.peak_soc_c10)
+            heat_rec.peak_soc_c10 = in->soc_c10;
+        if (in->gauge_ok && -in->ma > heat_rec.peak_ma)
+            heat_rec.peak_ma = -in->ma;
+    }
+    sb_strcpy(heat_rec.why, sizeof(heat_rec.why), ctl.why);
+    if (!running || sb_ms() - rec_saved_at >= 30000U) {
+        rec_saved_at = sb_ms();
+        if (running)
+            settings_changed();             /* the slot's save (at most one write in 10 s) */
+        else
+            settings_save_now();
+    }
+}
 #define FLAT_MA 1900                        /* the 0.6 tour's full-heat draw (1.8 A), for the estimates */
 
 static void extreme_confirm_done(int ok)
@@ -739,6 +783,7 @@ static void extreme_confirm_done(int ok)
     ctl.reserve_pct = heat_reserve_pct;
     ctl.target_c10 = heat_target_c10;
     ctl.no_current_stop = pending_level == HEAT_MANUAL && heat_no_current_stop;
+    ctl.soc_stop_c10 = pending_level == HEAT_MANUAL ? heat_soc_stop_c10 : 0;
     if (pending_level == HEAT_KEEPWARM) {
         ctl.man_a55 = ctl.man_m3 = 0;
         gpu_heat_session = 0;               /* the cores alone keep a battery warm */
@@ -937,6 +982,11 @@ void heater_status(struct sbos_heat *h)
     h->reserve_pct = heat_reserve_pct;
     h->target_c10 = heat_target_c10;
     h->no_current_stop = heat_no_current_stop;
+    h->trip_c = trip_top_c;
+    h->soc_stop_c10 = heat_soc_stop_c10;
+    h->last_unclean = heat_last_unclean;
+    h->last_peak_soc_c10 = heat_last.peak_soc_c10;
+    h->last_secs = heat_last.secs;
 }
 
 void heater_init(void)

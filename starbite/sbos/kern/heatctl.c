@@ -201,6 +201,10 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         stop(c, HEAT_ST_STOPPED, flat ? "Battery reached 55 \xc2\xb0" "C (its safety limit)" : "Battery reached 42 \xc2\xb0" "C");
         return;
     }
+    if (flat && c->level == HEAT_MANUAL && c->soc_stop_c10 > 0 && in->soc_ok && in->soc_c10 >= c->soc_stop_c10) {
+        stop(c, HEAT_ST_STOPPED, "Processor at your SoC stop");
+        return;
+    }
     if (flat && !in->trip_armed) {
         /* no stop of ours for the SoC's temperature in these levels: the hardware trip is the protection, so it
          * must stay armed the whole time (it was checked at the start) */

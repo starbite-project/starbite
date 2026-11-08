@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.6.2"
+#define SBOS_VERSION "0.6.3"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -100,6 +100,7 @@ struct heat_ctl {
     int reserve_pct;                /* 0.6.2: stop at this charge (a call / SOS reserve; 0 = overridden) */
     int target_c10;                 /* 0.6.2: Keep warm's battery target */
     int no_current_stop;            /* 0.6.2: Manual only: the 3.5 A battery-current stop turned off by the user */
+    int soc_stop_c10;               /* 0.6.3: Manual only: the user's SoC stop (0 off) */
     int cold;
     uint64_t t_start, t_end, t_step, t_ramp, last_bat_ok, last_soc_ok;
     int rest_mv;
@@ -142,6 +143,29 @@ extern int gpu_heat_allowed;
 extern uint32_t gpuheat_khz;        /* 0.6.1: the GPU's table step for the session */
 extern uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;    /* 0.6.1: Manual's picks (kHz) */
 extern int heat_reserve_pct, heat_target_c10, heat_no_current_stop;   /* 0.6.2 */
+extern int heat_soc_stop_c10;       /* 0.6.3: Manual's optional SoC stop (0 off) */
+/* 0.6.3: the S2MPB02 over I2C (fled.c): the torch at 240 mA, SOS flash pulses at 1250 mA (the chip's 125 ms timer) */
+extern int led_full;                /* Settings > Alarm: 0 the pins only as before (default), 1 the rated currents */
+int fled_init(void);
+const char *fled_why(void);
+int fled_torch_max(void);
+int fled_pulse(void);
+void fled_timer(void);
+void fled_off(void);
+/* 0.6.3: the heating session's record in the state slot ("heat"), every 30 s and at the stop: a forced power-off
+ * (the 0.6.2 tour: the SoC at 128 C) leaves its last state for the next start */
+struct heat_record {
+    uint32_t magic;                 /* "HRC1" */
+    uint32_t running;               /* 1 while heating: still 1 at the next start = it never stopped cleanly */
+    int32_t level, secs, cores;
+    int32_t bat_c10, skin_c10, soc_c10, ma, mv, pct;    /* the last readings */
+    int32_t peak_bat_c10, peak_soc_c10, peak_ma;
+    int32_t trip_c;                 /* the hardware trip's decoded temperature */
+    char why[48];
+};
+extern struct heat_record heat_rec;
+extern int heat_last_unclean;       /* the last start found a record still "running" */
+extern struct heat_record heat_last;
 extern int gpu_heat_session;        /* 0.6: Extreme's own confirmation allows the GPU for that session */
 int gpuheat_start(void);
 void gpuheat_tick(void);

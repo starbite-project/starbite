@@ -490,6 +490,21 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         sb_log(arg[1] ? "settings: Manual's 3.5 A battery-current stop: on" :
                         "settings: Manual's 3.5 A battery-current stop: OFF (the user's choice)");
         return 0;
+    case SET_LED_FULL:
+        led_full = arg[1] != 0;
+        sb_log(led_full ? "settings: the LED at its rated currents (S2MPB02 over I2C): on" :
+                          "settings: the LED at its rated currents: off (the pins only)");
+        if (led_full && !fled_init()) {
+            led_full = 0;
+            return SBOS_EAGAIN;             /* the chip did not answer (logged) */
+        }
+        return 0;
+    case SET_HEAT_SOC_STOP_C10:
+        if (arg[1] != 0 && (arg[1] < 700 || arg[1] > 1250))
+            return SBOS_EINVAL;
+        heat_soc_stop_c10 = (int)arg[1];
+        sb_logx("settings: Manual's SoC stop, 0.1 C (0 off): ", arg[1]);
+        return 0;
     case SET_HEAT_TARGET_C10:
         if (arg[1] < 50 || arg[1] > 350)
             return SBOS_EINVAL;
@@ -799,6 +814,8 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_RESERVE: return heat_reserve_pct;
         case SET_HEAT_TARGET_C10: return heat_target_c10;
         case SET_HEAT_CURRENT_STOP: return !heat_no_current_stop;
+        case SET_HEAT_SOC_STOP_C10: return heat_soc_stop_c10;
+        case SET_LED_FULL: return led_full;
         case SET_SAVED: return settings_persistent();
         case SET_AUTO_OFF_MIN: return (int64_t)auto_off_min;
         default: return SBOS_EINVAL;
