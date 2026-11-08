@@ -525,7 +525,7 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         }
         return 0;
     case SET_HEAT_SURV_BAT_C10:
-        if (arg[1] != 550 && arg[1] != 580 && arg[1] != 600)
+        if ((arg[1] != 550 && arg[1] != 580 && arg[1] != 600) || arg[1] > SBOS_HEAT_BAT_HARD_C10)
             return SBOS_EINVAL;             /* 60 C: a Li-ion cell's usual discharge rating; never higher */
         if (heater_running_ui())
             return SBOS_EAGAIN;
@@ -541,8 +541,8 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
                     "Only for Survival heat; the other levels keep their own limits.", "Hold to raise it", surv_bat_done);
         return 0;
     case SET_HEAT_SURV_STOP_C10:
-        if (arg[1] < 1250 || arg[1] > 1450)
-            return SBOS_EINVAL;
+        if (arg[1] < 1250 || arg[1] > SBOS_HEAT_SOC_HARD_C10)
+            return SBOS_EINVAL;             /* 145 C: the absolute limit (docs "Hard limits") */
         heat_surv_stop_c10 = (int)arg[1];
         sb_logx("settings: Survival (trip off)'s SoC stop, 0.1 C: ", arg[1]);
         return 0;

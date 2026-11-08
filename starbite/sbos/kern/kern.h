@@ -121,6 +121,7 @@ struct heat_ctl {
     uint32_t surv_m3_khz;           /* their clock (the pick) */
     int surv_bat_c10;               /* 1.1-beta5: Survival's battery limit: 550 / 580 / 600 (shed from 3 C below, stop at it) */
     uint64_t t_shed;
+    int x_held;                     /* 1.1-beta7: the trip-off hold has shed at least once (its slower add-back applies) */
     int cold;
     uint64_t t_start, t_end, t_step, t_ramp, last_bat_ok, last_soc_ok, last_gauge_ok;
     int rest_mv;

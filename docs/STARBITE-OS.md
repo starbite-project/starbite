@@ -426,6 +426,21 @@ S-Boot. The loader's quick POST takes about 0.3 s (docs/STARBITE-HEALTH.md 2.1: 
 first frame to about 5 s. It is the user's loader setting, not Starbite OS's to change. The image is about 5 MiB (4.3 MiB of it fonts and
 icons) for the loader to read.
 
+## 8.0 Hard limits (absolute; 2026-11-08)
+
+These are the heater's outer bounds. **No mode, setting, measurement or regulation may go past them**; the code
+refuses anything higher (`SBOS_HEAT_SOC_HARD_C10`, `SBOS_HEAT_BAT_HARD_C10` in `sdk/sbapp.h`; checked in
+`heatctl.c`, `app.c` and by `sbos-host-test.c`'s "hard limit" checks: a 145.1 °C or 155 °C setting is refused, and a
+corrupted limit still holds at 145 °C).
+
+| What | Absolute limit | Why |
+|---|---|---|
+| SoC (Survival with the chip's trip off: the held limit) | **145 °C** (on our TMU reading) | The TMU reading counts as invalid at 150 °C (the sample filter's range and `read_inputs`), the sensor is specified only to 125 °C, and at 145 °C the back of the phone was already 74.5 °C (beta6, 2026-11-08). The stop 5 °C past the held limit (at most 149 °C) is a stop, never a target. |
+| Battery (Survival's selectable limit) | **60 °C** | The usual top of a lithium-ion cell's discharge rating; 55 °C is the default, 58 / 60 °C only after their own confirmation. |
+
+**Declined on 2026-11-08:** the user asked for a 175 °C and then a 155 °C SoC limit. Both were declined for the
+reasons above, by the main session and here. 145 °C is the final limit; it is not to be raised by a later request.
+
 ## 8. Heater
 
 The phone deliberately makes heat (hand warmer, keeping itself above freezing). A kernel service; the Heat
@@ -830,6 +845,13 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
 ### 12.21 Version 1.1-beta1 / beta2: Survival heat; the LED chip's 0x63 (2026-11-08)
+
+beta7: master merged (libsb `ocp.c`, `wdt.c`, `sb_acpm_dvfs_step`; the FlexPMU steps once, in `smp.c`'s public
+`sb_m3_fp_*`, which Starbite's `hw.c` calls); a read-only OCP probe (Settings > About "Read the big cores' power
+limits": master's `sb_ocp_worker` on M3 core 4, the S2MPS18 OCP_WARN registers; a trap stays in that core); the
+trip-off hold tightened (one load a second near the limit, every 250 ms from 2 °C over; back below the limit minus
+1 °C, one a second: beta6 swung 133 .. 142 °C at 145; a lagging-reading simulation went from 112.9 .. 131.5 to
+126.2 .. 131.7 °C at 131); the hard limits (8.0).
 
 beta6: the M3 by measured watts within Samsung's core-count table (`sb_m3_ocp_max_khz`: 1 core 2704, 2 cores 2314,
 3-4 cores 1794; `heat_m3_cands`; `surv_calibrate` in heatctl.c, 4 s per candidate, the mean of the last 2.5 s);

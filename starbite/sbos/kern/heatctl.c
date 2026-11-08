@@ -86,13 +86,16 @@ int heat_max_cores(int level)
 
 int heat_surv_estop(const struct heat_ctl *c)
 {
-    int e = c->surv_stop_c10 + 50;
+    int lim = c->surv_stop_c10 < SBOS_HEAT_SOC_HARD_C10 ? c->surv_stop_c10 : SBOS_HEAT_SOC_HARD_C10;
+    int e = lim + 50;                       /* a stop 5 C past the held limit (the hold itself never above 145) */
     return e > 1490 ? 1490 : e;
 }
 
 int heat_surv_target(const struct heat_ctl *c)
 {
-    return c->level == HEAT_SURVIVAL_X ? c->surv_stop_c10 : c->lim->surv_target_c10;   /* 1.1-beta4: holds at the limit */
+    if (c->level != HEAT_SURVIVAL_X)
+        return c->lim->surv_target_c10;
+    return c->surv_stop_c10 < SBOS_HEAT_SOC_HARD_C10 ? c->surv_stop_c10 : SBOS_HEAT_SOC_HARD_C10;  /* the hold, <= 145 C */
 }
 
 void heat_ctl_init(struct heat_ctl *c, const struct heat_limits *lim)
@@ -223,11 +226,12 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
         no = level == HEAT_LOW ? "Battery below 20 %" : "Battery below 30 % (try Low)";
     else if (surv && in->pct <= L->surv_floor_pct)
         no = "The battery is at 2 %: nothing left to turn into heat";
-    else if (surv && c->surv_bat_c10 != 550 && c->surv_bat_c10 != 580 && c->surv_bat_c10 != 600)
+    else if (surv && ((c->surv_bat_c10 != 550 && c->surv_bat_c10 != 580 && c->surv_bat_c10 != 600) ||
+                      c->surv_bat_c10 > SBOS_HEAT_BAT_HARD_C10))
         no = "Survival's battery limit is not 55, 58 or 60 \xc2\xb0" "C";
     else if (surv && in->bat_c10 >= c->surv_bat_c10 - 30)
         no = "The battery is already near Survival's battery limit";
-    else if (level == HEAT_SURVIVAL_X && (c->surv_stop_c10 < 1250 || c->surv_stop_c10 > 1450))
+    else if (level == HEAT_SURVIVAL_X && (c->surv_stop_c10 < 1250 || c->surv_stop_c10 > SBOS_HEAT_SOC_HARD_C10))
         no = "Survival's SoC limit is not set (125 to 145 \xc2\xb0" "C)";
     else if (flat && !surv && c->reserve_pct > 0 && in->pct <= c->reserve_pct)
         no = "At the call / SOS reserve (hold Continue below the reserve to go on)";
@@ -262,6 +266,7 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
     c->win_bat_c10 = in->bat_c10;
     c->win_soc_c10 = in->soc_c10;
     c->bat_latched = 0;
+    c->x_held = 0;
     c->gpu_want = 1;
     c->t_shed = in->now;
     c->cal = surv ? 0 : 5;
@@ -432,29 +437,30 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
              * until 2 % battery: at or above the limit one load off per 250 ms (two at 2 C over): the M3s first, then
              * the GPU, then the A55s; back on one a second below the limit minus 2 C in the reverse order. No other
              * shedding (the current and the voltage: the 4.5 A stop and the PMIC's own) */
-            int lim = c->surv_stop_c10;
+            int lim = c->surv_stop_c10 < SBOS_HEAT_SOC_HARD_C10 ? c->surv_stop_c10 : SBOS_HEAT_SOC_HARD_C10;   /* never above 145 C */
             /* 1.1-beta5: the battery is held too: from its limit minus 3 C (the stop is at the limit itself) */
             int bhot = in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 30;
             int hot = (in->soc_ok && in->soc_c10 >= lim) || bhot;
             int very = (in->soc_ok && in->soc_c10 >= lim + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15);
-            int cool = in->soc_ok && in->soc_c10 < lim - L->surv_band_c10 && in->bat_ok &&
-                       in->bat_c10 < c->surv_bat_c10 - 40;
+            int cool = in->soc_ok && in->soc_c10 < lim - 10 && in->bat_ok && in->bat_c10 < c->surv_bat_c10 - 40;
             if (surv_calibrate(c, in, now, hot)) {
                 c->state = HEAT_ST_RUNNING;
                 why(c, "Survival: measuring the big cores' combinations");
                 return;
             }
-            if (hot && now - c->t_shed >= 250U) {
-                for (int n = very ? 2 : 1; n > 0; --n) {
-                    if (c->cores > 3)
-                        c->cores--;
-                    else if (c->gpu_want)
-                        c->gpu_want = 0;
-                    else if (c->cores > 0)
-                        c->cores--;
-                }
+            /* 1.1-beta7: a tighter hold (beta6 on the phone swung 133 .. 142 C at 145: the reading lags the die, and the
+             * old hold shed up to 8 loads a second before the reading turned, then waited for 2 C under): one load off a
+             * second near the limit (every 250 ms from 2 C over), one back a second below the limit minus 1 C */
+            if (hot && now - c->t_shed >= (very ? 250U : 1000U)) {
+                if (c->cores > 3)
+                    c->cores--;
+                else if (c->gpu_want)
+                    c->gpu_want = 0;
+                else if (c->cores > 0)
+                    c->cores--;
                 c->t_shed = now;
                 c->t_step = now;
+                c->x_held = 1;
             } else if (cool && now - c->t_step >= L->step_ms && !(c->cold && c->cores >= 3)) {
                 if (c->cores < 3)
                     c->cores++;

@@ -567,10 +567,12 @@ static void t_heater(void)
 
 /* ---- battery model --------------------------------------------------------------------------- */
 static double sim_m3_w[3] = { 1.6, 2.9, 4.4 };
+static double sim_lag;                      /* 1.1-beta7: the reading's lag behind the die, s (0: none) */
 /* ---- 1.1 Survival heat: a simulated phone (SoC and battery heat, the gauge, the chip's trip at our 128 C) ---- */
 struct sim {
-    double soc, bat, pct, w, mah;
+    double soc, bat, pct, w, mah, rd;               /* rd: the TMU's reading, lagging the die (sim_lag s) */
     int max_soc, gpu_flips, cut, secs, min_cores_hot, ocp_bad;
+    int held, hold_min, hold_max, hold_lim;     /* after the first reach of the hold limit (minus 1 C): its swing */
     double w_sum;
     int ticks;
 };
@@ -596,7 +598,8 @@ static void sim_tick(struct sim *s, const struct heat_ctl *c, struct heat_in *in
     s->pct = 80.0 - s->mah / 16.0;
     s->w_sum += w;
     s->ticks++;
-    in->soc_c10 = (int)(s->soc * 10.0);
+    s->rd = sim_lag > 0 ? s->rd + (s->soc - s->rd) * 0.25 / sim_lag : s->soc;
+    in->soc_c10 = (int)(s->rd * 10.0);
     in->bat_c10 = (int)(s->bat * 10.0);
     in->pct = (int)s->pct;
     in->ma = -(int)(amps * 1000.0);
@@ -604,6 +607,14 @@ static void sim_tick(struct sim *s, const struct heat_ctl *c, struct heat_in *in
     in->trip_armed = trip_armed;
     if (in->soc_c10 > s->max_soc)
         s->max_soc = in->soc_c10;
+    if (s->hold_lim && in->soc_c10 >= s->hold_lim - 10 && !s->held)
+        s->held = 1, s->hold_min = s->hold_max = in->soc_c10;
+    if (s->held && in->pct > 5) {
+        if (in->soc_c10 < s->hold_min)
+            s->hold_min = in->soc_c10;
+        if (in->soc_c10 > s->hold_max)
+            s->hold_max = in->soc_c10;
+    }
     if (trip_armed && in->soc_c10 >= 1280)
         s->cut = 1;                         /* the chip's own trip would have cut the power here */
 }
@@ -612,7 +623,7 @@ static void sim_run(struct heat_ctl *c, struct sim *s, int trip_armed, int max_s
 {
     struct heat_in in = base_in(0);
     in.bat_c10 = 100, in.usb_c10 = in.chg_c10 = 100;
-    s->soc = 38.0, s->bat = 10.0, s->pct = 80.0;
+    s->soc = s->rd = 38.0, s->bat = 10.0, s->pct = 80.0;
     int gpu = 1;
     uint64_t t = 0;
     for (; t < (uint64_t)max_s * 1000U && (c->state == HEAT_ST_RUNNING || c->state == HEAT_ST_HOLDING); t += 250) {
@@ -630,6 +641,35 @@ static void sim_run(struct heat_ctl *c, struct sim *s, int trip_armed, int max_s
 
 static void t_survival(void)
 {
+    /* 1.1-beta7: the ABSOLUTE limits: no hold, target or setting above 145 C SoC or 60 C battery */
+    {
+        struct heat_ctl c;
+        struct heat_in in = base_in(0);
+        heat_ctl_init(&c, 0);
+        c.surv_stop_c10 = 1451;
+        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == SBOS_EAGAIN, "hard limit: a 145.1 C hold is refused");
+        c.surv_stop_c10 = 1550;
+        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == SBOS_EAGAIN, "hard limit: 155 C (asked 2026-11-08) refused");
+        heat_ctl_init(&c, 0);
+        c.surv_stop_c10 = 1450;
+        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == 0, "hard limit: 145 C itself is accepted");
+        c.surv_stop_c10 = 1750;                 /* corrupted after the start: the hold still never passes 145 */
+        c.level = HEAT_SURVIVAL_X;
+        CHECK(heat_surv_target(&c) == SBOS_HEAT_SOC_HARD_C10 && heat_surv_estop(&c) <= 1490,
+              "hard limit: a corrupted limit holds at 145 C (target %d, stop %d)", heat_surv_target(&c), heat_surv_estop(&c));
+        c.trip_off = 1;
+        c.cal = 5;
+        run(&c, &in, 0, 10000, 0);
+        in.soc_c10 = 1455;
+        int before = c.cores + c.gpu_want;
+        run(&c, &in, 10250, 1000, 0);
+        CHECK(c.cores + c.gpu_want < before, "hard limit: at 145.5 C it sheds even with a 175 C setting (%d -> %d)", before,
+              c.cores + c.gpu_want);
+        heat_ctl_init(&c, 0);
+        c.surv_bat_c10 = 610;
+        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == SBOS_EAGAIN, "hard limit: a 61 C battery limit is refused");
+        CHECK(SBOS_HEAT_SOC_HARD_C10 == 1450 && SBOS_HEAT_BAT_HARD_C10 == 600, "hard limits: 145 C SoC, 60 C battery");
+    }
     struct heat_ctl c;
     struct heat_in in = base_in(0);
     /* the start: the tables' tops, no reserve, refused at 2 % */
@@ -699,12 +739,34 @@ static void t_survival(void)
     c.surv_stop_c10 = 1310;
     CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == 0, "trip-off Survival starts (%s)", c.why);
     c.trip_off = 1;                     /* heater.c after it cleared the trip */
+    s.hold_lim = 1310;
     sim_run(&c, &s, 0, 3 * 3600);
+    printf("survival sim (trip off): the hold swings %.1f .. %.1f C at a 131 C limit\n", s.hold_min / 10.0, s.hold_max / 10.0);
     printf("survival sim (trip off): %d s, %.1f W average, peak SoC %.1f C, ended: %s\n", s.secs,
            s.w_sum / (s.ticks ? s.ticks : 1), s.max_soc / 10.0, c.why);
     CHECK(s.max_soc >= 1300 && s.max_soc < 1335, "trip off: held at the 131 C limit (peak %d)", s.max_soc);
     CHECK(stopped_with(&c, HEAT_ST_STOPPED, "2 %"), "trip off: the limit holds, heat to 2 %% (%s)", c.why);
     CHECK(s.secs > 900, "trip off: the whole battery (%d s)", s.secs);
+
+    /* 1.1-beta7: the phone's hold swung 133 .. 142 C at a 145 C limit (beta6, 2@2314): with a 2 s lagging reading and
+     * 2 fast M3 cores the hold must stay within 4 C below the limit and never pass it by more than 1.5 C */
+    sim_lag = 2.0;
+    sim_m3_w[1] = 3.6;
+    memset(&s, 0, sizeof(s));
+    in = base_in(0);
+    heat_ctl_init(&c, 0);
+    c.surv_stop_c10 = 1310;
+    heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+    c.trip_off = 1;
+    s.hold_lim = 1310;
+    sim_run(&c, &s, 0, 3 * 3600);
+    printf("survival sim (trip off, lagging reading, 2@2314): the hold swings %.1f .. %.1f C at a 131 C limit, %d s, %s\n",
+           s.hold_min / 10.0, s.hold_max / 10.0, s.secs, c.why);
+    CHECK(s.hold_max <= 1325 && s.hold_min >= 1250, "the hold's swing stays within 125 .. 132.5 C (%d .. %d; beta6's hold: "
+          "112.9 .. 131.5 in this model)", s.hold_min, s.hold_max);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "2 %"), "and heats to 2 %% (%s)", c.why);
+    sim_lag = 0;
+    sim_m3_w[1] = 2.9;
 
     /* the stops that stay */
     in = base_in(0);
@@ -719,16 +781,16 @@ static void t_survival(void)
     CHECK(c.cal == 5 && c.cores == 7, "trip off: all 7 workers below the limit after the measurement (%d, cal %d)", c.cores,
           c.cal);
     in.soc_c10 = 1312;
-    run(&c, &in, 23500, 750, 0);
+    run(&c, &in, 23500, 3000, 0);         /* 1.1-beta7: one load a second near the limit */
     CHECK(c.state != HEAT_ST_STOPPED, "trip off: at the limit it sheds, no stop (%s)", c.why);
     CHECK(c.gpu_want == 1 && c.cores == 3, "trip off: the M3s shed first, the GPU kept (%d cores, gpu %d)", c.cores, c.gpu_want);
-    run(&c, &in, 24500, 0, 0);
+    run(&c, &in, 27500, 0, 0);
     CHECK(c.gpu_want == 0 && c.cores == 3, "trip off: then the GPU (%d cores, gpu %d)", c.cores, c.gpu_want);
     in.soc_c10 = 1250;
-    run(&c, &in, 25000, 4000, 0);
+    run(&c, &in, 28000, 4000, 0);
     CHECK(c.gpu_want == 1 && c.cores > 3, "trip off: back below the limit: the GPU, then the M3s (%d cores)", c.cores);
     in.soc_c10 = 1361;
-    run(&c, &in, 29500, 300, 0);
+    run(&c, &in, 32500, 300, 0);
     CHECK(stopped_with(&c, HEAT_ST_STOPPED, "past your limit"), "trip off: 5 C past the limit stops (%s)", c.why);
     in = base_in(0);
     heat_ctl_init(&c, 0);

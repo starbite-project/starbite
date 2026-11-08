@@ -206,6 +206,12 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
  * only about 5 % of 3000 mAh, so the gauge's percent under this load is worth about 16 mAh, not 30: the estimates use
  * 16 (half what the 0.6.2 estimate assumed, so they no longer promise twice the time). The 0.6.2 tour (Extreme, at the
  * caps) drew the same ~10 W. One run from a full charge: the gauge may fall faster near 100 %; more runs refine it. */
+/* 1.1-beta7: the ABSOLUTE limits (docs/STARBITE-OS.md "Hard limits"): Survival with the trip off holds the SoC at
+ * most here, the battery limit is at most 60 C. Nothing in the code may set, hold or regulate above them (unit-tested).
+ * The user asked for 175 and then 155 C on 2026-11-08: declined (the TMU reading counts as invalid at 150 C, the sensor
+ * is specified only to 125 C, and the back of the phone was already 74.5 C at 145 C). */
+#define SBOS_HEAT_SOC_HARD_C10 1450
+#define SBOS_HEAT_BAT_HARD_C10 600
 #define SBOS_HEAT_FULL_MA 2800
 #define SBOS_HEAT_MAH_PER_PCT 16
 
