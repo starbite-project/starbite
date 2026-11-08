@@ -1,0 +1,792 @@
+From 0410096852cb177eadcb3a163ff31db0a52c5293 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Sun, 8 Nov 2026 13:42:26 +0200
+Subject: [PATCH] patch: 0400-starlte-sd-async-uhs.patch - microSD root speed:
+ the mount gets real I/O attributes (1 MiB bufs, solid state), an asynchronous
+ strategy with one worker (page-fault reads first), UHS-I SDR50 behind sduhs=1
+
+vfs_init_io_attributes stopped at DKIOCGETFEATURES (ENOTTY), so the card root kept the
+defaults: 128 KiB per I/O, not solid state, a small read-ahead. Every query now answers:
+1 MiB per buf (split into 128 KiB CMD18s), solid state, no other limits.
+
+The strategy ran every buf in the calling thread, so the cluster layer's read-ahead and
+every write-behind stalled the app or daemon that issued it for the whole PIO transfer.
+Now it queues (three rings: synchronous reads, read-ahead, writes) and one worker at
+priority 81 (VM-privileged: page-outs pass through it) does the transfers. Order: a write
+someone waits on, a DKIOCSYNCHRONIZE, or a write older than 200 ms; then synchronous reads;
+then read-ahead; then writes. A read never passes a queued write it overlaps; writes stay
+FIFO. A buf issued from the worker runs inline. DKIOCSYNCHRONIZE drains the writes. sdq=0
+restores the synchronous strategy. Every 60 s one "STARBITE SD: io 60s" line: KiB, bufs,
+busy ms and KB/s per direction, queue depth, clock and mode (sdstats=0 off).
+
+UHS-I (sduhs=1; default off): ACMD41 with S18R; CMD11 with volt_switch (HTO accepted as its
+completion), clock off, S2MPS18 LDO2 to 1.8 V (vsel 0: the loader's 0x3c = 3.3 V and LDO31's
+0x28 = 2.8 V fit 1.8 V + 25 mV steps), UHS_REG bit 0, 10 ms, clock on, DAT0 released. A failed
+switch power-cycles the card (rails as at bring-up, LDO2 back to 3.3 V) and starts again at
+3.3 V high speed. Then SDR25 (50 MHz) and an 8-sector reference read; CMD6 function 2 (SDR50);
+CMU card divider /2 (403 MHz SDCLKIN, ciu 100.75 MHz, CLKDIV bypass) with Samsung's sdr50
+timing <3 0 4 2>; CMD19 at the 8 sample phases (CRC, and the SD 3.0 pattern when it matches),
+the middle of the longest passing run; the reference sectors read again and compared. Any
+failure, or a later read/write that fails three times, drops to SDR25.
+---
+ bsd/dev/starlte_sd.c | 586 ++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 557 insertions(+), 29 deletions(-)
+
+diff --git a/bsd/dev/starlte_sd.c b/bsd/dev/starlte_sd.c
+index 3ac8fab6..f2bdc0db 100644
+--- a/bsd/dev/starlte_sd.c
++++ b/bsd/dev/starlte_sd.c
+@@ -52,6 +52,8 @@
+ #include <kern/locks.h>
+ #include <kern/clock.h>
+ #include <kern/thread_call.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
+@@ -92,11 +94,13 @@ extern void sweet_sample_start(void);
+ #define FIFOTH    0x4c
+ #define VERID     0x6c
+ #define HCON      0x70
++#define UHS_REG   0x74             /* bit 0: card 0 at 1.8 V signalling (Linux SDMMC_UHS_18V) */
+ #define BMOD      0x80
+ #define CLKSEL64  0xa8
+ #define DATA      0x200
+ 
+ #define C_START    (1U << 31)
++#define C_VOLT     (1U << 28)           /* volt_switch: CMD11 and the clock updates around it */
+ #define C_HOLD     (1U << 29)
+ #define C_UPD_CLK  (1U << 21)
+ #define C_INIT     (1U << 15)
+@@ -128,6 +132,7 @@ extern void sweet_sample_start(void);
+ #define PLL_MMC_HZ      806000000ULL
+ #define SECTOR          512u
+ #define CHUNK           256u            /* sectors per CMD18, as sd.c */
++#define SD_MAXIO        (1024u * 1024u) /* bytes per buf the mount is told (0400) */
+ 
+ static struct {
+ 	vm_offset_t regs, cmu, fsys1, pinctrl, alive;
+@@ -271,7 +276,8 @@ cmd(unsigned idx, uint32_t arg, uint32_t flags)
+ 	}
+ 	uint64_t t = deadline_ms(500);
+ 	uint32_t s;
+-	while (!((s = rd(RINTSTS)) & (I_CD | I_HLE))) {
++	uint32_t done_bits = I_CD | I_HLE | ((flags & C_VOLT) ? I_HTO : 0);
++	while (!((s = rd(RINTSTS)) & done_bits)) {
+ 		if (expired(t)) {
+ 			return -1;
+ 		}
+@@ -329,6 +335,68 @@ csd_sectors(const uint32_t c[4])
+ 	return 0;
+ }
+ 
++/*
++ * 0400: UHS-I (sduhs=1, off by default). Samsung's starlte DT runs this slot at SDR50 / SDR104
++ * (sd-uhs-sdr50, sd-uhs-sdr104; vqmmc = S2MPS18 LDO2, 1.7-3.3 V). LDO2's vsel is 1.8 V + 25 mV
++ * steps: the loader's 0x3c = 3.3 V and LDO31's 0x28 = 2.8 V both fit, so 1.8 V = vsel 0 (0xc0 on).
++ * Sequence as Linux core/sd.c + dw_mmc.c: ACMD41 with S18R (bit 24); an S18A card gets CMD11 with
++ * volt_switch, the clock off (update with volt_switch), LDO2 to 1.8 V, UHS_REG bit 0, 10 ms, the
++ * clock back on, then DAT0 must be released. Any failure power-cycles the card (LDO31 off, LDO2 back
++ * to 3.3 V) and starts again without S18R: today's 3.3 V high speed. Then sd_uhs_mode: CMD6 group 1
++ * function 2 (SDR50) at 100.75 MHz the way Samsung clocks it (CMU card divider /2 -> a 403 MHz
++ * SDCLKIN, ciu /4, CLKDIV bypass; CLKSEL from samsung,dw-mshc-sdr50-timing <3 0 4 2>), CMD19
++ * tuning over the 8 sample phases, and a data check against the same sectors read at 50 MHz. If
++ * SDR50 fails anywhere, or later a read gives up three times, the card goes to SDR25 (50 MHz at
++ * 1.8 V, today's timing).
++ */
++static bool sd_uhs_failed;      /* the 1.8 V switch failed once this boot: never again */
++static bool sd_v18;             /* the card signals at 1.8 V */
++static int sd_mode;             /* 0 default speed, 1 high speed (3.3 V), 2 SDR25, 3 SDR50 */
++static uint8_t sd_tune_mask, sd_tune_phase;
++
++static const char *
++sd_mode_name(void)
++{
++	static const char *const n[] = { " default", " high speed", " SDR25 1.8V", " SDR50 1.8V" };
++	return n[sd_mode & 3];
++}
++
++static int
++sd_volt_switch(void)
++{
++	int r = cmd(11, 0, R1 | C_VOLT);
++	if (r) {
++		return 10 - r;                  /* 11..14 */
++	}
++	wr(CLKENA, 0);
++	wr(CMDARG, 0);
++	wr(CMD, C_START | C_HOLD | C_UPD_CLK | C_PRV_WAIT | C_VOLT);
++	if (wait_reg(CMD, C_START, 0, 100)) {
++		return 2;
++	}
++	if (!starlte_pmic_write(1, 0x4a, 0xc0)) {         /* LDO2 on, 1.8 V */
++		return 3;
++	}
++	wr(UHS_REG, rd(UHS_REG) | 1U);
++	delay(10 * 1000);
++	wr(CLKENA, 1);
++	wr(CMDARG, 0);
++	wr(CMD, C_START | C_HOLD | C_UPD_CLK | C_PRV_WAIT | C_VOLT);
++	if (wait_reg(CMD, C_START, 0, 100)) {
++		return 4;
++	}
++	delay(2 * 1000);
++	uint32_t ri = rd(RINTSTS), st = rd(STATUS);
++	wr(RINTSTS, 0xffffffffU);
++	uint8_t l2 = 0;
++	(void)starlte_pmic_read(1, 0x4a, &l2);
++	printf("STARBITE SD: 1.8 V switch: rintsts 0x%x status 0x%x ldo2 0x%x uhs_reg 0x%x\n", ri, st, l2, rd(UHS_REG));
++	if (st & (1U << 9)) {
++		return 5;                       /* the card still holds DAT0 low */
++	}
++	return 0;
++}
++
+ /* docs/XNU-MICROSD.md 2.3: sd_up() of shim/starlte/sd.c, step for step (plus CMD9). Lock held. */
+ static int
+ sd_hw_up(void)
+@@ -462,6 +530,9 @@ sd_hw_up(void)
+ 	}
+ 	wr(BMOD, 0);
+ 	wr(CTRL, rd(CTRL) & ~((1U << 25) | (1U << 4)));
++	wr(UHS_REG, 0);                 /* 3.3 V signalling, as the rails were just set (0400) */
++	sd_v18 = false;
++	sd_mode = 0;
+ 	wr(INTMASK, 0);
+ 	wr(RINTSTS, 0xffffffffU);
+ 	wr(TMOUT, 0xffffffffU);
+@@ -491,9 +562,12 @@ sd_hw_up(void)
+ 	if (r || (sd.r7 & 0xfffU) != 0x1aaU) {
+ 		return fail("CMD8 (not an SD 2.0 card at 3.3 V)", r);
+ 	}
++	uint32_t uhs = 0;
++	PE_parse_boot_argn("sduhs", &uhs, sizeof(uhs));
++	bool s18r = uhs && !sd_uhs_failed;
+ 	uint64_t t = deadline_ms(1500);
+ 	for (;;) {
+-		r = acmd(41, 0x40ff8000U, C_RESP);      /* HCS, 2.7-3.6 V; R3 has no CRC */
++		r = acmd(41, 0x40ff8000U | (s18r ? (1U << 24) : 0), C_RESP);      /* HCS, 2.7-3.6 V (+S18R); R3 has no CRC */
+ 		sd.ocr = r ? 0 : rd(RESP0);
+ 		if (!r && (sd.ocr & (1U << 31))) {
+ 			break;
+@@ -504,6 +578,19 @@ sd_hw_up(void)
+ 		delay(10 * 1000);
+ 	}
+ 	sd.high_capacity = (sd.ocr >> 30) & 1U;
++	if (s18r && (sd.ocr & (1U << 24))) {
++		int vs = sd_volt_switch();
++		if (vs) {
++			printf("STARBITE SD: 1.8 V switch failed (%d, rintsts 0x%x status 0x%x): power cycle, 3.3 V high speed\n",
++			    vs, sd.last_rintsts, rd(STATUS));
++			sd_uhs_failed = true;
++			sd.state = 0;
++			return sd_hw_up();      /* rails cycled again: LDO2 back to 3.3 V, the card reset */
++		}
++		sd_v18 = true;
++	} else if (s18r) {
++		printf("STARBITE SD: card did not accept 1.8 V (ocr 0x%08x): 3.3 V high speed\n", sd.ocr);
++	}
+ 	if ((r = cmd(2, 0, C_RESP | C_LONG | C_CRC))) {
+ 		return fail("CMD2 (CID)", r);
+ 	}
+@@ -655,6 +742,8 @@ sd_recover(void)
+ 	return state;
+ }
+ 
++static void sd_downshift(const char *why);
++
+ /* count sectors from absolute card sector `sector` to dst (8-byte aligned); 0 or a read error. Lock held. */
+ static int
+ sd_read_sectors(uint64_t sector, uint32_t count, void *dst)
+@@ -681,6 +770,10 @@ sd_read_sectors(uint64_t sector, uint32_t count, void *dst)
+ 				    a < 2 ? "retry" : "giving up");
+ 				sd.last_rintsts = ri;
+ 				sd.last_status = st;
++				if (a == 2 && sd_mode == 3) {
++					sd_downshift("a read failed three times");
++					a = -1;         /* three more tries at SDR25 */
++				}
+ 			}
+ 		}
+ 		if (r) {
+@@ -801,6 +894,10 @@ sd_write_sectors(uint64_t sector, uint32_t count, const void *src)
+ 				int cs = sd_recover();
+ 				printf("STARBITE SD: write %llu+%u: %d (rintsts 0x%x status 0x%x), reset + CMD12: card "
+ 				    "state %d, %s\n", sector, n, r, ri, st, cs, a < 2 ? "retry" : "giving up");
++				if (a == 2 && sd_mode == 3) {
++					sd_downshift("a write failed three times");
++					a = -1;
++				}
+ 			}
+ 		}
+ 		if (r) {
+@@ -893,36 +990,32 @@ starlte_sd_dump_log(const void *ring, uint32_t size, uint32_t bufx)
+  */
+ static int sd_hs;
+ 
+-static void
+-sd_high_speed(void)
++/* A short data read (CMD6 status, CMD19 tuning block) of `bytes` (<= 64) into st; 0 or < 0. Lock held. */
++static int
++sd_short_read(unsigned idx, uint32_t arg, unsigned bytes, uint64_t st[8])
+ {
+-	uint32_t want = 1;                      /* default on since 2026-11-03: 23.2 MB/s measured; sdhs=0 off */
+-	PE_parse_boot_argn("sdhs", &want, sizeof(want));
+-	if (!want || sd.state != 1 || sd.bus_hz > 202000000ULL || sd.bus_hz < 196000000ULL) {
+-		return;
+-	}
+-	uint64_t st[8];
+ 	wr(CTRL, rd(CTRL) | 2U);                        /* FIFO reset */
+ 	if (wait_reg(CTRL, 2U, 0, 50)) {
+-		return;
++		return -1;
+ 	}
+-	wr(BLKSIZ, 64);
+-	wr(BYTCNT, 64);
+-	int r = cmd(6, 0x80fffff1U, R1 | C_DATA);
+-	unsigned got = 0;
++	wr(BLKSIZ, bytes);
++	wr(BYTCNT, bytes);
++	int r = cmd(idx, arg, R1 | C_DATA);
++	unsigned got = 0, want = bytes / 8;
+ 	if (!r) {
+ 		uint64_t t = deadline_ms(200);
+ 		for (;;) {
+ 			uint32_t s = rd(RINTSTS);
+ 			uint32_t c = (rd(STATUS) >> 17) & 0x1fffU;
+-			while (c-- && got < 8) {
++			while (c-- && got < want) {
+ 				st[got++] = fifo_word();
+ 			}
+ 			if (s & I_DERR) {
++				sd.last_rintsts = s;
+ 				r = -5;
+ 				break;
+ 			}
+-			if ((s & I_DTO) && got >= 8) {
++			if ((s & I_DTO) && got >= want) {
+ 				break;
+ 			}
+ 			if (expired(t)) {
+@@ -932,17 +1025,195 @@ sd_high_speed(void)
+ 		}
+ 	}
+ 	wr(BLKSIZ, SECTOR);
+-	if (r || got < 8) {
+-		printf("STARBITE SD: high speed: CMD6 failed (%d, %u words), staying at %llu kHz\n", r, got,
+-		    sd.card_hz / 1000);
++	if (!r && got < want) {
++		r = -6;
++	}
++	return r;
++}
++
++/* CMD6 mode 1, group 1 = fn; 0 when the card switched (status byte 16 low nibble == fn). Lock held. */
++static int
++sd_switch_fn(unsigned fn)
++{
++	uint64_t st[8];
++	int r = sd_short_read(6, 0x80fffff0U | fn, 64, st);
++	if (r) {
+ 		(void)sd_recover();
++		return r;
++	}
++	const uint8_t *b = (const uint8_t *)st;         /* big-endian status, byte 16 = [383:376] */
++	return (b[16] & 0xfU) == fn ? 0 : 100 + (b[16] & 0xf);
++}
++
++/* the card's own CMU divider (0347): /1 = 806 MHz SDCLKIN, /2 = 403 MHz; the card clock must be off */
++static void
++sd_cmu_div(unsigned d)
++{
++	uint32_t v = mrd(sd.cmu, 0x1864);
++	if ((v & 0xfU) != d) {
++		mwr(sd.cmu, 0x1864, (v & ~0xfU) | d);
++		for (unsigned i = 0; i < 1000 && (mrd(sd.cmu, 0x1864) & (1U << 16)); i++) {
++			IODelay(1);
++		}
++	}
++	sd.cmu_div = mrd(sd.cmu, 0x1864);
++	sd.bus_hz = PLL_MMC_HZ / ((sd.cmu_div & 0xfU) + 1U) / 4U;
++}
++
++/* CLKDIV straight (0 = bypass), CLKSEL timing fields (div 3, drive, sample) */
++static int
++sd_clock_raw(unsigned clkdiv, unsigned drive, unsigned sample)
++{
++	wr(CLKENA, 0);
++	if (update_clock(true)) {
++		return -1;
++	}
++	wr(CLKSEL64, (rd(CLKSEL64) & ~0x07070007U) | (3U << 24) | ((drive & 7U) << 16) | (sample & 7U));
++	sd.clksel = rd(CLKSEL64);
++	wr(CLKDIV, clkdiv);
++	wr(CLKSRC, 0);
++	if (update_clock(true)) {
++		return -1;
++	}
++	wr(CLKENA, 1);
++	if (update_clock(true)) {
++		return -1;
++	}
++	sd.card_hz = clkdiv ? sd.bus_hz / (2 * clkdiv) : sd.bus_hz;
++	return 0;
++}
++
++/* SDR25 at 1.8 V or high speed at 3.3 V: today's 50.375 MHz timing (CMU /1, CLKDIV 2, CLKSEL 0x03020000) */
++static int
++sd_mode_50(void)
++{
++	wr(CLKENA, 0);
++	(void)update_clock(true);
++	sd_cmu_div(0);
++	return sd_clock_raw(2, 2, 0);
++}
++
++static uint64_t sd_check_a[8 * SECTOR / 8], sd_check_b[8 * SECTOR / 8];
++
++static const uint8_t sd_tuning_4bit[64] = {    /* SD 3.0 tuning block (Linux tuning_blk_pattern_4bit) */
++	0xff, 0x0f, 0xff, 0x00, 0xff, 0xcc, 0xc3, 0xcc, 0xc3, 0x3c, 0xcc, 0xff, 0xfe, 0xff, 0xfe, 0xef,
++	0xff, 0xdf, 0xff, 0xdd, 0xff, 0xfb, 0xff, 0xfb, 0xbf, 0xff, 0x7f, 0xff, 0x77, 0xf7, 0xbd, 0xef,
++	0xff, 0xf0, 0xff, 0xf0, 0x0f, 0xfc, 0xcc, 0x3c, 0xcc, 0x33, 0xcc, 0xcf, 0xff, 0xef, 0xff, 0xee,
++	0xff, 0xfd, 0xff, 0xfd, 0xdf, 0xff, 0xbf, 0xff, 0xbb, 0xff, 0xf7, 0xff, 0xf7, 0x7f, 0x7b, 0xde,
++};
++
++/* the card goes back to SDR25 (1.8 V, 50 MHz): after a failed SDR50 step or three failed reads */
++static void
++sd_downshift(const char *why)
++{
++	int r = sd_switch_fn(1);
++	int c = sd_mode_50();
++	sd_mode = 2;
++	printf("STARBITE SD: SDR50 off (%s): SDR25 %s (cmd6 %d, clock %d), %llu kHz\n", why,
++	    (r || c) ? "with errors" : "on", r, c, sd.card_hz / 1000);
++}
++
++static void
++sd_uhs_mode(void)
++{
++	/* the reference: 8 sectors at the card's start, read at 50 MHz SDR25 first */
++	if (sd_switch_fn(1) || sd_mode_50()) {
++		printf("STARBITE SD: SDR25 switch failed: staying at %llu kHz\n", sd.card_hz / 1000);
++		return;
++	}
++	sd_mode = 2;
++	sd_hs = 1;
++	if (sd_read_sectors(0, 8, sd_check_a)) {
++		printf("STARBITE SD: SDR25 reference read failed\n");
++		return;
++	}
++	int r = sd_switch_fn(2);
++	if (r) {
++		printf("STARBITE SD: card refused SDR50 (cmd6 %d): SDR25, %llu kHz\n", r, sd.card_hz / 1000);
++		return;
++	}
++	wr(CLKENA, 0);
++	(void)update_clock(true);
++	sd_cmu_div(1);                                  /* 403 MHz SDCLKIN -> ciu 100.75 MHz */
++	if (sd_clock_raw(0, 4, 2)) {
++		sd_downshift("clock update");
++		return;
++	}
++	/* CMD19 at every sample phase: a phase passes when the block arrives with a good CRC */
++	uint8_t pass = 0, match = 0;
++	for (unsigned ph = 0; ph < 8; ph++) {
++		wr(CLKSEL64, (rd(CLKSEL64) & ~7U) | ph);
++		uint64_t st[8] = { 0 };
++		int t = sd_short_read(19, 0, 64, st);
++		if (t) {
++			(void)sd_recover();
++		} else {
++			pass |= 1U << ph;
++			if (!memcmp(st, sd_tuning_4bit, 64)) {
++				match |= 1U << ph;
++			}
++		}
++	}
++	uint8_t ok = match ? match : pass;      /* the pattern from memory could be wrong: then CRC alone */
++	sd_tune_mask = ok;
++	if (!ok) {
++		sd_downshift("tuning: no sample phase passed");
++		return;
++	}
++	/* the middle of the longest run of passing phases (circular); all 8: Samsung's 2 */
++	unsigned best = 2, bestlen = 0;
++	if (ok != 0xff) {
++		for (unsigned st0 = 0; st0 < 8; st0++) {
++			if (!(ok & (1U << st0)) || (ok & (1U << ((st0 + 7) & 7)))) {
++				continue;               /* runs start after a failing phase */
++			}
++			unsigned len = 0;
++			while (len < 8 && (ok & (1U << ((st0 + len) & 7)))) {
++				len++;
++			}
++			if (len > bestlen) {
++				bestlen = len;
++				best = (st0 + len / 2) & 7;
++			}
++		}
++	}
++	sd_tune_phase = (uint8_t)best;
++	wr(CLKSEL64, (rd(CLKSEL64) & ~7U) | best);
++	sd.clksel = rd(CLKSEL64);
++	sd_mode = 3;
++	/* the same 8 sectors again, now at SDR50 */
++	int rr = sd_read_sectors(0, 8, sd_check_b);
++	if (rr || memcmp(sd_check_a, sd_check_b, sizeof(sd_check_a))) {
++		printf("STARBITE SD: SDR50 data check failed (%d)\n", rr);
++		sd_downshift("data check");
++		return;
++	}
++	printf("STARBITE SD: SDR50 on: %llu kHz, tuning pass 0x%02x pattern 0x%02x, sample phase %u, clksel 0x%x\n",
++	    sd.card_hz / 1000, pass, match, best, sd.clksel);
++}
++
++/*
++ * SD high speed (default, sdhs=0 turns it off): CMD6 switch to function group 1 = 1 (Linux core/sd_ops.c
++ * mmc_sd_switch: arg 0x80fffff1, a 64-byte status block; core/sd.c: the result nibble
++ * status[16] & 0xf must read 1), then the card clock to 50 MHz (bus / 4 = 50.375 MHz from the
++ * 201.5 MHz bus, as Linux runs it). Read only: CMD6 mode 1 only selects a bus timing. On any
++ * failure the card stays at 25 MHz. A card at 1.8 V (sduhs=1) goes to sd_uhs_mode. Lock held.
++ */
++static void
++sd_high_speed(void)
++{
++	if (sd.state == 1 && sd_v18) {
++		sd_uhs_mode();
+ 		return;
+ 	}
+-	const uint8_t *b = (const uint8_t *)st;         /* the status is big-endian, byte 16 = [383:376] */
+-	unsigned fn = b[16] & 0xfU;
+-	if (fn != 1) {
+-		printf("STARBITE SD: high speed: card answered function %u, staying at %llu kHz\n", fn,
+-		    sd.card_hz / 1000);
++	uint32_t want = 1;                      /* default on since 2026-11-03: 23.2 MB/s measured; sdhs=0 off */
++	PE_parse_boot_argn("sdhs", &want, sizeof(want));
++	if (!want || sd.state != 1 || sd.bus_hz > 202000000ULL || sd.bus_hz < 196000000ULL) {
++		return;
++	}
++	int r = sd_switch_fn(1);
++	if (r) {
++		printf("STARBITE SD: high speed: CMD6 failed (%d), staying at %llu kHz\n", r, sd.card_hz / 1000);
+ 		return;
+ 	}
+ 	IODelay(1000);
+@@ -952,6 +1223,7 @@ sd_high_speed(void)
+ 		return;
+ 	}
+ 	sd_hs = 1;
++	sd_mode = 1;
+ 	printf("STARBITE SD: high speed on: %llu kHz\n", sd.card_hz / 1000);
+ }
+ 
+@@ -1314,10 +1586,14 @@ starlte_sd_close(__unused dev_t dev, __unused int flags, __unused int devtype, _
+ 	return 0;
+ }
+ 
++/* One buf, start to finish, in the calling thread (the old strategy; now the queue worker's step). */
++static uint64_t sdq_rbytes, sdq_wbytes, sdq_rus, sdq_wus, sdq_nr, sdq_nw;
++
+ static void
+-starlte_sd_strategy(buf_t bp)
++sd_do_buf(buf_t bp)
+ {
+ 	int error = 0;
++	uint64_t t0 = mach_absolute_time();
+ 	caddr_t vaddr = NULL;
+ 	uint64_t off = (uint64_t)buf_blkno(bp) * SECTOR;
+ 	uint32_t count = buf_count(bp);
+@@ -1378,6 +1654,15 @@ starlte_sd_strategy(buf_t bp)
+ 	}
+ 	lck_mtx_unlock(&starlte_sd_lock);
+ 	buf_unmap(bp);
++	if (wr_) {
++		sdq_wbytes += count;
++		sdq_wus += elapsed_us(t0);
++		sdq_nw++;
++	} else {
++		sdq_rbytes += count;
++		sdq_rus += elapsed_us(t0);
++		sdq_nr++;
++	}
+ done:
+ 	if (error) {
+ 		buf_seterror(bp, error);
+@@ -1385,6 +1670,213 @@ done:
+ 	buf_biodone(bp);
+ }
+ 
++/*
++ * 0400: the strategy queues and returns; one worker thread does the transfers. Before this every
++ * buf ran synchronously in the thread that issued it, so the cluster layer's read-ahead and every
++ * write-behind (B_ASYNC) stalled the app or daemon that triggered it for the whole PIO transfer
++ * (writes run at about 5 MB/s). Order, highest first:
++ *   1. the oldest write if someone waits on it (not B_ASYNC), a DKIOCSYNCHRONIZE waits, or it has
++ *      waited 200 ms (writes never starve);
++ *   2. the oldest synchronous read (a page fault, a metadata read: a thread is blocked on it);
++ *   3. the oldest read-ahead (B_ASYNC read);
++ *   4. the oldest write.
++ * A read that overlaps a queued write is never taken before it: writes drain first (FIFO among
++ * writes, so the file system's write order is kept). A buf issued from the worker itself (a
++ * biodone callback starting I/O) runs inline. sdq=0 restores the synchronous strategy.
++ */
++#define SDQ_MAX 1024u
++struct sdq_ent {
++	buf_t bp;
++	uint64_t t;             /* mach_absolute_time at queueing */
++	uint64_t lba, n;        /* sectors, relative to the range */
++};
++struct sdq_ring {
++	struct sdq_ent e[SDQ_MAX];
++	unsigned head, len;
++};
++static struct sdq_ring sdq_rs, sdq_ra, sdq_w;   /* sync reads, async reads, writes */
++static LCK_MTX_DECLARE(sdq_lock, &starlte_sd_grp);
++static thread_t sdq_thread;
++static int sdq_on = -1;                         /* -1 not decided, 0 off (sdq=0), 1 on */
++static unsigned sdq_syncwait, sdq_active_w, sdq_maxlen;
++static uint64_t sdq_200ms;
++static char sdq_event, sdq_space, sdq_idle;
++extern boolean_t set_vm_privilege(boolean_t privileged);
++extern kern_return_t kernel_thread_start_priority(thread_continue_t, void *, integer_t, thread_t *);
++#define SDQ_PRI 81              /* BASEPRI_KERNEL */
++
++static inline unsigned
++sdq_total(void)
++{
++	return sdq_rs.len + sdq_ra.len + sdq_w.len;
++}
++
++static void
++sdq_push(struct sdq_ring *r, buf_t bp)
++{
++	struct sdq_ent *e = &r->e[(r->head + r->len) % SDQ_MAX];
++	e->bp = bp;
++	e->t = mach_absolute_time();
++	e->lba = (uint64_t)buf_blkno(bp);
++	e->n = ((uint64_t)buf_count(bp) + SECTOR - 1) / SECTOR;
++	r->len++;
++}
++
++static buf_t
++sdq_pop(struct sdq_ring *r)
++{
++	buf_t bp = r->e[r->head].bp;
++	r->head = (r->head + 1) % SDQ_MAX;
++	r->len--;
++	return bp;
++}
++
++static bool
++sdq_overlaps_write(const struct sdq_ent *rd_)
++{
++	for (unsigned i = 0; i < sdq_w.len; i++) {
++		const struct sdq_ent *w = &sdq_w.e[(sdq_w.head + i) % SDQ_MAX];
++		if (rd_->lba < w->lba + w->n && w->lba < rd_->lba + rd_->n) {
++			return true;
++		}
++	}
++	return false;
++}
++
++/* sdq_lock held */
++static buf_t
++sdq_pick(bool *is_write)
++{
++	*is_write = false;
++	if (sdq_w.len) {
++		const struct sdq_ent *w = &sdq_w.e[sdq_w.head];
++		if (!(buf_flags(w->bp) & B_ASYNC) || sdq_syncwait || mach_absolute_time() - w->t > sdq_200ms) {
++			*is_write = true;
++			return sdq_pop(&sdq_w);
++		}
++	}
++	if (sdq_rs.len && !sdq_overlaps_write(&sdq_rs.e[sdq_rs.head])) {
++		return sdq_pop(&sdq_rs);
++	}
++	if (sdq_ra.len && !sdq_overlaps_write(&sdq_ra.e[sdq_ra.head])) {
++		return sdq_pop(&sdq_ra);
++	}
++	if (sdq_w.len) {
++		*is_write = true;
++		return sdq_pop(&sdq_w);
++	}
++	return NULL;
++}
++
++__attribute__((noreturn)) static void
++sdq_worker(__unused void *arg, __unused wait_result_t wr)
++{
++	(void)set_vm_privilege(TRUE);           /* page-outs go through here: never wait for free pages */
++	lck_mtx_lock(&sdq_lock);
++	for (;;) {
++		bool is_write;
++		buf_t bp = sdq_pick(&is_write);
++		if (bp == NULL) {
++			thread_wakeup(&sdq_idle);
++			(void)assert_wait(&sdq_event, THREAD_UNINT);
++			lck_mtx_unlock(&sdq_lock);
++			thread_block(THREAD_CONTINUE_NULL);
++			lck_mtx_lock(&sdq_lock);
++			continue;
++		}
++		sdq_active_w = is_write;
++		thread_wakeup(&sdq_space);
++		lck_mtx_unlock(&sdq_lock);
++		sd_do_buf(bp);
++		lck_mtx_lock(&sdq_lock);
++		sdq_active_w = 0;
++		if (!sdq_w.len) {
++			thread_wakeup(&sdq_idle);
++		}
++	}
++}
++
++/* DKIOCSYNCHRONIZE: every write queued before it is on the card */
++static void
++sdq_drain_writes(void)
++{
++	if (sdq_on != 1) {
++		return;
++	}
++	lck_mtx_lock(&sdq_lock);
++	sdq_syncwait++;
++	while (sdq_w.len || sdq_active_w) {
++		thread_wakeup(&sdq_event);
++		(void)assert_wait(&sdq_idle, THREAD_UNINT);
++		lck_mtx_unlock(&sdq_lock);
++		thread_block(THREAD_CONTINUE_NULL);
++		lck_mtx_lock(&sdq_lock);
++	}
++	sdq_syncwait--;
++	lck_mtx_unlock(&sdq_lock);
++}
++
++static void
++starlte_sd_strategy(buf_t bp)
++{
++	if (__improbable(sdq_on < 0)) {
++		lck_mtx_lock(&sdq_lock);
++		if (sdq_on < 0) {
++			uint32_t on = 1;
++			PE_parse_boot_argn("sdq", &on, sizeof(on));
++			nanoseconds_to_absolutetime(200 * NSEC_PER_MSEC, &sdq_200ms);
++			thread_t t = THREAD_NULL;
++			if (on && kernel_thread_start_priority(sdq_worker, NULL, SDQ_PRI, &t) == KERN_SUCCESS) {
++				sdq_thread = t;
++				thread_deallocate(t);
++				sdq_on = 1;
++			} else {
++				sdq_on = 0;
++			}
++			printf("STARBITE SD: I/O queue %s (0400)\n", sdq_on ? "on: async strategy, one worker" : "off");
++		}
++		lck_mtx_unlock(&sdq_lock);
++	}
++	if (sdq_on != 1 || current_thread() == sdq_thread) {
++		sd_do_buf(bp);
++		return;
++	}
++	bool wr_ = !(buf_flags(bp) & B_READ);
++	struct sdq_ring *r = wr_ ? &sdq_w : (buf_flags(bp) & B_ASYNC) ? &sdq_ra : &sdq_rs;
++	lck_mtx_lock(&sdq_lock);
++	while (r->len >= SDQ_MAX) {
++		thread_wakeup(&sdq_event);
++		(void)assert_wait(&sdq_space, THREAD_UNINT);
++		lck_mtx_unlock(&sdq_lock);
++		thread_block(THREAD_CONTINUE_NULL);
++		lck_mtx_lock(&sdq_lock);
++	}
++	sdq_push(r, bp);
++	if (sdq_total() > sdq_maxlen) {
++		sdq_maxlen = sdq_total();
++	}
++	thread_wakeup_one(&sdq_event);
++	lck_mtx_unlock(&sdq_lock);
++}
++
++/* every 60 s: what the root's I/O did (MB/s while busy, how deep the queue got) */
++static thread_call_t sdq_stats_call;
++static void
++sdq_stats(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
++{
++	static uint64_t lrb, lwb, lru, lwu, lnr, lnw;
++	uint64_t rb = sdq_rbytes - lrb, wb = sdq_wbytes - lwb, ru = sdq_rus - lru, wu = sdq_wus - lwu;
++	printf("STARBITE SD: io 60s: read %llu KiB in %llu bufs, %llu ms busy (%llu KB/s); write %llu KiB in %llu bufs, "
++	    "%llu ms busy (%llu KB/s); queue max %u, %llu kHz%s, recovers %llu\n", rb >> 10, sdq_nr - lnr, ru / 1000,
++	    ru ? rb * 1000 / ru : 0, wb >> 10, sdq_nw - lnw, wu / 1000, wu ? wb * 1000 / wu : 0, sdq_maxlen,
++	    sd.card_hz / 1000, sd_mode_name(), sd.nrecover);
++	lrb = sdq_rbytes; lwb = sdq_wbytes; lru = sdq_rus; lwu = sdq_wus; lnr = sdq_nr; lnw = sdq_nw;
++	sdq_maxlen = 0;
++	uint64_t deadline;
++	clock_interval_to_deadline(60, NSEC_PER_SEC, &deadline);
++	thread_call_enter_delayed(sdq_stats_call, deadline);
++}
++
+ static int
+ starlte_sd_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag,
+     __unused struct proc *p, __unused int is_char)
+@@ -1407,16 +1899,42 @@ starlte_sd_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag
+ 		return 0;
+ 	case DKIOCSYNCHRONIZE:
+ 	case DKIOCSYNCHRONIZECACHE:
++		sdq_drain_writes();
++		return 0;
++	/*
++	 * 0400: vfs_init_io_attributes stops at the first query that fails; DKIOCGETFEATURES failed,
++	 * so the root kept the defaults (128 KiB I/Os, not solid state, small read-ahead). Now every
++	 * query answers: 1 MiB per buf (the strategy splits it into 128 KiB CMD18s; the buf is mapped
++	 * into one kernel range, so segments do not matter for PIO), solid state.
++	 */
++	case DKIOCGETFEATURES:
++		*f = 0;
++		return 0;
++	case DKIOCISSOLIDSTATE:
++		*f = 1;
++		return 0;
++	case DKIOCISVIRTUAL:
++		*f = 0;
+ 		return 0;
+ 	case DKIOCGETMAXBLOCKCOUNTREAD:
+-		*o = CHUNK;
++		*o = SD_MAXIO / SECTOR;
+ 		return 0;
+ 	case DKIOCGETMAXBLOCKCOUNTWRITE:
+-		*o = sd.writable ? CHUNK : 0;
++		*o = sd.writable ? SD_MAXIO / SECTOR : 0;
+ 		return 0;
+ 	case DKIOCGETMAXSEGMENTCOUNTREAD:
+ 	case DKIOCGETMAXSEGMENTCOUNTWRITE:
+-		*o = 1;
++		*o = SD_MAXIO / PAGE_SIZE;
++		return 0;
++	case DKIOCGETMAXBYTECOUNTREAD:
++	case DKIOCGETMAXBYTECOUNTWRITE:
++	case DKIOCGETMAXSEGMENTBYTECOUNTREAD:
++	case DKIOCGETMAXSEGMENTBYTECOUNTWRITE:
++	case DKIOCGETMINSEGMENTALIGNMENTBYTECOUNT:
++		*o = 0;                 /* no limit beyond the block counts */
++		return 0;
++	case DKIOCGETCOMMANDPOOLSIZE:
++		*f = 0;                 /* the default queue depth */
+ 		return 0;
+ 	default:
+ 		return ENOTTY;
+@@ -1537,6 +2055,16 @@ starlte_sd_rootdev(dev_t *dev)
+ 	    sd.card_hz / 1000);
+ 	/* As the UFS root does on a read-only root: the process sampler (bsd/dev/sweet_sample.c). */
+ 	sweet_sample_start();
++	{
++		uint32_t stats = 1;             /* 0400: sdstats=0 turns the 60 s io line off */
++		PE_parse_boot_argn("sdstats", &stats, sizeof(stats));
++		if (stats && sdq_stats_call == NULL) {
++			sdq_stats_call = thread_call_allocate(sdq_stats, NULL);
++			uint64_t deadline;
++			clock_interval_to_deadline(60, NSEC_PER_SEC, &deadline);
++			thread_call_enter_delayed(sdq_stats_call, deadline);
++		}
++	}
+ 	*dev = sd.bdev;
+ 	return 0;
+ }
