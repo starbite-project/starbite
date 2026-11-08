@@ -891,6 +891,13 @@ The census:
     restart and no cap. WTCNT is sampled at 10 s and 20 s to show the counter runs.
   - **Verdict:** `--deadman-test` passes only on the loader's `HANG (WATCHDOG)` record, and pulls the test
     boot's hive first.
+- **deadman-2 (22:31) PASSED.** The loader recorded `HANG (WATCHDOG) rst 0x00800000`.
+  - The counter runs: ArmWtCon 0xFF39; WTCNT 65,063 at arming, then 57,116 at 10 s and 49,180 at 20 s
+    (7,935 per 10 s, as computed).
+  - Windows lived 80 s. sbwdog started 27.3 s after the SoC reset.
+  - The display-only boot after it restarted itself and left the hive clean.
+  - Proven on the phone: boot-start loading, self-arming, the watchdog reset, and the clean restart.
+  - **Remaining gap:** a hang before sbwdog starts (the first ~27 s: firmware, boot manager, winload).
 - **Not yet shown on the phone:** that winload loads a Start 0 service from `System32\drivers`, that the UEFI
   leaves cluster 1 armed (sbwdog's ArmedAtStart and WtDat say), and that `NtShutdownSystem` from a driver
   leaves the hive and NTFS clean.
