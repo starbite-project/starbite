@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.5.7"
+#define SBOS_VERSION "0.5.8"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -218,6 +218,7 @@ void sos_status(struct sbos_sos *s);
 int sos_active(void);
 int sos_frame(uint32_t *argb);      /* 1 while SOS owns the screen: the colour to show */
 int clock_now(struct sbos_time *t);
+int64_t clock_set_net(int64_t utc);    /* NTP: the correction applied, s (never written to the PMIC) */
 /* the flashlight LED (torch.c) */
 int torch_ready(void);
 const char *torch_why(void);

@@ -243,6 +243,54 @@ static void dhcp_server(const uint8_t *f, unsigned len)
         model_rx(r, len);
         return;
     }
+    if (len >= 14 + 20 + 8 + 12 && ip[9] == 17) {
+        const uint8_t *u = ip + (ip[0] & 15) * 4u;
+        unsigned dport = (unsigned)u[2] << 8 | u[3], ulen = (unsigned)u[4] << 8 | u[5];
+        if ((dport == 53 || dport == 123) && ulen >= 8 + 12 && u + ulen <= f + len && ulen <= 600) {
+            /* DNS: any A question answered with 192.0.2.123; NTP: a server answer at 2026-11-08 01:30:00 UTC */
+            uint8_t r[14 + 20 + 8 + 620];
+            unsigned pl = ulen - 8;
+            uint8_t *rp = r + 14 + 20 + 8;
+            memset(r, 0, sizeof(r));
+            memcpy(r, f + 6, 6);
+            memcpy(r + 6, ap_bssid, 6);
+            r[12] = 0x08;
+            if (dport == 53) {
+                memcpy(rp, u + 8, pl);
+                rp[2] = 0x81, rp[3] = 0x80;     /* a response, recursion available, no error */
+                rp[7] = 1;                      /* one answer */
+                uint8_t *a = rp + pl;
+                const uint8_t ans[16] = { 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 123 };
+                memcpy(a, ans, sizeof(ans));
+                pl += sizeof(ans);
+            } else {
+                if (pl < 48)
+                    return;
+                pl = 48;
+                rp[0] = 0x24;                   /* version 4, server */
+                rp[1] = 2;
+                uint32_t t = 1794101400U + 2208988800U;
+                rp[40] = (uint8_t)(t >> 24), rp[41] = (uint8_t)(t >> 16), rp[42] = (uint8_t)(t >> 8), rp[43] = (uint8_t)t;
+            }
+            uint8_t *rip = r + 14, *rudp = rip + 20;
+            rip[0] = 0x45, rip[8] = 64, rip[9] = 17;
+            memcpy(rip + 12, ip + 16, 4);       /* from where it was sent */
+            memcpy(rip + 16, ip + 12, 4);
+            rudp[0] = u[2], rudp[1] = u[3], rudp[2] = u[0], rudp[3] = u[1];
+            unsigned ul = 8 + pl, tot = 20 + ul;
+            rudp[4] = (uint8_t)(ul >> 8), rudp[5] = (uint8_t)ul;
+            rip[2] = (uint8_t)(tot >> 8), rip[3] = (uint8_t)tot;
+            uint32_t s = 0;
+            for (unsigned i = 0; i < 20; i += 2)
+                s += (uint32_t)rip[i] << 8 | rip[i + 1];
+            while (s >> 16)
+                s = (s & 0xffff) + (s >> 16);
+            s = ~s & 0xffff;
+            rip[10] = (uint8_t)(s >> 8), rip[11] = (uint8_t)s;
+            model_rx(r, 14 + tot);
+            return;
+        }
+    }
     if (len < 14 + 20 + 8 + 240 || ip[9] != 17)
         return;
     ihl = (ip[0] & 15) * 4u;

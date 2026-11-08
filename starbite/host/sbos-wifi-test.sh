@@ -18,6 +18,7 @@ a=$(run $OPEN $ON $JOIN)
 want "$a" "wifi: the scan heard 1 networks" "open: the scan"
 want "$a" "wifi: an address from DHCP" "open: DHCP"
 want "$a" "wifi: the gateway answers a ping" "open: the router's ping"
+want "$a" "wifi: the clock was checked over the network" "open: the clock checked over the internet (NTP)"
 nowant "$a" "test-ap\|192\.168\|02:11:22:33" "open: no name or address logged"
 nowant "$a" "a loop turn took" "open: no slow loop turn"
 NET="test-ap

@@ -90,6 +90,30 @@ static int64_t rtc_t;
 static uint64_t rtc_ms, rtc_try;
 static int rtc_state;
 
+/* 0.5.8: the time from the network (NTP over Wi-Fi): kept as an offset to the PMIC's clock, never written to it;
+ * gone at a restart. With no readable PMIC clock the network's time is used as it is (rtc_state 2). Returns the
+ * correction in seconds (0: within 2 s, nothing changed). */
+static int64_t clock_adj;
+
+int64_t clock_set_net(int64_t utc)
+{
+    struct sbos_time t;
+    if (!clock_now(&t)) {
+        rtc_t = utc;
+        rtc_ms = sb_ms();
+        rtc_state = 2;
+        clock_adj = 0;
+        ui_mark_dirty();
+        return utc;
+    }
+    int64_t d = utc - t.utc;
+    if (d > -2 && d < 2)
+        return 0;
+    clock_adj += d;
+    ui_mark_dirty();
+    return d;
+}
+
 int clock_now(struct sbos_time *t)
 {
     uint64_t now = sb_ms();
@@ -100,14 +124,14 @@ int clock_now(struct sbos_time *t)
             rtc_t = (int64_t)e;
             rtc_ms = now;
             rtc_state = 1;
-        } else if (rtc_state != 1) {
+        } else if (rtc_state != 1 && rtc_state != 2) {
             rtc_state = -1;
         }
     }
     memset(t, 0, sizeof(*t));
-    if (rtc_state != 1)
+    if (rtc_state != 1 && rtc_state != 2)
         return 0;
-    int64_t utc = rtc_t + (int64_t)((now - rtc_ms) / 1000U);
+    int64_t utc = rtc_t + (int64_t)((now - rtc_ms) / 1000U) + clock_adj;
     struct tz_time l;
     tz_local(&tz_zones[0], utc, &l);
     t->utc = utc;

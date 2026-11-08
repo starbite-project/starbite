@@ -47,6 +47,12 @@ static int nnets, scan_heard;
 static uint16_t sync;
 static int joined = -1;
 static int pinged;
+/* 0.5.8: the time over the network (NTP, pool.ntp.org) once joined: 0 idle, 1 DNS, 2 asked, 3 done (checked),
+ * -1 no answer */
+#define NTP_PORT 50123
+static int ntp_st, clock_checked;
+static int32_t clock_off;
+static uint64_t ntp_t;
 /* the saved network (0.4.2): the store entry "wifinet", two lines (name, WPA2 passphrase or empty), made on the
  * Mac from the user's input for the Wi-Fi tests; read only, never logged, never shown (the passphrase) */
 static uint8_t sv_ssid[33];
@@ -321,6 +327,32 @@ static uint32_t net_random(void *ctx)
     return (uint32_t)x;
 }
 
+static uint32_t ntp_be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+
+/* sbnet's UDP for our ports: the NTP answer */
+static void net_udp(void *ctx, uint16_t port, const uint8_t from[4], uint16_t from_port, const uint8_t *d, uint32_t len)
+{
+    (void)ctx;
+    (void)from;
+    if (port != NTP_PORT || from_port != 123 || ntp_st != 2 || len < 48 || (d[0] & 7) != 4)
+        return;
+    uint32_t secs = ntp_be32(d + 40);           /* the transmit time, seconds since 1900 */
+    if (secs < 2208988800U + 1577836800U)   /* before 2020: not believed */
+        return;
+    uint64_t rtt = sb_ms() - ntp_t;
+    int64_t utc = (int64_t)(secs - 2208988800U) + (int64_t)((rtt / 2 + 500) / 1000U);
+    int64_t d_s = clock_set_net(utc);
+    clock_off = (int32_t)d_s;
+    clock_checked = d_s ? 2 : 1;
+    ntp_st = 3;
+    if (d_s)
+        logn("wifi: the clock was checked over the network and corrected by ", (uint64_t)(d_s < 0 ? -d_s : d_s),
+             d_s < 0 ? " s (it was ahead; until a restart)" : " s (it was behind; until a restart)");
+    else
+        sb_log("wifi: the clock was checked over the network: right");
+    notify();
+}
+
 static void net_log(void *ctx, const char *line)
 {
     (void)ctx;
@@ -484,7 +516,7 @@ int wifi_join(int i, const char *pass)
         /* bcmw_join does the WPA2 handshake and blocks (up to 15 s): the screen shows "Joining" first, the join
          * runs on the next tick (the heater is never on with Wi-Fi) */
         const struct bcmw_info *in = bcmw_info(w);
-        struct sbnet_os no = { 0, net_tx, net_now, net_random, net_log, 0 };
+        struct sbnet_os no = { 0, net_tx, net_now, net_random, net_log, net_udp };
         sbnet_init(&net, &no, in->mac);
         joined = i;
         join_pending = 1;
@@ -493,7 +525,7 @@ int wifi_join(int i, const char *pass)
         return 0;
     }
     const struct bcmw_info *in = bcmw_info(w);
-    struct sbnet_os no = { 0, net_tx, net_now, net_random, net_log, 0 };
+    struct sbnet_os no = { 0, net_tx, net_now, net_random, net_log, net_udp };
     sbnet_init(&net, &no, in->mac);
     joined = i;
     sb_log("wifi: joining an open network (name not logged)");
@@ -521,6 +553,8 @@ void wifi_status(struct sbos_wifi *s)
         memcpy(s->ip, net.ip, 4);
         memcpy(s->gateway, net.gateway, 4);
         s->ping_ms = net.ping_replies ? (int32_t)net.ping_rtt_ms : -1;
+        s->clock_checked = clock_checked;
+        s->clock_off_s = clock_off;
     }
     s->secs = (int32_t)((sb_ms() - t_state) / 1000U);
 }
@@ -674,6 +708,7 @@ void wifi_timer(unsigned id)
                 logn("wifi: an address from DHCP (not logged), lease ", net.lease_s, " s");
                 set_state(SBOS_WIFI_CONNECTED, "");
                 pinged = 0;
+                ntp_st = 0;
             } else if (st == SBOS_WIFI_DHCP && now - t_state > DHCP_MS) {
                 sb_log("wifi: no DHCP answer");
                 (void)bcmw_leave(w);
@@ -694,6 +729,23 @@ void wifi_timer(unsigned id)
             if (st == SBOS_WIFI_CONNECTED && pinged == 1 && net.ping_replies) {
                 pinged = 2;
                 logn("wifi: the gateway answers a ping in ", net.ping_rtt_ms, " ms");
+                notify();
+            }
+            if (st == SBOS_WIFI_CONNECTED && pinged == 2 && ntp_st == 0) {
+                ntp_st = sbnet_dns_query(&net, "pool.ntp.org") == 0 ? 1 : -1;
+                ntp_t = now;
+            }
+            if (ntp_st == 1 && net.dns_state == SBNET_DNS_DONE) {
+                uint8_t q[48];
+                memset(q, 0, sizeof(q));
+                q[0] = 0x23;                /* NTP version 4, client */
+                ntp_t = sb_ms();
+                ntp_st = sbnet_udp_send(&net, net.dns_result, 123, NTP_PORT, q, sizeof(q)) == 0 ? 2 : -1;
+            } else if ((ntp_st == 1 && net.dns_state == SBNET_DNS_FAILED) ||
+                       ((ntp_st == 1 || ntp_st == 2) && now - ntp_t > 8000)) {
+                ntp_st = -1;
+                clock_checked = -1;
+                sb_log("wifi: no answer from the time server (the clock stays as it is)");
                 notify();
             }
         }

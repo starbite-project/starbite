@@ -855,9 +855,16 @@ static void build_home(void)
             scopy(e->b, sizeof(e->b), "Alarm on");
     }
     struct el *e = add(cur, &ncur, E_CTEXT);
-    scopy(e->b, sizeof(e->b), "Bixby: open  " U_DOT "  Power: screen off  " U_DOT "  hold Power: menu");
-    e->value = F_SMALL;
-    e->color = C_L3;
+    int info = app_by_id("info");
+    if (info >= 0 && !sb_strcmp_eq(app_tile(info), "Not set up")) {
+        scopy(e->b, sizeof(e->b), "Tip: write your medical card in Info");   /* until there is one */
+        e->value = F_DETAIL;
+        e->color = C_STAR;
+    } else {
+        scopy(e->b, sizeof(e->b), "Bixby: open  " U_DOT "  Power: screen off  " U_DOT "  hold Power: menu");
+        e->value = F_SMALL;
+        e->color = C_L3;
+    }
     e->x = 0, e->y = y0 + rows * (th + 40) + 4, e->w = UI_W, e->h = 80;
 }
 

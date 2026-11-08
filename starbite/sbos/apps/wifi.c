@@ -85,6 +85,32 @@ static void show(void)
                 fmt_s(&f, "Asking the router...");
             }
             ui_textline(f.b, s.ping_ms >= 0 ? GREEN : GREY);
+            if (s.clock_checked) {
+                fmt_init(&f);
+                if (s.clock_checked == 1) {
+                    fmt_s(&f, "The clock is right (checked over the internet)");
+                } else if (s.clock_checked == 2) {
+                    int off = s.clock_off_s < 0 ? -s.clock_off_s : s.clock_off_s;
+                    fmt_s(&f, "The clock was ");
+                    if (off >= 2 * 86400) {
+                        fmt_d(&f, off / 86400);
+                        fmt_s(&f, " days ");
+                    } else if (off >= 2 * 3600) {
+                        fmt_d(&f, off / 3600);
+                        fmt_s(&f, " h ");
+                    } else if (off >= 120) {
+                        fmt_d(&f, off / 60);
+                        fmt_s(&f, " min ");
+                    } else {
+                        fmt_d(&f, off);
+                        fmt_s(&f, " s ");
+                    }
+                    fmt_s(&f, s.clock_off_s < 0 ? "fast: corrected" : "slow: corrected");
+                } else {
+                    fmt_s(&f, "No internet time answer (the clock is as it was)");
+                }
+                ui_textline(f.b, s.clock_checked > 0 ? GREEN : GREY);
+            }
         }
     } else if (s.state == SBOS_WIFI_OFF) {
         ui_textline("Turn Wi-Fi on to see the networks around and join one.", GREY);
