@@ -164,6 +164,13 @@ Screens:
 `build/menu/screens/contact.png` (26 before/after pairs: 16 concept states, 10 with the real catalog;
 `tools/menu/contact.py`).
 
+### 6.1 One UI regression on the 4-core BOOT (2026-11-08 ~10:56)
+BOOT-new.img (1eaf6e21…) passed the menu trial and Ubuntu, but under One UI (Samsung 4.9) cpus 1-3 stayed offline and
+Android reset after ~2 min. With the old loader, cores 1-3 were never powered before the kernel. With the new loader they
+are powered on and off once (PSCI CPU_ON/CPU_OFF), and Samsung's kernel does not bring them back. The old BOOT was restored.
+Fix staged: **BOOT-1core.img** (sha256 5c32e2c0…5950), the same UI fixes with cores 1-3 never touched (M7_DEF_CORES=1).
+Details and the data needed to keep 4 cores: side-session-notes/…/boot-menu-latest.md.
+
 ## 7. Not done / next
 
 - GPU (Mali-G72) composition: the right long-term answer for 60 fps (MV5). The win-mali-gpu track can
