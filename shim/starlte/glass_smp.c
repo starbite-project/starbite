@@ -294,12 +294,80 @@ static uint64_t ms_now(void)
     return hw_ticks() * 1000U / f;
 }
 
+/* ---- the cores' FlexPMU bookkeeping, as Samsung's kernel does it (ref/starlte-kernel,
+ * drivers/soc/samsung/exynos-powermode.c exynos_hotplug_in/out_callback -> cal_cpu_enable/disable,
+ * cal-if/exynos9810/flexpmu_cal_cpu_exynos9810.h core0N_on/off, pmucal_powermode_hint(CPU_INFORM_C2)).
+ * Run by the core itself, under one lock (the kernel's pmucal_cpu_lock): "on" right after it starts,
+ * "off" plus the C2 hint right before PSCI CPU_OFF. Without the "off" settings the FlexPMU never
+ * powers the core down after CPU_OFF; 2026-11-08 One UI then could not bring cpus 1-3 online. */
+#ifndef G7_SMP_QEMU
+#define PMU_BASE   0x14060000UL
+#define PMU_INTR   0x14070000UL
+#define GRP2_BID_EN   (PMU_INTR + 0x0200)
+#define GRP2_BID_PEND (PMU_INTR + 0x0208)
+#define GRP2_BID_CLR  (PMU_INTR + 0x020c)
+#define GRP1_BID_PEND (PMU_INTR + 0x0108)
+#define GRP1_BID_CLR  (PMU_INTR + 0x010c)
+#define PMU_EVT_EN_GRP2 (PMU_BASE + 0x7f08)
+#define CPU_INFORM(c) (PMU_BASE + 0x0860 + 4U * (unsigned)(c))
+#define CPU_INFORM_C2 1U
+static uint32_t pmu_lock;
+static inline uint32_t prd(uintptr_t a) { return *(volatile uint32_t *)a; }
+static inline void pwr(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; __asm__ volatile("dsb sy" ::: "memory"); }
+static inline void prmw(uintptr_t a, uint32_t mask, uint32_t val) { pwr(a, (prd(a) & ~mask) | val); }
+static void pmu_core_seq(unsigned c, int on)
+{
+    uint32_t b = 1U << (4U + c);   /* cluster 0 core c: bit 4 + c (core00 bit 4 .. core03 bit 7) */
+    while (__atomic_exchange_n(&pmu_lock, 1U, __ATOMIC_ACQUIRE))
+        __asm__ volatile("yield");
+    if (on) {
+        pwr(CPU_INFORM(c), 0);                          /* pmucal_powermode_hint_clear */
+        prmw(GRP2_BID_EN, b, 0);
+        if ((prd(GRP2_BID_PEND) & b) == b)
+            prmw(GRP2_BID_CLR, b, b);
+        prmw(PMU_EVT_EN_GRP2, b, 0);
+    } else {
+        pwr(CPU_INFORM(c), CPU_INFORM_C2);              /* pmucal_powermode_hint(cpu_inform_c2) */
+        prmw(GRP2_BID_EN, b, b);
+        if ((prd(GRP1_BID_PEND) & b) == b)
+            prmw(GRP1_BID_CLR, b, b);
+        prmw(PMU_EVT_EN_GRP2, b, b);
+    }
+    __atomic_store_n(&pmu_lock, 0U, __ATOMIC_RELEASE);
+}
+/* one pmsg line: the registers both sequences touch, and cores 1-3's PMU status */
+static void pmu_note(const char *when)
+{
+    static const uintptr_t r[] = { GRP2_BID_EN, GRP2_BID_PEND, GRP1_BID_PEND, PMU_EVT_EN_GRP2, CPU_INFORM(1), CPU_INFORM(2),
+                                   CPU_INFORM(3), PMU_BASE + 0x202c, PMU_BASE + 0x2034, PMU_BASE + 0x203c };
+    char b[200];
+    unsigned n = 0;
+    for (const char *p = "STARBITE v7 smp: pmu "; *p;)
+        b[n++] = *p++;
+    for (const char *p = when; *p && n < 60;)
+        b[n++] = *p++;
+    for (unsigned i = 0; i < sizeof(r) / sizeof(r[0]); ++i) {
+        uint32_t v = prd(r[i]);
+        b[n++] = ' ';
+        for (int k = 7; k >= 0; --k)
+            b[n++] = "0123456789abcdef"[(v >> (4 * k)) & 15U];
+    }
+    b[n++] = '\n';
+    b[n] = 0;
+    star_pmsg(b);
+}
+#else
+static void pmu_core_seq(unsigned c, int on) { (void)c; (void)on; }
+static void pmu_note(const char *when) { (void)when; }
+#endif
+
 void g7_worker_main(uint64_t w)
 {
     struct wslot *s = &WS[w];
     uint64_t mpidr, seen;
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
     s->mpidr = mpidr;
+    pmu_core_seq((unsigned)w, 1);   /* Samsung's hotplug-in callback, on this core */
     seen = claim_gen();
     __atomic_store_n(&s->state, (uint64_t)WS_IDLE, __ATOMIC_RELEASE);
     __asm__ volatile("dsb ish\n sev" ::: "memory");
@@ -312,6 +380,7 @@ void g7_worker_main(uint64_t w)
         run_chunks((int)w, seen);
         __asm__ volatile("dsb ish\n sev" ::: "memory");
     }
+    pmu_core_seq((unsigned)w, 0);   /* Samsung's hotplug-out callback, on this core, before CPU_OFF */
     __atomic_store_n(&s->state, (uint64_t)WS_LEAVING, __ATOMIC_RELEASE);
     __asm__ volatile("dsb sy\n sev" ::: "memory");
 }
@@ -340,6 +409,7 @@ int g7_smp_start(int want)
     if (!(sctlr & 1))                /* no MMU, no caches: workers would not be coherent */
         return g7_smp_on = 1;
     __atomic_store_n(&J.stop, 0U, __ATOMIC_RELEASE);
+    pmu_note("before CPU_ON");
     int n = 1;
     if (want > NW)
         want = NW;
@@ -385,6 +455,7 @@ int g7_smp_start(int want)
         n = w + 1;
     }
     g7_smp_on = n;
+    pmu_note("cores up");
     return n;
 }
 
@@ -412,6 +483,7 @@ int g7_smp_stop(void)
         started[w] = 0;
     }
     g7_smp_on = 1;
+    pmu_note("cores off");
     if (bad) {
         smp_broken = 1;              /* a core we could not turn off: never start more */
         note_core(0, "stop: cores whose CPU_OFF failed (bits)", bad);

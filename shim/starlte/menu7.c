@@ -206,6 +206,9 @@ enum { SH_CLOSE, SH_DEF, SH_START };                                  /* sh:* */
 enum { E_RETRY, E_BACK };                                             /* e:* */
 
 enum { MD_BOOT, MD_SPLASH, MD_INTRO, MD_MENU, MD_LAUNCH, MD_END };
+#if defined(M7_AUTOLAUNCH_ANDROID) && !defined(M7_AUTOLAUNCH)
+#define M7_AUTOLAUNCH "android"     /* (a define with quotes does not survive the build's shell) */
+#endif
 #if defined(M7_BENCH) && !defined(M7_PREVIEW)
 /* Bench build (tools/menu/build-bench.sh, docs/BOOT-MENU-OVERNIGHT.md): chain-loaded from the BOOT
  * loader as a bare test entry, it plays a fixed key script over the intro and the menu, alternating
@@ -213,6 +216,9 @@ enum { MD_BOOT, MD_SPLASH, MD_INTRO, MD_MENU, MD_LAUNCH, MD_END };
  * starts an OS, Lab, an alert or a setting: any key that would ends the bench at once. */
 static void bench_end(const char *why);
 static unsigned bench_keys(uint64_t now);
+/* M7_AUTOLAUNCH "key": after the script, start that catalog entry instead of rebooting (the 4-core
+ * hand-off test: cores up, menu frames, cores off, then the OS). 1 = due, 2 = started. */
+static int bench_auto;
 #endif
 enum { OV_NONE, OV_CTX, OV_ALERT, OV_SHEET };
 enum { AL_POWER, AL_RECOVERY, AL_DOWNLOAD };
@@ -1913,7 +1919,8 @@ static void pill_rect(struct rc *r);
 static void launch(int cat, int row, int src, uint32_t src_key, const struct rc *src_rect)
 {
 #if defined(M7_BENCH) && !defined(M7_PREVIEW)
-    bench_end("bench: launch");
+    if (bench_auto != 2)
+        bench_end("bench: launch");
 #endif
     close_overlays(1);
     S.mode = MD_LAUNCH;
@@ -4483,6 +4490,12 @@ static void bench_end(const char *why)
     b[n] = 0;
     star_pmsg(b);
     m7_report(why);
+#ifdef M7_AUTOLAUNCH
+    if (!bench_auto && why[7] == 'd') {     /* "bench: done": hand off through the menu's own return */
+        bench_auto = 1;
+        return;
+    }
+#endif
     int bad = g7_smp_stop();
     n = 0;
     rep_str(b, &n, "STARBITE v7 bench: cores off ");
@@ -4697,6 +4710,20 @@ static int run_loop(void)
             dispatch(&ev);
             had = 1;
         }
+#if defined(M7_BENCH) && defined(M7_AUTOLAUNCH) && !defined(M7_PREVIEW)
+        if (bench_auto == 1) {
+            int c = cat_find(M7_AUTOLAUNCH);
+            bench_auto = 2;
+            star_pmsg(c >= 0 ? "STARBITE v7 bench: auto-launch " M7_AUTOLAUNCH "\n" : "STARBITE v7 bench: auto-launch key not found\n");
+            if (c >= 0) {
+                S.now = t0;
+                launch(c, row_by_cat(c), SRC_PILL, 0, 0);
+                had = 1;
+            } else {
+                hw_reboot(INFORM_NORMAL);
+            }
+        }
+#endif
         float dt = (float)((t0 - last) / 1000.0);
         last = t0;
         m7_advance(dt);
