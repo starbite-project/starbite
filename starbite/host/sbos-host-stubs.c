@@ -93,6 +93,27 @@ void hw_wdt_feed_heat(void)
     host_wdt_fed = now;
 }
 int hw_dvfs(unsigned domain, uint32_t khz) { return sb_acpm_dvfs_listed(domain, khz); }
+/* 1.1-beta7: the OCP probe on the host: fake register values (the real mrs would trap here);
+ * SBOS_HOST_OCP=trap: the worker faults as an undefined register would */
+static void host_ocp_fake(unsigned w, void *arg)
+{
+    struct sb_wslot *s = sb_smp_own_slot(w);
+    (void)arg;
+    if (!s)
+        return;
+    if (getenv("SBOS_HOST_OCP") && !strcmp(getenv("SBOS_HOST_OCP"), "trap")) {
+        s->v[0] = 0x531f0020U;
+        s->esr = 0x02000000U;
+        s->state = SB_WK_FAULT;
+        return;
+    }
+    s->v[0] = 0x531f0020U, s->v[1] = 0x0000007cU, s->v[2] = 0x1, s->v[3] = 0x30U, s->v[4] = 0x01000000U, s->v[5] = 0x100U;
+    s->v[7] = 1;
+    sb_worker_publish(s);
+    while (!sb_worker_stop())
+        ;
+}
+int64_t hw_ocp_launch(unsigned w) { return sb_smp_launch(w, host_ocp_fake, 0); }
 int hw_dvfs_m3_ocp(uint32_t khz, unsigned busy)
 {
     if (!sb_m3_ocp_level_ok(khz, busy)) {

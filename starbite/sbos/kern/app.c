@@ -509,6 +509,8 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         sb_log(heat_reserve_override ? "settings: the next full-heat session without the call / SOS reserve (once)" :
                                        "settings: the reserve override cancelled");
         return 0;
+    case SET_OCP_PROBE:
+        return heater_ocp_probe();
     case SET_PANEL_DUMP:
         return panel_dump() ? 0 : SBOS_EAGAIN;
     case SET_LED_FULL:
@@ -862,6 +864,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_SOC_STOP_C10: return heat_soc_stop_c10;
         case SET_HEAT_SURV_STOP_C10: return heat_surv_stop_c10;
         case SET_HEAT_SURV_BAT_C10: return heat_surv_bat_c10;
+        case SET_OCP_PROBE: return heater_ocp_state;
         case SET_LED_FULL: return led_full ? (fled_flash_ok() ? 1 : 2) : -fled_code();     /* 1.0-rc3: negative = why the chip was refused */
         case SET_SAVED: return settings_persistent();
         case SET_AUTO_OFF_MIN: return (int64_t)auto_off_min;

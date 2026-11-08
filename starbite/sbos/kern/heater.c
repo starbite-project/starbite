@@ -343,6 +343,127 @@ static int cores_usable(int upto)
     return n;
 }
 
+/* 1.1-beta7: the M3 over-current registers, read only, on M3 core 4 (Samsung's OCP handler is the next step: it needs
+ * them readable and their throttle bits known; engineer-oc-2's oc9 probe does the same on Engineer OS). Only while
+ * the heater is idle: the probe ends with sb_smp_stop, which every worker sees. A trap on the M3 stays in the probe
+ * core (the worker vectors record FAULT and power it off). The M3 gets the FlexPMU steps like a heat worker. */
+int heater_ocp_state;
+
+int heater_ocp_probe(void)
+{
+    if (heater_busy() || stopping)
+        return SBOS_EAGAIN;
+    for (unsigned w = 1; w < 8; ++w)
+        if (running[w] || cs[w].st == CS_LAUNCHED)
+            return SBOS_EAGAIN;
+    if (!m3_prepped) {
+        if (!hw_m3_prep()) {
+            sb_log("ocp probe: the big cores could not be prepared");
+            return SBOS_EAGAIN;
+        }
+        m3_prepped = 1;
+    }
+    uint8_t w1 = 0, w2 = 0;
+    int pm = sb_ocp_pmic(&w1, &w2);
+    hw_m3_fp_log("ocp probe: flexpmu before");
+    (void)hw_m3_fp_reset();
+    hw_m3_core_on(4, 1);
+    sb_log("ocp probe: step: PSCI CPU_ON core 4 (sb_ocp_worker, read only)");
+    int64_t r = hw_ocp_launch(4);
+    sb_logx("ocp probe: step: CPU_ON returned ", (uint64_t)r);
+    const struct sb_wslot *s = 0;
+    int done = 0, fault = 0;
+    for (unsigned ms = 0; r == 0 && ms < 500 && !done && !fault; ms += 5) {
+        hw_wdt_feed();
+        sb_mdelay(5);
+        s = sb_smp_slot(4);
+        if (s && s->state == SB_WK_FAULT)
+            fault = 1;
+        else if (s && s->v[7] == 1)
+            done = 1;
+    }
+    uint64_t v[6] = { 0 };
+    if (s)
+        for (unsigned i = 0; i < 6; ++i)
+            v[i] = s->v[i];
+    hw_m3_core_off(4, 1);                   /* the C2 hint before it sees the stop and calls CPU_OFF */
+    hw_heat_stop_all();
+    for (unsigned ms = 0; ms < 300; ms += 5) {
+        const struct sb_wslot *t = sb_smp_slot(4);
+        if (!t || t->state != SB_WK_RUNNING)
+            break;
+        sb_mdelay(5);
+    }
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "ocp probe: PMIC OCP_WARN1 0xD3 ");
+    ub_hex(&u, w1, 2);
+    ub_s(&u, " OCP_WARN2 0xD4 ");
+    ub_hex(&u, w2, 2);
+    ub_s(&u, pm ? "" : " (PMIC read failed)");
+    sb_log(u.b);
+    if (r != 0 || (!done && !fault)) {
+        heater_ocp_state = -2;
+        sb_logx("ocp probe: the M3 core did not report (code) ", (uint64_t)r);
+        return SBOS_EAGAIN;
+    }
+    if (fault) {
+        heater_ocp_state = -1;
+        ub_init(&u);
+        ub_s(&u, "ocp probe: TRAPPED on the M3 (not readable at EL1): MIDR ");
+        ub_hex(&u, v[0], 8);
+        ub_s(&u, ", ESR ");
+        ub_hex(&u, s ? s->esr : 0, 8);
+        ub_s(&u, ", read so far ");
+        for (unsigned i = 1; i < 6; ++i) {
+            ub_hex(&u, v[i], 8);
+            ub_c(&u, i < 5 ? '/' : ' ');
+        }
+        sb_log(u.b);
+        sb_log("ocp probe: Survival stays inside Samsung's core-count table (4 cores at 1794 MHz at most)");
+        return SBOS_EAGAIN;
+    }
+    heater_ocp_state = ((v[0] >> 24) & 0xffU) == 0x53U ? 1 : -2;
+    ub_init(&u);
+    ub_s(&u, "ocp probe: MIDR ");
+    ub_hex(&u, v[0], 8);
+    ub_s(&u, " OCPTHROTTCTL ");
+    ub_hex(&u, v[1], 8);
+    ub_s(&u, " (TEW ");
+    ub_dec(&u, (uint64_t)((v[1] >> 2) & 1U));
+    ub_s(&u, ", TRW ");
+    ub_hex(&u, (v[1] >> 3) & 0x1fU, 2);
+    ub_s(&u, ", BPC ");
+    ub_hex(&u, (v[1] >> 16) & 0x1fU, 2);
+    ub_s(&u, ", THROTTERRA ");
+    ub_dec(&u, (uint64_t)((v[1] >> 27) & 1U));
+    ub_s(&u, ")");
+    sb_log(u.b);
+    ub_init(&u);
+    ub_s(&u, "ocp probe: OCPTHROTTCNTA ");
+    ub_hex(&u, v[2], 8);
+    ub_s(&u, " OCPINTCTL ");
+    ub_hex(&u, v[3], 8);
+    ub_s(&u, " (IRP ");
+    ub_dec(&u, (uint64_t)((v[3] >> SB_OCP_IRP_SHIFT) & SB_OCP_IRP_MASK));
+    ub_s(&u, "; Linux writes ");
+    ub_dec(&u, sb_ocp_irp(1794000U, 0));
+    ub_s(&u, " at 1794, ");
+    ub_dec(&u, sb_ocp_irp(2314000U, 0));
+    ub_s(&u, " at 2314, ");
+    ub_dec(&u, sb_ocp_irp(2704000U, 0));
+    ub_s(&u, " at 2704) GCUCTL ");
+    ub_hex(&u, v[4], 8);
+    ub_s(&u, " (THROTTERRAEN ");
+    ub_dec(&u, (uint64_t)((v[4] >> 24) & 1U));
+    ub_s(&u, ") BPT ");
+    ub_hex(&u, v[5], 8);
+    sb_log(u.b);
+    sb_log(heater_ocp_state == 1 ? "ocp probe: readable on the M3 (nothing written); the OCP mode comes after engineer-oc-2's oc9" :
+                                   "ocp probe: the core is not a Samsung M3 (MIDR): nothing read");
+    return heater_ocp_state == 1 ? 0 : SBOS_EAGAIN;
+}
+
 int heater_trip_off(void)
 {
     return trip_off;

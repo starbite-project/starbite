@@ -402,7 +402,10 @@ void hw_m3_core_off(unsigned w, int last);  /* 1.1-beta2: FlexPMU before it leav
 void hw_m3_fp_log(const char *what);
 int hw_m3_fp_reset(void);           /* 1.1-beta3: the M3 FlexPMU words back to the boot state (1 if changed) */
 int heater_trip_off(void);          /* 1.1-beta2: the chip's trip is off by Survival's switch now */
-int hw_dvfs_m3_ocp(uint32_t khz, unsigned busy);   /* 1.1-beta6: the M3 above 1794 within Samsung's core-count table */
+int hw_dvfs_m3_ocp(uint32_t khz, unsigned busy);
+int64_t hw_ocp_launch(unsigned w);  /* 1.1-beta7: sb_ocp_worker on M3 core w (read only) */
+int heater_ocp_probe(void);         /* 1.1-beta7: Settings > About: the M3 OCP registers, read only (0 read, < 0 not) */
+extern int heater_ocp_state;        /* 0 not probed, 1 readable (Samsung core, values logged), -1 trapped, -2 no start */   /* 1.1-beta6: the M3 above 1794 within Samsung's core-count table */
 void hw_wdt_feed_heat(void);        /* 1.1: the heat loop's feed (the only one while the trip is off) */
 unsigned hw_wdt_short(unsigned secs);   /* 1.1: the loader's watchdog shortened (0: back); 0 = refused */
 int hw_dvfs(unsigned domain, uint32_t khz);   /* sb_acpm_dvfs_listed */

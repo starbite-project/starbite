@@ -101,7 +101,7 @@ for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$
            "$wifi/wpa.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c"; do
     obj="$ob/k_$(basename "$src" | tr . _).o"
     flags=$CFLAGS
-    case " smp.c heatk.c " in
+    case " smp.c heatk.c ocp.c " in
     *" $(basename "$src") "*)
         flags=$V80FLAGS
         v80objs="$v80objs $obj" ;;

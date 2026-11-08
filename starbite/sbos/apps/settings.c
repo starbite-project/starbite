@@ -102,6 +102,10 @@ static void show(void)
         about();
         ui_button(10, "Read the panel's registers", dump_r == 1 ? "Done: in the log (read only)" :
                   dump_r < 0 ? "Did not complete (logged)" : "For the brighter-screen work: logged, read only", 0);
+        int op = setting_get(SET_OCP_PROBE);    /* 1.1-beta7 */
+        ui_button(11, "Read the big cores' power limits", op == 1 ? "Readable: in the log (read only)" :
+                  op == -1 ? "Not readable here (logged): 4 x 1794 MHz stays the limit" :
+                  op == -2 ? "Did not complete (logged)" : "For faster big cores later: one core, read only, logged", 0);
     }
     ui_textline(setting_get(SET_SAVED) == 1 ? "Saved on this phone." : "Settings last until a restart (no save slot yet).", GREY);
     ui_end();
@@ -112,6 +116,9 @@ void app_event(const struct sbos_event *ev)
     if (ev->type == EV_APP_START) {
         ui_tile("Display, alarm, about");
     } else if (ev->type == EV_APP_SHOW) {
+        show();
+    } else if (ev->type == EV_APP_BUTTON && ev->id == 11) {
+        (void)setting_set(SET_OCP_PROBE, 1);
         show();
     } else if (ev->type == EV_APP_BUTTON && ev->id == 10) {
         dump_r = setting_set(SET_PANEL_DUMP, 1) == 0 ? 1 : -1;

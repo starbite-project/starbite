@@ -302,6 +302,12 @@ int hw_dvfs(unsigned domain, uint32_t khz)
     return sb_acpm_dvfs_listed(domain, khz);
 }
 
+/* 1.1-beta7: the read-only OCP probe on M3 core w (libsb ocp.c sb_ocp_worker, master f8ad4a9) */
+int64_t hw_ocp_launch(unsigned w)
+{
+    return sb_smp_launch(w, sb_ocp_worker, 0);
+}
+
 int hw_dvfs_m3_ocp(uint32_t khz, unsigned busy)
 {
     return sb_acpm_dvfs_m3_ocp(khz, busy);
