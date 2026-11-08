@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
-# logged-boot.sh [WAIT_S] : one fully logged One UI boot (catalog key `android`), unattended, for the bootloop
+# [HOLD_S=N] logged-boot.sh [WAIT_S] : one fully logged One UI boot (catalog key `android`), unattended, for the bootloop
 # triage (docs/ANDROID-ONEUI.md 6). Start with the phone in TWRP or at the loader (menu / crash screen).
 #   1. before: TWRP -> pstore + last_kmsg, then `adb reboot` (lands in the loader menu); the loader's crash
 #      log (sbfb.py crash --level 3), its dmesg/loader/usb logs.
 #   2. `sbfb.py boot android`, then a 2 s timeline (timeline.txt) of every state change: none / loader <mode> /
 #      android bc= anim= zygote= ss= / recovery. While Android's adb is up: `logcat -b all` streamed to
-#      logcat-N.txt (capped 40 MB each), getprop and dmesg (if allowed) once per Android session.
+#      logcat-N.txt (unbuffered), getprop and dmesg (if allowed) once per Android session.
 #   3. outcome:
 #      boot_completed=1 -> getprop + logcat snapshot, then `adb reboot recovery` (back to TWRP): RESULT booted
 #      back at the loader (reset / watchdog / panic) -> crash log, logs, screen.png, `sbfb.py reboot recovery`
 #        (a warm reset keeps Samsung's last_kmsg of the failed kernel), then TWRP collection: RESULT reset
 #      TWRP directly (init fatal reboot / boot guard) -> TWRP collection: RESULT recovery
 #      nothing for WAIT_S -> RESULT hang (the user's buttons are needed)
+#   HOLD_S=N: after boot_completed keep the timeline and logcat (kernel buffer included) running N more seconds
+#      while the user uses the phone; a reset in that time is RESULT reset (with the seconds after boot_completed),
+#      and logcat holds the last lines before it (USB dies with the kernel, so the very last ones may be missing).
 #   TWRP collection = last_kmsg, pstore, tools/android/oneui/diag-boot.sh, ODM's 9 blocks (odm.bin).
 # Writes nothing to the phone except what the loader does for `oem reboot-to` (its one-shot next entry).
 #   -> build/test-boots/<date>-android-logged/ (RESULT in summary.txt)
 set -uo pipefail
 cd "$(dirname "$0")/../../.."
-WAIT=${1:-900}
+WAIT=$(( ${1:-900} + ${HOLD_S:-0} ))
 out=build/test-boots/$(date +%Y%m%d-%H%M%S)-android-logged
 mkdir -p "$out"
 S="$out/summary.txt"; T="$out/timeline.txt"
@@ -75,11 +78,15 @@ while :; do
     android*)
         if [ -z "$lcpid" ] || ! kill -0 "$lcpid" 2>/dev/null; then
             n=$((n + 1)); seen_android=1
-            ( adb logcat -b all -v threadtime 2>/dev/null </dev/null | head -c 40000000 > "$out/logcat-$n.txt" ) & lcpid=$!
+            adb logcat -b all -v threadtime </dev/null > "$out/logcat-$n.txt" 2>/dev/null & lcpid=$!   # adb writes as it reads: the last lines before a reset are kept
             adb shell getprop </dev/null > "$out/getprop-$n.txt" 2>/dev/null
             adb shell 'dmesg 2>&1 || su -c dmesg' </dev/null > "$out/dmesg-$n.txt" 2>/dev/null
         fi
         case "$s" in *bc=1*)
+            if [ "${HOLD_S:-0}" -gt 0 ]; then   # keep streaming while the user uses the phone
+                [ -n "${tbc:-}" ] || { tbc=$now; say "boot_completed after ${now}s: holding ${HOLD_S}s, logcat streaming (use the phone now)"; }
+                [ $((now - tbc)) -lt "$HOLD_S" ] && { sleep 2; continue; }
+            fi
             sleep 20
             adb shell getprop </dev/null > "$out/getprop-final.txt" 2>/dev/null
             adb shell 'dmesg 2>&1 || su -c dmesg' </dev/null > "$out/dmesg-final.txt" 2>/dev/null
@@ -87,7 +94,7 @@ while :; do
         esac ;;
     "loader crash"|"loader menu"|"loader recovery"|"loader fastboot")
         # back at the loader after Android had started = a reset during the boot
-        [ "$left" = 1 ] && { result="reset (back at the $s after ${now}s, $n Android adb session(s))"; break; } ;;
+        [ "$left" = 1 ] && { result="reset (back at the $s after ${now}s${tbc:+, $((now - tbc))s after boot_completed}, $n Android adb session(s))"; break; } ;;
     recovery) [ "$left" = 1 ] && result="recovery (TWRP after ${now}s: init fatal reboot or boot guard)" && break ;;
     esac
     [ "$now" -ge "$WAIT" ] && { result="hang (state '$s' after ${WAIT}s)"; break; }
@@ -113,6 +120,6 @@ esac
 for f in "$out"/logcat-*.txt; do
     [ -s "$f" ] || continue
     say "-- ${f##*/}: last fatal lines"
-    grep -a -E " F |FATAL|Fatal signal|beginning of crash|reboot|watchdog|init *:.*(fail|abort)" "$f" | tail -20 | tee -a "$S"
+    grep -a -E " F |FATAL|Fatal signal|beginning of crash|reboot|watchdog|init *:.*(fail|abort)|Kernel panic|Unable to handle|Internal error|BUG:|Oops|SError|mali|decon|Call trace" "$f" | tail -30 | tee -a "$S"
 done
 say "== done: $out ($(du -sh "$out" | cut -f1))"
