@@ -415,17 +415,15 @@ wdt_feed = "own"
 # Wi-Fi bring-up test (docs/WIFI-BCM4361.md 9, branch claude/wifi-core-c56c49 eab2408): T1 PCIe link. Hold Volume Up 2 s
 # to start; no storage writes, VENDOR read only, radio unpowered at the end.
 [[entry]]
-key = "menuhandoff"
-name = "Menu hand-off test"
-version = "4-core menu, then One UI"
+key = "ios26t1"
+name = "iOS 26 test"
+version = "T1: kernel 0400, card UHS-I, 1792 MiB"
 category = "lab"
-method = "bare"
+method = "xnu"
 tag = "lab"
-files = ["menuhandoff.img"]
+files = ["ios26-t1.xnu"]
+root = "sd:lba 182888448+33554432 (HFSX 16 GiB, sdrw)"
 flags = ["hidden"]
-wdt = 0
-wdt_feed = "own"
-no_launch = true
 
 [[entry]]
 key = "wifitest-join"
@@ -459,19 +457,16 @@ wdt_feed = "own"
 # + Star2LteUsbDxe + Star2LteSsdtDxe + one gated USB blob + the GPU session's SBGPU. Leave Windows via Start or Run
 # "shutdown /r /t 0" only. The normal win11 row is unchanged.
 [[entry]]
-key = "win11-usbh0"
-name = "Windows 11 (USB test)"
-version = "USB host test T1 (VBUS off)"
+key = "ios26t1h"
+name = "iOS 26 test"
+version = "T1h: kernel 0400, UHS off"
 category = "lab"
-method = "uefi"
+method = "xnu"
 tag = "lab"
-files = ["win11-usbh0.uefi"]
-root = "ufs:WINDOWS (NTFS)"
+files = ["ios26-t1h.xnu"]
+root = "sd:lba 182888448+33554432 (HFSX 16 GiB, sdrw)"
 flags = ["hidden"]
 
-# Windows 11 with a USB test firmware (docs/WIN11-USB.md, branch claude/win-usb-host-7efe60 9c14682): today's src38 UEFI
-# + Star2LteUsbDxe + Star2LteSsdtDxe + one gated USB blob + the GPU session's SBGPU. Leave Windows via Start or Run
-# "shutdown /r /t 0" only. The normal win11 row is unchanged.
 [[entry]]
 key = "win11-usb"
 name = "Windows 11 (USB test)"
