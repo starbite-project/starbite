@@ -863,6 +863,17 @@ The census:
 - **`tools/win/gpu-cycle.sh`:** install (refused without catalog watchdogs or with a dirty hive), the test
   boot, the pull, a self-restarting display-only boot, a hive check, and disarm. Also `--deadman-test` and
   `--clean-only`.
+- **Timing.**
+  - The loader's watchdog runs up to 82.6 s: WTCON 0xFF39, 793.457 Hz, 16-bit.
+  - Only hidden automation rows carry it: `win11-gpu` and `win11-auto`. The user's `win11` stays unarmed, so a
+    normal boot can never be reset.
+  - sbwdog records the gap it must cover: `GapMsAtStart`, from the watchdog's own count, and
+    `UptimeMsAtStart`, from the generic timer since reset.
+  - `gpu-cycle.sh --measure` takes that measurement as the first run. Over 82 s, the watchdog resets the phone
+    before Windows and it returns to the menu anyway.
+  - A UEFI-side feeder (a DXE timer event that only feeds an already-armed watchdog, stops after ~120 s of boot
+    services, and does a last feed at ExitBootServices) is designed but not built. It is needed only if the
+    margin is under ~20 s.
 - **Not yet shown on the phone:** that winload loads a Start 0 service from `System32\drivers`, that the UEFI
   leaves cluster 1 armed (sbwdog's ArmedAtStart and WtDat say), and that `NtShutdownSystem` from a driver
   leaves the hive and NTFS clean.
