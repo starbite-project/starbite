@@ -1964,9 +1964,38 @@ static void up2_row(uint32_t *out, const uint32_t *P, int pw, int ph, int y, int
         out[x] = vget_lane_u32(vreinterpret_u32_u8(vhadd_u8(v, vrhadd_u8(v, s))), 0);
     }
 }
+/* Motion frames (the glass moved: list, sections, overlays) present the canvas 2x by pixel doubling
+ * instead of the bilinear 1/4-3/4 weights: a load, a zip and two stores per 8 panel pixels instead of
+ * about 16 NEON operations. The content items are still drawn at panel resolution (text stays sharp).
+ * The rows are marked (PAPX) and presented again exactly at rest, a band per g7_idle, as the glass's
+ * half-resolution rows are. G7_FASTPRESENT 0: always bilinear. */
+#ifndef G7_FASTPRESENT
+#define G7_FASTPRESENT 1
+#endif
+static int pfast;                   /* this present: pixel doubling */
+static uint8_t PAPX[CH];            /* canvas row presented by pixel doubling: present it again at rest */
+static int npapx;
+static void up2_near(uint32_t *out, const uint32_t *P, int y, int X0, int X1)
+{
+    const uint32_t *N = P + (unsigned)(y >> 1) * CW;
+    int x = X0;
+    for (; x < X1 && (x & 7); x++)
+        out[x] = N[x >> 1];
+    for (; x + 8 <= X1; x += 8) {
+        uint32x4_t v = vld1q_u32(N + (x >> 1));
+        uint32x4x2_t z = vzipq_u32(v, v);
+        vst1q_u32(out + x, z.val[0]);
+        vst1q_u32(out + x + 4, z.val[1]);
+    }
+    for (; x < X1; x++)
+        out[x] = N[x >> 1];
+}
 static inline void up_row(uint32_t *out, const uint32_t *P, int y, int X0, int X1, int core)
 {
-    up2_row(out, P, CW, CH, y, X0, X1, core);
+    if (pfast && P == CANV)
+        up2_near(out, P, y, X0, X1);
+    else
+        up2_row(out, P, CW, CH, y, X0, X1, core);
 }
 /* the over glass (OVP, 2x) premultiplied over a panel row: d = P + d (255 - A) / 255 */
 static void over_row_p(uint32_t *row, int y, int X0, int X1, int core)
@@ -2103,6 +2132,19 @@ static uint32_t present_c(int i0, int j0, int i1, int j1)
             if (LO->item[i].a > 0.f && meets(BND[1][i], X0, Y0, X1, Y1))
                 PIL[1][J.np[1]++] = (uint16_t)i;
     int nband = (Y1 - Y0 + PB_ROWS - 1) / PB_ROWS;
+    if (pfast) {
+        for (int j = j0; j < j1 && j < CH; j++)
+            if (!PAPX[j]) {
+                PAPX[j] = 1;
+                npapx++;
+            }
+    } else if (i0 <= 0 && i1 >= CW && npapx) {
+        for (int j = j0 > 0 ? j0 - 1 : 0; j < j1 + 1 && j < CH; j++)
+            if (PAPX[j] && j >= j0 && j < j1) {
+                PAPX[j] = 0;
+                npapx--;
+            }
+    }
     /* images and tiles decoded on core 0 first; if they do not all fit in the cache at once, this
      * rect is presented by core 0 alone (which decodes as it goes, as before) */
     int par = g7_smp_on > 1 && nband > 1 && (!J.np[0] || gd_prewarm(LB, PIL[0], (unsigned)J.np[0])) &&
@@ -2638,6 +2680,7 @@ uint32_t g7_frame(const struct g7_frame *f)
                     (unsigned long long)over_area, napx, sh_on, sh_dy, bg8_ok, base_ok);
     }
 #endif
+    pfast = G7_FASTPRESENT && !forced && (motion_half || motion_over);
     if (all_dirty) {
         compose(0, 0, CW, CH);
         px = present_c(0, 0, CW, CH);
@@ -2669,6 +2712,7 @@ uint32_t g7_frame(const struct g7_frame *f)
         }
     }
     nxr = 0;
+    pfast = 0;
     if (curt_cap) {
         curt_ok = 1;
         curt_cap = 0;
@@ -2753,6 +2797,19 @@ int g7_idle(void)
         flag = GAPX;
     else if (noapx)
         flag = OAPX;
+    if (!flag && npapx) {
+        /* the glass is exact: rows a motion frame presented by pixel doubling, presented again */
+        int y0 = 0;
+        while (y0 < CH && !PAPX[y0])
+            y0++;
+        if (y0 >= CH) {
+            npapx = 0;
+            return 0;
+        }
+        int y1 = y0 + IDLE_ROWS > CH ? CH : y0 + IDLE_ROWS;
+        (void)present_c(0, y0, CW, y1);
+        return npapx != 0;
+    }
     if (!flag)
         return 0;
     int y0 = 0;
@@ -2763,7 +2820,7 @@ int g7_idle(void)
             napx = 0;
         else
             noapx = 0;
-        return napx || noapx;
+        return napx || noapx || npapx;
     }
     int y1 = y0 + IDLE_ROWS > CH ? CH : y0 + IDLE_ROWS;
     if (flag == GAPX)
@@ -2777,7 +2834,7 @@ int g7_idle(void)
     motion_over = mo;
     motion_qb = qb;
     motion_qo = qo;
-    return napx || noapx;
+    return napx || noapx || npapx;
 }
 
 void g7_present_all(void)

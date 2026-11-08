@@ -4382,6 +4382,8 @@ int m7_phase_last;
 static struct { uint32_t n, worst; uint64_t total_us; } PHS[M7_PH_N];
 #if defined(M7_BENCH) && !defined(M7_PREVIEW)
 static struct { uint32_t n; uint64_t us, px; } BEN[M7_PH_N][2];
+extern uint64_t g7_prof[12];
+static uint64_t BENP[M7_PH_N][4];  /* all-core frames: setup, base glass, over glass, present (ticks) */
 #endif
 static uint64_t px_total;
 static int phase_sync = -1;          /* menu7_progress / menu7_handoff frames */
@@ -4398,10 +4400,19 @@ uint32_t m7_frame_timed(const struct g7_frame *f, int ph)
         g7_smp_on = 1;              /* every other frame on core 0 alone (workers idle) */
     int ncore = g7_smp_on;
 #endif
+#if defined(M7_BENCH) && !defined(M7_PREVIEW)
+    uint64_t pp0 = g7_prof[0], pp1 = g7_prof[1], pp4 = g7_prof[4], pp7 = g7_prof[7];
+#endif
     uint64_t t0 = m7_now_us();
     uint32_t px = g7_frame(f);
 #if defined(M7_BENCH) && !defined(M7_PREVIEW)
     g7_smp_on = all;
+    if (ncore > 1 && ph >= 0 && ph < M7_PH_N) {
+        BENP[ph][0] += g7_prof[0] - pp0;
+        BENP[ph][1] += g7_prof[1] - pp1;
+        BENP[ph][2] += g7_prof[4] - pp4;
+        BENP[ph][3] += g7_prof[7] - pp7;
+    }
 #endif
     if (!px)
         return 0;
@@ -4485,6 +4496,22 @@ static void bench_end(const char *why)
         rep_str(b, &n, ",");
         uint32_t nn = BEN[ph][0].n + BEN[ph][1].n;
         rep_hex(b, &n, nn ? (BEN[ph][0].px + BEN[ph][1].px) / nn / 1000U : 0);
+    }
+    b[n++] = '\n';
+    b[n] = 0;
+    star_pmsg(b);
+    /* all-core frames per class: setup, base glass, over glass, present, in us (26 ticks / us) */
+    n = 0;
+    rep_str(b, &n, "STARBITE v7 bench: phases us/frame (setup,glass,over,present)");
+    for (int ph = 0; ph < M7_PH_N; ++ph) {
+        if (!BEN[ph][1].n)
+            continue;
+        rep_str(b, &n, " ");
+        rep_hex(b, &n, (uint64_t)ph);
+        for (int k = 0; k < 4; ++k) {
+            rep_str(b, &n, k ? "," : ":");
+            rep_hex(b, &n, BENP[ph][k] / 26U / BEN[ph][1].n);
+        }
     }
     b[n++] = '\n';
     b[n] = 0;
