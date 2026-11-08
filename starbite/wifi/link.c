@@ -335,9 +335,12 @@ void link_eapol(struct bcmw *w, const uint8_t *frame, uint32_t len)
     const char *why = "";
     int r;
 
-    if ((w->join_phase != 2 && w->join_phase != 3) || w->join_fwsup || w->join_open || len < 14 + 4 ||
-        bcmw_memcmp(frame + 6, w->join_bssid, 6))
+    if ((w->join_phase != 2 && w->join_phase != 3) || w->join_fwsup || w->join_open || len < 14 + 4)
+        return;
+    if (bcmw_memcmp(frame + 6, w->join_bssid, 6)) {
+        bcmw_say(w, "link: a handshake frame from another address than the access point's: ignored");
         return;                             /* only from the access point we joined (as an earlier port) */
+    }
     r = bcmw_wpa_message(&w->wpa, frame + 14, len - 14, reply + 14, &rlen, &why);
     if (r == BCMW_WPA_BAD) {
         struct bcmw_lb l;
@@ -464,6 +467,19 @@ static int scan_for(struct bcmw *w)
     return BCMW_OK;
 }
 
+/* Power save off for the join and the handshake, as bcmdhd does (it enables PM again later). Set explicitly even
+ * when it reads back 0: in the Windows runs the AP's handshake message 1 was dropped inside the firmware ("EL: 30
+ * 73b8" at each retry) until W2g set it, and T4-WPA2 (bcmw_join, which did not) showed the same signature. */
+static void join_pm_off(struct bcmw *w)
+{
+    uint32_t pm = 0xffffffffu, off = 0;
+    int fwerr = 0;
+    int ge = bcmw_ioctl(w, 0, BCMW_C_GET_PM, &pm, 4, 0, &fwerr);
+    int se = bcmw_ioctl(w, 0, BCMW_C_SET_PM, &off, 4, 1, &fwerr);
+    bcmw_sayx(w, "link: power save before the join ", ge == BCMW_OK ? pm : 0xffffffffu,
+              se == BCMW_OK ? "; now 0 (off: constantly awake)" : "; setting 0 REFUSED");
+}
+
 int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char *pass, unsigned timeout_ms)
 {
     unsigned pass_len = bcmw_strlen(pass);
@@ -564,6 +580,7 @@ int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char
         bcmw_sayx(w, "link: the firmware refused the security settings; its error ", (uint32_t)fwerr, NULL);
         goto out;
     }
+    join_pm_off(w);
     /* WLC_SET_SSID: brcmf_join_params = the name (4 + 32), then the BSSID and no channel list */
     bcmw_memset(j, 0, sizeof(j));
     put32(j, ssid_len);
@@ -733,17 +750,7 @@ int bcmw_connect(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const u
         bcmw_sayx(w, "link: the firmware refused the security settings; its error ", (uint32_t)fwerr, NULL);
         return e;
     }
-    {
-        /* power save off for the join and the handshake, as bcmdhd does (it enables PM again later): W2f got the
-         * AP's broadcasts but no unicast frame at all (handshake message 1, DHCP), what an AP holding frames for
-         * a station it believes asleep looks like */
-        uint32_t pm = 0xffffffffu;
-        int ge = bcmw_ioctl(w, 0, BCMW_C_GET_PM, &pm, 4, 0, &fwerr);
-        uint32_t off = 0;
-        int se = bcmw_ioctl(w, 0, BCMW_C_SET_PM, &off, 4, 1, &fwerr);
-        bcmw_sayx(w, "link: power save before the join ", ge == BCMW_OK ? pm : 0xffffffffu,
-                  se == BCMW_OK ? "; now 0 (off: constantly awake)" : "; setting 0 REFUSED");
-    }
+    join_pm_off(w);
     bcmw_memset(j, 0, sizeof(j));
     put32(j, ssid_len);
     bcmw_memcpy(j + 4, ssid, ssid_len);
