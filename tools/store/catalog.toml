@@ -430,14 +430,14 @@ no_launch = true
 # Wi-Fi bring-up test (docs/WIFI-BCM4361.md 9, branch claude/wifi-core-c56c49 eab2408): T2 firmware boot. Hold Volume Up 2 s
 # to start; no storage writes, VENDOR read only, radio unpowered at the end.
 [[entry]]
-key = "wifitest-fw"
-name = "Wi-Fi test 9"
-version = "BCM4361 T2 firmware boot"
+key = "wifitest-join"
+name = "Wi-Fi test 11"
+version = "BCM4361 T4 open join + DHCP"
 category = "lab"
 method = "bare"
 tag = "lab"
 files = ["wifitest.img"]
-cmdline = "wifi_step=9"
+cmdline = "wifi_step=11 wifi_auto=1 wifi_return=60"
 flags = ["hidden"]
 wdt = 30
 wdt_feed = "own"
