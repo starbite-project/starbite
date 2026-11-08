@@ -365,6 +365,7 @@ int sb_gate_check(unsigned space, unsigned lu, uint64_t first, uint64_t count, i
 #define SB_W_AUTH    -104                   /* no confirmed authorisation covers it */
 #define SB_W_IO      -105                   /* the device reported an error */
 #define SB_W_BACKUP  -106                   /* tier 3 storage without a verified backup */
+#define SB_W_HOLD    -107                   /* storage held (overclocking active): nothing written */
 struct sb_wdecide {
     int tier;                               /* 1, 2, 3 (SB_TIER_NO when refused) */
     char part[24];                          /* GPT partition, "boot LU n", "microSD" */
@@ -477,6 +478,24 @@ int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier);
  * and Starbite's iOS port send it; g3d = 4), with the gate: SB_SP_DVFS, first = domain, at the
  * caller's tier (at least 3). 1 sent and answered. */
 int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier);
+/* Overclocking (engineer/oc.c). FREQ_GET { domain, 0, 1, 0 }: the domain's current kHz (no
+ * write; domains 2-4 only, master plan rule 3). The first successful read of a domain, or the read sb_acpm_dvfs makes before its first
+ * request, is recorded as that domain's baseline; sb_acpm_dvfs_revert sends exactly that value,
+ * without an authorisation (it can only restore what was there). */
+#define SB_DVFS_NDOM 16U
+int sb_acpm_dvfs_get(uint32_t domain, uint32_t *khz);
+int sb_acpm_dvfs_baseline(uint32_t domain, uint32_t *khz);
+int sb_acpm_dvfs_revert(uint32_t domain);
+/* Read-only: len bytes of APM SRAM from offset off (both 4-aligned); 0 if out of range or a word
+ * faulted. */
+int sb_acpm_sram_read(uint32_t off, void *dst, uint32_t len);
+/* The AP channel table entry i: id, field, owner, type. */
+int sb_acpm_chan_info(unsigned i, uint32_t out[4]);
+/* Storage hold: while why is set, sb_write and sb_write_store refuse every block write
+ * (SB_W_HOLD), whatever the authorisation (overclocking: no storage write while a clock is off
+ * its default step). 0 lifts it. */
+void sb_storage_hold(const char *why);
+const char *sb_storage_held(void);
 
 /* ---- the Mali-G72 (mali.c, mali_desc.c) ------------------------------------------------------- */
 

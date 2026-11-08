@@ -966,13 +966,15 @@ static void gs_sample(void)
         gs_mv10 = (300000U + v * 6250U) / 100U;
 }
 
-static void gpu_stress_run(void)
+/* The stress loop: dur seconds (0 until stopped); page: the result page and the GPU results list.
+ * 1 pass, 0 fail, -1 not run or stopped by hand. */
+static int gs_run(unsigned dur, int page)
 {
     struct sb_gpu_result r;
     struct ub u;
-    if (!need_up())
-        return;
-    unsigned side = gs_side[gs_sz], dur = gs_dur_s[gs_d], ws = 0;
+    if (!sb_gpu_is_up())
+        return -1;
+    unsigned side = gs_side[gs_sz], ws = 0;
     uint32_t stride = side * 4U, jsp = sb_gpu_rd(0x01c);
     for (unsigned n = 1; n < 16 && !ws; ++n)        /* a slot besides JS0 that takes WRITE_VALUE */
         if ((jsp & (1U << n)) && (sb_gpu_rd(0x0c0 + 4U * n) & (1U << 2)))
@@ -981,7 +983,7 @@ static void gpu_stress_run(void)
     if (!GT.sub && gs_limit != LIMIT_NONE &&
         !dialog_danger("GPU stress", "The GPU's temperature sensor (TMU_SUB) is off: no limit can work.",
                        "Run it only while you watch the phone.", "RUN ANYWAY"))
-        return;
+        return -1;
     lab_chart_reset(0, "GPU ZONE (" U_DEG "C)", C_ORANGE, dur ? dur : 3600);
     lab_chart_reset(1, "MPIXEL PER SECOND", C_GREEN, dur ? dur : 3600);
     gs_frags = gs_wv = gs_px = gs_rounds = gs_bad = 0;
@@ -1067,8 +1069,51 @@ static void gpu_stress_run(void)
     if (gs_stop == 4)
         ub_s(&u, ", FAULT");
     sb_strcpy(gs_detail, sizeof(gs_detail), u.b);
-    g_result(4, !gs_bad && gs_stop != 4 && gs_rounds > 0, u.b);
+    int pass = !gs_bad && gs_stop != 4 && gs_rounds > 0;
+    if (!page)
+        return gs_stop == 1 ? -1 : pass && gs_stop == 3;
+    g_result(4, pass, u.b);
     info_screen("GPU stress result", fill_gs_result, 0);
+    return pass;
+}
+
+static void gpu_stress_run(void)
+{
+    if (need_up())
+        (void)gs_run(gs_dur_s[gs_d], 1);
+}
+
+/* ---- overclocking (oc.c) ------------------------------------------------------------------------------ */
+
+/* Before a G3D step: the GPU powered at its present clock (the tier 1 power-up, vdd_g3d 950 mV), so
+ * the step's own ACPM voltage is the last voltage written. 1 up. */
+int lab_oc_gpu_prepare(void)
+{
+    return need_up();
+}
+
+int lab_oc_gpu_up(void)
+{
+    return sb_gpu_is_up();
+}
+
+/* The stress rounds for secs at the clock ACPM set (vdd_g3d is not touched): 1 pass, 0 fail, -1 not
+ * run. detail: the summary (rounds, errors, the fault). */
+int lab_oc_gpu(unsigned secs, char *detail, unsigned cap)
+{
+    int sz = gs_sz;
+    gs_sz = 0;                              /* 512 x 512: a round stays short at any clock */
+    int r = gs_run(secs, 0);
+    gs_sz = sz;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, gs_detail);
+    if (gs_stop == 4) {
+        ub_s(&u, ": ");
+        ub_fault(&u, &gs_fault);
+    }
+    sb_strcpy(detail, cap, u.b);
+    return r;
 }
 
 static void build_gs(void)

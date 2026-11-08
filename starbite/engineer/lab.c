@@ -1537,6 +1537,125 @@ void lab_mem_stress(void)
     list_screen("Memory stress", build_ms, act_ms);
 }
 
+/* ---- overclocking stability checks (oc.c) -------------------------------------------------------
+ * The same kernels and patterns as the CPU and memory stress pages, run for a fixed time on a
+ * clock that was just changed. 1 pass, 0 fail (errors, a fault, the temperature limit), -1 not
+ * run (no cores, cancelled, no temperature guard declined). Nothing goes to the result pages. */
+
+int lab_oc_cpu(unsigned mask, unsigned secs, char *detail, unsigned cap)
+{
+    struct ub u;
+    if (!guard_ok("Stability test (CPU)"))
+        return -1;
+    mask = cores_offer(mask, "Overclocking stability test");
+    if (!mask)
+        return -1;
+    cs_dur = secs;
+    ch_reset(CH_TEMP, "HOTTEST SENSOR (" U_DEG "C)", C_ORANGE, secs);
+    ch_reset(CH_RATE, "WORK (BATCHES PER SECOND, ALL CORES)", C_GREEN, secs);
+    unsigned started = load_start(mask, KERN_INT | KERN_FP | KERN_NEON | KERN_MEM);
+    live_begin("Stability test (CPU)");
+    cs_t0 = sb_ms();
+    cs_stop = 0;
+    cs_peak = -100;
+    uint64_t next_s = sb_ms() + 1000;
+    temps_sample(0);
+    clocks_sample();
+    while (!cs_stop) {
+        load_slice(20);
+        if (live_poll(fill_cpu_live, 250))
+            cs_stop = 1;
+        if (sb_ms() >= next_s) {
+            next_s += 1000;
+            temps_sample(0);
+            clocks_sample();
+            load_rates();
+            ch_push(CH_TEMP, T.hottest);
+            ch_push(CH_RATE, (int32_t)rate_total);
+            if (T.hottest > cs_peak)
+                cs_peak = T.hottest;
+            if (over_limit(T.hottest))
+                cs_stop = 2;
+            if (load_faults() || load_errors())
+                cs_stop = 4;
+        }
+        if (sb_ms() - cs_t0 >= (uint64_t)secs * 1000U)
+            cs_stop = 3;
+    }
+    load_stop();
+    live_end();
+    uint64_t e = load_errors();
+    unsigned f = load_faults(), n = 0;
+    for (unsigned w = 0; w < SB_NCORES; ++w)
+        n += !core_res[w];
+    ub_init(&u);
+    ub_dec(&u, n);
+    ub_s(&u, " cores (");
+    ub_dec(&u, started + ((mask & 1U) ? 1U : 0U));
+    ub_s(&u, " asked), ");
+    fmt_mmss(&u, (sb_ms() - cs_t0) / 1000U);
+    ub_s(&u, ", ");
+    ub_dec(&u, e);
+    ub_s(&u, " errors, ");
+    ub_dec(&u, f);
+    ub_s(&u, " faults, peak ");
+    ub_sdec(&u, cs_peak);
+    ub_s(&u, " C");
+    if (cs_stop == 1)
+        ub_s(&u, " (stopped by hand)");
+    if (cs_stop == 2)
+        ub_s(&u, " (temperature limit)");
+    sb_strcpy(detail, cap, u.b);
+    if (cs_stop == 1)
+        return -1;
+    return !e && !f && n > 0 && cs_stop == 3;
+}
+
+int lab_oc_mem(unsigned size_idx, unsigned passes, char *detail, unsigned cap, unsigned *bw_read)
+{
+    int sz = ms_sz, np = ms_np;
+    ms_sz = size_idx < 3 ? (int)size_idx : 0;
+    ms_np = passes >= 10 ? 2 : passes >= 3 ? 1 : 0;
+    ms_err = ms_first_bad = 0;
+    ms_stop = 0;
+    ms_pos = 0;
+    ch_reset(CH_BW, "DRAM READ BANDWIDTH PER PASS (MiB/s)", C_STAR, 16);
+    live_begin("Stability test (memory)");
+    ms_t0 = sb_ms();
+    for (ms_pass = 0; !ms_stop && ms_pass < passes; ++ms_pass) {
+        ms_bandwidth();
+        for (unsigned p = 0; p < NPAT && !ms_stop && !ms_err; ++p)
+            if (ms_pattern(p, ms_pass * 0x2545f4914f6cdd1dULL + p + 0x0c))
+                ms_stop = 1;
+        if (ms_err)
+            break;
+    }
+    live_end();
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, ms_size_name[ms_sz]);
+    ub_s(&u, ", ");
+    ub_dec(&u, ms_pass);
+    ub_s(&u, ms_pass == 1 ? " pass, " : " passes, ");
+    ub_dec(&u, ms_err);
+    ub_s(&u, " bad words, read ");
+    ub_dec(&u, ms_bw_r);
+    ub_s(&u, " MiB/s");
+    if (ms_err) {
+        ub_s(&u, ", first at ");
+        ub_hex(&u, ms_first_bad, 9);
+    }
+    if (ms_stop)
+        ub_s(&u, " (stopped by hand)");
+    sb_strcpy(detail, cap, u.b);
+    if (bw_read)
+        *bw_read = (unsigned)ms_bw_r;
+    int r = ms_err ? 0 : ms_stop ? -1 : 1;
+    ms_sz = sz;
+    ms_np = np;
+    return r;
+}
+
 /* ---- display stress (no GPU: CPU fills and scrolls) ------------------------------------------- */
 
 static char ds_detail[96];

@@ -39,6 +39,7 @@
 #include "../libsb/ufs.c"
 #undef gpt_load
 #include "eng.h"
+#include "oc.h"
 
 static int fails, checks;
 
@@ -803,6 +804,41 @@ static void test_input(void)
     CHECK(next_event(50) == EV_NONE, "queue empty");
 }
 
+/* Overclocking tables (engineer/octab.c) on host/oc-fake.c's synthetic ECT and fvmap. */
+uint32_t oc_fake_ect(uint8_t *buf, uint32_t cap);
+uint32_t oc_fake_fvmap(uint8_t *buf, uint32_t cap);
+static void test_oc(void)
+{
+    static uint8_t ect[0x20000], win[0x30000], fv[0x2000];
+    static struct oc_tables t;
+    uint32_t n = oc_fake_ect(ect, sizeof(ect));
+    CHECK(n > 0, "oc: fake ECT built");
+    memset(win, 0, sizeof(win));
+    memcpy(win + 0x1000, ect, n);
+    CHECK(oct_ect_find(win, sizeof(win)) == 0x1000, "oc: PARA found at 0x1000");
+    CHECK(oct_ect_find(win, 0x1000) == OC_NONE, "oc: no PARA in an empty window");
+    memset(&t, 0, sizeof(t));
+    CHECK(oct_parse_ect(ect, n, &t) == OC_NDOM, "oc: %u domains", t.ect_domains);
+    CHECK(t.dvfs_parser == 3 && !strcmp(t.ect_ver, "004x"), "oc: ECT version %s parser %u", t.ect_ver, t.dvfs_parser);
+    const struct oc_dom *m3 = &t.d[OC_M3], *mif = &t.d[OC_MIF], *in = &t.d[OC_INT];
+    CHECK(m3->nlv == 21 && m3->khz[0] == 2886000 && m3->khz[20] == 598000, "oc: M3 levels %u", m3->nlv);
+    CHECK(m3->mm_rows == 7 && m3->cap_lo == 1924000 && m3->cap_hi == 2704000, "oc: M3 caps %u..%u", m3->cap_lo, m3->cap_hi);
+    CHECK(m3->cap_khz == 1924000 && !m3->cap_exact, "oc: unknown ASV row -> lowest cap");
+    oct_pick_row(&t, 5, 1);
+    CHECK(m3->cap_khz == 2704000 && m3->cap_exact, "oc: ASV row 5 -> 2704 MHz");
+    oct_pick_row(&t, 0, 0);
+    CHECK(mif->nlv == 11 && mif->cap_khz == 1794000, "oc: MIF levels %u cap %u", mif->nlv, mif->cap_khz);
+    /* fvmap: refused before it matches, accepted at its place */
+    CHECK(!oct_parse_fvmap(win, 0x2000, &t), "oc: zeros are not an fvmap");
+    CHECK(oc_fake_fvmap(fv, sizeof(fv)) == 0x2000 && oct_parse_fvmap(fv, sizeof(fv), &t) && t.fv_found, "oc: fvmap accepted");
+    CHECK(m3->fv_n == 21 && oct_uv(m3, 2886000) == 1200000, "oc: M3 top voltage %u", oct_uv(m3, 2886000));
+    CHECK(oct_allowed(m3, 2704000) && !oct_allowed(m3, 2700000), "oc: only listed M3 steps");
+    CHECK(!oct_allowed(in, 667000) && oct_allowed(in, 534000), "oc: INT 667 MHz (the green-screen freeze) is not a step");
+    CHECK(oct_above_cap(m3, 2886000) && !oct_above_cap(m3, 1924000), "oc: above-cap check");
+    /* a truncated ECT parses nothing past its end and does not read out of bounds */
+    CHECK(oct_parse_ect(ect, 64, &t) == 0, "oc: truncated ECT refused");
+}
+
 int main(void)
 {
     setvbuf(stdout, 0, _IOLBF, 0);
@@ -816,6 +852,7 @@ int main(void)
     test_filter();
     test_mali();
     test_input();
+    test_oc();
     printf("unit tests: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

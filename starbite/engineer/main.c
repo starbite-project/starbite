@@ -9,6 +9,7 @@
  * Tools > Exit to the boot menu; Tools > Reboot and power for the other modes).
  */
 #include "eng.h"
+#include "oc.h"
 
 struct eng E;
 int cur_tab;
@@ -483,6 +484,11 @@ void sb_main(void)
     ui_input_reset();
     E.tab_req = -1;
     cur_tab = 0;
+#ifdef OC_SELFTEST
+    oc_selftest_boot();                     /* read only: tables to pmsg, then the page */
+    cur_tab = 3;
+    oc_page();
+#endif
     for (;;) {
         E.home = 0;
         E.depth = 0;

@@ -207,7 +207,7 @@ display test, touch paint, keys) read the keys directly for the same reason.
 | Dashboard | TABS (every other tab, for keys), LEAVE; live tiles (A55 / M3 MHz, hottest °C, GPU, battery, current, RAM, uptime), current graph; Device information, SoC and CPU, Memory map, Reset and boot reason, Battery graph |
 | Tests | **STARBITE LAB**: Full health check, CPU stress, Memory stress, Thermal test, Battery tests, Storage test, Display stress, Touch grid, **GPU tests** (v2.1). **QUICK TESTS** (v1): Core bring-up test, Memory test, Memory bandwidth, Display test, Display panel, Brightness, Touch screen, Keys, Speed test. **RESULTS**: Test history (v2.1: with the tier 3 / 4 actions), Save report to the OS store |
 | Power | Battery and charger, Battery graph, **Battery tests**, PMIC regulators, PMIC register dump, Touch rails (tier 1, real), **PMIC and charger writes**, Reboot and power |
-| Clocks | CPU, Clocks, Temperatures, **Every thermal sensor**, GPU (Mali-G72), **GPU tests**, Real-time clock, Timer |
+| Clocks | CPU, Clocks, Temperatures, **Every thermal sensor**, GPU (Mali-G72), **GPU tests**, **Overclocking** (read only, section 14), Real-time clock, Timer |
 | Storage | UFS host controller, UFS device and health, Partitions, GPT viewer, **Partitions and LUs**, Sector viewer (**any medium / LU, edit**), Speed test, **Storage test**, microSD card (**power and clock it up**), Card store at boot (**real settings write**) |
 | Starbite | **OS store** (inspect, verify, copy, rename, remove), Catalog, Settings record, **Settings editor**, Start an OS, Write fence, Apple, iOS boot options, Android 17, Linux, Windows 11 |
 | Logs | Engineer OS log, Boot log (pmsg), Loader handoff, Test history, Audit log, Retained records, Kernel command lines, Registers |
@@ -628,3 +628,31 @@ lines) before starting another OS.
   reader**: no drivers in libsb (Radio is a "coming" page).
 - **Measure the display's frame rate or brightness curve** precisely: no vsync source is used.
 - **Run anything from v2.1 on the phone yet**: every v2.1 feature is host-tested only (section 10).
+
+## 14. Overclocking (step 1: read only)
+
+Clocks > **Overclocking** (`engineer/oc.c`, tables parsed by `engineer/octab.c`). Step 1 changes
+nothing; it shows, for every ACPM DVFS domain (0 MIF, 1 INT, 2 A55, 3 M3, 4 G3D, 5 INTCAM, 6 FSYS0,
+7 CAM, 8 DISP, 9 AUD, 10 IVA, 11 SCORE, 12 CP):
+
+- the frequency steps from **S-Boot's ECT** (DRAM 0xA0000000, read in place, never written: the DVFS
+  block's level lists) and **Samsung's caps** (the GEN block's `MINMAX_<domain>` rows, one per ASV table
+  version; until this chip's version is read, the lowest cap over the rows is shown);
+- **ACPM's voltage per step** from its fvmap in APM SRAM (first at the dtsi offset 0x6700, else a scan of
+  the SRAM; a block is accepted only if its A55, M3 and G3D rates are the ECT's);
+- the **current step** where a PLL can be read (A55, M3, G3D, MIF: PLL_MIF runs at twice the MIF step).
+
+No ACPM message is sent from the page. Clock tab rows after it moved: Real-time clock 0x67, Timer 0x68.
+
+**Self-test image** (`ENG_DEFS=-DOC_SELFTEST ENG_OUT=starbite/out/ocself sh starbite/engineer/build.sh`):
+at start it logs every domain's table to pmsg (`oc <DOM>: ect N fv N init N cap kHz boot kHz now kHz rows
+...`, then `kHz:uV` pairs six a line), then asks ACPM **FREQ_GET** (a read) for A55, M3 and G3D only,
+then opens the page. `sb_acpm_dvfs_get` refuses MIF and INT (master plan 1.2 rule 3).
+
+**Step 2 (not built, needs the user's review of step 1 and a decision on rule 3 for MIF / INT):** per
+domain controls limited to steps present in both the ECT and the fvmap (`oct_allowed`), auto-revert
+after 15 s unless confirmed (`sb_acpm_dvfs_revert` sends only the recorded baseline), a stability test
+per domain (`lab_oc_cpu`, `lab_oc_mem`, `lab_oc_gpu`), a hardware watchdog armed during tests, and the
+storage hold (`sb_storage_hold`: every block write refused) while a MIF / INT step is off its default.
+The green-screen freeze (NOTES.md 2026-10-30) came from asking ACPM for MIF 2093000 / INT 667000 kHz;
+667000 is not an INT step, so only listed steps may ever be sent.

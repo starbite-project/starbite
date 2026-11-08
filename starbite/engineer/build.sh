@@ -9,6 +9,8 @@
 # the main checkout); without one the build is skipped (exit 0) so the loader build is unaffected.
 #   sh starbite/engineer/build.sh --repro    build twice (the second into out/repro) and require
 #                                            byte-identical images
+# ENG_DEFS adds compiler defines to every object (ENG_DEFS=-DOC_SELFTEST: the read-only
+# Overclocking self-test image, docs/ENGINEER-OS.md section 14; use it with its own ENG_OUT).
 # On a native aarch64 host the build first runs the host unit tests (starbite/tools/unit-test.c)
 # and stops if one fails. ENG_OUT=dir changes the output directory.
 set -eu
@@ -54,7 +56,8 @@ echo "engineer: assets from $(basename "$SB7"), sha256 $(sha256sum "$SB7" | cut 
 if [ "$native" = 1 ]; then
     gcc -O1 -Wall -Wextra -Werror -Wno-unused-parameter -I"$lib" -I"$here" -o "$out/unit-test" \
         "$root/starbite/tools/unit-test.c" "$lib/str.c" "$lib/fence.c" "$lib/sbui_input.c" "$lib/mmu.c" \
-        "$lib/adc.c" "$lib/sd.c" "$lib/mali_desc.c" "$here/policy.c" "$here/kern.c"
+        "$lib/adc.c" "$lib/sd.c" "$lib/mali_desc.c" "$here/policy.c" "$here/kern.c" \
+        "$here/octab.c" "$root/starbite/host/oc-fake.c"
     "$out/unit-test"
 fi
 
@@ -74,7 +77,7 @@ for src in "$lib"/*.c "$lib"/*.S "$here"/*.c; do
         flags=$(echo "$CFLAGS" | sed 's/-mcpu=cortex-a55/-march=armv8-a+simd -mtune=cortex-a55/')
         v80objs="$v80objs $obj" ;;
     esac
-    "${CROSS}gcc" $flags -DSB_ASSETS="\"$out/sbassets.sb7\"" "$src" -o "$obj"
+    "${CROSS}gcc" $flags ${ENG_DEFS:-} -DSB_ASSETS="\"$out/sbassets.sb7\"" "$src" -o "$obj"
     objs="$objs $obj"
 done
 # The worker code must not contain an instruction the M3 cores lack (ARMv8.1+: LSE atomics, RDM,

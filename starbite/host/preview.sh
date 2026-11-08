@@ -29,7 +29,7 @@ limactl shell --workdir "$root" starbite python3 starbite/tools/mkassets.py "$SB
 limactl shell --workdir "$root" starbite python3 tools/store/sbstore2.py catalog tools/store/catalog.toml "$out/catalog.sbc"
 limactl shell --workdir "$root" starbite gcc -O1 -g -DSB_HOST "-DSB_ASSETS=\"$out/sbassets.sb7\"" \
     -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I"$lib" -I"$eng" \
-    -o "$out/engineer-host" "$root/starbite/host/host.c" \
+    -o "$out/engineer-host" "$root/starbite/host/host.c" "$root/starbite/host/oc-fake.c" \
     "$lib/str.c" "$lib/log.c" "$lib/sbui.c" "$lib/sbui_input.c" "$lib/sbui_page.c" "$lib/sbui_w.c" "$lib/sb7.c" \
     "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" "$lib/assets.S" "$eng"/*.c -lm -lpthread
 
@@ -57,7 +57,7 @@ if [ "${1:-}" = labtour ]; then
     exit $?
 fi
 
-all="dashboard hub tests power battery clocks temps storage partitions starbite catalog start logs pmsg tools armed peek device soc memory history dialog sector gpt keys cpu health warning sensors gpu gpujm redscreen offer"
+all="dashboard hub tests power battery clocks temps storage partitions starbite catalog start logs pmsg tools armed peek device soc memory history dialog sector gpt keys cpu health warning sensors gpu gpujm redscreen offer oc ocm3 ocmif ocsrc"
 want=${1:-$all}
 for s in $want; do
     case $s in
@@ -98,6 +98,11 @@ for s in $want; do
         k:p w:600 h:p:2300 w:900 h:u:1900 w:1500 ;;
     warning) scene warning w:800 t:270,2824 w:400 h:d:2600 w:300 k:p w:900 ;;
     sensors) scene sensors w:800 t:630,2824 w:400 k:d k:d k:d k:d k:p w:1500 ;;
+    oc) scene oc w:800 t:630,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:p w:800 ;;
+    ocm3) scene ocm3 w:800 t:630,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:p w:800 k:d k:d k:d k:d k:p w:800 ;;
+    ocmif) scene ocmif w:800 t:630,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:p w:800 k:d k:p w:800 ;;
+    ocsrc) scene ocsrc w:800 t:630,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:p w:800 \
+        k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:800 ;;
     *) echo "unknown scene $s"; exit 1 ;;
     esac
 done

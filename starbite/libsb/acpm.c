@@ -141,32 +141,135 @@ int sb_pmic_write(uint32_t type, uint32_t reg, uint8_t val, int tier)
  * index 0 of the AP's channel table (Linux sends DVFS there; Starbite's iOS port raised the GPU
  * to 572 MHz this way, xnu/series-12377/0303). ACPM sets the PLL and, from its own table, the
  * voltage. With the gate: SB_SP_DVFS, first = domain. */
-int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier)
+/* The DVFS channel: index 0 of the AP's channel table (validated), 0 if the table looks wrong. */
+static uint32_t dvfs_chan(uint32_t *id)
 {
-    const char *why;
-    uint32_t chans = ard(ACPM_INITDATA + 0x08), ap_max = ard(ACPM_INITDATA + 0x18), cmd[4];
-    if (sb_gate_check(SB_SP_DVFS, 0, domain, 1, tier < SB_TIER3 ? SB_TIER3 : tier, &why)) {
-        sb_logx("acpm dvfs refused, domain ", domain);
-        return 0;
-    }
+    uint32_t chans = ard(ACPM_INITDATA + 0x08), ap_max = ard(ACPM_INITDATA + 0x18);
     if (!ap_max || ap_max > 32 || chans >= ACPM_SRAM_SIZE - ap_max * 0x48)
         return 0;
-    uint32_t q = ard(chans + 0x34), e = ard(chans + 0x38), id = ard(chans);
-    if (!q || q > 64 || e < 16 || e > 64 || (e & 3U) || id > 31)
+    uint32_t q = ard(chans + 0x34), e = ard(chans + 0x38);
+    *id = ard(chans);
+    if (!q || q > 64 || e < 16 || e > 64 || (e & 3U) || *id > 31)
+        return 0;
+    return chans;
+}
+
+/* Each domain's step before Engineer OS asked for anything (FREQ_GET before the first request):
+ * the one value sb_acpm_dvfs_revert sends without an open authorisation. */
+static uint32_t dvfs_base[SB_DVFS_NDOM];
+static uint8_t dvfs_base_ok[SB_DVFS_NDOM], dvfs_touched[SB_DVFS_NDOM];
+
+static int dvfs_get(uint32_t domain, uint32_t *khz)
+{
+    uint32_t id, c = dvfs_chan(&id), cmd[4];
+    if (!c)
         return 0;
     cmd[0] = domain;
+    cmd[1] = 0;
+    cmd[2] = 1;                             /* FREQ_GET (vendor cal-if/acpm_dvfs.h) */
+    cmd[3] = 0;
+    if (!acpm_send(c, id, cmd))
+        return 0;
+    *khz = cmd[1];
+    return 1;
+}
+
+/* Master plan 1.2 rule 3: no ACPM DVFS message names MIF (0) or INT (1). Until the user changes
+ * that rule, FREQ_GET too is limited to A55 (2), M3 (3) and G3D (4). */
+int sb_acpm_dvfs_get(uint32_t domain, uint32_t *khz)
+{
+    if (domain < 2 || domain > 4 || !dvfs_get(domain, khz))
+        return 0;
+    if (!dvfs_base_ok[domain] && !dvfs_touched[domain] && *khz) {
+        dvfs_base[domain] = *khz;
+        dvfs_base_ok[domain] = 1;
+    }
+    return 1;
+}
+
+int sb_acpm_dvfs_baseline(uint32_t domain, uint32_t *khz)
+{
+    if (domain >= SB_DVFS_NDOM || !dvfs_base_ok[domain])
+        return 0;
+    *khz = dvfs_base[domain];
+    return 1;
+}
+
+static int dvfs_send(uint32_t domain, uint32_t khz, const char *tag)
+{
+    uint32_t id, c = dvfs_chan(&id), cmd[4];
+    if (!c)
+        return 0;
+    if (domain < SB_DVFS_NDOM && !dvfs_touched[domain]) {
+        uint32_t now = 0;
+        if (!dvfs_base_ok[domain] && dvfs_get(domain, &now) && now) {
+            dvfs_base[domain] = now;
+            dvfs_base_ok[domain] = 1;
+        }
+        dvfs_touched[domain] = 1;
+    }
+    cmd[0] = domain;
     cmd[1] = khz;
-    cmd[2] = cmd[3] = 0;
-    int ok = acpm_send(chans, id, cmd);
+    cmd[2] = cmd[3] = 0;                    /* FREQ_REQ */
+    int ok = acpm_send(c, id, cmd);
     struct ub u;
     ub_init(&u);
-    ub_s(&u, "acpm dvfs domain ");
+    ub_s(&u, tag);
     ub_dec(&u, domain);
     ub_s(&u, " to ");
     ub_dec(&u, khz);
     ub_s(&u, ok ? " kHz: answered" : " kHz: no answer");
     sb_log(u.b);
     return ok;
+}
+
+int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier)
+{
+    const char *why;
+    if (sb_gate_check(SB_SP_DVFS, 0, domain, 1, tier < SB_TIER3 ? SB_TIER3 : tier, &why)) {
+        sb_logx("acpm dvfs refused, domain ", domain);
+        return 0;
+    }
+    return dvfs_send(domain, khz, "acpm dvfs domain ");
+}
+
+/* Back to the recorded baseline: no authorisation needed, it only restores what was there before
+ * Engineer OS's first request (and refuses when no baseline was recorded). */
+int sb_acpm_dvfs_revert(uint32_t domain)
+{
+    if (domain >= SB_DVFS_NDOM || !dvfs_base_ok[domain]) {
+        sb_logx("acpm dvfs revert: no baseline for domain ", domain);
+        return 0;
+    }
+    return dvfs_send(domain, dvfs_base[domain], "acpm dvfs revert domain ");
+}
+
+/* Read-only copy out of APM SRAM (32-bit loads, bounds checked; a faulting word reads as 0 and
+ * makes the call return 0). */
+int sb_acpm_sram_read(uint32_t off, void *dst, uint32_t len)
+{
+    if ((off & 3U) || (len & 3U) || off >= ACPM_SRAM_SIZE || len > ACPM_SRAM_SIZE - off)
+        return 0;
+    uint32_t *d = (uint32_t *)dst;
+    int ok = 1;
+    for (uint32_t i = 0; i < len / 4; ++i) {
+        uint32_t v = 0;
+        if (!sb_probe32(ACPM_SRAM + off + 4U * i, &v))
+            ok = 0;
+        d[i] = v;
+    }
+    return ok;
+}
+
+/* The AP's channel table entry i: id, field, owner, type (diagnostics). */
+int sb_acpm_chan_info(unsigned i, uint32_t out[4])
+{
+    uint32_t chans = ard(ACPM_INITDATA + 0x08), ap_max = ard(ACPM_INITDATA + 0x18);
+    if (!ap_max || ap_max > 32 || i >= ap_max || chans >= ACPM_SRAM_SIZE - ap_max * 0x48)
+        return 0;
+    for (unsigned k = 0; k < 4; ++k)
+        out[k] = ard(chans + i * 0x48 + 4U * k);
+    return 1;
 }
 
 int sb_acpm_build(char out[25])

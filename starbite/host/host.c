@@ -723,6 +723,17 @@ int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier)
     sb_log(domain == 4 ? "acpm dvfs domain 4 (host)" : "acpm dvfs (host)");
     return 1;
 }
+/* APM SRAM reads (Overclocking): the fake SRAM at 0x02039000 (seed() puts oc-fake.c's fvmap there) */
+int sb_acpm_sram_read(uint32_t off, void *dst, uint32_t len)
+{
+    if ((off & 3U) || (len & 3U) || off >= 0x30000U || len > 0x30000U - off)
+        return 0;
+    memcpy(dst, (const void *)(0x02039000UL + off), len);
+    return 1;
+}
+/* oc-fake.c (linked by preview.sh only; the Utility OS preview leaves it out) */
+uint32_t oc_fake_ect(uint8_t *buf, uint32_t cap) __attribute__((weak));
+uint32_t oc_fake_fvmap(uint8_t *buf, uint32_t cap) __attribute__((weak));
 /* tier 4 attempts: the preview cannot map anything (the fake probe faults unmapped addresses) */
 int sb_mmu_map_temp(uint64_t pa) { (void)pa; return -1; }
 void sb_mmu_unmap_temp(void) {}
@@ -1693,6 +1704,11 @@ static void seed(void)
     w32(0x10070048, (uint32_t)(top[5] + 25) | (uint32_t)(top[6] + 25) << 9 | (uint32_t)(top[7] + 25) << 18);
     w32(0x10074040, (uint32_t)(sub[0] + 25) | (uint32_t)(sub[1] + 25) << 9);
     w32(0x10074044, (uint32_t)(sub[2] + 25));
+    /* Overclocking: a synthetic ECT at 0xA0000000 and ACPM fvmap at SRAM + 0x6700 */
+    if (oc_fake_ect && oc_fake_fvmap) {
+        (void)oc_fake_ect((uint8_t *)0xa0000000UL, 0x100000U);
+        (void)oc_fake_fvmap((uint8_t *)(0x02039000UL + 0x6700U), 0x2000U);
+    }
     /* clocks: A55 on its PLL (1794 MHz), shared PLLs, MIF, G3D */
     w32(0x1d000140, pll(138, 2, 0));
     w32(0x17400140, pll(160, 4, 2));        /* PLL_G3D: S-Boot's 260 MHz */
