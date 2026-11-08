@@ -527,6 +527,15 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         return (int64_t)r;
 #endif
     }
+    case SYS_APP_OPEN: {
+        if (!front || !user_str(a, arg[0], s1, sizeof(s1)))
+            return SBOS_EINVAL;
+        int t = app_by_id(s1);
+        if (t < 0 || app_hidden(t) || t == a)
+            return SBOS_EINVAL;
+        kui_open_app(t);                    /* events only: this handler finishes first */
+        return 0;
+    }
     case SYS_EXIT:
 #ifndef SB_HOST
         exit_req = a;

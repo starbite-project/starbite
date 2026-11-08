@@ -15,6 +15,7 @@
 /* ---- call numbers ---------------------------------------------------------------------------- */
 enum {
     SYS_RETURN = 0, SYS_LOG = 1, SYS_VERSION = 2, SYS_ALLOC = 3, SYS_EXIT = 4,
+    SYS_APP_OPEN = 5,                                       /* 0.5.11: another app to the front */
     /* UI 10..29 */
     SYS_UI_BEGIN = 10, SYS_UI_TITLE = 11, SYS_UI_BUTTON = 12, SYS_UI_BIG = 13, SYS_UI_TEXT = 14,
     SYS_UI_LEVEL = 15, SYS_UI_TOGGLE = 16, SYS_UI_HOLD = 17, SYS_UI_END = 18, SYS_UI_TOAST = 19,
@@ -190,6 +191,8 @@ int64_t sbos_call(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, uint64_t d, u
 static inline void sb_log_app(const char *s) { sbos_call(SYS_LOG, (uintptr_t)s, 0, 0, 0, 0); }
 static inline void *sb_alloc_app(uint64_t n) { return (void *)(uintptr_t)sbos_call(SYS_ALLOC, n, 0, 0, 0, 0); }
 static inline void sb_exit_app(void) { sbos_call(SYS_EXIT, 0, 0, 0, 0, 0); }
+/* another app to the front by its id (the caller must be in front): 0, or SBOS_EINVAL (no such app) */
+static inline int app_open(const char *id) { return (int)sbos_call(SYS_APP_OPEN, (uintptr_t)id, 0, 0, 0, 0); }
 
 static inline void ui_begin(void) { sbos_call(SYS_UI_BEGIN, 0, 0, 0, 0, 0); }
 static inline void ui_title(const char *t) { sbos_call(SYS_UI_TITLE, (uintptr_t)t, 0, 0, 0, 0); }

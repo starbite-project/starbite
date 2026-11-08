@@ -1,4 +1,4 @@
-# Starbite OS: a short guide (0.5.10)
+# Starbite OS: a short guide (0.5.11)
 
 Starbite OS is the Galaxy S9's own emergency system: a light, a heater, an alarm, the battery, a medical card and
 Wi-Fi, with big buttons and plain words. The design and the tests are in `docs/STARBITE-OS.md`.

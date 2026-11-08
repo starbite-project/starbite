@@ -42,7 +42,7 @@ static void show(void)
         ui_title("Emergency");
         ui_hold(1, "Call 112", 1200, UI_RED);
         ui_button(4, "Message", "Help / safe / hurt", UI_HALF);
-        ui_button(5, "Medical card", "The Info app", UI_HALF);
+        ui_button(5, "Medical card", "Your card in Info", UI_HALF);
         ui_hold(3, "Hold for the alarm", 1000, 0);
         int ph = (int)sbos_call(SYS_PHONE_STATE, 0, 0, 0, 0, 0);
         ui_textline(ph == SBOS_ENOSYS ? "No mobile network driver yet: calls and messages are not available."
@@ -80,7 +80,7 @@ void app_event(const struct sbos_event *ev)
         else if (ev->id == 4)
             page = 1, picked = -1;
         else if (ev->id == 5)
-            ui_toast_app("Open Info from home: the card is there", 3000);
+            app_open("info");               /* 0.5.11: the medical card */
         else if (ev->id >= 10 && ev->id < 13)
             picked = (int)ev->id - 10;
         show();
