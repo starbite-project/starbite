@@ -5,10 +5,18 @@ written from the lowest level up on libsb. Not Linux, not based on anything else
 low power; it has what you want in an emergency without being called an emergency OS: a flashlight, a
 heater, a loud alarm, a clock, honest battery estimates and, later, calls, texts and basic networking.
 
-Status (2026-11-07): design reviewed (section 13); version 0.1 built and host-tested (section 12); **first
-boot on S9 #1 passed** (section 14.1); one heater bug found there and fixed (0.1.1); heater Low passed on
-the phone (14.1). **0.2** (built and host-tested, not yet on the phone): the flashlight LED, the Info
-(emergency card) app, the panel's power saving (off until switched on), the heater's run log; section 12.4.
+Status (2026-11-08, 0.5.12): design reviewed (section 13); first boot on S9 #1 passed (14.1); 0.2 phone run:
+the LED works, the heater and the UI failed and were rewritten (0.2.1, 8.6); **0.3's unattended self test
+passed on the phone** (T11, 14.5). Since then, host-built and host-tested only (406 host checks, the unit tests,
+the settings, Wi-Fi and monkey tests, the 9-case soak, reproducible images), every step reviewed independently:
+- 0.3: the real interface (3.1), the app framework ("Writing an app", 5.1), the self-test image (12.6).
+- 0.3.2: settings saved on the phone through a fenced volatile store entry (6.5); screen-off low power and an
+  optional switch-off (4.2).
+- 0.4 .. 0.5.1: Wi-Fi on the merged BCM4361 core (9.4): open networks, the saved network, any WPA2 network typed
+  on the new on-screen keyboard, DHCP, a router ping, the clock over NTP, the chip's interrupt.
+- 0.5.2 .. 0.5.12: a quick Power press wakes the screen (an 0.1 bug), the medical card written on the phone and
+  shown on the lock screen, the apps' states saved, charts (battery, heat), fewer wake-ups, review fixes.
+- A short user guide: `docs/STARBITE-OS-GUIDE.md`. Phone tests waiting: 14.5 .. 14.7 (T14 .. T17).
 
 ---
 
