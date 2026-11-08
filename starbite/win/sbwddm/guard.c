@@ -18,7 +18,7 @@
 
 #define SBW_FULL_GUARD_LIMIT 1U
 #define SBW_HEALTHY_MS 60000U
-#define SBW_HEALTHY_FLIPS 30U             /* frames that reached the panel: flip copies + blts into the primary */
+#define SBW_HEALTHY_FLIPS 30U             /* frames with pixels that reached the panel (ContentFrames) */
 #define SBW_HEALTHY_JOBS 30U
 
 NTSTATUS SdDriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath);   /* sbdisplay (sd_embed.c) */
@@ -81,6 +81,8 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         { L"Live_Unmaps", a->Unmaps }, { L"Live_Allocations", a->Allocations }, { L"Live_Patches", a->Patches },
         { L"Live_JcRejected", a->JcRejected }, { L"Live_ThermalHolds", a->ThermalHolds },
         { L"Live_PrimaryBlts", a->PrimaryBlts }, { L"Live_PresentWaitTimeouts", a->PresentWaitTimeouts },
+        { L"Live_ContentFrames", a->ContentFrames }, { L"Live_CoherentMaps", a->CoherentMaps },
+        { L"Live_CpuMapFails", a->CpuMapFails },
         { L"Live_ThermalLevel", a->ThermalLevel },
     };
     for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]) && i < 40; i++)
@@ -116,7 +118,8 @@ static VOID GuardThread(PVOID Ctx)
             MwLog(a, L"S9ThermalHold", hold ? a->ThermalLevel : 0);
         }
         if (!a->Healthy && (KeQueryInterruptTime() - t0) / 10000 >= SBW_HEALTHY_MS &&
-            a->FlipCopies + a->PrimaryBlts >= SBW_HEALTHY_FLIPS && a->JobsDone >= SBW_HEALTHY_JOBS) {
+            a->ContentFrames >= SBW_HEALTHY_FLIPS && a->JobsDone >= SBW_HEALTHY_JOBS) {
+            /* T13d: 223 copies to the panel, all black, counted as healthy: only frames with pixels count */
             /* T13c: flips + any blts counted 212 presents that never reached the panel as healthy */
             a->Healthy = TRUE;
             S9PutDword(NULL, L"FullGuardBoots", 0);

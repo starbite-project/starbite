@@ -183,14 +183,43 @@ NTSTATUS APIENTRY MwPresent(IN_CONST_HANDLE hContext, DXGKARG_PRESENT *Arg)
     return STATUS_SUCCESS;
 }
 
-/* The CPU view of a resident allocation, or NULL. */
-static PUCHAR AllocationVa(MW_ALLOCATION *Alloc)
+/* The CPU view of a resident allocation, or NULL. S9 port (T13e): mapped once with the caching VidMm gave
+ * its pages (see MW_ALLOCATION.CpuMap), not the default cached system view. */
+static PUCHAR AllocationVa(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
 {
-    PUCHAR va;
     if (Alloc == NULL || Alloc->Mdl == NULL)
         return NULL;
-    va = (PUCHAR)MmGetSystemAddressForMdlSafe(Alloc->Mdl, NormalPagePriority | MdlMappingNoExecute);
-    return va != NULL ? va + (SIZE_T)Alloc->MdlPage * PAGE_SIZE : NULL;
+    if (Alloc->CpuMap == NULL) {
+        PVOID m = NULL;
+        __try {                           /* DISPATCH_LEVEL at most: SubmitCommand and the vsync DPC */
+            m = MmMapLockedPagesSpecifyCache(Alloc->Mdl, KernelMode, Alloc->Coherent ? MmCached : MmWriteCombined,
+                                             NULL, FALSE, HighPagePriority | MdlMappingNoExecute);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            m = NULL;
+        }
+        if (m == NULL) {
+            A->CpuMapFails++;
+            return NULL;
+        }
+        /* the vsync DPC and a present can race here: one view stays, the other is undone */
+        if (InterlockedCompareExchangePointer(&Alloc->CpuMap, m, NULL) != NULL)
+            MmUnmapLockedPages(m, Alloc->Mdl);
+    }
+    return (PUCHAR)Alloc->CpuMap + (SIZE_T)Alloc->MdlPage * PAGE_SIZE;
+}
+
+/* S9 port (T13e): did a frame bring pixels? 16 samples of what was copied (alpha ignored). The guard counts
+ * only such frames: T13d's 223 copies to the panel were black and still counted. */
+static BOOLEAN NotBlack(const UCHAR *Base, LONG Pitch, LONG L, LONG T, LONG R, LONG B)
+{
+    if (Base == NULL || R <= L || B <= T)
+        return FALSE;
+    for (LONG i = 0; i < 16; i++) {
+        LONG x = L + (R - L) * (i % 4) / 4 + (R - L) / 8, y = T + (B - T) * (i / 4) / 4 + (B - T) / 8;
+        if (((const ULONG *)(Base + (SIZE_T)y * Pitch))[x] & 0x00FFFFFFu)
+            return TRUE;
+    }
+    return FALSE;
 }
 
 static void ClipRect(RECT *R, LONG W, LONG H)
@@ -215,7 +244,7 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         dstH = (LONG)A->Fb.Height;
         dstPitch = (LONG)A->Fb.Pitch;
     } else {
-        dst = AllocationVa(Op->Dst);
+        dst = AllocationVa(A, Op->Dst);
         if (dst == NULL) {
             A->PresentSkips++;
             return;
@@ -225,7 +254,7 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         dstPitch = (LONG)(Op->Dst->Pitch ? Op->Dst->Pitch : Op->Dst->Width * 4);
     }
     if (Op->Kind == MW_PRESENT_BLT) {
-        src = AllocationVa(Op->Src);
+        src = AllocationVa(A, Op->Src);
         if (src == NULL) {
             A->PresentSkips++;
             return;
@@ -264,6 +293,12 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         A->PresentBlts++;
     else
         A->PresentFills++;
+    if (Op->Kind == MW_PRESENT_BLT && Op->Dst != NULL && (Op->Dst->Flags & MW_ALLOC_PRIMARY) && src != NULL) {
+        RECT r = Op->SrcRect;
+        ClipRect(&r, srcW, srcH);
+        if (NotBlack(src, srcPitch, r.left, r.top, r.right, r.bottom))
+            A->ContentFrames++;
+    }
 }
 
 NTSTATUS APIENTRY MwPatch(IN_CONST_HANDLE hAdapter, const DXGKARG_PATCH *Arg)
@@ -479,18 +514,19 @@ static void ShowPrimary(MW_ADAPTER *A, MW_ALLOCATION *P)
         A->FlipCopySkips++;
         return;
     }
-    src = (PUCHAR)MmGetSystemAddressForMdlSafe(P->Mdl, NormalPagePriority | MdlMappingNoExecute);
+    src = AllocationVa(A, P);             /* S9 port: the view with the pages' own caching */
     if (src == NULL) {
         A->FlipCopySkips++;
         return;
     }
-    src += (SIZE_T)P->MdlPage << PAGE_SHIFT;
     w = min(P->Width ? P->Width : A->Fb.Width, A->Fb.Width);
     h = min(P->Height ? P->Height : A->Fb.Height, A->Fb.Height);
     pitch = P->Pitch ? P->Pitch : w * 4;
     for (ULONG y = 0; y < h; y++)
         RtlCopyMemory(A->FbVa + (SIZE_T)y * A->Fb.Pitch, src + (SIZE_T)y * pitch, (SIZE_T)w * 4);
     A->FlipCopies++;
+    if (NotBlack(src, (LONG)pitch, 0, 0, (LONG)w, (LONG)h))
+        A->ContentFrames++;
 }
 
 static VOID VsyncDpc(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)

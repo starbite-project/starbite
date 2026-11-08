@@ -1,0 +1,203 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index 7ce5cee..40a01a9 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -129,6 +129,10 @@ static void fake_ioctl(DWORD code, void *buf, DWORD len);
+  * stderr goes to a file there (DWM and LogonUI have no console; T13b's DWM gave up after its first Render
+  * and said nothing anywhere). With umdlog\trace also present, the full driver-call trace (MALIKM_TRACE). */
+ static int sb_log_active, sb_log_trace;
++/* T13e: how sb_log_open ended, for UmdNote_1: 0 = logging, 1 = no umdlog folder, 0x100|errno = the umdlog
++ * file failed (then C:\Windows\Temp was tried: 0x10000 more if that worked). T13d's umdlog stayed empty. */
++static unsigned sb_log_status = 1;
++void malikm_note(unsigned id, unsigned value);
+ 
+ /* A Mesa abort() (no recovery point exists for it) ends the process; before that, the stack as offsets in
+  * this DLL, so the call that aborted can be found with the build's map/PDB. */
+@@ -141,6 +145,7 @@ sb_on_abort(int sig)
+    (void)sig;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCSTR)(void *)sb_on_abort, &self);
++   malikm_note(16, (unsigned)GetCurrentProcessId());   /* UmdNote_16: a process aborted */
+    fprintf(stderr, "sbumd: abort(), stack (+offset in this DLL, else absolute):\n");
+    for (USHORT i = 0; i < n; i++) {
+       HMODULE m = NULL;
+@@ -174,8 +179,16 @@ sb_log_open(void)
+    base = base ? base + 1 : exe;
+    snprintf(path, sizeof(path), "C:\\ProgramData\\Starbite\\umdlog\\%s-%lu-%lu.log", base,
+             (unsigned long)GetCurrentProcessId(), (unsigned long)GetTickCount());
+-   if (!freopen(path, "a", stderr))
+-      return;
++   if (!freopen(path, "a", stderr)) {
++      sb_log_status = 0x100 | (errno & 0xff);
++      snprintf(path, sizeof(path), "C:\\Windows\\Temp\\sbumd-%s-%lu-%lu.log", base,
++               (unsigned long)GetCurrentProcessId(), (unsigned long)GetTickCount());
++      if (!freopen(path, "a", stderr))
++         return;
++      sb_log_status |= 0x10000;
++   } else {
++      sb_log_status = 0;
++   }
+    setvbuf(stderr, NULL, _IONBF, 0);
+    sb_log_active = 1;
+    signal(SIGABRT, sb_on_abort);
+@@ -833,6 +846,32 @@ w_escape(void *data, UINT size)
+    return kmt_escape(wdevice, data, size);
+ }
+ 
++/* Starbite (sbumd, T13e): a fact for the KMD's registry trace, UmdNote_<id> = value (sbwddm's
++ * MW_ESCAPE_SB_NOTE). Needs no file access: T13d's processes left no umdlog at all. Ids: see
++ * docs/WIN11-GPU.md 6.13. Counters are sent at 1-4 and each power of two. */
++#define SB_ESCAPE_NOTE 0x5B01
++static volatile LONG sb_counts[64];
++
++void
++malikm_note(unsigned id, unsigned value)
++{
++   struct { uint32_t Code, Id, Value, Reserved; } n = { SB_ESCAPE_NOTE, id, value, 0 };
++   if (!ddi.on || id >= 64)
++      return;
++   (void)w_escape(&n, sizeof n);
++}
++
++void
++malikm_note_count(unsigned id)
++{
++   LONG c;
++   if (id >= 64)
++      return;
++   c = InterlockedIncrement(&sb_counts[id]);
++   if (c <= 4 || (c & (c - 1)) == 0)
++      malikm_note(id, (unsigned)c);
++}
++
+ static NTSTATUS
+ w_create(D3DDDI_ALLOCATIONINFO *ai)
+ {
+@@ -1139,6 +1178,11 @@ malikm_bind_d3dddi(HANDLE hRTAdapter, HANDLE hRTDevice, const void *pKTCallbacks
+       }
+    }
+    ReleaseSRWLockExclusive(&wddm_lock);
++   if (ret == 0) {
++      malikm_note(1, sb_log_status);
++      malikm_note(2, (unsigned)GetCurrentProcessId());
++      malikm_note_count(3);
++   }
+    if (trace_on() || sb_log_active)
+       fprintf(stderr, "malikm: bind to the runtime device %p: %s\n", hRTDevice,
+               ret == 0 ? "yes, through its callbacks" : "no (not maliwddm, or software runtime)");
+@@ -1546,6 +1590,12 @@ malikm_present_allocs(unsigned src, unsigned dst, void *dxgi_context)
+       ret = hr >= 0 ? 0 : -1;
+    }
+    ReleaseSRWLockExclusive(&wddm_lock);
++   if (ret) {
++      malikm_note_count(10);
++      malikm_note(11, (unsigned)hr);
++   } else {
++      malikm_note_count(9);
++   }
+    if (ret && (trace_on() || sb_log_active))
+       fprintf(stderr, "sbumd: pfnPresentCb(src 0x%x, dst 0x%x) failed: 0x%08lx\n", src, dst, (unsigned long)hr);
+    return ret;
+@@ -1563,6 +1613,7 @@ malikm_set_display_mode(unsigned hPrimaryAllocation)
+       hr = ddi.cb.pfnSetDisplayModeCb(ddi.device, &m);
+    }
+    ReleaseSRWLockExclusive(&wddm_lock);
++   malikm_note(12, (unsigned)hr);
+    if (trace_on() || sb_log_active)
+       fprintf(stderr, "sbumd: SetDisplayMode(0x%x): 0x%08lx\n", hPrimaryAllocation, (unsigned long)hr);
+    return hr >= 0 ? 0 : -1;
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index e7547f0..664be6e 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -72,6 +72,8 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
+       return E_FAIL;
+    }
+ 
++   if (malikm_hw())
++      malikm_note_count(15);              /* a present with no allocation of its own */
+    device->pipe->flush(device->pipe, NULL, 0);
+    device->pipe->screen->flush_frontbuffer(device->pipe->screen, device->pipe, 
+       pSrcResource->resource, 0, 0, pPresentData->pDXGIContext, 0, NULL);
+diff --git a/src/gallium/frontends/d3d10umd/Resource.cpp b/src/gallium/frontends/d3d10umd/Resource.cpp
+index ce30bf6..b375a1b 100644
+--- a/src/gallium/frontends/d3d10umd/Resource.cpp
++++ b/src/gallium/frontends/d3d10umd/Resource.cpp
+@@ -343,9 +343,13 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
+    }
+ 
+    pResource->resource = screen->resource_create(screen, &templat);
+-   if (sbAssoc && malikm_next_alloc_clear())
++   if (sbAssoc)
++      malikm_note_count(4);
++   if (sbAssoc && malikm_next_alloc_clear()) {
++      malikm_note_count(5);
+       DebugPrintf("sbumd: CreateResource %ux%u: its BO did not come from a fresh allocation\n",
+                   templat.width0, templat.height0);
++   }
+    if (sbAssoc && pResource->resource) {
+       /* The PRIME export marks the BO shared (Panfrost then never swaps it) and names its allocation. */
+       struct winsys_handle wh;
+@@ -362,6 +366,15 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
+                   templat.width0, templat.height0, pCreateResource->BindFlags, pCreateResource->MiscFlags,
+                   sbShared ? " shared" : "", sbPrimary ? " primary" : "", pResource->sbAllocation, kind,
+                   (unsigned)stride, sbPitch);
++      if (!pResource->sbAllocation)
++         malikm_note_count(6);
++      if (stride != sbPitch) {
++         malikm_note_count(7);
++         malikm_note(8, (unsigned)stride << 16 | sbPitch);
++      }
++      malikm_note(18, (unsigned)templat.format | (sbPrimary ? 0x100 : 0) | (sbShared ? 0x200 : 0) |
++                      (sbPresent ? 0x400 : 0) | (unsigned)kind << 12);
++      malikm_note(19, templat.width0 << 16 | templat.height0);
+    }
+    if (!pResource->resource) {
+       DebugPrintf("%s: failed to create resource\n", __func__);
+@@ -482,6 +495,9 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
+ 
+    if (!malikm_hw() || pOpenResource->NumAllocations != 1 ||
+        pOpenResource->pOpenAllocationInfo[0].PrivateDriverDataSize < 32) {   /* sizeof(MW_ALLOCATION_INFO) */
++      if (malikm_hw())
++         malikm_note(17, pOpenResource->NumAllocations << 16 |
++                         (pOpenResource->NumAllocations ? pOpenResource->pOpenAllocationInfo[0].PrivateDriverDataSize : 0));
+       DebugPrintf("sbumd: OpenResource: %u allocations, private data %u: unsupported\n",
+                   pOpenResource->NumAllocations,
+                   pOpenResource->NumAllocations ? pOpenResource->pOpenAllocationInfo[0].PrivateDriverDataSize : 0);
+@@ -499,6 +515,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
+                     DXGI_FORMAT_R8G8B8A8_UNORM;
+    int fd = (pf != PIPE_FORMAT_NONE && w && h && pitch) ? malikm_import_alloc(oi->hAllocation, size) : -1;
+    if (fd < 0) {
++      malikm_note_count(14);
+       DebugPrintf("sbumd: OpenResource: allocation 0x%x (%ux%u pitch %u fmt %u) not importable\n",
+                   oi->hAllocation, w, h, pitch, fmt);
+       SetError(hDevice, E_OUTOFMEMORY);
+@@ -524,6 +541,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
+    wh.modifier = DRM_FORMAT_MOD_LINEAR;
+    pResource->resource = screen->resource_from_handle(screen, &templat, &wh, 0);
+    if (!pResource->resource) {
++      malikm_note_count(14);
+       DebugPrintf("sbumd: OpenResource: import of allocation 0x%x failed\n", oi->hAllocation);
+       SetError(hDevice, E_OUTOFMEMORY);
+       return;
+@@ -533,6 +551,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
+    pResource->NumSubResources = 1;
+    pResource->transfers = (struct pipe_transfer **)calloc(1, sizeof *pResource->transfers);
+    pResource->sbAllocation = oi->hAllocation;
++   malikm_note_count(13);
+    DebugPrintf("sbumd: OpenResource: allocation 0x%x %ux%u pitch %u fmt %u\n", oi->hAllocation, w, h, pitch, fmt);
+ }
+ 
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index 3e367d9..ecb36f7 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -186,6 +186,8 @@ unsigned malikm_prime_alloc(int fd, int *kind);
+ int malikm_import_alloc(unsigned hAllocation, unsigned long long size);
+ int malikm_present_allocs(unsigned src, unsigned dst, void *dxgi_context);
+ int malikm_set_display_mode(unsigned hPrimaryAllocation);
++void malikm_note(unsigned id, unsigned value);
++void malikm_note_count(unsigned id);
+ #ifdef __cplusplus
+ }
+ #endif

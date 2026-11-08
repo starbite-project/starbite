@@ -713,6 +713,51 @@ primary, `Live_PrimaryBlts`).
 has drained, so it can't copy a frame the GPU is still drawing. The guard counts only flip copies and blts into
 the primary.
 
+### 6.13 T13d: frames reach the panel, black; T13e reads them with the right caching (2026-11-08)
+
+**T13d (20:26), hive replayed from SYSTEM.LOG1/LOG2 (the primary hive was stale):**
+- **GPU:** 4,224 renders, 4,680 submits, every fence completed, 4,221 jobs done, 4,220 IRQs. One job failed
+  with JS status 0x51 (INSTR_INVALID_ENC: one shader binary) and was recovered by one GPU reset.
+- **Presents:** 458 accepted, with no pfnPresentCb failures. 1,033 blts, of which 223 went into the framebuffer;
+  237 present skips, 2 flip copies, no present-wait timeouts.
+- **The panel stayed black.**
+- **The guard:** declared the boot healthy (FullHealthy 1, FullGuardBoots 0), because black copies counted as
+  frames. So the boot after it would have been full mode again; the peer put `sbwddm.full.off` in place.
+- **umdlog:** only `trace`, although the UMD ran. Most likely the forced restart left NTFS dirty and TWRP read a
+  stale MFT, the same way the hive was stale. A failed file open cannot be ruled out.
+
+**Cause:**
+- **The view:** the KMD's blts and flip copies read GPU output through `MmGetSystemAddressForMdlSafe`, a cached
+  view.
+- **The segment:** it is not cache-coherent, so VidMm gives its pages write-combined caching and the Mali writes
+  DRAM directly.
+- **The result:** a cached alias of those pages (mismatched attributes, which ARMv8 does not keep coherent)
+  returns whatever lines the cache holds. Here that was zeros.
+
+**T13e (sbwddm + sb-patches/0104):**
+- **CPU view:** each allocation gets one, with the caching VidMm gave its pages (MAP_APERTURE_SEGMENT
+  `Flags.CacheCoherent`: write-combined for our segment), mapped on first use by
+  `MmMapLockedPagesSpecifyCache`. A racing vsync DPC and present keep one view between them. The view is
+  unmapped on UNMAP_APERTURE_SEGMENT, on a remap, and on destroy. Destination writes to non-primary
+  allocations use the same view.
+- **Guard:** counts only frames with pixels: 16 samples of each flip copy's or primary blt's source, RGB not all
+  zero. Healthy = 60 s, at least 30 content frames, at least 30 jobs. New `Live_ContentFrames`,
+  `Live_CoherentMaps` and `Live_CpuMapFails`.
+- **Notes:** escape `MW_ESCAPE_SB_NOTE` (0x5B01, {Code, Id < 64, Value}) is written as `UmdNote_<id>` in the
+  trace key. This channel needs no file. sbumd sends:
+  - the log status;
+  - binds;
+  - resource backing (fresh, missing, stride mismatches, the last format and size);
+  - present OK and failure counts and the last HRESULT;
+  - SetDisplayMode's HRESULT;
+  - OpenResource results;
+  - fallback presents;
+  - aborts.
+  The id table is in the stage's INSTALL.md.
+- **Log fallback:** if a umdlog file cannot be opened, the log goes to `C:\Windows\Temp\sbumd-*.log`.
+- **Staged:** `build/win/stage/sbwddm-t13e/` (INSTALL.md, SHA256SUMS), with firmware windows-t13b.uefi
+  unchanged. After a forced restart, one clean display-only boot comes before TWRP reads the disk.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

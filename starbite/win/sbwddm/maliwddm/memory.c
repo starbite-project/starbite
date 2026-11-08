@@ -98,6 +98,10 @@ static NTSTATUS NewAllocation(MW_ADAPTER *A, const MW_ALLOCATION_INFO *In, DXGK_
 
 static void FreeAllocation(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
 {
+    if (Alloc->CpuMap && Alloc->Mdl) {
+        MmUnmapLockedPages(Alloc->CpuMap, Alloc->Mdl);
+        Alloc->CpuMap = NULL;
+    }
     ExAcquireFastMutex(&A->MmuLock);
     if (Alloc->Mapped && A->GpuUp)
         MkMmuUnmapPages(&A->Gpu, Alloc->GpuVa, Alloc->Pages);
@@ -257,8 +261,14 @@ NTSTATUS APIENTRY MwBuildPagingBuffer(IN_CONST_HANDLE hAdapter, DXGKARG_BUILDPAG
         ExAcquireFastMutex(&a->MmuLock);
         st = MkMmuMapPages(&a->Gpu, alloc->GpuVa, pfn, pages, (alloc->Flags & MW_ALLOC_NOEXEC) != 0);
         alloc->Mapped = NT_SUCCESS(st);
+        if (alloc->CpuMap && alloc->Mdl)    /* a view of the previous pages */
+            MmUnmapLockedPages(alloc->CpuMap, alloc->Mdl);
+        alloc->CpuMap = NULL;
         alloc->Mdl = Arg->MapApertureSegment.pMdl;
         alloc->MdlPage = (ULONG)Arg->MapApertureSegment.MdlOffset;
+        alloc->Coherent = Arg->MapApertureSegment.Flags.CacheCoherent != 0;
+        if (alloc->Coherent)
+            a->CoherentMaps++;
         ExReleaseFastMutex(&a->MmuLock);
         a->Maps++;
         if (!NT_SUCCESS(st))
@@ -277,6 +287,9 @@ NTSTATUS APIENTRY MwBuildPagingBuffer(IN_CONST_HANDLE hAdapter, DXGKARG_BUILDPAG
         if (alloc->Mapped)
             MkMmuUnmapPages(&a->Gpu, alloc->GpuVa, alloc->Pages);
         alloc->Mapped = FALSE;
+        if (alloc->CpuMap && alloc->Mdl)
+            MmUnmapLockedPages(alloc->CpuMap, alloc->Mdl);
+        alloc->CpuMap = NULL;
         alloc->Mdl = NULL;
         ExReleaseFastMutex(&a->MmuLock);
         return STATUS_SUCCESS;

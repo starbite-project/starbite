@@ -55,6 +55,12 @@ typedef struct _MW_ALLOCATION {
      * which is how a present reaches the pixels on the CPU. */
     PMDL Mdl;
     ULONG MdlPage;
+    /* S9 port (T13e): the CPU view the KMD's blts and flip copies read, mapped on first use with the
+     * caching VidMm gave the pages (MAP_APERTURE_SEGMENT Flags.CacheCoherent; ours is a non-coherent
+     * segment, so write-combined). The default MmGetSystemAddressForMdlSafe view is cached: mismatched
+     * attributes on ARM64, stale lines instead of the GPU's pixels (T13d: 223 blts to the panel, black). */
+    BOOLEAN Coherent;
+    PVOID CpuMap;
 } MW_ALLOCATION;
 
 typedef struct _MW_ADAPTER MW_ADAPTER;
@@ -162,7 +168,9 @@ struct _MW_ADAPTER {
     ULONG Interrupts;
     ULONG JcRejected;
     ULONG PrimaryBlts;
-    ULONG PresentWaitTimeouts;            /* presents copied before the queue drained (200 ms bound) */                    /* presents whose destination is the primary: pixels on the panel */                     /* renders refused: a chain outside the render's allocations */                     /* interrupt resources the device has (the stage-4 SSDT: the Mali's 3) */
+    ULONG PresentWaitTimeouts;
+    ULONG ContentFrames;                  /* frames copied to the panel whose sampled pixels were not all black */
+    ULONG CoherentMaps, CpuMapFails;            /* presents copied before the queue drained (200 ms bound) */                    /* presents whose destination is the primary: pixels on the panel */                     /* renders refused: a chain outside the render's allocations */                     /* interrupt resources the device has (the stage-4 SSDT: the Mali's 3) */
 
     /* Counters for the trace. */
     ULONG Renders, Presents, Submits;

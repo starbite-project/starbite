@@ -53,6 +53,15 @@ typedef struct _MW_COMMAND {
 #define MW_ESCAPE_ALLOC_INFO    1
 #define MW_ESCAPE_GPU_INFO      2
 #define MW_ESCAPE_STATS         3
+/* Starbite (sbumd/sbwddm): a fact from the UMD for the KMD's registry trace (UmdNote_<Id> = Value), a channel
+ * that needs no file permissions (T13d: no umdlog appeared at all). */
+#define MW_ESCAPE_SB_NOTE       0x5B01
+typedef struct _MW_ESCAPE_SB_NOTE_DATA {
+    mw_u32 Code;                        /* MW_ESCAPE_SB_NOTE */
+    mw_u32 Id;                          /* < 64 */
+    mw_u32 Value;
+    mw_u32 Reserved;
+} MW_ESCAPE_SB_NOTE_DATA;
 
 typedef struct _MW_ESCAPE_ALLOC_INFO_DATA {
     mw_u32 Code;                        /* MW_ESCAPE_ALLOC_INFO */

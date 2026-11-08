@@ -508,6 +508,16 @@ static NTSTATUS APIENTRY MwEscape(IN_CONST_HANDLE hAdapter, const DXGKARG_ESCAPE
             return STATUS_INVALID_PARAMETER;
         GpuInfo(a, (MW_ESCAPE_GPU_INFO_DATA *)Esc->pPrivateDriverData);
         return STATUS_SUCCESS;
+    case MW_ESCAPE_SB_NOTE:
+        if (Esc->PrivateDriverDataSize >= sizeof(MW_ESCAPE_SB_NOTE_DATA)) {
+            const MW_ESCAPE_SB_NOTE_DATA *n = (const MW_ESCAPE_SB_NOTE_DATA *)Esc->pPrivateDriverData;
+            WCHAR nm[24];
+            UNICODE_STRING us;
+            RtlInitEmptyUnicodeString(&us, nm, sizeof(nm));
+            if (n->Id < 64 && NT_SUCCESS(RtlUnicodeStringPrintf(&us, L"UmdNote_%u", n->Id)))
+                MwLog(a, nm, n->Value);
+        }
+        return STATUS_SUCCESS;
     case MW_ESCAPE_STATS:
         if (Esc->PrivateDriverDataSize < (UINT)FIELD_OFFSET(MW_ESCAPE_STATS_DATA, Vsyncs))
             return STATUS_INVALID_PARAMETER;
