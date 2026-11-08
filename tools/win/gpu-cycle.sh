@@ -200,7 +200,7 @@ deadman-test)
     mount_rw
     adb shell "mkdir -p $W/Windows/Starbite; echo test > $W/Windows/Starbite/sbwdog.off" >/dev/null
     umount_w
-    log "dead-man test: sbwdog.off in place, booting $ckey; expect the menu ~82 s after the loader"
+    log "dead-man test: sbwdog.off in place, booting $ckey; sbwdog arms the watchdog and never feeds it: expect the menu ~82 s after it starts"
     boot_and_return "$ckey" 400 "$out/deadman"
     mount_rw; adb shell "rm -f $W/Windows/Starbite/sbwdog.off" >/dev/null; umount_w
     log "dead-man test passed: the phone came back by itself"

@@ -874,6 +874,14 @@ The census:
   - A UEFI-side feeder (a DXE timer event that only feeds an already-armed watchdog, stops after ~120 s of boot
     services, and does a last feed at ExitBootServices) is designed but not built. It is needed only if the
     margin is under ~20 s.
+- **--measure (22:10).**
+  - sbwdog's clean restart works: 126 s back to the menu, hive clean.
+  - The loader's arming did not survive to Windows: WTCON 0, WTDAT 0xFE27 (its 82 s count), WTCNT held. Most
+    likely the woa UEFI stopped it.
+  - CNTFRQ_EL0 is 0, as S-Boot leaves it; the counter runs at 26 MHz.
+- **T13j:** in Unattended boots sbwdog arms the watchdog itself when it finds it stopped, and re-arms it if
+  anything stops it later. The user's own boots stay unarmed. A hang before sbwdog starts is a known gap until
+  there is a UEFI-side feeder.
 - **Not yet shown on the phone:** that winload loads a Start 0 service from `System32\drivers`, that the UEFI
   leaves cluster 1 armed (sbwdog's ArmedAtStart and WtDat say), and that `NtShutdownSystem` from a driver
   leaves the hive and NTFS clean.

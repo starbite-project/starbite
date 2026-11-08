@@ -17,13 +17,19 @@
  *   display-only            DisplayRestartSec 120, DisplayCapSec 180 (the clean boot after a test).
  * Without Unattended it only feeds, for as long as Windows runs.
  *
- * It never arms the watchdog by itself unless Parameters\ArmSec (10..82) is set and the loader did not arm
- * it; then it writes the loader's own sequence (stop, WTDAT/WTCNT, WTCON 0xFF39, PMU unmask bit 23).
+ * The loader arms it, but on the phone something before Windows' boot-start drivers stops it again (T13i
+ * --measure: WTCON 0, WTDAT the loader's 0xFE27 = 82 s, WTCNT held at WTDAT; most likely the woa UEFI). So when
+ * sbwdog finds it stopped in an Unattended boot, it arms it itself (Parameters\ArmSec, default 82; 0 = never;
+ * never in a boot without Unattended: the user's own boots stay unarmed, as the loader leaves them) with the loader's own
+ * sequence: stop, WTDAT/WTCNT, WTCON 0xFF39, and bit 23 of the PMU's disable/mask words cleared only if set.
+ * If anything stops it later, the feeder re-arms it (State\Rearms). Known gap: a hang before sbwdog starts
+ * (UEFI, boot manager, winload, early kernel) is not covered on this firmware; only a UEFI-side feeder would.
  *
- * State (Services\sbwdog\State, flushed): ArmedAtStart, WtCon, WtDat, PmuDisable, PmuMask, ArmedByUs,
+ * State (Services\sbwdog\State, flushed): ArmedAtStart, WtCon, WtDat, WtCntAtStart, PmuDisable, PmuMask,
+ * GapMsAtStart, UptimeMsAtStart, CntFrq, ArmedBySelf, ArmedNow, Rearms,
  * Mode (0 display-only, 1 full, 2 unknown), Seconds, Feeds, RestartAt, RestartStatus, CapAt.
- * Kill file: C:\Windows\Starbite\sbwdog.off: no feeding at all (the loader's watchdog, if armed, then resets
- * the phone N seconds after the loader: only for testing the dead-man itself).
+ * Kill file: C:\Windows\Starbite\sbwdog.off: armed as usual (Unattended), then never fed: the phone must reset
+ * ~82 s after sbwdog starts. Only for testing the dead-man itself (gpu-cycle.sh --deadman-test).
  */
 #include <ntddk.h>
 
@@ -175,8 +181,10 @@ static BOOLEAN Arm(ULONG Secs)
     Wr(g.Wdt, WTCNT, (ULONG)c);
     Wr(g.Wdt, WTCLRINT, 0);
     Wr(g.Wdt, WTCON, WDT_WTCON);
-    Wr(g.Pmu, PMU_WDT_DISABLE, Rd(g.Pmu, PMU_WDT_DISABLE) & ~(1U << WDT1_PMU_BIT));
-    Wr(g.Pmu, PMU_WDT_MASK, Rd(g.Pmu, PMU_WDT_MASK) & ~(1U << WDT1_PMU_BIT));
+    if (Rd(g.Pmu, PMU_WDT_DISABLE) & (1U << WDT1_PMU_BIT))
+        Wr(g.Pmu, PMU_WDT_DISABLE, Rd(g.Pmu, PMU_WDT_DISABLE) & ~(1U << WDT1_PMU_BIT));
+    if (Rd(g.Pmu, PMU_WDT_MASK) & (1U << WDT1_PMU_BIT))
+        Wr(g.Pmu, PMU_WDT_MASK, Rd(g.Pmu, PMU_WDT_MASK) & ~(1U << WDT1_PMU_BIT));
     return Armed();
 }
 
@@ -197,7 +205,8 @@ static VOID FeedThread(PVOID Ctx)
 {
     ULONG period = Param(L"PeriodMs", 5000);
     ULONG unattended = Param(L"Unattended", 0);
-    ULONG restartSec = 0, capSec = 0, mode = 2, secs = 0, feeds = 0;
+    ULONG restartSec = 0, capSec = 0, mode = 2, secs = 0, feeds = 0, rearms = 0;
+    ULONG armSec = unattended ? Param(L"ArmSec", 82) : 0;
     BOOLEAN feeding = TRUE, restarted = FALSE, decided = FALSE, armed;
     ULONG64 t0 = KeQueryInterruptTime();
     LARGE_INTEGER t;
@@ -209,6 +218,11 @@ static VOID FeedThread(PVOID Ctx)
     armed = Armed();
     for (;;) {
         ULONG elapsed;
+        if (feeding && armSec && !Armed()) {
+            /* stopped by someone after us (or never armed): arm again; the dead-man comes first */
+            armed = Arm(armSec);
+            State(L"Rearms", ++rearms, TRUE);
+        }
         if (feeding && armed)
             Feed(), feeds++;
         t.QuadPart = -10000LL * period;
@@ -261,9 +275,9 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT Drv, PUNICODE_STRING Reg)
     (void)RtlAppendUnicodeStringToString(&g.Svc, Reg);
     pa.QuadPart = (LONGLONG)WDT1_PA;
     g.Wdt = (volatile UCHAR *)MmMapIoSpaceEx(pa, PAGE_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
-    armSec = Param(L"ArmSec", 0);
+    armSec = Param(L"Unattended", 0) ? Param(L"ArmSec", 82) : 0;   /* only automation boots arm it */
     pa.QuadPart = (LONGLONG)PMU_PA;
-    g.PmuWritable = armSec != 0;          /* the PMU is written only to arm (ArmSec) */
+    g.PmuWritable = armSec != 0;          /* the PMU is written only to arm (ArmSec), and only bit 23 */
     g.Pmu = (volatile UCHAR *)MmMapIoSpaceEx(pa, PAGE_SIZE, PAGE_NOCACHE | (g.PmuWritable ? PAGE_READWRITE : PAGE_READONLY));
     if (g.Wdt == NULL || g.Pmu == NULL) {
         State(L"MapFailed", (g.Wdt == NULL) | (g.Pmu == NULL) << 1, TRUE);
@@ -277,7 +291,9 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT Drv, PUNICODE_STRING Reg)
         ULONG64 cnt = _ReadStatusReg(ARM64_CNTVCT), frq = _ReadStatusReg(ARM64_CNTFRQ_EL0);
         ULONG dat = Rd(g.Wdt, WTDAT), now = Rd(g.Wdt, WTCNT);
         State(L"CntFrq", (ULONG)frq, FALSE);
-        State(L"UptimeMsAtStart", frq ? (ULONG)(cnt * 1000ULL / frq) : 0, FALSE);
+        if (frq == 0)
+            frq = 26000000;               /* S-Boot leaves CNTFRQ_EL0 = 0; the counter runs at 26 MHz (NOTES.md) */
+        State(L"UptimeMsAtStart", (ULONG)(cnt * 1000ULL / frq), FALSE);
         State(L"GapMsAtStart", Armed() && dat >= now ? (ULONG)((ULONG64)(dat - now) * 1000000ULL / WDT_HZ_X1000) : 0,
               FALSE);
         State(L"WtCntAtStart", now, FALSE);
@@ -290,8 +306,13 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT Drv, PUNICODE_STRING Reg)
     State(L"RestartAt", 0, FALSE);
     State(L"CapAt", 0, FALSE);
     State(L"Mode", 2, FALSE);
+    /* ArmedBySelf: 1 = it was stopped and we armed it; 0 = the loader's arming survived (or ArmSec 0) */
     if (!Armed() && armSec)
-        State(L"ArmedByUs", Arm(armSec), FALSE);
+        State(L"ArmedBySelf", Arm(armSec), FALSE);
+    else
+        State(L"ArmedBySelf", 0, FALSE);
+    State(L"ArmedNow", Armed(), FALSE);
+    State(L"Rearms", 0, FALSE);
     if (FileExists(L"\\SystemRoot\\Starbite\\sbwdog.off")) {
         State(L"KillFile", 1, TRUE);
         return STATUS_SUCCESS;            /* loaded, feeds nothing */
