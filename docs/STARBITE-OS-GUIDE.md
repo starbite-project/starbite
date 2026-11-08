@@ -1,4 +1,4 @@
-# Starbite OS: a short guide (0.6.2)
+# Starbite OS: a short guide (1.0-rc1)
 
 Starbite OS is the Galaxy S9's own emergency system: a light, a heater, an alarm, the battery, a medical card and
 Wi-Fi, with big buttons and plain words. The design and the tests are in `docs/STARBITE-OS.md`.
@@ -22,8 +22,8 @@ is only refreshed when something changes.
 
 ## Home
 
-- **Emergency** (red, at the top): **Call 112** shows what would happen (there is no modem driver yet: it never
-  dials), **Message** (three ready texts, not sent yet), **Hold for the alarm**, **Medical card**.
+- **Emergency** (red): **Hold for the alarm**, **Medical card**. Calls and messages: coming soon (they need the
+  mobile network driver).
 - **Light**: the flashlight LED, or the screen as a light (white, warm, red; low, half, full).
 - **Heat**: Off, Low, High, **Extreme** (every part at its top table step, flat out until you press Off; asks
   each time with the minutes it lasts; stops only at 55 °C battery or the call / SOS reserve), **Manual** (pick the
@@ -40,7 +40,8 @@ is only refreshed when something changes.
 - **Clock**: the time, a world clock, a stopwatch, a timer.
 - **Battery**: the charge, how long it lasts at this use, and a chart of the last hours.
 - **Settings**: Display (brightness, screen-off time, switch off after the screen has been off), Alarm (the LED in
-  the alarm), Heat (the graphics processor in High, a test), About.
+  the alarm; "LED at rated power", new), Heat (the graphics processor in High), About (the version, the clocks,
+  temperatures; "Read the panel's registers", read only).
 - **Wi-Fi**: turn it on, pick a network. Open networks join at once; a secured one asks for its passphrase (kept in
   memory until a restart, never written to the log). The network saved on the phone is marked "Saved". Once
   joined it gets an address, checks the router and sets the clock from the internet.

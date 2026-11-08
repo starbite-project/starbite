@@ -36,10 +36,6 @@ struct st_ev {
     int32_t value;
 };
 static const struct st_ev script[] = {
-    { "emergency", "message page", EV_APP_BUTTON, 4, 0 },
-    { "emergency", "a message picked (UI only)", EV_APP_BUTTON, 10, 0 },
-    { "emergency", "back", EV_APP_BUTTON, 2, 0 },
-    { "emergency", "Call 112 page (UI only, never dials)", EV_APP_HOLD, 1, 0 },
     { "info", "the card editor", EV_APP_BUTTON, 2, 0 },
     { "info", "a field with the keyboard (nothing typed or saved)", EV_APP_BUTTON, 10, 0 },
     { "info", "back to the card", EV_APP_BUTTON, 3, 0 },
