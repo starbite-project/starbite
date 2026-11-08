@@ -193,6 +193,7 @@ struct _MW_ADAPTER {
     volatile LONG ShowGen;
     ULONG EmuFlips, EmuFlipsNotPrimary, RefreshUsLast, RefreshesPeriodic;
     ULONG RefPx[8], RefSrcTag;
+    ULONG FlipContent, FlipBlack, FlipPxCentre, FlipSrcVa, FlipSrcPages;  /* T13q: sampled at the flip itself */
     ULONG CoherentMaps, CpuMapFails;            /* presents copied before the queue drained (200 ms bound) */                    /* presents whose destination is the primary: pixels on the panel */                     /* renders refused: a chain outside the render's allocations */                     /* interrupt resources the device has (the stage-4 SSDT: the Mali's 3) */
 
     /* Counters for the trace. */

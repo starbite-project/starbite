@@ -962,6 +962,14 @@ read black in the KMD.
 **T13p (sb-patches/0105):** same-format 2D colour copies go through `pctx->blit` (GPU); everything else keeps
 the CPU path. sbshare adds a GPU re-sample after the producer's update.
 
+**cycle-t13p-1 (00:38):**
+- **All tests pass:** sbshare (open-copy, open-update and open-samp-red included), sbtex and the triangle.
+- **DWM runs far more** (736 flips, 17,760 renders), but every flipped primary still reads black in the KMD,
+  and the panel is black.
+- **T13q samples the presented frame from both sides:**
+  - the UMD GPU-copies one row of each sampled present's source and logs it (sb-patches/0106);
+  - the KMD samples the flip source at the flip itself, and logs its GPU address.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

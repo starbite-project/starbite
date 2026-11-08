@@ -1,0 +1,83 @@
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index 664be6e..96c8be2 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -39,6 +39,10 @@
+ #include "Debug.h"
+ 
+ #include "util/format/u_format.h"
++#include "util/box.h"
++#include "pipe/p_context.h"
++#include "pipe/p_screen.h"
++#include "util/u_inlines.h"
+ 
+ 
+ /*
+@@ -52,6 +56,59 @@
+  * ----------------------------------------------------------------------
+  */
+ 
++/* Starbite (sbumd, sb-patches/0106, docs/WIN11-GPU.md 6.18): what does a presented frame hold, as Panfrost
++ * sees it? T13p: every allocation DWM flipped read black in the KMD, while textures, shared surfaces and GPU
++ * copies all tested right. One row (the middle one) of the source is GPU-copied to a staging texture and read:
++ * 32 samples across it, logged to the umdlog and as UmdNote_20 (the centre pixel), 21/22 (presents with some /
++ * no non-black sample). The first 24 presents of each process, then every 64th. */
++static void
++sb_sample_present(struct pipe_context *pipe, Resource *res, unsigned alloc, unsigned flags)
++{
++   static unsigned n;
++   struct pipe_resource *src = res ? res->resource : NULL;
++   if (!src || src->target != PIPE_TEXTURE_2D || util_format_get_blocksize(src->format) != 4)
++      return;
++   n++;
++   if (n > 24 && n % 64)
++      return;
++   struct pipe_resource t;
++   memset(&t, 0, sizeof t);
++   t.target = PIPE_TEXTURE_2D;
++   t.format = src->format;
++   t.width0 = src->width0;
++   t.height0 = 1;
++   t.depth0 = 1;
++   t.array_size = 1;
++   t.usage = PIPE_USAGE_STAGING;
++   struct pipe_resource *st = pipe->screen->resource_create(pipe->screen, &t);
++   if (!st)
++      return;
++   struct pipe_box box;
++   u_box_2d(0, src->height0 / 2, src->width0, 1, &box);
++   pipe->resource_copy_region(pipe, st, 0, 0, 0, 0, src, 0, &box);
++   struct pipe_transfer *tr = NULL;
++   struct pipe_box all;
++   u_box_2d(0, 0, src->width0, 1, &all);
++   const uint32_t *px = (const uint32_t *)pipe->texture_map(pipe, st, 0, PIPE_MAP_READ, &all, &tr);
++   if (px) {
++      unsigned nonblack = 0;
++      uint32_t s[32];
++      for (unsigned i = 0; i < 32; i++) {
++         s[i] = px[(src->width0 * (2 * i + 1)) / 64];
++         if (s[i] & 0x00ffffffu)
++            nonblack++;
++      }
++      uint32_t centre = px[src->width0 / 2];
++      pipe->texture_unmap(pipe, tr);
++      malikm_note(20, centre);
++      malikm_note_count(nonblack ? 21 : 22);
++      DebugPrintf("sbumd: present #%u alloc 0x%x %ux%u fmt %u flags 0x%x: centre 0x%08x, %u/32 non-black: "
++                  "%08x %08x %08x %08x %08x %08x %08x %08x\n", n, alloc, src->width0, src->height0, src->format,
++                  flags, centre, nonblack, s[0], s[4], s[8], s[12], s[16], s[20], s[24], s[28]);
++   }
++   pipe_resource_reference(&st, NULL);
++}
++
+ HRESULT APIENTRY
+ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
+ {
+@@ -65,6 +122,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
+     * (the KMD blts or flips them once the GPU is done), as arehnman/virtio-win-mesa does. */
+    if (malikm_hw() && pSrcResource && pSrcResource->sbAllocation) {
+       Resource *pDstResource = pPresentData->hDstResource ? CastResource(pPresentData->hDstResource) : NULL;
++      sb_sample_present(device->pipe, pSrcResource, pSrcResource->sbAllocation, pPresentData->Flags.Value);
+       device->pipe->flush(device->pipe, NULL, 0);
+       if (malikm_present_allocs(pSrcResource->sbAllocation, pDstResource ? pDstResource->sbAllocation : 0,
+                                 pPresentData->pDXGIContext) == 0)

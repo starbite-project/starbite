@@ -332,8 +332,23 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         A->EmuFlips++;
         if (Op->Src == NULL || !(Op->Src->Flags & MW_ALLOC_PRIMARY))
             A->EmuFlipsNotPrimary++;
-        if (Op->Src != NULL)
+        if (Op->Src != NULL) {
+            /* T13q: what the flipped allocation holds at the moment of the flip (the refresh reads it up to
+             * 200 ms later, after d3d10umd's rotation copies), and where the GPU sees it */
+            PUCHAR v = AllocationVa(A, Op->Src);
+            if (v != NULL) {
+                LONG w = (LONG)(Op->Src->Width ? Op->Src->Width : 1), h = (LONG)(Op->Src->Height ? Op->Src->Height : 1);
+                LONG pitch = (LONG)(Op->Src->Pitch ? Op->Src->Pitch : Op->Src->Width * 4);
+                A->FlipPxCentre = ((const ULONG *)(v + (SIZE_T)(h / 2) * pitch))[w / 2];
+                if (NotBlack(v, pitch, 0, 0, w, h))
+                    A->FlipContent++;
+                else
+                    A->FlipBlack++;
+            }
+            A->FlipSrcVa = (ULONG)Op->Src->GpuVa;
+            A->FlipSrcPages = Op->Src->Pages;
             MwShow(A, Op->Src, TRUE);     /* the guard thread copies it to the panel */
+        }
         return;
     }
 
