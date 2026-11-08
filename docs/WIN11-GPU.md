@@ -606,6 +606,41 @@ So it is not known whether the GPU jobs, fences, flips or DWM itself failed.
 - Before T13c: T13b's own Application/System event logs and WER reports may already name DWM's exit code or a
   faulting module.
 
+### 6.10 Why T13b's DWM died: tgsi_to_nir has no D3D10 texture opcodes (fixed for T13c)
+
+**The evidence:** T13b's WER reports (`build/win/results/t13b/WER`) show 18 dwm.exe and 11 LogonUI.exe crashes, all
+`ucrtbase.dll+0x76ecc`, exception 0xC0000409 with data 7 (FAST_FAIL_FATAL_APP_EXIT, i.e. `abort()`), with
+sbumd.dll loaded. The process was gone right after its first Render: dxgkrnl's DestroyContext/DestroyDevice were
+the teardown.
+
+**The cause:** d3d10umd translates DXBC to TGSI with the D3D10 texture opcodes (`SAMPLE`, `SAMPLE_B`, `_C`,
+`_C_LZ`, `_D`, `_I`, `_L`, and `SVIEWINFO` for RESINFO), separate texture and sampler. Panfrost accepts NIR
+only (`supported_irs` = NIR), so every shader goes through Mesa's `tgsi_to_nir`. That implements none of
+these opcodes: it prints "unknown TGSI opcode" and calls `abort()`. This explains three observations:
+- wddm-mali-g52's D3D11 triangle had no texture, so it never met them;
+- softpipe (T11a) takes TGSI directly;
+- so does virgl (viogpu3d), where DWM ran.
+Every DWM shader samples a texture.
+
+**The fix in sbumd** (`tools/win/mesa/sb-patches/0102`): d3d10umd already has a legacy texture path (`TEX`,
+`TXB`, `TXL`, `TXD`, `TXF`, `TXQ`), which tgsi_to_nir handles and which gallium's own blitter shaders exercise
+on Panfrost every day. It was compiled into debug builds only (`ST_DEBUG_OLD_TEX_OPS`). Now `st_debug` exists
+in release builds too, and device creation turns the legacy path on when the fragment stage cannot take TGSI.
+softpipe keeps the D3D10 opcodes.
+
+Known limits, each logged by d3d10umd:
+- a texture is read through its sampler's index (fine when tN pairs with sN);
+- SAMPLE_C's compare value is not applied (shadow comparisons read the raw value);
+- SAMPLE_C targets other than 2D are flagged.
+
+The proper fix is to implement the D3D10 opcodes in tgsi_to_nir: separate texture and bare-sampler variables,
+which `nir_lower_samplers` already resolves independently. That needs a native test harness (NIR validation +
+the Bifrost compiler for 0x6221) and comes next.
+
+**Diagnostics:** with the umdlog active, a SIGABRT handler writes the stack (offsets in sbumd.dll) before the
+process ends. An abort() cannot be turned into a returned error: it happens deep in shader translation, which
+has no error path back to the D3D runtime.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

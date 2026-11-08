@@ -1,0 +1,110 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index 40ec93b..70ffdc8 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -25,6 +25,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <signal.h>
+ 
+ #include "util/os_time.h"
+ #include "drm-uapi/drm.h"
+@@ -129,6 +130,30 @@ static void fake_ioctl(DWORD code, void *buf, DWORD len);
+  * and said nothing anywhere). With umdlog\trace also present, the full driver-call trace (MALIKM_TRACE). */
+ static int sb_log_active, sb_log_trace;
+ 
++/* A Mesa abort() (no recovery point exists for it) ends the process; before that, the stack as offsets in
++ * this DLL, so the call that aborted can be found with the build's map/PDB. */
++static void
++sb_on_abort(int sig)
++{
++   void *frames[48];
++   HMODULE self = NULL;
++   USHORT n = RtlCaptureStackBackTrace(0, 48, frames, NULL);
++   (void)sig;
++   GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                      (LPCSTR)(void *)sb_on_abort, &self);
++   fprintf(stderr, "sbumd: abort(), stack (+offset in this DLL, else absolute):\n");
++   for (USHORT i = 0; i < n; i++) {
++      HMODULE m = NULL;
++      GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                         (LPCSTR)frames[i], &m);
++      if (m && m == self)
++         fprintf(stderr, "  #%u sbumd+0x%llx\n", i, (unsigned long long)((char *)frames[i] - (char *)self));
++      else
++         fprintf(stderr, "  #%u %p\n", i, frames[i]);
++   }
++   fflush(stderr);
++}
++
+ static void
+ sb_log_open(void)
+ {
+@@ -153,6 +178,7 @@ sb_log_open(void)
+       return;
+    setvbuf(stderr, NULL, _IONBF, 0);
+    sb_log_active = 1;
++   signal(SIGABRT, sb_on_abort);
+    sb_log_trace = GetFileAttributesA("C:\\ProgramData\\Starbite\\umdlog\\trace") != INVALID_FILE_ATTRIBUTES;
+    GetLocalTime(&st);
+    fprintf(stderr, "sbumd: %s pid %lu at %02u:%02u:%02u.%03u, driver-call trace %s\n", exe,
+diff --git a/src/gallium/frontends/d3d10umd/Debug.cpp b/src/gallium/frontends/d3d10umd/Debug.cpp
+index e9c1db3..b8743cd 100644
+--- a/src/gallium/frontends/d3d10umd/Debug.cpp
++++ b/src/gallium/frontends/d3d10umd/Debug.cpp
+@@ -4,10 +4,10 @@
+ #include <stdio.h>
+ 
+ 
+-#if MESA_DEBUG
+-
+ unsigned st_debug = 0;
+ 
++#if MESA_DEBUG
++
+ static const
+ struct debug_named_value st_debug_flags[] = {
+    {"oldtexops", ST_DEBUG_OLD_TEX_OPS, "oldtexops"},
+diff --git a/src/gallium/frontends/d3d10umd/Debug.h b/src/gallium/frontends/d3d10umd/Debug.h
+index efdf318..1cf5d03 100644
+--- a/src/gallium/frontends/d3d10umd/Debug.h
++++ b/src/gallium/frontends/d3d10umd/Debug.h
+@@ -19,11 +19,9 @@ extern "C" {
+ #define ST_DEBUG_TGSI          (1 <<  1)
+ 
+ 
+-#if MESA_DEBUG
++/* Starbite (sbumd): a variable in release builds too: Device.cpp turns ST_DEBUG_OLD_TEX_OPS on for drivers
++ * that take NIR only (docs/WIN11-GPU.md 6.10). */
+ extern unsigned st_debug;
+-#else
+-#define st_debug 0
+-#endif
+ 
+ 
+ #if MESA_DEBUG
+diff --git a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+index 11b0907..5b54c15 100644
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -151,6 +151,19 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
+    pDevice->pipe = pipe;
+    pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
+ 
++   /* Starbite (sbumd, docs/WIN11-GPU.md 6.10): a driver that takes NIR only (Panfrost) gets every shader
++    * through tgsi_to_nir, which implements none of the D3D10 texture opcodes this frontend emits
++    * (SAMPLE, SAMPLE_B/C/C_LZ/D/I/L, SVIEWINFO): "unknown TGSI opcode" and abort(), so DWM and LogonUI
++    * crash-looped at their first textured shader (T13b). The frontend's legacy path (TEX/TXB/TXL/TXD/TXF/TXQ,
++    * which tgsi_to_nir handles) is used for such drivers. Known limits, logged: a texture is read through
++    * its sampler's index, and SAMPLE_C's compare is not applied. A TGSI driver (softpipe) keeps the
++    * D3D10 opcodes. Before the empty shaders below, so every shader of the device takes the same path. */
++   if (!(screen->shader_caps[MESA_SHADER_FRAGMENT].supported_irs & (1 << PIPE_SHADER_IR_TGSI))) {
++      if (!(st_debug & ST_DEBUG_OLD_TEX_OPS))
++         DebugPrintf("d3d10umd: NIR-only driver, legacy texture opcodes\n");
++      st_debug |= ST_DEBUG_OLD_TEX_OPS;
++   }
++
+    pDevice->empty_vs = CreateEmptyShader(pDevice, MESA_SHADER_VERTEX);
+    pDevice->empty_fs = CreateEmptyShader(pDevice, MESA_SHADER_FRAGMENT);
+ 
