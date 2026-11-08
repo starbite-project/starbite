@@ -212,8 +212,8 @@ void sbdc_swap_flipped(struct sbdc_swap *s)
 
 /* ---- scaled copies ---------------------------------------------------------------------------- */
 
-void sbdc_blit(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
-               unsigned scale)
+void sbdc_blit_c(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+                 unsigned scale)
 {
     if (r.r <= r.l || r.b <= r.t)
         return;
@@ -339,8 +339,8 @@ static unsigned up(unsigned l, const struct sbdc_xf *x)
     return ((l << x->shift) + x->den - 1) / x->den;
 }
 
-void sbdc_blit_xf(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
-                  const struct sbdc_xf *x)
+void sbdc_blit_xf_c(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+                    const struct sbdc_xf *x)
 {
     unsigned sw, sh, W = x->lw, H = x->lh, lx0, lx1, ly0, ly1, X0, X1, Y0, Y1;
     long long pitch = (long long)src_pitch;
@@ -387,4 +387,200 @@ void sbdc_blit_xf(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned
             d[X] = *(const sbdc_u32 *)(base + (long long)lx * step);
         }
     }
+}
+
+/* ---- fast paths (T10): NEON on ARM64, bit-identical to the _c versions above (host-tested) ------------ */
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#define SBDC_NEON 1
+#endif
+
+static void row_copy(sbdc_u32 *d, const sbdc_u32 *s, unsigned n)
+{
+    unsigned i = 0;
+#ifdef SBDC_NEON
+    for (; i + 8 <= n; i += 8) {
+        uint32x4_t a = vld1q_u32(s + i), b = vld1q_u32(s + i + 4);
+        vst1q_u32(d + i, a);
+        vst1q_u32(d + i + 4, b);
+    }
+#endif
+    for (; i < n; ++i)
+        d[i] = s[i];
+}
+
+/* d[2i] = d[2i+1] = s[i] */
+static void row_double(sbdc_u32 *d, const sbdc_u32 *s, unsigned n)
+{
+    unsigned i = 0;
+#ifdef SBDC_NEON
+    for (; i + 4 <= n; i += 4) {
+        uint32x4_t v = vld1q_u32(s + i);
+        uint32x4x2_t z = vzipq_u32(v, v);
+        vst1q_u32(d + 2 * i, z.val[0]);
+        vst1q_u32(d + 2 * i + 4, z.val[1]);
+    }
+#endif
+    for (; i < n; ++i)
+        d[2 * i] = d[2 * i + 1] = s[i];
+}
+
+/* Panel pixels X0..X1 of one row at 4/3: d[X] = s[(3X) >> 2]; s holds sw pixels (never read beyond). */
+static void row_43(sbdc_u32 *d, const sbdc_u32 *s, unsigned X0, unsigned X1, unsigned sw)
+{
+    unsigned X = X0;
+    for (; X < X1 && (X & 3U); ++X)
+        d[X] = s[(X * 3U) >> 2];
+#ifdef SBDC_NEON
+    {
+        /* 8 panel pixels from 6 source pixels: 0,0,1,2 | 3,3,4,5 (byte indices into 32 loaded bytes) */
+        static const sbdc_u8 ia[16] = { 0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+        static const sbdc_u8 ib[16] = { 12, 13, 14, 15, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 };
+        uint8x16_t ta = vld1q_u8(ia), tb = vld1q_u8(ib);
+        for (; X + 8 <= X1 && ((X * 3U) >> 2) + 8 <= sw; X += 8) {
+            const sbdc_u8 *p = (const sbdc_u8 *)(s + ((X * 3U) >> 2));
+            uint8x16x2_t t;
+            t.val[0] = vld1q_u8(p);
+            t.val[1] = vld1q_u8(p + 16);
+            vst1q_u8((sbdc_u8 *)(d + X), vqtbl2q_u8(t, ta));
+            vst1q_u8((sbdc_u8 *)(d + X + 4), vqtbl2q_u8(t, tb));
+        }
+    }
+#endif
+    for (; X < X1; ++X)
+        d[X] = s[(X * 3U) >> 2];
+}
+
+void sbdc_blit(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+               unsigned scale)
+{
+    unsigned n;
+    if (r.r <= r.l || r.b <= r.t)
+        return;
+    n = (unsigned)(r.r - r.l);
+    for (int y = r.t; y < r.b; ++y) {
+        const sbdc_u32 *s = (const sbdc_u32 *)(src + (unsigned)y * src_pitch) + r.l;
+        if (scale == 2) {
+            row_double((sbdc_u32 *)(dst + (unsigned)(2 * y) * dst_pitch) + 2 * r.l, s, n);
+            row_double((sbdc_u32 *)(dst + (unsigned)(2 * y + 1) * dst_pitch) + 2 * r.l, s, n);
+        } else {
+            row_copy((sbdc_u32 *)(dst + (unsigned)y * dst_pitch) + r.l, s, n);
+        }
+    }
+}
+
+#define SBDC_TILE_Y 16U                   /* rotated: 16 panel rows (16 source columns) x 64 pixels per tile, */
+#define SBDC_TILE_X 64U                   /* so each source cache line is used 16 times while it is in L1 */
+
+void sbdc_blit_xf(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+                  const struct sbdc_xf *x)
+{
+    unsigned sw, sh, W = x->lw, H = x->lh, lx0, lx1, ly0, ly1, X0, X1, Y0, Y1;
+    long long pitch = (long long)src_pitch;
+    sbdc_xf_src_size(x, &sw, &sh);
+    if (r.l < 0)
+        r.l = 0;
+    if (r.t < 0)
+        r.t = 0;
+    if (r.r > (int)sw)
+        r.r = (int)sw;
+    if (r.b > (int)sh)
+        r.b = (int)sh;
+    if (r.r <= r.l || r.b <= r.t || !x->den)
+        return;
+    if (x->rot == SBDC_ROT_180) {         /* rare: the scalar path */
+        sbdc_blit_xf_c(dst, dst_pitch, src, src_pitch, r, x);
+        return;
+    }
+    switch (x->rot) {
+    case SBDC_ROT_90:  lx0 = (unsigned)r.t; lx1 = (unsigned)r.b; ly0 = H - (unsigned)r.r; ly1 = H - (unsigned)r.l; break;
+    case SBDC_ROT_270: lx0 = W - (unsigned)r.b; lx1 = W - (unsigned)r.t; ly0 = (unsigned)r.l; ly1 = (unsigned)r.r; break;
+    default:           lx0 = (unsigned)r.l; lx1 = (unsigned)r.r; ly0 = (unsigned)r.t; ly1 = (unsigned)r.b; break;
+    }
+    X0 = up(lx0, x);
+    X1 = up(lx1, x);
+    Y0 = up(ly0, x);
+    Y1 = up(ly1, x);
+    if (X1 > x->pw)
+        X1 = x->pw;
+    if (Y1 > x->ph)
+        Y1 = x->ph;
+    if (X1 <= X0 || Y1 <= Y0)
+        return;
+
+    if (x->rot != SBDC_ROT_90 && x->rot != SBDC_ROT_270) {
+        for (unsigned Y = Y0; Y < Y1; ++Y) {
+            unsigned ly = (Y * x->den) >> x->shift;
+            const sbdc_u32 *s = (const sbdc_u32 *)(src + (unsigned long long)ly * src_pitch);
+            sbdc_u32 *d = (sbdc_u32 *)(dst + (unsigned long long)Y * dst_pitch);
+            if (x->den == 1 && x->shift == 0)
+                row_copy(d + X0, s + X0, X1 - X0);
+            else if (x->den == 1 && x->shift == 1 && !(X0 & 1U) && !(X1 & 1U))
+                row_double(d + X0, s + X0 / 2, (X1 - X0) / 2);
+            else if (x->den == 3 && x->shift == 2)
+                row_43(d, s, X0, X1, sw);
+            else
+                for (unsigned X = X0; X < X1; ++X)
+                    d[X] = s[(X * x->den) >> x->shift];
+        }
+        return;
+    }
+    /* 90 / 270: tiles */
+    for (unsigned Yb = Y0; Yb < Y1; Yb += SBDC_TILE_Y) {
+        unsigned Ye = Yb + SBDC_TILE_Y < Y1 ? Yb + SBDC_TILE_Y : Y1;
+        for (unsigned Xb = X0; Xb < X1; Xb += SBDC_TILE_X) {
+            unsigned Xe = Xb + SBDC_TILE_X < X1 ? Xb + SBDC_TILE_X : X1;
+            for (unsigned Y = Yb; Y < Ye; ++Y) {
+                unsigned ly = (Y * x->den) >> x->shift;
+                const sbdc_u8 *base;
+                long long step;
+                sbdc_u32 *d = (sbdc_u32 *)(dst + (unsigned long long)Y * dst_pitch);
+                if (x->rot == SBDC_ROT_90) {
+                    base = src + (unsigned long long)(H - 1 - ly) * 4;
+                    step = pitch;
+                } else {
+                    base = src + (unsigned long long)(W - 1) * src_pitch + (unsigned long long)ly * 4;
+                    step = -pitch;
+                }
+                for (unsigned X = Xb; X < Xe; ++X)
+                    d[X] = *(const sbdc_u32 *)(base + (long long)((X * x->den) >> x->shift) * step);
+            }
+        }
+    }
+}
+
+static int present_simple(const struct sbdc_xf *x, struct sbdc_rect *r)
+{
+    unsigned rows;
+    if (x->rot != SBDC_ROT_0 || x->den != 1 || x->shift > 1)
+        return 0;
+    rows = x->ph >> x->shift;             /* source rows that fit the panel */
+    if (r->b > (int)rows)
+        r->b = (int)rows;
+    if (r->r > (int)x->lw)
+        r->r = (int)x->lw;
+    if (r->l < 0)
+        r->l = 0;
+    if (r->t < 0)
+        r->t = 0;
+    return 1;
+}
+
+void sbdc_present_blit(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+                       const struct sbdc_xf *x)
+{
+    if (present_simple(x, &r))
+        sbdc_blit(dst, dst_pitch, src, src_pitch, r, 1U << x->shift);
+    else
+        sbdc_blit_xf(dst, dst_pitch, src, src_pitch, r, x);
+}
+
+void sbdc_present_blit_c(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+                         const struct sbdc_xf *x)
+{
+    if (present_simple(x, &r))
+        sbdc_blit_c(dst, dst_pitch, src, src_pitch, r, 1U << x->shift);
+    else
+        sbdc_blit_xf_c(dst, dst_pitch, src, src_pitch, r, x);
 }

@@ -61,6 +61,8 @@ HKR, Parameters, Timing60,   %REG_DWORD%, 0   ; 1 = report the panel's real 60 H
 HKR, Parameters, Modes,       %REG_DWORD%, 7  ; resolutions offered: 1 = 1440x2960, 2 = 1080x2220, 4 = 720x1480 (sum)
 HKR, Parameters, DefaultMode, %REG_DWORD%, 1  ; Windows' preferred: 0 = 1440x2960, 1 = 1080x2220, 2 = 720x1480
 HKR, Parameters, Rotation,    %REG_DWORD%, 1  ; 1 = landscape/portrait and flipped (rotated in software)
+HKR, Parameters, Bench,       %REG_DWORD%, 1  ; 1 = time every copy path once, 20 s after start (private memory only)
+HKR, Parameters, PlainC,      %REG_DWORD%, 0  ; 1 = T9's plain-C copies instead of the NEON ones (A/B comparison)
 
 [SbDisplay_EventLog]
 AddReg = SbDisplay_EventLog_AddReg

@@ -180,6 +180,20 @@ void sbdc_xf_src_size(const struct sbdc_xf *x, unsigned *w, unsigned *h);
 void sbdc_blit_xf(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
                   const struct sbdc_xf *x);
 
+/* The present's copy: identity 1x/2x through sbdc_blit (rows limited to the panel), everything else through
+ * sbdc_blit_xf. _c: the same dispatch onto the plain-C versions (what T7/T9 ran; benchmark baseline). */
+void sbdc_present_blit(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+                       const struct sbdc_xf *x);
+void sbdc_present_blit_c(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+                         const struct sbdc_xf *x);
+
+/* The plain-C versions (T7/T9 as run on the phone): the reference for the fast ones above (NEON on ARM64,
+ * cache tiles when rotated), which must produce identical pixels. Used by the host test and the benchmark. */
+void sbdc_blit_c(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+                 unsigned scale);
+void sbdc_blit_xf_c(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+                    const struct sbdc_xf *x);
+
 /* ---- brightness (S6E3HA8 AOR) ------------------------------------------------------------ */
 
 /* Windows level 0..100 -> AOR (higher AOR = darker), through S-Boot's and the vendor's points. */

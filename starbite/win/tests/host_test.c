@@ -521,6 +521,68 @@ static void test_display(void)
         }
     }
 
+    /* T10: the fast paths against the plain-C ones, real sizes, odd source pitch, 300 random rectangles per
+     * transform (unaligned edges: the NEON heads and tails) plus the full frame */
+    {
+        static const unsigned sc[3][2] = { { 1, 0 }, { 3, 2 }, { 1, 1 } };
+        unsigned pitch_px = 2240;          /* > the widest presented image (2220), not a multiple of 8 + 4 */
+        uint32_t *bs = malloc((size_t)pitch_px * 2960 * 4), *d1 = malloc(1440 * 2960 * 4), *d2 = malloc(1440 * 2960 * 4);
+        unsigned seed = 12345, bad = 0, runs = 0;
+        for (unsigned i = 0; i < pitch_px * 2960; ++i)
+            bs[i] = i * 2654435761u;
+        for (int m = 0; m < 3; ++m)
+            for (unsigned rot = 1; rot <= 4; ++rot) {
+                struct sbdc_xf xf = { (1440 * sc[m][0]) >> sc[m][1], (2960 * sc[m][0]) >> sc[m][1], 1440, 2960, rot,
+                                      sc[m][0], sc[m][1] };
+                unsigned sw, sh;
+                sbdc_xf_src_size(&xf, &sw, &sh);
+                for (int k = 0; k <= 300; ++k) {
+                    struct sbdc_rect rr;
+                    if (k == 300) {
+                        rr = (struct sbdc_rect){ 0, 0, (int)sw, (int)sh };
+                    } else {
+                        unsigned a, b, c, e;
+                        seed = seed * 1103515245u + 12345u; a = (seed >> 8) % sw;
+                        seed = seed * 1103515245u + 12345u; b = (seed >> 8) % sw;
+                        seed = seed * 1103515245u + 12345u; c = (seed >> 8) % sh;
+                        seed = seed * 1103515245u + 12345u; e = (seed >> 8) % sh;
+                        rr = (struct sbdc_rect){ (int)(a < b ? a : b), (int)(c < e ? c : e), (int)(a < b ? b : a) + 1,
+                                                 (int)(c < e ? e : c) + 1 };
+                        if (k % 50 == 0)  /* sometimes small */
+                            rr.r = rr.l + 1 + (int)(seed % 13), rr.b = rr.t + 1 + (int)(seed % 7);
+                    }
+                    memset(d1, 0x5a, 1440 * 2960 * 4);
+                    memset(d2, 0x5a, 1440 * 2960 * 4);
+                    sbdc_blit_xf_c((uint8_t *)d1, 1440 * 4, (const uint8_t *)bs, pitch_px * 4, rr, &xf);
+                    sbdc_blit_xf((uint8_t *)d2, 1440 * 4, (const uint8_t *)bs, pitch_px * 4, rr, &xf);
+                    runs++;
+                    if (memcmp(d1, d2, 1440 * 2960 * 4)) {
+                        if (bad++ < 3)
+                            printf("  fast xf differs: mode %d rot %u rect %d,%d-%d,%d\n", m, rot, rr.l, rr.t, rr.r, rr.b);
+                    }
+                }
+            }
+        CHECK(!bad, "fast transform paths identical to plain C: %u/%u", runs - bad, runs);
+        bad = 0;
+        for (unsigned scale = 1; scale <= 2; ++scale)
+            for (int k = 0; k < 200; ++k) {
+                unsigned w = 1440 / scale, h = 2960 / scale, a, b;
+                struct sbdc_rect rr;
+                seed = seed * 1103515245u + 12345u; a = (seed >> 8) % w;
+                seed = seed * 1103515245u + 12345u; b = (seed >> 8) % h;
+                rr = (struct sbdc_rect){ (int)a, (int)b, (int)(a + 1 + seed % (w - a)), (int)(b + 1 + (seed >> 4) % (h - b)) };
+                memset(d1, 0x5a, 1440 * 2960 * 4);
+                memset(d2, 0x5a, 1440 * 2960 * 4);
+                sbdc_blit_c((uint8_t *)d1, 1440 * 4, (const uint8_t *)bs, pitch_px * 4, rr, scale);
+                sbdc_blit((uint8_t *)d2, 1440 * 4, (const uint8_t *)bs, pitch_px * 4, rr, scale);
+                bad += memcmp(d1, d2, 1440 * 2960 * 4) != 0;
+            }
+        CHECK(!bad, "fast 1x/2x copies identical to plain C (%u differ)", bad);
+        free(bs);
+        free(d1);
+        free(d2);
+    }
+
     /* brightness */
     CHECK(sbdc_level_to_aor(100) == 0x000c, "100 -> 0x000c");
     CHECK(sbdc_level_to_aor(64) == 0x0440, "64 -> S-Boot normal");

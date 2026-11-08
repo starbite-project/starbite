@@ -457,6 +457,32 @@ comes later behind a registry switch, since a panel that does not wake stays dar
   latter): sblinkd should log both after a rotation and turn the frame when `Rotation` is not IDENTITY.
 - Cost: rotated 90/270 presents read Windows' image down columns: slower than T7's copy for full frames.
 
+### 7.5c T10: where the desktop's time goes, and a faster copy (as built, 2026-11-08)
+
+**What makes this Windows feel slow.** Every frame is drawn twice on the CPU: WARP (Microsoft's software
+renderer) draws the windows and DWM composes them, then sbdisplay copies the changed rectangles to the panel
+(scaled and, since T9, rotated). Only the second part is ours. A Mali-rendered desktop is stage 4 (§6): a
+full WDDM driver plus Mesa's D3D10 driver cross-built for Windows, with an open question that can stop it
+(§6.3). It is weeks of work, not one step. The order:
+1. **Measure (T10).** How much of a core the copy costs (`CopyBusyPermille*`, `CopyUs*`), how often Windows
+   presents and how much it changes (`PresentsPerSec*`, `PixelsPerPresentAvg`), and every copy path timed
+   on the phone (`Bench_*`). If the copy is a small share, the slowness is WARP. The levers are then fewer
+   pixels (the 720 × 1480 mode), the CPU (sbthermal's boost; the big cores are another track's work) and,
+   in the end, stage 4.
+2. **The copy itself, now:** NEON fast paths: 1:1 rows and 2x doubling with 128-bit loads and stores, the
+   4/3 scaler as a byte-table lookup (6 source → 8 panel pixels per two `tbl` instructions), rotated copies
+   in 16 × 64 cache tiles. They are pixel-for-pixel identical to T9's plain C (host test: 3,612 transform
+   cases at real sizes with odd pitch and unaligned rectangles, plus 400 copies). On the Mac they run 3–6×
+   faster upright and about 1.5× rotated; the phone's figures come from `Bench_*`. `Parameters\PlainC` = 1
+   switches back to T9's copies, for an A/B comparison.
+3. Then, by what T10 shows: DECON page flips at scale 1 (no copy at all; built as T3b, off) or a smoother
+   1080 scaler; and the GPU track (sbmali T8 → Mesa without WDDM → stage 4).
+
+The benchmark runs once, 20 s after sbdisplay starts (`Parameters\Bench` = 0 turns it off). It uses a
+private write-combined buffer of 256 panel rows and a 17 MB pool copy of a test image, both freed right
+after, so it never touches the screen. Results are in microseconds per full 1440 × 2960 frame, best of 3:
+`Bench_{1440,1080,720}_R{0,90}_{C,Fast}`.
+
 ### 7.6a Refresh rate: what Windows shows, and overclocking (research, 2026-11-07)
 
 **"64 Hz" in Windows is a label.** sbdisplay copies Basic Display: the target mode leaves its frequencies
@@ -714,7 +740,7 @@ To do: 200 runs per format (Runs 200 or the value deleted) for the page-table co
 |---|---|---|---|
 | T7 | 2x scaled desktop (sbdisplay, copy mode) | smoother desktop (4x fewer pixels for WARP/DWM); Desktop Duplication on our display-only driver | a new display driver may black-screen (§4.3) |
 | T8 | sbmali v2 as a standalone service (`hive-service.py add sbmali`, next to sbdisplay): the GPU clock and a real draw. ACPM DVFS domain 4 to 572 MHz (BUCK6 rewritten after it), XNU's Mesa-built triangle (tiler + vertex + fragment, `xnu/src/starlte_gpu_tri.h`, proven on this phone under iOS) into a private buffer checked pixel by pixel, 200 runs per table format with clear + triangle, temperatures throughout | the clock path, the tiler, shaders, and the legacy-versus-AArch64 decision on a real workload | sustained GPU load for ~1 min at 572 MHz: the watchdog throttles (338 MHz at 70 °C, 260 at 80, stop at 90); otherwise as T5 |
-| T9 | Mesa on Windows without WDDM (wddm-mali-g52's M3/M4 shape): Mesa 26.2 + their patches cross-built for ARM64, Panfrost reaching sbmali through a Panfrost-style IOCTL interface (CREATE_BO, SUBMIT, WAIT_BO, ...), a D3D11 test program using Mesa's d3d10umd as a software driver | D3D11 rendered by the Mali under Windows | a user-mode program has to be started (the user taps it; services running cmd.exe crash on this Windows) |
+| T11 | Mesa on Windows without WDDM (wddm-mali-g52's M3/M4 shape): Mesa 26.2 + their patches cross-built for ARM64, Panfrost reaching sbmali through a Panfrost-style IOCTL interface (CREATE_BO, SUBMIT, WAIT_BO, ...), a D3D11 test program using Mesa's d3d10umd as a software driver | D3D11 rendered by the Mali under Windows | a user-mode program has to be started (the user taps it; services running cmd.exe crash on this Windows) |
 | 4a | sbwddm skeleton (WDDM 1.3, display half = sbdisplay incl. 2x scaling) | Windows accepts our full driver | black desktop possible (wddm-mali-g52 run 6) |
 
 ## 11. Stages and done-when

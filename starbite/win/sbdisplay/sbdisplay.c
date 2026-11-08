@@ -31,6 +31,7 @@
 
 #define SD_TAG 'dDbS'
 #define SD_GUARD_LIMIT 2
+#define SD_BENCH_DELAY_MS 20000         /* the benchmark runs this long after start (desktop up, sbthermal's boost in) */
 #define SD_GUARD_CLEAR_MS 60000         /* 1 min of presents (was 10 min for the first test, T7: proven on the
                                          * phone, and daily sessions shorter than 10 min would count) */
 #define SD_LATCH_TIMEOUT_US 50000
@@ -68,6 +69,11 @@ typedef struct _SD_DEVICE {
     ULONG Presents, Flips, Fallbacks, BrightnessSets, BrightnessFails;
     ULONG64 RateT0;                       /* presents per second, over 1 s windows */
     ULONG RateCount, RateLast, RateMax;
+    /* T10: what the present costs (performance-counter ticks): per 1 s window and per 1024 presents */
+    LONGLONG PcFreq, WinBlit, BatchBlit, BlitMax;
+    ULONG BusyLast, BusyMax;              /* permille of one core spent copying, last / worst 1 s window */
+    ULONG64 BatchPixels;
+    BOOLEAN PlainC;                       /* Parameters\PlainC = 1: T9's plain-C copies (A/B comparison) */
     BOOLEAN Timing60;                     /* Parameters\Timing60: report a full 60 Hz timing (see FillSignal) */
     ULONG64 Seen;
     HANDLE GuardThread;
@@ -340,12 +346,11 @@ static void CopyRects(PSD_DEVICE Dev, int I, const UCHAR *Src, LONG SrcPitch, co
                       const struct sbdc_xf *Xf)
 {
     /* identity at 1x or 2x: the proven T7 copy (64-bit stores); everything else: the general one */
-    BOOLEAN fast = Xf->rot == SBDC_ROT_0 && Xf->den == 1 && Xf->shift <= 1;
     for (unsigned k = 0; k < R->n; k++) {
-        if (fast)
-            sbdc_blit(Dev->Va[I], Dev->Fb.Pitch, Src, (unsigned)SrcPitch, R->r[k], 1U << Xf->shift);
+        if (Dev->PlainC)
+            sbdc_present_blit_c(Dev->Va[I], Dev->Fb.Pitch, Src, (unsigned)SrcPitch, R->r[k], Xf);
         else
-            sbdc_blit_xf(Dev->Va[I], Dev->Fb.Pitch, Src, (unsigned)SrcPitch, R->r[k], Xf);
+            sbdc_present_blit(Dev->Va[I], Dev->Fb.Pitch, Src, (unsigned)SrcPitch, R->r[k], Xf);
     }
 }
 
@@ -396,6 +401,73 @@ static void ReleaseScanout(PSD_DEVICE Dev)
 
 static KSTART_ROUTINE GuardThread;
 
+/* T10 benchmark, once per boot (Parameters\Bench, default 1): every mode x {upright, rotated 90}, the T9
+ * plain-C copy against the fast one, into a private write-combined buffer of 256 panel rows (never the
+ * screen), best of 3, logged as microseconds per full 1440 x 2960 frame (State\Bench_<mode>_<rot>_<C|Fast>). */
+static void Bench(PSD_DEVICE Dev)
+{
+    static const PCWSTR mn[SD_MODES] = { L"1440", L"1080", L"720" };
+    PHYSICAL_ADDRESS lo, hi, sk;
+    SIZE_T dsz = (SIZE_T)256 * Dev->Fb.Pitch, ssz = (SIZE_T)Dev->Fb.Width * Dev->Fb.Height * 4;
+    PUCHAR d, s;
+    lo.QuadPart = 0;
+    hi.QuadPart = -1;
+    sk.QuadPart = 0;
+    d = (PUCHAR)MmAllocateContiguousNodeMemory(dsz, lo, hi, sk, PAGE_READWRITE | PAGE_WRITECOMBINE, MM_ANY_NODE_OK);
+    s = (PUCHAR)ExAllocatePool2(POOL_FLAG_PAGED, ssz, 'bdbS');
+    Log(L"BenchAlloc", (d ? 1u : 0u) | (s ? 2u : 0u), TRUE);
+    if (d && s) {
+        for (SIZE_T i = 0; i < ssz / 4; i++)
+            ((ULONG *)s)[i] = (ULONG)i * 2654435761u;
+        for (ULONG m = 0; m < SD_MODES; m++) {
+            if (!ModeFits(Dev, m))
+                continue;
+            for (ULONG rot = SBDC_ROT_0; rot <= SBDC_ROT_90; rot++) {
+                struct sbdc_xf xf;
+                struct sbdc_rect r;
+                unsigned sw, sh;
+                LONGLONG best[2] = { MAXLONGLONG, MAXLONGLONG };
+                xf.lw = ModeW(Dev, m);
+                xf.lh = ModeH(Dev, m);
+                xf.pw = Dev->Fb.Width;
+                xf.ph = 256;                  /* the first 256 panel rows */
+                xf.rot = rot;
+                xf.den = SdModes[m].den;
+                xf.shift = SdModes[m].shift;
+                sbdc_xf_src_size(&xf, &sw, &sh);
+                r.l = r.t = 0;
+                r.r = (int)sw;
+                r.b = (int)sh;
+                for (int k = 0; k < 6; k++) {
+                    LONGLONG t = KeQueryPerformanceCounter(NULL).QuadPart;
+                    if (k & 1)
+                        sbdc_present_blit(d, Dev->Fb.Pitch, s, sw * 4, r, &xf);
+                    else
+                        sbdc_present_blit_c(d, Dev->Fb.Pitch, s, sw * 4, r, &xf);
+                    t = KeQueryPerformanceCounter(NULL).QuadPart - t;
+                    if (t < best[k & 1])
+                        best[k & 1] = t;
+                }
+                for (int v = 0; v < 2; v++) {
+                    WCHAR nm[48];
+                    UNICODE_STRING us;
+                    RtlInitEmptyUnicodeString(&us, nm, sizeof(nm) - sizeof(WCHAR));
+                    if (NT_SUCCESS(RtlUnicodeStringPrintf(&us, L"Bench_%s_R%u_%s", mn[m], (rot - 1) * 90,
+                                                          v ? L"Fast" : L"C"))) {
+                        nm[us.Length / sizeof(WCHAR)] = 0;
+                        Log(nm, (ULONG)(best[v] * 1000000LL / Dev->PcFreq * Dev->Fb.Height / 256), FALSE);
+                    }
+                }
+            }
+        }
+        Log(L"BenchDone", 1, TRUE);
+    }
+    if (s)
+        ExFreePoolWithTag(s, 'bdbS');
+    if (d)
+        MmFreeContiguousMemory(d);
+}
+
 static VOID GuardThread(PVOID Ctx)
 {
     PSD_DEVICE dev = (PSD_DEVICE)Ctx;
@@ -404,7 +476,12 @@ static VOID GuardThread(PVOID Ctx)
     ObReferenceObject(KeGetCurrentThread());   /* so StopGuard can always wait on it */
     dev->GuardThreadObj = KeGetCurrentThread();
     KeSetEvent(&dev->GuardStarted, IO_NO_INCREMENT, FALSE);
-    t.QuadPart = -10000LL * SD_GUARD_CLEAR_MS;
+    t.QuadPart = -10000LL * SD_BENCH_DELAY_MS;
+    if (KeWaitForSingleObject(&dev->GuardStop, Executive, KernelMode, FALSE, &t) != STATUS_TIMEOUT)
+        goto out;
+    if (Param(L"Bench", 1))
+        Bench(dev);
+    t.QuadPart = -10000LL * (SD_GUARD_CLEAR_MS - SD_BENCH_DELAY_MS);
     if (KeWaitForSingleObject(&dev->GuardStop, Executive, KernelMode, FALSE, &t) == STATUS_TIMEOUT) {
         /* Healthy = Windows has been presenting through us for a minute without a flip failure. */
         Log(L"PresentsAtGuard", dev->Presents, TRUE);
@@ -414,6 +491,7 @@ static VOID GuardThread(PVOID Ctx)
             ZwClose(h);
         }
     }
+out:
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -511,6 +589,13 @@ NTSTATUS SdStartDevice(IN_CONST_PVOID MiniportDeviceContext, IN_PDXGK_START_INFO
     dev->Rot = SBDC_ROT_0;
     dev->LastRot = SBDC_ROT_0;
     dev->Timing60 = Param(L"Timing60", 0) != 0;
+    dev->PlainC = Param(L"PlainC", 0) != 0;
+    {
+        LARGE_INTEGER f;
+        (void)KeQueryPerformanceCounter(&f);
+        dev->PcFreq = f.QuadPart ? f.QuadPart : 1;
+    }
+    Log(L"PlainC", dev->PlainC, FALSE);
     Log(L"Timing60", dev->Timing60, FALSE);
     Log(L"ModeMask", dev->ModeMask, FALSE);
     Log(L"DefaultMode", dev->DefaultMode, FALSE);
@@ -1173,6 +1258,7 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
     struct sbdc_rects copy;
     struct sbdc_xf xf;
     unsigned n = 0, sw, sh;
+    LONGLONG t0;
     PMDL mdl;
     const UCHAR *src;
     SIZE_T size;
@@ -1232,6 +1318,7 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
 
     if (dev->Flip && sbdc_wait_latched(&dev->Dc, SD_LATCH_TIMEOUT_US, 50))
         FallBackToCopy(dev, L"FlipLatchTimeout");
+    t0 = KeQueryPerformanceCounter(NULL).QuadPart;
 
     if (dev->Flip) {
         int back;
@@ -1260,6 +1347,16 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
             CopyRects(dev, 1, src, Arg->Pitch, &copy, &xf);
     }
 
+    {
+        LONGLONG dt = KeQueryPerformanceCounter(NULL).QuadPart - t0;
+        dev->WinBlit += dt;
+        dev->BatchBlit += dt;
+        if (dt > dev->BlitMax)
+            dev->BlitMax = dt;
+        for (unsigned i = 0; i < n; i++)
+            dev->BatchPixels += (ULONG64)(rect[i].r > rect[i].l ? rect[i].r - rect[i].l : 0) *
+                                (ULONG64)(rect[i].b > rect[i].t ? rect[i].b - rect[i].t : 0);
+    }
     MmUnlockPages(mdl);
     IoFreeMdl(mdl);
     {
@@ -1281,6 +1378,11 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
             dev->RateLast = (ULONG)(dev->RateCount * 10000000ULL / (now - dev->RateT0));
             if (dev->RateLast > dev->RateMax)
                 dev->RateMax = dev->RateLast;
+            /* copy time / window time: ticks -> 100 ns, then permille */
+            dev->BusyLast = (ULONG)((ULONG64)dev->WinBlit * 10000000ULL / (ULONG64)dev->PcFreq * 1000ULL / (now - dev->RateT0));
+            if (dev->BusyLast > dev->BusyMax)
+                dev->BusyMax = dev->BusyLast;
+            dev->WinBlit = 0;
             dev->RateCount = 0;
             dev->RateT0 = now;
         }
@@ -1290,6 +1392,13 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
         Log(L"Flips", dev->Flips, FALSE);
         Log(L"PresentsPerSecMax", dev->RateMax, FALSE);   /* how fast Windows really draws: the ceiling */
         Log(L"PresentsPerSecLast", dev->RateLast, FALSE);
+        Log(L"CopyBusyPermilleMax", dev->BusyMax, FALSE);     /* worst 1 s: share of one core spent copying */
+        Log(L"CopyBusyPermilleLast", dev->BusyLast, FALSE);
+        Log(L"CopyUsMax", (ULONG)(dev->BlitMax * 1000000LL / dev->PcFreq), FALSE);
+        Log(L"CopyUsAvg", (ULONG)(dev->BatchBlit * 1000000LL / dev->PcFreq / 1024), FALSE);
+        Log(L"PixelsPerPresentAvg", (ULONG)(dev->BatchPixels / 1024), FALSE);   /* Windows' changed area */
+        dev->BatchBlit = 0;
+        dev->BatchPixels = 0;
     }
     return STATUS_SUCCESS;
 }
