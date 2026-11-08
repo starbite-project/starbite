@@ -829,7 +829,21 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
-### 12.21 Version 1.1-beta1: Survival heat (2026-11-08)
+### 12.21 Version 1.1-beta1 / beta2: Survival heat; the LED chip's 0x63 (2026-11-08)
+
+beta2 from the user's 19:03 run: the M3s' FlexPMU bookkeeping (`hw_m3_core_on` / `hw_m3_core_off`, cpu0 only:
+CPU_INFORM 0x14060860 + 4 x phycpu, GRP2_INTR_BID_ENABLE 0x14070200, EVENT_ENABLE_GRP2 0x14067f08, MAILBOX_APM2AP
+0x14100010 bit 24; docs/STARBITE-OS-LINUX-M3.md 7) because the cluster stayed powered after a stop and core 4 did
+not start again; the GPU accepts a trip Survival switched off (`heater_trip_off`); one Survival mode whose "Hardware
+trip OFF" switch runs flat out to the user's stop (no shedding; the simulation reaches 131.0 °C in 25 s and stops).
+
+beta2: T23's probe answered rc3's LED question: the bus and the chip are fine (the USI10 IP clock runs from S-Boot's
+state; 0x1D = 0x90, CUR1 0xCC, TIME1 0x7F, CTRL1 0x33); only register 0x63 read 0x00 instead of the 0x7F the check
+wanted. 0x63 is reserved; Samsung's factory continuous-flash test writes 0x5F and then 0x7F, and 0x00 shares bit 5
+with 0x5F, so the chip's 125 ms flash timer is not confirmed. The chip is used for the torch (240 mA), the 1250 mA
+flash pulses only with 0x63 = 0x7F (`fled_flash_ok`); 0x63 is never written. `SET_LED_FULL` reads 2 for "the torch
+only". Host: `SBOS_HOST_FLED=r63zero`.
+
 
 The user's request: a last resort for the most heat in a survival situation. Two Heat buttons, each its own level:
 

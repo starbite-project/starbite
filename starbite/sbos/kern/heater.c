@@ -326,6 +326,20 @@ static int cores_usable(int upto)
     return n;
 }
 
+int heater_trip_off(void)
+{
+    return trip_off;
+}
+
+/* 1.1-beta2: M3 workers that run (or are starting) now, but w */
+static int m3_others(unsigned w)
+{
+    int n = 0;
+    for (unsigned v = 4; v < 8; ++v)
+        n += v != w && (running[v] || cs[v].st == CS_LAUNCHED);
+    return n;
+}
+
 static void workers_apply(void)
 {
     uint64_t now = sb_ms();
@@ -349,6 +363,8 @@ static void workers_apply(void)
         switch (cs[w].st) {
         case CS_RUN:
             if (!want_on) {
+                if (w >= 4)
+                    hw_m3_core_off(w, !m3_others(w));   /* before it sees run = 0 and calls CPU_OFF */
                 cfg.run[w] = 0;
                 sb_dcache_clean_inval(&cfg, sizeof(cfg));
                 running[w] = 0;
@@ -392,6 +408,8 @@ static void workers_apply(void)
                     sb_log(u.b);
                 }
                 if (!want_on) {
+                    if (w >= 4)
+                        hw_m3_core_off(w, !m3_others(w));
                     cfg.run[w] = 0;
                     sb_dcache_clean_inval(&cfg, sizeof(cfg));
                     running[w] = 0;
@@ -427,6 +445,12 @@ static void workers_apply(void)
                 return;
             }
             m3_prepped = 1;
+        }
+        if (w >= 4) {
+            int first = !m3_others(w);
+            if (first)
+                hw_m3_fp_log("heater: flexpmu before the first M3 start");
+            hw_m3_core_on(w, first);
         }
         cfg.run[w] = 1;
         sb_dcache_clean_inval(&cfg, sizeof(cfg));
@@ -644,6 +668,15 @@ static void restore_and_check(void)
     extreme_extras(0);
     ext_led_used = 0;                       /* a new session may light it again */
     gpu_heat_session = 0;
+    {
+        /* 1.1-beta2: the M3s' FlexPMU off before they see the stop: C2 for each, CPD for the last */
+        int left = 0;
+        for (unsigned w = 4; w < 8; ++w)
+            left += running[w] || cs[w].st == CS_LAUNCHED;
+        for (unsigned w = 4; w < 8; ++w)
+            if (running[w] || cs[w].st == CS_LAUNCHED)
+                hw_m3_core_off(w, --left == 0);
+    }
     for (unsigned w = 1; w < 8; ++w)
         cfg.run[w] = 0;
     sb_dcache_clean_inval(&cfg, sizeof(cfg));
@@ -721,6 +754,7 @@ static void stop_check(void)
         sb_log("heater: every worker core left the load");
         if (hw_m3_on())
             sb_log("heater: the M3 cluster still reads powered after the stop");
+        hw_m3_fp_log("heater: flexpmu after the stop");
         return;
     }
     if (late) {
@@ -996,7 +1030,7 @@ static void survival_show(void)
         kui_confirm(x ? "Survival heat, trip OFF (1 of 4)?" : "Survival heat (1 of 3)?",
                     "A LAST RESORT for a survival situation: the most heat this phone can make.",
                     "Every core and the GPU at the chip's top table steps, the screen at its brightest and the LED.",
-                    x ? "The chip's own heat power cut will be switched OFF." :
+                    x ? "The chip's own heat power cut will be switched OFF: flat out, no holding back, to your stop." :
                         "It holds the processor just below the chip's own power cut and runs to 2 % battery.",
                     x ? "Hold: 1 of 4" : "Hold: 1 of 3", survival_done);
         break;

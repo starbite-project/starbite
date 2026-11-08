@@ -20,6 +20,13 @@ want "$a" "S2MPB02 0x1D 0x90"
 want "$a" "settings: the LED at its rated currents (S2MPB02 over I2C): on"
 never "$a" "refused"
 never "$a" "FORBIDDEN"
+want "$a" "fled: 0x63 = 0x7F"
+FLED=r63zero
+d=$(run $ALARM $LED)
+want "$d" "settings: the LED at its rated currents (S2MPB02 over I2C): on"
+want "$d" "fled: 0x63 is not 0x7F: the chip's flash timer is not confirmed"
+never "$d" "refused"
+never "$d" "FORBIDDEN"
 FLED=noack
 b=$(run $ALARM $LED $LED $LED)
 want "$b" "fled: the first read failed: int_stat seen 0x00000401"

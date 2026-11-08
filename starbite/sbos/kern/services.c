@@ -59,7 +59,7 @@ void sos_timer(unsigned id)
     }
     if (sos_st == 1) {
         sos_phase = (int)(((now - sos_phase_t) / 250U) & 1U);
-        if (sos_led_on && led_full && fled_init()) {
+        if (sos_led_on && led_full && fled_flash_ok()) {   /* 1.1-beta2: else the torch strobes, as before */
             if (!sos_phase)
                 (void)fled_pulse();         /* 0.6.3: a 1250 mA flash pulse with the white phase, at most 1 a second */
         } else if (sos_led_on) {

@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.1-beta1"
+#define SBOS_VERSION "1.1-beta2"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -163,6 +163,8 @@ void heater_trip_restore_now(void); /* 1.1: before a restart or a power-off: the
 extern int led_full;                /* Settings > Alarm: 0 the pins only as before (default), 1 the rated currents */
 int fled_init(void);
 const char *fled_why(void);
+int fled_r63(void);                 /* 1.1-beta2: the last read of 0x63 (-1 none), no chip access */
+int fled_flash_ok(void);            /* 1.1-beta2: the chip answers and 0x63 = 0x7F (its flash timer confirmed) */
 int fled_code(void);                /* 1.0-rc3: 0 ok or untried, else the refusal (FLED_*), for Settings */
 void fled_retry(void);              /* 1.0-rc3: a refused chip is tried again at the next request */
 int fled_probe(void);               /* 1.0-rc3: the bring-up and the chip's reads only (no chip writes), logged */
@@ -381,6 +383,10 @@ void hw_irq_poll(void);             /* acknowledge what is pending (the loop, ev
 void hw_sleep_until(uint64_t at_ms);/* wfi (or a short delay in polling mode) until at_ms or an interrupt */
 void hw_arm_until(uint64_t at_ms);  /* the timer for an app frame's budget */
 void hw_wdt_feed(void);
+void hw_m3_core_on(unsigned w, int first);  /* 1.1-beta2: FlexPMU before an M3 worker's CPU_ON (first: cluster on) */
+void hw_m3_core_off(unsigned w, int last);  /* 1.1-beta2: FlexPMU before it leaves (last: cluster off) */
+void hw_m3_fp_log(const char *what);
+int heater_trip_off(void);          /* 1.1-beta2: the chip's trip is off by Survival's switch now */
 void hw_wdt_feed_heat(void);        /* 1.1: the heat loop's feed (the only one while the trip is off) */
 unsigned hw_wdt_short(unsigned secs);   /* 1.1: the loader's watchdog shortened (0: back); 0 = refused */
 int hw_dvfs(unsigned domain, uint32_t khz);   /* sb_acpm_dvfs_listed */

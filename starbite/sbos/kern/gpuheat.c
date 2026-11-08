@@ -137,7 +137,7 @@ int gpuheat_start(void)
     }
     struct sb_temps t;
     sb_temps_read(&t);
-    if (t.sub != 1 || !(t.trip_armed & 2)) {
+    if (t.sub != 1 || (!(t.trip_armed & 2) && !heater_trip_off())) {   /* 1.1-beta2: off by Survival's switch */
         fail("the GPU's hardware heat trip (TMU_SUB) is not armed");
         return 0;
     }

@@ -669,8 +669,9 @@ static void t_survival(void)
     sim_run(&c, &s, 0, 3 * 3600);
     printf("survival sim (trip off): %d s, %.1f W average, peak SoC %.1f C, ended: %s\n", s.secs,
            s.w_sum / (s.ticks ? s.ticks : 1), s.max_soc / 10.0, c.why);
-    CHECK(s.max_soc < 1310 && s.max_soc >= 1240, "trip off: held near 128 C, below the 131 C stop (peak %d)", s.max_soc);
-    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "2 %"), "trip off: ended at 2 %% (%s)", c.why);
+    CHECK(s.max_soc >= 1310 && s.max_soc < 1330, "trip off: flat out, no shedding, to the 131 C stop (peak %d)", s.max_soc);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "Survival stop"), "trip off: ended at the user's stop (%s)", c.why);
+    CHECK(s.gpu_flips == 0, "trip off: the GPU never shed (%d)", s.gpu_flips);
 
     /* the stops that stay */
     in = base_in(0);

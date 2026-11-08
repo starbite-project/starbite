@@ -831,7 +831,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_CURRENT_STOP: return !heat_no_current_stop;
         case SET_HEAT_SOC_STOP_C10: return heat_soc_stop_c10;
         case SET_HEAT_SURV_STOP_C10: return heat_surv_stop_c10;
-        case SET_LED_FULL: return led_full ? 1 : -fled_code();     /* 1.0-rc3: negative = why the chip was refused */
+        case SET_LED_FULL: return led_full ? (fled_flash_ok() ? 1 : 2) : -fled_code();     /* 1.0-rc3: negative = why the chip was refused */
         case SET_SAVED: return settings_persistent();
         case SET_AUTO_OFF_MIN: return (int64_t)auto_off_min;
         default: return SBOS_EINVAL;

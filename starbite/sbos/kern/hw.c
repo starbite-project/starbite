@@ -355,6 +355,69 @@ uint64_t hw_app_resume(struct aframe *f)
 }
 
 /* ---- heater workers --------------------------------------------------------------------------- */
+/* 1.1-beta2: Samsung's FlexPMU bookkeeping around an M3 core's CPU_ON / CPU_OFF (exynos-powermode.c,
+ * flexpmu_cal_cpu_exynos9810.h; the sbos-linux session's P2c, docs/STARBITE-OS-LINUX-M3.md 7). PSCI alone left the
+ * cluster powered after a stop (1.1-beta1 at 19:03: "the M3 cluster still reads powered", then core 4 never checked
+ * in at the next session). Core on: CPU_INFORM(phycpu) = 0, the core's bit cleared in GRP2_INTR_BID_ENABLE and
+ * PMU_EVENT_INTERRUPT_ENABLE_GRP2, the first core: MAILBOX_APM2AP bit 24 = 0. Core off (before the core's own
+ * CPU_OFF): CPU_INFORM = 1 (C2) and the bits set; the last core: CPU_INFORM = 2 (CPD) and bit 24 = 1. M3 core n
+ * (worker 4 + n) = bit n, phycpu 4 + n. Only cpu0 writes these (one decision at a time: no two cores race on the
+ * shared words); the A55 bits are never touched. */
+#define FP_INFORM(p) (0x14060860UL + 4U * (p))
+#define FP_GRP2_BID 0x14070200UL
+#define FP_EVT_GRP2 0x14067f08UL
+#define FP_MBOX 0x14100010UL
+static void fp_rmw(uintptr_t a, uint32_t clr, uint32_t set)
+{
+    volatile uint32_t *r = (volatile uint32_t *)a;
+    *r = (*r & ~clr) | set;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+void hw_m3_core_on(unsigned w, int first)
+{
+    if (w < 4 || w > 7)
+        return;
+    uint32_t b = 1U << (w - 4U);
+    if (first)
+        fp_rmw(FP_MBOX, 1U << 24, 0);
+    *(volatile uint32_t *)FP_INFORM(w) = 0;
+    fp_rmw(FP_GRP2_BID, b, 0);
+    fp_rmw(FP_EVT_GRP2, b, 0);
+}
+
+void hw_m3_core_off(unsigned w, int last)
+{
+    if (w < 4 || w > 7)
+        return;
+    uint32_t b = 1U << (w - 4U);
+    *(volatile uint32_t *)FP_INFORM(w) = last ? 2U : 1U;
+    fp_rmw(FP_GRP2_BID, 0, b);
+    fp_rmw(FP_EVT_GRP2, 0, b);
+    if (last)
+        fp_rmw(FP_MBOX, 0, 1U << 24);
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+void hw_m3_fp_log(const char *what)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, what);
+    ub_s(&u, ": M3 inform ");
+    for (unsigned p = 4; p < 8; ++p) {
+        ub_hex(&u, *(volatile uint32_t *)FP_INFORM(p), 1);
+        ub_c(&u, p < 7 ? '/' : ' ');
+    }
+    ub_s(&u, "grp2 ");
+    ub_hex(&u, *(volatile uint32_t *)FP_GRP2_BID, 8);
+    ub_s(&u, " evt ");
+    ub_hex(&u, *(volatile uint32_t *)FP_EVT_GRP2, 8);
+    ub_s(&u, " mbox ");
+    ub_hex(&u, *(volatile uint32_t *)FP_MBOX, 8);
+    ub_s(&u, sb_m3_on() ? ", cluster on" : ", cluster off");
+    sb_log(u.b);
+}
 int64_t hw_heat_launch(unsigned w, void *cfg)
 {
     return sb_smp_launch(w, heatk_worker, cfg);

@@ -88,8 +88,9 @@ static void show(void)
         ui_toggle(4, "LED strobes in the alarm", setting_get(SET_SOS_LED) == 1);
         ui_textline("The alarm flashes the screen white and red. With this on, the LED on the back strobes too.", 0);
         int lf = setting_get(SET_LED_FULL);
-        ui_toggle(8, "LED at rated power", lf == 1);
-        ui_textline(led_refused ? led_why(lf) :
+        ui_toggle(8, "LED at rated power", lf >= 1);
+        ui_textline(led_refused ? led_why(lf) : lf == 2 ?
+                    "The light at 240 mA. No 1250 mA flash pulses: the chip's flash timer is unconfirmed (logged)." :
                     "The light at 240 mA and, in the alarm, 1250 mA camera-flash pulses once a second (Samsung's values). Until a restart.",
                     led_refused ? 0xffff9f0aU : GREY);
         ui_textline("Sound and vibration: coming soon.", GREY);

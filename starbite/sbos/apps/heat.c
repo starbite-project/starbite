@@ -10,6 +10,7 @@ SBAPP_DEFINE("heat", "Heat", SBOS_P_HEAT, 0xffff9f0aU, 201);
 #define GREY 0xff8e8e93U
 
 static int visible;
+static int surv_tripoff;                    /* 1.1-beta2: Survival's "Hardware trip OFF" switch (until a restart) */
 /* 0.5.6: the battery's temperature during this heating session, every 10 s (the last 10 minutes) */
 static int16_t th[60];
 static int thn, was_on;
@@ -175,24 +176,29 @@ static void show(void)
         }
         ui_button(17, "Call / SOS reserve", f.b, 0);
         /* 1.1: the last resort (three confirmations; four with the chip's trip off) */
-        ui_button(23, "Survival heat", "Last resort: all the battery as heat. Asks 3 times.", 0);
         fmt_init(&f);
-        fmt_s(&f, "Chip's power cut OFF, stop ");
-        fmt_d(&f, h.surv_stop_c10 / 10);
-        fmt_s(&f, " \xc2\xb0" "C. Asks 4 times.");
-        ui_button(24, "Survival heat, trip OFF", f.b, 0);
-        fmt_init(&f);
-        fmt_s(&f, "Trip-off stop ");
-        fmt_d(&f, h.surv_stop_c10 / 10);
-        fmt_s(&f, " \xc2\xb0" "C (tap to change)");
-        ui_button(25, f.b, 0, 0);
+        if (surv_tripoff) {
+            fmt_s(&f, "Trip OFF: flat out to ");
+            fmt_d(&f, h.surv_stop_c10 / 10);
+            fmt_s(&f, " \xc2\xb0" "C. Asks 4 times.");
+        } else {
+            fmt_s(&f, "Last resort: all the battery as heat. Asks 3 times.");
+        }
+        ui_button(23, "Survival heat", f.b, 0);
+        ui_toggle(24, "Hardware trip OFF", surv_tripoff);
+        if (surv_tripoff) {
+            fmt_init(&f);
+            fmt_s(&f, "Stop at ");
+            fmt_d(&f, h.surv_stop_c10 / 10);
+            fmt_s(&f, " \xc2\xb0" "C (tap to change)");
+            ui_button(25, f.b, 0, 0);
+        }
     }
     if (on && h.level >= HEAT_SURVIVAL) {
         fmt_init(&f);
-        if (h.trip_off) {
-            fmt_s(&f, "SURVIVAL, THE CHIP'S POWER CUT OFF: holds below ");
-            fmt_d(&f, h.surv_target_c10 / 10);
-            fmt_s(&f, ", stops at ");
+        if (h.level == HEAT_SURVIVAL_X) {
+            fmt_s(&f, h.trip_off ? "SURVIVAL, THE CHIP'S POWER CUT OFF: flat out, stops at " :
+                                   "SURVIVAL (trip off asked): flat out, stops at ");
             fmt_d(&f, h.surv_stop_c10 / 10);
             fmt_s(&f, " \xc2\xb0" "C.");
         } else {
@@ -341,6 +347,11 @@ void app_event(const struct sbos_event *ev)
         heat_request(ev->value == 3 ? HEAT_EXTREME : ev->value == 2 ? HEAT_HIGH : ev->value == 1 ? HEAT_LOW : HEAT_OFF, 30);
         show();
         break;
+    case EV_APP_TOGGLE:
+        if (ev->id == 24)
+            surv_tripoff = ev->value != 0;  /* the four warnings come at the start */
+        show();
+        break;
     case EV_APP_HOLD:
         if (ev->id == 20)
             setting_set(SET_HEAT_CURRENT_STOP, 0);
@@ -357,9 +368,7 @@ void app_event(const struct sbos_event *ev)
         heat_status(&h);
         int running = h.state == HEAT_ST_RUNNING || h.state == HEAT_ST_HOLDING || h.state == HEAT_ST_PAUSED;
         if (ev->id == 23 && !running)
-            heat_request(HEAT_SURVIVAL, 0);
-        else if (ev->id == 24 && !running)
-            heat_request(HEAT_SURVIVAL_X, 0);
+            heat_request(surv_tripoff ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0);
         else if (ev->id == 25 && !running)
             setting_set(SET_HEAT_SURV_STOP_C10, h.surv_stop_c10 >= 1310 ? 1250 : h.surv_stop_c10 >= 1280 ? 1310 : 1280);
         else if (ev->id == 22 && !running) {

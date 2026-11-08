@@ -344,6 +344,23 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         /* Survival (1.1): as much load as the chip takes just below its own power cut, the battery's current and
          * its voltage. Shed at once (one load per 250 ms tick, two when 2 C over): the M3 cores first, then the
          * A55s, the GPU last; add again (one a second) only 2 C below the target, the GPU after every core */
+        if (c->level == HEAT_SURVIVAL_X) {
+            /* 1.1-beta2 (the user's spec): the hardware trip off = no shedding at all: every core and the GPU,
+             * one core more a second, flat out until the user's SoC stop (above) or a stop that stays */
+            if (now - c->t_step >= L->step_ms && c->cores < c->max_cores && !(c->cold && c->cores >= 3)) {
+                c->cores++;
+                c->t_step = now;
+            }
+            if (c->cold && now - c->t_start >= 30000U) {
+                c->cold = 0;
+                c->a55_khz = flat_a55(c);
+            }
+            c->gpu_want = 1;
+            c->m3_khz = c->cores > 3 ? flat_m3(c) : 0;
+            c->state = HEAT_ST_RUNNING;
+            why(c, "Survival, trip OFF: flat out to your stop");
+            return;
+        }
         int target = heat_surv_target(c);
         int hot = in->soc_ok && in->soc_c10 >= target;
         int very = in->soc_ok && in->soc_c10 >= target + 20;

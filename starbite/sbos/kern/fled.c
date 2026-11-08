@@ -148,6 +148,12 @@ static void log_ctrl(const char *when)
 
 static int code;
 static int probe_only;                      /* fled_probe: no chip writes */
+/* 1.1-beta2: register 0x63 (reserved, no datasheet). Samsung's only use: its factory continuous-flash test writes
+ * 0x5F ("continuous flash on") and afterwards 0x7F. The phone's first probe (T23, 18:53, after a cold boot) read
+ * 0x00. Bit 5 is the bit that differs in Samsung's pair, and it is clear in 0x00 too, so with anything but 0x7F the
+ * chip's own flash timer (the 125 ms hardware end of a 1250 mA pulse) is not confirmed: the chip is used for the
+ * torch (pin-driven, continuous by nature, 0x63 does not matter) and the flash pulses stay off. Never written. */
+static int r63_val = -1;
 
 static void refuse(int c, const char *w)
 {
@@ -197,6 +203,7 @@ int fled_init(void)
     sb_i2c_bus(&bus);
     log_ctrl("after the bring-up");
     uint8_t id = 0, c1 = 0, cur = 0, tim = 0, r63 = 0;
+    r63_val = -1;
     int ok = reg_rd(R_BST2, &id);
     if (!ok) {
         struct ub u;
@@ -228,6 +235,12 @@ int fled_init(void)
     ub_s(&u, " 0x63 ");
     ub_hex(&u, r63, 2);
     sb_log(u.b);
+    if (ok) {
+        r63_val = r63;
+        sb_log(r63 == 0x7fU ? "fled: 0x63 = 0x7F (Samsung's value after its continuous-flash test): flash pulses allowed" :
+                              "fled: 0x63 is not 0x7F: the chip's flash timer is not confirmed: the torch only, no 1250 mA "
+                              "flash pulses (0x63 never written)");
+    }
     if (!ok) {
         /* NODEV (INT_STAT bit 10 / TRANS_STATUS bits 3:2): the bus ran and nobody acknowledged 0x59 (the chip's power
          * or address); no transfer-done and no error at all: the controller never clocked (its IP clock) */
@@ -239,8 +252,6 @@ int fled_init(void)
             refuse(FLED_NOANSWER, "the LED chip does not answer on I2C");
     } else if (id != 0x90U) {
         refuse(FLED_NOTCHIP, "the LED chip is not the expected S2MPB02 (0x1D)");
-    } else if (r63 != 0x7fU) {
-        refuse(FLED_R63, "the LED chip's register 0x63 is not its default (a continuous flash mode?)");
     } else if (probe_only) {
         st = 0, code = 0, why = "probe only";
         sb_log("fled: probe: the S2MPB02 answers as expected (nothing written to it)");
@@ -253,6 +264,16 @@ int fled_init(void)
     if (st < 0)
         sb_logf("fled: refused: ", why);
     return st > 0;
+}
+
+int fled_r63(void)
+{
+    return r63_val;                         /* the last read of 0x63 (-1 none); no chip access */
+}
+
+int fled_flash_ok(void)
+{
+    return fled_init() && r63_val == 0x7f;
 }
 
 int fled_code(void)
@@ -296,7 +317,7 @@ int fled_torch_max(void)
 int fled_pulse(void)
 {
     uint64_t now = sb_ms();
-    if (!fled_init() || torch_on() || now - last_pulse < 1000U)
+    if (!fled_flash_ok() || torch_on() || now - last_pulse < 1000U)
         return 0;
     static int set;
     if (!set) {

@@ -190,7 +190,8 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
        SET_HEAT_CURRENT_STOP = 14 /* 0.6.2: Manual's 3.5 A battery-current stop: 1 on (default), 0 off; until a restart */,
        SET_HEAT_SOC_STOP_C10 = 15 /* 0.6.3: Manual's SoC stop, 0.1 C: 0 off (default) or 700..1250 */,
        SET_LED_FULL = 16 /* 0.6.3: the LED at its rated currents over I2C (torch 240 mA, SOS flash pulses 1250 mA);
-                            1.0-rc3: reads 1 on, 0 off, negative = why the chip was refused (kern.h FLED_*) */,
+                            1.0-rc3: reads 1 on, 0 off, negative = why the chip was refused (kern.h FLED_*);
+                            1.1-beta2: 2 on for the torch only (the flash pulses off: the chip's flash timer unconfirmed) */,
        SET_PANEL_DUMP = 17 /* 0.6.5: write 1: read the panel's registers (read only, logged) */,
        SET_HEAT_RESERVE_ONCE = 18 /* 1.0-rc2: write 1: the next full-heat session runs without the reserve (once) */,
        SET_HEAT_SURV_STOP_C10 = 19 /* 1.1: Survival (trip off)'s SoC stop, 0.1 C: 1250..1310 (default 1310) */ };

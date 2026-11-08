@@ -261,7 +261,7 @@ int sb_i2c_read(struct sb_i2c *b, unsigned addr, uint8_t reg, uint8_t *data, uns
             sb_i2c_fail_trans = !strcmp(f, "noack") ? 0x4U : 0x20000U;
             return 0;
         }
-        *data = s2mpb02[reg];
+        *data = f && !strcmp(f, "r63zero") && reg == 0x63 ? 0 : s2mpb02[reg];    /* T23's cold-boot 0x00 */
         return 1;
     }
     return 0;

@@ -174,7 +174,8 @@ void selftest_timer(unsigned id)
 #ifdef SBOS_SELFTEST_LED
         sb_log("selftest: LED probe only: the S2MPB02's bus (USI10) and its reads; nothing written to the chip, no heat");
         if (fled_probe()) {
-            sb_log("selftest: passed: LED probe: the chip answers");
+            sb_log(fled_r63() == 0x7f ? "selftest: passed: LED probe: the chip answers, flash pulses allowed" :
+                                     "selftest: passed: LED probe: the chip answers (torch; flash pulses off: 0x63)");
         } else {
             sb_logf("selftest: FAILED: LED probe: ", fled_why());
         }
