@@ -81,6 +81,7 @@ SD_ROOT_TAIL_BLOCKS = cardlayout.TAIL_SECTORS // cardlayout.BLOCK_SECTORS   # 16
 SET_SD_STORE = 1                          # settings flags: read the card's store at boot
 SF_VOLATILE = 1                           # directory flags: written in place by the loader, no CRC check
 CRASHLOG = 'crashlog'
+VOLATILE_KNOWN = (CRASHLOG, 'sbos-state')   # entries written in place by the loader / Starbite OS
 CL_BLOCK, CL_SLOTS = 4096, 15
 CL_BYTES = CL_BLOCK * (1 + CL_SLOTS)
 WDT_FEEDS = {'none': 0, 'kernel': 1, 'userspace': 2, 'own': 3, 'xnu': 4}
@@ -302,7 +303,7 @@ def build(a):
             for f in sorted(src.iterdir()):
                 if f.is_file():
                     items.setdefault(f.name, (guess_type(f.name), f.read_bytes()))
-                    if f.name == CRASHLOG:
+                    if f.name in VOLATILE_KNOWN:
                         vol.add(f.name)
         else:
             for name, typ, blob, fl in read_store(src, with_flags=True):
@@ -312,6 +313,9 @@ def build(a):
     for name in a.omit:
         if items.pop(name, None) is None:
             sys.exit(f'--omit {name}: no such entry')
+        if name in vol:
+            print(f'warning: --omit {name}: a volatile entry (written in place on the phone): its contents are lost')
+            vol.discard(name)
     for arg in a.files:
         name, _, rest = arg.partition('=')
         path, _, typ = rest.partition(':')
@@ -326,6 +330,21 @@ def build(a):
     elif a.no_crashlog:
         items.pop(CRASHLOG, None)
         vol.discard(CRASHLOG)
+    # --volatile NAME=BYTES: an entry an OS writes in place (Starbite OS's "sbos-state", docs/STARBITE-OS.md 6.5);
+    # zeros when new, an imported one keeps its bytes (its size must match)
+    for arg in a.volatile:
+        name, _, size = arg.partition('=')
+        try:
+            size = int(size, 0)
+        except ValueError:
+            sys.exit(f'--volatile {arg}: NAME=BYTES')
+        if not name or size <= 0 or size % BLOCK or size > 64 * 1048576:
+            sys.exit(f'--volatile {arg}: a whole number of 4 KiB blocks, at most 64 MiB')
+        if name in items and len(items[name][1]) != size:
+            sys.exit(f'--volatile {name}: the imported entry is {len(items[name][1])} bytes, not {size}')
+        if name not in items:
+            items[name] = (TYPES['data'], bytes(size))
+        vol.add(name)
     if len(items) > MAX_ENTRIES:
         sys.exit('too many entries')
     dirb, v1, data = bytearray(DIR_BLOCKS * BLOCK), bytearray(BLOCK), bytearray()
@@ -622,6 +641,8 @@ def main():
     b.add_argument('--omit', action='append', default=[], metavar='NAME', help='leave an imported entry out')
     b.add_argument('--crashlog', action='store_true', help='add the crash log entry (automatic with --medium ufs)')
     b.add_argument('--no-crashlog', dest='no_crashlog', action='store_true', help='no crash log entry')
+    b.add_argument('--volatile', action='append', default=[], metavar='NAME=BYTES',
+                   help='an entry written in place by an OS (zeros when new; kept on --import), e.g. sbos-state=1048576')
     b.add_argument('files', nargs='*')
     l = sub.add_parser('list')
     l.add_argument('img')
