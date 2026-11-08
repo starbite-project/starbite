@@ -85,6 +85,12 @@ unsigned hw_wdt_short(unsigned secs)
     printf(secs ? "host: watchdog shortened to %u s (fed by the heat loop only)\n" : "host: watchdog back to the loader's%.0u\n", secs);
     return secs ? secs * 1000U : 1U;
 }
+/* 1.2-alpha1: the Linux self-test image's own watchdog */
+unsigned hw_wdt_selftest(unsigned secs)
+{
+    printf("host: watchdog %u s for the self test (fed by the loop)\n", secs);
+    return secs;
+}
 void hw_wdt_feed_heat(void)
 {
     uint64_t now = sb_ms();

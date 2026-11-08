@@ -444,6 +444,14 @@ static void surv_bat_done(int ok)
     app_event_send(app_by_id("heat"), EV_APP_SERVICE, 1, 0);
 }
 
+/* 1.2-alpha1: the Linux test's confirmation */
+static void linux_done(int ok)
+{
+    kui_linux_on = ok ? 1 : 0;
+    sb_log(ok ? "settings: Linux apps: on (confirmed; the home tile until a restart)" : "settings: Linux apps: not turned on");
+    app_event_send(app_by_id("settings"), EV_APP_SERVICE, 1, 0);
+}
+
 /* SYS_SETTING_SET for the app in front: 0 done */
 static int64_t setting_set_k(uint64_t id, uint64_t v)
 {
@@ -511,6 +519,25 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         return 0;
     case SET_OCP_PROBE:
         return heater_ocp_probe();
+    case SET_LINUX:
+        if (!arg[1]) {
+            kui_linux_on = 0;
+            if (guest_stop() == 0)
+                sb_log("settings: Linux apps: off; Linux stopped");
+            else
+                sb_log("settings: Linux apps: off");
+            return 0;
+        }
+        if (kui_linux_on)
+            return 0;
+        if (!guest_available())
+            return SBOS_EAGAIN;             /* the three store files are missing */
+        kui_confirm("Linux apps (test)?",
+                    "Linux 7.1 runs on the four big cores, shown full screen; touch and keys go to it.",
+                    "A test: it uses more battery, and Heat cannot run while it does (both use the big cores).",
+                    "Hold Bixby to leave it; it stops 60 s later. Off again at the next start.",
+                    "Hold to turn on", linux_done);
+        return 0;
     case SET_PANEL_DUMP:
         return panel_dump() ? 0 : SBOS_EAGAIN;
     case SET_LED_FULL:
@@ -865,6 +892,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_SURV_STOP_C10: return heat_surv_stop_c10;
         case SET_HEAT_SURV_BAT_C10: return heat_surv_bat_c10;
         case SET_OCP_PROBE: return heater_ocp_state;
+        case SET_LINUX: return kui_linux_on ? 1 : guest_available() ? 0 : -1;
         case SET_LED_FULL: return led_full ? (fled_flash_ok() ? 1 : 2) : -fled_code();     /* 1.0-rc3: negative = why the chip was refused */
         case SET_SAVED: return settings_persistent();
         case SET_AUTO_OFF_MIN: return (int64_t)auto_off_min;

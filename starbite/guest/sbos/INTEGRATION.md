@@ -1,5 +1,20 @@
 # P3: wiring the guest service into Starbite OS (for the starbite-os session)
 
+**Status (2026-11-08, starbite-os session): wired in as Starbite OS 1.2-alpha1 on claude/starbite-os-05b163**
+(docs/STARBITE-OS.md 12.22). Steps 1-9 and 11 as written, with these differences:
+- `guest.c` loads through a bounce window, not `sbg_load_placed`. `store_load` reads into libsb's non-cacheable
+  RAM-test window below 4 GiB (0xa020_0000..0xa7f0_0000), then `sbg_load` word-copies into the carve-out (the P2
+  path). UFS DMA above 4 GiB has not run on the phone yet.
+- New in `guest.c`:
+  - a `GUEST_QEMU` profile: `sbsim/kern-shim.c`, `run-qemu.sh kern` (PASS);
+  - a host fake under `SB_HOST`;
+  - `guest_selftest_step` (the P3a sequence, shared by the phone's `starbite-os-guesttest.img` and QEMU);
+  - `guest_init` only in interrupt mode;
+  - `MSG_FOCUS 1` at HELLO when the view is already shown;
+  - `heater_m3_busy` in place of `heater_busy`.
+- Step 10 (the M3 clock) is deferred: the guest stays at the boot step.
+- The Linux tile is off by default: Settings > About > "Linux apps (test)" asks first and lasts until a restart.
+
 `guest.c` / `guest.h` here are a drop-in for `starbite/sbos/kern/`, built on `starbite/guest/host/sbghost.c`, the
 core the phone payloads P2..P2d ran. That is Linux 7.1 on all four M3 cores with the app, touch, the stop and the
 cluster off (P2c, 2026-11-08 22:48). They compile clean (`-Wall -Wextra -Werror`, Starbite's flags) against

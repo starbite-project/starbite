@@ -39,3 +39,14 @@ int guest_key(unsigned linux_code, int down);
 /* services.c */
 void guest_screen(int on);                 /* the screen state machine */
 void guest_power_off(void);                /* before a switch-off / restart: stop, wait up to 1 s */
+
+/* 1.2-alpha1 (starbite-os): the unattended check, shared by the phone's self-test image (uitest.c) and the QEMU
+ * run of this file (starbite/guest/sbsim/kern-shim.c). Call about every 100 ms: 0 still running, 1 passed,
+ * -1 failed (logged). Two cycles: start shown, a tap that must land in the app's pixels, hidden, stop, the
+ * cluster off; then a second start in the background and stop (the restart after a real cluster-off). */
+struct guest_st_ops {
+    void (*open)(void);                     /* the Linux view: guest_start() + the view shown */
+    void (*home)(void);                     /* back home: the view hidden (the guest keeps running) */
+    const uint32_t *(*panel)(void);         /* the composed frame (UI_W x UI_H), for the tap's pixel */
+};
+int guest_selftest_step(const struct guest_st_ops *o);

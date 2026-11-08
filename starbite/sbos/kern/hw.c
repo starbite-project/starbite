@@ -54,13 +54,21 @@ int hw_spi(unsigned intid, int on)
         return 1;
     }
     uintptr_t cfg = GICD + 0xc00 + 4 * (intid / 16);
-    wr(cfg, rd(cfg) & ~(2U << (2 * (intid % 16))));       /* ICFGR: level-sensitive */
-    uintptr_t tg = GICD + 0x800 + (intid & ~3U);
-    unsigned sh = 8 * (intid & 3U);
+    uint32_t edge = 2U << (2 * (intid % 16));
+    if (rd(cfg) & edge) {
+        /* 1.2: ICFGR is a 16-line word the guest kernel may also write: changed only while Linux is off */
+        if (guest_state() != GUEST_OFF) {
+            sb_logx("irq: ICFGR not changed while Linux runs (polling only), INTID ", intid);
+            return 0;
+        }
+        wr(cfg, rd(cfg) & ~edge);                         /* ICFGR: level-sensitive */
+    }
     uint32_t me = rd(GICD + 0x800) & 0xffU;                /* ITARGETSR0 byte 0: this CPU interface's own bit */
     if (!me)
         me = 1;
-    wr(tg, (rd(tg) & ~(0xffU << sh)) | (me << sh));        /* ITARGETSR: this cpu */
+    /* ITARGETSR: this cpu, a byte store (1.2: the guest kernel routes its own lines with byte stores into the same
+     * words; GIC-400 allows byte access to ITARGETSR) */
+    *(volatile uint8_t *)(GICD + 0x800 + intid) = (uint8_t)me;
     spi_on = intid;
     wr(GICD + 0x100 + 4 * (intid / 32), bit);             /* ISENABLER */
     if (!(rd(GICD + 0x100 + 4 * (intid / 32)) & bit)) {    /* not taken (a secure-group line?): polling only */
@@ -84,6 +92,8 @@ static unsigned irq_drain(void)
             K.timer_irqs++;
         } else if (id == spi_on && id) {
             wifi_irq();                     /* the radio (SPI 253): the chip masked, the tick run at once */
+        } else if (id == guest_db_host()) {
+            guest_irq();                    /* 1.2: the guest's doorbell (INTID 510, edge): its ring has something */
         } else {
             /* nothing else is enabled: a stray from before the reset; disable it again */
             if (id >= 16)
@@ -295,6 +305,26 @@ unsigned hw_wdt_short(unsigned secs)
     w[2] = (uint32_t)c;
     wdt_heat_only = 1;
     return (unsigned)(c * 1000U / per_s);
+}
+
+/* 1.2-alpha1: a self-test image's own watchdog (cluster 1): armed at secs by libsb when the loader left none (a
+ * no_launch entry gets no loader watchdog), else the loader's reload set to secs. The main loop's hw_wdt_feed feeds
+ * it either way: a stalled loop resets the SoC after secs. Returns the seconds, 0 refused. */
+unsigned hw_wdt_selftest(unsigned secs)
+{
+    volatile uint32_t *w = (volatile uint32_t *)WDT1;
+    uint32_t con = w[0];
+    uint32_t dis = *(volatile uint32_t *)0x14060408UL, mask = *(volatile uint32_t *)0x1406040CUL;
+    if ((con & 0x21U) != 0x21U || ((dis | mask) & (1U << 23)))
+        return sb_wdt_arm(secs);
+    uint32_t pre = ((con >> 8) & 0xffU) + 1U, div = 16U << ((con >> 3) & 3U);
+    uint64_t c = (uint64_t)26000000U / (pre * div) * secs;
+    if (!c || c > 0xffffU)
+        return 0;
+    w[1] = (uint32_t)c;
+    w[2] = (uint32_t)c;
+    sb_logx("watchdog: the loader's, reload set for seconds ", secs);
+    return secs;
 }
 
 int hw_dvfs(unsigned domain, uint32_t khz)

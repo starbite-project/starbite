@@ -849,6 +849,42 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.22 Version 1.2-alpha1: Linux apps on the M3 cluster (2026-11-08)
+
+The sbos-linux session's P3 kit (starbite/guest/sbos, docs/STARBITE-OS-LINUX-M3.md; Linux 7.1 proven on all four M3
+cores on the phone, P2d 3/3 cycles) wired into the kernel, following INTEGRATION.md's 11 steps:
+- **The service**: `guest.c` (built from starbite/guest/sbos with sbghost.c; timer owner `KT_GUEST`; `guest_init`
+  after `hw_irq_init`, only in interrupt mode; `irq_drain` passes INTID 510 to `guest_irq`; `hw_spi` writes ITARGETSR
+  with a byte store and changes ICFGR only while Linux is off (otherwise that line stays polled).
+- **The load**: the three store entries (`guest-linux.img`, `.dtb`, `-rd.img`) are read with `store_load` (CRC
+  checked) into libsb's non-cacheable RAM-test window below 4 GiB (0xa020_0000.., unused by Starbite OS; the
+  trampolines at 0xa010_0000 stay apart), then word-copied into the carve-out by `sbg_load`, the copy path P2..P2d
+  ran. UFS DMA straight into the high bank (the kit's `sbg_load_placed`) never ran on the phone; a 32-bit truncation
+  of its PRDT address would land on 0x8000_0000, so alpha1 does not use it. `guest_start` only checks and claims the
+  big cores; the load runs at the guest timer's first tick, after the tile's "Starting Linux…" page is drawn (UFS
+  speed unmeasured: about 28 MiB, logged "read in N ms, copied in M ms").
+- **Off by default, behind a confirmation**: Settings > About > "Linux apps (test)" (`SET_LINUX` 22) asks first
+  (`kui_confirm`) and lasts until a restart (never saved); only then the home tile "Linux" (when the three store
+  files exist). The view: the guest's 720 x 1440 surface at 2x between 40 px bars, presented whole on each new frame;
+  touches go to the guest (a press on the bars is Starbite's: the bottom bar is home), Volume as KEY_VOLUMEUP /
+  DOWN, short Bixby as KEY_BACK, held Bixby home. Leaving the view (home, the power menu, SOS, the screen off) hides it
+  (`MSG_FOCUS 0`); 60 s hidden or with the screen off stops Linux. Restart / power-off stop it first (up to 1 s).
+- **Exclusion**: Linux and the heater never run together (both own the four M3 cores): `heater_request` and the
+  heater's start refuse while `guest_owns_m3()` ("Close Linux first"), so does the OCP probe; `guest_start`
+  refuses while `heater_m3_busy()` (a session, its confirmation, a stop in progress, or an M3 worker / probe still
+  on a big core). After Linux powered the cluster down the heater runs the vendor PMU defaults again
+  (`heater_m3_released`).
+- **FlexPMU, still one implementation**: the guest's `m3_prep` = `hw_m3_fp_reset` + `hw_m3_prep` +
+  `hw_m3_core_on(4, 1)`, libsb's `sb_m3_fp_*` as the heater uses; the guest kernel does the rest (its last core asks
+  for the cluster-off itself, P2c / P2d).
+- **Not in alpha1**: the M3 clock for the guest (INTEGRATION.md step 10: it stays at the boot step, 1066 MHz in P2d).
+- **Checks**: host (`host/sbos-linux-test.sh` on guest.c's host fake: the confirmation, the tile, the view, the
+  tap at 2x, held Bixby, the 60 s stop, both refusals, missing files, a failed start, and `guest_selftest_step`'s two
+  cycles); QEMU (`starbite/guest/run-qemu.sh kern`: the same guest.c built `-DGUEST_QEMU` under
+  `sbsim/kern-shim.c` boots the S9's Linux 7.1 Image on CPUs 4..7 and runs the phone self test's
+  `guest_selftest_step`); the phone: `starbite-os-guesttest.img` (P3a, unattended: its own 30 s watchdog fed by the
+  loop, two cycles, then a restart into recovery).
+
 ### 12.21 Version 1.1-beta1 / beta2: Survival heat; the LED chip's 0x63 (2026-11-08)
 
 beta7: master merged (libsb `ocp.c`, `wdt.c`, `sb_acpm_dvfs_step`; the FlexPMU steps once, in `smp.c`'s public

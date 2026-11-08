@@ -110,6 +110,11 @@ static void show(void)
         ui_button(11, "Read the big cores' power limits", op == 1 ? "Readable: in the log (read only)" :
                   op == -1 ? "Not readable here (logged): 4 x 1794 MHz stays the limit" :
                   op == -2 ? "Did not complete (logged)" : "For faster big cores later: one core, read only, logged", 0);
+        int lx = setting_get(SET_LINUX);        /* 1.2-alpha1 */
+        ui_toggle(12, "Linux apps (test)", lx == 1);
+        ui_textline(lx < 0 ? "The Linux files are not on this phone." :
+                    lx == 1 ? "On until a restart: the Linux tile is on the home screen." :
+                    "Linux on the four big cores, for apps. Asks first; off at every start.", GREY);
     }
     ui_textline(setting_get(SET_SAVED) == 1 ? "Saved on this phone." : "Settings last until a restart (no save slot yet).", GREY);
     ui_end();
@@ -119,7 +124,7 @@ void app_event(const struct sbos_event *ev)
 {
     if (ev->type == EV_APP_START) {
         ui_tile("Display, alarm, about");
-    } else if (ev->type == EV_APP_SHOW) {
+    } else if (ev->type == EV_APP_SHOW || ev->type == EV_APP_SERVICE) {
         show();
     } else if (ev->type == EV_APP_BUTTON && ev->id == 11) {
         (void)setting_set(SET_OCP_PROBE, 1);
@@ -129,7 +134,7 @@ void app_event(const struct sbos_event *ev)
         show();
     } else if (ev->type == EV_APP_TOGGLE) {
         int id = ev->id == 2 ? SET_PANEL_SAVE : ev->id == 3 ? SET_PANEL_OFF : ev->id == 4 ? SET_SOS_LED :
-                 ev->id == 5 ? SET_GPU_HEAT : ev->id == 8 ? SET_LED_FULL : 0;
+                 ev->id == 5 ? SET_GPU_HEAT : ev->id == 8 ? SET_LED_FULL : ev->id == 12 ? SET_LINUX : 0;
         if (id) {
             int r = setting_set(id, ev->value);
             if (id == SET_LED_FULL)

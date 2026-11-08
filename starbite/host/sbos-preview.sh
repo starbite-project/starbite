@@ -24,7 +24,7 @@ done
 V="limactl shell --workdir $root starbite"
 $V python3 starbite/tools/mkassets.py "$SB7" "$out/libsb-assets.sb7" >/dev/null
 $V python3 starbite/sbos/tools/mergeassets.py "$out/sbassets.sb7" "$out/libsb-assets.sb7" "$EXTRA" >/dev/null
-CF="-O1 -g -DSB_HOST -DSB_HOST_UTILITY -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I$lib -I$k -I$sdk -I$root/starbite/utility -I$root/starbite/engineer -I$root/starbite/wifi"
+CF="-O1 -g -DSB_HOST -DSB_HOST_UTILITY -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I$lib -I$k -I$sdk -I$root/starbite/utility -I$root/starbite/engineer -I$root/starbite/wifi -I$root/starbite/guest/sbos"
 aobjs=""
 for a in emergency light heat sos info clock battery settings wifi; do
     $V gcc $CF -c -Dapp_event=${a}_app_event -Dsbapp_header=${a}_header -o "$out/app_$a.o" "$apps/$a.c"
@@ -36,7 +36,7 @@ $V gcc $CF -DSBOS_KERNEL "-DSB_ASSETS=\"$out/sbassets.sb7\"" -o "$out/sbos-host"
     "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" \
     "$lib/dvfs_levels.c" "$lib/assets.S" \
     "$k/main.c" "$k/timer.c" "$k/appfmt.c" "$k/state.c" "$k/batmodel.c" "$k/heatctl.c" "$k/heater.c" "$k/heatk.c" \
-    "$k/services.c" "$k/input.c" "$k/ui.c" "$k/app.c" "$k/torch.c" "$k/panel.c" "$k/gpuheat.c" "$k/uitest.c" "$k/settings.c" "$k/slot.c" "$k/wifi.c" "$k/look.c" "$k/fled.c" "$k/audio.c" \
+    "$k/services.c" "$k/input.c" "$k/ui.c" "$k/app.c" "$k/torch.c" "$k/panel.c" "$k/gpuheat.c" "$k/uitest.c" "$k/settings.c" "$k/slot.c" "$k/wifi.c" "$k/look.c" "$k/fled.c" "$k/audio.c" "$root/starbite/guest/sbos/guest.c" \
     "$root/starbite/wifi/core.c" "$root/starbite/wifi/exynos_pcie.c" "$root/starbite/wifi/chip.c" "$root/starbite/wifi/fw.c" \
     "$root/starbite/wifi/ring.c" "$root/starbite/wifi/msgbuf.c" "$root/starbite/wifi/link.c" "$root/starbite/wifi/wpa.c" \
     "$root/starbite/wifi/net.c" "$root/starbite/wifi/host/model.c" "$root/starbite/wifi/host/model_ap.c" "$root/starbite/utility/tz.c" $aobjs -lm -lpthread

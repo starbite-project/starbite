@@ -43,6 +43,9 @@ static void dispatch_timer(unsigned owner, unsigned id)
     case KT_STATE:
         settings_timer(id);
         break;
+    case KT_GUEST:
+        guest_timer(id);                    /* 1.2: Linux on the M3 cluster */
+        break;
     case KT_SELFTEST:
         selftest_timer(id);
         break;
@@ -142,6 +145,7 @@ void sb_main(void)
     boot_ms = sb_ms();
     K.deadman_t0 = boot_ms;
     hw_irq_init();
+    guest_init();                           /* 1.2: the guest's doorbell (INTID 510) routed here; nothing runs yet */
     if (!sb_touch_start())
         sb_log("sbos: no touch");
     input_init();

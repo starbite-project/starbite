@@ -183,6 +183,27 @@ int heater_busy(void)
     return heater_running_ui() || ctl.state == HEAT_ST_CONFIRM;
 }
 
+/* 1.2: the guest (Linux on the M3 cluster) and the heater exclude each other: both own the four big cores */
+int heater_m3_busy(void)
+{
+    if (heater_busy() || stopping)
+        return 1;
+    for (unsigned w = 4; w < 8; ++w)
+        if (running[w] || cs[w].st == CS_LAUNCHED)
+            return 1;
+    return 0;
+}
+
+int heater_guest_refuses(void)
+{
+    return guest_owns_m3();
+}
+
+void heater_m3_released(void)
+{
+    m3_prepped = 0;                         /* the guest's last core powered the cluster down (CPD): defaults again */
+}
+
 int heater_running_ui(void)
 {
     return ctl.state == HEAT_ST_RUNNING || ctl.state == HEAT_ST_HOLDING || ctl.state == HEAT_ST_PAUSED;
@@ -353,6 +374,10 @@ int heater_ocp_probe(void)
 {
     if (heater_busy() || stopping)
         return SBOS_EAGAIN;
+    if (heater_guest_refuses()) {
+        sb_log("ocp probe: refused: Linux has the big cores");
+        return SBOS_EAGAIN;
+    }
     for (unsigned w = 1; w < 8; ++w)
         if (running[w] || cs[w].st == CS_LAUNCHED)
             return SBOS_EAGAIN;
@@ -1066,6 +1091,12 @@ static void start_now(void)
         sb_log("heater: refused at the start: Wi-Fi is on");
         return;
     }
+    if (heater_guest_refuses()) {           /* 1.2: Linux came on while the confirmation was up (it cannot: belt) */
+        sb_strcpy(ctl.why, sizeof(ctl.why), "Close Linux first (it runs on the big cores)");
+        ctl.state = HEAT_ST_REFUSED;
+        sb_log("heater: refused at the start: Linux has the big cores");
+        return;
+    }
     struct heat_in in;
     read_inputs(&in);
     sb_mdelay(5);
@@ -1335,6 +1366,13 @@ int heater_request(int level, int minutes)
         sb_strcpy(ctl.why, sizeof(ctl.why), "Turn Wi-Fi off first (0.4: not both at once)");
         ctl.state = HEAT_ST_REFUSED;
         sb_log("heater: refused: Wi-Fi is on");
+        return SBOS_EAGAIN;
+    }
+    if (heater_guest_refuses() && !heater_running_ui()) {
+        /* 1.2: Linux runs on the four big cores: never both (Survival included) */
+        sb_strcpy(ctl.why, sizeof(ctl.why), "Close Linux first (it runs on the big cores)");
+        ctl.state = HEAT_ST_REFUSED;
+        sb_log("heater: refused: Linux has the big cores");
         return SBOS_EAGAIN;
     }
     if (heater_running_ui() && (level >= HEAT_EXTREME || ctl.level >= HEAT_EXTREME) && level != ctl.level) {

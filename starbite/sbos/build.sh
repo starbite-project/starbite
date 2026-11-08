@@ -57,7 +57,7 @@ fi
 
 CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie -fvisibility=hidden \
 -nostdlib -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-plt -mstrict-align -mcpu=cortex-a55 \
--fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$here/kern -I$here/sdk -I$ut -I$root/starbite/wifi"
+-fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$here/kern -I$here/sdk -I$ut -I$root/starbite/wifi -I$root/starbite/guest/sbos"
 V80FLAGS=$(echo "$CFLAGS" | sed 's/-mcpu=cortex-a55/-march=armv8-a+simd -mtune=cortex-a55/')
 LDFLAGS="-pie --no-dynamic-linker -z text -z norelro -z noexecstack --build-id=none --no-warn-rwx-segments --hash-style=gnu"
 
@@ -98,7 +98,8 @@ v80objs=""
 wifi="$root/starbite/wifi"
 for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$ut/exfat.c" \
            "$wifi/core.c" "$wifi/exynos_pcie.c" "$wifi/chip.c" "$wifi/fw.c" "$wifi/ring.c" "$wifi/msgbuf.c" "$wifi/link.c" \
-           "$wifi/wpa.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c"; do
+           "$wifi/wpa.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" \
+           "$root/starbite/guest/sbos/guest.c" "$root/starbite/guest/host/sbghost.c"; do
     obj="$ob/k_$(basename "$src" | tr . _).o"
     flags=$CFLAGS
     case " smp.c heatk.c ocp.c " in
@@ -115,6 +116,9 @@ stobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_on.o#")
 # 1.0-rc3: the LED-probe variant (only fled_probe, then a restart: the S2MPB02's first look on the phone)
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_LED "$here/kern/uitest.c" -o "$ob/k_uitest_led.o"
 ledobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_led.o#")
+# 1.2-alpha1: the Linux variant (P3a: the guest started, shown, tapped, stopped twice; then TWRP)
+"${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_GUEST "$here/kern/uitest.c" -o "$ob/k_uitest_guest.o"
+gstobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_guest.o#")
 if [ "$stobjs" = "$objs" ]; then
     echo "sbos: the self-test variant did not get k_uitest_on.o" >&2
     exit 1
@@ -168,12 +172,17 @@ relocs_only_relative "$out/starbite-os-ledprobe.elf"
 "${CROSS}objcopy" -O binary "$out/starbite-os-ledprobe.elf" "$out/starbite-os-ledprobe.bin"
 "${CROSS}nm" "$out/starbite-os-ledprobe.elf" | sort > "$out/starbite-os-ledprobe.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-ledprobe.bin" "$out/starbite-os-ledprobe.img" "$out/starbite-os-ledprobe.map"
+"${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $gstobjs -o "$out/starbite-os-guesttest.elf"
+relocs_only_relative "$out/starbite-os-guesttest.elf"
+"${CROSS}objcopy" -O binary "$out/starbite-os-guesttest.elf" "$out/starbite-os-guesttest.bin"
+"${CROSS}nm" "$out/starbite-os-guesttest.elf" | sort > "$out/starbite-os-guesttest.map"
+python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-guesttest.bin" "$out/starbite-os-guesttest.img" "$out/starbite-os-guesttest.map"
 if ! "${CROSS}nm" "$out/starbite-os.elf" | grep -q ' sbos_selftest_enabled$'; then
     echo "sbos: no sbos_selftest_enabled in the image" >&2
     exit 1
 fi
 
-leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" | head -3 || true)
+leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" | head -3 || true)
 if [ -n "$leak" ]; then
     echo "sbos: the image contains build-host paths:" >&2
     echo "$leak" >&2
@@ -191,4 +200,6 @@ sha256sum "$out/starbite-os-selftest.img" | sed "s#  .*#  starbite-os-selftest.i
 echo "sbos: $(cat "$out/starbite-os-selftest.img.sha256") (self-test variant)"
 sha256sum "$out/starbite-os-ledprobe.img" | sed "s#  .*#  starbite-os-ledprobe.img#" > "$out/starbite-os-ledprobe.img.sha256"
 echo "sbos: $(cat "$out/starbite-os-ledprobe.img.sha256") (LED-probe variant)"
+sha256sum "$out/starbite-os-guesttest.img" | sed "s#  .*#  starbite-os-guesttest.img#" > "$out/starbite-os-guesttest.img.sha256"
+echo "sbos: $(cat "$out/starbite-os-guesttest.img.sha256") (Linux self-test variant)"
 echo "sbos: $(cat "$out/starbite-os.img.sha256") ($(wc -c < "$out/starbite-os.img") bytes)"

@@ -50,6 +50,11 @@ is only refreshed when something changes.
 - **Settings**: Display (brightness, screen-off time, switch off after the screen has been off), Alarm (the LED in
   the alarm; "LED at rated power", new), Heat (the graphics processor in High), About (the version, the clocks,
   temperatures; "Read the panel's registers", read only).
+- **Linux** (1.2-alpha1, a test; off at every start): Settings > About > **Linux apps (test)** asks first, then puts
+  a **Linux** tile on home until the next restart. The tile starts Linux 7.1 on the four big cores and shows it full
+  screen between two thin bars (about 2 s to start); touch, Volume and Bixby go to it. **Hold Bixby** (or tap the
+  bottom bar) for home: Linux keeps running hidden and stops by itself 60 s later (also 60 s after the screen goes
+  off). Heat does not run while Linux does, and Linux does not start while Heat runs (both use the big cores).
 - **Wi-Fi**: turn it on, pick a network. Open networks join at once; a secured one asks for its passphrase (kept in
   memory until a restart, never written to the log). The network saved on the phone is marked "Saved". Once
   joined it gets an address, checks the router and sets the clock from the internet.

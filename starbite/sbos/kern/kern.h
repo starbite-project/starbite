@@ -4,15 +4,16 @@
  * the host test runs; hw_*() is the thin hardware layer (hw.c on the phone, the host stubs in the preview).
  */
 #pragma once
+#include "guest.h"                  /* 1.2: Linux on the M3 cluster (starbite/guest/sbos) */
 #include <stdint.h>
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.1-beta7b"
+#define SBOS_VERSION "1.2-alpha1"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
-enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_APP0 = 16 };
+enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_APP0 = 16 };
 #define KT_MAX 64
 #define KT_RESERVE 24                /* entries apps cannot take: the kernel's tasks always get theirs */
 struct ktimer {
@@ -375,6 +376,8 @@ void kui_light(uint32_t argb);
 void kui_awake(int on);
 void kui_open_app(int a);
 void kui_home(void);
+void kui_guest_open(void);          /* 1.2: the Linux view (the guest started if it is off) */
+extern int kui_linux_on;            /* 1.2: Settings > Linux apps: the home tile (off at every start) */
 void kui_lock(void);
 int kui_awake_on(void);
 void kui_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
@@ -387,8 +390,12 @@ void ui_ktimer(unsigned id);
 void ui_kminute(void);
 int heater_running_ui(void);
 int heater_busy(void);              /* running, or its first-run confirmation is up */
+int heater_m3_busy(void);           /* 1.2: heater_busy, a stop in progress or an M3 worker / probe on a big core */
+int heater_guest_refuses(void);     /* 1.2: 1 while Linux owns the M3 cluster: no heat, no OCP probe */
+void heater_m3_released(void);      /* 1.2: the guest powered the M3 cluster off: prepare it again before use */
 int heater_sensor(int id);          /* SYS_SENSOR_READ: 0.1 C or -1000 */
 void power_restart(int to_menu);
+void power_restart_recovery(void);  /* 1.2: the Linux self-test image: everything off, then TWRP */
 void power_off_now(void);
 void power_key_long(void);
 
@@ -407,7 +414,8 @@ int hw_dvfs_m3_ocp(uint32_t khz, unsigned busy);
 int64_t hw_ocp_launch(unsigned w);  /* 1.1-beta7: sb_ocp_worker on M3 core w (read only) */
 int heater_ocp_probe(void);         /* 1.1-beta7: Settings > About: the M3 OCP registers, read only (0 read, < 0 not) */
 extern int heater_ocp_state;        /* 0 not probed, 1 readable (Samsung core, values logged), -1 trapped, -2 no start */   /* 1.1-beta6: the M3 above 1794 within Samsung's core-count table */
-void hw_wdt_feed_heat(void);        /* 1.1: the heat loop's feed (the only one while the trip is off) */
+void hw_wdt_feed_heat(void);
+unsigned hw_wdt_selftest(unsigned secs);   /* 1.2: a self-test image's own watchdog at secs (fed by the loop); 0 refused */        /* 1.1: the heat loop's feed (the only one while the trip is off) */
 unsigned hw_wdt_short(unsigned secs);   /* 1.1: the loader's watchdog shortened (0: back); 0 = refused */
 int hw_dvfs(unsigned domain, uint32_t khz);   /* sb_acpm_dvfs_listed */
 int hw_m3_prep(void);               /* the vendor PMU defaults for the M3 cluster: 1 done */

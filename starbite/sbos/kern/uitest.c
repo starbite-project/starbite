@@ -12,6 +12,11 @@
  * 1.0-rc3: the LED-probe variant (starbite-os-ledprobe.img: also -DSBOS_SELFTEST_LED) runs only fled_probe() (the
  * S2MPB02's bus bring-up and its reads; nothing written to the chip, no screens, no heat, no Wi-Fi) and restarts.
  *
+ * 1.2-alpha1: the Linux variant (starbite-os-guesttest.img: -DSBOS_SELFTEST_GUEST) arms its own 30 s watchdog (fed by
+ * the loop), turns Linux apps on (no confirmation: the self-test image), runs guest.c's guest_selftest_step (two
+ * cycles: the view shown with a tap that must reach the app's pixels, home, stop, the M3 cluster off; then a start
+ * in the background and a stop; the heater refused while Linux runs) and restarts into recovery (TWRP: pmsg).
+ *
  * Never: the flashlight LED, the heater, the alarm, brightness or panel settings, a call or a message.
  * The only write: where the store has the volatile "sbos-state" entry, one save of the current settings into it
  * (after a logged dry run), read back (settings.c settings_selftest). Any
@@ -31,6 +36,24 @@ const int sbos_selftest_enabled = 0;
 #endif
 
 #define STEP_MS 700U
+
+#if defined(SBOS_SELFTEST_GUEST) || defined(SB_HOST)
+#define GST_BUILD 1
+#include "sbui.h"
+/* the Linux variant: the phone's starbite-os-guesttest.img, or the host's SBOS_HOST_SELFTEST_GUEST */
+static int guest_variant(void)
+{
+#ifdef SBOS_SELFTEST_GUEST
+    return 1;
+#else
+    return getenv("SBOS_HOST_SELFTEST_GUEST") != 0;
+#endif
+}
+static void gst_open(void) { kui_guest_open(); }
+static void gst_home(void) { kui_home(); }
+static const uint32_t *gst_panel(void) { return ui_back(); }
+static const struct guest_st_ops gst_ops = { gst_open, gst_home, gst_panel };
+#endif
 
 /* the in-app steps: only events that change what is shown (never a light, heat, alarm or setting) */
 struct st_ev {
@@ -68,7 +91,7 @@ static int streq(const char *a, const char *b)
 static int enabled(void)
 {
 #ifdef SB_HOST
-    if (getenv("SBOS_HOST_SELFTEST"))
+    if (getenv("SBOS_HOST_SELFTEST") || getenv("SBOS_HOST_SELFTEST_GUEST"))
         return 1;
 #endif
     return sbos_selftest_enabled;
@@ -184,6 +207,19 @@ void selftest_timer(unsigned id)
         kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
         return;
 #else
+#ifdef GST_BUILD
+        if (guest_variant()) {
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: Linux (P3a): the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: Linux (P3a): the watchdog could not be set (the loader's stays): ", w);
+            kui_linux_on = 1;
+            sb_log("selftest: Linux apps on for the test (the self-test image: no confirmation); then a restart into recovery");
+            kui_home();
+            phase = 20;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 1500, 0);
+            return;
+        }
+#endif
         kui_lock();
         phase = 1;
         break;
@@ -330,6 +366,35 @@ void selftest_timer(unsigned id)
         kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
         return;
     }
+#ifdef GST_BUILD
+    case 20: {                              /* Linux: one step every 100 ms until it passes or fails */
+        int r = guest_selftest_step(&gst_ops);
+        if (!r) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
+            return;
+        }
+        {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, r > 0 ? "selftest: passed: Linux (P3a), " : "selftest: FAILED: Linux (P3a), ");
+            ub_dec(&u, (sb_ms() - t0) / 1000U);
+            ub_s(&u, " s; slowest loop turn ");
+            ub_dec(&u, K.slow_turn_ms);
+            ub_s(&u, " ms; restart into recovery in 3 s");
+            sb_log(u.b);
+        }
+        phase = 21;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+        return;
+    }
+    case 21:
+        active = 0;
+        kui_home();
+        guest_power_off();                  /* (already off after a pass; after a failure: MSG_STOP, up to 1 s) */
+        sb_logx("selftest: Linux state at the restart (0 off): ", (uint64_t)guest_state());
+        power_restart_recovery();
+        return;
+#endif
     case 10:
         active = 0;
         power_restart(1);

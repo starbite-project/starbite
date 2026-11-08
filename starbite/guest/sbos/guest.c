@@ -1,27 +1,68 @@
 /* SPDX-License-Identifier: GPL-2.0-only
  * Starbite OS 0.9 / P3: the guest service, Linux apps on the M3 cluster (docs/STARBITE-OS-LINUX-M3.md).
- * A drop-in for kern/ (the starbite-os session wires it in: starbite/guest/sbos/INTEGRATION.md). Everything
- * the guest needs from the hardware goes through sbghost (starbite/guest/host), the core the phone payloads
- * P2..P2d ran: the carve-out, the trampoline below 4 GiB, CPU_ON, the shared header, the rings, the log zone.
+ * The sbos-linux session's drop-in, wired into Starbite OS 1.2-alpha1 by the starbite-os session
+ * (starbite/guest/sbos/INTEGRATION.md lists the hooks; docs/STARBITE-OS.md 12.22). Everything the guest needs
+ * from the hardware goes through sbghost (starbite/guest/host), the core the phone payloads P2..P2d ran: the
+ * carve-out, the trampoline below 4 GiB, CPU_ON, the shared header, the rings, the log zone.
  *
- * Life: off until an app needs Linux (the M3 cluster powered down) -> guest_start: the store's three files
- * straight into the carve-out (store_load), the M3 words back to the boot state, the vendor PMU defaults,
- * cluster/core on, CPU_ON(0x100) -> the poll timer (10 ms while starting or shown, 50 ms in the background)
- * -> guest_stop: MSG_STOP, the guest powers its cores and the cluster off itself (P2c) -> off. Hidden for 60 s
- * or the screen off for 60 s: stopped (power). The heater and the guest exclude each other (both own the M3s).
- * Never blocks the loop: start and stop return at once, the timer does the rest.
+ * Life: off until the user opens Linux (the M3 cluster powered down) -> guest_start: the store's three files
+ * into the bounce window below 4 GiB (store_load, CRC checked), then word copies into the carve-out (sbg_load:
+ * the copy path P2..P2d ran; UFS DMA above 4 GiB never ran on the phone), the M3 words back to the boot state,
+ * the vendor PMU defaults, cluster/core on, CPU_ON(0x100) -> the poll timer (10 ms while starting or shown,
+ * 50 ms in the background) -> guest_stop: MSG_STOP, the guest powers its cores and the cluster off itself (P2c)
+ * -> off. Hidden for 60 s or the screen off for 60 s: stopped (power). The heater and the guest exclude each
+ * other (both own the M3s). guest_start only checks and claims the big cores; the load runs at the guest timer's first
+ * tick (after the caller drew "Starting Linux..."), blocking the loop for as long as UFS takes for about 28 MiB
+ * (logged: "read in N ms, copied in M ms"); the watchdog is fed around it.
+ *
+ * Builds: the phone (SBOS_KERNEL), the QEMU run of this file (GUEST_QEMU: starbite/guest/sbsim/kern-shim.c
+ * gives the kernel calls; QEMU virt's addresses), the host preview / tests (SB_HOST: a fake guest, no sbghost).
  */
 #include "sb.h"
 #include "store.h"
 #include "kern.h"
 #include "kinput.h"
 #include "guest.h"
+#ifndef SB_HOST
 #include "../../guest/host/sbghost.h"
+#else
+#include <stdlib.h>
+#endif
 
+#ifdef GUEST_QEMU
+#ifndef GUEST_DB_GUEST
+#define GUEST_DB_GUEST 132U                 /* run-qemu.sh: SPIs 100 / 101 */
+#endif
+#ifndef GUEST_DB_HOST
+#define GUEST_DB_HOST 133U
+#endif
+#define G_LINUX_BASE SBG_QEMU_LINUX_BASE
+#define G_LINUX_SIZE SBG_QEMU_LINUX_SIZE
+#define G_SHM_BASE SBG_QEMU_SHM_BASE
+#define G_SHM_SIZE SBG_QEMU_SHM_SIZE
+#define G_GICD SBG_QEMU_GICD
+#define G_TRAMP SBG_QEMU_TRAMP
+#define G_FIRST_MPIDR 4U
+#define G_BOUNCE 0x50000000UL               /* QEMU RAM between the store (0x4800_0000) and the carve-out */
+#define G_BOUNCE_END 0x7f000000UL
+#else
 #define GUEST_DB_GUEST 511U                 /* P1: the doorbells (idle, non-secure, both directions, P1c) */
 #define GUEST_DB_HOST 510U
+#define G_LINUX_BASE SBG_S9_LINUX_BASE
+#define G_LINUX_SIZE SBG_S9_LINUX_SIZE
+#define G_SHM_BASE SBG_S9_SHM_BASE
+#define G_SHM_SIZE SBG_S9_SHM_SIZE
+#define G_GICD SBG_S9_GICD
+#define G_TRAMP SBG_S9_TRAMP
+#define G_FIRST_MPIDR 0x100U
+/* libsb's non-cacheable RAM-test window (sb.h SB_TEST_BASE..+SB_TEST_SIZE), which Starbite OS never uses (Engineer
+ * OS's memory stress does, in its own boots); its first MiB keeps the CPU_ON trampolines (0xa010_0000..0xa010_007f) */
+#define G_BOUNCE (SB_TEST_BASE + 0x100000UL)
+#define G_BOUNCE_END (SB_TEST_BASE + SB_TEST_SIZE)
+#endif
 #define SW 720U
 #define SH 1440U
+#define VIEW_Y 40U                          /* the view at 2x between a 40 px bar on top and one at the bottom */
 #define IDLE_STOP_MS 60000U
 
 static int st = GUEST_OFF, shown, screen = 1;
@@ -30,7 +71,19 @@ static uint32_t seq_seen = 0, seq_blit = 0;
 static uint64_t t_hidden, t_screen_off;
 static int sb_up;
 
+static void arm(uint32_t period)
+{
+    kt_cancel(KT_GUEST, KT_GUEST_ID_POLL);
+    kt_set(KT_GUEST, KT_GUEST_ID_POLL, sb_ms(), period, 1);
+}
+
+int guest_state(void) { return st; }
+const char *guest_why(void) { return why; }
+unsigned guest_db_host(void) { return GUEST_DB_HOST; }
+int guest_shown(void) { return shown && st == GUEST_RUNNING; }
+
 #ifndef SB_HOST
+/* ===================================== the guest (phone, QEMU) ===================================== */
 static uint64_t ms(void) { return sb_ms(); }
 static void host_log(const char *l)
 {
@@ -67,7 +120,8 @@ static int64_t cpu_on(uint64_t mpidr, uint64_t entry, uint64_t ctx)
     return (int32_t)sb_psci(SB_PSCI_CPU_ON, mpidr, entry, ctx);
 }
 static int cluster_off(void) { return hw_m3_on() ? 0 : 1; }
-/* the boot state, the vendor PMU defaults, then the vendor's hotplug-in for cluster 1's first core */
+/* the boot state, the vendor PMU defaults, then the vendor's hotplug-in for cluster 1's first core (libsb's
+ * sb_m3_fp_*: the one FlexPMU implementation, shared with the heater and Engineer OS) */
 static int m3_prep(void)
 {
     (void)hw_m3_fp_reset();
@@ -80,16 +134,18 @@ static const struct sbg_os shim = {
     .ms = ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
     .m3_prep = m3_prep,
 };
-#endif
 
 void guest_init(void)
 {
-#ifndef SB_HOST
-    uint8_t me = *(volatile uint8_t *)(SBG_S9_GICD + 0x800);   /* this core's interface (banked) */
+    if (!K.irq_mode) {                      /* the doorbells need the GIC: polling mode runs no guest */
+        why = "Linux needs interrupts (this boot runs in polling mode)";
+        return;
+    }
+    uint8_t me = *(volatile uint8_t *)(uintptr_t)(G_GICD + 0x800);   /* this core's interface (banked) */
     struct sbg_cfg cfg = {
-        .linux_base = SBG_S9_LINUX_BASE, .linux_size = SBG_S9_LINUX_SIZE,
-        .shm_base = SBG_S9_SHM_BASE, .shm_size = SBG_S9_SHM_SIZE,
-        .gicd = SBG_S9_GICD, .first_mpidr = 0x100, .tramp_pa = SBG_S9_TRAMP,
+        .linux_base = G_LINUX_BASE, .linux_size = G_LINUX_SIZE,
+        .shm_base = G_SHM_BASE, .shm_size = G_SHM_SIZE,
+        .gicd = G_GICD, .first_mpidr = G_FIRST_MPIDR, .tramp_pa = G_TRAMP,
         .surf_w = SW, .surf_h = SH,
         .db_guest = GUEST_DB_GUEST, .db_host = GUEST_DB_HOST,
         .host_lines = {0},                  /* the guest kernel has the shared-distributor patch */
@@ -99,40 +155,30 @@ void guest_init(void)
     sbg_init(&shim, &cfg, me ? me : 1);
     sbg_gic_prepare();                      /* the doorbells: edge; the host's routed here and enabled */
     sb_up = 1;
-#endif
 }
 
-unsigned guest_db_host(void) { return GUEST_DB_HOST; }
-int guest_state(void) { return st; }
-const char *guest_why(void) { return why; }
 int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED ? 1 : hw_m3_on() && st == GUEST_FAILED; }
-int guest_shown(void) { return shown && st == GUEST_RUNNING; }
 
 int guest_available(void)
 {
-#ifdef SB_HOST
-    return 0;
-#else
     struct store_ent e;
     return store_find(GUEST_STORE_IMAGE, &e) && store_find(GUEST_STORE_DTB, &e) && store_find(GUEST_STORE_RD, &e);
-#endif
 }
 
-static void arm(uint32_t period)
-{
-    kt_cancel(KT_GUEST, KT_GUEST_ID_POLL);
-    kt_set(KT_GUEST, KT_GUEST_ID_POLL, sb_ms(), period, 1);
-}
+static uintptr_t up_mib(uintptr_t a) { return (a + 0xfffffUL) & ~0xfffffUL; }
+
+/* 1.2-alpha1: the load runs at the guest timer's first tick, not inside guest_start: the caller (the home tile)
+ * draws "Starting Linux..." first, and a slow UFS read never looks like a hang */
+static int loading;
+static struct store_ent ld_i, ld_d, ld_r;
 
 int guest_start(void)
 {
-#ifdef SB_HOST
-    why = "no guest in the host preview";
-    return -1;
-#else
-    if (!sb_up || (st != GUEST_OFF && st != GUEST_FAILED))
+    if (!sb_up)
         return -1;
-    if (heater_busy()) {
+    if (st != GUEST_OFF && st != GUEST_FAILED)
+        return -1;
+    if (heater_m3_busy()) {
         why = "the heater has the big cores";
         return -2;
     }
@@ -140,36 +186,77 @@ int guest_start(void)
         why = "the last guest did not power off: restart the phone first";
         return -3;
     }
-    struct store_ent ei, ed, er;
-    if (!store_find(GUEST_STORE_IMAGE, &ei) || !store_find(GUEST_STORE_DTB, &ed) || !store_find(GUEST_STORE_RD, &er)) {
+    if (!store_find(GUEST_STORE_IMAGE, &ld_i) || !store_find(GUEST_STORE_DTB, &ld_d) || !store_find(GUEST_STORE_RD, &ld_r)) {
         why = "the Linux files are not in the store";
         return -4;
     }
-    /* straight into the carve-out (non-cacheable here: no cache maintenance needed for the M3s) */
-    uint64_t base = SBG_S9_LINUX_BASE;
-    if (store_load(&ei, (uintptr_t)(base + SBG_IMAGE_AT), SBG_DTB_OFF - SBG_IMAGE_AT) ||
-        store_load(&ed, (uintptr_t)(base + SBG_DTB_OFF), SBG_RD_OFF - SBG_DTB_OFF) ||
-        store_load(&er, (uintptr_t)(base + SBG_RD_OFF), SBG_S9_LINUX_SIZE - SBG_RD_OFF)) {
-        why = "a Linux file did not load (CRC or size)";
-        st = GUEST_FAILED;
-        return -5;
-    }
-    hw_wdt_feed();
-    if (sbg_load_placed(ei.size, ed.size, er.size) < 0 || sbg_start() < 0) {
-        why = sbg_stats()->why ? sbg_stats()->why : "the guest did not start";
-        st = GUEST_FAILED;
-        return -6;
-    }
-    st = GUEST_STARTING;
+    why = "";
+    st = GUEST_STARTING;                    /* the big cores are the guest's from here (the heater refuses) */
+    loading = 1;
     seq_seen = seq_blit = 0;
     arm(10);
     return 0;
-#endif
+}
+
+/* the guest timer's first tick: the store's files into the bounce window, the copy, CPU_ON. 0, or < 0 and why */
+static int load_and_start(void)
+{
+    /* the bounce window below 4 GiB: the Image, then the DTB and the initrd, each at a MiB boundary */
+    uintptr_t pi = G_BOUNCE, pd = up_mib(pi + ld_i.size), pr = up_mib(pd + ld_d.size);
+    if (ld_i.size > G_LINUX_SIZE || ld_d.size > G_LINUX_SIZE || ld_r.size > G_LINUX_SIZE ||
+        up_mib(pr + ld_r.size) > G_BOUNCE_END) {
+        why = "the Linux files are too big for the load window";
+        return -5;
+    }
+    uint64_t t0 = sb_ms();
+    hw_wdt_feed();
+    int r = store_load(&ld_i, pi, pd - pi);
+    hw_wdt_feed();
+    if (!r)
+        r = store_load(&ld_d, pd, pr - pd);
+    if (!r)
+        r = store_load(&ld_r, pr, up_mib(pr + ld_r.size) - pr);
+    hw_wdt_feed();
+    if (r) {
+        why = "a Linux file did not load (CRC or size)";
+        return -5;
+    }
+    uint64_t t1 = sb_ms();
+    int lr = sbg_load((const void *)pi, ld_i.size, (const void *)pd, ld_d.size, (const void *)pr, ld_r.size);
+    hw_wdt_feed();
+    {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "guest: the store's files read in ");
+        ub_dec(&u, t1 - t0);
+        ub_s(&u, " ms, copied into the carve-out in ");
+        ub_dec(&u, sb_ms() - t1);
+        ub_s(&u, " ms (Image ");
+        ub_dec(&u, ld_i.size);
+        ub_s(&u, ", DTB ");
+        ub_dec(&u, ld_d.size);
+        ub_s(&u, ", initrd ");
+        ub_dec(&u, ld_r.size);
+        ub_s(&u, " bytes)");
+        sb_log(u.b);
+    }
+    if (lr < 0 || sbg_start() < 0) {
+        why = sbg_stats()->why ? sbg_stats()->why : "the guest did not start";
+        return -6;
+    }
+    return 0;
 }
 
 int guest_stop(void)
 {
-#ifndef SB_HOST
+    if (st == GUEST_STARTING && loading) {  /* stopped before its load: nothing ran */
+        loading = 0;
+        st = GUEST_OFF;
+        shown = 0;
+        kt_cancel(KT_GUEST, KT_GUEST_ID_POLL);
+        sb_log("guest: stopped before the load");
+        return 0;
+    }
     if (st == GUEST_STARTING || st == GUEST_RUNNING) {
         sbg_stop();
         st = GUEST_STOPPING;
@@ -177,40 +264,55 @@ int guest_stop(void)
         arm(10);
         return 0;
     }
-#endif
     return -1;
 }
 
 void guest_irq(void)
 {
-#ifndef SB_HOST
     sbg_doorbell();
     if (st != GUEST_OFF)
         kt_set(KT_GUEST, KT_GUEST_ID_IDLE, sb_ms(), 0, 0);   /* a poll at once (the ring has something) */
-#endif
 }
 
 void guest_timer(unsigned id)
 {
-#ifndef SB_HOST
     (void)id;
     if (st == GUEST_OFF || st == GUEST_FAILED)
         return;
+    if (loading) {
+        loading = 0;
+        if (load_and_start() < 0) {
+            st = GUEST_FAILED;
+            shown = 0;
+            kt_cancel(KT_GUEST, KT_GUEST_ID_POLL);
+            heater_m3_released();           /* m3_prep may have run: the heater prepares the cluster again (it still
+                                             * refuses while a failed guest leaves the cluster powered) */
+            sb_logf("guest: did not start: ", why);
+            ui_mark_dirty();
+        }
+        return;
+    }
     sbg_poll();
     const struct sbg_stats *s = sbg_stats();
     if (s->state == SBG_RUNNING && st == GUEST_STARTING) {
         st = GUEST_RUNNING;
         arm(shown ? 10 : 50);
+        if (shown)
+            sbg_send(SBG_MSG_FOCUS, 1, 0);
         ui_mark_dirty();
     } else if (s->state == SBG_OFF) {
         st = GUEST_OFF;
+        shown = 0;
         kt_cancel(KT_GUEST, KT_GUEST_ID_POLL);
+        heater_m3_released();               /* the heater prepares the cluster again before its next start */
         ui_mark_dirty();
         return;
     } else if (s->state == SBG_FAILED) {
         st = GUEST_FAILED;
+        shown = 0;
         why = s->why ? s->why : "the guest failed";
         kt_cancel(KT_GUEST, KT_GUEST_ID_POLL);
+        heater_m3_released();
         ui_mark_dirty();
         return;
     }
@@ -225,12 +327,10 @@ void guest_timer(unsigned id)
             guest_stop();
         }
     }
-#endif
 }
 
 void guest_show(int on)
 {
-#ifndef SB_HOST
     shown = on ? 1 : 0;
     t_hidden = on ? 0 : sb_ms();
     if (st == GUEST_RUNNING) {
@@ -238,24 +338,16 @@ void guest_show(int on)
         arm(shown ? 10 : 50);
     }
     seq_blit = 0;                           /* the next draw copies the whole surface */
-#else
-    (void)on;
-#endif
 }
 
 int guest_frame_new(void)
 {
-#ifndef SB_HOST
     return guest_shown() && sbg_hdr()->surf_seq != seq_blit;
-#else
-    return 0;
-#endif
 }
 
 /* the guest's front buffer at 2x into the back buffer at (x0, y0): 1440 x 2880 */
 void guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0)
 {
-#ifndef SB_HOST
     const volatile uint32_t *px;
     uint32_t stride;
     uint32_t seq = seq_seen;
@@ -264,7 +356,7 @@ void guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0)
     if (!sbg_frame(&seq, &px, &stride)) {   /* nothing new: still draw the last front buffer */
         volatile struct sbshm_hdr *h = sbg_hdr();
         sbshm_dmb();
-        px = (const volatile uint32_t *)(uintptr_t)(SBG_S9_SHM_BASE + h->surf_off[h->surf_front & 1U]);
+        px = (const volatile uint32_t *)(uintptr_t)(G_SHM_BASE + h->surf_off[h->surf_front & 1U]);
         stride = h->surf_stride;
         seq = h->surf_seq;
     }
@@ -280,59 +372,357 @@ void guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0)
             d1[x] = c;
         }
     }
-#else
-    (void)back, (void)stride_px, (void)x0, (void)y0;
-#endif
 }
 
 /* touch in panel pixels (the view at (0, 40), 2x): surface pixels for the guest */
 int guest_input(int kin_type, int x, int y)
 {
-#ifndef SB_HOST
     if (!guest_shown())
         return 0;
-    int sx = x / 2, sy = (y - 40) / 2;
-    if (sy < 0 || sy >= (int)SH)
+    int sx = x / 2, sy = (y - (int)VIEW_Y) / 2;
+    if (y < (int)VIEW_Y || sy >= (int)SH)
         return kin_type != KIN_PRESS;       /* the bars are Starbite's: a press there is not the guest's */
     uint32_t phase = kin_type == KIN_PRESS ? SBG_TOUCH_DOWN : kin_type == KIN_MOVE ? SBG_TOUCH_MOVE : SBG_TOUCH_UP;
     sbg_touch(0, phase, sx, sy);
     return 1;
-#else
-    (void)kin_type, (void)x, (void)y;
-    return 0;
-#endif
 }
 
 int guest_key(unsigned linux_code, int down)
 {
-#ifndef SB_HOST
     return guest_shown() ? sbg_key(linux_code, down) : 0;
-#else
-    (void)linux_code, (void)down;
-    return 0;
-#endif
 }
 
 void guest_screen(int on)
 {
-#ifndef SB_HOST
     screen = on ? 1 : 0;
     t_screen_off = on ? 0 : sb_ms();
     if (st == GUEST_RUNNING)
         sbg_screen(on);
-#else
-    (void)on;
-#endif
 }
+
+static uint32_t touches_seen(void) { return st == GUEST_RUNNING ? sbg_hdr()->touches_seen : 0; }
+static uint32_t surf_seq(void) { return st == GUEST_RUNNING ? sbg_hdr()->surf_seq : 0; }
+static const char *start_note(void)
+{
+    static char b[96];
+    struct ub u;
+    const struct sbg_stats *s = sbg_stats();
+    ub_init(&u);
+    ub_s(&u, "HELLO after ");
+    ub_dec(&u, s->t_hello);
+    ub_s(&u, " ms, ");
+    ub_dec(&u, s->hello_ncpus);
+    ub_s(&u, " CPUs, guest CPU interfaces ");
+    ub_hex(&u, s->guest_cpuif, 2);
+    sb_strcpy(b, sizeof(b), u.b);
+    return b;
+}
+static uint32_t cluster_off_ms(void) { return (uint32_t)sbg_stats()->t_off; }
+#else
+/* ============================ the host's fake guest (preview, host tests) ============================ */
+/* SBOS_HOST_GUEST=1: the three store files exist; =fail: they exist and the start fails. The fake starts in
+ * 400 ms, draws a test pattern and the app's touch marks, and is off 100 ms after the stop. */
+static uint64_t t_next;
+static int fake_m3, fake_touches, fake_seq;
+static int dots[16][2], ndots;
+
+void guest_init(void) { sb_up = 1; }
+int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED ? 1 : fake_m3 && st == GUEST_FAILED; }
+int guest_available(void) { return getenv("SBOS_HOST_GUEST") != 0; }
+
+int guest_start(void)
+{
+    if (!sb_up || (st != GUEST_OFF && st != GUEST_FAILED))
+        return -1;
+    if (heater_m3_busy()) {
+        why = "the heater has the big cores";
+        return -2;
+    }
+    if (!guest_available()) {
+        why = "the Linux files are not in the store";
+        return -4;
+    }
+    const char *g = getenv("SBOS_HOST_GUEST");
+    if (g && g[0] == 'f') {
+        why = "the guest did not start (the host's fake: SBOS_HOST_GUEST=fail)";
+        st = GUEST_FAILED;
+        sb_log("guest: start failed (fake)");
+        return -6;
+    }
+    sb_log("guest: the store's files read and copied (fake)");
+    st = GUEST_STARTING;
+    fake_m3 = 1;
+    ndots = 0;
+    fake_touches = 0;
+    t_next = sb_ms() + 400;
+    seq_seen = seq_blit = 0;
+    arm(10);
+    return 0;
+}
+
+int guest_stop(void)
+{
+    if (st == GUEST_STARTING || st == GUEST_RUNNING) {
+        st = GUEST_STOPPING;
+        shown = 0;
+        t_next = sb_ms() + 100;
+        sb_log("guest: MSG_STOP (fake)");
+        arm(10);
+        return 0;
+    }
+    return -1;
+}
+
+void guest_irq(void) {}
+
+void guest_timer(unsigned id)
+{
+    (void)id;
+    uint64_t now = sb_ms();
+    if (st == GUEST_STARTING && now >= t_next) {
+        st = GUEST_RUNNING;
+        fake_seq++;
+        sb_log("guest: HELLO after 400 ms, 4 CPUs (fake)");
+        arm(shown ? 10 : 50);
+        ui_mark_dirty();
+    } else if (st == GUEST_STOPPING && now >= t_next) {
+        st = GUEST_OFF;
+        fake_m3 = 0;
+        kt_cancel(KT_GUEST, KT_GUEST_ID_POLL);
+        heater_m3_released();
+        sb_log("guest: every guest core off, the cluster off after 100 ms (fake)");
+        ui_mark_dirty();
+    } else if (st == GUEST_RUNNING) {
+        if ((!shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
+            (!screen && t_screen_off && now - t_screen_off > IDLE_STOP_MS)) {
+            sb_log("guest: unused for 60 s: stopping (the M3 cluster off)");
+            guest_stop();
+        }
+    }
+}
+
+void guest_show(int on)
+{
+    shown = on ? 1 : 0;
+    t_hidden = on ? 0 : sb_ms();
+    if (st == GUEST_RUNNING)
+        arm(shown ? 10 : 50);
+    seq_blit = 0;
+}
+
+int guest_frame_new(void) { return guest_shown() && (uint32_t)fake_seq != seq_blit; }
+
+void guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0)
+{
+    if (!guest_shown())
+        return;
+    seq_seen = seq_blit = (uint32_t)fake_seq;
+    for (uint32_t y = 0; y < 2 * SH; ++y) {
+        uint32_t *d = back + (uintptr_t)(y0 + y) * stride_px + x0;
+        uint32_t sy = y / 2;
+        for (uint32_t x = 0; x < 2 * SW; ++x) {
+            uint32_t sx = x / 2, c = sy < 120 ? 0xff1e1e2eU : 0xff000000U | ((sx * 255 / SW) << 16) | ((sy * 255 / SH) << 8) | 0x60U;
+            for (int i = 0; i < ndots; ++i) {
+                int dx = (int)sx - dots[i][0], dy = (int)sy - dots[i][1];
+                if (dx * dx + dy * dy <= 14 * 14)
+                    c = 0xffffd700U;
+            }
+            d[x] = c;
+        }
+    }
+}
+
+int guest_input(int kin_type, int x, int y)
+{
+    if (!guest_shown())
+        return 0;
+    int sx = x / 2, sy = (y - (int)VIEW_Y) / 2;
+    if (y < (int)VIEW_Y || sy >= (int)SH)
+        return kin_type != KIN_PRESS;
+    fake_touches++;
+    if (kin_type == KIN_PRESS && ndots < 16) {
+        dots[ndots][0] = sx;
+        dots[ndots][1] = sy;
+        ++ndots;
+        fake_seq += 2;
+        ui_mark_dirty();
+    }
+    return 1;
+}
+
+int guest_key(unsigned linux_code, int down)
+{
+    (void)linux_code, (void)down;
+    return guest_shown();
+}
+
+void guest_screen(int on)
+{
+    screen = on ? 1 : 0;
+    t_screen_off = on ? 0 : sb_ms();
+}
+
+static uint32_t touches_seen(void) { return st == GUEST_RUNNING ? (uint32_t)fake_touches : 0; }
+static uint32_t surf_seq(void) { return (uint32_t)fake_seq; }
+static const char *start_note(void) { return "HELLO after 400 ms, 4 CPUs (fake)"; }
+static uint32_t cluster_off_ms(void) { return 100; }
+static int hw_m3_on_fake(void) { return fake_m3; }
+#define hw_m3_on hw_m3_on_fake
+#endif
 
 void guest_power_off(void)
 {
-#ifndef SB_HOST
     if (guest_stop() < 0)
         return;
     for (unsigned i = 0; i < 100 && st == GUEST_STOPPING; ++i) {
         sb_mdelay(10);
         guest_timer(KT_GUEST_ID_POLL);
     }
-#endif
+}
+
+/* ================================== the unattended check (P3a) ===================================== */
+#define TAP_SX 360
+#define TAP_SY 840
+static int gs_phase, gs_fail;
+static uint64_t gs_t;
+static uint32_t gs_seq;
+
+static void gs_log(const char *a, const char *b)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "guest selftest: ");
+    ub_s(&u, a);
+    if (b)
+        ub_s(&u, b);
+    sb_log(u.b);
+}
+static int gs_failed(const char *what)
+{
+    gs_log("FAILED: ", what);
+    if (st == GUEST_STARTING || st == GUEST_RUNNING)
+        guest_stop();
+    gs_phase = 99;
+    gs_fail = 1;
+    return -1;
+}
+
+int guest_selftest_step(const struct guest_st_ops *o)
+{
+    uint64_t now = sb_ms(), dt = now - gs_t;
+    switch (gs_phase) {
+    case 0:
+        gs_log("start: two cycles (shown with a tap, then in the background)", 0);
+        if (!guest_available())
+            return gs_failed("the Linux files are not in the store (guest-linux.img / .dtb / -rd.img)");
+        if (heater_m3_busy())
+            return gs_failed("the heater has the big cores");
+        o->open();
+        if (st != GUEST_STARTING)
+            return gs_failed(why[0] ? why : "the start was refused");
+        if (!guest_owns_m3() || !heater_guest_refuses())
+            return gs_failed("the heater would not have been refused while Linux runs");
+        gs_log("cycle 1: started; the heater refuses while Linux has the big cores", 0);
+        gs_t = now;
+        gs_phase = 1;
+        return 0;
+    case 1:
+    case 7:
+        if (st == GUEST_FAILED)
+            return gs_failed(why);
+        if (st == GUEST_RUNNING) {
+            gs_log(gs_phase == 1 ? "cycle 1: running: " : "cycle 2: running: ", start_note());
+            gs_t = now;
+            if (gs_phase == 7) {
+                guest_stop();
+                gs_phase = 8;
+            } else {
+                gs_phase = 2;
+            }
+        } else if (dt > 45000) {
+            return gs_failed("no HELLO within 45 s");
+        }
+        return 0;
+    case 2:                                 /* 3 s of the app on screen, then the tap */
+        if (st != GUEST_RUNNING)
+            return gs_failed("the guest stopped by itself");
+        if (dt >= 3000) {
+            if (!guest_shown())
+                return gs_failed("the Linux view is not shown");
+            gs_seq = surf_seq();
+            guest_input(KIN_PRESS, 2 * TAP_SX, (int)VIEW_Y + 2 * TAP_SY);
+            gs_t = now;
+            gs_phase = 3;
+        }
+        return 0;
+    case 3:
+        if (dt >= 150) {
+            guest_input(KIN_RELEASE, 2 * TAP_SX, (int)VIEW_Y + 2 * TAP_SY);
+            gs_t = now;
+            gs_phase = 4;
+        }
+        return 0;
+    case 4: {                               /* the mark in the composed frame, 2 frames after the touch */
+        if (st != GUEST_RUNNING)
+            return gs_failed("the guest stopped by itself");
+        const uint32_t *p = o->panel ? o->panel() : 0;
+        if (touches_seen() >= 2 && surf_seq() - gs_seq >= 2 && !guest_frame_new() && p) {
+            uint32_t c = p[(uintptr_t)(VIEW_Y + 2 * TAP_SY) * 1440U + 2 * TAP_SX] & 0xffffffU;
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "cycle 1: the tap reached the app: pixel ");
+            ub_hex(&u, c, 6);
+            ub_s(&u, c == 0xffd700U ? " (the app's touch mark)" : " (NOT the touch mark)");
+            gs_log(u.b, 0);
+            if (c != 0xffd700U)
+                return gs_failed("the tap did not reach the app's pixels");
+            gs_t = now;
+            gs_phase = 5;
+        } else if (dt > 5000) {
+            return gs_failed("the tap was not seen by the guest within 5 s");
+        }
+        return 0;
+    }
+    case 5:                                 /* 2 s more, then home (hidden) and the stop */
+        if (dt >= 2000) {
+            o->home();
+            if (guest_shown())
+                return gs_failed("the view is still shown after home");
+            guest_stop();
+            gs_t = now;
+            gs_phase = 6;
+        }
+        return 0;
+    case 6:
+    case 8:
+        if (st == GUEST_OFF) {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, gs_phase == 6 ? "cycle 1" : "cycle 2");
+            ub_s(&u, ": off, the cluster off ");
+            ub_dec(&u, cluster_off_ms());
+            ub_s(&u, " ms after MSG_STOP; M3 cluster powered ");
+            ub_dec(&u, (uint64_t)hw_m3_on());
+            gs_log(u.b, 0);
+            if (hw_m3_on() || guest_owns_m3())
+                return gs_failed("the M3 cluster still powered after the guest's stop");
+            if (gs_phase == 8) {
+                gs_log("passed: two cycles, the tap in the app, the cluster off twice, the heater refused meanwhile", 0);
+                gs_phase = 99;
+                return 1;
+            }
+            if (guest_start() < 0)
+                return gs_failed(why);
+            gs_log("cycle 2: started in the background (not shown)", 0);
+            gs_t = now;
+            gs_phase = 7;
+        } else if (st == GUEST_FAILED) {
+            return gs_failed(why);
+        } else if (dt > 8000) {
+            return gs_failed("the guest did not power off within 8 s of MSG_STOP");
+        }
+        return 0;
+    default:
+        return gs_fail ? -1 : 1;
+    }
 }

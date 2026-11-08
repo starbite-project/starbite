@@ -10,6 +10,8 @@
 #   repair     stock kernel + sbguest.ko + sbsim re-asserts its lines after the guest's GIC init -- PASS
 #   patched    IMAGE=<kernel with linux/0001-*.patch> + sbguest.ko, strict (no line may be lost) -- PASS
 #   stub       no Linux: the phone probe's M3 stub (probe/m3stub.S, HVC build) on CPUs 4..7 -- PASS
+#   kern       Starbite OS 1.2-alpha1's own guest service (sbos/guest.c, -DGUEST_QEMU) under sbsim/kern-shim.c:
+#              the phone self-test image's guest_selftest_step (two cycles, the tap's pixel at 2x), strict -- PASS
 # Environment: IMAGE (default: the build tree's Image), WORK (default /mnt/build/sbguest), RUNS (2),
 # TIMEOUT (QEMU wall clock, 900 s), SURF (720x1440), PSCI01=1 (the guest gets the S9-style PSCI 0.1 node).
 set -euo pipefail
@@ -32,6 +34,17 @@ echo "== sbsim"
 gcc -O2 -g0 -ffreestanding -nostdlib -nostartfiles -fno-pic -fno-pie -no-pie -static -mgeneral-regs-only \
     -mstrict-align -fno-stack-protector -fno-builtin -Wall -Wextra -Wno-unused-const-variable \
     -T "$here/sbsim/link.ld" "$here/sbsim/start.S" "$here/sbsim/sbsim.c" "$here/host/sbghost.c" -DM3STUB_HVC "$here/probe/m3stub.S" -o sbsim/sbsim.elf
+
+if [ "$scen" = kern ]; then
+    echo "== kern-shim (Starbite OS's guest.c, GUEST_QEMU)"
+    sb="$here/../sbos"
+    lib="$here/../libsb"
+    gcc -O2 -g0 -ffreestanding -nostdlib -nostartfiles -fno-pic -fno-pie -no-pie -static -mgeneral-regs-only \
+        -mstrict-align -fno-stack-protector -fno-builtin -Wall -Wextra -Werror -Wno-unused-const-variable \
+        -DGUEST_QEMU -DSBOS_KERNEL -I"$lib" -I"$sb/kern" -I"$sb/sdk" -I"$here/sbos" \
+        -T "$here/sbsim/link.ld" "$here/sbsim/start.S" "$here/sbsim/kern-shim.c" "$here/sbos/guest.c" \
+        "$here/host/sbghost.c" "$lib/str.c" -o sbsim/kern-shim.elf
+fi
 
 echo "== guestd"
 gcc -O2 -static -pthread -Wall -Wextra -Wno-unused-const-variable "$here/guestd/guestd.c" -o rd/guestd
@@ -63,6 +76,7 @@ case "$scen" in
     repair) flags=1 ;;
     patched) flags=2 ;;
     stub) flags=4 ;;
+    kern) flags=2 ;;
     *) echo "unknown scenario $scen"; exit 2 ;;
 esac
 echo "== guest DTB ($scen)"
@@ -99,8 +113,8 @@ set +e
 timeout "$TIMEOUT" qemu-system-aarch64 -M virt,gic-version=2,virtualization=off,secure=off \
     -cpu cortex-a53 -smp 8 -m 2048 -nographic -no-reboot \
     -semihosting-config enable=on,target=native \
-    -kernel sbsim/sbsim.elf \
+    -kernel "$([ "$scen" = kern ] && echo sbsim/kern-shim.elf || echo sbsim/sbsim.elf)" \
     -device loader,file=out/store.bin,addr=0x48000000,force-raw=on 2>&1 | tee "$log"
 set -e
 for p in sbsim-panel-run*.ppm; do [ -f "$p" ] && mv "$p" "out/${scen}-${p}"; done
-echo "== $(grep -a 'sbsim: RESULT' "$log" || echo 'sbsim: no RESULT line (the guest took the machine down?)')"
+echo "== $(grep -a -E '(sbsim|kern-shim): RESULT' "$log" || echo 'sbsim: no RESULT line (the guest took the machine down?)')"

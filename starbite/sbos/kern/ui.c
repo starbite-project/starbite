@@ -32,7 +32,11 @@ static int getenv_dbg(void) { return getenv("SBOS_DBG") != 0; }
 
 enum { E_TITLE = 1, E_BACK, E_BUTTON, E_BIG, E_TEXT, E_LEVEL, E_TOGGLE, E_HOLD, E_CLOCK, E_TILE, E_ROUND,
        E_FIELD, E_TOAST, E_CTEXT, E_GAUGE, E_INPUT, E_KEYS, E_CHART, E_ICON, E_WIDGET, E_SCROLLBAR };
-enum { SCR_LOCK = 1, SCR_HOME, SCR_APP, SCR_POWER, SCR_CONFIRM, SCR_LIGHT, SCR_SOS, SCR_OFF, SCR_CONTROL };
+enum { SCR_LOCK = 1, SCR_HOME, SCR_APP, SCR_POWER, SCR_CONFIRM, SCR_LIGHT, SCR_SOS, SCR_OFF, SCR_CONTROL, SCR_GUEST };
+#define GUEST_TILE 0xffffU                      /* 1.2: the home tile "Linux" (not an app index) */
+int kui_linux_on;                               /* 1.2: Settings > Linux apps (off at every start; asked first) */
+static int in_guest, guest_drawn;               /* the Linux view told it is shown / its bars drawn */
+static void guest_view_sync(void);
 
 struct el {
     uint8_t kind, interactive, scrolled;    /* scrolled (0.6.2): an app page's element, drawn below SCROLL_TOP only */
@@ -489,6 +493,7 @@ void kui_home(void)
     screen = SCR_HOME;
     focus = -1;
     full = dirty = 1;
+    guest_view_sync();                      /* 1.2: the Linux view left at once (hidden, still running) */
 }
 
 void kui_lock(void)
@@ -839,13 +844,15 @@ static void build_home(void)
         e->x = MX, e->y = y0, e->w = CW, e->h = 210;
         y0 += 210 + 40;
     }
-    int shown_n = 0;
+    int shown_n = 0, linux_tile = kui_linux_on && guest_available();
     for (int i = 0; i < napps; ++i)
         shown_n += !app_hidden(i) && i != emerg;
+    shown_n += linux_tile;
     int rows = (shown_n + 1) / 2, th = rows > 3 ? (2700 - y0 - (rows - 1) * 40) / rows : 600;
     if (th > 600)
         th = 600;
-    for (int i = 0, t = 0; i < napps && t < 8; ++i) {
+    int t = 0;
+    for (int i = 0; i < napps && t < 10; ++i) {
         if (app_hidden(i) || i == emerg)
             continue;
         struct el *e = add(cur, &ncur, E_TILE);
@@ -865,6 +872,19 @@ static void build_home(void)
             scopy(e->b, sizeof(e->b), "Heating");
         if (i == sos_a && sos_active())
             scopy(e->b, sizeof(e->b), "Alarm on");
+    }
+    if (linux_tile && t < 10) {                  /* 1.2: Linux apps on the big cores (Settings turned it on) */
+        struct el *e = add(cur, &ncur, E_TILE);
+        e->id = GUEST_TILE;
+        scopy(e->a, sizeof(e->a), "Linux");
+        scopy(e->b, sizeof(e->b), guest_state() == GUEST_RUNNING ? "Running" : guest_state() == GUEST_STARTING ? "Starting" : "Test");
+        e->icon = 0;
+        e->color = 0xff5ac8faU;
+        e->w = 625;
+        e->h = th;
+        e->x = MX + (t % 2) * (625 + 50);
+        e->y = y0 + (t / 2) * (th + 40);
+        ++t;
     }
     struct el *e = add(cur, &ncur, E_CTEXT);
     int info = app_by_id("info");
@@ -945,6 +965,17 @@ static void build_home_normal(void)
         e->color = app_color(i) ? app_color(i) : C_STAR;
         e->x = MX + (k % 4) * 325, e->y = 600 + (k / 4) * 360, e->w = 325, e->h = 340;
         ++k;
+    }
+    if (kui_linux_on && guest_available() && k < 12) {     /* 1.2: Linux apps (Settings turned it on) */
+        e = add(cur, &ncur, E_ICON);
+        if (e) {
+            e->id = GUEST_TILE;
+            scopy(e->a, sizeof(e->a), "Linux");
+            e->icon = 0;
+            e->color = 0xff5ac8faU;
+            e->x = MX + (k % 4) * 325, e->y = 600 + (k / 4) * 360, e->w = 325, e->h = 340;
+            ++k;
+        }
     }
     if (emerg >= 0) {
         e = add(cur, &ncur, E_TILE);
@@ -1256,6 +1287,39 @@ static void build_sos(void)
     e->x = MX, e->y = 2540, e->w = CW, e->h = 230;
 }
 
+/* 1.2: the Linux view while it is not showing the guest's frames: starting, failed or stopping */
+static void build_guest(void)
+{
+    if (guest_shown())
+        return;                                 /* the frames are drawn straight (ui_kdraw) */
+    struct el *e = add(cur, &ncur, E_TITLE);
+    scopy(e->a, sizeof(e->a), "Linux");
+    e->x = MX, e->y = 250, e->w = CW, e->h = 140;
+    int base = ncur, gs = guest_state();
+    e = add(cur, &ncur, E_TEXT);
+    scopy(e->b, sizeof(e->b), gs == GUEST_STARTING ? "Starting Linux on the big cores\xe2\x80\xa6" :
+                              gs == GUEST_STOPPING ? "Linux is stopping\xe2\x80\xa6" :
+                              gs == GUEST_FAILED ? "Linux did not start." : "Linux is off.");
+    e->color = C_L1;
+    if (gs == GUEST_FAILED && guest_why()[0]) {
+        e = add(cur, &ncur, E_TEXT);
+        scopy(e->b, sizeof(e->b), guest_why());
+        e->color = C_L2;
+    }
+    e = add(cur, &ncur, E_TEXT);
+    scopy(e->b, sizeof(e->b), "A test on the four big cores; no heat meanwhile. Hold Bixby: home.");
+    e->color = C_L3;
+    if (gs == GUEST_STARTING) {
+        e = add(cur, &ncur, E_BUTTON);
+        e->id = 2;
+        scopy(e->a, sizeof(e->a), "Stop Linux");
+    }
+    e = add(cur, &ncur, E_BUTTON);
+    e->id = 1;
+    scopy(e->a, sizeof(e->a), "Home");
+    layout_flow(cur + base, ncur - base, 450);
+}
+
 static void build(void)
 {
     ncur = 0;
@@ -1273,9 +1337,11 @@ static void build(void)
     case SCR_CONFIRM: build_confirm(); break;
     case SCR_LIGHT: build_light(); break;
     case SCR_SOS: build_sos(); break;
+    case SCR_GUEST: build_guest(); break;
     default: break;
     }
-    if (toast[0] && sb_ms() < toast_until && screen != SCR_LIGHT && screen != SCR_SOS && screen != SCR_OFF) {
+    if (toast[0] && sb_ms() < toast_until && screen != SCR_LIGHT && screen != SCR_SOS && screen != SCR_OFF &&
+        !(screen == SCR_GUEST && guest_shown())) {
         struct el *e = add(cur, &ncur, E_TOAST);
         if (e) {
             scopy(e->b, sizeof(e->b), toast);
@@ -1755,14 +1821,65 @@ const char *kui_screen_name(void)
     case SCR_SOS: return "sos";
     case SCR_OFF: return "off";
     case SCR_CONTROL: return "control center";
+    case SCR_GUEST: return "linux";
     default: return "?";
     }
+}
+
+/* 1.2: the guest is told when its view is shown or left, whatever left it (home, the power menu, SOS, the screen) */
+static void guest_view_sync(void)
+{
+    if (screen == SCR_GUEST && !in_guest) {
+        in_guest = 1;
+        guest_drawn = 0;
+        guest_show(1);
+    } else if (screen != SCR_GUEST && in_guest) {
+        in_guest = 0;
+        guest_show(0);
+    }
+}
+
+/* the guest's frame at 2x (1440 x 2880) between two 40 px bars: no elements, the whole view presented */
+static void guest_draw(void)
+{
+    ui_noclip();
+    if (!guest_drawn || full) {
+        ui_fill(0, 0, UI_W, 40, 0xff101828U);
+        ui_fill(0, UI_H - 40, UI_W, 40, 0xff101828U);
+        if (ui_has_font(F_HEAD))
+            ui_text_c(F_HEAD, UI_W / 2, UI_H - 9, "Linux  \xc2\xb7  hold Bixby or tap here: home", C_L2);
+        ui_dirty_all();
+    }
+    guest_blit(ui_back(), UI_W, 0, 40);
+    ui_dirty(0, 40, UI_W, UI_H - 80);
+    if (ui_present())
+        panel_kick();
+    if (!K.first_frame_ms)
+        K.first_frame_ms = sb_ms() ? sb_ms() : 1;
+    guest_drawn = 1;
+    full = 0;
+    shown_screen = SCR_GUEST;
+    ncur = nshown = 0;
+    kui_stat_n = 1;
+    ++kui_stat_frames;
 }
 
 void ui_kdraw(void)
 {
     if (screen == SCR_OFF)
         return;
+    guest_view_sync();
+    if (screen == SCR_GUEST && guest_shown()) {
+        if (dirty || guest_frame_new() || !guest_drawn) {
+            dirty = 0;
+            guest_draw();
+        }
+        return;
+    }
+    if (guest_drawn) {                          /* out of the guest's frames (it stopped or failed while shown) */
+        guest_drawn = 0;
+        full = dirty = 1;
+    }
     if (!dirty && pressed < 0)
         return;
     dirty = 0;
@@ -1778,7 +1895,7 @@ void ui_kdraw(void)
         /* a screen change between the lock screen, home and the apps slides in (a wipe in 4 bands, about 70 ms):
          * forward from the right, back from the left; full-screen fields and the first frame appear at once */
         if (screen != shown_screen && shown_screen && shown_screen != SCR_OFF && !fullscreen &&
-            shown_screen != SCR_LIGHT && shown_screen != SCR_SOS)
+            shown_screen != SCR_LIGHT && shown_screen != SCR_SOS && shown_screen != SCR_GUEST && screen != SCR_GUEST)
             wipe = (screen == SCR_LOCK || (screen == SCR_HOME && shown_screen == SCR_APP)) ? -1 : 1;
         ui_noclip();
         look_bg(0, 0, UI_W, UI_H);
@@ -1889,7 +2006,16 @@ static void activate(int i, int x, int y)
         lock_pick((int)e->id);
         break;
     case SCR_HOME:
-        kui_open_app((int)e->id);
+        if (e->id == GUEST_TILE)
+            kui_guest_open();
+        else
+            kui_open_app((int)e->id);
+        break;
+    case SCR_GUEST:
+        if (e->id == 2)
+            guest_stop();
+        else
+            kui_home();
         break;
     case SCR_POWER:
         power_menu_pick((int)e->id);
@@ -1983,9 +2109,34 @@ static void back(void)
     case SCR_LIGHT:
         kui_light(0);
         break;
+    case SCR_GUEST:
+        kui_home();
+        break;
     default:
         break;
     }
+}
+
+/* 1.2: the home tile "Linux": start the guest (if it is off) and show its view */
+void kui_guest_open(void)
+{
+    int gs = guest_state();
+    if (gs == GUEST_OFF || gs == GUEST_FAILED) {
+        int r = guest_start();
+        if (r == -2) {
+            sb_log("ui: Linux refused: the heater has the big cores");
+            kui_toast("The heater has the big cores: stop it first", 2500);
+            return;
+        }
+        if (r < 0)
+            sb_logf("ui: Linux did not start: ", guest_why());
+        else
+            sb_log("ui: Linux starting (the home tile)");
+    }
+    screen = SCR_GUEST;
+    focus = -1;
+    full = dirty = 1;
+    guest_view_sync();
 }
 
 void kui_power_menu(void)
@@ -2060,6 +2211,7 @@ void kui_screen_changed(int on)
             }
             nshown = 0;
         }
+        guest_view_sync();                      /* 1.2: the Linux view hidden with the screen */
     }
 }
 
@@ -2108,11 +2260,47 @@ static void power_menu_pick(int id)
     }
 }
 
+/* 1.2: input while the guest's frames are shown: touches to Linux, Volume and Bixby as its keys, held Bixby or
+ * a tap on the bottom bar home (the guest keeps running hidden; 60 s later it is stopped) */
+static void guest_kevent(const struct kin *ev)
+{
+    switch (ev->type) {
+    case KIN_PRESS:
+    case KIN_MOVE:
+    case KIN_RELEASE:
+        if (guest_input(ev->type, ev->x, ev->y))
+            break;
+        if (ev->type == KIN_PRESS && ev->y >= UI_H - 40)
+            kui_home();
+        break;
+    case KIN_UP:
+    case KIN_DOWN: {
+        unsigned code = ev->type == KIN_UP ? 115U : 114U;    /* KEY_VOLUMEUP / KEY_VOLUMEDOWN */
+        guest_key(code, 1);
+        guest_key(code, 0);
+        break;
+    }
+    case KIN_SELECT:
+        guest_key(158U, 1);                     /* KEY_BACK */
+        guest_key(158U, 0);
+        break;
+    case KIN_BACK:
+        kui_home();
+        break;
+    default:
+        break;
+    }
+}
+
 void ui_kevent(const void *evp)
 {
     const struct kin *ev = evp;
     if (screen == SCR_OFF)
         return;
+    if (screen == SCR_GUEST && guest_shown()) {
+        guest_kevent(ev);
+        return;
+    }
     if (ncur == 0 || dirty)
         build();
     switch (ev->type) {

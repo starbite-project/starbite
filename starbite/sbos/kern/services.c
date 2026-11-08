@@ -375,6 +375,7 @@ static void screen(int on)
     if (!aod)
         hw_screen(on);                      /* (the dim clock keeps the panel on, in its low-power mode) */
     kui_screen_changed(on);
+    guest_screen(on);                       /* 1.2: Linux told; 60 s with the screen off stops it */
     if (aod) {
         sb_mdelay(40);                      /* the clock's frame into the panel's RAM first */
         (void)panel_lpm(1);
@@ -517,6 +518,7 @@ void power_restart(int to_menu)
 {
     torch_set(0);
     wifi_power(0);                          /* the radio held in reset and unpowered before the reset */
+    guest_power_off();                      /* 1.2: Linux stopped; its last core powers the M3 cluster off (<= 1 s) */
     heater_stop_all("Restarting");
     heater_trip_restore_now();              /* 1.1: the chip's trip back on before any reset we make */
     sb_mdelay(200);
@@ -525,10 +527,24 @@ void power_restart(int to_menu)
     sb_boot_next("starbite-os");
 }
 
+/* 1.2-alpha1: the Linux self-test image's end: everything off as for a restart, then TWRP (pmsg) */
+void power_restart_recovery(void)
+{
+    torch_set(0);
+    wifi_power(0);
+    guest_power_off();
+    heater_stop_all("Restarting");
+    heater_trip_restore_now();
+    sb_mdelay(200);
+    sb_reboot(SB_INFORM_RECOVERY);
+    sb_boot_next("starbite-os");            /* (sb_reboot does not return) */
+}
+
 void power_off_now(void)
 {
     torch_set(0);
     wifi_power(0);
+    guest_power_off();                      /* 1.2: Linux stopped before the power goes */
     if (heater_running_ui()) {
         heater_stop_all("Switching off");   /* the hardware off first */
         settings_save_now();                /* 1.0-rc2: then the heat record ("stopped"), before the power goes */
