@@ -443,12 +443,42 @@ which must run after the reset. State: `Sched_Init` 0, `Sched_BoFail` 0, `Sched_
    half, sbx for Render/Patch/SubmitCommand. One aperture segment, `BuildPagingBuffer` map/unmap through
    sbg, fences from sbg_irq via `DxgkCbNotifyInterrupt`, `ResetFromTimeout` = sbg's recovery, preemption at
    DMA-buffer granularity, the WDDM 1.2 mandatory DDIs (offer/reclaim, Direct Flip) present.
-3. **The UMD build:** Mesa 26.2.x + the viogpu3d-lineage d3d10umd + a Panfrost winsys on sbx, cross-built
-   for aarch64-windows (clang-cl) in the lima VM. **Needs disk:** the Mac has about 2 GB free. A Mesa cross
-   build wants about 5-10 GB in the VM, whose disk lives on the Mac. Build on the iCloud overflow or after
-   space is freed.
+3. **The UMD build:** done for upstream 26.2.6 + wddm-mali-g52's patches (§6.7). Still to do: port the
+   viogpu3d lineage's WDDM present/allocation changes and replace g52's malikm shim with a winsys on sbx.
 4. **4a on the phone:** sbwddm + the UMD with softpipe first (proves the WDDM plumbing DWM needs without the
    GPU), then Panfrost: behind the kill file, the guard and a dead-man way back (no WARP fallback).
+
+### 6.7 The UMD build: Mesa 26.2.6 for Windows ARM64 (built 2026-11-08)
+
+`tools/win/mesa/build-mesa.sh` (README alongside) cross-builds Mesa 26.2.6 in the lima VM:
+- **Toolchain:** clang 18 in `cl` mode, lld-link, and the MSVC/SDK kit from `~/sbwin` (MSVC ABI, as the D3D
+  runtime needs). Hybrid CRT. The tarball is checked against the SHA-256 in Mesa's release notes.
+- **Patches:** wddm-mali-g52's 20 Mesa patches (GPL-2.0, vendored in `tools/win/mesa/g52/`) apply unchanged
+  to 26.2.6.
+- **Panfrost's precompiled kernels (libpan)** and the three build-time tools (`mesa_clc`, `vtn_bindgen2`,
+  `panfrost_compile`) come from a native Linux build of the same patched tree with LLVM 18. The Windows
+  cross build uses them through `-Dmesa-clc=system -Dprecomp-compiler=system`. That is what makes a cross
+  build possible: wddm-mali-g52 built natively on a Windows ARM64 runner.
+
+Results, with zero failed steps in each:
+- `libgallium_d3d10-softpipe.dll` (10 MB)
+- `libgallium_d3d10-panfrost.dll` (13 MB, softpipe + Panfrost including the Mali-G72 model)
+
+Both are ARM64, export `OpenAdapter10` / `OpenAdapter10_2`, and import only GDI32, KERNEL32, USER32 and the
+in-box UCRT. The Panfrost build looks for the GPU as wddm-mali-g52's `\\.\MaliG52` device or a maliwddm
+adapter. When it finds neither it says "Panfrost found no Mali device, using softpipe". Our device side
+(sbwddm / sbx) will replace patches 0014/0015/0019 and `malikm_drm.c`.
+
+**T11a (phone, user mode only, nothing installed, GPU untouched):** `triangle.exe` (wddm-mali-g52's test,
+built with tools/win/build.sh) creates a D3D11 device at feature level 10_0 on each DLL as a *software
+adapter*, draws a red triangle on blue, and checks two pixels. Exit 0 = right. Proves the cross-built UMD
+loads in the phone's D3D runtime and renders (softpipe), and that the Panfrost build falls back cleanly.
+Staged in `build/win/stage/mesa-t11a/` with SHA256SUMS. `starbite/win/autotest/d3dtest.ps1` runs both with
+a 180 s limit each (autotest `--robust` hook, or by hand).
+
+Disk: the VM work tree is about 1.3 GB (src 504 MB, build-panfrost 161 MB, LLVM packages); the build dirs
+were cleaned after copying the outputs out. The pristine extract `~/sbmesa/mesa-26.2.6` (392 MB) is
+redundant and can go.
 
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
