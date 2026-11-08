@@ -940,6 +940,15 @@ Results land in `pre/gputest/`.
 - **T13n:** sbtex feeds positions from a vertex buffer, and the SV_VertexID variant runs last as a known gap.
 - **Unexplained, in every process:** one early job fails with JS 0x51.
 
+**cycle-t13n-1 (23:48):** sbtex hw passed all 9 tests on the Mali, so texturing works. The suspect is now the
+runtime-backed surfaces (sb-patches/0103): shared window surfaces and presented primaries. Every one of them
+read black in the KMD.
+
+**T13o:** `tools/win/mesa/tests/sbshare.cpp`, a shared B8G8R8A8 texture tested two ways:
+- **In one process:** cleared, drawn into, read back, against a plain texture as the control.
+- **Across two processes, as DWM:** the second process opens it, copies it, samples it, and sees a later clear
+  by the producer.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
