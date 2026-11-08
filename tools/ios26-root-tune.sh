@@ -10,6 +10,10 @@
 #   4. sboverlay.py + tools/overlay/card-overlay.sh: queued on the card (read back)
 #   tools/ios26-root-tune.sh            collect + tune + queue
 #   tools/ios26-root-tune.sh --collect  collect only (nothing written)
+#   TUNE=prefs ...                      only the Accessibility prefs (launchd.plist untouched)
+#   TUNE=launchd-log ...                prefs + launchd.plist with only the PosterBoard log (no job removed)
+#   TUNE=full ... (default)             prefs + PosterBoard log + jobs in starlte-disabled-ios26-b.list out
+#   (T3 2026-11-08 17:06: TUNE=full's launchd.plist ended in "No service cache": bisect with these)
 #   tools/ios26-root-tune.sh --undo DIR re-queue the launchd.plist (+ launchd-disabled.plist if the root had
 #                                       one) pulled into DIR (a <time>-ios26collect folder) before the tune:
 #                                       installed at the next iOS 26 boot, as the tune was
@@ -44,13 +48,25 @@ D="$out/System__Library__xpc__launchd-disabled.plist"
 A="$out/private__var__mobile__Library__Preferences__com.apple.Accessibility.plist"
 [ -s "$A" ] || A=-
 [ -s "$D" ] || D=-
-logs=(--log PosterBoard); for n in ${LOG:-}; do logs+=(--log "$n"); done
-python3 tools/ios26-launchd-tune.py "$L" "$D" "$out/tune" --off-list tools/starlte-disabled-ios26-b.list "${logs[@]}"
+mode=${TUNE:-full}
+mkdir -p "$out/tune"
+files=()
+case "$mode" in
+prefs) ;;
+launchd-log)
+    python3 tools/ios26-launchd-tune.py "$L" "$D" "$out/tune" --log PosterBoard
+    files+=("$out/tune/launchd.plist=/System/Library/xpc/launchd.plist:644") ;;
+full)
+    logs=(--log PosterBoard); for n in ${LOG:-}; do logs+=(--log "$n"); done
+    python3 tools/ios26-launchd-tune.py "$L" "$D" "$out/tune" --off-list tools/starlte-disabled-ios26-b.list "${logs[@]}"
+    files+=("$out/tune/launchd.plist=/System/Library/xpc/launchd.plist:644"
+            "$out/tune/launchd-disabled.plist=/System/Library/xpc/launchd-disabled.plist:644") ;;
+*) echo "TUNE=$mode: prefs | launchd-log | full"; exit 1 ;;
+esac
 python3 tools/ios26-prefs-tune.py "$A" "$out/tune/com.apple.Accessibility.plist" \
     ReduceMotionEnabled=1 EnhancedBackgroundContrastEnabled=1 | tee -a "$out/tune/report.txt"
-python3 tools/overlay/sboverlay.py "$out/overlay.bin" \
-    "$out/tune/launchd.plist=/System/Library/xpc/launchd.plist:644" \
-    "$out/tune/launchd-disabled.plist=/System/Library/xpc/launchd-disabled.plist:644" \
-    "$out/tune/com.apple.Accessibility.plist=/private/var/mobile/Library/Preferences/com.apple.Accessibility.plist:600:501:501"
+files+=("$out/tune/com.apple.Accessibility.plist=/private/var/mobile/Library/Preferences/com.apple.Accessibility.plist:600:501:501")
+echo "TUNE=$mode" >> "$out/tune/report.txt"
+python3 tools/overlay/sboverlay.py "$out/overlay.bin" "${files[@]}"
 tools/overlay/card-overlay.sh "$out/overlay.bin"
 echo "queued for the next iOS 26 boot (0401+ kernel): $out/tune/report.txt; undo: tools/ios26-root-tune.sh --undo $out"
