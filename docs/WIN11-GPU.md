@@ -641,6 +641,49 @@ the Bifrost compiler for 0x6221) and comes next.
 process ends. An abort() cannot be turned into a returned error: it happens deep in shader translation, which
 has no error path back to the D3D runtime.
 
+### 6.11 T13c: DWM runs on the Mali; LogonUI and every present do not (2026-11-08 20:02)
+
+`build/win/results/t13c`. The hive had to be replayed from SYSTEM.LOG1/LOG2 (tools/woa/hive-replay.py): the
+Live_ values are lazily flushed.
+
+**The GPU side works** (Live_, 113 s):
+- 1,912 GPU jobs done, 0 failed, 0 timed out, no MMU fault, no reset.
+- 2,124 fences submitted and 2,124 completed, 1,910 interrupts: the StarbiteGpu4 lines work.
+- 352 maps, 374 allocations, 7,597 emulated vsyncs.
+
+The texture fix of §6.10 held: no DWM crash. DWM's umdlog shows it submitting work the whole time.
+
+**Nothing reached the panel:**
+- DWM's log has **241 × "pfnPresentCb failed"**. g52's present path (patch 0019, `malikm_present_d3dddi`)
+  copies the frame on the CPU into a private allocation and calls `pfnPresentCb` with only a source: no
+  destination allocation and no tie to the presented resource. That does for a test window in WinPE, not
+  for the compositor.
+- Only 2 flips and 1 flip copy happened.
+- Upstream d3d10umd was written for software rasterizers:
+  - `OpenResource` is `LOG_UNSUPPORTED` + `E_OUTOFMEMORY`;
+  - `CreateResource` ignores MISC_SHARED;
+  - no allocation is ever associated with the runtime's resource handle.
+- **LogonUI crash-looped** (12 new WER reports: combase.dll, E_INVALIDARG, fail-fast) right after creating its
+  1024×1024 shared BGRA surface (bind SRV+RT+PRESENT, misc SHARED). A shared resource with no
+  resource-associated allocation has nothing the runtime could share.
+
+**The guard was wrong:** it counted flips + any present-blt (212) and marked the boot healthy, so
+FullGuardBoots went back to 0. It now requires frames that reached the panel (flip copies + blts into the
+primary, `Live_PrimaryBlts`).
+
+**T13d, from the working design of arehnman/virtio-win-mesa** (branch yttrium-experimental, read
+2026-11-08):
+- **CreateResource** hands the runtime's resource handle (and primary/VidPn) to the winsys before
+  `resource_create`, so the allocation is made with `hResource = hRTResource` (+ `Flags.Primary`,
+  `VidPnSourceId`). Shared, present and primary resources get dedicated linear BOs.
+- **Present** passes the source and destination resources' own allocations (no CPU readback) with
+  `pDXGIContext` and the context.
+- **OpenResource** imports the shared allocation (its handle and private data; GPU address via
+  MW_ESCAPE_ALLOC_INFO).
+- **SetDisplayMode** goes through `pfnSetDisplayModeCb`.
+- **KMD:** UMD primaries are treated as primaries. A present's CPU copy waits for its turn in the queue (it ran
+  at SubmitCommand, possibly before the GPU had finished the source).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

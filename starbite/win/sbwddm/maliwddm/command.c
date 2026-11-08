@@ -209,6 +209,7 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
     ULONG n = Op->NumRects ? Op->NumRects : 1;
 
     if (Op->Dst != NULL && (Op->Dst->Flags & MW_ALLOC_PRIMARY) && A->FbVa != NULL) {
+        A->PrimaryBlts++;                 /* S9 port: this one reaches the panel */
         dst = A->FbVa;
         dstW = (LONG)A->Fb.Width;
         dstH = (LONG)A->Fb.Height;
