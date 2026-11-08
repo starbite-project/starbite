@@ -29,6 +29,7 @@ ap.add_argument('--profile', choices=['s9', 'qemu'], required=True)
 ap.add_argument('--rd-size', type=lambda s: int(s, 0), default=0)
 ap.add_argument('--db-guest', type=lambda s: int(s, 0), default=0, help='INTID of the host->guest doorbell SPI')
 ap.add_argument('--bootargs-extra', default='')
+ap.add_argument('--psci01', action='store_true', help='qemu: the S9-style PSCI 0.1 node (listed ids)')
 ap.add_argument('out')
 a = ap.parse_args()
 
@@ -56,11 +57,11 @@ else:
     timer_freq = ''
     compat = 'arm,cortex-a53'
 
-if a.profile == 's9':
+if a.profile == 's9' or a.psci01:
     # the S9's own node (exynos9810-starlte.dtb): PSCI 0.1, function ids listed. Linux then has no PSCI
     # SYSTEM_OFF / SYSTEM_RESET at all: a guest power off or panic can never switch off or reset the phone.
     # No cpu_suspend: no cpuidle states here (the M3s idle in WFI; cluster power-down is docs 8, later).
-    psci_body = ('\t\tcompatible = "arm,psci";\n\t\tmethod = "smc";\n'
+    psci_body = (f'\t\tcompatible = "arm,psci";\n\t\tmethod = "{conduit}";\n'
                  '\t\tcpu_off = <0x84000002>;\n\t\tcpu_on = <0xc4000003>;')
 else:
     # QEMU's PSCI 1.0 (it has SYSTEM_OFF: sbguest.ko's handlers must win, run-qemu.sh "nomod" shows why)

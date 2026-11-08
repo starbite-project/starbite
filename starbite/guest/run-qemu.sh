@@ -11,7 +11,7 @@
 #   patched    IMAGE=<kernel with linux/0001-*.patch> + sbguest.ko, strict (no line may be lost) -- PASS
 #   stub       no Linux: the phone probe's M3 stub (probe/m3stub.S, HVC build) on CPUs 4..7 -- PASS
 # Environment: IMAGE (default: the build tree's Image), WORK (default /mnt/build/sbguest), RUNS (2),
-# TIMEOUT (QEMU wall clock, 900 s), SURF (720x1440).
+# TIMEOUT (QEMU wall clock, 900 s), SURF (720x1440), PSCI01=1 (the guest gets the S9-style PSCI 0.1 node).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 scen=${1:-repair}
@@ -48,8 +48,13 @@ cp "$BUSYBOX" rd/bin/busybox
 cp "$here/initramfs/init" rd/init
 chmod +x rd/init rd/guestd rd/bin/busybox
 mkdir -p rd/proc rd/sys rd/dev
-(cd rd && find . | sort | cpio -o -H newc --quiet --owner=0:0 | gzip -9) > out/initrd.cpio.gz
+find rd -exec touch -h -d @0 {} +       # reproducible: fixed mtimes, no gzip name / time
+(cd rd && find . | sort | cpio -o -H newc --quiet --owner=0:0 --reproducible | gzip -9 -n) > out/initrd.cpio.gz
 
+if [ "${BUILD_ONLY:-0}" = 1 ]; then    # probe/build.sh: guestd, sbguest.ko and the initramfs only
+    echo "== built: $WORK/out/initrd.cpio.gz"
+    exit 0
+fi
 extra=""
 flags=0
 case "$scen" in
@@ -63,7 +68,7 @@ esac
 echo "== guest DTB ($scen)"
 rdsize=$(stat -c %s out/initrd.cpio.gz)
 python3 "$here/mk-guest-dts.py" --profile qemu --rd-size "$rdsize" --db-guest $DB_GUEST \
-    --bootargs-extra "$extra" out/guest.dts
+    --bootargs-extra "$extra" ${PSCI01:+--psci01} out/guest.dts
 dtc -q -I dts -O dtb -o out/guest.dtb out/guest.dts
 
 echo "== store ($IMAGE)"

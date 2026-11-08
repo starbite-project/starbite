@@ -18,7 +18,7 @@ Code: `starbite/guest/` (all new, owned by this work).
 | `guestd/guestd.c` | guest user space: maps the region, draws the demo app, uinput, stop |
 | `initramfs/init` | the guest's init (busybox) |
 | `sbsim/` | Starbite OS's stand-in on QEMU; `run-qemu.sh` builds everything and runs the scenarios |
-| `probe/` | P1 phone probe (libsb payload): carve-out, doorbell lines, the M3 stub on all four cores |
+| `probe/` | phone payloads on libsb: P1 (carve-out, doorbell lines, the M3 stub on all four cores), P2 (Linux on the M3s) |
 
 ## 1. What is proven, what is not
 
@@ -182,6 +182,7 @@ with the MMU off, polls the GIC as Starbite OS does, and drives the guest throug
 | Scenario | Guest | Expect | Result (2026-11-08) |
 |---|---|---|---|
 | `repair` | stock S9 Image + sbguest.ko, host re-asserts lines | PASS | **PASS**: 2/2 boots, touch ok, cluster off 389/465 ms, lines taken 4 re-asserted 4, own SPI lost 0 |
+| `patched` + `PSCI01=1` | as `patched`, with the S9-style PSCI 0.1 node (listed ids, no SYSTEM_OFF) | PASS | **PASS**: secondaries via 0.1 `cpu_on`, cluster off 76/78 ms, HELLO 2.0/1.8 s (idle VM) |
 | `stub` | none: the probe's M3 stub on CPUs 4..7 | PASS | **PASS**: x0 = context id (direct) / DTB literal (trampoline), cpuif 0x10..0x80, doorbell after 1 WFI, host doorbell back, off |
 | `patched` | Image with the GIC patch + sbguest.ko, strict | PASS | **PASS**: 2/2 boots (HELLO 7.0 / 6.0 s under load), touch ok, cluster off 356/249 ms, host lines taken 0, own SPI lost 0, `GIC: shared distributor ... CTLR 0x1 left as found` |
 | `mod` | stock + sbguest.ko, no repair | FAIL (the hazard) | (shown by `repair`'s log: lines taken) |
@@ -205,10 +206,13 @@ driver is upstream's, so this Image can replace the daily one once the phone sta
   interface bit, WFI wake by the doorbell, host doorbell back, CPU_OFF); afterwards AFFINITY_INFO and the
   cluster's PMU state. About 15 s, the loader's watchdog fed, then a restart into recovery. Pass: `gprobe:
   RESULT PASS`, 4/4 cores and 2 doorbells.
-- **P2 — Linux on the M3s, no Starbite OS** (next): the probe plus `sbghost` (with a libsb shim) boots the S9
-  Image (patched) with `mk-guest-dts.py --profile s9` and the initramfs from the OS store, streams the guest's
-  log into pmsg, shows the surface on the panel at 2×, sends a scripted tap, stops the guest and checks the
-  cluster is off.
+- **P2 — Linux on the M3s, no Starbite OS** (`probe/p2.c`, staged, gated on P1): a 27 MiB libsb payload with
+  the guest inside (`p2blob.S`: the GIC-patched S9 Image, the `--profile s9` DTB, the initramfs). `sbghost` with
+  a libsb shim (`sb_psci`, `sb_m3_on`, `sb_m3_pmu_defaults`, pmsg) loads and starts it, forwards up to 60
+  filtered guest log lines into pmsg (it holds 16 KB) and the tail on a failure, composites the surface at 2× onto
+  the panel between the bars (720×1440 → 1440×2880 + 2 × 40), sends a scripted tap, shows the app for 8 s,
+  stops the guest and checks the cluster's PMU state. Doorbells off (polling) until P1 names the lines
+  (`P2_DB_GUEST` / `P2_DB_HOST`). Reproducible (`build.sh p2` twice, same hash).
 - **P3 — inside Starbite OS** (with the starbite-os session): `kern/guest.c` = the `sbghost` shim (`hw_m3_prep`,
   `sb_psci`, `sb_m3_on`, the kernel log); the surface element; touch routing with focus; the `hw_spi` byte-write
   change; a launcher tile ("Linux") that starts and stops the guest.
