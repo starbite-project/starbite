@@ -23,7 +23,7 @@ export SB_SIGN_CERT=${SB_SIGN_CERT:-$main/build/woa/ufs-sys/sign/starbite-test.c
 LIBS="displib.lib ntstrsafe.lib libcntpr.lib" \
     "$win/build.sh" wdm "$out/sbdisplay.sys" "$here/sbdisplay/sbdisplay.c" "$here/sbdisplay/sbdc_core.c"
 
-"$win/build.sh" kmdf "$out/sbmali.sys" "$here/sbmali/sbmali.c" "$here/sbmali/sbm_core.c" "$here/common/sbw_acpm.c"
+"$win/build.sh" kmdf "$out/sbmali.sys" "$here/sbmali/sbmali.c" "$here/sbmali/sbm_core.c" "$here/sbmali/sbg_core.c" "$here/common/sbw_acpm.c"
 
 cp "$here/sbdisplay/sbdisplay.inf" "$here/sbmali/sbmali.inf" "$out/"
 "$win/sign.sh" "$out/sbthermal.sys" "$out/sbdisplay.sys" "$out/sbmali.sys"

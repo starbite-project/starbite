@@ -25,6 +25,7 @@
 #include <ntddk.h>
 #include <wdf.h>
 #include "sbm_core.h"
+#include "sbg_core.h"
 #include "../sbthermal/sbth_core.h"
 
 /* T8's triangle: XNU's Mesa-built blob (proven on this phone under iOS). The generated header uses uint32_t. */
@@ -54,6 +55,8 @@ typedef struct _SM_CTX {
     ULONG GpuPllMax;                      /* the highest PLL_G3D read back after a raise */
     PMDL HeapMdl, RtMdl;                  /* T8: the blob's tiler heap (16 MiB) and its render-target window */
     PVOID RtVa;                           /* CPU view of the render-target window (uncached) */
+    PMDL SchedMdl;                        /* T12: the scheduler test's blob, job and result pages */
+    PVOID SchedVa;
     UCHAR BuckOld;
     BOOLEAN GpuTouched;
     PCALLBACK_OBJECT Cb;                  /* \Callback\StarbiteThermal, opened by the thread */
@@ -325,6 +328,201 @@ static int MapExtra(void *Ctx, struct sbm_pt *Pt)
     return MapMdl(Pt, SM_TRI_RT_LO, c->RtMdl) || MapMdl(Pt, SG_TRI_HEAP_VA, c->HeapMdl) ? -1 : 0;
 }
 
+/* ---- T12: the stage-4 scheduler (sbg_core) on the real GPU, polled ------------------------------- */
+
+#define SM_SCHED_PAGES 64U
+#define SM_SCHED_WV 8U
+
+static void MdlPas(PMDL Mdl, ULONG First, ULONG N, sbm_u64 *Pa)
+{
+    PPFN_NUMBER p = MmGetMdlPfnArray(Mdl);
+    for (ULONG i = 0; i < N; i++)
+        Pa[i] = (sbm_u64)p[First + i] << PAGE_SHIFT;
+}
+
+static ULONG64 NowUs(void)
+{
+    return KeQueryInterruptTime() / 10;
+}
+
+/* Poll until seq completes (sbg_tick handles a hang). 0 = completed (any status), -1 = gave up. */
+static int SchedWait(struct sbg *G, sbm_u64 Seq, ULONG64 MaxUs)
+{
+    ULONG64 t0 = NowUs();
+    while (!sbg_seq_done(G, Seq)) {
+        (void)sbg_irq(G, NowUs());
+        if (sbg_seq_done(G, Seq))
+            break;
+        (void)sbg_tick(G, NowUs());
+        if (NowUs() - t0 > MaxUs)
+            return -1;
+        KeStallExecutionProcessor(10);
+    }
+    return 0;
+}
+
+/* Rounds of 8 WRITE_VALUE chains (slots 0/1 alternating) + XNU's triangle (tiler on slot 1, fragment on
+ * slot 0), all queued at once and completed through the scheduler; buffers made of scattered Windows pages;
+ * then one deliberate MMU fault (a chain at an address nothing maps) followed by a chain from another context,
+ * which must run after the reset. Logs Sched_* in State. */
+static void SchedTest(PSM_CTX c, const struct sbm_info *Inf, struct sbth_state *Last, ULONG GpuKhz)
+{
+    struct sbg *g = NULL;
+    sbm_u64 *pa = NULL, jva = 0, ova = 0, va;
+    ULONG rounds = Param(L"SchedRuns", 100), ok = 0, done = 0, badpx = 0, mism = 0, px0 = 0, maxus = 0, level, n;
+    /* the blob's window as T8 mapped it: [SBM_TEST_VA, + 64 KiB), the blob at SG_TRI_BLOB_VA inside it (the draw
+     * writes scratch above the blob, 0x200C200..0x200C800) */
+    ULONG bn = SBM_TEST_DATA_BYTES / 4096U, boff = (ULONG)(SG_TRI_BLOB_VA - SBM_TEST_VA);
+    enum sbm_fmt fmt = Param(L"SchedFmt", 1) ? SBM_FMT_AARCH64 : SBM_FMT_LEGACY;
+    PUCHAR cpu = (PUCHAR)c->SchedVa;
+    volatile ULONG *jobs, *rt;
+    volatile ULONG64 *out;
+    int rc;
+
+    Step(8);
+    if (!c->SchedMdl || !cpu || !c->HeapMdl || !c->RtMdl || !c->RtVa || bn + 2 > SM_SCHED_PAGES) {
+        Log(L"Sched_Init", 0xfffffff0U, TRUE);
+        return;
+    }
+    if (rounds > 2000)
+        rounds = 2000;
+    g = (struct sbg *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*g), 'gsbS');
+    pa = (sbm_u64 *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(sbm_u64) * 4096, 'gsbS');
+    if (!g || !pa) {
+        Log(L"Sched_Init", 0xfffffff1U, TRUE);
+        goto free;
+    }
+    c->GpuTouched = TRUE;
+    rc = sbg_init(g, &c->Io, fmt, Inf->shader_present, (volatile sbm_u64 *)c->Mem, (sbm_u64)c->MemPa.QuadPart,
+                  SBM_TEST_BYTES / 0x1000U);
+    Log(L"Sched_Init", (ULONG)rc, TRUE);
+    if (rc)
+        goto fini;
+    g->timeout_us = 500000;
+
+    MdlPas(c->SchedMdl, 0, bn, pa);
+    va = SBM_TEST_VA;
+    rc = sbg_bo_create(g, pa, bn, SBG_BO_FIXED, &va) < 0;
+    MdlPas(c->SchedMdl, bn, 1, pa);
+    rc |= (sbg_bo_create(g, pa, 1, 0, &jva) < 0) << 1;
+    MdlPas(c->SchedMdl, bn + 1, 1, pa);
+    rc |= (sbg_bo_create(g, pa, 1, SBG_BO_NOEXEC, &ova) < 0) << 2;
+    MdlPas(c->HeapMdl, 0, SG_TRI_HEAP_BYTES / 4096U, pa);
+    va = SG_TRI_HEAP_VA;
+    rc |= (sbg_bo_create(g, pa, SG_TRI_HEAP_BYTES / 4096U, SBG_BO_FIXED | SBG_BO_NOEXEC, &va) < 0) << 3;
+    n = MmGetMdlByteCount(c->RtMdl) / PAGE_SIZE;
+    MdlPas(c->RtMdl, 0, n, pa);
+    va = SM_TRI_RT_LO;
+    rc |= (sbg_bo_create(g, pa, n, SBG_BO_FIXED | SBG_BO_NOEXEC, &va) < 0) << 4;
+    Log(L"Sched_BoFail", (ULONG)rc, TRUE);
+    if (rc)
+        goto fini;
+    jobs = (volatile ULONG *)(cpu + bn * 4096U);
+    out = (volatile ULONG64 *)(cpu + (bn + 1) * 4096U);
+    rt = (volatile ULONG *)((PUCHAR)c->RtVa + (SM_TRI_RT_VA - SM_TRI_RT_LO));
+
+    for (ULONG r = 0; r < rounds; r++) {
+        sbm_u64 seq = 0;
+        ULONG64 t0;
+        ULONG gate, want, color = 0, bad = 0, wvok = 1;
+        sbm_u32 w[16];
+        gate = ThermalGate(&c->Cb, Last, &level);
+        if (gate || level >= SBTH_STOP) {
+            Log(L"Sched_ThermalStop", GateCode(gate, level), TRUE);
+            break;
+        }
+        want = level == SBTH_HOT ? 260000 : level == SBTH_WARM ? 338000 : GpuKhz;
+        if (GpuKhz && want > GpuKhz)
+            want = GpuKhz;
+        if (GpuKhz && want != c->GpuKhzNow && SetGpuClock(c, want, FALSE)) {
+            Log(L"Sched_ThermalStop", 30, TRUE);
+            break;
+        }
+        for (ULONG i = 0; i < bn * 1024U; i++)
+            ((volatile ULONG *)cpu)[i] = 0;                /* the window as T8 had it: zero */
+        for (ULONG i = 0; i < SG_TRI_BLOB_WORDS; i++)
+            ((volatile ULONG *)(cpu + boff))[i] = sg_tri_blob[i];   /* fresh: the GPU rewrites its descriptors */
+        for (ULONG y = 0; y < SG_TRI_FB_H; y++)
+            for (ULONG x = 0; x < SG_TRI_FB_W; x++)
+                rt[y * (SM_TRI_RT_STRIDE / 4U) + x] = 0xa5a5a5a5U;
+        for (ULONG i = 0; i < SM_SCHED_WV; i++) {
+            sbm_write_value(w, 1, 0, ova + 8U * i, SBM_WV_IMM64, (sbm_u64)r << 32 | 0x5c000000U | i);
+            for (ULONG k = 0; k < 16; k++)
+                jobs[16 * i + k] = w[k];
+            out[i] = 0;
+        }
+        t0 = NowUs();
+        for (ULONG i = 0; i < SM_SCHED_WV; i++)
+            (void)sbg_submit(g, i & 1U, jva + 64U * i, 1, NowUs(), &seq);
+        (void)sbg_submit(g, 1, SG_TRI_BLOB_VA + SG_TRI_TILER_JOB, 1, NowUs(), &seq);
+        (void)sbg_submit(g, 0, SG_TRI_BLOB_VA + SG_TRI_FRAG_JOB, 1, NowUs(), &seq);
+        if (SchedWait(g, seq, 1000000) || g->guilty) {
+            Log(L"Sched_RoundFailed", r, TRUE);
+            done++;
+            break;
+        }
+        if (NowUs() - t0 > maxus)
+            maxus = (ULONG)(NowUs() - t0);
+        for (ULONG i = 0; i < SM_SCHED_WV; i++)
+            wvok &= out[i] == ((sbm_u64)r << 32 | 0x5c000000U | i);
+        for (ULONG y = 0; y < SG_TRI_FB_H; y++)
+            for (ULONG x = 0; x < SG_TRI_FB_W; x++) {
+                ULONG v = rt[y * (SM_TRI_RT_STRIDE / 4U) + x];
+                if (v == SG_TRI_COLOR)
+                    color++;
+                else if (v != SG_TRI_CLEAR)
+                    bad++;
+            }
+        if (!px0)
+            px0 = color;
+        mism += color != px0;
+        badpx += bad;
+        ok += wvok && !bad && color && color == px0;
+        done++;
+        if (r % 10 == 9)
+            Log(L"Sched_RoundsDone", done, TRUE);
+    }
+    Log(L"Sched_Rounds", done, FALSE);
+    Log(L"Sched_Ok", ok, FALSE);
+    Log(L"Sched_TriPx", px0, FALSE);
+    Log(L"Sched_TriMismatch", mism, FALSE);
+    Log(L"Sched_TriBadPx", badpx, FALSE);
+    Log(L"Sched_MaxRoundUs", maxus, TRUE);
+
+    /* the deliberate fault, then another context's chain */
+    if (Param(L"SchedFault", 1) && done == rounds) {
+        sbm_u64 sf = 0, s3 = 0;
+        sbm_u32 w[16];
+        ULONG f0 = g->faults;
+        sbm_write_value(w, 1, 0, ova + 0x100U, SBM_WV_IMM64, 0x5c5c5c5c5c5c5c5cULL);
+        for (ULONG k = 0; k < 16; k++)
+            jobs[0x40 + k] = w[k];
+        out[0x20] = 0;
+        (void)sbg_submit(g, 1, 0x7ff00000ULL, 2, NowUs(), &sf);
+        (void)sbg_submit(g, 1, jva + 0x100U, 3, NowUs(), &s3);
+        rc = SchedWait(g, s3, 1500000);
+        Log(L"Sched_FaultTest", !rc && g->faults == f0 + 1 && g->bad.ctx == 2 && g->bad.seq == sf &&
+                                (g->guilty & 4U) && out[0x20] == 0x5c5c5c5c5c5c5c5cULL ? 1u : 0u, FALSE);
+        Log(L"Sched_BadStatus", (ULONG)g->bad.status, FALSE);
+        Log(L"Sched_BadAsFault", g->bad.as_fault, FALSE);
+        Log(L"Sched_BadAddrLo", (ULONG)g->bad.fault_addr, FALSE);
+        Log(L"Sched_BadJsStatus", g->bad.js_status, TRUE);
+    }
+fini:
+    Log(L"Sched_Starts", g->starts, FALSE);
+    Log(L"Sched_Faults", g->faults, FALSE);
+    Log(L"Sched_Timeouts", g->timeouts, FALSE);
+    Log(L"Sched_Resets", g->resets, FALSE);
+    Log(L"Sched_ResetFail", g->reset_fail, FALSE);
+    Log(L"Sched_Skipped", g->skipped, TRUE);
+    sbg_fini(g);
+free:
+    if (pa)
+        ExFreePoolWithTag(pa, 'gsbS');
+    if (g)
+        ExFreePoolWithTag(g, 'gsbS');
+}
+
 static VOID SmThread(PVOID Ctx)
 {
     PSM_CTX c = (PSM_CTX)Ctx;
@@ -483,6 +681,8 @@ static VOID SmThread(PVOID Ctx)
         if (gate)
             break;
     }
+    if (!gate && Param(L"Sched", 1))
+        SchedTest(c, &inf, &last, gpukhz);
     Log(L"GpuMilliCEnd", (ULONG)last.gpu_mc, FALSE);
     Log(L"GpuMaxMilliC", (ULONG)last.max_gpu_mc, FALSE);
     Log(L"Throttles", throttles, FALSE);
@@ -569,7 +769,12 @@ static NTSTATUS StartHw(PSM_CTX c, BOOLEAN Standalone)
         if (c->RtMdl)
             c->RtVa = MmMapLockedPagesSpecifyCache(c->RtMdl, KernelMode, MmNonCached, NULL, FALSE,
                                                    NormalPagePriority | MdlMappingNoExecute);
-        Log(L"TriAlloc", (c->HeapMdl ? 1u : 0u) | (c->RtMdl ? 2u : 0u) | (c->RtVa ? 4u : 0u), FALSE);
+        c->SchedMdl = MmAllocatePagesForMdlEx(l, hgh, sk, SM_SCHED_PAGES * PAGE_SIZE, MmNonCached, MM_ALLOCATE_FULLY_REQUIRED);
+        if (c->SchedMdl)
+            c->SchedVa = MmMapLockedPagesSpecifyCache(c->SchedMdl, KernelMode, MmNonCached, NULL, FALSE,
+                                                      NormalPagePriority | MdlMappingNoExecute);
+        Log(L"TriAlloc", (c->HeapMdl ? 1u : 0u) | (c->RtMdl ? 2u : 0u) | (c->RtVa ? 4u : 0u) |
+                         (c->SchedMdl ? 8u : 0u) | (c->SchedVa ? 16u : 0u), FALSE);
     }
     Log(L"MemPaLo", (ULONG)c->MemPa.QuadPart, FALSE);
     Log(L"MemPaHi", (ULONG)(c->MemPa.QuadPart >> 32), TRUE);
@@ -655,6 +860,15 @@ static void StopHw(PSM_CTX c)
         MmFreePagesFromMdl(c->HeapMdl);
         ExFreePool(c->HeapMdl);
         c->HeapMdl = NULL;
+    }
+    if (c->SchedVa) {
+        MmUnmapLockedPages(c->SchedVa, c->SchedMdl);
+        c->SchedVa = NULL;
+    }
+    if (c->SchedMdl) {
+        MmFreePagesFromMdl(c->SchedMdl);
+        ExFreePool(c->SchedMdl);
+        c->SchedMdl = NULL;
     }
     Unmap(c);
 }

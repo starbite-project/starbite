@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../sbmali/sbm_core.h"
+#include "../sbmali/sbg_core.h"
 #include "../common/sbw_acpm.h"
 #include "../../../xnu/src/starlte_gpu_tri.h"
 
@@ -42,6 +43,10 @@ struct fake {
     struct { uint64_t pa, size; uint8_t *host; } region[2];   /* extra memory: render target, tiler heap */
     uint32_t tri_clear, tri_color;        /* the fake rasteriser paints x < y in tri_color on this clear */
     int tiler_jobs;
+    /* scheduler tests: jobs start on START but run only in fake_gpu_run(); hang = they never do */
+    int defer, hang;
+    unsigned pending;
+    int starts_while_busy, soft_resets, hard_stops, as_cmds;
 };
 
 static struct fake F;
@@ -244,7 +249,7 @@ static void f_wr(void *ctx, unsigned b, unsigned off, uint32_t v)
     }
     switch (off) {
     case 0x024: R(0x020) &= ~v; return;                       /* GPU_IRQ_CLEAR */
-    case 0x030: if (v == 1) R(0x020) |= 0x100; return;        /* SOFT_RESET -> RESET_COMPLETED */
+    case 0x030: if (v == 1) { R(0x020) |= 0x100; F.soft_resets++; F.pending = 0; } return;   /* SOFT_RESET */
     case 0x180: R(0x140) |= v; return;
     case 0x190: R(0x150) |= v; return;
     case 0x1a0: R(0x160) |= v; return;
@@ -255,9 +260,22 @@ static void f_wr(void *ctx, unsigned b, unsigned off, uint32_t v)
     case 0x2004: R(0x2000) &= ~v; return;
     }
     if (off >= 0x1800 && off < 0x1980 && (off & 0x7f) == 0x60 && v == 1) {
-        run_job((off - 0x1800) / 0x80);
+        unsigned js = (off - 0x1800) / 0x80;
+        if (F.defer) {
+            if (F.pending)
+                F.starts_while_busy++;
+            F.pending |= 1u << js;
+        } else {
+            run_job(js);
+        }
         return;
     }
+    if (off >= 0x1800 && off < 0x1980 && (off & 0x7f) == 0x20 && v == 3) {
+        F.hard_stops++;
+        F.pending &= ~(1u << ((off - 0x1800) / 0x80));
+    }
+    if (off == AS0 + 0x18)
+        F.as_cmds++;
     if (off == AS0 + 0x18 && v == 2)
         snprintf(F.lockaddr, sizeof(F.lockaddr), "%08x%08x", R(AS0 + 0x14), R(AS0 + 0x10));
     if (off < sizeof(F.gpu))
@@ -278,6 +296,227 @@ static void fake_init(uint8_t *mem)
     R(0x120) = 1;
     F.pmic[1][SBM_BUCK6_REG] = 0x33;
     acpm_init();
+}
+
+static void fake_gpu_run(void)
+{
+    if (F.hang)
+        return;
+    for (unsigned js = 0; js < 3; ++js)
+        if (F.pending & (1u << js)) {
+            F.pending &= ~(1u << js);
+            run_job(js);
+        }
+}
+
+/* ---- the scheduler (sbg_core) on the fake: buffer pages from a pool at POOL_PA ---- */
+#define POOL_PA 0x900000000ULL
+#define POOL_BYTES (48u << 20)
+static uint8_t *pool;
+static uint64_t pool_used;                /* pages */
+
+/* n pages; reversed = handed out last-first, so a buffer is never physically contiguous */
+static void pool_pages(uint64_t *pa, unsigned n, int reversed)
+{
+    for (unsigned i = 0; i < n; ++i)
+        pa[reversed ? n - 1 - i : i] = POOL_PA + (pool_used + i) * 4096;
+    pool_used += n;
+}
+
+static void bo_put(const uint64_t *pa, uint64_t off, const void *data, unsigned len)
+{
+    const uint8_t *d = data;
+    for (unsigned i = 0; i < len; ++i)
+        pool[pa[(off + i) / 4096] - POOL_PA + (off + i) % 4096] = d[i];
+}
+
+static uint64_t bo_get64(const uint64_t *pa, uint64_t off)
+{
+    uint64_t v;
+    memcpy(&v, pool + pa[off / 4096] - POOL_PA + off % 4096, 8);
+    return v;
+}
+
+static void sched_tests(uint8_t *mem, const struct sbm_io *io)
+{
+    static struct sbg g;
+    static uint64_t pa[4096];
+    uint64_t va, t = 1000;
+    int ok;
+
+    pool = calloc(1, POOL_BYTES);
+    pool_used = 0;
+    fake_init(mem);
+    F.region[0].pa = POOL_PA;
+    F.region[0].size = POOL_BYTES;
+    F.region[0].host = pool;
+    CHECK(sbg_init(&g, io, SBM_FMT_AARCH64, 0x5771777, (volatile uint64_t *)mem, MEM_PA, SBM_TEST_BYTES / 4096) == 0,
+          "scheduler init");
+    CHECK(R(0x1008) == 0x70007 && R(0x2008) == 1 && R(0x028) == 0x81, "interrupts unmasked: slots 0-2, AS0, GPU faults");
+
+    /* buffer objects: 60 of 1..80 pages, then every other released and 30 more */
+    {
+        int h[90], bad = 0;
+        uint64_t v[90], sz[90];
+        unsigned seed = 7;
+        for (int i = 0; i < 90; ++i) {
+            unsigned n;
+            if (i == 60)
+                for (int k = 0; k < 60; k += 2) {
+                    bad |= sbg_bo_release(&g, h[k], 0) != 0;
+                    h[k] = -1;
+                }
+            seed = seed * 1103515245u + 12345u;
+            n = 1 + (seed >> 8) % 80;
+            pool_pages(pa, n, 1);
+            h[i] = sbg_bo_create(&g, pa, n, SBG_BO_NOEXEC, &v[i]);
+            sz[i] = (uint64_t)n * 4096;
+            bad |= h[i] < 0 || v[i] < SBG_VA_BASE || v[i] + sz[i] > SBG_VA_END || (v[i] & (sz[i] > 0x10000 ? 0xffff : 0xfff)) ||
+                   sbg_bo_find(&g, v[i] + sz[i] - 1) != h[i];
+        }
+        for (int i = 0; i < 90; ++i)
+            for (int k = i + 1; k < 90; ++k)
+                if (h[i] >= 0 && h[k] >= 0 && v[i] < v[k] + sz[k] && v[k] < v[i] + sz[i])
+                    bad = 1;
+        CHECK(!bad, "90 buffers: in [32 MiB, 4 GiB), aligned, findable, never overlapping (reuse after release)");
+        va = v[1];
+        pool_pages(pa, 1, 0);
+        CHECK(sbg_bo_create(&g, pa, 1, SBG_BO_FIXED, &va) < 0, "fixed address on a live buffer: refused");
+        va = 0x1000000;
+        CHECK(sbg_bo_create(&g, pa, 1, SBG_BO_FIXED, &va) < 0, "fixed address below 32 MiB: refused");
+        for (int i = 1; i < 90; i += 2)
+            sbg_bo_release(&g, h[i], 0);
+        for (int i = 60; i < 90; i += 2)
+            sbg_bo_release(&g, h[i], 0);
+    }
+
+    /* ten WRITE_VALUE chains, alternating slots: one on the GPU at a time, fences in order */
+    {
+        uint64_t jpa[1], opa[1], jva, ova, s[10];
+        uint32_t w[16];
+        int hj, ho, order = 1, all = 1;
+        pool_pages(jpa, 1, 0);
+        pool_pages(opa, 1, 0);
+        hj = sbg_bo_create(&g, jpa, 1, 0, &jva);
+        ho = sbg_bo_create(&g, opa, 1, SBG_BO_NOEXEC, &ova);
+        for (int i = 0; i < 10; ++i) {
+            sbm_write_value(w, 1, 0, ova + 8 * i, SBM_WV_IMM64, 0x1000 + i);
+            bo_put(jpa, 64 * i, w, 64);
+        }
+        F.defer = 1;
+        for (int i = 0; i < 10; ++i)
+            ok = sbg_submit(&g, i & 1, jva + 64 * i, 1, t, &s[i]);
+        CHECK(ok == 0 && g.starts == 1 && g.done_seq == 0 && s[9] == s[0] + 9, "10 queued, 1 started, none done");
+        for (int i = 0; i < 10; ++i) {
+            fake_gpu_run();
+            order &= sbg_irq(&g, t) == 1 && g.done_seq == s[i] && (i == 9 || !sbg_seq_done(&g, s[i] + 1));
+        }
+        for (int i = 0; i < 10; ++i)
+            all &= bo_get64(opa, 8 * i) == 0x1000u + (unsigned)i;
+        CHECK(order && all && F.starts_while_busy == 0 && g.starts == 10, "fences complete in order, every value written");
+
+        /* a fault (chain at an address nothing maps) from context 2: reset, context 2 guilty, context 3 runs */
+        {
+            uint64_t sf, s3, s2;
+            sbm_write_value(w, 1, 0, ova + 0x100, SBM_WV_IMM64, 0x3333);
+            bo_put(jpa, 0x400, w, 64);
+            sbm_write_value(w, 1, 0, ova + 0x108, SBM_WV_IMM64, 0x2222);
+            bo_put(jpa, 0x440, w, 64);
+            sbg_submit(&g, 1, 0x7ff00000, 2, t, &sf);
+            sbg_submit(&g, 0, jva + 0x400, 3, t, &s3);
+            sbg_submit(&g, 0, jva + 0x440, 2, t, &s2);
+            for (int i = 0; i < 4; ++i) {
+                fake_gpu_run();
+                sbg_irq(&g, t);
+            }
+            CHECK(g.faults == 1 && g.bad.status == SBG_FAULT && g.bad.ctx == 2 && g.bad.seq == sf &&
+                  g.bad.fault_addr == 0x7ff00000 && g.resets == 1 && F.soft_resets >= 2,
+                  "fault recorded (ctx %u, addr %#llx), GPU reset", g.bad.ctx, (unsigned long long)g.bad.fault_addr);
+            CHECK(bo_get64(opa, 0x100) == 0x3333 && bo_get64(opa, 0x108) == 0 && g.skipped == 1 && g.done_seq == s2,
+                  "the other context's chain ran, the guilty context's next one was skipped");
+            CHECK(R(0x1008) == 0x70007 && R(0x2008) == 1, "interrupts re-armed after the reset");
+            sbg_ctx_reset(&g, 2);
+            sbg_submit(&g, 0, jva + 0x440, 2, t, &s2);
+            fake_gpu_run();
+            sbg_irq(&g, t);
+            CHECK(bo_get64(opa, 0x108) == 0x2222, "context 2 runs again after sbg_ctx_reset");
+        }
+
+        /* a hang: nothing happens until the timeout, then hard stop + reset; the next chain runs */
+        {
+            uint64_t sh, sn;
+            F.hang = 1;
+            sbm_write_value(w, 1, 0, ova + 0x110, SBM_WV_IMM64, 0x4444);
+            bo_put(jpa, 0x480, w, 64);
+            sbg_submit(&g, 1, jva + 0x480, 4, t, &sh);
+            sbg_submit(&g, 1, jva + 0x400, 5, t, &sn);
+            fake_gpu_run();
+            CHECK(sbg_irq(&g, t + 10) == 0 && sbg_tick(&g, t + 1000000) == 0 && !sbg_seq_done(&g, sh), "still running at 1 s");
+            CHECK(sbg_tick(&g, t + 2000001) == 1 && g.timeouts == 1 && g.bad.status == SBG_TIMEOUT && F.hard_stops >= 1 &&
+                  sbg_seq_done(&g, sh) && !sbg_seq_done(&g, sn), "timeout at 2 s: hard stop, reset, completed as TIMEOUT");
+            F.hang = 0;
+            bo_put(opa, 0x100, &(uint64_t){ 0 }, 8);
+            fake_gpu_run();
+            sbg_irq(&g, t + 2000002);
+            CHECK(sbg_seq_done(&g, sn) && bo_get64(opa, 0x100) == 0x3333, "the next chain ran after the timeout");
+        }
+
+        /* deferred release: unmapped only when the fence it was last used under completes */
+        {
+            uint64_t s1;
+            int locks = F.as_cmds;
+            sbg_submit(&g, 1, jva, 6, t, &s1);
+            CHECK(sbg_bo_release(&g, ho, s1) == 0 && sbg_bo_find(&g, ova) == ho, "release deferred while in use");
+            fake_gpu_run();
+            sbg_irq(&g, t);
+            CHECK(sbg_bo_find(&g, ova) == -1 && F.as_cmds > locks && bo_get64(opa, 0) == 0x1000,
+                  "unmapped (and the AS locked/flushed) after its fence");
+        }
+        sbg_bo_release(&g, hj, 0);
+    }
+
+    /* XNU's Mesa-built triangle through the scheduler: blob, tiler heap and render target as fixed buffers,
+     * tiler chain on slot 1 then fragment chain on slot 0 */
+    {
+        uint64_t bva = SBM_TEST_VA, hva = SG_TRI_HEAP_VA, rt_va = 0x4000000ULL + (uint64_t)SG_TRI_RT_Y * 5760 + SG_TRI_RT_X * 4;
+        uint64_t rlo = rt_va & ~0xfffULL, rhi = (rt_va + (SG_TRI_FB_H - 1) * 5760ULL + SG_TRI_FB_W * 4 + 0xfff) & ~0xfffULL;
+        unsigned bn = SBM_TEST_DATA_BYTES / 4096, rn = (unsigned)((rhi - rlo) / 4096);
+        static uint64_t bpa[64], rpa[1024], hpa[4096];
+        uint64_t s1, s0, rva = rlo;
+        unsigned px = 0, badpx = 0;
+        int hb, hh, hr;
+        pool_pages(bpa, bn, 1);
+        pool_pages(hpa, SG_TRI_HEAP_BYTES / 4096, 0);
+        pool_pages(rpa, rn, 0);
+        hb = sbg_bo_create(&g, bpa, bn, SBG_BO_FIXED, &bva);
+        hh = sbg_bo_create(&g, hpa, SG_TRI_HEAP_BYTES / 4096, SBG_BO_FIXED | SBG_BO_NOEXEC, &hva);
+        hr = sbg_bo_create(&g, rpa, rn, SBG_BO_FIXED | SBG_BO_NOEXEC, &rva);
+        CHECK(hb >= 0 && hh >= 0 && hr >= 0, "triangle buffers at their fixed addresses (%d %d %d)", hb, hh, hr);
+        bo_put(bpa, SG_TRI_BLOB_VA - SBM_TEST_VA, sg_tri_blob, SG_TRI_BLOB_WORDS * 4);   /* the 64 KiB window, as T8 */
+        memset(pool + rpa[0] - POOL_PA, 0xa5, (size_t)rn * 4096);
+        F.tri_clear = SG_TRI_CLEAR;
+        F.tri_color = SG_TRI_COLOR;
+        F.tiler_jobs = 0;
+        sbg_submit(&g, 1, SG_TRI_BLOB_VA + SG_TRI_TILER_JOB, 7, t, &s1);
+        sbg_submit(&g, 0, SG_TRI_BLOB_VA + SG_TRI_FRAG_JOB, 7, t, &s0);
+        for (int i = 0; i < 2; ++i) {
+            fake_gpu_run();
+            sbg_irq(&g, t);
+        }
+        for (unsigned y = 0; y < SG_TRI_FB_H; ++y)
+            for (unsigned x = 0; x < SG_TRI_FB_W; ++x) {
+                uint32_t v;
+                memcpy(&v, pool + rpa[0] - POOL_PA + (rt_va - rlo) + (uint64_t)y * 5760 + x * 4, 4);
+                px += v == SG_TRI_COLOR;
+                badpx += v != SG_TRI_COLOR && v != SG_TRI_CLEAR;
+            }
+        CHECK(sbg_seq_done(&g, s0) && F.tiler_jobs == 1 && px == SG_TRI_FB_W * (SG_TRI_FB_W - 1) / 2 && !badpx,
+              "triangle through the scheduler: %u px, %u foreign, %u faults", px, badpx, g.faults);
+    }
+
+    sbg_fini(&g);
+    CHECK(F.soft_resets > 0 && R(0x1008) == 0, "fini: reset, interrupts masked");
+    free(pool);
 }
 
 static int map_extra(void *ctx, struct sbm_pt *pt)
@@ -437,6 +676,7 @@ int main(void)
         CHECK(sbw_acpm_dvfs(&a, 2, 1690000) && F.dvfs_domain == 2, "A55 (2) passes");
     }
     CHECK(!strcmp(sbm_exc_name(0xc3), "TRANSLATION_FAULT") && !strcmp(sbm_exc_name(0x58), "DATA_INVALID_FAULT"), "names");
+    sched_tests(mem, &io);
     printf("%d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

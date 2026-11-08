@@ -349,6 +349,41 @@ phone is the no-network black-screen case of §4.3, so stage 4a runs only behind
 10-minute guard); TGSI leaving Mesa before we are done (we pin 26.2); DECON flips at 60 Hz (the Linux
 DECON driver hit a 30 fps flip cap; the `early_event` fix in K2 is built but not yet booted).
 
+### 6.4 The scheduler core: `sbg_core` (built 2026-11-08, host-tested; T12 on the phone)
+
+The kernel half stage 4 needs whichever user half wins §6.3. It is portable C on top of sbm_core
+(`starbite/win/sbmali/sbg_core.{h,c}`), shaped like Linux Panfrost so Mesa's Panfrost sees the hardware model
+it knows:
+- **Buffers:** the caller's 4 KiB pages (WDDM: VidMm's aperture pages; now MDL pages) mapped at a GPU
+  address the core picks in [32 MiB, 4 GiB) (Panfrost's window; > 64 KiB buffers 64 KiB aligned), or at a
+  fixed one. LOCK + FLUSH_PT after every map and unmap. **Deferred release:** a buffer is unmapped only once
+  the fence it was last used under has completed (VidMm reuses pages as soon as we return).
+- **Submits:** one job chain per submit on slot 0 (fragment), 1 (vertex/tiler) or 2 (compute), queued
+  (64 deep), one chain on the GPU at a time, fences completed strictly in order (WDDM 1.x: one node). The
+  dependency Mesa expresses between a tiler and a fragment submit is therefore always met.
+- **Completion:** from the job/MMU/GPU interrupt (`sbg_irq`) or polled. **Faults** (MMU, job, GPU): HARD_STOP,
+  soft reset, cores and AS0 back (tables kept), the submit completes as FAULT and its **context is guilty**:
+  its later submits complete unrun (D3D "device removed"), other contexts carry on. **Timeouts** (`sbg_tick`,
+  default 2 s = WDDM's TDR delay) take the same path.
+- Not yet: slot overlap (vertex of frame n+1 during fragment of frame n), one address space per context
+  (isolation), growable tiler heaps (Panfrost's fault-driven HEAP buffers; for now heaps are mapped whole),
+  power gating between frames.
+
+Host test (`tests/mali_test.c`, deferred-execution fake): 90 buffers placed without overlap, with reuse after
+release; fixed addresses refused when taken or outside the window; 10 chains across two slots, in-order fences,
+never two on the GPU; a fault from context 2 (reset, context 2's next submit skipped, context 3's ran,
+interrupts re-armed; context 2 back after `sbg_ctx_reset`); a hang (nothing before 2 s, then hard stop + reset,
+the next chain runs); deferred release; XNU's triangle through the scheduler. Five deliberate bugs in the core
+(no guilt, no deferred release, no timeout, one page mapped for all, an off-by-one fence) each fail it.
+
+**T12 (phone):** sbmali runs, after T8's runs, `SchedRuns` rounds (default 100) of 8 WRITE_VALUE chains plus
+the triangle, all queued at once through sbg, on buffers made of scattered Windows pages (MDLs), polled; then
+one deliberate MMU fault (a chain at 0x7FF00000, nothing mapped there) followed by another context's chain,
+which must run after the reset. State: `Sched_Init` 0, `Sched_BoFail` 0, `Sched_Rounds` = `Sched_Ok` = 100,
+`Sched_TriPx` 86528, `Sched_TriMismatch` 0, `Sched_TriBadPx` 0, `Sched_FaultTest` 1, `Sched_Faults` 1,
+`Sched_Resets` 1, `Sched_ResetFail` 0, `Sched_Timeouts` 0, `Sched_MaxRoundUs`. Off with `Parameters\Sched` = 0;
+`SchedFault` = 0 skips the fault; `SchedFmt` 0/1 = legacy/AArch64 tables (default AArch64).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
@@ -740,6 +775,7 @@ To do: 200 runs per format (Runs 200 or the value deleted) for the page-table co
 |---|---|---|---|
 | T7 | 2x scaled desktop (sbdisplay, copy mode) | smoother desktop (4x fewer pixels for WARP/DWM); Desktop Duplication on our display-only driver | a new display driver may black-screen (§4.3) |
 | T8 | sbmali v2 as a standalone service (`hive-service.py add sbmali`, next to sbdisplay): the GPU clock and a real draw. ACPM DVFS domain 4 to 572 MHz (BUCK6 rewritten after it), XNU's Mesa-built triangle (tiler + vertex + fragment, `xnu/src/starlte_gpu_tri.h`, proven on this phone under iOS) into a private buffer checked pixel by pixel, 200 runs per table format with clear + triangle, temperatures throughout | the clock path, the tiler, shaders, and the legacy-versus-AArch64 decision on a real workload | sustained GPU load for ~1 min at 572 MHz: the watchdog throttles (338 MHz at 70 °C, 260 at 80, stop at 90); otherwise as T5 |
+| T12 | sbmali + the stage-4 scheduler (§6.4): 100 rounds of queued chains + the triangle on scattered pages, one deliberate MMU fault and the recovery | the kernel half of stage 4 on the real GPU, fault recovery on hardware | as T8; the fault is the kind Panfrost recovers from daily |
 | T11 | Mesa on Windows without WDDM (wddm-mali-g52's M3/M4 shape): Mesa 26.2 + their patches cross-built for ARM64, Panfrost reaching sbmali through a Panfrost-style IOCTL interface (CREATE_BO, SUBMIT, WAIT_BO, ...), a D3D11 test program using Mesa's d3d10umd as a software driver | D3D11 rendered by the Mali under Windows | a user-mode program has to be started (the user taps it; services running cmd.exe crash on this Windows) |
 | 4a | sbwddm skeleton (WDDM 1.3, display half = sbdisplay incl. 2x scaling) | Windows accepts our full driver | black desktop possible (wddm-mali-g52 run 6) |
 
