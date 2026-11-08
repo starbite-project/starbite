@@ -457,6 +457,7 @@ void sb_main(void)
     cfg.link_speed = arg("wifi_gen", 2);
     cfg.link_tries = 3;
     cfg.fw_supplicant = (int)arg("wifi_fwsup", 0);     /* 1: try the firmware's own supplicant if it has one */
+    cfg.rx_buffers = 256;                               /* as the Windows driver (W2p joined WPA2 with it) */
     cfg.join_band = (int)arg("wifi_band", 0);           /* 2 or 5: join only on that band (default: 5 GHz preferred) */
     cfg.btc_off = (int)arg("wifi_btc0", 0);             /* 1: Bluetooth coexistence off (a 2.4 GHz experiment) */
     if (bcmw_init(w, &os, &cfg) != BCMW_OK) {

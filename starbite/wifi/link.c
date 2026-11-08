@@ -595,6 +595,11 @@ int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char
             e = bcmw_ioctl(w, 0, BCMW_C_SET_WSEC_PMK, pmk, sizeof(pmk), 1, &fwerr);
             bcmw_memset(pmk, 0, sizeof(pmk));
         } else if (e == BCMW_OK) {
+            /* exactly bcmw_connect's sequence (W2p, Windows, joined this AP's 5 GHz side with it; T4-WPA2 without
+             * this step saw the firmware drop message 1, "EL: 30 73b8"): sup_wpa 0 tried, even if refused */
+            int sup = bcmw_iovar_set_u32(w, "sup_wpa", 0);
+            bcmw_sayx(w, "link: sup_wpa 0 (the host's handshake): ", sup == BCMW_OK ? 0 : 0xffffffffu,
+                      sup == BCMW_OK ? " (set)" : " (refused: no firmware supplicant)");
             bcmw_rsn_ours(w->rsn_ours, w->join_group);
             e = bcmw_iovar_set(w, "wpaie", w->rsn_ours, BCMW_RSN_OURS, &fwerr);
             bcmw_memcpy(w->wpa.own, w->info.mac, 6);
@@ -609,6 +614,15 @@ int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char
         goto out;
     }
     join_pm_off(w);
+    {
+        /* the directed scan has just ended: 300 ms for the firmware to settle before the join (Windows joined
+         * seconds after its last scan) */
+        uint64_t s0 = bcmw_now(w);
+        while (bcmw_now(w) - s0 < 300000) {
+            mb_process(w);
+            bcmw_udelay(w, 1000);
+        }
+    }
     /* WLC_SET_SSID: brcmf_join_params = the name (4 + 32), then the BSSID and no channel list */
     bcmw_memset(j, 0, sizeof(j));
     put32(j, ssid_len);
