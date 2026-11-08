@@ -403,7 +403,7 @@ wdt_feed = "xnu"
 [[entry]]
 key = "starbite-os"
 name = "Starbite OS"
-version = "0.5.14 · Wi-Fi, keyboard, emergency card"
+version = "0.6 · phone UI, Emergency Mode, Extreme heat"
 category = "starbite"
 method = "bare"
 tag = "experimental"

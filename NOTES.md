@@ -2407,3 +2407,10 @@ backup/20261108-boot-before-menu7smp/BOOT.img (1cdeea25…) with only the loader
 changed. First boot: menu after 15 s, cores 1-3 checked in at 0 ms. Phone measurements (MB3b): focus 47 → 14 ms,
 scroll 234 → 74 ms, intro glass 324 → 99 ms, bake 499 → 129 ms. Way back: dd the backup from TWRP (or Download mode).
 Lesson from the night before: catalog rows with no_launch = true get no loader watchdog; chain images arm their own.
+
+## 2026-11-08: 4-core menu fixed for One UI (FlexPMU hand-off)
+
+The first 4-core BOOT left A55 cores 1-3 in a FlexPMU state Samsung's 4.9 kernel couldn't online (cpu1-3 offline,
+reset within ~2 min). The workers now run Samsung's cal_cpu_enable / CPU_INFORM C2 + cal_cpu_disable sequence around
+PSCI CPU_ON/OFF. BOOT = build/menu/BOOT-smp2.img (d3a31942…): One UI ran with cpu 0-7 online and no reset (MH1 433 s;
+confirming boot held 5 min). Fallback: build/menu/BOOT-1core.img (5c32e2c0…); original: backup/20261108-boot-before-menu7smp.
