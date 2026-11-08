@@ -4,7 +4,9 @@
  *   display-only  sbdisplay, unchanged (its code is built into this image): today's desktop.
  * DriverEntry picks full mode only when Parameters\FullMode = 1, no kill file
  * (\SystemRoot\Starbite\sbwddm.full.off) and State\FullGuardBoots < 1. A full-mode boot is counted at once
- * and cleared only when it is healthy: 60 s after start, with DWM's flips and GPU jobs completing. So any
+ * and cleared only when it is healthy: 60 s after start, with DWM's flips and GPU jobs completing (and since
+ * T13f only with Parameters\GuardAutoClear = 1: during bring-up every full-mode boot is followed by a
+ * display-only one until FullGuardBoots is reset by hand). So any
  * full-mode boot that does not get there (a black desktop and a forced or dead-man restart, a bugcheck, a
  * failed start) is followed by a display-only boot. There is no WARP fallback for a failing UMD (6.3), so
  * this guard is what brings the desktop back.
@@ -15,11 +17,13 @@
  * sbwddm.full.off = full mode off; sbdisplay.off = display-only mode off (sbdisplay's own, as before).
  */
 #include "maliwddm/maliwddm.h"
+#include "../sbdisplay/sbdc_core.h"     /* DECON register offsets (read only) */
 
 #define SBW_FULL_GUARD_LIMIT 1U
 #define SBW_HEALTHY_MS 60000U
 #define SBW_HEALTHY_FLIPS 30U             /* frames with pixels that reached the panel (ContentFrames) */
 #define SBW_HEALTHY_JOBS 30U
+#define SBW_LIVE_MAX 64U
 
 NTSTATUS SdDriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath);   /* sbdisplay (sd_embed.c) */
 
@@ -62,6 +66,11 @@ NTSTATUS S9Start(MW_ADAPTER *A)
 
 static KSTART_ROUTINE GuardThread;
 
+static ULONG Rd(volatile UCHAR *Base, ULONG Off)
+{
+    return Base != NULL ? READ_REGISTER_ULONG((volatile ULONG *)(Base + Off)) : 0xFFFFFFFFu;
+}
+
 /* T13c: the driver's live counters, logged (Live_<name>) whenever one changed, once a second. T13b's trace
  * ended at DWM's first Render; what came after (submits, fences, GPU jobs and faults, flips, vsyncs) never
  * reached the registry. */
@@ -83,14 +92,25 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         { L"Live_PrimaryBlts", a->PrimaryBlts }, { L"Live_PresentWaitTimeouts", a->PresentWaitTimeouts },
         { L"Live_ContentFrames", a->ContentFrames }, { L"Live_CoherentMaps", a->CoherentMaps },
         { L"Live_CpuMapFails", a->CpuMapFails },
+        { L"Live_FbContentFrames", a->FbContentFrames }, { L"Live_FbKPixels", (ULONG)(a->FbPixels >> 10) },
+        { L"Live_LastFbRectLT", a->LastFbRectLT }, { L"Live_LastFbRectRB", a->LastFbRectRB },
+        { L"Live_PrimaryOwnCopies", a->PrimaryOwnCopies },
+        /* T13f: what DECON scans (read only; sbdisplay's registers): IDMA channel 0's base address, live and
+         * shadow, its image size, the trigger control, the window enables and a pending shadow update */
+        { L"Live_DeconBaseY", Rd(a->DeconDmaVa, SBDC_CH0 + SBDC_IDMA_BASE_Y) },
+        { L"Live_DeconShadowBaseY", Rd(a->DeconDmaVa, SBDC_CH0 + SBDC_IDMA_SHADOW + SBDC_IDMA_BASE_Y) },
+        { L"Live_DeconImgSize", Rd(a->DeconDmaVa, SBDC_CH0 + SBDC_IDMA_IMG_SIZE) },
+        { L"Live_DeconTrig", Rd(a->DeconVa, SBDC_TRIG) }, { L"Live_DeconPath0", Rd(a->DeconVa, SBDC_PATH0) },
+        { L"Live_DeconShadowReq", Rd(a->DeconVa, SBDC_SHADOW_REQ) },
         { L"Live_ThermalLevel", a->ThermalLevel },
     };
-    for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]) && i < 40; i++)
-        if (c[i].v != Prev[i] || Prev[40] == 0) {
+    static_assert(sizeof(c) / sizeof(c[0]) < SBW_LIVE_MAX, "Live_ table too long");
+    for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]); i++)
+        if (c[i].v != Prev[i] || Prev[SBW_LIVE_MAX] == 0) {
             Prev[i] = c[i].v;
             MwLog(a, c[i].n, c[i].v);
         }
-    Prev[40] = 1;
+    Prev[SBW_LIVE_MAX] = 1;
 }
 
 static VOID GuardThread(PVOID Ctx)
@@ -99,7 +119,12 @@ static VOID GuardThread(PVOID Ctx)
     ULONG64 t0 = KeQueryInterruptTime();
     LARGE_INTEGER t;
     BOOLEAN hold = FALSE;
-    ULONG prev[41] = { 0 }, secs = 0;
+    ULONG prev[SBW_LIVE_MAX + 1] = { 0 }, secs = 0;
+    /* T13f: during bring-up a full-mode boot never clears its own guard (Parameters\GuardAutoClear = 0, the
+     * default): T13d and T13e both passed the health test with a black panel. The person resets
+     * FullGuardBoots from TWRP for each full-mode test; every other boot after one is display-only. */
+    ULONG autoClear = S9GetDword(L"Parameters", L"GuardAutoClear", 0);
+    ULONG testBand = S9GetDword(L"Parameters", L"TestBand", 1);
 
     for (;;) {
         ULONG level, gate;
@@ -108,6 +133,20 @@ static VOID GuardThread(PVOID Ctx)
             break;
         LiveCounters(a, prev);
         MwLog(a, L"Live_Seconds", ++secs);
+        /* T13f: a visible probe of the framebuffer path, independent of DWM and the GPU: a magenta band over
+         * the top 96 rows at 20 s and 40 s (Parameters\TestBand, default 1). Seen on the panel = the
+         * framebuffer the driver writes is the one DECON scans. */
+        if ((secs == 20 || secs == 40) && testBand && a->FbVa != NULL) {
+            ULONG rows = min(96u, a->Fb.Height), ok = 0;
+            for (ULONG y = 0; y < rows; y++) {
+                ULONG *row = (ULONG *)(a->FbVa + (SIZE_T)y * a->Fb.Pitch);
+                for (ULONG x = 0; x < a->Fb.Width; x++)
+                    row[x] = 0xFFFF00FFu;
+            }
+            KeMemoryBarrier();
+            ok = ((volatile ULONG *)a->FbVa)[a->Fb.Width / 2] == 0xFFFF00FFu;
+            MwLog(a, secs == 20 ? L"TestBand20" : L"TestBand40", ok ? rows : 0xBAD);
+        }
         gate = S9Gate(&a->S9, &level);
         a->ThermalLevel = gate ? 10 + gate : level;
         if ((gate != 0 || level >= SBTH_STOP) != hold) {
@@ -118,11 +157,13 @@ static VOID GuardThread(PVOID Ctx)
             MwLog(a, L"S9ThermalHold", hold ? a->ThermalLevel : 0);
         }
         if (!a->Healthy && (KeQueryInterruptTime() - t0) / 10000 >= SBW_HEALTHY_MS &&
-            a->ContentFrames >= SBW_HEALTHY_FLIPS && a->JobsDone >= SBW_HEALTHY_JOBS) {
+            a->ContentFrames >= SBW_HEALTHY_FLIPS && a->FbContentFrames >= SBW_HEALTHY_FLIPS &&
+            a->JobsDone >= SBW_HEALTHY_JOBS) {
             /* T13d: 223 copies to the panel, all black, counted as healthy: only frames with pixels count */
             /* T13c: flips + any blts counted 212 presents that never reached the panel as healthy */
             a->Healthy = TRUE;
-            S9PutDword(NULL, L"FullGuardBoots", 0);
+            if (autoClear)
+                S9PutDword(NULL, L"FullGuardBoots", 0);
             MwLog(a, L"S9Healthy", a->JobsDone);
             State(L"FullHealthy", 1);
         }

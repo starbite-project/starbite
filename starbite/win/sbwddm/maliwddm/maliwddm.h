@@ -116,6 +116,9 @@ struct _MW_ADAPTER {
     DXGK_DISPLAY_INFORMATION Fb;
     PUCHAR FbVa;
     SIZE_T FbSize;
+    /* S9 port (T13f): DECON's registers, mapped for reading only, so the guard thread can log what the panel
+     * really scans (T13e: 257 frames with pixels copied into the framebuffer, the panel black). */
+    volatile UCHAR *DeconVa, *DeconDmaVa;
     BOOLEAN SourceVisible, PathActive;
 
     /* GPU. MmuLock serialises the address allocator and the page tables. */
@@ -170,6 +173,10 @@ struct _MW_ADAPTER {
     ULONG PrimaryBlts;
     ULONG PresentWaitTimeouts;
     ULONG ContentFrames;                  /* frames copied to the panel whose sampled pixels were not all black */
+    ULONG FbContentFrames;                /* T13f: the same test read back from the framebuffer after the copy */
+    ULONG64 FbPixels;                     /* pixels written into the framebuffer */
+    ULONG LastFbRectLT, LastFbRectRB;     /* the last blt's rectangle into it, x << 16 | y */
+    ULONG PrimaryOwnCopies;               /* blts into a primary also written to its own pages */
     ULONG CoherentMaps, CpuMapFails;            /* presents copied before the queue drained (200 ms bound) */                    /* presents whose destination is the primary: pixels on the panel */                     /* renders refused: a chain outside the render's allocations */                     /* interrupt resources the device has (the stage-4 SSDT: the Mali's 3) */
 
     /* Counters for the trace. */

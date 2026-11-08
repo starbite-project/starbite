@@ -7,6 +7,7 @@
  * framebuffer is written by presents (step d).
  */
 #include "maliwddm.h"
+#include "../../sbdisplay/sbdc_core.h"   /* DECON addresses (T13f, read only) */
 
 static UINT BytesPerPixel(D3DDDIFORMAT F)
 {
@@ -64,6 +65,18 @@ NTSTATUS MwDisplayStart(MW_ADAPTER *A)
         return STATUS_UNSUCCESSFUL;
     MwLog(A, L"FbWidth", A->Fb.Width);
     MwLog(A, L"FbHeight", A->Fb.Height);
+    MwLog(A, L"FbPitch", A->Fb.Pitch);
+    MwLog(A, L"FbFormat", (ULONG)A->Fb.ColorFormat);
+    MwLog(A, L"FbPaLo", (ULONG)A->Fb.PhysicAddress.LowPart);
+    MwLog(A, L"FbPaHi", (ULONG)A->Fb.PhysicAddress.HighPart);
+    {   /* T13f: DECON and its DMA block, read only (sbdisplay's addresses), for the guard thread's Live_Decon* */
+        PHYSICAL_ADDRESS d;
+        d.QuadPart = (LONGLONG)SBDC_DECON_PA;
+        A->DeconVa = (volatile UCHAR *)MmMapIoSpaceEx(d, SBDC_DECON_SIZE, PAGE_READONLY | PAGE_NOCACHE);
+        d.QuadPart = (LONGLONG)SBDC_DMA_PA;
+        A->DeconDmaVa = (volatile UCHAR *)MmMapIoSpaceEx(d, SBDC_DMA_SIZE, PAGE_READONLY | PAGE_NOCACHE);
+        MwLog(A, L"DeconMapped", (A->DeconVa != NULL) | (A->DeconDmaVa != NULL) << 1);
+    }
     A->FbSize = (SIZE_T)A->Fb.Pitch * A->Fb.Height;
     pa = A->Fb.PhysicAddress;
     A->FbVa = (PUCHAR)MmMapIoSpaceEx(pa, A->FbSize, PAGE_READWRITE | PAGE_WRITECOMBINE);
@@ -79,6 +92,14 @@ void MwDisplayStop(MW_ADAPTER *A)
     if (A->FbVa != NULL) {
         MmUnmapIoSpace(A->FbVa, A->FbSize);
         A->FbVa = NULL;
+    }
+    if (A->DeconVa != NULL) {
+        MmUnmapIoSpace((PVOID)A->DeconVa, SBDC_DECON_SIZE);
+        A->DeconVa = NULL;
+    }
+    if (A->DeconDmaVa != NULL) {
+        MmUnmapIoSpace((PVOID)A->DeconDmaVa, SBDC_DMA_SIZE);
+        A->DeconDmaVa = NULL;
     }
 }
 

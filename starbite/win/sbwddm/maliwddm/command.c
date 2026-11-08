@@ -230,29 +230,53 @@ static void ClipRect(RECT *R, LONG W, LONG H)
     if (R->bottom > H) R->bottom = H;
 }
 
+/* Copy (or fill) a present's rectangles into one destination. Returns the pixels written. */
+static ULONG64 CopyRects(const MW_PRESENT_OP *Op, PUCHAR Dst, LONG DstW, LONG DstH, LONG DstPitch,
+                         const UCHAR *Src, LONG SrcW, LONG SrcH, LONG SrcPitch, RECT *Last)
+{
+    ULONG n = Op->NumRects ? Op->NumRects : 1;
+    ULONG64 px = 0;
+
+    for (ULONG i = 0; i < n; i++) {
+        RECT r = Op->NumRects ? Op->Rects[i] : Op->DstRect;
+        LONG dx = Op->SrcRect.left - Op->DstRect.left, dy = Op->SrcRect.top - Op->DstRect.top;
+
+        ClipRect(&r, DstW, DstH);
+        if (Op->Kind == MW_PRESENT_BLT) {
+            /* Keep the source side inside the source too. */
+            if (r.left + dx < 0) r.left = -dx;
+            if (r.top + dy < 0) r.top = -dy;
+            if (r.right + dx > SrcW) r.right = SrcW - dx;
+            if (r.bottom + dy > SrcH) r.bottom = SrcH - dy;
+        }
+        if (r.right <= r.left || r.bottom <= r.top)
+            continue;
+        for (LONG y = r.top; y < r.bottom; y++) {
+            ULONG *d = (ULONG *)(Dst + (SIZE_T)y * DstPitch) + r.left;
+            if (Op->Kind == MW_PRESENT_BLT) {
+                const ULONG *s = (const ULONG *)(Src + (SIZE_T)(y + dy) * SrcPitch) + r.left + dx;
+                RtlCopyMemory(d, s, (SIZE_T)(r.right - r.left) * 4);
+            } else {
+                for (LONG x = 0; x < r.right - r.left; x++)
+                    d[x] = Op->Color;
+            }
+        }
+        px += (ULONG64)(r.right - r.left) * (ULONG64)(r.bottom - r.top);
+        if (Last)
+            *Last = r;
+    }
+    return px;
+}
+
 /* Carry out a present on the CPU. 32-bit pixels only. */
 static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
 {
     PUCHAR dst, src = NULL;
     LONG dstW, dstH, dstPitch, srcPitch = 0, srcW = 0, srcH = 0;
-    ULONG n = Op->NumRects ? Op->NumRects : 1;
+    BOOLEAN toFb = Op->Dst != NULL && (Op->Dst->Flags & MW_ALLOC_PRIMARY) && A->FbVa != NULL;
+    RECT last = { 0, 0, 0, 0 };
+    ULONG64 px;
 
-    if (Op->Dst != NULL && (Op->Dst->Flags & MW_ALLOC_PRIMARY) && A->FbVa != NULL) {
-        A->PrimaryBlts++;                 /* S9 port: this one reaches the panel */
-        dst = A->FbVa;
-        dstW = (LONG)A->Fb.Width;
-        dstH = (LONG)A->Fb.Height;
-        dstPitch = (LONG)A->Fb.Pitch;
-    } else {
-        dst = AllocationVa(A, Op->Dst);
-        if (dst == NULL) {
-            A->PresentSkips++;
-            return;
-        }
-        dstW = (LONG)Op->Dst->Width;
-        dstH = (LONG)Op->Dst->Height;
-        dstPitch = (LONG)(Op->Dst->Pitch ? Op->Dst->Pitch : Op->Dst->Width * 4);
-    }
     if (Op->Kind == MW_PRESENT_BLT) {
         src = AllocationVa(A, Op->Src);
         if (src == NULL) {
@@ -263,37 +287,38 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         srcH = (LONG)Op->Src->Height;
         srcPitch = (LONG)(Op->Src->Pitch ? Op->Src->Pitch : Op->Src->Width * 4);
     }
-
-    for (ULONG i = 0; i < n; i++) {
-        RECT r = Op->NumRects ? Op->Rects[i] : Op->DstRect;
-        LONG dx = Op->SrcRect.left - Op->DstRect.left, dy = Op->SrcRect.top - Op->DstRect.top;
-
-        ClipRect(&r, dstW, dstH);
-        if (Op->Kind == MW_PRESENT_BLT) {
-            /* Keep the source side inside the source too. */
-            if (r.left + dx < 0) r.left = -dx;
-            if (r.top + dy < 0) r.top = -dy;
-            if (r.right + dx > srcW) r.right = srcW - dx;
-            if (r.bottom + dy > srcH) r.bottom = srcH - dy;
-        }
-        if (r.right <= r.left || r.bottom <= r.top)
-            continue;
-        for (LONG y = r.top; y < r.bottom; y++) {
-            ULONG *d = (ULONG *)(dst + (SIZE_T)y * dstPitch) + r.left;
-            if (Op->Kind == MW_PRESENT_BLT) {
-                const ULONG *s = (const ULONG *)(src + (SIZE_T)(y + dy) * srcPitch) + r.left + dx;
-                RtlCopyMemory(d, s, (SIZE_T)(r.right - r.left) * 4);
-            } else {
-                for (LONG x = 0; x < r.right - r.left; x++)
-                    d[x] = Op->Color;
-            }
+    /* A destination allocation's own pages. For a primary too (T13f): else a later flip to that primary
+     * copies its stale pages over the framebuffer. */
+    dst = AllocationVa(A, Op->Dst);
+    if (dst != NULL) {
+        dstW = (LONG)Op->Dst->Width;
+        dstH = (LONG)Op->Dst->Height;
+        dstPitch = (LONG)(Op->Dst->Pitch ? Op->Dst->Pitch : Op->Dst->Width * 4);
+        (void)CopyRects(Op, dst, dstW, dstH, dstPitch, src, srcW, srcH, srcPitch, NULL);
+        if (toFb)
+            A->PrimaryOwnCopies++;
+    } else if (!toFb) {
+        A->PresentSkips++;
+        return;
+    }
+    if (toFb) {
+        A->PrimaryBlts++;                 /* S9 port: this one reaches the panel */
+        px = CopyRects(Op, A->FbVa, (LONG)A->Fb.Width, (LONG)A->Fb.Height, (LONG)A->Fb.Pitch, src, srcW, srcH,
+                       srcPitch, &last);
+        A->FbPixels += px;
+        if (px) {
+            A->LastFbRectLT = (ULONG)last.left << 16 | (ULONG)last.top;
+            A->LastFbRectRB = (ULONG)last.right << 16 | (ULONG)last.bottom;
+            /* read back what the framebuffer now holds there (T13f) */
+            if (NotBlack(A->FbVa, (LONG)A->Fb.Pitch, last.left, last.top, last.right, last.bottom))
+                A->FbContentFrames++;
         }
     }
     if (Op->Kind == MW_PRESENT_BLT)
         A->PresentBlts++;
     else
         A->PresentFills++;
-    if (Op->Kind == MW_PRESENT_BLT && Op->Dst != NULL && (Op->Dst->Flags & MW_ALLOC_PRIMARY) && src != NULL) {
+    if (Op->Kind == MW_PRESENT_BLT && toFb && src != NULL) {
         RECT r = Op->SrcRect;
         ClipRect(&r, srcW, srcH);
         if (NotBlack(src, srcPitch, r.left, r.top, r.right, r.bottom))

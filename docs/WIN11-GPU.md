@@ -758,6 +758,36 @@ the primary.
 - **Staged:** `build/win/stage/sbwddm-t13e/` (INSTALL.md, SHA256SUMS), with firmware windows-t13b.uefi
   unchanged. After a forced restart, one clean display-only boot comes before TWRP reads the disk.
 
+### 6.14 T13e: pixels into the framebuffer, panel still black; T13f looks at DECON (2026-11-08)
+
+**T13e (20:46).** The hive was pulled right after the forced restart and replayed; the combo3b boot after it
+had already reset the trace key.
+- **Logon:** the session went past logon. DWM, Explorer, TabTip, TextInputHost and sblinkd all ran on the Mali.
+- **GPU:** 4,133 jobs, every fence completed. One job failed with status 0x51 and one reset recovered it.
+- **Copies:** 517 presents and 1,324 blts. 264 of the blts went into the framebuffer, and **257 of those had
+  pixels** (ContentFrames), so the caching fix worked. There were only 4 flips (SetDisplayMode) and 2 flip
+  copies: DWM presents by blt.
+- **The panel stayed black.**
+- **UMD notes:** logging worked (UmdNote_1 = 0). DWM made 3 primaries, 1440x2960, pitch 5760, A8R8G8B8.
+  SetDisplayMode returned S_OK. 4 OpenResource calls succeeded.
+- **The guard:** declared the boot healthy a third time (S9Healthy).
+
+**Resolution.** Full mode offers only the POST framebuffer's own mode (1440x2960, the native panel).
+Display-only mode's 1080x2220 is a scaled mode of sbdisplay's own and plays no part here.
+
+**T13f** separates the two remaining explanations: the copy is not landing, or DECON is not scanning that buffer.
+- **Readback:** each copy into the framebuffer is read back from it (FbContentFrames, FbKPixels, the last
+  rectangle).
+- **DECON:** its registers are read, never written, once a second: IDMA0 base live and shadow, image size,
+  trigger control, window enables, shadow request. They are compared with the POST framebuffer's address,
+  pitch and format.
+- **Probe:** a magenta band is written straight into the framebuffer at 20 s and 40 s, for the person to see or
+  not see.
+- **Fix:** a blt into a primary also goes into that primary's own pages, so a later flip cannot copy stale
+  black pages over the screen.
+- **Guard:** it no longer clears itself while we are in bring-up (Parameters\GuardAutoClear = 0). Health also
+  needs framebuffer readback.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
