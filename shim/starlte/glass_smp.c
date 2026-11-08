@@ -37,6 +37,10 @@
 
 int g7_smp_on;                       /* cores running jobs now (1 = core 0 only) */
 static int smp_broken;               /* a worker faulted or timed out: core 0 alone from then on */
+/* a core may not be cleanly off (it faulted, never checked in, timed out in a job, or its CPU_OFF
+ * returned): it skipped Samsung's FlexPMU "off" sequence or still runs. Sticky: every later
+ * g7_smp_stop reports it, and the menu resets the SoC instead of handing over (preflight #11, #12) */
+static int smp_tainted;
 uint64_t g7_smp_stat[4];             /* jobs, chunks run by workers, worker faults, CPU_OFF returned */
 
 /* The job: its fields are written by core 0 only while no chunk of any job is claimable, and read
@@ -448,6 +452,7 @@ int g7_smp_start(int want)
         if (s->state != WS_IDLE) {
             /* it never took its start record (or faulted): it is somewhere we cannot reach */
             smp_broken = 1;
+            smp_tainted |= 1 << w;
             g7_smp_stat[2]++;
             break;
         }
@@ -462,7 +467,7 @@ int g7_smp_start(int want)
 int g7_smp_stop(void)
 {
     if (g7_smp_on <= 1 && !started[1] && !started[2] && !started[3])
-        return 0;
+        return smp_tainted;
     __atomic_store_n(&J.stop, 1U, __ATOMIC_RELEASE);
     __asm__ volatile("dsb ish\n sev" ::: "memory");
     int bad = 0;
@@ -476,7 +481,9 @@ int g7_smp_stop(void)
         /* its cache levels written back, then CPU_OFF: 10 ms for both (PSCI 0.1 has no AFFINITY_INFO to
          * ask), then see whether the SMC came back */
         hw_wait_us(10000);
-        if (WS[w].state == WS_PARKED || (WS[w].state != WS_LEAVING && WS[w].state != WS_FAULT)) {
+        /* only LEAVING is clean (it ran the FlexPMU "off" sequence, then CPU_OFF). FAULT went to
+         * CPU_OFF without it; PARKED's CPU_OFF returned; anything else still runs. */
+        if (WS[w].state != WS_LEAVING) {
             bad |= 1 << w;
             g7_smp_stat[3]++;
         }
@@ -484,11 +491,12 @@ int g7_smp_stop(void)
     }
     g7_smp_on = 1;
     pmu_note("cores off");
-    if (bad) {
+    smp_tainted |= bad;
+    if (smp_tainted) {
         smp_broken = 1;              /* a core we could not turn off: never start more */
-        note_core(0, "stop: cores whose CPU_OFF failed (bits)", bad);
+        note_core(0, "stop: cores not cleanly off (bits)", smp_tainted);
     }
-    return bad;
+    return smp_tainted;
 }
 
 uint64_t g7_smp_report(void)
@@ -533,6 +541,8 @@ void g7_par(g7_rows_fn fn, void *ctx, int y0, int y1, int grain)
              * told apart from finished ones, so the whole job runs again on core 0 (each fn writes
              * only its own rows: running a chunk twice gives the same pixels). */
             smp_broken = 1;
+            for (int w = 1; w < g7_smp_on; ++w)
+                smp_tainted |= 1 << w;   /* which one is lost is not known */
             g7_smp_stat[2]++;
             g7_smp_on = 1;
             __atomic_store_n(&CLAIM, (uint64_t)(gen + 1U) << 32, __ATOMIC_RELEASE);   /* nothing left to claim */
@@ -611,7 +621,7 @@ int g7_smp_stop(void)
     for (int w = 1; w < nthreads; ++w)
         pthread_join(TH[w], 0);
     g7_smp_on = 1;
-    return 0;
+    return smp_tainted;             /* (threads always join cleanly) */
 }
 
 uint64_t g7_smp_report(void) { return (uint64_t)g7_smp_on; }

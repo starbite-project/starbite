@@ -4656,6 +4656,18 @@ static void frame_wait(double t0)
 }
 
 /* Lab (dock Lab, Hold Bixby, the Starbite Lab row): EngineerMode, then the menu again */
+/* A worker core is not cleanly off (glass_smp.c): only a SoC reset puts it back as S-Boot leaves it
+ * (the FlexPMU state One UI needs), so no OS, Lab or USB image gets the phone; the user is back
+ * at the menu after the reset. */
+static void m7_cores_bad(void)
+{
+#ifndef M7_PREVIEW
+    star_pmsg("STARBITE v7 smp: a core is not cleanly off; resetting instead of handing over\n");
+    hw_wait_us(50000);
+    hw_reboot(INFORM_NORMAL);
+#endif
+}
+
 #ifndef M7_DEF_CORES
 #define M7_DEF_CORES 4
 #endif
@@ -4668,7 +4680,8 @@ static void run_lab(void)
      * picked entry below (r = entry + 1); otherwise Engineer Lite (em_main) as before. */
     int eng = lab_os ? cat_find("engineer") : -1;
     lab_os = 0;
-    g7_smp_stop();                  /* Lab's core test starts cores itself */
+    if (g7_smp_stop())              /* Lab's core test starts cores itself */
+        m7_cores_bad();
     int r = eng >= 0 && star_entry_ready((unsigned)eng, 0) ? eng + 1 : em_main(M_in, M_cmd, M_len);
     g7_smp_start(m_cores);
     for (unsigned i = 0; i < NR; ++i)
@@ -5012,7 +5025,8 @@ int menu7_main(const struct star_info *in, char *cmdline, unsigned len)
     if (M_inited && !M_off)
         g7_smp_start(m_cores);
     int r = menu7_main_in(in, cmdline, len);
-    g7_smp_stop();
+    if (g7_smp_stop())
+        m7_cores_bad();                 /* never hand a core that is not cleanly off to an OS or a USB image */
     log_put(157, g7_smp_report());
     return r;
 }
