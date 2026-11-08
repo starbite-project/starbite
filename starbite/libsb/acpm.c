@@ -169,12 +169,30 @@ int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier)
     return ok;
 }
 
+static int acpm_dvfs_send(uint32_t domain, uint32_t khz);
+
+/* 1.1-beta6: the M3 above 1794 MHz for at most Samsung's core count (sb_m3_ocp_max_khz); busy = the M3 cores that
+ * run or may run at this clock (the caller counts them) */
+int sb_acpm_dvfs_m3_ocp(uint32_t khz, unsigned busy)
+{
+    if (!sb_m3_ocp_level_ok(khz, busy)) {
+        sb_logx("acpm dvfs (m3 ocp table) refused, busy cores ", busy);
+        return 0;
+    }
+    return acpm_dvfs_send(3, khz);
+}
+
 int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz)
 {
     if (!sb_dvfs_level_listed(domain, khz)) {
         sb_logx("acpm dvfs (listed) refused, domain ", domain);
         return 0;
     }
+    return acpm_dvfs_send(domain, khz);
+}
+
+static int acpm_dvfs_send(uint32_t domain, uint32_t khz)
+{
     uint32_t chans = ard(ACPM_INITDATA + 0x08), ap_max = ard(ACPM_INITDATA + 0x18), cmd[4];
     if (!ap_max || ap_max > 32 || chans >= ACPM_SRAM_SIZE - ap_max * 0x48)
         return 0;

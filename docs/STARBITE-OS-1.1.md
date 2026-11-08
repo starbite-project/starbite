@@ -1,4 +1,14 @@
-# Starbite OS 1.1-beta5: Survival heat (2026-11-08)
+# Starbite OS 1.1-beta6: Survival heat (2026-11-08)
+
+## beta6: the big cores by measured watts, inside Samsung's core-count table
+
+The M3 cluster has one clock, so the legal combinations under Samsung's exynos-ocp table (1 core 2704, 2 cores 2314,
+3-4 cores 1794 MHz; four cores above 1794 trip the buck's hard over-current cut, as Engineer OS saw at 4 x 2886) are
+4@1794, 3@1794, 2@2314 and 1@2704. At a Survival start, after the A55s (1950 MHz) and the GPU, each runs 4 s and its
+mean battery power is logged; the most watts is kept. A hot reading cuts the measurement short (the best so far).
+heater.c never launches an M3 core or raises the M3 clock past the table for the cores that run or are still
+leaving; libsb's `sb_acpm_dvfs_m3_ocp` refuses the same. Manual's M3 steps stay at 1794 at most.
+
 
 ## beta5: the battery held too; its limit selectable
 
@@ -71,5 +81,5 @@ strobes as the light instead. 0x63 is never written. Settings says so.
 - Not in 1.1: the M3 above 1794 MHz (past the cluster buck's current rating without Samsung's over-current handler),
   camera sensors, HBM, Wi-Fi TX, a shader workload (`docs/STARBITE-OS.md` 12.21 says why).
 
-Install: as 1.0-rc3, with `starbite-os-1.1-beta5.img` in the `starbite-os.img` entry and the catalog's version line
-`"1.1-beta5 · heat, light, alarm, card, Wi-Fi"`. Undo: `starbite-os-1.0-rc3.img` in the same entry.
+Install: as 1.0-rc3, with `starbite-os-1.1-beta6.img` in the `starbite-os.img` entry and the catalog's version line
+`"1.1-beta6 · heat, light, alarm, card, Wi-Fi"`. Undo: `starbite-os-1.0-rc3.img` in the same entry.

@@ -831,6 +831,12 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
 
 ### 12.21 Version 1.1-beta1 / beta2: Survival heat; the LED chip's 0x63 (2026-11-08)
 
+beta6: the M3 by measured watts within Samsung's core-count table (`sb_m3_ocp_max_khz`: 1 core 2704, 2 cores 2314,
+3-4 cores 1794; `heat_m3_cands`; `surv_calibrate` in heatctl.c, 4 s per candidate, the mean of the last 2.5 s);
+heater.c's guards: `m3_busy()` counts running, launched and still-leaving M3 workers; no launch above the table at
+the present clock; no clock raise until the extra cores left; `sb_acpm_dvfs_m3_ocp` in libsb refuses past the
+table. The beta3 statement that the M3 stays at 1794 (12.21 above) holds for Manual and Extreme only.
+
 beta5: `SET_HEAT_SURV_BAT_C10` (550 / 580 / 600; above 550 the kernel's own confirmation, `surv_bat_done`) and
 `heat_ctl.surv_bat_c10`: both Survival modes shed from the limit minus 3 °C, add back below minus 4 °C, stop at the
 limit; the Heat page warns above 60 °C skin.

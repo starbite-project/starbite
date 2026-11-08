@@ -527,6 +527,9 @@ int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier);
  * PLL). */
 int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz);
 int sb_dvfs_level_listed(uint32_t domain, uint32_t khz);   /* pure: 1 if khz is a listed level of domain */
+uint32_t sb_m3_ocp_max_khz(unsigned busy);          /* 1.1-beta6, pure: Samsung's M3 core-count table */
+int sb_m3_ocp_level_ok(uint32_t khz, unsigned busy); /* pure: a listed M3 level, or 2314 / 2704 within the table */
+int sb_acpm_dvfs_m3_ocp(uint32_t khz, unsigned busy);
 
 /* ---- the Mali-G72 (mali.c, mali_desc.c) ------------------------------------------------------- */
 

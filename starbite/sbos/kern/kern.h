@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.1-beta5"
+#define SBOS_VERSION "1.1-beta6"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -111,6 +111,14 @@ struct heat_ctl {
     int gpu_want;                   /* 1.1: the GPU's share may run (Survival sheds it last, adds it last) */
     int trip_off;                   /* 1.1: heater.c switched the chip's trip off (Survival, trip off) */
     int surv_stop_c10;              /* 1.1: Survival (trip off)'s SoC stop */
+    /* 1.1-beta6: Survival measures the legal M3 combinations (Samsung's core-count table) and keeps the most watts */
+    int cal;                        /* 0 waiting, 1..4 measuring candidate cal - 1, 5 done */
+    uint64_t cal_t;
+    int64_t cal_acc;
+    int cal_n;
+    int cal_mw[4];                  /* each candidate's mean battery power, mW (0 not measured) */
+    int m3_n;                       /* the M3 cores Survival may run (the pick) */
+    uint32_t surv_m3_khz;           /* their clock (the pick) */
     int surv_bat_c10;               /* 1.1-beta5: Survival's battery limit: 550 / 580 / 600 (shed from 3 C below, stop at it) */
     uint64_t t_shed;
     int cold;
@@ -130,7 +138,9 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
 void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in);
 int heat_max_cores(int level);      /* Low 3, Medium 5, High 7 */
 int heat_surv_target(const struct heat_ctl *c);    /* 1.1: the SoC reading Survival holds below (0.1 C) */
-int heat_surv_estop(const struct heat_ctl *c);     /* 1.1-beta4: trip off: the stop 5 C past the limit (<= 149 C) */
+int heat_surv_estop(const struct heat_ctl *c);
+struct heat_m3_cand { int n; uint32_t khz; };
+extern const struct heat_m3_cand heat_m3_cands[4];   /* 1.1-beta6: 4@1794, 3@1794, 2@2314, 1@2704 */     /* 1.1-beta4: trip off: the stop 5 C past the limit (<= 149 C) */
 /* After a stop: is worker core w's load gone? psci = AFFINITY_INFO's raw x0 (only w0 counts), slot = the
  * worker's SB_WK_* state, start_fail = CPU_ON said yes but the core never checked in. 1 off, 2 no load of ours
  * but PSCI says on / the core never checked in (logged, harmless), 0 still in the heat kernel (a restart after
@@ -392,6 +402,7 @@ void hw_m3_core_off(unsigned w, int last);  /* 1.1-beta2: FlexPMU before it leav
 void hw_m3_fp_log(const char *what);
 int hw_m3_fp_reset(void);           /* 1.1-beta3: the M3 FlexPMU words back to the boot state (1 if changed) */
 int heater_trip_off(void);          /* 1.1-beta2: the chip's trip is off by Survival's switch now */
+int hw_dvfs_m3_ocp(uint32_t khz, unsigned busy);   /* 1.1-beta6: the M3 above 1794 within Samsung's core-count table */
 void hw_wdt_feed_heat(void);        /* 1.1: the heat loop's feed (the only one while the trip is off) */
 unsigned hw_wdt_short(unsigned secs);   /* 1.1: the loader's watchdog shortened (0: back); 0 = refused */
 int hw_dvfs(unsigned domain, uint32_t khz);   /* sb_acpm_dvfs_listed */

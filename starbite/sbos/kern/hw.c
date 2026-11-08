@@ -302,6 +302,11 @@ int hw_dvfs(unsigned domain, uint32_t khz)
     return sb_acpm_dvfs_listed(domain, khz);
 }
 
+int hw_dvfs_m3_ocp(uint32_t khz, unsigned busy)
+{
+    return sb_acpm_dvfs_m3_ocp(khz, busy);
+}
+
 int hw_m3_prep(void)
 {
     return sb_m3_pmu_defaults();

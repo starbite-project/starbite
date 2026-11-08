@@ -273,11 +273,23 @@ static void read_inputs(struct heat_in *in)
     }
 }
 
+/* 1.1-beta6: the M3 cores that run or may run now (launched, ours, or still in the heat kernel after a stop
+ * request): what Samsung's core-count table is checked against */
+static unsigned m3_busy(void)
+{
+    unsigned n = 0;
+    for (unsigned v = 4; v < 8; ++v) {
+        const struct sb_wslot *s = sb_smp_slot(v);
+        n += running[v] || cs[v].st == CS_LAUNCHED || (s && s->state == SB_WK_RUNNING);
+    }
+    return n;
+}
+
 /* ask ACPM, then check the PLL within 5 ms: more than 2 % above the request is a stop */
 static int clock_set(unsigned domain, uint32_t khz)
 {
     sb_logx(domain == DVFS_A55 ? "heater: step: ACPM A55 kHz " : "heater: step: ACPM M3 kHz ", khz);
-    if (!hw_dvfs(domain, khz)) {
+    if (!(domain == DVFS_M3 && khz > 1794000U ? hw_dvfs_m3_ocp(khz, m3_busy()) : hw_dvfs(domain, khz))) {
         sb_log("heater: step: ACPM did not answer");
         return 0;
     }
@@ -452,6 +464,12 @@ static void workers_apply(void)
             m3_prepped = 1;
         }
         if (w >= 4) {
+            /* 1.1-beta6: never a core more than Samsung's table allows at the M3's present clock */
+            uint32_t now_khz = hw_m3_khz();
+            if (m3_set > now_khz)
+                now_khz = m3_set;
+            if (now_khz > sb_m3_ocp_max_khz(m3_busy() + 1U))
+                continue;                   /* clocks_apply lowers the clock first (this tick), then the next tick */
             int first = !m3_others(w);
             if (first)
                 hw_m3_fp_log("heater: flexpmu before the first M3 start");
@@ -505,6 +523,16 @@ static void clocks_apply(void)
     for (unsigned w = 4; w < 8; ++w)
         m3_running |= running[w];
     if (ctl.m3_khz && m3_running && hw_m3_on() && ctl.m3_khz != m3_set) {
+        /* 1.1-beta6: up only when no more M3 cores run than Samsung's table allows at the new clock (they leave a
+         * tick after their stop request); down always at once */
+        if (ctl.m3_khz > 1794000U && m3_busy() > (ctl.m3_khz <= 2314000U ? 2U : 1U)) {
+            static uint64_t said;
+            if (sb_ms() - said > 2000U) {
+                said = sb_ms();
+                sb_logx("heater: M3 clock up waits for the extra cores to leave, busy ", m3_busy());
+            }
+            return;
+        }
         if (!clock_set(DVFS_M3, ctl.m3_khz)) {
             heater_stop_all("The big cores' clock did not change as asked");
             return;
@@ -822,7 +850,37 @@ void heater_timer(unsigned id)
     last_in = in;
     int before = ctl.state;
     run_track(&in);
+    int cal_before = ctl.cal;
     heat_ctl_step(&ctl, &in);
+    if (ctl.level >= HEAT_SURVIVAL && ctl.cal != cal_before) {
+        /* 1.1-beta6: each measured M3 combination and the pick */
+        if (cal_before >= 1 && cal_before <= 4) {
+            const struct heat_m3_cand *k = &heat_m3_cands[cal_before - 1];
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "heater: survival M3 candidate ");
+            ub_dec(&u, (uint64_t)k->n);
+            ub_s(&u, " @ ");
+            ub_dec(&u, k->khz / 1000U);
+            ub_s(&u, " MHz (+ A55s, GPU, panel): ");
+            ub_dec(&u, (uint64_t)(ctl.cal_mw[cal_before - 1] / 1000));
+            ub_c(&u, '.');
+            ub_dec(&u, (uint64_t)(ctl.cal_mw[cal_before - 1] % 1000 / 100));
+            ub_s(&u, " W");
+            sb_log(u.b);
+        }
+        if (ctl.cal == 5) {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "heater: survival M3 pick: ");
+            ub_dec(&u, (uint64_t)ctl.m3_n);
+            ub_s(&u, " @ ");
+            ub_dec(&u, ctl.surv_m3_khz / 1000U);
+            ub_s(&u, cal_before >= 1 && cal_before <= 4 && ctl.cal_mw[cal_before - 1] ? " MHz (the most watts)" :
+                                                                                     " MHz (measurement cut short)");
+            sb_log(u.b);
+        }
+    }
     if (heater_running_ui())
         record(&in, 1);
     if (!heater_running_ui()) {

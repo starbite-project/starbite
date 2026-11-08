@@ -221,6 +221,11 @@ static void t_dvfs(void)
     CHECK(!sb_dvfs_level_listed(3, 2704000) && !sb_dvfs_level_listed(3, 1924000), "M3 above the all-core 1794 never");
     CHECK(!sb_dvfs_level_listed(3, 455000), "455 MHz is not an M3 level");
     CHECK(!sb_dvfs_level_listed(2, 1794001), "only exact levels");
+    /* 1.1-beta6: Samsung's M3 core-count table (exynos-ocp): 1 core 2704, 2 cores 2314, 3-4 cores 1794 */
+    CHECK(sb_m3_ocp_level_ok(2704000, 1) && !sb_m3_ocp_level_ok(2704000, 2) && sb_m3_ocp_level_ok(2314000, 2) &&
+          !sb_m3_ocp_level_ok(2314000, 3) && sb_m3_ocp_level_ok(1794000, 4) && !sb_m3_ocp_level_ok(2886000, 1) &&
+          !sb_m3_ocp_level_ok(2860000, 1) && !sb_m3_ocp_level_ok(1924000, 1) && !sb_m3_ocp_level_ok(2704000, 0 + 4),
+          "M3: 2704 for 1 core, 2314 for 2, 1794 for 3-4, nothing else above 1794");
     CHECK(sb_dvfs_level_listed(4, 572000) && sb_dvfs_level_listed(4, 260000), "GPU 572 / 260 MHz listed");
     CHECK(sb_dvfs_level_listed(4, 598000), "GPU 598 MHz listed (the ECT's top, 0.6.2)");
     CHECK(!sb_dvfs_level_listed(4, 611000) && !sb_dvfs_level_listed(4, 650000) && !sb_dvfs_level_listed(4, 702000) &&
@@ -561,10 +566,11 @@ static void t_heater(void)
 }
 
 /* ---- battery model --------------------------------------------------------------------------- */
+static double sim_m3_w[3] = { 1.6, 2.9, 4.4 };
 /* ---- 1.1 Survival heat: a simulated phone (SoC and battery heat, the gauge, the chip's trip at our 128 C) ---- */
 struct sim {
     double soc, bat, pct, w, mah;
-    int max_soc, gpu_flips, cut, secs, min_cores_hot;
+    int max_soc, gpu_flips, cut, secs, min_cores_hot, ocp_bad;
     double w_sum;
     int ticks;
 };
@@ -575,7 +581,11 @@ struct sim {
 static void sim_tick(struct sim *s, const struct heat_ctl *c, struct heat_in *in, int trip_armed)
 {
     int a55 = c->cores < 3 ? c->cores : 3, m3 = c->cores > 3 ? c->cores - 3 : 0;
-    double w = 1.2 + 0.6 * a55 + 1.6 * m3 + (c->gpu_want && c->state == HEAT_ST_RUNNING ? 2.5 : 0.0);
+    /* 1.1-beta6: an M3 core's power by its clock (V^2 f: about 1.6 / 2.9 / 4.4 W); sim_m3_w overrides it */
+    double m3w = c->m3_khz >= 2704000U ? sim_m3_w[2] : c->m3_khz >= 2314000U ? sim_m3_w[1] : sim_m3_w[0];
+    double w = 1.2 + 0.6 * a55 + m3w * m3 + (c->gpu_want && c->state == HEAT_ST_RUNNING ? 2.5 : 0.0);
+    if (c->m3_khz > 1794000U && m3 > (c->m3_khz <= 2314000U ? 2 : 1))
+        s->ocp_bad++;                       /* more M3 cores than Samsung's table allows at this clock */
     if (c->state != HEAT_ST_RUNNING && c->state != HEAT_ST_HOLDING)
         w = 0.4;
     double ss = 30.0 + 9.0 * w;
@@ -662,6 +672,25 @@ static void t_survival(void)
     CHECK(stopped_with(&c, HEAT_ST_STOPPED, "2 %"), "the run ended at 2 %% battery (%s)", c.why);
     CHECK(s.w_sum / s.ticks > 8.0, "most of the load ran (%.1f W average)", s.w_sum / s.ticks);
     CHECK(s.gpu_flips < 40, "the GPU is not switched on and off all the time (%d)", s.gpu_flips);
+    CHECK(s.ocp_bad == 0, "never more M3 cores than Samsung's table allows at the clock (%d ticks)", s.ocp_bad);
+    CHECK(c.cal_mw[0] > 0 && c.cal_mw[1] > 0 && c.cal_mw[2] > 0 && c.cal_mw[3] > 0,
+          "every M3 candidate measured (%d %d %d %d mW)", c.cal_mw[0], c.cal_mw[1], c.cal_mw[2], c.cal_mw[3]);
+    CHECK(c.m3_n == 4 && c.surv_m3_khz == 1794000U, "the pick: 4 @ 1794 has the most watts here (%d @ %u)", c.m3_n,
+          c.surv_m3_khz);
+    printf("survival M3 candidates: 4@1794 %d mW, 3@1794 %d, 2@2314 %d, 1@2704 %d; pick %d @ %u\n", c.cal_mw[0],
+           c.cal_mw[1], c.cal_mw[2], c.cal_mw[3], c.m3_n, c.surv_m3_khz);
+    /* a phone where two fast cores make more heat: the pick follows the measurement */
+    sim_m3_w[1] = 3.6;
+    memset(&s, 0, sizeof(s));
+    in = base_in(0);
+    in.bat_c10 = 100, in.usb_c10 = in.chg_c10 = 100;
+    heat_ctl_init(&c, 0);
+    heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in);
+    sim_run(&c, &s, 1, 600);
+    CHECK(c.m3_n == 2 && c.surv_m3_khz == 2314000U, "the pick follows the measurement: 2 @ 2314 (%d @ %u; %d %d %d %d mW)",
+          c.m3_n, c.surv_m3_khz, c.cal_mw[0], c.cal_mw[1], c.cal_mw[2], c.cal_mw[3]);
+    CHECK(s.ocp_bad == 0 && !s.cut, "and within Samsung's table, no trip (%d, peak %d)", s.ocp_bad, s.max_soc);
+    sim_m3_w[1] = 2.9;
 
     /* trip off: holds below the user's stop minus 3 C, never reaches it in the model, runs to 2 % */
     memset(&s, 0, sizeof(s));
@@ -686,19 +715,20 @@ static void t_survival(void)
     in.trip_armed = 0;
     run(&c, &in, 0, 5000, 0);
     CHECK(c.state == HEAT_ST_RUNNING, "trip off: the unarmed trip is expected, no stop (%s)", c.why);
-    run(&c, &in, 5250, 4000, 0);
-    CHECK(c.cores == 7, "trip off: all 7 workers below the limit (%d)", c.cores);
+    run(&c, &in, 5250, 18000, 0);         /* 1.1-beta6: past the M3 measurement (4 s + 4 x 4 s) */
+    CHECK(c.cal == 5 && c.cores == 7, "trip off: all 7 workers below the limit after the measurement (%d, cal %d)", c.cores,
+          c.cal);
     in.soc_c10 = 1312;
-    run(&c, &in, 9500, 750, 0);
+    run(&c, &in, 23500, 750, 0);
     CHECK(c.state != HEAT_ST_STOPPED, "trip off: at the limit it sheds, no stop (%s)", c.why);
     CHECK(c.gpu_want == 1 && c.cores == 3, "trip off: the M3s shed first, the GPU kept (%d cores, gpu %d)", c.cores, c.gpu_want);
-    run(&c, &in, 10500, 0, 0);
+    run(&c, &in, 24500, 0, 0);
     CHECK(c.gpu_want == 0 && c.cores == 3, "trip off: then the GPU (%d cores, gpu %d)", c.cores, c.gpu_want);
     in.soc_c10 = 1250;
-    run(&c, &in, 11000, 4000, 0);
+    run(&c, &in, 25000, 4000, 0);
     CHECK(c.gpu_want == 1 && c.cores > 3, "trip off: back below the limit: the GPU, then the M3s (%d cores)", c.cores);
     in.soc_c10 = 1361;
-    run(&c, &in, 15500, 300, 0);
+    run(&c, &in, 29500, 300, 0);
     CHECK(stopped_with(&c, HEAT_ST_STOPPED, "past your limit"), "trip off: 5 C past the limit stops (%s)", c.why);
     in = base_in(0);
     heat_ctl_init(&c, 0);

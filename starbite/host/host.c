@@ -1151,6 +1151,8 @@ int64_t sb_smp_launch(unsigned w, sb_work_fn fn, void *arg)
     }
     if (w >= 4 && sb_smp_m3_prep)
         sb_smp_m3_prep();
+    if (w >= 4)
+        *(volatile uint32_t *)0x14062044UL = 0xfU;     /* 1.1-beta6: the M3 cluster reads powered once one runs */
     if (hth_on[w])
         pthread_join(hth[w], 0);
     hth_on[w] = 0;

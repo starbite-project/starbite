@@ -69,5 +69,14 @@ r=$(run $OPEN $HEAT $BATLIM $HOLD w:500)
 want "$r" "settings: Survival's battery limit raised (confirmed), 0.1 C: 0x00000244" "58 C after its confirmation"
 r=$(run $OPEN $HEAT $BATLIM w:300 k:p w:500)
 never "$r" "raised (confirmed)" "no raise without the hold"
+# 1.1-beta6: the M3 measurement (4@1794, 3@1794, 2@2314, 1@2704) and the pick, never past Samsung's table
+ENVS=SBOS_HOST_SMP=m3
+r=$(run $OPEN $HEAT $SURV $HOLD $HOLD $HOLD w:26000 $OFF w:3000)
+for k in "4 @ 1794" "3 @ 1794" "2 @ 2314" "1 @ 2704"; do
+    want "$r" "heater: survival M3 candidate $k MHz" "M3 candidate $k measured"
+done
+want "$r" "heater: survival M3 pick:" "the pick logged"
+never "$r" "M3 OCP TABLE VIOLATION" "never more M3 cores than the table allows at the clock asked"
+never "$r" "acpm dvfs (m3 ocp table) refused" "the libsb table never had to refuse"
 echo "survival test: $fails failed"
 [ "$fails" = 0 ]

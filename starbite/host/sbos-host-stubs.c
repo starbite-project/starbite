@@ -32,6 +32,8 @@ int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz)
     printf("host: acpm dvfs domain %u to %u kHz (listed)\n", domain, khz);
     if (domain == 2)                                     /* the fake A55 PLL: 26 MHz * M / 2 */
         *(volatile uint32_t *)0x1d000140UL = 0xa0000010U | (khz / 13000U) << 16 | 2U << 8;
+    if (domain == 3)                                     /* 1.1-beta6: the fake M3 PLL, as the A55's */
+        *(volatile uint32_t *)0x1d100120UL = 0xa0000010U | (khz / 13000U) << 16 | 2U << 8;
     if (domain == 4)                                     /* the fake G3D PLL: 26 MHz * M / (4 << 2) */
         *(volatile uint32_t *)0x17400140UL = 0xa0000010U | (khz * 16U / 26000U) << 16 | 4U << 8 | 2U;
     return 1;
@@ -91,6 +93,16 @@ void hw_wdt_feed_heat(void)
     host_wdt_fed = now;
 }
 int hw_dvfs(unsigned domain, uint32_t khz) { return sb_acpm_dvfs_listed(domain, khz); }
+int hw_dvfs_m3_ocp(uint32_t khz, unsigned busy)
+{
+    if (!sb_m3_ocp_level_ok(khz, busy)) {
+        printf("host: M3 OCP TABLE VIOLATION: %u kHz with %u busy cores\n", khz, busy);
+        return 0;
+    }
+    printf("host: acpm dvfs domain 3 to %u kHz (m3 ocp table, %u busy)\n", khz, busy);
+    *(volatile uint32_t *)0x1d100120UL = 0xa0000010U | (khz / 13000U) << 16 | 2U << 8;
+    return 1;
+}
 int hw_m3_prep(void) { return sb_m3_pmu_defaults(); }
 uint32_t hw_a55_khz(void) { return (uint32_t)(sb_a55_hz() / 1000U); }
 uint32_t hw_m3_khz(void) { int off; uint64_t h = sb_m3_hz(&off); return off ? 0 : (uint32_t)(h / 1000U); }

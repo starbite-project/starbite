@@ -117,7 +117,69 @@ static uint32_t flat_a55(const struct heat_ctl *c)
 
 static uint32_t flat_m3(const struct heat_ctl *c)
 {
+    if (c->level >= HEAT_SURVIVAL && c->surv_m3_khz)
+        return c->surv_m3_khz;              /* 1.1-beta6: the measured pick (or the candidate being measured) */
     return c->level == HEAT_MANUAL && c->man_m3 ? c->man_m3 : M3_FULL;
+}
+
+/* 1.1-beta6: the legal M3 combinations (the cluster has one clock; Samsung's exynos-ocp core-count table) */
+const struct heat_m3_cand heat_m3_cands[4] = { { 4, 1794000U }, { 3, 1794000U }, { 2, 2314000U }, { 1, 2704000U } };
+
+static void cal_pick(struct heat_ctl *c)
+{
+    int best = -1;
+    for (int i = 0; i < 4; ++i)
+        if (c->cal_mw[i] > 0 && (best < 0 || c->cal_mw[i] > c->cal_mw[best]))
+            best = i;
+    if (best < 0)
+        best = 0;                           /* nothing measured: Samsung's all-core level */
+    c->m3_n = heat_m3_cands[best].n;
+    c->surv_m3_khz = heat_m3_cands[best].khz;
+    c->max_cores = 3 + c->m3_n;
+    if (c->cores > c->max_cores)
+        c->cores = c->max_cores;
+    c->cal = 5;
+}
+
+/* 1 while it measures (the regulation waits); a hot reading ends it with the best so far */
+static int surv_calibrate(struct heat_ctl *c, const struct heat_in *in, uint64_t now, int hot)
+{
+    if (c->cal >= 5)
+        return 0;
+    if (hot) {
+        cal_pick(c);
+        return 0;
+    }
+    if (c->cal == 0) {
+        /* the A55s and the GPU first (one core a second), then the measurement */
+        if (c->cores < 3 || !c->gpu_want || now - c->t_start < 4000U)
+            return 0;
+        c->cal = 1;
+    } else if (now - c->cal_t >= 4000U) {
+        c->cal_mw[c->cal - 1] = c->cal_n ? (int)(c->cal_acc / c->cal_n) : 0;
+        if (++c->cal > 4) {
+            cal_pick(c);
+            return 0;
+        }
+    } else {
+        if (now - c->cal_t >= 1500U && in->gauge_ok && in->ma < 0 && in->mv > 0) {
+            c->cal_acc += (int64_t)-in->ma * in->mv / 1000;
+            c->cal_n++;
+        }
+        return 1;
+    }
+    /* the next candidate: its core count and clock (heater.c lowers the cores before it raises the clock) */
+    const struct heat_m3_cand *k = &heat_m3_cands[c->cal - 1];
+    c->m3_n = k->n;
+    c->surv_m3_khz = k->khz;
+    c->max_cores = 3 + k->n;
+    c->cores = c->max_cores;
+    c->gpu_want = 1;
+    c->m3_khz = flat_m3(c);
+    c->cal_t = now;
+    c->cal_acc = 0;
+    c->cal_n = 0;
+    return 1;
 }
 
 static void stop(struct heat_ctl *c, int st, const char *w)
@@ -202,6 +264,13 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
     c->bat_latched = 0;
     c->gpu_want = 1;
     c->t_shed = in->now;
+    c->cal = surv ? 0 : 5;
+    for (int i = 0; i < 4; ++i)
+        c->cal_mw[i] = 0;
+    c->m3_n = 4;
+    c->surv_m3_khz = surv ? M3_FULL : 0;
+    if (surv)
+        c->max_cores = 3;                   /* the A55s first; the measurement picks the M3s */
     c->state = HEAT_ST_RUNNING;
     why(c, c->cold ? "Starting gently (cold)" : "Heating");
     return 0;
@@ -370,6 +439,11 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
             int very = (in->soc_ok && in->soc_c10 >= lim + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15);
             int cool = in->soc_ok && in->soc_c10 < lim - L->surv_band_c10 && in->bat_ok &&
                        in->bat_c10 < c->surv_bat_c10 - 40;
+            if (surv_calibrate(c, in, now, hot)) {
+                c->state = HEAT_ST_RUNNING;
+                why(c, "Survival: measuring the big cores' combinations");
+                return;
+            }
             if (hot && now - c->t_shed >= 250U) {
                 for (int n = very ? 2 : 1; n > 0; --n) {
                     if (c->cores > 3)
@@ -410,6 +484,11 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         int cool = in->soc_ok && in->soc_c10 < target - L->surv_band_c10 && in->gauge_ok && in->bat_ok &&
                    in->bat_c10 < c->surv_bat_c10 - 40 &&
                    iabs(in->ma) < L->hard_ma - 300 && in->mv >= L->surv_shed_mv + 50;
+        if (surv_calibrate(c, in, now, hot || amps || low)) {
+            c->state = HEAT_ST_RUNNING;
+            why(c, "Survival: measuring the big cores' combinations");
+            return;
+        }
         if ((hot || amps || low) && now - c->t_shed >= 250U) {
             for (int n = very ? 2 : 1; n > 0; --n) {
                 if (c->cores > 0)
