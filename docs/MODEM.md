@@ -315,6 +315,15 @@ the park: the full ss310ap_off sequence, CENTRAL_SEQ_CP_STATUS 0x80. Differences
   reads 5 while the central sequencer reports 0x80 (in reset).
 Rule 2's check is next: One UI's own cbd must bring the modem up after this.
 
+### After T6: One UI, then T7 (2026-11-08 21:21)
+One UI brought the modem up normally after T6 (ril.RildInit 1,1, modemSettingDone OK, ril.cpreset 0, SIM
+ABSENT,ABSENT: no SIM inserted). **Rule 2 holds.** T7 right after that warm reboot refused as designed: sequencer
+0, CP_CTRL_S 0, **CP_CTRL_NS 0x002016a2**. A warm reboot resets the CP's sequencer but keeps CP_PWRON in
+CP_CTRL_NS. That corrects 6.2: CP_CTRL bits do survive a warm reboot, and only a cold boot clears them (T1/T4
+had run after cold boots). Android's cbd treats exactly this state as "CP first Init" and re-runs cal_cp_init,
+which sets CP_PWRON again (no change) and CP_START. Since commit after 252c6a0 the guard follows Android: it
+refuses only when the sequencer is up or CP_START is set, and logs a leftover CP_PWRON.
+
 ### 6.2 Safety review (hazard -> what prevents it -> how it is tested)
 | hazard | prevention | test |
 |---|---|---|
@@ -323,7 +332,7 @@ Rule 2's check is next: One UI's own cbd must bring the modem up after this.
 | an EL3 call we did not mean | glue allow-list: CP_CTRL read; CP_CTRL write only when it differs from EL3's freshly read value in bits 1/2/3/17 alone; SSS clock 0/1; security mode 2 (2,0,0) and mode 0 (0xF0000000, BOOT <= 64 KiB, MAIN within the CP memory). Nothing else reaches `smc` | host: every recorded call audited against that list, in every scenario |
 | a stray MMIO store | glue allow-list: PMU 0x1320-0x1338 and 0x280, ISSR0-63, INTGR1 = 2, AP2CP_CFG = 1 | host: every recorded store audited |
 | the CP left running or half-started | every exit after cp_init goes through park (`stop()`); `sb_before_reset` parks again if a park failed (end, Power, the crash screen's reboot); a hang trips the 30 s watchdog, a system reset. T1 (17:52) ran after the morning's Android boots and read CP_CTRL_NS without CP_PWRON, AP2CP_CFG 0 on Android's own boots, so this state does not survive a reboot; T1 after T6/T7 confirms it | host: never-answering CP, EL3 refusal, copy refusal: all end parked (central status 0x80, CP_CTRL_NS bits 2 and 17, SSS clock off) |
-| touching a CP someone else started | refuses unless sequencer 0 and CP_START / CP_PWRON clear | host: "started before" -> only read calls, no store |
+| touching a CP someone else started | refuses unless sequencer 0 and CP_START clear (a CP_PWRON left by a warm reboot is accepted, as Android does) | host: "started before" -> only read calls, no store; "warm PWRON" -> runs and parks |
 | network activity, SIM use, a call | no IPC at all in stage 3: no BOOT magic, no UDL, no INIT_END, so the CP never reaches the phase where RIL powers the radio; the IPC builder's allow-list (GETs only, CALL/SMS/SS/SAT/identity refused) is unchanged; nothing in stage 3 builds a frame | the existing exhaustive allow-list test |
 | identifiers in logs | nv_data.bin only as size + CRC; logs redacted as before | existing redaction tests |
 | a hang without a clue | a "boot: ..." line before every step, in pmsg | host: breadcrumb tests |

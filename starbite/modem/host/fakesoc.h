@@ -21,7 +21,7 @@ struct fakesoc {
     struct { uint32_t off, size; uint8_t *mem; } reg[FS_REGIONS];
     unsigned nreg;
     /* faults to inject */
-    int refuse_el3_write, refuse_carve, never_status, started_before;
+    int refuse_el3_write, refuse_carve, never_status, started_before, warm_pwron;
     /* records */
     struct { uint64_t pa; uint32_t v; } wr[FS_MAXREC];
     unsigned nwr;

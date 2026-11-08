@@ -1240,6 +1240,16 @@ static void test_boot(void)
         CHECKEQ(s.smc[i].a[1], SBM_SMC_READ_CTRL);
     fakesoc_free(&s);
 
+    /* a warm reboot from Android left CP_PWRON set (sequencer 0): runs, as Android's cbd does */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.warm_pwron = 1;
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_RUN;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+    CHECK(b.validated && b.released && b.parked);
+    check_parked(&s);
+    fakesoc_free(&s);
+
     /* a corrupt section in RAM stops everything before EL3 */
     boot_image(&im, 1);
     fakesoc_init(&s, &im.plan, boot_crc, main_crc);

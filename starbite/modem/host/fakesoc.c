@@ -199,6 +199,8 @@ void fakesoc_plat(struct fakesoc *s, struct sbm_plat *p, void (*log)(void *, con
     p->carve_read = cr;
     p->udelay = udelay;
     p->now_us = now_us;
+    if (s->warm_pwron)                   /* after a warm reboot from Android: PWRON kept, sequencer 0 */
+        s->ctrl[SBM_CP_CTRL_NS] = 0x002016a2;
     if (s->started_before) {
         s->pmu[PMU_RSEQ] = 5;
         s->ctrl[SBM_CP_CTRL_S] = 8;

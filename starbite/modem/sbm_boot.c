@@ -339,8 +339,13 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
         return stop(p, b, SBM_EIO, "CP_CTRL read");
     sbm_logf(p, "boot: before: sequencer %u, CP_CTRL_S 0x%08x, CP_CTRL_NS 0x%08x", b->reset_seq_before, b->ctrl_s,
              b->ctrl_ns);
-    if (b->reset_seq_before != 0 || (b->ctrl_s & (1u << 3)) || (b->ctrl_ns & (1u << 1)))
+    /* Android's rule (shmem_security_request): cp_init when the sequencer reads 0. A warm reboot resets the
+     * sequencer but keeps CP_PWRON in CP_CTRL_NS (T7 21:21 after One UI: 0x002016a2, sequencer 0); cal_cp_init
+     * sets it anyway. A running sequencer or CP_START set means a CP that is up: not touched. */
+    if (b->reset_seq_before != 0 || (b->ctrl_s & (1u << 3)))
         return stop(p, b, SBM_EPERM, "the CP was already started: not touched");
+    if (b->ctrl_ns & (1u << 1))
+        sbm_logf(p, "boot: CP_PWRON left set by an earlier boot (a warm reboot keeps it); cp_init runs as on Android");
 
     b->inited = 1;                       /* from here on, every way out parks */
     r = sbm_seq_run(p, sbm_seq_cp_init, sbm_seq_cp_init_n - 1, 100000);
