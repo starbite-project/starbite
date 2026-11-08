@@ -1070,8 +1070,8 @@ static int gs_run(unsigned dur, int page)
         ub_s(&u, ", FAULT");
     sb_strcpy(gs_detail, sizeof(gs_detail), u.b);
     int pass = !gs_bad && gs_stop != 4 && gs_rounds > 0;
-    if (!page)
-        return gs_stop == 1 ? -1 : pass && gs_stop == 3;
+    if (!page)                              /* -2: the temperature limit, not an error */
+        return gs_stop == 1 ? -1 : gs_stop == 2 && !gs_bad ? -2 : pass && gs_stop == 3;
     g_result(4, pass, u.b);
     info_screen("GPU stress result", fill_gs_result, 0);
     return pass;
@@ -1101,10 +1101,13 @@ int lab_oc_gpu_up(void)
  * run. detail: the summary (rounds, errors, the fault). */
 int lab_oc_gpu(unsigned secs, char *detail, unsigned cap)
 {
-    int sz = gs_sz;
+    int sz = gs_sz, lim = gs_limit;
     gs_sz = 0;                              /* 512 x 512: a round stays short at any clock */
+    if (gs_limit == LIMIT_NONE || gs_limit < 5)
+        gs_limit = 5;                       /* 95 C for this run (as the CPU test); never "no limit" */
     int r = gs_run(secs, 0);
     gs_sz = sz;
+    gs_limit = lim;
     struct ub u;
     ub_init(&u);
     ub_s(&u, gs_detail);

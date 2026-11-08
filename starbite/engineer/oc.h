@@ -60,7 +60,8 @@ void oc_tick(void);                         /* main.c's ui_tick: feeds the watch
 void oc_selftest_boot(void) __attribute__((noreturn));  /* OC_SELFTEST: tables to pmsg, then recovery */
 int oc_active(void);                        /* 1 while any domain is off its default step */
 
-/* stability runs (lab.c, gpu.c): 1 pass, 0 fail, -1 not run; detail: one line */
+/* stability runs (lab.c, gpu.c): 1 pass, 0 fail, -1 not run, -2 inconclusive (the temperature limit,
+ * 95 C for these runs); detail: one line */
 int lab_oc_cpu(unsigned mask, unsigned secs, char *detail, unsigned cap);
 int lab_oc_mem(unsigned size_idx, unsigned passes, char *detail, unsigned cap, unsigned *bw_read);
 int lab_oc_gpu_prepare(void);

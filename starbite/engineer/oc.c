@@ -814,7 +814,7 @@ static int oc_test(int d)
     }
     struct ub u;
     ub_init(&u);
-    ub_s(&u, r > 0 ? "PASS at " : r == 0 ? "FAIL at " : "not run at ");
+    ub_s(&u, r > 0 ? "PASS at " : r == 0 ? "FAIL at " : r == -2 ? "INCONCLUSIVE (temperature limit) at " : "not run at ");
     ub_mhz(&u, oc_set[d]);
     ub_s(&u, " MHz: ");
     ub_s(&u, det);
@@ -838,6 +838,10 @@ static int oc_test(int d)
                             "OK");
     } else if (r > 0) {
         ui_toast("Stability test passed", C_GREEN, 1500);
+    } else if (r == -2) {
+        (void)dialog("Inconclusive", oc_res[d],
+                     "The temperature limit (95 C) stopped it, not an error. Let the phone cool, or test with "
+                     "fewer cores.", "OK");
     }
     return r;
 }
@@ -1107,7 +1111,8 @@ static void build_ctl(void)
     }
     kv_add("Default step", u.b);
     if (oc_res[d][0])
-        kv_addc("Stability test", oc_res[d], oc_res_ok[d] > 0 ? C_GREEN : oc_res_ok[d] == 0 ? C_RED : C_L2);
+        kv_addc("Stability test", oc_res[d], oc_res_ok[d] > 0 ? C_GREEN : oc_res_ok[d] == 0 ? C_RED :
+                                             oc_res_ok[d] == -2 ? C_ORANGE : C_L2);
     unsigned under = 0;
     for (unsigned l = 0; l < o->nlv; ++l)
         under += oct_uv(o, o->khz[l]) && oct_undervolted(o, o->khz[l]);

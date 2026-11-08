@@ -690,6 +690,16 @@ the M3 GCU's IRP setting and throttle polling (vendor exynos-ocp.c) wait for the
 and the M3 system registers OCPTHROTTCTL, OCPTHROTTCNTA, OCPINTCTL, GCUCTL and OCPTIDEPBOTTHRESH on core 4
 (`kern_ocp_probe`; after Lab's tier 3 M3 PMU step). Reads only.
 
+**M3 cores (libsb smp.c, oc8).** Before each M3 CPU_ON, Samsung's FlexPMU words (CPU_INFORM 0, the core's
+GRP2 bits clear, APM2AP mailbox bit 24 clear for the first core; reset to the boot state before the session's
+first M3 start), and before an M3 core's CPU_OFF only the C2 hint (never the cluster-off request): Starbite OS
+1.1-beta2/3's fix (be868f6). Without them, oc7's M3 tests started 1 of 2 cores and then none (2026-11-08).
+They run only under Lab's confirmed tier 3 "Start the M3 cores".
+
+**Stability runs** stop at 95 C (unless the user's Lab limit is higher; never "no limit"); a stop at that
+limit without errors is **inconclusive**, not a failure: no revert, no storage taint (A55 1950 MHz on four
+cores reached 85 C in 2 s on 2026-11-08).
+
 **Journal.** Before each request (once-per-session tier 1 confirmation, asked before the first request's
 own confirmation), one text entry `ocj-<time>-<n>.txt` is appended to the OS store with the request and
 the last 30 log lines, so a power cut does not lose what was asked. While storage is held, nothing more is

@@ -94,6 +94,58 @@ struct sb_wslot *sb_smp_own_slot(unsigned w)
     return w < SB_NCORES ? &slots[w] : 0;
 }
 
+/* Samsung's FlexPMU bookkeeping around an M3 core's CPU_ON / CPU_OFF (exynos-powermode.c,
+ * flexpmu_cal_cpu_exynos9810.h; Starbite OS 1.1-beta2/3, branch claude/starbite-os-05b163 be868f6:
+ * PSCI alone left the M3 cluster in a state where the next CPU_ON never checked in). Only the boot
+ * core writes these, only for M3 cores (bit n = core 4 + n), and only when the application has the
+ * M3 PMU step confirmed (sb_smp_m3_prep set). Core on: CPU_INFORM(4 + n) = 0, the core's bit cleared
+ * in GRP2_INTR_BID_ENABLE and PMU_EVENT_INTERRUPT_ENABLE_GRP2, for the first M3 core APM2AP mailbox
+ * bit 24 = 0. Before a core's CPU_OFF: only the C2 hint (CPU_INFORM = 1, its bits set); never the
+ * cluster-off request (CPD, bit 24 = 1): asked for and never done, it left the firmware waiting and
+ * the next start hung (sbos 1.1-beta2, 19:31). Before the session's first M3 start the words go back
+ * to the boot state (inform 0, the M3 bits clear, bit 24 clear). */
+#define FP_INFORM(p) (SB_PMU + 0x860U + 4U * (p))
+#define FP_GRP2_BID 0x14070200UL
+#define FP_EVT_GRP2 0x14067f08UL
+#define FP_MBOX 0x14100010UL
+
+static int m3_fp_session;
+
+static void fp_rmw(uintptr_t a, uint32_t clr, uint32_t set)
+{
+    volatile uint32_t *r = (volatile uint32_t *)a;
+    *r = (*r & ~clr) | set;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+static void m3_fp_reset(void)
+{
+    for (unsigned c = 4; c < 8; ++c)
+        *(volatile uint32_t *)FP_INFORM(c) = 0;
+    fp_rmw(FP_GRP2_BID, 0xfU, 0);
+    fp_rmw(FP_EVT_GRP2, 0xfU, 0);
+    fp_rmw(FP_MBOX, 1U << 24, 0);
+    sb_log("smp: M3 FlexPMU words back to the boot state");
+}
+
+static void m3_fp_on(unsigned w, int first)
+{
+    uint32_t b = 1U << (w - 4U);
+    if (first)
+        fp_rmw(FP_MBOX, 1U << 24, 0);
+    *(volatile uint32_t *)FP_INFORM(w) = 0;
+    fp_rmw(FP_GRP2_BID, b, 0);
+    fp_rmw(FP_EVT_GRP2, b, 0);
+}
+
+static void m3_fp_off(unsigned w)
+{
+    uint32_t b = 1U << (w - 4U);
+    *(volatile uint32_t *)FP_INFORM(w) = 1U;
+    fp_rmw(FP_GRP2_BID, 0, b);
+    fp_rmw(FP_EVT_GRP2, 0, b);
+}
+
 int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg)
 {
     if (w == 0 || w >= SB_NCORES || !fn)
@@ -131,8 +183,19 @@ int64_t sb_smp_start(unsigned w, sb_work_fn fn, void *arg)
     sb_worker_boot[5] = stacks[w];
     sb_worker_boot[6] = 0x52454b524f574253ULL;     /* "SBWORKER" */
     line_civac(sb_worker_boot, 64);
-    if (w >= 4 && sb_smp_m3_prep)
+    if (w >= 4 && sb_smp_m3_prep) {
         sb_smp_m3_prep();
+        if (!m3_fp_session) {
+            m3_fp_reset();
+            m3_fp_session = 1;
+        }
+        int first = 1;
+        for (unsigned v = 4; v < SB_NCORES; ++v) {
+            line_civac(&slots[v], sizeof(slots[v]));
+            first &= v == w || slots[v].state != SB_WK_RUNNING;
+        }
+        m3_fp_on(w, first);
+    }
     int64_t r = -5;
     for (unsigned a = 0; a < 20; ++a) {             /* ALREADY_ON / ON_PENDING: the last CPU_OFF is not done */
         r = sb_psci(SB_PSCI_CPU_ON, sb_smp_target(w), (uint64_t)(uintptr_t)sb_worker_entry, 0);
@@ -163,6 +226,12 @@ unsigned sb_smp_running(void)
 
 unsigned sb_smp_stop(unsigned ms)
 {
+    if (sb_smp_m3_prep)                     /* the C2 hint before each running M3 core sees stop and calls CPU_OFF */
+        for (unsigned w = 4; w < SB_NCORES; ++w) {
+            line_civac(&slots[w], sizeof(slots[w]));
+            if (slots[w].state == SB_WK_RUNNING)
+                m3_fp_off(w);
+        }
     stop_line[0] = 1;
     line_civac(stop_line, 64);
     uint64_t t0 = sb_ms();

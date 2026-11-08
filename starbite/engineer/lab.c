@@ -433,7 +433,8 @@ static int m3_confirm(void)
     a.target = "PMU";
     a.happens[0] = "Writes the vendor PMU defaults for the Mongoose M3 cluster: 6 registers, as Linux and iOS do";
     a.happens[1] = "on this phone before every M3 CPU_ON (PMU 0x1088, 0x2114, 0x2180, 0x21EC, 0x2258, 0x2384)";
-    a.happens[2] = "Then PSCI CPU_ON 0x100..0x103 starts the four M3 cores on the stress kernels";
+    a.happens[2] = "Then, per M3 core, Samsung's FlexPMU words (CPU_INFORM, GRP2 bits, APM mailbox bit 24) and PSCI "
+                   "CPU_ON; before CPU_OFF only the C2 hint (never a cluster power-down)";
     a.happens[3] = 0;
     a.undo = "a reboot resets the PMU; Engineer OS turns the cores off when the test ends";
     a.old_v = "";
@@ -564,7 +565,7 @@ int lab_oc_m3_probe(int may_ask, uint64_t v[6], uint64_t *esr, const char **why)
             ++diff;
     }
     *esr = 0;
-    if (diff && m3_state <= 0) {
+    if ((diff || may_ask) && m3_state <= 0) {
         if (!may_ask) {
             *why = "the M3 PMU registers are not at the vendor values (needs the confirmed PMU step)";
             return -1;
@@ -574,7 +575,7 @@ int lab_oc_m3_probe(int may_ask, uint64_t v[6], uint64_t *esr, const char **why)
             return -1;
         }
     }
-    sb_smp_m3_prep = diff ? m3_prep : 0;
+    sb_smp_m3_prep = m3_state > 0 ? m3_prep : 0;
     struct sb_wslot *s = sb_smp_own_slot(4);
     if (s)
         for (unsigned k = 0; k < 8; ++k)
@@ -1606,18 +1607,28 @@ void lab_mem_stress(void)
 
 /* ---- overclocking stability checks (oc.c) -------------------------------------------------------
  * The same kernels and patterns as the CPU and memory stress pages, run for a fixed time on a
- * clock that was just changed. 1 pass, 0 fail (errors, a fault, the temperature limit), -1 not
+ * clock that was just changed. 1 pass, 0 fail (errors, a fault), -2 inconclusive (the temperature
+ * limit: 95 C for these runs unless the user set a higher one), -1 not
  * run (no cores, cancelled, no temperature guard declined). Nothing goes to the result pages. */
 
 int lab_oc_cpu(unsigned mask, unsigned secs, char *detail, unsigned cap)
 {
     struct ub u;
-    if (!guard_ok("Stability test (CPU)"))
+    /* an overclocked core reaches Lab's default 85 C in seconds (A55 1950 MHz, 4 cores: 2 s on
+     * 2026-11-08): 95 C for this run unless the user set a higher one; "no limit" is never used here */
+    int lim = opt.limit;
+    if (opt.limit == LIMIT_NONE || opt.limit < 5)
+        opt.limit = 5;
+    if (!guard_ok("Stability test (CPU)")) {
+        opt.limit = lim;
         return -1;
+    }
     unsigned want = mask;
     mask = cores_offer(mask, "Overclocking stability test");
-    if (!mask || (!(want & 0x0fU) && !(mask & 0xf0U)))
+    if (!mask || (!(want & 0x0fU) && !(mask & 0xf0U))) {
+        opt.limit = lim;
         return -1;                          /* an M3 test without the M3 cores is not a test */
+    }
     cs_dur = secs;
     ch_reset(CH_TEMP, "HOTTEST SENSOR (" U_DEG "C)", C_ORANGE, secs);
     ch_reset(CH_RATE, "WORK (BATCHES PER SECOND, ALL CORES)", C_GREEN, secs);
@@ -1671,11 +1682,17 @@ int lab_oc_cpu(unsigned mask, unsigned secs, char *detail, unsigned cap)
     ub_s(&u, " C");
     if (cs_stop == 1)
         ub_s(&u, " (stopped by hand)");
-    if (cs_stop == 2)
-        ub_s(&u, " (temperature limit)");
+    if (cs_stop == 2) {
+        ub_s(&u, " (temperature limit ");
+        ub_dec(&u, (uint64_t)limit_c[opt.limit]);
+        ub_s(&u, " C)");
+    }
     sb_strcpy(detail, cap, u.b);
+    opt.limit = lim;
     if (cs_stop == 1)
         return -1;
+    if (cs_stop == 2 && !e && !f)
+        return -2;                          /* inconclusive: the temperature limit, not an error */
     return !e && !f && n > 0 && cs_stop == 3;
 }
 

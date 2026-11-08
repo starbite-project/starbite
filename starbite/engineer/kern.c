@@ -177,4 +177,6 @@ void kern_ocp_probe(unsigned w, void *arg)
     }
     s->v[7] = 1;
     sb_worker_publish(s);
+    while (!sb_worker_stop())               /* the boot core gives the FlexPMU C2 hint first, then stops it */
+        __asm__ volatile("yield");
 }
