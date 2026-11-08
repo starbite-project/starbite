@@ -132,6 +132,7 @@ class Volume:
     def listdir(self, path):
         """(name, type, size) of every entry of one folder: from the leaf holding (id, "") along fLinks."""
         fid = self.folder_id(path)
+        self.perms = {}
         want = (fid, b'')
         n = self.root
         while True:
@@ -158,6 +159,8 @@ class Volume:
                 rtype = struct.unpack_from('>h', data, 0)[0]
                 if rtype in (1, 2):
                     size = struct.unpack_from('>Q', data, 88)[0] if rtype == 2 else 0
+                    uid, gid, _, _, mode = struct.unpack_from('>IIBBH', data, 32)   # HFSPlusBSDInfo
+                    self.perms[name.decode('utf-16-be', 'replace')] = (uid, gid, mode)
                     out.append((name.decode('utf-16-be', 'replace'), 'dir' if rtype == 1 else 'file', size))
             n = struct.unpack_from('>I', node, 0)[0]
         return out
