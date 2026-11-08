@@ -176,6 +176,33 @@ mailbox is clocked and AP-readable (MCUCTLR, the interrupt registers and ISSR0-1
 needs no clock work. In short, S-Boot leaves the CP powered but never started, and stage 3 must run the `cp_init`
 sequence itself. T2 (the carve-out reads) is next.
 
+### Result T2 (2026-11-08 19:42, image 509a2fa, `build/test-boots/modemprobe-shm-1942/loader-pmsg.txt`)
+No faults. **The carve-out is AP-readable at EL1 before any EL3 call** (unknown #1, read side, is answered).
+modem_if + 0 holds RADIO's TOC (`54 4f 43 00`), and + 0x2a0 holds the valid MEM0 map with the same values as
+the RADIO image. S-Boot copied at least RADIO's first bytes there raw. The IPC region's first words are
+0xffcbffdf / 0xffffdfff: uninitialised DRAM, never set up. The verdict is still cp-off.
+
+### 5.1 Steps 3 and 4 (the next probe, image `modemprobe`, same build)
+Stage 3 copies BOOT/MAIN/VSS/NV into the carve-out and then calls EL3, so two things must be known first:
+how much S-Boot already put there, and whether the AP can store into it.
+
+- **Step 3**, key `modemprobe-map`, read only, unattended-safe. `sbm_probe_survey` reads the carve-out's own
+  TOC, then CRC32s 8 ranges (64 KiB at most each) of the carve-out and of the RADIO partition (GPT "RADIO",
+  read only): TOC, BOOT, the head and tail of MAIN and VSS, each at its raw file offset and at cbd's place
+  (MAIN + 0x10000, VSS + 0x7900000). Output `SURVEY: <range>: MATCH | differs | zero | carve-out refused`. If
+  "MAIN tail raw" matches, S-Boot copied the whole of RADIO raw. If only TOC/BOOT match, it copied the head.
+- **Step 4**, key `modemprobe-acc`, user present. First CP_CTRL_S / CP_CTRL_NS through EL3's read call
+  (`sbm_cp_ctrl_read`: SMC 0x82000700, x1 = 3 READ_CTRL, x2 = half, x3 = 0 S / 1 NS, as PMUCAL reads them;
+  value in bits 31:16 of each half, low 16 bits 0 on success). Never the write call: the glue refuses any other
+  arguments. Android logged CP_CTRL_S 0x8 / CP_CTRL_NS 0x2016a2 *after* cal_cp_init. Then
+  `sbm_probe_write_test` on two fixed words, the IPC command area (modem_if + 0x8000400, unused with IOSM
+  off) and the last word of the CP's memory (+ 0x78ffffc). For each: read, store original ^ 0xA5A5A5A5,
+  `dc civac` to DRAM, read back, then put the original back and check. Results: `writable`, `write-ignored`
+  (TZASC drops stores), `store-faulted` (it stops there), `unreadable`. The glue's `poke32` refuses every
+  other address.
+  Dead-man: the catalog watchdog (30 s, fed only between lines). A hang in the EL3 call or a store resets into the
+  loader's crash screen, and the last `probe:` line in pmsg names the step.
+
 ## 6. Next stages (not started)
 
 3. CP boot: copy BOOT/MAIN/VSS + NV from RAM copies (RADIO, EFS `nv_data.bin`, read once) per `sbm_plan`, the

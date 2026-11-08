@@ -4,6 +4,8 @@
 #include "../sbm.h"
 /* Fills p for a libsb image; line() gets every (already redacted) log line. */
 void sbm_sb_plat(struct sbm_plat *p, void (*line)(const char *));
+/* Step 4 (user present): adds EL3's CP_CTRL read call and the two-word store test. */
+void sbm_sb_plat_step4(struct sbm_plat *p);
 /* SErrors that were already pending before a probe read (not caused by it). */
 unsigned sbm_sb_stale_serrors(void);
 #endif

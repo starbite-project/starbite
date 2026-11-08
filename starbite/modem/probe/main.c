@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only
  * Modem probe image (docs/MODEM.md section 5, stage 2): a bare-metal libsb image that looks at the Shannon CP's
- * state and touches nothing. Every line is on the screen and in the pmsg ring (TWRP:
- * /sys/fs/pstore/pmsg-ramoops-0).
+ * state; it changes nothing but step 4's two test words, which it puts back. Every line is on the screen and
+ * in the pmsg ring (TWRP: /sys/fs/pstore/pmsg-ramoops-0).
  *
  *   1. the sbm core's self-test on the phone (in its own RAM: the SBD layout against this phone's logged
  *      offsets, a SIPC5 + IPC round trip, the request allow-list refusing every CALL / SMS command);
@@ -10,14 +10,21 @@
  *      the memory map at + 0x2a0, the IPC region's first two words). TrustZone may refuse them (a synchronous
  *      abort or an SError: both are caught when they reach EL1; if EL3 takes the SError itself the phone may
  *      reset into the loader's crash screen). Step 2 runs after step 1's lines are in pmsg.
+ *   4. step 3 (key "modemprobe-map", read only): the carve-out against the RADIO partition (GPT "RADIO", read
+ *      only), range by range by CRC32: S-Boot's raw copy (TOC first) and cbd's places (MAIN + 0x10000, VSS +
+ *      0x7900000).
+ *   5. step 4 (key "modemprobe-acc", user present): CP_CTRL_S / CP_CTRL_NS through EL3's read call (SMC
+ *      0x82000700, x1 = 3, as Samsung's PMUCAL), then a store test of two fixed carve-out words (the IPC region's
+ *      unused command area, the CP memory's last word), each put back at once.
  *
  * Boot arguments (the catalog row's cmdline, then S-Boot's bootargs):
- *   modem_step=N    1 or 2 (default: from the key; "modemprobe-shm" = 2)
+ *   modem_step=N    1..4 (default from the key: "modemprobe-shm" 2, "modemprobe-map" 3, "modemprobe-acc" 4)
  *   modem_auto=1    start without the held Volume Up (an unattended run the user agreed to)
  *   modem_return=S  S seconds after the end, reboot to the boot menu (default: 30 when auto, else wait for Power)
  * Watchdog: fed when the loader armed it (catalog wdt, wdt_feed "own"), as the Wi-Fi test image does.
- * Writes: no modem, PMU or partition register (sbm_sb.c has no store path); the only register store is the
- * watchdog feed (WTCNT, only when the loader armed it); otherwise the screen, the log ring, RAM.
+ * Writes: no modem, PMU or partition register. Step 4 stores to two DRAM words in the carve-out and puts them
+ * back (the only store path, refused for any other address). The watchdog feed (WTCNT, when the loader armed
+ * it). Otherwise the screen, the log ring, RAM. No EL3 write call is ever made.
  * The CP is not booted, reset, powered or signalled. Nothing is dialled; no identifier is read.
  */
 #include "sb.h"
@@ -269,12 +276,14 @@ void sb_main(void)
                 e ? (e->cmdline[0] ? e->cmdline : "(none)") : "(no catalog row)");
         line(s);
     }
-    step = arg("modem_step", sb_streq(key, "modemprobe-shm") ? 2 : 1);
-    if (step < 1 || step > 2)
+    step = arg("modem_step", sb_streq(key, "modemprobe-acc") ? 4 : sb_streq(key, "modemprobe-map") ? 3
+                            : sb_streq(key, "modemprobe-shm") ? 2 : 1);
+    if (step < 1 || step > 4)
         step = 1;
     autostart = arg("modem_auto", 0);
     ret = arg("modem_return", autostart ? 30 : 0);
-    linef("modemprobe: step %u of %u (1: registers only; 2: also three small reads in the CP carve-out)", step, 2);
+    linef("modemprobe: step %u of %u (1 registers; 2 + carve-out reads; 3 + survey against RADIO; 4 + CP_CTRL"
+          " via EL3 and a two-word store test)", step, 4);
     line("modemprobe: reads only. The CP is not booted, reset or signalled. No modem register or partition is written.");
     if (!autostart) {
         draw("Hold Volume Up 2 s to start. Power: back.");
@@ -298,6 +307,31 @@ void sb_main(void)
         line("modemprobe: step 2: the CP carve-out (0xF0000000), stops at the first refused read");
         sbm_probe_run(&p, SBM_PROBE_SHM, &pr);
         sbm_probe_report(&p, &pr);
+    }
+    if (step >= 3) {
+        struct sbm_survey sv;
+        line("modemprobe: step 3: the carve-out against the RADIO partition (read only)");
+        sbm_probe_survey(&p, &sv);
+        sbm_survey_report(&p, &sv);
+    }
+    if (step >= 4) {
+        static struct sbm_wtest w[SBM_WTEST_N];
+        uint32_t v, err;
+        char s[COLS];
+        line("modemprobe: step 4: CP_CTRL through EL3's read call, then the two-word store test");
+        sbm_sb_plat_step4(&p);
+        for (unsigned reg = 0; reg < 2; reg++) {
+            sbm_fmt(s, sizeof(s), "probe: EL3 read call for %s", reg ? "CP_CTRL_NS" : "CP_CTRL_S");
+            line(s);
+            int r = sbm_cp_ctrl_read(&p, reg, &v, &err);
+            sbm_fmt(s, sizeof(s), "CTRL: %s %s 0x%08x%s (EL3 error %u)", reg ? "CP_CTRL_NS" : "CP_CTRL_S",
+                    r == 0 ? "=" : "read failed,", v,
+                    r == 0 && reg == 0 ? ((v & 8) ? " (CP_START set)" : " (CP_START clear)")
+                    : r == 0 ? ((v & 2) ? " (CP_PWRON set)" : " (CP_PWRON clear)") : "", err);
+            line(s);
+        }
+        sbm_probe_write_test(&p, w);
+        sbm_wtest_report(&p, w);
     }
     {
         char s[COLS];

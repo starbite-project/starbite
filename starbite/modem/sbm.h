@@ -132,6 +132,13 @@ struct sbm_plat {
     int (*probe32)(void *ctx, uint64_t pa, uint32_t *v);
     void (*log)(void *ctx, const char *line);   /* one line, no newline; already redacted */
     void (*barrier)(void *ctx);                 /* dmb ish around ring index updates; NULL = none */
+    /* stage 2b, all optional (NULL = that part is skipped) */
+    uint64_t (*smc)(void *ctx, uint64_t id, uint64_t a1, uint64_t a2, uint64_t a3);   /* SMC #0 to EL3 */
+    /* bytes [off, off + len) of the RADIO partition, read only: 0 ok */
+    int (*radio_read)(void *ctx, uint64_t off, void *buf, uint32_t len);
+    /* store v at pa and push it to DRAM (clean + invalidate the line): 1 ok, 0 the store faulted. Only
+     * sbm_probe_write_test calls it, and only for its two fixed words. */
+    int (*poke32)(void *ctx, uint64_t pa, uint32_t v);
 };
 
 /* ------------------------------------------------------------------------------------------------ */
@@ -487,6 +494,50 @@ void sbm_probe_report(const struct sbm_plat *p, const struct sbm_probe *pr);
 /* A one-word verdict: "cp-off", "cp-in-reset", "cp-powered", "cp-running", "cp-booting", "cp-online",
  * "cp-crashed", "shm-zero-ambiguous" (carve-out read as all zero: no answer), "unreadable". */
 const char *sbm_probe_verdict(const struct sbm_probe *pr);
+
+/* Stage 2b, step 3 (read only): what S-Boot left in the carve-out, against the RADIO partition. Each range is
+ * read with probe32 (stopping at the first fault) and from RADIO with radio_read, and CRC32'd. "raw" = at its
+ * modem.bin file offset (S-Boot's copy starts with the TOC at modem_if + 0), "cbd" = where cbd would load it. */
+#define SBM_SURVEY_MAX   8
+#define SBM_SURVEY_CHUNK 0x10000U       /* bytes compared per range at most */
+struct sbm_survey_ent {
+    char what[16];
+    uint32_t carve_off, radio_off, len;
+    uint32_t crc_carve, crc_radio;
+    int carve_ok, radio_ok;
+    uint32_t zero_words;                /* in the carve-out range */
+};
+struct sbm_survey {
+    int toc_ok;                         /* the carve-out's own TOC parsed (else this phone's known values) */
+    struct sbm_toc toc;
+    unsigned n;
+    struct sbm_survey_ent e[SBM_SURVEY_MAX];
+};
+void sbm_probe_survey(const struct sbm_plat *p, struct sbm_survey *sv);
+void sbm_survey_report(const struct sbm_plat *p, const struct sbm_survey *sv);
+
+/* Stage 2b, step 4 (user present): CP_CTRL_S / CP_CTRL_NS through EL3's read call (SMC 0x82000700, x1 = 3
+ * READ_CTRL, x2 = half, x3 = register: 0 CP_CTRL_S, 1 CP_CTRL_NS), as Samsung's PMUCAL reads them. Never the
+ * write call. 0 ok, SBM_EPERM no smc, SBM_EIO EL3's error (*err = its low 16 bits). */
+#define SBM_SMC_CP         0x82000700ULL
+#define SBM_SMC_READ_CTRL  3
+#define SBM_CP_CTRL_S      0
+#define SBM_CP_CTRL_NS     1
+int sbm_cp_ctrl_read(const struct sbm_plat *p, unsigned reg, uint32_t *v, uint32_t *err);
+
+/* Step 4: can the AP store into the carve-out before EL3's security call (stage 3's copy-in needs it)? Two fixed
+ * words, the IPC region's command area (+0x400, unused on this phone) and the last word of the CP's own memory:
+ * read, store (original ^ 0xA5A5A5A5), push to DRAM, read back, then store the original again and check. */
+#define SBM_WTEST_N 2
+struct sbm_wtest {
+    uint64_t pa;
+    uint32_t before, pattern, after, restored;
+    int read_ok, store_ok, after_ok, restore_ok;
+    const char *result;                 /* "writable", "write-ignored", "store-faulted", "unreadable", "other" */
+};
+void sbm_probe_write_test(const struct sbm_plat *p, struct sbm_wtest w[SBM_WTEST_N]);
+void sbm_wtest_report(const struct sbm_plat *p, const struct sbm_wtest w[SBM_WTEST_N]);
+uint32_t sbm_crc32(uint32_t crc, const void *buf, size_t n);   /* zlib's CRC-32; start with 0 */
 
 /* ------------------------------------------------------------------------------------------------ */
 /* errors */

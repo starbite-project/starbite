@@ -237,6 +237,18 @@ int fakeregs_probe32(void *ctx, uint64_t pa, uint32_t *v)
         if (!r->shm_head)
             return 0;
         uint64_t o = pa - SBM_MODEM_IF_PA;
+        for (unsigned i = 0; i < r->ncell; ++i)
+            if (r->cell_pa[i] == pa) {
+                *v = r->cell_v[i];
+                return 1;
+            }
+        if (r->raw_len && o >= 0x400) {
+            uint8_t b[4] = { 0 };
+            for (unsigned k = 0; k < 4; ++k)
+                b[k] = o + k < r->raw_len ? fake_radio_byte(r, o + k) : 0;
+            *v = sbm_le32(b);
+            return 1;
+        }
         if (o + 4 <= 0x400) {
             *v = sbm_le32(r->shm_head + o);
             return 1;
@@ -248,4 +260,62 @@ int fakeregs_probe32(void *ctx, uint64_t pa, uint32_t *v)
         return 0;
     }
     return 0;
+}
+
+uint8_t fake_radio_byte(const struct fakeregs *r, uint64_t off)
+{
+    if (off < 0x400 && r->shm_head)
+        return r->shm_head[off];
+    uint32_t x = (uint32_t)off * 2654435761U;
+    return (uint8_t)(x >> 24 ^ x >> 13);
+}
+
+int fakeregs_radio_read(void *ctx, uint64_t off, void *buf, uint32_t len)
+{
+    struct fakeregs *r = ctx;
+    if (off + len > 52428800ULL)
+        return -1;
+    for (uint32_t i = 0; i < len; ++i)
+        ((uint8_t *)buf)[i] = fake_radio_byte(r, off + i);
+    return 0;
+}
+
+int fakeregs_poke32(void *ctx, uint64_t pa, uint32_t v)
+{
+    struct fakeregs *r = ctx;
+    if (r->npoke < 8)
+        r->poke_pa[r->npoke] = pa;
+    r->npoke++;
+    if (r->store_mode == STORE_FAULTS)
+        return 0;
+    if (r->store_mode == STORE_IGNORED)
+        return 1;
+    for (unsigned i = 0; i < r->ncell; ++i)
+        if (r->cell_pa[i] == pa) {
+            r->cell_v[i] = v;
+            return 1;
+        }
+    if (r->ncell < 4) {
+        r->cell_pa[r->ncell] = pa;
+        r->cell_v[r->ncell++] = v;
+    }
+    return 1;
+}
+
+uint64_t fakeregs_smc(void *ctx, uint64_t id, uint64_t a1, uint64_t a2, uint64_t a3)
+{
+    struct fakeregs *r = ctx;
+    if (r->nsmc < 16) {
+        r->smc_args[r->nsmc][0] = id;
+        r->smc_args[r->nsmc][1] = a1;
+        r->smc_args[r->nsmc][2] = a2;
+        r->smc_args[r->nsmc][3] = a3;
+    }
+    r->nsmc++;
+    if (r->smc_err)
+        return r->smc_err;
+    if (id != SBM_SMC_CP || a1 != SBM_SMC_READ_CTRL || a2 > 1 || a3 > 1)
+        return 0xFFFF;
+    uint32_t v = r->ctrl[a3];
+    return (uint64_t)((a2 ? v >> 16 : v & 0xFFFF) << 16);
 }

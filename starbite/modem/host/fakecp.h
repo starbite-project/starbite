@@ -49,7 +49,23 @@ struct fakeregs {
     uint64_t trace[512];
     unsigned ntrace;
     unsigned shm_reads;
+    /* stage 2b: raw_len > 0 = the carve-out holds S-Boot's raw copy of a fake RADIO (fake_radio_byte, with
+     * shm_head over its first 0x400 bytes) up to raw_len, zeros after it */
+    uint32_t raw_len;
+    enum { STORE_WRITABLE, STORE_IGNORED, STORE_FAULTS } store_mode;
+    uint64_t cell_pa[4];
+    uint32_t cell_v[4];
+    unsigned ncell, npoke;
+    uint64_t poke_pa[8];
+    /* EL3: CP_CTRL_S / CP_CTRL_NS values, an error to return, and every call made */
+    uint32_t ctrl[2], smc_err;
+    unsigned nsmc;
+    uint64_t smc_args[16][4];
 };
 int fakeregs_probe32(void *ctx, uint64_t pa, uint32_t *v);
+uint8_t fake_radio_byte(const struct fakeregs *r, uint64_t off);
+int fakeregs_radio_read(void *ctx, uint64_t off, void *buf, uint32_t len);
+int fakeregs_poke32(void *ctx, uint64_t pa, uint32_t v);
+uint64_t fakeregs_smc(void *ctx, uint64_t id, uint64_t a1, uint64_t a2, uint64_t a3);
 
 #endif

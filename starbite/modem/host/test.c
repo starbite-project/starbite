@@ -732,7 +732,7 @@ static void test_cell_and_redact(void)
     CHECK(strstr(s, "bad frame") != 0);
 
     /* sbm_logf redacts what a caller formats */
-    struct sbm_plat p = { 0, 0, tlog, 0 };
+    struct sbm_plat p = { 0, 0, tlog, 0, 0, 0, 0 };
     sbm_logf(&p, "number %s reg 0x%08x", "+15555550100", 0x6ba2u);
     CHECK(!strcmp(lastlog, "number +########### reg 0x00006ba2"));
     sbm_logf(&p, "%d %u %x %5s|%3d|%c%%|%04x|%llu", -42, 7u, 0xabcu, "ab", 5, 'z', 0x1fu, 123456ULL);
@@ -793,7 +793,7 @@ static int crumb_probe32(void *ctx, uint64_t pa, uint32_t *v)
 static void test_probe(void)
 {
     static struct fakeregs r;
-    struct sbm_plat p = { &r, fakeregs_probe32, tlog, 0 };
+    struct sbm_plat p = { &r, fakeregs_probe32, tlog, 0, 0, 0, 0 };
     struct sbm_probe pr;
     static uint8_t head[0x400];
 
@@ -868,7 +868,7 @@ static void test_probe(void)
     memset(&r, 0, sizeof(r));
     r.pmu[SBM_PMU_RESET_SEQ_STATUS / 4] = 5;
     r.shm_head = head;
-    struct sbm_plat pc = { &crumbs, crumb_probe32, tlog, 0 };
+    struct sbm_plat pc = { &crumbs, crumb_probe32, tlog, 0, 0, 0, 0 };
     crumbs.inner = &r;
     crumbs.n = 0;
     nlog = 0;
@@ -908,9 +908,137 @@ static void test_probe(void)
     CHECK(strcmp(sbm_probe_verdict(&pr), "shm-zero-ambiguous") != 0);
 
     /* no probe32: reads nothing */
-    struct sbm_plat none = { 0, 0, tlog, 0 };
+    struct sbm_plat none = { 0, 0, tlog, 0, 0, 0, 0 };
     sbm_probe_run(&none, SBM_PROBE_SHM, &pr);
     CHECK(!strcmp(sbm_probe_verdict(&pr), "unreadable"));
+}
+
+/* ---- stage 2b: survey, EL3's CP_CTRL read call, store test ----------------------------------- */
+
+static void test_probe2(void)
+{
+    static struct fakeregs r;
+    static uint8_t head[0x400];
+    struct sbm_plat p = { &r, fakeregs_probe32, tlog, 0, fakeregs_smc, fakeregs_radio_read, fakeregs_poke32 };
+    static struct sbm_survey sv;
+
+    CHECKEQ(sbm_crc32(0, "123456789", 9), 0xCBF43926);   /* the CRC-32 check value */
+
+    /* S-Boot's raw copy: everything at its file offset matches, cbd's places do not */
+    memset(&r, 0, sizeof(r));
+    make_toc(head);
+    make_memmap(head + SBM_MEMMAP_OFF);
+    r.shm_head = head;
+    r.raw_len = 0x3000000;
+    sbm_probe_survey(&p, &sv);
+    CHECK(sv.toc_ok);
+    CHECKEQ(sv.n, 8);
+    static const char *const want[8][2] = {
+        { "TOC raw", "MATCH" }, { "BOOT raw", "MATCH" }, { "MAIN head raw", "MATCH" }, { "MAIN head cbd", "differs" },
+        { "MAIN tail raw", "MATCH" }, { "MAIN tail cbd", "differs" }, { "VSS raw", "MATCH" }, { "VSS cbd", "zero" },
+    };
+    for (unsigned i = 0; i < 8 && i < sv.n; ++i) {
+        const struct sbm_survey_ent *e = &sv.e[i];
+        CHECK(!strcmp(e->what, want[i][0]));
+        CHECK(e->carve_ok && e->radio_ok);
+        int match = e->crc_carve == e->crc_radio;
+        if (!strcmp(want[i][1], "MATCH"))
+            CHECK(match);
+        else
+            CHECK(!match);
+        if (!strcmp(want[i][1], "zero"))
+            CHECKEQ(e->zero_words * 4, e->len);
+    }
+    CHECKEQ(sv.e[2].carve_off, 0x2040);
+    CHECKEQ(sv.e[3].carve_off, 0x10000);
+    CHECKEQ(sv.e[7].carve_off, 0x7900000);
+    CHECKEQ(sv.e[4].carve_off, (0x2040 + ((0x23d8ea0 - SBM_SURVEY_CHUNK) & ~3u)));
+    nlog = 0;
+    sbm_survey_report(&p, &sv);
+    CHECK(!strcmp(lastlog, "SURVEY: 5 of 8 ranges match RADIO"));
+    unsigned crumbs_seen = 0;
+    for (unsigned i = 0; i < nlog && i < 256; ++i)
+        crumbs_seen += !strncmp(loglines[i], "SURVEY: VSS cbd: zero (", 23);
+    CHECKEQ(crumbs_seen, 1);
+
+    /* the carve-out refuses: one refused read, then RADIO only */
+    memset(&r, 0, sizeof(r));
+    sbm_probe_survey(&p, &sv);
+    CHECK(!sv.toc_ok);
+    CHECKEQ(r.shm_reads, 1);
+    for (unsigned i = 0; i < sv.n; ++i)
+        CHECK(!sv.e[i].carve_ok && sv.e[i].radio_ok);
+
+    /* EL3's read call: as PMUCAL makes it, the value from two halves */
+    memset(&r, 0, sizeof(r));
+    r.ctrl[SBM_CP_CTRL_S] = 0x00000008;
+    r.ctrl[SBM_CP_CTRL_NS] = 0x002016a2;      /* this phone's value after Android's cal_cp_init */
+    uint32_t v, err;
+    CHECKEQ(sbm_cp_ctrl_read(&p, SBM_CP_CTRL_NS, &v, &err), 0);
+    CHECKEQ(v, 0x002016a2);
+    CHECKEQ(sbm_cp_ctrl_read(&p, SBM_CP_CTRL_S, &v, &err), 0);
+    CHECKEQ(v, 8);
+    CHECKEQ(sbm_cp_ctrl_read(&p, 2, &v, &err), SBM_EPERM);
+    r.smc_err = 0x5;
+    CHECKEQ(sbm_cp_ctrl_read(&p, SBM_CP_CTRL_S, &v, &err), SBM_EIO);
+    CHECKEQ(err, 5);
+    CHECKEQ(r.nsmc, 5);
+    for (unsigned i = 0; i < r.nsmc && i < 16; ++i) {
+        CHECKEQ(r.smc_args[i][0], SBM_SMC_CP);
+        CHECKEQ(r.smc_args[i][1], SBM_SMC_READ_CTRL);   /* never WRITE_CTRL (4) */
+        CHECK(r.smc_args[i][2] <= 1 && r.smc_args[i][3] <= 1);
+    }
+    struct sbm_plat nosmc = { &r, fakeregs_probe32, tlog, 0, 0, 0, 0 };
+    CHECKEQ(sbm_cp_ctrl_read(&nosmc, SBM_CP_CTRL_S, &v, &err), SBM_EPERM);
+
+    /* store test: writable, each word put back */
+    static struct sbm_wtest w[SBM_WTEST_N];
+    const uint64_t ipc_cmd = SBM_MODEM_IF_PA + SBM_DT_IPC_OFF + 0x400, cp_last = SBM_MODEM_IF_PA + SBM_DT_CP_SIZE - 4;
+    memset(&r, 0, sizeof(r));
+    r.shm_head = head;
+    r.raw_len = 0x3000000;
+    r.cell_pa[0] = ipc_cmd; r.cell_v[0] = 0x11223344;
+    r.cell_pa[1] = cp_last; r.cell_v[1] = 0xdeadbeef;
+    r.ncell = 2;
+    sbm_probe_write_test(&p, w);
+    CHECK(!strcmp(w[0].result, "writable") && !strcmp(w[1].result, "writable"));
+    CHECKEQ(w[0].pa, ipc_cmd);
+    CHECKEQ(w[1].pa, cp_last);
+    CHECKEQ(w[0].pattern, 0x11223344u ^ 0xA5A5A5A5u);
+    CHECK(w[0].restore_ok && w[1].restore_ok);
+    CHECKEQ(r.cell_v[0], 0x11223344);
+    CHECKEQ(r.cell_v[1], 0xdeadbeef);
+    CHECKEQ(r.npoke, 4);
+    for (unsigned i = 0; i < r.npoke && i < 8; ++i)
+        CHECK(r.poke_pa[i] == ipc_cmd || r.poke_pa[i] == cp_last);
+    sbm_wtest_report(&p, w);
+    CHECK(strstr(lastlog, "writable") && strstr(lastlog, "put back ok 0xdeadbeef"));
+
+    /* write-ignored (TZASC drops the store): nothing to put back */
+    memset(&r, 0, sizeof(r));
+    r.shm_head = head;
+    r.raw_len = 0x3000000;
+    r.store_mode = STORE_IGNORED;
+    sbm_probe_write_test(&p, w);
+    CHECK(!strcmp(w[0].result, "write-ignored") && !strcmp(w[1].result, "write-ignored"));
+    CHECKEQ(r.npoke, 2);
+
+    /* the store faults: stop there, the second word is not touched */
+    memset(&r, 0, sizeof(r));
+    r.shm_head = head;
+    r.raw_len = 0x3000000;
+    r.store_mode = STORE_FAULTS;
+    sbm_probe_write_test(&p, w);
+    CHECK(!strcmp(w[0].result, "store-faulted") && !strcmp(w[1].result, "skipped"));
+    CHECKEQ(r.npoke, 1);
+
+    /* unreadable: nothing stored */
+    memset(&r, 0, sizeof(r));
+    sbm_probe_write_test(&p, w);
+    CHECK(!strcmp(w[0].result, "unreadable"));
+    CHECKEQ(r.npoke, 0);
+    sbm_probe_write_test(&nosmc, w);           /* no poke32: skipped */
+    CHECK(!strcmp(w[0].result, "skipped"));
 }
 
 int main(int argc, char **argv)
@@ -924,6 +1052,7 @@ int main(int argc, char **argv)
     test_e2e();
     test_cell_and_redact();
     test_probe();
+    test_probe2();
     printf("sbm host test: %u checks, %u failed%s\n", checks, fails, radio ? " (with this phone's RADIO image)" : "");
     return fails ? 1 : 0;
 }
