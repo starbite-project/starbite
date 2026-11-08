@@ -495,3 +495,8 @@ a no-op. Open firmware-level question: which module publishes the live FADT and 
 Status 2026-11-08: the big-core hand-off reaches Windows' loader on the M3, which then hangs silently. Further
 work on this path is paused pending the user's decision (see the session's last report).
 
+**solo10 (1d195086):** the PSCI emulator went in as designed ("ntoskrnl BA000000 size 103D000: SMC wrapper +2000A8 ->
+emulator +5D7D10"), but Windows still hangs on the M3 (watchdog reset at ~2 min, no =UFS). So missing PSCI was not
+the only blocker. Nothing after winload is visible from the firmware side. The track stays paused for the user's
+decision; deeper instrumentation would mean patching more of Windows itself.
+
