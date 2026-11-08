@@ -223,7 +223,21 @@ static void scan_result(struct bcmw *w, const struct bcmw_event *ev)
         w->join_unsuitable++;
         return;
     }
-    if (!w->join_found || rssi > w->join_rssi) {
+    {
+        /* 5 GHz preferred when the same network is on both bands (a 5 GHz access point wins unless it is 20 dB
+         * weaker): T4-WPA2 joined the user's network fine on 5 GHz but timed out on its 2.4 GHz side (as W2g's
+         * 2.4 GHz hotspot did under Windows) */
+        int b5 = (le16(d + 72) & 0xc000) == 0xc000, cur5 = (w->join_chanspec & 0xc000) == 0xc000;
+        if ((w->cfg.join_band == 2 && b5) || (w->cfg.join_band == 5 && !b5)) {
+            w->join_unsuitable++;               /* the band asked for (an experiment setting) */
+            return;
+        }
+        int better = !w->join_found || (b5 == cur5 ? rssi > w->join_rssi :
+                                        b5 ? rssi + 20 > w->join_rssi : rssi > w->join_rssi + 20);
+        if (!better)
+            return;
+    }
+    {
         w->join_found = 1;
         w->join_rssi = rssi;
         bcmw_memcpy(w->join_bssid, d + 8, 6);
@@ -253,6 +267,20 @@ void link_event(struct bcmw *w, const struct bcmw_event *ev)
     }
     if (w->join_phase < 2)
         return;
+    if (w->join_phase == 2 && ev->type != E_PSK_SUP) {
+        /* every event while joining (the 2.4 GHz timeout: what the firmware did) */
+        struct bcmw_lb l;
+        lb_init(&l);
+        lb_s(&l, "link: event ");
+        lb_dec(&l, ev->type);
+        lb_s(&l, " status ");
+        lb_dec(&l, ev->status);
+        lb_s(&l, " reason ");
+        lb_dec(&l, ev->reason);
+        lb_s(&l, " flags ");
+        lb_hex(&l, ev->flags, 4);
+        bcmw_say_lb(w, &l);
+    }
     switch (ev->type) {
     case BCMW_E_SET_SSID:
         if (ev->status != 0) {

@@ -654,6 +654,13 @@ static int step_up(struct bcmw *w)
     }
     bcmw_iovar_set_u32(w, "mpc", 0);
     bcmw_iovar_set_u32(w, "roam_off", 1);   /* the host holds the keys of one AP (an earlier port, bcmdhd ROAM_ENABLE off) */
+    if (w->cfg.btc_off) {
+        uint32_t was = 0xffffffffu;
+        int ge = bcmw_iovar_get_u32(w, "btc_mode", &was);
+        int se = bcmw_iovar_set_u32(w, "btc_mode", 0);
+        bcmw_sayx(w, "fw: 10: Bluetooth coexistence (btc_mode) was ", ge == BCMW_OK ? was : 0xffffffffu,
+                  se == BCMW_OK ? "; now 0 (off)" : "; setting 0 REFUSED");
+    }
     v = 0;
     e = bcmw_ioctl(w, 0, BCMW_C_UP, &v, 4, 1, &fwerr);
     bcmw_sayx(w, "fw: 10: up: ", (uint32_t)e, e == BCMW_OK ? "(fine)" : "(FAILED)");
