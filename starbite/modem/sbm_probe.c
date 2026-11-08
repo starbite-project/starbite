@@ -8,7 +8,10 @@
  *   3. Only with SBM_PROBE_SHM: the CP carve-out, three small areas, stopping at the first fault:
  *      modem_if + 0 (16 bytes), the MEMn table at + 0x2a0 (80 bytes, what Samsung's shm_probe reads), and the
  *      first two words of the IPC region (magic, access). TZASC may refuse these reads: that is the question
- *      this step answers.
+ *      this step answers. Reads that all return zero without a fault prove nothing (an empty carve-out and a
+ *      TZASC read-as-zero denial look alike): the verdict is then "shm-zero-ambiguous".
+ * A breadcrumb line goes to the log before each block, so a read that hangs (the watchdog then resets) shows
+ * in pmsg which block it was.
  * No register is written, no SMC is made, nothing outside these addresses is read.
  */
 #include "sbm.h"
@@ -36,6 +39,17 @@ static int rd_bytes(const struct sbm_plat *p, struct sbm_probe *pr, uint64_t pa,
     return 1;
 }
 
+static void log_pmu(const struct sbm_plat *p, const struct sbm_probe *pr)
+{
+    if (pr->pmu_ok)
+        sbm_logf(p, "PMU: RESET_SEQUENCER_STATUS 0x%08x (seq %u, 5 = up) CENTRAL_SEQ_CP 0x%08x/0x%08x (st 0x%02x) "
+                    "CP_STAT 0x%08x CP_DEBUG 0x%08x",
+                 pr->reset_seq, pr->reset_seq & 7, pr->central_cfg, pr->central_st, (pr->central_st >> 16) & 0xFF,
+                 pr->cp_stat, pr->cp_debug);
+    else
+        sbm_logf(p, "PMU: not readable");
+}
+
 void sbm_probe_run(const struct sbm_plat *p, unsigned steps, struct sbm_probe *pr)
 {
     sbm_memset(pr, 0, sizeof(*pr));
@@ -45,12 +59,15 @@ void sbm_probe_run(const struct sbm_plat *p, unsigned steps, struct sbm_probe *p
         return;
     if (steps & (SBM_PROBE_REGS | SBM_PROBE_SHM)) {
         const uint64_t b = SBM_PMU_PA;
+        sbm_logf(p, "probe: reading PMU 0x%08x", (unsigned)b);
         pr->pmu_ok = rd(p, pr, b + SBM_PMU_RESET_SEQ_STATUS, &pr->reset_seq) &&
                      rd(p, pr, b + SBM_PMU_CP_STAT, &pr->cp_stat) &&
                      rd(p, pr, b + SBM_PMU_CP_DEBUG, &pr->cp_debug) &&
                      rd(p, pr, b + SBM_PMU_CENTRAL_SEQ_CP_CFG, &pr->central_cfg) &&
                      rd(p, pr, b + SBM_PMU_CENTRAL_SEQ_CP_ST, &pr->central_st);
+        log_pmu(p, pr);          /* in the log before the next block is touched */
         const uint64_t m = SBM_MBOX_PA;
+        sbm_logf(p, "probe: reading mailbox 0x%08x", (unsigned)m);
         pr->mbox_ok = rd(p, pr, m + SBM_MBOX_MCUCTLR, &pr->mcuctlr);
         if (pr->mbox_ok) {
             rd(p, pr, m + SBM_MBOX_INTMR0, &pr->intmr0);
@@ -67,14 +84,27 @@ void sbm_probe_run(const struct sbm_plat *p, unsigned steps, struct sbm_probe *p
     if (steps & SBM_PROBE_SHM) {
         pr->shm_tried = 1;
         const uint64_t c = SBM_MODEM_IF_PA;
+        sbm_logf(p, "probe: reading modem_if+0 (0x%08x, 16 bytes)", (unsigned)c);
         pr->shm_head_ok = rd_bytes(p, pr, c, pr->head, sizeof(pr->head));
-        if (pr->shm_head_ok)
+        if (pr->shm_head_ok) {
+            sbm_logf(p, "probe: reading modem_if+0x2a0 (memory map, %u bytes)", (unsigned)SBM_MEMMAP_BYTES);
             pr->shm_map_ok = rd_bytes(p, pr, c + SBM_MEMMAP_OFF, pr->map_raw, SBM_MEMMAP_BYTES);
+        }
         if (pr->shm_map_ok)
             sbm_memmap_parse(pr->map_raw, &pr->mm);
-        if (pr->shm_map_ok && pr->mm.ipc_size >= 8)
+        if (pr->shm_map_ok && pr->mm.ipc_size >= 8) {
+            sbm_logf(p, "probe: reading IPC region modem_if+0x%08x (8 bytes)", pr->mm.ipc_off);
             pr->shm_ipc_ok = rd(p, pr, c + pr->mm.ipc_off, &pr->ipc_magic) &&
                              rd(p, pr, c + pr->mm.ipc_off + 4, &pr->ipc_access);
+        }
+        /* all zero with no fault: an empty carve-out and a TZASC read-as-zero denial look the same */
+        if (pr->shm_head_ok) {
+            unsigned nz = 0;
+            for (unsigned i = 0; i < sizeof(pr->head); ++i)
+                nz |= pr->head[i];
+            pr->shm_zero = !nz && (!pr->shm_map_ok || !pr->mm.valid);
+        }
+        sbm_logf(p, "probe: carve-out reads done");
     }
 }
 
@@ -82,6 +112,8 @@ const char *sbm_probe_verdict(const struct sbm_probe *pr)
 {
     if (!pr->pmu_ok)
         return "unreadable";
+    if (pr->shm_zero)
+        return "shm-zero-ambiguous";
     if (pr->shm_ipc_ok && pr->ipc_magic == SBM_CRASH_MAGIC)
         return "cp-crashed";
     if ((pr->reset_seq & 7) != 5)
@@ -112,13 +144,7 @@ void sbm_probe_report(const struct sbm_plat *p, const struct sbm_probe *pr)
     if (!p || !p->log)
         return;
     sbm_logf(p, "modem probe: verdict %s, %u faulted read(s)", sbm_probe_verdict(pr), pr->faults);
-    if (pr->pmu_ok)
-        sbm_logf(p, "PMU: RESET_SEQUENCER_STATUS 0x%08x (seq %u, 5 = up) CENTRAL_SEQ_CP 0x%08x/0x%08x (st 0x%02x) "
-                    "CP_STAT 0x%08x CP_DEBUG 0x%08x",
-                 pr->reset_seq, pr->reset_seq & 7, pr->central_cfg, pr->central_st, (pr->central_st >> 16) & 0xFF,
-                 pr->cp_stat, pr->cp_debug);
-    else
-        sbm_logf(p, "PMU: not readable");
+    log_pmu(p, pr);
     if (pr->mbox_ok) {
         sbm_logf(p, "MBOX: MCUCTLR 0x%08x INTMR0 0x%08x INTSR0 0x%08x INTMSR0 0x%08x INTMR1 0x%08x INTSR1 0x%08x "
                     "INTMSR1 0x%08x",
@@ -151,6 +177,8 @@ void sbm_probe_report(const struct sbm_plat *p, const struct sbm_probe *pr)
     for (unsigned i = 0; i < sizeof(pr->head); ++i)
         o += (size_t)sbm_fmt(hex + o, sizeof(hex) - o, "%02x%s", pr->head[i], i + 1 < sizeof(pr->head) ? " " : "");
     sbm_logf(p, "SHM: modem_if + 0: %s", hex);
+    if (pr->shm_zero)
+        sbm_logf(p, "SHM: all zero: nothing loaded OR TZASC read-as-zero; not proof of access");
     if (!pr->shm_map_ok) {
         sbm_logf(p, "SHM: memory map at + 0x2a0 refused the read");
         return;

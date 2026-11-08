@@ -472,18 +472,20 @@ struct sbm_probe {
     uint32_t issr_ok;      /* bit n = ISSR n was read */
     /* carve-out */
     int shm_tried, shm_head_ok, shm_map_ok, shm_ipc_ok;
+    int shm_zero;          /* read without a fault but all zero: empty OR TZASC read-as-zero */
     uint8_t head[16];      /* modem_if + 0 */
     uint8_t map_raw[SBM_MEMMAP_BYTES];
     struct sbm_memmap mm;
     uint32_t ipc_magic, ipc_access;
     uint32_t faults;       /* reads that faulted */
 };
-/* Only reads, through p->probe32, in a fixed order: PMU, mailbox, then (step SHM) the carve-out. */
+/* Only reads, through p->probe32, in a fixed order: PMU, mailbox, then (step SHM) the carve-out. Logs a
+ * breadcrumb before each block and the PMU values right after they are read. */
 void sbm_probe_run(const struct sbm_plat *p, unsigned steps, struct sbm_probe *pr);
 /* What the readings mean, one line each, through p->log. */
 void sbm_probe_report(const struct sbm_plat *p, const struct sbm_probe *pr);
-/* A one-word verdict: "cp-off", "cp-in-reset", "cp-up-no-ipc", "cp-booting", "cp-online", "cp-crashed",
- * "unreadable". */
+/* A one-word verdict: "cp-off", "cp-in-reset", "cp-powered", "cp-running", "cp-booting", "cp-online",
+ * "cp-crashed", "shm-zero-ambiguous" (carve-out read as all zero: no answer), "unreadable". */
 const char *sbm_probe_verdict(const struct sbm_probe *pr);
 
 /* ------------------------------------------------------------------------------------------------ */

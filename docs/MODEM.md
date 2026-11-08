@@ -152,8 +152,15 @@ TOC and map. The 2026-11-05 backup has since been moved off this disk; its value
 
 The only register the image stores to is the watchdog's WTCNT (the feed, when the loader armed it).
 
+Breadcrumbs: before each block (PMU, mailbox, modem_if + 0, + 0x2a0, IPC) a `probe: reading ...` line goes to pmsg,
+and the PMU values are logged right after they are read. If a read hangs and the watchdog resets the phone, the
+last pmsg line names the block. **All-zero carve-out:** reads that succeed but return only zeros (head all zero,
+no valid map) do not answer unknown #1. An empty carve-out and a TZASC read-as-zero denial look the same. The
+report says `SHM: all zero: nothing loaded OR TZASC read-as-zero; not proof of access` and the verdict is
+`shm-zero-ambiguous`.
+
 Verdicts: `cp-off`, `cp-in-reset`, `cp-powered` (sequencer 5, cp_status 0), `cp-running`, `cp-booting`,
-`cp-online`, `cp-crashed`, `unreadable`. Expected under the Starbite loader (S-Boot ran, Android did not):
+`cp-online`, `cp-crashed`, `shm-zero-ambiguous`, `unreadable`. Expected under the Starbite loader (S-Boot ran, Android did not):
 `cp-off` or `cp-in-reset`, ISSR words 0.
 
 Catalog rows the main session adds (bare, hidden, lab):

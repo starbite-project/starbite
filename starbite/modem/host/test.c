@@ -15,10 +15,12 @@ static unsigned checks, fails;
         #a, _a, (unsigned long long)_a, _b, (unsigned long long)_b); } } while (0)
 
 static char lastlog[512];
+static char loglines[256][256];
 static unsigned nlog;
 static void tlog(void *ctx, const char *l)
 {
     (void)ctx;
+    snprintf(loglines[nlog % 256], sizeof(loglines[0]), "%s", l);
     nlog++;
     snprintf(lastlog, sizeof(lastlog), "%s", l);
     if (getenv("SBM_VERBOSE"))
@@ -766,6 +768,28 @@ static void check_trace(const struct fakeregs *r)
     }
 }
 
+/* records, at the first read of each block, how many log lines were written before it */
+static struct { struct fakeregs *inner; unsigned n; unsigned nlog_at[8]; uint64_t last_block; } crumbs;
+static int crumb_probe32(void *ctx, uint64_t pa, uint32_t *v)
+{
+    (void)ctx;
+    uint64_t c = SBM_MODEM_IF_PA, block = 0;
+    if (pa >= SBM_PMU_PA && pa < SBM_PMU_PA + 0x10000)
+        block = 1;
+    else if (pa >= SBM_MBOX_PA && pa < SBM_MBOX_PA + SBM_MBOX_SIZE)
+        block = 2;
+    else if (pa >= c && pa < c + 16)
+        block = 3;
+    else if (pa >= c + SBM_MEMMAP_OFF && pa < c + SBM_MEMMAP_OFF + SBM_MEMMAP_BYTES)
+        block = 4;
+    else if (pa >= c + SBM_DT_IPC_OFF && pa < c + SBM_DT_IPC_OFF + 8)
+        block = 5;
+    if (block != crumbs.last_block && crumbs.n < 8)
+        crumbs.nlog_at[crumbs.n++] = nlog;
+    crumbs.last_block = block;
+    return fakeregs_probe32(crumbs.inner, pa, v);
+}
+
 static void test_probe(void)
 {
     static struct fakeregs r;
@@ -838,6 +862,50 @@ static void test_probe(void)
     CHECK(!strcmp(sbm_probe_verdict(&pr), "cp-off"));
     CHECKEQ(pr.faults, 1);                         /* one try, then no more mailbox reads */
     check_trace(&r);
+
+    /* breadcrumbs: before each block's first read, the log names it; the PMU values are logged before the
+     * mailbox is touched (a hang then shows in pmsg where it was) */
+    memset(&r, 0, sizeof(r));
+    r.pmu[SBM_PMU_RESET_SEQ_STATUS / 4] = 5;
+    r.shm_head = head;
+    struct sbm_plat pc = { &crumbs, crumb_probe32, tlog, 0 };
+    crumbs.inner = &r;
+    crumbs.n = 0;
+    nlog = 0;
+    sbm_probe_run(&pc, SBM_PROBE_SHM, &pr);
+    CHECKEQ(crumbs.n, 5);
+    static const char *const want_crumb[5] = { "probe: reading PMU", "probe: reading mailbox",
+                                               "probe: reading modem_if+0 ", "probe: reading modem_if+0x2a0",
+                                               "probe: reading IPC region" };
+    for (unsigned i = 0; i < 5 && i < crumbs.n; ++i) {
+        unsigned at = crumbs.nlog_at[i];
+        CHECK(at > 0 && !strncmp(loglines[(at - 1) % 256], want_crumb[i], strlen(want_crumb[i])));
+    }
+    CHECK(crumbs.n >= 2 && crumbs.nlog_at[1] >= 2 && !strncmp(loglines[crumbs.nlog_at[1] - 2], "PMU: RESET", 10));
+    CHECK(!strcmp(loglines[(nlog - 1) % 256], "probe: carve-out reads done"));
+
+    /* an all-zero carve-out with no fault: empty OR TZASC read-as-zero; no answer either way */
+    static uint8_t zero[0x400];
+    memset(&r, 0, sizeof(r));
+    r.pmu[SBM_PMU_RESET_SEQ_STATUS / 4] = 5;
+    r.shm_head = zero;
+    sbm_probe_run(&p, SBM_PROBE_SHM, &pr);
+    CHECK(pr.shm_head_ok && pr.shm_map_ok && pr.shm_zero);
+    CHECKEQ(pr.faults, 0);
+    CHECK(!strcmp(sbm_probe_verdict(&pr), "shm-zero-ambiguous"));
+    nlog = 0;
+    sbm_probe_report(&p, &pr);
+    unsigned seen = 0;
+    for (unsigned i = 0; i < nlog && i < 256; ++i)
+        seen += !strcmp(loglines[i], "SHM: all zero: nothing loaded OR TZASC read-as-zero; not proof of access");
+    CHECKEQ(seen, 1);
+    CHECK(strstr(loglines[0], "verdict shm-zero-ambiguous") != 0);
+    /* a valid map with a zero IPC word is an answer (readable), not ambiguous */
+    r.shm_head = head;
+    memset(r.ipc_head, 0, sizeof(r.ipc_head));
+    sbm_probe_run(&p, SBM_PROBE_SHM, &pr);
+    CHECK(!pr.shm_zero && pr.mm.valid);
+    CHECK(strcmp(sbm_probe_verdict(&pr), "shm-zero-ambiguous") != 0);
 
     /* no probe32: reads nothing */
     struct sbm_plat none = { 0, 0, tlog, 0 };
