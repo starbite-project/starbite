@@ -1503,7 +1503,11 @@ static void labtour_generate(void)
     lt_row(2);
     tadd("T:A55 steps");
     lt_row(3);
-    tadd("T:Before you write");
+    tadd("T:Before you write");             /* the journal, once per session: tier 1 (Continue, slide) */
+    lt_row(0);
+    tadd("h:u:1900");
+    tadd("w:900");
+    tadd("T:Before you write");             /* then the request itself: tier 3 */
     lt_row(0);
     tadd("w:600");
     tadd("t:120,1585");
@@ -1515,6 +1519,8 @@ static void labtour_generate(void)
     tadd("w:900");
     tadd("h:p:3500");
     tadd("w:2500");
+    tadd("L:oc journal: allowed for this session");
+    tadd("L:oc journal: written ufs:ocj-");
     tadd("L:oc request A55 1690000 kHz");
     tadd("L:watchdog: armed (host)");
     tadd("L:storage held: overclocking");

@@ -559,11 +559,29 @@ void oc_tick(void)
 }
 
 /* The steps that may be sent: ECT levels ACPM also lists. */
-static unsigned oc_steps(const struct oc_dom *o, uint32_t *out)
+/* M3 above 1794 MHz needs the over-current handler (vendor exynos9810.dtsi exynos-ocp:
+ * max-freq-wo-ocp = 1794000; exynos-ocp.c with the PMIC's OCP_WARN and the M3 GCU's throttle).
+ * Engineer OS has no such handler yet, so those steps are not offered: 2886 MHz under stress cut
+ * the phone's power on 2026-11-08 (the buck's hard over-current limit). */
+#define OC_M3_WO_OCP 1794000U
+
+static int oc_m3_ocp_capped(int d, uint32_t khz)
 {
+    return d == OC_M3 && khz > OC_M3_WO_OCP;
+}
+
+/* A step the page offers and sends: the table's own (oct_allowed) and under the M3 cap. */
+static int oc_offered(int d, uint32_t khz)
+{
+    return oct_allowed(&OT.d[d], khz) && !oc_m3_ocp_capped(d, khz);
+}
+
+static unsigned oc_steps(int d, uint32_t *out)
+{
+    const struct oc_dom *o = &OT.d[d];
     unsigned n = 0;
     for (unsigned l = 0; l < o->nlv && n < OC_MAXLV; ++l)
-        if (oct_allowed(o, o->khz[l]))
+        if (oc_offered(d, o->khz[l]))
             out[n++] = o->khz[l];
     return n;
 }
@@ -801,13 +819,122 @@ static int oc_test(int d)
     return r;
 }
 
+/* ---- the persistent journal ---------------------------------------------------------------------
+ * pmsg is RAM: a PMIC power-off (M3 2886 MHz, 2026-11-08) loses it. Before each request, while
+ * storage is still allowed, one small text entry goes to the OS store ("ocj-<time>.txt": the
+ * request, the guards, the log tail). One tier 1 confirmation per session. While storage is held
+ * (after MIF / INT, an above-cap step, a failed test) nothing more can be written that boot. */
+static struct sb_auth oc_j_auth;
+static int oc_j_state;                      /* 0 not asked, 1 allowed, -1 declined */
+static unsigned oc_j_medium, oc_j_n;
+static char oc_j_buf[4096];
+
+static void jb_s(unsigned *n, const char *t)
+{
+    for (; *t && *n < sizeof(oc_j_buf) - 1; ++t)
+        oc_j_buf[(*n)++] = *t;
+}
+
+/* Once per session, before the first request's own confirmation. */
+static void oc_journal_ask(void)
+{
+    if (!oc_j_state && !sb_storage_held()) {
+        oc_j_medium = store_free(STORE_UFS) >= 4 ? STORE_UFS : STORE_SD;
+        struct action a = { "Overclocking journal", "", { "Before each clock request, one small text entry goes to the "
+                            "OS store (ocj-<time>.txt):", "the request and the last log lines, so a power cut does "
+                            "not lose them", "Existing entries are not touched (append only)", 0 },
+                            "Starbite > OS store > the entry > Remove (tier 2)", "", "4 KiB per request", "", TIER1,
+                            oc_j_medium, 0, SB_KIND_STORE, 0, 0 };
+        oc_j_state = lab_confirm(&a, &oc_j_auth) ? 1 : -1;
+        sb_log(oc_j_state > 0 ? "oc journal: allowed for this session" : "oc journal: declined");
+    }
+}
+
+static void oc_journal(int d, uint32_t from, uint32_t khz, int tier)
+{
+    struct ub u;
+    if (sb_storage_held()) {
+        sb_log("oc journal: not written (storage held this boot)");
+        return;
+    }
+    if (oc_j_state <= 0)
+        return;
+    struct sb_rtc r;
+    sb_rtc_read(&r);
+    char name[32];
+    ub_init(&u);
+    ub_s(&u, "ocj-");
+    if (r.ok) {
+        ub_dec(&u, r.y);
+        ub_dec2(&u, r.mo);
+        ub_dec2(&u, r.d);
+        ub_c(&u, '-');
+        ub_dec2(&u, r.h);
+        ub_dec2(&u, r.mi);
+        ub_dec2(&u, r.s);
+    } else {
+        ub_s(&u, "up");
+        ub_dec(&u, sb_ms() / 1000U);
+    }
+    ub_c(&u, '-');
+    ub_dec(&u, ++oc_j_n);
+    ub_s(&u, ".txt");
+    sb_strcpy(name, sizeof(name), u.b);
+    unsigned n = 0;
+    jb_s(&n, "Starbite overclocking journal 1 (Engineer OS " ENG_VERSION ")\n");
+    ub_init(&u);
+    ub_s(&u, "request ");
+    ub_s(&u, oc_info[d].name);
+    ub_c(&u, ' ');
+    ub_dec(&u, from);
+    ub_s(&u, " -> ");
+    ub_dec(&u, khz);
+    ub_s(&u, " kHz, ACPM ");
+    ub_dec(&u, oct_uv(&OT.d[d], khz));
+    ub_s(&u, " uV, tier ");
+    ub_dec(&u, (unsigned)tier);
+    ub_s(&u, ", default ");
+    ub_dec(&u, oc_base[d]);
+    ub_s(&u, " kHz, at ");
+    ub_dec(&u, sb_ms());
+    ub_s(&u, " ms\nother domains off default:");
+    for (int k = 0; k < OC_NDOM; ++k)
+        if (oc_off[k] && k != d) {
+            ub_c(&u, ' ');
+            ub_s(&u, oc_info[k].name);
+            ub_c(&u, '=');
+            ub_dec(&u, oc_set[k]);
+        }
+    ub_s(&u, "\n== log tail ==\n");
+    jb_s(&n, u.b);
+    unsigned lc = sb_log_count(), first = lc > 30 ? lc - 30 : 0;
+    for (unsigned i = first; i < lc; ++i) {
+        jb_s(&n, sb_log_line(i));
+        jb_s(&n, "\n");
+    }
+    struct store_ent e;
+    int rr = -1;
+    if (sb_gate_open(&oc_j_auth)) {
+        rr = store_append(oc_j_medium, name, ST_TEXT, oc_j_buf, n, &e);
+        sb_gate_close();
+    }
+    ub_init(&u);
+    ub_s(&u, rr ? "oc journal: NOT written (" : "oc journal: written ");
+    if (rr)
+        ub_sdec(&u, rr);
+    else
+        ub_s(&u, oc_j_medium == STORE_UFS ? "ufs:" : "sd:");
+    ub_s(&u, rr ? ")" : name);
+    sb_log(u.b);
+}
+
 static void oc_apply(int d, uint32_t khz)
 {
     struct oc_dom *o = &OT.d[d];
     uint32_t steps[OC_MAXLV], cur = 0;
-    unsigned n = oc_steps(o, steps);
+    unsigned n = oc_steps(d, steps);
     struct ub u;
-    if (!OC_CTRL(d) || !OT.fv_found || !oct_allowed(o, khz)) {
+    if (!OC_CTRL(d) || !OT.fv_found || !oc_offered(d, khz)) {
         log_dom("refused (not a listed step)", d, khz);
         (void)dialog_danger("Not a listed step", "Only steps in both the ECT and ACPM's own table are sent.",
                             "Nothing was sent.", "OK");
@@ -884,7 +1011,11 @@ static void oc_apply(int d, uint32_t khz)
                         0, SB_SP_DVFS, 0, 0, (uint64_t)d, 1 };
     a.tier = bus || hi ? SB_TIER4 : SB_TIER3;
     struct sb_auth au;
-    if (!lab_confirm(&a, &au) || !sb_gate_open(&au))
+    oc_journal_ask();
+    if (!lab_confirm(&a, &au))
+        return;
+    oc_journal(d, oc_set[d], khz, a.tier);      /* before the guards hold storage */
+    if (!sb_gate_open(&au))
         return;
     oc_off[d] = 1;                          /* guards on before anything is sent */
     oc_guards();
@@ -963,8 +1094,20 @@ static void build_ctl(void)
                  "chip; MIF 2093 MHz froze the phone this way under iOS).");
         kv_note(u.b);
     }
+    if (d == OC_M3) {
+        unsigned capped = 0;
+        for (unsigned l = 0; l < o->nlv; ++l)
+            capped += oct_allowed(o, o->khz[l]) && oc_m3_ocp_capped(d, o->khz[l]);
+        if (capped) {
+            ub_init(&u);
+            ub_dec(&u, capped);
+            ub_s(&u, " steps above 1794 MHz are not offered: they need the M3 over-current handler (Samsung's "
+                     "kernel caps M3 at 1794 MHz without it; 2886 MHz cut the power on 2026-11-08).");
+            kv_note(u.b);
+        }
+    }
     kv_hdr("STEPS: TAP ONE TO REQUEST IT");
-    ctl_n = (int)oc_steps(o, ctl_khz);
+    ctl_n = (int)oc_steps(d, ctl_khz);
     for (int i = 0; i < ctl_n; ++i) {
         uint32_t khz = ctl_khz[i];
         struct ub t;
@@ -1009,6 +1152,81 @@ static int act_ctl(int r)
     default: break;
     }
     return 0;
+}
+
+/* ---- the over-current (OCP) probe: reads only ----------------------------------------------------- */
+static char ocp_l[4][96];
+static int ocp_done;
+
+static void ocp_probe(int may_ask)
+{
+    struct ub u;
+    uint8_t w1 = 0, w2 = 0;
+    int r1 = sb_pmic_read(1, 0xd3, &w1), r2 = sb_pmic_read(1, 0xd4, &w2);
+    ub_init(&u);
+    ub_s(&u, "oc ocp: S2MPS18 OCP_WARN1 0xD3 ");
+    if (r1) {
+        ub_hex(&u, w1, 2);
+        ub_s(&u, (w1 & 0x80U) ? " (warning ON" : " (warning off");
+        ub_s(&u, ", level ");
+        ub_dec(&u, w1 & 0x1fU);
+        ub_c(&u, ')');
+    } else {
+        ub_s(&u, "no answer");
+    }
+    ub_s(&u, "; OCP_WARN2 0xD4 ");
+    if (r2)
+        ub_hex(&u, w2, 2);
+    else
+        ub_s(&u, "no answer");
+    sb_log(u.b);
+    sb_strcpy(ocp_l[0], sizeof(ocp_l[0]), u.b + 7);
+    uint64_t v[6] = { 0 }, esr = 0;
+    const char *why = 0;
+    int m = lab_oc_m3_probe(may_ask, v, &esr, &why);
+    ub_init(&u);
+    if (m > 0) {
+        ub_s(&u, "oc ocp: M3 MIDR ");
+        ub_hex(&u, v[0], 8);
+        ub_s(&u, " OCPTHROTTCTL ");
+        ub_hex(&u, v[1], 8);
+        ub_s(&u, " CNTA ");
+        ub_hex(&u, v[2], 8);
+        sb_log(u.b);
+        sb_strcpy(ocp_l[1], sizeof(ocp_l[1]), u.b + 7);
+        ub_init(&u);
+        ub_s(&u, "oc ocp: M3 OCPINTCTL ");
+        ub_hex(&u, v[3], 8);
+        ub_s(&u, " (IRP ");
+        ub_dec(&u, (v[3] >> 4) & 0x3fU);
+        ub_s(&u, ") GCUCTL ");
+        ub_hex(&u, v[4], 8);
+        ub_s(&u, (v[4] >> 24) & 1U ? " (OCP irq on)" : " (OCP irq off)");
+        ub_s(&u, " BOTTHRESH ");
+        ub_hex(&u, v[5], 6);
+        sb_log(u.b);
+        sb_strcpy(ocp_l[2], sizeof(ocp_l[2]), u.b + 7);
+    } else {
+        ub_s(&u, m == 0 ? "oc ocp: M3 sysregs FAULTED, ESR " : "oc ocp: M3 sysregs not read: ");
+        if (m == 0)
+            ub_hex(&u, esr, 8);
+        else
+            ub_s(&u, why ? why : "?");
+        sb_log(u.b);
+        sb_strcpy(ocp_l[1], sizeof(ocp_l[1]), u.b + 7);
+        ocp_l[2][0] = 0;
+    }
+    ocp_done = 1;
+}
+
+static void fill_ocp(void)
+{
+    kv_note("Reads only: the PMIC's over-current warning and the M3 cluster's throttle registers (vendor "
+            "exynos-ocp.c). M3 steps above 1794 MHz stay off until Engineer OS has an over-current handler.");
+    kv_hdr("RESULT");
+    for (int i = 0; i < 3; ++i)
+        if (ocp_l[i][0])
+            kv_mono(ocp_l[i]);
 }
 
 /* ---- the hub ------------------------------------------------------------------------------------- */
@@ -1082,6 +1300,7 @@ static void build_oc(void)
     row_add("Where the tables come from", u.b, 0);
     row_add("Write the tables to the log", "pmsg ring in RAM; nothing on storage", 0);
     row_add("Read the tables again", "ECT and APM SRAM", 0);
+    row_add("Over-current (OCP) probe", "PMIC OCP_WARN, M3 throttle registers (reads)", 0);
 }
 
 static int act_oc(int r)
@@ -1114,6 +1333,10 @@ static int act_oc(int r)
                      "Logs > Engineer OS log shows them.", "OK");
         break;
     case 2: oc_load(); break;
+    case 3:
+        ocp_probe(1);
+        info_screen("OCP probe", fill_ocp, 0);
+        break;
     default: break;
     }
     return 0;
@@ -1192,6 +1415,8 @@ void oc_selftest_boot(void)
                                                                                                     " ok");
         sb_log(u.b);
     }
+    crumb("OCP probe: PMIC 0xD3/0xD4, then M3 sysregs on core 4 (only if the PMU is already at the vendor values)");
+    ocp_probe(0);
     sb_logx("oc selftest: ACPM late or missing answers ", sb_acpm_dvfs_untrusted());
     sb_log("oc selftest: done; rebooting to recovery");
     __asm__ volatile("dsb sy" : : : "memory");  /* pmsg is in RAM: every line out before the reset */

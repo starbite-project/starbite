@@ -680,6 +680,18 @@ RX by timed-out requests before each send, and counts them (`sb_acpm_dvfs_untrus
 The storage hold stays until the next restart (not only until the revert) once MIF or INT was changed, an
 above-cap step was used, a stability test failed, a revert was not confirmed, or ACPM answered late.
 
+**M3 is capped at 1794 MHz** (vendor exynos9810.dtsi `exynos-ocp { max-freq-wo-ocp = <1794000> }`): above
+it Samsung's kernel relies on the PMIC's OCP_WARN (S2MPS18 0xD3 bit 7), the M3 GCU's hardware throttle and
+an IRQ handler (exynos-ocp.c). Engineer OS has no such handler; M3 2886 MHz under stress cut the phone's
+power on 2026-11-08 (the buck's hard limit). Overclocking > **Over-current (OCP) probe** reads 0xD3 / 0xD4
+and the M3 system registers OCPTHROTTCTL, OCPTHROTTCNTA, OCPINTCTL, GCUCTL and OCPTIDEPBOTTHRESH on core 4
+(`kern_ocp_probe`; after Lab's tier 3 M3 PMU step). Reads only.
+
+**Journal.** Before each request (once-per-session tier 1 confirmation, asked before the first request's
+own confirmation), one text entry `ocj-<time>-<n>.txt` is appended to the OS store with the request and
+the last 30 log lines, so a power cut does not lose what was asked. While storage is held, nothing more is
+written that boot (the first request of each boot is always journaled).
+
 The watchdog and the storage hold stay on until every domain is back (Overclocking > Every domain back,
 or each domain's "Back to the default step"). Reboot, boot-next and power off revert every domain first
 (`sb_before_reset`). The green-screen freeze (NOTES.md 2026-10-30) came from asking ACPM for MIF 2093000 /

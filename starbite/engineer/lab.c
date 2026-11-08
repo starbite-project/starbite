@@ -409,6 +409,8 @@ static const struct {
 } m3_pmu[] = { { 0x1088, 0xff000000U, 0x8d000000U }, { 0x2114, 3, 2 }, { 0x2180, 3, 2 }, { 0x21ec, 3, 2 },
                { 0x2258, 3, 2 }, { 0x2384, 3, 2 } };
 
+static int m3_enable(void);
+
 static void m3_prep(void)
 {
     for (unsigned i = 0; i < sizeof(m3_pmu) / sizeof(m3_pmu[0]); ++i) {
@@ -532,6 +534,58 @@ static void build_offer(void)
 static int act_offer(int i)
 {
     offer_pick = i;
+    return 1;
+}
+
+/* The OCP probe (oc.c): core 4 (the first M3) reads the GCU / OCP system registers (kern_ocp_probe)
+ * and stops. may_ask: 1 the M3 PMU step may be confirmed now (Lab's tier 3 "Start the M3 cores"),
+ * 0 (the unattended self-test): only when S-Boot already left the six PMU registers at the vendor
+ * values, so nothing is written. 1 read (v[0..5], see kern.c), 0 faulted (*esr), -1 not started
+ * (*why). */
+int lab_oc_m3_probe(int may_ask, uint64_t v[6], uint64_t *esr, const char **why)
+{
+    unsigned diff = 0;
+    for (unsigned i = 0; i < sizeof(m3_pmu) / sizeof(m3_pmu[0]); ++i) {
+        uint32_t r = 0;
+        if (!sb_probe32(SB_PMU + m3_pmu[i].off, &r) || (r & m3_pmu[i].mask) != m3_pmu[i].val)
+            ++diff;
+    }
+    *esr = 0;
+    if (diff && m3_state <= 0) {
+        if (!may_ask) {
+            *why = "the M3 PMU registers are not at the vendor values (needs the confirmed PMU step)";
+            return -1;
+        }
+        if (!m3_enable()) {
+            *why = "the M3 PMU step was not confirmed";
+            return -1;
+        }
+    }
+    sb_smp_m3_prep = diff ? m3_prep : 0;
+    struct sb_wslot *s = sb_smp_own_slot(4);
+    if (s)
+        for (unsigned k = 0; k < 8; ++k)
+            s->v[k] = 0;
+    int64_t r = sb_smp_start(4, kern_ocp_probe, 0);
+    if (r) {
+        *why = r == -100 ? "the M3 core did not check in" : "PSCI CPU_ON refused";
+        return -1;
+    }
+    const struct sb_wslot *g = 0;
+    for (unsigned ms = 0; ms < 1000; ++ms) {
+        g = sb_smp_slot(4);
+        if (g && (g->v[7] || g->state == SB_WK_FAULT || g->state == SB_WK_DONE || g->state == SB_WK_PARKED))
+            break;
+        sb_mdelay(1);
+    }
+    (void)sb_smp_stop(200);
+    if (!g || g->state == SB_WK_FAULT || !g->v[7]) {
+        *esr = g ? g->esr : 0;
+        *why = "the read faulted (trapped) or did not finish";
+        return 0;
+    }
+    for (unsigned k = 0; k < 6; ++k)
+        v[k] = g->v[k];
     return 1;
 }
 

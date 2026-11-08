@@ -66,3 +66,4 @@ int lab_oc_mem(unsigned size_idx, unsigned passes, char *detail, unsigned cap, u
 int lab_oc_gpu_prepare(void);
 int lab_oc_gpu_up(void);
 int lab_oc_gpu(unsigned secs, char *detail, unsigned cap);
+int lab_oc_m3_probe(int may_ask, uint64_t v[6], uint64_t *esr, const char **why);
