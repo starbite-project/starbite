@@ -1,4 +1,13 @@
-# Starbite OS 1.1-beta4: Survival heat (2026-11-08)
+# Starbite OS 1.1-beta5: Survival heat (2026-11-08)
+
+## beta5: the battery held too; its limit selectable
+
+beta3's trip-off run reached 48.6 °C battery and 74 °C on the back. Survival's battery limit is now 55 / 58 / 60 °C
+(default 55; 58 and 60 only after their own confirmation; 60, the usual top of a lithium cell's discharge rating,
+is the highest); both Survival modes hold the battery from the limit minus 3 °C (the same shed order as the SoC hold;
+back below the limit minus 4 °C) and stop at the limit itself. A Survival start is refused within 3 °C of it. Above
+60 °C on the back the Heat page shows "HOT: HOLD BY THE EDGES".
+
 
 ## beta4: the trip-off limit is held, not a stop
 
@@ -62,5 +71,5 @@ strobes as the light instead. 0x63 is never written. Settings says so.
 - Not in 1.1: the M3 above 1794 MHz (past the cluster buck's current rating without Samsung's over-current handler),
   camera sensors, HBM, Wi-Fi TX, a shader workload (`docs/STARBITE-OS.md` 12.21 says why).
 
-Install: as 1.0-rc3, with `starbite-os-1.1-beta4.img` in the `starbite-os.img` entry and the catalog's version line
-`"1.1-beta4 · heat, light, alarm, card, Wi-Fi"`. Undo: `starbite-os-1.0-rc3.img` in the same entry.
+Install: as 1.0-rc3, with `starbite-os-1.1-beta5.img` in the `starbite-os.img` entry and the catalog's version line
+`"1.1-beta5 · heat, light, alarm, card, Wi-Fi"`. Undo: `starbite-os-1.0-rc3.img` in the same entry.

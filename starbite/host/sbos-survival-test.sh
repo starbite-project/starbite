@@ -9,7 +9,8 @@ out="$root/starbite/out/sboshost"
 OPEN="w:300 g:1150,2310,0,700 w:400"
 HEAT="t:1057,663 w:600"
 SURV="t:723,1927 w:500"
-SURVX="t:723,2203 w:500 t:723,1927 w:500"
+SURVX="t:723,2473 w:500 t:723,1927 w:500"
+BATLIM="t:723,2213 w:500"
 HOLD="g:720,1170,0,1900 w:400"
 OFF="t:220,670 w:600"
 fails=0
@@ -62,5 +63,11 @@ ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_NOWDT=1"
 r=$(run $OPEN $HEAT $SURVX $HOLD $HOLD $HOLD $HOLD w:3000)
 want "$r" "No watchdog to back it" "refused without the loader's watchdog"
 never "$r" "the chip's hardware heat trip is OFF" "the trip untouched without a watchdog"
+# 1.1-beta5: the battery limit above 55 C only after its own confirmation
+ENVS=
+r=$(run $OPEN $HEAT $BATLIM $HOLD w:500)
+want "$r" "settings: Survival's battery limit raised (confirmed), 0.1 C: 0x00000244" "58 C after its confirmation"
+r=$(run $OPEN $HEAT $BATLIM w:300 k:p w:500)
+never "$r" "raised (confirmed)" "no raise without the hold"
 echo "survival test: $fails failed"
 [ "$fails" = 0 ]

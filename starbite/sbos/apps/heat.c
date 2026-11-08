@@ -185,6 +185,11 @@ static void show(void)
             fmt_s(&f, "Last resort: all the battery as heat. Asks 3 times.");
         }
         ui_button(23, "Survival heat", f.b, 0);
+        fmt_init(&f);
+        fmt_s(&f, "Battery limit ");
+        fmt_d(&f, h.surv_bat_c10 / 10);
+        fmt_s(&f, " \xc2\xb0" "C (tap: 55, 58, 60)");
+        ui_button(26, f.b, 0, 0);
         ui_toggle(24, "Hardware trip OFF", surv_tripoff);
         if (surv_tripoff) {
             fmt_init(&f);
@@ -211,7 +216,10 @@ static void show(void)
     }
     fmt_init(&f);
     temp(&f, h.bat_c10);
-    ui_big(on ? (flat ? "BATTERY  (STOPS AT 55 \xc2\xb0" "C)" : "BATTERY  (STOPS AT 42 \xc2\xb0" "C)") : "BATTERY",
+    ui_big(on ? (h.level >= HEAT_SURVIVAL ? (h.surv_bat_c10 >= 600 ? "BATTERY  (STOPS AT 60 \xc2\xb0" "C)" :
+                                             h.surv_bat_c10 >= 580 ? "BATTERY  (STOPS AT 58 \xc2\xb0" "C)" :
+                                                                     "BATTERY  (STOPS AT 55 \xc2\xb0" "C)") :
+                 flat ? "BATTERY  (STOPS AT 55 \xc2\xb0" "C)" : "BATTERY  (STOPS AT 42 \xc2\xb0" "C)") : "BATTERY",
            f.b, h.bat_c10 >= (flat ? 480 : 390) ? ORANGE : 0);
     fmt_init(&f);
     fmt_s(&f, "Processor ");
@@ -245,6 +253,8 @@ static void show(void)
         if (h.skin_c10 >= 460)
             fmt_s(&f, ": hot enough to burn skin");
         ui_textline(f.b, h.skin_c10 >= 460 ? ORANGE : 0xffffffffU);
+        if (h.skin_c10 > 600)               /* 1.1-beta5: the beta3 run reached 74 C on the back */
+            ui_big("HOT: HOLD BY THE EDGES", "Not the back or the screen", ORANGE);
     }
     fmt_init(&f);
     if (on && !flat) {
@@ -256,7 +266,9 @@ static void show(void)
     } else if (flat) {
         fmt_init(&f);
         fmt_s(&f, h.level == HEAT_KEEPWARM ? "Until you stop it. " : "Flat out until you press Off. ");
-        fmt_s(&f, "Stops only at 55 \xc2\xb0" "C battery");
+        fmt_s(&f, "Stops only at ");
+        fmt_d(&f, h.level >= HEAT_SURVIVAL ? h.surv_bat_c10 / 10 : 55);
+        fmt_s(&f, " \xc2\xb0" "C battery");
         if (h.level >= HEAT_SURVIVAL) {
             fmt_s(&f, " or 2 %.");
         } else if (h.reserve_pct > 0) {
@@ -369,6 +381,8 @@ void app_event(const struct sbos_event *ev)
         int running = h.state == HEAT_ST_RUNNING || h.state == HEAT_ST_HOLDING || h.state == HEAT_ST_PAUSED;
         if (ev->id == 23 && !running)
             heat_request(surv_tripoff ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0);
+        else if (ev->id == 26 && !running)
+            setting_set(SET_HEAT_SURV_BAT_C10, h.surv_bat_c10 >= 600 ? 550 : h.surv_bat_c10 >= 580 ? 600 : 580);
         else if (ev->id == 25 && !running)
             setting_set(SET_HEAT_SURV_STOP_C10, h.surv_stop_c10 >= 1450 ? 1250 : (h.surv_stop_c10 / 50 + 1) * 50);
         else if (ev->id == 22 && !running) {

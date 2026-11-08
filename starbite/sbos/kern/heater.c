@@ -951,6 +951,7 @@ uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;
 int heat_reserve_pct = 15, heat_target_c10 = 200, heat_no_current_stop;
 int heat_reserve_override;                  /* 1.0-rc2 (review): the hold overrides the reserve for the next session only */
 int heat_soc_stop_c10;                      /* 0.6.3: Manual's SoC stop (0 off: the user's default) */
+int heat_surv_bat_c10 = 550;                /* 1.1-beta5: Survival's battery limit (55 C; 58 / 60 after a confirmation) */
 int heat_surv_stop_c10 = 1350;              /* 1.1-beta4: Survival (trip off)'s SoC limit, held: 135 C (125..145) */
 struct heat_record heat_rec, heat_last;
 int heat_last_unclean;
@@ -1015,6 +1016,7 @@ static void extreme_confirm_done(int ok)
         ctl.man_a55 = ctl.man_m3 = 0;
         ctl.reserve_pct = 0;                /* Survival runs to 2 %: no reserve (its confirmations say so) */
         ctl.surv_stop_c10 = heat_surv_stop_c10;
+        ctl.surv_bat_c10 = heat_surv_bat_c10;
         gpuheat_khz = 598000U;              /* the GPU's table top (ECT dvfs_g3d) */
         gpu_heat_session = 1;
         sb_log(pending_level == HEAT_SURVIVAL_X ?
@@ -1057,12 +1059,19 @@ static void survival_show(void)
     }
     sb_strcpy(est, sizeof(est), u.b);
     int x = pending_level == HEAT_SURVIVAL_X;
-    static char stopl[128];
+    static char stopl[160], batl[128];
     ub_init(&u);
     ub_s(&u, "Holds at your limit (");
     ub_dec(&u, (uint64_t)(heat_surv_stop_c10 / 10));
-    ub_s(&u, " \xc2\xb0" "C) to 2 %; stops 5 \xc2\xb0" "C past it or at 55 \xc2\xb0" "C battery. A watchdog restarts a stalled phone.");
+    ub_s(&u, " \xc2\xb0" "C) to 2 %; stops 5 \xc2\xb0" "C past it or at ");
+    ub_dec(&u, (uint64_t)(heat_surv_bat_c10 / 10));
+    ub_s(&u, " \xc2\xb0" "C battery. A watchdog restarts a stalled phone.");
     sb_strcpy(stopl, sizeof(stopl), u.b);
+    ub_init(&u);
+    ub_s(&u, "It holds the battery below ");
+    ub_dec(&u, (uint64_t)(heat_surv_bat_c10 / 10));
+    ub_s(&u, " \xc2\xb0" "C, stops at it or at 2 %. Cancel stops it at any time.");
+    sb_strcpy(batl, sizeof(batl), u.b);
     switch (surv_step) {
     case 0:
         kui_confirm(x ? "Survival heat, trip OFF (1 of 4)?" : "Survival heat (1 of 3)?",
@@ -1086,7 +1095,7 @@ static void survival_show(void)
         else
             kui_confirm("Survival heat: last check (3 of 3)",
                         "The back gets very hot: hold it through a pocket or a glove, never against bare skin.",
-                        "It stops only at 55 \xc2\xb0" "C battery or 2 % battery. Cancel stops it at any time.",
+                        batl,
                         "Survival heat: a last resort for a survival situation.", "Hold: 3 of 3, start", survival_done);
         break;
     default:
@@ -1309,6 +1318,7 @@ void heater_status(struct sbos_heat *h)
                          heat_default_limits.surv_target_c10;
     h->surv_stop_c10 = heat_surv_stop_c10;
     h->gpu_on = gpuheat_on();
+    h->surv_bat_c10 = heater_running_ui() && ctl.level >= HEAT_SURVIVAL ? ctl.surv_bat_c10 : heat_surv_bat_c10;
 }
 
 void heater_init(void)

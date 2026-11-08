@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.1-beta4"
+#define SBOS_VERSION "1.1-beta5"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -111,6 +111,7 @@ struct heat_ctl {
     int gpu_want;                   /* 1.1: the GPU's share may run (Survival sheds it last, adds it last) */
     int trip_off;                   /* 1.1: heater.c switched the chip's trip off (Survival, trip off) */
     int surv_stop_c10;              /* 1.1: Survival (trip off)'s SoC stop */
+    int surv_bat_c10;               /* 1.1-beta5: Survival's battery limit: 550 / 580 / 600 (shed from 3 C below, stop at it) */
     uint64_t t_shed;
     int cold;
     uint64_t t_start, t_end, t_step, t_ramp, last_bat_ok, last_soc_ok, last_gauge_ok;
@@ -158,6 +159,7 @@ extern uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;    /* 0.6.1: Manual's p
 extern int heat_reserve_pct, heat_target_c10, heat_no_current_stop;   /* 0.6.2 */
 extern int heat_reserve_override;    /* 1.0-rc2: the next session's reserve overridden (once) */
 extern int heat_soc_stop_c10;       /* 0.6.3: Manual's optional SoC stop (0 off) */
+extern int heat_surv_bat_c10;       /* 1.1-beta5: Survival's battery limit (550 default, 580, 600 with a confirmation) */
 extern int heat_surv_stop_c10;      /* 1.1: Survival (trip off)'s SoC limit (1.1-beta4: held there; default 135 C) */
 void heater_trip_restore_now(void); /* 1.1: before a restart or a power-off: the chip's trip back on (waits <= 3 s to cool) */
 /* 0.6.3: the S2MPB02 over I2C (fled.c): the torch at 240 mA, SOS flash pulses at 1250 mA (the chip's 125 ms timer) */

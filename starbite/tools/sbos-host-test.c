@@ -706,12 +706,41 @@ static void t_survival(void)
     in.trip_armed = 0;
     run(&c, &in, 0, 1000, 0);
     CHECK(stopped_with(&c, HEAT_ST_STOPPED, "trip is not armed"), "Survival (trip on): the trip must stay armed (%s)", c.why);
+    /* 1.1-beta5: the battery limit (55 default, 58, 60): held from 3 C below, a stop at it, both modes */
+    for (int x = 0; x < 2; ++x)
+        for (int lim = 550; lim <= 600; lim += 50) {
+            in = base_in(0);
+            heat_ctl_init(&c, 0);
+            c.surv_bat_c10 = lim;
+            CHECK(heat_ctl_request(&c, x ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0, &in) == 0, "Survival %d starts (%s)", x, c.why);
+            c.trip_off = x;
+            run(&c, &in, 0, 9000, 0);
+            int before = c.cores;
+            in.bat_c10 = lim - 25;
+            run(&c, &in, 9250, 1000, 0);
+            CHECK(c.state != HEAT_ST_STOPPED && c.cores < before, "Survival %d: the battery at its limit - 2.5 C sheds, no stop "
+                  "(limit %d, %d -> %d cores, %s)", x, lim, before, c.cores, c.why);
+            in.bat_c10 = lim - 35;
+            run(&c, &in, 10500, 3000, 0);
+            CHECK(c.cores < before || !c.gpu_want, "Survival %d: no load back between limit - 4 and - 3 C (%d cores)", x, c.cores);
+            in.bat_c10 = lim;
+            run(&c, &in, 13750, 500, 0);
+            CHECK(stopped_with(&c, HEAT_ST_STOPPED, "battery limit"), "Survival %d: the stop at the battery limit %d (%s)", x,
+                  lim, c.why);
+        }
     in = base_in(0);
     heat_ctl_init(&c, 0);
-    heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in);
-    in.bat_c10 = 551;
-    run(&c, &in, 0, 1000, 0);
-    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "55"), "Survival: the battery's 55 C stop (%s)", c.why);
+    c.surv_bat_c10 = 650;
+    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == SBOS_EAGAIN, "Survival refuses a battery limit above 60 C");
+    in = base_in(0);
+    in.bat_c10 = 490;
+    in.usb_c10 = in.chg_c10 = 490;
+    heat_ctl_init(&c, 0);
+    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == 0, "Survival starts at 49 C with a 55 C limit (%s)", c.why);
+    in.bat_c10 = 530;
+    in.usb_c10 = in.chg_c10 = 530;
+    heat_ctl_init(&c, 0);
+    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == SBOS_EAGAIN, "Survival refuses to start within 3 C of the limit");
     in = base_in(0);
     heat_ctl_init(&c, 0);
     heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in);

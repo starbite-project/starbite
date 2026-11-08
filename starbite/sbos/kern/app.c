@@ -430,6 +430,20 @@ static void gpu_confirm_done(int ok)
         app_event_send(s, EV_APP_SHOW, 0, 0);
 }
 
+/* 1.1-beta5: Survival's battery limit above 55 C only after its own confirmation */
+static int surv_bat_pending;
+static void surv_bat_done(int ok)
+{
+    if (ok && (surv_bat_pending == 580 || surv_bat_pending == 600)) {
+        heat_surv_bat_c10 = surv_bat_pending;
+        sb_logx("settings: Survival's battery limit raised (confirmed), 0.1 C: ", (uint64_t)surv_bat_pending);
+    } else {
+        sb_log("settings: Survival's battery limit not raised");
+    }
+    surv_bat_pending = 0;
+    app_event_send(app_by_id("heat"), EV_APP_SERVICE, 1, 0);
+}
+
 /* SYS_SETTING_SET for the app in front: 0 done */
 static int64_t setting_set_k(uint64_t id, uint64_t v)
 {
@@ -507,6 +521,22 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
             led_full = 0;
             return SBOS_EAGAIN;             /* the chip did not answer (logged) */
         }
+        return 0;
+    case SET_HEAT_SURV_BAT_C10:
+        if (arg[1] != 550 && arg[1] != 580 && arg[1] != 600)
+            return SBOS_EINVAL;             /* 60 C: a Li-ion cell's usual discharge rating; never higher */
+        if (heater_running_ui())
+            return SBOS_EAGAIN;
+        if (arg[1] == 550) {
+            heat_surv_bat_c10 = 550;
+            sb_log("settings: Survival's battery limit: 55 C");
+            return 0;
+        }
+        surv_bat_pending = (int)arg[1];
+        kui_confirm(arg[1] == 600 ? "Battery limit 60 \xc2\xb0" "C?" : "Battery limit 58 \xc2\xb0" "C?",
+                    "Survival heat stops when the battery reaches this; it holds the load back from 3 \xc2\xb0" "C below.",
+                    "Above 55 \xc2\xb0" "C a lithium cell ages faster. 60 \xc2\xb0" "C is the top of its usual discharge rating: never higher.",
+                    "Only for Survival heat; the other levels keep their own limits.", "Hold to raise it", surv_bat_done);
         return 0;
     case SET_HEAT_SURV_STOP_C10:
         if (arg[1] < 1250 || arg[1] > 1450)
@@ -831,6 +861,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_CURRENT_STOP: return !heat_no_current_stop;
         case SET_HEAT_SOC_STOP_C10: return heat_soc_stop_c10;
         case SET_HEAT_SURV_STOP_C10: return heat_surv_stop_c10;
+        case SET_HEAT_SURV_BAT_C10: return heat_surv_bat_c10;
         case SET_LED_FULL: return led_full ? (fled_flash_ok() ? 1 : 2) : -fled_code();     /* 1.0-rc3: negative = why the chip was refused */
         case SET_SAVED: return settings_persistent();
         case SET_AUTO_OFF_MIN: return (int64_t)auto_off_min;

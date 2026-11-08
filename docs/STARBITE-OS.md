@@ -831,6 +831,10 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
 
 ### 12.21 Version 1.1-beta1 / beta2: Survival heat; the LED chip's 0x63 (2026-11-08)
 
+beta5: `SET_HEAT_SURV_BAT_C10` (550 / 580 / 600; above 550 the kernel's own confirmation, `surv_bat_done`) and
+`heat_ctl.surv_bat_c10`: both Survival modes shed from the limit minus 3 °C, add back below minus 4 °C, stop at the
+limit; the Heat page warns above 60 °C skin.
+
 beta4: with the trip off the user's limit (125..145 °C, default 135; `SET_HEAT_SURV_STOP_C10` 1250..1450) is held
 (`heatctl.c`: M3s, then the GPU, then the A55s off at the limit; back below it minus 2 °C) instead of stopping, so
 the session runs to 2 %; `heat_surv_estop` stops 5 °C past it (at most 149 °C). `struct heat_record` gained

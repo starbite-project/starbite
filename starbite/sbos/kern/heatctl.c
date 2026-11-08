@@ -105,6 +105,7 @@ void heat_ctl_init(struct heat_ctl *c, const struct heat_limits *lim)
     c->reserve_pct = c->lim->stop_pct;      /* 15 % for a call / SOS until the user overrides it */
     c->target_c10 = 200;                    /* Keep warm: 20 C */
     c->surv_stop_c10 = 1350;                /* Survival (trip off): holds at 135 C (1.1-beta4) */
+    c->surv_bat_c10 = 550;                  /* Survival's battery limit (1.1-beta5) */
     c->gpu_want = 1;
 }
 
@@ -160,6 +161,10 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
         no = level == HEAT_LOW ? "Battery below 20 %" : "Battery below 30 % (try Low)";
     else if (surv && in->pct <= L->surv_floor_pct)
         no = "The battery is at 2 %: nothing left to turn into heat";
+    else if (surv && c->surv_bat_c10 != 550 && c->surv_bat_c10 != 580 && c->surv_bat_c10 != 600)
+        no = "Survival's battery limit is not 55, 58 or 60 \xc2\xb0" "C";
+    else if (surv && in->bat_c10 >= c->surv_bat_c10 - 30)
+        no = "The battery is already near Survival's battery limit";
     else if (level == HEAT_SURVIVAL_X && (c->surv_stop_c10 < 1250 || c->surv_stop_c10 > 1450))
         no = "Survival's SoC limit is not set (125 to 145 \xc2\xb0" "C)";
     else if (flat && !surv && c->reserve_pct > 0 && in->pct <= c->reserve_pct)
@@ -234,12 +239,13 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
      * armed; the voltage is the PMIC's and the fuel gauge's own business */
     int flat = c->level >= HEAT_EXTREME;
     int surv = c->level >= HEAT_SURVIVAL;
-    int hard_bat = flat ? L->ext_hard_bat_c10 : L->hard_bat_c10;
+    int hard_bat = surv ? c->surv_bat_c10 : flat ? L->ext_hard_bat_c10 : L->hard_bat_c10;
     int band_bat = L->band_bat_c10;
     int soft_soc = L->soft_soc_c10;
     if (in->bat_ok && in->bat_c10 >= hard_bat) {
         c->bat_latched = 1;
-        stop(c, HEAT_ST_STOPPED, flat ? "Battery reached 55 \xc2\xb0" "C (its safety limit)" : "Battery reached 42 \xc2\xb0" "C");
+        stop(c, HEAT_ST_STOPPED, surv ? "Battery reached Survival's battery limit" :
+                                 flat ? "Battery reached 55 \xc2\xb0" "C (its safety limit)" : "Battery reached 42 \xc2\xb0" "C");
         return;
     }
     if (flat && c->level == HEAT_MANUAL && c->soc_stop_c10 > 0 && in->soc_ok && in->soc_c10 >= c->soc_stop_c10) {
@@ -358,9 +364,12 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
              * the GPU, then the A55s; back on one a second below the limit minus 2 C in the reverse order. No other
              * shedding (the current and the voltage: the 4.5 A stop and the PMIC's own) */
             int lim = c->surv_stop_c10;
-            int hot = in->soc_ok && in->soc_c10 >= lim;
-            int very = in->soc_ok && in->soc_c10 >= lim + 20;
-            int cool = in->soc_ok && in->soc_c10 < lim - L->surv_band_c10;
+            /* 1.1-beta5: the battery is held too: from its limit minus 3 C (the stop is at the limit itself) */
+            int bhot = in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 30;
+            int hot = (in->soc_ok && in->soc_c10 >= lim) || bhot;
+            int very = (in->soc_ok && in->soc_c10 >= lim + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15);
+            int cool = in->soc_ok && in->soc_c10 < lim - L->surv_band_c10 && in->bat_ok &&
+                       in->bat_c10 < c->surv_bat_c10 - 40;
             if (hot && now - c->t_shed >= 250U) {
                 for (int n = very ? 2 : 1; n > 0; --n) {
                     if (c->cores > 3)
@@ -387,17 +396,19 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
             }
             c->m3_khz = c->cores > 3 ? flat_m3(c) : 0;
             c->state = c->cores || c->gpu_want ? HEAT_ST_RUNNING : HEAT_ST_HOLDING;
-            why(c, hot ? "Survival, trip OFF: holding at your limit" :
+            why(c, bhot ? "Survival: holding the battery below its limit" : hot ? "Survival, trip OFF: holding at your limit" :
                    c->cores == c->max_cores && c->gpu_want ? "Survival, trip OFF: everything flat out" :
                    "Survival, trip OFF: adding load");
             return;
         }
         int target = heat_surv_target(c);
-        int hot = in->soc_ok && in->soc_c10 >= target;
-        int very = in->soc_ok && in->soc_c10 >= target + 20;
+        int bhot = in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 30;    /* 1.1-beta5: the battery held too */
+        int hot = (in->soc_ok && in->soc_c10 >= target) || bhot;
+        int very = (in->soc_ok && in->soc_c10 >= target + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15);
         int amps = in->gauge_ok && iabs(in->ma) > L->hard_ma;
         int low = in->gauge_ok && in->mv > 0 && in->mv < L->surv_shed_mv;
-        int cool = in->soc_ok && in->soc_c10 < target - L->surv_band_c10 && in->gauge_ok &&
+        int cool = in->soc_ok && in->soc_c10 < target - L->surv_band_c10 && in->gauge_ok && in->bat_ok &&
+                   in->bat_c10 < c->surv_bat_c10 - 40 &&
                    iabs(in->ma) < L->hard_ma - 300 && in->mv >= L->surv_shed_mv + 50;
         if ((hot || amps || low) && now - c->t_shed >= 250U) {
             for (int n = very ? 2 : 1; n > 0; --n) {
@@ -421,7 +432,8 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         }
         c->m3_khz = c->cores > 3 ? flat_m3(c) : 0;
         c->state = c->cores || c->gpu_want ? HEAT_ST_RUNNING : HEAT_ST_HOLDING;
-        why(c, hot ? (c->level == HEAT_SURVIVAL_X ? "Survival (trip off): holding below your stop" :
+        why(c, bhot ? "Survival: holding the battery below its limit" :
+               hot ? (c->level == HEAT_SURVIVAL_X ? "Survival (trip off): holding below your stop" :
                                                     "Survival: holding just below the chip's power cut") :
                amps ? "Survival: at the battery's current limit" : low ? "Survival: the battery's voltage is low" :
                c->cores == c->max_cores && c->gpu_want ? "Survival: everything flat out" : "Survival: adding load");
