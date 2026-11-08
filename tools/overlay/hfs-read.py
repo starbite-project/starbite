@@ -4,6 +4,9 @@
 catalog B-tree from its root node (HFSX keys compare binary: parent ID,
 then the UTF-16 name) and copies the data fork's extents.
     hfs-read.py /System/Library/xpc/launchd.plist OUT
+    hfs-read.py --ls /Library/Wallpaper          (names, types, sizes of one folder)
+    HFS_CARD=1 hfs-read.py ...                   iOS 26's root on the microSD card instead
+                                                 (/dev/block/mmcblk0, sector 182888448)
 Limits: no extents-overflow file (at most 8 extents per fork), no
 HFS-compressed (decmpfs) files; both are reported, not guessed. Reads go
 through the adb shell's dd and are cached per block.
@@ -13,7 +16,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-DEV = '/dev/block/by-name/USERDATA'
+import os
+if os.environ.get('HFS_CARD'):
+    DEV, BASE = '/dev/block/mmcblk0', 182888448 * 512      # tools/store/cardlayout.py: the ios26 area
+else:
+    DEV, BASE = '/dev/block/by-name/USERDATA', 0
 cache = {}
 
 
@@ -26,7 +33,7 @@ def dev_read(off, length):
         run = 1
         while run < len(missing) and missing[run] == start + run and run < 4096:
             run += 1
-        data = subprocess.run(['adb', 'exec-out', f'dd if={DEV} bs=4096 skip={start} count={run} 2>/dev/null'],
+        data = subprocess.run(['adb', 'exec-out', f'dd if={DEV} bs=4096 skip={start + BASE // 4096} count={run} 2>/dev/null'],
                               capture_output=True, check=True).stdout
         if len(data) != run * 4096:
             sys.exit(f'short read at block {start}')
@@ -113,6 +120,48 @@ class Volume:
             else:
                 sys.exit(f'unexpected node kind {kind}')
 
+    def folder_id(self, path):
+        parent = 2
+        for part in [p for p in path.split('/') if p]:
+            rec = self.lookup(parent, part)
+            if rec is None or struct.unpack_from('>h', rec, 0)[0] != 1:
+                sys.exit(f'{path}: no such folder')
+            parent = struct.unpack_from('>I', rec, 8)[0]
+        return parent
+
+    def listdir(self, path):
+        """(name, type, size) of every entry of one folder: from the leaf holding (id, "") along fLinks."""
+        fid = self.folder_id(path)
+        want = (fid, b'')
+        n = self.root
+        while True:
+            node = self.node(n)
+            if struct.unpack_from('>b', node, 8)[0] != 0:
+                break
+            child = None
+            for r in self.records(node, self.node_size):
+                klen, k = self.key(r)
+                if k > want and child is not None:
+                    break
+                child = struct.unpack_from('>I', r, 2 + klen)[0]
+            n = child
+        out = []
+        while n:
+            node = self.node(n)
+            for r in self.records(node, self.node_size):
+                klen, (parent, name) = self.key(r)
+                if parent < fid:
+                    continue
+                if parent > fid:
+                    return out
+                data = r[2 + klen + ((2 + klen) & 1):]
+                rtype = struct.unpack_from('>h', data, 0)[0]
+                if rtype in (1, 2):
+                    size = struct.unpack_from('>Q', data, 88)[0] if rtype == 2 else 0
+                    out.append((name.decode('utf-16-be', 'replace'), 'dir' if rtype == 1 else 'file', size))
+            n = struct.unpack_from('>I', node, 0)[0]
+        return out
+
     def read_path(self, path):
         parent = 2                              # the root folder's ID
         parts = [p for p in path.split('/') if p]
@@ -136,6 +185,10 @@ class Volume:
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == '--ls':
+        for name, kind, size in Volume().listdir(sys.argv[2]):
+            print(f'{kind:4} {size:>12} {name}')
+        return
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     data = Volume().read_path(sys.argv[1])
