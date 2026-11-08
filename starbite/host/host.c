@@ -782,6 +782,7 @@ int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz, int tier, const uint32_t 
     sb_log("acpm dvfs (listed step) (host)");
     return 1;
 }
+unsigned sb_acpm_dvfs_untrusted(void) { return 0; }
 int sb_acpm_dvfs_revert(uint32_t domain)
 {
     if (domain >= 13 || !dvfs_base_ok[domain])

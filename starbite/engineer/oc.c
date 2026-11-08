@@ -7,7 +7,8 @@
  * Step 2 (below the tables): MIF, INT, A55, M3 and G3D can be set to one of their own listed steps,
  * confirmed, guarded (watchdog, storage hold) and put back after 15 s unless kept; each has a
  * stability test. The OC_SELFTEST image (ENG_DEFS=-DOC_SELFTEST) logs the tables to pmsg at start
- * and asks ACPM FREQ_GET (a read) for A55 / M3 / G3D; it requests nothing.
+ * and asks ACPM FREQ_GET (a read) for A55 / M3 / G3D / MIF / INT next to the PLL and the boot step;
+ * it requests nothing.
  */
 #include "eng.h"
 #include "oc.h"
@@ -469,17 +470,50 @@ static unsigned oc_steps(const struct oc_dom *o, uint32_t *out)
 
 static void oc_reset_cb(void);
 
+/* Set once MIF / INT or an above-cap step was sent, a stability test failed, a revert was not
+ * confirmed or ACPM answered late: then storage stays held until the next restart (Engineer OS's own
+ * RAM state, the fence's GPT bounds and the store's directory included, may have taken bit errors). */
+static const char *oc_taint;
+
+static void oc_tainted(const char *why)
+{
+    if (!oc_taint) {
+        oc_taint = why;
+        sb_logf("oc: storage held until restart: ", why);
+    }
+}
+
 static void oc_guards(void)
 {
+    if (sb_acpm_dvfs_untrusted())
+        oc_tainted("ACPM answered late or not at all");
     if (oc_active()) {
         sb_storage_hold("overclocking: a clock is off its default step");
         (void)sb_wdt_arm(OC_WDT_S);
         sb_before_reset = oc_reset_cb;
     } else {
-        sb_storage_hold(0);
+        sb_storage_hold(oc_taint ? "restart before any storage write (overclocking)" : 0);
         sb_wdt_disarm();
         sb_before_reset = 0;
     }
+}
+
+/* The PLL agrees with step khz: 1 yes, 0 no, -1 no PLL readable (INT, a powered-off M3 or GPU). A
+ * request takes a moment: up to 10 ms for the PLL to show it. */
+static int pll_agrees(int d, uint32_t khz)
+{
+    const char *how;
+    int want = oct_level(&OT.d[d], khz), r = -1;
+    for (unsigned i = 0; i < 10; ++i) {
+        uint32_t now = now_khz(d, &how);
+        if (!now)
+            return -1;
+        r = step_of(d, now) == want;
+        if (r)
+            return 1;
+        sb_udelay(1000);
+    }
+    return r;
 }
 
 static void log_dom(const char *what, int d, uint32_t khz)
@@ -503,10 +537,18 @@ static int oc_revert(int d)
     if (!oc_off[d])
         return 1;
     int ok = sb_acpm_dvfs_revert((uint32_t)d) && sb_acpm_dvfs_get((uint32_t)d, &got) && got == oc_base[d];
+    /* FREQ_GET alone could echo the request: the PLL must agree where one is readable (MIF always);
+     * without one, only while every ACPM answer so far came in time */
+    if (ok) {
+        int p = pll_agrees(d, oc_base[d]);
+        ok = p > 0 || (p < 0 && d != OC_MIF && !sb_acpm_dvfs_untrusted());
+    }
     log_dom(ok ? "reverted" : "REVERT NOT CONFIRMED", d, ok ? got : oc_base[d]);
     if (ok) {
         oc_off[d] = 0;
         oc_set[d] = oc_base[d];
+    } else {
+        oc_tainted("a revert was not confirmed");
     }
     return ok;
 }
@@ -629,11 +671,13 @@ static int oc_test(int d)
     ub_c(&l, ' ');
     ub_s(&l, u.b);
     audit_line(l.b);
+    if (r == 0)
+        oc_tainted("a stability test failed");
     if (r == 0 && oc_off[d]) {
         int back = oc_revert(d);
         oc_guards();
         (void)dialog_danger("Stability test failed", oc_res[d],
-                            back ? "The domain is back on its default step." :
+                            back ? "Back on its default step. Restart before saving anything: storage stays held." :
                                    "The revert was NOT confirmed: restart the phone (hold Power + Volume Down).",
                             "OK");
     } else if (r > 0) {
@@ -659,19 +703,40 @@ static void oc_apply(int d, uint32_t khz)
         /* libsb keeps the step from before Engineer OS's first request (the GPU page may have sent one):
          * sb_acpm_dvfs_revert sends exactly that, so it is the default here too */
         uint32_t now = 0;
-        if (!sb_acpm_dvfs_get((uint32_t)d, &now) || !sb_acpm_dvfs_baseline((uint32_t)d, &cur) ||
-            !oct_allowed(o, cur)) {
+        const char *bad = 0;
+        if (!sb_acpm_dvfs_get((uint32_t)d, &now) || !sb_acpm_dvfs_baseline((uint32_t)d, &cur))
+            bad = "ACPM did not answer FREQ_GET";
+        else if (!oct_allowed(o, cur))
+            bad = "ACPM's step is not a listed step";
+        else if (oct_above_cap(o, cur))
+            bad = "ACPM's step is above Samsung's cap";
+        else if (now != cur)
+            bad = "the step changed since Engineer OS started (restart first)";
+        else if (sb_acpm_dvfs_untrusted())
+            bad = "ACPM answered late before: FREQ_GET is not proof (restart first)";
+        else {
+            int p = pll_agrees(d, cur);
+            if (p == 0 || (p < 0 && d == OC_MIF))
+                bad = "the PLL does not show ACPM's step";
+            else if (d == OC_INT && cur != o->boot_khz &&
+                     !(o->fv_init < o->fv_n && cur == o->fv_khz[o->fv_init]))
+                bad = "INT is not on its boot step (no PLL to check it)";
+        }
+        if (bad) {
             ub_init(&u);
-            ub_s(&u, cur ? "ACPM's current step is not a listed step: " : "ACPM did not answer FREQ_GET");
-            if (cur)
+            ub_s(&u, bad);
+            if (cur) {
+                ub_s(&u, ": ");
                 ub_dec(&u, cur);
-            log_dom("refused (no listed baseline)", d, cur);
-            (void)dialog_danger("No safe way back", u.b, "Without a listed step to return to, nothing is changed.",
-                                "OK");
+                ub_s(&u, " kHz");
+            }
+            log_dom("refused (baseline not proven)", d, cur);
+            (void)dialog_danger("No safe way back", u.b, "Without a proven default step to return to, nothing is "
+                                "changed.", "OK");
             return;
         }
         oc_base[d] = cur;
-        oc_set[d] = now;                    /* differs only after the GPU page's own request */
+        oc_set[d] = now;
         oc_base_ok[d] = 1;
     }
     if (khz == oc_set[d])
@@ -716,6 +781,8 @@ static void oc_apply(int d, uint32_t khz)
     oc_off[d] = 1;                          /* guards on before anything is sent */
     oc_guards();
     log_dom("request", d, khz);
+    if (bus || hi)
+        oc_tainted(bus ? "the memory / bus clock was changed" : "an above-cap step was used");
     int sent = sb_acpm_dvfs_listed((uint32_t)d, khz, a.tier, steps, n);
     sb_gate_close();
     uint32_t got = 0;
@@ -837,6 +904,8 @@ static void build_oc(void)
     oc_ensure();
     if (oc_active())
         kv_bigc("OVERCLOCKING ACTIVE", "watchdog armed, storage held", C_ORANGE);
+    else if (oc_taint)
+        kv_bigc("RESTART BEFORE SAVING", oc_taint, C_RED);
     kv_note("Every clock domain's steps from the chip's own tables, ACPM's voltage per step and Samsung's cap. "
             "MIF, INT, A55, M3 and G3D can be set to one of their own steps (confirmed, back after 15 s unless "
             "kept); the others are read only.");
@@ -940,32 +1009,53 @@ void oc_page(void)
 
 #ifdef OC_SELFTEST
 /* The read-only self-test image: tables to pmsg first (so a hang later still leaves them), then
- * ACPM FREQ_GET for A55, M3, G3D (reads; sb_acpm_dvfs_get refuses every other domain). */
+ * ACPM FREQ_GET (reads) for the five domains with controls, each next to its PLL step and boot step:
+ * the check that FREQ_GET reports the live step before any change trusts it as the way back. */
 void oc_selftest_boot(void)
 {
     sb_log("oc selftest: start (read only: ECT, APM SRAM, PLLs)");
     oc_load();
     log_tables();
-    sb_log("oc selftest: tables done; FREQ_GET A55, M3, G3D next");
-    static const int gd[3] = { OC_A55, OC_M3, OC_G3D };
-    for (int i = 0; i < 3; ++i) {
+    sb_log("oc selftest: tables done; FREQ_GET A55, M3, G3D, MIF, INT next (reads)");
+    static const int gd[5] = { OC_A55, OC_M3, OC_G3D, OC_MIF, OC_INT };
+    for (int i = 0; i < 5; ++i) {
+        const int d = gd[i];
+        const struct oc_dom *o = &OT.d[d];
         uint32_t khz = 0;
+        const char *how;
         struct ub u;
         ub_init(&u);
         ub_s(&u, "oc selftest: FREQ_GET ");
-        ub_s(&u, oc_info[gd[i]].name);
-        if (sb_acpm_dvfs_get((uint32_t)gd[i], &khz)) {
+        ub_s(&u, oc_info[d].name);
+        if (sb_acpm_dvfs_get((uint32_t)d, &khz)) {
             ub_s(&u, " = ");
             ub_dec(&u, khz);
-            int s = step_of(gd[i], khz);
-            ub_s(&u, s >= 0 ? " kHz, step " : " kHz, not a listed step");
-            if (s >= 0)
-                ub_dec(&u, (unsigned)s);
+            int l = oct_level(o, khz);
+            ub_s(&u, l >= 0 ? " step " : " NOT LISTED");
+            if (l >= 0)
+                ub_dec(&u, (unsigned)l);
+            ub_s(&u, oct_above_cap(o, khz) ? " ABOVE CAP" : "");
         } else {
             ub_s(&u, ": no answer");
         }
+        uint32_t now = now_khz(d, &how);
+        ub_s(&u, "; pll ");
+        ub_dec(&u, now);
+        if (now) {
+            int s = step_of(d, now);
+            ub_s(&u, " step ");
+            if (s >= 0)
+                ub_dec(&u, (unsigned)s);
+            else
+                ub_c(&u, '-');
+        }
+        ub_s(&u, "; boot ");
+        ub_dec(&u, o->boot_khz);
+        ub_s(&u, " init ");
+        ub_dec(&u, o->fv_init < o->fv_n ? o->fv_khz[o->fv_init] : 0);
         sb_log(u.b);
     }
+    sb_logx("oc selftest: ACPM late or missing answers ", sb_acpm_dvfs_untrusted());
     sb_log("oc selftest: done");
 }
 #endif

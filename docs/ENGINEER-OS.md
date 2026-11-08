@@ -650,8 +650,10 @@ in Engineer OS, so a step could not be tested). Tapping a step:
 
 1. refuses anything that is not in both the ECT and the fvmap (`oct_allowed`; libsb's
    `sb_acpm_dvfs_listed` checks the list again; `sb_acpm_dvfs` refuses MIF / INT outright);
-2. reads ACPM's step (FREQ_GET) and libsb's baseline (the step before Engineer OS's first request);
-   refuses if that baseline is not a listed step (no safe way back);
+2. reads ACPM's step (FREQ_GET) and libsb's baseline (the step before Engineer OS's first request) and
+   accepts it as the way back only if it is a listed step, at or below Samsung's cap, unchanged since
+   start, shown by the PLL (MIF must have a readable PLL; INT, which has none, must be on its boot or
+   fvmap init step), and every ACPM answer so far came in time;
 3. G3D: powers the GPU first (the GPU page's tier 1 power-up);
 4. confirms: tier 3 for A55 / M3 / G3D up to Samsung's cap, **tier 4 for MIF, INT and every above-cap step**;
 5. arms the cluster 1 watchdog (40 s, `libsb/wdt.c`, fed from `ui_tick`) and **holds storage**
@@ -660,6 +662,13 @@ in Engineer OS, so a step could not be tested). Tapping a step:
 7. counts down 15 s: **Power keeps it**; Volume, Back or the timeout reverts;
 8. offers the stability test: A55 / M3 CPU stress on that cluster for 60 s, G3D GPU stress for 60 s,
    MIF / INT memory patterns (64 MiB, 3 passes). A failure reverts the domain.
+
+A revert counts as confirmed only when FREQ_GET reports the baseline **and** the PLL shows it (MIF always;
+domains without a readable PLL only while ACPM has never answered late). `acpm_send` drops replies left in
+RX by timed-out requests before each send, and counts them (`sb_acpm_dvfs_untrusted`).
+
+The storage hold stays until the next restart (not only until the revert) once MIF or INT was changed, an
+above-cap step was used, a stability test failed, a revert was not confirmed, or ACPM answered late.
 
 The watchdog and the storage hold stay on until every domain is back (Overclocking > Every domain back,
 or each domain's "Back to the default step"). Reboot, boot-next and power off revert every domain first
@@ -671,5 +680,6 @@ for a cluster that is powered off (M3 between tests), and the ASV table version 
 
 **Self-test image** (`ENG_DEFS=-DOC_SELFTEST ENG_OUT=starbite/out/ocself sh starbite/engineer/build.sh`):
 at start it logs every domain's table to pmsg (`oc <DOM>: ect N fv N init N cap kHz boot kHz now kHz rows
-...`, then `kHz:uV` pairs six a line), then asks ACPM **FREQ_GET** for A55, M3 and G3D, then opens the
-page. It requests no step.
+...`, then `kHz:uV` pairs six a line), then asks ACPM **FREQ_GET** for A55, M3, G3D, MIF and INT, each logged next to
+its PLL step, boot step and fvmap init step (`oc selftest: FREQ_GET MIF = ... step n; pll ... step m; boot
+... init ...`), then opens the page. It requests no step. Its log is the go / no-go for step 2.

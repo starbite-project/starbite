@@ -491,6 +491,9 @@ int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz, int tier, const uint32_t 
 int sb_acpm_dvfs_get(uint32_t domain, uint32_t *khz);
 int sb_acpm_dvfs_baseline(uint32_t domain, uint32_t *khz);
 int sb_acpm_dvfs_revert(uint32_t domain);
+/* Non-zero once a DVFS message timed out or a late reply was dropped (acpm_send drains stale
+ * replies before each request): FREQ_GET is then not proof on its own. */
+unsigned sb_acpm_dvfs_untrusted(void);
 /* Read-only: len bytes of APM SRAM from offset off (both 4-aligned); 0 if out of range or a word
  * faulted. */
 int sb_acpm_sram_read(uint32_t off, void *dst, uint32_t len);

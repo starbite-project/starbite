@@ -31,6 +31,7 @@ static void awr(uint32_t off, uint32_t v)
 }
 
 static uint32_t acpm_seq;
+static unsigned acpm_drained;                /* stale replies dropped (late answers) */
 
 static uint32_t acpm_find(uint32_t id)
 {
@@ -61,6 +62,14 @@ static int acpm_send(uint32_t c, uint32_t id, uint32_t cmd[4])
     if (++acpm_seq >= 64)
         acpm_seq = 1;
     uint32_t seq = acpm_seq;
+    /* Replies still in RX answer requests that timed out (ACPM answered late): drop them all, so a
+     * later request whose seq happens to match never takes an old reply as its own. */
+    if (ard(rx_rear) != ard(rx_front)) {
+        awr(rx_rear, ard(rx_front));
+        __asm__ volatile("dsb sy" : : : "memory");
+        *(volatile uint32_t *)(ACPM_MBOX + 0x20) = 1U << id;      /* INTCR1 */
+        acpm_drained++;
+    }
     cmd[0] = (cmd[0] & ~(0x3fU << 16)) | (seq << 16);
     uint32_t slot = tx_base + esz * front;
     for (uint32_t i = 0; i < esz / 4; ++i)
@@ -158,6 +167,14 @@ static uint32_t dvfs_chan(uint32_t *id)
  * the one value sb_acpm_dvfs_revert sends without an open authorisation. */
 static uint32_t dvfs_base[SB_DVFS_NDOM];
 static uint8_t dvfs_base_ok[SB_DVFS_NDOM], dvfs_touched[SB_DVFS_NDOM];
+static unsigned dvfs_timeouts;
+
+/* DVFS requests or reads ACPM did not answer in time, plus late replies dropped from any channel:
+ * once non-zero, a FREQ_GET answer alone proves nothing (Overclocking then wants the PLL too). */
+unsigned sb_acpm_dvfs_untrusted(void)
+{
+    return dvfs_timeouts + acpm_drained;
+}
 
 static int dvfs_get(uint32_t domain, uint32_t *khz)
 {
@@ -168,8 +185,11 @@ static int dvfs_get(uint32_t domain, uint32_t *khz)
     cmd[1] = 0;
     cmd[2] = 1;                             /* FREQ_GET (vendor cal-if/acpm_dvfs.h) */
     cmd[3] = 0;
-    if (!acpm_send(c, id, cmd))
+    if (!acpm_send(c, id, cmd)) {
+        dvfs_timeouts++;
+        sb_logx("acpm FREQ_GET timed out, domain ", domain);
         return 0;
+    }
     *khz = cmd[1];
     return 1;
 }
@@ -211,6 +231,8 @@ static int dvfs_send(uint32_t domain, uint32_t khz, const char *tag)
     cmd[1] = khz;
     cmd[2] = cmd[3] = 0;                    /* FREQ_REQ */
     int ok = acpm_send(c, id, cmd);
+    if (!ok)
+        dvfs_timeouts++;
     struct ub u;
     ub_init(&u);
     ub_s(&u, tag);
