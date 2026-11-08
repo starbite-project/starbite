@@ -108,7 +108,8 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         { L"Live_RefPx6", a->RefPx[6] }, { L"Live_RefPx7", a->RefPx[7] },
         { L"Live_FlipContent", a->FlipContent }, { L"Live_FlipBlack", a->FlipBlack },
         { L"Live_FlipPxCentre", a->FlipPxCentre }, { L"Live_FlipSrcVa", a->FlipSrcVa },
-        { L"Live_FlipSrcPages", a->FlipSrcPages },
+        { L"Live_FlipSrcPages", a->FlipSrcPages }, { L"Live_ShowFromBltSrc", a->ShowFromBltSrc },
+        { L"Live_FlipsIgnoredBlack", a->FlipsIgnoredBlack },
         /* T13f: what DECON scans (read only; sbdisplay's registers): IDMA channel 0's base address, live and
          * shadow, its image size, the trigger control, the window enables and a pending shadow update */
         { L"Live_DeconBaseY", Rd(a->DeconDmaVa, SBDC_CH0 + SBDC_IDMA_BASE_Y) },

@@ -347,7 +347,14 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
             }
             A->FlipSrcVa = (ULONG)Op->Src->GpuVa;
             A->FlipSrcPages = Op->Src->Pages;
-            MwShow(A, Op->Src, TRUE);     /* the guard thread copies it to the panel */
+            /* T13s: DWM flips a primary nothing ever draws into (T13r: 0x40001340 all zeros, alpha too), while
+             * its frames reach the primary as blts. A flip to an all-black allocation leaves the panel as it is. */
+            if (v != NULL && !NotBlack(v, (LONG)(Op->Src->Pitch ? Op->Src->Pitch : Op->Src->Width * 4), 0, 0,
+                                       (LONG)(Op->Src->Width ? Op->Src->Width : 1),
+                                       (LONG)(Op->Src->Height ? Op->Src->Height : 1)))
+                A->FlipsIgnoredBlack++;
+            else
+                MwShow(A, Op->Src, TRUE); /* the guard thread copies it to the panel */
         }
         return;
     }
@@ -382,8 +389,17 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
             A->PrimaryBltsToScan++;
         else
             A->PrimaryBltsOther++;
-        MwShow(A, Op->Dst, FALSE);        /* the blt itself drew into the framebuffer: no new copy unless
-                                           * the panel showed another allocation until now */
+        /* T13s: DWM's present blts carry only dirty rectangles (T13f: ~1/6 of one frame in a minute) from its
+         * full-screen back buffer, which holds the whole composed frame. A display engine would scan the primary
+         * those rectangles accumulate in; ours never got the rest of the frame. So the panel shows the blt's
+         * source, whole, when it is full-screen; otherwise the destination primary as before. */
+        if (Op->Kind == MW_PRESENT_BLT && Op->Src != NULL && Op->Src->Width == A->Fb.Width &&
+            Op->Src->Height == A->Fb.Height) {
+            A->ShowFromBltSrc++;
+            MwShow(A, Op->Src, TRUE);
+        } else {
+            MwShow(A, Op->Dst, FALSE);    /* the blt itself drew into the framebuffer */
+        }
         px = CopyRects(Op, A->FbVa, (LONG)A->Fb.Width, (LONG)A->Fb.Height, (LONG)A->Fb.Pitch, src, srcW, srcH,
                        srcPitch, &last);
         A->FbPixels += px;

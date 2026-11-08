@@ -980,6 +980,17 @@ the CPU path. sbshare adds a GPU re-sample after the producer's update.
 
 **T13r (sb-patches/0107):** `_Blt` as a gallium blit, covering resolve, format conversion and stretch.
 
+**cycle-t13r-1 (01:13):**
+- **DXGI never called pfnBlt.**
+- **DWM's only UMD presents are flips of a primary that nothing ever draws** (all zeros, alpha included).
+- **DWM's frames reach the KMD as present blts** from its full-screen back buffer into the scanned primary,
+  but only as dirty rectangles. Our emulated flips then showed the empty primary.
+
+**T13s:**
+- **A blt into a primary from a full-screen source** makes that source (DWM's back buffer) what the emulated
+  scanout shows, whole.
+- **Flips to an all-black allocation are ignored.**
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
