@@ -79,5 +79,5 @@ fi
 "${CROSS}nm" "$out/modemprobe.elf" > "$out/modemprobe.map"
 "${CROSS}objcopy" -O binary "$out/modemprobe.elf" "$out/modemprobe.bin"
 python3 "$root/starbite/tools/check-image.py" "$out/modemprobe.bin" "$out/modemprobe.img" "$out/modemprobe.map"
-rm -f "$out"/mp_*.o "$out/modemprobe.bin"
+rm -rf "$out"/mp_*.o "$out/modemprobe.bin" "$out/mp-sbassets.sb7" "$out/host"   # keep the disk footprint small
 echo "modemprobe: $out/modemprobe.img, $(wc -c < "$out/modemprobe.img") bytes, sha256 $(sha256sum "$out/modemprobe.img" | cut -d' ' -f1)"

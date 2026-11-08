@@ -302,6 +302,19 @@ Clean, 0 faults. EFS: needs_recovery no, 47 root names, nv_data.bin inode 45 (1 
 backup). BOOT 0x73672490, MAIN 0xa98496b5 and VSS 0x5e715799 all match the TOC. `BOOT: ok (done (dry))`. The
 whole image is in RAM and verified; T6 is next.
 
+### Result T6 (2026-11-08 21:15, 0ec0bb4, `build/test-boots/modemload-sec-2116/loader-pmsg.txt`)
+Clean, 0 faults. **EL3 accepted our load:** cp_init (CP_CTRL_NS 0x002016a0 -> 0x002016a2, CP_CTRL_S 0 -> 8,
+sequencer 5), mode 2 0x0b as on Android, four sections copied and read back from DRAM with matching CRCs, **mode
+0 0x00 in 206 ms**, called from CPU 0 (Android: 127 ms, off CPU 0). That answers unknown #8: CPU 0 is fine. Then
+the park: the full ss310ap_off sequence, CENTRAL_SEQ_CP_STATUS 0x80. Differences from Android's log:
+- the GICD pending bit (0x10101238 bit 28) never showed (Android: set). PMUCAL only waits for it; probably the
+  GIC is set up differently under the loader;
+- CP_CTRL_S reads 0 again after cp_init (CP_START looks self-clearing once the sequencer runs);
+- CP_CTRL_NS gained bits 31:30 while up (0xc02016a2) and lost them in reset;
+- after the park CP_CTRL_NS is 0x002216a6 (+ CP_RESET_SET, + dump_pc_no_pg), and RESET_SEQUENCER_STATUS still
+  reads 5 while the central sequencer reports 0x80 (in reset).
+Rule 2's check is next: One UI's own cbd must bring the modem up after this.
+
 ### 6.2 Safety review (hazard -> what prevents it -> how it is tested)
 | hazard | prevention | test |
 |---|---|---|
