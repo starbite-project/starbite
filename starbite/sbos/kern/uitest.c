@@ -258,10 +258,10 @@ void selftest_timer(unsigned id)
             ++fails;
         kui_home();
         phase = 13;
-        sb_log("selftest: wifi: on, the bring-up and one scan (no join), then off");
+        sb_log("selftest: wifi: on, the bring-up, one scan, the saved network's join if heard, then off");
         break;
     }
-    case 13: {                              /* Wi-Fi: on, the bring-up, one scan, off; never a join */
+    case 13: {                              /* Wi-Fi: on, the bring-up, one scan, the saved network if heard, off */
         int done = 0;
         if (!wifi_selftest_phase(&done))
             ++fails;

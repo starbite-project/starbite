@@ -1027,6 +1027,7 @@ void kui_set_emergency(int on)
     }
     sb_log(on ? "ui: Emergency Mode on (the emergency screens; save and switch off 5 min after the screen goes off)"
               : "ui: Emergency Mode off (normal mode)");
+    panel_emergency(on);
     settings_changed();
     full = dirty = 1;
 }

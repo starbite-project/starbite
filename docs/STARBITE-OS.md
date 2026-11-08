@@ -829,6 +829,32 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.14 Version 0.6.1: Extreme flat out, Manual heat, WPA2, Emergency Mode's power profile (2026-11-08)
+
+From the user's tour of 0.6 (`build/starbite-os/tour06/pmsg.txt`):
+- **Extreme was a thermostat by design** (the user: it shed 8 → 4 → 2 → 1 cores at a 43 °C skin band and the
+  voltage-sag rule while the battery was at 35 °C; the GPU stopped when every worker was shed). Now Extreme (and
+  Manual) have **no regulation**: every worker joins one per second and stays; the A55s at the table's top
+  (1950 MHz, now listed in libsb), the M3s at 1794 MHz at once (the DT's `exynos-ocp` node allows the steps above
+  1794 MHz only with Samsung's over-current handler, which Starbite does not have yet), the GPU for the whole
+  session, no timer. The stops left: **battery 55 °C** (its safety), the SoC at 110 °C (a clean stop just below
+  S-Boot's 115 °C hardware trip, which stays armed), a lost or stuck battery/SoC reading, a core fault, the 15 %
+  reserve for Light and SOS, 3.45 V and 3.5 A. No skin stop (shown, orange above 46 °C: the user's choice). Starts
+  below 50 °C battery. The ~2 A in the log was not a limit: the load drew 1.8 A (ours are 3.2 / 3.5 A).
+- **Manual** (Heat > Manual): a table step for the A55s (455..1950 MHz), the M3s (650..1794 MHz) and the GPU
+  (off, 260..572 MHz), `SET_HEAT_MAN_*` (only listed steps; until a restart); flat out like Extreme.
+- **WPA2** (the tour: associated, no handshake message 1, the AP dropped the link): the core's `bcmw_join` now turns
+  the firmware's own supplicant off (`sup_wpa 0`) and power save off, as `bcmw_connect` has since W2d/W2f. The host
+  model has the phone firmware's defaults (`model_ap_real_defaults`: idsup, sup_wpa 1, PM 2: message 1 withheld)
+  and reproduced the failure before the fix. Starbite OS also asked for an address on association, before the keys
+  (fixed: only after the handshake), and the join no longer blocks the loop: `bcmw_join_start` + `bcmw_join_poll`
+  (0.6: up to 15 s frozen). The self test joins the saved `wifinet` network when it hears it (address, ping, NTP).
+- **Emergency Mode's power profile** (`panel_emergency`): frames only on change (the DECON trigger masked: the
+  panel shows its own RAM), the panel off with the screen, the brightness at most Mid; the settings stay as saved.
+  SOS and Extreme boost to AOR `00 0C`, the vendor's UI maximum (400 nits; not HBM). Research:
+  `build/em-research-panel-hbm-lowpower.md` (HBM needs gamma/ELVSS/VINT from the panel's own data: 0.6.2 with the
+  user present; the panel's AOD low-power mode: 0.6.2).
+
 ### 12.13 Version 0.6: normal mode, Emergency Mode, Extreme heat (2026-11-08)
 
 The plan is `docs/STARBITE-OS-PLAN-0.6-0.9.md`.

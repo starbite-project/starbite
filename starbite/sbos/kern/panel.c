@@ -30,6 +30,11 @@ int panel_save_on;                  /* settings: refresh only on change */
 int panel_off_on;                   /* settings: the panel off with the screen */
 static int masked, panel_dark;
 static unsigned dcs_fail;
+/* 0.6.1: Emergency Mode's power profile: refresh only on change and the panel off with the screen, whatever the
+ * settings say (they stay as saved), and the brightness at most Mid (SOS and Extreme still boost to the top) */
+static int em;
+#define SAVE_ON (panel_save_on || em)
+#define OFF_ON (panel_off_on || em)
 
 static uint32_t rd(uintptr_t a)
 {
@@ -55,7 +60,7 @@ static void trig(int mask)
 /* a present happened: let the next TE carry it, mask again in 60 ms */
 void panel_kick(void)
 {
-    if (!panel_save_on || panel_dark)
+    if (!SAVE_ON || panel_dark)
         return;
     if (masked)
         trig(0);
@@ -64,7 +69,7 @@ void panel_kick(void)
 
 void panel_idle(void)
 {
-    if (panel_save_on && !panel_dark && !masked)
+    if (SAVE_ON && !panel_dark && !masked)
         trig(1);
 }
 
@@ -72,7 +77,7 @@ void panel_idle(void)
 void panel_save_set(int on)
 {
     panel_save_on = !!on;
-    if (!on) {
+    if (!on && !em) {
         wr(DECON_TRIG, TRIG_FREE);
         masked = 0;
     }
@@ -148,9 +153,9 @@ void panel_screen(int on)
     if (!on) {
         /* with the panel off: dark first, then no more transfers; without it the black frame the UI presents
          * next goes out through panel_kick like any other (the trigger is masked 60 ms later) */
-        if (panel_off_on && !display(0)) {
+        if (OFF_ON && !display(0)) {
             panel_dark = 1;
-            if (panel_save_on && !masked)
+            if (SAVE_ON && !masked)
                 trig(1);
         }
         return;
@@ -167,7 +172,7 @@ void panel_screen(int on)
         }
         panel_dark = 0;                         /* never stay dark on purpose: the UI redraws anyway */
     }
-    if (panel_save_on)
+    if (SAVE_ON)
         panel_kick();
     else if (masked)
         trig(0);
@@ -182,6 +187,35 @@ static int applied = -1, boost;             /* the level on the panel; who asks 
 
 static int send_level(int level);
 
+/* what the panel shows for the user's level: the panel's top while boosted (5: AOR 00 0C, the vendor's UI maximum,
+ * 400 nits, the shortest emission-off time Samsung's driver ever sends; not HBM); at most Mid (2) in Emergency Mode
+ * ("Boot" is S-Boot's normal, brighter than Mid) */
+static int effective(int level)
+{
+    if (boost)
+        return 5;
+    if (em && (level == 0 || level > 2))
+        return 2;
+    return level;
+}
+
+void panel_emergency(int on)
+{
+    on = !!on;
+    if (on == em)
+        return;
+    em = on;
+    if (!em && !panel_save_on) {
+        wr(DECON_TRIG, TRIG_FREE);          /* free-running again, as the settings say */
+        masked = 0;
+    }
+    int eff = effective(panel_bright_level);
+    if (eff != applied && !(eff == 0 && applied < 0))
+        (void)send_level(eff);
+    sb_log(on ? "panel: Emergency Mode's power profile: refresh only on change, off with the screen, at most Mid"
+              : "panel: Emergency Mode's power profile off (the settings as saved)");
+}
+
 /* 0.6: the user's level; the panel shows it unless SOS or Extreme asks for the top level */
 int panel_brightness(int level)
 {
@@ -189,7 +223,7 @@ int panel_brightness(int level)
         return 0;
     int was = panel_bright_level;
     panel_bright_level = level;
-    int eff = boost ? 4 : level;
+    int eff = effective(level);
     if (eff == applied || (eff == 0 && applied < 0))
         return 1;                           /* already there (or the boot's level, nothing sent yet) */
     if (!send_level(eff)) {
@@ -206,14 +240,16 @@ void panel_boost(int who, int on)
     if (b == boost)
         return;
     boost = b;
-    int eff = boost ? 4 : panel_bright_level;
+    int eff = effective(panel_bright_level);
     if (eff != applied && !(eff == 0 && applied < 0))
         (void)send_level(eff);
 }
 
 static int send_level(int level)
 {
-    static const uint16_t aor[5] = { 0x0440, 0x0b7c, 0x0800, 0x0440, 0x0200 };
+    static const uint16_t aor[6] = { 0x0440, 0x0b7c, 0x0800, 0x0440, 0x0200, 0x000c };   /* 5: the boost only */
+    if (level < 0 || level > 5)
+        return 0;
     static const uint8_t key_on[3] = { 0xf0, 0x5a, 0x5a }, commit[2] = { 0xf7, 0x03 }, key_off[3] = { 0xf0, 0xa5, 0xa5 };
     /* level 0 after a change is S-Boot's normal AOR (0x0440) */
     if (!dsim_ready())
@@ -243,7 +279,7 @@ static int send_level(int level)
         return 0;
     }
     applied = level;
-    if (panel_save_on)
+    if (SAVE_ON)
         panel_kick();                           /* the next refresh carries it */
     return 1;
 }

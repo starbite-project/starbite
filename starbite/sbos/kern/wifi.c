@@ -59,7 +59,8 @@ static uint8_t ntp_nonce[8], ntp_server[4];
 static uint8_t sv_ssid[33];
 static unsigned sv_len;
 static char sv_pass[65];
-static int sv_ok, join_pending;
+static int sv_ok, join_pending, join_active;   /* 0.6.1: join_active: the handshake runs, one round per tick */
+static uint64_t join_t0;
 /* 0.5: networks joined with a typed passphrase this session (RAM only: gone at a restart; never logged) */
 #define REMEMBER 4
 static struct { uint8_t ssid[33]; unsigned len; char pass[65]; } rem[REMEMBER];
@@ -282,7 +283,11 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
         joined = -1;
     } else if (ev->type == BCMW_E_LINK) {
         if (ev->flags & 1) {
-            if (st == SBOS_WIFI_JOINING) {
+            if (st == SBOS_WIFI_JOINING && (join_pending || join_active)) {
+                /* 0.6.1: a secured join: associated is not joined; the address only after the handshake (0.6 asked
+                 * for it here, before the keys) */
+                logn("wifi: associated after ", sb_ms() - t_state, " ms; the handshake next");
+            } else if (st == SBOS_WIFI_JOINING) {
                 logn("wifi: the link is up after ", sb_ms() - t_state, " ms; asking for an address (DHCP)");
                 set_state(SBOS_WIFI_DHCP, "");
                 dhcp_go = 1;                /* not from inside bcmw_poll: the first frame opens the tx flow ring */
@@ -427,7 +432,7 @@ int wifi_power(int on)
         kt_cancel(KT_WIFI, 0);
         dhcp_go = 0;
         scan_retry = 0;
-        join_pending = 0;
+        join_pending = join_active = 0;
         memset(jp_pass, 0, sizeof(jp_pass));
         joined = -1;
         nnets = 0;
@@ -483,7 +488,7 @@ int wifi_power(int on)
     }
     w_ready = 1;
     dhcp_go = 0;
-    join_pending = 0;
+    join_pending = join_active = 0;
     load_saved();
     step = 0;
     nnets = 0;
@@ -542,8 +547,8 @@ int wifi_join(int i, const char *pass)
         sb_strcpy(jp_pass, sizeof(jp_pass), k);
     }
     if (nets[i].secure) {
-        /* bcmw_join does the WPA2 handshake and blocks (up to 15 s): the screen shows "Joining" first, the join
-         * runs on the next tick (the heater is never on with Wi-Fi) */
+        /* 0.6.1: bcmw_join_start (the directed scan, the PMK, SET_SSID: a few seconds at most) on the next tick, then
+         * one handshake round per tick (bcmw_join_poll): the screen keeps working (0.6 blocked up to 15 s) */
         const struct bcmw_info *in = bcmw_info(w);
         struct sbnet_os no = { 0, net_tx, net_now, net_random, net_log, net_udp };
         sbnet_init(&net, &no, in->mac);
@@ -648,6 +653,10 @@ void wifi_timer(unsigned id)
     if (st == SBOS_WIFI_OFF)
         return;
     uint64_t now = sb_ms();
+#ifdef SB_HOST
+    if (M.now < now * 1000U)
+        M.now = now * 1000U;                /* the model's clock follows the host's (a polled join's timeout) */
+#endif
     if (st == SBOS_WIFI_STARTING) {
         uint64_t t0 = sb_ms();
         hw_wdt_feed();                      /* the longest steps take seconds (0.5.12) */
@@ -701,12 +710,26 @@ void wifi_timer(unsigned id)
         }
         if (scan_retry && st == SBOS_WIFI_UP && now >= scan_retry_at)
             (void)wifi_scan();
+        int r = BCMW_E_PENDING;
         if (join_pending && st == SBOS_WIFI_JOINING && now - t_state >= 100) {
             join_pending = 0;
-            uint64_t t0 = sb_ms();
+            join_active = 1;                /* first: the association's events arrive inside bcmw_join_start */
+            join_t0 = sb_ms();
             hw_wdt_feed();
-            int r = joined >= 0 ? bcmw_join(w, nets[joined].ssid, nets[joined].ssid_len, jp_pass, 15000) : BCMW_E_STATE;
+            r = joined >= 0 ? bcmw_join_start(w, nets[joined].ssid, nets[joined].ssid_len, jp_pass, 15000) : BCMW_E_STATE;
             hw_wdt_feed();
+            uint64_t took = sb_ms() - join_t0;
+            if (took >= 150)
+                logn("wifi: the join's start (the directed scan, the PMK) took ", took, " ms");
+            if (r == BCMW_OK)
+                r = BCMW_E_PENDING;
+            now = sb_ms();
+        } else if (join_active) {
+            r = bcmw_join_poll(w);
+        }
+        if (r != BCMW_E_PENDING) {
+            uint64_t t0 = join_t0;
+            join_active = 0;
             if (r == BCMW_OK && joined >= 0)
                 remember(nets[joined].ssid, nets[joined].ssid_len, jp_pass);
             memset(jp_pass, 0, sizeof(jp_pass));
@@ -720,7 +743,7 @@ void wifi_timer(unsigned id)
                 set_state(SBOS_WIFI_DHCP, "");
                 dhcp_go = 1;
             }
-            now = sb_ms();                  /* the join blocked: states were set after the tick's start */
+            now = sb_ms();
         }
         if (dhcp_go && st == SBOS_WIFI_DHCP) {
             dhcp_go = 0;
@@ -731,7 +754,7 @@ void wifi_timer(unsigned id)
             logn("wifi: the scan timed out with ", (uint64_t)nnets, " networks");
             set_state(SBOS_WIFI_UP, "");
         }
-        if (st == SBOS_WIFI_JOINING && !join_pending && now - t_state > JOIN_MS) {
+        if (st == SBOS_WIFI_JOINING && !join_pending && !join_active && now - t_state > JOIN_MS) {
             sb_log("wifi: the join timed out");
             (void)bcmw_leave(w);
             joined = -1;
@@ -793,7 +816,7 @@ void wifi_timer(unsigned id)
         }
     }
     int busy = st == SBOS_WIFI_STARTING || st == SBOS_WIFI_SCANNING || st == SBOS_WIFI_JOINING || st == SBOS_WIFI_DHCP ||
-               join_pending || dhcp_go;
+               join_pending || join_active || dhcp_go;
     uint32_t every = st == SBOS_WIFI_STARTING ? 10U : K.screen_on ? TICK_ON_MS : TICK_OFF_MS;
     if (irq_on && irq_n && irq_trusted && !busy)
         every = st == SBOS_WIFI_CONNECTED ? 250U : 1000U;   /* interrupts wake it; sbnet's timers need 250 ms */
@@ -801,11 +824,39 @@ void wifi_timer(unsigned id)
         kt_set(KT_WIFI, 0, sb_ms(), every, 0);
 }
 
-/* the self test: on, the bring-up, one scan, off (never a join): 1 passed, 0 failed */
+/* the self test: on, the bring-up, one scan; 0.6.1: then, if the saved network ("wifinet") was heard, a join with
+ * its passphrase (WPA2 or open), an address, the router's ping and the clock check; then off. 1 passed, 0 failed */
 int wifi_selftest_phase(int *done)
 {
-    static int started;
+    static int started, jstate;            /* jstate: 0 not yet, 1 joining, 2 done */
+    static uint64_t jt0;
     *done = 0;
+    if (jstate == 1) {
+        int failed = st == SBOS_WIFI_UP || st == SBOS_WIFI_FAILED || st == SBOS_WIFI_OFF;
+        int finished = st == SBOS_WIFI_CONNECTED && (ntp_st == 3 || ntp_st == -1);   /* the clock checked, or no answer */
+        if (failed || finished || sb_ms() - jt0 > 45000U) {
+            jstate = 2;
+            if (st == SBOS_WIFI_CONNECTED) {
+                struct ub u;
+                ub_init(&u);
+                ub_s(&u, "selftest: wifi: JOINED the saved network, an address; the router answered: ");
+                ub_s(&u, pinged == 2 ? "yes" : "no");
+                ub_s(&u, "; the clock checked: ");
+                ub_s(&u, ntp_st == 3 ? "yes" : "no");
+                ub_s(&u, "; ");
+                ub_dec(&u, sb_ms() - jt0);
+                ub_s(&u, " ms");
+                sb_log(u.b);
+            } else {
+                sb_logf("selftest: wifi: the saved network did NOT join: ", why[0] ? why : "no address in 45 s");
+            }
+            int ok = st == SBOS_WIFI_CONNECTED;
+            wifi_power(0);
+            *done = 1;
+            return ok;
+        }
+        return 1;
+    }
     if (!started) {
         started = 1;
         wifi_power(0);                      /* from off: a radio already on would make t_on stale */
@@ -828,11 +879,29 @@ int wifi_selftest_phase(int *done)
              irq_storms ? " (a STORM: off, polling)" : irq_on ? " (on)" : " (polling)");
         if (irq_missed)
             logn("selftest: wifi: work found without an interrupt, times: ", irq_missed, "");
+        int heard = -1;
+        for (int i = 0; sv_ok && jstate == 0 && i < nnets; ++i)
+            if (nets[i].ssid_len == sv_len && !memcmp(nets[i].ssid, sv_ssid, sv_len))
+                heard = i;
+        if (heard >= 0) {
+            sb_log(nets[heard].secure ? "selftest: wifi: the saved network was heard: joining it (WPA2; name not logged)"
+                                      : "selftest: wifi: the saved network was heard: joining it (open; name not logged)");
+            jt0 = sb_ms();
+            if (wifi_join(heard, 0) == 0) {
+                jstate = 1;
+                return 1;
+            }
+            sb_log("selftest: wifi: the join was refused");
+            wifi_power(0);
+            *done = 1;
+            return 0;
+        }
+        sb_log(sv_ok ? "selftest: wifi: the saved network was not heard: no join" : "selftest: wifi: no saved network: no join");
         wifi_power(0);
         *done = 1;
         return 1;
     }
-    if (sb_ms() - t_on > 30000U) {
+    if (jstate == 0 && sb_ms() - t_on > 30000U) {
         sb_log("selftest: wifi: not up within 30 s");
         wifi_power(0);
         *done = 1;

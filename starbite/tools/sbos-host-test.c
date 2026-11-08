@@ -213,7 +213,9 @@ static void t_dvfs(void)
 {
     CHECK(sb_dvfs_level_listed(2, 1794000), "A55 1794 MHz listed");
     CHECK(sb_dvfs_level_listed(2, 1053000) && sb_dvfs_level_listed(2, 1248000), "A55 restore and cold levels");
-    CHECK(!sb_dvfs_level_listed(2, 1898000) && !sb_dvfs_level_listed(2, 1950000), "A55 above 1794 never");
+    CHECK(sb_dvfs_level_listed(2, 1898000) && sb_dvfs_level_listed(2, 1950000) && !sb_dvfs_level_listed(2, 2002000),
+          "A55: the table's top 1950 MHz listed (0.6.1), nothing above");
+    CHECK(!sb_dvfs_level_listed(3, 1924000) && !sb_dvfs_level_listed(3, 2704000), "M3 above 1794 MHz never (no OCP handler)");
     CHECK(sb_dvfs_level_listed(3, 1794000) && sb_dvfs_level_listed(3, 1469000) && sb_dvfs_level_listed(3, 1066000),
           "M3 heater and restore levels listed");
     CHECK(!sb_dvfs_level_listed(3, 2704000) && !sb_dvfs_level_listed(3, 1924000), "M3 above the all-core 1794 never");
@@ -335,6 +337,41 @@ static void t_heater(void)
     CHECK(c.cores == 7 && c.m3_khz == 1469000, "High: 7 workers, the M3s start at 1469 MHz (%d, %u)", c.cores, c.m3_khz);
     run(&c, &in, 10250, 60000, 0);
     CHECK(c.m3_khz == 1794000, "High: the M3s at 1794 MHz after the ramp (%u)", c.m3_khz);
+
+    /* Extreme (0.6.1): flat out: every worker, the A55 table's top, the M3s at 1794 MHz at once; no shedding at the
+     * band, the skin, a hot SoC, the sag or the soft current; no timer; the stops: 55 C battery, 110 C SoC */
+    heat_ctl_init(&c, 0);
+    in = base_in(0);
+    CHECK(heat_ctl_request(&c, HEAT_EXTREME, 30, &in) == 0 && c.a55_khz == 1950000, "Extreme: the A55s at 1950 MHz");
+    run(&c, &in, 0, 10000, 0);
+    CHECK(c.cores == 7 && c.m3_khz == 1794000, "Extreme: 7 workers, the M3s at 1794 MHz at once (%d, %u)", c.cores, c.m3_khz);
+    in.bat_c10 = 520; in.skin_c10 = 490; in.soc_c10 = 1000; in.mv = 3500; in.ma = -3300;
+    run(&c, &in, 10250, 120000, 0);
+    CHECK(c.state == HEAT_ST_RUNNING && c.cores == 7, "Extreme: no regulation at 52 C battery, 49 C skin, 100 C SoC, "
+          "sag and 3.3 A (state %d, cores %d, why \"%s\")", c.state, c.cores, c.why);
+    run(&c, &in, 130250, 3600000, 0);
+    CHECK(c.state == HEAT_ST_RUNNING, "Extreme: no timer (still running after an hour)");
+    in.bat_c10 = 550;
+    run(&c, &in, 3730250, 1000, 0);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "55"), "Extreme: stops at 55 C battery (\"%s\")", c.why);
+    in = base_in(0); in.bat_c10 = 450; in.usb_c10 = 450; in.chg_c10 = 450;
+    heat_ctl_init(&c, 0);
+    CHECK(heat_ctl_request(&c, HEAT_EXTREME, 30, &in) == 0, "Extreme starts at 45 C battery (Low would not)");
+    in.soc_c10 = 1100;
+    run(&c, &in, 0, 1000, 0);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "110"), "Extreme: stops at 110 C inside (\"%s\")", c.why);
+    in = base_in(0); in.pct = 39; refuse(in, HEAT_EXTREME, "39 % for Extreme");
+    in = base_in(0); in.bat_c10 = 500; refuse(in, HEAT_EXTREME, "the battery is 50 C for Extreme");
+    /* Manual: the picked steps */
+    heat_ctl_init(&c, 0);
+    in = base_in(0);
+    c.man_a55 = 1248000; c.man_m3 = 1066000;
+    CHECK(heat_ctl_request(&c, HEAT_MANUAL, 0, &in) == 0 && c.a55_khz == 1248000, "Manual: the A55 step picked");
+    run(&c, &in, 0, 10000, 0);
+    CHECK(c.cores == 7 && c.m3_khz == 1066000, "Manual: the M3 step picked (%u)", c.m3_khz);
+    in.skin_c10 = 470;
+    run(&c, &in, 10250, 5000, 0);
+    CHECK(c.state == HEAT_ST_RUNNING && c.cores == 7, "Manual: no skin stop or regulation");
 
     /* the battery band: cores come off at 40 C, never all at once */
     heat_ctl_init(&c, 0);

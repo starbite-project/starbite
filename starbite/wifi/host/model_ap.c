@@ -21,7 +21,7 @@ static const uint8_t gtk[16] = { 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
 
 static struct {
     uint8_t pmk[32], anonce[32], snonce[32], sta[6], ptk[48], wpaie[64], gtk2[16];
-    unsigned wpaie_len, wsec, wpa_auth, sup_wpa, step;
+    unsigned wpaie_len, wsec, wpa_auth, sup_wpa, step, pm;
     int joined;
 } A;
 
@@ -435,6 +435,14 @@ void model_ap_reset(void)
                  (unsigned)strlen(ap_ssid), A.pmk);
 }
 
+/* the phone firmware's defaults (Starbite OS 0.6 tour): its own supplicant on, power save on */
+void model_ap_real_defaults(void)
+{
+    M.real_defaults = 1;
+    A.sup_wpa = 1;
+    A.pm = 2;
+}
+
 /* a directed escan's result: one BSS of this name with an RSN element (WPA2-PSK, CCMP) */
 unsigned model_ap_scan_result(uint8_t *r, unsigned cap, uint16_t sync)
 {
@@ -470,7 +478,7 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
                    uint16_t *status)
 {
     if (cmd == BCMW_C_GET_VAR && !strcmp(name, "cap")) {
-        const char *c = M.fwsup ? "ap sta wme 802.11d 802.11h rm cqa cac dualband ampdu idsup sup_wpa" :
+        const char *c = M.fwsup || M.real_defaults ? "ap sta wme 802.11d 802.11h rm cqa cac dualband ampdu idsup sup_wpa" :
                                   "ap sta wme 802.11d 802.11h rm cqa cac dualband ampdu";
         memcpy(out, c, strlen(c) + 1);
         *rlen = (uint16_t)(strlen(c) + 1);
@@ -483,7 +491,7 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
         if (!strcmp(name, "wpa_auth"))
             return A.wpa_auth = v, 1;
         if (!strcmp(name, "sup_wpa")) {
-            if (!M.fwsup)                   /* a firmware without its own supplicant does not know it */
+            if (!M.fwsup && !M.real_defaults)   /* a firmware without its own supplicant does not know it */
                 return *status = (uint16_t)-23, 1;
             return A.sup_wpa = v, 1;
         }
@@ -512,6 +520,15 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
     }
     if (cmd == BCMW_C_SET_INFRA || cmd == BCMW_C_SET_AUTH)
         return 1;
+    if (cmd == BCMW_C_GET_PM) {
+        out[0] = (uint8_t)A.pm, out[1] = out[2] = out[3] = 0;
+        *rlen = 4;
+        return 1;
+    }
+    if (cmd == BCMW_C_SET_PM) {
+        A.pm = dlen >= 4 ? data[0] : A.pm;
+        return 1;
+    }
     if (cmd == 52) {                        /* DISASSOC: brcmf_scb_val_le, 12 bytes */
         if (dlen != 12)
             M.ap_errors |= 128;
@@ -530,7 +547,7 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
             memcmp(data + 36, ap_bssid, 6))
             *status = (uint16_t)-1;
         else if (M.open_ap ? (A.wsec != 0 || A.wpa_auth != 0) :
-                             (A.wsec != 4 || A.wpa_auth != 0x80 || (A.sup_wpa != (M.fwsup ? 1u : 0u))))
+                             (A.wsec != 4 || A.wpa_auth != 0x80 || (!M.real_defaults && A.sup_wpa != (M.fwsup ? 1u : 0u))))
             M.ap_errors |= 64;          /* the security settings */
         else
             A.joined = 1;
@@ -553,6 +570,8 @@ void model_ap_after(uint32_t cmd)
         return;                         /* open: associated is joined */
     if (M.fwsup)
         model_event(46, M.pmk_ok ? 6 : 4, 0, M.pmk_ok ? 0 : 14, 0, 0);    /* keyed, or a MIC failure */
+    else if (M.real_defaults && (A.sup_wpa || A.pm))
+        M.m1_withheld++;                /* the firmware's supplicant keeps it, or the AP holds it for a dozing station */
     else
         message1();
 }

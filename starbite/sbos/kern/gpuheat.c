@@ -24,7 +24,8 @@
 #define VA(o) (SB_GPU_VA + (uint64_t)(o))
 
 int gpu_heat_allowed;                       /* Settings, after its confirmation (until a restart) */
-int gpu_heat_session;                       /* 0.6: this Extreme session (its own confirmation names the GPU) */
+int gpu_heat_session;
+uint32_t gpuheat_khz = 572000U;            /* the GPU's table step for this session (Manual picks it) */                       /* 0.6: this Extreme session (its own confirmation names the GPU) */
 static struct sb_auth au;
 static int on, failed_session;
 static uint8_t buck_was;
@@ -177,7 +178,7 @@ int gpuheat_start(void)
         return 0;
     }
     uint8_t chk = 0;
-    if (hw_dvfs(DVFS_GPU, 572000)) {
+    if (hw_dvfs(DVFS_GPU, sb_dvfs_level_listed(4, gpuheat_khz) ? gpuheat_khz : 572000U)) {
         sb_mdelay(2);
         mhz = (unsigned)(sb_gpu_hz(&off) / 1000000U);
     } else {

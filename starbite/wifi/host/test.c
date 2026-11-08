@@ -679,6 +679,8 @@ static void run_bringup(int dma_idx)
         int jr;
         uint8_t ip[60];
         M.fwsup = dma_idx;
+        if (!dma_idx)
+            model_ap_real_defaults();   /* as the phone's firmware: sup_wpa 1 and PM 2 until the host turns them off */
         jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "wrong passphrase!", 2000);
         if (dma_idx)
             CHECK(jr != BCMW_OK && !M.pmk_ok, "the firmware's supplicant: a wrong passphrase gives a wrong PMK");
@@ -692,6 +694,7 @@ static void run_bringup(int dma_idx)
         jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "correct horse", 0);
         CHECK(jr == BCMW_OK && bcmw_link_up(w), "joining the model's network (%s): %d", dma_idx ? "the firmware's supplicant" : "the host's handshake", jr);
         CHECK(M.ap_errors == 0, "the access point found faults %x", M.ap_errors);
+        CHECK(M.m1_withheld == 0, "message 1 withheld %u times (the firmware's supplicant or power save left on)", M.m1_withheld);
         if (dma_idx)
             CHECK(M.pmk_ok, "the PMK given to the firmware is the network's");
         else

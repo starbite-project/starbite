@@ -19,6 +19,10 @@ struct model {
     int start_fw, fw_running, offer_dma_idx, up, scan_v2, hold_answer, release_answer, bad_console, phy_powered_down;
     /* the access point (model_ap.c) */
     int fwsup, handshake_done, pmk_ok;
+    /* the phone's firmware (Starbite OS 0.6 tour): it has its own supplicant (cap "idsup"), sup_wpa 1 and power save
+     * on by default; then the AP's handshake message 1 never reaches the host (W2d / W2f on Windows) */
+    int real_defaults;
+    unsigned m1_withheld;
     unsigned tx_seen, tx_ip, ap_errors, keys_ok, flow_created, disassoc, rekey_answered;
     unsigned watchdog_resets, boots, doorbells, hostready, ioctls, badoption;
     unsigned fw_errors;                 /* bits: what the model's firmware found wrong */
@@ -57,4 +61,5 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
                    uint16_t *status);
 void model_ap_after(uint32_t cmd);
 
+void model_ap_real_defaults(void);
 #endif

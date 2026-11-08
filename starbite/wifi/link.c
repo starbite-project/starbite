@@ -464,7 +464,7 @@ static int scan_for(struct bcmw *w)
     return BCMW_OK;
 }
 
-int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char *pass, unsigned timeout_ms)
+int bcmw_join_start(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char *pass, unsigned timeout_ms)
 {
     unsigned pass_len = bcmw_strlen(pass);
     uint8_t j[48];
@@ -551,6 +551,12 @@ int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char
             e = bcmw_ioctl(w, 0, BCMW_C_SET_WSEC_PMK, pmk, sizeof(pmk), 1, &fwerr);
             bcmw_memset(pmk, 0, sizeof(pmk));
         } else if (e == BCMW_OK) {
+            /* the host's handshake: the firmware's own supplicant off, as bcmw_connect does (Starbite OS 0.6 tour:
+             * associated, then no message 1 and the AP dropped the link; W2d saw the same on Windows). A firmware
+             * without one refuses: fine. */
+            int sup = bcmw_iovar_set_u32(w, "sup_wpa", 0);
+            bcmw_sayx(w, "link: sup_wpa 0 (the host's handshake): ", sup == BCMW_OK ? 0 : 0xffffffffu,
+                      sup == BCMW_OK ? " (set)" : " (refused: no firmware supplicant)");
             bcmw_rsn_ours(w->rsn_ours, w->join_group);
             e = bcmw_iovar_set(w, "wpaie", w->rsn_ours, BCMW_RSN_OURS, &fwerr);
             bcmw_memcpy(w->wpa.own, w->info.mac, 6);
@@ -564,45 +570,29 @@ int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char
         bcmw_sayx(w, "link: the firmware refused the security settings; its error ", (uint32_t)fwerr, NULL);
         goto out;
     }
+    {
+        /* power save off for the join and the handshake, as bcmw_connect and bcmdhd do: an AP holds unicast frames
+         * (handshake message 1, DHCP) for a station it believes asleep (W2f) */
+        uint32_t pm = 0xffffffffu, off = 0;
+        int ge = bcmw_ioctl(w, 0, BCMW_C_GET_PM, &pm, 4, 0, &fwerr);
+        int se = bcmw_ioctl(w, 0, BCMW_C_SET_PM, &off, 4, 1, &fwerr);
+        bcmw_sayx(w, "link: power save before the join ", ge == BCMW_OK ? pm : 0xffffffffu,
+                  se == BCMW_OK ? "; now 0 (off: constantly awake)" : "; setting 0 REFUSED");
+    }
     /* WLC_SET_SSID: brcmf_join_params = the name (4 + 32), then the BSSID and no channel list */
     bcmw_memset(j, 0, sizeof(j));
     put32(j, ssid_len);
     bcmw_memcpy(j + 4, ssid, ssid_len);
     bcmw_memcpy(j + 36, w->join_bssid, 6);
     w->join_phase = 2;
-    t0 = bcmw_now(w);
+    w->join_t0 = t0 = bcmw_now(w);
+    w->join_timeout_us = (uint64_t)(timeout_ms ? timeout_ms : 15000) * 1000;
+    (void)t0;
     if ((e = bcmw_ioctl(w, 0, BCMW_C_SET_SSID, j, sizeof(j), 1, &fwerr)) != BCMW_OK) {
         bcmw_sayx(w, "link: SET_SSID refused; the firmware's error ", (uint32_t)fwerr, NULL);
         goto out;
     }
-    while (w->join_phase == 2 && !w->dead) {
-        mb_process(w);
-        send_eapol(w);
-        if (w->keys_due)
-            install_keys(w);
-        if (w->link_up && (w->join_open || w->keyed)) {
-            w->join_phase = 3;
-            break;
-        }
-        if (bcmw_now(w) - t0 > (uint64_t)(timeout_ms ? timeout_ms : 15000) * 1000) {
-            bcmw_say(w, w->link_up ? "link: TIMEOUT: associated, but the handshake did not finish"
-                                   : "link: TIMEOUT: not associated");
-            e = BCMW_E_TIMEOUT;
-            goto out;
-        }
-        bcmw_udelay(w, 500);
-    }
-    if (w->join_phase != 3) {
-        e = BCMW_E_FW;
-        goto out;
-    }
-    lb_init(&l);
-    lb_s(&l, "link: THE NETWORK IS JOINED, ");
-    lb_dec(&l, (bcmw_now(w) - t0) / 1000);
-    lb_s(&l, " ms after SET_SSID");
-    bcmw_say_lb(w, &l);
-    bcmw_memset(w->wpa.pmk, 0, sizeof(w->wpa.pmk));
-    return BCMW_OK;
+    return BCMW_OK;                     /* the PMK stays for the handshake (bcmw_join_poll wipes it) */
 out:
     if (w->join_phase != 3) {
         if (w->join_phase == 2 || w->join_phase == -1)
@@ -610,6 +600,61 @@ out:
         w->join_phase = 0;
     }
     bcmw_memset(w->wpa.pmk, 0, sizeof(w->wpa.pmk));
+    return e;
+}
+
+int bcmw_join_poll(struct bcmw *w)
+{
+    struct bcmw_lb l;
+    int e;
+    if (w->join_phase == 3)
+        return BCMW_OK;
+    if (w->join_phase != 2 || w->dead) {
+        e = w->dead ? BCMW_E_NODEV : BCMW_E_STATE;
+        goto out;
+    }
+    mb_process(w);
+    send_eapol(w);
+    if (w->keys_due)
+        install_keys(w);
+    if (w->join_phase == 2 && w->link_up && (w->join_open || w->keyed)) {
+        w->join_phase = 3;
+        lb_init(&l);
+        lb_s(&l, "link: THE NETWORK IS JOINED, ");
+        lb_dec(&l, (bcmw_now(w) - w->join_t0) / 1000);
+        lb_s(&l, " ms after SET_SSID");
+        bcmw_say_lb(w, &l);
+        bcmw_memset(w->wpa.pmk, 0, sizeof(w->wpa.pmk));
+        return BCMW_OK;
+    }
+    if (w->join_phase != 2) {
+        e = BCMW_E_FW;
+        goto out;
+    }
+    if (bcmw_now(w) - w->join_t0 > w->join_timeout_us) {
+        bcmw_say(w, w->link_up ? "link: TIMEOUT: associated, but the handshake did not finish"
+                               : "link: TIMEOUT: not associated");
+        e = BCMW_E_TIMEOUT;
+        goto out;
+    }
+    return BCMW_E_PENDING;
+out:
+    if (w->join_phase != 3) {
+        if (w->join_phase == 2 || w->join_phase == -1)
+            bcmw_leave(w);
+        w->join_phase = 0;
+    }
+    bcmw_memset(w->wpa.pmk, 0, sizeof(w->wpa.pmk));
+    return e;
+}
+
+int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char *pass, unsigned timeout_ms)
+{
+    int e = bcmw_join_start(w, ssid, ssid_len, pass, timeout_ms);
+    if (e != BCMW_OK)
+        return e;
+    while ((e = bcmw_join_poll(w)) == BCMW_E_PENDING)
+        bcmw_udelay(w, 500);
     return e;
 }
 

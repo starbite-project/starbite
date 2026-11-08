@@ -302,6 +302,7 @@ struct bcmw {
     int scan_v2;                    /* the firmware answered scan_ver: v2 escan parameters */
     int scan_running;               /* step 10's escan has not ended yet */
     int join_phase;                 /* 0 idle, 1 scanning, 2 joining, 3 joined, -1 failed */
+    uint64_t join_t0, join_timeout_us;  /* bcmw_join_start / bcmw_join_poll: SET_SSID's time, the limit */
     int join_open, join_fwsup, join_found, join_scan_done, link_up, keyed, keys_due;
     unsigned join_unsuitable, join_group;
     int join_rssi;

@@ -149,6 +149,8 @@ void sb_main(void)
     heater_init();
     sos_init();
     settings_restore();                     /* after power_init: the screen-off time it restores re-arms the timer */
+    if (look_emergency && !sbos_selftest_enabled)
+        panel_emergency(1);                 /* 0.6.1: the saved Emergency Mode's power profile (not in the self test) */
 #ifdef SB_HOST
     look_emergency = getenv("SBOS_HOST_NORMAL") ? 0 : 1;   /* the host tests' layout (Emergency Mode) unless asked */
 #endif

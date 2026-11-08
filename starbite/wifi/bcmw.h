@@ -179,6 +179,12 @@ int bcmw_tx(struct bcmw *w, const uint8_t *frame, uint32_t len);
  * the name, joins the strongest suitable access point, does the handshake (the firmware's if it has one, else
  * the host's), installs the keys. timeout_ms 0: 15 s. The passphrase and keys are never logged. */
 int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char *pass, unsigned timeout_ms);
+/* The same in two parts, for a caller that must not block (Starbite OS): _start scans for the name, makes the PMK and
+ * sends SET_SSID (a few seconds at most); _poll does one round of the handshake: BCMW_OK joined, BCMW_E_PENDING not
+ * yet (call again), any other BCMW_E_* failed (the join is left). The passphrase is not kept after _start. */
+#define BCMW_E_PENDING  -9
+int bcmw_join_start(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char *pass, unsigned timeout_ms);
+int bcmw_join_poll(struct bcmw *w);
 int bcmw_leave(struct bcmw *w);
 int bcmw_link_up(const struct bcmw *w);
 

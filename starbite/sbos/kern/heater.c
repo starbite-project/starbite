@@ -647,7 +647,7 @@ void heater_timer(unsigned id)
         /* the GPU on High: on once 3 workers run, off only when the load stops (holding, paused, a stop), so the
          * regulation's core-by-core steps do not switch vdd_g3d up and down */
         extreme_extras(ctl.level == HEAT_EXTREME && heater_running_ui());
-        if (((ctl.level == HEAT_HIGH && gpu_heat_allowed) || (ctl.level == HEAT_EXTREME && gpu_heat_session)) &&
+        if (((ctl.level == HEAT_HIGH && gpu_heat_allowed) || (ctl.level >= HEAT_EXTREME && gpu_heat_session)) &&
             ctl.state == HEAT_ST_RUNNING) {
             if (!gpuheat_on() && cores_running() - cpu0_on >= 3)
                 (void)gpuheat_start();
@@ -717,6 +717,9 @@ static void start_now(void)
     ui_mark_dirty();
 }
 
+/* Manual (0.6.1): the picked ACPM steps (kHz; 0 = the top normal step; GPU 0 = not used) */
+uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;
+
 static void extreme_confirm_done(int ok)
 {
     if (!ok) {
@@ -727,8 +730,18 @@ static void extreme_confirm_done(int ok)
     }
     confirmed = 1;
     K.heat_confirmed = 1;
-    gpu_heat_session = 1;                   /* this confirmation named the GPU */
-    sb_log("heater: Extreme confirmed (CPU, GPU, panel, LED within their ratings)");
+    if (pending_level == HEAT_MANUAL) {
+        ctl.man_a55 = heat_man_a55;
+        ctl.man_m3 = heat_man_m3;
+        gpuheat_khz = heat_man_gpu ? heat_man_gpu : 572000U;
+        gpu_heat_session = heat_man_gpu != 0;
+        sb_log("heater: Manual confirmed (the picked table steps, flat out)");
+    } else {
+        ctl.man_a55 = ctl.man_m3 = 0;
+        gpuheat_khz = 572000U;
+        gpu_heat_session = 1;               /* this confirmation named the GPU */
+        sb_log("heater: Extreme confirmed (every core, the GPU, the panel and the LED at their top table steps)");
+    }
     start_now();
     if (!heater_running_ui())
         gpu_heat_session = 0;               /* refused: no session to cover */
@@ -760,7 +773,7 @@ int heater_request(int level, int minutes)
         }
         return 0;
     }
-    if (level > HEAT_EXTREME)
+    if (level > HEAT_MANUAL)
         return SBOS_EINVAL;
     if (wifi_on() && !heater_running_ui()) {
         sb_strcpy(ctl.why, sizeof(ctl.why), "Turn Wi-Fi off first (0.4: not both at once)");
@@ -768,18 +781,27 @@ int heater_request(int level, int minutes)
         sb_log("heater: refused: Wi-Fi is on");
         return SBOS_EAGAIN;
     }
-    if (heater_running_ui() && level == HEAT_EXTREME && ctl.level != HEAT_EXTREME) {
-        heater_request(0, 0);               /* to Extreme from a running level: stop, then ask (its own confirmation) */
+    if (heater_running_ui() && (level >= HEAT_EXTREME || ctl.level >= HEAT_EXTREME) && level != ctl.level) {
+        heater_request(0, 0);               /* to or from Extreme / Manual: stop, then start anew (its own rules) */
+        if (level < HEAT_EXTREME)
+            return SBOS_EAGAIN;             /* the old session is stopping: ask again in a moment */
     }
-    if (level == HEAT_EXTREME && !heater_running_ui()) {
+    if (level >= HEAT_EXTREME && !heater_running_ui()) {
         pending_level = level;
         pending_minutes = minutes;
         ctl.state = HEAT_ST_CONFIRM;
-        kui_confirm("Extreme heat?",
-                    "Every processor core, the graphics processor and the screen at their top rated levels.",
-                    "It stops by itself at 45 \xc2\xb0" "C battery, 46 \xc2\xb0" "C on the back, 85 \xc2\xb0" "C inside or 15 % battery.",
-                    "The phone gets hot quickly: hold it only through a pocket or a glove. About 2 % a minute.",
-                    "Hold for Extreme", extreme_confirm_done);
+        if (level == HEAT_EXTREME)
+            kui_confirm("Extreme heat?",
+                        "Every processor core at its top table step, the graphics processor, the screen at its top level and the LED.",
+                        "No regulation: it stays flat out until you stop it. It stops only at 55 \xc2\xb0" "C battery, 110 \xc2\xb0" "C inside, 15 % battery or a sensor fault.",
+                        "It gets hot quickly, also on the back: hold it only through a pocket or a glove. About 2 % a minute.",
+                        "Hold for Extreme", extreme_confirm_done);
+        else
+            kui_confirm("Manual heat?",
+                        "The clocks you picked for the small cores, the big cores and the graphics processor, flat out.",
+                        "No regulation: it runs until you stop it. It stops only at 55 \xc2\xb0" "C battery, 110 \xc2\xb0" "C inside, 15 % battery or a sensor fault.",
+                        "It gets hot quickly, also on the back: hold it only through a pocket or a glove.",
+                        "Hold for Manual", extreme_confirm_done);
         return 0;
     }
     if (heater_running_ui()) {
@@ -856,11 +878,13 @@ void heater_status(struct sbos_heat *h)
         h->soc_c10 = heater_sensor(3);
     }
     uint64_t now = sb_ms();
-    h->secs_left = heater_running_ui() && ctl.t_end > now ? (int32_t)((ctl.t_end - now) / 1000U) : 0;
+    h->secs_left = heater_running_ui() && ctl.level < HEAT_EXTREME && ctl.t_end > now ? (int32_t)((ctl.t_end - now) / 1000U) : 0;
     h->secs_run = heater_running_ui() ? (int32_t)((now - ctl.t_start) / 1000U) : 0;
     h->a55_mhz = (int32_t)(hw_a55_khz() / 1000U);
     h->m3_mhz = (int32_t)(hw_m3_khz() / 1000U);
     sb_strcpy(h->why, sizeof(h->why), ctl.why);
+    h->skin_c10 = last_in.skin_ok && heater_running_ui() ? last_in.skin_c10 : -1000;
+    h->gpu_mhz = (int32_t)gpuheat_mhz();
 }
 
 void heater_init(void)

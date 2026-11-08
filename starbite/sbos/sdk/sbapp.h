@@ -111,7 +111,8 @@ struct sbos_estimate {
     int32_t now_ma, screen_off_ma;
 };
 
-enum { HEAT_OFF = 0, HEAT_LOW, HEAT_MEDIUM, HEAT_HIGH, HEAT_EXTREME /* 0.6: everything at its rated top */ };
+enum { HEAT_OFF = 0, HEAT_LOW, HEAT_MEDIUM, HEAT_HIGH, HEAT_EXTREME /* 0.6: everything at its rated top */,
+       HEAT_MANUAL /* 0.6.1: the clocks picked per cluster, flat out as Extreme */ };
 enum {
     HEAT_ST_OFF = 0, HEAT_ST_RUNNING, HEAT_ST_HOLDING, /* at the target temperature, load paused */
     HEAT_ST_PAUSED,             /* a charger is connected */
@@ -125,6 +126,7 @@ struct sbos_heat {
     int32_t secs_left, secs_run;
     int32_t a55_mhz, m3_mhz;
     char why[64];
+    int32_t skin_c10, gpu_mhz;  /* 0.6.1: the back of the phone (-1000 unknown); the GPU's clock while it heats */
 };
 
 enum { SOS_OFF = 0, SOS_FLASH = 1 };
@@ -165,7 +167,9 @@ struct sbos_wifi {
 enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S = 4, SET_GPU_HEAT = 5,
        SET_BRIGHTNESS = 6 /* 0.3: 0 as the boot left it, 1 low, 2 medium, 3 normal, 4 high */,
        SET_SAVED = 7 /* 0.3.1, read only: 1 settings are saved across a restart on this phone */,
-       SET_AUTO_OFF_MIN = 8 /* 0.3.2: switch off after this many minutes with the screen off: 0 never, 5, 15, 60 */ };
+       SET_AUTO_OFF_MIN = 8 /* 0.3.2: switch off after this many minutes with the screen off: 0 never, 5, 15, 60 */,
+       SET_HEAT_MAN_A55 = 9, SET_HEAT_MAN_M3 = 10, SET_HEAT_MAN_GPU = 11 /* 0.6.1: Manual's ACPM steps in kHz (a table
+       step; A55/M3 0 = the top normal step, GPU 0 = not used); until a restart */ };
 
 /* sensor_read ids (0.3): temperatures in 0.1 C, -1000 unknown */
 enum { SENSOR_BATTERY_C10 = 1, SENSOR_SKIN_C10 = 2, SENSOR_SOC_C10 = 3, SENSOR_GPU_C10 = 4 };

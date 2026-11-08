@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.6"
+#define SBOS_VERSION "0.6.1"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -65,8 +65,11 @@ struct heat_limits {
     int soft_ma, hard_ma;           /* |current|: 3200 a core off, 3500 stop */
     int soft_sag_mv, cold_sag_mv;   /* VCELL below its resting value: 300 a core off, 150 the cold limit */
     int min_mv;                     /* stop below (3450) */
-    int min_pct[5];                 /* per level to start */
-    int ext_band_bat_c10, ext_hard_bat_c10, ext_soft_soc_c10;   /* Extreme (0.6): 43, 45, 78 C */
+    int min_pct[6];                 /* per level to start */
+    /* Extreme and Manual (0.6.1): no regulation, everything flat out until the user stops it; the stops left: the
+     * battery (55 C, its safety), the SoC just below its 115 C hardware trip (a clean stop instead of a reset), the
+     * sensors' integrity, a core fault, the 15 % reserve, the voltage floor and the current limit */
+    int ext_hard_bat_c10, ext_hard_soc_c10, ext_start_bat_max_c10;     /* 55, 110, 50 C */
     int stop_pct;                   /* stop below (15) */
     unsigned blind_ms;              /* no valid battery or SoC sample this long: stop (3000) */
     unsigned stuck_ms;              /* the same battery raw value this long while the SoC moved 5 C (60000) */
@@ -93,6 +96,7 @@ struct heat_ctl {
     int state, level, minutes;
     int cores, max_cores;           /* worker cores wanted now / for the level (A55 1-3, then M3 4-7) */
     uint32_t a55_khz, m3_khz;       /* clocks wanted (0: leave / restore) */
+    uint32_t man_a55, man_m3;       /* Manual (0.6.1): the picked steps (0: the top normal step) */
     int cold;
     uint64_t t_start, t_end, t_step, t_ramp, last_bat_ok, last_soc_ok;
     int rest_mv;
@@ -132,6 +136,8 @@ unsigned heatk_mixed(struct heatk_cfg *c, unsigned w, uint64_t it);
 int heater_cpu0_active(void);
 /* the GPU's share on High (gpuheat.c), off until Settings allows it */
 extern int gpu_heat_allowed;
+extern uint32_t gpuheat_khz;        /* 0.6.1: the GPU's table step for the session */
+extern uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;    /* 0.6.1: Manual's picks (kHz) */
 extern int gpu_heat_session;        /* 0.6: Extreme's own confirmation allows the GPU for that session */
 int gpuheat_start(void);
 void gpuheat_tick(void);
@@ -238,6 +244,7 @@ unsigned panel_dcs_failures(void);
 extern int panel_bright_level;
 int panel_brightness(int level);    /* the user's level: 0 untouched, 1..4 low..high: 1 done */
 void panel_boost(int who, int on);  /* 1 Extreme, 2 SOS: the top level while any asks */
+void panel_emergency(int on);       /* 0.6.1: Emergency Mode's power profile */
 /* files on the card, read only (files.c) */
 int kfile_read(const char *path, void *dst, uint32_t cap);
 extern int sos_led_on;              /* settings: the LED flashes with SOS */

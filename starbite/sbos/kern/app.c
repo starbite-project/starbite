@@ -464,6 +464,21 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         if (!K.screen_on && auto_off_min)
             kt_set(KT_POWER, 2, sb_ms(), auto_off_min * 60000U, 0);
         return 0;
+    case SET_HEAT_MAN_A55:
+    case SET_HEAT_MAN_M3:
+    case SET_HEAT_MAN_GPU: {
+        uint32_t dom = arg[0] == SET_HEAT_MAN_A55 ? 2U : arg[0] == SET_HEAT_MAN_M3 ? 3U : 4U;
+        if (arg[1] != 0 && !sb_dvfs_level_listed(dom, (uint32_t)arg[1]))
+            return SBOS_EINVAL;             /* only the vendor table's steps */
+        if (arg[0] == SET_HEAT_MAN_A55)
+            heat_man_a55 = (uint32_t)arg[1];
+        else if (arg[0] == SET_HEAT_MAN_M3)
+            heat_man_m3 = (uint32_t)arg[1];
+        else
+            heat_man_gpu = (uint32_t)arg[1];
+        sb_logx("settings: Manual heat step (kHz): ", arg[1]);
+        return 0;
+    }
     case SET_BRIGHTNESS:
         if (arg[1] > 4)
             return SBOS_EINVAL;
@@ -762,6 +777,9 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_GPU_HEAT: return gpu_heat_allowed;
         case SET_SCREEN_OFF_S: return (int64_t)K.screen_off_s;
         case SET_BRIGHTNESS: return panel_bright_level;
+        case SET_HEAT_MAN_A55: return heat_man_a55;
+        case SET_HEAT_MAN_M3: return heat_man_m3;
+        case SET_HEAT_MAN_GPU: return heat_man_gpu;
         case SET_SAVED: return settings_persistent();
         case SET_AUTO_OFF_MIN: return (int64_t)auto_off_min;
         default: return SBOS_EINVAL;

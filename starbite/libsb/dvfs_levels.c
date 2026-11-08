@@ -4,9 +4,12 @@
 #include "sb.h"
 
 /* Starbite OS's listed levels (docs/STARBITE-OS.md 8.3): the vendor tables' levels (DT cpufreq domain@0
- * mif-perf table for the A55, the big cluster's table for the M3; 1898 / 1950 MHz A55 and every M3 level
- * above the all-core 1794 MHz left out on purpose). */
-static const uint32_t lv_a55[] = { 455000, 598000, 715000, 832000, 949000, 1053000, 1248000, 1456000, 1690000, 1794000 };
+ * mif-perf table for the A55, the big cluster's table for the M3). 0.6.1: the A55 table's top two (1898, 1950 MHz)
+ * for Extreme and Manual: normal table steps, no policy cap in the DT. Every M3 level above 1794 MHz stays out:
+ * the DT's exynos-ocp node allows them only with Samsung's over-current handler running (max-freq-wo-ocp 1794 MHz),
+ * which Starbite does not have yet. */
+static const uint32_t lv_a55[] = { 455000, 598000, 715000, 832000, 949000, 1053000, 1248000, 1456000, 1690000, 1794000,
+                                   1898000, 1950000 };
 static const uint32_t lv_m3[] = { 650000, 741000, 858000, 962000, 1066000, 1170000, 1261000, 1469000, 1586000,
                                   1690000, 1794000 };
 
