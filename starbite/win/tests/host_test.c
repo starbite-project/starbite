@@ -460,6 +460,67 @@ static void test_display(void)
         free(big_dst);
     }
 
+    /* T9: every mode scale x every rotation against a reference built from Microsoft's KMDOD maps
+     * (ROTATE90: presented (sx, sy) -> mode (sy, H-1-sx); ROTATE270: -> (W-1-sy, sx)), whole frame and one
+     * rectangle (only its pixels written) */
+    {
+        static const unsigned sc[3][4] = { { 16, 24, 1, 0 }, { 12, 18, 3, 2 }, { 8, 12, 1, 1 } };
+        static uint32_t src[24 * 24], mode[24 * 24], dst[16 * 24], ref[16 * 24];
+        int bad = 0, cases = 0;
+        for (int m = 0; m < 3; ++m)
+            for (unsigned rot = 1; rot <= 4; ++rot) {
+                struct sbdc_xf xf = { sc[m][0], sc[m][1], 16, 24, rot, sc[m][2], sc[m][3] };
+                unsigned sw, sh, W = xf.lw, H = xf.lh;
+                sbdc_xf_src_size(&xf, &sw, &sh);
+                for (int pass = 0; pass < 2; ++pass) {
+                    struct sbdc_rect rr = pass ? (struct sbdc_rect){ 1, 2, (int)sw - 2, (int)sh / 2 }
+                                               : (struct sbdc_rect){ -3, -1, (int)sw + 5, (int)sh + 2 };
+                    for (unsigned i = 0; i < sw * sh; ++i)
+                        src[i] = 0x01000000u + i;
+                    for (unsigned sy = 0; sy < sh; ++sy)
+                        for (unsigned sx = 0; sx < sw; ++sx) {
+                            unsigned lx, ly;
+                            int in = (int)sx >= rr.l && (int)sx < rr.r && (int)sy >= rr.t && (int)sy < rr.b;
+                            switch (rot) {
+                            case 2: lx = sy; ly = H - 1 - sx; break;
+                            case 3: lx = W - 1 - sx; ly = H - 1 - sy; break;
+                            case 4: lx = W - 1 - sy; ly = sx; break;
+                            default: lx = sx; ly = sy; break;
+                            }
+                            mode[ly * W + lx] = in ? src[sy * sw + sx] : 0xdeadbeef;
+                        }
+                    for (unsigned Y = 0; Y < 24; ++Y)
+                        for (unsigned X = 0; X < 16; ++X)
+                            ref[Y * 16 + X] = mode[(Y * H / 24) * W + X * W / 16];
+                    for (int i = 0; i < 16 * 24; ++i)
+                        dst[i] = 0xdeadbeef;
+                    sbdc_blit_xf((uint8_t *)dst, 16 * 4, (const uint8_t *)src, sw * 4, rr, &xf);
+                    cases++;
+                    if (memcmp(dst, ref, sizeof(dst))) {
+                        bad++;
+                        printf("  xf mismatch: mode %d rot %u pass %d\n", m, rot, pass);
+                    }
+                }
+            }
+        CHECK(!bad, "rotation x scale: %d/%d cases match the KMDOD reference", cases - bad, cases);
+        /* the real sizes: 1080 x 2220 landscape (presented 2220 x 1080) fills 1440 x 2960 exactly */
+        {
+            struct sbdc_xf xf = { 1080, 2220, 1440, 2960, SBDC_ROT_90, 3, 2 };
+            unsigned sw, sh;
+            uint32_t *bs = malloc(2220 * 1080 * 4), *bd = malloc(1440 * 2960 * 4);
+            sbdc_xf_src_size(&xf, &sw, &sh);
+            for (unsigned i = 0; i < sw * sh; ++i)
+                bs[i] = i;
+            memset(bd, 0, 1440 * 2960 * 4);
+            sbdc_blit_xf((uint8_t *)bd, 1440 * 4, (const uint8_t *)bs, sw * 4, (struct sbdc_rect){ 0, 0, (int)sw, (int)sh }, &xf);
+            /* panel top-left = mode (0,0) = presented (sx = H-1, sy = 0); bottom-right = presented (0, 1079) */
+            CHECK(sw == 2220 && sh == 1080 && bd[0] == 2219 && bd[1440 * 2960 - 1] == 1079u * 2220,
+                  "1080x2220 rotated 90 -> 1440x2960 corners");
+            free(bs);
+            free(bd);
+        }
+    }
+
     /* brightness */
     CHECK(sbdc_level_to_aor(100) == 0x000c, "100 -> 0x000c");
     CHECK(sbdc_level_to_aor(64) == 0x0440, "64 -> S-Boot normal");

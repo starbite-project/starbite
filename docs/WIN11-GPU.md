@@ -425,6 +425,38 @@ Windows' "turn off display" → `DxgkDdiSetPowerState` on the monitor child. Fir
 frame only (no DCS). Panel display-off/sleep (DCS 0x28 / 0x10, proven on Linux with a 120 ms wake delay)
 comes later behind a registry switch, since a panel that does not wake stays dark until reboot.
 
+### 7.5b T9: resolutions and rotation (as built, 2026-11-08; not yet run on the phone)
+
+- **Modes** (Settings → Display → Display resolution): 1440 × 2960 (native), **1080 × 2220 (preferred = the
+  default)** and 720 × 1480 (T7's mode). Each fills the whole panel: the present scales Windows' image up
+  (1080: 4/3, nearest neighbour; 720: 2 × 2 blocks, T7's copy unchanged; native: 1:1). For Windows the path
+  stays identity: source, target and monitor modes have the same sizes, as in T7. `Parameters\Modes` (bit 0
+  native, bit 1 = 1080, bit 2 = 720; default 7), `Parameters\DefaultMode` (0/1/2, default 1). `Scale` is no
+  longer read.
+- **Rotation** (Display orientation: landscape, portrait, and both flipped): the path offers Identity, 90, 180,
+  270 (`DriverRotation` = 1), and the present rotates in software. Semantics from Microsoft's KMDOD sample:
+  source modes stay in the panel's orientation; with `Flags.Rotate` the presented image is rotated (90/270:
+  lh × lw) and ROTATE90 maps presented (sx, sy) to mode (sy, H−1−sx), ROTATE270 to (W−1−sy, sx). Orientation
+  changes arrive in `UpdateActiveVidPnPresentPath` (or a commit). Host-tested: all 3 scales × 4 rotations,
+  whole frame and partial rectangles, against a reference built from those maps. `Parameters\Rotation` = 0
+  turns it off. If "landscape" and "landscape (flipped)" come out swapped on the phone, the KMDOD direction is
+  the thing to check.
+- **Fallbacks:** a mode outside the list is refused at commit, so Windows keeps the one it had; Windows' own
+  15 s "Keep these display settings?" revert; **mode trial:** committing any mode other than 720 × 1480 writes
+  `Services\sbdisplay\ModePending` (flushed), cleared after a minute of presents in it; still set at the next
+  start (that boot ended early) → that boot offers 720 × 1480 only (`State\ModeFallback`); the boot guard
+  (two short boots → Basic Display) and the kill file as before.
+- **Default:** Windows keeps its saved layout per monitor (`Control\GraphicsDrivers\Configuration`), so after
+  T7 it would keep 720 × 1480; `tools/win/hive-service.py IN OUT display-reset 1` removes the saved layouts
+  offline, and Windows then starts in the preferred 1080 × 2220.
+- New State: ModeMask, DefaultMode, RotAllowed, ModeWidth/ModeHeight (per commit), Rotation,
+  PathRotationAsked, ModeFallback, ModeConfirmed.
+- Desktop Duplication (Starbite Link's sblinkd): `DXGI_OUTDUPL_DESC.Rotation` reports the orientation, and the
+  duplicated frame is in the panel's orientation; dirty rectangles are in desktop coordinates. A capture that
+  ignores `Rotation` shows a rotated desktop sideways **[from the DXGI documentation and Microsoft's
+  DesktopDuplication sample, not tested here]**.
+- Cost: rotated 90/270 presents read Windows' image down columns: slower than T7's copy for full frames.
+
 ### 7.6a Refresh rate: what Windows shows, and overclocking (research, 2026-11-07)
 
 **"64 Hz" in Windows is a label.** sbdisplay copies Basic Display: the target mode leaves its frequencies

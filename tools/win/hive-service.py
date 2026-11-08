@@ -5,6 +5,11 @@
   hive-service.py IN OUT disable NAME          Start = 4 (the service is skipped at boot; files stay)
   hive-service.py IN OUT remove NAME           delete the service key
   hive-service.py IN OUT hiberboot 0|1         Control\\Session Manager\\Power\\HiberbootEnabled (fast startup)
+  hive-service.py IN OUT param NAME VALUE=N [VALUE=N ...]   DWORDs in Services\\NAME\\Parameters (kept others)
+  hive-service.py IN OUT display-reset 1       delete Control\\GraphicsDrivers\\Configuration and Connectivity:
+                                               Windows' saved display layouts, rebuilt at the next boot from the
+                                               driver's preferred mode (resolution, orientation and scale return
+                                               to their defaults)
   hive-service.py IN check                     header sanity only (both sequence numbers equal = clean)
 
 IN is never modified; OUT is a new file. Defaults for add: Type 1 (kernel driver), Start 2 (auto: loaded by
@@ -151,6 +156,34 @@ def main(a):
             s = f'cd \\{key}\ndel\ncommit\n'
         hivexsh(work, s)
         shown = key if cmd != 'remove' else f'{cs}\\Services'
+    elif cmd == 'param':
+        key = f'{cs}\\Services\\{arg}'
+        if not exists(h, key):
+            raise SystemExit(f'no service {arg}')
+        vals = {}
+        for kv in a[4:]:
+            n, _, v = kv.partition('=')
+            if not n or not v:
+                raise SystemExit(f'bad VALUE=N: {kv}')
+            vals[n] = dword(int(v, 0))
+        if not vals:
+            raise SystemExit(__doc__)
+        if exists(h, key + '\\Parameters'):
+            s = setvals(h, key + '\\Parameters', vals)
+        else:
+            s = f'cd \\{key}\nadd Parameters\n' + setvals(None, key + '\\Parameters', vals)
+        hivexsh(work, s + 'commit\n')
+        shown = key + '\\Parameters'
+    elif cmd == 'display-reset':
+        gd = f'{cs}\\Control\\GraphicsDrivers'
+        s = ''
+        for sub in ('Configuration', 'Connectivity'):
+            if exists(h, f'{gd}\\{sub}'):
+                s += f'cd \\{gd}\\{sub}\ndel\n'
+        if not s:
+            raise SystemExit('nothing to reset (no Configuration/Connectivity key)')
+        hivexsh(work, s + 'commit\n')
+        shown = gd
     elif cmd == 'hiberboot':
         key = f'{cs}\\Control\\Session Manager\\Power'
         hivexsh(work, setvals(h, key, {'HiberbootEnabled': dword(int(arg))}) + 'commit\n')

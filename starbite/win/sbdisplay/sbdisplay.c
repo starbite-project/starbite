@@ -50,8 +50,14 @@ typedef struct _SD_DEVICE {
     BOOLEAN Hw;                           /* DECON registers mapped and the pipeline identified */
     BOOLEAN SourceVisible, PathActive;
     BOOLEAN FullCopy;                     /* next copy-mode present redraws the whole frame */
-    ULONG Scale;                          /* 1, or 2: Windows draws Lw x Lh, each pixel shown as 2 x 2 */
-    ULONG Lw, Lh;                         /* the mode Windows sees (= Fb.Width/Height at scale 1) */
+    ULONG Lw, Lh;                         /* the committed mode, in the panel's orientation */
+    ULONG ModeIdx, ModeMask, DefaultMode; /* SdModes index; bit i = SdModes[i] offered; Windows' preferred one */
+    ULONG Rot;                            /* the path's rotation (SBDC_ROT_*, = D3DKMDT_VPPR_IDENTITY..ROTATE270) */
+    ULONG LastRot;                        /* rotation of the previous present (a change = full redraw) */
+    BOOLEAN RotAllowed;
+    BOOLEAN ModePending;                  /* a mode other than the safe one is on trial (State: see SetMode) */
+    ULONG64 ModeSetTime;
+    struct sbdc_xf Xf;
     volatile UCHAR *Mmio[SBDC_BLOCKS];
     SIZE_T MmioSize[SBDC_BLOCKS];
     struct sbdc_io Io;
@@ -230,30 +236,93 @@ static UINT BytesPerPixel(D3DDDIFORMAT F)
     return (F == D3DDDIFMT_A8R8G8B8 || F == D3DDDIFMT_X8R8G8B8) ? 4 : 0;
 }
 
-static void FillSourceMode(PSD_DEVICE Dev, D3DKMDT_VIDPN_SOURCE_MODE *M)
+/* T9: the modes Windows may choose (Settings -> Display -> resolution), each filling the whole panel: panel
+ * pixel X shows mode pixel (X * den) >> shift. Index 2 is the safe mode (T7, proven): a mode that did not
+ * survive a minute of presents makes the next boot offer only it. */
+#define SD_MODES 3U
+#define SD_SAFE_MODE 2U
+#define SD_MODE_TRIAL_100NS (60ULL * 10000000ULL)
+static const struct { ULONG den, shift; } SdModes[SD_MODES] = { { 1, 0 }, { 3, 2 }, { 1, 1 } };
+
+static ULONG ModeW(PSD_DEVICE Dev, ULONG I) { return (Dev->Fb.Width * SdModes[I].den) >> SdModes[I].shift; }
+static ULONG ModeH(PSD_DEVICE Dev, ULONG I) { return (Dev->Fb.Height * SdModes[I].den) >> SdModes[I].shift; }
+
+/* Exact fit: the mode scaled back up is the framebuffer (1440 x 2960: all three). */
+static BOOLEAN ModeFits(PSD_DEVICE Dev, ULONG I)
+{
+    return (ModeW(Dev, I) << SdModes[I].shift) == Dev->Fb.Width * SdModes[I].den &&
+           (ModeH(Dev, I) << SdModes[I].shift) == Dev->Fb.Height * SdModes[I].den;
+}
+
+/* The offered mode of this size, or -1. */
+static LONG FindMode(PSD_DEVICE Dev, ULONG W, ULONG H)
+{
+    for (ULONG i = 0; i < SD_MODES; i++)
+        if ((Dev->ModeMask & (1U << i)) && ModeW(Dev, i) == W && ModeH(Dev, i) == H)
+            return (LONG)i;
+    return -1;
+}
+
+static BOOLEAN RotValid(PSD_DEVICE Dev, ULONG R)
+{
+    return R == SBDC_ROT_0 || (Dev->RotAllowed && R >= SBDC_ROT_90 && R <= SBDC_ROT_270);
+}
+
+/* Rotation from a path: identity when Windows leaves it open. 0 = not one we do. */
+static ULONG PathRot(PSD_DEVICE Dev, D3DKMDT_VIDPN_PRESENT_PATH_ROTATION R)
+{
+    if (R == D3DKMDT_VPPR_UNINITIALIZED || R == D3DKMDT_VPPR_UNPINNED || R == D3DKMDT_VPPR_NOTSPECIFIED)
+        return SBDC_ROT_0;
+    return RotValid(Dev, (ULONG)R) ? (ULONG)R : 0;
+}
+
+static void ApplyXf(PSD_DEVICE Dev)
+{
+    Dev->Xf.lw = Dev->Lw;
+    Dev->Xf.lh = Dev->Lh;
+    Dev->Xf.pw = Dev->Fb.Width;
+    Dev->Xf.ph = Dev->Fb.Height;
+    Dev->Xf.rot = Dev->Rot;
+    Dev->Xf.den = SdModes[Dev->ModeIdx].den;
+    Dev->Xf.shift = SdModes[Dev->ModeIdx].shift;
+    Dev->FullCopy = TRUE;                 /* every mode covers the whole panel: one full redraw replaces it */
+}
+
+static void SetMode(PSD_DEVICE Dev, ULONG I)
+{
+    Dev->ModeIdx = I;
+    Dev->Lw = ModeW(Dev, I);
+    Dev->Lh = ModeH(Dev, I);
+    ApplyXf(Dev);
+    Log(L"ModeWidth", Dev->Lw, FALSE);
+    Log(L"ModeHeight", Dev->Lh, FALSE);
+}
+
+static void FillSourceMode(PSD_DEVICE Dev, ULONG I, D3DKMDT_VIDPN_SOURCE_MODE *M)
 {
     M->Type = D3DKMDT_RMT_GRAPHICS;
-    M->Format.Graphics.PrimSurfSize.cx = Dev->Lw;
-    M->Format.Graphics.PrimSurfSize.cy = Dev->Lh;
+    M->Format.Graphics.PrimSurfSize.cx = ModeW(Dev, I);
+    M->Format.Graphics.PrimSurfSize.cy = ModeH(Dev, I);
     M->Format.Graphics.VisibleRegionSize = M->Format.Graphics.PrimSurfSize;
-    M->Format.Graphics.Stride = Dev->Scale == 1 ? Dev->Fb.Pitch : Dev->Lw * 4;
+    M->Format.Graphics.Stride = I == 0 ? Dev->Fb.Pitch : ModeW(Dev, I) * 4;
     M->Format.Graphics.PixelFormat = D3DDDIFMT_A8R8G8B8;
     M->Format.Graphics.ColorBasis = D3DKMDT_CB_SRGB;
     M->Format.Graphics.PixelValueAccessMode = D3DKMDT_PVAM_DIRECT;
 }
 
 /* The panel's own timing (vendor DT s6e3ha8_ddi: 60 Hz, h-porch 2/2/2, v-porch 15/3/1 -> 1446 x 2979 total at
- * 1440 x 2960), scaled with the mode: with Timing60 for the monitor and the target mode; otherwise the target mode leaves the frequencies unspecified as Basic Display does (and Windows
- * then shows "64 Hz", Basic Display's well-known figure; the panel refreshes at 60 Hz regardless: its TE). */
-static void FillSignal(PSD_DEVICE Dev, D3DKMDT_VIDEO_SIGNAL_INFO *S)
+ * 1440 x 2960), scaled with the mode: with Timing60 for the monitor and the target mode; otherwise the target
+ * mode leaves the frequencies unspecified as Basic Display does (Windows then shows "64 Hz"; the panel
+ * refreshes at 60 Hz regardless: its TE). Without Timing60 the signal has no blanking, exactly as T7. */
+static void FillSignal(PSD_DEVICE Dev, ULONG I, D3DKMDT_VIDEO_SIGNAL_INFO *S)
 {
-    /* without Timing60: exactly T7's proven signal (no blanking) */
-    ULONG ht = Dev->Lw + (Dev->Timing60 ? 6 / Dev->Scale : 0), vt = Dev->Lh + (Dev->Timing60 ? 19 / Dev->Scale : 0);
+    ULONG w = ModeW(Dev, I), h = ModeH(Dev, I);
+    ULONG ht = w + (Dev->Timing60 ? 6 * w / Dev->Fb.Width : 0), vt = h + (Dev->Timing60 ? 19 * h / Dev->Fb.Height : 0);
     S->VideoStandard = D3DKMDT_VSS_OTHER;
     S->TotalSize.cx = ht;
     S->TotalSize.cy = vt;
-    S->ActiveSize.cx = Dev->Lw;
-    S->ActiveSize.cy = Dev->Lh;
+    S->ActiveSize.cx = w;
+    S->ActiveSize.cy = h;
     S->VSyncFreq.Numerator = 60;
     S->VSyncFreq.Denominator = 1;
     S->HSyncFreq.Numerator = 60 * vt;
@@ -265,12 +334,19 @@ static void FillSignal(PSD_DEVICE Dev, D3DKMDT_VIDEO_SIGNAL_INFO *S)
 /* ---- scanout ownership ----------------------------------------------------------------------- */
 
 /* Copy rectangles of the source image into buffer i. */
-/* Copy rectangles of the source image (source pixels) into buffer i, scaled by Dev->Scale (flip mode and the
+/* Copy rectangles of the presented image (its pixels) into buffer i through the transform (flip mode and the
  * buffer-to-buffer restore always run at scale 1). */
-static void CopyRects(PSD_DEVICE Dev, int I, const UCHAR *Src, LONG SrcPitch, const struct sbdc_rects *R)
+static void CopyRects(PSD_DEVICE Dev, int I, const UCHAR *Src, LONG SrcPitch, const struct sbdc_rects *R,
+                      const struct sbdc_xf *Xf)
 {
-    for (unsigned k = 0; k < R->n; k++)
-        sbdc_blit(Dev->Va[I], Dev->Fb.Pitch, Src, (unsigned)SrcPitch, R->r[k], Dev->Scale);
+    /* identity at 1x or 2x: the proven T7 copy (64-bit stores); everything else: the general one */
+    BOOLEAN fast = Xf->rot == SBDC_ROT_0 && Xf->den == 1 && Xf->shift <= 1;
+    for (unsigned k = 0; k < R->n; k++) {
+        if (fast)
+            sbdc_blit(Dev->Va[I], Dev->Fb.Pitch, Src, (unsigned)SrcPitch, R->r[k], 1U << Xf->shift);
+        else
+            sbdc_blit_xf(Dev->Va[I], Dev->Fb.Pitch, Src, (unsigned)SrcPitch, R->r[k], Xf);
+    }
 }
 
 /* Leave flip mode: DECON back on the firmware framebuffer with the current image in it. Returns
@@ -285,7 +361,7 @@ static BOOLEAN BackToFirmwareBuffer(PSD_DEVICE Dev)
     }
     if (Dev->Swap.front == 1) {
         /* buffer 0 lacks what changed since it was last written: take it from buffer 1 */
-        CopyRects(Dev, 0, Dev->Va[1], (LONG)Dev->Fb.Pitch, &Dev->Swap.stale[0]);
+        CopyRects(Dev, 0, Dev->Va[1], (LONG)Dev->Fb.Pitch, &Dev->Swap.stale[0], &Dev->Xf);   /* flip: native, identity */
         SD_DSB();
         if (sbdc_flip(&Dev->Dc, Dev->Swap.pa[0]) || sbdc_wait_latched(&Dev->Dc, SD_LATCH_TIMEOUT_US, 50)) {
             Log(L"RestoreFlipFailed", 1, TRUE);
@@ -403,17 +479,43 @@ NTSTATUS SdStartDevice(IN_CONST_PVOID MiniportDeviceContext, IN_PDXGK_START_INFO
     if (dev->Va[0] == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
 
-    /* Scale 2 (Parameters\Scale, default 2): Windows gets a half-size mode and draws a quarter of the pixels;
-     * the present doubles them. Only for an even-sized, packed framebuffer; it implies copy mode. */
-    dev->Scale = Param(L"Scale", 2) == 2 && !(dev->Fb.Width & 1) && !(dev->Fb.Height & 1) &&
-                 dev->Fb.Pitch == dev->Fb.Width * 4 ? 2 : 1;
-    dev->Lw = dev->Fb.Width / dev->Scale;
-    dev->Lh = dev->Fb.Height / dev->Scale;
+    /* T9 modes (Parameters\Modes, bit i = SdModes[i]: 1 native, 2 = 1080 x 2220, 4 = 720 x 1480; default all),
+     * Windows' preferred one (Parameters\DefaultMode, default 1 = 1080 x 2220), rotation (Parameters\Rotation,
+     * default 1). Parameters\Scale (T7) is no longer read. */
+    dev->ModeMask = Param(L"Modes", 7) & 7;
+    dev->DefaultMode = Param(L"DefaultMode", 1);
+    dev->RotAllowed = Param(L"Rotation", 1) != 0;
+    if (Param(L"Flip", 0)) {              /* flip mode: native, unrotated only */
+        dev->ModeMask = 1;
+        dev->RotAllowed = FALSE;
+    }
+    {
+        HANDLE h;
+        ULONG pending = 0;
+        if (NT_SUCCESS(OpenSvc(NULL, &h))) {
+            pending = GetDword(h, L"ModePending", 0);
+            ZwClose(h);
+        }
+        if (pending) {                    /* the last boot's mode did not survive a minute: the safe mode only */
+            Log(L"ModeFallback", pending, FALSE);
+            dev->ModeMask = 1U << SD_SAFE_MODE;
+        }
+    }
+    for (ULONG i = 0; i < SD_MODES; i++)
+        if (!ModeFits(dev, i) || (i && dev->Fb.Pitch != dev->Fb.Width * 4))
+            dev->ModeMask &= ~(1U << i);
+    if (!dev->ModeMask)
+        dev->ModeMask = 1;                /* native always fits */
+    if (dev->DefaultMode >= SD_MODES || !(dev->ModeMask & (1U << dev->DefaultMode)))
+        dev->DefaultMode = (dev->ModeMask & (1U << SD_SAFE_MODE)) ? SD_SAFE_MODE : 0;
+    dev->Rot = SBDC_ROT_0;
+    dev->LastRot = SBDC_ROT_0;
     dev->Timing60 = Param(L"Timing60", 0) != 0;
     Log(L"Timing60", dev->Timing60, FALSE);
-    Log(L"Scale", dev->Scale, FALSE);
-    Log(L"ModeWidth", dev->Lw, FALSE);
-    Log(L"ModeHeight", dev->Lh, FALSE);
+    Log(L"ModeMask", dev->ModeMask, FALSE);
+    Log(L"DefaultMode", dev->DefaultMode, FALSE);
+    Log(L"RotAllowed", dev->RotAllowed, FALSE);
+    SetMode(dev, dev->DefaultMode);       /* until Windows commits one */
 
     /* Flip mode only when everything is exactly as S-Boot left it. */
     MapResources(dev);
@@ -426,7 +528,7 @@ NTSTATUS SdStartDevice(IN_CONST_PVOID MiniportDeviceContext, IN_PDXGK_START_INFO
         Log(L"Window", dev->Dc.win, FALSE);
         Log(L"TrigInherited", dev->Dc.trig_inherited, FALSE);
     }
-    if (dev->Hw && dev->Scale == 1 && Param(L"Flip", 0)) {
+    if (dev->Hw && dev->ModeMask == 1 && Param(L"Flip", 0)) {
         lo.QuadPart = 0;
         hi.QuadPart = 0xffffffffLL;       /* DECON's IDMA base registers are 32 bits */
         skip.QuadPart = 0;
@@ -709,8 +811,8 @@ static NTSTATUS SdIsSupportedVidPnImpl(IN_CONST_HANDLE hAdapter, DXGKARG_ISSUPPO
     st = setIf->pfnAcquirePinnedModeInfo(set, &pinned);
     if (NT_SUCCESS(st)) {
         Arg->IsVidPnSupported = pinned == NULL ||
-            (pinned->Type == D3DKMDT_RMT_GRAPHICS && pinned->Format.Graphics.PrimSurfSize.cx == dev->Lw &&
-             pinned->Format.Graphics.PrimSurfSize.cy == dev->Lh);
+            (pinned->Type == D3DKMDT_RMT_GRAPHICS &&
+             FindMode(dev, pinned->Format.Graphics.PrimSurfSize.cx, pinned->Format.Graphics.PrimSurfSize.cy) >= 0);
         if (pinned != NULL)
             setIf->pfnReleaseModeInfo(set, pinned);
     }
@@ -725,8 +827,10 @@ static NTSTATUS SdRecommendFunctionalVidPnImpl(IN_CONST_HANDLE h, const DXGKARG_
     return STATUS_GRAPHICS_NO_RECOMMENDED_FUNCTIONAL_VIDPN;
 }
 
+/* Source modes: every offered mode, or only the one matching a pinned target mode (Only >= 0). Source sizes
+ * stay in the panel's orientation when the path is rotated (as Microsoft's KMDOD sample). */
 static NTSTATUS AddSourceMode(PSD_DEVICE Dev, const DXGK_VIDPN_INTERFACE *VidPn, D3DKMDT_HVIDPN H,
-                              D3DDDI_VIDEO_PRESENT_SOURCE_ID Src)
+                              D3DDDI_VIDEO_PRESENT_SOURCE_ID Src, LONG Only)
 {
     D3DKMDT_HVIDPNSOURCEMODESET set;
     const DXGK_VIDPNSOURCEMODESET_INTERFACE *setIf;
@@ -747,12 +851,16 @@ static NTSTATUS AddSourceMode(PSD_DEVICE Dev, const DXGK_VIDPN_INTERFACE *VidPn,
     st = VidPn->pfnCreateNewSourceModeSet(H, Src, &set, &setIf);
     if (!NT_SUCCESS(st))
         return st;
-    st = setIf->pfnCreateNewModeInfo(set, &mode);
-    if (NT_SUCCESS(st)) {
-        FillSourceMode(Dev, mode);
-        st = setIf->pfnAddMode(set, mode);
-        if (!NT_SUCCESS(st))
-            setIf->pfnReleaseModeInfo(set, mode);
+    for (ULONG i = 0; i < SD_MODES && NT_SUCCESS(st); i++) {
+        if (!(Dev->ModeMask & (1U << i)) || (Only >= 0 && (ULONG)Only != i))
+            continue;
+        st = setIf->pfnCreateNewModeInfo(set, &mode);
+        if (NT_SUCCESS(st)) {
+            FillSourceMode(Dev, i, mode);
+            st = setIf->pfnAddMode(set, mode);
+            if (!NT_SUCCESS(st))
+                setIf->pfnReleaseModeInfo(set, mode);
+        }
     }
     if (NT_SUCCESS(st))
         st = VidPn->pfnAssignSourceModeSet(H, Src, set);
@@ -761,8 +869,10 @@ static NTSTATUS AddSourceMode(PSD_DEVICE Dev, const DXGK_VIDPN_INTERFACE *VidPn,
     return st;
 }
 
+/* Target modes: the same sizes as the source modes (the scaling to the panel is ours, invisible to Windows:
+ * the path stays identity, as T7 proved), or only the one matching a pinned source mode. */
 static NTSTATUS AddTargetMode(PSD_DEVICE Dev, const DXGK_VIDPN_INTERFACE *VidPn, D3DKMDT_HVIDPN H,
-                              D3DDDI_VIDEO_PRESENT_TARGET_ID Tgt)
+                              D3DDDI_VIDEO_PRESENT_TARGET_ID Tgt, LONG Only)
 {
     D3DKMDT_HVIDPNTARGETMODESET set;
     const DXGK_VIDPNTARGETMODESET_INTERFACE *setIf;
@@ -783,9 +893,12 @@ static NTSTATUS AddTargetMode(PSD_DEVICE Dev, const DXGK_VIDPN_INTERFACE *VidPn,
     st = VidPn->pfnCreateNewTargetModeSet(H, Tgt, &set, &setIf);
     if (!NT_SUCCESS(st))
         return st;
+    for (ULONG i = 0; i < SD_MODES && NT_SUCCESS(st); i++) {
+    if (!(Dev->ModeMask & (1U << i)) || (Only >= 0 && (ULONG)Only != i))
+        continue;
     st = setIf->pfnCreateNewModeInfo(set, &mode);
     if (NT_SUCCESS(st)) {
-        FillSignal(Dev, &mode->VideoSignalInfo);
+        FillSignal(Dev, i, &mode->VideoSignalInfo);
         if (!Dev->Timing60) {
         /* Frequencies unspecified, as Basic Display (malidod run 4: INVALID_FREQUENCY otherwise, with a timing
          * that had no blanking; Timing60 tries the panel's real one). */
@@ -795,16 +908,51 @@ static NTSTATUS AddTargetMode(PSD_DEVICE Dev, const DXGK_VIDPN_INTERFACE *VidPn,
         mode->VideoSignalInfo.HSyncFreq.Denominator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
         mode->VideoSignalInfo.PixelRate = D3DKMDT_FREQUENCY_NOTSPECIFIED;
         }
-        mode->Preference = D3DKMDT_MP_PREFERRED;
+        mode->Preference = i == Dev->DefaultMode ? D3DKMDT_MP_PREFERRED : D3DKMDT_MP_NOTPREFERRED;
         st = setIf->pfnAddMode(set, mode);
         if (!NT_SUCCESS(st))
             setIf->pfnReleaseModeInfo(set, mode);
+    }
     }
     if (NT_SUCCESS(st))
         st = VidPn->pfnAssignTargetModeSet(H, Tgt, set);
     if (!NT_SUCCESS(st))
         VidPn->pfnReleaseTargetModeSet(H, set);
     return st;
+}
+
+/* The offered mode index of the pinned source / target mode, or -1 (none pinned, or not ours). */
+static LONG PinnedSource(PSD_DEVICE Dev, const DXGK_VIDPN_INTERFACE *VidPn, D3DKMDT_HVIDPN H, D3DDDI_VIDEO_PRESENT_SOURCE_ID Src)
+{
+    D3DKMDT_HVIDPNSOURCEMODESET set;
+    const DXGK_VIDPNSOURCEMODESET_INTERFACE *setIf;
+    const D3DKMDT_VIDPN_SOURCE_MODE *pinned = NULL;
+    LONG r = -1;
+    if (!NT_SUCCESS(VidPn->pfnAcquireSourceModeSet(H, Src, &set, &setIf)))
+        return -1;
+    if (NT_SUCCESS(setIf->pfnAcquirePinnedModeInfo(set, &pinned)) && pinned != NULL) {
+        if (pinned->Type == D3DKMDT_RMT_GRAPHICS)
+            r = FindMode(Dev, pinned->Format.Graphics.PrimSurfSize.cx, pinned->Format.Graphics.PrimSurfSize.cy);
+        setIf->pfnReleaseModeInfo(set, pinned);
+    }
+    VidPn->pfnReleaseSourceModeSet(H, set);
+    return r;
+}
+
+static LONG PinnedTarget(PSD_DEVICE Dev, const DXGK_VIDPN_INTERFACE *VidPn, D3DKMDT_HVIDPN H, D3DDDI_VIDEO_PRESENT_TARGET_ID Tgt)
+{
+    D3DKMDT_HVIDPNTARGETMODESET set;
+    const DXGK_VIDPNTARGETMODESET_INTERFACE *setIf;
+    const D3DKMDT_VIDPN_TARGET_MODE *pinned = NULL;
+    LONG r = -1;
+    if (!NT_SUCCESS(VidPn->pfnAcquireTargetModeSet(H, Tgt, &set, &setIf)))
+        return -1;
+    if (NT_SUCCESS(setIf->pfnAcquirePinnedModeInfo(set, &pinned)) && pinned != NULL) {
+        r = FindMode(Dev, pinned->VideoSignalInfo.ActiveSize.cx, pinned->VideoSignalInfo.ActiveSize.cy);
+        setIf->pfnReleaseModeInfo(set, pinned);
+    }
+    VidPn->pfnReleaseTargetModeSet(H, set);
+    return r;
 }
 
 static NTSTATUS SdEnumVidPnCofuncModalityImpl(IN_CONST_HANDLE hAdapter, const DXGKARG_ENUMVIDPNCOFUNCMODALITY *Arg)
@@ -833,10 +981,13 @@ static NTSTATUS SdEnumVidPnCofuncModalityImpl(IN_CONST_HANDLE hAdapter, const DX
                           Arg->EnumPivot.VidPnTargetId == path->VidPnTargetId;
         NTSTATUS r = STATUS_SUCCESS;
 
+        LONG ps = PinnedSource(dev, vidpn, Arg->hConstrainingVidPn, path->VidPnSourceId);
+        LONG pt2 = PinnedTarget(dev, vidpn, Arg->hConstrainingVidPn, path->VidPnTargetId);
+
         if (!srcPivot)
-            r = AddSourceMode(dev, vidpn, Arg->hConstrainingVidPn, path->VidPnSourceId);
+            r = AddSourceMode(dev, vidpn, Arg->hConstrainingVidPn, path->VidPnSourceId, pt2);
         if (NT_SUCCESS(r) && !tgtPivot)
-            r = AddTargetMode(dev, vidpn, Arg->hConstrainingVidPn, path->VidPnTargetId);
+            r = AddTargetMode(dev, vidpn, Arg->hConstrainingVidPn, path->VidPnTargetId, ps);
         if (NT_SUCCESS(r) && !xfPivot &&
             (path->ContentTransformation.Scaling == D3DKMDT_VPPS_UNPINNED ||
              path->ContentTransformation.Rotation == D3DKMDT_VPPR_UNPINNED)) {
@@ -848,6 +999,14 @@ static NTSTATUS SdEnumVidPnCofuncModalityImpl(IN_CONST_HANDLE hAdapter, const DX
             if (upd.ContentTransformation.Rotation == D3DKMDT_VPPR_UNPINNED) {
                 RtlZeroMemory(&upd.ContentTransformation.RotationSupport, sizeof(upd.ContentTransformation.RotationSupport));
                 upd.ContentTransformation.RotationSupport.Identity = 1;
+                if (dev->RotAllowed) {        /* rotated in software in the present (as KMDOD; all four here) */
+                    upd.ContentTransformation.RotationSupport.Rotate90 = 1;
+                    upd.ContentTransformation.RotationSupport.Rotate180 = 1;
+                    upd.ContentTransformation.RotationSupport.Rotate270 = 1;
+                }
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM1_3_PATH_INDEPENDENT_ROTATION)
+                upd.ContentTransformation.RotationSupport.Offset0 = 1;
+#endif
             }
             r = topoIf->pfnUpdatePathSupportInfo(topo, &upd);
         }
@@ -900,11 +1059,41 @@ static NTSTATUS SdCommitVidPnImpl(IN_CONST_HANDLE hAdapter, const DXGKARG_COMMIT
     }
     st = setIf->pfnAcquirePinnedModeInfo(set, &pinned);
     if (NT_SUCCESS(st) && pinned != NULL) {
-        BOOLEAN ours = pinned->Type == D3DKMDT_RMT_GRAPHICS && pinned->Format.Graphics.PrimSurfSize.cx == dev->Lw &&
-                       pinned->Format.Graphics.PrimSurfSize.cy == dev->Lh;
+        LONG idx = pinned->Type == D3DKMDT_RMT_GRAPHICS ?
+            FindMode(dev, pinned->Format.Graphics.PrimSurfSize.cx, pinned->Format.Graphics.PrimSurfSize.cy) : -1;
+        ULONG rot = SBDC_ROT_0;
         setIf->pfnReleaseModeInfo(set, pinned);
-        st = ours ? STATUS_SUCCESS : STATUS_GRAPHICS_INVALID_VIDPN;
-        dev->PathActive = ours;
+        if (idx >= 0) {
+            /* the path's rotation (identity when there is none or it is open) */
+            D3DKMDT_HVIDPNTOPOLOGY topo;
+            const DXGK_VIDPNTOPOLOGY_INTERFACE *topoIf;
+            const D3DKMDT_VIDPN_PRESENT_PATH *path = NULL;
+            if (NT_SUCCESS(vidpn->pfnGetTopology(Arg->hFunctionalVidPn, &topo, &topoIf)) &&
+                NT_SUCCESS(topoIf->pfnAcquireFirstPathInfo(topo, &path)) && path != NULL) {
+                rot = PathRot(dev, path->ContentTransformation.Rotation);
+                topoIf->pfnReleasePathInfo(topo, path);
+            }
+        }
+        /* Not ours: refused, and Windows keeps the mode it had (its own fallback). */
+        st = idx >= 0 && rot ? STATUS_SUCCESS : STATUS_GRAPHICS_INVALID_VIDPN;
+        dev->PathActive = NT_SUCCESS(st);
+        if (NT_SUCCESS(st)) {
+            dev->Rot = rot;
+            SetMode(dev, (ULONG)idx);
+            Log(L"Rotation", rot, FALSE);
+            /* Trial: a mode other than the safe one is flushed as pending, and cleared after a minute of
+             * presents in it (present path). Still pending at the next start = that boot offers the safe mode. */
+            {
+                HANDLE h;
+                dev->ModePending = (ULONG)idx != SD_SAFE_MODE;
+                dev->ModeSetTime = KeQueryInterruptTime();
+                if (NT_SUCCESS(OpenSvc(NULL, &h))) {
+                    PutDword(h, L"ModePending", dev->ModePending ? (ULONG)idx + 1 : 0);
+                    (void)ZwFlushKey(h);
+                    ZwClose(h);
+                }
+            }
+        }
     } else if (NT_SUCCESS(st)) {
         dev->PathActive = FALSE;
     }
@@ -913,10 +1102,19 @@ static NTSTATUS SdCommitVidPnImpl(IN_CONST_HANDLE hAdapter, const DXGKARG_COMMIT
     return st;
 }
 
+/* Rotation changes arrive here without a new mode (Settings -> Display orientation). */
 static NTSTATUS SdUpdateActiveVidPnPresentPathImpl(IN_CONST_HANDLE h, const DXGKARG_UPDATEACTIVEVIDPNPRESENTPATH *A)
 {
-    UNREFERENCED_PARAMETER(h);
-    UNREFERENCED_PARAMETER(A);
+    PSD_DEVICE dev = (PSD_DEVICE)h;
+    ULONG rot = PathRot(dev, A->VidPnPresentPathInfo.ContentTransformation.Rotation);
+    Log(L"PathRotationAsked", (ULONG)A->VidPnPresentPathInfo.ContentTransformation.Rotation, FALSE);
+    if (!rot)
+        return STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED;
+    if (rot != dev->Rot) {
+        dev->Rot = rot;
+        ApplyXf(dev);
+        Log(L"Rotation", rot, TRUE);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -926,27 +1124,32 @@ static NTSTATUS SdRecommendMonitorModesImpl(IN_CONST_HANDLE hAdapter, const DXGK
     D3DKMDT_MONITOR_SOURCE_MODE *mode;
     NTSTATUS st;
 
-    st = Arg->pMonitorSourceModeSetInterface->pfnCreateNewModeInfo(Arg->hMonitorSourceModeSet, &mode);
-    if (!NT_SUCCESS(st))
-        return st;
-    FillSignal(dev, &mode->VideoSignalInfo);
-    mode->ColorBasis = D3DKMDT_CB_SRGB;
-    mode->ColorCoeffDynamicRanges.FirstChannel = 8;
-    mode->ColorCoeffDynamicRanges.SecondChannel = 8;
-    mode->ColorCoeffDynamicRanges.ThirdChannel = 8;
-    mode->ColorCoeffDynamicRanges.FourthChannel = 0;
-    mode->Origin = D3DKMDT_MCO_DRIVER;
-    mode->Preference = D3DKMDT_MP_PREFERRED;
-    st = Arg->pMonitorSourceModeSetInterface->pfnAddMode(Arg->hMonitorSourceModeSet, mode);
-    if (!NT_SUCCESS(st) && st != STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET)
-        Arg->pMonitorSourceModeSetInterface->pfnReleaseModeInfo(Arg->hMonitorSourceModeSet, mode);
+    for (ULONG i = 0; i < SD_MODES; i++) {
+        if (!(dev->ModeMask & (1U << i)))
+            continue;
+        st = Arg->pMonitorSourceModeSetInterface->pfnCreateNewModeInfo(Arg->hMonitorSourceModeSet, &mode);
+        if (!NT_SUCCESS(st))
+            return st;
+        FillSignal(dev, i, &mode->VideoSignalInfo);
+        mode->ColorBasis = D3DKMDT_CB_SRGB;
+        mode->ColorCoeffDynamicRanges.FirstChannel = 8;
+        mode->ColorCoeffDynamicRanges.SecondChannel = 8;
+        mode->ColorCoeffDynamicRanges.ThirdChannel = 8;
+        mode->ColorCoeffDynamicRanges.FourthChannel = 0;
+        mode->Origin = D3DKMDT_MCO_DRIVER;
+        mode->Preference = i == dev->DefaultMode ? D3DKMDT_MP_PREFERRED : D3DKMDT_MP_NOTPREFERRED;
+        st = Arg->pMonitorSourceModeSetInterface->pfnAddMode(Arg->hMonitorSourceModeSet, mode);
+        if (!NT_SUCCESS(st) && st != STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET)
+            Arg->pMonitorSourceModeSetInterface->pfnReleaseModeInfo(Arg->hMonitorSourceModeSet, mode);
+    }
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS SdQueryVidPnHWCapabilityImpl(IN_CONST_HANDLE h, DXGKARG_QUERYVIDPNHWCAPABILITY *Arg)
 {
-    UNREFERENCED_PARAMETER(h);
+    PSD_DEVICE dev = (PSD_DEVICE)h;
     RtlZeroMemory(&Arg->VidPnHWCaps, sizeof(Arg->VidPnHWCaps));
+    Arg->VidPnHWCaps.DriverRotation = dev->RotAllowed ? 1 : 0;   /* rotated in software (as KMDOD) */
     return STATUS_SUCCESS;
 }
 
@@ -968,17 +1171,26 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
     PSD_DEVICE dev = (PSD_DEVICE)hAdapter;
     struct sbdc_rect rect[SBDC_MAX_RECTS];
     struct sbdc_rects copy;
-    unsigned n = 0;
+    struct sbdc_xf xf;
+    unsigned n = 0, sw, sh;
     PMDL mdl;
     const UCHAR *src;
     SIZE_T size;
 
     if (!dev->SourceVisible || !dev->PathActive || dev->Va[0] == NULL)
         return STATUS_SUCCESS;
-    if (Arg->BytesPerPixel != 4 || Arg->Flags.Rotate)
+    if (Arg->BytesPerPixel != 4)
         return STATUS_NOT_SUPPORTED;
+    /* Rotate set: the image comes rotated (90/270: lh x lw) and we turn it (KMDOD's rule); else as the mode. */
+    xf = dev->Xf;
+    xf.rot = Arg->Flags.Rotate ? dev->Rot : SBDC_ROT_0;
+    if (xf.rot != dev->LastRot) {
+        dev->LastRot = xf.rot;
+        dev->FullCopy = TRUE;
+    }
+    sbdc_xf_src_size(&xf, &sw, &sh);
 
-    size = (SIZE_T)Arg->Pitch * dev->Lh;
+    size = (SIZE_T)Arg->Pitch * sh;
     mdl = IoAllocateMdl(Arg->pSource, (ULONG)size, FALSE, FALSE, NULL);
     if (mdl == NULL)
         return STATUS_NO_MEMORY;
@@ -1013,8 +1225,8 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
     }
     if (n == SBDC_MAX_RECTS && Arg->NumMoves + Arg->NumDirtyRects > SBDC_MAX_RECTS) {
         rect[0].l = rect[0].t = 0;
-        rect[0].r = (int)dev->Lw;
-        rect[0].b = (int)dev->Lh;
+        rect[0].r = (int)sw;
+        rect[0].b = (int)sh;
         n = 1;
     }
 
@@ -1026,7 +1238,7 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
         sbdc_swap_damage(&dev->Swap, rect, n, dev->Fb.Width, dev->Fb.Height);
         back = sbdc_swap_back(&dev->Swap);
         /* The back buffer is not scanned: the last flip latched, DECON reads the front one. */
-        CopyRects(dev, back, src, Arg->Pitch, &dev->Swap.stale[back]);
+        CopyRects(dev, back, src, Arg->Pitch, &dev->Swap.stale[back], &xf);
         SD_DSB();
         if (sbdc_flip(&dev->Dc, dev->Swap.pa[back]) == 0) {
             sbdc_swap_flipped(&dev->Swap);
@@ -1038,20 +1250,30 @@ static NTSTATUS SdPresentDisplayOnlyImpl(IN_CONST_HANDLE hAdapter, const DXGKARG
     } else {
         sbdc_rects_clear(&copy);
         if (dev->FullCopy) {
-            sbdc_rects_full(&copy, dev->Lw, dev->Lh);
+            sbdc_rects_full(&copy, sw, sh);
             dev->FullCopy = FALSE;
         }
         for (unsigned i = 0; i < n; i++)
-            sbdc_rects_add(&copy, rect[i], dev->Lw, dev->Lh);
-        CopyRects(dev, 0, src, Arg->Pitch, &copy);
+            sbdc_rects_add(&copy, rect[i], sw, sh);
+        CopyRects(dev, 0, src, Arg->Pitch, &copy, &xf);
         if (dev->Va[1])                   /* after a fallback: DECON may scan either buffer */
-            CopyRects(dev, 1, src, Arg->Pitch, &copy);
+            CopyRects(dev, 1, src, Arg->Pitch, &copy, &xf);
     }
 
     MmUnlockPages(mdl);
     IoFreeMdl(mdl);
     {
         ULONG64 now = KeQueryInterruptTime();
+        if (dev->ModePending && now - dev->ModeSetTime >= SD_MODE_TRIAL_100NS) {
+            HANDLE h;
+            dev->ModePending = FALSE;     /* a minute of presents in this mode: it stays offered */
+            if (NT_SUCCESS(OpenSvc(NULL, &h))) {
+                PutDword(h, L"ModePending", 0);
+                (void)ZwFlushKey(h);
+                ZwClose(h);
+            }
+            Log(L"ModeConfirmed", dev->ModeIdx, TRUE);
+        }
         if (!dev->RateT0)
             dev->RateT0 = now;
         dev->RateCount++;

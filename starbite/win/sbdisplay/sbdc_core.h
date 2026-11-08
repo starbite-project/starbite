@@ -154,6 +154,32 @@ void sbdc_swap_flipped(struct sbdc_swap *s);
 void sbdc_blit(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
                unsigned scale);
 
+/* ---- modes, rotation and non-integer scales (T9) -------------------------------------------------------- */
+
+/* Rotation as D3DKMDT_VIDPN_PRESENT_PATH_ROTATION's first values, so the driver passes the path's value through. */
+#define SBDC_ROT_0 1U
+#define SBDC_ROT_90 2U
+#define SBDC_ROT_180 3U
+#define SBDC_ROT_270 4U
+
+/* How Windows' image reaches the panel. The mode (lw x lh) is in the panel's orientation; Windows presents
+ * its image rotated (rot 90/270: lh x lw, as Microsoft's KMDOD sample). Scale: panel pixel X shows mode pixel
+ * (X * den) >> shift, i.e. panel/mode = 2^shift/den: (1,0) native, (3,2) 4/3, (1,1) 2. Nearest neighbour. */
+struct sbdc_xf {
+    unsigned lw, lh;
+    unsigned pw, ph;
+    unsigned rot;
+    unsigned den, shift;
+};
+
+/* The size of the image Windows presents for this transform. */
+void sbdc_xf_src_size(const struct sbdc_xf *x, unsigned *w, unsigned *h);
+
+/* Copy rectangle r (in the presented image's pixels; clipped here) into the panel buffer, rotated and scaled.
+ * Writes exactly the panel pixels whose mode pixel comes from inside r; never reads dst. */
+void sbdc_blit_xf(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+                  const struct sbdc_xf *x);
+
 /* ---- brightness (S6E3HA8 AOR) ------------------------------------------------------------ */
 
 /* Windows level 0..100 -> AOR (higher AOR = darker), through S-Boot's and the vendor's points. */

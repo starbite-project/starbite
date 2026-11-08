@@ -58,7 +58,9 @@ AddReg        = SbDisplay_Params
 HKR, Parameters, Flip,       %REG_DWORD%, 0   ; 1 = tear-free flips (writes DECON: IDMA ch0 base, shadow request, trigger)
 HKR, Parameters, Brightness, %REG_DWORD%, 0   ; 1 = brightness slider sends S-Boot's AOR sequence over DSIM
 HKR, Parameters, Timing60,   %REG_DWORD%, 0   ; 1 = report the panel's real 60 Hz timing (Windows then shows 60, not 64 Hz)
-HKR, Parameters, Scale,      %REG_DWORD%, 2   ; 2 = Windows draws 720x1480, shown doubled (4x fewer pixels for WARP); 1 = native
+HKR, Parameters, Modes,       %REG_DWORD%, 7  ; resolutions offered: 1 = 1440x2960, 2 = 1080x2220, 4 = 720x1480 (sum)
+HKR, Parameters, DefaultMode, %REG_DWORD%, 1  ; Windows' preferred: 0 = 1440x2960, 1 = 1080x2220, 2 = 720x1480
+HKR, Parameters, Rotation,    %REG_DWORD%, 1  ; 1 = landscape/portrait and flipped (rotated in software)
 
 [SbDisplay_EventLog]
 AddReg = SbDisplay_EventLog_AddReg

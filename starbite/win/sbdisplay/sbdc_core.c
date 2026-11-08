@@ -323,3 +323,68 @@ int sbdc_set_aor(struct sbdc *d, sbdc_u32 aor)
     }
     return r;
 }
+
+/* ---- modes, rotation and non-integer scales ------------------------------------------------- */
+
+void sbdc_xf_src_size(const struct sbdc_xf *x, unsigned *w, unsigned *h)
+{
+    int swap = x->rot == SBDC_ROT_90 || x->rot == SBDC_ROT_270;
+    *w = swap ? x->lh : x->lw;
+    *h = swap ? x->lw : x->lh;
+}
+
+/* First panel coordinate whose mode coordinate ((X * den) >> shift) is >= l. */
+static unsigned up(unsigned l, const struct sbdc_xf *x)
+{
+    return ((l << x->shift) + x->den - 1) / x->den;
+}
+
+void sbdc_blit_xf(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
+                  const struct sbdc_xf *x)
+{
+    unsigned sw, sh, W = x->lw, H = x->lh, lx0, lx1, ly0, ly1, X0, X1, Y0, Y1;
+    long long pitch = (long long)src_pitch;
+    sbdc_xf_src_size(x, &sw, &sh);
+    if (r.l < 0)
+        r.l = 0;
+    if (r.t < 0)
+        r.t = 0;
+    if (r.r > (int)sw)
+        r.r = (int)sw;
+    if (r.b > (int)sh)
+        r.b = (int)sh;
+    if (r.r <= r.l || r.b <= r.t || !x->den)
+        return;
+    /* the rectangle in mode coordinates (inverse of the source -> mode maps below) */
+    switch (x->rot) {
+    case SBDC_ROT_90:  lx0 = (unsigned)r.t; lx1 = (unsigned)r.b; ly0 = H - (unsigned)r.r; ly1 = H - (unsigned)r.l; break;
+    case SBDC_ROT_180: lx0 = W - (unsigned)r.r; lx1 = W - (unsigned)r.l; ly0 = H - (unsigned)r.b; ly1 = H - (unsigned)r.t; break;
+    case SBDC_ROT_270: lx0 = W - (unsigned)r.b; lx1 = W - (unsigned)r.t; ly0 = (unsigned)r.l; ly1 = (unsigned)r.r; break;
+    default:           lx0 = (unsigned)r.l; lx1 = (unsigned)r.r; ly0 = (unsigned)r.t; ly1 = (unsigned)r.b; break;
+    }
+    X0 = up(lx0, x);
+    X1 = up(lx1, x);
+    Y0 = up(ly0, x);
+    Y1 = up(ly1, x);
+    if (X1 > x->pw)
+        X1 = x->pw;
+    if (Y1 > x->ph)
+        Y1 = x->ph;
+    for (unsigned Y = Y0; Y < Y1; ++Y) {
+        unsigned ly = (Y * x->den) >> x->shift;
+        const sbdc_u8 *base;
+        long long step;
+        sbdc_u32 *d = (sbdc_u32 *)(dst + (unsigned long long)Y * dst_pitch);
+        /* mode pixel (lx, ly) = presented pixel base + lx * step */
+        switch (x->rot) {
+        case SBDC_ROT_90:  base = src + (unsigned long long)(H - 1 - ly) * 4; step = pitch; break;         /* sx = H-1-ly, sy = lx */
+        case SBDC_ROT_180: base = src + (unsigned long long)(H - 1 - ly) * src_pitch + (unsigned long long)(W - 1) * 4; step = -4; break;
+        case SBDC_ROT_270: base = src + (unsigned long long)(W - 1) * src_pitch + (unsigned long long)ly * 4; step = -pitch; break; /* sx = ly, sy = W-1-lx */
+        default:           base = src + (unsigned long long)ly * src_pitch; step = 4; break;
+        }
+        for (unsigned X = X0; X < X1; ++X) {
+            unsigned lx = (X * x->den) >> x->shift;
+            d[X] = *(const sbdc_u32 *)(base + (long long)lx * step);
+        }
+    }
+}
