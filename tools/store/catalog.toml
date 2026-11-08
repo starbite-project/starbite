@@ -417,13 +417,13 @@ wdt_feed = "own"
 [[entry]]
 key = "menubench"
 name = "Menu bench"
-version = "v7 1-vs-4-core bench 1"
+version = "v7 bench 3a (1 core, own watchdog)"
 category = "lab"
 method = "bare"
 tag = "lab"
 files = ["menubench.img"]
 flags = ["hidden"]
-wdt = 60
+wdt = 0
 wdt_feed = "own"
 no_launch = true
 
