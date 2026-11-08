@@ -297,6 +297,11 @@ mounted after fsync-only commits, with and without metadata_csum. Without the re
 data; with it, the newest nv_data.bin. Clean images read correctly too. Not exercised by the fixture: revoke
 records (the code follows jbd2's rule: a revoke in transaction T masks the block in transactions up to T).
 
+### Result T5b (2026-11-08 21:13, 0ec0bb4, `build/test-boots/modemload-dry-2113/loader-pmsg.txt`)
+Clean, 0 faults. EFS: needs_recovery no, 47 root names, nv_data.bin inode 45 (1 MiB, crc 0xf93b2ff6, as on the
+backup). BOOT 0x73672490, MAIN 0xa98496b5 and VSS 0x5e715799 all match the TOC. `BOOT: ok (done (dry))`. The
+whole image is in RAM and verified; T6 is next.
+
 ### 6.2 Safety review (hazard -> what prevents it -> how it is tested)
 | hazard | prevention | test |
 |---|---|---|
