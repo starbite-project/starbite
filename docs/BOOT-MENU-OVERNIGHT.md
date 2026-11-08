@@ -190,6 +190,11 @@ Where a 4-core frame goes (setup / glass / over / present, ms): scroll 24 / 26 /
 The setup (the frame's diff and shift bookkeeping, mostly on core 0) is the next lever. Verdict: BOOT-smp3
 (825d22f6…) goes in after a One UI check.
 
+### 6.4 MB5 (balanced shift, no LD4/ST4, half-resolution items while moving), 18:14: passed
+4 cores: focus 14 ms, scroll 57 ms (~17.5 fps), sections 83 ms (~12 fps), intro wallpaper 33 / glass 88 ms. Scroll frame:
+17 setup (≈ the row shift) + 25 glass + 2 over + 13 present. MB6 (05d2f17) vectorises the shift's correction (host 2.2x on
+the shift, frames byte-identical); BOOT-smp5 (5c43b37d…) staged.
+
 ## 7. Not done / next
 
 - GPU (Mali-G72) composition: the right long-term answer for 60 fps (MV5). The win-mali-gpu track can
