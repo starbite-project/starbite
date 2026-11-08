@@ -76,7 +76,10 @@ case "$mode" in
 prefs) ;;
 launchd-log)
     # no job removed: launchd-disabled.plist is neither read nor written (it can read back stale)
-    logs=(--log PosterBoard); for n in ${LOG:-}; do logs+=(--log "$n"); done
+    logs=(--log PosterBoard); for n in ${LOG:-}; do
+        # 2026-11-09 T12: with this edit launchd never started lsd (no UI); pkd was edited in the same run
+        case "$n" in lsd|pkd) echo "LOG=$n: refused (T12: lsd never started with its log mirrored)"; exit 1 ;; esac
+        logs+=(--log "$n"); done
     python3 tools/ios26-launchd-tune.py "$L" - "$out/tune" "${logs[@]}"
     files+=("$out/tune/launchd.plist=/System/Library/xpc/launchd.plist:644") ;;
 full)
