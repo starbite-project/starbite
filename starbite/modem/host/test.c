@@ -1306,8 +1306,8 @@ static void test_boot(void)
     b.hold_ms = 3000;
     CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
     CHECKEQ(b.hold_ms, 3000);
-    CHECK(b.phone_start_repeats >= 5 && b.phone_start_repeats <= 6);
-    CHECK(b.phone_start_gap_ms >= 490 && b.phone_start_gap_ms <= 520);
+    CHECK(b.phone_start_repeats >= 28 && b.phone_start_repeats <= 31);
+    CHECK(b.phone_start_gap_ms >= 98 && b.phone_start_gap_ms <= 103);
     CHECKEQ(b.other_cmds, 0);
     CHECKEQ(b.dl_frames_seen, 0);
     CHECKEQ(s.n_ap_msgs, 1);                           /* still only PIF_INIT_DONE */
@@ -1350,6 +1350,28 @@ static void test_boot(void)
     fakesoc_free(&s);
 }
 
+static void test_clk(void)
+{
+    static uint8_t buf[8192];
+    memset(buf, 0xEE, sizeof(buf));
+    CHECKEQ(sbm_clk_table_write(buf, sizeof(buf)), 248);
+    CHECKEQ(buf[39], 0xEE);                                 /* nothing before IPC + 40 */
+    CHECK(!memcmp(buf + 40, "CT0", 4));
+    CHECKEQ(sbm_le32(buf + 44), 4);
+    CHECK(!memcmp(buf + 48, "CL0", 4) && !memcmp(buf + 56, "CL1", 4) && !memcmp(buf + 64, "MIF", 4) &&
+          !memcmp(buf + 72, "INT", 4));
+    CHECKEQ(sbm_le32(buf + 52), 14);
+    CHECKEQ(sbm_le32(buf + 60), 21);
+    CHECKEQ(sbm_le32(buf + 68), 11);
+    CHECKEQ(sbm_le32(buf + 76), 6);
+    CHECKEQ(sbm_le32(buf + 80), 208000);                    /* CLOCK_TABLE[1][1] in this phone's log */
+    CHECKEQ(sbm_le32(buf + 80 + 4 * 13), 2002000);          /* [1][14] */
+    CHECKEQ(sbm_le32(buf + 80 + 4 * 14), 598000);           /* [2][1] */
+    CHECKEQ(sbm_le32(buf + 80 + 4 * 51), 534000);           /* [4][6], the last */
+    CHECKEQ(buf[40 + 248], 0xEE);                           /* nothing after it */
+    CHECKEQ(sbm_clk_table_write(buf, 100), SBM_EINVAL);
+}
+
 int main(int argc, char **argv)
 {
     test_toc();
@@ -1363,6 +1385,7 @@ int main(int argc, char **argv)
     test_probe();
     test_probe2();
     test_boot();
+    test_clk();
     printf("sbm host test: %u checks, %u failed%s\n", checks, fails, radio ? " (with this phone's RADIO image)" : "");
     return fails ? 1 : 0;
 }

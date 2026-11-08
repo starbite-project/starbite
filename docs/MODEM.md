@@ -385,6 +385,11 @@ Several runs in a row (warm reboots between them, the guard from bd8cc1b) show t
 that the CP is stable and quiet in its pre-online state. No One UI check is needed for that: each run's "before"
 line is the check (sequencer 0, CP_START clear).
 
+Result (2026-11-08 22:28-22:32, 1fbce47, `build/test-boots/modemlink-hold-{1,2,3}-*`): **3 runs, identical and
+clean**, warm boots back to back, about 66 s each, back to the loader on their own. `HOLD: 20000 ms: PHONE_START
+repeated 203 times (last gap 100 ms), other commands 0, DL frames waiting 0`; parked, after-probe `cp-in-reset`,
+0 faults. While it waits for INIT_END, the CP repeats PHONE_START every 100 ms and sends nothing on any ring.
+
 ## 7. Stage 5: online without RIL (plan; morning, user present)
 INIT_END makes the CP go online. Two things are unknown, and both decide safety:
 - **R1, RFS.** After INIT_END the CP reads (and writes) its NV files over ch 245, and without an answer it
@@ -395,7 +400,7 @@ INIT_END makes the CP go online. Two things are unknown, and both decide safety:
   phone camps for emergency-only service under Android, which is RX, and attach is impossible without a SIM. We
   need to know which IPC message turns RF on (pull libsec-ril / trace rild's first FMT frames), so that stage 5
   can keep RF off or send the "low power mode" request explicitly (one more allow-listed SET, radio *off* only).
-Stage 5 = T9 `modemlink-online`: INIT_END, an RFS server against the RAM copy of EFS/CPEFS (the CP's writes go to
+Stage 5 = T9 `modemlink-online`: the ECT clock table (`sbm_clk.c`, ready: this phone's 52 frequencies at IPC + 40, host-tested against its log), INIT_END, an RFS server against the RAM copy of EFS/CPEFS (the CP's writes go to
 RAM only), FMT receive-only with sbm_cell decoding (no request sent unless R2 requires the LPM one), 30 s, park.
 Safety additions: never any SMS/CALL/SS (the builder's allow-list); RFS writes only to RAM; a crash command or the
 CP's watchdog interrupt parks at once; first run attended.

@@ -649,6 +649,11 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
 /* Stage 4 (sbm_link.c), called by sbm_boot_run for SBM_BOOT_LINK after power on: DL_START, the UDL handshake,
  * INIT_START -> SBD layout -> PIF_INIT_DONE, wait for PHONE_START. Never INIT_END. 0 or SBM_E*. */
 int sbm_link_boot(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot *b);
+/* Stage 5 prep (sbm_clk.c): the ECT clock table at the legacy map's reserved area, written before INIT_END. Returns
+ * its size (248 on this phone) or SBM_E*. */
+#define SBM_CLK_TABLE_OFF 40
+uint32_t sbm_clk_table_size(void);
+int sbm_clk_table_write(uint8_t *ipc, uint32_t ipc_size);
 /* Park: Android's power-off. Safe to call more than once and when nothing was started. */
 int sbm_cp_park(const struct sbm_plat *p);
 void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b);
