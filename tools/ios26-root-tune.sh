@@ -29,7 +29,10 @@ if [ "${1:-}" = --undo ]; then
     [ -s "$L" ] || { echo "$L missing"; exit 1; }
     (cd "$dir" && shasum -a 256 -c originals.sha256)
     args=("$L=/System/Library/xpc/launchd.plist:644")
-    [ -s "$D" ] && args+=("$D=/System/Library/xpc/launchd-disabled.plist:644")
+    # launchd-disabled.plist is our own keep-file (launchd never reads it): only put back a copy that parses
+    if [ -s "$D" ] && python3 -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$D" 2>/dev/null; then
+        args+=("$D=/System/Library/xpc/launchd-disabled.plist:644")
+    fi
     A="$dir/private__var__mobile__Library__Preferences__com.apple.Accessibility.plist"
     [ -s "$A" ] || { A="$dir/ax-empty.plist"; python3 -c 'import plistlib,sys; plistlib.dump({}, open(sys.argv[1], "wb"), fmt=plistlib.FMT_BINARY)' "$A"; }
     args+=("$A=/private/var/mobile/Library/Preferences/com.apple.Accessibility.plist:600:501:501")
