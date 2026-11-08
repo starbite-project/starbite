@@ -65,7 +65,7 @@ loader*) ;;
 *) say "RESULT not-ready: phone neither in TWRP nor at the loader ($st)"; exit 2 ;;
 esac
 loader_logs pre
-say "boot android"; $SBFB boot android >> "$S" 2>&1
+BOOTKEY=${BOOTKEY:-android}; say "boot $BOOTKEY"; $SBFB boot "$BOOTKEY" >> "$S" 2>&1
 sleep 4
 
 t0=$(date +%s); last=""; seen_android=0; left=0; n=0; lcpid=""; result=""

@@ -415,13 +415,13 @@ wdt_feed = "own"
 # Wi-Fi bring-up test (docs/WIFI-BCM4361.md 9, branch claude/wifi-core-c56c49 eab2408): T1 PCIe link. Hold Volume Up 2 s
 # to start; no storage writes, VENDOR read only, radio unpowered at the end.
 [[entry]]
-key = "menutrial"
-name = "Menu trial"
-version = "new loader, 4-core menu"
+key = "menuhandoff"
+name = "Menu hand-off test"
+version = "4-core menu, then One UI"
 category = "lab"
 method = "bare"
 tag = "lab"
-files = ["menutrial.img"]
+files = ["menuhandoff.img"]
 flags = ["hidden"]
 wdt = 0
 wdt_feed = "own"
