@@ -12,12 +12,14 @@ export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode_16.4.app/Contents/Deve
 name=$1 cmdline=$2
 KERNEL=${KERNEL:-out/kernel.development.starlte-12377}
 ADT=${ADT:-out/starlte-iphone11.adt}
-MAX_CMDLINE=607                         # mkpayload.py BOOT_LINE_LENGTH - 1
+MAX_CMDLINE=583                         # 607 (mkpayload.py BOOT_LINE_LENGTH - 1) minus 24 for the loader's
+                                        # " sbcrash=loader sbwdt=NN": sb_line_edit stops at the first token that
+                                        # does not fit, and a dropped sbwdt= means no watchdog (2026-11-08)
 [ -f "$KERNEL" ] || { echo "no $KERNEL: tools/build-xnu-12377.sh"; exit 1; }
 line=$(cat "$cmdline")
 case "$line" in *$'\n'*) echo "$cmdline: more than one line"; exit 1 ;; esac
 n=$(printf '%s' "$line" | wc -c | tr -d ' ')
-[ "$n" -le "$MAX_CMDLINE" ] || { echo "$cmdline: cmdline $n bytes > $MAX_CMDLINE (it would be cut)"; exit 1; }
+[ "$n" -le "$MAX_CMDLINE" ] || { echo "$cmdline: cmdline $n bytes > $MAX_CMDLINE (the loader would drop its watchdog tokens)"; exit 1; }
 trap 'rm -f "$KERNEL.x"' EXIT           # the 21 MB stripped copy is only an input
 cp "$KERNEL" "$KERNEL.x"
 xcrun strip -x "$KERNEL.x"
