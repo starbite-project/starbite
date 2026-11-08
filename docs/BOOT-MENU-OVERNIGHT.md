@@ -105,6 +105,14 @@ The phone dropped off USB and never came back: **it needs Power + Volume Down in
   CPU_OFF completed): PASS. The pre-fix code also passes there (the race window is tiny), so QEMU doesn't decide
   which candidate it was.
 
+### 4.1a Root cause (2026-11-08 09:15, pmsg saved after the user's reset: `build/menu/mb1-hang-pmsg.txt`)
+It wasn't a hang. The test loader ran POST, started cores 1-3 (all checked in: `smp 222004`), then declined v7:
+`too slow (bake over 400 ms)` (436 ms; MB1 didn't parallelize the bake yet). BOOT's command line carries `starmenu7=2`
+(skip the check), but a chained loader doesn't get BOOT's command line. So menu v6 ran, and v6 doesn't serve
+background fastboot: the phone sat in the v6 menu with no USB and no watchdog. Fixed in e1e4d5d: test builds default
+to `starmenu7=2` (`M7_MODE_DEFAULT`); MB3 and the trial images were rebuilt. (Follow-up for the loader owner: v6
+could poll fbbg too, so a v6 fallback is never unreachable.)
+
 ### 4.2 MB3 (replaces MB1/MB2; `side-session-notes/…/menu-bench-3-request.md`)
 Both have the stub's 75 s dead-man and pmsg breadcrumbs (`STARBITE v7 bench: menu7 up / cores … / bake
 done / intro done`, per-core `CPU_ON` / `checked in` lines):
