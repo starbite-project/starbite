@@ -177,6 +177,7 @@ void sb_main(void)
         .linux_base = SBG_S9_LINUX_BASE, .linux_size = SBG_S9_LINUX_SIZE,
         .shm_base = SBG_S9_SHM_BASE, .shm_size = SBG_S9_SHM_SIZE,
         .gicd = GICD, .first_mpidr = 0x100,
+        .tramp_pa = SB_TEST_BASE,                   /* below 4 GiB, non-cacheable here (P1: a high entry is lost) */
         .surf_w = SW, .surf_h = SH,
         .db_guest = P2_DB_GUEST, .db_host = P2_DB_HOST,
         .host_lines = {0},

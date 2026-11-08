@@ -197,22 +197,30 @@ struct sbshm_prz {
 };
 
 /* ---- the M3 entry trampoline ------------------------------------------------------------------------
- * PSCI CPU_ON enters at `entry` with the MMU off; x0 should be the context id, but on the S9 that is not
- * proven (libsb's sb_smp_own_record checks it), so the trampoline loads the DTB address itself. The arm64
- * boot protocol wants x0 = DTB, x1..x3 = 0, MMU off. The host copies these words to
- * SHM_BASE + SBSHM_TRAMP_OFF, patches the Image address into words 6/7 and the DTB address into 8/9, and
- * passes the trampoline as the entry (and the DTB as context id as well). */
-#define SBG_TRAMP_IMG 6
-#define SBG_TRAMP_DTB 8
-static const uint32_t sbg_tramp[10] = {
-    0x58000100U,                    /* ldr x0, #32  (the DTB address at word 8) */
+ * PSCI CPU_ON enters at `entry` with the MMU off. On the S9 the entry must be BELOW 4 GiB: P1 (2026-11-08)
+ * CPU_ON'd an M3 at 0x8_8008_0000, PSCI said 0, the cluster powered up and the core never ran (the XNU port
+ * hit the same: NOTES.md 2026-10-26, "the <4 GiB CPU_ON trampoline"). So the host puts these words in a page
+ * of its own below 4 GiB (Starbite OS: its non-cacheable window at 0xa010_0000; QEMU: the shared header page)
+ * and passes them as the entry. x0 should be the context id, but the trampoline loads the DTB address
+ * itself; the arm64 boot protocol wants x0 = DTB, x1..x3 = 0, MMU off. The first instruction leaves a
+ * breadcrumb (its own address, at word 12) so the host can tell "never ran" from "ran and stalled later".
+ * The host patches the Image address into words 8/9 and the DTB address into 10/11. */
+#define SBG_TRAMP_IMG 8
+#define SBG_TRAMP_DTB 10
+#define SBG_TRAMP_CRUMB 12
+#define SBG_TRAMP_WORDS 14
+static const uint32_t sbg_tramp[SBG_TRAMP_WORDS] = {
+    0x10000185U,                    /* adr x5, #48  (word 12) */
+    0xf90000a5U,                    /* str x5, [x5]  the breadcrumb */
+    0x58000100U,                    /* ldr x0, #32  (the DTB address at word 10) */
     0xaa1f03e1U,                    /* mov x1, xzr */
     0xaa1f03e2U,                    /* mov x2, xzr */
     0xaa1f03e3U,                    /* mov x3, xzr */
-    0x58000044U,                    /* ldr x4, #8   (the Image address at word 6) */
+    0x58000044U,                    /* ldr x4, #8   (the Image address at word 8) */
     0xd61f0080U,                    /* br  x4 */
     0, 0,                           /* Image physical address (low, high) */
     0, 0,                           /* DTB physical address (low, high) */
+    0, 0,                           /* breadcrumb */
 };
 
 #endif

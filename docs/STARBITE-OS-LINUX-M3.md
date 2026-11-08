@@ -33,7 +33,10 @@ Code: `starbite/guest/` (all new, owned by this work).
 | The interim fix: Starbite re-asserts its lines from its tick | **QEMU** (lines taken 4, re-asserted 4, 0 interrupts lost) |
 | The real fix: `starbite,shared-distributor` patch (22 lines) | **QEMU, strict, 2/2 boots**: the S9 Image built with it leaves the distributor alone; host lines taken 0, own line lost 0 |
 | The probe's M3 stub (x0, interface bit, WFI wake on the doorbell, host doorbell, CPU_OFF) | **QEMU, 4/4 CPUs**; phone: P1 staged (10) |
-| Anything on the phone | **not yet**: P1 → P2 → P3 (10) |
+| The high bank: free, read/write from the A55 (100 × 16 MiB) | **phone, P1** |
+| Doorbell SPIs: INTIDs 511 (to the guest) and 510 (to the host): idle, non-secure, software-pendable | **phone, P1** |
+| A CPU_ON entry above 4 GiB never runs | **phone, P1** (core lost); P1b checks the fix |
+| Linux on the phone's M3s | not yet: P1b → P2 → P3 (10) |
 
 ## 2. Starting the M3 cluster with Linux
 
@@ -42,9 +45,12 @@ Code: `starbite/guest/` (all new, owned by this work).
    shared header, rings and log zone and writes the header (`sbg_load`).
 2. The M3 vendor PMU defaults (`sb_m3_pmu_defaults`: the six fields the daily Linux already writes with
    `s9p_vendor_m3_defaults`, xnu patch 0304), once per cluster power-up.
-3. PSCI `CPU_ON(0x100, trampoline, dtb)`. The trampoline (`sbg_tramp`, 10 words in the shared header page) sets
-   x0 = the DTB and x1..x3 = 0 and branches to the Image: the arm64 boot protocol, without relying on the
-   firmware passing the context id (libsb only *checks* that, `sb_smp_own_record`; P1 measures it).
+3. PSCI `CPU_ON(0x100, trampoline, dtb)`. **The entry must be below 4 GiB** (P1 on the phone: an entry at
+   0x8_8008_0000 got CPU_ON = 0, the cluster powered, the core never ran; the XNU port needed the same
+   "<4 GiB CPU_ON trampoline", NOTES.md 2026-10-26). So the trampoline (`sbg_tramp`, 14 words) lives in a
+   page of Starbite OS's below 4 GiB (its non-cacheable window, 0xa010_0000; `sbg_cfg.tramp_pa`). It leaves a
+   breadcrumb, sets x0 = the DTB and x1..x3 = 0, and branches to the Image in the high bank (a 64-bit
+   register branch is fine). The context id isn't relied on.
 4. Linux brings up 0x101..0x103 itself with PSCI 0.1 `cpu_on` from its DT. The guest's DT is not
    `samsung,exynos9810`, so the S9 port's per-core PMU writes stay off.
 
@@ -201,7 +207,9 @@ driver is upstream's, so this Image can replace the daily one once the phone sta
 
 ## 10. Phone plan (through the main session; each stage gated on the previous)
 
-- **P1 — probe, no Linux** (`starbite/guest/probe`, staged): carve-out read/write in 16 MiB steps; doorbell
+- **P1 — probe, no Linux** (`starbite/guest/probe`, ran 2026-11-08 17:43: carve-out ok, doorbells 511/510, M3
+  0x100 entered at 0x8_8008_0000 never ran → the 4 GiB rule; **P1b** runs one start path per core with
+  breadcrumbs: libsb's worker start, the stub below 4 GiB, the low trampoline → high stub, the high entry). P1: carve-out read/write in 16 MiB steps; doorbell
   candidates; the vendor PMU defaults; the M3 stub on 0x100..0x103 (MPIDR, EL, x0 vs the context id, GIC
   interface bit, WFI wake by the doorbell, host doorbell back, CPU_OFF); afterwards AFFINITY_INFO and the
   cluster's PMU state. About 15 s, the loader's watchdog fed, then a restart into recovery. Pass: `gprobe:

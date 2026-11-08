@@ -19,6 +19,9 @@ static unsigned line_n;
 #define H2G ((struct sbshm_ring *)SHM(SBSHM_H2G_OFF))
 #define G2H ((struct sbshm_ring *)SHM(SBSHM_G2H_OFF))
 
+static uint64_t tramp_pa(void) { return cfg.tramp_pa ? cfg.tramp_pa : cfg.shm_base + SBSHM_TRAMP_OFF; }
+static uint64_t crumb(void) { return *(volatile uint64_t *)(uintptr_t)(tramp_pa() + 4 * SBG_TRAMP_CRUMB); }
+
 static inline uint32_t rd32(uintptr_t a) { return *(volatile uint32_t *)a; }
 static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
 
@@ -214,8 +217,8 @@ int sbg_load(const void *image, uint64_t image_size, const void *dtb, uint64_t d
     h->surf_off[1] = (uint32_t)(SBSHM_SURF_OFF + surf);
     h->oops_off = SBSHM_OOPS_OFF;
     h->oops_size = SBSHM_OOPS_SIZE;
-    volatile uint32_t *tr = (volatile uint32_t *)SHM(SBSHM_TRAMP_OFF);
-    for (unsigned i = 0; i < 10; ++i)
+    volatile uint32_t *tr = (volatile uint32_t *)(uintptr_t)tramp_pa();
+    for (unsigned i = 0; i < SBG_TRAMP_WORDS; ++i)
         tr[i] = sbg_tramp[i];
     uint64_t dtb_pa = cfg.linux_base + SBG_DTB_OFF;
     tr[SBG_TRAMP_IMG] = (uint32_t)img_pa;
@@ -243,12 +246,12 @@ int sbg_start(void)
     }
     t_start = os->ms();
     st.boots++;
-    int64_t r = os->cpu_on(cfg.first_mpidr, cfg.shm_base + SBSHM_TRAMP_OFF, cfg.linux_base + SBG_DTB_OFF);
+    int64_t r = os->cpu_on(cfg.first_mpidr, tramp_pa(), cfg.linux_base + SBG_DTB_OFF);
     struct tb t = {.n = 0};
     t_s(&t, "guest: CPU_ON(");
     t_x(&t, cfg.first_mpidr);
     t_s(&t, ", trampoline ");
-    t_x(&t, cfg.shm_base + SBSHM_TRAMP_OFF);
+    t_x(&t, tramp_pa());
     t_s(&t, ") = ");
     if (r < 0) {
         t_s(&t, "-");
@@ -402,6 +405,14 @@ void sbg_poll(void)
     }
     if (st.state == SBG_BOOTING && t - t_start > cfg.boot_timeout_ms) {
         log_stream();
+        struct tb tb = {.n = 0};
+        t_s(&tb, "guest: no HELLO: trampoline breadcrumb ");
+        t_x(&tb, crumb());
+        t_s(&tb, crumb() == tramp_pa() + 4 * SBG_TRAMP_CRUMB ? " (the core ran the trampoline)"
+                                                            : " (the core never reached the trampoline)");
+        t_s(&tb, ", ramoops ");
+        t_s(&tb, ((volatile struct sbshm_prz *)SHM(SBSHM_OOPS_OFF))->sig == SBSHM_PRZ_SIG ? "up" : "never set up");
+        say(&tb);
         fail("no HELLO before the boot timeout (the M3 cluster stays on until the next reset)");
         return;
     }

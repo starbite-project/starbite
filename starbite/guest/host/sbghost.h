@@ -32,6 +32,8 @@ struct sbg_cfg {
     uint64_t shm_base, shm_size;
     uint64_t gicd;                                  /* GIC distributor, for the doorbells and the line checks */
     uint64_t first_mpidr;                           /* the guest's boot CPU: 0x100 on the S9, 4 on QEMU */
+    uint64_t tramp_pa;                              /* the entry trampoline: BELOW 4 GiB on the S9 (sbshm.h), in
+                                                     * host memory mapped non-cacheable; 0 = the shared header page */
     uint32_t surf_w, surf_h;                        /* the guest surface (XRGB8888, two buffers) */
     uint32_t db_guest, db_host;                     /* doorbell INTIDs (0: none, the guest polls) */
     uint32_t host_lines[8];                         /* INTIDs the host owns (checked + repaired), 0-terminated */

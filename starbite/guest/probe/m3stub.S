@@ -10,18 +10,22 @@
  * woke it, rings the host's doorbell SPI (GICD_ISPENDR) unless it was the timeout, turns its CPU interface off and
  * calls PSCI CPU_OFF. Block (64-bit words): 0 state (1 waiting, 2 done, 3 CPU_OFF returned), 1 MPIDR,
  * 2 CurrentEL, 3 x0, 4 cpuif, 5 INTID that woke it, 6 CNTFRQ, 7 WFIs, 8 CNTVCT at entry, 9 SCTLR,
- * 10 CNTVCT at the end, 11 CPU_OFF's return.
+ * 10 CNTVCT at the end, 11 CPU_OFF's return, 12 breadcrumb 2 (= the stub's crumb address).
+ * Breadcrumb 1: m3stub_crumb (the last quad of the stub) = its own address, written by the first instruction.
  */
     .section .rodata.m3stub, "a"
     .balign 8
-    .global m3stub_start, m3stub_lit, m3stub_end
+    .global m3stub_start, m3stub_lit, m3stub_crumb, m3stub_end
 m3stub_start:
+    adr     x8, m3stub_crumb
+    str     x8, [x8]                /* breadcrumb 1: the stub's first instruction ran (its own address) */
     adr     x9, m3stub_lit
     ldr     x10, [x9, #0]           /* the result block */
     ldr     x11, [x9, #8]           /* GICD */
     ldr     x12, [x9, #16]          /* GICC */
     ldr     w13, [x9, #24]          /* the host's doorbell INTID (0: none) */
     ldr     x14, [x9, #32]          /* timeout, counter ticks */
+    str     x8, [x10, #96]          /* breadcrumb 2: the literals and the block are reachable */
     str     x0, [x10, #24]
     mrs     x1, cntvct_el0
     str     x1, [x10, #64]
@@ -97,4 +101,6 @@ m3stub_start:
     .balign 8
 m3stub_lit:
     .quad   0, 0, 0, 0, 0
+m3stub_crumb:
+    .quad   0
 m3stub_end:

@@ -421,7 +421,7 @@ static int stub_test(void)
         volatile uint64_t *l = (volatile uint64_t *)(uintptr_t)(at + lit);
         l[0] = blk; l[1] = GICD; l[2] = GICC; l[3] = dbh; l[4] = 2 * frq;
         volatile uint32_t *tr = (volatile uint32_t *)(uintptr_t)(SBG_QEMU_SHM_BASE + SBSHM_TRAMP_OFF);
-        for (unsigned i = 0; i < 10; ++i)
+        for (unsigned i = 0; i < SBG_TRAMP_WORDS; ++i)
             tr[i] = sbg_tramp[i];
         tr[SBG_TRAMP_IMG] = (uint32_t)at;
         tr[SBG_TRAMP_IMG + 1] = 0;
@@ -480,6 +480,13 @@ static int stub_test(void)
         putu((uint64_t)off);
         puts_("\n");
         uint64_t want_x0 = c == 0 ? 0x434f4e54U + c : 0x44544221U + c;
+        uint64_t crumb = ((volatile uint64_t *)tr)[SBG_TRAMP_CRUMB / 2];
+        if (c && crumb != SBG_QEMU_SHM_BASE + SBSHM_TRAMP_OFF + 4 * SBG_TRAMP_CRUMB) {
+            puts_("sbsim: the trampoline breadcrumb is wrong: ");
+            putx(crumb);
+            puts_("\n");
+            continue;
+        }
         if (!r && b->state == 2 && b->intid == dbg && host_back && off && b->x0 == want_x0 && cif == (1U << (4 + c)))
             ++ok;
     }

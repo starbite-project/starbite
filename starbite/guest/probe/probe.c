@@ -162,42 +162,112 @@ static int try_line(unsigned id)
 }
 
 struct blk {
-    uint64_t state, mpidr, el, x0, cpuif, intid, frq, wfis, t0, sctlr, t1, off_ret;
+    uint64_t state, mpidr, el, x0, cpuif, intid, frq, wfis, t0, sctlr, t1, off_ret, crumb2;
 };
 
-/* step 4: one M3 core. 1 passed */
-static int m3_core(unsigned c, unsigned db_guest, unsigned db_host, uint64_t magic_ctx, uint64_t magic_dtb)
+/* P1b (after P1: CPU_ON of 0x100 at 0x8_8008_0000 said 0 and the core never ran) -- one start path per core:
+ *   0x100 CTRL      libsb's worker start (the heater's proven path: sb_smp_start, entry in this image)
+ *   0x101 LOWSTUB   the stub copied below 4 GiB (the non-cacheable window), its block there too
+ *   0x102 LOWTRAMP  the sbshm trampoline below 4 GiB -> the stub in the high bank, block in the high bank:
+ *                   exactly Linux's layout (the trampoline is what changes for P2)
+ *   0x103 HIGH      P1's start: the stub entered directly at 0x8_8008_0000 (expected to be lost: last) */
+enum { M_CTRL, M_LOWSTUB, M_LOWTRAMP, M_HIGH };
+static const char *const mname[] = {"control (libsb worker)", "stub below 4 GiB", "trampoline below 4 GiB -> high stub",
+                                    "stub entered at 0x8_8008_0000"};
+#define LOW SB_TEST_BASE                 /* 0xa010_0000: non-cacheable for the A55, below 4 GiB */
+#define LOW_TRAMP (LOW + 0x0)
+#define LOW_BLK (LOW + 0x800)
+#define LOW_STUB (LOW + 0x1000)
+extern const char m3stub_crumb[];
+
+static void ctrl_fn(unsigned w, void *arg)
 {
-    volatile struct blk *b = (volatile struct blk *)BLK;
-    volatile uint64_t *bw = (volatile uint64_t *)BLK;
-    for (unsigned i = 0; i < sizeof(struct blk) / 8; ++i)
-        bw[i] = 0;
-    /* the stub at the Image address, its literals patched */
+    (void)w;
+    (void)arg;
+}
+
+static void put_stub(uint64_t at, uint64_t blk, unsigned db_host)
+{
     uint64_t n = (uint64_t)(m3stub_end - m3stub_start), lit = (uint64_t)(m3stub_lit - m3stub_start);
     for (uint64_t i = 0; i < n; i += 4)
-        *(volatile uint32_t *)(uintptr_t)(STUB_AT + i) = *(const uint32_t *)(m3stub_start + i);
-    volatile uint64_t *L5 = (volatile uint64_t *)(uintptr_t)(STUB_AT + lit);
-    L5[0] = BLK;
-    L5[1] = GICD;
-    L5[2] = GICC;
-    L5[3] = db_host;
-    L5[4] = 2U * sb_freq();                         /* the stub's timeout: 2 s */
-    /* the sbshm trampoline (x0 = its DTB literal) */
-    volatile uint32_t *tr = (volatile uint32_t *)(uintptr_t)(SHM + SBSHM_TRAMP_OFF);
-    for (unsigned i = 0; i < 10; ++i)
-        tr[i] = sbg_tramp[i];
-    tr[SBG_TRAMP_IMG] = (uint32_t)STUB_AT;
-    tr[SBG_TRAMP_IMG + 1] = (uint32_t)(STUB_AT >> 32);
-    tr[SBG_TRAMP_DTB] = (uint32_t)magic_dtb;
-    tr[SBG_TRAMP_DTB + 1] = (uint32_t)(magic_dtb >> 32);
-    __asm__ volatile("dsb sy" ::: "memory");
-    int direct = c == 0;
-    uint64_t entry = direct ? STUB_AT : SHM + SBSHM_TRAMP_OFF;
-    int64_t r = (int32_t)sb_psci(SB_PSCI_CPU_ON, 0x100U + c, entry, magic_ctx);
+        *(volatile uint32_t *)(uintptr_t)(at + i) = *(const uint32_t *)(m3stub_start + i);
+    volatile uint64_t *l = (volatile uint64_t *)(uintptr_t)(at + lit);
+    l[0] = blk;
+    l[1] = GICD;
+    l[2] = GICC;
+    l[3] = db_host;
+    l[4] = 2U * sb_freq();                          /* the stub's timeout: 2 s */
+}
+
+static void crumbs(uint64_t stub, uint64_t blk, int tramp)
+{
+    uint64_t c1 = *(volatile uint64_t *)(uintptr_t)(stub + (uint64_t)(m3stub_crumb - m3stub_start));
+    uint64_t c2 = ((volatile struct blk *)(uintptr_t)blk)->crumb2;
+    ub_s(&u, "  breadcrumbs:");
+    if (tramp) {
+        uint64_t c0 = *(volatile uint64_t *)(uintptr_t)(LOW_TRAMP + 4 * SBG_TRAMP_CRUMB);
+        ub_s(&u, " trampoline ");
+        ub_s(&u, c0 == LOW_TRAMP + 4 * SBG_TRAMP_CRUMB ? "RAN" : c0 ? "odd " : "never");
+        if (c0 && c0 != LOW_TRAMP + 4 * SBG_TRAMP_CRUMB)
+            hx(c0);
+        ub_c(&u, ',');
+    }
+    ub_s(&u, " stub's first instruction ");
+    ub_s(&u, c1 ? "RAN" : "never");
+    ub_s(&u, ", block reached ");
+    ub_s(&u, c2 ? "yes" : "no");
+    ub_s(&u, "; block words:");
+    for (unsigned i = 0; i < 6; ++i) {
+        ub_c(&u, ' ');
+        hx(((volatile uint64_t *)(uintptr_t)blk)[i]);
+    }
+    L();
+}
+
+/* one M3 core along one start path. 1 passed */
+static int m3_core(unsigned c, int mode, unsigned db_guest, unsigned db_host, uint8_t *cif_out)
+{
+    unsigned w = 4 + c;
     ub_s(&u, "M3 0x10");
     ub_dec(&u, c);
-    ub_s(&u, direct ? " direct" : " trampoline");
-    ub_s(&u, ": CPU_ON ");
+    ub_s(&u, " (");
+    ub_s(&u, mname[mode]);
+    ub_s(&u, "): ");
+    if (mode == M_CTRL) {
+        int64_t r = sb_smp_start(w, ctrl_fn, 0);
+        uint64_t t0 = sb_ms();
+        while (r == 0 && sb_smp_slot(w)->state == SB_WK_RUNNING && sb_ms() - t0 < 1000)
+            wait_ms(1);
+        const struct sb_wslot *sl = sb_smp_slot(w);
+        ub_s(&u, "sb_smp_start ");
+        ub_sdec(&u, r);
+        ub_s(&u, ", slot state ");
+        ub_dec(&u, sl->state);
+        ub_s(&u, ", MPIDR ");
+        hx(sl->mpidr);
+        ub_s(&u, ", own record ");
+        ub_dec(&u, (uint64_t)sb_smp_own_record(w));
+        L();
+        return r == 0 && sl->state == SB_WK_DONE;
+    }
+    uint64_t stub = mode == M_LOWSTUB ? LOW_STUB : STUB_AT, blk = mode == M_LOWSTUB ? LOW_BLK : BLK;
+    volatile struct blk *b = (volatile struct blk *)(uintptr_t)blk;
+    for (unsigned i = 0; i < sizeof(struct blk) / 8; ++i)
+        ((volatile uint64_t *)(uintptr_t)blk)[i] = 0;
+    put_stub(stub, blk, db_host);
+    volatile uint32_t *tr = (volatile uint32_t *)(uintptr_t)LOW_TRAMP;
+    for (unsigned i = 0; i < SBG_TRAMP_WORDS; ++i)
+        tr[i] = sbg_tramp[i];
+    tr[SBG_TRAMP_IMG] = (uint32_t)stub;
+    tr[SBG_TRAMP_IMG + 1] = (uint32_t)(stub >> 32);
+    tr[SBG_TRAMP_DTB] = 0x44544221U + c;            /* the "DTB" the trampoline loads into x0 */
+    tr[SBG_TRAMP_DTB + 1] = 0;
+    __asm__ volatile("dsb sy" ::: "memory");
+    uint64_t entry = mode == M_LOWTRAMP ? LOW_TRAMP : stub, ctx = 0x5b5b5b00U | w;
+    int64_t r = (int32_t)sb_psci(SB_PSCI_CPU_ON, 0x100U + c, entry, ctx);
+    ub_s(&u, "CPU_ON(entry ");
+    hx(entry);
+    ub_s(&u, ") ");
     ub_sdec(&u, r);
     if (r) {
         L();
@@ -207,30 +277,28 @@ static int m3_core(unsigned c, unsigned db_guest, unsigned db_host, uint64_t mag
     while (b->state < 1 && sb_ms() - t0 < 1000)
         wait_ms(1);
     if (b->state < 1) {
-        ub_s(&u, ", no check-in in 1 s (the core is lost; the cluster stays on until the reset)");
+        ub_s(&u, ", no check-in in 1 s (the core is lost until the reset)");
         L();
+        crumbs(stub, blk, mode == M_LOWTRAMP);
         return 0;
     }
-    uint64_t t_in = sb_ms() - t0;
     uint8_t cif = (uint8_t)b->cpuif;
+    *cif_out = cif;
     ub_s(&u, ", in after ");
-    ub_dec(&u, t_in);
+    ub_dec(&u, sb_ms() - t0);
     ub_s(&u, " ms: MPIDR ");
     hx(b->mpidr);
     ub_s(&u, " EL");
     ub_dec(&u, (b->el >> 2) & 3U);
     ub_s(&u, " x0 ");
-    ub_s(&u, b->x0 == magic_ctx ? "=context id" : b->x0 == magic_dtb ? "=DTB literal" : "other ");
-    if (b->x0 != magic_ctx && b->x0 != magic_dtb)
+    ub_s(&u, b->x0 == ctx ? "=context id" : b->x0 == 0x44544221U + c ? "=DTB literal" : "other ");
+    if (b->x0 != ctx && b->x0 != 0x44544221U + c)
         hx(b->x0);
     ub_s(&u, " cpuif ");
     ub_hex(&u, cif, 2);
-    ub_s(&u, " CNTFRQ ");
-    ub_dec(&u, b->frq);
     ub_s(&u, " SCTLR ");
     hx(b->sctlr);
     L();
-    /* the doorbell to the core's own interface */
     unsigned others = 0;
     int db_ok = 0, host_ok = 0;
     if (db_guest && cif) {
@@ -251,7 +319,6 @@ static int m3_core(unsigned c, unsigned db_guest, unsigned db_host, uint64_t mag
             wait_ms(1);
     }
     wait_ms(20);
-    int64_t aff = sb_smp_affinity(4 + c);
     ub_s(&u, "M3 0x10");
     ub_dec(&u, c);
     ub_s(&u, ": state ");
@@ -267,13 +334,13 @@ static int m3_core(unsigned c, unsigned db_guest, unsigned db_host, uint64_t mag
         ub_s(&u, " us in the stub, ");
     }
     ub_s(&u, host_ok ? "host doorbell back ok" : "host doorbell NOT back");
-    ub_s(&u, ", AFFINITY_INFO ");
-    ub_sdec(&u, aff);
     if (b->state == 3) {
         ub_s(&u, ", CPU_OFF RETURNED ");
         ub_sdec(&u, (int64_t)(int32_t)b->off_ret);
     }
     L();
+    if (b->state < 2)
+        crumbs(stub, blk, mode == M_LOWTRAMP);
     return b->state == 2 && db_ok && host_ok;
 }
 
@@ -283,7 +350,7 @@ void sb_main(void)
     ub_s(&u, "gprobe: ");
     uint64_t mpidr;
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-    ub_s(&u, "guest-probe P1 (Starbite OS 0.9 app support, no Linux): EL");
+    ub_s(&u, "guest-probe P1b (Starbite OS 0.9 app support, no Linux): EL");
     ub_dec(&u, (sb_boot.el >> 2) & 3U);
     ub_s(&u, ", MPIDR ");
     hx(mpidr);
@@ -369,20 +436,13 @@ void sb_main(void)
     ub_s(&u, "M3 vendor PMU defaults: ");
     ub_s(&u, pmu ? "set (read back)" : "a read FAILED");
     L();
-    unsigned m3ok = 0, m3run = 0;
+    int res[4] = {0, 0, 0, 0};
     uint8_t cif[4] = {0};
-    if (pmu) {
-        for (unsigned c = 0; c < 4; ++c) {
-            ++m3run;
-            int r = m3_core(c, db[0], db[1], 0x53423930434f4e54ULL + c, 0x5342393044544221ULL + c);
-            cif[c] = (uint8_t)((volatile struct blk *)BLK)->cpuif;
-            if (r)
-                ++m3ok;
-            else if (((volatile struct blk *)BLK)->state < 1)
-                break;                      /* a lost core: do not start the next one */
+    if (pmu)
+        for (unsigned c = 0; c < 4; ++c) {          /* every path runs: each answers its own question */
+            res[c] = m3_core(c, (int)c, db[0], db[1], &cif[c]);
             feed();
         }
-    }
     wait_ms(50);
 
     /* 5. after */
@@ -399,7 +459,8 @@ void sb_main(void)
         ub_sdec(&u, sb_smp_affinity(4 + c));
     }
     L();
-    int pass = ok > 0 && !bad && nd == 2 && m3ok == 4;
+    /* what P2 needs: the control and both "below 4 GiB" paths; the high entry only tells why P1 failed */
+    int pass = ok > 0 && !bad && nd == 2 && res[M_CTRL] && res[M_LOWSTUB] && res[M_LOWTRAMP];
     ub_s(&u, "RESULT ");
     ub_s(&u, pass ? "PASS" : "FAIL");
     ub_s(&u, ": carve-out ");
@@ -408,10 +469,14 @@ void sb_main(void)
     ub_dec(&u, db[0]);
     ub_c(&u, '/');
     ub_dec(&u, db[1]);
-    ub_s(&u, ", M3 cores ");
-    ub_dec(&u, m3ok);
-    ub_c(&u, '/');
-    ub_dec(&u, m3run ? 4 : 0);
+    ub_s(&u, ", M3 paths: control ");
+    ub_s(&u, res[M_CTRL] ? "ok" : "FAIL");
+    ub_s(&u, ", low stub ");
+    ub_s(&u, res[M_LOWSTUB] ? "ok" : "FAIL");
+    ub_s(&u, ", low trampoline->high ");
+    ub_s(&u, res[M_LOWTRAMP] ? "ok" : "FAIL");
+    ub_s(&u, ", high entry ");
+    ub_s(&u, res[M_HIGH] ? "ok (so not the 4 GiB rule)" : "lost (the 4 GiB rule)");
     ub_s(&u, "; restarting into recovery in 5 s");
     L();
     wait_ms(5000);
