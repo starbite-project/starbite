@@ -491,6 +491,9 @@ int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz, int tier, const uint32_t 
 int sb_acpm_dvfs_get(uint32_t domain, uint32_t *khz);
 int sb_acpm_dvfs_baseline(uint32_t domain, uint32_t *khz);
 int sb_acpm_dvfs_revert(uint32_t domain);
+/* The baseline from the caller (the PLL's step: this firmware answers FREQ_GET with 0): set once,
+ * only before any request named the domain; 1 set or already equal. */
+int sb_acpm_dvfs_set_baseline(uint32_t domain, uint32_t khz);
 /* Non-zero once a DVFS message timed out or a late reply was dropped (acpm_send drains stale
  * replies before each request): FREQ_GET is then not proof on its own. */
 unsigned sb_acpm_dvfs_untrusted(void);

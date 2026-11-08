@@ -638,8 +638,15 @@ domain (0 MIF, 1 INT, 2 A55, 3 M3, 4 G3D, 5 INTCAM, 6 FSYS0, 7 CAM, 8 DISP, 9 AU
 - the frequency steps from **S-Boot's ECT** (DRAM 0xA0000000, read in place, never written: the DVFS
   block's level lists) and **Samsung's caps** (the GEN block's `MINMAX_<domain>` rows, one per ASV table
   version; until this chip's version is read, the lowest cap over the rows is shown);
-- **ACPM's voltage per step** from its fvmap in APM SRAM (first at the dtsi offset 0x6700, else a scan of
-  the SRAM; a block is accepted only if its A55, M3 and G3D rates are the ECT's);
+- **ACPM's voltage per step** from its fvmap in APM SRAM. Vendor `acpm/acpm.c`: SRAM + (the DVFS plugin's
+  `base_addr` & ~1) + `fvmap_offset` 0x6700 (+ the plugin's size for a dynamic plugin); the plugin is found
+  by name in `initdata->plugins` (0x30-byte entries, `fw_name` at +0x2C). Else a scan of the SRAM that skips
+  unreadable 4 KiB blocks. A block is accepted only if its A55, M3 and G3D rates are the ECT's. (SRAM +
+  0x6700 alone, the first guess, is not it: ocself-3 on the phone, 2026-11-08.)
+- **FREQ_GET does not work on this ACPM firmware**: it answers in time with 0 kHz for every domain
+  (ocself-3, 2026-11-08; the iOS port saw the same). 9810 Linux never asks it (cal-if reads the CMU), and
+  sends DVFS on channel index 0 (`acpm_dvfs.ch_num` is never set; channel id 5 is the MIF notification
+  channel). Every "current step" below therefore comes from the PLL, not from ACPM;
 - the **current step** where a PLL can be read (A55, M3, G3D, MIF: PLL_MIF runs at twice the MIF step).
 
 Clock tab rows after it moved: Real-time clock 0x67, Timer 0x68.
@@ -650,21 +657,22 @@ in Engineer OS, so a step could not be tested). Tapping a step:
 
 1. refuses anything that is not in both the ECT and the fvmap (`oct_allowed`; libsb's
    `sb_acpm_dvfs_listed` checks the list again; `sb_acpm_dvfs` refuses MIF / INT outright);
-2. reads ACPM's step (FREQ_GET) and libsb's baseline (the step before Engineer OS's first request) and
-   accepts it as the way back only if it is a listed step, at or below Samsung's cap, unchanged since
-   start, shown by the PLL (MIF must have a readable PLL; INT, which has none, must be on its boot or
-   fvmap init step), and every ACPM answer so far came in time;
+2. takes the way back from the PLL: the listed step the PLL shows (MIF and A55 must be readable; INT, and
+   M3 or G3D while powered off, have no PLL here: their ECT boot step is assumed), at or below Samsung's
+   cap, set once in libsb before any request names the domain (`sb_acpm_dvfs_set_baseline`), and only
+   while every ACPM answer so far came in time;
 3. G3D: powers the GPU first (the GPU page's tier 1 power-up);
 4. confirms: tier 3 for A55 / M3 / G3D up to Samsung's cap, **tier 4 for MIF, INT and every above-cap step**;
 5. arms the cluster 1 watchdog (40 s, `libsb/wdt.c`, fed from `ui_tick`) and **holds storage**
    (`sb_storage_hold`: every `sb_write` / `sb_write_store` returns `SB_W_HOLD`), then sends the request;
-6. reads FREQ_GET back; a different answer reverts at once;
+6. reads the PLL back; a PLL showing another step reverts at once. A domain with no PLL to read (INT, a
+   powered-off M3) cannot be verified: it is allowed, and storage stays held until restart;
 7. counts down 15 s: **Power keeps it**; Volume, Back or the timeout reverts;
 8. offers the stability test: A55 / M3 CPU stress on that cluster for 60 s, G3D GPU stress for 60 s,
    MIF / INT memory patterns (64 MiB, 3 passes). A failure reverts the domain.
 
-A revert counts as confirmed only when FREQ_GET reports the baseline **and** the PLL shows it (MIF always;
-domains without a readable PLL only while ACPM has never answered late). `acpm_send` drops replies left in
+A revert counts as confirmed only when the PLL shows the baseline (MIF and A55 always); for a domain with no
+PLL to read, ACPM taking the request is all there is, and storage then stays held until restart. `acpm_send` drops replies left in
 RX by timed-out requests before each send, and counts them (`sb_acpm_dvfs_untrusted`).
 
 The storage hold stays until the next restart (not only until the revert) once MIF or INT was changed, an

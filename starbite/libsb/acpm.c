@@ -206,6 +206,21 @@ int sb_acpm_dvfs_get(uint32_t domain, uint32_t *khz)
     return 1;
 }
 
+/* This ACPM firmware answers FREQ_GET with 0 (9810 Linux never asks it: cal-if reads the CMU), so
+ * the caller supplies the baseline from the PLL: accepted once, only before any request names the
+ * domain. */
+int sb_acpm_dvfs_set_baseline(uint32_t domain, uint32_t khz)
+{
+    if (domain >= SB_DVFS_NDOM || !khz || dvfs_touched[domain])
+        return 0;
+    if (dvfs_base_ok[domain])
+        return dvfs_base[domain] == khz;
+    dvfs_base[domain] = khz;
+    dvfs_base_ok[domain] = 1;
+    sb_logx("acpm dvfs baseline set (from the PLL), kHz ", khz);
+    return 1;
+}
+
 int sb_acpm_dvfs_baseline(uint32_t domain, uint32_t *khz)
 {
     if (domain >= SB_DVFS_NDOM || !dvfs_base_ok[domain])

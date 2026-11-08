@@ -751,11 +751,7 @@ int sb_acpm_dvfs_get(uint32_t domain, uint32_t *khz)
 {
     if (domain >= 13)
         return 0;
-    *khz = dvfs_now[domain];
-    if (!dvfs_base_ok[domain]) {
-        dvfs_base[domain] = *khz;
-        dvfs_base_ok[domain] = 1;
-    }
+    *khz = 0;                               /* as the phone's ACPM (ocself-3, 2026-11-08): FREQ_GET answers 0 */
     return 1;
 }
 int sb_acpm_dvfs_baseline(uint32_t domain, uint32_t *khz)
@@ -783,15 +779,21 @@ int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz, int tier, const uint32_t 
         listed |= steps[i] == khz && khz;
     if (domain >= 13 || !listed || sb_gate_check(SB_SP_DVFS, 0, domain, 1, tier < 3 ? 3 : tier, &why))
         return 0;
-    if (!dvfs_base_ok[domain]) {
-        dvfs_base[domain] = dvfs_now[domain];
-        dvfs_base_ok[domain] = 1;
-    }
     dvfs_set(domain, khz);
     sb_log("acpm dvfs (listed step) (host)");
     return 1;
 }
 unsigned sb_acpm_dvfs_untrusted(void) { return 0; }
+int sb_acpm_dvfs_set_baseline(uint32_t domain, uint32_t khz)
+{
+    if (domain >= 13 || !khz)
+        return 0;
+    if (dvfs_base_ok[domain])
+        return dvfs_base[domain] == khz;
+    dvfs_base[domain] = khz;
+    dvfs_base_ok[domain] = 1;
+    return 1;
+}
 int sb_acpm_dvfs_revert(uint32_t domain)
 {
     if (domain >= 13 || !dvfs_base_ok[domain])
@@ -1524,7 +1526,8 @@ static void labtour_generate(void)
     tadd("L:kept");
     lt_row(15);
     tadd("w:900");
-    tadd("L:oc reverted A55 1794000 kHz");
+    tadd("L:oc reverted (PLL agrees) A55 1794000 kHz");
+    tadd("L:oc baseline (PLL) A55 1794000 kHz");
     tadd("L:watchdog: disarmed (host)");
     tadd("L:storage hold lifted");
     lt_home(3);
@@ -1815,10 +1818,25 @@ static void seed(void)
     w32(0x10070048, (uint32_t)(top[5] + 25) | (uint32_t)(top[6] + 25) << 9 | (uint32_t)(top[7] + 25) << 18);
     w32(0x10074040, (uint32_t)(sub[0] + 25) | (uint32_t)(sub[1] + 25) << 9);
     w32(0x10074044, (uint32_t)(sub[2] + 25));
-    /* Overclocking: a synthetic ECT at 0xA0000000 and ACPM fvmap at SRAM + 0x6700 */
+    /* Overclocking: a synthetic ECT at 0xA0000000 and ACPM's plugin table and fvmap in APM SRAM */
     if (oc_fake_ect && oc_fake_fvmap) {
         (void)oc_fake_ect((uint8_t *)0xa0000000UL, 0x100000U);
-        (void)oc_fake_fvmap((uint8_t *)(0x02039000UL + 0x6700U), 0x2000U);
+        /* ACPM's plugin table as vendor acpm.c reads it (initdata +0x7F00: plugins, num_plugins; 0x30 bytes
+         * each: id, base_addr | 1, ..., size at +0x24, fw_name at +0x2C): PMIC, then DVFS at 0x10000 with its
+         * name at an unaligned offset; the fvmap at the DVFS plugin + 0x6700 */
+        w32(0x02039000UL + 0x7f00, 0x7000);
+        w32(0x02039000UL + 0x7f04, 2);
+        w32(0x02039000UL + 0x7000, 0);
+        w32(0x02039000UL + 0x7004, 0x4001);
+        w32(0x02039000UL + 0x7024, 0x2000);
+        w32(0x02039000UL + 0x702c, 0x7100);
+        memcpy((void *)(0x02039000UL + 0x7100), "PMIC", 5);
+        w32(0x02039000UL + 0x7030, 1);
+        w32(0x02039000UL + 0x7034, 0x10001);
+        w32(0x02039000UL + 0x7054, 0x6000);
+        w32(0x02039000UL + 0x705c, 0x7111);
+        memcpy((void *)(0x02039000UL + 0x7111), "ACPM_DVFS", 10);
+        (void)oc_fake_fvmap((uint8_t *)(0x02039000UL + 0x10000U + 0x6700U), 0x2000U);
     }
     /* clocks: A55 on its PLL (1794 MHz), shared PLLs, MIF, G3D */
     w32(0x1d000140, pll(138, 2, 0));

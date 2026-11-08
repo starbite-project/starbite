@@ -18,7 +18,16 @@
 static struct oc_tables OT;
 static int ot_loaded, ot_ect_ok;
 static uint32_t ot_ect_at = OC_NONE, ot_ect_size, ot_fv_at = OC_NONE;
-static int ot_fv_scanned;                   /* 1: found by scanning APM SRAM, not at the dtsi offset */
+static const char *ot_fv_how;               /* where the fvmap was found */
+#define OC_NPLUG 16
+struct oc_plug {
+    uint32_t id, base, size;
+    uint8_t att, stay;
+    char name[20];
+};
+static struct oc_plug ot_plug[OC_NPLUG];    /* ACPM's plugin table (initdata->plugins) */
+static unsigned ot_nplug;
+static uint64_t ot_sram_bad;                /* the scan: unreadable 4 KiB blocks */
 static uint8_t ot_sram[0x30000];            /* ACPM_SRAM_SIZE: the scan copy */
 
 static uint32_t rd32(uintptr_t a)
@@ -44,7 +53,7 @@ static void oc_load(void)
     ot_loaded = 1;
     ot_ect_ok = 0;
     ot_ect_at = ot_fv_at = OC_NONE;
-    ot_fv_scanned = 0;
+    ot_fv_how = 0;
     for (int d = 0; d < OC_NDOM; ++d)
         OT.d[d].fv_n = 0;
     OT.fv_found = 0;
@@ -59,27 +68,80 @@ static void oc_load(void)
     }
     if (!ot_ect_ok)
         return;
-    /* the fvmap: first at the dtsi offset, else anywhere in APM SRAM (each candidate must carry the
-     * ECT's A55, M3 and G3D steps, so a wrong place is not taken) */
-    crumb("APM SRAM fvmap at +0x6700 (8 KiB)");
-    if (sb_acpm_sram_read(OC_FVMAP_OFFSET, ot_sram, OC_FVMAP_SIZE) &&
-        oct_parse_fvmap(ot_sram, OC_FVMAP_SIZE, &OT)) {
-        ot_fv_at = OC_FVMAP_OFFSET;
+    /* The fvmap (vendor acpm.c): APM SRAM + (the DVFS plugin's base_addr & ~1) + fvmap_offset 0x6700
+     * for a resident plugin, + the plugin's size for a dynamic one. Each candidate must carry the
+     * ECT's A55, M3 and G3D steps, so a wrong place is not taken. */
+    crumb("ACPM plugin table (initdata +0x7F00)");
+    ot_nplug = 0;
+    uint32_t init[2];
+    if (sb_acpm_sram_read(0x7f00, init, 8) && init[0] && init[0] < sizeof(ot_sram) && init[1] && init[1] <= 32 &&
+        init[0] + init[1] * 0x30U <= sizeof(ot_sram)) {
+        for (uint32_t k = 0; k < init[1] && ot_nplug < OC_NPLUG; ++k) {
+            uint32_t w[12];
+            if (!sb_acpm_sram_read(init[0] + k * 0x30U, w, 0x30))
+                continue;
+            struct oc_plug *pl = &ot_plug[ot_nplug++];
+            pl->id = w[0];
+            pl->base = w[1] & ~1U;
+            pl->size = w[9];
+            pl->att = (uint8_t)w[8];
+            pl->stay = (uint8_t)w[10];
+            pl->name[0] = 0;
+            uint32_t nm[8], a = w[11] & ~3U;
+            if (w[11] && a + 32 <= sizeof(ot_sram) && sb_acpm_sram_read(a, nm, 32)) {
+                const char *c = (const char *)nm + (w[11] & 3U);
+                unsigned q = 0;
+                while (q < sizeof(pl->name) - 1 && c + q < (const char *)nm + 32 && c[q] >= 32 && c[q] < 127) {
+                    pl->name[q] = c[q];
+                    ++q;
+                }
+                pl->name[q] = 0;
+            }
+        }
+    }
+    for (unsigned k = 0; k < ot_nplug && ot_fv_at == OC_NONE; ++k) {
+        const struct oc_plug *pl = &ot_plug[k];
+        int dv = 0;
+        for (unsigned q = 0; pl->name[q] && pl->name[q + 1] && pl->name[q + 2] && pl->name[q + 3]; ++q)
+            dv |= (pl->name[q] | 0x20) == 'd' && (pl->name[q + 1] | 0x20) == 'v' && (pl->name[q + 2] | 0x20) == 'f' &&
+                  (pl->name[q + 3] | 0x20) == 's';
+        if (!dv)
+            continue;
+        uint32_t cand[2] = { pl->base + OC_FVMAP_OFFSET, pl->base + pl->size };
+        for (unsigned c = 0; c < 2 && ot_fv_at == OC_NONE; ++c) {
+            uint32_t o = cand[c] & ~3U, len = OC_FVMAP_SIZE;
+            if (!cand[c] || o >= sizeof(ot_sram))
+                continue;
+            if (len > sizeof(ot_sram) - o)
+                len = (sizeof(ot_sram) - o) & ~3U;
+            crumb(c ? "fvmap at the DVFS plugin + its size" : "fvmap at the DVFS plugin + 0x6700");
+            if (sb_acpm_sram_read(o, ot_sram, len) && oct_parse_fvmap(ot_sram, len, &OT)) {
+                ot_fv_at = o;
+                ot_fv_how = c ? "DVFS plugin + size" : "DVFS plugin + 0x6700";
+            }
+        }
+    }
+    if (ot_fv_at != OC_NONE)
         return;
-    }
-    uint32_t n = 0;
-    crumb("APM SRAM scan, 4 KiB blocks from +0x0");
-    while (n < sizeof(ot_sram) && sb_acpm_sram_read(n, ot_sram + n, 0x1000)) {
-        n += 0x1000;
+    /* last: a scan of the whole SRAM, 4 KiB blocks; a block that faults reads as zeros (it cannot
+     * hold the map) and the scan goes on */
+    crumb("APM SRAM scan, 4 KiB blocks, unreadable ones skipped");
+    ot_sram_bad = 0;
+    for (uint32_t b = 0; b < sizeof(ot_sram); b += 0x1000) {
+        if (!sb_acpm_sram_read(b, ot_sram + b, 0x1000)) {
+            for (uint32_t z = 0; z < 0x1000; ++z)
+                ot_sram[b + z] = 0;
+            ot_sram_bad |= 1ULL << (b >> 12);
+        }
         sb_wdt_feed(1);
-        if (oc_crumbs && !(n & 0x7fffU))
-            sb_logx("oc selftest: SRAM read to +", n);
     }
-    for (uint32_t o = 0; o + OC_NDOM * 24U <= n; o += 4) {
-        uint32_t len = n - o < OC_FVMAP_SIZE ? n - o : OC_FVMAP_SIZE;
+    if (oc_crumbs)
+        sb_logx("oc selftest: SRAM 4 KiB blocks unreadable (bit per block) ", ot_sram_bad);
+    for (uint32_t o = 0; o + OC_NDOM * 24U <= sizeof(ot_sram); o += 4) {
+        uint32_t len = sizeof(ot_sram) - o < OC_FVMAP_SIZE ? sizeof(ot_sram) - o : OC_FVMAP_SIZE;
         if (oct_parse_fvmap(ot_sram + o, len, &OT)) {
             ot_fv_at = o;
-            ot_fv_scanned = 1;
+            ot_fv_how = "SRAM scan";
             return;
         }
     }
@@ -347,8 +409,10 @@ static void fill_src(void)
         kv_addc("fvmap", u.b, C_ORANGE);
     } else {
         ub_s(&u, "SRAM + ");
-        ub_hex(&u, ot_fv_at, 4);
-        ub_s(&u, ot_fv_scanned ? " (found by a scan)" : " (the dtsi offset)");
+        ub_hex(&u, ot_fv_at, 5);
+        ub_s(&u, " (");
+        ub_s(&u, ot_fv_how ? ot_fv_how : "?");
+        ub_s(&u, ")");
         kv_add("Where", u.b);
     }
     kv_hdr("SAMSUNG'S CAPS");
@@ -384,10 +448,26 @@ static void log_tables(void)
     if (ot_fv_at == OC_NONE) {
         ub_s(&u, "not found");
     } else {
-        ub_hex(&u, ot_fv_at, 4);
-        ub_s(&u, ot_fv_scanned ? " (scan)" : " (dtsi)");
+        ub_hex(&u, ot_fv_at, 5);
+        ub_s(&u, " (");
+        ub_s(&u, ot_fv_how ? ot_fv_how : "?");
+        ub_s(&u, ")");
     }
     sb_log(u.b);
+    for (unsigned k = 0; k < ot_nplug; ++k) {
+        const struct oc_plug *pl = &ot_plug[k];
+        ub_init(&u);
+        ub_s(&u, "oc: acpm plugin ");
+        ub_dec(&u, pl->id);
+        ub_s(&u, " base ");
+        ub_hex(&u, pl->base, 5);
+        ub_s(&u, " size ");
+        ub_hex(&u, pl->size, 5);
+        ub_s(&u, pl->att ? " attached" : " detached");
+        ub_s(&u, pl->stay ? " stay " : " ");
+        ub_s(&u, pl->name[0] ? pl->name : "(no name)");
+        sb_log(u.b);
+    }
     for (int d = 0; d < OC_NDOM; ++d) {
         const struct oc_dom *o = &OT.d[d];
         const char *how;
@@ -547,23 +627,40 @@ static void log_dom(const char *what, int d, uint32_t khz)
     audit_line(u.b);
 }
 
-/* Back to the baseline; 1 when ACPM confirms it. */
+/* The step a domain is on. This ACPM firmware answers FREQ_GET with 0 (9810 Linux reads the CMU
+ * instead), so it comes from the PLL: kHz, 0 when unknown. Without a PLL to read (INT; M3 or G3D
+ * powered off) it is the ECT's boot step and *assumed is set. */
+static uint32_t oc_cur_step(int d, int *assumed)
+{
+    const struct oc_dom *o = &OT.d[d];
+    const char *how;
+    uint32_t now = now_khz(d, &how);
+    *assumed = 0;
+    if (now) {
+        int l = step_of(d, now);
+        return l >= 0 ? o->khz[l] : 0;
+    }
+    if (d == OC_MIF || d == OC_A55)         /* always readable: unreadable means unknown */
+        return 0;
+    *assumed = 1;
+    return o->boot_khz;
+}
+
+/* Back to the baseline; 1 when the PLL shows it (or, with no PLL to read, when ACPM took the
+ * request: storage then stays held until restart). */
 static int oc_revert(int d)
 {
-    uint32_t got = 0;
     if (!oc_off[d])
         return 1;
-    int ok = sb_acpm_dvfs_revert((uint32_t)d) && sb_acpm_dvfs_get((uint32_t)d, &got) && got == oc_base[d];
-    /* FREQ_GET alone could echo the request: the PLL must agree where one is readable (MIF always);
-     * without one, only while every ACPM answer so far came in time */
-    if (ok) {
-        int p = pll_agrees(d, oc_base[d]);
-        ok = p > 0 || (p < 0 && d != OC_MIF && !sb_acpm_dvfs_untrusted());
-    }
-    log_dom(ok ? "reverted" : "REVERT NOT CONFIRMED", d, ok ? got : oc_base[d]);
+    int sent = sb_acpm_dvfs_revert((uint32_t)d);
+    int p = sent ? pll_agrees(d, oc_base[d]) : 0;
+    int ok = sent && (p > 0 || (p < 0 && d != OC_MIF && d != OC_A55));
+    log_dom(ok ? (p > 0 ? "reverted (PLL agrees)" : "reverted (no PLL to read)") : "REVERT NOT CONFIRMED", d, oc_base[d]);
     if (ok) {
         oc_off[d] = 0;
         oc_set[d] = oc_base[d];
+        if (p < 0)
+            oc_tainted("a revert that cannot be read back (no PLL)");
     } else {
         oc_tainted("a revert was not confirmed");
     }
@@ -589,8 +686,8 @@ static void oc_reset_cb(void)
 }
 
 /* the keep-or-revert countdown */
-static int cd_d;
-static uint32_t cd_khz, cd_got, cd_left;
+static int cd_d, cd_pll;
+static uint32_t cd_khz, cd_left;
 
 static void fill_cd(void)
 {
@@ -608,11 +705,7 @@ static void fill_cd(void)
     kv_bigc(v.b, u.b, C_ORANGE);
     kv_note("Press Power to keep it. Volume, Back or nothing for the countdown: it goes back to the step it "
             "was on.");
-    kv_hdr("WHAT ACPM REPORTS");
-    ub_init(&u);
-    ub_mhz(&u, cd_got);
-    ub_s(&u, " MHz");
-    kv_addc("FREQ_GET", u.b, cd_got == cd_khz ? C_GREEN : C_RED);
+    kv_hdr("READ BACK");
     uint32_t now = now_khz(cd_d, &how);
     if (now) {
         ub_init(&u);
@@ -620,7 +713,9 @@ static void fill_cd(void)
         ub_s(&u, " MHz (");
         ub_s(&u, how);
         ub_s(&u, ")");
-        kv_add("Clock read back", u.b);
+        kv_addc("Clock", u.b, cd_pll > 0 ? C_GREEN : C_RED);
+    } else {
+        kv_addc("Clock", "no PLL to read here: not verifiable (storage held until restart)", C_ORANGE);
     }
     ub_init(&u);
     ub_mhz(&u, oc_base[cd_d]);
@@ -629,13 +724,13 @@ static void fill_cd(void)
     kv_add("Guards", "watchdog armed, storage writes held");
 }
 
-static int oc_countdown(int d, uint32_t khz, uint32_t got)
+static int oc_countdown(int d, uint32_t khz, int pll)
 {
     uint64_t end = sb_ms() + OC_KEEP_S * 1000U;
     uint32_t shown = 0;
     cd_d = d;
     cd_khz = khz;
-    cd_got = got;
+    cd_pll = pll;
     ui_input_reset();
     for (;;) {
         uint64_t t = sb_ms();
@@ -715,30 +810,25 @@ static void oc_apply(int d, uint32_t khz)
                             "Nothing was sent.", "OK");
         return;
     }
-    /* the baseline: ACPM's own step before Engineer OS's first request, and it must be listed */
+    /* G3D: the GPU powered first, so its PLL can be read */
+    if (d == OC_G3D && !lab_oc_gpu_up() && !lab_oc_gpu_prepare())
+        return;
+    /* the baseline: the step the PLL shows before Engineer OS's first request (INT, or a powered-off
+     * M3: the ECT boot step), listed, at or below the cap; libsb's revert sends exactly it */
     if (!oc_base_ok[d]) {
-        /* libsb keeps the step from before Engineer OS's first request (the GPU page may have sent one):
-         * sb_acpm_dvfs_revert sends exactly that, so it is the default here too */
-        uint32_t now = 0;
+        int assumed = 0;
         const char *bad = 0;
-        if (!sb_acpm_dvfs_get((uint32_t)d, &now) || !sb_acpm_dvfs_baseline((uint32_t)d, &cur))
-            bad = "ACPM did not answer FREQ_GET";
+        cur = oc_cur_step(d, &assumed);
+        if (!cur)
+            bad = "the PLL does not show a listed step";
         else if (!oct_allowed(o, cur))
-            bad = "ACPM's step is not a listed step";
+            bad = "the step is not in ACPM's table";
         else if (oct_above_cap(o, cur))
-            bad = "ACPM's step is above Samsung's cap";
-        else if (now != cur)
-            bad = "the step changed since Engineer OS started (restart first)";
+            bad = "the step is above Samsung's cap";
         else if (sb_acpm_dvfs_untrusted())
-            bad = "ACPM answered late before: FREQ_GET is not proof (restart first)";
-        else {
-            int p = pll_agrees(d, cur);
-            if (p == 0 || (p < 0 && d == OC_MIF))
-                bad = "the PLL does not show ACPM's step";
-            else if (d == OC_INT && cur != o->boot_khz &&
-                     !(o->fv_init < o->fv_n && cur == o->fv_khz[o->fv_init]))
-                bad = "INT is not on its boot step (no PLL to check it)";
-        }
+            bad = "ACPM answered late before (restart first)";
+        else if (!sb_acpm_dvfs_set_baseline((uint32_t)d, cur))
+            bad = "a request changed it since start, e.g. the GPU page (restart first)";
         if (bad) {
             ub_init(&u);
             ub_s(&u, bad);
@@ -752,21 +842,19 @@ static void oc_apply(int d, uint32_t khz)
                                 "changed.", "OK");
             return;
         }
-        oc_base[d] = cur;
-        oc_set[d] = now;
+        oc_base[d] = oc_set[d] = cur;
         oc_base_ok[d] = 1;
+        log_dom(assumed ? "baseline (boot step, no PLL)" : "baseline (PLL)", d, cur);
     }
     if (khz == oc_set[d])
         return;
     if (khz == oc_base[d]) {
         if (!oc_revert(d))
-            (void)dialog_danger("Revert not confirmed", "ACPM did not report the default step back.",
+            (void)dialog_danger("Revert not confirmed", "The PLL does not show the default step.",
                                 "Restart the phone (hold Power + Volume Down).", "OK");
         oc_guards();
         return;
     }
-    if (d == OC_G3D && !lab_oc_gpu_up() && !lab_oc_gpu_prepare())
-        return;
     int hi = oct_above_cap(o, khz), bus = d == OC_MIF || d == OC_INT;
     char tgt[8], nowv[24], newv[40];
     sb_strcpy(tgt, sizeof(tgt), oc_info[d].name);
@@ -802,16 +890,14 @@ static void oc_apply(int d, uint32_t khz)
         oc_tainted(bus ? "the memory / bus clock was changed" : "an above-cap step was used");
     int sent = sb_acpm_dvfs_listed((uint32_t)d, khz, a.tier, steps, n);
     sb_gate_close();
-    uint32_t got = 0;
-    int read = sb_acpm_dvfs_get((uint32_t)d, &got);
+    int pll = sent ? pll_agrees(d, khz) : 0;
     oc_set[d] = khz;
     ub_init(&u);
-    ub_s(&u, sent ? "ACPM answered; FREQ_GET " : "ACPM did NOT answer; FREQ_GET ");
-    if (read)
-        ub_dec(&u, got);
-    else
-        ub_s(&u, "no answer");
-    if (!sent || !read || got != khz) {
+    ub_s(&u, !sent ? "ACPM did NOT answer" : pll > 0 ? "ACPM answered; the PLL shows the step" :
+                     pll < 0 ? "ACPM answered; no PLL to read it back" : "ACPM answered; the PLL does NOT show the step");
+    if (pll < 0 && sent)
+        oc_tainted("a step that cannot be read back (no PLL)");
+    if (!sent || !pll) {
         ub_s(&u, ": back to the default");
         int back = oc_revert(d);
         oc_guards();
@@ -822,12 +908,12 @@ static void oc_apply(int d, uint32_t khz)
                             "OK");
         return;
     }
-    int keep = oc_countdown(d, khz, got);
+    int keep = oc_countdown(d, khz, pll);
     ub_s(&u, keep ? ", kept" : ", not kept: reverted");
     lab_major_result(a.title, tgt, u.b);
     if (!keep) {                            /* back to the default, also from an earlier kept step */
         if (!oc_revert(d))
-            (void)dialog_danger("Revert not confirmed", "ACPM did not report the default step back.",
+            (void)dialog_danger("Revert not confirmed", "The PLL does not show the default step.",
                                 "Restart the phone (hold Power + Volume Down).", "OK");
         oc_guards();
         return;
@@ -902,7 +988,7 @@ static int act_ctl(int r)
     case 0: (void)oc_test(d); break;
     case 1:
         if (!oc_revert(d))
-            (void)dialog_danger("Revert not confirmed", "ACPM did not report the default step back.",
+            (void)dialog_danger("Revert not confirmed", "The PLL does not show the default step.",
                                 "Restart the phone (hold Power + Volume Down).", "OK");
         oc_guards();
         break;
@@ -1040,7 +1126,7 @@ void oc_selftest_boot(void)
     oc_load();
     crumb("PLL reads and the table log");
     log_tables();
-    sb_log("oc selftest: tables done; FREQ_GET A55, M3, G3D, MIF, INT next (reads)");
+    sb_log("oc selftest: tables done; FREQ_GET (diagnostic: this firmware answers 0) and the PLL default per domain next");
     static const int gd[5] = { OC_A55, OC_M3, OC_G3D, OC_MIF, OC_INT };
     for (int i = 0; i < 5; ++i) {
         const int d = gd[i];
@@ -1078,6 +1164,18 @@ void oc_selftest_boot(void)
         ub_dec(&u, o->boot_khz);
         ub_s(&u, " init ");
         ub_dec(&u, o->fv_init < o->fv_n ? o->fv_khz[o->fv_init] : 0);
+        sb_log(u.b);
+        /* the step 2 go / no-go: the default step it would take, from the PLL (FREQ_GET answers 0 here) */
+        int assumed = 0;
+        uint32_t cur = oc_cur_step(d, &assumed);
+        ub_init(&u);
+        ub_s(&u, "oc selftest: default ");
+        ub_s(&u, oc_info[d].name);
+        ub_s(&u, " = ");
+        ub_dec(&u, cur);
+        ub_s(&u, assumed ? " (boot step, no PLL)" : " (PLL)");
+        ub_s(&u, !cur ? " UNKNOWN" : !oct_allowed(o, cur) ? " NOT IN ACPM TABLE" : oct_above_cap(o, cur) ? " ABOVE CAP" :
+                                                                                                    " ok");
         sb_log(u.b);
     }
     sb_logx("oc selftest: ACPM late or missing answers ", sb_acpm_dvfs_untrusted());
