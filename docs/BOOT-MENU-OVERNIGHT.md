@@ -110,8 +110,8 @@ Both have the stub's 75 s dead-man and pmsg breadcrumbs (`STARBITE v7 bench: men
 done / intro done`, per-core `CPU_ON` / `checked in` lines):
 | image | sha256 | |
 |---|---|---|
-| `menubench-3a.img` | 9da3cc48f5243d0225f106694cbad4eeb893494f8c526464169242421a1fa1fb | no extra cores: tests chain + loader restart only |
-| `menubench-3b.img` | 6a36d09aef89c342ca99695e4fc4d0fe794329467e9d1c76de27bb8a11e42de7 | 4 cores, alternating 1/4-core frames |
+| `menubench-3a.img` | ed7dcabd24a9281be55ebe82eb379daf959ae27c1f358aa696d4a035f50e49cd | no extra cores: tests chain + loader restart only |
+| `menubench-3b.img` | d0cfe0b676885dcf8ad443ecd4b42133fb8f702b5c2c97b3a4d17cb32d756f35 | 4 cores, alternating 1/4-core frames |
 Run 3a first, and 3b only if 3a came back by itself. Before either, save pmsg from the first boot after the hang
 (`build/menu/mb1-hang-pmsg.txt`).
 
@@ -119,12 +119,12 @@ Run 3a first, and 3b only if 3a came back by itself. Before either, save pmsg fr
 
 1. Power + Volume Down to bring the phone back; save pmsg (above).
 2. MB3a, then MB3b (unattended, ≤ 75 s each). Their pmsg lines give the real A55 frame times, 1 core vs 4.
-3. Then the trial: `menutrial.img` (sha256 1b30829c4adaeb7b38230fcc4074ec5b16cf5a6273a95251f73607c80b679a05;
+3. Then the trial: `menutrial.img` (sha256 5f7b6e4fcaa0a5056f871cb7289ee2f40ef4b6ccb8f453e9f8046fd35775260b;
    `side-session-notes/…/menu-trial-request.md`). New loader + new ramdisk (icons) from the store, user
    driving: scroll, open sections, options menu, then start Linux (check that all 4 CPUs are online),
    One UI, Windows, iOS. If it misbehaves, `starcores=1` gives the single-core renderer.
    Fallback with the same labels and icons but the old single-core renderer: `menutrial-1core.img`
-   (sha256 0cd893bbd727bafaacf13534bb71397710ec5a4dfdbaf6c9c0c454fc24391d67; loader
+   (sha256 6369d911ec346f35cd6ce20be7f4a2ab1758b90daf702aa1b236b0b24a46d852; loader
    `build/menu/loader-1core/xnu_boot.Image`, built with `M7_DEF_CORES=1`; `starcores=4` turns the cores on).
 4. Only then flash BOOT: `build/menu/loader-new/xnu_boot.Image` + `build/menu/menu-v7.sbm`, with the
    usual verified backup. If SMP ever hung at boot from BOOT, the way back is download mode (the old BOOT

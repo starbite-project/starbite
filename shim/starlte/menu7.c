@@ -4849,7 +4849,13 @@ static int menu7_main_in(const struct star_info *in, char *cmdline, unsigned len
     if (M_off)
         return -1;
     if (!M_inited) {
-        int mode = cmd_num(cmdline, "starmenu7", 1);
+        /* M7_MODE_DEFAULT 2: test loaders chained from the store (tools/menu/chain) do not get BOOT's
+         * command line, so its starmenu7=2 is missing; without it the speed check sent the
+         * 2026-11-07 bench to menu v6, which has no background USB (it sat there until reset) */
+#ifndef M7_MODE_DEFAULT
+#define M7_MODE_DEFAULT 1
+#endif
+        int mode = cmd_num(cmdline, "starmenu7", M7_MODE_DEFAULT);
         if (!mode || !menu7_ready() || !g7_init()) {
             M_off = 1;
             m7_report(!mode ? "off (starmenu7=0)" : !menu7_ready() ? "no assets (SB7ASSET/fonts)" : "g7_init failed");
