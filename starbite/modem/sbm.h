@@ -621,7 +621,10 @@ enum sbm_boot_stop { SBM_BOOT_DRY = 1, SBM_BOOT_SEC = 2, SBM_BOOT_RUN = 3, SBM_B
 #define SBM_UDL_BOOT_DONE_OK 0xA00D
 #define SBM_UDL_FIN          0x9F00
 #define SBM_UDL_FIN_OK       0xAF00
-#define SBM_UDL_PAYLOAD      4          /* bytes of the request payload (a LE u32): to confirm in cbd */
+/* bytes of the request payload: a LE u32. Confirmed in One UI's /vendor/bin/cbd (2026-11-08, build ID b42a5281):
+ * std_udl_req_resp(fd, req, exp) does write(fd, &req, 4), then std_udl_poll, read(fd, &resp, 4), resp == exp;
+ * umts_boot0 (ATTR_SIPC5, BOOT_ALIGNED) adds the 0xFC header: fc d7 08 00 0d 90 00 00 on the wire */
+#define SBM_UDL_PAYLOAD      4
 struct sbm_boot {
     enum sbm_boot_stop stop;
     /* what happened */
