@@ -66,7 +66,10 @@ run_case() {
     grep -q "host: reboot" "$log" || bad="$bad [no reboot from the power menu]"
     grep -q "CRASH" "$log" && bad="$bad [crash]"
     grep -q "event queue full" "$log" && bad="$bad [event queue full]"
-    grep -q "settings: brightness" "$log" && bad="$bad [the brightness was sent]"
+    # 1.0: the brightness is sent only by the SOS boost (0.6: the panel's top while it flashes) and its restore
+    grep -q "settings: brightness" "$log" && ! grep -q "sos: flashing" "$log" && bad="$bad [the brightness was sent]"
+    grep "settings: brightness" "$log" | grep -v "brightness 5 sent, AOR 0x000C\|brightness 0 sent, AOR 0x0440" | grep -q . &&
+        bad="$bad [a brightness other than the SOS boost was sent]"
     grep -q "a loop turn took" "$log" && bad="$bad [slow loop: $(grep -m1 'a loop turn took' "$log" | sed 's/.*took //')]"
     grep "panel vs back buffer" "$log" | grep -v " 0 px differ" | grep -q . && bad="$bad [unpresented pixels]"
     grep -q "heater: start, level" "$log" || bad="$bad [the heater never started]"
@@ -87,7 +90,7 @@ run_case() {
         echo "soak $name: ok ($(grep -c '^log: ' "$log") log lines, max cores $(grep -o 'cores [0-9]' "$log" | sort -k2 -n | tail -1))"
     fi
 }
-run_case clean "" "settings: panel refresh only on change: on" "settings: panel off with the screen: on" "settings: LED in SOS: on" "sos: countdown" "sos: off" "emergency: Call 112 held"
+run_case clean "" "settings: panel refresh only on change: on" "settings: panel off with the screen: on" "settings: LED in SOS: on" "sos: countdown" "sos: flashing" "sos: off"
 run_case all8 "m3" "core 7 (M3) running, 8 cores with cpu0"
 run_case timeout1 "timeout:1" "core 1: no check-in within 1 s (code -100): trying again later" "core 2 (A55) running" "core 1: no check-in within 1 s (code -100): not used until a restart"
 run_case timeout1noctx "timeout:1,noctx" "core 1: no check-in within 1 s; no more cores start in this session"
