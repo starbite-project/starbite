@@ -839,6 +839,66 @@ static void glb_shift_row(int y, int dy, const uint32_t *src, const uint8_t *ts)
             if (pu && gs_cover_row_g(0, C->si, py, 4.f * (float)i0 + 1.f, 2.f, 2 * (i1 - i0), COVB))
                 band = 1;           /* (a corner row: the coverage changes from row to row) */
             for (int i = i0; i < i1; i++) {
+                int inb = i >= ba && i + 4 <= bb;      /* 4 blocks all in the rim band */
+                if (i + 4 <= i1 && (i + 4 <= ba || i >= bb || inb)) {
+                    /* 4 blocks a NEON step outside a rim band (the common case): the same sums, then
+                     * into the pixel-interleaved JDX (each block twice; a shape on another weighs its
+                     * two pixels by their coverage) */
+                    const float32x4_t lo = vdupq_n_f32(-32000.f), hi = vdupq_n_f32(32000.f), k2040 = vdupq_n_f32(255.f * 8.f);
+                    const float32x4_t ph = vdupq_n_f32(.5f), nh = vdupq_n_f32(-.5f), z = vdupq_n_f32(0.f);
+                    float32x4_t fv[3], v[3];
+                    for (int c = 0; c < 3; c++) {
+                        float32x4_t t;
+                        if (inb) {          /* the band's own refracted rows */
+                            t = vmulq_n_f32(vsubq_f32(vld1q_f32(DBA[c] + i), vld1q_f32(DT[c] + i)), om);
+                            if (m > 0.f)
+                                t = vaddq_f32(t, vmulq_n_f32(vsubq_f32(vld1q_f32(DBB[c] + i), vld1q_f32(DT2[c] + i)), m));
+                        } else {
+                            t = vmulq_n_f32(vld1q_f32(DFA[c] + i), om);
+                            if (m > 0.f)
+                                t = vaddq_f32(t, vmulq_n_f32(vld1q_f32(DFB[c] + i), m));
+                        }
+                        fv[c] = vmulq_f32(t, k2040);
+                    }
+                    for (int c = 0; c < 3; c++)
+                        v[c] = vminq_f32(vmaxq_f32(vaddq_f32(vaddq_f32(vmulq_n_f32(fv[0], C->J[3 * c]), vmulq_n_f32(fv[1], C->J[3 * c + 1])),
+                                                             vmulq_n_f32(fv[2], C->J[3 * c + 2])), lo), hi);
+                    int16x4x2_t qq[3];
+                    if (!pu) {
+                        for (int c = 0; c < 3; c++) {
+                            float32x4_t w = vaddq_f32(v[c], vbslq_f32(vcltq_f32(v[c], z), nh, ph));
+                            int16x4_t q = vmovn_s32(vcvtq_s32_f32(w));
+                            qq[c] = vzip_s16(q, q);
+                        }
+                    } else {
+                        float um = C->umixf, uom = 1.f - um;
+                        float32x4_t fu4[3];
+                        for (int c = 0; c < 3; c++) {
+                            float32x4_t t = vmulq_n_f32(vld1q_f32(DFA[c] + i), uom);
+                            if (um > 0.f)
+                                t = vaddq_f32(t, vmulq_n_f32(vld1q_f32(DFB[c] + i), um));
+                            fu4[c] = vmulq_f32(t, k2040);
+                        }
+                        float32x4x2_t cov = vld2q_f32(COVB + 2 * (i - i0));   /* pixel 2i + 0, 2i + 1 */
+                        for (int c = 0; c < 3; c++) {
+                            float32x4_t u = vminq_f32(vmaxq_f32(vaddq_f32(vaddq_f32(vmulq_n_f32(fu4[0], C->uJ[3 * c]),
+                                                                                    vmulq_n_f32(fu4[1], C->uJ[3 * c + 1])),
+                                                                          vmulq_n_f32(fu4[2], C->uJ[3 * c + 2])), lo), hi);
+                            float32x4_t d = vsubq_f32(v[c], u), w0 = vaddq_f32(u, vmulq_f32(d, cov.val[0])),
+                                        w1 = vaddq_f32(u, vmulq_f32(d, cov.val[1]));
+                            w0 = vaddq_f32(w0, vbslq_f32(vcltq_f32(w0, z), nh, ph));
+                            w1 = vaddq_f32(w1, vbslq_f32(vcltq_f32(w1, z), nh, ph));
+                            qq[c] = vzip_s16(vmovn_s32(vcvtq_s32_f32(w0)), vmovn_s32(vcvtq_s32_f32(w1)));
+                        }
+                    }
+                    int16x4_t zz = vdup_n_s16(0);
+                    for (int h = 0; h < 2; h++) {
+                        int16x4x4_t px4 = { { qq[2].val[h], qq[1].val[h], qq[0].val[h], zz } };   /* bytes B, G, R, A */
+                        vst4_s16(JI + (unsigned)(2 * i + 4 * h) * 4U, px4);
+                    }
+                    i += 3;
+                    continue;
+                }
                 float f[3], fu[3];
                 for (int c = 0; c < 3; c++)
                     fu[c] = (DFA[c][i] * om + (m > 0.f ? DFB[c][i] * m : 0.f)) * (255.f * 8.f);
