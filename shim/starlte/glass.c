@@ -655,7 +655,11 @@ static void shift_detect(const struct pent *prev, int np, const struct sext *px,
 #define DT2 (DFA + 9)
 #define DBA (DFA + 12)
 #define DBB (DFA + 15)
-#define JDX ((int16_t (*)[GW])(TAB_SHIFT + 18UL * AW * 4UL))
+/* JDX, pixel-interleaved like the canvas's bytes (B, G, R, 0 per canvas pixel) so the shift's NEON loop
+ * needs no 4-way structure loads (slow on the A55): JX(c, x), c 0 R, 1 G, 2 B, at byte lane 2 - c */
+#define JI ((int16_t *)(TAB_SHIFT + 18UL * AW * 4UL))
+#define JX(c, x) JI[(unsigned)(x) * 4U + 2U - (unsigned)(c)]
+_Static_assert(18UL * AW * 4UL + 4UL * CW * 2UL <= 0x10000UL, "interleaved JDX overflow");
 _Static_assert(0xF0000UL + 18UL * AW * 4UL + 3UL * GW * 2UL <= 0x100000UL, "glass shift scratch overflow");
 _Static_assert(0xA0000UL + 18UL * AW * 4UL + 3UL * GW * 2UL <= 0xC0000UL, "per-core shift scratch overflow");
 /* the shift's per-core state (glass_smp.c): the correction's caches between rows */
@@ -683,9 +687,8 @@ _Static_assert(G7_NCORES == 4, "SHC initialiser");
 /* a fresh start of this core's caches (JDX all zero, nothing cached) */
 static void shc_reset(void)
 {
-    for (int c = 0; c < 3; c++)
-        for (int x = 0; x < GW; x++)
-            JDX[c][x] = 0;
+    for (unsigned x = 0; x < 4U * CW; x++)
+        JI[x] = 0;
     jd_ia = jd_ib = 0;
     jd_j = -1;
     jd_mask = 0xffffffffU;
@@ -794,9 +797,9 @@ static void glb_shift_row(int y, int dy, const uint32_t *src, const uint8_t *ts)
         /* clear what the last rows set outside this row's span */
         for (int c = 0; c < 3; c++) {
             for (int x = 2 * jd_ia; x < 2 * ia && x < 2 * jd_ib; x++)
-                JDX[c][x] = 0;
+                JX(c, x) = 0;
             for (int x = 2 * (ib > jd_ia ? ib : jd_ia); x < 2 * jd_ib; x++)
-                JDX[c][x] = 0;
+                JX(c, x) = 0;
         }
         jd_ia = ia;
         jd_ib = ib;
@@ -810,7 +813,7 @@ static void glb_shift_row(int y, int dy, const uint32_t *src, const uint8_t *ts)
                 i1 = AW;
             for (; at < i0; at++)                               /* gaps between spans */
                 for (int c = 0; c < 3; c++)
-                    JDX[c][2 * at] = JDX[c][2 * at + 1] = 0;
+                    JX(c, 2 * at) = JX(c, 2 * at + 1) = 0;
             float m = C->mixf, om = 1.f - m;
             int ba = i1, bb = i1;
             if (C->oy != 0.f) {
@@ -854,13 +857,13 @@ static void glb_shift_row(int y, int dy, const uint32_t *src, const uint8_t *ts)
                     float v = g_clamp(C->J[3 * c] * f[0] + C->J[3 * c + 1] * f[1] + C->J[3 * c + 2] * f[2], -32000.f, 32000.f);
                     if (!pu) {
                         int16_t q = (int16_t)(v < 0.f ? v - .5f : v + .5f);
-                        JDX[c][2 * i] = JDX[c][2 * i + 1] = q;
+                        JX(c, 2 * i) = JX(c, 2 * i + 1) = q;
                         continue;
                     }
                     float u = g_clamp(C->uJ[3 * c] * fu[0] + C->uJ[3 * c + 1] * fu[1] + C->uJ[3 * c + 2] * fu[2], -32000.f, 32000.f);
                     for (int k = 0; k < 2; k++) {
                         float w = u + (v - u) * COVB[2 * (i - i0) + k];
-                        JDX[c][2 * i + k] = (int16_t)(w < 0.f ? w - .5f : w + .5f);
+                        JX(c, 2 * i + k) = (int16_t)(w < 0.f ? w - .5f : w + .5f);
                     }
                 }
             }
@@ -892,34 +895,32 @@ static void glb_shift_row(int y, int dy, const uint32_t *src, const uint8_t *ts)
         }
     }
 #endif
-    /* 16 pixels a step, in 16-bit lanes: out = g + d T / 256 + JD (255 - T) / 256 (JD in 1/8) */
-    for (int x = 0; x < CW; x += 16) {
-        uint8x16x4_t g = vld4q_u8((const uint8_t *)(src + x)), n = vld4q_u8((const uint8_t *)(b1 + x)),
-                     o = vld4q_u8((const uint8_t *)(b0 + x)), r;
-        uint8x16_t t = vld1q_u8(ts + x);
-        vst1q_u8(td + x, t);
-        int16x8_t tb[2], wb[2];
-        tb[0] = vreinterpretq_s16_u16(vshll_n_u8(vget_low_u8(t), 7));
-        tb[1] = vreinterpretq_s16_u16(vshll_n_u8(vget_high_u8(t), 7));
+    /* 4 pixels (16 bytes, B G R A) a step, every byte lane the same: out = g + d T / 256 + JD (255 - T) / 256
+     * (JD in 1/8; T per pixel spread to its 4 lanes); alpha stays 255 (d and JD are 0 there) */
+    static const uint8_t spread[16] = { 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3 };
+    const uint8x16_t sp = vld1q_u8(spread);
+    const uint32x4_t opaque = vdupq_n_u32(0xff000000U);
+    for (int x = 0; x < CW; x += 16)
+        vst1q_u8(td + x, vld1q_u8(ts + x));
+    for (int x = 0; x < CW; x += 4) {
+        uint8x16_t g = vld1q_u8((const uint8_t *)(src + x)), n = vld1q_u8((const uint8_t *)(b1 + x)),
+                   o = vld1q_u8((const uint8_t *)(b0 + x));
+        uint8x16_t t = vqtbl1q_u8(vreinterpretq_u8_u32(vld1q_dup_u32((const uint32_t *)(const void *)(ts + x))), sp);
         uint8x16_t it = vmvnq_u8(t);
-        wb[0] = vreinterpretq_s16_u16(vshll_n_u8(vget_low_u8(it), 7));
-        wb[1] = vreinterpretq_s16_u16(vshll_n_u8(vget_high_u8(it), 7));
-        for (int c = 0; c < 3; c++) {          /* byte plane c: B, G, R = JDX[2 - c] */
-            const int16_t *j = JDX[2 - c] + x;
-            int16x8_t v[2];
-            for (int h = 0; h < 2; h++) {
-                uint8x8_t gn = h ? vget_high_u8(n.val[c]) : vget_low_u8(n.val[c]);
-                uint8x8_t go = h ? vget_high_u8(o.val[c]) : vget_low_u8(o.val[c]);
-                uint8x8_t gg = h ? vget_high_u8(g.val[c]) : vget_low_u8(g.val[c]);
-                int16x8_t d = vreinterpretq_s16_u16(vsubl_u8(gn, go));
-                int16x8_t c1 = vqrdmulhq_s16(d, tb[h]);
-                int16x8_t c2 = vrshrq_n_s16(vqrdmulhq_s16(vld1q_s16(j + 8 * h), wb[h]), 3);
-                v[h] = vaddq_s16(vaddq_s16(vreinterpretq_s16_u16(vmovl_u8(gg)), c1), c2);
-            }
-            r.val[c] = vcombine_u8(vqmovun_s16(v[0]), vqmovun_s16(v[1]));
+        const int16_t *j = JI + (unsigned)x * 4U;
+        int16x8_t v[2];
+        for (int h = 0; h < 2; h++) {
+            uint8x8_t gn = h ? vget_high_u8(n) : vget_low_u8(n), go = h ? vget_high_u8(o) : vget_low_u8(o);
+            uint8x8_t gg = h ? vget_high_u8(g) : vget_low_u8(g);
+            int16x8_t tb = vreinterpretq_s16_u16(vshll_n_u8(h ? vget_high_u8(t) : vget_low_u8(t), 7));
+            int16x8_t wb = vreinterpretq_s16_u16(vshll_n_u8(h ? vget_high_u8(it) : vget_low_u8(it), 7));
+            int16x8_t d = vreinterpretq_s16_u16(vsubl_u8(gn, go));
+            int16x8_t c1 = vqrdmulhq_s16(d, tb);
+            int16x8_t c2 = vrshrq_n_s16(vqrdmulhq_s16(vld1q_s16(j + 8 * h), wb), 3);
+            v[h] = vaddq_s16(vaddq_s16(vreinterpretq_s16_u16(vmovl_u8(gg)), c1), c2);
         }
-        r.val[3] = vdupq_n_u8(255);
-        vst4q_u8((uint8_t *)(dst + x), r);
+        uint32x4_t r = vreinterpretq_u32_u8(vcombine_u8(vqmovun_s16(v[0]), vqmovun_s16(v[1])));
+        vst1q_u32(dst + x, vorrq_u32(r, opaque));
     }
 }
 
@@ -930,8 +931,9 @@ static void glb_shift_row(int y, int dy, const uint32_t *src, const uint8_t *ts)
  * planes, scratch until a freeze), so no band reads a row another band already moved. */
 #define SNAP ((uint32_t *)(G7_CANVAS + 0x920000UL))
 #define SNAP_MAX 120                /* rows per cut; a larger dy is moved by core 0 alone */
-_Static_assert((G7_NCORES - 1UL) * SNAP_MAX * (CW * 4UL + CW) <= 0xC60000UL - 0x920000UL, "shift snapshot overflow");
-struct sjob { int dy, nb, cut[G7_NCORES + 1]; };
+#define SHIFT_NB 8                  /* bands (cut by count of rows to move: they bunch up), chunks for g7_par */
+_Static_assert((SHIFT_NB - 1UL) * SNAP_MAX * (CW * 4UL + CW) <= 0xC60000UL - 0x920000UL, "shift snapshot overflow");
+struct sjob { int dy, nb, cut[SHIFT_NB + 1]; };
 static void shift_band(void *ctx, int b0, int b1, int core)
 {
     const struct sjob *J = (const struct sjob *)ctx;
@@ -962,18 +964,33 @@ static void shift_band(void *ctx, int b0, int b1, int core)
         }
     }
 }
+static void shift_pixels_in(int dy);
 static void shift_pixels(int dy)
 {
+    PROF0;
+    shift_pixels_in(dy);
+    PROF(6);                        /* (inside setup: the shifted rows' pixels) */
+}
+static void shift_pixels_in(int dy)
+{
     struct sjob J;
-    int ady = dy < 0 ? -dy : dy, nb = g7_smp_on;
-    if (nb > G7_NCORES)
-        nb = G7_NCORES;
-    if (nb > 1 && (ady > SNAP_MAX || ady * 4 > CH / nb))
+    int ady = dy < 0 ? -dy : dy, nb = g7_smp_on > 1 ? SHIFT_NB : 1, k = 0;
+    for (int y = 0; y < CH; y++)
+        k += AFF[y] == 2;
+    if (nb > 1 && (ady > SNAP_MAX || k < 8 * nb))
         nb = 1;
     J.dy = dy;
     J.nb = nb;
-    for (int b = 0; b <= nb; b++)
-        J.cut[b] = CH * b / nb;
+    /* the cuts: each band gets about k / nb rows to move (a band reading across its cut takes the
+     * source rows there from the copy made below, so a band may be shorter than dy) */
+    J.cut[0] = 0;
+    J.cut[nb] = CH;
+    for (int b = 1, y = 0, c = 0; b < nb; b++) {
+        int want = k * b / nb;
+        while (y < CH && c < want)
+            c += AFF[y++] == 2;
+        J.cut[b] = y;
+    }
     if (nb > 1)
         for (int c = 1; c < nb; c++) {
             /* cut c: dy > 0: rows [cut - dy, cut) (read by band c); dy < 0: [cut, cut - dy) (band c - 1);
@@ -1167,7 +1184,11 @@ static void over_hold(int ns)
 static void layer_diff_save(int li, const struct g7_layer *l, int check)
 {
     int ns, ni;
-    layer_entries(li, l, &ns, &ni);
+    {
+        PROF0;
+        layer_entries(li, l, &ns, &ni);
+        PROF(5);                    /* (inside setup: the layers' entries, bounds and hashes) */
+    }
     if (check) {
         sh_dy = sh_on = 0;
         if (li == 0 && shift_on)
@@ -2083,6 +2104,31 @@ static void present_band(const struct pjob *J, int yb, int ye, int core)
         }
         return;
     }
+    if (pfast && !ov) {
+        /* a motion frame: the items at canvas resolution (a quarter of the pixels; text is softer
+         * while it moves, exact again at rest: these rows are PAPX), on a copy of the canvas rows,
+         * then pixel-doubled to the panel */
+        int cy0 = yb >> 1, cy1 = (ye + 1) >> 1, cx0 = X0 >> 1, cx1 = (X1 + 1) >> 1;
+        if (cx1 > CW) cx1 = CW;
+        if (cy1 > CH) cy1 = CH;
+        uint32_t *tmp = PBUFc(core);                         /* (cy1 - cy0) x CW */
+        uint32_t *row = PBUFc(core) + (unsigned)(PB_ROWS / 2 + 1) * CW - X0;   /* one panel row */
+        _Static_assert((PB_ROWS / 2 + 1) * CW + GW <= PB_ROWS * GW, "half-resolution band overflow");
+        for (int j = cy0; j < cy1; j++)
+            g_copy32(tmp + (unsigned)(j - cy0) * CW + cx0, CANV + (unsigned)j * CW + cx0, cx1 - cx0);
+        struct gd_target t = { tmp - (unsigned)cy0 * CW, CW, cx0, cy0, cx1, cy1, .5f, 0.f, 0.f, 0 };
+        if (nb[0])
+            gd_items_list(LB, (const int16_t (*)[4])BND[0], &t, BILc[core][0], (unsigned)nb[0]);
+        if (nb[1])
+            gd_items_list(LO, (const int16_t (*)[4])BND[1], &t, BILc[core][1], (unsigned)nb[1]);
+        for (int y = yb; y < ye; y++) {
+            up2_near(row, tmp - (unsigned)cy0 * CW, y, X0, X1);
+            if (edge)
+                edge_row(row, X0, X1);
+            g_copy32(fb + (unsigned)y * GW + X0, row + X0, w);
+        }
+        return;
+    }
     uint32_t *band = PBUFc(core) - X0;   /* band[(y - yb) * GW + x] */
     for (int y = yb; y < ye; y++)
         up_row(band + (unsigned)(y - yb) * GW, CANV, y, X0, X1, core);
@@ -2400,9 +2446,8 @@ int g7_init(void)
     }
     /* glb_shift_row adds JDX across the whole row and clears only what earlier rows set, so JDX
      * starts zero (the pool holds garbage at boot: the panel's side columns took it as stripes) */
-    for (int c = 0; c < 3; c++)
-        for (int x = 0; x < GW; x++)
-            JDX[c][x] = 0;
+    for (unsigned x = 0; x < 4U * CW; x++)
+        JI[x] = 0;
     jd_ia = jd_ib = 0;
     jd_j = -1;
     inited = 1;
