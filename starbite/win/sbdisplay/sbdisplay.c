@@ -79,6 +79,10 @@ typedef struct _SD_DEVICE {
     ULONG BusyLast, BusyMax;              /* permille of one core spent copying, last / worst 1 s window */
     ULONG64 BatchPixels;
     BOOLEAN PlainC;                       /* Parameters\PlainC = 1: T9's plain-C copies (A/B comparison) */
+    /* T10b: which copy each path uses (SD_V_*), [mode][0 upright, 1 rotated 90/270]: the boot benchmark's
+     * winner on this phone; until it has run, T10's measurements. Scratch = rows gathered in a cached buffer. */
+    UCHAR Pick[3][2];
+    sbdc_u32 *Scratch;                    /* SBDC_SCRATCH_ROWS x Fb.Width pixels, cached */
     BOOLEAN Timing60;                     /* Parameters\Timing60: report a full 60 Hz timing (see FillSignal) */
     ULONG64 Seen;
     HANDLE GuardThread;
@@ -347,12 +351,23 @@ static void FillSignal(PSD_DEVICE Dev, ULONG I, D3DKMDT_VIDEO_SIGNAL_INFO *S)
 /* Copy rectangles of the source image into buffer i. */
 /* Copy rectangles of the presented image (its pixels) into buffer i through the transform (flip mode and the
  * buffer-to-buffer restore always run at scale 1). */
+#define SD_V_C 0
+#define SD_V_FAST 1
+#define SD_V_SCRATCH 2
+
 static void CopyRects(PSD_DEVICE Dev, int I, const UCHAR *Src, LONG SrcPitch, const struct sbdc_rects *R,
-                      const struct sbdc_xf *Xf)
+                      const struct sbdc_xf *Xf0)
 {
+    struct sbdc_xf xf = *Xf0;
+    const struct sbdc_xf *Xf = &xf;
+    BOOLEAN rotated = xf.rot == SBDC_ROT_90 || xf.rot == SBDC_ROT_270;
+    UCHAR v = Dev->PlainC || xf.rot == SBDC_ROT_180 ? SD_V_C : Dev->Pick[Dev->ModeIdx][rotated ? 1 : 0];
+    if (v == SD_V_SCRATCH && !Dev->Scratch)
+        v = SD_V_FAST;
+    xf.scratch = v == SD_V_SCRATCH ? Dev->Scratch : NULL;
     /* identity at 1x or 2x: the proven T7 copy (64-bit stores); everything else: the general one */
     for (unsigned k = 0; k < R->n; k++) {
-        if (Dev->PlainC)
+        if (v == SD_V_C)
             sbdc_present_blit_c(Dev->Va[I], Dev->Fb.Pitch, Src, (unsigned)SrcPitch, R->r[k], Xf);
         else
             sbdc_present_blit(Dev->Va[I], Dev->Fb.Pitch, Src, (unsigned)SrcPitch, R->r[k], Xf);
@@ -386,6 +401,10 @@ static BOOLEAN BackToFirmwareBuffer(PSD_DEVICE Dev)
 static void ReleaseScanout(PSD_DEVICE Dev)
 {
     BOOLEAN safe = BackToFirmwareBuffer(Dev);
+    if (Dev->Scratch) {                   /* the guard (benchmark) thread is stopped before this */
+        ExFreePoolWithTag(Dev->Scratch, 'csbS');
+        Dev->Scratch = NULL;
+    }
     if (Dev->Va[1] && Dev->SecondOwned) {
         if (safe)
             MmFreeContiguousMemory(Dev->Va[1]);
@@ -428,10 +447,12 @@ static void Bench(PSD_DEVICE Dev)
             if (!ModeFits(Dev, m))
                 continue;
             for (ULONG rot = SBDC_ROT_0; rot <= SBDC_ROT_90; rot++) {
+                static const PCWSTR vn[3] = { L"C", L"Fast", L"Scratch" };
                 struct sbdc_xf xf;
                 struct sbdc_rect r;
-                unsigned sw, sh;
-                LONGLONG best[2] = { MAXLONGLONG, MAXLONGLONG };
+                unsigned sw, sh, nv = rot == SBDC_ROT_90 && Dev->Scratch ? 3 : 2, win = 0;
+                LONGLONG best[3] = { MAXLONGLONG, MAXLONGLONG, MAXLONGLONG };
+                RtlZeroMemory(&xf, sizeof(xf));
                 xf.lw = ModeW(Dev, m);
                 xf.lh = ModeH(Dev, m);
                 xf.pw = Dev->Fb.Width;
@@ -443,24 +464,38 @@ static void Bench(PSD_DEVICE Dev)
                 r.l = r.t = 0;
                 r.r = (int)sw;
                 r.b = (int)sh;
-                for (int k = 0; k < 6; k++) {
-                    LONGLONG t = KeQueryPerformanceCounter(NULL).QuadPart;
-                    if (k & 1)
-                        sbdc_present_blit(d, Dev->Fb.Pitch, s, sw * 4, r, &xf);
-                    else
+                for (unsigned k = 0; k < 3 * nv; k++) {   /* interleaved, best of 3 each */
+                    unsigned v = k % nv;
+                    LONGLONG t;
+                    xf.scratch = v == SD_V_SCRATCH ? Dev->Scratch : NULL;
+                    t = KeQueryPerformanceCounter(NULL).QuadPart;
+                    if (v == SD_V_C)
                         sbdc_present_blit_c(d, Dev->Fb.Pitch, s, sw * 4, r, &xf);
+                    else
+                        sbdc_present_blit(d, Dev->Fb.Pitch, s, sw * 4, r, &xf);
                     t = KeQueryPerformanceCounter(NULL).QuadPart - t;
-                    if (t < best[k & 1])
-                        best[k & 1] = t;
+                    if (t < best[v])
+                        best[v] = t;
                 }
-                for (int v = 0; v < 2; v++) {
+                for (unsigned v = 0; v < nv; v++) {
                     WCHAR nm[48];
                     UNICODE_STRING us;
+                    if (best[v] < best[win])
+                        win = v;
                     RtlInitEmptyUnicodeString(&us, nm, sizeof(nm) - sizeof(WCHAR));
-                    if (NT_SUCCESS(RtlUnicodeStringPrintf(&us, L"Bench_%s_R%u_%s", mn[m], (rot - 1) * 90,
-                                                          v ? L"Fast" : L"C"))) {
+                    if (NT_SUCCESS(RtlUnicodeStringPrintf(&us, L"Bench_%s_R%u_%s", mn[m], (rot - 1) * 90, vn[v]))) {
                         nm[us.Length / sizeof(WCHAR)] = 0;
                         Log(nm, (ULONG)(best[v] * 1000000LL / Dev->PcFreq * Dev->Fb.Height / 256), FALSE);
+                    }
+                }
+                Dev->Pick[m][rot == SBDC_ROT_90 ? 1 : 0] = (UCHAR)win;   /* from now on, the winner */
+                {
+                    WCHAR nm[32];
+                    UNICODE_STRING us;
+                    RtlInitEmptyUnicodeString(&us, nm, sizeof(nm) - sizeof(WCHAR));
+                    if (NT_SUCCESS(RtlUnicodeStringPrintf(&us, L"Pick_%s_R%u", mn[m], (rot - 1) * 90))) {
+                        nm[us.Length / sizeof(WCHAR)] = 0;
+                        Log(nm, win, FALSE);
                     }
                 }
             }
@@ -595,6 +630,14 @@ NTSTATUS SdStartDevice(IN_CONST_PVOID MiniportDeviceContext, IN_PDXGK_START_INFO
     dev->LastRot = SBDC_ROT_0;
     dev->Timing60 = Param(L"Timing60", 0) != 0;
     dev->PlainC = Param(L"PlainC", 0) != 0;
+    /* T10 on the phone (us per frame, C vs NEON): 1440 upright 5480 vs 6070, 1080 upright 75190 vs 10255,
+     * 720 upright 3688 vs 5989; rotated 687170 vs 125383, 185439 vs 115937, 103264 vs 150220. */
+    {
+        static const UCHAR t10[3][2] = { { SD_V_C, SD_V_FAST }, { SD_V_FAST, SD_V_FAST }, { SD_V_C, SD_V_C } };
+        RtlCopyMemory(dev->Pick, t10, sizeof(t10));
+    }
+    dev->Scratch = (sbdc_u32 *)ExAllocatePool2(POOL_FLAG_NON_PAGED, (SIZE_T)SBDC_SCRATCH_ROWS * dev->Fb.Width * 4, 'csbS');
+    Log(L"ScratchAlloc", dev->Scratch != NULL, FALSE);
     {
         LARGE_INTEGER f;
         (void)KeQueryPerformanceCounter(&f);

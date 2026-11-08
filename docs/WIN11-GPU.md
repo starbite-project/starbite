@@ -408,6 +408,19 @@ interrupts re-armed; context 2 back after `sbg_ctx_reset`); a hang (nothing befo
 the next chain runs); deferred release; XNU's triangle through the scheduler. Five deliberate bugs in the core
 (no guilt, no deferred release, no timeout, one page mapped for all, an off-by-one fence) each fail it.
 
+**T12 passed on the phone (2026-11-08 18:54, sbmali-e3fdf550, `build/win/results/t10-t12-hive`):**
+- 100/100 rounds through sbg at 572 MHz, on scattered Windows pages, each round 8 WRITE_VALUE chains plus
+  the triangle.
+- 86,528 triangle pixels in every round, 0 mismatches, 0 foreign pixels.
+- The slowest round (10 chains, queued at once, polled) took 1,008 µs.
+- The deliberate fault: status FAULT on context 2, AS fault 0x7C1002C1 (TRANSLATION_FAULT level 1) at
+  0x7FF00000, JS_STATUS 8 (still active when the MMU faulted). One soft reset, no reset failure, and the
+  next context's chain ran.
+- 1,002 chains started (1,000 + the two of the fault test), none skipped.
+- T8's long run in the same boot: legacy and AArch64 200/200 each, 0 faults.
+
+So the stage-4 kernel half queues, completes, faults and recovers on the real GPU.
+
 **T12's first build (sbmali-0b1e6520, 2026-11-08) never ran: the main session's pre-flight found it would
 hang.** A text replacement had turned sbg_core's `barrier()` helper into a call to itself (`if (io->barrier)
 barrier(g);`), which clang compiled to `b .` (6 places, the map/unmap/start paths). The host test missed it
@@ -674,6 +687,34 @@ The benchmark runs once, 20 s after sbdisplay starts (`Parameters\Bench` = 0 tur
 private write-combined buffer of 256 panel rows and a 17 MB pool copy of a test image, both freed right
 after, so it never touches the screen. Results are in microseconds per full 1440 × 2960 frame, best of 3:
 `Bench_{1440,1080,720}_R{0,90}_{C,Fast}`.
+
+**T10 on the phone (2026-11-08 18:54, sbdisplay-40548a5b, unattended; `build/win/results/t10-t12-hive`):**
+the desktop ran at 1080 × 2220 **rotated 270** (landscape from the T9 session). Presents up to 56/s, on
+average 32,079 changed pixels per present. The copy took on average 268 µs and at most 12.9 ms per present,
+and **at most 16 % of one core** over a 1 s window. Boot benchmark, µs per full 1440 × 2960 frame:
+
+| | upright C | upright NEON | rotated C | rotated tiled |
+|---|---|---|---|---|
+| 1440 | 5,480 | 6,070 | 687,170 | 125,383 |
+| 1080 | 75,190 | 10,255 | 185,439 | 115,937 |
+| 720 | 3,688 | 5,989 | 103,264 | 150,220 |
+
+Readings:
+- (a) On the phone's cores, 128-bit stores to the write-combined panel are slower than 64-bit ones. The 720
+  C path, with one 64-bit store per pixel pair, is the fastest copy measured: about 4.6 GB/s.
+- (b) The 4/3 scaler is the real win: NEON's table lookup is 7× faster.
+- (c) Rotated copies are expensive everywhere: a full landscape frame costs 116 ms at 1080. This is what
+  made landscape slow.
+- (d) The Mac predicts none of this (there, plain C wins rotated).
+
+**T10b (built, not yet on the phone):**
+- Every store to the panel is 64-bit, including the NEON 4/3 path.
+- Rotated copies gain a third variant: 8 panel rows gathered in a 46 KB cached scratch buffer (reads stay in
+  a few source lines), then each row written once, sequentially.
+- **Adaptive choice:** `Pick[mode][upright|rotated]` starts at T10's winners. The boot benchmark now times
+  C, NEON/tiled and scratch, and switches each path to its winner (State `Pick_<mode>_R<0|90>`: 0 C, 1 NEON or
+  tiled, 2 scratch). So a path is never slower than its best measured variant on this phone.
+- All variants are pixel-identical (host test).
 
 ### 7.6a Refresh rate: what Windows shows, and overclocking (research, 2026-11-07)
 

@@ -469,7 +469,7 @@ static void test_display(void)
         int bad = 0, cases = 0;
         for (int m = 0; m < 3; ++m)
             for (unsigned rot = 1; rot <= 4; ++rot) {
-                struct sbdc_xf xf = { sc[m][0], sc[m][1], 16, 24, rot, sc[m][2], sc[m][3] };
+                struct sbdc_xf xf = { sc[m][0], sc[m][1], 16, 24, rot, sc[m][2], sc[m][3], NULL };
                 unsigned sw, sh, W = xf.lw, H = xf.lh;
                 sbdc_xf_src_size(&xf, &sw, &sh);
                 for (int pass = 0; pass < 2; ++pass) {
@@ -505,7 +505,7 @@ static void test_display(void)
         CHECK(!bad, "rotation x scale: %d/%d cases match the KMDOD reference", cases - bad, cases);
         /* the real sizes: 1080 x 2220 landscape (presented 2220 x 1080) fills 1440 x 2960 exactly */
         {
-            struct sbdc_xf xf = { 1080, 2220, 1440, 2960, SBDC_ROT_90, 3, 2 };
+            struct sbdc_xf xf = { 1080, 2220, 1440, 2960, SBDC_ROT_90, 3, 2, NULL };
             unsigned sw, sh;
             uint32_t *bs = malloc(2220 * 1080 * 4), *bd = malloc(1440 * 2960 * 4);
             sbdc_xf_src_size(&xf, &sw, &sh);
@@ -532,8 +532,9 @@ static void test_display(void)
             bs[i] = i * 2654435761u;
         for (int m = 0; m < 3; ++m)
             for (unsigned rot = 1; rot <= 4; ++rot) {
+                static sbdc_u32 scratch[SBDC_SCRATCH_ROWS * 1440];
                 struct sbdc_xf xf = { (1440 * sc[m][0]) >> sc[m][1], (2960 * sc[m][0]) >> sc[m][1], 1440, 2960, rot,
-                                      sc[m][0], sc[m][1] };
+                                      sc[m][0], sc[m][1], NULL };
                 unsigned sw, sh;
                 sbdc_xf_src_size(&xf, &sw, &sh);
                 for (int k = 0; k <= 300; ++k) {
@@ -554,6 +555,7 @@ static void test_display(void)
                     memset(d1, 0x5a, 1440 * 2960 * 4);
                     memset(d2, 0x5a, 1440 * 2960 * 4);
                     sbdc_blit_xf_c((uint8_t *)d1, 1440 * 4, (const uint8_t *)bs, pitch_px * 4, rr, &xf);
+                    xf.scratch = (k & 1) ? scratch : NULL;     /* both rotated paths: scratch and tiles */
                     sbdc_blit_xf((uint8_t *)d2, 1440 * 4, (const uint8_t *)bs, pitch_px * 4, rr, &xf);
                     runs++;
                     if (memcmp(d1, d2, 1440 * 2960 * 4)) {

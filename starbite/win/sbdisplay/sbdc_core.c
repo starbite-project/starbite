@@ -396,32 +396,29 @@ void sbdc_blit_xf_c(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsign
 #define SBDC_NEON 1
 #endif
 
+/* Stores to the panel are 64-bit: on the phone's A55s, 128-bit stores to write-combined memory measured
+ * slower than 64-bit ones (T10: 720 upright 3.7 ms with 64-bit stores, 6.0 ms with 128-bit). */
 static void row_copy(sbdc_u32 *d, const sbdc_u32 *s, unsigned n)
 {
     unsigned i = 0;
-#ifdef SBDC_NEON
-    for (; i + 8 <= n; i += 8) {
-        uint32x4_t a = vld1q_u32(s + i), b = vld1q_u32(s + i + 4);
-        vst1q_u32(d + i, a);
-        vst1q_u32(d + i + 4, b);
+    if (n && ((unsigned long long)(d) & 4U)) {   /* to 8-byte alignment */
+        d[0] = s[0];
+        i = 1;
     }
-#endif
+    for (; i + 2 <= n; i += 2)
+        *(unsigned long long *)(d + i) = (unsigned long long)s[i] | (unsigned long long)s[i + 1] << 32;
     for (; i < n; ++i)
         d[i] = s[i];
 }
 
-/* d[2i] = d[2i+1] = s[i] */
+/* d[2i] = d[2i+1] = s[i]: one 64-bit store per source pixel (T7's copy, the fastest measured) */
 static void row_double(sbdc_u32 *d, const sbdc_u32 *s, unsigned n)
 {
     unsigned i = 0;
-#ifdef SBDC_NEON
-    for (; i + 4 <= n; i += 4) {
-        uint32x4_t v = vld1q_u32(s + i);
-        uint32x4x2_t z = vzipq_u32(v, v);
-        vst1q_u32(d + 2 * i, z.val[0]);
-        vst1q_u32(d + 2 * i + 4, z.val[1]);
+    if (!((unsigned long long)(d) & 4U)) {
+        for (; i < n; ++i)
+            *(unsigned long long *)(d + 2 * i) = (unsigned long long)s[i] | (unsigned long long)s[i] << 32;
     }
-#endif
     for (; i < n; ++i)
         d[2 * i] = d[2 * i + 1] = s[i];
 }
@@ -443,8 +440,11 @@ static void row_43(sbdc_u32 *d, const sbdc_u32 *s, unsigned X0, unsigned X1, uns
             uint8x16x2_t t;
             t.val[0] = vld1q_u8(p);
             t.val[1] = vld1q_u8(p + 16);
-            vst1q_u8((sbdc_u8 *)(d + X), vqtbl2q_u8(t, ta));
-            vst1q_u8((sbdc_u8 *)(d + X + 4), vqtbl2q_u8(t, tb));
+            uint32x4_t a = vreinterpretq_u32_u8(vqtbl2q_u8(t, ta)), b = vreinterpretq_u32_u8(vqtbl2q_u8(t, tb));
+            vst1_u32(d + X, vget_low_u32(a));      /* 64-bit stores (see row_copy) */
+            vst1_u32(d + X + 2, vget_high_u32(a));
+            vst1_u32(d + X + 4, vget_low_u32(b));
+            vst1_u32(d + X + 6, vget_high_u32(b));
         }
     }
 #endif
@@ -526,7 +526,31 @@ void sbdc_blit_xf(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned
         }
         return;
     }
-    /* 90 / 270: tiles */
+    /* 90 / 270 with a scratch buffer: SBDC_SCRATCH_ROWS panel rows at a time. Per panel column X the rows'
+     * pixels come from one source row (sy = lx) and adjacent columns: gathered into the cached scratch rows,
+     * then each row goes to the panel in one sequential pass of 64-bit stores. */
+    if (x->scratch) {
+        const sbdc_u8 *rowbase = x->rot == SBDC_ROT_90 ? src : src + (unsigned long long)(W - 1) * src_pitch;
+        long long step = x->rot == SBDC_ROT_90 ? pitch : -pitch;
+        for (unsigned Yb = Y0; Yb < Y1; Yb += SBDC_SCRATCH_ROWS) {
+            unsigned n = Y1 - Yb < SBDC_SCRATCH_ROWS ? Y1 - Yb : SBDC_SCRATCH_ROWS;
+            unsigned col[SBDC_SCRATCH_ROWS];
+            for (unsigned j = 0; j < n; ++j) {
+                unsigned ly = ((Yb + j) * x->den) >> x->shift;
+                col[j] = (x->rot == SBDC_ROT_90 ? H - 1 - ly : ly) * 4U;   /* byte offset of sx in a row */
+            }
+            for (unsigned X = X0; X < X1; ++X) {
+                const sbdc_u8 *row = rowbase + (long long)((X * x->den) >> x->shift) * step;
+                for (unsigned j = 0; j < n; ++j)
+                    x->scratch[j * x->pw + X] = *(const sbdc_u32 *)(row + col[j]);
+            }
+            for (unsigned j = 0; j < n; ++j)
+                row_copy((sbdc_u32 *)(dst + (unsigned long long)(Yb + j) * dst_pitch) + X0, x->scratch + j * x->pw + X0,
+                         X1 - X0);
+        }
+        return;
+    }
+    /* 90 / 270 without one: tiles */
     for (unsigned Yb = Y0; Yb < Y1; Yb += SBDC_TILE_Y) {
         unsigned Ye = Yb + SBDC_TILE_Y < Y1 ? Yb + SBDC_TILE_Y : Y1;
         for (unsigned Xb = X0; Xb < X1; Xb += SBDC_TILE_X) {

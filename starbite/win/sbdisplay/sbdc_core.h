@@ -170,7 +170,12 @@ struct sbdc_xf {
     unsigned pw, ph;
     unsigned rot;
     unsigned den, shift;
+    /* Optional, for rotated copies (T10b): a cached CPU buffer of SBDC_SCRATCH_ROWS x pw pixels. Rows are
+     * gathered there (reads stay in a few source cache lines) and then written to the panel sequentially,
+     * which write-combined memory needs. NULL = the tiled path. */
+    sbdc_u32 *scratch;
 };
+#define SBDC_SCRATCH_ROWS 8U
 
 /* The size of the image Windows presents for this transform. */
 void sbdc_xf_src_size(const struct sbdc_xf *x, unsigned *w, unsigned *h);
