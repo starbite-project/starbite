@@ -2720,7 +2720,8 @@ uint32_t g7_frame(const struct g7_frame *f)
         motion_half = !forced && (wide || glass_area * 8U > (uint64_t)GW * GH || (sh_on && sh_dy != 0));
         gs_prepare(GS_HALF, LB ? LB->shape : 0, LB ? LB->nshape : 0, &CBASE, 1.f);
         /* the glass changes over more than a quarter of the panel: those rows on the quarter grid */
-        motion_qb = G7_QMOTION && motion_half && glass_area * 4U > (uint64_t)GW * GH;
+        motion_qb = G7_QMOTION && motion_half && (glass_area * 4U > (uint64_t)GW * GH || (sh_on && sh_dy != 0));
+        /* (a shifting frame's rows shaded again, the moving edges: the quarter grid too, exact at rest) */
         if (motion_qb)
             gs_prepare(GS_QB, LB ? LB->shape : 0, LB ? LB->nshape : 0, &CBASE, 1.f);
     } else {
