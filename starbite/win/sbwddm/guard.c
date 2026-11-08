@@ -8,6 +8,11 @@
  * full-mode boot that does not get there (a black desktop and a forced or dead-man restart, a bugcheck, a
  * failed start) is followed by a display-only boot. There is no WARP fallback for a failing UMD (6.3), so
  * this guard is what brings the desktop back.
+ *
+ * Crash bounds without touching the phone: a full-mode boot that dies -> the next boot is display-only; a
+ * display-only boot that dies twice (sbdisplay's own GuardBoots, limit 2) -> the third boot refuses -> Basic
+ * Display. Kill files (C:\Windows\Starbite\, from TWRP): sbwddm.off = the whole driver off (checked first);
+ * sbwddm.full.off = full mode off; sbdisplay.off = display-only mode off (sbdisplay's own, as before).
  */
 #include "maliwddm/maliwddm.h"
 
@@ -119,6 +124,11 @@ NTSTATUS S9DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath
     ULONG want, guard;
     BOOLEAN kill;
 
+    /* The whole driver off, before anything else runs (no registry access yet): a file dropped from TWRP at
+     * C:\Windows\Starbite\sbwddm.off. Windows then uses Basic Display. Covers a fault in this function too,
+     * which neither boot guard would count. */
+    if (S9FileExists(L"\\SystemRoot\\Starbite\\sbwddm.off"))
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
     S9SetServiceKey(RegistryPath);
     {
         static const char id[] = SB_BUILD_ID;

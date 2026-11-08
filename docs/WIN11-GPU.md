@@ -518,6 +518,11 @@ its rule is applied now on the kernel side (below).
   The boot is counted at once, and cleared only when healthy: 60 s after start, with ≥ 30 flips/blts and
   ≥ 30 GPU jobs done. Otherwise the next boot is display-only (= sbdisplay, today's desktop). That is the
   answer to "no WARP fallback" (§6.3).
+  **Crash bounds:** full-mode crash → next boot display-only; display-only crash twice → the third boot
+  refuses (sbdisplay's GuardBoots) → Basic Display. **Kill files** (`C:\Windows\Starbite\`, droppable from
+  TWRP): `sbwddm.off` turns the whole driver off and is checked before anything else (also covers a fault
+  in the entry code, which neither guard counts); `sbwddm.full.off` turns off full mode; `sbdisplay.off`
+  turns off display-only mode.
 - **Interrupts for full mode:** `starbite/win/acpi/StarbiteGpu4.asl` (table revision 4) adds the Mali's lines
   (vendor DT: JOB SPI 282 = GSIV 314, MMU 281 = 313, GPU 283 = 315, level). It is installed by the shared
   SSDT firmware DXE (another track's BOOT flash).
