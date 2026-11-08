@@ -373,10 +373,28 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
      * copies its stale pages over the framebuffer. */
     dst = AllocationVa(A, Op->Dst);
     if (dst != NULL) {
+        RECT nr = { 0, 0, 0, 0 };
         dstW = (LONG)Op->Dst->Width;
         dstH = (LONG)Op->Dst->Height;
         dstPitch = (LONG)(Op->Dst->Pitch ? Op->Dst->Pitch : Op->Dst->Width * 4);
-        (void)CopyRects(Op, dst, dstW, dstH, dstPitch, src, srcW, srcH, srcPitch, NULL);
+        (void)CopyRects(Op, dst, dstW, dstH, dstPitch, src, srcW, srcH, srcPitch, &nr);
+        if (!toFb && Op->Kind == MW_PRESENT_BLT && src != NULL) {
+            /* T13t: an app's frame into a surface DWM samples: did pixels go in, and are they there after? */
+#define SB_TAG(x) ((x)->Width << 16 | ((x)->Height & 0x3FFF) | (((x)->Flags & MW_ALLOC_PRIMARY) ? 0x8000u : 0))
+            A->NpBlts++;
+            A->NpSrcTag = SB_TAG(Op->Src);
+            A->NpDstTag = SB_TAG(Op->Dst);
+#undef SB_TAG
+            A->NpRects = Op->NumRects;
+            A->NpRectLT = (ULONG)nr.left << 16 | (ULONG)nr.top;
+            A->NpRectRB = (ULONG)nr.right << 16 | (ULONG)nr.bottom;
+            if (NotBlack(src, srcPitch, 0, 0, srcW, srcH))
+                A->NpSrcContent++;
+            if (NotBlack(dst, dstPitch, 0, 0, dstW, dstH))
+                A->NpDstContent++;
+            A->NpSrcPx = ((const ULONG *)(src + (SIZE_T)(srcH / 2) * srcPitch))[srcW / 2];
+            A->NpDstPx = ((const ULONG *)(dst + (SIZE_T)(dstH / 2) * dstPitch))[dstW / 2];
+        }
         if (toFb)
             A->PrimaryOwnCopies++;
     } else if (!toFb) {
@@ -396,6 +414,14 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         if (Op->Kind == MW_PRESENT_BLT && Op->Src != NULL && Op->Src->Width == A->Fb.Width &&
             Op->Src->Height == A->Fb.Height) {
             A->ShowFromBltSrc++;
+            /* T13t: DWM's back buffer, whole: is it black outside the blt's rectangle? */
+            if (src != NULL) {
+                if (NotBlack(src, srcPitch, 0, 0, srcW, srcH))
+                    A->PbSrcFullContent++;
+                else
+                    A->PbSrcFullBlack++;
+                A->PbSrcPx = ((const ULONG *)(src + (SIZE_T)(srcH / 4) * srcPitch))[srcW / 2];
+            }
             MwShow(A, Op->Src, TRUE);
         } else {
             MwShow(A, Op->Dst, FALSE);    /* the blt itself drew into the framebuffer */

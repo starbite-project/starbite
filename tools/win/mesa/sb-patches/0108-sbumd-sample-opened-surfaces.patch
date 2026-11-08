@@ -1,0 +1,109 @@
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index 475941b..1f4f2f0 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -61,6 +61,46 @@
+  * copies all tested right. One row (the middle one) of the source is GPU-copied to a staging texture and read:
+  * 32 samples across it, logged to the umdlog and as UmdNote_20 (the centre pixel), 21/22 (presents with some /
+  * no non-black sample). The first 24 presents of each process, then every 64th. */
++struct Resource *sbOpened[SB_OPENED_MAX];
++
++/* One row (the middle one) of a 32-bit 2D resource, GPU-copied to staging and read: the non-black count of 32
++ * samples, the centre pixel. -1 if it cannot be sampled. */
++static int
++sb_sample_row(struct pipe_context *pipe, struct pipe_resource *src, uint32_t *centre)
++{
++   if (!src || src->target != PIPE_TEXTURE_2D || util_format_get_blocksize(src->format) != 4)
++      return -1;
++   struct pipe_resource t;
++   memset(&t, 0, sizeof t);
++   t.target = PIPE_TEXTURE_2D;
++   t.format = src->format;
++   t.width0 = src->width0;
++   t.height0 = 1;
++   t.depth0 = 1;
++   t.array_size = 1;
++   t.usage = PIPE_USAGE_STAGING;
++   struct pipe_resource *st = pipe->screen->resource_create(pipe->screen, &t);
++   if (!st)
++      return -1;
++   struct pipe_box box, all;
++   u_box_2d(0, src->height0 / 2, src->width0, 1, &box);
++   pipe->resource_copy_region(pipe, st, 0, 0, 0, 0, src, 0, &box);
++   u_box_2d(0, 0, src->width0, 1, &all);
++   struct pipe_transfer *tr = NULL;
++   const uint32_t *px = (const uint32_t *)pipe->texture_map(pipe, st, 0, PIPE_MAP_READ, &all, &tr);
++   int k = -1;
++   if (px) {
++      k = 0;
++      for (unsigned i = 0; i < 32; i++)
++         if (px[(src->width0 * (2 * i + 1)) / 64] & 0x00ffffffu)
++            k++;
++      *centre = px[src->width0 / 2];
++      pipe->texture_unmap(pipe, tr);
++   }
++   pipe_resource_reference(&st, NULL);
++   return k;
++}
++
+ static void
+ sb_sample_present(struct pipe_context *pipe, Resource *res, unsigned alloc, unsigned flags)
+ {
+@@ -107,6 +147,15 @@ sb_sample_present(struct pipe_context *pipe, Resource *res, unsigned alloc, unsi
+                   flags, centre, nonblack, s[0], s[4], s[8], s[12], s[16], s[20], s[24], s[28]);
+    }
+    pipe_resource_reference(&st, NULL);
++   /* sb-patches/0108: what this process (DWM) sees in the surfaces it opened from others */
++   for (unsigned i = 0; i < SB_OPENED_MAX; i++) {
++      Resource *o = sbOpened[i];
++      uint32_t c = 0;
++      int k = o ? sb_sample_row(pipe, o->resource, &c) : -1;
++      if (k >= 0)
++         DebugPrintf("sbumd:   opened alloc 0x%x %ux%u: centre 0x%08x, %d/32 non-black\n", o->sbAllocation,
++                     o->resource->width0, o->resource->height0, c, k);
++   }
+ }
+ 
+ HRESULT APIENTRY
+diff --git a/src/gallium/frontends/d3d10umd/Resource.cpp b/src/gallium/frontends/d3d10umd/Resource.cpp
+index b375a1b..ee40c0a 100644
+--- a/src/gallium/frontends/d3d10umd/Resource.cpp
++++ b/src/gallium/frontends/d3d10umd/Resource.cpp
+@@ -551,6 +551,11 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
+    pResource->NumSubResources = 1;
+    pResource->transfers = (struct pipe_transfer **)calloc(1, sizeof *pResource->transfers);
+    pResource->sbAllocation = oi->hAllocation;
++   for (unsigned i = 0; i < SB_OPENED_MAX; i++)
++      if (!sbOpened[i]) {
++         sbOpened[i] = pResource;
++         break;
++      }
+    malikm_note_count(13);
+    DebugPrintf("sbumd: OpenResource: allocation 0x%x %ux%u pitch %u fmt %u\n", oi->hAllocation, w, h, pitch, fmt);
+ }
+@@ -579,6 +584,10 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
+    struct pipe_context *pipe = CastPipeContext(hDevice);
+    Resource *pResource = CastResource(hResource);
+ 
++   for (unsigned i = 0; i < SB_OPENED_MAX; i++)
++      if (sbOpened[i] == pResource)
++         sbOpened[i] = NULL;
++
+    if (pResource->so_target) {
+       pipe_so_target_reference(&pResource->so_target, NULL);
+    }
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index ecb36f7..8bbe4b6 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -188,6 +188,10 @@ int malikm_present_allocs(unsigned src, unsigned dst, void *dxgi_context);
+ int malikm_set_display_mode(unsigned hPrimaryAllocation);
+ void malikm_note(unsigned id, unsigned value);
+ void malikm_note_count(unsigned id);
++/* Starbite (sb-patches/0108): the resources this device opened from other processes (OpenResource), for the
++ * present sampling: DWM samples its windows' surfaces through these. */
++#define SB_OPENED_MAX 32
++extern struct Resource *sbOpened[SB_OPENED_MAX];
+ #ifdef __cplusplus
+ }
+ #endif

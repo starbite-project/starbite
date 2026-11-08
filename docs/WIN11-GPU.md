@@ -991,6 +991,15 @@ the CPU path. sbshare adds a GPU re-sample after the producer's update.
   scanout shows, whole.
 - **Flips to an all-black allocation are ignored.**
 
+**cycle-t13s-1 (01:34):**
+- **DWM's back buffer**, now shown on the panel, is black everywhere except the spinner's rectangle.
+- **The apps' frames have content**, and reach DWM's surfaces through 280 present blts that our KMD copies on
+  the CPU.
+- **T13t instruments that path:**
+  - KMD: source and destination content of each non-primary blt;
+  - KMD: DWM's whole back buffer at each primary blt;
+  - UMD (sb-patches/0108): DWM's GPU view of every surface it opened.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

@@ -195,6 +195,10 @@ struct _MW_ADAPTER {
     ULONG RefPx[8], RefSrcTag;
     ULONG FlipContent, FlipBlack, FlipPxCentre, FlipSrcVa, FlipSrcPages;  /* T13q: sampled at the flip itself */
     ULONG ShowFromBltSrc, FlipsIgnoredBlack;                             /* T13s */
+    /* T13t: the present blts into non-primary surfaces (apps' frames into the surfaces DWM samples) and the
+     * full frame of the blt sources into primaries (DWM's back buffer) */
+    ULONG NpBlts, NpSrcContent, NpDstContent, NpSrcTag, NpDstTag, NpRectLT, NpRectRB, NpRects, NpSrcPx, NpDstPx;
+    ULONG PbSrcFullContent, PbSrcFullBlack, PbSrcPx;
     ULONG CoherentMaps, CpuMapFails;            /* presents copied before the queue drained (200 ms bound) */                    /* presents whose destination is the primary: pixels on the panel */                     /* renders refused: a chain outside the render's allocations */                     /* interrupt resources the device has (the stage-4 SSDT: the Mali's 3) */
 
     /* Counters for the trace. */
