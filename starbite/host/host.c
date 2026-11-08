@@ -137,8 +137,17 @@ static unsigned keys_now;
 unsigned sb_keys(void) { host_step(); return keys_now; }
 void sb_keys_release_wait(void) { while (sb_keys()) sb_mdelay(20); }
 void (*sb_before_reset)(void);
-static void host_before_reset(void) { void (*f)(void) = sb_before_reset; sb_before_reset = 0; if (f) f(); }
-void sb_reboot(uint32_t inform3) { host_before_reset(); printf("host: reboot (inform3 %#x)\n", inform3); exit(0); }
+static void host_before_reset(void)
+{
+    void (*f)(void) = sb_before_reset;
+    sb_before_reset = 0;
+    if (f)
+        f();
+    if (getenv("HOST_LOGTAIL"))                 /* the log so far, for scripts that end in a reset */
+        for (unsigned i = 0; i < sb_log_count(); ++i)
+            printf("log: %s\n", sb_log_line(i));
+}
+void sb_reboot(uint32_t inform3) { host_before_reset(); sb_log("reboot"); printf("host: reboot (inform3 %#x)\n", inform3); exit(0); }
 void sb_power_off(void) { host_before_reset(); printf("host: power off\n"); exit(0); }
 void sb_boot_next(const char *key) { host_before_reset(); printf("host: boot-next %s\n", key); exit(0); }
 int sb_boot_next_peek(char key[24]) { key[0] = 0; return 0; }

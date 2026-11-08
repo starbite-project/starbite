@@ -486,9 +486,7 @@ void sb_main(void)
     E.tab_req = -1;
     cur_tab = 0;
 #ifdef OC_SELFTEST
-    oc_selftest_boot();                     /* read only: tables to pmsg, then the page */
-    cur_tab = 3;
-    oc_page();
+    oc_selftest_boot();                     /* read only: tables to pmsg, then recovery (no return) */
 #endif
     for (;;) {
         E.home = 0;

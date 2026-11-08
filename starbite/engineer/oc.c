@@ -28,6 +28,16 @@ static uint32_t rd32(uintptr_t a)
     return v;
 }
 
+/* The self-test's breadcrumbs: one pmsg line before each read block, so a freeze shows where. */
+static int oc_crumbs;
+
+static void crumb(const char *what)
+{
+    sb_wdt_feed(1);                         /* between read blocks only (a no-op unless armed) */
+    if (oc_crumbs)
+        sb_logf("oc selftest: next: ", what);
+}
+
 static void oc_load(void)
 {
     const uint8_t *win = (const uint8_t *)ECT_BASE;
@@ -40,6 +50,7 @@ static void oc_load(void)
     OT.fv_found = 0;
     OT.asv_ver = 0;
     OT.asv_known = 0;                       /* not read yet: the lowest cap over the rows is used */
+    crumb("ECT in DRAM 0xA0000000 (find and parse)");
     ot_ect_at = oct_ect_find(win, OC_ECT_MAX);
     if (ot_ect_at != OC_NONE) {
         const uint8_t *e = win + ot_ect_at;
@@ -50,14 +61,20 @@ static void oc_load(void)
         return;
     /* the fvmap: first at the dtsi offset, else anywhere in APM SRAM (each candidate must carry the
      * ECT's A55, M3 and G3D steps, so a wrong place is not taken) */
+    crumb("APM SRAM fvmap at +0x6700 (8 KiB)");
     if (sb_acpm_sram_read(OC_FVMAP_OFFSET, ot_sram, OC_FVMAP_SIZE) &&
         oct_parse_fvmap(ot_sram, OC_FVMAP_SIZE, &OT)) {
         ot_fv_at = OC_FVMAP_OFFSET;
         return;
     }
     uint32_t n = 0;
-    while (n < sizeof(ot_sram) && sb_acpm_sram_read(n, ot_sram + n, 0x1000))
+    crumb("APM SRAM scan, 4 KiB blocks from +0x0");
+    while (n < sizeof(ot_sram) && sb_acpm_sram_read(n, ot_sram + n, 0x1000)) {
         n += 0x1000;
+        sb_wdt_feed(1);
+        if (oc_crumbs && !(n & 0x7fffU))
+            sb_logx("oc selftest: SRAM read to +", n);
+    }
     for (uint32_t o = 0; o + OC_NDOM * 24U <= n; o += 4) {
         uint32_t len = n - o < OC_FVMAP_SIZE ? n - o : OC_FVMAP_SIZE;
         if (oct_parse_fvmap(ot_sram + o, len, &OT)) {
@@ -1008,13 +1025,20 @@ void oc_page(void)
 }
 
 #ifdef OC_SELFTEST
-/* The read-only self-test image: tables to pmsg first (so a hang later still leaves them), then
+/* The read-only self-test image, unattended: the watchdog armed first, a breadcrumb before each read
+ * block, tables to pmsg first (so a hang later still leaves them), then
  * ACPM FREQ_GET (reads) for the five domains with controls, each next to its PLL step and boot step:
- * the check that FREQ_GET reports the live step before any change trusts it as the way back. */
+ * the check that FREQ_GET reports the live step before any change trusts it as the way back. Then
+ * the watchdog back as S-Boot left it and a reboot to recovery; it never returns. */
 void oc_selftest_boot(void)
 {
-    sb_log("oc selftest: start (read only: ECT, APM SRAM, PLLs)");
+    /* unattended: the cluster 1 watchdog (60 s) before the first ECT / SRAM / ACPM read, fed only
+     * between read blocks; at the end straight to recovery (TWRP pulls pmsg) */
+    oc_crumbs = 1;
+    sb_log("oc selftest: start (read only: ECT, APM SRAM, PLLs, FREQ_GET); watchdog 60 s, then recovery");
+    (void)sb_wdt_arm(60);
     oc_load();
+    crumb("PLL reads and the table log");
     log_tables();
     sb_log("oc selftest: tables done; FREQ_GET A55, M3, G3D, MIF, INT next (reads)");
     static const int gd[5] = { OC_A55, OC_M3, OC_G3D, OC_MIF, OC_INT };
@@ -1024,6 +1048,7 @@ void oc_selftest_boot(void)
         uint32_t khz = 0;
         const char *how;
         struct ub u;
+        crumb(oc_info[d].name);             /* "next: MIF" before its FREQ_GET */
         ub_init(&u);
         ub_s(&u, "oc selftest: FREQ_GET ");
         ub_s(&u, oc_info[d].name);
@@ -1056,6 +1081,9 @@ void oc_selftest_boot(void)
         sb_log(u.b);
     }
     sb_logx("oc selftest: ACPM late or missing answers ", sb_acpm_dvfs_untrusted());
-    sb_log("oc selftest: done");
+    sb_log("oc selftest: done; rebooting to recovery");
+    __asm__ volatile("dsb sy" : : : "memory");  /* pmsg is in RAM: every line out before the reset */
+    sb_wdt_disarm();                        /* S-Boot's masked state back, so no reset fires in TWRP */
+    sb_reboot(SB_INFORM_RECOVERY);
 }
 #endif

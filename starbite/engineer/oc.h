@@ -56,7 +56,7 @@ int oct_above_cap(const struct oc_dom *o, uint32_t khz);
 /* oc.c */
 void oc_page(void);                         /* Clocks tab > Overclocking */
 void oc_tick(void);                         /* main.c's ui_tick: feeds the watchdog while active */
-void oc_selftest_boot(void);                /* the OC_SELFTEST image: tables to pmsg at start */
+void oc_selftest_boot(void) __attribute__((noreturn));  /* OC_SELFTEST: tables to pmsg, then recovery */
 int oc_active(void);                        /* 1 while any domain is off its default step */
 
 /* stability runs (lab.c, gpu.c): 1 pass, 0 fail, -1 not run; detail: one line */
