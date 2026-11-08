@@ -66,4 +66,6 @@ int lab_oc_mem(unsigned size_idx, unsigned passes, char *detail, unsigned cap, u
 int lab_oc_gpu_prepare(void);
 int lab_oc_gpu_up(void);
 int lab_oc_gpu(unsigned secs, char *detail, unsigned cap);
+/* lab.c: at most this many M3 cores are started (Overclocking sets it while M3 is above 1794 MHz) */
+extern unsigned lab_m3_max_cores;
 int lab_oc_m3_probe(int may_ask, uint64_t v[6], uint64_t *esr, const char **why);

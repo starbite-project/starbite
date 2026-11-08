@@ -1494,7 +1494,7 @@ static void labtour_generate(void)
     tadd("L:audit: cancelled at the red warning: Register write");
     tadd("x:lab.tier4");
     lt_home(3);
-    /* Overclocking end to end: Clocks > Overclocking > A55, step 1690 MHz (tier 3: warning, Continue,
+    /* Overclocking end to end: Clocks > Overclocking > A55, step 1456 MHz (tier 3: warning, Continue,
      * "A55" typed, slide, Power held 3 s), kept with Power, the stability test declined; then the
      * guards must be on; "Back to the default step" (row 15) must revert and lift them */
     lt_tab(3);
@@ -1521,7 +1521,7 @@ static void labtour_generate(void)
     tadd("w:2500");
     tadd("L:oc journal: allowed for this session");
     tadd("L:oc journal: written ufs:ocj-");
-    tadd("L:oc request A55 1690000 kHz");
+    tadd("L:oc request A55 1456000 kHz");      /* row 3: 1950, 1794, 1690, 1456 (2002 is above Samsung's max) */
     tadd("L:watchdog: armed (host)");
     tadd("L:storage held: overclocking");
     tadd("k:p");

@@ -559,21 +559,37 @@ void oc_tick(void)
 }
 
 /* The steps that may be sent: ECT levels ACPM also lists. */
-/* M3 above 1794 MHz needs the over-current handler (vendor exynos9810.dtsi exynos-ocp:
- * max-freq-wo-ocp = 1794000; exynos-ocp.c with the PMIC's OCP_WARN and the M3 GCU's throttle).
- * Engineer OS has no such handler yet, so those steps are not offered: 2886 MHz under stress cut
- * the phone's power on 2026-11-08 (the buck's hard over-current limit). */
-#define OC_M3_WO_OCP 1794000U
+/* Samsung's own limits (vendor exynos9810.dtsi): the cpufreq ceilings (domain0 A55 max-freq 1950000,
+ * domain1 M3 2704000; ECT levels above them belong to other SKUs: A55 2002, M3 2860 / 2886 are never
+ * offered) and the M3 "big mode" limits by busy cores: 1 core to single_freq (no BIGTURBO table in
+ * this ECT: the 2704000 ceiling), 2 cores dual_freq 2314000, 3 or 4 cores triple / quad_freq 1794000.
+ * 4 M3 cores at 2886 MHz cut the phone's power on 2026-11-08. */
+#define OC_A55_MAX 1950000U
+#define OC_M3_MAX 2704000U
+#define OC_M3_DUAL 2314000U
+#define OC_M3_QUAD 1794000U
 
-static int oc_m3_ocp_capped(int d, uint32_t khz)
+static int oc_vendor_capped(int d, uint32_t khz)
 {
-    return d == OC_M3 && khz > OC_M3_WO_OCP;
+    return (d == OC_A55 && khz > OC_A55_MAX) || (d == OC_M3 && khz > OC_M3_MAX);
 }
 
-/* A step the page offers and sends: the table's own (oct_allowed) and under the M3 cap. */
+/* How many M3 cores may be busy at khz (4, 2 or 1). */
+static unsigned oc_m3_cores(uint32_t khz)
+{
+    return khz <= OC_M3_QUAD ? 4U : khz <= OC_M3_DUAL ? 2U : 1U;
+}
+
+/* While M3 is set above 1794 MHz, Lab starts at most this many M3 cores (lab.c load_start). */
+static void oc_m3_limit_update(void)
+{
+    lab_m3_max_cores = oc_off[OC_M3] ? oc_m3_cores(oc_set[OC_M3]) : 4U;
+}
+
+/* A step the page offers and sends: the table's own (oct_allowed) and within Samsung's ceilings. */
 static int oc_offered(int d, uint32_t khz)
 {
-    return oct_allowed(&OT.d[d], khz) && !oc_m3_ocp_capped(d, khz);
+    return oct_allowed(&OT.d[d], khz) && !oc_vendor_capped(d, khz);
 }
 
 static unsigned oc_steps(int d, uint32_t *out)
@@ -601,8 +617,11 @@ static void oc_tainted(const char *why)
     }
 }
 
+static void oc_m3_limit_update(void);
+
 static void oc_guards(void)
 {
+    oc_m3_limit_update();
     if (sb_acpm_dvfs_untrusted())
         oc_tainted("ACPM answered late or not at all");
     if (oc_active()) {
@@ -780,7 +799,11 @@ static int oc_test(int d)
     det[0] = 0;
     switch (d) {
     case OC_A55: r = lab_oc_cpu(0x0fU, 60, det, sizeof(det)); break;
-    case OC_M3: r = lab_oc_cpu(0xf0U, 60, det, sizeof(det)); break;
+    case OC_M3: {
+        unsigned k = oc_m3_cores(oc_set[d]);
+        r = lab_oc_cpu(k >= 4 ? 0xf0U : k == 2 ? 0x30U : 0x10U, 60, det, sizeof(det));
+        break;
+    }
     case OC_G3D:
         if (lab_oc_gpu_up() || lab_oc_gpu_prepare())
             r = lab_oc_gpu(60, det, sizeof(det));
@@ -1019,6 +1042,8 @@ static void oc_apply(int d, uint32_t khz)
         return;
     oc_off[d] = 1;                          /* guards on before anything is sent */
     oc_guards();
+    if (d == OC_M3)                         /* the busy-core limit of the new step, before it is sent */
+        lab_m3_max_cores = oc_m3_cores(khz) < oc_m3_cores(oc_set[d]) ? oc_m3_cores(khz) : oc_m3_cores(oc_set[d]);
     log_dom("request", d, khz);
     if (bus || hi)
         oc_tainted(bus ? "the memory / bus clock was changed" : "an above-cap step was used");
@@ -1094,17 +1119,21 @@ static void build_ctl(void)
                  "chip; MIF 2093 MHz froze the phone this way under iOS).");
         kv_note(u.b);
     }
-    if (d == OC_M3) {
+    {
         unsigned capped = 0;
         for (unsigned l = 0; l < o->nlv; ++l)
-            capped += oct_allowed(o, o->khz[l]) && oc_m3_ocp_capped(d, o->khz[l]);
+            capped += oct_allowed(o, o->khz[l]) && oc_vendor_capped(d, o->khz[l]);
         if (capped) {
             ub_init(&u);
             ub_dec(&u, capped);
-            ub_s(&u, " steps above 1794 MHz are not offered: they need the M3 over-current handler (Samsung's "
-                     "kernel caps M3 at 1794 MHz without it; 2886 MHz cut the power on 2026-11-08).");
+            ub_s(&u, d == OC_M3 ? " steps above 2704 MHz are not offered (Samsung's M3 maximum; 2886 MHz cut the power on "
+                                  "2026-11-08)." :
+                                  " step above 1950 MHz is not offered (Samsung's A55 maximum).");
             kv_note(u.b);
         }
+        if (d == OC_M3)
+            kv_note("Above 1794 MHz, Samsung lets fewer M3 cores run: 2 up to 2314 MHz, 1 up to 2704 MHz. The "
+                    "stability test and every Lab test use only that many while M3 is set above 1794 MHz.");
     }
     kv_hdr("STEPS: TAP ONE TO REQUEST IT");
     ctl_n = (int)oc_steps(d, ctl_khz);

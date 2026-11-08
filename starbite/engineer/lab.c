@@ -11,6 +11,7 @@
  * battery tests), a worker core that faults, the time limit. Every hardware wait below is bounded.
  */
 #include "eng.h"
+#include "oc.h"
 
 /* ---- options shared by the load tests ------------------------------------------------------ */
 
@@ -397,6 +398,7 @@ static const char *psci_name(int64_t r)
 static struct kern_cfg K;
 static int64_t core_res[SB_NCORES];
 static uint64_t it0, err0, last_it[SB_NCORES], rate[SB_NCORES], rate_total;
+unsigned lab_m3_max_cores = 4;              /* oc.c: Samsung's busy-core limit while M3 is overclocked */
 static int m3_state;                        /* 0 not enabled, 1 enabled (confirmed), -1 the PMU write failed */
 static unsigned run_mask;                   /* the cores the running test uses (after the offer) */
 static struct sb_auth m3_auth;
@@ -477,6 +479,17 @@ static unsigned load_start(unsigned mask, unsigned kmask)
     if ((mask & 0xf0U) && m3_state <= 0) {
         mask &= 0x0fU;
         audit_line("M3 cores not started (not enabled)");
+    }
+    {                                       /* Overclocking: Samsung's busy-core limit above 1794 MHz */
+        unsigned keep = 0, n3 = 0;
+        for (unsigned w = 4; w < SB_NCORES; ++w)
+            if ((mask & (1U << w)) && n3 < lab_m3_max_cores) {
+                keep |= 1U << w;
+                ++n3;
+            }
+        if ((mask & 0xf0U) != keep)
+            audit_line("M3 cores limited by the overclocked M3 step (Samsung's busy-core limit)");
+        mask = (mask & 0x0fU) | keep;
     }
     sb_smp_m3_prep = m3_state > 0 ? m3_prep : 0;
     show_now("Starting cores", fill_starting);
