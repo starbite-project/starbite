@@ -174,11 +174,10 @@ static int dvfs_get(uint32_t domain, uint32_t *khz)
     return 1;
 }
 
-/* Master plan 1.2 rule 3: no ACPM DVFS message names MIF (0) or INT (1). Until the user changes
- * that rule, FREQ_GET too is limited to A55 (2), M3 (3) and G3D (4). */
+/* FREQ_GET is a read; the 13 ACPM DVFS ids (0 MIF .. 12 CP). */
 int sb_acpm_dvfs_get(uint32_t domain, uint32_t *khz)
 {
-    if (domain < 2 || domain > 4 || !dvfs_get(domain, khz))
+    if (domain >= SB_DVFS_DOMAINS || !dvfs_get(domain, khz))
         return 0;
     if (!dvfs_base_ok[domain] && !dvfs_touched[domain] && *khz) {
         dvfs_base[domain] = *khz;
@@ -223,14 +222,37 @@ static int dvfs_send(uint32_t domain, uint32_t khz, const char *tag)
     return ok;
 }
 
+/* Master plan 1.2 rule 3 (as amended 2026-11-08): this general request never names MIF (0) or
+ * INT (1); only sb_acpm_dvfs_listed (Engineer OS's Overclocking category) may. */
 int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier)
 {
     const char *why;
-    if (sb_gate_check(SB_SP_DVFS, 0, domain, 1, tier < SB_TIER3 ? SB_TIER3 : tier, &why)) {
+    if (domain < 2 || domain >= SB_DVFS_DOMAINS ||
+        sb_gate_check(SB_SP_DVFS, 0, domain, 1, tier < SB_TIER3 ? SB_TIER3 : tier, &why)) {
         sb_logx("acpm dvfs refused, domain ", domain);
         return 0;
     }
     return dvfs_send(domain, khz, "acpm dvfs domain ");
+}
+
+/* Any domain, but only a step of the chip's own table: khz must be one of steps[0..n) (the caller
+ * passes the ECT levels that ACPM's fvmap also lists) and the open authorisation must cover the
+ * domain at tier >= 3. Refused (nothing sent) otherwise. */
+int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz, int tier, const uint32_t *steps, unsigned n)
+{
+    const char *why;
+    int listed = 0;
+    for (unsigned i = 0; i < n && i < 32; ++i)
+        listed |= steps[i] == khz && khz != 0;
+    if (domain >= SB_DVFS_DOMAINS || !listed) {
+        sb_logx("acpm dvfs refused (not a listed step), kHz ", khz);
+        return 0;
+    }
+    if (sb_gate_check(SB_SP_DVFS, 0, domain, 1, tier < SB_TIER3 ? SB_TIER3 : tier, &why)) {
+        sb_logx("acpm dvfs refused (no authorisation), domain ", domain);
+        return 0;
+    }
+    return dvfs_send(domain, khz, "acpm dvfs (listed step) domain ");
 }
 
 /* Back to the recorded baseline: no authorisation needed, it only restores what was there before

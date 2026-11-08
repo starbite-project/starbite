@@ -54,6 +54,14 @@ int oct_allowed(const struct oc_dom *o, uint32_t khz);
 int oct_above_cap(const struct oc_dom *o, uint32_t khz);
 
 /* oc.c */
-void oc_page(void);                         /* CPU tab > Overclocking (read only) */
+void oc_page(void);                         /* Clocks tab > Overclocking */
+void oc_tick(void);                         /* main.c's ui_tick: feeds the watchdog while active */
 void oc_selftest_boot(void);                /* the OC_SELFTEST image: tables to pmsg at start */
-int oc_active(void);                        /* 1 while any domain is off its default step (step 1: 0) */
+int oc_active(void);                        /* 1 while any domain is off its default step */
+
+/* stability runs (lab.c, gpu.c): 1 pass, 0 fail, -1 not run; detail: one line */
+int lab_oc_cpu(unsigned mask, unsigned secs, char *detail, unsigned cap);
+int lab_oc_mem(unsigned size_idx, unsigned passes, char *detail, unsigned cap, unsigned *bw_read);
+int lab_oc_gpu_prepare(void);
+int lab_oc_gpu_up(void);
+int lab_oc_gpu(unsigned secs, char *detail, unsigned cap);

@@ -1547,9 +1547,10 @@ int lab_oc_cpu(unsigned mask, unsigned secs, char *detail, unsigned cap)
     struct ub u;
     if (!guard_ok("Stability test (CPU)"))
         return -1;
+    unsigned want = mask;
     mask = cores_offer(mask, "Overclocking stability test");
-    if (!mask)
-        return -1;
+    if (!mask || (!(want & 0x0fU) && !(mask & 0xf0U)))
+        return -1;                          /* an M3 test without the M3 cores is not a test */
     cs_dur = secs;
     ch_reset(CH_TEMP, "HOTTEST SENSOR (" U_DEG "C)", C_ORANGE, secs);
     ch_reset(CH_RATE, "WORK (BATCHES PER SECOND, ALL CORES)", C_GREEN, secs);

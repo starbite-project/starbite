@@ -195,6 +195,13 @@ Menu v7 keeps getting faster in the background until it is smooth on the phone.
    - the typed ACPM DVFS call accepts only domains 2 (A55), 3 (M3) and 4 (GPU);
    - raw register writes (Engineer OS poke) exclude, at compile time, every CMU block (CMU_TOP holds the MIF switch mux and the INT bus muxes; CMU_MIF is 0x1B800000), the ACPM/APM mailbox and APM SRAM, DREX/DMC, and the PMU's DVFS registers;
    - code taken from other ports (exynos-linux, Samsung) is reviewed for MIF/INT DVFS, devfreq, interconnect and SICD idle paths before it is ported; those are compiled out, and our Linux DT has no MIF/INT devfreq nodes.
+   - **Amended 2026-11-08, for Engineer OS's Overclocking category only** (you asked: "add to engineer os a new category for overclocking. I did a bit of research and it is possible to e.g. overclock even the memory and more, so I want global overclocking too."). There, and nowhere else, ACPM DVFS messages may name MIF and INT, under these conditions:
+     - only a step listed in the chip's own ECT table that ACPM's own frequency/voltage table also lists (`libsb sb_acpm_dvfs_listed`; the general `sb_acpm_dvfs` still refuses MIF and INT);
+     - a tier 4 confirmation, then automatic revert after 15 s unless you keep it;
+     - the hardware watchdog armed and every storage write refused while any clock is off its default step;
+     - a stability test per domain;
+     - the first MIF/INT change runs with you watching the phone.
+     Every other OS and tool keeps the original rule (`docs/ENGINEER-OS.md` section 14).
 4. **Never test real emergency calls.** Never dial an emergency number in any test. **No Starbite OS ever places an emergency call.** Never send an SOS to anyone who was not warned first.
 5. **You only press buttons.** We run every command, flash, pull and analysis. The few things only you can do (setting up a stock phone online, OEM unlocking, accounts, buying things) are listed where they come up, kept short, and we ask before each one.
 6. **Every write:** backup first, then write, then read back and compare the SHA-256. Irreplaceable data (EFS and friends) lives in at least two places off the phone.

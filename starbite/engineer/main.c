@@ -96,6 +96,7 @@ static void tick(void)
 {
     uint64_t now = sb_ms();
     armed_tick();
+    oc_tick();                          /* the overclocking watchdog feed */
     if (now - tick_last >= 1000) {
         tick_last = now;
         dash_sample();                  /* the dashboard's and the battery graph's history */

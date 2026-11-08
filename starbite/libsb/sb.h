@@ -478,11 +478,16 @@ int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier);
  * and Starbite's iOS port send it; g3d = 4), with the gate: SB_SP_DVFS, first = domain, at the
  * caller's tier (at least 3). 1 sent and answered. */
 int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier);
-/* Overclocking (engineer/oc.c). FREQ_GET { domain, 0, 1, 0 }: the domain's current kHz (no
- * write; domains 2-4 only, master plan rule 3). The first successful read of a domain, or the read sb_acpm_dvfs makes before its first
+/* Master plan rule 3 (amended 2026-11-08): sb_acpm_dvfs refuses MIF (0) and INT (1); only
+ * sb_acpm_dvfs_listed may name them, and only with a step of the table the caller passes (Engineer
+ * OS's Overclocking category: the ECT levels ACPM's fvmap also lists).
+ * Overclocking (engineer/oc.c). FREQ_GET { domain, 0, 1, 0 }: the domain's current kHz (no
+ * write; domains 0-12). The first successful read of a domain, or the read sb_acpm_dvfs makes before its first
  * request, is recorded as that domain's baseline; sb_acpm_dvfs_revert sends exactly that value,
  * without an authorisation (it can only restore what was there). */
 #define SB_DVFS_NDOM 16U
+#define SB_DVFS_DOMAINS 13U                 /* ACPM DVFS ids 0 MIF .. 12 CP */
+int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz, int tier, const uint32_t *steps, unsigned n);
 int sb_acpm_dvfs_get(uint32_t domain, uint32_t *khz);
 int sb_acpm_dvfs_baseline(uint32_t domain, uint32_t *khz);
 int sb_acpm_dvfs_revert(uint32_t domain);
@@ -496,6 +501,16 @@ int sb_acpm_chan_info(unsigned i, uint32_t out[4]);
  * its default step). 0 lifts it. */
 void sb_storage_hold(const char *why);
 const char *sb_storage_held(void);
+/* The cluster 1 hardware watchdog as a dead-man (wdt.c): arm for secs (10..82; if the loader
+ * armed it already, only fed), feed (at most once a second unless now), disarm (back to exactly
+ * what was there; left armed if it was the loader's). */
+unsigned sb_wdt_arm(unsigned secs);
+void sb_wdt_feed(int now);
+void sb_wdt_disarm(void);
+int sb_wdt_armed(void);
+/* Called first by sb_reboot, sb_power_off and sb_boot_next when set (Overclocking: every domain
+ * back to its default step, the watchdog disarmed). */
+extern void (*sb_before_reset)(void);
 
 /* ---- the Mali-G72 (mali.c, mali_desc.c) ------------------------------------------------------- */
 

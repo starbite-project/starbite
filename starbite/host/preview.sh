@@ -57,7 +57,7 @@ if [ "${1:-}" = labtour ]; then
     exit $?
 fi
 
-all="dashboard hub tests power battery clocks temps storage partitions starbite catalog start logs pmsg tools armed peek device soc memory history dialog sector gpt keys cpu health warning sensors gpu gpujm redscreen offer oc ocm3 ocmif ocsrc"
+all="dashboard hub tests power battery clocks temps storage partitions starbite catalog start logs pmsg tools armed peek device soc memory history dialog sector gpt keys cpu health warning sensors gpu gpujm redscreen offer oc ocm3 ocmif ocsrc occtl ockeep"
 want=${1:-$all}
 for s in $want; do
     case $s in
@@ -101,6 +101,10 @@ for s in $want; do
     oc) scene oc w:800 t:630,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:p w:800 ;;
     ocm3) scene ocm3 w:800 t:630,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:p w:800 k:d k:d k:d k:d k:p w:800 ;;
     ocmif) scene ocmif w:800 t:630,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:p w:800 k:d k:p w:800 ;;
+    occtl) scene occtl w:800 t:630,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:p w:800 k:d k:d k:d k:p w:800 ;;
+    ockeep) scene ockeep w:800 t:630,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:p w:800 k:d k:d k:d k:p w:800 \
+        h:u:2200 k:d k:d k:d k:d k:p w:900 h:u:2200 k:p w:600 t:120,1585 t:360,2435 t:360,2435 t:1080,2605 w:900 \
+        h:u:1900 w:900 h:p:3500 w:4200 ;;
     ocsrc) scene ocsrc w:800 t:630,2824 w:400 k:d k:d k:d k:d k:d k:d k:d k:p w:800 \
         k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:d k:p w:800 ;;
     *) echo "unknown scene $s"; exit 1 ;;

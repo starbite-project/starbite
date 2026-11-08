@@ -629,11 +629,11 @@ lines) before starting another OS.
 - **Measure the display's frame rate or brightness curve** precisely: no vsync source is used.
 - **Run anything from v2.1 on the phone yet**: every v2.1 feature is host-tested only (section 10).
 
-## 14. Overclocking (step 1: read only)
+## 14. Overclocking
 
-Clocks > **Overclocking** (`engineer/oc.c`, tables parsed by `engineer/octab.c`). Step 1 changes
-nothing; it shows, for every ACPM DVFS domain (0 MIF, 1 INT, 2 A55, 3 M3, 4 G3D, 5 INTCAM, 6 FSYS0,
-7 CAM, 8 DISP, 9 AUD, 10 IVA, 11 SCORE, 12 CP):
+Clocks > **Overclocking** (`engineer/oc.c`, tables parsed by `engineer/octab.c`). For every ACPM DVFS
+domain (0 MIF, 1 INT, 2 A55, 3 M3, 4 G3D, 5 INTCAM, 6 FSYS0, 7 CAM, 8 DISP, 9 AUD, 10 IVA, 11 SCORE,
+12 CP) it shows:
 
 - the frequency steps from **S-Boot's ECT** (DRAM 0xA0000000, read in place, never written: the DVFS
   block's level lists) and **Samsung's caps** (the GEN block's `MINMAX_<domain>` rows, one per ASV table
@@ -642,17 +642,34 @@ nothing; it shows, for every ACPM DVFS domain (0 MIF, 1 INT, 2 A55, 3 M3, 4 G3D,
   the SRAM; a block is accepted only if its A55, M3 and G3D rates are the ECT's);
 - the **current step** where a PLL can be read (A55, M3, G3D, MIF: PLL_MIF runs at twice the MIF step).
 
-No ACPM message is sent from the page. Clock tab rows after it moved: Real-time clock 0x67, Timer 0x68.
+Clock tab rows after it moved: Real-time clock 0x67, Timer 0x68.
+
+**Changing a step (step 2; master plan 1.2 rule 3 as amended 2026-11-08, this category only).** MIF, INT,
+A55, M3 and G3D list their steps as rows; the other eight domains are read only (none of their blocks runs
+in Engineer OS, so a step could not be tested). Tapping a step:
+
+1. refuses anything that is not in both the ECT and the fvmap (`oct_allowed`; libsb's
+   `sb_acpm_dvfs_listed` checks the list again; `sb_acpm_dvfs` refuses MIF / INT outright);
+2. reads ACPM's step (FREQ_GET) and libsb's baseline (the step before Engineer OS's first request);
+   refuses if that baseline is not a listed step (no safe way back);
+3. G3D: powers the GPU first (the GPU page's tier 1 power-up);
+4. confirms: tier 3 for A55 / M3 / G3D up to Samsung's cap, **tier 4 for MIF, INT and every above-cap step**;
+5. arms the cluster 1 watchdog (40 s, `libsb/wdt.c`, fed from `ui_tick`) and **holds storage**
+   (`sb_storage_hold`: every `sb_write` / `sb_write_store` returns `SB_W_HOLD`), then sends the request;
+6. reads FREQ_GET back; a different answer reverts at once;
+7. counts down 15 s: **Power keeps it**; Volume, Back or the timeout reverts;
+8. offers the stability test: A55 / M3 CPU stress on that cluster for 60 s, G3D GPU stress for 60 s,
+   MIF / INT memory patterns (64 MiB, 3 passes). A failure reverts the domain.
+
+The watchdog and the storage hold stay on until every domain is back (Overclocking > Every domain back,
+or each domain's "Back to the default step"). Reboot, boot-next and power off revert every domain first
+(`sb_before_reset`). The green-screen freeze (NOTES.md 2026-10-30) came from asking ACPM for MIF 2093000 /
+INT 667000 kHz; 667000 is not an INT step, which the list now makes impossible to send.
+
+Not yet verified on the phone: that a watchdog reset fires while the memory bus is hung, ACPM's answer
+for a cluster that is powered off (M3 between tests), and the ASV table version row.
 
 **Self-test image** (`ENG_DEFS=-DOC_SELFTEST ENG_OUT=starbite/out/ocself sh starbite/engineer/build.sh`):
 at start it logs every domain's table to pmsg (`oc <DOM>: ect N fv N init N cap kHz boot kHz now kHz rows
-...`, then `kHz:uV` pairs six a line), then asks ACPM **FREQ_GET** (a read) for A55, M3 and G3D only,
-then opens the page. `sb_acpm_dvfs_get` refuses MIF and INT (master plan 1.2 rule 3).
-
-**Step 2 (not built, needs the user's review of step 1 and a decision on rule 3 for MIF / INT):** per
-domain controls limited to steps present in both the ECT and the fvmap (`oct_allowed`), auto-revert
-after 15 s unless confirmed (`sb_acpm_dvfs_revert` sends only the recorded baseline), a stability test
-per domain (`lab_oc_cpu`, `lab_oc_mem`, `lab_oc_gpu`), a hardware watchdog armed during tests, and the
-storage hold (`sb_storage_hold`: every block write refused) while a MIF / INT step is off its default.
-The green-screen freeze (NOTES.md 2026-10-30) came from asking ACPM for MIF 2093000 / INT 667000 kHz;
-667000 is not an INT step, so only listed steps may ever be sent.
+...`, then `kHz:uV` pairs six a line), then asks ACPM **FREQ_GET** for A55, M3 and G3D, then opens the
+page. It requests no step.
