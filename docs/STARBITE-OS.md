@@ -829,6 +829,19 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.19 0.7, step 1: the audio codec, read only (2026-11-08)
+
+The S9's sound (from the vendor DT and Samsung's exynos9810.dtsi): the codec is a Cirrus Logic **CS47L93**
+("Madera") on **SPI** spi_2 = 0x10470000 (USI01, PERIC0; SYSREG_PERIC0 0x1041100C = 2 for SPI), chip select 0, at
+most 25 MHz, pins gpp0-4/5/6 (function 2) and gpp0-7 (CS, function 2); reset **gpg1-0**; AVDD / DBVDD1 / CPVDD1 from
+**LDO32** (1.8 V, always on), CPVDD2 / DCVDD from **LDO34** (1.2 V, not always on; S2MPS18 L34CTRL 0x6B bits 7:6).
+The loudspeaker amplifier: **MAX98512** at 0x39 on HSI2C 0x108C0000.
+- `kern/audio.c` `audio_probe()` (the self test's step after Wi-Fi): tier A reads only (CMU_PERIC0's USI01 gates,
+  the USI mode, the SPI registers, the pins, the reset pin, LDO32 / LDO34) and logs them; tier B reads the codec's
+  ID (0x0000; 0x6371 expected for the CS47L92/93, upstream madera-core) and revision over SPI only if S-Boot left
+  it powered, out of reset and the bus set up, writing nothing but the SPI block's own registers. Otherwise it
+  says which is missing: powering the codec (LDO34 through the PMIC, then reset) is a step with the user present.
+
 ### 12.18 Version 0.6.5: Emergency Mode's dim clock (the panel's low-power mode), the panel's registers read (2026-11-08)
 
 - **The dim clock** (the control center in Emergency Mode: "Dim clock when off (new)", off by default, until a

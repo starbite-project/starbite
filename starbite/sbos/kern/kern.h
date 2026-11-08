@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.6.5"
+#define SBOS_VERSION "0.7-probe"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -274,7 +274,8 @@ int panel_brightness(int level);    /* the user's level: 0 untouched, 1..4 low..
 void panel_boost(int who, int on);  /* 1 Extreme, 2 SOS: the top level while any asks */
 void panel_emergency(int on);       /* 0.6.1: Emergency Mode's power profile */
 int panel_lpm(int on);              /* 0.6.5: the panel's low-power mode (ALPM 10 nits); 1 done */
-int panel_dump(void);               /* 0.6.5: read only: the panel's ID, gamma, ELVSS, VINT, AOR, IRC (logged) */
+int panel_dump(void);
+int audio_probe(void);              /* 0.7: the codec's state read only, its ID if S-Boot left it powered (audio.c) */               /* 0.6.5: read only: the panel's ID, gamma, ELVSS, VINT, AOR, IRC (logged) */
 extern int panel_in_lpm;
 extern int em_aod;                  /* 0.6.5: Emergency Mode: a dim clock (the panel's low-power mode) instead of black */
 void kui_aod_frame(void);           /* draws and sends the dim clock's picture */

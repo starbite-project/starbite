@@ -274,9 +274,15 @@ void selftest_timer(unsigned id)
         if (!wifi_selftest_phase(&done))
             ++fails;
         if (done)
-            phase = 12;
+            phase = 14;
         break;
     }
+    case 14:                                /* 0.7: the audio codec, read only (audio.c) */
+        sb_log("selftest: audio: the codec's state, read only (an ID read only if S-Boot left it powered)");
+        if (!audio_probe())
+            ++fails;
+        phase = 12;
+        break;
     case 12: {
         {
             int sr = settings_selftest();   /* the state slot: only where the "sbos-state" entry exists */
