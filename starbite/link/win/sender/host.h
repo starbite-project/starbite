@@ -14,6 +14,9 @@ uint32_t synth_scene(void);
 void     synth_set_auto(int fps);        /* > 0: the scene advances by itself at this rate; 0 = manual */
 void     synth_set_size(uint32_t w, uint32_t h);   /* initial size (before the capture opens) */
 void     synth_get_size(uint32_t *w, uint32_t *h);
+/* the output is turned (SBL_ROT_*) like Windows' orientation setting: the capture resets and re-opens
+ * with the upright size, the image goes through the same panel -> upright transform as capture_win.c */
+void     synth_set_rotation(int rot);
 uint64_t synth_captures(void);           /* frames the capture has taken from the "OS" */
 
 /* recording injector */

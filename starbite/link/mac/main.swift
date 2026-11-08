@@ -32,6 +32,7 @@ struct Options {
     var crcFile: String?
     var frames = 100
     var modeTest = (w: 1024, h: 600)
+    var finalSize: (w: Int, h: Int)? = nil   // selftest: the size the checked frame must have (default modeTest)
     var snapshot: String?
     var windowSnapshot: String?
     var timeout = 30.0
@@ -109,11 +110,15 @@ struct Options {
                 let parts = (value() ?? "").split(separator: "x").compactMap { Int($0) }
                 guard parts.count == 2 else { return "--mode-test needs WxH" }
                 modeTest = (parts[0], parts[1])
+            case "--final-size":
+                let parts = (value() ?? "").split(separator: "x").compactMap { Int($0) }
+                guard parts.count == 2 else { return "--final-size needs WxH" }
+                finalSize = (parts[0], parts[1])
             case "--help", "-h":
                 return "usage: StarbiteLink [--auto|--usb|--tcp HOST[:PORT]] [--host HOST[:PORT]] [--cmd-as-ctrl] " +
                     "[--hide-cursor] [--no-overlay] [--no-match-window] [--hidpi] [--verbose]\n" +
                     "       StarbiteLink --selftest --tcp HOST:PORT --crc-file F [--headless] [--frames N] " +
-                    "[--mode-test WxH] [--snapshot PNG] [--timeout S]"
+                    "[--mode-test WxH] [--final-size WxH] [--snapshot PNG] [--timeout S]"
             default:
                 if a.hasPrefix("-psn_") || a.hasPrefix("-NS") || a.hasPrefix("-Apple") { // launch services / defaults
                     if !a.hasPrefix("-psn_") { i += 1 }
@@ -206,6 +211,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
         presenter.show = { [weak self] s, w, h in self?.view.show(surface: s, width: w, height: h) }
         view.onCaptureChange = { [weak self] _ in self?.updateStatus() }
         view.onResizeSettled = { [weak self] _ in self?.requestWindowMode() }
+        view.onDisplaySizeChange = { [weak self] s in self?.fitWindow(toDisplay: s) }
         if options.selftest {
             // a fixed, known size so the selftest's pointer mapping is exact
             window.setContentSize(NSSize(width: options.modeTest.w, height: options.modeTest.h))
@@ -272,6 +278,31 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
         options.save()
         startLink()
         updateStatus()
+    }
+
+    /// The source changed the display's size by itself (Windows' orientation setting on the phone, a
+    /// re-open on another output): give the window the display's shape, keeping about its area and its top
+    /// edge, inside the screen. Not when the window drives the size (Display Follows Window Size with a
+    /// source that takes MODE, i.e. the Starbite Display), in full screen, or in the selftest.
+    func fitWindow(toDisplay px: CGSize) {
+        guard !options.selftest, let w = window, !w.styleMask.contains(.fullScreen),
+              px.width > 0, px.height > 0 else { return }
+        if options.matchWindow && linkStatus().peer_caps & UInt32(SBLK_CAP_MODE) != 0 { return }
+        let cur = view.bounds.size
+        guard cur.width > 0, cur.height > 0 else { return }
+        let aspect = px.width / px.height
+        if abs(cur.width / cur.height - aspect) < 0.02 { return }
+        var nw = (cur.width * cur.height * aspect).squareRoot(), nh = nw / aspect
+        let vis = (w.screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let chrome = w.frameRect(forContentRect: .zero).size
+        let s = min(1, (vis.width - chrome.width) * 0.95 / nw, (vis.height - chrome.height) * 0.95 / nh)
+        nw = floor(nw * s); nh = floor(nh * s)
+        var f = w.frameRect(forContentRect: NSRect(x: 0, y: 0, width: nw, height: nh))
+        let old = w.frame
+        f.origin = NSPoint(x: old.midX - f.width / 2, y: old.maxY - f.height)
+        f.origin.x = max(vis.minX, min(f.origin.x, vis.maxX - f.width))
+        f.origin.y = max(vis.minY, min(f.origin.y, vis.maxY - f.height))
+        w.setFrame(f, display: true, animate: false)
     }
 
     func requestWindowMode() {
@@ -485,8 +516,9 @@ final class SelfTest {
         if count == 30 { DispatchQueue.main.async { self.requestMode() } }
         if count == 50 { DispatchQueue.main.async { self.injectInput() } }
         lock.lock()
-        let go = armed && count >= app.options.frames && Int(f.width) == app.options.modeTest.w &&
-            Int(f.height) == app.options.modeTest.h && f.valid != 0
+        let want = app.options.finalSize ?? app.options.modeTest
+        let go = armed && count >= app.options.frames && Int(f.width) == want.w && Int(f.height) == want.h &&
+            f.valid != 0
         if go { armed = false }
         // the IOSurface checksum costs a full pass: only for the frames that can be the checked one
         let hashNext = armed && count + 1 >= app.options.frames

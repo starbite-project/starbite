@@ -7,6 +7,7 @@
  */
 #include "sender.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -56,6 +57,65 @@ void sbl_region_add(sbl_region *g, int32_t x, int32_t y, int32_t w, int32_t h, u
     g->n = 1;
     g->r[0].x = (uint16_t)bx0; g->r[0].y = (uint16_t)by0;
     g->r[0].w = (uint16_t)(bx1 - bx0); g->r[0].h = (uint16_t)(by1 - by0);
+}
+
+/* ---- rotated outputs (sender.h) ----------------------------------------------------------------- */
+
+void sbl_rot_size(int rot, uint32_t sw, uint32_t sh, uint32_t *dw, uint32_t *dh)
+{
+    int q = rot & 1;
+    *dw = q ? sh : sw;
+    *dh = q ? sw : sh;
+}
+
+sbl_irect sbl_rot_rect(int rot, uint32_t sw, uint32_t sh, sbl_irect s)
+{
+    int32_t W = (int32_t)sw, H = (int32_t)sh;
+    sbl_irect d = s;
+    switch (rot & 3) {
+    case SBL_ROT_90:  d.l = H - s.b; d.t = s.l;     d.r = H - s.t; d.b = s.r;     break;
+    case SBL_ROT_180: d.l = W - s.r; d.t = H - s.b; d.r = W - s.l; d.b = H - s.t; break;
+    case SBL_ROT_270: d.l = s.t;     d.t = W - s.r; d.r = s.b;     d.b = W - s.l; break;
+    default: break;
+    }
+    return d;
+}
+
+void sbl_rot_copy(int rot, uint8_t *dst, size_t dstride, const uint8_t *src, size_t sstride,
+                  uint32_t sw, uint32_t sh, sbl_irect sr)
+{
+    if (sr.l < 0) sr.l = 0;
+    if (sr.t < 0) sr.t = 0;
+    if (sr.r > (int32_t)sw) sr.r = (int32_t)sw;
+    if (sr.b > (int32_t)sh) sr.b = (int32_t)sh;
+    if (sr.l >= sr.r || sr.t >= sr.b) return;
+    sbl_irect d = sbl_rot_rect(rot, sw, sh, sr);
+    /* the source pixel of upright pixel (X, Y) is at o + X * ax + Y * ay (bytes):
+     *   90:  src(Y, sh-1-X)     180: src(sw-1-X, sh-1-Y)     270: src(sw-1-Y, X) */
+    ptrdiff_t ss = (ptrdiff_t)sstride, o, ax, ay;
+    switch (rot & 3) {
+    case SBL_ROT_90:  o = (ptrdiff_t)(sh - 1) * ss;                           ax = -ss; ay = 4;   break;
+    case SBL_ROT_180: o = (ptrdiff_t)(sh - 1) * ss + (ptrdiff_t)(sw - 1) * 4; ax = -4;  ay = -ss; break;
+    case SBL_ROT_270: o = (ptrdiff_t)(sw - 1) * 4;                            ax = ss;  ay = -4;  break;
+    default:          o = 0;                                                  ax = 4;   ay = ss;  break;
+    }
+    /* 32x32 blocks: one side is always read or written down a column, keep both in the cache */
+    enum { B = 32 };
+    for (int32_t by = d.t; by < d.b; by += B) {
+        int32_t ey = by + B < d.b ? by + B : d.b;
+        for (int32_t bx = d.l; bx < d.r; bx += B) {
+            int32_t ex = bx + B < d.r ? bx + B : d.r;
+            for (int32_t y = by; y < ey; y++) {
+                uint32_t *dp = (uint32_t *)(void *)(dst + (size_t)y * dstride) + bx;
+                const uint8_t *sp = src + o + (ptrdiff_t)bx * ax + (ptrdiff_t)y * ay;
+                for (int32_t x = bx; x < ex; x++, sp += ax) {
+                    uint32_t v;
+                    memcpy(&v, sp, 4);
+                    *dp++ = v | 0xFF000000u;
+                }
+            }
+        }
+    }
 }
 
 /* ---- encoder ------------------------------------------------------------------------------------- */

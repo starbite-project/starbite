@@ -732,9 +732,11 @@ void sbl_sender_run(sbl_sender *s)
                 denied_since = 0;
                 open_fail_logged = 0;
                 opened_at = plat_now_us();
-                sbl_log("capture: %s, \"%s\" %ux%u @ %u mHz at (%d,%d)%s", ci.method, ci.name, ci.width,
+                sbl_log("capture: %s, \"%s\" %ux%u @ %u mHz at (%d,%d)%s%s", ci.method, ci.name, ci.width,
                         ci.height, ci.refresh_mhz, ci.geom.out_x, ci.geom.out_y,
-                        ci.is_starbite ? " [Starbite Display]" : "");
+                        ci.is_starbite ? " [Starbite Display]" : "",
+                        ci.rotation == SBL_ROT_90 ? ", rotated 90" : ci.rotation == SBL_ROT_180 ? ", rotated 180" :
+                        ci.rotation == SBL_ROT_270 ? ", rotated 270" : "");
                 set_display(s, &ci);
                 mode_wait_until = 0;
                 sbl_enc_reset(&enc);

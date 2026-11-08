@@ -106,7 +106,8 @@ A feature is used only when **both** HELLOs have its bit. RAW is mandatory for b
 The viewer asks for a size (window resized, moved to another Mac screen). The source changes the Starbite
 Display's mode if it can and answers APPLIED with the size **it actually applied** (may differ: the nearest mode
 it supports), or REJECTED with the size it kept. The source also sends an unsolicited APPLIED when the size
-changes on the Windows side (Display Settings). After APPLIED, the next frame is a keyframe of the new size.
+changes on the Windows side (Display Settings, including the orientation: a rotated output is always sent
+upright, at the desktop's size, so portrait to landscape swaps width and height). After APPLIED, the next frame is a keyframe of the new size.
 
 ### FRAME_BEGIN (0x10)
 

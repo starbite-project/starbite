@@ -5,7 +5,8 @@
  *         HID -> scan code tables, absolute pointer mapping, key/button state and resync, text
  *   end to end: the real session + TCP code with the synthetic capture and a test viewer on loopback:
  *         HELLO, keyframe, pixel-exact images, 2-frames-in-flight, ACK(0), PING/PONG, input, BUSY,
- *         MODE, new HELLO, protocol error, dead link, idle cost
+ *         MODE, rotated outputs (Windows orientation change mid-session), new HELLO, protocol error, dead
+ *         link, idle cost; the panel -> upright transform for rotated outputs, pixel by pixel
  *   recovery: a USB-style link whose viewer ACKs before send() returns, dropped ACKs (stall timeout), the
  *         Mac app killed mid-session and restarted, HELLO during a hung send, queued PONGs, keep-awake,
  *         the watchdog
@@ -29,6 +30,136 @@ static long g_checks, g_fail;
 
 static uint32_t rng = 12345;
 static uint32_t rnd(void) { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng; }
+
+/* ---- rotated outputs (panel image -> upright desktop) ------------------------------------------ */
+
+/* the mapping sender.h documents, written out independently of pipeline.c */
+static void rot_ref(int rot, uint32_t sw, uint32_t sh, uint32_t x, uint32_t y, uint32_t *X, uint32_t *Y)
+{
+    switch (rot) {
+    case SBL_ROT_90:  *X = sh - 1 - y; *Y = x;          break;   /* clockwise: dw = sh */
+    case SBL_ROT_180: *X = sw - 1 - x; *Y = sh - 1 - y; break;
+    case SBL_ROT_270: *X = y;          *Y = sw - 1 - x; break;   /* counter-clockwise: dh = sw */
+    default:          *X = x;          *Y = y;          break;
+    }
+}
+
+static void test_rotate(void)
+{
+    /* the direction, on a 3x2 panel image: its top-left pixel ends top-right after 90 (clockwise),
+     * bottom-left after 270, bottom-right after 180 */
+    {
+        uint32_t src[6] = { 0xA, 0, 0, 0, 0, 0 }, dst[6];
+        sbl_irect all = { 0, 0, 3, 2 };
+        uint32_t dw, dh;
+        sbl_rot_size(SBL_ROT_90, 3, 2, &dw, &dh);
+        CHECK(dw == 2 && dh == 3);
+        memset(dst, 0, sizeof dst);
+        sbl_rot_copy(SBL_ROT_90, (uint8_t *)dst, 2 * 4, (const uint8_t *)src, 3 * 4, 3, 2, all);
+        CHECK(dst[0 * 2 + 1] == 0xFF00000Au);
+        memset(dst, 0, sizeof dst);
+        sbl_rot_copy(SBL_ROT_270, (uint8_t *)dst, 2 * 4, (const uint8_t *)src, 3 * 4, 3, 2, all);
+        CHECK(dst[2 * 2 + 0] == 0xFF00000Au);
+        memset(dst, 0, sizeof dst);
+        sbl_rot_copy(SBL_ROT_180, (uint8_t *)dst, 3 * 4, (const uint8_t *)src, 3 * 4, 3, 2, all);
+        CHECK(dst[1 * 3 + 2] == 0xFF00000Au);
+        sbl_irect tl = { 0, 0, 1, 1 }, r = sbl_rot_rect(SBL_ROT_90, 3, 2, tl);
+        CHECK(r.l == 1 && r.t == 0 && r.r == 2 && r.b == 1);
+    }
+
+    /* every pixel, whole images and random rects, odd sizes, padded rows, the 32-pixel blocks' edges */
+    static const uint32_t sizes[][2] = { { 1, 1 }, { 3, 2 }, { 37, 23 }, { 64, 33 }, { 108, 222 }, { 222, 108 } };
+    int bad_full = 0, bad_rect = 0, bad_box = 0, bad_round = 0, bad_outside = 0;
+    for (int rot = 0; rot < 4; rot++) {
+        for (size_t si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
+            uint32_t sw = sizes[si][0], sh = sizes[si][1], dw, dh;
+            sbl_rot_size(rot, sw, sh, &dw, &dh);
+            size_t ss = (size_t)sw * 4 + 12, ds = (size_t)dw * 4 + 20, bs = (size_t)sw * 4 + 4;
+            uint8_t *src = malloc(ss * sh), *dst = malloc(ds * dh), *back = malloc(bs * sh);
+            for (size_t i = 0; i < ss * sh; i++) src[i] = (uint8_t)rnd();
+            sbl_irect all = { 0, 0, (int32_t)sw, (int32_t)sh };
+            memset(dst, 0x5A, ds * dh);
+            sbl_rot_copy(rot, dst, ds, src, ss, sw, sh, all);
+            for (uint32_t y = 0; y < sh; y++)
+                for (uint32_t x = 0; x < sw; x++) {
+                    uint32_t X, Y, a, b;
+                    rot_ref(rot, sw, sh, x, y, &X, &Y);
+                    memcpy(&a, src + y * ss + x * 4, 4);
+                    memcpy(&b, dst + Y * ds + X * 4, 4);
+                    if (b != (a | 0xFF000000u)) bad_full++;
+                }
+            /* and back: the inverse turn restores the panel image (alpha now opaque) */
+            sbl_irect uall = { 0, 0, (int32_t)dw, (int32_t)dh };
+            sbl_rot_copy((4 - rot) & 3, back, bs, dst, ds, dw, dh, uall);
+            for (uint32_t y = 0; y < sh; y++)
+                for (uint32_t x = 0; x < sw; x++) {
+                    uint32_t a, b;
+                    memcpy(&a, src + y * ss + x * 4, 4);
+                    memcpy(&b, back + y * bs + x * 4, 4);
+                    if (b != (a | 0xFF000000u)) bad_round++;
+                }
+            for (int k = 0; k < 20; k++) {
+                sbl_irect r;
+                r.l = (int32_t)(rnd() % sw); r.r = r.l + 1 + (int32_t)(rnd() % (sw - (uint32_t)r.l));
+                r.t = (int32_t)(rnd() % sh); r.b = r.t + 1 + (int32_t)(rnd() % (sh - (uint32_t)r.t));
+                sbl_irect d = sbl_rot_rect(rot, sw, sh, r);
+                /* the rect is the bounding box of its turned corner pixels */
+                uint32_t X0, Y0, X1, Y1;
+                rot_ref(rot, sw, sh, (uint32_t)r.l, (uint32_t)r.t, &X0, &Y0);
+                rot_ref(rot, sw, sh, (uint32_t)r.r - 1, (uint32_t)r.b - 1, &X1, &Y1);
+                if (d.l != (int32_t)(X0 < X1 ? X0 : X1) || d.r != (int32_t)(X0 > X1 ? X0 : X1) + 1 ||
+                    d.t != (int32_t)(Y0 < Y1 ? Y0 : Y1) || d.b != (int32_t)(Y0 > Y1 ? Y0 : Y1) + 1 ||
+                    d.l < 0 || d.t < 0 || d.r > (int32_t)dw || d.b > (int32_t)dh) bad_box++;
+                memset(dst, 0x5A, ds * dh);
+                sbl_rot_copy(rot, dst, ds, src, ss, sw, sh, r);
+                for (uint32_t Y = 0; Y < dh; Y++)
+                    for (uint32_t X = 0; X < dw; X++) {
+                        int in = (int32_t)X >= d.l && (int32_t)X < d.r && (int32_t)Y >= d.t && (int32_t)Y < d.b;
+                        uint32_t b;
+                        memcpy(&b, dst + Y * ds + X * 4, 4);
+                        if (!in && b != 0x5A5A5A5Au) bad_outside++;
+                    }
+                for (int32_t y = r.t; y < r.b; y++)
+                    for (int32_t x = r.l; x < r.r; x++) {
+                        uint32_t X, Y, a, b;
+                        rot_ref(rot, sw, sh, (uint32_t)x, (uint32_t)y, &X, &Y);
+                        memcpy(&a, src + (size_t)y * ss + (size_t)x * 4, 4);
+                        memcpy(&b, dst + Y * ds + X * 4, 4);
+                        if (b != (a | 0xFF000000u)) bad_rect++;
+                    }
+            }
+            free(src); free(dst); free(back);
+        }
+    }
+    CHECKF(bad_full == 0, "%d pixels", bad_full);
+    CHECKF(bad_round == 0, "%d pixels", bad_round);
+    CHECKF(bad_box == 0, "%d rects", bad_box);
+    CHECKF(bad_rect == 0, "%d pixels", bad_rect);
+    CHECKF(bad_outside == 0, "%d pixels written outside the rect", bad_outside);
+    /* a rect partly outside the image is clipped (no write outside the upright image) */
+    {
+        uint32_t src[4 * 2], dst[2 * 4 + 2];
+        memset(src, 0x11, sizeof src);
+        for (int i = 0; i < 10; i++) dst[i] = 0x5A5A5A5Au;
+        sbl_irect wide = { -5, -5, 50, 50 };
+        sbl_rot_copy(SBL_ROT_90, (uint8_t *)dst, 2 * 4, (const uint8_t *)src, 4 * 4, 4, 2, wide);
+        CHECK(dst[0] == 0xFF111111u && dst[7] == 0xFF111111u && dst[8] == 0x5A5A5A5Au && dst[9] == 0x5A5A5A5Au);
+    }
+
+    /* the pointer on a portrait-mounted panel shown landscape: the frame and the output are both the
+     * upright 2220x1080, so the Mac's pixel lands on the same desktop pixel */
+    sbl_geom g;
+    memset(&g, 0, sizeof g);
+    g.out_w = 2220; g.out_h = 1080; g.disp_w = 2220; g.disp_h = 1080;
+    int32_t nx, ny, nx2, ny2;
+    sbl_map_abs(&g, 0, 0, &nx, &ny);
+    sbl_map_abs(&g, 2219, 1079, &nx2, &ny2);
+    /* back to a desktop pixel the way Windows does it (n * size / 65536, truncated) */
+    CHECK(nx * 2220 / 65536 == 0 && ny * 1080 / 65536 == 0);
+    CHECK(nx2 * 2220 / 65536 == 2219 && ny2 * 1080 / 65536 == 1079);
+    sbl_map_abs(&g, 1110, 540, &nx, &ny);
+    CHECKF(nx * 2220 / 65536 == 1110 && ny * 1080 / 65536 == 540, "%d,%d", nx, ny);
+}
 
 /* ---- region -------------------------------------------------------------------------------------- */
 
@@ -862,6 +993,49 @@ static void test_e2e(void)
     tv_pump(&v, 3000, u_mode);
     CHECK(v.got_mode && v.mode.status == SBLK_MODE_REJECTED && v.mode.width == 640);
 
+    /* Windows' orientation setting mid-session: the capture resets, re-opens upright with the new size,
+     * the viewer is told (unsolicited MODE APPLIED) and gets a keyframe of that size, pixel exact; the
+     * pointer then maps over the new size. 90 -> 270 keeps the size but still sends a keyframe. */
+    {
+        static const struct { int rot; uint32_t w, h; } turns[] = {
+            { SBL_ROT_90, 480, 640 }, { SBL_ROT_270, 480, 640 }, { SBL_ROT_180, 640, 480 }, { SBL_ROT_0, 640, 480 },
+        };
+        for (size_t i = 0; i < sizeof turns / sizeof turns[0]; i++) {
+            v.got_mode = 0;
+            k0 = v.keyframes;
+            synth_set_rotation(turns[i].rot);
+            if (turns[i].w != v.w || turns[i].h != v.h) {
+                tv_pump(&v, 3000, u_mode);
+                CHECKF(v.got_mode && v.mode.status == SBLK_MODE_APPLIED && v.mode.width == turns[i].w &&
+                       v.mode.height == turns[i].h, "rotation %d: mode %d st %u %ux%u", turns[i].rot * 90,
+                       v.got_mode, v.mode.status, v.mode.width, v.mode.height);
+            }
+            /* (a re-open within 1 s of the last one waits 1 s: session.c's churn guard) */
+            for (int t = 0; t < 60 && v.keyframes == k0 && !v.closed; t++) tv_pump(&v, 50, NULL);
+            tv_settle(&v, 200, 3000);
+            CHECKF(v.w == turns[i].w && v.h == turns[i].h && v.keyframes > k0 && tv_matches(&v, synth_scene()),
+                   "rotation %d: %ux%u keyframes %u -> %u matches %d", turns[i].rot * 90, v.w, v.h, k0, v.keyframes,
+                   tv_matches(&v, synth_scene()));
+            /* a scene change on the rotated output: only the changed area, still pixel exact */
+            synth_set_scene(synth_scene() + 1);
+            tv_settle(&v, 150, 3000);
+            CHECKF(tv_matches(&v, synth_scene()), "rotation %d: scene step differs", turns[i].rot * 90);
+            if (turns[i].rot == SBL_ROT_90) {
+                rec_clear();
+                memset(&m, 0, sizeof m);
+                m.type = SBLK_T_INPUT_POINTER;
+                m.u.pointer.x = 479; m.u.pointer.y = 639;
+                tv_send(&v, &m);
+                CHECK(wait_events(1, 1000));
+                n = rec_get(ev, 64);
+                CHECKF(n >= 1 && ev[0].kind == SBL_EV_MOVE_ABS && ev[0].x * 480 / 65536 == 479 &&
+                       ev[0].y * 640 / 65536 == 639,
+                       "n %d kind %d %d,%d", n, n ? ev[0].kind : 0, n ? ev[0].x : 0, n ? ev[0].y : 0);
+            }
+        }
+        CHECK(v.seq_bad == 0 && v.bad == 0);
+    }
+
     /* a new HELLO on the same connection: new session, keyframe, held keys released */
     rec_clear();
     k0 = v.keyframes;
@@ -1269,6 +1443,7 @@ int main(void)
     printf("encoder\n");  test_encoder();
     printf("flow\n");     test_flow();
     printf("input\n");    test_input();
+    printf("rotated outputs\n"); test_rotate();
     printf("usb receive (transfer boundaries)\n"); test_usb_rx();
     printf("end to end (TCP loopback, synthetic desktop)\n"); test_e2e();
     sbl_sender_stop(&g_s);

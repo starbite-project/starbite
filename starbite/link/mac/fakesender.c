@@ -8,12 +8,14 @@
  * input event it receives. Typed keys appear in the "Notepad" window, pointer drags move it, the wheel
  * scrolls it, and the "Input log" window shows the events: an interactive check of the whole loop.
  *
- *   fakesender [--port N] [--size WxH] [--fps N] [--crc-file F] [--log F] [--fault drop:N|stall:N|corrupt:N]
- *              [--exit-on-bye] [--verbose]
+ *   fakesender [--port N] [--size WxH] [--fps N] [--crc-file F] [--log F]
+ *              [--fault drop:N|stall:N|corrupt:N|rotate:N] [--exit-on-bye] [--verbose]
  *
  * --crc-file: after every frame "<id> <W>x<H> <hash>" (sbv_fb_hash of the composed image) so the viewer's
  * selftest can check its own composition. --fault: once, in the first session, after frame N: close the
- * socket (drop), go silent (stall), or send garbage (corrupt). --exit-on-bye: exit 0 when a viewer says BYE
+ * socket (drop), go silent (stall), send garbage (corrupt), or turn the display a quarter (rotate: W x H becomes
+ * H x W, announced with an unsolicited MODE APPLIED and a keyframe, like the phone after Windows' orientation
+ * setting changed). --exit-on-bye: exit 0 when a viewer says BYE
  * with reason normal (0) or shutdown (3).
  * Mac only (CoreGraphics + CoreText for the drawing); uses the portable core for everything on the wire.
  */
@@ -49,7 +51,7 @@ static uint64_t mono_us(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) /
 static struct {
     int port, w, h, fps, verbose, exit_on_bye;
     const char *crc_file, *log_file;
-    int fault_kind, fault_at;   /* 1 drop, 2 stall, 3 corrupt */
+    int fault_kind, fault_at;   /* 1 drop, 2 stall, 3 corrupt, 4 rotate */
 } opt = { SBLK_TCP_PORT, 1280, 720, 60, 0, 0, NULL, NULL, 0, 0 };
 
 static FILE *logf_, *crcf;
@@ -639,7 +641,21 @@ static void maybe_fault(void)
     L.faulted = 1;
     if (opt.fault_kind == 1) { say(1, "FAULT drop after frame %d", opt.fault_at); drop_client("fault: drop"); }
     else if (opt.fault_kind == 2) { say(1, "FAULT stall after frame %d", opt.fault_at); L.stalled = 1; }
-    else {
+    else if (opt.fault_kind == 4) {
+        uint32_t w = sc.H, h = sc.W;
+        say(1, "FAULT rotate after frame %d: %ux%u -> %ux%u", opt.fault_at, sc.W, sc.H, w, h);
+        scene_init(w, h);
+        outbuf_fit();
+        L.keyframe = 1;
+        sblk_msg m;
+        memset(&m, 0, sizeof m);
+        m.type = SBLK_T_MODE;
+        m.u.mode.width = (uint16_t)w;
+        m.u.mode.height = (uint16_t)h;
+        m.u.mode.refresh_mhz = (uint32_t)opt.fps * 1000;
+        m.u.mode.status = SBLK_MODE_APPLIED;
+        send_msg(&m);
+    } else {
         say(1, "FAULT corrupt after frame %d", opt.fault_at);
         uint8_t junk[64];
         for (int i = 0; i < 64; i++) junk[i] = (uint8_t)(i * 37 + 11);
@@ -725,6 +741,7 @@ static int parse_fault(const char *s)
     if (!strncmp(s, "drop", 4)) opt.fault_kind = 1;
     else if (!strncmp(s, "stall", 5)) opt.fault_kind = 2;
     else if (!strncmp(s, "corrupt", 7)) opt.fault_kind = 3;
+    else if (!strncmp(s, "rotate", 6)) opt.fault_kind = 4;
     else return -1;
     return opt.fault_at > 0 ? 0 : -1;
 }
@@ -743,7 +760,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--verbose")) opt.verbose = 1;
         else {
             fprintf(stderr, "usage: %s [--port N] [--size WxH] [--fps N] [--crc-file F] [--log F]\n"
-                            "          [--fault drop:N|stall:N|corrupt:N] [--exit-on-bye] [--verbose]\n", argv[0]);
+                            "          [--fault drop:N|stall:N|corrupt:N|rotate:N] [--exit-on-bye] [--verbose]\n", argv[0]);
             return 2;
         }
     }

@@ -12,7 +12,7 @@ static plat_mutex sy_lk;
 static int sy_init;
 static plat_event sy_ev;
 static uint32_t sy_scene, sy_w = 1280, sy_h = 720, sy_want_w, sy_want_h;
-static int sy_auto;
+static int sy_auto, sy_rot, sy_want_rot = -1;
 static uint64_t sy_caps;
 
 static void sy_once(void)
@@ -93,29 +93,76 @@ uint32_t synth_scene(void)
 void synth_set_auto(int fps) { sy_once(); sy_auto = fps; plat_event_set(sy_ev); }
 void synth_set_size(uint32_t w, uint32_t h) { sy_once(); sy_w = w; sy_h = h; }
 void synth_get_size(uint32_t *w, uint32_t *h) { *w = sy_w; *h = sy_h; }
+void synth_set_rotation(int rot) { sy_once(); sy_want_rot = rot & 3; plat_event_set(sy_ev); }
 uint64_t synth_captures(void) { return sy_caps; }
 
+struct sbl_cap;
+static void draw(struct sbl_cap *c, uint32_t k);
+static void add_dirty(struct sbl_cap *c, sbl_region *dirty, box r);
+
 struct sbl_cap {
-    uint32_t w, h, shown;      /* shown = the scene in px */
+    uint32_t w, h, shown;      /* shown = the scene in px; w x h = the upright desktop */
     uint8_t *px;
     size_t stride;
+    /* rotated like a Windows output in portrait/flipped orientation: the "OS" draws the upright scene
+     * (up), the duplication hands over the panel image (panel, sw x sh), and the capture turns it upright
+     * into px with the same sbl_rot_copy / sbl_rot_rect as capture_win.c */
+    int rot;
+    uint32_t sw, sh;
+    uint8_t *up, *panel;
+    size_t ustride, pstride;
     uint64_t last_auto;
     uint32_t nframes;
 };
+
+/* the "OS" draws scene k; a rotated output's capture turns the panel image upright like capture_win.c */
+static void draw(sbl_cap *c, uint32_t k)
+{
+    if (!c->rot) { synth_render(k, c->w, c->h, c->px, c->stride); return; }
+    synth_render(k, c->w, c->h, c->up, c->ustride);
+    sbl_irect all = { 0, 0, (int32_t)c->w, (int32_t)c->h };
+    /* the panel image: the upright one turned back (the inverse rotation) */
+    sbl_rot_copy((4 - c->rot) & 3, c->panel, c->pstride, c->up, c->ustride, c->w, c->h, all);
+    sbl_irect pall = { 0, 0, (int32_t)c->sw, (int32_t)c->sh };
+    sbl_rot_copy(c->rot, c->px, c->stride, c->panel, c->pstride, c->sw, c->sh, pall);
+}
+
+/* an upright dirty rect, as DXGI would report it (panel coordinates), mapped back like capture_win.c */
+static void add_dirty(sbl_cap *c, sbl_region *dirty, box b)
+{
+    sbl_irect r = { b.x, b.y, b.x + b.w, b.y + b.h };
+    if (c->rot) {
+        if (r.r > (int32_t)c->w) r.r = (int32_t)c->w;
+        if (r.b > (int32_t)c->h) r.b = (int32_t)c->h;
+        sbl_irect p = sbl_rot_rect((4 - c->rot) & 3, c->w, c->h, r);
+        r = sbl_rot_rect(c->rot, c->sw, c->sh, p);
+    }
+    sbl_region_add(dirty, r.l, r.t, r.r - r.l, r.b - r.t, c->w, c->h);
+}
 
 int sbl_cap_open(sbl_cap **cp, const sbl_cfg *cfg, sbl_cap_info *info)
 {
     (void)cfg;
     sy_once();
     if (sy_want_w) { sy_w = sy_want_w; sy_h = sy_want_h; sy_want_w = sy_want_h = 0; }
+    if (sy_want_rot >= 0) { sy_rot = sy_want_rot; sy_want_rot = -1; }
     sbl_cap *c = calloc(1, sizeof *c);
     if (!c) return -1;
-    c->w = sy_w; c->h = sy_h;
+    c->rot = sy_rot;
+    c->sw = sy_w; c->sh = sy_h;            /* sy_w x sy_h: the panel's (unrotated) mode */
+    sbl_rot_size(c->rot, c->sw, c->sh, &c->w, &c->h);
     c->stride = (size_t)c->w * 4 + 64;   /* padded rows, like a mapped texture */
     c->px = malloc(c->stride * c->h);
     if (!c->px) { free(c); return -1; }
+    if (c->rot) {
+        c->ustride = (size_t)c->w * 4 + 16;
+        c->pstride = (size_t)c->sw * 4 + 32;
+        c->up = malloc(c->ustride * c->h);
+        c->panel = malloc(c->pstride * c->sh);
+        if (!c->up || !c->panel) { sbl_cap_close(c); return -1; }
+    }
     c->shown = synth_scene();
-    synth_render(c->shown, c->w, c->h, c->px, c->stride);
+    draw(c, c->shown);
     memset(info, 0, sizeof *info);
     info->width = c->w; info->height = c->h; info->refresh_mhz = 60000;
     info->is_starbite = 1;
@@ -123,6 +170,7 @@ int sbl_cap_open(sbl_cap **cp, const sbl_cfg *cfg, sbl_cap_info *info)
     info->geom.out_x = 0; info->geom.out_y = 0;
     info->geom.out_w = (int32_t)c->w; info->geom.out_h = (int32_t)c->h;
     info->geom.disp_w = c->w; info->geom.disp_h = c->h;
+    info->rotation = c->rot;
     memcpy(info->name, "Starbite Display (synthetic)", 29);
     info->method = "synth";
     *cp = c;
@@ -133,12 +181,14 @@ void sbl_cap_close(sbl_cap *c)
 {
     if (!c) return;
     free(c->px);
+    free(c->up);
+    free(c->panel);
     free(c);
 }
 
 int sbl_cap_next(sbl_cap *c, int timeout_ms, sbl_region *dirty, uint64_t *capture_us)
 {
-    if (sy_want_w) return SBL_CAP_RESET;
+    if (sy_want_w || sy_want_rot >= 0) return SBL_CAP_RESET;
     uint64_t now = plat_now_us();
     if (sy_auto > 0) {
         uint64_t period = 1000000u / (uint64_t)sy_auto;
@@ -156,17 +206,17 @@ int sbl_cap_next(sbl_cap *c, int timeout_ms, sbl_region *dirty, uint64_t *captur
     if (k == c->shown) {
         if (timeout_ms) plat_event_wait(sy_ev, timeout_ms);
         k = synth_scene();
-        if (sy_want_w) return SBL_CAP_RESET;
+        if (sy_want_w || sy_want_rot >= 0) return SBL_CAP_RESET;
         if (k == c->shown) return 0;
     }
-    synth_render(k, c->w, c->h, c->px, c->stride);
+    draw(c, k);
     if (++c->nframes % 7 == 0) {
         sbl_region_add(dirty, 0, 0, (int32_t)c->w, (int32_t)c->h, c->w, c->h);
     } else {
         box a = box_of(c->shown, c->w, c->h), b = box_of(k, c->w, c->h), n = counter_of(c->w, c->h);
-        sbl_region_add(dirty, a.x, a.y, a.w, a.h, c->w, c->h);
-        sbl_region_add(dirty, b.x, b.y, b.w, b.h, c->w, c->h);
-        sbl_region_add(dirty, n.x, n.y, n.w, n.h, c->w, c->h);
+        add_dirty(c, dirty, a);
+        add_dirty(c, dirty, b);
+        add_dirty(c, dirty, n);
     }
     c->shown = k;
     sy_caps++;
@@ -196,6 +246,7 @@ int sbl_cap_set_mode(sbl_cap *c, uint32_t w, uint32_t h, uint32_t refresh_mhz)
     if (w < 64 || h < 64 || w > 4096 || h > 2304) return -1;
     w &= ~1u; h &= ~1u;   /* "nearest supported mode": even sizes */
     if (w == c->w && h == c->h) return 0;
+    if (c->rot & 1) { uint32_t t = w; w = h; h = t; }   /* the request is upright, the mode is the panel's */
     sy_want_w = w; sy_want_h = h;
     plat_event_set(sy_ev);
     return 1;

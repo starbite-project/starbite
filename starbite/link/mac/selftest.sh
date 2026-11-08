@@ -8,6 +8,9 @@
 #   corrupt  the source sends garbage after frame 40: viewer sends BYE(PROTOCOL), reconnects, passes
 #   stall    the source goes silent after frame 40: the viewer declares the link dead (5 s), reconnects
 #   busy     a second viewer gets BYE(BUSY) while the first one runs
+#   rotate   after the MODE and the input, the source turns its display (1024x600 -> 600x1024, like the
+#            phone after Windows' orientation changed): unsolicited MODE APPLIED + keyframe mid-session; the
+#            viewer must resize and compose the portrait image exactly
 #   big      1920x1080, 300 frames (throughput)
 # Every viewer run checks its own composed image (frame buffer, and the IOSurface the layer shows) against
 # the sender's per-frame checksum and exits 0/1; this script also checks the sender's input log.
@@ -65,7 +68,7 @@ input_checks() {
     expect "$l" 'BYE received reason=0' "viewer BYE(NORMAL) at the end"
 }
 
-[ $# -eq 0 ] && set -- unit basic auto drop corrupt stall busy big
+[ $# -eq 0 ] && set -- unit basic auto drop corrupt stall busy rotate big
 for s in "$@"; do
     echo "== $s"
     case $s in
@@ -122,6 +125,13 @@ PY
         sed 's/^/  /' "$d/second.out"
         expect "$d/second.out" 'type=0x3f len=4 reason=4 closed=True' "second viewer: BYE(BUSY) and closed"
         if [ $rc -eq 0 ]; then echo "  ok   first viewer unaffected (exit 0)"; else echo "  FAIL first viewer exit $rc"; fails=$((fails + 1)); fi ;;
+    rotate)
+        start_sender rotate --fault rotate:120
+        viewer --tcp 127.0.0.1:$port --frames 200 --final-size 600x1024
+        stop_sender; input_checks
+        expect "$d/sender.log" 'FAULT rotate after frame 120: 1024x600 -> 600x1024' "source turned its display mid-session"
+        expect "$d/viewer.out" ' 600x1024: fb ' "checked frame is the portrait one"
+        expect "$d/viewer.out" '1 session\(s\)' "same session throughout" ;;
     big)
         start_sender big --size 1920x1080
         viewer --tcp 127.0.0.1:$port --frames 300 --mode-test 1920x1080

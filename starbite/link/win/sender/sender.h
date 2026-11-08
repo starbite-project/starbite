@@ -30,6 +30,30 @@ void sbl_region_clear(sbl_region *g);
 void sbl_region_add(sbl_region *g, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t fw, uint32_t fh);
 void sbl_region_full(sbl_region *g, uint32_t fw, uint32_t fh);
 
+/* ---- rotated outputs ------------------------------------------------------------------------------ */
+
+/* An output Windows shows rotated (Display Settings > orientation) is duplicated in the PANEL's
+ * orientation: the image DXGI hands over is sw x sh, the desktop the user sees (and the frame we send)
+ * is dw x dh = sh x sw for 90/270. rot = quarter turns, following DXGI_MODE_ROTATION_* (the desktop
+ * image must be turned this way to be upright), as Microsoft's DesktopDuplication sample treats them:
+ *   SBL_ROT_90:  panel pixel (x, y) -> desktop pixel (dw - 1 - y, x), i.e. turned 90 degrees clockwise
+ *   SBL_ROT_180: (x, y) -> (dw - 1 - x, dh - 1 - y)
+ *   SBL_ROT_270: (x, y) -> (y, dh - 1 - x), i.e. turned 90 degrees counter-clockwise
+ * If the S9 shows 90/270 upside down, swap SBL_ROT_90 and SBL_ROT_270 in sbl_rot_from_dxgi()
+ * (capture_win.c): every transform here follows from that one value. */
+enum { SBL_ROT_0 = 0, SBL_ROT_90 = 1, SBL_ROT_180 = 2, SBL_ROT_270 = 3 };
+
+typedef struct sbl_irect { int32_t l, t, r, b; } sbl_irect;   /* right/bottom exclusive */
+
+/* the upright size of an sw x sh panel image */
+void sbl_rot_size(int rot, uint32_t sw, uint32_t sh, uint32_t *dw, uint32_t *dh);
+/* a rect of the sw x sh panel image -> the same pixels in the upright image */
+sbl_irect sbl_rot_rect(int rot, uint32_t sw, uint32_t sh, sbl_irect in);
+/* Copies the panel-image rect src_r (inside sw x sh, src rows sstride bytes) into the upright image
+ * dst (rows dstride bytes) at sbl_rot_rect(src_r), forcing alpha to 0xFF like the unrotated copy. */
+void sbl_rot_copy(int rot, uint8_t *dst, size_t dstride, const uint8_t *src, size_t sstride,
+                  uint32_t sw, uint32_t sh, sbl_irect src_r);
+
 /* ---- frame encoder ------------------------------------------------------------------------------ */
 
 #define SBL_MAX_RECTS 4096     /* dirty rects per frame before falling back to one bounding box */
@@ -201,6 +225,7 @@ typedef struct sbl_cap_info {
     uint32_t width, height, refresh_mhz;
     int      is_starbite;      /* the Starbite Display (IddCx): EXTEND, MODE */
     int      can_mode;         /* sbl_cap_set_mode() may work */
+    int      rotation;         /* SBL_ROT_*: the output is shown rotated; width/height are already upright */
     sbl_geom geom;
     char     name[96];         /* monitor name, UTF-8 */
     const char *method;        /* "dxgi", "gdi", "synth" */

@@ -137,6 +137,8 @@ final class DisplayView: NSView {
     var connected = false
     var onCaptureChange: ((Bool) -> Void)?
     var onResizeSettled: ((CGSize) -> Void)?
+    /// the frame size changed (a new session, MODE, the phone's display rotated): pixels
+    var onDisplaySizeChange: ((CGSize) -> Void)?
 
     private(set) var captured = false
     private var buttons: UInt32 = 0
@@ -214,6 +216,10 @@ final class DisplayView: NSView {
         if newSize != displaySize {
             displaySize = newSize
             window?.invalidateCursorRects(for: self)
+            // a pointer position computed for the old size must not go out mapped onto the new one
+            pendingPos = nil
+            lastSent = (x: Int32.min, y: Int32.min)
+            onDisplaySizeChange?(newSize)
         }
     }
 

@@ -15,6 +15,16 @@
  * (same cost as the plain copy), which also keeps invisible alpha changes out of the tile compare.
  * A present that comes without metadata is copied whole (the tile compare still sends only what
  * changed) instead of being dropped. sbl_cap_get_stats() counts all of it; --diag logs every OS frame.
+ *
+ * Rotated outputs (Display Settings > orientation portrait / landscape flipped / portrait flipped): the
+ * desktop is rotated, but DXGI hands over the image in the panel's own orientation (sw x sh; for 90/270
+ * the desktop's w x h swapped) and its dirty/move rects in that image's coordinates. Each copied rect is
+ * turned upright (sbl_rot_copy, pipeline.c) into our buffer, which always has the desktop's orientation,
+ * and its rect is turned the same way (sbl_rot_rect) for the encoder. So the viewer gets an upright
+ * frame of the desktop's size, and the pointer mapping (desktop coordinates) needs nothing extra. The
+ * first frame after an open checks the texture's real size: one already upright is copied as is.
+ * A rotation change is a mode change: DXGI reports ACCESS_LOST, the capture re-opens with the new
+ * size, and session.c announces it (MODE APPLIED) and sends a keyframe.
  */
 #define COBJMACROS
 #include "sender.h"
@@ -32,7 +42,10 @@ struct sbl_cap {
     RECT     desk;             /* desktop coordinates of the output */
     HMONITOR mon;
     int      starbite;
-    uint32_t w, h;
+    uint32_t w, h;             /* the desktop's (upright) size: what the viewer gets */
+    int      rot;              /* SBL_ROT_*: how the duplicated image is turned upright */
+    uint32_t sw, sh;           /* the duplicated image's size (w x h swapped for 90/270) */
+    int      tex_checked;      /* the first frame's texture size was compared with sw x sh */
     uint8_t *cur;              /* our copy of the desktop image, stride w*4 */
     size_t   stride;
     int      valid;
@@ -195,6 +208,19 @@ static int find_output(const sbl_cfg *cfg, pick *best)
 
 /* ---- DXGI duplication --------------------------------------------------------------------------- */
 
+/* DXGI_MODE_ROTATION_ROTATE90 = the desktop is shown turned 90 degrees clockwise relative to the panel
+ * (the DesktopDuplication sample's reading; sender.h has the pixel mapping). If 90/270 come out upside
+ * down on the phone, swap the SBL_ROT_90 and SBL_ROT_270 here: nothing else depends on the direction. */
+static int sbl_rot_from_dxgi(DXGI_MODE_ROTATION r)
+{
+    switch (r) {
+    case DXGI_MODE_ROTATION_ROTATE90:  return SBL_ROT_90;
+    case DXGI_MODE_ROTATION_ROTATE180: return SBL_ROT_180;
+    case DXGI_MODE_ROTATION_ROTATE270: return SBL_ROT_270;
+    default:                           return SBL_ROT_0;
+    }
+}
+
 static int dxgi_open(sbl_cap *c, pick *p)
 {
     D3D_FEATURE_LEVEL fl;
@@ -215,11 +241,19 @@ static int dxgi_open(sbl_cap *c, pick *p)
         return hr == E_ACCESSDENIED ? -2 : -1;
     }
     IDXGIOutputDuplication_GetDesc(c->dup, &c->dd);
-    if (c->dd.Rotation != DXGI_MODE_ROTATION_IDENTITY && c->dd.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED)
-        sbl_log("capture: output is rotated (%d): frames are sent unrotated, pointer mapping will be off",
-                (int)c->dd.Rotation);
-    c->w = c->dd.ModeDesc.Width;
-    c->h = c->dd.ModeDesc.Height;
+    c->rot = sbl_rot_from_dxgi(c->dd.Rotation);
+    /* the upright size: the output's desktop rect (always in the desktop's orientation, physical pixels:
+     * the thread is per-monitor DPI aware) when it is ModeDesc either way round, else ModeDesc as it is
+     * (landscape for a 90/270 output on Windows 11) */
+    uint32_t mw = c->dd.ModeDesc.Width, mh = c->dd.ModeDesc.Height;
+    uint32_t kw = (uint32_t)(c->desk.right - c->desk.left), kh = (uint32_t)(c->desk.bottom - c->desk.top);
+    if (kw && kh && ((kw == mw && kh == mh) || (kw == mh && kh == mw))) { c->w = kw; c->h = kh; }
+    else { c->w = mw; c->h = mh; }
+    sbl_rot_size(c->rot, c->w, c->h, &c->sw, &c->sh);   /* a quarter turn is its own size swap */
+    if (c->rot)
+        sbl_log("capture: output rotated %d degrees (DXGI rotation %d): duplicated image %ux%u expected, sent "
+                "upright as %ux%u (ModeDesc %ux%u, desktop rect %ux%u)", c->rot * 90, (int)c->dd.Rotation,
+                c->sw, c->sh, c->w, c->h, mw, mh, kw, kh);
     return 0;
 }
 
@@ -234,13 +268,51 @@ static void copy_rows(uint8_t *dst, size_t dstride, const uint8_t *src, size_t s
     }
 }
 
+/* clips a rect of the duplicated image (sw x sh; = w x h unless rotated 90/270) */
 static int clip_rect(const sbl_cap *c, RECT *r)
 {
     if (r->left < 0) r->left = 0;
     if (r->top < 0) r->top = 0;
-    if (r->right > (LONG)c->w) r->right = (LONG)c->w;
-    if (r->bottom > (LONG)c->h) r->bottom = (LONG)c->h;
+    if (r->right > (LONG)c->sw) r->right = (LONG)c->sw;
+    if (r->bottom > (LONG)c->sh) r->bottom = (LONG)c->sh;
     return r->left < r->right && r->top < r->bottom;
+}
+
+/* a clipped rect of the duplicated image into our upright copy */
+static void put_rect(sbl_cap *c, const uint8_t *src, size_t pitch, const RECT *r)
+{
+    if (!c->rot) { copy_rows(c->cur, c->stride, src, pitch, r); return; }
+    sbl_irect s = { r->left, r->top, r->right, r->bottom };
+    sbl_rot_copy(c->rot, c->cur, c->stride, src, pitch, c->sw, c->sh, s);
+}
+
+/* First frame after an open: is the duplicated image the size the rotation implies? Windows has been
+ * seen on the S9 to hand a 90/270 output's image over in the panel orientation (the case handled); one that is
+ * already upright is copied as is, and any other size is clipped to what both agree on. */
+static void check_texture(sbl_cap *c, IDXGIResource *res)
+{
+    c->tex_checked = 1;
+    ID3D11Texture2D *t = NULL;
+    if (!res || FAILED(IDXGIResource_QueryInterface(res, &IID_ID3D11Texture2D, (void **)&t))) return;
+    D3D11_TEXTURE2D_DESC td;
+    ID3D11Texture2D_GetDesc(t, &td);
+    ID3D11Texture2D_Release(t);
+    if (td.Width == c->sw && td.Height == c->sh) {
+        if (c->rot) sbl_log("capture: duplicated image %ux%u as expected: turning it upright", td.Width, td.Height);
+        return;
+    }
+    if (c->rot && td.Width == c->w && td.Height == c->h) {
+        sbl_log("capture: duplicated image %ux%u is already upright: copied without turning", td.Width, td.Height);
+        c->rot = SBL_ROT_0;
+        c->sw = c->w;
+        c->sh = c->h;
+        return;
+    }
+    sbl_log("capture: duplicated image %ux%u, expected %ux%u (rotation %d): clipping to both",
+            td.Width, td.Height, c->sw, c->sh, c->rot * 90);
+    /* only ever shrink: reads stay inside the texture, sbl_rot_rect's output inside w x h */
+    if (td.Width < c->sw) c->sw = td.Width;
+    if (td.Height < c->sh) c->sh = td.Height;
 }
 
 static int dxgi_next(sbl_cap *c, int timeout_ms, sbl_region *dirty, uint64_t *capture_us)
@@ -252,8 +324,10 @@ static int dxgi_next(sbl_cap *c, int timeout_ms, sbl_region *dirty, uint64_t *ca
     if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) return SBL_CAP_RESET;
     if (FAILED(hr)) { sbl_log("capture: AcquireNextFrame 0x%08lx", (unsigned long)hr); return SBL_CAP_RESET; }
     *capture_us = plat_now_us();
+    if (!c->tex_checked) check_texture(c, res);
 
-    /* metadata: move rects then dirty rects, all in desktop-image coordinates */
+    /* metadata: move rects then dirty rects, all in desktop-image coordinates (the duplicated image's:
+     * the panel's orientation on a rotated output; --diag's bbox is in those too) */
     RECT *rects = NULL;
     UINT nrects = 0, nmove = 0;
     int full = !c->valid;
@@ -303,7 +377,7 @@ static int dxgi_next(sbl_cap *c, int timeout_ms, sbl_region *dirty, uint64_t *ca
         IDXGIOutputDuplication_ReleaseFrame(c->dup);
         return 0;
     }
-    RECT all = { 0, 0, (LONG)c->w, (LONG)c->h };
+    RECT all = { 0, 0, (LONG)c->sw, (LONG)c->sh };
     if (full) { rects = &all; nrects = 1; nmove = 0; c->st.full++; }
     c->st.move_rects += nmove;
     c->st.dirty_rects += nrects - nmove;
@@ -315,7 +389,7 @@ static int dxgi_next(sbl_cap *c, int timeout_ms, sbl_region *dirty, uint64_t *ca
         if (SUCCEEDED(hr)) {
             for (UINT i = 0; i < nrects; i++) {
                 RECT r = rects[i];
-                if (clip_rect(c, &r)) copy_rows(c->cur, c->stride, mr.pBits, (size_t)mr.Pitch, &r);
+                if (clip_rect(c, &r)) put_rect(c, mr.pBits, (size_t)mr.Pitch, &r);
             }
             IDXGIOutputDuplication_UnMapDesktopSurface(c->dup);
         } else { sbl_log("capture: MapDesktopSurface 0x%08lx", (unsigned long)hr); ret = SBL_CAP_RESET; }
@@ -348,7 +422,7 @@ static int dxgi_next(sbl_cap *c, int timeout_ms, sbl_region *dirty, uint64_t *ca
             if (SUCCEEDED(hr)) {
                 for (UINT i = 0; i < nrects; i++) {
                     RECT r = rects[i];
-                    if (clip_rect(c, &r)) copy_rows(c->cur, c->stride, ms.pData, ms.RowPitch, &r);
+                    if (clip_rect(c, &r)) put_rect(c, ms.pData, ms.RowPitch, &r);
                 }
                 ID3D11DeviceContext_Unmap(c->ctx, (ID3D11Resource *)c->staging, 0);
             }
@@ -360,9 +434,13 @@ static int dxgi_next(sbl_cap *c, int timeout_ms, sbl_region *dirty, uint64_t *ca
     IDXGIOutputDuplication_ReleaseFrame(c->dup);
     if (ret < 0) return ret;
 
-    for (UINT i = 0; i < nrects; i++)
-        sbl_region_add(dirty, rects[i].left, rects[i].top, rects[i].right - rects[i].left,
-                       rects[i].bottom - rects[i].top, c->w, c->h);
+    for (UINT i = 0; i < nrects; i++) {
+        RECT r = rects[i];
+        if (!clip_rect(c, &r)) continue;
+        sbl_irect u = { r.left, r.top, r.right, r.bottom };
+        u = sbl_rot_rect(c->rot, c->sw, c->sh, u);   /* identity when not rotated */
+        sbl_region_add(dirty, u.l, u.t, u.r - u.l, u.b - u.t, c->w, c->h);
+    }
     c->valid = 1;
     return 1;
 }
@@ -481,6 +559,7 @@ static int cap_open(sbl_cap **cp, const sbl_cfg *cfg, sbl_cap_info *info)
         info->refresh_mhz = (uint32_t)((uint64_t)c->dd.ModeDesc.RefreshRate.Numerator * 1000u /
                                        c->dd.ModeDesc.RefreshRate.Denominator);
     info->is_starbite = c->starbite;
+    info->rotation = c->gdi ? SBL_ROT_0 : c->rot;   /* GDI's BitBlt is already upright */
     info->can_mode = c->starbite;   /* never resize the phone's own panel */
     info->geom.out_x = c->desk.left;
     info->geom.out_y = c->desk.top;

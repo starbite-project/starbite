@@ -22,7 +22,7 @@ keyboard and mouse drive Windows. sblinkd speaks SBLINK v1 (`../../PROTOCOL.md`)
 | `plat.c/.h` | Mutex, event, thread, clock and log (Win32 and POSIX) |
 | `main.c` | Options, logging, single instance (`Global\StarbiteLinkSender`), DPI awareness, `BYE(SHUTDOWN)` on logoff/shutdown/sleep, the watchdog thread, the session-helper mode |
 | `service_win.c` | `--service`: the StarbiteLink LocalSystem service that runs the sender as SYSTEM in the console session, never-sleep power settings, its own crash recovery |
-| `capture_win.c` | DXGI duplication: output choice, dirty and move rects, system-memory or staging copy, GDI fallback, MODE via ChangeDisplaySettingsEx |
+| `capture_win.c` | DXGI duplication: output choice, dirty and move rects, system-memory or staging copy, rotated outputs turned upright, GDI fallback, MODE via ChangeDisplaySettingsEx |
 | `inject_win.c` | SendInput; every thread that injects or captures follows the input desktop (Default / Winlogon) |
 | `usbfn_win.c` | GenericUsbFn: interface discovery, ACTIVATE_USB_BUS, bus events, bulk transfers with the ZLP rule, bounded cancels, re-activation of the USB function after a stuck transfer |
 | `capture_synth.c`, `inject_rec.c`, `host.h` | Mac host build: a synthetic desktop and an injector that records |
@@ -348,6 +348,20 @@ sleep, the hidden window sends `BYE(SHUTDOWN)` first.
     the right pixel whether Windows truncates or rounds (tested for every pixel).
   - Modifiers are resynchronised from the viewer's modifier state. Everything held down is released on session
     end, BYE, a new HELLO or a dead link.
+- **Rotated outputs.** With Windows' orientation set to portrait, landscape (flipped) or portrait (flipped),
+  DXGI still hands over the image, and its dirty and move rects, in the panel's own orientation (for 90/270
+  the desktop's width and height swapped). Each copied rect is turned upright into the capture buffer
+  (`sbl_rot_copy` in `pipeline.c`, in 32x32 blocks) and its rect turned the same way (`sbl_rot_rect`), so
+  the tile compare, the encoder and the Mac all see the desktop as Windows shows it, at the desktop's size
+  (landscape for 90/270 on the S9's portrait panel). The pointer needs nothing extra: the frame and the
+  output's desktop rect are both upright. The first frame after an open compares the texture's size with
+  what the rotation implies and logs it (an image that is already upright is copied as is). Changing the
+  orientation is a mode change: DXGI reports ACCESS_LOST, the capture re-opens at the new size, the Mac gets
+  an unsolicited MODE APPLIED and a keyframe, and resizes its window to the new shape (unless the window
+  drives the size). Direction: `DXGI_MODE_ROTATION_ROTATE90` is read as "desktop turned 90 degrees clockwise
+  relative to the panel", as Microsoft's DesktopDuplication sample does; if 90/270 come out upside down on
+  the phone, swap `SBL_ROT_90` and `SBL_ROT_270` in `sbl_rot_from_dxgi()` (`capture_win.c`). The host tests
+  check the transform pixel by pixel and a rotation mid-session end to end (`synth_set_rotation`).
 - **MODE.** Only the Starbite Display is ever resized, never the phone's own panel. The request goes to the
   nearest mode the IddCx monitor lists, applied with ChangeDisplaySettingsEx (dynamic, not saved). APPLIED goes
   out after the capture re-opens at the new size, followed by a keyframe.
@@ -370,6 +384,8 @@ and passes the PE check.
 - the friendly name match for "Starbite Display"
 - SendInput behaviour: scan codes, NumLock (0x45) and Pause by VK, the wheel and the absolute mapping
 - DPI awareness
+- rotated outputs: the rotation direction (see "Rotated outputs"), the texture size DXGI reports for a
+  90/270 output (logged at the first frame), ACCESS_LOST on an orientation change
 - `BYE(SHUTDOWN)` on logoff and sleep
 - every GenericUsbFn call: whether `GET_CLASS_INFO` works at Configured, the IOCTL buffer conventions (pipe id
   in, data out), the setup-packet handshake choice, and the maximum transfer size (`--usb-chunk`)
@@ -380,7 +396,6 @@ Not done:
 
 - the Windows cursor shape is not sent (the protocol has no message for it; the Mac shows its own cursor)
 - Caps Lock and Num Lock state are not synchronised
-- rotated outputs are sent unrotated (logged)
 - in the Startup-folder mode, no input into elevated or UIAccess windows or the secure desktop (UIPI); use the
   service mode
 - TCP has no authentication; it binds to 127.0.0.1 unless `--bind` is given
