@@ -11,7 +11,8 @@
 #   tools/ios26-root-tune.sh            collect + tune + queue
 #   tools/ios26-root-tune.sh --collect  collect only (nothing written)
 #   TUNE=prefs ...                      only the Accessibility prefs (launchd.plist untouched)
-#   TUNE=launchd-log ...                prefs + launchd.plist with only the PosterBoard log (no job removed)
+#   TUNE=launchd-log ...                prefs + launchd.plist with only the PosterBoard log (no job removed);
+#                                       LOG="pkd lsd ..." adds those jobs' logs (LOGDEST=console: into the kernel log)
 #   TUNE=full ... (default)             prefs + PosterBoard log + jobs in starlte-disabled-ios26-b.list out
 #   (T3 2026-11-08 17:06: TUNE=full's launchd.plist ended in "No service cache": bisect with these)
 #   tools/ios26-root-tune.sh --undo DIR re-queue the launchd.plist (+ launchd-disabled.plist if the root had
@@ -71,7 +72,8 @@ case "$mode" in
 prefs) ;;
 launchd-log)
     # no job removed: launchd-disabled.plist is neither read nor written (it can read back stale)
-    python3 tools/ios26-launchd-tune.py "$L" - "$out/tune" --log PosterBoard
+    logs=(--log PosterBoard); for n in ${LOG:-}; do logs+=(--log "$n"); done
+    python3 tools/ios26-launchd-tune.py "$L" - "$out/tune" "${logs[@]}"
     files+=("$out/tune/launchd.plist=/System/Library/xpc/launchd.plist:644") ;;
 full)
     logs=(--log PosterBoard); for n in ${LOG:-}; do logs+=(--log "$n"); done
