@@ -1,0 +1,40 @@
+From 7501c40d3cb6671c74cb8ed51e5acfa759a4522a Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Sun, 8 Nov 2026 13:53:05 +0200
+Subject: [PATCH] patch: 0402-starlte-no-rtc-wait.patch - no 30 s wait for an
+ IORTC resource that never comes (every 12377 boot: CPU test at 0.5 s,
+ calendar at 30.4 s); sbrtcwait=1 restores it
+
+---
+ iokit/Kernel/IOStartIOKit.cpp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
+index 95553a02..12c57660 100644
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -77,8 +77,24 @@ IOKitInitializeTime( void )
+ 	t.tv_sec = 30;
+ 	t.tv_nsec = 0;
+ 
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	/*
++	 * Starbite (0402): nothing on the S9 ever publishes IORTC, so every boot sat here for the full
++	 * 30 s (kernel log: the CPU timer test at 0.5 s, then clock_initialize_calendar at 30.4 s; iOS 26
++	 * and macOS 13 alike). The calendar comes from the card's SBTIME01 sector (0393) instead.
++	 * Boot-arg sbrtcwait=1 restores the wait.
++	 */
++	{
++		uint32_t rtcwait = 0;
++		PE_parse_boot_argn("sbrtcwait", &rtcwait, sizeof(rtcwait));
++		if (rtcwait) {
++			IOService::waitForService(IOService::resourceMatching("IORTC"), &t);
++		}
++	}
++#else
+ 	IOService::waitForService(
+ 		IOService::resourceMatching("IORTC"), &t );
++#endif
+ #if defined(__i386__) || defined(__x86_64__)
+ 	IOService::waitForService(
+ 		IOService::resourceMatching("IONVRAM"), &t );
