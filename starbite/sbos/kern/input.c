@@ -150,6 +150,16 @@ int input_poll(void)
         touch_poll(now);
     else
         sb_touch_clear();
+    /* 0.5.10: with the screen on, 60 reads a second only while something happens; after 5 s without a touch or a
+     * key, 20 (the first touch then waits up to 50 ms), back to 60 at once. Screen off: 20 (services.c). */
+    if (K.screen_on) {
+        static unsigned period = 16;
+        unsigned want = (t_down || t_power || t_bixby || vol_key || now - last_input < 5000U) ? 16U : 50U;
+        if (want != period) {
+            period = want;
+            kt_set(KT_INPUT, 1, now, want, 1);
+        }
+    }
     return qh != before;
 }
 
