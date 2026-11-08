@@ -32,6 +32,25 @@ void MwLog(MW_ADAPTER *A, PCWSTR Name, ULONG Value)
     ZwClose(key);
 }
 
+/* S9 port (T13c): delete the previous boot's trace subkey, so nothing stale is read as this boot's (T13b's
+ * pull still showed T13a's Fail_StartGpu and S9NoInterrupt). */
+void MwTraceReset(MW_ADAPTER *A)
+{
+    HANDLE key, sub;
+    UNICODE_STRING subName = RTL_CONSTANT_STRING(L"sbwddm");
+    OBJECT_ATTRIBUTES oa;
+    if (A == NULL || A->Pdo == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return;
+    if (!NT_SUCCESS(IoOpenDeviceRegistryKey(A->Pdo, PLUGPLAY_REGKEY_DEVICE, KEY_WRITE, &key)))
+        return;
+    InitializeObjectAttributes(&oa, &subName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, key, NULL);
+    if (NT_SUCCESS(ZwOpenKey(&sub, DELETE, &oa))) {
+        (void)ZwDeleteKey(sub);
+        ZwClose(sub);
+    }
+    ZwClose(key);
+}
+
 /* The CI run that built this image (0 for a local build): WDK builds are
  * deterministic, so __DATE__ and __TIME__ do not exist. */
 #ifndef MW_BUILD
@@ -48,37 +67,48 @@ void MwLogHook(void *Owner, PCWSTR Name, ULONG Value)
 /* Enter_<ddi> = call order, written BEFORE a DDI's first call runs, so a
  * DDI that never returns (a bugcheck inside it) is still on record. Name is
  * "Enter_<ddi>". */
+/* S9 port (T13c): exact first-call tracking. Upstream kept one bit per hash(name) % 64, and in T13b Render,
+ * Escape and SubmitCommand shared bits with earlier DDIs, so their Seen/Order entries never appeared. A
+ * name table instead: a racing duplicate only logs twice. */
+#define MW_TRACE_NAMES 128
+static PCWSTR TraceNames[MW_TRACE_NAMES];
+static volatile LONG TraceCount;
+
+static BOOLEAN FirstTime(PCWSTR Name)
+{
+    LONG n = TraceCount, i;
+    for (i = 0; i < n && i < MW_TRACE_NAMES; i++)
+        if (TraceNames[i] && wcscmp(TraceNames[i], Name) == 0)
+            return FALSE;
+    i = InterlockedIncrement(&TraceCount) - 1;
+    if (i < MW_TRACE_NAMES)
+        TraceNames[i] = Name;
+    return TRUE;
+}
+
 void MwEnter(MW_ADAPTER *A, PCWSTR Name)
 {
     if (A == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL)
         return;
-    ULONG h = 0;
-    for (PCWSTR c = Name; *c; c++)
-        h = h * 31 + *c;
-    if (A->Entered & (1ULL << (h % 64)))
+    if (!FirstTime(Name))
         return;
-    A->Entered |= 1ULL << (h % 64);
-    MwLog(A, Name, ++A->CallOrder);
+    MwLog(A, Name, (ULONG)InterlockedIncrement((volatile LONG *)&A->CallOrder));
 }
 
 NTSTATUS MwRet(MW_ADAPTER *A, PCWSTR Name, NTSTATUS St)
 {
     if (A == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL)
         return St;
-    ULONG h = 0;
-    for (PCWSTR c = Name; *c; c++)
-        h = h * 31 + *c;
-    if (!(A->Seen & (1ULL << (h % 64)))) {
+    if (FirstTime(Name)) {
         WCHAR seen[64];
         UNICODE_STRING us;
-        A->Seen |= 1ULL << (h % 64);
         RtlInitEmptyUnicodeString(&us, seen, sizeof(seen));
         if (NT_SUCCESS(RtlUnicodeStringPrintf(&us, L"Seen_%ws", Name + 5)))
             MwLog(A, seen, (ULONG)St);
         /* Which DDI dxgkrnl called first, second, ... */
         RtlInitEmptyUnicodeString(&us, seen, sizeof(seen));
         if (NT_SUCCESS(RtlUnicodeStringPrintf(&us, L"Order_%ws", Name + 5)))
-            MwLog(A, seen, ++A->CallOrder);
+            MwLog(A, seen, (ULONG)InterlockedIncrement((volatile LONG *)&A->CallOrder));
     }
     if (!NT_SUCCESS(St)) {
         MwLog(A, Name, (ULONG)St);
@@ -97,6 +127,7 @@ static NTSTATUS APIENTRY MwAddDevice(IN_CONST_PDEVICE_OBJECT Pdo, OUT_PPVOID Con
     if (a == NULL)
         return STATUS_NO_MEMORY;
     a->Pdo = (PDEVICE_OBJECT)Pdo;
+    MwTraceReset(a);                      /* S9 port: only this boot's values in the trace key */
     ExInitializeFastMutex(&a->MmuLock);
     a->Gpu.Log = MwLogHook;
     a->Gpu.LogOwner = a;

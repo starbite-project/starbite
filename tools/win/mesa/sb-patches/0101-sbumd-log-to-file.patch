@@ -1,0 +1,88 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index f857adb..40ec93b 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -124,13 +124,50 @@ static void fake_ioctl(DWORD code, void *buf, DWORD len);
+ 
+ /* MALIKM_TRACE=1: log every call to the real driver, with the DRM number,
+  * the driver's result and any Win32 error. */
++/* Starbite (sbumd, docs/WIN11-GPU.md 6.9): with C:\ProgramData\Starbite\umdlog present, this process's
++ * stderr goes to a file there (DWM and LogonUI have no console; T13b's DWM gave up after its first Render
++ * and said nothing anywhere). With umdlog\trace also present, the full driver-call trace (MALIKM_TRACE). */
++static int sb_log_active, sb_log_trace;
++
++static void
++sb_log_open(void)
++{
++   static int done;
++   char path[MAX_PATH], exe[MAX_PATH] = "?";
++   const char *base;
++   SYSTEMTIME st;
++   DWORD a;
++
++   if (done)
++      return;
++   done = 1;
++   a = GetFileAttributesA("C:\\ProgramData\\Starbite\\umdlog");
++   if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY))
++      return;
++   GetModuleFileNameA(NULL, exe, sizeof(exe));
++   base = strrchr(exe, '\\');
++   base = base ? base + 1 : exe;
++   snprintf(path, sizeof(path), "C:\\ProgramData\\Starbite\\umdlog\\%s-%lu-%lu.log", base,
++            (unsigned long)GetCurrentProcessId(), (unsigned long)GetTickCount());
++   if (!freopen(path, "a", stderr))
++      return;
++   setvbuf(stderr, NULL, _IONBF, 0);
++   sb_log_active = 1;
++   sb_log_trace = GetFileAttributesA("C:\\ProgramData\\Starbite\\umdlog\\trace") != INVALID_FILE_ATTRIBUTES;
++   GetLocalTime(&st);
++   fprintf(stderr, "sbumd: %s pid %lu at %02u:%02u:%02u.%03u, driver-call trace %s\n", exe,
++           (unsigned long)GetCurrentProcessId(), st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
++           sb_log_trace ? "on" : "off");
++}
++
+ static int
+ trace_on(void)
+ {
+    static int t = -1;
+    if (t < 0) {
+       const char *e = getenv("MALIKM_TRACE");
+-      t = e && *e && *e != '0';
++      sb_log_open();
++      t = (e && *e && *e != '0') || sb_log_trace;
+    }
+    return t;
+ }
+@@ -991,6 +1028,8 @@ malikm_bind_d3dddi(HANDLE hRTAdapter, HANDLE hRTDevice, const void *pKTCallbacks
+    MW_ESCAPE_GPU_INFO_DATA g = {0};
+    int ret = -1;
+ 
++   sb_log_open();
++
+    if (!cb || !cb->pfnEscapeCb || !cb->pfnAllocateCb || !cb->pfnRenderCb || !cb->pfnCreateContextCb)
+       return -1;
+    AcquireSRWLockExclusive(&wddm_lock);
+@@ -1024,7 +1063,7 @@ malikm_bind_d3dddi(HANDLE hRTAdapter, HANDLE hRTDevice, const void *pKTCallbacks
+       }
+    }
+    ReleaseSRWLockExclusive(&wddm_lock);
+-   if (trace_on())
++   if (trace_on() || sb_log_active)
+       fprintf(stderr, "malikm: bind to the runtime device %p: %s\n", hRTDevice,
+               ret == 0 ? "yes, through its callbacks" : "no (not maliwddm, or software runtime)");
+    return ret;
+diff --git a/src/gallium/frontends/d3d10umd/Debug.cpp b/src/gallium/frontends/d3d10umd/Debug.cpp
+index 17f7292..e9c1db3 100644
+--- a/src/gallium/frontends/d3d10umd/Debug.cpp
++++ b/src/gallium/frontends/d3d10umd/Debug.cpp
+@@ -34,6 +34,9 @@ DebugPrintf(const char *format, ...)
+     va_end(ap);
+ 
+     OutputDebugStringA(buf);
++    /* Starbite (sbumd): also to stderr, which the shim sends to C:\ProgramData\Starbite\umdlog\ when that
++     * directory exists (DWM has no debugger attached; the unsupported-entry-point messages land here). */
++    fputs(buf, stderr);
+ }
+ 
+ 

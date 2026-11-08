@@ -47,6 +47,12 @@ if [ ! -d src ]; then
     cp "$here"/g52/include/*.h src/include/win32-compat/
     git -C src add -A >/dev/null
     git -C src -c user.email=sb@local -c user.name=sb commit -qm "wddm-mali-g52 patches 0001-0020 + win32-compat"
+    # ours, on top (they touch the win32-compat copy too): tools/win/mesa/sb-patches/
+    for p in "$here"/sb-patches/*.patch; do
+        [ -e "$p" ] || continue
+        git -C src apply --whitespace=nowarn "$p"
+        git -C src -c user.email=sb@local -c user.name=sb commit -qam "$(basename "$p")"
+    done
 fi
 
 # ---- toolchain: clang 18 in cl mode, lld-link, llvm-lib, llvm-rc -------------------------------------

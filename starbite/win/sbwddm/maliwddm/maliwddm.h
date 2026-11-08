@@ -175,6 +175,7 @@ struct _MW_ADAPTER {
 
 /* ---- trace: Seen_<ddi>, Fail_<ddi> in the device's registry key ---- */
 void MwLog(MW_ADAPTER *A, PCWSTR Name, ULONG Value);
+void MwTraceReset(MW_ADAPTER *A);
 void MwLogHook(void *Owner, PCWSTR Name, ULONG Value);
 NTSTATUS MwRet(MW_ADAPTER *A, PCWSTR Name, NTSTATUS St);
 void MwEnter(MW_ADAPTER *A, PCWSTR Name);

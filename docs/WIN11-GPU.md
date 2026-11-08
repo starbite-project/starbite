@@ -574,6 +574,38 @@ the rail, the guard and the refusal paths. **T13b (needs StarbiteGpu4 in firmwar
 DWM on the Mali through Mesa. Expected first result per wddm-mali-g52: black desktop, then the guard. Logs
 say how far DWM got. Steps for both, with rollback: `build/win/stage/sbwddm-t13/INSTALL.md`.
 
+### 6.9 T13b: DWM on the Mali got to its first Render (2026-11-08 19:34)
+
+`windows-t13b.uefi` (Mali interrupts) + sbwddm full mode + sbumd.dll, with the user present. The Windows logo
+and spinner showed, then a black screen with the spinner for minutes (the login screen normally comes within
+seconds). Forced restart at about 19:38, no bugcheck (`build/win/results/t13b`).
+
+**What the trace shows:**
+- The start: GpuUp 1, S9Interrupts 3, Started 1.
+- Then the full WDDM bring-up, in order: QueryChildRelations, QueryAdapterInfo, CreateDevice, CreateContext,
+  BuildPagingBuffer, QueryDeviceDescriptor (no EDID, as always), RecommendMonitorModes, CofuncModality,
+  GetStandardAllocationDriverData, CreateAllocation, OpenAllocation, DescribeAllocation, CommitVidPn,
+  SetVidPnSourceAddress, SetVidPnSourceVisibility, ControlInterrupt (vsync on), Present, Patch, **Escape,
+  Render**, then DestroyContext and DestroyDevice.
+- No DDI failed after QueryInterface (LastFailedDdi unchanged).
+- The missing Seen_Render / Seen_Escape are **trace artifacts**: upstream's first-call bits were a hash of 64
+  slots, and Fail_Render collides with CommitVidPn, Fail_Escape with QueryChildRelations, SubmitCommand with
+  CreateContext. Nothing after each DDI's first call was logged.
+- The pull also still held T13a's Fail_StartGpu / S9NoInterrupt (the trace key persists across boots).
+
+So it is not known whether the GPU jobs, fences, flips or DWM itself failed.
+
+**T13c (staged, `build/win/stage/sbwddm-t13c/`):**
+- sbwddm: an exact first-call table instead of the hash, the trace key emptied at each AddDevice, and `Live_*`
+  counters (renders, submits, fences submitted/completed, jobs done/failed/timed out, the last JS status and MMU
+  fault with its address, interrupts, resets, flips and flip copies/skips, vsyncs, presents, maps, rejected
+  chains, thermal holds) written each second when they change.
+- sbumd.dll: `tools/win/mesa/sb-patches/0101`. With `C:\ProgramData\Starbite\umdlog\` present, every process
+  loading it logs its stderr there, d3d10umd's debug messages included. With `umdlog\trace`, every driver call
+  is logged too.
+- Before T13c: T13b's own Application/System event logs and WER reports may already name DWM's exit code or a
+  faulting module.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

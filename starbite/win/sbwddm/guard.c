@@ -62,18 +62,49 @@ NTSTATUS S9Start(MW_ADAPTER *A)
 
 static KSTART_ROUTINE GuardThread;
 
+/* T13c: the driver's live counters, logged (Live_<name>) whenever one changed, once a second. T13b's trace
+ * ended at DWM's first Render; what came after (submits, fences, GPU jobs and faults, flips, vsyncs) never
+ * reached the registry. */
+static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
+{
+    const struct { PCWSTR n; ULONG v; } c[] = {
+        { L"Live_Renders", a->Renders }, { L"Live_Presents", a->Presents }, { L"Live_Submits", a->Submits },
+        { L"Live_FenceSubmitted", a->LastSubmittedFence }, { L"Live_FenceCompleted", a->LastCompletedFence },
+        { L"Live_Queued", a->QCount }, { L"Live_JobsDone", a->JobsDone }, { L"Live_JobsFailed", a->JobsFailed },
+        { L"Live_JobsTimedOut", a->JobsTimedOut }, { L"Live_LastJsStatus", a->LastJsStatus },
+        { L"Live_LastFaultStatus", a->LastFaultStatus }, { L"Live_LastFaultAddrLo", (ULONG)a->LastFaultAddress },
+        { L"Live_LastFaultAddrHi", (ULONG)(a->LastFaultAddress >> 32) }, { L"Live_LastMmuFault", a->Gpu.LastMmuFault },
+        { L"Live_Irqs", a->Gpu.Irqs }, { L"Live_GpuResets", a->Gpu.Resets }, { L"Live_GpuUp", a->GpuUp },
+        { L"Live_Flips", a->Flips }, { L"Live_FlipCopies", a->FlipCopies }, { L"Live_FlipCopySkips", a->FlipCopySkips },
+        { L"Live_Vsyncs", a->Vsyncs }, { L"Live_PresentBlts", a->PresentBlts }, { L"Live_PresentFills", a->PresentFills },
+        { L"Live_PresentSkips", a->PresentSkips }, { L"Live_Maps", a->Maps }, { L"Live_MapFails", a->MapFails },
+        { L"Live_Unmaps", a->Unmaps }, { L"Live_Allocations", a->Allocations }, { L"Live_Patches", a->Patches },
+        { L"Live_JcRejected", a->JcRejected }, { L"Live_ThermalHolds", a->ThermalHolds },
+        { L"Live_ThermalLevel", a->ThermalLevel },
+    };
+    for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]) && i < 40; i++)
+        if (c[i].v != Prev[i] || Prev[40] == 0) {
+            Prev[i] = c[i].v;
+            MwLog(a, c[i].n, c[i].v);
+        }
+    Prev[40] = 1;
+}
+
 static VOID GuardThread(PVOID Ctx)
 {
     MW_ADAPTER *a = (MW_ADAPTER *)Ctx;
     ULONG64 t0 = KeQueryInterruptTime();
     LARGE_INTEGER t;
     BOOLEAN hold = FALSE;
+    ULONG prev[41] = { 0 }, secs = 0;
 
     for (;;) {
         ULONG level, gate;
         t.QuadPart = -10000LL * 1000;
         if (KeWaitForSingleObject(&a->GuardStop, Executive, KernelMode, FALSE, &t) != STATUS_TIMEOUT)
             break;
+        LiveCounters(a, prev);
+        MwLog(a, L"Live_Seconds", ++secs);
         gate = S9Gate(&a->S9, &level);
         a->ThermalLevel = gate ? 10 + gate : level;
         if ((gate != 0 || level >= SBTH_STOP) != hold) {
@@ -151,5 +182,7 @@ NTSTATUS S9DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath
     }
     S9PutDword(NULL, L"FullGuardBoots", guard + 1);   /* counted now, cleared when healthy */
     State(L"WddmMode", 1);
+    State(L"FullRefused", 0);             /* no stale refusal from an earlier boot */
+    State(L"FullHealthy", 0);
     return DxgkInitialize(DriverObject, RegistryPath, Full);
 }
