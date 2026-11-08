@@ -203,10 +203,65 @@ how much S-Boot already put there, and whether the AP can store into it.
   Dead-man: the catalog watchdog (30 s, fed only between lines). A hang in the EL3 call or a store resets into the
   loader's crash screen, and the last `probe:` line in pmsg names the step.
 
-## 6. Next stages (not started)
+### Result T3 (2026-11-08 20:13, image 1a4c529, `build/test-boots/modemprobe-map-2013/loader-pmsg.txt`)
+0 faults. TOC raw, BOOT raw and MAIN head raw MATCH RADIO. MAIN's tail at its raw offset, and VSS at both
+places, are mostly zero or other data, not RADIO's. So S-Boot copies only a prefix of RADIO, raw, from offset 0,
+at least 0x12040 bytes: TOC + BOOT + the start of MAIN, enough for the MEM0 map. Nothing is at cbd's places.
+The non-zero words in the VSS range are leftover DRAM (the IPC region also read 0xffcbffdf in T2 and 0 in T3).
+**The TOC's crc fields are zlib CRC-32 of each section:** BOOT in the carve-out = 0x73672490 = the TOC's BOOT
+crc. Stage 3 can verify every section it loads (MAIN 0xa98496b5, VSS 0x5e715799 on this phone's RADIO).
 
-3. CP boot: copy BOOT/MAIN/VSS + NV from RAM copies (RADIO, EFS `nv_data.bin`, read once) per `sbm_plan`, the
-   security SMC (mode 2 probe, then mode 0 with boot/main sizes), AP2CP_CFG release. User present.
+## 6. Stage 3: load the CP image and pass EL3's check (plan, 2026-11-08)
+
+Android's order, from this phone's log (`20261108-091233-android-logged/dmesg-1.txt:2159-2296`) and
+`link_device_shmem.c` `shmem_security_request`, `modem_ctrl_ss310ap.c` `ss310ap_on`:
+
+1. SSS clock on: `SMC 0x82001011, 0, 0, 0`.
+2. `cal_cp_init` (only when RESET_SEQUENCER_STATUS is 0, as T1 found): CP_CTRL_NS |= bit 1 (CP_PWRON) and
+   CP_CTRL_S |= bit 3 (CP_START), each as EL3 read-modify-write (`SMC 0x82000700, 3 READ_CTRL / 4 WRITE_CTRL,
+   value-or-half, reg`). Delay 1024 us, then wait RESET_SEQUENCER_STATUS[2:0] == 5 and GICD ISPENDR
+   (0x10101238) bit 28. Android logged CP_CTRL_NS 0x002016a2, CP_CTRL_S 0x8, RESET_SEQ 5 within 1 ms.
+3. The security call, mode 2 (CP_BOOT_RE_INIT): `SMC 0x82000700, 2, 0, 0` -> 0x0b CP_NOT_WORKING, which is
+   expected and harmless. SSS clock off: `SMC 0x82001011, 1, 0, 0`.
+4. Copy: BOOT (RADIO 0x200, 0x1e40) to + 0, MAIN (0x2040, 0x23d8ea0) to + 0x10000, VSS (0x23daee0, 0x57cbf0)
+   to + 0x7900000, NV (EFS `nv_data.bin`, 1 MiB) to + 0x4900000. These are `sbm_plan_build`'s numbers. S-Boot's
+   raw prefix (TOC at + 0) is overwritten, as on Android.
+5. SSS clock on; the security call mode 0: `SMC 0x82000700, 0 | 0xF0000000, 0x1e40, 0x23d8ea0` ->
+   0x00 CP_NO_ERROR after about 127 ms (EL3 checks the signature). SSS clock off. cbd moves the calling thread
+   off CPU 0 for both security calls (cpu_set 0xff -> 0xfe): **unknown #8**, whether EL3 requires that.
+6. Power on (`ss310ap_on`): all mailbox words 0; ISSR2 = sys_rev 174 << 6 | ds_det 1 << 14 (0x6b80), then
+   pda_active (bit 5); **AP2CP_CFG (0x14820000) = 1, the CP CPU starts**; wait 300 ms.
+7. Then the link (stage 4): poll ISSR3 cp_status; magic "BOOT" at IPC + 0; the UDL exchange; INIT_START ->
+   build the SBD layout (`sbm_sbd_init`) -> PIF_INIT_DONE; PHONE_START -> INIT_END once FMT and RFS are open
+   (RFS server needed: stage 5).
+
+### Phone steps (each is a new image key, each with the user present the first time)
+
+| step | what | changes | dead-man / way back |
+|---|---|---|---|
+| **T5 load-check** (`modemload-dry`) | read RADIO's BOOT/MAIN/VSS into RAM and check each against its TOC CRC-32; read EFS read-only (ext4: the Wi-Fi core's `ext4.c` reader, shared), take `nv_data.bin` (1 MiB) | RAM only. Nothing in the carve-out, no SMC. | unattended-safe; watchdog |
+| **T6 EL3 gate** (`modemload-sec`) | T5, then steps 1-5 above: cp_init, mode 2, the store test again (does mode 2 change it?), the copy with a read-back CRC of each section from DRAM, mode 0. **It stops before step 6**: the CP CPU is never released. | PMU CP_CTRL via EL3 (the same two bits Android sets), carve-out DRAM | watchdog 30 s (fed between steps only); EL3 hang -> crash screen. Afterwards the user boots One UI once and checks that the modem still comes up (cbd's log shows ONLINE): Android handles RESET_SEQ 5 ("CP first Init" is skipped). |
+| **T7 first breath** (`modemload-run`) | T6, then step 6 and stage 4's first half: wait for cp_status, set BOOT magic, the UDL exchange, then wait for the CP's INIT_START (15 s at most) and log it. Then **park the CP** with `cal_cp_reset_assert` (PMU *_SYS_PWR_REG writes + CP_CTRL_NS bit 2 via EL3 + CENTRAL_SEQ bit 16 = 0, wait status 0x80). The CP runs for seconds only, never reaches PHONE_START / network search, no RFS. | + AP2CP_CFG, mailbox words, PMU reset regs | park on every exit (timeout, Power, done); watchdog; a crash before parking -> watchdog reset (system reset takes the CP down: confirm on T7 by RESET_SEQ in the next boot's T1) |
+
+What changes after T4: if the store test says **writable**, the plan stands. If **write-ignored** or
+**store-faulted**, T6 runs the store test after mode 2 and copies only if the window has opened. If it is still
+closed, stage 3 waits for a different EL3 mode (research) and nothing is copied.
+
+Rules kept through stage 3: RADIO, EFS and CPEFS are only read. NV goes in from the RAM copy; the CP's own
+writes (stage 5, RFS) go to RAM. No dialling: the IPC builder's allow-list is unchanged, and stage 3 sends no
+IPC at all. No identifiers in logs: NV is checked by CRC and size only, never printed. The core gets EL3 *write*
+calls only for the two CP_CTRL bits in PMUCAL's tables. The glue keeps an exact-argument allow-list, as it does
+now for the read call.
+
+### Code still to write for stage 3 (host-tested first, as before)
+`sbm_boot.c`: the cp_init / security / power-on / reset-assert sequences as data tables, run through `plat`
+(smc, rd32/wr32 with an address allow-list: PMU 0x30/0x34 through EL3 only, 0x280, 0x1320-0x1338;
+AP2CP_CFG; the mailbox), with a fake PMU + EL3 model in the host test. Also the copy executor for `sbm_plan`,
+with CRC-32 verify against the TOC, and an ext4 read for `nv_data.bin` (shared with starbite/wifi).
+`probe/` gains the modemload keys.
+
+## 7. Later stages (not started)
+
 4. Link: mailbox doorbells + polling, INIT_START → PIF_INIT_DONE → PHONE_START → INIT_END, the ECT clock table.
 5. RFS server on ch 245 against a RAM copy of EFS/CPEFS (CP writes land in RAM only). Without it the CP never
    goes online.
