@@ -970,6 +970,16 @@ the CPU path. sbshare adds a GPU re-sample after the producer's update.
   - the UMD GPU-copies one row of each sampled present's source and logs it (sb-patches/0106);
   - the KMD samples the flip source at the flip itself, and logs its GPU address.
 
+**cycle-t13q-1 (00:52):**
+- **The apps' frames have content:** LogonUI's 1440x2976 surface holds the wallpaper (32/32 non-black), and
+  Explorer shows content too.
+- **Every one of DWM's 51 presents (flips of a primary) is black.**
+- **Cause:** d3d10umd's `_Blt` (DXGI `pfnBlt`) was an upstream stub returning S_OK. DWM composes into
+  non-primary back buffers, and DXGI moves each frame into the primary with pfnBlt before the flip, so the
+  primaries were never written.
+
+**T13r (sb-patches/0107):** `_Blt` as a gallium blit, covering resolve, format conversion and stretch.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

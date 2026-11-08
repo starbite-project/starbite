@@ -1,0 +1,56 @@
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index 96c8be2..475941b 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -332,7 +332,50 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
+ HRESULT APIENTRY
+ _Blt(DXGI_DDI_ARG_BLT *Blt)
+ {
+-   LOG_UNSUPPORTED_ENTRYPOINT();
++   LOG_ENTRYPOINT();
+ 
++   /* Starbite (sbumd, sb-patches/0107, docs/WIN11-GPU.md 6.18): upstream left this a stub that returned S_OK
++    * and did nothing. DXGI moves a composed frame into a swapchain buffer with it: DWM composes into its
++    * non-primary back buffers and DXGI blts each frame into the primary it then flips. With the stub, DWM's
++    * primaries were never written, and every flip showed black (T13q: the LogonUI frames held the wallpaper,
++    * every DWM present 0/32 non-black). Done as a gallium blit: MSAA resolve, format conversion and stretching
++    * as the DDI asks; a rotation other than identity is logged and drawn unrotated. */
++   static unsigned logged;
++   struct pipe_context *pipe = CastPipeDevice(Blt->hDevice);
++   Resource *pDst = CastResource(Blt->hDstResource);
++   Resource *pSrc = CastResource(Blt->hSrcResource);
++   if (!pipe || !pDst || !pSrc || !pDst->resource || !pSrc->resource)
++      return E_INVALIDARG;
++   struct pipe_resource *dst = pDst->resource, *src = pSrc->resource;
++   unsigned dlevels = dst->last_level + 1, slevels = src->last_level + 1;
++   struct pipe_blit_info b;
++   memset(&b, 0, sizeof b);
++   b.src.resource = src;
++   b.src.level = Blt->SrcSubresource % slevels;
++   b.src.format = src->format;
++   u_box_3d(0, 0, Blt->SrcSubresource / slevels, u_minify(src->width0, b.src.level),
++            u_minify(src->height0, b.src.level), 1, &b.src.box);
++   b.dst.resource = dst;
++   b.dst.level = Blt->DstSubresource % dlevels;
++   b.dst.format = dst->format;
++   int l = (int)Blt->DstLeft, t = (int)Blt->DstTop, r = (int)Blt->DstRight, bo = (int)Blt->DstBottom;
++   if (r <= l || bo <= t) {                 /* an empty rectangle: the whole destination */
++      l = 0;
++      t = 0;
++      r = (int)u_minify(dst->width0, b.dst.level);
++      bo = (int)u_minify(dst->height0, b.dst.level);
++   }
++   u_box_3d(l, t, Blt->DstSubresource / dlevels, r - l, bo - t, 1, &b.dst.box);
++   b.mask = util_format_get_mask(dst->format);
++   b.filter = (b.src.box.width != b.dst.box.width || b.src.box.height != b.dst.box.height) ?
++              PIPE_TEX_FILTER_LINEAR : PIPE_TEX_FILTER_NEAREST;
++   pipe->blit(pipe, &b);
++   if (logged < 8 || Blt->Rotate != DXGI_DDI_MODE_ROTATION_IDENTITY) {
++      logged++;
++      DebugPrintf("sbumd: Blt %ux%u fmt %u (alloc 0x%x) -> %ux%u fmt %u (alloc 0x%x) rect %d,%d-%d,%d flags 0x%x "
++                  "rotate %u\n", src->width0, src->height0, src->format, pSrc->sbAllocation, dst->width0,
++                  dst->height0, dst->format, pDst->sbAllocation, l, t, r, bo, Blt->Flags.Value, (unsigned)Blt->Rotate);
++   }
++   malikm_note_count(23);                    /* UmdNote_23: DXGI blts done */
+    return S_OK;
+ }
