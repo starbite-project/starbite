@@ -1,0 +1,82 @@
+;
+; sbwddm.inf - stage 4 (docs/WIN11-GPU.md 6.8): the Galaxy S9's Mali-G72 and display as one WDDM 1.3 driver,
+; with sbdisplay built in as its display-only mode. Binds ACPI\STRB0072 (\_SB.GPU0), the device sbdisplay
+; and sbmali (PnP) bind: only one of them at a time, and sbmali's standalone service must be off.
+;
+; Full mode (Parameters\FullMode = 1) loads sbumd.dll as the user-mode driver: Mesa 26.2.6's d3d10umd with
+; Panfrost (tools/win/mesa, libgallium_d3d10-panfrost.dll renamed), copied to System32. Without it a full
+; adapter fails with code 43 and Windows uses Basic Display (wddm-mali-g52 board runs 1-3). Preemption is
+; turned off system-wide, as viogpu3d and wddm-mali-g52 do: the driver never preempts a DMA buffer.
+; Derived from wddm-mali-g52's maliwddm.inf (GPL-2.0).
+;
+; SPDX-License-Identifier: GPL-2.0-only
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Display
+ClassGuid   = {4D36E968-E325-11CE-BFC1-08002BE10318}
+Provider    = %ProviderName%
+DriverVer   = 11/08/2026,0.4.0.0
+CatalogFile = sbwddm.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+SB_Umd = 11
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+sbwddm.sys = 1
+sbumd.dll = 1
+
+[Manufacturer]
+%ProviderName% = Standard,NTARM64.10.0...16299
+
+[Standard.NTARM64.10.0...16299]
+%SB.DeviceDesc% = SB_Inst,ACPI\STRB0072
+
+[SB_Inst]
+FeatureScore = F8
+CopyFiles = SB_CopyFiles,SB_Umd
+AddReg = SB_Settings
+
+[SB_CopyFiles]
+sbwddm.sys
+
+[SB_Umd]
+sbumd.dll
+
+[SB_Settings]
+HKR,,UserModeDriverName,%REG_MULTI_SZ%,sbumd.dll,sbumd.dll,sbumd.dll,sbumd.dll
+HKR,,InstalledDisplayDrivers,%REG_MULTI_SZ%,sbwddm
+HKLM,"SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Scheduler",EnablePreemption,%REG_DWORD%,0
+
+[SB_Inst.Services]
+AddService = sbwddm,0x00000002,SB_Service
+
+[SB_Service]
+DisplayName    = %SB.SvcDesc%
+ServiceType    = 1 ; SERVICE_KERNEL_DRIVER
+StartType      = 3 ; SERVICE_DEMAND_START
+ErrorControl   = 0 ; SERVICE_ERROR_IGNORE: a failure never stops boot
+ServiceBinary  = %13%\sbwddm.sys
+LoadOrderGroup = Video
+AddReg         = SB_Params
+
+[SB_Params]
+HKR, Parameters, FullMode,      %REG_DWORD%, 0      ; 1 = the WDDM render driver; 0 = sbdisplay (display-only)
+HKR, Parameters, ThermalWaitMs, %REG_DWORD%, 20000  ; how long start-up waits for sbthermal (make it system-start)
+HKR, Parameters, Modes,         %REG_DWORD%, 7      ; display-only mode: as sbdisplay
+HKR, Parameters, DefaultMode,   %REG_DWORD%, 1
+HKR, Parameters, Rotation,      %REG_DWORD%, 1
+
+[Strings]
+ProviderName  = "Starbite"
+DiskName      = "Starbite Mali-G72 WDDM driver"
+SB.DeviceDesc = "Starbite Galaxy S9 Mali-G72 + DECON (WDDM)"
+SB.SvcDesc    = "Starbite Mali-G72 WDDM driver"
+REG_DWORD     = 0x00010001
+REG_MULTI_SZ  = 0x00010000

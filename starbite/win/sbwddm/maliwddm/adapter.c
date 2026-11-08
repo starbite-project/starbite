@@ -10,10 +10,10 @@
 void MwLog(MW_ADAPTER *A, PCWSTR Name, ULONG Value)
 {
     HANDLE key, sub;
-    UNICODE_STRING name, subName = RTL_CONSTANT_STRING(L"maliwddm");
+    UNICODE_STRING name, subName = RTL_CONSTANT_STRING(L"sbwddm");   /* S9 port: our trace key */
     OBJECT_ATTRIBUTES oa;
 
-    DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL, "maliwddm: %ws = 0x%08x\n", Name, Value);
+    DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL, "sbwddm: %ws = 0x%08x\n", Name, Value);
     if (A == NULL || A->Pdo == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL)
         return;
     if (!NT_SUCCESS(IoOpenDeviceRegistryKey(A->Pdo, PLUGPLAY_REGKEY_DEVICE, KEY_WRITE, &key)))
@@ -89,6 +89,8 @@ NTSTATUS MwRet(MW_ADAPTER *A, PCWSTR Name, NTSTATUS St)
 
 /* ---- PnP ---- */
 
+static void StopGpu(MW_ADAPTER *A);
+
 static NTSTATUS APIENTRY MwAddDevice(IN_CONST_PDEVICE_OBJECT Pdo, OUT_PPVOID Context)
 {
     MW_ADAPTER *a = (MW_ADAPTER *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(MW_ADAPTER), MW_TAG);
@@ -103,7 +105,8 @@ static NTSTATUS APIENTRY MwAddDevice(IN_CONST_PDEVICE_OBJECT Pdo, OUT_PPVOID Con
     return STATUS_SUCCESS;
 }
 
-/* The first memory resource is the GPU's register block. */
+/* S9 port: the Mali's register block among the device's resources (STRB0072 also lists DECON, DPU_DMA and
+ * DSIM; malidod's first-resource rule would map DECON). */
 static NTSTATUS MapGpu(MW_ADAPTER *A)
 {
     DXGK_DEVICE_INFO info;
@@ -115,7 +118,10 @@ static NTSTATUS MapGpu(MW_ADAPTER *A)
         PCM_PARTIAL_RESOURCE_LIST p = &list->List[l].PartialResourceList;
         for (ULONG i = 0; i < p->Count; i++) {
             PCM_PARTIAL_RESOURCE_DESCRIPTOR d = &p->PartialDescriptors[i];
-            if (d->Type == CmResourceTypeMemory && A->Gpu.Regs == NULL) {
+            if (d->Type == CmResourceTypeInterrupt)
+                A->Interrupts++;
+            if (d->Type == CmResourceTypeMemory && A->Gpu.Regs == NULL &&
+                (ULONG64)d->u.Memory.Start.QuadPart == SBM_GPU_PA && d->u.Memory.Length >= SBM_GPU_SIZE) {
                 A->Gpu.RegsLength = d->u.Memory.Length;
                 A->Gpu.Regs = (volatile ULONG *)MmMapIoSpaceEx(d->u.Memory.Start, d->u.Memory.Length,
                                                                PAGE_READWRITE | PAGE_NOCACHE);
@@ -135,21 +141,42 @@ static NTSTATUS APIENTRY MwStartDevice(IN_CONST_PVOID Context, IN_PDXGK_START_IN
     a->Dxgk = *Dxgk;
     MwLog(a, L"Build", MW_BUILD);
     MwLog(a, L"RenderOnly", MW_RENDER_ONLY);
-#if !MW_RENDER_ONLY
-    st = MwDisplayStart(a);
-    if (!NT_SUCCESS(st))
-        return MwRet(a, L"Fail_StartDisplay", st);
-#endif
 
-    /* The GPU is optional to starting: without it the adapter still
-     * displays, and submissions complete without running. */
+    /* S9 port: the GPU first, the display after it. The GPU is NOT optional: without it DWM's surfaces would
+     * never be drawn (a black desktop with no fallback). A refusal here happens before the firmware
+     * framebuffer is taken over, so Windows' Basic Display takes the desktop as it found it, and the guard
+     * makes the next boot sbdisplay. */
     st = MapGpu(a);
+    if (NT_SUCCESS(st))
+        st = S9Init(&a->S9, a->Gpu.Regs, a->Gpu.RegsLength);
+    if (NT_SUCCESS(st))
+        st = S9Start(a);                  /* watchdog alive, G3D domain on, vdd_g3d 950 mV */
     if (NT_SUCCESS(st))
         st = MkMmuInit(&a->Gpu);
     if (NT_SUCCESS(st))
         st = MkGpuInit(&a->Gpu);
     a->GpuUp = NT_SUCCESS(st);
     MwLog(a, L"GpuUp", NT_SUCCESS(st) ? 1 : (ULONG)st);
+    /* Fences complete from the GPU interrupt (and the poll goes through DxgkCbSynchronizeExecution, which
+     * needs one). Without the Mali's interrupt lines (the stage-2 SSDT declares none) work would never
+     * complete: repeated TDRs, then bugcheck 0x116. So after the whole bring-up (logged), refuse. */
+    MwLog(a, L"S9Interrupts", a->Interrupts);
+    if (a->GpuUp && a->Interrupts == 0 && !S9GetDword(L"Parameters", L"AllowNoInterrupt", 0)) {
+        MwLog(a, L"S9NoInterrupt", 1);
+        a->GpuUp = FALSE;
+    }
+    if (!a->GpuUp) {
+        StopGpu(a);
+        return MwRet(a, L"Fail_StartGpu", STATUS_DEVICE_NOT_READY);
+    }
+#if !MW_RENDER_ONLY
+    st = MwDisplayStart(a);
+    if (!NT_SUCCESS(st)) {
+        StopGpu(a);
+        return MwRet(a, L"Fail_StartDisplay", st);
+    }
+#endif
+    S9GuardStart(a);
 
     /* Render-only: no sources and no children, and the firmware framebuffer
      * stays with Basic Display, which keeps the desktop up. */
@@ -161,7 +188,14 @@ static NTSTATUS APIENTRY MwStartDevice(IN_CONST_PVOID Context, IN_PDXGK_START_IN
 
 static void StopGpu(MW_ADAPTER *A)
 {
+    S9GuardStop(A);
     MkGpuStop(&A->Gpu);
+    if (A->Gpu.Regs != NULL && S9DomainOn(&A->S9)) {
+        /* cores off before the rail goes back (sbm_core's order) */
+        sbm_power_off(&A->S9.Io);
+    }
+    S9RailDown(&A->S9);
+    S9Fini(&A->S9);
     MkMmuFree(&A->Gpu);
     if (A->Gpu.Regs != NULL) {
         MmUnmapIoSpace((PVOID)A->Gpu.Regs, A->Gpu.RegsLength);
@@ -604,5 +638,6 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     init.DxgkDdiSystemDisplayEnable = MwSystemDisplayEnable;
     init.DxgkDdiSystemDisplayWrite = MwSystemDisplayWrite;
 
-    return DxgkInitialize(DriverObject, RegistryPath, &init);
+    /* S9 port: full mode or sbdisplay (display-only), chosen by guard.c */
+    return S9DriverEntry(DriverObject, RegistryPath, &init);
 }

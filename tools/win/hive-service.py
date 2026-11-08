@@ -5,11 +5,18 @@
   hive-service.py IN OUT disable NAME          Start = 4 (the service is skipped at boot; files stay)
   hive-service.py IN OUT remove NAME           delete the service key
   hive-service.py IN OUT hiberboot 0|1         Control\\Session Manager\\Power\\HiberbootEnabled (fast startup)
-  hive-service.py IN OUT param NAME VALUE=N [VALUE=N ...]   DWORDs in Services\\NAME\\Parameters (kept others)
+  hive-service.py IN OUT param NAME [--root] VALUE=N [VALUE=N ...]
+                                               DWORDs in Services\\NAME\\Parameters (kept others); --root: in
+                                               Services\\NAME itself (e.g. sbwddm's FullGuardBoots=0)
   hive-service.py IN OUT display-reset 1       delete Control\\GraphicsDrivers\\Configuration and Connectivity:
                                                Windows' saved display layouts, rebuilt at the next boot from the
                                                driver's preferred mode (resolution, orientation and scale return
                                                to their defaults)
+  hive-service.py IN OUT display-bind SERVICE [--umd DLL] [--preemption 0|1]
+                                               bind ACPI\\STRB0072 (the S9's GPU0) to SERVICE: Enum Service, the
+                                               driver key's InstalledDisplayDrivers, and UserModeDriverName =
+                                               DLL x4 with --umd (removed without: display-only drivers have
+                                               none); --preemption sets GraphicsDrivers\\Scheduler\\EnablePreemption
   hive-service.py IN check                     header sanity only (both sequence numbers equal = clean)
 
 IN is never modified; OUT is a new file. Defaults for add: Type 1 (kernel driver), Start 2 (auto: loaded by
@@ -66,13 +73,13 @@ def exists(h, path):
         return False
 
 
-def setvals(h, key, updates):
+def setvals(h, key, updates, remove=()):
     """hivexsh "setval" REPLACES every value of a key, so re-emit the existing ones byte for byte
-    (hex:<type>:..) with UPDATES {name: (type, bytes)} applied on top."""
+    (hex:<type>:..) with UPDATES {name: (type, bytes)} applied on top, and REMOVE left out."""
     vals = []
     if h is not None:
         _, k = h.find(key)
-        vals = [(n, t, d) for n, t, d in h.values(k) if n not in updates]
+        vals = [(n, t, d) for n, t, d in h.values(k) if n not in updates and n not in remove]
     vals += [(n, t, d) for n, (t, d) in updates.items()]
     s = f'cd \\{key}\nsetval {len(vals)}\n'
     for n, t, d in vals:
@@ -86,6 +93,10 @@ def dword(v):
 
 def sz(typ, text):
     return (typ, (text + '\0').encode('utf-16-le'))
+
+
+def multi_sz(items):
+    return (7, b''.join((x + '\0').encode('utf-16-le') for x in items) + '\0'.encode('utf-16-le'))
 
 
 def sha(path):
@@ -161,19 +172,22 @@ def main(a):
         if not exists(h, key):
             raise SystemExit(f'no service {arg}')
         vals = {}
-        for kv in a[4:]:
+        root = '--root' in a[4:]
+        for kv in [x for x in a[4:] if x != '--root']:
             n, _, v = kv.partition('=')
             if not n or not v:
                 raise SystemExit(f'bad VALUE=N: {kv}')
             vals[n] = dword(int(v, 0))
         if not vals:
             raise SystemExit(__doc__)
-        if exists(h, key + '\\Parameters'):
+        if root:
+            s = setvals(h, key, vals)
+        elif exists(h, key + '\\Parameters'):
             s = setvals(h, key + '\\Parameters', vals)
         else:
             s = f'cd \\{key}\nadd Parameters\n' + setvals(None, key + '\\Parameters', vals)
         hivexsh(work, s + 'commit\n')
-        shown = key + '\\Parameters'
+        shown = key if root else key + '\\Parameters'
     elif cmd == 'display-reset':
         gd = f'{cs}\\Control\\GraphicsDrivers'
         s = ''
@@ -184,6 +198,36 @@ def main(a):
             raise SystemExit('nothing to reset (no Configuration/Connectivity key)')
         hivexsh(work, s + 'commit\n')
         shown = gd
+    elif cmd == 'display-bind':
+        enum = f'{cs}\\Enum\\ACPI\\STRB0072\\0'
+        if not exists(h, enum):
+            raise SystemExit('no ACPI\\STRB0072 device in this hive')
+        _, k = h.find(enum)
+        drv = dict((n, d) for n, _, d in h.values(k)).get('Driver')
+        if not drv:
+            raise SystemExit('STRB0072 has no driver key (never installed?)')
+        drv = drv.decode('utf-16-le').rstrip('\0')
+        cls = f'{cs}\\Control\\Class\\{drv}'
+        if not exists(h, cls):
+            raise SystemExit(f'driver key {cls} missing')
+        if not exists(h, f'{cs}\\Services\\{arg}'):
+            raise SystemExit(f'no service {arg}: add it first')
+        s = setvals(h, enum, {'Service': sz(1, arg)})
+        upd = {'InstalledDisplayDrivers': multi_sz([arg])}
+        if '--umd' in opts:
+            upd['UserModeDriverName'] = multi_sz([opts['--umd']] * 4)
+            s += setvals(h, cls, upd)
+        else:
+            s += setvals(h, cls, upd, remove=('UserModeDriverName',))
+        if '--preemption' in opts:
+            sch = f'{cs}\\Control\\GraphicsDrivers\\Scheduler'
+            pre = {'EnablePreemption': dword(int(opts['--preemption']))}
+            if exists(h, sch):
+                s += setvals(h, sch, pre)
+            else:
+                s += f'cd \\{cs}\\Control\\GraphicsDrivers\nadd Scheduler\n' + setvals(None, sch, pre)
+        hivexsh(work, s + 'commit\n')
+        shown = cls
     elif cmd == 'hiberboot':
         key = f'{cs}\\Control\\Session Manager\\Power'
         hivexsh(work, setvals(h, key, {'HiberbootEnabled': dword(int(arg))}) + 'commit\n')
@@ -207,6 +251,9 @@ def main(a):
             os.remove(f)
     check(out)
     h2 = Hive(out)
+    if cmd == 'display-bind':
+        _, k = h2.find(f'{cs}\\Enum\\ACPI\\STRB0072\\0')
+        print('STRB0072 Service =', dict((n, d) for n, _, d in h2.values(k))['Service'].decode('utf-16-le').rstrip('\0'))
     if cmd == 'remove':
         print(f'{arg}: {"STILL THERE" if exists(h2, key) else "removed"}')
     else:

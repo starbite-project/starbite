@@ -13,7 +13,9 @@
 #include <ntddk.h>
 
 /* ---- registers (names and offsets as in Linux panfrost_regs.h) ---- */
-#define PMU_PA                  0x27380000ULL
+/* S9 port: the Exynos 9810's G3D domain status (PMU +0x44, 0xf = on), as sbm_core */
+#define PMU_PA                  0x14064000ULL
+#define PMU_G3D_STATUS          0x44
 #define PMU_ACK0                0x120
 #define PMU_STATUS0             0x230
 
@@ -123,8 +125,10 @@
 
 /* Mali LPAE page table entries. */
 #define MK_PTE_TABLE            0x3ULL
-#define MK_PTE_PAGE             0x2C5ULL    /* block | ATTRINDX 1 | read | write | outer shareable */
-#define MK_PTE_XN               (1ULL << 54)
+/* S9 port: the leaf that ran on this G72 in T5/T8 and under XNU (sbm_core LEGACY_LEAF): ATE, MEMATTR index 0,
+ * read + write, outer shareable. No XN bit in this format on the G72 (never tested; not set). */
+#define MK_PTE_PAGE             0x2C1ULL
+#define MK_PTE_XN               0ULL
 
 typedef struct _GPU_FEATURES {
     ULONG Id, Revision;
@@ -144,6 +148,7 @@ typedef struct _MK_GPU {
     volatile ULONG *Regs;
     SIZE_T RegsLength;
     BOOLEAN Ready;              /* powered and AS0 live: registers may be touched */
+    BOOLEAN DomainKnownOn;      /* S9 port: the PMU said the domain is on (the ISR may mask a stray line) */
     GPU_FEATURES F;
 
     /* AS0's page tables: L0, one L1, up to four L2 (one per GB), L3 on demand.

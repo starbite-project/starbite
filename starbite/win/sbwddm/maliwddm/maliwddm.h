@@ -15,6 +15,8 @@
 #include <ntstrsafe.h>
 #include "../common/maligpu.h"
 #include "maliwddm_abi.h"
+#include "../s9.h"
+#include "../sbx_cmd.h"
 
 #define MW_TAG                  'dwlM'
 #define MW_SEGMENT_ID           1           /* the aperture segment */
@@ -147,6 +149,19 @@ struct _MW_ADAPTER {
     struct _MW_ALLOCATION *ShownAlloc;
     ULONG Vsyncs, Flips, FlipCopies, FlipCopySkips;
 
+    /* S9 port (docs/WIN11-GPU.md 6.8): the platform around the Mali, and the guard thread that watches the
+     * temperature (ThermalHold: fences complete without running while it is set) and marks a boot
+     * healthy once DWM has flipped through us for a while (FullGuardBoots back to 0). */
+    S9_PLAT S9;
+    volatile BOOLEAN ThermalHold;
+    ULONG ThermalLevel, ThermalHolds;
+    HANDLE GuardThread;
+    PKTHREAD GuardThreadObj;
+    KEVENT GuardStop;
+    BOOLEAN Healthy;
+    ULONG Interrupts;
+    ULONG JcRejected;                     /* renders refused: a chain outside the render's allocations */                     /* interrupt resources the device has (the stage-4 SSDT: the Mali's 3) */
+
     /* Counters for the trace. */
     ULONG Renders, Presents, Submits;
     ULONG PagingOps[16];
@@ -220,3 +235,9 @@ BOOLEAN MwJobInterrupt(MW_ADAPTER *A);    /* from the ISR, at DIRQL */
 void MwCommandInit(MW_ADAPTER *A);
 void MwCommandStop(MW_ADAPTER *A);
 void MwArmPoll(MW_ADAPTER *A);
+
+/* S9 port (guard.c) */
+NTSTATUS S9Start(MW_ADAPTER *A);          /* watchdog alive (waits up to Parameters\ThermalWaitMs), domain on, rail up */
+void S9GuardStart(MW_ADAPTER *A);         /* the guard thread: thermal hold, healthy mark */
+void S9GuardStop(MW_ADAPTER *A);
+NTSTATUS S9DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath, PDRIVER_INITIALIZATION_DATA Full);

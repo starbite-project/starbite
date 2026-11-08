@@ -34,6 +34,12 @@ int sbx_alloc_check(const void *priv, sbx_u32 len)
     return 0;
 }
 
+int sbx_head_in(sbx_u64 head, sbx_u64 va, sbx_u64 size)
+{
+    return !(head & 63U) && size >= 64U && size - 1U <= ~va /* [va, va + size) does not wrap */ &&
+           head >= va && head - va <= size - 64U;
+}
+
 int sbx_cmd_parse(const void *buf, sbx_u32 len, const struct sbx_alloc_ref *allocs, sbx_u32 n,
                   struct sbx_job_out *out, sbx_u32 max_out)
 {
@@ -62,7 +68,7 @@ int sbx_cmd_parse(const void *buf, sbx_u32 len, const struct sbx_alloc_ref *allo
             return SBX_E_KIND;
         if (off & 63U)
             return SBX_E_ALIGN;
-        if (a->size < 64U || off > a->size - 64U)
+        if (a->size < 64U || off > a->size - 64U || !sbx_head_in(a->gpu_va + off, a->gpu_va, a->size))
             return SBX_E_RANGE;
         out[i].slot = slot;
         out[i].head = a->gpu_va + off;

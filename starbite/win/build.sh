@@ -25,10 +25,26 @@ LIBS="displib.lib ntstrsafe.lib libcntpr.lib" \
 
 "$win/build.sh" kmdf "$out/sbmali.sys" "$here/sbmali/sbmali.c" "$here/sbmali/sbm_core.c" "$here/sbmali/sbg_core.c" "$here/common/sbw_acpm.c"
 
-cp "$here/sbdisplay/sbdisplay.inf" "$here/sbmali/sbmali.inf" "$out/"
+# Stage 4: maliwddm (wddm-mali-g52) ported to the S9, with sbdisplay built in as its display-only mode.
+w=$here/sbwddm
+LIBS="displib.lib ntstrsafe.lib libcntpr.lib" \
+    "$win/build.sh" wdm "$out/sbwddm.sys" "$w/maliwddm/adapter.c" "$w/maliwddm/command.c" "$w/maliwddm/display.c" \
+    "$w/maliwddm/memory.c" "$w/common/maligpu.c" "$w/s9.c" "$w/guard.c" "$w/sbx_cmd.c" "$w/sd_embed.c" \
+    "$here/sbdisplay/sbdc_core.c" "$here/sbmali/sbm_core.c" "$here/common/sbw_acpm.c"
+# its user-mode driver, when tools/win/mesa/build-mesa.sh panfrost has been run
+umd=$root/build/win/mesa/libgallium_d3d10-panfrost.dll
+[ -f "$umd" ] && cp "$umd" "$out/sbumd.dll"
+
+cp "$here/sbdisplay/sbdisplay.inf" "$here/sbmali/sbmali.inf" "$w/sbwddm.inf" "$out/"
 # no image may branch to itself (T12's first sbmali did: an endless loop in a helper calling itself)
-"$win/check-selfloop.sh" "$out/sbthermal.sys" "$out/sbdisplay.sys" "$out/sbmali.sys"
-"$win/sign.sh" "$out/sbthermal.sys" "$out/sbdisplay.sys" "$out/sbmali.sys"
+"$win/check-selfloop.sh" "$out/sbthermal.sys" "$out/sbdisplay.sys" "$out/sbmali.sys" "$out/sbwddm.sys"
+"$win/sign.sh" "$out/sbthermal.sys" "$out/sbdisplay.sys" "$out/sbmali.sys" "$out/sbwddm.sys"
+if [ -f "$out/sbumd.dll" ]; then
+    "$win/check-selfloop.sh" "$out/sbumd.dll"
+    "$win/sign.sh" "$out/sbumd.dll"
+    python3 "$win/makecat.py" "$out/sbwddm.cat" "$out/sbwddm.inf" "$out/sbwddm.sys" "$out/sbumd.dll" --hwid 'acpi\strb0072'
+    "$win/sign.sh" "$out/sbwddm.cat"
+fi
 for p in sbdisplay sbmali; do
     python3 "$win/makecat.py" "$out/$p.cat" "$out/$p.inf" "$out/$p.sys" --hwid 'acpi\strb0072'
     "$win/sign.sh" "$out/$p.cat"
@@ -36,4 +52,6 @@ done
 # The ACPI device as a self-contained SSDT (iasl in the lima VM, which sees this tree at the same path), for the
 # shared SSDT-installing firmware DXE (owned by the win-usb-host track; one BOOT flash for all SSDTs).
 limactl shell starbite -- bash -c "cd '$out' && cp '$here/acpi/StarbiteGpu.asl' . && iasl -vs -p StarbiteGpu StarbiteGpu.asl >/dev/null && rm StarbiteGpu.asl"
-(cd "$out" && shasum -a 256 sbthermal.sys sbdisplay.sys sbdisplay.inf sbdisplay.cat sbmali.sys sbmali.inf sbmali.cat StarbiteGpu.aml > SHA256SUMS && cat SHA256SUMS)
+# stage 4's variant with the Mali's interrupt lines (sbwddm full mode)
+limactl shell starbite -- bash -c "cd '$out' && cp '$here/acpi/StarbiteGpu4.asl' . && iasl -vs -p StarbiteGpu4 StarbiteGpu4.asl >/dev/null && rm StarbiteGpu4.asl"
+(cd "$out" && shasum -a 256 sbthermal.sys sbdisplay.sys sbdisplay.inf sbdisplay.cat sbmali.sys sbmali.inf sbmali.cat sbwddm.sys sbwddm.inf $(cd "$out" && ls sbumd.dll sbwddm.cat 2>/dev/null) StarbiteGpu.aml StarbiteGpu4.aml > SHA256SUMS && cat SHA256SUMS)

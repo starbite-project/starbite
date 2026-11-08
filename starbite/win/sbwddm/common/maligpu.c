@@ -2,6 +2,9 @@
 /*
  * The Mali-G52 itself: see maligpu.h. Moved out of drivers/malikm/gpu.c
  * unchanged in behaviour, so the WDDM driver can share it.
+ *
+ * S9 port (Starbite, docs/WIN11-GPU.md 6.8): the Exynos 9810's G3D domain check, the G72's GPU_ID, and the
+ * power-up exactly as sbm_core runs it on this phone (no G52 quirks: the G72 has no IDVS group size).
  */
 #include "maligpu.h"
 
@@ -26,16 +29,15 @@ static BOOLEAN PmuSaysGpuIsOn(void)
 {
     PHYSICAL_ADDRESS pa;
     volatile ULONG *pmu;
-    ULONG status, ack;
+    ULONG status;
 
     pa.QuadPart = PMU_PA;
     pmu = (volatile ULONG *)MmMapIoSpaceEx(pa, 0x1000, PAGE_READWRITE | PAGE_NOCACHE);
     if (pmu == NULL)
         return FALSE;
-    status = READ_REGISTER_ULONG((PULONG)((PUCHAR)pmu + PMU_STATUS0));
-    ack = READ_REGISTER_ULONG((PULONG)((PUCHAR)pmu + PMU_ACK0));
+    status = READ_REGISTER_ULONG((PULONG)((PUCHAR)pmu + PMU_G3D_STATUS));
     MmUnmapIoSpace((PVOID)pmu, 0x1000);
-    return ((status >> 25) & 1) == 0 && (ack & 1) == 0;
+    return (status & 0xf) == 0xf;         /* S9: G3D CONFIGURATION/STATUS local power on */
 }
 
 static void ReadFeatures(MK_GPU *Gpu)
@@ -92,11 +94,7 @@ static BOOLEAN GpuPowerOn(MK_GPU *Gpu)
 {
     GPU_FEATURES *f = &Gpu->F;
 
-    /* panfrost_gpu_init_quirks for a G52: no shader quirks, TILER_CONFIG
-     * written back as read, the default IDVS group size. */
-    MK_WR(Gpu, GPU_TILER_CONFIG, MK_RD(Gpu, GPU_TILER_CONFIG));
-    MK_WR(Gpu, GPU_JM_CONFIG, JM_DEFAULT_IDVS_GROUP_SIZE << JM_IDVS_GROUP_SIZE_SHIFT);
-
+    /* S9 port: no G52 quirk writes (the G72 has no IDVS group size); L2, shaders, tiler as sbm_power_on. */
     MK_WR(Gpu, L2_PWRON_LO, (ULONG)f->L2Present);
     if (!Poll(Gpu, L2_READY_LO, 0xffffffff, (ULONG)f->L2Present, 20000))
         return FALSE;
@@ -147,9 +145,10 @@ NTSTATUS MkGpuInit(MK_GPU *Gpu)
     if (!PmuSaysGpuIsOn())
         return STATUS_DEVICE_NOT_READY;
 
+    Gpu->DomainKnownOn = TRUE;            /* S9 port: from here the ISR may touch the registers */
     MK_LOG(Gpu, L"Step", STEP_ID);
     MK_LOG(Gpu, L"GpuId", MK_RD(Gpu, GPU_ID));
-    if ((MK_RD(Gpu, GPU_ID) >> 16) != 0x7402)
+    if ((MK_RD(Gpu, GPU_ID) >> 16) != 0x6221)   /* S9: Mali-G72 */
         return STATUS_DEVICE_CONFIGURATION_ERROR;
 
     MK_LOG(Gpu, L"Step", STEP_RESET);
@@ -401,8 +400,19 @@ BOOLEAN MkIsr(MK_GPU *Gpu)
 {
     ULONG j, m, g;
 
-    if (!Gpu->Ready)
-        return FALSE;
+    if (!Gpu->Ready) {
+        /* S9 port: a level-triggered line that nobody claims storms. Registers mapped and the domain known
+         * on (Ready was set once, or the line fired after bring-up began): mask and clear everything. */
+        if (Gpu->Regs == NULL || !Gpu->DomainKnownOn)
+            return FALSE;
+        MK_WR(Gpu, JOB_INT_MASK, 0);
+        MK_WR(Gpu, MMU_INT_MASK, 0);
+        MK_WR(Gpu, GPU_INT_MASK, 0);
+        MK_WR(Gpu, JOB_INT_CLEAR, 0xffffffff);
+        MK_WR(Gpu, MMU_INT_CLEAR, 0xffffffff);
+        MK_WR(Gpu, GPU_INT_CLEAR, 0xffffffff);
+        return TRUE;
+    }
     j = MK_RD(Gpu, JOB_INT_STAT);
     m = MK_RD(Gpu, MMU_INT_STAT);
     g = MK_RD(Gpu, GPU_INT_STAT);

@@ -123,6 +123,12 @@ int main(void)
     c.j[0].offset = 0x10000 - 64;
     CHECK(parse(&c, len, al, 3, o) == 2 && o[0].head == 0x0200ffc0, "last whole descriptor");
 
+    /* sbx_head_in: the range rule on its own */
+    CHECK(sbx_head_in(0x1000, 0x1000, 0x40) && !sbx_head_in(0x1040, 0x1000, 0x40) && !sbx_head_in(0x1020, 0x1000, 0x1000) &&
+          !sbx_head_in(0xfc0, 0x1000, 0x1000) && sbx_head_in(0x1fc0, 0x1000, 0x1000) && !sbx_head_in(0x2000, 0x1000, 0x1000) &&
+          !sbx_head_in(0x1000, 0x1000, 0x20) && !sbx_head_in(0xffffffffffffffc0ULL, 0xffffffffffff0000ULL, 0x20000),
+          "head range rule: aligned, whole descriptor inside, no wrap");
+
     /* fuzz: random buffers and single-byte mutations of a valid one; must never read past len, and every
      * accepted job must lie inside a buffer allocation */
     {

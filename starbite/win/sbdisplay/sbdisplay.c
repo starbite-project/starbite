@@ -29,6 +29,11 @@
 #include <ntstrsafe.h>
 #include "sbdc_core.h"
 
+/* Built into sbwddm as its display-only mode (sbwddm/sd_embed.c): the same code under another entry name. */
+#ifdef SB_SBDISPLAY_EMBEDDED
+#define DriverEntry SdDriverEntry
+#endif
+
 #define SD_TAG 'dDbS'
 #define SD_GUARD_LIMIT 2
 #define SD_BENCH_DELAY_MS 20000         /* the benchmark runs this long after start (desktop up, sbthermal's boost in) */

@@ -32,4 +32,9 @@ int sbx_alloc_check(const void *priv, sbx_u32 len);
 int sbx_cmd_parse(const void *buf, sbx_u32 len, const struct sbx_alloc_ref *allocs, sbx_u32 n,
                   struct sbx_job_out *out, sbx_u32 max_out);
 
+/* The one rule both ABIs share: a chain head may start in [va, va + size) only 64-byte aligned with a whole
+ * 64-byte descriptor inside, never wrapping. 1 = inside. (sbwddm's maliwddm path checks every MW_COMMAND's
+ * Jc against its DMA buffer's allocation list with this.) */
+int sbx_head_in(sbx_u64 head, sbx_u64 va, sbx_u64 size);
+
 #endif

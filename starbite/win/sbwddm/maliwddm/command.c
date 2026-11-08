@@ -86,6 +86,16 @@ static void PatchEveryAllocation(UINT Allocations, D3DDDI_PATCHLOCATIONLIST **Ou
     }
 }
 
+static BOOLEAN JcInList(const MW_COMMAND *C, const DXGKARG_RENDER *Arg)
+{
+    for (UINT i = 0; i < Arg->AllocationListSize; i++) {
+        const MW_ALLOCATION *a = (const MW_ALLOCATION *)Arg->pAllocationList[i].hDeviceSpecificAllocation;
+        if (a && !(a->Flags & MW_ALLOC_PRIMARY) && sbx_head_in(C->Jc, a->GpuVa, a->Size))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 NTSTATUS APIENTRY MwRender(IN_CONST_HANDLE hContext, DXGKARG_RENDER *Arg)
 {
     MW_CONTEXT *ctx = (MW_CONTEXT *)hContext;
@@ -106,6 +116,12 @@ NTSTATUS APIENTRY MwRender(IN_CONST_HANDLE hContext, DXGKARG_RENDER *Arg)
             MW_COMMAND c = ((const MW_COMMAND *)Arg->pCommand)[i];
             if (c.Type != MW_CMD_JOB || c.Slot > 1 || c.Jc == 0)
                 return STATUS_INVALID_PARAMETER;
+            /* S9 port: the chain must start inside a (non-primary) allocation this render lists, which is also
+             * what VidMm makes resident (patched below): never at an address the UMD merely claims. */
+            if (!JcInList(&c, Arg)) {
+                ctx->Device->Adapter->JcRejected++;
+                return STATUS_INVALID_PARAMETER;
+            }
             priv->Commands[i] = c;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -286,7 +302,9 @@ static void Kick(MW_ADAPTER *A)
     while (!A->Running && A->QCount != 0) {
         MW_SUBMISSION *s = &A->Queue[A->QHead];
 
-        if (!A->GpuUp || s->Next >= s->Count) {
+        /* S9 port: while the watchdog says Stop/Critical, or is silent, work completes without running
+         * (frames are dropped; the GPU stays idle until it is cool again). */
+        if (!A->GpuUp || A->ThermalHold || s->Next >= s->Count) {
             NotifyCompleted(A, s->FenceId);
             A->QHead = (A->QHead + 1) % MW_QUEUE_DEPTH;
             A->QCount--;

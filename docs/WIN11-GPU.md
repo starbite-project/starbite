@@ -487,6 +487,55 @@ Disk: the VM work tree is about 1.3 GB (src 504 MB, build-panfrost 161 MB, LLVM 
 were cleaned after copying the outputs out. The pristine extract `~/sbmesa/mesa-26.2.6` (392 MB) is
 redundant and can go.
 
+### 6.8 sbwddm: maliwddm ported to the S9 (built 2026-11-08, compile-checked; T13 staged)
+
+**Base:** wddm-mali-g52's `maliwddm`, a WDDM 1.3 full driver (render + display) with which Mesa's Panfrost,
+loaded by the D3D runtime as the hardware UMD, drew a D3D11 triangle on their Mali-G52 (their M5.2 c2). DWM
+was not reached there. Copied verbatim (commit ff38591, `starbite/win/sbwddm/maliwddm`, `common/`, GPL-2.0),
+then ported. Its user↔kernel ABI (`maliwddm_abi.h`: allocation private data, `MW_COMMAND` job chains,
+escapes for GPU info and allocation GPU addresses) is kept as it is. **So the Mesa DLL of §6.7 is the UMD
+unchanged**: g52's shim finds the adapter by its GPU-info escape. sbx (§6.5) remains our stricter ABI for later;
+its rule is applied now on the kernel side (below).
+
+**The S9 port:**
+- **Hardware layer** (`common/maligpu.c`): G3D domain check (PMU +0x44), GPU_ID 0x6221, power-up as sbm_core
+  (no G52 quirks: no IDVS group size on the G72), the leaf 0x2C1 that ran on this G72 in T5/T8 and under
+  XNU (not their 0x2C5 + XN). Legacy table format, as T8 run 1. A stray level interrupt before bring-up is
+  masked and cleared.
+- **Platform** (`s9.c`): sbmali's accessors, sbthermal's gate and ACPM lock. vdd_g3d to 950 mV before the
+  GPU, back on stop. The clock stays at 260 MHz (no DVFS yet).
+- **Start order:** the GPU first (watchdog alive within `ThermalWaitMs`, domain on, rail, MMU, GPU), the
+  display after. **The GPU is not optional** (upstream allowed it): a failed bring-up refuses the start
+  before the firmware framebuffer is taken, so Basic Display keeps the desktop. **No interrupt lines** (the
+  stage-2 SSDT has none) refuse the start after a full, logged bring-up: without them fences never complete
+  (TDRs, then bugcheck 0x116).
+- **Jobs** (`command.c`): every `MW_COMMAND` chain must start inside a non-primary allocation of that
+  render's allocation list (`sbx_head_in`: 64-byte aligned, a whole descriptor inside, no wrap;
+  host-tested). Upstream accepted any address. While the watchdog says Stop/Critical, or is silent, fences
+  complete without running (dropped frames).
+- **Modes and guard** (`guard.c`, `sd_embed.c`): one binary with **sbdisplay built in**. Full mode only with
+  `Parameters\FullMode` = 1, no kill file `\SystemRoot\Starbite\sbwddm.full.off`, and `FullGuardBoots` = 0.
+  The boot is counted at once, and cleared only when healthy: 60 s after start, with ≥ 30 flips/blts and
+  ≥ 30 GPU jobs done. Otherwise the next boot is display-only (= sbdisplay, today's desktop). That is the
+  answer to "no WARP fallback" (§6.3).
+- **Interrupts for full mode:** `starbite/win/acpi/StarbiteGpu4.asl` (table revision 4) adds the Mali's lines
+  (vendor DT: JOB SPI 282 = GSIV 314, MMU 281 = 313, GPU 283 = 315, level). It is installed by the shared
+  SSDT firmware DXE (another track's BOOT flash).
+- **Packaging:** `starbite/win/build.sh` builds sbwddm.sys (89 KB, /W4 clean, no self-branches), signs it with
+  sbumd.dll (= §6.7's Panfrost DLL) and makes sbwddm.cat. `tools/win/hive-service.py display-bind SERVICE
+  [--umd DLL] [--preemption 0|1]` switches STRB0072 between sbwddm and sbdisplay offline (Enum Service,
+  InstalledDisplayDrivers, UserModeDriverName). `param NAME --root` resets FullGuardBoots. Install and
+  rollback were tested on a copy of the latest hive.
+
+**T13a (no firmware change, safe): full mode's bring-up under WDDM.** sbwddm bound with FullMode = 1 on the
+stage-2 SSDT: the whole GPU bring-up runs under dxgkrnl and is logged (Enum\ACPI\STRB0072\0\Device
+Parameters\sbwddm). Then the start is refused for want of interrupts, and that boot runs Basic Display.
+The next boot is display-only (State: WddmMode 0, FullRefused 1) = today's desktop. Proves: dxgkrnl accepts
+the full DDI table (DriverEntry, AddDevice, StartDevice), the G72 comes up under WDDM with the watchdog and
+the rail, the guard and the refusal paths. **T13b (needs StarbiteGpu4 in firmware):** full mode for real,
+DWM on the Mali through Mesa. Expected first result per wddm-mali-g52: black desktop, then the guard. Logs
+say how far DWM got. Steps for both, with rollback: `build/win/stage/sbwddm-t13/INSTALL.md`.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
@@ -879,6 +928,8 @@ To do: 200 runs per format (Runs 200 or the value deleted) for the page-table co
 | T7 | 2x scaled desktop (sbdisplay, copy mode) | smoother desktop (4x fewer pixels for WARP/DWM); Desktop Duplication on our display-only driver | a new display driver may black-screen (§4.3) |
 | T8 | sbmali v2 as a standalone service (`hive-service.py add sbmali`, next to sbdisplay): the GPU clock and a real draw. ACPM DVFS domain 4 to 572 MHz (BUCK6 rewritten after it), XNU's Mesa-built triangle (tiler + vertex + fragment, `xnu/src/starlte_gpu_tri.h`, proven on this phone under iOS) into a private buffer checked pixel by pixel, 200 runs per table format with clear + triangle, temperatures throughout | the clock path, the tiler, shaders, and the legacy-versus-AArch64 decision on a real workload | sustained GPU load for ~1 min at 572 MHz: the watchdog throttles (338 MHz at 70 °C, 260 at 80, stop at 90); otherwise as T5 |
 | T12 | sbmali + the stage-4 scheduler (§6.4): 100 rounds of queued chains + the triangle on scattered pages, one deliberate MMU fault and the recovery | the kernel half of stage 4 on the real GPU, fault recovery on hardware | as T8; the fault is the kind Panfrost recovers from daily |
+| T13a | sbwddm full mode on the stage-2 SSDT (§6.8): bring-up under WDDM, then a logged refusal (no interrupts) | dxgkrnl accepts the full driver; the G72 under WDDM; guard and fallback | that boot runs Basic Display (slower); then sbdisplay mode |
+| T13b | sbwddm full mode with StarbiteGpu4 (Mali interrupts) + sbumd.dll | DWM on the Mali, or how far it gets | black desktop likely first: the guard returns sbdisplay on the next boot |
 | T11 | Mesa on Windows without WDDM (wddm-mali-g52's M3/M4 shape): Mesa 26.2 + their patches cross-built for ARM64, Panfrost reaching sbmali through a Panfrost-style IOCTL interface (CREATE_BO, SUBMIT, WAIT_BO, ...), a D3D11 test program using Mesa's d3d10umd as a software driver | D3D11 rendered by the Mali under Windows | a user-mode program has to be started (the user taps it; services running cmd.exe crash on this Windows) |
 | 4a | sbwddm skeleton (WDDM 1.3, display half = sbdisplay incl. 2x scaling) | Windows accepts our full driver | black desktop possible (wddm-mali-g52 run 6) |
 
