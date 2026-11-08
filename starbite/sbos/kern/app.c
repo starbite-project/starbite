@@ -490,6 +490,11 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         sb_log(arg[1] ? "settings: Manual's 3.5 A battery-current stop: on" :
                         "settings: Manual's 3.5 A battery-current stop: OFF (the user's choice)");
         return 0;
+    case SET_HEAT_RESERVE_ONCE:
+        heat_reserve_override = arg[1] != 0;
+        sb_log(heat_reserve_override ? "settings: the next full-heat session without the call / SOS reserve (once)" :
+                                       "settings: the reserve override cancelled");
+        return 0;
     case SET_PANEL_DUMP:
         return panel_dump() ? 0 : SBOS_EAGAIN;
     case SET_LED_FULL:

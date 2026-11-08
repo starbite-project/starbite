@@ -316,7 +316,7 @@ void app_event(const struct sbos_event *ev)
         if (ev->id == 18) {
             struct sbos_heat h;
             heat_status(&h);
-            setting_set(SET_HEAT_RESERVE, 0);   /* the explicit override (a hold) */
+            setting_set(SET_HEAT_RESERVE_ONCE, 1);  /* 1.0-rc2: the override for this one session only */
             heat_request(h.level >= HEAT_EXTREME ? h.level : HEAT_EXTREME, 0);
         }
         show();

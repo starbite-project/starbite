@@ -26,6 +26,7 @@ const struct heat_limits heat_default_limits = {
     .ext_start_bat_max_c10 = 500,
     .stop_pct = 15,
     .blind_ms = 3000,
+    .gauge_blind_ms = 10000,
     .stuck_ms = 60000,
     .window_ms = 300000,
     .step_ms = 1000,
@@ -154,7 +155,7 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
     c->a55_khz = c->cold ? A55_COLD : flat_a55(c);
     c->m3_khz = 0;
     c->rest_mv = in->mv;
-    c->t_start = c->t_step = c->last_bat_ok = c->last_soc_ok = in->now;
+    c->t_start = c->t_step = c->last_bat_ok = c->last_soc_ok = c->last_gauge_ok = in->now;
     c->t_end = flat ? ~(uint64_t)0 : in->now + (uint64_t)minutes * 60000U;    /* flat out: until the user stops */
     c->t_ramp = 0;
     c->last_raw = in->bat_raw;
@@ -186,6 +187,13 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
     }
     if (now - c->last_soc_ok >= L->blind_ms) {
         stop(c, HEAT_ST_STOPPED, "Lost the processor temperature");
+        return;
+    }
+    /* 1.0-rc2 (review): the charge, voltage and current stops need the fuel gauge: without it for 10 s, stop */
+    if (in->gauge_ok)
+        c->last_gauge_ok = now;
+    if (now - c->last_gauge_ok >= L->gauge_blind_ms) {
+        stop(c, HEAT_ST_STOPPED, "Lost the battery's charge and current reading");
         return;
     }
     /* Extreme / Manual / Keep warm (0.6.1, 0.6.2): no software limits but the battery's 55 C (its fire safety), the

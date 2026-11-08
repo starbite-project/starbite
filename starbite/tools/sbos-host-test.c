@@ -400,6 +400,17 @@ static void t_heater(void)
     in.trip_armed = 0;
     run(&c, &in, 0, 1000, 0);
     CHECK(stopped_with(&c, HEAT_ST_STOPPED, "trip"), "Extreme stops if the hardware trip reads unarmed (\"%s\")", c.why);
+    /* 1.0-rc2: a lost fuel gauge stops heat after 10 s (it holds the reserve, current and voltage stops) */
+    for (int lv = HEAT_HIGH; lv <= HEAT_KEEPWARM; lv += HEAT_EXTREME - HEAT_HIGH) {
+        heat_ctl_init(&c, 0);
+        in = base_in(0); in.bat_c10 = 50; in.usb_c10 = 50; in.chg_c10 = 50;
+        heat_ctl_request(&c, lv, 30, &in);
+        in.gauge_ok = 0;
+        run(&c, &in, 0, 9000, 0);
+        CHECK(c.state != HEAT_ST_STOPPED, "level %d: a 9 s gauge gap is tolerated", lv);
+        run(&c, &in, 9250, 2000, 0);
+        CHECK(stopped_with(&c, HEAT_ST_STOPPED, "charge and current"), "level %d: a lost gauge stops heat (\"%s\")", lv, c.why);
+    }
     in = base_in(0); in.pct = 15; refuse(in, HEAT_EXTREME, "15 % (the reserve) for Extreme");
     in = base_in(0); in.pct = 16;
     heat_ctl_init(&c, 0);

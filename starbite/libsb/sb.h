@@ -162,6 +162,17 @@ void sb_pmsg_put(const char *s);                             /* raw, no prefix, 
 #define SB_K_POWER 8U
 unsigned sb_keys(void);
 void sb_keys_release_wait(void);
+/* 1.0-rc2: wait while keys(1) is nonzero, at most max_ms in step_ms steps (a stuck key never blocks a power-off):
+ * 1 released, 0 timed out. Pure (the unit test drives it). */
+static inline int sb_wait_released(unsigned (*keys)(void), void (*delay_ms)(unsigned), unsigned step_ms, unsigned max_ms)
+{
+    for (unsigned t = 0; keys(); t += step_ms) {
+        if (t >= max_ms)
+            return 0;
+        delay_ms(step_ms);
+    }
+    return 1;
+}
 
 /* ---- reset, power, boot-next ------------------------------------------------------------------- */
 

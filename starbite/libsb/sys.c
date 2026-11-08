@@ -86,7 +86,8 @@ void sb_power_off(void)
     volatile uint32_t *ps = (volatile uint32_t *)(SB_PMU + 0x330c);
     sb_log("power off (PS_HOLD low)");
     sb_touch_clear();
-    sb_keys_release_wait();
+    if (!sb_wait_released(sb_keys, sb_mdelay, 20, 5000))   /* 1.0-rc2 (review): a stuck key never blocks the power-off */
+        sb_log("power off: a key still reads pressed after 5 s: going ahead");
     sb_mdelay(300);
     __asm__ volatile("dmb oshst" : : : "memory");
     *ps = *ps & ~0x100U;

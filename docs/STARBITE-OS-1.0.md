@@ -1,10 +1,23 @@
-# Starbite OS 1.0-rc1: release note (2026-11-08)
+# Starbite OS 1.0-rc2: release note (2026-11-08)
 
 Starbite OS is the Galaxy S9's (SM-G960F, Exynos 9810) own small system: an emergency phone that boots in a
 fraction of a second after the loader, with a light, a heater, an alarm, a medical card, Wi-Fi, a clock and the
 battery, in a normal-mode phone shell with an Emergency Mode one switch away. It runs bare on libsb (no Linux),
 from RAM; it writes only its own save slot. Guide: `docs/STARBITE-OS-GUIDE.md`; design and tests:
 `docs/STARBITE-OS.md` (12.13 .. 12.19 for 0.6 .. 1.0); the plan after 1.0: `docs/STARBITE-OS-PLAN-0.6-0.9.md`.
+
+## rc2: fixes from an independent safety review of rc1
+
+1. A fuel gauge that stops answering mid-heat stopped none of the charge / current / voltage stops (they were
+   skipped without a reading): heat now stops after 10 s without a gauge reading (every level; host-tested).
+2. A stop saved the session record (UFS, FUA + cache flush, retries) before turning the hardware off: now the
+   cores, the GPU, its voltage, the clocks, the panel boost and the LED go off first; the record is saved after,
+   deferred (`sbos-heat-test.sh` checks the order). The power menu's switch-off saves it explicitly.
+3. The power-off waited without a limit for every key to be released: a stuck key blocked it (also the 3 %
+   switch-off). Now at most 5 s, then it goes ahead (logged; unit-tested).
+4. Manual's GPU step (598 MHz) carried over into High's GPU share: every non-Manual start resets it to 572 MHz.
+5. The "go on below the reserve" hold turned the reserve off for every later session: it now overrides the next
+   session only, and that session's confirmation and screen say the reserve is off.
 
 ## What works
 
@@ -87,19 +100,19 @@ Wi-Fi core, being built by the iOS 16 cellular session). The 1.0 seams for that:
 
 ## Install (one step: the store payload)
 
-Files (`build/store/`): `starbite-os-1.0-rc1.img` (the OS) and `starbite-os-1.0-rc1-selftest.img` (the self test),
+Files (`build/store/`): `starbite-os-1.0-rc2.img` (the OS) and `starbite-os-1.0-rc2-selftest.img` (the self test),
 each with a `.sha256`. The build is reproducible (`starbite/sbos/build.sh --repro` gives the same sha256).
 
-1. The OS store (UFS) entry `starbite-os.img` = `starbite-os-1.0-rc1.img`, keeping the volatile `sbos-state`
+1. The OS store (UFS) entry `starbite-os.img` = `starbite-os-1.0-rc2.img`, keeping the volatile `sbos-state`
    entry (1 MiB, the save slot; made once by `sbstore2.py build --volatile sbos-state=1048576`). For example, from a
-   pulled store: `tools/store/sbstore2.py build --import store.img --volatile sbos-state=1048576 ... starbite-os.img=build/store/starbite-os-1.0-rc1.img`
+   pulled store: `tools/store/sbstore2.py build --import store.img --volatile sbos-state=1048576 ... starbite-os.img=build/store/starbite-os-1.0-rc2.img`
    (as for 0.6.3, T14), then write the store as usual.
 2. The catalog entry (catalog-live.toml), unchanged except the version line:
    ```toml
    [[entry]]
    key = "starbite-os"
    name = "Starbite OS"
-   version = "1.0-rc1 · heat, light, alarm, card, Wi-Fi"
+   version = "1.0-rc2 · heat, light, alarm, card, Wi-Fi"
    category = "starbite"
    method = "bare"
    tag = "beta"

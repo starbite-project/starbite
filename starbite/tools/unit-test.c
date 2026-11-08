@@ -839,6 +839,19 @@ static void test_input(void)
     CHECK(next_event(50) == EV_NONE, "queue empty");
 }
 
+/* 1.0-rc2: the power-off's bounded key wait (sb_wait_released) */
+static unsigned fake_keys_left, fake_slept;
+static unsigned fake_keys(void) { return fake_keys_left ? (fake_keys_left--, 1U) : 0U; }
+static unsigned stuck_keys(void) { return 1U; }
+static void fake_delay(unsigned ms) { fake_slept += ms; }
+static void test_keywait(void)
+{
+    fake_keys_left = 3, fake_slept = 0;
+    CHECK(sb_wait_released(fake_keys, fake_delay, 20, 5000) == 1 && fake_slept == 60, "keys released after 3 polls");
+    fake_slept = 0;
+    CHECK(sb_wait_released(stuck_keys, fake_delay, 20, 5000) == 0 && fake_slept == 5000, "a stuck key: gives up after 5 s");
+}
+
 int main(void)
 {
     setvbuf(stdout, 0, _IOLBF, 0);
@@ -852,6 +865,7 @@ int main(void)
     test_filter();
     test_mali();
     test_input();
+    test_keywait();
     printf("unit tests: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

@@ -528,8 +528,10 @@ void power_off_now(void)
 {
     torch_set(0);
     wifi_power(0);
-    if (heater_running_ui())
-        heater_stop_all("Switching off");
+    if (heater_running_ui()) {
+        heater_stop_all("Switching off");   /* the hardware off first */
+        settings_save_now();                /* 1.0-rc2: then the heat record ("stopped"), before the power goes */
+    }
     sb_mdelay(200);
     sb_power_off();
     /* still here: a cable keeps the PMIC on. Stay on, screen off. */

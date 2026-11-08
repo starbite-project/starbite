@@ -509,8 +509,7 @@ static void extreme_extras(int on)
 
 static void restore_and_check(void)
 {
-    if (heat_rec.running)
-        record(&last_in, 0);                /* the stop, with its reason */
+    int was_recording = heat_rec.running != 0;
     extreme_extras(0);
     ext_led_used = 0;                       /* a new session may light it again */
     gpu_heat_session = 0;
@@ -546,6 +545,8 @@ static void restore_and_check(void)
         parked_logged[w] = 0;
     sb_logf("heater: stopped: ", ctl.why[0] ? ctl.why : "?");
     run_summary();
+    if (was_recording)
+        record(&last_in, 0);                /* 1.0-rc2 (review): the stop's record after the hardware is off */
 }
 
 /* every worker core must be off within 1.5 s of a stop */
@@ -692,6 +693,8 @@ static void start_now(void)
         sb_strcpy(ctl.why, sizeof(ctl.why), "Still stopping the last session");
         return;
     }
+    if (pending_level != HEAT_MANUAL)
+        gpuheat_khz = 572000U;              /* 1.0-rc2 (review): Manual's GPU step never carries over */
     if (heat_ctl_request(&ctl, pending_level, pending_minutes, &in) == 0) {
 #ifndef SB_HOST
         __asm__ volatile("msr fpcr, xzr" ::: "memory");   /* the reference in the workers' FP mode */
@@ -735,6 +738,7 @@ static void start_now(void)
 uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;
 /* 0.6.2: the call / SOS reserve for Extreme / Manual / Keep warm (0 = overridden), Keep warm's battery target */
 int heat_reserve_pct = 15, heat_target_c10 = 200, heat_no_current_stop;
+int heat_reserve_override;                  /* 1.0-rc2 (review): the hold overrides the reserve for the next session only */
 int heat_soc_stop_c10;                      /* 0.6.3: Manual's SoC stop (0 off: the user's default) */
 struct heat_record heat_rec, heat_last;
 int heat_last_unclean;
@@ -762,10 +766,7 @@ static void record(const struct heat_in *in, int running)
     sb_strcpy(heat_rec.why, sizeof(heat_rec.why), ctl.why);
     if (!running || sb_ms() - rec_saved_at >= 30000U) {
         rec_saved_at = sb_ms();
-        if (running)
-            settings_changed();             /* the slot's save (at most one write in 10 s) */
-        else
-            settings_save_now();
+        settings_changed();                 /* the slot's save, later (at most one write in 10 s; never in a stop's way) */
     }
 }
 #define FLAT_MA 1900                        /* the 0.6 tour's full-heat draw (1.8 A), for the estimates */
@@ -780,7 +781,8 @@ static void extreme_confirm_done(int ok)
     }
     confirmed = 1;
     K.heat_confirmed = 1;
-    ctl.reserve_pct = heat_reserve_pct;
+    ctl.reserve_pct = heat_reserve_override ? 0 : heat_reserve_pct;
+    heat_reserve_override = 0;              /* used up by this start (a refusal asks again) */
     ctl.target_c10 = heat_target_c10;
     ctl.no_current_stop = pending_level == HEAT_MANUAL && heat_no_current_stop;
     ctl.soc_stop_c10 = pending_level == HEAT_MANUAL ? heat_soc_stop_c10 : 0;
@@ -849,17 +851,20 @@ int heater_request(int level, int minutes)
         pending_minutes = minutes;
         ctl.state = HEAT_ST_CONFIRM;
         /* the estimate first (0.6.2): the battery's charge above the reserve at the tour's full-heat draw */
-        static char est[128];
+        static char est[128], stops[128];
+        int res = heat_reserve_override ? 0 : heat_reserve_pct;     /* 1.0-rc2: this session's reserve */
+        sb_strcpy(stops, sizeof(stops), res > 0 ? "Stops only at 55 \xc2\xb0" "C battery or the reserve. The back gets hot: hold it through a pocket or a glove." :
+                                                  "The reserve is OFF for this session: it stops only at 55 \xc2\xb0" "C battery. The back gets hot: use a pocket or a glove.");
         {
             struct heat_in in;
             read_inputs(&in);
-            int usable = in.gauge_ok ? in.pct - (heat_reserve_pct > 0 ? heat_reserve_pct : 0) : -1;
+            int usable = in.gauge_ok ? in.pct - (res > 0 ? res : 0) : -1;
             struct ub u;
             ub_init(&u);
             if (usable > 0) {
                 ub_s(&u, "About ");
                 ub_dec(&u, (uint64_t)(usable * 30 * 60 / FLAT_MA));
-                ub_s(&u, heat_reserve_pct > 0 ? " minutes of full heat before the call / SOS reserve (" :
+                ub_s(&u, res > 0 ? " minutes of full heat before the call / SOS reserve (" :
                                                 " minutes of full heat until the battery is empty (");
                 ub_dec(&u, (uint64_t)in.pct);
                 ub_s(&u, " % now, about 1.9 A).");
@@ -877,7 +882,8 @@ int heater_request(int level, int minutes)
             ub_s(&u, " \xc2\xb0" "C: a cold battery loses its charge; all cores while it is colder, none while warmer.");
             sb_strcpy(tl, sizeof(tl), u.b);
             kui_confirm("Keep the battery warm?", tl, est,
-                        "No other limits: it stops only at 55 \xc2\xb0" "C battery or the reserve.",
+                        res > 0 ? "No other limits: it stops only at 55 \xc2\xb0" "C battery or the reserve." :
+                                  "The reserve is OFF for this session: it stops only at 55 \xc2\xb0" "C battery.",
                         "Hold to start", extreme_confirm_done);
             return 0;
         }
@@ -885,14 +891,12 @@ int heater_request(int level, int minutes)
             kui_confirm("Extreme heat?",
                         "Every core at its top table step, the GPU, the screen at its top and the LED: flat out until you stop it.",
                         est,
-                        "Stops only at 55 \xc2\xb0" "C battery or the reserve. The back gets hot: hold it through a pocket or a glove.",
-                        "Hold for Extreme", extreme_confirm_done);
+                        stops, "Hold for Extreme", extreme_confirm_done);
         else
             kui_confirm("Manual heat?",
                         "The clocks you picked for the small cores, the big cores and the GPU, flat out until you stop it.",
                         est,
-                        "Stops only at 55 \xc2\xb0" "C battery or the reserve. The back gets hot: hold it through a pocket or a glove.",
-                        "Hold for Manual", extreme_confirm_done);
+                        stops, "Hold for Manual", extreme_confirm_done);
         return 0;
     }
     if (heater_running_ui()) {
@@ -979,7 +983,7 @@ void heater_status(struct sbos_heat *h)
     h->ma = last_in.gauge_ok && heater_running_ui() ? last_in.ma : 0;
     h->mv = last_in.gauge_ok && heater_running_ui() ? last_in.mv : 0;
     h->pct = last_in.gauge_ok ? last_in.pct : -1;
-    h->reserve_pct = heat_reserve_pct;
+    h->reserve_pct = heater_running_ui() ? ctl.reserve_pct : heat_reserve_pct;   /* this session's (1.0-rc2) */
     h->target_c10 = heat_target_c10;
     h->no_current_stop = heat_no_current_stop;
     h->trip_c = trip_top_c;

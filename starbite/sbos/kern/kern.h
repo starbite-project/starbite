@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.0-rc1"
+#define SBOS_VERSION "1.0-rc2"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -72,6 +72,7 @@ struct heat_limits {
     int ext_hard_bat_c10, ext_hard_soc_c10, ext_start_bat_max_c10;     /* 55, 110, 50 C */
     int stop_pct;                   /* stop below (15) */
     unsigned blind_ms;              /* no valid battery or SoC sample this long: stop (3000) */
+    unsigned gauge_blind_ms;        /* 1.0-rc2: no fuel-gauge reading this long: stop (10000) */
     unsigned stuck_ms;              /* the same battery raw value this long while the SoC moved 5 C (60000) */
     unsigned window_ms;             /* SoC up 20 C, battery moved < 0.5 C in this window: stop (300000) */
     unsigned step_ms;               /* regulation step (1000) */
@@ -102,7 +103,7 @@ struct heat_ctl {
     int no_current_stop;            /* 0.6.2: Manual only: the 3.5 A battery-current stop turned off by the user */
     int soc_stop_c10;               /* 0.6.3: Manual only: the user's SoC stop (0 off) */
     int cold;
-    uint64_t t_start, t_end, t_step, t_ramp, last_bat_ok, last_soc_ok;
+    uint64_t t_start, t_end, t_step, t_ramp, last_bat_ok, last_soc_ok, last_gauge_ok;
     int rest_mv;
     int last_raw, raw_soc_c10;
     uint64_t raw_since, t_win;
@@ -143,6 +144,7 @@ extern int gpu_heat_allowed;
 extern uint32_t gpuheat_khz;        /* 0.6.1: the GPU's table step for the session */
 extern uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;    /* 0.6.1: Manual's picks (kHz) */
 extern int heat_reserve_pct, heat_target_c10, heat_no_current_stop;   /* 0.6.2 */
+extern int heat_reserve_override;    /* 1.0-rc2: the next session's reserve overridden (once) */
 extern int heat_soc_stop_c10;       /* 0.6.3: Manual's optional SoC stop (0 off) */
 /* 0.6.3: the S2MPB02 over I2C (fled.c): the torch at 240 mA, SOS flash pulses at 1250 mA (the chip's 125 ms timer) */
 extern int led_full;                /* Settings > Alarm: 0 the pins only as before (default), 1 the rated currents */
