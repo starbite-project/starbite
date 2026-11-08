@@ -32,7 +32,7 @@ LEVEL_UP="$D $D $SEL"
 # Settings (0.3): Back, the section level, then Display's brightness (never selected here), screen-off level,
 # the two panel toggles; the Alarm section's LED toggle
 SCRIPT="w:600 $OPEN $HEAT_LOW w:5000 $LEVEL_UP w:15300 $BACK
- $EMERG $D $D $D $SEL w:600 $BACK $EMERG $D $D $D $SEL w:400 $D $SEL w:400 $BACK
+ $EMERG w:800 $BACK
  $SETT $D $D $D $D $D $SEL $D $SEL $U $U $U $U $SEL $D $SEL w:800 $BACK
  $LIGHT $D $D $SEL w:800 $SEL w:300 $D $SEL w:300 $D $SEL w:1200 $SEL w:400 $BACK
  $CLOCK $D $D $D $SEL $D $D $SEL w:2500 $SEL w:300 $BACK
