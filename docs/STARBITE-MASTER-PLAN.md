@@ -196,7 +196,7 @@ Menu v7 keeps getting faster in the background until it is smooth on the phone.
    - raw register writes (Engineer OS poke) exclude, at compile time, every CMU block (CMU_TOP holds the MIF switch mux and the INT bus muxes; CMU_MIF is 0x1B800000), the ACPM/APM mailbox and APM SRAM, DREX/DMC, and the PMU's DVFS registers;
    - code taken from other ports (exynos-linux, Samsung) is reviewed for MIF/INT DVFS, devfreq, interconnect and SICD idle paths before it is ported; those are compiled out, and our Linux DT has no MIF/INT devfreq nodes.
    - **Amended 2026-11-08, for Engineer OS's Overclocking category only** (you asked: "add to engineer os a new category for overclocking. I did a bit of research and it is possible to e.g. overclock even the memory and more, so I want global overclocking too."). There, and nowhere else, ACPM DVFS messages may name MIF and INT, under these conditions:
-     - only a step listed in the chip's own ECT table that ACPM's own frequency/voltage table also lists (`libsb sb_acpm_dvfs_listed`; the general `sb_acpm_dvfs` still refuses MIF and INT);
+     - only a step listed in the chip's own ECT table that ACPM's own frequency/voltage table also lists (`libsb sb_acpm_dvfs_step`; the general `sb_acpm_dvfs` still refuses MIF and INT);
      - a tier 4 confirmation, then automatic revert after 15 s unless you keep it;
      - the hardware watchdog armed and every storage write refused while any clock is off its default step;
      - a stability test per domain;

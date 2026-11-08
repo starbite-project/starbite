@@ -771,7 +771,7 @@ static void dvfs_set(uint32_t domain, uint32_t khz)
     if (domain == 0)
         w32(0x1b800120, pll(khz * 4U / 26000U, 2, 0));
 }
-int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz, int tier, const uint32_t *steps, unsigned n)
+int sb_acpm_dvfs_step(uint32_t domain, uint32_t khz, int tier, const uint32_t *steps, unsigned n)
 {
     const char *why;
     int listed = 0;
@@ -784,6 +784,8 @@ int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz, int tier, const uint32_t 
     return 1;
 }
 unsigned sb_acpm_dvfs_untrusted(void) { return 0; }
+/* libsb ocp.c (M3 system registers): never reached here (the preview has no M3 cores) */
+void sb_ocp_worker(unsigned w, void *arg) { (void)w; (void)arg; }
 int sb_acpm_dvfs_set_baseline(uint32_t domain, uint32_t khz)
 {
     if (domain >= 13 || !khz)

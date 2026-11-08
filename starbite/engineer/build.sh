@@ -65,8 +65,8 @@ CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie
 -nostdlib -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-plt -mstrict-align -mcpu=cortex-a55 \
 -fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$here"
 # Code that runs on the worker cores (the Mongoose M3s are ARMv8.0: no LSE, RDM, DotProd, FP16,
-# LRCPC) is built for plain armv8-a and checked below: libsb/smp.c and engineer/kern.c.
-V80=" smp.c kern.c "
+# LRCPC) is built for plain armv8-a and checked below: libsb/smp.c, libsb/ocp.c and engineer/kern.c.
+V80=" smp.c kern.c ocp.c "
 objs=""
 v80objs=""
 for src in "$lib"/*.c "$lib"/*.S "$here"/*.c; do

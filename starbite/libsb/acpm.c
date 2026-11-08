@@ -260,7 +260,7 @@ static int dvfs_send(uint32_t domain, uint32_t khz, const char *tag)
 }
 
 /* Master plan 1.2 rule 3 (as amended 2026-11-08): this general request never names MIF (0) or
- * INT (1); only sb_acpm_dvfs_listed (Engineer OS's Overclocking category) may. */
+ * INT (1); only sb_acpm_dvfs_step (Engineer OS's Overclocking category) may. */
 int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier)
 {
     const char *why;
@@ -275,7 +275,7 @@ int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier)
 /* Any domain, but only a step of the chip's own table: khz must be one of steps[0..n) (the caller
  * passes the ECT levels that ACPM's fvmap also lists) and the open authorisation must cover the
  * domain at tier >= 3. Refused (nothing sent) otherwise. */
-int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz, int tier, const uint32_t *steps, unsigned n)
+int sb_acpm_dvfs_step(uint32_t domain, uint32_t khz, int tier, const uint32_t *steps, unsigned n)
 {
     const char *why;
     int listed = 0;

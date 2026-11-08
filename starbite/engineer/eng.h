@@ -264,4 +264,3 @@ void kern_gold(struct kern_cfg *c);
 /* One batch of every enabled kernel; returns the mismatches (0 = all results correct). */
 unsigned kern_batch(struct kern_cfg *c, unsigned core, uint64_t *iters);
 void kern_worker(unsigned w, void *arg);
-void kern_ocp_probe(unsigned w, void *arg);  /* the M3 GCU / OCP sysregs, read on an M3 core */

@@ -432,6 +432,28 @@ void sb_worker_publish(struct sb_wslot *s);
 extern char sb_worker_entry[];
 extern volatile uint64_t sb_worker_boot[8];
 
+/* ---- M3 over-current protection, read side (ocp.c; vendor exynos-ocp.c) -------------------------
+ * Shared by Engineer OS Overclocking and Starbite OS. The M3 system registers (implementation
+ * defined, M3 only): OCPTHROTTCTL S3_0_C15_C12_7 (TEW bit 2, TRW bits 7:3, BPC 20:16, TCRST 23:21,
+ * OCPBPCHIT bit 26, OCPTHROTTERRA bit 27), OCPTHROTTCNTA S3_0_C15_C14_4 (TDCEN bit 0, TDT 31:20),
+ * OCPINTCTL S3_0_C15_C12_5 (IRP bits 9:4), GCUCTL S3_1_C15_C11_0 (OCPTHROTTERRAEN bit 24, OCPBPCEN
+ * bit 25), OCPTIDEPBOTTHRESH S3_0_C15_C15_1 (BPT 23:0). Samsung's limits (exynos9810.dtsi): M3
+ * max-freq-wo-ocp 1794000; busy M3 cores 1 -> 2704000 (cpufreq max; no BIGTURBO in this ECT),
+ * 2 -> 2314000, 3-4 -> 1794000; A55 max 1950000. */
+#define SB_OCP_PMIC_WARN1 0xd3U             /* S2MPS18 PMIC: bit 7 enable, 6 reset, 4:0 level */
+#define SB_OCP_PMIC_WARN2 0xd4U
+#define SB_OCP_THROTTERRA (1ULL << 27)      /* OCPTHROTTCTL: the GCU throttled (write 0 to clear) */
+#define SB_OCP_IRP_SHIFT 4U
+#define SB_OCP_IRP_MASK 0x3fU
+#define SB_OCP_FMIN_KHZ 650000U             /* cpufreq domain1 min-freq, the IRP formula's f_min */
+#define SB_M3_MAX_KHZ 2704000U
+#define SB_M3_DUAL_KHZ 2314000U
+#define SB_M3_QUAD_KHZ 1794000U
+#define SB_A55_MAX_KHZ 1950000U
+int sb_ocp_pmic(uint8_t *warn1, uint8_t *warn2);   /* 1 both read */
+unsigned sb_ocp_irp(uint32_t khz, uint32_t min_khz);  /* 2 * f / f_min - 2, clamped to 0..63 */
+void sb_ocp_worker(unsigned w, void *arg);  /* on an M3 worker: reads the registers (see ocp.c) */
+
 /* ---- CMGP ADC and thermistors (adc.c) --------------------------------------------------------- */
 
 /* One conversion of channel ch (0..11): 12-bit value, or -1 (clock gated, timeout). Polled. */
@@ -479,7 +501,7 @@ int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier);
  * caller's tier (at least 3). 1 sent and answered. */
 int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier);
 /* Master plan rule 3 (amended 2026-11-08): sb_acpm_dvfs refuses MIF (0) and INT (1); only
- * sb_acpm_dvfs_listed may name them, and only with a step of the table the caller passes (Engineer
+ * sb_acpm_dvfs_step may name them, and only with a step of the table the caller passes (Engineer
  * OS's Overclocking category: the ECT levels ACPM's fvmap also lists).
  * Overclocking (engineer/oc.c). FREQ_GET { domain, 0, 1, 0 }: the domain's current kHz (no
  * write; domains 0-12). The first successful read of a domain, or the read sb_acpm_dvfs makes before its first
@@ -487,7 +509,7 @@ int sb_acpm_dvfs(uint32_t domain, uint32_t khz, int tier);
  * without an authorisation (it can only restore what was there). */
 #define SB_DVFS_NDOM 16U
 #define SB_DVFS_DOMAINS 13U                 /* ACPM DVFS ids 0 MIF .. 12 CP */
-int sb_acpm_dvfs_listed(uint32_t domain, uint32_t khz, int tier, const uint32_t *steps, unsigned n);
+int sb_acpm_dvfs_step(uint32_t domain, uint32_t khz, int tier, const uint32_t *steps, unsigned n);
 int sb_acpm_dvfs_get(uint32_t domain, uint32_t *khz);
 int sb_acpm_dvfs_baseline(uint32_t domain, uint32_t *khz);
 int sb_acpm_dvfs_revert(uint32_t domain);

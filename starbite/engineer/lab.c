@@ -551,11 +551,11 @@ static int act_offer(int i)
     return 1;
 }
 
-/* The OCP probe (oc.c): core 4 (the first M3) reads the GCU / OCP system registers (kern_ocp_probe)
+/* The OCP probe (oc.c): core 4 (the first M3) reads the GCU / OCP system registers (libsb sb_ocp_worker)
  * and stops. may_ask: 1 the M3 PMU step may be confirmed now (Lab's tier 3 "Start the M3 cores"),
  * 0 (the unattended self-test): only when S-Boot already left the six PMU registers at the vendor
  * values, so nothing is written. 1 read (v[0..5], see kern.c), 0 faulted (*esr), -1 not started
- * (*why). */
+ * (*why); v[] as libsb ocp.c. */
 int lab_oc_m3_probe(int may_ask, uint64_t v[6], uint64_t *esr, const char **why)
 {
     unsigned diff = 0;
@@ -580,7 +580,7 @@ int lab_oc_m3_probe(int may_ask, uint64_t v[6], uint64_t *esr, const char **why)
     if (s)
         for (unsigned k = 0; k < 8; ++k)
             s->v[k] = 0;
-    int64_t r = sb_smp_start(4, kern_ocp_probe, 0);
+    int64_t r = sb_smp_start(4, sb_ocp_worker, 0);
     if (r) {
         *why = r == -100 ? "the M3 core did not check in" : "PSCI CPU_ON refused";
         return -1;
@@ -1611,6 +1611,40 @@ void lab_mem_stress(void)
  * limit: 95 C for these runs unless the user set a higher one), -1 not
  * run (no cores, cancelled, no temperature guard declined). Nothing goes to the result pages. */
 
+/* Overclocking runs: every TMU probe to the log once a second (the first 30 s, then every 10 s), so
+ * a temperature stop can be told apart from a misreading probe (2026-11-08: M3 runs stopped "at
+ * once", while A55 1950 MHz on four cores held 65 C). at = ms into the run; ~0 = the stop line. */
+static void oc_temps_log(uint64_t at)
+{
+    struct ub u;
+    uint64_t s = at / 1000U;
+    if (at != ~0ULL && s > 30 && s % 10U)
+        return;
+    ub_init(&u);
+    ub_s(&u, at == ~0ULL ? "oc temps STOP:" : "oc temps ");
+    if (at != ~0ULL) {
+        ub_dec(&u, s);
+        ub_s(&u, "s:");
+    }
+    static const char *const nm[5] = { " big1 ", " big2 ", " big3 ", " big4 ", " big6 " };
+    static const unsigned bp[5] = { 1, 2, 3, 4, 6 };
+    for (unsigned i = 0; i < 5; ++i) {
+        ub_s(&u, nm[i]);
+        ub_sdec(&u, T.big[i]);
+        ub_c(&u, '/');
+        ub_dec(&u, (unsigned)T.code_top[bp[i]]);
+    }
+    ub_s(&u, " lit ");
+    ub_sdec(&u, T.little);
+    ub_s(&u, " gpu ");
+    ub_sdec(&u, T.gpu);
+    ub_s(&u, " isp ");
+    ub_sdec(&u, T.isp);
+    ub_s(&u, sb_m3_on() ? " M3 on " : " M3 off ");
+    ub_dec(&u, sb_m3_hz(&(int){ 0 }) / 1000000U);
+    sb_log(u.b);
+}
+
 int lab_oc_cpu(unsigned mask, unsigned secs, char *detail, unsigned cap)
 {
     struct ub u;
@@ -1632,7 +1666,9 @@ int lab_oc_cpu(unsigned mask, unsigned secs, char *detail, unsigned cap)
     cs_dur = secs;
     ch_reset(CH_TEMP, "HOTTEST SENSOR (" U_DEG "C)", C_ORANGE, secs);
     ch_reset(CH_RATE, "WORK (BATCHES PER SECOND, ALL CORES)", C_GREEN, secs);
-    unsigned started = load_start(mask, KERN_INT | KERN_FP | KERN_NEON | KERN_MEM);
+    unsigned started = load_start(mask, KERN_INT | KERN_FP | KERN_NEON | KERN_MEM), over = 0;
+    temps_sample(0);
+    oc_temps_log(0);                        /* right after the cores started: every probe */
     live_begin("Stability test (CPU)");
     cs_t0 = sb_ms();
     cs_stop = 0;
@@ -1653,8 +1689,14 @@ int lab_oc_cpu(unsigned mask, unsigned secs, char *detail, unsigned cap)
             ch_push(CH_RATE, (int32_t)rate_total);
             if (T.hottest > cs_peak)
                 cs_peak = T.hottest;
-            if (over_limit(T.hottest))
+            oc_temps_log(sb_ms() - cs_t0);
+            /* two samples in a row over the limit (one stuck probe right after the M3 cluster powers up
+             * must not end the run; the TMU's own trip at 115 C stays armed) */
+            over = over_limit(T.hottest) ? over + 1 : 0;
+            if (over >= 2) {
                 cs_stop = 2;
+                oc_temps_log(~0ULL);            /* the stop: every probe, which one tripped */
+            }
             if (load_faults() || load_errors())
                 cs_stop = 4;
         }

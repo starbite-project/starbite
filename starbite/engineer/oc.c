@@ -529,7 +529,7 @@ static void log_tables(void)
 
 /* ---- step 2: changing a step --------------------------------------------------------------------
  * Master plan 1.2 rule 3 as amended 2026-11-08 (MIF / INT allowed here only, listed steps only).
- * Every request: a step of the ECT that ACPM's fvmap also lists (sb_acpm_dvfs_listed checks it
+ * Every request: a step of the ECT that ACPM's fvmap also lists (sb_acpm_dvfs_step checks it
  * again), confirmed (tier 3; tier 4 for MIF, INT and above-cap steps), sent only after the
  * watchdog is armed and storage writes are held; then 15 s to keep it (Power), else back to the
  * baseline ACPM reported before Engineer OS's first request. Both guards stay on until every
@@ -564,10 +564,10 @@ void oc_tick(void)
  * offered) and the M3 "big mode" limits by busy cores: 1 core to single_freq (no BIGTURBO table in
  * this ECT: the 2704000 ceiling), 2 cores dual_freq 2314000, 3 or 4 cores triple / quad_freq 1794000.
  * 4 M3 cores at 2886 MHz cut the phone's power on 2026-11-08. */
-#define OC_A55_MAX 1950000U
-#define OC_M3_MAX 2704000U
-#define OC_M3_DUAL 2314000U
-#define OC_M3_QUAD 1794000U
+#define OC_A55_MAX SB_A55_MAX_KHZ            /* libsb sb.h "OCP": shared with Starbite OS */
+#define OC_M3_MAX SB_M3_MAX_KHZ
+#define OC_M3_DUAL SB_M3_DUAL_KHZ
+#define OC_M3_QUAD SB_M3_QUAD_KHZ
 
 static int oc_vendor_capped(int d, uint32_t khz)
 {
@@ -1051,7 +1051,7 @@ static void oc_apply(int d, uint32_t khz)
     log_dom("request", d, khz);
     if (bus || hi)
         oc_tainted(bus ? "the memory / bus clock was changed" : "an above-cap step was used");
-    int sent = sb_acpm_dvfs_listed((uint32_t)d, khz, a.tier, steps, n);
+    int sent = sb_acpm_dvfs_step((uint32_t)d, khz, a.tier, steps, n);
     sb_gate_close();
     int pll = sent ? pll_agrees(d, khz) : 0;
     oc_set[d] = khz;
@@ -1196,7 +1196,7 @@ static void ocp_probe(int may_ask)
 {
     struct ub u;
     uint8_t w1 = 0, w2 = 0;
-    int r1 = sb_pmic_read(1, 0xd3, &w1), r2 = sb_pmic_read(1, 0xd4, &w2);
+    int r1 = sb_pmic_read(1, SB_OCP_PMIC_WARN1, &w1), r2 = sb_pmic_read(1, SB_OCP_PMIC_WARN2, &w2);
     ub_init(&u);
     ub_s(&u, "oc ocp: S2MPS18 OCP_WARN1 0xD3 ");
     if (r1) {
