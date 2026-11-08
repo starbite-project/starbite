@@ -95,9 +95,16 @@ boot_and_return() {
     local key=$1 limit=$2 dir=$3 start
     mkdir -p "$dir"
     start=$(date +%s)
-    timeout 25 tools/store/boot-next.sh "$key" 5 >/dev/null 2>&1 || true
-    log "booted $key; waiting up to ${limit}s for the loader menu"
+    # the main checkout's boot-next.sh (it reads that checkout's build/store/catalog-live.toml); it waits for
+    # TWRP to come back, so the 25 s timeout (124) is the normal end; 1 = it refused (nothing rebooted)
+    local rc=0
+    timeout 25 "$main/tools/store/boot-next.sh" "$key" 5 >>"$out/cycle.log" 2>&1 || rc=$?
+    if [ $rc = 1 ]; then log "boot-next.sh refused $key (see cycle.log): phone still in TWRP"; exit 1; fi
+    log "booted $key (boot-next rc $rc); waiting up to ${limit}s for the loader menu"
     sleep 60
+    if [ "$(adb get-state 2>/dev/null)" = recovery ]; then
+        log "the phone is still in TWRP 60 s after boot-next: $key did not start"; exit 2
+    fi
     until fastboot devices 2>/dev/null | grep -q fastboot; do
         if [ $(( $(date +%s) - start )) -gt "$limit" ]; then
             log "NO MENU after ${limit}s: the phone is stuck (needs the user)"; exit 2
@@ -107,7 +114,7 @@ boot_and_return() {
     log "menu after $(( $(date +%s) - start )) s"
     fastboot oem log dmesg > "$dir/loader-dmesg.txt" 2>&1 || true
     fastboot get_staged "$dir/zone0.bin" >/dev/null 2>&1 || true
-    python3 tools/store/sbfb.py reboot recovery >/dev/null 2>&1 || true
+    python3 "$main/tools/store/sbfb.py" reboot recovery >/dev/null 2>&1 || true
     for _ in $(seq 1 60); do [ "$(adb get-state 2>/dev/null)" = recovery ] && break; sleep 3; done
     [ "$(adb get-state 2>/dev/null)" = recovery ] || { log "no TWRP after the menu (needs the user)"; exit 2; }
     sleep 3
