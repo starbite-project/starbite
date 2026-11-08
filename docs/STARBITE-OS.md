@@ -1043,8 +1043,7 @@ forced restart). Cause and fixes: 8.6 and 12.5.
 - **T13 (the self test, no entry yet):** `starbite-os-0.3.2-selftest.img` as before (T11). Expect, beyond T11's lines:
   `slot: no "sbos-state" store entry`, `selftest: slot: no "sbos-state" entry: nothing written`,
   `power: A55 at 455 MHz with the screen off (was 1053 MHz)`, `selftest: screen off: A55 455 MHz`,
-  `power: REHEARSAL: it would stay on: a charger is connected` (on USB), `power: REHEARSAL: saved; would switch off
-  now`, `selftest: screen on: A55 1053 MHz`, `selftest: passed`. Writes: none (no entry).
+  `power: REHEARSAL: it would stay on: a charger is connected` (on USB), `power: REHEARSAL: the save as a dry run; would switch off now`, `selftest: screen on: A55 1053 MHz`, `selftest: passed`. Writes: none (no entry).
 - **T14 (the slot, after a store backup):** pull a store backup (`tools/store/store-pull.sh`), rebuild the store with
   `--import <the backup> --volatile sbos-state=1048576`, flash it (`store-flash.sh`), then T13 again. Expect
   `fence: standing grant for 256 blk at ufs:N (volatile entry, tier 1): sbos-state`, the dry run's `fence: would

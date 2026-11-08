@@ -30,7 +30,9 @@ static int slot_ok;                         /* 1 the slot exists and was read */
 static int cur_half = -1;                   /* the half that holds the newest valid copy */
 static uint64_t seq;
 static unsigned saves, save_fail;
-static int foreign;                         /* the newest copy is of another version: never overwrite it */
+static int foreign;
+static struct saved loaded;                 /* the record as restored (the self-test image saves its panel parts back) */
+static int have_loaded;                         /* the newest copy is of another version: never overwrite it */
 
 int settings_persistent(void)
 {
@@ -47,6 +49,11 @@ static void fill(struct saved *s)
     s->sos_led = (uint8_t)(sos_led_on != 0);
     s->bright = (uint8_t)panel_bright_level;
     s->pad[0] = auto_off_min;               /* 0.3.2: was zero padding, so 0 (never) for older records */
+    if (sbos_selftest_enabled && have_loaded) {     /* not applied there: kept as they were saved (0.5.12) */
+        s->panel_save = loaded.panel_save;
+        s->panel_off = loaded.panel_off;
+        s->bright = loaded.bright;
+    }
 }
 
 void settings_restore(void)
@@ -75,6 +82,10 @@ void settings_restore(void)
     }
     memset(&s, 0, sizeof(s));
     memcpy(&s, d, (unsigned)n < sizeof(s) ? (unsigned)n : sizeof(s));
+    if (s.version == 1) {
+        loaded = s;
+        have_loaded = 1;
+    }
     if (s.version != 1) {
         foreign = 1;
         sb_log("settings: a settings record of another version: defaults, and it is not overwritten");
@@ -84,11 +95,16 @@ void settings_restore(void)
         K.screen_off_s = s.screen_off_s;
         power_input();                      /* the screen-off timer with the restored time */
     }
-    panel_save_set(s.panel_save != 0);
-    panel_off_on = s.panel_off != 0;
     sos_led_on = s.sos_led != 0;
-    if (s.bright >= 1 && s.bright <= 4)
-        (void)panel_brightness(s.bright);
+    if (sbos_selftest_enabled) {
+        /* unattended: no panel commands from saved settings (0.5.12); the record stays as it was */
+        sb_log("settings: the self-test image leaves the panel's saved settings (brightness, refresh, off) unapplied");
+    } else {
+        panel_save_set(s.panel_save != 0);
+        panel_off_on = s.panel_off != 0;
+        if (s.bright >= 1 && s.bright <= 4)
+            (void)panel_brightness(s.bright);
+    }
     if (s.pad[0] == 5 || s.pad[0] == 15 || s.pad[0] == 60)
         auto_off_min = s.pad[0];
     struct ub u;

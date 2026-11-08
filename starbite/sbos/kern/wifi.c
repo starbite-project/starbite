@@ -94,6 +94,8 @@ static int w_ready;
 /* 0.5: the chip's INTx (SPI 253 = INTID 285); polling stays as the fallback and relaxes once interrupts arrive */
 #define WIFI_INTID 285U
 static int irq_on, irq_kicked, irq_trusted;
+static int scan_retry;                      /* a refused scan: tries left */
+static uint64_t scan_retry_at;
 static unsigned irq_n, irq_window_n, irq_storms, irq_missed;
 static uint64_t irq_window_t;
 static void irq_stop(void);                         /* bcmw_init succeeded on w (quiesce and leave only then) */
@@ -460,6 +462,7 @@ int wifi_power(int on)
     cfg.any_files = 1;
     memcpy(cfg.mac, "\x02\x11\x22\x33\x44\x55", 6);   /* the station address the model's access point expects */
 #endif
+    hw_wdt_feed();
     if (bcmw_init(w, &os, &cfg) != BCMW_OK) {
         set_state(SBOS_WIFI_FAILED, "The Wi-Fi core did not start");
         return SBOS_EAGAIN;
@@ -489,12 +492,23 @@ int wifi_scan(void)
     if (was == SBOS_WIFI_UP)
         set_state(SBOS_WIFI_SCANNING, "");  /* first: the scan's events can arrive while the command waits */
     kt_set(KT_WIFI, 0, sb_ms(), 10, 0);    /* the tick soon: the scan's events */
+    hw_wdt_feed();
     if (bcmw_scan_start(w, 0, 0, ++sync) != BCMW_OK) {
+        if (was == SBOS_WIFI_UP)
+            set_state(SBOS_WIFI_UP, "");
+        if (!scan_retry)
+            scan_retry = 3;
+        if (--scan_retry > 0) {             /* busy (the bring-up's own scan): again in 1.5 s */
+            scan_retry_at = sb_ms() + 1500;
+            sb_log("wifi: the scan was refused (busy?): trying again");
+            return 0;
+        }
         sb_log("wifi: the scan did not start");
         if (was == SBOS_WIFI_UP)
             set_state(SBOS_WIFI_UP, "The scan did not start");
         return SBOS_EAGAIN;
     }
+    scan_retry = 0;
     return 0;
 }
 
@@ -621,7 +635,9 @@ void wifi_timer(unsigned id)
     uint64_t now = sb_ms();
     if (st == SBOS_WIFI_STARTING) {
         uint64_t t0 = sb_ms();
+        hw_wdt_feed();                      /* the longest steps take seconds (0.5.12) */
         int r = bcmw_bringup(w, (unsigned)step + 1U);
+        hw_wdt_feed();
         uint64_t took = sb_ms() - t0;
         if (r < 0) {
             logn("wifi: the bring-up failed at step ", (uint64_t)step + 1U, "");
@@ -668,10 +684,14 @@ void wifi_timer(unsigned id)
             set_state(SBOS_WIFI_FAILED, "The radio stopped answering (logged)");
             return;
         }
+        if (scan_retry && st == SBOS_WIFI_UP && now >= scan_retry_at)
+            (void)wifi_scan();
         if (join_pending && st == SBOS_WIFI_JOINING && now - t_state >= 100) {
             join_pending = 0;
             uint64_t t0 = sb_ms();
+            hw_wdt_feed();
             int r = joined >= 0 ? bcmw_join(w, nets[joined].ssid, nets[joined].ssid_len, jp_pass, 15000) : BCMW_E_STATE;
+            hw_wdt_feed();
             if (r == BCMW_OK && joined >= 0)
                 remember(nets[joined].ssid, nets[joined].ssid_len, jp_pass);
             memset(jp_pass, 0, sizeof(jp_pass));
@@ -779,7 +799,7 @@ int wifi_selftest_phase(int *done)
         *done = 1;
         return 0;
     }
-    if (st == SBOS_WIFI_UP) {
+    if (st == SBOS_WIFI_UP && !scan_retry) {
         logn("selftest: wifi: up and scanned in ", sb_ms() - t_on, " ms");
         logn("selftest: wifi: networks heard: ", (uint64_t)nnets, " (names not logged)");
         logn("selftest: wifi: interrupts during the bring-up and scan: ", irq_n,

@@ -263,6 +263,10 @@ void battery_timer(unsigned id)
     if (bat.ok && bat.pct < 2 && torch_on())
         torch_set(0);
     if (bat.ok && !bat.charger && ((bat.pct < 3 && !sos_active()) || bat.pct < 2)) {
+        if (sbos_selftest_enabled) {       /* unattended: never switched off (no one to press Power) */
+            sb_log("sbos: battery reserve reached in the self-test image: back to the menu, not off");
+            power_restart(1);
+        }
         sb_log("sbos: battery reserve reached: power off");
         power_off_now();
     }
@@ -364,6 +368,7 @@ static void screen(int on)
         set_state(heater_running_ui() ? PS_HEAT : PS_ACTIVE);
         kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
         kt_cancel(KT_POWER, 2);
+        kt_set(KT_HOUSE, 0, sb_ms(), 1000, 0);     /* the watchdog fed every second again (0.5.12) */
         sb_log("sbos: screen on");
         a55_low(0);
     }
@@ -429,8 +434,15 @@ int power_auto_off(int rehearse)
     for (int a = 0; a < napps; ++a)
         app_event_send(a, EV_APP_SAVE, 0, 0);
     apps_service();                         /* their EV_APP_SAVE handlers run now */
-    settings_save_now();
-    sb_log(rehearse ? "power: REHEARSAL: saved; would switch off now (the self-test image never does)" :
+    if (rehearse) {                         /* the rehearsal writes nothing (the self test's slot step does) */
+        int was = sb_fence_is_dry_run();
+        sb_fence_dry_run(1);
+        settings_save_now();
+        sb_fence_dry_run(was);
+    } else {
+        settings_save_now();
+    }
+    sb_log(rehearse ? "power: REHEARSAL: the save as a dry run; would switch off now (the self-test image never does)" :
                       "power: saved; switching off after the screen was off");
     if (!rehearse)
         power_off_now();

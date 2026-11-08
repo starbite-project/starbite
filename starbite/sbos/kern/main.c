@@ -48,7 +48,7 @@ static void dispatch_timer(unsigned owner, unsigned id)
         /* 0.1: started and never touched for 10 minutes (an unattended test boot): back to the menu */
         if (!K.any_input && !heater_running_ui() && !sos_active() && sb_ms() - K.deadman_t0 >= 600000U) {
             sb_log("sbos: no touch or key for 10 minutes since the start: back to the menu");
-            sb_reboot(SB_INFORM_NORMAL);
+            power_restart(1);               /* the LED, the heater and the radio off first (0.5.12) */
         }
         kt_set(KT_HOUSE, 0, sb_ms(), K.screen_on ? 1000 : 10000, 0);
         break;
