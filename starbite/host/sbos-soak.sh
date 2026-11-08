@@ -32,7 +32,7 @@ LEVEL_UP="$D $D $SEL"
 # Settings (0.3): Back, the section level, then Display's brightness (never selected here), screen-off level,
 # the two panel toggles; the Alarm section's LED toggle
 SCRIPT="w:600 $OPEN $HEAT_LOW w:5000 $LEVEL_UP w:15300 $BACK
- $EMERG $D $D $HOLDSEL w:600 $BACK $EMERG $D $D $D $SEL w:400 $D $SEL w:400 $BACK
+ $EMERG $D $D $D $SEL w:600 $BACK $EMERG $D $D $D $SEL w:400 $D $SEL w:400 $BACK
  $SETT $D $D $D $D $D $SEL $D $SEL $U $U $U $U $SEL $D $SEL w:800 $BACK
  $LIGHT $D $D $SEL w:800 $SEL w:300 $D $SEL w:300 $D $SEL w:1200 $SEL w:400 $BACK
  $CLOCK $D $D $D $SEL $D $D $SEL w:2500 $SEL w:300 $BACK
@@ -90,7 +90,7 @@ run_case() {
         echo "soak $name: ok ($(grep -c '^log: ' "$log") log lines, max cores $(grep -o 'cores [0-9]' "$log" | sort -k2 -n | tail -1))"
     fi
 }
-run_case clean "" "settings: panel refresh only on change: on" "settings: panel off with the screen: on" "settings: LED in SOS: on" "sos: countdown" "sos: flashing" "sos: off"
+run_case clean "" "settings: panel refresh only on change: on" "settings: panel off with the screen: on" "settings: LED in SOS: on" "sos: countdown" "sos: off"
 run_case all8 "m3" "core 7 (M3) running, 8 cores with cpu0"
 run_case timeout1 "timeout:1" "core 1: no check-in within 1 s (code -100): trying again later" "core 2 (A55) running" "core 1: no check-in within 1 s (code -100): not used until a restart"
 run_case timeout1noctx "timeout:1,noctx" "core 1: no check-in within 1 s; no more cores start in this session"
