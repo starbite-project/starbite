@@ -640,8 +640,12 @@ static void t_survival(void)
     refuse(in, HEAT_SURVIVAL_X, "the trip is not armed at the start (trip-off Survival too)");
     in = base_in(0);
     heat_ctl_init(&c, 0);
-    c.surv_stop_c10 = 1400;
-    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == SBOS_EAGAIN, "trip-off Survival refuses a stop above 131 C");
+    c.surv_stop_c10 = 1500;
+    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == SBOS_EAGAIN, "trip-off Survival refuses a limit above 145 C");
+    heat_ctl_init(&c, 0);
+    CHECK(c.surv_stop_c10 == 1350 && heat_surv_estop(&c) == 1400, "trip off: the default limit 135 C, the stop 140 C");
+    c.surv_stop_c10 = 1450;
+    CHECK(heat_surv_estop(&c) == 1490, "trip off: the stop past 145 C is 149 C (150 does not read as valid)");
 
     /* the regulation, the whole battery: held below the trip, run to 2 % */
     struct sim s;
@@ -669,9 +673,9 @@ static void t_survival(void)
     sim_run(&c, &s, 0, 3 * 3600);
     printf("survival sim (trip off): %d s, %.1f W average, peak SoC %.1f C, ended: %s\n", s.secs,
            s.w_sum / (s.ticks ? s.ticks : 1), s.max_soc / 10.0, c.why);
-    CHECK(s.max_soc >= 1310 && s.max_soc < 1330, "trip off: flat out, no shedding, to the 131 C stop (peak %d)", s.max_soc);
-    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "Survival stop"), "trip off: ended at the user's stop (%s)", c.why);
-    CHECK(s.gpu_flips == 0, "trip off: the GPU never shed (%d)", s.gpu_flips);
+    CHECK(s.max_soc >= 1300 && s.max_soc < 1335, "trip off: held at the 131 C limit (peak %d)", s.max_soc);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "2 %"), "trip off: the limit holds, heat to 2 %% (%s)", c.why);
+    CHECK(s.secs > 900, "trip off: the whole battery (%d s)", s.secs);
 
     /* the stops that stay */
     in = base_in(0);
@@ -682,9 +686,20 @@ static void t_survival(void)
     in.trip_armed = 0;
     run(&c, &in, 0, 5000, 0);
     CHECK(c.state == HEAT_ST_RUNNING, "trip off: the unarmed trip is expected, no stop (%s)", c.why);
+    run(&c, &in, 5250, 4000, 0);
+    CHECK(c.cores == 7, "trip off: all 7 workers below the limit (%d)", c.cores);
     in.soc_c10 = 1312;
-    run(&c, &in, 5000, 500, 0);
-    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "Survival stop"), "trip off: the user's SoC stop (%s)", c.why);
+    run(&c, &in, 9500, 750, 0);
+    CHECK(c.state != HEAT_ST_STOPPED, "trip off: at the limit it sheds, no stop (%s)", c.why);
+    CHECK(c.gpu_want == 1 && c.cores == 3, "trip off: the M3s shed first, the GPU kept (%d cores, gpu %d)", c.cores, c.gpu_want);
+    run(&c, &in, 10500, 0, 0);
+    CHECK(c.gpu_want == 0 && c.cores == 3, "trip off: then the GPU (%d cores, gpu %d)", c.cores, c.gpu_want);
+    in.soc_c10 = 1250;
+    run(&c, &in, 11000, 4000, 0);
+    CHECK(c.gpu_want == 1 && c.cores > 3, "trip off: back below the limit: the GPU, then the M3s (%d cores)", c.cores);
+    in.soc_c10 = 1361;
+    run(&c, &in, 15500, 300, 0);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "past your limit"), "trip off: 5 C past the limit stops (%s)", c.why);
     in = base_in(0);
     heat_ctl_init(&c, 0);
     heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in);

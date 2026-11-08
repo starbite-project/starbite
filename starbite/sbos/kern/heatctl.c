@@ -84,9 +84,15 @@ int heat_max_cores(int level)
     return level == HEAT_LOW ? 3 : level == HEAT_MEDIUM ? 5 : level >= HEAT_HIGH && level <= HEAT_SURVIVAL_X ? 7 : 0;
 }
 
+int heat_surv_estop(const struct heat_ctl *c)
+{
+    int e = c->surv_stop_c10 + 50;
+    return e > 1490 ? 1490 : e;
+}
+
 int heat_surv_target(const struct heat_ctl *c)
 {
-    return c->level == HEAT_SURVIVAL_X ? c->surv_stop_c10 - 30 : c->lim->surv_target_c10;
+    return c->level == HEAT_SURVIVAL_X ? c->surv_stop_c10 : c->lim->surv_target_c10;   /* 1.1-beta4: holds at the limit */
 }
 
 void heat_ctl_init(struct heat_ctl *c, const struct heat_limits *lim)
@@ -98,7 +104,7 @@ void heat_ctl_init(struct heat_ctl *c, const struct heat_limits *lim)
     c->state = HEAT_ST_OFF;
     c->reserve_pct = c->lim->stop_pct;      /* 15 % for a call / SOS until the user overrides it */
     c->target_c10 = 200;                    /* Keep warm: 20 C */
-    c->surv_stop_c10 = 1310;                /* Survival (trip off): 131 C */
+    c->surv_stop_c10 = 1350;                /* Survival (trip off): holds at 135 C (1.1-beta4) */
     c->gpu_want = 1;
 }
 
@@ -154,8 +160,8 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
         no = level == HEAT_LOW ? "Battery below 20 %" : "Battery below 30 % (try Low)";
     else if (surv && in->pct <= L->surv_floor_pct)
         no = "The battery is at 2 %: nothing left to turn into heat";
-    else if (level == HEAT_SURVIVAL_X && (c->surv_stop_c10 < 1250 || c->surv_stop_c10 > 1310))
-        no = "Survival's SoC stop is not set (125 to 131 \xc2\xb0" "C)";
+    else if (level == HEAT_SURVIVAL_X && (c->surv_stop_c10 < 1250 || c->surv_stop_c10 > 1450))
+        no = "Survival's SoC limit is not set (125 to 145 \xc2\xb0" "C)";
     else if (flat && !surv && c->reserve_pct > 0 && in->pct <= c->reserve_pct)
         no = "At the call / SOS reserve (hold Continue below the reserve to go on)";
     else if (in->charger > 0)
@@ -241,8 +247,10 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         return;
     }
     /* Survival with the trip off (1.1): the user's SoC stop is the only temperature stop for the chip */
-    if (c->level == HEAT_SURVIVAL_X && c->trip_off && in->soc_ok && in->soc_c10 >= c->surv_stop_c10) {
-        stop(c, HEAT_ST_STOPPED, "Processor at your Survival stop");
+    /* 1.1-beta4: the user's limit is held (below); a runaway 5 C past it still stops (at most 149 C: a reading of
+     * 150 C is not taken as valid, and then the lost-reading stop acts) */
+    if (c->level == HEAT_SURVIVAL_X && c->trip_off && in->soc_ok && in->soc_c10 >= heat_surv_estop(c)) {
+        stop(c, HEAT_ST_STOPPED, "Processor 5 \xc2\xb0" "C past your limit: the hold could not keep it");
         return;
     }
     if (flat && !in->trip_armed && !c->trip_off) {
@@ -345,20 +353,43 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
          * its voltage. Shed at once (one load per 250 ms tick, two when 2 C over): the M3 cores first, then the
          * A55s, the GPU last; add again (one a second) only 2 C below the target, the GPU after every core */
         if (c->level == HEAT_SURVIVAL_X) {
-            /* 1.1-beta2 (the user's spec): the hardware trip off = no shedding at all: every core and the GPU,
-             * one core more a second, flat out until the user's SoC stop (above) or a stop that stays */
-            if (now - c->t_step >= L->step_ms && c->cores < c->max_cores && !(c->cold && c->cores >= 3)) {
-                c->cores++;
+            /* 1.1-beta4 (the user's spec): the hardware trip off: flat out up to the user's limit, then HELD there
+             * until 2 % battery: at or above the limit one load off per 250 ms (two at 2 C over): the M3s first, then
+             * the GPU, then the A55s; back on one a second below the limit minus 2 C in the reverse order. No other
+             * shedding (the current and the voltage: the 4.5 A stop and the PMIC's own) */
+            int lim = c->surv_stop_c10;
+            int hot = in->soc_ok && in->soc_c10 >= lim;
+            int very = in->soc_ok && in->soc_c10 >= lim + 20;
+            int cool = in->soc_ok && in->soc_c10 < lim - L->surv_band_c10;
+            if (hot && now - c->t_shed >= 250U) {
+                for (int n = very ? 2 : 1; n > 0; --n) {
+                    if (c->cores > 3)
+                        c->cores--;
+                    else if (c->gpu_want)
+                        c->gpu_want = 0;
+                    else if (c->cores > 0)
+                        c->cores--;
+                }
+                c->t_shed = now;
+                c->t_step = now;
+            } else if (cool && now - c->t_step >= L->step_ms && !(c->cold && c->cores >= 3)) {
+                if (c->cores < 3)
+                    c->cores++;
+                else if (!c->gpu_want)
+                    c->gpu_want = 1;
+                else if (c->cores < c->max_cores)
+                    c->cores++;
                 c->t_step = now;
             }
             if (c->cold && now - c->t_start >= 30000U) {
                 c->cold = 0;
                 c->a55_khz = flat_a55(c);
             }
-            c->gpu_want = 1;
             c->m3_khz = c->cores > 3 ? flat_m3(c) : 0;
-            c->state = HEAT_ST_RUNNING;
-            why(c, "Survival, trip OFF: flat out to your stop");
+            c->state = c->cores || c->gpu_want ? HEAT_ST_RUNNING : HEAT_ST_HOLDING;
+            why(c, hot ? "Survival, trip OFF: holding at your limit" :
+                   c->cores == c->max_cores && c->gpu_want ? "Survival, trip OFF: everything flat out" :
+                   "Survival, trip OFF: adding load");
             return;
         }
         int target = heat_surv_target(c);

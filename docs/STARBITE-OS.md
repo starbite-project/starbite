@@ -831,6 +831,11 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
 
 ### 12.21 Version 1.1-beta1 / beta2: Survival heat; the LED chip's 0x63 (2026-11-08)
 
+beta4: with the trip off the user's limit (125..145 °C, default 135; `SET_HEAT_SURV_STOP_C10` 1250..1450) is held
+(`heatctl.c`: M3s, then the GPU, then the A55s off at the limit; back below it minus 2 °C) instead of stopping, so
+the session runs to 2 %; `heat_surv_estop` stops 5 °C past it (at most 149 °C). `struct heat_record` gained
+`peak_mw` and `mwh`.
+
 beta3: beta2's last-core CPD + MAILBOX_APM2AP bit 24 left the cluster on and the next session's first PSCI call hung
 (a watchdog reset): the stop now gives only C2 per core (`hw_m3_core_off`), each start puts the M3 words back to the
 boot state first (`hw_m3_fp_reset`), the trip goes off only after the session's first loop turn, and the heater

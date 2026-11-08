@@ -102,7 +102,11 @@ void settings_restore(void)
                 ub_dec(&u, (uint64_t)(heat_last.pct > 0 ? heat_last.pct : 0));
                 ub_s(&u, " %, the hardware trip read ");
                 ub_dec(&u, (uint64_t)(heat_last.trip_c > 0 ? heat_last.trip_c : 0));
-                ub_s(&u, " C");
+                ub_s(&u, " C, peak ");
+                ub_dec(&u, (uint64_t)(heat_last.peak_mw > 0 ? heat_last.peak_mw / 1000 : 0));
+                ub_s(&u, " W, ");
+                ub_dec(&u, (uint64_t)(heat_last.mwh > 0 ? heat_last.mwh : 0));
+                ub_s(&u, " mWh (1.1-beta4)");
                 sb_log(u.b);
             }
             heat_rec = heat_last;           /* kept in the slot until the next session replaces it */

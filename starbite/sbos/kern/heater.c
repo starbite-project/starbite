@@ -35,6 +35,7 @@ static int gpu_probe_ok;
 static int trip_top_c;                      /* the hardware trip's decoded temperature (logged at a start) */
 static void record(const struct heat_in *in, int running);
 static uint64_t rec_saved_at;
+static uint64_t rec_t, rec_uwh;             /* 1.1-beta4: the energy integral of this session */
 static int launch_hold;
 static int ctx_ok;                          /* 1 workers use their own start records, -1 the shared one, 0 unknown */                     /* a core never checked in: no more launches this session */
 static int64_t last_code;                   /* the latest failure's code, for the screen */
@@ -636,7 +637,13 @@ static void run_summary(void)
     ub_dec(&u, (uint64_t)(pk.mv < 100000 ? pk.mv : 0));
     ub_s(&u, " mV, ran ");
     ub_dec(&u, (sb_ms() - pk.t0) / 1000U);
-    ub_s(&u, " s");
+    ub_s(&u, " s, peak ");
+    ub_dec(&u, (uint64_t)(heat_rec.peak_mw / 1000));
+    ub_c(&u, '.');
+    ub_dec(&u, (uint64_t)(heat_rec.peak_mw % 1000 / 100));
+    ub_s(&u, " W, ");
+    ub_dec(&u, (uint64_t)heat_rec.mwh);
+    ub_s(&u, " mWh");
     sb_log(u.b);
 }
 
@@ -912,6 +919,8 @@ static void start_now(void)
         trip_tried = 0;
         memset(&heat_rec, 0, sizeof(heat_rec));
         heat_rec.peak_bat_c10 = heat_rec.peak_soc_c10 = -1000;
+        rec_t = 0;
+        rec_uwh = 0;
         heat_rec.trip_c = trip_top_c;
         heat_last_unclean = 0;
         rec_saved_at = 0;                   /* the first record at once */
@@ -942,7 +951,7 @@ uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;
 int heat_reserve_pct = 15, heat_target_c10 = 200, heat_no_current_stop;
 int heat_reserve_override;                  /* 1.0-rc2 (review): the hold overrides the reserve for the next session only */
 int heat_soc_stop_c10;                      /* 0.6.3: Manual's SoC stop (0 off: the user's default) */
-int heat_surv_stop_c10 = 1310;              /* 1.1: Survival (trip off)'s SoC stop: 131 C (the user's planned test) */
+int heat_surv_stop_c10 = 1350;              /* 1.1-beta4: Survival (trip off)'s SoC limit, held: 135 C (125..145) */
 struct heat_record heat_rec, heat_last;
 int heat_last_unclean;
 
@@ -965,6 +974,15 @@ static void record(const struct heat_in *in, int running)
             heat_rec.peak_soc_c10 = in->soc_c10;
         if (in->gauge_ok && -in->ma > heat_rec.peak_ma)
             heat_rec.peak_ma = -in->ma;
+        /* 1.1-beta4: the battery's power and the energy: V x I at each record (4 a second while heating) */
+        uint64_t now = sb_ms();
+        int mw = in->gauge_ok && in->ma < 0 && in->mv > 0 ? (int)((int64_t)-in->ma * in->mv / 1000) : 0;
+        if (mw > heat_rec.peak_mw)
+            heat_rec.peak_mw = mw;
+        if (running && rec_t && now > rec_t && now - rec_t < 5000U)
+            rec_uwh += (uint64_t)mw * (now - rec_t) / 3600U;  /* mW x ms / 3600 = uWh */
+        rec_t = now;
+        heat_rec.mwh = (int32_t)(rec_uwh / 1000U);
     }
     sb_strcpy(heat_rec.why, sizeof(heat_rec.why), ctl.why);
     if (!running || sb_ms() - rec_saved_at >= 30000U) {
@@ -1041,16 +1059,16 @@ static void survival_show(void)
     int x = pending_level == HEAT_SURVIVAL_X;
     static char stopl[128];
     ub_init(&u);
-    ub_s(&u, "Stops at your SoC stop (");
+    ub_s(&u, "Holds at your limit (");
     ub_dec(&u, (uint64_t)(heat_surv_stop_c10 / 10));
-    ub_s(&u, " \xc2\xb0" "C), 55 \xc2\xb0" "C battery or 2 %. A watchdog restarts the phone if the software stalls.");
+    ub_s(&u, " \xc2\xb0" "C) to 2 %; stops 5 \xc2\xb0" "C past it or at 55 \xc2\xb0" "C battery. A watchdog restarts a stalled phone.");
     sb_strcpy(stopl, sizeof(stopl), u.b);
     switch (surv_step) {
     case 0:
         kui_confirm(x ? "Survival heat, trip OFF (1 of 4)?" : "Survival heat (1 of 3)?",
                     "A LAST RESORT for a survival situation: the most heat this phone can make.",
                     "Every core and the GPU at the chip's top table steps, the screen at its brightest and the LED.",
-                    x ? "The chip's own heat power cut will be switched OFF: flat out, no holding back, to your stop." :
+                    x ? "The chip's own heat power cut will be switched OFF: flat out up to your limit, held there to 2 %." :
                         "It holds the processor just below the chip's own power cut and runs to 2 % battery.",
                     x ? "Hold: 1 of 4" : "Hold: 1 of 3", survival_done);
         break;

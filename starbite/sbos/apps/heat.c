@@ -178,7 +178,7 @@ static void show(void)
         /* 1.1: the last resort (three confirmations; four with the chip's trip off) */
         fmt_init(&f);
         if (surv_tripoff) {
-            fmt_s(&f, "Trip OFF: flat out to ");
+            fmt_s(&f, "Trip OFF: flat out, held at ");
             fmt_d(&f, h.surv_stop_c10 / 10);
             fmt_s(&f, " \xc2\xb0" "C. Asks 4 times.");
         } else {
@@ -188,19 +188,19 @@ static void show(void)
         ui_toggle(24, "Hardware trip OFF", surv_tripoff);
         if (surv_tripoff) {
             fmt_init(&f);
-            fmt_s(&f, "Stop at ");
+            fmt_s(&f, "Limit ");
             fmt_d(&f, h.surv_stop_c10 / 10);
-            fmt_s(&f, " \xc2\xb0" "C (tap to change)");
+            fmt_s(&f, " \xc2\xb0" "C (tap: 125 to 145)");
             ui_button(25, f.b, 0, 0);
         }
     }
     if (on && h.level >= HEAT_SURVIVAL) {
         fmt_init(&f);
         if (h.level == HEAT_SURVIVAL_X) {
-            fmt_s(&f, h.trip_off ? "SURVIVAL, THE CHIP'S POWER CUT OFF: flat out, stops at " :
-                                   "SURVIVAL (trip off asked): flat out, stops at ");
+            fmt_s(&f, h.trip_off ? "SURVIVAL, THE CHIP'S POWER CUT OFF: held at " :
+                                   "SURVIVAL (trip off asked): held at ");
             fmt_d(&f, h.surv_stop_c10 / 10);
-            fmt_s(&f, " \xc2\xb0" "C.");
+            fmt_s(&f, " \xc2\xb0" "C, stops 5 past it.");
         } else {
             fmt_s(&f, "SURVIVAL: holds the processor below ");
             fmt_d(&f, h.surv_target_c10 / 10);
@@ -370,7 +370,7 @@ void app_event(const struct sbos_event *ev)
         if (ev->id == 23 && !running)
             heat_request(surv_tripoff ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0);
         else if (ev->id == 25 && !running)
-            setting_set(SET_HEAT_SURV_STOP_C10, h.surv_stop_c10 >= 1310 ? 1250 : h.surv_stop_c10 >= 1280 ? 1310 : 1280);
+            setting_set(SET_HEAT_SURV_STOP_C10, h.surv_stop_c10 >= 1450 ? 1250 : (h.surv_stop_c10 / 50 + 1) * 50);
         else if (ev->id == 22 && !running) {
             int k = 0;
             for (int i = 0; i < 5; ++i)

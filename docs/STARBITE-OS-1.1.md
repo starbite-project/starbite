@@ -1,4 +1,14 @@
-# Starbite OS 1.1-beta3: Survival heat (2026-11-08)
+# Starbite OS 1.1-beta4: Survival heat (2026-11-08)
+
+## beta4: the trip-off limit is held, not a stop
+
+beta3's trip-off run worked for the user (about 13 W, all 8 cores and the GPU, stopped at the 131 °C stop). The
+user asked to remove that stop: the limit (125 to 145 °C, default 135) is now **held** like the trip-on mode's
+122 °C (at or above it one load off per 250 ms, two at 2 °C over: the M3s, then the GPU, then the A55s; back on one a
+second below the limit minus 2 °C), so the heat goes on to 2 % battery. A runaway still ends: a stop 5 °C past the
+limit (at most 149 °C; a 150 °C reading is not valid and the lost-reading stop acts). The heat record keeps the peak
+power and the energy (`peak_mw`, `mwh`); the stop's log line ends with "peak X.X W, N mWh".
+
 
 ## beta3: the hang of beta2's trip-off session (19:31, a watchdog reset)
 
@@ -52,5 +62,5 @@ strobes as the light instead. 0x63 is never written. Settings says so.
 - Not in 1.1: the M3 above 1794 MHz (past the cluster buck's current rating without Samsung's over-current handler),
   camera sensors, HBM, Wi-Fi TX, a shader workload (`docs/STARBITE-OS.md` 12.21 says why).
 
-Install: as 1.0-rc3, with `starbite-os-1.1-beta3.img` in the `starbite-os.img` entry and the catalog's version line
-`"1.1-beta3 · heat, light, alarm, card, Wi-Fi"`. Undo: `starbite-os-1.0-rc3.img` in the same entry.
+Install: as 1.0-rc3, with `starbite-os-1.1-beta4.img` in the `starbite-os.img` entry and the catalog's version line
+`"1.1-beta4 · heat, light, alarm, card, Wi-Fi"`. Undo: `starbite-os-1.0-rc3.img` in the same entry.

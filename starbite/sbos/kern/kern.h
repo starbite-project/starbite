@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.1-beta3"
+#define SBOS_VERSION "1.1-beta4"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -129,6 +129,7 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
 void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in);
 int heat_max_cores(int level);      /* Low 3, Medium 5, High 7 */
 int heat_surv_target(const struct heat_ctl *c);    /* 1.1: the SoC reading Survival holds below (0.1 C) */
+int heat_surv_estop(const struct heat_ctl *c);     /* 1.1-beta4: trip off: the stop 5 C past the limit (<= 149 C) */
 /* After a stop: is worker core w's load gone? psci = AFFINITY_INFO's raw x0 (only w0 counts), slot = the
  * worker's SB_WK_* state, start_fail = CPU_ON said yes but the core never checked in. 1 off, 2 no load of ours
  * but PSCI says on / the core never checked in (logged, harmless), 0 still in the heat kernel (a restart after
@@ -157,7 +158,7 @@ extern uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;    /* 0.6.1: Manual's p
 extern int heat_reserve_pct, heat_target_c10, heat_no_current_stop;   /* 0.6.2 */
 extern int heat_reserve_override;    /* 1.0-rc2: the next session's reserve overridden (once) */
 extern int heat_soc_stop_c10;       /* 0.6.3: Manual's optional SoC stop (0 off) */
-extern int heat_surv_stop_c10;      /* 1.1: Survival (trip off)'s SoC stop (default 131 C) */
+extern int heat_surv_stop_c10;      /* 1.1: Survival (trip off)'s SoC limit (1.1-beta4: held there; default 135 C) */
 void heater_trip_restore_now(void); /* 1.1: before a restart or a power-off: the chip's trip back on (waits <= 3 s to cool) */
 /* 0.6.3: the S2MPB02 over I2C (fled.c): the torch at 240 mA, SOS flash pulses at 1250 mA (the chip's 125 ms timer) */
 extern int led_full;                /* Settings > Alarm: 0 the pins only as before (default), 1 the rated currents */
@@ -183,6 +184,7 @@ struct heat_record {
     int32_t peak_bat_c10, peak_soc_c10, peak_ma;
     int32_t trip_c;                 /* the hardware trip's decoded temperature */
     char why[48];
+    int32_t peak_mw, mwh;           /* 1.1-beta4: the battery's peak power and the energy taken this session */
 };
 extern struct heat_record heat_rec;
 extern int heat_last_unclean;       /* the last start found a record still "running" */

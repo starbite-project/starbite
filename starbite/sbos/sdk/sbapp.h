@@ -194,7 +194,7 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
                             1.1-beta2: 2 on for the torch only (the flash pulses off: the chip's flash timer unconfirmed) */,
        SET_PANEL_DUMP = 17 /* 0.6.5: write 1: read the panel's registers (read only, logged) */,
        SET_HEAT_RESERVE_ONCE = 18 /* 1.0-rc2: write 1: the next full-heat session runs without the reserve (once) */,
-       SET_HEAT_SURV_STOP_C10 = 19 /* 1.1: Survival (trip off)'s SoC stop, 0.1 C: 1250..1310 (default 1310) */ };
+       SET_HEAT_SURV_STOP_C10 = 19 /* 1.1: Survival (trip off)'s SoC limit, 0.1 C: 1250..1450 (1.1-beta4: held there; default 1350) */ };
 
 /* 1.0-rc3: the full-heat battery data for the minutes-left estimates (Heat's confirmation and its live readout).
  * Measured on the phone (rc2, 2026-11-08, Manual flat out, 7 cores + GPU): 2.8 A at 3.67 V (about 10 W; peak 2.86 A),
