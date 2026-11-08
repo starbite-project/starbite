@@ -47,6 +47,7 @@ struct fake {
     int defer, hang;
     unsigned pending;
     int starts_while_busy, soft_resets, hard_stops, as_cmds;
+    int barriers;                         /* the scheduler's io has a real barrier callback (counted) */
 };
 
 static struct fake F;
@@ -337,8 +338,18 @@ static uint64_t bo_get64(const uint64_t *pa, uint64_t off)
     return v;
 }
 
-static void sched_tests(uint8_t *mem, const struct sbm_io *io)
+static void f_barrier(void *ctx)
 {
+    (void)ctx;
+    F.barriers++;
+}
+
+static void sched_tests(uint8_t *mem, const struct sbm_io *io0)
+{
+    /* a non-NULL barrier, as on the phone: every path that calls it runs here (T12's first build looped
+     * forever in its barrier helper, which a NULL callback never reached) */
+    struct sbm_io iob = *io0;
+    const struct sbm_io *io = &iob;
     static struct sbg g;
     static uint64_t pa[4096];
     uint64_t va, t = 1000;
@@ -350,6 +361,7 @@ static void sched_tests(uint8_t *mem, const struct sbm_io *io)
     F.region[0].pa = POOL_PA;
     F.region[0].size = POOL_BYTES;
     F.region[0].host = pool;
+    iob.barrier = f_barrier;
     CHECK(sbg_init(&g, io, SBM_FMT_AARCH64, 0x5771777, (volatile uint64_t *)mem, MEM_PA, SBM_TEST_BYTES / 4096) == 0,
           "scheduler init");
     CHECK(R(0x1008) == 0x70007 && R(0x2008) == 1 && R(0x028) == 0x81, "interrupts unmasked: slots 0-2, AS0, GPU faults");
@@ -514,6 +526,7 @@ static void sched_tests(uint8_t *mem, const struct sbm_io *io)
               "triangle through the scheduler: %u px, %u foreign, %u faults", px, badpx, g.faults);
     }
 
+    CHECK(F.barriers > 100, "barrier callback used (%d times): before every start, after every map and unmap", F.barriers);
     sbg_fini(&g);
     CHECK(F.soft_resets > 0 && R(0x1008) == 0, "fini: reset, interrupts masked");
     free(pool);

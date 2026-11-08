@@ -408,6 +408,13 @@ interrupts re-armed; context 2 back after `sbg_ctx_reset`); a hang (nothing befo
 the next chain runs); deferred release; XNU's triangle through the scheduler. Five deliberate bugs in the core
 (no guilt, no deferred release, no timeout, one page mapped for all, an off-by-one fence) each fail it.
 
+**T12's first build (sbmali-0b1e6520, 2026-11-08) never ran: the main session's pre-flight found it would
+hang.** A text replacement had turned sbg_core's `barrier()` helper into a call to itself (`if (io->barrier)
+barrier(g);`), which clang compiled to `b .` (6 places, the map/unmap/start paths). The host test missed it
+because its fake had no barrier callback, so the branch was never taken. Fixed, and the scheduler test now
+runs with a counting barrier: the old code hangs under it. `tools/win/check-selfloop.sh` (any branch to its
+own address) now fails `starbite/win/build.sh`. A source scan for self-calling functions finds no other.
+
 **T12 (phone):** sbmali runs, after T8's runs, `SchedRuns` rounds (default 100) of 8 WRITE_VALUE chains plus
 the triangle, all queued at once through sbg, on buffers made of scattered Windows pages (MDLs), polled; then
 one deliberate MMU fault (a chain at 0x7FF00000, nothing mapped there) followed by another context's chain,

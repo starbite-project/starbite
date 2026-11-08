@@ -26,6 +26,8 @@ LIBS="displib.lib ntstrsafe.lib libcntpr.lib" \
 "$win/build.sh" kmdf "$out/sbmali.sys" "$here/sbmali/sbmali.c" "$here/sbmali/sbm_core.c" "$here/sbmali/sbg_core.c" "$here/common/sbw_acpm.c"
 
 cp "$here/sbdisplay/sbdisplay.inf" "$here/sbmali/sbmali.inf" "$out/"
+# no image may branch to itself (T12's first sbmali did: an endless loop in a helper calling itself)
+"$win/check-selfloop.sh" "$out/sbthermal.sys" "$out/sbdisplay.sys" "$out/sbmali.sys"
 "$win/sign.sh" "$out/sbthermal.sys" "$out/sbdisplay.sys" "$out/sbmali.sys"
 for p in sbdisplay sbmali; do
     python3 "$win/makecat.py" "$out/$p.cat" "$out/$p.inf" "$out/$p.sys" --hwid 'acpi\strb0072'

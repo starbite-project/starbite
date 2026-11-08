@@ -31,7 +31,7 @@ static void wr(struct sbg *g, unsigned off, sbm_u32 v) { g->io->wr(g->io->ctx, S
 static void barrier(struct sbg *g)
 {
     if (g->io->barrier)
-        barrier(g);
+        g->io->barrier(g->io->ctx);     /* the I/O layer's DSB, never this helper (T12 shipped a self-call) */
 }
 
 static void arm_irqs(struct sbg *g)
