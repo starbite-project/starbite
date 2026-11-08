@@ -27,6 +27,7 @@
 #include "../sbm.h"
 #include "sbm_sb.h"
 #include "ext4.h"
+#include "jbd2.h"
 
 static unsigned stale_serrors;
 
@@ -301,13 +302,146 @@ static int part_read(struct part *pt, uint64_t off, void *buf, uint32_t len)
     }
     return 0;
 }
-static int efs_read(void *ctx, uint64_t off, void *dst, uint32_t len) { return part_read(ctx, off, dst, len); }
+/* EFS reads go through the journal overlay once jbd2_scan has built it (never written back anywhere) */
+static const struct jbd2 *efs_journal;
+static uint32_t efs_bs = 4096;
+static uint8_t efs_jblk[4096] __attribute__((aligned(64)));
+static int efs_raw(void *ctx, uint64_t off, void *dst, uint32_t len) { return part_read(ctx, off, dst, len); }
+static int efs_read(void *ctx, uint64_t off, void *dst, uint32_t len)
+{
+    return jbd2_read(efs_journal, efs_bs, efs_raw, ctx, off, dst, len, efs_jblk, sizeof(efs_jblk));
+}
+
+struct names { char line[160]; unsigned n, len; int seen; void (*out)(const char *); };
+static void name_cb(void *ctx, const char *name, unsigned len, uint32_t ino)
+{
+    struct names *nm = ctx;
+    (void)ino;
+    nm->n++;
+    if (len == 11 && !memcmp(name, "nv_data.bin", 11))
+        nm->seen = 1;
+    if (nm->len + len + 2 > 70) {
+        sbm_redact_text(nm->line, sizeof(nm->line));
+        nm->out(nm->line);
+        sb_strcpy(nm->line, sizeof(nm->line), "EFS: / ");
+        nm->len = 7;
+    }
+    for (unsigned i = 0; i < len && nm->len + 2 < sizeof(nm->line); ++i)
+        nm->line[nm->len++] = (name[i] >= 0x20 && name[i] < 0x7F) ? name[i] : '?';
+    nm->line[nm->len++] = ' ';
+    nm->line[nm->len] = 0;
+}
+
+/* EFS /nv_data.bin, read only: the superblock facts, the journal (replayed in memory if the file system needs
+ * recovery), the root's names, the file. Every step says how it went. */
+static struct jbd2_map jmap[8192];
+static struct jbd2 jrn;
+static int efs_nv(uint8_t *d, uint32_t size, void (*line)(const char *))
+{
+    static uint8_t blk[4096] __attribute__((aligned(64)));
+    static struct ext4 fs;
+    static struct part efs;
+    uint8_t sb[256];
+    char s[160];
+    uint32_t ino;
+    uint8_t inode[EXT4_INODE_MAX];
+    efs.blk = blk;
+    efs.blk_lba = ~0ULL;
+    efs_journal = 0;
+    if (!gpt_find("EFS", &efs.first, &efs.last)) {
+        line("EFS: no GPT partition named EFS");
+        return SBM_ENOENT;
+    }
+    sbm_fmt(s, sizeof(s), "EFS: partition %u KiB", (unsigned)((efs.last - efs.first + 1) * 4));
+    line(s);
+    if (part_read(&efs, 1024, sb, sizeof(sb)) != 0) {
+        line("EFS: superblock read failed");
+        return SBM_EIO;
+    }
+    uint32_t magic = sb[0x38] | sb[0x39] << 8, logbs = sbm_le32(sb + 0x18), compat = sbm_le32(sb + 0x5C),
+             incompat = sbm_le32(sb + 0x60), ro = sbm_le32(sb + 0x64), jinum = sbm_le32(sb + 0xE0),
+             state = sb[0x3A] | sb[0x3B] << 8;
+    sbm_fmt(s, sizeof(s), "EFS: magic 0x%04x bs %u compat 0x%x incompat 0x%x ro 0x%x", magic, 1024u << (logbs & 7),
+            compat, incompat, ro);
+    line(s);
+    sbm_fmt(s, sizeof(s), "EFS: state 0x%x journal inode %u needs_recovery %s", state, jinum,
+            (incompat & 0x4) ? "YES" : "no");
+    line(s);
+    if (magic != 0xEF53) {
+        line("EFS: not ext4 (f2fs? another layout): stop");
+        return SBM_EINVAL;
+    }
+    fs.read = efs_read;
+    fs.ctx = &efs;
+    int e = ext4_open(&fs);
+    if (e) {
+        sbm_fmt(s, sizeof(s), "EFS: ext4_open refused: %d", e);
+        line(s);
+        return SBM_EINVAL;
+    }
+    efs_bs = fs.bs;
+    if ((incompat & 0x4) && (compat & 0x4) && jinum) {
+        e = jbd2_scan(&fs, jinum, &jrn, jmap, sizeof(jmap) / sizeof(jmap[0]));
+        sbm_fmt(s, sizeof(s), "EFS journal: %d %s start %u seq %u tx %u blocks %u revoked %u%s", e,
+                jrn.why ? jrn.why : "ok", jrn.start, jrn.seq0, jrn.transactions, jrn.n, jrn.skipped_revoked,
+                jrn.dropped_incomplete ? " (+1 incomplete, ignored)" : "");
+        line(s);
+        if (e)
+            return SBM_EINVAL;
+        efs_journal = &jrn;
+        efs.blk_lba = ~0ULL;
+        if ((e = ext4_open(&fs)) != 0) {    /* again, through the replayed blocks */
+            sbm_fmt(s, sizeof(s), "EFS: ext4_open after the replay refused: %d", e);
+            line(s);
+            return SBM_EINVAL;
+        }
+    } else if (incompat & 0x4) {
+        line("EFS: needs recovery but has no journal inode: stop");
+        return SBM_EINVAL;
+    }
+    struct names nm;
+    memset(&nm, 0, sizeof(nm));
+    nm.out = line;
+    sb_strcpy(nm.line, sizeof(nm.line), "EFS: / ");
+    nm.len = 7;
+    e = ext4_list(&fs, 2, name_cb, &nm);
+    if (nm.len > 7) {
+        sbm_redact_text(nm.line, sizeof(nm.line));
+        line(nm.line);
+    }
+    sbm_fmt(s, sizeof(s), "EFS: root: %u names (list %d), nv_data.bin %s", nm.n, e, nm.seen ? "present" : "ABSENT");
+    line(s);
+    if ((e = ext4_lookup(&fs, "/nv_data.bin", &ino)) != 0 || (e = ext4_inode(&fs, ino, inode)) != 0) {
+        sbm_fmt(s, sizeof(s), "EFS: /nv_data.bin lookup failed: %d", e);
+        line(s);
+        return SBM_ENOENT;
+    }
+    uint32_t mode = inode[0] | inode[1] << 8, flags = sbm_le32(inode + 0x20);
+    sbm_fmt(s, sizeof(s), "EFS: nv_data.bin inode %u mode 0x%x flags 0x%x size %u", ino, mode, flags,
+            (unsigned)ext4_size(inode));
+    line(s);
+    if ((mode & 0xF000) != 0x8000 || (flags & 0x10000000)) {   /* a regular file, not inline data */
+        line("EFS: nv_data.bin is not a plain regular file: stop");
+        return SBM_EINVAL;
+    }
+    if (ext4_size(inode) != size) {
+        sbm_fmt(s, sizeof(s), "EFS: nv_data.bin is %u bytes, the TOC says %u", (unsigned)ext4_size(inode), size);
+        line(s);
+        return SBM_EINVAL;
+    }
+    for (uint32_t o = 0; o < size; o += 4096)
+        if ((e = ext4_read(&fs, inode, o, d + o, size - o < 4096 ? size - o : 4096)) != 0) {
+            sbm_fmt(s, sizeof(s), "EFS: nv_data.bin read failed at 0x%x: %d", o, e);
+            line(s);
+            return SBM_EIO;
+        }
+    return 0;
+}
 
 int sbm_sb_load_image(struct sbm_image *im, void (*line)(const char *))
 {
-    static uint8_t blk[4096] __attribute__((aligned(64))), efs_blk[4096] __attribute__((aligned(64)));
-    static struct ext4 fs;
-    struct part radio = { 0, 0, ~0ULL, blk }, efs = { 0, 0, ~0ULL, efs_blk };
+    static uint8_t blk[4096] __attribute__((aligned(64)));
+    struct part radio = { 0, 0, ~0ULL, blk };
     uint8_t head[0x400];
     char s[160];
     memset(im, 0, sizeof(*im));
@@ -337,25 +471,10 @@ int sbm_sb_load_image(struct sbm_image *im, void (*line)(const char *))
             if (part_read(&radio, l->src_off, d, l->size) != 0)
                 return SBM_EIO;
         } else {
-            uint32_t ino;
-            uint8_t inode[EXT4_INODE_MAX];
             line("load: EFS /nv_data.bin (read only)");
-            if (!gpt_find("EFS", &efs.first, &efs.last))
-                return SBM_ENOENT;
-            fs.read = efs_read;
-            fs.ctx = &efs;
-            if (ext4_open(&fs) != 0 || ext4_lookup(&fs, "/nv_data.bin", &ino) != 0 || ext4_inode(&fs, ino, inode) != 0) {
-                line("load: EFS: no ext4 /nv_data.bin");
-                return SBM_ENOENT;
-            }
-            if (ext4_size(inode) != l->size) {
-                sbm_fmt(s, sizeof(s), "load: nv_data.bin is %u bytes, the TOC says %u", (unsigned)ext4_size(inode), l->size);
-                line(s);
-                return SBM_EINVAL;
-            }
-            for (uint32_t o = 0; o < l->size; o += 4096)
-                if (ext4_read(&fs, inode, o, d + o, l->size - o < 4096 ? l->size - o : 4096) != 0)
-                    return SBM_EIO;
+            int e = efs_nv(d, l->size, line);
+            if (e < 0)
+                return e;
         }
         im->data[k] = d;
     }

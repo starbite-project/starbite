@@ -40,7 +40,7 @@ CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie
 -nostdlib -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-plt -mstrict-align -mcpu=cortex-a55 \
 -fno-math-errno -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$modem"
 objs=""
-for src in "$lib"/*.c "$lib"/*.S "$modem"/sbm_*.c "$modem/sb/sbm_sb.c" "$modem/sb/ext4.c" "$here/main.c"; do
+for src in "$lib"/*.c "$lib"/*.S "$modem"/sbm_*.c "$modem/sb/sbm_sb.c" "$modem/sb/ext4.c" "$modem/sb/jbd2.c" "$here/main.c"; do
     obj="$out/mp_$(basename "$src" | tr . _).o"
     # shellcheck disable=SC2086
     "${CROSS}gcc" $CFLAGS -DSB_ASSETS="\"$out/mp-sbassets.sb7\"" "$src" -o "$obj"
@@ -49,7 +49,7 @@ done
 # rule: no partition write from the modem code. Its objects must not even reference a block-write function
 # (libsb's own code keeps them, behind sb_storage_hold, which the stage 3 keys set for the whole run).
 bad=""
-for o in "$out"/mp_sbm_*.o "$out"/mp_ext4_c.o "$out"/mp_main_c.o; do
+for o in "$out"/mp_sbm_*.o "$out"/mp_ext4_c.o "$out"/mp_jbd2_c.o "$out"/mp_main_c.o; do
     w=$("${CROSS}nm" -u "$o" | grep -E ' (sb_blk_write|ufs_write[a-z_]*|sd_write[a-z0-9_]*|sb_write|sb_write_store|store_write[a-z_]*)$' || true)
     [ -n "$w" ] && bad="$bad $(basename "$o"):$w"
 done

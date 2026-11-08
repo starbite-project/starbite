@@ -26,5 +26,8 @@ int ext4_lookup(struct ext4 *fs, const char *path, uint32_t *ino);
 int ext4_inode(struct ext4 *fs, uint32_t ino, uint8_t inode[EXT4_INODE_MAX]);
 uint64_t ext4_size(const uint8_t *inode);
 int ext4_read(struct ext4 *fs, const uint8_t *inode, uint64_t off, uint8_t *dst, uint32_t len);
+int ext4_bmap(struct ext4 *fs, const uint8_t *inode, uint32_t lblk, uint64_t *pblk);
+int ext4_list(struct ext4 *fs, uint32_t dir, void (*cb)(void *ctx, const char *name, unsigned len, uint32_t ino),
+              void *ctx);
 
 #endif

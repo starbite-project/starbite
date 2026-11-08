@@ -216,3 +216,38 @@ int ext4_lookup(struct ext4 *fs, const char *path, uint32_t *ino)
     *ino = cur;
     return 0;
 }
+
+/* Added for the modem glue: the physical block of an inode's logical block (0 = a hole), and a directory
+ * listing (names and inode numbers only). */
+int ext4_bmap(struct ext4 *fs, const uint8_t *inode, uint32_t lblk, uint64_t *pblk)
+{
+    return bmap(fs, inode, lblk, pblk);
+}
+
+int ext4_list(struct ext4 *fs, uint32_t dir, void (*cb)(void *ctx, const char *name, unsigned len, uint32_t ino),
+              void *ctx)
+{
+    uint8_t inode[EXT4_INODE_MAX];
+    int e = ext4_inode(fs, dir, inode);
+    if (e)
+        return e;
+    if ((g16(inode) & 0xF000) != 0x4000)
+        return EXT4_E_NOTFOUND;
+    uint64_t size = ext4_size(inode);
+    for (uint64_t off = 0; off < size; off += fs->bs) {
+        uint8_t *b = fs->dir;
+        uint32_t at = 0;
+        if ((e = ext4_read(fs, inode, off, b, fs->bs)))
+            return e;
+        while (at + 8 <= fs->bs) {
+            uint32_t i = g32(b + at), rl = g16(b + at + 4), l = b[at + 6];
+            if (rl < 8 || at + rl > fs->bs)
+                break;
+            if (i && l && at + 8 + l <= fs->bs)
+                cb(ctx, (const char *)b + at + 8, l, i);
+            at += rl;
+        }
+    }
+    return 0;
+}
+

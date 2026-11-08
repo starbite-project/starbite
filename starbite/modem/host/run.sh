@@ -47,6 +47,11 @@ $CC $flags -o "$OUT/sbm-test" $src "$here/fakecp.c" "$here/fakesoc.c" "$here/tes
 # shellcheck disable=SC2086
 $CC $flags -o "$OUT/sbm-lnk" $src "$here/lnk.c"
 if [ -n "$radio" ]; then "$OUT/sbm-test" "$radio"; else "$OUT/sbm-test"; fi
+# EFS: the glue's ext4 reader + in-memory journal replay, on images from mk-efs-fixture.sh (made in the VM)
+$CC -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all \
+    -o "$OUT/efs-test" "$core/sb/ext4.c" "$core/sb/jbd2.c" "$here/efs-test.c"
+fx=${SBM_EFS_FIXTURES:-"$here/out"}
+"$OUT/efs-test" "$fx/efs-nv-expected.bin" "$fx"/efs-*-dirty.img "$fx"/efs-*-clean.img
 lnk=${SBM_LNK:-}
 if [ -z "$lnk" ]; then
     lnk=$(ls "$root"/build/test-boots/*/dmesg*.txt "$root"/build/test-boots/*/last_kmsg*.txt 2>/dev/null || true)

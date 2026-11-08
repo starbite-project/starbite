@@ -273,6 +273,24 @@ magic, makes no UDL exchange and waits for no INIT_START. The CP stays in its ow
 - **Park** = Android's `ss310ap_off`: INTGR1 bit 1 (wakeup), 5 ms, dump_pc_no_pg (CP_CTRL_NS bit 17 via EL3),
   `cal_cp_reset_assert` (the *_SYS_PWR_REGs, CP_CTRL_NS bit 2 via EL3, CENTRAL_SEQ bit 16 = 0, wait status 0x80).
 
+### Result T5 (2026-11-08 20:34, cebf77f, `build/test-boots/modemload-dry-2034/loader-pmsg.txt`)
+RADIO's BOOT/MAIN/VSS loaded, then **EFS: no ext4 /nv_data.bin**, a clean stop with 0 faults. EFS (sda3) is
+journalled ext4. TWRP mounts it read-write at startup and logs "EXT4-fs (sda3): recovery complete", so the file
+system is regularly left with transactions only in its journal. Android rewrites nv_data.bin as a temp file
+plus a rename, and a raw reader then sees stale directory or inode blocks. Note that TWRP itself writes EFS on
+every visit (the replay); our code never does.
+
+### 6.1a EFS through the journal, read only (T5b)
+`sb/jbd2.c` replays the ext4 journal **in memory**. It scans committed transactions from the journal
+superblock's start and sequence (descriptor tags with 32/64-bit block numbers, checksum v2/v3 tag sizes,
+escaped blocks, revokes, an uncommitted tail dropped) and builds a map from file-system blocks to journal
+blocks. `jbd2_read` consults that map for every EFS read. Nothing is written back. The loader logs every step:
+superblock features, needs_recovery, the journal summary, the root's names (names only), and the
+nv_data.bin inode. **Host fixture** (`host/mk-efs-fixture.sh`, in the VM): ext4 images snapshotted while
+mounted after fsync-only commits, with and without metadata_csum. Without the replay the reader returns stale
+data; with it, the newest nv_data.bin. Clean images read correctly too. Not exercised by the fixture: revoke
+records (the code follows jbd2's rule: a revoke in transaction T masks the block in transactions up to T).
+
 ### 6.2 Safety review (hazard -> what prevents it -> how it is tested)
 | hazard | prevention | test |
 |---|---|---|
