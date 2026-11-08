@@ -53,6 +53,7 @@ static int pinged;
 static int ntp_st, clock_checked;
 static int32_t clock_off;
 static uint64_t ntp_t;
+static uint8_t ntp_nonce[8], ntp_server[4];
 /* the saved network (0.4.2): the store entry "wifinet", two lines (name, WPA2 passphrase or empty), made on the
  * Mac from the user's input for the Wi-Fi tests; read only, never logged, never shown (the passphrase) */
 static uint8_t sv_ssid[33];
@@ -338,16 +339,27 @@ static void net_udp(void *ctx, uint16_t port, const uint8_t from[4], uint16_t fr
     (void)from;
     if (port != NTP_PORT || from_port != 123 || ntp_st != 2 || len < 48 || (d[0] & 7) != 4)
         return;
+    if (memcmp(from, ntp_server, 4) || memcmp(d + 24, ntp_nonce, 8))
+        return;                             /* not from the server asked, or not an answer to our request */
+    if ((d[0] >> 6) == 3 || d[1] == 0 || d[1] >= 16)
+        return;                             /* the server is not synchronised */
     uint32_t secs = ntp_be32(d + 40);           /* the transmit time, seconds since 1900 */
     if (secs < 2208988800U + 1577836800U)   /* before 2020: not believed */
         return;
     uint64_t rtt = sb_ms() - ntp_t;
     int64_t utc = (int64_t)(secs - 2208988800U) + (int64_t)((rtt / 2 + 500) / 1000U);
-    int64_t d_s = clock_set_net(utc);
+    int was_set = 0;
+    int64_t d_s = clock_set_net(utc, &was_set);
+    if (d_s > 2000000000LL)
+        d_s = 2000000000LL;
+    if (d_s < -2000000000LL)
+        d_s = -2000000000LL;
     clock_off = (int32_t)d_s;
-    clock_checked = d_s ? 2 : 1;
+    clock_checked = was_set ? 3 : d_s ? 2 : 1;
     ntp_st = 3;
-    if (d_s)
+    if (was_set)
+        sb_log("wifi: the clock was set from the network (there was none; until a restart)");
+    else if (d_s)
         logn("wifi: the clock was checked over the network and corrected by ", (uint64_t)(d_s < 0 ? -d_s : d_s),
              d_s < 0 ? " s (it was ahead; until a restart)" : " s (it was behind; until a restart)");
     else
@@ -414,6 +426,7 @@ int wifi_power(int on)
         }
         kt_cancel(KT_WIFI, 0);
         dhcp_go = 0;
+        scan_retry = 0;
         join_pending = 0;
         memset(jp_pass, 0, sizeof(jp_pass));
         joined = -1;
@@ -435,6 +448,7 @@ int wifi_power(int on)
         memset(w, 0, bcmw_size());
     }
     w_ready = 0;
+    scan_retry = 0;
     irq_n = irq_missed = 0;
     irq_trusted = irq_kicked = 0;
     dk_next = dk_new = dk_reused = 0;      /* the DMA blocks of the first power-on, again in order */
@@ -517,6 +531,7 @@ int wifi_join(int i, const char *pass)
     if (st != SBOS_WIFI_UP || i < 0 || i >= nnets)
         return SBOS_EAGAIN;
     kt_set(KT_WIFI, 0, sb_ms(), 10, 0);    /* the tick soon (a relaxed poll may be pending) */
+    scan_retry = 0;
     if (nets[i].secure) {
         const char *k = pass && pass[0] ? pass : known_pass(nets[i].ssid, nets[i].ssid_len);
         unsigned n = k ? sb_strlen(k) : 0;
@@ -729,6 +744,7 @@ void wifi_timer(unsigned id)
                 set_state(SBOS_WIFI_CONNECTED, "");
                 pinged = 0;
                 ntp_st = 0;
+                clock_checked = 0;
             } else if (st == SBOS_WIFI_DHCP && now - t_state > DHCP_MS) {
                 sb_log("wifi: no DHCP answer");
                 (void)bcmw_leave(w);
@@ -751,7 +767,7 @@ void wifi_timer(unsigned id)
                 logn("wifi: the gateway answers a ping in ", net.ping_rtt_ms, " ms");
                 notify();
             }
-            if (st == SBOS_WIFI_CONNECTED && pinged == 2 && ntp_st == 0) {
+            if (st == SBOS_WIFI_CONNECTED && ntp_st == 0 && (pinged == 2 || (pinged == 1 && now - t_state > 3500))) {
                 ntp_st = sbnet_dns_query(&net, "pool.ntp.org") == 0 ? 1 : -1;
                 ntp_t = now;
             }
@@ -759,6 +775,12 @@ void wifi_timer(unsigned id)
                 uint8_t q[48];
                 memset(q, 0, sizeof(q));
                 q[0] = 0x23;                /* NTP version 4, client */
+                for (int i = 0; i < 8; i += 4) {    /* a nonce in the transmit time: the answer must echo it */
+                    uint32_t r = net_random(0);
+                    memcpy(ntp_nonce + i, &r, 4);
+                }
+                memcpy(q + 40, ntp_nonce, 8);
+                memcpy(ntp_server, net.dns_result, 4);
                 ntp_t = sb_ms();
                 ntp_st = sbnet_udp_send(&net, net.dns_result, 123, NTP_PORT, q, sizeof(q)) == 0 ? 2 : -1;
             } else if ((ntp_st == 1 && net.dns_state == SBNET_DNS_FAILED) ||

@@ -156,7 +156,7 @@ struct sbos_wifi {
     int32_t state, nets, rssi, secs;    /* secs: in this state */
     uint8_t ssid[33], ssid_len, ip[4], gateway[4];
     int32_t ping_ms;                    /* the gateway's answer, -1 none yet */
-    int32_t clock_checked;              /* 0.5.8: 0 not yet, 1 right, 2 corrected, -1 no answer */
+    int32_t clock_checked;              /* 0.5.8: 0 not yet, 1 right, 2 corrected, 3 set (there was none), -1 no answer */
     int32_t clock_off_s;                /* the correction (2) */
     char why[64];                       /* the last failure, in words */
 };

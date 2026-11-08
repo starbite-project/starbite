@@ -269,6 +269,7 @@ static void dhcp_server(const uint8_t *f, unsigned len)
                 pl = 48;
                 rp[0] = 0x24;                   /* version 4, server */
                 rp[1] = 2;
+                memcpy(rp + 24, u + 8 + 40, 8);     /* the originate time: the client's transmit time (its nonce) */
                 uint32_t t = 1794101400U + 2208988800U;
                 rp[40] = (uint8_t)(t >> 24), rp[41] = (uint8_t)(t >> 16), rp[42] = (uint8_t)(t >> 8), rp[43] = (uint8_t)t;
             }

@@ -15,14 +15,17 @@ static int16_t th[60];
 static int thn, was_on;
 static uint64_t th_t;
 
+static int sample_due;                      /* set by the 10 s timer: one sample per tick (a fixed grid) */
+
 static void sample(const struct sbos_heat *h, int on)
 {
     uint64_t now = uptime_ms();
     if (on && !was_on)
         thn = 0;                            /* a new session: a new curve */
     was_on = on;
-    if (!on || h->bat_c10 <= -1000 || (thn && now - th_t < 10000))
+    if (!on || h->bat_c10 <= -1000 || (thn && !sample_due))
         return;
+    sample_due = 0;
     if (thn == 60) {
         for (int i = 1; i < 60; ++i)
             th[i - 1] = th[i];
@@ -107,7 +110,13 @@ static void show(void)
         fmt_init(&lr);
         fmt_d(&lr, (thn - 1) * 10 / 60 ? (thn - 1) * 10 / 60 : (thn - 1) * 10);
         fmt_s(&lr, (thn - 1) * 10 / 60 ? " min ago|now (stops at 42)" : " s ago|now (stops at 42)");
-        ui_chart("BATTERY TEMPERATURE", th, thn, 200, 450, ORANGE, lr.b);
+        int lo = 200;                       /* 20 C, or lower when the phone was colder */
+        for (int i = 0; i < thn; ++i)
+            if (th[i] - 20 < lo)
+                lo = th[i] - 20;
+        if (lo < -300)
+            lo = -300;
+        ui_chart("BATTERY TEMPERATURE", th, thn, lo, 450, ORANGE, lr.b);
     }
     ui_textline("WARNING: the phone gets hot to hold. Keep it in a pocket or a glove, not on bare skin.", ORANGE);
     ui_textline("Uses the battery fast: about 1 % a minute on High. Not while charging.", GREY);
@@ -135,6 +144,10 @@ void app_event(const struct sbos_event *ev)
         show();
         break;
     case EV_APP_TIMER:
+        if (ev->id == 2)
+            sample_due = 1;
+        show();
+        break;
     case EV_APP_SERVICE:
         show();
         break;

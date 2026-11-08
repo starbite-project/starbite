@@ -1026,6 +1026,8 @@ static void build(void)
         h = fnv(h, &e->icon, sizeof(e->icon));
         h = fnv(h, e->a, sizeof(e->a));
         h = fnv(h, e->b, sizeof(e->b));
+        h = fnv(h, &e->n, sizeof(e->n));
+        h = fnv(h, &e->ms, sizeof(e->ms));
         int st[4] = { e->x, e->y, e->w, e->h };
         h = fnv(h, st, sizeof(st));
         if (e->interactive) {
@@ -1275,7 +1277,12 @@ static void draw_el(const struct el *e, int idx)
             }
             int val = v[i] < lo ? lo : v[i] > hi ? hi : v[i];
             int x = cx + 40 + (n > 1 ? (cw - 80) * i / (n - 1) : (cw - 80) / 2);
-            int y = cy + ch - 30 - (ch - 60) * (val - lo) / (hi - lo);
+            int64_t span = (int64_t)hi - lo;
+            int y = cy + ch - 30 - (int)((int64_t)(ch - 60) * ((int64_t)val - lo) / (span > 0 ? span : 1));
+            if (y < cy + 30)
+                y = cy + 30;
+            if (y > cy + ch - 30)
+                y = cy + ch - 30;
             if (px >= 0)
                 ui_line(px, py, x, y, 8, e->color);
             px = x, py = y;

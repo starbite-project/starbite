@@ -95,16 +95,18 @@ static int rtc_state;
  * correction in seconds (0: within 2 s, nothing changed). */
 static int64_t clock_adj;
 
-int64_t clock_set_net(int64_t utc)
+int64_t clock_set_net(int64_t utc, int *was_set)
 {
     struct sbos_time t;
+    *was_set = 0;
     if (!clock_now(&t)) {
         rtc_t = utc;
         rtc_ms = sb_ms();
         rtc_state = 2;
         clock_adj = 0;
+        *was_set = 1;                       /* there was no clock: set, not corrected */
         ui_mark_dirty();
-        return utc;
+        return 0;
     }
     int64_t d = utc - t.utc;
     if (d > -2 && d < 2)
@@ -117,7 +119,7 @@ int64_t clock_set_net(int64_t utc)
 int clock_now(struct sbos_time *t)
 {
     uint64_t now = sb_ms();
-    if (!rtc_state || now - rtc_try >= 60000U) {
+    if (rtc_state != 2 && (!rtc_state || now - rtc_try >= 60000U)) {   /* a network-set clock stays */
         uint64_t e;
         rtc_try = now;
         if (sb_rtc_epoch(&e) && e > 1577836800ULL) {
@@ -200,7 +202,7 @@ static void hist_add(void)
     if (hist_n && now - hist_t < HIST_MS)
         return;
     /* missed slots (the phone asleep longer than a slot): gaps */
-    while (hist_n && now - hist_t >= 2U * HIST_MS && hist_n < 1000) {
+    while (hist_n && now - hist_t >= 2U * HIST_MS) {
         hist[hist_head] = -32768;
         hist_head = (hist_head + 1) % HIST_N;
         if (hist_n < HIST_N)
@@ -211,7 +213,7 @@ static void hist_add(void)
     hist_head = (hist_head + 1) % HIST_N;
     if (hist_n < HIST_N)
         ++hist_n;
-    hist_t = now;
+    hist_t = hist_n > 1 ? hist_t + HIST_MS : now;   /* a fixed grid: late reads do not stretch the slots */
 }
 
 int battery_history(int16_t *out, int cap)

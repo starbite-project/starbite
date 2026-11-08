@@ -94,7 +94,9 @@ static void show(void)
             ui_textline(f.b, s.ping_ms >= 0 ? GREEN : GREY);
             if (s.clock_checked) {
                 fmt_init(&f);
-                if (s.clock_checked == 1) {
+                if (s.clock_checked == 3) {
+                    fmt_s(&f, "The clock was set from the internet");
+                } else if (s.clock_checked == 1) {
                     fmt_s(&f, "The clock is right (checked over the internet)");
                 } else if (s.clock_checked == 2) {
                     int off = s.clock_off_s < 0 ? -s.clock_off_s : s.clock_off_s;

@@ -533,6 +533,8 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         int t = app_by_id(s1);
         if (t < 0 || app_hidden(t) || t == a)
             return SBOS_EINVAL;
+        if (kui_screen() != 3 /* SCR_APP */)
+            return SBOS_EPERM;              /* not over the lock screen, SOS, the power menu or a confirmation */
         kui_open_app(t);                    /* events only: this handler finishes first */
         return 0;
     }
@@ -655,7 +657,8 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         char lr[48];
         if (!front || !user_str(a, arg[0], s1, sizeof(s1)) || !user_in(a, arg[1], &c, sizeof(c)))
             return SBOS_EINVAL;
-        if (c.n < 0 || c.n > 60 || c.lo >= c.hi || !user_in(a, c.v, vals, (uint64_t)c.n * 2U))
+        if (c.n < 0 || c.n > 60 || c.lo < -32768 || c.hi > 32767 || c.lo >= c.hi ||
+            !user_in(a, c.v, vals, (uint64_t)c.n * 2U))
             return SBOS_EINVAL;
         lr[0] = 0;
         if (c.lr && !user_str(a, c.lr, lr, sizeof(lr)))
