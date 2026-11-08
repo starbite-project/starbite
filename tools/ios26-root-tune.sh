@@ -65,7 +65,10 @@ done
 GOOD_LAUNCHD=5d8bc695
 if [ "$mode" != prefs ]; then
     got=$(shasum -a 256 "$L" | cut -c1-8)
-    [ "$got" = "$GOOD_LAUNCHD" ] || { echo "pulled launchd.plist is $got, not the known-good $GOOD_LAUNCHD (stale read?): refusing to edit it"; exit 1; }
+    # known good: Apple's original as edited before today (5d8bc695) or a launchd.plist one of our tunes wrote
+    good=$( { echo $GOOD_LAUNCHD; for t in build/test-boots/*-ios26collect/tune/launchd.plist; do
+        [ -f "$t" ] && shasum -a 256 "$t" | cut -c1-8; done; } | sort -u)
+    echo "$good" | grep -qx "$got" || { echo "pulled launchd.plist is $got, not a known-good one (stale read?): refusing to edit it"; exit 1; }
 fi
 files=()
 case "$mode" in
