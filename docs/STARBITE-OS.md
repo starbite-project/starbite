@@ -829,6 +829,61 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.21 Version 1.1-beta1: Survival heat (2026-11-08)
+
+The user's request: a last resort for the most heat in a survival situation. Two Heat buttons, each its own level:
+
+- **Survival heat** (`HEAT_SURVIVAL`, three confirmations that say "a last resort for a survival situation"):
+  every core and the GPU at the tables' tops (A55 1950, M3 1794, GPU 598 MHz, the tables' own voltages), the panel
+  at its top and the LED, **held just below the chip's own power cut**: the load is shed at once when our SoC reading
+  reaches 122.0 °C (one load per 250 ms tick, two at 124 °C; the M3s first, the GPU last) and added back one a
+  second below 120 °C (the GPU after every core). The chip's trip acted at our 128 °C in the 0.6.2 and rc2 runs.
+  No call / SOS reserve: it runs to **2 %** battery. Above 3.5 A or below 3400 mV it sheds load instead of stopping.
+  Stops that stay: the battery's 55 °C, the chip's own trip (it must stay armed), the gauge-lost stop (10 s),
+  readings lost, a core fault, a battery current above 4.5 A after shedding (a short), the PMIC's and gauge's own
+  protections, Off / Power.
+- **Survival heat, trip OFF** (`HEAT_SURVIVAL_X`, four confirmations, the user's explicit request and
+  responsibility): the same, but `heater.c` clears THERM_TRIP_EN (bit 12) in TMU_TOP and TMU_SUB CONTROL (0x10070020,
+  0x10074020) after the start and reads it back; a write that does not stick restores both, refuses and logs "not
+  writable from EL1 here" (S-Boot sets the bit; Linux's TMU driver writes the same register from non-secure EL1, so
+  it is expected to be writable; the phone answers it). Before that, the loader's watchdog (cluster 1, 0x10060000) is
+  shortened to 5 s and from then on fed **only** by the heat loop (`hw_wdt_feed_heat`; every other feed is ignored):
+  a stall resets the SoC, and S-Boot arms the trip again at every boot. It refuses without that watchdog (counting,
+  its reset unmasked in the PMU). The regulation holds 3 °C below the user's SoC stop (Heat > "Trip-off stop": 125 /
+  128 / 131 °C, default 131), and the stop itself is at that reading. The trip comes back exactly as saved (read back)
+  at every end: after a stop once the processor is below 122 °C (at most 10 s, the loads already off; the stop-check
+  tick feeds the watchdog meanwhile), and at once (after up to 3 s of cooling) before a restart, a power-off, or the
+  heater's own restart after a hung core.
+- **Not driven** (and why): the M3 above 1794 MHz (the ECT lists 2704 for one or two cores; Samsung's DT allows
+  anything above 1794 only with its over-current handler, which throttles at the cluster buck's current limit: four
+  cores at 2704 under this load would be past the buck's rating and end in a brown-out, not more heat); the camera
+  sensors and their rails (the S2MPB02's LDOs are on the LED chip's bus, which does not answer yet, plus a sensor and
+  CSIS driver); HBM (needs the panel's register dump, 0.6.6); Wi-Fi TX (heat and Wi-Fi do not run together yet); a
+  fragment-shader load (no Mali shader binary: the GPU load is chains of fragment jobs). The CPU load is already
+  dense NEON FMA plus memory streaming (`heatk.c`).
+- **Watts**: the tours measured 9.9-10.2 W flat out (2.8 A). Survival adds the panel at its top and the LED (about
+  1 W more at most). Held below the trip, the sustained power is what the phone can shed at 122 °C: less than 10 W at
+  room temperature (the runs reached the trip within about 3 minutes), more in the cold.
+- Host: `heatctl.c`'s regulation in `sbos-host-test.c` against a simulated phone (the SoC's heat, the cell, the
+  gauge's 16 mAh per percent): held at a 122.2 °C peak, ended at 2 % after 27 simulated minutes; trip off: 128.2 °C,
+  below the 131 °C stop; every stop that stays, the shedding at 3.5 A and low voltage, Off. `sbos-heat-test.sh`: the
+  trip-off order (the loads off, the trip back, the watchdog back), the refusal of a TMU that does not take the write
+  (`SBOS_HOST_TMU_RO`) and of a missing watchdog (`SBOS_HOST_NOWDT`).
+
+### 12.20 1.0-rc3: the LED chip's diagnostics, the measured heat estimate (2026-11-08)
+
+From rc2's first run on the phone (`docs/STARBITE-OS-1.0.md`, rc3). **The LED chip** (S2MPB02, HSI2C 0x10920000 =
+USI10, 0x59) was refused and the log went with the power cut. S-Boot never sets this bus up, so its IP clock is in
+its reset state (Linux's `clk_set_rate(200 MHz)` sets CMU_PERIC1's IP_USER mux 0x0120 and the USI10 divider 0x1828;
+fled.c reads them, never writes the CMU). `fled.c` now logs everything that decides it (the CMU_PERIC1 gates, mux,
+divider and Q-channel; CMU_TOP's PERIC1_IP gate / divider / mux; the controller before and after the bring-up; the
+SCL / SDA levels while the pins are still inputs; after a failed read libsb's `sb_i2c_fail_irq / _fifo / _trans`:
+INT_STAT bit 10 NODEV = the bus ran and nobody acknowledged, nothing at all = the controller never clocked), Settings
+names the reason (`SET_LED_FULL` reads negative `FLED_*`), each switch-on retries, and `starbite-os-ledprobe.img`
+runs only `fled_probe()` (no chip writes) and restarts. Host: `starbite/host/sbos-led-test.sh` (`SBOS_HOST_FLED=noack
+| noclock`). **The estimates**: 2.8 A and 16 mAh per gauge percent (`SBOS_HEAT_FULL_MA`, `SBOS_HEAT_MAH_PER_PCT`)
+from the run's record (Manual flat out, 2.8 A at 3.67 V, 100 -> 91 % in 183 s).
+
 ### 12.19 0.7, step 1: the audio codec, read only (2026-11-08)
 
 The S9's sound (from the vendor DT and Samsung's exynos9810.dtsi): the codec is a Cirrus Logic **CS47L93**
@@ -901,8 +956,9 @@ The user's scenario (Lapland, -35 °C, the phone is all they have), agreed with 
   more than 0.5 °C below it, one off per second above +0.5 °C; the cores alone (no GPU). In deep cold a warm cell
   keeps its capacity and its current.
 - **The estimate first**: each confirmation says about how many minutes of full heat the charge above the reserve
-  gives at 1.9 A (the 0.6 tour's draw). While heating: the measured current and power (A, W) and the minutes left to
-  the reserve (3000 mAh). One line explains that the heat is the battery's power (~7 W), not the clocks.
+  gives at the measured full-heat rate (1.0-rc3: 2.8 A and 16 mAh per gauge percent, from rc2's run: 100 -> 90 % in
+  about 3.3 minutes; 0.6.2 used 1.9 A and 30 mAh). While heating: the measured current and power (A, W) and the
+  minutes left to the reserve (the same 16 mAh per percent). One line explains that the heat is the battery's power (~7 W), not the clocks.
 - **Clock steps from the chip's own ECT** (`build/em-research-g3d-ect.md`, read from S-Boot's ECT; the VG4 boot-LUN
   backup holds the same bytes): the A55's cap is **1794 MHz** (GEN `MINMAX_dvfs_cpucl0`, every ASV version), so
   0.6.1's 1950 MHz for Extreme was above Samsung's own limit: Extreme is back at 1794. Manual offers 1898 / 1950 MHz

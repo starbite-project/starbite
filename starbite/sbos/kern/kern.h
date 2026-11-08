@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.0-rc3"
+#define SBOS_VERSION "1.1-beta1"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -65,7 +65,7 @@ struct heat_limits {
     int soft_ma, hard_ma;           /* |current|: 3200 a core off, 3500 stop */
     int soft_sag_mv, cold_sag_mv;   /* VCELL below its resting value: 300 a core off, 150 the cold limit */
     int min_mv;                     /* stop below (3450) */
-    int min_pct[7];                 /* per level to start */
+    int min_pct[9];                 /* per level to start */
     /* Extreme and Manual (0.6.1): no regulation, everything flat out until the user stops it; the stops left: the
      * battery (55 C, its safety), the SoC just below its 115 C hardware trip (a clean stop instead of a reset), the
      * sensors' integrity, a core fault, the 15 % reserve, the voltage floor and the current limit */
@@ -78,6 +78,12 @@ struct heat_limits {
     unsigned step_ms;               /* regulation step (1000) */
     unsigned ramp_ms;               /* M3 1469 -> 1794 MHz after this (60000) */
     unsigned max_minutes, def_minutes;
+    /* Survival (1.1): no stop for the SoC's temperature but the chip's own trip; the load is shed just below it */
+    int surv_target_c10;            /* hold the SoC reading below this (122.0 C: the trip acted at our 128 twice) */
+    int surv_band_c10;              /* add load again only below target minus this (2.0 C) */
+    int surv_floor_pct;             /* run to this charge (2 %) */
+    int surv_shed_mv;               /* shed a load while VCELL is below this (3400 mV): no stop, the PMIC's own floor stays */
+    int surv_stop_ma;               /* stop above this battery current even after shedding (4500 mA: a short) */
 };
 extern const struct heat_limits heat_default_limits;
 
@@ -102,6 +108,10 @@ struct heat_ctl {
     int target_c10;                 /* 0.6.2: Keep warm's battery target */
     int no_current_stop;            /* 0.6.2: Manual only: the 3.5 A battery-current stop turned off by the user */
     int soc_stop_c10;               /* 0.6.3: Manual only: the user's SoC stop (0 off) */
+    int gpu_want;                   /* 1.1: the GPU's share may run (Survival sheds it last, adds it last) */
+    int trip_off;                   /* 1.1: heater.c switched the chip's trip off (Survival, trip off) */
+    int surv_stop_c10;              /* 1.1: Survival (trip off)'s SoC stop */
+    uint64_t t_shed;
     int cold;
     uint64_t t_start, t_end, t_step, t_ramp, last_bat_ok, last_soc_ok, last_gauge_ok;
     int rest_mv;
@@ -118,6 +128,7 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
 /* 4 Hz with fresh readings: state, cores, clocks, why. */
 void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in);
 int heat_max_cores(int level);      /* Low 3, Medium 5, High 7 */
+int heat_surv_target(const struct heat_ctl *c);    /* 1.1: the SoC reading Survival holds below (0.1 C) */
 /* After a stop: is worker core w's load gone? psci = AFFINITY_INFO's raw x0 (only w0 counts), slot = the
  * worker's SB_WK_* state, start_fail = CPU_ON said yes but the core never checked in. 1 off, 2 no load of ours
  * but PSCI says on / the core never checked in (logged, harmless), 0 still in the heat kernel (a restart after
@@ -146,6 +157,8 @@ extern uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;    /* 0.6.1: Manual's p
 extern int heat_reserve_pct, heat_target_c10, heat_no_current_stop;   /* 0.6.2 */
 extern int heat_reserve_override;    /* 1.0-rc2: the next session's reserve overridden (once) */
 extern int heat_soc_stop_c10;       /* 0.6.3: Manual's optional SoC stop (0 off) */
+extern int heat_surv_stop_c10;      /* 1.1: Survival (trip off)'s SoC stop (default 131 C) */
+void heater_trip_restore_now(void); /* 1.1: before a restart or a power-off: the chip's trip back on (waits <= 3 s to cool) */
 /* 0.6.3: the S2MPB02 over I2C (fled.c): the torch at 240 mA, SOS flash pulses at 1250 mA (the chip's 125 ms timer) */
 extern int led_full;                /* Settings > Alarm: 0 the pins only as before (default), 1 the rated currents */
 int fled_init(void);
@@ -368,6 +381,8 @@ void hw_irq_poll(void);             /* acknowledge what is pending (the loop, ev
 void hw_sleep_until(uint64_t at_ms);/* wfi (or a short delay in polling mode) until at_ms or an interrupt */
 void hw_arm_until(uint64_t at_ms);  /* the timer for an app frame's budget */
 void hw_wdt_feed(void);
+void hw_wdt_feed_heat(void);        /* 1.1: the heat loop's feed (the only one while the trip is off) */
+unsigned hw_wdt_short(unsigned secs);   /* 1.1: the loader's watchdog shortened (0: back); 0 = refused */
 int hw_dvfs(unsigned domain, uint32_t khz);   /* sb_acpm_dvfs_listed */
 int hw_m3_prep(void);               /* the vendor PMU defaults for the M3 cluster: 1 done */
 uint32_t hw_a55_khz(void), hw_m3_khz(void);

@@ -113,7 +113,11 @@ struct sbos_estimate {
 
 enum { HEAT_OFF = 0, HEAT_LOW, HEAT_MEDIUM, HEAT_HIGH, HEAT_EXTREME /* 0.6: everything at its rated top */,
        HEAT_MANUAL /* 0.6.1: the clocks picked per cluster, flat out as Extreme */,
-       HEAT_KEEPWARM /* 0.6.2: the battery kept at a temperature target (deep cold), no other limits */ };
+       HEAT_KEEPWARM /* 0.6.2: the battery kept at a temperature target (deep cold), no other limits */,
+       HEAT_SURVIVAL /* 1.1: a last resort: everything at the tables' tops, held just below the chip's own power cut,
+                        until 2 % battery (triple confirmation) */,
+       HEAT_SURVIVAL_X /* 1.1: Survival with the chip's hardware heat trip OFF: up to the user's SoC stop, a 5 s
+                          watchdog fed only by the heat loop (quadruple confirmation) */ };
 enum {
     HEAT_ST_OFF = 0, HEAT_ST_RUNNING, HEAT_ST_HOLDING, /* at the target temperature, load paused */
     HEAT_ST_PAUSED,             /* a charger is connected */
@@ -134,6 +138,10 @@ struct sbos_heat {
     int32_t trip_c;             /* 0.6.3: the SoC's hardware trip as decoded (C; the 0.6.2 tour saw the power cut at 128) */
     int32_t soc_stop_c10;       /* 0.6.3: Manual's SoC stop (0 off) */
     int32_t last_unclean, last_peak_soc_c10, last_secs;     /* 0.6.3: the last session ended without a stop */
+    int32_t trip_off;           /* 1.1: the chip's hardware heat trip is switched off now (Survival, trip off) */
+    int32_t surv_target_c10;    /* 1.1: the SoC reading Survival holds below (0.1 C) */
+    int32_t surv_stop_c10;      /* 1.1: Survival (trip off)'s SoC stop (0.1 C) */
+    int32_t gpu_on;             /* 1.1: the GPU's share is running */
 };
 
 enum { SOS_OFF = 0, SOS_FLASH = 1 };
@@ -184,7 +192,8 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
        SET_LED_FULL = 16 /* 0.6.3: the LED at its rated currents over I2C (torch 240 mA, SOS flash pulses 1250 mA);
                             1.0-rc3: reads 1 on, 0 off, negative = why the chip was refused (kern.h FLED_*) */,
        SET_PANEL_DUMP = 17 /* 0.6.5: write 1: read the panel's registers (read only, logged) */,
-       SET_HEAT_RESERVE_ONCE = 18 /* 1.0-rc2: write 1: the next full-heat session runs without the reserve (once) */ };
+       SET_HEAT_RESERVE_ONCE = 18 /* 1.0-rc2: write 1: the next full-heat session runs without the reserve (once) */,
+       SET_HEAT_SURV_STOP_C10 = 19 /* 1.1: Survival (trip off)'s SoC stop, 0.1 C: 1250..1310 (default 1310) */ };
 
 /* 1.0-rc3: the full-heat battery data for the minutes-left estimates (Heat's confirmation and its live readout).
  * Measured on the phone (rc2, 2026-11-08, Manual flat out, 7 cores + GPU): 2.8 A at 3.67 V (about 10 W; peak 2.86 A),

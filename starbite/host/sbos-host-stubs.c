@@ -67,6 +67,25 @@ void hw_sleep_until(uint64_t at_ms)
 }
 void hw_arm_until(uint64_t at_ms) { (void)at_ms; }
 void hw_wdt_feed(void) {}
+/* 1.1: the short watchdog (Survival, trip off): SBOS_HOST_NOWDT=1 = the loader armed none */
+static int host_wdt_short;
+static uint64_t host_wdt_fed;
+unsigned hw_wdt_short(unsigned secs)
+{
+    if (secs && getenv("SBOS_HOST_NOWDT"))
+        return 0;
+    host_wdt_short = secs != 0;
+    host_wdt_fed = sb_ms();
+    printf(secs ? "host: watchdog shortened to %u s (fed by the heat loop only)\n" : "host: watchdog back to the loader's%.0u\n", secs);
+    return secs ? secs * 1000U : 1U;
+}
+void hw_wdt_feed_heat(void)
+{
+    uint64_t now = sb_ms();
+    if (host_wdt_short && now - host_wdt_fed > 4000U)
+        printf("host: WATCHDOG WOULD HAVE FIRED: %llu ms without a heat-loop feed\n", (unsigned long long)(now - host_wdt_fed));
+    host_wdt_fed = now;
+}
 int hw_dvfs(unsigned domain, uint32_t khz) { return sb_acpm_dvfs_listed(domain, khz); }
 int hw_m3_prep(void) { return sb_m3_pmu_defaults(); }
 uint32_t hw_a55_khz(void) { return (uint32_t)(sb_a55_hz() / 1000U); }

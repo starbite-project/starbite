@@ -3,9 +3,13 @@
  * (heatctl.c) and applies what it decides: the worker cores, the listed ACPM DVFS levels with a PLL readback,
  * the M3 cluster's PMU defaults (after the first-use confirmation), the heartbeat, and the checks after a stop
  * (every worker core off within 1.5 s, else the clocks are restored and the phone restarts).
- * Nothing here writes storage, the PMIC, the charger or the TMU. */
+ * Nothing here writes storage, the PMIC or the charger. The TMU only in Survival with the trip off (1.1): its
+ * CONTROL registers' THERM_TRIP_EN (bit 12) cleared at the start, read back, and put back exactly at every end. */
 #include "sb.h"
 #include "kern.h"
+#ifdef SB_HOST
+#include <stdlib.h>
+#endif
 
 #define A55_RESTORE 1053000U
 #define M3_RESTORE 1066000U
@@ -44,6 +48,133 @@ static int pending_level, pending_minutes;
 static struct heat_in last_in;
 static int stopping;                        /* stop checks in progress */
 static uint64_t stop_t;
+/* 1.1: Survival with the chip's hardware heat trip off */
+static int trip_off;                        /* the trip is off now (we cleared it) */
+static uint32_t trip_saved[2];              /* TMU_TOP / TMU_SUB CONTROL as S-Boot left them */
+static uint64_t trip_restore_due;           /* after a stop: back on once cool, at the latest at this time */
+static int surv_step;                       /* the confirmation being shown (0 .. 2 / 3) */
+
+static uint32_t mrd(uintptr_t a)
+{
+    uint32_t v = *(volatile uint32_t *)a;
+    __asm__ volatile("dmb oshld" ::: "memory");
+    return v;
+}
+
+static void mwr(uintptr_t a, uint32_t v)
+{
+    __asm__ volatile("dmb oshst" ::: "memory");
+    *(volatile uint32_t *)a = v;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+static void trip_log(const char *what)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, what);
+    ub_s(&u, ": TMU_TOP CONTROL ");
+    ub_hex(&u, mrd(SB_TMU_TOP + 0x20), 8);
+    ub_s(&u, ", TMU_SUB CONTROL ");
+    ub_hex(&u, mrd(SB_TMU_SUB + 0x20), 8);
+    sb_log(u.b);
+}
+
+/* the trip off: only with the short watchdog in place, read back; 0 with why (nothing changed) */
+static int trip_disable(const char **why)
+{
+    uint32_t t = mrd(SB_TMU_TOP + 0x20), s = mrd(SB_TMU_SUB + 0x20);
+    trip_log("heater: Survival (trip off): before");
+    if (!(t & 0x1000U)) {
+        *why = "The chip's heat trip was not armed (S-Boot's)";
+        return 0;
+    }
+    unsigned ms = hw_wdt_short(5);
+    if (!ms) {
+        *why = "No watchdog to back it (the loader's must count, its reset unmasked)";
+        return 0;
+    }
+    sb_logx("heater: Survival (trip off): the watchdog at ms, fed only by the heat loop: ", ms);
+    trip_saved[0] = t;
+    trip_saved[1] = s;
+    mwr(SB_TMU_TOP + 0x20, t & ~0x1000U);
+    if (s & 0x1000U)
+        mwr(SB_TMU_SUB + 0x20, s & ~0x1000U);
+#ifdef SB_HOST
+    if (getenv("SBOS_HOST_TMU_RO")) {           /* the host's model of a secure (not writable) TMU */
+        mwr(SB_TMU_TOP + 0x20, t);
+        mwr(SB_TMU_SUB + 0x20, s);
+    }
+#endif
+    uint32_t t2 = mrd(SB_TMU_TOP + 0x20), s2 = mrd(SB_TMU_SUB + 0x20);
+    trip_log("heater: Survival (trip off): after the write");
+    if ((t2 & 0x1000U) || (s2 & 0x1000U)) {
+        mwr(SB_TMU_TOP + 0x20, t);
+        mwr(SB_TMU_SUB + 0x20, s);
+        (void)hw_wdt_short(0);
+        sb_log("heater: Survival (trip off): the TMU's CONTROL did not take the write: not writable from EL1 here "
+               "(secure / TZPC?); the trip stays on");
+        *why = "The chip's heat trip cannot be switched off from here";
+        return 0;
+    }
+    trip_off = 1;
+    ctl.trip_off = 1;
+    trip_restore_due = 0;
+    sb_log("heater: Survival (trip off): the chip's hardware heat trip is OFF; our stop at the user's SoC reading");
+    return 1;
+}
+
+/* the trip back exactly as S-Boot left it, read back; then the loader's watchdog reload */
+static void trip_restore(const char *when)
+{
+    if (!trip_off)
+        return;
+    mwr(SB_TMU_TOP + 0x20, trip_saved[0]);
+    mwr(SB_TMU_SUB + 0x20, trip_saved[1]);
+    uint32_t t = mrd(SB_TMU_TOP + 0x20), s = mrd(SB_TMU_SUB + 0x20);
+    trip_off = 0;
+    ctl.trip_off = 0;
+    trip_restore_due = 0;
+    sb_logf("heater: the chip's hardware heat trip back on: ", when);
+    if (t != trip_saved[0] || s != trip_saved[1])
+        trip_log("heater: THE TRIP DID NOT READ BACK AS SAVED");
+    else
+        trip_log("heater: restored");
+    (void)hw_wdt_short(0);
+    sb_log("heater: the watchdog back to the loader's");
+}
+
+static int soc_now_c10(void)
+{
+    struct sb_temps t;
+    sb_temps_read(&t);
+    return t.top == 1 && t.hottest > -30 && t.hottest < 150 ? t.hottest * 10 : 2000;
+}
+
+/* the loads are already off: wait (the heat loop's feed) until the reading is below Survival's 122 C, at most until
+ * due, so the trip does not cut the power the moment it is back on */
+static void trip_restore_when_cool(int force)
+{
+    if (!trip_off)
+        return;
+    hw_wdt_feed_heat();
+    int c = soc_now_c10();
+    if (force || c < heat_default_limits.surv_target_c10 || sb_ms() >= trip_restore_due)
+        trip_restore(c < heat_default_limits.surv_target_c10 ? "the processor is below 122 C" :
+                     force ? "a restart or a power-off" : "10 s after the stop (still hot: the trip may act now)");
+}
+
+void heater_trip_restore_now(void)
+{
+    if (!trip_off)
+        return;
+    uint64_t until = sb_ms() + 3000U;
+    while (trip_off && sb_ms() < until && soc_now_c10() >= heat_default_limits.surv_target_c10) {
+        hw_wdt_feed_heat();
+        sb_mdelay(50);
+    }
+    trip_restore_when_cool(1);
+}
 
 int heater_busy(void)
 {
@@ -522,6 +653,10 @@ static void restore_and_check(void)
     }
     gpuheat_stop();
     hw_heat_stop_all();
+    if (trip_off && !trip_restore_due) {
+        trip_restore_due = sb_ms() + 10000U;    /* the loads are off: the trip back once below 122 C (<= 10 s) */
+        sb_log("heater: Survival (trip off) stopped: the trip comes back on as the processor cools (<= 10 s)");
+    }
     cpu0_on = 0;
     cpu0_bad = 0;
     for (unsigned w = 1; w < 8; ++w) {
@@ -590,6 +725,7 @@ static void stop_check(void)
     }
     if (late) {
         sb_log("heater: a worker core did not turn off: restarting the phone");
+        heater_trip_restore_now();
         (void)hw_dvfs(DVFS_A55, A55_RESTORE);
         sb_reboot(SB_INFORM_NORMAL);
     }
@@ -625,7 +761,8 @@ void heater_timer(unsigned id)
     if (id == 2) {
         if (stopping)
             stop_check();
-        if (!stopping)
+        trip_restore_when_cool(0);              /* 1.1: also feeds the short watchdog until the trip is back */
+        if (!stopping && !trip_off)
             kt_cancel(KT_HEATER, 2);
         return;
     }
@@ -648,6 +785,8 @@ void heater_timer(unsigned id)
     } else {
         /* the heartbeat: only after a complete, valid evaluation */
         cfg.heartbeat = sb_ticks();
+        if (trip_off)
+            hw_wdt_feed_heat();                 /* 1.1: the only feed while the chip's trip is off */
         sb_dcache_clean_inval(&cfg, sizeof(cfg));
         workers_apply();
         if (heater_running_ui())
@@ -655,9 +794,9 @@ void heater_timer(unsigned id)
         /* the GPU on High while the load runs (not while holding or paused) */
         /* the GPU on High: on once 3 workers run, off only when the load stops (holding, paused, a stop), so the
          * regulation's core-by-core steps do not switch vdd_g3d up and down */
-        extreme_extras(ctl.level == HEAT_EXTREME && heater_running_ui());
+        extreme_extras((ctl.level == HEAT_EXTREME || ctl.level >= HEAT_SURVIVAL) && heater_running_ui());
         if (((ctl.level == HEAT_HIGH && gpu_heat_allowed) || (ctl.level >= HEAT_EXTREME && gpu_heat_session)) &&
-            ctl.state == HEAT_ST_RUNNING) {
+            ctl.gpu_want && ctl.state == HEAT_ST_RUNNING) {
             if (!gpuheat_on() && cores_running() - cpu0_on >= 3)
                 (void)gpuheat_start();
             else if (gpuheat_on() && !gpu_probe_ok)
@@ -693,7 +832,7 @@ static void start_now(void)
         sb_strcpy(ctl.why, sizeof(ctl.why), "Still stopping the last session");
         return;
     }
-    if (pending_level != HEAT_MANUAL)
+    if (pending_level != HEAT_MANUAL && pending_level < HEAT_SURVIVAL)
         gpuheat_khz = 572000U;              /* 1.0-rc2 (review): Manual's GPU step never carries over */
     if (heat_ctl_request(&ctl, pending_level, pending_minutes, &in) == 0) {
 #ifndef SB_HOST
@@ -724,6 +863,15 @@ static void start_now(void)
                 cs[w].fails = 0;
                 cs[w].maybe_hung = 0;
             }
+        if (pending_level == HEAT_SURVIVAL_X) {
+            const char *no = 0;
+            if (!trip_disable(&no)) {
+                heater_stop_all(no);
+                ctl.state = HEAT_ST_REFUSED;
+                sb_logf("heater: Survival (trip off) refused: ", no);
+                return;
+            }
+        }
         workers_apply();
         if (heater_running_ui())
             clocks_apply();
@@ -740,6 +888,7 @@ uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;
 int heat_reserve_pct = 15, heat_target_c10 = 200, heat_no_current_stop;
 int heat_reserve_override;                  /* 1.0-rc2 (review): the hold overrides the reserve for the next session only */
 int heat_soc_stop_c10;                      /* 0.6.3: Manual's SoC stop (0 off: the user's default) */
+int heat_surv_stop_c10 = 1310;              /* 1.1: Survival (trip off)'s SoC stop: 131 C (the user's planned test) */
 struct heat_record heat_rec, heat_last;
 int heat_last_unclean;
 
@@ -790,6 +939,15 @@ static void extreme_confirm_done(int ok)
         ctl.man_a55 = ctl.man_m3 = 0;
         gpu_heat_session = 0;               /* the cores alone keep a battery warm */
         sb_log("heater: Keep warm confirmed (the battery's target)");
+    } else if (pending_level >= HEAT_SURVIVAL) {
+        ctl.man_a55 = ctl.man_m3 = 0;
+        ctl.reserve_pct = 0;                /* Survival runs to 2 %: no reserve (its confirmations say so) */
+        ctl.surv_stop_c10 = heat_surv_stop_c10;
+        gpuheat_khz = 598000U;              /* the GPU's table top (ECT dvfs_g3d) */
+        gpu_heat_session = 1;
+        sb_log(pending_level == HEAT_SURVIVAL_X ?
+               "heater: Survival heat with the chip's trip OFF confirmed four times (the tables' tops, to the user's SoC stop)" :
+               "heater: Survival heat confirmed three times (the tables' tops, just below the chip's power cut, to 2 %)");
     } else if (pending_level == HEAT_MANUAL) {
         ctl.man_a55 = heat_man_a55;
         ctl.man_m3 = heat_man_m3;
@@ -805,6 +963,84 @@ static void extreme_confirm_done(int ok)
     start_now();
     if (!heater_running_ui())
         gpu_heat_session = 0;               /* refused: no session to cover */
+}
+
+/* 1.1: Survival's confirmations: three, four with the trip off; each says what it is; any No ends it */
+static void survival_done(int ok);
+static void survival_show(void)
+{
+    static char est[160];
+    struct heat_in in;
+    read_inputs(&in);
+    struct ub u;
+    ub_init(&u);
+    if (in.gauge_ok && in.pct > 2) {
+        ub_s(&u, "It turns the WHOLE battery into heat: about ");
+        ub_dec(&u, (uint64_t)((in.pct - 2) * SBOS_HEAT_MAH_PER_PCT * 60 / FLAT_MA));
+        ub_s(&u, " minutes from ");
+        ub_dec(&u, (uint64_t)in.pct);
+        ub_s(&u, " % to 2 %. Nothing is kept for a call, the light or SOS.");
+    } else {
+        ub_s(&u, "It turns the WHOLE battery into heat. Nothing is kept for a call, the light or SOS.");
+    }
+    sb_strcpy(est, sizeof(est), u.b);
+    int x = pending_level == HEAT_SURVIVAL_X;
+    static char stopl[128];
+    ub_init(&u);
+    ub_s(&u, "Stops at your SoC stop (");
+    ub_dec(&u, (uint64_t)(heat_surv_stop_c10 / 10));
+    ub_s(&u, " \xc2\xb0" "C), 55 \xc2\xb0" "C battery or 2 %. A watchdog restarts the phone if the software stalls.");
+    sb_strcpy(stopl, sizeof(stopl), u.b);
+    switch (surv_step) {
+    case 0:
+        kui_confirm(x ? "Survival heat, trip OFF (1 of 4)?" : "Survival heat (1 of 3)?",
+                    "A LAST RESORT for a survival situation: the most heat this phone can make.",
+                    "Every core and the GPU at the chip's top table steps, the screen at its brightest and the LED.",
+                    x ? "The chip's own heat power cut will be switched OFF." :
+                        "It holds the processor just below the chip's own power cut and runs to 2 % battery.",
+                    x ? "Hold: 1 of 4" : "Hold: 1 of 3", survival_done);
+        break;
+    case 1:
+        kui_confirm(x ? "Survival heat, trip OFF (2 of 4)?" : "Survival heat (2 of 3)?", est,
+                    "When it ends the phone is empty and too hot to hold bare.",
+                    "Only for a survival situation.", x ? "Hold: 2 of 4" : "Hold: 2 of 3", survival_done);
+        break;
+    case 2:
+        if (x)
+            kui_confirm("The chip's power cut OFF (3 of 4)?",
+                        "WARNING: the processor's hardware heat trip is the one stop that works without software.",
+                        "Off, the processor runs hotter than its rating and may be damaged for good.",
+                        stopl, "Hold: 3 of 4", survival_done);
+        else
+            kui_confirm("Survival heat: last check (3 of 3)",
+                        "The back gets very hot: hold it through a pocket or a glove, never against bare skin.",
+                        "It stops only at 55 \xc2\xb0" "C battery or 2 % battery. Cancel stops it at any time.",
+                        "Survival heat: a last resort for a survival situation.", "Hold: 3 of 3, start", survival_done);
+        break;
+    default:
+        kui_confirm("Survival heat, trip OFF: last check (4 of 4)",
+                    "WARNING: a battery sits next to the processor. Keep the phone where you can drop it.",
+                    "Cancel or Power stops it at any time; the trip comes back on as soon as it stops.",
+                    "You take responsibility for any damage.", "Hold: 4 of 4, start", survival_done);
+        break;
+    }
+}
+
+static void survival_done(int ok)
+{
+    if (!ok) {
+        surv_step = 0;
+        sb_log("heater: Survival heat not confirmed");
+        extreme_confirm_done(0);
+        return;
+    }
+    int n = pending_level == HEAT_SURVIVAL_X ? 4 : 3;
+    if (++surv_step < n) {
+        survival_show();
+        return;
+    }
+    surv_step = 0;
+    extreme_confirm_done(1);
 }
 
 static void confirm_done(int ok)
@@ -833,7 +1069,7 @@ int heater_request(int level, int minutes)
         }
         return 0;
     }
-    if (level > HEAT_KEEPWARM)
+    if (level > HEAT_SURVIVAL_X)
         return SBOS_EINVAL;
     if (wifi_on() && !heater_running_ui()) {
         sb_strcpy(ctl.why, sizeof(ctl.why), "Turn Wi-Fi off first (0.4: not both at once)");
@@ -885,6 +1121,11 @@ int heater_request(int level, int minutes)
                         res > 0 ? "No other limits: it stops only at 55 \xc2\xb0" "C battery or the reserve." :
                                   "The reserve is OFF for this session: it stops only at 55 \xc2\xb0" "C battery.",
                         "Hold to start", extreme_confirm_done);
+            return 0;
+        }
+        if (level >= HEAT_SURVIVAL) {
+            surv_step = 0;
+            survival_show();
             return 0;
         }
         if (level == HEAT_EXTREME)
@@ -991,6 +1232,11 @@ void heater_status(struct sbos_heat *h)
     h->last_unclean = heat_last_unclean;
     h->last_peak_soc_c10 = heat_last.peak_soc_c10;
     h->last_secs = heat_last.secs;
+    h->trip_off = trip_off;
+    h->surv_target_c10 = heater_running_ui() && ctl.level >= HEAT_SURVIVAL ? heat_surv_target(&ctl) :
+                         heat_default_limits.surv_target_c10;
+    h->surv_stop_c10 = heat_surv_stop_c10;
+    h->gpu_on = gpuheat_on();
 }
 
 void heater_init(void)

@@ -244,13 +244,57 @@ void hw_arm_until(uint64_t at_ms)
 }
 
 static unsigned wdt_feeds;
+static int wdt_heat_only;                               /* 1.1: Survival with the trip off: only the heat loop feeds */
+static uint32_t wdt_saved;
 void hw_wdt_feed(void)
 {
     volatile uint32_t *w = (volatile uint32_t *)WDT1;
+    if (wdt_heat_only)
+        return;
     if (w[0] & (1U << 5)) {                             /* WTCON enable: WTCNT = WTDAT */
         w[2] = w[1];
         ++wdt_feeds;
     }
+}
+
+void hw_wdt_feed_heat(void)
+{
+    volatile uint32_t *w = (volatile uint32_t *)WDT1;
+    if (w[0] & (1U << 5))
+        w[2] = w[1];
+}
+
+/* 1.1: the loader's watchdog (cluster 1, 0x10060000) shortened to secs while the chip's heat trip is off, fed only by
+ * the heat loop (hw_wdt_feed_heat); 0 puts the loader's reload back. Refuses (0) unless it counts with its reset on
+ * and its reset reaches the SoC (PMU 0x14060408 / 0x1406040C bit 23 clear, as the loader leaves it). Returns the
+ * timeout in ms. */
+unsigned hw_wdt_short(unsigned secs)
+{
+    volatile uint32_t *w = (volatile uint32_t *)WDT1;
+    if (!secs) {
+        if (wdt_saved) {
+            w[1] = wdt_saved;
+            w[2] = wdt_saved;
+            wdt_saved = 0;
+        }
+        wdt_heat_only = 0;
+        return 1;
+    }
+    uint32_t con = w[0];
+    uint32_t dis = *(volatile uint32_t *)0x14060408UL, mask = *(volatile uint32_t *)0x1406040CUL;
+    if (!(con & (1U << 5)) || !(con & 1U) || ((dis | mask) & (1U << 23)))
+        return 0;
+    uint32_t pre = ((con >> 8) & 0xffU) + 1U, div = 16U << ((con >> 3) & 3U);
+    uint64_t per_s = 26000000U / (pre * div);       /* OSCCLK 26 MHz */
+    uint64_t c = per_s * secs;
+    if (!c || c > 0xffffU)
+        return 0;
+    if (!wdt_saved)
+        wdt_saved = w[1];
+    w[1] = (uint32_t)c;
+    w[2] = (uint32_t)c;
+    wdt_heat_only = 1;
+    return (unsigned)(c * 1000U / per_s);
 }
 
 int hw_dvfs(unsigned domain, uint32_t khz)

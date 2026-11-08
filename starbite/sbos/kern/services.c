@@ -518,6 +518,7 @@ void power_restart(int to_menu)
     torch_set(0);
     wifi_power(0);                          /* the radio held in reset and unpowered before the reset */
     heater_stop_all("Restarting");
+    heater_trip_restore_now();              /* 1.1: the chip's trip back on before any reset we make */
     sb_mdelay(200);
     if (to_menu)
         sb_reboot(SB_INFORM_NORMAL);
@@ -532,6 +533,7 @@ void power_off_now(void)
         heater_stop_all("Switching off");   /* the hardware off first */
         settings_save_now();                /* 1.0-rc2: then the heat record ("stopped"), before the power goes */
     }
+    heater_trip_restore_now();              /* 1.1: the chip's trip back on before the power goes */
     sb_mdelay(200);
     sb_power_off();
     /* still here: a cable keeps the PMIC on. Stay on, screen off. */

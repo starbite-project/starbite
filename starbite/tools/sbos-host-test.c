@@ -561,6 +561,177 @@ static void t_heater(void)
 }
 
 /* ---- battery model --------------------------------------------------------------------------- */
+/* ---- 1.1 Survival heat: a simulated phone (SoC and battery heat, the gauge, the chip's trip at our 128 C) ---- */
+struct sim {
+    double soc, bat, pct, w, mah;
+    int max_soc, gpu_flips, cut, secs, min_cores_hot;
+    double w_sum;
+    int ticks;
+};
+
+/* the load's power: base 1.2 W, the A55s 0.6 W, the M3s 1.6 W, the GPU 2.5 W (the tours: ~10 W flat out); the SoC's
+ * steady temperature 30 C + 9 C per W (so flat out would pass the trip) with an 8 s time constant; the cell 3.7 V
+ * less 60 mV per A, 16 mAh per gauge percent (1.0-rc3's measurement) */
+static void sim_tick(struct sim *s, const struct heat_ctl *c, struct heat_in *in, int trip_armed)
+{
+    int a55 = c->cores < 3 ? c->cores : 3, m3 = c->cores > 3 ? c->cores - 3 : 0;
+    double w = 1.2 + 0.6 * a55 + 1.6 * m3 + (c->gpu_want && c->state == HEAT_ST_RUNNING ? 2.5 : 0.0);
+    if (c->state != HEAT_ST_RUNNING && c->state != HEAT_ST_HOLDING)
+        w = 0.4;
+    double ss = 30.0 + 9.0 * w;
+    s->soc += (ss - s->soc) * 0.25 / 8.0;
+    s->bat += (w * 0.006 - (s->bat - 0.0) * 0.004) * 0.25;
+    double amps = w / 3.7;
+    s->mah += amps * 1000.0 * 0.25 / 3600.0;
+    s->pct = 80.0 - s->mah / 16.0;
+    s->w_sum += w;
+    s->ticks++;
+    in->soc_c10 = (int)(s->soc * 10.0);
+    in->bat_c10 = (int)(s->bat * 10.0);
+    in->pct = (int)s->pct;
+    in->ma = -(int)(amps * 1000.0);
+    in->mv = 3700 - (int)(amps * 60.0);
+    in->trip_armed = trip_armed;
+    if (in->soc_c10 > s->max_soc)
+        s->max_soc = in->soc_c10;
+    if (trip_armed && in->soc_c10 >= 1280)
+        s->cut = 1;                         /* the chip's own trip would have cut the power here */
+}
+
+static void sim_run(struct heat_ctl *c, struct sim *s, int trip_armed, int max_s)
+{
+    struct heat_in in = base_in(0);
+    in.bat_c10 = 100, in.usb_c10 = in.chg_c10 = 100;
+    s->soc = 38.0, s->bat = 10.0, s->pct = 80.0;
+    int gpu = 1;
+    uint64_t t = 0;
+    for (; t < (uint64_t)max_s * 1000U && (c->state == HEAT_ST_RUNNING || c->state == HEAT_ST_HOLDING); t += 250) {
+        in.now = t;
+        in.bat_raw += 1;
+        sim_tick(s, c, &in, trip_armed);
+        if (s->cut)
+            break;
+        heat_ctl_step(c, &in);
+        if (c->gpu_want != gpu)
+            s->gpu_flips++, gpu = c->gpu_want;
+    }
+    s->secs = (int)(t / 1000U);
+}
+
+static void t_survival(void)
+{
+    struct heat_ctl c;
+    struct heat_in in = base_in(0);
+    /* the start: the tables' tops, no reserve, refused at 2 % */
+    heat_ctl_init(&c, 0);
+    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == 0 && c.a55_khz == 1950000U && c.t_end == ~(uint64_t)0,
+          "Survival starts: the A55 at its table top, no end time (%s)", c.why);
+    run(&c, &in, 0, 10000, 0);
+    CHECK(c.cores >= 5 && c.m3_khz == 1794000U, "Survival: the M3s at 1794 MHz (cores %d, %u)", c.cores, c.m3_khz);
+    in = base_in(0);
+    in.pct = 2;
+    refuse(in, HEAT_SURVIVAL, "Survival at 2 %");
+    in = base_in(0);
+    in.pct = 10;                        /* below every reserve: Survival still starts */
+    heat_ctl_init(&c, 0);
+    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == 0, "Survival starts below the reserve (%s)", c.why);
+    in = base_in(0);
+    in.trip_armed = 0;
+    refuse(in, HEAT_SURVIVAL_X, "the trip is not armed at the start (trip-off Survival too)");
+    in = base_in(0);
+    heat_ctl_init(&c, 0);
+    c.surv_stop_c10 = 1400;
+    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == SBOS_EAGAIN, "trip-off Survival refuses a stop above 131 C");
+
+    /* the regulation, the whole battery: held below the trip, run to 2 % */
+    struct sim s;
+    memset(&s, 0, sizeof(s));
+    in = base_in(0);
+    in.bat_c10 = 100, in.usb_c10 = in.chg_c10 = 100;
+    heat_ctl_init(&c, 0);
+    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == 0, "the simulated Survival run starts (%s)", c.why);
+    sim_run(&c, &s, 1, 3 * 3600);
+    printf("survival sim: %d s, %.1f W average, peak SoC %.1f C, %d GPU switches, ended: %s\n", s.secs,
+           s.w_sum / (s.ticks ? s.ticks : 1), s.max_soc / 10.0, s.gpu_flips, c.why);
+    CHECK(!s.cut, "the chip's trip never acted (peak %d)", s.max_soc);
+    CHECK(s.max_soc < 1260, "the SoC held below 126 C (peak %d)", s.max_soc);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "2 %"), "the run ended at 2 %% battery (%s)", c.why);
+    CHECK(s.w_sum / s.ticks > 8.0, "most of the load ran (%.1f W average)", s.w_sum / s.ticks);
+    CHECK(s.gpu_flips < 40, "the GPU is not switched on and off all the time (%d)", s.gpu_flips);
+
+    /* trip off: holds below the user's stop minus 3 C, never reaches it in the model, runs to 2 % */
+    memset(&s, 0, sizeof(s));
+    in = base_in(0);
+    heat_ctl_init(&c, 0);
+    c.surv_stop_c10 = 1310;
+    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == 0, "trip-off Survival starts (%s)", c.why);
+    c.trip_off = 1;                     /* heater.c after it cleared the trip */
+    sim_run(&c, &s, 0, 3 * 3600);
+    printf("survival sim (trip off): %d s, %.1f W average, peak SoC %.1f C, ended: %s\n", s.secs,
+           s.w_sum / (s.ticks ? s.ticks : 1), s.max_soc / 10.0, c.why);
+    CHECK(s.max_soc < 1310 && s.max_soc >= 1240, "trip off: held near 128 C, below the 131 C stop (peak %d)", s.max_soc);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "2 %"), "trip off: ended at 2 %% (%s)", c.why);
+
+    /* the stops that stay */
+    in = base_in(0);
+    heat_ctl_init(&c, 0);
+    c.surv_stop_c10 = 1310;
+    heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+    c.trip_off = 1;
+    in.trip_armed = 0;
+    run(&c, &in, 0, 5000, 0);
+    CHECK(c.state == HEAT_ST_RUNNING, "trip off: the unarmed trip is expected, no stop (%s)", c.why);
+    in.soc_c10 = 1312;
+    run(&c, &in, 5000, 500, 0);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "Survival stop"), "trip off: the user's SoC stop (%s)", c.why);
+    in = base_in(0);
+    heat_ctl_init(&c, 0);
+    heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in);
+    in.trip_armed = 0;
+    run(&c, &in, 0, 1000, 0);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "trip is not armed"), "Survival (trip on): the trip must stay armed (%s)", c.why);
+    in = base_in(0);
+    heat_ctl_init(&c, 0);
+    heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in);
+    in.bat_c10 = 551;
+    run(&c, &in, 0, 1000, 0);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "55"), "Survival: the battery's 55 C stop (%s)", c.why);
+    in = base_in(0);
+    heat_ctl_init(&c, 0);
+    heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in);
+    run(&c, &in, 0, 3000, 0);
+    in.gauge_ok = 0;
+    run(&c, &in, 3000, 11000, 0);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "charge and current"), "Survival: the gauge-lost stop (%s)", c.why);
+    in = base_in(0);
+    heat_ctl_init(&c, 0);
+    heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in);
+    run(&c, &in, 0, 10000, 0);
+    int before = c.cores;
+    in.ma = -3700;
+    run(&c, &in, 10000, 1000, 0);
+    CHECK(c.state == HEAT_ST_RUNNING && c.cores < before, "Survival: 3.7 A sheds load, no stop (%d -> %d, %s)", before,
+          c.cores, c.why);
+    in.ma = -4600;
+    run(&c, &in, 11000, 500, 0);
+    CHECK(stopped_with(&c, HEAT_ST_STOPPED, "4.5 A"), "Survival: above 4.5 A stops (%s)", c.why);
+    in = base_in(0);
+    heat_ctl_init(&c, 0);
+    heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in);
+    run(&c, &in, 0, 10000, 0);
+    before = c.cores;
+    in.mv = 3380;
+    run(&c, &in, 10000, 1000, 0);
+    CHECK(c.state == HEAT_ST_RUNNING && c.cores < before, "Survival: a low voltage sheds load, no stop (%d -> %d)",
+          before, c.cores);
+    in = base_in(0);
+    heat_ctl_init(&c, 0);
+    heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in);
+    run(&c, &in, 0, 2000, 0);
+    heat_ctl_request(&c, HEAT_OFF, 0, &in);
+    CHECK(stopped_with(&c, HEAT_ST_OFF, "Stopped"), "Survival: Off always stops (%s)", c.why);
+}
+
 static void t_battery(void)
 {
     struct bat_model m;
@@ -626,6 +797,7 @@ int main(int argc, char **argv)
     t_heatk();
     t_dvfs();
     t_heater();
+    t_survival();
     t_battery();
     t_state();
     for (int i = 1; i < argc; ++i)

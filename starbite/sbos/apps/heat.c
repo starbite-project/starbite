@@ -150,7 +150,7 @@ static void show(void)
     int flat = on && h.level >= HEAT_EXTREME;
     if (on)
         manual_page = 0;
-    ui_level(1, "Off|Low|High|Extreme", on ? (h.level == HEAT_EXTREME || h.level == HEAT_MANUAL ? 3 :
+    ui_level(1, "Off|Low|High|Extreme", on ? (h.level >= HEAT_EXTREME && h.level != HEAT_KEEPWARM ? 3 :
                                               h.level == HEAT_KEEPWARM ? 0 : h.level >= HEAT_HIGH ? 2 : 1) : 0);
     if (on && h.level == HEAT_KEEPWARM)
         ui_button(19, "Stop keeping warm", 0, UI_HALF);
@@ -174,6 +174,34 @@ static void show(void)
             fmt_s(&f, "OFF: full heat runs the battery empty (tap: 15 %)");
         }
         ui_button(17, "Call / SOS reserve", f.b, 0);
+        /* 1.1: the last resort (three confirmations; four with the chip's trip off) */
+        ui_button(23, "Survival heat", "Last resort: all the battery as heat. Asks 3 times.", 0);
+        fmt_init(&f);
+        fmt_s(&f, "Chip's power cut OFF, stop ");
+        fmt_d(&f, h.surv_stop_c10 / 10);
+        fmt_s(&f, " \xc2\xb0" "C. Asks 4 times.");
+        ui_button(24, "Survival heat, trip OFF", f.b, 0);
+        fmt_init(&f);
+        fmt_s(&f, "Trip-off stop ");
+        fmt_d(&f, h.surv_stop_c10 / 10);
+        fmt_s(&f, " \xc2\xb0" "C (tap to change)");
+        ui_button(25, f.b, 0, 0);
+    }
+    if (on && h.level >= HEAT_SURVIVAL) {
+        fmt_init(&f);
+        if (h.trip_off) {
+            fmt_s(&f, "SURVIVAL, THE CHIP'S POWER CUT OFF: holds below ");
+            fmt_d(&f, h.surv_target_c10 / 10);
+            fmt_s(&f, ", stops at ");
+            fmt_d(&f, h.surv_stop_c10 / 10);
+            fmt_s(&f, " \xc2\xb0" "C.");
+        } else {
+            fmt_s(&f, "SURVIVAL: holds the processor below ");
+            fmt_d(&f, h.surv_target_c10 / 10);
+            fmt_s(&f, " \xc2\xb0" "C (the chip cuts near 128).");
+        }
+        fmt_s(&f, h.gpu_on ? " GPU on." : " GPU off.");
+        ui_textline(f.b, ORANGE);
     }
     fmt_init(&f);
     temp(&f, h.bat_c10);
@@ -223,7 +251,9 @@ static void show(void)
         fmt_init(&f);
         fmt_s(&f, h.level == HEAT_KEEPWARM ? "Until you stop it. " : "Flat out until you press Off. ");
         fmt_s(&f, "Stops only at 55 \xc2\xb0" "C battery");
-        if (h.reserve_pct > 0) {
+        if (h.level >= HEAT_SURVIVAL) {
+            fmt_s(&f, " or 2 %.");
+        } else if (h.reserve_pct > 0) {
             fmt_s(&f, " or ");
             fmt_d(&f, h.reserve_pct);
             fmt_s(&f, " %.");
@@ -277,7 +307,7 @@ static void show(void)
         ui_chart("BATTERY TEMPERATURE", th, thn, lo, flat ? 560 : 450, ORANGE, lr.b);
     }
     ui_textline("WARNING: the phone gets hot to hold. Keep it in a pocket or a glove, not on bare skin.", ORANGE);
-    ui_textline("About 1 % battery a minute on High, 2 % on Extreme. Not while charging.", GREY);
+    ui_textline("About 1 % battery a minute on High, 3 % on Extreme or Survival. Not while charging.", GREY);
     ui_end();
 }
 
@@ -326,7 +356,13 @@ void app_event(const struct sbos_event *ev)
         struct sbos_heat h;
         heat_status(&h);
         int running = h.state == HEAT_ST_RUNNING || h.state == HEAT_ST_HOLDING || h.state == HEAT_ST_PAUSED;
-        if (ev->id == 22 && !running) {
+        if (ev->id == 23 && !running)
+            heat_request(HEAT_SURVIVAL, 0);
+        else if (ev->id == 24 && !running)
+            heat_request(HEAT_SURVIVAL_X, 0);
+        else if (ev->id == 25 && !running)
+            setting_set(SET_HEAT_SURV_STOP_C10, h.surv_stop_c10 >= 1310 ? 1250 : h.surv_stop_c10 >= 1280 ? 1310 : 1280);
+        else if (ev->id == 22 && !running) {
             int k = 0;
             for (int i = 0; i < 5; ++i)
                 if (socstops[i] == h.soc_stop_c10)
