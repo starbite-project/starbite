@@ -41,9 +41,9 @@ Code: `starbite/guest/` (all new, owned by this work).
 | Linux 7.1 on M3 0x100: boot, HELLO, 45 frames composited, touch reached the app, MSG_STOP → power down | **phone, P2** (secondaries lost: high entry; fixed in P2b) |
 | **Linux 7.1 on all four M3 cores**: HELLO 119 ms after CPU_ON, 4 CPUs, GIC interfaces 0xf0, first frame 124 ms, 45 frames, touch, MSG_STOP → the guest's CPUs in CPU_OFF | **phone, P2b** (18:50) |
 | The cluster powering down after the guest's CPU_OFFs | **phone, P2c** (22:48): off 55 ms after MSG_STOP, with Samsung's FlexPMU core/cluster sequences (7); without them (P2b) it stayed on |
-| Start / stop / start in one boot, the M3s under load | P2d staged |
+| Start / stop / start in one boot, the M3s under load | **phone, P2d** (23:24): 3/3 cycles, each a cold start after a real cluster power-down (HELLO 118 ms, 4 CPUs, touch, cluster off 65..141 ms); four threads for 6 s at the M3's boot clock 1066 MHz: big cores 45 C |
 | PSCI's context id reaches x0 | **no** on the phone (x0 = 0xBFFFF01C): the trampoline's DTB literal is required |
-| Linux on the phone's M3s | not yet: P1b → P2 → P3 (10) |
+| Linux on the phone's M3s | **yes**: P2b..P2d; P3 (inside Starbite OS) next |
 
 ## 2. Starting the M3 cluster with Linux
 
@@ -171,6 +171,9 @@ volume. Any Linux toolkit sees an ordinary touchscreen. Focus and screen on/off 
   Starbite OS and the guest both read-modify-write GRP2_INTR_BID_ENABLE / EVENT_ENABLE_GRP2 (the A55 bits
   are Starbite's if it ever does the same for its own cores): a lock-free word shared by two kernels, so far
   safe only because Starbite never touches it while the guest runs.
+- **Clocks**: the guest runs at whatever the M3s were left at (P2d: the boot step, 1066 MHz). Starbite OS owns
+  ACPM, so the clock policy is the host's: `dvfs_request(DVFS_M3, khz)` when the Linux view is shown, low when it is
+  hidden, and the heat stops cover the big cores' sensors. No real heat sample yet at the top clock.
 - **Off until needed.** The M3 cluster stays powered down while Starbite OS runs alone. The first heavy app
   starts the guest: load, then CPU_ON. The guest's boot time is the start cost; on QEMU HELLO came after
   2.1 s with an idle host.

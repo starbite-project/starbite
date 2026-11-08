@@ -43,9 +43,12 @@ are the edits, in order.
 9. **FlexPMU**: `guest.c`'s `m3_prep` = `hw_m3_fp_reset()` + `hw_m3_prep()` + `hw_m3_core_on(4, 1)` (your 1.1
    helpers). The guest does the rest itself. Its kernel (linux/0002) does core on/off around its own CPU_ON /
    CPU_OFF. sbguest.ko's last core asks for the cluster-off **itself, right before its own CPU_OFF**: CPD +
-   APM mailbox bit 24. That powered the cluster off in P2c (and the firmware cleared bit 24). P2d tests the restart
-   after it. Until P2d passes, treat a second start in one boot as unproven.
-10. **Store**: three entries from `starbite/guest/probe/build.sh bundle`. Today: `guest-linux.img` 898bb78a…
+   APM mailbox bit 24. That powered the cluster off in P2c (and the firmware cleared bit 24), and P2d (23:24)
+   restarted it twice in one boot (3/3 cycles, cluster off 65..141 ms each time). The same order would let
+   the heater's last worker power the cluster down too.
+10. **Clock**: the guest has no ACPM; set the M3 clock for it (`dvfs_request(DVFS_M3, ...)`) when the view is shown,
+   lower it when hidden (P2d ran at the boot step, 1066 MHz).
+11. **Store**: three entries from `starbite/guest/probe/build.sh bundle`. Today: `guest-linux.img` 898bb78a…
     (Linux 7.1 with linux/0001 + 0002), `guest-linux.dtb` c6544670… (S9 profile, doorbell 511), `guest-linux-rd.img`
     63f982f8… (busybox, guestd, sbguest.ko; the DTB carries this initrd's size, so rebuild them together).
 
