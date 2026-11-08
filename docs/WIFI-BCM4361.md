@@ -442,7 +442,10 @@ IGTK accepted). W2m-b/W2n: 1 ms polling, 256 rx / 128 tx buffers, frames requeue
 buffer is with the firmware (the open test network itself caps at ~4 Mbit/s: the host was idle). W2o (8bbdde7):
 the radio switch (airplane mode). WPA2 is host-tested end to end on Windows' path (bcmw_connect, the handshake
 outside the core through os->rx/bcmw_tx, keys through bcmw_set_key, a group-key renewal) against the model AP;
-not yet on a real WPA2 network (needs the user's hotspot).
+and **on a real WPA2 network** in W2p's run (Windows joined a saved WPA2 network: four-way handshake, both keys,
+encrypted DHCP/IP). **Current best: W2q** (8218231, sbwificx.sys 24dc6c56..., tag `wifi-w2q`): its pmsg
+breadcrumbs (=WIFI, read from pmsg-ramoops-0) showed the shutdown path complete (D0 exit final, worker ended, radio
+off, D0 exit done) and the restart came on time; W2p's 15-minute restart stall did not come back.
 
 ## 10. Review
 
