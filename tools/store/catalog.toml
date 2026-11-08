@@ -317,7 +317,7 @@ flags = ["hidden"]
 [[entry]]
 key = "engineer"
 name = "Engineer OS"
-version = "2.1 · Lab tiers 1–4 · CPU/GPU"
+version = "2.1 · Lab tiers 1-4 · CPU/GPU"
 category = "starbite"
 method = "bare"
 tag = "beta"
