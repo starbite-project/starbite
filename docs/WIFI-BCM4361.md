@@ -11,7 +11,7 @@ Status 2026-11-07:
 | Core (`starbite/wifi/`: 3,600 lines, plus 870 for the VENDOR readers and the libsb shim) | **Works on S9 #1 to a scan** (2026-11-07, runs 2 and 3: firmware up, CLM loaded, 29 access points heard). Reviewed adversarially (section 10), host-tested on a register-level model |
 | NVRAM processing | Byte-identical to Linux's brcmfmac on all 10 of the phone's NVRAM files |
 | Reading the files from VENDOR | ext4 (LineageOS) and EROFS (One UI 8, S9 #1 now). The EROFS reader reads all 13 radio files from a copy of S9 #1's own VENDOR image, byte-identical |
-| libsb shim + test image `wifitest.img` | T1, T2, T3 passed on the phone (section 9) |
+| libsb shim + test image `wifitest.img` | T1, T2, T3 passed on the phone; **T4-open passed** 2026-11-08 (join, DHCP lease, router pings, DNS; section 9) |
 | Windows driver | `SbWifi.sys` (W1 skeleton, section 7) builds and signs with `tools/win`; not run (Windows on the phone is being repaired) |
 | Starbite OS | Shim done; integration plan in section 8, to agree with the `starbite-os` session |
 
@@ -372,6 +372,16 @@ loader enters bare images with S-Boot's FDT unchanged, so a catalog row's `cmdli
 of the store's `crashlog`: "SBCRASH1", CRC, state running, method bare), else the last `STARBITE: launch <key>`
 line in pmsg, else `wifitest`, and only a key starting with `wifitest` is trusted; then the bootargs. The first
 lines say `wifitest: settings: <key>: <cmdline>` and where the key came from.
+
+### T4-open (2026-11-08, image 6a136f3d, commit 6eba345): PASSED — bare-metal Wi-Fi end to end
+
+Hidden row `wifitest-join` (`wifi_step=11 wifi_auto=1 wifi_return=60`), store entry `wifinet` (one line: an open
+network's name, from the Windows run; not committed). PCIe Gen1 x1 in 70 us, firmware up, scan (42 APs), then
+`joining ... (open)`, `LINK UP`, **`THE NETWORK IS JOINED, 2365 ms after SET_SSID`**; sbnet: `DHCP: an offer`,
+`bound`, **`LEASED (7200 s; a router and a DNS server ...)`**, **`the router answered 3 of 3 pings`**, **`DNS
+ANSWERED (a lookup of example.com)`**; 8 frames received, 7 sent, 7 done, 0 errors; the radio unpowered on the way
+back and a clean return to the menu. Log: `build/wifi/t4-pmsg.txt` (not in git). Starbite OS 0.4+ uses this core
+and sbnet.
 
 ### Runs 2 and 3 (2026-11-07, launches #59 and #60, image 57148abf, commit 5115467): T2 and T3 passed
 
