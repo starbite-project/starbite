@@ -90,6 +90,9 @@ SCENE_ENV=SBOS_HOST_FILES=/nonexistent
 scene info-empty    w:300 $OPEN t:1057,1250 w:600
 scene info-edit     w:300 $OPEN t:1057,1250 w:600 t:720,1150 w:500
 scene info-field    w:300 $OPEN t:1057,1250 w:600 t:720,1150 w:500 t:720,655 w:500 t:930,2434 w:150 t:1210,2246 w:150 t:510,2246 w:300
+CARD="t:1057,1250 w:600 t:720,1150 w:500 t:720,655 w:500 t:930,2434 w:150 t:1210,2246 w:150 t:1245,2810 w:400 t:720,965 w:500 t:125,2810 w:150 t:1350,2246 w:150 t:1245,2810 w:400 t:382,2515 w:500"
+scene lock-card     w:300 $OPEN $CARD k:p w:600 k:p w:800
+scene lock-card-open w:300 $OPEN $CARD k:p w:600 k:p w:800 t:720,1695 w:600
 SCENE_ENV=
 scene power-menu    w:300 h:p:1300 w:500
 scene focus-keys    w:300 $OPEN k:d w:200 k:d w:200 k:d w:300

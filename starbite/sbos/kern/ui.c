@@ -73,6 +73,13 @@ static int cf_return;
 int app_front = -1;
 int ui_overflow;                    /* the last app screen built did not fit (the self test reads it) */
 
+static int sb_strcmp_eq(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        ++a, ++b;
+    return *a != *b;
+}
+
 static int strcmp_k(const char *a, const char *b)
 {
     while (*a && *a == *b)
@@ -746,6 +753,17 @@ static void build_lock(void)
     e->value = F_SMALL;
     e->color = C_L3;
     e->x = 0, e->y = 2660, e->w = UI_W, e->h = 80;
+    /* 0.5.4: the medical card for whoever finds the phone (as iPhone's Medical ID): shown only when Info has a
+     * card; a tap opens it (read only there: editing is a page further) */
+    int info = app_by_id("info");
+    if (info >= 0 && !sb_strcmp_eq(app_tile(info), "Emergency card")) {
+        e = add(cur, &ncur, E_BUTTON);
+        e->id = 3;
+        scopy(e->a, sizeof(e->a), "Medical card");
+        scopy(e->b, sizeof(e->b), "For whoever finds this phone");
+        e->flags = UI_RED;
+        e->x = 270, e->y = 1560, e->w = UI_W - 540, e->h = 270;
+    }
 }
 
 /* Home (0.3): the Emergency tile across the top (red), then the apps in two columns of large tiles, each with its
@@ -1537,6 +1555,8 @@ static void lock_pick(int id)
         light_on(SBOS_COLOR_WHITE, SCR_LOCK, 10);
     else if (id == 1)
         sos_set(1);
+    else if (id == 3 && app_by_id("info") >= 0)
+        kui_open_app(app_by_id("info"));    /* the medical card */
     else
         kui_home();
 }
