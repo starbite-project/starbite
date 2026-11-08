@@ -1074,3 +1074,20 @@ forced restart). Cause and fixes: 8.6 and 12.5.
   the network marked "Saved" → expect `wifi: joining the saved network (name not logged)`, `link: ... JOINED`, an
   address and the router's ping. This one can run unattended only with the user's agreement (it transmits on their
   network, as T4 did).
+
+### 14.8 Results (2026-11-08): T15 passed on the phone (0.5.3 self test, e35cdb46)
+
+- `selftest: passed: 25 screens, apps ok 9, dead 0, too tall 0, problems 0, slowest draw 142 ms, slowest loop turn
+  359 ms, 28 s`; the watchdog armed by the loader (30 s).
+- **Boot**: `first frame at 12872 ms since power-on: started at 12803, fonts and back buffer 10, battery 11, draw 48
+  ms`: Starbite OS's own part is **69 ms**; the rest is S-Boot and the loader (its full POST took 7986 ms in the
+  same log). The only big lever is the loader's quick POST (a loader setting).
+- **Wi-Fi**: interrupts on (SPI 253), **21 interrupts** during the bring-up and scan (the INTx path works); up in
+  867 ms; 2 networks heard; off after 3 s (the radio held in reset and unpowered). The slowest loop turns were two
+  core bring-up steps, the power sequence (250 ms: its 50 + 200 ms waits) and the firmware download (358 ms):
+  single calls into the core, splittable only with a resumable step in the core; they happen once per Wi-Fi on,
+  while the screen shows "Starting".
+- **Power**: the A55 at 455 MHz with the screen off and 1053 MHz back on; the switch-off rehearsal stayed on (the
+  charger) and saved.
+- **Slot**: no `sbos-state` entry, nothing written.
+- The bare-metal wifitest T4 (open network join, DHCP lease, 3/3 pings, DNS) passed too: the same core joins for real.
