@@ -545,8 +545,17 @@ NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMIT
     /* A present: done here, on the CPU; the submission then carries no
      * job and completes at once. */
     if (!Arg->Flags.Paging && priv != NULL && Arg->DmaBufferPrivateDataSize >= sizeof(*priv) &&
-        priv->Reserved == MW_DMA_MAGIC && priv->Present.Kind != MW_PRESENT_NONE)
+        priv->Reserved == MW_DMA_MAGIC && priv->Present.Kind != MW_PRESENT_NONE) {
+        /* S9 port (T13d): the source may still be being drawn by a job submitted before this present (one
+         * in-order queue). Copy only once everything before it has completed: the job interrupt keeps
+         * completing work while this waits (it runs above our IRQL). Bounded; a timeout is counted. */
+        ULONG64 t0 = KeQueryInterruptTime();
+        while (a->QCount != 0 && !a->Stopping && KeQueryInterruptTime() - t0 < 2000000ULL)
+            KeStallExecutionProcessor(20);
+        if (a->QCount != 0)
+            a->PresentWaitTimeouts++;
         DoPresent(a, &priv->Present);
+    }
     /* Paging buffers (empty: map/unmap happen on the CPU), presents and
      * anything without our private data carry no jobs. */
     if (!Arg->Flags.Paging && priv != NULL && Arg->DmaBufferPrivateDataSize >= sizeof(*priv) &&

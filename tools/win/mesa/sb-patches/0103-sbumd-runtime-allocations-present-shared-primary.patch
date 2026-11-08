@@ -1,0 +1,576 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index 70ffdc8..7ce5cee 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -399,20 +399,35 @@ drmCloseBufferHandle(int fd, uint32_t handle)
+    return drmIoctl(fd, DRM_IOCTL_GEM_CLOSE, &c);
+ }
+ 
++/* Starbite (sbumd): PRIME inside one process, for d3d10umd's shared and presented resources. The "fd" is
++ * SB_PRIME_TAG | GEM handle: never a CRT descriptor, so nothing may close() or lseek() it (pan_kmod's
++ * import asks malikm_prime_size() instead). */
++#define SB_PRIME_TAG 0x5B000000
++#define SB_PRIME_MASK 0x00FFFFFF
++static int wddm_on(void);
++
+ int
+ drmPrimeHandleToFD(int fd, uint32_t handle, uint32_t flags, int *prime_fd)
+ {
+-   (void)fd; (void)handle; (void)flags; (void)prime_fd;
+-   errno = ENOSYS;
+-   return -ENOSYS;
++   (void)fd; (void)flags;
++   if (!wddm_on() || handle == 0 || handle > SB_PRIME_MASK) {
++      errno = ENOSYS;
++      return -ENOSYS;
++   }
++   *prime_fd = (int)(SB_PRIME_TAG | handle);
++   return 0;
+ }
+ 
+ int
+ drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
+ {
+-   (void)fd; (void)prime_fd; (void)handle;
+-   errno = ENOSYS;
+-   return -ENOSYS;
++   (void)fd;
++   if (!wddm_on() || ((uint32_t)prime_fd & ~SB_PRIME_MASK) != SB_PRIME_TAG) {
++      errno = ENOSYS;
++      return -ENOSYS;
++   }
++   *handle = (uint32_t)prime_fd & SB_PRIME_MASK;
++   return 0;
+ }
+ 
+ /* ---- syncobjs: return conventions as libdrm's ---- */
+@@ -645,6 +660,11 @@ struct wbo {
+    uint64_t size, va;
+    void *cpu;
+    uint64_t listed;     /* submit that last put it in the allocation list */
++   /* Starbite (sbumd, docs/WIN11-GPU.md 6.12): who owns the allocation. 0: this BO (destroyed after
++    * idle). 1: a runtime resource (made with hResource = hres, released by resource after idle).
++    * 2: opened from another process (the runtime's; never destroyed here). */
++   int kind;
++   HANDLE hres;
+ };
+ static struct wbo *wbo;
+ static uint32_t wbo_cap;
+@@ -681,6 +701,13 @@ static struct {
+    int last_unsignalled;
+ } ddi;
+ 
++/* Starbite: the next CREATE_BO of this thread is the given runtime resource's (malikm_next_alloc). */
++static __declspec(thread) struct {
++   int armed, primary;
++   HANDLE hres;
++   unsigned vidpn, w, h, pitch, fmt;
++} sb_next;
++
+ /* Allocations whose BO is closed but which a job submitted earlier may
+  * still use. Linux's panfrost keeps a BO alive until its jobs are done,
+  * and Mesa's BO cache relies on that: it closes buffers without waiting.
+@@ -822,6 +849,29 @@ w_create(D3DDDI_ALLOCATIONINFO *ai)
+    return kmt.CreateAllocation(&ca);
+ }
+ 
++static NTSTATUS
++w_create_res(D3DDDI_ALLOCATIONINFO *ai, HANDLE hres)
++{
++   if (ddi.on && hres) {
++      D3DDDICB_ALLOCATE a = {0};
++      a.hResource = hres;
++      a.NumAllocations = 1;
++      a.pAllocationInfo = ai;
++      return ddi.cb.pfnAllocateCb(ddi.device, &a) >= 0 ? 0 : (NTSTATUS)0xC0000017;
++   }
++   return w_create(ai);
++}
++
++static void
++w_destroy_res(HANDLE hres)
++{
++   D3DDDICB_DEALLOCATE d = {0};
++   if (!ddi.on || !hres)
++      return;
++   d.hResource = hres;
++   ddi.cb.pfnDeallocateCb(ddi.device, &d);
++}
++
+ static void
+ w_destroy(D3DKMT_HANDLE h)
+ {
+@@ -1124,8 +1174,28 @@ wddm_drm(uint32_t nr, uint8_t *b, uint32_t size)
+       D3DDDI_ALLOCATIONINFO ai = {0};
+       ai.pPrivateDriverData = &pi;
+       ai.PrivateDriverDataSize = sizeof(pi);
+-      if (w_create(&ai) < 0)
++      /* Starbite: the BO behind a D3D resource the runtime must know (shared, presented, primary): made
++       * as that resource's allocation, with the surface's size, so the KMD can blt and flip it. */
++      HANDLE hres = NULL;
++      if (sb_next.armed && ddi.on) {
++         hres = sb_next.hres;
++         pi.Width = sb_next.w;
++         pi.Height = sb_next.h;
++         pi.Pitch = sb_next.pitch;
++         pi.Format = sb_next.fmt;
++         if (sb_next.primary) {
++            pi.Flags |= MW_ALLOC_PRIMARY;
++            ai.Flags.Primary = 1;
++            ai.VidPnSourceId = sb_next.vidpn;
++         }
++         sb_next.armed = 0;
++      }
++      if (w_create_res(&ai, hres) < 0) {
++         if (hres)
++            fprintf(stderr, "sbumd: resource allocation %llux%llu failed\n",
++                    (unsigned long long)pi.Width, (unsigned long long)pi.Height);
+          return -MK_ENOMEM;
++      }
+       MW_ESCAPE_ALLOC_INFO_DATA where = {0};
+       where.Code = MW_ESCAPE_ALLOC_INFO;
+       where.hAllocation = ai.hAllocation;
+@@ -1147,7 +1217,11 @@ wddm_drm(uint32_t nr, uint8_t *b, uint32_t size)
+          h = wbo_cap + 1;
+          wbo_cap = cap;
+       }
+-      wbo[h - 1] = (struct wbo){ai.hAllocation, where.Size, where.GpuVa, NULL};
++      wbo[h - 1] = (struct wbo){ai.hAllocation, where.Size, where.GpuVa, NULL, 0, hres ? 1 : 0, hres};
++      if (hres && (trace_on() || sb_log_active))
++         fprintf(stderr, "sbumd: bo %u is resource %p's allocation 0x%x (%ux%u pitch %u fmt %u%s)\n", h, hres,
++                 (unsigned)ai.hAllocation, (unsigned)pi.Width, (unsigned)pi.Height, (unsigned)pi.Pitch,
++                 (unsigned)pi.Format, (pi.Flags & MW_ALLOC_PRIMARY) ? ", primary" : "");
+       a->handle = h;
+       a->offset = where.GpuVa;
+       /* Where every BO lives, so a GPU fault address can be traced back to
+@@ -1245,6 +1319,17 @@ wddm_drm(uint32_t nr, uint8_t *b, uint32_t size)
+                  ((struct drm_gem_close *)b)->handle, (unsigned long long)bo->va);
+       if (bo->cpu)
+          w_unlock(bo->h);
++      if (bo->kind == 2) {               /* opened: the runtime's */
++         memset(bo, 0, sizeof(*bo));
++         return 0;
++      }
++      if (bo->kind == 1) {               /* a resource's: released by resource, once nothing uses it */
++         HANDLE hres = bo->hres;
++         wddm_idle();
++         w_destroy_res(hres);
++         memset(bo, 0, sizeof(*bo));
++         return 0;
++      }
+       /* Not destroyed yet: see wdead. The handle number is free at once. */
+       if (wdead_n == wdead_cap) {
+          uint32_t cap = wdead_cap ? wdead_cap * 2 : WDEAD_FLUSH;
+@@ -1334,6 +1419,155 @@ wddm_ioctl(DWORD code, void *buf, DWORD len)
+    ReleaseSRWLockExclusive(&wddm_lock);
+ }
+ 
++/* ---- Starbite: d3d10umd's resources as runtime allocations (docs/WIN11-GPU.md 6.12) ----
++ * The design of arehnman/virtio-win-mesa (yttrium): a resource the runtime must know is backed by an
++ * allocation made with its hResource; presents name the resources' own allocations; shared resources are
++ * opened from the runtime's allocation handle; the primary is set with pfnSetDisplayModeCb. */
++
++int
++malikm_hw(void)
++{
++   return ddi.on;
++}
++
++void
++malikm_next_alloc(void *hres, int primary, unsigned vidpn, unsigned w, unsigned h, unsigned pitch, unsigned fmt)
++{
++   sb_next.armed = 1;
++   sb_next.hres = hres;
++   sb_next.primary = primary;
++   sb_next.vidpn = vidpn;
++   sb_next.w = w;
++   sb_next.h = h;
++   sb_next.pitch = pitch;
++   sb_next.fmt = fmt;
++}
++
++/* 1 if the armed association was not consumed (the resource's BO came from elsewhere). */
++int
++malikm_next_alloc_clear(void)
++{
++   int left = sb_next.armed;
++   sb_next.armed = 0;
++   return left;
++}
++
++/* The allocation behind a PRIME "fd" from drmPrimeHandleToFD, and whether it is a resource's. */
++unsigned
++malikm_prime_alloc(int fd, int *kind)
++{
++   uint32_t h;
++   struct wbo *bo;
++   if (drmPrimeFDToHandle(0, fd, &h) != 0)
++      return 0;
++   AcquireSRWLockShared(&wddm_lock);
++   bo = wddm_bo(h);
++   unsigned a = bo ? bo->h : 0;
++   if (kind)
++      *kind = bo ? bo->kind : -1;
++   ReleaseSRWLockShared(&wddm_lock);
++   return a;
++}
++
++/* Size of the BO behind a PRIME "fd" (pan_kmod's import; lseek() cannot be used). 0 if unknown. */
++uint64_t
++malikm_prime_size(int fd)
++{
++   uint32_t h;
++   struct wbo *bo;
++   uint64_t size = 0;
++   if (drmPrimeFDToHandle(0, fd, &h) != 0)
++      return 0;
++   AcquireSRWLockShared(&wddm_lock);
++   bo = wddm_bo(h);
++   if (bo)
++      size = bo->size;
++   ReleaseSRWLockShared(&wddm_lock);
++   return size;
++}
++
++/* An allocation another process shared (OpenResource), as a BO of ours: its PRIME "fd", or -1. */
++int
++malikm_import_alloc(unsigned hAllocation, uint64_t size)
++{
++   MW_ESCAPE_ALLOC_INFO_DATA where = {0};
++   uint32_t h = 0;
++   int fd = -1;
++
++   AcquireSRWLockExclusive(&wddm_lock);
++   for (uint32_t i = 0; i < wbo_cap; i++)
++      if (wbo[i].h == hAllocation) {
++         h = i + 1;                      /* already ours (opened twice) */
++         break;
++      }
++   if (!h) {
++      where.Code = MW_ESCAPE_ALLOC_INFO;
++      where.hAllocation = hAllocation;
++      if (w_escape(&where, sizeof(where)) < 0 || where.GpuVa == 0)
++         goto out;
++      for (uint32_t i = 0; i < wbo_cap && !h; i++)
++         if (!wbo[i].h)
++            h = i + 1;
++      if (!h) {
++         uint32_t cap = wbo_cap ? wbo_cap * 2 : 256;
++         struct wbo *n = realloc(wbo, cap * sizeof(*n));
++         if (!n)
++            goto out;
++         memset(n + wbo_cap, 0, (cap - wbo_cap) * sizeof(*n));
++         wbo = n;
++         h = wbo_cap + 1;
++         wbo_cap = cap;
++      }
++      wbo[h - 1] = (struct wbo){hAllocation, where.Size ? where.Size : size, where.GpuVa, NULL, 0, 2, NULL};
++   }
++   fd = (int)(SB_PRIME_TAG | h);
++   if (trace_on() || sb_log_active)
++      fprintf(stderr, "sbumd: opened allocation 0x%x as bo %u va 0x%llx\n", hAllocation, h,
++              (unsigned long long)wbo[h - 1].va);
++out:
++   ReleaseSRWLockExclusive(&wddm_lock);
++   return fd;
++}
++
++/* A DXGI present of resources' own allocations. 0 = presented. */
++int
++malikm_present_allocs(unsigned src, unsigned dst, void *dxgi_context)
++{
++   int ret = -1;
++   HRESULT hr = E_FAIL;
++   AcquireSRWLockExclusive(&wddm_lock);
++   if (ddi.on && ddi.dxgi && ddi.dxgi->pfnPresentCb) {
++      DXGIDDICB_PRESENT p = {0};
++      p.hSrcAllocation = src;
++      p.hDstAllocation = dst;
++      p.pDXGIContext = dxgi_context;
++      p.hContext = ddi.context;
++      hr = ddi.dxgi->pfnPresentCb(ddi.device, &p);
++      ret = hr >= 0 ? 0 : -1;
++   }
++   ReleaseSRWLockExclusive(&wddm_lock);
++   if (ret && (trace_on() || sb_log_active))
++      fprintf(stderr, "sbumd: pfnPresentCb(src 0x%x, dst 0x%x) failed: 0x%08lx\n", src, dst, (unsigned long)hr);
++   return ret;
++}
++
++/* The scanout primary (DXGI SetDisplayMode). 0 = done. */
++int
++malikm_set_display_mode(unsigned hPrimaryAllocation)
++{
++   HRESULT hr = E_FAIL;
++   AcquireSRWLockExclusive(&wddm_lock);
++   if (ddi.on && ddi.cb.pfnSetDisplayModeCb) {
++      D3DDDICB_SETDISPLAYMODE m = {0};
++      m.hPrimaryAllocation = hPrimaryAllocation;
++      hr = ddi.cb.pfnSetDisplayModeCb(ddi.device, &m);
++   }
++   ReleaseSRWLockExclusive(&wddm_lock);
++   if (trace_on() || sb_log_active)
++      fprintf(stderr, "sbumd: SetDisplayMode(0x%x): 0x%08lx\n", hPrimaryAllocation, (unsigned long)hr);
++   return hr >= 0 ? 0 : -1;
++}
++
+ /* ---- MALIKM_FAKE ----
+  * The driver, emulated in this process on the same marshalled buffers, for
+  * CI runners with no Mali: buffers are ordinary memory, the GET_PARAM values
+diff --git a/src/gallium/drivers/panfrost/pan_bo.c b/src/gallium/drivers/panfrost/pan_bo.c
+index d0ce95c..9950eba 100644
+--- a/src/gallium/drivers/panfrost/pan_bo.c
++++ b/src/gallium/drivers/panfrost/pan_bo.c
+@@ -263,7 +263,8 @@ panfrost_bo_cache_put(struct panfrost_bo *bo)
+ {
+    struct panfrost_device *dev = bo->dev;
+ 
+-   if (bo->flags & PAN_BO_SHARED || dev->debug & PAN_DBG_NO_CACHE)
++   /* Starbite (sbumd): a shareable BO is a D3D resource's runtime allocation (or will be): never recycled */
++   if (bo->flags & (PAN_BO_SHARED | PAN_BO_SHAREABLE) || dev->debug & PAN_DBG_NO_CACHE)
+       return false;
+ 
+    /* Must be first */
+@@ -384,10 +385,12 @@ panfrost_bo_create(struct panfrost_device *dev, size_t size, uint32_t flags,
+     * cache. But if there's no nothing suitable, we should flush the cache
+     * to make space for the new allocation.
+     */
+-   bo = panfrost_bo_cache_fetch(dev, size, flags, label, true);
++   /* Starbite (sbumd): a shareable BO must be a fresh allocation (it becomes a D3D resource's) */
++   bool fresh = flags & PAN_BO_SHAREABLE;
++   bo = fresh ? NULL : panfrost_bo_cache_fetch(dev, size, flags, label, true);
+    if (!bo)
+       bo = panfrost_bo_alloc(dev, size, flags, label);
+-   if (!bo)
++   if (!bo && !fresh)
+       bo = panfrost_bo_cache_fetch(dev, size, flags, label, false);
+    if (!bo) {
+       panfrost_bo_cache_evict_all(dev);
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index ea61523..e7547f0 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -61,6 +61,17 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
+    struct Device *device = CastDevice(pPresentData->hDevice);
+    Resource *pSrcResource = CastResource(pPresentData->hSurfaceToPresent);
+ 
++   /* Starbite (sbumd, docs/WIN11-GPU.md 6.12): on the Mali, present the resources' own allocations
++    * (the KMD blts or flips them once the GPU is done), as arehnman/virtio-win-mesa does. */
++   if (malikm_hw() && pSrcResource && pSrcResource->sbAllocation) {
++      Resource *pDstResource = pPresentData->hDstResource ? CastResource(pPresentData->hDstResource) : NULL;
++      device->pipe->flush(device->pipe, NULL, 0);
++      if (malikm_present_allocs(pSrcResource->sbAllocation, pDstResource ? pDstResource->sbAllocation : 0,
++                                pPresentData->pDXGIContext) == 0)
++         return S_OK;
++      return E_FAIL;
++   }
++
+    device->pipe->flush(device->pipe, NULL, 0);
+    device->pipe->screen->flush_frontbuffer(device->pipe->screen, device->pipe, 
+       pSrcResource->resource, 0, 0, pPresentData->pDXGIContext, 0, NULL);
+@@ -114,6 +125,11 @@ _GetGammaCaps( DXGI_DDI_ARG_GET_GAMMA_CONTROL_CAPS *GetCaps )
+ HRESULT APIENTRY
+ _SetDisplayMode( DXGI_DDI_ARG_SETDISPLAYMODE *SetDisplayMode )
+ {
++   /* Starbite (sbumd): the scanout primary through the runtime (pfnSetDisplayModeCb). */
++   Resource *pResource = CastResource(SetDisplayMode->hResource);
++   if (malikm_hw() && pResource && pResource->sbAllocation)
++      return malikm_set_display_mode(pResource->sbAllocation) == 0 ? S_OK : DXGI_DDI_ERR_UNSUPPORTED;
++
+    LOG_UNSUPPORTED_ENTRYPOINT();
+ 
+    return S_OK;
+diff --git a/src/gallium/frontends/d3d10umd/Resource.cpp b/src/gallium/frontends/d3d10umd/Resource.cpp
+index 65729f1..ce30bf6 100644
+--- a/src/gallium/frontends/d3d10umd/Resource.cpp
++++ b/src/gallium/frontends/d3d10umd/Resource.cpp
+@@ -39,6 +39,9 @@
+ #include "Debug.h"
+ 
+ #include "util/u_math.h"
++#include "util/format/u_format.h"
++#include "frontend/winsys_handle.h"
++#include "drm-uapi/drm_fourcc.h"
+ #include "util/u_rect.h"
+ #include "util/u_surface.h"
+ 
+@@ -307,8 +310,60 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
+       }
+    }
+ 
++   /* Starbite (sbumd, docs/WIN11-GPU.md 6.12, after arehnman/virtio-win-mesa): a resource the runtime must
++    * know (shared, presented, a primary) is backed by an allocation made with its hRTResource (and as a
++    * scanout primary with Flags.Primary and its VidPn source), linear and in a BO of its own. Its pitch
++    * goes to the KMD, which blts and flips it on the CPU. */
++   bool sbShared = !!(pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED);
++   bool sbPresent = !!(pCreateResource->BindFlags & D3D10_DDI_BIND_PRESENT);
++   bool sbPrimary = pCreateResource->pPrimaryDesc &&
++                    !(pCreateResource->pPrimaryDesc->DriverFlags & DXGI_DDI_PRIMARY_OPTIONAL);
++   bool sbAssoc = malikm_hw() && templat.target == PIPE_TEXTURE_2D &&
++                  (sbShared || sbPresent || pCreateResource->pPrimaryDesc);
++   unsigned sbPitch = 0;
++   if (pCreateResource->pPrimaryDesc && !sbPrimary)
++      pCreateResource->pPrimaryDesc->DriverFlags |= DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT;
++   if (sbAssoc) {
++      unsigned fmt = 0;   /* D3DDDIFORMAT */
++      switch (pCreateResource->Format) {
++      case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: case DXGI_FORMAT_B8G8R8A8_TYPELESS:
++         fmt = 21; break;                 /* D3DDDIFMT_A8R8G8B8 */
++      case DXGI_FORMAT_B8G8R8X8_UNORM: case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB: case DXGI_FORMAT_B8G8R8X8_TYPELESS:
++         fmt = 22; break;                 /* D3DDDIFMT_X8R8G8B8 */
++      case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: case DXGI_FORMAT_R8G8B8A8_TYPELESS:
++         fmt = 32; break;                 /* D3DDDIFMT_A8B8G8R8 */
++      default:
++         break;
++      }
++      templat.bind |= PIPE_BIND_SHARED | PIPE_BIND_LINEAR | PIPE_BIND_DISPLAY_TARGET;
++      sbPitch = align(templat.width0 * util_format_get_blocksize(templat.format), 64);
++      malikm_next_alloc(hRTResource.handle, sbPrimary,
++                        sbPrimary ? pCreateResource->pPrimaryDesc->VidPnSourceId : 0,
++                        templat.width0, templat.height0, sbPitch, fmt);
++   }
++
+    pResource->resource = screen->resource_create(screen, &templat);
+-   if (!pResource) {
++   if (sbAssoc && malikm_next_alloc_clear())
++      DebugPrintf("sbumd: CreateResource %ux%u: its BO did not come from a fresh allocation\n",
++                  templat.width0, templat.height0);
++   if (sbAssoc && pResource->resource) {
++      /* The PRIME export marks the BO shared (Panfrost then never swaps it) and names its allocation. */
++      struct winsys_handle wh;
++      int kind = -1;
++      memset(&wh, 0, sizeof wh);
++      wh.type = WINSYS_HANDLE_TYPE_FD;
++      if (screen->resource_get_handle(screen, NULL, pResource->resource, &wh, 0))
++         pResource->sbAllocation = malikm_prime_alloc((int)(intptr_t)wh.handle, &kind);
++      uint64_t stride = 0;
++      screen->resource_get_param(screen, NULL, pResource->resource, 0, 0, 0, PIPE_RESOURCE_PARAM_STRIDE, 0,
++                                 &stride);
++      DebugPrintf("sbumd: CreateResource %ux%u bind 0x%x misc 0x%x%s%s -> allocation 0x%x (kind %d), "
++                  "stride %u (told the KMD %u)\n",
++                  templat.width0, templat.height0, pCreateResource->BindFlags, pCreateResource->MiscFlags,
++                  sbShared ? " shared" : "", sbPrimary ? " primary" : "", pResource->sbAllocation, kind,
++                  (unsigned)stride, sbPitch);
++   }
++   if (!pResource->resource) {
+       DebugPrintf("%s: failed to create resource\n", __func__);
+       SetError(hDevice, E_OUTOFMEMORY);
+       return;
+@@ -418,8 +473,67 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
+              D3D10DDI_HRESOURCE hResource,                        // IN
+              D3D10DDI_HRTRESOURCE hRTResource)                    // IN
+ {
+-   LOG_UNSUPPORTED_ENTRYPOINT();
+-   SetError(hDevice, E_OUTOFMEMORY);
++   /* Starbite (sbumd, docs/WIN11-GPU.md 6.12): a 2D surface another process shared (our private data
++    * describes it), imported as a BO of this device. */
++   Device *pDevice = CastDevice(hDevice);
++   struct pipe_screen *screen = pDevice->screen;
++   Resource *pResource = CastResource(hResource);
++   memset(pResource, 0, sizeof *pResource);
++
++   if (!malikm_hw() || pOpenResource->NumAllocations != 1 ||
++       pOpenResource->pOpenAllocationInfo[0].PrivateDriverDataSize < 32) {   /* sizeof(MW_ALLOCATION_INFO) */
++      DebugPrintf("sbumd: OpenResource: %u allocations, private data %u: unsupported\n",
++                  pOpenResource->NumAllocations,
++                  pOpenResource->NumAllocations ? pOpenResource->pOpenAllocationInfo[0].PrivateDriverDataSize : 0);
++      SetError(hDevice, E_OUTOFMEMORY);
++      return;
++   }
++   const D3DDDI_OPENALLOCATIONINFO *oi = &pOpenResource->pOpenAllocationInfo[0];
++   /* MW_ALLOCATION_INFO: Version, Flags, Size (u64), Width, Height, Pitch, Format */
++   const unsigned *pd = (const unsigned *)oi->pPrivateDriverData;
++   unsigned long long size = (unsigned long long)pd[2] | (unsigned long long)pd[3] << 32;
++   unsigned w = pd[4], h = pd[5], pitch = pd[6], fmt = pd[7];
++   enum pipe_format pf = fmt == 21 ? PIPE_FORMAT_B8G8R8A8_UNORM : fmt == 22 ? PIPE_FORMAT_B8G8R8X8_UNORM :
++                         fmt == 32 ? PIPE_FORMAT_R8G8B8A8_UNORM : PIPE_FORMAT_NONE;
++   DXGI_FORMAT df = fmt == 21 ? DXGI_FORMAT_B8G8R8A8_UNORM : fmt == 22 ? DXGI_FORMAT_B8G8R8X8_UNORM :
++                    DXGI_FORMAT_R8G8B8A8_UNORM;
++   int fd = (pf != PIPE_FORMAT_NONE && w && h && pitch) ? malikm_import_alloc(oi->hAllocation, size) : -1;
++   if (fd < 0) {
++      DebugPrintf("sbumd: OpenResource: allocation 0x%x (%ux%u pitch %u fmt %u) not importable\n",
++                  oi->hAllocation, w, h, pitch, fmt);
++      SetError(hDevice, E_OUTOFMEMORY);
++      return;
++   }
++   struct pipe_resource templat;
++   memset(&templat, 0, sizeof templat);
++   templat.target = PIPE_TEXTURE_2D;
++   templat.format = pf;
++   templat.width0 = w;
++   templat.height0 = h;
++   templat.depth0 = 1;
++   templat.array_size = 1;
++   templat.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET | PIPE_BIND_SHARED | PIPE_BIND_LINEAR |
++                  PIPE_BIND_DISPLAY_TARGET;
++   templat.usage = PIPE_USAGE_DEFAULT;
++   struct winsys_handle wh;
++   memset(&wh, 0, sizeof wh);
++   wh.type = WINSYS_HANDLE_TYPE_FD;
++   wh.handle = (HANDLE)(intptr_t)fd;
++   wh.stride = pitch;
++   wh.offset = 0;
++   wh.modifier = DRM_FORMAT_MOD_LINEAR;
++   pResource->resource = screen->resource_from_handle(screen, &templat, &wh, 0);
++   if (!pResource->resource) {
++      DebugPrintf("sbumd: OpenResource: import of allocation 0x%x failed\n", oi->hAllocation);
++      SetError(hDevice, E_OUTOFMEMORY);
++      return;
++   }
++   pResource->Format = df;
++   pResource->MipLevels = 1;
++   pResource->NumSubResources = 1;
++   pResource->transfers = (struct pipe_transfer **)calloc(1, sizeof *pResource->transfers);
++   pResource->sbAllocation = oi->hAllocation;
++   DebugPrintf("sbumd: OpenResource: allocation 0x%x %ux%u pitch %u fmt %u\n", oi->hAllocation, w, h, pitch, fmt);
+ }
+ 
+ 
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index 633dc2d..3e367d9 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -171,8 +171,25 @@ struct Resource
+    struct pipe_resource *resource;
+    struct pipe_transfer **transfers;
+    struct pipe_stream_output_target *so_target;
++   /* Starbite (sbumd): the runtime allocation behind a shared, presented or primary resource (0: none) */
++   unsigned sbAllocation;
+ };
+ 
++/* Starbite (sbumd, docs/WIN11-GPU.md 6.12): the kernel-driver shim (include/win32-compat/malikm_drm.c) */
++#ifdef __cplusplus
++extern "C" {
++#endif
++int malikm_hw(void);
++void malikm_next_alloc(void *hres, int primary, unsigned vidpn, unsigned w, unsigned h, unsigned pitch, unsigned fmt);
++int malikm_next_alloc_clear(void);
++unsigned malikm_prime_alloc(int fd, int *kind);
++int malikm_import_alloc(unsigned hAllocation, unsigned long long size);
++int malikm_present_allocs(unsigned src, unsigned dst, void *dxgi_context);
++int malikm_set_display_mode(unsigned hPrimaryAllocation);
++#ifdef __cplusplus
++}
++#endif
++
+ 
+ static inline Resource *
+ CastResource(D3D10DDI_HRESOURCE hResource)
+diff --git a/src/panfrost/lib/kmod/pan_kmod.c b/src/panfrost/lib/kmod/pan_kmod.c
+index eac10b2..7443e01 100644
+--- a/src/panfrost/lib/kmod/pan_kmod.c
++++ b/src/panfrost/lib/kmod/pan_kmod.c
+@@ -169,7 +169,13 @@ pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd)
+ 
+       p_atomic_inc(&bo->refcnt);
+    } else {
++#ifdef _WIN32
++      /* Starbite (sbumd): the shim's PRIME "fd" is no CRT descriptor (lseek would fast-fail). */
++      extern uint64_t malikm_prime_size(int fd);
++      size_t size = (size_t)malikm_prime_size(fd);
++#else
+       size_t size = lseek(fd, 0, SEEK_END);
++#endif
+       if (size == 0 || size == (size_t)-1) {
+          mesa_loge("invalid dmabuf size");
+          goto err_close_handle;

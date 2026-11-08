@@ -161,7 +161,8 @@ struct _MW_ADAPTER {
     BOOLEAN Healthy;
     ULONG Interrupts;
     ULONG JcRejected;
-    ULONG PrimaryBlts;                    /* presents whose destination is the primary: pixels on the panel */                     /* renders refused: a chain outside the render's allocations */                     /* interrupt resources the device has (the stage-4 SSDT: the Mali's 3) */
+    ULONG PrimaryBlts;
+    ULONG PresentWaitTimeouts;            /* presents copied before the queue drained (200 ms bound) */                    /* presents whose destination is the primary: pixels on the panel */                     /* renders refused: a chain outside the render's allocations */                     /* interrupt resources the device has (the stage-4 SSDT: the Mali's 3) */
 
     /* Counters for the trace. */
     ULONG Renders, Presents, Submits;

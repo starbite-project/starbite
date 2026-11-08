@@ -80,7 +80,7 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         { L"Live_PresentSkips", a->PresentSkips }, { L"Live_Maps", a->Maps }, { L"Live_MapFails", a->MapFails },
         { L"Live_Unmaps", a->Unmaps }, { L"Live_Allocations", a->Allocations }, { L"Live_Patches", a->Patches },
         { L"Live_JcRejected", a->JcRejected }, { L"Live_ThermalHolds", a->ThermalHolds },
-        { L"Live_PrimaryBlts", a->PrimaryBlts },
+        { L"Live_PrimaryBlts", a->PrimaryBlts }, { L"Live_PresentWaitTimeouts", a->PresentWaitTimeouts },
         { L"Live_ThermalLevel", a->ThermalLevel },
     };
     for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]) && i < 40; i++)

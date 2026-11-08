@@ -684,6 +684,35 @@ primary, `Live_PrimaryBlts`).
 - **KMD:** UMD primaries are treated as primaries. A present's CPU copy waits for its turn in the queue (it ran
   at SubmitCommand, possibly before the GPU had finished the source).
 
+### 6.12 T13d: runtime allocations, presents, shared surfaces (built 2026-11-08; staged)
+
+`tools/win/mesa/sb-patches/0103` (after arehnman/virtio-win-mesa's yttrium design) and sbwddm.
+
+**sbumd.dll:**
+- **Resource allocations:** for a 2D resource that is shared, has BIND_PRESENT or is a primary,
+  d3d10umd arms the shim with the runtime's hRTResource, the surface's size, a 64-byte-aligned pitch and
+  the D3DDDI format (+ Flags.Primary and VidPnSourceId for a scanout primary; an optional primary gets
+  NO_SCANOUT). Then it creates the pipe resource with SHARED|LINEAR|DISPLAY_TARGET. The shim's next
+  CREATE_BO in that thread becomes `pfnAllocateCb` with `hResource`.
+- **Panfrost:** never recycles a shareable BO (cache fetch and put), so that allocation is fresh. A PRIME
+  export (an in-process fake FD = tag | GEM handle) marks the BO shared, so Panfrost never swaps it, and
+  names its allocation.
+- **Logging:** Panfrost's actual stride is logged next to the pitch told to the KMD.
+- **Lifetime:** a resource's allocation is released by `hResource` after an idle wait. An opened allocation is
+  never destroyed by us.
+- **Present** passes `hSrcAllocation` / `hDstAllocation` of the resources themselves, plus `pDXGIContext`,
+  to `pfnPresentCb`. No CPU readback, and the HRESULT is logged.
+- **OpenResource** imports another process's allocation, using its handle and our private data (size,
+  pitch, format): GPU address via MW_ESCAPE_ALLOC_INFO, then `resource_from_handle` (FD, linear, the
+  pitch). pan_kmod's import gets the size from the shim, since `lseek` on the fake FD would fast-fail.
+- **SetDisplayMode** goes through `pfnSetDisplayModeCb`.
+- **Reproducibility:** the three sb-patches apply in order to the g52-patched tree and reproduce the built tree
+  exactly.
+
+**sbwddm:** a present's CPU copy waits (up to 200 ms, `Live_PresentWaitTimeouts`) until the in-order queue
+has drained, so it can't copy a frame the GPU is still drawing. The guard counts only flip copies and blts into
+the primary.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
