@@ -7,15 +7,33 @@
 #   3. sboverlay.py + tools/overlay/card-overlay.sh: queued on the card (read back)
 #   tools/ios26-root-tune.sh            collect + tune + queue
 #   tools/ios26-root-tune.sh --collect  collect only (nothing written)
+#   tools/ios26-root-tune.sh --undo DIR re-queue the launchd.plist (+ launchd-disabled.plist if the root had
+#                                       one) pulled into DIR (a <time>-ios26collect folder) before the tune:
+#                                       installed at the next iOS 26 boot, as the tune was
+# The pulled originals stay in the collect folder: System__Library__xpc__launchd*.plist, sha256 in
+# originals.sha256.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ "$(adb get-state 2>/dev/null)" = recovery ] || { echo "phone not in TWRP"; exit 1; }
+if [ "${1:-}" = --undo ]; then
+    dir=${2:?usage: ios26-root-tune.sh --undo build/test-boots/<time>-ios26collect}
+    L="$dir/System__Library__xpc__launchd.plist" D="$dir/System__Library__xpc__launchd-disabled.plist"
+    [ -s "$L" ] || { echo "$L missing"; exit 1; }
+    (cd "$dir" && shasum -a 256 -c originals.sha256)
+    args=("$L=/System/Library/xpc/launchd.plist:644")
+    [ -s "$D" ] && args+=("$D=/System/Library/xpc/launchd-disabled.plist:644")
+    python3 tools/overlay/sboverlay.py "$dir/undo.bin" "${args[@]}"
+    tools/overlay/card-overlay.sh "$dir/undo.bin"
+    echo "undo queued: the original launchd.plist goes back at the next iOS 26 boot (0401+ kernel)"
+    exit 0
+fi
 out=build/test-boots/$(date +%Y%m%d-%H%M%S)-ios26collect
 python3 tools/ios26-collect.py "$out" 2>&1 | tee "$out.log"
 [ "${1:-}" = --collect ] && { echo "collected: $out"; exit 0; }
 L="$out/System__Library__xpc__launchd.plist"
 D="$out/System__Library__xpc__launchd-disabled.plist"
 [ -s "$L" ] || { echo "launchd.plist not pulled: not tuning"; exit 1; }
+(cd "$out" && shasum -a 256 System__Library__xpc__launchd*.plist > originals.sha256 && cat originals.sha256)
 [ -s "$D" ] || D=-
 logs=(--log PosterBoard); for n in ${LOG:-}; do logs+=(--log "$n"); done
 python3 tools/ios26-launchd-tune.py "$L" "$D" "$out/tune" --off-list tools/starlte-disabled-ios26-b.list "${logs[@]}"
@@ -23,4 +41,4 @@ python3 tools/overlay/sboverlay.py "$out/overlay.bin" \
     "$out/tune/launchd.plist=/System/Library/xpc/launchd.plist:644" \
     "$out/tune/launchd-disabled.plist=/System/Library/xpc/launchd-disabled.plist:644"
 tools/overlay/card-overlay.sh "$out/overlay.bin"
-echo "queued for the next iOS 26 boot (0401+ kernel): $out/tune/report.txt; undo: cp the pulled plists back the same way"
+echo "queued for the next iOS 26 boot (0401+ kernel): $out/tune/report.txt; undo: tools/ios26-root-tune.sh --undo $out"
