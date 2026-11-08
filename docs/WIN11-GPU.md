@@ -416,6 +416,40 @@ which must run after the reset. State: `Sched_Init` 0, `Sched_BoFail` 0, `Sched_
 `Sched_Resets` 1, `Sched_ResetFail` 0, `Sched_Timeouts` 0, `Sched_MaxRoundUs`. Off with `Parameters\Sched` = 0;
 `SchedFault` = 0 skips the fault; `SchedFmt` 0/1 = legacy/AArch64 tables (default AArch64).
 
+### 6.5 The UMD ↔ KMD ABI: `sbx_abi.h` (built 2026-11-08, host-fuzzed)
+
+`starbite/win/sbwddm/sbx_abi.h` (MIT, so the Mesa side can include it) and its kernel-side validator
+`sbx_cmd.{h,c}`:
+- **Allocations:** `DxgkDdiCreateAllocation`'s per-allocation private data is `struct sbx_alloc` (version,
+  kind: buffer / texture / render target / tiler heap / primary / shadow, flags: no-exec, CPU-mapped, shared,
+  size). The KMD writes the GPU address back: fixed for the allocation's life (sbg_core places it), as
+  Panfrost needs it at creation.
+- **Submission:** the command buffer the UMD hands `DxgkDdiRender` is a header plus up to 16 jobs `{slot,
+  allocation-list index, offset}`. A chain is named by an entry of this DMA buffer's allocation list, never a
+  raw GPU address. The KMD resolves it, so a chain can only start inside a buffer allocation that this
+  submission references and VidMm made resident. Never in a primary, shadow or heap. Always 64-byte aligned,
+  with a whole descriptor inside.
+- The parser trusts nothing beyond the length it is given and reads byte by byte. Host test: every rule,
+  plus 200,000 random and mutated buffers under AddressSanitizer at exact length, where any accepted job
+  must lie inside a buffer allocation.
+- **Not yet:** the descriptors' own pointers (which the GPU follows inside its address space) are not
+  checked. Per-context address spaces (§6.4 "not yet") are what will contain a hostile chain; until then,
+  one shared AS, as wddm-mali-g52.
+
+### 6.6 Next, in order (2026-11-08)
+
+1. **T12 on the phone:** the scheduler on the real Mali (staged).
+2. **sbwddm skeleton** (WDDM 1.3 full driver, compile-checked): sbdisplay's display half, sbg as the render
+   half, sbx for Render/Patch/SubmitCommand. One aperture segment, `BuildPagingBuffer` map/unmap through
+   sbg, fences from sbg_irq via `DxgkCbNotifyInterrupt`, `ResetFromTimeout` = sbg's recovery, preemption at
+   DMA-buffer granularity, the WDDM 1.2 mandatory DDIs (offer/reclaim, Direct Flip) present.
+3. **The UMD build:** Mesa 26.2.x + the viogpu3d-lineage d3d10umd + a Panfrost winsys on sbx, cross-built
+   for aarch64-windows (clang-cl) in the lima VM. **Needs disk:** the Mac has about 2 GB free. A Mesa cross
+   build wants about 5-10 GB in the VM, whose disk lives on the Mac. Build on the iCloud overflow or after
+   space is freed.
+4. **4a on the phone:** sbwddm + the UMD with softpipe first (proves the WDDM plumbing DWM needs without the
+   GPU), then Panfrost: behind the kill file, the guard and a dead-man way back (no WARP fallback).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

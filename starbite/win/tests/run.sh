@@ -9,3 +9,6 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -fsanitize=address,undefined \
 cc -std=c11 -Wall -Wextra -Werror -O1 -fsanitize=address,undefined \
     -o "$out-mali" "$here/mali_test.c" "$here/../sbmali/sbm_core.c" "$here/../sbmali/sbg_core.c" "$here/../common/sbw_acpm.c"
 "$out-mali"
+cc -std=c11 -Wall -Wextra -Werror -O1 -fsanitize=address,undefined \
+    -o "$out-sbx" "$here/sbx_test.c" "$here/../sbwddm/sbx_cmd.c"
+"$out-sbx"
