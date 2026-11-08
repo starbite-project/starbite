@@ -451,10 +451,10 @@ comes later behind a registry switch, since a panel that does not wake stays dar
   offline, and Windows then starts in the preferred 1080 × 2220.
 - New State: ModeMask, DefaultMode, RotAllowed, ModeWidth/ModeHeight (per commit), Rotation,
   PathRotationAsked, ModeFallback, ModeConfirmed.
-- Desktop Duplication (Starbite Link's sblinkd): `DXGI_OUTDUPL_DESC.Rotation` reports the orientation, and the
-  duplicated frame is in the panel's orientation; dirty rectangles are in desktop coordinates. A capture that
-  ignores `Rotation` shows a rotated desktop sideways **[from the DXGI documentation and Microsoft's
-  DesktopDuplication sample, not tested here]**.
+- Desktop Duplication (Starbite Link's sblinkd): `DXGI_OUTDUPL_DESC.Rotation` reports the orientation and
+  `ModeDesc` the size. Whether the duplicated frame then arrives already turned or in the panel's orientation
+  is **not checked** (Microsoft's DesktopDuplication sample handles `Rotation` itself, which suggests the
+  latter): sblinkd should log both after a rotation and turn the frame when `Rotation` is not IDENTITY.
 - Cost: rotated 90/270 presents read Windows' image down columns: slower than T7's copy for full frames.
 
 ### 7.6a Refresh rate: what Windows shows, and overclocking (research, 2026-11-07)
