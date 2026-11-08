@@ -902,6 +902,29 @@ The census:
   leaves cluster 1 armed (sbwdog's ArmedAtStart and WtDat say), and that `NtShutdownSystem` from a driver
   leaves the hive and NTFS clean.
 
+### 6.18 cycle-t13k-1: DWM's own frames are black; T13l tests texturing on the Mali (2026-11-08)
+
+**The first unattended GPU cycle (T13k):**
+- **The cycle itself:** a clean restart at 300 s, the display-only boot after it, and a clean hive.
+- **Flips:** EmuFlips = PresentFlipFlag = 194, so the stale replays are gone. Every flip source is black
+  (211 refreshes skipped, RefPx 0).
+- **DWM:** it rendered (5,243 jobs, all fences), created its 3 primaries and set the display mode, and imported
+  8 window surfaces. Its log has no failures.
+- **Rotation is not the cause:** `RotateResourceIdentities` copies contents between the rotated buffers.
+- **The spinner** comes from a non-primary surface (dxgkrnl's boot animation), not from DWM.
+
+**Suspect: texture sampling.** DWM composes by sampling, and sb-patches/0102 routes D3D10 sampling through a
+legacy TEX path that has not been checked on the Mali.
+
+**T13l: render tests at logon in the full-mode boot.** `starbite/win/autotest/sb-gputest.cmd`, one-shot and
+armed by gpu-cycle.sh, runs:
+- `triangle.exe hw`;
+- `sbtex.exe hw`: `tools/win/mesa/tests/sbtex.cpp`, 9 tests: clears, a solid shader, Sample, SampleLevel,
+  Load, GetDimensions, a BGRA texture, bilinear;
+- the same 9 on softpipe, as the reference.
+
+Results land in `pre/gputest/`.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

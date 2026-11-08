@@ -1,0 +1,19 @@
+@echo off
+rem sb-gputest.cmd (docs/WIN11-GPU.md 6.18): at logon in a full-mode GPU test boot, render tests on the Mali
+rem through the hardware UMD (sbumd), then a software reference. One-shot: armed by tools/win/gpu-cycle.sh with
+rem C:\starbite\auto\gpu\armed. Output: C:\starbite\auto\gpu\gputest.log, sbtex*.log, triangle.ppm.
+set D=C:\starbite\auto\gpu
+if not exist %D%\armed exit /b 0
+del %D%\armed
+cd /d %D%
+echo sb-gputest start %date% %time% >> gputest.log
+rem give DWM and the session a moment to settle
+ping -n 16 127.0.0.1 > nul
+triangle.exe hw >> gputest.log 2>&1
+echo triangle hw exit %errorlevel% >> gputest.log
+if exist triangle.ppm move /y triangle.ppm triangle-hw.ppm > nul
+sbtex.exe hw sbtex-hw.log >> gputest.log 2>&1
+echo sbtex hw exit %errorlevel% >> gputest.log
+if exist libgallium_d3d10-softpipe.dll sbtex.exe %D%\libgallium_d3d10-softpipe.dll sbtex-softpipe.log >> gputest.log 2>&1
+echo sbtex softpipe exit %errorlevel% >> gputest.log
+echo sb-gputest end %date% %time% >> gputest.log

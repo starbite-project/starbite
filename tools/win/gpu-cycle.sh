@@ -44,6 +44,8 @@ mkdir -p "$out"
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$out/cycle.log"; }
 NTFS=/dev/block/sda27
 W=/tmp/wwin
+SU="$W/Users/starbite/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup"
+gpu_armed=0
 HIVE=Windows/System32/config/SYSTEM
 HS=tools/win/hive-service.py
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -165,11 +167,23 @@ install() {
         push_check "$stage/sbwddm.sys" "$W/Windows/System32/drivers/sbwddm.sys" || rc=4
         [ -f "$stage/sbumd.dll" ] && { push_check "$stage/sbumd.dll" "$W/Windows/System32/sbumd.dll" || rc=4; }
         adb shell "rm -f $W/Windows/Starbite/sbwddm.full.off $W/Windows/Temp/sbumd-*.log; mkdir -p $W/ProgramData/Starbite/umdlog; cd $W/ProgramData/Starbite/umdlog && for f in *; do [ \"\$f\" = trace ] || rm -f \"\$f\"; done; touch trace" >/dev/null
+        # STAGE/gputest/: render tests at logon in the test boot (starbite/win/autotest/sb-gputest.cmd, one-shot)
+        if [ -d "$stage/gputest" ]; then
+            adb shell "rm -rf $W/starbite/auto/gpu; mkdir -p $W/starbite/auto/gpu" >/dev/null
+            for f in "$stage"/gputest/*; do
+                case $f in
+                *.cmd) push_check "$f" "$SU/$(basename "$f")" || rc=4 ;;
+                *) push_check "$f" "$W/starbite/auto/gpu/$(basename "$f")" || rc=4 ;;
+                esac
+            done
+            adb shell "echo on > $W/starbite/auto/gpu/armed" >/dev/null
+            gpu_armed=1
+        fi
     fi
     adb shell "rm -f $W/Windows/Starbite/sbwdog.off" >/dev/null
     umount_w
     [ $rc = 0 ] || { log "install read-back failed: phone left in TWRP"; exit 4; }
-    log "installed from $(basename "$stage"): sbwdog (Start 0, Unattended=1)$([ "$1" = 1 ] && echo ", sbwddm/sbumd, FullGuardBoots=0")"
+    log "installed from $(basename "$stage"): sbwdog (Start 0, Unattended=1)$([ "$1" = 1 ] && echo ", sbwddm/sbumd, FullGuardBoots=0")$([ $gpu_armed = 1 ] && echo ", gputest armed")"
 }
 finish() {  # after a clean display-only boot: disarm unless asked not to
     if [ $keep = 0 ]; then mount_rw; set_unattended 0 || true; umount_w; log "Unattended=0"; fi
@@ -246,6 +260,13 @@ pull_hive "$out/pre"
 mkdir -p "$out/pre/umdlog"
 adb pull "$W/ProgramData/Starbite/umdlog/." "$out/pre/umdlog/" >/dev/null 2>&1 || true
 adb shell "ls $W/Windows/Temp/ | grep '^sbumd-'" 2>/dev/null | tr -d '\r' | while read -r f; do adb pull "$W/Windows/Temp/$f" "$out/pre/umdlog/" >/dev/null 2>&1; done || true
+if [ $gpu_armed = 1 ]; then
+    mkdir -p "$out/pre/gputest"
+    for f in gputest.log sbtex-hw.log sbtex-softpipe.log triangle-hw.ppm armed; do
+        adb pull "$W/starbite/auto/gpu/$f" "$out/pre/gputest/" >/dev/null 2>&1 || true
+    done
+    if [ -f "$out/pre/gputest/armed" ]; then log "gputest did NOT run (still armed: no logon?)"; else log "gputest: $(grep -a -E 'exit|TEST' "$out/pre/gputest/gputest.log" 2>/dev/null | tr -d '\r' | tr '\n' ';' | cut -c1-400)"; fi
+fi
 umount_w
 log "pulled pre/ ($(du -sh "$out/pre" | cut -f1)); the values below are from the unreplayed hive"
 gap_report "$out/pre/SYSTEM"
