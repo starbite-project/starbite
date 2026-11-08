@@ -932,6 +932,14 @@ Results land in `pre/gputest/`.
 - **The camera at +70 s showed black.**
 - **T13m:** the tests pick the adapter by vendor (or "Mali"/"Starbite"), and are otherwise unchanged.
 
+**cycle-t13m-1 (23:25):**
+- **`triangle.exe hw` PASSED:** the first correct hardware D3D11 triangle on the Mali under Windows (FL 10_0,
+  through sbwddm and sbumd).
+- **sbtex hw crashed at its first shader pass.** Panfrost's Bifrost backend reports "Unhandled intrinsic
+  load_vertex_id_zero_base" for SV_VertexID (tgsi_to_nir path) and leaves it undefined.
+- **T13n:** sbtex feeds positions from a vertex buffer, and the SV_VertexID variant runs last as a known gap.
+- **Unexplained, in every process:** one early job fails with JS 0x51.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

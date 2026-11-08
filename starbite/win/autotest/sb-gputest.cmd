@@ -16,4 +16,7 @@ sbtex.exe hw sbtex-hw.log >> gputest.log 2>&1
 echo sbtex hw exit %errorlevel% >> gputest.log
 if exist libgallium_d3d10-softpipe.dll sbtex.exe %D%\libgallium_d3d10-softpipe.dll sbtex-softpipe.log >> gputest.log 2>&1
 echo sbtex softpipe exit %errorlevel% >> gputest.log
+rem the SV_VertexID variant last: on the Mali it crashed (T13m: Panfrost has no load_vertex_id_zero_base)
+sbtex.exe hw sbtex-hw-vertexid.log vertexid >> gputest.log 2>&1
+echo sbtex hw vertexid exit %errorlevel% >> gputest.log
 echo sb-gputest end %date% %time% >> gputest.log

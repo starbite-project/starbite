@@ -38,7 +38,11 @@ static const char kHlsl[] =
     "Texture2D t : register(t0);\n"
     "SamplerState s : register(s0);\n"
     "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
-    "V vs(uint id : SV_VertexID) {\n"
+    /* T13n: positions from a vertex buffer. T13m's SV_VertexID version crashed the hardware UMD: Panfrost's
+     * Bifrost backend has no load_vertex_id_zero_base ("Unhandled intrinsic"), the value stayed undefined */
+    "V vs(float2 p : POSITION) {\n"
+    "  V o; o.uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); o.p = float4(p, 0, 1); return o; }\n"
+    "V vs_id(uint id : SV_VertexID) {\n"
     "  V o; float2 uv = float2((id << 1) & 2, id & 2);\n"
     "  o.uv = uv; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n"
     "float4 ps_solid(V i) : SV_Target { return float4(0.0, 0.0, 1.0, 1.0); }\n"
@@ -50,6 +54,8 @@ static const char kHlsl[] =
 static ID3D11Device *dev;
 static ID3D11DeviceContext *ctx;
 static ID3D11VertexShader *vs;
+static ID3D11InputLayout *il;
+static ID3D11Buffer *vb;
 static FILE *logf;
 static int failures;
 
@@ -159,7 +165,9 @@ static bool pass(const char *ps_entry, ID3D11ShaderResourceView *srv, ID3D11Samp
     ctx->OMSetRenderTargets(1, &rtv, nullptr);
     D3D11_VIEWPORT vp = { 0.0f, 0.0f, 64.0f, 64.0f, 0.0f, 1.0f };
     ctx->RSSetViewports(1, &vp);
-    ctx->IASetInputLayout(nullptr);
+    UINT stride = 8, offset = 0;
+    ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+    ctx->IASetInputLayout(il);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->VSSetShader(vs, nullptr, 0);
     ctx->PSSetShader(ps, nullptr, 0);
@@ -232,10 +240,27 @@ int main(int argc, char **argv)
     }
     out("device created (%s), feature level 0x%x\n", hw ? "hardware" : "software", got);
 
-    ID3DBlob *vsb = compile("vs", "vs_4_0");
+    bool vid = argc > 3 && strcmp(argv[3], "vertexid") == 0;   /* the SV_VertexID shader instead (T13m's crash) */
+    ID3DBlob *vsb = compile(vid ? "vs_id" : "vs", "vs_4_0");
+    if (vid)
+        out("vertex shader: SV_VertexID (expect a crash on the Mali until Panfrost handles it)\n");
     if (!vsb || FAILED(dev->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &vs))) {
         out("FAIL vertex shader\n");
         return 105;
+    }
+    {   // one triangle covering the 64x64 target (clip space), as the g52 triangle feeds its vertices
+        const float verts[] = { -1.0f, 1.0f, 3.0f, 1.0f, -1.0f, -3.0f };
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = sizeof(verts);
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA init = { verts, 0, 0 };
+        D3D11_INPUT_ELEMENT_DESC ied = { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 };
+        if (FAILED(dev->CreateBuffer(&bd, &init, &vb)) ||
+            (!vid && FAILED(dev->CreateInputLayout(&ied, 1, vsb->GetBufferPointer(), vsb->GetBufferSize(), &il)))) {
+            out("FAIL vertex buffer / input layout\n");
+            return 107;
+        }
     }
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
