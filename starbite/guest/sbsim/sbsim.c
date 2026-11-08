@@ -383,6 +383,14 @@ static int run_guest(unsigned run)
             char name[] = "sbsim-panel-run0.ppm";
             name[15] = (char)('0' + run % 10);
             write_ppm(name);
+            t_touch = t;
+            if (run == 1)
+                sbg_send(SBG_MSG_LOAD, 4, 2);       /* run 1: stop while four load threads spin */
+            else
+                sbg_stop();
+        } else if (tstep == 5 && run == 1 && t - t_touch > 1000) {
+            tstep = 6;
+            puts_("sbsim: MSG_STOP during the guest's load\n");
             sbg_stop();
         }
     }

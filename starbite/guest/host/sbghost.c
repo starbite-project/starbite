@@ -228,7 +228,7 @@ int sbg_load(const void *image, uint64_t image_size, const void *dtb, uint64_t d
     sbshm_dmb();
     h->host_state = SBG_HOST_LOADED;
     st.state = SBG_LOADED;
-    st.hello = st.frames = 0;
+    st.hello = st.frames = st.hello_ncpus = 0;
     st.t_hello = st.t_first_frame = st.t_off = st.t_stop = 0;
     log_pos = 0;
     log_seen = 0;
@@ -325,6 +325,7 @@ int sbg_touch(uint32_t slot, uint32_t phase, int32_t x, int32_t y)
     return r;
 }
 int sbg_key(uint32_t code, int down) { return put(SBG_MSG_KEY, code, down ? 1U : 0U, 0, 0); }
+int sbg_send(uint16_t type, uint32_t a, uint32_t b) { return put(type, a, b, 0, 0); }
 int sbg_screen(int on)
 {
     HDR->screen_on = on ? 1U : 0U;
@@ -380,6 +381,7 @@ void sbg_poll(void)
         st.msgs_in++;
         if (m.type == SBG_MSG_HELLO && !st.hello) {
             st.hello = 1;
+            st.hello_ncpus = m.a;
             st.t_hello = t - t_start;
             if (st.state == SBG_BOOTING)
                 st.state = SBG_RUNNING;

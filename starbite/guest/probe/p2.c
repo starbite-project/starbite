@@ -29,7 +29,6 @@
 #define SW 720U
 #define SH 1440U
 #define BAR 40U                                     /* (2960 - 2 * 1440) / 2 */
-#define LOG_MAX 60U
 
 extern const char p2_image[], p2_image_end[], p2_dtb[], p2_dtb_end[], p2_rd[], p2_rd_end[];
 
@@ -62,7 +61,7 @@ static int has(const char *s, const char *w)
     return 0;
 }
 static char tail[48][120];
-static unsigned tail_n, fwd, seen;
+static unsigned tail_n, fwd, seen, log_max = 36;
 static void guest_log(const char *l)
 {
     sb_strcpy(tail[tail_n % 48], sizeof(tail[0]), l);
@@ -71,11 +70,11 @@ static void guest_log(const char *l)
     static const char *const keep[] = {"guestd", "sbguest", "guest-init", "GIC", "psci", "smp:", "SMP:", "panic",
                                        "Oops", "BUG", "Unable", "rror", "ail", "Kernel command", "Run /init",
                                        "Memory:", "Machine model", "arch_timer", "Booted secondary", "reboot", "killed",
-                                       "shut down", "trampoline", "online"};
+                                       "shut down", "trampoline", "online", "load:"};
     int k = seen <= 3;
     for (unsigned i = 0; !k && i < sizeof(keep) / sizeof(keep[0]); ++i)
         k = has(l, keep[i]);
-    if (!k || fwd >= LOG_MAX)
+    if (!k || fwd >= log_max)
         return;
     ++fwd;
     ub_s(&u, "linux| ");
@@ -207,11 +206,190 @@ static void wait_ms(unsigned n)
     }
 }
 
+#ifndef P2_CYCLES
+#define P2_CYCLES 3U
+#endif
+static volatile struct sbshm_hdr *h;
+
+/* the M3s under the guest's load: clock and the big cores' temperature, once a second */
+static int load_sample(unsigned i)
+{
+    struct sb_temps tp;
+    int off = 0;
+    sb_temps_read(&tp);
+    uint64_t hz = sb_m3_hz(&off);
+    ub_s(&u, "load +");
+    ub_dec(&u, i);
+    ub_s(&u, " s: M3 ");
+    if (off)
+        ub_s(&u, "off");
+    else
+        ub_dec(&u, hz / 1000000U);
+    ub_s(&u, " MHz, big cores max ");
+    ub_sdec(&u, tp.big_max);
+    ub_s(&u, " C, hottest ");
+    ub_sdec(&u, tp.hottest);
+    ub_s(&u, " C, A55 ");
+    ub_dec(&u, sb_a55_hz() / 1000000U);
+    ub_s(&u, " MHz");
+    L();
+    return tp.big_max;
+}
+
+/* one guest run: load, start, the app, a tap, (the load), stop, the cluster off. 1 passed */
+static int cycle(unsigned n, int with_load)
+{
+    fwd = 0;
+    seen = 0;
+    tail_n = 0;
+    log_max = n == 0 ? 36U : 8U;                     /* pmsg holds 16 KB for three boots */
+    pmu_snap();
+    uint64_t t_load = sb_ms();
+    int r = sbg_load(p2_image, (uint64_t)(p2_image_end - p2_image), p2_dtb, (uint64_t)(p2_dtb_end - p2_dtb),
+                     p2_rd, (uint64_t)(p2_rd_end - p2_rd));
+    feed();
+    ub_s(&u, "cycle ");
+    ub_dec(&u, n);
+    ub_s(&u, with_load ? " (with load)" : "");
+    ub_s(&u, ": loaded in ");
+    ub_dec(&u, sb_ms() - t_load);
+    ub_s(&u, " ms");
+    L();
+    if (r == 0) {
+        bars();
+        r = sbg_start();
+    }
+    const struct sbg_stats *s = sbg_stats();
+    uint32_t seq = 0, tstep = 0, touch_seq = 0, frames = 0, stride = 0, loads = 0;
+    const volatile uint32_t *px = 0;
+    uint64_t last_comp = 0, t_touch = 0, t_run = 0, t_sample = 0;
+    int touch_ok = 0, hot = 0;
+    uint64_t show = with_load ? 8000U : (n == 0 ? 8000U : 3000U);
+    while (r == 0) {
+        wait_ms(5);
+        uint64_t t = sb_ms();
+        sbg_poll();
+        s = sbg_stats();
+        if (s->state == SBG_FAILED || s->state == SBG_OFF)
+            break;
+        if (t - last_comp >= 200 && sbg_frame(&seq, &px, &stride)) {
+            last_comp = t;
+            composite(px, stride);
+            frames++;
+        }
+        if (s->state == SBG_RUNNING && frames >= 3 && tstep == 0) {
+            sbg_touch(0, SBG_TOUCH_DOWN, 360, 840);
+            tstep = 1;
+            t_touch = t;
+        } else if (tstep == 1 && t - t_touch > 150) {
+            sbg_touch(0, SBG_TOUCH_MOVE, 420, 840);
+            tstep = 2;
+        } else if (tstep == 2 && t - t_touch > 300) {
+            sbg_touch(0, SBG_TOUCH_UP, 420, 840);
+            sbg_key(158, 1);
+            sbg_key(158, 0);
+            tstep = 3;
+        } else if (tstep == 3 && h->touches_seen >= 3) {
+            tstep = 4;
+            touch_seq = h->surf_seq;
+        } else if (tstep == 4 && h->surf_seq - touch_seq >= 2) {
+            sbshm_dmb();
+            const volatile uint32_t *fr = (const volatile uint32_t *)(uintptr_t)(SBG_S9_SHM_BASE +
+                                                                                 h->surf_off[h->surf_front & 1U]);
+            uint32_t c = fr[840U * (h->surf_stride / 4) + 360U] & 0xffffffU;  /* the newest front buffer */
+            touch_ok = c == 0xffd700U;
+            ub_s(&u, "touch reached the app: pixel at the tap ");
+            ub_hex(&u, c, 6);
+            ub_s(&u, touch_ok ? " (its touch mark)" : " (NOT the touch mark)");
+            L();
+            tstep = 5;
+            t_run = t_sample = t;
+            if (with_load)
+                sbg_send(SBG_MSG_LOAD, 4, 6);       /* four threads, 6 s: every M3 busy */
+        } else if (tstep == 5) {
+            if (with_load && t - t_sample >= 1000 && loads < 8) {
+                t_sample = t;
+                if (load_sample(++loads) >= 75) {   /* a safety stop well below the trips */
+                    hot = 1;
+                    ub_s(&u, "load: the big cores reached 75 C: stopping early");
+                    L();
+                }
+            }
+            if (hot || t - t_run > show) {
+                tstep = 6;
+                sbg_stop();
+            }
+        }
+    }
+    s = sbg_stats();
+    ub_s(&u, "cycle ");
+    ub_dec(&u, n);
+    ub_s(&u, ": HELLO after ");
+    ub_dec(&u, s->t_hello);
+    ub_s(&u, " ms with ");
+    ub_dec(&u, s->hello_ncpus);
+    ub_s(&u, " CPUs, interfaces ");
+    ub_hex(&u, s->guest_cpuif, 2);
+    ub_s(&u, ", first frame ");
+    ub_dec(&u, s->t_first_frame);
+    ub_s(&u, " ms, frames shown ");
+    ub_dec(&u, frames);
+    ub_s(&u, ", heartbeats ");
+    ub_dec(&u, h->guest_heartbeat);
+    ub_s(&u, ", log lines ");
+    ub_dec(&u, seen);
+    L();
+    if (s->state != SBG_OFF) {
+        ub_s(&u, "the guest's last log lines:");
+        L();
+        unsigned k = tail_n < 48 ? tail_n : 48;
+        for (unsigned i = tail_n - k; i < tail_n && i < tail_n - k + 30; ++i) {
+            ub_s(&u, "linux| ");
+            ub_s(&u, tail[i % 48]);
+            L();
+        }
+    }
+    /* the cluster's power over 2 s after the stop */
+    ub_s(&u, "cycle ");
+    ub_dec(&u, n);
+    ub_s(&u, " after the stop: guest_state ");
+    ub_dec(&u, h->guest_state);
+    ub_s(&u, ", M3 cluster at +0/100/500/2000 ms:");
+    static const unsigned at[] = {0, 100, 400, 1500};
+    for (unsigned i = 0; i < 4; ++i) {
+        wait_ms(at[i]);
+        ub_s(&u, sb_m3_on() ? " on" : " off");
+    }
+    L();
+    int off = !sb_m3_on();
+    if (!off || n == 0) {
+        fp_note("after the stop");
+        if (!off)
+            pmu_diff();
+    }
+    int pass = r == 0 && s->state == SBG_OFF && s->hello && s->hello_ncpus == 4 && frames >= 5 && touch_ok && off &&
+               (!with_load || loads >= 3);
+    ub_s(&u, "cycle ");
+    ub_dec(&u, n);
+    ub_s(&u, pass ? ": PASS" : ": FAIL");
+    if (s->state == SBG_OFF) {
+        ub_s(&u, ", cluster off ");
+        ub_dec(&u, s->t_off);
+        ub_s(&u, " ms after MSG_STOP");
+    }
+    if (s->why) {
+        ub_s(&u, ", why: ");
+        ub_s(&u, s->why);
+    }
+    L();
+    return pass;
+}
+
 void sb_main(void)
 {
     ub_init(&u);
     ub_s(&u, "gp2: ");
-    ub_s(&u, "guest-probe P2c (Linux on the M3 cluster, no Starbite OS): EL");
+    ub_s(&u, "guest-probe P2d (Linux on the M3 cluster, no Starbite OS: three cycles): EL");
     ub_dec(&u, (sb_boot.el >> 2) & 3U);
     ub_s(&u, ", guest Image ");
     ub_dec(&u, (uint64_t)(p2_image_end - p2_image));
@@ -263,132 +441,25 @@ void sb_main(void)
     };
     sbg_init(&shim, &cfg, me);
     sbg_gic_prepare();
-    pmu_snap();
-    uint64_t t_load = sb_ms();
-    int r = sbg_load(p2_image, (uint64_t)(p2_image_end - p2_image), p2_dtb, (uint64_t)(p2_dtb_end - p2_dtb),
-                     p2_rd, (uint64_t)(p2_rd_end - p2_rd));
-    feed();
-    ub_s(&u, "loaded into the carve-out in ");
-    ub_dec(&u, sb_ms() - t_load);
-    ub_s(&u, " ms");
-    L();
-    if (r == 0) {
-        bars();
-        r = sbg_start();
+    h = sbg_hdr();
+    unsigned ok = 0, ran = 0;
+    for (unsigned n = 0; n < P2_CYCLES; ++n) {
+        ++ran;
+        int r = cycle(n, n == 1);
+        ok += (unsigned)r;
+        if (!r || sb_m3_on())
+            break;                                  /* a guest that did not stop cleanly is not restarted */
     }
-    const struct sbg_stats *s = sbg_stats();
-    volatile struct sbshm_hdr *h = sbg_hdr();
-    uint32_t seq = 0, tstep = 0, touch_seq = 0, frames = 0, stride = 0;
-    const volatile uint32_t *px = 0;
-    uint64_t last_comp = 0, t_touch = 0, t_run = 0;
-    int touch_ok = 0;
-    while (r == 0) {
-        wait_ms(5);
-        uint64_t t = sb_ms();
-        sbg_poll();
-        s = sbg_stats();
-        if (s->state == SBG_FAILED || s->state == SBG_OFF)
-            break;
-        if (t - last_comp >= 200 && sbg_frame(&seq, &px, &stride)) {
-            last_comp = t;
-            composite(px, stride);
-            frames++;
-        }
-        if (s->state == SBG_RUNNING && frames >= 3 && tstep == 0) {
-            sbg_touch(0, SBG_TOUCH_DOWN, 360, 840);
-            tstep = 1;
-            t_touch = t;
-        } else if (tstep == 1 && t - t_touch > 150) {
-            sbg_touch(0, SBG_TOUCH_MOVE, 420, 840);
-            tstep = 2;
-        } else if (tstep == 2 && t - t_touch > 300) {
-            sbg_touch(0, SBG_TOUCH_UP, 420, 840);
-            sbg_key(158, 1);
-            sbg_key(158, 0);
-            tstep = 3;
-        } else if (tstep == 3 && h->touches_seen >= 3) {
-            tstep = 4;
-            touch_seq = h->surf_seq;
-        } else if (tstep == 4 && h->surf_seq - touch_seq >= 2) {
-            sbshm_dmb();
-            const volatile uint32_t *fr = (const volatile uint32_t *)(uintptr_t)(SBG_S9_SHM_BASE +
-                                                                                 h->surf_off[h->surf_front & 1U]);
-            uint32_t c = fr[840U * (h->surf_stride / 4) + 360U] & 0xffffffU;  /* the newest front buffer */
-            touch_ok = c == 0xffd700U;
-            ub_s(&u, "touch reached the app: pixel at the tap ");
-            ub_hex(&u, c, 6);
-            ub_s(&u, touch_ok ? " (its touch mark)" : " (NOT the touch mark)");
-            L();
-            tstep = 5;
-            t_run = t;
-        } else if (tstep == 5 && t - t_run > 8000) {
-            tstep = 6;
-            sbg_stop();
-        }
-    }
-    s = sbg_stats();
-    ub_s(&u, "guest: HELLO ");
-    ub_dec(&u, s->hello);
-    ub_s(&u, " after ");
-    ub_dec(&u, s->t_hello);
-    ub_s(&u, " ms, CPUs ");
-    ub_dec(&u, s->guest_ncpus);
-    ub_s(&u, ", interfaces ");
-    ub_hex(&u, s->guest_cpuif, 2);
-    ub_s(&u, ", first frame ");
-    ub_dec(&u, s->t_first_frame);
-    ub_s(&u, " ms, frames shown ");
-    ub_dec(&u, frames);
-    ub_s(&u, ", guest heartbeats ");
-    ub_dec(&u, h->guest_heartbeat);
-    ub_s(&u, ", log lines ");
-    ub_dec(&u, seen);
-    L();
-    if (s->state != SBG_OFF) {
-        ub_s(&u, "the guest's last log lines:");
-        L();
-        unsigned n = tail_n < 48 ? tail_n : 48;
-        for (unsigned i = tail_n - n; i < tail_n && i < tail_n - n + 30; ++i) {
-            ub_s(&u, "linux| ");
-            ub_s(&u, tail[i % 48]);
-            L();
-        }
-    }
-    /* the cluster's power over 2 s after the stop: does the firmware take it down once every core is off? */
-    ub_s(&u, "after the stop: guest_state ");
-    ub_dec(&u, h->guest_state);
-    ub_s(&u, ", guest CPUs online at the end ");
-    ub_dec(&u, h->guest_ncpus);
-    ub_s(&u, ", M3 cluster at +0/100/500/2000 ms:");
-    static const unsigned at[] = {0, 100, 400, 1500};
-    for (unsigned i = 0; i < 4; ++i) {
-        wait_ms(at[i]);
-        ub_s(&u, sb_m3_on() ? " on" : " off");
-    }
-    ub_s(&u, ", PMU 0x14062044 ");
-    ub_hex(&u, rd(0x14062044UL), 8);
-    L();
-    fp_note("after the stop");
-    pmu_diff();
-    int off = !sb_m3_on();
-    int pass = r == 0 && s->state == SBG_OFF && s->hello && frames >= 5 && touch_ok && off;
     ub_s(&u, "RESULT ");
-    ub_s(&u, pass ? "PASS" : "FAIL");
-    ub_s(&u, ": Linux on the M3s ");
-    ub_s(&u, s->hello ? "ran" : "did NOT say HELLO");
-    ub_s(&u, ", touch ");
-    ub_s(&u, touch_ok ? "ok" : "no");
-    ub_s(&u, ", stop: cluster ");
-    ub_s(&u, off ? "off" : "STILL POWERED");
-    if (s->state == SBG_OFF) {
-        ub_s(&u, " after ");
-        ub_dec(&u, s->t_off);
-        ub_s(&u, " ms");
-    }
-    if (s->why) {
-        ub_s(&u, ", why: ");
-        ub_s(&u, s->why);
-    }
+    ub_s(&u, ok == P2_CYCLES ? "PASS" : "FAIL");
+    ub_s(&u, ": ");
+    ub_dec(&u, ok);
+    ub_c(&u, '/');
+    ub_dec(&u, P2_CYCLES);
+    ub_s(&u, " guest cycles (start, 4 CPUs, app, touch, stop, cluster off; cycle 1 with the M3s under load), ran ");
+    ub_dec(&u, ran);
+    ub_s(&u, "; M3 cluster ");
+    ub_s(&u, sb_m3_on() ? "STILL POWERED" : "off");
     ub_s(&u, "; restarting into recovery in 5 s");
     L();
     wait_ms(5000);

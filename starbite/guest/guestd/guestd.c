@@ -256,12 +256,17 @@ static int cpu_load(int pct[8])
     return n;
 }
 
+static volatile uint64_t burn_until;          /* 0: forever (--burn), else ms_now() deadline (SBG_MSG_LOAD) */
 static void *burn(void *arg)
 {
     (void)arg;
     volatile uint64_t x = 1;
-    for (;;)
+    uint64_t until = burn_until;
+    for (unsigned i = 0;; ++i) {
         x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+        if (until && !(i & 0xfffff) && ms_now() >= until)
+            break;
+    }
     return NULL;
 }
 
@@ -365,6 +370,14 @@ int main(int argc, char **argv)
                 say("key %u %s", m.a, m.b ? "down" : "up");
             } else if (m.type == SBG_MSG_STOP) {
                 stop();
+            } else if (m.type == SBG_MSG_LOAD && m.a && m.a <= 16 && m.b && m.b <= 60) {
+                burn_until = ms_now() + 1000ULL * m.b;
+                for (uint32_t i = 0; i < m.a; ++i) {
+                    pthread_t th;
+                    if (pthread_create(&th, NULL, burn, NULL) == 0)
+                        pthread_detach(th);
+                }
+                say("load: %u threads for %u s", m.a, m.b);
             }
         }
         /* 2. the frame */

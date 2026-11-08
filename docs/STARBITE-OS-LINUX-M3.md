@@ -40,7 +40,8 @@ Code: `starbite/guest/` (all new, owned by this work).
 | Both doorbells, M3 → A55 (510) included | **phone, P1c** (back ok from 0x101 and 0x102) |
 | Linux 7.1 on M3 0x100: boot, HELLO, 45 frames composited, touch reached the app, MSG_STOP → power down | **phone, P2** (secondaries lost: high entry; fixed in P2b) |
 | **Linux 7.1 on all four M3 cores**: HELLO 119 ms after CPU_ON, 4 CPUs, GIC interfaces 0xf0, first frame 124 ms, 45 frames, touch, MSG_STOP → the guest's CPUs in CPU_OFF | **phone, P2b** (18:50) |
-| The cluster powering down after the guest's CPU_OFFs | **no** (P2b: the PMU still reads on: Samsung's FlexPMU off sequence is missing, see 7); P2c adds it |
+| The cluster powering down after the guest's CPU_OFFs | **phone, P2c** (22:48): off 55 ms after MSG_STOP, with Samsung's FlexPMU core/cluster sequences (7); without them (P2b) it stayed on |
+| Start / stop / start in one boot, the M3s under load | P2d staged |
 | PSCI's context id reaches x0 | **no** on the phone (x0 = 0xBFFFF01C): the trampoline's DTB literal is required |
 | Linux on the phone's M3s | not yet: P1b → P2 → P3 (10) |
 
