@@ -829,6 +829,15 @@ preview's 20 scenes, 0 px unpresented; image 5181440 bytes, sha256 b3aad7624ea40
   normal AOR (0x0440); no transition when the screen wakes; the overflow log's bit shift; long tile lines cut
   on a character boundary before the compare; build.sh fails if the self-test image did not get the self test.
 
+### 12.17 Version 0.6.4: the Wi-Fi join never blocks (2026-11-08)
+
+- T14 passed on the phone with 0.6.3's self test (the `sbos-state` entry made; the fence's standing grant; a dry run,
+  then sequence 1 written with FUA + cache flush, read back and picked): the heat record now persists there.
+- 0.6.3's self test still had a 2343 ms loop turn: `bcmw_join_start` waited for the directed scan. Now it computes
+  the PMK and starts the scan only; `bcmw_join_poll` waits for the scan's end (up to 8 s), then the access point,
+  the security settings, power save and SET_SSID (`join_associate`), then the handshake as before. The 15 s
+  timeout counts from SET_SSID. On the host the self test's slowest loop turn is 7 ms with a WPA2 join.
+
 ### 12.16 Version 0.6.3: the heat record, Manual's SoC stop, the LED at its rated currents (2026-11-08)
 
 From the user's 0.6.2 tour: about 10 W at most, and "at 128 °C it force shut off" (the SoC reading on screen; the

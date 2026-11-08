@@ -434,7 +434,7 @@ static int has_idsup(struct bcmw *w)
     return 0;
 }
 
-static int scan_for(struct bcmw *w)
+static int scan_begin(struct bcmw *w)
 {
     uint8_t p[80];
     uint64_t t0;
@@ -459,11 +459,7 @@ static int scan_for(struct bcmw *w)
     }
     if (e != BCMW_OK)
         return e;
-    t0 = bcmw_now(w);
-    while (!w->join_scan_done && bcmw_now(w) - t0 < 8000000) {
-        mb_process(w);
-        bcmw_udelay(w, 1000);
-    }
+    w->join_t0 = bcmw_now(w);           /* the directed scan's start: bcmw_join_poll waits up to 8 s for its end */
     return BCMW_OK;
 }
 
@@ -484,9 +480,7 @@ static void join_pm_off(struct bcmw *w)
 int bcmw_join_start(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char *pass, unsigned timeout_ms)
 {
     unsigned pass_len = bcmw_strlen(pass);
-    uint8_t j[48];
-    int e, fwerr = 0;
-    uint64_t t0;
+    int e;
     struct bcmw_lb l;
 
     if (w->step < BCMW_STEP_UP || w->dead)
@@ -500,32 +494,14 @@ int bcmw_join_start(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, cons
     w->link_up = w->keyed = 0;
     w->keys_due = 0;
     w->join_fwsup = !w->join_open && w->cfg.fw_supplicant && has_idsup(w);
+    w->join_timeout_us = (uint64_t)(timeout_ms ? timeout_ms : 15000) * 1000;
     lb_init(&l);
     lb_s(&l, "link: joining a network (name not logged): ");
     lb_s(&l, w->join_open ? "open" : w->join_fwsup ? "WPA2-PSK, the firmware's supplicant (cap: idsup)"
                                                    : "WPA2-PSK, the host's supplicant");
     bcmw_say_lb(w, &l);
 
-    if ((e = scan_for(w)) != BCMW_OK)
-        goto out;
-    if (!w->join_found) {
-        bcmw_sayx(w, "link: no suitable access point of that name; unsuitable ones heard: ", w->join_unsuitable, NULL);
-        e = BCMW_E_NODEV;
-        goto out;
-    }
-    lb_init(&l);
-    lb_s(&l, "link: the access point ");
-    for (int i = 0; i < 3; i++) {
-        lb_hex(&l, w->join_bssid[i], 2);
-        lb_s(&l, ":");
-    }
-    lb_s(&l, "..:..:.. (its maker's half), RSSI ");
-    lb_sdec(&l, w->join_rssi);
-    lb_s(&l, " dBm, chanspec ");
-    lb_hex(&l, w->join_chanspec, 4);
-    lb_s(&l, w->join_open ? ", open" : w->join_group == BCMW_CIPHER_CCMP ? ", group cipher CCMP" : ", group cipher TKIP");
-    bcmw_say_lb(w, &l);
-
+    /* the PMK first (it needs only the name and the passphrase; the passphrase is not kept after this call) */
     if (!w->join_open && pass_len == 64) {
         /* 64 hex digits are the PSK itself (IEEE 802.11 M.4) */
         for (unsigned i = 0; i < 64; i++) {
@@ -548,6 +524,39 @@ int bcmw_join_start(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, cons
         lb_s(&l, " ms");
         bcmw_say_lb(w, &l);
     }
+    /* the directed scan: started here, its results waited for in bcmw_join_poll (Starbite OS 0.6.3: the wait blocked
+     * the caller's loop for ~2.3 s) */
+    if ((e = scan_begin(w)) != BCMW_OK)
+        goto out;
+    return BCMW_OK;
+out:
+    w->join_phase = 0;
+    bcmw_memset(w->wpa.pmk, 0, sizeof(w->wpa.pmk));
+    return e;
+}
+
+/* after the directed scan: the access point, the security settings, power save, SET_SSID */
+static int join_associate(struct bcmw *w)
+{
+    uint8_t j[48];
+    int e, fwerr = 0;
+    struct bcmw_lb l;
+    if (!w->join_found) {
+        bcmw_sayx(w, "link: no suitable access point of that name; unsuitable ones heard: ", w->join_unsuitable, NULL);
+        return BCMW_E_NODEV;
+    }
+    lb_init(&l);
+    lb_s(&l, "link: the access point ");
+    for (int i = 0; i < 3; i++) {
+        lb_hex(&l, w->join_bssid[i], 2);
+        lb_s(&l, ":");
+    }
+    lb_s(&l, "..:..:.. (its maker's half), RSSI ");
+    lb_sdec(&l, w->join_rssi);
+    lb_s(&l, " dBm, chanspec ");
+    lb_hex(&l, w->join_chanspec, 4);
+    lb_s(&l, w->join_open ? ", open" : w->join_group == BCMW_CIPHER_CCMP ? ", group cipher CCMP" : ", group cipher TKIP");
+    bcmw_say_lb(w, &l);
     {
         uint32_t v = 1;
         bcmw_ioctl(w, 0, BCMW_C_SET_INFRA, &v, 4, 1, &fwerr);
@@ -585,31 +594,21 @@ int bcmw_join_start(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, cons
     }
     if (e != BCMW_OK) {
         bcmw_sayx(w, "link: the firmware refused the security settings; its error ", (uint32_t)fwerr, NULL);
-        goto out;
+        return e;
     }
     join_pm_off(w);
     /* WLC_SET_SSID: brcmf_join_params = the name (4 + 32), then the BSSID and no channel list */
     bcmw_memset(j, 0, sizeof(j));
-    put32(j, ssid_len);
-    bcmw_memcpy(j + 4, ssid, ssid_len);
+    put32(j, w->join_ssid_len);
+    bcmw_memcpy(j + 4, w->join_ssid, w->join_ssid_len);
     bcmw_memcpy(j + 36, w->join_bssid, 6);
     w->join_phase = 2;
-    w->join_t0 = t0 = bcmw_now(w);
-    w->join_timeout_us = (uint64_t)(timeout_ms ? timeout_ms : 15000) * 1000;
-    (void)t0;
+    w->join_t0 = bcmw_now(w);
     if ((e = bcmw_ioctl(w, 0, BCMW_C_SET_SSID, j, sizeof(j), 1, &fwerr)) != BCMW_OK) {
         bcmw_sayx(w, "link: SET_SSID refused; the firmware's error ", (uint32_t)fwerr, NULL);
-        goto out;
+        return e;
     }
     return BCMW_OK;                     /* the PMK stays for the handshake (bcmw_join_poll wipes it) */
-out:
-    if (w->join_phase != 3) {
-        if (w->join_phase == 2 || w->join_phase == -1)
-            bcmw_leave(w);              /* the firmware would go on trying (an earlier port: station_leave) */
-        w->join_phase = 0;
-    }
-    bcmw_memset(w->wpa.pmk, 0, sizeof(w->wpa.pmk));
-    return e;
 }
 
 int bcmw_join_poll(struct bcmw *w)
@@ -618,6 +617,14 @@ int bcmw_join_poll(struct bcmw *w)
     int e;
     if (w->join_phase == 3)
         return BCMW_OK;
+    if (w->join_phase == 1 && !w->dead) {
+        mb_process(w);
+        if (!w->join_scan_done && bcmw_now(w) - w->join_t0 < 8000000)
+            return BCMW_E_PENDING;      /* the directed scan's results */
+        if ((e = join_associate(w)) != BCMW_OK)
+            goto out;
+        return BCMW_E_PENDING;
+    }
     if (w->join_phase != 2 || w->dead) {
         e = w->dead ? BCMW_E_NODEV : BCMW_E_STATE;
         goto out;
