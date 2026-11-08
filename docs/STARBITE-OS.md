@@ -1059,7 +1059,7 @@ forced restart). Cause and fixes: 8.6 and 12.5.
   `selftest: wifi: on, the bring-up and one scan (no join), then off`, the core's step lines (`wifi: pcie: ...`,
   `wifi: chip: 7: chip 4361 revision 5`, `wifi: msgbuf: ...`), `wifi: up in N ms; scanning`, `wifi: the scan heard
   N networks (names not logged)`, `selftest: wifi: networks heard: N`, `wifi: off (the radio held in reset and
-  unpowered)`, `selftest: passed: 25 screens, apps ok 9 ...`. The radio transmits only the scan's probe requests
+  unpowered)`, `selftest: passed: 25 screens, apps ok 9 ...` (from 0.5.9: 28 screens, with Info's card editor and the keyboard). The radio transmits only the scan's probe requests
   (as T3 did). Undo: none needed (the radio is off at the end, and a reset unpowers it anyway).
 - **T16 (the user present, an open network):** the normal image; Wi-Fi → on → pick an open network (a phone's
   hotspot without a password works) → expect "Connected", the address and "The router answers in N ms".
