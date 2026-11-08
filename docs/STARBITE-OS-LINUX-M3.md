@@ -39,6 +39,8 @@ Code: `starbite/guest/` (all new, owned by this work).
 | The M3s: GIC CPU interfaces 0x20 / 0x40 (0x101 / 0x102), WFI woken by doorbell 511, PSCI CPU_OFF | **phone, P1b** |
 | Both doorbells, M3 → A55 (510) included | **phone, P1c** (back ok from 0x101 and 0x102) |
 | Linux 7.1 on M3 0x100: boot, HELLO, 45 frames composited, touch reached the app, MSG_STOP → power down | **phone, P2** (secondaries lost: high entry; fixed in P2b) |
+| **Linux 7.1 on all four M3 cores**: HELLO 119 ms after CPU_ON, 4 CPUs, GIC interfaces 0xf0, first frame 124 ms, 45 frames, touch, MSG_STOP → the guest's CPUs in CPU_OFF | **phone, P2b** (18:50) |
+| The cluster powering down after the guest's CPU_OFFs | **no** (P2b: the PMU still reads on: Samsung's FlexPMU off sequence is missing, see 7); P2c adds it |
 | PSCI's context id reaches x0 | **no** on the phone (x0 = 0xBFFFF01C): the trampoline's DTB literal is required |
 | Linux on the phone's M3s | not yet: P1b → P2 → P3 (10) |
 
@@ -155,6 +157,19 @@ volume. Any Linux toolkit sees an ordinary touchscreen. Focus and screen on/off 
 
 ## 7. Power and life cycle
 
+- **The FlexPMU sequences (P2b on the phone):** PSCI CPU_OFF alone leaves the M3 cores and the cluster
+  powered (status words 0x14062004.. and 0x14062044 still on, configuration 0x14062040 still 0x000F000F).
+  Samsung's kernel wraps every hotplug in FlexPMU bookkeeping (ref/starlte-kernel exynos-powermode.c,
+  cal-if/exynos9810/flexpmu_cal_cpu_exynos9810.h, ACPM build). Core on: CPU_INFORM(phycpu) = 0 and the core's
+  bit cleared in GRP2_INTR_BID_ENABLE (0x14070200) and PMU_EVENT_INTERRUPT_ENABLE_GRP2 (0x14067f08). Core off,
+  on the dying core right before CPU_OFF: CPU_INFORM = 1 (C2) and those bits set. The last core of a cluster:
+  CPU_INFORM = 2 (CPD) and MAILBOX_APM2AP (0x14100010) bit 24 = 1; the first core: bit 24 = 0. M3 core n =
+  bit n, A55 core n = bit 4 + n; CPU_INFORM(phycpu) at 0x14060860 + 4 × phycpu (M3s: 0x870..0x87c).
+  Where they live: linux/0002 does core on before each CPU_ON and core off in `cpu_psci_cpu_die`; sbguest.ko
+  does the last core's off + cluster off; the host (sbghost's `m3_prep`) does cluster on + core 0x100 on.
+  Starbite OS and the guest both read-modify-write GRP2_INTR_BID_ENABLE / EVENT_ENABLE_GRP2 (the A55 bits
+  are Starbite's if it ever does the same for its own cores): a lock-free word shared by two kernels, so far
+  safe only because Starbite never touches it while the guest runs.
 - **Off until needed.** The M3 cluster stays powered down while Starbite OS runs alone. The first heavy app
   starts the guest: load, then CPU_ON. The guest's boot time is the start cost; on QEMU HELLO came after
   2.1 s with an idle host.

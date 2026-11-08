@@ -64,6 +64,10 @@ if a.profile == 's9' or a.psci01:
     # No cpu_suspend: no cpuidle states here (the M3s idle in WFI; cluster power-down is docs 8, later).
     psci_body = (f'\t\tcompatible = "arm,psci";\n\t\tmethod = "{conduit}";\n'
                  '\t\tcpu_off = <0x84000002>;\n\t\tcpu_on = <0xc4000003>;')
+    if a.profile == 's9':
+        # Samsung's FlexPMU core / cluster power bookkeeping (linux/0002 + sbguest.ko): <PMU, its interrupt
+        # block, the APM mailbox>. Without it CPU_OFF leaves the M3s powered (P2b on the phone).
+        psci_body += '\n\t\tstarbite,flexpmu = <0x14060000 0x14070000 0x14100000>;'
 else:
     # QEMU's PSCI 1.0 (it has SYSTEM_OFF: sbguest.ko's handlers must win, run-qemu.sh "nomod" shows why)
     psci_body = f'\t\tcompatible = "arm,psci-1.0", "arm,psci-0.2";\n\t\tmethod = "{conduit}";'

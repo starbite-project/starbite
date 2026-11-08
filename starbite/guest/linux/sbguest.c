@@ -15,6 +15,7 @@
  * DT: compatible "starbite,guest-shm", reg = the header page, interrupts = the host->guest doorbell SPI
  * (optional); /chosen/starbite,shm = <base size> of the whole region.
  */
+#include <asm/cputype.h>
 #include <linux/arm-smccc.h>
 #include <linux/cpu.h>
 #include <linux/fs.h>
@@ -40,6 +41,7 @@ static void __iomem *gicd;
 static bool use_hvc;
 static u32 fn_cpu_off = PSCI_0_2_FN_CPU_OFF;
 static atomic_t db_count = ATOMIC_INIT(0);
+static void __iomem *fp_pmu, *fp_intr, *fp_mbox;	/* /psci starbite,flexpmu (the S9) */
 static DECLARE_WAIT_QUEUE_HEAD(db_wait);
 
 static void sbg_psci_cpu_off(void)
@@ -60,10 +62,36 @@ static void sbg_ring_host(void)
 		writel(BIT(id % 32), gicd + 0x200 + 4 * (id / 32));	/* GICD_ISPENDR */
 }
 
-/* the last CPU: mark, ring, CPU_OFF; never returns */
+/*
+ * The last guest CPU's FlexPMU bookkeeping before its CPU_OFF, as Samsung's hotplug-out does for the last core
+ * of a cluster (exynos-powermode.c: cpu_disable, then cluster_disable): the core's "off" sequence with the C2
+ * hint, then the CPD hint and the APM mailbox's cluster bit (flexpmu_cal_cpu_exynos9810.h cluster1_off:
+ * MAILBOX_APM2AP + 0x10 bit 24). The other cores did their "off" in cpu_psci_cpu_die (linux/0002).
+ */
+static void sbg_flexpmu_last(void)
+{
+	u64 mpidr = read_cpuid_mpidr();
+	unsigned int lvl = (mpidr & MPIDR_MT_BITMASK) ? 1 : 0;
+	unsigned int phy = (MPIDR_AFFINITY_LEVEL(mpidr, 1 + lvl) << 2) | MPIDR_AFFINITY_LEVEL(mpidr, lvl);
+	u32 b = phy >= 4 ? BIT(phy - 4) : BIT(phy + 4);
+
+	if (!fp_pmu || !fp_intr || !fp_mbox || phy > 7)
+		return;
+	writel_relaxed(1, fp_pmu + 0x860 + 4 * phy);				/* CPU_INFORM_C2 */
+	writel_relaxed(readl_relaxed(fp_intr + 0x200) | b, fp_intr + 0x200);	/* GRP2_INTR_BID_ENABLE */
+	if ((readl_relaxed(fp_intr + 0x108) & b) == b)
+		writel_relaxed(readl_relaxed(fp_intr + 0x10c) | b, fp_intr + 0x10c);
+	writel_relaxed(readl_relaxed(fp_pmu + 0x7f08) | b, fp_pmu + 0x7f08);
+	writel_relaxed(2, fp_pmu + 0x860 + 4 * phy);				/* CPU_INFORM_CPD */
+	writel_relaxed(readl_relaxed(fp_mbox + 0x10) | BIT(24), fp_mbox + 0x10);	/* cluster1_off */
+	dsb(sy);
+}
+
+/* the last CPU: mark, ring, the FlexPMU's cluster-off bookkeeping, CPU_OFF; never returns */
 static void __noreturn sbg_last_cpu_off(u32 state)
 {
 	local_irq_disable();
+	sbg_flexpmu_last();
 	WRITE_ONCE(hdr->guest_state, state);
 	WRITE_ONCE(hdr->guest_ncpus, num_online_cpus());
 	dsb(sy);
@@ -201,8 +229,16 @@ static int sbg_probe(struct platform_device *pdev)
 		psci = of_find_compatible_node(NULL, NULL, "arm,psci");
 	if (psci && !of_property_read_string(psci, "method", &method))
 		use_hvc = !strcmp(method, "hvc");
-	if (psci)
+	if (psci) {
+		u32 fp[3];
+
 		of_property_read_u32(psci, "cpu_off", &fn_cpu_off);
+		if (!of_property_read_u32_array(psci, "starbite,flexpmu", fp, 3)) {
+			fp_pmu = ioremap(fp[0], 0x8000);
+			fp_intr = ioremap(fp[1], 0x1000);
+			fp_mbox = ioremap(fp[2], 0x1000);
+		}
+	}
 	of_node_put(psci);
 	if (hdr->gicd_base)
 		gicd = ioremap(hdr->gicd_base, 0x1000);
@@ -223,8 +259,9 @@ static int sbg_probe(struct platform_device *pdev)
 	register_reboot_notifier(&sbg_reboot_nb);
 	register_restart_handler(&sbg_restart_nb);
 	register_sys_off_handler(SYS_OFF_MODE_POWER_OFF, SYS_OFF_PRIO_HIGH, sbg_power_off, NULL);
-	dev_info(&pdev->dev, "shared region %pa + %#llx, PSCI %s, doorbell irq %d, GIC CPU interface %#x\n",
-		 &shm_base, shm_size, use_hvc ? "hvc" : "smc", irq, hdr->guest_cpuif);
+	dev_info(&pdev->dev, "shared region %pa + %#llx, PSCI %s, doorbell irq %d, GIC CPU interface %#x%s\n",
+		 &shm_base, shm_size, use_hvc ? "hvc" : "smc", irq, hdr->guest_cpuif,
+		 fp_mbox ? ", FlexPMU cluster off" : "");
 	return 0;
 }
 

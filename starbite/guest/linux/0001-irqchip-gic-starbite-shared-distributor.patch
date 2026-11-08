@@ -1,5 +1,5 @@
---- a/drivers/irqchip/irq-gic.c	2026-11-08 18:35:55.934754689 +0200
-+++ b/drivers/irqchip/irq-gic.c	2026-11-08 18:35:55.953754862 +0200
+--- a/drivers/irqchip/irq-gic.c	2026-11-08 18:55:40.681872067 +0200
++++ b/drivers/irqchip/irq-gic.c	2026-11-08 18:55:40.716872987 +0200
 @@ -461,6 +461,15 @@
  }
  

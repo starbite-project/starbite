@@ -87,7 +87,48 @@ static int64_t cpu_on(uint64_t mpidr, uint64_t entry, uint64_t ctx)
     return (int32_t)sb_psci(SB_PSCI_CPU_ON, mpidr, entry, ctx);
 }
 static int cluster_off(void) { return sb_m3_on() ? 0 : 1; }
-static int m3_prep(void) { return sb_m3_pmu_defaults() ? 1 : 0; }
+/* P2c: the FlexPMU registers the vendor's hotplug path touches for cluster 1 (one line) */
+static void fp_note(const char *when)
+{
+    static const uint32_t r[] = {0x14070200U, 0x14070208U, 0x14070108U, 0x14067f08U, 0x14060870U, 0x14060874U,
+                                 0x14060878U, 0x1406087cU, 0x14100010U, 0x14062000U, 0x14062004U, 0x14062040U,
+                                 0x14062044U};
+    ub_s(&u, "FlexPMU ");
+    ub_s(&u, when);
+    ub_c(&u, ':');
+    for (unsigned i = 0; i < sizeof(r) / sizeof(r[0]); ++i) {
+        uint32_t v = 0;
+        ub_c(&u, ' ');
+        ub_hexn(&u, r[i] & 0xffffU, 4);
+        ub_c(&u, '=');
+        if (sb_probe32(r[i], &v))
+            ub_hexn(&u, v, 8);
+        else
+            ub_s(&u, "fault");
+    }
+    L();
+}
+/* the vendor's hotplug-in for the first core of cluster 1 (exynos-powermode.c cluster_enable + cpu_enable,
+ * flexpmu_cal_cpu_exynos9810.h cluster1_on + core10_on), before Starbite's CPU_ON of 0x100; the guest kernel
+ * does the same for 0x101..0x103 (linux/0002) */
+static int m3_prep(void)
+{
+    if (!sb_m3_pmu_defaults())
+        return 0;
+    fp_note("before the start");
+    volatile uint32_t *mbox = (volatile uint32_t *)0x14100010UL;
+    *mbox = *mbox & ~(1U << 24);                    /* cluster1_on: MAILBOX_APM2AP bit 24 = 0 */
+    *(volatile uint32_t *)0x14060870UL = 0;         /* CPU_INFORM(4): the hint cleared */
+    volatile uint32_t *en = (volatile uint32_t *)0x14070200UL;
+    *en = *en & ~1U;                                /* GRP2_INTR_BID_ENABLE bit 0 (cluster 1 core 0) */
+    if (*(volatile uint32_t *)0x14070208UL & 1U)
+        *(volatile uint32_t *)0x1407020cUL |= 1U;   /* GRP2 pending: clear */
+    volatile uint32_t *ev = (volatile uint32_t *)0x14067f08UL;
+    *ev = *ev & ~1U;                                /* PMU_EVENT_INTERRUPT_ENABLE_GRP2 bit 0 */
+    __asm__ volatile("dsb sy" ::: "memory");
+    fp_note("after cluster/core on");
+    return 1;
+}
 static const struct sbg_os shim = {
     .ms = ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
     .m3_prep = m3_prep,
@@ -170,7 +211,7 @@ void sb_main(void)
 {
     ub_init(&u);
     ub_s(&u, "gp2: ");
-    ub_s(&u, "guest-probe P2b (Linux on the M3 cluster, no Starbite OS): EL");
+    ub_s(&u, "guest-probe P2c (Linux on the M3 cluster, no Starbite OS): EL");
     ub_dec(&u, (sb_boot.el >> 2) & 3U);
     ub_s(&u, ", guest Image ");
     ub_dec(&u, (uint64_t)(p2_image_end - p2_image));
@@ -327,6 +368,7 @@ void sb_main(void)
     ub_s(&u, ", PMU 0x14062044 ");
     ub_hex(&u, rd(0x14062044UL), 8);
     L();
+    fp_note("after the stop");
     pmu_diff();
     int off = !sb_m3_on();
     int pass = r == 0 && s->state == SBG_OFF && s->hello && frames >= 5 && touch_ok && off;
