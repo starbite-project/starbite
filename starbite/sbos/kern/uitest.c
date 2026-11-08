@@ -165,7 +165,8 @@ void selftest_timer(unsigned id)
         ub_dec(&u, K.first_frame_ms);
         ub_s(&u, " ms, ");
         ub_dec(&u, (uint64_t)napps);
-        ub_s(&u, " apps");
+        ub_s(&u, " apps, entered at EL");
+        ub_dec(&u, (sb_boot.el >> 2) & 3U);     /* 1.0: the exception level the loader handed over (EL2 = a hypervisor) */
         sb_log(u.b);
         kui_lock();
         phase = 1;

@@ -55,6 +55,36 @@ policy caps, within the table voltages), never M3 above 1794.
 - Heat and Wi-Fi do not run at the same time. No real RAM sleep (the screen-off state lowers the clocks). No lock
   code. The SoC reading vs the hardware trip (128 vs 115 °C) is not explained yet.
 
+## Where the rest of the full OS plugs in (kept clean in 1.0)
+
+Starbite OS is meant to grow into a full phone OS: normal mode and Emergency Mode, our own apps, heavier apps
+through a Linux guest (stage 0.9) and cellular from the modem core (stage 0.8, an OS-independent library like the
+Wi-Fi core, being built by the iOS 16 cellular session). The 1.0 seams for that:
+
+- **Apps** (`kern/app.c`, `sdk/sbapp.h`): apps are `.sba` files at EL0 with a manifest of permissions and a numbered
+  system-call table (SYS_*); UI is declarative (ui_* elements built by the kernel). A new service adds system calls
+  and a permission bit; no app changes. `SBOS_P_PHONE` and `SYS_PHONE_STATE` (today `SBOS_ENOSYS`) are the reserved
+  telephony slot: calls (`SYS_CALL_*`) and SMS (`SYS_SMS_*`) go there, with the emergency dial refused in the kernel
+  in test images.
+- **Services next to Wi-Fi** (`kern/wifi.c` over `starbite/wifi`): the pattern for the modem: a core library with an
+  OS shim (`bcmw_os`: register access, DMA blocks, time, logging, events), driven by a kernel timer tick, never
+  blocking the loop (start + poll), its own state machine and UI tile. The modem core plugs in the same way.
+- **Display** (`kern/ui.c`, libsb `sbui`): one back buffer, dirty rectangles, `ui_present` + `panel_kick`, the
+  brightness arbiter (`panel.c`). A guest-app surface is one more element kind (a rectangle the kernel copies
+  from a shared framebuffer region on each present) plus a full-screen app mode; touch inside it is forwarded.
+- **Input** (`kern/input.c`): one event queue (touch, keys) with the pocket lock in front; a guest gets the events
+  of its surface through a ring.
+- **Power** (`kern/services.c`): one screen state machine (on / off / the dim clock), the A55 clock policy, the
+  switch-off path with the apps' save events; a guest and the modem get the same "screen off / save / power off"
+  events.
+- **EL2 (the hypervisor question), answered:** no. The loader hands Starbite OS EL1 (libsb's crt0 records
+  CurrentEL; the self test now logs "entered at EL1"); Samsung's hypervisor (uH / RKP) owns EL2: `hvc` is
+  undefined and ID-register reads trap to it (NOTES.md 2026-10-27; docs/STARBITE-MASTER-PLAN.md 46, 475). So no
+  hypervisor and no isolated Linux guest on this phone. Stage 0.9 takes the other route in its plan: Linux alone on
+  the M3 cluster as a second kernel next to Starbite OS (both at EL1, separate memory, a shared message ring and a
+  framebuffer region for its surface, the GIC partitioned by interrupt), started through the heater's worker-core
+  path. No isolation between the two: a research build first.
+
 ## Install (one step: the store payload)
 
 Files (`build/store/`): `starbite-os-1.0-rc1.img` (the OS) and `starbite-os-1.0-rc1-selftest.img` (the self test),
