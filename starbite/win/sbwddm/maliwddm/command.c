@@ -152,6 +152,39 @@ NTSTATUS APIENTRY MwPresent(IN_CONST_HANDLE hContext, DXGKARG_PRESENT *Arg)
         return STATUS_INVALID_PARAMETER;
     RtlZeroMemory(priv, sizeof(*priv));
     priv->Reserved = MW_DMA_MAGIC;
+    /* T13g: what kind of presents DWM sends (the first 8 in detail) */
+    if (Arg->Flags.Flip)
+        a->PresentFlipFlag++;
+    else if (Arg->Flags.Blt)
+        a->PresentBltFlag++;
+    else if (Arg->Flags.ColorFill)
+        a->PresentFillFlag++;
+    else
+        a->PresentOtherFlag++;
+    if (a->PresentLogged < 8 && KeGetCurrentIrql() == PASSIVE_LEVEL) {
+        static const PCWSTR fl[8] = { L"Pres0_Flags", L"Pres1_Flags", L"Pres2_Flags", L"Pres3_Flags",
+                                      L"Pres4_Flags", L"Pres5_Flags", L"Pres6_Flags", L"Pres7_Flags" };
+        static const PCWSTR sr[8] = { L"Pres0_Src", L"Pres1_Src", L"Pres2_Src", L"Pres3_Src",
+                                      L"Pres4_Src", L"Pres5_Src", L"Pres6_Src", L"Pres7_Src" };
+        static const PCWSTR ds[8] = { L"Pres0_Dst", L"Pres1_Dst", L"Pres2_Dst", L"Pres3_Dst",
+                                      L"Pres4_Dst", L"Pres5_Dst", L"Pres6_Dst", L"Pres7_Dst" };
+        static const PCWSTR rc[8] = { L"Pres0_DstRB", L"Pres1_DstRB", L"Pres2_DstRB", L"Pres3_DstRB",
+                                      L"Pres4_DstRB", L"Pres5_DstRB", L"Pres6_DstRB", L"Pres7_DstRB" };
+        static const PCWSTR nr[8] = { L"Pres0_Rects", L"Pres1_Rects", L"Pres2_Rects", L"Pres3_Rects",
+                                      L"Pres4_Rects", L"Pres5_Rects", L"Pres6_Rects", L"Pres7_Rects" };
+        ULONG i = a->PresentLogged++;
+        MW_ALLOCATION *s = (MW_ALLOCATION *)Arg->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].hDeviceSpecificAllocation;
+        MW_ALLOCATION *d = (MW_ALLOCATION *)Arg->pAllocationList[DXGK_PRESENT_DESTINATION_INDEX].hDeviceSpecificAllocation;
+        /* allocation: width << 16 | height (low 15 bits) | 0x8000 primary | 0x4000 the scanned one */
+#define SB_ALLOC_TAG(x) ((x) == NULL ? 0u : ((x)->Width << 16 | ((x)->Height & 0x3FFF) | \
+                         (((x)->Flags & MW_ALLOC_PRIMARY) ? 0x8000u : 0) | ((x) == a->ScanAlloc ? 0x4000u : 0)))
+        MwLog(a, fl[i], Arg->Flags.Value);
+        MwLog(a, sr[i], SB_ALLOC_TAG(s));
+        MwLog(a, ds[i], SB_ALLOC_TAG(d));
+        MwLog(a, rc[i], (ULONG)Arg->DstRect.right << 16 | (ULONG)Arg->DstRect.bottom);
+        MwLog(a, nr[i], Arg->SubRectCnt);
+#undef SB_ALLOC_TAG
+    }
     if (Arg->Flags.Blt || Arg->Flags.ColorFill) {
         MW_PRESENT_OP *op = &priv->Present;
         op->Kind = Arg->Flags.ColorFill ? MW_PRESENT_FILL : MW_PRESENT_BLT;
@@ -303,6 +336,11 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
     }
     if (toFb) {
         A->PrimaryBlts++;                 /* S9 port: this one reaches the panel */
+        if (Op->Dst == A->ScanAlloc)
+            A->PrimaryBltsToScan++;
+        else
+            A->PrimaryBltsOther++;
+        A->LastPrimaryDst = Op->Dst;
         px = CopyRects(Op, A->FbVa, (LONG)A->Fb.Width, (LONG)A->Fb.Height, (LONG)A->Fb.Pitch, src, srcW, srcH,
                        srcPitch, &last);
         A->FbPixels += px;
@@ -552,6 +590,48 @@ static void ShowPrimary(MW_ADAPTER *A, MW_ALLOCATION *P)
     A->FlipCopies++;
     if (NotBlack(src, (LONG)pitch, 0, 0, (LONG)w, (LONG)h))
         A->ContentFrames++;
+}
+
+/* T13g: the emulated scanout. A display engine would show the scanned primary's pages; our framebuffer only
+ * got what was blted into it (DWM's dirty rectangles: T13f wrote ~1/6 of one frame in a minute). Called at
+ * PASSIVE_LEVEL by the guard thread when work completed since the last call: the whole scanned primary to
+ * the framebuffer, unless it is all black (so it can never blank what the blts drew). */
+void MwRefreshScanout(MW_ADAPTER *A)
+{
+    MW_ALLOCATION *p = A->LastPrimaryDst;
+    PUCHAR src;
+    ULONG w, h, pitch;
+    ULONG64 t0;
+
+    if (p != NULL)
+        A->RefreshFromBltDst++;
+    else
+        p = A->ScanAlloc;
+
+    if (A->FbVa == NULL || p == NULL || !p->Mapped || p->Mdl == NULL || !A->SourceVisible || A->Stopping) {
+        A->RefreshSkipsNoScan++;
+        return;
+    }
+    src = AllocationVa(A, p);
+    if (src == NULL) {
+        A->RefreshSkipsNoScan++;
+        return;
+    }
+    w = min(p->Width ? p->Width : A->Fb.Width, A->Fb.Width);
+    h = min(p->Height ? p->Height : A->Fb.Height, A->Fb.Height);
+    pitch = p->Pitch ? p->Pitch : w * 4;
+    A->ScanContent = NotBlack(src, (LONG)pitch, 0, 0, (LONG)w, (LONG)h);
+    if (!A->ScanContent) {
+        A->RefreshSkipsBlack++;
+        return;
+    }
+    t0 = KeQueryInterruptTime();
+    for (ULONG y = 0; y < h; y++)
+        RtlCopyMemory(A->FbVa + (SIZE_T)y * A->Fb.Pitch, src + (SIZE_T)y * pitch, (SIZE_T)w * 4);
+    t0 = (KeQueryInterruptTime() - t0) / 10;
+    if (t0 > A->RefreshUsMax)
+        A->RefreshUsMax = (ULONG)t0;
+    A->Refreshes++;
 }
 
 static VOID VsyncDpc(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)

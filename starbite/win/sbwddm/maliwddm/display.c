@@ -496,6 +496,7 @@ NTSTATUS APIENTRY MwSetVidPnSourceAddress(IN_CONST_HANDLE hAdapter, const DXGKAR
         return STATUS_INVALID_PARAMETER;
     dev->ScanAddr = Arg->PrimaryAddress;
     dev->ScanAlloc = (MW_ALLOCATION *)Arg->hAllocation;
+    dev->LastPrimaryDst = NULL;           /* T13g: the flipped-to primary is what the panel shows now */
     dev->Flips++;
     return STATUS_SUCCESS;
 }

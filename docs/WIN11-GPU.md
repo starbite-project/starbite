@@ -788,6 +788,31 @@ Display-only mode's 1080x2220 is a scaled mode of sbdisplay's own and plays no p
 - **Guard:** it no longer clears itself while we are in bring-up (Parameters\GuardAutoClear = 0). Health also
   needs framebuffer readback.
 
+### 6.15 T13f: DECON scans our framebuffer, DWM sends only dirty rectangles; T13g refreshes from the primary (2026-11-08)
+
+**T13f (21:07):**
+- **The probe:** the user saw the magenta band.
+- **DECON's registers:** IDMA0 base, live and shadow, = the POST framebuffer (0xCC000000), 1440x2960,
+  X8R8G8B8, pitch 5760, hardware trigger on (0x3061), no pending shadow update. So the path from the
+  framebuffer to the panel works.
+- **DWM's copies:** 195 of 202 copies into the framebuffer read back with pixels. Together they wrote only
+  ~714K pixels, a sixth of one frame. The last one was 58x61 near the bottom centre. DWM sends dirty
+  rectangles only.
+- **The flips:** the only primary-to-panel copies of whole frames came from the 4 mode-set flips, before DWM
+  had drawn anything.
+- **Conclusion:** the panel was black because nothing ever put a whole desktop frame there.
+
+**T13g emulates a scanout:**
+- **The refresh:** at most every 200 ms (`RefreshMs`), and only when GPU work or a present completed since
+  the last time, the whole frame is copied to the framebuffer. It is copied from the primary the last panel blt
+  went into, or from the scanned primary after a flip. An all-black source is skipped, so the refresh can never
+  blank the panel.
+- **The cost:** one 17 MB copy from write-combined pages per refresh, measured as `RefreshUsMax`.
+- **The census:** every present's flags are counted, the first 8 are logged in detail, and blts into the
+  scanned primary are counted apart from blts into other primaries. This shows whether DWM's whole frame
+  is in a primary at all (`ScanContent`). If it is not, the composed frame must be elsewhere, for example
+  rendered only into a back buffer that is never presented whole.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

@@ -98,6 +98,9 @@ static NTSTATUS NewAllocation(MW_ADAPTER *A, const MW_ALLOCATION_INFO *In, DXGK_
 
 static void FreeAllocation(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
 {
+    /* T13g: never leave the refresh pointing at freed memory */
+    (void)InterlockedCompareExchangePointer((PVOID volatile *)&A->LastPrimaryDst, NULL, Alloc);
+    (void)InterlockedCompareExchangePointer((PVOID volatile *)&A->ScanAlloc, NULL, Alloc);
     if (Alloc->CpuMap && Alloc->Mdl) {
         MmUnmapLockedPages(Alloc->CpuMap, Alloc->Mdl);
         Alloc->CpuMap = NULL;

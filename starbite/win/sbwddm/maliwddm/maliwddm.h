@@ -177,6 +177,17 @@ struct _MW_ADAPTER {
     ULONG64 FbPixels;                     /* pixels written into the framebuffer */
     ULONG LastFbRectLT, LastFbRectRB;     /* the last blt's rectangle into it, x << 16 | y */
     ULONG PrimaryOwnCopies;               /* blts into a primary also written to its own pages */
+    /* T13g: T13f wrote only ~714K pixels into the framebuffer in 202 copies (DWM's dirty rectangles) and never
+     * a whole frame, so the panel stayed black around them. A real scanout shows the scanned primary's pages:
+     * the refresh copies ScanAlloc to the framebuffer whenever work completed since the last refresh. */
+    ULONG PresentFlipFlag, PresentBltFlag, PresentFillFlag, PresentOtherFlag;
+    ULONG PrimaryBltsToScan, PrimaryBltsOther;
+    ULONG Refreshes, RefreshSkipsBlack, RefreshSkipsNoScan, RefreshUsMax, ScanContent;
+    ULONG PresentLogged;
+    /* the primary the last blt to the panel went into: what the panel shows since then (cleared by a flip
+     * and when that allocation is destroyed); the refresh copies it, else ScanAlloc */
+    struct _MW_ALLOCATION *volatile LastPrimaryDst;
+    ULONG RefreshFromBltDst;
     ULONG CoherentMaps, CpuMapFails;            /* presents copied before the queue drained (200 ms bound) */                    /* presents whose destination is the primary: pixels on the panel */                     /* renders refused: a chain outside the render's allocations */                     /* interrupt resources the device has (the stage-4 SSDT: the Mali's 3) */
 
     /* Counters for the trace. */
@@ -252,6 +263,7 @@ DXGKDDI_GETSCANLINE MwGetScanLine;
 BOOLEAN MwJobInterrupt(MW_ADAPTER *A);    /* from the ISR, at DIRQL */
 void MwCommandInit(MW_ADAPTER *A);
 void MwCommandStop(MW_ADAPTER *A);
+void MwRefreshScanout(MW_ADAPTER *A);
 void MwArmPoll(MW_ADAPTER *A);
 
 /* S9 port (guard.c) */
