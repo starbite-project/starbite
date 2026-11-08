@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "fakecp.h"
+#include "fakesoc.h"
 
 static unsigned checks, fails;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -1041,6 +1042,228 @@ static void test_probe2(void)
     CHECK(!strcmp(w[0].result, "skipped"));
 }
 
+/* ---- stage 3: load, EL3, start, park (against the fake SoC) ---------------------------------- */
+
+#define T_MAIN 0x30000u
+#define T_VSS 0x8000u
+static uint8_t t_radio[0x2040 + T_MAIN + T_VSS], t_nv[0x100000];
+
+static void boot_image(struct sbm_image *im, int corrupt)
+{
+    static uint8_t b[1024];
+    for (unsigned i = 0; i < sizeof(t_radio); ++i)
+        t_radio[i] = (uint8_t)(i * 2654435761u >> 13);
+    for (unsigned i = 0; i < sizeof(t_nv); ++i)
+        t_nv[i] = (uint8_t)(i * 40503u >> 7);
+    memset(b, 0, sizeof(b));
+    toc_ent(b, 0, "TOC", 0, 0, 0x200, 4);
+    toc_ent(b, 1, "BOOT", 0x200, 0x40000000, 0x1e40, 1);
+    toc_ent(b, 2, "MAIN", 0x2040, 0x40010000, T_MAIN, 2);
+    toc_ent(b, 3, "VSS", 0x2040 + T_MAIN, 0x47900000, T_VSS, 3);
+    toc_ent(b, 4, "NV", 0, 0x44900000, 0x100000, 4);
+    sbm_put32(b + 32 * 1 + 24, sbm_crc32(0, t_radio + 0x200, 0x1e40));
+    sbm_put32(b + 32 * 2 + 24, sbm_crc32(0, t_radio + 0x2040, T_MAIN));
+    sbm_put32(b + 32 * 3 + 24, sbm_crc32(0, t_radio + 0x2040 + T_MAIN, T_VSS));
+    make_memmap(b + SBM_MEMMAP_OFF);
+    memset(im, 0, sizeof(*im));
+    CHECKEQ(sbm_toc_parse(b, sizeof(t_radio), &im->toc), 0);
+    sbm_memmap_parse(b + SBM_MEMMAP_OFF, &im->mm);
+    CHECKEQ(sbm_plan_build(&im->toc, &im->mm, &im->plan), 0);
+    for (unsigned k = 0; k < im->plan.n; ++k)
+        im->data[k] = im->plan.l[k].src == SBM_SRC_NV ? t_nv : t_radio + im->plan.l[k].src_off;
+    if (corrupt)
+        t_radio[0x2040 + 77] ^= 1;
+}
+
+/* every store and every EL3 call the fake saw, against the allow-list */
+static void check_allowed(const struct fakesoc *s)
+{
+    for (unsigned i = 0; i < s->nwr && i < FS_MAXREC; ++i) {
+        uint64_t a = s->wr[i].pa;
+        uint32_t v = s->wr[i].v;
+        int ok = (a >= SBM_PMU_PA + 0x1320 && a <= SBM_PMU_PA + 0x1338 && !(a & 3)) ||
+                 a == SBM_PMU_PA + SBM_PMU_CENTRAL_SEQ_CP_CFG ||
+                 (a >= SBM_MBOX_PA + SBM_MBOX_ISSR(0) && a <= SBM_MBOX_PA + SBM_MBOX_ISSR(63)) ||
+                 (a == SBM_MBOX_PA + SBM_MBOX_INTGR1 && v == 2) || (a == SBM_AP2CP_CFG_PA && v == 1);
+        CHECK(ok);
+        if (!ok)
+            printf("  store not allowed: 0x%llx = 0x%x\n", (unsigned long long)a, v);
+    }
+    uint32_t prev[2] = { 0, 0x002016a0 };
+    for (unsigned i = 0; i < s->nsmc && i < FS_MAXREC; ++i) {
+        const uint64_t *x = s->smc[i].a;
+        int ok = 0;
+        if (x[0] == SBM_SMC_CP && x[1] == SBM_SMC_READ_CTRL)
+            ok = x[2] <= 1 && x[3] <= 1;
+        else if (x[0] == SBM_SMC_CP && x[1] == SBM_SMC_WRITE_CTRL && x[3] <= 1) {
+            uint32_t diff = (uint32_t)x[2] ^ prev[x[3]];
+            ok = !(diff & ~((1u << 1) | (1u << 2) | (1u << 3) | (1u << 17)));
+            prev[x[3]] = (uint32_t)x[2];
+        } else if (x[0] == SBM_SMC_SSS_CLK)
+            ok = x[1] <= 1 && !x[2] && !x[3];
+        else if (x[0] == SBM_SMC_CP && x[1] == SBM_SEC_REINIT)
+            ok = !x[2] && !x[3];
+        else if (x[0] == SBM_SMC_CP && x[1] == (SBM_SEC_NORMAL | SBM_MODEM_IF_PA))
+            ok = x[2] == 0x1e40 && x[3] == T_MAIN;
+        CHECK(ok);
+        if (!ok)
+            printf("  EL3 call not allowed: 0x%llx 0x%llx 0x%llx 0x%llx\n", (unsigned long long)x[0],
+                   (unsigned long long)x[1], (unsigned long long)x[2], (unsigned long long)x[3]);
+    }
+}
+
+static unsigned count_wr(const struct fakesoc *s, uint64_t pa)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < s->nwr && i < FS_MAXREC; ++i)
+        n += s->wr[i].pa == pa;
+    return n;
+}
+
+static void check_parked(const struct fakesoc *s)
+{
+    CHECKEQ((s->pmu[SBM_PMU_CENTRAL_SEQ_CP_ST / 4] >> 16) & 0xFF, 0x80);
+    CHECK(s->ctrl[SBM_CP_CTRL_NS] & (1u << 2));
+    CHECK(s->ctrl[SBM_CP_CTRL_NS] & (1u << 17));
+    CHECK(!s->cp_running);
+    CHECK(!s->sss_on);
+}
+
+static void test_boot(void)
+{
+    static struct fakesoc s;
+    static struct sbm_image im;
+    struct sbm_plat p;
+    struct sbm_boot b;
+
+    CHECKEQ(sbm_crc32(0, "123456789", 9), 0xCBF43926);
+    boot_image(&im, 0);
+    uint32_t boot_crc = sbm_crc32(0, t_radio + 0x200, 0x1e40), main_crc = sbm_crc32(0, t_radio + 0x2040, T_MAIN);
+
+    /* DRY: RAM only, no EL3 call, no store, no carve-out write */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_DRY;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+    CHECK(b.checked && !b.inited);
+    CHECKEQ(s.nsmc, 0);
+    CHECKEQ(s.nwr, 0);
+    CHECKEQ(s.carve_writes, 0);
+    fakesoc_free(&s);
+
+    /* SEC: through EL3's signature check, the CP CPU never started, parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_SEC;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+    CHECK(b.inited && b.copied && b.validated && !b.released && b.parked);
+    CHECKEQ(b.sec2, SBM_SEC_NOT_WORKING);
+    CHECKEQ(b.sec0, SBM_SEC_OK);
+    CHECKEQ(b.ctrl_ns, 0x002016a2);        /* this phone's value after cal_cp_init */
+    CHECKEQ(b.ctrl_s, 0x8);
+    CHECKEQ(count_wr(&s, SBM_AP2CP_CFG_PA), 0);
+    CHECKEQ(s.carve_refused, 0);
+    check_parked(&s);
+    check_allowed(&s);
+    nlog = 0;
+    sbm_boot_report(&p, &b);
+    CHECK(strstr(loglines[0], "BOOT: ok") != 0);
+    fakesoc_free(&s);
+
+    /* RUN: started, first status, parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_RUN;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+    CHECK(b.released && b.parked);
+    CHECK(b.cp_status_ms >= 30 && b.cp_status_ms <= 50);
+    CHECKEQ(SBM_CP_STATUS(b.issr[3]), 1);
+    CHECKEQ(b.issr[2], (174u << 6) | (1u << 14) | (1u << 5));    /* 0x6ba0, as Android's */
+    CHECKEQ(count_wr(&s, SBM_AP2CP_CFG_PA), 1);
+    check_parked(&s);
+    check_allowed(&s);
+    fakesoc_free(&s);
+
+    /* the CP never answers: still parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.never_status = 1;
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_RUN;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), SBM_ETIME);
+    CHECK(b.released && b.parked);
+    check_parked(&s);
+    check_allowed(&s);
+    fakesoc_free(&s);
+
+    /* EL3 refuses the image: not started, parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc ^ 1);
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_RUN;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), SBM_EIO);
+    CHECK(!b.validated && !b.released && b.parked);
+    CHECKEQ(b.sec0, 0x0e);
+    CHECKEQ(count_wr(&s, SBM_AP2CP_CFG_PA), 0);
+    check_parked(&s);
+    fakesoc_free(&s);
+
+    /* the copy is refused: no EL3 mode 0, parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.refuse_carve = 1;
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_SEC;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), SBM_EIO);
+    CHECK(!b.copied && b.parked);
+    for (unsigned i = 0; i < s.nsmc && i < FS_MAXREC; ++i)
+        CHECK(s.smc[i].a[1] != (SBM_SEC_NORMAL | SBM_MODEM_IF_PA));
+    check_parked(&s);
+    fakesoc_free(&s);
+
+    /* EL3 refuses the CP_CTRL write: nothing started, nothing to park */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.refuse_el3_write = 1;
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_SEC;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), SBM_EIO);
+    CHECK(!b.copied);
+    CHECKEQ(s.nwr, 0);
+    fakesoc_free(&s);
+
+    /* a CP somebody already started is not touched at all */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.started_before = 1;
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_RUN;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), SBM_EPERM);
+    CHECK(!b.inited);
+    CHECKEQ(s.nwr, 0);
+    for (unsigned i = 0; i < s.nsmc && i < FS_MAXREC; ++i)
+        CHECKEQ(s.smc[i].a[1], SBM_SMC_READ_CTRL);
+    fakesoc_free(&s);
+
+    /* a corrupt section in RAM stops everything before EL3 */
+    boot_image(&im, 1);
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_RUN;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), SBM_EIO);
+    CHECK(!b.checked);
+    CHECKEQ(s.nsmc, 0);
+    fakesoc_free(&s);
+
+    /* park on its own: nothing started -> no stores; called twice after a run -> still parked */
+    boot_image(&im, 0);
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    fakesoc_plat(&s, &p, tlog);
+    CHECKEQ(sbm_cp_park(&p), 0);
+    CHECKEQ(s.nwr, 0);
+    b.stop = SBM_BOOT_RUN;
+    sbm_boot_run(&p, &im, &b);
+    CHECKEQ(sbm_cp_park(&p), 0);
+    check_parked(&s);
+    check_allowed(&s);
+    fakesoc_free(&s);
+}
+
 int main(int argc, char **argv)
 {
     test_toc();
@@ -1053,6 +1276,7 @@ int main(int argc, char **argv)
     test_cell_and_redact();
     test_probe();
     test_probe2();
+    test_boot();
     printf("sbm host test: %u checks, %u failed%s\n", checks, fails, radio ? " (with this phone's RADIO image)" : "");
     return fails ? 1 : 0;
 }

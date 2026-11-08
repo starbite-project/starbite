@@ -38,6 +38,7 @@
 #define COLS 200U
 static char lines[LINES][COLS];
 static unsigned nl;
+static int is_load;                     /* a modemload key: stage 3, not the read-only probe */
 static void wdt_feed(void);
 
 static void draw(const char *foot)
@@ -46,7 +47,8 @@ static void draw(const char *foot)
     unsigned first = nl > 52 ? nl - 52 : 0;
 
     ui_fill(0, 0, SB_FB_W, SB_FB_H, C_BG);
-    ui_text(F_TITLE_S, 40, 100, "Modem probe: Shannon CP (read only)", C_L1);
+    ui_text(F_TITLE_S, 40, 100, is_load ? "Modem load: Shannon CP (stage 3 test)" : "Modem probe: Shannon CP (read only)",
+            C_L1);
     for (unsigned i = first; i < nl; i++) {
         const char *s = lines[i % LINES];
         while (*s && y < (int)SB_FB_H - 160) {
@@ -150,7 +152,7 @@ static const char *launched_key(char key[24])
             for (; i < 23 && blk[48 + i]; i++)
                 key[i] = (char)blk[48 + i];
             key[i] = 0;
-            if (sb_prefix(key, "modemprobe"))
+            if (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload"))
                 return "the loader's launch record";
         }
     }
@@ -175,7 +177,7 @@ static const char *launched_key(char key[24])
                     at++;
                 }
                 key[i] = 0;
-                found = i > 0 && sb_prefix(key, "modemprobe");
+                found = i > 0 && (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload"));
             }
         }
         if (found)
@@ -257,6 +259,68 @@ static void plog(const char *s)
     line(s);
 }
 
+/* ---- stage 3 (docs/MODEM.md 6): keys modemload-dry / -sec / -run ------------------------------------ */
+
+static struct sbm_plat park_plat;
+static int park_armed;
+
+/* sb_before_reset: every reboot path (the end, Power, the crash screen's reboot) parks a CP we touched */
+static void park_hook(void)
+{
+    if (!park_armed)
+        return;
+    park_armed = 0;
+    line("modemload: reset hook: parking the CP (Android's power-off) before the reboot");
+    sbm_cp_park(&park_plat);
+}
+
+static void stage3(const char *key)
+{
+    static struct sbm_image im;
+    struct sbm_boot b;
+    struct sbm_probe pr;
+    char s[COLS];
+    enum sbm_boot_stop stop = sb_streq(key, "modemload-run") ? SBM_BOOT_RUN
+                            : sb_streq(key, "modemload-sec") ? SBM_BOOT_SEC : SBM_BOOT_DRY;
+
+    sb_storage_hold("modem test: no storage writes");
+    sbm_fmt(s, sizeof(s), "modemload: %s; storage writes held; watchdog %u s (own: armed or fed here)",
+            stop == SBM_BOOT_RUN ? "RUN: load, EL3 check, start the CP, first status, park"
+            : stop == SBM_BOOT_SEC ? "SEC: load, EL3 check, park (the CP CPU is not started)" : "DRY: RAM only",
+            sb_wdt_arm(30));
+    line(s);
+    line("modemload: no IPC is sent: no network search, no attach, no SIM use, no call of any kind");
+    sbm_sb_plat(&park_plat, plog);
+    sbm_probe_run(&park_plat, SBM_PROBE_REGS, &pr);
+    sbm_probe_report(&park_plat, &pr);
+    int r = sbm_sb_load_image(&im, line);
+    if (r < 0) {
+        sbm_fmt(s, sizeof(s), "modemload: loading RADIO / EFS failed: %s", sbm_strerror(r));
+        line(s);
+        return;
+    }
+    if (stop >= SBM_BOOT_SEC) {
+        sbm_sb_plat_stage3(&park_plat);
+        park_armed = 1;
+        sb_before_reset = park_hook;
+    }
+    b.stop = stop;
+    sbm_boot_run(&park_plat, &im, &b);
+    park_armed = b.inited && !b.parked;  /* the core parked already; the hook only retries a failed park */
+    sbm_boot_report(&park_plat, &b);
+    line("modemload: after:");
+    sbm_probe_run(&park_plat, SBM_PROBE_REGS, &pr);
+    sbm_probe_report(&park_plat, &pr);
+    if (stop >= SBM_BOOT_SEC) {
+        uint32_t v, err;
+        for (unsigned reg = 0; reg < 2; reg++)
+            if (sbm_cp_ctrl_read(&park_plat, reg, &v, &err) == 0) {
+                sbm_fmt(s, sizeof(s), "CTRL: %s = 0x%08x", reg ? "CP_CTRL_NS" : "CP_CTRL_S", v);
+                line(s);
+            }
+    }
+}
+
 void sb_main(void)
 {
     char key[24];
@@ -282,9 +346,15 @@ void sb_main(void)
         step = 1;
     autostart = arg("modem_auto", 0);
     ret = arg("modem_return", autostart ? 30 : 0);
-    linef("modemprobe: step %u of %u (1 registers; 2 + carve-out reads; 3 + survey against RADIO; 4 + CP_CTRL"
-          " via EL3 and a two-word store test)", step, 4);
-    line("modemprobe: reads only. The CP is not booted, reset or signalled. No modem register or partition is written.");
+    is_load = sb_prefix(key, "modemload");
+    if (is_load) {
+        line("modemload: stage 3 test (docs/MODEM.md 6). RADIO and EFS are only read; every partition write is held.");
+        line("modemload: -sec / -run start the CP's power sequence through EL3 and always end with the CP parked.");
+    } else {
+        linef("modemprobe: step %u of %u (1 registers; 2 + carve-out reads; 3 + survey against RADIO; 4 + CP_CTRL"
+              " via EL3 and a two-word store test)", step, 4);
+        line("modemprobe: reads only. The CP is not booted, reset or signalled. No modem register or partition is written.");
+    }
     if (!autostart) {
         draw("Hold Volume Up 2 s to start. Power: back.");
         if (!held_up(2000)) {
@@ -293,6 +363,10 @@ void sb_main(void)
         }
     }
     selftest();
+    if (is_load) {
+        stage3(key);
+        goto end;
+    }
 
     sbm_sb_plat(&p, plog);
     {
@@ -333,11 +407,16 @@ void sb_main(void)
         sbm_probe_write_test(&p, w);
         sbm_wtest_report(&p, w);
     }
+end:
     {
         char s[COLS];
-        sbm_fmt(s, sizeof(s), "modemprobe: END: verdict %s; faults: sync %u, SError %u (stale before a read: %u)",
-                sbm_probe_verdict(&pr), (unsigned)sb_fault.count, (unsigned)sb_fault.serror_count,
-                sbm_sb_stale_serrors());
+        if (sb_prefix(key, "modemload"))
+            sbm_fmt(s, sizeof(s), "modemload: END; faults: sync %u, SError %u (stale before a read: %u)",
+                    (unsigned)sb_fault.count, (unsigned)sb_fault.serror_count, sbm_sb_stale_serrors());
+        else
+            sbm_fmt(s, sizeof(s), "modemprobe: END: verdict %s; faults: sync %u, SError %u (stale before a read: %u)",
+                    sbm_probe_verdict(&pr), (unsigned)sb_fault.count, (unsigned)sb_fault.serror_count,
+                    sbm_sb_stale_serrors());
         line(s);
     }
     draw(ret ? "Rebooting to the menu soon. Power: now." : "Power: reboot to the boot menu.");

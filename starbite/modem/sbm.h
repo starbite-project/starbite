@@ -139,6 +139,15 @@ struct sbm_plat {
     /* store v at pa and push it to DRAM (clean + invalidate the line): 1 ok, 0 the store faulted. Only
      * sbm_probe_write_test calls it, and only for its two fixed words. */
     int (*poke32)(void *ctx, uint64_t pa, uint32_t v);
+    /* stage 3 (sbm_boot.c), all optional (NULL = the step that needs it refuses) */
+    /* one MMIO store; the glue keeps its own exact allow-list (PMU CP regs, the mailbox, AP2CP_CFG): 1 ok */
+    int (*mmio_wr32)(void *ctx, uint64_t pa, uint32_t v);
+    /* copy into / out of modem_if + off, through DRAM (clean / invalidate the lines): 1 ok, 0 refused */
+    int (*carve_write)(void *ctx, uint32_t off, const void *src, uint32_t len);
+    int (*carve_read)(void *ctx, uint32_t off, void *dst, uint32_t len);
+    void (*udelay)(void *ctx, uint32_t us);
+    uint64_t (*now_us)(void *ctx);
+    void (*feed)(void *ctx);                    /* the watchdog, during long steps */
 };
 
 /* ------------------------------------------------------------------------------------------------ */
@@ -538,6 +547,74 @@ struct sbm_wtest {
 void sbm_probe_write_test(const struct sbm_plat *p, struct sbm_wtest w[SBM_WTEST_N]);
 void sbm_wtest_report(const struct sbm_plat *p, const struct sbm_wtest w[SBM_WTEST_N]);
 uint32_t sbm_crc32(uint32_t crc, const void *buf, size_t n);   /* zlib's CRC-32; start with 0 */
+
+/* ------------------------------------------------------------------------------------------------ */
+/* Stage 3 (sbm_boot.c): load the CP image, pass EL3's check, start the CP, park it                  */
+/* The order is Android's on this phone (docs/MODEM.md section 6): cp_init (EL3 CP_CTRL writes), security
+ * mode 2, copy BOOT/MAIN/VSS/NV, security mode 0, power on (mailbox words, AP2CP_CFG = 1). Parking is
+ * Android's ss310ap_off: wakeup interrupt, 5 ms, dump_pc_no_pg, cal_cp_reset_assert. */
+
+#define SBM_SMC_WRITE_CTRL 4
+#define SBM_SMC_SSS_CLK    0x82001011ULL     /* x1: 0 enable, 1 disable */
+#define SBM_SEC_NORMAL     0                 /* x1 = 0 | modem_if base, x2 = BOOT size, x3 = MAIN size */
+#define SBM_SEC_REINIT     2                 /* x1 = 2, 0, 0: Android's first call, answers 0x0b */
+#define SBM_SEC_OK         0x00
+#define SBM_SEC_NOT_WORKING 0x0b
+#define SBM_AP2CP_CFG_PA   0x14820000ULL     /* bit 0: the CP CPU runs */
+#define SBM_GICD_CP_PEND   0x10101238ULL     /* GICD ISPENDR, bit 28: PMUCAL waits for it after cp_init */
+#define SBM_MBOX_WORDS     64
+#define SBM_SYS_REV        174               /* this phone's (Android's init_mailbox_regs) */
+#define SBM_DS_DET         1
+
+enum sbm_seq_op { SBM_SEQ_WRITE, SBM_SEQ_WRITE_EL3, SBM_SEQ_DELAY, SBM_SEQ_WAIT };
+struct sbm_seq {
+    uint8_t op;
+    const char *name;
+    uint64_t pa;               /* WRITE / WAIT: the register; WRITE_EL3: SBM_CP_CTRL_S or _NS in pa */
+    uint32_t mask, value;      /* new = (old & ~mask) | value; DELAY: value = us; WAIT: (reg & mask) == value */
+};
+extern const struct sbm_seq sbm_seq_cp_init[], sbm_seq_reset_assert[], sbm_seq_dump_pc_no_pg[];
+extern const unsigned sbm_seq_cp_init_n, sbm_seq_reset_assert_n, sbm_seq_dump_pc_no_pg_n;
+/* Runs a PMUCAL-style table; a WAIT polls up to timeout_us. 0, SBM_ETIME (which wait), SBM_EIO / SBM_EPERM. */
+int sbm_seq_run(const struct sbm_plat *p, const struct sbm_seq *s, unsigned n, uint32_t timeout_us);
+/* CP_CTRL through EL3, read-modify-write the way PMUCAL does. 0 or SBM_E*. */
+int sbm_cp_ctrl_rmw(const struct sbm_plat *p, unsigned reg, uint32_t mask, uint32_t value, uint32_t *now);
+/* The security call (SSS clock on around it). *ret = EL3's answer. 0 if the call was made. */
+int sbm_sec_req(const struct sbm_plat *p, unsigned mode, uint32_t boot_size, uint32_t main_size, uint32_t *ret);
+
+/* What stage 3 works from: this phone's TOC, map and plan, and the sections already in RAM (the glue reads
+ * them read-only from RADIO and EFS). */
+struct sbm_image {
+    struct sbm_toc toc;
+    struct sbm_memmap mm;
+    struct sbm_plan plan;
+    const uint8_t *data[SBM_LOAD_MAX];   /* in plan order: BOOT, MAIN, VSS, NV */
+    uint32_t crc[SBM_LOAD_MAX];          /* filled by sbm_image_check */
+};
+/* Checks the sections in RAM: BOOT/MAIN/VSS against the TOC's CRC-32, NV's size. 0 or SBM_E*. Logs only
+ * sizes and CRCs, never content. */
+int sbm_image_check(const struct sbm_plat *p, struct sbm_image *im);
+
+enum sbm_boot_stop { SBM_BOOT_DRY = 1, SBM_BOOT_SEC = 2, SBM_BOOT_RUN = 3 };
+struct sbm_boot {
+    enum sbm_boot_stop stop;
+    /* what happened */
+    int checked, inited, copied, validated, released, parked;
+    uint32_t sec2, sec0;                 /* EL3's answers */
+    uint32_t ctrl_s, ctrl_ns;            /* after cp_init */
+    uint32_t reset_seq_before, reset_seq_after;
+    uint32_t cp_status_ms;               /* how long until ISSR3 cp_status != 0 (RUN) */
+    uint32_t issr[4];                    /* after power on */
+    uint64_t sec0_us;
+    int err;                             /* 0, or the SBM_E* that stopped it */
+    const char *stopped_at;
+};
+/* Runs stage 3 up to b->stop. Whatever happens after cp_init, the CP is parked before it returns (and the
+ * caller parks again from its reset hook if it never returns). 0 or SBM_E*. */
+int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot *b);
+/* Park: Android's power-off. Safe to call more than once and when nothing was started. */
+int sbm_cp_park(const struct sbm_plat *p);
+void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b);
 
 /* ------------------------------------------------------------------------------------------------ */
 /* errors */

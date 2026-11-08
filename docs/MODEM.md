@@ -253,12 +253,41 @@ IPC at all. No identifiers in logs: NV is checked by CRC and size only, never pr
 calls only for the two CP_CTRL bits in PMUCAL's tables. The glue keeps an exact-argument allow-list, as it does
 now for the read call.
 
-### Code still to write for stage 3 (host-tested first, as before)
-`sbm_boot.c`: the cp_init / security / power-on / reset-assert sequences as data tables, run through `plat`
-(smc, rd32/wr32 with an address allow-list: PMU 0x30/0x34 through EL3 only, 0x280, 0x1320-0x1338;
-AP2CP_CFG; the mailbox), with a fake PMU + EL3 model in the host test. Also the copy executor for `sbm_plan`,
-with CRC-32 verify against the TOC, and an ext4 read for `nv_data.bin` (shared with starbite/wifi).
-`probe/` gains the modemload keys.
+### Result T4 (2026-11-08 20:15, image 1a4c529, `build/test-boots/modemprobe-acc-2015/loader-pmsg.txt`)
+0 faults. CP_CTRL_S 0x00000000, CP_CTRL_NS 0x002016a0 through EL3's read call: CP_PWRON and CP_START are clear,
+and NS is exactly Android's 0x002016a2 without bit 1. Both test words in the carve-out are **writable** and were
+put back (0xf8000400, 0xf78ffffc). The main branch of the plan stands.
+
+### 6.1 Stage 3 as built (commit after 28ce91c; `sbm_boot.c`, `sb/sbm_sb.c`, `probe/main.c`)
+Keys on the same `modemprobe.img`: `modemload-dry` (T5), `modemload-sec` (T6), `modemload-run` (T7). T7 now
+stops at the CP's first status word: release the CP, poll ISSR3 cp_status for up to 2 s, park. It sets no BOOT
+magic, makes no UDL exchange and waits for no INIT_START. The CP stays in its own early boot, and the link is stage 4.
+
+- **Load (all keys):** GPT "RADIO" (TOC, MEM0 map, plan, BOOT/MAIN/VSS) and GPT "EFS" ext4 `/nv_data.bin`
+  (the Wi-Fi core's read-only ext4 reader, copied to `sb/ext4.c`) go into RAM. Each RADIO section must match its
+  TOC CRC-32, and NV must be exactly the TOC's 1 MiB. Its content is never printed, only a CRC.
+- **SEC:** refuses unless the CP is untouched (sequencer 0, CP_START and CP_PWRON clear). Then: cp_init (PMUCAL's
+  table), mode 2, copy with a CRC read back from DRAM per section, mode 0, **park**.
+- **RUN:** as SEC, then power on (ISSR0-63 = 0, ISSR2 = 0x6b80 then 0x6ba0 as Android, AP2CP_CFG = 1), up to 2 s
+  for cp_status, **park**.
+- **Park** = Android's `ss310ap_off`: INTGR1 bit 1 (wakeup), 5 ms, dump_pc_no_pg (CP_CTRL_NS bit 17 via EL3),
+  `cal_cp_reset_assert` (the *_SYS_PWR_REGs, CP_CTRL_NS bit 2 via EL3, CENTRAL_SEQ bit 16 = 0, wait status 0x80).
+
+### 6.2 Safety review (hazard -> what prevents it -> how it is tested)
+| hazard | prevention | test |
+|---|---|---|
+| a partition written (RADIO, EFS, CPEFS, any) | the core has no block I/O; the glue only calls `sb_blk_read`; the stage 3 keys set `sb_storage_hold` for the whole run, so libsb refuses every block write | `host/run.sh` greps starbite/modem for block-write calls; `probe/build.sh` fails if a modem object references one (`nm -u`) |
+| a wrong or corrupt image handed to EL3 | every section checked against the TOC's CRC-32 in RAM and again after the copy, read back from DRAM; EL3 checks the signature itself | host: corrupt byte -> stops before any EL3 call; refused copy -> no mode 0; EL3 refusal -> not started, parked |
+| an EL3 call we did not mean | glue allow-list: CP_CTRL read; CP_CTRL write only when it differs from EL3's freshly read value in bits 1/2/3/17 alone; SSS clock 0/1; security mode 2 (2,0,0) and mode 0 (0xF0000000, BOOT <= 64 KiB, MAIN within the CP memory). Nothing else reaches `smc` | host: every recorded call audited against that list, in every scenario |
+| a stray MMIO store | glue allow-list: PMU 0x1320-0x1338 and 0x280, ISSR0-63, INTGR1 = 2, AP2CP_CFG = 1 | host: every recorded store audited |
+| the CP left running or half-started | every exit after cp_init goes through park (`stop()`); `sb_before_reset` parks again if a park failed (end, Power, the crash screen's reboot); a hang trips the 30 s watchdog, a system reset. T1 (17:52) ran after the morning's Android boots and read CP_CTRL_NS without CP_PWRON, AP2CP_CFG 0 on Android's own boots, so this state does not survive a reboot; T1 after T6/T7 confirms it | host: never-answering CP, EL3 refusal, copy refusal: all end parked (central status 0x80, CP_CTRL_NS bits 2 and 17, SSS clock off) |
+| touching a CP someone else started | refuses unless sequencer 0 and CP_START / CP_PWRON clear | host: "started before" -> only read calls, no store |
+| network activity, SIM use, a call | no IPC at all in stage 3: no BOOT magic, no UDL, no INIT_END, so the CP never reaches the phase where RIL powers the radio; the IPC builder's allow-list (GETs only, CALL/SMS/SS/SAT/identity refused) is unchanged; nothing in stage 3 builds a frame | the existing exhaustive allow-list test |
+| identifiers in logs | nv_data.bin only as size + CRC; logs redacted as before | existing redaction tests |
+| a hang without a clue | a "boot: ..." line before every step, in pmsg | host: breadcrumb tests |
+| **open:** the security calls on CPU 0 | cbd moves off CPU 0 for them; libsb runs on CPU 0 with interrupts masked, which should be fine. If EL3 objects, mode 2/0 return an error code, the run stops and parks | phone T6 |
+
+Not done by any key: a write to RADIO/EFS/CPEFS; an IPC message; the CP's network phase.
 
 ## 7. Later stages (not started)
 
