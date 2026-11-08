@@ -365,6 +365,9 @@ static void fill_dom(void)
         if (!uv && o->nlv) {
             ub_s(&u, "not in ACPM");
             c = C_L3;
+        } else if (oct_undervolted(o, khz)) {
+            ub_s(&u, "undervolted: blocked");
+            c = C_RED;
         } else if (o->cap_khz && khz > o->cap_khz) {
             ub_s(&u, "above cap");
             c = C_ORANGE;
@@ -949,6 +952,17 @@ static void build_ctl(void)
     kv_add("Default step", u.b);
     if (oc_res[d][0])
         kv_addc("Stability test", oc_res[d], oc_res_ok[d] > 0 ? C_GREEN : oc_res_ok[d] == 0 ? C_RED : C_L2);
+    unsigned under = 0;
+    for (unsigned l = 0; l < o->nlv; ++l)
+        under += oct_uv(o, o->khz[l]) && oct_undervolted(o, o->khz[l]);
+    if (under) {
+        ub_init(&u);
+        ub_dec(&u, under);
+        ub_s(&u, under == 1 ? " step is" : " steps are");
+        ub_s(&u, " not offered: ACPM gives them less voltage than a slower step (not characterised for this "
+                 "chip; MIF 2093 MHz froze the phone this way under iOS).");
+        kv_note(u.b);
+    }
     kv_hdr("STEPS: TAP ONE TO REQUEST IT");
     ctl_n = (int)oc_steps(o, ctl_khz);
     for (int i = 0; i < ctl_n; ++i) {

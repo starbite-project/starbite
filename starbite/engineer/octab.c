@@ -362,11 +362,24 @@ int oct_level(const struct oc_dom *o, uint32_t khz)
     return -1;
 }
 
+/* ACPM gives khz less voltage than some slower step: an uncharacterised level for this chip (the phone,
+ * 2026-11-08: MIF 2002-2094 MHz at 712.5 mV under 1794 MHz's 737.5 mV, where iOS froze at 2093 MHz;
+ * M3 2886 MHz under 2860 MHz). 1 when so. */
+int oct_undervolted(const struct oc_dom *o, uint32_t khz)
+{
+    uint32_t uv = oct_uv(o, khz);
+    for (unsigned l = 0; l < o->fv_n; ++l)
+        if (o->fv_khz[l] < khz && o->fv_uv[l] > uv)
+            return 1;
+    return 0;
+}
+
 /* A step the overclocking pages may request: in the ECT's level list AND in ACPM's own fvmap
- * (so ACPM applies its own ASV voltage); never anything else. */
+ * (so ACPM applies its own ASV voltage) AND not given less voltage than a slower step; never
+ * anything else. */
 int oct_allowed(const struct oc_dom *o, uint32_t khz)
 {
-    return oct_level(o, khz) >= 0 && oct_uv(o, khz) != 0;
+    return oct_level(o, khz) >= 0 && oct_uv(o, khz) != 0 && !oct_undervolted(o, khz);
 }
 
 int oct_above_cap(const struct oc_dom *o, uint32_t khz)

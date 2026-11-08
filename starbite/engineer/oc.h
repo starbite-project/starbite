@@ -50,6 +50,7 @@ void oct_pick_row(struct oc_tables *t, unsigned asv_ver, int known);
 int oct_parse_fvmap(const uint8_t *fv, uint32_t size, struct oc_tables *t);
 uint32_t oct_uv(const struct oc_dom *o, uint32_t khz);
 int oct_level(const struct oc_dom *o, uint32_t khz);
+int oct_undervolted(const struct oc_dom *o, uint32_t khz);
 int oct_allowed(const struct oc_dom *o, uint32_t khz);
 int oct_above_cap(const struct oc_dom *o, uint32_t khz);
 

@@ -835,6 +835,13 @@ static void test_oc(void)
     CHECK(oct_allowed(m3, 2704000) && !oct_allowed(m3, 2700000), "oc: only listed M3 steps");
     CHECK(!oct_allowed(in, 667000) && oct_allowed(in, 534000), "oc: INT 667 MHz (the green-screen freeze) is not a step");
     CHECK(oct_above_cap(m3, 2886000) && !oct_above_cap(m3, 1924000), "oc: above-cap check");
+    /* a step ACPM gives less voltage than a slower one is refused (the phone's MIF 2002-2094 / M3 2886) */
+    CHECK(!oct_undervolted(m3, 2886000) && oct_allowed(m3, 2886000), "oc: monotonic ramp allowed");
+    for (unsigned l = 0; l < m3->fv_n; ++l)
+        if (m3->fv_khz[l] == 2886000)
+            t.d[OC_M3].fv_uv[l] = 1150000;      /* below 2860 MHz's */
+    CHECK(oct_undervolted(m3, 2886000) && !oct_allowed(m3, 2886000) && oct_allowed(m3, 2860000),
+          "oc: undervolted top step refused, the next one kept");
     /* a truncated ECT parses nothing past its end and does not read out of bounds */
     CHECK(oct_parse_ect(ect, 64, &t) == 0, "oc: truncated ECT refused");
 }

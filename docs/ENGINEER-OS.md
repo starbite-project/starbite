@@ -655,7 +655,9 @@ Clock tab rows after it moved: Real-time clock 0x67, Timer 0x68.
 A55, M3 and G3D list their steps as rows; the other eight domains are read only (none of their blocks runs
 in Engineer OS, so a step could not be tested). Tapping a step:
 
-1. refuses anything that is not in both the ECT and the fvmap (`oct_allowed`; libsb's
+1. refuses anything that is not in both the ECT and the fvmap, or that ACPM gives less voltage than a
+   slower step (`oct_undervolted`: on this phone MIF 2002 / 2093 / 2094 MHz get 712.5 mV against 1794 MHz's
+   737.5 mV, and M3 2886 MHz 1225 mV against 2860 MHz's 1237.5 mV; iOS froze at MIF 2093 MHz) (`oct_allowed`; libsb's
    `sb_acpm_dvfs_listed` checks the list again; `sb_acpm_dvfs` refuses MIF / INT outright);
 2. takes the way back from the PLL: the listed step the PLL shows (MIF and A55 must be readable; INT, and
    M3 or G3D while powered off, have no PLL here: their ECT boot step is assumed), at or below Samsung's
