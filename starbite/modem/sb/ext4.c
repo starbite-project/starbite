@@ -38,8 +38,9 @@ int ext4_open(struct ext4 *fs)
     fs->desc_size = (incompat & 0x80) && g16(sb + 0xFE) >= 64 ? g16(sb + 0xFE) : 32;   /* INCOMPAT_64BIT */
     if (!fs->ipg || !fs->bpg || fs->inode_size < 128 || fs->inode_size > 1024)
         return EXT4_E_CORRUPT;
-    if (incompat & 0x10000)                 /* INCOMPAT_ENCRYPT: not on VENDOR */
-        return EXT4_E_UNSUPPORTED;
+    /* INCOMPAT_ENCRYPT (0x10000) only says files *may* be encrypted (EFS on this S9 has it): encrypted inodes
+     * (EXT4_ENCRYPT_FL) are refused one by one in ext4_read and the directory walks instead. */
+    (void)incompat;
     return 0;
 }
 
@@ -138,8 +139,11 @@ static int bmap(struct ext4 *fs, const uint8_t *inode, uint32_t lblk, uint64_t *
     }
 }
 
+#define ENCRYPTED(inode) ((inode)[0x21] & 0x08)    /* i_flags (le32 at 0x20) & EXT4_ENCRYPT_FL (0x800) */
 int ext4_read(struct ext4 *fs, const uint8_t *inode, uint64_t off, uint8_t *dst, uint32_t len)
 {
+    if (ENCRYPTED(inode))                   /* ciphertext: never handed out as if it were the file */
+        return EXT4_E_UNSUPPORTED;
     uint64_t size = ext4_size(inode);
     if (off > size || len > size - off)
         return EXT4_E_CORRUPT;

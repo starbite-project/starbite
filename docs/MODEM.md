@@ -274,13 +274,19 @@ magic, makes no UDL exchange and waits for no INIT_START. The CP stays in its ow
   `cal_cp_reset_assert` (the *_SYS_PWR_REGs, CP_CTRL_NS bit 2 via EL3, CENTRAL_SEQ bit 16 = 0, wait status 0x80).
 
 ### Result T5 (2026-11-08 20:34, cebf77f, `build/test-boots/modemload-dry-2034/loader-pmsg.txt`)
-RADIO's BOOT/MAIN/VSS loaded, then **EFS: no ext4 /nv_data.bin**, a clean stop with 0 faults. EFS (sda3) is
-journalled ext4. TWRP mounts it read-write at startup and logs "EXT4-fs (sda3): recovery complete", so the file
-system is regularly left with transactions only in its journal. Android rewrites nv_data.bin as a temp file
-plus a rename, and a raw reader then sees stale directory or inode blocks. Note that TWRP itself writes EFS on
-every visit (the replay); our code never does.
+RADIO's BOOT/MAIN/VSS loaded, then **EFS: no ext4 /nv_data.bin**, a clean stop with 0 faults. **Cause** (found on
+the read-only copy `backup/20261108-efs/EFS.img`, 2026-11-08 20:40): EFS's superblock has `INCOMPAT_ENCRYPT`
+(features: has_journal ext_attr filetype extent encrypt sparse_super large_file uninit_bg; 4 KiB blocks; state
+clean; journal_checksum + revoke). The reader copied from the Wi-Fi core refused that flag outright. The flag
+only allows per-file encryption. nv_data.bin (inode 45, 1 MiB, flags 0x80080 = extents + noatime) is not
+encrypted. The reader now refuses encrypted *inodes* (EXT4_ENCRYPT_FL) instead of the whole file system. On the
+copy it reads nv_data.bin with the same CRC-32 as e2fsprogs' `debugfs -c ... cat`. The root holds nv_data.bin,
+.nv_data.bak, nv_data.bin.md5, .nv_state, nv.log and 42 other names.
+TWRP mounts EFS read-write when it starts and replays the journal ("EXT4-fs (sda3): recovery complete" in its
+logs), so EFS can be left needing recovery. That is why the in-memory replay below stays. Our code never writes
+EFS; TWRP does, on every visit.
 
-### 6.1a EFS through the journal, read only (T5b)
+### 6.1a EFS: encrypted inodes refused, the journal replayed in memory (T5b)
 `sb/jbd2.c` replays the ext4 journal **in memory**. It scans committed transactions from the journal
 superblock's start and sequence (descriptor tags with 32/64-bit block numbers, checksum v2/v3 tag sizes,
 escaped blocks, revokes, an uncommitted tail dropped) and builds a map from file-system blocks to journal

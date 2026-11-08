@@ -53,8 +53,91 @@ static int read_nv(uint8_t *out, uint32_t size, int replay, struct jbd2 *j, stru
     return 0;
 }
 
+/* --inspect IMG: what the phone's loader would see, summary only: superblock facts, the journal, the root's
+ * names (runs of 7+ digits masked), nv_data.bin's inode and size and the CRC-32 of what the reader returns. No
+ * file content is printed and nothing is written anywhere. */
+static unsigned nnames;
+static void name_cb(void *ctx, const char *name, unsigned len, uint32_t ino)
+{
+    (void)ctx;
+    char b[260];
+    unsigned run = 0;
+    for (unsigned i = 0; i < len && i < 255; ++i) {
+        char c = name[i] >= 0x20 && name[i] < 0x7F ? name[i] : '?';
+        b[i] = c;
+        run = c >= '0' && c <= '9' ? run + 1 : 0;
+        if (run >= 7)
+            for (unsigned k = i + 1 - run; k <= i; ++k)
+                b[k] = '#';
+    }
+    b[len < 255 ? len : 255] = 0;
+    printf("  / %-28s inode %u\n", b, ino);
+    nnames++;
+}
+static uint32_t crc32b(const uint8_t *p, uint32_t n)
+{
+    uint32_t c = ~0u;
+    while (n--) {
+        c ^= *p++;
+        for (int k = 0; k < 8; ++k)
+            c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1)));
+    }
+    return ~c;
+}
+static int inspect(const char *path, const char *file)
+{
+    static struct ext4 fs;
+    static struct jbd2_map map[8192];
+    static uint8_t nv[4u << 20];
+    struct jbd2 j;
+    uint8_t sb[256], inode[EXT4_INODE_MAX];
+    uint32_t ino;
+    img = fopen(path, "rb");
+    if (!img || raw(0, 1024, sb, sizeof(sb)))
+        return printf("inspect: cannot read %s\n", path), 1;
+#define L32(o) ((uint32_t)sb[o] | (uint32_t)sb[o + 1] << 8 | (uint32_t)sb[o + 2] << 16 | (uint32_t)sb[o + 3] << 24)
+    printf("inspect: magic 0x%04x bs %u compat 0x%x incompat 0x%x ro_compat 0x%x state 0x%x journal inode %u%s\n",
+           sb[0x38] | sb[0x39] << 8, 1024u << L32(0x18), L32(0x5C), L32(0x60), L32(0x64), sb[0x3A] | sb[0x3B] << 8,
+           L32(0xE0), (L32(0x60) & 4) ? " NEEDS_RECOVERY" : "");
+    jr = 0;
+    fs.read = rd;
+    if (ext4_open(&fs))
+        return printf("inspect: ext4_open refused\n"), 1;
+    bs = fs.bs;
+    if (L32(0x60) & 4) {
+        int e = jbd2_scan(&fs, L32(0xE0), &j, map, 8192);
+        printf("inspect: journal %d %s: start %u seq %u tx %u blocks %u revoked %u features 0x%x%s\n", e,
+               j.why ? j.why : "ok", j.start, j.seq0, j.transactions, j.n, j.skipped_revoked, j.features,
+               j.dropped_incomplete ? " +incomplete tail" : "");
+        if (e)
+            return 1;
+        jr = &j;
+        if (ext4_open(&fs))
+            return printf("inspect: ext4_open after the replay refused\n"), 1;
+    }
+    nnames = 0;
+    int e = ext4_list(&fs, 2, name_cb, 0);
+    printf("inspect: root: %u names (%d)\n", nnames, e);
+    if ((e = ext4_lookup(&fs, file, &ino)) || (e = ext4_inode(&fs, ino, inode)))
+        return printf("inspect: %s: lookup %d\n", file, e), 1;
+    uint64_t size = ext4_size(inode);
+    uint32_t flags = (uint32_t)inode[0x20] | (uint32_t)inode[0x21] << 8 | (uint32_t)inode[0x22] << 16 | (uint32_t)inode[0x23] << 24;
+    printf("inspect: %s inode %u mode 0x%x flags 0x%x size %llu\n", file, ino, inode[0] | inode[1] << 8, flags,
+           (unsigned long long)size);
+    if (size <= sizeof(nv)) {
+        for (uint32_t o = 0; o < size; o += 4096)
+            if ((e = ext4_read(&fs, inode, o, nv + o, size - o < 4096 ? (uint32_t)(size - o) : 4096)))
+                return printf("inspect: read %d at 0x%x\n", e, o), 1;
+        printf("inspect: %s read ok, crc32 0x%08x (content not shown)\n", file, crc32b(nv, (uint32_t)size));
+    }
+    fclose(img);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 3 && !strcmp(argv[1], "--inspect"))
+        return inspect(argv[2], argc > 3 ? argv[3] : "/nv_data.bin");
     static uint8_t want[1048576], got[1048576];
     static struct jbd2_map map[8192];
     struct jbd2 j;
