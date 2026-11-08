@@ -21,11 +21,13 @@ enum {
     SYS_UI_LIGHT = 20, SYS_UI_AWAKE = 21,
     SYS_UI_TILE = 22, SYS_UI_GAUGE = 23,                   /* API 1, added in 0.3 */
     SYS_UI_INPUT = 24, SYS_UI_INPUT_GET = 25,              /* 0.5: a text field and the keyboard */
+    SYS_UI_CHART = 26,                                      /* 0.5.6: a line chart */
     /* time 30..39 */
     SYS_TIME_NOW = 30, SYS_TIMER_SET = 31, SYS_TIMER_CANCEL = 32, SYS_UPTIME_MS = 33,
     /* power 40..49 */
     SYS_BATTERY = 40, SYS_ESTIMATE = 41, SYS_POWER_REQUEST = 42, SYS_SYSINFO = 43,
     SYS_SETTING_GET = 44, SYS_SETTING_SET = 45,            /* API 1, added in 0.2 */
+    SYS_BATTERY_HISTORY = 46,                               /* 0.5.6 */
     /* light 50..59 */
     SYS_TORCH = 50, SYS_STROBE = 51,
     /* heat 60..69 */
@@ -228,6 +230,17 @@ static inline void ui_input_init(uint32_t id, const char *label, uint32_t flags,
     sbos_call(SYS_UI_INPUT, id, (uintptr_t)label, flags, (uint64_t)max, (uintptr_t)init);
 }
 static inline int ui_input_get(char *buf, uint32_t cap) { return (int)sbos_call(SYS_UI_INPUT_GET, (uintptr_t)buf, cap, 0, 0, 0); }
+/* A line chart (0.5.6): n values (at most 60, oldest first) between lo and hi, drawn in argb; caption above, the
+ * left and right labels under it (e.g. "8 h ago", "now"). A value of -32768 is a gap. */
+static inline void ui_chart(const char *caption, const int16_t *v, int n, int lo, int hi, uint32_t argb,
+                            const char *left_right)
+{
+    struct { const int16_t *v; int32_t n, lo, hi; uint32_t argb; const char *lr; } c = { v, n, lo, hi, argb, left_right };
+    sbos_call(SYS_UI_CHART, (uintptr_t)caption, (uintptr_t)&c, 0, 0, 0);
+}
+/* the battery's charge over the last hours: one value (0.1 %) every 10 minutes, oldest first, -32768 unknown;
+ * returns the count (at most cap) */
+static inline int battery_history(int16_t *v, int cap) { return (int)sbos_call(SYS_BATTERY_HISTORY, (uintptr_t)v, (uint64_t)cap, 0, 0, 0); }
 /* the short line under the app's tile on home (any time, front or not; "" clears it) */
 static inline void ui_tile(const char *line) { sbos_call(SYS_UI_TILE, (uintptr_t)line, 0, 0, 0, 0); }
 /* a ring gauge: permille 0..1000 of the ring in argb, value inside, caption under it */

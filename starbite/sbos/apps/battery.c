@@ -43,6 +43,24 @@ static void show(void)
     fmt_init(&f);
     fmt_dur(&f, e.now_min);
     ui_big(e.learned ? "LEFT AT THIS USE" : "LEFT AT THIS USE (TYPICAL)", f.b, 0);
+    {
+        /* 0.5.6: the charge over the last hours (one value every 10 minutes since the start) */
+        int16_t h[48];
+        int hn = battery_history(h, 48);
+        if (hn >= 2) {
+            struct fmt lr;
+            fmt_init(&lr);
+            int mins = (hn - 1) * 10;
+            if (mins >= 120) {
+                fmt_d(&lr, mins / 60);
+                fmt_s(&lr, " h ago|now");
+            } else {
+                fmt_d(&lr, mins);
+                fmt_s(&lr, " min ago|now");
+            }
+            ui_chart("CHARGE OVER TIME", h, hn, 0, 1000, c, lr.b);
+        }
+    }
     fmt_init(&f);
     fmt_s(&f, "Screen off: ");
     fmt_dur(&f, e.screen_off_min);

@@ -31,7 +31,7 @@ static int getenv_dbg(void) { return getenv("SBOS_DBG") != 0; }
 #define ICON_SOS_S 227
 
 enum { E_TITLE = 1, E_BACK, E_BUTTON, E_BIG, E_TEXT, E_LEVEL, E_TOGGLE, E_HOLD, E_CLOCK, E_TILE, E_ROUND,
-       E_FIELD, E_TOAST, E_CTEXT, E_GAUGE, E_INPUT, E_KEYS };
+       E_FIELD, E_TOAST, E_CTEXT, E_GAUGE, E_INPUT, E_KEYS, E_CHART };
 enum { SCR_LOCK = 1, SCR_HOME, SCR_APP, SCR_POWER, SCR_CONFIRM, SCR_LIGHT, SCR_SOS, SCR_OFF };
 
 struct el {
@@ -207,6 +207,28 @@ void kui_hold(uint32_t id, const char *label, uint32_t ms, uint32_t flags)
     e->flags = flags;
     e->ms = ms < 300 ? 300 : ms > 5000 ? 5000 : ms;
     scopy(e->a, sizeof(e->a), label);
+}
+
+/* a line chart: up to 60 int16 values in b[] (120 bytes), the count in n, the range in value (lo) and ms (hi), the
+ * left / right labels "left|right" in a */
+void kui_chart(const char *caption, const int16_t *v, int n, int lo, int hi, uint32_t c, const char *lr)
+{
+    struct el *e = add(app_els, &napp_els, E_CHART);
+    if (!e)
+        return;
+    if (n > 60)
+        n = 60;
+    memcpy(e->b, v, (unsigned)n * 2U);
+    e->n = n;
+    e->value = lo;
+    e->ms = (uint32_t)hi;
+    e->color = c ? c : C_GREEN;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, caption);
+    ub_c(&u, '|');
+    ub_s(&u, lr);
+    scopy(e->a, sizeof(e->a), u.b);
 }
 
 void kui_gauge(const char *caption, const char *value, int permille, uint32_t c)
@@ -549,6 +571,7 @@ static void layout_flow(struct el *l, int n, int y)
         case E_TOGGLE: e->h = 210; break;
         case E_GAUGE: e->h = 640; break;
         case E_INPUT: e->h = 250; break;
+        case E_CHART: e->h = 420; break;
         case E_KEYS:
             e->x = 0, e->y = KB_TOP - 20, e->w = UI_W, e->h = UI_H - KB_TOP + 20;
             continue;                       /* fixed at the bottom: the flow above it goes on */
@@ -1208,6 +1231,52 @@ static void draw_el(const struct el *e, int idx)
             ui_text_c(ui_has_font(F_VALUE) ? F_VALUE : F_BIG, UI_W / 2, 1100, "SOS", tc);
             ui_text_c(F_TITLE, UI_W / 2, 1350, e->b, tc);
         }
+        break;
+    }
+    case E_CHART: {                             /* caption|left|right in a; values in b; the line, a dot at the end */
+        char cap[48], lft[24], rgt[24];
+        const char *s = e->a;
+        unsigned k = 0;
+        for (; *s && *s != '|' && k + 1 < sizeof(cap); ++s)
+            cap[k++] = *s;
+        cap[k] = 0;
+        if (*s == '|')
+            ++s;
+        k = 0;
+        for (; *s && *s != '|' && k + 1 < sizeof(lft); ++s)
+            lft[k++] = *s;
+        lft[k] = 0;
+        if (*s == '|')
+            ++s;
+        k = 0;
+        for (; *s && k + 1 < sizeof(rgt); ++s)
+            rgt[k++] = *s;
+        rgt[k] = 0;
+        ui_text(F_HEAD, e->x + 4, e->y + 40, cap, C_L2);
+        int cx = e->x, cy = e->y + 64, cw = e->w, ch = e->h - 64 - 60;
+        ui_round(cx, cy, cw, ch, 40, card);
+        for (int g = 1; g < 4; ++g)             /* quarter lines */
+            ui_fill(cx + 30, cy + ch * g / 4, cw - 60, 2, ui_mix(C_L3, card, 60));
+        int16_t v[60];
+        memcpy(v, e->b, sizeof(v));
+        int lo = e->value, hi = (int)e->ms, n = e->n;
+        int px = -1, py = -1;
+        for (int i = 0; i < n; ++i) {
+            if (v[i] == -32768) {
+                px = -1;
+                continue;
+            }
+            int val = v[i] < lo ? lo : v[i] > hi ? hi : v[i];
+            int x = cx + 40 + (n > 1 ? (cw - 80) * i / (n - 1) : (cw - 80) / 2);
+            int y = cy + ch - 30 - (ch - 60) * (val - lo) / (hi - lo);
+            if (px >= 0)
+                ui_line(px, py, x, y, 8, e->color);
+            px = x, py = y;
+        }
+        if (px >= 0)
+            ui_disc(px, py, 14, e->color);
+        ui_text(F_SMALL, e->x + 8, e->y + e->h - 14, lft, C_L3);
+        ui_text_r(F_SMALL, e->x + e->w - 8, e->y + e->h - 14, rgt, C_L3);
         break;
     }
     case E_INPUT: {                             /* the field: its label, the text (or dots), a cursor, Show / Hide */

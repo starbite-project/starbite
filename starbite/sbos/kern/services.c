@@ -163,6 +163,41 @@ void battery_get(struct sbos_battery *b)
     *b = bat;
 }
 
+/* 0.5.6: the charge every 10 minutes for the last 8 hours (48 values; a gap where it was not read) */
+#define HIST_N 48
+#define HIST_MS 600000U
+static int16_t hist[HIST_N];
+static unsigned hist_head, hist_n;
+static uint64_t hist_t;
+
+static void hist_add(void)
+{
+    uint64_t now = sb_ms();
+    if (hist_n && now - hist_t < HIST_MS)
+        return;
+    /* missed slots (the phone asleep longer than a slot): gaps */
+    while (hist_n && now - hist_t >= 2U * HIST_MS && hist_n < 1000) {
+        hist[hist_head] = -32768;
+        hist_head = (hist_head + 1) % HIST_N;
+        if (hist_n < HIST_N)
+            ++hist_n;
+        hist_t += HIST_MS;
+    }
+    hist[hist_head] = bat.ok ? (int16_t)bat.pct_x10 : -32768;
+    hist_head = (hist_head + 1) % HIST_N;
+    if (hist_n < HIST_N)
+        ++hist_n;
+    hist_t = now;
+}
+
+int battery_history(int16_t *out, int cap)
+{
+    int n = (int)hist_n < cap ? (int)hist_n : cap;
+    for (int i = 0; i < n; ++i)                 /* the newest n, oldest first */
+        out[i] = hist[(hist_head + HIST_N - (unsigned)n + (unsigned)i) % HIST_N];
+    return n;
+}
+
 static int32_t cold_adjust(int32_t min)
 {
     if (bat.temp_c10 > -1000 && bat.temp_c10 < 0)
@@ -195,6 +230,7 @@ void battery_timer(unsigned id)
 {
     (void)id;
     bat_read();
+    hist_add();
     if (bat.ok)
         bat_model_feed(&model, K.power_state, bat.avg_ma, sb_ms() - K.state_since);
     ui_kminute();
@@ -212,6 +248,7 @@ void battery_init(void)
 {
     bat_model_init(&model);
     bat_read();
+    hist_add();
 }
 
 /* ---- power ------------------------------------------------------------------------------- */

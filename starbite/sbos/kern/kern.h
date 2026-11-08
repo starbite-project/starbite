@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.5.5"
+#define SBOS_VERSION "0.5.6"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -205,6 +205,7 @@ void battery_init(void);
 void battery_timer(unsigned id);
 void battery_get(struct sbos_battery *b);
 void battery_estimate(struct sbos_estimate *e);
+int battery_history(int16_t *out, int cap);   /* 0.1 %, oldest first */
 void heater_init(void);
 void heater_timer(unsigned id);
 int heater_request(int level, int minutes);
@@ -270,6 +271,7 @@ void selftest_input(void);
 void kui_input(uint32_t id, const char *label, uint32_t flags, int max, const char *init);
 int kui_input_get(char *out, unsigned cap);
 void kui_input_wipe(void);
+void kui_chart(const char *caption, const int16_t *v, int n, int lo, int hi, uint32_t c, const char *lr);
 void kui_gauge(const char *caption, const char *value, int permille, uint32_t c);
 const char *app_tile(int a);        /* the line an app shows under its home tile */
 void kui_toast(const char *t, uint32_t ms);

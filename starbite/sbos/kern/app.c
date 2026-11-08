@@ -640,6 +640,20 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         memset(t, 0, sizeof(t));
         return ok ? n : SBOS_EINVAL;
     }
+    case SYS_UI_CHART: {
+        struct { uint64_t v; int32_t n, lo, hi; uint32_t argb; uint64_t lr; } c;
+        int16_t vals[60];
+        char lr[48];
+        if (!front || !user_str(a, arg[0], s1, sizeof(s1)) || !user_in(a, arg[1], &c, sizeof(c)))
+            return SBOS_EINVAL;
+        if (c.n < 0 || c.n > 60 || c.lo >= c.hi || !user_in(a, c.v, vals, (uint64_t)c.n * 2U))
+            return SBOS_EINVAL;
+        lr[0] = 0;
+        if (c.lr && !user_str(a, c.lr, lr, sizeof(lr)))
+            return SBOS_EINVAL;
+        kui_chart(s1, vals, c.n, c.lo, c.hi, c.argb, lr);
+        return 0;
+    }
     case SYS_UI_GAUGE:
         if (!front || !user_str(a, arg[0], s1, sizeof(s1)) || !user_str(a, arg[1], s2, sizeof(s2)))
             return SBOS_EINVAL;
@@ -721,6 +735,12 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
     }
     case SYS_STROBE:
         return (p->perms & SBOS_P_LIGHT) ? SBOS_ENOSYS : SBOS_EPERM;
+    case SYS_BATTERY_HISTORY: {
+        int16_t h[48];
+        int cap = arg[1] > 48 ? 48 : (int)arg[1];
+        int n = battery_history(h, cap);
+        return user_out(a, arg[0], h, (uint64_t)n * 2U) ? n : SBOS_EINVAL;
+    }
     case SYS_SETTING_GET:
         switch (arg[0]) {
         case SET_PANEL_SAVE: return panel_save_on;

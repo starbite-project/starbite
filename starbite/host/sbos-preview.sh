@@ -75,6 +75,7 @@ scene world         w:300 $OPEN t:382,1837 w:600 t:720,1100 w:500
 scene stopwatch     w:300 $OPEN t:382,1837 w:600 t:380,1400 w:500 t:720,950 w:2300
 scene timer         w:300 $OPEN t:382,1837 w:600 t:1050,1400 w:500 t:380,950 w:300 t:720,1220 w:2300
 scene battery       w:300 $OPEN t:1057,1837 w:600
+scene battery-history w:300 $OPEN w:3700000 k:p w:500 $OPEN t:1057,1837 w:600
 scene settings      w:300 $OPEN t:382,2424 w:600
 scene settings-on   w:300 $OPEN t:382,2424 w:600 t:720,1789 w:300 t:720,2039 w:300
 scene settings-alarm w:300 $OPEN t:382,2424 w:600 t:557,670 w:400
