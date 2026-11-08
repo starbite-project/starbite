@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "0.5.2"
+#define SBOS_VERSION "0.5.3"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -267,7 +267,7 @@ extern const int sbos_selftest_enabled;
 void selftest_start(void);
 void selftest_timer(unsigned id);
 void selftest_input(void);
-void kui_input(uint32_t id, const char *label, uint32_t flags, int max);
+void kui_input(uint32_t id, const char *label, uint32_t flags, int max, const char *init);
 int kui_input_get(char *out, unsigned cap);
 void kui_input_wipe(void);
 void kui_gauge(const char *caption, const char *value, int permille, uint32_t c);
@@ -322,7 +322,8 @@ void settings_changed(void);
 void settings_timer(unsigned id);
 int settings_persistent(void);
 int settings_selftest(void);       /* uitest.c: 1 passed, 0 failed, -1 no slot */
-void settings_save_now(void);       /* write the settings at once (switch-off), where the slot exists */
+void settings_save_now(void);
+void settings_app_restore(int a);  /* app.c at load: the app's record from the slot into its state */       /* write the settings at once (switch-off), where the slot exists */
 extern uint32_t auto_off_min;       /* services.c: switch off after this many minutes with the screen off */
 int power_auto_off(int rehearse);
 void power_screen_set(int on);

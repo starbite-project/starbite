@@ -7,7 +7,7 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/starbite/out/sboshost"
 st="$out/settings-test.bin"
 rm -f "$st"
-run() { limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 ${SLOT:+SBOS_HOST_STATE=$st} "$out/sbos-host" "$out" /dev/null "$@" s:settings-test q 2>&1 | grep -E 'settings:|fence:|slot:'; }
+run() { limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 ${SLOT:+SBOS_HOST_STATE=$st} ${NOFILES:+SBOS_HOST_FILES=/nonexistent} "$out/sbos-host" "$out" /dev/null "$@" s:settings-test q 2>&1 | grep -E 'settings:|fence:|slot:'; }
 OPEN="w:300 g:1150,2310,0,700 w:400 t:382,2424 w:600"
 fails=0
 want() { if echo "$1" | grep -q -- "$2"; then echo "ok: $2"; else echo "FAIL: $2"; echo "$1" | sed 's/^/    /'; fails=$((fails + 1)); fi; }
@@ -26,6 +26,14 @@ want "$c" "restored (slot sequence 2): screen off 60 s, refresh on change on, pa
 printf 'XX' | dd of="$st" bs=1 seek=$((512 * 1024 + 40)) conv=notrunc 2>/dev/null
 d=$(run w:300)
 want "$d" "restored (slot sequence 1): screen off 60 s, refresh on change on, panel off off"
+# 0.5.3: an app's state across a restart: the Info app's card (Name typed on the keyboard) saved, then restored
+INFO="w:300 g:1150,2310,0,700 w:400 t:1057,1250 w:600 t:720,1150 w:500 t:720,655 w:500 t:930,2434 w:150 t:1210,2246 w:150 t:1245,2810 w:4000"
+NOFILES=1
+f=$(run $INFO)
+want "$f" "settings: saved" "the card saved with the settings"
+g=$(run w:300)
+want "$g" "settings: an app's state restored: info" "the card restored at the next start"
+NOFILES=
 SLOT=
 e=$(run $OPEN t:720,1789 w:4000)
 want "$e" "no \"sbos-state\" store entry"

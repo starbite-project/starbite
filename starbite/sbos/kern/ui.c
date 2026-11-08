@@ -217,7 +217,7 @@ void kui_gauge(const char *caption, const char *value, int permille, uint32_t c)
  * leaves the front, and never logged. Layers: 0 lower case, 1 upper case (one letter, then back), 2 digits and
  * signs, 3 more signs. Keys: touch only (Volume and Bixby do not type). */
 static char kb_text[65];
-static int kb_len, kb_layer, kb_secret, kb_show, kb_max, kb_on;
+static int kb_len, kb_layer, kb_secret, kb_show, kb_max, kb_on, kb_caps;
 static uint32_t kb_id;
 
 void kui_input_wipe(void)
@@ -227,14 +227,24 @@ void kui_input_wipe(void)
     kb_id = 0;
 }
 
-void kui_input(uint32_t id, const char *label, uint32_t flags, int max)
+void kui_input(uint32_t id, const char *label, uint32_t flags, int max, const char *init)
 {
-    if (kb_id != id) {                      /* another field: a fresh text */
+    if (kb_id != id) {                      /* another field: a fresh text (or the app's starting text) */
         kui_input_wipe();
         kb_id = id;
+        if (init) {
+            int m = max < 1 ? 1 : max > 64 ? 64 : max;
+            while (kb_len < m && init[kb_len])
+                ++kb_len;
+            memcpy(kb_text, init, (unsigned)kb_len);
+            kb_text[kb_len] = 0;
+        }
     }
     kb_on = 1;
     kb_secret = (flags & 1U) != 0;
+    kb_caps = (flags & 4U) != 0;
+    if (kb_caps && !kb_len && kb_layer == 0)
+        kb_layer = 1;                       /* a name starts with a capital */
     kb_max = max < 1 ? 1 : max > 64 ? 64 : max;
     struct el *e = add(app_els, &napp_els, E_INPUT);
     if (e) {
@@ -252,6 +262,7 @@ void kui_input(uint32_t id, const char *label, uint32_t flags, int max)
     if (k) {
         k->id = id;
         k->value = kb_layer;
+        k->flags = flags;                   /* 2: the action key says Join (else Done) */
     }
 }
 
@@ -334,6 +345,8 @@ static void kb_press(int x, int y)
     else if (c == 2) {
         if (kb_len > 0)
             kb_text[--kb_len] = 0;
+        if (kb_caps && !kb_len && kb_layer == 0)
+            kb_layer = 1;
     } else if (c == 4) {
         if (app_front >= 0)
             app_event_send(app_front, EV_APP_BUTTON, kb_id, kb_len);
@@ -1195,7 +1208,7 @@ static void draw_el(const struct el *e, int idx)
                 if (c == 3)
                     lab = e->value >= 2 ? "abc" : "123";
                 if (c == 4)
-                    lab = "Join";
+                    lab = (e->flags & 2U) ? "Join" : "Done";
                 if (c == 5)
                     lab = "space";
                 if (c == 1 && e->value < 2)

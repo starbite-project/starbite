@@ -201,6 +201,7 @@ static void app_add(const struct sbapp_header *h, uintptr_t slot, void (*host_en
     if (p->heap > p->heap_end)
         p->heap = p->heap_end;
     ++napps;
+    settings_app_restore(napps - 1);        /* its saved state (the slot), before EV_APP_START reads it */
     if (!app_hidden(napps - 1) || K.irq_mode)
         app_event_send(napps - 1, EV_APP_START, 0, 0);
 }
@@ -616,11 +617,16 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
             ui_mark_dirty();
         }
         return 0;
-    case SYS_UI_INPUT:
+    case SYS_UI_INPUT: {
+        char init[72];
         if (!front || !arg[0] || !user_str(a, arg[1], s1, sizeof(s1)))
             return SBOS_EINVAL;
-        kui_input((uint32_t)arg[0], s1, (uint32_t)arg[2], (int)arg[3]);
+        if (arg[4] && !user_str(a, arg[4], init, sizeof(init)))
+            return SBOS_EINVAL;
+        kui_input((uint32_t)arg[0], s1, (uint32_t)arg[2], (int)arg[3], arg[4] ? init : 0);
+        memset(init, 0, sizeof(init));
         return 0;
+    }
     case SYS_UI_INPUT_GET: {
         char t[65];
         if (!front || !arg[1])
@@ -817,6 +823,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         if (arg[1] > STATE_REC_MAX || !user_in(a, arg[0], p->state, arg[1]))
             return SBOS_EINVAL;
         p->state_n = (uint32_t)arg[1];
+        settings_changed();                 /* 0.5.3: saved with the settings (3 s later) where the slot exists */
         return 0;
     case SYS_STATE_GET: {
         uint64_t n = p->state_n < arg[1] ? p->state_n : arg[1];

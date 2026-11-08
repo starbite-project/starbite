@@ -214,12 +214,18 @@ static inline void ui_toast_app(const char *t, uint32_t ms) { sbos_call(SYS_UI_T
  * gets EV_APP_SHOW again). */
 static inline void ui_light(uint32_t argb) { sbos_call(SYS_UI_LIGHT, argb, 0, 0, 0, 0); }
 static inline void ui_awake(int on) { sbos_call(SYS_UI_AWAKE, (uint64_t)on, 0, 0, 0, 0); }
-/* A text field with the on-screen keyboard (0.5): id (not 0) names it; flags 1 = secret (dots, with Show); max
+/* A text field with the on-screen keyboard (0.5): id (not 0) names it; flags 1 = secret (dots, with Show),
+ * 2 = the action key says "Join" (else "Done"), 4 = start with a capital (names); max
  * characters (1..64). The keyboard's action key sends EV_APP_BUTTON with this id (value: the length). The text
  * stays in the kernel: ui_input_get copies it (and it is wiped when the app leaves the front). */
 static inline void ui_input(uint32_t id, const char *label, uint32_t flags, int max)
 {
     sbos_call(SYS_UI_INPUT, id, (uintptr_t)label, flags, (uint64_t)max, 0);
+}
+/* the same, starting from init when the field is new (editing a saved value) */
+static inline void ui_input_init(uint32_t id, const char *label, uint32_t flags, int max, const char *init)
+{
+    sbos_call(SYS_UI_INPUT, id, (uintptr_t)label, flags, (uint64_t)max, (uintptr_t)init);
 }
 static inline int ui_input_get(char *buf, uint32_t cap) { return (int)sbos_call(SYS_UI_INPUT_GET, (uintptr_t)buf, cap, 0, 0, 0); }
 /* the short line under the app's tile on home (any time, front or not; "" clears it) */

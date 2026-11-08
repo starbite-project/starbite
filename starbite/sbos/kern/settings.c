@@ -12,6 +12,7 @@
  * confirmation. A restore is skipped after an unclean start (none yet: the loader's crash detection has it). */
 #include "sb.h"
 #include "kern.h"
+#include "kapp.h"
 #include "sbapp.h"
 
 #define REC "sbos.settings"
@@ -137,6 +138,15 @@ void settings_timer(unsigned id)
         sb_log("settings: not saved: the record did not fit");
         return;
     }
+    /* 0.5.3: each app's own state (SYS_STATE_PUT, up to 4 KiB), as "app:<id>" */
+    for (int a = 0; a < napps; ++a) {
+        if (!apps[a].state_n)
+            continue;
+        char id[24] = "app:";
+        sb_strcpy(id + 4, sizeof(id) - 4, apps[a].id);
+        if (state_add(&b, id, apps[a].state, apps[a].state_n) < 0)
+            sb_logf("settings: an app's state did not fit: ", apps[a].id);
+    }
     uint32_t n = state_finish(&b);
     int w = hw_slot_write(to, half[to], n);
     if (w < 0) {
@@ -161,6 +171,21 @@ void settings_timer(unsigned id)
     ub_dec(&u, n);
     ub_s(&u, " bytes)");
     sb_log(u.b);
+}
+
+void settings_app_restore(int a)
+{
+    if (!slot_ok || cur_half < 0 || a < 0 || a >= napps)
+        return;
+    char id[24] = "app:";
+    sb_strcpy(id + 4, sizeof(id) - 4, apps[a].id);
+    const uint8_t *d = 0;
+    int n = state_find(half[cur_half], id, &d);
+    if (n <= 0 || !d || n > (int)STATE_REC_MAX)
+        return;
+    memcpy(apps[a].state, d, (unsigned)n);
+    apps[a].state_n = (uint32_t)n;
+    sb_logf("settings: an app's state restored: ", apps[a].id);
 }
 
 void settings_save_now(void)

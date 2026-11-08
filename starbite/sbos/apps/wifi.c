@@ -54,7 +54,7 @@ static void show(void)
         ui_title("Join a network");
         name_of(nm, sizeof(nm), nets[pick].ssid, nets[pick].ssid_len);
         ui_big("SECURED NETWORK", nm, 0);
-        ui_input(5, "Passphrase", 1, 63);
+        ui_input(5, "Passphrase", 1 | 2, 63);
         ui_textline("Kept in this phone's memory until a restart. Never written to the log.", GREY);
         ui_button(3, "Cancel", 0, UI_HALF);
         ui_end();

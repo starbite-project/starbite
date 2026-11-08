@@ -45,7 +45,7 @@ scene() {
     name=$1
     shift
     if [ -n "${SCENES:-}" ] && ! echo " $SCENES " | grep -q " $name "; then return 0; fi
-    $V env ${SBOS_DBG:+SBOS_DBG=1} ${SCENE_ENV:-X=1} SBOS_HOST_FILES=$root/starbite/sbos/examples "$out/sbos-host" "$out" /dev/null "$@" "s:$name" q | grep -E "shot|FAIL|CRASH|dbg|host: (power|reboot|boot)" || true
+    $V env ${SBOS_DBG:+SBOS_DBG=1} SBOS_HOST_FILES=$root/starbite/sbos/examples ${SCENE_ENV:-X=1} "$out/sbos-host" "$out" /dev/null "$@" "s:$name" q | grep -E "shot|FAIL|CRASH|dbg|host: (power|reboot|boot)" || true
     "$py" -c "from PIL import Image; Image.open('$out/$name.ppm').save('$png/$name.png')"
 }
 OPEN="g:1150,2310,0,700 w:400"                      # hold Open on the lock screen
@@ -85,6 +85,11 @@ scene wifi-list     w:300 $OPEN t:1057,2424 w:600 t:720,625 w:3000
 scene wifi-joined   w:300 $OPEN t:1057,2424 w:600 t:720,625 w:3000 t:720,905 w:6000
 SCENE_ENV=SBOS_HOST_WPA2=1
 scene wifi-passphrase w:300 $OPEN t:1057,2424 w:600 t:720,625 w:3000 t:720,905 w:800 t:580,2622 w:150 t:1210,2246 w:150 t:510,2246 w:300
+SCENE_ENV=
+SCENE_ENV=SBOS_HOST_FILES=/nonexistent
+scene info-empty    w:300 $OPEN t:1057,1250 w:600
+scene info-edit     w:300 $OPEN t:1057,1250 w:600 t:720,1150 w:500
+scene info-field    w:300 $OPEN t:1057,1250 w:600 t:720,1150 w:500 t:720,655 w:500 t:930,2434 w:150 t:1210,2246 w:150 t:510,2246 w:300
 SCENE_ENV=
 scene power-menu    w:300 h:p:1300 w:500
 scene focus-keys    w:300 $OPEN k:d w:200 k:d w:200 k:d w:300
