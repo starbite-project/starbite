@@ -85,6 +85,57 @@ static void Say(const char *line)
         ZwWriteFile(g_log, NULL, NULL, NULL, &iosb, buf, (ULONG)n, NULL, NULL);
 }
 
+// Breadcrumbs that survive a hung shutdown and the reset after it (W2q): the firmware's pmsg ring at 0xFED14000
+// ("DBGC", start, size; text at +12, 0x3F00 bytes; the same writer as the woa firmware's patch 0003; the UFS driver
+// logs its =UFSBUGCHECK there too), read from TWRP as /sys/fs/pstore/pmsg-ramoops-0. The log file cannot help:
+// Windows locks the file system before devices power down. Short fixed texts only.
+static volatile UCHAR *g_ring;
+static KSPIN_LOCK g_ring_lock;
+
+static void CrumbInit(void)
+{
+    PHYSICAL_ADDRESS pa;
+    if (g_ring)
+        return;
+    KeInitializeSpinLock(&g_ring_lock);
+    pa.QuadPart = 0xFED14000ll;
+    g_ring = (volatile UCHAR *)MmMapIoSpaceEx(pa, 0x4000, PAGE_READWRITE | PAGE_NOCACHE);
+}
+
+// the bytes of t into the ring (under g_ring_lock): appended until it is full, then wrapping, as the firmware does
+static void RingPut(const char *t)
+{
+    volatile ULONG *w = (volatile ULONG *)g_ring;
+    for (; *t; t++) {
+        ULONG pos;
+        if (w[2] < 0x3F00u) {
+            pos = w[2];
+            w[2] = pos + 1;
+            w[1] = (pos + 1) % 0x3F00u;
+        } else {
+            pos = w[1];
+            w[1] = (pos + 1) % 0x3F00u;
+        }
+        g_ring[12 + pos] = (UCHAR)*t;
+    }
+}
+
+static void Crumb(const char *t)
+{
+    volatile ULONG *w = (volatile ULONG *)g_ring;
+    KIRQL old;
+    if (!g_ring)
+        return;
+    KeAcquireSpinLock(&g_ring_lock, &old);
+    if (w[0] != 0x43474244u || w[1] >= 0x3F00u || w[2] > 0x3F00u)
+        w[0] = 0x43474244u, w[1] = 0, w[2] = 0;
+    RingPut("=WIFI ");
+    RingPut(t);
+    RingPut("\n");
+    KeMemoryBarrier();
+    KeReleaseSpinLock(&g_ring_lock, old);
+}
+
 static void Sayf(const char *fmt, ...)
 {
     char line[240];
@@ -1094,6 +1145,7 @@ static void CmdRadio(DEVCTX *d, WIFIREQUEST r, WDI_MESSAGE_HEADER *h, UINT in)
     }
     d->radio_off = !on;
     Sayf("wificx: radio %s (Windows' switch): firmware %s %d", on ? "ON" : "OFF", on ? "up" : "down", e);
+    Crumb(on ? "radio on" : "radio off");
     Indicate(d, WDI_INDICATION_SET_RADIO_STATE_COMPLETE, hc.PortId, hc.TransactionId,
              e == BCMW_OK ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE, NULL, 0);
     {
@@ -1450,10 +1502,13 @@ static void Worker(PVOID arg)
         }
         SendQueued(d);
         // only after a full queue held Windows' packets back (it arms the notification whenever it goes idle)
-        if (d->txq && d->tx_held && d->tx_count < QLEN / 2) {
+        if (d->tx_held && d->tx_count < QLEN / 2) {
+            KIRQL old;
             InterlockedExchange(&d->tx_held, 0);
-            if (InterlockedExchange(&d->tx_armed, 0))
+            KeAcquireSpinLock(&d->tx_lock, &old);  // not on a queue being destroyed (QueueDestroy takes it)
+            if (d->txq && InterlockedExchange(&d->tx_armed, 0))
                 NetTxQueueNotifyMoreCompletedPacketsAvailable(d->txq);  // room again: Windows' ring is taken up
+            KeReleaseSpinLock(&d->tx_lock, old);
         }
         if (!d->up)
             continue;
@@ -1686,8 +1741,12 @@ static EVT_WDF_OBJECT_CONTEXT_DESTROY QueueDestroy;
 static void QueueDestroy(WDFOBJECT o)
 {
     QUEUECTX *c = QueueCtx(o);
-    if (c->d && c->d->txq == (NETPACKETQUEUE)o)
+    if (c->d && c->d->txq == (NETPACKETQUEUE)o) {
+        KIRQL old;
+        KeAcquireSpinLock(&c->d->tx_lock, &old);   // the worker notifies the queue under this lock
         c->d->txq = NULL;
+        KeReleaseSpinLock(&c->d->tx_lock, old);
+    }
     if (c->d && c->d->rxq == (NETPACKETQUEUE)o) {
         KIRQL old;
         KeAcquireSpinLock(&c->d->rx_lock, &old);
@@ -2009,6 +2068,7 @@ static NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST)
 static void Stop(DEVCTX *d)
 {
     KIRQL old;
+    Crumb(d->thread ? "stop: the worker is asked to end" : "stop: no worker");
     KeAcquireSpinLock(&d->cmd_lock, &old);
     d->stopping = 1;
     KeReleaseSpinLock(&d->cmd_lock, old);
@@ -2022,6 +2082,7 @@ static void Stop(DEVCTX *d)
         }
         ZwClose(d->thread);
         d->thread = NULL;
+        Crumb("stop: the worker ended");
     }
     // requests the worker did not take: answered, so WiFiCx never waits on them
     for (;;) {
@@ -2041,6 +2102,7 @@ static void Stop(DEVCTX *d)
         bcmw_quiesce(d->w);         // the radio held in reset and unpowered
         d->up = 0;
         Say("wificx: the radio is off");
+        Crumb("stop: the radio is off");
     }
 }
 
@@ -2048,9 +2110,11 @@ static EVT_WDF_DEVICE_D0_EXIT D0Exit;
 static NTSTATUS D0Exit(WDFDEVICE device, WDF_POWER_DEVICE_STATE target)
 {
     DEVCTX *d = Ctx(device);
+    Crumb(target == WdfPowerDeviceD3Final ? "D0 exit (final: shutdown or removal)" : "D0 exit (sleep)");
     if (target == WdfPowerDeviceD3Final)
         Stop(d);                    // removal or shutdown: nothing comes after this
     SetParam(L"GuardBoots", 0);
+    Crumb("D0 exit done");
     Sayf("wificx: D0 exit to %d (clean: the boot guard is reset)", (int)target);
     return STATUS_SUCCESS;
 }
@@ -2060,6 +2124,7 @@ static NTSTATUS ReleaseHardware(WDFDEVICE device, WDFCMRESLIST)
 {
     Stop(Ctx(device));
     Say("wificx: released");
+    Crumb("hardware released");
     return STATUS_SUCCESS;
 }
 
@@ -2078,6 +2143,8 @@ static EVT_WDF_DRIVER_DEVICE_ADD DeviceAdd;
 static NTSTATUS DeviceAdd(WDFDRIVER, PWDFDEVICE_INIT init)
 {
     LogOpen();
+    CrumbInit();
+    Crumb("device added");
     NTSTATUS st = NetDeviceInitConfig(init);
     if (!NT_SUCCESS(st))
         return st;
