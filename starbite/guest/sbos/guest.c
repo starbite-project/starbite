@@ -68,6 +68,7 @@
 static int st = GUEST_OFF, shown, screen = 1;
 static const char *why = "";
 static uint32_t seq_seen = 0, seq_blit = 0;
+static uint32_t blits, blit_ms_max;           /* the view's frames drawn (P3b: logged by the self test) */
 static uint64_t t_hidden, t_screen_off;
 static int sb_up;
 
@@ -361,6 +362,7 @@ void guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0)
         seq = h->surf_seq;
     }
     seq_seen = seq_blit = seq;
+    uint64_t t0 = sb_ms();
     for (uint32_t y = 0; y < SH; ++y) {
         const volatile uint32_t *s = (const volatile uint32_t *)((uintptr_t)px + (uintptr_t)y * stride);
         uint64_t *d0 = (uint64_t *)(back + (uintptr_t)(y0 + 2 * y) * stride_px + x0);
@@ -372,6 +374,9 @@ void guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0)
             d1[x] = c;
         }
     }
+    ++blits;
+    if (sb_ms() - t0 > blit_ms_max)
+        blit_ms_max = (uint32_t)(sb_ms() - t0);
 }
 
 /* touch in panel pixels (the view at (0, 40), 2x): surface pixels for the guest */
@@ -493,6 +498,10 @@ void guest_timer(unsigned id)
         sb_log("guest: every guest core off, the cluster off after 100 ms (fake)");
         ui_mark_dirty();
     } else if (st == GUEST_RUNNING) {
+        if (shown) {                        /* like guestd: a new frame every tick, faster than the view draws */
+            fake_seq++;
+            ui_mark_dirty();
+        }
         if ((!shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
             (!screen && t_screen_off && now - t_screen_off > IDLE_STOP_MS)) {
             sb_log("guest: unused for 60 s: stopping (the M3 cluster off)");
@@ -517,6 +526,7 @@ void guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0)
     if (!guest_shown())
         return;
     seq_seen = seq_blit = (uint32_t)fake_seq;
+    ++blits;
     for (uint32_t y = 0; y < 2 * SH; ++y) {
         uint32_t *d = back + (uintptr_t)(y0 + y) * stride_px + x0;
         uint32_t sy = y / 2;
@@ -585,7 +595,7 @@ void guest_power_off(void)
 #define TAP_SY 840
 static int gs_phase, gs_fail;
 static uint64_t gs_t;
-static uint32_t gs_seq;
+static uint32_t gs_seq, gs_blits;
 
 static void gs_log(const char *a, const char *b)
 {
@@ -650,6 +660,7 @@ int guest_selftest_step(const struct guest_st_ops *o)
             if (!guest_shown())
                 return gs_failed("the Linux view is not shown");
             gs_seq = surf_seq();
+            gs_blits = blits;
             guest_input(KIN_PRESS, 2 * TAP_SX, (int)VIEW_Y + 2 * TAP_SY);
             gs_t = now;
             gs_phase = 3;
@@ -662,29 +673,57 @@ int guest_selftest_step(const struct guest_st_ops *o)
             gs_phase = 4;
         }
         return 0;
-    case 4: {                               /* the mark in the composed frame, 2 frames after the touch */
+    case 4: {
+        /* the mark in a frame the view actually drew: one published at least 2 frames after the tap (the app's dots
+         * persist). P3a waited for "no frame pending" instead; on the phone the guest publishes faster than the 2x
+         * view draws, so that moment never came (touches seen, the check timed out). */
         if (st != GUEST_RUNNING)
             return gs_failed("the guest stopped by itself");
         const uint32_t *p = o->panel ? o->panel() : 0;
-        if (touches_seen() >= 2 && surf_seq() - gs_seq >= 2 && !guest_frame_new() && p) {
+        if (touches_seen() >= 2 && seq_blit && (int32_t)(seq_blit - gs_seq) >= 2 && p) {
             uint32_t c = p[(uintptr_t)(VIEW_Y + 2 * TAP_SY) * 1440U + 2 * TAP_SX] & 0xffffffU;
             struct ub u;
             ub_init(&u);
             ub_s(&u, "cycle 1: the tap reached the app: pixel ");
             ub_hex(&u, c, 6);
             ub_s(&u, c == 0xffd700U ? " (the app's touch mark)" : " (NOT the touch mark)");
+            ub_s(&u, " in the drawn frame +");
+            ub_dec(&u, seq_blit - gs_seq);
+            ub_s(&u, " after the tap, ");
+            ub_dec(&u, dt);
+            ub_s(&u, " ms after the release");
             gs_log(u.b, 0);
             if (c != 0xffd700U)
                 return gs_failed("the tap did not reach the app's pixels");
             gs_t = now;
             gs_phase = 5;
         } else if (dt > 5000) {
-            return gs_failed("the tap was not seen by the guest within 5 s");
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "the tap's check timed out (5 s): touches seen ");
+            ub_dec(&u, touches_seen());
+            ub_s(&u, ", frames published since the tap ");
+            ub_dec(&u, surf_seq() - gs_seq);
+            ub_s(&u, ", the drawn frame ");
+            ub_sdec(&u, (int32_t)(seq_blit - gs_seq));
+            ub_s(&u, ", view draws since the tap ");
+            ub_dec(&u, blits - gs_blits);
+            gs_log(u.b, 0);
+            return gs_failed("the tap was not seen in a drawn frame within 5 s");
         }
         return 0;
     }
     case 5:                                 /* 2 s more, then home (hidden) and the stop */
         if (dt >= 2000) {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "cycle 1: the view drew ");
+            ub_dec(&u, blits);
+            ub_s(&u, " frames, the slowest 2x copy ");
+            ub_dec(&u, blit_ms_max);
+            ub_s(&u, " ms; the guest published ");
+            ub_dec(&u, surf_seq());
+            gs_log(u.b, 0);
             o->home();
             if (guest_shown())
                 return gs_failed("the view is still shown after home");

@@ -1,4 +1,9 @@
-# Starbite OS 1.2-alpha1: Linux apps on the big cores (a test) (2026-11-08)
+# Starbite OS 1.2-alpha2: Linux apps on the big cores (a test) (2026-11-09)
+
+alpha2: the self test's tap check reads a frame the view really drew (the P3a run on the phone timed out waiting
+for a moment without an undrawn frame); nothing else changed.
+
+## 1.2-alpha1 (2026-11-08)
 
 1.1-beta7b plus the sbos-linux session's guest (Linux 7.1 on the four M3 cores), wired in as docs/STARBITE-OS.md
 12.22 describes.

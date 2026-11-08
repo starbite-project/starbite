@@ -877,6 +877,12 @@ cores on the phone, P2d 3/3 cycles) wired into the kernel, following INTEGRATION
 - **FlexPMU, still one implementation**: the guest's `m3_prep` = `hw_m3_fp_reset` + `hw_m3_prep` +
   `hw_m3_core_on(4, 1)`, libsb's `sb_m3_fp_*` as the heater uses; the guest kernel does the rest (its last core asks
   for the cluster-off itself, P2c / P2d).
+- **alpha2 (P3b)**: P3a on the phone (2026-11-09 00:14) passed everything up to the tap. The read took 495 ms and the
+  copy 362 ms; HELLO came after 118 ms with 4 CPUs, the heater was refused, and the cluster was off 60 ms after the
+  stop. The guest saw the tap (guestd: "touch down at 360,840"), but the check timed out. It waited for a moment
+  with no undrawn frame, and guestd publishes faster than the 2x view draws, so that moment never came. The check
+  now reads the pixel in a frame the view drew at least 2 frames after the tap, and logs the view's frame count and
+  its slowest copy. QEMU showed the same race (94 frames published, 36 drawn).
 - **Not in alpha1**: the M3 clock for the guest (INTEGRATION.md step 10: it stays at the boot step, 1066 MHz in P2d).
 - **Checks**: host (`host/sbos-linux-test.sh` on guest.c's host fake: the confirmation, the tile, the view, the
   tap at 2x, held Bixby, the 60 s stop, both refusals, missing files, a failed start, and `guest_selftest_step`'s two
