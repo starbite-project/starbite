@@ -322,7 +322,8 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     b->stop = want;
     b->stopped_at = "-";
     sbm_logf(p, "boot: stage 3 up to %s", want == SBM_BOOT_DRY ? "the RAM check" : want == SBM_BOOT_SEC
-             ? "EL3's signature check (the CP CPU is not started)" : "the CP's first status (then parked)");
+             ? "EL3's signature check (the CP CPU is not started)" : want == SBM_BOOT_RUN
+             ? "the CP's first status (then parked)" : "stage 4: the link up to PHONE_START (no INIT_END; then parked)");
     int r = sbm_image_check(p, im);
     if (r < 0)
         return stop(p, b, r, "image check");
@@ -332,6 +333,8 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
 
     if (!p->smc || !p->mmio_wr32 || !p->probe32 || !p->carve_write || !p->carve_read)
         return stop(p, b, SBM_EPERM, "platform");
+    if (want == SBM_BOOT_LINK && (!p->ipc || im->mm.ipc_size < SBM_LEG_RAW_RX_BUFF + SBM_LEG_RAW_RX_SIZE))
+        return stop(p, b, SBM_EPERM, "platform (no IPC region view)");
     /* only a CP that nobody started: the state S-Boot leaves (T1, T4) */
     uint32_t err;
     b->reset_seq_before = reset_seq(p);
@@ -375,7 +378,12 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
         return stop(p, b, 0, "done (validated, not started)");
 
     r = power_on(p, b);
-    return stop(p, b, r, r < 0 ? "power on" : "done (first status, parked)");
+    if (r < 0 || want == SBM_BOOT_RUN)
+        return stop(p, b, r, r < 0 ? "power on" : "done (first status, parked)");
+    r = sbm_link_boot(p, im, b);
+    return stop(p, b, r, r < 0 ? (b->pif_sent ? "waiting for PHONE_START" : b->init_start ? "INIT_START"
+                                  : b->udl_done ? "waiting for INIT_START" : "DL_START / UDL")
+                               : "done (PHONE_START, no INIT_END, parked)");
 }
 
 void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
@@ -389,5 +397,9 @@ void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
     if (b->released)
         sbm_logf(p, "BOOT: CP status after %u ms; ISSR3 0x%08x (cp_status %u)", b->cp_status_ms, b->issr[3],
                  SBM_CP_STATUS(b->issr[3]));
+    if (b->stop == SBM_BOOT_LINK && b->released)
+        sbm_logf(p, "LINK: udl %u (0x%04x 0x%04x) init_start %u (%u ms) pif %u phone_start %u (%u ms) msgs %u crash 0x%x",
+                 b->udl_done, b->udl_resp[0], b->udl_resp[1], b->init_start, b->init_start_ms, b->pif_sent,
+                 b->phone_start, b->phone_start_ms, b->n_msgs, b->crash_cmd);
     sbm_logf(p, "BOOT: sequencer before %u, after %u", b->reset_seq_before, b->reset_seq_after);
 }

@@ -65,6 +65,10 @@
 #define SBM_MBX_CP2AP_MSG     1
 #define SBM_MBX_AP2CP_STATUS  2
 #define SBM_MBX_CP2AP_STATUS  3
+/* interrupt numbers (mif_pdata): AP -> CP through INTGR1 bit n, CP -> AP in INTSR0 bit 16 + n */
+#define SBM_INT_AP2CP_MSG     0
+#define SBM_INT_AP2CP_WAKEUP  1
+#define SBM_IRQ_CP2AP_MSG     0
 /* field packing of the status words */
 #define SBM_CP_STATUS(v)      (((v) >> 1) & 0xFU)     /* ISSR3 */
 #define SBM_CP_LTE_ACTIVE(v)  (((v) >> 5) & 1U)
@@ -148,6 +152,8 @@ struct sbm_plat {
     void (*udelay)(void *ctx, uint32_t us);
     uint64_t (*now_us)(void *ctx);
     void (*feed)(void *ctx);                    /* the watchdog, during long steps */
+    /* stage 4: the CPU view of the IPC region (modem_if + ipc_off, ipc_size bytes); NULL = stage 4 refused */
+    uint8_t *ipc;
 };
 
 /* ------------------------------------------------------------------------------------------------ */
@@ -595,7 +601,27 @@ struct sbm_image {
  * sizes and CRCs, never content. */
 int sbm_image_check(const struct sbm_plat *p, struct sbm_image *im);
 
-enum sbm_boot_stop { SBM_BOOT_DRY = 1, SBM_BOOT_SEC = 2, SBM_BOOT_RUN = 3 };
+enum sbm_boot_stop { SBM_BOOT_DRY = 1, SBM_BOOT_SEC = 2, SBM_BOOT_RUN = 3, SBM_BOOT_LINK = 4 };
+
+/* Stage 4 (sbm_link.c): the legacy 4 MB map at the front of the IPC region (Samsung's shmem_4mb_phys_map without
+ * LEGACY_QOS), used for the boot-time UDL exchange before the SBD rings exist */
+#define SBM_LEG_MAGIC        0
+#define SBM_LEG_ACCESS       4
+#define SBM_LEG_RAW_TX_HEAD  24
+#define SBM_LEG_RAW_TX_TAIL  28
+#define SBM_LEG_RAW_RX_HEAD  32
+#define SBM_LEG_RAW_RX_TAIL  36
+#define SBM_LEG_HEADS        8          /* fmt tx/rx, raw tx/rx head+tail: 8 words from offset 8 */
+#define SBM_LEG_RAW_TX_BUFF  12288
+#define SBM_LEG_RAW_TX_SIZE  2084864
+#define SBM_LEG_RAW_RX_BUFF  2097152
+#define SBM_LEG_RAW_RX_SIZE  2097152
+/* cbd's std UDL handshake on umts_boot0 (ch 215, SIPC5, padded to 8): request -> expected answer */
+#define SBM_UDL_BOOT_DONE    0x900D
+#define SBM_UDL_BOOT_DONE_OK 0xA00D
+#define SBM_UDL_FIN          0x9F00
+#define SBM_UDL_FIN_OK       0xAF00
+#define SBM_UDL_PAYLOAD      4          /* bytes of the request payload (a LE u32): to confirm in cbd */
 struct sbm_boot {
     enum sbm_boot_stop stop;
     /* what happened */
@@ -605,6 +631,9 @@ struct sbm_boot {
     uint32_t reset_seq_before, reset_seq_after;
     uint32_t cp_status_ms;               /* how long until ISSR3 cp_status != 0 (RUN) */
     uint32_t issr[4];                    /* after power on */
+    /* stage 4 */
+    int udl_done, init_start, pif_sent, phone_start;
+    uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;
     uint64_t sec0_us;
     int err;                             /* 0, or the SBM_E* that stopped it */
     const char *stopped_at;
@@ -612,6 +641,9 @@ struct sbm_boot {
 /* Runs stage 3 up to b->stop. Whatever happens after cp_init, the CP is parked before it returns (and the
  * caller parks again from its reset hook if it never returns). 0 or SBM_E*. */
 int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot *b);
+/* Stage 4 (sbm_link.c), called by sbm_boot_run for SBM_BOOT_LINK after power on: DL_START, the UDL handshake,
+ * INIT_START -> SBD layout -> PIF_INIT_DONE, wait for PHONE_START. Never INIT_END. 0 or SBM_E*. */
+int sbm_link_boot(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot *b);
 /* Park: Android's power-off. Safe to call more than once and when nothing was started. */
 int sbm_cp_park(const struct sbm_plat *p);
 void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b);

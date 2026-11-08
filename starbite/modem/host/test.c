@@ -1084,7 +1084,8 @@ static void check_allowed(const struct fakesoc *s)
         int ok = (a >= SBM_PMU_PA + 0x1320 && a <= SBM_PMU_PA + 0x1338 && !(a & 3)) ||
                  a == SBM_PMU_PA + SBM_PMU_CENTRAL_SEQ_CP_CFG ||
                  (a >= SBM_MBOX_PA + SBM_MBOX_ISSR(0) && a <= SBM_MBOX_PA + SBM_MBOX_ISSR(63)) ||
-                 (a == SBM_MBOX_PA + SBM_MBOX_INTGR1 && v == 2) || (a == SBM_AP2CP_CFG_PA && v == 1);
+                 (a == SBM_MBOX_PA + SBM_MBOX_INTGR1 && (v == 2 || v == 1)) ||
+                 (a == SBM_MBOX_PA + SBM_MBOX_INTCR0 && v == (1u << 16)) || (a == SBM_AP2CP_CFG_PA && v == 1);
         CHECK(ok);
         if (!ok)
             printf("  store not allowed: 0x%llx = 0x%x\n", (unsigned long long)a, v);
@@ -1248,6 +1249,63 @@ static void test_boot(void)
     CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
     CHECK(b.validated && b.released && b.parked);
     check_parked(&s);
+    fakesoc_free(&s);
+
+    /* LINK (stage 4): DL_START, UDL, INIT_START -> rings -> PIF_INIT_DONE, PHONE_START, never INIT_END, parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_LINK;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+    CHECK(b.udl_done && b.init_start && b.pif_sent && b.phone_start && b.parked);
+    CHECKEQ(b.udl_resp[0], SBM_UDL_BOOT_DONE_OK);
+    CHECKEQ(b.udl_resp[1], SBM_UDL_FIN_OK);
+    CHECK(s.layout_ok);
+    CHECK(b.init_start_ms >= 30 && b.init_start_ms <= 60);
+    CHECKEQ(s.n_udl, 2);
+    static const uint8_t want_udl[2][8] = { { 0xfc, 0xd7, 0x08, 0x00, 0x0d, 0x90, 0x00, 0x00 },
+                                            { 0xfc, 0xd7, 0x08, 0x00, 0x00, 0x9f, 0x00, 0x00 } };
+    CHECK(!memcmp(s.udl_frames[0], want_udl[0], 8) && !memcmp(s.udl_frames[1], want_udl[1], 8));
+    CHECKEQ(s.n_ap_msgs, 1);
+    CHECKEQ(s.ap_msgs[0], 0xCD);                       /* PIF_INIT_DONE, and nothing else: never INIT_END (0xC2) */
+    CHECKEQ(s.mbox[SBM_MBOX_ISSR(SBM_MBX_AP2CP_STATUS) / 4] & 0xFFFF, 0x6ba2);   /* Android's 0x6ba2 */
+    CHECKEQ(sbm_le32(s.ipc), SBM_BOOT_MAGIC);
+    CHECK(s.ctrl[SBM_CP_CTRL_NS] & (1u << 2));          /* parked: CP_RESET_SET */
+    check_parked(&s);
+    check_allowed(&s);
+    nlog = 0;
+    sbm_boot_report(&p, &b);
+    unsigned link_line = 0;
+    for (unsigned i = 0; i < nlog && i < 256; ++i)
+        link_line += !strncmp(loglines[i], "LINK: udl 1 (0xa00d 0xaf00) init_start 1", 40);
+    CHECKEQ(link_line, 1);
+    fakesoc_free(&s);
+
+    /* LINK: the CP's boot loader stays silent / answers wrong / crashes: each ends parked, no INIT_END */
+    for (int k = 0; k < 3; ++k) {
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        s.udl_silent = k == 0;
+        s.udl_wrong = k == 1;
+        s.crash_after_pif = k == 2;
+        fakesoc_plat(&s, &p, tlog);
+        b.stop = SBM_BOOT_LINK;
+        CHECKEQ(sbm_boot_run(&p, &im, &b), k == 0 ? SBM_ETIME : SBM_EIO);
+        CHECK(b.parked && !b.phone_start);
+        if (k == 2)
+            CHECKEQ(b.crash_cmd, SBM_CMD_CRASH_RESET);
+        for (unsigned i = 0; i < s.n_ap_msgs && i < 32; ++i)
+            CHECK(s.ap_msgs[i] != SBM_CMD2INT(SBM_CMD_INIT_END));
+        check_parked(&s);
+        check_allowed(&s);
+        fakesoc_free(&s);
+    }
+
+    /* LINK without an IPC view: refused before anything is touched */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    fakesoc_plat(&s, &p, tlog);
+    p.ipc = 0;
+    b.stop = SBM_BOOT_LINK;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), SBM_EPERM);
+    CHECKEQ(s.nwr, 0);
     fakesoc_free(&s);
 
     /* a corrupt section in RAM stops everything before EL3 */

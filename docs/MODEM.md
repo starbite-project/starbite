@@ -340,6 +340,35 @@ refuses only when the sequencer is up or CP_START is set, and logs a leftover CP
 
 Not done by any key: a write to RADIO/EFS/CPEFS; an IPC message; the CP's network phase.
 
+### Result T7 (2026-11-08 21:27, cold boot, 0ec0bb4, `build/test-boots/modemload-run-2127/loader-pmsg.txt`)
+**The CP booted from our load.** AP2CP_CFG 0 -> 1, cp_status set at once (ISSR3 0x2), ISSR2 0x6ba0 as on Android,
+mode 0 0x00 in 205 ms. It was parked (`released 1 parked 1`, CP_CTRL_NS 0x002216a6), 0 faults.
+
+## 6.5 Stage 4: the link up to PHONE_START (built, waiting on one fact from cbd)
+`sbm_link.c`, key `modemlink-boot` (stop `SBM_BOOT_LINK`), runs after T7's power-on, in Android's order
+(this phone's log 19.2105-20.49; `shmem_start_download`, `xmit_udl`, `cmd_init_start_handler`, `ss310ap_boot_off`):
+1. DL_START: the legacy map's eight queue words = 0, magic "BOOT" at IPC + 0 (read back), ap_status = 1 in ISSR2
+   (0x6ba2, Android's value).
+2. UDL handshake on ch 215 through the legacy RAW queue (`shmem_4mb_phys_map` without LEGACY_QOS: raw tx
+   head/tail at +24/+28, buffer +12288 (2084864 bytes); raw rx head/tail +32/+36, buffer +2097152 (2 MiB)).
+   Frames are SIPC5, config 0xFC (start + PADDING: the boot link is BOOT_ALIGNED), padded to 8.
+   0x900D -> 0xA00D, then 0x9F00 -> 0xAF00, 2 s each (Android: 2.4 ms). **Not yet confirmed:** the request's
+   payload (assumed: a LE u32, so `fc d7 08 00 0d 90 00 00`). The kernel never logs these frames, and cbd builds
+   them, so the payload is read from cbd (`/vendor/bin/cbd`) before the image is staged.
+3. BOOT_OFF: dump_pc_no_pg off (CP_CTRL_NS bit 17 = 0 via EL3), then wait for the CP's message (15 s).
+4. INIT_START (0xC1 in ISSR1, INTSR0 bit 16, acknowledged through INTCR0): `sbm_sbd_init` (the layout matched
+   against this phone's log), then PIF_INIT_DONE (0xCD in ISSR0, INTGR1 bit 0).
+5. PHONE_START (0xC8): logged; **stage 4 stops**. It sends no INIT_END and opens no RIL/RFS channel, so the CP
+   never goes online. Then the park, as in stage 3. A CP crash command (0x07 / 0x09) stops it at once and parks.
+
+Safety additions over 6.2:
+- The glue allows two more stores, only with the stage 4 key: INTGR1 = 1 (the message doorbell) and
+  INTCR0 = 1 << 16 (acknowledge).
+- The IPC region is written directly (the legacy words, the SBD descriptors). That is the region designed for
+  this; stage 3 never touched it.
+- Host tests (fake CP): the exact UDL frames; ISSR2 0x6ba2; PIF_INIT_DONE is the only command ever sent, and
+  0xC2 never; a silent boot loader, a wrong answer and a crash command all end parked.
+
 ## 7. Later stages (not started)
 
 4. Link: mailbox doorbells + polling, INIT_START → PIF_INIT_DONE → PHONE_START → INIT_END, the ECT clock table.
