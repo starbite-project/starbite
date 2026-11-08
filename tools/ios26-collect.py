@@ -49,6 +49,9 @@ def health():
         print(f'journal: info flags 0x{flags:x}, at byte {joff} size {jsize >> 20} MiB, header magic 0x{magic:08x} '
               f'start {start} end {end}: {"TRANSACTIONS PENDING (replayed at the next mount)" if pending else "empty (clean)"}')
         ok = ok and magic == 0x4a4e4c78
+        if pending:
+            print('NOTE: this reader does not replay the journal: files changed during the last boot (overlay installs '
+                  'included) can read back stale; check those with the kernel log\'s "STARLTE OVERLAY:" lines')
     print('health:', 'OK' if ok else 'PROBLEM')
     return ok
 
