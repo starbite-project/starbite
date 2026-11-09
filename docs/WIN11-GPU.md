@@ -1115,6 +1115,20 @@ when.
     a copy in the DPC before the fence signals, since Panfrost reuses the descriptor pool right after. Deferred:
     it is recovered by one reset, and nothing visible depends on it.
 
+### 6.21 The 15-minute soak, and a frame-rate test (2026-11-09)
+
+**soak-t14a-1 (03:57-04:24, a 900 s full-mode boot):**
+- **The panel:** content for 873 of 883 s sampled (FbLiveSecs), FullHealthy 1.
+- **GPU:** 26,183 jobs, 1 failure (the known first-frame JS 0x51), 0 timeouts, 0 MMU faults. 0 whole-frame CPU
+  copies.
+- **DWM:** 1,264 presents and 724 flips. A static sign-in screen, so this is not a frame rate.
+- **Thermal:** 0 holds. GPU at most 50.9 °C, hottest sensor 61.2 °C.
+- **The end:** a clean restart at 900 s, and the hive was clean.
+
+**T14b:** `tools/win/mesa/tests/sbfps.cpp`, a full-screen window rendering as fast as it can (a clear plus a
+moving quad, with a DYNAMIC constant buffer), 20 s with a blt swap chain and 20 s with a flip one. It logs fps
+and the slowest frame.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
