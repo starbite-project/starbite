@@ -1,0 +1,55 @@
+From 2883eb29cdb096a1af1aed75247067085207d08e Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Mon, 9 Nov 2026 15:23:21 +0200
+Subject: [PATCH] patch: 0410-starbite-mali-big-buffers.patch - GPU HOLDERS:
+ each client's own buffers over 8 MiB by size (8-16, 16-32, 32-64, 64+ MiB)
+
+---
+ iokit/Kernel/arm/StarbiteMali.cpp | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/iokit/Kernel/arm/StarbiteMali.cpp b/iokit/Kernel/arm/StarbiteMali.cpp
+index 4a333d44..1395c8cb 100644
+--- a/iokit/Kernel/arm/StarbiteMali.cpp
++++ b/iokit/Kernel/arm/StarbiteMali.cpp
+@@ -207,6 +207,7 @@ static struct {
+ 	char name[17];
+ 	int64_t pages[3];
+ 	int64_t bos;
++	int64_t big[4];                 /* 0410: our buffers 8-16, 16-32, 32-64, >= 64 MiB */
+ } sbm_slot[SBM_SLOTS];
+ static int64_t sbm_size_bos[4], sbm_size_pages[4];     /* <= 64 KiB, <= 1 MiB, <= 8 MiB, larger */
+ 
+@@ -224,6 +225,10 @@ sbm_count_pages(const sbm_bo *bo, int64_t sign, int slot = -1)
+ 	if (slot >= 0 && slot < SBM_SLOTS) {
+ 		OSAddAtomic64(sign * (int64_t)bo->pages, &sbm_slot[slot].pages[kind]);
+ 		OSAddAtomic64(sign, &sbm_slot[slot].bos);
++		if (kind == 0 && bo->pages > 2048) {
++			unsigned b = bo->pages <= 4096 ? 0 : bo->pages <= 8192 ? 1 : bo->pages <= 16384 ? 2 : 3;
++			OSAddAtomic64(sign, &sbm_slot[slot].big[b]);
++		}
+ 	}
+ 	if (kind == 0) {
+ 		unsigned c = sbm_size_class(bo->pages);
+@@ -750,16 +755,17 @@ StarbiteMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArgume
+ 		IOLockUnlock(sbm_va_lock);
+ 		IOLog("%s\n", line);
+ 		{
+-			char who[400];
++			char who[600];
+ 			int m = snprintf(who, sizeof(who), "STARLTE GPU HOLDERS: sizes <=64K %lld (%lld MiB) <=1M %lld (%lld MiB) "
+ 			    "<=8M %lld (%lld MiB) larger %lld (%lld MiB); by client:", sbm_size_bos[0], sbm_size_pages[0] / 256,
+ 			    sbm_size_bos[1], sbm_size_pages[1] / 256, sbm_size_bos[2], sbm_size_pages[2] / 256, sbm_size_bos[3],
+ 			    sbm_size_pages[3] / 256);
+ 			for (int i = 0; i < SBM_SLOTS && m < (int)sizeof(who) - 40; i++) {
+ 				if (sbm_slot[i].pid > 1) {
+-					m += snprintf(who + m, sizeof(who) - (size_t)m, " %s[%d] %lld/%lld/%lld MiB %lld bos",
+-					    sbm_slot[i].name, sbm_slot[i].pid, sbm_slot[i].pages[0] / 256, sbm_slot[i].pages[1] / 256,
+-					    sbm_slot[i].pages[2] / 256, sbm_slot[i].bos);
++					m += snprintf(who + m, sizeof(who) - (size_t)m, " %s[%d] %lld/%lld/%lld MiB %lld bos (big 8-16:%lld 16-32:%lld "
++					    "32-64:%lld 64+:%lld)", sbm_slot[i].name, sbm_slot[i].pid, sbm_slot[i].pages[0] / 256,
++					    sbm_slot[i].pages[1] / 256, sbm_slot[i].pages[2] / 256, sbm_slot[i].bos, sbm_slot[i].big[0],
++					    sbm_slot[i].big[1], sbm_slot[i].big[2], sbm_slot[i].big[3]);
+ 				}
+ 			}
+ 			IOLog("%s\n", who);
