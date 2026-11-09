@@ -89,6 +89,9 @@ typedef struct _MW_CONTEXT {
 #define MW_PRESENT_FILL         2
 #define MW_PRESENT_FLIP         3       /* S9 port (T13h): DWM's flips, emulated (the panel shows Src) */
 #define MW_MAX_RECTS            16
+#define MW_COPY_HELPERS         3       /* T27: blt copies split over the submitting thread and these */
+#define MW_COPY_CHUNK_ROWS      16
+#define MW_COPY_IDLE            0x3FFFFFFF  /* MW_COPY_JOB.Next while no job is open: helpers take nothing */
 
 typedef struct _MW_PRESENT_OP {
     ULONG Kind;
@@ -102,6 +105,19 @@ typedef struct _MW_PRESENT_OP {
     PHYSICAL_ADDRESS SrcPhys;
     BOOLEAN SrcPhysValid;
 } MW_PRESENT_OP;
+
+/* T27: one blt copy, split into chunks of MW_COPY_CHUNK_ROWS rows over the rectangles taken together. The rectangles
+ * are clipped to both surfaces; a source pixel is at (x + Dx, y + Dy). Next/Done are taken atomically. */
+typedef struct _MW_COPY_JOB {
+    PUCHAR Dst;
+    const UCHAR *Src;
+    LONG DstPitch, SrcPitch, Dx, Dy;
+    ULONG NRects;
+    RECT R[MW_MAX_RECTS];
+    LONG RowStart[MW_MAX_RECTS + 1];
+    LONG Chunks;
+    volatile LONG Next, Done;
+} MW_COPY_JOB;
 
 typedef struct _MW_DMA_PRIVATE {
     ULONG Count;
@@ -234,6 +250,22 @@ struct _MW_ADAPTER {
     ULONG ScanFlips, ScanFlipsForced, ScanSlotShared, ScanFallback, ScanPendingTicks;
     ULONG FlipAddrPatched, FlipAddrShown;   /* T25 */
     ULONG FlipAddrPresent;                  /* T26: flip addresses taken at Present (VidMm patches only on moves) */
+    /* T27: blt copies. [0] on one CPU, [1] split over MW_COPY_HELPERS + 1; El* only copies of >= 64k pixels */
+    ULONG ParallelBlt;                      /* Parameters\ParallelBlt: 0 one CPU, 1 A/B then the faster, 2 always */
+    ULONG ParDecided;                       /* 0 measuring, 1 one CPU won, 2 split won */
+    HANDLE CopyThread[MW_COPY_HELPERS];
+    PKTHREAD CopyThreadObj[MW_COPY_HELPERS];
+    KEVENT CopyGo[MW_COPY_HELPERS];
+    struct { struct _MW_ADAPTER *A; ULONG I; } CopyCtx[MW_COPY_HELPERS];
+    volatile LONG CopyStop, CopyBusy, CopyHelpersUp;
+    MW_COPY_JOB CopyJob;
+    ULONG64 ElCopy100ns[2], ElPx[2];
+    ULONG ElN[2], CopyHelperChunks, CopyBusySerial, CopyWaitLong;
+    ULONG64 BltCopy100ns, BltPx, CpuViewNew100ns;
+    ULONG BltMaxMs, BltArea64k, BltArea1M, BltAreaBig, BltBoundsFallback, BltMaxSubRects, CpuViewNew;
+    ULONG BltProc[4], BltProcPx, BltBigProcs;
+    ULONG ViewTestDone, ViewWcMBps, ViewCachedColdMBps, ViewCachedHotMBps;
+    ULONG SubmitIrqlSeen, PresentMaxMs;
     BOOLEAN CachedBltReads;                 /* T26: Parameters\CachedBltReads (default 1); off after a mismatch */
     ULONG CachedBlts, CachedBltMismatch;
     /* T14a: the first failed job of the boot (JS 0x51 INSTR_INVALID_ENC, once per boot since T13b), for
@@ -266,6 +298,7 @@ struct _MW_ADAPTER {
 /* ---- trace: Seen_<ddi>, Fail_<ddi> in the device's registry key ---- */
 void MwLog(MW_ADAPTER *A, PCWSTR Name, ULONG Value);
 void MwLogFlush(MW_ADAPTER *A);
+void MwCopyStart(MW_ADAPTER *A);  /* T27 */
 void MwScanFallback(MW_ADAPTER *A, MW_ALLOCATION **Owners, ULONG N);
 void MwScanFlipHw(MW_ADAPTER *A, ULONG Slot);
 void MwTraceReset(MW_ADAPTER *A);

@@ -23,7 +23,7 @@
 #define SBW_HEALTHY_MS 60000U
 #define SBW_HEALTHY_FLIPS 30U             /* DWM frames to the panel (flips + primary blts); with FbLiveSecs >= 30 */
 #define SBW_HEALTHY_JOBS 30U
-#define SBW_LIVE_MAX 128U
+#define SBW_LIVE_MAX 192U   /* T27: 128 -> 192 (the guard thread keeps one stack array of these) */
 
 NTSTATUS SdDriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath);   /* sbdisplay (sd_embed.c) */
 
@@ -147,6 +147,22 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         /* T26: flip addresses taken at Present; blt presents read through the cached view; mismatches (then off) */
         { L"Live_FlipAddrPresent", a->FlipAddrPresent }, { L"Live_CachedBlts", a->CachedBlts },
         { L"Live_CachedBltMismatch", a->CachedBltMismatch },
+        /* T27: blt copies: time and pixels (all; big ones on one CPU [0] and split [1]), sizes, the A/B verdict,
+         * the view read test, new CPU views, the presenter of the last big blt, submit IRQLs */
+        { L"Live_BltCopyMs", (ULONG)(a->BltCopy100ns / 10000) }, { L"Live_BltMPx", (ULONG)(a->BltPx >> 20) },
+        { L"Live_BltArea64k", a->BltArea64k }, { L"Live_BltArea1M", a->BltArea1M }, { L"Live_BltAreaBig", a->BltAreaBig },
+        { L"Live_El0N", a->ElN[0] }, { L"Live_El0Ms", (ULONG)(a->ElCopy100ns[0] / 10000) },
+        { L"Live_El0MPx", (ULONG)(a->ElPx[0] >> 20) }, { L"Live_El1N", a->ElN[1] },
+        { L"Live_El1Ms", (ULONG)(a->ElCopy100ns[1] / 10000) }, { L"Live_El1MPx", (ULONG)(a->ElPx[1] >> 20) },
+        { L"Live_ParDecided", a->ParDecided }, { L"Live_CopyHelperChunks", a->CopyHelperChunks },
+        { L"Live_CopyBusySerial", a->CopyBusySerial }, { L"Live_CopyWaitLong", a->CopyWaitLong },
+        { L"Live_ViewTestDone", a->ViewTestDone }, { L"Live_ViewWcMBps", a->ViewWcMBps },
+        { L"Live_ViewCachedColdMBps", a->ViewCachedColdMBps }, { L"Live_ViewCachedHotMBps", a->ViewCachedHotMBps },
+        { L"Live_CpuViewNew", a->CpuViewNew }, { L"Live_CpuViewNewMs", (ULONG)(a->CpuViewNew100ns / 10000) },
+        { L"Live_BltBoundsFallback", a->BltBoundsFallback }, { L"Live_BltMaxSubRects", a->BltMaxSubRects },
+        { L"Live_BltBigProcs", a->BltBigProcs }, { L"Live_BltProcPx", a->BltProcPx },
+        { L"Live_BltProc0", a->BltProc[0] }, { L"Live_BltProc1", a->BltProc[1] }, { L"Live_BltProc2", a->BltProc[2] },
+        { L"Live_SubmitIrqlSeen", a->SubmitIrqlSeen }, { L"Live_PresentMaxMs", a->PresentMaxMs },
     };
     static_assert(sizeof(c) / sizeof(c[0]) < SBW_LIVE_MAX, "Live_ table too long");
     for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]); i++)

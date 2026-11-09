@@ -215,6 +215,7 @@ NTSTATUS MwDisplayStart(MW_ADAPTER *A)
     /* T26: blt presents read their source through a cached, line-invalidated view (command.c AllocationVaCached) */
     A->CachedBltReads = S9GetDword(L"Parameters", L"CachedBltReads", 0) != 0;
     MwLog(A, L"CachedBltReads", A->CachedBltReads);
+    MwCopyStart(A);                       /* T27: blt copies split over the CPUs */
     if (A->PrimaryInFb)
         ScanStart(A);
     A->SourceVisible = TRUE;

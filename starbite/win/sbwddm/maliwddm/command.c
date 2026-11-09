@@ -14,6 +14,8 @@
  */
 #include "maliwddm.h"
 
+NTKERNELAPI PCHAR PsGetProcessImageFileName(PEPROCESS Process);   /* T27: exported, undocumented */
+
 #define MW_DMA_MAGIC            0x4D57444Du /* 'MWDM' in the private data */
 #define MW_DMA_BUFFER_SIZE      (16 * 1024)
 #define MW_LIST_SIZE            256     /* Panfrost submits reference many BOs */
@@ -222,6 +224,41 @@ NTSTATUS APIENTRY MwPresent(IN_CONST_HANDLE hContext, DXGKARG_PRESENT *Arg)
         op->NumRects = Arg->SubRectCnt <= MW_MAX_RECTS ? Arg->SubRectCnt : 0;
         for (ULONG i = 0; i < op->NumRects; i++)
             op->Rects[i] = Arg->pDstSubRects[i];
+        if (Arg->SubRectCnt > a->BltMaxSubRects)
+            a->BltMaxSubRects = Arg->SubRectCnt;
+        if (Arg->SubRectCnt > MW_MAX_RECTS && Arg->pDstSubRects != NULL) {
+            /* T27: more rectangles than fit: their bounding box, not the whole DstRect (a full-screen copy) */
+            RECT b = Arg->pDstSubRects[0];
+            for (ULONG i = 1; i < Arg->SubRectCnt; i++) {
+                const RECT *q = &Arg->pDstSubRects[i];
+                if (q->left < b.left) b.left = q->left;
+                if (q->top < b.top) b.top = q->top;
+                if (q->right > b.right) b.right = q->right;
+                if (q->bottom > b.bottom) b.bottom = q->bottom;
+            }
+            op->Rects[0] = b;
+            op->NumRects = 1;
+            a->BltBoundsFallback++;
+        }
+        if (op->Kind == MW_PRESENT_BLT) {
+            /* T27: who sends the big blts (>= 256k pixels in all): the presenting process's image name */
+            ULONG64 area = 0;
+            if (op->NumRects == 0)
+                area = (ULONG64)(op->DstRect.right - op->DstRect.left) * (ULONG64)(op->DstRect.bottom - op->DstRect.top);
+            for (ULONG i = 0; i < op->NumRects; i++)
+                area += (ULONG64)(op->Rects[i].right - op->Rects[i].left) * (ULONG64)(op->Rects[i].bottom - op->Rects[i].top);
+            if (area >= 262144) {
+                const char *nm = PsGetProcessImageFileName(PsGetCurrentProcess());
+                a->BltBigProcs++;
+                a->BltProcPx = (ULONG)(area > 0xFFFFFFFFull ? 0xFFFFFFFFull : area);
+                if (nm != NULL) {
+                    char b[16] = { 0 };
+                    for (ULONG i = 0; i < 15 && nm[i]; i++)
+                        b[i] = nm[i];
+                    RtlCopyMemory(a->BltProc, b, 16);
+                }
+            }
+        }
         /* Both allocations must be resident (and their pages known). */
         for (UINT i = DXGK_PRESENT_SOURCE_INDEX;
              i <= DXGK_PRESENT_DESTINATION_INDEX && Arg->PatchLocationListOutSize > 0; i++) {
@@ -252,12 +289,15 @@ static PUCHAR AllocationVaCached(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
         return NULL;
     if (Alloc->CpuMapCached == NULL) {
         PVOID m = NULL;
+        ULONG64 t0 = KeQueryInterruptTime();
         __try {
             m = MmMapLockedPagesSpecifyCache(Alloc->Mdl, KernelMode, MmCached, NULL, FALSE,
                                              HighPagePriority | MdlMappingNoExecute);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             m = NULL;
         }
+        A->CpuViewNew++;                  /* T27 */
+        A->CpuViewNew100ns += KeQueryInterruptTime() - t0;
         if (m == NULL) {
             A->CpuMapFails++;
             return NULL;
@@ -286,12 +326,15 @@ static PUCHAR AllocationVa(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
         return NULL;
     if (Alloc->CpuMap == NULL) {
         PVOID m = NULL;
+        ULONG64 t0 = KeQueryInterruptTime();
         __try {                           /* DISPATCH_LEVEL at most: SubmitCommand and the vsync DPC */
             m = MmMapLockedPagesSpecifyCache(Alloc->Mdl, KernelMode, Alloc->Coherent ? MmCached : MmWriteCombined,
                                              NULL, FALSE, HighPagePriority | MdlMappingNoExecute);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             m = NULL;
         }
+        A->CpuViewNew++;                  /* T27 */
+        A->CpuViewNew100ns += KeQueryInterruptTime() - t0;
         if (m == NULL) {
             A->CpuMapFails++;
             return NULL;
@@ -323,6 +366,255 @@ static void ClipRect(RECT *R, LONG W, LONG H)
     if (R->top < 0) R->top = 0;
     if (R->right > W) R->right = W;
     if (R->bottom > H) R->bottom = H;
+}
+
+/* T27: read Bytes through a view and return MB/s (each 8-byte word loaded once, as a copy would). */
+static ULONG ReadMBps(const UCHAR *P, SIZE_T Bytes)
+{
+    volatile ULONG64 sink = 0;
+    ULONG64 acc = 0, t0 = KeQueryInterruptTime(), dt;
+    for (SIZE_T o = 0; o < Bytes; o += 64) {
+        const volatile ULONG64 *q = (const volatile ULONG64 *)(P + o);
+        acc += q[0] + q[1] + q[2] + q[3] + q[4] + q[5] + q[6] + q[7];
+    }
+    sink = acc;
+    (void)sink;
+    dt = KeQueryInterruptTime() - t0;
+    return dt ? (ULONG)((ULONG64)Bytes * 10 / dt) : 0xFFFFFFFF;   /* bytes per 100 ns * 10 = MB/s */
+}
+
+/* T27: T26's cached view did not make DWM's blt copies any cheaper (cycle-t26-1: present copy 475-490 ms/s with every
+ * blt read through it), so Windows may have given it the pages' existing (write-combined) attribute. Measure once:
+ * 256 KB of a blt source read through the write-combined view, then through the cached view right after cleaning
+ * and invalidating it (cold), then again (hot). A real cached view reads cold several times faster than the
+ * write-combined one (line fills, prefetch) and hot faster still; cached reads stay on only if cold >= 1.5 x. */
+static void ViewTest(MW_ADAPTER *A, const UCHAR *Wc, const UCHAR *Cached, SIZE_T Bytes)
+{
+    KIRQL old;
+    if (Bytes > 256 * 1024)
+        Bytes = 256 * 1024;
+    Bytes &= ~(SIZE_T)63;
+    if (Bytes < 4096)
+        return;
+    KeRaiseIrql(DISPATCH_LEVEL, &old);    /* no preemption inside the timings */
+    for (SIZE_T o = 0; o < Bytes; o += 64)
+        __asm__ volatile("dc civac, %0" : : "r"(Cached + o) : "memory");
+    __asm__ volatile("dsb sy" : : : "memory");
+    A->ViewWcMBps = ReadMBps(Wc, Bytes);
+    A->ViewCachedColdMBps = ReadMBps(Cached, Bytes);
+    A->ViewCachedHotMBps = ReadMBps(Cached, Bytes);
+    KeLowerIrql(old);
+    A->ViewTestDone = 1;
+    if ((ULONG64)A->ViewCachedColdMBps * 2 < (ULONG64)A->ViewWcMBps * 3) {
+        A->CachedBltReads = FALSE;
+        A->ViewTestDone = 2;              /* 2: no faster: cached reads off */
+    }
+}
+
+/* T27: rows [k * MW_COPY_CHUNK_ROWS, + MW_COPY_CHUNK_ROWS) of a job's rectangles taken one after another. */
+static void CopyChunk(const MW_COPY_JOB *J, LONG K)
+{
+    LONG row = K * MW_COPY_CHUNK_ROWS, end = row + MW_COPY_CHUNK_ROWS;
+    for (ULONG i = 0; i < J->NRects && row < end; i++) {
+        if (row >= J->RowStart[i + 1])
+            continue;
+        const RECT *r = &J->R[i];
+        LONG a = row - J->RowStart[i], b = (end < J->RowStart[i + 1] ? end : J->RowStart[i + 1]) - J->RowStart[i];
+        SIZE_T bytes = (SIZE_T)(r->right - r->left) * 4;
+        for (LONG y = r->top + a; y < r->top + b; y++)
+            RtlCopyMemory(J->Dst + (SIZE_T)y * J->DstPitch + (SIZE_T)r->left * 4,
+                          J->Src + (SIZE_T)(y + J->Dy) * J->SrcPitch + (SIZE_T)(r->left + J->Dx) * 4, bytes);
+        row = J->RowStart[i + 1];
+    }
+}
+
+/* T27: take chunks until none is left. A helper takes and copies each chunk at DISPATCH_LEVEL, so a chunk once taken
+ * is never preempted by a thread: the submitting thread (possibly at DISPATCH_LEVEL itself) only ever waits for chunks
+ * a running CPU is copying. The submitting thread itself stays at its own IRQL (nobody waits for it). */
+static void CopyTakeChunks(MW_ADAPTER *A, MW_COPY_JOB *J, BOOLEAN Helper)
+{
+    for (;;) {
+        KIRQL old = PASSIVE_LEVEL;
+        LONG k;
+        if (Helper)
+            KeRaiseIrql(DISPATCH_LEVEL, &old);
+        k = InterlockedIncrement(&J->Next) - 1;
+        if (k >= J->Chunks) {
+            if (Helper)
+                KeLowerIrql(old);
+            break;
+        }
+        CopyChunk(J, k);
+        InterlockedIncrement(&J->Done);
+        if (Helper) {
+            A->CopyHelperChunks++;
+            KeLowerIrql(old);
+        }
+    }
+}
+
+static VOID CopyHelperThread(PVOID Context)
+{
+    MW_ADAPTER *a = ((struct { MW_ADAPTER *A; ULONG I; } *)Context)->A;
+    ULONG i = ((struct { MW_ADAPTER *A; ULONG I; } *)Context)->I;
+    KeSetPriorityThread(KeGetCurrentThread(), LOW_REALTIME_PRIORITY);
+    for (;;) {
+        (void)KeWaitForSingleObject(&a->CopyGo[i], Executive, KernelMode, FALSE, NULL);
+        if (a->CopyStop)
+            break;
+        CopyTakeChunks(a, &a->CopyJob, TRUE);
+    }
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+/* T27: the helper threads, once (StartDevice, PASSIVE_LEVEL). */
+void MwCopyStart(MW_ADAPTER *A)
+{
+    OBJECT_ATTRIBUTES oa;
+    A->ParallelBlt = S9GetDword(L"Parameters", L"ParallelBlt", 1);
+    MwLog(A, L"ParallelBlt", A->ParallelBlt);
+    if (A->CopyHelpersUp || A->ParallelBlt == 0)
+        return;
+    A->CopyStop = 0;
+    A->CopyJob.Next = MW_COPY_IDLE;
+    A->CopyJob.Chunks = 0;
+    for (ULONG i = 0; i < MW_COPY_HELPERS; i++) {
+        KeInitializeEvent(&A->CopyGo[i], SynchronizationEvent, FALSE);
+        A->CopyCtx[i].A = A;
+        A->CopyCtx[i].I = i;
+        InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+        if (!NT_SUCCESS(PsCreateSystemThread(&A->CopyThread[i], THREAD_ALL_ACCESS, &oa, NULL, NULL, CopyHelperThread,
+                                             &A->CopyCtx[i])))
+            break;
+        (void)ObReferenceObjectByHandle(A->CopyThread[i], SYNCHRONIZE, *PsThreadType, KernelMode,
+                                        (PVOID *)&A->CopyThreadObj[i], NULL);
+        A->CopyHelpersUp++;
+    }
+    MwLog(A, L"CopyHelpers", (ULONG)A->CopyHelpersUp);
+}
+
+static void CopyStopHelpers(MW_ADAPTER *A)
+{
+    A->CopyStop = 1;
+    KeMemoryBarrier();
+    for (ULONG i = 0; i < MW_COPY_HELPERS; i++) {
+        if (A->CopyThreadObj[i]) {
+            KeSetEvent(&A->CopyGo[i], IO_NO_INCREMENT, FALSE);
+            (void)KeWaitForSingleObject(A->CopyThreadObj[i], Executive, KernelMode, FALSE, NULL);
+            ObDereferenceObject(A->CopyThreadObj[i]);
+            A->CopyThreadObj[i] = NULL;
+        }
+        if (A->CopyThread[i]) {
+            ZwClose(A->CopyThread[i]);
+            A->CopyThread[i] = NULL;
+        }
+    }
+    A->CopyHelpersUp = 0;
+}
+
+/* T27: a blt's rectangles into one destination, as CopyRects, timed; split over the CPUs when it is big (>= 64k
+ * pixels) and splitting is on (ParallelBlt 2) or being measured or chosen (ParallelBlt 1: copies alternate between
+ * one CPU and split until each has 32, then the faster per pixel stays). */
+static ULONG64 CopyBlt(MW_ADAPTER *A, const MW_PRESENT_OP *Op, PUCHAR Dst, LONG DstW, LONG DstH, LONG DstPitch,
+                       const UCHAR *Src, LONG SrcW, LONG SrcH, LONG SrcPitch, RECT *Last)
+{
+    MW_COPY_JOB *J = &A->CopyJob;
+    RECT r[MW_MAX_RECTS];
+    LONG rows = 0, dx = Op->SrcRect.left - Op->DstRect.left, dy = Op->SrcRect.top - Op->DstRect.top;
+    ULONG n = Op->NumRects ? Op->NumRects : 1, nr = 0;
+    ULONG64 px = 0, t0 = KeQueryInterruptTime(), dt;
+    BOOLEAN split = FALSE, big;
+
+    for (ULONG i = 0; i < n && i < MW_MAX_RECTS; i++) {
+        RECT q = Op->NumRects ? Op->Rects[i] : Op->DstRect;
+        ClipRect(&q, DstW, DstH);
+        if (q.left + dx < 0) q.left = -dx;
+        if (q.top + dy < 0) q.top = -dy;
+        if (q.right + dx > SrcW) q.right = SrcW - dx;
+        if (q.bottom + dy > SrcH) q.bottom = SrcH - dy;
+        if (q.right <= q.left || q.bottom <= q.top)
+            continue;
+        r[nr++] = q;
+        px += (ULONG64)(q.right - q.left) * (ULONG64)(q.bottom - q.top);
+        if (Last)
+            *Last = q;
+    }
+    if (nr == 0)
+        return 0;
+    big = px >= 65536;
+    if (big && A->CopyHelpersUp && A->ParallelBlt != 0) {
+        if (A->ParallelBlt == 2 || A->ParDecided == 2)
+            split = TRUE;
+        else if (A->ParDecided == 0)
+            split = ((A->ElN[0] + A->ElN[1]) & 1) != 0;
+    }
+    if (split && InterlockedCompareExchange(&A->CopyBusy, 1, 0) != 0) {
+        split = FALSE;                    /* another present is copying with the helpers */
+        A->CopyBusySerial++;
+    }
+    if (split) {
+        InterlockedExchange(&J->Next, MW_COPY_IDLE);  /* stragglers of the last job take nothing while this is set up */
+        J->Dst = Dst;
+        J->Src = Src;
+        J->DstPitch = DstPitch;
+        J->SrcPitch = SrcPitch;
+        J->Dx = dx;
+        J->Dy = dy;
+        J->NRects = nr;
+        for (ULONG i = 0; i < nr; i++) {
+            J->R[i] = r[i];
+            J->RowStart[i] = rows;
+            rows += r[i].bottom - r[i].top;
+        }
+        J->RowStart[nr] = rows;
+        J->Chunks = (rows + MW_COPY_CHUNK_ROWS - 1) / MW_COPY_CHUNK_ROWS;
+        J->Done = 0;
+        KeMemoryBarrier();
+        InterlockedExchange(&J->Next, 0);
+        for (ULONG i = 0; i < MW_COPY_HELPERS; i++)
+            if (A->CopyThreadObj[i])
+                KeSetEvent(&A->CopyGo[i], IO_NO_INCREMENT, FALSE);
+        CopyTakeChunks(A, J, FALSE);
+        {
+            ULONG64 w0 = KeQueryInterruptTime();
+            BOOLEAN counted = FALSE;
+            while (J->Done < J->Chunks) {  /* only chunks a running CPU took (at DISPATCH_LEVEL) */
+                YieldProcessor();
+                if (!counted && KeQueryInterruptTime() - w0 > 500000ULL) {
+                    A->CopyWaitLong++;
+                    counted = TRUE;
+                }
+            }
+        }
+        InterlockedExchange(&J->Next, MW_COPY_IDLE);
+        InterlockedExchange(&A->CopyBusy, 0);
+    } else {
+        for (ULONG i = 0; i < nr; i++)
+            for (LONG y = r[i].top; y < r[i].bottom; y++)
+                RtlCopyMemory(Dst + (SIZE_T)y * DstPitch + (SIZE_T)r[i].left * 4,
+                              Src + (SIZE_T)(y + dy) * SrcPitch + (SIZE_T)(r[i].left + dx) * 4,
+                              (SIZE_T)(r[i].right - r[i].left) * 4);
+    }
+    dt = KeQueryInterruptTime() - t0;
+    A->BltCopy100ns += dt;
+    A->BltPx += px;
+    if (px < 65536)
+        A->BltArea64k++;
+    else if (px < 1048576)
+        A->BltArea1M++;
+    else
+        A->BltAreaBig++;
+    if (big) {
+        A->ElCopy100ns[split] += dt;
+        A->ElPx[split] += px;
+        A->ElN[split]++;
+        if (A->ParallelBlt == 1 && A->ParDecided == 0 && A->ElN[0] >= 32 && A->ElN[1] >= 32 &&
+            A->ElCopy100ns[0] && A->ElCopy100ns[1]) {
+            /* pixels per time: split wins if 10 % faster */
+            A->ParDecided = A->ElPx[1] * A->ElCopy100ns[0] * 10 > A->ElPx[0] * A->ElCopy100ns[1] * 11 ? 2 : 1;
+        }
+    }
+    return px;
 }
 
 /* Copy (or fill) a present's rectangles into one destination. Returns the pixels written. */
@@ -415,7 +707,9 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         if (A->CachedBltReads && srcW > 0 && srcH > 0) {
             /* T26: read through a cached view, every line of the source rectangles invalidated first */
             PUCHAR c = AllocationVaCached(A, Op->Src);
-            if (c != NULL) {
+            if (c != NULL && !A->ViewTestDone)
+                ViewTest(A, src, c, (SIZE_T)srcPitch * (SIZE_T)srcH);   /* T27: may turn cached reads off */
+            if (c != NULL && A->CachedBltReads) {
                 ULONG n = Op->NumRects ? Op->NumRects : 1;
                 LONG dx = Op->SrcRect.left - Op->DstRect.left, dy = Op->SrcRect.top - Op->DstRect.top;
                 BOOLEAN same = TRUE;
@@ -451,7 +745,10 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         dstW = (LONG)Op->Dst->Width;
         dstH = (LONG)Op->Dst->Height;
         dstPitch = (LONG)(Op->Dst->Pitch ? Op->Dst->Pitch : Op->Dst->Width * 4);
-        (void)CopyRects(Op, dst, dstW, dstH, dstPitch, src, srcW, srcH, srcPitch, &nr);
+        if (Op->Kind == MW_PRESENT_BLT)
+            (void)CopyBlt(A, Op, dst, dstW, dstH, dstPitch, src, srcW, srcH, srcPitch, &nr);   /* T27 */
+        else
+            (void)CopyRects(Op, dst, dstW, dstH, dstPitch, src, srcW, srcH, srcPitch, &nr);
         if (!toFb && Op->Kind == MW_PRESENT_BLT && src != NULL) {
             /* T13t: an app's frame into a surface DWM samples: did pixels go in, and are they there after? */
 #define SB_TAG(x) ((x)->Width << 16 | ((x)->Height & 0x3FFF) | (((x)->Flags & MW_ALLOC_PRIMARY) ? 0x8000u : 0))
@@ -504,8 +801,12 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         } else {
             MwShow(A, Op->Dst, FALSE);    /* the blt itself drew into the framebuffer */
         }
-        px = CopyRects(Op, A->FbVa, (LONG)A->Fb.Width, (LONG)A->Fb.Height, (LONG)A->Fb.Pitch, src, srcW, srcH,
-                       srcPitch, &last);
+        if (Op->Kind == MW_PRESENT_BLT)
+            px = CopyBlt(A, Op, A->FbVa, (LONG)A->Fb.Width, (LONG)A->Fb.Height, (LONG)A->Fb.Pitch, src, srcW, srcH,
+                         srcPitch, &last);
+        else
+            px = CopyRects(Op, A->FbVa, (LONG)A->Fb.Width, (LONG)A->Fb.Height, (LONG)A->Fb.Pitch, src, srcW, srcH,
+                           srcPitch, &last);
         A->FbPixels += px;
         if (px) {
             A->LastFbRectLT = (ULONG)last.left << 16 | (ULONG)last.top;
@@ -890,6 +1191,7 @@ void MwCommandStop(MW_ADAPTER *A)
     KeCancelTimer(&A->VsyncTimer);
     KeFlushQueuedDpcs();
     InterlockedExchange(&A->PollArmed, 0);
+    CopyStopHelpers(A);                   /* T27 */
 }
 
 NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMITCOMMAND *Arg)
@@ -901,6 +1203,7 @@ NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMIT
 
     RtlZeroMemory(&sub, sizeof(sub));
     sub.FenceId = Arg->SubmissionFenceId;
+    a->SubmitIrqlSeen |= 1u << (KeGetCurrentIrql() & 31);   /* T27 */
     /* A present: done here, on the CPU; the submission then carries no
      * job and completes at once. */
     BOOLEAN deferFlip = !Arg->Flags.Paging && priv != NULL && Arg->DmaBufferPrivateDataSize >= sizeof(*priv) &&
@@ -939,7 +1242,12 @@ NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMIT
             if (w > a->PresentWaitMax100ns)
                 a->PresentWaitMax100ns = w;
             DoPresent(a, &priv->Present);
-            InterlockedAdd64(&a->PresentCpu100ns, (LONG64)(KeQueryInterruptTime() - t1));
+            {
+                ULONG64 c = KeQueryInterruptTime() - t1;
+                InterlockedAdd64(&a->PresentCpu100ns, (LONG64)c);
+                if (c / 10000 > a->PresentMaxMs)
+                    a->PresentMaxMs = (ULONG)(c / 10000);   /* T27: the longest single present on the CPU */
+            }
         }
     }
     /* Paging buffers (empty: map/unmap happen on the CPU), presents and

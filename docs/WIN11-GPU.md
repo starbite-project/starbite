@@ -1406,6 +1406,25 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
   T25's Patch-only capture saw 94 of 3,599 flips. Counter `Live_FlipAddrPresent`.
 - A real GPU blit for these presents (a KMD-built Mali job) stays the next step if cached reads are not enough.
 
+### 6.34 T26's result; T27 split blt copies (2026-11-10)
+
+- **cycle-t26-1:**
+  - Every flip now carries its address (`Live_FlipAddrPresent` = `Shown` = 3,568).
+  - Every blt was read through the cached view (2,551, no mismatches).
+  - Present copy was still 475-490 ms/s, so the cached view read as slowly as the write-combined one. Windows
+    probably mapped it with the pages' existing attribute.
+  - Drag: link 30.6 moves/s, max 866 ms; nolink 42.7, max 312 ms.
+- **The user's install from T26** keeps `CachedBltReads` 0 (install-default needs `--cached-blt 1`).
+- **T27:**
+  - **Split copies:** blt copies of >= 64k pixels are split in 16-row chunks over the submitting thread and 3
+    helper threads (`Parameters\ParallelBlt` 0/1/2). Mode 1 alternates one CPU and split for 32 copies each, then
+    keeps the faster.
+  - **View test:** a one-off read-speed test (write-combined, cached cold, cached hot) decides whether cached reads
+    stay on.
+  - **Bounding box:** more than 16 dirty rectangles are copied as their bounding box, not the full DstRect.
+  - **Counters:** copy sizes, time spent creating CPU views, the longest present, the image name of the process
+    sending the big blts, and the IRQLs SubmitCommand runs at.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
