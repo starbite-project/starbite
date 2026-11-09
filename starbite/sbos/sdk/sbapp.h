@@ -216,6 +216,11 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
  * stop past it is at most 149 C. */
 #define SBOS_HEAT_SOC_HARD_C10 1500
 #define SBOS_HEAT_SOC_HOLD_MAX_C10 1480
+/* 1.2-alpha4 (the user, 2026-11-09): Survival (trip off) "No limit", behind 8 holds: nothing of ours holds or stops
+ * the SoC by temperature; the battery limit (55/58/60 C) and 2 % still stop. A reading is trusted up to 199 C (the
+ * TMU is trimmed at 25 and 85 C; solder melts near 217 C): above it the reading counts as lost and Survival stops */
+#define SBOS_HEAT_SOC_NOLIMIT_C10 9990
+#define SBOS_TEMP_READ_MAX_C 200
 #define SBOS_HEAT_BAT_HARD_C10 600
 #define SBOS_HEAT_FULL_MA 2800
 #define SBOS_HEAT_MAH_PER_PCT 16

@@ -11,6 +11,7 @@ SBAPP_DEFINE("heat", "Heat", SBOS_P_HEAT, 0xffff9f0aU, 201);
 
 static int visible;
 static int surv_tripoff;                    /* 1.1-beta2: Survival's "Hardware trip OFF" switch (until a restart) */
+static int nolimit_holds;                   /* 1.2-alpha4: holds so far toward Survival's "No limit" (8 needed) */
 /* 0.5.6: the battery's temperature during this heating session, every 10 s (the last 10 minutes) */
 static int16_t th[60];
 static int thn, was_on;
@@ -178,9 +179,13 @@ static void show(void)
         /* 1.1: the last resort (three confirmations; four with the chip's trip off) */
         fmt_init(&f);
         if (surv_tripoff) {
-            fmt_s(&f, "Trip OFF: flat out, held at ");
-            fmt_d(&f, h.surv_stop_c10 / 10);
-            fmt_s(&f, " \xc2\xb0" "C. Asks 4 times.");
+            if (h.surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10) {
+                fmt_s(&f, "Trip OFF, NO SoC LIMIT: flat out to the battery limit. Asks 4 times.");
+            } else {
+                fmt_s(&f, "Trip OFF: flat out, held at ");
+                fmt_d(&f, h.surv_stop_c10 / 10);
+                fmt_s(&f, " \xc2\xb0" "C. Asks 4 times.");
+            }
         } else {
             fmt_s(&f, "Last resort: all the battery as heat. Asks 3 times.");
         }
@@ -190,23 +195,47 @@ static void show(void)
         fmt_d(&f, h.surv_bat_c10 / 10);
         fmt_s(&f, " \xc2\xb0" "C (tap: 55, 58, 60)");
         ui_button(26, f.b, 0, 0);
+        /* 1.2-alpha4: the 3.5 A battery-current limit, as in Manual (one switch for both, until a restart) */
+        if (!h.no_current_stop) {
+            ui_hold(28, "Hold: turn the 3.5 A current limit off", 1500, 0);
+            ui_textline("Survival holds the load at 3.5 A. Off, it adds load past it; the 4.5 A stop (trip off) stays.", GREY);
+        } else {
+            ui_button(29, "3.5 A current limit: OFF", "Tap to turn it back on", 0);
+        }
         ui_toggle(24, "Hardware trip OFF", surv_tripoff);
         if (surv_tripoff) {
             fmt_init(&f);
-            fmt_s(&f, "Limit ");
-            fmt_d(&f, h.surv_stop_c10 / 10);
-            fmt_s(&f, h.surv_stop_c10 >= SBOS_HEAT_SOC_HARD_C10 ? " \xc2\xb0" "C: held at 148 (tap: 125 to 150)" :
-                                                                  " \xc2\xb0" "C (tap: 125 to 150)");
+            if (h.surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10) {
+                fmt_s(&f, "Limit: NONE (tap: back to 125)");
+            } else {
+                fmt_s(&f, "Limit ");
+                fmt_d(&f, h.surv_stop_c10 / 10);
+                fmt_s(&f, h.surv_stop_c10 >= SBOS_HEAT_SOC_HARD_C10 ? " \xc2\xb0" "C: held at 148 (tap: 125 to 150)" :
+                                                                      " \xc2\xb0" "C (tap: 125 to 150)");
+            }
             ui_button(25, f.b, 0, 0);
+            if (h.surv_stop_c10 != SBOS_HEAT_SOC_NOLIMIT_C10) {
+                fmt_init(&f);
+                fmt_s(&f, "Hold 8 times: remove the SoC limit (");
+                fmt_d(&f, nolimit_holds);
+                fmt_s(&f, " of 8)");
+                ui_hold(27, f.b, 1500, 0);
+                ui_textline("Then nothing of ours holds the chip by temperature: only the battery limit and 2 % stop it. "
+                            "Readings past 199 \xc2\xb0" "C count as lost (a stop).", GREY);
+            }
         }
     }
     if (on && h.level >= HEAT_SURVIVAL) {
         fmt_init(&f);
         if (h.level == HEAT_SURVIVAL_X) {
-            fmt_s(&f, h.trip_off ? "SURVIVAL, THE CHIP'S POWER CUT OFF: held at " :
-                                   "SURVIVAL (trip off asked): held at ");
-            fmt_d(&f, h.surv_stop_c10 / 10);
-            fmt_s(&f, " \xc2\xb0" "C, stops 5 past it.");
+            fmt_s(&f, h.trip_off ? "SURVIVAL, THE CHIP'S POWER CUT OFF: " : "SURVIVAL (trip off asked): ");
+            if (h.surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10) {
+                fmt_s(&f, "NO SoC LIMIT, battery limit only.");
+            } else {
+                fmt_s(&f, "held at ");
+                fmt_d(&f, h.surv_stop_c10 / 10);
+                fmt_s(&f, " \xc2\xb0" "C, stops 5 past it.");
+            }
         } else {
             fmt_s(&f, "SURVIVAL: holds the processor below ");
             fmt_d(&f, h.surv_target_c10 / 10);
@@ -366,8 +395,12 @@ void app_event(const struct sbos_event *ev)
         show();
         break;
     case EV_APP_HOLD:
-        if (ev->id == 20)
+        if (ev->id == 20 || ev->id == 28)
             setting_set(SET_HEAT_CURRENT_STOP, 0);
+        if (ev->id == 27 && ++nolimit_holds >= 8) {   /* 1.2-alpha4: the eighth hold removes the limit */
+            nolimit_holds = 0;
+            setting_set(SET_HEAT_SURV_STOP_C10, SBOS_HEAT_SOC_NOLIMIT_C10);
+        }
         if (ev->id == 18) {
             struct sbos_heat h;
             heat_status(&h);
@@ -384,8 +417,11 @@ void app_event(const struct sbos_event *ev)
             heat_request(surv_tripoff ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0);
         else if (ev->id == 26 && !running)
             setting_set(SET_HEAT_SURV_BAT_C10, h.surv_bat_c10 >= 600 ? 550 : h.surv_bat_c10 >= 580 ? 600 : 580);
-        else if (ev->id == 25 && !running)
+        else if (ev->id == 25 && !running) {
+            nolimit_holds = 0;
             setting_set(SET_HEAT_SURV_STOP_C10, h.surv_stop_c10 >= SBOS_HEAT_SOC_HARD_C10 ? 1250 : (h.surv_stop_c10 / 50 + 1) * 50);
+        } else if (ev->id == 29 && !running)
+            setting_set(SET_HEAT_CURRENT_STOP, 1);
         else if (ev->id == 22 && !running) {
             int k = 0;
             for (int i = 0; i < 5; ++i)

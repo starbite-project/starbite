@@ -86,6 +86,8 @@ int heat_max_cores(int level)
 
 int heat_surv_estop(const struct heat_ctl *c)
 {
+    if (c->surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10)
+        return SBOS_HEAT_SOC_NOLIMIT_C10;  /* 1.2-alpha4: no stop of ours by temperature */
     int lim = c->surv_stop_c10 < SBOS_HEAT_SOC_HOLD_MAX_C10 ? c->surv_stop_c10 : SBOS_HEAT_SOC_HOLD_MAX_C10;
     int e = lim + 50;                       /* a stop 5 C past the held limit (the hold itself never above 145) */
     return e > 1490 ? 1490 : e;
@@ -95,6 +97,8 @@ int heat_surv_target(const struct heat_ctl *c)
 {
     if (c->level != HEAT_SURVIVAL_X)
         return c->lim->surv_target_c10;
+    if (c->surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10)
+        return SBOS_HEAT_SOC_NOLIMIT_C10;  /* 1.2-alpha4: never held by temperature */
     return c->surv_stop_c10 < SBOS_HEAT_SOC_HOLD_MAX_C10 ? c->surv_stop_c10 : SBOS_HEAT_SOC_HOLD_MAX_C10;  /* <= 148 C */
 }
 
@@ -231,7 +235,8 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
         no = "Survival's battery limit is not 55, 58 or 60 \xc2\xb0" "C";
     else if (surv && in->bat_c10 >= c->surv_bat_c10 - 30)
         no = "The battery is already near Survival's battery limit";
-    else if (level == HEAT_SURVIVAL_X && (c->surv_stop_c10 < 1250 || c->surv_stop_c10 > SBOS_HEAT_SOC_HARD_C10))
+    else if (level == HEAT_SURVIVAL_X && (c->surv_stop_c10 < 1250 || c->surv_stop_c10 > SBOS_HEAT_SOC_HARD_C10) &&
+             c->surv_stop_c10 != SBOS_HEAT_SOC_NOLIMIT_C10)
         no = "Survival's SoC limit is not set (125 to 145 \xc2\xb0" "C)";
     else if (flat && !surv && c->reserve_pct > 0 && in->pct <= c->reserve_pct)
         no = "At the call / SOS reserve (hold Continue below the reserve to go on)";
@@ -485,11 +490,11 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         int bhot = in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 30;    /* 1.1-beta5: the battery held too */
         int hot = (in->soc_ok && in->soc_c10 >= target) || bhot;
         int very = (in->soc_ok && in->soc_c10 >= target + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15);
-        int amps = in->gauge_ok && iabs(in->ma) > L->hard_ma;
+        int amps = !c->no_current_stop && in->gauge_ok && iabs(in->ma) > L->hard_ma;   /* 1.2-alpha4: can be off */
         int low = in->gauge_ok && in->mv > 0 && in->mv < L->surv_shed_mv;
         int cool = in->soc_ok && in->soc_c10 < target - L->surv_band_c10 && in->gauge_ok && in->bat_ok &&
                    in->bat_c10 < c->surv_bat_c10 - 40 &&
-                   iabs(in->ma) < L->hard_ma - 300 && in->mv >= L->surv_shed_mv + 50;
+                   (c->no_current_stop || iabs(in->ma) < L->hard_ma - 300) && in->mv >= L->surv_shed_mv + 50;
         if (surv_calibrate(c, in, now, hot || amps || low)) {
             c->state = HEAT_ST_RUNNING;
             why(c, "Survival: measuring the big cores' combinations");

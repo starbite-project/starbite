@@ -661,6 +661,8 @@ static void t_survival(void)
         /* every value an int can hold: the hold and the stop stay below a 150 C reading */
         int worst_t = 0, worst_e = 0;
         for (int v = -100000; v <= 100000; v += 7) {
+            if (v == SBOS_HEAT_SOC_NOLIMIT_C10)
+                continue;                       /* 1.2-alpha4: the user's "No limit" (8 holds), checked below */
             c.surv_stop_c10 = v;
             if (heat_surv_target(&c) > worst_t)
                 worst_t = heat_surv_target(&c);
@@ -695,6 +697,48 @@ static void t_survival(void)
         CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == SBOS_EAGAIN, "hard limit: a 61 C battery limit is refused");
         CHECK(SBOS_HEAT_SOC_HARD_C10 == 1500 && SBOS_HEAT_SOC_HOLD_MAX_C10 == 1480 && SBOS_HEAT_BAT_HARD_C10 == 600,
               "hard limits: 150 C SoC (held at 148 at most), 60 C battery");
+        /* 1.2-alpha4: "No limit": accepted, never held or stopped by the SoC's temperature; the battery still is */
+        heat_ctl_init(&c, 0);
+        in = base_in(0);
+        c.surv_stop_c10 = SBOS_HEAT_SOC_NOLIMIT_C10;
+        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == 0, "no limit: accepted");
+        c.trip_off = 1;
+        c.cal = 5;
+        run(&c, &in, 0, 10000, 0);
+        int full = c.cores + c.gpu_want;
+        in.soc_c10 = 1950;
+        run(&c, &in, 10250, 3000, 0);
+        CHECK(c.state == HEAT_ST_RUNNING && c.cores + c.gpu_want >= full, "no limit: 195 C neither sheds nor stops (%d -> %d, %s)",
+              full, c.cores + c.gpu_want, c.why);
+        in.bat_c10 = c.surv_bat_c10 - 20;
+        run(&c, &in, 13500, 3000, 0);
+        CHECK(c.cores + c.gpu_want < full || c.state != HEAT_ST_RUNNING, "no limit: the battery limit still holds (%s)", c.why);
+        in = base_in(0);
+        heat_ctl_init(&c, 0);
+        c.surv_stop_c10 = SBOS_HEAT_SOC_NOLIMIT_C10;
+        heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+        c.trip_off = 1;
+        run(&c, &in, 0, 2000, 0);
+        in.soc_ok = 0;                          /* 200 C or more: invalid */
+        run(&c, &in, 2250, 4000, 0);
+        CHECK(stopped_with(&c, HEAT_ST_STOPPED, "processor temperature"), "no limit: a lost reading still ends it (%s)", c.why);
+        /* the 3.5 A limit in plain Survival: held there, or (the user's switch) not */
+        for (int off = 0; off < 2; ++off) {
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.no_current_stop = off;
+            heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in);
+            c.cal = 5;
+            run(&c, &in, 0, 10000, 0);
+            int n0 = c.cores + c.gpu_want;
+            in.ma = -3800;
+            run(&c, &in, 10250, 2000, 0);
+            if (off)
+                CHECK(c.cores + c.gpu_want >= n0, "Survival, 3.5 A limit off: 3.8 A sheds nothing (%d -> %d)", n0,
+                      c.cores + c.gpu_want);
+            else
+                CHECK(c.cores + c.gpu_want < n0, "Survival, 3.5 A limit on: 3.8 A sheds (%d -> %d)", n0, c.cores + c.gpu_want);
+        }
     }
     struct heat_ctl c;
     struct heat_in in = base_in(0);

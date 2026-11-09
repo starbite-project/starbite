@@ -150,7 +150,7 @@ static int soc_now_c10(void)
 {
     struct sb_temps t;
     sb_temps_read(&t);
-    return t.top == 1 && t.hottest > -30 && t.hottest < 150 ? t.hottest * 10 : 2000;
+    return t.top == 1 && t.hottest > -30 && t.hottest < SBOS_TEMP_READ_MAX_C ? t.hottest * 10 : 2000;
 }
 
 /* the loads are already off: wait (the heat loop's feed) until the reading is below Survival's 122 C, at most until
@@ -244,9 +244,9 @@ static void read_inputs(struct heat_in *in)
     struct sb_temps t;
     sb_temps_read(&t);
     in->tmu_on = t.top == 1;
-    in->soc_ok = t.top == 1 && t.hottest > -30 && t.hottest < 150;
+    in->soc_ok = t.top == 1 && t.hottest > -30 && t.hottest < SBOS_TEMP_READ_MAX_C;
     in->soc_c10 = t.hottest * 10;
-    gpu_probe_ok = t.sub == 1 && t.gpu > -30 && t.gpu < 150;
+    gpu_probe_ok = t.sub == 1 && t.gpu > -30 && t.gpu < SBOS_TEMP_READ_MAX_C;
     if (gpuheat_on() && gpu_probe_ok && t.gpu * 10 > in->soc_c10)
         in->soc_c10 = t.gpu * 10;               /* the GPU's zone (TMU_SUB) counts while it heats */
     in->trip_armed = (t.trip_armed & 1) && (!gpuheat_on() || (t.trip_armed & 2));   /* the GPU's zone too while it runs */
@@ -1216,7 +1216,8 @@ static void extreme_confirm_done(int ok)
     ctl.reserve_pct = heat_reserve_override ? 0 : heat_reserve_pct;
     heat_reserve_override = 0;              /* used up by this start (a refusal asks again) */
     ctl.target_c10 = heat_target_c10;
-    ctl.no_current_stop = pending_level == HEAT_MANUAL && heat_no_current_stop;
+    ctl.no_current_stop = (pending_level == HEAT_MANUAL || pending_level == HEAT_SURVIVAL ||
+                           pending_level == HEAT_SURVIVAL_X) && heat_no_current_stop;   /* 1.2-alpha4: Survival too */
     ctl.soc_stop_c10 = pending_level == HEAT_MANUAL ? heat_soc_stop_c10 : 0;
     if (pending_level == HEAT_KEEPWARM) {
         ctl.man_a55 = ctl.man_m3 = 0;
@@ -1271,9 +1272,13 @@ static void survival_show(void)
     int x = pending_level == HEAT_SURVIVAL_X;
     static char stopl[160], batl[128];
     ub_init(&u);
-    ub_s(&u, "Holds at your limit (");
-    ub_dec(&u, (uint64_t)(heat_surv_stop_c10 / 10));
-    ub_s(&u, " \xc2\xb0" "C) to 2 %; stops 5 \xc2\xb0" "C past it or at ");
+    if (heat_surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10) {   /* 1.2-alpha4 */
+        ub_s(&u, "NO SoC LIMIT: nothing holds the chip by temperature (readings past 199 \xc2\xb0" "C stop it). Stops at ");
+    } else {
+        ub_s(&u, "Holds at your limit (");
+        ub_dec(&u, (uint64_t)(heat_surv_stop_c10 / 10));
+        ub_s(&u, " \xc2\xb0" "C) to 2 %; stops 5 \xc2\xb0" "C past it or at ");
+    }
     ub_dec(&u, (uint64_t)(heat_surv_bat_c10 / 10));
     ub_s(&u, " \xc2\xb0" "C battery. A watchdog restarts a stalled phone.");
     sb_strcpy(stopl, sizeof(stopl), u.b);
@@ -1493,8 +1498,8 @@ int heater_sensor(int id)
         c[2] = v > -300 && v < 1200 ? v : -1000;
         struct sb_temps t;
         sb_temps_read(&t);
-        c[3] = t.top == 1 && t.hottest > -30 && t.hottest < 150 ? t.hottest * 10 : -1000;
-        c[4] = t.sub == 1 && t.gpu > -30 && t.gpu < 150 ? t.gpu * 10 : -1000;
+        c[3] = t.top == 1 && t.hottest > -30 && t.hottest < SBOS_TEMP_READ_MAX_C ? t.hottest * 10 : -1000;
+        c[4] = t.sub == 1 && t.gpu > -30 && t.gpu < SBOS_TEMP_READ_MAX_C ? t.gpu * 10 : -1000;
     }
     return c[id];
 }

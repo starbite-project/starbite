@@ -509,8 +509,8 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         return 0;
     case SET_HEAT_CURRENT_STOP:
         heat_no_current_stop = arg[1] == 0;
-        sb_log(arg[1] ? "settings: Manual's 3.5 A battery-current stop: on" :
-                        "settings: Manual's 3.5 A battery-current stop: OFF (the user's choice)");
+        sb_log(arg[1] ? "settings: the 3.5 A battery-current limit (Manual, Survival): on" :
+                        "settings: the 3.5 A battery-current limit (Manual, Survival): OFF (the user's choice)");
         return 0;
     case SET_HEAT_RESERVE_ONCE:
         heat_reserve_override = arg[1] != 0;
@@ -568,8 +568,8 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
                     "Only for Survival heat; the other levels keep their own limits.", "Hold to raise it", surv_bat_done);
         return 0;
     case SET_HEAT_SURV_STOP_C10:
-        if (arg[1] < 1250 || arg[1] > SBOS_HEAT_SOC_HARD_C10)
-            return SBOS_EINVAL;             /* 150 C: the absolute final limit (docs "Hard limits") */
+        if ((arg[1] < 1250 || arg[1] > SBOS_HEAT_SOC_HARD_C10) && arg[1] != SBOS_HEAT_SOC_NOLIMIT_C10)
+            return SBOS_EINVAL;             /* 125..150 C, or (1.2-alpha4) "No limit" after the app's 8 holds */
         heat_surv_stop_c10 = (int)arg[1];
         sb_logx("settings: Survival (trip off)'s SoC stop, 0.1 C: ", arg[1]);
         return 0;

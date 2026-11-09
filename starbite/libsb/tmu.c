@@ -57,7 +57,7 @@ static int tmu_get(void *v)
     int code = code_of(c->base, c->p);
     sb_udelay(10);
     int t = code_to_c(c->base, c->p, code, &c->flags);
-    if (code == 0 || code == 0x1ff || t < -30 || t > 150) {
+    if (code == 0 || code == 0x1ff || t < -30 || t >= 200) {      /* 1.2-alpha4: was > 150 (Survival "No limit") */
         c->bad_code = code;
         return SB_NO_SAMPLE;                    /* rejected (counted by the filter) */
     }
