@@ -288,6 +288,20 @@ static uint32_t g_con0_598;
 static uint64_t g_t;
 static int64_t g_acc;
 static int g_n, g_best;
+static uint64_t g_jobs0;
+
+/* 1.2-alpha14 (H2c): the GPU's real clock from Mali's cycle counter (GPU_COMMAND 0x30 = 5 starts it; CYCLE_COUNT
+ * 0x90 / 0x94) against the arch timer over 20 ms, MHz */
+static unsigned g_mhz_measured(void)
+{
+    uint32_t lo0 = sb_gpu_rd(0x90), hi0 = sb_gpu_rd(0x94);
+    uint64_t t0 = sb_us();
+    sb_udelay(20000);
+    uint32_t lo1 = sb_gpu_rd(0x90), hi1 = sb_gpu_rd(0x94);
+    uint64_t dt = sb_us() - t0;
+    uint64_t c0 = (uint64_t)hi0 << 32 | lo0, c1 = (uint64_t)hi1 << 32 | lo1;
+    return dt && c1 > c0 ? (unsigned)((c1 - c0) / dt) : 0;
+}
 
 static uint32_t g_rd(uintptr_t a)
 {
@@ -378,7 +392,7 @@ int gpuprobe_step(void)
         gpuheat_tick();
     switch (gph) {
     case 0:
-        sb_log("probe: start: H2b, the GPU above 598 MHz (PLL_G3D at S 0, the vendor's sequence, vdd_g3d 950 mV, 30 s a step)");
+        sb_log("probe: start: H2c, the GPU above 598 MHz (its cycle counter, jobs a second) (PLL_G3D at S 0, the vendor's sequence, vdd_g3d 950 mV, 30 s a step)");
         gpu_heat_session = 1;
         gpuheat_khz = 598000U;
         if (!gpuheat_start()) {
@@ -388,6 +402,8 @@ int gpuprobe_step(void)
         }
         g_con0_598 = g_rd(G3D_CON0);
         sb_logx("probe: gpu: PLL_LOCKTIME ", g_rd(G3D_LOCK));
+        (void)sb_gpu_wr(0x30, 5);           /* CYCLE_COUNT_START */
+        g_jobs0 = gpuheat_jobs();
         {
             struct ub u;
             ub_init(&u);
@@ -435,6 +451,25 @@ int gpuprobe_step(void)
         }
         if (now - g_t < 30000U)
             return 0;
+        {
+            uint64_t j = gpuheat_jobs();
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "probe: gpu: ");
+            ub_dec(&u, mhz);
+            ub_s(&u, " MHz: the GPU's own cycle counter says ");
+            ub_dec(&u, g_mhz_measured());
+            ub_s(&u, " MHz; ");
+            ub_dec(&u, (j - g_jobs0) / 30U);
+            ub_s(&u, " fragment jobs a second (1 Mpixel each); G3D mux ");
+            ub_hex(&u, g_rd(0x17401000UL), 8);
+            ub_s(&u, " div ");
+            ub_hex(&u, g_rd(0x17401800UL), 8);
+            ub_s(&u, " switch-user ");
+            ub_hex(&u, g_rd(0x17400120UL), 8);
+            sb_log(u.b);
+            g_jobs0 = j;
+        }
         {
             struct ub u;
             ub_init(&u);

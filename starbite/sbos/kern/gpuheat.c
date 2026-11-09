@@ -59,6 +59,12 @@ static void buck_restore(void)
  * second while the GPU heats (950 mV: the value Starbite's iOS and Linux run the GPU at, read back) */
 static uint64_t t_hold;
 static unsigned holds;
+static uint64_t jobs_done;                  /* 1.2-alpha14: fragment jobs finished this session (H2c's throughput) */
+
+uint64_t gpuheat_jobs(void)
+{
+    return jobs_done;
+}
 
 static void buck_hold(void)
 {
@@ -212,6 +218,7 @@ int gpuheat_start(void)
     t_hold = sb_ms();
     chain = 64;
     chains = faults = 0;
+    jobs_done = 0;
     build();
     if (!submit()) {
         gpuheat_fail_stop("the first job did not start");
@@ -259,7 +266,10 @@ void gpuheat_tick(void)
             return;
         }
     ++chains;
-    if (took < 200U && chain * 2U <= JOBS_MAX)
+    jobs_done += chain;
+    /* 1.2-alpha14: chains grow until one lasts 1 s (was 200 ms): the heater resubmits on its 4 Hz tick, so a 200 ms
+     * chain left the GPU idle up to half the time (H2b on the phone: 1024-job chains, the GPU zone at ~50 C) */
+    if (took < 1000U && chain * 2U <= JOBS_MAX)
         chain *= 2U;
     build();
     if (!submit())
