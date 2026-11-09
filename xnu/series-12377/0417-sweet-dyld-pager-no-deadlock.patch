@@ -1,0 +1,75 @@
+From 366597d94388f084b9da327bfff4724ddc7a4f25 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Mon, 9 Nov 2026 23:04:17 +0200
+Subject: [PATCH] patch: 0417-sweet-dyld-pager-no-deadlock.patch - the 16 KiB
+ fixup path releases its source page before it reads the neighbours (as 0334
+ for the shared region pager): two threads filling different 4 KiB pieces of
+ one fixup page deadlocked, a copy-on-write page above stayed busy
+ (securityd's main thread all boot, T22b/T23)
+
+---
+ osfmk/vm/vm_dyld_pager.c | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/osfmk/vm/vm_dyld_pager.c b/osfmk/vm/vm_dyld_pager.c
+index 26abef69..f1cdac01 100644
+--- a/osfmk/vm/vm_dyld_pager.c
++++ b/osfmk/vm/vm_dyld_pager.c
+@@ -1283,6 +1283,34 @@ retry_src_fault:
+ 		 */
+ 		bcopy((const char *)src_vaddr, (char *)dst_vaddr, PAGE_SIZE);
+ 
++#if SWEET_DYLD
++		/*
++		 * 0417: with 16 KiB fixup pages sweet_fixup_subpage() faults the source page's three
++		 * neighbours. Holding the source busy meanwhile deadlocked two threads filling different
++		 * 4 KiB pieces of one 16 KiB fixup page, each asleep on the other's busy page; the
++		 * copy-on-write page above stayed busy for good (securityd's main thread for the whole
++		 * boot, T22b/T23). As 0334 did for the shared region pager: the original contents are in
++		 * the destination page now, so let the source go before the neighbours are read.
++		 */
++		bool sweet_src_released = false;
++		if (DYLD_FIXUP_PAGE_SIZE > PAGE_SIZE) {
++			vm_object_lock(src_page_object);
++			vm_page_wakeup_done(src_page_object, src_page);
++			src_page = VM_PAGE_NULL;
++			vm_object_paging_end(src_page_object);
++			vm_object_unlock(src_page_object);
++			if (top_page != VM_PAGE_NULL) {
++				vm_object_lock(src_top_object);
++				VM_PAGE_FREE(top_page);
++				vm_object_paging_end(src_top_object);
++				vm_object_unlock(src_top_object);
++				top_page = VM_PAGE_NULL;
++			}
++			src_vaddr = dst_vaddr;
++			sweet_src_released = true;
++		}
++#endif
++
+ 		/*
+ 		 * Figure out what the original user virtual address was, based on the offset.
+ 		 */
+@@ -1325,6 +1353,9 @@ retry_src_fault:
+ 			}
+ 		}
+ 
++#if SWEET_DYLD
++		if (!sweet_src_released) {
++#endif
+ 		assert(VM_PAGE_OBJECT(src_page) == src_page_object);
+ 		assert(src_page->vmp_busy);
+ 		assert(src_page_object->paging_in_progress > 0);
+@@ -1337,6 +1368,9 @@ retry_src_fault:
+ 		src_page = VM_PAGE_NULL;
+ 		vm_object_paging_end(src_page_object);
+ 		vm_object_unlock(src_page_object);
++#if SWEET_DYLD
++		}
++#endif
+ 
+ 		if (top_page != VM_PAGE_NULL) {
+ 			assert(VM_PAGE_OBJECT(top_page) == src_top_object);
+-- 
+2.53.0
+
