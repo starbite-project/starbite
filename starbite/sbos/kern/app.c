@@ -990,10 +990,23 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         if (!(p->perms & (SBOS_P_SENSORS | SBOS_P_HEAT)))
             return SBOS_EPERM;
         return heater_sensor((int)arg[0]);
+    /* 1.2-alpha8: the motor and the wake-up alarms */
     case SYS_VIBRATE:
-    case SYS_ALARM_SET:
-    case SYS_ALARM_CANCEL:
-        return (p->perms & SBOS_P_ALARM) ? SBOS_ENOSYS : SBOS_EPERM;
+        if (!(p->perms & SBOS_P_ALARM))
+            return SBOS_EPERM;
+        if (!arg[0]) {
+            vib_off();
+            return 0;
+        }
+        return vib_buzz(arg[1] ? (unsigned)(arg[1] > 20 ? 20 : arg[1]) : 1U, (unsigned)arg[0], (unsigned)arg[0]);
+    case SYS_ALARM_SET:                 /* index, h << 8 | m, days (bit 0 Sunday; 0 once), on */
+        if (!(p->perms & SBOS_P_ALARM))
+            return SBOS_EPERM;
+        return alarm_set((int)arg[0], (int)(arg[1] >> 8 & 0xff), (int)(arg[1] & 0xff), (int)arg[2], (int)arg[3]);
+    case SYS_ALARM_CANCEL:              /* 0 stop the ringing alarm, 1 snooze it */
+        if (!(p->perms & SBOS_P_ALARM))
+            return SBOS_EPERM;
+        return alarm_stop(arg[0] ? 1 : 0);
     /* ---- state (kept in RAM in v0.1; saved from v0.2) ---- */
     case SYS_STATE_PUT:
     {

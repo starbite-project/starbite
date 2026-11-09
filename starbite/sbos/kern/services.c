@@ -413,6 +413,12 @@ void power_input(void)
 
 void power_key_short(void)
 {
+    if (alarm_ringing() >= 0) {                     /* 1.2-alpha8: Power snoozes a ringing alarm */
+        if (!K.screen_on)
+            screen(1);
+        (void)alarm_stop(1);
+        return;
+    }
     if (sos_active() || kui_screen() == 6 /* SCR_LIGHT */) {
         if (!K.screen_on)
             screen(1);
@@ -452,6 +458,8 @@ int power_auto_off(int rehearse)
         why = "the alarm runs";
     else if (torch_on())
         why = "the LED is on";
+    else if (alarm_any())
+        why = "a wake-up alarm is set";             /* 1.2-alpha8: it could not ring switched off */
     else if (!bat.ok || bat.pct <= 3)
         why = "the battery is unknown or at the reserve";
     if (why) {

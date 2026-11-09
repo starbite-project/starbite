@@ -5,9 +5,35 @@
 #include "sbfmt.h"
 #include "tz.h"
 
-SBAPP_DEFINE("clock", "Clock", 0, 0xff6fb3ffU, 203);
+SBAPP_DEFINE("clock", "Clock", SBOS_P_ALARM, 0xff6fb3ffU, 203);   /* 1.2-alpha8: alarms and the motor */
 
-enum { M_MAIN, M_WORLD, M_STOPWATCH, M_TIMER };
+enum { M_MAIN, M_WORLD, M_STOPWATCH, M_TIMER, M_ALARMS, M_EDIT, M_RING };
+
+/* 1.2-alpha8: wake-up alarms, kept in this app's saved state and given to the kernel at every start */
+#define NAL 4
+#define AL_MAGIC 0x314d4c41U                /* "ALM1" */
+static struct {
+    uint32_t magic;
+    struct { uint8_t on, h, m, days; } a[NAL];
+} al;
+static int edit_i, ring_i = -1;
+static const char *const rep_name[3] = { "Once", "Every day", "Weekdays" };
+
+static int rep_of(int days)
+{
+    return days == 0x7f ? 1 : days == 0x3e ? 2 : 0;
+}
+
+static void al_push(int i)
+{
+    alarm_set(i, al.a[i].h, al.a[i].m, al.a[i].days, al.a[i].on);
+}
+
+static void al_save(void)
+{
+    al.magic = AL_MAGIC;
+    state_put(&al, sizeof(al));
+}
 static int mode, visible;
 static uint64_t sw_t0, sw_acc;
 static int sw_run;
@@ -72,6 +98,68 @@ static void show_main(void)
     ui_button(1, "World clock", "Six cities", 0);
     ui_button(2, "Stopwatch", sw_run ? "Running" : "", UI_HALF);
     ui_button(3, "Timer", tm_run ? "Running" : tm_done ? "Done" : "", UI_HALF);
+    {
+        int n = 0;
+        for (int i = 0; i < NAL; ++i)
+            n += al.a[i].on;
+        fmt_init(&f);
+        if (n) {
+            fmt_d(&f, n);
+            fmt_s(&f, n == 1 ? " alarm on" : " alarms on");
+        } else {
+            fmt_s(&f, "None on");
+        }
+        ui_button(4, "Alarms", f.b, 0);
+    }
+}
+
+static void al_line(struct fmt *f, int i)
+{
+    hm(f, al.a[i].h, al.a[i].m);
+    fmt_s(f, "  ");
+    fmt_s(f, rep_name[rep_of(al.a[i].days)]);
+}
+
+static void show_alarms(void)
+{
+    ui_title("Alarms");
+    for (int i = 0; i < NAL; ++i) {
+        struct fmt f;
+        fmt_init(&f);
+        al_line(&f, i);
+        ui_toggle(30U + (unsigned)i, f.b, al.a[i].on);
+        ui_button(34U + (unsigned)i, "Set time", 0, UI_HALF);
+    }
+    ui_textline("It buzzes and shows this app. Power: snooze 9 min. The phone stays on while one is set.", 0);
+}
+
+static void show_edit(void)
+{
+    struct fmt f;
+    ui_title("Alarm time");
+    fmt_init(&f);
+    hm(&f, al.a[edit_i].h, al.a[edit_i].m);
+    ui_big("", f.b, 0);
+    ui_button(40, "+1 hour", 0, UI_HALF);
+    ui_button(41, "-1 hour", 0, UI_HALF);
+    ui_button(42, "+10 min", 0, UI_HALF);
+    ui_button(43, "-10 min", 0, UI_HALF);
+    ui_button(44, "+1 min", 0, UI_HALF);
+    ui_button(45, "-1 min", 0, UI_HALF);
+    ui_level(46, "Once|Every day|Weekdays", rep_of(al.a[edit_i].days));
+    ui_button(47, "Done: the alarm on", 0, UI_ACCENT);
+}
+
+static void show_ring(void)
+{
+    struct fmt f;
+    ui_title("Alarm");
+    fmt_init(&f);
+    if (ring_i >= 0)
+        hm(&f, al.a[ring_i].h, al.a[ring_i].m);
+    ui_big("WAKE UP", f.b, 0xffff9f0aU);
+    ui_button(50, "Stop", 0, UI_RED);
+    ui_button(51, "Snooze 9 minutes", "Or press Power", UI_ACCENT);
 }
 
 static void show_world(void)
@@ -133,10 +221,16 @@ static void show(void)
         show_stopwatch();
     else if (mode == M_TIMER)
         show_timer();
+    else if (mode == M_ALARMS)
+        show_alarms();
+    else if (mode == M_EDIT)
+        show_edit();
+    else if (mode == M_RING)
+        show_ring();
     else
         show_main();
     ui_end();
-    ui_awake((mode == M_STOPWATCH && sw_run) || (mode == M_TIMER && (tm_run || tm_done)));
+    ui_awake((mode == M_STOPWATCH && sw_run) || (mode == M_TIMER && (tm_run || tm_done)) || mode == M_RING);
 }
 
 static void tick(void)
@@ -150,7 +244,34 @@ void app_event(const struct sbos_event *ev)
 {
     switch (ev->type) {
     case EV_APP_START:
-        ui_tile("World, stopwatch, timer");
+        ui_tile("World, stopwatch, timer, alarms");
+        if (state_get(&al, sizeof(al)) != (int)sizeof(al) || al.magic != AL_MAGIC) {
+            for (int i = 0; i < NAL; ++i) {
+                al.a[i].on = 0;
+                al.a[i].h = (uint8_t)(i == 0 ? 7 : 8);
+                al.a[i].m = (uint8_t)(i == 0 ? 0 : i == 1 ? 0 : i == 2 ? 30 : 45);
+                al.a[i].days = 0x3e;
+            }
+        }
+        for (int i = 0; i < NAL; ++i)
+            al_push(i);
+        break;
+    case EV_APP_SERVICE:
+        if (ev->id == 3) {                  /* the kernel rings alarm (value & 0xff) */
+            ring_i = ev->value & 0xff;
+            if (ring_i >= 0 && ring_i < NAL && !al.a[ring_i].days) {
+                al.a[ring_i].on = 0;        /* once: off now */
+                al_save();
+            }
+            mode = M_RING;
+            show();
+        } else if (ev->id == 4) {
+            if (mode == M_RING)
+                mode = M_MAIN;
+            ring_i = -1;
+            if (visible)
+                show();
+        }
         break;
     case EV_APP_SHOW:
         visible = 1;
@@ -167,6 +288,29 @@ void app_event(const struct sbos_event *ev)
         case 1: mode = M_WORLD; break;
         case 2: mode = M_STOPWATCH; break;
         case 3: mode = M_TIMER; tm_done = 0; break;
+        case 4: mode = M_ALARMS; break;
+        case 34: case 35: case 36: case 37:
+            edit_i = (int)ev->id - 34;
+            mode = M_EDIT;
+            break;
+        case 40: case 41: case 42: case 43: case 44: case 45: {
+            static const int dm[6] = { 60, -60, 10, -10, 1, -1 };
+            int t = al.a[edit_i].h * 60 + al.a[edit_i].m + dm[ev->id - 40];
+            t = (t % 1440 + 1440) % 1440;
+            al.a[edit_i].h = (uint8_t)(t / 60);
+            al.a[edit_i].m = (uint8_t)(t % 60);
+            break;
+        }
+        case 47:
+            al.a[edit_i].on = 1;
+            al_push(edit_i);
+            al_save();
+            mode = M_ALARMS;
+            break;
+        case 50: case 51:
+            alarm_cancel(ev->id == 51);
+            mode = M_MAIN;
+            break;
         case 10:
             if (sw_run) {
                 sw_acc += uptime_ms() - sw_t0;
@@ -214,7 +358,29 @@ void app_event(const struct sbos_event *ev)
         tick();
         show();
         break;
+    case EV_APP_TOGGLE:
+        if (ev->id >= 30 && ev->id < 30 + NAL) {
+            int i = (int)ev->id - 30;
+            al.a[i].on = (uint8_t)!!ev->value;
+            al_push(i);
+            al_save();
+            show();
+        }
+        break;
+    case EV_APP_LEVEL:
+        if (ev->id == 46 && ev->value >= 0 && ev->value < 3) {
+            static const uint8_t dd[3] = { 0, 0x7f, 0x3e };
+            al.a[edit_i].days = dd[ev->value];
+            show();
+        }
+        break;
     case EV_APP_BACK:
+        if (mode == M_RING) {
+            alarm_cancel(1);                /* Back while ringing: snooze, never a silent stop */
+        } else if (mode == M_EDIT) {
+            al_push(edit_i);                /* the time kept, its on/off as it was */
+            al_save();
+        }
         mode = M_MAIN;
         break;
     case EV_APP_TIMER:

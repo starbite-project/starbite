@@ -59,12 +59,18 @@ static void dispatch_timer(unsigned owner, unsigned id)
         kt_set(KT_HOUSE, 0, sb_ms(), K.screen_on ? 1000 : 10000, 0);
         break;
     case KT_CLOCK:
+        if (id == 1) {
+            alarm_timer();                  /* 1.2-alpha8: an alarm rings: buzz again */
+            break;
+        }
         ui_kminute();
         {
             struct sbos_time t;
             uint32_t ms = 60000;
-            if (clock_now(&t))
+            if (clock_now(&t)) {
                 ms = (uint32_t)(60 - t.s) * 1000U + 50U;
+                alarm_minute(&t);           /* 1.2-alpha8: wake-up alarms */
+            }
             kt_set(KT_CLOCK, 0, sb_ms(), ms, 0);
         }
         break;

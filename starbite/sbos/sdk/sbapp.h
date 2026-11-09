@@ -342,6 +342,13 @@ static inline int sensor_read(int id) { return (int)sbos_call(SYS_SENSOR_READ, (
 static inline int heat_request(int level, int minutes) { return (int)sbos_call(SYS_HEAT_REQUEST, (uint64_t)level, (uint64_t)minutes, 0, 0, 0); }
 static inline int heat_status(struct sbos_heat *h) { return (int)sbos_call(SYS_HEAT_STATUS, (uintptr_t)h, 0, 0, 0, 0); }
 static inline int sos(int on) { return (int)sbos_call(SYS_SIREN, (uint64_t)on, 0, 0, 0, 0); }
+/* 1.2-alpha8 (SBOS_P_ALARM): the motor; a wake-up alarm (index 0..3, days bit 0 Sunday .. bit 6, 0 once); stop or
+ * snooze the ringing one. The ringing alarm comes as EV_APP_SERVICE id 3 (value: index | h << 8 | m << 16), its end
+ * as id 4 (value 1 snoozed). */
+static inline int vibrate(unsigned ms, unsigned count) { return (int)sbos_call(SYS_VIBRATE, ms, count, 0, 0, 0); }
+static inline int alarm_set(int i, int h, int m, int days, int on)
+{ return (int)sbos_call(SYS_ALARM_SET, (uint64_t)i, (uint64_t)(h << 8 | m), (uint64_t)days, (uint64_t)on, 0); }
+static inline int alarm_cancel(int snooze) { return (int)sbos_call(SYS_ALARM_CANCEL, (uint64_t)snooze, 0, 0, 0, 0); }
 static inline int sos_status(struct sbos_sos *s) { return (int)sbos_call(SYS_SOS_STATUS, (uintptr_t)s, 0, 0, 0, 0); }
 static inline int state_put(const void *p, uint32_t n) { return (int)sbos_call(SYS_STATE_PUT, (uintptr_t)p, n, 0, 0, 0); }
 static inline int state_get(void *p, uint32_t cap) { return (int)sbos_call(SYS_STATE_GET, (uintptr_t)p, cap, 0, 0, 0); }
