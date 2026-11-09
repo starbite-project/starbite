@@ -676,6 +676,10 @@ void MwRefreshScanout(MW_ADAPTER *A)
         A->RefreshSkipsNoScan++;
         return;
     }
+    if (p->FbAliased) {                   /* T13z: the GPU drew it into the framebuffer itself */
+        A->RefreshSkipsAliased++;
+        return;
+    }
     src = AllocationVa(A, p);
     if (src == NULL) {
         A->RefreshSkipsNoScan++;

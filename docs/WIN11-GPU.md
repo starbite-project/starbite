@@ -1066,6 +1066,14 @@ The bugs found on the way, each by a test that isolated it:
   load_vertex_id_zero_base on this path).
 - **The normal boot path:** full mode as the default, behind the guard. The guard still never clears itself.
 
+**cycle-t13y-1 (03:21):**
+- **The sign-in screen on the panel.**
+- **But DWM's frames arrive as flips of its primaries,** and every flip cost a whole-frame CPU copy: 240, up to
+  1.4 s each.
+- **T13z:** a full-screen primary with the framebuffer's layout gets the framebuffer's physical pages at its GPU
+  address when VidMm maps it (Parameters\PrimaryInFb). DWM then renders straight into what DECON scans:
+  single-buffered, no CPU copy.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

@@ -71,6 +71,7 @@ HKR, Parameters, FullMode,      %REG_DWORD%, 0      ; 1 = the WDDM render driver
 HKR, Parameters, GuardAutoClear,%REG_DWORD%, 0      ; 1 = a healthy full-mode boot clears its own guard (not during bring-up)
 HKR, Parameters, TestBand,      %REG_DWORD%, 0      ; 1 = full mode: a magenta band at the top at 20 s and 40 s (framebuffer probe)
 HKR, Parameters, RefreshMs,     %REG_DWORD%, 200    ; full mode: the scanned primary to the panel at most this often (0 = off)
+HKR, Parameters, PrimaryInFb,   %REG_DWORD%, 1      ; full mode: full-screen primaries rendered straight into the framebuffer (0 = CPU copies)
 HKR, Parameters, ThermalWaitMs, %REG_DWORD%, 20000  ; how long start-up waits for sbthermal (make it system-start)
 HKR, Parameters, Modes,         %REG_DWORD%, 7      ; display-only mode: as sbdisplay
 HKR, Parameters, DefaultMode,   %REG_DWORD%, 1

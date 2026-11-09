@@ -82,6 +82,18 @@ NTSTATUS MwDisplayStart(MW_ADAPTER *A)
     A->FbVa = (PUCHAR)MmMapIoSpaceEx(pa, A->FbSize, PAGE_READWRITE | PAGE_WRITECOMBINE);
     if (A->FbVa == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
+    /* T13z: the framebuffer's pages, for full-screen primaries the GPU then renders straight into (DECON scans
+     * them). T13y: DWM's frames arrive as flips of its primaries, and each was copied whole on the CPU, up to
+     * 1.4 s from write-combined memory. Physically contiguous by construction (the firmware's framebuffer). */
+    A->PrimaryInFb = S9GetDword(L"Parameters", L"PrimaryInFb", 1);
+    A->FbPages = (ULONG)((A->FbSize + PAGE_SIZE - 1) >> PAGE_SHIFT);
+    if (A->PrimaryInFb && A->FbPfn == NULL) {
+        A->FbPfn = (PFN_NUMBER *)ExAllocatePool2(POOL_FLAG_NON_PAGED, (SIZE_T)A->FbPages * sizeof(PFN_NUMBER), MW_TAG);
+        if (A->FbPfn != NULL)
+            for (ULONG i = 0; i < A->FbPages; i++)
+                A->FbPfn[i] = (PFN_NUMBER)((ULONG64)pa.QuadPart >> PAGE_SHIFT) + i;
+    }
+    MwLog(A, L"PrimaryInFb", A->PrimaryInFb && A->FbPfn != NULL);
     A->SourceVisible = TRUE;
     A->PathActive = TRUE;
     return STATUS_SUCCESS;
@@ -93,6 +105,7 @@ void MwDisplayStop(MW_ADAPTER *A)
         MmUnmapIoSpace(A->FbVa, A->FbSize);
         A->FbVa = NULL;
     }
+    /* FbPfn stays: GPU mappings made from it may outlive the display (they are only page numbers) */
     if (A->DeconVa != NULL) {
         MmUnmapIoSpace((PVOID)A->DeconVa, SBDC_DECON_SIZE);
         A->DeconVa = NULL;

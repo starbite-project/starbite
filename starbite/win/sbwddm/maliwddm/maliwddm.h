@@ -48,6 +48,7 @@ typedef struct _MW_ALLOCATION {
     ULONG Flags;                /* MW_ALLOC_* */
     ULONG64 GpuVa;              /* reserved at creation, fixed for life */
     BOOLEAN Mapped;             /* resident: pages mapped at GpuVa */
+    BOOLEAN FbAliased;          /* T13z: a full-screen primary whose GPU pages are the framebuffer's */
     /* Standard allocations (primary, shadow, staging) the runtime creates. */
     UINT Width, Height, Pitch;
     D3DDDIFORMAT Format;
@@ -195,6 +196,10 @@ struct _MW_ADAPTER {
     ULONG RefPx[8], RefSrcTag;
     ULONG FlipContent, FlipBlack, FlipPxCentre, FlipSrcVa, FlipSrcPages;  /* T13q: sampled at the flip itself */
     ULONG ShowFromBltSrc, FlipsIgnoredBlack;                             /* T13s */
+    /* T13z: full-screen primaries rendered straight into the framebuffer (Parameters\PrimaryInFb, default 1):
+     * the framebuffer's page numbers, mapped at such a primary's GPU address instead of its own pages */
+    PFN_NUMBER *FbPfn;
+    ULONG FbPages, PrimaryInFb, FbAliasMaps, RefreshSkipsAliased;
     /* T13t: the present blts into non-primary surfaces (apps' frames into the surfaces DWM samples) and the
      * full frame of the blt sources into primaries (DWM's back buffer) */
     ULONG NpBlts, NpSrcContent, NpDstContent, NpSrcTag, NpDstTag, NpRectLT, NpRectRB, NpRects, NpSrcPx, NpDstPx;

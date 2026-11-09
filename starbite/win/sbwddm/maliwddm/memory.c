@@ -261,8 +261,23 @@ NTSTATUS APIENTRY MwBuildPagingBuffer(IN_CONST_HANDLE hAdapter, DXGKARG_BUILDPAG
         if (pages > alloc->Pages)
             pages = alloc->Pages;
         PPFN_NUMBER pfn = MmGetMdlPfnArray(Arg->MapApertureSegment.pMdl) + Arg->MapApertureSegment.MdlOffset;
+        BOOLEAN nx = (alloc->Flags & MW_ALLOC_NOEXEC) != 0;
         ExAcquireFastMutex(&a->MmuLock);
-        st = MkMmuMapPages(&a->Gpu, alloc->GpuVa, pfn, pages, (alloc->Flags & MW_ALLOC_NOEXEC) != 0);
+        /* T13z: a full-screen primary with the framebuffer's layout renders straight into the framebuffer:
+         * its GPU address maps the framebuffer's pages (the rest of the allocation, if any, its own). All
+         * such primaries alias one framebuffer: single-buffered, tearing possible, no CPU copy. */
+        alloc->FbAliased = a->PrimaryInFb && a->FbPfn != NULL && (alloc->Flags & MW_ALLOC_PRIMARY) &&
+                           alloc->Width == a->Fb.Width && alloc->Height == a->Fb.Height &&
+                           (alloc->Pitch == 0 || alloc->Pitch == a->Fb.Pitch) && pages >= a->FbPages;
+        if (alloc->FbAliased) {
+            st = MkMmuMapPages(&a->Gpu, alloc->GpuVa, a->FbPfn, a->FbPages, nx);
+            if (NT_SUCCESS(st) && pages > a->FbPages)
+                st = MkMmuMapPages(&a->Gpu, alloc->GpuVa + ((ULONG64)a->FbPages << PAGE_SHIFT), pfn + a->FbPages,
+                                   pages - a->FbPages, nx);
+            a->FbAliasMaps++;
+        } else {
+            st = MkMmuMapPages(&a->Gpu, alloc->GpuVa, pfn, pages, nx);
+        }
         alloc->Mapped = NT_SUCCESS(st);
         if (alloc->CpuMap && alloc->Mdl)    /* a view of the previous pages */
             MmUnmapLockedPages(alloc->CpuMap, alloc->Mdl);
