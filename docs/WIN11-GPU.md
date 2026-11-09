@@ -1266,6 +1266,29 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
     pagefile head and pulls the dumps after the repair boot.
 - **sbtext:** DirectWrite (grayscale, ClearType), WIC and Direct2D shapes on the Mali versus WARP.
 
+### 6.25 Direct2D's integer vertex attributes, T18 (2026-11-09)
+
+- **T17 on the user's phone:** no bugcheck, and the hive stayed clean across Restart, but rendering looked the same
+  (no sign-in name or picture).
+  - The 0114 UMD was active (no process used the legacy texture mode).
+  - LogonUI's own surfaces did hold pixels.
+- **T17's unattended cycle (sbtext, Mali against WARP):**
+  - Direct2D's rounded rectangle had the right shape but was pure red (1,0,0,1) instead of blue.
+  - The WIC bitmap was two edge lines.
+  - Text and the ellipse outline were missing.
+  - sbtex `twotex`, `swizzle` and `a8` passed.
+- **Cause:**
+  - Bifrost's `bi_emit_load_attr` gives a float32-typed attribute load the F32 register format, so the hardware
+    converts a pure-integer attribute (R32_UINT, …) to a float value.
+  - tgsi_to_nir types every D3D10 input as float32; TGSI has no input types.
+  - Direct2D's vertex shaders unpack packed integer attributes with bit operations.
+- **sb-patches/0115:** float32 attribute loads use `.auto32`, so the attribute's format decides, as Bifrost already
+  did for integer loads. Float, unorm and scaled formats are unchanged; integer formats keep their bits. GL always
+  pairs integer attributes with integer inputs, so it is unaffected.
+- **sbtex:** `uintattr` and `instattr` tests added.
+- **Also seen:** sbfps was cut off by the cycle's 300 s restart, not stalled. Its flip run reached about 65 fps
+  (T14: 15).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

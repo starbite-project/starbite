@@ -1,0 +1,20 @@
+diff --git a/src/panfrost/compiler/bifrost/bifrost_compile.c b/src/panfrost/compiler/bifrost/bifrost_compile.c
+index c604951..0767abe 100644
+--- a/src/panfrost/compiler/bifrost/bifrost_compile.c
++++ b/src/panfrost/compiler/bifrost/bifrost_compile.c
+@@ -519,7 +519,14 @@ bi_emit_load_attr(bi_builder *b, nir_intrinsic_instr *instr)
+          regfmt = BI_REGISTER_FORMAT_AUTO;
+          break;
+       case nir_type_float32:
+-         regfmt = BI_REGISTER_FORMAT_F32;
++         /* Starbite (sb-patches/0115, docs/WIN11-GPU.md 6.25): the attribute's own format decides (.auto32), as for
++          * integers above. A float-format attribute loads as f32 either way (normalized and scaled formats too);
++          * a pure-integer one (R32_UINT, R8G8B8A8_UINT...) keeps its bits instead of being converted to a float
++          * value. D3D10 shaders (d3d10umd -> TGSI -> tgsi_to_nir) declare no input types, so every input arrives
++          * as float32, while Direct2D's vertex shaders decode packed integer attributes with bit operations: on
++          * the Mali a solid blue brush drew pure red and text, outlines and bitmaps drew nothing (sbtext, T17).
++          * GL is unaffected: an integer-format attribute always has an integer-typed shader input there. */
++         regfmt = BI_REGISTER_FORMAT_AUTO;
+          break;
+       case nir_type_uint16:
+          regfmt = BI_REGISTER_FORMAT_U16;

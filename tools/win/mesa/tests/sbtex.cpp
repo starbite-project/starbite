@@ -22,6 +22,9 @@
 //               read t1 at the sampler's index, t0, and text never drew in the user's T15 session)
 //   swizzle     Sample(..).gbra (the view swizzle the legacy path dropped)
 //   a8          an A8_UNORM texture's alpha (glyph-atlas style)
+//   uintattr    a colour packed in an R32_UINT vertex attribute, unpacked with integer ops in the vertex shader
+//               (Direct2D's way; T18, sb-patches/0115: Bifrost loaded it converted to a float value)
+//   instattr    the same as a per-instance attribute, DrawInstanced
 // The texture: left half green, right half red (RGBA8 0xff00ff00 / 0xff0000ff). Output lines "TEST name: PASS|FAIL
 // got ... want ..."; exit code = the number of failed tests (100 + n if the device could not be made).
 //
@@ -53,6 +56,11 @@ static const char kHlsl[] =
     "float4 ps_twotex(V i) : SV_Target { return float4(0, t.Sample(s, i.uv).g, t1.Sample(s, i.uv).b, 1); }\n"
     "float4 ps_swizzle(V i) : SV_Target { return t.Sample(s, i.uv).gbra; }\n"
     "float4 ps_alpha(V i) : SV_Target { return float4(t.Sample(s, i.uv).a, 0, 0, 1); }\n"
+    "struct VC { float4 p : SV_Position; float4 c : COLOR0; };\n"
+    "VC vs_uint(float2 p : POSITION, uint c : COLOR) {\n"
+    "  VC o; o.p = float4(p, 0, 1);\n"
+    "  o.c = float4((c >> 16) & 255, (c >> 8) & 255, c & 255, c >> 24) / 255.0; return o; }\n"
+    "float4 ps_col(VC i) : SV_Target { return i.c; }\n"
     "float4 ps_solid(V i) : SV_Target { return float4(0.0, 0.0, 1.0, 1.0); }\n"
     "float4 ps_sample(V i) : SV_Target { return t.Sample(s, i.uv); }\n"
     "float4 ps_level(V i) : SV_Target { return t.SampleLevel(s, i.uv, 0); }\n"
@@ -363,6 +371,67 @@ int main(int argc, char **argv)
         if (ta && SUCCEEDED(dev->CreateShaderResourceView(ta, nullptr, &srva)) && pass("ps_alpha", srva, point, px))
             check("a8", px, 16, 0xff0000ffu, 48, 0xff000040u, 0xffffffffu);
         else out("TEST a8       : FAIL (pass or A8_UNORM unsupported)\n"), failures++;
+    }
+
+    {   // T18: packed integer vertex attributes (sb-patches/0115)
+        ID3DBlob *vb2 = compile("vs_uint", "vs_4_0"), *pb2 = compile("ps_col", "ps_4_0");
+        ID3D11VertexShader *vsu = nullptr;
+        ID3D11PixelShader *psc = nullptr;
+        ID3D11InputLayout *ilv = nullptr, *ili = nullptr;
+        ID3D11Buffer *colv = nullptr, *coli = nullptr;
+        const UINT packed[3] = { 0xff2060c0u, 0xff2060c0u, 0xff2060c0u };   /* A R G B: (0x20, 0x60, 0xc0) */
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = sizeof(packed);
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA init = { packed, 0, 0 };
+        D3D11_INPUT_ELEMENT_DESC iv[2] = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "COLOR", 0, DXGI_FORMAT_R32_UINT, 1, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
+        D3D11_INPUT_ELEMENT_DESC ii[2] = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "COLOR", 0, DXGI_FORMAT_R32_UINT, 1, 0, D3D11_INPUT_PER_INSTANCE_DATA, 1 } };
+        bool setup = vb2 && pb2 &&
+            SUCCEEDED(dev->CreateVertexShader(vb2->GetBufferPointer(), vb2->GetBufferSize(), nullptr, &vsu)) &&
+            SUCCEEDED(dev->CreatePixelShader(pb2->GetBufferPointer(), pb2->GetBufferSize(), nullptr, &psc)) &&
+            SUCCEEDED(dev->CreateInputLayout(iv, 2, vb2->GetBufferPointer(), vb2->GetBufferSize(), &ilv)) &&
+            SUCCEEDED(dev->CreateInputLayout(ii, 2, vb2->GetBufferPointer(), vb2->GetBufferSize(), &ili)) &&
+            SUCCEEDED(dev->CreateBuffer(&bd, &init, &colv)) && SUCCEEDED(dev->CreateBuffer(&bd, &init, &coli));
+        for (int inst = 0; inst < 2; inst++) {
+            const char *name = inst ? "instattr" : "uintattr";
+            ID3D11Texture2D *rt = setup ? texture(DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET, nullptr, 0) : nullptr;
+            ID3D11RenderTargetView *rtv = nullptr;
+            if (!rt || FAILED(dev->CreateRenderTargetView(rt, nullptr, &rtv))) {
+                out("TEST %-9s: FAIL (setup)\n", name);
+                failures++;
+                continue;
+            }
+            const float grey[4] = { 0.5f, 0.5f, 0.5f, 1.0f };
+            ctx->ClearRenderTargetView(rtv, grey);
+            ctx->OMSetRenderTargets(1, &rtv, nullptr);
+            D3D11_VIEWPORT vp = { 0.0f, 0.0f, 64.0f, 64.0f, 0.0f, 1.0f };
+            ctx->RSSetViewports(1, &vp);
+            ID3D11Buffer *bufs[2] = { vb, inst ? coli : colv };
+            UINT strides[2] = { 8, 4 }, offs[2] = { 0, 0 };
+            ctx->IASetVertexBuffers(0, 2, bufs, strides, offs);
+            ctx->IASetInputLayout(inst ? ili : ilv);
+            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx->VSSetShader(vsu, nullptr, 0);
+            ctx->PSSetShader(psc, nullptr, 0);
+            if (inst)
+                ctx->DrawInstanced(3, 1, 0, 0);
+            else
+                ctx->Draw(3, 0);
+            if (readback(rt, DXGI_FORMAT_R8G8B8A8_UNORM, px))
+                check(name, px, 16, 0xffc06020u, 48, 0xffc06020u, 0xffffffffu);   /* R 0x20 G 0x60 B 0xc0 A 0xff */
+            else
+                out("TEST %-9s: FAIL (readback)\n", name), failures++;
+            rtv->Release();
+            rt->Release();
+        }
+        ID3D11Buffer *one[2] = { vb, nullptr };
+        UINT st1[2] = { 8, 0 }, of1[2] = { 0, 0 };
+        ctx->IASetVertexBuffers(0, 2, one, st1, of1);
     }
 
     out("sbtex %s: %d test(s) failed\n", dll, failures);
