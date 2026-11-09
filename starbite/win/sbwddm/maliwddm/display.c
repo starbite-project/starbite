@@ -54,6 +54,124 @@ static void FillSignal(MW_ADAPTER *Dev, D3DKMDT_VIDEO_SIGNAL_INFO *S)
 
 /* ---- the firmware framebuffer ---- */
 
+/* T24: register access for sbdc_core (DECON and DPU_DMA only; DSIM is never touched here) */
+static sbdc_u32 ScanRd(void *Ctx, unsigned B, unsigned Off)
+{
+    MW_ADAPTER *a = (MW_ADAPTER *)Ctx;
+    return (B < 2 && a->DcMmio[B] != NULL) ? READ_REGISTER_ULONG((volatile ULONG *)(a->DcMmio[B] + Off)) : 0;
+}
+
+static void ScanWr(void *Ctx, unsigned B, unsigned Off, sbdc_u32 V)
+{
+    MW_ADAPTER *a = (MW_ADAPTER *)Ctx;
+    if (B < 2 && a->DcMmio[B] != NULL) {
+        KeMemoryBarrier();
+        WRITE_REGISTER_ULONG((volatile ULONG *)(a->DcMmio[B] + Off), V);
+        KeMemoryBarrier();
+    }
+}
+
+static void ScanDelay(void *Ctx, unsigned Us)
+{
+    UNREFERENCED_PARAMETER(Ctx);
+    KeStallExecutionProcessor(Us);
+}
+
+/* T24: DECON flips between scanout buffers (Parameters\ScanFlip). Only after sbdc_identify finds S-Boot's live
+ * pipeline as expected; anything else leaves the aliased single framebuffer of T13z. */
+static void ScanStart(MW_ADAPTER *A)
+{
+    PHYSICAL_ADDRESS d, lo, hi, skip;
+    ULONG want = S9GetDword(L"Parameters", L"ScanFlip", 0);
+    int id;
+
+    MwLog(A, L"ScanFlipWanted", want);
+    if (!want || A->FbPfn == NULL || A->Fb.PhysicAddress.QuadPart >= 0x100000000LL)
+        return;
+    d.QuadPart = (LONGLONG)SBDC_DECON_PA;
+    A->DcMmio[0] = (volatile UCHAR *)MmMapIoSpaceEx(d, SBDC_DECON_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
+    d.QuadPart = (LONGLONG)SBDC_DMA_PA;
+    A->DcMmio[1] = (volatile UCHAR *)MmMapIoSpaceEx(d, SBDC_DMA_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
+    if (A->DcMmio[0] == NULL || A->DcMmio[1] == NULL) {
+        MwLog(A, L"ScanFlipOn", 0x100);
+        return;
+    }
+    A->DcIo.ctx = A;
+    A->DcIo.rd = ScanRd;
+    A->DcIo.wr = ScanWr;
+    A->DcIo.delay_us = ScanDelay;
+    id = sbdc_identify(&A->Dc, &A->DcIo, (sbdc_u32)A->Fb.PhysicAddress.QuadPart, A->Fb.Width, A->Fb.Height);
+    MwLog(A, L"ScanIdentify", (ULONG)id);
+    if (id != 0)
+        return;
+    A->Slot[0].Pa = (ULONG64)A->Fb.PhysicAddress.QuadPart;
+    A->Slot[0].Va = A->FbVa;
+    A->Slot[0].Pfn = A->FbPfn;
+    A->ScanSlots = 1;
+    lo.QuadPart = 0;
+    hi.QuadPart = 0xFFFFFFFFLL;           /* DECON's base registers are 32 bits */
+    skip.QuadPart = 0;
+    for (ULONG i = 1; i < 3; i++) {
+        PUCHAR va = (PUCHAR)MmAllocateContiguousNodeMemory(A->FbSize, lo, hi, skip, PAGE_READWRITE | PAGE_WRITECOMBINE,
+                                                         MM_ANY_NODE_OK);
+        PFN_NUMBER *pfn;
+        ULONG64 pa;
+        if (va == NULL)
+            break;
+        pa = (ULONG64)MmGetPhysicalAddress(va).QuadPart;
+        pfn = (PFN_NUMBER *)ExAllocatePool2(POOL_FLAG_NON_PAGED, (SIZE_T)A->FbPages * sizeof(PFN_NUMBER), MW_TAG);
+        if (pfn == NULL || pa >= 0x100000000ULL || (pa & (PAGE_SIZE - 1))) {
+            if (pfn)
+                ExFreePoolWithTag(pfn, MW_TAG);
+            MmFreeContiguousMemory(va);
+            break;
+        }
+        for (ULONG p = 0; p < A->FbPages; p++)
+            pfn[p] = (PFN_NUMBER)(pa >> PAGE_SHIFT) + p;
+        RtlZeroMemory(va, A->FbSize);
+        A->Slot[i].Pa = pa;
+        A->Slot[i].Va = va;
+        A->Slot[i].Pfn = pfn;
+        A->ScanSlots = i + 1;
+        MwLog(A, i == 1 ? L"ScanSlot1Pa" : L"ScanSlot2Pa", (ULONG)pa);
+    }
+    A->ScanCur = 0;
+    A->FbVaOrig = A->FbVa;
+    A->ScanFlipOn = A->ScanSlots >= 2;
+    MwLog(A, L"ScanFlipOn", A->ScanFlipOn ? A->ScanSlots : 0);
+}
+
+/* T24: DECON back on the firmware framebuffer before anything else owns the display; our buffers are freed only
+ * once that has latched (never free memory a display engine may still read). */
+static void ScanStop(MW_ADAPTER *A)
+{
+    BOOLEAN home = TRUE;
+    if (A->ScanSlots >= 2 && A->DcMmio[0] != NULL && A->DcMmio[1] != NULL) {
+        A->ScanFlipOn = FALSE;
+        if (A->ScanCur != 0) {
+            if (A->FbVaOrig != NULL && A->FbVa != NULL && A->FbVa != A->FbVaOrig)
+                RtlCopyMemory(A->FbVaOrig, A->FbVa, A->FbSize);   /* the current image, for the next owner */
+            home = sbdc_wait_latched(&A->Dc, 50000, 50) == 0 &&
+                   sbdc_flip(&A->Dc, (sbdc_u32)A->Slot[0].Pa) == 0 && sbdc_wait_latched(&A->Dc, 50000, 50) == 0;
+            A->ScanCur = 0;
+        }
+        if (A->FbVaOrig != NULL)
+            A->FbVa = A->FbVaOrig;
+        for (ULONG i = 1; i < A->ScanSlots; i++) {
+            if (home && A->Slot[i].Va != NULL)
+                MmFreeContiguousMemory(A->Slot[i].Va);
+            A->Slot[i].Va = NULL;
+            /* Pfn arrays stay: GPU mappings made from them may outlive the display (page numbers only) */
+        }
+        A->ScanSlots = 1;
+    }
+    for (ULONG b = 0; b < 2; b++) {
+        if (A->DcMmio[b] != NULL)
+            MmUnmapIoSpace((PVOID)A->DcMmio[b], b == 0 ? SBDC_DECON_SIZE : SBDC_DMA_SIZE);
+        A->DcMmio[b] = NULL;
+    }
+}
+
 NTSTATUS MwDisplayStart(MW_ADAPTER *A)
 {
     PHYSICAL_ADDRESS pa;
@@ -94,6 +212,8 @@ NTSTATUS MwDisplayStart(MW_ADAPTER *A)
                 A->FbPfn[i] = (PFN_NUMBER)((ULONG64)pa.QuadPart >> PAGE_SHIFT) + i;
     }
     MwLog(A, L"PrimaryInFb", A->PrimaryInFb && A->FbPfn != NULL);
+    if (A->PrimaryInFb)
+        ScanStart(A);
     A->SourceVisible = TRUE;
     A->PathActive = TRUE;
     return STATUS_SUCCESS;
@@ -101,6 +221,7 @@ NTSTATUS MwDisplayStart(MW_ADAPTER *A)
 
 void MwDisplayStop(MW_ADAPTER *A)
 {
+    ScanStop(A);
     if (A->FbVa != NULL) {
         MmUnmapIoSpace(A->FbVa, A->FbSize);
         A->FbVa = NULL;

@@ -66,6 +66,7 @@ static NTSTATUS NewAllocation(MW_ADAPTER *A, const MW_ALLOCATION_INFO *In, DXGK_
     alloc->Height = In->Height;
     alloc->Pitch = In->Pitch;
     alloc->Format = (D3DDDIFORMAT)In->Format;
+    alloc->ScanSlot = -1;
 
     /* The GPU address, for the allocation's whole life. */
     ExAcquireFastMutex(&A->MmuLock);
@@ -120,6 +121,8 @@ static void FreeAllocation(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
         MkMmuUnmapPages(&A->Gpu, Alloc->GpuVa, Alloc->Pages);
     if (Alloc->GpuVa != 0 && A->GpuUp)
         MkVaFree(&A->Gpu, Alloc->GpuVa, Alloc->Pages);
+    if (Alloc->ScanSlot >= 0 && Alloc->ScanSlot < 3 && A->Slot[Alloc->ScanSlot].Owner == Alloc)
+        A->Slot[Alloc->ScanSlot].Owner = NULL;   /* T24: the buffer may serve the next primary */
     ExReleaseFastMutex(&A->MmuLock);
     InterlockedAdd64(&A->AllocBytes, -(LONG64)Alloc->Size);
     ExFreePoolWithTag(Alloc, MW_TAG);
@@ -251,6 +254,20 @@ NTSTATUS APIENTRY MwCloseAllocation(IN_CONST_HANDLE hDevice, const DXGKARG_CLOSE
     return STATUS_SUCCESS;
 }
 
+/* T24: flips never latched; every scanout primary renders into the firmware framebuffer again (T13z) */
+void MwScanFallback(MW_ADAPTER *A, MW_ALLOCATION **Owners, ULONG N)
+{
+    ExAcquireFastMutex(&A->MmuLock);
+    for (ULONG i = 0; i < N; i++) {
+        MW_ALLOCATION *o = Owners[i];
+        if (o != NULL && o->Mapped && o->FbAliased && A->GpuUp)
+            (void)MkMmuMapPages(&A->Gpu, o->GpuVa, A->FbPfn, A->FbPages, (o->Flags & MW_ALLOC_NOEXEC) != 0);
+        if (o != NULL)
+            o->ScanSlot = 0;
+    }
+    ExReleaseFastMutex(&A->MmuLock);
+}
+
 /* ---- residency ---- */
 
 /* Map and unmap happen here, on the CPU, as viogpu3d does: the paging
@@ -282,7 +299,27 @@ NTSTATUS APIENTRY MwBuildPagingBuffer(IN_CONST_HANDLE hAdapter, DXGKARG_BUILDPAG
                            alloc->Width == a->Fb.Width && alloc->Height == a->Fb.Height &&
                            (alloc->Pitch == 0 || alloc->Pitch == a->Fb.Pitch) && pages >= a->FbPages;
         if (alloc->FbAliased) {
-            st = MkMmuMapPages(&a->Gpu, alloc->GpuVa, a->FbPfn, a->FbPages, nx);
+            PFN_NUMBER *fbpfn = a->FbPfn;
+            if (a->ScanFlipOn) {
+                /* T24: a scanout buffer of its own: a free one other than the one DECON scans if possible */
+                LONG s = alloc->ScanSlot;
+                if (s < 0 || s >= (LONG)a->ScanSlots) {
+                    s = -1;
+                    for (ULONG pass = 0; pass < 2 && s < 0; pass++)
+                        for (ULONG i = 0; i < a->ScanSlots && s < 0; i++)
+                            if (a->Slot[i].Owner == NULL && (pass == 1 || (LONG)i != a->ScanCur))
+                                s = (LONG)i;
+                    if (s < 0) {
+                        s = 0;            /* all taken: share the firmware framebuffer (T13z) */
+                        a->ScanSlotShared++;
+                    } else {
+                        a->Slot[s].Owner = alloc;
+                    }
+                    alloc->ScanSlot = s;
+                }
+                fbpfn = a->Slot[s].Pfn;
+            }
+            st = MkMmuMapPages(&a->Gpu, alloc->GpuVa, fbpfn, a->FbPages, nx);
             if (NT_SUCCESS(st) && pages > a->FbPages)
                 st = MkMmuMapPages(&a->Gpu, alloc->GpuVa + ((ULONG64)a->FbPages << PAGE_SHIFT), pfn + a->FbPages,
                                    pages - a->FbPages, nx);

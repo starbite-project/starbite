@@ -15,6 +15,7 @@
 #include <ntstrsafe.h>
 #include "../common/maligpu.h"
 #include "maliwddm_abi.h"
+#include "../../sbdisplay/sbdc_core.h"   /* T24: DECON flips */
 #include "../s9.h"
 #include "../sbx_cmd.h"
 
@@ -65,6 +66,7 @@ typedef struct _MW_ALLOCATION {
      * attributes on ARM64, stale lines instead of the GPU's pixels (T13d: 223 blts to the panel, black). */
     BOOLEAN Coherent;
     PVOID CpuMap;
+    LONG ScanSlot;              /* T24: the scanout buffer this full-screen primary renders into (-1: none) */
 } MW_ALLOCATION;
 
 typedef struct _MW_ADAPTER MW_ADAPTER;
@@ -106,6 +108,7 @@ typedef struct _MW_DMA_PRIVATE {
 /* A submission the hardware works through, one job chain at a time. */
 typedef struct _MW_SUBMISSION {
     ULONG FenceId;
+    ULONG FlipSlot1;            /* T24: scanout buffer + 1 to show when this submission is reached (0: none) */
     ULONG Count, Next;          /* commands, and the next one to start */
     MW_COMMAND Commands[MW_MAX_COMMANDS];
 } MW_SUBMISSION;
@@ -208,6 +211,20 @@ struct _MW_ADAPTER {
     /* T13z: full-screen primaries rendered straight into the framebuffer (Parameters\PrimaryInFb, default 1):
      * the framebuffer's page numbers, mapped at such a primary's GPU address instead of its own pages */
     PFN_NUMBER *FbPfn;
+    /* T24 (docs/WIN11-GPU.md 6.31): real flips. Parameters\ScanFlip = 1: each full-screen primary renders into a
+     * scanout buffer of its own (slot 0 = the firmware framebuffer, 1-2 contiguous below 4 GiB), and a flip points
+     * DECON's IDMA channel 0 at it when the in-order queue reaches it (sbdisplay's sequence, proven on Linux). FbVa
+     * always maps the buffer DECON scans, so every CPU path follows. A flip that never latches (500 ms) falls back
+     * to T13z's single aliased framebuffer. */
+    BOOLEAN ScanFlipOn;
+    struct sbdc Dc;
+    struct sbdc_io DcIo;
+    volatile UCHAR *DcMmio[3];
+    PUCHAR FbVaOrig;
+    struct { ULONG64 Pa; PUCHAR Va; PFN_NUMBER *Pfn; MW_ALLOCATION *Owner; } Slot[3];
+    ULONG ScanSlots;
+    volatile LONG ScanCur;
+    ULONG ScanFlips, ScanFlipsForced, ScanSlotShared, ScanFallback, ScanPendingTicks;
     /* T14a: the first failed job of the boot (JS 0x51 INSTR_INVALID_ENC, once per boot since T13b), for
      * matching against the umdlogs' "bo N va A-B" lines */
     ULONG64 RunningJc;
@@ -238,6 +255,8 @@ struct _MW_ADAPTER {
 /* ---- trace: Seen_<ddi>, Fail_<ddi> in the device's registry key ---- */
 void MwLog(MW_ADAPTER *A, PCWSTR Name, ULONG Value);
 void MwLogFlush(MW_ADAPTER *A);
+void MwScanFallback(MW_ADAPTER *A, MW_ALLOCATION **Owners, ULONG N);
+void MwScanFlipHw(MW_ADAPTER *A, ULONG Slot);
 void MwTraceReset(MW_ADAPTER *A);
 void MwLogHook(void *Owner, PCWSTR Name, ULONG Value);
 NTSTATUS MwRet(MW_ADAPTER *A, PCWSTR Name, NTSTATUS St);

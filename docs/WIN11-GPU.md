@@ -1355,6 +1355,23 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
   - **sb-patches/0119:** per-device 10 s umdlog stats (submits, blocked waits, CPU maps).
   - **gpu-cycle `--no-trace`:** a test cycle without the per-call umdlog trace.
 
+### 6.31 The user's T22 session: OOM crashes; T24 real flips (2026-11-09)
+
+- **The user's T22 session:** drags about 4 fps without sblinkd and 2 with it, drops below 1 fps, constant flicker,
+  "the driver crashed", and a 10-minute shutdown.
+  - The KMD saw no GPU fault, timeout or reset.
+  - The UMD had 2 failed allocations (D3DERR_OUTOFVIDEOMEMORY from VidMm at 841 MB peak; the KMD never refused one).
+  - LogonUI crashed on a NULL gallium context (`cso_create_context+0xd0`) and sblinkd on a memcpy into an unmapped
+    BO (`panfrost_ptr_map+0x2e8`). Both were symbolised with a link map of a rebuilt T22 UMD.
+- **sb-patches/0120:** CreateDevice fails with E_OUTOFMEMORY instead; Panfrost drops a replacement BO it cannot map.
+- **Real flips (`ScanFlip`):**
+  - two contiguous scanout buffers next to the firmware framebuffer, after `sbdc_identify`;
+  - each full-screen primary is aliased to a buffer of its own at MAP_APERTURE;
+  - a present-flip is carried in its submission and executed in Kick when the queue reaches it (IDMA0 base, shadow
+    request, TE trigger), with `FbVa` following the scanned buffer;
+  - a latch watchdog in the guard falls back to T13z, and DECON goes home on stop;
+  - a test-cycle default; off in `--install-default` until proven.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

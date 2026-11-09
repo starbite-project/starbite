@@ -1,0 +1,46 @@
+diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
+index ed7dee5..c961c1e 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -1720,6 +1720,13 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
+          if (!(bo->flags & PAN_BO_SHARED)) {
+             newbo =
+                panfrost_bo_create(dev, panfrost_bo_size(bo), flags, bo->label);
++            /* Starbite (sb-patches/0120, docs/WIN11-GPU.md 6.31): a BO whose CPU mapping failed (Windows under memory
++             * pressure: the Lock failed) has ptr.cpu NULL; the memcpy below then crashed the process (sblinkd,
++             * T22: panfrost_ptr_map+0x2e8). Without one, the code below waits for the old BO instead. */
++            if (newbo && panfrost_bo_mmap(newbo)) {
++               panfrost_bo_unreference(newbo);
++               newbo = NULL;
++            }
+          }
+ 
+          if (newbo) {
+diff --git a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+index 77f65a8..3265e6c 100644
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -149,10 +149,23 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
+    if (!screen)
+       return E_OUTOFMEMORY;
+    struct pipe_context *pipe = screen->context_create(screen, NULL, 0);
++   /* sb-patches/0120: no context (out of GPU memory: T22's LogonUI crashed in cso_create_context on a NULL pipe):
++    * fail the device, which the runtime reports to the application, instead of crashing its process */
++   if (!pipe) {
++      DebugPrintf("sbumd: CreateDevice: no gallium context (out of memory?)\n");
++      screen->destroy(screen);
++      return E_OUTOFMEMORY;
++   }
+    pDevice->screen = screen;
+    pDevice->pipe = pipe;
+    pDevice->sbDev = d3d10_created_sb_dev();
+    pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
++   if (!pDevice->cso) {
++      DebugPrintf("sbumd: CreateDevice: no cso context\n");
++      pipe->destroy(pipe);
++      screen->destroy(screen);
++      return E_OUTOFMEMORY;
++   }
+ 
+    /* Starbite (sbumd, docs/WIN11-GPU.md 6.10): a driver that takes NIR only (Panfrost) gets every shader
+     * through tgsi_to_nir, which implements none of the D3D10 texture opcodes this frontend emits

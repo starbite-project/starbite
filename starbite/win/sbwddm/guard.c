@@ -137,6 +137,10 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         { L"Live_RateGpuPermille", a->RateGpuPermille }, { L"Live_RatePresentWaitMs", a->RatePresentWaitMs },
         { L"Live_RatePresentCpuMs", a->RatePresentCpuMs }, { L"Live_RatePresentWaitMaxMs", a->RatePresentWaitMaxMs },
         { L"Live_RatePresents10", a->RatePresents10 }, { L"Live_RateJobs10", a->RateJobs10 },
+        /* T24: real flips: done, done over one not latched yet, primaries sharing the framebuffer, the fallback */
+        { L"Live_ScanFlips", a->ScanFlips }, { L"Live_ScanFlipsForced", a->ScanFlipsForced },
+        { L"Live_ScanSlotShared", a->ScanSlotShared }, { L"Live_ScanFallback", a->ScanFallback },
+        { L"Live_ScanCur", (ULONG)a->ScanCur },
     };
     static_assert(sizeof(c) / sizeof(c[0]) < SBW_LIVE_MAX, "Live_ table too long");
     for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]); i++)
@@ -165,6 +169,7 @@ static VOID GuardThread(PVOID Ctx)
      * T13-T16 flushed after every single value). Test cycles: 1/1; the user's install: 10/60. */
     ULONG liveSec = S9GetDword(L"Parameters", L"LiveSec", 1), liveFlushSec = S9GetDword(L"Parameters", L"LiveFlushSec", 1);
     ULONG lastFlush = 0;
+    ULONG scanFlips0 = 0, scanForced0 = 0;   /* T24: the latch check */
     LONG64 rateBusy = 0, rateWait = 0, rateCpu = 0;      /* T23 */
     ULONG ratePres = 0, rateJobs = 0, rateSec = 0;
     ULONG64 nextSec = KeQueryInterruptTime() + 10000000ULL, lastWork = (ULONG64)-1, lastPeriodic = 0;
@@ -177,6 +182,30 @@ static VOID GuardThread(PVOID Ctx)
         t.QuadPart = -10000LL * (refreshMs ? refreshMs : 1000);
         if (KeWaitForSingleObject(&a->GuardStop, Executive, KernelMode, FALSE, &t) != STATUS_TIMEOUT)
             break;
+        if (a->ScanFlipOn) {
+            /* T24: is DECON taking flips? A flip normally latches at the next TE (16.7 ms), so a sample may well
+             * catch one pending. Stuck means: with flips coming, 90 % of them found the previous one still pending
+             * (MwScanFlipHw counts those as forced), two ticks running; with no new flips, one pending for 3 ticks.
+             * Then back to the aliased firmware framebuffer for the rest of the boot. */
+            ULONG df = a->ScanFlips - scanFlips0, dforced = a->ScanFlipsForced - scanForced0;
+            BOOLEAN pend = sbdc_flip_pending(&a->Dc) != 0;
+            BOOLEAN bad = df >= 5 ? dforced * 10 >= df * 9 : (df == 0 && pend);
+            scanFlips0 = a->ScanFlips;
+            scanForced0 = a->ScanFlipsForced;
+            a->ScanPendingTicks = bad ? a->ScanPendingTicks + 1 : 0;
+            if (a->ScanPendingTicks >= (df >= 5 ? 2u : 3u)) {
+                MW_ALLOCATION *own[3];
+                ULONG n = 0;
+                a->ScanFlipOn = FALSE;
+                for (ULONG i = 0; i < a->ScanSlots && i < 3; i++)
+                    if (a->Slot[i].Owner != NULL)
+                        own[n++] = a->Slot[i].Owner;
+                MwScanFallback(a, own, n);
+                MwScanFlipHw(a, 0);
+                a->ScanFallback++;
+                MwLog(a, L"ScanFallbackAtFlip", a->ScanFlips);
+            }
+        }
         if (refreshMs) {
             /* T13h: a flip or another allocation shown: copy it now. Otherwise, when GPU work completed (it may
              * draw straight into the shown primary), at most every 2 s: one whole copy costs up to 0.7 s. */

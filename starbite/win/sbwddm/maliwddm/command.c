@@ -483,6 +483,29 @@ static void NotifyCompleted(MW_ADAPTER *A, ULONG Fence)
     A->NeedDpc = TRUE;
 }
 
+/* T24: point DECON's IDMA channel 0 at a scanout buffer; latched at the next TE edge (sbdc_flip's sequence, without
+ * its "still pending" refusal: a newer flip simply replaces one not latched yet). Any IRQL. */
+void MwScanFlipHw(MW_ADAPTER *A, ULONG Slot)
+{
+    const struct sbdc_io *io = &A->DcIo;
+    sbdc_u32 pa, v;
+    if (Slot >= A->ScanSlots || A->Slot[Slot].Va == NULL || A->Dc.win >= SBDC_MAX_WIN)
+        return;
+    pa = (sbdc_u32)A->Slot[Slot].Pa;
+    if (sbdc_flip_pending(&A->Dc))
+        A->ScanFlipsForced++;
+    io->wr(io->ctx, SBDC_DMA, SBDC_CH0 + SBDC_IDMA_BASE_Y, pa);
+    io->wr(io->ctx, SBDC_DMA, SBDC_CH0 + SBDC_IDMA_BASE_Y + 4U, pa);
+    io->wr(io->ctx, SBDC_DECON, SBDC_SHADOW_REQ, 1U << A->Dc.win);
+    v = io->rd(io->ctx, SBDC_DECON, SBDC_TRIG);
+    if ((v & (SBDC_TRIG_HW_EN | SBDC_TRIG_HW_MASK)) != SBDC_TRIG_HW_EN)
+        io->wr(io->ctx, SBDC_DECON, SBDC_TRIG, (v | SBDC_TRIG_HW_EN) & ~SBDC_TRIG_HW_MASK);
+    A->Dc.cur_pa = pa;
+    A->ScanCur = (LONG)Slot;
+    A->FbVa = A->Slot[Slot].Va;           /* every CPU path writes and samples what DECON scans */
+    A->ScanFlips++;
+}
+
 /* Start the next job chain, completing every submission that has none left.
  * Called with the queue owned (interrupt level). */
 static void Kick(MW_ADAPTER *A)
@@ -493,6 +516,8 @@ static void Kick(MW_ADAPTER *A)
         /* S9 port: while the watchdog says Stop/Critical, or is silent, work completes without running
          * (frames are dropped; the GPU stays idle until it is cool again). */
         if (!A->GpuUp || A->ThermalHold || s->Next >= s->Count) {
+            if (s->FlipSlot1 && A->ScanFlipOn)   /* T24: everything before it is done: show the frame */
+                MwScanFlipHw(A, s->FlipSlot1 - 1);
             NotifyCompleted(A, s->FenceId);
             A->QHead = (A->QHead + 1) % MW_QUEUE_DEPTH;
             A->QCount--;
@@ -788,7 +813,15 @@ NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMIT
     sub.FenceId = Arg->SubmissionFenceId;
     /* A present: done here, on the CPU; the submission then carries no
      * job and completes at once. */
-    if (!Arg->Flags.Paging && priv != NULL && Arg->DmaBufferPrivateDataSize >= sizeof(*priv) &&
+    BOOLEAN deferFlip = !Arg->Flags.Paging && priv != NULL && Arg->DmaBufferPrivateDataSize >= sizeof(*priv) &&
+                        priv->Reserved == MW_DMA_MAGIC && priv->Present.Kind == MW_PRESENT_FLIP &&
+                        priv->Present.Src != NULL && priv->Present.Src->FbAliased && a->ScanFlipOn &&
+                        priv->Present.Src->ScanSlot >= 0;
+    if (deferFlip) {
+        /* T24: a real flip, done when the queue reaches this submission (Kick), i.e. once the frame is drawn */
+        sub.FlipSlot1 = (ULONG)priv->Present.Src->ScanSlot + 1;
+        a->EmuFlips++;
+    } else if (!Arg->Flags.Paging && priv != NULL && Arg->DmaBufferPrivateDataSize >= sizeof(*priv) &&
         priv->Reserved == MW_DMA_MAGIC && priv->Present.Kind != MW_PRESENT_NONE) {
         /* S9 port (T13d): the source may still be being drawn by a job submitted before this present (one
          * in-order queue). Copy only once everything before it has completed: the job interrupt keeps
