@@ -211,6 +211,15 @@ static VOID GuardThread(PVOID Ctx)
             MwLog(a, L"S9ThermalHold", hold ? a->ThermalLevel : 0);
         }
         a->FbLiveLast = MwFbSamples(a);
+        if (secs % 10 == 0 && a->FbVa != NULL && secs <= 600) {
+            /* T14d: what the panel shows over the boot (lock screen, sign-in, desktop, a test app): the centre
+             * pixel every 10 s as FbCtr<seconds> */
+            WCHAR nm[16];
+            UNICODE_STRING us;
+            RtlInitEmptyUnicodeString(&us, nm, sizeof(nm));
+            if (NT_SUCCESS(RtlUnicodeStringPrintf(&us, L"FbCtr%03u", secs)))
+                MwLog(a, nm, ((const ULONG *)(a->FbVa + (SIZE_T)(a->Fb.Height / 2) * a->Fb.Pitch))[a->Fb.Width / 2]);
+        }
         if (a->FbLiveLast >= 8)
             a->FbLiveSecs++;
         /* T14a: healthy = the panel itself showed content for 30 s (at least 8 of 16 points across the whole

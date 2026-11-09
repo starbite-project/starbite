@@ -282,6 +282,13 @@ pull_hive "$out/pre"
 mkdir -p "$out/pre/umdlog"
 adb pull "$W/ProgramData/Starbite/umdlog/." "$out/pre/umdlog/" >/dev/null 2>&1 || true
 adb shell "ls $W/Windows/Temp/ | grep '^sbumd-'" 2>/dev/null | tr -d '\r' | while read -r f; do adb pull "$W/Windows/Temp/$f" "$out/pre/umdlog/" >/dev/null 2>&1; done || true
+# T14d: the newest Windows Error Reporting reports (a crashed test or driver process)
+mkdir -p "$out/pre/wer"
+for d in ReportArchive ReportQueue; do
+    adb shell "ls -t '$W/ProgramData/Microsoft/Windows/WER/$d' 2>/dev/null | head -8" | tr -d '\r' | while read -r r; do
+        [ -n "$r" ] && adb pull "$W/ProgramData/Microsoft/Windows/WER/$d/$r" "$out/pre/wer/" >/dev/null 2>&1
+    done
+done
 if [ $gpu_armed = 1 ]; then
     mkdir -p "$out/pre/gputest"
     for f in gputest.log sbtex-hw.log sbtex-softpipe.log sbtex-hw-vertexid.log sbshare.log sbdwm-hw.log sbdwm-softpipe.log sbfps.log triangle-hw.ppm armed; do

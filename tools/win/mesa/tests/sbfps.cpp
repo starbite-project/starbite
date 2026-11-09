@@ -74,6 +74,26 @@ static DWORD WINAPI Watchdog(LPVOID)
     }
 }
 
+/* T14d: T14c's flip run ended the process so suddenly its watchdog never logged: a crash. Name it. */
+static LONG WINAPI Crash(EXCEPTION_POINTERS *e)
+{
+    HMODULE m = nullptr;
+    char mod[MAX_PATH] = "?";
+    void *addr = e->ExceptionRecord->ExceptionAddress;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCSTR)addr, &m);
+    if (m)
+        GetModuleFileNameA(m, mod, sizeof(mod));
+    out("CRASH: run %ld, %ld frames, in '%s': exception 0x%08lx at %p (%s+0x%llx), info %llx %llx\n", g_run,
+        g_frames, kPhase[g_phase < 7 ? g_phase : 0], (unsigned long)e->ExceptionRecord->ExceptionCode, addr, mod,
+        (unsigned long long)((char *)addr - (char *)m), (unsigned long long)e->ExceptionRecord->ExceptionInformation[0],
+        (unsigned long long)e->ExceptionRecord->ExceptionInformation[1]);
+    if (logfile)
+        fflush(logfile);
+    fflush(stdout);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     if (m == WM_DESTROY) {
@@ -256,6 +276,7 @@ int main(int argc, char **argv)
     if (secs < 2 || secs > 300)
         secs = 20.0;
     logfile = fopen(argc > 3 ? argv[3] : "sbfps.log", "a");
+    SetUnhandledExceptionFilter(Crash);
     QueryPerformanceFrequency(&g_f);
     CreateThread(nullptr, 0, Watchdog, nullptr, 0, nullptr);
     SetProcessDPIAware();

@@ -1129,6 +1129,15 @@ when.
 moving quad, with a DYNAMIC constant buffer), 20 s with a blt swap chain and 20 s with a flip one. It logs fps
 and the slowest frame.
 
+**cycle-t14c-1 (04:35):**
+- **The first measured frame rate:** a full-screen D3D11 app with a blt-model swap chain ran at **81.7 fps** on the
+  Mali (1,226 frames in 15 s, slowest 192 ms).
+- **The flip-model run crashed** after ~6 s at ~16 fps.
+- **The panel showed the lock screen after logon.** DWM kept its 3 framebuffer-aliased primaries throughout, so
+  it was composing the lock screen over the session.
+- **T14d:** the framebuffer's centre pixel every 10 s (`FbCtrNNN`), a crash logger in sbfps, and WER reports in
+  the pull.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
