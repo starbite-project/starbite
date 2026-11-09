@@ -45,7 +45,7 @@ esac
 out=${1:?usage: gpu-cycle.sh STAGE OUT [...]}; shift
 tkey=win11-gpu; ckey=win11-auto; keep=0
 full_sec=300
-while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --full-sec) full_sec=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
+while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --no-trace) notrace=1; shift;; --full-sec) full_sec=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
 case $full_sec in ''|*[!0-9]*) echo "--full-sec needs seconds"; exit 1;; esac
 [ "$full_sec" -ge 120 ] && [ "$full_sec" -le 3600 ] || { echo "--full-sec 120..3600"; exit 1; }
 mkdir -p "$out"
@@ -186,6 +186,7 @@ install() {
         # with it left over from them: every GPU call of every process was an unbuffered write to its log.
         local trace="touch trace"
         [ "${guard_auto:-0}" = 1 ] && trace="rm -f trace"
+        [ "${notrace:-0}" = 1 ] && trace="rm -f trace"   # T23: timing runs (sbdrag) without the per-call trace
         adb shell "rm -f $W/Windows/Starbite/sbwddm.full.off $W/Windows/Temp/sbumd-*.log; mkdir -p $W/ProgramData/Starbite/umdlog; cd $W/ProgramData/Starbite/umdlog && for f in *; do [ \"\$f\" = trace ] || rm -f \"\$f\"; done; $trace" >/dev/null
         # STAGE/gputest/: render tests at logon in the test boot (starbite/win/autotest/sb-gputest.cmd, one-shot)
         if [ -d "$stage/gputest" ]; then
@@ -343,7 +344,7 @@ for d in ReportArchive ReportQueue; do
 done
 if [ $gpu_armed = 1 ]; then
     mkdir -p "$out/pre/gputest"
-    for f in gputest.log sbtex-hw.log sbtex-softpipe.log sbtex-hw-vertexid.log sbshare.log sbdwm-hw.log sbdwm-softpipe.log sbfps.log sbfps-watchdog.log sbtwo.log sbtext.log sbtext-hw.ppm sbtext-warp.ppm sbtext-hw-only-clear.ppm sbtext-hw-only-roundrect.ppm triangle-hw.ppm armed; do
+    for f in gputest.log sbtex-hw.log sbtex-softpipe.log sbtex-hw-vertexid.log sbshare.log sbdwm-hw.log sbdwm-softpipe.log sbfps.log sbfps-watchdog.log sbtwo.log sbdrag.log sbtext.log sbtext-hw.ppm sbtext-warp.ppm sbtext-hw-only-clear.ppm sbtext-hw-only-roundrect.ppm triangle-hw.ppm armed; do
         adb pull "$W/starbite/auto/gpu/$f" "$out/pre/gputest/" >/dev/null 2>&1 || true
     done
     if [ -f "$out/pre/gputest/armed" ]; then log "gputest did NOT run (still armed: no logon?)"; else log "gputest: $(grep -a -E 'exit|TEST' "$out/pre/gputest/gputest.log" 2>/dev/null | tr -d '\r' | tr '\n' ';' | cut -c1-400)"; fi

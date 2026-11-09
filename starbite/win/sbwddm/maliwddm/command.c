@@ -535,6 +535,7 @@ static BOOLEAN Reap(MW_ADAPTER *A, BOOLEAN CheckTimeout)
     }
 
     A->Running = FALSE;
+    A->GpuBusy100ns += (LONG64)(KeQueryInterruptTime() - A->JobStart);   /* T23 (interrupt level: no interlock needed) */
     if (!failed) {
         A->JobsDone++;
         return TRUE;
@@ -802,7 +803,16 @@ NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMIT
             if (a->QCount != 0)
                 a->PresentWaitTimeouts++;
         }
-        DoPresent(a, &priv->Present);
+        {
+            /* T23: the wait above and the CPU work below, per present */
+            ULONG64 t1 = KeQueryInterruptTime();
+            LONG64 w = (LONG64)(t1 - t0);
+            InterlockedAdd64(&a->PresentWait100ns, w);
+            if (w > a->PresentWaitMax100ns)
+                a->PresentWaitMax100ns = w;
+            DoPresent(a, &priv->Present);
+            InterlockedAdd64(&a->PresentCpu100ns, (LONG64)(KeQueryInterruptTime() - t1));
+        }
     }
     /* Paging buffers (empty: map/unmap happen on the CPU), presents and
      * anything without our private data carry no jobs. */

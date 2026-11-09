@@ -56,6 +56,14 @@ typedef struct _MW_COMMAND {
 /* Starbite (sbumd/sbwddm): a fact from the UMD for the KMD's registry trace (UmdNote_<Id> = Value), a channel
  * that needs no file permissions (T13d: no umdlog appeared at all). */
 #define MW_ESCAPE_SB_NOTE       0x5B01
+/* T23: the KMD's time accumulators, for a test that measures a stretch of work (sbdrag): 100 ns units since start */
+#define MW_ESCAPE_SB_RATES      0x5B02
+typedef struct _MW_ESCAPE_SB_RATES_DATA {
+    mw_u32 Code;                        /* MW_ESCAPE_SB_RATES */
+    mw_u32 Presents, JobsDone, Renders;
+    mw_u64 GpuBusy100ns, PresentWait100ns, PresentCpu100ns, Now100ns;
+    mw_u32 ThermalHolds, Reserved;
+} MW_ESCAPE_SB_RATES_DATA;
 typedef struct _MW_ESCAPE_SB_NOTE_DATA {
     mw_u32 Code;                        /* MW_ESCAPE_SB_NOTE */
     mw_u32 Id;                          /* < 64 */

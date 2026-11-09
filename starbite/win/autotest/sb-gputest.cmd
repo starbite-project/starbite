@@ -9,6 +9,13 @@ cd /d %D%
 echo sb-gputest start %date% %time% >> gputest.log
 rem give DWM and the session a moment to settle
 ping -n 16 127.0.0.1 > nul
+rem T23: a window drag, DWM fps and where the time goes; with Starbite link (sblinkd) running, then without
+sbdrag.exe link sbdrag.log >> gputest.log 2>&1
+echo sbdrag link exit %errorlevel% >> gputest.log
+taskkill /f /im sblinkd.exe >> gputest.log 2>&1
+ping -n 3 127.0.0.1 > nul
+sbdrag.exe nolink sbdrag.log >> gputest.log 2>&1
+echo sbdrag nolink exit %errorlevel% >> gputest.log
 triangle.exe hw >> gputest.log 2>&1
 echo triangle hw exit %errorlevel% >> gputest.log
 if exist triangle.ppm move /y triangle.ppm triangle-hw.ppm > nul

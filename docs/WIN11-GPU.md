@@ -1342,6 +1342,19 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
 - **T22's tests:** sbtext draws each element alone against WARP (tiles differing and tiles all zero); sbtex adds
   `cbindex` and `bufload`.
 
+### 6.30 T22 fixed Direct2D; T23 measures a drag (2026-11-09)
+
+- **T22:** sbtext 0 failures (text, ClearType, bitmap and shapes equal WARP; all isolation tests clean); sbtex
+  `cbindex` and `bufload` pass.
+  - The black tiles were the buffer-view bug as well.
+  - T22 is the user's default, and the sign-in screen shows its text.
+- **Speed:** the user reports a window drag at about 2 fps. T23 measures it:
+  - **sbdrag:** 300 SetWindowPos moves, each followed by DwmFlush. It takes DWM timing info plus the KMD
+    accumulators via escape 0x5B02, with and without sblinkd.
+  - **KMD:** accumulators for GPU busy, the present queue wait and the present CPU copy, as `Live_Rate*`.
+  - **sb-patches/0119:** per-device 10 s umdlog stats (submits, blocked waits, CPU maps).
+  - **gpu-cycle `--no-trace`:** a test cycle without the per-call umdlog trace.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

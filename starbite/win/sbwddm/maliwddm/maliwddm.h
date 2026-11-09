@@ -179,6 +179,10 @@ struct _MW_ADAPTER {
     ULONG JcRejected;
     ULONG PrimaryBlts;
     ULONG PresentWaitTimeouts;
+    /* T23: where frame time goes (100 ns units, accumulated): GPU job run time, the present path's wait for the queue
+     * to drain (SubmitCommand), the CPU copies of presents (DoPresent); the guard turns them into per-second rates */
+    volatile LONG64 GpuBusy100ns, PresentWait100ns, PresentCpu100ns, PresentWaitMax100ns;
+    ULONG RateGpuPermille, RatePresentWaitMs, RatePresentCpuMs, RatePresentWaitMaxMs, RatePresents10, RateJobs10;
     ULONG ContentFrames;                  /* frames copied to the panel whose sampled pixels were not all black */
     ULONG FbContentFrames;                /* T13f: the same test read back from the framebuffer after the copy */
     ULONG64 FbPixels;                     /* pixels written into the framebuffer */

@@ -1,0 +1,94 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index ae5b33d..b4dcca0 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -752,6 +752,10 @@ struct sbdev {
+    void *present_cpu;
+    unsigned present_w, present_h;
+    uint32_t failed_seen;
++   /* T23 (sb-patches/0119): where this device's time goes, printed every 10 s to the umdlog */
++   LARGE_INTEGER st_t0;
++   unsigned st_submits, st_waits, st_blocked, st_busy, st_maps;
++   double st_blocked_ms, st_longest_ms;
+ };
+ 
+ static D3DKMT_HANDLE wadapter;
+@@ -1198,8 +1202,35 @@ static void wdead_reap(struct sbdev *d);
+ 
+ /* Wait until submission Seq of this device is done, for at most Ms milliseconds (0: just ask). 0 when done;
+  * -MK_EBUSY (Ms 0) or -MK_ETIMEDOUT when not. */
++static int sb_wait_seq_inner(struct sbdev *d, uint64_t seq, DWORD ms);
++
++/* T23: every wait timed; a wait that took over 0.1 ms counts as blocked */
+ static int
+ sb_wait_seq(struct sbdev *d, uint64_t seq, DWORD ms)
++{
++   LARGE_INTEGER f, t0, t1;
++   int ret;
++   if (seq == 0 || seq <= d->done)
++      return 0;
++   QueryPerformanceFrequency(&f);
++   QueryPerformanceCounter(&t0);
++   ret = sb_wait_seq_inner(d, seq, ms);
++   QueryPerformanceCounter(&t1);
++   double el = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
++   d->st_waits++;
++   if (ret == -MK_EBUSY)
++      d->st_busy++;
++   if (el > 0.1) {
++      d->st_blocked++;
++      d->st_blocked_ms += el;
++      if (el > d->st_longest_ms)
++         d->st_longest_ms = el;
++   }
++   return ret;
++}
++
++static int
++sb_wait_seq_inner(struct sbdev *d, uint64_t seq, DWORD ms)
+ {
+    int ret;
+ 
+@@ -1622,6 +1653,7 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+          if (bo)
+             bo->used = next;
+       }
++      d->st_submits++;
+       if (a->out_sync) {
+          uint64_t *s = sb_sync(d, a->out_sync);
+          if (s)
+@@ -1761,8 +1793,10 @@ wddm_ioctl(int fd, DWORD code, void *buf, DWORD len)
+       struct wbo *bo = wddm_bo(d, MALIKM_MMAP_HANDLE(m->Offset));
+       h->Result = -MK_EINVAL;
+       if (bo && m->Size <= bo->size) {
+-         if (!bo->cpu)
++         if (!bo->cpu) {
+             bo->cpu = w_lock(d, bo->h);
++            d->st_maps++;
++         }
+          if (bo->cpu) {
+             m->Address = (uint64_t)(uintptr_t)bo->cpu;
+             h->Result = 0;
+@@ -1782,6 +1816,22 @@ wddm_ioctl(int fd, DWORD code, void *buf, DWORD len)
+    }
+    if (trace_on() && code == IOCTL_MALIKM_DRM)
+       fprintf(stderr, "malikm-wddm: nr 0x%x -> %d\n", h->Nr, h->Result);
++   if (sb_log_active) {
++      LARGE_INTEGER f, now;
++      QueryPerformanceFrequency(&f);
++      QueryPerformanceCounter(&now);
++      if (d->st_t0.QuadPart == 0) {
++         d->st_t0 = now;
++      } else if (now.QuadPart - d->st_t0.QuadPart >= 10 * f.QuadPart) {
++         double s10 = (double)(now.QuadPart - d->st_t0.QuadPart) / (double)f.QuadPart;
++         fprintf(stderr, "sbumd: stats %.1f s (device %u): %u submits, %u waits (%u blocked: %.1f ms, longest %.1f ms; "
++                 "%u answered busy), %u new CPU maps\n", s10, d->id, d->st_submits, d->st_waits, d->st_blocked,
++                 d->st_blocked_ms, d->st_longest_ms, d->st_busy, d->st_maps);
++         d->st_t0 = now;
++         d->st_submits = d->st_waits = d->st_blocked = d->st_busy = d->st_maps = 0;
++         d->st_blocked_ms = d->st_longest_ms = 0;
++      }
++   }
+    ReleaseSRWLockExclusive(&d->lock);
+ }
+ 

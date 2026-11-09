@@ -132,6 +132,11 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         /* T15: GPU memory (MB alive now, the most so far) and allocations that failed */
         { L"Live_AllocMB", (ULONG)(a->AllocBytes >> 20) }, { L"Live_AllocMBPeak", (ULONG)(a->AllocBytesPeak >> 20) },
         { L"Live_AllocVaFails", (ULONG)a->AllocVaFails }, { L"Live_AllocFails", (ULONG)a->AllocFails },
+        /* T23: rates over the last logging interval: GPU busy (per mille), the present path's queue wait and CPU copy
+         * (ms per second; the longest single wait), presents and GPU jobs per 10 s */
+        { L"Live_RateGpuPermille", a->RateGpuPermille }, { L"Live_RatePresentWaitMs", a->RatePresentWaitMs },
+        { L"Live_RatePresentCpuMs", a->RatePresentCpuMs }, { L"Live_RatePresentWaitMaxMs", a->RatePresentWaitMaxMs },
+        { L"Live_RatePresents10", a->RatePresents10 }, { L"Live_RateJobs10", a->RateJobs10 },
     };
     static_assert(sizeof(c) / sizeof(c[0]) < SBW_LIVE_MAX, "Live_ table too long");
     for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]); i++)
@@ -160,6 +165,8 @@ static VOID GuardThread(PVOID Ctx)
      * T13-T16 flushed after every single value). Test cycles: 1/1; the user's install: 10/60. */
     ULONG liveSec = S9GetDword(L"Parameters", L"LiveSec", 1), liveFlushSec = S9GetDword(L"Parameters", L"LiveFlushSec", 1);
     ULONG lastFlush = 0;
+    LONG64 rateBusy = 0, rateWait = 0, rateCpu = 0;      /* T23 */
+    ULONG ratePres = 0, rateJobs = 0, rateSec = 0;
     ULONG64 nextSec = KeQueryInterruptTime() + 10000000ULL, lastWork = (ULONG64)-1, lastPeriodic = 0;
     LONG lastGen = -1;
     if (refreshMs != 0 && refreshMs < 50)
@@ -196,6 +203,16 @@ static VOID GuardThread(PVOID Ctx)
         BOOLEAN logNow = liveSec <= 1 || secs % liveSec == 0;
         a->LogBatch = TRUE;
         if (logNow) {
+            /* T23: rates since the last logging tick */
+            ULONG span = secs - rateSec ? secs - rateSec : 1;
+            LONG64 busy = a->GpuBusy100ns, wait = a->PresentWait100ns, cpu = a->PresentCpu100ns;
+            a->RateGpuPermille = (ULONG)((busy - rateBusy) / 10000 / span);           /* 100 ns -> 1/1000 of a second */
+            a->RatePresentWaitMs = (ULONG)((wait - rateWait) / 10000 / span);
+            a->RatePresentCpuMs = (ULONG)((cpu - rateCpu) / 10000 / span);
+            a->RatePresentWaitMaxMs = (ULONG)(InterlockedExchange64(&a->PresentWaitMax100ns, 0) / 10000);
+            a->RatePresents10 = (a->Presents - ratePres) * 10 / span;
+            a->RateJobs10 = (a->JobsDone - rateJobs) * 10 / span;
+            rateBusy = busy; rateWait = wait; rateCpu = cpu; ratePres = a->Presents; rateJobs = a->JobsDone; rateSec = secs;
             LiveCounters(a, prev);
             MwLog(a, L"Live_Seconds", secs);
         }

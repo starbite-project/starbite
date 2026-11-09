@@ -542,6 +542,20 @@ static NTSTATUS APIENTRY MwEscape(IN_CONST_HANDLE hAdapter, const DXGKARG_ESCAPE
                 MwLog(a, nm, n->Value);
         }
         return STATUS_SUCCESS;
+    case MW_ESCAPE_SB_RATES:
+        if (Esc->PrivateDriverDataSize >= sizeof(MW_ESCAPE_SB_RATES_DATA)) {
+            MW_ESCAPE_SB_RATES_DATA *r = (MW_ESCAPE_SB_RATES_DATA *)Esc->pPrivateDriverData;
+            r->Presents = a->Presents;
+            r->JobsDone = a->JobsDone;
+            r->Renders = a->Renders;
+            r->GpuBusy100ns = (mw_u64)a->GpuBusy100ns;
+            r->PresentWait100ns = (mw_u64)a->PresentWait100ns;
+            r->PresentCpu100ns = (mw_u64)a->PresentCpu100ns;
+            r->Now100ns = KeQueryInterruptTime();
+            r->ThermalHolds = a->ThermalHolds;
+            return STATUS_SUCCESS;
+        }
+        return STATUS_INVALID_PARAMETER;
     case MW_ESCAPE_STATS:
         if (Esc->PrivateDriverDataSize < (UINT)FIELD_OFFSET(MW_ESCAPE_STATS_DATA, Vsyncs))
             return STATUS_INVALID_PARAMETER;
