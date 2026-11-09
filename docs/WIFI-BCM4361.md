@@ -11,7 +11,7 @@ Status 2026-11-07:
 | Core (`starbite/wifi/`: 3,600 lines, plus 870 for the VENDOR readers and the libsb shim) | **Works on S9 #1 to a scan** (2026-11-07, runs 2 and 3: firmware up, CLM loaded, 29 access points heard). Reviewed adversarially (section 10), host-tested on a register-level model |
 | NVRAM processing | Byte-identical to Linux's brcmfmac on all 10 of the phone's NVRAM files |
 | Reading the files from VENDOR | ext4 (LineageOS) and EROFS (One UI 8, S9 #1 now). The EROFS reader reads all 13 radio files from a copy of S9 #1's own VENDOR image, byte-identical |
-| libsb shim + test image `wifitest.img` | T1, T2, T3 passed on the phone; **T4-open passed** 2026-11-08 (join, DHCP lease, router pings, DNS; section 9) |
+| libsb shim + test image `wifitest.img` | T1, T2, T3 passed on the phone; **T4-open passed** 2026-11-08 (join, DHCP lease, router pings, DNS; section 9). **WPA2 with the core's own handshake joined** 2026-11-09 in Starbite OS 1.2-alpha7 (section 9, T4-WPA2) |
 | Windows driver | `SbWifi.sys` (W1 skeleton, section 7) builds and signs with `tools/win`; not run (Windows on the phone is being repaired) |
 | Starbite OS | Shim done; integration plan in section 8, to agree with the `starbite-os` session |
 
@@ -235,6 +235,7 @@ the chip accepts our ring descriptors and stamping, DMA through the real SysMMU 
 4. Escan v1 vs v2: chosen by `scan_ver` as brcmfmac does; both are host-tested, neither has run on this firmware.
 5. Interrupts: polling first; INTx (SPI 253) when the OS has interrupts.
 7. The firmware's supplicant (`wifi_fwsup=1`) is untried; the host's is the default (T4).
+9. WPA2 on 2.4 GHz: associated, then SET_SSID timeout and no handshake message (T4-WPA2 run b, section 9); 5 GHz works.
 8. A real random source for the handshake's nonce in the shims (libsb: e.g. the TRNG if reachable from EL1;
    Windows: `BCryptGenRandom`).
 6. Deep sleep (`D2H_DEV_DS_ENTER_REQ`) is acknowledged as brcmfmac does; power saving is not set yet.
@@ -382,6 +383,29 @@ network's name, from the Windows run; not committed). PCIe Gen1 x1 in 70 us, fir
 ANSWERED (a lookup of example.com)`**; 8 frames received, 7 sent, 7 done, 0 errors; the radio unpowered on the way
 back and a clean return to the menu. Log: `build/wifi/t4-pmsg.txt` (not in git). Starbite OS 0.4+ uses this core
 and sbnet.
+
+### T4-WPA2 (2026-11-08/09): the core's own four-way handshake — JOINED on 5 GHz (Starbite OS 1.2-alpha7)
+
+`bcmw_join` with the host's supplicant (`link.c` + `wpa.c`) on the user's WPA2 network (dual band, one name).
+Logs are not in git (`build/wifi/t4wpa2*-pmsg.txt`, `build/starbite-os/t12a7-wifi/pmsg.txt`).
+
+| Run | Image / commit | Band chosen | Result |
+|---|---|---|---|
+| a | 6a136f3d (6eba345) | 5 GHz | associated; the AP's message 1 dropped inside the firmware (console `EL: 30 73b8`); no EAPOL to the host |
+| b | e14fca2 (PM 0 before the join) | 2.4 GHz (chanspec 1808) | LINK UP, no message 1, no JOIN event, SET_SSID status 2 (timeout) ~2 s later |
+| c | a05e2623 (3ccc92a: 5 GHz preferred, events logged) | 5 GHz (e32a) | the firmware's join completed (AUTH, LINK, ASSOC, JOIN, SET_SSID 0), but message 1 and its 3 resends dropped (`EL: 30 73b8` at +0, +0.1, +1.1, +2.1 s); deauth reason 2 |
+| d | 8d915b29 (24a0adf: sup_wpa 0 tried, 300 ms settle after the scan, 256 rx buffers) | — | not run (superseded by the Starbite OS run below) |
+| Starbite OS 1.2-alpha7 self test | 3ccc92a + 24a0adf ported into Starbite's non-blocking join (claude/starbite-os-05b163, 07f8ff8) | 5 GHz (e32a, -56 dBm) | **JOINED**: PMK in 78 ms, sup_wpa 0 refused, events 54/3/16/7, message 1 answered (message 2), the tx flow ring created (512 x 48), message 3 answered (message 4), keyed, **THE NETWORK IS JOINED 2292 ms after SET_SSID**; DHCP bound (7200 s), gateway ping 21 ms, DNS answered |
+
+Earlier Starbite OS self tests (0.6.1 T20, 1.2-alpha5) all chose 2.4 GHz (1808) and failed as run b did, and so
+did Windows W2g on a 2.4 GHz hotspot. So:
+- **5 GHz is preferred** (`scan_result`: unless more than 20 dB weaker; `cfg.join_band` forces a band). Every WPA2
+  success so far (W2p under Windows, alpha7) is 5 GHz.
+- **Run c's message-1 drops went away with 24a0adf's sequence** (the `sup_wpa 0` attempt, PM 0, the settle after
+  the directed scan, 256 rx buffers); which of these mattered is not isolated.
+- **Open: the 2.4 GHz timeout** (associated, then no message 1 and SET_SSID 2). The untried experiment is the
+  hidden row `wifitest-join24` (`wifi_band=2 wifi_btc0=1`: 2.4 GHz only, Bluetooth coexistence off). A
+  2.4 GHz-only network will not join until this is understood.
 
 ### Runs 2 and 3 (2026-11-07, launches #59 and #60, image 57148abf, commit 5115467): T2 and T3 passed
 
