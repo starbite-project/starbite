@@ -60,14 +60,25 @@ static void wr(uintptr_t a, uint32_t v)
 static int max_rmw(uint8_t reg, uint8_t clear, uint8_t set)
 {
     uint8_t v = 0;
-    if (!sb_max_init() || !sb_i2c_read(&sb_max_bus, MAX_TOP, reg, &v, 1))
+    if (!sb_max_init() || !sb_i2c_read(&sb_max_bus, MAX_TOP, reg, &v, 1)) {
+        sb_logx("vib: the MAX77705 read failed, reg ", reg);
         return 0;
+    }
     uint8_t n = (uint8_t)((v & ~clear) | set);
     if (n == v)
         return 1;
     struct sb_auth au;
     sb_auth_init(&au, SB_SP_MAX, 0, (uint64_t)MAX_TOP << 8 | reg, 1, SB_TIER1, 0, "vibration: the MAX77705 haptic bits");
-    int ok = sb_gate_open(&au) && sb_max_write(MAX_TOP, reg, n, SB_TIER1);
+    /* 1.2-alpha11: tier 1 needs its two steps (alpha8 on the phone: the gate refused silently, nothing was written).
+     * The value is fixed in this file (the vendor DT's: BIASEN, MCONFIG LRA + enable + / 128; only these two
+     * registers, read-modify-write), not the user's, as gpuheat's fixed vdd_g3d */
+    sb_auth_step(&au, SB_STEP_WARN);
+    sb_auth_step(&au, SB_STEP_HELD);
+    if (!sb_gate_open(&au)) {
+        sb_logx("vib: the gate refused the MAX77705 write, reg ", reg);
+        return 0;
+    }
+    int ok = sb_max_write(MAX_TOP, reg, n, SB_TIER1);
     sb_gate_close();
     return ok;
 }

@@ -440,9 +440,12 @@ void selftest_timer(unsigned id)
         return;
     case 42:
         vib_off();
-        sb_logx(vib_on() ? "selftest: FAILED: vibration: still on after the stop " :
-                           "selftest: passed: vibration (the motor off after the stop); feel / hear it? seconds ",
-                (sb_ms() - t0) / 1000U);
+        if (!vib_ready())                   /* 1.2-alpha11: alpha8 said "passed" after a refusal */
+            sb_logf("selftest: FAILED: vibration: ", vib_why());
+        else
+            sb_logx(vib_on() ? "selftest: FAILED: vibration: still on after the stop " :
+                               "selftest: passed: vibration (the motor ran, then off after the stop); felt? seconds ",
+                    (sb_ms() - t0) / 1000U);
         phase = 43;
         kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
         return;
