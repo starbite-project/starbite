@@ -277,13 +277,21 @@ driver is upstream's, so this Image can replace the daily one once the phone sta
 
 Each step stands alone and keeps the contract (sbshm.h) and the host core (sbghost) as they are.
 
-1. **Damage-only frames** (guestd): publish only on change and fill `damage_*`. The host's 2x copy of the whole
+1. **Damage-only frames** (guestd): publish only on change and fill `damage_*`. **Done (db2bea2)**: a row table
+   (`row_seq[]` at SBSHM_ROWS_OFF, `rows_valid`) carries the seq in which each row last changed; hosts copy only
+   newer rows (`sbg_rows()`); QEMU: 76..324 rows per composite instead of 1440, the panel verified exact. The host's 2x copy of the whole
    surface (112 ms at worst in P3b) is the bottleneck, not Linux.
-2. **A guest kernel of its own** (`guest.config` on the 7.1 tree, its own out/): no S9 port drivers (no initcall
+2. **A guest kernel of its own**. **Done (8ac79c8)**: `linux/guest.config` on allnoconfig, built by
+   `build-patched.sh GUEST=1` into `$WORK/gout` in 1.5 min: 7.1.0-sbguest, 6.7 MB. Planned as (`guest.config` on the
+   7.1 tree, its own out/): no S9 port drivers (no initcall
    blacklist needed), `STRICT_DEVMEM`, `DRM_SIMPLEDRM` on the surface (`simple-framebuffer` node at the surface
    buffer), sbguest built in, both Starbite patches. The DRM side then gives any fbdev/DRM client the screen
    unchanged, and fbcon gives a Linux console at once.
-3. **A terminal**: fbcon or a small terminal on simpledrm, with input from Starbite's on-screen keyboard as key
+3. **A terminal**. **Done on QEMU (8ac79c8; run-term.sh 3/3)**: `--fb` puts a simple-framebuffer
+   node on surface buffer 0 (the region no-map), `--term` a shell on tty1 with the kernel console only in the
+   ramoops zone. `guestd --present` copies fbcon's changed rows into buffer 1, the stable front (reading the live
+   buffer left transient rows stale on QEMU). Typing uses `sbshm_ascii_key`. Phone: P4 staged (2c76887). Planned
+   as: fbcon or a small terminal on simpledrm, with input from Starbite's on-screen keyboard as key
    events (`SBG_MSG_KEY` already carries Linux key codes; the keyboard is Starbite's, the pocket lock in front).
 4. **A root file system**: the guest has only its initramfs. Read-only first: a block device over the shared region
    that Starbite OS serves from a store entry or the microSD (the host does the I/O; the guest never touches UFS).
