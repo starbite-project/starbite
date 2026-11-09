@@ -428,9 +428,21 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         stop(c, HEAT_ST_STOPPED, "Battery at 2 %: all of it went to heat");
         return;
     }
-    if (surv && in->gauge_ok && iabs(in->ma) > L->surv_stop_ma) {
+    if (surv && in->gauge_ok && !c->no_high_stop && iabs(in->ma) > L->surv_stop_ma) {
         stop(c, HEAT_ST_STOPPED, "Battery current above 4.5 A (a short or a failing cell?)");
         return;
+    }
+    /* 1.2-alpha17 (the user: "the battery has its own protection board"): with the 4.5 A stop off, a backstop far
+     * above what the loads draw (~5 A at most): 6 A for 1 s. The pack's own protection handles real shorts */
+    if (surv && c->no_high_stop && in->gauge_ok && iabs(in->ma) > HEAT_BACKSTOP_MA) {
+        if (!c->t_over)
+            c->t_over = now ? now : 1;
+        else if (now - c->t_over >= 1000U) {
+            stop(c, HEAT_ST_STOPPED, "Battery current above 6 A for 1 s (a short or a failing cell?)");
+            return;
+        }
+    } else {
+        c->t_over = 0;
     }
     if (flat && !surv && in->gauge_ok && c->reserve_pct > 0 && in->pct < c->reserve_pct) {
         stop(c, HEAT_ST_STOPPED, "Reserve reached: kept for a call or SOS");
@@ -512,11 +524,11 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
             /* 1.2-alpha16: a soft current ceiling 0.3 A below the 4.5 A stop (one gauge sample above it ends Survival;
              * the user's alpha7 run had -3.56 A spikes at a 3.1 A average): the fine hold steps down from 4.2 A, back
              * up only below 3.9 A */
-            int ahi = in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 300;
+            int ahi = !c->no_high_stop && in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 300;
             int hot = (in->soc_ok && in->soc_c10 >= lim) || bhot || ahi;
             int very = (in->soc_ok && in->soc_c10 >= lim + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15);
             int cool = in->soc_ok && in->soc_c10 < lim - 10 && in->bat_ok && in->bat_c10 < c->surv_bat_c10 - 40 &&
-                       !(in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 600);
+                       (c->no_high_stop || !(in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 600));
             if (surv_calibrate(c, in, now, hot)) {
                 c->state = HEAT_ST_RUNNING;
                 why(c, "Survival: measuring the big cores' combinations");
@@ -565,12 +577,12 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         int hot = (in->soc_ok && in->soc_c10 >= target) || bhot;
         int very = (in->soc_ok && in->soc_c10 >= target + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15);
         int amps = !c->no_current_stop && in->gauge_ok && iabs(in->ma) > L->hard_ma;   /* 1.2-alpha4: can be off */
-        int ahi = in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 300;  /* 1.2-alpha16: below the 4.5 A stop */
+        int ahi = !c->no_high_stop && in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 300;  /* 1.2-alpha16 */
         int low = in->gauge_ok && in->mv > 0 && in->mv < L->surv_shed_mv;
         int cool = in->soc_ok && in->soc_c10 < target - L->surv_band_c10 && in->gauge_ok && in->bat_ok &&
                    in->bat_c10 < c->surv_bat_c10 - 40 &&
                    (c->no_current_stop || iabs(in->ma) < L->hard_ma - 300) && in->mv >= L->surv_shed_mv + 50 &&
-                   iabs(in->ma) < L->surv_stop_ma - 600;
+                   (c->no_high_stop || iabs(in->ma) < L->surv_stop_ma - 600);
         if (surv_calibrate(c, in, now, hot || amps || low)) {
             c->state = HEAT_ST_RUNNING;
             why(c, "Survival: measuring the big cores' combinations");

@@ -144,6 +144,7 @@ struct sbos_heat {
     int32_t surv_stop_c10;      /* 1.1: Survival (trip off)'s SoC stop (0.1 C) */
     int32_t gpu_on;             /* 1.1: the GPU's share is running */
     int32_t surv_bat_c10;       /* 1.1-beta5: Survival's battery limit (0.1 C) */
+    int32_t no_high_stop;       /* 1.2-alpha17: Survival's 4.5 A stop turned off (a 6 A / 1 s backstop instead) */
 };
 
 enum { SOS_OFF = 0, SOS_FLASH = 1 };
@@ -205,6 +206,8 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
                          Reads 1 on, 0 off, -1 the Linux files are not in the store */,
        SET_HEAT_WHITE = 23 /* 1.2-alpha5: write 1 while Survival runs: the screen white again (Survival's heat);
                               0 the normal screen */,
+       SET_HEAT_HIGH_STOP = 25 /* 1.2-alpha17: Survival's 4.5 A battery-current stop: 0 asks once, then off (a 6 A over
+                                   1 s backstop stays); 1 on again. Remembered. Reads 1 on, 0 off */,
        SET_VIBRATE = 24 /* 1.2-alpha7: write (count << 16) | ms: count pulses (0 = 1) of ms (<= 5000) with ms gaps; 0 stops.
                            Reads 1 when the motor works, 0 not tried yet, -1 refused */ };
 

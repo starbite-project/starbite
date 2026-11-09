@@ -207,10 +207,15 @@ static void show(void)
         /* 1.2-alpha4: the 3.5 A battery-current limit, as in Manual (one switch for both, until a restart) */
         if (!h.no_current_stop) {
             ui_hold(28, "Hold: turn the 3.5 A current limit off", 1500, 0);
-            ui_textline("Survival holds the load at 3.5 A. Off, it adds load past it; the 4.5 A stop (trip off) stays.", GREY);
+            ui_textline("Survival holds the load at 3.5 A. Off, it adds load past it. Remembered.", GREY);
         } else {
             ui_button(29, "3.5 A current limit: OFF", "Tap to turn it back on", 0);
         }
+        /* 1.2-alpha17: the 4.5 A stop, its own switch (one confirmation, remembered) */
+        if (!h.no_high_stop)
+            ui_hold(31, "Hold: turn the 4.5 A stop off (asks once)", 1500, 0);
+        else
+            ui_button(32, "4.5 A stop: OFF", "6 A for 1 s still stops. Tap to turn it back on", 0);
         ui_toggle(24, "Hardware trip OFF", surv_tripoff);
         if (surv_tripoff) {
             fmt_init(&f);
@@ -410,6 +415,8 @@ void app_event(const struct sbos_event *ev)
     case EV_APP_HOLD:
         if (ev->id == 20 || ev->id == 28)
             setting_set(SET_HEAT_CURRENT_STOP, 0);
+        if (ev->id == 31)                   /* 1.2-alpha17: the kernel asks once */
+            setting_set(SET_HEAT_HIGH_STOP, 0);
         if (ev->id == 27)                   /* 1.2-alpha16: the kernel asks once, then remembers it */
             setting_set(SET_HEAT_SURV_STOP_C10, SBOS_HEAT_SOC_NOLIMIT_C10);
         if (ev->id == 18) {
@@ -434,6 +441,8 @@ void app_event(const struct sbos_event *ev)
             setting_set(SET_HEAT_SURV_STOP_C10, h.surv_stop_c10 >= SBOS_HEAT_SOC_HARD_C10 ? 1250 : (h.surv_stop_c10 / 50 + 1) * 50);
         } else if (ev->id == 29 && !running)
             setting_set(SET_HEAT_CURRENT_STOP, 1);
+        else if (ev->id == 32 && !running)
+            setting_set(SET_HEAT_HIGH_STOP, 1);
         else if (ev->id == 22 && !running) {
             int k = 0;
             for (int i = 0; i < 5; ++i)

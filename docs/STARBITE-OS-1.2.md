@@ -1,4 +1,19 @@
-# Starbite OS 1.2-alpha16: Survival with the GPU overclock, a fine hold, the 150 C reading fixed (2026-11-09)
+# Starbite OS 1.2-alpha17: Survival's 4.5 A stop gets a switch (2026-11-09)
+
+alpha16 on the phone: it climbs fast (~130 C quickly), then stopped on "Battery current above 4.5 A". The user: the
+battery has its own protection board, so the 4.5 A stop should be optional.
+- **Heat > Survival > "Hold: turn the 4.5 A stop off"**: one warning screen, remembered across restarts (as the 3.5 A
+  limit now is too). Off, Survival keeps drawing above 4.5 A; the soft 4.2 A ceiling is off with it.
+- **A backstop stays: 6 A for 1 s** stops Survival. The loads draw ~5 A at most, so 6 A sustained means a fault. The
+  battery pack's own protection and the MAX77705's battery-to-system over-current limit still act. (8 A was asked;
+  6 A was picked because nothing of ours can reach it, and it catches a soft short sooner.)
+- **The MAX77705's B2SOVRC** (CHG_CNFG_05 0xBC [3:0]: 0 off, 6 4.5 A, 8 4.8 A, 9 5.0 A, 0xB 5.4 A, 0xC 5.6 A) is read
+  (never written) at every Survival start, logged, and kept in the heat log's header: if it is on, it is the next
+  wall above 4.5 A (a cut of the system rail, so a restart).
+- The battery voltage is in the heat log every second (it was already); heatlog.py prints the B2SOVRC line too.
+- The battery limit (<= 60 C) and the 2 % stop are unchanged.
+
+## Starbite OS 1.2-alpha16: Survival with the GPU overclock, a fine hold, the 150 C reading fixed (2026-11-09)
 
 From the user's alpha7 Survival run on battery (19:30, the heat log in the slot):
 - **The "150 -> 130 -> 135" saw was a reading bug, not the chip.** At a steady 11.7 W the hottest reading dropped from

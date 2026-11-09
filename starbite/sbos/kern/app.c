@@ -446,6 +446,18 @@ static void surv_bat_done(int ok)
 }
 
 /* 1.2-alpha1: the Linux test's confirmation */
+/* 1.2-alpha17 (the user): Survival's 4.5 A stop off, one warning, remembered */
+static void highstop_done(int ok)
+{
+    if (ok) {
+        heat_no_high_stop = 1;
+        settings_changed();
+    }
+    sb_log(ok ? "settings: Survival's 4.5 A stop: OFF (confirmed; saved; a 6 A / 1 s backstop stays)" :
+                "settings: Survival's 4.5 A stop kept");
+    app_event_send(app_by_id("heat"), EV_APP_SERVICE, 1, 0);
+}
+
 /* 1.2-alpha16 (the user): "No limit" with one clear warning (was 8 holds), remembered across restarts */
 static void nolimit_done(int ok)
 {
@@ -519,8 +531,25 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         heat_reserve_pct = (int)arg[1];
         sb_logx("settings: the call / SOS reserve for full heat, % (0 overridden): ", arg[1]);
         return 0;
+    case SET_HEAT_HIGH_STOP:
+        if (arg[1]) {
+            heat_no_high_stop = 0;
+            settings_changed();
+            sb_log("settings: Survival's 4.5 A stop: on");
+            return 0;
+        }
+        if (!heat_no_high_stop)
+            kui_confirm("Survival without the 4.5 A stop?",
+                        "Survival keeps drawing above 4.5 A instead of stopping. The battery's own protection board and "
+                        "the charger chip's limit still act; ours stops only at 6 A for 1 s.",
+                        "The phone may restart if the battery's voltage sags too far at high current: the heat log keeps "
+                        "the voltage each second.",
+                        "Remembered until you turn it back on.",
+                        "Hold to turn the stop off", highstop_done);
+        return 0;
     case SET_HEAT_CURRENT_STOP:
         heat_no_current_stop = arg[1] == 0;
+        settings_changed();                 /* 1.2-alpha17: remembered */
         sb_log(arg[1] ? "settings: the 3.5 A battery-current limit (Manual, Survival): on" :
                         "settings: the 3.5 A battery-current limit (Manual, Survival): OFF (the user's choice)");
         return 0;
@@ -927,6 +956,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_RESERVE: return heat_reserve_pct;
         case SET_HEAT_TARGET_C10: return heat_target_c10;
         case SET_HEAT_CURRENT_STOP: return !heat_no_current_stop;
+        case SET_HEAT_HIGH_STOP: return !heat_no_high_stop;
         case SET_HEAT_SOC_STOP_C10: return heat_soc_stop_c10;
         case SET_HEAT_SURV_STOP_C10: return heat_surv_stop_c10;
         case SET_HEAT_SURV_BAT_C10: return heat_surv_bat_c10;

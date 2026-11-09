@@ -750,6 +750,37 @@ static void t_survival(void)
             run(&c, &in, 12500, 3000, 0);
             CHECK(load_of(&c) <= l1, "Survival %d: no step back up between 3.9 and 4.2 A (%d -> %d)", x, l1, load_of(&c));
         }
+        /* 1.2-alpha17: the 4.5 A stop off (the user's switch): 5 A neither stops nor trims; 6.5 A for 1 s stops */
+        for (int x = 0; x < 2; ++x) {
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.no_current_stop = 1;
+            c.no_high_stop = 1;
+            heat_ctl_request(&c, x ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0, &in);
+            c.trip_off = x;
+            run(&c, &in, 0, 10000, 0);
+            int l0 = load_of(&c);
+            in.ma = -5000;
+            run(&c, &in, 10250, 3000, 0);
+            CHECK(c.state == HEAT_ST_RUNNING && load_of(&c) >= l0, "Survival %d, 4.5 A stop off: 5 A neither stops nor "
+                  "trims (%d -> %d, %s)", x, l0, load_of(&c), c.why);
+            in.ma = -6500;
+            run(&c, &in, 13500, 500, 0);
+            CHECK(c.state == HEAT_ST_RUNNING, "Survival %d: 6.5 A for 0.5 s is not yet a stop (%s)", x, c.why);
+            in.ma = -5000;
+            run(&c, &in, 14250, 500, 0);
+            in.ma = -6500;
+            run(&c, &in, 15000, 1250, 0);
+            CHECK(stopped_with(&c, HEAT_ST_STOPPED, "above 6 A for 1 s"), "Survival %d: 6.5 A for 1 s stops (%s)", x, c.why);
+        }
+        heat_ctl_init(&c, 0);
+        in = base_in(0);
+        heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+        c.trip_off = 1;
+        run(&c, &in, 0, 10000, 0);
+        in.ma = -4600;
+        run(&c, &in, 10250, 300, 0);
+        CHECK(stopped_with(&c, HEAT_ST_STOPPED, "above 4.5 A"), "the 4.5 A stop on (the default) still stops (%s)", c.why);
         /* the 3.5 A limit in plain Survival: held there, or (the user's switch) not */
         for (int off = 0; off < 2; ++off) {
             heat_ctl_init(&c, 0);

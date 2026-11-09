@@ -43,11 +43,15 @@ def main():
         return 1
     seq, recs = max(hs, key=lambda h: h[0])
     blob = b"".join(recs.get("heatlog%d" % k, b"") for k in range(8))
-    magic, n, level, a55, m3n, gpu, _ = struct.unpack_from("<IIIIHHI", blob, 0)
+    magic, n, level, a55, m3n, gpu, cnfg05 = struct.unpack_from("<IIIIHHI", blob, 0)
     if magic != HLOG_MAGIC:
         print("heatlog: bad magic %#x" % magic)
         return 1
     print("heatlog: state sequence %d, level %d, %d samples, A55 %d MHz, %d M3 cores, GPU %d MHz" % (seq, level, n, a55, m3n, gpu))
+    if cnfg05 & 0x100:
+        names = {0: "off", 6: "4.5 A", 8: "4.8 A", 9: "5.0 A", 0xB: "5.4 A", 0xC: "5.6 A"}
+        print("heatlog: MAX77705 CHG_CNFG_05 %#04x: B2SOVRC (battery to system over-current) %s" %
+              (cnfg05 & 0xFF, names.get(cnfg05 & 0xF, "code %d" % (cnfg05 & 0xF))))
     samples = []
     for i in range(min(n, HLOG_N)):
         samples.append(struct.unpack_from("<HhhhHHBBBB", blob, 24 + 16 * i))

@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha16"
+#define SBOS_VERSION "1.2-alpha17"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -108,6 +108,8 @@ struct heat_ctl {
     int reserve_pct;                /* 0.6.2: stop at this charge (a call / SOS reserve; 0 = overridden) */
     int target_c10;                 /* 0.6.2: Keep warm's battery target */
     int no_current_stop;            /* 0.6.2: Manual only: the 3.5 A battery-current stop turned off by the user */
+    int no_high_stop;               /* 1.2-alpha17: Survival's 4.5 A stop off (the user): a 6 A / 1 s backstop instead */
+    uint64_t t_over;                /* when the current first went above the backstop (0 below) */
     int soc_stop_c10;               /* 0.6.3: Manual only: the user's SoC stop (0 off) */
     int gpu_want;                   /* 1.1: the GPU's share may run (Survival sheds it last, adds it last) */
     int trip_off;                   /* 1.1: heater.c switched the chip's trip off (Survival, trip off) */
@@ -173,6 +175,8 @@ extern int gpu_heat_allowed;
 extern uint32_t gpuheat_khz;        /* 0.6.1: the GPU's table step for the session */
 extern uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;    /* 0.6.1: Manual's picks (kHz) */
 extern int heat_reserve_pct, heat_target_c10, heat_no_current_stop;   /* 0.6.2 */
+extern int heat_no_high_stop;       /* 1.2-alpha17: Survival's 4.5 A stop off (remembered) */
+#define HEAT_BACKSTOP_MA 6000       /* 1.2-alpha17: with the 4.5 A stop off: 6 A for 1 s still stops */
 extern int heat_reserve_override;    /* 1.0-rc2: the next session's reserve overridden (once) */
 extern int heat_soc_stop_c10;       /* 0.6.3: Manual's optional SoC stop (0 off) */
 extern int heat_surv_bat_c10;       /* 1.1-beta5: Survival's battery limit (550 default, 580, 600 with a confirmation) */

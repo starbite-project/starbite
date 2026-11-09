@@ -1128,6 +1128,29 @@ static void hlog_start(void)
     hlog_t0 = sb_ms();
     hlog_next = hlog_t0;
     hlog_thr0 = 0;
+    {
+        /* 1.2-alpha17: the MAX77705's battery-to-system over-current limit (CHG_CNFG_05 0xBC [3:0], B2SOVRC; vendor
+         * max77705_charger.h: 0 off, 6 4.5 A, 8 4.8 A, 9 5.0 A, 0xB 5.4 A, 0xC 5.6 A), read only: the hardware wall
+         * above our own current limits. Never written */
+        uint8_t v = 0;
+        if (sb_chg_read(0xbc, &v)) {
+            heat_log.pad = 0x100U | v;
+            static const char *const nm[16] = { "off", "?", "?", "?", "?", "?", "4.5 A", "?", "4.8 A", "5.0 A", "?",
+                                                "5.4 A", "5.6 A", "?", "?", "?" };
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "heater: MAX77705 CHG_CNFG_05 ");
+            ub_hex(&u, v, 2);
+            ub_s(&u, ": B2SOVRC (battery to system over-current) code ");
+            ub_dec(&u, v & 0xfU);
+            ub_s(&u, " = ");
+            ub_s(&u, nm[v & 0xfU]);
+            ub_s(&u, heat_no_high_stop ? "; our 4.5 A stop: OFF (6 A / 1 s backstop)" : "; our 4.5 A stop: on");
+            sb_log(u.b);
+        } else {
+            sb_log("heater: MAX77705 CHG_CNFG_05 not read");
+        }
+    }
     sb_log(cfg.ocp_read ? "heater: heat log on (1 s), with the M3 throttle counter" :
                           "heater: heat log on (1 s); the M3 throttle counter needs Settings > About > OCP probe first");
 }
@@ -1269,6 +1292,7 @@ static void start_now(void)
 uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;
 /* 0.6.2: the call / SOS reserve for Extreme / Manual / Keep warm (0 = overridden), Keep warm's battery target */
 int heat_reserve_pct = 15, heat_target_c10 = 200, heat_no_current_stop;
+int heat_no_high_stop;                      /* 1.2-alpha17 */
 int heat_reserve_override;                  /* 1.0-rc2 (review): the hold overrides the reserve for the next session only */
 int heat_soc_stop_c10;                      /* 0.6.3: Manual's SoC stop (0 off: the user's default) */
 int heat_surv_bat_c10 = 550;                /* 1.1-beta5: Survival's battery limit (55 C; 58 / 60 after a confirmation) */
@@ -1328,6 +1352,8 @@ static void extreme_confirm_done(int ok)
     ctl.target_c10 = heat_target_c10;
     ctl.no_current_stop = (pending_level == HEAT_MANUAL || pending_level == HEAT_SURVIVAL ||
                            pending_level == HEAT_SURVIVAL_X) && heat_no_current_stop;   /* 1.2-alpha4: Survival too */
+    ctl.no_high_stop = pending_level >= HEAT_SURVIVAL && heat_no_high_stop;  /* 1.2-alpha17 */
+    ctl.t_over = 0;
     ctl.soc_stop_c10 = pending_level == HEAT_MANUAL ? heat_soc_stop_c10 : 0;
     if (pending_level == HEAT_KEEPWARM) {
         ctl.man_a55 = ctl.man_m3 = 0;
@@ -1640,6 +1666,7 @@ void heater_status(struct sbos_heat *h)
     h->reserve_pct = heater_running_ui() ? ctl.reserve_pct : heat_reserve_pct;   /* this session's (1.0-rc2) */
     h->target_c10 = heat_target_c10;
     h->no_current_stop = heat_no_current_stop;
+    h->no_high_stop = heat_no_high_stop;
     h->trip_c = trip_top_c;
     h->soc_stop_c10 = heat_soc_stop_c10;
     h->last_unclean = heat_last_unclean;
