@@ -7,9 +7,11 @@ then the UTF-16 name) and copies the data fork's extents.
     hfs-read.py --ls /Library/Wallpaper          (names, types, sizes of one folder)
     HFS_CARD=1 hfs-read.py ...                   iOS 26's root on the microSD card instead
                                                  (/dev/block/mmcblk0, sector 182888448)
-Limits: no extents-overflow file (at most 8 extents per fork), no
-HFS-compressed (decmpfs) files; both are reported, not guessed. Reads go
-through the adb shell's dd and are cached per block.
+    HFS_IMAGE=FILE hfs-read.py ...               a local image file instead of the phone (tests)
+Forks with more than 8 extents continue in the extents-overflow B-tree
+(looked up by file ID and start block). HFS-compressed (decmpfs) files are
+reported, not guessed. Reads go through the adb shell's dd and are cached
+per block.
 """
 import struct
 import subprocess
@@ -28,6 +30,15 @@ def dev_read(off, length):
     """Bytes [off, off + length) of USERDATA, in 4 KiB blocks."""
     first, last = off // 4096, (off + length + 4095) // 4096
     missing = [b for b in range(first, last) if b not in cache]
+    if missing and os.environ.get('HFS_IMAGE'):
+        with open(os.environ['HFS_IMAGE'], 'rb') as f:
+            f.seek(first * 4096)
+            data = f.read((last - first) * 4096)
+        if len(data) != (last - first) * 4096:
+            sys.exit(f'short read at block {first}')
+        for i in range(last - first):
+            cache[first + i] = data[i * 4096:(i + 1) * 4096]
+        missing = []
     while missing:
         start = missing[0]
         run = 1
@@ -51,21 +62,63 @@ class Volume:
         if sig not in (b'H+', b'HX'):
             sys.exit(f'no HFS+ volume header ({sig!r})')
         self.block = struct.unpack_from('>I', vh, 40)[0]
-        self.catalog = self.fork(vh, 272)
+        self.overflow = None
+        self.overflow = self.fork(vh, 192, 3)                # the extents file never overflows itself
+        ohdr = self.fork_read(self.overflow, 0, 512)
+        self.ov_root = struct.unpack_from('>I', ohdr, 16)[0]
+        self.ov_node_size = struct.unpack_from('>H', ohdr, 32)[0]
+        self.catalog = self.fork(vh, 272, 4)
         hdr = self.fork_read(self.catalog, 0, 512)
         (self.depth, self.root, _, _, _, self.node_size, _, _, _) = struct.unpack_from('>HIIIIHHII', hdr, 14)
         self.compare = hdr[14 + 37]
         if sig == b'HX' and self.compare != 0xBC:
             sys.exit(f'unexpected key compare type {self.compare:#x}')
 
-    @staticmethod
-    def fork(buf, off):
+    def fork(self, buf, off, file_id):
+        """(logical size, [(start block, block count)...]) of a data fork (HFSPlusForkData at buf[off:]); extents
+        past the first 8 come from the extents-overflow B-tree, keyed (file ID, data fork, first file block)."""
         size, _, total = struct.unpack_from('>QII', buf, off)
-        ext = [struct.unpack_from('>II', buf, off + 16 + 8 * i) for i in range(8)]
-        ext = [e for e in ext if e[1]]
-        if sum(e[1] for e in ext) < total:
-            sys.exit('fork has more than 8 extents (extents overflow file not supported)')
+        ext = [e for e in (struct.unpack_from('>II', buf, off + 16 + 8 * i) for i in range(8)) if e[1]]
+        have = sum(e[1] for e in ext)
+        while have < total:
+            if self.overflow is None or len(ext) % 8:
+                sys.exit(f'file {file_id}: fork has {have} of {total} blocks in its extents and no overflow record')
+            rec = self.overflow_lookup(file_id, have)
+            if rec is None:
+                sys.exit(f'file {file_id}: no extents-overflow record for block {have} (of {total})')
+            more = [e for e in (struct.unpack_from('>II', rec, 8 * i) for i in range(8)) if e[1]]
+            if not more:
+                sys.exit(f'file {file_id}: empty extents-overflow record at block {have}')
+            ext += more
+            have += sum(e[1] for e in more)
+        if have != total:
+            sys.exit(f'file {file_id}: extents cover {have} blocks, fork says {total}')
         return size, ext
+
+    def overflow_lookup(self, file_id, start):
+        """The 8-extent record keyed (file_id, data fork 0, start) in the extents-overflow B-tree, or None.
+        Key: keyLength 10, forkType u8, pad u8, fileID u32, startBlock u32; ordered by fileID, forkType, start."""
+        want = (file_id, 0, start)
+        n, size = self.ov_root, self.ov_node_size
+        for _ in range(16):
+            if not n:
+                return None
+            node = self.fork_read(self.overflow, n * size, size)
+            kind = struct.unpack_from('>b', node, 8)[0]
+            best = None
+            for r in self.records(node, size):
+                klen, fork_type, fid, sblock = struct.unpack_from('>HBxII', r, 0)
+                k = (fid, fork_type, sblock)
+                if kind == -1 and k == want:
+                    return r[2 + klen:2 + klen + 64]
+                if kind == 0:
+                    if k > want:
+                        break
+                    best = struct.unpack_from('>I', r, 2 + klen)[0]
+            if kind != 0:
+                return None
+            n = best
+        sys.exit('extents-overflow B-tree deeper than 16 levels')
 
     def fork_read(self, fork, off, length):
         out, pos = bytearray(), 0
@@ -183,7 +236,7 @@ class Volume:
                 owner_flags = rec[32 + 9]
                 if owner_flags & 0x20:
                     sys.exit(f'{path}: HFS-compressed (decmpfs), not supported')
-                fork = self.fork(rec, 88)
+                fork = self.fork(rec, 88, struct.unpack_from('>I', rec, 8)[0])
                 return self.fork_read(fork, 0, fork[0])
 
 
