@@ -199,6 +199,12 @@ struct _MW_ADAPTER {
     /* T13z: full-screen primaries rendered straight into the framebuffer (Parameters\PrimaryInFb, default 1):
      * the framebuffer's page numbers, mapped at such a primary's GPU address instead of its own pages */
     PFN_NUMBER *FbPfn;
+    /* T14a: the first failed job of the boot (JS 0x51 INSTR_INVALID_ENC, once per boot since T13b), for
+     * matching against the umdlogs' "bo N va A-B" lines */
+    ULONG64 RunningJc;
+    ULONG Fail1Slot, Fail1JcLo, Fail1HeadLo, Fail1TailLo, Fail1Status, Fail1JobsDone, Fail1Ms, Fail1Submits;
+    ULONG64 StartTime;
+    ULONG FbLiveSecs, FbLiveLast;         /* T14a: seconds the panel showed content (>= 8 of 16 samples) */
     ULONG FbPages, PrimaryInFb, FbAliasMaps, RefreshSkipsAliased;
     /* T13t: the present blts into non-primary surfaces (apps' frames into the surfaces DWM samples) and the
      * full frame of the blt sources into primaries (DWM's back buffer) */
@@ -281,6 +287,7 @@ void MwCommandInit(MW_ADAPTER *A);
 void MwCommandStop(MW_ADAPTER *A);
 void MwRefreshScanout(MW_ADAPTER *A);
 void MwShow(MW_ADAPTER *A, struct _MW_ALLOCATION *P, BOOLEAN NewContent);
+ULONG MwFbSamples(MW_ADAPTER *A);
 void MwArmPoll(MW_ADAPTER *A);
 
 /* S9 port (guard.c) */

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One unattended Windows GPU test cycle (docs/WIN11-GPU.md 6.17), started with the phone in TWRP:
 #
-#   tools/win/gpu-cycle.sh STAGE OUT [--test-key win11-gpu] [--clean-key win11-auto] [--keep-unattended]
+#   tools/win/gpu-cycle.sh STAGE OUT [--test-key win11-gpu] [--clean-key win11-auto] [--keep-unattended] [--full-sec N]
+#                                     (--full-sec: the full-mode boot restarts itself after N s, 120..3600, default 300)
 #   tools/win/gpu-cycle.sh --clean-only OUT [--clean-key win11-auto]    a dirty hive -> one clean display-only boot
 #   tools/win/gpu-cycle.sh --measure STAGE OUT                          first run: sbwdog alone, one display-only boot
 #                                                                       that must restart itself; the boot-time gap
@@ -24,7 +25,8 @@
 #  5. Boots CLEAN_KEY (the combo3b firmware: no GPU interrupts, so sbwddm cannot go full mode; the guard says
 #     display-only anyway), which restarts itself cleanly at ~120 s; waits for the menu; back to TWRP.
 #  6. Checks the hive is clean, pulls OUT/post/SYSTEM, then sets Unattended=0 (unless --keep-unattended).
-# The phone ends in TWRP. Exit: 0 done; 1 usage or precondition (phone untouched or still in TWRP); 2 the phone
+# --install-default STAGE OUT: the user's attended setup (no boot): full mode by default, the guard clears itself
+# after a boot with content on the panel, sbwdog only feeds. The phone ends in TWRP. Exit: 0 done; 1 usage or precondition (phone untouched or still in TWRP); 2 the phone
 # did not come back (it needs the user); 3 the hive is dirty (run --clean-only first); 4 an install read-back
 # failed (phone in TWRP, files as listed); 5 --deadman-test: no WATCHDOG reset (the hang protection is not proven).
 set -euo pipefail
@@ -35,11 +37,15 @@ mode=cycle
 case "${1:-}" in
 --clean-only|--deadman-test) mode=${1#--}; shift; stage= ;;
 --measure) mode=measure; stage=${2:?usage: gpu-cycle.sh --measure STAGE OUT}; shift 2 ;;
+--install-default) mode=install-default; stage=${2:?usage: gpu-cycle.sh --install-default STAGE OUT}; shift 2 ;;
 *) stage=${1:?usage: gpu-cycle.sh STAGE OUT [...]}; shift ;;
 esac
 out=${1:?usage: gpu-cycle.sh STAGE OUT [...]}; shift
 tkey=win11-gpu; ckey=win11-auto; keep=0
-while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; *) echo "bad arg $1"; exit 1;; esac; done
+full_sec=300
+while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --full-sec) full_sec=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
+case $full_sec in ''|*[!0-9]*) echo "--full-sec needs seconds"; exit 1;; esac
+[ "$full_sec" -ge 120 ] && [ "$full_sec" -le 3600 ] || { echo "--full-sec 120..3600"; exit 1; }
 mkdir -p "$out"
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$out/cycle.log"; }
 NTFS=/dev/block/sda27
@@ -52,7 +58,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 # ---- preconditions -----------------------------------------------------------------------------------
 [ "$(adb get-state 2>/dev/null)" = recovery ] || { log "phone not in TWRP"; exit 1; }
-python3 - "$main/build/store/catalog-live.toml" "$tkey" "$ckey" <<'PY' || exit 1
+[ "$mode" = install-default ] || python3 - "$main/build/store/catalog-live.toml" "$tkey" "$ckey" <<'PY' || exit 1
 import sys, tomllib
 cat = tomllib.load(open(sys.argv[1], 'rb'))
 rows = {e['key']: e for e in cat.get('entry', [])}
@@ -156,10 +162,14 @@ install() {
     adb pull "$W/$HIVE" "$tmp/SYSTEM" >/dev/null
     if ! hive_clean "$tmp/SYSTEM"; then umount_w; log "the hive is dirty (the last Windows boot did not end cleanly): run --clean-only, or restart Windows cleanly once"; exit 3; fi
     mkdir -p "$out/hive-before"; cp "$tmp/SYSTEM" "$out/hive-before/SYSTEM"
-    if [ "$1" = 1 ]; then python3 "$HS" "$tmp/SYSTEM" "$tmp/S1" param sbwddm --root FullGuardBoots=0 >/dev/null; else cp "$tmp/SYSTEM" "$tmp/S1"; fi
+    if [ "$1" = 1 ]; then
+        python3 "$HS" "$tmp/SYSTEM" "$tmp/S0" param sbwddm --root FullGuardBoots=0 >/dev/null
+        # unattended cycles: the guard never clears itself (each install resets it); --install-default sets 1
+        python3 "$HS" "$tmp/S0" "$tmp/S1" param sbwddm FullMode=1 GuardAutoClear="${guard_auto:-0}" >/dev/null
+    else cp "$tmp/SYSTEM" "$tmp/S1"; fi
     if python3 tools/woa/hive.py "$tmp/S1" 'ControlSet001\Services\sbwdog' 2>/dev/null | grep -q "Start"; then cp "$tmp/S1" "$tmp/S2"
     else python3 "$HS" "$tmp/S1" "$tmp/S2" add sbwdog --start 0 --oneshot 0 --image 'System32\drivers\sbwdog.sys' --display "Starbite watchdog feeder" >/dev/null; fi
-    python3 "$HS" "$tmp/S2" "$tmp/S3" param sbwdog Unattended=1 FullRestartSec=300 FullCapSec=360 DisplayRestartSec=120 DisplayCapSec=180 >/dev/null
+    python3 "$HS" "$tmp/S2" "$tmp/S3" param sbwdog Unattended="${unattended:-1}" FullRestartSec="$full_sec" FullCapSec=$((full_sec + 60)) DisplayRestartSec=120 DisplayCapSec=180 >/dev/null
     local rc=0
     push_check "$tmp/S3" "$W/$HIVE" || rc=4
     push_check "$stage/sbwdog.sys" "$W/Windows/System32/drivers/sbwdog.sys" || rc=4
@@ -192,6 +202,18 @@ finish() {  # after a clean display-only boot: disarm unless asked not to
 
 # ---- modes -----------------------------------------------------------------------------------------------
 case $mode in
+install-default)
+    # the user's own attended boots (docs/WIN11-GPU.md 6.20): full mode by default behind the guard, which clears
+    # itself after a boot that showed content on the panel; sbwdog only feeds (Unattended=0: no arming, no
+    # restart, no cap). Nothing is booted; the gputest is not armed. The win11 row must use the GPU firmware
+    # (windows-t13b.uefi: the Mali interrupt lines), or full mode refuses to start and Windows uses Basic Display.
+    guard_auto=1 unattended=0
+    stage_gputest=$stage/gputest
+    mount_rw
+    if [ -d "$stage_gputest" ]; then stage_tmp=$(mktemp -d); cp "$stage"/*.sys "$stage"/*.dll "$stage_tmp"/ 2>/dev/null; stage=$stage_tmp; fi
+    install 1
+    log "default install done: FullMode=1, FullGuardBoots=0, GuardAutoClear=1, sbwdog Unattended=0; phone in TWRP"
+    exit 0 ;;
 measure)
     # sbwdog alone, then one display-only boot of CLEAN_KEY: it must restart itself cleanly at ~120 s.
     # Measures the loader -> Windows gap (GapMsAtStart) the 82 s watchdog has to cover. If the gap is longer,
@@ -254,7 +276,7 @@ install 1
 
 # ---- the test boot, the pull, the clean boot ----------------------------------------------------------------
 # full mode: Windows restarts itself at 300 s, the feeder stops at 360 s, the watchdog fires <= 82 s later
-boot_and_return "$tkey" 900 "$out/pre"
+boot_and_return "$tkey" $((full_sec + 600)) "$out/pre"
 mount_ro
 pull_hive "$out/pre"
 mkdir -p "$out/pre/umdlog"

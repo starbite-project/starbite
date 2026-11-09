@@ -21,9 +21,9 @@
 
 #define SBW_FULL_GUARD_LIMIT 1U
 #define SBW_HEALTHY_MS 60000U
-#define SBW_HEALTHY_FLIPS 30U             /* frames with pixels that reached the panel (ContentFrames) */
+#define SBW_HEALTHY_FLIPS 30U             /* DWM frames to the panel (flips + primary blts); with FbLiveSecs >= 30 */
 #define SBW_HEALTHY_JOBS 30U
-#define SBW_LIVE_MAX 96U
+#define SBW_LIVE_MAX 128U
 
 NTSTATUS SdDriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath);   /* sbdisplay (sd_embed.c) */
 
@@ -111,6 +111,11 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         { L"Live_FlipSrcPages", a->FlipSrcPages }, { L"Live_ShowFromBltSrc", a->ShowFromBltSrc },
         { L"Live_FlipsIgnoredBlack", a->FlipsIgnoredBlack }, { L"Live_FbAliasMaps", a->FbAliasMaps },
         { L"Live_RefreshSkipsAliased", a->RefreshSkipsAliased },
+        { L"Live_Fail1Slot", a->Fail1Slot }, { L"Live_Fail1JcLo", a->Fail1JcLo }, { L"Live_Fail1HeadLo", a->Fail1HeadLo },
+        { L"Live_Fail1TailLo", a->Fail1TailLo }, { L"Live_Fail1Status", a->Fail1Status },
+        { L"Live_Fail1JobsDone", a->Fail1JobsDone }, { L"Live_Fail1Submits", a->Fail1Submits },
+        { L"Live_Fail1Ms", a->Fail1Ms },
+        { L"Live_FbLiveSecs", a->FbLiveSecs }, { L"Live_FbLiveLast", a->FbLiveLast },
         { L"Live_NpBlts", a->NpBlts }, { L"Live_NpSrcContent", a->NpSrcContent }, { L"Live_NpDstContent", a->NpDstContent },
         { L"Live_NpSrcTag", a->NpSrcTag }, { L"Live_NpDstTag", a->NpDstTag }, { L"Live_NpRectLT", a->NpRectLT },
         { L"Live_NpRectRB", a->NpRectRB }, { L"Live_NpRects", a->NpRects }, { L"Live_NpSrcPx", a->NpSrcPx },
@@ -205,8 +210,14 @@ static VOID GuardThread(PVOID Ctx)
                 a->ThermalHolds++;
             MwLog(a, L"S9ThermalHold", hold ? a->ThermalLevel : 0);
         }
+        a->FbLiveLast = MwFbSamples(a);
+        if (a->FbLiveLast >= 8)
+            a->FbLiveSecs++;
+        /* T14a: healthy = the panel itself showed content for 30 s (at least 8 of 16 points across the whole
+         * framebuffer not black: a black screen with a spinner does not pass, T13d..T13s did), DWM sent 30
+         * frames (flips or blts into the primary), and 30 GPU jobs completed, a minute after start */
         if (!a->Healthy && (KeQueryInterruptTime() - t0) / 10000 >= SBW_HEALTHY_MS &&
-            a->ContentFrames >= SBW_HEALTHY_FLIPS && a->FbContentFrames >= SBW_HEALTHY_FLIPS &&
+            a->FbLiveSecs >= 30 && a->EmuFlips + a->PrimaryBlts >= SBW_HEALTHY_FLIPS &&
             a->JobsDone >= SBW_HEALTHY_JOBS) {
             /* T13d: 223 copies to the panel, all black, counted as healthy: only frames with pixels count */
             /* T13c: flips + any blts counted 212 presents that never reached the panel as healthy */

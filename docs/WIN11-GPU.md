@@ -1074,6 +1074,32 @@ The bugs found on the way, each by a test that isolated it:
   address when VidMm maps it (Parameters\PrimaryInFb). DWM then renders straight into what DECON scans:
   single-buffered, no CPU copy.
 
+**cycle-t13z-1 (03:33):**
+- **The sign-in screen:** no whole-frame CPU copies (Refreshes 0); the primaries render into the framebuffer.
+- **JS 0x51 is one job per boot,** not one per process.
+
+### 6.20 T14a: the default-boot guard (2026-11-09)
+
+**Health for the default boot.** Healthy means all of these, a minute after start:
+- the framebuffer showed content for 30 s, a second counting when at least 8 of 16 points across the whole
+  panel are not black;
+- DWM sent 30 frames;
+- 30 GPU jobs completed.
+
+A black panel with a spinner does not pass.
+
+**Who may clear the guard:** `Parameters\GuardAutoClear`.
+- Code default 0, and unattended cycles pin 0.
+- The user's attended setup (`gpu-cycle.sh --install-default`) sets 1: a healthy boot re-arms full mode.
+- A failed boot (black, a hang, a forced restart) leaves the next one display-only.
+- sbwdog stays Unattended=0 there: feeding only.
+- The win11 row needs the GPU firmware (windows-t13b.uefi). On combo3b, full mode refuses to start.
+
+**The first failed job of a boot** is captured: slot, chain, failing job address (JS_HEAD), tail, status, and
+when.
+
+`--full-sec N` makes longer soak boots.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

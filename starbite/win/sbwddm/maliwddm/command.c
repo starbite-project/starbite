@@ -504,6 +504,7 @@ static void Kick(MW_ADAPTER *A)
         A->JobStart = KeQueryInterruptTime();
         (void)MkJobTakeStatus(&A->Gpu, c->Slot);
         InterlockedExchange(&A->Gpu.MmuIrqStatus, 0);
+        A->RunningJc = c->Jc;
         MkJobStart(&A->Gpu, c->Slot, c->Jc, (A->ChainFlag++ & 1) != 0);
     }
 }
@@ -541,6 +542,17 @@ static BOOLEAN Reap(MW_ADAPTER *A, BOOLEAN CheckTimeout)
     /* A fault leaves the address space stopped: start the GPU over, and
      * drop the rest of this submission (its later chains depend on it). */
     A->JobsFailed++;
+    if (A->JobsFailed == 1) {
+        /* T14a: where the job chain stopped: JS_HEAD is the job that failed, JS_TAIL the last one done */
+        A->Fail1Slot = slot;
+        A->Fail1JcLo = (ULONG)A->RunningJc;
+        A->Fail1HeadLo = MK_RD(gpu, JS_SLOT(slot) + JS_HEAD_LO);
+        A->Fail1TailLo = MK_RD(gpu, JS_SLOT(slot) + 0x08);   /* JS_TAIL_LO */
+        A->Fail1Status = A->LastJsStatus;
+        A->Fail1JobsDone = A->JobsDone;
+        A->Fail1Submits = A->Submits;
+        A->Fail1Ms = (ULONG)((KeQueryInterruptTime() - A->StartTime) / 10000);
+    }
     A->LastFaultStatus = gpu->LastMmuFault;
     A->LastFaultAddress = gpu->LastFaultAddress;
     A->Queue[A->QHead].Next = A->Queue[A->QHead].Count;
@@ -652,6 +664,21 @@ static BOOLEAN SyncVsync(PVOID Context)
     n.CrtcVsync.PhysicalAddress = a->ScanAddr;   /* the flip this vsync completes */
     a->Dxgk.DxgkCbNotifyInterrupt(a->Dxgk.DeviceHandle, &n);
     return TRUE;
+}
+
+/* T14a: how many of 16 points spread over the whole framebuffer are not black (what the panel shows). */
+ULONG MwFbSamples(MW_ADAPTER *A)
+{
+    ULONG n = 0;
+    LONG w = (LONG)A->Fb.Width, h = (LONG)A->Fb.Height;
+    if (A->FbVa == NULL || w <= 0 || h <= 0)
+        return 0;
+    for (LONG i = 0; i < 16; i++) {
+        LONG x = w * (i % 4) / 4 + w / 8, y = h * (i / 4) / 4 + h / 8;
+        if (((const ULONG *)(A->FbVa + (SIZE_T)y * A->Fb.Pitch))[x] & 0x00FFFFFFu)
+            n++;
+    }
+    return n;
 }
 
 /* T13h: what the panel should show from now on. NewContent: a flip (new pixels even in the same allocation). */

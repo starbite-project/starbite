@@ -207,6 +207,7 @@ static NTSTATUS APIENTRY MwStartDevice(IN_CONST_PVOID Context, IN_PDXGK_START_IN
         return MwRet(a, L"Fail_StartDisplay", st);
     }
 #endif
+    a->StartTime = KeQueryInterruptTime();
     S9GuardStart(a);
 
     /* Render-only: no sources and no children, and the firmware framebuffer
