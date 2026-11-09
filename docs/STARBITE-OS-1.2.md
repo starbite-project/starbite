@@ -1,4 +1,32 @@
-# Starbite OS 1.2-alpha10: notifications, wake-up alarms, vibration, the Wi-Fi join fixes (2026-11-09)
+# Starbite OS 1.2-alpha16: Survival with the GPU overclock, a fine hold, the 150 C reading fixed (2026-11-09)
+
+From the user's alpha7 Survival run on battery (19:30, the heat log in the slot):
+- **The "150 -> 130 -> 135" saw was a reading bug, not the chip.** At a steady 11.7 W the hottest reading dropped from
+  150 to 129 C in one second (t = 223 -> 224 s, and again at 375 -> 376). alpha4 allowed SoC readings up to 199 C in
+  the TMU's sample check, but the sample filter around it still dropped every sample above 150. The hottest probe
+  vanished and the next one (~130 C) was shown. Fixed in libsb tmu.c (the filter's range is -30 .. 199 C). With "No
+  limit" the reading now keeps rising past 150 (the chip's real hottest spot); at 200 C or above it counts as lost
+  and stops Survival.
+- **The draw was ~3.1 A (11.7 W)** with 3 A55 at 1950, 2 M3 at 2314 and the GPU at 598 MHz, and the GPU at ~731 mV:
+  ACPM had put its own voltage back (fixed in alpha12).
+- **A fine hold.** At the limit Survival now steps the M3 and GPU clocks down together, one ECT level a second (M3
+  2314 -> 2106 -> 2002 -> 1924 -> 1794 -> 1690 -> 1586 -> 1469 MHz; GPU 858 -> 806 -> 754 -> 702 -> 650 -> 598), before
+  it sheds a whole load. Back below: every load first, then the clocks up. Each step is a few percent of the power,
+  not a whole core. The M3's 1924 / 2002 / 2106 steps are allowed for 2 busy cores at most.
+- **The GPU at 858 MHz** in Survival (H2b / H2c on the phone: 858 held 30 s, the GPU's cycle counter read 857), at
+  950 mV held (alpha12), PLL_G3D with the vendor's sequence (S 0). A failed lock goes back to 598 for the session.
+- **"No limit" asks once** (was 8 holds): Heat > Survival > Hardware trip OFF > "Hold: remove the SoC limit" and one
+  warning screen. Survival's SoC limit (or none), its battery limit (55 / 58 / 60) and the trip-off switch are
+  remembered across restarts (the state slot).
+- **A soft current ceiling** 0.3 A below the 4.5 A stop: from 4.2 A the hold steps down, back up only below 3.9 A,
+  so a single gauge spike above 4.5 A (which ends Survival) is less likely. The 4.5 A stop and the 3.5 A switch are
+  unchanged.
+- **The GPU's compute job** (H2d on the phone: 40 jobs a second at 858 MHz, each 4.3 G FMAs, the GPU zone at 94 C
+  alone, the results bit-exact with the CPU's FMA loop) replaces the memory-bound clear jobs in Survival: an FMA-loop
+  shader compiled by Mesa's Bifrost compiler (tools/mesa-alujob.c -> kern/gpualu.h), on job slot 1. If it ever fails
+  (a fault, nothing written), the clear jobs take over for the rest of the session.
+
+## Starbite OS 1.2-alpha10: notifications, wake-up alarms, vibration, the Wi-Fi join fixes (2026-11-09)
 
 - **Notifications** (alpha10): a dot next to the time while any is unread; tap the status bar for the control
   center, which lists the newest four (with the time) and has Clear. Posted by apps (notify()) and by the phone

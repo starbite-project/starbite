@@ -11,7 +11,16 @@ SBAPP_DEFINE("heat", "Heat", SBOS_P_HEAT, 0xffff9f0aU, 201);
 
 static int visible;
 static int surv_tripoff;                    /* 1.1-beta2: Survival's "Hardware trip OFF" switch (until a restart) */
-static int nolimit_holds;                   /* 1.2-alpha4: holds so far toward Survival's "No limit" (8 needed) */
+/* 1.2-alpha16: the trip-off switch is remembered (this app's saved state); "No limit" asks once (the kernel's
+ * confirmation) and the kernel remembers it */
+struct heat_state { uint32_t magic, tripoff; };
+#define HEAT_STATE_MAGIC 0x31544148U        /* "HAT1" */
+
+static void save_state(void)
+{
+    struct heat_state st = { HEAT_STATE_MAGIC, (uint32_t)surv_tripoff };
+    state_put(&st, sizeof(st));
+}
 /* 0.5.6: the battery's temperature during this heating session, every 10 s (the last 10 minutes) */
 static int16_t th[60];
 static int thn, was_on;
@@ -215,11 +224,7 @@ static void show(void)
             }
             ui_button(25, f.b, 0, 0);
             if (h.surv_stop_c10 != SBOS_HEAT_SOC_NOLIMIT_C10) {
-                fmt_init(&f);
-                fmt_s(&f, "Hold 8 times: remove the SoC limit (");
-                fmt_d(&f, nolimit_holds);
-                fmt_s(&f, " of 8)");
-                ui_hold(27, f.b, 1500, 0);
+                ui_hold(27, "Hold: remove the SoC limit (asks once)", 1500, 0);
                 ui_textline("Then nothing of ours holds the chip by temperature: only the battery limit and 2 % stop it. "
                             "Readings past 199 \xc2\xb0" "C count as lost (a stop).", GREY);
             }
@@ -364,10 +369,14 @@ static void show(void)
 void app_event(const struct sbos_event *ev)
 {
     switch (ev->type) {
-    case EV_APP_START:
+    case EV_APP_START: {
+        struct heat_state st;
+        if (state_get(&st, sizeof(st)) == (int)sizeof(st) && st.magic == HEAT_STATE_MAGIC)
+            surv_tripoff = st.tripoff != 0;     /* 1.2-alpha16: as the user left it */
         timer_set(2, 10000, 1);             /* the home tile's line and the temperature curve */
         show();
         break;
+    }
     case EV_APP_SHOW:
         visible = 1;
         timer_set(1, 1000, 1);
@@ -392,17 +401,17 @@ void app_event(const struct sbos_event *ev)
         show();
         break;
     case EV_APP_TOGGLE:
-        if (ev->id == 24)
+        if (ev->id == 24) {
             surv_tripoff = ev->value != 0;  /* the four warnings come at the start */
+            save_state();                   /* 1.2-alpha16: remembered */
+        }
         show();
         break;
     case EV_APP_HOLD:
         if (ev->id == 20 || ev->id == 28)
             setting_set(SET_HEAT_CURRENT_STOP, 0);
-        if (ev->id == 27 && ++nolimit_holds >= 8) {   /* 1.2-alpha4: the eighth hold removes the limit */
-            nolimit_holds = 0;
+        if (ev->id == 27)                   /* 1.2-alpha16: the kernel asks once, then remembers it */
             setting_set(SET_HEAT_SURV_STOP_C10, SBOS_HEAT_SOC_NOLIMIT_C10);
-        }
         if (ev->id == 18) {
             struct sbos_heat h;
             heat_status(&h);
@@ -422,7 +431,6 @@ void app_event(const struct sbos_event *ev)
         else if (ev->id == 26 && !running)
             setting_set(SET_HEAT_SURV_BAT_C10, h.surv_bat_c10 >= 600 ? 550 : h.surv_bat_c10 >= 580 ? 600 : 580);
         else if (ev->id == 25 && !running) {
-            nolimit_holds = 0;
             setting_set(SET_HEAT_SURV_STOP_C10, h.surv_stop_c10 >= SBOS_HEAT_SOC_HARD_C10 ? 1250 : (h.surv_stop_c10 / 50 + 1) * 50);
         } else if (ev->id == 29 && !running)
             setting_set(SET_HEAT_CURRENT_STOP, 1);

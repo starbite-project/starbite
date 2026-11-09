@@ -33,6 +33,10 @@ int sb_m3_ocp_level_ok(uint32_t khz, unsigned busy)
 {
     if (sb_dvfs_level_listed(3, khz))
         return 1;
+    /* 1.2-alpha16: Survival's fine hold trims the 2 M3 cores through the ECT's own steps between 1794 and 2314 MHz
+     * (ACPM's fvmap: 1924 875 mV, 2002 900, 2106 937.5; H1 on the phone), each below Samsung's 2-core level */
+    if (khz == 1924000U || khz == 2002000U || khz == 2106000U)
+        return busy <= 2 && khz <= sb_m3_ocp_max_khz(busy);
     return (khz == SB_M3_DUAL_KHZ || khz == SB_M3_MAX_KHZ) && khz <= sb_m3_ocp_max_khz(busy);
 }
 

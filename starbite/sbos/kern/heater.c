@@ -1099,6 +1099,8 @@ void heater_timer(unsigned id)
         } else if (gpuheat_on()) {
             gpuheat_stop();
         }
+        if (gpuheat_on() && ctl.level >= HEAT_SURVIVAL)
+            (void)gpuheat_set_mhz(ctl.gpu_mhz);     /* 1.2-alpha16: 858 MHz, stepped down by the fine hold */
         gpuheat_tick();
     }
     if (before != ctl.state) {
@@ -1213,6 +1215,8 @@ static void start_now(void)
     }
     if (pending_level != HEAT_MANUAL && pending_level < HEAT_SURVIVAL)
         gpuheat_khz = 572000U;              /* 1.0-rc2 (review): Manual's GPU step never carries over */
+    gpuheat_alu = pending_level >= HEAT_SURVIVAL;   /* 1.2-alpha16: H2d on the phone: Survival's GPU runs the compute
+                                                     * job (40 a second at 858 MHz); every other level the clears */
     if (heat_ctl_request(&ctl, pending_level, pending_minutes, &in) == 0) {
         /* 1.1-beta3: before this session's first PSCI or ACPM call: the M3 FlexPMU words as the boot had them */
         hw_m3_fp_log("heater: flexpmu at the start");

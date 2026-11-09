@@ -36,6 +36,8 @@ is only refreshed when something changes.
   or SOS). **Survival heat, trip OFF** (asks four times) also switches the chip's own heat power cut off and stops at
   the processor limit you set (125 to 150 °C); it may damage the processor. Both stop at 55 °C battery,
   and Off or Power stops them at any time. Hold the phone through a pocket or a glove.
+  1.2-alpha16: the GPU runs a compute job at 858 MHz; at your limit the clocks step down before a load is shed (a
+  steady hold, no saw). "No limit" asks once; the limit, the battery limit and the trip-off switch are remembered.
 - **Hard limits** (final, never raised): the processor limit at most **150 °C** (Survival with the trip off; at 150
   it holds about 148 °C, because the sensor's reading is not valid at 150) and the battery at most **60 °C**. 175 and
   155 °C were asked for on 2026-11-08 and declined; 150 °C was agreed.

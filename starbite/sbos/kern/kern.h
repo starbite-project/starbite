@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha15"
+#define SBOS_VERSION "1.2-alpha16"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -120,6 +120,9 @@ struct heat_ctl {
     int cal_mw[4];                  /* each candidate's mean battery power, mW (0 not measured) */
     int m3_n;                       /* the M3 cores Survival may run (the pick) */
     uint32_t surv_m3_khz;           /* their clock (the pick) */
+    int trim;                       /* 1.2-alpha16: Survival's fine hold: 0 everything at its top, each step the M3
+                                       and GPU clocks one level down before a whole load is shed */
+    unsigned gpu_mhz;               /* 1.2-alpha16: the GPU clock Survival asks for (heater.c: gpuheat_set_mhz) */
     int surv_bat_c10;               /* 1.1-beta5: Survival's battery limit: 550 / 580 / 600 (shed from 3 C below, stop at it) */
     uint64_t t_shed;
     int x_held;                     /* 1.1-beta7: the trip-off hold has shed at least once (its slower add-back applies) */
@@ -364,6 +367,10 @@ void notif_clear(void);
 int heatprobe_step(void);
 int gpuprobe_step(void);
 uint64_t gpuheat_jobs(void);
+int gpuheat_set_mhz(unsigned mhz);  /* 1.2-alpha16: PLL_G3D above ACPM's 598 (S 0, the vendor's sequence) */
+int gpu_pms_ok(uint32_t p, uint32_t m, uint32_t s);
+int gpu_pll_set(uint32_t p, uint32_t m, uint32_t s);
+#define SURV_GPU_MHZ 858U           /* 1.2-alpha16: H2b/H2c on the phone: 858 MHz held 30 s at 950 mV (cycle counter 857) */
 extern int gpuheat_alu, gpuprobe_alu;
 int panel_dump(void);
 int audio_probe(void);              /* 0.7: the codec's state read only, its ID if S-Boot left it powered (audio.c) */               /* 0.6.5: read only: the panel's ID, gamma, ELVSS, VINT, AOR, IRC (logged) */

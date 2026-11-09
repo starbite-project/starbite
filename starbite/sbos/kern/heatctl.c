@@ -124,11 +124,62 @@ static uint32_t flat_a55(const struct heat_ctl *c)
            c->level >= HEAT_EXTREME ? A55_TOP : A55_FULL;
 }
 
+
 static uint32_t flat_m3(const struct heat_ctl *c)
 {
+    if (c->level >= HEAT_SURVIVAL && c->surv_m3_khz == 2314000U && c->trim > 0 && c->trim < 8)
+        return (const uint32_t[8]){ 2314000U, 2106000U, 2002000U, 1924000U, 1794000U, 1690000U, 1586000U,
+                                    1469000U }[c->trim];       /* 1.2-alpha16: the fine hold (trim_tab) */
     if (c->level >= HEAT_SURVIVAL && c->surv_m3_khz)
         return c->surv_m3_khz;              /* 1.1-beta6: the measured pick (or the candidate being measured) */
     return c->level == HEAT_MANUAL && c->man_m3 ? c->man_m3 : M3_FULL;
+}
+
+/* 1.2-alpha16: Survival's fine hold. The user saw a 20 C saw at the limit (most of it the TMU filter's 150 C cap,
+ * fixed in libsb tmu.c; the rest whole loads shed and added). Now, at the limit, the M3 and GPU clocks step down one
+ * ECT level at a time before a whole load is shed, and step back up after every load is back: each step is ~5-8 %
+ * of the power instead of ~15-25 % */
+static const struct { uint32_t m3; unsigned gpu; } trim_tab[] = {
+    { 2314000U, SURV_GPU_MHZ }, { 2106000U, 806U }, { 2002000U, 754U }, { 1924000U, 702U },
+    { 1794000U, 650U }, { 1690000U, 598U }, { 1586000U, 598U }, { 1469000U, 598U },
+};
+#define NTRIM ((int)(sizeof(trim_tab) / sizeof(trim_tab[0])))
+
+static int trim_on(const struct heat_ctl *c)
+{
+    return c->level >= HEAT_SURVIVAL && c->surv_m3_khz == trim_tab[0].m3;
+}
+
+/* the clocks for the present trim (Survival with 2 M3 at 2314) */
+static void trim_apply(struct heat_ctl *c)
+{
+    if (!trim_on(c)) {
+        c->gpu_mhz = 598U;
+        return;
+    }
+    if (c->trim < 0)
+        c->trim = 0;
+    if (c->trim >= NTRIM)
+        c->trim = NTRIM - 1;
+    c->gpu_mhz = trim_tab[c->trim].gpu;
+}
+
+/* hot: one trim step down if there is one left (1), else 0 (shed a load) */
+static int trim_down(struct heat_ctl *c)
+{
+    if (!trim_on(c) || c->trim >= NTRIM - 1 || c->cores <= 3)
+        return 0;
+    ++c->trim;
+    return 1;
+}
+
+/* cool, every load back: one trim step up (1), else 0 */
+static int trim_up(struct heat_ctl *c)
+{
+    if (!trim_on(c) || c->trim <= 0)
+        return 0;
+    --c->trim;
+    return 1;
 }
 
 /* 1.1-beta6: the legal M3 combinations (the cluster has one clock; Samsung's exynos-ocp core-count table) */
@@ -284,6 +335,8 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
         c->cal_mw[i] = 0;
     c->m3_n = 4;
     c->surv_m3_khz = surv ? M3_FULL : 0;
+    c->trim = 0;
+    c->gpu_mhz = surv ? SURV_GPU_MHZ : 598U;  /* 1.2-alpha16: H2b/H2c's 858 MHz in Survival */
     if (surv) {
         /* 1.2-alpha6: alpha5's 4 x 1794 drew under 3 A on the phone; beta6/7's own measurements there had 2 x 2314 as
          * the most watts (9.5 / 9.7 W against 9.1 / 9.4 for 4 x 1794): that pick, fixed (Samsung's 2-core level) */
@@ -456,9 +509,14 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
             int lim = heat_surv_target(c);  /* the user's limit, the hold never above 148 C (a 150 limit holds at 148) */
             /* 1.1-beta5: the battery is held too: from its limit minus 3 C (the stop is at the limit itself) */
             int bhot = in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 30;
-            int hot = (in->soc_ok && in->soc_c10 >= lim) || bhot;
+            /* 1.2-alpha16: a soft current ceiling 0.3 A below the 4.5 A stop (one gauge sample above it ends Survival;
+             * the user's alpha7 run had -3.56 A spikes at a 3.1 A average): the fine hold steps down from 4.2 A, back
+             * up only below 3.9 A */
+            int ahi = in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 300;
+            int hot = (in->soc_ok && in->soc_c10 >= lim) || bhot || ahi;
             int very = (in->soc_ok && in->soc_c10 >= lim + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15);
-            int cool = in->soc_ok && in->soc_c10 < lim - 10 && in->bat_ok && in->bat_c10 < c->surv_bat_c10 - 40;
+            int cool = in->soc_ok && in->soc_c10 < lim - 10 && in->bat_ok && in->bat_c10 < c->surv_bat_c10 - 40 &&
+                       !(in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 600);
             if (surv_calibrate(c, in, now, hot)) {
                 c->state = HEAT_ST_RUNNING;
                 why(c, "Survival: measuring the big cores' combinations");
@@ -468,7 +526,9 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
              * old hold shed up to 8 loads a second before the reading turned, then waited for 2 C under): one load off a
              * second near the limit (every 250 ms from 2 C over), one back a second below the limit minus 1 C */
             if (hot && now - c->t_shed >= (very ? 250U : 1000U)) {
-                if (c->cores > 3)
+                if (trim_down(c))
+                    ;                       /* 1.2-alpha16: a clock step first */
+                else if (c->cores > 3)
                     c->cores--;
                 else if (c->gpu_want)
                     c->gpu_want = 0;
@@ -484,8 +544,11 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
                     c->gpu_want = 1;
                 else if (c->cores < c->max_cores)
                     c->cores++;
+                else
+                    (void)trim_up(c);       /* 1.2-alpha16: every load back, then the clocks */
                 c->t_step = now;
             }
+            trim_apply(c);
             if (c->cold && now - c->t_start >= 30000U) {
                 c->cold = 0;
                 c->a55_khz = flat_a55(c);
@@ -502,17 +565,19 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         int hot = (in->soc_ok && in->soc_c10 >= target) || bhot;
         int very = (in->soc_ok && in->soc_c10 >= target + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15);
         int amps = !c->no_current_stop && in->gauge_ok && iabs(in->ma) > L->hard_ma;   /* 1.2-alpha4: can be off */
+        int ahi = in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 300;  /* 1.2-alpha16: below the 4.5 A stop */
         int low = in->gauge_ok && in->mv > 0 && in->mv < L->surv_shed_mv;
         int cool = in->soc_ok && in->soc_c10 < target - L->surv_band_c10 && in->gauge_ok && in->bat_ok &&
                    in->bat_c10 < c->surv_bat_c10 - 40 &&
-                   (c->no_current_stop || iabs(in->ma) < L->hard_ma - 300) && in->mv >= L->surv_shed_mv + 50;
+                   (c->no_current_stop || iabs(in->ma) < L->hard_ma - 300) && in->mv >= L->surv_shed_mv + 50 &&
+                   iabs(in->ma) < L->surv_stop_ma - 600;
         if (surv_calibrate(c, in, now, hot || amps || low)) {
             c->state = HEAT_ST_RUNNING;
             why(c, "Survival: measuring the big cores' combinations");
             return;
         }
-        if ((hot || amps || low) && now - c->t_shed >= 250U) {
-            for (int n = very ? 2 : 1; n > 0; --n) {
+        if (ahi && !hot && !amps && !low && now - c->t_shed >= 1000U) {
+            if (!trim_down(c)) {                /* 4.2 A: a clock step, or a load when none is left */
                 if (c->cores > 0)
                     c->cores--;
                 else
@@ -520,13 +585,29 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
             }
             c->t_shed = now;
             c->t_step = now;
+        } else if ((hot || amps || low) && now - c->t_shed >= 250U) {
+            /* 1.2-alpha16: just over: a clock step (the fine hold); 2 C over, the current or the voltage: loads at
+             * once, as before (the chip's own trip is near) */
+            if (very || amps || low || !trim_down(c)) {
+                for (int n = very ? 2 : 1; n > 0; --n) {
+                    if (c->cores > 0)
+                        c->cores--;
+                    else
+                        c->gpu_want = 0;
+                }
+            }
+            c->t_shed = now;
+            c->t_step = now;
         } else if (cool && now - c->t_step >= L->step_ms && !(c->cold && c->cores >= 3)) {
             if (c->cores < c->max_cores)
                 c->cores++;
-            else
+            else if (!c->gpu_want)
                 c->gpu_want = 1;
+            else
+                (void)trim_up(c);
             c->t_step = now;
         }
+        trim_apply(c);
         if (c->cold && now - c->t_start >= 30000U) {
             c->cold = 0;
             c->a55_khz = flat_a55(c);

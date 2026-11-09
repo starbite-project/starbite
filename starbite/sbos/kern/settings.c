@@ -51,6 +51,8 @@ static void fill(struct saved *s)
     s->pad[0] = auto_off_min;               /* 0.3.2: was zero padding, so 0 (never) for older records */
     s->pad[1] = 0x100U | (uint32_t)(look_emergency != 0) | (uint32_t)(em_set_auto != 0) << 1;    /* 0.6 */
     s->pad[2] = (uint32_t)(look_is_ready() ? look_style() : look_saved_style) + 1U;
+    s->pad[3] = 0x10000U | (uint32_t)(heat_surv_stop_c10 & 0xffff) |  /* 1.2-alpha16: Survival's SoC limit (or none) */
+                (uint32_t)((heat_surv_bat_c10 / 10) & 0x7f) << 20;  /* and its battery limit (55 / 58 / 60) */
     if (sbos_selftest_enabled && have_loaded) {     /* not applied there: kept as they were saved (0.5.12) */
         s->panel_save = loaded.panel_save;
         s->panel_off = loaded.panel_off;
@@ -175,6 +177,18 @@ void settings_restore(void)
     }
     if (s.pad[2] >= 1 && s.pad[2] <= 4)
         look_saved_style = (int)s.pad[2] - 1;   /* main makes it once, after this */
+    if (s.pad[3] & 0x10000U) {              /* 1.2-alpha16: Survival's SoC limit, as the user left it */
+        int v = (int)(s.pad[3] & 0xffffU);
+        if ((v >= 1250 && v <= SBOS_HEAT_SOC_HARD_C10) || v == SBOS_HEAT_SOC_NOLIMIT_C10) {
+            heat_surv_stop_c10 = v;
+            sb_logx("settings: Survival's SoC limit restored, 0.1 C: ", (uint64_t)v);
+        }
+        int b = (int)((s.pad[3] >> 20) & 0x7fU) * 10;
+        if (b == 550 || b == 580 || b == 600) {
+            heat_surv_bat_c10 = b;
+            sb_logx("settings: Survival's battery limit restored, 0.1 C: ", (uint64_t)b);
+        }
+    }
     struct ub u;
     ub_init(&u);
     ub_s(&u, "settings: restored (slot sequence ");

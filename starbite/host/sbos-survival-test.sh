@@ -112,5 +112,15 @@ want "$r" "Survival stays inside Samsung's core-count table" "and the fallback s
 ENVS=
 r=$(run $SETT_ABOUT $PROBE)
 want "$r" "ocp probe: the M3 core did not report" "no M3 core: reported, nothing read"
+# 1.2-alpha16: "No limit" asks once (was 8 holds) and is remembered with the trip-off switch across a restart
+ST="$out/nolimit-state.bin"
+rm -f "$ST"
+ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_STATE=$ST"
+r=$(run $OPEN $HEAT t:723,2900 w:500 g:720,2400,-1500,600 w:800 g:718,1968,0,1700 w:800 g:720,1170,0,1900 w:1500 w:12000)
+want "$r" "settings: Survival (trip off): NO SoC LIMIT (confirmed; saved)" "No limit: one hold, one confirmation"
+r=$(run $OPEN $HEAT w:600 s:nl-after)
+want "$r" "settings: Survival's SoC limit restored, 0.1 C: 0x00002706" "No limit remembered across a restart"
+c=$(px nl-after 720 2000); echo "note: after the restart the Heat page was drawn ($c)"
+ENVS=
 echo "survival test: $fails failed"
 [ "$fails" = 0 ]

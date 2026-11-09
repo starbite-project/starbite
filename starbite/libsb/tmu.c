@@ -70,7 +70,10 @@ static int tmu_filtered(uintptr_t base, unsigned p, unsigned *flags, int *code_o
     unsigned slot = (base == SB_TMU_SUB ? 8U : 0U) + p, rej = 0;
     struct tmu_ctx c = { base, p, 0, 0, -1 };
     int bad = 0;
-    int t = sb_sample_filter(tmu_get, &c, -30, 150, 3, 6, &rej, &bad);
+    /* 1.2-alpha16: the filter's range up to 199 C as tmu_get's (alpha4 changed only tmu_get: every sample above 150
+     * was still dropped here, so the hottest probe vanished at 150 and the next one (~130) became "the hottest":
+     * the 150 -> 130 -> 135 saw the user saw in Survival "No limit" on 2026-11-09, at a steady 11.7 W) */
+    int t = sb_sample_filter(tmu_get, &c, -30, 199, 3, 6, &rej, &bad);
     if (slot < 11) {
         ++tmu_reads[slot];
         tmu_rej[slot] += rej;

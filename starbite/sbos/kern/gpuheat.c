@@ -84,7 +84,105 @@ static void buck_restore(void)
  * second while the GPU heats (950 mV: the value Starbite's iOS and Linux run the GPU at, read back) */
 static uint64_t t_hold;
 static unsigned holds;
-static uint64_t jobs_done;                  /* 1.2-alpha14: fragment jobs finished this session (H2c's throughput) */
+static uint64_t jobs_done;
+/* 1.2-alpha16: the GPU above ACPM's 598 MHz in Survival (H2b/H2c on the phone: every step to 858 locked and held, the
+ * cycle counter followed). PLL_G3D (a 1018X: VCO 600..1200 MHz, P 1..63, M 64..1023, S 0..6, Fref 2..8 MHz; vendor
+ * cal-if pll_spec.c): 598 is P 4 M 184 S 1 (VCO 1196); above 600 the clock is the VCO itself (S 0). The vendor's
+ * sequence (ra_enable_pll / ra_pll_set_pmsk): the output to the oscillator (MUX_BUSY awaited), the PLL off, the lock
+ * time P x 150, one write of P, M, S with MUX_SEL and ENABLE, STABLE awaited. A failed lock goes back to the 598
+ * word and stops trying for the session. */
+#define G3D_CON0 0x17400140UL
+#define G3D_LOCK 0x17400000UL
+static uint32_t w598;                       /* PLL_CON0 after ACPM's 598 MHz request */
+static unsigned cur_mhz;
+static int oc_failed;
+
+static uint32_t crd(uintptr_t a)
+{
+#ifndef SB_HOST
+    return *(volatile uint32_t *)a;
+#else
+    (void)a;
+    return 0xa0b80411U;                     /* host: the phone's 598 word */
+#endif
+}
+
+static void cwr(uintptr_t a, uint32_t v)
+{
+#ifndef SB_HOST
+    __asm__ volatile("dsb sy" ::: "memory");
+    *(volatile uint32_t *)a = v;
+    __asm__ volatile("dsb sy" ::: "memory");
+#else
+    (void)a;
+    (void)v;
+#endif
+}
+
+int gpu_pms_ok(uint32_t p, uint32_t m, uint32_t s)
+{
+    uint64_t fref_khz = p ? 26000U / p : 0, vco_mhz = p ? 26ULL * m / p : 0;
+    return p >= 1 && p <= 63 && m >= 64 && m <= 1023 && s <= 6 && fref_khz >= 2000 && fref_khz <= 8000 &&
+           vco_mhz >= 600 && vco_mhz <= 1200;
+}
+
+int gpu_pll_set(uint32_t p, uint32_t m, uint32_t s)
+{
+    if (!gpu_pms_ok(p, m, s))
+        return 0;
+    uint32_t v = crd(G3D_CON0);
+    cwr(G3D_CON0, v & ~0x10U);
+#ifndef SB_HOST
+    for (unsigned us = 0; us < 100 && (crd(G3D_CON0) & 0x80U); ++us)
+        sb_udelay(1);
+#endif
+    v = crd(G3D_CON0) & ~(0x80000000U | 0x10U);
+    cwr(G3D_CON0, v);
+    cwr(G3D_LOCK, p * 150U);
+    v = (v & ~((0x3ffU << 16) | (0x3fU << 8) | 7U)) | m << 16 | p << 8 | s;
+    cwr(G3D_CON0, v | 0x80000000U | 0x10U);
+#ifndef SB_HOST
+    for (unsigned us = 0; us < 2000; us += 5) {
+        if (crd(G3D_CON0) & 0x20000000U)
+            return 1;
+        sb_udelay(5);
+    }
+    return 0;
+#else
+    return 1;
+#endif
+}
+
+static void back_to_598(void)
+{
+    if (cur_mhz > 598U && w598)
+        (void)gpu_pll_set((w598 >> 8) & 0x3fU, (w598 >> 16) & 0x3ffU, w598 & 7U);
+    cur_mhz = 598U;
+}
+
+/* 0 at that clock, -1 refused (not running, failed before, outside the PLL) */
+int gpuheat_set_mhz(unsigned mhz)
+{
+    if (!on || !w598 || mhz == cur_mhz)
+        return mhz == cur_mhz ? 0 : -1;
+    if (mhz <= 598U) {
+        back_to_598();
+        return 0;
+    }
+    if (oc_failed)
+        return -1;
+    uint32_t p = (w598 >> 8) & 0x3fU, m = p ? (mhz * p + 13U) / 26U : 0;
+    if (!gpu_pms_ok(p, m, 0) || !gpu_pll_set(p, m, 0)) {
+        oc_failed = 1;
+        back_to_598();
+        sb_logx("heater: gpu: the PLL did not lock above 598: back at 598 for this session, MHz asked ", mhz);
+        return -1;
+    }
+    if (cur_mhz <= 598U)
+        sb_logx("heater: gpu: PLL_G3D above ACPM's table (S 0, the vendor's sequence), MHz ", 26U * m / p);
+    cur_mhz = 26U * m / p;
+    return 0;
+}                  /* 1.2-alpha14: fragment jobs finished this session (H2c's throughput) */
 
 uint64_t gpuheat_jobs(void)
 {
@@ -135,7 +233,7 @@ int gpuheat_on(void)
 
 unsigned gpuheat_mhz(void)
 {
-    return on ? mhz : 0;
+    return on ? (cur_mhz > 598U ? cur_mhz : mhz) : 0;     /* 1.2-alpha16: the PLL's own clock above ACPM's table */
 }
 
 static void put(uint64_t va, const uint32_t *w, unsigned n);
@@ -269,6 +367,14 @@ int gpuheat_start(void)
         sb_log("heater: gpu: vdd_g3d changed after the clock request (ACPM): set again");
     buck_hold();                            /* 1.2-alpha12 */
     t_hold = sb_ms();
+    w598 = 0;
+    cur_mhz = mhz;
+    oc_failed = 0;
+    if (mhz == 598U) {
+        uint32_t w = crd(G3D_CON0);
+        if ((w & 0xa0000010U) == 0xa0000010U && gpu_pms_ok((w >> 8) & 0x3fU, (w >> 16) & 0x3ffU, w & 7U))
+            w598 = w;                       /* enabled, locked, on the PLL: the word to come back to */
+    }
     chain = gpuheat_alu ? 4 : 64;
     chains = faults = 0;
     jobs_done = 0;
@@ -356,6 +462,8 @@ void gpuheat_stop(void)
         return;
     }
     quiesce();
+    back_to_598();                          /* 1.2-alpha16: ACPM's own word before its 260 MHz request */
+    w598 = 0;
     sb_gpu_power_off();
     (void)hw_dvfs(DVFS_GPU, 260000);
     sb_gpu_close();
@@ -378,6 +486,12 @@ void gpuheat_fail_stop(const char *why)
 {
     gpuheat_stop();
     fail(why);
+    if (gpuheat_alu) {
+        /* 1.2-alpha16: the compute job failed: the clear jobs once more in this session (the GPU was reset) */
+        gpuheat_alu = 0;
+        failed_session = 0;
+        sb_log("heater: gpu: the compute job failed: the clear jobs instead for this session");
+    }
 }
 
 void gpuheat_new_session(void)

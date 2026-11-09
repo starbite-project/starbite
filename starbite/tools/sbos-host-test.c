@@ -224,8 +224,12 @@ static void t_dvfs(void)
     /* 1.1-beta6: Samsung's M3 core-count table (exynos-ocp): 1 core 2704, 2 cores 2314, 3-4 cores 1794 */
     CHECK(sb_m3_ocp_level_ok(2704000, 1) && !sb_m3_ocp_level_ok(2704000, 2) && sb_m3_ocp_level_ok(2314000, 2) &&
           !sb_m3_ocp_level_ok(2314000, 3) && sb_m3_ocp_level_ok(1794000, 4) && !sb_m3_ocp_level_ok(2886000, 1) &&
-          !sb_m3_ocp_level_ok(2860000, 1) && !sb_m3_ocp_level_ok(1924000, 1) && !sb_m3_ocp_level_ok(2704000, 0 + 4),
-          "M3: 2704 for 1 core, 2314 for 2, 1794 for 3-4, nothing else above 1794");
+          !sb_m3_ocp_level_ok(2860000, 1) && !sb_m3_ocp_level_ok(2704000, 0 + 4),
+          "M3: 2704 for 1 core, 2314 for 2, 1794 for 3-4");
+    /* 1.2-alpha16: the fine hold's ECT steps between 1794 and 2314, for two busy M3 cores at most */
+    CHECK(sb_m3_ocp_level_ok(2106000, 2) && sb_m3_ocp_level_ok(2002000, 2) && sb_m3_ocp_level_ok(1924000, 1) &&
+          !sb_m3_ocp_level_ok(1924000, 3) && !sb_m3_ocp_level_ok(2106000, 4) && !sb_m3_ocp_level_ok(2400000, 1),
+          "M3: 1924 / 2002 / 2106 for 1-2 cores only, nothing else in between");
     CHECK(sb_dvfs_level_listed(4, 572000) && sb_dvfs_level_listed(4, 260000), "GPU 572 / 260 MHz listed");
     CHECK(sb_dvfs_level_listed(4, 598000), "GPU 598 MHz listed (the ECT's top, 0.6.2)");
     CHECK(!sb_dvfs_level_listed(4, 611000) && !sb_dvfs_level_listed(4, 650000) && !sb_dvfs_level_listed(4, 702000) &&
@@ -639,6 +643,12 @@ static void sim_run(struct heat_ctl *c, struct sim *s, int trip_armed, int max_s
     s->secs = (int)(t / 1000U);
 }
 
+/* 1.2-alpha16: the load Survival asks for: whole loads count 16, the fine hold's clock steps 1 each (8 levels) */
+static int load_of(const struct heat_ctl *c)
+{
+    return c->cores * 16 + c->gpu_want * 16 + (8 - c->trim);
+}
+
 static void t_survival(void)
 {
     /* 1.1-beta7: the ABSOLUTE FINAL limits (150 C SoC agreed 2026-11-08, 60 C battery): no setting, target, hold or
@@ -676,10 +686,10 @@ static void t_survival(void)
         c.cal = 5;
         run(&c, &in, 0, 10000, 0);
         in.soc_c10 = 1482;
-        int before = c.cores + c.gpu_want;
+        int before = load_of(&c);
         run(&c, &in, 10250, 1000, 0);
-        CHECK(c.cores + c.gpu_want < before, "hard limit: at 148.2 C it sheds even with a 175 C limit (%d -> %d)", before,
-              c.cores + c.gpu_want);
+        CHECK(load_of(&c) < before, "hard limit: at 148.2 C it sheds even with a 175 C limit (%d -> %d)", before,
+              load_of(&c));
         in.soc_c10 = 1491;
         run(&c, &in, 11500, 300, 0);
         CHECK(stopped_with(&c, HEAT_ST_STOPPED, "past your limit"), "hard limit: 149.1 C stops (%s)", c.why);
@@ -705,14 +715,14 @@ static void t_survival(void)
         c.trip_off = 1;
         c.cal = 5;
         run(&c, &in, 0, 10000, 0);
-        int full = c.cores + c.gpu_want;
+        int full = load_of(&c);
         in.soc_c10 = 1950;
         run(&c, &in, 10250, 3000, 0);
-        CHECK(c.state == HEAT_ST_RUNNING && c.cores + c.gpu_want >= full, "no limit: 195 C neither sheds nor stops (%d -> %d, %s)",
-              full, c.cores + c.gpu_want, c.why);
+        CHECK(c.state == HEAT_ST_RUNNING && load_of(&c) >= full, "no limit: 195 C neither sheds nor stops (%d -> %d, %s)",
+              full, load_of(&c), c.why);
         in.bat_c10 = c.surv_bat_c10 - 20;
         run(&c, &in, 13500, 3000, 0);
-        CHECK(c.cores + c.gpu_want < full || c.state != HEAT_ST_RUNNING, "no limit: the battery limit still holds (%s)", c.why);
+        CHECK(load_of(&c) < full || c.state != HEAT_ST_RUNNING, "no limit: the battery limit still holds (%s)", c.why);
         in = base_in(0);
         heat_ctl_init(&c, 0);
         c.surv_stop_c10 = SBOS_HEAT_SOC_NOLIMIT_C10;
@@ -722,6 +732,24 @@ static void t_survival(void)
         in.soc_ok = 0;                          /* 200 C or more: invalid */
         run(&c, &in, 2250, 4000, 0);
         CHECK(stopped_with(&c, HEAT_ST_STOPPED, "processor temperature"), "no limit: a lost reading still ends it (%s)", c.why);
+        /* 1.2-alpha16: the soft ceiling 0.3 A below the 4.5 A stop, in both modes: a step down, no stop */
+        for (int x = 0; x < 2; ++x) {
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.no_current_stop = 1;
+            heat_ctl_request(&c, x ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0, &in);
+            c.trip_off = x;
+            run(&c, &in, 0, 10000, 0);
+            int l0 = load_of(&c);
+            in.ma = -4300;
+            run(&c, &in, 10250, 2000, 0);
+            CHECK(c.state == HEAT_ST_RUNNING && load_of(&c) < l0, "Survival %d: 4.3 A steps down below the 4.5 A stop, no stop "
+                  "(%d -> %d, %s)", x, l0, load_of(&c), c.why);
+            int l1 = load_of(&c);
+            in.ma = -4000;
+            run(&c, &in, 12500, 3000, 0);
+            CHECK(load_of(&c) <= l1, "Survival %d: no step back up between 3.9 and 4.2 A (%d -> %d)", x, l1, load_of(&c));
+        }
         /* the 3.5 A limit in plain Survival: held there, or (the user's switch) not */
         for (int off = 0; off < 2; ++off) {
             heat_ctl_init(&c, 0);
@@ -849,16 +877,26 @@ static void t_survival(void)
     run(&c, &in, 5250, 18000, 0);
     CHECK(c.cal == 5 && c.cores == 5, "trip off: all 5 workers below the limit (%d, cal %d)", c.cores, c.cal);
     in.soc_c10 = 1312;
-    run(&c, &in, 23500, 1500, 0);         /* 1.1-beta7: one load a second near the limit (1.2-alpha6: 2 M3s) */
+    run(&c, &in, 23500, 1500, 0);         /* 1.1-beta7: one step a second near the limit (1.2-alpha6: 2 M3s) */
     CHECK(c.state != HEAT_ST_STOPPED, "trip off: at the limit it sheds, no stop (%s)", c.why);
-    CHECK(c.gpu_want == 1 && c.cores == 3, "trip off: the M3s shed first, the GPU kept (%d cores, gpu %d)", c.cores, c.gpu_want);
-    run(&c, &in, 25500, 0, 0);
+    /* 1.2-alpha16: the fine hold: clock steps first (M3 2314 -> 2106 -> ..., GPU 858 -> 806 -> ...), no load shed */
+    CHECK(c.cores == 5 && c.gpu_want == 1 && c.trim == 2 && c.m3_khz == 2002000U && c.gpu_mhz == 754U,
+          "trip off: the fine hold steps the clocks first (%d cores, trim %d, M3 %u, GPU %u)", c.cores, c.trim, c.m3_khz,
+          c.gpu_mhz);
+    run(&c, &in, 25500, 4500, 0);
+    CHECK(c.trim == 7 && c.cores == 5, "trip off: every clock step before a load (trim %d, %d cores)", c.trim, c.cores);
+    run(&c, &in, 31500, 1500, 0);
+    CHECK(c.gpu_want == 1 && c.cores == 3, "trip off: then the M3s shed, the GPU kept (%d cores, gpu %d)", c.cores, c.gpu_want);
+    run(&c, &in, 33500, 0, 0);
     CHECK(c.gpu_want == 0 && c.cores == 3, "trip off: then the GPU (%d cores, gpu %d)", c.cores, c.gpu_want);
     in.soc_c10 = 1250;
-    run(&c, &in, 28000, 4000, 0);
+    run(&c, &in, 34000, 4000, 0);
     CHECK(c.gpu_want == 1 && c.cores > 3, "trip off: back below the limit: the GPU, then the M3s (%d cores)", c.cores);
+    run(&c, &in, 38250, 12000, 0);
+    CHECK(c.cores == 5 && c.trim == 0 && c.m3_khz == 2314000U && c.gpu_mhz == 858U,
+          "trip off: every load back, then the clocks to the top (trim %d, M3 %u, GPU %u)", c.trim, c.m3_khz, c.gpu_mhz);
     in.soc_c10 = 1361;
-    run(&c, &in, 32500, 300, 0);
+    run(&c, &in, 50500, 300, 0);
     CHECK(stopped_with(&c, HEAT_ST_STOPPED, "past your limit"), "trip off: 5 C past the limit stops (%s)", c.why);
     in = base_in(0);
     heat_ctl_init(&c, 0);
@@ -875,14 +913,15 @@ static void t_survival(void)
             CHECK(heat_ctl_request(&c, x ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0, &in) == 0, "Survival %d starts (%s)", x, c.why);
             c.trip_off = x;
             run(&c, &in, 0, 9000, 0);
-            int before = c.cores;
+            int before = load_of(&c);
             in.bat_c10 = lim - 25;
             run(&c, &in, 9250, 1000, 0);
-            CHECK(c.state != HEAT_ST_STOPPED && c.cores < before, "Survival %d: the battery at its limit - 2.5 C sheds, no stop "
-                  "(limit %d, %d -> %d cores, %s)", x, lim, before, c.cores, c.why);
+            CHECK(c.state != HEAT_ST_STOPPED && load_of(&c) < before, "Survival %d: the battery at its limit - 2.5 C sheds, no "
+                  "stop (limit %d, %d -> %d, %s)", x, lim, before, load_of(&c), c.why);
+            int held = load_of(&c);
             in.bat_c10 = lim - 35;
             run(&c, &in, 10500, 3000, 0);
-            CHECK(c.cores < before || !c.gpu_want, "Survival %d: no load back between limit - 4 and - 3 C (%d cores)", x, c.cores);
+            CHECK(load_of(&c) <= held, "Survival %d: no load back between limit - 4 and - 3 C (%d -> %d)", x, held, load_of(&c));
             in.bat_c10 = lim;
             run(&c, &in, 13750, 500, 0);
             CHECK(stopped_with(&c, HEAT_ST_STOPPED, "battery limit"), "Survival %d: the stop at the battery limit %d (%s)", x,

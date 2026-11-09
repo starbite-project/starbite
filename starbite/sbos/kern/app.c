@@ -436,6 +436,7 @@ static void surv_bat_done(int ok)
 {
     if (ok && (surv_bat_pending == 580 || surv_bat_pending == 600)) {
         heat_surv_bat_c10 = surv_bat_pending;
+        settings_changed();                 /* 1.2-alpha16: remembered */
         sb_logx("settings: Survival's battery limit raised (confirmed), 0.1 C: ", (uint64_t)surv_bat_pending);
     } else {
         sb_log("settings: Survival's battery limit not raised");
@@ -445,6 +446,17 @@ static void surv_bat_done(int ok)
 }
 
 /* 1.2-alpha1: the Linux test's confirmation */
+/* 1.2-alpha16 (the user): "No limit" with one clear warning (was 8 holds), remembered across restarts */
+static void nolimit_done(int ok)
+{
+    if (ok) {
+        heat_surv_stop_c10 = SBOS_HEAT_SOC_NOLIMIT_C10;
+        settings_changed();
+    }
+    sb_log(ok ? "settings: Survival (trip off): NO SoC LIMIT (confirmed; saved)" : "settings: Survival's SoC limit kept");
+    app_event_send(app_by_id("heat"), EV_APP_SERVICE, 1, 0);
+}
+
 static void linux_done(int ok)
 {
     kui_linux_on = ok ? 1 : 0;
@@ -568,6 +580,7 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
             return SBOS_EAGAIN;
         if (arg[1] == 550) {
             heat_surv_bat_c10 = 550;
+            settings_changed();
             sb_log("settings: Survival's battery limit: 55 C");
             return 0;
         }
@@ -579,8 +592,19 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         return 0;
     case SET_HEAT_SURV_STOP_C10:
         if ((arg[1] < 1250 || arg[1] > SBOS_HEAT_SOC_HARD_C10) && arg[1] != SBOS_HEAT_SOC_NOLIMIT_C10)
-            return SBOS_EINVAL;             /* 125..150 C, or (1.2-alpha4) "No limit" after the app's 8 holds */
+            return SBOS_EINVAL;             /* 125..150 C, or (1.2-alpha4) "No limit" */
+        if (arg[1] == SBOS_HEAT_SOC_NOLIMIT_C10 && heat_surv_stop_c10 != SBOS_HEAT_SOC_NOLIMIT_C10) {
+            kui_confirm("Survival with NO SoC limit?",
+                        "Nothing holds or stops the processor by its temperature: it runs flat out, above 150 C if it gets "
+                        "there, until the battery limit or 2 %. Only with the chip's own trip OFF.",
+                        "The chip can be damaged: a last resort for staying warm. A reading of 200 C or a lost reading "
+                        "still stops it.",
+                        "Remembered until you tap the limit again.",
+                        "Hold to remove the limit", nolimit_done);
+            return 0;
+        }
         heat_surv_stop_c10 = (int)arg[1];
+        settings_changed();                 /* 1.2-alpha16: saved */
         sb_logx("settings: Survival (trip off)'s SoC stop, 0.1 C: ", arg[1]);
         return 0;
     case SET_HEAT_SOC_STOP_C10:
