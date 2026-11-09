@@ -53,6 +53,27 @@ static void buck_restore(void)
     sb_log(ok ? "heater: gpu: vdd_g3d back" : "heater: gpu: vdd_g3d NOT back (stays 950 mV until a restart)");
 }
 
+/* 1.2-alpha12: vdd_g3d held at 950 mV. H1 on the phone: ACPM's fvmap has G3D 598 MHz at 731.25 mV, and every GPU
+ * session on the phone logged "vdd_g3d changed after the clock request (ACPM)": ACPM's level request puts its own
+ * voltage back, so the GPU heated at ~731 mV, not 950. Now written again after the request and checked every
+ * second while the GPU heats (950 mV: the value Starbite's iOS and Linux run the GPU at, read back) */
+static uint64_t t_hold;
+static unsigned holds;
+
+static void buck_hold(void)
+{
+    if (!buck_written)
+        return;
+    uint8_t v = 0;
+    if (!sb_pmic_read(1, BUCK6, &v) || v == BUCK6_950)
+        return;
+    int w = sb_gate_open(&au) && sb_pmic_write(1, BUCK6, BUCK6_950, SB_TIER1);
+    sb_gate_close();
+    if (!holds++ || !w)
+        sb_logx(w ? "heater: gpu: vdd_g3d back to 950 mV after ACPM set it, was (6.25 mV steps from 300) " :
+                    "heater: gpu: vdd_g3d could NOT be set back to 950 mV, reads ", v);
+}
+
 /* job slot 0 stopped and the GPU reset before its power goes (never powered off with a chain running) */
 static void quiesce(void)
 {
@@ -149,6 +170,7 @@ int gpuheat_start(void)
     sb_auth_step(&au, SB_STEP_WARN);            /* the Settings confirmation: the warning ... */
     sb_auth_step(&au, SB_STEP_HELD);            /* ... and its hold */
     uint8_t now_v = 0;
+    holds = 0;
     if (buck_was != BUCK6_950) {
         int w = sb_gate_open(&au) && sb_pmic_write(1, BUCK6, BUCK6_950, SB_TIER1);
         sb_gate_close();
@@ -185,7 +207,9 @@ int gpuheat_start(void)
         mhz = (unsigned)(hz / 1000000U);
     }
     if (buck_written && (!sb_pmic_read(1, BUCK6, &chk) || chk != BUCK6_950))
-        sb_log("heater: gpu: vdd_g3d changed after the clock request (ACPM): logged");
+        sb_log("heater: gpu: vdd_g3d changed after the clock request (ACPM): set again");
+    buck_hold();                            /* 1.2-alpha12 */
+    t_hold = sb_ms();
     chain = 64;
     chains = faults = 0;
     build();
@@ -218,6 +242,10 @@ void gpuheat_tick(void)
         return;
     }
     ++ticks_waiting;
+    if (sb_ms() - t_hold >= 1000U) {           /* 1.2-alpha12: ACPM may set its own voltage again */
+        t_hold = sb_ms();
+        buck_hold();
+    }
     if (!(j & 1U))
         return;                                 /* still running */
     uint64_t took = sb_ms() - t_sub;

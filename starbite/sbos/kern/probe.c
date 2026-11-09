@@ -272,3 +272,220 @@ int heatprobe_step(void)
         return 1;
     }
 }
+
+/* ---- H2 (1.2-alpha12, starbite-os-gputest.img, -DSBOS_SELFTEST_GPU): the GPU above ACPM's 598 MHz ----------------
+ * The GPU heat job (gpuheat.c: vdd_g3d held at 950 mV, 18 cores, pixels checked after each chain) at 598 MHz, then
+ * PLL_G3D (CMU_G3D 0x17400140, FOUT = 26 MHz x M / (P << S)) set directly for 650, 702, 754, 806 and 858 MHz, 30 s
+ * each: the GPU's clock to the 26 MHz oscillator (PLL_CON0 bit 4), the PLL off, M written, the PLL on, its lock
+ * (bit 29) awaited (at most 5 ms), the GPU back on the PLL. A step passes with the job still running, no fault, the
+ * lock held and the GPU zone below 110 C. The first failure or 110 C ends the ladder: the PLL back to its 598 MHz
+ * word, ACPM asked for 598 again (its own state), the GPU heat stopped. vdd_g3d stays 950 mV throughout (ACPM's
+ * table: 598 MHz at 731 mV, so 950 is ~220 mV above it); custom voltages above 950 come in a later step. */
+#define G3D_CON0 0x17400140UL
+static const unsigned g_steps[] = { 650, 702, 754, 806, 858 };
+static int gph, gstep;
+static uint32_t g_con0_598;
+static uint64_t g_t;
+static int64_t g_acc;
+static int g_n, g_best;
+
+static uint32_t g_rd(uintptr_t a)
+{
+#ifndef SB_HOST
+    return *(volatile uint32_t *)a;
+#else
+    (void)a;
+    return 0xa0000000U | 23U << 16 | 1U << 8 | 1U | 0x10U;   /* host: M 23, P 1, S 1: 299 MHz */
+#endif
+}
+
+static void g_wr(uintptr_t a, uint32_t v)
+{
+#ifndef SB_HOST
+    __asm__ volatile("dsb sy" ::: "memory");
+    *(volatile uint32_t *)a = v;
+    __asm__ volatile("dsb sy" ::: "memory");
+#else
+    (void)a;
+    (void)v;
+#endif
+}
+
+/* the PLL to M (P and S kept); 1 locked */
+static int g_set_m(uint32_t m)
+{
+    uint32_t v = g_rd(G3D_CON0);
+    g_wr(G3D_CON0, v & ~0x10U);                         /* the GPU on the oscillator */
+    sb_udelay(20);
+    v = g_rd(G3D_CON0) & ~0x80000000U;
+    g_wr(G3D_CON0, v);                                  /* the PLL off */
+    sb_udelay(5);
+    v = (v & ~(0x3ffU << 16)) | (m & 0x3ffU) << 16;
+    g_wr(G3D_CON0, v);
+    g_wr(G3D_CON0, v | 0x80000000U);                    /* on */
+    int locked = 0;
+#ifndef SB_HOST
+    for (unsigned us = 0; us < 5000; us += 10) {
+        if (g_rd(G3D_CON0) & 0x20000000U) {
+            locked = 1;
+            break;
+        }
+        sb_udelay(10);
+    }
+#else
+    locked = 1;
+#endif
+    if (locked)
+        g_wr(G3D_CON0, g_rd(G3D_CON0) | 0x10U);         /* the GPU back on the PLL */
+    return locked;
+}
+
+static void g_back(const char *why)
+{
+    uint32_t m = (g_con0_598 >> 16) & 0x3ffU;
+    if (m)
+        (void)g_set_m(m);
+    (void)hw_dvfs(4, 598000U);
+    sb_logf("probe: gpu: back at 598 MHz: ", why);
+}
+
+static int g_temp_c(void)
+{
+    struct sb_temps t;
+    sb_temps_read(&t);
+    return t.sub == 1 ? t.gpu : -100;
+}
+
+int gpuprobe_step(void)
+{
+    uint64_t now = sb_ms();
+    if (gph > 0 && gph < 9)
+        gpuheat_tick();
+    switch (gph) {
+    case 0:
+        sb_log("probe: start: H2, the GPU above 598 MHz (PLL_G3D set directly, vdd_g3d 950 mV, 30 s a step)");
+        gpu_heat_session = 1;
+        gpuheat_khz = 598000U;
+        if (!gpuheat_start()) {
+            sb_log("probe: FAILED: H2: the GPU heat did not start");
+            gph = 9;
+            return 0;
+        }
+        g_con0_598 = g_rd(G3D_CON0);
+        {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "probe: gpu: PLL_G3D at 598: ");
+            ub_hex(&u, g_con0_598, 8);
+            ub_s(&u, " (M ");
+            ub_dec(&u, (g_con0_598 >> 16) & 0x3ffU);
+            ub_s(&u, " P ");
+            ub_dec(&u, (g_con0_598 >> 8) & 0x3fU);
+            ub_s(&u, " S ");
+            ub_dec(&u, g_con0_598 & 7U);
+            ub_s(&u, ")");
+            sb_log(u.b);
+        }
+        gstep = -1;
+        g_t = now;
+        g_acc = 0;
+        g_n = 0;
+        g_best = 598;
+        gph = 1;
+        return 0;
+    case 1: {                                           /* running a step (-1: 598 itself) */
+        struct sb_bat b;
+        if (now - g_t >= 5000U && sb_bat_read(&b) && b.ok) {
+            g_acc += b.ma;
+            ++g_n;
+        }
+        int tc = g_temp_c();
+        unsigned mhz = gstep < 0 ? 598U : g_steps[gstep];
+        int locked = (g_rd(G3D_CON0) & 0x20000000U) != 0;
+        if (!gpuheat_on() || !locked || tc >= 110) {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "probe: gpu: ");
+            ub_dec(&u, mhz);
+            ub_s(&u, !gpuheat_on() ? " MHz FAILED: the GPU job stopped (a fault or a wrong pixel) after " :
+                     !locked ? " MHz FAILED: the PLL lost its lock after " : " MHz: the GPU zone reached 110 C after ");
+            ub_dec(&u, (now - g_t) / 1000U);
+            ub_s(&u, " s");
+            sb_log(u.b);
+            g_back(tc >= 110 ? "the temperature" : "a failed step");
+            gph = 8;
+            g_t = now;
+            return 0;
+        }
+        if (now - g_t < 30000U)
+            return 0;
+        {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "probe: gpu: ");
+            ub_dec(&u, mhz);
+            ub_s(&u, " MHz passed 30 s: PLL ");
+            int off = 0;
+            ub_dec(&u, sb_gpu_hz(&off) / 1000000U);
+            ub_s(&u, " MHz, GPU zone ");
+            ub_sdec(&u, tc);
+            ub_s(&u, " C, battery ");
+            ub_sdec(&u, g_n ? g_acc / g_n : 0);
+            ub_s(&u, " mA (+ charging)");
+            sb_log(u.b);
+        }
+        g_best = (int)mhz;
+        if (++gstep >= (int)(sizeof(g_steps) / sizeof(g_steps[0]))) {
+            g_back("the ladder's end");
+            gph = 8;
+            g_t = now;
+            return 0;
+        }
+        {
+            uint32_t p = (g_con0_598 >> 8) & 0x3fU, s = g_con0_598 & 7U;
+            uint32_t m = (uint32_t)(((uint64_t)g_steps[gstep] * p * (1U << s) + 13U) / 26U);
+            uint64_t vco = p ? 26ULL * m / p : 0;
+            if (!p || m > 1023U || vco > 3200U) {
+                sb_logx("probe: gpu: the next step is outside the PLL's fields or VCO, MHz ", g_steps[gstep]);
+                g_back("the PLL's limits");
+                gph = 8;
+                g_t = now;
+                return 0;
+            }
+            int ok = g_set_m(m);
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "probe: gpu: to ");
+            ub_dec(&u, g_steps[gstep]);
+            ub_s(&u, " MHz: M ");
+            ub_dec(&u, m);
+            ub_s(&u, ok ? ", locked, PLL reads " : ", NO LOCK in 5 ms, PLL reads ");
+            int off = 0;
+            ub_dec(&u, sb_gpu_hz(&off) / 1000000U);
+            ub_s(&u, " MHz");
+            sb_log(u.b);
+            if (!ok) {
+                g_back("no lock");
+                gph = 8;
+                g_t = now;
+                return 0;
+            }
+        }
+        g_t = now;
+        g_acc = 0;
+        g_n = 0;
+        return 0;
+    }
+    case 8:
+        gpuheat_stop();
+        sb_logx("probe: passed: H2 done; the highest GPU step that passed 30 s, MHz: ", (uint64_t)g_best);
+        gph = 10;
+        return 1;
+    case 9:
+        gpuheat_stop();
+        gph = 10;
+        return 1;
+    default:
+        return 1;
+    }
+}

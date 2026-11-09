@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha11"
+#define SBOS_VERSION "1.2-alpha12"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -362,6 +362,7 @@ const struct notif *notif_get(int i);
 void notif_seen(void);
 void notif_clear(void);
 int heatprobe_step(void);
+int gpuprobe_step(void);
 int panel_dump(void);
 int audio_probe(void);              /* 0.7: the codec's state read only, its ID if S-Boot left it powered (audio.c) */               /* 0.6.5: read only: the panel's ID, gamma, ELVSS, VINT, AOR, IRC (logged) */
 extern int panel_in_lpm;

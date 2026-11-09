@@ -208,6 +208,16 @@ void selftest_timer(unsigned id)
         kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
         return;
 #else
+#ifdef SBOS_SELFTEST_GPU
+        {
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: GPU ladder H2: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: GPU ladder H2: the watchdog could not be set (the loader's stays): ", w);
+            phase = 50;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
 #ifdef SBOS_SELFTEST_VIB
         {
             /* 1.2-alpha7: the vibration motor, unattended: its reads, the PWM's rate, three buzzes, a stop in the
@@ -415,6 +425,21 @@ void selftest_timer(unsigned id)
         kui_home();
         guest_power_off();                  /* (already off after a pass; after a failure: MSG_STOP, up to 1 s) */
         sb_logx("selftest: Linux state at the restart (0 off): ", (uint64_t)guest_state());
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_GPU
+    case 50:                                /* 1.2-alpha12 H2: one step every 100 ms (probe.c) */
+        if (!gpuprobe_step()) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
+            return;
+        }
+        sb_logx("selftest: GPU ladder H2 done, seconds: ", (sb_ms() - t0) / 1000U);
+        phase = 51;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+        return;
+    case 51:
+        active = 0;
         power_restart_recovery();
         return;
 #endif
