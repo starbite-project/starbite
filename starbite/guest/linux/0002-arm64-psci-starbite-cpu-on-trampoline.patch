@@ -1,5 +1,5 @@
---- a/arch/arm64/kernel/psci.c	2026-11-08 18:55:40.732873407 +0200
-+++ b/arch/arm64/kernel/psci.c	2026-11-08 18:55:40.761874169 +0200
+--- a/arch/arm64/kernel/psci.c
++++ b/arch/arm64/kernel/psci.c
 @@ -14,6 +14,7 @@
  #include <linux/smp.h>
  #include <linux/delay.h>
