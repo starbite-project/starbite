@@ -35,6 +35,7 @@ static int gpu_probe_ok;
 static int trip_top_c;                      /* the hardware trip's decoded temperature (logged at a start) */
 static void record(const struct heat_in *in, int running);
 static void hlog_tick(const struct heat_in *in);    /* 1.2-alpha6 */
+static void b2s_restore(const char *when);   /* 1.2-alpha18 */
 static uint64_t rec_saved_at;
 static uint64_t rec_t, rec_uwh;             /* 1.1-beta4: the energy integral of this session */
 static int launch_hold;
@@ -169,6 +170,7 @@ static void trip_restore_when_cool(int force)
 
 void heater_trip_restore_now(void)
 {
+    b2s_restore("a restart or a power-off");    /* 1.2-alpha18 */
     if (!trip_off)
         return;
     uint64_t until = sb_ms() + 3000U;
@@ -872,6 +874,7 @@ int heater_white(void)
 static void restore_and_check(void)
 {
     int was_recording = heat_rec.running != 0;
+    b2s_restore("the stop");                /* 1.2-alpha18 */
     extreme_extras(0);
     ext_led_used = 0;                       /* a new session may light it again */
     ext_white_used = 0;
@@ -1111,16 +1114,157 @@ void heater_timer(unsigned id)
     ui_mark_dirty();
 }
 
+/* 1.2-alpha18 (the user, who heard the risk, on their own phone): with Survival's 4.5 A stop off, the MAX77705's
+ * battery-to-system over-current cut (B2SOVRC, CHG_CNFG_05 0xBC [3:0]; the vendor header max77705_charger.h lists
+ * only 0 DISABLE, 6 4.5 A, 8 4.8 A, 9 5.0 A, 0xB 5.4 A, 0xC 5.6 A; this phone has 0xC, the highest threshold, so the
+ * only documented step past it is DISABLE) is off while Survival runs, and the value found is put back at every stop,
+ * a restart, a power-off and, after a crash, at Starbite OS's next boot (the slot's note, written before the change:
+ * a SoC reset does not reset the MAX77705, which runs from the battery). Only the B2SOVRC bits change. While it is
+ * off: the governor at 6.0 A, the backstop 6.5 A for 1 s, the 3.35 V floor; the pack's own protection stays */
+int heat_b2s_note;
+static int b2s_raised;
+
+static int b2s_write(uint8_t v)
+{
+    struct sb_auth au;
+    sb_auth_init(&au, SB_SP_MAX, 0, 0x69ULL << 8 | 0xbc, 1, SB_TIER1, 0, "heater: the MAX77705's B2SOVRC (the user's choice)");
+    sb_auth_step(&au, SB_STEP_WARN);        /* Heat > Survival's 4.5 A switch: its warning and hold */
+    sb_auth_step(&au, SB_STEP_HELD);
+    int ok = sb_gate_open(&au) && sb_max_write(0x69, 0xbc, v, SB_TIER1);
+    sb_gate_close();
+    uint8_t back = 0;
+    return ok && sb_chg_read(0xbc, &back) && back == v;
+}
+
+static void b2s_raise(void)
+{
+    uint8_t v = 0;
+    if (!sb_chg_read(0xbc, &v)) {
+        sb_log("heater: B2SOVRC: CHG_CNFG_05 not read: left as it is");
+        return;
+    }
+    if (!(v & 0xfU)) {
+        sb_log("heater: B2SOVRC already off: left as it is");
+        return;
+    }
+    heat_b2s_note = 0x100 | v;              /* in the slot before the change (a crash puts it back at the boot) */
+    settings_save_now();
+    if (!b2s_write((uint8_t)(v & 0xf0U))) {
+        sb_logx("heater: B2SOVRC: the MAX77705 did not take DISABLE (left as found), CHG_CNFG_05 ", v);
+        (void)b2s_write(v);
+        heat_b2s_note = 0;
+        settings_changed();
+        return;
+    }
+    b2s_raised = 1;
+    sb_logx("heater: B2SOVRC OFF for this Survival run (the user's choice), CHG_CNFG_05 was ", v);
+}
+
+static void b2s_restore(const char *when)
+{
+    if (!b2s_raised && !heat_b2s_note)
+        return;
+    uint8_t v = (uint8_t)(heat_b2s_note & 0xff);
+    int ok = (heat_b2s_note & 0x100) && (v & 0xfU) && b2s_write(v);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, ok ? "heater: B2SOVRC back (" : "heater: B2SOVRC NOT put back (");
+    ub_s(&u, when);
+    ub_s(&u, "), CHG_CNFG_05 ");
+    ub_hex(&u, v, 2);
+    sb_log(u.b);
+    if (ok) {
+        b2s_raised = 0;
+        heat_b2s_note = 0;
+        settings_changed();
+    }
+}
+
+/* 1.2-alpha18: what the last run left behind, read at every boot (read only): the fuel gauge's trackers since the
+ * last Survival start (the cell's lowest voltage and highest discharge current: the gauge runs from the battery, so
+ * they survive a sudden power loss), the MAX77705's charger / battery details and the S2MPS18's power-on / off
+ * sources. A cut by the MAX77705 (B2SOVRC 5.6 A) shows as a peak current at or above ~5.6 A with the voltage still
+ * up; a brownout as a lowest voltage near the system's cut (~3.0 V and below) */
+void heater_boot_forensics(void)
+{
+    if (heat_b2s_note)
+        b2s_restore("the boot after a Survival run that did not stop");
+    uint16_t mmv = 0, mmc = 0;
+    uint8_t d0 = 0, d1 = 0, d2 = 0, on = 0, off = 0;
+    int ok_v = sb_fg_word(0x1b, &mmv), ok_c = sb_fg_word(0x1c, &mmc);
+    int ok_d = sb_chg_read(0xb3, &d0) && sb_chg_read(0xb4, &d1) && sb_chg_read(0xb5, &d2);
+    int ok_p = sb_pmic_read(1, 0x10, &on) && sb_pmic_read(1, 0x11, &off);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "boot: since the last Survival start: lowest cell ");
+    if (ok_v) {
+        ub_dec(&u, (mmv & 0xffU) * 20U);
+        ub_s(&u, " mV (highest ");
+        ub_dec(&u, (mmv >> 8) * 20U);
+        ub_s(&u, ")");
+    } else {
+        ub_s(&u, "--");
+    }
+    ub_s(&u, ", highest discharge ");
+    if (ok_c) {
+        int mn = (int8_t)(mmc & 0xffU), mx = (int8_t)(mmc >> 8);   /* 80 mA a step (5 mOhm) */
+        ub_dec(&u, (uint64_t)(mn < 0 ? -mn * 80 : 0));
+        ub_s(&u, " mA (highest charge ");
+        ub_dec(&u, (uint64_t)(mx > 0 ? mx * 80 : 0));
+        ub_s(&u, " mA)");
+    } else {
+        ub_s(&u, "--");
+    }
+    sb_log(u.b);
+    ub_init(&u);
+    ub_s(&u, "boot: MAX77705 CHG_DTLS ");
+    if (ok_d) {
+        ub_hex(&u, d0, 2);
+        ub_c(&u, ' ');
+        ub_hex(&u, d1, 2);
+        ub_s(&u, " (BAT_DTLS ");
+        ub_dec(&u, (d1 >> 4) & 7U);
+        ub_s(&u, ") ");
+        ub_hex(&u, d2, 2);
+    } else {
+        ub_s(&u, "not read");
+    }
+    ub_s(&u, "; S2MPS18 PWRONSRC ");
+    if (ok_p) {
+        ub_hex(&u, on, 2);
+        ub_s(&u, " OFFSRC ");
+        ub_hex(&u, off, 2);
+    } else {
+        ub_s(&u, "not read");
+    }
+    sb_log(u.b);
+}
+
+/* at a Survival start: the gauge's min / max trackers cleared (their reset values), so the next boot tells this run */
+static void fg_trackers_reset(void)
+{
+    struct sb_auth au;
+    sb_auth_init(&au, SB_SP_MAX, 0, 0x36ULL << 8 | 0x1b, 2, SB_TIER1, 0, "heater: the fuel gauge's min / max trackers");
+    sb_auth_step(&au, SB_STEP_WARN);
+    sb_auth_step(&au, SB_STEP_HELD);
+    int ok = sb_gate_open(&au) && sb_fg_write16(0x1b, 0x00ffU, SB_TIER1) && sb_fg_write16(0x1c, 0x807fU, SB_TIER1);
+    sb_gate_close();
+    sb_log(ok ? "heater: the fuel gauge's lowest-voltage / highest-current trackers cleared for this run" :
+                "heater: the fuel gauge's trackers could not be cleared (the next boot's numbers include older runs)");
+}
+
 /* 1.2-alpha6: the heat log (kern.h struct hlog): one sample a second, saved with the heat record (every 30 s and at
  * the stop) */
 struct hlog heat_log;
 static uint64_t hlog_t0, hlog_next;
+static int hl_peak_ma, hl_min_mv;           /* 1.2-alpha18: over the second (4 readings), for the next sample */
 static uint32_t hlog_thr0;
 
 static void hlog_start(void)
 {
     memset(&heat_log, 0, sizeof(heat_log));
     heat_log.magic = HLOG_MAGIC;
+    hl_peak_ma = hl_min_mv = 0;
     heat_log.level = (uint32_t)pending_level;
     heat_log.a55_mhz = ctl.a55_khz / 1000U;
     heat_log.m3_n = (uint16_t)ctl.m3_n;
@@ -1128,6 +1272,15 @@ static void hlog_start(void)
     hlog_t0 = sb_ms();
     hlog_next = hlog_t0;
     hlog_thr0 = 0;
+    if (pending_level >= HEAT_SURVIVAL)
+        fg_trackers_reset();                /* 1.2-alpha18 */
+    if (pending_level >= HEAT_SURVIVAL && heat_no_high_stop) {
+        b2s_raise();
+        ctl.gov_ma = b2s_raised ? 6000 : 0;     /* 0: 5.0 A under the 5.6 A cut */
+        ctl.backstop_ma = b2s_raised ? 6500 : 0;
+    } else {
+        ctl.gov_ma = ctl.backstop_ma = 0;
+    }
     {
         /* 1.2-alpha17: the MAX77705's battery-to-system over-current limit (CHG_CNFG_05 0xBC [3:0], B2SOVRC; vendor
          * max77705_charger.h: 0 off, 6 4.5 A, 8 4.8 A, 9 5.0 A, 0xB 5.4 A, 0xC 5.6 A), read only: the hardware wall
@@ -1155,6 +1308,11 @@ static void hlog_start(void)
                           "heater: heat log on (1 s); the M3 throttle counter needs Settings > About > OCP probe first");
 }
 
+static int iabs_h(int v)
+{
+    return v < 0 ? -v : v;
+}
+
 static int16_t clamp16(int v)
 {
     return (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
@@ -1163,7 +1321,15 @@ static int16_t clamp16(int v)
 static void hlog_tick(const struct heat_in *in)
 {
     uint64_t now = sb_ms();
-    if (heat_log.magic != HLOG_MAGIC || now < hlog_next)
+    if (heat_log.magic != HLOG_MAGIC)
+        return;
+    if (in->gauge_ok) {
+        if (iabs_h(in->ma) > hl_peak_ma)
+            hl_peak_ma = iabs_h(in->ma);
+        if (in->mv > 0 && (!hl_min_mv || in->mv < hl_min_mv))
+            hl_min_mv = in->mv;
+    }
+    if (now < hlog_next)
         return;
     uint32_t n = heat_log.n;
     uint32_t secs = (uint32_t)((now - hlog_t0) / 1000U);
@@ -1175,8 +1341,11 @@ static void hlog_tick(const struct heat_in *in)
     s->t = (uint16_t)(secs > 65535U ? 65535U : secs);
     s->soc_c10 = clamp16(in->soc_ok ? in->soc_c10 : -1000);
     s->bat_c10 = clamp16(in->bat_ok ? in->bat_c10 : -1000);
-    s->ma = clamp16(in->gauge_ok ? in->ma : 0);
-    s->mv = (uint16_t)(in->gauge_ok && in->mv > 0 ? in->mv : 0);
+    /* 1.2-alpha18: the second's peak discharge current and lowest cell voltage (the MAX77705's 5.6 A cut and a
+     * brownout show there first) */
+    s->ma = clamp16(hl_peak_ma ? -hl_peak_ma : (in->gauge_ok ? in->ma : 0));
+    s->mv = (uint16_t)(hl_min_mv ? hl_min_mv : (in->gauge_ok && in->mv > 0 ? in->mv : 0));
+    hl_peak_ma = hl_min_mv = 0;
     s->m3_mhz = (uint16_t)(hw_m3_on() ? hw_m3_khz() / 1000U : 0);
     s->cores = (uint8_t)(cores_running() - cpu0_on);
     s->flags = (uint8_t)((gpuheat_on() ? 1 : 0) | (trip_off ? 2 : 0) | (kui_screen() == 6 ? 4 : 0) |
@@ -1330,9 +1499,15 @@ static void record(const struct heat_in *in, int running)
         heat_rec.mwh = (int32_t)(rec_uwh / 1000U);
     }
     sb_strcpy(heat_rec.why, sizeof(heat_rec.why), ctl.why);
-    if (!running || sb_ms() - rec_saved_at >= 30000U) {
+    /* 1.2-alpha18: in Survival the slot every 2 s (alpha17's sudden power loss kept only the first 4 s of the log);
+     * elsewhere every 30 s */
+    unsigned every = running && ctl.level >= HEAT_SURVIVAL ? 2000U : 30000U;
+    if (!running || sb_ms() - rec_saved_at >= every) {
         rec_saved_at = sb_ms();
-        settings_changed();                 /* the slot's save, later (at most one write in 10 s; never in a stop's way) */
+        if (every == 2000U)
+            settings_changed_soon(2000U);
+        else
+            settings_changed();             /* the slot's save, later (at most one write in 10 s; never in a stop's way) */
     }
 }
 #define FLAT_MA SBOS_HEAT_FULL_MA           /* 1.0-rc3: the measured full-heat draw (sbapp.h: 2.8 A, ~3 % a minute) */

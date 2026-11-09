@@ -6,6 +6,7 @@ import struct, sys, zlib
 
 MAGIC_HALF = b"SBOSSTA1"
 HLOG_MAGIC = 0x31474C48
+HLOG_MAGIC2 = 0x32474C48   # 1.2-alpha18: mA = the second's peak, mV = its lowest
 HLOG_N, HLOG_FAST = 1024, 600
 REC_MAX = 4096
 
@@ -44,10 +45,12 @@ def main():
     seq, recs = max(hs, key=lambda h: h[0])
     blob = b"".join(recs.get("heatlog%d" % k, b"") for k in range(8))
     magic, n, level, a55, m3n, gpu, cnfg05 = struct.unpack_from("<IIIIHHI", blob, 0)
-    if magic != HLOG_MAGIC:
+    if magic not in (HLOG_MAGIC, HLOG_MAGIC2):
         print("heatlog: bad magic %#x" % magic)
         return 1
     print("heatlog: state sequence %d, level %d, %d samples, A55 %d MHz, %d M3 cores, GPU %d MHz" % (seq, level, n, a55, m3n, gpu))
+    if magic == HLOG_MAGIC2:
+        print("heatlog: (alpha18+) mA is each second's peak discharge, mV its lowest cell voltage")
     if cnfg05 & 0x100:
         names = {0: "off", 6: "4.5 A", 8: "4.8 A", 9: "5.0 A", 0xB: "5.4 A", 0xC: "5.6 A"}
         print("heatlog: MAX77705 CHG_CNFG_05 %#04x: B2SOVRC (battery to system over-current) %s" %

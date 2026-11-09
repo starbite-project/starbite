@@ -166,6 +166,23 @@ int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier)
     return ok;
 }
 
+/* 1.2-alpha18: a fuel-gauge word (16 bits, little-endian), with the gate (SB_SP_MAX 0x36 << 8 | reg), read back.
+ * Starbite OS uses it only to clear the min / max trackers (MaxMinVolt 0x1B, MaxMinCurr 0x1C) at a Survival start. */
+int sb_fg_write16(uint8_t reg, uint16_t val, int tier)
+{
+    const char *why;
+    uint8_t m[3] = { reg, (uint8_t)val, (uint8_t)(val >> 8) };
+    if (sb_gate_check(SB_SP_MAX, 0, (uint64_t)BI_FG << 8 | reg, 1, tier < SB_TIER1 ? SB_TIER1 : tier, &why)) {
+        sb_logx("fuel gauge write refused, reg ", reg);
+        return 0;
+    }
+    if (!sb_max_init())
+        return 0;
+    int ok = sb_i2c_msg(&sb_max_bus, BI_FG, 0, m, 3, 1);
+    uint16_t back = 0;
+    return ok && sb_fg_word(reg, &back) && back == val;
+}
+
 /* One sample for the status bar and the dashboard. */
 int sb_bat_read(struct sb_bat *bt)
 {

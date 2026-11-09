@@ -159,6 +159,8 @@ void sb_main(void)
     heater_init();
     sos_init();
     settings_restore();                     /* after power_init: the screen-off time it restores re-arms the timer */
+    heater_boot_forensics();                /* 1.2-alpha18: the last run's lowest voltage / highest current; a
+                                             * B2SOVRC left raised by a crash put back (the slot's note) */
     if (look_emergency && !sbos_selftest_enabled)
         panel_emergency(1);                 /* 0.6.1: the saved Emergency Mode's power profile (not in the self test) */
 #ifdef SB_HOST

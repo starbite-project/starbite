@@ -243,9 +243,16 @@ int sb_fg_word_checked(uint8_t reg, uint16_t *v, unsigned lo, unsigned hi)
     }
     return 1;
 }
+static uint8_t chg_regs[256];
+static int chg_written[256];
 int sb_chg_read(uint8_t reg, uint8_t *v)
 {
+    if (chg_written[reg]) {                 /* 1.2-alpha18: a written register reads back */
+        *v = chg_regs[reg];
+        return 1;
+    }
     switch (reg) {
+    case 0xbc: *v = 0x3c; break;                                /* CHG_CNFG_05: B2SOVRC 5.6 A, as the phone */
     case 0xb2: *v = 0x00; break;
     case 0xb3: *v = 0x00; break;
     case 0xb4: *v = 0x38; break;                                /* battery OK, charger off */
@@ -1102,14 +1109,22 @@ static void host_gpu_tick(void)
     HG(0x9c) = (uint32_t)(ts >> 32);
 }
 
-static uint8_t chg_regs[256];
+int sb_fg_write16(uint8_t reg, uint16_t val, int tier)
+{
+    const char *why;
+    (void)val;
+    return !sb_gate_check(SB_SP_MAX, 0, 0x36ULL << 8 | reg, 1, tier < 1 ? 1 : tier, &why);
+}
+
 int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier)
 {
     const char *why;
     if (sb_gate_check(SB_SP_MAX, 0, (uint64_t)addr7 << 8 | reg, 1, tier < 1 ? 1 : tier, &why))
         return 0;
-    if (addr7 == 0x69)
+    if (addr7 == 0x69) {
         chg_regs[reg] = val;
+        chg_written[reg] = 1;
+    }
     return 1;
 }
 

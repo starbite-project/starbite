@@ -113,8 +113,8 @@ ENVS=
 r=$(run $SETT_ABOUT $PROBE)
 want "$r" "ocp probe: the M3 core did not report" "no M3 core: reported, nothing read"
 # 1.2-alpha16: "No limit" asks once (was 8 holds) and is remembered with the trip-off switch across a restart
-ST="$out/nolimit-state.bin"
-rm -f "$ST"
+ST=/tmp/sbos-survival-state.bin         # in the VM: the Mac-shared folder showed a just-written slot late
+limactl shell starbite rm -f "$ST"
 ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_STATE=$ST"
 r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 t:1184,1872 w:600 g:720,2400,-1500,600 w:800 g:718,1594,0,1700 w:800 g:720,1170,0,1900 w:1500 w:12000)
 want "$r" "settings: Survival (trip off): NO SoC LIMIT (confirmed; saved)" "No limit: one hold, one confirmation"
@@ -122,12 +122,23 @@ r=$(run $OPEN $HEAT w:600 s:nl-after)
 want "$r" "settings: Survival's SoC limit restored, 0.1 C: 0x00002706" "No limit remembered across a restart"
 c=$(px nl-after 720 2000); echo "note: after the restart the Heat page was drawn ($c)"
 # 1.2-alpha17: the 4.5 A stop's switch: one hold, one confirmation, remembered
-rm -f "$ST"
+limactl shell starbite rm -f "$ST"
 ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_STATE=$ST"
-r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 g:718,1610,0,1700 w:800 g:720,1170,0,1900 w:1500 w:12000)
+r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 g:718,1610,0,1700 w:800 g:720,1170,0,1900 w:1500 w:16000)
 want "$r" "settings: Survival's 4.5 A stop: OFF (confirmed; saved; a 6 A / 1 s backstop stays)" "4.5 A stop off: asked once"
 r=$(run $OPEN $HEAT w:600)
 want "$r" "settings: Survival's current stops restored (bit 0: 4.5 A off, bit 1: 3.5 A off): 0x00000001" "and remembered"
+# 1.2-alpha18: with the 4.5 A stop off, B2SOVRC off for the run and back at the stop; a run that never stops: back
+# at the next boot (the slot's note)
+r=$(run $OPEN $HEAT $SURV $HOLD $HOLD $HOLD w:4000 $OFF w:3000)
+want "$r" "heater: B2SOVRC OFF for this Survival run (the user's choice), CHG_CNFG_05 was 0x0000003C" "B2SOVRC off at the start"
+want "$r" "heater: B2SOVRC back (the stop), CHG_CNFG_05 0x3C" "and back at the stop"
+want "$r" "fuel gauge's lowest-voltage / highest-current trackers cleared" "the gauge's trackers cleared at the start"
+r=$(run $OPEN $HEAT $SURV $HOLD $HOLD $HOLD w:4000)
+want "$r" "heater: B2SOVRC OFF for this Survival run" "B2SOVRC off again"
+r=$(run w:1500)
+want "$r" "heater: B2SOVRC back (the boot after a Survival run that did not stop), CHG_CNFG_05 0x3C" "a run that never stopped: back at the next boot"
+want "$r" "boot: since the last Survival start: lowest cell" "the boot's readout"
 ENVS=
 echo "survival test: $fails failed"
 [ "$fails" = 0 ]

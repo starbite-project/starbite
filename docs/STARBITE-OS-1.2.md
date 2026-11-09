@@ -1,4 +1,26 @@
-# Starbite OS 1.2-alpha17: Survival's 4.5 A stop gets a switch (2026-11-09)
+# Starbite OS 1.2-alpha18: a current / voltage governor under the charger chip's cut; the heat log survives a power loss (2026-11-09)
+
+alpha17 on the phone (the 4.5 A stop off, on battery): a sudden power loss (SPON) at ~147 C; only the first 4 s of
+the heat log survived (2.97 A at 3.87 V, then 3.78 A / 3.75 V / 14.2 W at 94 C); the MAX77705's B2SOVRC reads
+0x3C: 5.6 A.
+- **The MAX77705's battery-to-system cut off during Survival (the user's choice, after hearing the risk).** With the
+  4.5 A stop off, B2SOVRC (CHG_CNFG_05 [3:0]) goes to DISABLE for the run. The vendor header lists only DISABLE, 4.5,
+  4.8, 5.0, 5.4 and 5.6 A, and this phone is at 5.6 A, the highest threshold. The value found is noted in the slot
+  first, and put back at every stop, restart and power-off, and after a crash at Starbite OS's next boot. A SoC
+  reset does not reset the MAX77705, which runs from the battery; another OS booted after a crash may not restore it
+  (the vendor driver's .c is not in our tree to check). The pack's own protection board stays.
+- **A governor** with the 4.5 A stop off: the fine hold steps down from 6.0 A with B2SOVRC off (5.0 A if the chip did
+  not take the change), every 250 ms from 0.3 A above that, or from 3.35 V on the cell; back up only 0.3 A below
+  and above 3.45 V. The backstop is 6.5 A for 1 s with B2SOVRC off (6 A otherwise).
+- **The heat log survives a sudden power loss:** in Survival the slot is written every 2 s (was every 30 s), and each
+  second's sample keeps its peak discharge current and lowest cell voltage (log "HLG2").
+- **What the last run left behind, at every boot** (read only): the fuel gauge's lowest cell voltage and highest
+  discharge current since the last Survival start (MaxMinVolt / MaxMinCurr: the gauge runs from the battery, so
+  they survive the power loss; cleared at each Survival start), the MAX77705's charger details and the S2MPS18's
+  power-on / off sources, as `boot: ...` lines in pmsg. **A peak current near 5.6 A with the voltage still up means
+  the MAX77705 cut; a lowest voltage near 3 V means a brownout.**
+
+## Starbite OS 1.2-alpha17: Survival's 4.5 A stop gets a switch (2026-11-09)
 
 alpha16 on the phone: it climbs fast (~130 C quickly), then stopped on "Battery current above 4.5 A". The user: the
 battery has its own protection board, so the 4.5 A stop should be optional.

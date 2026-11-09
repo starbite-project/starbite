@@ -23,6 +23,7 @@ struct saved {
     uint32_t screen_off_s;
     uint8_t panel_save, panel_off, sos_led, bright;
     uint32_t pad[4];
+    uint32_t ext[4];                        /* 1.2-alpha18: [0] the B2SOVRC note (0x100 | CHG_CNFG_05 as found) */
 };
 
 static uint8_t *half[2];
@@ -51,6 +52,7 @@ static void fill(struct saved *s)
     s->pad[0] = auto_off_min;               /* 0.3.2: was zero padding, so 0 (never) for older records */
     s->pad[1] = 0x100U | (uint32_t)(look_emergency != 0) | (uint32_t)(em_set_auto != 0) << 1;    /* 0.6 */
     s->pad[2] = (uint32_t)(look_is_ready() ? look_style() : look_saved_style) + 1U;
+    s->ext[0] = (uint32_t)heat_b2s_note;     /* 1.2-alpha18 */
     s->pad[3] = 0x10000U | (uint32_t)(heat_surv_stop_c10 & 0xffff) |  /* 1.2-alpha16: Survival's SoC limit (or none) */
                 (uint32_t)((heat_surv_bat_c10 / 10) & 0x7f) << 20 |  /* and its battery limit (55 / 58 / 60) */
                 (uint32_t)(heat_no_high_stop != 0) << 27 |            /* 1.2-alpha17: the 4.5 A stop off */
@@ -179,6 +181,8 @@ void settings_restore(void)
     }
     if (s.pad[2] >= 1 && s.pad[2] <= 4)
         look_saved_style = (int)s.pad[2] - 1;   /* main makes it once, after this */
+    if ((s.ext[0] & ~0x1ffU) == 0 && (s.ext[0] & 0x100U))
+        heat_b2s_note = (int)s.ext[0];      /* 1.2-alpha18: a Survival run left B2SOVRC raised: the boot puts it back */
     if (s.pad[3] & 0x10000U) {              /* 1.2-alpha16: Survival's SoC limit, as the user left it */
         int v = (int)(s.pad[3] & 0xffffU);
         if ((v >= 1250 && v <= SBOS_HEAT_SOC_HARD_C10) || v == SBOS_HEAT_SOC_NOLIMIT_C10) {
@@ -226,6 +230,17 @@ void settings_changed(void)
     uint64_t now = sb_ms(), at = now + SAVE_DELAY_MS;
     if (last_save && at < last_save + 10000U)
         at = last_save + 10000U;            /* at most one write in 10 s, whatever an app does */
+    kt_set(KT_STATE, 0, now, (uint32_t)(at - now), 0);
+}
+
+/* 1.2-alpha18: Survival's heat log: a save within ms (at least ms after the last one) instead of the 10 s spacing */
+void settings_changed_soon(uint32_t ms)
+{
+    if (!slot_ok || kt_pending(KT_STATE, 0))
+        return;
+    uint64_t now = sb_ms(), at = now + 200U;
+    if (last_save && at < last_save + ms)
+        at = last_save + ms;
     kt_set(KT_STATE, 0, now, (uint32_t)(at - now), 0);
 }
 

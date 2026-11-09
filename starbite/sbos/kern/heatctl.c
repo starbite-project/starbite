@@ -144,6 +144,8 @@ static const struct { uint32_t m3; unsigned gpu; } trim_tab[] = {
     { 1794000U, 650U }, { 1690000U, 598U }, { 1586000U, 598U }, { 1469000U, 598U },
 };
 #define NTRIM ((int)(sizeof(trim_tab) / sizeof(trim_tab[0])))
+#define GOV_MA(c) ((c)->gov_ma ? (c)->gov_ma : HEAT_GOV_MA)              /* 1.2-alpha18 */
+#define BACKSTOP_MA(c) ((c)->backstop_ma ? (c)->backstop_ma : HEAT_BACKSTOP_MA)
 
 static int trim_on(const struct heat_ctl *c)
 {
@@ -434,11 +436,11 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
     }
     /* 1.2-alpha17 (the user: "the battery has its own protection board"): with the 4.5 A stop off, a backstop far
      * above what the loads draw (~5 A at most): 6 A for 1 s. The pack's own protection handles real shorts */
-    if (surv && c->no_high_stop && in->gauge_ok && iabs(in->ma) > HEAT_BACKSTOP_MA) {
+    if (surv && c->no_high_stop && in->gauge_ok && iabs(in->ma) > BACKSTOP_MA(c)) {
         if (!c->t_over)
             c->t_over = now ? now : 1;
         else if (now - c->t_over >= 1000U) {
-            stop(c, HEAT_ST_STOPPED, "Battery current above 6 A for 1 s (a short or a failing cell?)");
+            stop(c, HEAT_ST_STOPPED, c->backstop_ma > HEAT_BACKSTOP_MA ? "Battery current above 6.5 A for 1 s (a short or a failing cell?)" : "Battery current above 6 A for 1 s (a short or a failing cell?)");
             return;
         }
     } else {
@@ -525,10 +527,18 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
              * the user's alpha7 run had -3.56 A spikes at a 3.1 A average): the fine hold steps down from 4.2 A, back
              * up only below 3.9 A */
             int ahi = !c->no_high_stop && in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 300;
-            int hot = (in->soc_ok && in->soc_c10 >= lim) || bhot || ahi;
-            int very = (in->soc_ok && in->soc_c10 >= lim + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15);
+            /* 1.2-alpha18: with the 4.5 A stop off, a governor under the MAX77705's battery-to-system cut (B2SOVRC
+             * 5.6 A on this phone) and under a brownout: down from 5.0 A or 3.35 V, back up below 4.7 A and above 3.45 V
+             * (alpha17 on the phone: a sudden power loss at ~147 C with nothing of ours limiting the current) */
+            int gov = c->no_high_stop && in->gauge_ok &&
+                      (iabs(in->ma) > GOV_MA(c) || (in->mv > 0 && in->mv < HEAT_GOV_MV));
+            int hot = (in->soc_ok && in->soc_c10 >= lim) || bhot || ahi || gov;
+            int very = (in->soc_ok && in->soc_c10 >= lim + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15) ||
+                       (c->no_high_stop && in->gauge_ok && iabs(in->ma) > GOV_MA(c) + 300);
             int cool = in->soc_ok && in->soc_c10 < lim - 10 && in->bat_ok && in->bat_c10 < c->surv_bat_c10 - 40 &&
-                       (c->no_high_stop || !(in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 600));
+                       (c->no_high_stop || !(in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 600)) &&
+                       (!c->no_high_stop || (in->gauge_ok && iabs(in->ma) < GOV_MA(c) - 300 &&
+                                             in->mv >= HEAT_GOV_MV + 100));
             if (surv_calibrate(c, in, now, hot)) {
                 c->state = HEAT_ST_RUNNING;
                 why(c, "Survival: measuring the big cores' combinations");
@@ -578,11 +588,13 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         int very = (in->soc_ok && in->soc_c10 >= target + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15);
         int amps = !c->no_current_stop && in->gauge_ok && iabs(in->ma) > L->hard_ma;   /* 1.2-alpha4: can be off */
         int ahi = !c->no_high_stop && in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 300;  /* 1.2-alpha16 */
+        if (c->no_high_stop && in->gauge_ok && iabs(in->ma) > GOV_MA(c))
+            ahi = 1;                            /* 1.2-alpha18: the governor under the MAX77705's 5.6 A */
         int low = in->gauge_ok && in->mv > 0 && in->mv < L->surv_shed_mv;
         int cool = in->soc_ok && in->soc_c10 < target - L->surv_band_c10 && in->gauge_ok && in->bat_ok &&
                    in->bat_c10 < c->surv_bat_c10 - 40 &&
                    (c->no_current_stop || iabs(in->ma) < L->hard_ma - 300) && in->mv >= L->surv_shed_mv + 50 &&
-                   (c->no_high_stop || iabs(in->ma) < L->surv_stop_ma - 600);
+                   (c->no_high_stop ? iabs(in->ma) < GOV_MA(c) - 300 : iabs(in->ma) < L->surv_stop_ma - 600);
         if (surv_calibrate(c, in, now, hot || amps || low)) {
             c->state = HEAT_ST_RUNNING;
             why(c, "Survival: measuring the big cores' combinations");

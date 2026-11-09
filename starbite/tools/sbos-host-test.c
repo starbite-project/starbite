@@ -773,6 +773,35 @@ static void t_survival(void)
             run(&c, &in, 15000, 1250, 0);
             CHECK(stopped_with(&c, HEAT_ST_STOPPED, "above 6 A for 1 s"), "Survival %d: 6.5 A for 1 s stops (%s)", x, c.why);
         }
+        /* 1.2-alpha18: the governor with the 4.5 A stop off: down from 5.0 A or 3.35 V, up below 4.7 A and above 3.45 V */
+        for (int x = 0; x < 2; ++x) {
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.no_current_stop = 1;
+            c.no_high_stop = 1;
+            heat_ctl_request(&c, x ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0, &in);
+            c.trip_off = x;
+            run(&c, &in, 0, 10000, 0);
+            int g0 = load_of(&c);
+            in.ma = -5200;
+            run(&c, &in, 10250, 2000, 0);
+            CHECK(c.state == HEAT_ST_RUNNING && load_of(&c) < g0, "Survival %d governor: 5.2 A steps down (%d -> %d, %s)", x,
+                  g0, load_of(&c), c.why);
+            int g1 = load_of(&c);
+            in.ma = -4800;
+            run(&c, &in, 12500, 3000, 0);
+            CHECK(load_of(&c) == g1, "Survival %d governor: 4.8 A holds (%d -> %d)", x, g1, load_of(&c));
+            in.ma = -4500;
+            run(&c, &in, 15750, 3000, 0);
+            CHECK(load_of(&c) > g1, "Survival %d governor: 4.5 A steps back up (%d -> %d)", x, g1, load_of(&c));
+            if (x) {
+                int g2 = load_of(&c);
+                in.ma = -4000;
+                in.mv = 3300;
+                run(&c, &in, 19000, 2000, 0);
+                CHECK(load_of(&c) < g2, "Survival 1 governor: 3.30 V steps down (%d -> %d)", g2, load_of(&c));
+            }
+        }
         heat_ctl_init(&c, 0);
         in = base_in(0);
         heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);

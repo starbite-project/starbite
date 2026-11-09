@@ -273,6 +273,7 @@ int sb_fg_word(uint8_t reg, uint16_t *v);
 int sb_chg_read(uint8_t reg, uint8_t *v);
 int sb_usbc_read(uint8_t reg, uint8_t *v);
 int sb_bat_read(struct sb_bat *b);
+int sb_fg_write16(uint8_t reg, uint16_t val, int tier);   /* 1.2-alpha18: gated, read back */
 /* A fuel-gauge word read up to 3 times when the bus fails; with lo < hi, a value outside
  * [lo, hi] is read again and, if it stays outside, rejected (0). Counted for the pages: the
  * gauge's I2C reads used to turn a failed read into "0 mV". */
