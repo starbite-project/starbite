@@ -93,7 +93,7 @@ def main():
         dest = out / path.lstrip('/').replace('/', '__')
         try:
             dest.write_bytes(vol.read_path(path))
-            print(f'{path}: {size} bytes')
+            print(f'{path}: {len(dest.read_bytes())} bytes')
         except SystemExit as e:
             print(f'{path}: {e}')
 

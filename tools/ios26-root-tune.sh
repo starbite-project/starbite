@@ -56,6 +56,12 @@ mode=${TUNE:-full}
 mkdir -p "$out/tune"
 # every pulled plist the chosen mode reads must parse (a stale host read gives garbage: refuse, no traceback)
 plist_ok() { [ "$1" = - ] || python3 -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$1" 2>/dev/null; }
+# launchd-disabled.plist is only our own keep-file (launchd never reads it): one left corrupt by a pre-0409
+# overlay (new head + old tail, 2026-11-08) is replaced by a fresh one instead of stopping the tune
+if [ "$mode" = full ] && ! plist_ok "$D"; then
+    echo "note: $D does not parse (the pre-0409 truncation bug): a fresh launchd-disabled.plist replaces it"
+    D=-
+fi
 need=("$A"); [ "$mode" = full ] && need+=("$L" "$D"); [ "$mode" = launchd-log ] && need+=("$L")
 for f in "${need[@]}"; do
     plist_ok "$f" || { echo "$f does not parse (stale host read?): refusing; nothing queued"; exit 1; }
