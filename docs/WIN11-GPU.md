@@ -1035,7 +1035,10 @@ the CPU path. sbshare adds a GPU re-sample after the producer's update.
 
 ### 6.19 T13x: the Windows 11 lock screen on the panel, drawn by the Mali (2026-11-09, ~03:30)
 
-**cycle-t13x-1:** about 100 s into the full-mode boot, the camera shows the **Windows 11 bloom lock-screen
+**cycle-t13x-1:**
+- **Tests:** sbdwm hw 0 failed (cb and dwm PASS); DWM's sampled presents 48/52 with pixels; the cycle and hive
+  clean.
+- **The panel:** about 100 s into the full-mode boot, the camera shows the **Windows 11 bloom lock-screen
 wallpaper on the panel.** DWM composed it on the Mali through sbumd (Mesa d3d10umd + Panfrost) and sbwddm, and
 the KMD's emulated scanout copied it to the framebuffer.
 
