@@ -417,6 +417,32 @@ present (stops within ms), a crash (parks).
 The full path from here to a voice call, with which experiments need One UI, is in the shared notes:
 `modem-voice-plan.md`.
 
+### 7.2 Facts from One UI's vendor binaries (2026-11-09; read offline, binaries kept out of git)
+VENDOR was copied read-only in TWRP and extracted in the VM (EROFS). From `lib64/libsec-ril.so` (stripped, but its
+C++ dynamic symbols remain), `etc/mixer_paths.xml` and `firmware/calliope_*.bin`:
+- **RFS** (Nv::ProcessRfsMessage): header `u32 length; u8 index; u8 id`, a 23-way dispatch on the index:
+  0x01 NV read, 0x02 NV write, 0x03 read file, 0x04 write file, 0x05 lseek, 0x06 close, 0x07 put file,
+  0x08 get file, 0x09 rename, 0x0a file info, 0x0b delete, 0x0c make dir, 0x11 open, 0x13 info by handle,
+  0x14 create, 0x15 NV write all, 0x17 NV restore (the rest are refused). NV read: request `offset@6, length@10`
+  (at most 0x80000); reply `u8 confirm, u32 offset, u32 n` + data (15-byte header, id echoed). NV write: request
+  `offset, length, data`; reply 15 bytes. Open: `u32 flags@6, u32 path_len@10 (<= 1023), path@14`, relative to the
+  RFS directory. Android writes nv_data.bin, fsyncs, updates nv_data.bin.md5 and a backup. **Ours writes only to
+  RAM** (`sbm_rfs.c`, host-tested).
+- **Radio power** (IpcProtocol41Power::IpcTxRadioPower): `PWR_PHONE_STATE (0x0107) EXEC`, u16 data `0x0001` low
+  power mode (RF off) / `0x0202` normal (RF on). Modem power-off: `PWR 0x0102 EXEC`. RIL's RadioPowerUpHandler
+  sends NORMAL at boot, so after INIT_END the CP stays in low power mode until asked. That is why T9 (which sends
+  nothing) should keep the RF off.
+- **Call** (IpcProtocol41Call): OUTGOING `0x0201 EXEC`, 99 bytes: u16 call-type code, CLIR, number length (<= 82),
+  prefix (0x11 if the number starts with '+', else 0x21), the number. Also Answer, Release, Hold, DTMF,
+  GetCallList, and an emergency-status call that we never build.
+- **Sound** (IpcProtocol41Sound): AUDIO_PATH `0x0903 SET` (2 bytes), SPKR_VOLUME `0x0901 SET` (2 bytes),
+  CLOCK_CTRL `0x0909` (1 byte), mute, WB-AMR, ringback.
+- **Call audio**: the VSS (voice) task runs **inside ABOX's Calliope firmware** ("VSS_init_proc", "SET CALLPATH").
+  The audio HAL's in-call handset route is `ABOX UAIF1 SPK = SIFS0`, `ABOX RSRC0 = SIFS0`, `ABOX RECP PIFS0 = 1`,
+  `ABOX Sound Type = VOICE`, plus the amp's one-stop mode "Receiver Left/Right". **The earpiece is the MAX98512's
+  receiver mode, fed from UAIF1**, not the codec's HPOUT3. Path: CP <-> ABOX (Calliope + VSS) <-> UAIF1 <->
+  amp / codec.
+
 ## 8. Later stages (not started)
 
 

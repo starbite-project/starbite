@@ -1410,6 +1410,55 @@ static void test_boot(void)
     fakesoc_free(&s);
 }
 
+static void test_rfs(void)
+{
+    static uint8_t nv[0x100000], out[0x2000];
+    struct sbm_rfs r;
+    for (unsigned i = 0; i < sizeof(nv); ++i)
+        nv[i] = (uint8_t)(i * 13);
+    sbm_rfs_init(&r, nv, sizeof(nv));
+    /* NV_READ 0x1000 bytes at 0x2000, id 7 */
+    uint8_t rq[14];
+    sbm_put32(rq, 14); rq[4] = SBM_RFS_IDX_NV_READ; rq[5] = 7; sbm_put32(rq + 6, 0x2000); sbm_put32(rq + 10, 0x1000);
+    CHECKEQ(sbm_rfs_handle(&r, rq, 14, out, sizeof(out)), 15 + 0x1000);
+    CHECKEQ(sbm_le32(out), 15 + 0x1000);
+    CHECKEQ(out[4], 1);
+    CHECKEQ(out[5], 7);
+    CHECKEQ(out[6], 1);
+    CHECKEQ(sbm_le32(out + 7), 0x2000);
+    CHECKEQ(sbm_le32(out + 11), 0x1000);
+    CHECK(!memcmp(out + 15, nv + 0x2000, 0x1000));
+    /* past the end: confirm 0, no data */
+    sbm_put32(rq + 6, 0xFF800); sbm_put32(rq + 10, 0x1000);
+    CHECKEQ(sbm_rfs_handle(&r, rq, 14, out, sizeof(out)), 15);
+    CHECKEQ(out[6], 0);
+    CHECKEQ(sbm_le32(out + 11), 0);
+    /* a reply that does not fit the caller's buffer */
+    sbm_put32(rq + 6, 0); sbm_put32(rq + 10, 0x1F00);
+    CHECKEQ(sbm_rfs_handle(&r, rq, 14, out, 0x1000), SBM_ENOSPC);
+    /* NV_WRITE 4 bytes at 0x10: the RAM copy changes, a 15-byte confirm */
+    uint8_t wr[18];
+    sbm_put32(wr, 18); wr[4] = SBM_RFS_IDX_NV_WRITE; wr[5] = 9; sbm_put32(wr + 6, 0x10); sbm_put32(wr + 10, 4);
+    wr[14] = 0xde; wr[15] = 0xad; wr[16] = 0xbe; wr[17] = 0xef;
+    CHECKEQ(sbm_rfs_handle(&r, wr, 18, out, sizeof(out)), 15);
+    CHECK(out[4] == 2 && out[5] == 9 && out[6] == 1 && sbm_le32(out + 11) == 4);
+    CHECK(nv[0x10] == 0xde && nv[0x13] == 0xef);
+    /* a write whose length claims more data than the message carries: refused, the copy untouched */
+    sbm_put32(wr + 10, 400); nv[0x10] = 0x11;
+    CHECKEQ(sbm_rfs_handle(&r, wr, 18, out, sizeof(out)), 15);
+    CHECKEQ(out[6], 0);
+    CHECKEQ(nv[0x10], 0x11);
+    /* malformed: the header's length disagrees with the message */
+    sbm_put32(rq, 99);
+    CHECKEQ(sbm_rfs_handle(&r, rq, 14, out, sizeof(out)), SBM_EBADF);
+    /* a file operation: counted, not answered (yet) */
+    uint8_t op[20] = { 20, 0, 0, 0, SBM_RFS_IDX_OPEN, 3 };
+    CHECKEQ(sbm_rfs_handle(&r, op, 20, out, sizeof(out)), 0);
+    CHECKEQ(r.other[SBM_RFS_IDX_OPEN], 1);
+    CHECKEQ(r.reads, 2);                                     /* the ENOSPC one is not counted */
+    CHECKEQ(r.writes, 2);
+}
+
 static void test_clk(void)
 {
     static uint8_t buf[8192];
@@ -1446,6 +1495,7 @@ int main(int argc, char **argv)
     test_probe2();
     test_boot();
     test_clk();
+    test_rfs();
     printf("sbm host test: %u checks, %u failed%s\n", checks, fails, radio ? " (with this phone's RADIO image)" : "");
     return fails ? 1 : 0;
 }

@@ -667,6 +667,43 @@ int sbm_link_boot(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boo
 #define SBM_CLK_TABLE_OFF 40
 uint32_t sbm_clk_table_size(void);
 int sbm_clk_table_write(uint8_t *ipc, uint32_t ipc_size);
+/* Stage 5b (sbm_rfs.c): the RFS server's core, NV against a RAM copy (layouts from One UI's libsec-ril.so). */
+#define SBM_RFS_IDX_NV_READ        0x01
+#define SBM_RFS_IDX_NV_WRITE       0x02
+#define SBM_RFS_IDX_READ_FILE      0x03
+#define SBM_RFS_IDX_WRITE_FILE     0x04
+#define SBM_RFS_IDX_LSEEK          0x05
+#define SBM_RFS_IDX_CLOSE          0x06
+#define SBM_RFS_IDX_PUT_FILE       0x07
+#define SBM_RFS_IDX_GET_FILE       0x08
+#define SBM_RFS_IDX_RENAME         0x09
+#define SBM_RFS_IDX_FILE_INFO      0x0a
+#define SBM_RFS_IDX_DELETE         0x0b
+#define SBM_RFS_IDX_MKDIR          0x0c
+#define SBM_RFS_IDX_OPEN           0x11
+#define SBM_RFS_IDX_INFO_BY_HANDLE 0x13
+#define SBM_RFS_IDX_CREATE         0x14
+#define SBM_RFS_IDX_NV_WRITE_ALL   0x15
+#define SBM_RFS_IDX_NV_RESTORE     0x17
+#define SBM_RFS_REPLY_HDR          15     /* header + u8 confirm + u32 offset + u32 length */
+#define SBM_RFS_MAX_IO             0x80000
+struct sbm_rfs {
+    uint8_t *nv;                      /* the RAM copy of nv_data.bin: the CP's writes land here and nowhere else */
+    uint32_t nv_size;
+    uint32_t reads, writes, read_bytes, write_bytes, refused, bad, unhandled;
+    uint32_t other[0x20];             /* requests per index this core does not answer yet */
+};
+void sbm_rfs_init(struct sbm_rfs *r, uint8_t *nv, uint32_t nv_size);
+/* One RFS request (the payload of a ch 245 frame) -> the reply in out. Returns its length, 0 = not answered (an
+ * index this core does not handle yet), or SBM_E*. */
+int sbm_rfs_handle(struct sbm_rfs *r, const uint8_t *req, uint32_t n, uint8_t *out, uint32_t cap);
+
+/* The radio's power state request, from One UI's libsec-ril (IpcProtocol41Power::IpcTxRadioPower): PWR_PHONE_STATE
+ * (0x0107) EXEC with u16 data: 0x0001 = low power mode (RF off), 0x0202 = normal (RF on). The RIL sends NORMAL at
+ * boot; without it the CP stays in low power mode. Not on the builder's allow-list (nothing sends it yet). */
+#define SBM_PWR_STATE_LPM     0x0001
+#define SBM_PWR_STATE_NORMAL  0x0202
+
 /* Park: Android's power-off. Safe to call more than once and when nothing was started. */
 int sbm_cp_park(const struct sbm_plat *p);
 void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b);
