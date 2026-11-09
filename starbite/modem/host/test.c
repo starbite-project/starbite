@@ -1604,6 +1604,81 @@ static void test_rfs(void)
     CHECKEQ(r.writes, 2);
 }
 
+static void test_policy_sms(void)
+{
+    /* emergency classifier */
+    CHECK(sbm_is_emergency("112", 0, 0) && sbm_is_emergency("911", 0, 0) && sbm_is_emergency("999", 0, 0));
+    CHECK(sbm_is_emergency("+44999", 0, 0) && sbm_is_emergency("0044112", 0, 0) && sbm_is_emergency("+1 911", 0, 0));
+    CHECK(sbm_is_emergency("1 1 2", 0, 0));
+    CHECK(sbm_is_emergency("abc", 0, 0));                          /* not a plain number: refused */
+    CHECK(!sbm_is_emergency("+15555550100", 0, 0));
+    static const char *const sim_ecc[] = { "5550199" };            /* a SIM's own list (made up) */
+    CHECK(sbm_is_emergency("5550199", sim_ecc, 1));
+    /* the policy: allow-list only, never an emergency or short code */
+    struct sbm_dial_policy pol = { { "+15555550100", "5550199" }, 2, sim_ecc, 1 };
+    CHECKEQ(sbm_dial_check(&pol, "+15555550100"), 0);
+    CHECKEQ(sbm_dial_check(&pol, "+1 555 555 0100"), 0);
+    CHECKEQ(sbm_dial_check(&pol, "15555550100"), SBM_EPERM);      /* the '+' matters */
+    CHECKEQ(sbm_dial_check(&pol, "+15555550101"), SBM_EPERM);     /* not on the list */
+    CHECKEQ(sbm_dial_check(&pol, "5550199"), SBM_EPERM);          /* on the list, but the SIM calls it emergency */
+    CHECKEQ(sbm_dial_check(&pol, "112"), SBM_EPERM);
+    CHECKEQ(sbm_dial_check(&pol, "12345"), SBM_EPERM);
+    CHECKEQ(sbm_dial_check(&pol, "+1555x5550100"), SBM_EINVAL);
+    struct sbm_dial_policy none = { { 0 }, 0, 0, 0 };
+    CHECKEQ(sbm_dial_check(&none, "+15555550100"), SBM_EPERM);    /* an empty list allows nothing */
+
+    /* SMS-DELIVER, 7-bit "hellohello" from +15555550100 (fictional) */
+    static const uint8_t d1[] = { 0x04, 0x0B, 0x91, 0x51, 0x55, 0x55, 0x05, 0x01, 0xF0, 0x00, 0x00,
+                                  0x21, 0x11, 0x90, 0x00, 0x00, 0x00, 0x00, 0x0A,
+                                  0xE8, 0x32, 0x9B, 0xFD, 0x46, 0x97, 0xD9, 0xEC, 0x37 };
+    static struct sbm_sms sm;
+    CHECKEQ(sbm_sms_deliver_decode(d1, sizeof(d1), &sm), 0);
+    CHECK(!strcmp(sm.from, "+15555550100"));
+    CHECK(!strcmp(sm.text, "hellohello"));
+    CHECKEQ(sm.alphabet, 0);
+    /* UCS-2 "Hi\u00e4" */
+    static const uint8_t d2[] = { 0x00, 0x0B, 0x91, 0x51, 0x55, 0x55, 0x05, 0x01, 0xF0, 0x00, 0x08,
+                                  0, 0, 0, 0, 0, 0, 0, 0x06, 0x00, 0x48, 0x00, 0x69, 0x00, 0xE4 };
+    CHECKEQ(sbm_sms_deliver_decode(d2, sizeof(d2), &sm), 0);
+    CHECK(!strcmp(sm.text, "Hi\xc3\xa4"));
+    /* concatenated (UDH 00 03 2A 02 01) 7-bit "hi": the header's fill bits */
+    static const uint8_t d3[] = { 0x44, 0x0B, 0x91, 0x51, 0x55, 0x55, 0x05, 0x01, 0xF0, 0x00, 0x00,
+                                  0, 0, 0, 0, 0, 0, 0, 0x09, 0x05, 0x00, 0x03, 0x2A, 0x02, 0x01, 0xD0, 0x69 };
+    CHECKEQ(sbm_sms_deliver_decode(d3, sizeof(d3), &sm), 0);
+    CHECK(sm.concat && sm.ref == 0x2A && sm.total == 2 && sm.seq == 1);
+    CHECK(!strcmp(sm.text, "hi"));
+    /* malformed: truncated, not a DELIVER, UDL past the end */
+    CHECKEQ(sbm_sms_deliver_decode(d1, 12, &sm), SBM_EBADF);
+    uint8_t bad[sizeof(d1)];
+    memcpy(bad, d1, sizeof(d1));
+    bad[0] = 0x01;
+    CHECKEQ(sbm_sms_deliver_decode(bad, sizeof(bad), &sm), SBM_EBADF);
+    memcpy(bad, d1, sizeof(d1));
+    bad[18] = 0xA0;
+    CHECKEQ(sbm_sms_deliver_decode(bad, sizeof(bad), &sm), SBM_EBADF);
+    /* the incoming IPC: data 02 x x x x len | SCA (empty) | TPDU */
+    static uint8_t im_[7 + 6 + 1 + sizeof(d1)];
+    sbm_put16(im_, sizeof(im_)); im_[2] = 1; im_[4] = 0x04; im_[5] = 0x02; im_[6] = SBM_IPC_NOTI;
+    im_[7] = 2; im_[12] = (uint8_t)(1 + sizeof(d1)); im_[13] = 0;
+    memcpy(im_ + 14, d1, sizeof(d1));
+    struct sbm_ipc_msg m;
+    CHECKEQ(sbm_ipc_parse(im_, sizeof(im_), &m), 0);
+    CHECKEQ(sbm_sms_incoming(&m, &sm), 0);
+    CHECK(!strcmp(sm.text, "hellohello"));
+    im_[7] = 1;                                                    /* CDMA: not ours */
+    CHECKEQ(sbm_sms_incoming(&m, &sm), SBM_EBADF);
+    /* SMS-SUBMIT: policy first, then the PDU byte for byte */
+    uint8_t out[64];
+    static const uint8_t want[] = { 0x01, 0x00, 0x0B, 0x91, 0x51, 0x55, 0x55, 0x05, 0x01, 0xF0, 0x00, 0x00, 0x0A,
+                                    0xE8, 0x32, 0x9B, 0xFD, 0x46, 0x97, 0xD9, 0xEC, 0x37 };
+    CHECKEQ(sbm_sms_submit(&pol, "+15555550100", "hellohello", out, sizeof(out)), (int)sizeof(want));
+    CHECK(!memcmp(out, want, sizeof(want)));
+    CHECKEQ(sbm_sms_submit(&pol, "112", "hellohello", out, sizeof(out)), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit(&pol, "+15555550101", "hi", out, sizeof(out)), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit(&pol, "+15555550100", "price: 5 euro {x}", out, sizeof(out)), SBM_EINVAL);
+    CHECKEQ(sbm_sms_submit(&pol, "+15555550100", "hellohello", out, 10), SBM_ENOSPC);
+}
+
 static void test_clk(void)
 {
     static uint8_t buf[8192];
@@ -1641,6 +1716,7 @@ int main(int argc, char **argv)
     test_boot();
     test_clk();
     test_rfs();
+    test_policy_sms();
     printf("sbm host test: %u checks, %u failed%s\n", checks, fails, radio ? " (with this phone's RADIO image)" : "");
     return fails ? 1 : 0;
 }

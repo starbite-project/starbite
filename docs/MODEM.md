@@ -522,6 +522,19 @@ C++ dynamic symbols remain), `etc/mixer_paths.xml` and `firmware/calliope_*.bin`
   receiver mode, fed from UAIF1**, not the codec's HPOUT3. Path: CP <-> ABOX (Calliope + VSS) <-> UAIF1 <->
   amp / codec.
 
+### 7.5 Overnight 2026-11-09/10: a soak, SMS and the dial policy (host-only)
+- **Soak** (`modemlink-soak`, 2e82690): T11's queries every 10 s for 10 min, and a PLMN-masked status line every
+  60 s (`sbm_cell_line_masked`; every ONLINE line now masks the PLMN).
+- **Dial / send policy** (`sbm_policy.c`): a number passes only if it is on the user's allow-list digit for digit,
+  has at least 7 digits, and is not an emergency number. The emergency check covers a world list, the SIM's and the
+  network's lists, and any of those behind +CC / 00CC. No switch disables it.
+- **SMS** (`sbm_sms.c`): TP-DELIVER decode (GSM 7-bit with the default and extension tables, UCS-2 with surrogates,
+  8-bit by length, concatenation headers with their fill bits), the incoming IPC 0x0402 layout read from
+  libsec-ril (data[0] 2 = GSM, data[5] = length, SMSC, PDU), and TP-SUBMIT encode, which calls the policy first.
+- **Not built, on purpose:** the IPC send frame (0x0401 EXEC: data `{a, b, f(c), pdu_len}` + PDU; the meaning and
+  values of the first three bytes are unconfirmed) and any call frame. They wait for the SIM day, with the user
+  present and a real capture (O3/O4) to confirm them. Nothing in this core can send or dial.
+
 ## 8. Later stages (not started)
 
 

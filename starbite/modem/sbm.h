@@ -715,6 +715,37 @@ int sbm_rfs_handle(struct sbm_rfs *r, const uint8_t *req, uint32_t n, uint8_t *o
 #define SBM_PWR_STATE_LPM     0x0001
 #define SBM_PWR_STATE_NORMAL  0x0202
 
+/* Dial / send policy (sbm_policy.c): never an emergency number (world list + the SIM's and network's own lists + any
+ * of them behind an international prefix), never a short code, only the user's own allow-list. No switch. */
+#define SBM_DIAL_ALLOW_MAX   4
+#define SBM_DIAL_MIN_DIGITS  7
+struct sbm_dial_policy {
+    const char *allowed[SBM_DIAL_ALLOW_MAX];    /* the user's own numbers (never in git) */
+    unsigned n_allowed;
+    const char *const *extra_emergency;          /* SIM ECC / network emergency numbers, if known */
+    unsigned n_extra;
+};
+int sbm_is_emergency(const char *number, const char *const *extra, unsigned n_extra);   /* 1 = refuse */
+int sbm_dial_check(const struct sbm_dial_policy *pol, const char *number);              /* 0 or SBM_EPERM */
+
+/* SMS (sbm_sms.c): TP-DELIVER decode, the incoming IPC (0x0402), TP-SUBMIT encode (policy first). */
+#define SBM_SMS_TEXT_MAX 640
+struct sbm_sms {
+    char from[24];                    /* the sender: the user's data, never logged by this core */
+    int from_alpha;                   /* an alphanumeric sender name */
+    uint8_t pid, dcs, alphabet;       /* alphabet: 0 GSM 7-bit, 1 8-bit, 2 UCS-2 */
+    uint8_t scts[7];                  /* service centre time stamp (BCD, swapped) */
+    int concat;
+    uint8_t ref, total, seq;          /* concatenated SMS */
+    uint32_t binary_len;              /* 8-bit data: its length (the data is not kept) */
+    char text[SBM_SMS_TEXT_MAX];      /* UTF-8 */
+};
+int sbm_sms_deliver_decode(const uint8_t *tpdu, uint32_t n, struct sbm_sms *s);
+int sbm_sms_incoming(const struct sbm_ipc_msg *m, struct sbm_sms *s);
+/* TP-SUBMIT for number (allow-listed, never an emergency number: sbm_dial_check) and an ASCII text that fits one
+ * GSM 7-bit message (160 characters, the common subset). Returns the PDU length or SBM_E*. Nothing sends it yet. */
+int sbm_sms_submit(const struct sbm_dial_policy *pol, const char *number, const char *text, uint8_t *out, uint32_t cap);
+
 /* Park: Android's power-off. Safe to call more than once and when nothing was started. */
 int sbm_cp_park(const struct sbm_plat *p);
 void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b);
