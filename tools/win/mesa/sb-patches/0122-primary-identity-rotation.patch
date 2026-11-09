@@ -1,0 +1,147 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index 52b27c1..198fcfd 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -1014,6 +1014,16 @@ malikm_note_count(unsigned id)
+       malikm_note(id, (unsigned)c);
+ }
+ 
++/* sb-patches/0122: per-process event counters (d3d10umd's SB_STAT_*), printed with the 10 s stats */
++static volatile LONG sb_stat[8];
++
++void
++malikm_stat(unsigned id)
++{
++   if (id < 8)
++      InterlockedIncrement(&sb_stat[id]);
++}
++
+ static __declspec(thread) HRESULT sb_alloc_hr;   /* T15: the runtime's answer to the last allocation */
+ 
+ static NTSTATUS
+@@ -1851,6 +1861,11 @@ wddm_ioctl(int fd, DWORD code, void *buf, DWORD len)
+          fprintf(stderr, "sbumd: stats %.1f s (device %u): %u submits, %u waits (%u blocked: %.1f ms, longest %.1f ms; "
+                  "%u answered busy), %u new CPU maps\n", s10, d->id, d->st_submits, d->st_waits, d->st_blocked,
+                  d->st_blocked_ms, d->st_longest_ms, d->st_busy, d->st_maps);
++         /* sb-patches/0122: this process's rotations (identities, of primaries, by copying), blits, flushes */
++         fprintf(stderr, "sbumd: stats rotate id %ld, primary %ld, copy %ld; blits %ld; flush-all %ld\n",
++                 InterlockedExchange(&sb_stat[0], 0), InterlockedExchange(&sb_stat[1], 0),
++                 InterlockedExchange(&sb_stat[2], 0), InterlockedExchange(&sb_stat[3], 0),
++                 InterlockedExchange(&sb_stat[4], 0));
+          d->st_t0 = now;
+          d->st_submits = d->st_waits = d->st_blocked = d->st_busy = d->st_maps = 0;
+          d->st_blocked_ms = d->st_longest_ms = 0;
+diff --git a/src/gallium/drivers/panfrost/pan_blit.c b/src/gallium/drivers/panfrost/pan_blit.c
+index 3ec8933..ceeeb4c 100644
+--- a/src/gallium/drivers/panfrost/pan_blit.c
++++ b/src/gallium/drivers/panfrost/pan_blit.c
+@@ -73,6 +73,10 @@ panfrost_blit_no_afbc_legalization(struct pipe_context *pipe,
+    util_blitter_blit(ctx->blitter, info, NULL);
+ }
+ 
++#ifdef _WIN32
++void malikm_stat(unsigned id);            /* sb-patches/0122: the shim's counters */
++#endif
++
+ void
+ panfrost_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
+ {
+@@ -95,6 +99,9 @@ panfrost_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
+    enum pipe_format dst_view_format = util_format_linear(info->dst.format);
+    pan_legalize_format(ctx, dst, dst_view_format, true, false);
+ 
++#ifdef _WIN32
++   malikm_stat(3);                        /* sb-patches/0122: SB_STAT_BLIT */
++#endif
+    panfrost_flush_all_batches(ctx, "Blit");
+    panfrost_blit_no_afbc_legalization(pipe, info);
+    panfrost_flush_all_batches(ctx, "Blit");
+diff --git a/src/gallium/drivers/panfrost/pan_job.c b/src/gallium/drivers/panfrost/pan_job.c
+index bfe1f9d..3b0862f 100644
+--- a/src/gallium/drivers/panfrost/pan_job.c
++++ b/src/gallium/drivers/panfrost/pan_job.c
+@@ -757,6 +757,12 @@ panfrost_flush_all_batches(struct panfrost_context *ctx, const char *reason)
+    assert(reason);
+    PAN_TRACE_SCOPE(PAN_TRACE_GL_JOB, "%s reason=\"%s\"", __func__, reason);
+    perf_debug(ctx, "Flushing everything due to: %s", reason);
++#ifdef _WIN32
++   {
++      void malikm_stat(unsigned id);      /* sb-patches/0122: SB_STAT_FLUSH_ALL */
++      malikm_stat(4);
++   }
++#endif
+ 
+    struct panfrost_batch *batch = panfrost_get_batch_for_fbo(ctx);
+    if (!batch)
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index fde02b1..dd85dda 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -147,7 +147,14 @@ sb_sample_present(struct pipe_context *pipe, Resource *res, unsigned alloc, unsi
+    if (!src || src->target != PIPE_TEXTURE_2D || util_format_get_blocksize(src->format) != 4)
+       return;
+    n++;
+-   if (n > 24 && n % 64)
++   /* sb-patches/0122: the first 24 presents only (each sample is a GPU copy and a synchronous read, plus one per
++    * opened surface: a stall of DWM's frame every 64 presents); SB_SAMPLE_ALL=1 keeps sampling every 64th */
++   static int sample_all = -1;
++   if (sample_all < 0) {
++      const char *e = getenv("SB_SAMPLE_ALL");
++      sample_all = e && *e == '1';
++   }
++   if (n > 24 && (!sample_all || n % 64))
+       return;
+    struct pipe_resource t;
+    memset(&t, 0, sizeof t);
+@@ -361,7 +368,16 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
+    struct pipe_resource *resource0 = CastPipeResource(RotateResourceIdentities->pResources[0]);
+ 
+    /* sb-patches/0112: a runtime-backed flip chain that is not the scanout: rotate identities (BOs and their
+-    * allocations), as DXGI's flip model needs; primaries keep the copy rotation below */
++    * allocations), as DXGI's flip model needs; primaries keep the copy rotation below.
++    * sb-patches/0122 (T28): primaries too. Since T24 every full-screen primary has its own scanout buffer and the KMD
++    * flips DECON between them, so DWM's chain of three can rotate like any other; the copy rotation cost four
++    * full-screen GPU copies per DWM frame, each with a flush of everything before and after (Panfrost's blit).
++    * SB_PRIMARY_COPY_ROTATE=1 (system environment) restores the copies. */
++   static int copy_primaries = -1;
++   if (copy_primaries < 0) {
++      const char *e = getenv("SB_PRIMARY_COPY_ROTATE");
++      copy_primaries = e && *e == '1';
++   }
+    if (malikm_use(CastDevice(RotateResourceIdentities->hDevice)->sbDev) && RotateResourceIdentities->Resources <= 16) {
+       Resource *rs[16];
+       struct pipe_resource *pr[16];
+@@ -370,9 +386,10 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
+       for (UINT i = 0; i < n && ok; i++) {
+          rs[i] = CastResource(RotateResourceIdentities->pResources[i]);
+          pr[i] = rs[i] ? rs[i]->resource : NULL;
+-         ok = rs[i] && pr[i] && rs[i]->sbAllocation && !rs[i]->sbPrimary;
++         ok = rs[i] && pr[i] && rs[i]->sbAllocation && (!rs[i]->sbPrimary || !copy_primaries);
+       }
+       if (ok && panfrost_sb_rotate_bos(pipe, pr, n)) {
++         malikm_stat(rs[0]->sbPrimary ? SB_STAT_ROT_PRIMARY : SB_STAT_ROT_ID);
+          unsigned a0 = rs[0]->sbAllocation;
+          for (UINT i = 0; i + 1 < n; i++)
+             rs[i]->sbAllocation = rs[i + 1]->sbAllocation;
+@@ -384,6 +401,7 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
+ 
+    assert(resource0);
+    LOG_UNSUPPORTED(resource0->last_level);
++   malikm_stat(SB_STAT_ROT_COPY);
+ 
+    /*
+     * XXX: Copying is not very efficient, but it is much simpler than the
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index 778ff2f..48599b1 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -217,6 +217,9 @@ void malikm_note(unsigned id, unsigned value);
+ void malikm_note_count(unsigned id);
+ /* sb-patches/0112: in the Panfrost build (pan_resource.c); the softpipe build gets sb_rotate_bos_none */
+ bool panfrost_sb_rotate_bos(struct pipe_context *pctx, struct pipe_resource **res, unsigned n);
++/* sb-patches/0122: per-process event counters, printed and reset with the shim's 10 s stats line */
++enum { SB_STAT_ROT_ID, SB_STAT_ROT_PRIMARY, SB_STAT_ROT_COPY, SB_STAT_BLIT, SB_STAT_FLUSH_ALL, SB_STAT_N };
++extern "C" void malikm_stat(unsigned id);
+ /* Starbite (sb-patches/0108): the resources this device opened from other processes (OpenResource), for the
+  * present sampling: DWM samples its windows' surfaces through these. */
+ #define SB_OPENED_MAX 32

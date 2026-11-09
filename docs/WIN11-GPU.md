@@ -1425,6 +1425,21 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
   - **Counters:** copy sizes, time spent creating CPU views, the longest present, the image name of the process
     sending the big blts, and the IRQLs SubmitCommand runs at.
 
+### 6.35 T27's result; T28 primary identity rotation (2026-11-10)
+
+- **cycle-t27-1 (installed):**
+  - **sbdrag:** link 33.9 moves/s, max 62.9 ms, present copy 120 ms/s; nolink 34.0 moves/s, max 118 ms.
+  - **View test:** write-combined 87 MB/s; the "cached" view 65 MB/s cold and 87 MB/s hot, so it is write-combined.
+  - **Split copies:** 79 MPx/s against 45 MPx/s on one CPU.
+  - **SubmitCommand runs at DISPATCH_LEVEL.** DWM sends the big blts, with up to 123 rectangles.
+- **Per move ~29.5 ms, GPU busy 44 %, 21-22 jobs per present.** d3d10umd still rotated DWM's three primaries by copying
+  (4 full-screen GPU copies per flip), and each Panfrost blit flushes all batches before and after.
+- **T28 (sb-patches/0122):**
+  - Primaries rotate identities too. Since T24 each has its own scanout buffer. `SB_PRIMARY_COPY_ROTATE=1`
+    restores the copies.
+  - The present readback runs only for the first 24 presents (`SB_SAMPLE_ALL=1` restores every 64th).
+  - The umdlog stats gain rotations (identity / primary / copy), blits and flush-alls per 10 s.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
