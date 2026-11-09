@@ -208,6 +208,18 @@ void selftest_timer(unsigned id)
         kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
         return;
 #else
+#ifdef SBOS_SELFTEST_VIB
+        {
+            /* 1.2-alpha7: the vibration motor, unattended: its reads, the PWM's rate, three buzzes, a stop in the
+             * middle of a pattern, then a restart into recovery (TWRP: pmsg) */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: vibration: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: vibration: the watchdog could not be set (the loader's stays): ", w);
+            phase = 40;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
 #ifdef SBOS_SELFTEST_PROBE
         {
             unsigned w = hw_wdt_selftest(30);
@@ -403,6 +415,40 @@ void selftest_timer(unsigned id)
         kui_home();
         guest_power_off();                  /* (already off after a pass; after a failure: MSG_STOP, up to 1 s) */
         sb_logx("selftest: Linux state at the restart (0 off): ", (uint64_t)guest_state());
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_VIB
+    case 40:
+        if (!vib_ready()) {
+            sb_logf("selftest: FAILED: vibration: ", vib_why());
+            phase = 43;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
+            return;
+        }
+        sb_log("selftest: vibration: three buzzes of 400 ms (400 ms apart)");
+        if (vib_buzz(3, 400, 400))
+            sb_logf("selftest: FAILED: vibration: ", vib_why());
+        phase = 41;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+        return;
+    case 41:
+        sb_log("selftest: vibration: a 5-buzz pattern stopped after the second");
+        (void)vib_buzz(5, 300, 300);
+        phase = 42;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 900, 0);
+        return;
+    case 42:
+        vib_off();
+        sb_logx(vib_on() ? "selftest: FAILED: vibration: still on after the stop " :
+                           "selftest: passed: vibration (the motor off after the stop); feel / hear it? seconds ",
+                (sb_ms() - t0) / 1000U);
+        phase = 43;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
+        return;
+    case 43:
+        active = 0;
+        vib_off();
         power_restart_recovery();
         return;
 #endif

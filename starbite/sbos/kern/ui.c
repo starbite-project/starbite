@@ -2624,6 +2624,8 @@ void ui_ktimer(unsigned id)
         fled_timer();                       /* 0.6.3: the flash pin low after the pulse */
     } else if (id == 4 && screen == SCR_LIGHT) {
         kui_light(0);
+    } else if (id == 9) {
+        vib_timer();                        /* 1.2-alpha7: the vibration's pulse or gap ended */
     } else if (id == 8) {
         if (screen == SCR_LIGHT && light_heat)
             dirty = 1;                      /* the strip's numbers */

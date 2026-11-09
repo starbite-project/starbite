@@ -223,6 +223,7 @@ void app_event(const struct sbos_event *ev)
             tm_done = 1;
             tm_left_ms = 0;
             ui_toast_app("The timer is done", 4000);
+            setting_set(SET_VIBRATE, (3U << 16) | 500U);   /* 1.2-alpha7: three buzzes */
             ui_tile("Timer done");
         }
         if (visible)

@@ -121,6 +121,8 @@ ledobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_led.o#")
 gstobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_guest.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_PROBE "$here/kern/uitest.c" -o "$ob/k_uitest_probe.o"
 prbobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_probe.o#")
+"${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_VIB "$here/kern/uitest.c" -o "$ob/k_uitest_vib.o"
+vibobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_vib.o#")
 if [ "$stobjs" = "$objs" ]; then
     echo "sbos: the self-test variant did not get k_uitest_on.o" >&2
     exit 1
@@ -184,12 +186,17 @@ relocs_only_relative "$out/starbite-os-heatprobe.elf"
 "${CROSS}objcopy" -O binary "$out/starbite-os-heatprobe.elf" "$out/starbite-os-heatprobe.bin"
 "${CROSS}nm" "$out/starbite-os-heatprobe.elf" | sort > "$out/starbite-os-heatprobe.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-heatprobe.bin" "$out/starbite-os-heatprobe.img" "$out/starbite-os-heatprobe.map"
+"${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vibobjs -o "$out/starbite-os-vibtest.elf"
+relocs_only_relative "$out/starbite-os-vibtest.elf"
+"${CROSS}objcopy" -O binary "$out/starbite-os-vibtest.elf" "$out/starbite-os-vibtest.bin"
+"${CROSS}nm" "$out/starbite-os-vibtest.elf" | sort > "$out/starbite-os-vibtest.map"
+python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-vibtest.bin" "$out/starbite-os-vibtest.img" "$out/starbite-os-vibtest.map"
 if ! "${CROSS}nm" "$out/starbite-os.elf" | grep -q ' sbos_selftest_enabled$'; then
     echo "sbos: no sbos_selftest_enabled in the image" >&2
     exit 1
 fi
 
-leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" "$out/starbite-os-heatprobe.img" | head -3 || true)
+leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" "$out/starbite-os-heatprobe.img" "$out/starbite-os-vibtest.img" | head -3 || true)
 if [ -n "$leak" ]; then
     echo "sbos: the image contains build-host paths:" >&2
     echo "$leak" >&2
@@ -211,4 +218,6 @@ sha256sum "$out/starbite-os-guesttest.img" | sed "s#  .*#  starbite-os-guesttest
 echo "sbos: $(cat "$out/starbite-os-guesttest.img.sha256") (Linux self-test variant)"
 sha256sum "$out/starbite-os-heatprobe.img" | sed "s#  .*#  starbite-os-heatprobe.img#" > "$out/starbite-os-heatprobe.img.sha256"
 echo "sbos: $(cat "$out/starbite-os-heatprobe.img.sha256") (heat probe H1 variant)"
+sha256sum "$out/starbite-os-vibtest.img" | sed "s#  .*#  starbite-os-vibtest.img#" > "$out/starbite-os-vibtest.img.sha256"
+echo "sbos: $(cat "$out/starbite-os-vibtest.img.sha256") (vibration test variant)"
 echo "sbos: $(cat "$out/starbite-os.img.sha256") ($(wc -c < "$out/starbite-os.img") bytes)"

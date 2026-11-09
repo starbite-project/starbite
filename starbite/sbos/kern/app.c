@@ -521,6 +521,14 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         return heater_ocp_probe();
     case SET_HEAT_WHITE:
         return arg[1] ? heater_white() : (kui_heat_light(0), 0);
+    case SET_VIBRATE: {                 /* 1.2-alpha7 */
+        unsigned ms = (unsigned)(arg[1] & 0xffffU), n = (unsigned)((arg[1] >> 16) & 0xffU);
+        if (!ms) {
+            vib_off();
+            return 0;
+        }
+        return vib_buzz(n ? n : 1, ms, ms);
+    }
     case SET_LINUX:
         if (!arg[1]) {
             kui_linux_on = 0;
@@ -895,6 +903,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_SURV_BAT_C10: return heat_surv_bat_c10;
         case SET_OCP_PROBE: return heater_ocp_state;
         case SET_LINUX: return kui_linux_on ? 1 : guest_available() ? 0 : -1;
+        case SET_VIBRATE: return vib_ready() ? 1 : -1;
         case SET_LED_FULL: return led_full ? (fled_flash_ok() ? 1 : 2) : -fled_code();     /* 1.0-rc3: negative = why the chip was refused */
         case SET_SAVED: return settings_persistent();
         case SET_AUTO_OFF_MIN: return (int64_t)auto_off_min;
