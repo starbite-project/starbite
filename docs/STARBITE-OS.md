@@ -883,6 +883,13 @@ cores on the phone, P2d 3/3 cycles) wired into the kernel, following INTEGRATION
   with no undrawn frame, and guestd publishes faster than the 2x view draws, so that moment never came. The check
   now reads the pixel in a frame the view drew at least 2 frames after the tap, and logs the view's frame count and
   its slowest copy. QEMU showed the same race (94 frames published, 36 drawn).
+- **P3b PASSED on the phone (2026-11-09 02:40, 14 s, starbite-os-1.2-alpha2-guesttest.img f9931add)**:
+  - Both cycles: read 493-495 ms, copy 362-363 ms, CPU_ON 0, HELLO 116-119 ms with 4 CPUs (interfaces 0xF0).
+  - The tap's 0xFFD700 mark appeared in the drawn frame 5 frames after the tap, 117 ms after the release.
+  - The view drew 48 frames while the guest published 110 (the slowest 2x copy took 112 ms).
+  - The heater was refused while Linux ran; the cluster was off 50 ms after MSG_STOP, twice.
+  - Cycle 2, the restart in the background after a real cluster-off inside Starbite OS, passed.
+  - The slowest loop turn (858 ms) is the load at the guest timer's first tick.
 - **Not in alpha1**: the M3 clock for the guest (INTEGRATION.md step 10: it stays at the boot step, 1066 MHz in P2d).
 - **Checks**: host (`host/sbos-linux-test.sh` on guest.c's host fake: the confirmation, the tile, the view, the
   tap at 2x, held Bixby, the 60 s stop, both refusals, missing files, a failed start, and `guest_selftest_step`'s two
