@@ -190,8 +190,14 @@ static void ap_msg(struct fakesoc *s)
             sbm_put32(big + 10, 0x80000); sbm_put32(big + 14, 6000);
             for (unsigned i = 0; i < 6000; ++i)
                 big[18 + i] = (uint8_t)(0x5A ^ i);
-            for (uint32_t o = 0; o < sizeof(big); o += 2048)
-                fakecp_raw(&s->fcp, SBM_CH_RFS0, big + o, sizeof(big) - o < 2048 ? sizeof(big) - o : 2048);
+            /* as the phone does (T10): ordinary SIPC5 frames of 2040 payload bytes, joined by the RFS length */
+            const uint8_t *rm = big + 4;
+            for (uint32_t o = 0; o < ml; o += 2040) {
+                uint8_t fr[2048];
+                uint32_t k = ml - o < 2040 ? ml - o : 2040;
+                int fl = sbm_sipc5_build(fr, sizeof(fr), SBM_CH_RFS0, rm + o, k);
+                fakecp_raw(&s->fcp, SBM_CH_RFS0, fr, (uint32_t)fl);
+            }
             uint8_t rd[18] = { 0xf8, 0xf5, 18, 0, 14, 0, 0, 0, SBM_RFS_IDX_NV_READ, 2 };
             sbm_put32(rd + 10, 0x2000); sbm_put32(rd + 14, 0x1000);
             fakecp_raw(&s->fcp, SBM_CH_RFS0, rd, sizeof(rd));

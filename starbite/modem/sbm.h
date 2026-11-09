@@ -652,7 +652,7 @@ struct sbm_boot {
     int init_end_sent;
     uint32_t fmt_rx, rfs_rx, rfs_reads, rfs_writes, rfs_other, other_rx, bad_rx, sim_status, stopped_by;
     int rfs_serve;                     /* input (T10): answer RFS from the RAM copy of nv_data.bin */
-    uint32_t rfs_tx, rfs_tx_frames, rfs_tx_bytes, big_frames, big_dropped;
+    uint32_t rfs_tx, rfs_tx_frames, rfs_tx_bytes, big_frames, big_dropped, rfs_joined, rfs_parts;
     struct sbm_cell_state cell;        /* what the CP reported (decoded, identity-free) */
     uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;
     uint64_t sec0_us;

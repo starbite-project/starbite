@@ -417,8 +417,8 @@ void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
                  b->fmt_rx, b->rfs_rx, b->rfs_reads, b->rfs_writes, b->rfs_other, b->bad_rx);
         sbm_logf(p, "ONLINE: %s", line);
         if (b->rfs_serve || b->big_frames || b->big_dropped)
-            sbm_logf(p, "ONLINE: RFS served %u replies (%u frames, %u bytes); big frames %u, dropped %u", b->rfs_tx,
-                     b->rfs_tx_frames, b->rfs_tx_bytes, b->big_frames, b->big_dropped);
+            sbm_logf(p, "ONLINE: RFS served %u replies (%u frames, %u bytes); joined %u long messages from %u pieces; big frames %u, dropped %u",
+                     b->rfs_tx, b->rfs_tx_frames, b->rfs_tx_bytes, b->rfs_joined, b->rfs_parts, b->big_frames, b->big_dropped);
     }
     if (b->stop == SBM_BOOT_LINK && b->hold_ms)
         sbm_logf(p, "HOLD: %u ms: PHONE_START repeated %u times (last gap %u ms), other commands %u, DL frames waiting %u",

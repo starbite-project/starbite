@@ -1379,8 +1379,10 @@ static void test_boot(void)
         nlog = 0;
         CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
         CHECKEQ(b.stopped_by, SBM_STOP_TIME);
-        CHECKEQ(b.big_frames, 1);
+        CHECKEQ(b.big_frames, 0);
         CHECKEQ(b.big_dropped, 0);
+        CHECKEQ(b.rfs_joined, 1);
+        CHECKEQ(b.rfs_parts, 3);                              /* 6014 bytes in 2040-byte pieces */
         CHECKEQ(b.rfs_rx, 3);
         CHECKEQ(b.rfs_tx, 3);
         CHECKEQ(b.bad_rx, 0);
@@ -1509,6 +1511,10 @@ static void test_rfs(void)
     CHECKEQ(sbm_rfs_handle(&r, op, 20, out, sizeof(out)), 14);
     CHECK(sbm_le32(out) == 14 && out[4] == 0x11 && out[5] == 3 && sbm_le32(out + 6) == 0xFFFFFFFFu && sbm_le32(out + 10) == 2);
     CHECKEQ(r.opens, 1);
+    /* close of the (invalid) handle: result -1, errno EBADF */
+    uint8_t cl[10] = { 10, 0, 0, 0, SBM_RFS_IDX_CLOSE, 5, 0xff, 0xff, 0xff, 0xff };
+    CHECKEQ(sbm_rfs_handle(&r, cl, 10, out, sizeof(out)), 14);
+    CHECK(out[4] == 6 && out[5] == 5 && sbm_le32(out + 6) == 0xFFFFFFFFu && sbm_le32(out + 10) == 9);
     /* another file operation: counted, not answered */
     uint8_t fi[20] = { 20, 0, 0, 0, SBM_RFS_IDX_FILE_INFO, 4 };
     CHECKEQ(sbm_rfs_handle(&r, fi, 20, out, sizeof(out)), 0);

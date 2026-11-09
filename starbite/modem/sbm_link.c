@@ -372,8 +372,51 @@ static int rfs_send(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd
     return 0;
 }
 
+/* RFS messages longer than one frame (libsec-ril's Nv::ProcessRfsPacket): the CP sends them as several ordinary
+ * SIPC5 frames (2040 payload bytes each on this phone, T10); the RFS header's u32 length (at most 0x80000) says how
+ * many bytes make one message, and the pieces are appended until it is reached. T10's 89,680-byte NV write. */
+static uint8_t rfs_acc_buf[SBM_RFS_MAX_IO + 64];
+static uint32_t rfs_acc_total, rfs_acc_rcvd;
+
+/* 1 = a whole RFS message in (*mm, *ml), 0 = a piece taken, -1 = dropped */
+static int rfs_join(struct sbm_boot *b, const uint8_t *m, uint32_t n, const uint8_t **mm, uint32_t *ml)
+{
+    if (!rfs_acc_total) {
+        if (n < SBM_RFS_HDR)
+            return -1;
+        uint32_t total = sbm_le32(m);
+        if (total < SBM_RFS_HDR || total > sizeof(rfs_acc_buf))
+            return -1;
+        if (total <= n) {
+            *mm = m;
+            *ml = total;
+            return 1;
+        }
+        sbm_memcpy(rfs_acc_buf, m, n);
+        rfs_acc_total = total;
+        rfs_acc_rcvd = n;
+        b->rfs_parts++;
+        return 0;
+    }
+    if (n > rfs_acc_total - rfs_acc_rcvd) {         /* more than the message said: drop it all */
+        rfs_acc_total = rfs_acc_rcvd = 0;
+        return -1;
+    }
+    sbm_memcpy(rfs_acc_buf + rfs_acc_rcvd, m, n);
+    rfs_acc_rcvd += n;
+    b->rfs_parts++;
+    if (rfs_acc_rcvd < rfs_acc_total)
+        return 0;
+    *mm = rfs_acc_buf;
+    *ml = rfs_acc_total;
+    rfs_acc_total = rfs_acc_rcvd = 0;
+    b->rfs_joined++;
+    return 1;
+}
+
 static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, struct sbm_image *im)
 {
+    rfs_acc_total = rfs_acc_rcvd = 0;
     static uint8_t rbuf[3][8192];
     static struct sbm_reasm ra[3];
     static struct sbm_rfs rfs;
@@ -483,6 +526,14 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
                         b->bad_rx++;
                     }
                 } else if (got == 1) {
+                    int j = rfs_join(b, msg, ml, &msg, &ml);
+                    if (j < 0) {
+                        if (b->bad_rx++ < 5)
+                            sbm_logf(p, "online: +%u ms: RFS piece dropped (%u bytes; the join is reset)", ms, ml);
+                        goto next;
+                    }
+                    if (j == 0)
+                        goto next;
                     b->rfs_rx++;
                     log_rfs(p, b, msg, ml, rfs_logged < ONLINE_LOG_MAX);
                     rfs_logged += rfs_logged < ONLINE_LOG_MAX;
@@ -514,6 +565,7 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
                                  c < 2 && n > 4 ? f[4] : 0, c < 2 && n > 5 ? f[5] : 0, c < 2 && n > 6 ? f[6] : 0,
                                  c < 2 && n > 7 ? f[7] : 0);
                 }
+            next:
                 sbm_sbd_get_done(sbd, (unsigned)id, SBM_DL, p);
                 if (b->fmt_rx + b->rfs_rx + b->bad_rx >= 200) {
                     b->stopped_by = SBM_STOP_FRAMES;

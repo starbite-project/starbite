@@ -14,8 +14,8 @@
  *   0x03 read file, 0x04 write file, 0x05 lseek, 0x06 close, 0x07 put file, 0x08 get file, 0x09 rename,
  *   0x0a get file info, 0x0b delete, 0x0c make directory, 0x11 open (u32 flags, u32 path_len, path),
  *   0x13 file info by handle, 0x14 create, 0x15 NV write all, 0x17 NV restore; other indexes are refused.
- * This core answers NV_READ, NV_WRITE and OPEN (always "no such file"); the other file operations are counted and
- * left unanswered until a log shows the CP needs them (their reply layouts are still to be read from the library).
+ * This core answers NV_READ, NV_WRITE, OPEN (always "no such file") and CLOSE (always EBADF); the other file operations
+ * are counted and left unanswered until a log shows the CP needs them (their reply layouts are still to be read from the library).
  */
 #include "sbm.h"
 
@@ -101,6 +101,19 @@ int sbm_rfs_handle(struct sbm_rfs *r, const uint8_t *req, uint32_t n, uint8_t *o
         if (idx < sizeof(r->other) / sizeof(r->other[0]))
             r->other[idx]++;
         r->opens++;
+        return SBM_RFS_OPEN_REPLY;
+    }
+    case SBM_RFS_IDX_CLOSE: {
+        /* We never hand out a handle (open answers ENOENT), so a close is of an invalid handle: result -1, errno
+         * EBADF (9), what Android's close(-1) gives. ProcessCloseFile's reply: 14 bytes, u32 result, u32 errno.
+         * T10: the CP closes the handle of its failed open right after our answer. */
+        int e = reply_hdr(out, cap, SBM_RFS_OPEN_REPLY, idx, id);
+        if (e < 0)
+            return e;
+        sbm_put32(out + 6, 0xFFFFFFFFu);
+        sbm_put32(out + 10, 9);
+        if (idx < sizeof(r->other) / sizeof(r->other[0]))
+            r->other[idx]++;
         return SBM_RFS_OPEN_REPLY;
     }
     default:

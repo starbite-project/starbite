@@ -459,6 +459,15 @@ Host: the fake CP sends the open, a 6000-byte NV write over three buffers and an
 replies from the UL ring (ENOENT; write confirmed; read data correct in 3 fragments). The RAM copy holds the
 write, and no NV byte appears in a log.
 
+### Result T10 (2026-11-09, 27231dc, `build/modem/t10-rfs-1/pmsg.txt`)
+Online 30 s, parked, no crash, no body bytes in the log. The open of CP_OMC_AUDIO_SLSI.bin was answered (errno 2,
++1169 ms), then the CP sent **close (0x06)** and the 89,680-byte NV write. "big frames 0": the write did **not**
+come as check_more continuation. Every 2048-byte buffer carried its own ordinary SIPC5 frame (2040 payload
+bytes), and the **RFS layer** joins them by the RFS header's u32 length. libsec-ril's `Nv::ProcessRfsPacket`
+does exactly that: a pending message, at most 0x80000, appended until complete. **T10b** joins at the RFS layer
+(`rfs_join`) and answers close (result -1, errno EBADF: `ProcessCloseFile`'s 14-byte reply; we never hand out a
+handle). The fake CP now splits long RFS messages the same way.
+
 ### 7.2 Facts from One UI's vendor binaries (2026-11-09; read offline, binaries kept out of git)
 VENDOR was copied read-only in TWRP and extracted in the VM (EROFS). From `lib64/libsec-ril.so` (stripped, but its
 C++ dynamic symbols remain), `etc/mixer_paths.xml` and `firmware/calliope_*.bin`:
