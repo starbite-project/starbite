@@ -722,12 +722,15 @@ static void build_status(void)
     ub_s(&sig, b.charger ? "|c" : "|-");
     ub_dec(&sig, (uint64_t)wifi_bar());
     ub_dec(&sig, (uint64_t)(b.pct < 0 ? 0 : b.pct));
+    ub_s(&sig, notif_unread() ? "|n" : "|-");      /* 1.2-alpha9: the unread notifications' dot */
     if (!status_forced && !strcmp_k(sig.b, st_sig))
         return;
     scopy(st_sig, sizeof(st_sig), sig.b);
     status_forced = 0;
     look_bg(0, 0, UI_W, UI_STATUS_H);
     ui_text(F_STATUS, 64, 76, tm, C_L1);
+    if (notif_unread())                     /* 1.2-alpha9: unread notifications (the control center lists them) */
+        ui_disc(64 + ui_text_w(F_STATUS, tm) + 26, 62, 10, C_STAR);
     int x = UI_W - 64 - 84;
     if (b.ok)
         glyph_battery(x, 42, b.pct, b.charger != 0);
@@ -1132,6 +1135,7 @@ void kui_control_open(void)
         return;
     cc_return = screen;
     screen = SCR_CONTROL;
+    notif_seen();                           /* 1.2-alpha9: the list is shown now */
     focus = -1;
     full = dirty = 1;
 }
@@ -1171,6 +1175,32 @@ static void build_control(void)
     scopy(e->a, sizeof(e->a), "Control center");
     e->x = MX, e->y = 330, e->w = CW, e->h = 140;
     int base = ncur;
+    /* 1.2-alpha9: the notifications, newest first (opening this marks them read) */
+    for (int i = 0; i < notif_count() && i < 4; ++i) {
+        const struct notif *n = notif_get(i);
+        struct ub u;
+        ub_init(&u);
+        if (n->hm >= 0) {
+            ub_dec2(&u, (unsigned)(n->hm / 100));
+            ub_c(&u, ':');
+            ub_dec2(&u, (unsigned)(n->hm % 100));
+            ub_s(&u, "  ");
+        }
+        ub_s(&u, n->title);
+        if (n->text[0]) {
+            ub_s(&u, ": ");
+            ub_s(&u, n->text);
+        }
+        e = add(cur, &ncur, E_TEXT);
+        scopy(e->b, sizeof(e->b), u.b);
+        e->color = C_L1;
+    }
+    if (notif_count()) {
+        e = add(cur, &ncur, E_BUTTON);
+        e->id = 7;
+        scopy(e->a, sizeof(e->a), "Clear");
+        e->flags = UI_HALF;
+    }
     e = add(cur, &ncur, E_TOGGLE);
     e->id = 1;
     scopy(e->a, sizeof(e->a), "Emergency Mode");
@@ -1218,6 +1248,11 @@ static void control_pick(const struct el *e, int x)
 {
     if (e->kind == E_BACK) {
         control_close();
+        return;
+    }
+    if (e->kind == E_BUTTON && e->id == 7) {
+        notif_clear();                      /* 1.2-alpha9 */
+        full = dirty = 1;
         return;
     }
     if (e->kind == E_TOGGLE) {

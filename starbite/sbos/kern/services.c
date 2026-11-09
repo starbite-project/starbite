@@ -272,6 +272,21 @@ void battery_timer(unsigned id)
     ui_kminute();
     kt_set(KT_BATTERY, 1, sb_ms(), K.screen_on ? 10000 : 60000, 0);
     /* the reserve (docs 4.6): below 3 % off, unless SOS runs (down to 2 %) */
+    {
+        /* 1.2-alpha9: a low battery, once at 15 % and once at 5 % (again after a charge above them) */
+        static int said15, said5;
+        if (bat.ok && !bat.charger) {
+            if (bat.pct <= 5 && !said5) {
+                said5 = said15 = 1;
+                notif_post("battery", "Battery at 5 %", "Plug in soon; the phone switches off at 3 %");
+            } else if (bat.pct <= 15 && !said15) {
+                said15 = 1;
+                notif_post("battery", "Battery at 15 %", "");
+            }
+        } else if (bat.ok && bat.pct > 20) {
+            said15 = said5 = 0;
+        }
+    }
     if (bat.ok && bat.pct < 2 && torch_on())
         torch_set(0);
     if (bat.ok && !bat.charger && ((bat.pct < 3 && !sos_active()) || bat.pct < 2)) {

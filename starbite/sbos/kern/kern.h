@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha9"
+#define SBOS_VERSION "1.2-alpha10"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -350,6 +350,17 @@ int alarm_ringing(void);
 void alarm_minute(const struct sbos_time *t);
 void alarm_timer(void);
 int alarm_stop(int snooze);
+/* 1.2-alpha9: notifications (notif.c) */
+struct notif {
+    char who[16], title[40], text[72];
+    int hm;                         /* local hh * 100 + mm, -1 unknown */
+};
+void notif_post(const char *who, const char *title, const char *text);
+int notif_count(void);
+int notif_unread(void);
+const struct notif *notif_get(int i);
+void notif_seen(void);
+void notif_clear(void);
 int heatprobe_step(void);
 int panel_dump(void);
 int audio_probe(void);              /* 0.7: the codec's state read only, its ID if S-Boot left it powered (audio.c) */               /* 0.6.5: read only: the panel's ID, gamma, ELVSS, VINT, AOR, IRC (logged) */

@@ -920,6 +920,9 @@ static void restore_and_check(void)
     for (unsigned w = 0; w < 8; ++w)
         parked_logged[w] = 0;
     sb_logf("heater: stopped: ", ctl.why[0] ? ctl.why : "?");
+    if (ctl.why[0] && !(ctl.why[0] == 'S' && ctl.why[1] == 't' && ctl.why[2] == 'o' && ctl.why[3] == 'p' &&
+                        ctl.why[4] == 'p' && ctl.why[5] == 'e' && ctl.why[6] == 'd' && !ctl.why[7]))
+        notif_post("heat", "Heat stopped", ctl.why);    /* 1.2-alpha9: by itself (not the user's Off) */
     run_summary();
     if (was_recording)
         record(&last_in, 0);                /* 1.0-rc2 (review): the stop's record after the hardware is off */

@@ -727,6 +727,11 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
             return SBOS_EPERM;
         kui_end();
         return 0;
+    case SYS_NOTIFY:                    /* 1.2-alpha9 */
+        if (!user_str(a, arg[0], s1, sizeof(s1)) || (arg[1] && !user_str(a, arg[1], s2, sizeof(s2))))
+            return SBOS_EINVAL;
+        notif_post(p->name, s1, arg[1] ? s2 : "");
+        return 0;
     case SYS_UI_TOAST:
         if (!front || !user_str(a, arg[0], s1, sizeof(s1)))
             return SBOS_EINVAL;

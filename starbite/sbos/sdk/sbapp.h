@@ -16,6 +16,7 @@
 enum {
     SYS_RETURN = 0, SYS_LOG = 1, SYS_VERSION = 2, SYS_ALLOC = 3, SYS_EXIT = 4,
     SYS_APP_OPEN = 5,                                       /* 0.5.11: another app to the front */
+    SYS_NOTIFY = 6,                                         /* 1.2-alpha9: a notification (title, text) */
     /* UI 10..29 */
     SYS_UI_BEGIN = 10, SYS_UI_TITLE = 11, SYS_UI_BUTTON = 12, SYS_UI_BIG = 13, SYS_UI_TEXT = 14,
     SYS_UI_LEVEL = 15, SYS_UI_TOGGLE = 16, SYS_UI_HOLD = 17, SYS_UI_END = 18, SYS_UI_TOAST = 19,
@@ -345,6 +346,8 @@ static inline int sos(int on) { return (int)sbos_call(SYS_SIREN, (uint64_t)on, 0
 /* 1.2-alpha8 (SBOS_P_ALARM): the motor; a wake-up alarm (index 0..3, days bit 0 Sunday .. bit 6, 0 once); stop or
  * snooze the ringing one. The ringing alarm comes as EV_APP_SERVICE id 3 (value: index | h << 8 | m << 16), its end
  * as id 4 (value 1 snoozed). */
+/* 1.2-alpha9: a notification in the control center's list (the status bar shows a dot until it is seen) */
+static inline int notify(const char *title, const char *text) { return (int)sbos_call(SYS_NOTIFY, (uintptr_t)title, (uintptr_t)text, 0, 0, 0); }
 static inline int vibrate(unsigned ms, unsigned count) { return (int)sbos_call(SYS_VIBRATE, ms, count, 0, 0, 0); }
 static inline int alarm_set(int i, int h, int m, int days, int on)
 { return (int)sbos_call(SYS_ALARM_SET, (uint64_t)i, (uint64_t)(h << 8 | m), (uint64_t)days, (uint64_t)on, 0); }

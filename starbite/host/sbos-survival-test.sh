@@ -24,6 +24,7 @@ r=$(run $OPEN $HEAT $SURV $HOLD $HOLD $HOLD w:7000 $OFF w:3000)
 want "$r" "Survival heat confirmed three times" "Survival: three confirmations"
 want "$r" "heater: start, level 0x00000007" "Survival started"
 want "$r" "heater: stopped: Stopped" "Off stopped Survival"
+never "$r" "notif: heat" "the user's Off posts no notification (1.2-alpha9)"
 never "$r" "trip is OFF" "Survival (default) never touches the trip"
 want "$r" "host: flexpmu core 4 on (first: cluster on)" "FlexPMU: the first M3 core's cluster on before its CPU_ON"
 n=$(echo "$r" | grep -c "(first: cluster on)")
@@ -57,6 +58,7 @@ want "$r" "not writable from EL1 here" "a TMU that does not take the write is re
 want "$r" "cannot be switched off from here" "and refused"
 want "$r" "host: watchdog back to the loader's" "the watchdog put back after the refusal"
 want "$r" "heater: stopped: The chip's heat trip cannot be switched off from here" "the session stopped at its first loop turn"
+want "$r" "notif: heat: Heat stopped" "a heat stop by itself posts a notification (1.2-alpha9)"
 want "$r" "heater: every worker core left the load" "and its workers left"
 never "$r" "the chip's hardware heat trip is OFF" "the trip never reported off"
 ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_NOWDT=1"

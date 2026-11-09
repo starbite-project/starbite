@@ -103,6 +103,15 @@ void alarm_timer(void)
         return;
     if (sb_ms() - ring_t0 >= RING_MAX_MS) {
         sb_log("alarm: 10 minutes without an answer: stopped");
+        {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "Not answered: ");
+            ub_dec2(&u, al[ringing].h);
+            ub_c(&u, ':');
+            ub_dec2(&u, al[ringing].m);
+            notif_post("clock", "Missed alarm", u.b);
+        }
         alarm_stop(0);
         return;
     }
