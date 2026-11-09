@@ -1,0 +1,84 @@
+From 9cacd9e361c600ddd3dffe4e07bce90eec5d2d46 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Mon, 9 Nov 2026 20:31:38 +0200
+Subject: [PATCH] patch: 0415-starlte-stall-probe-page.patch - the stall probe
+ names the page a thread has slept on for over 5 s (bits, offset, file or
+ anonymous)
+
+---
+ osfmk/kern/kern_stackshot.c | 33 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/osfmk/kern/kern_stackshot.c b/osfmk/kern/kern_stackshot.c
+index 0ac62248..48d09e58 100644
+--- a/osfmk/kern/kern_stackshot.c
++++ b/osfmk/kern/kern_stackshot.c
+@@ -6539,12 +6539,15 @@ stackshot_update_passcode_status(stackshot_passcode_status_t primary_user_status
+  * turnstile lock was held. 0413 used stackshot's owner helpers, which panic outside the debugger
+  * (turnstile_is_send_turnstile): 0414 reads each thread under its thread lock and walks the chain itself
+  * with try-locks on the turnstiles' waitqs, hand over hand, at most 4 hops.
++ * 0415: a thread blocked on a busy page for over 5 s (T22b: securityd's main thread for the whole boot) gets a
++ * second line with that page's state and its object: the file (vnode pager) and offset, or "anonymous".
+  */
++extern kern_return_t vnode_pager_get_object_name(memory_object_t, char *, vm_size_t, char *, vm_size_t, boolean_t *);
+ extern int starlte_workq_pid(void *wq);         /* bsd/pthread/pthread_workqueue.c */
+ #define ST_STALL_MAX 192
+ enum { ST_CH_NONE, ST_CH_THREAD, ST_CH_WORKQ, ST_CH_BUSY, ST_CH_OTHER, ST_CH_DEEP };
+ static struct st_stall_rec {
+-	uint64_t tid, event, blocked_ms, inh_tid;
++	uint64_t tid, event, raw_event, blocked_ms, inh_tid;
+ 	int pid, inh_pid;
+ 	uint8_t state, hint, main, chain, hops;
+ 	char name[20];
+@@ -6630,6 +6633,30 @@ st_stall_name(int pid, char *buf, size_t len)
+ 	}
+ }
+ 
++/* a page some thread has slept on for over 5 s: its bits and whose it is (tasks_threads_lock held; may sleep) */
++static void
++st_stall_page(vm_page_t m)
++{
++	char path[160] = "", file[64] = "";
++	boolean_t trunc = FALSE;
++	vm_object_t object = VM_PAGE_OBJECT(m);
++	const char *kind = "no object";
++	if (object != VM_OBJECT_NULL) {
++		if (object->internal) {
++			kind = "anonymous";
++		} else if (object->pager != MEMORY_OBJECT_NULL &&
++		    vnode_pager_get_object_name(object->pager, path, sizeof(path), file, sizeof(file), &trunc) == KERN_SUCCESS) {
++			kind = "file";
++		} else {
++			kind = "external, not a vnode";
++		}
++	}
++	printf("STARLTE STALL:   page %#lx off %#llx busy %d wanted %d absent %d error %d cleaning %d restart %d "
++	    "laundry %d: %s %s%s\n", (unsigned long)VM_KERNEL_ADDRPERM(m), (uint64_t)m->vmp_offset, m->vmp_busy,
++	    m->vmp_wanted, m->vmp_absent, m->vmp_error, m->vmp_cleaning, m->vmp_restart, m->vmp_laundry, kind,
++	    path[0] ? path : file, trunc ? "..." : "");
++}
++
+ void starlte_stall_dump(uint64_t input_abs, uint64_t present_abs);
+ void
+ starlte_stall_dump(uint64_t input_abs, uint64_t present_abs)
+@@ -6669,6 +6696,7 @@ starlte_stall_dump(uint64_t input_abs, uint64_t present_abs)
+ 			bool parked_wq = r->hint == kThreadWaitParkedWorkQueue || r->hint == kThreadWaitParkedBoundWorkQueue;
+ 			if ((thread->state & TH_WAIT) && !parked_wq) {
+ 				r->event = VM_KERNEL_UNSLIDE_OR_PERM(thread->wait_event);
++				r->raw_event = (uint64_t)thread->wait_event;
+ 				st_stall_chain(thread, r);
+ 			}
+ 			r->tid = thread_tid(thread);
+@@ -6724,6 +6752,9 @@ starlte_stall_dump(uint64_t input_abs, uint64_t present_abs)
+ 		printf("STARLTE STALL: %s[%d] tid %llu%s %s %s %llu ms ev %#llx%s\n", r->name, r->pid, r->tid,
+ 		    r->main ? " main" : "", (r->state & TH_RUN) ? "R" : (r->state & TH_WAIT) ? "W" : "-",
+ 		    (r->state & TH_WAIT) ? st_hint_name(r->hint) : "", r->blocked_ms, r->event, who);
++		if ((r->state & TH_WAIT) && r->hint == kThreadWaitPageBusy && r->blocked_ms > 5000 && r->raw_event) {
++			st_stall_page((vm_page_t)r->raw_event);
++		}
+ 	}
+ 	lck_mtx_unlock(&tasks_threads_lock);
+ }
+-- 
+2.53.0
+

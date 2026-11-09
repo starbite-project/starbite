@@ -1,0 +1,347 @@
+From 8d17da14b5af69061a095f395ba85d0110f49d3a Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Mon, 9 Nov 2026 19:41:16 +0200
+Subject: [PATCH] patch: 0413-starlte-stall-probe.patch - a touch with no
+ present for 1.5 s logs what backboardd's and SpringBoard's threads, and every
+ blocked main thread, wait on (block hint, owner, turnstile inheritor); on
+ with sweetreboot= or starstall=1
+
+---
+ bsd/dev/starlte_touch.c               |  47 ++++++
+ iokit/Kernel/arm/SweetFramebuffer.cpp |   2 +
+ iokit/Kernel/arm/hid/SweetHID.cpp     |  11 ++
+ osfmk/kern/kern_stackshot.c           | 211 ++++++++++++++++++++++++++
+ 4 files changed, 271 insertions(+)
+
+diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
+index 6b425320..fa05bd74 100644
+--- a/bsd/dev/starlte_touch.c
++++ b/bsd/dev/starlte_touch.c
+@@ -737,6 +737,52 @@ st_event(void)
+ 	return true;
+ }
+ 
++/*
++ * 0413: the stall probe. A touch (press or release, real or scripted) that is followed by no present for
++ * 1.5 s: who are backboardd's and SpringBoard's threads, and every process's main thread, waiting on
++ * (osfmk/kern/kern_stackshot.c, starlte_stall_dump). At most 30 per boot, 5 s apart. On with sweetreboot=
++ * (the timed/logged boots) or starstall=1; starstall=0 off.
++ */
++extern uint64_t sweet_last_input_abs, sweet_last_present_abs;
++extern void starlte_stall_dump(uint64_t input_abs, uint64_t present_abs);
++static int st_stall_on = -1;
++
++static void
++st_stall_check(void)
++{
++	static uint64_t handled, last_dump;
++	static unsigned dumps;
++	if (st_stall_on < 0) {
++		uint32_t v = 0, r = 0;
++		st_stall_on = PE_parse_boot_argn("starstall", &v, sizeof(v)) ? (v != 0) :
++		    (PE_parse_boot_argn("sweetreboot", &r, sizeof(r)) && r != 0);
++		if (st_stall_on) {
++			printf("STARLTE STALL: probe on (a touch with no present for 1.5 s)\n");
++		}
++	}
++	uint64_t in = sweet_last_input_abs, now = mach_absolute_time(), ns = 0, gap = 0;
++	if (!st_stall_on || in == 0 || in == handled || dumps >= 30) {
++		return;
++	}
++	absolutetime_to_nanoseconds(now - in, &ns);
++	if (ns < 1500000000ULL) {
++		return;
++	}
++	handled = in;
++	if (sweet_last_present_abs > in) {
++		return;                 /* the screen changed after the touch */
++	}
++	if (last_dump != 0) {
++		absolutetime_to_nanoseconds(now - last_dump, &gap);
++		if (gap < 5000000000ULL) {
++			return;
++		}
++	}
++	last_dump = now;
++	dumps++;
++	starlte_stall_dump(in, sweet_last_present_abs);
++}
++
+ static void
+ st_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+@@ -805,6 +851,7 @@ st_thread(__unused void *arg, __unused wait_result_t wr)
+ 		if (tick % 6000 == 5999) {
+ 			printf("STARLTE TOUCH: %u events, %u retries, %u lost\n", st_events, st_retries, st_lost);
+ 		}
++		st_stall_check();
+ 		st_msleep(5);
+ 	}
+ }
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index e11fe0ca..ddecb8b4 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -37,6 +37,7 @@
+ #include "SweetSurface.h"
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
++extern "C" uint64_t sweet_last_present_abs;     /* 0413: iokit/Kernel/arm/hid/SweetHID.cpp */
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+ extern "C" uint64_t a5xelte_power_pressed_at;   /* bsd/dev/a5xelte_keys.c */
+ #endif
+@@ -412,6 +413,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		uint64_t before = fb->fPerfLog ? mach_absolute_time() : 0;
+ #endif
+ 		uint64_t bytes = fb->present(rec);
++		sweet_last_present_abs = mach_absolute_time();     /* 0413: the stall probe */
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+ 		if (fb->fPerfLog) {
+ 			uint64_t ns = 0;
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 35091fa1..7b110a3c 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -1138,9 +1138,20 @@ sweet_hid_key(int key, int down)
+ 	}
+ }
+ 
++/* 0413: the stall probe (bsd/dev/starlte_touch.c) compares the last touch with the last present */
++extern "C" uint64_t sweet_last_input_abs;
++extern "C" uint64_t sweet_last_present_abs;
++uint64_t sweet_last_input_abs;
++uint64_t sweet_last_present_abs;
++
+ extern "C" void
+ sweet_hid_touch(int finger, int down, int x, int y)
+ {
++	static bool was_down[16];
++	if (finger >= 0 && finger < 16 && was_down[finger] != (down != 0)) {
++		was_down[finger] = down != 0;
++		sweet_last_input_abs = mach_absolute_time();
++	}
+ 	if (gSweetTouch) {
+ 		gSweetTouch->touch(finger, down != 0, x, y);
+ 	}
+diff --git a/osfmk/kern/kern_stackshot.c b/osfmk/kern/kern_stackshot.c
+index 970a39a0..5076d1bc 100644
+--- a/osfmk/kern/kern_stackshot.c
++++ b/osfmk/kern/kern_stackshot.c
+@@ -6528,3 +6528,214 @@ stackshot_update_passcode_status(stackshot_passcode_status_t primary_user_status
+ {
+ 	passcode_status = primary_user_status;
+ }
++
++/*
++ * Starbite 0413: the stall probe (bsd/dev/starlte_touch.c calls it when a touch got no present for 1.5 s).
++ * For backboardd and SpringBoard every thread that is not a parked workqueue thread, for every other process
++ * its main thread when it has been blocked for over 1 s on something other than its run loop's port set:
++ *   "STARLTE STALL: SpringBoard[27] tid 1234 main W PortReceive 2400 ms owner 0x1a03 -> lsd[88] tid 5678"
++ * state R (running/runnable) or W (waiting); the wait kind is the thread's block hint; owner/context as
++ * stackshot's waitinfo; "->" is the turnstile's final inheritor (the thread or task the wait is pushed to).
++ * Each thread is read under its thread lock (it cannot be woken meanwhile); the owner helpers are the ones
++ * stackshot uses, which only peek at lock words.
++ */
++#define ST_STALL_MAX 192
++static struct st_stall_rec {
++	uint64_t tid, owner, context, ts_ctx, blocked_ms;
++	int pid;
++	uint8_t state, hint, ts_flags, main;
++	char name[20];
++} st_stall_recs[ST_STALL_MAX];
++
++static const char *
++st_hint_name(unsigned h)
++{
++	static const char *const names[] = {
++		"None", "KMutex", "PortReceive", "PortSetReceive", "PortSend", "PortSendInTransit", "Semaphore",
++		"KRWRead", "KRWWrite", "KRWUpgrade", "UserLock", "PThreadMutex", "PThreadRWRead", "PThreadRWWrite",
++		"PThreadCondVar", "ParkedWQ", "WorkloopSyncWait", "OnProcess", "SleepWithInheritor", "Eventlink",
++		"Compressor", "ParkedBoundWQ", "PageBusy", "PLReqInProgress", "PagerReady", "PagingActivity",
++		"MappingInProgress", "MemoryBlocked", "PagingInProgress", "PageInThrottle",
++	};
++	return h < sizeof(names) / sizeof(names[0]) ? names[h] : "?";
++}
++
++static void
++st_stall_owner(thread_t thread, struct st_stall_rec *r)
++{
++	thread_waitinfo_v2_t wi;
++	struct ipc_service_port_label *ispl = NULL;
++	bzero(&wi, sizeof(wi));
++	wi.wait_type = thread->block_hint;
++	switch (thread->block_hint) {
++	case kThreadWaitKernelMutex:
++		if (thread->waitq.wq_q) {
++			kdp_lck_mtx_find_owner(thread->waitq.wq_q, thread->wait_event, (thread_waitinfo_t *)&wi);
++		}
++		break;
++	case kThreadWaitPortReceive:
++		if (thread->waitq.wq_q) {
++			kdp_mqueue_recv_find_owner(thread->waitq.wq_q, thread->wait_event, &wi, &ispl);
++		}
++		break;
++	case kThreadWaitPortSend:
++		if (thread->waitq.wq_q) {
++			kdp_mqueue_send_find_owner(thread->waitq.wq_q, thread->wait_event, &wi, &ispl);
++		}
++		break;
++	case kThreadWaitSemaphore:
++		if (thread->waitq.wq_q) {
++			kdp_sema_find_owner(thread->waitq.wq_q, thread->wait_event, (thread_waitinfo_t *)&wi);
++		}
++		break;
++	case kThreadWaitUserLock:
++		if (thread->waitq.wq_q) {
++			kdp_ulock_find_owner(thread->waitq.wq_q, thread->wait_event, (thread_waitinfo_t *)&wi);
++		}
++		break;
++	case kThreadWaitPThreadMutex:
++	case kThreadWaitPThreadRWLockRead:
++	case kThreadWaitPThreadRWLockWrite:
++	case kThreadWaitPThreadCondVar:
++		kdp_pthread_find_owner(thread, (thread_waitinfo_t *)&wi);
++		break;
++	case kThreadWaitWorkloopSyncWait:
++		kdp_workloop_sync_wait_find_owner(thread, thread->wait_event, (thread_waitinfo_t *)&wi);
++		break;
++	case kThreadWaitOnProcess:
++		kdp_wait4_find_process(thread, thread->wait_event, (thread_waitinfo_t *)&wi);
++		break;
++	default:
++		break;
++	}
++	r->owner = wi.owner;
++	r->context = wi.context;
++	struct turnstile *ts = thread_get_waiting_turnstile(thread);
++	if (ts != TURNSTILE_NULL) {
++		thread_turnstileinfo_v2_t ti;
++		bzero(&ti, sizeof(ti));
++		kdp_turnstile_fill_tsinfo(ts, &ti, &ispl);
++		r->ts_ctx = ti.turnstile_context;
++		r->ts_flags = (uint8_t)ti.turnstile_flags;
++	}
++}
++
++/* name[pid] of the task with that pid, or of the task owning the thread with that tid */
++static void
++st_stall_who(uint64_t key, bool is_tid, char *buf, size_t len)
++{
++	task_t task;
++	snprintf(buf, len, is_tid ? "tid %llu" : "pid %llu", key);
++	queue_iterate(&tasks, task, task_t, tasks) {
++		void *p = get_bsdtask_info(task);
++		if (p == NULL) {
++			continue;
++		}
++		char nm[20];
++		proc_name_kdp(p, nm, sizeof(nm));
++		if (!is_tid) {
++			if ((uint64_t)pid_from_task(task) == key) {
++				snprintf(buf, len, "%s[%d]", nm, pid_from_task(task));
++				return;
++			}
++			continue;
++		}
++		thread_t thread;
++		bool found = false;
++		task_lock(task);
++		queue_iterate(&task->threads, thread, thread_t, task_threads) {
++			if (thread_tid(thread) == key) {
++				found = true;
++				break;
++			}
++		}
++		task_unlock(task);
++		if (found) {
++			snprintf(buf, len, "%s[%d] tid %llu", nm, pid_from_task(task), key);
++			return;
++		}
++	}
++}
++
++void starlte_stall_dump(uint64_t input_abs, uint64_t present_abs);
++void
++starlte_stall_dump(uint64_t input_abs, uint64_t present_abs)
++{
++	uint64_t now = mach_absolute_time(), since_in = 0, since_pr = 0;
++	absolutetime_to_nanoseconds(now - input_abs, &since_in);
++	if (present_abs) {
++		absolutetime_to_nanoseconds(now - present_abs, &since_pr);
++	}
++	unsigned n = 0, parked = 0, quiet = 0;
++	task_t task;
++	lck_mtx_lock(&tasks_threads_lock);
++	queue_iterate(&tasks, task, task_t, tasks) {
++		void *p = get_bsdtask_info(task);
++		if (p == NULL) {
++			continue;
++		}
++		char nm[20];
++		proc_name_kdp(p, nm, sizeof(nm));
++		bool full = strcmp(nm, "backboardd") == 0 || strcmp(nm, "SpringBoard") == 0;
++		bool first = true;
++		thread_t thread;
++		task_lock(task);
++		queue_iterate(&task->threads, thread, thread_t, task_threads) {
++			bool is_main = first;
++			first = false;
++			if ((!full && !is_main) || n >= ST_STALL_MAX) {
++				continue;
++			}
++			struct st_stall_rec *r = &st_stall_recs[n];
++			bzero(r, sizeof(*r));
++			spl_t s = splsched();
++			thread_lock(thread);
++			r->state = (uint8_t)thread->state;
++			r->hint = (uint8_t)thread->block_hint;
++			uint64_t lr = thread->last_run_time;
++			if ((thread->state & TH_WAIT) && r->hint != kThreadWaitParkedWorkQueue &&
++			    r->hint != kThreadWaitParkedBoundWorkQueue) {
++				st_stall_owner(thread, r);
++			}
++			r->tid = thread_tid(thread);
++			thread_unlock(thread);
++			splx(s);
++			uint64_t ns = 0;
++			if ((r->state & TH_WAIT) && lr && now > lr) {
++				absolutetime_to_nanoseconds(now - lr, &ns);
++			}
++			r->blocked_ms = ns / 1000000;
++			if (r->hint == kThreadWaitParkedWorkQueue || r->hint == kThreadWaitParkedBoundWorkQueue) {
++				parked++;
++				continue;
++			}
++			if (!full && ((r->state & TH_WAIT) == 0 || r->hint == kThreadWaitPortSetReceive ||
++			    r->hint == kThreadWaitNone || r->blocked_ms < 1000)) {
++				quiet++;
++				continue;
++			}
++			r->pid = pid_from_task(task);
++			r->main = is_main;
++			strlcpy(r->name, nm, sizeof(r->name));
++			n++;
++		}
++		task_unlock(task);
++	}
++	printf("STARLTE STALL: touch %llu ms ago, last present %llu ms ago: %u threads listed, %u parked, %u quiet\n",
++	    since_in / 1000000, present_abs ? since_pr / 1000000 : 0, n, parked, quiet);
++	for (unsigned i = 0; i < n; i++) {
++		struct st_stall_rec *r = &st_stall_recs[i];
++		char who[64] = "";
++		if (r->ts_ctx && (r->ts_flags & (STACKSHOT_TURNSTILE_STATUS_THREAD | STACKSHOT_TURNSTILE_STATUS_BLOCKED_ON_TASK))) {
++			char w[56];
++			st_stall_who(r->ts_ctx, (r->ts_flags & STACKSHOT_TURNSTILE_STATUS_THREAD) != 0, w, sizeof(w));
++			snprintf(who, sizeof(who), " -> %s", w);
++		} else if (r->ts_flags) {
++			snprintf(who, sizeof(who), " ts 0x%x", r->ts_flags);
++		}
++		printf("STARLTE STALL: %s[%d] tid %llu%s %s %s %llu ms owner %#llx ctx %#llx%s\n", r->name, r->pid, r->tid,
++		    r->main ? " main" : "", (r->state & TH_RUN) ? "R" : (r->state & TH_WAIT) ? "W" : "-",
++		    (r->state & TH_WAIT) ? st_hint_name(r->hint) : "", r->blocked_ms, r->owner, r->context, who);
++	}
++	lck_mtx_unlock(&tasks_threads_lock);
++}
+-- 
+2.53.0
+

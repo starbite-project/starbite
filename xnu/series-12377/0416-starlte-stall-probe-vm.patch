@@ -1,0 +1,92 @@
+From 83cc5f4d4106bb364b920a2077160c6ee5d2b887 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Mon, 9 Nov 2026 23:02:35 +0200
+Subject: [PATCH] patch: 0416-starlte-stall-probe-vm.patch - the stall probe
+ lists securityd in full and any thread blocked over 1 s on the VM or a kernel
+ lock; page lines add the object, its refs and paging activity, the page queue
+ and wire count
+
+---
+ osfmk/kern/kern_stackshot.c | 38 +++++++++++++++++++++++++++++++------
+ 1 file changed, 32 insertions(+), 6 deletions(-)
+
+diff --git a/osfmk/kern/kern_stackshot.c b/osfmk/kern/kern_stackshot.c
+index 48d09e58..426da661 100644
+--- a/osfmk/kern/kern_stackshot.c
++++ b/osfmk/kern/kern_stackshot.c
+@@ -6541,7 +6541,25 @@ stackshot_update_passcode_status(stackshot_passcode_status_t primary_user_status
+  * with try-locks on the turnstiles' waitqs, hand over hand, at most 4 hops.
+  * 0415: a thread blocked on a busy page for over 5 s (T22b: securityd's main thread for the whole boot) gets a
+  * second line with that page's state and its object: the file (vnode pager) and offset, or "anonymous".
++ * 0416: T23's page was anonymous, at 0x3c9000 (the second 4 KiB of a 16 KiB user page): securityd is listed in
++ * full too, and any process's thread blocked over 1 s on the VM or a kernel lock; the page line adds its object
++ * (so two threads on one object match), the object's references and paging activity, and the page's queue.
+  */
++static bool
++st_stall_vm_wait(unsigned h)
++{
++	switch (h) {
++	case kThreadWaitKernelMutex: case kThreadWaitKernelRWLockRead: case kThreadWaitKernelRWLockWrite:
++	case kThreadWaitKernelRWLockUpgrade: case kThreadWaitCompressor: case kThreadWaitPageBusy:
++	case kThreadWaitPLReqInProgress: case kThreadWaitPagerReady: case kThreadWaitPagingActivity:
++	case kThreadWaitMappingInProgress: case kThreadWaitMemoryBlocked: case kThreadWaitPagingInProgress:
++	case kThreadWaitPageInThrottle: case kThreadWaitVMEntryExclEvent: case kThreadWaitVMEntrySharedEvent:
++	case kThreadWaitVMEntryKUnwireEvent:
++		return true;
++	default:
++		return false;
++	}
++}
+ extern kern_return_t vnode_pager_get_object_name(memory_object_t, char *, vm_size_t, char *, vm_size_t, boolean_t *);
+ extern int starlte_workq_pid(void *wq);         /* bsd/pthread/pthread_workqueue.c */
+ #define ST_STALL_MAX 192
+@@ -6652,9 +6670,16 @@ st_stall_page(vm_page_t m)
+ 		}
+ 	}
+ 	printf("STARLTE STALL:   page %#lx off %#llx busy %d wanted %d absent %d error %d cleaning %d restart %d "
+-	    "laundry %d: %s %s%s\n", (unsigned long)VM_KERNEL_ADDRPERM(m), (uint64_t)m->vmp_offset, m->vmp_busy,
+-	    m->vmp_wanted, m->vmp_absent, m->vmp_error, m->vmp_cleaning, m->vmp_restart, m->vmp_laundry, kind,
+-	    path[0] ? path : file, trunc ? "..." : "");
++	    "laundry %d q %d wire %d: %s %s%s\n", (unsigned long)VM_KERNEL_ADDRPERM(m), (uint64_t)m->vmp_offset, m->vmp_busy,
++	    m->vmp_wanted, m->vmp_absent, m->vmp_error, m->vmp_cleaning, m->vmp_restart, m->vmp_laundry,
++	    m->vmp_q_state, (int)m->vmp_wire_count, kind, path[0] ? path : file, trunc ? "..." : "");
++	if (object != VM_OBJECT_NULL) {
++		printf("STARLTE STALL:   object %#lx refs %u size %#llx paging %u activity %u shadow %#lx copy %#lx "
++		    "pager_ready %d named %d\n", (unsigned long)VM_KERNEL_ADDRPERM(object),
++		    os_ref_get_count_raw(&object->ref_count), (uint64_t)object->vo_size, object->paging_in_progress,
++		    object->activity_in_progress, (unsigned long)VM_KERNEL_ADDRPERM(object->shadow),
++		    (unsigned long)VM_KERNEL_ADDRPERM(object->vo_copy), object->pager_ready, object->named);
++	}
+ }
+ 
+ void starlte_stall_dump(uint64_t input_abs, uint64_t present_abs);
+@@ -6676,14 +6701,14 @@ starlte_stall_dump(uint64_t input_abs, uint64_t present_abs)
+ 		}
+ 		char nm[20];
+ 		proc_name_kdp(p, nm, sizeof(nm));
+-		bool full = strcmp(nm, "backboardd") == 0 || strcmp(nm, "SpringBoard") == 0;
++		bool full = strcmp(nm, "backboardd") == 0 || strcmp(nm, "SpringBoard") == 0 || strcmp(nm, "securityd") == 0;
+ 		bool first = true;
+ 		thread_t thread;
+ 		task_lock(task);
+ 		queue_iterate(&task->threads, thread, thread_t, task_threads) {
+ 			bool is_main = first;
+ 			first = false;
+-			if ((!full && !is_main) || n >= ST_STALL_MAX) {
++			if (n >= ST_STALL_MAX) {
+ 				continue;
+ 			}
+ 			struct st_stall_rec *r = &st_stall_recs[n];
+@@ -6711,7 +6736,8 @@ starlte_stall_dump(uint64_t input_abs, uint64_t present_abs)
+ 				parked++;
+ 				continue;
+ 			}
+-			if (!full && ((r->state & TH_WAIT) == 0 || r->hint == kThreadWaitPortSetReceive ||
++			bool vmw = (r->state & TH_WAIT) && st_stall_vm_wait(r->hint) && r->blocked_ms >= 1000;
++			if (!full && !vmw && (!is_main || (r->state & TH_WAIT) == 0 || r->hint == kThreadWaitPortSetReceive ||
+ 			    r->hint == kThreadWaitNone || r->blocked_ms < 1000)) {
+ 				quiet++;
+ 				continue;
+-- 
+2.53.0
+

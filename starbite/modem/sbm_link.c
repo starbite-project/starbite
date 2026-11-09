@@ -54,9 +54,12 @@ static int msg_send(const struct sbm_plat *p, uint16_t v)
            p->mmio_wr32(p->ctx, MB(SBM_MBOX_INTGR1), 1u << SBM_INT_AP2CP_MSG);
 }
 
+static uint32_t g_online_ms = 0xFFFFFFFFu;   /* ms since INIT_END while online (for the log), else ~0 */
 static void note_msg(const struct sbm_plat *p, struct sbm_boot *b, uint32_t v, const char *during)
 {
     b->n_msgs++;
+    if (g_online_ms != 0xFFFFFFFFu)
+        sbm_logf(p, "online: +%u ms: CP msg 0x%04x", g_online_ms, v);
     b->last_msg = v;
     if ((v & SBM_INT_VALID) && (v & SBM_CMD_VALID)) {
         uint32_t cmd = v & SBM_CMD_FIELD;
@@ -205,6 +208,556 @@ static int hold(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sb
     return 0;
 }
 
+/* ---- stage 5a: INIT_END, then receive only ---------------------------------------------------- */
+/* The CP goes online. Nothing is sent after INIT_END: no FMT request, no RFS answer. FMT frames are decoded (identity-
+ * free state, redacted lines); RFS frames show their header and offset/length only, never data. Stops (and the caller
+ * parks) on a SIM that is not absent, on any registration, on a crash command, after hold_ms or 200 frames. */
+#define ONLINE_LOG_MAX 40
+static void log_rfs(const struct sbm_plat *p, struct sbm_boot *b, const uint8_t *pl, uint32_t n, int logit)
+{
+    if (n < SBM_RFS_HDR) {
+        b->bad_rx++;
+        return;
+    }
+    uint32_t len = sbm_le32(pl);
+    uint8_t idx = pl[4], id = pl[5];
+    uint16_t cmd = SBM_CMD(SBM_G_RFS, idx);
+    if (cmd == SBM_RFS_NV_READ_ITEM)
+        b->rfs_reads++;
+    else if (cmd == SBM_RFS_NV_WRITE_ITEM)
+        b->rfs_writes++;
+    else
+        b->rfs_other++;
+    if (!logit)
+        return;
+    if (idx == SBM_RFS_IDX_OPEN && n >= SBM_RFS_HDR + 8) {
+        /* open: u32 flags, u32 path length, the path (a file name in the RFS directory: not an identifier) */
+        char path[64];
+        uint32_t plen = sbm_le32(pl + 10), k = 0;
+        for (; k < plen && k + 1 < sizeof(path) && SBM_RFS_HDR + 8 + k < n; ++k) {
+            char c = (char)pl[SBM_RFS_HDR + 8 + k];
+            path[k] = c >= 0x20 && c < 0x7F ? c : '?';
+        }
+        path[k] = 0;
+        sbm_logf(p, "RFS: rx idx 0x11 id %u len %u: open flags 0x%x path '%s' (not answered)", id, len, sbm_le32(pl + 6),
+                 path);
+        return;
+    }
+    if ((idx == SBM_RFS_IDX_NV_READ || idx == SBM_RFS_IDX_NV_WRITE) && n >= SBM_RFS_HDR + 8)
+        sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u: offset 0x%x length 0x%x (%s)", idx, id, len,
+                 sbm_le32(pl + 6), sbm_le32(pl + 10), idx == SBM_RFS_IDX_NV_READ ? "NV read" : "NV write, data not shown");
+    else
+        sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u (%u bytes; body not shown)", idx, id, len, n);
+}
+
+/* Android's shmem_reset_ipc_link, run on the CP's first PHONE_START: access 0, magic 0, the legacy queue words 0,
+ * then magic IPC (0xAA) and access 1, read back. The CP only treats the link as up (ipc_active) with both set:
+ * T9 (2026-11-09 15:58) sent INIT_END with the magic still "BOOT" and the CP answered CRASH_EXIT at once. */
+static int reset_ipc_link(const struct sbm_plat *p)
+{
+    *leg(p, SBM_LEG_ACCESS) = 0;
+    *leg(p, SBM_LEG_MAGIC) = 0;
+    for (unsigned i = 0; i < SBM_LEG_HEADS; ++i)
+        *leg(p, 8 + 4 * i) = 0;
+    bar(p);
+    *leg(p, SBM_LEG_MAGIC) = SBM_IPC_MAGIC;
+    *leg(p, SBM_LEG_ACCESS) = 1;
+    bar(p);
+    return *leg(p, SBM_LEG_MAGIC) == SBM_IPC_MAGIC && *leg(p, SBM_LEG_ACCESS) == 1 ? 0 : SBM_EIO;
+}
+
+static void online_state(const struct sbm_plat *p, const char *when)
+{
+    uint32_t i1 = 0, i3 = 0, sr = 0;
+    p->probe32(p->ctx, MB(SBM_MBOX_ISSR(SBM_MBX_CP2AP_MSG)), &i1);
+    p->probe32(p->ctx, MB(SBM_MBOX_ISSR(SBM_MBX_CP2AP_STATUS)), &i3);
+    p->probe32(p->ctx, MB(SBM_MBOX_INTSR0), &sr);
+    sbm_logf(p, "online: %s: magic 0x%08x access %u | ISSR1 0x%04x ISSR3 0x%08x (cp_status %u) INTSR0 0x%08x", when,
+             *leg(p, SBM_LEG_MAGIC), *leg(p, SBM_LEG_ACCESS), i1 & 0xFFFF, i3, SBM_CP_STATUS(i3), sr);
+}
+
+/* CP -> AP frames longer than one SBD buffer (Android's check_more): the first buffer carries the SIPC5 header with
+ * the whole length, the next buffers are raw continuation without a header, until the length is reached. T9c: an
+ * 89,680-byte NV write arrived this way. */
+struct bigf {
+    uint8_t *buf;
+    uint32_t cap, total, rcvd;
+    int active;
+};
+static uint8_t big_fmt[2][0x10000], big_rfs[0xA0000];
+static struct bigf bigs[3] = { { big_fmt[0], sizeof(big_fmt[0]), 0, 0, 0 }, { big_fmt[1], sizeof(big_fmt[1]), 0, 0, 0 },
+                               { big_rfs, sizeof(big_rfs), 0, 0, 0 } };
+
+/* 1 = a whole frame in (*fb, *fl); 0 = taken into a big frame (more to come); -1 = dropped */
+static int big_feed(struct sbm_boot *b, struct bigf *g, const uint8_t *f, uint32_t n, uint32_t bufsz,
+                    const uint8_t **fb, uint32_t *fl)
+{
+    if (g->active) {
+        if (n > g->cap - g->rcvd) {
+            g->active = 0;
+            b->big_dropped++;
+            return -1;
+        }
+        sbm_memcpy(g->buf + g->rcvd, f, n);
+        g->rcvd += n;
+        if (g->rcvd < g->total)
+            return 0;
+        g->active = 0;
+        b->big_frames++;
+        *fb = g->buf;
+        *fl = g->total;
+        return 1;
+    }
+    if (n >= 4 && (f[0] & SBM_SIPC5_START) == SBM_SIPC5_START) {
+        uint32_t flen = (f[0] & SBM_SIPC5_EXT) && (f[0] & SBM_SIPC5_MULTI) != SBM_SIPC5_MULTI
+                        ? (n >= 6 ? sbm_le32(f + 2) : 0) : sbm_le16(f + 2);
+        if (flen > bufsz && flen > n) {
+            if (flen > g->cap) {
+                b->big_dropped++;
+                return -1;
+            }
+            sbm_memcpy(g->buf, f, n);
+            g->rcvd = n;
+            g->total = flen;
+            g->active = 1;
+            return 0;
+        }
+    }
+    *fb = f;
+    *fl = n;
+    return 1;
+}
+
+/* AP -> CP on the RFS UL ring, Android's way (misc_write with max_tx_size = the 2048-byte buffer): one SIPC5 frame
+ * when it fits, else multi-frame fragments (config 0xFB, { id, more }), each followed by the data doorbell 0x81. */
+#define RFS_TX_FRAME 2048u
+static int put_wait_ch(const struct sbm_plat *p, struct sbm_sbd *sbd, uint16_t ch, const uint8_t *fr, uint32_t l)
+{
+    for (uint32_t t = 0; t < 2000; ++t) {
+        int r = sbm_sbd_put(sbd, ch, SBM_UL, fr, l, p);
+        if (r == 0)
+            return msg_send(p, SBM_INT_VALID | 0x0001) ? 0 : SBM_EPERM;
+        if (r != SBM_ENOSPC)
+            return r;
+        delay(p, 1000);             /* the CP has not consumed the ring yet */
+        if (!(t % 100))
+            feed(p);
+    }
+    return SBM_ETIME;
+}
+static int put_wait(const struct sbm_plat *p, struct sbm_sbd *sbd, const uint8_t *fr, uint32_t l)
+{
+    return put_wait_ch(p, sbd, SBM_CH_RFS0, fr, l);
+}
+
+/* our FMT query seqs: 0x41..0xFE, round and round. Answers are matched to the open-query bitmap, not by range:
+ * 2ecf7cd counted aseq > 0x40 only, and the u8 seq wrapped through 0x00..0x40 (soak-2: 130 answers uncounted). */
+static uint8_t o_mseq = 0x40;
+static uint32_t o_open[8];
+#define SBM_QSEQ_FIRST 0x41u
+#define SBM_QSEQ_LAST  0xFEu
+
+/* T11: the status GETs, through the builder's allow-list (sbm_ipc_frame refuses anything else: no SET/EXEC, nothing
+ * that switches RF on, no CALL/SMS/SS/SAT/identity), on FMT0 with the data doorbell. Answers come back as RESP on
+ * the DL rings and go through sbm_cell like everything else. */
+static int fmt_queries(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, uint32_t ms, int logit)
+{
+    static const struct { uint16_t cmd; uint8_t n; uint8_t d[2]; } q[] = {
+        { SBM_PWR_PHONE_STATE, 0, { 0 } },       { SBM_SEC_PIN_STATUS, 0, { 0 } },
+        { SBM_SEC_SIM_ICC_TYPE, 0, { 0 } },      { SBM_NET_REGIST, 2, { 0xff, SBM_DOMAIN_CS } },
+        { SBM_NET_REGIST, 2, { 0xff, SBM_DOMAIN_PS } }, { SBM_NET_SERVING_NETWORK, 0, { 0 } },
+        { SBM_NET_PLMN_SEL, 0, { 0 } },          { SBM_DISP_ICON_INFO, 1, { 0x01 } },
+        { SBM_DISP_RSSI_INFO, 0, { 0 } },        { SBM_NET_MODE_SEL, 0, { 0 } },
+        { SBM_MISC_TIME_INFO, 0, { 0 } },
+    };
+    uint8_t fr[64];
+    for (unsigned i = 0; i < sizeof(q) / sizeof(q[0]); ++i) {
+        char nb[12];
+        o_mseq = o_mseq >= SBM_QSEQ_LAST || o_mseq < SBM_QSEQ_FIRST ? (uint8_t)SBM_QSEQ_FIRST : (uint8_t)(o_mseq + 1u);
+        uint8_t mseq = o_mseq;
+        if (o_open[mseq >> 5] & (1u << (mseq & 31)))
+            b->fmt_stale++;                       /* that query never got its answer; the seq is reused */
+        int l = sbm_ipc_frame(fr, sizeof(fr), SBM_CH_FMT0, mseq, q[i].cmd, SBM_IPC_GET, q[i].d, q[i].n);
+        if (l < 0) {
+            b->fmt_tx_refused++;
+            continue;
+        }
+        int r = put_wait_ch(p, sbd, SBM_CH_FMT0, fr, (uint32_t)l);
+        if (r < 0)
+            return r;
+        b->fmt_tx++;
+        o_open[mseq >> 5] |= 1u << (mseq & 31);
+        if (logit)
+            sbm_logf(p, "FMT: +%u TX ch235 | %s GET seq %u", ms, sbm_ipc_name(q[i].cmd, nb), mseq);
+    }
+    return 0;
+}
+
+static int rfs_send(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, const uint8_t *m, uint32_t len)
+{
+    static uint8_t fr[RFS_TX_FRAME];
+    static uint8_t info_id;
+    int l, r;
+    if (len + 4 <= RFS_TX_FRAME) {
+        l = sbm_sipc5_build(fr, sizeof(fr), SBM_CH_RFS0, m, len);
+        if (l < 0)
+            return l;
+        r = put_wait(p, sbd, fr, (uint32_t)l);
+        b->rfs_tx_frames += r == 0;
+        return r;
+    }
+    info_id = (uint8_t)((info_id + 1) & 0x7F);
+    for (uint32_t o = 0; o < len; o += RFS_TX_FRAME - 5) {
+        uint32_t k = len - o < RFS_TX_FRAME - 5 ? len - o : RFS_TX_FRAME - 5;
+        l = sbm_sipc5_build_multi(fr, sizeof(fr), SBM_CH_RFS0, info_id, o + k < len, m + o, k);
+        if (l < 0)
+            return l;
+        if ((r = put_wait(p, sbd, fr, (uint32_t)l)) < 0)
+            return r;
+        b->rfs_tx_frames++;
+    }
+    return 0;
+}
+
+/* RFS messages longer than one frame (libsec-ril's Nv::ProcessRfsPacket): the CP sends them as several ordinary
+ * SIPC5 frames (2040 payload bytes each on this phone, T10); the RFS header's u32 length (at most 0x80000) says how
+ * many bytes make one message, and the pieces are appended until it is reached. T10's 89,680-byte NV write. */
+static uint8_t rfs_acc_buf[SBM_RFS_MAX_IO + 64];
+static uint32_t rfs_acc_total, rfs_acc_rcvd;
+
+/* 1 = a whole RFS message in (*mm, *ml), 0 = a piece taken, -1 = dropped */
+static int rfs_join(struct sbm_boot *b, const uint8_t *m, uint32_t n, const uint8_t **mm, uint32_t *ml)
+{
+    if (!rfs_acc_total) {
+        if (n < SBM_RFS_HDR)
+            return -1;
+        uint32_t total = sbm_le32(m);
+        if (total < SBM_RFS_HDR || total > sizeof(rfs_acc_buf))
+            return -1;
+        if (total <= n) {
+            *mm = m;
+            *ml = total;
+            return 1;
+        }
+        sbm_memcpy(rfs_acc_buf, m, n);
+        rfs_acc_total = total;
+        rfs_acc_rcvd = n;
+        b->rfs_parts++;
+        return 0;
+    }
+    if (n > rfs_acc_total - rfs_acc_rcvd) {         /* more than the message said: drop it all */
+        rfs_acc_total = rfs_acc_rcvd = 0;
+        return -1;
+    }
+    sbm_memcpy(rfs_acc_buf + rfs_acc_rcvd, m, n);
+    rfs_acc_rcvd += n;
+    b->rfs_parts++;
+    if (rfs_acc_rcvd < rfs_acc_total)
+        return 0;
+    *mm = rfs_acc_buf;
+    *ml = rfs_acc_total;
+    rfs_acc_total = rfs_acc_rcvd = 0;
+    b->rfs_joined++;
+    return 1;
+}
+
+/* The online stage's state: one instance (the CP is one), shared by the test images' timed loop and the session API. */
+static uint8_t o_rbuf[3][8192];
+static struct sbm_reasm o_ra[3];
+static struct sbm_rfs o_rfs;
+static uint8_t o_reply[SBM_RFS_MAX_IO + 64];
+static uint32_t o_logged, o_rfs_logged, o_data_msgs, o_budget;
+static struct sbm_sbd *o_sbd;
+
+/* reset the IPC link, wait 100 ms, the clock table, INIT_END (Android's order on PHONE_START) */
+static int online_enter(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, struct sbm_image *im)
+{
+    rfs_acc_total = rfs_acc_rcvd = 0;
+    o_logged = o_rfs_logged = o_data_msgs = 0;
+    o_sbd = sbd;
+    o_mseq = SBM_QSEQ_FIRST - 1;
+    sbm_memset(o_open, 0, sizeof(o_open));
+    if (b->rfs_serve) {
+        /* the RAM copy of nv_data.bin the glue read from EFS (read only); the CP's writes change only this RAM */
+        uint8_t *nv = 0;
+        uint32_t nvs = 0;
+        for (unsigned k = 0; k < im->plan.n; ++k)
+            if (im->plan.l[k].src == SBM_SRC_NV) {
+                nv = (uint8_t *)(uintptr_t)im->data[k];
+                nvs = im->plan.l[k].size;
+            }
+        if (!nv)
+            return SBM_ENOENT;
+        sbm_rfs_init(&o_rfs, nv, nvs);
+        for (unsigned k = 0; k < 3; ++k)
+            bigs[k].active = 0;
+    }
+    if (reset_ipc_link(p) < 0) {
+        sbm_logf(p, "online: the IPC link reset did not read back");
+        return SBM_EIO;
+    }
+    sbm_logf(p, "online: IPC link reset (magic 0xAA, access 1), as Android does on PHONE_START");
+    /* Android sends INIT_END when RIL opens its channels, about 140 ms later: wait 100 ms, keeping the mailbox clear */
+    for (unsigned ms = 0; ms < 100; ++ms) {
+        uint32_t v;
+        if (msg_take(p, &v) && (v & SBM_CMD_VALID) && (v & SBM_CMD_FIELD) != SBM_CMD_PHONE_START) {
+            note_msg(p, b, v, "link reset");
+            if (b->crash_cmd) {
+                b->stopped_by = SBM_STOP_CRASH;
+                online_state(p, "crash before INIT_END");
+                return SBM_EIO;
+            }
+        }
+        delay(p, 1000);
+    }
+    int r = sbm_clk_table_write(p->ipc, sbd->ipc_size);
+    if (r < 0)
+        return r;
+    sbm_logf(p, "online: ECT clock table written (%d bytes); INIT_END -> the CP goes online", r);
+    bar(p);
+    if (!msg_send(p, SBM_CMD2INT(SBM_CMD_INIT_END)))
+        return SBM_EPERM;
+    b->init_end_sent = 1;
+    online_state(p, "INIT_END sent");
+    sbm_cell_init(&b->cell);
+    b->sim_status = 0xFFFFFFFFu;
+    for (unsigned k = 0; k < 3; ++k) {
+        o_ra[k].buf = o_rbuf[k];
+        o_ra[k].cap = sizeof(o_rbuf[k]);
+        o_ra[k].len = 0;
+        o_ra[k].active = 0;
+    }
+    o_budget = 200 + (b->hold_ms ? b->hold_ms : 20000) / 50;
+    return 0;
+}
+
+/* One pass at time ms since INIT_END: the mailbox, the FMT/RFS rings (RFS answered when serving), the guards, the
+ * periodic queries. 0 = go on, 1 = stopped by a guard (b->stopped_by), SBM_E* = an error or a crash command. */
+static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, uint32_t ms)
+{
+    uint32_t v;
+    g_online_ms = ms;
+    if (msg_take(p, &v)) {
+        if (v & SBM_CMD_VALID) {
+            note_msg(p, b, v, "online");
+            if (b->crash_cmd) {
+                b->stopped_by = SBM_STOP_CRASH;
+                g_online_ms = 0xFFFFFFFFu;
+                online_state(p, "after the crash command");
+                return SBM_EIO;
+            }
+        } else if (o_data_msgs++ < 5) {
+            sbm_logf(p, "online: +%u ms: CP data doorbell 0x%04x", ms, v);
+        }
+    }
+    /* FMT0, FMT1, RFS0: drain (the AP consumes these rings in Android too); other rings are left alone */
+    static const uint16_t chs[3] = { SBM_CH_FMT0, SBM_CH_FMT1, SBM_CH_RFS0 };
+    for (unsigned c = 0; c < 3; ++c) {
+        int id = sbm_sbd_id(sbd, chs[c]);
+        const uint8_t *f;
+        int n;
+        while (id >= 0 && (n = sbm_sbd_get(sbd, (unsigned)id, SBM_DL, &f, p)) != 0) {
+            if (n < 0) {
+                if (b->bad_rx++ < 5)
+                    sbm_logf(p, "online: +%u ms: ch %u entry refused (%s), size word 0x%08x", ms, chs[c],
+                             sbm_strerror(n), sbd->last_size_v);
+                if (n == SBM_EIO)
+                    break;          /* a broken index: leave this ring for now */
+                continue;
+            }
+            struct sbm_sipc5 fr;
+            const uint8_t *msg, *fb;
+            uint32_t ml, fl;
+            int whole = big_feed(b, &bigs[c], f, (uint32_t)n, sbd->r[id][SBM_DL].size, &fb, &fl);
+            int ok = whole == 1 && sbm_sipc5_parse(fb, fl, &fr) == 0 && fr.ch == chs[c];
+            int got = ok ? sbm_reasm_feed(&o_ra[c], &fr, &msg, &ml) : whole == 0 ? 0 : -1;
+            if (got == 1 && c < 2) {
+                struct sbm_ipc_msg m;
+                b->fmt_rx++;
+                if (sbm_ipc_parse(msg, ml, &m) == 0) {
+                    sbm_cell_update(&b->cell, &m);
+                    if (m.type == SBM_IPC_RESP && m.aseq >= SBM_QSEQ_FIRST && m.aseq <= SBM_QSEQ_LAST) {
+                        uint32_t bit = 1u << (m.aseq & 31);
+                        if (!(o_open[m.aseq >> 5] & bit)) {
+                            b->fmt_unmatched++;
+                        } else {                           /* an answer to one of our queries */
+                            o_open[m.aseq >> 5] &= ~bit;
+                            if (m.cmd == SBM_GEN_PHONE_RES)
+                                b->fmt_gen_res++;
+                            else
+                                b->fmt_resp++;
+                        }
+                    }
+                    if (o_logged < ONLINE_LOG_MAX) {
+                        char line[200];
+                        sbm_frame_line(fb, fl, 1, line, sizeof(line));
+                        sbm_logf(p, "FMT: +%u %s", ms, line);
+                        o_logged++;
+                    }
+                } else {
+                    b->bad_rx++;
+                }
+            } else if (got == 1) {
+                int j = rfs_join(b, msg, ml, &msg, &ml);
+                if (j < 0) {
+                    if (b->bad_rx++ < 5)
+                        sbm_logf(p, "online: +%u ms: RFS piece dropped (%u bytes; the join is reset)", ms, ml);
+                    goto next;
+                }
+                if (j == 0)
+                    goto next;
+                b->rfs_rx++;
+                log_rfs(p, b, msg, ml, o_rfs_logged < ONLINE_LOG_MAX);
+                o_rfs_logged += o_rfs_logged < ONLINE_LOG_MAX;
+                if (b->rfs_serve) {
+                    int rl = sbm_rfs_handle(&o_rfs, msg, ml, o_reply, sizeof(o_reply));
+                    if (rl > 0) {
+                        int e = rfs_send(p, b, sbd, o_reply, (uint32_t)rl);
+                        if (o_rfs_logged < ONLINE_LOG_MAX) {
+                            sbm_logf(p, "RFS: +%u tx idx 0x%02x id %u len %u: %s %u (%s)", ms, o_reply[4], o_reply[5], rl,
+                                     o_reply[4] == SBM_RFS_IDX_OPEN ? "errno" : "confirm",
+                                     o_reply[4] == SBM_RFS_IDX_OPEN ? sbm_le32(o_reply + 10) : o_reply[6], e ? sbm_strerror(e) : "sent");
+                            o_rfs_logged++;
+                        }
+                        if (e < 0) {
+                            b->stopped_by = SBM_STOP_TIME;
+                            g_online_ms = 0xFFFFFFFFu;
+                            online_state(p, "the RFS reply could not be sent");
+                            return e;
+                        }
+                        b->rfs_tx++;
+                        b->rfs_tx_bytes += (uint32_t)rl;
+                    }
+                }
+            } else if (got < 0) {
+                /* the first bytes only for FMT (headers); for RFS only the 4-byte link header: never NV data */
+                if (b->bad_rx++ < 5)
+                    sbm_logf(p, "online: +%u ms: ch %u frame not parsed: %u bytes, size word 0x%08x, head %02x %02x %02x %02x"
+                             " %02x %02x %02x %02x", ms, chs[c], n, sbd->last_size_v, f[0], f[1], f[2], f[3],
+                             c < 2 && n > 4 ? f[4] : 0, c < 2 && n > 5 ? f[5] : 0, c < 2 && n > 6 ? f[6] : 0,
+                             c < 2 && n > 7 ? f[7] : 0);
+            }
+        next:
+            sbm_sbd_get_done(sbd, (unsigned)id, SBM_DL, p);
+            if (b->fmt_rx + b->rfs_rx + b->bad_rx >= o_budget) {
+                b->stopped_by = SBM_STOP_FRAMES;
+                g_online_ms = 0xFFFFFFFFu;
+                return 1;
+            }
+        }
+    }
+    /* the guards: a SIM that is not absent, any registration */
+    if (b->cell.have_sim) {
+        b->sim_status = b->cell.sim_status;
+        if (b->cell.sim_status != SBM_SIM_ABSENT && b->cell.sim_status != SBM_SIM_ERROR) {
+            sbm_logf(p, "online: SIM status 0x%02x (not absent): stopping now, as planned", b->cell.sim_status);
+            b->stopped_by = SBM_STOP_SIM;
+            g_online_ms = 0xFFFFFFFFu;
+            return 1;
+        }
+    }
+    if ((b->cell.have_cs && (b->cell.cs.state == SBM_REG_HOME || b->cell.cs.state == SBM_REG_ROAMING)) ||
+        (b->cell.have_ps && (b->cell.ps.state == SBM_REG_HOME || b->cell.ps.state == SBM_REG_ROAMING))) {
+        sbm_logf(p, "online: the CP reports registration: stopping now");
+        b->stopped_by = SBM_STOP_REG;
+        g_online_ms = 0xFFFFFFFFu;
+        return 1;
+    }
+    if (b->fmt_query && ms >= 3000 &&
+        (ms == 3000 || (b->query_period_ms && (ms - 3000) % b->query_period_ms == 0))) {
+        int e = fmt_queries(p, b, sbd, ms, ms == 3000);
+        if (e < 0) {
+            g_online_ms = 0xFFFFFFFFu;
+            online_state(p, "a query could not be sent");
+            return e;
+        }
+    }
+    if (b->query_period_ms && !(ms % 60000)) {
+        char line[160];
+        sbm_cell_line_masked(&b->cell, line, sizeof(line));
+        sbm_logf(p, "SOAK: +%u s: %s | FMT %u RFS %u queries %u answers %u", ms / 1000, line, b->fmt_rx, b->rfs_rx,
+                 b->fmt_tx, b->fmt_resp + b->fmt_gen_res);
+    }
+    return 0;
+}
+
+static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, struct sbm_image *im)
+{
+    int r = online_enter(p, b, sbd, im);
+    if (r < 0)
+        return r;
+    if (b->keep_running == SBM_KEEP_RUNNING)
+        return 0;                            /* the session API takes over (sbm_modem_poll) */
+    const uint32_t limit = b->hold_ms ? b->hold_ms : 20000;
+    for (uint32_t ms = 1; ms <= limit; ++ms) {
+        r = online_poll(p, b, sbd, ms);
+        if (r != 0)
+            return r < 0 ? r : 0;
+        if (!(ms % 1000))
+            feed(p);
+        delay(p, 1000);
+    }
+    b->stopped_by = SBM_STOP_TIME;
+    g_online_ms = 0xFFFFFFFFu;
+    online_state(p, "end");
+    return 0;
+}
+
+/* ---- the session API (Starbite OS): start once, poll from the event loop, stop = park ---------------- */
+
+int sbm_modem_start(struct sbm_modem *m, const struct sbm_plat *p, struct sbm_image *im)
+{
+    sbm_memset(m, 0, sizeof(*m));
+    m->p = p;
+    m->im = im;
+    m->b.stop = SBM_BOOT_ONLINE;
+    m->b.rfs_serve = 1;
+    m->b.keep_running = SBM_KEEP_RUNNING;
+    m->b.hold_ms = 0;
+    int r = sbm_boot_run(p, im, &m->b);
+    m->up = r == 0 && m->b.init_end_sent && !m->b.parked;
+    return m->up ? 0 : (r < 0 ? r : SBM_EIO);
+}
+
+int sbm_modem_poll(struct sbm_modem *m, uint32_t elapsed_ms)
+{
+    if (!m->up)
+        return SBM_EPERM;
+    m->ms += elapsed_ms ? elapsed_ms : 1;
+    int r = online_poll(m->p, &m->b, o_sbd, m->ms);
+    if (r != 0) {                            /* a guard or a crash: park now */
+        sbm_cp_park(m->p);
+        m->up = 0;
+        m->b.parked = 1;
+        return r < 0 ? r : 1;
+    }
+    return 0;
+}
+
+int sbm_modem_query(struct sbm_modem *m)
+{
+    if (!m->up)
+        return SBM_EPERM;
+    return fmt_queries(m->p, &m->b, o_sbd, m->ms, 0);
+}
+
+void sbm_modem_status(const struct sbm_modem *m, char *out, size_t cap)
+{
+    if (!m->up) {
+        sbm_strlcpy(out, m->b.parked ? "modem off (parked)" : "modem off", cap);
+        return;
+    }
+    sbm_cell_line_masked(&m->b.cell, out, cap);
+}
+
+int sbm_modem_stop(struct sbm_modem *m)
+{
+    int r = m->up || m->b.inited ? sbm_cp_park(m->p) : 0;
+    m->up = 0;
+    m->b.parked = r == 0;
+    return r;
+}
+
 /* ---- the whole stage --------------------------------------------------------------------------- */
 
 static int wait_cmd(const struct sbm_plat *p, struct sbm_boot *b, uint32_t want, uint32_t timeout_ms, uint32_t *ms_out,
@@ -283,6 +836,8 @@ int sbm_link_boot(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boo
     }
     b->phone_start = 1;
     sbm_logf(p, "link: PHONE_START after %u ms. Stage 4 stops here: no INIT_END, the CP is parked", b->phone_start_ms);
+    if (b->stop == SBM_BOOT_ONLINE)
+        return online(p, b, &sbd, im);
     if (b->hold_ms)
         return hold(p, b, &sbd);
     return 0;

@@ -13,6 +13,8 @@
 #   TUNE=prefs ...                      only the Accessibility prefs (launchd.plist untouched)
 #   TUNE=launchd-log ...                prefs + launchd.plist with only the PosterBoard log (no job removed);
 #                                       LOG="pkd lsd ..." adds those jobs' logs (LOGDEST=console: into the kernel log)
+#                                       ENABLE="logd ..." drops those jobs' Disabled key (both launchd modes);
+#                                       back off: --undo with the collect folder from before
 #   TUNE=full ... (default)             prefs + PosterBoard log + jobs in starlte-disabled-ios26-b.list out
 #   (T3 2026-11-08 17:06: TUNE=full's launchd.plist ended in "No service cache": bisect with these)
 #   tools/ios26-root-tune.sh --undo DIR re-queue the launchd.plist (+ launchd-disabled.plist if the root had
@@ -56,6 +58,12 @@ mode=${TUNE:-full}
 mkdir -p "$out/tune"
 # every pulled plist the chosen mode reads must parse (a stale host read gives garbage: refuse, no traceback)
 plist_ok() { [ "$1" = - ] || python3 -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$1" 2>/dev/null; }
+# launchd-disabled.plist is only our own keep-file (launchd never reads it): one left corrupt by a pre-0409
+# overlay (new head + old tail, 2026-11-08) is replaced by a fresh one instead of stopping the tune
+if [ "$mode" = full ] && ! plist_ok "$D"; then
+    echo "note: $D does not parse (the pre-0409 truncation bug): a fresh launchd-disabled.plist replaces it"
+    D=-
+fi
 need=("$A"); [ "$mode" = full ] && need+=("$L" "$D"); [ "$mode" = launchd-log ] && need+=("$L")
 for f in "${need[@]}"; do
     plist_ok "$f" || { echo "$f does not parse (stale host read?): refusing; nothing queued"; exit 1; }
@@ -66,9 +74,10 @@ GOOD_LAUNCHD=5d8bc695
 if [ "$mode" != prefs ]; then
     got=$(shasum -a 256 "$L" | cut -c1-8)
     # known good: Apple's original as edited before today (5d8bc695) or a launchd.plist one of our tunes wrote
-    # (only TUNE=launchd-log ones: T3's full tune of 2026-11-08 17:06 made launchd panic)
+    # (tunes whose report says TUNE=launchd-log or TUNE=full: T3's of 2026-11-08 17:06, which panicked through the
+    # pre-0409 truncation bug, predates that line and stays out)
     good=$( { echo $GOOD_LAUNCHD; for t in build/test-boots/*-ios26collect/tune/launchd.plist; do
-        [ -f "$t" ] && grep -qx "TUNE=launchd-log" "$(dirname "$t")/report.txt" 2>/dev/null && shasum -a 256 "$t" | cut -c1-8; done; } | sort -u)
+        [ -f "$t" ] && grep -qxE "TUNE=(launchd-log|full)" "$(dirname "$t")/report.txt" 2>/dev/null && shasum -a 256 "$t" | cut -c1-8; done; } | sort -u)
     echo "$good" | grep -qx "$got" || { echo "pulled launchd.plist is $got, not a known-good one (stale read?): refusing to edit it"; exit 1; }
 fi
 files=()
@@ -80,10 +89,12 @@ launchd-log)
         # 2026-11-09 T12: with this edit launchd never started lsd (no UI); pkd was edited in the same run
         case "$n" in lsd|pkd) echo "LOG=$n: refused (T12: lsd never started with its log mirrored)"; exit 1 ;; esac
         logs+=(--log "$n"); done
+    for n in ${ENABLE:-}; do logs+=(--enable "$n"); done
     python3 tools/ios26-launchd-tune.py "$L" - "$out/tune" "${logs[@]}"
     files+=("$out/tune/launchd.plist=/System/Library/xpc/launchd.plist:644") ;;
 full)
     logs=(--log PosterBoard); for n in ${LOG:-}; do logs+=(--log "$n"); done
+    for n in ${ENABLE:-}; do logs+=(--enable "$n"); done
     python3 tools/ios26-launchd-tune.py "$L" "$D" "$out/tune" --off-list tools/starlte-disabled-ios26-b.list "${logs[@]}"
     files+=("$out/tune/launchd.plist=/System/Library/xpc/launchd.plist:644"
             "$out/tune/launchd-disabled.plist=/System/Library/xpc/launchd-disabled.plist:644") ;;

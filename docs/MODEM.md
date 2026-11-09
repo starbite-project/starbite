@@ -405,6 +405,168 @@ RAM only), FMT receive-only with sbm_cell decoding (no request sent unless R2 re
 Safety additions: never any SMS/CALL/SS (the builder's allow-list); RFS writes only to RAM; a crash command or the
 CP's watchdog interrupt parks at once; first run attended.
 
+### 7.1 Stage 5a as built: T9 `modemlink-online` (receive only)
+After PHONE_START: the ECT clock table, INIT_END (the only new command), then for `modem_hold` seconds (default
+20), receive only. FMT0/FMT1/RFS0 DL rings are drained; the other rings are left alone. FMT messages go through
+`sbm_cell` and `sbm_frame_line` (identity payloads never shown). RFS messages are logged by their header
+(`u32 length; u8 index; u8 id`) and `offset/length` only; an NV write's data is never shown. Nothing is sent: no
+FMT request, no RFS answer. It stops (and parks) at once if the CP reports a SIM that is not absent, any
+registration (home/roaming), or a crash command; otherwise after the time or 200 frames. Host-tested with the fake
+CP: no SIM (6 FMT, 3 RFS, stops on time, clock table first, INIT_END last, a write's data never in a log), a SIM
+present (stops within ms), a crash (parks).
+The full path from here to a voice call, with which experiments need One UI, is in the shared notes:
+`modem-voice-plan.md`.
+
+### Result T9 (2026-11-09 15:58, 1822faa, `build/modem/t9-online-1/pmsg.txt`)
+Stage 4 as before (INIT_START 1056 ms, PHONE_START 0 ms). After the clock table and INIT_END, the CP sent one more
+PHONE_START (0xC8) and then **CRASH_EXIT (0xC9)**, with no FMT or RFS frame. Parked, the phone was fine (clean
+restart). **Cause:** Android's `cmd_phone_start_handler` first runs `shmem_reset_ipc_link`: access 0, magic 0, the
+legacy queue words 0, then **magic 0xAA (IPC) and access 1**, read back. The CP only treats the link as up with both
+set. INIT_END follows about 140 ms later (this phone's log: PHONE_START 20.4877, INIT_END 20.6311). We sent
+INIT_END with the magic still "BOOT". **T9b** does the reset, waits 100 ms, then the clock table and INIT_END,
+and logs ms-since-INIT_END on every online line plus magic, access, ISSR1/3 and INTSR0 at INIT_END and at the
+stop. The fake CP now crashes the same way when the reset is missing.
+
+### Result T9b (2026-11-09, 8354e3b, `build/modem/t9b-online-1/pmsg.txt`)
+**The link reset fixed the crash.** At INIT_END: magic 0xaa, access 1, cp_status 1. The CP stayed online the full
+20 s, was parked, and restarted cleanly. It sent one more PHONE_START and data doorbells (0x0083) at +1170 to
++1415 ms, but all **78 frames counted as bad**. Cause: Android's `recv_data` takes the length as `size_v & 0xFFFF`
+on **every** channel, and the CP puts the channel in the high half of FMT/RFS entries too. Ours masked only PS
+channels, so every FMT/RFS entry looked longer than its buffer. **T9c** masks it on every channel. The fake CP now
+packs the channel the same way. A refused entry logs its size word, and an unparsed frame its first 12 bytes; RFS
+open requests show their flags and path.
+
+### Result T9c (2026-11-09, 0f97603, `build/modem/t9c-online-1/pmsg.txt`)
+**First real traffic from our own link.** FMT 21 frames on ch 235 and 236: PWR_PHONE_PWR_UP (53), 0x1305, 0x0d0f,
+0x2601 INDI, SEC_SIM_ICC_TYPE 00, SEC_PIN_STATUS 80 00 (SIM absent), PWR_PHONE_STATE 02, 0x0827. RFS: first an
+**open of `CP_OMC_AUDIO_SLSI.bin`** (flags 0), then an **NV write of 0x15e42 bytes at 0x80000** (an 89,680-byte
+message). That message spans many 2048-byte DL buffers: the first carries the SIPC5 header with the whole length,
+the rest are raw continuation (Android's `check_more`). Ours took the continuation for new messages (53 "other"),
+**and the generic RFS logger printed 8 bytes of NV data from each of them** into pmsg (local, git-ignored file).
+That breaks the rule; T10's logger prints header fields only.
+
+### 7.3 T10 `modemlink-rfs`: RFS served from RAM
+T9c plus:
+- **big DL frames joined** (check_more; up to 640 KB for RFS, 64 KB for FMT);
+- **RFS answered** by `sbm_rfs.c` from the RAM copy of nv_data.bin. NV read returns data; NV write lands in RAM only.
+  Open answers "no such file" (handle -1, errno 2): Android also has no `CP_OMC_AUDIO_SLSI.bin` in
+  /mnt/vendor/efs. Other file operations are counted and not answered;
+- **replies sent Android's way**: one SIPC5 frame if it fits 2048 bytes, else multi-frame fragments (0xFB, `{id,
+  more}`, 2043 payload bytes each, as `misc_write` with max_tx_size = 2048 does), each with the data doorbell 0x81,
+  waiting for ring space;
+- **RFS log lines** show header fields only (idx, id, length; NV offset/length; open path), never body bytes.
+Host: the fake CP sends the open, a 6000-byte NV write over three buffers and an NV read, then checks our three
+replies from the UL ring (ENOENT; write confirmed; read data correct in 3 fragments). The RAM copy holds the
+write, and no NV byte appears in a log.
+
+### Result T10 (2026-11-09, 27231dc, `build/modem/t10-rfs-1/pmsg.txt`)
+Online 30 s, parked, no crash, no body bytes in the log. The open of CP_OMC_AUDIO_SLSI.bin was answered (errno 2,
++1169 ms), then the CP sent **close (0x06)** and the 89,680-byte NV write. "big frames 0": the write did **not**
+come as check_more continuation. Every 2048-byte buffer carried its own ordinary SIPC5 frame (2040 payload
+bytes), and the **RFS layer** joins them by the RFS header's u32 length. libsec-ril's `Nv::ProcessRfsPacket`
+does exactly that: a pending message, at most 0x80000, appended until complete. **T10b** joins at the RFS layer
+(`rfs_join`) and answers close (result -1, errno EBADF: `ProcessCloseFile`'s 14-byte reply; we never hand out a
+handle). The fake CP now splits long RFS messages the same way.
+
+### Result T10b (2026-11-09, 588e003, `build/modem/t10b-rfs-1/pmsg.txt`)
+**The CP is online and settled with our RFS server.** 9 replies, 3 long messages joined from 99 pieces, no crash,
+SIM absent. Sequence:
+- open CP_OMC_AUDIO_SLSI.bin -> ENOENT, close -> EBADF; the same for CP_AUDIO_SLSI.bin;
+- NV write 0x15e42 at 0x80000 and 0x4ff4 at 0 -> confirmed (RAM), +3857 ms;
+- +17821 ms open FLL.bin -> ENOENT; the 0x80000 NV write again; open (flags 0x42, create) err/csdiag_rf_Mipi.dat ->
+  ENOENT.
+None of these files is in EFS's root. The CP's diagnostics create fails harmlessly instead of storing anything.
+
+### 7.4 T11 `modemlink-query`: the first AP -> CP requests
+T10b plus the 11 status GETs of the builder's allow-list (power state, SIM status and card type, CS/PS
+registration, serving network, PLMN selection, icon/RSSI, mode, time), sent once 3 s after INIT_END on FMT0 with the
+data doorbell. 60 s window. No SET or EXEC (T11 showed the receiver camps anyway: see its result); no CALL/SMS/SS/SAT/identity request
+(the allow-list refuses them before a frame exists). Answers (RESP / GEN_PHONE_RES) are counted and decoded.
+
+### Result T11 (2026-11-09 17:50, 436cbf9, `build/modem/t11-query-1/pmsg.txt`)
+**The first AP -> CP requests work.** 11 GETs sent at +3000 ms, all answered at +3001 ms: 9 RESP, plus 2
+GEN_PHONE_RES errors (SEC_SIM_ICC_TYPE code 0x000a; MISC_TIME_INFO code 0x8001). The decoded state is SIM absent,
+CS emergency-only (GSM), PS not registered, a PLMN and 4 bars; PWR_PHONE_STATE 02, PLMN_SEL 02 (automatic). The
+PLMN identifies the user's country and operator, so it stays in the local pmsg only, never in git.
+**Correction: the CP camps without PWR_PHONE_STATE NORMAL.** Its receiver scans and camps on a cell in the default
+state; PHONE_STATE 02 is probably "normal/online". With no SIM that is receive-only "limited service", as in
+Android with no SIM ("emergency calls only"). Location updating, GPRS attach and LTE attach all need the SIM's IMSI
+and keys, so the CP cannot register. The only transmission allowed in limited service is an emergency call, which
+our builder refuses before a frame exists. The logs cannot prove zero RF output, but nothing in them shows a
+registration attempt. Once a SIM is in, the CP will try to register by itself as soon as it is online, so **from
+then on every online run counts as a transmitting run** (user present, the user's SIM).
+
+### 7.2 Facts from One UI's vendor binaries (2026-11-09; read offline, binaries kept out of git)
+VENDOR was copied read-only in TWRP and extracted in the VM (EROFS). From `lib64/libsec-ril.so` (stripped, but its
+C++ dynamic symbols remain), `etc/mixer_paths.xml` and `firmware/calliope_*.bin`:
+- **RFS** (Nv::ProcessRfsMessage): header `u32 length; u8 index; u8 id`, a 23-way dispatch on the index:
+  0x01 NV read, 0x02 NV write, 0x03 read file, 0x04 write file, 0x05 lseek, 0x06 close, 0x07 put file,
+  0x08 get file, 0x09 rename, 0x0a file info, 0x0b delete, 0x0c make dir, 0x11 open, 0x13 info by handle,
+  0x14 create, 0x15 NV write all, 0x17 NV restore (the rest are refused). NV read: request `offset@6, length@10`
+  (at most 0x80000); reply `u8 confirm, u32 offset, u32 n` + data (15-byte header, id echoed). NV write: request
+  `offset, length, data`; reply 15 bytes. Open: `u32 flags@6, u32 path_len@10 (<= 1023), path@14`, relative to the
+  RFS directory. Android writes nv_data.bin, fsyncs, updates nv_data.bin.md5 and a backup. **Ours writes only to
+  RAM** (`sbm_rfs.c`, host-tested).
+- **Radio power** (IpcProtocol41Power::IpcTxRadioPower): `PWR_PHONE_STATE (0x0107) EXEC`, u16 data `0x0001` low
+  power mode (RF off) / `0x0202` normal (RF on). Modem power-off: `PWR 0x0102 EXEC`. RIL's RadioPowerUpHandler
+  sends NORMAL at boot. **Corrected by T11:** without that request the CP still scans and camps (receive). The
+  inference "it stays in low power mode until asked" was wrong.
+- **Call** (IpcProtocol41Call): OUTGOING `0x0201 EXEC`, 99 bytes: u16 call-type code, CLIR, number length (<= 82),
+  prefix (0x11 if the number starts with '+', else 0x21), the number. Also Answer, Release, Hold, DTMF,
+  GetCallList, and an emergency-status call that we never build.
+- **Sound** (IpcProtocol41Sound): AUDIO_PATH `0x0903 SET` (2 bytes), SPKR_VOLUME `0x0901 SET` (2 bytes),
+  CLOCK_CTRL `0x0909` (1 byte), mute, WB-AMR, ringback.
+- **Call audio**: the VSS (voice) task runs **inside ABOX's Calliope firmware** ("VSS_init_proc", "SET CALLPATH").
+  The audio HAL's in-call handset route is `ABOX UAIF1 SPK = SIFS0`, `ABOX RSRC0 = SIFS0`, `ABOX RECP PIFS0 = 1`,
+  `ABOX Sound Type = VOICE`, plus the amp's one-stop mode "Receiver Left/Right". **The earpiece is the MAX98512's
+  receiver mode, fed from UAIF1**, not the codec's HPOUT3. Path: CP <-> ABOX (Calliope + VSS) <-> UAIF1 <->
+  amp / codec.
+
+### 7.5 Overnight 2026-11-09/10: a soak, SMS and the dial policy (host-only)
+- **Soak** (`modemlink-soak`, 2e82690): T11's queries every 10 s for 10 min, and a PLMN-masked status line every
+  60 s (`sbm_cell_line_masked`; every ONLINE line now masks the PLMN).
+- **Dial / send policy** (`sbm_policy.c`): a number passes only if it is on the user's allow-list digit for digit,
+  has at least 7 digits, and is not an emergency number. The emergency check covers a world list, the SIM's and the
+  network's lists, and any of those behind +CC / 00CC. No switch disables it.
+- **SMS** (`sbm_sms.c`): TP-DELIVER decode (GSM 7-bit with the default and extension tables, UCS-2 with surrogates,
+  8-bit by length, concatenation headers with their fill bits), the incoming IPC 0x0402 layout read from
+  libsec-ril (data[0] 2 = GSM, data[5] = length, SMSC, PDU), and TP-SUBMIT encode, which calls the policy first.
+- **Not built, on purpose:** the IPC send frame (0x0401 EXEC: data `{a, b, f(c), pdu_len}` + PDU; the meaning and
+  values of the first three bytes are unconfirmed) and any call frame. They wait for the SIM day, with the user
+  present and a real capture (O3/O4) to confirm them. Nothing in this core can send or dial.
+
+### 7.6 The session API for Starbite OS (`sbm_modem_*`)
+The online stage is now two functions: `online_enter` (link reset, clock table, INIT_END) and `online_poll` (one pass:
+mailbox, rings, RFS, guards, queries). The test images run them in a timed loop as before. Starbite OS gets:
+- `sbm_modem_start(m, plat, image)`: load, EL3, start, link, online with the RFS server. About 2 s, blocking; the CP
+  stays up (`keep_running`).
+- `sbm_modem_poll(m, elapsed_ms)`: non-blocking, from the event loop. A guard (a SIM that is not absent, a
+  registration) or a crash command parks the CP and returns 1 / an error.
+- `sbm_modem_query`, `sbm_modem_status` (the masked line for a status screen), `sbm_modem_stop` (park).
+The platform glue for Starbite OS is `sb/sbm_sb.c` (as for the test images), and the reset hook must park. Host
+tests cover a 2 s loop, a query, the masked status, stop/park, and a SIM appearing (the guard parks from poll). The
+phone demo is key `modemsess`: a 1 ms loop for 2 minutes, queries every 10 s, the masked status line on the screen.
+
+**Soak run 1 (2026-11-09, 2ecf7cd, `build/modem/soak-1/pmsg.txt`): returned unparked after INIT_END.** `stage3()` in
+the probe never zeroed its `struct sbm_boot`. The new `keep_running` input was stack garbage (non-zero), so
+`sbm_boot_run` took the session path. It returned "online (session: running, not parked)" with zero traffic, and
+the image went to its end. The reset hook still parked the CP before the reboot (`CENTRAL_SEQ_CP_STATUS 0x80`), and
+One UI's modem was not affected. Fixed in three places:
+- the core keeps the CP only for `keep_running == SBM_KEEP_RUNNING` ("KEEP"); any other value parks;
+- `stage3()` zeroes the struct;
+- `stage3()` parks the CP itself whenever `sbm_boot_run` returns with it unparked, without waiting for the reset hook.
+A host test runs ONLINE with garbage-filled structs and four non-magic values, and every case must park. The host
+test's own `struct sbm_boot` had the same flaw, which made its check count depend on the build. It is now zeroed.
+
+**Soak run 2 (2026-11-10, 95e079a, `build/modem/soak-2/pmsg.txt`): passed.** It ran 651 s, parked, FMT 689, RFS 9,
+bad 0, with a steady SIM absent / CS emergency-only (GSM) / bars 4 / rssi 0x3d-0x3f. Answers seemed to fall behind
+from +180 s (660 sent, 529 counted), but FMT receive rose by exactly 66 a minute the whole time: the CP answered
+everything, and our counter missed the answers. The query seq was a u8 from 0x40 and wrapped through 0x00..0x40,
+while answers counted only for aseq > 0x40. That is 65 of every 256, so 130 uncounted (one more unexplained). Fixed:
+query seqs cycle 0x41..0xFE, each answer is matched to a bitmap of open queries, and the ONLINE line now gives
+unanswered / stale (a seq reused while still open) / unmatched counts. A host test runs a 590 s soak (649 GETs, three
+wraps) and needs every answer matched.
+
 ## 8. Later stages (not started)
 
 

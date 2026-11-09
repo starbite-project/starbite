@@ -152,7 +152,7 @@ static const char *launched_key(char key[24])
             for (; i < 23 && blk[48 + i]; i++)
                 key[i] = (char)blk[48 + i];
             key[i] = 0;
-            if (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink"))
+            if (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_streq(key, "modemsess"))
                 return "the loader's launch record";
         }
     }
@@ -177,7 +177,7 @@ static const char *launched_key(char key[24])
                     at++;
                 }
                 key[i] = 0;
-                found = i > 0 && (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink"));
+                found = i > 0 && (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_streq(key, "modemsess"));
             }
         }
         if (found)
@@ -274,24 +274,92 @@ static void park_hook(void)
     sbm_cp_park(&park_plat);
 }
 
+/* modemsess: the session API as Starbite OS would use it: start, a 1 ms event loop for modem_hold seconds (default
+ * 120), the status GETs every 10 s, the masked status line on the screen every second and in pmsg every 10 s, then
+ * stop (park). The guards inside poll park the CP on a SIM or a registration. */
+static void session(void)
+{
+    static struct sbm_image im;
+    static struct sbm_modem mo;
+    char s[COLS], st[COLS];
+    unsigned secs = arg("modem_hold", 120);
+    if (secs > 600)
+        secs = 600;
+    sb_storage_hold("modem session: no storage writes");
+    sbm_fmt(s, sizeof(s), "modemsess: session API demo, %u s; watchdog %u s", secs, sb_wdt_arm(30));
+    line(s);
+    sbm_sb_plat(&park_plat, plog);
+    if (sbm_sb_load_image(&im, line) < 0) {
+        line("modemsess: loading RADIO / EFS failed");
+        return;
+    }
+    sbm_sb_plat_stage4(&park_plat, im.mm.ipc_off);
+    park_armed = 1;
+    sb_before_reset = park_hook;
+    int r = sbm_modem_start(&mo, &park_plat, &im);
+    sbm_fmt(s, sizeof(s), "modemsess: start: %s", r == 0 ? "online" : sbm_strerror(r));
+    line(s);
+    uint64_t t0 = sb_ms(), last_draw = 0, last_q = 0;
+    while (mo.up && sb_ms() - t0 < secs * 1000ULL) {
+        r = sbm_modem_poll(&mo, 1);
+        if (r != 0) {
+            sbm_fmt(s, sizeof(s), "modemsess: poll stopped: %s (parked)", r < 0 ? sbm_strerror(r) : "a guard");
+            line(s);
+            break;
+        }
+        uint64_t now = sb_ms() - t0;
+        if (now >= 3000 && now - last_q >= 10000) {
+            last_q = now;
+            sbm_modem_query(&mo);
+            sbm_modem_status(&mo, st, sizeof(st));
+            sbm_fmt(s, sizeof(s), "SESSION: +%u s: %s", (unsigned)(now / 1000), st);
+            line(s);
+        }
+        if (now - last_draw >= 1000) {
+            last_draw = now;
+            sbm_modem_status(&mo, st, sizeof(st));
+            draw(st);
+            sb_wdt_feed(0);
+        }
+        sb_udelay(1000);
+    }
+    sbm_modem_status(&mo, st, sizeof(st));
+    sbm_fmt(s, sizeof(s), "SESSION: end: %s | FMT %u RFS %u queries %u answers %u", st, mo.b.fmt_rx, mo.b.rfs_rx,
+            mo.b.fmt_tx, mo.b.fmt_resp + mo.b.fmt_gen_res);
+    line(s);
+    sbm_modem_stop(&mo);
+    park_armed = 0;
+    line(mo.b.parked ? "modemsess: parked" : "modemsess: the park reported an error");
+}
+
 static void stage3(const char *key)
 {
     static struct sbm_image im;
     struct sbm_boot b;
     struct sbm_probe pr;
     char s[COLS];
-    enum sbm_boot_stop stop = sb_prefix(key, "modemlink") ? SBM_BOOT_LINK
+    int soak = sb_streq(key, "modemlink-soak");
+    int query = sb_streq(key, "modemlink-query") || soak;
+    int serve = sb_streq(key, "modemlink-rfs") || query;
+    enum sbm_boot_stop stop = sb_streq(key, "modemlink-online") || serve ? SBM_BOOT_ONLINE
+                            : sb_prefix(key, "modemlink") ? SBM_BOOT_LINK
                             : sb_streq(key, "modemload-run") ? SBM_BOOT_RUN
                             : sb_streq(key, "modemload-sec") ? SBM_BOOT_SEC : SBM_BOOT_DRY;
 
+    sbm_memset(&b, 0, sizeof(b));           /* 2ecf7cd left it unset: keep_running garbage, soak returned unparked */
     sb_storage_hold("modem test: no storage writes");
     sbm_fmt(s, sizeof(s), "modemload: %s; storage writes held; watchdog %u s (own: armed or fed here)",
-            stop == SBM_BOOT_LINK ? "LINK: stage 3, then DL_START, UDL, INIT_START, PIF_INIT_DONE, PHONE_START, park"
+            soak ? "SOAK: INIT_END, RFS from RAM, the 11 status GETs every 10 s, 10 min (no SIM: receive only), park"
+            : query ? "ONLINE+RFS+QUERY: INIT_END, RFS from RAM, 11 status GETs (allow-listed, no SET), 60 s, park"
+            : serve ? "ONLINE+RFS: stage 4, INIT_END, RFS answered from a RAM copy of nv_data.bin (FMT receive only), park"
+            : stop == SBM_BOOT_ONLINE ? "ONLINE: stage 4, then INIT_END and 20 s receive only (no SIM allowed), park"
+            : stop == SBM_BOOT_LINK ? "LINK: stage 3, then DL_START, UDL, INIT_START, PIF_INIT_DONE, PHONE_START, park"
             : stop == SBM_BOOT_RUN ? "RUN: load, EL3 check, start the CP, first status, park"
             : stop == SBM_BOOT_SEC ? "SEC: load, EL3 check, park (the CP CPU is not started)" : "DRY: RAM only",
             sb_wdt_arm(30));
     line(s);
-    line(stop == SBM_BOOT_LINK ? "modemlink: link commands only, never INIT_END: the CP never goes online (no RIL, network, SIM or call)"
+    line(stop == SBM_BOOT_ONLINE ? "modemlink: INIT_END, then receive only: no request, no RFS answer; stops on a SIM, a registration or a crash"
+         : stop == SBM_BOOT_LINK ? "modemlink: link commands only, never INIT_END: the CP never goes online (no RIL, network, SIM or call)"
                                : "modemload: no IPC is sent: no network search, no attach, no SIM use, no call of any kind");
     sbm_sb_plat(&park_plat, plog);
     sbm_probe_run(&park_plat, SBM_PROBE_REGS, &pr);
@@ -303,7 +371,7 @@ static void stage3(const char *key)
         return;
     }
     if (stop >= SBM_BOOT_SEC) {
-        if (stop == SBM_BOOT_LINK)
+        if (stop >= SBM_BOOT_LINK)
             sbm_sb_plat_stage4(&park_plat, im.mm.ipc_off);
         else
             sbm_sb_plat_stage3(&park_plat);
@@ -311,8 +379,17 @@ static void stage3(const char *key)
         sb_before_reset = park_hook;
     }
     b.stop = stop;
-    b.hold_ms = sb_streq(key, "modemlink-hold") ? 1000u * arg("modem_hold", 20) : 0;
+    b.hold_ms = sb_streq(key, "modemlink-hold") || stop == SBM_BOOT_ONLINE ? 1000u * arg("modem_hold", 20) : 0;
+    b.rfs_serve = serve;
+    b.fmt_query = query;
+    if (query && !arg("modem_hold", 0))
+        b.hold_ms = soak ? 600000 : 60000;
+    b.query_period_ms = soak ? 10000 : 0;
     sbm_boot_run(&park_plat, &im, &b);
+    if (b.inited && !b.parked) {         /* stage 3 never keeps the CP: park here, not only in the reset hook */
+        line("modemload: the CP came back not parked: parking it now");
+        b.parked = sbm_cp_park(&park_plat) == 0;
+    }
     park_armed = b.inited && !b.parked;  /* the core parked already; the hook only retries a failed park */
     sbm_boot_report(&park_plat, &b);
     line("modemload: after:");
@@ -353,7 +430,7 @@ void sb_main(void)
         step = 1;
     autostart = arg("modem_auto", 0);
     ret = arg("modem_return", autostart ? 30 : 0);
-    is_load = sb_prefix(key, "modemload") || sb_prefix(key, "modemlink");
+    is_load = sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_streq(key, "modemsess");
     if (is_load) {
         line("modemload: stage 3 test (docs/MODEM.md 6). RADIO and EFS are only read; every partition write is held.");
         line("modemload: -sec / -run start the CP's power sequence through EL3 and always end with the CP parked.");
@@ -370,6 +447,10 @@ void sb_main(void)
         }
     }
     selftest();
+    if (sb_streq(key, "modemsess")) {
+        session();
+        goto end;
+    }
     if (is_load) {
         stage3(key);
         goto end;

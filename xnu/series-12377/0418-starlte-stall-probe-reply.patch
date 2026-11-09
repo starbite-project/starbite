@@ -1,0 +1,117 @@
+From 29f32633891b49fa84d3cc9e1ad292ad42ea1386 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Mon, 9 Nov 2026 23:28:28 +0200
+Subject: [PATCH] patch: 0418-starlte-stall-probe-reply.patch - the stall probe
+ names the service a thread waits on for a reply when its request still sits
+ in the destination port (receiver process and launchd service name)
+
+---
+ osfmk/kern/kern_stackshot.c | 70 +++++++++++++++++++++++++++++++++++--
+ 1 file changed, 67 insertions(+), 3 deletions(-)
+
+diff --git a/osfmk/kern/kern_stackshot.c b/osfmk/kern/kern_stackshot.c
+index 426da661..3a74bbcf 100644
+--- a/osfmk/kern/kern_stackshot.c
++++ b/osfmk/kern/kern_stackshot.c
+@@ -6562,14 +6562,65 @@ st_stall_vm_wait(unsigned h)
+ }
+ extern kern_return_t vnode_pager_get_object_name(memory_object_t, char *, vm_size_t, char *, vm_size_t, boolean_t *);
+ extern int starlte_workq_pid(void *wq);         /* bsd/pthread/pthread_workqueue.c */
++#include <ipc/ipc_port.h>
++#include <ipc/ipc_space.h>
++#include <ipc/ipc_service_port.h>
++/*
++ * 0418: a thread waiting for a reply on a special reply port that is still linked to the destination port
++ * (the request is queued there, nobody has received it): the destination's receiver and launchd service name,
++ * "reply from com.apple.xyz (launchd[1])". T25: PosterBoard's main thread had waited 133 s like that.
++ */
+ #define ST_STALL_MAX 192
+ enum { ST_CH_NONE, ST_CH_THREAD, ST_CH_WORKQ, ST_CH_BUSY, ST_CH_OTHER, ST_CH_DEEP };
+ static struct st_stall_rec {
+ 	uint64_t tid, event, raw_event, blocked_ms, inh_tid;
+ 	int pid, inh_pid;
+-	uint8_t state, hint, main, chain, hops;
++	uint8_t state, hint, main, chain, hops, reply;
++	int svc_pid;
+ 	char name[20];
++	char svc[48];
+ } st_stall_recs[ST_STALL_MAX];
++enum { ST_RP_NONE, ST_RP_LINKED, ST_RP_OTHER_LINK, ST_RP_BUSY, ST_RP_NOT_SPECIAL };
++
++/* thread locked, at splsched, waiting on a port's waitq */
++static void
++st_stall_reply(thread_t thread, struct st_stall_rec *r)
++{
++	waitq_t wq = thread->waitq;
++	if (waitq_is_null(wq) || waitq_type(wq) != WQT_PORT) {
++		return;
++	}
++	ipc_port_t port = ip_from_waitq(wq.wq_q);
++	if (!waitq_lock_try(wq)) {
++		r->reply = ST_RP_BUSY;
++		return;
++	}
++	if (!ip_is_special_reply_port(port)) {
++		r->reply = ST_RP_NOT_SPECIAL;
++	} else if (port->ip_sync_link_state != PORT_SYNC_LINK_PORT || port->ip_sync_inheritor_port == IP_NULL) {
++		r->reply = ST_RP_OTHER_LINK;
++		r->svc_pid = port->ip_sync_link_state;
++	} else {
++		ipc_port_t dst = port->ip_sync_inheritor_port;
++		r->reply = ST_RP_BUSY;
++		if (waitq_lock_try(io_waitq(ip_to_object(dst)))) {
++			r->reply = ST_RP_LINKED;
++			r->svc_pid = -1;
++			if (ip_active(dst) && ip_in_a_space(dst) && dst->ip_receiver != IS_NULL &&
++			    dst->ip_receiver->is_task != TASK_NULL) {
++				r->svc_pid = pid_from_task(dst->ip_receiver->is_task);
++			}
++			if (ip_is_any_service_port(dst)) {
++				ipc_object_label_t label = __io_label_validate(ip_to_object(dst), *ip_to_object(dst), false);
++				if (label.iol_service != NULL && label.iol_service->ispl_service_name != NULL) {
++					strlcpy(r->svc, label.iol_service->ispl_service_name, sizeof(r->svc));
++				}
++			}
++			waitq_unlock(io_waitq(ip_to_object(dst)));
++		}
++	}
++	waitq_unlock(wq);
++}
+ 
+ static const char *
+ st_hint_name(unsigned h)
+@@ -6723,6 +6774,9 @@ starlte_stall_dump(uint64_t input_abs, uint64_t present_abs)
+ 				r->event = VM_KERNEL_UNSLIDE_OR_PERM(thread->wait_event);
+ 				r->raw_event = (uint64_t)thread->wait_event;
+ 				st_stall_chain(thread, r);
++				if (r->hint == kThreadWaitPortReceive) {
++					st_stall_reply(thread, r);
++				}
+ 			}
+ 			r->tid = thread_tid(thread);
+ 			thread_unlock(thread);
+@@ -6775,9 +6829,19 @@ starlte_stall_dump(uint64_t input_abs, uint64_t present_abs)
+ 		default:
+ 			break;
+ 		}
+-		printf("STARLTE STALL: %s[%d] tid %llu%s %s %s %llu ms ev %#llx%s\n", r->name, r->pid, r->tid,
++		char rp[96] = "";
++		if (r->reply == ST_RP_LINKED) {
++			char w2[40];
++			st_stall_name(r->svc_pid, w2, sizeof(w2));
++			snprintf(rp, sizeof(rp), " reply from %s (%s)", r->svc[0] ? r->svc : "unnamed port", w2);
++		} else if (r->reply == ST_RP_OTHER_LINK) {
++			snprintf(rp, sizeof(rp), " reply port link %d", r->svc_pid);
++		} else if (r->reply == ST_RP_BUSY) {
++			snprintf(rp, sizeof(rp), " reply port locked");
++		}
++		printf("STARLTE STALL: %s[%d] tid %llu%s %s %s %llu ms ev %#llx%s%s\n", r->name, r->pid, r->tid,
+ 		    r->main ? " main" : "", (r->state & TH_RUN) ? "R" : (r->state & TH_WAIT) ? "W" : "-",
+-		    (r->state & TH_WAIT) ? st_hint_name(r->hint) : "", r->blocked_ms, r->event, who);
++		    (r->state & TH_WAIT) ? st_hint_name(r->hint) : "", r->blocked_ms, r->event, who, rp);
+ 		if ((r->state & TH_WAIT) && r->hint == kThreadWaitPageBusy && r->blocked_ms > 5000 && r->raw_event) {
+ 			st_stall_page((vm_page_t)r->raw_event);
+ 		}
+-- 
+2.53.0
+

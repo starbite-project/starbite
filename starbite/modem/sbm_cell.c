@@ -218,6 +218,30 @@ void sbm_cell_line(const struct sbm_cell_state *st, char *out, size_t cap)
     sbm_fmt(out, cap, "%s | %s | %s | %s | %s", sim, cs, ps, plmn, bars);
 }
 
+void sbm_cell_line_masked(const struct sbm_cell_state *st, char *out, size_t cap)
+{
+    struct sbm_cell_state m = *st;
+    char line[160], rssi[16];
+    m.have_plmn = 0;
+    sbm_cell_line(&m, line, sizeof(line));
+    if (st->have_rssi)
+        sbm_fmt(rssi, sizeof(rssi), " | rssi 0x%02x", st->rssi_raw[0]);
+    else
+        rssi[0] = 0;
+    /* "PLMN -" from the copy: say whether one is known without saying which */
+    char *p = line;
+    for (; *p; ++p)
+        if (p[0] == 'P' && p[1] == 'L' && p[2] == 'M' && p[3] == 'N' && p[4] == ' ' && p[5] == '-')
+            break;
+    if (*p && st->have_plmn) {
+        size_t o = (size_t)(p - line);
+        line[o] = 0;
+        sbm_fmt(out, cap, "%sPLMN set%s%s", line, p + 6, rssi);
+        return;
+    }
+    sbm_fmt(out, cap, "%s%s", line, rssi);
+}
+
 /* ---- redaction ------------------------------------------------------------------------------- */
 
 static int is_dec(char c) { return c >= '0' && c <= '9'; }

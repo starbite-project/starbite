@@ -404,6 +404,17 @@ static void test_sbd_rings(void)
     CHECKEQ(sbm_sbd_get(&ap, (unsigned)pid, SBM_DL, &f, 0), 1500);
     sbm_sbd_get_done(&ap, (unsigned)pid, SBM_DL, 0);
 
+    /* the CP puts the channel in the high half of FMT entries too (T9b): the length is the low 16 bits */
+    CHECKEQ(sbm_sbd_put(&cp, SBM_CH_FMT1, SBM_DL, fr, 77, 0), 0);
+    {
+        int fid = sbm_sbd_id(&ap, SBM_CH_FMT1);
+        uint16_t frp = sbm_sbd_rp(&ap, (unsigned)fid, SBM_DL);
+        sbm_put32(ipc + ap.r[fid][SBM_DL].size_v_off + 4 * frp, (SBM_CH_FMT1 << 16) | 77);
+        CHECKEQ(sbm_sbd_get(&ap, (unsigned)fid, SBM_DL, &f, 0), 77);
+        CHECKEQ(ap.last_size_v, (SBM_CH_FMT1 << 16) | 77);
+        sbm_sbd_get_done(&ap, (unsigned)fid, SBM_DL, 0);
+    }
+
     /* a CP that writes nonsense: an index past the ring, a size past the buffer */
     int did = sbm_sbd_id(&ap, SBM_CH_FMT1);
     uint32_t wp_off = ap.rbps_off + 2 * (ap.n * 3 + (unsigned)did);
@@ -695,6 +706,23 @@ static void test_cell_and_redact(void)
     CHECKEQ(sbm_cell_update(&st, &m), 0);
     CHECKEQ(st.n_bad, 2);
     CHECK(!strcmp(sbm_sim_name(SBM_SIM_ABSENT), "absent"));
+
+    /* the masked status line never shows the PLMN */
+    {
+        struct sbm_cell_state cs;
+        char ln[200];
+        sbm_cell_init(&cs);
+        cs.have_sim = 1; cs.sim_status = SBM_SIM_ABSENT;
+        cs.have_plmn = 1; strcpy(cs.plmn, "00101");
+        cs.have_bars = 1; cs.bars = 4;
+        cs.have_rssi = 1; cs.rssi_raw[0] = 0x53;
+        sbm_cell_line_masked(&cs, ln, sizeof(ln));
+        CHECK(!strcmp(ln, "SIM absent | CS ? | PS ? | PLMN set | bars 4 | rssi 0x53"));
+        CHECK(strstr(ln, "00101") == 0);
+        cs.have_plmn = 0;
+        sbm_cell_line_masked(&cs, ln, sizeof(ln));
+        CHECK(!strcmp(ln, "SIM absent | CS ? | PS ? | PLMN - | bars 4 | rssi 0x53"));
+    }
 
     char s[200];
     strcpy(s, "IMEI 012345678901234 IMSI 001010123456789 cid 7654321 len 123456");
@@ -1137,6 +1165,7 @@ static void test_boot(void)
     struct sbm_plat p;
     struct sbm_boot b;
 
+    memset(&b, 0, sizeof(b));            /* its inputs are copied by sbm_boot_run: never stack garbage (2ecf7cd) */
     CHECKEQ(sbm_crc32(0, "123456789", 9), 0xCBF43926);
     boot_image(&im, 0);
     uint32_t boot_crc = sbm_crc32(0, t_radio + 0x200, 0x1e40), main_crc = sbm_crc32(0, t_radio + 0x2040, T_MAIN);
@@ -1317,6 +1346,282 @@ static void test_boot(void)
     fakesoc_free(&s);
     b.hold_ms = 0;
 
+    /* ONLINE (stage 5a), no SIM: clock table, INIT_END, receive only, stops on time, parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_ONLINE;
+    b.hold_ms = 2000;
+    nlog = 0;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+    CHECK(b.init_end_sent && b.parked);
+    CHECKEQ(b.stopped_by, SBM_STOP_TIME);
+    CHECKEQ(b.fmt_rx, 6);
+    CHECKEQ(b.rfs_rx, 3);
+    CHECKEQ(b.rfs_reads, 2);
+    CHECKEQ(b.rfs_writes, 1);
+    CHECKEQ(b.bad_rx, 0);
+    CHECKEQ(b.sim_status, SBM_SIM_ABSENT);
+    CHECK(!memcmp(s.ipc + 40, "CT0", 4));                       /* the clock table went out first */
+    CHECKEQ(sbm_le32(s.ipc), SBM_IPC_MAGIC);                    /* the IPC link reset before INIT_END */
+    CHECKEQ(sbm_le32(s.ipc + 4), 1);
+    CHECKEQ(s.crashed_no_magic, 0);
+    CHECKEQ(s.n_ap_msgs, 2);
+    CHECKEQ(s.ap_msgs[0], 0xCD);
+    CHECKEQ(s.ap_msgs[1], 0xC2);                                /* INIT_END, and nothing after it */
+    {
+        unsigned rfs_lines = 0, leaks = 0;
+        for (unsigned i = 0; i < nlog && i < 256; ++i) {
+            rfs_lines += !strncmp(loglines[i], "RFS: rx idx 0x01", 16) || !strncmp(loglines[i], "RFS: rx idx 0x02", 16);
+            leaks += strstr(loglines[i], "0123456789") != 0 || strstr(loglines[i], "30 31 32") != 0;
+        }
+        CHECKEQ(rfs_lines, 3);
+        CHECKEQ(leaks, 0);                                       /* the write's data is never shown */
+    }
+    check_parked(&s);
+    check_allowed(&s);
+    fakesoc_free(&s);
+
+    /* T10: ONLINE + RFS served from RAM: the open gets ENOENT, the big NV write (three DL buffers, check_more) lands
+     * in the RAM copy only, the NV read gets a multi-frame reply with the right data */
+    {
+        static uint8_t nv_before[0x100000];
+        boot_image(&im, 0);
+        memcpy(nv_before, t_nv, sizeof(nv_before));
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        s.rfs_mode = 1;
+        s.nv_ref = nv_before;
+        fakesoc_plat(&s, &p, tlog);
+        b.stop = SBM_BOOT_ONLINE;
+        b.hold_ms = 2000;
+        b.rfs_serve = 1;
+        nlog = 0;
+        CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+        CHECKEQ(b.stopped_by, SBM_STOP_TIME);
+        CHECKEQ(b.big_frames, 0);
+        CHECKEQ(b.big_dropped, 0);
+        CHECKEQ(b.rfs_joined, 1);
+        CHECKEQ(b.rfs_parts, 3);                              /* 6014 bytes in 2040-byte pieces */
+        CHECKEQ(b.rfs_rx, 3);
+        CHECKEQ(b.rfs_tx, 3);
+        CHECKEQ(b.bad_rx, 0);
+        CHECKEQ(s.rfs_open_enoent, 1);
+        CHECKEQ(s.rfs_write_ok, 1);
+        CHECKEQ(s.rfs_read_ok, 1);
+        CHECKEQ(s.rfs_bad_reply, 0);
+        CHECKEQ(s.rfs_frames_in, 1 + 1 + 3);               /* 14 + 15 bytes single, 4111 bytes in 3 fragments */
+        CHECKEQ(t_nv[0x80000], 0x5A);                        /* the write landed in the RAM copy */
+        CHECKEQ(t_nv[0x80000 + 5999], (uint8_t)(0x5A ^ 5999));
+        unsigned leaks = 0;
+        for (unsigned i = 0; i < nlog && i < 256; ++i)
+            leaks += strstr(loglines[i], "5a 5b") != 0 || strstr(loglines[i], "5b 58") != 0;
+        CHECKEQ(leaks, 0);                                   /* NV data never in a log */
+        check_parked(&s);
+        check_allowed(&s);
+        fakesoc_free(&s);
+        b.rfs_serve = 0;
+        boot_image(&im, 0);
+    }
+
+    /* T11: ONLINE + RFS + the status queries: 11 GETs through the allow-list, answered by the fake CP */
+    {
+        static uint8_t nv_before[0x100000];
+        boot_image(&im, 0);
+        memcpy(nv_before, t_nv, sizeof(nv_before));
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        s.rfs_mode = 1;
+        s.nv_ref = nv_before;
+        fakesoc_plat(&s, &p, tlog);
+        b.stop = SBM_BOOT_ONLINE;
+        b.hold_ms = 5000;
+        b.rfs_serve = 1;
+        b.fmt_query = 1;
+        CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+        CHECKEQ(b.fmt_tx, 11);
+        CHECKEQ(b.fmt_tx_refused, 0);
+        CHECKEQ(b.fmt_resp, 9);                               /* the fake answers 9 kinds ... */
+        CHECKEQ(b.fmt_gen_res, 2);                            /* ... and refuses MODE_SEL and TIME_INFO */
+        CHECKEQ(s.fcp.n_req, 11);
+        CHECKEQ(s.fcp.n_forbidden, 0);
+        CHECKEQ(s.fcp.n_call, 0);
+        CHECK(b.cell.have_cs && b.cell.cs.state == SBM_REG_EMERGENCY);
+        CHECKEQ(b.cell.plmn_sel, 2);
+        CHECKEQ(s.rfs_read_ok, 1);
+        check_parked(&s);
+        check_allowed(&s);
+        fakesoc_free(&s);
+        b.rfs_serve = 0;
+        b.fmt_query = 0;
+        boot_image(&im, 0);
+    }
+
+    /* soak: queries at +3 s and every 10 s for 25 s (3 rounds), the masked status line every 60 s (none in 25 s) */
+    {
+        static uint8_t nv_before[0x100000];
+        boot_image(&im, 0);
+        memcpy(nv_before, t_nv, sizeof(nv_before));
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        s.rfs_mode = 1;
+        s.nv_ref = nv_before;
+        fakesoc_plat(&s, &p, tlog);
+        b.stop = SBM_BOOT_ONLINE;
+        b.hold_ms = 25000;
+        b.rfs_serve = 1;
+        b.fmt_query = 1;
+        b.query_period_ms = 10000;
+        nlog = 0;
+        CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+        CHECKEQ(b.stopped_by, SBM_STOP_TIME);
+        CHECKEQ(b.fmt_tx, 33);
+        CHECKEQ(b.fmt_resp + b.fmt_gen_res, 33);
+        CHECKEQ(s.fcp.n_forbidden, 0);
+        unsigned tx_lines = 0;
+        for (unsigned i = 0; i < nlog && i < 256; ++i)
+            tx_lines += strstr(loglines[i], " TX ch235 | ") != 0;
+        CHECKEQ(tx_lines, 11);                                  /* only the first round is logged in full */
+        check_parked(&s);
+        fakesoc_free(&s);
+        b.rfs_serve = 0;
+        b.fmt_query = 0;
+        b.query_period_ms = 0;
+        boot_image(&im, 0);
+    }
+
+    /* soak-2: 590 s of queries (59 rounds, 649 GETs) crosses the seq wrap three times; every answer must match */
+    {
+        boot_image(&im, 0);
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        fakesoc_plat(&s, &p, tlog);
+        b.stop = SBM_BOOT_ONLINE;
+        b.hold_ms = 590000;
+        b.rfs_serve = 0;
+        b.fmt_query = 1;
+        b.query_period_ms = 10000;
+        nlog = 0;
+        CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+        CHECKEQ(b.stopped_by, SBM_STOP_TIME);
+        CHECKEQ(b.fmt_tx, 649);
+        CHECKEQ(b.fmt_resp + b.fmt_gen_res, 649);
+        CHECKEQ(b.fmt_unmatched, 0);
+        CHECKEQ(b.fmt_stale, 0);
+        CHECKEQ(s.fcp.n_forbidden, 0);
+        unsigned soak_lines = 0;
+        for (unsigned i = 0; i < nlog && i < 256; ++i)
+            soak_lines += strstr(loglines[i], "SOAK: +") != 0;
+        CHECKEQ(soak_lines, 9);
+        check_parked(&s);
+        fakesoc_free(&s);
+        b.fmt_query = 0;
+        b.query_period_ms = 0;
+        boot_image(&im, 0);
+    }
+
+    /* soak 2ecf7cd: the caller left keep_running as stack garbage; anything but SBM_KEEP_RUNNING must park */
+    {
+        static const uint32_t junk[] = { 1, 0xA5A5A5A5u, 0xFFFFFFFFu, SBM_KEEP_RUNNING ^ 1 };
+        for (unsigned j = 0; j < sizeof(junk) / sizeof(junk[0]); ++j) {
+            struct sbm_boot g;
+            memset(&g, 0xA5, sizeof(g));
+            g.stop = SBM_BOOT_ONLINE;
+            g.hold_ms = 2000;
+            g.rfs_serve = 0;
+            g.fmt_query = 0;
+            g.query_period_ms = 0;
+            g.keep_running = junk[j];
+            boot_image(&im, 0);
+            fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+            fakesoc_plat(&s, &p, tlog);
+            CHECKEQ(sbm_boot_run(&p, &im, &g), 0);
+            CHECK(g.init_end_sent && g.parked && !g.keep_running);
+            CHECKEQ(g.stopped_by, SBM_STOP_TIME);
+            CHECK(!strstr(g.stopped_at, "not parked"));
+            check_parked(&s);
+            fakesoc_free(&s);
+        }
+        boot_image(&im, 0);
+    }
+
+    /* the session API (Starbite OS): start, poll from a loop, query, status, stop = park */
+    {
+        static uint8_t nv_before[0x100000];
+        static struct sbm_modem mo;
+        char st[200];
+        boot_image(&im, 0);
+        memcpy(nv_before, t_nv, sizeof(nv_before));
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        s.rfs_mode = 1;
+        s.nv_ref = nv_before;
+        fakesoc_plat(&s, &p, tlog);
+        CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
+        CHECK(mo.up && !mo.b.parked && mo.b.init_end_sent);
+        CHECK(s.cp_running);                                     /* not parked: the session owns it */
+        for (unsigned i = 0; i < 2000; ++i) {                    /* 2 s of an event loop, 1 ms per turn */
+            CHECKEQ(sbm_modem_poll(&mo, 1), 0);
+            p.udelay(p.ctx, 1000);
+        }
+        CHECKEQ(sbm_modem_query(&mo), 0);
+        for (unsigned i = 0; i < 100; ++i) {
+            sbm_modem_poll(&mo, 1);
+            p.udelay(p.ctx, 1000);
+        }
+        sbm_modem_status(&mo, st, sizeof(st));
+        CHECK(strstr(st, "SIM absent") && strstr(st, "CS emergency-only") && !strstr(st, "00101"));
+        CHECKEQ(s.rfs_read_ok, 1);
+        CHECKEQ(sbm_modem_stop(&mo), 0);
+        CHECK(!mo.up && mo.b.parked);
+        sbm_modem_status(&mo, st, sizeof(st));
+        CHECK(!strcmp(st, "modem off (parked)"));
+        CHECKEQ(sbm_modem_poll(&mo, 1), SBM_EPERM);
+        check_parked(&s);
+        check_allowed(&s);
+        fakesoc_free(&s);
+
+        /* a SIM appears: the guard parks the CP from inside poll */
+        boot_image(&im, 0);
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        s.sim_present = 1;
+        fakesoc_plat(&s, &p, tlog);
+        CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
+        int r = 0;
+        for (unsigned i = 0; i < 2000 && r == 0; ++i) {
+            r = sbm_modem_poll(&mo, 1);
+            p.udelay(p.ctx, 1000);
+        }
+        CHECKEQ(r, 1);
+        CHECKEQ(mo.b.stopped_by, SBM_STOP_SIM);
+        CHECK(!mo.up && mo.b.parked);
+        check_parked(&s);
+        fakesoc_free(&s);
+        boot_image(&im, 0);
+    }
+
+    /* ONLINE with a SIM present: stops at once on the SIM status, parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.sim_present = 1;
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_ONLINE;
+    b.hold_ms = 20000;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+    CHECKEQ(b.stopped_by, SBM_STOP_SIM);
+    CHECK(s.clock_us < 9000000);                                 /* well before the 20 s */
+    CHECK(b.parked);
+    check_parked(&s);
+    fakesoc_free(&s);
+
+    /* ONLINE and the CP crashes: parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.online_crash = 1;
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_ONLINE;
+    b.hold_ms = 2000;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), SBM_EIO);
+    CHECKEQ(b.stopped_by, SBM_STOP_CRASH);
+    CHECK(b.parked);
+    check_parked(&s);
+    fakesoc_free(&s);
+    b.hold_ms = 0;
+
+    /* LINK never sends INIT_END: checked above (ap_msgs only 0xCD) */
+
     /* LINK without an IPC view: refused before anything is touched */
     fakesoc_init(&s, &im.plan, boot_crc, main_crc);
     fakesoc_plat(&s, &p, tlog);
@@ -1348,6 +1653,139 @@ static void test_boot(void)
     check_parked(&s);
     check_allowed(&s);
     fakesoc_free(&s);
+}
+
+static void test_rfs(void)
+{
+    static uint8_t nv[0x100000], out[0x2000];
+    struct sbm_rfs r;
+    for (unsigned i = 0; i < sizeof(nv); ++i)
+        nv[i] = (uint8_t)(i * 13);
+    sbm_rfs_init(&r, nv, sizeof(nv));
+    /* NV_READ 0x1000 bytes at 0x2000, id 7 */
+    uint8_t rq[14];
+    sbm_put32(rq, 14); rq[4] = SBM_RFS_IDX_NV_READ; rq[5] = 7; sbm_put32(rq + 6, 0x2000); sbm_put32(rq + 10, 0x1000);
+    CHECKEQ(sbm_rfs_handle(&r, rq, 14, out, sizeof(out)), 15 + 0x1000);
+    CHECKEQ(sbm_le32(out), 15 + 0x1000);
+    CHECKEQ(out[4], 1);
+    CHECKEQ(out[5], 7);
+    CHECKEQ(out[6], 1);
+    CHECKEQ(sbm_le32(out + 7), 0x2000);
+    CHECKEQ(sbm_le32(out + 11), 0x1000);
+    CHECK(!memcmp(out + 15, nv + 0x2000, 0x1000));
+    /* past the end: confirm 0, no data */
+    sbm_put32(rq + 6, 0xFF800); sbm_put32(rq + 10, 0x1000);
+    CHECKEQ(sbm_rfs_handle(&r, rq, 14, out, sizeof(out)), 15);
+    CHECKEQ(out[6], 0);
+    CHECKEQ(sbm_le32(out + 11), 0);
+    /* a reply that does not fit the caller's buffer */
+    sbm_put32(rq + 6, 0); sbm_put32(rq + 10, 0x1F00);
+    CHECKEQ(sbm_rfs_handle(&r, rq, 14, out, 0x1000), SBM_ENOSPC);
+    /* NV_WRITE 4 bytes at 0x10: the RAM copy changes, a 15-byte confirm */
+    uint8_t wr[18];
+    sbm_put32(wr, 18); wr[4] = SBM_RFS_IDX_NV_WRITE; wr[5] = 9; sbm_put32(wr + 6, 0x10); sbm_put32(wr + 10, 4);
+    wr[14] = 0xde; wr[15] = 0xad; wr[16] = 0xbe; wr[17] = 0xef;
+    CHECKEQ(sbm_rfs_handle(&r, wr, 18, out, sizeof(out)), 15);
+    CHECK(out[4] == 2 && out[5] == 9 && out[6] == 1 && sbm_le32(out + 11) == 4);
+    CHECK(nv[0x10] == 0xde && nv[0x13] == 0xef);
+    /* a write whose length claims more data than the message carries: refused, the copy untouched */
+    sbm_put32(wr + 10, 400); nv[0x10] = 0x11;
+    CHECKEQ(sbm_rfs_handle(&r, wr, 18, out, sizeof(out)), 15);
+    CHECKEQ(out[6], 0);
+    CHECKEQ(nv[0x10], 0x11);
+    /* malformed: the header's length disagrees with the message */
+    sbm_put32(rq, 99);
+    CHECKEQ(sbm_rfs_handle(&r, rq, 14, out, sizeof(out)), SBM_EBADF);
+    /* open: always "no such file" (handle -1, errno 2), 14 bytes */
+    uint8_t op[20] = { 20, 0, 0, 0, SBM_RFS_IDX_OPEN, 3 };
+    CHECKEQ(sbm_rfs_handle(&r, op, 20, out, sizeof(out)), 14);
+    CHECK(sbm_le32(out) == 14 && out[4] == 0x11 && out[5] == 3 && sbm_le32(out + 6) == 0xFFFFFFFFu && sbm_le32(out + 10) == 2);
+    CHECKEQ(r.opens, 1);
+    /* close of the (invalid) handle: result -1, errno EBADF */
+    uint8_t cl[10] = { 10, 0, 0, 0, SBM_RFS_IDX_CLOSE, 5, 0xff, 0xff, 0xff, 0xff };
+    CHECKEQ(sbm_rfs_handle(&r, cl, 10, out, sizeof(out)), 14);
+    CHECK(out[4] == 6 && out[5] == 5 && sbm_le32(out + 6) == 0xFFFFFFFFu && sbm_le32(out + 10) == 9);
+    /* another file operation: counted, not answered */
+    uint8_t fi[20] = { 20, 0, 0, 0, SBM_RFS_IDX_FILE_INFO, 4 };
+    CHECKEQ(sbm_rfs_handle(&r, fi, 20, out, sizeof(out)), 0);
+    CHECKEQ(r.other[SBM_RFS_IDX_FILE_INFO], 1);
+    CHECKEQ(r.reads, 2);                                     /* the ENOSPC one is not counted */
+    CHECKEQ(r.writes, 2);
+}
+
+static void test_policy_sms(void)
+{
+    /* emergency classifier */
+    CHECK(sbm_is_emergency("112", 0, 0) && sbm_is_emergency("911", 0, 0) && sbm_is_emergency("999", 0, 0));
+    CHECK(sbm_is_emergency("+44999", 0, 0) && sbm_is_emergency("0044112", 0, 0) && sbm_is_emergency("+1 911", 0, 0));
+    CHECK(sbm_is_emergency("1 1 2", 0, 0));
+    CHECK(sbm_is_emergency("abc", 0, 0));                          /* not a plain number: refused */
+    CHECK(!sbm_is_emergency("+15555550100", 0, 0));
+    static const char *const sim_ecc[] = { "5550199" };            /* a SIM's own list (made up) */
+    CHECK(sbm_is_emergency("5550199", sim_ecc, 1));
+    /* the policy: allow-list only, never an emergency or short code */
+    struct sbm_dial_policy pol = { { "+15555550100", "5550199" }, 2, sim_ecc, 1 };
+    CHECKEQ(sbm_dial_check(&pol, "+15555550100"), 0);
+    CHECKEQ(sbm_dial_check(&pol, "+1 555 555 0100"), 0);
+    CHECKEQ(sbm_dial_check(&pol, "15555550100"), SBM_EPERM);      /* the '+' matters */
+    CHECKEQ(sbm_dial_check(&pol, "+15555550101"), SBM_EPERM);     /* not on the list */
+    CHECKEQ(sbm_dial_check(&pol, "5550199"), SBM_EPERM);          /* on the list, but the SIM calls it emergency */
+    CHECKEQ(sbm_dial_check(&pol, "112"), SBM_EPERM);
+    CHECKEQ(sbm_dial_check(&pol, "12345"), SBM_EPERM);
+    CHECKEQ(sbm_dial_check(&pol, "+1555x5550100"), SBM_EINVAL);
+    struct sbm_dial_policy none = { { 0 }, 0, 0, 0 };
+    CHECKEQ(sbm_dial_check(&none, "+15555550100"), SBM_EPERM);    /* an empty list allows nothing */
+
+    /* SMS-DELIVER, 7-bit "hellohello" from +15555550100 (fictional) */
+    static const uint8_t d1[] = { 0x04, 0x0B, 0x91, 0x51, 0x55, 0x55, 0x05, 0x01, 0xF0, 0x00, 0x00,
+                                  0x21, 0x11, 0x90, 0x00, 0x00, 0x00, 0x00, 0x0A,
+                                  0xE8, 0x32, 0x9B, 0xFD, 0x46, 0x97, 0xD9, 0xEC, 0x37 };
+    static struct sbm_sms sm;
+    CHECKEQ(sbm_sms_deliver_decode(d1, sizeof(d1), &sm), 0);
+    CHECK(!strcmp(sm.from, "+15555550100"));
+    CHECK(!strcmp(sm.text, "hellohello"));
+    CHECKEQ(sm.alphabet, 0);
+    /* UCS-2 "Hi\u00e4" */
+    static const uint8_t d2[] = { 0x00, 0x0B, 0x91, 0x51, 0x55, 0x55, 0x05, 0x01, 0xF0, 0x00, 0x08,
+                                  0, 0, 0, 0, 0, 0, 0, 0x06, 0x00, 0x48, 0x00, 0x69, 0x00, 0xE4 };
+    CHECKEQ(sbm_sms_deliver_decode(d2, sizeof(d2), &sm), 0);
+    CHECK(!strcmp(sm.text, "Hi\xc3\xa4"));
+    /* concatenated (UDH 00 03 2A 02 01) 7-bit "hi": the header's fill bits */
+    static const uint8_t d3[] = { 0x44, 0x0B, 0x91, 0x51, 0x55, 0x55, 0x05, 0x01, 0xF0, 0x00, 0x00,
+                                  0, 0, 0, 0, 0, 0, 0, 0x09, 0x05, 0x00, 0x03, 0x2A, 0x02, 0x01, 0xD0, 0x69 };
+    CHECKEQ(sbm_sms_deliver_decode(d3, sizeof(d3), &sm), 0);
+    CHECK(sm.concat && sm.ref == 0x2A && sm.total == 2 && sm.seq == 1);
+    CHECK(!strcmp(sm.text, "hi"));
+    /* malformed: truncated, not a DELIVER, UDL past the end */
+    CHECKEQ(sbm_sms_deliver_decode(d1, 12, &sm), SBM_EBADF);
+    uint8_t bad[sizeof(d1)];
+    memcpy(bad, d1, sizeof(d1));
+    bad[0] = 0x01;
+    CHECKEQ(sbm_sms_deliver_decode(bad, sizeof(bad), &sm), SBM_EBADF);
+    memcpy(bad, d1, sizeof(d1));
+    bad[18] = 0xA0;
+    CHECKEQ(sbm_sms_deliver_decode(bad, sizeof(bad), &sm), SBM_EBADF);
+    /* the incoming IPC: data 02 x x x x len | SCA (empty) | TPDU */
+    static uint8_t im_[7 + 6 + 1 + sizeof(d1)];
+    sbm_put16(im_, sizeof(im_)); im_[2] = 1; im_[4] = 0x04; im_[5] = 0x02; im_[6] = SBM_IPC_NOTI;
+    im_[7] = 2; im_[12] = (uint8_t)(1 + sizeof(d1)); im_[13] = 0;
+    memcpy(im_ + 14, d1, sizeof(d1));
+    struct sbm_ipc_msg m;
+    CHECKEQ(sbm_ipc_parse(im_, sizeof(im_), &m), 0);
+    CHECKEQ(sbm_sms_incoming(&m, &sm), 0);
+    CHECK(!strcmp(sm.text, "hellohello"));
+    im_[7] = 1;                                                    /* CDMA: not ours */
+    CHECKEQ(sbm_sms_incoming(&m, &sm), SBM_EBADF);
+    /* SMS-SUBMIT: policy first, then the PDU byte for byte */
+    uint8_t out[64];
+    static const uint8_t want[] = { 0x01, 0x00, 0x0B, 0x91, 0x51, 0x55, 0x55, 0x05, 0x01, 0xF0, 0x00, 0x00, 0x0A,
+                                    0xE8, 0x32, 0x9B, 0xFD, 0x46, 0x97, 0xD9, 0xEC, 0x37 };
+    CHECKEQ(sbm_sms_submit(&pol, "+15555550100", "hellohello", out, sizeof(out)), (int)sizeof(want));
+    CHECK(!memcmp(out, want, sizeof(want)));
+    CHECKEQ(sbm_sms_submit(&pol, "112", "hellohello", out, sizeof(out)), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit(&pol, "+15555550101", "hi", out, sizeof(out)), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit(&pol, "+15555550100", "price: 5 euro {x}", out, sizeof(out)), SBM_EINVAL);
+    CHECKEQ(sbm_sms_submit(&pol, "+15555550100", "hellohello", out, 10), SBM_ENOSPC);
 }
 
 static void test_clk(void)
@@ -1386,6 +1824,8 @@ int main(int argc, char **argv)
     test_probe2();
     test_boot();
     test_clk();
+    test_rfs();
+    test_policy_sms();
     printf("sbm host test: %u checks, %u failed%s\n", checks, fails, radio ? " (with this phone's RADIO image)" : "");
     return fails ? 1 : 0;
 }

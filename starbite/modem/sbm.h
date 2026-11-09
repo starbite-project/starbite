@@ -297,6 +297,7 @@ struct sbm_sbd {
     struct sbm_ring r[SBM_SBD_MAX_CH][2];
     uint8_t ch2id[256];    /* 0xFF = none */
     uint32_t errors;       /* rejected ring entries (bad index, size or address) */
+    uint32_t last_size_v;  /* the raw size word of the entry sbm_sbd_get looked at last (diagnostics) */
 };
 /* Lays out the descriptor region and buffer pool for chans[0..n) the way Samsung's AP does on CMD_INIT_START
  * (the CP reads this layout). Clears the descriptor region only. 0 or SBM_E*. */
@@ -346,7 +347,7 @@ int sbm_sbd_id(const struct sbm_sbd *s, uint16_t ch);   /* ring id of a channel,
 #define SBM_G_CFG   0x0F   /* seen */
 #define SBM_G_IMEI  0x10
 #define SBM_G_GPS   0x11   /* seen */
-#define SBM_G_RFS   0x42
+#define SBM_G_RFS   0x42   /* RFS channel: its own header { u32 length; u8 index; u8 id } */
 #define SBM_G_GEN   0x80   /* seen */
 #define SBM_CMD(g, i) ((uint16_t)(((g) << 8) | (i)))
 #define SBM_PWR_PHONE_PWR_UP     SBM_CMD(SBM_G_PWR, 0x01)
@@ -370,6 +371,15 @@ int sbm_sbd_id(const struct sbm_sbd *s, uint16_t ch);   /* ring id of a channel,
 #define SBM_MISC_ME_SN           SBM_CMD(SBM_G_MISC, 0x03)
 #define SBM_MISC_TIME_INFO       SBM_CMD(SBM_G_MISC, 0x05)
 #define SBM_GEN_PHONE_RES        SBM_CMD(SBM_G_GEN, 0x01)
+#define SBM_RFS_NV_READ_ITEM     SBM_CMD(SBM_G_RFS, 0x01)   /* libsamsung-ipc rfs.h: body { u32 offset; u32 length } */
+#define SBM_RFS_NV_WRITE_ITEM    SBM_CMD(SBM_G_RFS, 0x02)   /* { u32 offset; u32 length; data } */
+#define SBM_RFS_HDR              6
+/* why stage 5a stopped */
+#define SBM_STOP_TIME     1
+#define SBM_STOP_SIM      2       /* a SIM is present: not tonight's experiment */
+#define SBM_STOP_REG      3       /* the CP reported registration */
+#define SBM_STOP_CRASH    4
+#define SBM_STOP_FRAMES   5       /* the frame budget is used up */
 
 struct sbm_ipc_msg {
     uint16_t len;          /* whole message, header included */
@@ -458,6 +468,9 @@ void sbm_cell_init(struct sbm_cell_state *st);
 int sbm_cell_update(struct sbm_cell_state *st, const struct sbm_ipc_msg *m);
 /* One line, e.g. "SIM absent | CS emergency-only (GSM) | PS emergency-only | PLMN 00101 | bars 2" */
 void sbm_cell_line(const struct sbm_cell_state *st, char *out, size_t cap);
+/* The same without the PLMN (it identifies the country and operator): "PLMN set" / "PLMN -". For logs and for a
+ * status screen that is shared or photographed. Also "rssi 0x.." from DISP_RSSI_INFO when known. */
+void sbm_cell_line_masked(const struct sbm_cell_state *st, char *out, size_t cap);
 const char *sbm_sim_name(uint8_t status);
 const char *sbm_reg_name(uint8_t state);
 const char *sbm_act_name(uint8_t act);
@@ -601,7 +614,7 @@ struct sbm_image {
  * sizes and CRCs, never content. */
 int sbm_image_check(const struct sbm_plat *p, struct sbm_image *im);
 
-enum sbm_boot_stop { SBM_BOOT_DRY = 1, SBM_BOOT_SEC = 2, SBM_BOOT_RUN = 3, SBM_BOOT_LINK = 4 };
+enum sbm_boot_stop { SBM_BOOT_DRY = 1, SBM_BOOT_SEC = 2, SBM_BOOT_RUN = 3, SBM_BOOT_LINK = 4, SBM_BOOT_ONLINE = 5 };
 
 /* Stage 4 (sbm_link.c): the legacy 4 MB map at the front of the IPC region (Samsung's shmem_4mb_phys_map without
  * LEGACY_QOS), used for the boot-time UDL exchange before the SBD rings exist */
@@ -638,6 +651,19 @@ struct sbm_boot {
     uint32_t hold_ms;                    /* input (LINK): stay after PHONE_START this long, watching, sending nothing */
     int udl_done, init_start, pif_sent, phone_start;
     uint32_t phone_start_repeats, phone_start_gap_ms, dl_frames_seen, other_cmds;
+    /* stage 5a (ONLINE, receive only): INIT_END sent, then what the CP says for hold_ms */
+    int init_end_sent;
+    uint32_t fmt_rx, rfs_rx, rfs_reads, rfs_writes, rfs_other, other_rx, bad_rx, sim_status, stopped_by;
+    int rfs_serve;                     /* input (T10): answer RFS from the RAM copy of nv_data.bin */
+    uint32_t rfs_tx, rfs_tx_frames, rfs_tx_bytes, big_frames, big_dropped, rfs_joined, rfs_parts;
+    int fmt_query;                     /* input (T11): send the allow-listed status GETs once, 3 s after INIT_END */
+    uint32_t query_period_ms;          /* input (soak): and again every this many ms (0 = once) */
+    uint32_t keep_running;             /* input (session API only): SBM_KEEP_RUNNING = return online after INIT_END,
+                                        * not parked. Any other value (0, or stack garbage) parks: soak 2ecf7cd */
+    uint32_t fmt_tx, fmt_tx_refused, fmt_resp, fmt_gen_res;
+    uint32_t fmt_unmatched;            /* RESPs whose seq has no open query of ours (a duplicate or a stray) */
+    uint32_t fmt_stale;                /* a seq came round again (188 queries later) while its query was still open */
+    struct sbm_cell_state cell;        /* what the CP reported (decoded, identity-free) */
     uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;
     uint64_t sec0_us;
     int err;                             /* 0, or the SBM_E* that stopped it */
@@ -654,6 +680,95 @@ int sbm_link_boot(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boo
 #define SBM_CLK_TABLE_OFF 40
 uint32_t sbm_clk_table_size(void);
 int sbm_clk_table_write(uint8_t *ipc, uint32_t ipc_size);
+/* Stage 5b (sbm_rfs.c): the RFS server's core, NV against a RAM copy (layouts from One UI's libsec-ril.so). */
+#define SBM_RFS_IDX_NV_READ        0x01
+#define SBM_RFS_IDX_NV_WRITE       0x02
+#define SBM_RFS_IDX_READ_FILE      0x03
+#define SBM_RFS_IDX_WRITE_FILE     0x04
+#define SBM_RFS_IDX_LSEEK          0x05
+#define SBM_RFS_IDX_CLOSE          0x06
+#define SBM_RFS_IDX_PUT_FILE       0x07
+#define SBM_RFS_IDX_GET_FILE       0x08
+#define SBM_RFS_IDX_RENAME         0x09
+#define SBM_RFS_IDX_FILE_INFO      0x0a
+#define SBM_RFS_IDX_DELETE         0x0b
+#define SBM_RFS_IDX_MKDIR          0x0c
+#define SBM_RFS_IDX_OPEN           0x11
+#define SBM_RFS_IDX_INFO_BY_HANDLE 0x13
+#define SBM_RFS_IDX_CREATE         0x14
+#define SBM_RFS_IDX_NV_WRITE_ALL   0x15
+#define SBM_RFS_IDX_NV_RESTORE     0x17
+#define SBM_RFS_REPLY_HDR          15     /* header + u8 confirm + u32 offset + u32 length */
+#define SBM_RFS_OPEN_REPLY         14     /* header + u32 handle + u32 errno (ProcessOpenFile) */
+#define SBM_RFS_MAX_IO             0x80000
+struct sbm_rfs {
+    uint8_t *nv;                      /* the RAM copy of nv_data.bin: the CP's writes land here and nowhere else */
+    uint32_t nv_size;
+    uint32_t reads, writes, opens, read_bytes, write_bytes, refused, bad, unhandled;
+    uint32_t other[0x20];             /* requests per index this core does not answer yet */
+};
+void sbm_rfs_init(struct sbm_rfs *r, uint8_t *nv, uint32_t nv_size);
+/* One RFS request (the payload of a ch 245 frame) -> the reply in out. Returns its length, 0 = not answered (an
+ * index this core does not handle yet), or SBM_E*. */
+int sbm_rfs_handle(struct sbm_rfs *r, const uint8_t *req, uint32_t n, uint8_t *out, uint32_t cap);
+
+/* The radio's power state request, from One UI's libsec-ril (IpcProtocol41Power::IpcTxRadioPower): PWR_PHONE_STATE
+ * (0x0107) EXEC with u16 data: 0x0001 = low power mode (RF off), 0x0202 = normal (RF on). The RIL sends NORMAL at
+ * boot. T11 showed that the CP scans and camps without it too (receive only with no SIM), so it is not the receiver's
+ * on/off switch. Not on the builder's allow-list (nothing sends it yet). */
+#define SBM_PWR_STATE_LPM     0x0001
+#define SBM_PWR_STATE_NORMAL  0x0202
+
+/* Dial / send policy (sbm_policy.c): never an emergency number (world list + the SIM's and network's own lists + any
+ * of them behind an international prefix), never a short code, only the user's own allow-list. No switch. */
+#define SBM_DIAL_ALLOW_MAX   4
+#define SBM_DIAL_MIN_DIGITS  7
+#define SBM_KEEP_RUNNING     0x4B454550u   /* "KEEP": the only value of sbm_boot.keep_running that skips the park */
+struct sbm_dial_policy {
+    const char *allowed[SBM_DIAL_ALLOW_MAX];    /* the user's own numbers (never in git) */
+    unsigned n_allowed;
+    const char *const *extra_emergency;          /* SIM ECC / network emergency numbers, if known */
+    unsigned n_extra;
+};
+int sbm_is_emergency(const char *number, const char *const *extra, unsigned n_extra);   /* 1 = refuse */
+int sbm_dial_check(const struct sbm_dial_policy *pol, const char *number);              /* 0 or SBM_EPERM */
+
+/* SMS (sbm_sms.c): TP-DELIVER decode, the incoming IPC (0x0402), TP-SUBMIT encode (policy first). */
+#define SBM_SMS_TEXT_MAX 640
+struct sbm_sms {
+    char from[24];                    /* the sender: the user's data, never logged by this core */
+    int from_alpha;                   /* an alphanumeric sender name */
+    uint8_t pid, dcs, alphabet;       /* alphabet: 0 GSM 7-bit, 1 8-bit, 2 UCS-2 */
+    uint8_t scts[7];                  /* service centre time stamp (BCD, swapped) */
+    int concat;
+    uint8_t ref, total, seq;          /* concatenated SMS */
+    uint32_t binary_len;              /* 8-bit data: its length (the data is not kept) */
+    char text[SBM_SMS_TEXT_MAX];      /* UTF-8 */
+};
+int sbm_sms_deliver_decode(const uint8_t *tpdu, uint32_t n, struct sbm_sms *s);
+int sbm_sms_incoming(const struct sbm_ipc_msg *m, struct sbm_sms *s);
+/* TP-SUBMIT for number (allow-listed, never an emergency number: sbm_dial_check) and an ASCII text that fits one
+ * GSM 7-bit message (160 characters, the common subset). Returns the PDU length or SBM_E*. Nothing sends it yet. */
+int sbm_sms_submit(const struct sbm_dial_policy *pol, const char *number, const char *text, uint8_t *out, uint32_t cap);
+
+/* The session API (Starbite OS): sbm_modem_start loads, checks and starts the CP and brings the link online with the RFS
+ * server (about 2 s, blocking); sbm_modem_poll is non-blocking, from the event loop (every few ms): mailbox, rings,
+ * RFS, guards; a guard (a SIM that is not absent, a registration) or a crash parks the CP and returns 1 / SBM_E*.
+ * sbm_modem_query sends the allow-listed status GETs; sbm_modem_status gives the masked status line; sbm_modem_stop
+ * parks. Receive-only by design until the SIM day: the guards stay in. */
+struct sbm_modem {
+    const struct sbm_plat *p;
+    struct sbm_image *im;
+    struct sbm_boot b;
+    uint32_t ms;
+    int up;
+};
+int sbm_modem_start(struct sbm_modem *m, const struct sbm_plat *p, struct sbm_image *im);
+int sbm_modem_poll(struct sbm_modem *m, uint32_t elapsed_ms);
+int sbm_modem_query(struct sbm_modem *m);
+void sbm_modem_status(const struct sbm_modem *m, char *out, size_t cap);
+int sbm_modem_stop(struct sbm_modem *m);
+
 /* Park: Android's power-off. Safe to call more than once and when nothing was started. */
 int sbm_cp_park(const struct sbm_plat *p);
 void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b);

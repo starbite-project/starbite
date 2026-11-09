@@ -5,7 +5,8 @@
 # "echo STARBITE-TERM-OK > /dev/kmsg" + Enter as key events, waits for that line in the guest's kernel log, checks
 # the panel against the guest's frame row by row and that it shows text, then stops the guest; RUNS times.
 #   limactl shell starbite -- /Users/dev/project-starbite/starbite/guest/run-term.sh
-# Environment: WORK (/mnt/build/sbguest), IMAGE ($WORK/Image-guest), KOUT ($WORK/gout), RUNS (2), TIMEOUT (900 s).
+# Environment: WORK (/mnt/build/sbguest), IMAGE ($WORK/Image-guest), KOUT ($WORK/gout), RUNS (2), TIMEOUT (900 s),
+# SURF (720x1440), EXTRA (guest bootargs).
 # guestd, sbguest.ko and the initramfs come from run-qemu.sh BUILD_ONLY=1 (one recipe).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -14,7 +15,8 @@ IMAGE=${IMAGE:-$WORK/Image-guest}
 KOUT=${KOUT:-$WORK/gout}
 RUNS=${RUNS:-2}
 TIMEOUT=${TIMEOUT:-900}
-SURF=720x1440
+SURF=${SURF:-720x1440}                    # the terminal surface (starbite-os 1.2: 720x1060 with fbcon=font:TER16x32)
+EXTRA=${EXTRA:-}                          # more guest bootargs, e.g. "fbcon=font:TER16x32"
 DB_GUEST=132
 DB_HOST=133
 [ -f "$IMAGE" ] || { echo "run-term: no $IMAGE (linux/build-patched.sh GUEST=1)"; exit 1; }
@@ -23,7 +25,7 @@ BUILD_ONLY=1 WORK="$WORK" KOUT="$KOUT" "$here/run-qemu.sh" term > "$WORK/out/run
 cd "$WORK"
 rdsize=$(stat -c %s out/initrd.cpio.gz)
 python3 "$here/mk-guest-dts.py" --profile qemu --psci01 --fb "$SURF" --term --rd-size "$rdsize" --db-guest $DB_GUEST \
-    out/term.dts
+    --bootargs-extra "$EXTRA" out/term.dts
 dtc -q -I dts -O dtb -o out/term.dtb out/term.dts
 python3 - "$IMAGE" out/term.dtb out/initrd.cpio.gz out/store-term.bin 10 "$RUNS" "$DB_GUEST" "$DB_HOST" "$SURF" <<'EOF'
 import struct, sys

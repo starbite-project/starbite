@@ -217,7 +217,9 @@ int sbm_sbd_put(struct sbm_sbd *s, uint16_t ch, unsigned dir, const uint8_t *fra
         return SBM_ENOSPC;
     sbm_memcpy(s->ipc + r->buff_off + in * r->size, frame, len);
     uint32_t sv = len;
-    if (sbm_ch_is_ps(ch))
+    /* the AP (UL) packs the channel only for PS channels (sbd_pio_tx); the CP (DL, the fake CP here) packs it
+     * on every channel, as seen on the phone (T9b) */
+    if (sbm_ch_is_ps(ch) || dir == SBM_DL)
         sv = (len & 0xFFFF) | ((uint32_t)ch << 16);
     *p32(s, r->size_v_off + 4 * in) = sv;
     bar(p);                          /* the data and its size before the index */
@@ -241,7 +243,10 @@ int sbm_sbd_get(struct sbm_sbd *s, unsigned id, unsigned dir, const uint8_t **f,
         return 0;
     bar(p);                          /* the index before the size and the data it covers */
     uint32_t sv = *p32(s, r->size_v_off + 4 * out);
-    uint32_t len = sbm_ch_is_ps(r->ch) ? (sv & 0xFFFF) : sv;
+    /* Android's recv_data: the length is the low 16 bits on every channel (the CP puts the channel in the high
+     * half of FMT and RFS entries too: T9b, 2026-11-09, 78 frames refused before this) */
+    uint32_t len = sv & 0xFFFF;
+    s->last_size_v = sv;
     if (len == 0 || len > r->size) {
         s->errors++;
         *p16(s, rbp_off(s, id, dir, 0)) = (uint16_t)((out + 1) % r->len);   /* skip it */

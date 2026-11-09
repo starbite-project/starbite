@@ -1,0 +1,119 @@
+From 90b5a59ad9dcac2f423f5712aa76d530fe225f76 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Mon, 9 Nov 2026 15:31:18 +0200
+Subject: [PATCH] patch: 0411-starlte-cpu-thermal-governor.patch -
+ starcpugov=KHZ: the M3 cluster above 1794 MHz while the TMU's big probes read
+ <= 75 C, back at >= 85 C (off by default); starcpugov=1 only logs the
+ temperatures
+
+---
+ bsd/dev/starlte_touch.c | 89 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 89 insertions(+)
+
+diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
+index 9eb69ffd..6b425320 100644
+--- a/bsd/dev/starlte_touch.c
++++ b/bsd/dev/starlte_touch.c
+@@ -412,6 +412,94 @@ starlte_acpm_dvfs(uint32_t domain, uint32_t khz)
+ 	return ok;
+ }
+ 
++/*
++ * 0411: the M3s' clock above 1794 MHz under a thermal governor (boot-arg starcpugov=KHZ, e.g. 2314000; off by
++ * default: st_cpu_dvfs refuses > 1794 MHz "not without thermal control"). TMU_TOP 0x10070000, the big cluster's
++ * probes 1, 2, 3, 4 and 6 (exynos9810.dtsi BIG zone, mask 0x5e; build/em-research-thermal-clocks.md):
++ * TRIMINFO_p [8:0] code at 25 C, [17:9] code at 85 C, TRIMINFO0 [23] two-point; CURRENT_TEMP 0x40/0x44/0x48,
++ * 9 bits per probe. Every 250 ms: the hottest probe >= 85 C -> 1794 MHz; <= 75 C -> KHZ again. A reading that
++ * makes no sense (TMU off, < 0 or > 125 C) -> 1794 MHz and the governor stops. Never above 2704000 kHz.
++ */
++extern bool starlte_acpm_dvfs(uint32_t domain, uint32_t khz);
++static vm_offset_t st_tmu;
++
++static int
++st_tmu_probe_c(unsigned p)
++{
++	uint32_t trim0 = *(volatile uint32_t *)(st_tmu + 0x000);
++	uint32_t trim = *(volatile uint32_t *)(st_tmu + 4 * p);
++	int te1 = (int)(trim & 0x1ff), te2 = (int)((trim >> 9) & 0x1ff);
++	uint32_t reg = p < 2 ? 0x40 : 0x44 + 4 * ((p - 2) / 3);
++	unsigned shift = p < 2 ? 9 * p : 9 * ((p - 2) % 3);
++	int code = (int)((*(volatile uint32_t *)(st_tmu + reg) >> shift) & 0x1ff);
++	if ((trim0 >> 23) & 1) {
++		if (te2 <= te1) {
++			return -100;
++		}
++		return (code - te1) * (85 - 25) / (te2 - te1) + 25;
++	}
++	return code - te1 + 25;
++}
++
++static void
++st_cpu_gov_thread(void *arg, __unused wait_result_t wr)
++{
++	uint32_t hi = (uint32_t)(uintptr_t)arg, cur = 1794000;
++	bool watch = hi == 1;                   /* starcpugov=1: log the temperatures only, never change a clock */
++	static const unsigned probes[] = { 1, 2, 3, 4, 6 };
++	unsigned n = 0;
++	for (;;) {
++		int hot = -1000;
++		for (unsigned i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
++			int c = st_tmu_probe_c(probes[i]);
++			hot = c > hot ? c : hot;
++		}
++		bool on = (*(volatile uint32_t *)(st_tmu + 0x20) & 1u) != 0;
++		if (watch) {
++			if (n++ % 40 == 0) {    /* every 10 s */
++				printf("STARLTE GOV: watch: TMU %s, big probes 1/2/3/4/6 = %d %d %d %d %d C\n", on ? "on" : "off",
++				    st_tmu_probe_c(1), st_tmu_probe_c(2), st_tmu_probe_c(3), st_tmu_probe_c(4), st_tmu_probe_c(6));
++			}
++			st_msleep(250);
++			continue;
++		}
++		if (!on || hot < 0 || hot > 125) {
++			(void)starlte_acpm_dvfs(3, 1794000);
++			printf("STARLTE GOV: TMU %s, hottest big probe %d C: 1794 MHz, governor stopped\n", on ? "on" : "off", hot);
++			return;
++		}
++		uint32_t want = hot >= 85 ? 1794000 : hot <= 75 ? hi : cur;
++		if (want != cur) {
++			if (starlte_acpm_dvfs(3, want)) {
++				cur = want;
++			}
++			printf("STARLTE GOV: big cluster %d C -> %u kHz\n", hot, cur);
++		}
++		if (++n % 240 == 0) {           /* every minute */
++			printf("STARLTE GOV: big cluster %d C, %u kHz\n", hot, cur);
++		}
++		st_msleep(250);
++	}
++}
++
++static void
++st_cpu_gov_start(void)
++{
++	uint32_t khz = 0;
++	if (!PE_parse_boot_argn("starcpugov", &khz, sizeof(khz)) || (khz != 1 && khz <= 1794000)) {
++		return;
++	}
++	if (khz > 2704000) {
++		khz = 2704000;
++	}
++	st_tmu = ml_io_map(0x10070000, 0x1000);
++	thread_t th;
++	if (st_tmu && kernel_thread_start(st_cpu_gov_thread, (void *)(uintptr_t)khz, &th) == KERN_SUCCESS) {
++		thread_deallocate(th);
++		printf("STARLTE GOV: %s (TMU_TOP 0x10070000)\n", khz == 1 ? "watch only" : "big cluster raised while under 75-85 C");
++	}
++}
++
+ /* Returns true once both touch rails are on (or were already). */
+ static bool
+ st_power_on(void)
+@@ -661,6 +749,7 @@ st_thread(__unused void *arg, __unused wait_result_t wr)
+ 		bool on = st_power_on();
+ 		if (acpm_ap_max) {
+ 			st_cpu_dvfs();
++			st_cpu_gov_start();
+ 		}
+ 		/* Supplies up, then the S6SY761 boots its firmware (~100 ms). */
+ 		st_msleep(150);
