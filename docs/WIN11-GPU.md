@@ -1000,6 +1000,15 @@ the CPU path. sbshare adds a GPU re-sample after the producer's update.
   - KMD: DWM's whole back buffer at each primary blt;
   - UMD (sb-patches/0108): DWM's GPU view of every surface it opened.
 
+**cycle-t13t-1 (02:00):**
+- **DWM's GPU sees the windows' content in the surfaces it opened** (LogonUI's wallpaper 32/32, the user tile
+  white).
+- **Yet its composed frame is all zeros:** a transparent clear with nothing drawn on top.
+- **The non-primary blts are DWM's own buffer-to-buffer copies.**
+- **T13u** logs, per sampled present, what was drawn since the last one: draw counts, the render target against
+  the presented resource, the last draw's state, clears, viewport and scissor, and predication
+  (sb-patches/0109).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
