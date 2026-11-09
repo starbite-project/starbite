@@ -56,6 +56,8 @@ def main():
         if n:
             env = job.setdefault('EnvironmentVariables', {})
             env['OS_ACTIVITY_DT_MODE'] = 'YES'
+            if os.environ.get('LOGLEVEL') == 'debug':
+                env['OS_ACTIVITY_MODE'] = 'debug'   # info + debug messages too
             job['StandardErrorPath'] = '/dev/console' if os.environ.get('LOGDEST') == 'console' else f'/private/var/tmp/{n}.log'
             hit.add(n)
             report.append(f'log  {job.get("Label")} ({prog(job)}) -> {job["StandardErrorPath"]}')

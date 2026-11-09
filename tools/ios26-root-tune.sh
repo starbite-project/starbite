@@ -72,9 +72,10 @@ GOOD_LAUNCHD=5d8bc695
 if [ "$mode" != prefs ]; then
     got=$(shasum -a 256 "$L" | cut -c1-8)
     # known good: Apple's original as edited before today (5d8bc695) or a launchd.plist one of our tunes wrote
-    # (only TUNE=launchd-log ones: T3's full tune of 2026-11-08 17:06 made launchd panic)
+    # (tunes whose report says TUNE=launchd-log or TUNE=full: T3's of 2026-11-08 17:06, which panicked through the
+    # pre-0409 truncation bug, predates that line and stays out)
     good=$( { echo $GOOD_LAUNCHD; for t in build/test-boots/*-ios26collect/tune/launchd.plist; do
-        [ -f "$t" ] && grep -qx "TUNE=launchd-log" "$(dirname "$t")/report.txt" 2>/dev/null && shasum -a 256 "$t" | cut -c1-8; done; } | sort -u)
+        [ -f "$t" ] && grep -qxE "TUNE=(launchd-log|full)" "$(dirname "$t")/report.txt" 2>/dev/null && shasum -a 256 "$t" | cut -c1-8; done; } | sort -u)
     echo "$good" | grep -qx "$got" || { echo "pulled launchd.plist is $got, not a known-good one (stale read?): refusing to edit it"; exit 1; }
 fi
 files=()
