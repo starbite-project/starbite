@@ -137,6 +137,8 @@ struct _MW_ADAPTER {
     volatile ULONG QCount;
     BOOLEAN Running;            /* a job chain of Queue[QHead] is on the GPU */
     BOOLEAN NeedDpc;            /* a fence completed: queue the DPC */
+    /* T17: MwLog writes without ZwFlushKey while set (the guard thread's batches, flushed once per LiveFlushSec) */
+    volatile BOOLEAN LogBatch;
     ULONG RunningSlot;
     ULONG64 JobStart;           /* interrupt time the running chain started */
     ULONG LastSubmittedFence, LastCompletedFence;
@@ -231,6 +233,7 @@ struct _MW_ADAPTER {
 
 /* ---- trace: Seen_<ddi>, Fail_<ddi> in the device's registry key ---- */
 void MwLog(MW_ADAPTER *A, PCWSTR Name, ULONG Value);
+void MwLogFlush(MW_ADAPTER *A);
 void MwTraceReset(MW_ADAPTER *A);
 void MwLogHook(void *Owner, PCWSTR Name, ULONG Value);
 NTSTATUS MwRet(MW_ADAPTER *A, PCWSTR Name, NTSTATUS St);

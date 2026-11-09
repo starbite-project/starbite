@@ -7,6 +7,25 @@
 
 /* ---- trace ---- */
 
+/* T17: the trace key to disk (after a batch of MwLog writes). */
+void MwLogFlush(MW_ADAPTER *A)
+{
+    HANDLE key, sub;
+    UNICODE_STRING subName = RTL_CONSTANT_STRING(L"sbwddm");
+    OBJECT_ATTRIBUTES oa;
+
+    if (A == NULL || A->Pdo == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return;
+    if (!NT_SUCCESS(IoOpenDeviceRegistryKey(A->Pdo, PLUGPLAY_REGKEY_DEVICE, KEY_WRITE, &key)))
+        return;
+    InitializeObjectAttributes(&oa, &subName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, key, NULL);
+    if (NT_SUCCESS(ZwOpenKey(&sub, KEY_WRITE, &oa))) {
+        (void)ZwFlushKey(sub);
+        ZwClose(sub);
+    }
+    ZwClose(key);
+}
+
 void MwLog(MW_ADAPTER *A, PCWSTR Name, ULONG Value)
 {
     HANDLE key, sub;
@@ -25,8 +44,12 @@ void MwLog(MW_ADAPTER *A, PCWSTR Name, ULONG Value)
         RtlInitUnicodeString(&name, Name);
         (void)ZwSetValueKey(sub, &name, 0, REG_DWORD, &Value, sizeof(Value));
         /* To disk now: a bugcheck loses registry writes still in memory,
-         * and the last value before one is the one that matters. */
-        (void)ZwFlushKey(sub);
+         * and the last value before one is the one that matters.
+         * S9 port (T17): not inside the guard thread's batches. A flush writes the whole SYSTEM hive's log;
+         * one per Live_ value (~26 a second) kept the UFS busy for the whole user session 2026-11-09, made
+         * every registry user wait, and left the primary hive 10,000 log entries behind at its crash. */
+        if (!A->LogBatch)
+            (void)ZwFlushKey(sub);
         ZwClose(sub);
     }
     ZwClose(key);

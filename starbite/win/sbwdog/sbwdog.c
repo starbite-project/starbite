@@ -106,6 +106,8 @@ static ULONG Param(PCWSTR Name, ULONG Dflt)
     return r;
 }
 
+NTSYSAPI NTSTATUS NTAPI ZwDeleteFile(POBJECT_ATTRIBUTES ObjectAttributes);   /* ntifs.h */
+
 static void State(PCWSTR Name, ULONG Value, BOOLEAN Flush)
 {
     HANDLE h;
@@ -260,6 +262,23 @@ static VOID FeedThread(PVOID Ctx)
                 State(L"ArmedNow", armed, TRUE);
             }
         }
+        /* T17: \Windows\Starbite\sbwdog.unattended (made from TWRP, one-shot, deleted here) makes this one boot
+         * an unattended one without a registry write: a dirty hive (the user's T15 session ended in a 0x7E at
+         * restart) must not be edited offline, and a boot that repairs it must still come back by itself. The
+         * watchdog is armed as soon as the file is seen (seconds after boot-start); restart and cap as for
+         * Unattended=1. */
+        if (!dead && !unattended && elapsed < 60 && FileExists(L"\\SystemRoot\\Starbite\\sbwdog.unattended")) {
+            UNICODE_STRING fn = RTL_CONSTANT_STRING(L"\\SystemRoot\\Starbite\\sbwdog.unattended");
+            OBJECT_ATTRIBUTES foa;
+            unattended = 1;
+            g.PmuWritable = TRUE;
+            armSec = Param(L"ArmSec", 82);
+            armed = Armed() || Arm(armSec);
+            State(L"UnattendedByFile", elapsed, TRUE);
+            State(L"ArmedNow", armed, TRUE);
+            InitializeObjectAttributes(&foa, &fn, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+            State(L"UnattendedFileDeleted", NT_SUCCESS(ZwDeleteFile(&foa)), TRUE);
+        }
         if (dead) {
             /* a pure dead-man: does the counter run? (82 s = 65063 counts; 10 s = 7935) */
             if (!sampled10 && elapsed >= 10) {
@@ -331,7 +350,8 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT Drv, PUNICODE_STRING Reg)
     armSec = (Param(L"Unattended", 0) || dead) ? Param(L"ArmSec", 82) : 0;
     pa.QuadPart = (LONGLONG)PMU_PA;
     g.PmuWritable = armSec != 0;          /* the PMU is written only to arm (ArmSec), and only bit 23 */
-    g.Pmu = (volatile UCHAR *)MmMapIoSpaceEx(pa, PAGE_SIZE, PAGE_NOCACHE | (g.PmuWritable ? PAGE_READWRITE : PAGE_READONLY));
+    /* T17: mapped writable always (the file switch may arm later); written only while PmuWritable */
+    g.Pmu = (volatile UCHAR *)MmMapIoSpaceEx(pa, PAGE_SIZE, PAGE_NOCACHE | PAGE_READWRITE);
     if (g.Wdt == NULL || g.Pmu == NULL) {
         State(L"MapFailed", (g.Wdt == NULL) | (g.Pmu == NULL) << 1, TRUE);
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -370,6 +390,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT Drv, PUNICODE_STRING Reg)
     State(L"Rearms", 0, FALSE);
     State(L"KillFile", 0, FALSE);
     State(L"KillFileSeenAt", 0, FALSE);
+    State(L"UnattendedByFile", 0, FALSE);
     State(L"Dm10WtCnt", 0, FALSE);
     State(L"Dm20WtCnt", 0, FALSE);
     State(L"DeadmanTest", dead, TRUE);

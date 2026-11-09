@@ -21,7 +21,8 @@ export SB_SIGN_CERT=${SB_SIGN_CERT:-$main/build/woa/ufs-sys/sign/starbite-test.c
 # Both are plain WDM-style kernel images (GsDriverEntry); sbdisplay is a display miniport through displib.
 "$win/build.sh" wdm "$out/sbthermal.sys" "$here/sbthermal/sbthermal.c" "$here/sbthermal/sbth_core.c" "$here/common/sbw_acpm.c"
 # the dead-man feeder for unattended boots (the loader's cluster-1 watchdog), a boot-start service
-"$win/build.sh" wdm "$out/sbwdog.sys" "$here/sbwdog/sbwdog.c"
+# T17: link maps next to the drivers, so a bugcheck address can be named (tools/win/kdump.py --map)
+LDFLAGS="/map:$out/sbwdog.map" "$win/build.sh" wdm "$out/sbwdog.sys" "$here/sbwdog/sbwdog.c"
 LIBS="displib.lib ntstrsafe.lib libcntpr.lib" \
     "$win/build.sh" wdm "$out/sbdisplay.sys" "$here/sbdisplay/sbdisplay.c" "$here/sbdisplay/sbdc_core.c"
 
@@ -29,7 +30,7 @@ LIBS="displib.lib ntstrsafe.lib libcntpr.lib" \
 
 # Stage 4: maliwddm (wddm-mali-g52) ported to the S9, with sbdisplay built in as its display-only mode.
 w=$here/sbwddm
-LIBS="displib.lib ntstrsafe.lib libcntpr.lib" \
+LDFLAGS="/map:$out/sbwddm.map" LIBS="displib.lib ntstrsafe.lib libcntpr.lib" \
     "$win/build.sh" wdm "$out/sbwddm.sys" "$w/maliwddm/adapter.c" "$w/maliwddm/command.c" "$w/maliwddm/display.c" \
     "$w/maliwddm/memory.c" "$w/common/maligpu.c" "$w/s9.c" "$w/guard.c" "$w/sbx_cmd.c" "$w/sd_embed.c" \
     "$here/sbdisplay/sbdc_core.c" "$here/sbmali/sbm_core.c" "$here/common/sbw_acpm.c"

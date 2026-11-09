@@ -15,6 +15,9 @@ if exist triangle.ppm move /y triangle.ppm triangle-hw.ppm > nul
 rem T15: several D3D devices in one process (Explorer has two; sb-patches/0113), six at once, and a pace
 sbtwo.exe hw sbtwo.log >> gputest.log 2>&1
 echo sbtwo hw exit %errorlevel% >> gputest.log
+rem T17: DirectWrite text, a WIC image and Direct2D shapes, the Mali against WARP (sbtext-hw.ppm, sbtext-warp.ppm)
+sbtext.exe hw sbtext.log >> gputest.log 2>&1
+echo sbtext hw exit %errorlevel% >> gputest.log
 sbtex.exe hw sbtex-hw.log >> gputest.log 2>&1
 echo sbtex hw exit %errorlevel% >> gputest.log
 rem T13o: shared surfaces, one process and two (as DWM opens window surfaces)

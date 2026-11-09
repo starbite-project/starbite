@@ -36,6 +36,7 @@ main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)     # build/store lives
 mode=cycle
 case "${1:-}" in
 --clean-only|--deadman-test) mode=${1#--}; shift; stage= ;;
+--clean-by-file) mode=clean-by-file; stage=${2:?usage: gpu-cycle.sh --clean-by-file STAGE OUT}; shift 2 ;;
 --measure) mode=measure; stage=${2:?usage: gpu-cycle.sh --measure STAGE OUT}; shift 2 ;;
 --install-default) mode=install-default; stage=${2:?usage: gpu-cycle.sh --install-default STAGE OUT}; shift 2 ;;
 *) stage=${1:?usage: gpu-cycle.sh STAGE OUT [...]}; shift ;;
@@ -165,7 +166,9 @@ install() {
     if [ "$1" = 1 ]; then
         python3 "$HS" "$tmp/SYSTEM" "$tmp/S0" param sbwddm --root FullGuardBoots=0 >/dev/null
         # unattended cycles: the guard never clears itself (each install resets it); --install-default sets 1
-        python3 "$HS" "$tmp/S0" "$tmp/S1" param sbwddm FullMode=1 GuardAutoClear="${guard_auto:-0}" >/dev/null
+        # T17: Live_ logging rate and hive flushes (1 s / every second in test cycles; the user's install 10 s / 60 s)
+        python3 "$HS" "$tmp/S0" "$tmp/S1" param sbwddm FullMode=1 GuardAutoClear="${guard_auto:-0}" \
+            LiveSec="${live_sec:-1}" LiveFlushSec="${live_flush:-1}" >/dev/null
     else cp "$tmp/SYSTEM" "$tmp/S1"; fi
     if python3 tools/woa/hive.py "$tmp/S1" 'ControlSet001\Services\sbwdog' 2>/dev/null | grep -q "Start"; then cp "$tmp/S1" "$tmp/S2"
     else python3 "$HS" "$tmp/S1" "$tmp/S2" add sbwdog --start 0 --oneshot 0 --image 'System32\drivers\sbwdog.sys' --display "Starbite watchdog feeder" >/dev/null; fi
@@ -211,7 +214,7 @@ install-default)
     # itself after a boot that showed content on the panel; sbwdog only feeds (Unattended=0: no arming, no
     # restart, no cap). Nothing is booted; the gputest is not armed. The win11 row must use the GPU firmware
     # (windows-t13b.uefi: the Mali interrupt lines), or full mode refuses to start and Windows uses Basic Display.
-    guard_auto=1 unattended=0
+    guard_auto=1 unattended=0 live_sec=10 live_flush=60
     stage_gputest=$stage/gputest
     mount_rw
     if [ -d "$stage_gputest" ]; then stage_tmp=$(mktemp -d); cp "$stage"/*.sys "$stage"/*.dll "$stage_tmp"/ 2>/dev/null; stage=$stage_tmp; fi
@@ -227,6 +230,33 @@ measure)
     clean_boot || { gap_report "$out/post/SYSTEM"; log "the self-restart did not leave the hive clean"; exit 3; }
     gap_report "$out/post/SYSTEM"
     keep=1; finish
+    exit 0 ;;
+clean-by-file)
+    # T17: a dirty hive with sbwdog Unattended=0 (the user's own install), which must not be edited offline. STAGE's
+    # sbwdog.sys (it reads the one-shot file switch \Windows\Starbite\sbwdog.unattended) and the switch are written
+    # as files only; then a display-only boot repairs the hive, arms the watchdog and restarts itself. No registry
+    # write before the hive is clean. Windows writes any pending crash dump (pagefile) to C:\Windows\Minidump or
+    # MEMORY.DMP during that boot: they are pulled after it.
+    python3 - "$stage/sbwdog.sys" <<'PY' || { log "$stage/sbwdog.sys has no file switch (T17+ needed)"; exit 1; }
+import sys
+sys.exit(0 if open(sys.argv[1], 'rb').read().count('sbwdog.unattended'.encode('utf-16-le')) else 1)
+PY
+    mount_rw
+    adb shell "mkdir -p $W/Windows/Starbite $W/Windows/Minidump" >/dev/null
+    mkdir -p "$out/pre"
+    adb exec-out "dd if=$W/pagefile.sys bs=1048576 count=8 2>/dev/null" > "$out/pre/pagefile-head.bin" || true   # binary-safe
+    push_check "$stage/sbwdog.sys" "$W/Windows/System32/drivers/sbwdog.sys" || { umount_w; exit 4; }
+    adb shell "rm -f $W/Windows/Starbite/sbwdog.off; echo on > $W/Windows/Starbite/sbwdog.unattended" >/dev/null
+    umount_w
+    log "clean-by-file: sbwdog from $(basename "$stage") + the one-shot switch; pagefile head saved; booting $ckey"
+    clean_boot || { log "the hive is still dirty after the repair boot"; exit 3; }
+    mount_ro
+    mkdir -p "$out/dumps"
+    adb shell "ls $W/Windows/Minidump/ 2>/dev/null; ls -la $W/Windows/MEMORY.DMP 2>/dev/null" | tee -a "$out/cycle.log"
+    adb pull "$W/Windows/Minidump" "$out/dumps/" >/dev/null 2>&1 || true
+    adb pull "$W/Windows/MEMORY.DMP" "$out/dumps/" >/dev/null 2>&1 || true
+    umount_w
+    log "clean-by-file done; dumps (if any) in $out/dumps; sbwdog stays Unattended=0 in the registry (the switch was one-shot)"
     exit 0 ;;
 clean-only)
     need_unattended
@@ -295,7 +325,7 @@ for d in ReportArchive ReportQueue; do
 done
 if [ $gpu_armed = 1 ]; then
     mkdir -p "$out/pre/gputest"
-    for f in gputest.log sbtex-hw.log sbtex-softpipe.log sbtex-hw-vertexid.log sbshare.log sbdwm-hw.log sbdwm-softpipe.log sbfps.log sbfps-watchdog.log sbtwo.log triangle-hw.ppm armed; do
+    for f in gputest.log sbtex-hw.log sbtex-softpipe.log sbtex-hw-vertexid.log sbshare.log sbdwm-hw.log sbdwm-softpipe.log sbfps.log sbfps-watchdog.log sbtwo.log sbtext.log sbtext-hw.ppm sbtext-warp.ppm triangle-hw.ppm armed; do
         adb pull "$W/starbite/auto/gpu/$f" "$out/pre/gputest/" >/dev/null 2>&1 || true
     done
     if [ -f "$out/pre/gputest/armed" ]; then log "gputest did NOT run (still armed: no logon?)"; else log "gputest: $(grep -a -E 'exit|TEST' "$out/pre/gputest/gputest.log" 2>/dev/null | tr -d '\r' | tr '\n' ';' | cut -c1-400)"; fi

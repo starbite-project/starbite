@@ -156,6 +156,10 @@ static VOID GuardThread(PVOID Ctx)
     ULONG testBand = S9GetDword(L"Parameters", L"TestBand", 0);     /* T13f: seen by the user; off now */
     /* T13g: the emulated scanout's period (MwRefreshScanout), 0 = off */
     ULONG refreshMs = S9GetDword(L"Parameters", L"RefreshMs", 200);
+    /* T17: Live_ logging every LiveSec seconds, written to disk every LiveFlushSec (one hive flush per batch;
+     * T13-T16 flushed after every single value). Test cycles: 1/1; the user's install: 10/60. */
+    ULONG liveSec = S9GetDword(L"Parameters", L"LiveSec", 1), liveFlushSec = S9GetDword(L"Parameters", L"LiveFlushSec", 1);
+    ULONG lastFlush = 0;
     ULONG64 nextSec = KeQueryInterruptTime() + 10000000ULL, lastWork = (ULONG64)-1, lastPeriodic = 0;
     LONG lastGen = -1;
     if (refreshMs != 0 && refreshMs < 50)
@@ -188,8 +192,13 @@ static VOID GuardThread(PVOID Ctx)
         if (KeQueryInterruptTime() < nextSec)
             continue;
         nextSec += 10000000ULL;
-        LiveCounters(a, prev);
-        MwLog(a, L"Live_Seconds", ++secs);
+        ++secs;
+        BOOLEAN logNow = liveSec <= 1 || secs % liveSec == 0;
+        a->LogBatch = TRUE;
+        if (logNow) {
+            LiveCounters(a, prev);
+            MwLog(a, L"Live_Seconds", secs);
+        }
         /* T13f: a visible probe of the framebuffer path, independent of DWM and the GPU: a magenta band over
          * the top 96 rows at 20 s and 40 s (Parameters\TestBand, default 1). Seen on the panel = the
          * framebuffer the driver writes is the one DECON scans. */
@@ -214,7 +223,7 @@ static VOID GuardThread(PVOID Ctx)
             MwLog(a, L"S9ThermalHold", hold ? a->ThermalLevel : 0);
         }
         a->FbLiveLast = MwFbSamples(a);
-        if (secs % 10 == 0 && a->FbVa != NULL && secs <= 600) {
+        if (logNow && secs % 10 == 0 && a->FbVa != NULL && secs <= 600) {
             /* T14d: what the panel shows over the boot (lock screen, sign-in, desktop, a test app): the centre
              * pixel every 10 s as FbCtr<seconds> */
             WCHAR nm[16];
@@ -222,6 +231,11 @@ static VOID GuardThread(PVOID Ctx)
             RtlInitEmptyUnicodeString(&us, nm, sizeof(nm));
             if (NT_SUCCESS(RtlUnicodeStringPrintf(&us, L"FbCtr%03u", secs)))
                 MwLog(a, nm, ((const ULONG *)(a->FbVa + (SIZE_T)(a->Fb.Height / 2) * a->Fb.Pitch))[a->Fb.Width / 2]);
+        }
+        a->LogBatch = FALSE;
+        if (logNow && secs - lastFlush >= (liveFlushSec ? liveFlushSec : 1)) {
+            lastFlush = secs;
+            MwLogFlush(a);
         }
         if (a->FbLiveLast >= 8)
             a->FbLiveSecs++;

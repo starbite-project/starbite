@@ -1240,6 +1240,32 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
 - Desktop Duplication's CPU reads from uncached allocations, the Starbite link slowdown (sblinkd copies
   dirty rects to a staging texture and maps it).
 
+### 6.24 The T15 restart bugcheck, the registry storm, and a way out of a dirty hive (2026-11-09)
+
+- **The bugcheck:** the user's Start → Restart was very slow, then 0x7E (`B1=c0000005 B2=fffff80910661cd4`,
+  TWRP pstore).
+  - Matching the page offset `cd4` against T15's sbwddm (rebuilt with a link map, code byte-identical) leaves
+    one memory access, `MwDestroyAllocation+0xd8`. That load cannot fault (the same page was just touched by
+    the mutex acquire). sbwdog has none.
+  - The module is open until the crash dump is read. The bugcheck was followed by ~80 UFS writes (a dump in
+    pagefile.sys, which the next boot moves to `Minidump\` / `MEMORY.DMP`).
+  - `tools/win/kdump.py` reads small (triage) dumps: drivers, the faulting module+offset, exception record and
+    ARM64 context from the saved stack, symbolised with our link maps. `starbite/win/build.sh` now keeps
+    `sbwddm.map` / `sbwdog.map`.
+- **The registry storm:** MwLog called ZwFlushKey after every value. The guard thread logs ~26 `Live_` values
+  a second, so the SYSTEM hive was flushed ~26 times a second for the whole session (UFS and registry
+  contention, a slow shutdown).
+  - The dirty hive's primary is at sequence 142366 while its logs hold 152455-153965, so the hive cannot be
+    replayed offline (`hive-replay.py` applies nothing). Windows must repair it itself.
+  - The guard thread now logs in batches (`LogBatch`) and flushes once per `LiveFlushSec`.
+  - gpu-cycle sets `LiveSec` / `LiveFlushSec` to 1/1 in test cycles and 10/60 in `--install-default`.
+- **Out of the dirty hive with Unattended=0:**
+  - sbwdog's one-shot file switch `\Windows\Starbite\sbwdog.unattended`: arms, restarts and caps as
+    Unattended=1, then deletes the file. The PMU is now mapped writable at load; writes are still gated.
+  - `gpu-cycle.sh --clean-by-file STAGE OUT` uses only file writes: sbwdog.sys and the switch. It also saves the
+    pagefile head and pulls the dumps after the repair boot.
+- **sbtext:** DirectWrite (grayscale, ClearType), WIC and Direct2D shapes on the Mali versus WARP.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
