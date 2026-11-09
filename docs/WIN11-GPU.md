@@ -1017,6 +1017,15 @@ the CPU path. sbshare adds a GPU re-sample after the producer's update.
   constant buffer, premultiplied blend, a 1440x2960 BGRA target, then all together), on the Mali and on
   softpipe.
 
+**cycle-t13v-1 (02:50):**
+- **sbdwm on the Mali:** indexed draws, index offsets, 32-bit indices, blending and the 1440x2960 BGRA target all
+  pass.
+- **A vertex-shader constant buffer fails:** the transform reads as zero and nothing is drawn. DWM's own draw,
+  rebuilt, comes out all zero. softpipe passes everything.
+- **So DWM's black frames come from constant buffers on the Mali path.**
+- **T13w bisects it:** b0 (the uniform-lowering path) vs b1 (UBO), vertex vs pixel shader, and initial data vs
+  UpdateSubresource vs DYNAMIC Map. Each variant draws the value it read.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

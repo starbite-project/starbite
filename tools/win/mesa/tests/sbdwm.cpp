@@ -44,7 +44,16 @@ static const char kHlsl[] =
     "  V o; o.uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); o.p = float4(p * xf.xy + xf.zw, 0, 1); return o; }\n"
     "float4 ps_blue(V i) : SV_Target { return float4(0.0, 0.0, 1.0, 1.0); }\n"
     "float4 ps_green(V i) : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }\n"
-    "float4 ps_sample(V i) : SV_Target { return t.Sample(s, i.uv); }\n";
+    "float4 ps_sample(V i) : SV_Target { return t.Sample(s, i.uv); }\n"
+    /* T13w: what a shader reads from a constant buffer, as a colour (cb = 0.25, 0.5, 0.75, 1.0) */
+    "cbuffer Y : register(b1) { float4 yv; };\n"
+    "struct C { float4 p : SV_Position; float4 c : COLOR0; };\n"
+    "C vs_c0(float2 p : POSITION) { C o; o.p = float4(p, 0, 1); o.c = xf; return o; }\n"
+    "C vs_c1(float2 p : POSITION) { C o; o.p = float4(p, 0, 1); o.c = yv; return o; }\n"
+    "float4 ps_c(C i) : SV_Target { return i.c; }\n"
+    "V vs_pass(float2 p : POSITION) { V o; o.uv = float2(0, 0); o.p = float4(p, 0, 1); return o; }\n"
+    "float4 ps_c0(V i) : SV_Target { return xf; }\n"
+    "float4 ps_c1(V i) : SV_Target { return yv; }\n";
 
 static ID3D11Device *dev;
 static ID3D11DeviceContext *ctx;
@@ -303,6 +312,91 @@ int main(int argc, char **argv)
     };
     for (const Pass &p : passes)
         run(p);
+
+    /* ---- T13w: the constant-buffer bisect. Each draws a full quad with the colour the shader read from a
+     * constant buffer: want 0.25, 0.5, 0.75, 1.0 = RGBA8 0xffbf8040. */
+    {
+        const float cv[4] = { 0.25f, 0.5f, 0.75f, 1.0f };
+        struct V { const char *name, *vs, *ps; int slot; int kind; } vars[] = {
+            /* kind: 0 DEFAULT + initial data, 1 DEFAULT + UpdateSubresource, 2 DYNAMIC + Map(WRITE_DISCARD) */
+            { "cb-vs-b0", "vs_c0", "ps_c", 0, 0 },
+            { "cb-vs-b1", "vs_c1", "ps_c", 1, 0 },
+            { "cb-ps-b0", "vs_pass", "ps_c0", 0, 0 },
+            { "cb-ps-b1", "vs_pass", "ps_c1", 1, 0 },
+            { "cb-vs-upd", "vs_c0", "ps_c", 0, 1 },
+            { "cb-vs-dyn", "vs_c0", "ps_c", 0, 2 },
+            { "cb-ps-dyn", "vs_pass", "ps_c0", 0, 2 },
+        };
+        for (const V &v : vars) {
+            D3D11_BUFFER_DESC bd2 = {};
+            bd2.ByteWidth = 16;
+            bd2.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            bd2.Usage = v.kind == 2 ? D3D11_USAGE_DYNAMIC : D3D11_USAGE_DEFAULT;
+            bd2.CPUAccessFlags = v.kind == 2 ? D3D11_CPU_ACCESS_WRITE : 0;
+            D3D11_SUBRESOURCE_DATA init = { cv, 0, 0 };
+            ID3D11Buffer *cb = nullptr;
+            if (FAILED(dev->CreateBuffer(&bd2, v.kind == 0 ? &init : nullptr, &cb))) {
+                out("TEST %-9s: FAIL (CreateBuffer)\n", v.name);
+                failures++;
+                continue;
+            }
+            if (v.kind == 1)
+                ctx->UpdateSubresource(cb, 0, nullptr, cv, 0, 0);
+            if (v.kind == 2) {
+                D3D11_MAPPED_SUBRESOURCE m;
+                if (SUCCEEDED(ctx->Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+                    memcpy(m.pData, cv, 16);
+                    ctx->Unmap(cb, 0);
+                }
+            }
+            ID3DBlob *vsb2 = compile(v.vs, "vs_4_0"), *psb2 = compile(v.ps, "ps_4_0");
+            ID3D11VertexShader *vs2 = nullptr;
+            ID3D11PixelShader *ps2 = nullptr;
+            ID3D11InputLayout *il2 = nullptr;
+            ID3D11Texture2D *rt = texture(64, 64, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET, nullptr, 0);
+            ID3D11RenderTargetView *rtv = nullptr;
+            if (!vsb2 || !psb2 || !rt ||
+                FAILED(dev->CreateVertexShader(vsb2->GetBufferPointer(), vsb2->GetBufferSize(), nullptr, &vs2)) ||
+                FAILED(dev->CreatePixelShader(psb2->GetBufferPointer(), psb2->GetBufferSize(), nullptr, &ps2)) ||
+                FAILED(dev->CreateInputLayout(&ied, 1, vsb2->GetBufferPointer(), vsb2->GetBufferSize(), &il2)) ||
+                FAILED(dev->CreateRenderTargetView(rt, nullptr, &rtv))) {
+                out("TEST %-9s: FAIL (setup)\n", v.name);
+                failures++;
+                continue;
+            }
+            const float grey[4] = { 0.5f, 0.5f, 0.5f, 1.0f };
+            ctx->ClearRenderTargetView(rtv, grey);
+            ctx->OMSetRenderTargets(1, &rtv, nullptr);
+            D3D11_VIEWPORT vp = { 0.0f, 0.0f, 64.0f, 64.0f, 0.0f, 1.0f };
+            ctx->RSSetViewports(1, &vp);
+            UINT stride = 8, offset = 0;
+            ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+            ctx->IASetInputLayout(il2);
+            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx->VSSetShader(vs2, nullptr, 0);
+            ctx->PSSetShader(ps2, nullptr, 0);
+            ID3D11Buffer *none = nullptr;
+            ctx->VSSetConstantBuffers(0, 1, &none);
+            ctx->VSSetConstantBuffers(1, 1, &none);
+            ctx->PSSetConstantBuffers(0, 1, &none);
+            ctx->PSSetConstantBuffers(1, 1, &none);
+            ctx->VSSetConstantBuffers(v.slot, 1, &cb);
+            ctx->PSSetConstantBuffers(v.slot, 1, &cb);
+            ctx->Draw(6, 0);
+            ID3D11RenderTargetView *nrt = nullptr;
+            ctx->OMSetRenderTargets(1, &nrt, nullptr);
+            int xy[2] = { 32, 32 };
+            UINT px = 0;
+            bool ok = pixels(rt, 1, xy, &px) && (px == 0xffbf8040u || px == 0xffc08040u);
+            out("TEST %-9s: %s  got 0x%08x  want 0xffbf8040 (grey 0xff808080 = nothing drawn)\n", v.name,
+                ok ? "PASS" : "FAIL", px);
+            if (!ok)
+                failures++;
+            rtv->Release();
+            rt->Release();
+            cb->Release();
+        }
+    }
     out("sbdwm %s: %d test(s) failed\n", dll, failures);
     if (logf)
         fclose(logf);
