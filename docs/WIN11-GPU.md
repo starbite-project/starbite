@@ -1314,6 +1314,20 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
 - **sbtex:** R8G8B8A8_UINT, R16G16_UINT, R16G16B16A16_UINT and R32G32B32A32_UINT inputs, plus an R8G8B8A8_UNORM
   control.
 
+### 6.28 T20's trace: Direct2D's flat integer varyings; T21 (2026-11-09)
+
+- **Direct2D's vertex shader** (TGSI from T20's dump):
+  - It reads `R16G16_SINT` and `R32_SINT` elements, per vertex and per instance, and converts them with `I2F`.
+    sbtex's integer-format tests all pass.
+  - It passes raw integer bits on, `OUT[2] = (IN[4].x, IN[3].y, IN[3].x)`.
+- **The pixel shader** reads that input `CONSTANT` and computes buffer offsets with `UADD`/`UMAD`, then
+  `SAMPLE_I` into a UINT buffer view and a 2D texture.
+- **The cause:** tgsi_to_nir marks TGSI shaders `separate_shader` and types varyings float32. Panfrost skips its
+  untrusted-type rules for separate shaders, so the integers went through F32 varying formats, which is lossy
+  (varyings.rst).
+- **sb-patches/0117:** the rules apply to separate shaders too (VS highp → U32; FS flat → U32, smooth → F32).
+  The host test compiles a flat-integer FS to `LD_VAR_FLAT.v4.u32`.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

@@ -1,0 +1,21 @@
+diff --git a/src/panfrost/compiler/pan_nir_collect_varyings.c b/src/panfrost/compiler/pan_nir_collect_varyings.c
+index c7a43af..f9e5b9f 100644
+--- a/src/panfrost/compiler/pan_nir_collect_varyings.c
++++ b/src/panfrost/compiler/pan_nir_collect_varyings.c
+@@ -153,10 +153,14 @@ walk_varyings(UNUSED nir_builder *b, nir_instr *instr, void *data)
+    unsigned size = nir_alu_type_get_type_size(type);
+    assert(base_type & (nir_type_int | nir_type_uint | nir_type_float));
+ 
++   /* Starbite (sb-patches/0117, docs/WIN11-GPU.md 6.28): separate shaders too. tgsi_to_nir marks every TGSI shader
++    * separate and types every varying float32, so D3D10 shaders (d3d10umd) passed integer bits through flat varyings
++    * in float formats, which is lossy ("mistaking an int for a float seems to be lossy", varyings.rst): Direct2D's
++    * colours and glyph data arrived as zeros (sbtext, T18-T20). The rules below (VS writes highp as U32; FS reads
++    * flat as U32, smooth as F32) need no linking: descriptor formats may differ between the stages. */
+    bool untrusted_type = !wv_data->trust_varying_flat_highp_types &&
+                          sem.location >= VARYING_SLOT_VAR0 &&
+-                         !sem.medium_precision &&
+-                         !b->shader->info.separate_shader;
++                         !sem.medium_precision;
+    if (untrusted_type) {
+       /* Don't trust the type, varying_opts might have smashed everything
+        * onto floats.  Replace all flat varyings with ints and smooth varyings

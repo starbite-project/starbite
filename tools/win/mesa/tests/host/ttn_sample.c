@@ -107,6 +107,18 @@ static const char *shaders[][2] = {
      "  0: SAMPLE_I TEMP[0], IMM[0].xxxx, SVIEW[1]\n"
      "  1: MOV OUT[0], TEMP[0]\n"
      "  2: END\n" },
+   { "flat integer varying (Direct2D's colour bits, sb-patches/0117)",
+     "FRAG\n"
+     "DCL IN[0], GENERIC[2], CONSTANT\n"
+     "DCL OUT[0], COLOR\n"
+     "DCL TEMP[0]\n"
+     "IMM[0] UINT32 { 255, 8, 16, 0 }\n"
+     "  0: AND TEMP[0].x, IN[0].xxxx, IMM[0].xxxx\n"
+     "  1: USHR TEMP[0].y, IN[0].xxxx, IMM[0].yyyy\n"
+     "  2: AND TEMP[0].y, TEMP[0].yyyy, IMM[0].xxxx\n"
+     "  3: U2F TEMP[0].xy, TEMP[0].xyyy\n"
+     "  4: MOV OUT[0], TEMP[0].xyxy\n"
+     "  5: END\n" },
    { "control: vertex shader, legacy TXL: NIR only (this harness has no varying layout; the backend crashes on any VS)",
      "VERT\n"
      "DCL IN[0]\n"
@@ -199,6 +211,18 @@ main(void)
       NIR_PASS(_, s, nir_lower_io, nir_var_shader_in | nir_var_shader_out, glsl_type_size,
                nir_lower_io_use_interpolated_input_intrinsics);
       NIR_PASS(_, s, nir_opt_constant_folding);
+      nir_foreach_function_impl(impl, s) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+               if (in->intrinsic == nir_intrinsic_load_input)
+                  printf("    load_input base %u type 0x%x (before Panfrost's varying collection)\n",
+                         nir_intrinsic_base(in), (unsigned)nir_intrinsic_dest_type(in));
+            }
+         }
+      }
       printf("  textures_used 0x%x samplers_used 0x%x\n", (unsigned)s->info.textures_used[0],
              (unsigned)s->info.samplers_used[0]);
       print_tex(s);
