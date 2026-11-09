@@ -67,6 +67,7 @@ int ui_scroll_max;                          /* the last app page's scroll range 
 static int light_return = SCR_LOCK;
 static uint32_t light_argb;
 static uint64_t light_hint_until, light_off_at;
+static int light_heat;                      /* 1.2-alpha5: the light is Survival's white screen (a status strip) */
 static char toast[64];
 static uint64_t toast_until;
 static int app_awake;
@@ -456,9 +457,33 @@ void kui_light(uint32_t argb)
             screen = light_return;
             full = dirty = 1;
         }
+        if (light_heat)
+            kt_cancel(KT_UI, 8);
+        light_heat = 0;
         return;
     }
+    light_heat = 0;
     light_on(argb, SCR_APP, 10);
+}
+
+/* 1.2-alpha5 (the user, 2026-11-09): Survival's screen as heat: full white at the panel's top level (heater.c keeps the
+ * boost), a dark strip at the top with the temperatures and the battery's current, refreshed every second; a tap or a
+ * key brings back the screen it covered (the Heat page's "White screen" shows it again). Off when Survival ends. */
+void kui_heat_light(int on)
+{
+    if (!on) {
+        if (light_heat)
+            kui_light(0);
+        return;
+    }
+    if (screen == SCR_LIGHT && light_heat)
+        return;
+    int ret = screen == SCR_LIGHT ? light_return : screen;
+    if (ret == SCR_CONFIRM || ret == SCR_OFF || ret == SCR_GUEST || ret == SCR_SOS)
+        ret = SCR_APP;
+    light_on(0xffffffffU, ret, 24U * 60U);
+    light_heat = 1;
+    kt_set(KT_UI, 8, sb_ms(), 1000, 1);
 }
 
 void kui_awake(int on)
@@ -1274,13 +1299,53 @@ static void build_confirm(void)
             cur[i].y += 60;
 }
 
+#define HEAT_STRIP_H 180
+#define HEAT_STRIP_C 0xff1c1c1eU
+
+static void ub_c10s(struct ub *u, int c10)
+{
+    if (c10 <= -1000) {
+        ub_s(u, "--");
+        return;
+    }
+    if (c10 < 0) {
+        ub_c(u, '-');
+        c10 = -c10;
+    }
+    ub_dec(u, (uint64_t)(c10 / 10));
+    ub_c(u, '.');
+    ub_dec(u, (uint64_t)(c10 % 10));
+}
+
 static void build_light(void)
 {
     struct el *e = add(cur, &ncur, E_FIELD);
     e->x = 0, e->y = 0, e->w = UI_W, e->h = UI_H;
     e->color = light_argb;
     if (sb_ms() < light_hint_until)
-        scopy(e->b, sizeof(e->b), "Tap or press a key to turn it off");
+        scopy(e->b, sizeof(e->b), light_heat ? "Survival: the screen as heat. Tap for the normal screen" :
+                                               "Tap or press a key to turn it off");
+    if (!light_heat)
+        return;
+    struct sbos_heat h;
+    heater_status(&h);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "SoC ");
+    ub_c10s(&u, h.soc_c10);
+    ub_s(&u, " \xc2\xb0" "C  battery ");
+    ub_c10s(&u, h.bat_c10);
+    ub_s(&u, " \xc2\xb0" "C  ");
+    ub_dec(&u, (uint64_t)(h.ma < 0 ? -h.ma : h.ma));
+    ub_s(&u, " mA  ");
+    ub_dec(&u, (uint64_t)(h.pct < 0 ? 0 : h.pct));
+    ub_c(&u, '%');
+    struct el *t = add(cur, &ncur, E_FIELD);
+    t->x = 0, t->y = 0, t->w = UI_W, t->h = HEAT_STRIP_H;
+    t->color = HEAT_STRIP_C;
+    t->value = 1;                           /* the strip: white text at its own place */
+    scopy(t->b, sizeof(t->b), u.b);
+    scopy(t->a, sizeof(t->a), h.why);
 }
 
 static void build_sos(void)
@@ -1634,6 +1699,11 @@ static void draw_el_raw(const struct el *e, int idx)
     }
     case E_FIELD: {
         ui_fill(e->x, e->y, e->w, e->h, e->color);
+        if (screen == SCR_LIGHT && e->value == 1) {     /* 1.2-alpha5: Survival's status strip */
+            ui_text_c(F_ROW, UI_W / 2, e->y + 70, e->b, 0xffffffffU);
+            ui_text_c(F_ROW, UI_W / 2, e->y + 140, e->a, 0xffaeaeb2U);
+            break;
+        }
         if (screen == SCR_LIGHT && e->b[0])
             ui_text_c(F_ROW, UI_W / 2, UI_H - 200, e->b, ui_mix(0xff000000U, e->color, 90));
         if (screen == SCR_SOS) {
@@ -2554,6 +2624,11 @@ void ui_ktimer(unsigned id)
         fled_timer();                       /* 0.6.3: the flash pin low after the pulse */
     } else if (id == 4 && screen == SCR_LIGHT) {
         kui_light(0);
+    } else if (id == 8) {
+        if (screen == SCR_LIGHT && light_heat)
+            dirty = 1;                      /* the strip's numbers */
+        else
+            kt_cancel(KT_UI, 8);
     } else if (id == 5) {
         if (key_hold_armed >= 0 && sb_ms() >= key_hold_until)
             key_hold_armed = -1;

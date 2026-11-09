@@ -201,7 +201,9 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
                              0 not run, 1 readable, -1 trapped, -2 the core did not start */,
        SET_LINUX = 22 /* 1.2-alpha1: Linux apps on the big cores (a test): write 1 asks first (the kernel's
                          confirmation), then shows the home tile "Linux" until a restart; 0 hides it and stops Linux.
-                         Reads 1 on, 0 off, -1 the Linux files are not in the store */ };
+                         Reads 1 on, 0 off, -1 the Linux files are not in the store */,
+       SET_HEAT_WHITE = 23 /* 1.2-alpha5: write 1 while Survival runs: the screen white again (Survival's heat);
+                              0 the normal screen */ };
 
 /* 1.0-rc3: the full-heat battery data for the minutes-left estimates (Heat's confirmation and its live readout).
  * Measured on the phone (rc2, 2026-11-08, Manual flat out, 7 cores + GPU): 2.8 A at 3.67 V (about 10 W; peak 2.86 A),

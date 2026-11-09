@@ -822,12 +822,15 @@ static void run_summary(void)
 }
 
 /* Extreme's extra heat (0.6), all within ratings: the panel at its top brightness level and the LED on (its torch
- * current: the GPIO driver has one); both put back when Extreme stops or holds */
-static int ext_on, ext_led, ext_led_used;
+ * current: the GPIO driver has one); both put back when Extreme stops or holds.
+ * 1.2-alpha5 (the user, 2026-11-09): Survival keeps the panel's top level but never lights the LED, and shows the
+ * screen full white (ui.c kui_heat_light: a dark status strip; a tap brings the normal screen back, the Heat page's
+ * "White screen" button the white again) once per session */
+static int ext_on, ext_led, ext_led_used, ext_white_used;
 static void extreme_confirm_done(int ok);
 
-/* on for the whole Extreme session (through HOLDING: no switching every few seconds at the band); the LED once per
- * session (its own 10-minute limit then holds) */
+/* on for the whole Extreme / Survival session (through HOLDING: no switching every few seconds at the band); the
+ * LED (Extreme only) and the white screen (Survival only) once per session */
 static void extreme_extras(int on)
 {
     if (on == ext_on)
@@ -835,18 +838,34 @@ static void extreme_extras(int on)
     ext_on = on;
     if (on) {
         panel_boost(1, 1);
-        if (!ext_led_used) {
+        if (ctl.level == HEAT_EXTREME && !ext_led_used) {
             ext_led_used = 1;
             ext_led = !torch_on() && torch_ready() && torch_set(1) == 0;   /* 240 mA with Settings' full LED (0.6.3) */
         }
-        sb_log(ext_led ? "heater: Extreme: the panel at its top level, the LED on" : "heater: Extreme: the panel at its top level");
+        if (ctl.level >= HEAT_SURVIVAL && !ext_white_used) {
+            ext_white_used = 1;
+            kui_heat_light(1);
+        }
+        sb_log(ext_led ? "heater: Extreme: the panel at its top level, the LED on" :
+               ctl.level >= HEAT_SURVIVAL ? "heater: Survival: the panel at its top level, the screen white (no LED)" :
+                                            "heater: Extreme: the panel at its top level");
     } else {
         panel_boost(1, 0);
         if (ext_led)
             torch_set(0);
         ext_led = 0;
-        sb_log("heater: Extreme's panel level and LED put back");
+        kui_heat_light(0);
+        sb_log("heater: the panel level, the white screen and the LED put back");
     }
+}
+
+/* 1.2-alpha5: the Heat page's "White screen" button while Survival runs */
+int heater_white(void)
+{
+    if (!heater_running_ui() || ctl.level < HEAT_SURVIVAL)
+        return SBOS_EINVAL;
+    kui_heat_light(1);
+    return 0;
 }
 
 static void restore_and_check(void)
@@ -854,6 +873,7 @@ static void restore_and_check(void)
     int was_recording = heat_rec.running != 0;
     extreme_extras(0);
     ext_led_used = 0;                       /* a new session may light it again */
+    ext_white_used = 0;
     gpu_heat_session = 0;
     {
         /* 1.1-beta2: the M3s' FlexPMU off before they see the stop: C2 for each, CPD for the last */

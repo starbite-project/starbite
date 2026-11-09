@@ -243,6 +243,8 @@ static void show(void)
         }
         fmt_s(&f, h.gpu_on ? " GPU on." : " GPU off.");
         ui_textline(f.b, ORANGE);
+        /* 1.2-alpha5: the screen as heat (full white at the panel's top level; a tap comes back here) */
+        ui_button(30, "White screen: more heat", "Full white with the readings on top. Tap it to come back.", 0);
     }
     fmt_init(&f);
     temp(&f, h.bat_c10);
@@ -413,7 +415,9 @@ void app_event(const struct sbos_event *ev)
         struct sbos_heat h;
         heat_status(&h);
         int running = h.state == HEAT_ST_RUNNING || h.state == HEAT_ST_HOLDING || h.state == HEAT_ST_PAUSED;
-        if (ev->id == 23 && !running)
+        if (ev->id == 30 && running)
+            setting_set(SET_HEAT_WHITE, 1);
+        else if (ev->id == 23 && !running)
             heat_request(surv_tripoff ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0);
         else if (ev->id == 26 && !running)
             setting_set(SET_HEAT_SURV_BAT_C10, h.surv_bat_c10 >= 600 ? 550 : h.surv_bat_c10 >= 580 ? 600 : 580);

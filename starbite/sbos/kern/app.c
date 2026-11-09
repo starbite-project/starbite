@@ -519,6 +519,8 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         return 0;
     case SET_OCP_PROBE:
         return heater_ocp_probe();
+    case SET_HEAT_WHITE:
+        return arg[1] ? heater_white() : (kui_heat_light(0), 0);
     case SET_LINUX:
         if (!arg[1]) {
             kui_linux_on = 0;

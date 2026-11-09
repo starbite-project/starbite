@@ -208,6 +208,16 @@ void selftest_timer(unsigned id)
         kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
         return;
 #else
+#ifdef SBOS_SELFTEST_PROBE
+        {
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: heat probe H1: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: heat probe H1: the watchdog could not be set (the loader's stays): ", w);
+            phase = 30;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
 #ifdef GST_BUILD
         if (guest_variant()) {
             unsigned w = hw_wdt_selftest(30);
@@ -393,6 +403,23 @@ void selftest_timer(unsigned id)
         kui_home();
         guest_power_off();                  /* (already off after a pass; after a failure: MSG_STOP, up to 1 s) */
         sb_logx("selftest: Linux state at the restart (0 off): ", (uint64_t)guest_state());
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_PROBE
+    case 30:                                /* 1.2-alpha5 probe H1: one step every 100 ms (probe.c) */
+        if (!heatprobe_step()) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
+            return;
+        }
+        sb_logx("selftest: heat probe H1 done, seconds: ", (sb_ms() - t0) / 1000U);
+        phase = 31;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+        return;
+    case 31:
+        active = 0;
+        kui_light(0);
+        panel_boost(4, 0);
         power_restart_recovery();
         return;
 #endif

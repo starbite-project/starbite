@@ -311,6 +311,36 @@ int panel_dump(void)
     return ok;
 }
 
+/* 1.2-alpha5 (probe H1): the ACL registers Samsung's brightness sequence also sends (55 on/off, B4 control 6 bytes;
+ * the vendor's STAR_A3_S0_ACL_ONOFF / ACL_CONTROL), read only, for the HBM decision */
+int panel_dump_acl(void)
+{
+    static const uint8_t k2on[3] = { 0xf0, 0x5a, 0x5a }, k2off[3] = { 0xf0, 0xa5, 0xa5 };
+    if (!dsim_ready()) {
+        sb_log("panel: read: the link is not in command mode: nothing read");
+        return 0;
+    }
+    int was_masked = masked;
+    trig(1);
+    sb_mdelay(20);
+    uint8_t b[16];
+    int ok = 0;
+    if (!dcs_long(k2on, 3)) {
+        int n = dcs_read(0x55, b, 1);
+        log_hex("ACL on/off (55)", b, n);
+        ok = n == 1;
+        n = dcs_read(0xb4, b, 6);
+        log_hex("ACL control (B4)", b, n);
+        ok &= n == 6;
+    }
+    (void)dcs_long(k2off, 3);
+    if (!was_masked)
+        trig(0);
+    else
+        panel_kick();
+    return ok;
+}
+
 /* 0.6.5: the panel's own low-power mode (ALPM, 10 nits), Samsung's star_a3_s1 enter / exit tables exactly
  * (build/em-research-panel-hbm-lowpower.md 2.2): the picture in the panel's RAM stays; frames may still be sent.
  * Every enter is paired with an exit; the exit re-sends our AOR (the enter replaced it with 0B 74). */

@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha4"
+#define SBOS_VERSION "1.2-alpha5"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -311,6 +311,8 @@ int panel_brightness(int level);    /* the user's level: 0 untouched, 1..4 low..
 void panel_boost(int who, int on);  /* 1 Extreme, 2 SOS: the top level while any asks */
 void panel_emergency(int on);       /* 0.6.1: Emergency Mode's power profile */
 int panel_lpm(int on);              /* 0.6.5: the panel's low-power mode (ALPM 10 nits); 1 done */
+int panel_dump_acl(void);
+int heatprobe_step(void);
 int panel_dump(void);
 int audio_probe(void);              /* 0.7: the codec's state read only, its ID if S-Boot left it powered (audio.c) */               /* 0.6.5: read only: the panel's ID, gamma, ELVSS, VINT, AOR, IRC (logged) */
 extern int panel_in_lpm;
@@ -373,6 +375,8 @@ void kui_gauge(const char *caption, const char *value, int permille, uint32_t c)
 const char *app_tile(int a);        /* the line an app shows under its home tile */
 void kui_toast(const char *t, uint32_t ms);
 void kui_light(uint32_t argb);
+void kui_heat_light(int on);             /* 1.2-alpha5: Survival's white screen with a status strip */
+int heater_white(void);
 void kui_awake(int on);
 void kui_open_app(int a);
 void kui_home(void);

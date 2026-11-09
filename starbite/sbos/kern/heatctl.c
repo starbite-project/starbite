@@ -274,13 +274,16 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
     c->x_held = 0;
     c->gpu_want = 1;
     c->t_shed = in->now;
-    c->cal = surv ? 0 : 5;
+    /* 1.2-alpha5 (the user, 2026-11-09): Survival no longer measures the M3 combinations (beta6's 16 s of 3, 2 and 1
+     * cores made the dip the user saw: ~130 C on one fast core, ~100 C once four ran); every load starts at once
+     * (heater.c: one CPU_ON per 250 ms tick, about 2 s for all 7): 4 M3 cores at the quad clock, the A55s, the GPU */
+    c->cal = 5;
     for (int i = 0; i < 4; ++i)
         c->cal_mw[i] = 0;
     c->m3_n = 4;
     c->surv_m3_khz = surv ? M3_FULL : 0;
     if (surv)
-        c->max_cores = 3;                   /* the A55s first; the measurement picks the M3s */
+        c->cores = c->cold ? 3 : c->max_cores;   /* cold (below 20 C SoC / 5 C battery): the A55s for 30 s first */
     c->state = HEAT_ST_RUNNING;
     why(c, c->cold ? "Starting gently (cold)" : "Heating");
     return 0;
