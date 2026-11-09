@@ -1033,6 +1033,36 @@ the CPU path. sbshare adds a GPU re-sample after the producer's update.
 - **T13x (sb-patches/0110):** d3d10umd maps D3D slot n to gallium buffer n + 1 / `CONST[n + 1]`, so every D3D
   constant buffer takes the working path.
 
+### 6.19 T13x: the Windows 11 lock screen on the panel, drawn by the Mali (2026-11-09, ~03:30)
+
+**cycle-t13x-1:** about 100 s into the full-mode boot, the camera shows the **Windows 11 bloom lock-screen
+wallpaper on the panel.** DWM composed it on the Mali through sbumd (Mesa d3d10umd + Panfrost) and sbwddm, and
+the KMD's emulated scanout copied it to the framebuffer.
+
+What it took, after the GPU and kernel driver themselves (T12, T13a-c):
+- **0102:** D3D10 texture opcodes for a NIR-only driver.
+- **0103:** runtime allocations for shared, presented and primary resources.
+- **sbwddm:** the cache-correct CPU views; the stale-present fix (MwRender); flips carried out; an emulated
+  scanout that shows DWM's back buffer.
+- **0105:** GPU texture copies.
+- **0110:** constant buffers kept off gallium slot 0, which reads wrong on this path.
+
+The bugs found on the way, each by a test that isolated it:
+- tgsi_to_nir has no D3D10 sample opcodes (T13b);
+- a cached view of write-combined pages (T13d);
+- render submissions replayed stale presents (T13h);
+- Panfrost's CPU texture copies, which read zeros or stale data through an opened surface's mapping (T13o);
+- DXGI's Blt stub, harmless here because DWM never calls it (T13r);
+- cb0 through the default-uniform route reads wrong (T13w).
+
+**What is left:**
+- **Speed:** the emulated scanout copies on the CPU from write-combined memory, up to 0.7 s per whole frame.
+  Next: copy only on a new source and let DWM's dirty rectangles do the rest (T13y). After that, the copy on
+  the GPU, or DWM's frames rendered straight into the framebuffer.
+- **Robustness:** the JS 0x51 job (one per process); SV_VertexID (Panfrost's Bifrost backend has no
+  load_vertex_id_zero_base on this path).
+- **The normal boot path:** full mode as the default, behind the guard. The guard still never clears itself.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
