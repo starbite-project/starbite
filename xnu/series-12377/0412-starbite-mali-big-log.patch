@@ -1,0 +1,41 @@
+From 374bc48dec4fed5f2317665036ab6b63aac05de0 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Mon, 9 Nov 2026 16:10:31 +0200
+Subject: [PATCH] patch: 0412-starbite-mali-big-log.patch - the first 60 GPU
+ buffers over 8 MiB logged with process and exact size
+
+---
+ iokit/Kernel/arm/StarbiteMali.cpp | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/iokit/Kernel/arm/StarbiteMali.cpp b/iokit/Kernel/arm/StarbiteMali.cpp
+index 1395c8cb..3fb099b7 100644
+--- a/iokit/Kernel/arm/StarbiteMali.cpp
++++ b/iokit/Kernel/arm/StarbiteMali.cpp
+@@ -32,6 +32,7 @@
+ #include "SweetSurface.h"
+ extern "C" int proc_pid(struct proc *);
+ extern "C" void proc_name(int pid, char *buf, int size);
++extern "C" void proc_selfname(char *buf, int size);
+ 
+ extern "C" void sweet_memstat_gpu_client(struct proc *p);  /* bsd/kern/kern_memorystatus.c */
+ extern "C" void *get_bsdtask_info(task_t);
+@@ -362,6 +363,18 @@ StarbiteMaliUserClient::createBO(sbm_create_bo *a)
+ 	/* whole 16 KiB pages: Mesa maps the buffer into a task with 16 KiB pages */
+ 	uint64_t bytes = ((uint64_t)a->size + 0x3fff) & ~0x3fffull;
+ 	uint32_t pages = (uint32_t)(bytes / 0x1000);
++	/* 0412: the first 60 buffers over 8 MiB, by process, with their exact size (what backboardd's 16-32 MiB
++	 * buffers are: Mesa's own, render targets or pools) */
++	if (pages > 2048) {
++		static int big_logged;
++		if (big_logged < 60) {
++			big_logged++;
++			char who[32];
++			proc_selfname(who, sizeof(who));
++			IOLog("STARLTE GPU BIG: %s create %llu bytes (%llu KiB) flags 0x%x\n", who, (uint64_t)a->size,
++			    (uint64_t)a->size >> 10, (unsigned)a->flags);
++		}
++	}
+ 	uint64_t va = sbm_va_alloc(bytes);
+ 	if (va == 0) {
+ 		return kIOReturnNoSpace;
