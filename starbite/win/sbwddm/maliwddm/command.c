@@ -793,10 +793,15 @@ NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMIT
          * in-order queue). Copy only once everything before it has completed: the job interrupt keeps
          * completing work while this waits (it runs above our IRQL). Bounded; a timeout is counted. */
         ULONG64 t0 = KeQueryInterruptTime();
-        while (a->QCount != 0 && !a->Stopping && KeQueryInterruptTime() - t0 < 2000000ULL)
-            KeStallExecutionProcessor(20);
-        if (a->QCount != 0)
-            a->PresentWaitTimeouts++;
+        /* T14e: a flip to a framebuffer-aliased primary reads nothing on the CPU (the GPU drew it where the panel
+         * scans), so it does not wait for the queue to drain. Everything else (blts, fills, flips of other
+         * allocations, which are sampled on the CPU) still waits for everything before it. */
+        if (priv->Present.Kind != MW_PRESENT_FLIP || priv->Present.Src == NULL || !priv->Present.Src->FbAliased) {
+            while (a->QCount != 0 && !a->Stopping && KeQueryInterruptTime() - t0 < 2000000ULL)
+                KeStallExecutionProcessor(20);
+            if (a->QCount != 0)
+                a->PresentWaitTimeouts++;
+        }
         DoPresent(a, &priv->Present);
     }
     /* Paging buffers (empty: map/unmap happen on the CPU), presents and

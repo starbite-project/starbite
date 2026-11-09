@@ -1138,6 +1138,15 @@ and the slowest frame.
 - **T14d:** the framebuffer's centre pixel every 10 s (`FbCtrNNN`), a crash logger in sbfps, and WER reports in
   the pull.
 
+**cycle-t14d-1 (04:47):**
+- **sbfps:** blt model 79.8 fps, flip model 15.0 fps.
+- **The FbCtr timeline:** the panel tracks DWM (lock screen, sign-in, the dark welcome background), and the
+  lock/sign-in UI stays over the session.
+- **Why the flip model is slow:** d3d10umd's RotateResourceIdentities created and freed a new 17 MB temporary
+  per flip. It was shareable, so it never went through Panfrost's BO cache.
+- **T14e:** the temporary is kept per device and made without the share binds (sb-patches/0111), and flips of
+  framebuffer-aliased primaries skip the KMD's queue-drain wait.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

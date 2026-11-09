@@ -1,0 +1,68 @@
+diff --git a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+index 5b54c15..c2c94cc 100644
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -355,6 +355,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
+    struct pipe_context *pipe = pDevice->pipe;
+ 
+    pipe->flush(pipe, NULL, 0);
++   pipe_resource_reference(&pDevice->rot_temp, NULL);   /* sb-patches/0111 */
+ 
+    for (i = 0; i < PIPE_MAX_SO_BUFFERS; ++i) {
+       pipe_so_target_reference(&pDevice->so_targets[i], NULL);
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index 2936311..6d6cc81 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -350,9 +350,24 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
+     * alternative of recreating all views.
+     */
+ 
+-   struct pipe_resource *temp_resource;
+-   temp_resource = screen->resource_create(screen, resource0);
+-   assert(temp_resource);
++   /* Starbite (sb-patches/0111, docs/WIN11-GPU.md 6.21): one temporary per device, kept while it fits, and
++    * made without the shared/display binds (it is never shared or presented): T14d's flip-model app ran at
++    * 15 fps against 80 fps blt model, and DWM's log showed the temporary 1440x2960 BO created and closed on
++    * every flip. Shareable BOs bypass Panfrost's BO cache (sb-patches/0103), so each was a new VidMm
++    * allocation, zero-filled and mapped. */
++   Device *pDev = CastDevice(RotateResourceIdentities->hDevice);
++   struct pipe_resource *temp_resource = pDev->rot_temp;
++   if (!temp_resource || temp_resource->width0 != resource0->width0 ||
++       temp_resource->height0 != resource0->height0 || temp_resource->format != resource0->format ||
++       temp_resource->target != resource0->target || temp_resource->last_level != resource0->last_level ||
++       temp_resource->array_size != resource0->array_size) {
++      struct pipe_resource t = *resource0;
++      t.bind &= ~(PIPE_BIND_SHARED | PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT);
++      t.bind |= PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW;
++      pipe_resource_reference(&pDev->rot_temp, NULL);
++      pDev->rot_temp = screen->resource_create(screen, &t);
++      temp_resource = pDev->rot_temp;
++   }
+    if (!temp_resource) {
+       return E_OUTOFMEMORY;
+    }
+@@ -393,7 +408,7 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
+                                  &src_box);
+    }
+ 
+-   pipe_resource_reference(&temp_resource, NULL);
++   /* the temporary stays on the device (pDev->rot_temp) */
+ 
+    return S_OK;
+ }
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index 913da38..6314b5e 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -119,6 +119,10 @@ struct Device
+     * depends on whether a depth-stencil view is bound (see
+     * BindDepthStencilState). */
+    struct DepthStencilState *bound_dss;
++
++   /* Starbite (sb-patches/0111): the temporary resource RotateResourceIdentities copies through, kept between
++    * presents (it was created and destroyed on every flip: a fresh 17 MB allocation through VidMm each time) */
++   struct pipe_resource *rot_temp;
+ };
+ 
+ 
