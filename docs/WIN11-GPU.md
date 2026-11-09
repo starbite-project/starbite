@@ -1328,6 +1328,20 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
 - **sb-patches/0117:** the rules apply to separate shaders too (VS highp → U32; FS flat → U32, smooth → F32).
   The host test compiles a flat-integer FS to `LD_VAR_FLAT.v4.u32`.
 
+### 6.29 T21: still black; Direct2D's buffer views; T22 (2026-11-09)
+
+- **T21:** sbtext unchanged (only the bitmap moved slightly).
+- **The trace:** Direct2D's frame is four draws: two instanced glyph runs, a bitmap strip, and a 1696-vertex shape
+  strip. The clear is a ClearRenderTargetView.
+  - The text pixel shader reads a `Buffer<uint>` view.
+  - The shape and bitmap vertex shaders index a 250-entry constant array (`CONST[2][TEMP]`) with an integer
+    attribute.
+- **sb-patches/0118:** Bifrost (arch < 9) reads buffer textures through attribute descriptors, which Panfrost
+  emits only for shaders whose `info.texture_buffers` is set (GLSL's sampler lowering sets it, tgsi_to_nir did
+  not). tgsi_to_nir now sets it; the host test shows the attribute slot.
+- **T22's tests:** sbtext draws each element alone against WARP (tiles differing and tiles all zero); sbtex adds
+  `cbindex` and `bufload`.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

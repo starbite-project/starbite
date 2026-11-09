@@ -343,7 +343,7 @@ for d in ReportArchive ReportQueue; do
 done
 if [ $gpu_armed = 1 ]; then
     mkdir -p "$out/pre/gputest"
-    for f in gputest.log sbtex-hw.log sbtex-softpipe.log sbtex-hw-vertexid.log sbshare.log sbdwm-hw.log sbdwm-softpipe.log sbfps.log sbfps-watchdog.log sbtwo.log sbtext.log sbtext-hw.ppm sbtext-warp.ppm triangle-hw.ppm armed; do
+    for f in gputest.log sbtex-hw.log sbtex-softpipe.log sbtex-hw-vertexid.log sbshare.log sbdwm-hw.log sbdwm-softpipe.log sbfps.log sbfps-watchdog.log sbtwo.log sbtext.log sbtext-hw.ppm sbtext-warp.ppm sbtext-hw-only-clear.ppm sbtext-hw-only-roundrect.ppm triangle-hw.ppm armed; do
         adb pull "$W/starbite/auto/gpu/$f" "$out/pre/gputest/" >/dev/null 2>&1 || true
     done
     if [ -f "$out/pre/gputest/armed" ]; then log "gputest did NOT run (still armed: no logon?)"; else log "gputest: $(grep -a -E 'exit|TEST' "$out/pre/gputest/gputest.log" 2>/dev/null | tr -d '\r' | tr '\n' ';' | cut -c1-400)"; fi

@@ -241,8 +241,12 @@ main(void)
       inputs.fau.promote_immediates = true;
       struct util_dynarray bin = UTIL_DYNARRAY_INIT;
       pan_shader_compile(s, &inputs, &bin, &info);
-      printf("  %s: %u bytes of Bifrost code, texture_count %u\n", bin.size ? "PASS" : "FAIL",
-             (unsigned)bin.size, info.texture_count);
+      printf("  %s: %u bytes of Bifrost code, texture_count %u, attribute_count %u\n", bin.size ? "PASS" : "FAIL",
+             (unsigned)bin.size, info.texture_count, info.attribute_count);
+      if (strstr(shaders[i][0], "BUFFER") && info.attribute_count == 0) {
+         printf("  FAIL: a buffer view but no attribute slot (Bifrost reads texel buffers as attributes)\n");
+         fails++;
+      }
       if (!bin.size)
          fails++;
       util_dynarray_fini(&bin);

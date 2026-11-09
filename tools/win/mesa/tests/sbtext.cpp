@@ -74,8 +74,10 @@ static IDXGIAdapter1 *mali_adapter(void)
 }
 
 /* Draws the scene with Direct2D on `dev` and reads it back into px (BGRA). */
+/* T22: `mask` picks the elements (1 gray text, 2 ClearType text, 4 bitmap, 8 rounded rectangle, 16 ellipse);
+ * the white clear is always drawn. */
 static bool render(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID2D1Factory *d2d, IDWriteFactory *dw,
-                   IWICImagingFactory *wic, UINT *px, const char *who)
+                   IWICImagingFactory *wic, UINT *px, const char *who, unsigned mask = 31)
 {
     D3D11_TEXTURE2D_DESC td = {};
     td.Width = W;
@@ -130,13 +132,17 @@ static bool render(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID2D1Factory *d2
     rt->BeginDraw();
     rt->Clear(D2D1::ColorF(1, 1, 1, 1));
     rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-    rt->DrawText(L"Starbite 0123 Text", 18, fmt, D2D1::RectF(8, 8, W - 8, 80), black);
+    if (mask & 1)
+        rt->DrawText(L"Starbite 0123 Text", 18, fmt, D2D1::RectF(8, 8, W - 8, 80), black);
     rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-    rt->DrawText(L"Starbite 0123 Text", 18, fmt, D2D1::RectF(8, 88, W - 8, 160), black);
-    if (bmp)
+    if (mask & 2)
+        rt->DrawText(L"Starbite 0123 Text", 18, fmt, D2D1::RectF(8, 88, W - 8, 160), black);
+    if (bmp && (mask & 4))
         rt->DrawBitmap(bmp, D2D1::RectF(0, 176, 128, 304), 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(176, 176, 336, 304), 16, 16), blue);
-    rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(424, 240), 64, 56), black, 6.0f);
+    if (mask & 8)
+        rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(176, 176, 336, 304), 16, 16), blue);
+    if (mask & 16)
+        rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(424, 240), 64, 56), black, 6.0f);
     hr = rt->EndDraw();
     if (FAILED(hr))
         out("%s: EndDraw 0x%08lx\n", who, (unsigned long)hr);
@@ -251,6 +257,37 @@ int main(int argc, char **argv)
     if (!okh || !oks) {
         out("FAIL render (mali %d, warp %d)\n", okh, oks);
         return 104;
+    }
+    /* T22: each element alone (and the clear alone): the whole frame against WARP's, and which 16x16 tiles differ */
+    {
+        static UINT ea[W * H], eb[W * H];
+        struct { const char *name; unsigned mask; } el[] = {
+            { "only-clear", 0 }, { "only-gray", 1 }, { "only-cleartype", 2 }, { "only-bitmap", 4 },
+            { "only-roundrect", 8 }, { "only-ellipse", 16 },
+        };
+        for (auto &e : el) {
+            bool k1 = render(hw, hwc, d2d, dw, wic, ea, "mali", e.mask), k2 = render(sw, swc, d2d, dw, wic, eb, "warp", e.mask);
+            int bad_tiles = 0, black_tiles = 0;
+            for (int ty = 0; ty < H / 16; ty++)
+                for (int tx = 0; tx < W / 16; tx++) {
+                    double dd = diff(ea, eb, ty * 16, ty * 16 + 16, tx * 16, tx * 16 + 16);
+                    bad_tiles += dd >= 6.0;
+                    bool all0 = true;
+                    for (int y = ty * 16; y < ty * 16 + 16 && all0; y++)
+                        for (int x = tx * 16; x < tx * 16 + 16 && all0; x++)
+                            all0 = ea[y * W + x] == 0;
+                    black_tiles += all0;
+                }
+            double dd = diff(ea, eb, 0, H, 0, W);
+            bool ok = k1 && k2 && dd < 3.0;
+            out("TEST %-14s: %s  frame difference %.2f, %d of %d tiles differ, %d tiles all 0x00000000\n", e.name,
+                ok ? "PASS" : "FAIL", dd, bad_tiles, (W / 16) * (H / 16), black_tiles);
+            if (e.mask == 0 || e.mask == 8) {
+                char n[64];
+                snprintf(n, sizeof(n), "sbtext-hw-%s.ppm", e.name);
+                ppm(n, ea);
+            }
+        }
     }
     struct { const char *name; int y0, y1, x0, x1; bool text; } r[] = {
         { "gray", 0, 80, 0, W, true }, { "cleartype", 80, 160, 0, W, true },

@@ -1,0 +1,25 @@
+diff --git a/src/gallium/auxiliary/nir/tgsi_to_nir.c b/src/gallium/auxiliary/nir/tgsi_to_nir.c
+index 190852b..e5ae525 100644
+--- a/src/gallium/auxiliary/nir/tgsi_to_nir.c
++++ b/src/gallium/auxiliary/nir/tgsi_to_nir.c
+@@ -1108,6 +1108,8 @@ get_sampler_var(struct ttn_compile *c, int binding,
+ 
+       /* Record textures used */
+       BITSET_SET(c->build.shader->info.textures_used, binding);
++      if (dim == GLSL_SAMPLER_DIM_BUF)   /* sb-patches/0118 */
++         BITSET_SET(c->build.shader->info.texture_buffers, binding);
+       if (op == nir_texop_txf || op == nir_texop_txf_ms)
+          BITSET_SET(c->build.shader->info.textures_used_by_txf, binding);
+       BITSET_SET(c->build.shader->info.samplers_used, binding);
+@@ -1439,6 +1441,11 @@ get_texture_var(struct ttn_compile *c, unsigned binding, enum glsl_sampler_dim d
+    BITSET_SET(c->build.shader->info.textures_used, binding);
+    if (txf)
+       BITSET_SET(c->build.shader->info.textures_used_by_txf, binding);
++   /* sb-patches/0118: as gl_nir_lower_samplers_as_deref does. Bifrost (arch < 9) serves buffer textures as
++    * attributes and emits them only for shaders whose texture_buffers say so: without it Direct2D's
++    * Buffer<uint> reads (its glyph data) got no descriptor and its text came out empty (T22). */
++   if (dim == GLSL_SAMPLER_DIM_BUF)
++      BITSET_SET(c->build.shader->info.texture_buffers, binding);
+    return var;
+ }
+ 

@@ -25,6 +25,9 @@
 //   uintattr    a colour packed in an R32_UINT vertex attribute, unpacked with integer ops in the vertex shader
 //               (Direct2D's way; T18, sb-patches/0115: Bifrost loaded it converted to a float value)
 //   instattr    the same as a per-instance attribute, DrawInstanced
+//   cbindex     a colour from a 250-entry constant array (b1) indexed by an R16G16_SINT attribute (Direct2D's
+//               brush palette, T22)
+//   bufload     Buffer<uint>.Load in the pixel shader (Direct2D's glyph data, T22)
 //   int-*       uint4 vertex inputs from narrower integer formats (R8G8B8A8_UINT, R16G16_UINT, R16G16B16A16_UINT,
 //               R32G32B32A32_UINT) and an R8G8B8A8_UNORM float control (T20: Direct2D uses integer attributes)
 // The texture: left half green, right half red (RGBA8 0xff00ff00 / 0xff0000ff). Output lines "TEST name: PASS|FAIL
@@ -63,6 +66,10 @@ static const char kHlsl[] =
     "  VC o; o.p = float4(p, 0, 1);\n"
     "  o.c = float4((c >> 16) & 255, (c >> 8) & 255, c & 255, c >> 24) / 255.0; return o; }\n"
     "float4 ps_col(VC i) : SV_Target { return i.c; }\n"
+    "cbuffer Pal : register(b1) { float4 pal[250]; };\n"
+    "VC vs_cbidx(float2 p : POSITION, int2 c : COLOR) { VC o; o.p = float4(p, 0, 1); o.c = pal[c.x] * (c.y / 255.0); return o; }\n"
+    "Buffer<uint> bl : register(t0);\n"
+    "float4 ps_buf(V i) : SV_Target { uint v = bl.Load(3); return float4((v >> 16) & 255, (v >> 8) & 255, v & 255, 255) / 255.0; }\n"
     "VC vs_u4(float2 p : POSITION, uint4 c : COLOR) { VC o; o.p = float4(p, 0, 1); o.c = float4(c) / 255.0; return o; }\n"
     "VC vs_f4(float2 p : POSITION, float4 c : COLOR) { VC o; o.p = float4(p, 0, 1); o.c = c; return o; }\n"
     "float4 ps_solid(V i) : SV_Target { return float4(0.0, 0.0, 1.0, 1.0); }\n"
@@ -488,6 +495,80 @@ int main(int argc, char **argv)
             else
                 out("TEST %-9s: FAIL (readback)\n", f.name), failures++;
             rtv->Release(); rt->Release(); nl->Release(); nb->Release();
+        }
+        {   /* T22: cbindex */
+            ID3DBlob *bc = compile("vs_cbidx", "vs_4_0");
+            ID3D11VertexShader *vc = nullptr;
+            ID3D11InputLayout *lc = nullptr;
+            ID3D11Buffer *cb = nullptr, *ib2 = nullptr;
+            static float pal[250][4];
+            pal[7][0] = 0.2f; pal[7][1] = 0.4f; pal[7][2] = 0.6f; pal[7][3] = 1.0f;
+            D3D11_BUFFER_DESC cbd = {};
+            cbd.ByteWidth = sizeof(pal);
+            cbd.Usage = D3D11_USAGE_DEFAULT;
+            cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            D3D11_SUBRESOURCE_DATA cin = { pal, 0, 0 };
+            const short idx[6] = { 7, 255, 7, 255, 7, 255 };
+            D3D11_BUFFER_DESC ibd = {};
+            ibd.ByteWidth = sizeof(idx);
+            ibd.Usage = D3D11_USAGE_DEFAULT;
+            ibd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            D3D11_SUBRESOURCE_DATA iin = { idx, 0, 0 };
+            D3D11_INPUT_ELEMENT_DESC ce[2] = {
+                { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "COLOR", 0, DXGI_FORMAT_R16G16_SINT, 1, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
+            ID3D11Texture2D *rt = texture(DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET, nullptr, 0);
+            ID3D11RenderTargetView *rtv = nullptr;
+            if (bc && psc && SUCCEEDED(dev->CreateVertexShader(bc->GetBufferPointer(), bc->GetBufferSize(), nullptr, &vc)) &&
+                SUCCEEDED(dev->CreateInputLayout(ce, 2, bc->GetBufferPointer(), bc->GetBufferSize(), &lc)) &&
+                SUCCEEDED(dev->CreateBuffer(&cbd, &cin, &cb)) && SUCCEEDED(dev->CreateBuffer(&ibd, &iin, &ib2)) && rt &&
+                SUCCEEDED(dev->CreateRenderTargetView(rt, nullptr, &rtv))) {
+                const float grey[4] = { 0.5f, 0.5f, 0.5f, 1.0f };
+                ctx->ClearRenderTargetView(rtv, grey);
+                ctx->OMSetRenderTargets(1, &rtv, nullptr);
+                D3D11_VIEWPORT vp = { 0.0f, 0.0f, 64.0f, 64.0f, 0.0f, 1.0f };
+                ctx->RSSetViewports(1, &vp);
+                ID3D11Buffer *bufs[2] = { vb, ib2 };
+                UINT strides[2] = { 8, 4 }, offs[2] = { 0, 0 };
+                ctx->IASetVertexBuffers(0, 2, bufs, strides, offs);
+                ctx->IASetInputLayout(lc);
+                ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                ctx->VSSetShader(vc, nullptr, 0);
+                ctx->VSSetConstantBuffers(1, 1, &cb);
+                ctx->PSSetShader(psc, nullptr, 0);
+                ctx->Draw(3, 0);
+                if (readback(rt, DXGI_FORMAT_R8G8B8A8_UNORM, px))
+                    check("cbindex", px, 16, 0xff996633u, 48, 0xff996633u, 0xfffefefeu);   /* 0.2/0.4/0.6 +-1 */
+                else
+                    out("TEST cbindex  : FAIL (readback)\n"), failures++;
+                ID3D11Buffer *nocb = nullptr;
+                ctx->VSSetConstantBuffers(1, 1, &nocb);
+            } else {
+                out("TEST cbindex  : FAIL (setup)\n");
+                failures++;
+            }
+            if (rtv) rtv->Release();
+            if (rt) rt->Release();
+        }
+        {   /* T22: bufload */
+            const UINT data[8] = { 0, 0, 0, 0x00c06020u, 0, 0, 0, 0 };
+            D3D11_BUFFER_DESC bbd = {};
+            bbd.ByteWidth = sizeof(data);
+            bbd.Usage = D3D11_USAGE_DEFAULT;
+            bbd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA bin = { data, 0, 0 };
+            ID3D11Buffer *bb = nullptr;
+            ID3D11ShaderResourceView *bsrv = nullptr;
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd2 = {};
+            sd2.Format = DXGI_FORMAT_R32_UINT;
+            sd2.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+            sd2.Buffer.FirstElement = 0;
+            sd2.Buffer.NumElements = 8;
+            if (SUCCEEDED(dev->CreateBuffer(&bbd, &bin, &bb)) && SUCCEEDED(dev->CreateShaderResourceView(bb, &sd2, &bsrv)) &&
+                pass("ps_buf", bsrv, point, px))
+                check("bufload", px, 16, 0xff2060c0u, 48, 0xff2060c0u, 0xffffffffu);   /* R 0xc0 G 0x60 B 0x20 */
+            else
+                out("TEST bufload  : FAIL (setup or pass)\n"), failures++;
         }
         ID3D11Buffer *one[2] = { vb, nullptr };
         UINT st1[2] = { 8, 0 }, of1[2] = { 0, 0 };
