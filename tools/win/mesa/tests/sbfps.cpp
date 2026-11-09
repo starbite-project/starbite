@@ -36,6 +36,64 @@ static volatile LONG g_phase, g_frames, g_run;
 static const char *const kPhase[] = { "idle", "clear", "map", "draw", "present", "create", "release" };
 static volatile LONG64 g_last;          /* QPC of the last completed frame */
 static LARGE_INTEGER g_f;
+/* T14g: T14b's and T14f's blt runs stopped after ~500-600 frames and even the watchdog's lines never came: the
+ * watchdog now writes with WriteFile on its own handle (no CRT locks a stuck main thread could hold) and, when a
+ * frame is stuck, suspends the main thread and logs where it is (PC, LR and the frame-pointer chain). */
+static HANDLE g_raw = INVALID_HANDLE_VALUE, g_main;
+
+static void raw(const char *fmt, ...)
+{
+    char b[512];
+    va_list a;
+    va_start(a, fmt);
+    int n = _vsnprintf(b, sizeof(b) - 1, fmt, a);
+    va_end(a);
+    if (n < 0)
+        n = (int)strlen(b);
+    DWORD w;
+    if (g_raw != INVALID_HANDLE_VALUE)
+        WriteFile(g_raw, b, (DWORD)n, &w, nullptr);
+}
+
+static void where(const char *what, DWORD64 pc)
+{
+    HMODULE m = nullptr;
+    char mod[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)(ULONG_PTR)pc, &m) && m) {
+        GetModuleFileNameA(m, mod, sizeof(mod));
+        const char *base = strrchr(mod, '\\');
+        raw("  %s %s+0x%llx\r\n", what, base ? base + 1 : mod, (unsigned long long)(pc - (DWORD64)(ULONG_PTR)m));
+    } else {
+        raw("  %s 0x%llx\r\n", what, (unsigned long long)pc);
+    }
+}
+
+static void dump_main(void)
+{
+    CONTEXT c;
+    memset(&c, 0, sizeof(c));
+    c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (SuspendThread(g_main) == (DWORD)-1 || !GetThreadContext(g_main, &c)) {
+        raw("  (could not read the main thread)\r\n");
+        return;
+    }
+    where("pc", c.Pc);
+    where("lr", c.Lr);
+    DWORD64 fp = c.Fp;
+    for (int i = 0; i < 20 && fp; i++) {
+        DWORD64 frame[2];
+        SIZE_T got = 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ULONG_PTR)fp, frame, sizeof(frame), &got) ||
+            got != sizeof(frame))
+            break;
+        if (frame[1])
+            where("fp->lr", frame[1]);
+        if (frame[0] <= fp)
+            break;
+        fp = frame[0];
+    }
+}
 
 static void out(const char *fmt, ...)
 {
@@ -61,14 +119,12 @@ static DWORD WINAPI Watchdog(LPVOID)
         LONG fr = g_frames;
         double idle = (double)(now.QuadPart - g_last) / g_f.QuadPart;
         if (fr != lastFrames && g_phase != 0)
-            out("  run %ld: %ld frames so far\n", g_run, fr);
+            raw("  run %ld: %ld frames so far\r\n", g_run, fr);
         lastFrames = fr;
         if (g_phase != 0 && idle > 5.0) {
-            out("STUCK: run %ld, %ld frames done, in '%s' for %.1f s; exiting\n", g_run, fr,
-                kPhase[g_phase < 7 ? g_phase : 0], idle);
-            if (logfile)
-                fflush(logfile);
-            fflush(stdout);
+            raw("STUCK: run %ld, %ld frames done, in '%s' for %d s; the main thread:\r\n", g_run, fr,
+                kPhase[g_phase < 7 ? g_phase : 0], (int)idle);
+            dump_main();
             TerminateProcess(GetCurrentProcess(), 90);
         }
     }
@@ -277,6 +333,10 @@ int main(int argc, char **argv)
         secs = 20.0;
     logfile = fopen(argc > 3 ? argv[3] : "sbfps.log", "a");
     SetUnhandledExceptionFilter(Crash);
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &g_main, 0, FALSE,
+                    DUPLICATE_SAME_ACCESS);
+    g_raw = CreateFileA(argc > 3 ? "sbfps-watchdog.log" : "sbfps-watchdog.log", FILE_APPEND_DATA,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     QueryPerformanceFrequency(&g_f);
     CreateThread(nullptr, 0, Watchdog, nullptr, 0, nullptr);
     SetProcessDPIAware();
@@ -297,8 +357,9 @@ int main(int argc, char **argv)
     ShowWindow(wnd, SW_SHOW);
     UpdateWindow(wnd);
     int r = 0;
-    r += run(wnd, w, h, DXGI_SWAP_EFFECT_DISCARD, 1, "blt (DISCARD, 1 buffer)", secs);
+    /* T14g: flip first (T14f's blt stall kept the flip run from ever starting) */
     r += run(wnd, w, h, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, 2, "flip (FLIP_SEQUENTIAL, 2 buffers)", secs);
+    r += run(wnd, w, h, DXGI_SWAP_EFFECT_DISCARD, 1, "blt (DISCARD, 1 buffer)", secs);
     DestroyWindow(wnd);
     out("sbfps: done (%d run(s) failed)\n", r);
     if (logfile)
