@@ -43,6 +43,7 @@ Code: `starbite/guest/` (all new, owned by this work).
 | The cluster powering down after the guest's CPU_OFFs | **phone, P2c** (22:48): off 55 ms after MSG_STOP, with Samsung's FlexPMU core/cluster sequences (7); without them (P2b) it stayed on |
 | Start / stop / start in one boot, the M3s under load | **phone, P2d** (23:24): 3/3 cycles, each a cold start after a real cluster power-down (HELLO 118 ms, 4 CPUs, touch, cluster off 65..141 ms); four threads for 6 s at the M3's boot clock 1066 MHz: big cores 45 C |
 | **Linux started from inside Starbite OS** (1.2-alpha1, the starbite-os session's wiring of starbite/guest/sbos) | **phone, P3a** (2026-11-09 00:14): store read 495 ms, copy into the carve-out 362 ms, CPU_ON 0, HELLO 118 ms with 4 CPUs (0xf0), the heater refused meanwhile, cluster off 60 ms after MSG_STOP; guestd received the tap. The self test's own pixel check timed out (it waited for a moment with no frame pending; guestd publishes faster than the 2x view draws): fixed in P3b |
+| **Starbite OS hosts the Linux guest end to end** (1.2-alpha2) | **phone, P3b** (2026-11-09 02:40): the tap in the app (0xffd700 at drawn frame +5, 117 ms after the release), 48 frames drawn at 2x (slowest copy 112 ms; the guest published 110), cluster off 50 ms after the stop twice, a background restart, the heater refused while Linux had the M3s. **0.9's app-support milestone is done on the phone.** |
 | PSCI's context id reaches x0 | **no** on the phone (x0 = 0xBFFFF01C): the trampoline's DTB literal is required |
 | Linux on the phone's M3s | **yes**: P2b..P2d; P3 (inside Starbite OS) next |
 
@@ -271,3 +272,25 @@ driver is upstream's, so this Image can replace the daily one once the phone sta
   tick, `sbg_frame` from `ui_present`, `sbg_touch`/`sbg_key` from the input queue when the surface has focus,
   `sbg_screen`/`sbg_stop` from the services' screen and power events, the doorbell INTID in `irq_drain`.
 - The M3 heater and the guest are mutually exclusive (both own the M3 cluster).
+
+## 12. After 0.9: from the demo app to real Linux apps (proposed order)
+
+Each step stands alone and keeps the contract (sbshm.h) and the host core (sbghost) as they are.
+
+1. **Damage-only frames** (guestd): publish only on change and fill `damage_*`. The host's 2x copy of the whole
+   surface (112 ms at worst in P3b) is the bottleneck, not Linux.
+2. **A guest kernel of its own** (`guest.config` on the 7.1 tree, its own out/): no S9 port drivers (no initcall
+   blacklist needed), `STRICT_DEVMEM`, `DRM_SIMPLEDRM` on the surface (`simple-framebuffer` node at the surface
+   buffer), sbguest built in, both Starbite patches. The DRM side then gives any fbdev/DRM client the screen
+   unchanged, and fbcon gives a Linux console at once.
+3. **A terminal**: fbcon or a small terminal on simpledrm, with input from Starbite's on-screen keyboard as key
+   events (`SBG_MSG_KEY` already carries Linux key codes; the keyboard is Starbite's, the pocket lock in front).
+4. **A root file system**: the guest has only its initramfs. Read-only first: a block device over the shared region
+   that Starbite OS serves from a store entry or the microSD (the host does the I/O; the guest never touches UFS).
+5. **Network**: a virtio-net-like ring over the shared region, bridged by Starbite's Wi-Fi core (the radio stays
+   Starbite's).
+6. **A compositor and real apps**: cage or weston on the DRM device (one full-screen app at a time fits the phone),
+   then foot (terminal) and a browser. A browser wants the RAM (1.5 GiB guest) and the root file system (4), and is
+   the last step.
+7. **Clocks and heat for real loads**: Starbite sets the M3 clock while the view is shown (P2d ran at 1066 MHz), with
+   its heat stops over the big cores.
