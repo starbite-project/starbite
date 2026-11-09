@@ -1156,6 +1156,46 @@ and the slowest frame.
 - **T14f (sb-patches/0112):** non-primary runtime-backed flip chains rotate identities, i.e. Panfrost swaps the
   BOs with their allocations the way its own rename path does. Primaries keep the copy rotation.
 
+### 6.22 The user's first session on the GPU, and T15 (2026-11-09)
+
+The user ran t14a as the default (`--install-default`, win11 row on windows-t13b.uefi) and reported: it works, but
+much flickers or never draws, and it is slower than CPU rendering. Data: hive (clean) and 53 umdlogs
+(build/win/results/user-20261109; the session ran 11:59-12:09).
+
+- **GPU memory ran out from 12:03** (CREATE_BO → ENOMEM). DWM died and restarted 8 times in 3 minutes: the
+  flicker and the black flashes. Then dwm, LogonUI, TabTip and TextInputHost fell back to softpipe (CPU rendering
+  through the full driver), which is slower than Basic Display.
+  - **Cause:** Mesa's tiler heap, 128 MB per pipe screen (one per D3D device). Linux's panfrost grows it on GPU
+    faults; ours is allocated whole. Per process that is 130-436 MB, against the 1 GiB aperture segment.
+- **Second D3D devices never drew.** Every Explorer and most TextInputHost processes have two devices. Each
+  submission of the second was refused (Render 0xC0000001 → EIO), so the taskbar, Start and the touch keyboard
+  never drew.
+  - **Cause:** the libdrm shim kept one global device per process; the second CreateDevice rebound it, so every
+    submission's allocation list held the other device's allocations.
+- **Slow on the GPU too:**
+  - The user's DWM made 19,134 waits for 17,386 submissions. Each `WAIT_BO` drained the whole GPU, including
+    Mesa's zero-timeout "is this buffer idle?" probes from its BO cache, so the CPU and the GPU never overlapped.
+  - The full driver-call trace (`umdlog\trace`, left over from test cycles) was on in every process.
+- **Flips:** all 985 flips were of framebuffer-aliased primaries (counted "black": the allocation's own pages are
+  never written). With PrimaryInFb all of DWM's primaries alias the one scanned buffer, so DWM draws each frame
+  onto the visible panel: tearing and half-drawn frames during animations.
+
+**T15** (stage `sbwddm-t15`):
+- **sb-patches/0113** (sbumd):
+  - one shim state per runtime device, named by Panfrost's fd (and its duplicates, via Mesa's os_dupfd_cloexec);
+  - the d3d10umd entry points select their device (`malikm_use`);
+  - tiler heap 64 MB in dwm.exe, 32 MB elsewhere;
+  - per-device submission events in a ring, with `WAIT_BO` waiting only for the submission that last named the BO
+    (a zero timeout answers busy) and syncobjs carrying sequence numbers;
+  - closed BOs freed once their device's work at close time is done, without draining;
+  - residency-only allocations listed as read;
+  - failed allocations logged with the runtime's HRESULT (UmdNote_25 to 28).
+- **sbwddm:** segment 1.5 GiB; `Live_AllocMB`, `Live_AllocMBPeak`, `Live_AllocVaFails`, `Live_AllocFails`.
+- **gpu-cycle.sh:** `--install-default` turns the trace off.
+- **gputest:** sbtwo (several devices per process, six at once, a pace line).
+- **Next (T16):** real DECON flips, with each full-screen primary in a scanout buffer of its own and
+  SetVidPnSourceAddress writing the IDMA base (§7.3).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

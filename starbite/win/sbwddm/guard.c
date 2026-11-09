@@ -129,6 +129,9 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         { L"Live_DeconTrig", Rd(a->DeconVa, SBDC_TRIG) }, { L"Live_DeconPath0", Rd(a->DeconVa, SBDC_PATH0) },
         { L"Live_DeconShadowReq", Rd(a->DeconVa, SBDC_SHADOW_REQ) },
         { L"Live_ThermalLevel", a->ThermalLevel },
+        /* T15: GPU memory (MB alive now, the most so far) and allocations that failed */
+        { L"Live_AllocMB", (ULONG)(a->AllocBytes >> 20) }, { L"Live_AllocMBPeak", (ULONG)(a->AllocBytesPeak >> 20) },
+        { L"Live_AllocVaFails", (ULONG)a->AllocVaFails }, { L"Live_AllocFails", (ULONG)a->AllocFails },
     };
     static_assert(sizeof(c) / sizeof(c[0]) < SBW_LIVE_MAX, "Live_ table too long");
     for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]); i++)

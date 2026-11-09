@@ -176,7 +176,11 @@ install() {
     if [ "$1" = 1 ]; then
         push_check "$stage/sbwddm.sys" "$W/Windows/System32/drivers/sbwddm.sys" || rc=4
         [ -f "$stage/sbumd.dll" ] && { push_check "$stage/sbumd.dll" "$W/Windows/System32/sbumd.dll" || rc=4; }
-        adb shell "rm -f $W/Windows/Starbite/sbwddm.full.off $W/Windows/Temp/sbumd-*.log; mkdir -p $W/ProgramData/Starbite/umdlog; cd $W/ProgramData/Starbite/umdlog && for f in *; do [ \"\$f\" = trace ] || rm -f \"\$f\"; done; touch trace" >/dev/null
+        # T15: the full driver-call trace (umdlog\trace) only in test cycles. The user's session 2026-11-09 ran
+        # with it left over from them: every GPU call of every process was an unbuffered write to its log.
+        local trace="touch trace"
+        [ "${guard_auto:-0}" = 1 ] && trace="rm -f trace"
+        adb shell "rm -f $W/Windows/Starbite/sbwddm.full.off $W/Windows/Temp/sbumd-*.log; mkdir -p $W/ProgramData/Starbite/umdlog; cd $W/ProgramData/Starbite/umdlog && for f in *; do [ \"\$f\" = trace ] || rm -f \"\$f\"; done; $trace" >/dev/null
         # STAGE/gputest/: render tests at logon in the test boot (starbite/win/autotest/sb-gputest.cmd, one-shot)
         if [ -d "$stage/gputest" ]; then
             adb shell "rm -rf $W/starbite/auto/gpu; mkdir -p $W/starbite/auto/gpu" >/dev/null
@@ -212,7 +216,7 @@ install-default)
     mount_rw
     if [ -d "$stage_gputest" ]; then stage_tmp=$(mktemp -d); cp "$stage"/*.sys "$stage"/*.dll "$stage_tmp"/ 2>/dev/null; stage=$stage_tmp; fi
     install 1
-    log "default install done: FullMode=1, FullGuardBoots=0, GuardAutoClear=1, sbwdog Unattended=0; phone in TWRP"
+    log "default install done: FullMode=1, FullGuardBoots=0, GuardAutoClear=1, sbwdog Unattended=0, umdlog trace off; phone in TWRP"
     exit 0 ;;
 measure)
     # sbwdog alone, then one display-only boot of CLEAN_KEY: it must restart itself cleanly at ~120 s.
@@ -291,7 +295,7 @@ for d in ReportArchive ReportQueue; do
 done
 if [ $gpu_armed = 1 ]; then
     mkdir -p "$out/pre/gputest"
-    for f in gputest.log sbtex-hw.log sbtex-softpipe.log sbtex-hw-vertexid.log sbshare.log sbdwm-hw.log sbdwm-softpipe.log sbfps.log sbfps-watchdog.log triangle-hw.ppm armed; do
+    for f in gputest.log sbtex-hw.log sbtex-softpipe.log sbtex-hw-vertexid.log sbshare.log sbdwm-hw.log sbdwm-softpipe.log sbfps.log sbfps-watchdog.log sbtwo.log triangle-hw.ppm armed; do
         adb pull "$W/starbite/auto/gpu/$f" "$out/pre/gputest/" >/dev/null 2>&1 || true
     done
     if [ -f "$out/pre/gputest/armed" ]; then log "gputest did NOT run (still armed: no logon?)"; else log "gputest: $(grep -a -E 'exit|TEST' "$out/pre/gputest/gputest.log" 2>/dev/null | tr -d '\r' | tr '\n' ';' | cut -c1-400)"; fi

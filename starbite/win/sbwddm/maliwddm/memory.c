@@ -73,7 +73,17 @@ static NTSTATUS NewAllocation(MW_ADAPTER *A, const MW_ALLOCATION_INFO *In, DXGK_
     ExReleaseFastMutex(&A->MmuLock);
     if (!ok && A->GpuUp) {
         ExFreePoolWithTag(alloc, MW_TAG);
+        InterlockedIncrement(&A->AllocVaFails);
         return STATUS_GRAPHICS_NO_VIDEO_MEMORY;
+    }
+    {
+        LONG64 now = InterlockedAdd64(&A->AllocBytes, (LONG64)alloc->Size), peak = A->AllocBytesPeak;
+        while (now > peak) {
+            LONG64 seen = InterlockedCompareExchange64(&A->AllocBytesPeak, now, peak);
+            if (seen == peak)
+                break;
+            peak = seen;
+        }
     }
 
     A->Allocations++;
@@ -111,6 +121,7 @@ static void FreeAllocation(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
     if (Alloc->GpuVa != 0 && A->GpuUp)
         MkVaFree(&A->Gpu, Alloc->GpuVa, Alloc->Pages);
     ExReleaseFastMutex(&A->MmuLock);
+    InterlockedAdd64(&A->AllocBytes, -(LONG64)Alloc->Size);
     ExFreePoolWithTag(Alloc, MW_TAG);
 }
 
@@ -128,6 +139,7 @@ NTSTATUS APIENTRY MwCreateAllocation(IN_CONST_HANDLE hAdapter, DXGKARG_CREATEALL
         else
             st = NewAllocation(a, in, info);
         if (!NT_SUCCESS(st)) {
+            InterlockedIncrement(&a->AllocFails);
             for (UINT j = 0; j < i; j++)
                 FreeAllocation(a, (MW_ALLOCATION *)Arg->pAllocationInfo[j].hAllocation);
             return st;

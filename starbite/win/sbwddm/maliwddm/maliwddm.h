@@ -20,7 +20,10 @@
 
 #define MW_TAG                  'dwlM'
 #define MW_SEGMENT_ID           1           /* the aperture segment */
-#define MW_SEGMENT_SIZE         (1024ULL * 1024 * 1024)
+/* S9 port (T15): 1.5 GiB (was 1 GiB). The user's session (2026-11-09) ran out from minute 4 with 128 MB tiler
+ * heaps in every process (now 32/64 MB, sb-patches/0113); the margin is for many apps at once. Only an
+ * address range for VidMm: memory is used only as allocations are made. */
+#define MW_SEGMENT_SIZE         (1536ULL * 1024 * 1024)
 #define MW_QUEUE_DEPTH          16          /* submissions the KMD holds */
 
 /* 1: a render-only adapter (no VidPN sources or children; another device's
@@ -216,6 +219,9 @@ struct _MW_ADAPTER {
     ULONG Renders, Presents, Submits;
     ULONG PagingOps[16];
     ULONG Maps, MapFails, Unmaps, LastMapPages, Allocations;
+    /* T15: allocation bytes alive now and at most, and failures (no GPU address; refused) */
+    volatile LONG64 AllocBytes, AllocBytesPeak;
+    volatile LONG AllocVaFails, AllocFails;
     NTSTATUS LastMapStatus;
     ULONG64 LastMapVa, LastAllocVa;
     ULONG Patches, PatchAllocations, PatchPatchLocations, PatchSegment0;
