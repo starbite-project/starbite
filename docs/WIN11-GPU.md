@@ -1100,6 +1100,21 @@ when.
 
 `--full-sec N` makes longer soak boots.
 
+**cycle-t14a-1 (03:46):**
+- **The new health rule on the phone:** FbLiveSecs 268 of 277 s (FbLiveLast 16/16), FullHealthy 1. The guard
+  stayed armed (GuardAutoClear 0 in cycles).
+- **The once-per-boot failed job:**
+  - **Where:** slot 1 (vertex/tiler/compute), 12 s after start, after 200 jobs. The chain starts at
+    0x034b8700 and the failing job is at 0x034b8c40, inside LogonUI's bo 27 (0x34b8000-0x34c8000, NOEXEC,
+    64 KB), a descriptor pool made just before LogonUI's first submit. That first frame was 4 Draws + 4
+    instanced DrawIndexed into a 1024x1024 target.
+  - **What:** status 0x51 (INSTR_INVALID_ENC), on the first frame of the first GPU client, never again.
+  - **Suspects:** a precompiled libpan kernel that is wrong for the G72 (v6), or the first execution of a
+    freshly uploaded shader. Jobs start with a clean+invalidate flush, which makes a stale cache unlikely.
+  - **Next:** a dump of the job descriptor and its shader at failure time. That needs a pre-reserved mapping and
+    a copy in the DPC before the fence signals, since Panfrost reuses the descriptor pool right after. Deferred:
+    it is recovered by one reset, and nothing visible depends on it.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
