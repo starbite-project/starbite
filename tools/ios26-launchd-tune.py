@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Edit a copy of iOS 26's /System/Library/xpc/launchd.plist (launchd on this root reads its jobs from it)
 for the card overlay: take jobs out by program name, and give chosen jobs an os_log mirror on stderr.
-    ios26-launchd-tune.py IN_LAUNCHD IN_DISABLED|- OUTDIR [--off-list FILE] [--log NAME]... [--dry]
+    ios26-launchd-tune.py IN_LAUNCHD IN_DISABLED|- OUTDIR [--off-list FILE] [--log NAME]... [--enable NAME]... [--dry]
 IN_DISABLED is the root's launchd-disabled.plist ("-" when it has none); removed jobs are kept there, as
 tools/starlte-disable-jobs.py does, so they can be put back. A job matches --off-list / --log NAME when the
 basename of its Program / ProgramArguments[0] starts with NAME (STARLTE TOP's process names), or its Label
 equals NAME. --log adds OS_ACTIVITY_DT_MODE=YES and StandardErrorPath /private/var/tmp/NAME.log
 (LOGDEST=console: /dev/console, which kernel 0371 copies into the kernel log with sweetcontee=1).
+--enable NAME drops a job's "Disabled" key (Apple ships logd disabled in this cache: without logd no
+os_log profile reaches a process, only errors reach the mirror).
 Writes OUTDIR/launchd.plist, OUTDIR/launchd-disabled.plist, OUTDIR/report.txt. Then:
     python3 tools/overlay/sboverlay.py OUT.bin OUTDIR/launchd.plist=/System/Library/xpc/launchd.plist:644 \\
         OUTDIR/launchd-disabled.plist=/System/Library/xpc/launchd-disabled.plist:644
@@ -34,6 +36,7 @@ def main():
     ap.add_argument('outdir')
     ap.add_argument('--off-list')
     ap.add_argument('--log', action='append', default=[])
+    ap.add_argument('--enable', action='append', default=[])
     ap.add_argument('--dry', action='store_true')
     a = ap.parse_args()
     d = plistlib.load(open(a.launchd, 'rb'))
@@ -61,7 +64,13 @@ def main():
             job['StandardErrorPath'] = '/dev/console' if os.environ.get('LOGDEST') == 'console' else f'/private/var/tmp/{n}.log'
             hit.add(n)
             report.append(f'log  {job.get("Label")} ({prog(job)}) -> {job["StandardErrorPath"]}')
-    for n in off + a.log:
+    for key, job in jobs.items():
+        n = matches(job, a.enable)
+        if n:
+            was = job.pop('Disabled', None)
+            hit.add(n)
+            report.append(f'on   {job.get("Label")} ({prog(job)}) Disabled was {was}')
+    for n in off + a.log + a.enable:
         if n not in hit:
             report.append(f'none {n}: no job with that program or label (already off, or not a launchd job)')
     report.append(f'{len(jobs)} jobs left, {len(kept)} in launchd-disabled.plist')
