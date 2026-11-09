@@ -1147,6 +1147,15 @@ and the slowest frame.
 - **T14e:** the temporary is kept per device and made without the share binds (sb-patches/0111), and flips of
   framebuffer-aliased primaries skip the KMD's queue-drain wait.
 
+**cycle-t14e-1 (04:59):**
+- **Blt model 76.2 fps.** The flip run stopped after ~4 s.
+- **sbfps's umdlog:** from then on every submit failed in dxgkrnl ("Render failed"); our KMD never saw them.
+  The WER reports were TextInputHost only.
+- **Cause:** d3d10umd's copy-based RotateResourceIdentities left the app's buffer 0 on the allocation the flip
+  had just handed to DWM.
+- **T14f (sb-patches/0112):** non-primary runtime-backed flip chains rotate identities, i.e. Panfrost swaps the
+  BOs with their allocations the way its own rename path does. Primaries keep the copy rotation.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

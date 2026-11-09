@@ -1,0 +1,131 @@
+diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
+index 7d9661a..bbc30de 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -2612,6 +2612,49 @@ panfrost_resource_screen_destroy(struct pipe_screen *pscreen)
+    u_transfer_helper_destroy(pscreen->transfer_helper);
+ }
+ 
++/* Starbite (sbumd, sb-patches/0112, docs/WIN11-GPU.md 6.21): DXGI's RotateResourceIdentities for a flip-model
++ * swap chain, as identities rather than contents: resource i takes resource i+1's BO (with its allocation), the
++ * last takes the first's. d3d10umd copied the contents instead, so buffer 0 kept the allocation DWM had just
++ * been handed by the flip, and the runtime refused every later render into it (T14e: 'Render failed' from
++ * the second second of a flip-model app on). The same swap as this file's own rename path (a new BO under a
++ * resource, plane.base, panfrost_dirty_state_all), after flushing everything. Only plain 2D linear resources
++ * of one layout; false = not done (the caller copies). */
++bool
++panfrost_sb_rotate_bos(struct pipe_context *pctx, struct pipe_resource **res, unsigned n)
++{
++   struct panfrost_context *ctx = pan_context(pctx);
++   struct panfrost_bo *bo0;
++   if (n < 2 || n > 16)
++      return false;
++   struct panfrost_resource *r0 = pan_resource(res[0]);
++   for (unsigned i = 0; i < n; i++) {
++      struct panfrost_resource *r = pan_resource(res[i]);
++      if (!r || !r->bo || r->base.target != PIPE_TEXTURE_2D || r->base.last_level != 0 ||
++          r->base.array_size != 1 || r->separate_stencil || r->shadow_image ||
++          r->modifier != DRM_FORMAT_MOD_LINEAR || r->base.format != r0->base.format ||
++          r->base.width0 != r0->base.width0 || r->base.height0 != r0->base.height0 ||
++          panfrost_bo_size(r->bo) != panfrost_bo_size(r0->bo))
++         return false;
++   }
++   /* recorded batches re-read plane.base when they are emitted: submit them all first */
++   pctx->flush(pctx, NULL, 0);
++   bo0 = r0->bo;
++   BITSET_DECLARE(valid0, PAN_MAX_MIP_LEVELS);
++   memcpy(valid0, r0->valid.data, sizeof(valid0));
++   for (unsigned i = 0; i + 1 < n; i++) {
++      struct panfrost_resource *a = pan_resource(res[i]), *b = pan_resource(res[i + 1]);
++      a->bo = b->bo;
++      a->plane.base = a->bo->ptr.gpu;
++      memcpy(a->valid.data, b->valid.data, sizeof(valid0));
++   }
++   struct panfrost_resource *last = pan_resource(res[n - 1]);
++   last->bo = bo0;
++   last->plane.base = bo0->ptr.gpu;
++   memcpy(last->valid.data, valid0, sizeof(valid0));
++   panfrost_dirty_state_all(ctx);
++   return true;
++}
++
+ /* Starbite (sbumd, sb-patches/0105, docs/WIN11-GPU.md 6.18): texture copies on the GPU. Panfrost copied them
+  * on the CPU (util_resource_copy_region) through both BOs mappings. On Windows that path is wrong for a surface
+  * opened from another process (T13o: its CPU view read zeros, then stale contents, while GPU sampling of it was
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index 6d6cc81..7ada447 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -64,6 +64,10 @@
+ struct Resource *sbOpened[SB_OPENED_MAX];
+ struct SbTrace sbTrace;
+ 
++/* sb-patches/0112: the default when the driver has no BO rotation (softpipe build) */
++extern "C" bool sb_rotate_bos_none(struct pipe_context *, struct pipe_resource **, unsigned) { return false; }
++#pragma comment(linker, "/alternatename:panfrost_sb_rotate_bos=sb_rotate_bos_none")
++
+ void
+ sb_trace_draw(struct Device *d, unsigned kind, unsigned count, unsigned instances, unsigned index_size,
+               unsigned restart)
+@@ -342,6 +346,28 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
+ 
+    struct pipe_resource *resource0 = CastPipeResource(RotateResourceIdentities->pResources[0]);
+ 
++   /* sb-patches/0112: a runtime-backed flip chain that is not the scanout: rotate identities (BOs and their
++    * allocations), as DXGI's flip model needs; primaries keep the copy rotation below */
++   if (malikm_hw() && RotateResourceIdentities->Resources <= 16) {
++      Resource *rs[16];
++      struct pipe_resource *pr[16];
++      bool ok = true;
++      UINT n = RotateResourceIdentities->Resources;
++      for (UINT i = 0; i < n && ok; i++) {
++         rs[i] = CastResource(RotateResourceIdentities->pResources[i]);
++         pr[i] = rs[i] ? rs[i]->resource : NULL;
++         ok = rs[i] && pr[i] && rs[i]->sbAllocation && !rs[i]->sbPrimary;
++      }
++      if (ok && panfrost_sb_rotate_bos(pipe, pr, n)) {
++         unsigned a0 = rs[0]->sbAllocation;
++         for (UINT i = 0; i + 1 < n; i++)
++            rs[i]->sbAllocation = rs[i + 1]->sbAllocation;
++         rs[n - 1]->sbAllocation = a0;
++         malikm_note_count(24);              /* UmdNote_24: identity rotations */
++         return S_OK;
++      }
++   }
++
+    assert(resource0);
+    LOG_UNSUPPORTED(resource0->last_level);
+ 
+diff --git a/src/gallium/frontends/d3d10umd/Resource.cpp b/src/gallium/frontends/d3d10umd/Resource.cpp
+index ee40c0a..3640928 100644
+--- a/src/gallium/frontends/d3d10umd/Resource.cpp
++++ b/src/gallium/frontends/d3d10umd/Resource.cpp
+@@ -350,6 +350,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
+       DebugPrintf("sbumd: CreateResource %ux%u: its BO did not come from a fresh allocation\n",
+                   templat.width0, templat.height0);
+    }
++   pResource->sbPrimary = sbPrimary;
+    if (sbAssoc && pResource->resource) {
+       /* The PRIME export marks the BO shared (Panfrost then never swaps it) and names its allocation. */
+       struct winsys_handle wh;
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index 6314b5e..79b3a4c 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -196,6 +196,7 @@ struct Resource
+    struct pipe_stream_output_target *so_target;
+    /* Starbite (sbumd): the runtime allocation behind a shared, presented or primary resource (0: none) */
+    unsigned sbAllocation;
++   bool sbPrimary;                   /* sb-patches/0112: a scanout primary (rotated by copy) */
+ };
+ 
+ /* Starbite (sbumd, docs/WIN11-GPU.md 6.12): the kernel-driver shim (include/win32-compat/malikm_drm.c) */
+@@ -211,6 +212,8 @@ int malikm_present_allocs(unsigned src, unsigned dst, void *dxgi_context);
+ int malikm_set_display_mode(unsigned hPrimaryAllocation);
+ void malikm_note(unsigned id, unsigned value);
+ void malikm_note_count(unsigned id);
++/* sb-patches/0112: in the Panfrost build (pan_resource.c); the softpipe build gets sb_rotate_bos_none */
++bool panfrost_sb_rotate_bos(struct pipe_context *pctx, struct pipe_resource **res, unsigned n);
+ /* Starbite (sb-patches/0108): the resources this device opened from other processes (OpenResource), for the
+  * present sampling: DWM samples its windows' surfaces through these. */
+ #define SB_OPENED_MAX 32
