@@ -34,7 +34,7 @@ mk() {  # mk N FILE SCRIPT NAME
     cp "$2" "$PD/$1/a/$2"
     cp "$2" "$PD/$1/b/$2"
     python3 "$here/$3" "$PD/$1/b/$2"
-    (cd "$PD/$1" && diff -u "a/$2" "b/$2" > "$PD/$4" || true)
+    (cd "$PD/$1" && diff -u --label "a/$2" --label "b/$2" "a/$2" "b/$2" > "$PD/$4" || true)   # no timestamps
     cp "$PD/$4" "$here/$4"
 }
 mk 1 drivers/irqchip/irq-gic.c mk-gic-patch.py 0001-irqchip-gic-starbite-shared-distributor.patch

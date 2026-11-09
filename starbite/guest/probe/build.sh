@@ -1,6 +1,6 @@
 #!/bin/sh
 # guest-probe P1 and P2 (docs/STARBITE-OS-LINUX-M3.md 10): bare libsb payloads for the OS store / catalog.
-#   limactl shell starbite -- /Users/dev/project-starbite/starbite/guest/probe/build.sh [p1|p2|all|bundle]
+#   limactl shell starbite -- /Users/dev/project-starbite/starbite/guest/probe/build.sh [p1|p2|p4|all|bundle]
 # bundle: guest-linux.img / .dtb / -rd.img for the OS store (P3, Starbite OS kern/guest.c), in $OUT/bundle.
 # libsb comes from git at LIBSB_REF (default aed0ce1, Starbite OS 1.0-rc2's libsb, proven on the phone), never
 # from a working tree other sessions edit. Outputs in $OUT: guest-probe.img (P1), guest-p2.img (P2), + .sha256.
@@ -81,17 +81,29 @@ if [ "$what" = bundle ]; then          # P3: the three store files Starbite OS's
     (cd "$B" && sha256sum guest-linux.img guest-linux.dtb guest-linux-rd.img > SHA256SUMS && cat SHA256SUMS)
     exit 0
 fi
+p2_name=guest-p2
+p2_kout=""
+p2_dts=""
+p2_defs=""
+if [ "$what" = p4 ]; then               # P4: the terminal on the guest kernel of its own (docs 12 steps 2 + 3)
+    P2_IMAGE=${P4_IMAGE:-$WORK/Image-guest}
+    p2_name=guest-p4
+    p2_kout="KOUT=$WORK/gout"
+    p2_dts="--fb 720x1440 --term"
+    p2_defs="-DP2_TERM=1 -DP2_CYCLES=2U"
+    what=p2
+fi
 if [ "$what" = p2 ] || [ "$what" = all ]; then
-    [ -f "$P2_IMAGE" ] || { echo "guest-p2: no $P2_IMAGE (starbite/guest/linux/build-patched.sh)" >&2; exit 1; }
-    BUILD_ONLY=1 WORK="$WORK" "$here/../run-qemu.sh" >/dev/null
+    [ -f "$P2_IMAGE" ] || { echo "$p2_name: no $P2_IMAGE (starbite/guest/linux/build-patched.sh)" >&2; exit 1; }
+    env BUILD_ONLY=1 WORK="$WORK" $p2_kout "$here/../run-qemu.sh" >/dev/null
     rdf="$WORK/out/initrd.cpio.gz"
     python3 "$here/../mk-guest-dts.py" --profile s9 --rd-size "$(stat -c %s "$rdf")" --db-guest "$P2_DB_GUEST" \
-        "$OUT/s9-guest.dts" >/dev/null
+        $p2_dts "$OUT/s9-guest.dts" >/dev/null
     dtc -q -I dts -O dtb -o "$OUT/s9-guest.dtb" "$OUT/s9-guest.dts"
     cp "$P2_IMAGE" "$OUT/p2-Image"
     cp "$rdf" "$OUT/p2-initrd.cpio.gz"
     blob=$(cd "$OUT" && cc "$here/p2blob.S" -DP2_IMAGE='"p2-Image"' -DP2_DTB='"s9-guest.dtb"' -DP2_RD='"p2-initrd.cpio.gz"' -Wa,-I"$OUT")
-    link guest-p2 "$(cc "$here/p2.c" -DP2_DB_GUEST="$P2_DB_GUEST" -DP2_DB_HOST="$P2_DB_HOST")" \
+    link $p2_name "$(cc "$here/p2.c" -DP2_DB_GUEST="$P2_DB_GUEST" -DP2_DB_HOST="$P2_DB_HOST" $p2_defs)" \
         "$(cc "$here/../host/sbghost.c")" "$blob"
-    echo "guest-p2: Image $(sha256sum "$P2_IMAGE" | cut -c1-16)..., doorbells $P2_DB_GUEST/$P2_DB_HOST"
+    echo "$p2_name: Image $(sha256sum "$P2_IMAGE" | cut -c1-16)..., doorbells $P2_DB_GUEST/$P2_DB_HOST"
 fi
