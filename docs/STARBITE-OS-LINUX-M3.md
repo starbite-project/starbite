@@ -44,6 +44,7 @@ Code: `starbite/guest/` (all new, owned by this work).
 | Start / stop / start in one boot, the M3s under load | **phone, P2d** (23:24): 3/3 cycles, each a cold start after a real cluster power-down (HELLO 118 ms, 4 CPUs, touch, cluster off 65..141 ms); four threads for 6 s at the M3's boot clock 1066 MHz: big cores 45 C |
 | **Linux started from inside Starbite OS** (1.2-alpha1, the starbite-os session's wiring of starbite/guest/sbos) | **phone, P3a** (2026-11-09 00:14): store read 495 ms, copy into the carve-out 362 ms, CPU_ON 0, HELLO 118 ms with 4 CPUs (0xf0), the heater refused meanwhile, cluster off 60 ms after MSG_STOP; guestd received the tap. The self test's own pixel check timed out (it waited for a moment with no frame pending; guestd publishes faster than the 2x view draws): fixed in P3b |
 | **Starbite OS hosts the Linux guest end to end** (1.2-alpha2) | **phone, P3b** (2026-11-09 02:40): the tap in the app (0xffd700 at drawn frame +5, 117 ms after the release), 48 frames drawn at 2x (slowest copy 112 ms; the guest published 110), cluster off 50 ms after the stop twice, a background restart, the heater refused while Linux had the M3s. **0.9's app-support milestone is done on the phone.** |
+| **A Linux terminal on Starbite's screen** (the guest kernel of its own, 7.1.0-sbguest, simpledrm + fbcon, typed into by key events) | **phone, P4** (2026-11-09 03:09): 2/2 cycles, the typed command line ran (STARBITE-TERM-OK), HELLO 98-99 ms with 4 CPUs (the 6.7 MB kernel boots ~20 ms faster than the S9 one), first frame 103-104 ms, cluster off 50-55 ms; photographed (build/test-boots/p4-photos/p4-console.jpg) |
 | PSCI's context id reaches x0 | **no** on the phone (x0 = 0xBFFFF01C): the trampoline's DTB literal is required |
 | Linux on the phone's M3s | **yes**: P2b..P2d; P3 (inside Starbite OS) next |
 
@@ -290,7 +291,7 @@ Each step stands alone and keeps the contract (sbshm.h) and the host core (sbgho
 3. **A terminal**. **Done on QEMU (8ac79c8; run-term.sh 3/3)**: `--fb` puts a simple-framebuffer
    node on surface buffer 0 (the region no-map), `--term` a shell on tty1 with the kernel console only in the
    ramoops zone. `guestd --present` copies fbcon's changed rows into buffer 1, the stable front (reading the live
-   buffer left transient rows stale on QEMU). Typing uses `sbshm_ascii_key`. Phone: P4 staged (2c76887). Planned
+   buffer left transient rows stale on QEMU). Typing uses `sbshm_ascii_key`. **Phone: P4 PASS 2/2 (03:09).** Starbite OS 1.2-alpha3 adopted it (4x view, 45x33 characters, Terminus 16x32: a866f15). Planned
    as: fbcon or a small terminal on simpledrm, with input from Starbite's on-screen keyboard as key
    events (`SBG_MSG_KEY` already carries Linux key codes; the keyboard is Starbite's, the pocket lock in front).
 4. **A root file system**: the guest has only its initramfs. Read-only first: a block device over the shared region
