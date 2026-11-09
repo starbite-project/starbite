@@ -1,0 +1,280 @@
+From 1da25eac23d4bd1de534f76313051e2e863cfde7 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Mon, 9 Nov 2026 20:05:36 +0200
+Subject: [PATCH] patch: 0414-starlte-stall-probe-no-kdp.patch - the stall
+ probe without stackshot's debugger-only owner helpers (0413 panicked:
+ turnstile_is_send_turnstile outside kdp): threads read under their lock, the
+ turnstile chain walked with waitq try-locks, workqueue inheritors named by
+ process
+
+---
+ bsd/pthread/pthread_workqueue.c |   9 ++
+ osfmk/kern/kern_stackshot.c     | 184 +++++++++++++++-----------------
+ 2 files changed, 95 insertions(+), 98 deletions(-)
+
+diff --git a/bsd/pthread/pthread_workqueue.c b/bsd/pthread/pthread_workqueue.c
+index cb27db6d..e707813e 100644
+--- a/bsd/pthread/pthread_workqueue.c
++++ b/bsd/pthread/pthread_workqueue.c
+@@ -5331,3 +5331,12 @@ workq_init(void)
+ 	thread_deallocate_daemon_register_queue(&workq_deallocate_queue,
+ 	    workq_deallocate_queue_invoke);
+ }
++
++/* Starbite 0414: the stall probe (osfmk/kern/kern_stackshot.c) names the process behind a workqueue inheritor */
++int starlte_workq_pid(void *wq);
++int
++starlte_workq_pid(void *wq)
++{
++	struct workqueue *w = wq;
++	return (w != NULL && w->wq_proc != NULL) ? proc_pid(w->wq_proc) : -1;
++}
+diff --git a/osfmk/kern/kern_stackshot.c b/osfmk/kern/kern_stackshot.c
+index 5076d1bc..0ac62248 100644
+--- a/osfmk/kern/kern_stackshot.c
++++ b/osfmk/kern/kern_stackshot.c
+@@ -6530,20 +6530,23 @@ stackshot_update_passcode_status(stackshot_passcode_status_t primary_user_status
+ }
+ 
+ /*
+- * Starbite 0413: the stall probe (bsd/dev/starlte_touch.c calls it when a touch got no present for 1.5 s).
++ * Starbite 0413/0414: the stall probe (bsd/dev/starlte_touch.c calls it when a touch got no present for 1.5 s).
+  * For backboardd and SpringBoard every thread that is not a parked workqueue thread, for every other process
+  * its main thread when it has been blocked for over 1 s on something other than its run loop's port set:
+- *   "STARLTE STALL: SpringBoard[27] tid 1234 main W PortReceive 2400 ms owner 0x1a03 -> lsd[88] tid 5678"
+- * state R (running/runnable) or W (waiting); the wait kind is the thread's block hint; owner/context as
+- * stackshot's waitinfo; "->" is the turnstile's final inheritor (the thread or task the wait is pushed to).
+- * Each thread is read under its thread lock (it cannot be woken meanwhile); the owner helpers are the ones
+- * stackshot uses, which only peek at lock words.
++ *   "STARLTE STALL: SpringBoard[27] tid 1234 main W PortReceive 2400 ms ev 0x.. -> thread lsd[88] tid 5678 (2 hops)"
++ * state R (running/runnable) or W (waiting); the wait kind is the thread's block hint; "->" is where the wait's
++ * priority is pushed: the turnstile chain followed to a thread, a process's workqueue, or "busy" when a
++ * turnstile lock was held. 0413 used stackshot's owner helpers, which panic outside the debugger
++ * (turnstile_is_send_turnstile): 0414 reads each thread under its thread lock and walks the chain itself
++ * with try-locks on the turnstiles' waitqs, hand over hand, at most 4 hops.
+  */
++extern int starlte_workq_pid(void *wq);         /* bsd/pthread/pthread_workqueue.c */
+ #define ST_STALL_MAX 192
++enum { ST_CH_NONE, ST_CH_THREAD, ST_CH_WORKQ, ST_CH_BUSY, ST_CH_OTHER, ST_CH_DEEP };
+ static struct st_stall_rec {
+-	uint64_t tid, owner, context, ts_ctx, blocked_ms;
+-	int pid;
+-	uint8_t state, hint, ts_flags, main;
++	uint64_t tid, event, blocked_ms, inh_tid;
++	int pid, inh_pid;
++	uint8_t state, hint, main, chain, hops;
+ 	char name[20];
+ } st_stall_recs[ST_STALL_MAX];
+ 
+@@ -6560,98 +6563,68 @@ st_hint_name(unsigned h)
+ 	return h < sizeof(names) / sizeof(names[0]) ? names[h] : "?";
+ }
+ 
++/* thread locked, at splsched */
+ static void
+-st_stall_owner(thread_t thread, struct st_stall_rec *r)
++st_stall_chain(thread_t thread, struct st_stall_rec *r)
+ {
+-	thread_waitinfo_v2_t wi;
+-	struct ipc_service_port_label *ispl = NULL;
+-	bzero(&wi, sizeof(wi));
+-	wi.wait_type = thread->block_hint;
+-	switch (thread->block_hint) {
+-	case kThreadWaitKernelMutex:
+-		if (thread->waitq.wq_q) {
+-			kdp_lck_mtx_find_owner(thread->waitq.wq_q, thread->wait_event, (thread_waitinfo_t *)&wi);
++	struct turnstile *ts = thread_get_waiting_turnstile(thread), *held = TURNSTILE_NULL;
++	r->chain = ST_CH_NONE;
++	for (unsigned hop = 0; ts != TURNSTILE_NULL; hop++) {
++		if (hop >= 4) {
++			r->chain = ST_CH_DEEP;
++			break;
+ 		}
+-		break;
+-	case kThreadWaitPortReceive:
+-		if (thread->waitq.wq_q) {
+-			kdp_mqueue_recv_find_owner(thread->waitq.wq_q, thread->wait_event, &wi, &ispl);
++		if (!waitq_lock_try(&ts->ts_waitq)) {
++			r->chain = ST_CH_BUSY;
++			break;
+ 		}
+-		break;
+-	case kThreadWaitPortSend:
+-		if (thread->waitq.wq_q) {
+-			kdp_mqueue_send_find_owner(thread->waitq.wq_q, thread->wait_event, &wi, &ispl);
++		if (held != TURNSTILE_NULL) {
++			waitq_unlock(&held->ts_waitq);
+ 		}
+-		break;
+-	case kThreadWaitSemaphore:
+-		if (thread->waitq.wq_q) {
+-			kdp_sema_find_owner(thread->waitq.wq_q, thread->wait_event, (thread_waitinfo_t *)&wi);
++		held = ts;
++		r->hops = (uint8_t)(hop + 1);
++		uint32_t f = ts->ts_inheritor_flags;
++		void *inh = ts->ts_inheritor;
++		if (inh == NULL) {
++			break;
+ 		}
+-		break;
+-	case kThreadWaitUserLock:
+-		if (thread->waitq.wq_q) {
+-			kdp_ulock_find_owner(thread->waitq.wq_q, thread->wait_event, (thread_waitinfo_t *)&wi);
++		if (f & TURNSTILE_INHERITOR_THREAD) {
++			thread_t t = (thread_t)inh;
++			task_t tk = get_threadtask(t);
++			r->inh_tid = thread_tid(t);
++			r->inh_pid = tk != TASK_NULL ? pid_from_task(tk) : -1;
++			r->chain = ST_CH_THREAD;
++			break;
+ 		}
+-		break;
+-	case kThreadWaitPThreadMutex:
+-	case kThreadWaitPThreadRWLockRead:
+-	case kThreadWaitPThreadRWLockWrite:
+-	case kThreadWaitPThreadCondVar:
+-		kdp_pthread_find_owner(thread, (thread_waitinfo_t *)&wi);
+-		break;
+-	case kThreadWaitWorkloopSyncWait:
+-		kdp_workloop_sync_wait_find_owner(thread, thread->wait_event, (thread_waitinfo_t *)&wi);
+-		break;
+-	case kThreadWaitOnProcess:
+-		kdp_wait4_find_process(thread, thread->wait_event, (thread_waitinfo_t *)&wi);
+-		break;
+-	default:
++		if (f & TURNSTILE_INHERITOR_WORKQ) {
++			r->inh_pid = starlte_workq_pid(inh);
++			r->chain = ST_CH_WORKQ;
++			break;
++		}
++		if (f & TURNSTILE_INHERITOR_TURNSTILE) {
++			ts = (struct turnstile *)inh;
++			continue;
++		}
++		r->chain = ST_CH_OTHER;
+ 		break;
+ 	}
+-	r->owner = wi.owner;
+-	r->context = wi.context;
+-	struct turnstile *ts = thread_get_waiting_turnstile(thread);
+-	if (ts != TURNSTILE_NULL) {
+-		thread_turnstileinfo_v2_t ti;
+-		bzero(&ti, sizeof(ti));
+-		kdp_turnstile_fill_tsinfo(ts, &ti, &ispl);
+-		r->ts_ctx = ti.turnstile_context;
+-		r->ts_flags = (uint8_t)ti.turnstile_flags;
++	if (held != TURNSTILE_NULL) {
++		waitq_unlock(&held->ts_waitq);
+ 	}
+ }
+ 
+-/* name[pid] of the task with that pid, or of the task owning the thread with that tid */
++/* name[pid] of the task with that pid (tasks_threads_lock held) */
+ static void
+-st_stall_who(uint64_t key, bool is_tid, char *buf, size_t len)
++st_stall_name(int pid, char *buf, size_t len)
+ {
+ 	task_t task;
+-	snprintf(buf, len, is_tid ? "tid %llu" : "pid %llu", key);
++	snprintf(buf, len, "pid %d", pid);
+ 	queue_iterate(&tasks, task, task_t, tasks) {
+ 		void *p = get_bsdtask_info(task);
+-		if (p == NULL) {
+-			continue;
+-		}
+-		char nm[20];
+-		proc_name_kdp(p, nm, sizeof(nm));
+-		if (!is_tid) {
+-			if ((uint64_t)pid_from_task(task) == key) {
+-				snprintf(buf, len, "%s[%d]", nm, pid_from_task(task));
+-				return;
+-			}
+-			continue;
+-		}
+-		thread_t thread;
+-		bool found = false;
+-		task_lock(task);
+-		queue_iterate(&task->threads, thread, thread_t, task_threads) {
+-			if (thread_tid(thread) == key) {
+-				found = true;
+-				break;
+-			}
+-		}
+-		task_unlock(task);
+-		if (found) {
+-			snprintf(buf, len, "%s[%d] tid %llu", nm, pid_from_task(task), key);
++		if (p != NULL && pid_from_task(task) == pid) {
++			char nm[20];
++			proc_name_kdp(p, nm, sizeof(nm));
++			snprintf(buf, len, "%s[%d]", nm, pid);
+ 			return;
+ 		}
+ 	}
+@@ -6693,9 +6666,10 @@ starlte_stall_dump(uint64_t input_abs, uint64_t present_abs)
+ 			r->state = (uint8_t)thread->state;
+ 			r->hint = (uint8_t)thread->block_hint;
+ 			uint64_t lr = thread->last_run_time;
+-			if ((thread->state & TH_WAIT) && r->hint != kThreadWaitParkedWorkQueue &&
+-			    r->hint != kThreadWaitParkedBoundWorkQueue) {
+-				st_stall_owner(thread, r);
++			bool parked_wq = r->hint == kThreadWaitParkedWorkQueue || r->hint == kThreadWaitParkedBoundWorkQueue;
++			if ((thread->state & TH_WAIT) && !parked_wq) {
++				r->event = VM_KERNEL_UNSLIDE_OR_PERM(thread->wait_event);
++				st_stall_chain(thread, r);
+ 			}
+ 			r->tid = thread_tid(thread);
+ 			thread_unlock(thread);
+@@ -6705,7 +6679,7 @@ starlte_stall_dump(uint64_t input_abs, uint64_t present_abs)
+ 				absolutetime_to_nanoseconds(now - lr, &ns);
+ 			}
+ 			r->blocked_ms = ns / 1000000;
+-			if (r->hint == kThreadWaitParkedWorkQueue || r->hint == kThreadWaitParkedBoundWorkQueue) {
++			if (parked_wq) {
+ 				parked++;
+ 				continue;
+ 			}
+@@ -6725,17 +6699,31 @@ starlte_stall_dump(uint64_t input_abs, uint64_t present_abs)
+ 	    since_in / 1000000, present_abs ? since_pr / 1000000 : 0, n, parked, quiet);
+ 	for (unsigned i = 0; i < n; i++) {
+ 		struct st_stall_rec *r = &st_stall_recs[i];
+-		char who[64] = "";
+-		if (r->ts_ctx && (r->ts_flags & (STACKSHOT_TURNSTILE_STATUS_THREAD | STACKSHOT_TURNSTILE_STATUS_BLOCKED_ON_TASK))) {
+-			char w[56];
+-			st_stall_who(r->ts_ctx, (r->ts_flags & STACKSHOT_TURNSTILE_STATUS_THREAD) != 0, w, sizeof(w));
+-			snprintf(who, sizeof(who), " -> %s", w);
+-		} else if (r->ts_flags) {
+-			snprintf(who, sizeof(who), " ts 0x%x", r->ts_flags);
+-		}
+-		printf("STARLTE STALL: %s[%d] tid %llu%s %s %s %llu ms owner %#llx ctx %#llx%s\n", r->name, r->pid, r->tid,
++		char who[72] = "", w[48];
++		switch (r->chain) {
++		case ST_CH_THREAD:
++			st_stall_name(r->inh_pid, w, sizeof(w));
++			snprintf(who, sizeof(who), " -> thread %s tid %llu (%u hops)", w, r->inh_tid, r->hops);
++			break;
++		case ST_CH_WORKQ:
++			st_stall_name(r->inh_pid, w, sizeof(w));
++			snprintf(who, sizeof(who), " -> workq %s (%u hops)", w, r->hops);
++			break;
++		case ST_CH_BUSY:
++			snprintf(who, sizeof(who), " -> busy after %u hops", r->hops);
++			break;
++		case ST_CH_DEEP:
++			snprintf(who, sizeof(who), " -> deeper than 4 hops");
++			break;
++		case ST_CH_OTHER:
++			snprintf(who, sizeof(who), " -> other inheritor (%u hops)", r->hops);
++			break;
++		default:
++			break;
++		}
++		printf("STARLTE STALL: %s[%d] tid %llu%s %s %s %llu ms ev %#llx%s\n", r->name, r->pid, r->tid,
+ 		    r->main ? " main" : "", (r->state & TH_RUN) ? "R" : (r->state & TH_WAIT) ? "W" : "-",
+-		    (r->state & TH_WAIT) ? st_hint_name(r->hint) : "", r->blocked_ms, r->owner, r->context, who);
++		    (r->state & TH_WAIT) ? st_hint_name(r->hint) : "", r->blocked_ms, r->event, who);
+ 	}
+ 	lck_mtx_unlock(&tasks_threads_lock);
+ }
+-- 
+2.53.0
+
