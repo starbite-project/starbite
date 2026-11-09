@@ -706,7 +706,8 @@ int sbm_rfs_handle(struct sbm_rfs *r, const uint8_t *req, uint32_t n, uint8_t *o
 
 /* The radio's power state request, from One UI's libsec-ril (IpcProtocol41Power::IpcTxRadioPower): PWR_PHONE_STATE
  * (0x0107) EXEC with u16 data: 0x0001 = low power mode (RF off), 0x0202 = normal (RF on). The RIL sends NORMAL at
- * boot; without it the CP stays in low power mode. Not on the builder's allow-list (nothing sends it yet). */
+ * boot. T11 showed that the CP scans and camps without it too (receive only with no SIM), so it is not the receiver's
+ * on/off switch. Not on the builder's allow-list (nothing sends it yet). */
 #define SBM_PWR_STATE_LPM     0x0001
 #define SBM_PWR_STATE_NORMAL  0x0202
 

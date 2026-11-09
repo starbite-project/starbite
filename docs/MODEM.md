@@ -480,8 +480,21 @@ None of these files is in EFS's root. The CP's diagnostics create fails harmless
 ### 7.4 T11 `modemlink-query`: the first AP -> CP requests
 T10b plus the 11 status GETs of the builder's allow-list (power state, SIM status and card type, CS/PS
 registration, serving network, PLMN selection, icon/RSSI, mode, time), sent once 3 s after INIT_END on FMT0 with the
-data doorbell. 60 s window. No SET or EXEC, so RF stays in low-power mode; no CALL/SMS/SS/SAT/identity request
+data doorbell. 60 s window. No SET or EXEC (T11 showed the receiver camps anyway: see its result); no CALL/SMS/SS/SAT/identity request
 (the allow-list refuses them before a frame exists). Answers (RESP / GEN_PHONE_RES) are counted and decoded.
+
+### Result T11 (2026-11-09 17:50, 436cbf9, `build/modem/t11-query-1/pmsg.txt`)
+**The first AP -> CP requests work.** 11 GETs sent at +3000 ms, all answered at +3001 ms: 9 RESP, plus 2
+GEN_PHONE_RES errors (SEC_SIM_ICC_TYPE code 0x000a; MISC_TIME_INFO code 0x8001). The decoded state is SIM absent,
+CS emergency-only (GSM), PS not registered, a PLMN and 4 bars; PWR_PHONE_STATE 02, PLMN_SEL 02 (automatic). The
+PLMN identifies the user's country and operator, so it stays in the local pmsg only, never in git.
+**Correction: the CP camps without PWR_PHONE_STATE NORMAL.** Its receiver scans and camps on a cell in the default
+state; PHONE_STATE 02 is probably "normal/online". With no SIM that is receive-only "limited service", as in
+Android with no SIM ("emergency calls only"). Location updating, GPRS attach and LTE attach all need the SIM's IMSI
+and keys, so the CP cannot register. The only transmission allowed in limited service is an emergency call, which
+our builder refuses before a frame exists. The logs cannot prove zero RF output, but nothing in them shows a
+registration attempt. Once a SIM is in, the CP will try to register by itself as soon as it is online, so **from
+then on every online run counts as a transmitting run** (user present, the user's SIM).
 
 ### 7.2 Facts from One UI's vendor binaries (2026-11-09; read offline, binaries kept out of git)
 VENDOR was copied read-only in TWRP and extracted in the VM (EROFS). From `lib64/libsec-ril.so` (stripped, but its
@@ -496,8 +509,8 @@ C++ dynamic symbols remain), `etc/mixer_paths.xml` and `firmware/calliope_*.bin`
   RAM** (`sbm_rfs.c`, host-tested).
 - **Radio power** (IpcProtocol41Power::IpcTxRadioPower): `PWR_PHONE_STATE (0x0107) EXEC`, u16 data `0x0001` low
   power mode (RF off) / `0x0202` normal (RF on). Modem power-off: `PWR 0x0102 EXEC`. RIL's RadioPowerUpHandler
-  sends NORMAL at boot, so after INIT_END the CP stays in low power mode until asked. That is why T9 (which sends
-  nothing) should keep the RF off.
+  sends NORMAL at boot. **Corrected by T11:** without that request the CP still scans and camps (receive). The
+  inference "it stays in low power mode until asked" was wrong.
 - **Call** (IpcProtocol41Call): OUTGOING `0x0201 EXEC`, 99 bytes: u16 call-type code, CLIR, number length (<= 82),
   prefix (0x11 if the number starts with '+', else 0x21), the number. Also Answer, Release, Hold, DTMF,
   GetCallList, and an emergency-status call that we never build.
