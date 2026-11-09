@@ -1440,6 +1440,23 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
   - The present readback runs only for the first 24 presents (`SB_SAMPLE_ALL=1` restores every 64th).
   - The umdlog stats gain rotations (identity / primary / copy), blits and flush-alls per 10 s.
 
+### 6.36 T28's result; T29 GDI blt rectangles, no flush after blits (2026-11-10)
+
+- **cycle-t28-1 (installed):**
+  - **sbdrag:** link 46.2 moves/s, avg 21.6 ms, max 44.6 ms; 14.2 jobs per present (T27: 22); GPU busy 28.7 %;
+    present copy 210 ms/s.
+  - **DWM:** about 56 primary identity rotations a second, no copy rotations.
+  - **Flip counters clean:** ScanCur moves, FlipAddrShown = ScanFlips, no fallback, no "Render failed".
+- **The KMD's CPU copies** are 1440x2960 → 1440x2960 non-primary blts that never pass through our UMD (all of DWM's
+  presents are flips). They are most likely GDI's (CDD), with up to 123 dirty rectangles; above 16 the bounding
+  box was copied.
+- **DWM's UMD:** about 2.7 blits and 10 flushes of everything per frame (Panfrost flushes all batches before and
+  after every blit).
+- **T29:**
+  - `MW_MAX_RECTS` 128 (bounding box only above that).
+  - sb-patches/0123 drops the flush after a blit (`SB_BLIT_FLUSH_AFTER=1` restores it), so a copy-forward blit and
+    the frame drawn over it share one render pass.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

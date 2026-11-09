@@ -88,7 +88,8 @@ typedef struct _MW_CONTEXT {
 #define MW_PRESENT_BLT          1
 #define MW_PRESENT_FILL         2
 #define MW_PRESENT_FLIP         3       /* S9 port (T13h): DWM's flips, emulated (the panel shows Src) */
-#define MW_MAX_RECTS            16
+#define MW_MAX_RECTS            128     /* T29: 16 -> 128. GDI's (CDD's) blts carry up to 123 dirty rectangles; above
+                                         * 16, T27/T28 copied their bounding box (up to 1440x1761 px a blt) */
 #define MW_COPY_HELPERS         3       /* T27: blt copies split over the submitting thread and these */
 #define MW_COPY_CHUNK_ROWS      16
 #define MW_COPY_IDLE            0x3FFFFFFF  /* MW_COPY_JOB.Next while no job is open: helpers take nothing */

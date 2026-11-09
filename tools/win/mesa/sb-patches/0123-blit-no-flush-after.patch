@@ -1,0 +1,27 @@
+diff --git a/src/gallium/drivers/panfrost/pan_blit.c b/src/gallium/drivers/panfrost/pan_blit.c
+index ceeeb4c..b44c1e4 100644
+--- a/src/gallium/drivers/panfrost/pan_blit.c
++++ b/src/gallium/drivers/panfrost/pan_blit.c
+@@ -1,3 +1,4 @@
++#include <stdlib.h>
+ /*
+  * Copyright (C) 2014 Broadcom
+  * Copyright (C) 2019 Collabora, Ltd.
+@@ -104,5 +105,16 @@ panfrost_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
+ #endif
+    panfrost_flush_all_batches(ctx, "Blit");
+    panfrost_blit_no_afbc_legalization(pipe, info);
+-   panfrost_flush_all_batches(ctx, "Blit");
++   /* Starbite (sbumd, sb-patches/0123, docs/WIN11-GPU.md 6.36): no flush after the blit. The blit is a draw into
++    * its destination's batch, and Panfrost's resource tracking orders any later reader or writer of either resource
++    * against it; flushing here ended that batch, so DWM's copy-forward blit into its back buffer and the frame drawn
++    * over it became two render passes (a full write-out and reload of the tiles) and two submissions. T28's DWM:
++    * ~2.7 blits and ~10 flushes of everything per frame. SB_BLIT_FLUSH_AFTER=1 (system environment) restores it. */
++   static int flush_after = -1;
++   if (flush_after < 0) {
++      const char *e = getenv("SB_BLIT_FLUSH_AFTER");
++      flush_after = e && *e == '1';
++   }
++   if (flush_after)
++      panfrost_flush_all_batches(ctx, "Blit");
+ }
