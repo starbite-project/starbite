@@ -5,6 +5,7 @@
 #ifndef FAKESOC_H
 #define FAKESOC_H
 #include "../sbm.h"
+#include "fakecp.h"
 
 #define FS_MAXREC 1024
 #define FS_REGIONS 4
@@ -25,7 +26,9 @@ struct fakesoc {
     /* stage 4: the IPC region, and the fake CP's side of the handshake */
     uint8_t *ipc;
     uint32_t ipc_size;
-    enum { L_IDLE, L_UDL, L_INIT_SOON, L_WAIT_PIF, L_PHONE_SOON, L_DONE } link;
+    enum { L_IDLE, L_UDL, L_INIT_SOON, L_WAIT_PIF, L_PHONE_SOON, L_DONE, L_ONLINE } link;
+    struct fakecp fcp;                 /* the CP's online side: FMT NOTIs, RFS requests */
+    int sim_present, online_crash;
     uint64_t link_at_us;
     int udl_silent, udl_wrong, crash_after_pif, layout_ok;
     uint8_t udl_frames[4][16];

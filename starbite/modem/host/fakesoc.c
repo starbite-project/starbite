@@ -120,6 +120,21 @@ static void ap_msg(struct fakesoc *s)
     if (s->n_ap_msgs < 32)
         s->ap_msgs[s->n_ap_msgs] = v;
     s->n_ap_msgs++;
+    if (s->link == L_DONE && v == SBM_CMD2INT(SBM_CMD_INIT_END)) {
+        /* online: the NOTIs this phone's CP sent under Android, then RFS requests (read, read, write) */
+        s->link = L_ONLINE;
+        fakecp_attach(&s->fcp, s->ipc, s->ipc_size, s->sim_present ? FAKE_HOME : FAKE_NOSIM);
+        fakecp_boot_notis(&s->fcp);
+        static const uint8_t rd1[] = { 0xf8, 0xf5, 18, 0, 14, 0, 0, 0, 0x01, 1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00 };
+        static const uint8_t rd2[] = { 0xf8, 0xf5, 18, 0, 14, 0, 0, 0, 0x01, 2, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00 };
+        uint8_t wr[4 + 6 + 8 + 16] = { 0xf8, 0xf5, 34, 0, 30, 0, 0, 0, 0x02, 3, 0x00, 0x20, 0, 0, 16, 0, 0, 0 };
+        for (unsigned i = 0; i < 16; ++i)
+            wr[18 + i] = (uint8_t)('0' + i % 10);    /* data that must never be logged */
+        fakecp_raw(&s->fcp, SBM_CH_RFS0, rd1, sizeof(rd1));
+        fakecp_raw(&s->fcp, SBM_CH_RFS0, rd2, sizeof(rd2));
+        fakecp_raw(&s->fcp, SBM_CH_RFS0, wr, sizeof(wr));
+        cp_msg(s, s->online_crash ? SBM_CMD2INT(SBM_CMD_CRASH_EXIT) : (SBM_INT_VALID | 0x01));
+    }
     if (s->link == L_WAIT_PIF && v == SBM_CMD2INT(SBM_CMD_PIF_INIT_DONE)) {
         struct sbm_sbd cp;
         s->layout_ok = sbm_sbd_attach(&cp, s->ipc, s->ipc_size) == 0 && cp.n == 9 && cp.rbps_off == 3852;

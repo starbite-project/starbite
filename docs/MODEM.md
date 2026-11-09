@@ -405,6 +405,18 @@ RAM only), FMT receive-only with sbm_cell decoding (no request sent unless R2 re
 Safety additions: never any SMS/CALL/SS (the builder's allow-list); RFS writes only to RAM; a crash command or the
 CP's watchdog interrupt parks at once; first run attended.
 
+### 7.1 Stage 5a as built: T9 `modemlink-online` (receive only)
+After PHONE_START: the ECT clock table, INIT_END (the only new command), then for `modem_hold` seconds (default
+20), receive only. FMT0/FMT1/RFS0 DL rings are drained; the other rings are left alone. FMT messages go through
+`sbm_cell` and `sbm_frame_line` (identity payloads never shown). RFS messages are logged by their header
+(`u32 length; u8 index; u8 id`) and `offset/length` only; an NV write's data is never shown. Nothing is sent: no
+FMT request, no RFS answer. It stops (and parks) at once if the CP reports a SIM that is not absent, any
+registration (home/roaming), or a crash command; otherwise after the time or 200 frames. Host-tested with the fake
+CP: no SIM (6 FMT, 3 RFS, stops on time, clock table first, INIT_END last, a write's data never in a log), a SIM
+present (stops within ms), a crash (parks).
+The full path from here to a voice call, with which experiments need One UI, is in the shared notes:
+`modem-voice-plan.md`.
+
 ## 8. Later stages (not started)
 
 

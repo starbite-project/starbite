@@ -205,6 +205,134 @@ static int hold(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sb
     return 0;
 }
 
+/* ---- stage 5a: INIT_END, then receive only ---------------------------------------------------- */
+/* The CP goes online. Nothing is sent after INIT_END: no FMT request, no RFS answer. FMT frames are decoded (identity-
+ * free state, redacted lines); RFS frames show their header and offset/length only, never data. Stops (and the caller
+ * parks) on a SIM that is not absent, on any registration, on a crash command, after hold_ms or 200 frames. */
+#define ONLINE_LOG_MAX 40
+static void log_rfs(const struct sbm_plat *p, struct sbm_boot *b, const uint8_t *pl, uint32_t n, int logit)
+{
+    if (n < SBM_RFS_HDR) {
+        b->bad_rx++;
+        return;
+    }
+    uint32_t len = sbm_le32(pl);
+    uint8_t idx = pl[4], id = pl[5];
+    uint16_t cmd = SBM_CMD(SBM_G_RFS, idx);
+    if (cmd == SBM_RFS_NV_READ_ITEM)
+        b->rfs_reads++;
+    else if (cmd == SBM_RFS_NV_WRITE_ITEM)
+        b->rfs_writes++;
+    else
+        b->rfs_other++;
+    if (!logit)
+        return;
+    if (n >= SBM_RFS_HDR + 8)
+        sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u: offset 0x%x length 0x%x (%s; not answered)", idx, id, len,
+                 sbm_le32(pl + 6), sbm_le32(pl + 10), cmd == SBM_RFS_NV_READ_ITEM ? "NV read" :
+                 cmd == SBM_RFS_NV_WRITE_ITEM ? "NV write, data not shown" : "unknown");
+    else
+        sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u, %u bytes (not answered)", idx, id, len, n);
+}
+
+static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd)
+{
+    static uint8_t rbuf[3][8192];
+    static struct sbm_reasm ra[3];
+    uint32_t logged = 0;
+    int r = sbm_clk_table_write(p->ipc, sbd->ipc_size);
+    if (r < 0)
+        return r;
+    sbm_logf(p, "online: ECT clock table written (%d bytes); INIT_END -> the CP goes online. Receive only from here", r);
+    bar(p);
+    if (!msg_send(p, SBM_CMD2INT(SBM_CMD_INIT_END)))
+        return SBM_EPERM;
+    b->init_end_sent = 1;
+    sbm_cell_init(&b->cell);
+    b->sim_status = 0xFFFFFFFFu;
+    for (unsigned k = 0; k < 3; ++k) {
+        ra[k].buf = rbuf[k];
+        ra[k].cap = sizeof(rbuf[k]);
+        ra[k].len = 0;
+        ra[k].active = 0;
+    }
+    const uint32_t limit = b->hold_ms ? b->hold_ms : 20000;
+    for (uint32_t ms = 1; ms <= limit; ++ms) {
+        uint32_t v;
+        if (msg_take(p, &v) && (v & SBM_CMD_VALID)) {
+            note_msg(p, b, v, "online");
+            if (b->crash_cmd) {
+                b->stopped_by = SBM_STOP_CRASH;
+                return SBM_EIO;
+            }
+        }
+        /* FMT0, FMT1, RFS0: drain (the AP consumes these rings in Android too); other rings are left alone */
+        static const uint16_t chs[3] = { SBM_CH_FMT0, SBM_CH_FMT1, SBM_CH_RFS0 };
+        for (unsigned c = 0; c < 3; ++c) {
+            int id = sbm_sbd_id(sbd, chs[c]);
+            const uint8_t *f;
+            int n;
+            while (id >= 0 && (n = sbm_sbd_get(sbd, (unsigned)id, SBM_DL, &f, p)) != 0) {
+                if (n < 0) {
+                    b->bad_rx++;
+                    continue;
+                }
+                struct sbm_sipc5 fr;
+                const uint8_t *msg;
+                uint32_t ml;
+                int ok = sbm_sipc5_parse(f, (uint32_t)n, &fr) == 0 && fr.ch == chs[c];
+                int got = ok ? sbm_reasm_feed(&ra[c], &fr, &msg, &ml) : -1;
+                if (got == 1 && c < 2) {
+                    struct sbm_ipc_msg m;
+                    b->fmt_rx++;
+                    if (sbm_ipc_parse(msg, ml, &m) == 0) {
+                        sbm_cell_update(&b->cell, &m);
+                        if (logged < ONLINE_LOG_MAX) {
+                            char line[200];
+                            sbm_frame_line(f, (uint32_t)n, 1, line, sizeof(line));
+                            sbm_logf(p, "FMT: %s", line);
+                            logged++;
+                        }
+                    } else {
+                        b->bad_rx++;
+                    }
+                } else if (got == 1) {
+                    b->rfs_rx++;
+                    log_rfs(p, b, msg, ml, logged < ONLINE_LOG_MAX);
+                    logged += logged < ONLINE_LOG_MAX;
+                } else if (got < 0) {
+                    b->bad_rx++;
+                }
+                sbm_sbd_get_done(sbd, (unsigned)id, SBM_DL, p);
+                if (b->fmt_rx + b->rfs_rx + b->bad_rx >= 200) {
+                    b->stopped_by = SBM_STOP_FRAMES;
+                    return 0;
+                }
+            }
+        }
+        /* the guards: a SIM that is not absent, any registration */
+        if (b->cell.have_sim) {
+            b->sim_status = b->cell.sim_status;
+            if (b->cell.sim_status != SBM_SIM_ABSENT && b->cell.sim_status != SBM_SIM_ERROR) {
+                sbm_logf(p, "online: SIM status 0x%02x (not absent): stopping now, as planned", b->cell.sim_status);
+                b->stopped_by = SBM_STOP_SIM;
+                return 0;
+            }
+        }
+        if ((b->cell.have_cs && (b->cell.cs.state == SBM_REG_HOME || b->cell.cs.state == SBM_REG_ROAMING)) ||
+            (b->cell.have_ps && (b->cell.ps.state == SBM_REG_HOME || b->cell.ps.state == SBM_REG_ROAMING))) {
+            sbm_logf(p, "online: the CP reports registration: stopping now");
+            b->stopped_by = SBM_STOP_REG;
+            return 0;
+        }
+        if (!(ms % 1000))
+            feed(p);
+        delay(p, 1000);
+    }
+    b->stopped_by = SBM_STOP_TIME;
+    return 0;
+}
+
 /* ---- the whole stage --------------------------------------------------------------------------- */
 
 static int wait_cmd(const struct sbm_plat *p, struct sbm_boot *b, uint32_t want, uint32_t timeout_ms, uint32_t *ms_out,
@@ -283,6 +411,8 @@ int sbm_link_boot(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boo
     }
     b->phone_start = 1;
     sbm_logf(p, "link: PHONE_START after %u ms. Stage 4 stops here: no INIT_END, the CP is parked", b->phone_start_ms);
+    if (b->stop == SBM_BOOT_ONLINE)
+        return online(p, b, &sbd);
     if (b->hold_ms)
         return hold(p, b, &sbd);
     return 0;

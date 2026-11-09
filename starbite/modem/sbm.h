@@ -346,7 +346,7 @@ int sbm_sbd_id(const struct sbm_sbd *s, uint16_t ch);   /* ring id of a channel,
 #define SBM_G_CFG   0x0F   /* seen */
 #define SBM_G_IMEI  0x10
 #define SBM_G_GPS   0x11   /* seen */
-#define SBM_G_RFS   0x42
+#define SBM_G_RFS   0x42   /* RFS channel: its own header { u32 length; u8 index; u8 id } */
 #define SBM_G_GEN   0x80   /* seen */
 #define SBM_CMD(g, i) ((uint16_t)(((g) << 8) | (i)))
 #define SBM_PWR_PHONE_PWR_UP     SBM_CMD(SBM_G_PWR, 0x01)
@@ -370,6 +370,15 @@ int sbm_sbd_id(const struct sbm_sbd *s, uint16_t ch);   /* ring id of a channel,
 #define SBM_MISC_ME_SN           SBM_CMD(SBM_G_MISC, 0x03)
 #define SBM_MISC_TIME_INFO       SBM_CMD(SBM_G_MISC, 0x05)
 #define SBM_GEN_PHONE_RES        SBM_CMD(SBM_G_GEN, 0x01)
+#define SBM_RFS_NV_READ_ITEM     SBM_CMD(SBM_G_RFS, 0x01)   /* libsamsung-ipc rfs.h: body { u32 offset; u32 length } */
+#define SBM_RFS_NV_WRITE_ITEM    SBM_CMD(SBM_G_RFS, 0x02)   /* { u32 offset; u32 length; data } */
+#define SBM_RFS_HDR              6
+/* why stage 5a stopped */
+#define SBM_STOP_TIME     1
+#define SBM_STOP_SIM      2       /* a SIM is present: not tonight's experiment */
+#define SBM_STOP_REG      3       /* the CP reported registration */
+#define SBM_STOP_CRASH    4
+#define SBM_STOP_FRAMES   5       /* the frame budget is used up */
 
 struct sbm_ipc_msg {
     uint16_t len;          /* whole message, header included */
@@ -601,7 +610,7 @@ struct sbm_image {
  * sizes and CRCs, never content. */
 int sbm_image_check(const struct sbm_plat *p, struct sbm_image *im);
 
-enum sbm_boot_stop { SBM_BOOT_DRY = 1, SBM_BOOT_SEC = 2, SBM_BOOT_RUN = 3, SBM_BOOT_LINK = 4 };
+enum sbm_boot_stop { SBM_BOOT_DRY = 1, SBM_BOOT_SEC = 2, SBM_BOOT_RUN = 3, SBM_BOOT_LINK = 4, SBM_BOOT_ONLINE = 5 };
 
 /* Stage 4 (sbm_link.c): the legacy 4 MB map at the front of the IPC region (Samsung's shmem_4mb_phys_map without
  * LEGACY_QOS), used for the boot-time UDL exchange before the SBD rings exist */
@@ -638,6 +647,10 @@ struct sbm_boot {
     uint32_t hold_ms;                    /* input (LINK): stay after PHONE_START this long, watching, sending nothing */
     int udl_done, init_start, pif_sent, phone_start;
     uint32_t phone_start_repeats, phone_start_gap_ms, dl_frames_seen, other_cmds;
+    /* stage 5a (ONLINE, receive only): INIT_END sent, then what the CP says for hold_ms */
+    int init_end_sent;
+    uint32_t fmt_rx, rfs_rx, rfs_reads, rfs_writes, rfs_other, other_rx, bad_rx, sim_status, stopped_by;
+    struct sbm_cell_state cell;        /* what the CP reported (decoded, identity-free) */
     uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;
     uint64_t sec0_us;
     int err;                             /* 0, or the SBM_E* that stopped it */

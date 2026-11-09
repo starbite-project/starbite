@@ -1317,6 +1317,66 @@ static void test_boot(void)
     fakesoc_free(&s);
     b.hold_ms = 0;
 
+    /* ONLINE (stage 5a), no SIM: clock table, INIT_END, receive only, stops on time, parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_ONLINE;
+    b.hold_ms = 2000;
+    nlog = 0;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+    CHECK(b.init_end_sent && b.parked);
+    CHECKEQ(b.stopped_by, SBM_STOP_TIME);
+    CHECKEQ(b.fmt_rx, 6);
+    CHECKEQ(b.rfs_rx, 3);
+    CHECKEQ(b.rfs_reads, 2);
+    CHECKEQ(b.rfs_writes, 1);
+    CHECKEQ(b.bad_rx, 0);
+    CHECKEQ(b.sim_status, SBM_SIM_ABSENT);
+    CHECK(!memcmp(s.ipc + 40, "CT0", 4));                       /* the clock table went out first */
+    CHECKEQ(s.n_ap_msgs, 2);
+    CHECKEQ(s.ap_msgs[0], 0xCD);
+    CHECKEQ(s.ap_msgs[1], 0xC2);                                /* INIT_END, and nothing after it */
+    {
+        unsigned rfs_lines = 0, leaks = 0;
+        for (unsigned i = 0; i < nlog && i < 256; ++i) {
+            rfs_lines += !strncmp(loglines[i], "RFS: rx idx 0x01", 16) || !strncmp(loglines[i], "RFS: rx idx 0x02", 16);
+            leaks += strstr(loglines[i], "0123456789") != 0 || strstr(loglines[i], "30 31 32") != 0;
+        }
+        CHECKEQ(rfs_lines, 3);
+        CHECKEQ(leaks, 0);                                       /* the write's data is never shown */
+    }
+    check_parked(&s);
+    check_allowed(&s);
+    fakesoc_free(&s);
+
+    /* ONLINE with a SIM present: stops at once on the SIM status, parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.sim_present = 1;
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_ONLINE;
+    b.hold_ms = 20000;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+    CHECKEQ(b.stopped_by, SBM_STOP_SIM);
+    CHECK(s.clock_us < 9000000);                                 /* well before the 20 s */
+    CHECK(b.parked);
+    check_parked(&s);
+    fakesoc_free(&s);
+
+    /* ONLINE and the CP crashes: parked */
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.online_crash = 1;
+    fakesoc_plat(&s, &p, tlog);
+    b.stop = SBM_BOOT_ONLINE;
+    b.hold_ms = 2000;
+    CHECKEQ(sbm_boot_run(&p, &im, &b), SBM_EIO);
+    CHECKEQ(b.stopped_by, SBM_STOP_CRASH);
+    CHECK(b.parked);
+    check_parked(&s);
+    fakesoc_free(&s);
+    b.hold_ms = 0;
+
+    /* LINK never sends INIT_END: checked above (ap_msgs only 0xCD) */
+
     /* LINK without an IPC view: refused before anything is touched */
     fakesoc_init(&s, &im.plan, boot_crc, main_crc);
     fakesoc_plat(&s, &p, tlog);

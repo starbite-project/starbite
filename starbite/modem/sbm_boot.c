@@ -325,7 +325,9 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     b->stopped_at = "-";
     sbm_logf(p, "boot: stage 3 up to %s", want == SBM_BOOT_DRY ? "the RAM check" : want == SBM_BOOT_SEC
              ? "EL3's signature check (the CP CPU is not started)" : want == SBM_BOOT_RUN
-             ? "the CP's first status (then parked)" : "stage 4: the link up to PHONE_START (no INIT_END; then parked)");
+             ? "the CP's first status (then parked)" : want == SBM_BOOT_LINK
+             ? "stage 4: the link up to PHONE_START (no INIT_END; then parked)"
+             : "stage 5a: INIT_END, receive only, then parked");
     int r = sbm_image_check(p, im);
     if (r < 0)
         return stop(p, b, r, "image check");
@@ -335,7 +337,7 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
 
     if (!p->smc || !p->mmio_wr32 || !p->probe32 || !p->carve_write || !p->carve_read)
         return stop(p, b, SBM_EPERM, "platform");
-    if (want == SBM_BOOT_LINK && (!p->ipc || im->mm.ipc_size < SBM_LEG_RAW_RX_BUFF + SBM_LEG_RAW_RX_SIZE))
+    if (want >= SBM_BOOT_LINK && (!p->ipc || im->mm.ipc_size < SBM_LEG_RAW_RX_BUFF + SBM_LEG_RAW_RX_SIZE))
         return stop(p, b, SBM_EPERM, "platform (no IPC region view)");
     /* only a CP that nobody started: the state S-Boot leaves (T1, T4) */
     uint32_t err;
@@ -383,6 +385,8 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     if (r < 0 || want == SBM_BOOT_RUN)
         return stop(p, b, r, r < 0 ? "power on" : "done (first status, parked)");
     r = sbm_link_boot(p, im, b);
+    if (want == SBM_BOOT_ONLINE && b->init_end_sent)
+        return stop(p, b, r, r < 0 ? "online (an error or a crash command)" : "done (online, receive only, parked)");
     return stop(p, b, r, r < 0 ? (b->pif_sent ? "waiting for PHONE_START" : b->init_start ? "INIT_START"
                                   : b->udl_done ? "waiting for INIT_START" : "DL_START / UDL")
                                : "done (PHONE_START, no INIT_END, parked)");
@@ -399,10 +403,18 @@ void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
     if (b->released)
         sbm_logf(p, "BOOT: CP status after %u ms; ISSR3 0x%08x (cp_status %u)", b->cp_status_ms, b->issr[3],
                  SBM_CP_STATUS(b->issr[3]));
-    if (b->stop == SBM_BOOT_LINK && b->released)
+    if (b->stop >= SBM_BOOT_LINK && b->released)
         sbm_logf(p, "LINK: udl %u (0x%04x 0x%04x) init_start %u (%u ms) pif %u phone_start %u (%u ms) msgs %u crash 0x%x",
                  b->udl_done, b->udl_resp[0], b->udl_resp[1], b->init_start, b->init_start_ms, b->pif_sent,
                  b->phone_start, b->phone_start_ms, b->n_msgs, b->crash_cmd);
+    if (b->stop == SBM_BOOT_ONLINE && b->init_end_sent) {
+        char line[160];
+        static const char *const why[] = { "-", "time", "SIM present", "registration", "crash command", "frame budget" };
+        sbm_cell_line(&b->cell, line, sizeof(line));
+        sbm_logf(p, "ONLINE: stopped by %s; FMT %u, RFS %u (reads %u, writes %u, other %u), bad %u", why[b->stopped_by <= 5 ? b->stopped_by : 0],
+                 b->fmt_rx, b->rfs_rx, b->rfs_reads, b->rfs_writes, b->rfs_other, b->bad_rx);
+        sbm_logf(p, "ONLINE: %s", line);
+    }
     if (b->stop == SBM_BOOT_LINK && b->hold_ms)
         sbm_logf(p, "HOLD: %u ms: PHONE_START repeated %u times (last gap %u ms), other commands %u, DL frames waiting %u",
                  b->hold_ms, b->phone_start_repeats, b->phone_start_gap_ms, b->other_cmds, b->dl_frames_seen);
