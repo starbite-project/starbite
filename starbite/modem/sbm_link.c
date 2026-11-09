@@ -230,10 +230,27 @@ static void log_rfs(const struct sbm_plat *p, struct sbm_boot *b, const uint8_t 
         b->rfs_other++;
     if (!logit)
         return;
-    if (n >= SBM_RFS_HDR + 8)
+    if (idx == SBM_RFS_IDX_OPEN && n >= SBM_RFS_HDR + 8) {
+        /* open: u32 flags, u32 path length, the path (a file name in the RFS directory: not an identifier) */
+        char path[64];
+        uint32_t plen = sbm_le32(pl + 10), k = 0;
+        for (; k < plen && k + 1 < sizeof(path) && SBM_RFS_HDR + 8 + k < n; ++k) {
+            char c = (char)pl[SBM_RFS_HDR + 8 + k];
+            path[k] = c >= 0x20 && c < 0x7F ? c : '?';
+        }
+        path[k] = 0;
+        sbm_logf(p, "RFS: rx idx 0x11 id %u len %u: open flags 0x%x path '%s' (not answered)", id, len, sbm_le32(pl + 6),
+                 path);
+        return;
+    }
+    if ((idx == SBM_RFS_IDX_NV_READ || idx == SBM_RFS_IDX_NV_WRITE) && n >= SBM_RFS_HDR + 8)
         sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u: offset 0x%x length 0x%x (%s; not answered)", idx, id, len,
-                 sbm_le32(pl + 6), sbm_le32(pl + 10), cmd == SBM_RFS_NV_READ_ITEM ? "NV read" :
-                 cmd == SBM_RFS_NV_WRITE_ITEM ? "NV write, data not shown" : "unknown");
+                 sbm_le32(pl + 6), sbm_le32(pl + 10), idx == SBM_RFS_IDX_NV_READ ? "NV read" : "NV write, data not shown");
+    else if (idx == SBM_RFS_IDX_WRITE_FILE || idx == SBM_RFS_IDX_PUT_FILE || idx == SBM_RFS_IDX_NV_WRITE_ALL)
+        sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u (carries data: not shown; not answered)", idx, id, len);
+    else if (n >= SBM_RFS_HDR + 8)
+        sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u: %02x %02x %02x %02x %02x %02x %02x %02x (not answered)", idx, id, len,
+                 pl[6], pl[7], pl[8], pl[9], pl[10], pl[11], pl[12], pl[13]);
     else
         sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u, %u bytes (not answered)", idx, id, len, n);
 }
@@ -330,7 +347,11 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
             int n;
             while (id >= 0 && (n = sbm_sbd_get(sbd, (unsigned)id, SBM_DL, &f, p)) != 0) {
                 if (n < 0) {
-                    b->bad_rx++;
+                    if (b->bad_rx++ < 5)
+                        sbm_logf(p, "online: +%u ms: ch %u entry refused (%s), size word 0x%08x", ms, chs[c],
+                                 sbm_strerror(n), sbd->last_size_v);
+                    if (n == SBM_EIO)
+                        break;          /* a broken index: leave this ring for now */
                     continue;
                 }
                 struct sbm_sipc5 fr;
@@ -357,7 +378,11 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
                     log_rfs(p, b, msg, ml, logged < ONLINE_LOG_MAX);
                     logged += logged < ONLINE_LOG_MAX;
                 } else if (got < 0) {
-                    b->bad_rx++;
+                    if (b->bad_rx++ < 5)
+                        sbm_logf(p, "online: +%u ms: ch %u frame not parsed: %u bytes, size word 0x%08x, head %02x %02x %02x %02x "
+                                 "%02x %02x %02x %02x %02x %02x %02x %02x", ms, chs[c], n, sbd->last_size_v, f[0], f[1],
+                                 f[2], f[3], n > 4 ? f[4] : 0, n > 5 ? f[5] : 0, n > 6 ? f[6] : 0, n > 7 ? f[7] : 0,
+                                 n > 8 ? f[8] : 0, n > 9 ? f[9] : 0, n > 10 ? f[10] : 0, n > 11 ? f[11] : 0);
                 }
                 sbm_sbd_get_done(sbd, (unsigned)id, SBM_DL, p);
                 if (b->fmt_rx + b->rfs_rx + b->bad_rx >= 200) {

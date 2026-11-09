@@ -427,6 +427,15 @@ INIT_END with the magic still "BOOT". **T9b** does the reset, waits 100 ms, then
 and logs ms-since-INIT_END on every online line plus magic, access, ISSR1/3 and INTSR0 at INIT_END and at the
 stop. The fake CP now crashes the same way when the reset is missing.
 
+### Result T9b (2026-11-09, 8354e3b, `build/modem/t9b-online-1/pmsg.txt`)
+**The link reset fixed the crash.** At INIT_END: magic 0xaa, access 1, cp_status 1. The CP stayed online the full
+20 s, was parked, and restarted cleanly. It sent one more PHONE_START and data doorbells (0x0083) at +1170 to
++1415 ms, but all **78 frames counted as bad**. Cause: Android's `recv_data` takes the length as `size_v & 0xFFFF`
+on **every** channel, and the CP puts the channel in the high half of FMT/RFS entries too. Ours masked only PS
+channels, so every FMT/RFS entry looked longer than its buffer. **T9c** masks it on every channel. The fake CP now
+packs the channel the same way. A refused entry logs its size word, and an unparsed frame its first 12 bytes; RFS
+open requests show their flags and path.
+
 ### 7.2 Facts from One UI's vendor binaries (2026-11-09; read offline, binaries kept out of git)
 VENDOR was copied read-only in TWRP and extracted in the VM (EROFS). From `lib64/libsec-ril.so` (stripped, but its
 C++ dynamic symbols remain), `etc/mixer_paths.xml` and `firmware/calliope_*.bin`:

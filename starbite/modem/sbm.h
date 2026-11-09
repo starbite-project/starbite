@@ -297,6 +297,7 @@ struct sbm_sbd {
     struct sbm_ring r[SBM_SBD_MAX_CH][2];
     uint8_t ch2id[256];    /* 0xFF = none */
     uint32_t errors;       /* rejected ring entries (bad index, size or address) */
+    uint32_t last_size_v;  /* the raw size word of the entry sbm_sbd_get looked at last (diagnostics) */
 };
 /* Lays out the descriptor region and buffer pool for chans[0..n) the way Samsung's AP does on CMD_INIT_START
  * (the CP reads this layout). Clears the descriptor region only. 0 or SBM_E*. */

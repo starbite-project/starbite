@@ -404,6 +404,17 @@ static void test_sbd_rings(void)
     CHECKEQ(sbm_sbd_get(&ap, (unsigned)pid, SBM_DL, &f, 0), 1500);
     sbm_sbd_get_done(&ap, (unsigned)pid, SBM_DL, 0);
 
+    /* the CP puts the channel in the high half of FMT entries too (T9b): the length is the low 16 bits */
+    CHECKEQ(sbm_sbd_put(&cp, SBM_CH_FMT1, SBM_DL, fr, 77, 0), 0);
+    {
+        int fid = sbm_sbd_id(&ap, SBM_CH_FMT1);
+        uint16_t frp = sbm_sbd_rp(&ap, (unsigned)fid, SBM_DL);
+        sbm_put32(ipc + ap.r[fid][SBM_DL].size_v_off + 4 * frp, (SBM_CH_FMT1 << 16) | 77);
+        CHECKEQ(sbm_sbd_get(&ap, (unsigned)fid, SBM_DL, &f, 0), 77);
+        CHECKEQ(ap.last_size_v, (SBM_CH_FMT1 << 16) | 77);
+        sbm_sbd_get_done(&ap, (unsigned)fid, SBM_DL, 0);
+    }
+
     /* a CP that writes nonsense: an index past the ring, a size past the buffer */
     int did = sbm_sbd_id(&ap, SBM_CH_FMT1);
     uint32_t wp_off = ap.rbps_off + 2 * (ap.n * 3 + (unsigned)did);
