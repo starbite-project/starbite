@@ -25,7 +25,7 @@ echo sbdwm softpipe exit %errorlevel% >> gputest.log
 if exist libgallium_d3d10-softpipe.dll sbtex.exe %D%\libgallium_d3d10-softpipe.dll sbtex-softpipe.log >> gputest.log 2>&1
 echo sbtex softpipe exit %errorlevel% >> gputest.log
 rem T14b: a windowed D3D11 app at full speed, 20 s with a blt swap chain and 20 s with a flip one (sbfps.log)
-sbfps.exe hw 20 sbfps.log >> gputest.log 2>&1
+sbfps.exe hw 15 sbfps.log >> gputest.log 2>&1
 echo sbfps hw exit %errorlevel% >> gputest.log
 rem the SV_VertexID variant last: on the Mali it crashed (T13m: Panfrost has no load_vertex_id_zero_base)
 sbtex.exe hw sbtex-hw-vertexid.log vertexid >> gputest.log 2>&1

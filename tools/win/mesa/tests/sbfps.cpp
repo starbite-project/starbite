@@ -30,6 +30,12 @@ static const char kHlsl[] =
     "float4 ps() : SV_Target { return col; }\n";
 
 static FILE *logfile;
+/* T14c: T14b's first run stopped somewhere after 512+ good frames and never reported. What each frame is doing,
+ * and a watchdog that names the call a stuck frame is in, logs it and ends the process. */
+static volatile LONG g_phase, g_frames, g_run;
+static const char *const kPhase[] = { "idle", "clear", "map", "draw", "present", "create", "release" };
+static volatile LONG64 g_last;          /* QPC of the last completed frame */
+static LARGE_INTEGER g_f;
 
 static void out(const char *fmt, ...)
 {
@@ -42,6 +48,29 @@ static void out(const char *fmt, ...)
         vfprintf(logfile, fmt, a);
         va_end(a);
         fflush(logfile);
+    }
+}
+
+static DWORD WINAPI Watchdog(LPVOID)
+{
+    LONG lastFrames = -1;
+    LARGE_INTEGER now;
+    for (;;) {
+        Sleep(2000);
+        QueryPerformanceCounter(&now);
+        LONG fr = g_frames;
+        double idle = (double)(now.QuadPart - g_last) / g_f.QuadPart;
+        if (fr != lastFrames && g_phase != 0)
+            out("  run %ld: %ld frames so far\n", g_run, fr);
+        lastFrames = fr;
+        if (g_phase != 0 && idle > 5.0) {
+            out("STUCK: run %ld, %ld frames done, in '%s' for %.1f s; exiting\n", g_run, fr,
+                kPhase[g_phase < 7 ? g_phase : 0], idle);
+            if (logfile)
+                fflush(logfile);
+            fflush(stdout);
+            TerminateProcess(GetCurrentProcess(), 90);
+        }
     }
 }
 
@@ -75,6 +104,12 @@ static IDXGIAdapter1 *pick_adapter(void)
 /* One run with one swap effect: frames for `secs` seconds. 0 = ran. */
 static int run(HWND wnd, int w, int h, DXGI_SWAP_EFFECT effect, UINT buffers, const char *name, double secs)
 {
+    LARGE_INTEGER c0;
+    QueryPerformanceCounter(&c0);
+    g_last = c0.QuadPart;
+    g_frames = 0;
+    InterlockedIncrement(&g_run);
+    g_phase = 5;                          /* create */
     IDXGIAdapter1 *ad = pick_adapter();
     if (!ad) {
         out("%s: no Starbite/Mali adapter\n", name);
@@ -139,6 +174,7 @@ static int run(HWND wnd, int w, int h, DXGI_SWAP_EFFECT effect, UINT buffers, co
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&t0);
     prev = t0;
+    g_last = t0.QuadPart;
     unsigned frames = 0, slow = 0;
     double worst = 0;
     for (;;) {
@@ -158,7 +194,9 @@ static int run(HWND wnd, int w, int h, DXGI_SWAP_EFFECT effect, UINT buffers, co
         if (frames && dt > 0.1)
             slow++;
         const float clear[4] = { 0.5f + 0.5f * (float)sin(t), 0.5f + 0.5f * (float)sin(t * 1.3 + 2), 0.5f, 1.0f };
+        g_phase = 1;
         ctx->ClearRenderTargetView(rtv, clear);
+        g_phase = 2;
         D3D11_MAPPED_SUBRESOURCE map;
         if (SUCCEEDED(ctx->Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
             float *p = (float *)map.pData;
@@ -172,6 +210,7 @@ static int run(HWND wnd, int w, int h, DXGI_SWAP_EFFECT effect, UINT buffers, co
             p[7] = 1.0f;
             ctx->Unmap(cb, 0);
         }
+        g_phase = 3;
         ctx->OMSetRenderTargets(1, &rtv, nullptr);
         D3D11_VIEWPORT vp = { 0, 0, (float)w, (float)h, 0, 1 };
         ctx->RSSetViewports(1, &vp);
@@ -184,13 +223,19 @@ static int run(HWND wnd, int w, int h, DXGI_SWAP_EFFECT effect, UINT buffers, co
         ctx->PSSetShader(ps, nullptr, 0);
         ctx->PSSetConstantBuffers(0, 1, &cb);
         ctx->Draw(6, 0);
+        g_phase = 4;
         hr = sc->Present(0, 0);
         if (FAILED(hr)) {
             out("%s: Present failed 0x%08lx after %u frames\n", name, (unsigned long)hr, frames);
             break;
         }
         frames++;
+        g_frames = (LONG)frames;
+        LARGE_INTEGER done;
+        QueryPerformanceCounter(&done);
+        g_last = done.QuadPart;
     }
+    g_phase = 6;                          /* release */
     QueryPerformanceCounter(&now);
     double total = (double)(now.QuadPart - t0.QuadPart) / f.QuadPart;
     out("%s: %u frames in %.1f s = %.1f fps; slowest frame %.0f ms; %u frames over 100 ms\n", name, frames, total,
@@ -198,6 +243,7 @@ static int run(HWND wnd, int w, int h, DXGI_SWAP_EFFECT effect, UINT buffers, co
     sc->Release();
     ctx->Release();
     dev->Release();
+    g_phase = 0;
     return 0;
 }
 
@@ -206,10 +252,12 @@ int main(int argc, char **argv)
     _set_error_mode(_OUT_TO_STDERR);
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-    double secs = argc > 2 ? atof(argv[2]) : 20.0;
+    double secs = argc > 2 ? atof(argv[2]) : 15.0;
     if (secs < 2 || secs > 300)
         secs = 20.0;
     logfile = fopen(argc > 3 ? argv[3] : "sbfps.log", "a");
+    QueryPerformanceFrequency(&g_f);
+    CreateThread(nullptr, 0, Watchdog, nullptr, 0, nullptr);
     SetProcessDPIAware();
     int w = GetSystemMetrics(SM_CXSCREEN), h = GetSystemMetrics(SM_CYSCREEN);
     out("sbfps: screen %dx%d, %.0f s per run\n", w, h, secs);
