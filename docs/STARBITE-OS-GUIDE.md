@@ -45,7 +45,10 @@ is only refreshed when something changes.
 - **SOS**: the screen flashes white and red with a big SOS; the LED can strobe with it (Settings > Alarm).
 - **Info**: your **medical card**. Tap "Write the card": name, blood type, allergies, medicines, conditions and
   whom to call, typed on the keyboard. (A file `/starbite/emergency.txt` on a microSD card works too.)
-- **Clock**: the time, a world clock, a stopwatch, a timer.
+- **Clock**: the time, a world clock, a stopwatch, a timer (it ends with three buzzes) and **Alarms** (1.2-alpha9):
+  four alarms, each with a switch and **Set time** (+/- hours, ten minutes, minutes; Once, Every day or Weekdays).
+  An alarm turns the screen on and buzzes until **Stop** or **Snooze** (9 minutes; Power snoozes too), at most 10
+  minutes. The phone stays on (no automatic switch-off) while an alarm is set.
 - **Battery**: the charge, how long it lasts at this use, and a chart of the last hours.
 - **Settings**: Display (brightness, screen-off time, switch off after the screen has been off), Alarm (the LED in
   the alarm; "LED at rated power", new), Heat (the graphics processor in High), About (the version, the clocks,
@@ -62,6 +65,11 @@ is only refreshed when something changes.
   memory until a restart, never written to the log). The network saved on the phone is marked "Saved". Once
   joined it gets an address, checks the router and sets the clock from the internet.
 
+## Notifications
+
+- A small blue dot next to the time means something happened: a missed alarm, heat that stopped by itself, a low
+  battery, the timer. Tap the status bar: the control center lists them at the top; **Clear** empties the list.
+
 ## Keys
 
 - **Volume** moves the focus (a frame), **Bixby** selects (a hold button needs Bixby twice), **Bixby held** is
@@ -75,5 +83,5 @@ is only refreshed when something changes.
 
 ## What is not there yet
 
-Calls and messages (no modem driver), sound and vibration (no drivers), real sleep with the memory kept (the
+Calls and messages (no modem driver), sound (no driver; vibration works from 1.2-alpha8), real sleep with the memory kept (the
 screen-off state lowers the clocks instead), a lock code.

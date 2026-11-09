@@ -1,4 +1,39 @@
-# Starbite OS 1.2-alpha5: Survival hotter and at once (2026-11-09)
+# Starbite OS 1.2-alpha10: notifications, wake-up alarms, vibration, the Wi-Fi join fixes (2026-11-09)
+
+- **Notifications** (alpha10): a dot next to the time while any is unread; tap the status bar for the control
+  center, which lists the newest four (with the time) and has Clear. Posted by apps (notify()) and by the phone
+  itself: a missed alarm, heat that stopped by itself, the battery at 15 % and 5 %, the Clock timer. Kept until a
+  restart.
+
+The road to "a proper OS" (the ranked gap list: calls and SMS with modem-core; then Wi-Fi, vibration, alarms,
+standby battery, notifications, sound, a lock code, app install, speed). Items 2, 3, 4 and 6 started here.
+
+- **Alarms** (Clock > Alarms): four alarms, each on / off, its time (+/- 1 h, 10 min, 1 min) and Once / Every
+  day / Weekdays. At its minute the screen comes on, Clock shows WAKE UP with Stop and Snooze (9 minutes), and the
+  phone buzzes every 2.5 s, at most 10 minutes. Power snoozes; Back snoozes too (never a silent stop). The phone
+  does not switch itself off while an alarm is set (it could not ring switched off). Saved with Clock's state.
+- **Vibration** (alpha8): the S9's motor (an LRA) through PWM timer 1 (gpp3-1), the motor boost (gpg1-7) and the
+  MAX77705's haptic bits (MAINCTRL1 bias, MCONFIG 0xC2), the vendor DT's alert setting (48.8 us, 70 %). The first
+  use measures the PWM timer's clock and refuses if it does not tick. The Clock timer ends with three buzzes. Apps:
+  vibrate(), SET_VIBRATE. The test image `starbite-os-vibtest.img` buzzes three times, stops a pattern midway and
+  restarts into recovery.
+- **Wi-Fi join** (alpha7): wifi-core's fixes in Starbite's non-blocking join: 5 GHz preferred (every self test so
+  far took 2.4 GHz and timed out), every firmware event logged while joining, 300 ms of settling after the directed
+  scan, 256 rx buffers. The Linux guest's bounce load now stops below the radio's DMA window.
+  **On the phone (alpha7 self test, cab82e5a, 2026-11-09): PASSED, the first WPA2 join**: the 5 GHz side (chanspec
+  0xe32a, -56 dBm), the four-way handshake answered, keyed 2292 ms after SET_SSID (4944 ms in all), DHCP bound
+  (lease 7200 s), the gateway pinged in 21 ms, DNS answered, the clock corrected over the network (+6 s); 26 screens,
+  9 apps, 0 problems.
+
+## 1.2-alpha6 (2026-11-09)
+
+- Survival: 2 M3 cores at 2314 MHz (the phone's own beta6 / beta7 measurements: 9.5 / 9.7 W against 9.1 / 9.4 W for
+  4 x 1794; alpha5's 4 x 1794 drew under 3 A), the A55s and the GPU, all at once.
+- The heat log: one sample a second for 10 minutes, then one every 10 s (SoC, battery, current, voltage, the M3
+  clock, cores, flags, the PMIC's OCP_WARN1, and the M3 throttle counter after Settings > About > OCP probe), saved
+  in the slot and kept until the next session; `starbite/tools/heatlog.py <store image>` prints it.
+
+## 1.2-alpha5: Survival hotter and at once (2026-11-09)
 
 The user's findings on alpha4 (the main session's relay): the measurement phase rose to ~130 C, fell to ~100 C and
 climbed back slowly; Survival rarely drew more than ~3.5 A even with the limit off; no flashlight in Survival; the
