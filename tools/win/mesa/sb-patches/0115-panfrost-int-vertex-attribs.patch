@@ -1,0 +1,138 @@
+diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.c b/src/gallium/drivers/panfrost/pan_cmdstream.c
+index bcb3abe..5a58fab 100644
+--- a/src/gallium/drivers/panfrost/pan_cmdstream.c
++++ b/src/gallium/drivers/panfrost/pan_cmdstream.c
+@@ -4113,6 +4113,10 @@ panfrost_create_vertex_elements_state(struct pipe_context *pctx,
+ 
+    so->num_elements = num_elements;
+    memcpy(so->pipe, elements, sizeof(*elements) * num_elements);
++   for (unsigned i = 0; i < num_elements && i < 32; ++i) {
++      if (util_format_is_pure_integer(elements[i].src_format))
++         so->sb_int_mask |= 1u << i;
++   }
+ 
+    for (unsigned i = 0; i < num_elements; ++i)
+       so->strides[elements[i].vertex_buffer_index] = elements[i].src_stride;
+diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.h b/src/gallium/drivers/panfrost/pan_cmdstream.h
+index 2c0f5aa..94507fe 100644
+--- a/src/gallium/drivers/panfrost/pan_cmdstream.h
++++ b/src/gallium/drivers/panfrost/pan_cmdstream.h
+@@ -61,6 +61,9 @@ struct panfrost_zsa_state {
+ };
+ 
+ struct panfrost_vertex_state {
++   /* Starbite (sb-patches/0115): the elements with a pure-integer format, bit i = element i. The first member: the
++    * arch-independent pan_context.c reads it from the opaque CSO at bind time. */
++   uint32_t sb_int_mask;
+    unsigned num_elements;
+    struct pipe_vertex_element pipe[PIPE_MAX_ATTRIBS];
+    uint16_t strides[PIPE_MAX_ATTRIBS];
+diff --git a/src/gallium/drivers/panfrost/pan_context.c b/src/gallium/drivers/panfrost/pan_context.c
+index f8425d4..13fbf4b 100644
+--- a/src/gallium/drivers/panfrost/pan_context.c
++++ b/src/gallium/drivers/panfrost/pan_context.c
+@@ -305,6 +305,21 @@ panfrost_bind_vertex_elements_state(struct pipe_context *pctx, void *hwcso)
+    struct panfrost_context *ctx = pan_context(pctx);
+    ctx->vertex = hwcso;
+    ctx->dirty |= PAN_DIRTY_VERTEX;
++
++   /* Starbite (sb-patches/0115, docs/WIN11-GPU.md 6.26): D3D10 vertex shaders (TGSI) carry no input types, so
++    * tgsi_to_nir loads every input as float32, and the hardware would convert an integer attribute (R32_UINT...)
++    * to a float value. The vertex shader variant is keyed on which elements are pure integers; those inputs are
++    * loaded raw. (T18 loaded every attribute raw: Bifrost's .auto32 then broke the float formats.) */
++   uint32_t mask = hwcso ? *(const uint32_t *)hwcso : 0;   /* panfrost_vertex_state.sb_int_mask, first member */
++   if (mask != ctx->sb_int_attribs) {
++      ctx->sb_int_attribs = mask;
++      if (ctx->uncompiled[MESA_SHADER_VERTEX]) {
++         ctx->dirty |= PAN_DIRTY_TLS_SIZE;
++         ctx->dirty_shader[MESA_SHADER_VERTEX] |= PAN_DIRTY_STAGE_SHADER;
++         panfrost_update_shader_variant(ctx, MESA_SHADER_VERTEX);
++         panfrost_update_shader_variant(ctx, MESA_SHADER_FRAGMENT);
++      }
++   }
+ }
+ 
+ static void
+diff --git a/src/gallium/drivers/panfrost/pan_context.h b/src/gallium/drivers/panfrost/pan_context.h
+index 651bce3..3b2a396 100644
+--- a/src/gallium/drivers/panfrost/pan_context.h
++++ b/src/gallium/drivers/panfrost/pan_context.h
+@@ -182,6 +182,8 @@ struct panfrost_context {
+ 
+    struct pipe_vertex_buffer vertex_buffers[PIPE_MAX_ATTRIBS];
+    uint32_t vb_mask;
++   /* Starbite (sb-patches/0115): the bound vertex elements' pure-integer mask (a vertex shader variant key) */
++   uint32_t sb_int_attribs;
+ 
+    /* Bound CL global buffers */
+    struct util_dynarray global_buffers;
+@@ -383,6 +385,9 @@ struct panfrost_vs_key {
+    /* Bit mask of varyings in the linked FS that use noperspective
+     * interpolation, starting at VARYING_SLOT_VAR0 */
+    uint32_t noperspective_varyings;
++
++   /* Starbite (sb-patches/0115): inputs fed by pure-integer vertex elements, loaded as raw 32-bit values */
++   uint32_t int_attribs;
+ };
+ 
+ struct panfrost_shader_key {
+diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
+index bbc30de..ed7dee5 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -2619,6 +2619,8 @@ panfrost_resource_screen_destroy(struct pipe_screen *pscreen)
+  * the second second of a flip-model app on). The same swap as this file's own rename path (a new BO under a
+  * resource, plane.base, panfrost_dirty_state_all), after flushing everything. Only plain 2D linear resources
+  * of one layout; false = not done (the caller copies). */
++bool panfrost_sb_rotate_bos(struct pipe_context *pctx, struct pipe_resource **res, unsigned n);  /* d3d10umd's */
++
+ bool
+ panfrost_sb_rotate_bos(struct pipe_context *pctx, struct pipe_resource **res, unsigned n)
+ {
+diff --git a/src/gallium/drivers/panfrost/pan_shader.c b/src/gallium/drivers/panfrost/pan_shader.c
+index 920be21..ffd0c89 100644
+--- a/src/gallium/drivers/panfrost/pan_shader.c
++++ b/src/gallium/drivers/panfrost/pan_shader.c
+@@ -91,6 +91,8 @@ lower_sample_mask_writes(nir_builder *b, nir_intrinsic_instr *intrin,
+    return true;
+ }
+ 
++static bool sb_retype_int_attribs(nir_builder *b, nir_intrinsic_instr *intr, void *data);
++
+ static void
+ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
+                         struct util_debug_callback *dbg,
+@@ -104,6 +106,9 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
+ 
+    nir_shader *s = nir_shader_clone(NULL, ir);
+ 
++   if (s->info.stage == MESA_SHADER_VERTEX && key->vs.int_attribs)
++      NIR_PASS(_, s, nir_shader_intrinsics_pass, sb_retype_int_attribs, nir_metadata_all, &key->vs.int_attribs);
++
+    /* While graphics shaders are preprocessed at CSO create time, compute
+     * kernels are not preprocessed until they're cloned since the driver does
+     * not get ownership of the NIR from compute CSOs. Do this preprocessing now.
+@@ -302,6 +307,23 @@ panfrost_build_vs_key(struct panfrost_context *ctx,
+ 
+    assert(fs != NULL && "too early");
+    key->noperspective_varyings = fs->noperspective_varyings;
++   key->int_attribs = ctx->sb_int_attribs;   /* element i = input i (driver_location; inputs_read is VERT_ATTRIB-based) */
++}
++
++/* Starbite (sb-patches/0115): a float32 vertex input fed by a pure-integer element is loaded as uint32 (Bifrost's
++ * .auto32: the bits as they are, as for GL's integer attributes). Input i is element i (d3d10umd puts each element
++ * at its input register; tgsi_to_nir's driver_location is that register). */
++static bool
++sb_retype_int_attribs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   uint32_t mask = *(const uint32_t *)data;
++   if (intr->intrinsic != nir_intrinsic_load_input || !nir_src_is_const(intr->src[0]))
++      return false;
++   unsigned slot = nir_intrinsic_base(intr) + nir_src_as_uint(intr->src[0]);
++   if (slot >= 32 || !(mask & (1u << slot)) || nir_intrinsic_dest_type(intr) != nir_type_float32)
++      return false;
++   nir_intrinsic_set_dest_type(intr, nir_type_uint32);
++   return true;
+ }
+ 
+ static void

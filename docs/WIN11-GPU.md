@@ -1289,6 +1289,21 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
 - **Also seen:** sbfps was cut off by the cycle's 300 s restart, not stalled. Its flip run reached about 65 fps
   (T14: 15).
 
+### 6.26 T18's result and T19: integer attributes per element (2026-11-09)
+
+- **T18 (every attribute loaded with `.auto32`):**
+  - sbtex `uintattr` and `instattr` passed, and sbfps completed (flip 56 fps, blt 76 fps).
+  - Direct2D filled its target with transparent black, so `.auto32` is not a valid load for non-integer formats
+    (Panfrost only ever uses it for integer ones).
+- **T19 (sb-patches/0115 replaced):**
+  - Bifrost is back to F32 for float32 loads.
+  - Panfrost records a mask of pure-integer vertex elements when they are created (`panfrost_vertex_state.sb_int_mask`,
+    the first member, so the arch-independent bind can read it).
+  - The bound mask is part of the vertex shader variant key (`panfrost_vs_key.int_attribs`).
+  - At variant compile, `load_input`s of those elements are retyped to uint32, the register format GL's integer
+    attributes use. Input i is element i: d3d10umd places elements at their input register, and tgsi_to_nir's
+    driver_location is that register.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
