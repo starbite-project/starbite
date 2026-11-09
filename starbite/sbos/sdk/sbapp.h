@@ -208,6 +208,8 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
                               0 the normal screen */,
        SET_HEAT_HIGH_STOP = 25 /* 1.2-alpha17: Survival's 4.5 A battery-current stop: 0 asks once, then off (a 6 A over
                                    1 s backstop stays); 1 on again. Remembered. Reads 1 on, 0 off */,
+       SET_HEAT_SCREEN_WHITE = 26 /* 1.2-alpha19: Survival's screen white at the panel's top level (1) or dark with the
+                                      readings (0, the default: the panel's ~1 W goes to the chips). Remembered */,
        SET_VIBRATE = 24 /* 1.2-alpha7: write (count << 16) | ms: count pulses (0 = 1) of ms (<= 5000) with ms gaps; 0 stops.
                            Reads 1 when the motor works, 0 not tried yet, -1 refused */ };
 

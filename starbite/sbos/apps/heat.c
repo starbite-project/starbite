@@ -254,7 +254,7 @@ static void show(void)
         fmt_s(&f, h.gpu_on ? " GPU on." : " GPU off.");
         ui_textline(f.b, ORANGE);
         /* 1.2-alpha5: the screen as heat (full white at the panel's top level; a tap comes back here) */
-        ui_button(30, "White screen: more heat", "Full white with the readings on top. Tap it to come back.", 0);
+        ui_button(30, "Survival screen", "The readings full screen (white or dark: Settings > Heat). Tap to come back.", 0);
     }
     fmt_init(&f);
     temp(&f, h.bat_c10);
@@ -344,7 +344,7 @@ static void show(void)
         ui_textline(f.b, 0xffffffffU);
     }
     if (flat || manual_page)
-        ui_textline("The heat is the battery's power (about 10 W at most), not the clocks: faster clocks would not warm more.", GREY);
+        ui_textline("The heat is the battery's power (10 to 20 W): the battery's current and voltage cap it, not the clocks.", GREY);
     if (!on && h.state == HEAT_ST_STOPPED && h.why[0] == 'R')     /* "Reserve reached" */
         ui_hold(18, "Hold to go on below the reserve", 1500, 0);
     if (manual_page || (on && h.level == HEAT_MANUAL))

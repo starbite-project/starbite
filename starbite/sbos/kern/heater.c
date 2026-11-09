@@ -840,7 +840,8 @@ static void extreme_extras(int on)
         return;
     ext_on = on;
     if (on) {
-        panel_boost(1, 1);
+        if (ctl.level < HEAT_SURVIVAL || heat_screen_white)
+            panel_boost(1, 1);              /* 1.2-alpha19: Survival only with the white screen */
         if (ctl.level == HEAT_EXTREME && !ext_led_used) {
             ext_led_used = 1;
             ext_led = !torch_on() && torch_ready() && torch_set(1) == 0;   /* 240 mA with Settings' full LED (0.6.3) */
@@ -850,7 +851,9 @@ static void extreme_extras(int on)
             kui_heat_light(1);
         }
         sb_log(ext_led ? "heater: Extreme: the panel at its top level, the LED on" :
-               ctl.level >= HEAT_SURVIVAL ? "heater: Survival: the panel at its top level, the screen white (no LED)" :
+               ctl.level >= HEAT_SURVIVAL ? (heat_screen_white ?
+                                             "heater: Survival: the panel at its top level, the screen white (no LED)" :
+                                             "heater: Survival: the screen dark with the readings (no LED, no boost)") :
                                             "heater: Extreme: the panel at its top level");
     } else {
         panel_boost(1, 0);
@@ -1462,6 +1465,7 @@ uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;
 /* 0.6.2: the call / SOS reserve for Extreme / Manual / Keep warm (0 = overridden), Keep warm's battery target */
 int heat_reserve_pct = 15, heat_target_c10 = 200, heat_no_current_stop;
 int heat_no_high_stop;                      /* 1.2-alpha17 */
+int heat_screen_white;                      /* 1.2-alpha19: off by default (the user: hotter chips without it) */
 int heat_reserve_override;                  /* 1.0-rc2 (review): the hold overrides the reserve for the next session only */
 int heat_soc_stop_c10;                      /* 0.6.3: Manual's SoC stop (0 off: the user's default) */
 int heat_surv_bat_c10 = 550;                /* 1.1-beta5: Survival's battery limit (55 C; 58 / 60 after a confirmation) */

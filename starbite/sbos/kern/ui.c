@@ -481,7 +481,7 @@ void kui_heat_light(int on)
     int ret = screen == SCR_LIGHT ? light_return : screen;
     if (ret == SCR_CONFIRM || ret == SCR_OFF || ret == SCR_GUEST || ret == SCR_SOS)
         ret = SCR_APP;
-    light_on(0xffffffffU, ret, 24U * 60U);
+    light_on(heat_screen_white ? 0xffffffffU : 0xff000000U, ret, 24U * 60U);   /* 1.2-alpha19: dark by default */
     light_heat = 1;
     kt_set(KT_UI, 8, sb_ms(), 1000, 1);
 }
@@ -883,7 +883,7 @@ static void build_home(void)
     if (th > 600)
         th = 600;
     int t = 0;
-    for (int i = 0; i < napps && t < 10; ++i) {
+    for (int i = 0; i < napps && t < 12; ++i) {   /* 1.2-alpha20: 10 apps + Linux + Terminal */
         if (app_hidden(i) || i == emerg)
             continue;
         struct el *e = add(cur, &ncur, E_TILE);
@@ -904,7 +904,7 @@ static void build_home(void)
         if (i == sos_a && sos_active())
             scopy(e->b, sizeof(e->b), "Alarm on");
     }
-    if (linux_tile && t < 10) {                  /* 1.2: Linux apps on the big cores (Settings turned it on) */
+    if (linux_tile && t < 12) {                  /* 1.2: Linux apps on the big cores (Settings turned it on) */
         struct el *e = add(cur, &ncur, E_TILE);
         e->id = GUEST_TILE;
         scopy(e->a, sizeof(e->a), "Linux");
@@ -917,7 +917,7 @@ static void build_home(void)
         e->y = y0 + (t / 2) * (th + 40);
         ++t;
     }
-    if (term_tile && t < 10) {                  /* 1.2-alpha3: the Linux terminal with Starbite's keyboard */
+    if (term_tile && t < 12) {                  /* 1.2-alpha3: the Linux terminal with Starbite's keyboard */
         struct el *e = add(cur, &ncur, E_TILE);
         e->id = GUEST_TILE_TERM;
         scopy(e->a, sizeof(e->a), "Terminal");
@@ -1358,7 +1358,8 @@ static void build_light(void)
     e->x = 0, e->y = 0, e->w = UI_W, e->h = UI_H;
     e->color = light_argb;
     if (sb_ms() < light_hint_until)
-        scopy(e->b, sizeof(e->b), light_heat ? "Survival: the screen as heat. Tap for the normal screen" :
+        scopy(e->b, sizeof(e->b), light_heat ? (heat_screen_white ? "Survival: the screen as heat. Tap for the normal screen" :
+                                                "Survival: the readings. Tap for the normal screen") :
                                                "Tap or press a key to turn it off");
     if (!light_heat)
         return;

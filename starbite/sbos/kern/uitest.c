@@ -75,6 +75,12 @@ static const struct st_ev script[] = {
     { "settings", "section Heat", EV_APP_LEVEL, 9, 2 },
     { "settings", "section About", EV_APP_LEVEL, 9, 3 },
     { "settings", "section Display", EV_APP_LEVEL, 9, 0 },
+    { "calc", "key 1", EV_APP_LEVEL, 12, 0 },        /* 1.2-alpha20: 1 / 3 = (the 128-bit division on the phone) */
+    { "calc", "key /", EV_APP_LEVEL, 10, 3 },
+    { "calc", "key 3", EV_APP_LEVEL, 12, 2 },
+    { "calc", "key =", EV_APP_LEVEL, 13, 2 },
+    { "calc", "C", EV_APP_BUTTON, 1, 0 },
+    { "notes", "the new-note editor (nothing typed or saved)", EV_APP_BUTTON, 2, 0 },
 };
 #define NSCRIPT (int)(sizeof(script) / sizeof(script[0]))
 
@@ -178,7 +184,16 @@ static int shown_app(int i)
 
 void selftest_timer(unsigned id)
 {
-    (void)id;
+    if (id == 1) {
+        if (!active)
+            return;
+        active = 0;
+        sb_logx("selftest: STALLED: still running after 180 s, phase ", (uint64_t)phase);
+        sb_logx("selftest: STALLED: app index / screen index / steps ", (uint64_t)app_i << 32 | (uint64_t)scr_i << 16 | (uint64_t)steps);
+        sb_log("selftest: STALLED: restart into recovery for pmsg");
+        power_restart_recovery();
+        return;
+    }
     if (!active)
         return;
     power_input();                          /* keep the screen on through the test (not counted as a touch) */
@@ -258,6 +273,10 @@ void selftest_timer(unsigned id)
 #endif
         kui_lock();
         phase = 1;
+        /* 1.2-alpha19: the alpha18 self test stalled on the phone (no return in 240 s, its pmsg overwritten by the next
+         * boot): the regular self test still running after 180 s logs where it is and restarts into recovery (TWRP
+         * keeps pmsg). The variants have their own watchdogs and lengths */
+        kt_set(KT_SELFTEST, 1, sb_ms(), 180000, 0);
         break;
 #endif
     }

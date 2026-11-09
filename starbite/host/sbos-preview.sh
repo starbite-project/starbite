@@ -26,7 +26,7 @@ $V python3 starbite/tools/mkassets.py "$SB7" "$out/libsb-assets.sb7" >/dev/null
 $V python3 starbite/sbos/tools/mergeassets.py "$out/sbassets.sb7" "$out/libsb-assets.sb7" "$EXTRA" >/dev/null
 CF="-O1 -g -DSB_HOST -DSB_HOST_UTILITY -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I$lib -I$k -I$sdk -I$root/starbite/utility -I$root/starbite/engineer -I$root/starbite/wifi -I$root/starbite/guest/sbos"
 aobjs=""
-for a in emergency light heat sos info clock battery settings wifi; do
+for a in emergency light heat sos info clock battery settings wifi calc notes; do
     $V gcc $CF -c -Dapp_event=${a}_app_event -Dsbapp_header=${a}_header -o "$out/app_$a.o" "$apps/$a.c"
     aobjs="$aobjs $out/app_$a.o"
 done
@@ -51,7 +51,7 @@ scene() {
 OPEN="g:1150,2310,0,700 w:400"                      # hold Open on the lock screen
 BACK="h:b:900 w:300"                                # Bixby held: Back
 # home (0.3): Emergency across the top (720,245); tiles: Light 382,663 Heat 1057,663 SOS 382,1250 Info 1057,1250
-# Clock 382,1837 Battery 1057,1837 Settings 382,2424
+# Clock 382,1545 Battery 1057,1545 Settings 382,2015 Wi-Fi 1057,2015 Calculator 382,2485 Notes 1057,2485 (5 rows, 1.2-alpha20)
 scene lock          w:600
 scene home          w:300 $OPEN
 scene emergency     w:300 $OPEN t:720,245 w:500
@@ -77,22 +77,22 @@ scene sos           w:300 $OPEN t:382,1250 w:500
 scene sos-countdown w:300 $OPEN t:382,1250 w:500 g:720,635,0,1300 w:600
 scene sos-flash     w:300 $OPEN t:382,1250 w:500 g:720,635,0,1300 w:3600
 scene info          w:300 $OPEN t:1057,1250 w:600
-scene clock         w:300 $OPEN t:382,1837 w:600
-scene world         w:300 $OPEN t:382,1837 w:600 t:720,1100 w:500
-scene stopwatch     w:300 $OPEN t:382,1837 w:600 t:380,1400 w:500 t:720,950 w:2300
-scene timer         w:300 $OPEN t:382,1837 w:600 t:1050,1400 w:500 t:380,950 w:300 t:720,1220 w:2300
-scene battery       w:300 $OPEN t:1057,1837 w:600
-scene battery-history w:300 $OPEN w:3700000 k:p w:500 $OPEN t:1057,1837 w:600
-scene settings      w:300 $OPEN t:382,2424 w:600
-scene settings-on   w:300 $OPEN t:382,2424 w:600 t:720,1789 w:300 t:720,2039 w:300
-scene settings-alarm w:300 $OPEN t:382,2424 w:600 t:557,670 w:400
-scene settings-heat w:300 $OPEN t:382,2424 w:600 t:882,670 w:400
-scene settings-about w:300 $OPEN t:382,2424 w:600 t:1207,670 w:400
-scene wifi          w:300 $OPEN t:1057,2424 w:600
-scene wifi-list     w:300 $OPEN t:1057,2424 w:600 t:720,625 w:3000
-scene wifi-joined   w:300 $OPEN t:1057,2424 w:600 t:720,625 w:3000 t:720,905 w:6000
+scene clock         w:300 $OPEN t:382,1545 w:600
+scene world         w:300 $OPEN t:382,1545 w:600 t:720,1100 w:500
+scene stopwatch     w:300 $OPEN t:382,1545 w:600 t:380,1400 w:500 t:720,950 w:2300
+scene timer         w:300 $OPEN t:382,1545 w:600 t:1050,1400 w:500 t:380,950 w:300 t:720,1220 w:2300
+scene battery       w:300 $OPEN t:1057,1545 w:600
+scene battery-history w:300 $OPEN w:3700000 k:p w:500 $OPEN t:1057,1545 w:600
+scene settings      w:300 $OPEN t:382,2015 w:600
+scene settings-on   w:300 $OPEN t:382,2015 w:600 t:720,1789 w:300 t:720,2039 w:300
+scene settings-alarm w:300 $OPEN t:382,2015 w:600 t:557,670 w:400
+scene settings-heat w:300 $OPEN t:382,2015 w:600 t:882,670 w:400
+scene settings-about w:300 $OPEN t:382,2015 w:600 t:1207,670 w:400
+scene wifi          w:300 $OPEN t:1057,2015 w:600
+scene wifi-list     w:300 $OPEN t:1057,2015 w:600 t:720,625 w:3000
+scene wifi-joined   w:300 $OPEN t:1057,2015 w:600 t:720,625 w:3000 t:720,905 w:6000
 SCENE_ENV=SBOS_HOST_WPA2=1
-scene wifi-passphrase w:300 $OPEN t:1057,2424 w:600 t:720,625 w:3000 t:720,905 w:800 t:580,2622 w:150 t:1210,2246 w:150 t:510,2246 w:300
+scene wifi-passphrase w:300 $OPEN t:1057,2015 w:600 t:720,625 w:3000 t:720,905 w:800 t:580,2622 w:150 t:1210,2246 w:150 t:510,2246 w:300
 SCENE_ENV=
 SCENE_ENV=SBOS_HOST_FILES=/nonexistent
 scene info-empty    w:300 $OPEN t:1057,1250 w:600
@@ -120,6 +120,17 @@ SCENE_ENV=
 scene power-menu    w:300 h:p:1300 w:500
 scene focus-keys    w:300 $OPEN k:d w:200 k:d w:200 k:d w:300
 scene lock-hold     w:300 g:290,2310,0,300
+# 1.2-alpha20: Calculator (keys: columns x 224 552 884 1212, rows y 988 1328 1668 2008) and Notes
+CALC="t:382,2485 w:600"
+scene calc          w:300 $OPEN $CALC
+scene calc-chain    w:300 $OPEN $CALC t:224,1668 w:150 t:552,1668 w:150 t:1212,2008 w:150 t:224,988 w:150 t:1212,1328 w:150 t:552,1668 w:150 t:884,2008 w:400
+scene calc-third    w:300 $OPEN $CALC t:224,1668 w:150 t:1212,988 w:150 t:884,1668 w:150 t:884,2008 w:400
+scene calc-op       w:300 $OPEN $CALC t:224,1668 w:150 t:552,1668 w:150 t:1212,2008 w:150 t:224,988 w:400
+NOTES="t:1057,2485 w:600"
+scene notes         w:300 $OPEN $NOTES
+scene notes-new     w:300 $OPEN $NOTES t:720,636 w:600
+scene notes-saved   w:300 $OPEN $NOTES t:720,636 w:600 t:125,2622 w:150 t:860,2434 w:150 t:1070,2246 w:150 t:1245,2810 w:600
+scene notes-note    w:300 $OPEN $NOTES t:720,636 w:600 t:125,2622 w:150 t:860,2434 w:150 t:1070,2246 w:150 t:1245,2810 w:600 t:720,636 w:600
 echo "PNGs in $png"
 # SBOS_SCREENS=DIR: every screen and one contact sheet there too (the main checkout's build/starbite-os/screens/)
 if [ -n "${SBOS_SCREENS:-}" ]; then

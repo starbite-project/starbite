@@ -773,6 +773,35 @@ static void t_survival(void)
             run(&c, &in, 15000, 1250, 0);
             CHECK(stopped_with(&c, HEAT_ST_STOPPED, "above 6 A for 1 s"), "Survival %d: 6.5 A for 1 s stops (%s)", x, c.why);
         }
+        /* 1.2-alpha19: above 165 C the governor steps every 250 ms from 5.6 A (here a 6.0 A session) or 3.36 V */
+        {
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.no_current_stop = 1;
+            c.no_high_stop = 1;
+            c.gov_ma = 6000;
+            c.backstop_ma = 6500;
+            c.surv_stop_c10 = SBOS_HEAT_SOC_NOLIMIT_C10;
+            heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+            c.trip_off = 1;
+            run(&c, &in, 0, 10000, 0);
+            int k0 = load_of(&c);
+            in.soc_c10 = 1600;
+            in.ma = -5700;
+            run(&c, &in, 10250, 1000, 0);
+            CHECK(load_of(&c) == k0, "governor: 160 C at 5.7 A (below its 6.0 A) holds (%d -> %d)", k0, load_of(&c));
+            in.soc_c10 = 1700;
+            run(&c, &in, 11500, 1000, 0);
+            CHECK(load_of(&c) <= k0 - 3, "governor: 170 C at 5.7 A steps every 250 ms (%d -> %d)", k0, load_of(&c));
+            int k1 = load_of(&c);
+            in.ma = -5400;
+            run(&c, &in, 12750, 3000, 0);
+            CHECK(load_of(&c) == k1, "governor: 170 C at 5.4 A no step back up (%d -> %d)", k1, load_of(&c));
+            in.ma = -4500;
+            in.mv = 3350;
+            run(&c, &in, 16000, 1000, 0);
+            CHECK(load_of(&c) < k1, "governor: 170 C at 3.35 V steps down (%d -> %d)", k1, load_of(&c));
+        }
         /* 1.2-alpha18: the governor with the 4.5 A stop off: down from 5.0 A or 3.35 V, up below 4.7 A and above 3.45 V */
         for (int x = 0; x < 2; ++x) {
             heat_ctl_init(&c, 0);

@@ -1,4 +1,34 @@
-# Starbite OS 1.2-alpha18: a current / voltage governor under the charger chip's cut; the heat log survives a power loss (2026-11-09)
+# Starbite OS 1.2-alpha20: Calculator and Notes; alpha19's heat changes (2026-11-09)
+
+alpha20 = alpha19 (below: the dark Survival screen, the governor above 165 C, the self-test stall limit, none of it
+run on the phone yet) plus two apps:
+- **Calculator:** + - x / with a decimal point, C and Delete, chained left to right as a pocket calculator
+  (12 + 7 x 2 = 38). Fixed point (6 decimals, 12 digits; 128-bit products divided by a long division, no libgcc);
+  5 / 0 and overflow show an error. The keys are four rows of level pickers.
+- **Notes:** up to 8 notes of 64 characters with the system keyboard, kept in the app's state (the sbos-state slot,
+  so they survive a restart where the slot is set up); Edit, hold to delete.
+- Two new icons (209 calculator, 210 notes) in sbos-extra.sb7: rerun `starbite/sbos/tools/sbos-assets.py` before a
+  build (this branch built its own copy in build/brand/ of its worktree).
+- Home has 10 tiles now, so its rows are shorter (5 rows: Light/Heat 663, SOS/Info 1250, Clock/Battery 1545,
+  Settings/Wi-Fi 2015, Calculator/Notes 2485); every host test's taps moved with them. New `sbos-apps-test.sh`.
+- The apps log one short line for the host tests (`calc: = 38`, `notes: saved, 2`: the count, never the text).
+
+## Starbite OS 1.2-alpha19: a dark Survival screen by default, a faster governor above 165 C, a self-test stall limit (2026-11-09)
+
+alpha18 on the phone: a record 173 C. From 100 to 125 s it held 161-170 C at 4.6-5.4 A, 3.34-3.43 V and 16-18 W
+(the M3 stepping 2002 <-> 2106 at the 3.35 V floor), battery 47-49 C. In the last second: 173 C, 6.08 A, 3.28 V,
+19.95 W, then the power went (a brownout: B2SOVRC was off). The alpha18 self test also stalled (no return in 240 s;
+its pmsg overwritten by the next boot).
+- **The governor above 165 C** (the leakage runaway): steps every 250 ms, from 5.6 A or 3.36 V; back up only 0.3 A
+  below and 0.1 V above. Below 165 C as alpha18 (6.0 A with B2SOVRC off, 3.35 V, one step a second).
+- **Survival's screen dark by default:** the readings on black, no panel boost. The user found the chips hotter
+  without the white screen: under the current / voltage ceiling, the panel's ~1 W came out of the chips' budget.
+  White (with the boost) is a switch in Settings > Heat, remembered.
+- **The self test's own stall limit:** the regular self test still running after 180 s logs `selftest: STALLED`
+  with its phase and step, and restarts into recovery, so TWRP keeps that pmsg.
+- The fuel gauge's trackers, the boot: lines, B2SOVRC's handling and the 2 s heat-log saves are unchanged.
+
+## Starbite OS 1.2-alpha18: a current / voltage governor under the charger chip's cut; the heat log survives a power loss (2026-11-09)
 
 alpha17 on the phone (the 4.5 A stop off, on battery): a sudden power loss (SPON) at ~147 C; only the first 4 s of
 the heat log survived (2.97 A at 3.87 V, then 3.78 A / 3.75 V / 14.2 W at 94 C); the MAX77705's B2SOVRC reads

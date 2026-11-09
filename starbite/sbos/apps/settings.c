@@ -102,6 +102,10 @@ static void show(void)
         ui_toggle(5, "GPU in Heat High", setting_get(SET_GPU_HEAT) == 1);
         ui_textline("High also loads the graphics processor: more heat, faster battery use. Asks first.", 0);
         ui_textline("Low and High stop by themselves at 42 \xc2\xb0" "C battery, 46 \xc2\xb0" "C case, 15 % battery or after 30 minutes. Extreme, Manual and Keep warm: see Heat.", GREY);
+        /* 1.2-alpha19: Survival's screen white at the top level, or dark (the default) */
+        ui_toggle(13, "Survival screen white", setting_get(SET_HEAT_SCREEN_WHITE) == 1);
+        ui_textline("Off (the default): Survival shows its readings on black, and the panel's ~1 W goes to the chips "
+                    "under the current limit.", GREY);
     } else {
         about();
         ui_button(10, "Read the panel's registers", dump_r == 1 ? "Done: in the log (read only)" :
@@ -134,7 +138,8 @@ void app_event(const struct sbos_event *ev)
         show();
     } else if (ev->type == EV_APP_TOGGLE) {
         int id = ev->id == 2 ? SET_PANEL_SAVE : ev->id == 3 ? SET_PANEL_OFF : ev->id == 4 ? SET_SOS_LED :
-                 ev->id == 5 ? SET_GPU_HEAT : ev->id == 8 ? SET_LED_FULL : ev->id == 12 ? SET_LINUX : 0;
+                 ev->id == 5 ? SET_GPU_HEAT : ev->id == 8 ? SET_LED_FULL : ev->id == 12 ? SET_LINUX :
+                 ev->id == 13 ? SET_HEAT_SCREEN_WHITE : 0;
         if (id) {
             int r = setting_set(id, ev->value);
             if (id == SET_LED_FULL)

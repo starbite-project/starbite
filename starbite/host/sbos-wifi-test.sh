@@ -6,7 +6,7 @@
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/starbite/out/sboshost"
-OPEN="w:300 g:1150,2310,0,700 w:400 t:1057,2424 w:600"       # the lock screen's Open, then the Wi-Fi tile
+OPEN="w:300 g:1150,2310,0,700 w:400 t:1057,2015 w:600"       # the lock screen's Open, then the Wi-Fi tile
 ON="t:720,625 w:3000"                                           # the toggle, the bring-up and the scan
 JOIN="t:720,905 w:9000"                                         # the first network
 fails=0

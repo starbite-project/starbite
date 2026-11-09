@@ -8,7 +8,7 @@ set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/starbite/out/sboshost"
 UNLOCK="w:300 g:1150,2310,0,700 w:400"
-SETTINGS="t:382,2424 w:600 t:1216,672 w:600"
+SETTINGS="t:382,2015 w:600 t:1216,672 w:600"
 TOGGLE="t:1200,2536 w:600"
 HOLD="g:720,1170,0,1900 w:600"
 BACK="t:220,210 w:800"

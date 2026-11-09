@@ -87,16 +87,16 @@ want "$r" "heater: heat log on" "the heat log is on"
 n=$(echo "$r" | grep -n "heater: core 5 (M3) running" | head -1 | cut -d: -f1)
 m=$(echo "$r" | grep -n "heater: start, level" | head -1 | cut -d: -f1)
 [ -n "$n" ] && [ -n "$m" ] && echo "note: start at log line $m, core 7 at line $n"
-want "$r" "heater: Survival: the panel at its top level, the screen white (no LED)" "Survival: the top level and the white screen, no LED"
+want "$r" "heater: Survival: the screen dark with the readings (no LED, no boost)" "Survival: the dark readings screen by default, no boost, no LED"
 never "$r" "the LED on" "Survival never lights the LED"
 never "$r" "M3 OCP TABLE VIOLATION" "never more M3 cores than the table allows at the clock asked"
 never "$r" "acpm dvfs (m3 ocp table) refused" "the libsb table never had to refuse"
-c=$(px surv-white 720 1500); [ "$c" = ffffff ] && echo "ok: the screen is white" || { echo "FAIL: white screen pixel $c"; fails=$((fails + 1)); }
+c=$(px surv-white 720 1500); [ "$c" = 000000 ] && echo "ok: the screen is dark (1.2-alpha19 default)" || { echo "FAIL: dark screen pixel $c"; fails=$((fails + 1)); }
 c=$(px surv-white 20 40); [ "$c" = 1c1c1e ] && echo "ok: the dark status strip on top" || { echo "FAIL: strip pixel $c"; fails=$((fails + 1)); }
-c=$(px surv-back 720 1500); [ "$c" != ffffff ] && echo "ok: a tap brings the normal screen back" || { echo "FAIL: still white after a tap"; fails=$((fails + 1)); }
+c=$(px surv-back 720 1200); [ "$c" = 1c1c1e ] && echo "ok: a tap brings the normal screen back" || { echo "FAIL: still the dark screen after a tap"; fails=$((fails + 1)); }
 want "$r" "heater: the panel level, the white screen and the LED put back" "everything put back at the stop"
 # 1.1-beta7: the read-only OCP probe (Settings > About): readable, trapped, no M3 core
-SETT_ABOUT="w:300 g:1150,2310,0,700 w:400 t:382,2424 w:800 t:1216,671 w:600"
+SETT_ABOUT="w:300 g:1150,2310,0,700 w:400 t:382,2015 w:800 t:1216,671 w:600"
 PROBE="t:723,2252 w:1500"
 ENVS=SBOS_HOST_SMP=m3
 r=$(run $SETT_ABOUT $PROBE)

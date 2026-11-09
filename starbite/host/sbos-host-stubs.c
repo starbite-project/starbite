@@ -183,6 +183,8 @@ APP(info)
 APP(clock)
 APP(battery)
 APP(settings)
+APP(calc)
+APP(notes)
 struct host_app {
     const struct sbapp_header *hdr;
     void (*entry)(const struct sbos_event *);
@@ -190,5 +192,6 @@ struct host_app {
 const struct host_app sbos_host_apps[] = {
     { &emergency_header, emergency_app_event }, { &light_header, light_app_event }, { &heat_header, heat_app_event }, { &sos_header, sos_app_event }, { &info_header, info_app_event },
     { &clock_header, clock_app_event }, { &battery_header, battery_app_event }, { &settings_header, settings_app_event }, { &wifi_header, wifi_app_event },
+    { &calc_header, calc_app_event }, { &notes_header, notes_app_event },
 };
-const int sbos_host_napps = 9;
+const int sbos_host_napps = 11;

@@ -531,6 +531,12 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         heat_reserve_pct = (int)arg[1];
         sb_logx("settings: the call / SOS reserve for full heat, % (0 overridden): ", arg[1]);
         return 0;
+    case SET_HEAT_SCREEN_WHITE:
+        heat_screen_white = arg[1] != 0;
+        settings_changed();
+        sb_log(heat_screen_white ? "settings: Survival's screen: white at the top level (more heat from the panel)" :
+                                   "settings: Survival's screen: dark (the budget to the chips)");
+        return 0;
     case SET_HEAT_HIGH_STOP:
         if (arg[1]) {
             heat_no_high_stop = 0;
@@ -957,6 +963,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_TARGET_C10: return heat_target_c10;
         case SET_HEAT_CURRENT_STOP: return !heat_no_current_stop;
         case SET_HEAT_HIGH_STOP: return !heat_no_high_stop;
+        case SET_HEAT_SCREEN_WHITE: return heat_screen_white;
         case SET_HEAT_SOC_STOP_C10: return heat_soc_stop_c10;
         case SET_HEAT_SURV_STOP_C10: return heat_surv_stop_c10;
         case SET_HEAT_SURV_BAT_C10: return heat_surv_bat_c10;

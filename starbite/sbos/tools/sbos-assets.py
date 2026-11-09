@@ -60,6 +60,12 @@ ICONS = {
                  'A15.5 15.5 0 0 1 3.6 7.4a2 2 0 0 1 2-2.2z"/><path d="M18 2.5v5.5"/><path d="M15.25 5.25h5.5"/>',
     'wifi': '<path d="M2.5 9a14 14 0 0 1 19 0"/><path d="M5.8 12.6a9.2 9.2 0 0 1 12.4 0"/>'
             '<path d="M9.1 16.1a4.4 4.4 0 0 1 5.8 0"/><circle cx="12" cy="19.4" r=".6"/>',
+    # 1.2-alpha20: Calculator (a body, a display, keys), Notes (a page with lines and a folded corner)
+    'calc': '<rect x="5" y="2.5" width="14" height="19" rx="2.2"/><rect x="8" y="5.5" width="8" height="3.5" rx=".8"/>'
+            '<path d="M8.5 13h.01"/><path d="M12 13h.01"/><path d="M15.5 13h.01"/>'
+            '<path d="M8.5 17h.01"/><path d="M12 17h.01"/><path d="M15.5 17h.01"/>',
+    'notes': '<path d="M5.5 2.5h9l4 4v13a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-15a2 2 0 0 1 2-2z"/>'
+             '<path d="M14.5 2.5v4h4"/><path d="M8 11h8"/><path d="M8 14.5h8"/><path d="M8 18h5"/>',
 }
 # id: (icon, px, stroke in 24-unit) -- ids must match starbite/sbos/kern/ui.c ICON_*
 ICON_IDS = {
@@ -68,6 +74,7 @@ ICON_IDS = {
     220: ('back', 64, 2.4), 221: ('power', 96, 2.0), 222: ('moon', 96, 2.0), 223: ('restart', 96, 2.0),
     224: ('menu', 96, 2.0), 225: ('lock', 64, 2.2), 226: ('light', 96, 2.0), 227: ('sos', 96, 2.0),
     207: ('emergency', 150, 1.6), 208: ('wifi', 150, 1.6), 228: ('emergency', 96, 2.0),
+    209: ('calc', 150, 1.6), 210: ('notes', 150, 1.6),
 }
 
 

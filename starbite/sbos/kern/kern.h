@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha18"
+#define SBOS_VERSION "1.2-alpha20"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -177,11 +177,15 @@ extern uint32_t gpuheat_khz;        /* 0.6.1: the GPU's table step for the sessi
 extern uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;    /* 0.6.1: Manual's picks (kHz) */
 extern int heat_reserve_pct, heat_target_c10, heat_no_current_stop;   /* 0.6.2 */
 extern int heat_no_high_stop;
+extern int heat_screen_white;       /* 1.2-alpha19: Survival's screen white (1) or dark (0, default); remembered */
 extern int heat_b2s_note;           /* 1.2-alpha18: 0x100 | CHG_CNFG_05 as found while Survival has B2SOVRC off (slot) */
 void heater_boot_forensics(void);   /* 1.2-alpha18: read only, at every boot */       /* 1.2-alpha17: Survival's 4.5 A stop off (remembered) */
 #define HEAT_BACKSTOP_MA 6000       /* 1.2-alpha17: with the 4.5 A stop off: 6 A for 1 s still stops */
 #define HEAT_GOV_MA 5000            /* 1.2-alpha18: with it off, Survival steps down from 5.0 A (the MAX77705 cuts at 5.6) */
 #define HEAT_GOV_MV 3350            /* and from 3.35 V on the cell (a brownout's margin) */
+#define HEAT_LEAK_C10 1650          /* 1.2-alpha19: from 165 C (the leakage runaway) the governor steps every 250 ms, */
+#define HEAT_LEAK_MA 5600           /* from 5.6 A */
+#define HEAT_LEAK_MV 3360           /* or 3.36 V */
 extern int heat_reserve_override;    /* 1.0-rc2: the next session's reserve overridden (once) */
 extern int heat_soc_stop_c10;       /* 0.6.3: Manual's optional SoC stop (0 off) */
 extern int heat_surv_bat_c10;       /* 1.1-beta5: Survival's battery limit (550 default, 580, 600 with a confirmation) */
