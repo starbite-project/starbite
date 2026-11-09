@@ -131,9 +131,8 @@ static void ui_setup(uint32_t w, uint32_t h)
     ioctl(uifd, UI_SET_EVBIT, EV_ABS);
     ioctl(uifd, UI_SET_EVBIT, EV_SYN);
     ioctl(uifd, UI_SET_KEYBIT, BTN_TOUCH);
-    static const int keys[] = {KEY_BACK, KEY_HOMEPAGE, KEY_POWER, KEY_VOLUMEUP, KEY_VOLUMEDOWN, KEY_MENU};
-    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i)
-        ioctl(uifd, UI_SET_KEYBIT, keys[i]);
+    for (int k = KEY_ESC; k <= KEY_MICMUTE; ++k)  /* a whole keyboard: Starbite's on-screen keys type into the VT */
+        ioctl(uifd, UI_SET_KEYBIT, k);
     ioctl(uifd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
     struct uinput_abs_setup a = {0};
     int codes[] = {ABS_MT_SLOT, ABS_MT_TRACKING_ID, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_X, ABS_Y};
@@ -287,6 +286,54 @@ static int publish(const uint32_t *src, uint32_t stride)
     return 1;
 }
 
+/* --present (the terminal, docs 12 step 3): the kernel's fbcon / simpledrm draw into surface buffer 0 (the DT's
+ * simple-framebuffer), live. guestd looks every 50 ms (or at a doorbell) and copies the rows that changed into
+ * buffer 1, which is the front the host reads: the host never sees a half-drawn row of fbcon's, and a change that
+ * comes and goes between two looks (the cursor moving) can never stay on the host's screen (QEMU: reading buffer 0
+ * directly left such rows stale). Changed rows get row_seq = the new seq. Returns 1 when a frame was published. */
+static int present(void)
+{
+    volatile uint32_t *rows = (volatile uint32_t *)(shm + SBSHM_ROWS_OFF);
+    const uint32_t *buf = (const uint32_t *)(shm + hdr->surf_off[0]);
+    uint8_t *front = shm + hdr->surf_off[1];
+    uint32_t stride_px = hdr->surf_stride / 4;
+    if (!shadow[0]) {
+        shadow[0] = calloc((size_t)W * H, 4);
+        if (!shadow[0])
+            return 0;
+        if (H <= SBSHM_ROWS_MAX)
+            hdr->rows_valid = 1;
+    }
+    uint32_t seq = hdr->surf_seq + 1U, n = 0, y0 = H, y1 = 0;
+    size_t rb = (size_t)W * 4;
+    for (uint32_t y = 0; y < H; ++y) {
+        const uint32_t *src = buf + (size_t)y * stride_px;
+        if (!hdr->surf_seq || memcmp(src, shadow[0] + (size_t)y * W, rb)) {
+            memcpy(shadow[0] + (size_t)y * W, src, rb);
+            memcpy(front + (size_t)y * hdr->surf_stride, shadow[0] + (size_t)y * W, rb);   /* the snapshot */
+            if (H <= SBSHM_ROWS_MAX)
+                rows[y] = seq;
+            ++n;
+            if (y < y0)
+                y0 = y;
+            y1 = y + 1;
+        }
+    }
+    if (!n)
+        return 0;
+    sbshm_dmb();
+    hdr->surf_front = 1;
+    hdr->damage_x = 0;
+    hdr->damage_w = W;
+    hdr->damage_y = y0;
+    hdr->damage_h = y1 - y0;
+    sbshm_dmb();
+    hdr->surf_seq = seq;
+    pub_frames++;
+    pub_rows += n;
+    return 1;
+}
+
 /* ---- per-CPU load ----------------------------------------------------------------------------------- */
 static unsigned long long prev_busy[8], prev_all[8];
 static int cpu_load(int pct[8])
@@ -357,10 +404,13 @@ static void stop(void)
 
 int main(int argc, char **argv)
 {
-    int nburn = 0;
-    for (int i = 1; i + 1 < argc; ++i)
-        if (!strcmp(argv[i], "--burn"))
+    int nburn = 0, present_mode = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (!strcmp(argv[i], "--burn") && i + 1 < argc)
             nburn = atoi(argv[i + 1]);
+        else if (!strcmp(argv[i], "--present"))
+            present_mode = 1;
+    }
     kfd = open("/dev/kmsg", O_WRONLY);
     if (map_shm() < 0)
         return 1;
@@ -382,7 +432,7 @@ int main(int argc, char **argv)
         pthread_t t;
         pthread_create(&t, NULL, burn, NULL);
     }
-    const char *title = "Linux on M3";
+    const char *title = present_mode ? "Linux terminal" : "Linux on M3";
     for (unsigned i = 0; title[i]; ++i)
         hdr->title[i] = title[i];
     sbshm_dmb();
@@ -425,7 +475,8 @@ int main(int argc, char **argv)
                 ui_ev(EV_KEY, (uint16_t)m.a, (int32_t)m.b);
                 ui_ev(EV_SYN, SYN_REPORT, 0);
                 snprintf(keyline, sizeof(keyline), "KEY %u %s", m.a, m.b ? "DOWN" : "UP");
-                say("key %u %s", m.a, m.b ? "down" : "up");
+                if (!present_mode)          /* the terminal: keys are typing, not news */
+                    say("key %u %s", m.a, m.b ? "down" : "up");
             } else if (m.type == SBG_MSG_STOP) {
                 stop();
             } else if (m.type == SBG_MSG_LOAD && m.a && m.a <= 16 && m.b && m.b <= 60) {
@@ -438,8 +489,15 @@ int main(int argc, char **argv)
                 say("load: %u threads for %u s", m.a, m.b);
             }
         }
-        /* 2. the frame */
         uint64_t t = ms_now();
+        if (present_mode) {                 /* the terminal: fbcon draws, guestd publishes the changed rows */
+            if (present())
+                frame++;
+            hdr->guest_heartbeat++;
+            hdr->guest_uptime_ms = t - t0;
+            goto wait;
+        }
+        /* 2. the frame */
         if (t - lastload >= 500) {
             ncl = cpu_load(pct);
             lastload = t;
@@ -481,6 +539,7 @@ int main(int argc, char **argv)
             frame++;
         hdr->guest_heartbeat++;
         hdr->guest_uptime_ms = t - t0;
+    wait:
         /* 4. wait: the doorbell (sbguest.ko) or 50 ms */
         if (sbfd >= 0) {
             struct pollfd p = {.fd = sbfd, .events = POLLIN};

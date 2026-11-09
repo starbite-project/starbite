@@ -32,7 +32,7 @@
 #define PSCI_SYSTEM_OFF    0x84000008UL
 #define PSCI_VERSION       0x84000000UL
 
-enum { F_REPAIR = 1, F_STRICT = 2, F_STUB = 4 };
+enum { F_REPAIR = 1, F_STRICT = 2, F_STUB = 4, F_TERM = 8 };
 
 struct manifest {
     uint64_t magic;                     /* "SBSTORE1" */
@@ -336,7 +336,21 @@ static void own_check(uint64_t t)
 
 /* ---- the shim for sbghost ------------------------------------------------------------------------- */
 static void host_log(const char *l) { puts_("sbsim: "); puts_(l); puts_("\n"); }
-static void guest_log(const char *l) { puts_("  linux| "); puts_(l); puts_("\n"); }
+static int term_ok_seen;
+static void guest_log(const char *l)
+{
+    puts_("  linux| ");
+    puts_(l);
+    puts_("\n");
+    for (const char *p = l; *p; ++p) {      /* the terminal scenario's typed command, run by the guest's shell */
+        const char *w = "STARBITE-TERM-OK";
+        unsigned i = 0;
+        while (w[i] && p[i] == w[i])
+            ++i;
+        if (!w[i] && p > l && p[-1] != 'O')  /* not the echo of the command line itself ("echo STARBITE...") */
+            term_ok_seen = 1;
+    }
+}
 static int64_t cpu_on(uint64_t mpidr, uint64_t entry, uint64_t ctx)
 {
     return (int32_t)sbsim_hvc(PSCI_CPU_ON, mpidr, entry, ctx);
@@ -364,7 +378,9 @@ static int run_guest(unsigned run)
     rows_copied = frames_drawn = 0;
     const volatile uint32_t *px = 0;
     uint32_t stride = 0;
-    uint32_t seq = 0, tstep = 0, touch_seq = 0, frames = 0;
+    uint32_t seq = 0, tstep = 0, touch_seq = 0, frames = 0, typed = 0, last_pub = 0;
+    uint64_t t_pub = 0;
+    term_ok_seen = 0;
     uint64_t last_comp = 0, t_touch = 0;
     int touch_ok = 0;
     const struct sbg_stats *s = sbg_stats();
@@ -385,6 +401,58 @@ static int run_guest(unsigned run)
             last_comp = t;
             composite(px, stride, seq);
             frames++;
+        }
+        if (mf->flags & F_TERM) {           /* the terminal: type a command, the shell runs it */
+            static const char cmd[] = "echo STARBITE-TERM-OK > /dev/kmsg\n";
+            if (s->state == SBG_RUNNING && frames >= 2 && tstep == 0 && t_touch && t - t_touch > 2000) {
+                tstep = 1;
+                typed = 0;
+                touch_seq = h->surf_seq;        /* any frame after the typing began shows the result */
+            } else if (tstep == 0 && s->state == SBG_RUNNING && !t_touch) {
+                t_touch = t;                    /* the shell needs a moment after HELLO */
+            } else if (tstep == 1 && t - t_touch >= 20) {
+                t_touch = t;
+                if (cmd[typed]) {
+                    int sh;
+                    unsigned k = sbshm_ascii_key(cmd[typed++], &sh);
+                    if (sh)
+                        sbg_key(SBSHM_KEY_LEFTSHIFT, 1);
+                    sbg_key(k, 1);
+                    sbg_key(k, 0);
+                    if (sh)
+                        sbg_key(SBSHM_KEY_LEFTSHIFT, 0);
+                } else {
+                    puts_("sbsim: typed the command\n");
+                    tstep = 2;
+                }
+            } else if (tstep == 2 && h->surf_seq != last_pub) {
+                last_pub = h->surf_seq;         /* the live screen (fbcon) still changing */
+                t_pub = t;
+            } else if (tstep == 2 && term_ok_seen && px && h->surf_seq != touch_seq && seq == h->surf_seq &&
+                       t - t_pub > 300) {       /* still for 300 ms: fbcon idle, guestd's last look published */
+                uint32_t bad = verify_panel(px, stride), lit = 0;
+                for (uint32_t y = BAR; y < ph - BAR; ++y)
+                    for (uint32_t x = 0; x < pw; x += 4)
+                        lit += (panel_px(x, y) & 0xffffffU) != 0;
+                puts_("sbsim: the shell ran the typed command (STARBITE-TERM-OK in the guest's log); panel against the guest's frame: ");
+                putu(bad);
+                puts_(" rows differ, lit pixels (1 in 4) ");
+                putu(lit);
+                puts_("\n");
+                touch_ok = !bad && lit > 100;
+                if (bad)
+                    damage_bad = 1;
+                char name[] = "sbsim-term-run0.ppm";
+                name[14] = (char)('0' + run % 10);
+                write_ppm(name);
+                tstep = 5;
+                sbg_stop();
+            } else if (tstep == 2 && t - t_touch > 20000) {
+                puts_("sbsim: no STARBITE-TERM-OK from the guest's shell in 20 s\n");
+                tstep = 5;
+                sbg_stop();
+            }
+            continue;
         }
         /* scripted input once the app has drawn a few frames: tap, drag, release, a key */
         if (s->state == SBG_RUNNING && frames >= 3 && tstep == 0) {
