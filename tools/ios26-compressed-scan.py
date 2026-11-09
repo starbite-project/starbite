@@ -5,7 +5,8 @@ Kernel logs show ~41 "decmpfs ... tried to access a compressed file of unregiste
 has no decompressor (macOS/iOS get them from AppleFSCompression), so such files read as errors. This walks every
 leaf node of the catalog B-tree once (read in 16 MiB slices), keeps folder names and compressed file records, and
 writes: path, file ID, data fork size, resource fork logical size (type 4/8/12 keep their chunks there; 0 means
-the data sits in the com.apple.decmpfs xattr), mode. Hard links are listed under each link path with the inode's
+the data sits in the com.apple.decmpfs xattr), mode, decmpfs type and unpacked size (from the com.apple.decmpfs
+headers, collected in one pass over the Attributes B-tree's leaves). Hard links are listed under each link path with the inode's
 fork sizes. HFS_IMAGE=FILE scans a local image instead (tools/overlay/hfs-read.py)."""
 import importlib.util
 import os
@@ -21,6 +22,40 @@ _spec.loader.exec_module(hr)
 
 UF_COMPRESSED = 0x20
 SLICE = 16 << 20
+
+
+def walk_leaves(vol, fork, node_size, fn):
+    size = fork[0]
+    for base in range(0, size, SLICE):
+        buf = vol.fork_read(fork, base, min(SLICE, size - base))
+        hr.cache.clear()
+        for off in range(0, len(buf) - node_size + 1, node_size):
+            node = buf[off:off + node_size]
+            if struct.unpack_from('>b', node, 8)[0] == -1:
+                for r in vol.records(node, node_size):
+                    fn(r)
+        yield min(base + SLICE, size), size
+
+
+def decmpfs_headers(vol):
+    """file ID -> (decmpfs type, unpacked size) from every inline com.apple.decmpfs attribute."""
+    out = {}
+    if not vol.attributes:
+        return out
+    hdr = vol.fork_read(vol.attributes, 0, 512)
+    ns = struct.unpack_from('>H', hdr, 32)[0]
+    want = 'com.apple.decmpfs'.encode('utf-16-be')
+
+    def rec(r):
+        klen, fid, _, nlen = struct.unpack_from('>HxxIIH', r, 0)
+        if r[14:14 + 2 * nlen] != want:
+            return
+        d = r[2 + klen:]
+        if struct.unpack_from('>I', d, 0)[0] == 0x10 and d[16:20] == b'fpmc':
+            out[fid] = (struct.unpack_from('<I', d, 20)[0], struct.unpack_from('<Q', d, 24)[0])
+    for done, size in walk_leaves(vol, vol.attributes, ns, rec):
+        print(f'{done >> 20} of {size >> 20} MiB of attributes: {len(out)} decmpfs headers', file=sys.stderr)
+    return out
 
 
 def main():
@@ -79,12 +114,18 @@ def main():
         if fid not in linked:
             rows.append((path(parent, nm), fid, ds, rs, mode))
     rows.sort()
+    heads = decmpfs_headers(vol)
+    types = {}
     with open(sys.argv[1], 'w') as f:
-        f.write('path\tfile_id\tdata_size\trsrc_size\tmode\n')
+        f.write('path\tfile_id\tdata_size\trsrc_size\tmode\tdecmpfs_type\tunpacked_size\n')
         for p, fid, ds, rs, mode in rows:
-            f.write(f'{p}\t{fid}\t{ds}\t{rs}\t{mode:o}\n')
-    print(f'{files} files, {len(comp)} compressed ({sum(1 for r in rows if r[3])} with a resource fork, '
-          f'{sum(r[3] for r in rows) >> 20} MiB of resource forks) -> {sys.argv[1]}')
+            t, us = heads.get(fid, ('?', '?'))
+            types[t] = types.get(t, 0) + 1
+            f.write(f'{p}\t{fid}\t{ds}\t{rs}\t{mode:o}\t{t}\t{us}\n')
+    unpacked = sum(heads[r[1]][1] for r in rows if r[1] in heads)
+    print(f'{files} files, {len(rows)} compressed paths ({sum(1 for r in rows if r[3])} with a resource fork, '
+          f'{sum(r[3] for r in rows) >> 20} MiB of resource forks, {unpacked >> 20} MiB unpacked); types '
+          + ' '.join(f'{t}:{n}' for t, n in sorted(types.items(), key=str)) + f' -> {sys.argv[1]}')
 
 
 if __name__ == '__main__':

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Undo HFS compression on iOS 26's card root through the card overlay (phone in TWRP; kernel 0406+).
     tools/ios26-decmpfs-fix.py SCAN.tsv OUTDIR [--prefix /System/Library/ExtensionKit ...] [--max-mib 30]
+                               [--max-rounds N]
 Our XNU has no decmpfs decompressors (AppleFSCompression is not in the kernel), so every compressed file on the
 root ("tried to access a compressed file of unregistered type 12" in the kernel log) is unreadable on the phone.
 For each compressed path in SCAN.tsv (tools/ios26-compressed-scan.py), filtered by --prefix, this reads the
@@ -10,7 +11,9 @@ size, and packs overlay rounds of at most --max-mib MiB and 120 files:
     OUTDIR/files/<n>=/path:MODE:UID:GID       (a plain copy, same owner and mode)
 OUTDIR/round-K.bin: one overlay per boot (tools/overlay/card-overlay.sh OUTDIR/round-K.bin, then boot);
 OUTDIR/undo-K.bin: moves the copy to /private/var/tmp/sbz-<n>.new and the original back.
-OUTDIR/plan.tsv lists every file; failures are listed, not packed."""
+OUTDIR/plan.tsv lists every file; failures are listed, not packed. Disk: each round is packed as soon as it is
+full and its unpacked copies are deleted, so the Mac needs about (rounds x --max-mib) MiB; --max-rounds stops early
+(the rest is listed as "later"; rerun with --prefix or a trimmed SCAN.tsv to continue)."""
 import argparse
 import importlib.util
 import os
@@ -75,14 +78,39 @@ def main():
     ap.add_argument('outdir')
     ap.add_argument('--prefix', action='append', default=[])
     ap.add_argument('--max-mib', type=int, default=30)
+    ap.add_argument('--max-rounds', type=int, default=0)
     a = ap.parse_args()
     rows = [l.rstrip('\n').split('\t') for l in open(a.scan)][1:]
     paths = [r[0] for r in rows if not a.prefix or any(r[0].startswith(p) for p in a.prefix)]
     out = Path(a.outdir)
     (out / 'files').mkdir(parents=True, exist_ok=True)
     vol = hr.Volume()
-    plan, rounds, cur, cur_bytes, fails = [], [], [], 0, 0
+    plan, cur, cur_bytes, fails = [], [], 0, 0
+    rounds = 0
+
+    def flush():
+        nonlocal rounds, cur, cur_bytes
+        if not cur:
+            return
+        rounds += 1
+        args, undo = [], []
+        for n, path, local, mode, uid, gid in cur:
+            args += [f'rename:{path}=/private/var/tmp/sbz-{n}', f'{local}={path}:{mode:o}:{uid}:{gid}']
+            undo += [f'rename:{path}=/private/var/tmp/sbz-{n}.new', f'rename:/private/var/tmp/sbz-{n}={path}']
+        for name, ops in ((f'round-{rounds}.bin', args), (f'undo-{rounds}.bin', undo)):
+            r = subprocess.run([sys.executable, str(HERE / 'overlay' / 'sboverlay.py'), str(out / name)] + ops,
+                               capture_output=True, text=True)
+            if r.returncode:
+                sys.exit(f'sboverlay {name}: {r.stderr or r.stdout}')
+            print(r.stdout.strip().splitlines()[-1], flush=True)
+        for c in cur:
+            c[2].unlink()
+        cur, cur_bytes = [], 0
+
     for n, path in enumerate(paths):
+        if a.max_rounds and rounds >= a.max_rounds:
+            plan.append((path, 'later', ''))
+            continue
         if ':' in path or '=' in path or len(path.encode()) >= 232:
             plan.append((path, 'skip', 'path not packable')); fails += 1
             continue
@@ -93,37 +121,28 @@ def main():
             plan.append((path, 'fail', str(e))); fails += 1
             continue
         hr.cache.clear()
+        if len(data) > a.max_mib << 20:
+            plan.append((path, 'fail', f'{len(data)} bytes: bigger than one round')); fails += 1
+            continue
+        if cur and (cur_bytes + len(data) > a.max_mib << 20 or len(cur) >= MAX_FILES):
+            flush()
+            if a.max_rounds and rounds >= a.max_rounds:
+                plan.append((path, 'later', ''))
+                continue
         uid, gid = struct.unpack_from('>II', rec, 32)
         mode = struct.unpack_from('>H', rec, 42)[0] & 0o7777
         local = out / 'files' / str(n)
         local.write_bytes(data)
-        if len(data) > a.max_mib << 20:
-            plan.append((path, 'fail', f'{len(data)} bytes: bigger than one round')); fails += 1
-            local.unlink()
-            continue
-        if cur and (cur_bytes + len(data) > a.max_mib << 20 or len(cur) >= MAX_FILES):
-            rounds.append(cur); cur, cur_bytes = [], 0
         cur.append((n, path, local, mode, uid, gid))
         cur_bytes += len(data)
-        plan.append((path, f'round {len(rounds) + 1}', f'type {ctype}, {len(data)} bytes, park /private/var/tmp/sbz-{n}'))
-    if cur:
-        rounds.append(cur)
-    for k, batch in enumerate(rounds, 1):
-        args, undo = [], []
-        for n, path, local, mode, uid, gid in batch:
-            args += [f'rename:{path}=/private/var/tmp/sbz-{n}', f'{local}={path}:{mode:o}:{uid}:{gid}']
-            undo += [f'rename:{path}=/private/var/tmp/sbz-{n}.new', f'rename:/private/var/tmp/sbz-{n}={path}']
-        for name, ops in ((f'round-{k}.bin', args), (f'undo-{k}.bin', undo)):
-            r = subprocess.run([sys.executable, str(HERE / 'overlay' / 'sboverlay.py'), str(out / name)] + ops,
-                               capture_output=True, text=True)
-            if r.returncode:
-                sys.exit(f'sboverlay {name}: {r.stderr or r.stdout}')
-            print(r.stdout.strip().splitlines()[-1])
+        plan.append((path, f'round {rounds + 1}', f'type {ctype}, {len(data)} bytes, park /private/var/tmp/sbz-{n}'))
+    flush()
     with open(out / 'plan.tsv', 'w') as f:
         for row in plan:
             f.write('\t'.join(row) + '\n')
-    print(f'{len(paths)} paths: {len(paths) - fails} packed in {len(rounds)} round(s), {fails} failed/skipped '
-          f'-> {out}/plan.tsv')
+    later = sum(1 for r in plan if r[1] == 'later')
+    print(f'{len(paths)} paths: {len(paths) - fails - later} packed in {rounds} round(s), {fails} failed/skipped, '
+          f'{later} later -> {out}/plan.tsv')
 
 
 if __name__ == '__main__':
