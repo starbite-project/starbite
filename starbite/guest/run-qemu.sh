@@ -11,7 +11,8 @@
 #   patched    IMAGE=<kernel with linux/0001-*.patch> + sbguest.ko, strict (no line may be lost) -- PASS
 #   stub       no Linux: the phone probe's M3 stub (probe/m3stub.S, HVC build) on CPUs 4..7 -- PASS
 #   kern       Starbite OS 1.2-alpha1's own guest service (sbos/guest.c, -DGUEST_QEMU) under sbsim/kern-shim.c:
-#              the phone self-test image's guest_selftest_step (two cycles, the tap's pixel at 2x), strict -- PASS
+#              the phone self-test image's guest_selftest_step (the app with the tap's pixel at 2x; 1.2-alpha3: the
+#              terminal on Image-guest with a typed command, a second store at 0x4c000000), strict -- PASS
 # Environment: IMAGE (default: the build tree's Image), WORK (default /mnt/build/sbguest), RUNS (2),
 # TIMEOUT (QEMU wall clock, 900 s), SURF (720x1440), PSCI01=1 (the guest gets the S9-style PSCI 0.1 node).
 set -euo pipefail
@@ -106,6 +107,38 @@ open(out, 'wb').write(data)
 print(f'store: {len(data)} bytes, Image {len(blobs[0])}, DTB {len(blobs[1])}, initrd {len(blobs[2])}')
 EOF
 
+extra_loader=""
+if [ "$scen" = kern ]; then
+    # 1.2-alpha3: the terminal too (Starbite's GUEST_TERM): the guest kernel of its own, sbguest.ko against it, the
+    # surface 720 x 1060 in Terminus 16x32 (2x above Starbite's keyboard), a second store at 0x4c000000
+    GIMG=${GUEST_IMAGE:-/mnt/build/sbguest/Image-guest}
+    GKOUT=${GUEST_KOUT:-/mnt/build/sbguest/gout}
+    echo "== the terminal's files ($GIMG, sbguest.ko against $GKOUT, --fb 720x1060 --term, Terminus 16x32)"
+    BUILD_ONLY=1 WORK="$WORK/term" KOUT="$GKOUT" "$here/run-qemu.sh" mod > out/term-build.log 2>&1 || { tail -20 out/term-build.log; exit 1; }
+    trd="$WORK/term/out/initrd.cpio.gz"
+    python3 "$here/mk-guest-dts.py" --profile qemu --psci01 --fb 720x1060 --term --rd-size "$(stat -c %s "$trd")" \
+        --db-guest $DB_GUEST --bootargs-extra "fbcon=font:TER16x32" out/term.dts
+    dtc -q -I dts -O dtb -o out/term.dtb out/term.dts
+    python3 - "$GIMG" out/term.dtb "$trd" out/store-term.bin "$DB_GUEST" "$DB_HOST" <<'EOF2'
+import struct, sys
+img, dtb, rd, out, dbg, dbh = sys.argv[1:]
+blobs = [open(p, 'rb').read() for p in (img, dtb, rd)]
+off, offs = 0x1000, []
+for b in blobs:
+    offs.append(off)
+    off = (off + len(b) + 0xfff) & ~0xfff
+m = struct.pack('<QII6QIIIIIIII', 0x3145524f54534253, 2, 1, offs[0], len(blobs[0]), offs[1], len(blobs[1]),
+                offs[2], len(blobs[2]), int(dbg), int(dbh), 720, 1060, 0, 0, 300, 0)
+data = bytearray(off)
+data[:len(m)] = m
+for o, b in zip(offs, blobs):
+    data[o:o + len(b)] = b
+open(out, 'wb').write(data)
+print(f'store (terminal): {len(data)} bytes, Image {len(blobs[0])}, DTB {len(blobs[1])}, initrd {len(blobs[2])}')
+EOF2
+    extra_loader="-device loader,file=out/store-term.bin,addr=0x4c000000,force-raw=on"
+fi
+
 echo "== QEMU ($scen)"
 log=out/qemu-$scen.log
 rm -f sbsim-panel-run*.ppm
@@ -114,7 +147,7 @@ timeout "$TIMEOUT" qemu-system-aarch64 -M virt,gic-version=2,virtualization=off,
     -cpu cortex-a53 -smp 8 -m 2048 -nographic -no-reboot \
     -semihosting-config enable=on,target=native \
     -kernel "$([ "$scen" = kern ] && echo sbsim/kern-shim.elf || echo sbsim/sbsim.elf)" \
-    -device loader,file=out/store.bin,addr=0x48000000,force-raw=on 2>&1 | tee "$log"
+    -device loader,file=out/store.bin,addr=0x48000000,force-raw=on $extra_loader 2>&1 | tee "$log"
 set -e
 for p in sbsim-panel-run*.ppm; do [ -f "$p" ] && mv "$p" "out/${scen}-${p}"; done
 echo "== $(grep -a -E '(sbsim|kern-shim): RESULT' "$log" || echo 'sbsim: no RESULT line (the guest took the machine down?)')"

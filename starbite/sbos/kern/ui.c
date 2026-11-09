@@ -34,8 +34,10 @@ enum { E_TITLE = 1, E_BACK, E_BUTTON, E_BIG, E_TEXT, E_LEVEL, E_TOGGLE, E_HOLD, 
        E_FIELD, E_TOAST, E_CTEXT, E_GAUGE, E_INPUT, E_KEYS, E_CHART, E_ICON, E_WIDGET, E_SCROLLBAR };
 enum { SCR_LOCK = 1, SCR_HOME, SCR_APP, SCR_POWER, SCR_CONFIRM, SCR_LIGHT, SCR_SOS, SCR_OFF, SCR_CONTROL, SCR_GUEST };
 #define GUEST_TILE 0xffffU                      /* 1.2: the home tile "Linux" (not an app index) */
+#define GUEST_TILE_TERM 0xfffeU                 /* 1.2-alpha3: the home tile "Terminal" */
 int kui_linux_on;                               /* 1.2: Settings > Linux apps (off at every start; asked first) */
 static int in_guest, guest_drawn;               /* the Linux view told it is shown / its bars drawn */
+static int gk_layer;                            /* 1.2-alpha3: the terminal keyboard's layer (as kb_layer) */
 static void guest_view_sync(void);
 
 struct el {
@@ -847,7 +849,8 @@ static void build_home(void)
     int shown_n = 0, linux_tile = kui_linux_on && guest_available();
     for (int i = 0; i < napps; ++i)
         shown_n += !app_hidden(i) && i != emerg;
-    shown_n += linux_tile;
+    int term_tile = kui_linux_on && guest_available_mode(GUEST_TERM);
+    shown_n += linux_tile + term_tile;
     int rows = (shown_n + 1) / 2, th = rows > 3 ? (2700 - y0 - (rows - 1) * 40) / rows : 600;
     if (th > 600)
         th = 600;
@@ -877,9 +880,22 @@ static void build_home(void)
         struct el *e = add(cur, &ncur, E_TILE);
         e->id = GUEST_TILE;
         scopy(e->a, sizeof(e->a), "Linux");
-        scopy(e->b, sizeof(e->b), guest_state() == GUEST_RUNNING ? "Running" : guest_state() == GUEST_STARTING ? "Starting" : "Test");
+        scopy(e->b, sizeof(e->b), guest_mode() == GUEST_APP && guest_state() == GUEST_RUNNING ? "Running" : "Test");
         e->icon = 0;
         e->color = 0xff5ac8faU;
+        e->w = 625;
+        e->h = th;
+        e->x = MX + (t % 2) * (625 + 50);
+        e->y = y0 + (t / 2) * (th + 40);
+        ++t;
+    }
+    if (term_tile && t < 10) {                  /* 1.2-alpha3: the Linux terminal with Starbite's keyboard */
+        struct el *e = add(cur, &ncur, E_TILE);
+        e->id = GUEST_TILE_TERM;
+        scopy(e->a, sizeof(e->a), "Terminal");
+        scopy(e->b, sizeof(e->b), guest_mode() == GUEST_TERM && guest_state() == GUEST_RUNNING ? "Running" : "Linux shell");
+        e->icon = 0;
+        e->color = 0xff32d74bU;
         e->w = 625;
         e->h = th;
         e->x = MX + (t % 2) * (625 + 50);
@@ -973,6 +989,17 @@ static void build_home_normal(void)
             scopy(e->a, sizeof(e->a), "Linux");
             e->icon = 0;
             e->color = 0xff5ac8faU;
+            e->x = MX + (k % 4) * 325, e->y = 600 + (k / 4) * 360, e->w = 325, e->h = 340;
+            ++k;
+        }
+    }
+    if (kui_linux_on && guest_available_mode(GUEST_TERM) && k < 12) {     /* 1.2-alpha3: the terminal */
+        e = add(cur, &ncur, E_ICON);
+        if (e) {
+            e->id = GUEST_TILE_TERM;
+            scopy(e->a, sizeof(e->a), "Terminal");
+            e->icon = 0;
+            e->color = 0xff32d74bU;
             e->x = MX + (k % 4) * 325, e->y = 600 + (k / 4) * 360, e->w = 325, e->h = 340;
             ++k;
         }
@@ -1762,7 +1789,7 @@ static void draw_el_raw(const struct el *e, int idx)
                 if (c == 3)
                     lab = e->value >= 2 ? "abc" : "123";
                 if (c == 4)
-                    lab = (e->flags & 2U) ? "Join" : "Done";
+                    lab = (e->flags & 8U) ? "Enter" : (e->flags & 2U) ? "Join" : "Done";
                 if (c == 5)
                     lab = "space";
                 if (c == 1 && e->value < 2)
@@ -1839,19 +1866,45 @@ static void guest_view_sync(void)
     }
 }
 
-/* the guest's frame at 2x (1440 x 2880) between two 40 px bars: no elements, the whole view presented */
+/* 1.2-alpha3: the terminal's keyboard (the apps' keyboard, its action key Enter) under the 2x view */
+static void guest_keys_draw(void)
+{
+    struct el k;
+    memset(&k, 0, sizeof(k));
+    k.kind = E_KEYS;
+    k.y = KB_TOP - 24;
+    k.h = UI_H - k.y;
+    k.value = gk_layer;
+    k.flags = 8;
+    draw_el_raw(&k, -1);
+}
+
+/* the guest's frame between Starbite's bars: the app at 2x (1440 x 2880, a 40 px bar below), the terminal at 2x
+ * (1440 x 2120) above the keyboard. Only the rows the guest changed are copied and presented (damage per row). */
 static void guest_draw(void)
 {
+    int term = guest_mode() == GUEST_TERM;
     ui_noclip();
-    if (!guest_drawn || full) {
+    int all = !guest_drawn || full;
+    if (all) {
+        guest_full_next();                      /* the whole surface: the back buffer had other screens */
         ui_fill(0, 0, UI_W, 40, 0xff101828U);
-        ui_fill(0, UI_H - 40, UI_W, 40, 0xff101828U);
-        if (ui_has_font(F_HEAD))
-            ui_text_c(F_HEAD, UI_W / 2, UI_H - 9, "Linux  \xc2\xb7  hold Bixby or tap here: home", C_L2);
-        ui_dirty_all();
+        if (term) {
+            if (ui_has_font(F_HEAD))
+                ui_text_c(F_HEAD, UI_W / 2, 31, "Linux terminal  \xc2\xb7  hold Bixby: home", C_L2);
+            guest_keys_draw();
+        } else {
+            ui_fill(0, UI_H - 40, UI_W, 40, 0xff101828U);
+            if (ui_has_font(F_HEAD))
+                ui_text_c(F_HEAD, UI_W / 2, UI_H - 9, "Linux  \xc2\xb7  hold Bixby or tap here: home", C_L2);
+        }
     }
-    guest_blit(ui_back(), UI_W, 0, 40);
-    ui_dirty(0, 40, UI_W, UI_H - 80);
+    int y0, y1;
+    guest_blit(ui_back(), UI_W, 0, 40, &y0, &y1);
+    if (all)
+        ui_dirty_all();
+    else if (y0 >= 0)
+        ui_dirty(0, y0, UI_W, y1 - y0 + 1);
     if (ui_present())
         panel_kick();
     if (!K.first_frame_ms)
@@ -2006,8 +2059,8 @@ static void activate(int i, int x, int y)
         lock_pick((int)e->id);
         break;
     case SCR_HOME:
-        if (e->id == GUEST_TILE)
-            kui_guest_open();
+        if (e->id == GUEST_TILE || e->id == GUEST_TILE_TERM)
+            kui_guest_open(e->id == GUEST_TILE_TERM ? GUEST_TERM : GUEST_APP);
         else
             kui_open_app((int)e->id);
         break;
@@ -2117,12 +2170,24 @@ static void back(void)
     }
 }
 
-/* 1.2: the home tile "Linux": start the guest (if it is off) and show its view */
-void kui_guest_open(void)
+/* 1.2: the home tiles "Linux" (GUEST_APP) and "Terminal" (GUEST_TERM): start that guest (if it is off) and show
+ * its view. The other one still running (hidden) is stopped first: one guest at a time on the big cores. */
+void kui_guest_open(int mode)
 {
     int gs = guest_state();
+    if ((gs == GUEST_STARTING || gs == GUEST_RUNNING) && guest_mode() != mode) {
+        guest_stop();
+        sb_log("ui: the other Linux stopped first");
+        kui_toast("Closing the other Linux: tap again in a moment", 2500);
+        return;
+    }
+    if (gs == GUEST_STOPPING) {
+        kui_toast("Linux is stopping: tap again in a moment", 2000);
+        return;
+    }
     if (gs == GUEST_OFF || gs == GUEST_FAILED) {
-        int r = guest_start();
+        gk_layer = 0;
+        int r = guest_start_mode(mode);
         if (r == -2) {
             sb_log("ui: Linux refused: the heater has the big cores");
             kui_toast("The heater has the big cores: stop it first", 2500);
@@ -2131,7 +2196,7 @@ void kui_guest_open(void)
         if (r < 0)
             sb_logf("ui: Linux did not start: ", guest_why());
         else
-            sb_log("ui: Linux starting (the home tile)");
+            sb_log(mode == GUEST_TERM ? "ui: the Linux terminal starting (the home tile)" : "ui: Linux starting (the home tile)");
     }
     screen = SCR_GUEST;
     focus = -1;
@@ -2260,29 +2325,67 @@ static void power_menu_pick(int id)
     }
 }
 
+/* 1.2-alpha3: a tap on the terminal's keyboard: the apps' keys and layers (kb_press), each character as Linux keys */
+static void guest_term_key(int x, int y)
+{
+    int bx, by, bw, c = kb_key(gk_layer, x, y, &bx, &by, &bw), layer = gk_layer;
+    if (!c)
+        return;
+    if (c == 1)
+        gk_layer = gk_layer >= 2 ? (gk_layer == 2 ? 3 : 2) : (gk_layer ? 0 : 1);
+    else if (c == 6)
+        gk_layer = gk_layer == 3 ? 2 : 3;
+    else if (c == 3)
+        gk_layer = gk_layer >= 2 ? 0 : 2;
+    else if (c == 2)
+        guest_type('\b');
+    else if (c == 4)
+        guest_type('\n');
+    else {
+        guest_type(c == 5 ? ' ' : (char)c);
+        if (gk_layer == 1)
+            gk_layer = 0;                       /* one capital, then lower case again */
+    }
+    if (gk_layer != layer) {                    /* the keyboard redrawn with its new layer */
+        ui_noclip();
+        guest_keys_draw();
+        ui_dirty(0, KB_TOP - 24, UI_W, UI_H - (KB_TOP - 24));
+        if (ui_present())
+            panel_kick();
+    }
+}
+
 /* 1.2: input while the guest's frames are shown: touches to Linux, Volume and Bixby as its keys, held Bixby or
- * a tap on the bottom bar home (the guest keeps running hidden; 60 s later it is stopped) */
+ * a tap on the bottom bar home (the guest keeps running hidden; 60 s later it is stopped). The terminal: its
+ * keyboard below the view; Volume as Up / Down (the shell's history), short Bixby as Tab. */
 static void guest_kevent(const struct kin *ev)
 {
+    int term = guest_mode() == GUEST_TERM;
     switch (ev->type) {
     case KIN_PRESS:
     case KIN_MOVE:
     case KIN_RELEASE:
+        if (term && ev->y >= KB_TOP - 24) {
+            if (ev->type == KIN_PRESS)
+                guest_term_key(ev->x, ev->y);
+            break;
+        }
         if (guest_input(ev->type, ev->x, ev->y))
             break;
-        if (ev->type == KIN_PRESS && ev->y >= UI_H - 40)
+        if (!term && ev->type == KIN_PRESS && ev->y >= UI_H - 40)
             kui_home();
         break;
     case KIN_UP:
     case KIN_DOWN: {
-        unsigned code = ev->type == KIN_UP ? 115U : 114U;    /* KEY_VOLUMEUP / KEY_VOLUMEDOWN */
+        unsigned code = term ? (ev->type == KIN_UP ? 103U : 108U) :          /* KEY_UP / KEY_DOWN */
+                               (ev->type == KIN_UP ? 115U : 114U);           /* KEY_VOLUMEUP / KEY_VOLUMEDOWN */
         guest_key(code, 1);
         guest_key(code, 0);
         break;
     }
     case KIN_SELECT:
-        guest_key(158U, 1);                     /* KEY_BACK */
-        guest_key(158U, 0);
+        guest_key(term ? 15U : 158U, 1);        /* KEY_TAB / KEY_BACK */
+        guest_key(term ? 15U : 158U, 0);
         break;
     case KIN_BACK:
         kui_home();

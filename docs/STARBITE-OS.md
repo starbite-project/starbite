@@ -890,6 +890,24 @@ cores on the phone, P2d 3/3 cycles) wired into the kernel, following INTEGRATION
   - The heater was refused while Linux ran; the cluster was off 50 ms after MSG_STOP, twice.
   - Cycle 2, the restart in the background after a real cluster-off inside Starbite OS, passed.
   - The slowest loop turn (858 ms) is the load at the guest timer's first tick.
+- **alpha3: the Terminal and damage per row** (the sbos-linux session's steps 1-3, master db2bea2 / 8ac79c8 /
+  2c76887):
+  - `guest_blit` copies only the rows newer than the frame it drew last (sbshm.h `row_seq`, `sbg_rows`), and
+    presents only that band. A guest without the table (the app bundle 63f982f8) is still copied whole.
+  - A home tile **Terminal** (behind the same Settings switch, when the three `guest-term*` store entries exist)
+    starts the second guest. That is the guest kernel of its own (Image-guest 35fb2f5b, 7.1.0-sbguest, simpledrm +
+    fbcon) with a shell on tty1.
+  - Its surface is 720 x 1060 in fbcon's Terminus 16 x 32 font (guest.config a866f15, `fbcon=font:TER16x32`),
+    drawn at 2x (1440 x 2120, 45 x 33 characters) between the top bar and Starbite's keyboard (the apps' keyboard,
+    its action key Enter). The DT comes from `starbite/guest/sbos/term-bundle.sh` (probe/build.sh p4's recipe with
+    this surface and font). (A first cut drew 8 x 16 at 4x on a 360 x 530 surface; the 16 x 32 font reads better.)
+  - The keys are sent as Linux key codes (`sbshm_ascii_key`, Shift around capitals and signs). Volume is Up / Down
+    (the shell's history), short Bixby is Tab, held Bixby goes home.
+  - One guest at a time: a tile of the other guest stops the hidden one first ("tap again in a moment").
+  - The self test's cycle 2 is now the terminal. It types `uname -a; grep -c processor /proc/cpuinfo; echo
+    STARBITE-TERM-OK > /dev/kmsg` and waits for the marker in the guest's log. Then it checks the view shows
+    text, stops, and checks the cluster is off.
+  - QEMU (`run-qemu.sh kern`, two stores): PASS.
 - **Not in alpha1**: the M3 clock for the guest (INTEGRATION.md step 10: it stays at the boot step, 1066 MHz in P2d).
 - **Checks**: host (`host/sbos-linux-test.sh` on guest.c's host fake: the confirmation, the tile, the view, the
   tap at 2x, held Bixby, the 60 s stop, both refusals, missing files, a failed start, and `guest_selftest_step`'s two

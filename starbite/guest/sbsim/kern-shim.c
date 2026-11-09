@@ -21,6 +21,7 @@
 #define GICD      SBG_QEMU_GICD
 #define GICC      SBG_QEMU_GICC
 #define STORE     SBG_QEMU_STORE
+#define STORE_TERM 0x4c000000UL             /* run-qemu.sh kern: the terminal's store (Image-guest, its DT, initrd) */
 #define PANEL     0x44000000UL              /* 1440 x 2960 x 4 = 17 MB, below the trampoline page (0x4700_0000) */
 #define PW        1440U
 #define PH        2960U
@@ -123,16 +124,22 @@ int heater_guest_refuses(void) { return guest_owns_m3(); }      /* as heater.c *
 void heater_m3_released(void) { ++released; }
 
 /* the store: the run's manifest (Image, DTB, initrd placed by -device loader) */
-static struct manifest *mf;
+static struct manifest *mf, *mt;
 int store_find(const char *name, struct store_ent *e)
 {
     uint64_t off, size;
     if (sb_streq(name, GUEST_STORE_IMAGE))
-        off = mf->img_off, size = mf->img_size;
+        off = STORE + mf->img_off, size = mf->img_size;
     else if (sb_streq(name, GUEST_STORE_DTB))
-        off = mf->dtb_off, size = mf->dtb_size;
+        off = STORE + mf->dtb_off, size = mf->dtb_size;
     else if (sb_streq(name, GUEST_STORE_RD))
-        off = mf->rd_off, size = mf->rd_size;
+        off = STORE + mf->rd_off, size = mf->rd_size;
+    else if (mt && sb_streq(name, GUEST_TERM_IMAGE))
+        off = STORE_TERM + mt->img_off, size = mt->img_size;
+    else if (mt && sb_streq(name, GUEST_TERM_DTB))
+        off = STORE_TERM + mt->dtb_off, size = mt->dtb_size;
+    else if (mt && sb_streq(name, GUEST_TERM_RD))
+        off = STORE_TERM + mt->rd_off, size = mt->rd_size;
     else
         return 0;
     memset(e, 0, sizeof(*e));
@@ -145,7 +152,7 @@ int store_load(const struct store_ent *e, uintptr_t dst, uint64_t cap)
 {
     if (e->size > cap)
         return -3;
-    const volatile uint64_t *s = (const volatile uint64_t *)(STORE + e->lba);
+    const volatile uint64_t *s = (const volatile uint64_t *)(uintptr_t)e->lba;    /* (an address here) */
     volatile uint64_t *d = (volatile uint64_t *)dst;
     for (uint64_t i = 0; i < (e->size + 7) / 8; ++i)
         d[i] = s[i];
@@ -300,8 +307,13 @@ static void st_open(void)
         guest_show(1);
 }
 static void st_home(void) { guest_show(0); }
+static void st_open_term(void)
+{
+    if (guest_start_mode(GUEST_TERM) == 0)
+        guest_show(1);
+}
 static const uint32_t *st_panel(void) { return (const uint32_t *)PANEL; }
-static const struct guest_st_ops ops = {st_open, st_home, st_panel};
+static const struct guest_st_ops ops = {st_open, st_home, st_open_term, st_panel};
 
 static void pump(void)
 {
@@ -314,7 +326,8 @@ static void pump(void)
     uint64_t t = sb_ms();
     if (guest_frame_new() && t - last_blit >= 150) {   /* ui.c presents on each new frame; here at most ~7/s */
         last_blit = t;
-        guest_blit((uint32_t *)PANEL, PW, 0, 40);
+        int y0, y1;
+        guest_blit((uint32_t *)PANEL, PW, 0, 40, &y0, &y1);
         ++blits;
         dirty = 0;
     }
@@ -334,8 +347,11 @@ static void logn(const char *a, uint64_t v)
 void sbsim_main(void)
 {
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frq));
-    puts_("\nkern-shim: Starbite OS 1.2-alpha1's guest.c on QEMU CPU 0 (GUEST_QEMU)\n");
+    puts_("\nkern-shim: Starbite OS 1.2's guest.c on QEMU CPU 0 (GUEST_QEMU)\n");
     mf = (struct manifest *)STORE;
+    mt = ((struct manifest *)STORE_TERM)->magic == 0x3145524f54534253ULL ? (struct manifest *)STORE_TERM : 0;
+    if (!mt)
+        puts_("kern-shim: no terminal store at 0x4c000000 (cycle 2 will fail)\n");
     if (mf->magic != 0x3145524f54534253ULL) {
         puts_("kern-shim: RESULT FAIL: no store manifest at 0x48000000\n");
         sbsim_hvc(PSCI_SYSTEM_OFF, 0, 0, 0);

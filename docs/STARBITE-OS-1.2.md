@@ -1,4 +1,12 @@
-# Starbite OS 1.2-alpha2: Linux apps on the big cores (a test) (2026-11-09)
+# Starbite OS 1.2-alpha3: a Linux terminal (2026-11-09)
+
+- **Terminal** (home, next to Linux; behind the same Settings switch): a Linux shell on the big cores, large
+  (45 x 33 characters) above Starbite's keyboard. Enter runs a line; Volume steps through the history; Bixby is
+  Tab; hold Bixby for home. Needs the store entries `guest-term.img`, `guest-term.dtb` and `guest-term-rd.img`.
+- The Linux view copies only the rows that changed (faster, less power), when the guest says which.
+- One Linux at a time: opening the other one closes the first.
+
+## 1.2-alpha2 (2026-11-09)
 
 alpha2: the self test's tap check reads a frame the view really drew (the P3a run on the phone timed out waiting
 for a moment without an undrawn frame); nothing else changed.

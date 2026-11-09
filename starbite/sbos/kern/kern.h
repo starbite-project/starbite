@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha2"
+#define SBOS_VERSION "1.2-alpha3"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -376,7 +376,7 @@ void kui_light(uint32_t argb);
 void kui_awake(int on);
 void kui_open_app(int a);
 void kui_home(void);
-void kui_guest_open(void);          /* 1.2: the Linux view (the guest started if it is off) */
+void kui_guest_open(int mode);      /* 1.2: the Linux view (GUEST_APP / GUEST_TERM; started if it is off) */
 extern int kui_linux_on;            /* 1.2: Settings > Linux apps: the home tile (off at every start) */
 void kui_lock(void);
 int kui_awake_on(void);

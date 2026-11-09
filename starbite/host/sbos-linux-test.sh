@@ -78,8 +78,30 @@ if echo "$r" | grep -q "guest selftest: start"; then
     want "$r" "guest selftest: passed" "guest_selftest_step: both cycles pass on the fake"
     want "$r" "cycle 1: the tap reached the app" "the tap's pixel checked"
     want "$r" "cycle 2: off" "the second cycle off"
+    want "$r" "cycle 2: the command ran (STARBITE-TERM-OK" "the terminal cycle: the typed command ran"
 else
     echo "note: SBOS_HOST_SELFTEST_GUEST not wired in this host build"
 fi
+
+# 1.2-alpha3: the Terminal (the guest kernel of its own at 4x, Starbite's keyboard below it)
+TERM_TILE="t:1057,2480 w:900"
+K_E="t:370,2246 w:150"; K_C="t:580,2622 w:150"; K_H="t:860,2434 w:150"; K_O="t:1210,2246 w:150"
+K_I="t:1070,2246 w:150"; K_SP="t:545,2810 w:150"; K_SHIFT="t:125,2622 w:150"; K_ENTER="t:1245,2810 w:300"
+K_DEL="t:1375,2622 w:150"; K_X="t:440,2622 w:150"
+ENVS="SBOS_HOST_GUEST=1"
+r=$(run $LXON $TERM_TILE s:lx-term $K_E $K_C $K_H $K_O $K_SP $K_H $K_I $K_X $K_DEL $K_ENTER $K_SHIFT $K_E $K_C $K_H $K_O $K_ENTER s:lx-term-typed)
+want "$r" "ui: the Linux terminal starting (the home tile)" "the Terminal tile starts the terminal"
+want "$r" "the fake terminal ran: echo hi$" "typed on Starbite's keyboard: echo hi (Delete removed the x), Enter ran it"
+want "$r" "the fake terminal ran: Echo$" "Shift: one capital, then lower case"
+c=$(px lx-term-typed 720 2246); [ "$c" != 000000 ] && echo "ok: the keyboard is drawn below the terminal" || { echo "FAIL: no keyboard ($c)"; fails=$((fails + 1)); }
+c=$(px lx-term-typed 8 60); [ "$c" = aaaaaa ] && echo "ok: the typed characters on the 4x view" || { echo "FAIL: view pixel $c"; fails=$((fails + 1)); }
+# one guest at a time: the terminal hidden, then the Linux tile stops it first
+r=$(run $LXON $TERM_TILE h:b:1200 w:600 $TILE w:300 w:1500 $TILE w:900)
+want "$r" "ui: the other Linux stopped first" "the Linux tile stops the hidden terminal first"
+want "$r" "ui: Linux starting (the home tile)" "and starts the app on the next tap"
+# the app's files only: no Terminal tile
+ENVS="SBOS_HOST_GUEST=app"
+r=$(run $LXON $TERM_TILE)
+never "$r" "terminal starting" "no Terminal tile without the terminal's files"
 
 echo "linux test: $fails failed"

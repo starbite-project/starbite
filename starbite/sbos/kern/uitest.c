@@ -49,10 +49,11 @@ static int guest_variant(void)
     return getenv("SBOS_HOST_SELFTEST_GUEST") != 0;
 #endif
 }
-static void gst_open(void) { kui_guest_open(); }
+static void gst_open(void) { kui_guest_open(GUEST_APP); }
+static void gst_open_term(void) { kui_guest_open(GUEST_TERM); }
 static void gst_home(void) { kui_home(); }
 static const uint32_t *gst_panel(void) { return ui_back(); }
-static const struct guest_st_ops gst_ops = { gst_open, gst_home, gst_panel };
+static const struct guest_st_ops gst_ops = { gst_open, gst_home, gst_open_term, gst_panel };
 #endif
 
 /* the in-app steps: only events that change what is shown (never a light, heat, alarm or setting) */

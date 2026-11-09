@@ -13,12 +13,27 @@
 #define GUEST_STORE_IMAGE "guest-linux.img"
 #define GUEST_STORE_DTB   "guest-linux.dtb"
 #define GUEST_STORE_RD    "guest-linux-rd.img"
+/* 1.2-alpha3: the terminal (the guest kernel of its own, a shell on fbcon with the Terminus 16 x 32 font; its
+ * surface sized for 2x above the keyboard: 720 x 1060 = 1440 x 2120 on the panel, 45 x 33 characters) */
+#define GUEST_TERM_IMAGE  "guest-term.img"
+#define GUEST_TERM_DTB    "guest-term.dtb"
+#define GUEST_TERM_RD     "guest-term-rd.img"
+#define GUEST_TERM_W 720U
+#define GUEST_TERM_H 1060U
+enum { GUEST_APP = 0, GUEST_TERM = 1 };
 
 enum { GUEST_OFF = 0, GUEST_STARTING, GUEST_RUNNING, GUEST_STOPPING, GUEST_FAILED };
 
 void guest_init(void);                     /* once, after hw_irq_init (routes the host doorbell) */
 int guest_available(void);                 /* 1: the three store entries exist */
 int guest_start(void);                     /* 0 started, < 0 refused (heater busy, no files, a load error) */
+int guest_start_mode(int mode);            /* GUEST_APP (= guest_start) or GUEST_TERM */
+int guest_available_mode(int mode);
+int guest_mode(void);                      /* the last started */
+int guest_scale(void);                     /* the view's scale: 2 (both; the blit also does 4) */
+int guest_type(char c);                    /* one character as Linux keys (Shift around it): 1 sent */
+int guest_term_ok(void);                   /* the terminal's typed self-test command ran */
+void guest_full_next(void);                /* the next guest_blit copies every row (the view redrawn whole) */
 int guest_stop(void);                      /* MSG_STOP; the cluster goes off by itself */
 int guest_state(void);                     /* GUEST_* */
 const char *guest_why(void);               /* GUEST_FAILED: the reason */
@@ -32,7 +47,8 @@ unsigned guest_db_host(void);              /* the INTID irq_drain must not treat
 void guest_show(int on);                   /* on: MSG_FOCUS 1; off: MSG_FOCUS 0 (stopped after 60 s hidden) */
 int guest_shown(void);
 int guest_frame_new(void);                 /* 1 when the guest published a frame since the last blit */
-void guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0);   /* 720x1440 at 2x */
+/* the rows newer than the frame drawn (damage per row) at 2x / 4x: the rows copied; *py0..*py1 the panel rows */
+int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0, int *py1);
 int guest_input(int kin_type, int x, int y);  /* KIN_PRESS/MOVE/RELEASE in panel pixels: 1 taken */
 int guest_key(unsigned linux_code, int down);
 
@@ -47,6 +63,8 @@ void guest_power_off(void);                /* before a switch-off / restart: sto
 struct guest_st_ops {
     void (*open)(void);                     /* the Linux view: guest_start() + the view shown */
     void (*home)(void);                     /* back home: the view hidden (the guest keeps running) */
+    void (*open_term)(void);                /* the terminal's view: guest_start_mode(GUEST_TERM) + shown */
     const uint32_t *(*panel)(void);         /* the composed frame (UI_W x UI_H), for the tap's pixel */
 };
 int guest_selftest_step(const struct guest_st_ops *o);
+/* (1.2-alpha3: cycle 2 is the terminal: a command typed as keys, its kmsg marker in the log, text on the view) */

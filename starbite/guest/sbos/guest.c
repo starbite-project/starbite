@@ -62,15 +62,28 @@
 #endif
 #define SW 720U
 #define SH 1440U
-#define VIEW_Y 40U                          /* the view at 2x between a 40 px bar on top and one at the bottom */
+#define VIEW_Y 40U                          /* the view below a 40 px bar, at 2x */
 #define IDLE_STOP_MS 60000U
 
 static int st = GUEST_OFF, shown, screen = 1;
 static const char *why = "";
 static uint32_t seq_seen = 0, seq_blit = 0;
-static uint32_t blits, blit_ms_max;           /* the view's frames drawn (P3b: logged by the self test) */
+static uint32_t blits, blit_ms_max, rows_copied;   /* the view's frames drawn, its slowest copy, rows copied */
 static uint64_t t_hidden, t_screen_off;
 static int sb_up;
+/* 1.2-alpha3: two guests from the same service: the app demo (the S9 Linux, 720 x 1440 at 2x) and the terminal
+ * (the guest kernel of its own, a shell on fbcon in Terminus 16 x 32, 720 x 1060 at 2x above Starbite's keyboard) */
+static int mode = GUEST_APP, term_ok;
+static const char *const names[2][3] __attribute__((unused)) = {
+    {GUEST_STORE_IMAGE, GUEST_STORE_DTB, GUEST_STORE_RD},
+    {GUEST_TERM_IMAGE, GUEST_TERM_DTB, GUEST_TERM_RD},
+};
+static unsigned surf_w(void) { return mode == GUEST_TERM ? GUEST_TERM_W : SW; }
+static unsigned surf_h(void) { return mode == GUEST_TERM ? GUEST_TERM_H : SH; }
+int guest_mode(void) { return mode; }
+int guest_scale(void) { return 2; }      /* (the terminal: a 16 x 32 font instead of 8 x 16 at 4x) */
+int guest_term_ok(void) { return term_ok; }
+void guest_full_next(void) { seq_blit = 0; }     /* the next blit copies every row */
 
 static void arm(uint32_t period)
 {
@@ -98,7 +111,13 @@ static void host_log(const char *l)
 static void guest_log(const char *l)
 {
     static const char *const keep[] = {"guestd", "sbguest", "guest-init", "panic", "Oops", "BUG", "Unable",
-                                       "failed", "error", "smp: Brought up"};
+                                       "failed", "error", "smp: Brought up", "STARBITE"};
+    int has_echo = 0;
+    for (const char *s = l; *s; ++s)
+        has_echo |= sb_prefix(s, "echo");
+    for (const char *s = l; *s && !has_echo; ++s)
+        if (sb_prefix(s, "STARBITE-TERM-OK"))
+            term_ok = 1;                    /* the typed command ran (its kmsg line, not the command's echo) */
     for (unsigned i = 0; i < sizeof(keep) / sizeof(keep[0]); ++i) {
         const char *k = keep[i];
         for (const char *s = l; *s; ++s) {
@@ -136,35 +155,44 @@ static const struct sbg_os shim = {
     .m3_prep = m3_prep,
 };
 
+static uint8_t me_if;
+/* sbghost's configuration for the current mode (the surface size differs); again before each load */
+static void cfg_init(void)
+{
+    struct sbg_cfg cfg = {
+        .linux_base = G_LINUX_BASE, .linux_size = G_LINUX_SIZE,
+        .shm_base = G_SHM_BASE, .shm_size = G_SHM_SIZE,
+        .gicd = G_GICD, .first_mpidr = G_FIRST_MPIDR, .tramp_pa = G_TRAMP,
+        .surf_w = surf_w(), .surf_h = surf_h(),
+        .db_guest = GUEST_DB_GUEST, .db_host = GUEST_DB_HOST,
+        .host_lines = {0},                  /* the guest kernel has the shared-distributor patch */
+        .repair = 0,
+        .boot_timeout_ms = 30000, .stop_timeout_ms = 5000,
+    };
+    sbg_init(&shim, &cfg, me_if ? me_if : 1);
+}
+
 void guest_init(void)
 {
     if (!K.irq_mode) {                      /* the doorbells need the GIC: polling mode runs no guest */
         why = "Linux needs interrupts (this boot runs in polling mode)";
         return;
     }
-    uint8_t me = *(volatile uint8_t *)(uintptr_t)(G_GICD + 0x800);   /* this core's interface (banked) */
-    struct sbg_cfg cfg = {
-        .linux_base = G_LINUX_BASE, .linux_size = G_LINUX_SIZE,
-        .shm_base = G_SHM_BASE, .shm_size = G_SHM_SIZE,
-        .gicd = G_GICD, .first_mpidr = G_FIRST_MPIDR, .tramp_pa = G_TRAMP,
-        .surf_w = SW, .surf_h = SH,
-        .db_guest = GUEST_DB_GUEST, .db_host = GUEST_DB_HOST,
-        .host_lines = {0},                  /* the guest kernel has the shared-distributor patch */
-        .repair = 0,
-        .boot_timeout_ms = 30000, .stop_timeout_ms = 5000,
-    };
-    sbg_init(&shim, &cfg, me ? me : 1);
+    me_if = *(volatile uint8_t *)(uintptr_t)(G_GICD + 0x800);   /* this core's interface (banked) */
+    cfg_init();
     sbg_gic_prepare();                      /* the doorbells: edge; the host's routed here and enabled */
     sb_up = 1;
 }
 
 int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED ? 1 : hw_m3_on() && st == GUEST_FAILED; }
 
-int guest_available(void)
+int guest_available_mode(int m)
 {
     struct store_ent e;
-    return store_find(GUEST_STORE_IMAGE, &e) && store_find(GUEST_STORE_DTB, &e) && store_find(GUEST_STORE_RD, &e);
+    m = m == GUEST_TERM ? GUEST_TERM : GUEST_APP;
+    return store_find(names[m][0], &e) && store_find(names[m][1], &e) && store_find(names[m][2], &e);
 }
+int guest_available(void) { return guest_available_mode(GUEST_APP); }
 
 static uintptr_t up_mib(uintptr_t a) { return (a + 0xfffffUL) & ~0xfffffUL; }
 
@@ -173,8 +201,11 @@ static uintptr_t up_mib(uintptr_t a) { return (a + 0xfffffUL) & ~0xfffffUL; }
 static int loading;
 static struct store_ent ld_i, ld_d, ld_r;
 
-int guest_start(void)
+int guest_start(void) { return guest_start_mode(GUEST_APP); }
+
+int guest_start_mode(int m)
 {
+    m = m == GUEST_TERM ? GUEST_TERM : GUEST_APP;
     if (!sb_up)
         return -1;
     if (st != GUEST_OFF && st != GUEST_FAILED)
@@ -187,11 +218,13 @@ int guest_start(void)
         why = "the last guest did not power off: restart the phone first";
         return -3;
     }
-    if (!store_find(GUEST_STORE_IMAGE, &ld_i) || !store_find(GUEST_STORE_DTB, &ld_d) || !store_find(GUEST_STORE_RD, &ld_r)) {
-        why = "the Linux files are not in the store";
+    if (!store_find(names[m][0], &ld_i) || !store_find(names[m][1], &ld_d) || !store_find(names[m][2], &ld_r)) {
+        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" : "the Linux files are not in the store";
         return -4;
     }
     why = "";
+    mode = m;
+    term_ok = 0;
     st = GUEST_STARTING;                    /* the big cores are the guest's from here (the heater refuses) */
     loading = 1;
     seq_seen = seq_blit = 0;
@@ -202,6 +235,7 @@ int guest_start(void)
 /* the guest timer's first tick: the store's files into the bounce window, the copy, CPU_ON. 0, or < 0 and why */
 static int load_and_start(void)
 {
+    cfg_init();                             /* this mode's surface */
     /* the bounce window below 4 GiB: the Image, then the DTB and the initrd, each at a MiB boundary */
     uintptr_t pi = G_BOUNCE, pd = up_mib(pi + ld_i.size), pr = up_mib(pd + ld_d.size);
     if (ld_i.size > G_LINUX_SIZE || ld_d.size > G_LINUX_SIZE || ld_r.size > G_LINUX_SIZE ||
@@ -346,14 +380,17 @@ int guest_frame_new(void)
     return guest_shown() && sbg_hdr()->surf_seq != seq_blit;
 }
 
-/* the guest's front buffer at 2x into the back buffer at (x0, y0): 1440 x 2880 */
-void guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0)
+/* the guest's front buffer at 2x (app: 1440 x 2880; terminal: 1440 x 2120) into the back buffer at (x0, y0).
+ * 1.2-alpha3: damage per row (sbshm.h): only the rows newer than the frame drawn last (all after a show, when
+ * seq_blit is 0, or when the guest keeps no table). Returns the rows copied; *py0 / *py1 the panel rows touched. */
+int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0, int *py1)
 {
     const volatile uint32_t *px;
     uint32_t stride;
     uint32_t seq = seq_seen;
+    *py0 = *py1 = -1;
     if (!guest_shown())
-        return;
+        return 0;
     if (!sbg_frame(&seq, &px, &stride)) {   /* nothing new: still draw the last front buffer */
         volatile struct sbshm_hdr *h = sbg_hdr();
         sbshm_dmb();
@@ -361,22 +398,36 @@ void guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0)
         stride = h->surf_stride;
         seq = h->surf_seq;
     }
+    const volatile uint32_t *rows = sbg_rows();
+    uint32_t drawn = seq_blit, w = surf_w(), hh = surf_h(), k = (uint32_t)guest_scale(), n = 0;
     seq_seen = seq_blit = seq;
     uint64_t t0 = sb_ms();
-    for (uint32_t y = 0; y < SH; ++y) {
+    for (uint32_t y = 0; y < hh; ++y) {
+        if (rows && drawn && !sbshm_row_newer(rows[y], drawn))
+            continue;
         const volatile uint32_t *s = (const volatile uint32_t *)((uintptr_t)px + (uintptr_t)y * stride);
-        uint64_t *d0 = (uint64_t *)(back + (uintptr_t)(y0 + 2 * y) * stride_px + x0);
-        uint64_t *d1 = (uint64_t *)(back + (uintptr_t)(y0 + 2 * y + 1) * stride_px + x0);
-        for (uint32_t x = 0; x < SW; ++x) {
+        uint64_t *d = (uint64_t *)(back + (uintptr_t)(y0 + k * y) * stride_px + x0);
+        for (uint32_t x = 0; x < w; ++x) {
             uint64_t c = s[x] | 0xff000000U;
             c |= c << 32;
-            d0[x] = c;
-            d1[x] = c;
+            for (uint32_t i = 0; i < k / 2; ++i)
+                d[x * (k / 2) + i] = c;
         }
+        for (uint32_t r = 1; r < k; ++r) {  /* the same row k times */
+            uint64_t *e = (uint64_t *)(back + (uintptr_t)(y0 + k * y + r) * stride_px + x0);
+            for (uint32_t x = 0; x < w * k / 2; ++x)
+                e[x] = d[x];
+        }
+        if (*py0 < 0)
+            *py0 = (int)(y0 + k * y);
+        *py1 = (int)(y0 + k * y + k - 1);
+        ++n;
     }
     ++blits;
     if (sb_ms() - t0 > blit_ms_max)
         blit_ms_max = (uint32_t)(sb_ms() - t0);
+    rows_copied += n;
+    return (int)n;
 }
 
 /* touch in panel pixels (the view at (0, 40), 2x): surface pixels for the guest */
@@ -384,8 +435,8 @@ int guest_input(int kin_type, int x, int y)
 {
     if (!guest_shown())
         return 0;
-    int sx = x / 2, sy = (y - (int)VIEW_Y) / 2;
-    if (y < (int)VIEW_Y || sy >= (int)SH)
+    int k = guest_scale(), sx = x / k, sy = (y - (int)VIEW_Y) / k;
+    if (y < (int)VIEW_Y || sy >= (int)surf_h())
         return kin_type != KIN_PRESS;       /* the bars are Starbite's: a press there is not the guest's */
     uint32_t phase = kin_type == KIN_PRESS ? SBG_TOUCH_DOWN : kin_type == KIN_MOVE ? SBG_TOUCH_MOVE : SBG_TOUCH_UP;
     sbg_touch(0, phase, sx, sy);
@@ -395,6 +446,22 @@ int guest_input(int kin_type, int x, int y)
 int guest_key(unsigned linux_code, int down)
 {
     return guest_shown() ? sbg_key(linux_code, down) : 0;
+}
+
+/* 1.2-alpha3: one character typed (Starbite's keyboard, the self test): its Linux key, with Shift around it */
+int guest_type(char c)
+{
+    int shift = 0;
+    unsigned code = sbshm_ascii_key(c, &shift);
+    if (!code || !guest_shown())
+        return 0;
+    if (shift)
+        sbg_key(SBSHM_KEY_LEFTSHIFT, 1);
+    sbg_key(code, 1);
+    sbg_key(code, 0);
+    if (shift)
+        sbg_key(SBSHM_KEY_LEFTSHIFT, 0);
+    return 1;
 }
 
 void guest_screen(int on)
@@ -430,23 +497,36 @@ static uint32_t cluster_off_ms(void) { return (uint32_t)sbg_stats()->t_off; }
 static uint64_t t_next;
 static int fake_m3, fake_touches, fake_seq;
 static int dots[16][2], ndots;
+static char typed[96];                      /* the fake terminal: the line being typed, then shown as blocks */
+static int ntyped, shown_chars;
 
 void guest_init(void) { sb_up = 1; }
 int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED ? 1 : fake_m3 && st == GUEST_FAILED; }
-int guest_available(void) { return getenv("SBOS_HOST_GUEST") != 0; }
-
-int guest_start(void)
+/* SBOS_HOST_GUEST=1 (or fail): both guests' files; =app: only the app's */
+int guest_available_mode(int m)
 {
+    const char *g = getenv("SBOS_HOST_GUEST");
+    return g && (m != GUEST_TERM || g[0] != 'a');
+}
+int guest_available(void) { return guest_available_mode(GUEST_APP); }
+int guest_start(void) { return guest_start_mode(GUEST_APP); }
+
+int guest_start_mode(int m)
+{
+    m = m == GUEST_TERM ? GUEST_TERM : GUEST_APP;
     if (!sb_up || (st != GUEST_OFF && st != GUEST_FAILED))
         return -1;
     if (heater_m3_busy()) {
         why = "the heater has the big cores";
         return -2;
     }
-    if (!guest_available()) {
-        why = "the Linux files are not in the store";
+    if (!guest_available_mode(m)) {
+        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" : "the Linux files are not in the store";
         return -4;
     }
+    mode = m;
+    term_ok = 0;
+    ntyped = shown_chars = 0;
     const char *g = getenv("SBOS_HOST_GUEST");
     if (g && g[0] == 'f') {
         why = "the guest did not start (the host's fake: SBOS_HOST_GUEST=fail)";
@@ -521,42 +601,82 @@ void guest_show(int on)
 
 int guest_frame_new(void) { return guest_shown() && (uint32_t)fake_seq != seq_blit; }
 
-void guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0)
+int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0, int *py1)
 {
+    *py0 = *py1 = -1;
     if (!guest_shown())
-        return;
+        return 0;
     seq_seen = seq_blit = (uint32_t)fake_seq;
     ++blits;
-    for (uint32_t y = 0; y < 2 * SH; ++y) {
+    uint32_t k = (uint32_t)guest_scale(), w = surf_w(), hh = surf_h();
+    for (uint32_t y = 0; y < k * hh; ++y) {
         uint32_t *d = back + (uintptr_t)(y0 + y) * stride_px + x0;
-        uint32_t sy = y / 2;
-        for (uint32_t x = 0; x < 2 * SW; ++x) {
-            uint32_t sx = x / 2, c = sy < 120 ? 0xff1e1e2eU : 0xff000000U | ((sx * 255 / SW) << 16) | ((sy * 255 / SH) << 8) | 0x60U;
-            for (int i = 0; i < ndots; ++i) {
-                int dx = (int)sx - dots[i][0], dy = (int)sy - dots[i][1];
-                if (dx * dx + dy * dy <= 14 * 14)
-                    c = 0xffffd700U;
+        uint32_t sy = y / k;
+        for (uint32_t x = 0; x < k * w; ++x) {
+            uint32_t sx = x / k, c;
+            if (mode == GUEST_TERM) {       /* black, the typed characters as 16 x 32 blocks, 45 a row */
+                int cell = (int)(sy / 32) * 45 + (int)(sx / 16);
+                c = cell < shown_chars && (sx % 16) < 12 && (sy % 32) > 4 && (sy % 32) < 28 ? 0xffaaaaaaU : 0xff000000U;
+            } else {
+                c = sy < 120 ? 0xff1e1e2eU : 0xff000000U | ((sx * 255 / w) << 16) | ((sy * 255 / hh) << 8) | 0x60U;
+                for (int i = 0; i < ndots; ++i) {
+                    int dx = (int)sx - dots[i][0], dy = (int)sy - dots[i][1];
+                    if (dx * dx + dy * dy <= 14 * 14)
+                        c = 0xffffd700U;
+                }
             }
             d[x] = c;
         }
     }
+    *py0 = (int)y0;
+    *py1 = (int)(y0 + k * hh - 1);
+    rows_copied += hh;
+    return (int)hh;
 }
 
 int guest_input(int kin_type, int x, int y)
 {
     if (!guest_shown())
         return 0;
-    int sx = x / 2, sy = (y - (int)VIEW_Y) / 2;
-    if (y < (int)VIEW_Y || sy >= (int)SH)
+    int k = guest_scale(), sx = x / k, sy = (y - (int)VIEW_Y) / k;
+    if (y < (int)VIEW_Y || sy >= (int)surf_h())
         return kin_type != KIN_PRESS;
     fake_touches++;
-    if (kin_type == KIN_PRESS && ndots < 16) {
+    if (kin_type == KIN_PRESS && ndots < 16 && mode == GUEST_APP) {
         dots[ndots][0] = sx;
         dots[ndots][1] = sy;
         ++ndots;
         fake_seq += 2;
         ui_mark_dirty();
     }
+    return 1;
+}
+
+/* the fake terminal: Enter runs the line; "echo STARBITE-TERM-OK > /dev/kmsg" logs the marker as the kernel would */
+int guest_type(char c)
+{
+    if (!guest_shown())
+        return 0;
+    if (c == '\n') {
+        typed[ntyped] = 0;
+        sb_logf("guest: the fake terminal ran: ", typed);
+        int hit = 0;
+        for (int i = 0; typed[i]; ++i)
+            hit |= sb_prefix(typed + i, "STARBITE-TERM-OK");
+        if (hit && mode == GUEST_TERM) {
+            term_ok = 1;
+            sb_log("linux| STARBITE-TERM-OK (fake)");
+        }
+        ntyped = 0;
+    } else if (c == '\b') {
+        if (ntyped)
+            --ntyped;
+    } else if (ntyped + 1 < (int)sizeof(typed)) {
+        typed[ntyped++] = c;
+    }
+    shown_chars++;
+    fake_seq++;
+    ui_mark_dirty();
     return 1;
 }
 
@@ -596,6 +716,7 @@ void guest_power_off(void)
 static int gs_phase, gs_fail;
 static uint64_t gs_t;
 static uint32_t gs_seq, gs_blits;
+static int gs_typed;
 
 static void gs_log(const char *a, const char *b)
 {
@@ -622,7 +743,7 @@ int guest_selftest_step(const struct guest_st_ops *o)
     uint64_t now = sb_ms(), dt = now - gs_t;
     switch (gs_phase) {
     case 0:
-        gs_log("start: two cycles (shown with a tap, then in the background)", 0);
+        gs_log("start: two cycles (the app shown with a tap; the terminal with a typed command)", 0);
         if (!guest_available())
             return gs_failed("the Linux files are not in the store (guest-linux.img / .dtb / -rd.img)");
         if (heater_m3_busy())
@@ -641,14 +762,9 @@ int guest_selftest_step(const struct guest_st_ops *o)
         if (st == GUEST_FAILED)
             return gs_failed(why);
         if (st == GUEST_RUNNING) {
-            gs_log(gs_phase == 1 ? "cycle 1: running: " : "cycle 2: running: ", start_note());
+            gs_log(gs_phase == 1 ? "cycle 1: running: " : "cycle 2 (terminal): running: ", start_note());
             gs_t = now;
-            if (gs_phase == 7) {
-                guest_stop();
-                gs_phase = 8;
-            } else {
-                gs_phase = 2;
-            }
+            gs_phase = gs_phase == 7 ? 10 : 2;
         } else if (dt > 45000) {
             return gs_failed("no HELLO within 45 s");
         }
@@ -746,13 +862,17 @@ int guest_selftest_step(const struct guest_st_ops *o)
             if (hw_m3_on() || guest_owns_m3())
                 return gs_failed("the M3 cluster still powered after the guest's stop");
             if (gs_phase == 8) {
-                gs_log("passed: two cycles, the tap in the app, the cluster off twice, the heater refused meanwhile", 0);
+                gs_log("passed: the app with the tap, the terminal with a typed command, the cluster off twice, "
+                       "the heater refused meanwhile", 0);
                 gs_phase = 99;
                 return 1;
             }
-            if (guest_start() < 0)
-                return gs_failed(why);
-            gs_log("cycle 2: started in the background (not shown)", 0);
+            if (!guest_available_mode(GUEST_TERM))
+                return gs_failed("the terminal's Linux files are not in the store (guest-term.img / .dtb / -rd.img)");
+            o->open_term();
+            if (st != GUEST_STARTING)
+                return gs_failed(why[0] ? why : "the terminal's start was refused");
+            gs_log("cycle 2: the terminal started (shown at 2x above the keyboard)", 0);
             gs_t = now;
             gs_phase = 7;
         } else if (st == GUEST_FAILED) {
@@ -761,6 +881,77 @@ int guest_selftest_step(const struct guest_st_ops *o)
             return gs_failed("the guest did not power off within 8 s of MSG_STOP");
         }
         return 0;
+    case 10:                                /* the shell's prompt first */
+        if (st != GUEST_RUNNING)
+            return gs_failed("the terminal stopped by itself");
+        if (dt >= 1500) {
+            gs_typed = 0;
+            gs_phase = 11;
+        }
+        return 0;
+    case 11: {                              /* the command, four characters a step (the ring stays far from full) */
+        static const char cmd[] = "uname -a; grep -c processor /proc/cpuinfo; echo STARBITE-TERM-OK > /dev/kmsg\n";
+        for (int i = 0; i < 4 && cmd[gs_typed]; ++i, ++gs_typed)
+            if (!guest_type(cmd[gs_typed]))
+                return gs_failed("a character could not be typed (no key, or the ring full)");
+        if (!cmd[gs_typed]) {
+            gs_log("cycle 2: typed: uname -a; grep -c processor /proc/cpuinfo; echo STARBITE-TERM-OK > /dev/kmsg", 0);
+            gs_t = now;
+            gs_blits = blits;
+            gs_phase = 12;
+        }
+        return 0;
+    }
+    case 12: {                              /* the command ran (its kmsg line) and the terminal shows text */
+        if (st != GUEST_RUNNING)
+            return gs_failed("the terminal stopped by itself");
+        const uint32_t *p = o->panel ? o->panel() : 0;
+        /* the view drew since the typing and has nothing pending (a quiet terminal publishes only on change: after
+         * its output no new frame comes), or kept drawing a guest that keeps publishing */
+        if (term_ok && p && dt >= 500 && blits != gs_blits && (!guest_frame_new() || blits - gs_blits >= 3)) {
+            uint32_t lit = 0, lit_rows = 0;
+            for (uint32_t y = VIEW_Y; y < VIEW_Y + 2U * GUEST_TERM_H; y += 4) {
+                uint32_t n = 0;
+                for (uint32_t x = 0; x < 1440U; x += 2)
+                    n += (p[(uintptr_t)y * 1440U + x] & 0xffffffU) != 0;
+                lit += n;
+                lit_rows += n != 0;
+            }
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "cycle 2: the command ran (STARBITE-TERM-OK in the guest's log) after ");
+            ub_dec(&u, dt);
+            ub_s(&u, " ms; the terminal shows text: ");
+            ub_dec(&u, lit);
+            ub_s(&u, " lit samples in ");
+            ub_dec(&u, lit_rows);
+            ub_s(&u, " rows; the view drew ");
+            ub_dec(&u, blits - gs_blits);
+            ub_s(&u, " frames since the typing, ");
+            ub_dec(&u, rows_copied);
+            ub_s(&u, " rows copied in all, the slowest copy ");
+            ub_dec(&u, blit_ms_max);
+            ub_s(&u, " ms");
+            gs_log(u.b, 0);
+            if (lit_rows < 4)
+                return gs_failed("the terminal's view shows no text");
+            o->home();
+            guest_stop();
+            gs_t = now;
+            gs_phase = 8;
+        } else if (dt > 15000) {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "the typed command's check timed out (15 s): marker ");
+            ub_dec(&u, (uint64_t)term_ok);
+            ub_s(&u, ", view draws since the typing ");
+            ub_dec(&u, blits - gs_blits);
+            gs_log(u.b, 0);
+            return gs_failed(term_ok ? "the terminal's view did not draw after the command within 15 s" :
+                                       "STARBITE-TERM-OK did not reach the guest's log within 15 s");
+        }
+        return 0;
+    }
     default:
         return gs_fail ? -1 : 1;
     }
