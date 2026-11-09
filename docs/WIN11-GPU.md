@@ -1026,6 +1026,13 @@ the CPU path. sbshare adds a GPU re-sample after the producer's update.
 - **T13w bisects it:** b0 (the uniform-lowering path) vs b1 (UBO), vertex vs pixel shader, and initial data vs
   UpdateSubresource vs DYNAMIC Map. Each variant draws the value it read.
 
+**cycle-t13w-1 (03:10):**
+- **Constant-buffer slot b0 reads wrong** in both shader stages and with every fill method; **b1 works.**
+- **The route at fault:** cb0 (`CONST[0]`) goes through tgsi_to_nir's `load_uniform` and Bifrost's
+  `lower_uniforms_to_ubo` to UBO 0, while `CONST[1+]` takes the plain UBO path.
+- **T13x (sb-patches/0110):** d3d10umd maps D3D slot n to gallium buffer n + 1 / `CONST[n + 1]`, so every D3D
+  constant buffer takes the working path.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

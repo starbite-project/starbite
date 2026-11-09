@@ -1,0 +1,72 @@
+diff --git a/src/gallium/frontends/d3d10umd/Shader.cpp b/src/gallium/frontends/d3d10umd/Shader.cpp
+index df6ffa1..bf7ab58 100644
+--- a/src/gallium/frontends/d3d10umd/Shader.cpp
++++ b/src/gallium/frontends/d3d10umd/Shader.cpp
+@@ -33,6 +33,13 @@
+ 
+ #include "Shader.h"
+ #include "ShaderParse.h"
++/* Starbite (sbumd, sb-patches/0110, docs/WIN11-GPU.md 6.18): D3D constant-buffer slot n is gallium constant
++ * buffer n + 1 (TGSI CONST[n + 1]). Gallium buffer 0 is the default uniform block: tgsi_to_nir turns CONST[0]
++ * into load_uniform and Bifrost lowers that to UBO 0, a path that read zeros or other memory on the Mali
++ * (T13w: cb0 failed in vertex and pixel shaders, b1 passed). DWM keeps its transform in cb0, so every one of
++ * its frames came out empty. Slots 0..13 become 1..14 (PIPE_MAX_CONSTANT_BUFFERS 16). */
++#define SB_CB_SHIFT 1
++
+ #include "State.h"
+ #include "Query.h"
+ 
+@@ -173,7 +180,7 @@ SetConstantBuffers(mesa_shader_stage shader_type,    // IN
+       cb.buffer_size = cb.buffer ? cb.buffer->width0 : 0;
+       pipe->set_constant_buffer(pipe,
+                                 shader_type,
+-                                StartBuffer + i,
++                                StartBuffer + i + SB_CB_SHIFT,
+                                 &cb);
+    }
+ }
+diff --git a/src/gallium/frontends/d3d10umd/ShaderTGSI.c b/src/gallium/frontends/d3d10umd/ShaderTGSI.c
+index 653cb96..07f51e0 100644
+--- a/src/gallium/frontends/d3d10umd/ShaderTGSI.c
++++ b/src/gallium/frontends/d3d10umd/ShaderTGSI.c
+@@ -32,6 +32,13 @@
+ 
+ #include "Debug.h"
+ #include "ShaderParse.h"
++/* Starbite (sbumd, sb-patches/0110, docs/WIN11-GPU.md 6.18): D3D constant-buffer slot n is gallium constant
++ * buffer n + 1 (TGSI CONST[n + 1]). Gallium buffer 0 is the default uniform block: tgsi_to_nir turns CONST[0]
++ * into load_uniform and Bifrost lowers that to UBO 0, a path that read zeros or other memory on the Mali
++ * (T13w: cb0 failed in vertex and pixel shaders, b1 passed). DWM keeps its transform in cb0, so every one of
++ * its frames came out empty. Slots 0..13 become 1..14 (PIPE_MAX_CONSTANT_BUFFERS 16). */
++#define SB_CB_SHIFT 1
++
+ 
+ #include "pipe/p_state.h"
+ #include "tgsi/tgsi_ureg.h"
+@@ -1002,7 +1009,7 @@ translate_src_operand(struct Shader_xlate *sx,
+          assert(operand->base.index[1].imm < SHADER_MAX_CONSTS);
+ 
+          reg = ureg_src_register(TGSI_FILE_CONSTANT, operand->base.index[1].imm);
+-         reg = ureg_src_dimension(reg, operand->base.index[0].imm);
++         reg = ureg_src_dimension(reg, operand->base.index[0].imm + SB_CB_SHIFT);
+          break;
+       case D3D10_SB_OPERAND_INDEX_RELATIVE:
+       case D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE:
+@@ -1010,7 +1017,7 @@ translate_src_operand(struct Shader_xlate *sx,
+          reg = ureg_src_indirect(
+             reg,
+             translate_relative_operand(sx, &operand->base.index[1].rel));
+-         reg = ureg_src_dimension(reg, operand->base.index[0].imm);
++         reg = ureg_src_dimension(reg, operand->base.index[0].imm + SB_CB_SHIFT);
+          break;
+       default:
+          /* XXX: Other index representations.
+@@ -1857,7 +1864,7 @@ Shader_tgsi_translate(const unsigned *code,
+          ureg_DECL_constant2D(ureg,
+                               0,
+                               num_constants - 1,
+-                              opcode.src[0].base.index[0].imm);
++                              opcode.src[0].base.index[0].imm + SB_CB_SHIFT);
+          break;
+       }
+ 
