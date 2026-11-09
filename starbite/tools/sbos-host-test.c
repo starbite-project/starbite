@@ -747,7 +747,7 @@ static void t_survival(void)
     CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == 0 && c.a55_khz == 1950000U && c.t_end == ~(uint64_t)0,
           "Survival starts: the A55 at its table top, no end time (%s)", c.why);
     run(&c, &in, 0, 10000, 0);
-    CHECK(c.cores >= 5 && c.m3_khz == 1794000U, "Survival: the M3s at 1794 MHz (cores %d, %u)", c.cores, c.m3_khz);
+    CHECK(c.cores >= 5 && c.m3_khz == 2314000U, "Survival: the 2 M3s at 2314 MHz (cores %d, %u)", c.cores, c.m3_khz);
     in = base_in(0);
     in.pct = 2;
     refuse(in, HEAT_SURVIVAL, "Survival at 2 %");
@@ -784,15 +784,16 @@ static void t_survival(void)
     CHECK(s.gpu_flips < 40, "the GPU is not switched on and off all the time (%d)", s.gpu_flips);
     CHECK(s.ocp_bad == 0, "never more M3 cores than Samsung's table allows at the clock (%d ticks)", s.ocp_bad);
     /* 1.2-alpha5: no measurement: 4 M3 cores at the quad clock from the start */
-    CHECK(c.cal == 5 && c.cal_mw[0] == 0 && c.m3_n == 4 && c.surv_m3_khz == 1794000U,
-          "no M3 measurement: 4 @ 1794 from the start (%d @ %u, cal %d)", c.m3_n, c.surv_m3_khz, c.cal);
+    CHECK(c.cal == 5 && c.cal_mw[0] == 0 && c.m3_n == 2 && c.surv_m3_khz == 2314000U,
+          "no M3 measurement: 2 @ 2314 (the phone's measured best) from the start (%d @ %u, cal %d)", c.m3_n,
+          c.surv_m3_khz, c.cal);
     /* every load at once: all 7 workers and the GPU asked for in the first step, not one a second */
     in = base_in(0);
     heat_ctl_init(&c, 0);
-    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == 0 && c.cores == 7 && c.gpu_want && c.m3_khz == 0,
+    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == 0 && c.cores == 5 && c.gpu_want && c.m3_khz == 0,
           "Survival asks for every load at the start (%d cores, gpu %d)", c.cores, c.gpu_want);
     run(&c, &in, 0, 300, 0);
-    CHECK(c.cores == 7 && c.gpu_want && c.m3_khz == 1794000U, "and keeps them, the M3s at 1794 at once (%d, %u, %s)",
+    CHECK(c.cores == 5 && c.gpu_want && c.m3_khz == 2314000U, "and keeps them, the 2 M3s at 2314 at once (%d, %u, %s)",
           c.cores, c.m3_khz, c.why);
     in = base_in(0);
     in.soc_c10 = 150;                   /* cold: the A55s first for 30 s, as before */
@@ -846,12 +847,12 @@ static void t_survival(void)
     run(&c, &in, 0, 5000, 0);
     CHECK(c.state == HEAT_ST_RUNNING, "trip off: the unarmed trip is expected, no stop (%s)", c.why);
     run(&c, &in, 5250, 18000, 0);
-    CHECK(c.cal == 5 && c.cores == 7, "trip off: all 7 workers below the limit (%d, cal %d)", c.cores, c.cal);
+    CHECK(c.cal == 5 && c.cores == 5, "trip off: all 5 workers below the limit (%d, cal %d)", c.cores, c.cal);
     in.soc_c10 = 1312;
-    run(&c, &in, 23500, 3000, 0);         /* 1.1-beta7: one load a second near the limit */
+    run(&c, &in, 23500, 1500, 0);         /* 1.1-beta7: one load a second near the limit (1.2-alpha6: 2 M3s) */
     CHECK(c.state != HEAT_ST_STOPPED, "trip off: at the limit it sheds, no stop (%s)", c.why);
     CHECK(c.gpu_want == 1 && c.cores == 3, "trip off: the M3s shed first, the GPU kept (%d cores, gpu %d)", c.cores, c.gpu_want);
-    run(&c, &in, 27500, 0, 0);
+    run(&c, &in, 25500, 0, 0);
     CHECK(c.gpu_want == 0 && c.cores == 3, "trip off: then the GPU (%d cores, gpu %d)", c.cores, c.gpu_want);
     in.soc_c10 = 1250;
     run(&c, &in, 28000, 4000, 0);

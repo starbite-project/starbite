@@ -147,6 +147,17 @@ void heatk_worker(unsigned w, void *arg)
             break;
         }
         s->errors += heatk_mixed(c, w, iters);
+#ifndef SB_HOST
+        /* 1.2-alpha6: the M3 GCU's throttle counter and control (libsb ocp.c's registers), only after the read-only
+         * OCP probe found them readable this boot (heater.c sets ocp_read): slot v[2] OCPTHROTTCNTA, v[3] CTL */
+        if (w == 4 && c->ocp_read && !(iters & 255U)) {
+            uint64_t r;
+            __asm__ volatile("mrs %0, S3_0_C15_C14_4" : "=r"(r));
+            s->v[2] = r;
+            __asm__ volatile("mrs %0, S3_0_C15_C12_7" : "=r"(r));
+            s->v[3] = r;
+        }
+#endif
         s->iters = ++iters;
         sb_worker_publish(s);
         if (s->errors)

@@ -28,7 +28,7 @@ never "$r" "trip is OFF" "Survival (default) never touches the trip"
 want "$r" "host: flexpmu core 4 on (first: cluster on)" "FlexPMU: the first M3 core's cluster on before its CPU_ON"
 n=$(echo "$r" | grep -c "(first: cluster on)")
 if [ "$n" = 1 ]; then echo "ok: FlexPMU: cluster on once"; else echo "FAIL: cluster on $n times"; fails=$((fails + 1)); fi
-want "$r" "host: flexpmu core 7 off (C2)" "FlexPMU: each M3 core's C2 hint at the stop"
+want "$r" "host: flexpmu core 5 off (C2)" "FlexPMU: each M3 core's C2 hint at the stop"
 never "$r" "cluster off" "FlexPMU: never the cluster-off request (beta2's hang)"
 want "$r" "heater: flexpmu at the start" "FlexPMU: logged at the start"
 want "$r" "heater: step: PSCI CPU_ON core 0x00000004" "breadcrumbs: before each CPU_ON"
@@ -41,7 +41,7 @@ want "$r" "heater: start, level 0x00000008" "trip off: started"
 want "$r" "heater: gpu on, 598 MHz" "trip off: the GPU runs its load"
 never "$r" "TMU_SUB) is not armed" "trip off: the GPU is not refused for the trip we switched off"
 never "$r" "holding" "trip off: flat out, nothing shed while it ran"
-want "$r" "heater: core 7 (M3) running" "trip off: every core runs"
+want "$r" "heater: core 5 (M3) running" "trip off: every core runs (2 M3s)"
 order "$r" "host: watchdog shortened to 5 s" "the chip's hardware heat trip is OFF" "the watchdog is short before the trip goes off"
 order "$r" "heater: 0 s bat" "the chip's hardware heat trip is OFF" "the trip goes off only after the session's first loop turn"
 want "$r" "heater: step: trip off, the watchdog fed" "the short watchdog fed right after the trip write"
@@ -79,8 +79,10 @@ print('%02x%02x%02x' % tuple(d[o:o+3]))"
 ENVS=SBOS_HOST_SMP=m3
 r=$(run $OPEN $HEAT $SURV $HOLD $HOLD $HOLD w:2500 s:surv-white t:720,1500 w:600 s:surv-back w:3000 $OFF w:3000)
 never "$r" "heater: survival M3 candidate" "no M3 measurement"
-want "$r" "heater: core 7 (M3) running" "every core running at once"
-n=$(echo "$r" | grep -n "heater: core 7 (M3) running" | head -1 | cut -d: -f1)
+want "$r" "heater: core 5 (M3) running" "every core running at once (2 M3s)"
+never "$r" "heater: core 6 (M3) running" "no third M3 core"
+want "$r" "heater: heat log on" "the heat log is on"
+n=$(echo "$r" | grep -n "heater: core 5 (M3) running" | head -1 | cut -d: -f1)
 m=$(echo "$r" | grep -n "heater: start, level" | head -1 | cut -d: -f1)
 [ -n "$n" ] && [ -n "$m" ] && echo "note: start at log line $m, core 7 at line $n"
 want "$r" "heater: Survival: the panel at its top level, the screen white (no LED)" "Survival: the top level and the white screen, no LED"
@@ -88,7 +90,7 @@ never "$r" "the LED on" "Survival never lights the LED"
 never "$r" "M3 OCP TABLE VIOLATION" "never more M3 cores than the table allows at the clock asked"
 never "$r" "acpm dvfs (m3 ocp table) refused" "the libsb table never had to refuse"
 c=$(px surv-white 720 1500); [ "$c" = ffffff ] && echo "ok: the screen is white" || { echo "FAIL: white screen pixel $c"; fails=$((fails + 1)); }
-c=$(px surv-white 720 40); [ "$c" = 1c1c1e ] && echo "ok: the dark status strip on top" || { echo "FAIL: strip pixel $c"; fails=$((fails + 1)); }
+c=$(px surv-white 20 40); [ "$c" = 1c1c1e ] && echo "ok: the dark status strip on top" || { echo "FAIL: strip pixel $c"; fails=$((fails + 1)); }
 c=$(px surv-back 720 1500); [ "$c" != ffffff ] && echo "ok: a tap brings the normal screen back" || { echo "FAIL: still white after a tap"; fails=$((fails + 1)); }
 want "$r" "heater: the panel level, the white screen and the LED put back" "everything put back at the stop"
 # 1.1-beta7: the read-only OCP probe (Settings > About): readable, trapped, no M3 core

@@ -51,6 +51,8 @@ const struct heat_limits heat_default_limits = {
  * cluster's buck reaches its current limit; four M3 cores at 2704 under a power-virus load would run the buck past
  * that rating (a brown-out reset, not heat) */
 #define A55_SURV 1950000U
+#define SURV_M3_N 2
+#define SURV_M3_KHZ 2314000U
 
 static void why(struct heat_ctl *c, const char *s)
 {
@@ -282,8 +284,14 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
         c->cal_mw[i] = 0;
     c->m3_n = 4;
     c->surv_m3_khz = surv ? M3_FULL : 0;
-    if (surv)
+    if (surv) {
+        /* 1.2-alpha6: alpha5's 4 x 1794 drew under 3 A on the phone; beta6/7's own measurements there had 2 x 2314 as
+         * the most watts (9.5 / 9.7 W against 9.1 / 9.4 for 4 x 1794): that pick, fixed (Samsung's 2-core level) */
+        c->m3_n = SURV_M3_N;
+        c->surv_m3_khz = SURV_M3_KHZ;
+        c->max_cores = 3 + SURV_M3_N;
         c->cores = c->cold ? 3 : c->max_cores;   /* cold (below 20 C SoC / 5 C battery): the A55s for 30 s first */
+    }
     c->state = HEAT_ST_RUNNING;
     why(c, c->cold ? "Starting gently (cold)" : "Heating");
     return 0;

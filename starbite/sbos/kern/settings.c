@@ -78,6 +78,26 @@ void settings_restore(void)
     const uint8_t *d = 0;
     {
         /* 0.6.3: the last heating session's record: still "running" means the power went while it heated */
+        /* 1.2-alpha6: the last session's heat log, kept until the next session replaces it */
+        {
+            char id[12] = "heatlog0";
+            uint8_t *p = (uint8_t *)&heat_log;
+            int ok = 1;
+            for (uint32_t o = 0, k = 0; o < sizeof(heat_log); o += STATE_REC_MAX, ++k) {
+                id[7] = (char)('0' + k);
+                uint32_t len = sizeof(heat_log) - o < STATE_REC_MAX ? sizeof(heat_log) - o : STATE_REC_MAX;
+                const uint8_t *q = 0;
+                if (state_find(half[cur_half], id, &q) != (int)len || !q) {
+                    ok = 0;
+                    break;
+                }
+                memcpy(p + o, q, len);
+            }
+            if (!ok || heat_log.magic != HLOG_MAGIC)
+                memset(&heat_log, 0, sizeof(heat_log));
+            else
+                sb_logx("settings: the last heat log kept, samples: ", heat_log.n);
+        }
         int hn = state_find(half[cur_half], "heat", &d);
         if (hn == (int)sizeof(heat_last) && d) {
             memcpy(&heat_last, d, sizeof(heat_last));
@@ -209,6 +229,18 @@ void settings_timer(unsigned id)
     }
     if (heat_rec.magic == 0x31435248U && state_add(&b, "heat", &heat_rec, sizeof(heat_rec)) < 0)
         sb_log("settings: the heat record did not fit");
+    if (heat_log.magic == HLOG_MAGIC) {     /* 1.2-alpha6: the heat log in 4 KiB records */
+        char id[12] = "heatlog0";
+        const uint8_t *p = (const uint8_t *)&heat_log;
+        for (uint32_t o = 0, k = 0; o < sizeof(heat_log); o += STATE_REC_MAX, ++k) {
+            id[7] = (char)('0' + k);
+            uint32_t len = sizeof(heat_log) - o < STATE_REC_MAX ? sizeof(heat_log) - o : STATE_REC_MAX;
+            if (state_add(&b, id, p + o, len) < 0) {
+                sb_log("settings: the heat log did not fit");
+                break;
+            }
+        }
+    }
     /* 0.5.3: each app's own state (SYS_STATE_PUT, up to 4 KiB), as "app:<id>" */
     for (int a = 0; a < napps; ++a) {
         if (!apps[a].state_n)

@@ -34,6 +34,7 @@ static int charger_now = -1, charger_seen = -2, charger_raw = -1;   /* unknown u
 static int gpu_probe_ok;
 static int trip_top_c;                      /* the hardware trip's decoded temperature (logged at a start) */
 static void record(const struct heat_in *in, int running);
+static void hlog_tick(const struct heat_in *in);    /* 1.2-alpha6 */
 static uint64_t rec_saved_at;
 static uint64_t rec_t, rec_uwh;             /* 1.1-beta4: the energy integral of this session */
 static int launch_hold;
@@ -1047,8 +1048,10 @@ void heater_timer(unsigned id)
             sb_log(u.b);
         }
     }
-    if (heater_running_ui())
+    if (heater_running_ui()) {
         record(&in, 1);
+        hlog_tick(&in);
+    }
     if (!heater_running_ui()) {
         restore_and_check();
         kt_cancel(KT_HEATER, 1);
@@ -1103,6 +1106,84 @@ void heater_timer(unsigned id)
     ui_mark_dirty();
 }
 
+/* 1.2-alpha6: the heat log (kern.h struct hlog): one sample a second, saved with the heat record (every 30 s and at
+ * the stop) */
+struct hlog heat_log;
+static uint64_t hlog_t0, hlog_next;
+static uint32_t hlog_thr0;
+
+static void hlog_start(void)
+{
+    memset(&heat_log, 0, sizeof(heat_log));
+    heat_log.magic = HLOG_MAGIC;
+    heat_log.level = (uint32_t)pending_level;
+    heat_log.a55_mhz = ctl.a55_khz / 1000U;
+    heat_log.m3_n = (uint16_t)ctl.m3_n;
+    heat_log.gpu_mhz = (uint16_t)(gpuheat_khz / 1000U);
+    hlog_t0 = sb_ms();
+    hlog_next = hlog_t0;
+    hlog_thr0 = 0;
+    sb_log(cfg.ocp_read ? "heater: heat log on (1 s), with the M3 throttle counter" :
+                          "heater: heat log on (1 s); the M3 throttle counter needs Settings > About > OCP probe first");
+}
+
+static int16_t clamp16(int v)
+{
+    return (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+}
+
+static void hlog_tick(const struct heat_in *in)
+{
+    uint64_t now = sb_ms();
+    if (heat_log.magic != HLOG_MAGIC || now < hlog_next)
+        return;
+    uint32_t n = heat_log.n;
+    uint32_t secs = (uint32_t)((now - hlog_t0) / 1000U);
+    if (n >= HLOG_FAST && secs % 10U)
+        return;                             /* past the fast part: one every 10 s */
+    hlog_next = now + 1000U - (now - hlog_t0) % 1000U;
+    uint32_t i = n < HLOG_N ? n : HLOG_FAST + (n - HLOG_FAST) % (HLOG_N - HLOG_FAST);
+    struct hlog_sample *s = &heat_log.s[i];
+    s->t = (uint16_t)(secs > 65535U ? 65535U : secs);
+    s->soc_c10 = clamp16(in->soc_ok ? in->soc_c10 : -1000);
+    s->bat_c10 = clamp16(in->bat_ok ? in->bat_c10 : -1000);
+    s->ma = clamp16(in->gauge_ok ? in->ma : 0);
+    s->mv = (uint16_t)(in->gauge_ok && in->mv > 0 ? in->mv : 0);
+    s->m3_mhz = (uint16_t)(hw_m3_on() ? hw_m3_khz() / 1000U : 0);
+    s->cores = (uint8_t)(cores_running() - cpu0_on);
+    s->flags = (uint8_t)((gpuheat_on() ? 1 : 0) | (trip_off ? 2 : 0) | (kui_screen() == 6 ? 4 : 0) |
+                         (ctl.state == HEAT_ST_HOLDING ? 8 : 0) | (ctl.state == HEAT_ST_PAUSED ? 16 : 0));
+    uint8_t d3 = 0, d4 = 0;
+    s->ocp_d3 = sb_ocp_pmic(&d3, &d4) ? d3 : 0xffU;
+    const struct sb_wslot *w4 = sb_smp_slot(4);
+    if (cfg.ocp_read && running[4] && w4) {
+        uint32_t c = (uint32_t)w4->v[2];
+        if (!hlog_thr0)
+            hlog_thr0 = c ? c : 1U;
+        s->thr = (uint8_t)(c - hlog_thr0);
+        s->flags |= 32;
+    }
+    heat_log.n = n + 1;
+    if (secs % 10U == 0) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "heater: log ");
+        ub_dec(&u, secs);
+        ub_s(&u, " s: OCP_WARN1 ");
+        ub_hex(&u, s->ocp_d3, 2);
+        if (s->flags & 32) {
+            ub_s(&u, ", M3 throttle count +");
+            ub_dec(&u, s->thr);
+            ub_s(&u, ", OCPTHROTTCTL ");
+            ub_hex(&u, w4->v[3], 8);
+        }
+        ub_s(&u, ", M3 ");
+        ub_dec(&u, s->m3_mhz);
+        ub_s(&u, " MHz");
+        sb_log(u.b);
+    }
+}
+
 static void start_now(void)
 {
     if (wifi_on()) {                        /* Wi-Fi came on while the confirmation was up */
@@ -1140,7 +1221,9 @@ static void start_now(void)
         cfg.gold = heatk_batch();
         cfg.max_age = 2U * sb_freq();               /* 2 s: the loop never blocks that long now */
         cfg.heartbeat = sb_ticks();
+        cfg.ocp_read = heater_ocp_state == 1;   /* 1.2-alpha6: only after the read-only probe passed this boot */
         sb_dcache_clean_inval(&cfg, sizeof(cfg));
+        hlog_start();
         if (kt_set(KT_HEATER, 1, sb_ms(), 250, 1)) {
             heater_stop_all("No timer for the heater");
             return;

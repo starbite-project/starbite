@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha5"
+#define SBOS_VERSION "1.2-alpha6"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -154,7 +154,8 @@ struct heatk_cfg {
     uint64_t max_age;               /* ticks: older heartbeat stops a worker (2 s) */
     uint64_t gold;                  /* the fixed reference block's result */
     volatile uint32_t run[8];       /* per worker: 1 keep going */
-    uint64_t pad[1];
+    volatile uint32_t ocp_read;     /* 1.2-alpha6: core 4 reads the GCU throttle registers (the OCP probe passed) */
+    uint32_t pad;
     /* second line: written before any launch (the image is cleaned to DRAM at every launch) */
     uint64_t *buf[8];               /* per core (0 = cpu0): HEATK_WORDS words, write-back RAM */
 };
@@ -201,6 +202,28 @@ struct heat_record {
     int32_t peak_mw, mwh;           /* 1.1-beta4: the battery's peak power and the energy taken this session */
 };
 extern struct heat_record heat_rec;
+/* 1.2-alpha6: the heat log in the state slot ("heatlog0".."heatlog3", 4 KiB each): one sample a second for the
+ * first HLOG_FAST samples of a session, then one every 10 s in a ring over the rest; kept until the next session.
+ * starbite/tools/heatlog.py prints it from a pulled store image. */
+struct hlog_sample {
+    uint16_t t;                     /* seconds since the session's start */
+    int16_t soc_c10, bat_c10, ma;   /* the hottest SoC probe, the battery, its current (- discharging) */
+    uint16_t mv, m3_mhz;            /* the battery's voltage; the M3 clock (PLL) */
+    uint8_t cores, flags;           /* workers running (cpu0 not counted); 1 GPU on, 2 trip off, 4 white screen,
+                                       8 holding, 16 paused, 32 the M3 throttle count is read */
+    uint8_t ocp_d3, thr;            /* the PMIC's OCP_WARN1 (0xD3); the M3 GCU throttle counter's low byte */
+};
+#define HLOG_N 1024U
+#define HLOG_FAST 600U
+#define HLOG_MAGIC 0x31474c48U      /* "HLG1" */
+struct hlog {
+    uint32_t magic, n;              /* n: samples written (up to HLOG_N; past HLOG_FAST the ring wraps) */
+    uint32_t level, a55_mhz;
+    uint16_t m3_n, gpu_mhz;
+    uint32_t pad;
+    struct hlog_sample s[HLOG_N];
+};
+extern struct hlog heat_log;
 extern int heat_last_unclean;       /* the last start found a record still "running" */
 extern struct heat_record heat_last;
 extern int gpu_heat_session;        /* 0.6: Extreme's own confirmation allows the GPU for that session */
