@@ -125,6 +125,8 @@ prbobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_probe.o#")
 vibobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_vib.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_GPU "$here/kern/uitest.c" -o "$ob/k_uitest_gpu.o"
 gpuobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_gpu.o#")
+"${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_GPUALU "$here/kern/uitest.c" -o "$ob/k_uitest_gpualu.o"
+gpualuobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_gpualu.o#")
 if [ "$stobjs" = "$objs" ]; then
     echo "sbos: the self-test variant did not get k_uitest_on.o" >&2
     exit 1
@@ -198,12 +200,17 @@ relocs_only_relative "$out/starbite-os-gputest.elf"
 "${CROSS}objcopy" -O binary "$out/starbite-os-gputest.elf" "$out/starbite-os-gputest.bin"
 "${CROSS}nm" "$out/starbite-os-gputest.elf" | sort > "$out/starbite-os-gputest.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gputest.bin" "$out/starbite-os-gputest.img" "$out/starbite-os-gputest.map"
+"${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $gpualuobjs -o "$out/starbite-os-gpualu.elf"
+relocs_only_relative "$out/starbite-os-gpualu.elf"
+"${CROSS}objcopy" -O binary "$out/starbite-os-gpualu.elf" "$out/starbite-os-gpualu.bin"
+"${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
+python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
 if ! "${CROSS}nm" "$out/starbite-os.elf" | grep -q ' sbos_selftest_enabled$'; then
     echo "sbos: no sbos_selftest_enabled in the image" >&2
     exit 1
 fi
 
-leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" "$out/starbite-os-heatprobe.img" "$out/starbite-os-vibtest.img" "$out/starbite-os-gputest.img" | head -3 || true)
+leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" "$out/starbite-os-heatprobe.img" "$out/starbite-os-vibtest.img" "$out/starbite-os-gputest.img" "$out/starbite-os-gpualu.img" | head -3 || true)
 if [ -n "$leak" ]; then
     echo "sbos: the image contains build-host paths:" >&2
     echo "$leak" >&2
@@ -229,4 +236,6 @@ sha256sum "$out/starbite-os-vibtest.img" | sed "s#  .*#  starbite-os-vibtest.img
 echo "sbos: $(cat "$out/starbite-os-vibtest.img.sha256") (vibration test variant)"
 sha256sum "$out/starbite-os-gputest.img" | sed "s#  .*#  starbite-os-gputest.img#" > "$out/starbite-os-gputest.img.sha256"
 echo "sbos: $(cat "$out/starbite-os-gputest.img.sha256") (GPU ladder H2 variant)"
+sha256sum "$out/starbite-os-gpualu.img" | sed "s#  .*#  starbite-os-gpualu.img#" > "$out/starbite-os-gpualu.img.sha256"
+echo "sbos: $(cat "$out/starbite-os-gpualu.img.sha256") (GPU compute H2d variant)"
 echo "sbos: $(cat "$out/starbite-os.img.sha256") ($(wc -c < "$out/starbite-os.img") bytes)"

@@ -12,6 +12,7 @@
  * Stop: cores off, domain 4 back to 260 MHz, vdd_g3d back to what it was, the session closed. */
 #include "sb.h"
 #include "kern.h"
+#include "gpualu.h"                        /* 1.2-alpha15: the compute job (tools/mesa-alujob.c) */
 
 #define BUCK6 0x2bU
 #define BUCK6_950 0x68U
@@ -30,6 +31,30 @@ static struct sb_auth au;
 static int on, failed_session;
 static uint8_t buck_was;
 static uint32_t shaders, colour;
+/* 1.2-alpha15: the arithmetic-bound compute job instead of the clear jobs (H2c: the clears are memory bound, the
+ * same jobs a second from 598 to 858 MHz). Its own job slot (1: compute, as Panfrost), the shader and descriptors
+ * from Mesa, its result (output slot 0) checked against the same FMA loop on the CPU after each chain */
+int gpuheat_alu;
+static int js;                              /* the job slot this session uses */
+static int alu_loaded, alu_mismatch_said;
+static uint32_t alu_expect[4];
+#define ALU_JOBS_MAX ((O_PIX - O_JOBS) / GPUALU_JOB_BYTES)
+
+static void alu_expected(void)
+{
+    float v[4] = { 1.0f, 1.25f, 1.5f, 1.75f };  /* output slot 0: the shader's start for slot 0 */
+    for (unsigned i = 0; i < GPUALU_ITER * 16U; ++i)
+        for (unsigned k = 0; k < 4; ++k)
+#ifndef SB_HOST
+            v[k] = __builtin_fmaf(v[k], GPUALU_FMA_A, GPUALU_FMA_B);
+#else
+            v[k] = v[k] * GPUALU_FMA_A + GPUALU_FMA_B;
+#endif
+    for (unsigned k = 0; k < 4; ++k) {
+        union { float f; uint32_t u; } c = { .f = v[k] };
+        alu_expect[k] = c.u;
+    }
+}
 static unsigned chain = 64;
 static uint64_t t_sub, chains, faults;
 static unsigned mhz;
@@ -83,10 +108,10 @@ static void buck_hold(void)
 /* job slot 0 stopped and the GPU reset before its power goes (never powered off with a chain running) */
 static void quiesce(void)
 {
-    (void)sb_gpu_wr(0x1800 + 0x20, 3);          /* JS0 COMMAND: HARD_STOP */
+    (void)sb_gpu_wr(0x1800 + 0x80U * (unsigned)js + 0x20, 3);   /* the session's slot: HARD_STOP */
     for (unsigned us = 0; us < 5000; us += 50) {
         uint32_t j = sb_gpu_rd(0x1000);
-        if (j & 0x10001U)
+        if (j & (0x10001U << js))
             break;
         sb_udelay(50);
     }
@@ -113,8 +138,36 @@ unsigned gpuheat_mhz(void)
     return on ? mhz : 0;
 }
 
+static void put(uint64_t va, const uint32_t *w, unsigned n);
+
+static void build_alu(void)
+{
+    if (!alu_loaded) {
+        put(VA(GPUALU_O_SHADER), gpualu_shader, sizeof(gpualu_shader) / 4U);
+        put(VA(GPUALU_O_RSD), gpualu_rsd, sizeof(gpualu_rsd) / 4U);
+        put(VA(GPUALU_O_TLS), gpualu_tls, sizeof(gpualu_tls) / 4U);
+        alu_loaded = 1;
+    }
+    static const uint32_t sentinel[4] = { 0xffffffffU, 0xffffffffU, 0xffffffffU, 0xffffffffU };
+    put(VA(GPUALU_O_OUT), sentinel, 4);
+    uint32_t w[GPUALU_JOB_BYTES / 4U];
+    for (unsigned k = 0; k < chain; ++k) {
+        for (unsigned i = 0; i < GPUALU_JOB_BYTES / 4U; ++i)
+            w[i] = gpualu_job[i];
+        uint64_t next = k + 1U < chain ? VA(O_JOBS + GPUALU_JOB_BYTES * (k + 1U)) : 0;
+        w[4] = (w[4] & 0xffffU) | (k + 1U) << 16;   /* the job index (Mesa's header: type 4 compute) */
+        w[6] = (uint32_t)next;
+        w[7] = (uint32_t)(next >> 32);
+        put(VA(O_JOBS + GPUALU_JOB_BYTES * k), w, GPUALU_JOB_BYTES / 4U);
+    }
+}
+
 static void build(void)
 {
+    if (gpuheat_alu) {
+        build_alu();
+        return;
+    }
     uint32_t d[48], j[16];
     colour = 0xff000000U | (uint32_t)((chains + 1U) * 2654435761U >> 8);
     mali_fbd(d, VA(O_SAMPLES), SIDE, SIDE, VA(O_PIX), SIDE * 4U, colour);
@@ -129,7 +182,7 @@ static int submit(void)
 {
     (void)sb_gpu_wr(0x1004, 0xffffffffU);  /* JOB_IRQ_CLEAR */
     t_sub = sb_ms();
-    return sb_gpu_submit(0, VA(O_JOBS), shaders);
+    return sb_gpu_submit((unsigned)js, VA(O_JOBS), shaders);
 }
 
 static void fail(const char *why)
@@ -216,9 +269,13 @@ int gpuheat_start(void)
         sb_log("heater: gpu: vdd_g3d changed after the clock request (ACPM): set again");
     buck_hold();                            /* 1.2-alpha12 */
     t_hold = sb_ms();
-    chain = 64;
+    chain = gpuheat_alu ? 4 : 64;
     chains = faults = 0;
     jobs_done = 0;
+    js = gpuheat_alu ? 1 : 0;
+    alu_loaded = alu_mismatch_said = 0;
+    if (gpuheat_alu)
+        alu_expected();
     build();
     if (!submit()) {
         gpuheat_fail_stop("the first job did not start");
@@ -240,7 +297,7 @@ void gpuheat_tick(void)
     if (!on)
         return;
     uint32_t j = sb_gpu_rd(0x1000), m = sb_gpu_rd(0x2000), g = sb_gpu_rd(0x0020);
-    if ((j & 0x10000U) || m || (g & 0x81U) || sb_ms() - t_sub > 5000U) {
+    if ((j & (0x10000U << js)) || m || (g & 0x81U) || sb_ms() - t_sub > 5000U) {
         struct sb_gpu_result r;
         (void)sb_gpu_wait(1, 0, &r);            /* stops the slot, clears the interrupts */
         ++faults;
@@ -253,13 +310,29 @@ void gpuheat_tick(void)
         t_hold = sb_ms();
         buck_hold();
     }
-    if (!(j & 1U))
+    if (!(j & (1U << js)))
         return;                                 /* still running */
     uint64_t took = sb_ms() - t_sub;
     if (ticks_waiting <= 1)
         took = 0;                               /* done within one tick: the chain is too short */
     ticks_waiting = 0;
     volatile uint32_t *px = (volatile uint32_t *)(uintptr_t)SB_GPU_CPU(VA(O_PIX));
+    if (gpuheat_alu) {
+        if (px[0] == 0xffffffffU && px[1] == 0xffffffffU) {
+            gpuheat_fail_stop("the compute job wrote nothing: the GPU's share stops");
+            return;
+        }
+        if (!alu_mismatch_said && (px[0] != alu_expect[0] || px[3] != alu_expect[3])) {
+            alu_mismatch_said = 1;
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "heater: gpu: the compute result differs from the CPU's FMA loop (logged once): GPU ");
+            ub_hex(&u, px[0], 8);
+            ub_s(&u, " CPU ");
+            ub_hex(&u, alu_expect[0], 8);
+            sb_log(u.b);
+        }
+    } else
     for (unsigned k = 0; k < 8; ++k)
         if (px[(k * 131071U) % (SIDE * SIDE)] != colour) {
             gpuheat_fail_stop("the render target holds the wrong colour: the GPU's share stops");
@@ -269,7 +342,7 @@ void gpuheat_tick(void)
     jobs_done += chain;
     /* 1.2-alpha14: chains grow until one lasts 1 s (was 200 ms): the heater resubmits on its 4 Hz tick, so a 200 ms
      * chain left the GPU idle up to half the time (H2b on the phone: 1024-job chains, the GPU zone at ~50 C) */
-    if (took < 1000U && chain * 2U <= JOBS_MAX)
+    if (took < 1000U && chain * 2U <= (gpuheat_alu ? ALU_JOBS_MAX : JOBS_MAX))
         chain *= 2U;
     build();
     if (!submit())

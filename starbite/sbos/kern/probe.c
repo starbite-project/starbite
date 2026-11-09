@@ -282,7 +282,11 @@ int heatprobe_step(void)
  * word, ACPM asked for 598 again (its own state), the GPU heat stopped. vdd_g3d stays 950 mV throughout (ACPM's
  * table: 598 MHz at 731 mV, so 950 is ~220 mV above it); custom voltages above 950 come in a later step. */
 #define G3D_CON0 0x17400140UL
-static const unsigned g_steps[] = { 650, 702, 754, 806, 858 };
+static const unsigned g_steps_clear[] = { 650, 702, 754, 806, 858 };
+static const unsigned g_steps_alu[] = { 702, 858 };    /* 1.2-alpha15 H2d: the compute job at 598, 702, 858 */
+int gpuprobe_alu;                                   /* H2d: set by uitest's SBOS_SELFTEST_GPUALU variant */
+static const unsigned *g_steps = g_steps_clear;
+static unsigned g_nsteps = 5;
 static int gph, gstep;
 static uint32_t g_con0_598;
 static uint64_t g_t;
@@ -395,6 +399,11 @@ int gpuprobe_step(void)
         sb_log("probe: start: H2c, the GPU above 598 MHz (its cycle counter, jobs a second) (PLL_G3D at S 0, the vendor's sequence, vdd_g3d 950 mV, 30 s a step)");
         gpu_heat_session = 1;
         gpuheat_khz = 598000U;
+        gpuheat_alu = gpuprobe_alu;
+        g_steps = gpuprobe_alu ? g_steps_alu : g_steps_clear;
+        g_nsteps = gpuprobe_alu ? 2U : 5U;
+        if (gpuprobe_alu)
+            sb_log("probe: H2d: the compute job (Mesa's Bifrost FMA loop, 4.3 G FMAs a job) instead of the clears");
         if (!gpuheat_start()) {
             sb_log("probe: FAILED: H2: the GPU heat did not start");
             gph = 9;
@@ -461,7 +470,8 @@ int gpuprobe_step(void)
             ub_dec(&u, g_mhz_measured());
             ub_s(&u, " MHz; ");
             ub_dec(&u, (j - g_jobs0) / 30U);
-            ub_s(&u, " fragment jobs a second (1 Mpixel each); G3D mux ");
+            ub_s(&u, gpuprobe_alu ? " compute jobs a second (4.3 G FMAs each); G3D mux " :
+                                   " fragment jobs a second (1 Mpixel each); G3D mux ");
             ub_hex(&u, g_rd(0x17401000UL), 8);
             ub_s(&u, " div ");
             ub_hex(&u, g_rd(0x17401800UL), 8);
@@ -486,7 +496,7 @@ int gpuprobe_step(void)
             sb_log(u.b);
         }
         g_best = (int)mhz;
-        if (++gstep >= (int)(sizeof(g_steps) / sizeof(g_steps[0]))) {
+        if (++gstep >= (int)g_nsteps) {
             g_back("the ladder's end");
             gph = 8;
             g_t = now;

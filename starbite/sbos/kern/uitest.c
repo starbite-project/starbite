@@ -208,8 +208,11 @@ void selftest_timer(unsigned id)
         kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
         return;
 #else
-#ifdef SBOS_SELFTEST_GPU
+#if defined(SBOS_SELFTEST_GPU) || defined(SBOS_SELFTEST_GPUALU)
         {
+#ifdef SBOS_SELFTEST_GPUALU
+            gpuprobe_alu = 1;
+#endif
             unsigned w = hw_wdt_selftest(30);
             sb_logx(w ? "selftest: GPU ladder H2: the watchdog at 30 s, fed by the loop: seconds " :
                         "selftest: GPU ladder H2: the watchdog could not be set (the loader's stays): ", w);
@@ -428,7 +431,7 @@ void selftest_timer(unsigned id)
         power_restart_recovery();
         return;
 #endif
-#ifdef SBOS_SELFTEST_GPU
+#if defined(SBOS_SELFTEST_GPU) || defined(SBOS_SELFTEST_GPUALU)
     case 50:                                /* 1.2-alpha12 H2: one step every 100 ms (probe.c) */
         if (!gpuprobe_step()) {
             kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
