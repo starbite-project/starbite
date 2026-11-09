@@ -350,6 +350,13 @@ static int put_wait(const struct sbm_plat *p, struct sbm_sbd *sbd, const uint8_t
     return put_wait_ch(p, sbd, SBM_CH_RFS0, fr, l);
 }
 
+/* our FMT query seqs: 0x41..0xFE, round and round. Answers are matched to the open-query bitmap, not by range:
+ * 2ecf7cd counted aseq > 0x40 only, and the u8 seq wrapped through 0x00..0x40 (soak-2: 130 answers uncounted). */
+static uint8_t o_mseq = 0x40;
+static uint32_t o_open[8];
+#define SBM_QSEQ_FIRST 0x41u
+#define SBM_QSEQ_LAST  0xFEu
+
 /* T11: the status GETs, through the builder's allow-list (sbm_ipc_frame refuses anything else: no SET/EXEC, nothing
  * that switches RF on, no CALL/SMS/SS/SAT/identity), on FMT0 with the data doorbell. Answers come back as RESP on
  * the DL rings and go through sbm_cell like everything else. */
@@ -363,11 +370,14 @@ static int fmt_queries(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
         { SBM_DISP_RSSI_INFO, 0, { 0 } },        { SBM_NET_MODE_SEL, 0, { 0 } },
         { SBM_MISC_TIME_INFO, 0, { 0 } },
     };
-    static uint8_t mseq = 0x40;
     uint8_t fr[64];
     for (unsigned i = 0; i < sizeof(q) / sizeof(q[0]); ++i) {
         char nb[12];
-        int l = sbm_ipc_frame(fr, sizeof(fr), SBM_CH_FMT0, ++mseq, q[i].cmd, SBM_IPC_GET, q[i].d, q[i].n);
+        o_mseq = o_mseq >= SBM_QSEQ_LAST || o_mseq < SBM_QSEQ_FIRST ? (uint8_t)SBM_QSEQ_FIRST : (uint8_t)(o_mseq + 1u);
+        uint8_t mseq = o_mseq;
+        if (o_open[mseq >> 5] & (1u << (mseq & 31)))
+            b->fmt_stale++;                       /* that query never got its answer; the seq is reused */
+        int l = sbm_ipc_frame(fr, sizeof(fr), SBM_CH_FMT0, mseq, q[i].cmd, SBM_IPC_GET, q[i].d, q[i].n);
         if (l < 0) {
             b->fmt_tx_refused++;
             continue;
@@ -376,6 +386,7 @@ static int fmt_queries(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
         if (r < 0)
             return r;
         b->fmt_tx++;
+        o_open[mseq >> 5] |= 1u << (mseq & 31);
         if (logit)
             sbm_logf(p, "FMT: +%u TX ch235 | %s GET seq %u", ms, sbm_ipc_name(q[i].cmd, nb), mseq);
     }
@@ -464,6 +475,8 @@ static int online_enter(const struct sbm_plat *p, struct sbm_boot *b, struct sbm
     rfs_acc_total = rfs_acc_rcvd = 0;
     o_logged = o_rfs_logged = o_data_msgs = 0;
     o_sbd = sbd;
+    o_mseq = SBM_QSEQ_FIRST - 1;
+    sbm_memset(o_open, 0, sizeof(o_open));
     if (b->rfs_serve) {
         /* the RAM copy of nv_data.bin the glue read from EFS (read only); the CP's writes change only this RAM */
         uint8_t *nv = 0;
@@ -563,11 +576,17 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
                 b->fmt_rx++;
                 if (sbm_ipc_parse(msg, ml, &m) == 0) {
                     sbm_cell_update(&b->cell, &m);
-                    if (m.type == SBM_IPC_RESP && m.aseq > 0x40) {      /* an answer to one of our queries */
-                        if (m.cmd == SBM_GEN_PHONE_RES)
-                            b->fmt_gen_res++;
-                        else
-                            b->fmt_resp++;
+                    if (m.type == SBM_IPC_RESP && m.aseq >= SBM_QSEQ_FIRST && m.aseq <= SBM_QSEQ_LAST) {
+                        uint32_t bit = 1u << (m.aseq & 31);
+                        if (!(o_open[m.aseq >> 5] & bit)) {
+                            b->fmt_unmatched++;
+                        } else {                           /* an answer to one of our queries */
+                            o_open[m.aseq >> 5] &= ~bit;
+                            if (m.cmd == SBM_GEN_PHONE_RES)
+                                b->fmt_gen_res++;
+                            else
+                                b->fmt_resp++;
+                        }
                     }
                     if (o_logged < ONLINE_LOG_MAX) {
                         char line[200];

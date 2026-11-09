@@ -426,8 +426,9 @@ void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
                  b->fmt_rx, b->rfs_rx, b->rfs_reads, b->rfs_writes, b->rfs_other, b->bad_rx);
         sbm_logf(p, "ONLINE: %s", line);
         if (b->fmt_query)
-            sbm_logf(p, "ONLINE: queries sent %u (refused by the allow-list %u), answered %u RESP + %u GEN_PHONE_RES",
-                     b->fmt_tx, b->fmt_tx_refused, b->fmt_resp, b->fmt_gen_res);
+            sbm_logf(p, "ONLINE: queries sent %u (refused by the allow-list %u), answered %u RESP + %u GEN_PHONE_RES;"
+                     " unanswered %u, stale %u, unmatched %u", b->fmt_tx, b->fmt_tx_refused, b->fmt_resp, b->fmt_gen_res,
+                     b->fmt_tx - b->fmt_resp - b->fmt_gen_res, b->fmt_stale, b->fmt_unmatched);
         if (b->rfs_serve || b->big_frames || b->big_dropped)
             sbm_logf(p, "ONLINE: RFS served %u replies (%u frames, %u bytes); joined %u long messages from %u pieces; big frames %u, dropped %u",
                      b->rfs_tx, b->rfs_tx_frames, b->rfs_tx_bytes, b->rfs_joined, b->rfs_parts, b->big_frames, b->big_dropped);

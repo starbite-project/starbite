@@ -558,6 +558,15 @@ One UI's modem was not affected. Fixed in three places:
 A host test runs ONLINE with garbage-filled structs and four non-magic values, and every case must park. The host
 test's own `struct sbm_boot` had the same flaw, which made its check count depend on the build. It is now zeroed.
 
+**Soak run 2 (2026-11-10, 95e079a, `build/modem/soak-2/pmsg.txt`): passed.** It ran 651 s, parked, FMT 689, RFS 9,
+bad 0, with a steady SIM absent / CS emergency-only (GSM) / bars 4 / rssi 0x3d-0x3f. Answers seemed to fall behind
+from +180 s (660 sent, 529 counted), but FMT receive rose by exactly 66 a minute the whole time: the CP answered
+everything, and our counter missed the answers. The query seq was a u8 from 0x40 and wrapped through 0x00..0x40,
+while answers counted only for aseq > 0x40. That is 65 of every 256, so 130 uncounted (one more unexplained). Fixed:
+query seqs cycle 0x41..0xFE, each answer is matched to a bitmap of open queries, and the ONLINE line now gives
+unanswered / stale (a seq reused while still open) / unmatched counts. A host test runs a 590 s soak (649 GETs, three
+wraps) and needs every answer matched.
+
 ## 8. Later stages (not started)
 
 

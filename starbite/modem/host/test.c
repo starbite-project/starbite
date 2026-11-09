@@ -1486,6 +1486,35 @@ static void test_boot(void)
         boot_image(&im, 0);
     }
 
+    /* soak-2: 590 s of queries (59 rounds, 649 GETs) crosses the seq wrap three times; every answer must match */
+    {
+        boot_image(&im, 0);
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        fakesoc_plat(&s, &p, tlog);
+        b.stop = SBM_BOOT_ONLINE;
+        b.hold_ms = 590000;
+        b.rfs_serve = 0;
+        b.fmt_query = 1;
+        b.query_period_ms = 10000;
+        nlog = 0;
+        CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+        CHECKEQ(b.stopped_by, SBM_STOP_TIME);
+        CHECKEQ(b.fmt_tx, 649);
+        CHECKEQ(b.fmt_resp + b.fmt_gen_res, 649);
+        CHECKEQ(b.fmt_unmatched, 0);
+        CHECKEQ(b.fmt_stale, 0);
+        CHECKEQ(s.fcp.n_forbidden, 0);
+        unsigned soak_lines = 0;
+        for (unsigned i = 0; i < nlog && i < 256; ++i)
+            soak_lines += strstr(loglines[i], "SOAK: +") != 0;
+        CHECKEQ(soak_lines, 9);
+        check_parked(&s);
+        fakesoc_free(&s);
+        b.fmt_query = 0;
+        b.query_period_ms = 0;
+        boot_image(&im, 0);
+    }
+
     /* soak 2ecf7cd: the caller left keep_running as stack garbage; anything but SBM_KEEP_RUNNING must park */
     {
         static const uint32_t junk[] = { 1, 0xA5A5A5A5u, 0xFFFFFFFFu, SBM_KEEP_RUNNING ^ 1 };
