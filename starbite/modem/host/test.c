@@ -1404,6 +1404,38 @@ static void test_boot(void)
         boot_image(&im, 0);
     }
 
+    /* T11: ONLINE + RFS + the status queries: 11 GETs through the allow-list, answered by the fake CP */
+    {
+        static uint8_t nv_before[0x100000];
+        boot_image(&im, 0);
+        memcpy(nv_before, t_nv, sizeof(nv_before));
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        s.rfs_mode = 1;
+        s.nv_ref = nv_before;
+        fakesoc_plat(&s, &p, tlog);
+        b.stop = SBM_BOOT_ONLINE;
+        b.hold_ms = 5000;
+        b.rfs_serve = 1;
+        b.fmt_query = 1;
+        CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+        CHECKEQ(b.fmt_tx, 11);
+        CHECKEQ(b.fmt_tx_refused, 0);
+        CHECKEQ(b.fmt_resp, 9);                               /* the fake answers 9 kinds ... */
+        CHECKEQ(b.fmt_gen_res, 2);                            /* ... and refuses MODE_SEL and TIME_INFO */
+        CHECKEQ(s.fcp.n_req, 11);
+        CHECKEQ(s.fcp.n_forbidden, 0);
+        CHECKEQ(s.fcp.n_call, 0);
+        CHECK(b.cell.have_cs && b.cell.cs.state == SBM_REG_EMERGENCY);
+        CHECKEQ(b.cell.plmn_sel, 2);
+        CHECKEQ(s.rfs_read_ok, 1);
+        check_parked(&s);
+        check_allowed(&s);
+        fakesoc_free(&s);
+        b.rfs_serve = 0;
+        b.fmt_query = 0;
+        boot_image(&im, 0);
+    }
+
     /* ONLINE with a SIM present: stops at once on the SIM status, parked */
     fakesoc_init(&s, &im.plan, boot_crc, main_crc);
     s.sim_present = 1;

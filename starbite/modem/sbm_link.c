@@ -331,10 +331,10 @@ static int big_feed(struct sbm_boot *b, struct bigf *g, const uint8_t *f, uint32
 /* AP -> CP on the RFS UL ring, Android's way (misc_write with max_tx_size = the 2048-byte buffer): one SIPC5 frame
  * when it fits, else multi-frame fragments (config 0xFB, { id, more }), each followed by the data doorbell 0x81. */
 #define RFS_TX_FRAME 2048u
-static int put_wait(const struct sbm_plat *p, struct sbm_sbd *sbd, const uint8_t *fr, uint32_t l)
+static int put_wait_ch(const struct sbm_plat *p, struct sbm_sbd *sbd, uint16_t ch, const uint8_t *fr, uint32_t l)
 {
     for (uint32_t t = 0; t < 2000; ++t) {
-        int r = sbm_sbd_put(sbd, SBM_CH_RFS0, SBM_UL, fr, l, p);
+        int r = sbm_sbd_put(sbd, ch, SBM_UL, fr, l, p);
         if (r == 0)
             return msg_send(p, SBM_INT_VALID | 0x0001) ? 0 : SBM_EPERM;
         if (r != SBM_ENOSPC)
@@ -344,6 +344,41 @@ static int put_wait(const struct sbm_plat *p, struct sbm_sbd *sbd, const uint8_t
             feed(p);
     }
     return SBM_ETIME;
+}
+static int put_wait(const struct sbm_plat *p, struct sbm_sbd *sbd, const uint8_t *fr, uint32_t l)
+{
+    return put_wait_ch(p, sbd, SBM_CH_RFS0, fr, l);
+}
+
+/* T11: the status GETs, through the builder's allow-list (sbm_ipc_frame refuses anything else: no SET/EXEC, nothing
+ * that switches RF on, no CALL/SMS/SS/SAT/identity), on FMT0 with the data doorbell. Answers come back as RESP on
+ * the DL rings and go through sbm_cell like everything else. */
+static int fmt_queries(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, uint32_t ms)
+{
+    static const struct { uint16_t cmd; uint8_t n; uint8_t d[2]; } q[] = {
+        { SBM_PWR_PHONE_STATE, 0, { 0 } },       { SBM_SEC_PIN_STATUS, 0, { 0 } },
+        { SBM_SEC_SIM_ICC_TYPE, 0, { 0 } },      { SBM_NET_REGIST, 2, { 0xff, SBM_DOMAIN_CS } },
+        { SBM_NET_REGIST, 2, { 0xff, SBM_DOMAIN_PS } }, { SBM_NET_SERVING_NETWORK, 0, { 0 } },
+        { SBM_NET_PLMN_SEL, 0, { 0 } },          { SBM_DISP_ICON_INFO, 1, { 0x01 } },
+        { SBM_DISP_RSSI_INFO, 0, { 0 } },        { SBM_NET_MODE_SEL, 0, { 0 } },
+        { SBM_MISC_TIME_INFO, 0, { 0 } },
+    };
+    static uint8_t mseq = 0x40;
+    uint8_t fr[64];
+    for (unsigned i = 0; i < sizeof(q) / sizeof(q[0]); ++i) {
+        char nb[12];
+        int l = sbm_ipc_frame(fr, sizeof(fr), SBM_CH_FMT0, ++mseq, q[i].cmd, SBM_IPC_GET, q[i].d, q[i].n);
+        if (l < 0) {
+            b->fmt_tx_refused++;
+            continue;
+        }
+        int r = put_wait_ch(p, sbd, SBM_CH_FMT0, fr, (uint32_t)l);
+        if (r < 0)
+            return r;
+        b->fmt_tx++;
+        sbm_logf(p, "FMT: +%u TX ch235 | %s GET seq %u", ms, sbm_ipc_name(q[i].cmd, nb), mseq);
+    }
+    return 0;
 }
 
 static int rfs_send(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, const uint8_t *m, uint32_t len)
@@ -516,6 +551,12 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
                     b->fmt_rx++;
                     if (sbm_ipc_parse(msg, ml, &m) == 0) {
                         sbm_cell_update(&b->cell, &m);
+                        if (m.type == SBM_IPC_RESP && m.aseq > 0x40) {      /* an answer to one of our queries */
+                            if (m.cmd == SBM_GEN_PHONE_RES)
+                                b->fmt_gen_res++;
+                            else
+                                b->fmt_resp++;
+                        }
                         if (logged < ONLINE_LOG_MAX) {
                             char line[200];
                             sbm_frame_line(fb, fl, 1, line, sizeof(line));
@@ -590,6 +631,14 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
             b->stopped_by = SBM_STOP_REG;
             g_online_ms = 0xFFFFFFFFu;
             return 0;
+        }
+        if (b->fmt_query && ms == 3000) {
+            int e = fmt_queries(p, b, sbd, ms);
+            if (e < 0) {
+                g_online_ms = 0xFFFFFFFFu;
+                online_state(p, "a query could not be sent");
+                return e;
+            }
         }
         if (!(ms % 1000))
             feed(p);

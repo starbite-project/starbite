@@ -468,6 +468,21 @@ does exactly that: a pending message, at most 0x80000, appended until complete. 
 (`rfs_join`) and answers close (result -1, errno EBADF: `ProcessCloseFile`'s 14-byte reply; we never hand out a
 handle). The fake CP now splits long RFS messages the same way.
 
+### Result T10b (2026-11-09, 588e003, `build/modem/t10b-rfs-1/pmsg.txt`)
+**The CP is online and settled with our RFS server.** 9 replies, 3 long messages joined from 99 pieces, no crash,
+SIM absent. Sequence:
+- open CP_OMC_AUDIO_SLSI.bin -> ENOENT, close -> EBADF; the same for CP_AUDIO_SLSI.bin;
+- NV write 0x15e42 at 0x80000 and 0x4ff4 at 0 -> confirmed (RAM), +3857 ms;
+- +17821 ms open FLL.bin -> ENOENT; the 0x80000 NV write again; open (flags 0x42, create) err/csdiag_rf_Mipi.dat ->
+  ENOENT.
+None of these files is in EFS's root. The CP's diagnostics create fails harmlessly instead of storing anything.
+
+### 7.4 T11 `modemlink-query`: the first AP -> CP requests
+T10b plus the 11 status GETs of the builder's allow-list (power state, SIM status and card type, CS/PS
+registration, serving network, PLMN selection, icon/RSSI, mode, time), sent once 3 s after INIT_END on FMT0 with the
+data doorbell. 60 s window. No SET or EXEC, so RF stays in low-power mode; no CALL/SMS/SS/SAT/identity request
+(the allow-list refuses them before a frame exists). Answers (RESP / GEN_PHONE_RES) are counted and decoded.
+
 ### 7.2 Facts from One UI's vendor binaries (2026-11-09; read offline, binaries kept out of git)
 VENDOR was copied read-only in TWRP and extracted in the VM (EROFS). From `lib64/libsec-ril.so` (stripped, but its
 C++ dynamic symbols remain), `etc/mixer_paths.xml` and `firmware/calliope_*.bin`:

@@ -319,11 +319,12 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
 {
     enum sbm_boot_stop want = b->stop;
     uint32_t hold = b->hold_ms;
-    int serve = b->rfs_serve;
+    int serve = b->rfs_serve, query = b->fmt_query;
     sbm_memset(b, 0, sizeof(*b));
     b->stop = want;
     b->hold_ms = hold > 60000 ? 60000 : hold;
     b->rfs_serve = serve;
+    b->fmt_query = query;
     b->stopped_at = "-";
     sbm_logf(p, "boot: stage 3 up to %s", want == SBM_BOOT_DRY ? "the RAM check" : want == SBM_BOOT_SEC
              ? "EL3's signature check (the CP CPU is not started)" : want == SBM_BOOT_RUN
@@ -416,6 +417,9 @@ void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
         sbm_logf(p, "ONLINE: stopped by %s; FMT %u, RFS %u (reads %u, writes %u, other %u), bad %u", why[b->stopped_by <= 5 ? b->stopped_by : 0],
                  b->fmt_rx, b->rfs_rx, b->rfs_reads, b->rfs_writes, b->rfs_other, b->bad_rx);
         sbm_logf(p, "ONLINE: %s", line);
+        if (b->fmt_query)
+            sbm_logf(p, "ONLINE: queries sent %u (refused by the allow-list %u), answered %u RESP + %u GEN_PHONE_RES",
+                     b->fmt_tx, b->fmt_tx_refused, b->fmt_resp, b->fmt_gen_res);
         if (b->rfs_serve || b->big_frames || b->big_dropped)
             sbm_logf(p, "ONLINE: RFS served %u replies (%u frames, %u bytes); joined %u long messages from %u pieces; big frames %u, dropped %u",
                      b->rfs_tx, b->rfs_tx_frames, b->rfs_tx_bytes, b->rfs_joined, b->rfs_parts, b->big_frames, b->big_dropped);

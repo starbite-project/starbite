@@ -151,6 +151,7 @@ static void ap_msg(struct fakesoc *s)
     uint32_t v = s->mbox[SBM_MBOX_ISSR(SBM_MBX_AP2CP_MSG) / 4];
     if (s->link == L_ONLINE && v == (SBM_INT_VALID | 0x01)) {
         rfs_ul(s);
+        fakecp_step(&s->fcp);           /* FMT requests: answered from the scenario (no SIM) */
         return;
     }
     if (s->n_ap_msgs < 32)
