@@ -1,0 +1,119 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index b4dcca0..52b27c1 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -702,6 +702,7 @@ struct wbo {
+    int kind;
+    HANDLE hres;
+    uint64_t used;       /* T15: the last submission that named it; WAIT_BO waits for that one */
++   int listed_once;     /* T25: in an allocation list at least once (made resident) */
+ };
+ 
+ /* Allocations whose BO is closed but which a job submitted earlier may still use. Linux's panfrost keeps a
+@@ -756,6 +757,8 @@ struct sbdev {
+    LARGE_INTEGER st_t0;
+    unsigned st_submits, st_waits, st_blocked, st_busy, st_maps;
+    double st_blocked_ms, st_longest_ms;
++   unsigned submits_n;     /* T25 */
++   int list_all;           /* T25: SB_LIST_ALL=1, every live BO in every submission (as before) */
+ };
+ 
+ static D3DKMT_HANDLE wadapter;
+@@ -1137,24 +1140,8 @@ w_render(struct sbdev *d, UINT commandLength, UINT allocations)
+       d->patch = r.pNewPatchLocationList;
+       d->patch_size = r.NewPatchLocationListSize;
+       d->seq++;
+-
+-      /* A CPU event the scheduler sets when the context gets here. */
+-      HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+-      if (ev) {
+-         D3DDDICB_SIGNALSYNCHRONIZATIONOBJECT2 sig = {0};
+-         sig.hContext = d->context;
+-         sig.Flags.EnqueueCpuEvent = 1;
+-         sig.CpuEventHandle = ev;
+-         if (d->cb.pfnSignalSynchronizationObject2Cb(d->device, &sig) >= 0) {
+-            ring_push(d, d->seq, ev);
+-            return 0;
+-         }
+-         CloseHandle(ev);
+-      }
+-      if (!d->noevent || trace_on())
+-         fprintf(stderr, "malikm-wddm: no completion event for this submission;"
+-                 " waits poll the KMD until it catches up\n");
+-      d->noevent = d->seq;
++      /* T25: no completion event per submission any more (a CreateEvent, a signal call and a CloseHandle each,
++       * for the few that a wait ever needs): sb_wait_seq queues one when it needs one (sb_enqueue_event) */
+       return 0;
+    }
+    D3DKMT_RENDER r = {0};
+@@ -1204,6 +1191,27 @@ static void wdead_reap(struct sbdev *d);
+  * -MK_EBUSY (Ms 0) or -MK_ETIMEDOUT when not. */
+ static int sb_wait_seq_inner(struct sbdev *d, uint64_t seq, DWORD ms);
+ 
++/* T25: a CPU event the scheduler sets once this context has done everything submitted so far */
++static void
++sb_enqueue_event(struct sbdev *d)
++{
++   HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
++   if (ev) {
++      D3DDDICB_SIGNALSYNCHRONIZATIONOBJECT2 sig = {0};
++      sig.hContext = d->context;
++      sig.Flags.EnqueueCpuEvent = 1;
++      sig.CpuEventHandle = ev;
++      if (d->cb.pfnSignalSynchronizationObject2Cb(d->device, &sig) >= 0) {
++         ring_push(d, d->seq, ev);
++         return;
++      }
++      CloseHandle(ev);
++   }
++   if (!d->noevent || trace_on())
++      fprintf(stderr, "malikm-wddm: no completion event; waits poll the KMD until it catches up\n");
++   d->noevent = d->seq;
++}
++
+ /* T23: every wait timed; a wait that took over 0.1 ms counts as blocked */
+ static int
+ sb_wait_seq(struct sbdev *d, uint64_t seq, DWORD ms)
+@@ -1238,6 +1246,10 @@ sb_wait_seq_inner(struct sbdev *d, uint64_t seq, DWORD ms)
+       return 0;
+    if (seq > d->seq)
+       seq = d->seq;
++   /* T25: events are queued on demand: one covering everything submitted, unless one at or after Seq exists */
++   if (d->on && (d->ring_n == 0 || d->ring[(d->ring_first + d->ring_n - 1) % SB_RING].seq < seq) &&
++       d->noevent < seq)
++      sb_enqueue_event(d);
+    /* the oldest event at or after Seq */
+    for (uint32_t k = 0; k < d->ring_n; k++) {
+       uint32_t i = (d->ring_first + k) % SB_RING;
+@@ -1401,6 +1413,8 @@ malikm_bind_d3dddi(HANDLE hRTAdapter, HANDLE hRTDevice, const void *pKTCallbacks
+    e.PrivateDriverDataSize = sizeof(g);
+    g.Code = MW_ESCAPE_GPU_INFO;
+    if (cb->pfnEscapeCb(hRTAdapter, &e) >= 0 && g.Count != 0 && g.Valid != 0 && (d = sb_new_dev()) != NULL) {
++      const char *la = getenv("SB_LIST_ALL");
++      d->list_all = la && *la == '1';
+       D3DDDICB_CREATECONTEXT c = {0};
+       c.NodeOrdinal = 0;
+       c.EngineAffinity = 1;
+@@ -1625,11 +1639,21 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+        * translation faults (0x4002c3) at 0xa131000, the first byte of a 64 KiB BO, in every present.exe
+        * run. T15: listed as read, not written (no write hazards for VidMm to order on). */
+       uint32_t named = n;
++      /* T25: a BO not named here is listed until it has been made resident once, then only in a full refresh every
++       * 64 submissions (VidMm keeps allocations resident unless it needs the room). T23: every DWM submission listed
++       * 120-250 allocations, all processed by the runtime and VidMm, ~135 submissions a second on the A55s. */
++      int refresh = d->list_all || (d->submits_n++ % 64) == 0;
++      for (uint32_t i = 0; i < a->bo_handle_count; i++) {
++         struct wbo *bo = wddm_bo(d, bos[i]);
++         if (bo)
++            bo->listed_once = 1;
++      }
+       for (uint32_t i = 0; i < d->bo_cap && n < d->alloc_size; i++) {
+          struct wbo *bo = &d->bo[i];
+-         if (!bo->h || bo->listed == d->mark)
++         if (!bo->h || bo->listed == d->mark || (bo->listed_once && !refresh))
+             continue;
+          bo->listed = d->mark;
++         bo->listed_once = 1;
+          memset(&d->alloc[n], 0, sizeof(d->alloc[n]));
+          d->alloc[n].hAllocation = bo->h;
+          n++;

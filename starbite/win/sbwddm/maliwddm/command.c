@@ -459,6 +459,18 @@ NTSTATUS APIENTRY MwPatch(IN_CONST_HANDLE hAdapter, const DXGKARG_PATCH *Arg)
 
     /* Nothing to patch; record where VidMm put the first allocation. */
     a->Patches++;
+    {
+        /* T25: a flip's source address, for the vsync that completes it (vsync reported only SetVidPnSourceAddress's
+         * address, which DWM's present-flips never update: T23, ~200 ms a frame with the GPU 7 % busy) */
+        MW_DMA_PRIVATE *priv = (MW_DMA_PRIVATE *)Arg->pDmaBufferPrivateData;
+        if (priv != NULL && Arg->DmaBufferPrivateDataSize >= sizeof(*priv) && priv->Reserved == MW_DMA_MAGIC &&
+            priv->Present.Kind == MW_PRESENT_FLIP && Arg->pAllocationList != NULL &&
+            Arg->AllocationListSize > DXGK_PRESENT_SOURCE_INDEX) {
+            priv->Present.SrcPhys = Arg->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].PhysicalAddress;
+            priv->Present.SrcPhysValid = TRUE;
+            a->FlipAddrPatched++;
+        }
+    }
     a->PatchAllocations = Arg->AllocationListSize;
     a->PatchPatchLocations = Arg->PatchLocationListSubmissionLength;
     if (Arg->AllocationListSize != 0 && Arg->pAllocationList != NULL) {
@@ -518,6 +530,10 @@ static void Kick(MW_ADAPTER *A)
         if (!A->GpuUp || A->ThermalHold || s->Next >= s->Count) {
             if (s->FlipSlot1 && A->ScanFlipOn)   /* T24: everything before it is done: show the frame */
                 MwScanFlipHw(A, s->FlipSlot1 - 1);
+            if (s->FlipPhysValid) {              /* T25: the vsyncs from now on report the flip done */
+                A->ScanAddr = s->FlipPhys;
+                A->FlipAddrShown++;
+            }
             NotifyCompleted(A, s->FenceId);
             A->QHead = (A->QHead + 1) % MW_QUEUE_DEPTH;
             A->QCount--;
@@ -817,6 +833,11 @@ NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMIT
                         priv->Reserved == MW_DMA_MAGIC && priv->Present.Kind == MW_PRESENT_FLIP &&
                         priv->Present.Src != NULL && priv->Present.Src->FbAliased && a->ScanFlipOn &&
                         priv->Present.Src->ScanSlot >= 0;
+    if (!Arg->Flags.Paging && priv != NULL && Arg->DmaBufferPrivateDataSize >= sizeof(*priv) &&
+        priv->Reserved == MW_DMA_MAGIC && priv->Present.Kind == MW_PRESENT_FLIP && priv->Present.SrcPhysValid) {
+        sub.FlipPhys = priv->Present.SrcPhys;   /* T25 */
+        sub.FlipPhysValid = TRUE;
+    }
     if (deferFlip) {
         /* T24: a real flip, done when the queue reaches this submission (Kick), i.e. once the frame is drawn */
         sub.FlipSlot1 = (ULONG)priv->Present.Src->ScanSlot + 1;

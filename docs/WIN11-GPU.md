@@ -1372,6 +1372,23 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
   - a latch watchdog in the guard falls back to T13z, and DECON goes home on stop;
   - a test-cycle default; off in `--install-default` until proven.
 
+### 6.32 T23's drag numbers; T25 (2026-11-09)
+
+- **sbdrag (traced):** 4.9 moves/s, about 204 ms per move, the same with and without sblinkd.
+  - GPU busy 6.8 %, present queue wait 0, present CPU copies small.
+  - DWM's UMD makes about 135 submissions a second and rarely blocks (8-16 ms per 10 s).
+  - DwmGetCompositionTimingInfo's cFrame did not advance.
+- **Two likely causes:**
+  - The vsync interrupt reported `ScanAddr`, which only SetVidPnSourceAddress sets and DWM's present-flips never
+    call, so dxgkrnl never saw a flip completed.
+  - Per-submission CPU cost on the A55s: every live allocation listed for residency, and a completion event created
+    and signalled for every submission.
+- **T25:**
+  - The KMD records a flip's source segment address in DxgkDdiPatch and reports it from the vsync once the queue
+    reaches the flip.
+  - sb-patches/0121 lists unnamed BOs only until first resident, with a full refresh every 64 submissions
+    (`SB_LIST_ALL=1` restores), and queues completion events only when a wait needs one.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

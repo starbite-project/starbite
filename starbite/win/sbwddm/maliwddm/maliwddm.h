@@ -96,6 +96,10 @@ typedef struct _MW_PRESENT_OP {
     RECT SrcRect, DstRect;
     ULONG NumRects;             /* 0: DstRect alone */
     RECT Rects[MW_MAX_RECTS];   /* destination sub-rectangles */
+    /* T25: a flip's source as dxgkrnl addresses it (its segment address, from DxgkDdiPatch): what the vsync
+     * interrupt must report once the flip is done, for dxgkrnl to count the flip as completed */
+    PHYSICAL_ADDRESS SrcPhys;
+    BOOLEAN SrcPhysValid;
 } MW_PRESENT_OP;
 
 typedef struct _MW_DMA_PRIVATE {
@@ -109,6 +113,8 @@ typedef struct _MW_DMA_PRIVATE {
 typedef struct _MW_SUBMISSION {
     ULONG FenceId;
     ULONG FlipSlot1;            /* T24: scanout buffer + 1 to show when this submission is reached (0: none) */
+    PHYSICAL_ADDRESS FlipPhys;  /* T25: the flipped primary's address, reported by the vsyncs after it */
+    BOOLEAN FlipPhysValid;
     ULONG Count, Next;          /* commands, and the next one to start */
     MW_COMMAND Commands[MW_MAX_COMMANDS];
 } MW_SUBMISSION;
@@ -225,6 +231,7 @@ struct _MW_ADAPTER {
     ULONG ScanSlots;
     volatile LONG ScanCur;
     ULONG ScanFlips, ScanFlipsForced, ScanSlotShared, ScanFallback, ScanPendingTicks;
+    ULONG FlipAddrPatched, FlipAddrShown;   /* T25 */
     /* T14a: the first failed job of the boot (JS 0x51 INSTR_INVALID_ENC, once per boot since T13b), for
      * matching against the umdlogs' "bo N va A-B" lines */
     ULONG64 RunningJc;
