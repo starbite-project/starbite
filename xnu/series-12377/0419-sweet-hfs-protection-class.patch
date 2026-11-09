@@ -1,0 +1,69 @@
+From bd55af9b0d8d021fede903278ad025536da6fd80 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Tue, 10 Nov 2026 00:43:54 +0200
+Subject: [PATCH] patch: 0419-sweet-hfs-protection-class.patch - sweet_hfs (no
+ content protection) remembers a file's data protection class and reports it
+ (default D): iOS 26 sets classes and reads them back; PosterBoard got
+ ENOTSUP/EINVAL and gave up on its wallpaper store
+
+---
+ bsd/sweet_hfs/core/hfs_cnode.h |  4 ++++
+ bsd/sweet_hfs/core/hfs_vnops.c | 20 ++++++++++++++++++++
+ 2 files changed, 24 insertions(+)
+
+diff --git a/bsd/sweet_hfs/core/hfs_cnode.h b/bsd/sweet_hfs/core/hfs_cnode.h
+index 62c6a140..d6adb3a8 100644
+--- a/bsd/sweet_hfs/core/hfs_cnode.h
++++ b/bsd/sweet_hfs/core/hfs_cnode.h
+@@ -185,6 +185,10 @@ struct cnode {
+ 		};
+ 		uint8_t c_tflags;
+ 	};
++#if !CONFIG_PROTECT
++	/* Starbite 0419: the data protection class last set (F_SETPROTECTIONCLASS / setattrlist), 0 = never */
++	uint8_t		c_starbite_pclass;
++#endif
+ 
+ 	/*
+ 	 * Where we're using a journal, we keep track of the last
+diff --git a/bsd/sweet_hfs/core/hfs_vnops.c b/bsd/sweet_hfs/core/hfs_vnops.c
+index cd5a56aa..507b6d5f 100644
+--- a/bsd/sweet_hfs/core/hfs_vnops.c
++++ b/bsd/sweet_hfs/core/hfs_vnops.c
+@@ -1154,6 +1154,17 @@ hfs_vnop_getattr(struct vnop_getattr_args *ap)
+     		vap->va_dataprotect_class = cp->c_cpentry ? CP_CLASS(cp->c_cpentry->cp_pclass) : 0;
+     		VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
+     	} 	
++#else
++	/*
++	 * Starbite 0419: no content protection on this root (no AppleKeyStore), but iOS 26 sets a class on
++	 * new files and folders and reads it back: PosterBoard set class D on its store folders, got ENOTSUP /
++	 * EINVAL when reading it and gave up ("Data store could not be created for an unknown reason").
++	 * Report the class last set on this cnode, else D (4, "no protection"), which is what the data is.
++	 */
++	if (VATTR_IS_ACTIVE(vap, va_dataprotect_class)) {
++		vap->va_dataprotect_class = cp->c_starbite_pclass ? cp->c_starbite_pclass : 4;
++		VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
++	}
+ #endif
+ 	if (VATTR_IS_ACTIVE(vap, va_write_gencount)) {
+ 		if (ubc_is_mapped_writable(vp)) {
+@@ -1646,6 +1657,15 @@ out:
+ 	VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
+ 	if (!error && VATTR_IS_ACTIVE(vap, va_dataprotect_class))
+ 		error = cp_vnode_setclass(vp, vap->va_dataprotect_class);
++#else
++	/* Starbite 0419: remember the class (see hfs_vnop_getattr); classes A..F are 1..6, 7 = A/B hybrid */
++	if (!error && VATTR_IS_ACTIVE(vap, va_dataprotect_class)) {
++		uint32_t pc = vap->va_dataprotect_class & 0x1f;
++		if (pc >= 1 && pc <= 7) {
++			VTOC(vp)->c_starbite_pclass = (uint8_t)pc;
++			VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
++		}
++	}
+ #endif
+ 
+ 	return (error);
+-- 
+2.53.0
+

@@ -9,6 +9,7 @@
 #   tools/ios26-poster-store.sh --undo     queue the rename back (only if no new store was created meanwhile:
 #                                          the kernel's rename refuses an existing destination)
 #   tools/ios26-poster-store.sh --version FROM TO   rename the store's version folder (T28: 59 -> 61)
+#   tools/ios26-poster-store.sh --fresh [SUFFIX]     move the whole store aside as ...DataStore.SUFFIX (default starbite-old2)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ "$(adb get-state 2>/dev/null)" = recovery ] || { echo "phone not in TWRP"; exit 1; }
@@ -37,6 +38,11 @@ case "${1:-}" in
 --undo)
     python3 tools/overlay/sboverlay.py "$D/undo.bin" "rename:$OLD=$STORE" | tail -1
     tools/overlay/card-overlay.sh "$D/undo.bin"; echo "queued: store back at the next boot";;
+--fresh)
+    # 0419 test: move the whole store (59/ and T28's 61/) aside under a new name so PosterBoard starts empty
+    name=${2:-starbite-old2}
+    python3 tools/overlay/sboverlay.py "$D/fresh.bin" "rename:$STORE=$STORE.$name" | tail -1
+    tools/overlay/card-overlay.sh "$D/fresh.bin"; echo "queued: store -> $STORE.$name at the next boot";;
 --version)
     # 2026-11-10 T27: PosterBoard looks for store version 61 (then 60, 58), finds only 59 (what a fresh store got
     # in T19) and never creates 61. --version FROM TO renames the version folder (undo: --version TO FROM).
@@ -45,5 +51,5 @@ case "${1:-}" in
     python3 tools/overlay/sboverlay.py "$D/version.bin" "rename:$STORE/$from=$STORE/$to" | tail -1
     tools/overlay/card-overlay.sh "$D/version.bin"; echo "queued: $from -> $to at the next boot";;
 *)
-    sed -n '2,12p' "$0"; exit 1;;
+    sed -n '2,13p' "$0"; exit 1;;
 esac
