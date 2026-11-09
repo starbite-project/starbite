@@ -6,7 +6,7 @@
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/starbite/out/sboshost"
-OPEN="w:300 g:1150,2310,0,700 w:400 t:1057,2015 w:600"       # the lock screen's Open, then the Wi-Fi tile
+OPEN="w:300 g:1150,2310,0,700 w:400 t:1057,1738 w:600"       # the lock screen's Open, then the Wi-Fi tile
 ON="t:720,625 w:3000"                                           # the toggle, the bring-up and the scan
 JOIN="t:720,905 w:9000"                                         # the first network
 fails=0
@@ -35,6 +35,19 @@ c=$(run $OPEN $ON t:720,905 w:17000)                            # 0.6.1: the joi
 want "$c" "the network did not take the phone" "a wrong passphrase refused"
 nowant "$c" "a loop turn took" "a wrong passphrase: the loop never blocked during the join (0.6.1)"
 nowant "$c" "wifi: an address from DHCP" "no address with a wrong passphrase"
+# 1.2-alpha21: the automatic join (a known network heard after the scan: once per power-on) and its switch
+NET="test-ap
+correct horse"
+d=$(run $OPEN $ON w:9000)
+want "$d" "joining it automatically" "auto: the saved network joined without a tap"
+want "$d" "THE NETWORK IS JOINED" "auto: the WPA2 handshake"
+want "$d" "wifi: an address from DHCP" "auto: DHCP"
+nowant "$d" "correct horse\|test-ap" "auto: no name or passphrase logged"
+KNOWN="t:720,1184 w:500"; AUTO="t:720,624 w:400"; DONE="h:b:900 w:300 t:1057,1738 w:600"   # Back: home, Wi-Fi again
+e=$(run $OPEN $KNOWN $AUTO $DONE $ON w:9000)
+want "$e" "settings: Wi-Fi never joins by itself" "auto off: the switch"
+nowant "$e" "joining it automatically" "auto off: no join by itself"
+nowant "$e" "THE NETWORK IS JOINED" "auto off: not joined"
 NET=
 CYC=""
 i=0

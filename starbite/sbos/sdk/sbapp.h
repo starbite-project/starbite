@@ -41,10 +41,13 @@ enum {
     /* files 90..99 (read only), sensors 100..119, phone 120..139, network 140..159, camera 160..179:
      * reserved, SBOS_ENOSYS in API 1 */
     SYS_FILE_OPEN = 90, SYS_FILE_READ = 91,                 /* 91: added in 0.2 */
+    SYS_FILE_LIST = 92,                                     /* 1.2-alpha21: a folder's entries */
     SYS_SENSOR_READ = 100,                                  /* 0.3: temperatures */
     SYS_PHONE_STATE = 120, SYS_CALL_DIAL = 121, SYS_CALL_HANGUP = 122, SYS_SMS_SEND = 123, SYS_SMS_READ = 124,
+    SYS_MODEM_POWER = 125,                                  /* 1.2-alpha21: 120 and 125 only (receive only) */
     SYS_NET_STATE = 140,                                    /* 0.4: Wi-Fi's state (struct sbos_wifi) */
     SYS_WIFI_POWER = 141, SYS_WIFI_SCAN = 142, SYS_WIFI_LIST = 143, SYS_WIFI_JOIN = 144,   /* 0.4 */
+    SYS_WIFI_KNOWN = 145, SYS_WIFI_FORGET = 146,           /* 1.2-alpha21 */
     SYS_CAM_OPEN = 160,
     SYS_MAX = 180
 };
@@ -172,6 +175,18 @@ struct sbos_wifi_net {
     int32_t rssi, secure, channel, band5;
     int32_t saved;                      /* 0.4.2: the phone's saved network (store entry "wifinet"): joinable */
 };
+/* 1.2-alpha21: a folder's entry on the card (SYS_FILE_LIST, SBOS_P_FILES, read only) */
+struct sbos_dirent {
+    char name[64];                      /* UTF-8, cut to 63 bytes */
+    uint64_t size;
+    int32_t dir;
+};
+
+/* 1.2-alpha21: a known network (SYS_WIFI_KNOWN): the saved one (set from the computer) or one joined since the start */
+struct sbos_wifi_known {
+    uint8_t ssid[33], ssid_len;
+    int32_t saved, heard;               /* heard: in the last scan */
+};
 struct sbos_wifi {
     int32_t state, nets, rssi, secs;    /* secs: in this state */
     uint8_t ssid[33], ssid_len, ip[4], gateway[4];
@@ -179,6 +194,21 @@ struct sbos_wifi {
     int32_t clock_checked;              /* 0.5.8: 0 not yet, 1 right, 2 corrected, 3 set (there was none), -1 no answer */
     int32_t clock_off_s;                /* the correction (2) */
     char why[64];                       /* the last failure, in words */
+};
+
+/* 1.2-alpha21 (SBOS_P_PHONE): the modem, receive only (docs/MODEM.md 7.6): its status, never a call, an SMS or
+ * data. Started only by the user (the kernel's own confirmation), never by the self test; a SIM or a network
+ * registration parks it (the guards). The operator (PLMN) is never given to apps. */
+enum { SBOS_MODEM_OFF = 0, SBOS_MODEM_STARTING, SBOS_MODEM_ON, SBOS_MODEM_PARKED, SBOS_MODEM_FAILED };
+struct sbos_phone {
+    int32_t state, secs;                /* secs: in this state */
+    int32_t sim;                        /* the CP's SIM status code, -1 not known yet */
+    int32_t bars, rssi;                 /* -1 not known */
+    uint32_t msgs, queries, answers, rfs;
+    int32_t starts;                     /* since the boot */
+    char sim_name[24], cs[40], ps[40];  /* "absent", "emergency-only (GSM)", ... */
+    char why[64];                       /* the last stop or failure, in words */
+    char line[112];                     /* the masked status line (no PLMN) */
 };
 
 /* settings (SYS_SETTING_GET / SET): until a restart in 0.2 */
@@ -210,6 +240,8 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
                                    1 s backstop stays); 1 on again. Remembered. Reads 1 on, 0 off */,
        SET_HEAT_SCREEN_WHITE = 26 /* 1.2-alpha19: Survival's screen white at the panel's top level (1) or dark with the
                                       readings (0, the default: the panel's ~1 W goes to the chips). Remembered */,
+       SET_WIFI_AUTOJOIN = 27 /* 1.2-alpha21: join a known network the scan heard, once per power-on (1, the default)
+                                  or never (0). Remembered */,
        SET_VIBRATE = 24 /* 1.2-alpha7: write (count << 16) | ms: count pulses (0 = 1) of ms (<= 5000) with ms gaps; 0 stops.
                            Reads 1 when the motor works, 0 not tried yet, -1 refused */ };
 
@@ -338,8 +370,22 @@ static inline int setting_get(int id) { return (int)sbos_call(SYS_SETTING_GET, (
 static inline int setting_set(int id, int v) { return (int)sbos_call(SYS_SETTING_SET, (uint64_t)id, (uint64_t)(int64_t)v, 0, 0, 0); }
 /* the start of a file on the card (read only): bytes read, or < 0 */
 static inline int file_read(const char *path, void *buf, uint32_t cap) { return (int)sbos_call(SYS_FILE_READ, (uintptr_t)path, (uintptr_t)buf, cap, 0, 0); }
+/* 1.2-alpha21: a folder's entries from first (path "/" the card's root): how many were stored; *total all of them */
+static inline int file_list(const char *path, struct sbos_dirent *d, int max, int first, int *total)
+{
+    int64_t r = sbos_call(SYS_FILE_LIST, (uintptr_t)path, (uintptr_t)d, (uint64_t)max, (uint64_t)first, 0);
+    if (total)
+        *total = r < 0 ? 0 : (int)(r >> 16);
+    return r < 0 ? (int)r : (int)(r & 0xffff);
+}
 static inline int wifi_state(struct sbos_wifi *s) { return (int)sbos_call(SYS_NET_STATE, (uintptr_t)s, 0, 0, 0, 0); }
 static inline int wifi_power(int on) { return (int)sbos_call(SYS_WIFI_POWER, (uint64_t)on, 0, 0, 0, 0); }
+/* 1.2-alpha21: the modem's status; on 1 asks the kernel to start it (its own confirmation screen first), 0 stops it */
+static inline int phone_state(struct sbos_phone *s) { return (int)sbos_call(SYS_PHONE_STATE, (uintptr_t)s, 0, 0, 0, 0); }
+static inline int modem_power(int on) { return (int)sbos_call(SYS_MODEM_POWER, (uint64_t)on, 0, 0, 0, 0); }
+/* 1.2-alpha21: the known networks (names only); forget one joined since the start (not the saved one) */
+static inline int wifi_known(struct sbos_wifi_known *k, int max) { return (int)sbos_call(SYS_WIFI_KNOWN, (uintptr_t)k, (uint64_t)max, 0, 0, 0); }
+static inline int wifi_forget(int i) { return (int)sbos_call(SYS_WIFI_FORGET, (uint64_t)i, 0, 0, 0, 0); }
 static inline int wifi_scan(void) { return (int)sbos_call(SYS_WIFI_SCAN, 0, 0, 0, 0, 0); }
 static inline int wifi_list(struct sbos_wifi_net *n, int max) { return (int)sbos_call(SYS_WIFI_LIST, (uintptr_t)n, (uint64_t)max, 0, 0, 0); }
 /* pass: NULL for an open or the saved network, else the WPA2 passphrase (8..63 characters, or 64 hex) */

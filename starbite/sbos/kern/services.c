@@ -540,6 +540,7 @@ void power_timer(unsigned id)
 void power_restart(int to_menu)
 {
     torch_set(0);
+    kmodem_stop("Restarting");              /* 1.2-alpha21: the CP parked before any reset */
     wifi_power(0);                          /* the radio held in reset and unpowered before the reset */
     guest_power_off();                      /* 1.2: Linux stopped; its last core powers the M3 cluster off (<= 1 s) */
     heater_stop_all("Restarting");
@@ -554,6 +555,7 @@ void power_restart(int to_menu)
 void power_restart_recovery(void)
 {
     torch_set(0);
+    kmodem_stop("Restarting");              /* 1.2-alpha21: the CP parked before any reset */
     wifi_power(0);
     guest_power_off();
     heater_stop_all("Restarting");
@@ -566,6 +568,7 @@ void power_restart_recovery(void)
 void power_off_now(void)
 {
     torch_set(0);
+    kmodem_stop("Switching off");              /* 1.2-alpha21: the CP parked before any reset */
     wifi_power(0);
     guest_power_off();                      /* 1.2: Linux stopped before the power goes */
     if (heater_running_ui()) {

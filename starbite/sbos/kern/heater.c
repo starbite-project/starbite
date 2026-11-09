@@ -1669,6 +1669,8 @@ static void confirm_done(int ok)
 
 int heater_request(int level, int minutes)
 {
+    if (level > 0)
+        kmodem_stop("Heat started");        /* 1.2-alpha21: Heat wins; the CP parked first */
     if (level <= 0) {
         if (heater_running_ui()) {
             heat_ctl_request(&ctl, 0, 0, &last_in);

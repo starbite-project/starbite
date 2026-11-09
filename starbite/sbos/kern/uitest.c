@@ -396,6 +396,14 @@ void selftest_timer(unsigned id)
             if (sr < 0)
                 sb_log("selftest: slot: no \"sbos-state\" entry: nothing written");
         }
+        {                                   /* 1.2-alpha21: the modem is never started here; its RAM need is checked */
+            struct ub m;
+            ub_init(&m);
+            ub_s(&m, "selftest: modem: not started (only the user starts it); free RAM ");
+            ub_size(&m, sb_arena_free());
+            ub_s(&m, sb_arena_free() >= (64ULL << 20) ? " (enough: 64 MiB needed)" : " (NOT enough: 64 MiB needed)");
+            sb_log(m.b);
+        }
         struct ub u;
         ub_init(&u);
         ub_s(&u, fails || overflows ? "selftest: FAILED: " : "selftest: passed: ");

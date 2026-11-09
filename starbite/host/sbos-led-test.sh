@@ -6,7 +6,7 @@ set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/starbite/out/sboshost"
 run() { limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 ${FLED:+SBOS_HOST_FLED=$FLED} "$out/sbos-host" "$out" /dev/null "$@" q 2>&1 | grep -E 'settings: the LED|fled:|host: S2MPB02'; }
-ALARM="w:300 g:1150,2310,0,700 w:400 t:382,2015 w:800 t:552,671 w:600"
+ALARM="w:300 g:1150,2310,0,700 w:400 t:382,1738 w:800 t:552,671 w:600"
 LED="t:1184,1407 w:600"
 fails=0
 want() { if echo "$1" | grep -q -- "$2"; then echo "ok: $2"; else echo "FAIL: $2"; echo "$1" | sed 's/^/    /'; fails=$((fails + 1)); fi; }

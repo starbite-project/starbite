@@ -77,6 +77,18 @@ static const char *known_pass(const uint8_t *ssid, unsigned len)
     return 0;
 }
 
+/* 1.2-alpha21: join a known network the scan heard, once per power-on (Wi-Fi > Known networks; on by default) */
+int wifi_autojoin = 1;
+static int auto_pending, auto_done;
+static int wifi_in_selftest(void)
+{
+#ifdef SB_HOST
+    if (getenv("SBOS_HOST_SELFTEST"))
+        return 1;
+#endif
+    return sbos_selftest_enabled;           /* the self test's Wi-Fi step joins by itself */
+}
+
 static void remember(const uint8_t *ssid, unsigned len, const char *pass)
 {
     unsigned i = 0;
@@ -272,6 +284,7 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
             sort_nets();
             logn("wifi: the scan heard ", (uint64_t)nnets, " networks (names not logged)");
             set_state(SBOS_WIFI_UP, "");
+            auto_pending = wifi_autojoin && !auto_done && joined < 0 && !wifi_in_selftest();
         }
         return;
     }
@@ -433,6 +446,7 @@ int wifi_power(int on)
         dhcp_go = 0;
         scan_retry = 0;
         join_pending = join_active = 0;
+        auto_pending = 0;
         memset(jp_pass, 0, sizeof(jp_pass));
         joined = -1;
         nnets = 0;
@@ -454,6 +468,7 @@ int wifi_power(int on)
     }
     w_ready = 0;
     scan_retry = 0;
+    auto_pending = auto_done = 0;           /* 1.2-alpha21: one automatic join per power-on */
     irq_n = irq_missed = 0;
     irq_trusted = irq_kicked = 0;
     dk_next = dk_new = dk_reused = 0;      /* the DMA blocks of the first power-on, again in order */
@@ -594,6 +609,55 @@ void wifi_status(struct sbos_wifi *s)
     s->secs = (int32_t)((sb_ms() - t_state) / 1000U);
 }
 
+/* 1.2-alpha21: the known networks: the saved one (the store's "wifinet", set from the computer) first, then the ones
+ * joined with a typed passphrase since the start (RAM only). Names only; passphrases never leave the kernel. */
+int wifi_known(struct sbos_wifi_known *out, int max)
+{
+    int n = 0;
+    if (sv_ok && n < max) {
+        memset(&out[n], 0, sizeof(out[n]));
+        memcpy(out[n].ssid, sv_ssid, sv_len);
+        out[n].ssid_len = (uint8_t)sv_len;
+        out[n].saved = 1;
+        ++n;
+    }
+    for (unsigned i = 0; i < nrem && n < max; ++i) {
+        if (sv_ok && rem[i].len == sv_len && !memcmp(rem[i].ssid, sv_ssid, sv_len))
+            continue;                       /* the saved one, typed again: listed once */
+        memset(&out[n], 0, sizeof(out[n]));
+        memcpy(out[n].ssid, rem[i].ssid, rem[i].len);
+        out[n].ssid_len = (uint8_t)rem[i].len;
+        ++n;
+    }
+    for (int k = 0; k < n; ++k)
+        for (int i = 0; i < nnets; ++i)
+            if (nets[i].ssid_len == out[k].ssid_len && !memcmp(nets[i].ssid, out[k].ssid, out[k].ssid_len))
+                out[k].heard = 1;
+    return n;
+}
+
+/* forget a network joined since the start (k: its place in wifi_known's list); the saved one: SBOS_EPERM */
+int wifi_forget(int k)
+{
+    struct sbos_wifi_known kn[1 + REMEMBER];
+    int n = wifi_known(kn, 1 + REMEMBER);
+    if (k < 0 || k >= n)
+        return SBOS_EINVAL;
+    if (kn[k].saved)
+        return SBOS_EPERM;
+    for (unsigned i = 0; i < nrem; ++i)
+        if (rem[i].len == kn[k].ssid_len && !memcmp(rem[i].ssid, kn[k].ssid, rem[i].len)) {
+            memset(rem[i].pass, 0, sizeof(rem[i].pass));
+            for (unsigned j = i; j + 1 < nrem; ++j)
+                rem[j] = rem[j + 1];
+            --nrem;
+            memset(&rem[nrem], 0, sizeof(rem[nrem]));
+            sb_log("wifi: a network joined since the start was forgotten (name not logged)");
+            return 0;
+        }
+    return SBOS_EINVAL;
+}
+
 int wifi_list(struct sbos_wifi_net *out, int max)
 {
     int n = nnets < max ? nnets : max;
@@ -658,6 +722,16 @@ void wifi_timer(unsigned id)
     if (M.now < now * 1000U)
         M.now = now * 1000U;                /* the model's clock follows the host's (a polled join's timeout) */
 #endif
+    if (auto_pending && st == SBOS_WIFI_UP) {   /* 1.2-alpha21: from the tick, not inside the chip's event */
+        auto_pending = 0;
+        auto_done = 1;
+        for (int i = 0; i < nnets; ++i)     /* strongest first (sort_nets) */
+            if (known_pass(nets[i].ssid, nets[i].ssid_len)) {
+                sb_log("wifi: a known network was heard: joining it automatically (name not logged)");
+                (void)wifi_join(i, 0);
+                break;
+            }
+    }
     if (st == SBOS_WIFI_STARTING) {
         uint64_t t0 = sb_ms();
         hw_wdt_feed();                      /* the longest steps take seconds (0.5.12) */
@@ -754,6 +828,7 @@ void wifi_timer(unsigned id)
             sort_nets();
             logn("wifi: the scan timed out with ", (uint64_t)nnets, " networks");
             set_state(SBOS_WIFI_UP, "");
+            auto_pending = wifi_autojoin && !auto_done && joined < 0 && !wifi_in_selftest();
         }
         if (st == SBOS_WIFI_JOINING && !join_pending && !join_active && now - t_state > JOIN_MS) {
             sb_log("wifi: the join timed out");

@@ -1,4 +1,26 @@
-# Starbite OS 1.2-alpha20: Calculator and Notes; alpha19's heat changes (2026-11-09)
+# Starbite OS 1.2-alpha21: Modem (receive only), Files, Wi-Fi's known networks (2026-11-10)
+
+alpha20 passed its self test on the phone (34 screens, 11 apps, Wi-Fi joined) and is the user's image. alpha21 adds:
+- **Modem** (`kern/modem.c`, `apps/modem.c`): modem-core's session API (docs/MODEM.md 7.6, master merged at a8e68f4),
+  receive only. The app shows the SIM, the CS / PS registration, the bars and the counters, never the PLMN, an IMEI
+  or a number. Started only by the user: the app's Start opens the kernel's own confirmation ("Hold to start").
+  Never at boot, never in a self-test image (refused in the kernel), never with Heat or Linux running. RADIO and EFS
+  are read once (read only, about 42 MiB; refused under 64 MiB free). The CP's NV writes go to a RAM copy, restored
+  from a pristine copy before every start. libsb's storage hold is on while it runs (Starbite's own saves wait and
+  retry every 5 s). Polled every 2 ms, the status GETs every 10 s. Parked on Stop, on a guard (a SIM or a
+  registration: a notification), before Heat or Linux starts, on every restart / power-off path, and by
+  `sb_before_reset`. The modem objects are checked at build time for block-write references (none). Its ext4
+  reader is built with `m_ext4_*` names so Wi-Fi keeps its own.
+- **Files** (`apps/files.c`, `SYS_FILE_LIST` 92): the card's exFAT folders, read only; a text file's first 4 KiB.
+- **Wi-Fi > Known networks:** the saved network and those joined since the start; Forget for the latter (RAM only);
+  "Join automatically" (on by default, remembered: settings pad[3] bit 30 = off). After a scan, a known network is
+  joined once per power-on, from the Wi-Fi tick; never in a self-test image (its own join step runs there).
+- **APP_MAX 12 -> 20.** alpha20's pack had 13 apps for 12 places: `test-fault` (the EL0 isolation check at boot) was
+  dropped silently on the phone. build.sh now fails when the pack is larger than APP_MAX.
+- Home: 12 apps in 6 rows; short tiles put the icon left of the name; with Linux and Terminal, 7 rows (cap 14).
+- The self test logs `selftest: modem: not started (only the user starts it); free RAM ...` and opens Modem and Files.
+
+## Starbite OS 1.2-alpha20: Calculator and Notes; alpha19's heat changes (2026-11-09)
 
 alpha20 = alpha19 (below: the dark Survival screen, the governor above 165 C, the self-test stall limit, none of it
 run on the phone yet) plus two apps:

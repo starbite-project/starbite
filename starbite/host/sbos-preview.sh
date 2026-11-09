@@ -26,7 +26,7 @@ $V python3 starbite/tools/mkassets.py "$SB7" "$out/libsb-assets.sb7" >/dev/null
 $V python3 starbite/sbos/tools/mergeassets.py "$out/sbassets.sb7" "$out/libsb-assets.sb7" "$EXTRA" >/dev/null
 CF="-O1 -g -DSB_HOST -DSB_HOST_UTILITY -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I$lib -I$k -I$sdk -I$root/starbite/utility -I$root/starbite/engineer -I$root/starbite/wifi -I$root/starbite/guest/sbos"
 aobjs=""
-for a in emergency light heat sos info clock battery settings wifi calc notes; do
+for a in emergency light heat sos info clock battery settings wifi modem calc notes files; do
     $V gcc $CF -c -Dapp_event=${a}_app_event -Dsbapp_header=${a}_header -o "$out/app_$a.o" "$apps/$a.c"
     aobjs="$aobjs $out/app_$a.o"
 done
@@ -36,7 +36,7 @@ $V gcc $CF -DSBOS_KERNEL "-DSB_ASSETS=\"$out/sbassets.sb7\"" -o "$out/sbos-host"
     "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" \
     "$lib/dvfs_levels.c" "$lib/assets.S" \
     "$k/main.c" "$k/timer.c" "$k/appfmt.c" "$k/state.c" "$k/batmodel.c" "$k/heatctl.c" "$k/heater.c" "$k/heatk.c" \
-    "$k/services.c" "$k/input.c" "$k/ui.c" "$k/app.c" "$k/torch.c" "$k/vib.c" "$k/alarm.c" "$k/notif.c" "$k/panel.c" "$k/gpuheat.c" "$k/uitest.c" "$k/settings.c" "$k/slot.c" "$k/wifi.c" "$k/look.c" "$k/fled.c" "$k/audio.c" "$root/starbite/guest/sbos/guest.c" \
+    "$k/services.c" "$k/input.c" "$k/ui.c" "$k/app.c" "$k/torch.c" "$k/vib.c" "$k/alarm.c" "$k/notif.c" "$k/modem.c" "$k/panel.c" "$k/gpuheat.c" "$k/uitest.c" "$k/settings.c" "$k/slot.c" "$k/wifi.c" "$k/look.c" "$k/fled.c" "$k/audio.c" "$root/starbite/guest/sbos/guest.c" \
     "$root/starbite/wifi/core.c" "$root/starbite/wifi/exynos_pcie.c" "$root/starbite/wifi/chip.c" "$root/starbite/wifi/fw.c" \
     "$root/starbite/wifi/ring.c" "$root/starbite/wifi/msgbuf.c" "$root/starbite/wifi/link.c" "$root/starbite/wifi/wpa.c" \
     "$root/starbite/wifi/net.c" "$root/starbite/wifi/host/model.c" "$root/starbite/wifi/host/model_ap.c" "$root/starbite/utility/tz.c" $aobjs -lm -lpthread
@@ -51,7 +51,8 @@ scene() {
 OPEN="g:1150,2310,0,700 w:400"                      # hold Open on the lock screen
 BACK="h:b:900 w:300"                                # Bixby held: Back
 # home (0.3): Emergency across the top (720,245); tiles: Light 382,663 Heat 1057,663 SOS 382,1250 Info 1057,1250
-# Clock 382,1545 Battery 1057,1545 Settings 382,2015 Wi-Fi 1057,2015 Calculator 382,2485 Notes 1057,2485 (5 rows, 1.2-alpha20)
+# 6 rows (1.2-alpha21): SOS 382,956 Info 1057,956 Clock 382,1347 Battery 1057,1347 Settings 382,1738 Wi-Fi 1057,1738
+# Modem 382,2129 Calculator 1057,2129 Notes 382,2520 Files 1057,2520 (Light 382,663 Heat 1057,663 as before)
 scene lock          w:600
 scene home          w:300 $OPEN
 scene emergency     w:300 $OPEN t:720,245 w:500
@@ -73,32 +74,32 @@ scene heat-pocket   w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,19
 scene heat-unlocked w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:36000 k:p w:500
 scene home-busy     w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:3000 $BACK w:1200
 scene heat-off      w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:4000 t:220,670 w:3000
-scene sos           w:300 $OPEN t:382,1250 w:500
-scene sos-countdown w:300 $OPEN t:382,1250 w:500 g:720,635,0,1300 w:600
-scene sos-flash     w:300 $OPEN t:382,1250 w:500 g:720,635,0,1300 w:3600
-scene info          w:300 $OPEN t:1057,1250 w:600
-scene clock         w:300 $OPEN t:382,1545 w:600
-scene world         w:300 $OPEN t:382,1545 w:600 t:720,1100 w:500
-scene stopwatch     w:300 $OPEN t:382,1545 w:600 t:380,1400 w:500 t:720,950 w:2300
-scene timer         w:300 $OPEN t:382,1545 w:600 t:1050,1400 w:500 t:380,950 w:300 t:720,1220 w:2300
-scene battery       w:300 $OPEN t:1057,1545 w:600
-scene battery-history w:300 $OPEN w:3700000 k:p w:500 $OPEN t:1057,1545 w:600
-scene settings      w:300 $OPEN t:382,2015 w:600
-scene settings-on   w:300 $OPEN t:382,2015 w:600 t:720,1789 w:300 t:720,2039 w:300
-scene settings-alarm w:300 $OPEN t:382,2015 w:600 t:557,670 w:400
-scene settings-heat w:300 $OPEN t:382,2015 w:600 t:882,670 w:400
-scene settings-about w:300 $OPEN t:382,2015 w:600 t:1207,670 w:400
-scene wifi          w:300 $OPEN t:1057,2015 w:600
-scene wifi-list     w:300 $OPEN t:1057,2015 w:600 t:720,625 w:3000
-scene wifi-joined   w:300 $OPEN t:1057,2015 w:600 t:720,625 w:3000 t:720,905 w:6000
+scene sos           w:300 $OPEN t:382,956 w:500
+scene sos-countdown w:300 $OPEN t:382,956 w:500 g:720,635,0,1300 w:600
+scene sos-flash     w:300 $OPEN t:382,956 w:500 g:720,635,0,1300 w:3600
+scene info          w:300 $OPEN t:1057,956 w:600
+scene clock         w:300 $OPEN t:382,1347 w:600
+scene world         w:300 $OPEN t:382,1347 w:600 t:720,1100 w:500
+scene stopwatch     w:300 $OPEN t:382,1347 w:600 t:380,1400 w:500 t:720,950 w:2300
+scene timer         w:300 $OPEN t:382,1347 w:600 t:1050,1400 w:500 t:380,950 w:300 t:720,1220 w:2300
+scene battery       w:300 $OPEN t:1057,1347 w:600
+scene battery-history w:300 $OPEN w:3700000 k:p w:500 $OPEN t:1057,1347 w:600
+scene settings      w:300 $OPEN t:382,1738 w:600
+scene settings-on   w:300 $OPEN t:382,1738 w:600 t:720,1789 w:300 t:720,2039 w:300
+scene settings-alarm w:300 $OPEN t:382,1738 w:600 t:557,670 w:400
+scene settings-heat w:300 $OPEN t:382,1738 w:600 t:882,670 w:400
+scene settings-about w:300 $OPEN t:382,1738 w:600 t:1207,670 w:400
+scene wifi          w:300 $OPEN t:1057,1738 w:600
+scene wifi-list     w:300 $OPEN t:1057,1738 w:600 t:720,625 w:3000
+scene wifi-joined   w:300 $OPEN t:1057,1738 w:600 t:720,625 w:3000 t:720,905 w:6000
 SCENE_ENV=SBOS_HOST_WPA2=1
-scene wifi-passphrase w:300 $OPEN t:1057,2015 w:600 t:720,625 w:3000 t:720,905 w:800 t:580,2622 w:150 t:1210,2246 w:150 t:510,2246 w:300
+scene wifi-passphrase w:300 $OPEN t:1057,1738 w:600 t:720,625 w:3000 t:720,905 w:800 t:580,2622 w:150 t:1210,2246 w:150 t:510,2246 w:300
 SCENE_ENV=
 SCENE_ENV=SBOS_HOST_FILES=/nonexistent
-scene info-empty    w:300 $OPEN t:1057,1250 w:600
-scene info-edit     w:300 $OPEN t:1057,1250 w:600 t:720,1150 w:500
-scene info-field    w:300 $OPEN t:1057,1250 w:600 t:720,1150 w:500 t:720,655 w:500 t:930,2434 w:150 t:1210,2246 w:150 t:510,2246 w:300
-CARD="t:1057,1250 w:600 t:720,1150 w:500 t:720,655 w:500 t:930,2434 w:150 t:1210,2246 w:150 t:1245,2810 w:400 t:720,965 w:500 t:125,2810 w:150 t:1350,2246 w:150 t:1245,2810 w:400 t:382,2515 w:500"
+scene info-empty    w:300 $OPEN t:1057,956 w:600
+scene info-edit     w:300 $OPEN t:1057,956 w:600 t:720,1150 w:500
+scene info-field    w:300 $OPEN t:1057,956 w:600 t:720,1150 w:500 t:720,655 w:500 t:930,2434 w:150 t:1210,2246 w:150 t:510,2246 w:300
+CARD="t:1057,956 w:600 t:720,1150 w:500 t:720,655 w:500 t:930,2434 w:150 t:1210,2246 w:150 t:1245,2810 w:400 t:720,965 w:500 t:125,2810 w:150 t:1350,2246 w:150 t:1245,2810 w:400 t:382,2515 w:500"
 scene lock-card     w:300 $OPEN $CARD k:p w:600 k:p w:800
 scene lock-card-open w:300 $OPEN $CARD k:p w:600 k:p w:800 g:720,1715,0,900 w:600
 SCENE_ENV=SBOS_HOST_NORMAL=1
@@ -121,16 +122,29 @@ scene power-menu    w:300 h:p:1300 w:500
 scene focus-keys    w:300 $OPEN k:d w:200 k:d w:200 k:d w:300
 scene lock-hold     w:300 g:290,2310,0,300
 # 1.2-alpha20: Calculator (keys: columns x 224 552 884 1212, rows y 988 1328 1668 2008) and Notes
-CALC="t:382,2485 w:600"
+CALC="t:1057,2129 w:600"
 scene calc          w:300 $OPEN $CALC
 scene calc-chain    w:300 $OPEN $CALC t:224,1668 w:150 t:552,1668 w:150 t:1212,2008 w:150 t:224,988 w:150 t:1212,1328 w:150 t:552,1668 w:150 t:884,2008 w:400
 scene calc-third    w:300 $OPEN $CALC t:224,1668 w:150 t:1212,988 w:150 t:884,1668 w:150 t:884,2008 w:400
 scene calc-op       w:300 $OPEN $CALC t:224,1668 w:150 t:552,1668 w:150 t:1212,2008 w:150 t:224,988 w:400
-NOTES="t:1057,2485 w:600"
+NOTES="t:382,2520 w:600"
 scene notes         w:300 $OPEN $NOTES
 scene notes-new     w:300 $OPEN $NOTES t:720,636 w:600
 scene notes-saved   w:300 $OPEN $NOTES t:720,636 w:600 t:125,2622 w:150 t:860,2434 w:150 t:1070,2246 w:150 t:1245,2810 w:600
 scene notes-note    w:300 $OPEN $NOTES t:720,636 w:600 t:125,2622 w:150 t:860,2434 w:150 t:1070,2246 w:150 t:1245,2810 w:600 t:720,636 w:600
+# 1.2-alpha21: Modem (receive only; the host's fake modem): Start 720,972, the kernel's confirmation: hold 720,940
+MODEM="t:382,2129 w:600"
+scene modem         w:300 $OPEN $MODEM
+scene modem-confirm w:300 $OPEN $MODEM t:720,972 w:500
+scene modem-on      w:300 $OPEN $MODEM t:720,972 w:500 g:720,940,0,1900 w:5000
+FILES="t:1057,2520 w:800"
+scene files         w:300 $OPEN $FILES
+scene files-folder  w:300 $OPEN $FILES t:720,800 w:500
+scene files-text    w:300 $OPEN $FILES t:720,800 w:500 t:720,1000 w:500
+scene wifi-known    w:300 $OPEN t:1057,1738 w:600 t:720,1184 w:500
+SCENE_ENV=SBOS_HOST_MODEM_GUARD=6
+scene modem-parked  w:300 $OPEN $MODEM t:720,972 w:500 g:720,940,0,1900 w:9000
+SCENE_ENV=
 echo "PNGs in $png"
 # SBOS_SCREENS=DIR: every screen and one contact sheet there too (the main checkout's build/starbite-os/screens/)
 if [ -n "${SBOS_SCREENS:-}" ]; then

@@ -531,6 +531,12 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         heat_reserve_pct = (int)arg[1];
         sb_logx("settings: the call / SOS reserve for full heat, % (0 overridden): ", arg[1]);
         return 0;
+    case SET_WIFI_AUTOJOIN:
+        wifi_autojoin = arg[1] != 0;
+        settings_changed();
+        sb_log(wifi_autojoin ? "settings: Wi-Fi joins a known network automatically" :
+                               "settings: Wi-Fi never joins by itself");
+        return 0;
     case SET_HEAT_SCREEN_WHITE:
         heat_screen_white = arg[1] != 0;
         settings_changed();
@@ -964,6 +970,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_CURRENT_STOP: return !heat_no_current_stop;
         case SET_HEAT_HIGH_STOP: return !heat_no_high_stop;
         case SET_HEAT_SCREEN_WHITE: return heat_screen_white;
+        case SET_WIFI_AUTOJOIN: return wifi_autojoin;
         case SET_HEAT_SOC_STOP_C10: return heat_soc_stop_c10;
         case SET_HEAT_SURV_STOP_C10: return heat_surv_stop_c10;
         case SET_HEAT_SURV_BAT_C10: return heat_surv_bat_c10;
@@ -982,6 +989,20 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         if (r == 0 && arg[0] != SET_GPU_HEAT)
             settings_changed();             /* saved in 3 s where there is a state slot (the GPU never is) */
         return r;
+    }
+    case SYS_FILE_LIST: {                   /* 1.2-alpha21: returns stored | total << 16 */
+        struct sbos_dirent d[16];
+        if (!(p->perms & SBOS_P_FILES))
+            return SBOS_EPERM;
+        int max = arg[2] > 16 ? 16 : (int)arg[2], total = 0;
+        if (!user_str(a, arg[0], s1, sizeof(s1)) || arg[3] > 4096)
+            return SBOS_EINVAL;
+        int n = kfile_list(s1, d, max, (int)arg[3], &total);
+        if (n < 0)
+            return n;
+        if (n > 0 && !user_out(a, arg[1], d, (uint64_t)n * sizeof(d[0])))
+            return SBOS_EINVAL;
+        return (int64_t)n | (int64_t)(total > 0xffff ? 0xffff : total) << 16;
     }
     case SYS_FILE_READ: {
         if (!(p->perms & SBOS_P_FILES))
@@ -1018,6 +1039,32 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         return user_out(a, arg[0], &s, sizeof(s)) ? 0 : SBOS_EINVAL;
     }
     /* ---- Wi-Fi (0.4) ---- */
+    case SYS_WIFI_KNOWN: {                  /* 1.2-alpha21: names only */
+        struct sbos_wifi_known kn[8];
+        if (!(p->perms & SBOS_P_NET))
+            return SBOS_EPERM;
+        int max = arg[1] > 8 ? 8 : (int)arg[1];
+        int n = wifi_known(kn, max);
+        if (n > 0 && !user_out(a, arg[0], kn, (uint64_t)n * sizeof(kn[0])))
+            return SBOS_EINVAL;
+        return n;
+    }
+    case SYS_WIFI_FORGET:
+        if (!(p->perms & SBOS_P_NET) || !front)
+            return SBOS_EPERM;
+        return wifi_forget((int)arg[0]);
+    /* ---- the modem, receive only (1.2-alpha21) ---- */
+    case SYS_PHONE_STATE: {
+        struct sbos_phone ph;
+        if (!(p->perms & SBOS_P_PHONE))
+            return SBOS_EPERM;
+        kmodem_status(&ph);
+        return user_out(a, arg[0], &ph, sizeof(ph)) ? 0 : SBOS_EINVAL;
+    }
+    case SYS_MODEM_POWER:
+        if (!(p->perms & SBOS_P_PHONE) || !front)
+            return SBOS_EPERM;
+        return kmodem_power(arg[0] ? 1 : 0);
     case SYS_NET_STATE: {
         struct sbos_wifi ws;
         if (!(p->perms & SBOS_P_NET))

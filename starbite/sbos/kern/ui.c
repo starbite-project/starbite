@@ -883,7 +883,7 @@ static void build_home(void)
     if (th > 600)
         th = 600;
     int t = 0;
-    for (int i = 0; i < napps && t < 12; ++i) {   /* 1.2-alpha20: 10 apps + Linux + Terminal */
+    for (int i = 0; i < napps && t < 14; ++i) {   /* 1.2-alpha21: 12 apps + Linux + Terminal */
         if (app_hidden(i) || i == emerg)
             continue;
         struct el *e = add(cur, &ncur, E_TILE);
@@ -904,7 +904,7 @@ static void build_home(void)
         if (i == sos_a && sos_active())
             scopy(e->b, sizeof(e->b), "Alarm on");
     }
-    if (linux_tile && t < 12) {                  /* 1.2: Linux apps on the big cores (Settings turned it on) */
+    if (linux_tile && t < 14) {                  /* 1.2: Linux apps on the big cores (Settings turned it on) */
         struct el *e = add(cur, &ncur, E_TILE);
         e->id = GUEST_TILE;
         scopy(e->a, sizeof(e->a), "Linux");
@@ -917,7 +917,7 @@ static void build_home(void)
         e->y = y0 + (t / 2) * (th + 40);
         ++t;
     }
-    if (term_tile && t < 12) {                  /* 1.2-alpha3: the Linux terminal with Starbite's keyboard */
+    if (term_tile && t < 14) {                  /* 1.2-alpha3: the Linux terminal with Starbite's keyboard */
         struct el *e = add(cur, &ncur, E_TILE);
         e->id = GUEST_TILE_TERM;
         scopy(e->a, sizeof(e->a), "Terminal");
@@ -997,7 +997,7 @@ static void build_home_normal(void)
     }
     e->x = MX, e->y = 150, e->w = CW, e->h = 360;
     int k = 0;
-    for (int i = 0; i < napps && k < 12; ++i) {
+    for (int i = 0; i < napps && k < 14; ++i) {
         if (app_hidden(i) || i == emerg)
             continue;
         e = add(cur, &ncur, E_ICON);
@@ -1010,7 +1010,7 @@ static void build_home_normal(void)
         e->x = MX + (k % 4) * 325, e->y = 600 + (k / 4) * 360, e->w = 325, e->h = 340;
         ++k;
     }
-    if (kui_linux_on && guest_available() && k < 12) {     /* 1.2: Linux apps (Settings turned it on) */
+    if (kui_linux_on && guest_available() && k < 14) {     /* 1.2: Linux apps (Settings turned it on) */
         e = add(cur, &ncur, E_ICON);
         if (e) {
             e->id = GUEST_TILE;
@@ -1021,7 +1021,7 @@ static void build_home_normal(void)
             ++k;
         }
     }
-    if (kui_linux_on && guest_available_mode(GUEST_TERM) && k < 12) {     /* 1.2-alpha3: the terminal */
+    if (kui_linux_on && guest_available_mode(GUEST_TERM) && k < 14) {     /* 1.2-alpha3: the terminal */
         e = add(cur, &ncur, E_ICON);
         if (e) {
             e->id = GUEST_TILE_TERM;
@@ -1682,6 +1682,17 @@ static void draw_el_raw(const struct el *e, int idx)
             break;
         }
         card_round(e->x, e->y, e->w, e->h, 72, card);
+        if (e->h < 420) {                       /* 1.2-alpha21: 6 or 7 rows: the icon left, the name and its line right */
+            int cy = e->y + e->h / 2;
+            ui_disc(e->x + 115, cy, 92, ui_mix(e->color, C_CARD, 60));
+            if (e->icon)
+                ui_icon(e->icon, e->x + 40, cy - 75, e->color);
+            int tf = ui_text_w(F_TITLE, e->a) <= e->w - 246 ? F_TITLE : F_TITLE_S;   /* "Calculator": one size down */
+            ui_text_cut(tf, e->x + 226, cy + (e->b[0] ? 8 : 30), e->a, e->w - 246, C_L1);
+            if (e->b[0])
+                ui_text_cut(F_DETAIL, e->x + 228, cy + 70, e->b, e->w - 250, ui_mix(e->color, C_L1, 140));
+            break;
+        }
         int big = e->h >= 520, ic = big ? 160 : 130;
         ui_disc(e->x + 150, e->y + ic, 100, ui_mix(e->color, C_CARD, 60));
         if (e->icon)
@@ -2293,6 +2304,7 @@ void kui_guest_open(int mode)
     }
     if (gs == GUEST_OFF || gs == GUEST_FAILED) {
         gk_layer = 0;
+        kmodem_stop("Linux started");      /* 1.2-alpha21 */
         int r = guest_start_mode(mode);
         if (r == -2) {
             sb_log("ui: Linux refused: the heater has the big cores");

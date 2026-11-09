@@ -97,7 +97,7 @@ static void show(void)
                     "The light at 240 mA. No 1250 mA flash pulses: the chip's flash timer is unconfirmed (logged)." :
                     "The light at 240 mA and, in the alarm, 1250 mA camera-flash pulses once a second (Samsung's values). Until a restart.",
                     led_refused ? 0xffff9f0aU : GREY);
-        ui_textline("Sound and vibration: coming soon.", GREY);
+        ui_textline("Alarms and timers buzz the vibration motor. Sound: not yet.", GREY);
     } else if (section == 2) {
         ui_toggle(5, "GPU in Heat High", setting_get(SET_GPU_HEAT) == 1);
         ui_textline("High also loads the graphics processor: more heat, faster battery use. Asks first.", 0);

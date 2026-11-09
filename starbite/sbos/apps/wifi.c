@@ -12,7 +12,9 @@ SBAPP_DEFINE("wifi", "Wi-Fi", SBOS_P_NET, 0xff0a84ffU, 208);
 
 static struct sbos_wifi_net nets[SBOS_WIFI_NETS];
 static int nn, visible;
-static int page, pick = -1;                 /* page 1: the passphrase for nets[pick] */
+static int page, pick = -1;                 /* page 1: the passphrase for nets[pick]; 2: the known networks (1.2-alpha21) */
+static struct sbos_wifi_known kn[8];
+static int nk;
 
 static void name_of(char *o, unsigned cap, const uint8_t *s, unsigned n)
 {
@@ -64,6 +66,36 @@ static void show(void)
         ui_input((uint32_t)(100 + pick), "Passphrase", 1 | 2, 63);     /* one field per network: no carry-over */
         ui_textline("Kept in this phone's memory until a restart. Never written to the log.", GREY);
         ui_button(3, "Cancel", 0, UI_HALF);
+        ui_end();
+        return;
+    }
+    if (page == 2) {                        /* 1.2-alpha21: the known networks */
+        nk = wifi_known(kn, 8);
+        if (nk < 0)
+            nk = 0;
+        ui_begin();
+        ui_title("Known networks");
+        ui_toggle(5, "Join automatically", setting_get(SET_WIFI_AUTOJOIN) == 1);
+        ui_textline("When Wi-Fi turns on and hears a known network, it joins the strongest one.", GREY);
+        if (!nk)
+            ui_textline("None yet. A network you join with its passphrase is known until a restart.", GREY);
+        for (int i = 0; i < nk; ++i) {
+            name_of(nm, sizeof(nm), kn[i].ssid, kn[i].ssid_len <= 32 ? kn[i].ssid_len : 32);
+            if (kn[i].saved) {
+                fmt_init(&f);
+                fmt_s(&f, nm);
+                fmt_s(&f, kn[i].heard ? "  \xc2\xb7 saved, heard now" : "  \xc2\xb7 saved");
+                ui_textline(f.b, 0xffffffffU);
+            } else {
+                fmt_init(&f);
+                fmt_s(&f, "Forget ");
+                fmt_s(&f, nm);
+                ui_hold((uint32_t)(30 + i), f.b, 900, 0);
+            }
+        }
+        ui_textline("The saved one is set from the computer; the others last until a restart.", GREY);
+        ui_textline("Passphrases are never shown or logged.", GREY);
+        ui_button(3, "Done", 0, UI_HALF);
         ui_end();
         return;
     }
@@ -146,6 +178,8 @@ static void show(void)
         if (s.why[0])
             ui_textline(s.why, ORANGE);
     }
+    ui_button(4, "Known networks", setting_get(SET_WIFI_AUTOJOIN) == 1 ? "Joins automatically" : "Never joins by itself",
+              0);
     ui_end();
 }
 
@@ -164,7 +198,17 @@ void app_event(const struct sbos_event *ev)
         visible = 0;
         page = 0;
         break;
+    case EV_APP_HOLD:
+        if (page == 2 && ev->id >= 30 && ev->id < 30 + (uint32_t)nk && wifi_forget((int)ev->id - 30) == 0)
+            ui_toast_app("Forgotten", 2000);
+        show();
+        break;
     case EV_APP_TOGGLE:
+        if (ev->id == 5) {
+            setting_set(SET_WIFI_AUTOJOIN, ev->value ? 1 : 0);
+            show();
+            break;
+        }
         if (ev->id == 1 && wifi_power(ev->value) == SBOS_EAGAIN)
             ui_toast_app("Not now (heating?)", 2500);
         show();
@@ -174,6 +218,8 @@ void app_event(const struct sbos_event *ev)
             wifi_scan();
         } else if (ev->id == 3) {
             page = 0;
+        } else if (ev->id == 4) {
+            page = 2;
         } else if (ev->id == (uint32_t)(100 + pick) && page == 1) {     /* the keyboard's Join */
             char pw[65];
             int n = ui_input_get(pw, sizeof(pw));

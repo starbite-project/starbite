@@ -96,7 +96,7 @@ c=$(px surv-white 20 40); [ "$c" = 1c1c1e ] && echo "ok: the dark status strip o
 c=$(px surv-back 720 1200); [ "$c" = 1c1c1e ] && echo "ok: a tap brings the normal screen back" || { echo "FAIL: still the dark screen after a tap"; fails=$((fails + 1)); }
 want "$r" "heater: the panel level, the white screen and the LED put back" "everything put back at the stop"
 # 1.1-beta7: the read-only OCP probe (Settings > About): readable, trapped, no M3 core
-SETT_ABOUT="w:300 g:1150,2310,0,700 w:400 t:382,2015 w:800 t:1216,671 w:600"
+SETT_ABOUT="w:300 g:1150,2310,0,700 w:400 t:382,1738 w:800 t:1216,671 w:600"
 PROBE="t:723,2252 w:1500"
 ENVS=SBOS_HOST_SMP=m3
 r=$(run $SETT_ABOUT $PROBE)

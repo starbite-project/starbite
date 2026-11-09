@@ -42,6 +42,35 @@ static int mount(void)
     return st > 0;
 }
 
+/* 1.2-alpha21: a folder's entries (names, sizes; read only) for the Files app */
+static struct exfat_ent lst[128];
+
+int kfile_list(const char *path, struct sbos_dirent *out, int max, int first, int *total)
+{
+    struct exfat_ent d;
+    const struct exfat_ent *dir = 0;
+    *total = 0;
+    if (!mount())
+        return SBOS_EAGAIN;
+    if (path[0] && !(path[0] == '/' && !path[1])) {
+        if (exfat_walk(&fs, path, &d, scratch, (int)(sizeof(scratch) / sizeof(scratch[0]))) || !d.dir)
+            return SBOS_EINVAL;
+        dir = &d;
+    }
+    int all = 0;
+    int n = exfat_list(&fs, dir, lst, (int)(sizeof(lst) / sizeof(lst[0])), &all);
+    if (n < 0)
+        return SBOS_EAGAIN;
+    *total = n;                             /* the first 128 (a folder with more says so in the app) */
+    int k = 0;
+    for (int i = first; i < n && k < max; ++i, ++k) {
+        sb_strcpy(out[k].name, sizeof(out[k].name), lst[i].name);
+        out[k].size = lst[i].size;
+        out[k].dir = lst[i].dir;
+    }
+    return k;
+}
+
 int kfile_read(const char *path, void *dst, uint32_t cap)
 {
     struct exfat_ent e;

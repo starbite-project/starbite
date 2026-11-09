@@ -8,12 +8,12 @@ set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/starbite/out/sboshost"
 UNLOCK="w:300 g:1150,2310,0,700 w:400"
-SETTINGS="t:382,2015 w:600 t:1216,672 w:600"
+SETTINGS="t:382,1738 w:600 t:1216,672 w:600"
 TOGGLE="t:1200,2536 w:600"
 HOLD="g:720,1170,0,1900 w:600"
 BACK="t:220,210 w:800"
 LXON="$UNLOCK $SETTINGS $TOGGLE $HOLD $BACK"
-TILE="t:382,2480 w:100"
+TILE="t:382,2547 w:100"             # 1.2-alpha21: 7 rows (12 apps, Linux, Terminal)
 HEAT="t:1057,663 w:600"
 fails=0
 want() { if echo "$1" | grep -q -- "$2"; then echo "ok: $3"; else echo "FAIL: $3 ($2)"; fails=$((fails + 1)); fi; }
@@ -84,7 +84,7 @@ else
 fi
 
 # 1.2-alpha3: the Terminal (the guest kernel of its own at 4x, Starbite's keyboard below it)
-TERM_TILE="t:1057,2480 w:900"
+TERM_TILE="t:1057,2547 w:900"
 K_E="t:370,2246 w:150"; K_C="t:580,2622 w:150"; K_H="t:860,2434 w:150"; K_O="t:1210,2246 w:150"
 K_I="t:1070,2246 w:150"; K_SP="t:545,2810 w:150"; K_SHIFT="t:125,2622 w:150"; K_ENTER="t:1245,2810 w:300"
 K_DEL="t:1375,2622 w:150"; K_X="t:440,2622 w:150"

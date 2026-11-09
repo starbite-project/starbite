@@ -9,11 +9,11 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha20"
+#define SBOS_VERSION "1.2-alpha21"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
-enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_APP0 = 16 };
+enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_MODEM, KT_APP0 = 16 };
 #define KT_MAX 64
 #define KT_RESERVE 24                /* entries apps cannot take: the kernel's tasks always get theirs */
 struct ktimer {
@@ -392,10 +392,12 @@ extern int em_aod;                  /* 0.6.5: Emergency Mode: a dim clock (the p
 void kui_aod_frame(void);           /* draws and sends the dim clock's picture */
 /* files on the card, read only (files.c) */
 int kfile_read(const char *path, void *dst, uint32_t cap);
+/* 1.2-alpha21: entries [first, first + max) of a folder: stored n, *total all (read only) */
+int kfile_list(const char *path, struct sbos_dirent *out, int max, int first, int *total);
 extern int sos_led_on;              /* settings: the LED flashes with SOS */
 
 /* apps (app.c; struct kapp in kapp.h) */
-#define APP_MAX 12
+#define APP_MAX 20                      /* 1.2-alpha21: was 12 (alpha20 had 13 in its pack: test-fault was dropped) */
 extern int napps;
 extern int app_front;               /* -1: the system screens (lock, home) */
 void apps_load_builtin(void);
@@ -533,7 +535,16 @@ void wifi_status(struct sbos_wifi *s);
 int wifi_list(struct sbos_wifi_net *out, int max);
 int wifi_bar(void);
 void wifi_timer(unsigned id);
+extern int wifi_autojoin;              /* 1.2-alpha21: join a known network automatically (remembered) */
+int wifi_known(struct sbos_wifi_known *out, int max);
+int wifi_forget(int k);
 int wifi_selftest_phase(int *done);
+/* 1.2-alpha21: the modem, receive only (modem.c) */
+int kmodem_on(void);
+int kmodem_power(int on);              /* 1: the confirmation (the start only on its hold); 0: stop */
+void kmodem_stop(const char *why);     /* park now (no-op when off) */
+void kmodem_timer(unsigned id);
+void kmodem_status(struct sbos_phone *s);
 void wifi_irq(void);                /* hw.c's interrupt drain: the radio's INTx */
 int hw_spi(unsigned intid, int on); /* one device interrupt (level, cpu0) on or off: 1 done, 0 no interrupts */
 void heatk_worker(unsigned w, void *arg);

@@ -10,7 +10,7 @@ want() { if echo "$1" | grep -q -- "$2"; then echo "ok: $3"; else echo "FAIL: $3
 never() { if echo "$1" | grep -q -- "$2"; then echo "FAIL: $3 ($2)"; fails=$((fails + 1)); else echo "ok: $3"; fi; }
 run() { limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 "$out/sbos-host" "$out" /dev/null "$@" q 2>&1; }
 UNLOCK="w:300 g:1150,2310,0,700 w:400"
-CLOCK="t:385,1545 w:600"
+CLOCK="t:385,1347 w:600"
 ALARMS="t:710,1672 w:600"
 EDIT0="t:385,888 w:600"
 H="t:385,955 w:150"

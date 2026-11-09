@@ -66,6 +66,11 @@ ICONS = {
             '<path d="M8.5 17h.01"/><path d="M12 17h.01"/><path d="M15.5 17h.01"/>',
     'notes': '<path d="M5.5 2.5h9l4 4v13a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-15a2 2 0 0 1 2-2z"/>'
              '<path d="M14.5 2.5v4h4"/><path d="M8 11h8"/><path d="M8 14.5h8"/><path d="M8 18h5"/>',
+    # 1.2-alpha21: Files (a folder), Modem (a mast with its waves)
+    'files': '<path d="M3 6.5a2 2 0 0 1 2-2h4.2l2 2.3H19a2 2 0 0 1 2 2v9.7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 10h18"/>',
+    'modem': '<path d="M12 11v10.5"/><path d="M9 21.5h6"/><circle cx="12" cy="9" r="1.6"/>'
+             '<path d="M8.2 5.4a5.4 5.4 0 0 0 0 7.2"/><path d="M15.8 5.4a5.4 5.4 0 0 1 0 7.2"/>'
+             '<path d="M5.3 2.8a9.2 9.2 0 0 0 0 12.4"/><path d="M18.7 2.8a9.2 9.2 0 0 1 0 12.4"/>',
 }
 # id: (icon, px, stroke in 24-unit) -- ids must match starbite/sbos/kern/ui.c ICON_*
 ICON_IDS = {
@@ -74,7 +79,7 @@ ICON_IDS = {
     220: ('back', 64, 2.4), 221: ('power', 96, 2.0), 222: ('moon', 96, 2.0), 223: ('restart', 96, 2.0),
     224: ('menu', 96, 2.0), 225: ('lock', 64, 2.2), 226: ('light', 96, 2.0), 227: ('sos', 96, 2.0),
     207: ('emergency', 150, 1.6), 208: ('wifi', 150, 1.6), 228: ('emergency', 96, 2.0),
-    209: ('calc', 150, 1.6), 210: ('notes', 150, 1.6),
+    209: ('calc', 150, 1.6), 210: ('notes', 150, 1.6), 211: ('modem', 150, 1.6), 212: ('files', 150, 1.6),
 }
 
 

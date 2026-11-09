@@ -57,7 +57,8 @@ static void fill(struct saved *s)
                 (uint32_t)((heat_surv_bat_c10 / 10) & 0x7f) << 20 |  /* and its battery limit (55 / 58 / 60) */
                 (uint32_t)(heat_no_high_stop != 0) << 27 |            /* 1.2-alpha17: the 4.5 A stop off */
                 (uint32_t)(heat_no_current_stop != 0) << 28 |         /* and the 3.5 A limit off */
-                (uint32_t)(heat_screen_white != 0) << 29;             /* 1.2-alpha19: Survival's white screen */
+                (uint32_t)(heat_screen_white != 0) << 29 |            /* 1.2-alpha19: Survival's white screen */
+                (uint32_t)(wifi_autojoin == 0) << 30;                 /* 1.2-alpha21: Wi-Fi's automatic join off */
     if (sbos_selftest_enabled && have_loaded) {     /* not applied there: kept as they were saved (0.5.12) */
         s->panel_save = loaded.panel_save;
         s->panel_off = loaded.panel_off;
@@ -193,6 +194,7 @@ void settings_restore(void)
         heat_no_high_stop = (int)((s.pad[3] >> 27) & 1U);
         heat_no_current_stop = (int)((s.pad[3] >> 28) & 1U);
         heat_screen_white = (int)((s.pad[3] >> 29) & 1U);
+        wifi_autojoin = !((s.pad[3] >> 30) & 1U);
         if (heat_no_high_stop || heat_no_current_stop)
             sb_logx("settings: Survival's current stops restored (bit 0: 4.5 A off, bit 1: 3.5 A off): ",
                     (uint64_t)(heat_no_high_stop | heat_no_current_stop << 1));
@@ -251,6 +253,15 @@ void settings_timer(unsigned id)
     (void)id;
     if (!slot_ok)
         return;
+    if (sb_storage_held()) {                /* 1.2-alpha21: the modem runs (no block writes): try again in 5 s */
+        static uint64_t said;
+        if (!said || sb_ms() - said > 60000U) {
+            said = sb_ms();
+            sb_log("settings: the save waits: storage writes are held (the modem runs)");
+        }
+        kt_set(KT_STATE, 0, sb_ms(), 5000, 0);
+        return;
+    }
     if (foreign) {
         sb_log("settings: not saved: the slot holds a newer version's settings");
         return;

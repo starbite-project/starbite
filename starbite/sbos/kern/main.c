@@ -43,6 +43,9 @@ static void dispatch_timer(unsigned owner, unsigned id)
     case KT_STATE:
         settings_timer(id);
         break;
+    case KT_MODEM:
+        kmodem_timer(id);                   /* 1.2-alpha21: the modem's start, poll and status GETs */
+        break;
     case KT_GUEST:
         guest_timer(id);                    /* 1.2: Linux on the M3 cluster */
         break;

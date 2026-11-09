@@ -56,6 +56,48 @@ int kfile_read(const char *path, void *dst, uint32_t cap)
     return (int)n;
 }
 
+/* 1.2-alpha21: a folder of SBOS_HOST_FILES, sorted by name (the card's order is the directory's own) */
+#include <dirent.h>
+#include <string.h>
+#include <sys/stat.h>
+static int ent_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+int kfile_list(const char *path, struct sbos_dirent *out, int max, int first, int *total)
+{
+    static char names[128][64];
+    const char *dir = getenv("SBOS_HOST_FILES");
+    *total = 0;
+    if (!dir)
+        return SBOS_EAGAIN;
+    char p[512];
+    snprintf(p, sizeof(p), "%s%s", dir, path);
+    DIR *d = opendir(p);
+    if (!d)
+        return SBOS_EINVAL;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) && n < 128)
+        if (e->d_name[0] != '.') {
+            size_t l = strlen(e->d_name);
+            if (l > 63)
+                l = 63;
+            memcpy(names[n], e->d_name, l);
+            names[n++][l] = 0;
+        }
+    closedir(d);
+    qsort(names, (size_t)n, sizeof(names[0]), ent_cmp);
+    *total = n;
+    int k = 0;
+    for (int i = first; i < n && k < max; ++i, ++k) {
+        char q[640];
+        struct stat sb;
+        snprintf(out[k].name, sizeof(out[k].name), "%s", names[i]);
+        snprintf(q, sizeof(q), "%s/%s", p, names[i]);
+        out[k].dir = stat(q, &sb) == 0 && S_ISDIR(sb.st_mode);
+        out[k].size = out[k].dir ? 0 : (uint64_t)sb.st_size;
+    }
+    return k;
+}
+
 /* ---- the kernel's hardware layer ---- */
 int hw_irq_init(void) { K.irq_mode = 1; return 1; }
 void hw_irq_poll(void) {}
@@ -183,8 +225,10 @@ APP(info)
 APP(clock)
 APP(battery)
 APP(settings)
+APP(modem)
 APP(calc)
 APP(notes)
+APP(files)
 struct host_app {
     const struct sbapp_header *hdr;
     void (*entry)(const struct sbos_event *);
@@ -192,6 +236,7 @@ struct host_app {
 const struct host_app sbos_host_apps[] = {
     { &emergency_header, emergency_app_event }, { &light_header, light_app_event }, { &heat_header, heat_app_event }, { &sos_header, sos_app_event }, { &info_header, info_app_event },
     { &clock_header, clock_app_event }, { &battery_header, battery_app_event }, { &settings_header, settings_app_event }, { &wifi_header, wifi_app_event },
-    { &calc_header, calc_app_event }, { &notes_header, notes_app_event },
+    { &modem_header, modem_app_event }, { &calc_header, calc_app_event }, { &notes_header, notes_app_event },
+    { &files_header, files_app_event },
 };
-const int sbos_host_napps = 11;
+const int sbos_host_napps = 13;

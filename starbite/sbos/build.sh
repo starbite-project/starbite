@@ -75,7 +75,7 @@ relocs_only_relative() {
 "${CROSS}gcc" $CFLAGS "$here/sdk/sbapp_lib.c" -o "$ob/app_lib.o"
 "${CROSS}gcc" $CFLAGS "$ut/tz.c" -o "$ob/app_tz.o"
 apps=""
-for a in emergency light heat sos info clock battery settings wifi calc notes test-loop test-fault; do
+for a in emergency light heat sos info clock battery settings wifi modem calc notes files test-loop test-fault; do
     "${CROSS}gcc" $CFLAGS "$here/apps/$a.c" -o "$ob/app_$a.o"
     extra=""
     [ "$a" = clock ] && extra="$ob/app_tz.o"
@@ -90,6 +90,13 @@ for a in emergency light heat sos info clock battery settings wifi calc notes te
     NM="${CROSS}nm" python3 "$here/tools/mk-sba.py" app "$ob/$a.elf" "$ob/$a.bin" "$ob/$a.sba"
     apps="$apps $ob/$a.sba"
 done
+# 1.2-alpha21: the kernel loads at most APP_MAX apps from the pack (alpha20 had 13 for 12: test-fault was dropped)
+appmax=$(sed -n 's/^#define APP_MAX \([0-9]*\).*/\1/p' "$here/kern/kern.h")
+napps=$(echo $apps | wc -w)
+if [ -z "$appmax" ] || [ "$napps" -gt "$appmax" ]; then
+    echo "sbos: $napps apps in the pack but the kernel loads at most ${appmax:-?} (APP_MAX in kern/kern.h)" >&2
+    exit 1
+fi
 python3 "$here/tools/mk-sba.py" pack "$ob/apps.pack" $apps
 
 # ---- kernel ----------------------------------------------------------------------------------------
@@ -110,6 +117,26 @@ for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$
     "${CROSS}gcc" $flags -DSBOS_KERNEL -DSB_ASSETS="\"$ob/sbassets.sb7\"" -DSBOS_APPS="\"$ob/apps.pack\"" "$src" -o "$obj"
     objs="$objs $obj"
 done
+# 1.2-alpha21: modem-core (docs/MODEM.md 7.6) for the Modem app, receive only. Its ext4 reader (a superset of
+# Wi-Fi's: EFS has the encryption flag) is built with its names prefixed, so Wi-Fi keeps its own tested reader.
+modem="$root/starbite/modem"
+MREN="-Dext4_open=m_ext4_open -Dext4_inode=m_ext4_inode -Dext4_size=m_ext4_size -Dext4_read=m_ext4_read \
+-Dext4_lookup=m_ext4_lookup -Dext4_bmap=m_ext4_bmap -Dext4_list=m_ext4_list"
+for src in "$modem"/sbm_*.c "$modem/sb/sbm_sb.c" "$modem/sb/ext4.c" "$modem/sb/jbd2.c"; do
+    obj="$ob/km_$(basename "$src" | tr . _).o"
+    "${CROSS}gcc" $CFLAGS $MREN -I"$modem" "$src" -o "$obj"
+    objs="$objs $obj"
+done
+# the rule of the modem images: no partition write from the modem code (libsb's storage hold is on while it runs)
+bad=""
+for o in "$ob"/km_*.o "$ob/k_modem_c.o"; do
+    w=$("${CROSS}nm" -u "$o" | grep -E ' (sb_blk_write|ufs_write[a-z_]*|sd_write[a-z0-9_]*|sb_write|sb_write_store|store_write[a-z_]*)$' || true)
+    [ -n "$w" ] && bad="$bad $(basename "$o"):$w"
+done
+if [ -n "$bad" ]; then
+    echo "sbos: the modem objects reference a block write:$bad" >&2
+    exit 1
+fi
 # the self-test variant (docs/STARBITE-OS.md 12.6): the same objects with uitest.c built to run
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON "$here/kern/uitest.c" -o "$ob/k_uitest_on.o"
 stobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_on.o#")
