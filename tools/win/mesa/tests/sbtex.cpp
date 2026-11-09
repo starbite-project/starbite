@@ -18,6 +18,10 @@
 //   dims        Texture2D.GetDimensions             (RESINFO/SVIEWINFO -> TXQ)
 //   bgra        Sample of a B8G8R8A8 texture        (DWM's surfaces)
 //   linear      Sample with a bilinear sampler, inside a flat area
+//   twotex      t0 and t1 through one sampler, s0 (Direct2D's text shaders; T16, sb-patches/0114: the legacy path
+//               read t1 at the sampler's index, t0, and text never drew in the user's T15 session)
+//   swizzle     Sample(..).gbra (the view swizzle the legacy path dropped)
+//   a8          an A8_UNORM texture's alpha (glyph-atlas style)
 // The texture: left half green, right half red (RGBA8 0xff00ff00 / 0xff0000ff). Output lines "TEST name: PASS|FAIL
 // got ... want ..."; exit code = the number of failed tests (100 + n if the device could not be made).
 //
@@ -45,6 +49,10 @@ static const char kHlsl[] =
     "V vs_id(uint id : SV_VertexID) {\n"
     "  V o; float2 uv = float2((id << 1) & 2, id & 2);\n"
     "  o.uv = uv; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n"
+    "Texture2D t1 : register(t1);\n"
+    "float4 ps_twotex(V i) : SV_Target { return float4(0, t.Sample(s, i.uv).g, t1.Sample(s, i.uv).b, 1); }\n"
+    "float4 ps_swizzle(V i) : SV_Target { return t.Sample(s, i.uv).gbra; }\n"
+    "float4 ps_alpha(V i) : SV_Target { return float4(t.Sample(s, i.uv).a, 0, 0, 1); }\n"
     "float4 ps_solid(V i) : SV_Target { return float4(0.0, 0.0, 1.0, 1.0); }\n"
     "float4 ps_sample(V i) : SV_Target { return t.Sample(s, i.uv); }\n"
     "float4 ps_level(V i) : SV_Target { return t.SampleLevel(s, i.uv, 0); }\n"
@@ -148,7 +156,8 @@ static void check(const char *name, const UINT *px, int x1, UINT want1, int x2, 
 }
 
 /* One full-screen pass with pixel shader `ps` sampling `srv` through `smp`, into a fresh RGBA8 target. */
-static bool pass(const char *ps_entry, ID3D11ShaderResourceView *srv, ID3D11SamplerState *smp, UINT *px)
+static bool pass(const char *ps_entry, ID3D11ShaderResourceView *srv, ID3D11SamplerState *smp, UINT *px,
+                 ID3D11ShaderResourceView *srv1 = nullptr)
 {
     ID3DBlob *b = compile(ps_entry, "ps_4_0");
     if (!b)
@@ -171,12 +180,13 @@ static bool pass(const char *ps_entry, ID3D11ShaderResourceView *srv, ID3D11Samp
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->VSSetShader(vs, nullptr, 0);
     ctx->PSSetShader(ps, nullptr, 0);
-    ctx->PSSetShaderResources(0, 1, &srv);
+    ID3D11ShaderResourceView *srvs[2] = { srv, srv1 };
+    ctx->PSSetShaderResources(0, 2, srvs);
     ctx->PSSetSamplers(0, 1, &smp);
     ctx->Draw(3, 0);
     bool ok = readback(rt, DXGI_FORMAT_R8G8B8A8_UNORM, px);
-    ID3D11ShaderResourceView *none = nullptr;
-    ctx->PSSetShaderResources(0, 1, &none);
+    ID3D11ShaderResourceView *none[2] = { nullptr, nullptr };
+    ctx->PSSetShaderResources(0, 2, none);
     rtv->Release();
     rt->Release();
     ps->Release();
@@ -332,6 +342,28 @@ int main(int argc, char **argv)
     else out("TEST bgra     : FAIL (pass)\n"), failures++;
     if (pass("ps_sample", srv, linear, px)) check("linear", px, 8, green, 56, red, 0xffffffffu);
     else out("TEST linear   : FAIL (pass)\n"), failures++;
+
+    {   // T16: what Direct2D's text and images need (sb-patches/0114)
+        static UINT solid[64 * 64], alpha[64 * 16];
+        for (int i = 0; i < 64 * 64; i++)
+            solid[i] = blue;
+        for (int y = 0; y < 64; y++)
+            for (int x = 0; x < 64; x++)
+                ((BYTE *)alpha)[y * 64 + x] = x < 32 ? 0xff : 0x40;
+        ID3D11Texture2D *tb = texture(DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, solid, 64 * 4);
+        ID3D11Texture2D *ta = texture(DXGI_FORMAT_A8_UNORM, D3D11_BIND_SHADER_RESOURCE, alpha, 64);
+        ID3D11ShaderResourceView *srvblue = nullptr, *srva = nullptr;
+        if (tb && SUCCEEDED(dev->CreateShaderResourceView(tb, nullptr, &srvblue)) &&
+            pass("ps_twotex", srv, point, px, srvblue))
+            check("twotex", px, 16, 0xffffff00u, 48, 0xffff0000u, 0xffffffffu);   // (0, g of t0, b of t1, 1)
+        else out("TEST twotex   : FAIL (pass)\n"), failures++;
+        if (pass("ps_swizzle", srv, point, px))
+            check("swizzle", px, 16, red, 48, blue, 0xffffffffu);                  // green.gbra = red; red.gbra = blue
+        else out("TEST swizzle  : FAIL (pass)\n"), failures++;
+        if (ta && SUCCEEDED(dev->CreateShaderResourceView(ta, nullptr, &srva)) && pass("ps_alpha", srva, point, px))
+            check("a8", px, 16, 0xff0000ffu, 48, 0xff000040u, 0xffffffffu);
+        else out("TEST a8       : FAIL (pass or A8_UNORM unsupported)\n"), failures++;
+    }
 
     out("sbtex %s: %d test(s) failed\n", dll, failures);
     if (logf)

@@ -1196,6 +1196,50 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
 - **Next (T16):** real DECON flips, with each full-screen primary in a scanout buffer of its own and
   SetVidPnSourceAddress writing the IDMA base (§7.3).
 
+### 6.23 T15 on the user's phone, and T16: textures read through the wrong index (2026-11-09)
+
+**T15 (attended, `--install-default`; 13 photos, hive, 11 umdlogs in build/win/results/user-t15):**
+- **What held:**
+  - GPU memory peaked at 945 MB (`Live_AllocMBPeak`), with no failed allocations and no refused submissions;
+  - DWM did not restart;
+  - the taskbar and Start drew (every second D3D device now has its own shim device).
+- **What was still wrong:**
+  - no text in XAML apps or LogonUI (Settings showed cards and toggles without a letter);
+  - no profile picture;
+  - dithered taskbar icons;
+  - stale regions;
+  - heavy flicker;
+  - Starbite link about 8x slower.
+- **The umdlogs:** every XAML and Direct2D frame is `DrawIndexedInstanced(6 indices, N instances)` into 1024x1024
+  shared atlases.
+
+**The cause:**
+- d3d10umd ran Panfrost in its legacy texture mode (§6.10), because tgsi_to_nir lacked the D3D10 opcodes.
+- In that mode SAMPLE becomes TEX on the **sampler's** unit (`LOG_UNSUPPORTED` when the indices differ), and the
+  resource swizzle is dropped.
+- Direct2D samples its glyph atlas (and image masks) next to another texture through one sampler, so text read
+  texture 0 instead.
+
+**T16 (sb-patches/0114):**
+- tgsi_to_nir implements SAMPLE, SAMPLE_B/C/C_LZ/D/L/I/I_MS and SVIEWINFO:
+  - separate texture and bare-sampler variables, so the texture and sampler indices are separate (Panfrost
+    emits texture and sampler tables independently);
+  - the view swizzle and texel offsets applied;
+  - a SAMPLE outside fragment shaders becomes lod 0.
+- d3d10umd stops using the legacy mode (`SB_OLD_TEX_OPS=1` restores it).
+- **Host test:** `tools/win/mesa/tests/host/ttn_sample.c` runs TGSI shaders through tgsi_to_nir, Panfrost's
+  lowering and the Bifrost compiler for the G72, natively in the lima VM. All fragment cases compile:
+  - two textures and one sampler (texture_index 1, sampler_index 0);
+  - B/L/D, compare, load, and buffer load.
+  SVIEWINFO and the vertex-shader cases are validated in NIR only: the harness lacks the driver's system-value and
+  varying setup, and the legacy controls crash there too.
+- **sbtex:** `twotex`, `swizzle` and `a8` tests added.
+
+**Left for T17:**
+- real DECON flips: the aliased single scanout buffer tears and shows half-drawn frames;
+- Desktop Duplication's CPU reads from uncached allocations, the Starbite link slowdown (sblinkd copies
+  dirty rects to a staging texture and maps it).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
