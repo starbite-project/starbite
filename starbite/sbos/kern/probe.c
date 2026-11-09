@@ -311,40 +311,55 @@ static void g_wr(uintptr_t a, uint32_t v)
 #endif
 }
 
-/* the PLL to M (P and S kept); 1 locked */
-static int g_set_m(uint32_t m)
+/* 1.2-alpha13 (H2b): H2 asked M 200 with P 4, S 1 (VCO 1300 MHz) and the PLL never locked: the 1018X's VCO range is
+ * 600 .. 1200 MHz (vendor cal-if pll_spec.c gpll1018X_spec: P 1..63, M 64..1023, S 0..6, Fref 2..8 MHz, lock time 150
+ * Fref cycles a P), and 598 MHz already runs it at 1196 (S 1). Above 600 MHz: S 0, the VCO is the clock itself. The
+ * vendor's own sequence (cal-if ra.c ra_enable_pll / ra_pll_set_pmsk): the output mux to the oscillator (MUX_SEL 0,
+ * then MUX_BUSY bit 7 clear), the PLL off, the lock time P x 150 into PLL_LOCKTIME (0x17400000), then one write of P,
+ * M, S with MUX_SEL and ENABLE, and STABLE (bit 29) awaited. 1 locked. */
+#define G3D_LOCK 0x17400000UL
+static int g_pms_ok(uint32_t p, uint32_t m, uint32_t s)
 {
+    uint64_t fref_khz = p ? 26000U / p : 0, vco_mhz = p ? 26ULL * m / p : 0;
+    return p >= 1 && p <= 63 && m >= 64 && m <= 1023 && s <= 6 && fref_khz >= 2000 && fref_khz <= 8000 &&
+           vco_mhz >= 600 && vco_mhz <= 1200;
+}
+
+static int g_set_pms(uint32_t p, uint32_t m, uint32_t s)
+{
+    if (!g_pms_ok(p, m, s))
+        return 0;
     uint32_t v = g_rd(G3D_CON0);
-    g_wr(G3D_CON0, v & ~0x10U);                         /* the GPU on the oscillator */
-    sb_udelay(20);
-    v = g_rd(G3D_CON0) & ~0x80000000U;
+    g_wr(G3D_CON0, v & ~0x10U);                         /* the output to the oscillator */
+#ifndef SB_HOST
+    for (unsigned us = 0; us < 100 && (g_rd(G3D_CON0) & 0x80U); ++us)
+        sb_udelay(1);                                   /* MUX_BUSY */
+#endif
+    v = g_rd(G3D_CON0) & ~(0x80000000U | 0x10U);
     g_wr(G3D_CON0, v);                                  /* the PLL off */
-    sb_udelay(5);
-    v = (v & ~(0x3ffU << 16)) | (m & 0x3ffU) << 16;
-    g_wr(G3D_CON0, v);
-    g_wr(G3D_CON0, v | 0x80000000U);                    /* on */
+    g_wr(G3D_LOCK, p * 150U);                           /* the lock time, as the vendor writes it */
+    v = (v & ~((0x3ffU << 16) | (0x3fU << 8) | 7U)) | m << 16 | p << 8 | s;
+    g_wr(G3D_CON0, v | 0x80000000U | 0x10U);            /* P, M, S, MUX_SEL and ENABLE in one write */
     int locked = 0;
 #ifndef SB_HOST
-    for (unsigned us = 0; us < 5000; us += 10) {
+    for (unsigned us = 0; us < 2000; us += 5) {
         if (g_rd(G3D_CON0) & 0x20000000U) {
             locked = 1;
             break;
         }
-        sb_udelay(10);
+        sb_udelay(5);
     }
 #else
     locked = 1;
 #endif
-    if (locked)
-        g_wr(G3D_CON0, g_rd(G3D_CON0) | 0x10U);         /* the GPU back on the PLL */
     return locked;
 }
 
 static void g_back(const char *why)
 {
-    uint32_t m = (g_con0_598 >> 16) & 0x3ffU;
+    uint32_t m = (g_con0_598 >> 16) & 0x3ffU, p = (g_con0_598 >> 8) & 0x3fU, s = g_con0_598 & 7U;
     if (m)
-        (void)g_set_m(m);
+        (void)g_set_pms(p, m, s);
     (void)hw_dvfs(4, 598000U);
     sb_logf("probe: gpu: back at 598 MHz: ", why);
 }
@@ -363,7 +378,7 @@ int gpuprobe_step(void)
         gpuheat_tick();
     switch (gph) {
     case 0:
-        sb_log("probe: start: H2, the GPU above 598 MHz (PLL_G3D set directly, vdd_g3d 950 mV, 30 s a step)");
+        sb_log("probe: start: H2b, the GPU above 598 MHz (PLL_G3D at S 0, the vendor's sequence, vdd_g3d 950 mV, 30 s a step)");
         gpu_heat_session = 1;
         gpuheat_khz = 598000U;
         if (!gpuheat_start()) {
@@ -372,6 +387,7 @@ int gpuprobe_step(void)
             return 0;
         }
         g_con0_598 = g_rd(G3D_CON0);
+        sb_logx("probe: gpu: PLL_LOCKTIME ", g_rd(G3D_LOCK));
         {
             struct ub u;
             ub_init(&u);
@@ -442,24 +458,31 @@ int gpuprobe_step(void)
             return 0;
         }
         {
-            uint32_t p = (g_con0_598 >> 8) & 0x3fU, s = g_con0_598 & 7U;
-            uint32_t m = (uint32_t)(((uint64_t)g_steps[gstep] * p * (1U << s) + 13U) / 26U);
-            uint64_t vco = p ? 26ULL * m / p : 0;
-            if (!p || m > 1023U || vco > 3200U) {
-                sb_logx("probe: gpu: the next step is outside the PLL's fields or VCO, MHz ", g_steps[gstep]);
+            /* S 0 above 600 MHz (the VCO is the clock: 600 .. 1200), P kept (4: Fref 6.5 MHz) */
+            uint32_t p = (g_con0_598 >> 8) & 0x3fU, s = 0;
+            uint32_t m = p ? (uint32_t)(((uint64_t)g_steps[gstep] * p + 13U) / 26U) : 0;
+            if (!g_pms_ok(p, m, s)) {
+                sb_logx("probe: gpu: the next step is outside the 1018X's limits (VCO 600..1200), MHz ", g_steps[gstep]);
                 g_back("the PLL's limits");
                 gph = 8;
                 g_t = now;
                 return 0;
             }
-            int ok = g_set_m(m);
+            uint32_t lk0 = g_rd(G3D_LOCK);
+            int ok = g_set_pms(p, m, s);
             struct ub u;
             ub_init(&u);
             ub_s(&u, "probe: gpu: to ");
             ub_dec(&u, g_steps[gstep]);
-            ub_s(&u, " MHz: M ");
+            ub_s(&u, " MHz: P ");
+            ub_dec(&u, p);
+            ub_s(&u, " M ");
             ub_dec(&u, m);
-            ub_s(&u, ok ? ", locked, PLL reads " : ", NO LOCK in 5 ms, PLL reads ");
+            ub_s(&u, " S 0 (lock time was ");
+            ub_dec(&u, lk0);
+            ub_s(&u, "), CON0 ");
+            ub_hex(&u, g_rd(G3D_CON0), 8);
+            ub_s(&u, ok ? ", locked, PLL reads " : ", NO LOCK in 2 ms, PLL reads ");
             int off = 0;
             ub_dec(&u, sb_gpu_hz(&off) / 1000000U);
             ub_s(&u, " MHz");
