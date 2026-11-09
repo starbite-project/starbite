@@ -58,7 +58,7 @@
 /* libsb's non-cacheable RAM-test window (sb.h SB_TEST_BASE..+SB_TEST_SIZE), which Starbite OS never uses (Engineer
  * OS's memory stress does, in its own boots); its first MiB keeps the CPU_ON trampolines (0xa010_0000..0xa010_007f) */
 #define G_BOUNCE (SB_TEST_BASE + 0x100000UL)
-#define G_BOUNCE_END (SB_TEST_BASE + SB_TEST_SIZE)
+#define G_BOUNCE_END 0xa6000000UL          /* 1.2-alpha7: below the radio's DMA (wifi/sb 0xa6000000..0xa6800000) */
 #endif
 #define SW 720U
 #define SH 1440U

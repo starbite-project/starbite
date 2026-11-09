@@ -223,7 +223,17 @@ static void scan_result(struct bcmw *w, const struct bcmw_event *ev)
         w->join_unsuitable++;
         return;
     }
-    if (!w->join_found || rssi > w->join_rssi) {
+    {
+        /* wifi-core 3ccc92a: 5 GHz preferred when the same network is on both bands (a 5 GHz access point wins
+         * unless it is 20 dB weaker): T4-WPA2 joined the user's network on 5 GHz but timed out on its 2.4 GHz side
+         * (as W2g's 2.4 GHz hotspot did under Windows); Starbite OS's self tests picked 2.4 GHz and timed out */
+        int b5 = (le16(d + 72) & 0xc000) == 0xc000, cur5 = (w->join_chanspec & 0xc000) == 0xc000;
+        int better = !w->join_found || (b5 == cur5 ? rssi > w->join_rssi :
+                                        b5 ? rssi + 20 > w->join_rssi : rssi > w->join_rssi + 20);
+        if (!better)
+            return;
+    }
+    {
         w->join_found = 1;
         w->join_rssi = rssi;
         bcmw_memcpy(w->join_bssid, d + 8, 6);
@@ -253,6 +263,20 @@ void link_event(struct bcmw *w, const struct bcmw_event *ev)
     }
     if (w->join_phase < 2)
         return;
+    if (w->join_phase == 2 && ev->type != E_PSK_SUP) {
+        /* wifi-core 3ccc92a: every event while joining (what the firmware did before a timeout) */
+        struct bcmw_lb l;
+        lb_init(&l);
+        lb_s(&l, "link: event ");
+        lb_dec(&l, ev->type);
+        lb_s(&l, " status ");
+        lb_dec(&l, ev->status);
+        lb_s(&l, " reason ");
+        lb_dec(&l, ev->reason);
+        lb_s(&l, " flags ");
+        lb_hex(&l, ev->flags, 4);
+        bcmw_say_lb(w, &l);
+    }
     switch (ev->type) {
     case BCMW_E_SET_SSID:
         if (ev->status != 0) {
@@ -449,6 +473,7 @@ static int scan_begin(struct bcmw *w)
     w->join_phase = 1;
     w->join_found = 0;
     w->join_scan_done = 0;
+    w->join_settle_t = 0;
     w->join_unsuitable = 0;
     for (unsigned k = 0; (e = bcmw_iovar_set(w, "escan", p, n, 0)) != BCMW_OK && k < 5; k++) {
         bcmw_say(w, "link: the scan was refused (busy?): again in 500 ms");
@@ -621,6 +646,12 @@ int bcmw_join_poll(struct bcmw *w)
         mb_process(w);
         if (!w->join_scan_done && bcmw_now(w) - w->join_t0 < 8000000)
             return BCMW_E_PENDING;      /* the directed scan's results */
+        /* wifi-core 24a0adf: 300 ms of settling after the directed scan before SET_SSID (Windows joined seconds
+         * after its last scan) */
+        if (!w->join_settle_t)
+            w->join_settle_t = bcmw_now(w);
+        if (bcmw_now(w) - w->join_settle_t < 300000)
+            return BCMW_E_PENDING;
         if ((e = join_associate(w)) != BCMW_OK)
             goto out;
         return BCMW_E_PENDING;

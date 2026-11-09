@@ -477,6 +477,7 @@ int wifi_power(int on)
     os.dma_alloc = dma_reuse;
     memset(&cfg, 0, sizeof(cfg));
     cfg.stop_after = BCMW_STEP_UP;
+    cfg.rx_buffers = 256;                   /* 1.2-alpha7: as the Windows driver that joins (wifi-core 24a0adf) */
 #ifdef SB_HOST
     cfg.any_files = 1;
     memcpy(cfg.mac, "\x02\x11\x22\x33\x44\x55", 6);   /* the station address the model's access point expects */
