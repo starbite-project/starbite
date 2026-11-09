@@ -707,6 +707,23 @@ static void test_cell_and_redact(void)
     CHECKEQ(st.n_bad, 2);
     CHECK(!strcmp(sbm_sim_name(SBM_SIM_ABSENT), "absent"));
 
+    /* the masked status line never shows the PLMN */
+    {
+        struct sbm_cell_state cs;
+        char ln[200];
+        sbm_cell_init(&cs);
+        cs.have_sim = 1; cs.sim_status = SBM_SIM_ABSENT;
+        cs.have_plmn = 1; strcpy(cs.plmn, "00101");
+        cs.have_bars = 1; cs.bars = 4;
+        cs.have_rssi = 1; cs.rssi_raw[0] = 0x53;
+        sbm_cell_line_masked(&cs, ln, sizeof(ln));
+        CHECK(!strcmp(ln, "SIM absent | CS ? | PS ? | PLMN set | bars 4 | rssi 0x53"));
+        CHECK(strstr(ln, "00101") == 0);
+        cs.have_plmn = 0;
+        sbm_cell_line_masked(&cs, ln, sizeof(ln));
+        CHECK(!strcmp(ln, "SIM absent | CS ? | PS ? | PLMN - | bars 4 | rssi 0x53"));
+    }
+
     char s[200];
     strcpy(s, "IMEI 012345678901234 IMSI 001010123456789 cid 7654321 len 123456");
     CHECKEQ(sbm_redact_text(s, sizeof(s)), 3);
@@ -1433,6 +1450,38 @@ static void test_boot(void)
         fakesoc_free(&s);
         b.rfs_serve = 0;
         b.fmt_query = 0;
+        boot_image(&im, 0);
+    }
+
+    /* soak: queries at +3 s and every 10 s for 25 s (3 rounds), the masked status line every 60 s (none in 25 s) */
+    {
+        static uint8_t nv_before[0x100000];
+        boot_image(&im, 0);
+        memcpy(nv_before, t_nv, sizeof(nv_before));
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        s.rfs_mode = 1;
+        s.nv_ref = nv_before;
+        fakesoc_plat(&s, &p, tlog);
+        b.stop = SBM_BOOT_ONLINE;
+        b.hold_ms = 25000;
+        b.rfs_serve = 1;
+        b.fmt_query = 1;
+        b.query_period_ms = 10000;
+        nlog = 0;
+        CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+        CHECKEQ(b.stopped_by, SBM_STOP_TIME);
+        CHECKEQ(b.fmt_tx, 33);
+        CHECKEQ(b.fmt_resp + b.fmt_gen_res, 33);
+        CHECKEQ(s.fcp.n_forbidden, 0);
+        unsigned tx_lines = 0;
+        for (unsigned i = 0; i < nlog && i < 256; ++i)
+            tx_lines += strstr(loglines[i], " TX ch235 | ") != 0;
+        CHECKEQ(tx_lines, 11);                                  /* only the first round is logged in full */
+        check_parked(&s);
+        fakesoc_free(&s);
+        b.rfs_serve = 0;
+        b.fmt_query = 0;
+        b.query_period_ms = 0;
         boot_image(&im, 0);
     }
 

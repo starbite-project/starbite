@@ -353,7 +353,7 @@ static int put_wait(const struct sbm_plat *p, struct sbm_sbd *sbd, const uint8_t
 /* T11: the status GETs, through the builder's allow-list (sbm_ipc_frame refuses anything else: no SET/EXEC, nothing
  * that switches RF on, no CALL/SMS/SS/SAT/identity), on FMT0 with the data doorbell. Answers come back as RESP on
  * the DL rings and go through sbm_cell like everything else. */
-static int fmt_queries(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, uint32_t ms)
+static int fmt_queries(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, uint32_t ms, int logit)
 {
     static const struct { uint16_t cmd; uint8_t n; uint8_t d[2]; } q[] = {
         { SBM_PWR_PHONE_STATE, 0, { 0 } },       { SBM_SEC_PIN_STATUS, 0, { 0 } },
@@ -376,7 +376,8 @@ static int fmt_queries(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
         if (r < 0)
             return r;
         b->fmt_tx++;
-        sbm_logf(p, "FMT: +%u TX ch235 | %s GET seq %u", ms, sbm_ipc_name(q[i].cmd, nb), mseq);
+        if (logit)
+            sbm_logf(p, "FMT: +%u TX ch235 | %s GET seq %u", ms, sbm_ipc_name(q[i].cmd, nb), mseq);
     }
     return 0;
 }
@@ -608,7 +609,7 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
                 }
             next:
                 sbm_sbd_get_done(sbd, (unsigned)id, SBM_DL, p);
-                if (b->fmt_rx + b->rfs_rx + b->bad_rx >= 200) {
+                if (b->fmt_rx + b->rfs_rx + b->bad_rx >= 200 + limit / 50) {
                     b->stopped_by = SBM_STOP_FRAMES;
                     g_online_ms = 0xFFFFFFFFu;
                     return 0;
@@ -632,13 +633,20 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
             g_online_ms = 0xFFFFFFFFu;
             return 0;
         }
-        if (b->fmt_query && ms == 3000) {
-            int e = fmt_queries(p, b, sbd, ms);
+        if (b->fmt_query && ms >= 3000 &&
+            (ms == 3000 || (b->query_period_ms && (ms - 3000) % b->query_period_ms == 0))) {
+            int e = fmt_queries(p, b, sbd, ms, ms == 3000);
             if (e < 0) {
                 g_online_ms = 0xFFFFFFFFu;
                 online_state(p, "a query could not be sent");
                 return e;
             }
+        }
+        if (b->query_period_ms && !(ms % 60000)) {
+            char line[160];
+            sbm_cell_line_masked(&b->cell, line, sizeof(line));
+            sbm_logf(p, "SOAK: +%u s: %s | FMT %u RFS %u queries %u answers %u", ms / 1000, line, b->fmt_rx, b->rfs_rx,
+                     b->fmt_tx, b->fmt_resp + b->fmt_gen_res);
         }
         if (!(ms % 1000))
             feed(p);

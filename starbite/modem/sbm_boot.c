@@ -320,11 +320,13 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     enum sbm_boot_stop want = b->stop;
     uint32_t hold = b->hold_ms;
     int serve = b->rfs_serve, query = b->fmt_query;
+    uint32_t period = b->query_period_ms;
     sbm_memset(b, 0, sizeof(*b));
     b->stop = want;
-    b->hold_ms = hold > 60000 ? 60000 : hold;
+    b->hold_ms = hold > 600000 ? 600000 : hold;     /* 10 min at most (the soak) */
     b->rfs_serve = serve;
     b->fmt_query = query;
+    b->query_period_ms = period;
     b->stopped_at = "-";
     sbm_logf(p, "boot: stage 3 up to %s", want == SBM_BOOT_DRY ? "the RAM check" : want == SBM_BOOT_SEC
              ? "EL3's signature check (the CP CPU is not started)" : want == SBM_BOOT_RUN
@@ -413,7 +415,7 @@ void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
     if (b->stop == SBM_BOOT_ONLINE && b->init_end_sent) {
         char line[160];
         static const char *const why[] = { "-", "time", "SIM present", "registration", "crash command", "frame budget" };
-        sbm_cell_line(&b->cell, line, sizeof(line));
+        sbm_cell_line_masked(&b->cell, line, sizeof(line));
         sbm_logf(p, "ONLINE: stopped by %s; FMT %u, RFS %u (reads %u, writes %u, other %u), bad %u", why[b->stopped_by <= 5 ? b->stopped_by : 0],
                  b->fmt_rx, b->rfs_rx, b->rfs_reads, b->rfs_writes, b->rfs_other, b->bad_rx);
         sbm_logf(p, "ONLINE: %s", line);

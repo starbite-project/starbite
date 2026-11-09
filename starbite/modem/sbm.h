@@ -468,6 +468,9 @@ void sbm_cell_init(struct sbm_cell_state *st);
 int sbm_cell_update(struct sbm_cell_state *st, const struct sbm_ipc_msg *m);
 /* One line, e.g. "SIM absent | CS emergency-only (GSM) | PS emergency-only | PLMN 00101 | bars 2" */
 void sbm_cell_line(const struct sbm_cell_state *st, char *out, size_t cap);
+/* The same without the PLMN (it identifies the country and operator): "PLMN set" / "PLMN -". For logs and for a
+ * status screen that is shared or photographed. Also "rssi 0x.." from DISP_RSSI_INFO when known. */
+void sbm_cell_line_masked(const struct sbm_cell_state *st, char *out, size_t cap);
 const char *sbm_sim_name(uint8_t status);
 const char *sbm_reg_name(uint8_t state);
 const char *sbm_act_name(uint8_t act);
@@ -654,6 +657,7 @@ struct sbm_boot {
     int rfs_serve;                     /* input (T10): answer RFS from the RAM copy of nv_data.bin */
     uint32_t rfs_tx, rfs_tx_frames, rfs_tx_bytes, big_frames, big_dropped, rfs_joined, rfs_parts;
     int fmt_query;                     /* input (T11): send the allow-listed status GETs once, 3 s after INIT_END */
+    uint32_t query_period_ms;          /* input (soak): and again every this many ms (0 = once) */
     uint32_t fmt_tx, fmt_tx_refused, fmt_resp, fmt_gen_res;
     struct sbm_cell_state cell;        /* what the CP reported (decoded, identity-free) */
     uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;
