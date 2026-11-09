@@ -321,14 +321,14 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     uint32_t hold = b->hold_ms;
     int serve = b->rfs_serve, query = b->fmt_query;
     uint32_t period = b->query_period_ms;
-    int keep = b->keep_running;
+    uint32_t keep = b->keep_running;
     sbm_memset(b, 0, sizeof(*b));
     b->stop = want;
     b->hold_ms = hold > 600000 ? 600000 : hold;     /* 10 min at most (the soak) */
     b->rfs_serve = serve;
     b->fmt_query = query;
     b->query_period_ms = period;
-    b->keep_running = keep && want == SBM_BOOT_ONLINE;
+    b->keep_running = keep == SBM_KEEP_RUNNING && want == SBM_BOOT_ONLINE ? SBM_KEEP_RUNNING : 0;
     b->stopped_at = "-";
     sbm_logf(p, "boot: stage 3 up to %s", want == SBM_BOOT_DRY ? "the RAM check" : want == SBM_BOOT_SEC
              ? "EL3's signature check (the CP CPU is not started)" : want == SBM_BOOT_RUN
@@ -392,7 +392,7 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     if (r < 0 || want == SBM_BOOT_RUN)
         return stop(p, b, r, r < 0 ? "power on" : "done (first status, parked)");
     r = sbm_link_boot(p, im, b);
-    if (want == SBM_BOOT_ONLINE && b->keep_running && r == 0 && b->init_end_sent) {
+    if (want == SBM_BOOT_ONLINE && b->keep_running == SBM_KEEP_RUNNING && r == 0 && b->init_end_sent) {
         b->stopped_at = "online (session: running, not parked)";
         return 0;                             /* the session owns the CP now; sbm_modem_stop parks it */
     }

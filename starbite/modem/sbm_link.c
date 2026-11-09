@@ -667,7 +667,7 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
     int r = online_enter(p, b, sbd, im);
     if (r < 0)
         return r;
-    if (b->keep_running)
+    if (b->keep_running == SBM_KEEP_RUNNING)
         return 0;                            /* the session API takes over (sbm_modem_poll) */
     const uint32_t limit = b->hold_ms ? b->hold_ms : 20000;
     for (uint32_t ms = 1; ms <= limit; ++ms) {
@@ -693,7 +693,7 @@ int sbm_modem_start(struct sbm_modem *m, const struct sbm_plat *p, struct sbm_im
     m->im = im;
     m->b.stop = SBM_BOOT_ONLINE;
     m->b.rfs_serve = 1;
-    m->b.keep_running = 1;
+    m->b.keep_running = SBM_KEEP_RUNNING;
     m->b.hold_ms = 0;
     int r = sbm_boot_run(p, im, &m->b);
     m->up = r == 0 && m->b.init_end_sent && !m->b.parked;

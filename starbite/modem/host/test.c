@@ -1165,6 +1165,7 @@ static void test_boot(void)
     struct sbm_plat p;
     struct sbm_boot b;
 
+    memset(&b, 0, sizeof(b));            /* its inputs are copied by sbm_boot_run: never stack garbage (2ecf7cd) */
     CHECKEQ(sbm_crc32(0, "123456789", 9), 0xCBF43926);
     boot_image(&im, 0);
     uint32_t boot_crc = sbm_crc32(0, t_radio + 0x200, 0x1e40), main_crc = sbm_crc32(0, t_radio + 0x2040, T_MAIN);
@@ -1482,6 +1483,31 @@ static void test_boot(void)
         b.rfs_serve = 0;
         b.fmt_query = 0;
         b.query_period_ms = 0;
+        boot_image(&im, 0);
+    }
+
+    /* soak 2ecf7cd: the caller left keep_running as stack garbage; anything but SBM_KEEP_RUNNING must park */
+    {
+        static const uint32_t junk[] = { 1, 0xA5A5A5A5u, 0xFFFFFFFFu, SBM_KEEP_RUNNING ^ 1 };
+        for (unsigned j = 0; j < sizeof(junk) / sizeof(junk[0]); ++j) {
+            struct sbm_boot g;
+            memset(&g, 0xA5, sizeof(g));
+            g.stop = SBM_BOOT_ONLINE;
+            g.hold_ms = 2000;
+            g.rfs_serve = 0;
+            g.fmt_query = 0;
+            g.query_period_ms = 0;
+            g.keep_running = junk[j];
+            boot_image(&im, 0);
+            fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+            fakesoc_plat(&s, &p, tlog);
+            CHECKEQ(sbm_boot_run(&p, &im, &g), 0);
+            CHECK(g.init_end_sent && g.parked && !g.keep_running);
+            CHECKEQ(g.stopped_by, SBM_STOP_TIME);
+            CHECK(!strstr(g.stopped_at, "not parked"));
+            check_parked(&s);
+            fakesoc_free(&s);
+        }
         boot_image(&im, 0);
     }
 

@@ -658,7 +658,8 @@ struct sbm_boot {
     uint32_t rfs_tx, rfs_tx_frames, rfs_tx_bytes, big_frames, big_dropped, rfs_joined, rfs_parts;
     int fmt_query;                     /* input (T11): send the allow-listed status GETs once, 3 s after INIT_END */
     uint32_t query_period_ms;          /* input (soak): and again every this many ms (0 = once) */
-    int keep_running;                  /* input (session API): return online after INIT_END, not parked */
+    uint32_t keep_running;             /* input (session API only): SBM_KEEP_RUNNING = return online after INIT_END,
+                                        * not parked. Any other value (0, or stack garbage) parks: soak 2ecf7cd */
     uint32_t fmt_tx, fmt_tx_refused, fmt_resp, fmt_gen_res;
     struct sbm_cell_state cell;        /* what the CP reported (decoded, identity-free) */
     uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;
@@ -720,6 +721,7 @@ int sbm_rfs_handle(struct sbm_rfs *r, const uint8_t *req, uint32_t n, uint8_t *o
  * of them behind an international prefix), never a short code, only the user's own allow-list. No switch. */
 #define SBM_DIAL_ALLOW_MAX   4
 #define SBM_DIAL_MIN_DIGITS  7
+#define SBM_KEEP_RUNNING     0x4B454550u   /* "KEEP": the only value of sbm_boot.keep_running that skips the park */
 struct sbm_dial_policy {
     const char *allowed[SBM_DIAL_ALLOW_MAX];    /* the user's own numbers (never in git) */
     unsigned n_allowed;

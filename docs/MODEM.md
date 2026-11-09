@@ -547,6 +547,17 @@ The platform glue for Starbite OS is `sb/sbm_sb.c` (as for the test images), and
 tests cover a 2 s loop, a query, the masked status, stop/park, and a SIM appearing (the guard parks from poll). The
 phone demo is key `modemsess`: a 1 ms loop for 2 minutes, queries every 10 s, the masked status line on the screen.
 
+**Soak run 1 (2026-11-09, 2ecf7cd, `build/modem/soak-1/pmsg.txt`): returned unparked after INIT_END.** `stage3()` in
+the probe never zeroed its `struct sbm_boot`. The new `keep_running` input was stack garbage (non-zero), so
+`sbm_boot_run` took the session path. It returned "online (session: running, not parked)" with zero traffic, and
+the image went to its end. The reset hook still parked the CP before the reboot (`CENTRAL_SEQ_CP_STATUS 0x80`), and
+One UI's modem was not affected. Fixed in three places:
+- the core keeps the CP only for `keep_running == SBM_KEEP_RUNNING` ("KEEP"); any other value parks;
+- `stage3()` zeroes the struct;
+- `stage3()` parks the CP itself whenever `sbm_boot_run` returns with it unparked, without waiting for the reset hook.
+A host test runs ONLINE with garbage-filled structs and four non-magic values, and every case must park. The host
+test's own `struct sbm_boot` had the same flaw, which made its check count depend on the build. It is now zeroed.
+
 ## 8. Later stages (not started)
 
 

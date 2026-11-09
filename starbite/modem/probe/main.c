@@ -346,6 +346,7 @@ static void stage3(const char *key)
                             : sb_streq(key, "modemload-run") ? SBM_BOOT_RUN
                             : sb_streq(key, "modemload-sec") ? SBM_BOOT_SEC : SBM_BOOT_DRY;
 
+    sbm_memset(&b, 0, sizeof(b));           /* 2ecf7cd left it unset: keep_running garbage, soak returned unparked */
     sb_storage_hold("modem test: no storage writes");
     sbm_fmt(s, sizeof(s), "modemload: %s; storage writes held; watchdog %u s (own: armed or fed here)",
             soak ? "SOAK: INIT_END, RFS from RAM, the 11 status GETs every 10 s, 10 min (no SIM: receive only), park"
@@ -385,6 +386,10 @@ static void stage3(const char *key)
         b.hold_ms = soak ? 600000 : 60000;
     b.query_period_ms = soak ? 10000 : 0;
     sbm_boot_run(&park_plat, &im, &b);
+    if (b.inited && !b.parked) {         /* stage 3 never keeps the CP: park here, not only in the reset hook */
+        line("modemload: the CP came back not parked: parking it now");
+        b.parked = sbm_cp_park(&park_plat) == 0;
+    }
     park_armed = b.inited && !b.parked;  /* the core parked already; the hook only retries a failed park */
     sbm_boot_report(&park_plat, &b);
     line("modemload: after:");
