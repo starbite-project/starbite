@@ -1389,6 +1389,23 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
   - sb-patches/0121 lists unnamed BOs only until first resident, with a full refresh every 64 submissions
     (`SB_LIST_ALL=1` restores), and queues completion events only when a wait needs one.
 
+### 6.33 T25's drag numbers; T26 cached blt reads (2026-11-10)
+
+- **sbdrag (T25, untraced):**
+  - with sblinkd: 44.7 moves/s, avg 22.4 ms, max 399 ms;
+  - without: 38.4 moves/s, max 478 ms.
+  - Present copy 330-537 ms/s, almost all from the KMD's CPU copies of DWM's blt presents (2,349 of them).
+  - DWM's UMD waits blocked for up to 740 ms. The copies run inside SubmitCommand, which holds the queue.
+- **The copies read their source through a write-combined view.** Uncached reads on the A55s are the cost.
+- **T26 `CachedBltReads`** (driver default 0, test cycles 1, `gpu-cycle.sh --cached-blt N`):
+  - A second, cached view of the allocation's MDL (`AllocationVaCached`) is used for blt sources only.
+  - Before the copy, each source rectangle's lines are cleaned and invalidated (`dc civac`, then `dsb sy`).
+  - 16 sample pixels are compared with the write-combined view; a mismatch turns cached reads off for the boot.
+  - Counters `Live_CachedBlts`, `Live_CachedBltMismatch`.
+- **Flip address at Present:** DxgkDdiPresent records a flip's source segment address. Patch overrides it on a move.
+  T25's Patch-only capture saw 94 of 3,599 flips. Counter `Live_FlipAddrPresent`.
+- A real GPU blit for these presents (a KMD-built Mali job) stays the next step if cached reads are not enough.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

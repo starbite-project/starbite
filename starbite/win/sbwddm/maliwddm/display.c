@@ -212,6 +212,9 @@ NTSTATUS MwDisplayStart(MW_ADAPTER *A)
                 A->FbPfn[i] = (PFN_NUMBER)((ULONG64)pa.QuadPart >> PAGE_SHIFT) + i;
     }
     MwLog(A, L"PrimaryInFb", A->PrimaryInFb && A->FbPfn != NULL);
+    /* T26: blt presents read their source through a cached, line-invalidated view (command.c AllocationVaCached) */
+    A->CachedBltReads = S9GetDword(L"Parameters", L"CachedBltReads", 0) != 0;
+    MwLog(A, L"CachedBltReads", A->CachedBltReads);
     if (A->PrimaryInFb)
         ScanStart(A);
     A->SourceVisible = TRUE;

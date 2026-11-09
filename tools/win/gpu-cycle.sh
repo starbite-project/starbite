@@ -45,7 +45,7 @@ esac
 out=${1:?usage: gpu-cycle.sh STAGE OUT [...]}; shift
 tkey=win11-gpu; ckey=win11-auto; keep=0
 full_sec=300
-while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --no-trace) notrace=1; shift;; --scan-flip) scan_flip=$2; shift 2;; --full-sec) full_sec=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
+while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --no-trace) notrace=1; shift;; --scan-flip) scan_flip=$2; shift 2;; --cached-blt) cached_blt=$2; shift 2;; --full-sec) full_sec=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
 case $full_sec in ''|*[!0-9]*) echo "--full-sec needs seconds"; exit 1;; esac
 [ "$full_sec" -ge 120 ] && [ "$full_sec" -le 3600 ] || { echo "--full-sec 120..3600"; exit 1; }
 mkdir -p "$out"
@@ -169,7 +169,7 @@ install() {
         # unattended cycles: the guard never clears itself (each install resets it); --install-default sets 1
         # T17: Live_ logging rate and hive flushes (1 s / every second in test cycles; the user's install 10 s / 60 s)
         python3 "$HS" "$tmp/S0" "$tmp/S1" param sbwddm FullMode=1 GuardAutoClear="${guard_auto:-0}" \
-            LiveSec="${live_sec:-1}" LiveFlushSec="${live_flush:-1}" ScanFlip="${scan_flip:-1}" >/dev/null
+            LiveSec="${live_sec:-1}" LiveFlushSec="${live_flush:-1}" ScanFlip="${scan_flip:-1}" CachedBltReads="${cached_blt:-1}" >/dev/null
     else cp "$tmp/SYSTEM" "$tmp/S1"; fi
     if python3 tools/woa/hive.py "$tmp/S1" 'ControlSet001\Services\sbwdog' 2>/dev/null | grep -q "Start"; then cp "$tmp/S1" "$tmp/S2"
     else python3 "$HS" "$tmp/S1" "$tmp/S2" add sbwdog --start 0 --oneshot 0 --image 'System32\drivers\sbwdog.sys' --display "Starbite watchdog feeder" >/dev/null; fi
@@ -220,6 +220,7 @@ install-default)
     # (windows-t13b.uefi: the Mali interrupt lines), or full mode refuses to start and Windows uses Basic Display.
     guard_auto=1 unattended=0 live_sec=10 live_flush=60
     scan_flip=${scan_flip:-0}   # T24: real DECON flips only when asked (--scan-flip 1) until a cycle has proven them
+    cached_blt=${cached_blt:-0} # T26: cached blt-present reads only when asked (--cached-blt 1) until a cycle has proven them
     stage_gputest=$stage/gputest
     mount_rw
     if [ -d "$stage_gputest" ]; then stage_tmp=$(mktemp -d); cp "$stage"/*.sys "$stage"/*.dll "$stage_tmp"/ 2>/dev/null; stage=$stage_tmp; fi

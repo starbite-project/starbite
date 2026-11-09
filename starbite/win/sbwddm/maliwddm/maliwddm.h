@@ -67,6 +67,7 @@ typedef struct _MW_ALLOCATION {
     BOOLEAN Coherent;
     PVOID CpuMap;
     LONG ScanSlot;              /* T24: the scanout buffer this full-screen primary renders into (-1: none) */
+    PVOID CpuMapCached;         /* T26: a cached view for blt-present reads, invalidated line by line before use */
 } MW_ALLOCATION;
 
 typedef struct _MW_ADAPTER MW_ADAPTER;
@@ -232,6 +233,9 @@ struct _MW_ADAPTER {
     volatile LONG ScanCur;
     ULONG ScanFlips, ScanFlipsForced, ScanSlotShared, ScanFallback, ScanPendingTicks;
     ULONG FlipAddrPatched, FlipAddrShown;   /* T25 */
+    ULONG FlipAddrPresent;                  /* T26: flip addresses taken at Present (VidMm patches only on moves) */
+    BOOLEAN CachedBltReads;                 /* T26: Parameters\CachedBltReads (default 1); off after a mismatch */
+    ULONG CachedBlts, CachedBltMismatch;
     /* T14a: the first failed job of the boot (JS 0x51 INSTR_INVALID_ENC, once per boot since T13b), for
      * matching against the umdlogs' "bo N va A-B" lines */
     ULONG64 RunningJc;

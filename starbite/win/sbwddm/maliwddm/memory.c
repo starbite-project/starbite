@@ -112,6 +112,10 @@ static void FreeAllocation(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
     /* T13g: never leave the refresh pointing at freed memory */
     (void)InterlockedCompareExchangePointer((PVOID volatile *)&A->ShowAlloc, NULL, Alloc);
     (void)InterlockedCompareExchangePointer((PVOID volatile *)&A->ScanAlloc, NULL, Alloc);
+    if (Alloc->CpuMapCached && Alloc->Mdl) {
+        MmUnmapLockedPages(Alloc->CpuMapCached, Alloc->Mdl);
+        Alloc->CpuMapCached = NULL;
+    }
     if (Alloc->CpuMap && Alloc->Mdl) {
         MmUnmapLockedPages(Alloc->CpuMap, Alloc->Mdl);
         Alloc->CpuMap = NULL;
@@ -331,6 +335,9 @@ NTSTATUS APIENTRY MwBuildPagingBuffer(IN_CONST_HANDLE hAdapter, DXGKARG_BUILDPAG
         if (alloc->CpuMap && alloc->Mdl)    /* a view of the previous pages */
             MmUnmapLockedPages(alloc->CpuMap, alloc->Mdl);
         alloc->CpuMap = NULL;
+        if (alloc->CpuMapCached && alloc->Mdl)
+            MmUnmapLockedPages(alloc->CpuMapCached, alloc->Mdl);
+        alloc->CpuMapCached = NULL;
         alloc->Mdl = Arg->MapApertureSegment.pMdl;
         alloc->MdlPage = (ULONG)Arg->MapApertureSegment.MdlOffset;
         alloc->Coherent = Arg->MapApertureSegment.Flags.CacheCoherent != 0;
@@ -357,6 +364,9 @@ NTSTATUS APIENTRY MwBuildPagingBuffer(IN_CONST_HANDLE hAdapter, DXGKARG_BUILDPAG
         if (alloc->CpuMap && alloc->Mdl)
             MmUnmapLockedPages(alloc->CpuMap, alloc->Mdl);
         alloc->CpuMap = NULL;
+        if (alloc->CpuMapCached && alloc->Mdl)
+            MmUnmapLockedPages(alloc->CpuMapCached, alloc->Mdl);
+        alloc->CpuMapCached = NULL;
         alloc->Mdl = NULL;
         ExReleaseFastMutex(&a->MmuLock);
         return STATUS_SUCCESS;

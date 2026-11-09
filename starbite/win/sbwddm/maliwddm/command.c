@@ -196,6 +196,12 @@ NTSTATUS APIENTRY MwPresent(IN_CONST_HANDLE hContext, DXGKARG_PRESENT *Arg)
         MW_PRESENT_OP *op = &priv->Present;
         op->Kind = MW_PRESENT_FLIP;
         op->Src = (MW_ALLOCATION *)Arg->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].hDeviceSpecificAllocation;
+        /* T26: the source's address as of now (VidMm calls Patch only when an allocation moved: T25 saw 94 of 3,599) */
+        if (Arg->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].SegmentId != 0) {
+            op->SrcPhys = Arg->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].PhysicalAddress;
+            op->SrcPhysValid = TRUE;
+            a->FlipAddrPresent++;
+        }
         if (op->Src != NULL && Arg->PatchLocationListOutSize > 0) {
             RtlZeroMemory(Arg->pPatchLocationListOut, sizeof(*Arg->pPatchLocationListOut));
             Arg->pPatchLocationListOut->AllocationIndex = DXGK_PRESENT_SOURCE_INDEX;
@@ -236,6 +242,44 @@ NTSTATUS APIENTRY MwPresent(IN_CONST_HANDLE hContext, DXGKARG_PRESENT *Arg)
 
 /* The CPU view of a resident allocation, or NULL. S9 port (T13e): mapped once with the caching VidMm gave
  * its pages (see MW_ALLOCATION.CpuMap), not the default cached system view. */
+/* T26: a cached view of an allocation, for blt-present reads only. The GPU writes these pages without snooping the
+ * CPU caches, so every line read through this view is invalidated first (InvalidateRect); 16 pixels per present are
+ * compared with the write-combined view, and one mismatch turns cached reads off for the rest of the boot. T25: the
+ * write-combined reads of DWM's blt presents took 330-540 ms of CPU a second during a window drag. */
+static PUCHAR AllocationVaCached(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
+{
+    if (Alloc == NULL || Alloc->Mdl == NULL)
+        return NULL;
+    if (Alloc->CpuMapCached == NULL) {
+        PVOID m = NULL;
+        __try {
+            m = MmMapLockedPagesSpecifyCache(Alloc->Mdl, KernelMode, MmCached, NULL, FALSE,
+                                             HighPagePriority | MdlMappingNoExecute);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            m = NULL;
+        }
+        if (m == NULL) {
+            A->CpuMapFails++;
+            return NULL;
+        }
+        if (InterlockedCompareExchangePointer(&Alloc->CpuMapCached, m, NULL) != NULL)
+            MmUnmapLockedPages(m, Alloc->Mdl);
+    }
+    return (PUCHAR)Alloc->CpuMapCached + (SIZE_T)Alloc->MdlPage * PAGE_SIZE;
+}
+
+/* Drop (clean+invalidate, never dirty here) every cache line of a rectangle of a cached view. */
+static void InvalidateRect(const UCHAR *Base, LONG Pitch, LONG L, LONG T, LONG R, LONG B)
+{
+    for (LONG y = T; y < B; y++) {
+        ULONG_PTR p = (ULONG_PTR)(Base + (SIZE_T)y * Pitch + (SIZE_T)L * 4) & ~(ULONG_PTR)63;
+        ULONG_PTR e = (ULONG_PTR)(Base + (SIZE_T)y * Pitch + (SIZE_T)R * 4);
+        for (; p < e; p += 64)
+            __asm__ volatile("dc civac, %0" : : "r"(p) : "memory");
+    }
+    __asm__ volatile("dsb sy" : : : "memory");
+}
+
 static PUCHAR AllocationVa(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
 {
     if (Alloc == NULL || Alloc->Mdl == NULL)
@@ -368,6 +412,36 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         srcW = (LONG)Op->Src->Width;
         srcH = (LONG)Op->Src->Height;
         srcPitch = (LONG)(Op->Src->Pitch ? Op->Src->Pitch : Op->Src->Width * 4);
+        if (A->CachedBltReads && srcW > 0 && srcH > 0) {
+            /* T26: read through a cached view, every line of the source rectangles invalidated first */
+            PUCHAR c = AllocationVaCached(A, Op->Src);
+            if (c != NULL) {
+                ULONG n = Op->NumRects ? Op->NumRects : 1;
+                LONG dx = Op->SrcRect.left - Op->DstRect.left, dy = Op->SrcRect.top - Op->DstRect.top;
+                BOOLEAN same = TRUE;
+                for (ULONG i = 0; i < n; i++) {
+                    RECT r = Op->NumRects ? Op->Rects[i] : Op->DstRect;
+                    r.left += dx; r.right += dx; r.top += dy; r.bottom += dy;
+                    ClipRect(&r, srcW, srcH);
+                    if (r.right > r.left && r.bottom > r.top)
+                        InvalidateRect(c, srcPitch, r.left, r.top, r.right, r.bottom);
+                    if (i == 0 && r.right > r.left && r.bottom > r.top) {
+                        for (LONG k = 0; k < 16 && same; k++) {
+                            LONG x = r.left + (r.right - r.left) * (k % 4) / 4, y = r.top + (r.bottom - r.top) * (k / 4) / 4;
+                            SIZE_T o = (SIZE_T)y * srcPitch + (SIZE_T)x * 4;
+                            same = *(const volatile ULONG *)(c + o) == *(const volatile ULONG *)(src + o);
+                        }
+                    }
+                }
+                if (same) {
+                    src = c;
+                    A->CachedBlts++;
+                } else {
+                    A->CachedBltMismatch++;
+                    A->CachedBltReads = FALSE;
+                }
+            }
+        }
     }
     /* A destination allocation's own pages. For a primary too (T13f): else a later flip to that primary
      * copies its stale pages over the framebuffer. */

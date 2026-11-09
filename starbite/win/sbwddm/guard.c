@@ -144,6 +144,9 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         /* T25: flips whose source address Patch saw, and that the vsync then reported */
         { L"Live_FlipAddrPatched", a->FlipAddrPatched }, { L"Live_FlipAddrShown", a->FlipAddrShown },
         { L"Live_ScanAddrLo", a->ScanAddr.LowPart },
+        /* T26: flip addresses taken at Present; blt presents read through the cached view; mismatches (then off) */
+        { L"Live_FlipAddrPresent", a->FlipAddrPresent }, { L"Live_CachedBlts", a->CachedBlts },
+        { L"Live_CachedBltMismatch", a->CachedBltMismatch },
     };
     static_assert(sizeof(c) / sizeof(c[0]) < SBW_LIVE_MAX, "Live_ table too long");
     for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]); i++)
