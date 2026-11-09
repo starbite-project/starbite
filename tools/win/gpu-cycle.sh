@@ -173,6 +173,8 @@ install() {
     else cp "$tmp/SYSTEM" "$tmp/S1"; fi
     if python3 tools/woa/hive.py "$tmp/S1" 'ControlSet001\Services\sbwdog' 2>/dev/null | grep -q "Start"; then cp "$tmp/S1" "$tmp/S2"
     else python3 "$HS" "$tmp/S1" "$tmp/S2" add sbwdog --start 0 --oneshot 0 --image 'System32\drivers\sbwdog.sys' --display "Starbite watchdog feeder" >/dev/null; fi
+    # T17: small memory dumps on (the image had CrashDumpEnabled 0: T15's restart bugcheck left nothing to read)
+    python3 "$HS" "$tmp/S2" "$tmp/S2d" crashdump 3 >/dev/null && mv "$tmp/S2d" "$tmp/S2"
     python3 "$HS" "$tmp/S2" "$tmp/S3" param sbwdog Unattended="${unattended:-1}" FullRestartSec="$full_sec" FullCapSec=$((full_sec + 60)) DisplayRestartSec=120 DisplayCapSec=180 >/dev/null
     local rc=0
     push_check "$tmp/S3" "$W/$HIVE" || rc=4

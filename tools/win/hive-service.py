@@ -5,6 +5,9 @@
   hive-service.py IN OUT disable NAME          Start = 4 (the service is skipped at boot; files stay)
   hive-service.py IN OUT remove NAME           delete the service key
   hive-service.py IN OUT hiberboot 0|1         Control\\Session Manager\\Power\\HiberbootEnabled (fast startup)
+  hive-service.py IN OUT crashdump 0|3         Control\\CrashControl\\CrashDumpEnabled: 3 = small memory dumps into
+                                               %SystemRoot%\\Minidump (the S9's Windows had 0: the T15 restart
+                                               bugcheck left no dump); tools/win/kdump.py reads them
   hive-service.py IN OUT param NAME [--root] VALUE=N [VALUE=N ...]
                                                DWORDs in Services\\NAME\\Parameters (kept others); --root: in
                                                Services\\NAME itself (e.g. sbwddm's FullGuardBoots=0)
@@ -228,6 +231,12 @@ def main(a):
                 s += f'cd \\{cs}\\Control\\GraphicsDrivers\nadd Scheduler\n' + setvals(None, sch, pre)
         hivexsh(work, s + 'commit\n')
         shown = cls
+    elif cmd == 'crashdump':
+        if arg not in ('0', '3'):
+            raise SystemExit('crashdump 0|3')
+        key = f'{cs}\\Control\\CrashControl'
+        hivexsh(work, setvals(h, key, {'CrashDumpEnabled': dword(int(arg))}) + 'commit\n')
+        shown = key
     elif cmd == 'hiberboot':
         key = f'{cs}\\Control\\Session Manager\\Power'
         hivexsh(work, setvals(h, key, {'HiberbootEnabled': dword(int(arg))}) + 'commit\n')
