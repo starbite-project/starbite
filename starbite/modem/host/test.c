@@ -1485,6 +1485,60 @@ static void test_boot(void)
         boot_image(&im, 0);
     }
 
+    /* the session API (Starbite OS): start, poll from a loop, query, status, stop = park */
+    {
+        static uint8_t nv_before[0x100000];
+        static struct sbm_modem mo;
+        char st[200];
+        boot_image(&im, 0);
+        memcpy(nv_before, t_nv, sizeof(nv_before));
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        s.rfs_mode = 1;
+        s.nv_ref = nv_before;
+        fakesoc_plat(&s, &p, tlog);
+        CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
+        CHECK(mo.up && !mo.b.parked && mo.b.init_end_sent);
+        CHECK(s.cp_running);                                     /* not parked: the session owns it */
+        for (unsigned i = 0; i < 2000; ++i) {                    /* 2 s of an event loop, 1 ms per turn */
+            CHECKEQ(sbm_modem_poll(&mo, 1), 0);
+            p.udelay(p.ctx, 1000);
+        }
+        CHECKEQ(sbm_modem_query(&mo), 0);
+        for (unsigned i = 0; i < 100; ++i) {
+            sbm_modem_poll(&mo, 1);
+            p.udelay(p.ctx, 1000);
+        }
+        sbm_modem_status(&mo, st, sizeof(st));
+        CHECK(strstr(st, "SIM absent") && strstr(st, "CS emergency-only") && !strstr(st, "00101"));
+        CHECKEQ(s.rfs_read_ok, 1);
+        CHECKEQ(sbm_modem_stop(&mo), 0);
+        CHECK(!mo.up && mo.b.parked);
+        sbm_modem_status(&mo, st, sizeof(st));
+        CHECK(!strcmp(st, "modem off (parked)"));
+        CHECKEQ(sbm_modem_poll(&mo, 1), SBM_EPERM);
+        check_parked(&s);
+        check_allowed(&s);
+        fakesoc_free(&s);
+
+        /* a SIM appears: the guard parks the CP from inside poll */
+        boot_image(&im, 0);
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        s.sim_present = 1;
+        fakesoc_plat(&s, &p, tlog);
+        CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
+        int r = 0;
+        for (unsigned i = 0; i < 2000 && r == 0; ++i) {
+            r = sbm_modem_poll(&mo, 1);
+            p.udelay(p.ctx, 1000);
+        }
+        CHECKEQ(r, 1);
+        CHECKEQ(mo.b.stopped_by, SBM_STOP_SIM);
+        CHECK(!mo.up && mo.b.parked);
+        check_parked(&s);
+        fakesoc_free(&s);
+        boot_image(&im, 0);
+    }
+
     /* ONLINE with a SIM present: stops at once on the SIM status, parked */
     fakesoc_init(&s, &im.plan, boot_crc, main_crc);
     s.sim_present = 1;

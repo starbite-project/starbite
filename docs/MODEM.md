@@ -535,6 +535,18 @@ C++ dynamic symbols remain), `etc/mixer_paths.xml` and `firmware/calliope_*.bin`
   values of the first three bytes are unconfirmed) and any call frame. They wait for the SIM day, with the user
   present and a real capture (O3/O4) to confirm them. Nothing in this core can send or dial.
 
+### 7.6 The session API for Starbite OS (`sbm_modem_*`)
+The online stage is now two functions: `online_enter` (link reset, clock table, INIT_END) and `online_poll` (one pass:
+mailbox, rings, RFS, guards, queries). The test images run them in a timed loop as before. Starbite OS gets:
+- `sbm_modem_start(m, plat, image)`: load, EL3, start, link, online with the RFS server. About 2 s, blocking; the CP
+  stays up (`keep_running`).
+- `sbm_modem_poll(m, elapsed_ms)`: non-blocking, from the event loop. A guard (a SIM that is not absent, a
+  registration) or a crash command parks the CP and returns 1 / an error.
+- `sbm_modem_query`, `sbm_modem_status` (the masked line for a status screen), `sbm_modem_stop` (park).
+The platform glue for Starbite OS is `sb/sbm_sb.c` (as for the test images), and the reset hook must park. Host
+tests cover a 2 s loop, a query, the masked status, stop/park, and a SIM appearing (the guard parks from poll). The
+phone demo is key `modemsess`: a 1 ms loop for 2 minutes, queries every 10 s, the masked status line on the screen.
+
 ## 8. Later stages (not started)
 
 

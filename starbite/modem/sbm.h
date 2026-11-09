@@ -658,6 +658,7 @@ struct sbm_boot {
     uint32_t rfs_tx, rfs_tx_frames, rfs_tx_bytes, big_frames, big_dropped, rfs_joined, rfs_parts;
     int fmt_query;                     /* input (T11): send the allow-listed status GETs once, 3 s after INIT_END */
     uint32_t query_period_ms;          /* input (soak): and again every this many ms (0 = once) */
+    int keep_running;                  /* input (session API): return online after INIT_END, not parked */
     uint32_t fmt_tx, fmt_tx_refused, fmt_resp, fmt_gen_res;
     struct sbm_cell_state cell;        /* what the CP reported (decoded, identity-free) */
     uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;
@@ -745,6 +746,24 @@ int sbm_sms_incoming(const struct sbm_ipc_msg *m, struct sbm_sms *s);
 /* TP-SUBMIT for number (allow-listed, never an emergency number: sbm_dial_check) and an ASCII text that fits one
  * GSM 7-bit message (160 characters, the common subset). Returns the PDU length or SBM_E*. Nothing sends it yet. */
 int sbm_sms_submit(const struct sbm_dial_policy *pol, const char *number, const char *text, uint8_t *out, uint32_t cap);
+
+/* The session API (Starbite OS): sbm_modem_start loads, checks and starts the CP and brings the link online with the RFS
+ * server (about 2 s, blocking); sbm_modem_poll is non-blocking, from the event loop (every few ms): mailbox, rings,
+ * RFS, guards; a guard (a SIM that is not absent, a registration) or a crash parks the CP and returns 1 / SBM_E*.
+ * sbm_modem_query sends the allow-listed status GETs; sbm_modem_status gives the masked status line; sbm_modem_stop
+ * parks. Receive-only by design until the SIM day: the guards stay in. */
+struct sbm_modem {
+    const struct sbm_plat *p;
+    struct sbm_image *im;
+    struct sbm_boot b;
+    uint32_t ms;
+    int up;
+};
+int sbm_modem_start(struct sbm_modem *m, const struct sbm_plat *p, struct sbm_image *im);
+int sbm_modem_poll(struct sbm_modem *m, uint32_t elapsed_ms);
+int sbm_modem_query(struct sbm_modem *m);
+void sbm_modem_status(const struct sbm_modem *m, char *out, size_t cap);
+int sbm_modem_stop(struct sbm_modem *m);
 
 /* Park: Android's power-off. Safe to call more than once and when nothing was started. */
 int sbm_cp_park(const struct sbm_plat *p);
