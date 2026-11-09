@@ -280,14 +280,16 @@ static void stage3(const char *key)
     struct sbm_boot b;
     struct sbm_probe pr;
     char s[COLS];
-    enum sbm_boot_stop stop = sb_streq(key, "modemlink-online") ? SBM_BOOT_ONLINE
+    int serve = sb_streq(key, "modemlink-rfs");
+    enum sbm_boot_stop stop = sb_streq(key, "modemlink-online") || serve ? SBM_BOOT_ONLINE
                             : sb_prefix(key, "modemlink") ? SBM_BOOT_LINK
                             : sb_streq(key, "modemload-run") ? SBM_BOOT_RUN
                             : sb_streq(key, "modemload-sec") ? SBM_BOOT_SEC : SBM_BOOT_DRY;
 
     sb_storage_hold("modem test: no storage writes");
     sbm_fmt(s, sizeof(s), "modemload: %s; storage writes held; watchdog %u s (own: armed or fed here)",
-            stop == SBM_BOOT_ONLINE ? "ONLINE: stage 4, then INIT_END and 20 s receive only (no SIM allowed), park"
+            serve ? "ONLINE+RFS: stage 4, INIT_END, RFS answered from a RAM copy of nv_data.bin (FMT receive only), park"
+            : stop == SBM_BOOT_ONLINE ? "ONLINE: stage 4, then INIT_END and 20 s receive only (no SIM allowed), park"
             : stop == SBM_BOOT_LINK ? "LINK: stage 3, then DL_START, UDL, INIT_START, PIF_INIT_DONE, PHONE_START, park"
             : stop == SBM_BOOT_RUN ? "RUN: load, EL3 check, start the CP, first status, park"
             : stop == SBM_BOOT_SEC ? "SEC: load, EL3 check, park (the CP CPU is not started)" : "DRY: RAM only",
@@ -315,6 +317,7 @@ static void stage3(const char *key)
     }
     b.stop = stop;
     b.hold_ms = sb_streq(key, "modemlink-hold") || stop == SBM_BOOT_ONLINE ? 1000u * arg("modem_hold", 20) : 0;
+    b.rfs_serve = serve;
     sbm_boot_run(&park_plat, &im, &b);
     park_armed = b.inited && !b.parked;  /* the core parked already; the hook only retries a failed park */
     sbm_boot_report(&park_plat, &b);

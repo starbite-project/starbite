@@ -29,6 +29,12 @@ struct fakesoc {
     enum { L_IDLE, L_UDL, L_INIT_SOON, L_WAIT_PIF, L_PHONE_SOON, L_DONE, L_ONLINE } link;
     struct fakecp fcp;                 /* the CP's online side: FMT NOTIs, RFS requests */
     int sim_present, online_crash, crashed_no_magic;
+    /* T10: the CP's RFS side (requests out, replies checked) */
+    int rfs_mode;
+    const uint8_t *nv_ref;              /* what NV reads must return (the test's RAM copy before the write) */
+    uint32_t rfs_replies, rfs_read_ok, rfs_write_ok, rfs_open_enoent, rfs_bad_reply, rfs_frames_in;
+    uint8_t rfs_rbuf[0x20000];
+    struct sbm_reasm rfs_ra;
     uint64_t link_at_us;
     int udl_silent, udl_wrong, crash_after_pif, layout_ok;
     uint8_t udl_frames[4][16];

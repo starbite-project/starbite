@@ -244,15 +244,10 @@ static void log_rfs(const struct sbm_plat *p, struct sbm_boot *b, const uint8_t 
         return;
     }
     if ((idx == SBM_RFS_IDX_NV_READ || idx == SBM_RFS_IDX_NV_WRITE) && n >= SBM_RFS_HDR + 8)
-        sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u: offset 0x%x length 0x%x (%s; not answered)", idx, id, len,
+        sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u: offset 0x%x length 0x%x (%s)", idx, id, len,
                  sbm_le32(pl + 6), sbm_le32(pl + 10), idx == SBM_RFS_IDX_NV_READ ? "NV read" : "NV write, data not shown");
-    else if (idx == SBM_RFS_IDX_WRITE_FILE || idx == SBM_RFS_IDX_PUT_FILE || idx == SBM_RFS_IDX_NV_WRITE_ALL)
-        sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u (carries data: not shown; not answered)", idx, id, len);
-    else if (n >= SBM_RFS_HDR + 8)
-        sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u: %02x %02x %02x %02x %02x %02x %02x %02x (not answered)", idx, id, len,
-                 pl[6], pl[7], pl[8], pl[9], pl[10], pl[11], pl[12], pl[13]);
     else
-        sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u, %u bytes (not answered)", idx, id, len, n);
+        sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u (%u bytes; body not shown)", idx, id, len, n);
 }
 
 /* Android's shmem_reset_ipc_link, run on the CP's first PHONE_START: access 0, magic 0, the legacy queue words 0,
@@ -281,11 +276,124 @@ static void online_state(const struct sbm_plat *p, const char *when)
              *leg(p, SBM_LEG_MAGIC), *leg(p, SBM_LEG_ACCESS), i1 & 0xFFFF, i3, SBM_CP_STATUS(i3), sr);
 }
 
-static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd)
+/* CP -> AP frames longer than one SBD buffer (Android's check_more): the first buffer carries the SIPC5 header with
+ * the whole length, the next buffers are raw continuation without a header, until the length is reached. T9c: an
+ * 89,680-byte NV write arrived this way. */
+struct bigf {
+    uint8_t *buf;
+    uint32_t cap, total, rcvd;
+    int active;
+};
+static uint8_t big_fmt[2][0x10000], big_rfs[0xA0000];
+static struct bigf bigs[3] = { { big_fmt[0], sizeof(big_fmt[0]), 0, 0, 0 }, { big_fmt[1], sizeof(big_fmt[1]), 0, 0, 0 },
+                               { big_rfs, sizeof(big_rfs), 0, 0, 0 } };
+
+/* 1 = a whole frame in (*fb, *fl); 0 = taken into a big frame (more to come); -1 = dropped */
+static int big_feed(struct sbm_boot *b, struct bigf *g, const uint8_t *f, uint32_t n, uint32_t bufsz,
+                    const uint8_t **fb, uint32_t *fl)
+{
+    if (g->active) {
+        if (n > g->cap - g->rcvd) {
+            g->active = 0;
+            b->big_dropped++;
+            return -1;
+        }
+        sbm_memcpy(g->buf + g->rcvd, f, n);
+        g->rcvd += n;
+        if (g->rcvd < g->total)
+            return 0;
+        g->active = 0;
+        b->big_frames++;
+        *fb = g->buf;
+        *fl = g->total;
+        return 1;
+    }
+    if (n >= 4 && (f[0] & SBM_SIPC5_START) == SBM_SIPC5_START) {
+        uint32_t flen = (f[0] & SBM_SIPC5_EXT) && (f[0] & SBM_SIPC5_MULTI) != SBM_SIPC5_MULTI
+                        ? (n >= 6 ? sbm_le32(f + 2) : 0) : sbm_le16(f + 2);
+        if (flen > bufsz && flen > n) {
+            if (flen > g->cap) {
+                b->big_dropped++;
+                return -1;
+            }
+            sbm_memcpy(g->buf, f, n);
+            g->rcvd = n;
+            g->total = flen;
+            g->active = 1;
+            return 0;
+        }
+    }
+    *fb = f;
+    *fl = n;
+    return 1;
+}
+
+/* AP -> CP on the RFS UL ring, Android's way (misc_write with max_tx_size = the 2048-byte buffer): one SIPC5 frame
+ * when it fits, else multi-frame fragments (config 0xFB, { id, more }), each followed by the data doorbell 0x81. */
+#define RFS_TX_FRAME 2048u
+static int put_wait(const struct sbm_plat *p, struct sbm_sbd *sbd, const uint8_t *fr, uint32_t l)
+{
+    for (uint32_t t = 0; t < 2000; ++t) {
+        int r = sbm_sbd_put(sbd, SBM_CH_RFS0, SBM_UL, fr, l, p);
+        if (r == 0)
+            return msg_send(p, SBM_INT_VALID | 0x0001) ? 0 : SBM_EPERM;
+        if (r != SBM_ENOSPC)
+            return r;
+        delay(p, 1000);             /* the CP has not consumed the ring yet */
+        if (!(t % 100))
+            feed(p);
+    }
+    return SBM_ETIME;
+}
+
+static int rfs_send(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, const uint8_t *m, uint32_t len)
+{
+    static uint8_t fr[RFS_TX_FRAME];
+    static uint8_t info_id;
+    int l, r;
+    if (len + 4 <= RFS_TX_FRAME) {
+        l = sbm_sipc5_build(fr, sizeof(fr), SBM_CH_RFS0, m, len);
+        if (l < 0)
+            return l;
+        r = put_wait(p, sbd, fr, (uint32_t)l);
+        b->rfs_tx_frames += r == 0;
+        return r;
+    }
+    info_id = (uint8_t)((info_id + 1) & 0x7F);
+    for (uint32_t o = 0; o < len; o += RFS_TX_FRAME - 5) {
+        uint32_t k = len - o < RFS_TX_FRAME - 5 ? len - o : RFS_TX_FRAME - 5;
+        l = sbm_sipc5_build_multi(fr, sizeof(fr), SBM_CH_RFS0, info_id, o + k < len, m + o, k);
+        if (l < 0)
+            return l;
+        if ((r = put_wait(p, sbd, fr, (uint32_t)l)) < 0)
+            return r;
+        b->rfs_tx_frames++;
+    }
+    return 0;
+}
+
+static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, struct sbm_image *im)
 {
     static uint8_t rbuf[3][8192];
     static struct sbm_reasm ra[3];
-    uint32_t logged = 0;
+    static struct sbm_rfs rfs;
+    static uint8_t reply[SBM_RFS_MAX_IO + 64];
+    uint32_t logged = 0, rfs_logged = 0;
+    if (b->rfs_serve) {
+        /* the RAM copy of nv_data.bin the glue read from EFS (read only); the CP's writes change only this RAM */
+        uint8_t *nv = 0;
+        uint32_t nvs = 0;
+        for (unsigned k = 0; k < im->plan.n; ++k)
+            if (im->plan.l[k].src == SBM_SRC_NV) {
+                nv = (uint8_t *)(uintptr_t)im->data[k];
+                nvs = im->plan.l[k].size;
+            }
+        if (!nv)
+            return SBM_ENOENT;
+        sbm_rfs_init(&rfs, nv, nvs);
+        for (unsigned k = 0; k < 3; ++k)
+            bigs[k].active = 0;
+    }
     if (reset_ipc_link(p) < 0) {
         sbm_logf(p, "online: the IPC link reset did not read back");
         return SBM_EIO;
@@ -355,10 +463,11 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
                     continue;
                 }
                 struct sbm_sipc5 fr;
-                const uint8_t *msg;
-                uint32_t ml;
-                int ok = sbm_sipc5_parse(f, (uint32_t)n, &fr) == 0 && fr.ch == chs[c];
-                int got = ok ? sbm_reasm_feed(&ra[c], &fr, &msg, &ml) : -1;
+                const uint8_t *msg, *fb;
+                uint32_t ml, fl;
+                int whole = big_feed(b, &bigs[c], f, (uint32_t)n, sbd->r[id][SBM_DL].size, &fb, &fl);
+                int ok = whole == 1 && sbm_sipc5_parse(fb, fl, &fr) == 0 && fr.ch == chs[c];
+                int got = ok ? sbm_reasm_feed(&ra[c], &fr, &msg, &ml) : whole == 0 ? 0 : -1;
                 if (got == 1 && c < 2) {
                     struct sbm_ipc_msg m;
                     b->fmt_rx++;
@@ -366,7 +475,7 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
                         sbm_cell_update(&b->cell, &m);
                         if (logged < ONLINE_LOG_MAX) {
                             char line[200];
-                            sbm_frame_line(f, (uint32_t)n, 1, line, sizeof(line));
+                            sbm_frame_line(fb, fl, 1, line, sizeof(line));
                             sbm_logf(p, "FMT: +%u %s", ms, line);
                             logged++;
                         }
@@ -375,14 +484,35 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
                     }
                 } else if (got == 1) {
                     b->rfs_rx++;
-                    log_rfs(p, b, msg, ml, logged < ONLINE_LOG_MAX);
-                    logged += logged < ONLINE_LOG_MAX;
+                    log_rfs(p, b, msg, ml, rfs_logged < ONLINE_LOG_MAX);
+                    rfs_logged += rfs_logged < ONLINE_LOG_MAX;
+                    if (b->rfs_serve) {
+                        int rl = sbm_rfs_handle(&rfs, msg, ml, reply, sizeof(reply));
+                        if (rl > 0) {
+                            int e = rfs_send(p, b, sbd, reply, (uint32_t)rl);
+                            if (rfs_logged < ONLINE_LOG_MAX) {
+                                sbm_logf(p, "RFS: +%u tx idx 0x%02x id %u len %u: %s %u (%s)", ms, reply[4], reply[5], rl,
+                                         reply[4] == SBM_RFS_IDX_OPEN ? "errno" : "confirm",
+                                         reply[4] == SBM_RFS_IDX_OPEN ? sbm_le32(reply + 10) : reply[6], e ? sbm_strerror(e) : "sent");
+                                rfs_logged++;
+                            }
+                            if (e < 0) {
+                                b->stopped_by = SBM_STOP_TIME;
+                                g_online_ms = 0xFFFFFFFFu;
+                                online_state(p, "the RFS reply could not be sent");
+                                return e;
+                            }
+                            b->rfs_tx++;
+                            b->rfs_tx_bytes += (uint32_t)rl;
+                        }
+                    }
                 } else if (got < 0) {
+                    /* the first bytes only for FMT (headers); for RFS only the 4-byte link header: never NV data */
                     if (b->bad_rx++ < 5)
-                        sbm_logf(p, "online: +%u ms: ch %u frame not parsed: %u bytes, size word 0x%08x, head %02x %02x %02x %02x "
-                                 "%02x %02x %02x %02x %02x %02x %02x %02x", ms, chs[c], n, sbd->last_size_v, f[0], f[1],
-                                 f[2], f[3], n > 4 ? f[4] : 0, n > 5 ? f[5] : 0, n > 6 ? f[6] : 0, n > 7 ? f[7] : 0,
-                                 n > 8 ? f[8] : 0, n > 9 ? f[9] : 0, n > 10 ? f[10] : 0, n > 11 ? f[11] : 0);
+                        sbm_logf(p, "online: +%u ms: ch %u frame not parsed: %u bytes, size word 0x%08x, head %02x %02x %02x %02x"
+                                 " %02x %02x %02x %02x", ms, chs[c], n, sbd->last_size_v, f[0], f[1], f[2], f[3],
+                                 c < 2 && n > 4 ? f[4] : 0, c < 2 && n > 5 ? f[5] : 0, c < 2 && n > 6 ? f[6] : 0,
+                                 c < 2 && n > 7 ? f[7] : 0);
                 }
                 sbm_sbd_get_done(sbd, (unsigned)id, SBM_DL, p);
                 if (b->fmt_rx + b->rfs_rx + b->bad_rx >= 200) {
@@ -498,7 +628,7 @@ int sbm_link_boot(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boo
     b->phone_start = 1;
     sbm_logf(p, "link: PHONE_START after %u ms. Stage 4 stops here: no INIT_END, the CP is parked", b->phone_start_ms);
     if (b->stop == SBM_BOOT_ONLINE)
-        return online(p, b, &sbd);
+        return online(p, b, &sbd, im);
     if (b->hold_ms)
         return hold(p, b, &sbd);
     return 0;

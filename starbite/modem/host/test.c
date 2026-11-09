@@ -1363,6 +1363,45 @@ static void test_boot(void)
     check_allowed(&s);
     fakesoc_free(&s);
 
+    /* T10: ONLINE + RFS served from RAM: the open gets ENOENT, the big NV write (three DL buffers, check_more) lands
+     * in the RAM copy only, the NV read gets a multi-frame reply with the right data */
+    {
+        static uint8_t nv_before[0x100000];
+        boot_image(&im, 0);
+        memcpy(nv_before, t_nv, sizeof(nv_before));
+        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+        s.rfs_mode = 1;
+        s.nv_ref = nv_before;
+        fakesoc_plat(&s, &p, tlog);
+        b.stop = SBM_BOOT_ONLINE;
+        b.hold_ms = 2000;
+        b.rfs_serve = 1;
+        nlog = 0;
+        CHECKEQ(sbm_boot_run(&p, &im, &b), 0);
+        CHECKEQ(b.stopped_by, SBM_STOP_TIME);
+        CHECKEQ(b.big_frames, 1);
+        CHECKEQ(b.big_dropped, 0);
+        CHECKEQ(b.rfs_rx, 3);
+        CHECKEQ(b.rfs_tx, 3);
+        CHECKEQ(b.bad_rx, 0);
+        CHECKEQ(s.rfs_open_enoent, 1);
+        CHECKEQ(s.rfs_write_ok, 1);
+        CHECKEQ(s.rfs_read_ok, 1);
+        CHECKEQ(s.rfs_bad_reply, 0);
+        CHECKEQ(s.rfs_frames_in, 1 + 1 + 3);               /* 14 + 15 bytes single, 4111 bytes in 3 fragments */
+        CHECKEQ(t_nv[0x80000], 0x5A);                        /* the write landed in the RAM copy */
+        CHECKEQ(t_nv[0x80000 + 5999], (uint8_t)(0x5A ^ 5999));
+        unsigned leaks = 0;
+        for (unsigned i = 0; i < nlog && i < 256; ++i)
+            leaks += strstr(loglines[i], "5a 5b") != 0 || strstr(loglines[i], "5b 58") != 0;
+        CHECKEQ(leaks, 0);                                   /* NV data never in a log */
+        check_parked(&s);
+        check_allowed(&s);
+        fakesoc_free(&s);
+        b.rfs_serve = 0;
+        boot_image(&im, 0);
+    }
+
     /* ONLINE with a SIM present: stops at once on the SIM status, parked */
     fakesoc_init(&s, &im.plan, boot_crc, main_crc);
     s.sim_present = 1;
@@ -1465,10 +1504,15 @@ static void test_rfs(void)
     /* malformed: the header's length disagrees with the message */
     sbm_put32(rq, 99);
     CHECKEQ(sbm_rfs_handle(&r, rq, 14, out, sizeof(out)), SBM_EBADF);
-    /* a file operation: counted, not answered (yet) */
+    /* open: always "no such file" (handle -1, errno 2), 14 bytes */
     uint8_t op[20] = { 20, 0, 0, 0, SBM_RFS_IDX_OPEN, 3 };
-    CHECKEQ(sbm_rfs_handle(&r, op, 20, out, sizeof(out)), 0);
-    CHECKEQ(r.other[SBM_RFS_IDX_OPEN], 1);
+    CHECKEQ(sbm_rfs_handle(&r, op, 20, out, sizeof(out)), 14);
+    CHECK(sbm_le32(out) == 14 && out[4] == 0x11 && out[5] == 3 && sbm_le32(out + 6) == 0xFFFFFFFFu && sbm_le32(out + 10) == 2);
+    CHECKEQ(r.opens, 1);
+    /* another file operation: counted, not answered */
+    uint8_t fi[20] = { 20, 0, 0, 0, SBM_RFS_IDX_FILE_INFO, 4 };
+    CHECKEQ(sbm_rfs_handle(&r, fi, 20, out, sizeof(out)), 0);
+    CHECKEQ(r.other[SBM_RFS_IDX_FILE_INFO], 1);
     CHECKEQ(r.reads, 2);                                     /* the ENOSPC one is not counted */
     CHECKEQ(r.writes, 2);
 }

@@ -436,6 +436,29 @@ channels, so every FMT/RFS entry looked longer than its buffer. **T9c** masks it
 packs the channel the same way. A refused entry logs its size word, and an unparsed frame its first 12 bytes; RFS
 open requests show their flags and path.
 
+### Result T9c (2026-11-09, 0f97603, `build/modem/t9c-online-1/pmsg.txt`)
+**First real traffic from our own link.** FMT 21 frames on ch 235 and 236: PWR_PHONE_PWR_UP (53), 0x1305, 0x0d0f,
+0x2601 INDI, SEC_SIM_ICC_TYPE 00, SEC_PIN_STATUS 80 00 (SIM absent), PWR_PHONE_STATE 02, 0x0827. RFS: first an
+**open of `CP_OMC_AUDIO_SLSI.bin`** (flags 0), then an **NV write of 0x15e42 bytes at 0x80000** (an 89,680-byte
+message). That message spans many 2048-byte DL buffers: the first carries the SIPC5 header with the whole length,
+the rest are raw continuation (Android's `check_more`). Ours took the continuation for new messages (53 "other"),
+**and the generic RFS logger printed 8 bytes of NV data from each of them** into pmsg (local, git-ignored file).
+That breaks the rule; T10's logger prints header fields only.
+
+### 7.3 T10 `modemlink-rfs`: RFS served from RAM
+T9c plus:
+- **big DL frames joined** (check_more; up to 640 KB for RFS, 64 KB for FMT);
+- **RFS answered** by `sbm_rfs.c` from the RAM copy of nv_data.bin. NV read returns data; NV write lands in RAM only.
+  Open answers "no such file" (handle -1, errno 2): Android also has no `CP_OMC_AUDIO_SLSI.bin` in
+  /mnt/vendor/efs. Other file operations are counted and not answered;
+- **replies sent Android's way**: one SIPC5 frame if it fits 2048 bytes, else multi-frame fragments (0xFB, `{id,
+  more}`, 2043 payload bytes each, as `misc_write` with max_tx_size = 2048 does), each with the data doorbell 0x81,
+  waiting for ring space;
+- **RFS log lines** show header fields only (idx, id, length; NV offset/length; open path), never body bytes.
+Host: the fake CP sends the open, a 6000-byte NV write over three buffers and an NV read, then checks our three
+replies from the UL ring (ENOENT; write confirmed; read data correct in 3 fragments). The RAM copy holds the
+write, and no NV byte appears in a log.
+
 ### 7.2 Facts from One UI's vendor binaries (2026-11-09; read offline, binaries kept out of git)
 VENDOR was copied read-only in TWRP and extracted in the VM (EROFS). From `lib64/libsec-ril.so` (stripped, but its
 C++ dynamic symbols remain), `etc/mixer_paths.xml` and `firmware/calliope_*.bin`:

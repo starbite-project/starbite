@@ -651,6 +651,8 @@ struct sbm_boot {
     /* stage 5a (ONLINE, receive only): INIT_END sent, then what the CP says for hold_ms */
     int init_end_sent;
     uint32_t fmt_rx, rfs_rx, rfs_reads, rfs_writes, rfs_other, other_rx, bad_rx, sim_status, stopped_by;
+    int rfs_serve;                     /* input (T10): answer RFS from the RAM copy of nv_data.bin */
+    uint32_t rfs_tx, rfs_tx_frames, rfs_tx_bytes, big_frames, big_dropped;
     struct sbm_cell_state cell;        /* what the CP reported (decoded, identity-free) */
     uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;
     uint64_t sec0_us;
@@ -687,11 +689,12 @@ int sbm_clk_table_write(uint8_t *ipc, uint32_t ipc_size);
 #define SBM_RFS_IDX_NV_WRITE_ALL   0x15
 #define SBM_RFS_IDX_NV_RESTORE     0x17
 #define SBM_RFS_REPLY_HDR          15     /* header + u8 confirm + u32 offset + u32 length */
+#define SBM_RFS_OPEN_REPLY         14     /* header + u32 handle + u32 errno (ProcessOpenFile) */
 #define SBM_RFS_MAX_IO             0x80000
 struct sbm_rfs {
     uint8_t *nv;                      /* the RAM copy of nv_data.bin: the CP's writes land here and nowhere else */
     uint32_t nv_size;
-    uint32_t reads, writes, read_bytes, write_bytes, refused, bad, unhandled;
+    uint32_t reads, writes, opens, read_bytes, write_bytes, refused, bad, unhandled;
     uint32_t other[0x20];             /* requests per index this core does not answer yet */
 };
 void sbm_rfs_init(struct sbm_rfs *r, uint8_t *nv, uint32_t nv_size);

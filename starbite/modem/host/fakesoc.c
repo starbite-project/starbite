@@ -114,9 +114,45 @@ static void link_tick(struct fakesoc *s)
     }
 }
 
+/* the CP reads the RFS UL ring: one reply per complete (possibly multi-frame) message */
+static void rfs_ul(struct fakesoc *s)
+{
+    int id = sbm_sbd_id(&s->fcp.sbd, SBM_CH_RFS0);
+    const uint8_t *f;
+    int n;
+    while (id >= 0 && (n = sbm_sbd_get(&s->fcp.sbd, (unsigned)id, SBM_UL, &f, 0)) > 0) {
+        struct sbm_sipc5 fr;
+        const uint8_t *m;
+        uint32_t ml;
+        s->rfs_frames_in++;
+        if (sbm_sipc5_parse(f, (uint32_t)n, &fr) == 0 && fr.ch == SBM_CH_RFS0 && (uint32_t)n <= 2048 &&
+            sbm_reasm_feed(&s->rfs_ra, &fr, &m, &ml) == 1) {
+            s->rfs_replies++;
+            if (ml >= 6 && sbm_le32(m) == ml) {
+                if (m[4] == SBM_RFS_IDX_NV_READ && m[5] == 2 && ml == 15 + 0x1000 && m[6] == 1 &&
+                    sbm_le32(m + 7) == 0x2000 && !memcmp(m + 15, s->nv_ref + 0x2000, 0x1000))
+                    s->rfs_read_ok++;
+                else if (m[4] == SBM_RFS_IDX_NV_WRITE && m[5] == 0 && ml == 15 && m[6] == 1 && sbm_le32(m + 11) == 6000)
+                    s->rfs_write_ok++;
+                else if (m[4] == SBM_RFS_IDX_OPEN && m[5] == 1 && ml == 14 && sbm_le32(m + 10) == 2)
+                    s->rfs_open_enoent++;
+                else
+                    s->rfs_bad_reply++;
+            } else {
+                s->rfs_bad_reply++;
+            }
+        }
+        sbm_sbd_get_done(&s->fcp.sbd, (unsigned)id, SBM_UL, 0);
+    }
+}
+
 static void ap_msg(struct fakesoc *s)
 {
     uint32_t v = s->mbox[SBM_MBOX_ISSR(SBM_MBX_AP2CP_MSG) / 4];
+    if (s->link == L_ONLINE && v == (SBM_INT_VALID | 0x01)) {
+        rfs_ul(s);
+        return;
+    }
     if (s->n_ap_msgs < 32)
         s->ap_msgs[s->n_ap_msgs] = v;
     s->n_ap_msgs++;
@@ -136,9 +172,36 @@ static void ap_msg(struct fakesoc *s)
         uint8_t wr[4 + 6 + 8 + 16] = { 0xf8, 0xf5, 34, 0, 30, 0, 0, 0, 0x02, 3, 0x00, 0x20, 0, 0, 16, 0, 0, 0 };
         for (unsigned i = 0; i < 16; ++i)
             wr[18 + i] = (uint8_t)('0' + i % 10);    /* data that must never be logged */
-        fakecp_raw(&s->fcp, SBM_CH_RFS0, rd1, sizeof(rd1));
-        fakecp_raw(&s->fcp, SBM_CH_RFS0, rd2, sizeof(rd2));
-        fakecp_raw(&s->fcp, SBM_CH_RFS0, wr, sizeof(wr));
+        if (s->rfs_mode) {
+            /* open "CP_OMC_AUDIO_SLSI.bin" (as on the phone), a 6000-byte NV write spread over three 2048-byte
+             * buffers (one SIPC5 header, raw continuation: Android's check_more), an NV read of 0x1000 at 0x2000 */
+            static const char path[] = "CP_OMC_AUDIO_SLSI.bin";
+            uint8_t op[4 + 14 + sizeof(path)];
+            uint32_t ol = 14 + sizeof(path);
+            op[0] = 0xf8; op[1] = 0xf5; sbm_put16(op + 2, (uint16_t)(4 + ol));
+            sbm_put32(op + 4, ol); op[8] = SBM_RFS_IDX_OPEN; op[9] = 1;
+            sbm_put32(op + 10, 0); sbm_put32(op + 14, sizeof(path));
+            memcpy(op + 18, path, sizeof(path));
+            fakecp_raw(&s->fcp, SBM_CH_RFS0, op, sizeof(op));
+            static uint8_t big[4 + 14 + 6000];
+            uint32_t ml = 14 + 6000;
+            big[0] = 0xf8; big[1] = 0xf5; sbm_put16(big + 2, (uint16_t)(4 + ml));
+            sbm_put32(big + 4, ml); big[8] = SBM_RFS_IDX_NV_WRITE; big[9] = 0;
+            sbm_put32(big + 10, 0x80000); sbm_put32(big + 14, 6000);
+            for (unsigned i = 0; i < 6000; ++i)
+                big[18 + i] = (uint8_t)(0x5A ^ i);
+            for (uint32_t o = 0; o < sizeof(big); o += 2048)
+                fakecp_raw(&s->fcp, SBM_CH_RFS0, big + o, sizeof(big) - o < 2048 ? sizeof(big) - o : 2048);
+            uint8_t rd[18] = { 0xf8, 0xf5, 18, 0, 14, 0, 0, 0, SBM_RFS_IDX_NV_READ, 2 };
+            sbm_put32(rd + 10, 0x2000); sbm_put32(rd + 14, 0x1000);
+            fakecp_raw(&s->fcp, SBM_CH_RFS0, rd, sizeof(rd));
+            s->rfs_ra.buf = s->rfs_rbuf;
+            s->rfs_ra.cap = sizeof(s->rfs_rbuf);
+        } else {
+            fakecp_raw(&s->fcp, SBM_CH_RFS0, rd1, sizeof(rd1));
+            fakecp_raw(&s->fcp, SBM_CH_RFS0, rd2, sizeof(rd2));
+            fakecp_raw(&s->fcp, SBM_CH_RFS0, wr, sizeof(wr));
+        }
         cp_msg(s, s->online_crash ? SBM_CMD2INT(SBM_CMD_CRASH_EXIT) : (SBM_INT_VALID | 0x01));
     }
     if (s->link == L_WAIT_PIF && v == SBM_CMD2INT(SBM_CMD_PIF_INIT_DONE)) {

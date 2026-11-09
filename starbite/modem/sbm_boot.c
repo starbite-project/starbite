@@ -319,9 +319,11 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
 {
     enum sbm_boot_stop want = b->stop;
     uint32_t hold = b->hold_ms;
+    int serve = b->rfs_serve;
     sbm_memset(b, 0, sizeof(*b));
     b->stop = want;
     b->hold_ms = hold > 60000 ? 60000 : hold;
+    b->rfs_serve = serve;
     b->stopped_at = "-";
     sbm_logf(p, "boot: stage 3 up to %s", want == SBM_BOOT_DRY ? "the RAM check" : want == SBM_BOOT_SEC
              ? "EL3's signature check (the CP CPU is not started)" : want == SBM_BOOT_RUN
@@ -414,6 +416,9 @@ void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
         sbm_logf(p, "ONLINE: stopped by %s; FMT %u, RFS %u (reads %u, writes %u, other %u), bad %u", why[b->stopped_by <= 5 ? b->stopped_by : 0],
                  b->fmt_rx, b->rfs_rx, b->rfs_reads, b->rfs_writes, b->rfs_other, b->bad_rx);
         sbm_logf(p, "ONLINE: %s", line);
+        if (b->rfs_serve || b->big_frames || b->big_dropped)
+            sbm_logf(p, "ONLINE: RFS served %u replies (%u frames, %u bytes); big frames %u, dropped %u", b->rfs_tx,
+                     b->rfs_tx_frames, b->rfs_tx_bytes, b->big_frames, b->big_dropped);
     }
     if (b->stop == SBM_BOOT_LINK && b->hold_ms)
         sbm_logf(p, "HOLD: %u ms: PHONE_START repeated %u times (last gap %u ms), other commands %u, DL frames waiting %u",
