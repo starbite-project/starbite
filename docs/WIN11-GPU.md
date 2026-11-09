@@ -1009,6 +1009,14 @@ the CPU path. sbshare adds a GPU re-sample after the producer's update.
   the presented resource, the last draw's state, clears, viewport and scissor, and predication
   (sb-patches/0109).
 
+**cycle-t13u-1 (02:27):**
+- **What DWM draws:** each frame is one DrawIndexed (16-bit, 6 or 48 indices, triangle list, restart 0xffff)
+  into the presented 1440x2960 BGRA target, with a full viewport, no depth and no active predication. The target
+  stays all zero.
+- **T13v:** `tools/win/mesa/tests/sbdwm.cpp` adds DWM's features one at a time (16-bit indexed, index offset,
+  constant buffer, premultiplied blend, a 1440x2960 BGRA target, then all together), on the Mali and on
+  softpipe.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

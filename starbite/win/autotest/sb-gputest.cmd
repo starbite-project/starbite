@@ -17,6 +17,11 @@ echo sbtex hw exit %errorlevel% >> gputest.log
 rem T13o: shared surfaces, one process and two (as DWM opens window surfaces)
 sbshare.exe hw sbshare.log >> gputest.log 2>&1
 echo sbshare hw exit %errorlevel% >> gputest.log
+rem T13v: DWM's composition draw, one feature at a time (indexed, constant buffer, blend, 1440x2960 BGRA)
+sbdwm.exe hw sbdwm-hw.log >> gputest.log 2>&1
+echo sbdwm hw exit %errorlevel% >> gputest.log
+if exist libgallium_d3d10-softpipe.dll sbdwm.exe %D%\libgallium_d3d10-softpipe.dll sbdwm-softpipe.log >> gputest.log 2>&1
+echo sbdwm softpipe exit %errorlevel% >> gputest.log
 if exist libgallium_d3d10-softpipe.dll sbtex.exe %D%\libgallium_d3d10-softpipe.dll sbtex-softpipe.log >> gputest.log 2>&1
 echo sbtex softpipe exit %errorlevel% >> gputest.log
 rem the SV_VertexID variant last: on the Mali it crashed (T13m: Panfrost has no load_vertex_id_zero_base)
