@@ -17,7 +17,7 @@ r=$(limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 SBOS_HOST_S
     t:220,670 w:6000 q 2>&1)
 want "$r" "heater: start, level 0x00000004" "Extreme started"
 want "$r" "heater: stopped: Stopped" "Off stopped it"
-order "$r" "heater: Extreme's panel level and LED put back" "settings: saved" "the hardware off before the stop record's save"
+order "$r" "heater: the panel level, the white screen and the LED put back" "settings: saved" "the hardware off before the stop record's save"
 order "$r" "heater: stopped: Stopped" "settings: saved" "the stop logged before the save"
 echo "heat test: $fails failed"
 [ "$fails" = 0 ]
