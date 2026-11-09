@@ -59,6 +59,8 @@
 #define SBSHM_TRAMP_OFF     0x000f00U           /* the M3 entry trampoline (sbg_tramp, 64 bytes) */
 #define SBSHM_H2G_OFF       0x001000U           /* ring: host -> guest (control + input, in order) */
 #define SBSHM_G2H_OFF       0x003000U           /* ring: guest -> host */
+#define SBSHM_ROWS_OFF      0x008000U           /* uint32_t row_seq[SBSHM_ROWS_MAX]: damage per surface row */
+#define SBSHM_ROWS_MAX      4096U
 #define SBSHM_OOPS_OFF      0x100000U           /* pstore/ramoops console zone (the guest's kernel log) */
 #define SBSHM_OOPS_SIZE     0x080000U           /* 512 KiB */
 #define SBSHM_SURF_OFF      0x200000U           /* surface buffers, each surf_stride * surf_h */
@@ -116,8 +118,21 @@ struct sbshm_hdr {
     uint32_t guest_err;
     char guest_kver[64];            /* uname -r */
     char title[32];                 /* the app's title for Starbite's frame */
-    uint32_t pad1[16];
+    uint32_t rows_valid;            /* 1: the guest keeps row_seq (SBSHM_ROWS_OFF); 0: copy the whole surface */
+    uint32_t pad1[15];
 };
+
+/* ---- damage per row (guestd since 2026-11-09) ----------------------------------------------------------
+ * row_seq[y] = the surf_seq of the frame in which surface row y last changed. The guest writes the rows of a
+ * new frame into the back buffer, sets row_seq[y] = the new seq for every row that differs from the current front,
+ * then publishes (surf_front, dmb, surf_seq) as before; it keeps both buffers whole (each has every row of its
+ * frame). A host that drew the frame `drawn` copies only the rows with (int32_t)(row_seq[y] - drawn) > 0 from the
+ * front buffer, then drawn = the surf_seq it read before the rows (a frame published meanwhile has newer rows and
+ * is copied next time). A host that ignores the table copies everything, as before. */
+static inline int sbshm_row_newer(uint32_t row_seq, uint32_t drawn)
+{
+    return (int32_t)(row_seq - drawn) > 0;
+}
 
 /* ---- rings ----------------------------------------------------------------------------------------- */
 enum {

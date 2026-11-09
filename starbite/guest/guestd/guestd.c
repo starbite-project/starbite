@@ -229,6 +229,64 @@ static void text(int x, int y, int s, uint32_t c, const char *str)
     }
 }
 
+/* ---- publishing (sbshm.h: damage per row) --------------------------------------------------------------
+ * shadow[b] mirrors surface buffer b (both buffers are kept whole). A new frame: the rows that differ from the
+ * back buffer's shadow are written there; the rows that differ from the front's get row_seq = the new seq (the
+ * host copies only those); then the flip. Nothing changed: no frame. Returns 1 when a frame was published. */
+static uint32_t *shadow[2];
+static uint8_t *changed;
+static uint64_t pub_frames, pub_rows;
+static int publish(const uint32_t *src, uint32_t stride)
+{
+    volatile uint32_t *rows = (volatile uint32_t *)(shm + SBSHM_ROWS_OFF);
+    if (!shadow[0]) {
+        shadow[0] = malloc((size_t)W * H * 4);
+        shadow[1] = malloc((size_t)W * H * 4);
+        changed = malloc(H);
+        if (!shadow[0] || !shadow[1] || !changed)
+            return 0;
+        memset(shadow[0], 0, (size_t)W * H * 4);       /* sbghost zeroed both buffers before the start */
+        memset(shadow[1], 0, (size_t)W * H * 4);
+        if (H <= SBSHM_ROWS_MAX)
+            hdr->rows_valid = 1;
+    }
+    uint32_t front = hdr->surf_front & 1U, back = front ^ 1U, seq = hdr->surf_seq + 1U;
+    size_t rb = (size_t)W * 4;
+    uint32_t n = 0, y0 = H, y1 = 0;
+    for (uint32_t y = 0; y < H; ++y) {
+        changed[y] = memcmp(src + (size_t)y * W, shadow[front] + (size_t)y * W, rb) != 0;
+        if (changed[y]) {
+            ++n;
+            if (y < y0)
+                y0 = y;
+            y1 = y + 1;
+        }
+    }
+    if (!n && hdr->surf_seq)
+        return 0;
+    uint8_t *dst = shm + hdr->surf_off[back];
+    for (uint32_t y = 0; y < H; ++y)
+        if (memcmp(src + (size_t)y * W, shadow[back] + (size_t)y * W, rb)) {
+            memcpy(dst + (size_t)y * stride, src + (size_t)y * W, rb);
+            memcpy(shadow[back] + (size_t)y * W, src + (size_t)y * W, rb);
+        }
+    if (H <= SBSHM_ROWS_MAX)
+        for (uint32_t y = 0; y < H; ++y)
+            if (changed[y] || !hdr->surf_seq)
+                rows[y] = seq;
+    sbshm_dmb();
+    hdr->surf_front = back;
+    hdr->damage_x = 0;
+    hdr->damage_w = W;
+    hdr->damage_y = n ? y0 : 0;
+    hdr->damage_h = n ? y1 - y0 : H;
+    sbshm_dmb();
+    hdr->surf_seq = seq;
+    pub_frames++;
+    pub_rows += n ? n : H;
+    return 1;
+}
+
 /* ---- per-CPU load ----------------------------------------------------------------------------------- */
 static unsigned long long prev_busy[8], prev_all[8];
 static int cpu_load(int pct[8])
@@ -418,19 +476,11 @@ int main(int argc, char **argv)
         rect(bx, by, 80, 80, 0x00e91e63);
         for (int i = 0; i < ndots; ++i)
             dot(dots[i].x, dots[i].y, 14, 0x00ffd700);
-        /* 3. publish into the back buffer */
-        uint32_t back = (hdr->surf_front + 1) & 1U;
-        uint8_t *dst = shm + hdr->surf_off[back];
-        for (uint32_t y = 0; y < H; ++y)
-            memcpy(dst + (size_t)y * stride, fb + (size_t)y * W, (size_t)W * 4);
-        sbshm_dmb();
-        hdr->surf_front = back;
-        hdr->damage_w = 0;
-        sbshm_dmb();
-        hdr->surf_seq++;
+        /* 3. publish: only the rows that changed (sbshm.h "damage per row") */
+        if (publish(fb, stride))
+            frame++;
         hdr->guest_heartbeat++;
         hdr->guest_uptime_ms = t - t0;
-        frame++;
         /* 4. wait: the doorbell (sbguest.ko) or 50 ms */
         if (sbfd >= 0) {
             struct pollfd p = {.fd = sbfd, .events = POLLIN};
