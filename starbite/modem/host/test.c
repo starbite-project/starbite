@@ -1333,6 +1333,9 @@ static void test_boot(void)
     CHECKEQ(b.bad_rx, 0);
     CHECKEQ(b.sim_status, SBM_SIM_ABSENT);
     CHECK(!memcmp(s.ipc + 40, "CT0", 4));                       /* the clock table went out first */
+    CHECKEQ(sbm_le32(s.ipc), SBM_IPC_MAGIC);                    /* the IPC link reset before INIT_END */
+    CHECKEQ(sbm_le32(s.ipc + 4), 1);
+    CHECKEQ(s.crashed_no_magic, 0);
     CHECKEQ(s.n_ap_msgs, 2);
     CHECKEQ(s.ap_msgs[0], 0xCD);
     CHECKEQ(s.ap_msgs[1], 0xC2);                                /* INIT_END, and nothing after it */

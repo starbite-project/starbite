@@ -54,9 +54,12 @@ static int msg_send(const struct sbm_plat *p, uint16_t v)
            p->mmio_wr32(p->ctx, MB(SBM_MBOX_INTGR1), 1u << SBM_INT_AP2CP_MSG);
 }
 
+static uint32_t g_online_ms = 0xFFFFFFFFu;   /* ms since INIT_END while online (for the log), else ~0 */
 static void note_msg(const struct sbm_plat *p, struct sbm_boot *b, uint32_t v, const char *during)
 {
     b->n_msgs++;
+    if (g_online_ms != 0xFFFFFFFFu)
+        sbm_logf(p, "online: +%u ms: CP msg 0x%04x", g_online_ms, v);
     b->last_msg = v;
     if ((v & SBM_INT_VALID) && (v & SBM_CMD_VALID)) {
         uint32_t cmd = v & SBM_CMD_FIELD;
@@ -235,11 +238,55 @@ static void log_rfs(const struct sbm_plat *p, struct sbm_boot *b, const uint8_t 
         sbm_logf(p, "RFS: rx idx 0x%02x id %u len %u, %u bytes (not answered)", idx, id, len, n);
 }
 
+/* Android's shmem_reset_ipc_link, run on the CP's first PHONE_START: access 0, magic 0, the legacy queue words 0,
+ * then magic IPC (0xAA) and access 1, read back. The CP only treats the link as up (ipc_active) with both set:
+ * T9 (2026-11-09 15:58) sent INIT_END with the magic still "BOOT" and the CP answered CRASH_EXIT at once. */
+static int reset_ipc_link(const struct sbm_plat *p)
+{
+    *leg(p, SBM_LEG_ACCESS) = 0;
+    *leg(p, SBM_LEG_MAGIC) = 0;
+    for (unsigned i = 0; i < SBM_LEG_HEADS; ++i)
+        *leg(p, 8 + 4 * i) = 0;
+    bar(p);
+    *leg(p, SBM_LEG_MAGIC) = SBM_IPC_MAGIC;
+    *leg(p, SBM_LEG_ACCESS) = 1;
+    bar(p);
+    return *leg(p, SBM_LEG_MAGIC) == SBM_IPC_MAGIC && *leg(p, SBM_LEG_ACCESS) == 1 ? 0 : SBM_EIO;
+}
+
+static void online_state(const struct sbm_plat *p, const char *when)
+{
+    uint32_t i1 = 0, i3 = 0, sr = 0;
+    p->probe32(p->ctx, MB(SBM_MBOX_ISSR(SBM_MBX_CP2AP_MSG)), &i1);
+    p->probe32(p->ctx, MB(SBM_MBOX_ISSR(SBM_MBX_CP2AP_STATUS)), &i3);
+    p->probe32(p->ctx, MB(SBM_MBOX_INTSR0), &sr);
+    sbm_logf(p, "online: %s: magic 0x%08x access %u | ISSR1 0x%04x ISSR3 0x%08x (cp_status %u) INTSR0 0x%08x", when,
+             *leg(p, SBM_LEG_MAGIC), *leg(p, SBM_LEG_ACCESS), i1 & 0xFFFF, i3, SBM_CP_STATUS(i3), sr);
+}
+
 static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd)
 {
     static uint8_t rbuf[3][8192];
     static struct sbm_reasm ra[3];
     uint32_t logged = 0;
+    if (reset_ipc_link(p) < 0) {
+        sbm_logf(p, "online: the IPC link reset did not read back");
+        return SBM_EIO;
+    }
+    sbm_logf(p, "online: IPC link reset (magic 0xAA, access 1), as Android does on PHONE_START");
+    /* Android sends INIT_END when RIL opens its channels, about 140 ms later: wait 100 ms, keeping the mailbox clear */
+    for (unsigned ms = 0; ms < 100; ++ms) {
+        uint32_t v;
+        if (msg_take(p, &v) && (v & SBM_CMD_VALID) && (v & SBM_CMD_FIELD) != SBM_CMD_PHONE_START) {
+            note_msg(p, b, v, "link reset");
+            if (b->crash_cmd) {
+                b->stopped_by = SBM_STOP_CRASH;
+                online_state(p, "crash before INIT_END");
+                return SBM_EIO;
+            }
+        }
+        delay(p, 1000);
+    }
     int r = sbm_clk_table_write(p->ipc, sbd->ipc_size);
     if (r < 0)
         return r;
@@ -248,6 +295,7 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
     if (!msg_send(p, SBM_CMD2INT(SBM_CMD_INIT_END)))
         return SBM_EPERM;
     b->init_end_sent = 1;
+    online_state(p, "INIT_END sent");
     sbm_cell_init(&b->cell);
     b->sim_status = 0xFFFFFFFFu;
     for (unsigned k = 0; k < 3; ++k) {
@@ -257,13 +305,21 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
         ra[k].active = 0;
     }
     const uint32_t limit = b->hold_ms ? b->hold_ms : 20000;
+    uint32_t data_msgs = 0;
     for (uint32_t ms = 1; ms <= limit; ++ms) {
         uint32_t v;
-        if (msg_take(p, &v) && (v & SBM_CMD_VALID)) {
-            note_msg(p, b, v, "online");
-            if (b->crash_cmd) {
-                b->stopped_by = SBM_STOP_CRASH;
-                return SBM_EIO;
+        g_online_ms = ms;
+        if (msg_take(p, &v)) {
+            if (v & SBM_CMD_VALID) {
+                note_msg(p, b, v, "online");
+                if (b->crash_cmd) {
+                    b->stopped_by = SBM_STOP_CRASH;
+                    g_online_ms = 0xFFFFFFFFu;
+                    online_state(p, "after the crash command");
+                    return SBM_EIO;
+                }
+            } else if (data_msgs++ < 5) {
+                sbm_logf(p, "online: +%u ms: CP data doorbell 0x%04x", ms, v);
             }
         }
         /* FMT0, FMT1, RFS0: drain (the AP consumes these rings in Android too); other rings are left alone */
@@ -290,7 +346,7 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
                         if (logged < ONLINE_LOG_MAX) {
                             char line[200];
                             sbm_frame_line(f, (uint32_t)n, 1, line, sizeof(line));
-                            sbm_logf(p, "FMT: %s", line);
+                            sbm_logf(p, "FMT: +%u %s", ms, line);
                             logged++;
                         }
                     } else {
@@ -306,6 +362,7 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
                 sbm_sbd_get_done(sbd, (unsigned)id, SBM_DL, p);
                 if (b->fmt_rx + b->rfs_rx + b->bad_rx >= 200) {
                     b->stopped_by = SBM_STOP_FRAMES;
+                    g_online_ms = 0xFFFFFFFFu;
                     return 0;
                 }
             }
@@ -316,6 +373,7 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
             if (b->cell.sim_status != SBM_SIM_ABSENT && b->cell.sim_status != SBM_SIM_ERROR) {
                 sbm_logf(p, "online: SIM status 0x%02x (not absent): stopping now, as planned", b->cell.sim_status);
                 b->stopped_by = SBM_STOP_SIM;
+                g_online_ms = 0xFFFFFFFFu;
                 return 0;
             }
         }
@@ -323,6 +381,7 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
             (b->cell.have_ps && (b->cell.ps.state == SBM_REG_HOME || b->cell.ps.state == SBM_REG_ROAMING))) {
             sbm_logf(p, "online: the CP reports registration: stopping now");
             b->stopped_by = SBM_STOP_REG;
+            g_online_ms = 0xFFFFFFFFu;
             return 0;
         }
         if (!(ms % 1000))
@@ -330,6 +389,8 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
         delay(p, 1000);
     }
     b->stopped_by = SBM_STOP_TIME;
+    g_online_ms = 0xFFFFFFFFu;
+    online_state(p, "end");
     return 0;
 }
 

@@ -120,7 +120,13 @@ static void ap_msg(struct fakesoc *s)
     if (s->n_ap_msgs < 32)
         s->ap_msgs[s->n_ap_msgs] = v;
     s->n_ap_msgs++;
-    if (s->link == L_DONE && v == SBM_CMD2INT(SBM_CMD_INIT_END)) {
+    if (s->link == L_DONE && v == SBM_CMD2INT(SBM_CMD_INIT_END) &&
+        (l32(s, SBM_LEG_MAGIC) != SBM_IPC_MAGIC || l32(s, SBM_LEG_ACCESS) != 1)) {
+        /* what T9 (2026-11-09) showed: INIT_END without the IPC link reset -> CRASH_EXIT at once */
+        s->link = L_ONLINE;
+        cp_msg(s, SBM_CMD2INT(SBM_CMD_CRASH_EXIT));
+        s->crashed_no_magic = 1;
+    } else if (s->link == L_DONE && v == SBM_CMD2INT(SBM_CMD_INIT_END)) {
         /* online: the NOTIs this phone's CP sent under Android, then RFS requests (read, read, write) */
         s->link = L_ONLINE;
         fakecp_attach(&s->fcp, s->ipc, s->ipc_size, s->sim_present ? FAKE_HOME : FAKE_NOSIM);

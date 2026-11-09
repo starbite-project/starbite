@@ -417,6 +417,16 @@ present (stops within ms), a crash (parks).
 The full path from here to a voice call, with which experiments need One UI, is in the shared notes:
 `modem-voice-plan.md`.
 
+### Result T9 (2026-11-09 15:58, 1822faa, `build/modem/t9-online-1/pmsg.txt`)
+Stage 4 as before (INIT_START 1056 ms, PHONE_START 0 ms). After the clock table and INIT_END, the CP sent one more
+PHONE_START (0xC8) and then **CRASH_EXIT (0xC9)**, with no FMT or RFS frame. Parked, the phone was fine (clean
+restart). **Cause:** Android's `cmd_phone_start_handler` first runs `shmem_reset_ipc_link`: access 0, magic 0, the
+legacy queue words 0, then **magic 0xAA (IPC) and access 1**, read back. The CP only treats the link as up with both
+set. INIT_END follows about 140 ms later (this phone's log: PHONE_START 20.4877, INIT_END 20.6311). We sent
+INIT_END with the magic still "BOOT". **T9b** does the reset, waits 100 ms, then the clock table and INIT_END,
+and logs ms-since-INIT_END on every online line plus magic, access, ISSR1/3 and INTSR0 at INIT_END and at the
+stop. The fake CP now crashes the same way when the reset is missing.
+
 ### 7.2 Facts from One UI's vendor binaries (2026-11-09; read offline, binaries kept out of git)
 VENDOR was copied read-only in TWRP and extracted in the VM (EROFS). From `lib64/libsec-ril.so` (stripped, but its
 C++ dynamic symbols remain), `etc/mixer_paths.xml` and `firmware/calliope_*.bin`:

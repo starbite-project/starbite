@@ -28,7 +28,7 @@ struct fakesoc {
     uint32_t ipc_size;
     enum { L_IDLE, L_UDL, L_INIT_SOON, L_WAIT_PIF, L_PHONE_SOON, L_DONE, L_ONLINE } link;
     struct fakecp fcp;                 /* the CP's online side: FMT NOTIs, RFS requests */
-    int sim_present, online_crash;
+    int sim_present, online_crash, crashed_no_magic;
     uint64_t link_at_us;
     int udl_silent, udl_wrong, crash_after_pif, layout_ok;
     uint8_t udl_frames[4][16];
