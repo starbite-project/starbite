@@ -908,6 +908,12 @@ cores on the phone, P2d 3/3 cycles) wired into the kernel, following INTEGRATION
     STARBITE-TERM-OK > /dev/kmsg` and waits for the marker in the guest's log. Then it checks the view shows
     text, stops, and checks the cluster is off.
   - QEMU (`run-qemu.sh kern`, two stores): PASS.
+- **P3c PASSED on the phone (2026-11-09 04:19, 17 s, starbite-os-1.2-alpha3-guesttest.img 91f00c49)**:
+  - The app: the tap's mark 5 frames after the tap (116 ms); the view drew 48 frames, the slowest copy 113 ms; the
+    cluster off 60 ms after the stop.
+  - The terminal (7.1.0-sbguest, Terminus 16x32): HELLO after 94 ms; the typed command's STARBITE-TERM-OK after
+    500 ms; 147 rows of text on the view; the cluster off 50 ms after the stop.
+  - The heater was refused meanwhile.
 - **Not in alpha1**: the M3 clock for the guest (INTEGRATION.md step 10: it stays at the boot step, 1066 MHz in P2d).
 - **Checks**: host (`host/sbos-linux-test.sh` on guest.c's host fake: the confirmation, the tile, the view, the
   tap at 2x, held Bixby, the 60 s stop, both refusals, missing files, a failed start, and `guest_selftest_step`'s two
