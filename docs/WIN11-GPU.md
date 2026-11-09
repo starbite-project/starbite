@@ -1304,6 +1304,16 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
     attributes use. Input i is element i: d3d10umd places elements at their input register, and tgsi_to_nir's
     driver_location is that register.
 
+### 6.27 T19 = T18; T20 looks at Direct2D's layouts and shaders (2026-11-09)
+
+- **T19's sbtext matched T18's byte for byte** (sbumd 49ea86c3 was pushed).
+  - Retyping only integer-fed inputs gives T18's result, so Direct2D does use integer vertex attributes.
+  - With them raw, every Direct2D colour (the clear too) is zero. R32_UINT itself works (`uintattr`).
+- **T20 (sb-patches/0116, diagnostic, only while `umdlog\trace` exists):** dumps element layouts, shader TGSI and
+  the first 64 draws per process.
+- **sbtex:** R8G8B8A8_UINT, R16G16_UINT, R16G16B16A16_UINT and R32G32B32A32_UINT inputs, plus an R8G8B8A8_UNORM
+  control.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

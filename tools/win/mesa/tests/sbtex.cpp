@@ -25,6 +25,8 @@
 //   uintattr    a colour packed in an R32_UINT vertex attribute, unpacked with integer ops in the vertex shader
 //               (Direct2D's way; T18, sb-patches/0115: Bifrost loaded it converted to a float value)
 //   instattr    the same as a per-instance attribute, DrawInstanced
+//   int-*       uint4 vertex inputs from narrower integer formats (R8G8B8A8_UINT, R16G16_UINT, R16G16B16A16_UINT,
+//               R32G32B32A32_UINT) and an R8G8B8A8_UNORM float control (T20: Direct2D uses integer attributes)
 // The texture: left half green, right half red (RGBA8 0xff00ff00 / 0xff0000ff). Output lines "TEST name: PASS|FAIL
 // got ... want ..."; exit code = the number of failed tests (100 + n if the device could not be made).
 //
@@ -61,6 +63,8 @@ static const char kHlsl[] =
     "  VC o; o.p = float4(p, 0, 1);\n"
     "  o.c = float4((c >> 16) & 255, (c >> 8) & 255, c & 255, c >> 24) / 255.0; return o; }\n"
     "float4 ps_col(VC i) : SV_Target { return i.c; }\n"
+    "VC vs_u4(float2 p : POSITION, uint4 c : COLOR) { VC o; o.p = float4(p, 0, 1); o.c = float4(c) / 255.0; return o; }\n"
+    "VC vs_f4(float2 p : POSITION, float4 c : COLOR) { VC o; o.p = float4(p, 0, 1); o.c = c; return o; }\n"
     "float4 ps_solid(V i) : SV_Target { return float4(0.0, 0.0, 1.0, 1.0); }\n"
     "float4 ps_sample(V i) : SV_Target { return t.Sample(s, i.uv); }\n"
     "float4 ps_level(V i) : SV_Target { return t.SampleLevel(s, i.uv, 0); }\n"
@@ -428,6 +432,62 @@ int main(int argc, char **argv)
                 out("TEST %-9s: FAIL (readback)\n", name), failures++;
             rtv->Release();
             rt->Release();
+        }
+        /* T20: narrower integer formats; components 0x20, 0x60, 0xc0, 0xff (missing ones read as 0, 0, 1) */
+        struct { const char *name; DXGI_FORMAT fmt; UINT stride; BYTE data[16]; UINT want; bool flt; } nf[] = {
+            { "int-rgba8", DXGI_FORMAT_R8G8B8A8_UINT, 4, { 0x20, 0x60, 0xc0, 0xff }, 0xffc06020u, false },
+            { "int-rg16", DXGI_FORMAT_R16G16_UINT, 4, { 0x20, 0, 0x60, 0 }, 0x01006020u, false },
+            { "int-rgba16", DXGI_FORMAT_R16G16B16A16_UINT, 8, { 0x20, 0, 0x60, 0, 0xc0, 0, 0xff, 0 }, 0xffc06020u, false },
+            { "int-rgba32", DXGI_FORMAT_R32G32B32A32_UINT, 16, { 0x20, 0, 0, 0, 0x60, 0, 0, 0, 0xc0, 0, 0, 0, 0xff, 0, 0, 0 },
+              0xffc06020u, false },
+            { "unorm-rgba8", DXGI_FORMAT_R8G8B8A8_UNORM, 4, { 0x20, 0x60, 0xc0, 0xff }, 0xffc06020u, true },
+        };
+        ID3DBlob *bu4 = compile("vs_u4", "vs_4_0"), *bf4 = compile("vs_f4", "vs_4_0");
+        ID3D11VertexShader *vu4 = nullptr, *vf4 = nullptr;
+        if (bu4) dev->CreateVertexShader(bu4->GetBufferPointer(), bu4->GetBufferSize(), nullptr, &vu4);
+        if (bf4) dev->CreateVertexShader(bf4->GetBufferPointer(), bf4->GetBufferSize(), nullptr, &vf4);
+        for (auto &f : nf) {
+            ID3DBlob *sig = f.flt ? bf4 : bu4;
+            BYTE vdat[3 * 16];
+            for (int v = 0; v < 3; v++)
+                memcpy(vdat + v * f.stride, f.data, f.stride);
+            D3D11_BUFFER_DESC nbd = {};
+            nbd.ByteWidth = 3 * f.stride;
+            nbd.Usage = D3D11_USAGE_DEFAULT;
+            nbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            D3D11_SUBRESOURCE_DATA nin = { vdat, 0, 0 };
+            D3D11_INPUT_ELEMENT_DESC ne[2] = {
+                { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "COLOR", 0, f.fmt, 1, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
+            ID3D11Buffer *nb = nullptr;
+            ID3D11InputLayout *nl = nullptr;
+            ID3D11Texture2D *rt = texture(DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET, nullptr, 0);
+            ID3D11RenderTargetView *rtv = nullptr;
+            if (!sig || !(f.flt ? vf4 : vu4) || !psc || FAILED(dev->CreateBuffer(&nbd, &nin, &nb)) ||
+                FAILED(dev->CreateInputLayout(ne, 2, sig->GetBufferPointer(), sig->GetBufferSize(), &nl)) || !rt ||
+                FAILED(dev->CreateRenderTargetView(rt, nullptr, &rtv))) {
+                out("TEST %-9s: FAIL (setup)\n", f.name);
+                failures++;
+                continue;
+            }
+            const float grey[4] = { 0.5f, 0.5f, 0.5f, 1.0f };
+            ctx->ClearRenderTargetView(rtv, grey);
+            ctx->OMSetRenderTargets(1, &rtv, nullptr);
+            D3D11_VIEWPORT vp = { 0.0f, 0.0f, 64.0f, 64.0f, 0.0f, 1.0f };
+            ctx->RSSetViewports(1, &vp);
+            ID3D11Buffer *bufs[2] = { vb, nb };
+            UINT strides[2] = { 8, f.stride }, offs[2] = { 0, 0 };
+            ctx->IASetVertexBuffers(0, 2, bufs, strides, offs);
+            ctx->IASetInputLayout(nl);
+            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx->VSSetShader(f.flt ? vf4 : vu4, nullptr, 0);
+            ctx->PSSetShader(psc, nullptr, 0);
+            ctx->Draw(3, 0);
+            if (readback(rt, DXGI_FORMAT_R8G8B8A8_UNORM, px))
+                check(f.name, px, 16, f.want, 48, f.want, 0xffffffffu);
+            else
+                out("TEST %-9s: FAIL (readback)\n", f.name), failures++;
+            rtv->Release(); rt->Release(); nl->Release(); nb->Release();
         }
         ID3D11Buffer *one[2] = { vb, nullptr };
         UINT st1[2] = { 8, 0 }, of1[2] = { 0, 0 };

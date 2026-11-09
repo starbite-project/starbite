@@ -1,0 +1,105 @@
+diff --git a/src/gallium/frontends/d3d10umd/Debug.cpp b/src/gallium/frontends/d3d10umd/Debug.cpp
+index b8743cd..296ca5a 100644
+--- a/src/gallium/frontends/d3d10umd/Debug.cpp
++++ b/src/gallium/frontends/d3d10umd/Debug.cpp
+@@ -23,6 +23,17 @@ st_debug_parse(void)
+ #endif
+ 
+ 
++/* Starbite (sb-patches/0116, docs/WIN11-GPU.md 6.27): shader, element-layout and draw dumps, only while
++ * C:\ProgramData\Starbite\umdlog\trace exists (gpu-cycle's test boots; never the user's install). */
++extern "C" int
++sb_dump_on(void)
++{
++   static int on = -1;
++   if (on < 0)
++      on = GetFileAttributesA("C:\\ProgramData\\Starbite\\umdlog\\trace") != INVALID_FILE_ATTRIBUTES;
++   return on;
++}
++
+ void
+ DebugPrintf(const char *format, ...)
+ {
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index 2051624..fde02b1 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -74,6 +74,20 @@ sb_trace_draw(struct Device *d, unsigned kind, unsigned count, unsigned instance
+ {
+    if (kind < 5)
+       sbTrace.draws[kind]++;
++   {
++      /* sb-patches/0116: the first 64 draws of a process, in full (test boots only) */
++      static unsigned n;
++      if (sb_dump_on() && n < 64) {
++         struct pipe_blend_state *bs = NULL;
++         n++;
++         fprintf(stderr, "sbumd: draw %u kind %u count %u inst %u isize %u prim %u vs %p layout %p rt %u %ux%u fmt %s\n",
++                 n, kind, count, instances, index_size, (unsigned)d->primitive,
++                 d->bound_vs ? (const void *)d->bound_vs->state.tokens : NULL, (void *)d->element_layout,
++                 d->fb.nr_cbufs, d->fb.width, d->fb.height,
++                 d->fb.nr_cbufs ? util_format_name(d->fb.cbufs[0].format) : "-");
++         (void)bs;
++      }
++   }
+    sbTrace.rt0 = d->fb.nr_cbufs ? d->fb.cbufs[0].texture : NULL;
+    sbTrace.rt_w = d->fb.width;
+    sbTrace.rt_h = d->fb.height;
+diff --git a/src/gallium/frontends/d3d10umd/InputAssembly.cpp b/src/gallium/frontends/d3d10umd/InputAssembly.cpp
+index d36a070..0f9b5d3 100644
+--- a/src/gallium/frontends/d3d10umd/InputAssembly.cpp
++++ b/src/gallium/frontends/d3d10umd/InputAssembly.cpp
+@@ -304,6 +304,19 @@ CreateElementLayout(
+       max_elements = MAX2(max_elements, pVertexElement->InputRegister + 1);
+    }
+ 
++   {
++      if (sb_dump_on()) {
++         fprintf(stderr, "sbumd: element layout %p, %u elements\n", (void *)pElementLayout, num_elements);
++         for (unsigned i = 0; i < num_elements; i++) {
++            const D3D10DDIARG_INPUT_ELEMENT_DESC *e = &pCreateElementLayout->pVertexElements[i];
++            fprintf(stderr, "sbumd:   reg %u slot %u offset %u dxgi %u -> %s class %u step %u\n", e->InputRegister,
++                    e->InputSlot, e->AlignedByteOffset, (unsigned)e->Format,
++                    util_format_name(FormatTranslate(e->Format, false)), (unsigned)e->InputSlotClass,
++                    e->InstanceDataStepRate);
++         }
++      }
++   }
++
+    /* XXX: What do we do when there's a gap? */
+    if (max_elements != num_elements) {
+       DebugPrintf("%s: gap\n", __func__);
+diff --git a/src/gallium/frontends/d3d10umd/ShaderTGSI.c b/src/gallium/frontends/d3d10umd/ShaderTGSI.c
+index 07f51e0..b995a03 100644
+--- a/src/gallium/frontends/d3d10umd/ShaderTGSI.c
++++ b/src/gallium/frontends/d3d10umd/ShaderTGSI.c
+@@ -2308,6 +2308,17 @@ Shader_tgsi_translate(const unsigned *code,
+    if (st_debug & ST_DEBUG_TGSI) {
+       tgsi_dump(tokens, 0);
+    }
++   {
++      extern int sb_dump_on(void);   /* Debug.cpp (sb-patches/0116) */
++      if (sb_dump_on()) {
++         char *buf = malloc(65536);
++         if (buf && tgsi_dump_str(tokens, 0, buf, 65536)) {
++            fprintf(stderr, "sbumd: shader %p\n%s", (const void *)tokens, buf);
++            fprintf(stderr, "sbumd: end shader %p\n", (const void *)tokens);
++         }
++         free(buf);
++      }
++   }
+ 
+    return tokens;
+ }
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index 8257e56..778ff2f 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -206,6 +206,7 @@ extern "C" {
+ #endif
+ int malikm_hw(void);
+ int malikm_use(void *dev);   /* sb-patches/0113: this thread's shim device; 1 if it is on the Mali */
++int sb_dump_on(void);   /* sb-patches/0116: Debug.cpp */
+ void malikm_next_alloc(void *hres, int primary, unsigned vidpn, unsigned w, unsigned h, unsigned pitch, unsigned fmt);
+ int malikm_next_alloc_clear(void);
+ unsigned malikm_prime_alloc(int fd, int *kind);
