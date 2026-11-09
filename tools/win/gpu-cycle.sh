@@ -36,6 +36,7 @@ main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)     # build/store lives
 mode=cycle
 case "${1:-}" in
 --clean-only|--deadman-test) mode=${1#--}; shift; stage= ;;
+--pull-dump) mode=pull-dump; shift; stage= ;;
 --clean-by-file) mode=clean-by-file; stage=${2:?usage: gpu-cycle.sh --clean-by-file STAGE OUT}; shift 2 ;;
 --measure) mode=measure; stage=${2:?usage: gpu-cycle.sh --measure STAGE OUT}; shift 2 ;;
 --install-default) mode=install-default; stage=${2:?usage: gpu-cycle.sh --install-default STAGE OUT}; shift 2 ;;
@@ -230,6 +231,21 @@ measure)
     clean_boot || { gap_report "$out/post/SYSTEM"; log "the self-restart did not leave the hive clean"; exit 3; }
     gap_report "$out/post/SYSTEM"
     keep=1; finish
+    exit 0 ;;
+pull-dump)
+    # T17: read-only, nothing booted: the crash dump a bugcheck left in pagefile.sys (before Windows boots again
+    # and moves it), and any dumps Windows already moved; then kdump.py on what came back.
+    mount_ro
+    mkdir -p "$out/dumps"
+    adb exec-out "dd if=$W/pagefile.sys bs=1048576 count=8 2>/dev/null" > "$out/dumps/pagefile-head.bin" || true
+    adb pull "$W/Windows/Minidump" "$out/dumps/" >/dev/null 2>&1 || true
+    adb pull "$W/Windows/MEMORY.DMP" "$out/dumps/" >/dev/null 2>&1 || true
+    umount_w
+    for f in "$out"/dumps/pagefile-head.bin "$out"/dumps/*.dmp "$out"/dumps/*/*.dmp "$out"/dumps/MEMORY.DMP; do
+        [ -s "$f" ] || continue
+        log "kdump $(basename "$f"):"
+        python3 tools/win/kdump.py "$f" ${KDUMP_MAPS:-} 2>&1 | tee -a "$out/cycle.log" | head -60
+    done
     exit 0 ;;
 clean-by-file)
     # T17: a dirty hive with sbwdog Unattended=0 (the user's own install), which must not be edited offline. STAGE's
