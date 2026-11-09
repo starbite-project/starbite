@@ -167,7 +167,9 @@ static VOID GuardThread(PVOID Ctx)
                 lastWork = work;
                 lastPeriodic = now;
                 MwRefreshScanout(a);
-            } else if (work != lastWork && now - lastPeriodic >= 20000000ULL) {
+            } else if (work != lastWork && now - lastPeriodic >= 100000000ULL) {
+                /* T13y: the slow safety refresh, every 10 s at most (was 2 s): the dirty rectangles keep the
+                 * panel current in between */
                 lastWork = work;
                 lastPeriodic = now;
                 a->RefreshesPeriodic++;

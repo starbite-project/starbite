@@ -414,6 +414,10 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         if (Op->Kind == MW_PRESENT_BLT && Op->Src != NULL && Op->Src->Width == A->Fb.Width &&
             Op->Src->Height == A->Fb.Height) {
             A->ShowFromBltSrc++;
+            /* T13y: NewContent FALSE: the whole source is copied to the panel only when it becomes the shown
+             * allocation (or by the slow safety refresh). Every later frame's changes are the blt's own dirty
+             * rectangles, which this function has already copied straight into the framebuffer. T13x copied
+             * the whole 1440x2960 frame (up to 0.7 s from write-combined memory) after every blt. */
             /* T13t: DWM's back buffer, whole: is it black outside the blt's rectangle? */
             if (src != NULL) {
                 if (NotBlack(src, srcPitch, 0, 0, srcW, srcH))
@@ -422,7 +426,7 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
                     A->PbSrcFullBlack++;
                 A->PbSrcPx = ((const ULONG *)(src + (SIZE_T)(srcH / 4) * srcPitch))[srcW / 2];
             }
-            MwShow(A, Op->Src, TRUE);
+            MwShow(A, Op->Src, FALSE);
         } else {
             MwShow(A, Op->Dst, FALSE);    /* the blt itself drew into the framebuffer */
         }
