@@ -1,0 +1,32 @@
+From bcab15c73c7ca84b37d20d35d0e84a3bf8abc521 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Mon, 9 Nov 2026 02:02:28 +0200
+Subject: [PATCH] patch: 0409-starlte-overlay-truncate.patch - the overlay
+ truncates before writing (vnode_open never honoured O_TRUNC: a shorter file
+ kept the old tail; launchd.plist became unreadable after shrinking edits)
+
+---
+ bsd/dev/starlte_overlay.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/bsd/dev/starlte_overlay.c b/bsd/dev/starlte_overlay.c
+index c37645c3..3772821b 100644
+--- a/bsd/dev/starlte_overlay.c
++++ b/bsd/dev/starlte_overlay.c
+@@ -118,6 +118,16 @@ so_write_file(const char *path, uint32_t mode, const void *data, uint32_t size,
+ 	if (err) {
+ 		return err;
+ 	}
++	/*
++	 * 0409: vnode_open does not truncate (open1() does it after vn_open_auth, the KPI does not): a shorter
++	 * file written over a longer one kept the old tail. A binary plist keeps its offset table at its end, so
++	 * launchd.plist became unreadable ("No service cache" panics T3 and T13, 2026-11-08/09).
++	 */
++	err = vnode_setsize(vp, (off_t)0, 0, ctx);
++	if (err) {
++		(void)vnode_close(vp, FWRITE, ctx);
++		return err;
++	}
+ 	int resid = 0;
+ 	if (size) {
+ 		err = vn_rdwr(UIO_WRITE, vp, (caddr_t)(uintptr_t)data, (int)size, 0, UIO_SYSSPACE,

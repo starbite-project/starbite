@@ -62,15 +62,19 @@ static int has(const char *s, const char *w)
 }
 static char tail[48][120];
 static unsigned tail_n, fwd, seen, log_max = 36;
+static int term_ok;                         /* P4: the typed command ran (its line in the guest's log) */
 static void guest_log(const char *l)
 {
+    if (has(l, "STARBITE-TERM-OK"))
+        term_ok = 1;
     sb_strcpy(tail[tail_n % 48], sizeof(tail[0]), l);
     ++tail_n;
     ++seen;
     static const char *const keep[] = {"guestd", "sbguest", "guest-init", "GIC", "psci", "smp:", "SMP:", "panic",
                                        "Oops", "BUG", "Unable", "rror", "ail", "Kernel command", "Run /init",
                                        "Memory:", "Machine model", "arch_timer", "Booted secondary", "reboot", "killed",
-                                       "shut down", "trampoline", "online", "load:"};
+                                       "shut down", "trampoline", "online", "load:", "STARBITE-TERM", "simpledrm",
+                                       "frame buffer device", "terminal"};
     int k = seen <= 3;
     for (unsigned i = 0; !k && i < sizeof(keep) / sizeof(keep[0]); ++i)
         k = has(l, keep[i]);
@@ -260,7 +264,9 @@ static int cycle(unsigned n, int with_load)
         r = sbg_start();
     }
     const struct sbg_stats *s = sbg_stats();
-    uint32_t seq = 0, tstep = 0, touch_seq = 0, frames = 0, stride = 0, loads = 0;
+    uint32_t seq = 0, tstep = 0, touch_seq = 0, frames = 0, stride = 0, loads = 0, typed = 0;
+    term_ok = 0;
+    (void)typed;
     const volatile uint32_t *px = 0;
     uint64_t last_comp = 0, t_touch = 0, t_run = 0, t_sample = 0;
     int touch_ok = 0, hot = 0;
@@ -277,6 +283,47 @@ static int cycle(unsigned n, int with_load)
             composite(px, stride);
             frames++;
         }
+#ifdef P2_TERM
+        /* P4, the terminal: the shell on tty1 gets a typed command line (key events, sbshm_ascii_key) */
+        if (tstep < 10) {
+            static const char cmd[] = "uname -a; grep -c processor /proc/cpuinfo; echo STARBITE-TERM-OK > /dev/kmsg\n";
+            if (s->state == SBG_RUNNING && tstep == 0) {
+                tstep = 1;
+                t_touch = t;
+            } else if (tstep == 1 && t - t_touch >= 2000) {      /* the shell's prompt */
+                tstep = 2;
+                typed = 0;
+                t_touch = t;
+            } else if (tstep == 2 && t - t_touch >= 30) {
+                t_touch = t;
+                if (cmd[typed]) {
+                    int sh;
+                    unsigned k = sbshm_ascii_key(cmd[typed++], &sh);
+                    if (sh)
+                        sbg_key(SBSHM_KEY_LEFTSHIFT, 1);
+                    sbg_key(k, 1);
+                    sbg_key(k, 0);
+                    if (sh)
+                        sbg_key(SBSHM_KEY_LEFTSHIFT, 0);
+                } else {
+                    ub_s(&u, "terminal: typed the command line (");
+                    ub_dec(&u, sizeof(cmd) - 1);
+                    ub_s(&u, " keys)");
+                    L();
+                    tstep = 3;
+                }
+            } else if (tstep == 3 && (term_ok || t - t_touch > 10000)) {
+                ub_s(&u, term_ok ? "terminal: the shell ran it (STARBITE-TERM-OK in the guest's log)"
+                                 : "terminal: no STARBITE-TERM-OK from the shell in 10 s");
+                L();
+                touch_ok = term_ok;
+                tstep = 5;                  /* the shared tail: show it, then stop */
+                t_run = t;
+            }
+            if (tstep < 5)
+                continue;
+        }
+#endif
         if (s->state == SBG_RUNNING && frames >= 3 && tstep == 0) {
             sbg_touch(0, SBG_TOUCH_DOWN, 360, 840);
             tstep = 1;
@@ -445,7 +492,11 @@ void sb_main(void)
     unsigned ok = 0, ran = 0;
     for (unsigned n = 0; n < P2_CYCLES; ++n) {
         ++ran;
+#ifdef P2_TERM
+        int r = cycle(n, 0);                        /* P4: the terminal in every cycle, no load */
+#else
         int r = cycle(n, n == 1);
+#endif
         ok += (unsigned)r;
         if (!r || sb_m3_on())
             break;                                  /* a guest that did not stop cleanly is not restarted */

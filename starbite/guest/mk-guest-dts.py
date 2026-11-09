@@ -30,6 +30,10 @@ ap.add_argument('--rd-size', type=lambda s: int(s, 0), default=0)
 ap.add_argument('--db-guest', type=lambda s: int(s, 0), default=0, help='INTID of the host->guest doorbell SPI')
 ap.add_argument('--bootargs-extra', default='')
 ap.add_argument('--psci01', action='store_true', help='qemu: the S9-style PSCI 0.1 node (listed ids)')
+ap.add_argument('--fb', metavar='WxH', default='',
+                help='the guest kernel of its own (linux/guest.config): a simple-framebuffer node on surface buffer 0 '
+                     '(simpledrm, fbcon), the surface region no-map (simpledrm maps it write-combine)')
+ap.add_argument('--term', action='store_true', help='with --fb: sbguest.mode=term (a shell on tty1, guestd presents)')
 ap.add_argument('out')
 a = ap.parse_args()
 
@@ -99,6 +103,29 @@ ppi = lambda n: f'1 {n} {(ppi_mask << 8) | 8:#x}'
 db = f'\n\t\tinterrupts = <0 {a.db_guest - 32} 1>;' if a.db_guest else ''
 
 
+SURF_AT = SB + c('SBSHM_SURF_OFF')
+surf_nomap = fb_node = ''
+if a.fb:
+    fw, fh = (int(v) for v in a.fb.split('x'))
+    assert SURF_AT + fw * fh * 4 <= SB + SS
+    surf_nomap = '\n\t\t\tno-map;'
+    fb_node = f'''	/* the guest's display: surface buffer 0 (guestd --present publishes its changed rows to Starbite OS) */
+	framebuffer@{SURF_AT:x} {{
+		compatible = "simple-framebuffer";
+		reg = <{SURF_AT >> 32:#x} {SURF_AT & 0xffffffff:#x} 0x0 {fw * fh * 4:#x}>;
+		width = <{fw}>;
+		height = <{fh}>;
+		stride = <{fw * 4}>;
+		format = "x8r8g8b8";
+	}};
+
+'''
+if a.term:
+    assert a.fb, '--term needs --fb'
+    # the kernel's console: the ramoops zone only (Starbite reads it), not the VT: tty1 shows the shell alone
+    bootargs += ' sbguest.mode=term console=ramoops-1'
+
+
 def h64(v):
     return f'{v >> 32:#x} {v & 0xffffffff:#x}'
 
@@ -141,7 +168,7 @@ dts = f'''/dts-v1/;
 		}};
 
 		sbshm_surf: sbshm-surf@{SB + OOPS_OFF + OOPS_SIZE:x} {{
-			reg = <{h64(SB + OOPS_OFF + OOPS_SIZE)} {h64(SS - OOPS_OFF - OOPS_SIZE)}>;
+			reg = <{h64(SB + OOPS_OFF + OOPS_SIZE)} {h64(SS - OOPS_OFF - OOPS_SIZE)}>;{surf_nomap}
 		}};
 	}};
 
@@ -170,7 +197,7 @@ dts = f'''/dts-v1/;
 		starbite,shared-distributor;
 	}};
 
-	starbite-guest@{SB:x} {{
+{fb_node}	starbite-guest@{SB:x} {{
 		compatible = "starbite,guest-shm";
 		reg = <{h64(SB)} 0x0 0x1000>;{db}
 	}};

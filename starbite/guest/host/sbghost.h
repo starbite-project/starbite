@@ -70,6 +70,9 @@ void sbg_poll(void);
 void sbg_doorbell(void);
 /* A new frame since *seq: 1 and the front buffer, else 0. */
 int sbg_frame(uint32_t *seq, const volatile uint32_t **pixels, uint32_t *stride_bytes);
+/* The guest's row table (sbshm.h "damage per row"): NULL when the guest keeps none (copy every row). A host that
+ * drew frame `drawn` copies row y when sbshm_row_newer(rows[y], drawn). */
+const volatile uint32_t *sbg_rows(void);
 int sbg_touch(uint32_t slot, uint32_t phase, int32_t x, int32_t y);
 int sbg_key(uint32_t code, int down);
 int sbg_screen(int on);

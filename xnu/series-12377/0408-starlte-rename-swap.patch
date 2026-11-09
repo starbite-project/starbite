@@ -1,0 +1,95 @@
+From 045c86a16abf66802d33b66415cac3147f9d2683 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Sun, 8 Nov 2026 23:49:42 +0200
+Subject: [PATCH] patch: 0408-starlte-rename-swap.patch - renameatx_np
+ RENAME_SWAP on a file system without it (HFS) is emulated with three renames
+ (iOS 26's lsd never saved its LaunchServices database: no app extensions
+ registered); sbswap=0 off
+
+---
+ bsd/vfs/vfs_syscalls.c | 65 ++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 63 insertions(+), 2 deletions(-)
+
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+index ef0fb601..8cee1c21 100644
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -10366,6 +10366,46 @@ rename(__unused proc_t p, struct rename_args *uap, __unused int32_t *retval)
+ 	           AT_FDCWD, uap->to, UIO_USERSPACE, 0);
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include <pexpert/pexpert.h>
++static int
++sweet_rename_swap(vfs_context_t ctx, int fromfd, user_addr_t ufrom, int tofd, user_addr_t uto, u_int flags)
++{
++	char *from = zalloc(ZV_NAMEI), *to = zalloc(ZV_NAMEI), *tmp = zalloc(ZV_NAMEI);
++	size_t len = 0;
++	int error = copyinstr(ufrom, from, MAXPATHLEN, &len);
++	if (!error) {
++		error = copyinstr(uto, to, MAXPATHLEN, &len);
++	}
++	if (!error && snprintf(tmp, MAXPATHLEN, "%s.sbswap%d", to, proc_selfpid()) >= MAXPATHLEN) {
++		error = ENAMETOOLONG;
++	}
++	if (!error) {
++		/* 1: to -> tmp; 2: from -> to; 3: tmp -> from */
++		error = renameat_internal(ctx, tofd, CAST_USER_ADDR_T(to), tofd, CAST_USER_ADDR_T(tmp), UIO_SYSSPACE, flags);
++		if (!error) {
++			error = renameat_internal(ctx, fromfd, CAST_USER_ADDR_T(from), tofd, CAST_USER_ADDR_T(to), UIO_SYSSPACE, flags);
++			if (error) {
++				(void)renameat_internal(ctx, tofd, CAST_USER_ADDR_T(tmp), tofd, CAST_USER_ADDR_T(to), UIO_SYSSPACE, flags);
++			} else {
++				error = renameat_internal(ctx, tofd, CAST_USER_ADDR_T(tmp), fromfd, CAST_USER_ADDR_T(from),
++				    UIO_SYSSPACE, flags);
++			}
++		}
++	}
++	static int logged;
++	if (logged < 20) {
++		logged++;
++		printf("STARBITE SWAP: %s[%d] rename swap %s <-> %s emulated: %d\n", proc_best_name(current_proc()),
++		    proc_selfpid(), from, to, error);
++	}
++	zfree(ZV_NAMEI, from);
++	zfree(ZV_NAMEI, to);
++	zfree(ZV_NAMEI, tmp);
++	return error;
++}
++#endif
++
+ int
+ renameatx_np(__unused proc_t p, struct renameatx_np_args *uap, __unused int32_t *retval)
+ {
+@@ -10377,8 +10417,29 @@ renameatx_np(__unused proc_t p, struct renameatx_np_args *uap, __unused int32_t
+ 		return EINVAL;
+ 	}
+ 
+-	return renameat_internal(vfs_context_current(), uap->fromfd, uap->from,
+-	           uap->tofd, uap->to, UIO_USERSPACE, uap->flags);
++	int error = renameat_internal(vfs_context_current(), uap->fromfd, uap->from,
++	    uap->tofd, uap->to, UIO_USERSPACE, uap->flags);
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	/*
++	 * Starbite (0408): HFS has no atomic RENAME_SWAP (an APFS feature), and iOS 26 never expects ENOTSUP:
++	 * Foundation's replace-item saves (NSIRD temporary folder + renameatx_np RENAME_SWAP) failed, so lsd
++	 * never saved its LaunchServices database and no app extension (posters, Control Center controls) was
++	 * ever registered (2026-11-08 T8). Emulate the swap with three renames through a temporary name:
++	 * not atomic, but at every step each object exists under one of its names. sbswap=0 turns it off.
++	 */
++	if (error == ENOTSUP && (uap->flags & RENAME_SWAP)) {
++		static int on = -1;
++		if (on < 0) {
++			on = 1;
++			PE_parse_boot_argn("sbswap", &on, sizeof(on));
++		}
++		if (on) {
++			error = sweet_rename_swap(vfs_context_current(), uap->fromfd, uap->from, uap->tofd, uap->to,
++			    uap->flags & ~(u_int)RENAME_SWAP);
++		}
++	}
++#endif
++	return error;
+ }
+ 
+ int

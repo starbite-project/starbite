@@ -11,7 +11,8 @@
 #   tools/ios26-root-tune.sh            collect + tune + queue
 #   tools/ios26-root-tune.sh --collect  collect only (nothing written)
 #   TUNE=prefs ...                      only the Accessibility prefs (launchd.plist untouched)
-#   TUNE=launchd-log ...                prefs + launchd.plist with only the PosterBoard log (no job removed)
+#   TUNE=launchd-log ...                prefs + launchd.plist with only the PosterBoard log (no job removed);
+#                                       LOG="pkd lsd ..." adds those jobs' logs (LOGDEST=console: into the kernel log)
 #   TUNE=full ... (default)             prefs + PosterBoard log + jobs in starlte-disabled-ios26-b.list out
 #   (T3 2026-11-08 17:06: TUNE=full's launchd.plist ended in "No service cache": bisect with these)
 #   tools/ios26-root-tune.sh --undo DIR re-queue the launchd.plist (+ launchd-disabled.plist if the root had
@@ -29,7 +30,10 @@ if [ "${1:-}" = --undo ]; then
     [ -s "$L" ] || { echo "$L missing"; exit 1; }
     (cd "$dir" && shasum -a 256 -c originals.sha256)
     args=("$L=/System/Library/xpc/launchd.plist:644")
-    [ -s "$D" ] && args+=("$D=/System/Library/xpc/launchd-disabled.plist:644")
+    # launchd-disabled.plist is our own keep-file (launchd never reads it): only put back a copy that parses
+    if [ -s "$D" ] && python3 -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$D" 2>/dev/null; then
+        args+=("$D=/System/Library/xpc/launchd-disabled.plist:644")
+    fi
     A="$dir/private__var__mobile__Library__Preferences__com.apple.Accessibility.plist"
     [ -s "$A" ] || { A="$dir/ax-empty.plist"; python3 -c 'import plistlib,sys; plistlib.dump({}, open(sys.argv[1], "wb"), fmt=plistlib.FMT_BINARY)' "$A"; }
     args+=("$A=/private/var/mobile/Library/Preferences/com.apple.Accessibility.plist:600:501:501")
@@ -50,11 +54,33 @@ A="$out/private__var__mobile__Library__Preferences__com.apple.Accessibility.plis
 [ -s "$D" ] || D=-
 mode=${TUNE:-full}
 mkdir -p "$out/tune"
+# every pulled plist the chosen mode reads must parse (a stale host read gives garbage: refuse, no traceback)
+plist_ok() { [ "$1" = - ] || python3 -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$1" 2>/dev/null; }
+need=("$A"); [ "$mode" = full ] && need+=("$L" "$D"); [ "$mode" = launchd-log ] && need+=("$L")
+for f in "${need[@]}"; do
+    plist_ok "$f" || { echo "$f does not parse (stale host read?): refusing; nothing queued"; exit 1; }
+done
+# The host reads raw blocks without replaying the journal, so a recently rewritten launchd.plist can read back
+# stale (2026-11-08). Only edit the known-good original (sha below, pulled 17:06 and restored by --undo).
+GOOD_LAUNCHD=5d8bc695
+if [ "$mode" != prefs ]; then
+    got=$(shasum -a 256 "$L" | cut -c1-8)
+    # known good: Apple's original as edited before today (5d8bc695) or a launchd.plist one of our tunes wrote
+    # (only TUNE=launchd-log ones: T3's full tune of 2026-11-08 17:06 made launchd panic)
+    good=$( { echo $GOOD_LAUNCHD; for t in build/test-boots/*-ios26collect/tune/launchd.plist; do
+        [ -f "$t" ] && grep -qx "TUNE=launchd-log" "$(dirname "$t")/report.txt" 2>/dev/null && shasum -a 256 "$t" | cut -c1-8; done; } | sort -u)
+    echo "$good" | grep -qx "$got" || { echo "pulled launchd.plist is $got, not a known-good one (stale read?): refusing to edit it"; exit 1; }
+fi
 files=()
 case "$mode" in
 prefs) ;;
 launchd-log)
-    python3 tools/ios26-launchd-tune.py "$L" "$D" "$out/tune" --log PosterBoard
+    # no job removed: launchd-disabled.plist is neither read nor written (it can read back stale)
+    logs=(--log PosterBoard); for n in ${LOG:-}; do
+        # 2026-11-09 T12: with this edit launchd never started lsd (no UI); pkd was edited in the same run
+        case "$n" in lsd|pkd) echo "LOG=$n: refused (T12: lsd never started with its log mirrored)"; exit 1 ;; esac
+        logs+=(--log "$n"); done
+    python3 tools/ios26-launchd-tune.py "$L" - "$out/tune" "${logs[@]}"
     files+=("$out/tune/launchd.plist=/System/Library/xpc/launchd.plist:644") ;;
 full)
     logs=(--log PosterBoard); for n in ${LOG:-}; do logs+=(--log "$n"); done

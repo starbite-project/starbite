@@ -372,6 +372,11 @@ int sbg_stop(void)
 
 void sbg_doorbell(void) { /* the poll that follows reads the ring; the count is the host's own */ }
 
+const volatile uint32_t *sbg_rows(void)
+{
+    return HDR->rows_valid ? (const volatile uint32_t *)SHM(SBSHM_ROWS_OFF) : 0;
+}
+
 int sbg_frame(uint32_t *seq, const volatile uint32_t **pixels, uint32_t *stride_bytes)
 {
     volatile struct sbshm_hdr *h = HDR;

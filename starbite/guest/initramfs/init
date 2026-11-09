@@ -11,9 +11,28 @@ if [ -f /sbguest.ko ] && ! grep -q sbguest.nomod /proc/cmdline; then
     insmod /sbguest.ko && echo "guest-init: sbguest.ko loaded" > /dev/kmsg
 fi
 burn=0
+mode=app
 for a in $(cat /proc/cmdline); do
-    case "$a" in sbguest.burn=*) burn=${a#sbguest.burn=} ;; esac
+    case "$a" in
+    sbguest.burn=*) burn=${a#sbguest.burn=} ;;
+    sbguest.mode=*) mode=${a#sbguest.mode=} ;;
+    esac
 done
+if [ "$mode" = term ] && [ -e /dev/tty1 ]; then
+    # the terminal (docs 12 step 3): fbcon draws tty1 into the shared surface, guestd publishes the changed rows and
+    # turns Starbite's keys into a uinput keyboard; a shell on tty1, started again if it exits
+    # no blinking cursor: every blink would be a frame for Starbite to copy (power), and the screen would change
+    # under a host reading it
+    echo 0 > /sys/class/graphics/fbcon/cursor_blink 2>/dev/null
+    /guestd --present </dev/null >/dev/null 2>&1 &
+    echo "guest-init: terminal mode (tty1 on the shared surface)" > /dev/kmsg
+    export HOME=/ PS1='starbite-linux# ' TERM=linux
+    while true; do
+        printf '\033[2J\033[HStarbite OS - Linux %s on the M3 cores\n\n' "$(uname -r)" > /dev/tty1
+        setsid sh -c 'exec sh -i </dev/tty1 >/dev/tty1 2>&1'
+        echo "guest-init: the shell on tty1 exited; starting another" > /dev/kmsg
+    done
+fi
 /guestd --burn "$burn"
 echo "guest-init: guestd exited ($?)" > /dev/kmsg
 exec /bin/sh
