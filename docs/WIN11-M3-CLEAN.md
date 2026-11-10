@@ -388,3 +388,27 @@ and control **a55ctl4** (`starbite-uefi-a55ctl4.bin`, sha256 `b4d83a33002c9d58eb
   PMCCFILTR 1<<27, PMCNTENSET bit 31) replayed and measured. A55 0 does it at ReadyToBoot; M3 core 1 does it right
   before returning into winload, so on the exact CPU and state Windows inherits. Everything is restored afterwards.
   N about 0 on the M3 and non-zero on the A55 would make the cycle counter the HAL failure (Fable's PMU candidate).
+
+## 18. m3kern7 result (23:17) and a55ctl3 (22:59): the ladder and the failing HAL step
+
+a55ctl3 (A55s, healthy): `=M3K U0005` (storage driver at beat 5), fbn01, KUSER at PA BBC24000 with InterruptTime and
+TickCount moving, `np04`, `psB2EAB080`, no bugcheck. **Every instrument works.** m3kern5/7 on the M3: `np01`, `ps0`,
+bugcheck 0x5C.
+
+m3kern7: `=M3B p2 0000000005250631 p3 1 p4 FFFFFFFFC000000?` (the last digit cut by the 60-character print).
+- p2 0x05250631 is a fixed tag in two literal pools, used by exactly two 0x5C sites:
+  - A, 0x14048B130 (HAL init near HalCalibratePerformanceCounter): status = the init routine `[timer+0x68]` of the
+    timer object pointed to by nt+D18A18 (an indirect call), logged with a line number, p3 = the step byte nt+C0F710,
+    p4 = the status;
+  - B, 0x140A61114 (HAL init allocating HalQueryMaximumProcessorCount x 24 bytes).
+  Both pass p1 0x110 / 0x200 as immediates, yet KiBugCheckData[1] read 0x20; to be resolved. p4 = 0xC000000x.
+- PMU: on M3 core 1 at the hand-off the cycle counter was already set exactly as Windows does (winload had set it:
+  PMCR 53023011, PMCCFILTR 8000000, PMCNTENSET 80000000); the counts were cut off by the print width. The HAL's own
+  PMU setup at 0x4AE830 always returns success, so it isn't the failing step.
+
+**m3kern8** (`starbite-uefi-m3kern8.bin`, sha256 `b9589ce6adfd0c81be2b578ce78a59e6fafbfa7decea04d8b2e4b2aaca8ae02d`) and
+control **a55ctl5** (`starbite-uefi-a55ctl5.bin`, sha256 `c7c26417acc1171bc02304350c7709f037c4aa9bf7939815705a82587c598aa3`):
+- `=M3T oOOOOOOOO fFFFFFFFF sSS stSSSSSSSS` (39 chars): the kernel's VA base from HalPrivateDispatchTable slot 1
+  (file value 0x14024AF30), then o = the RVA of the timer object at nt+D18A18, f = the RVA of its init routine
+  (+0x68), s = HAL step byte nt+C0F710, st = the full status;
+- `=M3P <cycles per ms> cyc/ms <cpu> ...`: the number first now.

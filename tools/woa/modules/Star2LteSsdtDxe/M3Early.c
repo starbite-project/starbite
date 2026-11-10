@@ -426,6 +426,10 @@ __asm__ (
   "  bl    70f\n"
   "  ldr   x9, [x19, #0xE8]\n"
   "  bl    70f\n"
+  "  ldr   x9, [x19, #0xF0]\n"            // v8: the failing HAL timer
+  "  bl    80f\n"
+  "  ldr   x9, [x19, #0xF8]\n"
+  "  bl    80f\n"
   "  mrs   x1, cntvct_el0\n"            // 120 s fallback (the loader's own watchdog is 82 s)
   "  sub   x1, x1, x23\n"
   "  movz  x2, #0xE400\n"
@@ -583,6 +587,48 @@ __asm__ (
   "  mov   x30, x17\n"
   "79:\n"
   "  ret\n"
+  // v8: "=M3T o00000000 f00000000 s00 st00000000": kernel VA base K = [nt+C004E8] - 0x24AF30 (HalPrivateDispatchTable
+  // slot 1, file value 0x14024AF30); o = [nt+D18A18] - K (the HAL timer object site A initialises), f = its +0x68
+  // init routine - K (if o is inside the image), s = the HAL step byte nt+C0F710, st = KiBugCheckData[4] (status)
+  "80:\n"
+  "  cbz   x9, 89f\n"
+  "  mov   x17, x30\n"
+  "  ldr   x3, [x19, #0xA8]\n"
+  "  cbz   x3, 88f\n"
+  "  movz  x4, #0x04E8\n"
+  "  movk  x4, #0xC0, lsl #16\n"
+  "  ldr   x5, [x3, x4]\n"
+  "  movz  x4, #0xAF30\n"
+  "  movk  x4, #0x24, lsl #16\n"
+  "  sub   x13, x5, x4\n"
+  "  movz  x4, #0x8A18\n"
+  "  movk  x4, #0xD1, lsl #16\n"
+  "  ldr   x5, [x3, x4]\n"
+  "  sub   x12, x5, x13\n"
+  "  mov   x0, x12\n  add x1, x9, #6\n   mov x2, #8\n  bl 30f\n"
+  "  mov   x0, #0\n"
+  "  movz  x4, #0xD000\n"
+  "  movk  x4, #0x103, lsl #16\n"
+  "  cmp   x12, x4\n"
+  "  b.hs  81f\n"
+  "  add   x5, x3, x12\n"
+  "  ldr   x0, [x5, #0x68]\n"
+  "  sub   x0, x0, x13\n"
+  "81:\n"
+  "  add   x1, x9, #16\n  mov x2, #8\n  bl 30f\n"
+  "  movz  x4, #0xF710\n"
+  "  movk  x4, #0xC0, lsl #16\n"
+  "  ldrb  w0, [x3, x4]\n  add x1, x9, #26\n  mov x2, #2\n  bl 30f\n"
+  "  ldr   x4, [x19, #0xD8]\n"
+  "  ldr   x0, [x4, #32]\n  add x1, x9, #31\n  mov x2, #8\n  bl 30f\n"
+  "  dc    civac, x9\n"
+  "  add   x0, x9, #38\n"
+  "  dc    civac, x0\n"
+  "  dsb   sy\n"
+  "88:\n"
+  "  mov   x30, x17\n"
+  "89:\n"
+  "  ret\n"
   "30:\n"                               // x0 value, x1 first digit, x2 digits; clobbers x0-x2, x6-x8
   "  add   x1, x1, x2\n"
   "31:\n"
@@ -626,6 +672,7 @@ STATIC UINTN                   mEWatch[2][4];      // [ring][field] first digit:
 STATIC CONST CHAR8             mEWatchTag[] = "=M3E watch beat ";
 STATIC CONST CHAR8             mEKTag[]     = "=M3K b0000 e00 gd0 @00 fbn00 @00 h00000000";
 STATIC CONST CHAR8             mEUTag[]     = "=M3U u00000000 it00000000 tc00000000";
+STATIC CONST CHAR8             mETTag[]     = "=M3T o00000000 f00000000 s00 st00000000";
 STATIC CONST CHAR8             mEBTag[]     = "=M3B p20000000000000000 p30000000000000000 p40000000000000000";
 STATIC CONST CHAR8             mENTag[]     = "=M3N lb00000000 np00 ps00000000 bc00000000 p10000000000000000";
 STATIC UINT8                   mEMap[0x8000];      // v3: the memory map at ExitBootServices (static: no allocation)
@@ -786,6 +833,8 @@ M3EarlyA55Watch (
       ((volatile UINT64 *)(UINTN)mEGuard)[0xB8 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mENTag);
       ((volatile UINT64 *)(UINTN)mEGuard)[0xE0 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mEBTag);
       ((volatile UINT64 *)(UINTN)mEGuard)[0xE8 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mEBTag);
+      ((volatile UINT64 *)(UINTN)mEGuard)[0xF0 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mETTag);
+      ((volatile UINT64 *)(UINTN)mEGuard)[0xF8 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mETTag);
       EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x800);
       EClean (SB_EVLOG_BASE, SB_EVLOG_BASE + 12 + SB_EVLOG_CAP);
       EClean (SB_PMSG_BASE, SB_PMSG_BASE + 12 + SB_PMSG_CAP);
@@ -1150,7 +1199,7 @@ EPmuReplay (
   }
 
   __asm__ __volatile__ ("msr pmccfiltr_el0, %0\n msr pmcr_el0, %1\n isb" : : "r" (Filt), "r" (Pmcr) : "memory");
-  SbLog ("=M3E pmu %a: pmcr %lx filt %lx en %lx; cycles in 1 ms %ld (%lx -> %lx)", Who, Pmcr, Filt, En, C1 - C0, C0, C1);
+  SbLog ("=M3P %ld cyc/ms %a pmcr %lx filt %lx en %lx", C1 - C0, Who, Pmcr, Filt, En);
 }
 
 //
@@ -1508,6 +1557,8 @@ M3EarlyEbsWrap (
     L[0xB8 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mENTag);
     L[0xE0 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mEBTag);
     L[0xE8 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mEBTag);
+    L[0xF0 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mETTag);
+    L[0xF8 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mETTag);
     SbLog ("=M3E ctl: guard released on M3 core 1; Windows continues on A55 0 (MADT as woa made it)");
     EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x800);
     EClean (SB_EVLOG_BASE, SB_EVLOG_BASE + 12 + SB_EVLOG_CAP);
@@ -1612,6 +1663,7 @@ M3EarlyOnReadyToBoot (
   SbLog ("%a", mEUTag);
   SbLog ("%a", mENTag);
   SbLog ("%a", mEBTag);
+  SbLog ("%a", mETTag);
   EPmuReplay ("A55 0");
  #endif
  #if STARBITE_M3_EARLY == 3
