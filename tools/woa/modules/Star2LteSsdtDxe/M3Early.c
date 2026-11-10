@@ -253,7 +253,8 @@ __asm__ (
   "  .p2align 3\n"
   "  .globl M3EarlyGuard\n"
   "M3EarlyGuard:\n"
-  "  mov   x19, x0\n"
+  "  adr   x19, .\n"                     // its own page (the code sits at +0x800; also entered from the M3 park loop)
+  "  and   x19, x19, #0xFFFFFFFFFFFFF000\n"
   "  mrs   x1, sctlr_el1\n"
   "  bic   x1, x1, #1\n"
   "  bic   x1, x1, #4\n"
@@ -1282,6 +1283,24 @@ M3EarlyEbsWrap (
   EProgress (6);
   SbLog ("=M3E ExitBootServices returned %r on mpidr %lx (woa's hook included)", Status, EMpidr ());
   EAcpiLine ("ebs-post");
+ #if STARBITE_M3_EARLY == 3
+  {
+    volatile UINT64  *L = (volatile UINT64 *)(UINTN)mEGuard;
+
+    L[0x40 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mEKTag);
+    L[0x48 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mEKTag);
+    L[0x90 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mEUTag);
+    L[0x98 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mEUTag);
+    SbLog ("=M3E ctl: guard released on M3 core 1; Windows continues on A55 0 (MADT as woa made it)");
+    EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x800);
+    EClean (SB_EVLOG_BASE, SB_EVLOG_BASE + 12 + SB_EVLOG_CAP);
+    EClean (SB_PMSG_BASE, SB_PMSG_BASE + 12 + SB_PMSG_CAP);
+    *(volatile UINT32 *)(UINTN)(mEPark + 0x40) = 1;
+    EClean ((UINTN)mEPark + 0x40, (UINTN)mEPark + 0x44);
+    __asm__ __volatile__ ("sev" ::: "memory");
+    return Status;
+  }
+ #endif
  #if STARBITE_M3_EARLY >= 2
   if (mEMoved) {
     ECommitTables ();
@@ -1373,6 +1392,10 @@ M3EarlyOnReadyToBoot (
   EFbLiterals ();
   SbLog ("%a", mEKTag);
   SbLog ("%a", mEUTag);
+ #endif
+ #if STARBITE_M3_EARLY == 3
+  SbLog ("=M3E ctl: no hand-off; Windows boots on the A55s, the guard runs on M3 core 1 from EBS");
+  return;
  #endif
   Old = gBS->RaiseTPL (TPL_HIGH_LEVEL);
   ESaveA55Gic ();
@@ -1480,6 +1503,9 @@ M3EarlyArm (
   Lit    = (UINT64 *)(UINTN)(mEPark + 0x800 + (UINTN)(M3EarlyParkLit - M3EarlyPark));
   Lit[0] = mEPark;
   Lit[1] = (UINT64)(UINTN)M3EarlyEntry;
+ #if STARBITE_M3_EARLY == 3
+  Lit[1] = (UINT64)(Page + 3 * EFI_PAGE_SIZE + 0x800);      // control: the parked M3 runs the guard instead
+ #endif
   mEGuard = Page + 3 * EFI_PAGE_SIZE;
   ((UINT64 *)(UINTN)mEGuard)[0] = 0x0000000000000401ull;     // 0..1 GiB Device-nGnRnE (PMU), AF
   ((UINT64 *)(UINTN)mEGuard)[1] = 0x0000000040000401ull;

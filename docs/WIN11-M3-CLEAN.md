@@ -316,3 +316,14 @@ search. The tick question stays open. Screen (user, m3kern1/2): the logo only, n
   banks), nothing else, so the scan also reaches the high bank;
 - the UFS trigger is checked every 256 scanned pages, so a long scan never delays the volume reset.
 Still read-only towards Windows.
+
+## 14. a55ctl1: the control run (healthy boot, same instruments)
+
+`starbite-uefi-a55ctl1.bin`, sha256 `ef384254d773fc8554cf370400206bfc4fa19cbab852ecfb3bbb8f503b8f3cd4`
+(`SOLO=a55ctl1 M3EARLY=3`). No hand-off: Windows boots on the A55s with woa's tables as on every normal boot. The
+parked M3 core 1 runs the same guard instead of A55 0 (from ExitBootServices: own tables, the KUSER scan, the =M3K
+and =M3U lines, and the reset at the UFS driver's first pmsg line). What it gives:
+- whether the instruments work at all: KUSER found, `it`/`tc` growing, `gd`, `e` and `fbn` on a healthy kernel;
+- the baseline timing (beats from kernel entry to the GIC enable, the first screen change and the storage driver)
+  to compare with the M3 runs.
+Safe: the reset comes at the storage driver's first line, before any write, as in the M3 runs.
