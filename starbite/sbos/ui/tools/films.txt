@@ -5,3 +5,4 @@ holds: wait 300; hold 72 720 650; wait 700; hold 318 720 950; wait 900
 relock: wait 300; drag 195 795 195 330 220; wait 900; drag 80 20 80 640 300; wait 1200
 pages: wait 300; drag 195 795 195 330 220; wait 900; drag 320 450 60 450 200; wait 900; drag 60 450 330 460 220; wait 1200
 cc: wait 300; drag 195 795 195 330 220; wait 900; drag 320 20 320 330 260; wait 900; tap 70 290; wait 500; drag 240 230 240 120 300; wait 600; tap 195 600; wait 1000
+app: wait 300; drag 195 795 195 330 220; wait 900; tap 158 290; wait 1100; drag 195 795 200 450 260; wait 1200

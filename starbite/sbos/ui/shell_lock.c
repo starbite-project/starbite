@@ -985,6 +985,169 @@ static int cc_tap(float x, float y)
     return 1;
 }
 
+
+/* ---- an app opened from home: the window grows from its icon (the concept's openApp / setAppRect) -----------
+ * R goes from the icon's rect (radius 15) to the panel (radius 52) on the open spring (380 / 34); the window is the
+ * panel's page scaled uniformly by R.w / 390 and clipped to R; its background mixes from the app's tint to #0a0f1f
+ * (min(1, 2 p)), its content fades in (p x 1.6 - .2), home behind scales to 1.05 and fades to .6. A swipe up from
+ * the bottom bar follows the finger (scale >= .35, radius 52 -> 30) and closes it into the icon (360 / 30) past
+ * 60 pt or faster than .35 pt/ms, else springs back. P2: every app shows the concept's generic screen. */
+typedef struct { float x, y, w, h, r; } arect;
+typedef struct { const char *l, *r; } arow;
+typedef struct { const char *cap; int n; arow rows[8]; } asec;
+typedef struct { const char *k, *name; uint32_t tint; int ns; asec sec[4]; } appdef;
+static const appdef APPS[] = {
+    { "calendar", "Calendar", 0x1d2440, 2, { { "Today", 2, { { "Exam", "09:00" }, { "Starbite: big cores", "19:00" } } },
+                                           { "Tomorrow", 1, { { "Nothing planned", "" } } } } },
+    { "weather", "Weather", 0x1d2440, 1, { { "Helsinki", 3, { { "Now", "3 \xc2\xb0" "C \xc2\xb7 Cloudy" }, { "Tonight", "\xe2\x88\x92" "1 \xc2\xb0" "C" }, { "Tomorrow", "4 \xc2\xb0" "C \xc2\xb7 Rain" } } } } },
+    { "clock", "Clock", 0x1d2440, 2, { { "World clock", 3, { { "Helsinki", "Today" }, { "Tokyo", "+7 h" }, { "New York", "\xe2\x88\x92" "7 h" } } },
+                                     { "Alarms", 2, { { "07:00", "Vibrate" }, { "08:30", "Off" } } } } },
+    { "camera", "Camera", 0x1d2440, 1, { { "", 1, { { "The camera needs its driver first", "" } } } } },
+    { "photos", "Photos", 0x1d2440, 1, { { "", 1, { { "Coming soon", "" } } } } },
+    { "music", "Music", 0x1d2440, 1, { { "Library", 2, { { "Songs", "42" }, { "Playlists", "3" } } } } },
+    { "notes", "Notes", 0x1d2440, 1, { { "Notes", 2, { { "Shopping list", "Today" }, { "Ideas", "Yesterday" } } } } },
+    { "calc", "Calculator", 0x1d2440, 1, { { "Recent", 2, { { "12 \xc3\x97 7", "84" }, { "230 \xc3\xb7 4", "57.5" } } } } },
+    { "contacts", "Contacts", 0x1d2440, 1, { { "", 1, { { "Coming soon", "" } } } } },
+    { "files", "Files", 0x1d2440, 2, { { "Locations", 2, { { "On this phone", "12.4 GB free" }, { "Memory card", "118 GB free" } } },
+                                     { "Recent", 2, { { "Photos", "Folder" }, { "Downloads", "Folder" } } } } },
+    { "light", "Flashlight", 0x1d2440, 1, { { "", 2, { { "Flashlight", "Off" }, { "Screen light", "Full white" } } } } },
+    { "battery", "Battery", 0x1d2440, 2, { { "Now", 3, { { "Charge", "87 %" }, { "Battery temperature", "31 \xc2\xb0" "C" }, { "Phone temperature", "41 \xc2\xb0" "C" } } },
+                                         { "Last 24 hours", 2, { { "Screen on", "3 h 12 min" }, { "Survival Heat", "2 min 45 s" } } } } },
+    { "terminal", "Terminal", 0x1d2440, 1, { { "Linux apps", 3, { { "Terminal", "Open" }, { "Firefox", "Get" }, { "GIMP", "Get" } } } } },
+    { "browser", "Browser", 0x2f7bf6, 1, { { "Favourites", 3, { { "Starbite", "" }, { "Wikipedia", "" }, { "Weather", "" } } } } },
+    { "medical", "Medical Card", 0x1d2440, 1, { { "Shown on the lock screen", 3, { { "Blood type", "Add" }, { "Allergies", "Add" }, { "Emergency contacts", "Add" } } } } },
+    { "sos", "SOS", 0x1d2440, 1, { { "", 3, { { "Call 112", "Needs a SIM" }, { "Siren", "Off" }, { "Flashing light", "Off" } } } } },
+    { "phone", "Phone", 0x16b34a, 1, { { "", 1, { { "Coming soon", "" } } } } },
+    { "messages", "Messages", 0x16b34a, 1, { { "", 1, { { "Coming soon", "" } } } } },
+    { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "Home" }, { "Mobile Data", "No SIM" }, { "Battery", "87 %" } } },
+                                           { "", 4, { { "Display & Brightness", "" }, { "Wallpaper", "" }, { "Date & Time", "Automatic" }, { "Startup system", "Starbite OS" } } },
+                                           { "", 1, { { "About", "Galaxy S9" } } } } },
+};
+#define NAPPS ((int)(sizeof APPS / sizeof APPS[0]))
+static tk_layer appg, appbg, appc;
+static struct { int on, closing, following, a; arect icon, R, from, to; float travel; } AP;
+static tk_spring sp_app;
+static const arect FULLR = { 0, 0, 390, H_PT, 52 };
+static arect lerpr(arect a, arect b, float t)
+{
+    return (arect){ a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.w + (b.w - a.w) * t, a.h + (b.h - a.h) * t, a.r + (b.r - a.r) * t };
+}
+static void build_app_page(int a)
+{
+    /* the concept's genericScreen: the large title, captions (or an 18 pt gap), grouped rows */
+    const appdef *A = &APPS[a];
+    float y = 56 + 8 + 41 + 12;                         /* the title's box and margins */
+    float h = y;
+    for (int i = 0; i < A->ns; i++) h += (A->sec[i].cap[0] ? 34 : 18) + 47.0f * A->sec[i].n;
+    relayer(&appc);
+    dc d = mk(&appc, "app-page", 0, 0, 390, h + 4, 0, 0);
+    d_text(&d, TK_IT800, 34, 20, 64 + 33, A->name, -.8f, 0, INK, 0);
+    for (int i = 0; i < A->ns; i++) {
+        const asec *S = &A->sec[i];
+        if (S->cap[0]) {
+            /* .sec: 13 px, upper case, .04 em, .55; margin 18 36 6 (the 18 collapses with the title's 12) */
+            char up[64];
+            int k = 0;
+            for (const char *c = S->cap; *c && k < 63; c++) up[k++] = *c >= 'a' && *c <= 'z' ? (char)(*c - 32) : *c;
+            up[k] = 0;
+            d_text(&d, TK_IT400, 13, 36, y + (i ? 18 : 6) + 13, up, .52f, 0, W(.55f), 0);
+            y += (i ? 18 : 6) + 16 + 6;
+        } else
+            y += 18;
+        float gh = 47.0f * S->n - 1;
+        d_rrect(&d, 16, y, 358, gh, 16, tk_hex(0x151c33, 1));
+        for (int r = 0; r < S->n; r++) {
+            float ry = y + 47 * r;
+            d_text(&d, TK_IT400, 16, 32, ry + 13 + 16, S->rows[r].l, 0, 0, INK, 0);
+            if (S->rows[r].r[0]) {
+                float w = tw(TK_IT400, 16, S->rows[r].r, 0, TK_TNUM);
+                d_text(&d, TK_IT400, 16, 358 - w, ry + 13 + 16, S->rows[r].r, 0, TK_TNUM, W(.55f), 0);
+            }
+            if (r + 1 < S->n) d_rrect(&d, 16, ry + 46, 358, .5f, 0, W(.08f));
+        }
+        y += gh;
+    }
+    tk_layer_prepare(&appc);
+}
+static void set_app_rect(arect R)
+{
+    AP.R = R;
+    float s = R.w / 390, ch = R.h / s, inset = (H_PT - ch) / 2;
+    appg.sx = appg.sy = s;
+    appg.ox = appg.oy = 0;
+    appg.x = PT(R.x) / s;
+    appg.y = PT(R.y - inset * s) / s;
+    appg.clip = 1;
+    appg.clip_r = (tk_rect){ PT(R.x), PT(R.y), PT(R.w), PT(R.h) };
+    appg.clip_radius = PT(R.r);
+    float p = (R.w - 62) / (390 - 62);
+    appc.alpha = tk_clampf(p * 1.6f - .2f, 0, 1);
+    uint32_t t = APPS[AP.a].tint, b = 0x0a0f1f;
+    float m = tk_clampf(p * 2, 0, 1);
+    uint32_t cr = (uint32_t)((t >> 16 & 255) * (1 - m) + (b >> 16 & 255) * m + .5f), cg = (uint32_t)((t >> 8 & 255) * (1 - m) + (b >> 8 & 255) * m + .5f),
+             cb = (uint32_t)((t & 255) * (1 - m) + (b & 255) * m + .5f);
+    appbg.solid = 0xff000000u | cr << 16 | cg << 8 | cb;
+    appbg.gen++;
+    home.sx = home.sy = 1 + .05f * p;
+    home.alpha = 1 - .4f * tk_clampf(p, 0, 1);
+    appg.hidden = !AP.on;
+}
+static arect icon_rect(int a)
+{
+    static const char *P1[8] = { "calendar", "weather", "clock", "camera", "photos", "music", "notes", "calc" };
+    static const char *P2[8] = { "contacts", "files", "light", "battery", "terminal", "browser", "medical", "sos" };
+    static const char *DK[4] = { "phone", "messages", "browser", "settings" };
+    const char *k = APPS[a].k;
+    for (int i = 0; i < 4; i++) if (!tk_strcmp(DK[i], k)) return (arect){ 22 + 86.5f * i + 12.25f, 705, 62, 62, 15 };
+    for (int i = 0; i < 8; i++) if (!tk_strcmp(P1[i], k)) return (arect){ 22 + 86.5f * (i % 4) + 12.25f + page_x, 258 + 103 * (i / 4), 62, 62, 15 };
+    for (int i = 0; i < 8; i++) if (!tk_strcmp(P2[i], k)) return (arect){ 390 + 22 + 86.5f * (i % 4) + 12.25f + page_x, 62 + 103 * (i / 4), 62, 62, 15 };
+    return (arect){ 164, 370, 62, 62, 15 };
+}
+/* the app under a tap on home (the page's grid or the dock), or -1 */
+static int app_hit(float x, float y)
+{
+    static const char *P1[8] = { "calendar", "weather", "clock", "camera", "photos", "music", "notes", "calc" };
+    static const char *P2[8] = { "contacts", "files", "light", "battery", "terminal", "browser", "medical", "sos" };
+    static const char *DK[4] = { "phone", "messages", "browser", "settings" };
+    const char *k = 0;
+    if (y >= 700 && y <= 772) { int i = (int)((x - 22) / 86.5f); if (i >= 0 && i < 4) k = DK[i]; }
+    else {
+        int pg = page_x < -195;
+        float x0 = x - (pg ? 390 + page_x : page_x), top = pg ? 62 : 258;
+        int col = (int)((x0 - 22) / 86.5f), row = (int)((y - top) / 103);
+        if (col >= 0 && col < 4 && row >= 0 && row < 2 && y - top - row * 103 < 83) k = (pg ? P2 : P1)[row * 4 + col];
+    }
+    if (!k) return -1;
+    for (int a = 0; a < NAPPS; a++) if (!tk_strcmp(APPS[a].k, k)) return a;
+    return -1;
+}
+static void app_open(int a)
+{
+    AP.a = a;
+    AP.on = 1;
+    AP.closing = AP.following = 0;
+    build_app_page(a);
+    AP.icon = icon_rect(a);
+    AP.from = AP.icon;
+    AP.to = FULLR;
+    tk_spring_start(&sp_app, 0, 1, 0, TK_SPR_OPEN);
+    set_app_rect(AP.icon);
+}
+static void app_close(float v)
+{
+    AP.closing = 1;
+    AP.from = AP.R;
+    AP.to = icon_rect(AP.a);
+    tk_spring_start(&sp_app, 0, 1, tk_minf(6, tk_fabsf(v) * 2), TK_SPR_CLOSE);
+}
+static void app_finish_close(void)
+{
+    AP.on = AP.closing = 0;
+    appg.hidden = 1;
+    home.sx = home.sy = 1;
+    home.alpha = 1;
+}
+
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
 {
@@ -1057,8 +1220,10 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 }
 static void relink(void)
 {
-    tk_layer *r[] = { &star, &home, &lockg, &lockflat, &focus, &ccl, &boot, &homebar };
-    link(&root, r, 8);
+    tk_layer *r[] = { &star, &home, &lockg, &lockflat, &appg, &focus, &ccl, &boot, &homebar };
+    link(&root, r, 9);
+    tk_layer *ag[] = { &appbg, &appc };
+    link(&appg, ag, 2);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &list, &Q[0].grp, &Q[1].grp, &hint };
     link(&lockg, lk, 10);
     tk_layer *ls[3 * NG + 1];
@@ -1091,6 +1256,14 @@ void sh_init_begin(tk_comp *c)
     tk_layer_init(&pages, "pages");
     tk_layer_init(&ccl, "cc");
     ccl.hidden = 1;
+    tk_layer_init(&appg, "app");
+    appg.hidden = 1;
+    tk_layer_init(&appbg, "app-ground");
+    appbg.solid = 0xff0a0f1fu;
+    appbg.solid_w = TK_W;
+    appbg.solid_h = TK_H;
+    appbg.opaque = 1;
+    tk_layer_init(&appc, "app-page");
     tk_layer_init(&lockg, "lock");
     tk_layer_init(&list, "list");
     list.clip = 1;
@@ -1196,11 +1369,20 @@ void sh_set(const char *what, const char *key, float v)
         sp_page.live = 0; page_dragging = 0;
         set_page(0);
         CCS.on = 0; sp_cc.live = 0; set_cc(0);
+        if (AP.on) { sp_app.live = 0; app_finish_close(); }
         locked = 1;
         set_lock(0);
         mark_a = mark_t; glyph_a = glyph_t; hint_a = 0; hint_left = 0;
         apply_tweens();
         place_list();
+    } else if (!tk_strcmp(what, "app")) {
+        for (int a = 0; a < NAPPS; a++)
+            if (!tk_strcmp(APPS[a].k, key)) {
+                app_open(a);
+                sp_app.live = 0;
+                set_app_rect(lerpr(AP.icon, FULLR, v));
+                if (v >= 1) appg.clip = 0;
+            }
     } else if (!tk_strcmp(what, "cc")) {
         if (!CCS.built || cc_stale) { build_cc(); cc_stale = 0; }
         sp_cc.live = 0;
@@ -1222,7 +1404,7 @@ void sh_set(const char *what, const char *key, float v)
 }
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
-enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL };
+enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP };
 static struct {
     int kind, arg, arg2, moved;
     float x0, y0, base, t0;
@@ -1271,6 +1453,11 @@ void sh_touch(int phase, float x, float y, float t)
             float sy = focus_sy;
             if (x >= 39 + thumb_x && x <= 91 + thumb_x && y >= sy + 5 && y <= sy + 57) { T.kind = G_THUMB; T.base = thumb_x; sp_thumb.live = 0; }
             else if (y < 196 || y > 463) T.kind = G_SCRIM;
+            return;
+        }
+        if (!locked && AP.on) {
+            /* an open app: the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
+            if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
             return;
         }
         if (!locked && CCS.on && !CCS.closing) {
@@ -1347,6 +1534,16 @@ void sh_touch(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, y, t);
             set_lock(-H_PT + tk_maxf(0, dy));
             break;
+        case G_APP: {
+            tk_tracker_add(&T.tr, y, t);
+            float d2 = tk_minf(0, dy), sc = tk_maxf(.35f, 1 + d2 / (H_PT * .9f));
+            arect R = { 0, 0, 390 * sc, H_PT * sc, 52 + (30 - 52) * (1 - sc) };
+            R.x = x - R.w / 2;
+            R.y = (H_PT + d2) - R.h * .92f;
+            AP.travel = d2;
+            set_app_rect(R);
+            break;
+        }
         case G_CC:
             tk_tracker_add(&T.tr, y, t);
             CCS.on = 1;
@@ -1428,7 +1625,19 @@ void sh_touch(int phase, float x, float y, float t)
     case G_CCTAP:
         if (!T.moved && !cc_tap(x, y)) cc_close();
         break;
+    case G_APP: {
+        float v = tk_tracker_v(&T.tr);
+        AP.following = 0;
+        if (AP.travel < -60 || v < -.35f) app_close(v);
+        else { AP.from = AP.R; AP.to = FULLR; tk_spring_start(&sp_app, 0, 1, 0, TK_SPR_OPEN); }
+        break;
+    }
     case G_PAGE:
+        if (!page_dir) {                      /* a tap: an app icon opens its app */
+            int a = app_hit(x, y);
+            if (a >= 0) app_open(a);
+            break;
+        }
         if (page_dir == 1) {
             float v = tk_tracker_v(&T.tr), target = page_x + v * 220 < -195 ? -390 : 0;
             page_dragging = 0;
@@ -1480,7 +1689,17 @@ int sh_tick(float dt, float t)
         set_page(sp_page.x);
         mv = 1;
     }
-    if (T.kind == G_CC || T.kind == G_CCSL) mv = 1;
+    if (T.kind == G_CC || T.kind == G_CCSL || T.kind == G_APP) mv = 1;
+    if (sp_app.live) {
+        int live = tk_spring_step(&sp_app, dt);
+        float u = AP.closing ? tk_minf(1.04f, sp_app.x) : sp_app.x;
+        set_app_rect(lerpr(AP.from, AP.to, u));
+        if (!live) {
+            if (AP.closing) app_finish_close();
+            else appg.clip = 0;              /* at rest: the whole panel, no clip (as the concept drops it) */
+        }
+        mv = 1;
+    }
     if (sp_cc.live) {
         int live = tk_spring_step(&sp_cc, dt);
         set_cc(tk_maxf(0, sp_cc.x));
@@ -1651,7 +1870,8 @@ void sh_idle(void)
 int sh_moving(void)
 {
     int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB ||
-            T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || T.kind == G_CC || T.kind == G_CCSL || sp_cc.live || booting;
+            T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || T.kind == G_CC || T.kind == G_CCSL || sp_cc.live ||
+            T.kind == G_APP || sp_app.live || booting;
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live;
     return m;

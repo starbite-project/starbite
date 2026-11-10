@@ -49,6 +49,7 @@ typedef struct {
     float a, b, tx, ty;       /* screen = (a x + tx, b y + ty) for bitmap px (x, y) */
     float alpha;
     tk_irect clip;            /* screen, half-open */
+    float crad;               /* the clip's corner radius (screen px; 0 square) */
     float ft0, ft1, fb0, fb1; /* fade: alpha 0 at ft0 .. 1 at ft1; 1 at fb0 .. 0 at fb1 (screen y) */
     int fade;
     tk_irect r;               /* screen rect drawn (clipped) */
@@ -81,7 +82,7 @@ static tk_irect iunion(tk_irect a, tk_irect b)
 }
 
 static void walk(tk_layer *l, float a, float b, float tx, float ty, float alpha, tk_irect clip,
-                 float ft0, float ft1, float fb0, float fb1, int fade)
+                 float ft0, float ft1, float fb0, float fb1, int fade, float crad)
 {
     for (; l; l = l->next) {
         if (l->hidden || l->alpha <= 0) continue;
@@ -92,10 +93,12 @@ static void walk(tk_layer *l, float a, float b, float tx, float ty, float alpha,
         tk_irect c = clip;
         float f0 = ft0, f1 = ft1, g0 = fb0, g1 = fb1;
         int fd = fade;
+        float cr = crad;
         if (l->clip) {
             tk_rect r = l->clip_r;     /* in the parent's space */
             tk_irect s = irect_of(a * r.x + tx, b * r.y + ty, a * (r.x + r.w) + tx, b * (r.y + r.h) + ty);
             c = isect(c, s);
+            if (l->clip_radius > 0) cr = a * l->clip_radius;
             if (l->fade_top > 0 || l->fade_bot > 0) {
                 f0 = b * r.y + ty; f1 = f0 + b * l->fade_top;
                 g1 = b * (r.y + r.h) + ty; g0 = g1 - b * l->fade_bot;
@@ -107,16 +110,16 @@ static void walk(tk_layer *l, float a, float b, float tx, float ty, float alpha,
             float h = l->solid ? l->solid_h : l->slice == 1 ? l->slice_h : (float)l->bmp.h;
             float w = l->solid ? l->solid_w : l->slice == 2 ? l->slice_h : (float)l->bmp.w;
             it->l = l; it->a = A; it->b = B; it->tx = TX; it->ty = TY; it->alpha = AL;
-            it->clip = c; it->fade = fd; it->ft0 = f0; it->ft1 = f1; it->fb0 = g0; it->fb1 = g1;
+            it->clip = c; it->crad = cr; it->fade = fd; it->ft0 = f0; it->ft1 = f1; it->fb0 = g0; it->fb1 = g1;
             it->r = isect(irect_of(TX, TY, TX + A * w, TY + B * h), c);
             if (!iempty(it->r)) {
                 it->key[0] = A; it->key[1] = B; it->key[2] = TX; it->key[3] = TY; it->key[4] = AL;
-                it->key[5] = (float)l->gen; it->key[6] = h; it->key[7] = (float)(c.x0 + 3 * c.y0 + 7 * c.x1 + 11 * c.y1);
+                it->key[5] = (float)l->gen; it->key[6] = h; it->key[7] = (float)(c.x0 + 3 * c.y0 + 7 * c.x1 + 11 * c.y1) + cr * 13;
                 W->n++;
             }
         }
         if (l->child)
-            walk(l->child, A, B, TX, TY, AL, c, f0, f1, g0, g1, fd);
+            walk(l->child, A, B, TX, TY, AL, c, f0, f1, g0, g1, fd, cr);
     }
 }
 
@@ -260,6 +263,18 @@ static int slice_row(const tk_layer *l, int v, int srch, float res)
 }
 
 
+/* a rounded clip (an app window growing from its icon): the row's span inside it, hard-edged (motion frames) */
+static inline void round_span(const item *it, float k, int y, tk_irect *d)
+{
+    if (it->crad <= 0) return;
+    float r = it->crad * k, y0 = it->clip.y0 * k, y1 = it->clip.y1 * k, yc = y + .5f, in = 0;
+    if (yc < y0 + r) { float dy = y0 + r - yc; in = r - tk_sqrtf(tk_maxf(0, r * r - dy * dy)); }
+    else if (yc > y1 - r) { float dy = yc - (y1 - r); in = r - tk_sqrtf(tk_maxf(0, r * r - dy * dy)); }
+    if (in <= 0) return;
+    int xa = (int)(it->clip.x0 * k + in + .5f), xb = (int)(it->clip.x1 * k - in + .5f);
+    if (d->x0 < xa) d->x0 = xa;
+    if (d->x1 > xb) d->x1 = xb;
+}
 static inline void up2x_hrow(uint32_t *o, const uint32_t *V, int X0, int X1);
 static void draw_solid(const tgt *T, const item *it, tk_irect R)
 {
@@ -268,7 +283,11 @@ static void draw_solid(const tgt *T, const item *it, tk_irect R)
     tk_irect d = isect(R, irect_of(it->r.x0 * k, it->r.y0 * k, it->r.x1 * k, it->r.y1 * k));
     if (iempty(d)) return;
     uint32_t c = it->l->solid, *rowbuf = T->S->rowbuf;
-    for (int y = d.y0; y < d.y1; y++) {
+    tk_irect D0 = d;
+    for (int y = D0.y0; y < D0.y1; y++) {
+        tk_irect d = D0;
+        round_span(it, k, y, &d);
+        if (d.x1 <= d.x0) continue;
         float f = fade_at(it, (y + .5f) / k);
         unsigned al = (unsigned)(it->alpha * f * 255 + .5f);
         uint32_t *dst = T->t->px + (size_t)y * T->t->stride + d.x0;
@@ -312,8 +331,13 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
      * present's 1/4 3/4 kernel, which is what the bilinear gives at that scale */
     int two = tk_fabsf(A - 2) < 1e-4f && tk_fabsf(B - 2) < 1e-4f && !l->slice && !(glass && gm) &&
               tk_fabsf(TX - ox) < 1e-3f && tk_fabsf(TY - oy) < 1e-3f;
-    int colok = 0, umin = 0, umax = 0;
-    for (int y = d.y0; y < d.y1; y++) {
+    int colok = 0, umin = 0, umax = 0, lastx0 = d.x0;
+    tk_irect D0 = d;
+    for (int y = D0.y0; y < D0.y1; y++) {
+        tk_irect d = D0;
+        round_span(it, k, y, &d);
+        if (d.x1 <= d.x0) continue;
+        if (d.x0 != lastx0 || d.x1 != D0.x1) { colok = 0; lastx0 = d.x0; }
         float f = fade_at(it, (y + .5f) / k);
         unsigned al = (unsigned)(it->alpha * f * 255 + .5f);
         if (!al) continue;
@@ -597,7 +621,7 @@ static void band(void *arg, int i)
             float k = T.k;
             for (int q2 = cur.n - 1; q2 >= 0; q2--) {
                 const item *it = &cur.it[q2];
-                if (!it->l->opaque || it->alpha < .999f || it->fade) continue;
+                if (!it->l->opaque || it->alpha < .999f || it->fade || it->crad > 0) continue;
                 tk_irect cv = { (int)(it->r.x0 * k + .999f), (int)(it->r.y0 * k + .999f), (int)(it->r.x1 * k), (int)(it->r.y1 * k) };
                 if (cv.x0 <= b.x0 && cv.y0 <= b.y0 && cv.x1 >= b.x1 && cv.y1 >= b.y1) { first = q2; break; }
             }
@@ -639,7 +663,7 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     cur.n = 0;
     W = &cur;
     tk_irect screen = { 0, 0, TK_W, TK_H };
-    walk(c->root, 1, 1, 0, 0, 1, screen, 0, 0, 0, 0, 0);
+    walk(c->root, 1, 1, 0, 0, 1, screen, 0, 0, 0, 0, 0, 0);
 
     /* damage */
     tk_irect D[TK_MAXD];
@@ -737,7 +761,7 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
     flist.n = 0;
     W = &flist;
     tk_irect screen = { 0, 0, out->w, out->h };
-    walk(g->child, k, k, 0, 0, 1, screen, 0, 0, 0, 0, 0);
+    walk(g->child, k, k, 0, 0, 1, screen, 0, 0, 0, 0, 0, 0);
     W = &cur;
     tk_memset(out->px, 0, (size_t)out->stride * out->h * 4);
     if (mask && mask->v) tk_memset(mask->v, 0, (size_t)mask->w * mask->h);

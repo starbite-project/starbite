@@ -14,5 +14,8 @@
  {"name": "home-page-50",    "js": "sbSet('unlock', 1); sbSet('page', .5)", "host": ["unlock=:1", "page=:0.5"]},
  {"name": "cc",              "js": "sbSet('unlock', 1); sbSet('cc', 1)", "host": ["unlock=:1", "cc=:1"]},
  {"name": "cc-50",           "js": "sbSet('unlock', 1); sbSet('cc', .5)", "host": ["unlock=:1", "cc=:0.5"]},
+ {"name": "app-settings",    "js": "sbSet('unlock', 1); sbSet('app', ['settings', 1])", "host": ["unlock=:1", "app=settings:1"]},
+ {"name": "app-calendar",    "js": "sbSet('unlock', 1); sbSet('app', ['calendar', 1])", "host": ["unlock=:1", "app=calendar:1"]},
+ {"name": "app-clock-50",    "js": "sbSet('unlock', 1); sbSet('app', ['clock', .5])", "host": ["unlock=:1", "app=clock:0.5"]},
  {"name": "hint",            "js": "window.__hint = 1",                    "host": ["hint=:1"]}
 ]
