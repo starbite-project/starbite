@@ -14,6 +14,7 @@
 #   TUNE=launchd-log ...                prefs + launchd.plist with only the PosterBoard log (no job removed);
 #                                       LOG="pkd lsd ..." adds those jobs' logs (LOGDEST=console: into the kernel log)
 #                                       ENABLE="logd ..." drops those jobs' Disabled key (both launchd modes);
+#                                       PROFILES="subsystem ..." adds os_log debug profiles to the same overlay;
 #                                       back off: --undo with the collect folder from before
 #   TUNE=full ... (default)             prefs + PosterBoard log + jobs in starlte-disabled-ios26-b.list out
 #   (T3 2026-11-08 17:06: TUNE=full's launchd.plist ended in "No service cache": bisect with these)
@@ -104,6 +105,14 @@ python3 tools/ios26-prefs-tune.py "$A" "$out/tune/com.apple.Accessibility.plist"
     ReduceMotionEnabled=1 EnhancedBackgroundContrastEnabled=1 | tee -a "$out/tune/report.txt"
 files+=("$out/tune/com.apple.Accessibility.plist=/private/var/mobile/Library/Preferences/com.apple.Accessibility.plist:600:501:501")
 echo "TUNE=$mode" >> "$out/tune/report.txt"
+# PROFILES="com.apple.extensionkit ...": os_log debug profiles in the same overlay (as tools/ios26-log-profile.sh;
+# they only take effect with logd running: ENABLE=logd)
+for s in ${PROFILES:-}; do
+    case "$s" in *[!A-Za-z0-9._-]*) echo "bad subsystem $s"; exit 1;; esac
+    python3 -c 'import plistlib,sys; plistlib.dump({"DEFAULT-OPTIONS": {"Level": {"Enable": "Debug", "Persist": "Debug"}, "Enable-Private-Data": True}}, open(sys.argv[1], "wb"))' "$out/tune/$s.plist"
+    files+=("$out/tune/$s.plist=/System/Library/Preferences/Logging/Subsystems/$s.plist:644:0:0")
+    echo "profile $s" >> "$out/tune/report.txt"
+done
 python3 tools/overlay/sboverlay.py "$out/overlay.bin" "${files[@]}"
 tools/overlay/card-overlay.sh "$out/overlay.bin"
 echo "queued for the next iOS 26 boot (0401+ kernel): $out/tune/report.txt; undo: tools/ios26-root-tune.sh --undo $out"
