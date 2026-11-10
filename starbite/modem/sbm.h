@@ -594,6 +594,9 @@ struct sbm_seq {
 };
 extern const struct sbm_seq sbm_seq_cp_init[], sbm_seq_reset_assert[], sbm_seq_dump_pc_no_pg[];
 extern const unsigned sbm_seq_cp_init_n, sbm_seq_reset_assert_n, sbm_seq_dump_pc_no_pg_n;
+/* PMUCAL's cp_reset_release (pmucal_cp_exynos9810.h): CP_START again, the central sequencer back to 0, the GIC bit */
+extern const struct sbm_seq sbm_seq_reset_release[];
+extern const unsigned sbm_seq_reset_release_n;
 /* Runs a PMUCAL-style table; a WAIT polls up to timeout_us. 0, SBM_ETIME (which wait), SBM_EIO / SBM_EPERM. */
 int sbm_seq_run(const struct sbm_plat *p, const struct sbm_seq *s, unsigned n, uint32_t timeout_us);
 /* CP_CTRL through EL3, read-modify-write the way PMUCAL does. 0 or SBM_E*. */
@@ -609,6 +612,14 @@ struct sbm_image {
     struct sbm_plan plan;
     const uint8_t *data[SBM_LOAD_MAX];   /* in plan order: BOOT, MAIN, VSS, NV */
     uint32_t crc[SBM_LOAD_MAX];          /* filled by sbm_image_check */
+    /* Streaming (the small footprint): a RADIO section whose data[k] is NULL is read from the partition through
+     * plat->radio_read in chunks of chunk_size bytes, twice: once for the CRC check, once into the carve-out (its CRC
+     * must match the check's, then the read-back's). Only NV needs RAM. 0 / NULL = everything in RAM as before. */
+    uint8_t *chunk;
+    uint32_t chunk_size;                 /* >= 4096, a multiple of 4096 */
+    /* NV as EFS holds it (read once, never written): copied over data[NV] before every start, so each start and
+     * each restart serves the same data, whatever the CP wrote to the RAM copy last time. NULL = not restored. */
+    const uint8_t *nv_pristine;
 };
 /* Checks the sections in RAM: BOOT/MAIN/VSS against the TOC's CRC-32, NV's size. 0 or SBM_E*. Logs only
  * sizes and CRCs, never content. */
@@ -642,6 +653,8 @@ struct sbm_boot {
     enum sbm_boot_stop stop;
     /* what happened */
     int checked, inited, copied, validated, released, parked;
+    int restart;                         /* output: a CP parked earlier in this boot was restarted (reset release) */
+    uint32_t streamed;                   /* output: bytes read from RADIO straight into the carve-out */
     uint32_t sec2, sec0;                 /* EL3's answers */
     uint32_t ctrl_s, ctrl_ns;            /* after cp_init */
     uint32_t reset_seq_before, reset_seq_after;
@@ -756,17 +769,71 @@ int sbm_sms_submit(const struct sbm_dial_policy *pol, const char *number, const 
  * RFS, guards; a guard (a SIM that is not absent, a registration) or a crash parks the CP and returns 1 / SBM_E*.
  * sbm_modem_query sends the allow-listed status GETs; sbm_modem_status gives the masked status line; sbm_modem_stop
  * parks. Receive-only by design until the SIM day: the guards stay in. */
+enum sbm_modem_state {
+    SBM_MS_OFF = 0,        /* never started, or stopped by the caller (parked) */
+    SBM_MS_ONLINE = 1,     /* up: polling, queries answered */
+    SBM_MS_STALLED = 2,    /* the CP stopped answering: parked; sbm_modem_recover may restart it */
+    SBM_MS_GUARD = 3,      /* a guard parked it (a SIM that is not absent, a registration): stays off */
+    SBM_MS_CRASHED = 4,    /* the CP sent its crash command: parked; sbm_modem_recover may restart it */
+    SBM_MS_FAILED = 5,     /* the start failed (parked); last_err says why */
+};
+#define SBM_STALL_MS        20000u   /* an open query and nothing from the CP for this long = stalled */
+#define SBM_RECOVER_GAP_MS   5000u   /* at least this long parked before a restart */
+#define SBM_RECOVER_MAX         3u   /* restarts per SBM_RECOVER_WINDOW_MS; then it stays off */
+#define SBM_RECOVER_WINDOW_MS (30u * 60u * 1000u)
+/* What a UI shows: one copy, taken with sbm_modem_snapshot whenever it wants (cheap, no I/O). Everything here is
+ * safe to show on screen; only `line` (masked) and the numbers may go to a log. plmn and cell are SCREEN ONLY: they
+ * identify the country and operator. */
+struct sbm_modem_snap {
+    uint32_t gen;          /* bumps whenever anything below changes: redraw when it differs from the last one */
+    uint8_t state;         /* enum sbm_modem_state */
+    uint8_t sim;           /* SBM_SIM_*, 0xFF = not reported yet */
+    uint8_t cs, ps;        /* SBM_REG_* (registration), 0xFF = not reported yet */
+    uint8_t rat;           /* SBM_ACT_* of the CS (else PS) registration, 0 = unknown */
+    uint8_t bars;          /* 0..5 from DISP_ICON_INFO, 0xFF = unknown */
+    uint8_t rssi_raw;      /* DISP_RSSI_INFO's byte, 0xFF = unknown; rssi_dbm = -rssi_raw (Samsung's IPC habit,
+                            * unconfirmed: 0x3d = -61 dBm with 4 bars fits) */
+    int16_t rssi_dbm;      /* 0 = unknown */
+    uint8_t emergency_only;/* 1: camped with limited service (no SIM): "Emergency calls only" */
+    uint8_t have_plmn;
+    char plmn[7];          /* SCREEN ONLY: MCC-MNC of the serving cell, e.g. "00101" */
+    uint8_t have_cell;     /* the CP sent LAC / cell id (their values are not kept: location) */
+    uint32_t up_ms;        /* since the last start */
+    uint32_t last_rx_ms;   /* since anything came from the CP (0xFFFFFFFF = nothing yet) */
+    uint32_t queries, answers, open;   /* status GETs sent / answered / still waiting */
+    uint32_t starts, restarts;         /* this session: starts by the caller, automatic restarts */
+    int32_t last_err;      /* SBM_E* of the last failure, 0 = none */
+    char line[112];        /* the masked one-line status (loggable) */
+};
+/* The session. Keep it static (it holds the boot record); start/stop as often as needed: the same struct, the same
+ * image, no allocation in the core. */
 struct sbm_modem {
     const struct sbm_plat *p;
     struct sbm_image *im;
     struct sbm_boot b;
-    uint32_t ms;
+    uint32_t ms;           /* ms since the last start (the caller's elapsed_ms added up) */
     int up;
+    uint8_t state;         /* enum sbm_modem_state */
+    uint32_t gen, starts, restarts, stalls, crashes;
+    uint32_t last_rx_ms, last_q_ms, down_ms;  /* last_rx: when the CP last sent anything; down: when it was parked */
+    uint32_t total_ms;     /* ms since the first start (for the restart window) */
+    uint32_t restart_at[SBM_RECOVER_MAX];     /* total_ms of the recent restarts */
+    uint32_t rx_seen;      /* fmt_rx + rfs_rx at the last poll (to see new traffic) */
+    int32_t last_err;
+    struct sbm_modem_snap last_snap;          /* for gen: what changed since */
 };
 int sbm_modem_start(struct sbm_modem *m, const struct sbm_plat *p, struct sbm_image *im);
+/* Non-blocking. 0 = nothing new; 1 = something the UI shows changed (take a snapshot); SBM_E* = it went down
+ * (parked): SBM_ETIME a stall, SBM_EIO a CP crash, SBM_EPERM a guard. */
 int sbm_modem_poll(struct sbm_modem *m, uint32_t elapsed_ms);
 int sbm_modem_query(struct sbm_modem *m);
 void sbm_modem_status(const struct sbm_modem *m, char *out, size_t cap);
+void sbm_modem_snapshot(struct sbm_modem *m, struct sbm_modem_snap *s);
+/* After a stall or a crash (not a guard, not a stop): restarts the CP (blocking, about 2 s) when it has been parked
+ * for SBM_RECOVER_GAP_MS and fewer than SBM_RECOVER_MAX restarts happened in the window. Call it from a timer while
+ * the state is STALLED / CRASHED, with elapsed_ms since the last poll/recover call. 0 restarted, 1 not yet (wait),
+ * SBM_EPERM not allowed (state, or the window is used up), else the start's SBM_E*. */
+int sbm_modem_recover(struct sbm_modem *m, uint32_t elapsed_ms);
 int sbm_modem_stop(struct sbm_modem *m);
 
 /* Park: Android's power-off. Safe to call more than once and when nothing was started. */
@@ -789,6 +856,7 @@ const char *sbm_strerror(int e);
 /* freestanding helpers (sbm_util.c) */
 void sbm_memcpy(void *d, const void *s, size_t n);
 void sbm_memset(void *d, int c, size_t n);
+int sbm_memcmp(const void *a, const void *b, size_t n);
 size_t sbm_strlcpy(char *d, const char *s, size_t cap);
 /* tiny formatter: %s %u %d %x %c %% with width / zero pad, l / ll; returns the full length */
 int sbm_fmt(char *out, size_t cap, const char *fmt, ...);

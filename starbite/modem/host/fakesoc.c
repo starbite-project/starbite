@@ -2,7 +2,9 @@
 /* sbm host test: the fake SoC for stage 3 (fakesoc.h). Behaviour follows this phone's log and PMUCAL's tables:
  * CP_PWRON + CP_START -> the reset sequencer reads 5 and the GIC bit pends; mode 2 -> 0x0b; mode 0 checks the
  * carve-out's BOOT/MAIN against the "signed" CRCs -> 0 or 0x0e; AP2CP_CFG = 1 after a valid mode 0 -> the CP sets
- * cp_status 1 in ISSR3 30 ms later; CENTRAL_SEQ_CP_CONFIGURATION bit 16 = 0 -> status 0x80 (in reset). */
+ * cp_status 1 in ISSR3 30 ms later; CENTRAL_SEQ_CP_CONFIGURATION bit 16 = 0 with CP_RESET_SET -> status 0x80 (in
+ * reset), the reset sequencer stays 5 (as soak-1's park read it on the phone); CP_START written again while in reset
+ * (PMUCAL's reset_release) -> status 0, the GIC bit; MCUCTLR bit 0 clears the mailbox. */
 #include <stdlib.h>
 #include <string.h>
 #include "fakesoc.h"
@@ -150,6 +152,8 @@ static void ap_msg(struct fakesoc *s)
 {
     uint32_t v = s->mbox[SBM_MBOX_ISSR(SBM_MBX_AP2CP_MSG) / 4];
     if (s->link == L_ONLINE && v == (SBM_INT_VALID | 0x01)) {
+        if (s->cp_mute)
+            return;
         rfs_ul(s);
         fakecp_step(&s->fcp);           /* FMT requests: answered from the scenario (no SIM) */
         return;
@@ -167,6 +171,7 @@ static void ap_msg(struct fakesoc *s)
         /* online: the NOTIs this phone's CP sent under Android, then RFS requests (read, read, write) */
         s->link = L_ONLINE;
         fakecp_attach(&s->fcp, s->ipc, s->ipc_size, s->sim_present ? FAKE_HOME : FAKE_NOSIM);
+        s->fcp.nosim_plmn = s->nosim_plmn;
         fakecp_boot_notis(&s->fcp);
         static const uint8_t rd1[] = { 0xf8, 0xf5, 18, 0, 14, 0, 0, 0, 0x01, 1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00 };
         static const uint8_t rd2[] = { 0xf8, 0xf5, 18, 0, 14, 0, 0, 0, 0x01, 2, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00 };
@@ -229,11 +234,6 @@ static void tick(struct fakesoc *s)
         s->pmu[PMU_RSEQ] = 5;
         s->gicd_pend |= 1u << 28;
     }
-    if (!(s->pmu[PMU_CCFG] & (1u << 16)) && (s->ctrl[SBM_CP_CTRL_NS] & 4)) {
-        s->pmu[PMU_CST] = 0x80u << 16;
-        s->pmu[PMU_RSEQ] = 0;
-        s->cp_running = 0;
-    }
     if (s->cp_running && !s->never_status && s->clock_us >= s->run_at_us)
         s->mbox[SBM_MBOX_ISSR(SBM_MBX_CP2AP_STATUS) / 4] |= 1u << 1;
 }
@@ -276,8 +276,20 @@ static int mmio_wr(void *ctx, uint64_t pa, uint32_t v)
         if (pa == SBM_PMU_PA + 0x30 || pa == SBM_PMU_PA + 0x34)
             return 0;
         s->pmu[(pa - SBM_PMU_PA) / 4] = v;
+        if (pa == SBM_PMU_PA + SBM_PMU_CENTRAL_SEQ_CP_CFG && !(v & (1u << 16)) && (s->ctrl[SBM_CP_CTRL_NS] & 4)) {
+            s->pmu[PMU_CST] = 0x80u << 16;      /* reset asserted; the reset sequencer keeps its 5 */
+            s->cp_running = 0;
+            s->validated = 0;
+            s->link = L_IDLE;
+            s->asserts++;
+        }
     } else if (pa >= SBM_MBOX_PA && pa < SBM_MBOX_PA + SBM_MBOX_SIZE) {
-        if (pa == SBM_MBOX_PA + SBM_MBOX_INTGR1) {
+        if (pa == SBM_MBOX_PA + SBM_MBOX_MCUCTLR) {
+            if (v & 1) {
+                memset(s->mbox, 0, sizeof(s->mbox));
+                s->mbox_resets++;
+            }
+        } else if (pa == SBM_MBOX_PA + SBM_MBOX_INTGR1) {
             if (v & 1)
                 ap_msg(s);
         } else if (pa == SBM_MBOX_PA + SBM_MBOX_INTCR0) {
@@ -287,7 +299,7 @@ static int mmio_wr(void *ctx, uint64_t pa, uint32_t v)
         }
     } else if (pa == SBM_AP2CP_CFG_PA) {
         s->ap2cp_cfg = v;
-        if ((v & 1) && s->validated && s->pmu[PMU_RSEQ] == 5) {
+        if ((v & 1) && s->validated && s->pmu[PMU_RSEQ] == 5 && !(s->pmu[PMU_CST] & (0x80u << 16))) {
             s->cp_running = 1;
             s->run_at_us = s->clock_us + 30000;
         }
@@ -311,6 +323,11 @@ static uint64_t smc(void *ctx, uint64_t id, uint64_t a1, uint64_t a2, uint64_t a
         } else {
             s->ctrl[a3] = (uint32_t)a2;
             ret = 0;
+            if (a3 == SBM_CP_CTRL_S && (a2 & 8) && (s->pmu[PMU_CST] >> 16) == 0x80 && !s->release_stuck) {
+                s->pmu[PMU_CST] = 0;            /* PMUCAL's reset_release */
+                s->gicd_pend |= 1u << 28;
+                s->releases++;
+            }
         }
     } else if (id == SBM_SMC_SSS_CLK && a1 <= 1 && !a2 && !a3) {
         s->sss_on = a1 == 0;
@@ -363,6 +380,19 @@ static int cr(void *ctx, uint32_t off, void *dst, uint32_t len)
     return 1;
 }
 
+static int radio_rd(void *ctx, uint64_t off, void *buf, uint32_t len)
+{
+    struct fakesoc *s = ctx;
+    if (!s->radio || off > s->radio_size || len > s->radio_size - off)
+        return -1;
+    memcpy(buf, s->radio + off, len);
+    s->radio_reads++;
+    s->radio_bytes += len;
+    if (s->radio_flip_at && s->radio_reads >= s->radio_flip_at && len)
+        ((uint8_t *)buf)[0] ^= 1;
+    return 0;
+}
+
 static void udelay(void *ctx, uint32_t us)
 {
     struct fakesoc *s = ctx;
@@ -384,6 +414,8 @@ void fakesoc_plat(struct fakesoc *s, struct sbm_plat *p, void (*log)(void *, con
     p->udelay = udelay;
     p->now_us = now_us;
     p->ipc = s->ipc;
+    if (s->radio)
+        p->radio_read = radio_rd;
     if (s->warm_pwron)                   /* after a warm reboot from Android: PWRON kept, sequencer 0 */
         s->ctrl[SBM_CP_CTRL_NS] = 0x002016a2;
     if (s->started_before) {

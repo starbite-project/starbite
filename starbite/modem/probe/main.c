@@ -274,66 +274,129 @@ static void park_hook(void)
     sbm_cp_park(&park_plat);
 }
 
-/* modemsess: the session API as Starbite OS would use it: start, a 1 ms event loop for modem_hold seconds (default
- * 120), the status GETs every 10 s, the masked status line on the screen every second and in pmsg every 10 s, then
- * stop (park). The guards inside poll park the CP on a SIM or a registration. */
-static void session(void)
+/* modemsess*: the session API as Starbite OS uses it, from the small-footprint image (only nv_data in RAM; BOOT/MAIN/
+ * VSS streamed from RADIO at each start): start, a 1 ms event loop for modem_hold seconds, the status GETs every
+ * 10 s, a snapshot line in pmsg every 10 s and on the screen every second (masked: never the PLMN), then stop
+ * (park). A stall or a crash is recovered as Starbite OS would (sbm_modem_recover). The guards park on a SIM or a
+ * registration and stay parked.
+ *   modemsess        one session, modem_hold s (120)
+ *   modemsess-cycle  modem_cycles sessions (3) of modem_hold s (40) each, 6 s parked between: the same-boot restart
+ *   modemsess-long   one session of modem_hold s (1500 = 25 min): continuous use */
+static void snap_line(struct sbm_modem *mo, const char *tag, unsigned secs)
 {
-    static struct sbm_image im;
-    static struct sbm_modem mo;
+    struct sbm_modem_snap sn;
+    char s[COLS];
+    sbm_modem_snapshot(mo, &sn);
+    sbm_fmt(s, sizeof(s), "%s +%u s: %s | state %u gen %u | q %u a %u open %u | rssi %d dBm | rx %u ms ago | starts %u"
+            " restarts %u%s", tag, secs, sn.line, sn.state, sn.gen, sn.queries, sn.answers, sn.open, sn.rssi_dbm,
+            sn.last_rx_ms == 0xFFFFFFFFu ? 0 : sn.last_rx_ms, sn.starts, sn.restarts, sn.emergency_only ?
+            " | emergency calls only" : "");
+    line(s);
+}
+
+static int session_run(struct sbm_modem *mo, unsigned secs, unsigned cycle)
+{
     char s[COLS], st[COLS];
-    unsigned secs = arg("modem_hold", 120);
-    if (secs > 600)
-        secs = 600;
-    sb_storage_hold("modem session: no storage writes");
-    sbm_fmt(s, sizeof(s), "modemsess: session API demo, %u s; watchdog %u s", secs, sb_wdt_arm(30));
-    line(s);
-    sbm_sb_plat(&park_plat, plog);
-    if (sbm_sb_load_image(&im, line) < 0) {
-        line("modemsess: loading RADIO / EFS failed");
-        return;
-    }
-    sbm_sb_plat_stage4(&park_plat, im.mm.ipc_off);
-    park_armed = 1;
-    sb_before_reset = park_hook;
-    int r = sbm_modem_start(&mo, &park_plat, &im);
-    sbm_fmt(s, sizeof(s), "modemsess: start: %s", r == 0 ? "online" : sbm_strerror(r));
-    line(s);
-    uint64_t t0 = sb_ms(), last_draw = 0, last_q = 0;
-    while (mo.up && sb_ms() - t0 < secs * 1000ULL) {
-        r = sbm_modem_poll(&mo, 1);
-        if (r != 0) {
-            sbm_fmt(s, sizeof(s), "modemsess: poll stopped: %s (parked)", r < 0 ? sbm_strerror(r) : "a guard");
-            line(s);
-            break;
+    uint64_t t0 = sb_ms(), last = t0, last_draw = 0, last_q = 0;
+    while (sb_ms() - t0 < secs * 1000ULL) {
+        uint64_t t = sb_ms();
+        uint32_t el = (uint32_t)(t - last);
+        last = t;
+        uint64_t now = t - t0;
+        if (mo->up) {
+            int r = sbm_modem_poll(mo, el ? el : 1);
+            if (r < 0) {
+                sbm_fmt(s, sizeof(s), "modemsess: down: %s (parked)", sbm_strerror(r));
+                line(s);
+                snap_line(mo, "SESSION:", (unsigned)(now / 1000));
+                if (mo->state == SBM_MS_GUARD)
+                    return r;
+            }
+        } else {
+            int r = sbm_modem_recover(mo, el);
+            if (r == 0) {
+                line("modemsess: recovered (restarted)");
+                last = sb_ms();
+            } else if (r < 0) {
+                sbm_fmt(s, sizeof(s), "modemsess: no recovery: %s", sbm_strerror(r));
+                line(s);
+                return r;
+            }
         }
-        uint64_t now = sb_ms() - t0;
-        if (now >= 3000 && now - last_q >= 10000) {
+        if (mo->up && now >= 3000 && now - last_q >= 10000) {
             last_q = now;
-            /* the counts before this round: a round that loses its answers shows as a gap in a */
-            unsigned q0 = mo.b.fmt_tx, a0 = mo.b.fmt_resp + mo.b.fmt_gen_res;
-            int qr = sbm_modem_query(&mo);
-            sbm_modem_status(&mo, st, sizeof(st));
-            sbm_fmt(s, sizeof(s), "SESSION: +%u s: %s | q %u a %u%s", (unsigned)(now / 1000), st, q0, a0,
-                    qr < 0 ? " | query error" : "");
+            unsigned q0 = mo->b.fmt_tx, a0 = mo->b.fmt_resp + mo->b.fmt_gen_res;
+            int qr = sbm_modem_query(mo);
+            sbm_fmt(s, sizeof(s), "SESSION: cycle %u +%u s: query round (q %u a %u before)%s", cycle,
+                    (unsigned)(now / 1000), q0, a0, qr < 0 ? " | query error" : "");
             line(s);
+            snap_line(mo, "SNAP:", (unsigned)(now / 1000));
         }
         if (now - last_draw >= 1000) {
             last_draw = now;
-            sbm_modem_status(&mo, st, sizeof(st));
+            sbm_modem_status(mo, st, sizeof(st));
             draw(st);
             sb_wdt_feed(0);
         }
         sb_udelay(1000);
     }
-    sbm_modem_status(&mo, st, sizeof(st));
-    sbm_fmt(s, sizeof(s), "SESSION: end: %s | FMT %u RFS %u queries %u answers %u (unanswered %u stale %u unmatched %u"
-            " bad %u)", st, mo.b.fmt_rx, mo.b.rfs_rx, mo.b.fmt_tx, mo.b.fmt_resp + mo.b.fmt_gen_res,
-            mo.b.fmt_tx - mo.b.fmt_resp - mo.b.fmt_gen_res, mo.b.fmt_stale, mo.b.fmt_unmatched, mo.b.bad_rx);
+    return 0;
+}
+
+static void session(const char *key)
+{
+    static struct sbm_image im;
+    static struct sbm_modem mo;
+    char s[COLS];
+    int cyc = sb_streq(key, "modemsess-cycle"), lng = sb_streq(key, "modemsess-long");
+    unsigned secs = arg("modem_hold", cyc ? 40 : lng ? 1500 : 120), cycles = cyc ? arg("modem_cycles", 3) : 1;
+    if (secs > 3600)
+        secs = 3600;
+    if (cycles < 1 || cycles > 5)
+        cycles = 3;
+    sb_storage_hold("modem session: no storage writes");
+    sbm_fmt(s, sizeof(s), "modemsess: session API demo (%s), %u x %u s; watchdog %u s", key, cycles, secs,
+            sb_wdt_arm(30));
     line(s);
-    sbm_modem_stop(&mo);
+    sbm_sb_plat(&park_plat, plog);
+    uint64_t used0 = sb_arena_used();
+    if (sbm_sb_load_image_stream(&im, line) < 0) {
+        line("modemsess: loading RADIO / EFS failed");
+        return;
+    }
+    sbm_fmt(s, sizeof(s), "modemsess: footprint: %u KiB of RAM for the modem (NV + its pristine copy + the stream chunk);"
+            " the core's static buffers are in the image", (unsigned)((sb_arena_used() - used0) >> 10));
+    line(s);
+    sbm_sb_plat_stage4(&park_plat, im.mm.ipc_off);
+    park_armed = 1;
+    sb_before_reset = park_hook;
+    for (unsigned c = 1; c <= cycles; ++c) {
+        uint64_t t = sb_ms();
+        int r = sbm_modem_start(&mo, &park_plat, &im);
+        sbm_fmt(s, sizeof(s), "modemsess: cycle %u start: %s in %u ms (%s, streamed %u KiB)", c,
+                r == 0 ? "online" : sbm_strerror(r), (unsigned)(sb_ms() - t), mo.b.restart ? "restart: reset release"
+                : "first start: cp_init", mo.b.streamed >> 10);
+        line(s);
+        if (r != 0)
+            break;
+        r = session_run(&mo, secs, c);
+        snap_line(&mo, "SESSION: end", secs);
+        sbm_fmt(s, sizeof(s), "SESSION: end cycle %u: FMT %u RFS %u queries %u answers %u (unanswered %u stale %u"
+                " unmatched %u bad %u) stalls %u crashes %u", c, mo.b.fmt_rx, mo.b.rfs_rx, mo.b.fmt_tx,
+                mo.b.fmt_resp + mo.b.fmt_gen_res, mo.b.fmt_tx - mo.b.fmt_resp - mo.b.fmt_gen_res, mo.b.fmt_stale,
+                mo.b.fmt_unmatched, mo.b.bad_rx, mo.stalls, mo.crashes);
+        line(s);
+        sbm_modem_stop(&mo);
+        line(mo.b.parked ? "modemsess: parked" : "modemsess: the park reported an error");
+        if (r < 0 || !mo.b.parked)
+            break;
+        if (c < cycles)
+            for (unsigned k = 0; k < 6; ++k) {      /* parked between the cycles, as a user's Stop / Start */
+                sb_udelay(1000000);
+                sb_wdt_feed(0);
+            }
+    }
     park_armed = 0;
-    line(mo.b.parked ? "modemsess: parked" : "modemsess: the park reported an error");
 }
 
 static void stage3(const char *key)
@@ -434,7 +497,7 @@ void sb_main(void)
         step = 1;
     autostart = arg("modem_auto", 0);
     ret = arg("modem_return", autostart ? 30 : 0);
-    is_load = sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_streq(key, "modemsess");
+    is_load = sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_prefix(key, "modemsess");
     if (is_load) {
         line("modemload: stage 3 test (docs/MODEM.md 6). RADIO and EFS are only read; every partition write is held.");
         line("modemload: -sec / -run start the CP's power sequence through EL3 and always end with the CP parked.");
@@ -451,8 +514,8 @@ void sb_main(void)
         }
     }
     selftest();
-    if (sb_streq(key, "modemsess")) {
-        session();
+    if (sb_prefix(key, "modemsess")) {
+        session(key);
         goto end;
     }
     if (is_load) {

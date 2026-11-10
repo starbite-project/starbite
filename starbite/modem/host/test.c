@@ -1113,7 +1113,8 @@ static void check_allowed(const struct fakesoc *s)
                  a == SBM_PMU_PA + SBM_PMU_CENTRAL_SEQ_CP_CFG ||
                  (a >= SBM_MBOX_PA + SBM_MBOX_ISSR(0) && a <= SBM_MBOX_PA + SBM_MBOX_ISSR(63)) ||
                  (a == SBM_MBOX_PA + SBM_MBOX_INTGR1 && (v == 2 || v == 1)) ||
-                 (a == SBM_MBOX_PA + SBM_MBOX_INTCR0 && v == (1u << 16)) || (a == SBM_AP2CP_CFG_PA && v == 1);
+                 (a == SBM_MBOX_PA + SBM_MBOX_INTCR0 && v == (1u << 16)) || (a == SBM_AP2CP_CFG_PA && v == 1) ||
+                 (a == SBM_MBOX_PA + SBM_MBOX_MCUCTLR && v == 1);
         CHECK(ok);
         if (!ok)
             printf("  store not allowed: 0x%llx = 0x%x\n", (unsigned long long)a, v);
@@ -1156,6 +1157,214 @@ static void check_parked(const struct fakesoc *s)
     CHECK(s->ctrl[SBM_CP_CTRL_NS] & (1u << 17));
     CHECK(!s->cp_running);
     CHECK(!s->sss_on);
+}
+
+/* the session API as Starbite OS runs it: a streamed image (only NV in RAM), polls every ms, a query every 10 s */
+static int sess_run(struct sbm_modem *mo, struct sbm_plat *p, unsigned ms, unsigned query_every, unsigned *queries)
+{
+    for (unsigned t = 1; t <= ms; ++t) {
+        if (query_every && t % query_every == 0) {
+            if (sbm_modem_query(mo) == 0 && queries)
+                ++*queries;
+        }
+        int r = sbm_modem_poll(mo, 1);
+        if (r < 0)
+            return r;
+        p->udelay(p->ctx, 1000);
+    }
+    return 0;
+}
+
+static void stream_image(struct sbm_image *im, uint8_t *chunk, uint32_t chunk_size, const uint8_t *nv_pristine)
+{
+    boot_image(im, 0);
+    for (unsigned k = 0; k < im->plan.n; ++k)
+        if (im->plan.l[k].src == SBM_SRC_RADIO)
+            im->data[k] = 0;                   /* left on the partition */
+    im->chunk = chunk;
+    im->chunk_size = chunk_size;
+    im->nv_pristine = nv_pristine;
+}
+
+static void test_session(uint32_t boot_crc, uint32_t main_crc)
+{
+    static struct fakesoc s;
+    static struct sbm_image im;
+    static struct sbm_modem mo;
+    static uint8_t chunk[0x40000], nv_pristine[0x100000];
+    struct sbm_plat p;
+    struct sbm_modem_snap sn, sn2;
+    char st[200];
+    unsigned q = 0;
+
+    /* start from a streamed image: BOOT/MAIN/VSS read from RADIO twice (check, copy), only NV in RAM */
+    stream_image(&im, chunk, sizeof(chunk), nv_pristine);
+    memcpy(nv_pristine, t_nv, sizeof(nv_pristine));
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.radio = t_radio;
+    s.radio_size = sizeof(t_radio);
+    s.rfs_mode = 1;
+    s.nosim_plmn = 1;
+    s.nv_ref = nv_pristine;
+    fakesoc_plat(&s, &p, tlog);
+    memset(&mo, 0, sizeof(mo));
+    CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
+    CHECK(mo.up && !mo.b.parked && mo.b.init_end_sent && !mo.b.restart);
+    CHECKEQ(mo.state, SBM_MS_ONLINE);
+    CHECKEQ(mo.b.streamed, 0x1e40 + T_MAIN + T_VSS);
+    CHECKEQ(s.radio_bytes, 2ull * (0x1e40 + T_MAIN + T_VSS));   /* the check and the copy */
+    CHECK(s.cp_running && s.validated);                          /* EL3 accepted what was streamed in */
+    CHECK(im.data[0] == 0 && im.data[1] == 0);
+
+    /* 11 rounds, 10 s apart (sess-1's shape): every answer arrives and matches */
+    CHECKEQ(sess_run(&mo, &p, 110000, 10000, &q), 0);
+    CHECKEQ(q, 11);
+    CHECKEQ(mo.b.fmt_tx, 121);
+    CHECKEQ(mo.b.fmt_resp + mo.b.fmt_gen_res, 121);
+    CHECKEQ(mo.b.fmt_unmatched, 0);
+    CHECKEQ(s.rfs_read_ok, 1);
+    CHECKEQ(s.rfs_write_ok, 1);
+    CHECKEQ(t_nv[0x80001], (uint8_t)(0x5A ^ 1));                 /* the CP's NV write: the RAM copy only */
+    CHECK(nv_pristine[0x80001] != t_nv[0x80001]);
+
+    /* the snapshot: what the UI shows; the PLMN only in its own field, never in the line */
+    sbm_modem_snapshot(&mo, &sn);
+    CHECKEQ(sn.state, SBM_MS_ONLINE);
+    CHECKEQ(sn.sim, SBM_SIM_ABSENT);
+    CHECKEQ(sn.cs, SBM_REG_EMERGENCY);
+    CHECK(sn.emergency_only);
+    CHECKEQ(sn.rat, SBM_ACT_GSM);
+    CHECK(sn.bars <= 5);
+    CHECK(sn.have_plmn && !strcmp(sn.plmn, "00101"));
+    CHECK(!strstr(sn.line, "00101") && strstr(sn.line, "PLMN set"));
+    CHECKEQ(sn.queries, 121);
+    CHECKEQ(sn.answers, 121);
+    CHECKEQ(sn.open, 0);
+    CHECKEQ(sn.starts, 1);
+    CHECK(sn.up_ms >= 110000 && sn.last_rx_ms < 11000);
+    CHECK(sn.gen > 0);
+    sbm_modem_snapshot(&mo, &sn2);
+    CHECKEQ(sn2.gen, sn.gen);                                    /* nothing changed: no redraw */
+
+    /* 12 minutes on: the old total frame budget (about 600 frames) would have stopped it after about 8 */
+    CHECKEQ(sess_run(&mo, &p, 12 * 60000, 10000, &q), 0);
+    CHECK(mo.up);
+    CHECKEQ(mo.b.fmt_resp + mo.b.fmt_gen_res, mo.b.fmt_tx);
+    CHECK(mo.b.fmt_tx >= 121 + 72 * 11);
+
+    /* stop = park; the snapshot says so and drops the radio fields */
+    CHECKEQ(sbm_modem_stop(&mo), 0);
+    CHECK(!mo.up && mo.b.parked);
+    check_parked(&s);
+    CHECKEQ((s.pmu[SBM_PMU_RESET_SEQ_STATUS / 4] & 7), 5);       /* as on the phone: the sequencer stays 5 */
+    sbm_modem_snapshot(&mo, &sn2);
+    CHECKEQ(sn2.state, SBM_MS_OFF);
+    CHECK(sn2.gen != sn.gen && sn2.bars == 0xFF && !sn2.have_plmn && sn2.sim == 0xFF);
+    sbm_modem_status(&mo, st, sizeof(st));
+    CHECK(!strcmp(st, "modem off (parked)"));
+    CHECKEQ(sbm_modem_poll(&mo, 1), SBM_EPERM);
+    CHECKEQ(sbm_modem_recover(&mo, 10000), SBM_EPERM);           /* a stop is the user's: no automatic restart */
+
+    /* start again in the same boot: Android's reset path (no second cp_init), NV restored from the pristine copy */
+    t_nv[5] ^= 0xFF;
+    CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
+    CHECK(mo.up && mo.b.restart);
+    CHECKEQ(s.releases, 1);
+    CHECKEQ(s.mbox_resets, 1);
+    CHECKEQ(t_nv[5], nv_pristine[5]);
+    CHECKEQ(mo.starts, 2);
+    CHECKEQ(sess_run(&mo, &p, 20000, 10000, 0), 0);
+    CHECKEQ(mo.b.fmt_resp + mo.b.fmt_gen_res, 22);
+    CHECKEQ(s.radio_bytes, 4ull * (0x1e40 + T_MAIN + T_VSS));
+
+    /* the CP goes quiet: a stall 20 s after the first unanswered query, parked; recover after 5 s */
+    s.cp_mute = 1;
+    uint64_t t0 = s.clock_us;
+    int r = sess_run(&mo, &p, 60000, 10000, 0);
+    CHECKEQ(r, SBM_ETIME);
+    CHECK(s.clock_us - t0 >= 29000000 && s.clock_us - t0 <= 34000000);   /* query at +10 s, stall 20 s later */
+    CHECKEQ(mo.state, SBM_MS_STALLED);
+    CHECK(!mo.up && mo.b.parked);
+    check_parked(&s);
+    sbm_modem_snapshot(&mo, &sn);
+    CHECKEQ(sn.state, SBM_MS_STALLED);
+    CHECKEQ(sn.last_err, SBM_ETIME);
+    CHECKEQ(sbm_modem_recover(&mo, 1000), 1);                    /* not yet: 5 s parked first */
+    s.cp_mute = 0;
+    CHECKEQ(sbm_modem_recover(&mo, 4000), 0);
+    CHECK(mo.up && mo.b.restart);
+    CHECKEQ(mo.restarts, 1);
+    CHECKEQ(sess_run(&mo, &p, 15000, 10000, 0), 0);
+    CHECK(mo.b.fmt_resp + mo.b.fmt_gen_res == 11);
+
+    /* three restarts in the window, then it stays off */
+    for (unsigned k = 0; k < 3; ++k) {
+        s.cp_mute = 1;
+        CHECKEQ(sess_run(&mo, &p, 60000, 10000, 0), SBM_ETIME);
+        s.cp_mute = 0;
+        r = sbm_modem_recover(&mo, 6000);
+        if (k < 2) {
+            CHECKEQ(r, 0);
+            CHECK(mo.up);
+        } else {
+            CHECKEQ(r, SBM_EPERM);
+            CHECK(!mo.up && mo.state == SBM_MS_STALLED);
+        }
+    }
+    CHECKEQ(mo.restarts, 3);
+    CHECKEQ(mo.stalls, 4);
+    check_parked(&s);
+    check_allowed(&s);
+    CHECKEQ(s.fcp.n_forbidden, 0);
+    CHECKEQ(s.fcp.n_call, 0);
+    fakesoc_free(&s);
+
+    /* RADIO reads differently at the copy than at the check: refused before EL3 sees it, parked */
+    stream_image(&im, chunk, sizeof(chunk), nv_pristine);
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.radio = t_radio;
+    s.radio_size = sizeof(t_radio);
+    s.radio_flip_at = 1 + (0x1e40 + 0x3ffff) / 0x40000 + (T_MAIN + 0x3ffff) / 0x40000 + (T_VSS + 0x3ffff) / 0x40000 + 1;
+    fakesoc_plat(&s, &p, tlog);
+    memset(&mo, 0, sizeof(mo));
+    CHECKEQ(sbm_modem_start(&mo, &p, &im), SBM_EIO);
+    CHECKEQ(mo.state, SBM_MS_FAILED);
+    CHECK(!mo.up && mo.b.copied == 0 && !mo.b.validated && mo.b.parked);
+    check_parked(&s);
+    CHECKEQ(sbm_modem_recover(&mo, 10000), SBM_EPERM);
+    fakesoc_free(&s);
+
+    /* the reset release never completes: the restart fails, parked again */
+    stream_image(&im, chunk, sizeof(chunk), nv_pristine);
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.radio = t_radio;
+    s.radio_size = sizeof(t_radio);
+    fakesoc_plat(&s, &p, tlog);
+    memset(&mo, 0, sizeof(mo));
+    CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
+    CHECKEQ(sbm_modem_stop(&mo), 0);
+    s.release_stuck = 1;
+    CHECKEQ(sbm_modem_start(&mo, &p, &im), SBM_ETIME);
+    CHECK(!mo.up && mo.b.restart && mo.b.parked && mo.state == SBM_MS_FAILED);
+    CHECK(!s.cp_running);
+    CHECKEQ((s.pmu[SBM_PMU_CENTRAL_SEQ_CP_ST / 4] >> 16) & 0xFF, 0x80);
+    fakesoc_free(&s);
+
+    /* a SIM appears: the guard parks from inside poll; no automatic restart after a guard */
+    boot_image(&im, 0);
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.sim_present = 1;
+    fakesoc_plat(&s, &p, tlog);
+    memset(&mo, 0, sizeof(mo));
+    CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
+    CHECKEQ(sess_run(&mo, &p, 2000, 0, 0), SBM_EPERM);
+    CHECKEQ(mo.b.stopped_by, SBM_STOP_SIM);
+    CHECKEQ(mo.state, SBM_MS_GUARD);
+    CHECK(!mo.up && mo.b.parked);
+    CHECKEQ(sbm_modem_recover(&mo, 10000), SBM_EPERM);
+    check_parked(&s);
+    fakesoc_free(&s);
+    boot_image(&im, 0);
 }
 
 static void test_boot(void)
@@ -1540,73 +1749,7 @@ static void test_boot(void)
         boot_image(&im, 0);
     }
 
-    /* the session API (Starbite OS): start, poll from a loop, query, status, stop = park */
-    {
-        static uint8_t nv_before[0x100000];
-        static struct sbm_modem mo;
-        char st[200];
-        boot_image(&im, 0);
-        memcpy(nv_before, t_nv, sizeof(nv_before));
-        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
-        s.rfs_mode = 1;
-        s.nv_ref = nv_before;
-        fakesoc_plat(&s, &p, tlog);
-        CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
-        CHECK(mo.up && !mo.b.parked && mo.b.init_end_sent);
-        CHECK(s.cp_running);                                     /* not parked: the session owns it */
-        for (unsigned i = 0; i < 2000; ++i) {                    /* 2 s of an event loop, 1 ms per turn */
-            CHECKEQ(sbm_modem_poll(&mo, 1), 0);
-            p.udelay(p.ctx, 1000);
-        }
-        CHECKEQ(sbm_modem_query(&mo), 0);
-        for (unsigned i = 0; i < 100; ++i) {
-            sbm_modem_poll(&mo, 1);
-            p.udelay(p.ctx, 1000);
-        }
-        /* sess-1: 121 queries, 110 answers. Here: 11 rounds, 10 s apart, as the modemsess loop runs them */
-        for (unsigned round = 0; round < 11; ++round) {
-            CHECKEQ(sbm_modem_query(&mo), 0);
-            int pr = 0;
-            for (unsigned i = 0; i < 10000 && pr == 0; ++i) {
-                pr = sbm_modem_poll(&mo, 1);
-                p.udelay(p.ctx, 1000);
-            }
-            CHECKEQ(pr, 0);
-            CHECKEQ(mo.b.fmt_resp + mo.b.fmt_gen_res, mo.b.fmt_tx);
-        }
-        CHECKEQ(mo.b.fmt_tx, 132);
-        CHECKEQ(mo.b.fmt_unmatched, 0);
-        CHECKEQ(mo.b.fmt_stale, 0);
-        sbm_modem_status(&mo, st, sizeof(st));
-        CHECK(strstr(st, "SIM absent") && strstr(st, "CS emergency-only") && !strstr(st, "00101"));
-        CHECKEQ(s.rfs_read_ok, 1);
-        CHECKEQ(sbm_modem_stop(&mo), 0);
-        CHECK(!mo.up && mo.b.parked);
-        sbm_modem_status(&mo, st, sizeof(st));
-        CHECK(!strcmp(st, "modem off (parked)"));
-        CHECKEQ(sbm_modem_poll(&mo, 1), SBM_EPERM);
-        check_parked(&s);
-        check_allowed(&s);
-        fakesoc_free(&s);
-
-        /* a SIM appears: the guard parks the CP from inside poll */
-        boot_image(&im, 0);
-        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
-        s.sim_present = 1;
-        fakesoc_plat(&s, &p, tlog);
-        CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
-        int r = 0;
-        for (unsigned i = 0; i < 2000 && r == 0; ++i) {
-            r = sbm_modem_poll(&mo, 1);
-            p.udelay(p.ctx, 1000);
-        }
-        CHECKEQ(r, 1);
-        CHECKEQ(mo.b.stopped_by, SBM_STOP_SIM);
-        CHECK(!mo.up && mo.b.parked);
-        check_parked(&s);
-        fakesoc_free(&s);
-        boot_image(&im, 0);
-    }
+    test_session(boot_crc, main_crc);
 
     /* ONLINE with a SIM present: stops at once on the SIM status, parked */
     fakesoc_init(&s, &im.plan, boot_crc, main_crc);
