@@ -1571,6 +1571,38 @@ held" from N s.
 Stage `build/win/stage/sbwddm-t32` = T31 + sbkeys.sys 4660b7c4 + the gputest's `reg query` lines. Its INSTALL.md
 has the run, the pass criteria and the install.
 
+### 6.41 T32b: DWM's crash out of video memory (the user's Steam session) (2026-11-10)
+
+**What happened:** the user ran T30 attended. Steam and Geometry Dash brought black screens and flicker, and then a
+Start menu that "tweaks out". The pull is `build/win/user-t30-0715`. In it:
+- **The crash:** `AppCrash_dwm.exe_ecabb674…`, c0000005 in sbumd 86046664 at offset 0x8140c.
+- **Symbolised:** the same objects relinked with `/MAP` give identical code (the recipe: `ninja -t commands` for
+  libgallium_d3d10.dll, with `/OUT` and `/MAP` redirected). The fault is in `panfrost_ptr_map` +0x2e8, the
+  AFBC/AFRC staging path.
+- **Why:** `pan_alloc_staging` returned NULL, and with `assert` compiled out the next line read
+  `staging->plane…row_stride` from NULL.
+- **The allocation:** the crashed DWM's umdlog ends with `allocation of 9672 KiB failed: 0x8876017c` twice.
+  0x8876017c is D3DERR_OUTOFVIDEOMEMORY: the segment's 1.5 GiB CommitLimit was reached across all processes.
+- **Why the retry failed too:** Mesa's retry after emptying its BO cache can't help under the shim. Closed BOs wait
+  on the dead list (struct wdead, up to 63) until the GPU is done and keep counting.
+- **The game:** Geometry Dash crashed 1.5 s later in its own libcocos2d.dll.
+- **Older reports:** dwmcore c00001ad (STATUS_FATAL_MEMORY_EXHAUSTION) on 11-09 is the same pattern earlier.
+
+**sb-patches/0125-map-failure-and-alloc-retry.patch:**
+1. Every failure in `panfrost_ptr_map` releases the transfer and its staging resource and returns NULL with
+   `*out_transfer = NULL` (`pan_ptr_map_fail`).
+2. d3d10umd `ResourceMap` clears the transfer on failure and reports E_OUTOFMEMORY, a Map error the runtime expects
+   (it was E_FAIL).
+3. Shim CREATE_BO: on a failure with closed allocations pending, it waits for them, destroys them, and retries once.
+4. The shim counts each device's live, peak and closed-not-destroyed allocation bytes. It prints them every 10 s
+   (`sbumd: stats memory …`) and with every failure, so the next OOM names who holds the segment.
+
+**Not changed:** the 1.5 GiB segment, and AFBC for textures DWM maps. Out of memory can still cost DWM a frame or a
+device reset, but no longer an access violation.
+
+**Stage:** `build/win/stage/sbwddm-t32b` = T32 + sbumd c878ede4 + `maps/sbumd.map`. From now on every stage keeps a
+sbumd map.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

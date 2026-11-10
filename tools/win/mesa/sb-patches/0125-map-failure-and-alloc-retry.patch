@@ -1,0 +1,186 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index 6d0796e..5c3d2b1 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -714,6 +714,7 @@ struct wbo {
+ struct wdead {
+    D3DKMT_HANDLE h;
+    uint64_t seq;
++   uint64_t size;       /* sb-patches/0125: counted until destroyed */
+ };
+ #define WDEAD_FLUSH 64
+ 
+@@ -757,6 +758,10 @@ struct sbdev {
+    /* T23 (sb-patches/0119): where this device's time goes, printed every 10 s to the umdlog */
+    LARGE_INTEGER st_t0;
+    unsigned st_submits, st_waits, st_blocked, st_busy, st_maps;
++   /* sb-patches/0125: this device's allocations (BOs and resources' own, not opened ones), and the closed ones
++    * not destroyed yet (struct wdead), in bytes; failed allocations and retries after destroying closed ones */
++   uint64_t mem_live, mem_peak, mem_dead;
++   unsigned st_allocfail, st_allocretry_ok;
+    double st_blocked_ms, st_longest_ms;
+    unsigned submits_n;     /* T25 */
+    int list_all;           /* T25: SB_LIST_ALL=1, every live BO in every submission (as before) */
+@@ -1347,6 +1352,7 @@ wdead_reap(struct sbdev *d)
+    for (uint32_t i = 0; i < d->dead_n; i++) {
+       if (d->dead[i].seq <= d->done) {
+          w_destroy(d, d->dead[i].h);
++         d->mem_dead -= d->dead[i].size;
+          n++;
+       } else {
+          d->dead[k++] = d->dead[i];
+@@ -1603,10 +1609,33 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+          }
+          sb_next.armed = 0;
+       }
+-      if (w_create_res(d, &ai, hres) < 0) {
++      int created = w_create_res(d, &ai, hres) >= 0;
++      if (!created && d->dead_n) {
++         /* sb-patches/0125: closed allocations still count against the segment until destroyed (struct wdead).
++          * Mesa's answer to a failed allocation is to empty its BO cache and try again, which here only moves
++          * those BOs to the dead list: the retry failed the same way (the user's DWM, then its crash). Wait for
++          * what they were used by, destroy them, and try once more. */
++         uint32_t had = d->dead_n;
++         uint64_t had_b = d->mem_dead;
++         (void)sb_wait_seq(d, d->dead[d->dead_n - 1].seq, 10000);
++         wdead_reap(d);
++         ai.hAllocation = 0;
++         created = w_create_res(d, &ai, hres) >= 0;
++         fprintf(stderr, "sbumd: allocation of %llu KiB failed (0x%08lx); destroyed %u of %u closed allocations "
++                 "(%llu of %llu MiB), retry %s\n", (unsigned long long)(sz >> 10), (unsigned long)sb_alloc_hr,
++                 had - d->dead_n, had, (unsigned long long)((had_b - d->mem_dead) >> 20),
++                 (unsigned long long)(had_b >> 20), created ? "ok" : "failed");
++         if (created)
++            d->st_allocretry_ok++;
++      }
++      if (!created) {
++         d->st_allocfail++;
+          /* T15: every failed allocation, with its size (the user's session: DWM restarted on ENOMEM) */
+-         fprintf(stderr, "sbumd: allocation of %llu KiB failed: 0x%08lx (%s%s)\n", (unsigned long long)(sz >> 10),
+-                 (unsigned long)sb_alloc_hr, hres ? "resource " : "", (a->flags & PANFROST_BO_HEAP) ? "heap" : "bo");
++         fprintf(stderr, "sbumd: allocation of %llu KiB failed: 0x%08lx (%s%s); this device holds %llu MiB "
++                 "(peak %llu), %llu MiB closed not yet destroyed (%u)\n", (unsigned long long)(sz >> 10),
++                 (unsigned long)sb_alloc_hr, hres ? "resource " : "", (a->flags & PANFROST_BO_HEAP) ? "heap" : "bo",
++                 (unsigned long long)(d->mem_live >> 20), (unsigned long long)(d->mem_peak >> 20),
++                 (unsigned long long)(d->mem_dead >> 20), d->dead_n);
+          malikm_note(28, (unsigned)sb_alloc_hr);   /* UmdNote_28: the last failed allocation's HRESULT */
+          malikm_note_count(25);           /* UmdNote_25: failed allocations */
+          return -MK_ENOMEM;
+@@ -1632,6 +1661,9 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+          return -MK_ENOMEM;
+       }
+       d->bo[h - 1] = (struct wbo){ai.hAllocation, where.Size, where.GpuVa, NULL, 0, hres ? 1 : 0, hres, 0};
++      d->mem_live += where.Size;
++      if (d->mem_live > d->mem_peak)
++         d->mem_peak = d->mem_live;
+       if (hres && (trace_on() || sb_log_active))
+          fprintf(stderr, "sbumd: bo %u is resource %p's allocation 0x%x (%ux%u pitch %u fmt %u%s)\n", h, hres,
+                  (unsigned)ai.hAllocation, (unsigned)pi.Width, (unsigned)pi.Height, (unsigned)pi.Pitch,
+@@ -1813,6 +1845,7 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+          memset(bo, 0, sizeof(*bo));
+          return 0;
+       }
++      d->mem_live -= bo->size;
+       if (bo->kind == 1) {               /* a resource's: released by resource, once nothing uses it */
+          HANDLE hres = bo->hres;
+          wddm_idle(d);
+@@ -1835,6 +1868,8 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+       }
+       d->dead[d->dead_n].h = bo->h;
+       d->dead[d->dead_n].seq = d->seq;
++      d->dead[d->dead_n].size = bo->size;
++      d->mem_dead += bo->size;
+       d->dead_n++;
+       memset(bo, 0, sizeof(*bo));
+       if (d->dead_n >= WDEAD_FLUSH) {
+@@ -1969,6 +2004,11 @@ wddm_ioctl(int fd, DWORD code, void *buf, DWORD len)
+          /* sb-patches/0122: this process's rotations (identities, of primaries, by copying), blits, flushes */
+          fprintf(stderr, "sbumd: stats merged %u (vertex/tiler + fragment in one Render)\n", d->st_merged);
+          d->st_merged = 0;
++         /* sb-patches/0125: who holds the segment (its CommitLimit is shared by every process) */
++         fprintf(stderr, "sbumd: stats memory %llu MiB (peak %llu), closed not destroyed %llu MiB (%u); "
++                 "allocations failed %u, saved by a retry %u\n", (unsigned long long)(d->mem_live >> 20),
++                 (unsigned long long)(d->mem_peak >> 20), (unsigned long long)(d->mem_dead >> 20), d->dead_n,
++                 d->st_allocfail, d->st_allocretry_ok);
+          fprintf(stderr, "sbumd: stats rotate id %ld, primary %ld, copy %ld; blits %ld; flush-all %ld\n",
+                  InterlockedExchange(&sb_stat[0], 0), InterlockedExchange(&sb_stat[1], 0),
+                  InterlockedExchange(&sb_stat[2], 0), InterlockedExchange(&sb_stat[3], 0),
+diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
+index c961c1e..5c8f79e 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -1571,6 +1571,21 @@ panfrost_can_discard(struct pipe_resource *resource, const struct pipe_box *box,
+            !(rsrc->bo->flags & PAN_BO_SHARED));
+ }
+ 
++/* Starbite (sb-patches/0125, docs/WIN11-GPU.md 6.41): a failed map releases the transfer and its staging
++ * resource and leaves *out_transfer NULL. Before, the AFBC path dereferenced a NULL staging resource when the
++ * allocation failed (the user's DWM, out of video memory with Steam and a game: panfrost_ptr_map+0x2e8), and
++ * the other failures left a transfer behind that the D3D10 frontend kept as mapped. */
++static void *
++pan_ptr_map_fail(struct panfrost_transfer *transfer, struct pipe_transfer **out_transfer)
++{
++   if (transfer->staging.rsrc)
++      pipe_resource_reference(&transfer->staging.rsrc, NULL);
++   pipe_resource_reference(&transfer->base.resource, NULL);
++   ralloc_free(transfer);
++   *out_transfer = NULL;
++   return NULL;
++}
++
+ static void *
+ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
+                  unsigned level,
+@@ -1608,7 +1623,8 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
+        drm_is_afrc(rsrc->modifier)) {
+       struct panfrost_resource *staging =
+          pan_alloc_staging(ctx, rsrc, level, box);
+-      assert(staging);
++      if (!staging)
++         return pan_ptr_map_fail(transfer, out_transfer);
+ 
+       /* Staging resources have one LOD: level 0. Query the strides
+        * on this LOD.
+@@ -1639,7 +1655,7 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
+       }
+ 
+       if (panfrost_bo_mmap(staging->bo))
+-         return NULL;
++         return pan_ptr_map_fail(transfer, out_transfer);
+ 
+       return staging->bo->ptr.cpu;
+    }
+@@ -1648,7 +1664,7 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
+ 
+    /* If we haven't already mmaped, now's the time */
+    if (panfrost_bo_mmap(bo))
+-      return NULL;
++      return pan_ptr_map_fail(transfer, out_transfer);
+ 
+    if (dev->debug & (PAN_DBG_TRACE | PAN_DBG_SYNC)) {
+       pandecode_inject_mmap(dev->decode_ctx, bo->ptr.gpu, bo->ptr.cpu,
+@@ -1745,7 +1761,7 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
+ 
+             if (!copy_resource && drm_is_afbc(rsrc->modifier)) {
+                if (panfrost_resource_init_afbc_headers(rsrc))
+-                  return NULL;
++                  return pan_ptr_map_fail(transfer, out_transfer);
+             }
+ 
+             bo = newbo;
+diff --git a/src/gallium/frontends/d3d10umd/Resource.cpp b/src/gallium/frontends/d3d10umd/Resource.cpp
+index 41a4482..7b81d67 100644
+--- a/src/gallium/frontends/d3d10umd/Resource.cpp
++++ b/src/gallium/frontends/d3d10umd/Resource.cpp
+@@ -686,7 +686,10 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
+    }
+    if (!map) {
+       DebugPrintf("%s: failed to map resource\n", __func__);
+-      SetError(hDevice, E_FAIL);
++      /* Starbite (sb-patches/0125): nothing stays mapped, and E_OUTOFMEMORY is a Map error the runtime
++       * expects (E_FAIL is not one) */
++      pResource->transfers[SubResource] = NULL;
++      SetError(hDevice, E_OUTOFMEMORY);
+       return;
+    }
+ 
