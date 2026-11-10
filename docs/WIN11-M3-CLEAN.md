@@ -503,3 +503,24 @@ was back at the menu after 588 s. The registry hive is clean (179290/179290). zo
 (the phone's autotest.ps1 is an older version), so there is no MIDR from inside Windows yet: `tools/woa/win-m3/sb-cpuproof.cmd`
 (one-shot Startup item, deletes itself) writes C:\starbite\auto\cpuproof.txt with NUMBER_OF_PROCESSORS,
 PROCESSOR_IDENTIFIER, the CentralProcessor registry keys (`CP 4000` = MIDR_EL1) and sbcpu-arm64's output.
+
+## 24. m3all3 result (00:0x): Windows 11 on three M3 cores; m3all3c: 1.8 GHz with a thermal guard
+
+m3all3: `=M3S core 2/3 rc 0 ... 1 ms`, `on: 4n 6Y 7Y`, `=M3N np03`; cpu.log: 3 logical processors, CentralProcessor
+0/1/2 `CP 4000` = 0x531F0020 (all M3), no PF 34 (LSE correctly not advertised), caches L1 64K/64K, L2 512K, L3 4M,
+20M mul-add 101/112/121 ms per core at 1066 MHz. Open: the clock; c000001d in winsqlite3.dll 3.51.1.0 (+0xEC614,
+services WpnUserService/DiagTrack/OneSyncSvc; M3-specific, binary still to be pulled); xtajit64 c0000409
+(fail-fast, the known CNTFRQ_EL0 = 0 problem of the x64 emulator, A55 path too).
+
+**m3all3c** (`starbite-uefi-m3all3c.bin`, sha256 `f6b9332fac5e00bdf5520c1fe156110b26ed8cd0b70f6a5d723e0561ca8ebe7d`,
+`SOLO=m3all3c M3EARLY=5 M3KHZ=1794000 KILL_SERIAL=1`): m3all3 plus
+- right before winload resumes (on M3 core 1, after the table commit), one ACPM DVFS FREQ_REQ {domain 3 = CPUCL1,
+  1794000 kHz} on channel 0 of the AP channel table, libsb `acpm.c` format, reply matched by its sequence number:
+  `=M3C 1794000 kHz M3 cluster: answered`;
+- A55 0's guard reads the M3 probes (TOP TMU 1, 2, 3, 4, 6; libsb `tmu.c` calibration) every 0.5 s:
+  `=M3H tTT hiHH sS` (hex degrees C now / highest; state 0 ok, 1 throttled, 2 reset). At >= 85 C it sends one
+  FREQ_REQ to 1066 MHz (fire and forget, same channel) and stays there. At >= 100 C it resets through the loader
+  watchdog (21f). No governor yet.
+- ACPM sharing: the Windows-side ACPM user is sbwddm (GPU, domain 4 only; it isn't loaded by these SOLO images).
+  The guard and that driver would share channel 0's queue, so a combined image needs one owner.
+Free-run builds no longer carry the =M3B/=M3T/watch lines, the framebuffer hash or the PMU replay (room in the DXE slot).
