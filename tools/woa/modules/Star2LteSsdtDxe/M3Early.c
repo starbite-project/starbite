@@ -267,10 +267,12 @@ __asm__ (
   "  isb\n"
   "  mov   x1, #0xFF00\n"
   "  msr   mair_el1, x1\n"
-  "  movz  x1, #0x3520\n"
-  "  movk  x1, #0x80, lsl #16\n"
+  "  movz  x1, #0x3519\n"               // v4 TCR: T0SZ 25 (512 GiB, level 1 start), WB, inner shareable, 4K,
+  "  movk  x1, #0x80, lsl #16\n"         //    EPD1, IPS 40 bits
+  "  movk  x1, #0x2, lsl #32\n"
   "  msr   tcr_el1, x1\n"
-  "  msr   ttbr0_el1, x19\n"
+  "  ldr   x1, [x19, #0xA0]\n"           // v4: the 512-entry table page
+  "  msr   ttbr0_el1, x1\n"
   "  isb\n"
   "  tlbi  vmalle1\n"
   "  dsb   sy\n"
@@ -371,6 +373,7 @@ __asm__ (
   "  cbnz  x29, 41f\n"
   "  ldr   x3, [x19, #0x78]\n"
   "  add   x4, x19, #0x100\n"
+  "  mov   x18, #256\n"
   "40:\n"
   "  cbz   x3, 42f\n"
   "  ldp   x5, x6, [x4], #16\n"
@@ -389,6 +392,17 @@ __asm__ (
   "45:\n"
   "  add   x5, x5, #0x1000\n"
   "  sub   x6, x6, #1\n"
+  "  subs  x18, x18, #1\n"              // v4: the UFS trigger every 256 pages scanned
+  "  b.ne  44b\n"
+  "  mov   x18, #256\n"
+  "  dc    civac, x20\n"
+  "  dsb   sy\n"
+  "  ldr   w1, [x20, #4]\n"
+  "  cmp   w1, w21\n"
+  "  b.ne  2f\n"
+  "  ldr   w1, [x20, #8]\n"
+  "  cmp   w1, w22\n"
+  "  b.ne  2f\n"
   "  b     44b\n"
   "43:\n"
   "  sub   x3, x3, #1\n"
@@ -999,9 +1013,25 @@ EFbLiterals (
 }
 
 //
-// v3: winload's EfiLoaderData ranges (2..4 GiB, inside the guard's map) for its KUSER_SHARED_DATA scan, read with
-// GetMemoryMap into a static buffer (no allocation, so winload's map key stays valid). Up to 112 ranges at +0x100.
+// v4: RAM the kernel may use, from the memory map at ExitBootServices (static buffer: no allocation, winload's map
+// key stays valid), for the guard's KUSER_SHARED_DATA scan: first EfiLoaderData and OS-defined types, then loader
+// code, boot services code/data and conventional memory; adjacent ranges merged; 2..64 GiB (the guard's map); never
+// reserved, runtime, ACPI, MMIO or unusable memory. Up to 112 ranges at +0x100. One short line per memory type.
 //
+STATIC
+BOOLEAN
+EScanType (
+  IN UINT32  Type,
+  IN UINTN   Pass
+  )
+{
+  if (Pass == 0) {
+    return (Type == EfiLoaderData) || (Type >= 0x70000000u);
+  }
+
+  return (Type == EfiLoaderCode) || (Type == EfiBootServicesCode) || (Type == EfiBootServicesData) || (Type == EfiConventionalMemory);
+}
+
 STATIC
 VOID
 ELoaderRanges (
@@ -1015,35 +1045,69 @@ ELoaderRanges (
   UINTN                  DSize;
   UINT32                 DVer;
   UINTN                  n;
-  UINTN                  Pages;
+  UINTN                  Pass;
+  UINTN                  Dropped;
+  UINTN                  t;
+  UINT64                 Pages[17], Lo[17], Hi[17], Cnt[17];
+  UINT64                 End;
   EFI_STATUS             Status;
 
   Size   = sizeof (mEMap);
   Status = gBS->GetMemoryMap (&Size, (EFI_MEMORY_DESCRIPTOR *)mEMap, &Key, &DSize, &DVer);
   L[0x78 / 8] = 0;
   if (EFI_ERROR (Status) || (DSize == 0)) {
-    SbLog ("=M3E map: %r", Status);
+    SbLog ("=M3E map: %r size %ld", Status, Size);
     return;
   }
 
-  n     = 0;
-  Pages = 0;
-  for (D = (EFI_MEMORY_DESCRIPTOR *)mEMap; (UINT8 *)D < mEMap + Size; D = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)D + DSize)) {
-    if ((D->Type != EfiLoaderData) || (D->PhysicalStart < 0x80000000ull) ||
-        (D->PhysicalStart + EFI_PAGES_TO_SIZE (D->NumberOfPages) > 0x100000000ull) || (n >= 112))
-    {
-      continue;
-    }
+  ZeroMem (Pages, sizeof (Pages));
+  ZeroMem (Cnt, sizeof (Cnt));
+  SetMem64 (Lo, sizeof (Lo), MAX_UINT64);
+  ZeroMem (Hi, sizeof (Hi));
+  n       = 0;
+  Dropped = 0;
+  for (Pass = 0; Pass < 2; Pass++) {
+    for (D = (EFI_MEMORY_DESCRIPTOR *)mEMap; (UINT8 *)D < mEMap + Size; D = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)D + DSize)) {
+      End = D->PhysicalStart + EFI_PAGES_TO_SIZE (D->NumberOfPages);
+      if (Pass == 0) {
+        t         = (D->Type < 16) ? D->Type : 16;
+        Pages[t] += D->NumberOfPages;
+        Cnt[t]++;
+        Lo[t] = MIN (Lo[t], D->PhysicalStart);
+        Hi[t] = MAX (Hi[t], End);
+      }
 
-    L[(0x100 / 8) + 2 * n]     = D->PhysicalStart;
-    L[(0x100 / 8) + 2 * n + 1] = D->NumberOfPages;
-    Pages                     += D->NumberOfPages;
-    n++;
+      if (!EScanType (D->Type, Pass) ||
+          !(((D->PhysicalStart >= 0x80000000ull) && (End <= 0x100000000ull)) ||
+            ((D->PhysicalStart >= 0x880000000ull) && (End <= 0x900000000ull))))
+      {
+        continue;
+      }
+
+      if ((n > 0) && (L[(0x100 / 8) + 2 * (n - 1)] + EFI_PAGES_TO_SIZE (L[(0x100 / 8) + 2 * (n - 1) + 1]) == D->PhysicalStart)) {
+        L[(0x100 / 8) + 2 * (n - 1) + 1] += D->NumberOfPages;
+        continue;
+      }
+
+      if (n >= 112) {
+        Dropped++;
+        continue;
+      }
+
+      L[(0x100 / 8) + 2 * n]     = D->PhysicalStart;
+      L[(0x100 / 8) + 2 * n + 1] = D->NumberOfPages;
+      n++;
+    }
   }
 
   L[0x78 / 8] = n;
   EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x800);
-  SbLog ("=M3E map: %d LoaderData ranges, %d pages", n, Pages);
+  SbLog ("=M3E map: %ld entries, %d scan ranges, %d dropped", Size / DSize, n, Dropped);
+  for (t = 0; t < 17; t++) {
+    if (Cnt[t] != 0) {
+      SbLog ("=M3E mt %x n%ld p%lx %lx-%lx", (UINT32)t, Cnt[t], Pages[t], Lo[t], Hi[t]);
+    }
+  }
 }
 
 STATIC
@@ -1401,12 +1465,12 @@ M3EarlyArm (
   }
 
   Page = 0xFFFFFFFFu;
-  if (EFI_ERROR (gBS->AllocatePages (AllocateMaxAddress, EfiReservedMemoryType, 4, &Page))) {
+  if (EFI_ERROR (gBS->AllocatePages (AllocateMaxAddress, EfiReservedMemoryType, 5, &Page))) {
     SbLog ("=M3E: no pages, not armed");
     return;
   }
 
-  ZeroMem ((VOID *)(UINTN)Page, 4 * EFI_PAGE_SIZE);
+  ZeroMem ((VOID *)(UINTN)Page, 5 * EFI_PAGE_SIZE);
   mECtx        = (M3E_CTX *)(UINTN)Page;
   mEPark       = Page + EFI_PAGE_SIZE;
   mEWatchStack = Page + 2 * EFI_PAGE_SIZE;
@@ -1421,8 +1485,23 @@ M3EarlyArm (
   ((UINT64 *)(UINTN)mEGuard)[1] = 0x0000000040000401ull;
   ((UINT64 *)(UINTN)mEGuard)[2] = 0x0000000080000705ull;     // 2..3 GiB Normal WB, inner shareable, AF
   ((UINT64 *)(UINTN)mEGuard)[3] = 0x00000000C0000705ull;     // 3..4 GiB (pmsg ring 0xFED14000)
+  {
+    UINT64  *Tbl = (UINT64 *)(UINTN)(Page + 4 * EFI_PAGE_SIZE);    // v4: 512 x 1 GiB, level 1 (T0SZ 25)
+    UINTN   k;
+
+    for (k = 0; k < 2; k++) {
+      Tbl[k] = ((UINT64)k << 30) | 0x401ull;                          // 0..2 GiB Device (PMU, GIC)
+    }
+
+    Tbl[2]  = 0x0000000080000705ull;                                 // 2..4 GiB Normal WB: low DRAM, the rings
+    Tbl[3]  = 0x00000000C0000705ull;
+    Tbl[34] = 0x0000000880000705ull;                                 // 34..36 GiB: the high DRAM bank only
+    Tbl[35] = 0x00000008C0000705ull;
+
+    ((UINT64 *)(UINTN)mEGuard)[0xA0 / 8] = (UINT64)(UINTN)Tbl;
+  }
   CopyMem ((VOID *)(UINTN)(mEGuard + 0x800), M3EarlyGuard, (UINTN)(M3EarlyGuardEnd - M3EarlyGuard));
-  EClean ((UINTN)Page, (UINTN)Page + 4 * EFI_PAGE_SIZE);
+  EClean ((UINTN)Page, (UINTN)Page + 5 * EFI_PAGE_SIZE);
   __asm__ __volatile__ ("ic iallu\n dsb sy\n isb" ::: "memory");
   for (i = 0; i < ARRAY_SIZE (mEPmu); i++) {
     Pmu[mEPmu[i].Offset / 4] = (Pmu[mEPmu[i].Offset / 4] & ~mEPmu[i].Mask) | mEPmu[i].Value;

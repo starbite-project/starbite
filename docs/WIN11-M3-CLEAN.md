@@ -300,3 +300,19 @@ into `=M3U uPPPPPPPP itIIIIIIII tcTTTTTTTT`. Read-only. Reading:
 - it/tc growing (InterruptTime in 100 ns units, ~0x4C4B40 per 0.5 s): clock interrupts run on the M3, so the kernel
   is alive and waiting on something else (a device, a CPU, a DPC);
 - it/tc frozen at a small value: the clock stopped or never ticked; the HAL timer path on the M3 is the suspect.
+
+## 13. m3kern3 result (22:14) and m3kern4
+
+m3kern3: `=M3K` as m3kern2 (GIC re-enabled at beat 1, then nothing); `=M3U u00000000 it00000000 tc00000000`;
+`=M3E map: 0 LoaderData ranges, 0 pages`. No EfiLoaderData range lay inside 2..4 GiB, so the scan had nothing to
+search. The tick question stays open. Screen (user, m3kern1/2): the logo only, no spinner.
+
+**m3kern4** (`starbite-uefi-m3kern4.bin`, sha256 `9ca771f388e19a72058a750b27f4fcde70229a388cc2cc13c51591c909acea54`):
+- the memory map at ExitBootServices is summarised per type (`=M3E mt T nCOUNT pPAGES LO-HI`, short lines), so we
+  learn where winload's memory actually is;
+- the scan covers EfiLoaderData and OS-defined types first, then loader code, boot-services code/data and
+  conventional memory (never reserved, runtime, ACPI, MMIO), merged into up to 112 ranges;
+- the guard's own map is now a 40-bit table: 0..2 GiB Device (PMU, GIC), 2..4 GiB and 34..36 GiB Normal (the two DRAM
+  banks), nothing else, so the scan also reaches the high bank;
+- the UFS trigger is checked every 256 scanned pages, so a long scan never delays the volume reset.
+Still read-only towards Windows.
