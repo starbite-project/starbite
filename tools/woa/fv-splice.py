@@ -10,6 +10,7 @@ pads, PCDs) and replaces its last file, the LZMA-compressed DXE volume
 volume to its length with 0xFF and fixes the FV header checksum. This is the
 src32 control build: our SEC/PEI + the release's entire DXE module set.
 """
+import os
 import struct
 import sys
 
@@ -63,6 +64,17 @@ def splice(ours, rel):
     r_off, r_size = rfiles[-1][0], rfiles[-1][1]
     assert ofiles[-1][3] == rfiles[-1][3], 'DXE volume file attributes differ'
     out = bytearray(ours[:o_off]) + rel[r_off:r_off + r_size]
+    if len(out) > length and os.environ.get('FV_GROW') == '1':
+        # Opt-in (docs/WIN11-M3-CLEAN.md 27): GenFv auto-sized FVMAIN_COMPACT to its contents, but SEC/PEI were built
+        # with PcdFvSize = PcdFdSize = 0x700000 and walk the volume by its header, so the header may claim more of the
+        # FD. New length = the contents rounded up to a block, never past the FD; block map and checksum follow.
+        blk = struct.unpack_from('<I', out, 60)[0]
+        new = (len(out) + blk - 1) // blk * blk
+        assert new <= len(ours) and struct.unpack_from('<II', out, 64) == (0, 0), 'unexpected FV layout'
+        struct.pack_into('<Q', out, 32, new)
+        struct.pack_into('<I', out, 56, new // blk)
+        print(f'outer FV grown 0x{length:x} -> 0x{new:x} (FV_GROW=1)')
+        length = new
     assert len(out) <= length, f'release DXE volume does not fit: {len(out):#x} > {length:#x}'
     out += b'\xff' * (length - len(out))
     out += ours[length:]   # the rest of the FD (0xFF) keeps the flashed image size

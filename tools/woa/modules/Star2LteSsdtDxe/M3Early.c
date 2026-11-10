@@ -38,6 +38,9 @@
 #ifndef STARBITE_M3_EARLY
 #define STARBITE_M3_EARLY 0
 #endif
+#ifndef STARBITE_M3_LITE
+#define STARBITE_M3_LITE 0               // v14: daily big-core boot: no =M3K / =M3N diagnostics (room in the DXE slot)
+#endif
 #ifndef STARBITE_M3_KHZ
 #define STARBITE_M3_KHZ 0                // v12: M3 cluster clock (ACPM domain 3) set at the hand-off, 0 = left as is
 #endif
@@ -383,10 +386,12 @@ __asm__ (
   "  cmp   x6, #16\n"
   "  b.lo  15b\n"
   // the line "=M3K b0000 e00 gd0 @00 fbn00 @00 h00000000" in zone 0 (+0x40) and pmsg (+0x48)
+#if !STARBITE_M3_LITE
   "  ldr   x9, [x19, #0x40]\n"
   "  bl    20f\n"
   "  ldr   x9, [x19, #0x48]\n"
   "  bl    20f\n"
+#endif
   // v3: KUSER_SHARED_DATA (NtMajorVersion 10 at +0x26C, ImageNumberLow/High 0xAA64 at +0x2C) in winload's
   // EfiLoaderData ranges (+0x100: base, pages; +0x78 count); then InterruptTime (+0x8) and TickCount (+0x320)
   "  cbnz  x29, 41f\n"
@@ -491,10 +496,12 @@ __asm__ (
   "  bl    100f\n"
   "130:\n"
   "  ldr   x9, [x19, #0x00]\n  bl 140f\n  ldr x9, [x19, #0x08]\n  bl 140f\n"
+#if !STARBITE_M3_LITE
   "  ldr   x9, [x19, #0xB0]\n"            // v5: ntoskrnl globals line, zone 0 and pmsg
   "  bl    60f\n"
   "  ldr   x9, [x19, #0xB8]\n"
   "  bl    60f\n"
+#endif
 #if STARBITE_M3_EARLY < 4
   "  ldr   x9, [x19, #0xE0]\n"            // v7: bugcheck parameters 2..4
   "  bl    70f\n"
@@ -600,6 +607,7 @@ __asm__ (
   "  dsb   sy\n"
   "8:\n"
   "  b     8b\n"
+#if !STARBITE_M3_LITE
   // write the fields at line x9 (skip if 0); keeps x19..x28, x14..x16, x10, x11
   "20:\n"
   "  cbz   x9, 29f\n"
@@ -618,6 +626,7 @@ __asm__ (
   "  mov   x30, x17\n"
   "29:\n"
   "  ret\n"
+#endif
   // "=M3U u00000000 it00000000 tc00000000" at x9 (skip if 0)
   "50:\n"
   "  cbz   x9, 59f\n"
@@ -632,6 +641,7 @@ __asm__ (
   "  mov   x30, x17\n"
   "59:\n"
   "  ret\n"
+#if !STARBITE_M3_LITE
   // v5: "=M3N lb00000000 np00 ps00000000 bc00000000 p10000000000000000" at x9: KeLoaderBlock, KeNumberProcessors,
   // PsInitialSystemProcess, KiBugCheckData[0], [1] read through ntoskrnl's physical image (+0xC0..+0xD8)
   "60:\n"
@@ -652,6 +662,7 @@ __asm__ (
   "  mov   x30, x17\n"
   "69:\n"
   "  ret\n"
+#endif
 #if STARBITE_M3_EARLY < 4
   // v7: "=M3B p20000000000000000 p30000000000000000 p40000000000000000" = KiBugCheckData[2..4]
   "70:\n"
@@ -1403,6 +1414,7 @@ EPmuReplay (
 }
 
 
+#if !STARBITE_M3_LITE
 //
 // v5: ntoskrnl's physical image (winload loads it contiguously; woa logs the same base, =NTID b=BA000000): the guard
 // reads four exported globals through it. Only for the analysed build (SizeOfImage 0x103D000, export name
@@ -1474,6 +1486,7 @@ ENtosFind (
   EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x800);
   SbLog ("=M3E ntos %lx lb %lx np %x bc %lx", B, B ? *(UINT64 *)(UINTN)(B + 0xD1B4B8) : 0, B ? *(UINT8 *)(UINTN)(B + 0xD1AB86) : 0, B ? *(UINT64 *)(UINTN)(B + 0xCFE0A0) : 0);
 }
+#endif
 
 //
 // v4: RAM the kernel may use, from the memory map at ExitBootServices (static buffer: no allocation, winload's map
@@ -1860,7 +1873,9 @@ M3EarlyEbsWrap (
     EAcpiLine ("ebs-pre");
  #if STARBITE_M3_EARLY >= 2
     ELoaderRanges ();
+   #if !STARBITE_M3_LITE
     ENtosFind ();
+   #endif
  #endif
   }
 
@@ -1993,9 +2008,13 @@ M3EarlyOnReadyToBoot (
  #if STARBITE_M3_EARLY < 4
   EFbLiterals ();
  #endif
+ #if !STARBITE_M3_LITE
   SbLog ("%a", mEKTag);
+ #endif
   SbLog ("%a", mEUTag);
+ #if !STARBITE_M3_LITE
   SbLog ("%a", mENTag);
+ #endif
   SbLog ("%a", mEHTag);
  #if STARBITE_M3_EARLY < 4
   SbLog ("%a", mEBTag);

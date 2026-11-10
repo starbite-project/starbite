@@ -556,3 +556,24 @@ the request is sent once by the **guard** at its entry, through its own page tab
 ACPM mailbox, the TMU and the watchdog are all reachable), fire and forget (no wait). The kHz value is a guard literal
 (+0x2C). Crumb `c` in `=M3H t.. hi.. s. cN`: 1 written (and cleaned to RAM) before the attempt, 2 after. A hang
 inside ACPM shows as c1. Thermal guard as in m3all3c.
+
+## 27. m3all3d result: 3 M3s at 1794 MHz (2.2x); windows-big3-1794: the user's normal firmware on the big cores
+
+m3all3d: Win32_Processor 3 cores at 1794 MHz, 20M mul-add 45.9 / 45.4 / 55.5 ms (2.2x m3all3), `=M3H t33 hi46 s0 c2`
+(51 C, peak 70 C, never throttled), clean restart. sbcpu-x64/x86 c0000409 (emulator, CNTFRQ), sbcpu-arm64 fine.
+
+**windows-big3-1794.uefi** (sha256 `a0bb8a2679b269f3342a17c767ae36524d16749f1a85022f1429b645899911ba`) = the `win11` row's
+firmware `windows-t32s-nocache.uefi` (c3e43fd2: USB device, SBGPU, WLAN4361, SMBIOS) with only Star2LteSsdtDxe
+replaced by m3all3d's module (same blob installer, plus M3 core 1 boot, M3 2/3 parked, parking-v1 MADT, 1794 MHz,
+liveness + thermal guard). The old module is blanked (`--kill-blank`). Everything else is byte-identical: bootshim,
+SEC/PEI file, every other DXE module and blob.
+
+The release DXE volume no longer fit its 0x51000 outer FV (0x1848 over). That size was only GenFv's auto-size
+(FVMAIN_COMPACT `NumBlocks = 0`); SEC/PEI were built with PcdFvSize = PcdFdSize = 0x700000 and walk the volume by its
+header. `FV_GROW=1` (fv-splice.py) lets the header claim more of the FD: here 0x51000 -> 0x53000 (FvLength, block count,
+header checksum; 4 header bytes change, the tail stays 0xFF). This is new: if this image stops before the Windows
+logo, the grown outer FV is the suspect (the loader watchdog brings the phone back; Windows never started).
+
+Windows-side on the M3s: our own drivers (sbwddm, sbwdog, sbkeys, sbwificx) have no unchecked LSE (lse-scan).
+sbwddm uses ACPM channel 0 for G3D. The guard sends on that channel only at hand-off (before Windows' drivers) and
+once more if it throttles at 85 C: a rare overlap window, acceptable until there is a single ACPM owner.

@@ -46,6 +46,7 @@ M3BOOT=${M3BOOT:-0}                               # 1: M3 core 1 becomes the boo
 M3PSCIEMU=${M3PSCIEMU:-0}                         # 1: with M3BOOT: PSCI 1.0 answers patched into ntoskrnl (v10) instead of the FADT change
 M3EARLY=${M3EARLY:-0}                             # 1: boot CPU -> M3 1 at ReadyToBoot, log only, reset at EBS (docs/WIN11-M3-CLEAN.md 9)
 M3KHZ=${M3KHZ:-0}                                 # with M3EARLY: M3 cluster clock in kHz set at the hand-off (ACPM), 0 = as is
+M3LITE=${M3LITE:-0}                               # with M3EARLY: 1 = daily big-core module (no =M3K/=M3N diagnostics)
 M3DIAG=${M3DIAG:-0}                               # 1: log-only M3 diagnostic, resets after ExitBootServices (docs/WIN11-M3-CLEAN.md)
 CORES8=${CORES8:-0}                               # 1: M3 cores 1..3 parked for Windows + MADT/_MAT at EBS (7 CPUs);
                                                   #    2: also M3 core 0 (8 CPUs); docs/WIN11-24H2-A55.md
@@ -118,7 +119,7 @@ image() {   # image NAME ROLE ACPI VBUS BLOB
     tools/woa/build-uefi.sh "$UEFI_TARGET" -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_USB_DXE=TRUE -D STAR2LTE_SSDT_DXE=TRUE \
         -D STARBITE_USB_ROLE=$role -D STARBITE_USB_ACPI=$acpi -D STARBITE_USB_VBUS=$vbus -D STARBITE_PPTT_FIX=$PPTT \
         -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK -D STARBITE_M3_RUN=$M3RUN -D STARBITE_M3_BOOT=$M3BOOT \
-        -D STARBITE_CORES8=$CORES8 -D STARBITE_M3_PSCIEMU=$M3PSCIEMU -D STARBITE_M3_DIAG=$M3DIAG -D STARBITE_M3_EARLY=$M3EARLY -D STARBITE_M3_KHZ=$M3KHZ | tail -1
+        -D STARBITE_CORES8=$CORES8 -D STARBITE_M3_PSCIEMU=$M3PSCIEMU -D STARBITE_M3_DIAG=$M3DIAG -D STARBITE_M3_EARLY=$M3EARLY -D STARBITE_M3_KHZ=$M3KHZ -D STARBITE_M3_LITE=$M3LITE | tail -1
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$USBDXE" "$out/$name-usb.ffs"
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$SSDTDXE" "$out/$name-ssdt.ffs"
     grep -aq "usb-policy role=$role acpi=$acpi vbus=$vbus" "$out/$name-usb.ffs" ||
@@ -173,7 +174,7 @@ if [ -n "$SOLO" ]; then
     # EXTRA_AML blobs (e.g. SBGPU, so Windows keeps its display driver on these boots).
     echo "== $SOLO: Star2LteSsdtDxe alone (PPTT fix $PPTT, M3 probe $M3, M3 park $M3PARK, M3 run $M3RUN, M3 boot $M3BOOT, cores8 $CORES8, M3 diag $M3DIAG, PPTT OEM $PPTT_OEM)"
     tools/woa/build-uefi.sh "$UEFI_TARGET" -D STAR2LTE_RAM_STAGE=3 -D STAR2LTE_SSDT_DXE=TRUE \
-        -D STARBITE_PPTT_FIX=$PPTT -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK -D STARBITE_M3_RUN=$M3RUN -D STARBITE_M3_BOOT=$M3BOOT -D STARBITE_CORES8=$CORES8 -D STARBITE_M3_PSCIEMU=$M3PSCIEMU -D STARBITE_M3_DIAG=$M3DIAG -D STARBITE_M3_EARLY=$M3EARLY -D STARBITE_M3_KHZ=$M3KHZ | tail -1
+        -D STARBITE_PPTT_FIX=$PPTT -D STARBITE_M3_PROBE=$M3 -D STARBITE_M3_PARK=$M3PARK -D STARBITE_M3_RUN=$M3RUN -D STARBITE_M3_BOOT=$M3BOOT -D STARBITE_CORES8=$CORES8 -D STARBITE_M3_PSCIEMU=$M3PSCIEMU -D STARBITE_M3_DIAG=$M3DIAG -D STARBITE_M3_EARLY=$M3EARLY -D STARBITE_M3_KHZ=$M3KHZ -D STARBITE_M3_LITE=$M3LITE | tail -1
     python3 tools/woa/dxe-replace.py "$out/Star2LtePkg.fd" "$out/Star2LtePkg.fd" /dev/null --extract "$SSDTDXE" "$out/$SOLO-ssdt.ffs"
     flags_ok "$out/$SOLO-ssdt.ffs"
     python3 tools/woa/dxe-replace.py "$W/Star2LtePkg-src38.fd" "$rel" "$out/$SOLO.fd" \
