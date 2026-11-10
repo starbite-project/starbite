@@ -35,6 +35,7 @@
   Cores8ParkStub.h
   M3PsciEmu.h
   M3Diag.c
+  M3Early.c
   PpttBuild.c
   PpttBuild.h
   StarbiteLog.h

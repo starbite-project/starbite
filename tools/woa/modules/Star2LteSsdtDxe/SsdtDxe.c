@@ -66,6 +66,9 @@
 #ifndef STARBITE_M3_DIAG
 #define STARBITE_M3_DIAG 0
 #endif
+#ifndef STARBITE_M3_EARLY
+#define STARBITE_M3_EARLY 0
+#endif
 
 VOID
 PpttFix (
@@ -99,6 +102,11 @@ Cores8Arm (
 
 VOID
 M3DiagArm (
+  VOID
+  );
+
+VOID
+M3EarlyArm (
   VOID
   );
 
@@ -353,6 +361,9 @@ SsdtDxeEntry (
  #endif
  #if STARBITE_M3_PARK
   M3Park ();          // after the probe, never with it (build-win-usbhost.sh refuses both)
+ #endif
+ #if STARBITE_M3_EARLY
+  M3EarlyArm ();      // clean-slate track: boot CPU -> M3 1 at ReadyToBoot, log only (docs/WIN11-M3-CLEAN.md 9)
  #endif
  #if STARBITE_M3_DIAG
   M3DiagArm ();       // clean-slate big-core track, image 1: log only, resets after ExitBootServices

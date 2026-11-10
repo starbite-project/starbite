@@ -213,3 +213,26 @@ Run exactly as m3diag1 (row `win11-m3probe`, attended, reads from pmsg in TWRP o
 Next (being built): the boot CPU moves to M3 1 **before winload** (at ReadyToBoot), and UEFI's GIC/timer banked
 state is replicated on it (INTID 27/30 priority and enable, GICC CTLR/PMR/BPR, CNTV/CNTP). UEFI and winload then
 run on the M3 up to ExitBootServices, and the image resets there (log-only). Then the real boot with corrected tables.
+
+## 9. m3diag3 result (20:53, PASSED) and m3early1: the boot CPU moves to an M3 before winload
+
+m3diag3: A55 0 cleared its own OS lock (OSLSR A -> 8), every CoreSight read completed, but EDPCSR/EDCIDSR/EDVIDSR
+read 0 and **EDDEVID = 0: PC sampling is not implemented in the A55's debug block.** Dropped. (The M3's own debug
+block, 0x1E410000 + n * 0x100000, could differ; not pursued now.)
+
+**m3early1** (`starbite-uefi-m3early1.bin`, sha256 `5844614aad1df9733ddc21ae8617999ccff01fc22210a7a52eb4ea2c5d6bcb61`,
+`SOLO=m3early1 M3EARLY=1`; code `M3Early.c`). Log only:
+- dispatch: M3 core 1 parked (one CPU_ON with the PMU defaults, as B3 v3..solo10);
+- ReadyToBoot (our callback, TPL HIGH): the A55's banked GIC state (ISENABLER0, IPRIORITYR0..7), CPU interface
+  (CTLR/PMR/BPR) and timers (CNTP/CNTV CTL+CVAL) saved; the EL1 context handed to the M3 (M3Boot's proven
+  mechanism); on the M3 the GIC state is applied to its own interface, SPIs aimed at interface 0 are retargeted to
+  interface 5, timers restored, TPL back. Then a 10 ms UEFI timer event proves the tick runs on the M3;
+- A55 0 masks its timers and becomes a watcher: it rewrites the `=M3E watch beat .... prog .. pmsg ....` line in both
+  rings every 0.5 s for 90 s (prog 1 claimed, 2 GIC/timer moved, 3 tick seen / 33 not, 4 left ReadyToBoot,
+  5 in ExitBootServices, 6 EBS done), then WFI with MMU off;
+- the boot manager and winload load and run on the M3; at ExitBootServices (our wrapper, outermost) the M3 logs its
+  MPIDR, calls the real EBS (woa's hook included), logs, and resets (ResetSystem, then PMU SWRESET).
+Fail-safe: no claim within 1 s, then the A55 stays the boot CPU and the image still resets at EBS.
+
+What it answers: whether UEFI and winload work on an M3 boot CPU. That is cause #2 tested at the right layer: after
+this, every decision winload makes is made on the M3.
