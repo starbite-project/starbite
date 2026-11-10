@@ -382,6 +382,16 @@ void sh_boot_os(const char *key)
 #endif
 }
 
+void sh_torch(int lit)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log(lit ? "next: torch: would light (a dry run: the self test)" : "next: torch: would go off (a dry run)");
+#else
+    int r = torch_set(lit);
+    if (r < 0) sb_log("next: torch: the LED did not answer");
+#endif
+}
+
 /* ---- the self test --------------------------------------------------------------------------------------- */
 #ifdef SBOS_SELFTEST_NEXT
 typedef struct { int kind; float x0, y0, x1, y1, ms; } step;

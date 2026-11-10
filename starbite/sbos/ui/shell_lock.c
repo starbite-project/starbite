@@ -201,10 +201,24 @@ static void fmt_hm(char *b) { b[0] = (char)('0' + ST.h / 10); b[1] = (char)('0' 
     b[3] = (char)('0' + ST.mi / 10); b[4] = (char)('0' + ST.mi % 10); b[5] = 0; }
 
 static tk_layer lstatus, lclock, lwidgets;
+static void relink(void);
+static char carrier[32] = "No SIM";
 static void build_lstatus(void)
 {
+    relayer(&lstatus);
     dc d = mk(&lstatus, "lock-status", 0, 0, 390, 48, 2, 0);
-    status_bar(&d, "No SIM");
+    status_bar(&d, carrier);
+}
+/* the modem's status (its session's status API): the carrier or "No SIM" / "Emergency calls only" */
+void sh_carrier(const char *text)
+{
+    if (!tk_strcmp(text, carrier)) return;
+    int n = 0;
+    while (text[n] && n < 31) { carrier[n] = text[n]; n++; }
+    carrier[n] = 0;
+    build_lstatus();
+    relink();
+    lock_ver++;
 }
 static void build_lclock(void)
 {
@@ -1214,6 +1228,7 @@ int sh_tick(float dt, float t)
             if (p >= 1) {
                 q->fired = 1;
                 q->lit = !q->lit;
+                if (i == 0) sh_torch(q->lit);   /* the LED (the platform; Emergency mode is not in Next yet) */
                 q->facelit.hidden = q->iconlit.hidden = !q->lit;
                 q->face.hidden = q->icon.hidden = q->lit;
                 hold_ring(q, i, 0);

@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+void sh_torch(int lit) { fprintf(stderr, "torch: %s\n", lit ? "on" : "off"); }
 void sh_boot_os(const char *key) { fprintf(stderr, "slide to start: would restart into %s\n", key); }
 
 /* SBTK_CORES=n: the bands over n threads (the phone's four A55), to check that a split frame is bit for bit the

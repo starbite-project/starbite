@@ -22,5 +22,9 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp);   
 
 /* provided by the platform: slide to start finished (the kernel: the loader's one-shot next boot) */
 void sh_boot_os(const char *key);
+/* provided by the platform: the torch hold toggled the flashlight */
+void sh_torch(int lit);
+/* the status bar's left text from the modem's status (default "No SIM") */
+void sh_carrier(const char *text);
 
 #endif
