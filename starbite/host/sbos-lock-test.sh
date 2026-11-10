@@ -1,7 +1,8 @@
 #!/bin/sh
 # 1.2-alpha25: the lock screen as the user asked (2026-11-10): swipe up unlocks; the other OSes are cards (from the
 # store's catalog, read only); a hold on one asks, and yes is the loader's one-shot next boot (a dry run here: logged,
-# no restart). Run on the Mac after sbos-preview.sh built the host binary.
+# no restart). Run on the Mac after sbos-preview.sh built the host binary. 1.2-alpha26: only with SBOS_LOCK_V25 1
+# (kern.h; the alpha25 lock screen is off while the UI is redesigned).
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/starbite/out/sboshost"

@@ -28,7 +28,7 @@ int app_is_test(int a)
  * Mode. Light and SOS stay in both. A notification from Heat still opens it. */
 int app_hidden(int a)
 {
-    return app_is_test(a) || (a >= 0 && a < napps && !look_emergency && sb_streq(apps[a].id, "heat"));
+    return app_is_test(a) || (SBOS_LOCK_V25 && a >= 0 && a < napps && !look_emergency && sb_streq(apps[a].id, "heat"));
 }
 
 int app_by_id(const char *id)

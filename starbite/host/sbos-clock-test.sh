@@ -31,8 +31,8 @@ r=$(limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 SBOS_HOST_N
 never "$r" "no clock at boot: on once" "never in a self test (it has its own Wi-Fi step)"
 ST=/tmp/sbos-clock-state.bin
 limactl shell starbite rm -f "$ST"
-ENVS="SBOS_HOST_STATE=$ST"
-r=$(run w:600 g:720,1375,0,800 w:6000)
+# a settings save (Wi-Fi > Known networks > Join automatically, in the host's default layout) keeps the time
+r=$(limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 "SBOS_HOST_STATE=$ST" "$out/sbos-host" "$out" /dev/null w:300 g:1150,2310,0,700 w:400 t:1057,1738 w:600 t:720,1184 w:500 t:720,624 w:6000 q 2>&1)
 want "$r" "settings: saved" "a settings save keeps the time"
 ENVS="SBOS_HOST_STATE=$ST SBOS_HOST_RTC_LOST=1"
 r=$(run w:600)

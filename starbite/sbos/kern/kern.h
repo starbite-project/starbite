@@ -10,6 +10,11 @@
 #include "sbapp.h"
 
 #define SBOS_VERSION "1.2-alpha26"
+/* 1.2-alpha26: alpha25's lock screen (OS cards, swipe up, the Emergency hold, Heat only in Emergency) is off: the user
+ * rejected it; the UI is being redesigned (docs/concepts/starbite-os-shell). 0 = alpha24's lock screen and home */
+#ifndef SBOS_LOCK_V25
+#define SBOS_LOCK_V25 0
+#endif
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */

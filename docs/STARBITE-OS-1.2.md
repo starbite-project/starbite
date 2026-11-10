@@ -16,6 +16,10 @@ offset). alpha26:
   the user's Wi-Fi switch or Heat ends it at once (Heat is never blocked by it).
 - **At boot** `clock: the PMIC clock reads ... UTC` (with LOST / BEHIND when so), the last known time, and which is
   used. Host: `SBOS_HOST_RTC_LOST=1`, `sbos-clock-test.sh`.
+- **alpha25's lock screen is switched off** (`SBOS_LOCK_V25` 0, kern.h): the user rejected it; the lock screen and the
+  home are alpha24's again (Heat on the home in both modes). The UI is being redesigned from the HTML shell concept
+  (docs/concepts/starbite-os-shell) before any phone build. Kept from alpha25: the self test's DHCP-only warning.
+  `sbos-lock-test.sh` applies only with `SBOS_LOCK_V25` 1.
 
 ## Starbite OS 1.2-alpha25: the lock screen picks the OS; Heat lives in Emergency mode (2026-11-10)
 

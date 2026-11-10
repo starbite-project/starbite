@@ -284,9 +284,11 @@ void selftest_timer(unsigned id)
     }
     case 1: {
         logline("lock screen", -1);
+#if SBOS_LOCK_V25
         int nc = kui_test_os_card();        /* 1.2-alpha25: a card's restart, a dry run (logged, nothing restarts) */
         sb_logx(nc ? "selftest: lock screen: OS cards (the first one's restart, a dry run): " :
                      "selftest: lock screen: no OS cards (the catalog lists none): ", (uint64_t)nc);
+#endif
         kui_home();
         phase = 2;
         break;

@@ -942,7 +942,8 @@ static void build_lock(void)
         e->x = 110 + i * 430, e->y = 2130, e->w = 360, e->h = 450;   /* the box holds the 169 px ring */
     }
     /* 1.2-alpha25: Emergency Mode in and out (heat and the power features live there), then the other OSes as
-     * notification cards (a hold each; fewer when the medical card shows) */
+     * notification cards (a hold each; fewer when the medical card shows). Off in alpha26 (SBOS_LOCK_V25) */
+#if SBOS_LOCK_V25
     if (!pocket_lock) {
         e = add(cur, &ncur, E_HOLD);
         e->id = 4;
@@ -968,6 +969,10 @@ static void build_lock(void)
     scopy(e->b, sizeof(e->b), pocket_lock ? "Heating: touch is locked. Press Power" :
                               osc_n > 0 ? "Swipe up to unlock  " U_DOT "  hold a card for another OS" :
                                           "Swipe up to unlock, or hold a button");
+#else
+    e = add(cur, &ncur, E_CTEXT);
+    scopy(e->b, sizeof(e->b), pocket_lock ? "Heating: touch is locked. Press Power" : "Hold a button");
+#endif
     e->value = F_SMALL;
     e->color = pocket_lock ? C_L1 : C_L3;
     e->x = 0, e->y = 2660, e->w = UI_W, e->h = 80;
@@ -2732,7 +2737,7 @@ void ui_kevent(const void *evp)
             dirty = 1;
             break;
         }
-        if (screen == SCR_LOCK && !pocket_lock && press_y >= UI_H - 560 && press_y - ev->y >= 600) {
+        if (SBOS_LOCK_V25 && screen == SCR_LOCK && !pocket_lock && press_y >= UI_H - 560 && press_y - ev->y >= 600) {
             press_y = -1;                   /* 1.2-alpha25: swipe up from the bottom unlocks (as an iPhone) */
             pressed = -1;
             sb_log("ui: unlocked by a swipe up");
