@@ -10,5 +10,7 @@
  {"name": "scroll-60",       "js": "document.getElementById('nscroll').scrollTop = 60", "host": ["scroll=:60"]},
  {"name": "focus-win11",     "js": "sbSet('focus', ['win11', 1])",         "host": ["focus=win11:1"]},
  {"name": "focus-ios26-50",  "js": "sbSet('focus', ['ios26', .5])",        "host": ["focus=ios26:0.5"]},
+ {"name": "home-page2",      "js": "sbSet('unlock', 1); sbSet('page', 1)", "host": ["unlock=:1", "page=:1"]},
+ {"name": "home-page-50",    "js": "sbSet('unlock', 1); sbSet('page', .5)", "host": ["unlock=:1", "page=:0.5"]},
  {"name": "hint",            "js": "window.__hint = 1",                    "host": ["hint=:1"]}
 ]

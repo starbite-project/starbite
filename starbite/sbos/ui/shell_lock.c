@@ -561,7 +561,7 @@ static void toggle_group(int g, int instant)
     place_list();
 }
 
-static tk_layer hparts[8];
+static tk_layer hparts[8], hsearch[3], pages;
 static void build_home_sb(void)
 {
     relayer(&hparts[0]);
@@ -616,13 +616,40 @@ static void build_home(void)
         float w = tw(TK_IT500, 12, P1N[i], 0, 0);
         d_text(&d, TK_IT500, 12, cx - w / 2, y + 68 + 12, P1N[i], 0, 0, INK, 1);
     }
-    d = mk(&hparts[3], "home-dock", 0, 600, 390, 202, 0, 1);
+    /* page 2: the second grid (top 62) */
+    {
+        static const char *P2[8] = { "contacts", "files", "light", "battery", "terminal", "browser", "medical", "sos" };
+        static const char *P2N[8] = { "Contacts", "Files", "Flashlight", "Battery", "Terminal", "Browser", "Medical Card", "SOS" };
+        /* drawn as if on screen, then moved one page to the right (layers never extend past the panel's sides) */
+        d = mk(&hparts[4], "home-apps2", 0, 55, 390, 220, 4, 0);
+        for (int i = 0; i < 8; i++) {
+            float cx = 22 + 86.5f * (i % 4) + 43.25f, y = 62 + 103 * (i / 4);
+            char n[40] = "a62-";
+            tk_memcpy(n + 4, P2[i], tk_strlen(P2[i]) + 1);
+            d_icon(&d, n, cx - 31, y, 1);
+            float w = tw(TK_IT500, 12, P2N[i], 0, 0);
+            d_text(&d, TK_IT500, 12, cx - w / 2, y + 68 + 12, P2N[i], 0, 0, INK, 1);
+        }
+        hparts[4].x = hparts[4].bx = hparts[4].x + PT(390);
+    }
+    /* the Search pill, three ways: the word (at rest on a page), the page dots (moving, either page lit) */
     {
         float sw = 15 + 13 + 6 + tw(TK_IT600, 13, "Search", 0, 0) + 15, sx = 195 - sw / 2;
+        d = mk(&hsearch[0], "search", sx, 640, sw, 30, 44, 1);
         d_glass(&d, sx, 640, sw, 30, 15, 1, 1);
         d_icon(&d, "search", sx + 15, 640 + 8.5f, 1);
         d_text(&d, TK_IT600, 13, sx + 34, 640 + 7 + 13, "Search", 0, 0, INK, 1);
+        for (int k = 0; k < 2; k++) {
+            d = mk(&hsearch[1 + k], "search-dots", 161.5f, 640, 67, 27, 44, 1);
+            d_glass(&d, 161.5f, 640, 67, 27, 13.5f, 1, 1);
+            d_icon(&d, "search", 161.5f + 15, 640 + 7, 1);
+            d_rrect(&d, 195.5f, 650.5f, 6, 6, 3, k == 0 ? W(1) : W(.4f));
+            d_rrect(&d, 207.5f, 650.5f, 6, 6, 3, k == 1 ? W(1) : W(.4f));
+        }
+        for (int k = 0; k < 3; k++) tk_a8_free(&hsearch[k].glass);
+        hsearch[1].hidden = hsearch[2].hidden = 1;
     }
+    d = mk(&hparts[3], "home-dock", 0, 650, 390, 152, 0, 1);
     d_glass(&d, 12, 688, 366, 96, 36, 0, 1);
     for (int i = 0; i < 4; i++) {
         float x = 22 + 86.5f * i + 12.25f;
@@ -638,7 +665,7 @@ static void build_home(void)
     }
     /* the parts stay separate layers under one group (they do not overlap, so the group's opacity per part is
      * exact); #home has will-change: opacity, a backdrop root in Chrome: its glass shows no wallpaper blur */
-    for (int i = 0; i < 4; i++) tk_a8_free(&hparts[i].glass);
+    for (int i = 0; i < 5; i++) tk_a8_free(&hparts[i].glass);
 }
 
 static float focus_sy;
@@ -793,6 +820,22 @@ static void flatten_lock(void)
     tk_layer_dirty(&lockflat);
 }
 
+/* ---- home's pages: the grid slides, the Search pill shows the page dots while it moves ---------------------- */
+static float page_x;                    /* pt: 0 page 1, -390 page 2 */
+static tk_spring sp_page;
+static int page_dir, page_dragging;
+static void set_page(float x)
+{
+    page_x = x;
+    pages.x = PT(x);
+    float p = -x / 390;
+    float fr = p - tk_floorf(p + .5f);
+    int moving = tk_fabsf(fr) > .02f || page_dragging;
+    hsearch[0].hidden = moving;
+    hsearch[1].hidden = !moving || p >= .5f;
+    hsearch[2].hidden = !moving || p < .5f;
+}
+
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
 {
@@ -878,8 +921,10 @@ static void relink(void)
         tk_layer *q[] = { &Q[i].face, &Q[i].facelit, &Q[i].icon, &Q[i].iconlit, &Q[i].ring };
         link(&Q[i].grp, q, 5);
     }
-    tk_layer *h[] = { &hparts[0], &hparts[1], &hparts[2], &hparts[3] };
-    link(&home, h, 4);
+    tk_layer *pg[] = { &hparts[1], &hparts[2], &hparts[4] };
+    link(&pages, pg, 3);
+    tk_layer *h[] = { &hparts[0], &pages, &hsearch[0], &hsearch[1], &hsearch[2], &hparts[3] };
+    link(&home, h, 6);
 }
 
 /* the bake in steps (the kernel runs one per loop turn: the watchdog is fed and the screen fills in as it goes);
@@ -894,6 +939,7 @@ void sh_init_begin(tk_comp *c)
     tk_layer_init(&home, "home");
     home.ox = PT(195);
     home.oy = PT(401);
+    tk_layer_init(&pages, "pages");
     tk_layer_init(&lockg, "lock");
     tk_layer_init(&list, "list");
     list.clip = 1;
@@ -996,11 +1042,16 @@ void sh_set(const char *what, const char *key, float v)
         for (int g = 0; g < NG; g++) if (K[g].isopen) toggle_group(g, 1);
         scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
         sp_lock.live = 0;
+        sp_page.live = 0; page_dragging = 0;
+        set_page(0);
         locked = 1;
         set_lock(0);
         mark_a = mark_t; glyph_a = glyph_t; hint_a = 0; hint_left = 0;
         apply_tweens();
         place_list();
+    } else if (!tk_strcmp(what, "page")) {
+        sp_page.live = 0;
+        set_page(-390 * v);
     } else if (!tk_strcmp(what, "hint")) {
         hint_a = v;
         apply_tweens();
@@ -1013,7 +1064,7 @@ void sh_set(const char *what, const char *key, float v)
 }
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
-enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK };
+enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE };
 static struct {
     int kind, arg, arg2, moved;
     float x0, y0, base, t0;
@@ -1066,7 +1117,16 @@ void sh_touch(int phase, float x, float y, float t)
         }
         if (!locked) {
             /* home: a pull down from the top-left corner brings the lock back (the concept's re-lock) */
-            if (y < 56 && x < 195) { T.kind = G_RELOCK; sp_lock.live = 0; tk_tracker_add(&T.tr, y, t); }
+            if (y < 56 && x < 195) { T.kind = G_RELOCK; sp_lock.live = 0; tk_tracker_add(&T.tr, y, t); return; }
+            /* elsewhere but the dock, Search and the widgets: the pages (direction decided after 8 pt) */
+            int on_w = page_x > -195 && y >= 60 && y <= 218 && ((x >= 24 && x <= 182) || (x >= 208 && x <= 366));
+            if (y >= 56 && y < 688 && !(y >= 640 && y <= 670 && x >= 150 && x <= 240) && !on_w) {
+                T.kind = G_PAGE;
+                T.base = page_x;
+                page_dir = 0;
+                sp_page.live = 0;
+                tk_tracker_add(&T.tr, x, t);
+            }
             return;
         }
         for (int i = 0; i < 2; i++) {
@@ -1113,6 +1173,19 @@ void sh_touch(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, y, t);
             set_lock(-H_PT + tk_maxf(0, dy));
             break;
+        case G_PAGE: {
+            float dx = x - T.x0;
+            tk_tracker_add(&T.tr, x, t);
+            if (!page_dir && dx * dx + dy * dy > 64) page_dir = tk_fabsf(dx) > tk_fabsf(dy) ? 1 : 2;
+            if (page_dir == 1) {
+                page_dragging = 1;
+                float px = T.base + dx;
+                if (px > 0) px *= .3f;
+                if (px < -390) px = -390 + (px + 390) * .3f;
+                set_page(px);
+            }
+            break;
+        }
         case G_LOCK: {
             tk_tracker_add(&T.tr, y, t);
             float d = dy + T.base;
@@ -1162,6 +1235,13 @@ void sh_touch(int phase, float x, float y, float t)
         else { scroll_v = -tk_tracker_v(&T.tr); scroll_momentum = tk_fabsf(scroll_v) > .02f; }
         break;
     }
+    case G_PAGE:
+        if (page_dir == 1) {
+            float v = tk_tracker_v(&T.tr), target = page_x + v * 220 < -195 ? -390 : 0;
+            page_dragging = 0;
+            tk_spring_start(&sp_page, page_x, target, v * 1000, TK_SPR_ROWS);
+        }
+        break;
     case G_RELOCK: {
         float v = tk_tracker_v(&T.tr);
         if (-lockY < H_PT * .7f || v > .4f) { locked = 1; tk_spring_start(&sp_lock, lockY, 0, 0, TK_SPR_UNLOCK); }
@@ -1201,7 +1281,12 @@ int sh_tick(float dt, float t)
         if (!live && sp_lock.to <= -H_PT + .01f) { locked = 0; lockflat.hidden = 1; home.sx = home.sy = 1; }
         mv = 1;
     }
-    if (T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB || T.kind == G_RELOCK) mv = 1;
+    if (T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB || T.kind == G_RELOCK || T.kind == G_PAGE) mv = 1;
+    if (sp_page.live) {
+        tk_spring_step(&sp_page, dt);
+        set_page(sp_page.x);
+        mv = 1;
+    }
     /* the mark (.3 s), the glyph (.2 s) and the hint (.3 s): linear stand-ins for their CSS ease */
     mv |= tween(&mark_a, mark_t, .3f, dt);
     mv |= tween(&glyph_a, glyph_t, .2f, dt);
@@ -1364,7 +1449,7 @@ void sh_idle(void)
 int sh_moving(void)
 {
     int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB ||
-            T.kind == G_RELOCK || booting;
+            T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || booting;
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live;
     return m;
