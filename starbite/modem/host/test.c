@@ -1563,6 +1563,20 @@ static void test_boot(void)
             sbm_modem_poll(&mo, 1);
             p.udelay(p.ctx, 1000);
         }
+        /* sess-1: 121 queries, 110 answers. Here: 11 rounds, 10 s apart, as the modemsess loop runs them */
+        for (unsigned round = 0; round < 11; ++round) {
+            CHECKEQ(sbm_modem_query(&mo), 0);
+            int pr = 0;
+            for (unsigned i = 0; i < 10000 && pr == 0; ++i) {
+                pr = sbm_modem_poll(&mo, 1);
+                p.udelay(p.ctx, 1000);
+            }
+            CHECKEQ(pr, 0);
+            CHECKEQ(mo.b.fmt_resp + mo.b.fmt_gen_res, mo.b.fmt_tx);
+        }
+        CHECKEQ(mo.b.fmt_tx, 132);
+        CHECKEQ(mo.b.fmt_unmatched, 0);
+        CHECKEQ(mo.b.fmt_stale, 0);
         sbm_modem_status(&mo, st, sizeof(st));
         CHECK(strstr(st, "SIM absent") && strstr(st, "CS emergency-only") && !strstr(st, "00101"));
         CHECKEQ(s.rfs_read_ok, 1);

@@ -310,9 +310,12 @@ static void session(void)
         uint64_t now = sb_ms() - t0;
         if (now >= 3000 && now - last_q >= 10000) {
             last_q = now;
-            sbm_modem_query(&mo);
+            /* the counts before this round: a round that loses its answers shows as a gap in a */
+            unsigned q0 = mo.b.fmt_tx, a0 = mo.b.fmt_resp + mo.b.fmt_gen_res;
+            int qr = sbm_modem_query(&mo);
             sbm_modem_status(&mo, st, sizeof(st));
-            sbm_fmt(s, sizeof(s), "SESSION: +%u s: %s", (unsigned)(now / 1000), st);
+            sbm_fmt(s, sizeof(s), "SESSION: +%u s: %s | q %u a %u%s", (unsigned)(now / 1000), st, q0, a0,
+                    qr < 0 ? " | query error" : "");
             line(s);
         }
         if (now - last_draw >= 1000) {
@@ -324,8 +327,9 @@ static void session(void)
         sb_udelay(1000);
     }
     sbm_modem_status(&mo, st, sizeof(st));
-    sbm_fmt(s, sizeof(s), "SESSION: end: %s | FMT %u RFS %u queries %u answers %u", st, mo.b.fmt_rx, mo.b.rfs_rx,
-            mo.b.fmt_tx, mo.b.fmt_resp + mo.b.fmt_gen_res);
+    sbm_fmt(s, sizeof(s), "SESSION: end: %s | FMT %u RFS %u queries %u answers %u (unanswered %u stale %u unmatched %u"
+            " bad %u)", st, mo.b.fmt_rx, mo.b.rfs_rx, mo.b.fmt_tx, mo.b.fmt_resp + mo.b.fmt_gen_res,
+            mo.b.fmt_tx - mo.b.fmt_resp - mo.b.fmt_gen_res, mo.b.fmt_stale, mo.b.fmt_unmatched, mo.b.bad_rx);
     line(s);
     sbm_modem_stop(&mo);
     park_armed = 0;

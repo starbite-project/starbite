@@ -567,6 +567,14 @@ query seqs cycle 0x41..0xFE, each answer is matched to a bitmap of open queries,
 unanswered / stale (a seq reused while still open) / unmatched counts. A host test runs a 590 s soak (649 GETs, three
 wraps) and needs every answer matched.
 
+**modemsess run 1 (2026-11-10, c6573f1, `build/modem/sess-1/pmsg.txt`): passed, came back clean after 166 s, parked.**
+SIM absent at +10 s; not registered, bars 0 at +20 s; CS emergency-only (GSM), bars 4, rssi 0x3d from +30 s to
+the end. 121 queries in 11 rounds, 110 answers: one round's worth is missing. That is not queries in flight at the
+stop: the last round went out at +110 s, the stop came at +120 s. The first round was answered in full (seqs 65-75),
+and the frame log ends after 40 lines, so the log does not say which round lost its answers. A host test of the same
+11 rounds, 10 s apart, gets every answer. The probe now prints the q / a counts before each round, and the end line
+gives unanswered / stale / unmatched / bad, so a re-run shows which round it is.
+
 ## 8. Later stages (not started)
 
 
