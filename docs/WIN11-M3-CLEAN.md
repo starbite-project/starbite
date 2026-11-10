@@ -327,3 +327,23 @@ and =M3U lines, and the reset at the UFS driver's first pmsg line). What it give
 - the baseline timing (beats from kernel entry to the GIC enable, the first screen change and the storage driver)
   to compare with the M3 runs.
 Safe: the reset comes at the storage driver's first line, before any write, as in the M3 runs.
+
+## 15. m3kern4 result (22:45, unattended) and m3kern5 / a55ctl2
+
+m3kern4: `=M3K` unchanged (GIC re-enabled at beat 1, then nothing); `=M3U u00000000`. The memory map at
+ExitBootServices (78 entries) has **no EfiLoaderData at all**. winload's memory is EfiLoaderCode (type 1, 0x5853
+pages, 0x90700000..0xBB72C000), plus BootServicesData (type 4, 0xACE3A pages, 0x90000000..0x9_0000_0000, high bank
+included) and conventional memory. Scanning all of it (16 ranges) found no KUSER_SHARED_DATA signature. Either the
+kernel never initialised those fields on the M3, or the signature doesn't hold this early; the control run decides.
+
+**m3kern5** (`starbite-uefi-m3kern5.bin`, sha256 `e83c21a5c2b3eff0ec71344a1236c46516e3edb1fd429fbd69090e2f5fce02d0`) and
+**a55ctl2** (control, `starbite-uefi-a55ctl2.bin`, sha256 `4407b55a1ba7411f89b7d4eaf42a26913174eb451b6d48d19ed5915d03302cb1`):
+as m3kern4 / a55ctl1, plus a third line read through ntoskrnl's physical image (found at ExitBootServices: the PE at
+0xBA000000 or at a LoaderCode range start, export name ntoskrnl.exe, SizeOfImage 0x103D000 = the analysed build):
+`=M3N lbLLLLLLLL npNN psPPPPPPPP bcCCCCCCCC p1QQQQQQQQQQQQQQQQ`
+- `lb` KeLoaderBlock (RVA D1B4B8): set in KiSystemStartup, cleared at the end of phase 1;
+- `np` KeNumberProcessors (D1AB86): 1 once the boot CPU is initialised;
+- `ps` PsInitialSystemProcess (D1AA20): set late in phase 0 (process manager);
+- `bc`/`p1` KiBugCheckData[0]/[1] (CFE0A0): **the bugcheck code and first parameter if Windows bugchecked**.
+The screen hash now covers the whole screen (every 32nd row and pixel). `=M3E ntos <base> ...` logs the values
+before the kernel runs (all 0 expected).
