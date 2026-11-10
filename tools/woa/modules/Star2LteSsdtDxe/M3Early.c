@@ -553,19 +553,23 @@ __asm__ (
   "  ldr   x9, [x19, #0x00]\n  bl 140f\n  ldr x9, [x19, #0x08]\n  bl 140f\n"
   "  b     21f\n"
   "132:\n"
-  "  cmp   w13, #85\n"
+  "  cmp   w13, #80\n"                    // v16: throttle at 80 C (was 85)
   "  b.lt  130f\n"
   "  ldr   x1, [x19, #0x18]\n"
   "  cbnz  x1, 130f\n"
   "  mov   x1, #1\n"
   "  str   x1, [x19, #0x18]\n"
+  "  ldr   w1, [x19, #0x14]\n"             // v16: throttle events (=M3H nN, saturates at 15)
+  "  cmp   w1, #15\n"
+  "  cinc  w1, w1, lo\n"
+  "  str   w1, [x19, #0x14]\n"
   "  mov   w0, #3\n"
   "  movz  w1, #0x4450\n"                // 1066000 kHz
   "  movk  w1, #0x10, lsl #16\n"
   "  bl    100f\n"
   "130:\n"
   // v15 temperature step governor (free run): steps 1794 / 2002 / 2314 MHz (+0x24 index), at most one change per
-  // 6 beats (3 s, +0x3C): up below 70 C, down above 80 C; after the 85 C throttle (state 1), back to 1794 below 70 C.
+  // 6 beats (3 s, +0x3C): up below 65 C, down above 75 C; after the 80 C throttle (state 1), back to 1794 below 65 C (v16).
   "  ldr   x1, [x19, #0x30]\n"
   "  cbz   x1, 139f\n"
   "  cmn   w13, #1000\n"
@@ -577,7 +581,7 @@ __asm__ (
   "  cbz   x1, 134f\n"
   "  cmp   x1, #1\n"
   "  b.ne  139f\n"
-  "  cmp   w13, #70\n"
+  "  cmp   w13, #65\n"                    // v16: back to 1794 MHz only below 65 C
   "  b.ge  139f\n"
   "  str   xzr, [x19, #0x18]\n"
   "  mov   w6, #0\n"
@@ -586,14 +590,14 @@ __asm__ (
   "  cmp   w5, #6\n"
   "  b.lo  139f\n"
   "  ldr   w6, [x19, #0x24]\n"
-  "  cmp   w13, #70\n"
+  "  cmp   w13, #65\n"                    // v16: up only below 65 C
   "  b.ge  135f\n"
   "  cmp   w6, #2\n"
   "  b.hs  139f\n"
   "  add   w6, w6, #1\n"
   "  b     136f\n"
   "135:\n"
-  "  cmp   w13, #80\n"
+  "  cmp   w13, #75\n"                    // v16: down above 75 C
   "  b.le  139f\n"
   "  cbz   w6, 139f\n"
   "  sub   w6, w6, #1\n"
@@ -960,6 +964,7 @@ __asm__ (
   "  ldr   x0, [x19, #0x18]\n  add x1, x9, #15\n  mov x2, #1\n  bl 30f\n"
   "  ldrb  w0, [x19, #0x28]\n  add x1, x9, #18\n  mov x2, #1\n  bl 30f\n"
   "  ldrb  w0, [x19, #0x24]\n  add x1, x9, #21\n  mov x2, #1\n  bl 30f\n"
+  "  ldrb  w0, [x19, #0x14]\n  add x1, x9, #24\n  mov x2, #1\n  bl 30f\n"
   "  dc    civac, x9\n"
   "  dsb   sy\n"
   "  mov   x30, x17\n"
@@ -1009,7 +1014,7 @@ STATIC UINTN                   mEWatch[2][4];      // [ring][field] first digit:
 STATIC CONST CHAR8             mEWatchTag[] = "=M3E watch beat ";
 STATIC CONST CHAR8             mEKTag[]     = "=M3K b0000 e00 gd0 @00 fbn00 @00 h00000000";
 STATIC CONST CHAR8             mEUTag[]     = "=M3U u00000000 it00000000 tc00000000";
-STATIC CONST CHAR8             mEHTag[]     = "=M3H t00 hi00 s0 c0 g0";
+STATIC CONST CHAR8             mEHTag[]     = "=M3H t00 hi00 s0 c0 g0 n0";
 STATIC CONST CHAR8             mETTag[]     = "=M3T o00000000 f00000000 s00 st00000000";
 STATIC CONST CHAR8             mEBTag[]     = "=M3B p20000000000000000 p30000000000000000 p40000000000000000";
 STATIC CONST CHAR8             mENTag[]     = "=M3N lb00000000 np00 ps00000000 bc00000000 p10000000000000000";

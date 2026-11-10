@@ -625,3 +625,18 @@ firmware with only Star2LteSsdtDxe swapped, outer FV grown as big3-1794).
 **ACPM ownership closed (01:3x):** sbwddm never used the DVFS queue (PMIC channel 2 only). The channel-0 writer was
 sbthermal's A55 governor; GPU session T34 (sbthermal db7ef111) stands it down on big-core boots (non-A55 CPU or a live
 arbiter). With T34 installed the guard is the only channel-0 writer on big-core boots.
+
+## 30. big3g result (01:22) and guard v16 (conservative governor): windows-big3h
+
+big3g: `=M3H t4B hi56 s0 c2 g2`: it reached 2314 MHz, the peak was 86 C and the final 75 C. `s` shows only the current
+state: a throttle at >= 85 C goes back to s0 after cooling below 70 C (by design), so the line couldn't tell whether
+it fired. The 0.5 s beat also let the temperature overshoot the 85 C threshold.
+
+**v16:** throttle at 80 C (to 1066 MHz), down-step above 75 C, up-step and throttle recovery only below 65 C, and a
+throttle-event counter `nN` on the line (`=M3H tTT hiHH sS cC gG nN`, saturating at F). The throttle already takes the
+hottest of all five M3 probes (TOP TMU 1, 2, 3, 4, 6) every beat. `windows-big3h.uefi` (7e14e11e...),
+SOLO `starbite-uefi-m3all3h.bin` (0b208195...).
+
+WER (big3-run1/wer): sbcpu-x64 on the M3 = fast-fail code 5 raised by xtajit64 at +0x36D6C (no guest address in the
+report); on the A55 before E1 it was c0000094 at +0x30C70 (the CNTFRQ divide). To see the guest instruction a minidump
+is needed (WER LocalDumps for sbcpu-x64.exe: a Windows configuration change, the user's call).
