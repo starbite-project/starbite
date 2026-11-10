@@ -18,6 +18,8 @@
        phase 2: the virtual timer's PPI 27 delivered to the M3 at EL1 (priority, enable, a 100 us timer);
        phase 3: CoreSight external debug of A55 core 0 read by the M3 (MMU off): IDs, EDPRSR, EDPCSR samples
                 before and after unlocking (EDLAR, OSLAR), to learn whether a hung core's PC can be sampled.
+     v2 (20:12): the IRQ arrived; every EDPCSR read aborted (EDPRSR.OSLK = 1), the external unlock took an SError.
+     v3: A55 0 clears its OWN OS lock (msr OSLAR_EL1, xzr) before phase 3; no external writes at all.
   2. ACPI snapshots at dispatch, ReadyToBoot, ExitBootServices before the inner (woa) hook, and after it: FADT
      ARM_BOOT_ARCH / flags / hash, MADT, GTDT, DSDT hashes, so the step that clears ARM_BOOT_ARCH is bracketed.
      After ExitBootServices: full hex dumps of the live FADT, MADT and GTDT, every DSDT _MAT GICC, and the A55's
@@ -299,16 +301,7 @@ __asm__ (
   "  LDG 72, x28, 0x0A8\n"              // EDVIDSR
   "  LDG 73, x28, 0x0A0\n"
   "  LDG 74, x28, 0x0A0\n"
-  "  DT 75\n"                           // software lock off, OS lock off (A55 0 only; it resets before Windows)
-  "  movz  w1, #0xCE55\n"
-  "  movk  w1, #0xC5AC, lsl #16\n"
-  "  str   w1, [x28, #0xFB0]\n"
-  "  dsb   sy\n"
-  "  str   wzr, [x28, #0x300]\n"
-  "  dsb   sy\n"
-  "  isb\n"
-  "  ldr   w0, [x28, #0xFB4]\n"
-  "  DE 75\n"
+  "  LDG 75, x28, 0x0A4\n"              // EDCIDSR (v3: no external unlock writes; v2's took an SError)
   "  LDG 76, x28, 0x314\n"
   "  LDG 77, x28, 0x0A0\n"
   "  LDG 78, x28, 0x0AC\n"
@@ -364,7 +357,7 @@ STATIC CONST CHAR8  *mTestName[N_TESTS + 1] = {
   "gicdPRI7", "giccCTLR","giccPMR", "giccHPPI","giccIIDR","SMCCCver","PSCIver", "WA1feat",
   "pri6w",    "en0w",    "IRQ",     "vctl",    "isr2",
   "csCIDR0",  "csCIDR1", "csPIDR0", "csARCH",  "csDEVID", "csLSR",   "csPRSR",  "csMIDR",
-  "csMPIDR",  "csPCSR",  "csPCSRhi","csVIDSR", "csPCSR",  "csPCSR",  "csUNLK",  "csPRSR",
+  "csMPIDR",  "csPCSR",  "csPCSRhi","csVIDSR", "csPCSR",  "csPCSR",  "csCIDSR", "csPRSR",
   "csPCSR",   "csPCSRhi","csPCSR",  "csPCSR"
 };
 
@@ -851,7 +844,7 @@ DiagM3 (
   UINTN             Ms;
 
   Ver = DiagSmc (0x84000000u, 0, 0) & 0xFFFFFFFFu;
-  SbLog ("=M3D v2 at dispatch: A55 PSCI_VERSION %lx (FFFFFFFF = no shim yet, CPU_ON goes to Samsung EL3)", Ver);
+  SbLog ("=M3D v3 at dispatch: A55 PSCI_VERSION %lx (FFFFFFFF = no shim yet, CPU_ON goes to Samsung EL3)", Ver);
   if (Ver != 0xFFFFFFFFu) {
     SbLog ("=M3D: the woa PSCI shim is already installed; no CPU_ON this boot (it would never reach our stub)");
     return;
@@ -920,6 +913,10 @@ DiagM3 (
     (UINT64)(UINTN)DiagWait,
     (UINT64)(UINTN)MicroSecondDelay
     );
+  __asm__ __volatile__ ("mrs %0, oslsr_el1" : "=r" (Rc));
+  __asm__ __volatile__ ("msr oslar_el1, xzr\n isb" ::: "memory");   // the CPU's own OS lock, as Linux and Windows clear it at boot
+  __asm__ __volatile__ ("mrs %0, oslsr_el1" : "=r" (Ver));
+  SbLog ("=M3D phase 3: A55 0 cleared its own OS lock: OSLSR %lx -> %lx", Rc, Ver);
   DiagGo (P, 2);
   Crumb = DiagWait (P, 0xFF, 200, &Ms);
   SbLog ("=M3D phase 3: crumb %lx after %d ms (FF = done; a number = that register access hung the M3)", Crumb, Ms);
@@ -1000,7 +997,7 @@ DiagEbsWrap (
   (VOID)G;
   DiagMatScan (DiagDsdt (F));
   SbLog ("=M3D (repeat, pmsg wraps) acpi%a", mDiagSnap0);
-  SbLog ("=M3D v2 done. Windows' kernel was NOT started. Resetting now (warm); if that fails the watchdog resets in ~2 min");
+  SbLog ("=M3D v3 done. Windows' kernel was NOT started. Resetting now (warm); if that fails the watchdog resets in ~2 min");
   gST->RuntimeServices->ResetSystem (EfiResetWarm, EFI_SUCCESS, 0, NULL);
   SbLog ("=M3D ResetSystem returned; waiting for the watchdog");
   for ( ; ;) {
@@ -1039,7 +1036,7 @@ M3DiagArm (
 {
   EFI_STATUS  Status;
 
-  SbLog ("=M3D v2 armed: log only; M3 core 2: instruction probe, timer IRQ, CoreSight of A55 0; reset after ExitBootServices");
+  SbLog ("=M3D v3 armed: log only; M3 core 2: instruction probe, timer IRQ, CoreSight PC samples of A55 0 (OS lock cleared by A55 0); reset after EBS");
   DiagAcpiSnap ("dispatch");
   DiagTableList ();
   DiagGicBases ();

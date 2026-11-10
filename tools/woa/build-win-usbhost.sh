@@ -159,7 +159,7 @@ flags_ok() {   # flags_ok FFS
     [ "$has" = "$((M3BOOT > 0))" ] || { echo "$1: M3 boot present=$has, wanted $M3BOOT" >&2; exit 1; }
     if [ "$M3BOOT" = 2 ]; then grep -aq "solo: M3 1 only" "$1" || { echo "$1: not the solo build" >&2; exit 1; }; fi
     if [ "$M3BOOT" = 3 ]; then grep -aq "big: M3 1 + parked M3s" "$1" && grep -aq "=C8 v1 big" "$1" || { echo "$1: not the big-core build" >&2; exit 1; }; fi
-    if grep -aq "=M3D v2 armed" "$1"; then has=1; else has=0; fi
+    if grep -aq "=M3D v3 armed" "$1"; then has=1; else has=0; fi
     [ "$has" = "$M3DIAG" ] || { echo "$1: M3 diag present=$has, wanted $M3DIAG" >&2; exit 1; }
     if grep -aq "=C8 v1" "$1"; then has=1; else has=0; fi
     [ "$has" = "$((CORES8 > 0))" ] || { echo "$1: cores8 present=$has, wanted $CORES8" >&2; exit 1; }

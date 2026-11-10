@@ -189,3 +189,27 @@ the hang's PC is the next lever, which m3diag2 prepares.
   A55 carries on and the image still resets).
 
 Run exactly as m3diag1 (row `win11-m3probe`, attended, reads from pmsg in TWRP or zone 0). Pass = `=M3D v2 done`.
+
+## 8. m3diag2 result (20:12, attended, PASSED) and m3diag3
+
+- **Timer interrupt on the M3: works.** INTID 27 got priority 0x80 and its banked enable bit (en0w 8007FFF). IAR
+  reads 0x1B after 2711 ticks (≈104 us for a 100 us timer), and the M3 got it at EL1 under EL3's defaults. Cause #4 out.
+- **The FADT/MADT writer is bracketed:** at our dispatch ARM_BOOT_ARCH = **1** (FADT hash 52CFD2E9, MADT AF2D3771),
+  and by ReadyToBoot it is **0** (E5D67277) with the MADT changed too (A105FFF5). The writer runs between
+  Star2LteSsdtDxe's dispatch and ReadyToBoot: the woa PSCI EL2 shim (it logs `acpi=1` after installing) or the
+  release BDS's "P" step. Both are woa's firmware, not Windows. The tables we hand Windows on the M3 path must be
+  written after it (at ReadyToBoot or EBS, as before), complete: MADT **and** DSDT `_MAT`.
+- **CoreSight:** 0x1E810000 is A55 0's ARMv8.0 debug block (CIDR 0D/90, EDDEVARCH 47708A15, MIDR 410FD051). EDPRSR
+  2AB / 2A1 = powered, **OS lock set**. In v8.0 the OS lock blocks EDPCSR, which matches every PCSR read giving a sync
+  external abort (96000610). The external EDLAR/OSLAR writes were refused with an SError (BE000000).
+- **m3diag3** (`starbite-uefi-m3diag3.bin`, sha256 `4843ffeb09f62fbf2730cbc9e93ebd59a68494eed38426f55921f4cbe149b9f0`):
+  as v2, but A55 0 clears **its own** OS lock (`msr OSLAR_EL1, xzr`, as Linux and Windows do at boot; OSLSR logged
+  before/after) before phase 3. No external debug writes at all. Test 75 reads EDCIDSR instead. Pass: csPCSR values
+  near the logged DiagWait / MicroSecondDelay addresses (or 0xFFFFFFFF = sampling prohibited by the SoC's
+  authentication signals). If it works, the hand-off image can have M3 core 2 (MMU off, outside Windows) sample M3
+  core 1's PC every few ms. M3 1 would clear its own OS lock in our hand-off code. That shows where Windows stops,
+  without touching Windows.
+
+Next (being built): the boot CPU moves to M3 1 **before winload** (at ReadyToBoot), and UEFI's GIC/timer banked
+state is replicated on it (INTID 27/30 priority and enable, GICC CTLR/PMR/BPR, CNTV/CNTP). UEFI and winload then
+run on the M3 up to ExitBootServices, and the image resets there (log-only). Then the real boot with corrected tables.
