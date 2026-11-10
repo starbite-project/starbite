@@ -86,7 +86,8 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
     float total = 0;
     for (int i = 0; i < n; i++) total += st[i].ms;
     total += 1500;     /* let everything settle */
-    FILE *f = fopen(out, "wb");
+    FILE *f = !strcmp(out, "-") ? stdout : fopen(out, "wb");
+    FILE *log = f == stdout ? stderr : stdout;
     tk_bmp h;
     tk_bmp_new(&h, TK_W / 2, TK_H / 2);
     const float dt = 1000.0f / 60;
@@ -123,7 +124,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         int mv = sh_tick(dt / 1000, t);
         int motion = mv || sh_moving();
         tk_comp_frame(c, motion, 0);
-        printf("F %d %.1f %s px %d comp %.2f present %.2f total %.2f\n", frame, t, c->last_half ? "half" : "full",
+        fprintf(log, "F %d %.1f %s px %d comp %.2f present %.2f total %.2f\n", frame, t, c->last_half ? "half" : "full",
                c->last_px, c->us_comp / 1000.0, c->us_present / 1000.0, c->last_us / 1000.0);
         if (half) {
             tk_bmp_down2(&h, &c->fb);
@@ -137,7 +138,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         if (t > total + 8000) break;
     }
     (void)rest_frames;
-    fclose(f);
+    if (f != stdout) fclose(f); else fflush(f);
     fprintf(stderr, "film: %d frames\n", frame);
     return 0;
 }

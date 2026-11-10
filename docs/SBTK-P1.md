@@ -87,17 +87,31 @@ what moved at full resolution.
 Per state with everything damaged (`sbtk-host … frames`): a motion frame of the swiping lock over the scaling
 home is 1.7 ms compose + 0.95 ms present; at rest 6.7 ms (full resolution, a scaled layer); the lock at rest 3.7 ms.
 
-**A55: not measured yet.** uibench (P0) gives each kernel's MB/s on the phone; `frametimes.py` divides the host's
-uibench kernels (`sbtk-host … bench`: blend 37 GB/s, 2x into RAM 29 GB/s on one M4 core) by the phone's and scales
-each frame's compose and present time by them, per uibench set (1 or 4 A55, 1053 or 1794 MHz). Until those numbers
-arrive, menu7's uncalibrated x12 to x33 (one A55 at ~1050 MHz) puts the swipe's motion frames at a mean of 16 to 44 ms
-on one core (p90 32 to 88), and at roughly a third of that with the rows split over four cores: 60 fps is within
-reach only on four cores at the good end of that range.
+**A55, from the phone's uibench (P0, 2026-11-10 22:10, `build/starbite-os/uibench-1/pmsg.txt`).** `frametimes.py`
+scales each frame's compose by host / A55 throughput of the half-resolution blend and its present by the host's 2x
+into RAM against the A55's 2x into the framebuffer. One A55 is x44 (compose) / x60 (present) one M4 core; four A55
+at 1053 MHz x11 / x15; four A55 at 1794 MHz x6.4 / x8.8. Motion frames (mean / p90 ms, share within 16.7 ms):
+
+| film | 1 A55, 1053 MHz | 4 A55, 1053 MHz | 4 A55, 1794 MHz |
+|---|---|---|---|
+| unlock | 63 / 124, 47 % | 16 / 31, 50 % | 9.3 / 18, 59 % |
+| group | 46 / 53, 1 % | 11.5 / 13.4, 96 % | 6.8 / 7.8, 98 % |
+| focus | 91 / 176, 27 % | 23 / 44, 55 % | 13.3 / 26, 55 % |
+| holds | 21 / 27, 41 % | 5.2 / 6.8, 96 % | 3.0 / 4.0, 100 % |
+
+The first frame at rest (full resolution, once per gesture): 13-44 ms on four A55 at 1794 MHz.
+
+So, on four A55 boosted to 1794 MHz while a finger is down: the Systems list and the holds hold 60 fps; the
+unlock and the focus sheet average under 16.7 ms but their heaviest frames (the whole panel moving: the wallpaper
+copy, the scaled home, the flattened lock with its glass; the scrim and the scaled card) reach 18-26 ms. What
+brings them in: skipping fully transparent spans and copying fully opaque ones instead of blending (a cached
+layer is mostly one or the other; the flattened lock is ~70 % transparent), and the scaled layers' bilinear only
+while they scale. The rest frame drawn in bands over the next idle frames, as menu7 does.
 
 Costs outside the frames (bake, all float C, host): wallpaper + glass backdrop ~100 ms, home ~100 ms, lock ~40 ms,
 the five vendor cards ~550 ms (glass bakes and local backdrops), opening the focus sheet ~220 ms (the scrim
-snapshot blur and the card). At x12-x33 that is 10-30 s at boot and 3-7 s per sheet on one A55: the P2 work list
-below starts there.
+snapshot blur and the card). Float bake code scales worse than the NEON kernels uibench measures (assume x40-x60 on
+one A55): 30-50 s at boot and ~10 s per sheet as it is. The P2 work list below starts there.
 
 ## P2 (the phone), in the order it matters
 1. Bake paths in NEON and at reduced resolution where blurred (shadow, glow, local backdrop, scrim), the bakes

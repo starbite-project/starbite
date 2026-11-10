@@ -35,9 +35,9 @@ film)
     name=$2
     script=$(grep "^$name:" "$here/films.txt" | cut -d: -f2-)
     mkdir -p "$out/films"
-    "$out/sbtk-host" "$out/sbtk.pak" film "$out/films/$name.bgra" "$script" half > "$out/films/$name.frames.txt"
-    swift "$here/encode.swift" "$out/films/$name.bgra" 720 1480 60 "$out/films/$name.mp4" 2>/dev/null
-    [ -n "${KEEP:-}" ] || rm -f "$out/films/$name.bgra"
+    # frames go straight into the encoder (half resolution): nothing raw is written to disk
+    swiftc -O -o "$out/sbtk-encode" "$here/encode.swift" 2>/dev/null || true
+    "$out/sbtk-host" "$out/sbtk.pak" film - "$script" half 2> "$out/films/$name.frames.txt" | "$out/sbtk-encode" - 720 1480 60 "$out/films/$name.mp4"
     "$out/sbtk-host" "$out/sbtk.pak" bench > "$out/hostbench.txt"
     if [ -n "${UIBENCH:-}" ]; then "$py" "$here/frametimes.py" "$out/films/$name.frames.txt" "$out/hostbench.txt" "$UIBENCH"
     else "$py" "$here/frametimes.py" "$out/films/$name.frames.txt"; fi ;;
