@@ -26,6 +26,7 @@
 #     display-only anyway), which restarts itself cleanly at ~120 s; waits for the menu; back to TWRP.
 #  6. Checks the hive is clean, pulls OUT/post/SYSTEM, then sets Unattended=0 (unless --keep-unattended).
 # T32 keys (any mode that installs): --keys 1|off [--sas 0|1]; test cycles also --keys-selftest N (docs/WIN11-GPU.md 6.40).
+# T32c (any mode that installs): --crashdump 0|3 (default 0, always written, with AutoReboot 1); --afbc 0|1 (sbumd AFBC).
 # --install-default STAGE OUT: the user's attended setup (no boot): full mode by default, the guard clears itself
 # after a boot with content on the panel, sbwdog only feeds. The phone ends in TWRP. Exit: 0 done; 1 usage or precondition (phone untouched or still in TWRP); 2 the phone
 # did not come back (it needs the user); 3 the hive is dirty (run --clean-only first); 4 an install read-back
@@ -46,13 +47,17 @@ esac
 out=${1:?usage: gpu-cycle.sh STAGE OUT [...]}; shift
 tkey=win11-gpu; ckey=win11-auto; keep=0
 full_sec=300
-while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --no-trace) notrace=1; shift;; --scan-flip) scan_flip=$2; shift 2;; --cached-blt) cached_blt=$2; shift 2;; --parallel-blt) par_blt=$2; shift 2;; --blt-no-drain) no_drain=$2; shift 2;; --keys) keys=$2; shift 2;; --keys-selftest) keys_selftest=$2; shift 2;; --sas) sas=$2; shift 2;; --full-sec) full_sec=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
+while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --no-trace) notrace=1; shift;; --scan-flip) scan_flip=$2; shift 2;; --cached-blt) cached_blt=$2; shift 2;; --parallel-blt) par_blt=$2; shift 2;; --blt-no-drain) no_drain=$2; shift 2;; --keys) keys=$2; shift 2;; --crashdump) crashdump=$2; shift 2;; --afbc) afbc=$2; shift 2;; --keys-selftest) keys_selftest=$2; shift 2;; --sas) sas=$2; shift 2;; --full-sec) full_sec=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
 case $full_sec in ''|*[!0-9]*) echo "--full-sec needs seconds"; exit 1;; esac
 # T32: sbkeys (Bixby held 3 s = clean restart; docs/WIN11-GPU.md 6.40). --keys 1 installs STAGE/sbkeys.sys as a
 # service (Start 2) with Enable=1; --keys off sets Enable=0; default: leave whatever is there. --keys-selftest N (test
 # cycles only): sbkeys "holds" Bixby itself from N s after it starts, so the test boot must end in ITS clean restart at
 # ~N+3 s, before sbwdog's. --sas 1: Volume Up + Power signals Global\StarbiteSasRequest (default 0).
 keys=${keys:-0}; keys_selftest=${keys_selftest:-0}; sas=${sas:-0}
+crashdump=${crashdump:-0}   # T32c: see install(); 3 = small dumps (only with a dump-capable disk driver)
+case $crashdump in 0|3) ;; *) echo "--crashdump 0|3"; exit 1;; esac
+afbc=${afbc:-}              # T32c: sbumd's AFBC switch (file C:\ProgramData\Starbite\noafbc): 0 off, 1 on; empty = leave
+case $afbc in ''|0|1) ;; *) echo "--afbc 0|1"; exit 1;; esac
 case $keys in 0|1|off) ;; *) echo "--keys 0|1|off"; exit 1;; esac
 case $keys_selftest in ''|*[!0-9]*) echo "--keys-selftest needs seconds"; exit 1;; esac
 case $sas in 0|1) ;; *) echo "--sas 0|1"; exit 1;; esac
@@ -207,8 +212,11 @@ install() {
     else cp "$tmp/SYSTEM" "$tmp/S1"; fi
     if python3 tools/woa/hive.py "$tmp/S1" 'ControlSet001\Services\sbwdog' 2>/dev/null | grep -q "Start"; then cp "$tmp/S1" "$tmp/S2"
     else python3 "$HS" "$tmp/S1" "$tmp/S2" add sbwdog --start 0 --oneshot 0 --image 'System32\drivers\sbwdog.sys' --display "Starbite watchdog feeder" >/dev/null; fi
-    # T17: small memory dumps on (the image had CrashDumpEnabled 0: T15's restart bugcheck left nothing to read)
-    python3 "$HS" "$tmp/S2" "$tmp/S2d" crashdump 3 >/dev/null && mv "$tmp/S2d" "$tmp/S2"
+    # T32c: crash dumps OFF by default and AutoReboot 1, written on every install (T17..T32b forced 3 and the image
+    # had AutoReboot 0). The UFS driver has no dump mode: with 3 a bugcheck sat on its blue screen trying to write the
+    # dump until the user forced a restart, and the next boot overwrote =UFSBUGCHECK. With 0 + AutoReboot 1 it resets
+    # at once to the loader, and the stop code is in TWRP's pmsg (grep -a =UFSBUGCHECK). --crashdump 3: opt in.
+    python3 "$HS" "$tmp/S2" "$tmp/S2d" crashdump "$crashdump" --autoreboot 1 >/dev/null && mv "$tmp/S2d" "$tmp/S2"
     python3 "$HS" "$tmp/S2" "$tmp/S3" param sbwdog Unattended="${unattended:-1}" FullRestartSec="$full_sec" FullCapSec=$((full_sec + 60)) DisplayRestartSec=120 DisplayCapSec=180 >/dev/null
     if [ "$keys" = 1 ]; then
         [ -f "$stage/sbkeys.sys" ] || { umount_w; log "--keys 1: $stage has no sbkeys.sys"; exit 1; }
@@ -229,6 +237,11 @@ install() {
         push_check "$stage/sbkeys.sys" "$W/Windows/System32/drivers/sbkeys.sys" || rc=4
         adb shell "rm -f $W/Windows/Starbite/sbkeys.off" >/dev/null
     fi
+    # T32c: sbumd's AFBC switch (sb-patches/0126 reads C:\ProgramData\Starbite\noafbc in every process)
+    case $afbc in
+    0) adb shell "mkdir -p $W/ProgramData/Starbite; echo on > $W/ProgramData/Starbite/noafbc" >/dev/null; log "AFBC off (noafbc)" ;;
+    1) adb shell "rm -f $W/ProgramData/Starbite/noafbc" >/dev/null; log "AFBC on (noafbc removed)" ;;
+    esac
     if [ "$1" = 1 ]; then
         push_check "$stage/sbwddm.sys" "$W/Windows/System32/drivers/sbwddm.sys" || rc=4
         [ -f "$stage/sbumd.dll" ] && { push_check "$stage/sbumd.dll" "$W/Windows/System32/sbumd.dll" || rc=4; }
@@ -237,7 +250,10 @@ install() {
         local trace="touch trace"
         [ "${guard_auto:-0}" = 1 ] && trace="rm -f trace"
         [ "${notrace:-0}" = 1 ] && trace="rm -f trace"   # T23: timing runs (sbdrag) without the per-call trace
-        adb shell "rm -f $W/Windows/Starbite/sbwddm.full.off $W/Windows/Temp/sbumd-*.log; mkdir -p $W/ProgramData/Starbite/umdlog; cd $W/ProgramData/Starbite/umdlog && for f in *; do [ \"\$f\" = trace ] || rm -f \"\$f\"; done; $trace" >/dev/null
+        # T32c: sbumd's shell-surface dumps (sb-patches/0126) only in test cycles, never in the user's boots
+        local dumpsw="touch dump"
+        [ "${guard_auto:-0}" = 1 ] && dumpsw="rm -f dump"
+        adb shell "rm -f $W/Windows/Starbite/sbwddm.full.off $W/Windows/Temp/sbumd-*.log; mkdir -p $W/ProgramData/Starbite/umdlog; cd $W/ProgramData/Starbite/umdlog && for f in *; do [ \"\$f\" = trace ] || rm -f \"\$f\"; done; $trace; $dumpsw" >/dev/null
         # STAGE/gputest/: render tests at logon in the test boot (starbite/win/autotest/sb-gputest.cmd, one-shot)
         if [ -d "$stage/gputest" ]; then
             adb shell "rm -rf $W/starbite/auto/gpu; mkdir -p $W/starbite/auto/gpu" >/dev/null

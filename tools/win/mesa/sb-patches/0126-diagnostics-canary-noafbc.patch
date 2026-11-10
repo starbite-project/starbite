@@ -1,0 +1,446 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index 5c3d2b1..57d97c5 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -1041,6 +1041,48 @@ malikm_stat(unsigned id)
+       InterlockedIncrement(&sb_stat[id]);
+ }
+ 
++/* sb-patches/0126 (docs/WIN11-GPU.md 6.42): file switches under C:\ProgramData\Starbite (every process sees them,
++ * DWM and the shell included, unlike environment variables), this process's image name, and the resource canary. */
++int
++malikm_switch(const char *name)
++{
++   char p[MAX_PATH];
++   snprintf(p, sizeof(p), "C:\\ProgramData\\Starbite\\%s", name);
++   return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
++}
++
++const char *
++malikm_exe(void)
++{
++   static char b[64];
++   if (!b[0]) {
++      char exe[MAX_PATH];
++      GetModuleFileNameA(NULL, exe, sizeof(exe));
++      const char *s = strrchr(exe, '\\');
++      snprintf(b, sizeof(b), "%s", s ? s + 1 : exe);
++   }
++   return b;
++}
++
++/* A panfrost_resource that a batch was about to read or write is not a live one (freed, or never one): logged with
++ * the caller's offset in this DLL (maps/sbumd.map names it) and skipped instead of dereferenced (T30's Explorer
++ * crash: pan_resource_afbcp_update +0xc on a freed resource). */
++void
++malikm_canary(const char *what, const void *rsrc, unsigned magic, const void *ret)
++{
++   static volatile LONG n;
++   LONG c = InterlockedIncrement(&n);
++   malikm_note_count(29);                 /* UmdNote_29: canary hits */
++   if (c <= 32 || (c & (c - 1)) == 0) {
++      HMODULE m = NULL;
++      GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                         (LPCSTR)(void *)malikm_canary, &m);
++      fprintf(stderr, "sbumd: CANARY %s: resource %p magic 0x%08x is not a live resource; called from rva 0x%llx; "
++              "skipped (hit %ld)\n", what, rsrc, magic, (unsigned long long)((uintptr_t)ret - (uintptr_t)m), c);
++      fflush(stderr);
++   }
++}
++
+ static __declspec(thread) HRESULT sb_alloc_hr;   /* T15: the runtime's answer to the last allocation */
+ 
+ static NTSTATUS
+diff --git a/src/gallium/drivers/panfrost/pan_job.c b/src/gallium/drivers/panfrost/pan_job.c
+index 3b0862f..47e71ae 100644
+--- a/src/gallium/drivers/panfrost/pan_job.c
++++ b/src/gallium/drivers/panfrost/pan_job.c
+@@ -365,6 +365,13 @@ panfrost_batch_read_rsrc(struct panfrost_batch *batch,
+ {
+    uint32_t access = PAN_BO_ACCESS_READ | panfrost_access_for_stage(stage);
+ 
++#ifdef _WIN32
++   if (rsrc->sb_magic != SB_RSRC_LIVE) {   /* sb-patches/0126 */
++      void malikm_canary(const char *what, const void *rsrc, unsigned magic, const void *ret);
++      malikm_canary(__func__, rsrc, rsrc->sb_magic, __builtin_return_address(0));
++      return;
++   }
++#endif
+    pan_resource_update_access(batch->ctx, rsrc, false);
+ 
+    panfrost_batch_add_bo_old(batch, rsrc->bo, access);
+@@ -384,6 +391,13 @@ panfrost_batch_write_rsrc(struct panfrost_batch *batch,
+ {
+    uint32_t access = PAN_BO_ACCESS_WRITE | panfrost_access_for_stage(stage);
+ 
++#ifdef _WIN32
++   if (rsrc->sb_magic != SB_RSRC_LIVE) {   /* sb-patches/0126 */
++      void malikm_canary(const char *what, const void *rsrc, unsigned magic, const void *ret);
++      malikm_canary(__func__, rsrc, rsrc->sb_magic, __builtin_return_address(0));
++      return;
++   }
++#endif
+    pan_resource_update_access(batch->ctx, rsrc, true);
+ 
+    panfrost_batch_add_bo_old(batch, rsrc->bo, access);
+diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
+index 5c8f79e..e6365c2 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -277,6 +277,7 @@ panfrost_resource_destroy(struct pipe_screen *screen, struct pipe_resource *pt)
+    free(rsrc->damage.tile_map.data);
+ 
+    util_range_destroy(&rsrc->valid_buffer_range);
++   rsrc->sb_magic = SB_RSRC_DEAD;          /* sb-patches/0126 */
+    free(rsrc);
+ }
+ 
+@@ -374,6 +375,7 @@ panfrost_resource_from_handle(struct pipe_screen *pscreen,
+    rsc = CALLOC_STRUCT(panfrost_resource);
+    if (!rsc)
+       return NULL;
++   rsc->sb_magic = SB_RSRC_LIVE;           /* sb-patches/0126 */
+ 
+    prsc = &rsc->base;
+ 
+@@ -1087,6 +1089,7 @@ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
+ 
+    if (!so)
+       return NULL;
++   so->sb_magic = SB_RSRC_LIVE;            /* sb-patches/0126 */
+ 
+    so->base = *template;
+    so->base.screen = screen;
+diff --git a/src/gallium/drivers/panfrost/pan_resource.h b/src/gallium/drivers/panfrost/pan_resource.h
+index bfd3343..2d9fb81 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.h
++++ b/src/gallium/drivers/panfrost/pan_resource.h
+@@ -103,8 +103,14 @@ struct panfrost_resource {
+ 
+    /* AFBC-P state */
+    struct pan_afbcp *afbcp;
++
++   /* Starbite (sb-patches/0126): SB_RSRC_LIVE from creation until destroy, then SB_RSRC_DEAD */
++   uint32_t sb_magic;
+ };
+ 
++#define SB_RSRC_LIVE 0x53425253u    /* "SRBS" */
++#define SB_RSRC_DEAD 0xdeadb5b5u
++
+ static inline struct panfrost_resource *
+ pan_resource(struct pipe_resource *p)
+ {
+diff --git a/src/gallium/drivers/panfrost/pan_screen.c b/src/gallium/drivers/panfrost/pan_screen.c
+index 23659ae..661f34d 100644
+--- a/src/gallium/drivers/panfrost/pan_screen.c
++++ b/src/gallium/drivers/panfrost/pan_screen.c
+@@ -1034,6 +1034,15 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
+       return NULL;
+    }
+ 
++#ifdef _WIN32
++   {  /* sb-patches/0126: C:\ProgramData\Starbite\noafbc = PAN_MESA_DEBUG=noafbc for every process (the AFBC A/B) */
++      int malikm_switch(const char *name);
++      if (malikm_switch("noafbc")) {
++         dev->debug |= PAN_DBG_NO_AFBC;
++         fprintf(stderr, "sbumd: AFBC off (C:\\ProgramData\\Starbite\\noafbc)\n");
++      }
++   }
++#endif
+    if (dev->debug & PAN_DBG_NO_AFBC)
+       dev->has_afbc = false;
+ 
+diff --git a/src/gallium/frontends/d3d10umd/Adapter.cpp b/src/gallium/frontends/d3d10umd/Adapter.cpp
+index 3259249..4ec9c94 100644
+--- a/src/gallium/frontends/d3d10umd/Adapter.cpp
++++ b/src/gallium/frontends/d3d10umd/Adapter.cpp
+@@ -125,10 +125,8 @@ OpenAdapter10(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
+ #endif
+       break;
+    default:
+-      if (0) {
+-         DebugPrintf("%s: unsupported interface version 0x%08x\n",
+-                     __func__, pOpenData->Interface);
+-      }
++      DebugPrintf("sbumd: %s: unsupported interface 0x%08x version 0x%08x (refused)\n",
++                  __func__, pOpenData->Interface, pOpenData->Version);
+       return E_FAIL;
+    }
+ 
+@@ -171,6 +169,8 @@ GetSupportedVersions(D3D10DDI_HADAPTER hAdapter,
+ {
+    LOG_ENTRYPOINT();
+ 
++   DebugPrintf("sbumd: GetSupportedVersions (%u entries offered, %s)\n",
++               (unsigned)ARRAYSIZE(SupportedDDIInterfaceVersions), pSupportedDDIInterfaceVersions ? "list" : "count");
+    if (pSupportedDDIInterfaceVersions &&
+        *puEntries < ARRAYSIZE(SupportedDDIInterfaceVersions)) {
+       return E_OUTOFMEMORY;
+@@ -203,6 +203,8 @@ GetCaps(D3D10DDI_HADAPTER hAdapter,
+         const D3D10_2DDIARG_GETCAPS *pData)
+ {
+    LOG_ENTRYPOINT();
++   /* sb-patches/0126: which caps the runtime asks for (all answered zero, as before) */
++   DebugPrintf("sbumd: GetCaps type %u size %u (answered zeros)\n", (unsigned)pData->Type, (unsigned)pData->DataSize);
+    memset(pData->pData, 0, pData->DataSize);
+    return S_OK;
+ }
+@@ -225,6 +227,7 @@ OpenAdapter10_2(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
+ {
+    LOG_ENTRYPOINT();
+ 
++   DebugPrintf("sbumd: OpenAdapter10_2 interface 0x%08x version 0x%08x\n", pOpenData->Interface, pOpenData->Version);
+    HRESULT hr = OpenAdapterCommon(pOpenData);
+ 
+    if (SUCCEEDED(hr)) {
+diff --git a/src/gallium/frontends/d3d10umd/Debug.cpp b/src/gallium/frontends/d3d10umd/Debug.cpp
+index 296ca5a..6ad35ee 100644
+--- a/src/gallium/frontends/d3d10umd/Debug.cpp
++++ b/src/gallium/frontends/d3d10umd/Debug.cpp
+@@ -34,6 +34,16 @@ sb_dump_on(void)
+    return on;
+ }
+ 
++/* sb-patches/0126: SetError's log, the first 64 and then every power of two of each process */
++void
++SbLogSetError(long hr, const char *fn)
++{
++   static volatile long n;
++   long c = InterlockedIncrement(&n);
++   if (c <= 64 || (c & (c - 1)) == 0)
++      DebugPrintf("sbumd: SetError 0x%08lx in %s (#%ld)\n", (unsigned long)hr, fn, c);
++}
++
+ void
+ DebugPrintf(const char *format, ...)
+ {
+diff --git a/src/gallium/frontends/d3d10umd/Debug.h b/src/gallium/frontends/d3d10umd/Debug.h
+index 1cf5d03..878c0ed 100644
+--- a/src/gallium/frontends/d3d10umd/Debug.h
++++ b/src/gallium/frontends/d3d10umd/Debug.h
+@@ -66,6 +66,9 @@ AssertFail(const char *expr, const char *file, unsigned line, const char *functi
+ 
+ #define LOG_UNSUPPORTED_ENTRYPOINT() DebugPrintf("%s XXX\n", __func__)
+ 
++/* sb-patches/0126 */
++void SbLogSetError(long hr, const char *fn);
++
+ #define LOG_UNSUPPORTED(expr) \
+    do { if (expr) DebugPrintf("%s:%d XXX %s\n", __func__, __LINE__, #expr); } while(0)
+ 
+diff --git a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+index 3265e6c..50958ad 100644
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -119,6 +119,8 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
+       DebugPrintf("pUMCallbacks = %p\n", pCreateData->pUMCallbacks);
+    }
+ 
++   DebugPrintf("sbumd: CreateDevice interface 0x%08x version 0x%08x flags 0x%x\n", pCreateData->Interface,
++               pCreateData->Version, (unsigned)pCreateData->Flags);
+    switch (pCreateData->Interface) {
+    case D3D10_0_DDI_INTERFACE_VERSION:
+    case D3D10_0_x_DDI_INTERFACE_VERSION:
+@@ -508,10 +510,26 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
+    *pFormatCaps = 0;
+ 
+    enum pipe_format format = FormatTranslate(Format, false);
++   /* sb-patches/0126: each DXGI format's answer, once per process */
++   static unsigned char sbSeen[256];
++   bool sbLog = (unsigned)Format < 256 && !sbSeen[(unsigned)Format];
++   if (sbLog)
++      sbSeen[(unsigned)Format] = 1;
+    if (format == PIPE_FORMAT_NONE) {
+       *pFormatCaps = D3D10_DDI_FORMAT_SUPPORT_NOT_SUPPORTED;
++      if (sbLog)
++         DebugPrintf("sbumd: CheckFormatSupport %s (%u): no pipe format: NOT SUPPORTED\n", FormatToName(Format),
++                     (unsigned)Format);
+       return;
+    }
++   struct SbCapsLog {
++      UINT *caps; DXGI_FORMAT f; enum pipe_format p; bool on;
++      ~SbCapsLog() {
++         if (on)
++            DebugPrintf("sbumd: CheckFormatSupport %s (%u) -> %s: caps 0x%x%s\n", FormatToName(f), (unsigned)f,
++                        util_format_name(p), *caps, *caps ? "" : " (none)");
++      }
++   } sbCapsLog = { pFormatCaps, Format, format, sbLog };
+ 
+    if (Format == DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM) {
+       /*
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index dd85dda..c47e2d4 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -156,40 +156,123 @@ sb_sample_present(struct pipe_context *pipe, Resource *res, unsigned alloc, unsi
+    }
+    if (n > 24 && (!sample_all || n % 64))
+       return;
++   /* sb-patches/0126 (docs/WIN11-GPU.md 6.42): the whole surface, GPU-copied to staging and read on a grid
++    * (every 2nd column, every 4th row): the 32-sample middle row as before, plus the bounding box of non-zero
++    * pixels, an alpha histogram, and how many pixels have a colour channel above their alpha (not valid
++    * premultiplied). The shell's own windows (TextInputHost, Explorer, SystemSettings, StartMenuExperienceHost,
++    * ShellExperienceHost, SearchHost) also dump presents #2, #8 and #20 at half size to umdlog\ (.ppm + alpha .pgm). */
+    struct pipe_resource t;
+    memset(&t, 0, sizeof t);
+    t.target = PIPE_TEXTURE_2D;
+    t.format = src->format;
+    t.width0 = src->width0;
+-   t.height0 = 1;
++   t.height0 = src->height0;
+    t.depth0 = 1;
+    t.array_size = 1;
+    t.usage = PIPE_USAGE_STAGING;
+    struct pipe_resource *st = pipe->screen->resource_create(pipe->screen, &t);
+-   if (!st)
++   if (!st) {
++      DebugPrintf("sbumd: present #%u alloc 0x%x %ux%u: no staging for the sample\n", n, alloc, src->width0,
++                  src->height0);
+       return;
++   }
+    struct pipe_box box;
+-   u_box_2d(0, src->height0 / 2, src->width0, 1, &box);
++   u_box_2d(0, 0, src->width0, src->height0, &box);
+    pipe->resource_copy_region(pipe, st, 0, 0, 0, 0, src, 0, &box);
+    struct pipe_transfer *tr = NULL;
+-   struct pipe_box all;
+-   u_box_2d(0, 0, src->width0, 1, &all);
+-   const uint32_t *px = (const uint32_t *)pipe->texture_map(pipe, st, 0, PIPE_MAP_READ, &all, &tr);
+-   if (px) {
++   const uint8_t *map = (const uint8_t *)pipe->texture_map(pipe, st, 0, PIPE_MAP_READ, &box, &tr);
++   if (map) {
++      const unsigned W = src->width0, H = src->height0, stride = tr->stride;
++      const uint32_t *mid = (const uint32_t *)(map + (size_t)(H / 2) * stride);
+       unsigned nonblack = 0;
+-      uint32_t s[32];
++      uint32_t sm[32];
+       for (unsigned i = 0; i < 32; i++) {
+-         s[i] = px[(src->width0 * (2 * i + 1)) / 64];
+-         if (s[i] & 0x00ffffffu)
++         sm[i] = mid[(W * (2 * i + 1)) / 64];
++         if (sm[i] & 0x00ffffffu)
+             nonblack++;
+       }
+-      uint32_t centre = px[src->width0 / 2];
+-      pipe->texture_unmap(pipe, tr);
++      uint32_t centre = mid[W / 2];
++      const bool bgra = src->format == PIPE_FORMAT_B8G8R8A8_UNORM || src->format == PIPE_FORMAT_B8G8R8X8_UNORM ||
++                        src->format == PIPE_FORMAT_B8G8R8A8_SRGB || src->format == PIPE_FORMAT_B8G8R8X8_SRGB;
++      const bool alpha = util_format_has_alpha(src->format);
++      unsigned minx = W, miny = H, maxx = 0, maxy = 0, nz = 0, total = 0, over = 0, ahist[4] = {0, 0, 0, 0};
++      for (unsigned y = 0; y < H; y += 4) {
++         const uint32_t *row = (const uint32_t *)(map + (size_t)y * stride);
++         for (unsigned x = 0; x < W; x += 2) {
++            uint32_t v = row[x];
++            unsigned a = v >> 24, c0 = v & 0xff, c1 = (v >> 8) & 0xff, c2 = (v >> 16) & 0xff;
++            total++;
++            ahist[a == 0 ? 0 : a < 128 ? 1 : a < 255 ? 2 : 3]++;
++            if (alpha && (c0 > a || c1 > a || c2 > a))
++               over++;
++            if (v) {
++               nz++;
++               if (x < minx) minx = x;
++               if (y < miny) miny = y;
++               if (x > maxx) maxx = x;
++               if (y > maxy) maxy = y;
++            }
++         }
++      }
+       malikm_note(20, centre);
+       malikm_note_count(nonblack ? 21 : 22);
+       DebugPrintf("sbumd: present #%u alloc 0x%x %ux%u fmt %u flags 0x%x: centre 0x%08x, %u/32 non-black: "
+-                  "%08x %08x %08x %08x %08x %08x %08x %08x\n", n, alloc, src->width0, src->height0, src->format,
+-                  flags, centre, nonblack, s[0], s[4], s[8], s[12], s[16], s[20], s[24], s[28]);
++                  "%08x %08x %08x %08x %08x %08x %08x %08x\n", n, alloc, W, H, src->format,
++                  flags, centre, nonblack, sm[0], sm[4], sm[8], sm[12], sm[16], sm[20], sm[24], sm[28]);
++      if (nz)
++         DebugPrintf("sbumd:   surface: %u/%u grid px non-zero, bbox %u,%u-%u,%u; alpha 0:%u 1-127:%u 128-254:%u "
++                     "255:%u; colour>alpha %u%s\n", nz, total, minx, miny, maxx, maxy, ahist[0], ahist[1], ahist[2],
++                     ahist[3], over, alpha ? "" : " (no alpha channel)");
++      else
++         DebugPrintf("sbumd:   surface: all %u grid px zero (fully transparent black)\n", total);
++      static int shell = -1;
++      static unsigned dumps;
++      if (shell < 0) {
++         /* only with umdlog\dump present (test cycles): up to 12 MB per process would pile up in the user boots */
++         const char *e = malikm_exe();
++         shell = malikm_switch("umdlog\\dump") &&
++                 (!_stricmp(e, "TextInputHost.exe") || !_stricmp(e, "explorer.exe") ||
++                  !_stricmp(e, "SystemSettings.exe") || !_stricmp(e, "StartMenuExperienceHost.exe") ||
++                  !_stricmp(e, "ShellExperienceHost.exe") || !_stricmp(e, "SearchHost.exe"));
++      }
++      if (shell && dumps < 3 && (n == 2 || n == 8 || n == 20)) {
++         char path[MAX_PATH];
++         dumps++;
++         const unsigned w2 = W / 2, h2 = H / 2;
++         snprintf(path, sizeof path, "C:\\ProgramData\\Starbite\\umdlog\\dump-%s-%lu-p%u-%ux%u.ppm", malikm_exe(),
++                  GetCurrentProcessId(), n, W, H);
++         FILE *f = fopen(path, "wb");
++         snprintf(path + strlen(path) - 4, 5, ".pgm");
++         FILE *fa = fopen(path, "wb");
++         if (f && fa) {
++            fprintf(f, "P6\n%u %u\n255\n", w2, h2);
++            fprintf(fa, "P5\n%u %u\n255\n", w2, h2);
++            uint8_t *line = (uint8_t *)malloc((size_t)w2 * 4);
++            for (unsigned y = 0; line && y < h2; y++) {
++               const uint32_t *row = (const uint32_t *)(map + (size_t)(2 * y) * stride);
++               for (unsigned x = 0; x < w2; x++) {
++                  uint32_t v = row[2 * x];
++                  uint8_t r = bgra ? (v >> 16) & 0xff : v & 0xff, b = bgra ? v & 0xff : (v >> 16) & 0xff;
++                  line[3 * x] = r;
++                  line[3 * x + 1] = (v >> 8) & 0xff;
++                  line[3 * x + 2] = b;
++                  line[3 * w2 + x] = v >> 24;
++               }
++               fwrite(line, 1, (size_t)w2 * 3, f);
++               fwrite(line + 3 * w2, 1, w2, fa);
++            }
++            free(line);
++            DebugPrintf("sbumd:   dumped present #%u to %s (+.ppm)\n", n, path);
++         }
++         if (f)
++            fclose(f);
++         if (fa)
++            fclose(fa);
++      }
++      pipe->texture_unmap(pipe, tr);
++   } else {
++      DebugPrintf("sbumd: present #%u alloc 0x%x %ux%u: the sample could not be mapped\n", n, alloc, src->width0,
++                  src->height0);
+    }
+    pipe_resource_reference(&st, NULL);
+    /* sb-patches/0109: what was drawn since the last logged present */
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index 48599b1..f37ab87 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -176,14 +176,18 @@ CastPipeDevice(DXGI_DDI_HDEVICE hDevice)
+ }
+ 
+ 
++extern "C" void SbLogSetError(long hr, const char *fn);
++/* sb-patches/0126: every failed HRESULT handed to the runtime is logged with the function that set it */
+ static inline void
+-SetError(D3D10DDI_HDEVICE hDevice, HRESULT hr)
++SetErrorAt(D3D10DDI_HDEVICE hDevice, HRESULT hr, const char *fn)
+ {
+    if (FAILED(hr)) {
++      SbLogSetError(hr, fn);
+       Device *pDevice = CastDevice(hDevice);
+       pDevice->UMCallbacks.pfnSetErrorCb(pDevice->hRTCoreLayer, hr);
+    }
+ }
++#define SetError(hDevice, hr) SetErrorAt((hDevice), (hr), __func__)
+ 
+ 
+ struct Resource
+@@ -215,6 +219,9 @@ int malikm_present_allocs(unsigned src, unsigned dst, void *dxgi_context);
+ int malikm_set_display_mode(unsigned hPrimaryAllocation);
+ void malikm_note(unsigned id, unsigned value);
+ void malikm_note_count(unsigned id);
++const char *malikm_exe(void);   /* sb-patches/0126: this process image name */
++int malikm_switch(const char *name);   /* sb-patches/0126: C:\ProgramData\Starbite\<name> exists */
++void SbLogSetError(long hr, const char *fn);   /* sb-patches/0126: Debug.cpp */
+ /* sb-patches/0112: in the Panfrost build (pan_resource.c); the softpipe build gets sb_rotate_bos_none */
+ bool panfrost_sb_rotate_bos(struct pipe_context *pctx, struct pipe_resource **res, unsigned n);
+ /* sb-patches/0122: per-process event counters, printed and reset with the shim's 10 s stats line */

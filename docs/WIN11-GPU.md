@@ -327,8 +327,11 @@ buffer's GPU address when it creates it, and WDDM 1.x lets the driver keep its o
   (allocation VA, command format) instead of maliwddm's.
 - Shaders: d3d10umd translates DXBC to TGSI, Panfrost converts TGSI to NIR (`tgsi_to_nir`) and compiles
   Bifrost **[unverified for 26.2's Panfrost; wddm-mali-g52 M4 shows it works on v7]**.
-- Feature level: d3d10umd implements the D3D10 and D3D10.1 DDIs only; the D3D11 runtime creates a device at
-  feature level 10_0 on it **[claim, wddm-mali-g52 CI]**.
+- Feature level: as built, sbumd offers **only the D3D10.0 DDI**. In `State.h`, `SUPPORT_D3D10_1` is 0 and so is
+  `SUPPORT_D3D11`, so `GetSupportedVersions` lists the three 10_0 interfaces only. `GetCaps` answers every
+  query with zeros, and only the DXGI 1.0 base table is filled. The D3D11 runtime therefore creates devices at
+  feature level 10_0 at most (checked 2026-11-10 against the source; the 10_1 code paths exist behind the switch).
+  T32c logs every OpenAdapter/CreateDevice interface and every GetCaps type the runtime asks for (§6.42).
 - Build: in the lima VM `starbite` or on iCloud overflow (never the Mac SSD): meson cross build for
   `aarch64-pc-windows-msvc` with clang-cl, lld-link and the SDK/WDK headers from `tools/win/`. wddm-mali-g52
   built on GitHub's Windows runners; we cannot push, so the cross build is ours to make work **[unverified]**.
@@ -1602,6 +1605,91 @@ device reset, but no longer an access violation.
 
 **Stage:** `build/win/stage/sbwddm-t32b` = T32 + sbumd c878ede4 + `maps/sbumd.map`. From now on every stage keeps a
 sbumd map.
+
+### 6.42 T32c: bluescreens that leave a trace, a diagnostic sbumd, the AFBC A/B (2026-11-10 evening)
+
+**What the user saw on T30** (evidence `build/user-1110-evening/`): much smoother, but:
+- the touch keyboard half-rendered and transparent;
+- File Explorer not rendering;
+- frequent bluescreens.
+
+**What the research pass found:**
+- The TextInputHost presents are drawn but fully transparent (0/32 non-black): empty, not a crash.
+- The only new crash is Explorer at sbumd +0x7e67c = `pan_resource_afbcp_update` +0xc. AFBC-P is off by default
+  (`pan_force_afbc_packing` false, so `afbcp` stays NULL); a non-NULL `afbcp` there means a freed
+  `panfrost_resource` was still reachable from a batch.
+- The bluescreens left nothing to read, because every install since T17 forced CrashControl `CrashDumpEnabled 3`
+  and the image has `AutoReboot 0`:
+  - the bugcheck tried to write a dump through our UFS driver, which has no dump mode;
+  - it never rebooted, so the user forced a restart;
+  - the next Windows boot overwrote the pmsg ring holding `=UFSBUGCHECK`.
+
+**T32c:**
+1. **BSOD capture:** `gpu-cycle.sh` writes `CrashDumpEnabled 0` + `AutoReboot 1` on every install
+   (`hive-service.py crashdump 0 --autoreboot 1`); `--crashdump 3` opts in.
+   - A bugcheck now resets at once. The UFS driver's existing callback leaves `=UFSBUGCHECK BC= B1..B4` in pmsg,
+     inside the area the loader snapshots at each boot.
+   - No second record from sbwdog: nothing would read it.
+   - **Follow-up (the loader's owner):** `shim/starlte/crash.c` could copy that line into the store crash log's
+     reason for uefi launches, so it survives a Windows boot before TWRP.
+2. **sb-patches/0126**, diagnostics only:
+   - SetError with its function;
+   - OpenAdapter10_2 / CreateDevice interface and version;
+   - every GetCaps type;
+   - each format's CheckFormatSupport answer;
+   - whole-surface present stats: bbox, alpha histogram, colour > alpha;
+   - present dumps of the shell's windows (only while `umdlog\dump` exists: test cycles);
+   - the resource canary: a magic in `panfrost_resource`, checked in `panfrost_batch_read_rsrc` and `write_rsrc`;
+     a dead resource is logged with the caller's RVA (`maps/sbumd.map`) and skipped.
+
+   The gputest opens Explorer, Settings and TabTip at its end.
+3. **AFBC A/B:** `C:\ProgramData\Starbite\noafbc` (`gpu-cycle.sh --afbc 0|1`) sets Panfrost's `noafbc` in every
+   process. Two cycles with identical flags give the A/B.
+
+Stage `build/win/stage/sbwddm-t32c` = T32b + sbumd 34e75e5d. INSTALL.md has the runs and the install.
+
+**Next, by what 2 shows:** `SUPPORT_D3D10_1` = 1 (FL 10_1: what the shell asks for, per the logged
+interfaces/GetCaps), and whatever SetError/CheckFormatSupport show the shell is refused.
+
+### 6.43 Phase 1 plan: a kernel driver that fails like a real one (multi-week; not started)
+
+T32c is diagnostics. "Proper" means faults stay inside the process that caused them and Windows' own recovery (TDR)
+works. Today:
+- **Faults:** a faulting job resets the GPU, drops the rest of its submission and still reports
+  DMA_COMPLETED (`command.c`, the JobsFailed path). The process never learns its work failed; DWM keeps
+  compositing garbage or empty surfaces.
+- **One address space:** every process's allocations live in one GPU address space (AS0, one page table,
+  `maligpu.c`). A bad pointer in one app can read or overwrite another's surfaces; a fault stops everyone's work.
+- **TDR:** `RestartFromTimeout` is a no-op, and `ResetFromTimeout` resets the GPU but keeps no per-context state.
+- **Never run under Driver Verifier.**
+
+Steps, each with its own unattended cycle:
+1. **Report faults as faults.** On a job or MMU fault, notify `DXGK_INTERRUPT_DMA_FAULTED` with the faulting fence,
+   the node and the page-fault details. Then dxgkrnl marks the context, and the device, as guilty and removed: the
+   app gets DEVICE_REMOVED and recreates its device, and DWM recovers instead of drawing nothing. Verify with a
+   deliberate bad-VA job (sbtest) and check that only that process loses its device.
+2. **Real TDR.** `ResetFromTimeout`: stop all job slots, flush and reset the MMU, reset the GPU.
+   `RestartFromTimeout`: re-init the address spaces and the queue state, with fences resynchronised to dxgkrnl's
+   last completed value. `QueryDependentEngineGroup`/`QueryEngineStatus` if dxgkrnl wants them (WDDM 1.3).
+   Test: a job that never ends, then `TdrDelay` → recovery without a bluescreen.
+3. **Per-process address spaces.**
+   - The G72 has 8 address spaces (AsPresent 0xff).
+   - Give each WDDM device its own page table and bind an AS at submit (LRU over the 8, as the Linux panfrost
+     driver does).
+   - Allocations get mapped into each device's table on use (residency list). Shared and primary allocations get
+     mapped into every device that opens them.
+   - This is the biggest change: sbwddm's single `GpuVa` per allocation becomes one per device; the shim already
+     asks the VA per allocation (MW_ESCAPE_ALLOC_INFO).
+4. **Driver Verifier.**
+   - Run `verifier /standard /driver sbwddm.sys` plus special pool and IRQL checking, in a test cycle with the
+     gputest. It needs a bugcheck record that survives: T32c's capture.
+   - Then low-resources simulation, for the allocation-failure paths fixed in 0125.
+5. **Hardening in step:**
+   - check every escape and private-data size against the caller's buffer;
+   - validate job chains' VAs against the submitting device's table (after 3, the MMU does this).
+
+Exit criterion: a week of the user's normal use (Steam, Explorer, Settings, the keyboard) without a bluescreen.
+Every app failure must be a removed device that the app or DWM recovers from.
 
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 

@@ -49,4 +49,13 @@ echo sbfps hw exit %errorlevel% >> gputest.log
 rem the SV_VertexID variant last: on the Mali it crashed (T13m: Panfrost has no load_vertex_id_zero_base)
 sbtex.exe hw sbtex-hw-vertexid.log vertexid >> gputest.log 2>&1
 echo sbtex hw vertexid exit %errorlevel% >> gputest.log
+rem T32c: the shell surfaces the user saw fail (File Explorer, Settings, the touch keyboard), so sbumd's present
+rem sampling and dumps (umdlog\dump-*.ppm/.pgm, sb-patches/0126) see them; they stay open until the restart
+start "" explorer.exe C:\
+ping -n 11 127.0.0.1 > nul
+start "" ms-settings:display
+ping -n 11 127.0.0.1 > nul
+start "" "C:\Program Files\Common Files\microsoft shared\ink\TabTip.exe"
+ping -n 11 127.0.0.1 > nul
+echo shell surfaces opened %time% >> gputest.log
 echo sb-gputest end %date% %time% >> gputest.log

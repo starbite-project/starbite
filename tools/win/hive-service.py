@@ -5,7 +5,8 @@
   hive-service.py IN OUT disable NAME          Start = 4 (the service is skipped at boot; files stay)
   hive-service.py IN OUT remove NAME           delete the service key
   hive-service.py IN OUT hiberboot 0|1         Control\\Session Manager\\Power\\HiberbootEnabled (fast startup)
-  hive-service.py IN OUT crashdump 0|3         Control\\CrashControl\\CrashDumpEnabled: 3 = small memory dumps into
+  hive-service.py IN OUT crashdump 0|3 [--autoreboot 0|1]
+                                               Control\\CrashControl\\CrashDumpEnabled: 3 = small memory dumps into
                                                %SystemRoot%\\Minidump (the S9's Windows had 0: the T15 restart
                                                bugcheck left no dump); tools/win/kdump.py reads them
   hive-service.py IN OUT param NAME [--root] VALUE=N [VALUE=N ...]
@@ -235,7 +236,12 @@ def main(a):
         if arg not in ('0', '3'):
             raise SystemExit('crashdump 0|3')
         key = f'{cs}\\Control\\CrashControl'
-        hivexsh(work, setvals(h, key, {'CrashDumpEnabled': dword(int(arg))}) + 'commit\n')
+        vals = {'CrashDumpEnabled': dword(int(arg))}
+        if '--autoreboot' in opts:             # T32c: 1 = a bugcheck resets at once (no screen left waiting)
+            if opts['--autoreboot'] not in ('0', '1'):
+                raise SystemExit('--autoreboot 0|1')
+            vals['AutoReboot'] = dword(int(opts['--autoreboot']))
+        hivexsh(work, setvals(h, key, vals) + 'commit\n')
         shown = key
     elif cmd == 'hiberboot':
         key = f'{cs}\\Control\\Session Manager\\Power'
