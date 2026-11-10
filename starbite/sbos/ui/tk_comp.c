@@ -180,16 +180,27 @@ static void row_glass(uint32_t *d, const uint32_t *b, const uint8_t *m, int n, u
 }
 
 /* ---- drawing one item into a target rect ------------------------------------------------------------------ */
+/* per band scratch: a frame's rows are split into bands that run on several cores at once */
+#define TK_NBAND 8
 typedef struct {
+    uint32_t rowbuf[TK_W + 16], vrow[TK_W + 16], bwrow[TK_W + 16], upV[TK_W / 2 + 32];
+    uint8_t maskbuf[TK_W + 16], mrow[TK_W + 16];
+    int colu[TK_W + 16];
+    uint16_t colw[TK_W + 16];
+} scr;
+static scr SCR[TK_NBAND];
+
+typedef struct {
+    scr *S;               /* this band's scratch */
     tk_bmp *t;            /* target */
     tk_a8 *collect;       /* flatten: glass masks go here instead of the backdrop */
     const tk_bmp *bw;     /* the glass backdrop (half resolution) */
     float k;              /* target px per screen px (1 or .5) */
     int bw_double;        /* the target is full resolution: each backdrop px covers 2 x 2 */
 } tgt;
-static uint32_t bwrow[TK_W + 16];
 static const uint32_t *bw_row(const tgt *T, int y, int x0, int n)
 {
+    uint32_t *bwrow = T->S->bwrow;
     if (!T->bw_double) return T->bw->px + (size_t)y * T->bw->stride + x0;
     const uint32_t *r = T->bw->px + (size_t)(y >> 1) * T->bw->stride;
     for (int i = 0; i < n; i++) bwrow[i] = r[(x0 + i) >> 1];
@@ -235,10 +246,6 @@ static int slice_row(const tk_layer *l, int v, int srch, float res)
     return (int)(s0 + (v - s0) * (mid > 0 ? smid / mid : 0));
 }
 
-static uint32_t rowbuf[TK_W + 16], vrow[TK_W + 16];
-static uint8_t maskbuf[TK_W + 16], mrow[TK_W + 16];
-static int colu[TK_W + 16];
-static uint16_t colw[TK_W + 16];
 
 static void draw_solid(const tgt *T, const item *it, tk_irect R)
 {
@@ -246,7 +253,7 @@ static void draw_solid(const tgt *T, const item *it, tk_irect R)
     float k = T->k;
     tk_irect d = isect(R, irect_of(it->r.x0 * k, it->r.y0 * k, it->r.x1 * k, it->r.y1 * k));
     if (iempty(d)) return;
-    uint32_t c = it->l->solid;
+    uint32_t c = it->l->solid, *rowbuf = T->S->rowbuf;
     for (int y = d.y0; y < d.y1; y++) {
         float f = fade_at(it, (y + .5f) / k);
         unsigned al = (unsigned)(it->alpha * f * 255 + .5f);
@@ -265,6 +272,10 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
 {
     tk_layer *l = it->l;
     if (l->solid) { draw_solid(T, it, R); return; }
+    uint32_t *rowbuf = T->S->rowbuf, *vrow = T->S->vrow;
+    uint8_t *maskbuf = T->S->maskbuf, *mrow = T->S->mrow;
+    int *colu = T->S->colu;
+    uint16_t *colw = T->S->colw;
     float k = T->k, A = it->a * k, B = it->b * k, TX = it->tx * k, TY = it->ty * k;
     /* the source: the half copy when it is the closer size */
     const tk_bmp *src = &l->bmp;
@@ -401,9 +412,9 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
 }
 
 /* ---- 2x up: a half-resolution image into an output rect (any parity) of a full one, 1/4 3/4 bilinear -------- */
-static uint32_t upV[TK_W / 2 + 32];
-static void up2x_out(tk_bmp *dst, const tk_bmp *h, tk_irect R)
+static void up2x_out(tk_bmp *dst, const tk_bmp *h, tk_irect R, scr *S)
 {
+    uint32_t *upV = S->upV;
     /* per output row: the vertical blend (3/4 its half row + 1/4 the half row above or below) into a padded temp
      * row, then each output px 3/4 its half px + 1/4 the left or right neighbour: 3 loads per 4 half px */
     R = isect(R, (tk_irect){ 0, 0, dst->w, dst->h });
@@ -489,6 +500,47 @@ int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel)
 
 static int was_motion = -1;
 
+/* a frame's work over bands of rows: phase 0 composes every damage rect, phase 1 presents it */
+typedef struct { tk_comp *c; const tgt *T; tk_irect *D; int nd, motion, phase; } job;
+static void band(void *arg, int i)
+{
+    job *J = arg;
+    tgt T = *J->T;
+    T.S = &SCR[i];
+    for (int q = 0; q < J->nd; q++) {
+        tk_irect r = J->D[q];
+        int h = r.y1 - r.y0, y0 = r.y0 + h * i / TK_NBAND, y1 = r.y0 + h * (i + 1) / TK_NBAND;
+        if (y1 <= y0) continue;
+        tk_irect b = { r.x0, y0, r.x1, y1 };
+        if (J->phase == 0) {
+            if (J->motion)
+                for (int y = b.y0; y < b.y1; y++)
+                    tk_memcpy(T.t->px + (size_t)y * T.t->stride + b.x0, J->c->base_half.px + (size_t)y * J->c->base_half.stride + b.x0, (size_t)(b.x1 - b.x0) * 4);
+            else
+                up2x_out(&J->c->fb, &J->c->base_half, b, T.S);
+            for (int k = 0; k < cur.n; k++) draw_item(&T, &cur.it[k], b);
+        } else if (J->motion) {
+            /* the damage 2x into the panel, a half px of margin for the bilinear neighbours (the margin rows only
+             * by the first and last band) */
+            tk_irect o = { 2 * b.x0 - 2, 2 * b.y0 - (i == 0 ? 2 : 0), 2 * b.x1 + 2, 2 * b.y1 + (i == TK_NBAND - 1 ? 2 : 0) };
+            up2x_out(&J->c->panel, &J->c->half, isect(o, (tk_irect){ 0, 0, TK_W, TK_H }), T.S);
+        } else {
+            if (J->c->panel.px != J->c->fb.px)
+                for (int y = b.y0; y < b.y1; y++)
+                    tk_memcpy(J->c->panel.px + (size_t)y * J->c->panel.stride + b.x0, J->c->fb.px + (size_t)y * J->c->fb.stride + b.x0, (size_t)(b.x1 - b.x0) * 4);
+            /* the half canvas follows the rest frame (what changed, 2x2 averaged): a motion frame then only composes
+             * what moves, and layers that never move never need their half copies */
+            tk_irect e = { b.x0, b.y0 & ~1, b.x1, b.y1 + (b.y1 & 1) };
+            down2_rect(&J->c->half, &J->c->fb, e);
+        }
+    }
+}
+static void run_bands(tk_comp *c, job *J)
+{
+    if (c->par) c->par(band, J, TK_NBAND);
+    else for (int i = 0; i < TK_NBAND; i++) band(J, i);
+}
+
 int tk_comp_frame(tk_comp *c, int motion, int full)
 {
     uint64_t t0 = tk_us();
@@ -551,8 +603,13 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
 
     /* motion: the half canvas, its backdrop 1:1; at rest: the RAM frame, the wallpaper and the backdrop from their
      * half-resolution copies (smooth: the wallpaper's gradients, the 52 px blur) */
-    tgt T = { motion ? &c->half : &c->fb, 0, &c->bw_half, motion ? .5f : 1, 0 };
+    tgt T = { &SCR[0], motion ? &c->half : &c->fb, 0, &c->bw_half, motion ? .5f : 1, 0 };
     T.bw_double = !motion;
+    /* what is drawn from a half copy gets it made now, on this core (the bands run on several) */
+    for (int i = 0; i < cur.n; i++) {
+        item *it = &cur.it[i];
+        if (it->l->bmp.px && it->a * T.k < .75f && it->b * T.k < .75f) half_of(it->l);
+    }
     int px = 0;
     for (int q = 0; q < nd; q++) {
         tk_irect r = D[q];
@@ -561,30 +618,15 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
             D[q] = r;
             c->moved = iunion(c->moved, (tk_irect){ 2 * r.x0, 2 * r.y0, 2 * r.x1, 2 * r.y1 });
             c->have_moved = 1;
-            for (int y = r.y0; y < r.y1; y++)
-                tk_memcpy(T.t->px + (size_t)y * T.t->stride + r.x0, c->base_half.px + (size_t)y * c->base_half.stride + r.x0, (size_t)(r.x1 - r.x0) * 4);
-        } else
-            up2x_out(&c->fb, &c->base_half, r);
-        px += (r.x1 - r.x0) * (r.y1 - r.y0);
-        for (int i = 0; i < cur.n; i++) draw_item(&T, &cur.it[i], r);
-    }
-    uint64_t t1 = tk_us();
-    for (int q = 0; q < nd; q++) {
-        if (motion) {
-            /* the damage 2x into the panel, with a half px of margin for the bilinear neighbours */
-            tk_irect r = D[q];
-            up2x_out(&c->panel, &c->half, isect((tk_irect){ 2 * r.x0 - 2, 2 * r.y0 - 2, 2 * r.x1 + 2, 2 * r.y1 + 2 }, screen));
-        } else if (c->panel.px != c->fb.px) {
-            tk_irect r = D[q];
-            for (int y = r.y0; y < r.y1; y++)
-                tk_memcpy(c->panel.px + (size_t)y * c->panel.stride + r.x0, c->fb.px + (size_t)y * c->fb.stride + r.x0, (size_t)(r.x1 - r.x0) * 4);
         }
+        px += (r.x1 - r.x0) * (r.y1 - r.y0);
     }
-    if (!motion) {
-        /* the half canvas follows the rest frame (what changed, 2x2 averaged): a motion frame then only composes
-         * what moves, and layers that never move never need their half copies */
-        for (int q = 0; q < nd; q++) down2_rect(&c->half, &c->fb, D[q]);
-    }
+    job J = { c, &T, D, nd, motion, 0 };
+    J.phase = 0;
+    run_bands(c, &J);
+    uint64_t t1 = tk_us();
+    J.phase = 1;                                /* the present (and, at rest, the half canvas following) */
+    run_bands(c, &J);
     uint64_t t2 = tk_us();
     c->nd = nd;
     for (int q = 0; q < nd; q++) c->dmg[q] = motion ? (tk_irect){ 2 * D[q].x0, 2 * D[q].y0, 2 * D[q].x1, 2 * D[q].y1 } : D[q];
@@ -607,7 +649,7 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
     W = &cur;
     tk_memset(out->px, 0, (size_t)out->stride * out->h * 4);
     if (mask && mask->v) tk_memset(mask->v, 0, (size_t)mask->w * mask->h);
-    tgt T = { out, mask && mask->v ? mask : 0, 0, 1, 0 };
+    tgt T = { &SCR[0], out, mask && mask->v ? mask : 0, 0, 1, 0 };
     for (int i = 0; i < flist.n; i++) draw_item(&T, &flist.it[i], screen);
 }
 

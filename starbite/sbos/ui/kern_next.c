@@ -50,6 +50,91 @@ void tk_heap_oom(uint64_t n, uint64_t used)
 uint64_t tk_us(void) { return sb_ticks() * 1000000ULL / sb_freq(); }
 void tk_log(const char *s) { sb_logf("next: ", s); }
 
+/* ---- the other three A55 (cores 1..3) as band workers (P2b) ---------------------------------------------
+ * A frame's bands go to whichever cores are running: each takes the next band until none are left (the boot core
+ * too), so a core that is not up yet only means fewer helpers. Workers start with the first touch (sb_smp_launch:
+ * the loop never waits for a core) and stop after 5 s without motion, so idle phones do not spin three cores. */
+static struct {
+    volatile uint32_t gen, next, done, n;
+    void (*fn)(void *, int);
+    void *arg;
+    uint32_t pad[8];
+} JOB __attribute__((aligned(64)));
+static int workers_on;
+static uint32_t worker_bands[4];
+
+static void take_bands(unsigned core)
+{
+    for (;;) {
+        uint32_t i = __atomic_fetch_add(&JOB.next, 1, __ATOMIC_ACQ_REL);
+        if (i >= __atomic_load_n(&JOB.n, __ATOMIC_ACQUIRE)) break;
+        JOB.fn(JOB.arg, (int)i);
+        worker_bands[core & 3]++;
+        __atomic_fetch_add(&JOB.done, 1, __ATOMIC_ACQ_REL);
+    }
+}
+static void band_worker(unsigned w, void *arg)
+{
+    (void)arg;
+    uint32_t seen = __atomic_load_n(&JOB.gen, __ATOMIC_ACQUIRE);
+    unsigned spins = 0;
+    for (;;) {
+        uint32_t g = __atomic_load_n(&JOB.gen, __ATOMIC_ACQUIRE);
+        if (g != seen) {
+            seen = g;
+            take_bands(w);
+            continue;
+        }
+        if (++spins >= 1024) {
+            spins = 0;
+            if (sb_worker_stop()) return;
+        }
+        __asm__ volatile("yield");
+    }
+}
+static void kpar(void (*fn)(void *, int), void *arg, int n)
+{
+    if (!workers_on) {
+        for (int i = 0; i < n; i++) fn(arg, i);
+        return;
+    }
+    JOB.fn = fn;
+    JOB.arg = arg;
+    __atomic_store_n(&JOB.n, (uint32_t)n, __ATOMIC_RELEASE);
+    __atomic_store_n(&JOB.done, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&JOB.next, 0, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&JOB.gen, 1, __ATOMIC_ACQ_REL);
+    take_bands(0);
+    while (__atomic_load_n(&JOB.done, __ATOMIC_ACQUIRE) < (uint32_t)n)
+        __asm__ volatile("yield");
+}
+static void workers_start(void)
+{
+    if (workers_on) return;
+    int any = 0;
+    for (unsigned w = 1; w <= 3; w++) {
+        int64_t r = sb_smp_launch(w, band_worker, 0);
+        if (r == 0) any = 1;
+        else {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "next: core ");
+            ub_dec(&u, w);
+            ub_s(&u, " not launched: ");
+            ub_sdec(&u, r);
+            sb_log(u.b);
+        }
+    }
+    workers_on = any;
+}
+static void workers_stop(void)
+{
+    if (!workers_on) return;
+    workers_on = 0;
+    unsigned left = sb_smp_stop(50);
+    if (left) sb_logx("next: workers that did not stop: ", left);
+}
+
 /* ---- the pack (next_pack.S) -------------------------------------------------------------------------------- */
 extern const uint8_t sbtk_pack_start[], sbtk_pack_end[];
 
@@ -137,6 +222,8 @@ static void stats_log(const char *what)
     ub_dec(&u, FS.over16);
     ub_s(&u, "; A55 kHz ");
     ub_dec(&u, hw_a55_khz());
+    ub_s(&u, "; bands by core 0/1/2/3 ");
+    for (int k = 0; k < 4; k++) { if (k) ub_c(&u, '/'); ub_dec(&u, worker_bands[k]); worker_bands[k] = 0; }
     ub_s(&u, "; heap ");
     ub_dec(&u, tk_heap_used() >> 20);
     ub_s(&u, " MiB (peak ");
@@ -162,6 +249,7 @@ static void frame(void)
         last_tick = 0;
         sh_idle();
         kt_set(KT_UI, 21, sb_ms(), 400, 0);         /* back to the screen-on clock unless something moves again */
+        kt_set(KT_UI, 23, sb_ms(), 5000, 0);        /* and the band workers off after 5 s */
 #ifndef SBOS_SELFTEST_NEXT
         stats_log("gesture");
         stats_reset();
@@ -172,7 +260,9 @@ static void frame(void)
 static void start_ticking(void)
 {
     kt_cancel(KT_UI, 21);
+    kt_cancel(KT_UI, 23);
     boost(1);
+    workers_start();
     if (ticking) return;
     ticking = 1;
     last_tick = sb_ms();
@@ -194,6 +284,9 @@ void next_kinit(void)
         sb_log("next: no memory for the compositor: the regular UI runs");
         return;
     }
+#ifndef SBOS_NEXT_ONECORE
+    comp.par = kpar;
+#endif
     /* the bake one step per loop turn (the watchdog is fed between them; the screen fills in); the top step from
      * the second step on, once the kernel's interrupts and ACPM are up */
     sh_init_begin(&comp);
@@ -257,6 +350,10 @@ void next_ktimer(unsigned id)
     if (ready && id == 20) { frame(); return; }
     if (ready && id == 21) {
         if (!ticking && !sh_moving()) boost(0);
+        return;
+    }
+    if (ready && id == 23) {
+        if (!ticking && !sh_moving()) workers_stop();
         return;
     }
     ui_ktimer(id);

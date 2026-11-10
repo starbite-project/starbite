@@ -16,6 +16,31 @@
 
 void sh_boot_os(const char *key) { fprintf(stderr, "slide to start: would restart into %s\n", key); }
 
+/* SBTK_CORES=n: the bands over n threads (the phone's four A55), to check that a split frame is bit for bit the
+ * serial one and to time it */
+#include <pthread.h>
+static struct { void (*fn)(void *, int); void *arg; int n, next; pthread_mutex_t m; } PJ = { 0, 0, 0, 0, PTHREAD_MUTEX_INITIALIZER };
+static void *pworker(void *x)
+{
+    (void)x;
+    for (;;) {
+        pthread_mutex_lock(&PJ.m);
+        int i = PJ.next++;
+        pthread_mutex_unlock(&PJ.m);
+        if (i >= PJ.n) return 0;
+        PJ.fn(PJ.arg, i);
+    }
+}
+static int ncores = 1;
+static void host_par(void (*fn)(void *, int), void *arg, int n)
+{
+    PJ.fn = fn; PJ.arg = arg; PJ.n = n; PJ.next = 0;
+    pthread_t t[8];
+    for (int k = 0; k < ncores - 1; k++) pthread_create(&t[k], 0, pworker, 0);
+    pworker(0);
+    for (int k = 0; k < ncores - 1; k++) pthread_join(t[k], 0);
+}
+
 static uint8_t *readall(const char *p, uint32_t *len)
 {
     FILE *f = fopen(p, "rb");
@@ -236,6 +261,7 @@ int main(int argc, char **argv)
     if (!tk_pack_open(pak, len)) { fprintf(stderr, "bad pack\n"); return 1; }
     static tk_comp c;
     if (!tk_comp_init(&c, 0, 0)) return 1;
+    if (getenv("SBTK_CORES")) { ncores = atoi(getenv("SBTK_CORES")); if (ncores > 1) c.par = host_par; }
     uint64_t t0 = tk_us();
     sh_init(&c);
     fprintf(stderr, "bake: %.1f ms; heap %.1f MB (peak %.1f MB)\n", (tk_us() - t0) / 1000.0, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);

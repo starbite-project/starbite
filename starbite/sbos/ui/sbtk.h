@@ -170,6 +170,8 @@ typedef struct {
     tk_irect dmg[16];          /* the last frame's panel rects (for a partial panel update) */
     int nd;
     tk_layer *root;
+    /* run fn(arg, 0 .. n - 1) on as many cores as the platform has, returning when all are done (NULL: one core) */
+    void (*par)(void (*fn)(void *, int), void *arg, int n);
     int motion;                /* the next frame is a motion frame (half resolution) */
     tk_irect moved;            /* what motion frames covered since the last full frame */
     int have_moved;
