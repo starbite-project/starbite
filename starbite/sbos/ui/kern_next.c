@@ -518,7 +518,7 @@ int next_selftest_step(void)
     if (F.film < 6) { film_start(F.film + 1); return 1; }
     {
         /* the present's kernels against uibench's loops, on these buffers and cores (boosted, workers on) */
-        static const char *const BN[5] = { "the motion present (2x, centred)", "the rest copy (tk_memcpy rows)",
+        static const char *const BN[5] = { "the motion present (2x, rows in pairs)", "the rest copy (tk_memcpy rows)",
                                            "uibench's copy", "uibench's 2x", "the half canvas following (2x2 down)" };
         boost(1);
         workers_start();

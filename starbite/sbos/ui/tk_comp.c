@@ -566,44 +566,70 @@ static void up2x_out(tk_bmp *dst, const tk_bmp *h, tk_irect R, scr *S)
 
 /* motion frames' present: uibench's 2x (half px i at panel px 2i; the odd px and rows averages of their
  * neighbours): half the work of the centred kernel; the half-px offset exists only while things move */
+/* one panel row of the fast 2x (the edges of a band: an odd first row, a lone last row) */
+static void up2x_row(uint32_t *o, const uint32_t *a, const uint32_t *b, int odd, int w, int x0, int x1)
+{
+    int i0 = x0 >> 1, i1 = tk_mini(w, (x1 + 1) >> 1), i = i0;
+    for (; i + 5 <= i1 && i + 5 <= w; i += 4) {
+        uint8x16_t A = vld1q_u8((const uint8_t *)(a + i)), An = vld1q_u8((const uint8_t *)(a + i + 1));
+        if (odd) {
+            An = vrhaddq_u8(An, vld1q_u8((const uint8_t *)(b + i + 1)));
+            A = vrhaddq_u8(A, vld1q_u8((const uint8_t *)(b + i)));
+        }
+        uint32x4x2_t t = vzipq_u32(vreinterpretq_u32_u8(A), vreinterpretq_u32_u8(vrhaddq_u8(A, An)));
+        vst1q_u32(o + 2 * i, t.val[0]);
+        vst1q_u32(o + 2 * i + 4, t.val[1]);
+    }
+    for (; i < i1; i++) {
+        int in = tk_mini(w - 1, i + 1);
+        uint32_t p = a[i], q = a[in];
+        if (odd) {
+            uint32_t p2 = 0, q2 = 0;
+            for (int sh = 0; sh < 32; sh += 8) {
+                p2 |= (((p >> sh & 255) + (b[i] >> sh & 255) + 1) >> 1) << sh;
+                q2 |= (((q >> sh & 255) + (b[in] >> sh & 255) + 1) >> 1) << sh;
+            }
+            p = p2; q = q2;
+        }
+        uint32_t m = 0;
+        for (int sh = 0; sh < 32; sh += 8) m |= (((p >> sh & 255) + (q >> sh & 255) + 1) >> 1) << sh;
+        if (2 * i >= x0 && 2 * i < x1) o[2 * i] = p;
+        if (2 * i + 1 >= x0 && 2 * i + 1 < x1) o[2 * i + 1] = m;
+    }
+}
+
+/* motion frames' present: uibench's 2x (half px i at panel px 2i; the odd px and rows averages of their
+ * neighbours). Rows go in pairs from one set of loads (4 loads per 8 px pair, as uibench's loop): the in-order
+ * A55 paid ~1.7x for one row at a time (6 loads per pair and a branch in the loop) */
 static void up2x_fast(tk_bmp *dst, const tk_bmp *h, tk_irect R)
 {
     R = isect(R, (tk_irect){ 0, 0, dst->w, dst->h });
     if (iempty(R)) return;
-    int i0 = R.x0 >> 1, i1 = tk_mini(h->w, (R.x1 + 1) >> 1);
-    for (int Y = R.y0; Y < R.y1; Y++) {
-        int j = tk_mini(Y >> 1, h->h - 1), odd = Y & 1;
-        const uint32_t *a = h->px + (size_t)j * h->stride, *b = h->px + (size_t)tk_mini(h->h - 1, j + 1) * h->stride;
-        uint32_t *o = dst->px + (size_t)Y * dst->stride;
-        int i = i0;
-        for (; i + 5 <= i1 && i + 5 <= h->w; i += 4) {
-            uint8x16_t A = vld1q_u8((const uint8_t *)(a + i)), An = vld1q_u8((const uint8_t *)(a + i + 1));
-            if (odd) {
-                uint8x16_t Bv = vld1q_u8((const uint8_t *)(b + i)), Bn = vld1q_u8((const uint8_t *)(b + i + 1));
-                An = vrhaddq_u8(An, Bn);
-                A = vrhaddq_u8(A, Bv);
-            }
-            uint32x4x2_t t = vzipq_u32(vreinterpretq_u32_u8(A), vreinterpretq_u32_u8(vrhaddq_u8(A, An)));
-            vst1q_u32(o + 2 * i, t.val[0]);
-            vst1q_u32(o + 2 * i + 4, t.val[1]);
+    int w = h->w, Y = R.y0;
+#define HROW(j) (h->px + (size_t)tk_mini(h->h - 1, (j)) * h->stride)
+    if (Y & 1) { up2x_row(dst->px + (size_t)Y * dst->stride, HROW(Y >> 1), HROW((Y >> 1) + 1), 1, w, R.x0, R.x1); Y++; }
+    int i0 = R.x0 >> 1, i1 = tk_mini(w, (R.x1 + 1) >> 1), iv = i0;
+    while (iv + 5 <= i1 && iv + 5 <= w) iv += 4;          /* [i0, iv) in NEON, [iv, i1) by up2x_row */
+    for (; Y + 1 < R.y1; Y += 2) {
+        const uint8_t *r0 = (const uint8_t *)HROW(Y >> 1), *r1 = (const uint8_t *)HROW((Y >> 1) + 1);
+        uint32_t *o0 = dst->px + (size_t)Y * dst->stride, *o1 = o0 + dst->stride;
+        for (int i = i0; i < iv; i += 4) {
+            uint8x16_t A = vld1q_u8(r0 + 4 * i), An = vld1q_u8(r0 + 4 * i + 4);
+            uint8x16_t B = vld1q_u8(r1 + 4 * i), Bn = vld1q_u8(r1 + 4 * i + 4);
+            uint8x16_t Ah = vrhaddq_u8(A, An), V = vrhaddq_u8(A, B), Vn = vrhaddq_u8(An, Bn);
+            uint32x4x2_t t = vzipq_u32(vreinterpretq_u32_u8(A), vreinterpretq_u32_u8(Ah));
+            uint32x4x2_t m = vzipq_u32(vreinterpretq_u32_u8(V), vreinterpretq_u32_u8(vrhaddq_u8(V, Vn)));
+            vst1q_u32(o0 + 2 * i, t.val[0]); vst1q_u32(o0 + 2 * i + 4, t.val[1]);
+            vst1q_u32(o1 + 2 * i, m.val[0]); vst1q_u32(o1 + 2 * i + 4, m.val[1]);
         }
-        for (; i < i1; i++) {
-            int in = tk_mini(h->w - 1, i + 1);
-            uint32_t p = a[i], q = a[in];
-            if (odd) {
-                uint32_t p2 = 0, q2 = 0;
-                for (int sh = 0; sh < 32; sh += 8) {
-                    p2 |= (((p >> sh & 255) + (b[i] >> sh & 255) + 1) >> 1) << sh;
-                    q2 |= (((q >> sh & 255) + (b[in] >> sh & 255) + 1) >> 1) << sh;
-                }
-                p = p2; q = q2;
-            }
-            uint32_t m = 0;
-            for (int sh = 0; sh < 32; sh += 8) m |= (((p >> sh & 255) + (q >> sh & 255) + 1) >> 1) << sh;
-            if (2 * i >= R.x0 && 2 * i < R.x1) o[2 * i] = p;
-            if (2 * i + 1 >= R.x0 && 2 * i + 1 < R.x1) o[2 * i + 1] = m;
+        if (iv < i1) {
+            int x0 = tk_maxi(R.x0, 2 * iv);
+            up2x_row(o0, (const uint32_t *)r0, (const uint32_t *)r1, 0, w, x0, R.x1);
+            up2x_row(o1, (const uint32_t *)r0, (const uint32_t *)r1, 1, w, x0, R.x1);
         }
     }
+    if (Y < R.y1) up2x_row(dst->px + (size_t)Y * dst->stride, HROW(Y >> 1), HROW((Y >> 1) + 1), 0, w, R.x0, R.x1);
+#undef HROW
 }
 
 static void down2_rect(tk_bmp *h, const tk_bmp *f, tk_irect r)
