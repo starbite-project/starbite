@@ -426,6 +426,14 @@ void kui_end(void)
     if (!keep && kb_id)
         kui_input_wipe();
     app_building = 0;
+    {                                       /* 1.2-alpha22: a page with another title (a sub-page) starts at its top */
+        static char done_title[sizeof(app_title)];
+        static int done_app = -2;
+        if (done_app == app_front && sb_strcmp_eq(done_title, app_title))  /* (non-zero: they differ) */
+            app_scroll = 0;
+        done_app = app_front;
+        scopy(done_title, sizeof(done_title), app_title);
+    }
     if (screen == SCR_APP)
         dirty = 1;
 }
@@ -1187,13 +1195,12 @@ static void build_control(void)
             ub_s(&u, "  ");
         }
         ub_s(&u, n->title);
-        if (n->text[0]) {
-            ub_s(&u, ": ");
-            ub_s(&u, n->text);
-        }
-        e = add(cur, &ncur, E_TEXT);
-        scopy(e->b, sizeof(e->b), u.b);
-        e->color = C_L1;
+        e = add(cur, &ncur, E_BUTTON);     /* 1.2-alpha22: a tap opens the app that posted it */
+        if (!e)
+            break;
+        e->id = 100U + (uint32_t)i;
+        scopy(e->a, sizeof(e->a), u.b);
+        scopy(e->b, sizeof(e->b), n->text);
     }
     if (notif_count()) {
         e = add(cur, &ncur, E_BUTTON);
@@ -1253,6 +1260,19 @@ static void control_pick(const struct el *e, int x)
     if (e->kind == E_BUTTON && e->id == 7) {
         notif_clear();                      /* 1.2-alpha9 */
         full = dirty = 1;
+        return;
+    }
+    if (e->kind == E_BUTTON && e->id >= 100 && e->id < 104) {   /* 1.2-alpha22: a notification: open its app */
+        const struct notif *n = notif_get((int)e->id - 100);
+        int a = n ? app_by_id(n->who) : -1;
+        for (int k = 0; n && a < 0 && k < napps; ++k)   /* an app's own post carries its name */
+            if (!sb_strcmp_eq(app_name(k), n->who))
+                a = k;
+        if (a >= 0 && !app_hidden(a)) {
+            sb_log("ui: a notification opened its app");
+            control_close();
+            kui_open_app(a);
+        }
         return;
     }
     if (e->kind == E_TOGGLE) {

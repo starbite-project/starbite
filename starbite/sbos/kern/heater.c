@@ -1871,3 +1871,72 @@ void heater_init(void)
     read_inputs(&in);
     last_in = in;
 }
+
+/* 1.2-alpha22: the heat log for the Heat app's "Last session" page: the samples in time order (the first HLOG_FAST,
+ * then the ring from its oldest), summed up and put in SBOS_HEAT_LOG_PTS time buckets. */
+void heater_log_summary(struct sbos_heat_log *o)
+{
+    memset(o, 0, sizeof(*o));
+    for (int k = 0; k < SBOS_HEAT_LOG_PTS; ++k)
+        o->soc[k] = o->bat[k] = o->amps10[k] = o->mv[k] = -32768;
+    const struct hlog *L = &heat_log;
+    if (L->magic != HLOG_MAGIC || !L->n)
+        return;
+    uint32_t stored = L->n < HLOG_N ? L->n : HLOG_N;
+    uint32_t fast = stored < HLOG_FAST ? stored : HLOG_FAST;
+    uint32_t ring = stored - fast, start = 0;
+    if (L->n > HLOG_N)                      /* the ring wrapped: its oldest is the next one to be written */
+        start = (L->n - HLOG_FAST) % (HLOG_N - HLOG_FAST);
+#define HL_AT(j) (&L->s[(j) < fast ? (j) : HLOG_FAST + (start + (j) - fast) % (HLOG_N - HLOG_FAST)])
+    uint32_t t0 = HL_AT(0)->t, t1 = HL_AT(stored - 1)->t;
+    o->samples = (int32_t)stored;
+    o->secs = (int32_t)t1;
+    o->level = (int32_t)L->level;
+    o->gpu_mhz = L->gpu_mhz;
+    o->a55_mhz = (int32_t)L->a55_mhz;
+    o->m3_n = L->m3_n;
+    o->peak_soc_c10 = o->peak_bat_c10 = -1000;
+    o->min_mv = 0;
+    o->points = stored < SBOS_HEAT_LOG_PTS ? (int32_t)stored : SBOS_HEAT_LOG_PTS;   /* short: one point a sample */
+    uint32_t span = t1 > t0 ? t1 - t0 : 1;
+    (void)ring;
+    for (uint32_t j = 0; j < stored; ++j) {
+        const struct hlog_sample *x = HL_AT(j);
+        int b = o->points > 1 ? (int)((uint64_t)(x->t - t0) * (uint32_t)(o->points - 1) / span) : 0;
+        if (b < 0 || b >= o->points)
+            continue;
+        int dis = x->ma < 0 ? -x->ma : 0;
+        if (x->soc_c10 > o->peak_soc_c10)
+            o->peak_soc_c10 = x->soc_c10;
+        if (x->bat_c10 > o->peak_bat_c10)
+            o->peak_bat_c10 = x->bat_c10;
+        if (dis > o->peak_ma)
+            o->peak_ma = dis;
+        if (x->mv && (!o->min_mv || x->mv < o->min_mv))
+            o->min_mv = x->mv;
+        int mw = (int)((int64_t)dis * x->mv / 1000);
+        if (mw > o->peak_mw)
+            o->peak_mw = mw;
+        if (o->soc[b] == -32768 || x->soc_c10 > o->soc[b])
+            o->soc[b] = x->soc_c10;
+        if (o->bat[b] == -32768 || x->bat_c10 > o->bat[b])
+            o->bat[b] = x->bat_c10;
+        if (o->amps10[b] == -32768 || dis / 100 > o->amps10[b])
+            o->amps10[b] = (int16_t)(dis / 100);
+        if (x->mv && (o->mv[b] == -32768 || x->mv < o->mv[b]))
+            o->mv[b] = (int16_t)(x->mv > 32767 ? 32767 : x->mv);
+    }
+#undef HL_AT
+    for (int k = 1; k < o->points; ++k)     /* a bucket no sample fell in (1 s and 10 s steps): the one before */
+        if (o->soc[k] == -32768) {
+            o->soc[k] = o->soc[k - 1];
+            o->bat[k] = o->bat[k - 1];
+            o->amps10[k] = o->amps10[k - 1];
+            o->mv[k] = o->mv[k - 1];
+        }
+    const struct heat_record *r = heat_rec.magic ? &heat_rec : &heat_last;
+    if (r->magic) {
+        sb_strcpy(o->why, sizeof(o->why), r->why);
+        o->unclean = r == &heat_last && heat_last_unclean;
+    }
+}

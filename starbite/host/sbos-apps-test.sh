@@ -58,6 +58,10 @@ r=$(limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 SBOS_HOST_M
     $UNLOCK $MODEM $START $HOLDSTART w:6000 q 2>&1)
 want "$r" "modem: a guard parked the CP" "a guard parks it"
 want "$r" "storage hold lifted" "the hold lifted after the guard"
+r=$(limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 SBOS_HOST_MODEM_GUARD=3 "$out/sbos-host" "$out" /dev/null \
+    $UNLOCK $MODEM $START $HOLDSTART w:5000 h:b:900 w:400 t:700,50 w:600 t:720,632 w:800 s:notif-open q 2>&1)
+want "$r" "notif: modem: Modem parked" "the park posts a notification"
+want "$r" "ui: a notification opened its app" "a tap on it opens the Modem app (1.2-alpha22)"
 r=$(run $UNLOCK $MODEM $START $HOLDSTART w:2000 h:b:900 w:300 t:1057,663 w:600 t:720,670 w:600 g:720,1070,0,1900 w:2000)
 want "$r" "modem: stopped (Heat started): parked" "Heat parks the modem first"
 limactl shell starbite rm -f $ST
@@ -81,5 +85,11 @@ want "$r" "files: a text file shown, bytes 74" "Files: a text file shown"
 never "$r" "readme\|notes/" "Files: no file name logged"
 r=$(limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 "$out/sbos-host" "$out" /dev/null $UNLOCK $FILES q 2>&1)
 want "$r" "files: the folder could not be read" "Files: no card is said, not a crash"
+# 1.2-alpha22: Heat > Last session (the heat log): none yet in a fresh run; after 20 s of High, its samples
+HEAT="t:1057,663 w:600"; DOWN="g:720,2400,-1500,600 w:600 g:720,2400,-1500,600 w:600"; LAST="t:720,2780 w:800"
+r=$(run $UNLOCK $HEAT $DOWN $LAST)
+want "$r" "heat: the last session's log shown: samples 0" "Heat log: none before the first session"
+r=$(run $UNLOCK $HEAT t:720,670 w:400 g:720,1070,0,1900 w:20000 t:220,670 w:1500 $DOWN $LAST)
+want "$r" "heat: the last session's log shown: samples [12][0-9]" "Heat log: the session's samples (one a second)"
 echo "apps test: $fails failed"
 [ "$fails" = 0 ]

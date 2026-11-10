@@ -1019,6 +1019,13 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         if (arg[0] && !front)
             return SBOS_EPERM;              /* starting needs the app in front (the confirmation) */
         return heater_request((int)arg[0], (int)arg[1]);
+    case SYS_HEAT_LOG: {                    /* 1.2-alpha22: the last session's log, summed up */
+        static struct sbos_heat_log hl;
+        if (!(p->perms & SBOS_P_HEAT))
+            return SBOS_EPERM;
+        heater_log_summary(&hl);
+        return user_out(a, arg[0], &hl, sizeof(hl)) ? 0 : SBOS_EINVAL;
+    }
     case SYS_HEAT_STATUS: {
         struct sbos_heat h;
         if (!(p->perms & SBOS_P_HEAT))

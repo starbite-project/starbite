@@ -1,4 +1,19 @@
-# Starbite OS 1.2-alpha21: Modem (receive only), Files, Wi-Fi's known networks (2026-11-10)
+# Starbite OS 1.2-alpha22: Heat's "Last session" (the heat log on the phone), tappable notifications (2026-11-10)
+
+alpha21 passed its self test on the phone (36 screens, 13 apps, Wi-Fi joined) and is the user's image; the modemsess
+run passed (camped emergency-only after 30 s, bars 4). alpha22 adds:
+- **Heat > Last session** (`SYS_HEAT_LOG` 62, `heater_log_summary`): the state slot's heat log (alpha6..18's
+  HLG2) on the phone: the level, the length, the GPU clock, the hottest processor and battery readings, the most
+  current, the lowest voltage, the most power, how it ended (or "the power went"), and four charts (processor,
+  battery, current, voltage) in up to 60 time buckets (the hottest / most / lowest of each). The button is the last
+  thing on the Heat page and only while heat is off: unscrolled taps stay; a page scrolled to its end shows
+  everything 165 px higher (the Survival test's scrolled taps moved with it).
+- **Notifications open their app:** in the control center each one is a button; a tap opens the app that posted
+  it (the kernel's own: modem, heat, clock, battery).
+- **A sub-page starts at its top:** a page whose title changes (Heat > Last session, Wi-Fi > Known networks, Notes >
+  a note) resets the scroll; the same page keeps it.
+
+## Starbite OS 1.2-alpha21: Modem (receive only), Files, Wi-Fi's known networks (2026-11-10)
 
 alpha20 passed its self test on the phone (34 screens, 11 apps, Wi-Fi joined) and is the user's image. alpha21 adds:
 - **Modem** (`kern/modem.c`, `apps/modem.c`): modem-core's session API (docs/MODEM.md 7.6, master merged at a8e68f4),

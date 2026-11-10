@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha21"
+#define SBOS_VERSION "1.2-alpha22"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -240,6 +240,7 @@ struct hlog {
     struct hlog_sample s[HLOG_N];
 };
 extern struct hlog heat_log;
+void heater_log_summary(struct sbos_heat_log *o);   /* 1.2-alpha22: SYS_HEAT_LOG */
 extern int heat_last_unclean;       /* the last start found a record still "running" */
 extern struct heat_record heat_last;
 extern int gpu_heat_session;        /* 0.6: Extreme's own confirmation allows the GPU for that session */

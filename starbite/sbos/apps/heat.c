@@ -67,6 +67,8 @@ static const int st_m3[] = { 0, 650000, 741000, 858000, 962000, 1066000, 1170000
                              1794000 };
 static const int st_gpu[] = { 0, 260000, 299000, 338000, 455000, 546000, 572000, 598000 };
 static int ma55, mm3, mgpu = 6;            /* indices into the tables */
+static int log_page;                        /* 1.2-alpha22: the last session's log */
+static struct sbos_heat_log hl;
 static int manual_page;                     /* the Manual set-up page (picked in the level row) */
 
 static void step_text(struct fmt *f, int khz, const char *top)
@@ -142,6 +144,104 @@ static void tile(const struct sbos_heat *h, int on)
     ui_tile(f.b);
 }
 
+static void c10(struct fmt *f, int v)          /* 123.4 */
+{
+    if (v < 0) {
+        fmt_c(f, '-');
+        v = -v;
+    }
+    fmt_d(f, v / 10);
+    fmt_c(f, '.');
+    fmt_c(f, (char)('0' + v % 10));
+}
+
+/* 1.2-alpha22: the last session from the heat log (the state slot): its peaks and four charts */
+static void show_log(void)
+{
+    struct fmt f, lr;
+    heat_log_get(&hl);
+    {
+        struct fmt g;                       /* for the host tests: the count only */
+        fmt_init(&g);
+        fmt_s(&g, "heat: the last session's log shown: samples ");
+        fmt_d(&g, hl.samples);
+        sb_log_app(g.b);
+    }
+    ui_begin();
+    ui_title("Last session");
+    if (hl.samples <= 0) {
+        ui_textline("No heat log yet: it starts with the next heating session.", GREY);
+        ui_button(41, "Back to Heat", 0, UI_HALF);
+        ui_end();
+        return;
+    }
+    static const char *const lv[] = { "Off", "Low", "Medium", "High", "Extreme", "Manual", "Keep warm", "Survival",
+                                      "Survival (trip off)" };
+    ui_big("THE LAST SESSION", hl.level >= 0 && hl.level < 9 ? lv[hl.level] : "Heat", 0);
+    fmt_init(&f);
+    if (hl.secs < 120) {
+        fmt_d(&f, hl.secs);
+        fmt_s(&f, " s");
+    } else {
+        fmt_dur(&f, (hl.secs + 30) / 60);
+    }
+    if (hl.gpu_mhz > 0) {
+        fmt_s(&f, ", the GPU at ");
+        fmt_d(&f, hl.gpu_mhz);
+        fmt_s(&f, " MHz");
+    }
+    ui_textline(f.b, 0xffffffffU);
+    fmt_init(&f);
+    fmt_s(&f, "Hottest: processor ");
+    c10(&f, hl.peak_soc_c10);
+    fmt_s(&f, " \xc2\xb0" "C, battery ");
+    c10(&f, hl.peak_bat_c10);
+    fmt_s(&f, " \xc2\xb0" "C");
+    ui_textline(f.b, 0xffffffffU);
+    fmt_init(&f);
+    fmt_s(&f, "Most current ");
+    fmt_d(&f, hl.peak_ma / 1000);
+    fmt_c(&f, '.');
+    fmt_d(&f, hl.peak_ma % 1000 / 100);
+    fmt_s(&f, " A, lowest voltage ");
+    fmt_d(&f, hl.min_mv / 1000);
+    fmt_c(&f, '.');
+    fmt_d(&f, hl.min_mv % 1000 / 100);
+    fmt_d(&f, hl.min_mv % 100 / 10);
+    fmt_s(&f, " V, most power ");
+    fmt_d(&f, hl.peak_mw / 1000);
+    fmt_c(&f, '.');
+    fmt_d(&f, hl.peak_mw % 1000 / 100);
+    fmt_s(&f, " W");
+    ui_textline(f.b, 0xffffffffU);
+    if (hl.unclean)
+        ui_textline("It ended without a stop: the power went (the log keeps up to its last 2 s).", ORANGE);
+    else if (hl.why[0])
+        ui_textline(hl.why, GREY);
+    fmt_init(&lr);
+    fmt_s(&lr, "start|");
+    if (hl.secs < 120) {
+        fmt_d(&lr, hl.secs);
+        fmt_s(&lr, " s");
+    } else {
+        fmt_dur(&lr, (hl.secs + 30) / 60);
+    }
+    int hi = hl.peak_soc_c10 + 50 > 600 ? hl.peak_soc_c10 + 50 : 600;
+    ui_chart("PROCESSOR \xc2\xb0" "C", hl.soc, hl.points, 200, hi, ORANGE, lr.b);
+    hi = hl.peak_bat_c10 + 30 > 450 ? hl.peak_bat_c10 + 30 : 450;
+    ui_chart("BATTERY \xc2\xb0" "C", hl.bat, hl.points, 200, hi, 0xffffd60aU, lr.b);
+    hi = hl.peak_ma / 100 + 5 > 30 ? hl.peak_ma / 100 + 5 : 30;
+    ui_chart("CURRENT A", hl.amps10, hl.points, 0, hi, 0xffff453aU, lr.b);
+    int lo = hl.min_mv - 100 < 3000 ? hl.min_mv - 100 : 3000;
+    ui_chart("VOLTAGE V", hl.mv, hl.points, lo, 4400, 0xff0a84ffU, lr.b);
+    fmt_init(&f);
+    fmt_d(&f, hl.samples);
+    fmt_s(&f, " samples: one a second for 10 min, then one every 10 s. Kept until the next session.");
+    ui_textline(f.b, GREY);
+    ui_button(41, "Back to Heat", 0, UI_HALF);
+    ui_end();
+}
+
 static void show(void)
 {
     struct sbos_heat h;
@@ -156,6 +256,11 @@ static void show(void)
     sample(&h, on);
     if (!visible)
         return;
+    if (log_page && !on) {
+        show_log();
+        return;
+    }
+    log_page = 0;
     ui_begin();
     ui_title("Heat");
     int flat = on && h.level >= HEAT_EXTREME;
@@ -368,6 +473,8 @@ static void show(void)
     }
     ui_textline("WARNING: the phone gets hot to hold. Keep it in a pocket or a glove, not on bare skin.", ORANGE);
     ui_textline("About 1 % battery a minute on High, 3 % on Extreme or Survival. Not while charging.", GREY);
+    if (!on)                                /* 1.2-alpha22: the last session's log (last on the page: taps above stay) */
+        ui_button(40, "Last session", "Its heat log: peaks and charts", 0);
     ui_end();
 }
 
@@ -389,6 +496,7 @@ void app_event(const struct sbos_event *ev)
         break;
     case EV_APP_HIDE:
         visible = 0;
+        log_page = 0;
         timer_cancel(1);
         break;
     case EV_APP_LEVEL:
@@ -431,7 +539,11 @@ void app_event(const struct sbos_event *ev)
         struct sbos_heat h;
         heat_status(&h);
         int running = h.state == HEAT_ST_RUNNING || h.state == HEAT_ST_HOLDING || h.state == HEAT_ST_PAUSED;
-        if (ev->id == 30 && running)
+        if (ev->id == 40 && !running)
+            log_page = 1;
+        else if (ev->id == 41)
+            log_page = 0;
+        else if (ev->id == 30 && running)
             setting_set(SET_HEAT_WHITE, 1);
         else if (ev->id == 23 && !running)
             heat_request(surv_tripoff ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0);

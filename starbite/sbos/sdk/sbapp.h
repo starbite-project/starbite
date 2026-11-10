@@ -34,6 +34,7 @@ enum {
     SYS_TORCH = 50, SYS_STROBE = 51,
     /* heat 60..69 */
     SYS_HEAT_REQUEST = 60, SYS_HEAT_STATUS = 61,
+    SYS_HEAT_LOG = 62,                                      /* 1.2-alpha22: the last session's heat log */
     /* alarm and sound 70..79 */
     SYS_SIREN = 70, SYS_VIBRATE = 71, SYS_ALARM_SET = 72, SYS_ALARM_CANCEL = 73, SYS_SOS_STATUS = 74,
     /* state 80..89 */
@@ -148,6 +149,19 @@ struct sbos_heat {
     int32_t gpu_on;             /* 1.1: the GPU's share is running */
     int32_t surv_bat_c10;       /* 1.1-beta5: Survival's battery limit (0.1 C) */
     int32_t no_high_stop;       /* 1.2-alpha17: Survival's 4.5 A stop turned off (a 6 A / 1 s backstop instead) */
+};
+
+/* 1.2-alpha22 (SBOS_P_HEAT): the last heating session's log (the state slot's heat log), summed up and in 60 time
+ * buckets oldest first (-32768 = no sample in that bucket): the hottest SoC and battery, the highest discharge
+ * current (0.1 A), the lowest voltage (mV). samples 0: no log. */
+#define SBOS_HEAT_LOG_PTS 60
+struct sbos_heat_log {
+    int32_t samples, secs, level, gpu_mhz, a55_mhz, m3_n;
+    int32_t peak_soc_c10, peak_bat_c10, peak_ma, min_mv, peak_mw;   /* peak_ma: discharge, positive */
+    int32_t unclean;                    /* the session ended without a stop (the power went) */
+    int32_t points;
+    char why[48];                       /* how it ended, when known */
+    int16_t soc[SBOS_HEAT_LOG_PTS], bat[SBOS_HEAT_LOG_PTS], amps10[SBOS_HEAT_LOG_PTS], mv[SBOS_HEAT_LOG_PTS];
 };
 
 enum { SOS_OFF = 0, SOS_FLASH = 1 };
@@ -378,6 +392,7 @@ static inline int file_list(const char *path, struct sbos_dirent *d, int max, in
         *total = r < 0 ? 0 : (int)(r >> 16);
     return r < 0 ? (int)r : (int)(r & 0xffff);
 }
+static inline int heat_log_get(struct sbos_heat_log *l) { return (int)sbos_call(SYS_HEAT_LOG, (uintptr_t)l, 0, 0, 0, 0); }
 static inline int wifi_state(struct sbos_wifi *s) { return (int)sbos_call(SYS_NET_STATE, (uintptr_t)s, 0, 0, 0, 0); }
 static inline int wifi_power(int on) { return (int)sbos_call(SYS_WIFI_POWER, (uint64_t)on, 0, 0, 0, 0); }
 /* 1.2-alpha21: the modem's status; on 1 asks the kernel to start it (its own confirmation screen first), 0 stops it */

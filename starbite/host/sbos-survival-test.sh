@@ -9,7 +9,7 @@ out="$root/starbite/out/sboshost"
 OPEN="w:300 g:1150,2310,0,700 w:400"
 HEAT="t:1057,663 w:600"
 SURV="t:723,1927 w:500"
-SURVX="g:720,2400,-1500,600 w:800 t:1184,1872 w:500 t:718,589 w:500"   # 1.2-alpha17: scrolled (the 4.5 A row)
+SURVX="g:720,2400,-1500,600 w:800 t:1184,1707 w:500 t:718,424 w:500"   # 1.2-alpha17: scrolled (the 4.5 A row); alpha22: 165 px up (Last session)
 BATLIM="t:723,2213 w:500"
 HOLD="g:720,1170,0,1900 w:400"
 OFF="t:720,330 w:600 t:220,670 w:600"   # 1.2-alpha5: the first tap leaves the white screen (on the Heat page: the title)
@@ -116,7 +116,7 @@ want "$r" "ocp probe: the M3 core did not report" "no M3 core: reported, nothing
 ST=/tmp/sbos-survival-state.bin         # in the VM: the Mac-shared folder showed a just-written slot late
 limactl shell starbite rm -f "$ST"
 ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_STATE=$ST"
-r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 t:1184,1872 w:600 g:720,2400,-1500,600 w:800 g:718,1594,0,1700 w:800 g:720,1170,0,1900 w:1500 w:12000)
+r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 t:1184,1707 w:600 g:720,2400,-1500,600 w:800 g:718,1300,0,1700 w:800 g:720,1170,0,1900 w:1500 w:12000)
 want "$r" "settings: Survival (trip off): NO SoC LIMIT (confirmed; saved)" "No limit: one hold, one confirmation"
 r=$(run $OPEN $HEAT w:600 s:nl-after)
 want "$r" "settings: Survival's SoC limit restored, 0.1 C: 0x00002706" "No limit remembered across a restart"
@@ -124,7 +124,7 @@ c=$(px nl-after 720 2000); echo "note: after the restart the Heat page was drawn
 # 1.2-alpha17: the 4.5 A stop's switch: one hold, one confirmation, remembered
 limactl shell starbite rm -f "$ST"
 ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_STATE=$ST"
-r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 g:718,1610,0,1700 w:800 g:720,1170,0,1900 w:1500 w:16000)
+r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 g:718,1445,0,1700 w:800 g:720,1170,0,1900 w:1500 w:16000)
 want "$r" "settings: Survival's 4.5 A stop: OFF (confirmed; saved; a 6 A / 1 s backstop stays)" "4.5 A stop off: asked once"
 r=$(run $OPEN $HEAT w:600)
 want "$r" "settings: Survival's current stops restored (bit 0: 4.5 A off, bit 1: 3.5 A off): 0x00000001" "and remembered"

@@ -65,6 +65,8 @@ scene light-led     w:300 $OPEN t:382,663 w:400 t:720,655 w:600
 scene heat          w:300 $OPEN t:1057,663 w:600
 scene heat-confirm  w:300 $OPEN t:1057,663 w:600 t:720,670 w:400
 scene heat-running  w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:25000
+# 1.2-alpha22: High for 20 s, Off, the page's end, Last session (the heat log)
+scene heat-log      w:300 $OPEN t:1057,663 w:600 t:720,670 w:400 g:720,1070,0,1900 w:20000 t:220,670 w:1500 g:720,2400,-1500,600 w:600 g:720,2400,-1500,600 w:600 t:720,2780 w:800
 scene heat-manual   w:300 $OPEN t:1057,663 w:600 t:1057,1302 w:500
 scene heat-manual-2 w:300 $OPEN t:1057,663 w:600 t:1057,1302 w:500 t:720,1150 w:300 t:720,1150 w:300
 scene heat-manual-scrolled w:300 $OPEN t:1057,663 w:600 t:1057,1302 w:500 g:720,2400,-1500,600 w:400
