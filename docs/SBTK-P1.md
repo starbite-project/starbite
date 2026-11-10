@@ -151,3 +151,19 @@ Licences: Inter / Inter Tight and Outfit are OFL (`tools/brand/fonts`); stb_true
 - **Host estimate** for P2c (uibench-1 ratios, four A55 at 1794 MHz, motion frames mean / p90): unlock 6.9 / 14.4 ms,
   the list 4.1 / 4.6, the focus sheet 7.5 / 14.7, holds 1.8 / 2.7.
 - **Not yet**: the apps from home, the Control Centre, Spotlight, Emergency mode, the power menu on a long press.
+
+### P2 on the phone, 2026-11-11 (self tests by the main session)
+
+| image | bake | unlock mean / max | list | focus open; frames mean / max | holds |
+|---|---|---|---|---|---|
+| P2d | 5.5 s | 8.6 / 27 ms | 6.7 / 41 | 1.2 s; 15.4 / 59 (34 of 59 over 16.7) | 1.8 / 6 |
+| P2e | 5.4 s | 7.7 / 27 | 6.4 / 25 | 0.87 s; 9.6 / 19 (18 of 88 over) | 1.6 / 6 |
+| P2f | 2.7 s | 7.7 / 27 | 6.4 / 25 | 0.41 s; 8.4 / 34 (3 of 101 over) | 1.6 / 6 |
+
+What moved them: cached glass faces, the card's backdrop from the half-resolution scrim, culling under opaque
+layers and nearest sampling in motion frames (P2e); the paired-row present, the frozen screen under the sheet,
+the bakes on four cores (P2f); the exact-2x path for half-resolution layers at rest (P2g, against the 25-34 ms
+first frames at rest). P2h fixed a clock that stayed on its first minute (a re-made layer restarted its content
+generation, so the compositor kept the old pixels: `sbtk-host clocktest` and the self test now check it) and added
+the Control Centre (1.54 against the concept) and home's second page (0.93); P2i the app zoom with the generic app
+screen (0.31-0.38; 0.90 half-way).
