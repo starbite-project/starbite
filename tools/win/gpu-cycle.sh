@@ -25,6 +25,7 @@
 #  5. Boots CLEAN_KEY (the combo3b firmware: no GPU interrupts, so sbwddm cannot go full mode; the guard says
 #     display-only anyway), which restarts itself cleanly at ~120 s; waits for the menu; back to TWRP.
 #  6. Checks the hive is clean, pulls OUT/post/SYSTEM, then sets Unattended=0 (unless --keep-unattended).
+# T32 keys (any mode that installs): --keys 1|off [--sas 0|1]; test cycles also --keys-selftest N (docs/WIN11-GPU.md 6.40).
 # --install-default STAGE OUT: the user's attended setup (no boot): full mode by default, the guard clears itself
 # after a boot with content on the panel, sbwdog only feeds. The phone ends in TWRP. Exit: 0 done; 1 usage or precondition (phone untouched or still in TWRP); 2 the phone
 # did not come back (it needs the user); 3 the hive is dirty (run --clean-only first); 4 an install read-back
@@ -45,8 +46,21 @@ esac
 out=${1:?usage: gpu-cycle.sh STAGE OUT [...]}; shift
 tkey=win11-gpu; ckey=win11-auto; keep=0
 full_sec=300
-while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --no-trace) notrace=1; shift;; --scan-flip) scan_flip=$2; shift 2;; --cached-blt) cached_blt=$2; shift 2;; --parallel-blt) par_blt=$2; shift 2;; --blt-no-drain) no_drain=$2; shift 2;; --full-sec) full_sec=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
+while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --no-trace) notrace=1; shift;; --scan-flip) scan_flip=$2; shift 2;; --cached-blt) cached_blt=$2; shift 2;; --parallel-blt) par_blt=$2; shift 2;; --blt-no-drain) no_drain=$2; shift 2;; --keys) keys=$2; shift 2;; --keys-selftest) keys_selftest=$2; shift 2;; --sas) sas=$2; shift 2;; --full-sec) full_sec=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
 case $full_sec in ''|*[!0-9]*) echo "--full-sec needs seconds"; exit 1;; esac
+# T32: sbkeys (Bixby held 3 s = clean restart; docs/WIN11-GPU.md 6.40). --keys 1 installs STAGE/sbkeys.sys as a
+# service (Start 2) with Enable=1; --keys off sets Enable=0; default: leave whatever is there. --keys-selftest N (test
+# cycles only): sbkeys "holds" Bixby itself from N s after it starts, so the test boot must end in ITS clean restart at
+# ~N+3 s, before sbwdog's. --sas 1: Volume Up + Power signals Global\StarbiteSasRequest (default 0).
+keys=${keys:-0}; keys_selftest=${keys_selftest:-0}; sas=${sas:-0}
+case $keys in 0|1|off) ;; *) echo "--keys 0|1|off"; exit 1;; esac
+case $keys_selftest in ''|*[!0-9]*) echo "--keys-selftest needs seconds"; exit 1;; esac
+case $sas in 0|1) ;; *) echo "--sas 0|1"; exit 1;; esac
+if [ "$keys_selftest" != 0 ]; then
+    [ "$keys" = 1 ] || { echo "--keys-selftest needs --keys 1"; exit 1; }
+    [ "$mode" = cycle ] || { echo "--keys-selftest is for test cycles only"; exit 1; }
+    [ "$keys_selftest" -ge 30 ] && [ "$keys_selftest" -le $((full_sec - 30)) ] || { echo "--keys-selftest 30..full-sec-30"; exit 1; }
+fi
 [ "$full_sec" -ge 120 ] && [ "$full_sec" -le 3600 ] || { echo "--full-sec 120..3600"; exit 1; }
 mkdir -p "$out"
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$out/cycle.log"; }
@@ -155,6 +169,26 @@ need_unattended() {  # the display-only boot restarts itself only with sbwdog in
     mount_ro; adb pull "$W/$HIVE" "$tmp/cur" >/dev/null; umount_w
     [ "$(wdog_param "$tmp/cur" Unattended)" = 1 ] || { log "sbwdog is not installed with Unattended=1: a display-only boot would not restart itself (run --measure from a clean hive first)"; exit 1; }
 }
+keys_report() {  # $1 = hive (T32: sbkeys' State, replayed over the logs when they are next to it)
+    local h=$1
+    [ "$keys" = 1 ] || return 0
+    if [ -f "$(dirname "$1")/SYSTEM.LOG1" ] && python3 "$main/tools/woa/hive-replay.py" "$1" "$1.keys-replayed" "$(dirname "$1")/SYSTEM.LOG1" "$(dirname "$1")/SYSTEM.LOG2" >/dev/null 2>&1; then
+        h=$1.keys-replayed
+    fi
+    python3 tools/woa/hive.py "$h" 'ControlSet001\Services\sbkeys\State' > "$1.sbkeys.txt" 2>&1 || true
+    log "sbkeys: $(grep -E 'Started|KillFile|MapFailed|PinsOk|Gpa0Con|Gpa2Con|Gpa0Dat|Gpa2Dat|ArmedAt|KeysSeen|Presses|RestartAt|RestartStatus|SasRequests|SasEvent|SelfTest' "$1.sbkeys.txt" | sed 's/DWORD 0x[0-9a-f]* //' | tr -s ' ' | tr '\n' ' ')"
+}
+smbios_report() {  # $1 = hive. T32: what Windows took from the firmware's SMBIOS (HardwareConfig\<LastConfig>:
+    # without SMBIOS only SystemBiosVersion 'EXYNOS - 1' 'EDK II - 10000'; with it BIOSVendor, SystemManufacturer...)
+    local h=$1 cfg
+    if [ -f "$(dirname "$1")/SYSTEM.LOG1" ] && python3 "$main/tools/woa/hive-replay.py" "$1" "$1.smb-replayed" "$(dirname "$1")/SYSTEM.LOG1" "$(dirname "$1")/SYSTEM.LOG2" >/dev/null 2>&1; then
+        h=$1.smb-replayed
+    fi
+    cfg=$(python3 tools/woa/hive.py "$h" 'HardwareConfig' 2>/dev/null | awk -F"'" '/LastConfig/ { print $2 }')
+    python3 tools/woa/hive.py "$h" "HardwareConfig\\$cfg" > "$1.smbios.txt" 2>&1 || true
+    python3 tools/woa/hive.py "$h" 'ControlSet001\Control\SystemInformation' >> "$1.smbios.txt" 2>&1 || true
+    log "smbios ($cfg): $(grep -E 'BIOSVendor|BIOSVersion|SystemBiosVersion|SystemManufacturer|SystemProductName|SystemFamily|ProcessorNameString' "$1.smbios.txt" | tr -s ' ' | tr '\n' ' ')"
+}
 gap_report() {  # $1 = hive
     python3 tools/woa/hive.py "$1" 'ControlSet001\Services\sbwdog\State' > "$1.sbwdog.txt" 2>&1 || true
     log "sbwdog: $(grep -E 'ArmedAtStart|GapMsAtStart|UptimeMsAtStart|WtDat |Mode |RestartAt|RestartStatus|CapAt|KillFile' "$1.sbwdog.txt" | sed 's/DWORD 0x[0-9a-f]* //' | tr -s ' ' | tr '\n' ' ')"
@@ -176,9 +210,25 @@ install() {
     # T17: small memory dumps on (the image had CrashDumpEnabled 0: T15's restart bugcheck left nothing to read)
     python3 "$HS" "$tmp/S2" "$tmp/S2d" crashdump 3 >/dev/null && mv "$tmp/S2d" "$tmp/S2"
     python3 "$HS" "$tmp/S2" "$tmp/S3" param sbwdog Unattended="${unattended:-1}" FullRestartSec="$full_sec" FullCapSec=$((full_sec + 60)) DisplayRestartSec=120 DisplayCapSec=180 >/dev/null
+    if [ "$keys" = 1 ]; then
+        [ -f "$stage/sbkeys.sys" ] || { umount_w; log "--keys 1: $stage has no sbkeys.sys"; exit 1; }
+        if ! python3 tools/woa/hive.py "$tmp/S3" 'ControlSet001\Services\sbkeys' 2>/dev/null | grep -q "Start"; then
+            python3 "$HS" "$tmp/S3" "$tmp/S3k" add sbkeys --start 2 --oneshot 0 --image 'System32\drivers\sbkeys.sys' --display "Starbite keys" >/dev/null
+            mv "$tmp/S3k" "$tmp/S3"
+        fi
+        python3 "$HS" "$tmp/S3" "$tmp/S3k" param sbkeys Enable=1 Sas="$sas" SelfTestSec="$keys_selftest" >/dev/null
+        mv "$tmp/S3k" "$tmp/S3"
+    elif [ "$keys" = off ] && python3 tools/woa/hive.py "$tmp/S3" 'ControlSet001\Services\sbkeys' 2>/dev/null | grep -q "Start"; then
+        python3 "$HS" "$tmp/S3" "$tmp/S3k" param sbkeys Enable=0 SelfTestSec=0 >/dev/null
+        mv "$tmp/S3k" "$tmp/S3"
+    fi
     local rc=0
     push_check "$tmp/S3" "$W/$HIVE" || rc=4
     push_check "$stage/sbwdog.sys" "$W/Windows/System32/drivers/sbwdog.sys" || rc=4
+    if [ "$keys" = 1 ]; then
+        push_check "$stage/sbkeys.sys" "$W/Windows/System32/drivers/sbkeys.sys" || rc=4
+        adb shell "rm -f $W/Windows/Starbite/sbkeys.off" >/dev/null
+    fi
     if [ "$1" = 1 ]; then
         push_check "$stage/sbwddm.sys" "$W/Windows/System32/drivers/sbwddm.sys" || rc=4
         [ -f "$stage/sbumd.dll" ] && { push_check "$stage/sbumd.dll" "$W/Windows/System32/sbumd.dll" || rc=4; }
@@ -208,6 +258,13 @@ install() {
 }
 finish() {  # after a clean display-only boot: disarm unless asked not to
     if [ $keep = 0 ]; then mount_rw; set_unattended 0 || true; umount_w; log "Unattended=0"; fi
+    if [ "$keys_selftest" != 0 ]; then   # T32: sbkeys clears it itself at load; this covers a test boot it never reached
+        mount_rw; adb pull "$W/$HIVE" "$tmp/SYSTEM" >/dev/null
+        if hive_clean "$tmp/SYSTEM" && python3 "$HS" "$tmp/SYSTEM" "$tmp/SYSTEM.k" param sbkeys SelfTestSec=0 >/dev/null; then
+            push_check "$tmp/SYSTEM.k" "$W/$HIVE" && log "sbkeys SelfTestSec=0"
+        else log "sbkeys SelfTestSec not cleared (hive dirty)"; fi
+        umount_w
+    fi
     log "done; phone in TWRP"
 }
 
@@ -223,6 +280,7 @@ install-default)
     cached_blt=${cached_blt:-0} # T26: cached blt-present reads only when asked (--cached-blt 1) until a cycle has proven them
     par_blt=${par_blt:-0}       # T27: blt copies split over the CPUs only when asked (--parallel-blt 1 or 2)
     no_drain=${no_drain:-0}     # T31: GDI blts overlap the GPU queue only when asked (--blt-no-drain 1)
+    keys_selftest=0             # T32: --keys 1 installs sbkeys for the user (Bixby held 3 s = clean restart)
     stage_gputest=$stage/gputest
     mount_rw
     if [ -d "$stage_gputest" ]; then stage_tmp=$(mktemp -d); cp "$stage"/*.sys "$stage"/*.dll "$stage_tmp"/ 2>/dev/null; stage=$stage_tmp; fi
@@ -336,6 +394,8 @@ install 1
 boot_and_return "$tkey" $((full_sec + 600)) "$out/pre"
 mount_ro
 pull_hive "$out/pre"
+# T32: a clean restart (sbwdog's or sbkeys') leaves the hive clean; a watchdog reset or a crash leaves it dirty
+if hive_clean "$out/pre/SYSTEM"; then log "the test boot's hive is clean (it ended in a clean restart)"; else log "the test boot's hive is DIRTY (no clean restart)"; fi
 mkdir -p "$out/pre/umdlog"
 adb pull "$W/ProgramData/Starbite/umdlog/." "$out/pre/umdlog/" >/dev/null 2>&1 || true
 adb shell "ls $W/Windows/Temp/ | grep '^sbumd-'" 2>/dev/null | tr -d '\r' | while read -r f; do adb pull "$W/Windows/Temp/$f" "$out/pre/umdlog/" >/dev/null 2>&1; done || true
@@ -356,5 +416,7 @@ fi
 umount_w
 log "pulled pre/ ($(du -sh "$out/pre" | cut -f1)); the values below are from the unreplayed hive"
 gap_report "$out/pre/SYSTEM"
+keys_report "$out/pre/SYSTEM"
+smbios_report "$out/pre/SYSTEM"
 clean_boot || { log "leaving Unattended=1: the hive is dirty (run --clean-only)"; exit 3; }
 finish

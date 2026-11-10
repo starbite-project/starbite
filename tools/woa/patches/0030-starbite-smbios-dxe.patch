@@ -1,0 +1,27 @@
+starbite: SMBIOS for Windows (Task Manager's CPU name): Star2LteSmbiosDxe (tools/woa/modules-smbios,
+copied into Platform/Star2LtePkg/Drivers by build-uefi.sh) builds the table and both entry points itself
+(edk2's SmbiosDxe does not fit the release's DXE slot). Built only
+with -D STAR2LTE_SMBIOS_DXE (+ STARBITE_SMBIOS_TYPE7=0|1), so builds without it are unchanged.
+docs/WIN11-GPU.md section 6.39; image recipe tools/woa/build-win-smbios.sh.
+
+--- a/Platform/Star2LtePkg/Star2LtePkg.dsc
++++ b/Platform/Star2LtePkg/Star2LtePkg.dsc
+@@ -394,3 +394,9 @@
+   MdeModulePkg/Bus/Scsi/ScsiBusDxe/ScsiBusDxe.inf
+   MdeModulePkg/Bus/Scsi/ScsiDiskDxe/ScsiDiskDxe.inf
++!ifdef STAR2LTE_SMBIOS_DXE
++  Platform/Star2LtePkg/Drivers/Star2LteSmbiosDxe/Star2LteSmbiosDxe.inf {
++    <BuildOptions>
++      *_*_*_CC_FLAGS = -DSTARBITE_SMBIOS_TYPE7=$(STARBITE_SMBIOS_TYPE7)
++  }
++!endif
+   MdeModulePkg/Universal/Disk/DiskIoDxe/DiskIoDxe.inf
+--- a/Platform/Star2LtePkg/Star2LtePkg.fdf
++++ b/Platform/Star2LtePkg/Star2LtePkg.fdf
+@@ -163,3 +163,6 @@
+   INF MdeModulePkg/Universal/Disk/UnicodeCollation/EnglishDxe/EnglishDxe.inf
+   INF FatPkg/EnhancedFatDxe/Fat.inf
++!ifdef STAR2LTE_SMBIOS_DXE
++  INF Platform/Star2LtePkg/Drivers/Star2LteSmbiosDxe/Star2LteSmbiosDxe.inf
++!endif
+   # TODO: USB stack for HID/keyboard + install media:

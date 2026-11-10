@@ -7,6 +7,12 @@ if not exist %D%\armed exit /b 0
 del %D%\armed
 cd /d %D%
 echo sb-gputest start %date% %time% >> gputest.log
+rem T32: what Windows made of the firmware's SMBIOS (Task Manager's CPU name is ProcessorNameString; the
+rem HARDWARE key is volatile, so it is in no hive); takes no time, runs before anything that could hang
+reg query "HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0" /v ProcessorNameString >> gputest.log 2>&1
+reg query "HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0" /v VendorIdentifier >> gputest.log 2>&1
+reg query "HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0" /v ~MHz >> gputest.log 2>&1
+reg query "HKLM\HARDWARE\DESCRIPTION\System\BIOS" >> gputest.log 2>&1
 rem give DWM and the session a moment to settle
 ping -n 16 127.0.0.1 > nul
 rem T23: a window drag, DWM fps and where the time goes; with Starbite link (sblinkd) running, then without

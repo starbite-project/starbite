@@ -4,7 +4,7 @@
 #
 #   starbite/win/build.sh [out-dir]          default: build/win-gpu (git-ignored)
 #
-# Out: sbthermal.sys (non-PnP service), sbdisplay.{sys,inf,cat} and sbmali.{sys,inf,cat} (PnP packages for
+# Out: sbthermal.sys, sbwdog.sys and sbkeys.sys (non-PnP services), sbdisplay.{sys,inf,cat} and sbmali.{sys,inf,cat} (PnP packages for
 # ACPI\STRB0072, one installed at a time), StarbiteGpu.aml,
 # all signed with the Starbite test certificate, plus SHA256SUMS.
 set -euo pipefail
@@ -23,6 +23,8 @@ export SB_SIGN_CERT=${SB_SIGN_CERT:-$main/build/woa/ufs-sys/sign/starbite-test.c
 # the dead-man feeder for unattended boots (the loader's cluster-1 watchdog), a boot-start service
 # T17: link maps next to the drivers, so a bugcheck address can be named (tools/win/kdump.py --map)
 LDFLAGS="/map:$out/sbwdog.map" "$win/build.sh" wdm "$out/sbwdog.sys" "$here/sbwdog/sbwdog.c"
+# the S9's keys (Bixby held: clean restart), a plain service like sbwdog (docs/WIN11-GPU.md 6.40)
+LDFLAGS="/map:$out/sbkeys.map" "$win/build.sh" wdm "$out/sbkeys.sys" "$here/sbkeys/sbkeys.c" "$here/sbkeys/sbk_core.c"
 LIBS="displib.lib ntstrsafe.lib libcntpr.lib" \
     "$win/build.sh" wdm "$out/sbdisplay.sys" "$here/sbdisplay/sbdisplay.c" "$here/sbdisplay/sbdc_core.c"
 
@@ -40,8 +42,8 @@ umd=$root/build/win/mesa/libgallium_d3d10-panfrost.dll
 
 cp "$here/sbdisplay/sbdisplay.inf" "$here/sbmali/sbmali.inf" "$w/sbwddm.inf" "$out/"
 # no image may branch to itself (T12's first sbmali did: an endless loop in a helper calling itself)
-"$win/check-selfloop.sh" "$out/sbthermal.sys" "$out/sbwdog.sys" "$out/sbdisplay.sys" "$out/sbmali.sys" "$out/sbwddm.sys"
-"$win/sign.sh" "$out/sbthermal.sys" "$out/sbwdog.sys" "$out/sbdisplay.sys" "$out/sbmali.sys" "$out/sbwddm.sys"
+"$win/check-selfloop.sh" "$out/sbthermal.sys" "$out/sbwdog.sys" "$out/sbkeys.sys" "$out/sbdisplay.sys" "$out/sbmali.sys" "$out/sbwddm.sys"
+"$win/sign.sh" "$out/sbthermal.sys" "$out/sbwdog.sys" "$out/sbkeys.sys" "$out/sbdisplay.sys" "$out/sbmali.sys" "$out/sbwddm.sys"
 if [ -f "$out/sbumd.dll" ]; then
     "$win/check-selfloop.sh" "$out/sbumd.dll"
     "$win/sign.sh" "$out/sbumd.dll"
@@ -57,4 +59,4 @@ done
 limactl shell starbite -- bash -c "cd '$out' && cp '$here/acpi/StarbiteGpu.asl' . && iasl -vs -p StarbiteGpu StarbiteGpu.asl >/dev/null && rm StarbiteGpu.asl"
 # stage 4's variant with the Mali's interrupt lines (sbwddm full mode)
 limactl shell starbite -- bash -c "cd '$out' && cp '$here/acpi/StarbiteGpu4.asl' . && iasl -vs -p StarbiteGpu4 StarbiteGpu4.asl >/dev/null && rm StarbiteGpu4.asl"
-(cd "$out" && shasum -a 256 sbthermal.sys sbwdog.sys sbdisplay.sys sbdisplay.inf sbdisplay.cat sbmali.sys sbmali.inf sbmali.cat sbwddm.sys sbwddm.inf $(cd "$out" && ls sbumd.dll sbwddm.cat 2>/dev/null) StarbiteGpu.aml StarbiteGpu4.aml > SHA256SUMS && cat SHA256SUMS)
+(cd "$out" && shasum -a 256 sbthermal.sys sbwdog.sys sbkeys.sys sbdisplay.sys sbdisplay.inf sbdisplay.cat sbmali.sys sbmali.inf sbmali.cat sbwddm.sys sbwddm.inf $(cd "$out" && ls sbumd.dll sbwddm.cat 2>/dev/null) StarbiteGpu.aml StarbiteGpu4.aml > SHA256SUMS && cat SHA256SUMS)

@@ -1481,6 +1481,96 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
     overlaps the GPU.
   - **`NeonCopy`:** an in-boot A/B of RtlCopyMemory against a 64-byte NEON row copy.
 
+### 6.39 T32a: the CPU name, SMBIOS in the firmware (2026-11-10)
+
+Task Manager's CPU label was empty because the woa release publishes no SMBIOS: there is no SmbiosDxe, and the
+`=FWTS A21` trace lists `acpi20=` only. The SYSTEM hive's `HardwareConfig\{0…0}` held only
+`SystemBiosVersion 'EXYNOS - 1' 'EDK II - 10000'`.
+
+**SmbiosDxe doesn't fit.** edk2's SmbiosDxe plus a platform module put the compressed DXE volume 3108 bytes over the
+release's fixed slot (0x51000). It was still 2496 bytes over with SerialDxe blanked. Nothing in UEFI consumes the
+SMBIOS protocol, since Windows reads the configuration tables.
+
+**One module instead: `Star2LteSmbiosDxe`** (`tools/woa/modules-smbios`).
+- `SmbiosBuild.c` writes the table byte by byte (portable).
+- `SmbiosPlatform.c` puts the table and both entry points in one page below 4 GiB (EfiRuntimeServicesData):
+  - SMBIOS 3.0 (`gEfiSmbios3TableGuid`);
+  - 2.1 (`gEfiSmbiosTableGuid`);
+  - version 3.3.
+- Depex: the CPU and Runtime architectural protocols.
+
+**The records:**
+
+| Type | Content |
+|---|---|
+| 0 | Starbite firmware, UEFI supported |
+| 1 | Samsung Galaxy S9 SM-G960F, family Galaxy S. No serial number; the UUID is zero (not present) |
+| 3 | Samsung, hand held |
+| 4 | **"Samsung Exynos 9810"**, ARMv8, MIDR_EL1, 4/4/4 cores/enabled/threads (the four A55s Windows runs, NUMPROC=4), max 1794 MHz, current 1690 MHz, external 26 MHz |
+| 7 | Only with `STARBITE_SMBIOS_TYPE7=1`. L1 D/I 32 KiB 4-way, L2 512 KiB 16-way (the CLIDR/CCSIDR measurement, WIN11-USB.md §10) |
+
+**Host test** (`modules-smbios/test/run.sh`): our own structure walk and checksums. Then dmidecode 3.5
+`--from-dump` decodes all four variants (3.0 or 2.1 entry point, each with and without caches) with no complaint.
+
+**Images** (`tools/woa/build-win-smbios.sh`): windows-t13b.uefi plus that one file.
+- `build/win/stage/windows-t32s-nocache.uefi` (c3e43fd2…, types 0/1/3/4).
+- `windows-t32s.uefi` (1e50bdd7…, with type 7).
+- Checks on both:
+  - identity rebuild of t13b's volume byte-identical;
+  - `dxe-diff`: SEC/PEI identical, only Star2LteSmbiosDxe added;
+  - bootshim identical.
+- The no-cache image comes first because the PPTT with the same caches bugchecked Windows (0x7E, unexplained).
+
+**What a cycle shows** (gpu-cycle.sh, T32):
+- A21 `smb3=… smb=…`.
+- `smbios (…): BIOSVendor 'Starbite' … SystemManufacturer 'Samsung' SystemProductName 'Galaxy S9'`.
+- The gputest now starts with `reg query …\CentralProcessor\0 /v ProcessorNameString`, which is Task Manager's
+  label. HARDWARE is volatile, so no hive holds it.
+
+### 6.40 T32b: the S9's keys under Windows, Bixby held = clean restart (sbkeys) (2026-11-10)
+
+The release's ACPI has no button device, so the keys did nothing in Windows. When the Start menu would not open
+(user, T30), there was no clean way to restart.
+
+**`sbkeys.sys` (starbite/win/sbkeys)** is a plain service like sbwdog (Type 1, Start 2).
+- **Why not KMDF/PnP with an SSDT:** the GPIO page 0x14050000 is already a memory resource of the release's touch
+  device TSP0, so a second device listing it would get a resource conflict. A PnP driver would also need a
+  driver-store install from inside Windows.
+- **The registers:** sbkeys maps the page with `MmMapIoSpaceEx(PAGE_READONLY | PAGE_NOCACHE)` and reads only GPA0
+  CON/DAT (0x20/0x24) and GPA2 CON/DAT (0x60/0x64). These are the loader's own key bits (shim/starlte/menu.c):
+  - Volume Up GPA0.3, Volume Down GPA0.4, Bixby GPA0.6, Power GPA2.4;
+  - active low;
+  - polled every 30 ms from a LOW_REALTIME thread.
+
+**Patterns** (`sbk_core.c`; host test `starbite/win/tests/keys_test.c`, 41 checks):
+- **Restart:** Bixby alone held 3 s → `NtShutdownSystem(ShutdownReboot)` from a second thread (sbwdog's clean
+  restart: hives and NTFS flushed), once per boot.
+- **Arming:** nothing counts until all keys have read released for 2 s in a row, so a pin stuck low can never
+  restart.
+- **Never a restart:**
+  - Bixby with any other key;
+  - Volume Down + Power (the ~7 s hardware force restart).
+- **Interrupted holds:** a poll gap over 500 ms drops a hold.
+- **Pin check:** a key pin that is not an input or EINT → sbkeys exits at start (PinsOk 0).
+- **Optional SAS** (Parameters\Sas=1, default 0): Volume Up + Power, all keys up within 1.5 s → signals
+  `Global\StarbiteSasRequest`. The SendSAS half belongs in sblinkd (link track, not edited here), plus the
+  SoftwareSASGeneration policy.
+
+**Off switches:**
+- `C:\Windows\Starbite\sbkeys.off`;
+- Parameters\Enable=0 (`gpu-cycle.sh --keys off`);
+- Start=4.
+
+**State** is in `Services\sbkeys\State`. **Unattended proof:** Parameters\SelfTestSec=N (one-shot) feeds "Bixby
+held" from N s.
+
+**gpu-cycle.sh** gets:
+- `--keys 1|off`, `--sas 0|1`, `--keys-selftest N`;
+- after the test boot, the lines `the test boot's hive is clean/DIRTY`, `sbkeys: …` and `smbios …`.
+
+Stage `build/win/stage/sbwddm-t32` = T31 + sbkeys.sys 4660b7c4 + the gputest's `reg query` lines. Its INSTALL.md
+has the run, the pass criteria and the install.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

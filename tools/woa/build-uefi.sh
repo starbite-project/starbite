@@ -22,6 +22,8 @@ cp -R ref/exynos9810-woa/firmware "$src"
 for p in ${PATCHES:-tools/woa/patches/*.patch}; do
     patch -s -d "$src" -p1 < "$p"
 done
+# modules kept as plain files; only their patch's DSC/FDF lines (under an !ifdef) build them
+cp -R tools/woa/modules-smbios/. "$src/Platform/Star2LtePkg/Drivers/"
 limactl shell starbite -- bash -c "
     set -e
     cd ~/work/edk2

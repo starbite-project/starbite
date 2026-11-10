@@ -12,3 +12,6 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -fsanitize=address,undefined \
 cc -std=c11 -Wall -Wextra -Werror -O1 -fsanitize=address,undefined \
     -o "$out-sbx" "$here/sbx_test.c" "$here/../sbwddm/sbx_cmd.c"
 "$out-sbx"
+cc -std=c11 -Wall -Wextra -Werror -O1 -fsanitize=address,undefined \
+    -o "$out-keys" "$here/keys_test.c" "$here/../sbkeys/sbk_core.c"
+"$out-keys"
