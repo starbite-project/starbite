@@ -106,7 +106,7 @@ void tk_glass_backdrop(tk_bmp *dst, const tk_bmp *src)
     tk_bmp_free(&q);
 }
 
-void tk_glass_bake(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow)
+void tk_glass_bake_ref(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow)
 {
     if (shadow)
         tk_box_shadow(b, x, y, w, h, r, 0, PT(10), PT(28), 0, TK_RGBA(0, 0, 0, .26f), 0);
@@ -177,8 +177,7 @@ void tk_glass_local(tk_bmp *b, const tk_bmp *src, float x, float y, float w, flo
     tk_bmp t;
     if (!tk_bmp_new(&t, W, H)) return;
     tk_bmp_copy(&t, 0, 0, src, X, Y, W, H);
-    tk_bmp_blur(&t, PT(14));
-    tk_bmp_satbright(&t, 1.9f, 1.06f);
+    tk_bmp_blur_sat(&t, PT(14), 1.9f, 1.06f);
     tk_fm m;
     if (tk_fm_new(&m, W, H)) {
         tk_fm_rrect(&m, (float)X, (float)Y, x, y, w, h, r);
@@ -236,4 +235,125 @@ float tk_bezier(float x1, float y1, float x2, float y2, float t)
     }
     float iu = 1 - u;
     return 3 * iu * iu * u * y1 + 3 * iu * u * u * y2 + u * u * u;
+}
+
+/* ---- the same recipe in one pass per pixel (the bake the phone uses) -------------------------------------------
+ * Everything .lg paints is a function of the pixel's signed distance to the rounded box (and of the box shifted by
+ * the rims' offsets), its position (the gradients) and, for the blurred parts, a gaussian of that distance: the
+ * drop shadow outside (0 10 28: sigma 14 pt, offset 10 pt) and the glow inside (inset 0 0 22: sigma 11 pt). The
+ * gaussian of a distance is exact along straight edges and close at the corners, which is where tk_glass_bake_ref
+ * (fill, blur and draw per part: about fifteen passes over the element) and this one differ, by a level or two. */
+static float PHI[1025];                     /* the standard normal CDF on [-4, 4] */
+static int phi_ok;
+static float phi(float x)
+{
+    if (!phi_ok) {
+        /* Abramowitz-Stegun 7.1.26 for erf */
+        for (int i = 0; i <= 1024; i++) {
+            float v = -4 + 8.0f * i / 1024, z = tk_fabsf(v) / 1.41421356f, t = 1 / (1 + .3275911f * z);
+            float e = 1 - (((((1.061405429f * t - 1.453152027f) * t) + 1.421413741f) * t - .284496736f) * t + .254829592f) * t * tk_expf(-z * z);
+            PHI[i] = .5f * (1 + (v < 0 ? -e : e));
+        }
+        phi_ok = 1;
+    }
+    if (x <= -4) return 0;
+    if (x >= 4) return 1;
+    float f = (x + 4) * 128;
+    int i = (int)f;
+    return PHI[i] + (PHI[i + 1] - PHI[i]) * (f - i);
+}
+static inline void over4(float *d, float r, float g, float b, float a)      /* premultiplied: d = s over d */
+{
+    d[0] = r + d[0] * (1 - a); d[1] = g + d[1] * (1 - a); d[2] = b + d[2] * (1 - a); d[3] = a + d[3] * (1 - a);
+}
+static inline void over_col(float *d, float cr, float cg, float cb, float a)  /* straight colour at alpha a */
+{
+    over4(d, cr * a, cg * a, cb * a, a);
+}
+void tk_glass_bake(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow)
+{
+    if (!b->px) return;
+    float sg = PT(14), sdy = PT(10), gg = PT(11), p1 = PT(1), r15 = PT(1.5f);
+    float mg = shadow ? 3 * sg + sdy + 2 : 2;
+    int X0 = tk_maxi(0, (int)tk_floorf(x - mg)), X1 = tk_mini(b->w, (int)(x + w + mg) + 1);
+    int Y0 = tk_maxi(0, (int)tk_floorf(y - mg + (shadow ? sdy : 0))), Y1 = tk_mini(b->h, (int)(y + h + mg) + 1);
+    if (shadow) Y0 = tk_maxi(0, (int)tk_floorf(y - 3 * sg + sdy) - 2);
+    /* the paints, as tk_glass_bake_ref sets them up */
+    tk_col tint = dark ? TK_RGBA(14, 22, 48, .42f) : TK_RGBA(36, 56, 120, .20f);
+    tk_stop g[3] = { { 0, TK_RGBA(255, 255, 255, dark ? .08f : .12f) }, { .46f, TK_RGBA(255, 255, 255, dark ? .02f : .035f) },
+                     { 1, TK_RGBA(255, 255, 255, dark ? .04f : .06f) } };
+    tk_paint pg = tk_linear(180, x, y, w, h, 3, g);
+    tk_stop s1[2] = { { 0, TK_RGBA(255, 255, 255, .24f) }, { .55f, TK_RGBA(0, 0, 0, 0) } };
+    tk_stop s2[2] = { { 0, TK_RGBA(160, 200, 255, .12f) }, { .6f, TK_RGBA(0, 0, 0, 0) } };
+    tk_paint q1 = tk_radial(1.1f, .7f, .18f, -.1f, x, y, w, h, 2, s1), q2 = tk_radial(.8f, .5f, 1.0f, 1.2f, x, y, w, h, 2, s2);
+    tk_stop e[5] = { { 0, TK_RGBA(255, 255, 255, .65f) }, { .28f, TK_RGBA(255, 255, 255, .08f) },
+                     { .5f, TK_RGBA(255, 255, 255, 0) }, { .72f, TK_RGBA(255, 255, 255, .08f) }, { 1, TK_RGBA(255, 255, 255, .45f) } };
+    tk_paint pe = tk_linear(140, x, y, w, h, 5, e);
+    /* the inner box for the 1 pt ring, per-corner radii shrunk as the reference does */
+    tk_r4 keep = tk_corner, inner = keep;
+    if (tk_use_r4) { inner.tl = tk_maxf(0, keep.tl - p1); inner.tr = tk_maxf(0, keep.tr - p1); inner.br = tk_maxf(0, keep.br - p1); inner.bl = tk_maxf(0, keep.bl - p1); }
+    for (int j = Y0; j < Y1; j++) {
+        float py = j + .5f;
+        tk_col grow = tk_paint_at(&pg, x + w / 2, py);          /* the vertical gradient: one colour per row */
+        for (int i = X0; i < X1; i++) {
+            float px = i + .5f;
+            float sd = tk_sd_rrect(px, py, x, y, w, h, r);
+            float cov = tk_clampf(.5f - sd, 0, 1);
+            float out[4] = { 0, 0, 0, 0 };
+            if (shadow && cov < 1) {
+                /* the drop shadow: the box moved down 10 pt, blurred; only outside the box (as Chrome clips it) */
+                float ss = tk_sd_rrect(px, py - sdy, x, y, w, h, r);
+                float a = .26f * phi(-ss / sg) * (1 - cov);
+                if (a > 1.0f / 1024) over_col(out, 0, 0, 0, a);
+            }
+            if (cov > 0) {
+                float f[4] = { 0, 0, 0, 0 };
+                over_col(f, tint.r, tint.g, tint.b, tint.a);
+                over4(f, grow.r, grow.g, grow.b, grow.a);
+                /* inset glow (the hole blurred: deeper than 3 sigma it is gone) */
+                if (-sd < 3 * gg) {
+                    float a = .05f * (1 - phi(-sd / gg));
+                    over_col(f, 255, 255, 255, a);
+                }
+                /* the rims: the box minus the box moved by the offset (the bottom rim: up 1 pt; the top: down 1.5 pt) */
+                if (py > y + h - 4 * p1) {
+                    float hb = tk_clampf(.5f - tk_sd_rrect(px, py + p1, x, y, w, h, r), 0, 1);
+                    float a = .12f * (1 - hb);
+                    if (a > 0) over_col(f, 255, 255, 255, a);
+                }
+                if (py < y + 4 * r15 || sd > -3 * r15) {
+                    float ht = tk_clampf(.5f - tk_sd_rrect(px, py - r15, x, y, w, h, r), 0, 1);
+                    float a = .42f * (1 - ht);
+                    if (a > 0) over_col(f, 255, 255, 255, a);
+                }
+                tk_col c2 = tk_paint_at(&q2, px, py), c1 = tk_paint_at(&q1, px, py);
+                over4(f, c2.r, c2.g, c2.b, c2.a);
+                over4(f, c1.r, c1.g, c1.b, c1.a);
+                /* the 1 pt gradient ring */
+                if (sd > -p1 - 1) {
+                    if (tk_use_r4) tk_corner = inner;
+                    float ci = tk_clampf(.5f - tk_sd_rrect(px, py, x + p1, y + p1, w - 2 * p1, h - 2 * p1, tk_maxf(0, r - p1)), 0, 1);
+                    if (tk_use_r4) tk_corner = keep;
+                    float ring = 1 - ci;
+                    if (ring > 0) {
+                        tk_col ce = tk_paint_at(&pe, px, py);
+                        over4(f, ce.r * ring, ce.g * ring, ce.b * ring, ce.a * ring);
+                    }
+                }
+                over4(out, f[0] * cov, f[1] * cov, f[2] * cov, f[3] * cov);
+            }
+            if (out[3] <= 0) continue;
+            uint32_t *d = &b->px[j * b->stride + i], o = *d;
+            float ia = 1 - out[3], A = out[3] + (o >> 24) / 255.0f * ia;
+            int R = (int)(out[0] + (o >> 16 & 255) * ia + .5f), G = (int)(out[1] + (o >> 8 & 255) * ia + .5f), B = (int)(out[2] + (o & 255) * ia + .5f);
+            int Aq = (int)(A * 255 + .5f);
+            Aq = Aq > 255 ? 255 : Aq;
+            R = R > Aq ? Aq : R; G = G > Aq ? Aq : G; B = B > Aq ? Aq : B;
+            *d = (uint32_t)Aq << 24 | (uint32_t)R << 16 | (uint32_t)G << 8 | (uint32_t)B;
+            if (mask && mask->v && i < mask->w && j < mask->h && cov > 0) {
+                int v = (int)(cov * 255 + .5f);
+                if (v > mask->v[j * mask->w + i]) mask->v[j * mask->w + i] = (uint8_t)v;
+            }
+        }
+    }
 }

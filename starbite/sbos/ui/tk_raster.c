@@ -96,7 +96,7 @@ tk_r4 tk_corner = { 0, 0, 0, 0 };
 int tk_use_r4;
 
 /* the signed distance to a rounded box with radii per corner (CSS border-radius after its scaling rule) */
-static float sd_rrect(float px, float py, float x, float y, float w, float h, float r)
+float tk_sd_rrect(float px, float py, float x, float y, float w, float h, float r)
 {
     float tl = r, tr = r, br = r, bl = r;
     if (tk_use_r4) { tl = tk_corner.tl; tr = tk_corner.tr; br = tk_corner.br; bl = tk_corner.bl; }
@@ -131,7 +131,7 @@ void tk_fm_rrect(tk_fm *m, float ox, float oy, float x, float y, float w, float 
         for (int i = a; i < b; i++) row[i] = 1;
         for (int i = x0; i < x1; i++) {
             if (i == a) { i = b - 1; continue; }
-            float c = tk_clampf(0.5f - sd_rrect(i + 0.5f + ox, py, x, y, w, h, r), 0, 1);
+            float c = tk_clampf(0.5f - tk_sd_rrect(i + 0.5f + ox, py, x, y, w, h, r), 0, 1);
             if (c > row[i]) row[i] = c;
         }
     }
@@ -379,10 +379,14 @@ static void box_mirror(float *v, float *t, int n, int r)
     tk_memcpy(v, t, (size_t)n * 4);
 }
 static void bmp_blur_full(tk_bmp *b, float sigma);
-void tk_bmp_blur(tk_bmp *b, float sigma)
+void tk_bmp_blur(tk_bmp *b, float sigma) { tk_bmp_blur_sat(b, sigma, 1, 1); }
+void tk_bmp_blur_sat(tk_bmp *b, float sigma, float sat, float bright)
 {
-    if (sigma < 0.3f) return;
-    if (sigma < 8 || b->w < 16 || b->h < 16) { bmp_blur_full(b, sigma); return; }
+    /* the blur, then CSS saturate / brightness; for a wide blur both at a quarter of the resolution (the result
+     * is smooth: the filter commutes with the bilinear up to within a level) */
+    int filt = sat != 1 || bright != 1;
+    if (sigma < 0.3f) { if (filt) tk_bmp_satbright(b, sat, bright); return; }
+    if (sigma < 8 || b->w < 16 || b->h < 16) { bmp_blur_full(b, sigma); if (filt) tk_bmp_satbright(b, sat, bright); return; }
     /* as tk_fm_blur: a wide gaussian at a quarter of the resolution, then bilinear up */
     tk_bmp a, q;
     if (!tk_bmp_new(&a, (b->w + 1) / 2, (b->h + 1) / 2)) { bmp_blur_full(b, sigma); return; }
@@ -390,6 +394,7 @@ void tk_bmp_blur(tk_bmp *b, float sigma)
     tk_bmp_down2(&a, b);
     tk_bmp_down2(&q, &a);
     bmp_blur_full(&q, sigma / 4);
+    if (filt) tk_bmp_satbright(&q, sat, bright);
     for (int j = 0; j < b->h; j++) {
         float fy = (j + .5f) / 4 - .5f;
         int ya = (int)tk_floorf(fy);

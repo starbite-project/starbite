@@ -61,6 +61,7 @@ tk_col tk_paint_at(const tk_paint *p, float x, float y);       /* premultiplied 
 typedef struct { float tl, tr, br, bl; } tk_r4;
 extern tk_r4 tk_corner;            /* per-corner radii for every rounded box while tk_use_r4 (else the r given) */
 extern int tk_use_r4;
+float tk_sd_rrect(float px, float py, float x, float y, float w, float h, float r);   /* signed distance */
 void tk_fm_clear(tk_fm *m, float v);
 void tk_fm_rrect(tk_fm *m, float ox, float oy, float x, float y, float w, float h, float r);   /* max-combine AA */
 void tk_fm_circle(tk_fm *m, float ox, float oy, float cx, float cy, float r);
@@ -82,6 +83,7 @@ void tk_blit(tk_bmp *dst, const tk_bmp *src, int x, int y, float alpha);
 void tk_blit_tinted(tk_bmp *dst, const tk_bmp *src, int x, int y, tk_col tint);   /* src alpha x tint colour */
 /* CSS filters on a premultiplied region: blur (gaussian sigma px, edges mirrored), saturate, brightness */
 void tk_bmp_blur(tk_bmp *b, float sigma);
+void tk_bmp_blur_sat(tk_bmp *b, float sigma, float sat, float bright);
 void tk_bmp_satbright(tk_bmp *b, float sat, float bright);
 void tk_bmp_copy(tk_bmp *dst, int dx, int dy, const tk_bmp *src, int sx, int sy, int w, int h);
 void tk_bmp_down2(tk_bmp *dst, const tk_bmp *src);              /* 2x2 box (premultiplied) */
@@ -119,6 +121,7 @@ void tk_glass_backdrop(tk_bmp *dst, const tk_bmp *src);
  * rims and glow, the specular radials and the 1 pt gradient border; dark = .lg.dark. Its backdrop mask (the shape's
  * coverage) goes into mask (same frame as b) if given. */
 void tk_glass_bake(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow);
+void tk_glass_bake_ref(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow);   /* the layered one */
 /* the glass's backdrop filter applied in place to what b already holds under the shape (glass inside a backdrop
  * root, as the lock list's cards: Chrome filters only the list's own content, not the wallpaper) */
 void tk_glass_local(tk_bmp *dst, const tk_bmp *src, float x, float y, float w, float h, float r);
