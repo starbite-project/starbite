@@ -621,3 +621,7 @@ Guard v15 (free-run builds only):
 
 Images: `starbite-uefi-m3all3g.bin` (SOLO, 0f038088...) and **`windows-big3g.uefi`** (e5000b31...: the win11 row's
 firmware with only Star2LteSsdtDxe swapped, outer FV grown as big3-1794).
+
+**ACPM ownership closed (01:3x):** sbwddm never used the DVFS queue (PMIC channel 2 only). The channel-0 writer was
+sbthermal's A55 governor; GPU session T34 (sbthermal db7ef111) stands it down on big-core boots (non-A55 CPU or a live
+arbiter). With T34 installed the guard is the only channel-0 writer on big-core boots.
