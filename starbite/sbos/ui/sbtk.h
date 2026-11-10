@@ -62,6 +62,11 @@ typedef struct { float tl, tr, br, bl; } tk_r4;
 extern tk_r4 tk_corner;            /* per-corner radii for every rounded box while tk_use_r4 (else the r given) */
 extern int tk_use_r4;
 float tk_sd_rrect(float px, float py, float x, float y, float w, float h, float r);   /* signed distance */
+float tk_sd_rrect4(float px, float py, float x, float y, float w, float h, const tk_r4 *k);
+tk_r4 tk_radii(float w, float h, float r);
+/* the platform's parallel run (set it to the compositor's); tk_par_rows splits [y0, y1) into 8 bands over it */
+extern void (*tk_par)(void (*fn)(void *, int), void *arg, int n);
+void tk_par_rows(int y0, int y1, void (*fn)(void *, int, int), void *ctx);
 void tk_fm_clear(tk_fm *m, float v);
 void tk_fm_rrect(tk_fm *m, float ox, float oy, float x, float y, float w, float h, float r);   /* max-combine AA */
 void tk_fm_circle(tk_fm *m, float ox, float oy, float cx, float cy, float r);

@@ -96,12 +96,10 @@ void tk_fm_clear(tk_fm *m, float v) { for (int i = 0; i < m->w * m->h; i++) m->v
 tk_r4 tk_corner = { 0, 0, 0, 0 };
 int tk_use_r4;
 
-/* the signed distance to a rounded box with radii per corner (CSS border-radius after its scaling rule) */
-float tk_sd_rrect(float px, float py, float x, float y, float w, float h, float r)
+/* the signed distance to a rounded box with explicit radii per corner */
+float tk_sd_rrect4(float px, float py, float x, float y, float w, float h, const tk_r4 *k)
 {
-    float tl = r, tr = r, br = r, bl = r;
-    if (tk_use_r4) { tl = tk_corner.tl; tr = tk_corner.tr; br = tk_corner.br; bl = tk_corner.bl; }
-    else { float m = tk_minf(w, h) / 2; if (r > m) tl = tr = br = bl = m; }
+    float tl = k->tl, tr = k->tr, br = k->br, bl = k->bl;
     float cx, cy, rr = -1;
     if (px < x + tl && py < y + tl) { cx = x + tl; cy = y + tl; rr = tl; }
     else if (px > x + w - tr && py < y + tr) { cx = x + w - tr; cy = y + tr; rr = tr; }
@@ -112,6 +110,35 @@ float tk_sd_rrect(float px, float py, float x, float y, float w, float h, float 
         return tk_sqrtf(dx * dx + dy * dy) - rr;
     }
     return tk_maxf(tk_maxf(x - px, px - (x + w)), tk_maxf(y - py, py - (y + h)));
+}
+/* the radii a box draws with: per corner while tk_use_r4, else r (CSS scaling: at most half the shorter side) */
+tk_r4 tk_radii(float w, float h, float r)
+{
+    if (tk_use_r4) return tk_corner;
+    float m = tk_minf(w, h) / 2;
+    if (r > m) r = m;
+    return (tk_r4){ r, r, r, r };
+}
+float tk_sd_rrect(float px, float py, float x, float y, float w, float h, float r)
+{
+    tk_r4 k = tk_radii(w, h, r);
+    return tk_sd_rrect4(px, py, x, y, w, h, &k);
+}
+
+/* the platform's parallel run (the kernel: the four A55); NULL runs the bands here */
+void (*tk_par)(void (*fn)(void *, int), void *arg, int n);
+typedef struct { void (*fn)(void *, int, int); void *ctx; int y0, y1; } rows_job;
+static void rows_band(void *a, int i)
+{
+    rows_job *J = a;
+    int h = J->y1 - J->y0, y0 = J->y0 + h * i / 8, y1 = J->y0 + h * (i + 1) / 8;
+    if (y1 > y0) J->fn(J->ctx, y0, y1);
+}
+void tk_par_rows(int y0, int y1, void (*fn)(void *, int, int), void *ctx)
+{
+    rows_job J = { fn, ctx, y0, y1 };
+    if (tk_par && y1 - y0 >= 64) tk_par(rows_band, &J, 8);
+    else fn(ctx, y0, y1);
 }
 void tk_fm_rrect(tk_fm *m, float ox, float oy, float x, float y, float w, float h, float r)
 {

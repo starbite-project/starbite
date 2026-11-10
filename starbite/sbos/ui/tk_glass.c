@@ -7,6 +7,24 @@
 
 static const tk_col WHITE0 = { 255, 255, 255, 0 };
 
+typedef struct { tk_bmp *b; float k; const tk_paint *lin, *L[3]; } wall_ctx;
+static void wall_rows(void *a, int y0, int y1)
+{
+    wall_ctx *W = a;
+    tk_bmp *b = W->b;
+    for (int j = y0; j < y1; j++)
+        for (int i = 0; i < b->w; i++) {
+            float x = (i + .5f) / W->k, y = (j + .5f) / W->k;
+            tk_col c = tk_paint_at(W->lin, x, y);
+            for (int q = 0; q < 3; q++) {
+                tk_col s = tk_paint_at(W->L[q], x, y);
+                c.r = s.r + c.r * (1 - s.a); c.g = s.g + c.g * (1 - s.a); c.b = s.b + c.b * (1 - s.a);
+            }
+            int R = (int)(c.r + .5f), G = (int)(c.g + .5f), B = (int)(c.b + .5f);
+            b->px[j * b->stride + i] = 0xff000000u | (uint32_t)(R > 255 ? 255 : R) << 16 | (uint32_t)(G > 255 ? 255 : G) << 8 | (uint32_t)(B > 255 ? 255 : B);
+        }
+}
+
 void tk_wall_draw(tk_bmp *b, int emergency, float k)
 {
     /* .wall: inset -30 pt, so the gradient box is 450 x 862 pt from (-30, -30) */
@@ -30,18 +48,8 @@ void tk_wall_draw(tk_bmp *b, int emergency, float k)
         r2 = tk_radial(.9f, .6f, .08f, .96f, bx, by, bw, bh, 2, c);
         r3 = tk_solid(TK_RGBA(0, 0, 0, 0));
     }
-    for (int j = 0; j < b->h; j++)
-        for (int i = 0; i < b->w; i++) {
-            float x = (i + .5f) / k, y = (j + .5f) / k;
-            tk_col c = tk_paint_at(&lin, x, y);
-            const tk_paint *L[3] = { &r3, &r2, &r1 };
-            for (int k = 0; k < 3; k++) {
-                tk_col s = tk_paint_at(L[k], x, y);
-                c.r = s.r + c.r * (1 - s.a); c.g = s.g + c.g * (1 - s.a); c.b = s.b + c.b * (1 - s.a);
-            }
-            int R = (int)(c.r + .5f), G = (int)(c.g + .5f), B = (int)(c.b + .5f);
-            b->px[j * b->stride + i] = 0xff000000u | (uint32_t)(R > 255 ? 255 : R) << 16 | (uint32_t)(G > 255 ? 255 : G) << 8 | (uint32_t)(B > 255 ? 255 : B);
-        }
+    wall_ctx W = { b, k, &lin, { &r3, &r2, &r1 } };
+    tk_par_rows(0, b->h, wall_rows, &W);
 }
 
 static void bilinear_up(tk_bmp *dst, const tk_bmp *src)
@@ -69,20 +77,16 @@ static void bilinear_up(tk_bmp *dst, const tk_bmp *src)
     }
 }
 
-void tk_bmp_up(tk_bmp *dst, const tk_bmp *src, int x0, int y0, float f)
+typedef struct { tk_bmp *dst; const tk_bmp *src; int y0; float f; const int32_t *cu; } up_ctx;
+static void up_rows(void *a, int ja, int jb)
 {
-    /* dst px (i, j) = the bilinear sample of src at the point (x0 + i, y0 + j) of a space f times src's; fixed
-     * point (16.16), the columns' table made once */
-    if (!dst->px || !src->px) return;
-    int32_t *cu = tk_alloc((size_t)dst->w * 8);
-    if (!cu) return;
-    for (int i = 0; i < dst->w; i++) {
-        float fx = (x0 + i + .5f) / f - .5f;
-        int xa = (int)tk_floorf(fx);
-        cu[2 * i] = xa;
-        cu[2 * i + 1] = (int32_t)((fx - xa) * 256);
-    }
-    for (int j = 0; j < dst->h; j++) {
+    up_ctx *U = a;
+    tk_bmp *dst = U->dst;
+    const tk_bmp *src = U->src;
+    int y0 = U->y0;
+    float f = U->f;
+    const int32_t *cu = U->cu;
+    for (int j = ja; j < jb; j++) {
         float fy = (y0 + j + .5f) / f - .5f;
         int ya = (int)tk_floorf(fy);
         unsigned ty = (unsigned)((fy - ya) * 256);
@@ -103,6 +107,23 @@ void tk_bmp_up(tk_bmp *dst, const tk_bmp *src, int x0, int y0, float f)
             o[i] = rb | ag;
         }
     }
+}
+
+void tk_bmp_up(tk_bmp *dst, const tk_bmp *src, int x0, int y0, float f)
+{
+    /* dst px (i, j) = the bilinear sample of src at the point (x0 + i, y0 + j) of a space f times src's; fixed
+     * point (16.16), the columns' table made once */
+    if (!dst->px || !src->px) return;
+    int32_t *cu = tk_alloc((size_t)dst->w * 8);
+    if (!cu) return;
+    for (int i = 0; i < dst->w; i++) {
+        float fx = (x0 + i + .5f) / f - .5f;
+        int xa = (int)tk_floorf(fx);
+        cu[2 * i] = xa;
+        cu[2 * i + 1] = (int32_t)((fx - xa) * 256);
+    }
+    up_ctx U = { dst, src, y0, f, cu };
+    tk_par_rows(0, dst->h, up_rows, &U);
     tk_free(cu);
 }
 
@@ -182,18 +203,19 @@ void tk_glass_bake_ref(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float 
     }
 }
 
-void tk_glass_local_put(tk_bmp *b, const tk_bmp *t, int X, int Y, float x, float y, float w, float h, float r)
+typedef struct { tk_bmp *b; const tk_bmp *t; const tk_fm *m; int X, Y; } put_ctx;
+static void put_rows(void *a, int ja, int jb)
 {
-    /* t (the filtered backdrop, its px (0, 0) at b's (X, Y)) over b inside the rounded box */
-    int W = t->w, H = t->h;
-    tk_fm m;
-    if (!tk_fm_new(&m, W, H)) return;
-    tk_fm_rrect(&m, (float)X, (float)Y, x, y, w, h, r);
-    for (int j = 0; j < H; j++) {
+    put_ctx *P = a;
+    tk_bmp *b = P->b;
+    const tk_bmp *t = P->t;
+    const tk_fm *m = P->m;
+    int X = P->X, Y = P->Y, W = t->w;
+    for (int j = ja; j < jb; j++) {
         int by = Y + j;
         if (by < 0 || by >= b->h) continue;
         for (int i = 0; i < W; i++) {
-            unsigned c = (unsigned)(m.v[j * W + i] * 255 + .5f);
+            unsigned c = (unsigned)(m->v[j * W + i] * 255 + .5f);
             int bx = X + i;
             if (!c || bx < 0 || bx >= b->w) continue;
             uint32_t sp = t->px[j * t->stride + i], *d = &b->px[by * b->stride + bx], o = *d, res = 0;
@@ -205,6 +227,17 @@ void tk_glass_local_put(tk_bmp *b, const tk_bmp *t, int X, int Y, float x, float
             *d = res;
         }
     }
+}
+
+void tk_glass_local_put(tk_bmp *b, const tk_bmp *t, int X, int Y, float x, float y, float w, float h, float r)
+{
+    /* t (the filtered backdrop, its px (0, 0) at b's (X, Y)) over b inside the rounded box */
+    int W = t->w, H = t->h;
+    tk_fm m;
+    if (!tk_fm_new(&m, W, H)) return;
+    tk_fm_rrect(&m, (float)X, (float)Y, x, y, w, h, r);
+    put_ctx P = { b, t, &m, X, Y };
+    tk_par_rows(0, t->h, put_rows, &P);
     tk_fm_free(&m);
 }
 
@@ -291,73 +324,57 @@ static inline void over_col(float *d, float cr, float cg, float cb, float a)  /*
 {
     over4(d, cr * a, cg * a, cb * a, a);
 }
-void tk_glass_bake(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow)
+typedef struct {
+    tk_bmp *b; tk_a8 *mask;
+    float x, y, w, h, r, sg, sdy, gg, p1, r15;
+    int X0, X1, shadow;
+    tk_r4 R, Ri;                            /* the box's radii and the 1 pt ring's inner ones */
+    tk_col tint;
+    tk_paint pg, q1, q2, pe;
+} gbake;
+
+static void gbake_rows(void *a, int Y0, int Y1)
 {
-    if (!b->px) return;
-    float sg = PT(14), sdy = PT(10), gg = PT(11), p1 = PT(1), r15 = PT(1.5f);
-    float mg = shadow ? 3 * sg + sdy + 2 : 2;
-    int X0 = tk_maxi(0, (int)tk_floorf(x - mg)), X1 = tk_mini(b->w, (int)(x + w + mg) + 1);
-    int Y0 = tk_maxi(0, (int)tk_floorf(y - mg + (shadow ? sdy : 0))), Y1 = tk_mini(b->h, (int)(y + h + mg) + 1);
-    if (shadow) Y0 = tk_maxi(0, (int)tk_floorf(y - 3 * sg + sdy) - 2);
-    /* the paints, as tk_glass_bake_ref sets them up */
-    tk_col tint = dark ? TK_RGBA(14, 22, 48, .42f) : TK_RGBA(36, 56, 120, .20f);
-    tk_stop g[3] = { { 0, TK_RGBA(255, 255, 255, dark ? .08f : .12f) }, { .46f, TK_RGBA(255, 255, 255, dark ? .02f : .035f) },
-                     { 1, TK_RGBA(255, 255, 255, dark ? .04f : .06f) } };
-    tk_paint pg = tk_linear(180, x, y, w, h, 3, g);
-    tk_stop s1[2] = { { 0, TK_RGBA(255, 255, 255, .24f) }, { .55f, TK_RGBA(0, 0, 0, 0) } };
-    tk_stop s2[2] = { { 0, TK_RGBA(160, 200, 255, .12f) }, { .6f, TK_RGBA(0, 0, 0, 0) } };
-    tk_paint q1 = tk_radial(1.1f, .7f, .18f, -.1f, x, y, w, h, 2, s1), q2 = tk_radial(.8f, .5f, 1.0f, 1.2f, x, y, w, h, 2, s2);
-    tk_stop e[5] = { { 0, TK_RGBA(255, 255, 255, .65f) }, { .28f, TK_RGBA(255, 255, 255, .08f) },
-                     { .5f, TK_RGBA(255, 255, 255, 0) }, { .72f, TK_RGBA(255, 255, 255, .08f) }, { 1, TK_RGBA(255, 255, 255, .45f) } };
-    tk_paint pe = tk_linear(140, x, y, w, h, 5, e);
-    /* the inner box for the 1 pt ring, per-corner radii shrunk as the reference does */
-    tk_r4 keep = tk_corner, inner = keep;
-    if (tk_use_r4) { inner.tl = tk_maxf(0, keep.tl - p1); inner.tr = tk_maxf(0, keep.tr - p1); inner.br = tk_maxf(0, keep.br - p1); inner.bl = tk_maxf(0, keep.bl - p1); }
+    gbake *G = a;
+    tk_bmp *b = G->b;
+    tk_a8 *mask = G->mask;
+    float x = G->x, y = G->y, w = G->w, h = G->h, sg = G->sg, sdy = G->sdy, gg = G->gg, p1 = G->p1, r15 = G->r15;
     for (int j = Y0; j < Y1; j++) {
         float py = j + .5f;
-        tk_col grow = tk_paint_at(&pg, x + w / 2, py);          /* the vertical gradient: one colour per row */
-        for (int i = X0; i < X1; i++) {
+        tk_col grow = tk_paint_at(&G->pg, x + w / 2, py);      /* the vertical gradient: one colour per row */
+        for (int i = G->X0; i < G->X1; i++) {
             float px = i + .5f;
-            float sd = tk_sd_rrect(px, py, x, y, w, h, r);
+            float sd = tk_sd_rrect4(px, py, x, y, w, h, &G->R);
             float cov = tk_clampf(.5f - sd, 0, 1);
             float out[4] = { 0, 0, 0, 0 };
-            if (shadow && cov < 1) {
+            if (G->shadow && cov < 1) {
                 /* the drop shadow: the box moved down 10 pt, blurred; only outside the box (as Chrome clips it) */
-                float ss = tk_sd_rrect(px, py - sdy, x, y, w, h, r);
-                float a = .26f * phi(-ss / sg) * (1 - cov);
-                if (a > 1.0f / 1024) over_col(out, 0, 0, 0, a);
+                float ss = tk_sd_rrect4(px, py - sdy, x, y, w, h, &G->R);
+                float al = .26f * phi(-ss / sg) * (1 - cov);
+                if (al > 1.0f / 1024) over_col(out, 0, 0, 0, al);
             }
             if (cov > 0) {
                 float f[4] = { 0, 0, 0, 0 };
-                over_col(f, tint.r, tint.g, tint.b, tint.a);
+                over_col(f, G->tint.r, G->tint.g, G->tint.b, G->tint.a);
                 over4(f, grow.r, grow.g, grow.b, grow.a);
-                /* inset glow (the hole blurred: deeper than 3 sigma it is gone) */
-                if (-sd < 3 * gg) {
-                    float a = .05f * (1 - phi(-sd / gg));
-                    over_col(f, 255, 255, 255, a);
-                }
+                if (-sd < 3 * gg) over_col(f, 255, 255, 255, .05f * (1 - phi(-sd / gg)));   /* the inset glow */
                 /* the rims: the box minus the box moved by the offset (the bottom rim: up 1 pt; the top: down 1.5 pt) */
                 if (py > y + h - 4 * p1) {
-                    float hb = tk_clampf(.5f - tk_sd_rrect(px, py + p1, x, y, w, h, r), 0, 1);
-                    float a = .12f * (1 - hb);
-                    if (a > 0) over_col(f, 255, 255, 255, a);
+                    float hb = tk_clampf(.5f - tk_sd_rrect4(px, py + p1, x, y, w, h, &G->R), 0, 1);
+                    if (hb < 1) over_col(f, 255, 255, 255, .12f * (1 - hb));
                 }
                 if (py < y + 4 * r15 || sd > -3 * r15) {
-                    float ht = tk_clampf(.5f - tk_sd_rrect(px, py - r15, x, y, w, h, r), 0, 1);
-                    float a = .42f * (1 - ht);
-                    if (a > 0) over_col(f, 255, 255, 255, a);
+                    float ht = tk_clampf(.5f - tk_sd_rrect4(px, py - r15, x, y, w, h, &G->R), 0, 1);
+                    if (ht < 1) over_col(f, 255, 255, 255, .42f * (1 - ht));
                 }
-                tk_col c2 = tk_paint_at(&q2, px, py), c1 = tk_paint_at(&q1, px, py);
+                tk_col c2 = tk_paint_at(&G->q2, px, py), c1 = tk_paint_at(&G->q1, px, py);
                 over4(f, c2.r, c2.g, c2.b, c2.a);
                 over4(f, c1.r, c1.g, c1.b, c1.a);
-                /* the 1 pt gradient ring */
-                if (sd > -p1 - 1) {
-                    if (tk_use_r4) tk_corner = inner;
-                    float ci = tk_clampf(.5f - tk_sd_rrect(px, py, x + p1, y + p1, w - 2 * p1, h - 2 * p1, tk_maxf(0, r - p1)), 0, 1);
-                    if (tk_use_r4) tk_corner = keep;
+                if (sd > -p1 - 1) {                 /* the 1 pt gradient ring */
+                    float ci = tk_clampf(.5f - tk_sd_rrect4(px, py, x + p1, y + p1, w - 2 * p1, h - 2 * p1, &G->Ri), 0, 1);
                     float ring = 1 - ci;
                     if (ring > 0) {
-                        tk_col ce = tk_paint_at(&pe, px, py);
+                        tk_col ce = tk_paint_at(&G->pe, px, py);
                         over4(f, ce.r * ring, ce.g * ring, ce.b * ring, ce.a * ring);
                     }
                 }
@@ -366,17 +383,48 @@ void tk_glass_bake(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, f
             if (out[3] <= 0) continue;
             uint32_t *d = &b->px[j * b->stride + i], o = *d;
             float ia = 1 - out[3], A = out[3] + (o >> 24) / 255.0f * ia;
-            int R = (int)(out[0] + (o >> 16 & 255) * ia + .5f), G = (int)(out[1] + (o >> 8 & 255) * ia + .5f), B = (int)(out[2] + (o & 255) * ia + .5f);
+            int R = (int)(out[0] + (o >> 16 & 255) * ia + .5f), Gc = (int)(out[1] + (o >> 8 & 255) * ia + .5f), B = (int)(out[2] + (o & 255) * ia + .5f);
             int Aq = (int)(A * 255 + .5f);
             Aq = Aq > 255 ? 255 : Aq;
-            R = R > Aq ? Aq : R; G = G > Aq ? Aq : G; B = B > Aq ? Aq : B;
-            *d = (uint32_t)Aq << 24 | (uint32_t)R << 16 | (uint32_t)G << 8 | (uint32_t)B;
+            R = R > Aq ? Aq : R; Gc = Gc > Aq ? Aq : Gc; B = B > Aq ? Aq : B;
+            *d = (uint32_t)Aq << 24 | (uint32_t)R << 16 | (uint32_t)Gc << 8 | (uint32_t)B;
             if (mask && mask->v && i < mask->w && j < mask->h && cov > 0) {
                 int v = (int)(cov * 255 + .5f);
                 if (v > mask->v[j * mask->w + i]) mask->v[j * mask->w + i] = (uint8_t)v;
             }
         }
     }
+}
+
+void tk_glass_bake(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow)
+{
+    if (!b->px) return;
+    (void)phi(0);                           /* the table, before any band uses it */
+    gbake G;
+    G.b = b; G.mask = mask; G.x = x; G.y = y; G.w = w; G.h = h; G.r = r; G.shadow = shadow;
+    G.sg = PT(14); G.sdy = PT(10); G.gg = PT(11); G.p1 = PT(1); G.r15 = PT(1.5f);
+    float mg = shadow ? 3 * G.sg + G.sdy + 2 : 2;
+    G.X0 = tk_maxi(0, (int)tk_floorf(x - mg)); G.X1 = tk_mini(b->w, (int)(x + w + mg) + 1);
+    int Y0 = tk_maxi(0, (int)tk_floorf(y - (shadow ? 3 * G.sg - G.sdy : 0) - 2)), Y1 = tk_mini(b->h, (int)(y + h + mg) + 1);
+    G.R = tk_radii(w, h, r);
+    G.Ri = (tk_r4){ tk_maxf(0, G.R.tl - G.p1), tk_maxf(0, G.R.tr - G.p1), tk_maxf(0, G.R.br - G.p1), tk_maxf(0, G.R.bl - G.p1) };
+    if (!tk_use_r4) {                       /* the reference's inner box: r - 1 pt, then CSS-scaled to its own size */
+        float ri = tk_maxf(0, r - G.p1), m = tk_minf(w - 2 * G.p1, h - 2 * G.p1) / 2;
+        if (ri > m) ri = m;
+        G.Ri = (tk_r4){ ri, ri, ri, ri };
+    }
+    G.tint = dark ? TK_RGBA(14, 22, 48, .42f) : TK_RGBA(36, 56, 120, .20f);
+    tk_stop g[3] = { { 0, TK_RGBA(255, 255, 255, dark ? .08f : .12f) }, { .46f, TK_RGBA(255, 255, 255, dark ? .02f : .035f) },
+                     { 1, TK_RGBA(255, 255, 255, dark ? .04f : .06f) } };
+    G.pg = tk_linear(180, x, y, w, h, 3, g);
+    tk_stop s1[2] = { { 0, TK_RGBA(255, 255, 255, .24f) }, { .55f, TK_RGBA(0, 0, 0, 0) } };
+    tk_stop s2[2] = { { 0, TK_RGBA(160, 200, 255, .12f) }, { .6f, TK_RGBA(0, 0, 0, 0) } };
+    G.q1 = tk_radial(1.1f, .7f, .18f, -.1f, x, y, w, h, 2, s1);
+    G.q2 = tk_radial(.8f, .5f, 1.0f, 1.2f, x, y, w, h, 2, s2);
+    tk_stop e[5] = { { 0, TK_RGBA(255, 255, 255, .65f) }, { .28f, TK_RGBA(255, 255, 255, .08f) },
+                     { .5f, TK_RGBA(255, 255, 255, 0) }, { .72f, TK_RGBA(255, 255, 255, .08f) }, { 1, TK_RGBA(255, 255, 255, .45f) } };
+    G.pe = tk_linear(140, x, y, w, h, 5, e);
+    tk_par_rows(Y0, Y1, gbake_rows, &G);
 }
 
 void tk_glass_from_half(tk_bmp *b, int box, int boy, const tk_bmp *half, float x, float y, float w, float h, float r)

@@ -103,7 +103,7 @@ static void relayer(tk_layer *l) { tk_layer_dirty(l); tk_bmp_free(&l->bmp); tk_a
 
 /* ---- state ------------------------------------------------------------------------------------------------- */
 static tk_layer root, home, lockflat, lockg, mark, glyph_c, glyph_o, list, etool, hint, homebar;
-static tk_layer focus, scrim, fgrp, fcard, ffill, flabel, fthumb, boot, bootc, bootbar;
+static tk_layer focus, funder, scrim, fgrp, fcard, ffill, flabel, fthumb, boot, bootc, bootbar;
 typedef struct {
     tk_layer face, facelit, icon, iconlit, ring, grp;
     tk_bmp ringbuf;
@@ -662,6 +662,15 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         tk_bmp_free(&q);
     }
     scrim.opaque = 1;                        /* nothing under it needs drawing once it is fully in */
+    /* what is under the sheet does not change while it is open: the screen as it is now (the half canvas follows
+     * every rest frame), one opaque layer, so a frame draws it and the scrim instead of every lock layer */
+    relayer(&funder);
+    tk_layer_init(&funder, "focus-under");
+    if (tk_bmp_new(&funder.bmp, TK_W / 2, TK_H / 2)) {
+        tk_bmp_copy(&funder.bmp, 0, 0, &C->half, 0, 0, TK_W / 2, TK_H / 2);
+        funder.sx = funder.sy = 2;
+        funder.opaque = 1;
+    }
     /* the card: its backdrop is the scrim filtered again (blur 14, saturate 1.9, brightness 1.06), taken once at
      * rest and moved with the card while it springs in (Chrome filters the live scene under it each frame) */
     float sy = 0;
@@ -744,6 +753,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     tk_layer_add(&fgrp, &flabel);
     tk_layer_add(&fgrp, &fthumb);
     focus.child = 0;
+    if (funder.bmp.px) tk_layer_add(&focus, &funder);
     tk_layer_add(&focus, &scrim);
     tk_layer_add(&focus, &fgrp);
     focus_sys = s;
@@ -1274,7 +1284,7 @@ int sh_tick(float dt, float t)
                 boot.opaque = 1;
                 boot.solid_w = TK_W;
                 boot.solid_h = TK_H;
-                dc d = mk(&bootc, "boot-content", 100, 300, 190, 175, 0, 0);
+                dc d = mk(&bootc, "boot-content", 0, 300, 390, 175, 0, 0);
                 char tn[40] = "t66-";
                 tk_memcpy(tn + 4, focus_sys->k, tk_strlen(focus_sys->k) + 1);
                 d_icon(&d, tn, 162, 315, 1);

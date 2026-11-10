@@ -304,6 +304,7 @@ void next_kinit(void)
     }
 #ifndef SBOS_NEXT_ONECORE
     comp.par = kpar;
+    tk_par = kpar;                                   /* the bakes' row loops too */
 #endif
     /* the bake one step per loop turn (the watchdog is fed between them; the screen fills in); the top step from
      * the second step on, once the kernel's interrupts and ACPM are up */
@@ -317,6 +318,7 @@ static void bake_step(void)
 {
     hw_wdt_feed();
     boost(1);
+    workers_start();
     if (sh_init_step()) {
         tk_comp_frame(&comp, 0, 1);
         present();
@@ -327,6 +329,7 @@ static void bake_step(void)
     status_now();
     ready = need_full = 1;
     boost(0);
+    kt_set(KT_UI, 23, sb_ms(), 5000, 0);            /* the workers off after 5 s unless a finger comes */
     struct ub u;
     ub_init(&u);
     ub_s(&u, "next: ready; the bake took ");

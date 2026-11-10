@@ -194,7 +194,7 @@ static void row_glass(uint32_t *d, const uint32_t *b, const uint8_t *m, int n, u
 /* per band scratch: a frame's rows are split into bands that run on several cores at once */
 #define TK_NBAND 8
 typedef struct {
-    uint32_t rowbuf[TK_W + 16], vrow[TK_W + 16], bwrow[TK_W + 16], upV[TK_W / 2 + 32];
+    uint32_t rowbuf[TK_W + 16], vrow[TK_W + 16], bwrow[TK_W + 16], upV[TK_W / 2 + 32], upB[TK_W / 2 + 32];
     uint8_t maskbuf[TK_W + 16], mrow[TK_W + 16];
     int colu[TK_W + 16];
     uint16_t colw[TK_W + 16];
@@ -440,52 +440,71 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
 }
 
 /* ---- 2x up: a half-resolution image into an output rect (any parity) of a full one, 1/4 3/4 bilinear -------- */
+/* one output row from its vertical blend V (padded: V[i0 - 1] .. V[i1]): 3/4 V[k] + 1/4 the left / right neighbour */
+static inline void up2x_hrow(uint32_t *o, const uint32_t *V, int X0, int X1)
+{
+    int X = X0;
+    if (X & 1) {                                     /* an odd first px: the right half of its pair */
+        int k = X >> 1;
+        uint32_t a = V[k], e = V[k + 1], r = 0;
+        for (int sh = 0; sh < 32; sh += 8) r |= ((3 * (a >> sh & 255) + (e >> sh & 255) + 2) >> 2) << sh;
+        o[X++] = r;
+    }
+    for (; X + 16 <= X1; X += 16) {                  /* 16 px (64 bytes) a step: whole write-combining bursts */
+        int k = X >> 1;
+        uint8x16_t c0 = vld1q_u8((const uint8_t *)(V + k)), l0 = vld1q_u8((const uint8_t *)(V + k - 1)), r0 = vld1q_u8((const uint8_t *)(V + k + 1));
+        uint8x16_t c1 = vld1q_u8((const uint8_t *)(V + k + 4)), l1 = vld1q_u8((const uint8_t *)(V + k + 3)), r1 = vld1q_u8((const uint8_t *)(V + k + 5));
+        uint32x4x2_t a = vzipq_u32(vreinterpretq_u32_u8(vrhaddq_u8(c0, vrhaddq_u8(c0, l0))), vreinterpretq_u32_u8(vrhaddq_u8(c0, vrhaddq_u8(c0, r0))));
+        uint32x4x2_t b = vzipq_u32(vreinterpretq_u32_u8(vrhaddq_u8(c1, vrhaddq_u8(c1, l1))), vreinterpretq_u32_u8(vrhaddq_u8(c1, vrhaddq_u8(c1, r1))));
+        uint32x4x4_t w = { { a.val[0], a.val[1], b.val[0], b.val[1] } };
+        vst1q_u32_x4(o + X, w);
+    }
+    for (; X + 8 <= X1; X += 8) {
+        int k = X >> 1;
+        uint8x16_t Vc = vld1q_u8((const uint8_t *)(V + k)), Vl = vld1q_u8((const uint8_t *)(V + k - 1)), Vr = vld1q_u8((const uint8_t *)(V + k + 1));
+        uint32x4x2_t t = vzipq_u32(vreinterpretq_u32_u8(vrhaddq_u8(Vc, vrhaddq_u8(Vc, Vl))), vreinterpretq_u32_u8(vrhaddq_u8(Vc, vrhaddq_u8(Vc, Vr))));
+        vst1q_u32(o + X, t.val[0]);
+        vst1q_u32(o + X + 4, t.val[1]);
+    }
+    for (; X < X1; X++) {
+        int k = X >> 1;
+        uint32_t a = V[k], e = V[X & 1 ? k + 1 : k - 1], r = 0;
+        for (int sh = 0; sh < 32; sh += 8) r |= ((3 * (a >> sh & 255) + (e >> sh & 255) + 2) >> 2) << sh;
+        o[X] = r;
+    }
+}
+
 static void up2x_out(tk_bmp *dst, const tk_bmp *h, tk_irect R, scr *S)
 {
-    uint32_t *upV = S->upV;
-    /* per output row: the vertical blend (3/4 its half row + 1/4 the half row above or below) into a padded temp
-     * row, then each output px 3/4 its half px + 1/4 the left or right neighbour: 3 loads per 4 half px */
+    /* per half row j: the two vertical blends (3/4 row j + 1/4 the row above, for output row 2j; + 1/4 the row
+     * below, for 2j + 1) from one pass over its three rows, then each output row horizontally */
     R = isect(R, (tk_irect){ 0, 0, dst->w, dst->h });
     if (iempty(R)) return;
     int i0 = tk_maxi(0, (R.x0 >> 1) - 1), i1 = tk_mini(h->w, ((R.x1 - 1) >> 1) + 2);
-    uint32_t *V = upV + 8 - i0;                     /* V[i] for i in [i0 - 1, i1] */
-    for (int Y = R.y0; Y < R.y1; Y++) {
-        int j = Y >> 1, jn = Y & 1 ? tk_mini(h->h - 1, j + 1) : tk_maxi(0, j - 1);
-        j = tk_mini(j, h->h - 1);
-        const uint32_t *c = h->px + (size_t)j * h->stride, *n = h->px + (size_t)jn * h->stride;
+    uint32_t *T = S->upV + 8 - i0, *B = S->upB + 8 - i0;   /* [i0 - 1, i1] */
+    for (int j = R.y0 >> 1; 2 * j < R.y1; j++) {
+        int jj = tk_mini(j, h->h - 1), ju = tk_maxi(0, jj - 1), jd = tk_mini(h->h - 1, jj + 1);
+        int top = 2 * j >= R.y0, bot = 2 * j + 1 < R.y1;
+        const uint32_t *c = h->px + (size_t)jj * h->stride, *u = h->px + (size_t)ju * h->stride, *d = h->px + (size_t)jd * h->stride;
         int i = i0;
         for (; i + 4 <= i1; i += 4) {
-            uint8x16_t C = vld1q_u8((const uint8_t *)(c + i)), N = vld1q_u8((const uint8_t *)(n + i));
-            vst1q_u8((uint8_t *)(V + i), vrhaddq_u8(C, vrhaddq_u8(C, N)));
+            uint8x16_t C = vld1q_u8((const uint8_t *)(c + i));
+            if (top) vst1q_u8((uint8_t *)(T + i), vrhaddq_u8(C, vrhaddq_u8(C, vld1q_u8((const uint8_t *)(u + i)))));
+            if (bot) vst1q_u8((uint8_t *)(B + i), vrhaddq_u8(C, vrhaddq_u8(C, vld1q_u8((const uint8_t *)(d + i)))));
         }
         for (; i < i1; i++) {
-            uint32_t o = 0;
-            for (int sh = 0; sh < 32; sh += 8) o |= ((3 * (c[i] >> sh & 255) + (n[i] >> sh & 255) + 2) >> 2) << sh;
-            V[i] = o;
+            uint32_t ot = 0, ob = 0;
+            for (int sh = 0; sh < 32; sh += 8) {
+                ot |= ((3 * (c[i] >> sh & 255) + (u[i] >> sh & 255) + 2) >> 2) << sh;
+                ob |= ((3 * (c[i] >> sh & 255) + (d[i] >> sh & 255) + 2) >> 2) << sh;
+            }
+            T[i] = ot;
+            B[i] = ob;
         }
-        V[i0 - 1] = V[i0];
-        V[i1] = V[i1 - 1];
-        uint32_t *o = dst->px + (size_t)Y * dst->stride;
-        int X = R.x0;
-        if (X & 1) {                                 /* an odd first px: the right half of its pair */
-            int k = X >> 1;
-            uint32_t a = V[k], e = V[k + 1], r = 0;
-            for (int sh = 0; sh < 32; sh += 8) r |= ((3 * (a >> sh & 255) + (e >> sh & 255) + 2) >> 2) << sh;
-            o[X++] = r;
-        }
-        for (; X + 8 <= R.x1; X += 8) {
-            int k = X >> 1;
-            uint8x16_t Vc = vld1q_u8((const uint8_t *)(V + k)), Vl = vld1q_u8((const uint8_t *)(V + k - 1)), Vr = vld1q_u8((const uint8_t *)(V + k + 1));
-            uint32x4x2_t t = vzipq_u32(vreinterpretq_u32_u8(vrhaddq_u8(Vc, vrhaddq_u8(Vc, Vl))), vreinterpretq_u32_u8(vrhaddq_u8(Vc, vrhaddq_u8(Vc, Vr))));
-            vst1q_u32(o + X, t.val[0]);
-            vst1q_u32(o + X + 4, t.val[1]);
-        }
-        for (; X < R.x1; X++) {
-            int k = X >> 1;
-            uint32_t a = V[k], e = V[X & 1 ? k + 1 : k - 1], r = 0;
-            for (int sh = 0; sh < 32; sh += 8) r |= ((3 * (a >> sh & 255) + (e >> sh & 255) + 2) >> 2) << sh;
-            o[X] = r;
-        }
+        T[i0 - 1] = T[i0]; T[i1] = T[i1 - 1];
+        B[i0 - 1] = B[i0]; B[i1] = B[i1 - 1];
+        if (top) up2x_hrow(dst->px + (size_t)(2 * j) * dst->stride, T, R.x0, R.x1);
+        if (bot) up2x_hrow(dst->px + (size_t)(2 * j + 1) * dst->stride, B, R.x0, R.x1);
     }
 }
 
