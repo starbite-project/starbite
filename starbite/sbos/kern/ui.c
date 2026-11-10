@@ -13,6 +13,7 @@
 #include "sbui_w.h"
 #include "kern.h"
 #include "kinput.h"
+#include "catalog.h"
 #ifdef SB_HOST
 #include <stdio.h>
 #include <stdlib.h>
@@ -782,6 +783,98 @@ static const char *const wd[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "
 static const char *const mn[12] = { "January", "February", "March", "April", "May", "June", "July", "August",
                                     "September", "October", "November", "December" };
 
+/* 1.2-alpha25 (the user: "at the starbite lock screen, the os dropdowns are like notifications ... use the lock screen
+ * to pick your os"): the other OSes as cards, read from the store's catalog (read only, once). A hold on a card asks;
+ * yes = the loader's one-shot next boot (the SBNEXT2! mailbox) and a restart: nothing is written to the store. In a
+ * self test or on the host it is a dry run (logged, no restart). The loader's own menu stays as it was. */
+#define OSC_MAX 5
+static struct { char key[24], name[32]; } osc[OSC_MAX];
+static int osc_n = -1, osc_pending = -1;
+
+static void osc_load(void)
+{
+    if (osc_n >= 0)
+        return;
+    osc_n = 0;
+    unsigned n = cat_count();
+    for (unsigned pass = 0; pass < 2; ++pass)        /* the stable and daily entries first, then the rest */
+        for (unsigned i = 0; i < n && osc_n < OSC_MAX; ++i) {
+            const struct cat_ent *c = cat_get(i);
+            if (!c || !c->key[0] || (c->flags & CF_HIDDEN) || c->category == CAT_LAB || c->tag == TAG_LAB ||
+                c->tag == TAG_EXPERIMENTAL || !sb_strcmp_eq(c->key, "starbite-os"))
+                continue;
+            int first = c->tag == TAG_STABLE || c->tag == TAG_DAILY;
+            if (first != (pass == 0))
+                continue;
+            scopy(osc[osc_n].key, sizeof(osc[osc_n].key), c->key);
+            scopy(osc[osc_n].name, sizeof(osc[osc_n].name), c->name[0] ? c->name : c->key);
+            ++osc_n;
+        }
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "lock: OS cards from the catalog");
+    ub_s(&u, cat_builtin() ? " (built in): " : ": ");
+    ub_dec(&u, (uint64_t)osc_n);
+    sb_log(u.b);
+}
+
+static void osc_done(int ok)
+{
+    int i = osc_pending;
+    osc_pending = -1;
+    screen = SCR_LOCK;
+    full = dirty = 1;
+    if (!ok || i < 0 || i >= osc_n) {
+        sb_log("lock: OS card: not restarted");
+        return;
+    }
+    struct ub u;
+    ub_init(&u);
+#ifdef SB_HOST
+    int dry = 1;
+#else
+    int dry = sbos_selftest_enabled;
+#endif
+    ub_s(&u, dry ? "lock: OS card: would restart into " : "lock: OS card: restarting into ");
+    ub_s(&u, osc[i].key);
+    ub_s(&u, dry ? " (a dry run: the self test / the host)" : " (the loader's one-shot next boot)");
+    sb_log(u.b);
+    if (!dry)
+        power_boot_os(osc[i].key);
+}
+
+static void osc_pick(int i)
+{
+    if (i < 0 || i >= osc_n)
+        return;
+    static char title[48], l1[128];
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "Restart into ");
+    ub_s(&u, osc[i].name);
+    ub_c(&u, '?');
+    scopy(title, sizeof(title), u.b);
+    ub_init(&u);
+    ub_s(&u, "Starbite OS closes and the loader starts ");
+    ub_s(&u, osc[i].name);
+    ub_s(&u, " once.");
+    scopy(l1, sizeof(l1), u.b);
+    osc_pending = i;
+    kui_confirm(title, l1, "Nothing is changed: the next power-on starts as before.",
+                "To come back, restart and pick Starbite OS in the loader's menu.", "Hold to restart", osc_done);
+}
+
+/* 1.2-alpha25: the self test's lock-screen step: the first card picked and confirmed (a dry run there: logged) */
+int kui_test_os_card(void)
+{
+    osc_load();
+    if (osc_n <= 0)
+        return 0;
+    osc_pick(0);
+    osc_done(1);
+    return osc_n;
+}
+
 static void build_lock(void)
 {
     struct el *e = add(cur, &ncur, E_CLOCK);
@@ -846,8 +939,33 @@ static void build_lock(void)
         e->ms = ms[i];
         e->x = 110 + i * 430, e->y = 2130, e->w = 360, e->h = 450;   /* the box holds the 169 px ring */
     }
+    /* 1.2-alpha25: Emergency Mode in and out (heat and the power features live there), then the other OSes as
+     * notification cards (a hold each; fewer when the medical card shows) */
+    if (!pocket_lock) {
+        e = add(cur, &ncur, E_HOLD);
+        e->id = 4;
+        scopy(e->a, sizeof(e->a), look_emergency ? "Leave Emergency mode" : "Emergency mode");
+        e->flags = UI_RED;
+        e->ms = 500;
+        e->x = 110, e->w = UI_W - 220, e->h = 130;
+        e->y = 1310;
+    }
+    osc_load();
+    int info_card = app_by_id("info") >= 0 && !sb_strcmp_eq(app_tile(app_by_id("info")), "Emergency card");
+    int cmax = info_card ? 2 : OSC_MAX - 1;
+    int ncard = osc_n > cmax ? cmax : osc_n;
+    for (int i = 0; i < ncard && !pocket_lock; ++i) {
+        e = add(cur, &ncur, E_HOLD);
+        e->id = 10U + (uint32_t)i;
+        scopy(e->a, sizeof(e->a), osc[i].name);
+        e->ms = 500;
+        e->x = 110, e->w = UI_W - 220, e->h = 130;
+        e->y = (info_card ? 1850 : 1460) + i * 150;
+    }
     e = add(cur, &ncur, E_CTEXT);
-    scopy(e->b, sizeof(e->b), pocket_lock ? "Heating: touch is locked. Press Power" : "Hold a button");
+    scopy(e->b, sizeof(e->b), pocket_lock ? "Heating: touch is locked. Press Power" :
+                              osc_n > 0 ? "Swipe up to unlock  " U_DOT "  hold a card for another OS" :
+                                          "Swipe up to unlock, or hold a button");
     e->value = F_SMALL;
     e->color = pocket_lock ? C_L1 : C_L3;
     e->x = 0, e->y = 2660, e->w = UI_W, e->h = 80;
@@ -2446,6 +2564,12 @@ static void lock_pick(int id)
         light_on(SBOS_COLOR_WHITE, SCR_LOCK, 10);
     else if (id == 1)
         sos_set(1);
+    else if (id >= 10 && id < 10 + OSC_MAX)
+        osc_pick(id - 10);                  /* 1.2-alpha25: another OS */
+    else if (id == 4) {                     /* 1.2-alpha25: Emergency mode in / out, from the lock screen */
+        kui_set_emergency(!look_emergency);
+        full = dirty = 1;
+    }
     else if (id == 3 && app_by_id("info") >= 0) {
         /* the medical card, read only: the app is told (EV_APP_SHOW value 1) and Back returns here */
         kui_open_app(app_by_id("info"));
@@ -2604,6 +2728,13 @@ void ui_kevent(const void *evp)
             pressed = -1;
             press_y = -1;
             dirty = 1;
+            break;
+        }
+        if (screen == SCR_LOCK && !pocket_lock && press_y >= UI_H - 560 && press_y - ev->y >= 600) {
+            press_y = -1;                   /* 1.2-alpha25: swipe up from the bottom unlocks (as an iPhone) */
+            pressed = -1;
+            sb_log("ui: unlocked by a swipe up");
+            kui_home();
             break;
         }
         if (pressed < 0 && press_y >= 0 && press_y < UI_STATUS_H + 20 && ev->y < UI_STATUS_H + 200) {

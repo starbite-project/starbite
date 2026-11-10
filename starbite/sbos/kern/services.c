@@ -551,6 +551,19 @@ void power_restart(int to_menu)
     sb_boot_next("starbite-os");
 }
 
+/* 1.2-alpha25: the lock screen's OS card: everything off as for a restart, then the loader starts that key once */
+void power_boot_os(const char *key)
+{
+    torch_set(0);
+    kmodem_stop("Restarting");
+    wifi_power(0);
+    guest_power_off();
+    heater_stop_all("Restarting");
+    heater_trip_restore_now();
+    sb_mdelay(200);
+    sb_boot_next(key);
+}
+
 /* 1.2-alpha1: the Linux self-test image's end: everything off as for a restart, then TWRP (pmsg) */
 void power_restart_recovery(void)
 {

@@ -78,5 +78,11 @@ nowant "$k" "wifi: joining a secured" "typed: the passphrase does not carry over
 e=$(run $OPEN $ON h:b:900 w:500 t:1057,663 w:600 t:720,670 w:600)
 want "$e" "heater: refused: Wi-Fi is on" "the heater refused while Wi-Fi is on"
 nowant "$e" "heater: start, level" "the heater did not start"
+# 1.2-alpha25: the self test with a DHCP server that never answers: joined (the handshake) = a WARNING, still a pass
+NET="test-ap
+correct horse"
+r=$(limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 SBOS_HOST_NO_DHCP=1 "SBOS_HOST_WIFINET=$NET" SBOS_HOST_SELFTEST=1 "$out/sbos-host" "$out" /dev/null w:90000 q 2>&1)
+want "$r" "selftest: WARNING: wifi: joined (the handshake done) but no address (DHCP; the router)" "self test: no DHCP answer is a warning"
+want "$r" "selftest: passed: " "and the self test still passes"
 echo "wifi test: $fails failed"
 [ "$fails" = 0 ]

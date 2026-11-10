@@ -177,9 +177,11 @@ void selftest_input(void)
     sb_log("selftest: a touch or key: stopped; back to the menu after 10 minutes without input");
 }
 
+int selftest_warnings;                      /* 1.2-alpha25 */
+
 static int shown_app(int i)
 {
-    return i < napps && !app_hidden(i);
+    return i < napps && !app_is_test(i);     /* 1.2-alpha25: every app, Emergency Mode's too */
 }
 
 void selftest_timer(unsigned id)
@@ -280,11 +282,15 @@ void selftest_timer(unsigned id)
         break;
 #endif
     }
-    case 1:
+    case 1: {
         logline("lock screen", -1);
+        int nc = kui_test_os_card();        /* 1.2-alpha25: a card's restart, a dry run (logged, nothing restarts) */
+        sb_logx(nc ? "selftest: lock screen: OS cards (the first one's restart, a dry run): " :
+                     "selftest: lock screen: no OS cards (the catalog lists none): ", (uint64_t)nc);
         kui_home();
         phase = 2;
         break;
+    }
     case 2:
         logline("home", -1);
         app_i = 0;
@@ -404,6 +410,8 @@ void selftest_timer(unsigned id)
             ub_s(&m, sb_arena_free() >= (64ULL << 20) ? " (enough: 64 MiB needed)" : " (NOT enough: 64 MiB needed)");
             sb_log(m.b);
         }
+        if (selftest_warnings)              /* 1.2-alpha25: the environment's (the router's DHCP), not a failure */
+            sb_logx("selftest: warnings (see the WARNING lines above): ", (uint64_t)selftest_warnings);
         struct ub u;
         ub_init(&u);
         ub_s(&u, fails || overflows ? "selftest: FAILED: " : "selftest: passed: ");

@@ -1,4 +1,26 @@
-# Starbite OS 1.2-alpha24: Survival "Unlimited", a brownout guard, the loader names a power loss (2026-11-10)
+# Starbite OS 1.2-alpha25: the lock screen picks the OS; Heat lives in Emergency mode (2026-11-10)
+
+The user (19:25) wants Starbite OS to become the phone's main OS, iOS-like, with the other OSes on its lock screen
+and the heater and power features in Emergency mode (the roadmap: starbite-os-roadmap.md in the session notes).
+Phase 1, part 1:
+- **OS cards on the lock screen** (ui.c `osc_*`): the store's catalog, read once and only read (libsb catalog.c),
+  gives up to 4 cards (2 with the medical card): stable and daily entries first; no lab, experimental, hidden or
+  Starbite OS itself. A hold on a card asks "Restart into X?"; yes = `power_boot_os(key)`: everything off as for a
+  restart, then the loader's one-shot next boot (`sb_boot_next`, the SBNEXT2! mailbox). Nothing is written to the
+  store or the settings; the next power-on starts as before. In a self test and on the host it is a dry run (logged).
+- **Swipe up from the bottom unlocks** (as an iPhone); the Open hold stays (gloves). Not while heating's pocket lock.
+- **Emergency mode in and out from the lock screen** (a red hold). Heat's tile shows on the home only in Emergency
+  mode (`app_hidden`); Light and SOS stay in both, and a heat notification still opens Heat. The self test still
+  visits every app.
+- **Self test:** after the lock screen, the first card's restart as a dry run (`selftest: lock screen: OS cards
+  ...`). Host: `sbos-lock-test.sh`.
+- **The self test's Wi-Fi:** joined with the 4-way handshake done but no DHCP address is a warning, not a failure
+  (`selftest: WARNING: wifi: ... (DHCP; the router)`, then `selftest: warnings ...: N` before the verdict). alpha24's
+  first phone self test failed only on that (three DISCOVERs unanswered); a failed bring-up, scan, join or handshake
+  still fails. Host: `SBOS_HOST_NO_DHCP=1` silences the model's DHCP server.
+- Not yet: the home's dock and polish, Starbite OS as the default boot (phase 2, after the user tries this).
+
+## Starbite OS 1.2-alpha24: Survival "Unlimited", a brownout guard, the loader names a power loss (2026-11-10)
 
 alpha23 passed its self test and was the user's image (07:38). Its evening All out run (pulled
 `build/user-1110-evening`, level 8) lasted 36 s: the cell went from 3.77 V at rest to 2.95 V at 5.56 A (1 s

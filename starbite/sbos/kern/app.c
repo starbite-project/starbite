@@ -18,9 +18,17 @@ static int cur_app = -1;                    /* whose handler runs (the host's di
 #define SLOT_COUNT 28U
 
 /* the boot self test's apps ("test-..."): not on home, no toasts, started only in interrupt mode */
-int app_hidden(int a)
+int app_is_test(int a)
 {
     return a >= 0 && a < napps && sb_prefix(apps[a].id, "test-");
+}
+
+/* 1.2-alpha25 (the user: "heater stuff etc is separated into emergency mode ... full smartphone os comes first"):
+ * Heat (every level, Survival, All out, Unlimited, the guard, the current switches) is on the home only in Emergency
+ * Mode. Light and SOS stay in both. A notification from Heat still opens it. */
+int app_hidden(int a)
+{
+    return app_is_test(a) || (a >= 0 && a < napps && !look_emergency && sb_streq(apps[a].id, "heat"));
 }
 
 int app_by_id(const char *id)

@@ -7,6 +7,7 @@
  * message 3 with the GTK wrapped (its own AES-128 encryption and RFC 3394 key wrap, checked against the RFC's
  * example), checks message 4, and then the keys the host installs must be its TK and GTK.
  */
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -377,7 +378,7 @@ void model_ap_tx(const uint8_t *f, unsigned len)
     if (len < 14 || f[12] != 0x88 || f[13] != 0x8e) {
         if (len >= 14 && f[12] == 0x08 && f[13] == 0x00) {
             M.tx_ip++;
-            if (M.open_ap || M.echo_sync)
+            if ((M.open_ap || M.echo_sync) && !getenv("SBOS_HOST_NO_DHCP"))   /* 1.2-alpha25: a silent DHCP server */
                 dhcp_server(f, len);
         }
         return;

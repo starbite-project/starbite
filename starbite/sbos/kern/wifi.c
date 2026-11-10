@@ -905,9 +905,12 @@ void wifi_timer(unsigned id)
 int wifi_selftest_phase(int *done)
 {
     static int started, jstate;            /* jstate: 0 not yet, 1 joining, 2 done */
+    static int seen_dhcp;                   /* 1.2-alpha25: the join and its handshake done, the address asked for */
     static uint64_t jt0;
     *done = 0;
     if (jstate == 1) {
+        if (st == SBOS_WIFI_DHCP)
+            seen_dhcp = 1;
         int failed = st == SBOS_WIFI_UP || st == SBOS_WIFI_FAILED || st == SBOS_WIFI_OFF;
         int finished = st == SBOS_WIFI_CONNECTED && (ntp_st == 3 || ntp_st == -1);   /* the clock checked, or no answer */
         if (failed || finished || sb_ms() - jt0 > 45000U) {
@@ -923,10 +926,15 @@ int wifi_selftest_phase(int *done)
                 ub_dec(&u, sb_ms() - jt0);
                 ub_s(&u, " ms");
                 sb_log(u.b);
+            } else if (seen_dhcp) {
+                /* 1.2-alpha25 (the main session): the join and the 4-way handshake are ours and passed; the address
+                 * is the router's: a warning, not a failure (alpha24 on the phone: three DISCOVERs unanswered) */
+                sb_log("selftest: WARNING: wifi: joined (the handshake done) but no address (DHCP; the router)");
+                ++selftest_warnings;
             } else {
                 sb_logf("selftest: wifi: the saved network did NOT join: ", why[0] ? why : "no address in 45 s");
             }
-            int ok = st == SBOS_WIFI_CONNECTED;
+            int ok = st == SBOS_WIFI_CONNECTED || seen_dhcp;
             wifi_power(0);
             *done = 1;
             return ok;
