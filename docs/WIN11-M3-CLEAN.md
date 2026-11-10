@@ -577,3 +577,28 @@ logo, the grown outer FV is the suspect (the loader watchdog brings the phone ba
 Windows-side on the M3s: our own drivers (sbwddm, sbwdog, sbkeys, sbwificx) have no unchecked LSE (lse-scan).
 sbwddm uses ACPM channel 0 for G3D. The guard sends on that channel only at hand-off (before Windows' drivers) and
 once more if it throttles at 85 C: a rare overlap window, acceptable until there is a single ACPM owner.
+
+## 28. windows-big3-1794 result (01:03): the user's firmware on 3 M3s, GPU driver in full mode; x86/x64 emulation
+
+windows-big3-1794: desktop, 3 x 531F0020 at 1794 MHz ('Samsung Exynos 9810' via SMBIOS), sbwddm WddmMode 1 (full),
+Wi-Fi and link up, 73 C peak, clean restart, hive clean.
+
+**x86/x64 emulation on the M3 (not the CNTFRQ problem).** On the A55s the E1 setting (ScaleRdtsc = 0, SOFTWARE hive)
+already makes sbcpu-x64/x86 exit 0 (results-e1, results-auto7). On the M3 every emulated process fast-fails with
+c0000409 at xtajit64 +0x36D6C (sbcpu-x64, sbcpu-x86, SysWOW64 cmd.exe, steam.exe) before printing anything.
+- +0x36D6C is the emulator raising the *guest's* fail-fast (its "INT n" trap BRK #0xF012 with an invalid vector,
+  reached from its STATUS_ILLEGAL_INSTRUCTION handler, which matches the faulting word against its own trap markers
+  BRK #0xF00E..#0xF013). So an illegal instruction happened inside emulation on the M3 and was not one of the
+  emulator's markers.
+- xtajit64 reads PF 34 (LSE) at start-up (+0x18238, +0x309F4) and keeps the result, yet the binaries carry CAS/CASP/LD<op>
+  (lse-scan: xtajit64 53, xtajit 38). Likeliest: a code path (generated or runtime) still uses an ARMv8.1+ instruction
+  on a host without it. Microsoft never supported Windows 11 x64 emulation on ARMv8.0 SoCs (Snapdragon 835).
+- Firmware cannot add instructions or catch EL0 undefined instructions (section 25). Practical answer: x86/x64 apps on
+  the A55 Windows row, native ARM64 apps on the big-core row. To confirm the instruction: the WER reports
+  (C:\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_sbcpu-x64*\Report.wer) name the exception address.
+
+**Governor (c), proposed:** a thermal-step governor in the A55 guard, outside Windows: from the TMU, step the M3 cluster
+up through the M3 table (1794 -> 2002 -> 2314 MHz) while the hottest probe stays under ~70 C, and down above ~80 C,
+with hysteresis and at most one ACPM request per few seconds. It needs one ACPM owner: sbwddm (GPU session) sends on
+the same channel-0 queue, so either the guard owns ACPM and sbwddm asks it (shared word), or sbwddm gains a domain-3
+policy. Load-driven scaling (from Windows' idle time) would need a Windows-side driver.
