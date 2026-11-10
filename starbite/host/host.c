@@ -180,7 +180,26 @@ void sb_rtc_read(struct sb_rtc *r)
     r->h = (unsigned)(s / 3600U) % 24U; r->mi = (unsigned)(s / 60U) % 60U; r->s = (unsigned)(s % 60U);
     r->ctrl = 0x02; r->ok = 1;
 }
-int sb_rtc_epoch(uint64_t *e) { struct sb_rtc r; sb_rtc_read(&r); *e = 1793887200ULL + r.h * 3600U + r.mi * 60U + r.s - 14 * 3600; return 1; }
+/* 1.2-alpha26: SBOS_HOST_RTC_LOST=1: the PMIC clock reads 2000-01-01 (a brownout's reset) until sb_rtc_write sets it */
+static int host_rtc_set;
+static int64_t host_rtc_off;
+int sb_rtc_epoch(uint64_t *e)
+{
+    uint64_t up = now_us / 1000000U;
+    if (getenv("SBOS_HOST_RTC_LOST") && !host_rtc_set) {
+        *e = 946684800ULL + up;
+        return 1;
+    }
+    *e = (uint64_t)((int64_t)(1793887200ULL + 32 * 60 + 10 + up) + host_rtc_off);
+    return 1;
+}
+int sb_rtc_write(uint64_t e)
+{
+    host_rtc_set = 1;
+    host_rtc_off = (int64_t)e - (int64_t)(1793887200ULL + 32 * 60 + 10 + now_us / 1000000U);
+    printf("host: the PMIC clock written\n");
+    return 1;
+}
 int sb_touch_rails(uint8_t *l35, uint8_t *l43) { *l35 = pmic[1][0x6c]; *l43 = pmic[1][0x74]; return 1; }
 int sb_sd_rails(uint8_t *l31, uint8_t *l2) { *l31 = pmic[1][0x68]; *l2 = pmic[1][0x4a]; return 0; }
 

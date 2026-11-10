@@ -1918,6 +1918,10 @@ int heater_request(int level, int minutes)
         return SBOS_EINVAL;
     if (level == HEAT_SURVIVAL && heat_unlimited && !heater_running_ui())
         level = HEAT_SURVIVAL_X;            /* 1.2-alpha24: Unlimited switches the chip's trip off too (4 asks) */
+    if (level > 0 && wifi_time_only()) {    /* 1.2-alpha26: the boot's time check never blocks heat */
+        wifi_time_only_end("heat asked");
+        wifi_power(0);
+    }
     if (wifi_on() && !heater_running_ui()) {
         sb_strcpy(ctl.why, sizeof(ctl.why), "Turn Wi-Fi off first (0.4: not both at once)");
         ctl.state = HEAT_ST_REFUSED;

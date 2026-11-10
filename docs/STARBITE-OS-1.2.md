@@ -1,4 +1,23 @@
-# Starbite OS 1.2-alpha25: the lock screen picks the OS; Heat lives in Emergency mode (2026-11-10)
+# Starbite OS 1.2-alpha26: the clock is right after every boot (2026-11-10)
+
+The user (on alpha24): "starbite os didn't know the time". alpha24's self-test pmsg: "the clock was set from the
+network (there was none)", where alpha23's PMIC clock had been 7 s off. The PMIC's clock was lost: the evening's
+brownouts can reset it to 2000-01-01, and Starbite OS never wrote the network's time back (0.5.8 kept it as an
+offset). alpha26:
+- **The network's time is written into the PMIC clock** (`sb_rtc_write`, libsb acpm.c: the vendor's rtc-s2mp.h map
+  for this PMIC, SEC 0x05 .. YEAR 0x0B, WEEK one-hot, then UPDATE's WUDR bit 1; only in binary 24 h mode as the
+  reader; read back within 2 s), at every network set or correction of 2 s or more. The PMIC clock keeps time across
+  a power loss, for every OS.
+- **The last known time** goes into the state slot (ext[2], UTC): hourly, at a network set, at a restart or
+  power-off. A PMIC clock before 2020 or behind that time is LOST: the last known time is used, marked
+  approximate (the lock screen's date says "approx."), until the network or the PMIC clock gives the real one.
+- **A boot without a clock** with a saved network (and automatic joins on): Wi-Fi comes on once, joins, gets the
+  time, writes the PMIC clock, and goes off again (`wifi: no clock at boot ...`, at most 90 s). Never in a self test;
+  the user's Wi-Fi switch or Heat ends it at once (Heat is never blocked by it).
+- **At boot** `clock: the PMIC clock reads ... UTC` (with LOST / BEHIND when so), the last known time, and which is
+  used. Host: `SBOS_HOST_RTC_LOST=1`, `sbos-clock-test.sh`.
+
+## Starbite OS 1.2-alpha25: the lock screen picks the OS; Heat lives in Emergency mode (2026-11-10)
 
 The user (19:25) wants Starbite OS to become the phone's main OS, iOS-like, with the other OSes on its lock screen
 and the heater and power features in Emergency mode (the roadmap: starbite-os-roadmap.md in the session notes).

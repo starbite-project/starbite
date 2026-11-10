@@ -162,6 +162,7 @@ void sb_main(void)
     heater_init();
     sos_init();
     settings_restore();                     /* after power_init: the screen-off time it restores re-arms the timer */
+    clock_boot_log();                       /* 1.2-alpha26: the PMIC clock, or the last known time */
     heater_boot_forensics();                /* 1.2-alpha18: the last run's lowest voltage / highest current; a
                                              * B2SOVRC left raised by a crash put back (the slot's note) */
     if (look_emergency && !sbos_selftest_enabled)
@@ -172,6 +173,7 @@ void sb_main(void)
     look_init(look_saved_style);            /* 0.6: the wallpaper, once, after the first frame (the saved one) */
     kui_redraw_all();
     apps_load_builtin();
+    wifi_boot_time_check();                 /* 1.2-alpha26: no clock: Wi-Fi once for the time, then off */
     {
         struct ub u;
         ub_init(&u);

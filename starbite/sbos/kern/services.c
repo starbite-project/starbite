@@ -98,23 +98,112 @@ void sos_init(void)
 /* ---- clock: the RTC (UTC) once a minute, the counter in between --------------------------------- */
 static int64_t rtc_t;
 static uint64_t rtc_ms, rtc_try;
-static int rtc_state;
+static int rtc_state;                       /* 0 not read, 1 the PMIC's, 2 the network's, 3 the last known (approx.), -1 none */
+/* 1.2-alpha26 (the user: "starbite os didn't know the time"): alpha24's boot found the PMIC clock lost (the evening's
+ * brownouts can reset it; nothing of ours wrote it back). Now: the network's time is written into the PMIC clock
+ * (it keeps time across a power loss), the last known time is kept in the state slot (hourly, at a network set, at a
+ * restart or power-off) and used, marked approximate, when the PMIC clock is lost or behind it; and a boot without a
+ * clock asks Wi-Fi once for the time (wifi.c) */
+static uint32_t clock_saved;                /* the last known UTC from the state slot (0 none) */
+static uint64_t clock_save_t;
+
+void clock_restore_saved(uint32_t utc)
+{
+    clock_saved = utc;
+    if (rtc_state == -1)
+        rtc_state = 0;                      /* read again with the last known time at hand */
+}
+
+uint32_t clock_saved_value(void)
+{
+    struct sbos_time t;
+    return clock_now(&t) && !t.approx && t.utc > 0 ? (uint32_t)t.utc : clock_saved;
+}
+
+static void ymdhm(struct ub *u, int64_t e)
+{
+    int64_t days = e / 86400, s = e % 86400;
+    int64_t z = days + 719468, era = z / 146097, doe = z - era * 146097;
+    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153;
+    int64_t d = doy - (153 * mp + 2) / 5 + 1, mo = mp < 10 ? mp + 3 : mp - 9, y = yoe + era * 400 + (mo <= 2);
+    ub_dec(u, (uint64_t)y);
+    ub_c(u, '-');
+    ub_dec2(u, (unsigned)mo);
+    ub_c(u, '-');
+    ub_dec2(u, (unsigned)d);
+    ub_c(u, ' ');
+    ub_dec2(u, (unsigned)(s / 3600));
+    ub_c(u, ':');
+    ub_dec2(u, (unsigned)(s / 60 % 60));
+}
+
+/* at boot (after the settings): what the PMIC clock says, and what is used */
+void clock_boot_log(void)
+{
+    uint64_t e = 0;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "clock: the PMIC clock ");
+    if (!sb_rtc_epoch(&e)) {
+        ub_s(&u, "not read");
+    } else {
+        ub_s(&u, "reads ");
+        ymdhm(&u, (int64_t)e);
+        ub_s(&u, " UTC");
+        if (e <= 1577836800ULL)
+            ub_s(&u, ": LOST (before 2020: reset by a power loss?)");
+        else if (clock_saved && e + 60 < clock_saved)
+            ub_s(&u, ": BEHIND the last known time (reset?)");
+    }
+    sb_log(u.b);
+    if (clock_saved) {
+        ub_init(&u);
+        ub_s(&u, "clock: the last known time (the state slot) ");
+        ymdhm(&u, clock_saved);
+        ub_s(&u, " UTC");
+        sb_log(u.b);
+    }
+    struct sbos_time t;
+    sb_log(!clock_now(&t) ? "clock: no time yet (the network gives it)" :
+           t.approx ? "clock: the last known time, shown as approximate until the network or the PMIC clock gives it" :
+                      "clock: the PMIC clock is used");
+}
 
 /* 0.5.8: the time from the network (NTP over Wi-Fi): kept as an offset to the PMIC's clock, never written to it;
  * gone at a restart. With no readable PMIC clock the network's time is used as it is (rtc_state 2). Returns the
  * correction in seconds (0: within 2 s, nothing changed). */
 static int64_t clock_adj;
 
+/* 1.2-alpha26: the network's time into the PMIC clock (it keeps time across a power loss); the network's time used
+ * either way; the last known time saved */
+static void clock_to_pmic(int64_t utc)
+{
+    clock_saved = (uint32_t)utc;
+    clock_save_t = sb_ms();
+    settings_changed();
+    if (sb_rtc_write((uint64_t)utc)) {
+        rtc_t = utc;
+        rtc_ms = sb_ms();
+        rtc_state = 1;
+        clock_adj = 0;
+        sb_log("clock: the PMIC clock set from the network (it keeps the time across a power loss)");
+    } else {
+        sb_log("clock: the PMIC clock could NOT be set (refused or no read-back): the network's time until a restart");
+    }
+}
+
 int64_t clock_set_net(int64_t utc, int *was_set)
 {
     struct sbos_time t;
     *was_set = 0;
-    if (!clock_now(&t)) {
+    if (!clock_now(&t) || t.approx) {
         rtc_t = utc;
         rtc_ms = sb_ms();
         rtc_state = 2;
         clock_adj = 0;
-        *was_set = 1;                       /* there was no clock: set, not corrected */
+        *was_set = 1;                       /* there was no clock (or only the last known): set, not corrected */
+        clock_to_pmic(utc);
         ui_mark_dirty();
         return 0;
     }
@@ -122,6 +211,7 @@ int64_t clock_set_net(int64_t utc, int *was_set)
     if (d > -2 && d < 2)
         return 0;
     clock_adj += d;
+    clock_to_pmic(utc);
     ui_mark_dirty();
     return d;
 }
@@ -132,17 +222,29 @@ int clock_now(struct sbos_time *t)
     if (rtc_state != 2 && (!rtc_state || now - rtc_try >= 60000U)) {   /* a network-set clock stays */
         uint64_t e;
         rtc_try = now;
-        if (sb_rtc_epoch(&e) && e > 1577836800ULL) {
+        if (sb_rtc_epoch(&e) && e > 1577836800ULL && (!clock_saved || e + 60 >= clock_saved)) {
             rtc_t = (int64_t)e;
             rtc_ms = now;
             rtc_state = 1;
-        } else if (rtc_state != 1 && rtc_state != 2) {
-            rtc_state = -1;
+        } else if (rtc_state != 1 && rtc_state != 2 && rtc_state != 3) {
+            if (clock_saved > 1577836800U) {   /* 1.2-alpha26: the last known time, approximate */
+                rtc_t = (int64_t)clock_saved;
+                rtc_ms = now;
+                rtc_state = 3;
+            } else {
+                rtc_state = -1;
+            }
         }
     }
     memset(t, 0, sizeof(*t));
-    if (rtc_state != 1 && rtc_state != 2)
+    if (rtc_state != 1 && rtc_state != 2 && rtc_state != 3)
         return 0;
+    if (rtc_state != 3 && now - clock_save_t >= 3600000U && now > 60000U) {
+        clock_save_t = now;                 /* 1.2-alpha26: the last known time saved hourly */
+        clock_saved = (uint32_t)(rtc_t + (int64_t)((now - rtc_ms) / 1000U) + clock_adj);
+        settings_changed();
+    }
+    t->approx = rtc_state == 3;
     int64_t utc = rtc_t + (int64_t)((now - rtc_ms) / 1000U) + clock_adj;
     struct tz_time l;
     tz_local(&tz_zones[0], utc, &l);
@@ -541,6 +643,8 @@ void power_restart(int to_menu)
 {
     torch_set(0);
     kmodem_stop("Restarting");              /* 1.2-alpha21: the CP parked before any reset */
+    clock_saved = clock_saved_value();      /* 1.2-alpha26: the last known time kept (after the modem's storage hold) */
+    settings_save_now();
     wifi_power(0);                          /* the radio held in reset and unpowered before the reset */
     guest_power_off();                      /* 1.2: Linux stopped; its last core powers the M3 cluster off (<= 1 s) */
     heater_stop_all("Restarting");
@@ -582,6 +686,8 @@ void power_off_now(void)
 {
     torch_set(0);
     kmodem_stop("Switching off");              /* 1.2-alpha21: the CP parked before any reset */
+    clock_saved = clock_saved_value();      /* 1.2-alpha26: the last known time kept */
+    settings_save_now();
     wifi_power(0);
     guest_power_off();                      /* 1.2: Linux stopped before the power goes */
     if (heater_running_ui()) {

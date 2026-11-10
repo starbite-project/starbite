@@ -99,6 +99,7 @@ struct sbos_time {
     int32_t off_min;            /* local offset from UTC */
     char abbr[8];               /* "EET" */
     char zone[24];              /* "Helsinki" */
+    int32_t approx;             /* 1.2-alpha26: 1 the clock is the last known time (the PMIC's clock was lost) */
 };
 
 struct sbos_battery {

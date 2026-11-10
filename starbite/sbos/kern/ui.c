@@ -890,6 +890,8 @@ static void build_lock(void)
         ub_dec(&u, (uint64_t)t.d);
         ub_c(&u, ' ');
         ub_s(&u, mn[t.mo - 1]);
+        if (t.approx)
+            ub_s(&u, "  " U_DOT "  approx.");   /* 1.2-alpha26: the last known time (the PMIC clock was lost) */
         scopy(e->b, sizeof(e->b), u.b);
     }
     e->value = F_TITLE_S;

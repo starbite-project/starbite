@@ -221,6 +221,7 @@ struct sb_rtc {
 };
 void sb_rtc_read(struct sb_rtc *r);
 int sb_rtc_epoch(uint64_t *epoch);
+int sb_rtc_write(uint64_t epoch);           /* 1.2-alpha26: UTC into the PMIC clock, read back */
 /* Touch rails LDO35 1.8 V / LDO43 3.0 V, read only: 1 on, 0 off or unexpected, -1 ACPM. */
 int sb_touch_rails(uint8_t *l35, uint8_t *l43);
 /* microSD rails LDO31 / LDO2, read only: 1 on in the card's range, 0 off, -1 ACPM. */

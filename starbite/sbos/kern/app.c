@@ -1146,6 +1146,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
     case SYS_WIFI_POWER:
         if (!(p->perms & SBOS_P_NET) || !front)
             return SBOS_EPERM;
+        wifi_time_only_end("the user's Wi-Fi switch");   /* 1.2-alpha26: then it stays as the user set it */
         return wifi_power(arg[0] != 0);
     case SYS_WIFI_SCAN:
         if (!(p->perms & SBOS_P_NET) || !front)

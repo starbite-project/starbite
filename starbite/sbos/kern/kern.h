@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha25"
+#define SBOS_VERSION "1.2-alpha26"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -496,6 +496,12 @@ int heater_guest_refuses(void);     /* 1.2: 1 while Linux owns the M3 cluster: n
 void heater_m3_released(void);      /* 1.2: the guest powered the M3 cluster off: prepare it again before use */
 int heater_sensor(int id);          /* SYS_SENSOR_READ: 0.1 C or -1000 */
 void power_restart(int to_menu);
+void clock_restore_saved(uint32_t utc);  /* 1.2-alpha26: the last known time from the state slot */
+uint32_t clock_saved_value(void);       /* the time to keep in the slot */
+void clock_boot_log(void);              /* what the PMIC clock says at boot */
+int wifi_time_only(void);               /* 1.2-alpha26: Wi-Fi is on only to get the time (at boot) */
+void wifi_time_only_end(const char *why);
+void wifi_boot_time_check(void);
 void power_boot_os(const char *key);    /* 1.2-alpha25: the lock screen's OS card (sb_boot_next) */
 int kui_test_os_card(void);
 int app_is_test(int a);

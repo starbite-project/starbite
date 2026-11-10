@@ -376,10 +376,10 @@ static void net_udp(void *ctx, uint16_t port, const uint8_t from[4], uint16_t fr
     clock_checked = was_set ? 3 : d_s ? 2 : 1;
     ntp_st = 3;
     if (was_set)
-        sb_log("wifi: the clock was set from the network (there was none; until a restart)");
+        sb_log("wifi: the clock was set from the network (there was none)");
     else if (d_s)
         logn("wifi: the clock was checked over the network and corrected by ", (uint64_t)(d_s < 0 ? -d_s : d_s),
-             d_s < 0 ? " s (it was ahead; until a restart)" : " s (it was behind; until a restart)");
+             d_s < 0 ? " s (it was ahead)" : " s (it was behind)");
     else
         sb_log("wifi: the clock was checked over the network: right");
     notify();
@@ -712,12 +712,51 @@ static void irq_stop(void)
     irq_on = 0;
 }
 
+/* 1.2-alpha26: a boot without a clock: Wi-Fi on once for the time (the saved network joins by itself), then off.
+ * Not in a self test, not without a saved network or with automatic joins off; the user's own Wi-Fi switch, or Heat,
+ * ends it */
+static int time_only;
+static uint64_t time_only_t;
+
+int wifi_time_only(void)
+{
+    return time_only && st != SBOS_WIFI_OFF;
+}
+
+void wifi_time_only_end(const char *why)
+{
+    if (!time_only)
+        return;
+    time_only = 0;
+    sb_logf("wifi: the boot's time check ends: ", why);
+}
+
+void wifi_boot_time_check(void)
+{
+    struct sbos_time t;
+    if (sbos_selftest_enabled || wifi_in_selftest() || !wifi_autojoin || (clock_now(&t) && !t.approx))
+        return;
+    load_saved();
+    if (!sv_ok)
+        return;
+    time_only = 1;
+    time_only_t = sb_ms();
+    sb_log("wifi: no clock at boot: on once for the time (the saved network), then off");
+    if (wifi_power(1))
+        wifi_time_only_end("Wi-Fi did not come on");
+}
+
 void wifi_timer(unsigned id)
 {
     (void)id;
     if (st == SBOS_WIFI_OFF)
         return;
     uint64_t now = sb_ms();
+    if (time_only && (ntp_st == 3 || ntp_st == -1 || now - time_only_t > 90000U)) {
+        wifi_time_only_end(ntp_st == 3 ? "the clock is set; Wi-Fi off again" : "no time came; Wi-Fi off again");
+        wifi_power(0);
+        return;
+    }
 #ifdef SB_HOST
     if (M.now < now * 1000U)
         M.now = now * 1000U;                /* the model's clock follows the host's (a polled join's timeout) */

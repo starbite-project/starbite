@@ -54,6 +54,7 @@ static void fill(struct saved *s)
     s->pad[2] = (uint32_t)(look_is_ready() ? look_style() : look_saved_style) + 1U;
     s->ext[0] = (uint32_t)heat_b2s_note;     /* 1.2-alpha18 */
     s->ext[1] = 0x10000U | (uint32_t)(heat_guard_mv & 0xffff);   /* 1.2-alpha24: the brownout guard's floor */
+    s->ext[2] = clock_saved_value();         /* 1.2-alpha26: the last known time (UTC; 0 none) */
     s->pad[3] = 0x10000U | (uint32_t)(heat_surv_stop_c10 & 0xffff) |  /* 1.2-alpha16: Survival's SoC limit (or none) */
                 (uint32_t)(heat_unlimited != 0) << 17 |               /* 1.2-alpha24: Unlimited */
                 (uint32_t)(heat_guard_on == 0) << 18 |                /* and the brownout guard OFF (0: on) */
@@ -187,6 +188,8 @@ void settings_restore(void)
     }
     if (s.pad[2] >= 1 && s.pad[2] <= 4)
         look_saved_style = (int)s.pad[2] - 1;   /* main makes it once, after this */
+    if (s.ext[2] > 1577836800U)
+        clock_restore_saved(s.ext[2]);      /* 1.2-alpha26: the last known time */
     if ((s.ext[1] & 0xffff0000U) == 0x10000U) {     /* 1.2-alpha24 */
         int g = (int)(s.ext[1] & 0xffffU);
         if (g == 3200 || g == 3350 || g == 3500)

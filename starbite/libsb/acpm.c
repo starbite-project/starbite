@@ -409,6 +409,40 @@ int sb_rtc_epoch(uint64_t *epoch)
     return 1;
 }
 
+/* 1.2-alpha26: the PMIC's clock set (UTC, as Android and Linux keep it): the vendor's rtc-s2mp.h map for this PMIC
+ * (SEC 0x05 .. YEAR 0x0B, WEEK one-hot 1 << weekday, YEAR from 2000), then UPDATE's WUDR (bit 1) copies them in;
+ * read back. Only in the mode the reader understands (CTRL: BCD_EN 0, MODEL24 1); RTC_WAKE and the other UPDATE
+ * bits kept. A brownout can leave the clock at its reset value; Starbite OS sets it from the network then. Only the
+ * time registers and UPDATE are written. 1 set and read back within 2 s, 0 not (refused, no answer, mismatch). */
+int sb_rtc_write(uint64_t epoch)
+{
+    uint8_t ctrl = 0, u = 0;
+    if (!sb_pmic_read(2, 0x00, &ctrl) || (ctrl & 0x01U) || !(ctrl & 0x02U) || !sb_pmic_read(2, 0x02, &u))
+        return 0;
+    if (epoch < 946684800ULL || epoch >= 4102444800ULL)
+        return 0;                           /* 2000 .. 2099: the year register's range */
+    uint64_t days = epoch / 86400, secs = epoch % 86400;
+    unsigned wday = (unsigned)((days + 4) % 7);   /* 1970-01-01 was a Thursday */
+    /* civil from days (Howard Hinnant's algorithm) */
+    uint64_t z = days + 719468, era = z / 146097, doe = z - era * 146097;
+    uint64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    uint64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153;
+    unsigned d = (unsigned)(doy - (153 * mp + 2) / 5 + 1), mo = (unsigned)(mp < 10 ? mp + 3 : mp - 9);
+    unsigned y = (unsigned)(yoe + era * 400 + (mo <= 2));
+    const uint8_t v[7] = { (uint8_t)(secs % 60), (uint8_t)(secs / 60 % 60), (uint8_t)(secs / 3600),
+                           (uint8_t)(1U << wday), (uint8_t)d, (uint8_t)mo, (uint8_t)(y - 2000U) };
+    for (unsigned i = 0; i < 7; ++i)
+        if (!pmic_write(2, 0x05 + i, v[i]))
+            return 0;
+    if (!pmic_write(2, 0x02, (uint8_t)((u & ~0x17U) | 0x02U)))   /* WUDR: the registers into the counters */
+        return 0;
+    sb_mdelay(10);
+    uint64_t back = 0;
+    if (!sb_rtc_epoch(&back))
+        return 0;
+    return back + 2 >= epoch && back <= epoch + 2;
+}
+
 /* ---- touch rails (menu.c tp_power / hw_touch_rails) ----------------------------------------- */
 
 /* Read only in v1: switching a rail on is a Tier 1 action (engineer/armed.c, dry-run). The
