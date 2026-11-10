@@ -44,8 +44,8 @@ typedef struct { tk_bmp *b; tk_a8 *m; float ox, oy; } dc;   /* ox, oy: the bitma
 static dc mk(tk_layer *l, const char *name, float x, float y, float w, float h, float mg, int glass)
 {
     tk_layer_init(l, name);
-    float x0 = tk_maxf(PT(x - mg), -PT(40)), y0 = PT(y - mg);
-    float x1 = tk_minf(PT(x + w + mg), PT(390 + 40)), y1 = PT(y + h + mg);
+    float x0 = tk_maxf(PT(x - mg), 0), y0 = PT(y - mg);       /* nothing beyond the panel's sides is ever shown */
+    float x1 = tk_minf(PT(x + w + mg), (float)TK_W), y1 = PT(y + h + mg);
     int X = (int)tk_floorf(x0), Y = (int)tk_floorf(y0);
     tk_bmp_new(&l->bmp, (int)(x1 - X) + 2, (int)(y1 - Y) + 2);
     if (glass) tk_a8_new(&l->glass, l->bmp.w, l->bmp.h);
@@ -146,12 +146,27 @@ static int booting;
 static float now_ms;
 
 /* ---- the wallpaper and its glass backdrop ------------------------------------------------------------------ */
+static tk_layer star;
 static void build_wall(void)
 {
-    tk_wall_draw(&C->base, 0);
-    tk_bmp_down2(&C->base_half, &C->base);
-    tk_glass_backdrop(&C->bw, &C->base);
-    tk_bmp_down2(&C->bw_half, &C->bw);
+    /* the wallpaper at half resolution (smooth gradients; the rest frames scale it 2x), the star as a layer over
+     * it; the glass backdrop is the wallpaper with the star, blurred */
+    tk_wall_draw(&C->base_half, 0, .5f);
+    const tk_bmp *st = tk_icon("star");
+    float pad = tk_icon_pad("star");
+    tk_layer_init(&star, "star");
+    star.bmp = *st;                       /* a view into the pack */
+    star.x = (float)(int)tk_floorf(PT(390 - 34 - 36) - pad + .5f);
+    star.y = (float)(int)tk_floorf(PT(56) - pad + .5f);
+    tk_bmp src, sh;
+    tk_bmp_new(&src, C->base_half.w, C->base_half.h);
+    tk_bmp_copy(&src, 0, 0, &C->base_half, 0, 0, src.w, src.h);
+    tk_bmp_new(&sh, (st->w + 1) / 2, (st->h + 1) / 2);
+    tk_bmp_down2(&sh, st);
+    tk_blit(&src, &sh, (int)star.x / 2, (int)star.y / 2, 1);
+    tk_glass_backdrop(&C->bw_half, &src);
+    tk_bmp_free(&sh);
+    tk_bmp_free(&src);
 }
 
 /* ---- the status bar (lock and home) -------------------------------------------------------------------------- */
@@ -220,10 +235,10 @@ static void build_hold(int i)
     tk_layer_init(&q->grp, i ? "q-em" : "q-light");
     q->grp.ox = PT(x + 26);
     q->grp.oy = PT(y + 26);
-    dc d = mk(&q->face, "q-face", x, y, 52, 52, 56, 1);
+    dc d = mk(&q->face, "q-face", x, y, 52, 52, 44, 1);
     d_glass(&d, x, y, 52, 52, 26, 1, 1);
     /* lit: the background is white (torch) or the Emergency red instead of the tint, the rest of the glass stays */
-    d = mk(&q->facelit, "q-lit", x, y, 52, 52, 56, 1);
+    d = mk(&q->facelit, "q-lit", x, y, 52, 52, 44, 1);
     d_glass(&d, x, y, 52, 52, 26, 1, 1);
     d_rrect(&d, x, y, 52, 52, 26, i ? tk_hex(0xff5a4e, 1) : W(1));
     tk_box_shadow(d.b, PT(x) - d.ox, PT(y) - d.oy, PT(52), PT(52), PT(26), 0, PT(1.5f), 0, 0, W(.42f), 1);
@@ -271,7 +286,10 @@ static void hold_ring(hold_t *q, int i, float p)
     tk_layer_dirty(&q->ring);
 }
 
+static void relayer(tk_layer *l) { tk_layer_dirty(l); tk_bmp_free(&l->bmp); tk_a8_free(&l->glass); }
+
 /* ---- the Systems list ------------------------------------------------------------------------------------------ */
+#define FACE_MG 44.0f            /* the margin around a card's face (its shadow) */
 #define LIST_TOP 310.0f
 #define LIST_H 374.0f           /* .nwrap: top 310, bottom 118 */
 static int stack(int g) { return G[g].n > 1; }
@@ -347,7 +365,7 @@ static void build_card(int g)
     float top = LIST_TOP + k->y;            /* rest screen pt at scroll 0 */
     k->full = 60.0f * gr->n;
     /* closed: the ghosts (painted before every card), the card's own glass over them, its head */
-    dc d = mk(&k->closed, "card", 14, top, 362, 76, 56, 0);
+    dc d = mk(&k->closed, "card", 14, top, 362, 76, 44, 0);
     if (stack(g)) {
         ghost(d.b, d.ox, d.oy, 33, top + 56, 324, .4f);
         ghost(d.b, d.ox, d.oy, 23, top + 50, 344, .7f);
@@ -355,15 +373,8 @@ static void build_card(int g)
     tk_glass_local(d.b, d.b, PT(14) - d.ox, PT(top) - d.oy, PT(362), PT(68), PT(26));
     d_glass(&d, 14, top, 362, 68, 26, 0, 1);
     head_content(&d, g, top);
-    /* open: the face at the open height (3-slice while it grows), the head, the rows */
+    /* open: made when the card opens, freed when it has closed (build_open / free_open) */
     tk_layer_init(&k->open, "card-open");
-    d = mk(&k->face, "face", 14, top, 362, 68 + k->full, 56, 0);
-    d_glass(&d, 14, top, 362, 68 + k->full, 26, 0, 1);
-    k->face.slice = 1;
-    k->face.slice_s0 = PT(40 + 56);
-    k->face.slice_s1 = PT(30 + 56);
-    d = mk(&k->head, "head", 14, top, 362, 68, 2, 0);
-    head_content(&d, g, top);
     d = mk(&k->chev, "chev", k->chx, top + 27, 14, 14, 0, 0);
     d_icon(&d, "chev", k->chx, top + 27, 1);
     k->chev_t = 1;
@@ -371,6 +382,27 @@ static void build_card(int g)
     tk_bmp_copy(&k->chev0, 0, 0, &k->chev.bmp, 0, 0, k->chev.bmp.w, k->chev.bmp.h);
     tk_layer_init(&k->members, "members");
     k->members.clip = 1;
+    k->open.hidden = 1;
+    k->chev.clip = 1;
+    tk_layer_add(&list, &k->closed);
+    tk_layer_add(&list, &k->open);
+    tk_layer_add(&list, &k->chev);
+}
+/* an opening card's face (at the open height: a 3-slice while it grows), its head and its member rows */
+static void build_open(int g)
+{
+    card_t *k = &K[g];
+    const grp_t *gr = &G[g];
+    if (k->face.bmp.px) return;
+    float top = LIST_TOP + k->y;
+    dc d = mk(&k->face, "face", 14, top, 362, 68 + k->full, FACE_MG, 0);
+    d_glass(&d, 14, top, 362, 68 + k->full, 26, 0, 1);
+    k->face.slice = 1;
+    k->face.slice_s0 = PT(40 + FACE_MG);
+    k->face.slice_s1 = PT(30 + FACE_MG);
+    d = mk(&k->head, "head", 14, top, 362, 68, 2, 0);
+    head_content(&d, g, top);
+    k->members.child = 0;
     for (int i = 0; i < gr->n; i++) {
         const sys_t *s = &gr->it[i];
         float ry = top + 68 + 60 * i;
@@ -390,19 +422,24 @@ static void build_card(int g)
         }
         tk_layer_add(&k->members, &k->rows[i]);
     }
+    k->open.child = 0;
     tk_layer_add(&k->open, &k->face);
     tk_layer_add(&k->open, &k->head);
     tk_layer_add(&k->open, &k->members);
-    k->open.hidden = 1;
-    k->chev.clip = 1;
-    tk_layer_add(&list, &k->closed);
-    tk_layer_add(&list, &k->open);
-    tk_layer_add(&list, &k->chev);
 }
+static void free_open(int g)
+{
+    card_t *k = &K[g];
+    if (!k->face.bmp.px) return;
+    relayer(&k->face);
+    relayer(&k->head);
+    for (int i = 0; i < G[g].n; i++) relayer(&k->rows[i]);
+}
+
 static void build_etool(void)
 {
     float top = LIST_TOP + 448;
-    dc d = mk(&etool, "etool", 90, top, 210, 32, 56, 0);
+    dc d = mk(&etool, "etool", 90, top, 210, 32, 44, 0);
     float w1 = 14 + 15 + 6 + tw(TK_IT600, 13, "Recovery", 0, 0) + 14, w2 = 14 + 15 + 6 + tw(TK_IT600, 13, "Lab", 0, 0) + 14;
     float x = (390 - (w1 + 10 + w2)) / 2;
     d_glass(&d, x, top, w1, 32, 16, 1, 1);
@@ -431,7 +468,7 @@ static void place_list(void)
         k->chev.y = k->chev.by + dy;
         k->chev.clip_r = (tk_rect){ PT(14), PT(top), PT(362), PT(68) };
         float h = 68 + k->memh;
-        k->face.slice_h = PT(h + 112);
+        k->face.slice_h = PT(h + 2 * FACE_MG);
         k->members.clip_r = (tk_rect){ PT(14), PT(top + 68), PT(362), PT(k->memh) };
         float p = k->full > 0 ? k->memh / (k->to > k->from ? k->full : tk_maxf(1, k->from)) : 0;
         if (!k->sp.live) p = k->isopen ? 1 : 0;
@@ -461,6 +498,7 @@ static void toggle_group(int g, int instant)
 {
     card_t *k = &K[g];
     k->isopen = !k->isopen;
+    if (k->isopen) build_open(g);
     float from = k->memh, to = k->isopen ? k->full : 0;
     k->from = from;
     k->to = to;
@@ -485,11 +523,9 @@ static void build_home(void)
     static const char *P1[8] = { "calendar", "weather", "clock", "camera", "photos", "music", "notes", "calc" };
     static const char *P1N[8] = { "Calendar", "Weather", "Clock", "Camera", "Photos", "Music", "Notes", "Calculator" };
     static const char *DK[4] = { "phone", "messages", "browser", "settings" };
-    tk_layer grp;
-    tk_layer_init(&grp, "home-build");
     dc d = mk(&hparts[0], "home-sb", 0, 0, 390, 48, 0, 0);
     status_bar(&d, "21:05");
-    d = mk(&hparts[1], "home-w", 0, 50, 390, 200, 56, 1);
+    d = mk(&hparts[1], "home-w", 0, 50, 390, 200, 44, 1);
     d_glass(&d, 24, 60, 158, 158, 24, 0, 1);
     d_glass(&d, 208, 60, 158, 158, 24, 0, 1);
     /* Battery: .lab, .big, three rows */
@@ -526,7 +562,7 @@ static void build_home(void)
         float w = tw(TK_IT500, 12, P1N[i], 0, 0);
         d_text(&d, TK_IT500, 12, cx - w / 2, y + 68 + 12, P1N[i], 0, 0, INK, 1);
     }
-    d = mk(&hparts[3], "home-dock", 0, 620, 390, 182, 56, 1);
+    d = mk(&hparts[3], "home-dock", 0, 600, 390, 202, 0, 1);
     {
         float sw = 15 + 13 + 6 + tw(TK_IT600, 13, "Search", 0, 0) + 15, sx = 195 - sw / 2;
         d_glass(&d, sx, 640, sw, 30, 15, 1, 1);
@@ -546,19 +582,17 @@ static void build_home(void)
             d_text(&d, TK_IT700, 12, x + 60 - bw / 2 - tw(TK_IT700, 12, bn, 0, 0) / 2, base_of(TK_IT700, 12, 699, 20), bn, 0, 0, INK, 0);
         }
     }
-    for (int i = 0; i < 4; i++) tk_layer_add(&grp, &hparts[i]);
+    /* the parts stay separate layers under one group (they do not overlap, so the group's opacity per part is
+     * exact); #home has will-change: opacity, a backdrop root in Chrome: its glass shows no wallpaper blur */
     tk_layer_init(&home, "home");
-    tk_bmp_new(&home.bmp, TK_W, TK_H);
-    tk_a8_new(&home.glass, TK_W, TK_H);
-    tk_flatten(&grp, &home.bmp, &home.glass);
-    for (int i = 0; i < 4; i++) { tk_bmp_free(&hparts[i].bmp); tk_a8_free(&hparts[i].glass); }
-    /* #home has will-change: opacity, a backdrop root in Chrome: its glass shows no wallpaper blur, only its tint */
-    tk_a8_free(&home.glass);
+    for (int i = 0; i < 4; i++) {
+        tk_a8_free(&hparts[i].glass);
+        tk_layer_add(&home, &hparts[i]);
+    }
     home.ox = PT(195);
     home.oy = PT(401);
 }
 
-static void relayer(tk_layer *l) { tk_layer_dirty(l); tk_bmp_free(&l->bmp); tk_a8_free(&l->glass); }
 static float focus_sy;
 
 /* ---- the focus sheet --------------------------------------------------------------------------------------- */
@@ -568,33 +602,20 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     tk_comp_frame(C, 0, 1);
     relayer(&scrim);
     tk_layer_init(&scrim, "scrim");
-    tk_bmp_new(&scrim.bmp, TK_W, TK_H);
+    /* half resolution, drawn 2x (it is a blur): 4 MB instead of 17 */
+    tk_bmp_new(&scrim.bmp, TK_W / 2, TK_H / 2);
+    scrim.sx = scrim.sy = 2;
     {
-        tk_bmp a, q;
-        tk_bmp_new(&a, TK_W / 2, TK_H / 2);
+        tk_bmp q;
         tk_bmp_new(&q, TK_W / 4, TK_H / 4);
-        tk_bmp_down2(&a, &C->fb);
-        tk_bmp_down2(&q, &a);
+        tk_bmp_down2(&scrim.bmp, &C->fb);
+        tk_bmp_down2(&q, &scrim.bmp);
         tk_bmp_blur(&q, PT(22) / 4);
         tk_bmp_satbright(&q, 1.3f, 1);
-        /* up to full (bilinear, via the glass module's helper: blur 0 is a copy) */
-        for (int j = 0; j < TK_H; j++)
-            for (int i = 0; i < TK_W; i++) {
-                float fx = (i + .5f) / 4 - .5f, fy = (j + .5f) / 4 - .5f;
-                int x0 = (int)tk_floorf(fx), y0 = (int)tk_floorf(fy);
-                float tx = fx - x0, ty = fy - y0;
-                int xa = tk_maxi(0, x0), xb = tk_mini(q.w - 1, x0 + 1), ya = tk_maxi(0, y0), yb = tk_mini(q.h - 1, y0 + 1);
-                uint32_t p00 = q.px[ya * q.w + xa], p01 = q.px[ya * q.w + xb], p10 = q.px[yb * q.w + xa], p11 = q.px[yb * q.w + xb], o = 0;
-                for (int sh = 0; sh < 32; sh += 8) {
-                    float v = ((p00 >> sh & 255) * (1 - tx) + (p01 >> sh & 255) * tx) * (1 - ty) + ((p10 >> sh & 255) * (1 - tx) + (p11 >> sh & 255) * tx) * ty;
-                    o |= (uint32_t)(int)(v + .5f) << sh;
-                }
-                scrim.bmp.px[j * TK_W + i] = o;
-            }
-        tk_bmp_free(&a);
+        tk_bmp_up(&scrim.bmp, &q, 0, 0, 2);
         tk_bmp_free(&q);
         tk_paint t = tk_solid(TK_RGBA(4, 8, 26, .28f));
-        tk_fill_rrect(&scrim.bmp, -2, -2, TK_W + 4, TK_H + 4, 0, &t, 1);
+        tk_fill_rrect(&scrim.bmp, -2, -2, TK_W / 2 + 4, TK_H / 2 + 4, 0, &t, 1);
     }
     /* the card: its backdrop is the scrim filtered again (blur 14, saturate 1.9, brightness 1.06), taken once at
      * rest and moved with the card while it springs in (Chrome filters the live scene under it each frame) */
@@ -602,11 +623,11 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     for (int pass = 0; pass < 1; pass++) {
         tk_layer *L = &fcard;
         relayer(L);
-        dc d = mk(L, pass ? "fcard-moving" : "fcard", 14, 196, 362, 267, 56, 0);
+        dc d = mk(L, "fcard", 14, 196, 362, 267, 44, 0);
         if (!pass) {
             tk_bmp crop;
             tk_bmp_new(&crop, d.b->w, d.b->h);
-            tk_bmp_copy(&crop, 0, 0, &scrim.bmp, (int)d.ox, (int)d.oy, crop.w, crop.h);
+            tk_bmp_up(&crop, &scrim.bmp, (int)d.ox, (int)d.oy, 2);      /* the card's part of the scrim, 2x */
             tk_glass_local(d.b, &crop, PT(14) - d.ox, PT(196) - d.oy, PT(362), PT(267), PT(32));
             tk_bmp_free(&crop);
         }
@@ -694,11 +715,10 @@ static void set_focus(float p)
 static void flatten_lock(void)
 {
     if (flat_ver == lock_ver) return;
-    tk_flatten(&lockg, &lockflat.bmp, &lockflat.glass);
+    tk_flatten(&lockg, &lockflat.bmp, &lockflat.glass, .5f);
     flat_ver = lock_ver;
     tk_layer_dirty(&lockflat);
-    tk_layer_prepare(&lockflat);
-    tk_layer_prepare(&home);
+    tk_comp_prepare(C);
 }
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
@@ -719,7 +739,7 @@ static void set_lock(float y)
         flatten_lock();
         lockg.hidden = 1;
         lockflat.hidden = la <= 0;
-        lockflat.y = PT(y);
+        lockflat.y = PT(y) / 2;           /* the layer's offset is scaled with it */
         lockflat.alpha = tk_maxf(0, la);
     }
 }
@@ -793,14 +813,17 @@ int sh_init(tk_comp *c)
     tk_layer_add(&lockg, &Q[1].grp);
     tk_layer_add(&lockg, &hint);
     tk_layer_init(&lockflat, "lock-flat");
-    tk_bmp_new(&lockflat.bmp, TK_W, TK_H);
-    tk_a8_new(&lockflat.glass, TK_W, TK_H);
+    /* the flattened lock is only ever seen moving (half-resolution frames): kept at half resolution, drawn 2x */
+    tk_bmp_new(&lockflat.bmp, TK_W / 2, TK_H / 2);
+    tk_a8_new(&lockflat.glass, TK_W / 2, TK_H / 2);
+    lockflat.sx = lockflat.sy = 2;
     lockflat.glass_opaque_only = 1;
     lockflat.hidden = 1;
     tk_layer_init(&focus, "focus");
     focus.hidden = 1;
     tk_layer_init(&boot, "boot");
     boot.hidden = 1;
+    tk_layer_add(&root, &star);
     tk_layer_add(&root, &home);
     tk_layer_add(&root, &lockg);
     tk_layer_add(&root, &lockflat);
@@ -1054,6 +1077,7 @@ int sh_tick(float dt, float t)
             mv = 1;
             place_list();
         }
+        if (!k->isopen && !k->sp.live && k->chev_t >= 1 && k->memh <= 0 && k->face.bmp.px) free_open(g);
         if (k->chev_t < 1) {
             k->chev_t = tk_minf(1, k->chev_t + dt / .35f);
             k->chev_now = k->chev_from + (k->chev_to - k->chev_from) * tk_bezier(.3f, 1.4f, .4f, 1, k->chev_t);

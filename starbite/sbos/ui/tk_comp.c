@@ -182,9 +182,18 @@ static void row_glass(uint32_t *d, const uint32_t *b, const uint8_t *m, int n, u
 typedef struct {
     tk_bmp *t;            /* target */
     tk_a8 *collect;       /* flatten: glass masks go here instead of the backdrop */
-    const tk_bmp *bw;     /* glass backdrop at the target's resolution */
+    const tk_bmp *bw;     /* the glass backdrop (half resolution) */
     float k;              /* target px per screen px (1 or .5) */
+    int bw_double;        /* the target is full resolution: each backdrop px covers 2 x 2 */
 } tgt;
+static uint32_t bwrow[TK_W + 16];
+static const uint32_t *bw_row(const tgt *T, int y, int x0, int n)
+{
+    if (!T->bw_double) return T->bw->px + (size_t)y * T->bw->stride + x0;
+    const uint32_t *r = T->bw->px + (size_t)(y >> 1) * T->bw->stride;
+    for (int i = 0; i < n; i++) bwrow[i] = r[(x0 + i) >> 1];
+    return bwrow;
+}
 
 static const tk_bmp *half_of(tk_layer *l)
 {
@@ -271,7 +280,7 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
                 const uint8_t *sm = gm->v + (size_t)v * gm->w + u0 + i0;
                 for (int q = 0; q < i1 - i0; q++) { unsigned m = (sm[q] * al + 127) / 255; if (m > cm[q]) cm[q] = (uint8_t)m; }
             } else if (glass)
-                row_glass(dst + i0, T->bw->px + (size_t)y * T->bw->stride + d.x0 + i0, gm->v + (size_t)v * gm->w + u0 + i0, i1 - i0, al);
+                row_glass(dst + i0, bw_row(T, y, d.x0 + i0, i1 - i0), gm->v + (size_t)v * gm->w + u0 + i0, i1 - i0, al);
             row_over(dst + i0, src->px + (size_t)v * src->stride + u0 + i0, i1 - i0, al);
         } else {
             /* bilinear, separable: the two source rows blended once over the span, then each target px from two
@@ -362,66 +371,72 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
                 uint8_t *cm = T->collect->v + (size_t)y * T->collect->w + d.x0;
                 for (int q = 0; q < n; q++) { unsigned m = (maskbuf[q] * al + 127) / 255; if (m > cm[q]) cm[q] = (uint8_t)m; }
             } else if (glass)
-                row_glass(dst, T->bw->px + (size_t)y * T->bw->stride + d.x0, maskbuf, n, al);
+                row_glass(dst, bw_row(T, y, d.x0, n), maskbuf, n, al);
             row_over(dst, rowbuf, n, al);
         }
     }
 }
 
-/* ---- the present: the half canvas's rect, 2x, into the panel (1/4 3/4 bilinear) -------------------------- */
-static uint32_t prT[TK_W / 2 + 32], prB[TK_W / 2 + 32];
-static void up2x_rect(tk_bmp *fb, const tk_bmp *h, tk_irect r)
+/* ---- 2x up: a half-resolution image into an output rect (any parity) of a full one, 1/4 3/4 bilinear -------- */
+static uint32_t upV[TK_W / 2 + 32];
+static void up2x_out(tk_bmp *dst, const tk_bmp *h, tk_irect R)
 {
-    /* per half row: the two vertical blends (3/4 this row + 1/4 the row above / below) into padded temp rows,
-     * then each horizontally into two panel px (3/4 + 1/4 the left / right neighbour): 3 loads per 4 px */
-    int x0 = r.x0, x1 = r.x1, n = x1 - x0;
-    uint32_t *T = prT + 8, *B = prB + 8;
-    for (int j = r.y0; j < r.y1; j++) {
-        const uint32_t *c = h->px + (size_t)j * h->stride;
-        const uint32_t *u = h->px + (size_t)tk_maxi(0, j - 1) * h->stride;
-        const uint32_t *d = h->px + (size_t)tk_mini(h->h - 1, j + 1) * h->stride;
-        int a0 = tk_maxi(0, x0 - 1), a1 = tk_mini(h->w, x1 + 1), i = a0;
-        for (; i + 4 <= a1; i += 4) {
-            uint8x16_t C = vld1q_u8((const uint8_t *)(c + i)), U = vld1q_u8((const uint8_t *)(u + i)), D = vld1q_u8((const uint8_t *)(d + i));
-            vst1q_u8((uint8_t *)(T + i - x0), vrhaddq_u8(C, vrhaddq_u8(C, U)));
-            vst1q_u8((uint8_t *)(B + i - x0), vrhaddq_u8(C, vrhaddq_u8(C, D)));
+    /* per output row: the vertical blend (3/4 its half row + 1/4 the half row above or below) into a padded temp
+     * row, then each output px 3/4 its half px + 1/4 the left or right neighbour: 3 loads per 4 half px */
+    R = isect(R, (tk_irect){ 0, 0, dst->w, dst->h });
+    if (iempty(R)) return;
+    int i0 = tk_maxi(0, (R.x0 >> 1) - 1), i1 = tk_mini(h->w, ((R.x1 - 1) >> 1) + 2);
+    uint32_t *V = upV + 8 - i0;                     /* V[i] for i in [i0 - 1, i1] */
+    for (int Y = R.y0; Y < R.y1; Y++) {
+        int j = Y >> 1, jn = Y & 1 ? tk_mini(h->h - 1, j + 1) : tk_maxi(0, j - 1);
+        j = tk_mini(j, h->h - 1);
+        const uint32_t *c = h->px + (size_t)j * h->stride, *n = h->px + (size_t)jn * h->stride;
+        int i = i0;
+        for (; i + 4 <= i1; i += 4) {
+            uint8x16_t C = vld1q_u8((const uint8_t *)(c + i)), N = vld1q_u8((const uint8_t *)(n + i));
+            vst1q_u8((uint8_t *)(V + i), vrhaddq_u8(C, vrhaddq_u8(C, N)));
         }
-        for (; i < a1; i++) {
-            uint32_t ot = 0, ob = 0;
-            for (int sh = 0; sh < 32; sh += 8) {
-                ot |= ((3 * (c[i] >> sh & 255) + (u[i] >> sh & 255) + 2) >> 2) << sh;
-                ob |= ((3 * (c[i] >> sh & 255) + (d[i] >> sh & 255) + 2) >> 2) << sh;
-            }
-            T[i - x0] = ot;
-            B[i - x0] = ob;
+        for (; i < i1; i++) {
+            uint32_t o = 0;
+            for (int sh = 0; sh < 32; sh += 8) o |= ((3 * (c[i] >> sh & 255) + (n[i] >> sh & 255) + 2) >> 2) << sh;
+            V[i] = o;
         }
-        if (x0 == 0) { T[-1] = T[0]; B[-1] = B[0]; }
-        if (x1 == h->w) { T[n] = T[n - 1]; B[n] = B[n - 1]; }
-        uint32_t *o0 = fb->px + (size_t)(2 * j) * fb->stride + 2 * x0, *o1 = o0 + fb->stride;
-        int k = 0;
-        for (; k + 4 <= n; k += 4) {
-            uint8x16_t Tc = vld1q_u8((const uint8_t *)(T + k)), Tl = vld1q_u8((const uint8_t *)(T + k - 1)), Tr = vld1q_u8((const uint8_t *)(T + k + 1));
-            uint8x16_t Bc = vld1q_u8((const uint8_t *)(B + k)), Bl = vld1q_u8((const uint8_t *)(B + k - 1)), Br = vld1q_u8((const uint8_t *)(B + k + 1));
-            uint32x4x2_t t = vzipq_u32(vreinterpretq_u32_u8(vrhaddq_u8(Tc, vrhaddq_u8(Tc, Tl))), vreinterpretq_u32_u8(vrhaddq_u8(Tc, vrhaddq_u8(Tc, Tr))));
-            uint32x4x2_t b = vzipq_u32(vreinterpretq_u32_u8(vrhaddq_u8(Bc, vrhaddq_u8(Bc, Bl))), vreinterpretq_u32_u8(vrhaddq_u8(Bc, vrhaddq_u8(Bc, Br))));
-            vst1q_u32(o0 + 2 * k, t.val[0]); vst1q_u32(o0 + 2 * k + 4, t.val[1]);
-            vst1q_u32(o1 + 2 * k, b.val[0]); vst1q_u32(o1 + 2 * k + 4, b.val[1]);
+        V[i0 - 1] = V[i0];
+        V[i1] = V[i1 - 1];
+        uint32_t *o = dst->px + (size_t)Y * dst->stride;
+        int X = R.x0;
+        if (X & 1) {                                 /* an odd first px: the right half of its pair */
+            int k = X >> 1;
+            uint32_t a = V[k], e = V[k + 1], r = 0;
+            for (int sh = 0; sh < 32; sh += 8) r |= ((3 * (a >> sh & 255) + (e >> sh & 255) + 2) >> 2) << sh;
+            o[X++] = r;
         }
-        for (; k < n; k++)
-            for (int q = 0; q < 4; q++) {
-                const uint32_t *R = q < 2 ? T : B;
-                uint32_t a = R[k], e = R[k + (q & 1 ? 1 : -1)], o = 0;
-                for (int sh = 0; sh < 32; sh += 8) o |= ((3 * (a >> sh & 255) + (e >> sh & 255) + 2) >> 2) << sh;
-                (q < 2 ? o0 : o1)[2 * k + (q & 1)] = o;
-            }
+        for (; X + 8 <= R.x1; X += 8) {
+            int k = X >> 1;
+            uint8x16_t Vc = vld1q_u8((const uint8_t *)(V + k)), Vl = vld1q_u8((const uint8_t *)(V + k - 1)), Vr = vld1q_u8((const uint8_t *)(V + k + 1));
+            uint32x4x2_t t = vzipq_u32(vreinterpretq_u32_u8(vrhaddq_u8(Vc, vrhaddq_u8(Vc, Vl))), vreinterpretq_u32_u8(vrhaddq_u8(Vc, vrhaddq_u8(Vc, Vr))));
+            vst1q_u32(o + X, t.val[0]);
+            vst1q_u32(o + X + 4, t.val[1]);
+        }
+        for (; X < R.x1; X++) {
+            int k = X >> 1;
+            uint32_t a = V[k], e = V[X & 1 ? k + 1 : k - 1], r = 0;
+            for (int sh = 0; sh < 32; sh += 8) r |= ((3 * (a >> sh & 255) + (e >> sh & 255) + 2) >> 2) << sh;
+            o[X] = r;
+        }
     }
 }
 
 /* ---- the frame -------------------------------------------------------------------------------------------- */
-int tk_comp_init(tk_comp *c)
+int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel)
 {
-    if (!tk_bmp_new(&c->fb, TK_W, TK_H) || !tk_bmp_new(&c->base, TK_W, TK_H) || !tk_bmp_new(&c->bw, TK_W, TK_H) ||
-        !tk_bmp_new(&c->base_half, TK_W / 2, TK_H / 2) || !tk_bmp_new(&c->bw_half, TK_W / 2, TK_H / 2) ||
+    /* fb: the full-resolution compose target in RAM (the kernel lends the old UI's back buffer); panel: where
+     * frames are presented (the framebuffer; write only: motion frames are scaled straight into it) */
+    if (fb) { c->fb.w = TK_W; c->fb.h = TK_H; c->fb.stride = TK_W; c->fb.px = fb; }
+    else if (!tk_bmp_new(&c->fb, TK_W, TK_H)) return 0;
+    if (panel) { c->panel.w = TK_W; c->panel.h = TK_H; c->panel.stride = TK_W; c->panel.px = panel; }
+    else if (!tk_bmp_new(&c->panel, TK_W, TK_H)) return 0;
+    if (!tk_bmp_new(&c->base_half, TK_W / 2, TK_H / 2) || !tk_bmp_new(&c->bw_half, TK_W / 2, TK_H / 2) ||
         !tk_bmp_new(&c->half, TK_W / 2, TK_H / 2))
         return 0;
     return 1;
@@ -440,11 +455,10 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     /* damage */
     tk_irect D[TK_MAXD];
     int nd = 0;
-    tk_irect bbox = { 0, 0, 0, 0 };
     if (full || was_motion < 0 || (motion && !was_motion)) {
         D[nd++] = screen;
     } else {
-        tk_irect acc[TK_MAXITEM * 2];
+        static tk_irect acc[TK_MAXITEM * 2 + 2];
         int na = 0;
         for (int i = 0; i < cur.n; i++) {
             item *it = &cur.it[i];
@@ -476,8 +490,7 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
             else if (nd < TK_MAXD) D[nd++] = r;
             else D[nd - 1] = iunion(D[nd - 1], r);
         }
-        /* merging can make new overlaps */
-        for (int again = 1; again;) {
+        for (int again = 1; again;) {           /* merging can make new overlaps */
             again = 0;
             for (int i = 0; i < nd && !again; i++)
                 for (int j = i + 1; j < nd; j++)
@@ -491,8 +504,10 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     }
     if (!motion) { c->have_moved = 0; c->moved = (tk_irect){ 0, 0, 0, 0 }; }
 
-    tgt T = { motion ? &c->half : &c->fb, 0, motion ? &c->bw_half : &c->bw, motion ? .5f : 1 };
-    const tk_bmp *base = motion ? &c->base_half : &c->base;
+    /* motion: the half canvas, its backdrop 1:1; at rest: the RAM frame, the wallpaper and the backdrop from their
+     * half-resolution copies (smooth: the wallpaper's gradients, the 52 px blur) */
+    tgt T = { motion ? &c->half : &c->fb, 0, &c->bw_half, motion ? .5f : 1, 0 };
+    T.bw_double = !motion;
     int px = 0;
     for (int q = 0; q < nd; q++) {
         tk_irect r = D[q];
@@ -501,21 +516,28 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
             D[q] = r;
             c->moved = iunion(c->moved, (tk_irect){ 2 * r.x0, 2 * r.y0, 2 * r.x1, 2 * r.y1 });
             c->have_moved = 1;
-        }
-        bbox = iunion(bbox, r);
+            for (int y = r.y0; y < r.y1; y++)
+                tk_memcpy(T.t->px + (size_t)y * T.t->stride + r.x0, c->base_half.px + (size_t)y * c->base_half.stride + r.x0, (size_t)(r.x1 - r.x0) * 4);
+        } else
+            up2x_out(&c->fb, &c->base_half, r);
         px += (r.x1 - r.x0) * (r.y1 - r.y0);
-        for (int y = r.y0; y < r.y1; y++)
-            tk_memcpy(T.t->px + (size_t)y * T.t->stride + r.x0, base->px + (size_t)y * base->stride + r.x0, (size_t)(r.x1 - r.x0) * 4);
         for (int i = 0; i < cur.n; i++) draw_item(&T, &cur.it[i], r);
     }
     uint64_t t1 = tk_us();
-    if (motion)
-        for (int q = 0; q < nd; q++) {
-            /* one half px of margin for the bilinear neighbours */
-            tk_irect r = isect((tk_irect){ D[q].x0 - 1, D[q].y0 - 1, D[q].x1 + 1, D[q].y1 + 1 }, (tk_irect){ 0, 0, TK_W / 2, TK_H / 2 });
-            up2x_rect(&c->fb, &c->half, r);
+    for (int q = 0; q < nd; q++) {
+        if (motion) {
+            /* the damage 2x into the panel, with a half px of margin for the bilinear neighbours */
+            tk_irect r = D[q];
+            up2x_out(&c->panel, &c->half, isect((tk_irect){ 2 * r.x0 - 2, 2 * r.y0 - 2, 2 * r.x1 + 2, 2 * r.y1 + 2 }, screen));
+        } else if (c->panel.px != c->fb.px) {
+            tk_irect r = D[q];
+            for (int y = r.y0; y < r.y1; y++)
+                tk_memcpy(c->panel.px + (size_t)y * c->panel.stride + r.x0, c->fb.px + (size_t)y * c->fb.stride + r.x0, (size_t)(r.x1 - r.x0) * 4);
         }
+    }
     uint64_t t2 = tk_us();
+    c->nd = nd;
+    for (int q = 0; q < nd; q++) c->dmg[q] = motion ? (tk_irect){ 2 * D[q].x0, 2 * D[q].y0, 2 * D[q].x1, 2 * D[q].y1 } : D[q];
     prev = cur;
     was_motion = motion;
     c->last_half = motion;
@@ -523,20 +545,19 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     c->us_comp = t1 - t0;
     c->us_present = t2 - t1;
     c->last_us = t2 - t0;
-    (void)bbox;
     return c->last_px;
 }
 
-void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask)
+void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
 {
     flist.n = 0;
     W = &flist;
     tk_irect screen = { 0, 0, out->w, out->h };
-    walk(g->child, 1, 1, 0, 0, 1, screen, 0, 0, 0, 0, 0);
+    walk(g->child, k, k, 0, 0, 1, screen, 0, 0, 0, 0, 0);
     W = &cur;
     tk_memset(out->px, 0, (size_t)out->stride * out->h * 4);
     if (mask && mask->v) tk_memset(mask->v, 0, (size_t)mask->w * mask->h);
-    tgt T = { out, mask && mask->v ? mask : 0, 0, 1 };
+    tgt T = { out, mask && mask->v ? mask : 0, 0, 1, 0 };
     for (int i = 0; i < flist.n; i++) draw_item(&T, &flist.it[i], screen);
 }
 

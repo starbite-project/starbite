@@ -31,14 +31,14 @@ int tk_fm_new(tk_fm *m, int w, int h)
     m->v = w > 0 && h > 0 ? tk_alloc((size_t)w * h * 4) : 0;
     return m->v != 0;
 }
-void tk_fm_free(tk_fm *m) { if (m->v) tk_free(m->v); m->v = 0; }
+void tk_fm_free(tk_fm *m) { if (m->v) tk_free(m->v); m->v = 0; m->w = m->h = 0; }
 int tk_a8_new(tk_a8 *m, int w, int h)
 {
     m->w = w; m->h = h;
     m->v = w > 0 && h > 0 ? tk_alloc((size_t)w * h) : 0;
     return m->v != 0;
 }
-void tk_a8_free(tk_a8 *m) { if (m->v) tk_free(m->v); m->v = 0; }
+void tk_a8_free(tk_a8 *m) { if (m->v) tk_free(m->v); m->v = 0; m->w = m->h = 0; }
 
 /* ---- paints ----------------------------------------------------------------------------------------------- */
 tk_paint tk_solid(tk_col c) { tk_paint p; tk_memset(&p, 0, sizeof p); p.kind = TK_P_SOLID; p.solid = c; return p; }

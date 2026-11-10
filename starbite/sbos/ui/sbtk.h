@@ -85,6 +85,8 @@ void tk_bmp_blur(tk_bmp *b, float sigma);
 void tk_bmp_satbright(tk_bmp *b, float sat, float bright);
 void tk_bmp_copy(tk_bmp *dst, int dx, int dy, const tk_bmp *src, int sx, int sy, int w, int h);
 void tk_bmp_down2(tk_bmp *dst, const tk_bmp *src);              /* 2x2 box (premultiplied) */
+/* bilinear up: dst px (i, j) samples src at the point (x0 + i, y0 + j) of a space f times src's size */
+void tk_bmp_up(tk_bmp *dst, const tk_bmp *src, int x0, int y0, float f);
 
 /* ---- text (stb_truetype on static instances; tk_text.c) ----------------------------------------------------- */
 enum { TK_IT400, TK_IT500, TK_IT600, TK_IT700, TK_IT800, TK_OF300, TK_NFONT };
@@ -109,9 +111,9 @@ const tk_bmp *tk_icon(const char *name);               /* NULL if missing */
 float tk_icon_pad(const char *name);                   /* the margin baked around it (glows), px */
 
 /* ---- Liquid Glass (tk_glass.c) ----------------------------------------------------------------------------- */
-/* the wallpaper: the concept's .wall.n (inset -30 pt, three radials over a vertical gradient) and the star */
-void tk_wall_draw(tk_bmp *b, int emergency);
-/* the backdrop the glass shows: blur 14 pt, saturate 1.9, brightness 1.06 of src */
+/* the wallpaper: the concept's .wall.n (inset -30 pt, three radials over a vertical gradient) at k px per panel px */
+void tk_wall_draw(tk_bmp *b, int emergency, float k);
+/* the backdrop the glass shows: blur 14 pt, saturate 1.9, brightness 1.06 of src (both half resolution) */
 void tk_glass_backdrop(tk_bmp *dst, const tk_bmp *src);
 /* bake one .lg element into b at (x, y, w, h) with radius r: the drop shadow (outside), the tint gradient, the inset
  * rims and glow, the specular radials and the 1 pt gradient border; dark = .lg.dark. Its backdrop mask (the shape's
@@ -158,10 +160,13 @@ void tk_layer_dirty(tk_layer *l);                         /* its bitmap changed 
 void tk_layer_prepare(tk_layer *l);                       /* make its half copy now (idle time), not on first motion */
 
 typedef struct {
-    tk_bmp fb;                 /* the panel (host: RAM; device: the framebuffer) */
-    tk_bmp base, base_half;    /* wallpaper + star, full and half */
-    tk_bmp bw, bw_half;        /* the glass backdrop of base */
+    tk_bmp fb;                 /* the full-resolution frame in RAM (blends read it) */
+    tk_bmp panel;              /* where frames go (the framebuffer: written only) */
+    tk_bmp base_half;          /* the wallpaper at half resolution (the star is a layer) */
+    tk_bmp bw_half;            /* the glass backdrop: the wallpaper blurred, half resolution */
     tk_bmp half;               /* the half-resolution motion canvas */
+    tk_irect dmg[16];          /* the last frame's panel rects (for a partial panel update) */
+    int nd;
     tk_layer *root;
     int motion;                /* the next frame is a motion frame (half resolution) */
     tk_irect moved;            /* what motion frames covered since the last full frame */
@@ -170,10 +175,10 @@ typedef struct {
     int last_half, last_px;
     uint64_t last_us, us_comp, us_present;
 } tk_comp;
-int tk_comp_init(tk_comp *c);
+int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocated */
 /* render a group's children (as if the group were at identity) into a screen-sized transparent bitmap and their
  * glass masks into mask: one cached layer for a group that moves or fades as one (CALayer's shouldRasterize) */
-void tk_flatten(tk_layer *group, tk_bmp *out, tk_a8 *mask);
+void tk_flatten(tk_layer *group, tk_bmp *out, tk_a8 *mask, float scale);   /* scale .5: a half-resolution cache */
 /* draw a frame: motion = half resolution and 2x present; full = redraw everything; returns the drawn px */
 int tk_comp_frame(tk_comp *c, int motion, int full);
 void tk_comp_prepare(tk_comp *c);                         /* idle: make the visible layers' half copies */
@@ -198,6 +203,8 @@ float tk_tracker_v(const tk_tracker *t);                             /* units pe
 /* ---- platform ---------------------------------------------------------------------------------------------- */
 void *tk_alloc(size_t n);          /* zeroed, 64-byte aligned */
 void tk_free(void *p);
+size_t tk_heap_used(void);
+size_t tk_heap_peak(void);
 uint64_t tk_us(void);
 void tk_log(const char *s);
 

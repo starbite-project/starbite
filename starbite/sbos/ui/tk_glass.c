@@ -7,7 +7,7 @@
 
 static const tk_col WHITE0 = { 255, 255, 255, 0 };
 
-void tk_wall_draw(tk_bmp *b, int emergency)
+void tk_wall_draw(tk_bmp *b, int emergency, float k)
 {
     /* .wall: inset -30 pt, so the gradient box is 450 x 862 pt from (-30, -30) */
     float bx = PT(-30), by = PT(-30), bw = PT(450), bh = PT(862);
@@ -32,7 +32,7 @@ void tk_wall_draw(tk_bmp *b, int emergency)
     }
     for (int j = 0; j < b->h; j++)
         for (int i = 0; i < b->w; i++) {
-            float x = i + .5f, y = j + .5f;
+            float x = (i + .5f) / k, y = (j + .5f) / k;
             tk_col c = tk_paint_at(&lin, x, y);
             const tk_paint *L[3] = { &r3, &r2, &r1 };
             for (int k = 0; k < 3; k++) {
@@ -42,12 +42,6 @@ void tk_wall_draw(tk_bmp *b, int emergency)
             int R = (int)(c.r + .5f), G = (int)(c.g + .5f), B = (int)(c.b + .5f);
             b->px[j * b->stride + i] = 0xff000000u | (uint32_t)(R > 255 ? 255 : R) << 16 | (uint32_t)(G > 255 ? 255 : G) << 8 | (uint32_t)(B > 255 ? 255 : B);
         }
-    /* the star: right 34, top 56, 36 x 36 pt, with its glow baked around it */
-    const tk_bmp *st = tk_icon("star");
-    if (st) {
-        float pad = tk_icon_pad("star");
-        tk_blit(b, st, (int)tk_floorf(PT(390 - 34 - 36) - pad + .5f), (int)tk_floorf(PT(56) - pad + .5f), 1);
-    }
 }
 
 static void bilinear_up(tk_bmp *dst, const tk_bmp *src)
@@ -75,18 +69,40 @@ static void bilinear_up(tk_bmp *dst, const tk_bmp *src)
     }
 }
 
+void tk_bmp_up(tk_bmp *dst, const tk_bmp *src, int x0, int y0, float f)
+{
+    /* dst px (i, j) = the bilinear sample of src at the point (x0 + i, y0 + j) of a space f times src's */
+    for (int j = 0; j < dst->h; j++) {
+        float fy = (y0 + j + .5f) / f - .5f;
+        int ya = (int)tk_floorf(fy);
+        unsigned ty = (unsigned)((fy - ya) * 256);
+        int y_0 = tk_maxi(0, tk_mini(src->h - 1, ya)), y_1 = tk_maxi(0, tk_mini(src->h - 1, ya + 1));
+        for (int i = 0; i < dst->w; i++) {
+            float fx = (x0 + i + .5f) / f - .5f;
+            int xa = (int)tk_floorf(fx);
+            unsigned tx = (unsigned)((fx - xa) * 256);
+            int x_0 = tk_maxi(0, tk_mini(src->w - 1, xa)), x_1 = tk_maxi(0, tk_mini(src->w - 1, xa + 1));
+            uint32_t p00 = src->px[y_0 * src->stride + x_0], p01 = src->px[y_0 * src->stride + x_1];
+            uint32_t p10 = src->px[y_1 * src->stride + x_0], p11 = src->px[y_1 * src->stride + x_1], o = 0;
+            for (int sh = 0; sh < 32; sh += 8) {
+                unsigned t0 = (p00 >> sh & 255) * (256 - tx) + (p01 >> sh & 255) * tx, t1 = (p10 >> sh & 255) * (256 - tx) + (p11 >> sh & 255) * tx;
+                o |= ((t0 * (256 - ty) + t1 * ty + 32768) >> 16) << sh;
+            }
+            dst->px[j * dst->stride + i] = o;
+        }
+    }
+}
+
 void tk_glass_backdrop(tk_bmp *dst, const tk_bmp *src)
 {
-    /* the blur at quarter resolution (sigma 14 pt = 51.7 px is far wider than the 4 px it loses), then up */
-    tk_bmp a, q;
-    tk_bmp_new(&a, src->w / 2, src->h / 2);
-    tk_bmp_new(&q, src->w / 4, src->h / 4);
-    tk_bmp_down2(&a, src);
-    tk_bmp_down2(&q, &a);
+    /* src and dst at half resolution; the blur at a quarter (sigma 14 pt = 51.7 px is far wider than what that
+     * loses), then up */
+    tk_bmp q;
+    tk_bmp_new(&q, src->w / 2, src->h / 2);
+    tk_bmp_down2(&q, src);
     tk_bmp_blur(&q, PT(14) / 4);
     tk_bmp_satbright(&q, 1.9f, 1.06f);
     bilinear_up(dst, &q);
-    tk_bmp_free(&a);
     tk_bmp_free(&q);
 }
 

@@ -127,10 +127,10 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         fprintf(log, "F %d %.1f %s px %d comp %.2f present %.2f total %.2f\n", frame, t, c->last_half ? "half" : "full",
                c->last_px, c->us_comp / 1000.0, c->us_present / 1000.0, c->last_us / 1000.0);
         if (half) {
-            tk_bmp_down2(&h, &c->fb);
+            tk_bmp_down2(&h, &c->panel);
             fwrite(h.px, 4, (size_t)h.w * h.h, f);
         } else
-            fwrite(c->fb.px, 4, (size_t)TK_W * TK_H, f);
+            fwrite(c->panel.px, 4, (size_t)TK_W * TK_H, f);
         t += dt;
         frame++;
         rest_frames = motion ? 0 : rest_frames + 1;
@@ -139,7 +139,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
     }
     (void)rest_frames;
     if (f != stdout) fclose(f); else fflush(f);
-    fprintf(stderr, "film: %d frames\n", frame);
+    fprintf(stderr, "film: %d frames; heap %.1f MB (peak %.1f MB)\n", frame, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
     return 0;
 }
 
@@ -211,6 +211,18 @@ static void bench(void)
     }
 }
 
+static double memwalk(tk_layer *l, int depth)
+{
+    double t = 0;
+    for (; l; l = l->next) {
+        double b = (double)l->bmp.w * l->bmp.h * 4, h = (double)l->half.w * l->half.h * 4;
+        double g = (double)l->glass.w * l->glass.h + (double)l->ghalf.w * l->ghalf.h;
+        if (b + h + g > 2e5) fprintf(stderr, "mem %*s%-14s %6.1f MB (half %.1f, glass %.1f)%s\n", depth * 2, "", l->name, (b + h + g) / 1e6, h / 1e6, g / 1e6, l->hidden ? " hidden" : "");
+        t += b + h + g + memwalk(l->child, depth + 1);
+    }
+    return t;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: sbtk-host PAK still|film|bench ...\n"); return 2; }
@@ -219,15 +231,16 @@ int main(int argc, char **argv)
     if (!strcmp(argv[2], "bench")) { bench(); return 0; }
     if (!tk_pack_open(pak, len)) { fprintf(stderr, "bad pack\n"); return 1; }
     static tk_comp c;
-    if (!tk_comp_init(&c)) return 1;
+    if (!tk_comp_init(&c, 0, 0)) return 1;
     uint64_t t0 = tk_us();
     sh_init(&c);
-    fprintf(stderr, "bake: %.1f ms\n", (tk_us() - t0) / 1000.0);
+    fprintf(stderr, "bake: %.1f ms; heap %.1f MB (peak %.1f MB)\n", (tk_us() - t0) / 1000.0, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
+    if (getenv("SBTK_MEM")) fprintf(stderr, "mem: layers %.1f MB\n", memwalk(c.root, 0) / 1e6);
     if (!strcmp(argv[2], "still") && argc >= 4) {
         for (int i = 4; i < argc; i++) apply_state(argv[i]);
         tk_comp_frame(&c, 0, 1);
         fprintf(stderr, "frame: %.2f ms\n", c.last_us / 1000.0);
-        write_ppm(argv[3], &c.fb);
+        write_ppm(argv[3], &c.panel);
         return 0;
     }
     if (!strcmp(argv[2], "frames") && argc >= 3) {
