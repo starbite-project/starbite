@@ -640,3 +640,14 @@ SOLO `starbite-uefi-m3all3h.bin` (0b208195...).
 WER (big3-run1/wer): sbcpu-x64 on the M3 = fast-fail code 5 raised by xtajit64 at +0x36D6C (no guest address in the
 report); on the A55 before E1 it was c0000094 at +0x30C70 (the CNTFRQ divide). To see the guest instruction a minidump
 is needed (WER LocalDumps for sbcpu-x64.exe: a Windows configuration change, the user's call).
+
+## 31. big3h result (01:44) and v17 (governor capped at 2002 MHz): windows-big3i
+
+big3h: `=M3H t41 hi55 s0 c2 g1 n5`: peak 85 C, five throttles, ended at 2002 MHz; mul-add 63 / 81 / 49 ms. sbthermal T34
+reported `Acpm 'sbthermal: big-core boot, the guard owns ACPM', BigCore 3, Midr 0x531f0020`: the arbiter handshake
+works. 2314 MHz heats the cluster faster than a 0.5 s beat can follow.
+
+**v17:** the governor tops out at 2002 MHz (step 1) and changes at most once per 10 s (20 beats); thresholds as v16
+(throttle 80 C, down > 75 C, up < 65 C). `windows-big3i.uefi` (dca74622...), SOLO `starbite-uefi-m3all3i.bin` (b6a726f7...).
+Fixed 1794 MHz peaked at 73 C (big3-1794), so 2002 MHz should stay below the 80 C throttle under the same autotest load.
+If big3i shows n0 and hi < 0x50, it can replace big3-1794 as the daily image (+12% clock).

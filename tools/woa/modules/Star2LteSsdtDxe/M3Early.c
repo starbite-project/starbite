@@ -587,12 +587,12 @@ __asm__ (
   "  mov   w6, #0\n"
   "  b     136f\n"
   "134:\n"
-  "  cmp   w5, #6\n"
+  "  cmp   w5, #20\n"                     // v17: at most one change per 10 s (big3h overshot to 85 C at 3 s)
   "  b.lo  139f\n"
   "  ldr   w6, [x19, #0x24]\n"
   "  cmp   w13, #65\n"                    // v16: up only below 65 C
   "  b.ge  135f\n"
-  "  cmp   w6, #2\n"
+  "  cmp   w6, #1\n"                      // v17: capped at step 1 = 2002 MHz (2314 heated past 85 C between beats)
   "  b.hs  139f\n"
   "  add   w6, w6, #1\n"
   "  b     136f\n"
