@@ -542,3 +542,17 @@ Microsoft build is compiled for a newer architecture level than 23H2's baseline.
   (CAS/CASP/LD<op>/SWP) and LDAPR encodings in ARM64 PE code sections. ntoskrnl, ntdll and kernelbase contain LSE
   too, but only in their checked outline-atomics helpers (they run fine on the M3). A large LDAPR count, like
   winsqlite3's 92, is the red flag. Run it on a read-only copy of C:\Windows\System32 to list the candidates.
+
+## 26. m3all3c result: the clock request faulted on the M3; m3all3d moves it into the guard
+
+m3all3c hung before Windows (loader watchdog; hive clean). Up to the commit everything matched m3all3, but no `=M3C`
+line, and the guard never beat (`=M3K b0000`). The cause: the C request ran on M3 core 1 through **UEFI's page tables**,
+which map only a fixed list of MMIO windows (PlatformMemoryMapLib: framebuffer, rings, a few named blocks). APM SRAM
+(0x02039000) isn't one of them, so the M3 took a data abort at the first SRAM read, before prog 7. The guard,
+which starts at prog 7, never ran.
+
+**m3all3d** (`starbite-uefi-m3all3d.bin`, sha256 `dda69fd24e6cc64ff0b0fa2349fdbf757f3b9e70c696bf9bf18e922f477c436d`):
+the request is sent once by the **guard** at its entry, through its own page table (0..1 GiB Device: APM SRAM, the
+ACPM mailbox, the TMU and the watchdog are all reachable), fire and forget (no wait). The kHz value is a guard literal
+(+0x2C). Crumb `c` in `=M3H t.. hi.. s. cN`: 1 written (and cleaned to RAM) before the attempt, 2 after. A hang
+inside ACPM shows as c1. Thermal guard as in m3all3c.
