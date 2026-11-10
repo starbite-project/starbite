@@ -411,6 +411,33 @@ static void ViewTest(MW_ADAPTER *A, const UCHAR *Wc, const UCHAR *Cached, SIZE_T
     }
 }
 
+/* T31: a row copy with 64-byte NEON loads and stores, two in flight (128 bytes a turn). T27/T29: blt copies read
+ * write-combined memory at 87 MB/s with 8-byte loads and ~300 MB/s split over four CPUs with RtlCopyMemory; wider
+ * loads may keep more of the bus busy. Chosen by an A/B in the boot (Parameters\NeonCopy). */
+static void CopyRowNeon(UCHAR *D, const UCHAR *S, SIZE_T N)
+{
+    while (N >= 128) {
+        __asm__ volatile("ld1 {v0.16b, v1.16b, v2.16b, v3.16b}, [%1], #64\n\t"
+                         "ld1 {v4.16b, v5.16b, v6.16b, v7.16b}, [%1], #64\n\t"
+                         "st1 {v0.16b, v1.16b, v2.16b, v3.16b}, [%0], #64\n\t"
+                         "st1 {v4.16b, v5.16b, v6.16b, v7.16b}, [%0], #64"
+                         : "+r"(D), "+r"(S)
+                         :
+                         : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "memory");
+        N -= 128;
+    }
+    if (N)
+        RtlCopyMemory(D, S, N);
+}
+
+static __forceinline void CopyRow(BOOLEAN Neon, UCHAR *D, const UCHAR *S, SIZE_T N)
+{
+    if (Neon)
+        CopyRowNeon(D, S, N);
+    else
+        RtlCopyMemory(D, S, N);
+}
+
 /* T27: rows [k * MW_COPY_CHUNK_ROWS, + MW_COPY_CHUNK_ROWS) of a job's rectangles taken one after another. */
 static void CopyChunk(const MW_COPY_JOB *J, LONG K)
 {
@@ -422,8 +449,8 @@ static void CopyChunk(const MW_COPY_JOB *J, LONG K)
         LONG a = row - J->RowStart[i], b = (end < J->RowStart[i + 1] ? end : J->RowStart[i + 1]) - J->RowStart[i];
         SIZE_T bytes = (SIZE_T)(r->right - r->left) * 4;
         for (LONG y = r->top + a; y < r->top + b; y++)
-            RtlCopyMemory(J->Dst + (SIZE_T)y * J->DstPitch + (SIZE_T)r->left * 4,
-                          J->Src + (SIZE_T)(y + J->Dy) * J->SrcPitch + (SIZE_T)(r->left + J->Dx) * 4, bytes);
+            CopyRow(J->Neon, J->Dst + (SIZE_T)y * J->DstPitch + (SIZE_T)r->left * 4,
+                    J->Src + (SIZE_T)(y + J->Dy) * J->SrcPitch + (SIZE_T)(r->left + J->Dx) * 4, bytes);
         row = J->RowStart[i + 1];
     }
 }
@@ -473,6 +500,10 @@ void MwCopyStart(MW_ADAPTER *A)
     OBJECT_ATTRIBUTES oa;
     A->ParallelBlt = S9GetDword(L"Parameters", L"ParallelBlt", 1);
     MwLog(A, L"ParallelBlt", A->ParallelBlt);
+    A->NeonCopy = S9GetDword(L"Parameters", L"NeonCopy", 1);       /* T31: 0 off, 1 A/B, 2 always */
+    MwLog(A, L"NeonCopy", A->NeonCopy);
+    A->BltNoDrain = S9GetDword(L"Parameters", L"BltNoDrain", 0);   /* T31 */
+    MwLog(A, L"BltNoDrain", A->BltNoDrain);
     if (A->CopyHelpersUp || A->ParallelBlt == 0)
         return;
     A->CopyStop = 0;
@@ -548,6 +579,14 @@ static ULONG64 CopyBlt(MW_ADAPTER *A, const MW_PRESENT_OP *Op, PUCHAR Dst, LONG 
         else if (A->ParDecided == 0)
             split = ((A->ElN[0] + A->ElN[1]) & 1) != 0;
     }
+    /* T31: once one CPU vs split is settled, big copies alternate RtlCopyMemory and NEON (32 each), then the faster */
+    BOOLEAN neon = FALSE;
+    if (big && A->NeonCopy != 0 && (A->ParallelBlt != 1 || A->ParDecided != 0)) {
+        if (A->NeonCopy == 2 || A->NeonDecided == 2)
+            neon = TRUE;
+        else if (A->NeonDecided == 0)
+            neon = ((A->NeN[0] + A->NeN[1]) & 1) != 0;
+    }
     if (split && InterlockedCompareExchange(&A->CopyBusy, 1, 0) != 0) {
         split = FALSE;                    /* another present is copying with the helpers */
         A->CopyBusySerial++;
@@ -568,6 +607,7 @@ static ULONG64 CopyBlt(MW_ADAPTER *A, const MW_PRESENT_OP *Op, PUCHAR Dst, LONG 
         }
         J->RowStart[nr] = rows;
         J->Chunks = (rows + MW_COPY_CHUNK_ROWS - 1) / MW_COPY_CHUNK_ROWS;
+        J->Neon = neon;
         J->Done = 0;
         KeMemoryBarrier();
         InterlockedExchange(&J->Next, 0);
@@ -591,9 +631,9 @@ static ULONG64 CopyBlt(MW_ADAPTER *A, const MW_PRESENT_OP *Op, PUCHAR Dst, LONG 
     } else {
         for (ULONG i = 0; i < nr; i++)
             for (LONG y = r[i].top; y < r[i].bottom; y++)
-                RtlCopyMemory(Dst + (SIZE_T)y * DstPitch + (SIZE_T)r[i].left * 4,
-                              Src + (SIZE_T)(y + dy) * SrcPitch + (SIZE_T)(r[i].left + dx) * 4,
-                              (SIZE_T)(r[i].right - r[i].left) * 4);
+                CopyRow(neon, Dst + (SIZE_T)y * DstPitch + (SIZE_T)r[i].left * 4,
+                        Src + (SIZE_T)(y + dy) * SrcPitch + (SIZE_T)(r[i].left + dx) * 4,
+                        (SIZE_T)(r[i].right - r[i].left) * 4);
     }
     dt = KeQueryInterruptTime() - t0;
     A->BltCopy100ns += dt;
@@ -608,6 +648,13 @@ static ULONG64 CopyBlt(MW_ADAPTER *A, const MW_PRESENT_OP *Op, PUCHAR Dst, LONG 
         A->ElCopy100ns[split] += dt;
         A->ElPx[split] += px;
         A->ElN[split]++;
+        if (A->NeonCopy == 1 && A->NeonDecided == 0 && (A->ParallelBlt != 1 || A->ParDecided != 0)) {
+            A->NeCopy100ns[neon] += dt;
+            A->NePx[neon] += px;
+            A->NeN[neon]++;
+            if (A->NeN[0] >= 32 && A->NeN[1] >= 32 && A->NeCopy100ns[0] && A->NeCopy100ns[1])
+                A->NeonDecided = A->NePx[1] * A->NeCopy100ns[0] * 10 > A->NePx[0] * A->NeCopy100ns[1] * 11 ? 2 : 1;
+        }
         if (A->ParallelBlt == 1 && A->ParDecided == 0 && A->ElN[0] >= 32 && A->ElN[1] >= 32 &&
             A->ElCopy100ns[0] && A->ElCopy100ns[1]) {
             /* pixels per time: split wins if 10 % faster */
@@ -704,6 +751,22 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         srcW = (LONG)Op->Src->Width;
         srcH = (LONG)Op->Src->Height;
         srcPitch = (LONG)(Op->Src->Pitch ? Op->Src->Pitch : Op->Src->Width * 4);
+        {
+            /* T31: what kinds of surfaces the blts copy between, and who made the full-screen ones */
+#define SB_KIND(x) ((x) == NULL ? 3 : ((x)->Flags & MW_ALLOC_STD_SHADOW) ? 0 : ((x)->Flags & MW_ALLOC_STD_STAGING) ? 1 : \
+                    ((x)->Flags & MW_ALLOC_STD_PRIMARY) ? 2 : 3)
+            A->BltSrcKind[SB_KIND(Op->Src)]++;
+            A->BltDstKind[SB_KIND(Op->Dst)]++;
+#undef SB_KIND
+            if ((ULONG64)srcW * (ULONG64)srcH >= 1048576) {
+                A->BltSrcCreator[0] = Op->Src->Creator[0];
+                A->BltSrcCreator[1] = Op->Src->Creator[1];
+                if (Op->Dst != NULL) {
+                    A->BltDstCreator[0] = Op->Dst->Creator[0];
+                    A->BltDstCreator[1] = Op->Dst->Creator[1];
+                }
+            }
+        }
         if (A->CachedBltReads && srcW > 0 && srcH > 0) {
             /* T26: read through a cached view, every line of the source rectangles invalidated first */
             PUCHAR c = AllocationVaCached(A, Op->Src);
@@ -1228,7 +1291,14 @@ NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMIT
         /* T14e: a flip to a framebuffer-aliased primary reads nothing on the CPU (the GPU drew it where the panel
          * scans), so it does not wait for the queue to drain. Everything else (blts, fills, flips of other
          * allocations, which are sampled on the CPU) still waits for everything before it. */
-        if (priv->Present.Kind != MW_PRESENT_FLIP || priv->Present.Src == NULL || !priv->Present.Src->FbAliased) {
+        /* T31: a blt from one of CDD's CPU-only surfaces (GDI's shadow or staging) reads nothing the GPU writes, so
+         * the CPU copy overlaps the queued GPU work instead of waiting for it (Parameters\BltNoDrain) */
+        BOOLEAN cpuSrc = priv->Present.Kind == MW_PRESENT_BLT && priv->Present.Src != NULL &&
+                         (priv->Present.Src->Flags & (MW_ALLOC_STD_SHADOW | MW_ALLOC_STD_STAGING)) != 0 &&
+                         priv->Present.Dst != NULL && !(priv->Present.Dst->Flags & MW_ALLOC_PRIMARY);   /* not the panel */
+        if (cpuSrc && a->BltNoDrain) {
+            a->BltNoDrainCount++;
+        } else if (priv->Present.Kind != MW_PRESENT_FLIP || priv->Present.Src == NULL || !priv->Present.Src->FbAliased) {
             while (a->QCount != 0 && !a->Stopping && KeQueryInterruptTime() - t0 < 2000000ULL)
                 KeStallExecutionProcessor(20);
             if (a->QCount != 0)

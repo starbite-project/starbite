@@ -1469,6 +1469,18 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
   - Any other call on the device sends a held chain first.
   - `SB_NO_MERGE=1` restores one Render per chain. The umdlog stats count merges.
 
+### 6.38 T30's result; T31 GDI blts overlap the GPU (2026-11-10)
+
+- **cycle-t30-1 (installed):** submissions halved (3,039 renders against 6,050), but moves/s stayed level (44.4 /
+  41.6). Per-submission cost is not the limit.
+- **What is left:** the GDI blt copy (~240 ms/s), which waits for the GPU queue to drain first, and DWM's pacing.
+- **T31:**
+  - **Tagging:** standard allocations are tagged by kind, and every allocation records its creator process.
+    Counters show what the blts copy between and who made those surfaces.
+  - **`BltNoDrain`:** a blt from a CDD shadow/staging surface into a non-primary skips the queue drain and
+    overlaps the GPU.
+  - **`NeonCopy`:** an in-boot A/B of RtlCopyMemory against a 64-byte NEON row copy.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

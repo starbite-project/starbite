@@ -9,6 +9,8 @@
  */
 #include "maliwddm.h"
 
+NTKERNELAPI PCHAR PsGetProcessImageFileName(PEPROCESS Process);   /* T31: exported, undocumented */
+
 /* ---- the segment ---- */
 
 NTSTATUS MwQuerySegment(MW_ADAPTER *A, const DXGKARG_QUERYADAPTERINFO *Info)
@@ -62,6 +64,14 @@ static NTSTATUS NewAllocation(MW_ADAPTER *A, const MW_ALLOCATION_INFO *In, DXGK_
     alloc->Pages = pages;
     alloc->Size = (SIZE_T)pages << PAGE_SHIFT;
     alloc->Flags = In->Flags;
+    {
+        /* T31: who made it (dxgkrnl calls CreateAllocation in the creating process's context) */
+        const char *nm = PsGetProcessImageFileName(PsGetCurrentProcess());
+        char b[8] = { 0 };
+        for (ULONG i = 0; nm != NULL && i < 8 && nm[i]; i++)
+            b[i] = nm[i];
+        RtlCopyMemory(alloc->Creator, b, 8);
+    }
     alloc->Width = In->Width;
     alloc->Height = In->Height;
     alloc->Pitch = In->Pitch;
@@ -201,18 +211,20 @@ NTSTATUS APIENTRY MwGetStandardAllocationDriverData(IN_CONST_HANDLE hAdapter,
         w = Arg->pCreateSharedPrimarySurfaceData->Width;
         h = Arg->pCreateSharedPrimarySurfaceData->Height;
         f = Arg->pCreateSharedPrimarySurfaceData->Format;
-        flags |= MW_ALLOC_PRIMARY;
+        flags |= MW_ALLOC_PRIMARY | MW_ALLOC_STD_PRIMARY;
         break;
     case D3DKMDT_STANDARDALLOCATION_SHADOWSURFACE:
         w = Arg->pCreateShadowSurfaceData->Width;
         h = Arg->pCreateShadowSurfaceData->Height;
         f = Arg->pCreateShadowSurfaceData->Format;
         pitch = &Arg->pCreateShadowSurfaceData->Pitch;
+        flags |= MW_ALLOC_STD_SHADOW;     /* T31 */
         break;
     case D3DKMDT_STANDARDALLOCATION_STAGINGSURFACE:
         w = Arg->pCreateStagingSurfaceData->Width;
         h = Arg->pCreateStagingSurfaceData->Height;
         pitch = &Arg->pCreateStagingSurfaceData->Pitch;
+        flags |= MW_ALLOC_STD_STAGING;    /* T31 */
         break;
     default:
         return STATUS_NOT_SUPPORTED;

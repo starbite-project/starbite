@@ -163,6 +163,17 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         { L"Live_BltBigProcs", a->BltBigProcs }, { L"Live_BltProcPx", a->BltProcPx },
         { L"Live_BltProc0", a->BltProc[0] }, { L"Live_BltProc1", a->BltProc[1] }, { L"Live_BltProc2", a->BltProc[2] },
         { L"Live_SubmitIrqlSeen", a->SubmitIrqlSeen }, { L"Live_PresentMaxMs", a->PresentMaxMs },
+        /* T31 */
+        { L"Live_BltSrcShadow", a->BltSrcKind[0] }, { L"Live_BltSrcStaging", a->BltSrcKind[1] },
+        { L"Live_BltSrcPrimary", a->BltSrcKind[2] }, { L"Live_BltSrcOther", a->BltSrcKind[3] },
+        { L"Live_BltDstShadow", a->BltDstKind[0] }, { L"Live_BltDstStaging", a->BltDstKind[1] },
+        { L"Live_BltDstPrimary", a->BltDstKind[2] }, { L"Live_BltDstOther", a->BltDstKind[3] },
+        { L"Live_BltSrcCreator0", a->BltSrcCreator[0] }, { L"Live_BltSrcCreator1", a->BltSrcCreator[1] },
+        { L"Live_BltDstCreator0", a->BltDstCreator[0] }, { L"Live_BltDstCreator1", a->BltDstCreator[1] },
+        { L"Live_BltNoDrainCount", a->BltNoDrainCount }, { L"Live_NeonDecided", a->NeonDecided },
+        { L"Live_Ne0N", a->NeN[0] }, { L"Live_Ne0Ms", (ULONG)(a->NeCopy100ns[0] / 10000) },
+        { L"Live_Ne0MPx", (ULONG)(a->NePx[0] >> 20) }, { L"Live_Ne1N", a->NeN[1] },
+        { L"Live_Ne1Ms", (ULONG)(a->NeCopy100ns[1] / 10000) }, { L"Live_Ne1MPx", (ULONG)(a->NePx[1] >> 20) },
     };
     static_assert(sizeof(c) / sizeof(c[0]) < SBW_LIVE_MAX, "Live_ table too long");
     for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]); i++)

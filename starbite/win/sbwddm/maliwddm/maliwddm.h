@@ -68,6 +68,7 @@ typedef struct _MW_ALLOCATION {
     PVOID CpuMap;
     LONG ScanSlot;              /* T24: the scanout buffer this full-screen primary renders into (-1: none) */
     PVOID CpuMapCached;         /* T26: a cached view for blt-present reads, invalidated line by line before use */
+    ULONG Creator[2];           /* T31: the image name (8 chars) of the process that created it */
 } MW_ALLOCATION;
 
 typedef struct _MW_ADAPTER MW_ADAPTER;
@@ -88,6 +89,10 @@ typedef struct _MW_CONTEXT {
 #define MW_PRESENT_BLT          1
 #define MW_PRESENT_FILL         2
 #define MW_PRESENT_FLIP         3       /* S9 port (T13h): DWM's flips, emulated (the panel shows Src) */
+/* T31: kinds of dxgkrnl's standard allocations (KMD-side flags, set in GetStandardAllocationDriverData) */
+#define MW_ALLOC_STD_SHADOW     0x100   /* CDD's GDI shadow: written by the CPU only */
+#define MW_ALLOC_STD_STAGING    0x200   /* CDD's staging surface: CPU only */
+#define MW_ALLOC_STD_PRIMARY    0x400   /* the shared primary */
 #define MW_MAX_RECTS            128     /* T29: 16 -> 128. GDI's (CDD's) blts carry up to 123 dirty rectangles; above
                                          * 16, T27/T28 copied their bounding box (up to 1440x1761 px a blt) */
 #define MW_COPY_HELPERS         3       /* T27: blt copies split over the submitting thread and these */
@@ -117,6 +122,7 @@ typedef struct _MW_COPY_JOB {
     RECT R[MW_MAX_RECTS];
     LONG RowStart[MW_MAX_RECTS + 1];
     LONG Chunks;
+    BOOLEAN Neon;               /* T31: rows copied by CopyRowNeon */
     volatile LONG Next, Done;
 } MW_COPY_JOB;
 
@@ -267,6 +273,12 @@ struct _MW_ADAPTER {
     ULONG BltProc[4], BltProcPx, BltBigProcs;
     ULONG ViewTestDone, ViewWcMBps, ViewCachedColdMBps, ViewCachedHotMBps;
     ULONG SubmitIrqlSeen, PresentMaxMs;
+    /* T31: blt sources/destinations by kind [0] shadow [1] staging [2] shared primary [3] other (UMD); the creators
+     * of the last big blt's source and destination; blts copied without draining the queue; the NEON copy A/B */
+    ULONG BltSrcKind[4], BltDstKind[4], BltSrcCreator[2], BltDstCreator[2];
+    ULONG BltNoDrain, BltNoDrainCount, NeonCopy, NeonDecided;
+    ULONG64 NeCopy100ns[2], NePx[2];
+    ULONG NeN[2];
     BOOLEAN CachedBltReads;                 /* T26: Parameters\CachedBltReads (default 1); off after a mismatch */
     ULONG CachedBlts, CachedBltMismatch;
     /* T14a: the first failed job of the boot (JS 0x51 INSTR_INVALID_ENC, once per boot since T13b), for
