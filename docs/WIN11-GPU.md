@@ -1715,6 +1715,21 @@ Every app failure must be a removed device that the app or DWM recovers from.
 - **Stage:** `build/win/stage/sbwddm-t33` (sbumd 416c8caa, sbtext 8dbc65bd); run with `--afbc 0`.
 - **Open:** if dwm.exe logs no SRC1 and the keyboard stays see-through, the next diagnostic is a switch-gated DWM
   frame dump while TabTip is up.
+- **T33's run** (`build/win/cycle-t33-1`): every test passed, including `transparent` (0.00 against WARP); drag
+  60.0/60.0.
+  - **A crash:** a new **AppCrash_LogonUI** in T33's sbumd at `panfrost_delete_shader_state+0x8`. DestroyShader freed
+    `dual_handle` on vertex and geometry shaders, whose 0127 fields are never initialised.
+  - **The variant never fired:** blend states with SRC1 (SRC1_ALPHA/INV_SRC1_ALPHA) exist in 9 processes, but no
+    pixel shader with o1 was ever bound with one, so no variant was made.
+  - **The text was fine:** D2D text on transparent targets already matched WARP. The TextInputHost surfaces with
+    colour > alpha are glyph/mask atlases, where white with coverage alpha is normal. The T32c reading above was
+    wrong.
+- **T33b (sb-patches/0128):**
+  - DestroyShader touches the 0127 fields only for pixel shaders;
+  - a log line `SRC1 blend bound with a pixel shader without o1`;
+  - dwm.exe dumps its composed frame (half size, up to 8 per boot) whenever `umdlog\dwmframe` gets a new
+    last-write time during the boot. The gputest rewrites it after opening Explorer, Settings and TabTip.
+  - Stage: `build/win/stage/sbwddm-t33b` (sbumd 6c78df1c). The user's default stays T32c `--afbc 0`.
 
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 

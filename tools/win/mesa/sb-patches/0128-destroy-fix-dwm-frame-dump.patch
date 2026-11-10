@@ -1,0 +1,123 @@
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index c47e2d4..2dc1723 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -154,7 +154,27 @@ sb_sample_present(struct pipe_context *pipe, Resource *res, unsigned alloc, unsi
+       const char *e = getenv("SB_SAMPLE_ALL");
+       sample_all = e && *e == '1';
+    }
+-   if (n > 24 && (!sample_all || n % 64))
++   /* sb-patches/0128: dwm.exe dumps its composed frame (the screen) whenever umdlog\dwmframe gets a new last-write
++    * time during this boot (the gputest rewrites it with each shell window open); checked every 4th present, up to
++    * 8 dumps. A file left from an earlier boot only sets the baseline. */
++   bool force = false;
++   static int is_dwm = -1;
++   static unsigned dwm_dumps;
++   static ULONGLONG dwm_mtime;
++   static bool dwm_seen;
++   if (is_dwm < 0)
++      is_dwm = !_stricmp(malikm_exe(), "dwm.exe");
++   if (is_dwm && dwm_dumps < 8 && !(n % 4)) {
++      WIN32_FILE_ATTRIBUTE_DATA fa;
++      if (GetFileAttributesExA("C:\\ProgramData\\Starbite\\umdlog\\dwmframe", GetFileExInfoStandard, &fa)) {
++         ULONGLONG t = ((ULONGLONG)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
++         if (dwm_seen && t != dwm_mtime)
++            force = true;
++         dwm_mtime = t;
++      }
++      dwm_seen = true;
++   }
++   if (n > 24 && (!sample_all || n % 64) && !force)
+       return;
+    /* sb-patches/0126 (docs/WIN11-GPU.md 6.42): the whole surface, GPU-copied to staging and read on a grid
+     * (every 2nd column, every 4th row): the 32-sample middle row as before, plus the bounding box of non-zero
+@@ -235,9 +255,12 @@ sb_sample_present(struct pipe_context *pipe, Resource *res, unsigned alloc, unsi
+                   !_stricmp(e, "SystemSettings.exe") || !_stricmp(e, "StartMenuExperienceHost.exe") ||
+                   !_stricmp(e, "ShellExperienceHost.exe") || !_stricmp(e, "SearchHost.exe"));
+       }
+-      if (shell && dumps < 3 && (n == 2 || n == 8 || n == 20)) {
++      if ((shell && dumps < 3 && (n == 2 || n == 8 || n == 20)) || force) {
+          char path[MAX_PATH];
+-         dumps++;
++         if (force)
++            dwm_dumps++;
++         else
++            dumps++;
+          const unsigned w2 = W / 2, h2 = H / 2;
+          snprintf(path, sizeof path, "C:\\ProgramData\\Starbite\\umdlog\\dump-%s-%lu-p%u-%ux%u.ppm", malikm_exe(),
+                   GetCurrentProcessId(), n, W, H);
+diff --git a/src/gallium/frontends/d3d10umd/OutputMerger.cpp b/src/gallium/frontends/d3d10umd/OutputMerger.cpp
+index 72fc0ab..5fbf0cc 100644
+--- a/src/gallium/frontends/d3d10umd/OutputMerger.cpp
++++ b/src/gallium/frontends/d3d10umd/OutputMerger.cpp
+@@ -756,6 +756,8 @@ SetBlendState(D3D10DDI_HDEVICE hDevice,      // IN
+       pDevice->sb_blend_dual = dual;
+       if (pDevice->sb_ps && pDevice->sb_ps->writes_o1)
+          SbBindFs(pDevice);
++      else if (dual && pDevice->sb_ps)
++         SbNoteDualWithoutO1();
+    }
+ 
+    struct pipe_blend_color color;
+diff --git a/src/gallium/frontends/d3d10umd/Shader.cpp b/src/gallium/frontends/d3d10umd/Shader.cpp
+index 41a86ba..09d3b09 100644
+--- a/src/gallium/frontends/d3d10umd/Shader.cpp
++++ b/src/gallium/frontends/d3d10umd/Shader.cpp
+@@ -308,11 +308,15 @@ DestroyShader(D3D10DDI_HDEVICE hDevice,   // IN
+    Shader *pShader = CastShader(hShader);
+    Device *pDevice = CastDevice(hDevice);
+ 
+-   if (pDevice->sb_ps == pShader)
+-      pDevice->sb_ps = NULL;
+-   if (pShader->dual_handle) {
+-      pipe->delete_fs_state(pipe, pShader->dual_handle);
+-      pShader->dual_handle = NULL;
++   /* sb-patches/0128: only pixel shaders initialise the 0127 fields. T33 read dual_handle of vertex and geometry
++    * shaders too (uninitialised runtime memory) and freed garbage: LogonUI c0000005 in panfrost_delete_shader_state. */
++   if (pShader->type == MESA_SHADER_FRAGMENT) {
++      if (pDevice->sb_ps == pShader)
++         pDevice->sb_ps = NULL;
++      if (pShader->dual_handle) {
++         pipe->delete_fs_state(pipe, pShader->dual_handle);
++         pShader->dual_handle = NULL;
++      }
+    }
+ 
+    if (pShader->handle) {
+@@ -1070,12 +1074,25 @@ SbCreateDualFs(Device *pDevice, Shader *pShader)
+ }
+ 
+ 
++/* sb-patches/0128: an SRC1 blend state bound together with a pixel shader that has no o1 (D3D: undefined) */
++void
++SbNoteDualWithoutO1(void)
++{
++   static unsigned n;
++   n++;
++   if (n <= 8 || !(n & (n - 1)))
++      DebugPrintf("sbumd: SRC1 blend bound with a pixel shader without o1 (#%u)\n", n);
++}
++
++
+ void
+ SbBindFs(Device *pDevice)
+ {
+    Shader *pShader = pDevice->sb_ps;
+    void *state = pShader ? pShader->handle : NULL;
+ 
++   if (pShader && !pShader->writes_o1 && pDevice->sb_blend_dual)
++      SbNoteDualWithoutO1();
+    if (pShader && pShader->writes_o1 && pDevice->sb_blend_dual) {
+       if (!pShader->dual_tried) {
+          pShader->dual_tried = true;
+diff --git a/src/gallium/frontends/d3d10umd/Shader.h b/src/gallium/frontends/d3d10umd/Shader.h
+index fc09c73..a0fba1b 100644
+--- a/src/gallium/frontends/d3d10umd/Shader.h
++++ b/src/gallium/frontends/d3d10umd/Shader.h
+@@ -163,5 +163,6 @@ void APIENTRY GenMips(D3D10DDI_HDEVICE hDevice,
+ 
+ /* sb-patches/0127: bind the bound pixel shader, or its dual-source variant while the blend state needs one */
+ void SbBindFs(struct Device *pDevice);
++void SbNoteDualWithoutO1(void);
+ 
+ #endif   /* SHADER_H */

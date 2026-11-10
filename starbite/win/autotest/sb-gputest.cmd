@@ -51,11 +51,22 @@ sbtex.exe hw sbtex-hw-vertexid.log vertexid >> gputest.log 2>&1
 echo sbtex hw vertexid exit %errorlevel% >> gputest.log
 rem T32c: the shell surfaces the user saw fail (File Explorer, Settings, the touch keyboard), so sbumd's present
 rem sampling and dumps (umdlog\dump-*.ppm/.pgm, sb-patches/0126) see them; they stay open until the restart
+rem T33b (sb-patches/0128): after each window settles, rewriting umdlog\dwmframe makes DWM dump its next composed
+rem frame (the screen, half size); the minimised cmd changes the taskbar so DWM presents at all
 start "" explorer.exe C:\
 ping -n 11 127.0.0.1 > nul
+echo %time%> C:\ProgramData\Starbite\umdlog\dwmframe
+start "" /min cmd /c exit
+ping -n 4 127.0.0.1 > nul
 start "" ms-settings:display
 ping -n 11 127.0.0.1 > nul
+echo %time%> C:\ProgramData\Starbite\umdlog\dwmframe
+start "" /min cmd /c exit
+ping -n 4 127.0.0.1 > nul
 start "" "C:\Program Files\Common Files\microsoft shared\ink\TabTip.exe"
 ping -n 11 127.0.0.1 > nul
+echo %time%> C:\ProgramData\Starbite\umdlog\dwmframe
+start "" /min cmd /c exit
+ping -n 4 127.0.0.1 > nul
 echo shell surfaces opened %time% >> gputest.log
 echo sb-gputest end %date% %time% >> gputest.log
