@@ -931,6 +931,123 @@ static void t_survival(void)
             run(&c, &in, 12500, 1000, 0);
             CHECK(load_of(&c) < t0, "All out, trip on: 124 C still sheds below the chip's cut (%d -> %d)", t0, load_of(&c));
         }
+        /* 1.2-alpha24: Unlimited: a lost SoC reading does not stop it; the battery, 2 % and the backstop still do */
+        {
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.all_out = c.unlimited = 1;
+            c.no_high_stop = c.no_current_stop = 1;
+            c.gov_ma = 6000;
+            c.backstop_ma = 6500;
+            heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+            c.trip_off = 1;
+            c.cal = 5;
+            run(&c, &in, 0, 10000, 0);
+            int u0 = load_of(&c);
+            in.soc_ok = 0;                      /* 200 C or more, or the TMU lost */
+            run(&c, &in, 10250, 6000, 0);
+            CHECK(c.state == HEAT_ST_RUNNING && load_of(&c) >= u0, "Unlimited: a lost SoC reading neither stops nor sheds "
+                  "(%d -> %d, %s)", u0, load_of(&c), c.why);
+            in.soc_ok = 1;
+            in.pct = 1;
+            run(&c, &in, 16500, 300, 0);
+            CHECK(stopped_with(&c, HEAT_ST_STOPPED, "2 %"), "Unlimited: 2 %% still stops (%s)", c.why);
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.all_out = c.unlimited = 1;
+            c.no_high_stop = c.no_current_stop = 1;
+            c.backstop_ma = 6500;
+            heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+            c.trip_off = 1;
+            c.cal = 5;
+            run(&c, &in, 0, 10000, 0);
+            in.ma = -6700;
+            run(&c, &in, 10250, 1250, 0);
+            CHECK(stopped_with(&c, HEAT_ST_STOPPED, "for 1 s"), "Unlimited: the 6.5 A / 1 s backstop still stops (%s)", c.why);
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.all_out = c.unlimited = 1;
+            c.surv_bat_c10 = 650;
+            heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+            c.trip_off = 1;
+            in.bat_c10 = 650;
+            run(&c, &in, 0, 500, 0);
+            CHECK(stopped_with(&c, HEAT_ST_STOPPED, "battery limit"), "Unlimited: the 65 C battery limit still stops (%s)",
+                  c.why);
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.unlimited = 1;
+            heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+            c.trip_off = 1;
+            run(&c, &in, 0, 1000, 0);
+            in.bat_ok = 0;
+            run(&c, &in, 1250, 3500, 0);
+            CHECK(stopped_with(&c, HEAT_ST_STOPPED, "battery temperature"), "Unlimited: a lost battery reading stops (%s)",
+                  c.why);
+        }
+        /* 1.2-alpha24: the brownout guard: a sample below the floor sheds the smallest step within one step (250 ms);
+         * nothing back until 3 s at the floor + 100 mV; off, it only measures */
+        for (int on = 0; on < 2; ++on) {
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.all_out = 1;
+            c.no_current_stop = 1;
+            c.no_high_stop = 1;
+            c.guard_on = on;
+            c.guard_mv = 3350;
+            heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+            c.trip_off = 1;
+            c.cal = 5;
+            run(&c, &in, 0, 10000, 0);
+            int g0 = load_of(&c), gpu0 = c.gpu_want, cores0 = c.cores;
+            heat_guard_sample(&c, 3600, -3000, 10100);
+            heat_guard_sample(&c, 3300, -5000, 10200);   /* below 3.35 V (and R = 300 mV / 2 A = 150 mOhm) */
+            in.now = 10250;
+            heat_ctl_step(&c, &in);
+            if (on) {
+                CHECK(load_of(&c) == g0 - 1 && c.cores == cores0 && c.gpu_want == gpu0 && c.g_sheds == 1,
+                      "guard: 3.30 V sheds one clock trim at the next step (%d -> %d, sheds %u)", g0, load_of(&c), c.g_sheds);
+            } else {
+                CHECK(load_of(&c) >= g0 && c.g_sheds == 0, "guard off: 3.30 V sheds nothing (%d -> %d)", g0, load_of(&c));
+            }
+            CHECK(c.g_min_mv == 3300 && c.g_r_mohm == 150 && c.g_ocv_mv == 3300 + 750,
+                  "guard %d: the fast minimum 3300 mV, R 150 mOhm, OCV 4050 mV (%d, %d, %d)", on, c.g_min_mv, c.g_r_mohm,
+                  c.g_ocv_mv);
+            if (!on)
+                continue;
+            for (int k = 0; k < 7; ++k) {        /* still low: a step every sample that is low */
+                heat_guard_sample(&c, 3300, -5000, 10300 + 250U * (unsigned)k);
+                in.now = 10350 + 250U * (unsigned)k;
+                heat_ctl_step(&c, &in);
+            }
+            CHECK(c.gpu_want == 0 || c.cores < cores0, "guard: trims first, then the GPU or a core (gpu %d, cores %d -> %d, "
+                  "trim %d)", c.gpu_want, cores0, c.cores, c.trim);
+            int g1 = load_of(&c);
+            for (uint64_t t = 12200; t <= 14000; t += 100) {   /* back up at 3.50 V: within 3 s nothing comes back */
+                heat_guard_sample(&c, 3500, -4000, t);
+                if (t % 250 == 0) {
+                    in.now = t;
+                    heat_ctl_step(&c, &in);
+                }
+            }
+            CHECK(load_of(&c) == g1 && strstr(c.why, "brownout guard"), "guard: no add-back within 3 s (%d -> %d, %s)", g1,
+                  load_of(&c), c.why);
+            for (uint64_t t = 14100; t <= 18000; t += 100) {
+                heat_guard_sample(&c, 3500, -4000, t);
+                if (t % 250 == 0) {
+                    in.now = t;
+                    heat_ctl_step(&c, &in);
+                }
+            }
+            CHECK(load_of(&c) > g1, "guard: after 3 s at the floor + 100 mV it adds back (%d -> %d)", g1, load_of(&c));
+            int g2 = load_of(&c);
+            heat_guard_sample(&c, 3480, -4000, 18100);
+            heat_guard_sample(&c, 3410, -4100, 18200);  /* a 70 mV drop in 100 ms, 60 mV over the floor: a fast drop */
+            in.now = 18250;
+            heat_ctl_step(&c, &in);
+            CHECK(load_of(&c) < g2 && c.g_fast >= 1, "guard: a fast drop near the floor sheds before the floor (%d -> %d)", g2,
+                  load_of(&c));
+        }
         {                                       /* All out off: the old hold (the user's switch) */
             heat_ctl_init(&c, 0);
             in = base_in(0);

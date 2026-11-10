@@ -91,11 +91,15 @@ struct sb_evidence {
 #define CK_UNKNOWN   8U   /* a reset nobody explains */
 #define CK_LOADERWDT 9U   /* a watchdog reset while no OS ran */
 #define CK_OOPS      10U  /* Linux oops, the system went on */
+#define CK_POWERLOSS 11U  /* 2026-11-10: S2MPS18 PWRONSRC SMPL: the battery let go for a moment (a brownout) */
 #define SEV_INFO  0U      /* logged only */
 #define SEV_WARN  1U      /* report saved, crash screen */
 #define SEV_CRASH 2U
 unsigned sb_classify(const struct sb_evidence *e, unsigned *severity);
 const char *sb_kind_name(unsigned kind);     /* "KERNEL PANIC" */
+/* 2026-11-10: the S2MPS18's PWRONSRC / OFFSRC bits with the vendor's names (sec_debug_reset_reason.c), 0 for none */
+const char *sb_pwron_bit_name(unsigned bit); /* "SMPL" */
+const char *sb_pwroff_bit_name(unsigned bit);/* "UVLOB" */
 
 /* ---- the crash log: store entry "crashlog" (flag SF_VOLATILE), 16 blocks of 4 KiB -------------
  * Block 0, the header (CRC32 of bytes 16..1023 at 12):

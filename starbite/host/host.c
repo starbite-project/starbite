@@ -303,6 +303,22 @@ int sb_bat_read(struct sb_bat *b)
     return 1;
 }
 
+/* 1.2-alpha24: the brownout guard's fast read. SBOS_HOST_FAST_MV=N: the cell reads N mV here (a sag the 1 s
+ * reading does not show), so the guard's shedding can be tested */
+int sb_bat_fast(int *mv, int *ma)
+{
+    static int forced = -1;
+    if (forced < 0) {
+        const char *e = getenv("SBOS_HOST_FAST_MV");
+        forced = e ? atoi(e) : 0;
+    }
+    uint16_t v;
+    sb_fg_word(0x09, &v);
+    *mv = forced > 0 ? forced : (int)((uint32_t)v * 5U / 64U);
+    *ma = fake_ma();
+    return 1;
+}
+
 /* ---- touch: the script's taps and drags ----------------------------------------------------- */
 
 struct sb_touch_info sb_tp;

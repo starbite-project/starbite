@@ -27,6 +27,9 @@ int batt_init(void);
 /* One reading (RepSOC, VCELL, Current, CHG_INT_OK, CHG_DETAILS_01): about 0.5 ms on a working
  * bus. 1 and *b valid, or 0 and b->valid = 0 (b is always written). */
 int batt_read(struct batt_info *b);
+/* 2026-11-10: the charger's B2SOVRC back to 5.6 A when found off (Survival's switch, then a brownout):
+ * -1 bus, 0 nothing to do, 1 put back, 2 the write did not read back */
+int batt_b2s_restore(uint8_t *was, uint8_t *now);
 
 /* Single values: -1 unknown. */
 int batt_percent(void);

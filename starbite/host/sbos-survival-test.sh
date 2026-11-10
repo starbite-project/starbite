@@ -9,7 +9,8 @@ out="$root/starbite/out/sboshost"
 OPEN="w:300 g:1150,2310,0,700 w:400"
 HEAT="t:1057,663 w:600"
 SURV="t:723,1927 w:500"
-SURVX="g:720,2400,-1500,600 w:800 t:1184,2226 w:500 t:718,424 w:500"   # 1.2-alpha17: scrolled (the 4.5 A row); alpha22: 165 px up (Last session); alpha23: the All out row
+# 1.2-alpha24: to the page's end (the trip toggle under Unlimited and the guard), then back to the top for Survival
+SURVX="g:720,2400,-1500,600 w:800 g:720,2400,-1500,600 w:800 t:1184,1688 w:500 g:720,500,2000,600 w:800 g:720,500,2000,600 w:800 t:723,1927 w:500"
 BATLIM="t:723,2213 w:500"
 HOLD="g:720,1170,0,1900 w:400"
 OFF="t:720,330 w:600 t:220,670 w:600"   # 1.2-alpha5: the first tap leaves the white screen (on the Heat page: the title)
@@ -124,9 +125,10 @@ ST=/tmp/sbos-survival-state.bin         # in the VM: the Mac-shared folder showe
 limactl shell starbite rm -f "$ST"
 ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_STATE=$ST"
 # 1.2-alpha23: All out off first (the limit rows show only then), then the trip toggle, then the limit's hold
-r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 t:1184,1709 w:600 t:1184,2148 w:600 g:720,2400,-1500,600 w:800 g:718,1295,0,1700 w:800 g:720,1170,0,1900 w:1500 w:12000)
+r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 t:1184,1709 w:600 g:720,2400,-1500,600 w:800 g:720,2400,-1500,600 w:800 t:1184,1569 w:600 g:720,2400,-1500,600 w:800 g:720,2400,-1500,600 w:800 g:718,1295,0,1700 w:800 g:720,1170,0,1900 w:1500 w:12000)
 want "$r" "settings: Survival All out: off" "All out: the switch turns it off"
 want "$r" "settings: Survival (trip off): NO SoC LIMIT (confirmed; saved)" "No limit: one hold, one confirmation"
+never "$r" "ui: app page has more elements than fit" "the Heat page fits (1.2-alpha24: EL_MAX 40)"
 r=$(run $OPEN $HEAT w:600 s:nl-after)
 want "$r" "settings: Survival's SoC limit restored, 0.1 C: 0x00002706" "No limit remembered across a restart"
 want "$r" "settings: Survival's All out restored: off" "All out off remembered across a restart"
@@ -143,6 +145,33 @@ want "$r" "heater: SoC readings ignored this session (15 C or more above the med
 ENVS=SBOS_HOST_SMP=m3
 r=$(run $OPEN $HEAT $SURV $HOLD $HOLD $HOLD w:8000 $OFF w:2000)
 never "$r" "a SoC reading ignored" "no spike: nothing ignored"
+# 1.2-alpha24: Unlimited (one hold to confirm, remembered): Survival starts with the trip off (4 asks), B2SOVRC off
+limactl shell starbite rm -f "$ST"
+ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_STATE=$ST"
+r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 t:1184,2226 w:800 $HOLD w:1500 w:12000)
+want "$r" "settings: Survival UNLIMITED: on (confirmed; saved)" "Unlimited: one confirmation"
+r=$(run $OPEN $HEAT w:600 $SURV $HOLD $HOLD $HOLD $HOLD w:5000 $OFF w:3000)
+want "$r" "settings: Survival restored (bit 0 Unlimited, bit 1 the brownout guard OFF): 0x00000001" "Unlimited remembered"
+want "$r" "heater: UNLIMITED: the trip off" "Unlimited: said at the start"
+want "$r" "heater: start, level 0x00000008" "Unlimited: the trip-off level (4 asks)"
+want "$r" "heater: B2SOVRC OFF for this Survival run" "Unlimited: B2SOVRC off"
+want "$r" "heater: B2SOVRC back (the stop)" "and back at the stop"
+want "$r" "heater: the brownout guard ON (100 ms samples)" "the guard on by default (the user)"
+want "$r" "heater: fast gauge, the session: lowest " "the 100 ms samples logged at the stop"
+# the brownout guard (on by default): a cell reading 3.20 V on the 100 ms samples sheds load; switched off
+# (remembered), the same sag sheds nothing
+limactl shell starbite rm -f "$ST"
+ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_STATE=$ST SBOS_HOST_FAST_MV=3200"
+r=$(run $OPEN $HEAT w:600 $SURV $HOLD $HOLD $HOLD w:6000 $OFF w:3000)
+want "$r" "heater: the brownout guard ON (100 ms samples)" "the guard on at the start (default)"
+want "$r" "guard ON, floor 3350 mV, sheds [1-9]" "3.20 V on the fast samples: the guard shed load"
+want "$r" "lowest 3200 mV" "the fast minimum logged"
+r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 t:1184,2476 w:800 w:4000)
+want "$r" "settings: the brownout guard: off" "the guard's switch turns it off"
+r=$(run $OPEN $HEAT w:600 $SURV $HOLD $HOLD $HOLD w:6000 $OFF w:3000)
+want "$r" "settings: Survival restored (bit 0 Unlimited, bit 1 the brownout guard OFF): 0x00000002" "guard off remembered"
+want "$r" "guard off (floor 3350 mV), sheds 0" "guard off: the same sag sheds nothing"
+limactl shell starbite rm -f "$ST"
 # 1.2-alpha17: the 4.5 A stop's switch: one hold, one confirmation, remembered
 limactl shell starbite rm -f "$ST"
 ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_STATE=$ST"

@@ -184,6 +184,68 @@ static int trim_up(struct heat_ctl *c)
     return 1;
 }
 
+/* 1.2-alpha24: the brownout guard's sample (every 100 ms from heater.c while Survival runs). The cell browns out in
+ * sub-second sags (alpha18 at 3.28 V, alpha23 at 2.95 V as the 1 s minimum), so the guard looks at 100 ms samples:
+ * below the floor, or a 60 mV drop in one sample within 150 mV of it, asks the next step to shed */
+void heat_guard_sample(struct heat_ctl *c, int mv, int ma, uint64_t now)
+{
+    if (c->level < HEAT_SURVIVAL || (c->state != HEAT_ST_RUNNING && c->state != HEAT_ST_HOLDING) || mv <= 0)
+        return;
+    int d = -ma;                            /* discharge, positive */
+    int fast = 0;
+    ++c->g_samples;
+    if (!c->g_min_mv || mv < c->g_min_mv)
+        c->g_min_mv = mv;
+    if (d > c->g_max_d)
+        c->g_max_d = d;
+    if (c->g_last_t && now - c->g_last_t <= 300U) {
+        int dd = d - c->g_last_d, dv = c->g_last_mv - mv;
+        if (dd >= 300 || dd <= -300) {     /* a load step: its resistance (the voltage moves against the current) */
+            int r = dv * 1000 / dd;
+            if (r >= 20 && r <= 500)
+                c->g_r_mohm = c->g_r_mohm ? (c->g_r_mohm * 3 + r) / 4 : r;
+        }
+        fast = dv >= 60;
+    }
+    if (fast)
+        ++c->g_fast;
+    if (c->g_r_mohm && d > 0)
+        c->g_ocv_mv = mv + d * c->g_r_mohm / 1000;
+    if (c->guard_on && c->guard_mv > 0) {
+        if (mv < c->guard_mv || (fast && mv < c->guard_mv + 150)) {
+            c->g_shed = 1;
+            c->g_t_low = now;
+        } else if (mv < c->guard_mv + 100) {
+            c->g_t_low = now;               /* not clear yet: nothing added back */
+        }
+    }
+    c->g_last_mv = mv;
+    c->g_last_d = d;
+    c->g_last_t = now;
+}
+
+/* the guard's shed: the smallest step first (a clock trim, then the GPU, then one M3, then an A55) */
+static void guard_shed(struct heat_ctl *c, uint64_t now)
+{
+    if (trim_down(c))
+        ;
+    else if (c->gpu_want)
+        c->gpu_want = 0;
+    else if (c->cores > 0)
+        c->cores--;
+    c->g_shed = 0;
+    ++c->g_sheds;
+    c->t_shed = now;
+    c->t_step = now;
+}
+
+/* the guard holds back any add while the cell was below its floor + 100 mV in the last 3 s */
+static int guard_holds(const struct heat_ctl *c, uint64_t now)
+{
+    return c->guard_on && c->guard_mv > 0 &&
+           ((c->g_t_low && now - c->g_t_low < 3000U) || (c->g_last_mv > 0 && c->g_last_mv < c->guard_mv + 100));
+}
+
 /* 1.1-beta6: the legal M3 combinations (the cluster has one clock; Samsung's exynos-ocp core-count table) */
 const struct heat_m3_cand heat_m3_cands[4] = { { 4, 1794000U }, { 3, 1794000U }, { 2, 2314000U }, { 1, 2704000U } };
 
@@ -368,7 +430,7 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         stop(c, HEAT_ST_STOPPED, "Lost the battery temperature");
         return;
     }
-    if (now - c->last_soc_ok >= L->blind_ms) {
+    if (now - c->last_soc_ok >= L->blind_ms && !c->unlimited) {   /* 1.2-alpha24: Unlimited does not need it */
         stop(c, HEAT_ST_STOPPED, "Lost the processor temperature");
         return;
     }
@@ -545,7 +607,9 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
             int cool = in->soc_ok && in->soc_c10 < lim - 10 && in->bat_ok && in->bat_c10 < c->surv_bat_c10 - 40 &&
                        (c->no_high_stop || !(in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 600)) &&
                        (!c->no_high_stop || c->all_out || (in->gauge_ok && iabs(in->ma) < gma - 300 && in->mv >= gmv + 100));
-            if (surv_calibrate(c, in, now, hot)) {
+            if (guard_holds(c, now))
+                cool = 0;                   /* 1.2-alpha24: the brownout guard */
+            if (surv_calibrate(c, in, now, hot || c->g_shed)) {
                 c->state = HEAT_ST_RUNNING;
                 why(c, "Survival: measuring the big cores' combinations");
                 return;
@@ -553,7 +617,9 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
             /* 1.1-beta7: a tighter hold (beta6 on the phone swung 133 .. 142 C at 145: the reading lags the die, and the
              * old hold shed up to 8 loads a second before the reading turned, then waited for 2 C under): one load off a
              * second near the limit (every 250 ms from 2 C over), one back a second below the limit minus 1 C */
-            if (hot && now - c->t_shed >= (very ? 250U : 1000U)) {
+            if (c->g_shed) {
+                guard_shed(c, now);         /* 1.2-alpha24: within one step (250 ms) of the low sample */
+            } else if (hot && now - c->t_shed >= (very ? 250U : 1000U)) {
                 if (trim_down(c))
                     ;                       /* 1.2-alpha16: a clock step first */
                 else if (c->cores > 3)
@@ -583,7 +649,9 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
             }
             c->m3_khz = c->cores > 3 ? flat_m3(c) : 0;
             c->state = c->cores || c->gpu_want ? HEAT_ST_RUNNING : HEAT_ST_HOLDING;
-            if (c->all_out)                 /* 1.2-alpha23: only the battery and the 4.5 A switch's ceiling shed */
+            if (guard_holds(c, now) && !bhot)
+                why(c, "Survival: the brownout guard holds the voltage");
+            else if (c->all_out)            /* 1.2-alpha23: only the battery and the 4.5 A switch's ceiling shed */
                 why(c, bhot ? "Survival: holding the battery below its limit" :
                        hot ? "Survival, All out: at 4.2 A (4.5 A stop on)" :
                        c->cores == c->max_cores && c->gpu_want ? "Survival, All out: everything flat out" :
@@ -609,12 +677,16 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
                    in->bat_c10 < c->surv_bat_c10 - 40 &&
                    (c->no_current_stop || iabs(in->ma) < L->hard_ma - 300) && (c->all_out || in->mv >= L->surv_shed_mv + 50) &&
                    (c->no_high_stop ? c->all_out || iabs(in->ma) < gma - 300 : iabs(in->ma) < L->surv_stop_ma - 600);
-        if (surv_calibrate(c, in, now, hot || amps || low)) {
+        if (guard_holds(c, now))
+            cool = 0;                       /* 1.2-alpha24: the brownout guard */
+        if (surv_calibrate(c, in, now, hot || amps || low || c->g_shed)) {
             c->state = HEAT_ST_RUNNING;
             why(c, "Survival: measuring the big cores' combinations");
             return;
         }
-        if (ahi && !hot && !amps && !low && now - c->t_shed >= (leak ? 250U : 1000U)) {
+        if (c->g_shed) {
+            guard_shed(c, now);             /* 1.2-alpha24 */
+        } else if (ahi && !hot && !amps && !low && now - c->t_shed >= (leak ? 250U : 1000U)) {
             if (!trim_down(c)) {                /* 4.2 A: a clock step, or a load when none is left */
                 if (c->cores > 0)
                     c->cores--;
@@ -653,6 +725,7 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         c->m3_khz = c->cores > 3 ? flat_m3(c) : 0;
         c->state = c->cores || c->gpu_want ? HEAT_ST_RUNNING : HEAT_ST_HOLDING;
         why(c, bhot ? "Survival: holding the battery below its limit" :
+               guard_holds(c, now) ? "Survival: the brownout guard holds the voltage" :
                hot ? (c->level == HEAT_SURVIVAL_X ? "Survival (trip off): holding below your stop" :
                                                     "Survival: holding just below the chip's power cut") :
                amps ? "Survival: at the battery's current limit" : low ? "Survival: the battery's voltage is low" :

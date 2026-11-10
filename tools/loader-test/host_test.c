@@ -303,7 +303,11 @@ static void test_classify(void)
         { "clean reboot", RST_SWRESET, 0x12345670U, RR_R, 0, 0, 1, M_LINUX, 1, CK_CLEAN, SEV_INFO },
         { "reboot to recovery", RST_SWRESET, 0x12345674U, -1, -1, 0, 1, M_XNU, 0, CK_CLEAN, SEV_INFO },
         { "power off, power on", RST_PINRESET, 0, RR_N, 0x1, 0, 1, M_LINUX, 1, CK_POWER, SEV_INFO },
-        { "power lost (SMPL)", RST_PINRESET, 0, RR_N, 0x40, 0, 1, M_LINUX, 1, CK_POWER, SEV_WARN },
+        { "power lost (SMPL)", RST_PINRESET, 0, RR_N, 0x40, 0, 1, M_LINUX, 1, CK_POWERLOSS, SEV_WARN },
+        { "a brownout S-Boot calls SPON (SMPL)", RST_SWRESET, 0, RR_S, 0x40, 0, 1, M_BARE, 0, CK_POWERLOSS, SEV_WARN },
+        { "a brownout S-Boot calls PPON (SMPL)", RST_PINRESET, 0, RR_P, 0x41, 0, 1, M_BARE, 0, CK_POWERLOSS, SEV_WARN },
+        { "a panic with SMPL stays a panic", RST_SWRESET, SEC_CAUSE_PANIC, RR_K, 0x40, EV_AND_PANIC, 1, M_ANDROID, 0, CK_PANIC, SEV_CRASH },
+        { "SPON without SMPL stays a fault", RST_SWRESET, 0, RR_S, 0x01, 0, 1, M_BARE, 0, CK_FAULT, SEV_CRASH },
         { "nothing explains it", 0, 0, -1, -1, 0, 1, M_BARE, 0, CK_UNKNOWN, SEV_WARN },
     };
     for (unsigned i = 0; i < sizeof(cs) / sizeof(cs[0]); ++i) {
@@ -318,7 +322,7 @@ static void test_classify(void)
 static void test_names(void)
 {
     FILE *f = open_out("names-c.txt");
-    for (unsigned k = 0; k <= 10; ++k)
+    for (unsigned k = 0; k <= 11; ++k)
         fprintf(f, "kind %u %s\n", k, sb_kind_name(k));
     for (int r = 1; r <= 10; ++r)
         fprintf(f, "rr %d %s\n", r, sb_rr_name(r));

@@ -183,6 +183,20 @@ int sb_fg_write16(uint8_t reg, uint16_t val, int tier)
     return ok && sb_fg_word(reg, &back) && back == val;
 }
 
+/* 1.2-alpha24: the cell's voltage and current only (two gauge words; the gauge updates them every ~175 ms), for
+ * Survival's 100 ms brownout guard. 0 when either is not read (never a guessed 0 mA) */
+int sb_bat_fast(int *mv, int *ma)
+{
+    uint16_t v, i;
+    if (!sb_max_init())
+        return 0;
+    if (!sb_fg_word_checked(0x09, &v, 32000, 60160) || !sb_fg_word_checked(0x0a, &i, 0, 0))
+        return 0;
+    *mv = (int)((uint32_t)v * 5U / 64U);
+    *ma = (int32_t)(int16_t)i * 5 / 16;
+    return 1;
+}
+
 /* One sample for the status bar and the dashboard. */
 int sb_bat_read(struct sb_bat *bt)
 {

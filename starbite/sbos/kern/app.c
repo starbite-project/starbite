@@ -458,6 +458,17 @@ static void highstop_done(int ok)
     app_event_send(app_by_id("heat"), EV_APP_SERVICE, 1, 0);
 }
 
+/* 1.2-alpha24 (the user): Unlimited, one warning, remembered */
+static void unlimited_done(int ok)
+{
+    if (ok) {
+        heat_unlimited = 1;
+        settings_changed();
+    }
+    sb_log(ok ? "settings: Survival UNLIMITED: on (confirmed; saved)" : "settings: Survival Unlimited not turned on");
+    app_event_send(app_by_id("heat"), EV_APP_SERVICE, 1, 0);
+}
+
 /* 1.2-alpha16 (the user): "No limit" with one clear warning (was 8 holds), remembered across restarts */
 static void nolimit_done(int ok)
 {
@@ -542,6 +553,39 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         settings_changed();
         sb_log(heat_screen_white ? "settings: Survival's screen: white at the top level (more heat from the panel)" :
                                    "settings: Survival's screen: dark (the budget to the chips)");
+        return 0;
+    case SET_HEAT_UNLIMITED:                /* 1.2-alpha24 */
+        if (heater_running_ui())
+            return SBOS_EAGAIN;
+        if (!arg[1]) {
+            heat_unlimited = 0;
+            settings_changed();
+            sb_log("settings: Survival Unlimited: off");
+            return 0;
+        }
+        if (!heat_unlimited)
+            kui_confirm("Survival with every limit off?",
+                        "UNLIMITED: the chip's trip off, no SoC limit, no 3.5 / 4.5 A stop, the charger chip's 5.6 A cut off.",
+                        "It will likely switch itself off when the voltage sags (a brownout); a charger may be needed to "
+                        "start it.",
+                        "Kept: the battery limit, 2 %, 6 A for 1 s. Remembered until you turn it off.",
+                        "Hold to turn every limit off", unlimited_done);
+        return 0;
+    case SET_HEAT_GUARD:                    /* 1.2-alpha24: also for a session that runs */
+        heat_guard_on = arg[1] != 0;
+        if (heater_running_ui())
+            heater_guard_live();
+        settings_changed();
+        sb_log(heat_guard_on ? "settings: the brownout guard: on" : "settings: the brownout guard: off");
+        return 0;
+    case SET_HEAT_GUARD_MV:
+        if (arg[1] != 3200 && arg[1] != 3350 && arg[1] != 3500)
+            return SBOS_EINVAL;
+        heat_guard_mv = (int)arg[1];
+        if (heater_running_ui())
+            heater_guard_live();
+        settings_changed();
+        sb_logx("settings: the brownout guard's floor, mV: ", (uint64_t)heat_guard_mv);
         return 0;
     case SET_HEAT_ALL_OUT:                  /* 1.2-alpha23 (the user): on by default; Survival's start asks anyway */
         heat_all_out = arg[1] != 0;
@@ -978,6 +1022,9 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_CURRENT_STOP: return !heat_no_current_stop;
         case SET_HEAT_HIGH_STOP: return !heat_no_high_stop;
         case SET_HEAT_ALL_OUT: return heat_all_out;
+        case SET_HEAT_UNLIMITED: return heat_unlimited;
+        case SET_HEAT_GUARD: return heat_guard_on;
+        case SET_HEAT_GUARD_MV: return heat_guard_mv;
         case SET_HEAT_SCREEN_WHITE: return heat_screen_white;
         case SET_WIFI_AUTOJOIN: return wifi_autojoin;
         case SET_HEAT_SOC_STOP_C10: return heat_soc_stop_c10;

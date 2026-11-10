@@ -1,4 +1,34 @@
-# Starbite OS 1.2-alpha23: Survival "All out", on by default; a 65 C battery limit (2026-11-10)
+# Starbite OS 1.2-alpha24: Survival "Unlimited", a brownout guard, the loader names a power loss (2026-11-10)
+
+alpha23 passed its self test and was the user's image (07:38). Its evening All out run (pulled
+`build/user-1110-evening`, level 8) lasted 36 s: the cell went from 3.77 V at rest to 2.95 V at 5.56 A (1 s
+minimum), SoC 151 C, then the power went (an SMPL power loss; the loader called it "FAULT (S-BOOT)"). The gauge's
+resistance is about 0.13 ohm, so 5.5 A costs ~0.7 V, and the current climbs with the leakage. The user: "unlimited:
+bypass everything on every system and core, max heat, no panics, except battery temp". alpha24:
+- **Unlimited** (`SET_HEAT_UNLIMITED` 29, off by default, one confirmation, pad[3] bit 17): Survival starts at the
+  trip-off level (4 asks) with All out, the 3.5 A and 4.5 A switches off and so B2SOVRC off, and a lost SoC reading
+  (200 C or a dead TMU) no longer stops it (`heat_ctl.unlimited`). Kept: the battery limit (up to 65 C) and its hold,
+  2 %, the 6 / 6.5 A for 1 s backstop, a lost battery or gauge reading, the PMIC's own buck OCP, thermal shutdown and
+  UVLO (never written), the pack's PCM. Not added: clocks above alpha16's (A55 1950, M3 2 x 2314, GPU 858): the
+  battery, not the clocks, ends the run (16 W browned out in 36 s), so more clock is an earlier brownout; the M3's
+  OCP_WARN throttle is the buck's own protection and stays.
+- **The brownout guard** (`SET_HEAT_GUARD` 30 / `SET_HEAT_GUARD_MV` 31, ON by default (the user, 19:50), pad[3] bit 18 = off, ext[1] the
+  floor): a 100 ms timer (KT_HEATER 3) reads only VCELL and Current (`sb_bat_fast`); `heat_guard_sample` keeps the
+  fast minimum, learns R from load steps and the OCV (V + I R); with the guard on, a sample below the floor (3.20 /
+  3.35 / 3.50 V) or a 60 mV drop in one sample within 150 mV of it makes the next 250 ms step shed the smallest step
+  (a clock trim, then the GPU, then a core), and nothing is added back until the cell stayed at the floor + 100 mV
+  for 3 s. The guard can be switched while Survival runs. Logged every 10 s and at the stop (`heater: fast gauge`),
+  shown on the Heat page and the Survival strip. The heat log's per-second peak current and lowest voltage now take
+  the 100 ms samples too.
+- **The boot log** names the S2MPS18's sources with the vendor's names (`boot: powered on by: SMPL (a POWER LOSS
+  ...)`; OFFSRC "may be stale") and reads the charger's input current limit (CHG_CNFG_09, read only).
+- **The loader** (shim/starlte, its own image): `CK_POWERLOSS` "POWER LOSS (battery brownout)" when S-Boot's
+  pwronsrc has SMPL, before S-Boot's SPON / PPON "FAULT"; the crash report prints PWRONSRC / OFFSRC bit names
+  (OFFSRC "(may be stale)"); and its battery check puts B2SOVRC back to 5.6 A when it finds it off (a Survival run, a
+  brownout, then another OS): the one MAX77705 register the loader writes. Survival while charging is not in this
+  build: it would charge a 55-65 C cell; doing it right needs the charger's buck-only mode, a separate step.
+
+## Starbite OS 1.2-alpha23: Survival "All out", on by default; a 65 C battery limit (2026-11-10)
 
 alpha22 passed its self test on the phone (15 apps, Wi-Fi joined) and is the user's image. The user (2026-11-10, ~07:05):
 "i dont want survival heat to hold at the limit at all, add the toggle so it can go all out even though it may brownout

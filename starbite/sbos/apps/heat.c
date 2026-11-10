@@ -292,7 +292,9 @@ static void show(void)
         ui_button(17, "Call / SOS reserve", f.b, 0);
         /* 1.1: the last resort (three confirmations; four with the chip's trip off) */
         fmt_init(&f);
-        if (h.all_out) {                    /* 1.2-alpha23 (the user): the default */
+        if (h.unlimited) {                  /* 1.2-alpha24 */
+            fmt_s(&f, "UNLIMITED: every limit off but the battery's. Asks 4 times.");
+        } else if (h.all_out) {             /* 1.2-alpha23 (the user): the default */
             fmt_s(&f, surv_tripoff ? "ALL OUT, trip OFF: no hold, no throttle. Asks 4 times." :
                                      "ALL OUT: no throttle, below the chip's cut. Asks 3 times.");
         } else if (surv_tripoff) {
@@ -332,8 +334,28 @@ static void show(void)
                                               : "On: no current or voltage throttle (it may switch itself off); with the trip on it "
                                                 "keeps below the chip's power cut.")
                               : "Off: Survival holds at its limit and throttles the current and voltage, as before.", GREY);
-        ui_toggle(24, "Hardware trip OFF", surv_tripoff);
-        if (surv_tripoff && h.all_out) {
+        /* 1.2-alpha24 (the user): Unlimited (asks once) and the brownout guard */
+        ui_toggle(34, "Unlimited", h.unlimited);
+        if (h.unlimited)
+            ui_textline("On: the trip off, no SoC or current stop, the charger chip's cut off. Kept: the battery limit, 2 %, "
+                        "6 A for 1 s.", ORANGE);
+        ui_toggle(35, "Brownout guard", h.guard_on);
+        if (h.guard_on) {
+            fmt_init(&f);
+            fmt_s(&f, "Floor ");
+            fmt_d(&f, h.guard_mv / 1000);
+            fmt_c(&f, '.');
+            fmt_d(&f, h.guard_mv % 1000 / 10);
+            fmt_s(&f, " V (tap: 3.20, 3.35, 3.50)");
+            ui_button(36, f.b, 0, 0);
+            ui_textline("Every 100 ms: below the floor it sheds the smallest step, adds it back 3 s later.", GREY);
+        } else {
+            ui_textline("Off: nothing watches the voltage; a sag may switch the phone off.", GREY);
+        }
+        ui_toggle(24, "Hardware trip OFF", surv_tripoff || h.unlimited);
+        if (h.unlimited) {
+            ui_textline("Unlimited switches the trip off at the start.", GREY);
+        } else if (surv_tripoff && h.all_out) {
             ui_textline("SoC limit: not used while All out is on.", GREY);
         } else if (surv_tripoff) {
             fmt_init(&f);
@@ -355,7 +377,9 @@ static void show(void)
     }
     if (on && h.level >= HEAT_SURVIVAL) {
         fmt_init(&f);
-        if (h.all_out) {                    /* 1.2-alpha23 */
+        if (h.unlimited) {                  /* 1.2-alpha24 */
+            fmt_s(&f, "SURVIVAL, UNLIMITED: every limit off but the battery's and 2 %.");
+        } else if (h.all_out) {             /* 1.2-alpha23 */
             fmt_s(&f, h.level == HEAT_SURVIVAL_X ? (h.trip_off ? "SURVIVAL, ALL OUT, THE CHIP'S POWER CUT OFF: no SoC limit, "
                                                                  "no throttle; battery limit and 2 % only." :
                                                                  "SURVIVAL, ALL OUT (trip off asked): no SoC limit, no throttle.") :
@@ -376,6 +400,22 @@ static void show(void)
         }
         fmt_s(&f, h.gpu_on ? " GPU on." : " GPU off.");
         ui_textline(f.b, ORANGE);
+        if (h.fast_min_mv > 0) {            /* 1.2-alpha24: the 100 ms samples */
+            fmt_init(&f);
+            fmt_s(&f, "Lowest cell ");
+            fmt_d(&f, h.fast_min_mv / 1000);
+            fmt_c(&f, '.');
+            fmt_d(&f, h.fast_min_mv % 1000 / 100);
+            fmt_d(&f, h.fast_min_mv % 100 / 10);
+            fmt_s(&f, h.guard_on ? " V (the guard holds " : " V (100 ms; the guard is off)");
+            if (h.guard_on) {
+                fmt_d(&f, h.guard_mv / 1000);
+                fmt_c(&f, '.');
+                fmt_d(&f, h.guard_mv % 1000 / 10);
+                fmt_s(&f, " V)");
+            }
+            ui_textline(f.b, GREY);
+        }
         /* 1.2-alpha5: the screen as heat (full white at the panel's top level; a tap comes back here) */
         ui_button(30, "Survival screen", "The readings full screen (white or dark: Settings > Heat). Tap to come back.", 0);
     }
@@ -539,6 +579,10 @@ void app_event(const struct sbos_event *ev)
         }
         if (ev->id == 33)                   /* 1.2-alpha23: remembered by the kernel */
             setting_set(SET_HEAT_ALL_OUT, ev->value != 0);
+        if (ev->id == 34)                   /* 1.2-alpha24: on asks first (the kernel) */
+            setting_set(SET_HEAT_UNLIMITED, ev->value != 0);
+        if (ev->id == 35)
+            setting_set(SET_HEAT_GUARD, ev->value != 0);
         show();
         break;
     case EV_APP_HOLD:
@@ -566,6 +610,8 @@ void app_event(const struct sbos_event *ev)
             log_page = 0;
         else if (ev->id == 30 && running)
             setting_set(SET_HEAT_WHITE, 1);
+        else if (ev->id == 36)              /* 1.2-alpha24: the guard's floor (also while it runs) */
+            setting_set(SET_HEAT_GUARD_MV, h.guard_mv >= 3500 ? 3200 : h.guard_mv >= 3350 ? 3500 : 3350);
         else if (ev->id == 23 && !running)
             heat_request(surv_tripoff ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0);
         else if (ev->id == 26 && !running)

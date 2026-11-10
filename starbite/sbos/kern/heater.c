@@ -36,6 +36,8 @@ static int trip_top_c;                      /* the hardware trip's decoded tempe
 static void record(const struct heat_in *in, int running);
 static void hlog_tick(const struct heat_in *in);    /* 1.2-alpha6 */
 static void b2s_restore(const char *when);   /* 1.2-alpha18 */
+static void guard_log(const char *what);    /* 1.2-alpha24 */
+static int hl_peak_ma, hl_min_mv;           /* (a tentative definition: the heat log's below) */
 static uint64_t rec_saved_at;
 static uint64_t rec_t, rec_uwh;             /* 1.1-beta4: the energy integral of this session */
 static int launch_hold;
@@ -1014,6 +1016,9 @@ static void restore_and_check(void)
     for (unsigned w = 0; w < 8; ++w)
         parked_logged[w] = 0;
     sb_logf("heater: stopped: ", ctl.why[0] ? ctl.why : "?");
+    kt_cancel(KT_HEATER, 3);
+    if (ctl.g_samples)
+        guard_log("heater: fast gauge, the session");
     if (sf_spikes) {
         struct ub u;
         ub_init(&u);
@@ -1104,6 +1109,21 @@ void heater_stop_all(const char *why)
 
 void heater_timer(unsigned id)
 {
+    if (id == 3) {                              /* 1.2-alpha24: the 100 ms gauge sample (Survival) */
+        if (!heater_running_ui() || ctl.level < HEAT_SURVIVAL) {
+            kt_cancel(KT_HEATER, 3);
+            return;
+        }
+        int mv = 0, ma = 0;
+        if (sb_bat_fast(&mv, &ma)) {
+            heat_guard_sample(&ctl, mv, ma, sb_ms());
+            if (-ma > hl_peak_ma)
+                hl_peak_ma = -ma;               /* the heat log's second: its true peak and lowest */
+            if (!hl_min_mv || mv < hl_min_mv)
+                hl_min_mv = mv;
+        }
+        return;
+    }
     if (id == 2) {
         if (stopping)
             stop_check();
@@ -1336,6 +1356,40 @@ void heater_boot_forensics(void)
         ub_s(&u, "not read");
     }
     sb_log(u.b);
+    {
+        /* 1.2-alpha24: the charger's input current limit, as S-Boot / the last OS left it (Starbite OS never writes
+         * it): CHG_CNFG_09 0xC0 [6:0] CHGIN_ILIM, read only */
+        uint8_t c9 = 0;
+        if (sb_chg_read(0xc0, &c9))
+            sb_logx("boot: MAX77705 CHG_CNFG_09 (CHGIN_ILIM, the input current limit; read only): ", c9);
+    }
+    if (!ok_p)
+        return;
+    /* 1.2-alpha24: in words, with the vendor's names (sec_debug_reset_reason.c). OFFSRC is not cleared by every path,
+     * so it may be left from an earlier power-off */
+    static const char *const onn[8] = { "PWRON (the key)", "JIGONB", "ACOKB (a charger)", "MRST (the keys' reset)",
+                                        "ALARM1", "ALARM2", "SMPL (a POWER LOSS: the battery let go, a brownout)",
+                                        "WTSR (a watchdog's cold reset)" };
+    static const char *const offn[8] = { "RSVD0", "TSD (the PMIC's thermal shutdown)", "TIMEOUT", "LDO3OK",
+                                         "PWRHOLD (the OS let go)", "RSVD5", "RSVD6", "UVLOB (under-voltage lockout)" };
+    ub_init(&u);
+    ub_s(&u, "boot: powered on by:");
+    for (int b = 0; b < 8; ++b)
+        if (on & (1U << b)) {
+            ub_c(&u, ' ');
+            ub_s(&u, onn[b]);
+        }
+    if (!on)
+        ub_s(&u, " (none set)");
+    ub_s(&u, "; off by (may be stale):");
+    for (int b = 0; b < 8; ++b)
+        if (off & (1U << b)) {
+            ub_c(&u, ' ');
+            ub_s(&u, offn[b]);
+        }
+    if (!off)
+        ub_s(&u, " (none set)");
+    sb_log(u.b);
 }
 
 /* at a Survival start: the gauge's min / max trackers cleared (their reset values), so the next boot tells this run */
@@ -1373,7 +1427,7 @@ static void hlog_start(void)
     hlog_thr0 = 0;
     if (pending_level >= HEAT_SURVIVAL)
         fg_trackers_reset();                /* 1.2-alpha18 */
-    if (pending_level >= HEAT_SURVIVAL && heat_no_high_stop) {
+    if (pending_level >= HEAT_SURVIVAL && (heat_no_high_stop || heat_unlimited)) {    /* 1.2-alpha24: Unlimited too */
         b2s_raise();
         ctl.gov_ma = b2s_raised ? 6000 : 0;     /* 0: 5.0 A under the 5.6 A cut */
         ctl.backstop_ma = b2s_raised ? 6500 : 0;
@@ -1397,7 +1451,7 @@ static void hlog_start(void)
             ub_dec(&u, v & 0xfU);
             ub_s(&u, " = ");
             ub_s(&u, nm[v & 0xfU]);
-            ub_s(&u, heat_no_high_stop ? "; our 4.5 A stop: OFF (6 A / 1 s backstop)" : "; our 4.5 A stop: on");
+            ub_s(&u, heat_no_high_stop || heat_unlimited ? "; our 4.5 A stop: OFF (6 A / 1 s backstop)" : "; our 4.5 A stop: on");
             sb_log(u.b);
         } else {
             sb_log("heater: MAX77705 CHG_CNFG_05 not read");
@@ -1482,7 +1536,50 @@ static void hlog_tick(const struct heat_in *in)
         ub_dec(&u, s->m3_mhz);
         ub_s(&u, " MHz");
         sb_log(u.b);
+        if (ctl.g_samples)
+            guard_log("heater: fast gauge");
     }
+}
+
+/* 1.2-alpha24: the guard switched while Survival runs: applies at once */
+void heater_guard_live(void)
+{
+    if (ctl.level < HEAT_SURVIVAL)
+        return;
+    ctl.guard_on = heat_guard_on;
+    ctl.guard_mv = heat_guard_mv;
+    if (!ctl.guard_on)
+        ctl.g_shed = 0;
+}
+
+/* 1.2-alpha24: what the 100 ms gauge samples saw this session */
+static void guard_log(const char *what)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, what);
+    ub_s(&u, ": lowest ");
+    ub_dec(&u, (uint64_t)ctl.g_min_mv);
+    ub_s(&u, " mV, most ");
+    ub_dec(&u, (uint64_t)ctl.g_max_d);
+    ub_s(&u, " mA, R ");
+    if (ctl.g_r_mohm) {
+        ub_dec(&u, (uint64_t)ctl.g_r_mohm);
+        ub_s(&u, " mOhm, OCV ");
+        ub_dec(&u, (uint64_t)ctl.g_ocv_mv);
+        ub_s(&u, " mV");
+    } else {
+        ub_s(&u, "not yet");
+    }
+    ub_s(&u, ", fast drops ");
+    ub_dec(&u, ctl.g_fast);
+    ub_s(&u, ctl.guard_on ? ", guard ON, floor " : ", guard off (floor ");
+    ub_dec(&u, (uint64_t)ctl.guard_mv);
+    ub_s(&u, ctl.guard_on ? " mV, sheds " : " mV), sheds ");
+    ub_dec(&u, ctl.g_sheds);
+    ub_s(&u, ", samples ");
+    ub_dec(&u, ctl.g_samples);
+    sb_log(u.b);
 }
 
 static void start_now(void)
@@ -1531,6 +1628,8 @@ static void start_now(void)
             heater_stop_all("No timer for the heater");
             return;
         }
+        if (pending_level >= HEAT_SURVIVAL && kt_set(KT_HEATER, 3, sb_ms() + 100U, 100, 1))
+            sb_log("heater: no timer for the 100 ms gauge samples (the guard and the fast minimum are off)");
         sb_logx("heater: start, level ", (uint64_t)pending_level);
         trip_tried = 0;
         memset(&heat_rec, 0, sizeof(heat_rec));
@@ -1567,6 +1666,9 @@ uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;
 int heat_reserve_pct = 15, heat_target_c10 = 200, heat_no_current_stop;
 int heat_no_high_stop;                      /* 1.2-alpha17 */
 int heat_all_out = 1;                       /* 1.2-alpha23 (the user): Survival All out, on by default */
+int heat_unlimited;                         /* 1.2-alpha24 (the user): every software limit off but the battery's */
+int heat_guard_on = 1;                      /* 1.2-alpha24: the brownout guard, on by default (the user, 19:50) */
+int heat_guard_mv = 3350;                   /* and its floor: 3.20 / 3.35 / 3.50 V */
 int heat_screen_white;                      /* 1.2-alpha19: off by default (the user: hotter chips without it) */
 int heat_reserve_override;                  /* 1.0-rc2 (review): the hold overrides the reserve for the next session only */
 int heat_soc_stop_c10;                      /* 0.6.3: Manual's SoC stop (0 off: the user's default) */
@@ -1635,6 +1737,19 @@ static void extreme_confirm_done(int ok)
                            pending_level == HEAT_SURVIVAL_X) && heat_no_current_stop;   /* 1.2-alpha4: Survival too */
     ctl.no_high_stop = pending_level >= HEAT_SURVIVAL && heat_no_high_stop;  /* 1.2-alpha17 */
     ctl.all_out = pending_level >= HEAT_SURVIVAL && heat_all_out;           /* 1.2-alpha23 */
+    /* 1.2-alpha24: Unlimited: All out, both current switches off, the trip off (heater_request asked for that level);
+     * the guard as the user set it */
+    ctl.unlimited = pending_level >= HEAT_SURVIVAL && heat_unlimited;
+    if (ctl.unlimited) {
+        ctl.all_out = 1;
+        ctl.no_high_stop = 1;
+        ctl.no_current_stop = 1;
+    }
+    ctl.guard_on = pending_level >= HEAT_SURVIVAL && heat_guard_on;
+    ctl.guard_mv = heat_guard_mv;
+    ctl.g_shed = ctl.g_last_mv = ctl.g_last_d = ctl.g_min_mv = ctl.g_max_d = ctl.g_r_mohm = ctl.g_ocv_mv = 0;
+    ctl.g_last_t = ctl.g_t_low = 0;
+    ctl.g_samples = ctl.g_sheds = ctl.g_fast = 0;
     ctl.t_over = 0;
     ctl.soc_stop_c10 = pending_level == HEAT_MANUAL ? heat_soc_stop_c10 : 0;
     if (pending_level == HEAT_KEEPWARM) {
@@ -1651,6 +1766,9 @@ static void extreme_confirm_done(int ok)
         sb_log(pending_level == HEAT_SURVIVAL_X ?
                "heater: Survival heat with the chip's trip OFF confirmed four times (the tables' tops, to the user's SoC stop)" :
                "heater: Survival heat confirmed three times (the tables' tops, just below the chip's power cut, to 2 %)");
+        if (ctl.unlimited)
+            sb_log("heater: UNLIMITED: the trip off, no SoC hold or stop, no 3.5 / 4.5 A stop, B2SOVRC off; kept: the battery limit, 2 %, the 6 / 6.5 A backstop");
+        sb_log(ctl.guard_on ? "heater: the brownout guard ON (100 ms samples)" : "heater: the brownout guard off (100 ms samples logged)");
         sb_log(ctl.all_out ? (pending_level == HEAT_SURVIVAL_X ?
                               "heater: All out: no temperature hold, no current or voltage governor (the battery's hold, the 4.5 A switch and 2 % stay)" :
                               "heater: All out: no current or voltage governor; held below the chip's power cut (the trip is on)") :
@@ -1694,8 +1812,10 @@ static void survival_show(void)
     int x = pending_level == HEAT_SURVIVAL_X;
     static char stopl[160], batl[128];
     ub_init(&u);
-    if (heat_all_out) {                     /* 1.2-alpha23 */
-        ub_s(&u, "ALL OUT: no SoC limit and no current or voltage throttle (a brownout may switch it off). Stops at ");
+    if (heat_unlimited) {                   /* 1.2-alpha24 */
+        ub_s(&u, "UNLIMITED: no SoC limit, no current stop, B2SOVRC off; it may brown out. Stops at ");
+    } else if (heat_all_out) {              /* 1.2-alpha23 */
+        ub_s(&u, "ALL OUT: no SoC limit, no current or voltage throttle; it may brown out. Stops at ");
     } else if (heat_surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10) {   /* 1.2-alpha4 */
         ub_s(&u, "NO SoC LIMIT: nothing holds the chip by temperature (readings past 199 \xc2\xb0" "C stop it). Stops at ");
     } else {
@@ -1704,7 +1824,8 @@ static void survival_show(void)
         ub_s(&u, " \xc2\xb0" "C) to 2 %; stops 5 \xc2\xb0" "C past it or at ");
     }
     ub_dec(&u, (uint64_t)(heat_surv_bat_c10 / 10));
-    ub_s(&u, " \xc2\xb0" "C battery. A watchdog restarts a stalled phone.");
+    ub_s(&u, heat_unlimited || heat_all_out ? " \xc2\xb0" "C battery or 2 %." :     /* 1.2-alpha24: fits 127 bytes */
+                                              " \xc2\xb0" "C battery. A watchdog restarts a stalled phone.");
     sb_strcpy(stopl, sizeof(stopl), u.b);
     ub_init(&u);
     ub_s(&u, "It holds the battery below ");
@@ -1795,6 +1916,8 @@ int heater_request(int level, int minutes)
     }
     if (level > HEAT_SURVIVAL_X)
         return SBOS_EINVAL;
+    if (level == HEAT_SURVIVAL && heat_unlimited && !heater_running_ui())
+        level = HEAT_SURVIVAL_X;            /* 1.2-alpha24: Unlimited switches the chip's trip off too (4 asks) */
     if (wifi_on() && !heater_running_ui()) {
         sb_strcpy(ctl.why, sizeof(ctl.why), "Turn Wi-Fi off first (0.4: not both at once)");
         ctl.state = HEAT_ST_REFUSED;
@@ -1960,6 +2083,10 @@ void heater_status(struct sbos_heat *h)
     h->no_current_stop = heat_no_current_stop;
     h->no_high_stop = heat_no_high_stop;
     h->all_out = heater_running_ui() && ctl.level >= HEAT_SURVIVAL ? ctl.all_out : heat_all_out;
+    h->unlimited = heater_running_ui() && ctl.level >= HEAT_SURVIVAL ? ctl.unlimited : heat_unlimited;
+    h->guard_on = heater_running_ui() && ctl.level >= HEAT_SURVIVAL ? ctl.guard_on : heat_guard_on;
+    h->guard_mv = heat_guard_mv;
+    h->fast_min_mv = heater_running_ui() ? ctl.g_min_mv : 0;
     h->trip_c = trip_top_c;
     h->soc_stop_c10 = heat_soc_stop_c10;
     h->last_unclean = heat_last_unclean;

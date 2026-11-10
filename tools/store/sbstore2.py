@@ -509,7 +509,8 @@ def settings(a):
 
 # ---- the crash log (store entry "crashlog"; shim/starlte/sbfmt.h, docs/STARBITE-HEALTH.md) ----------
 KINDS = ['NO OS WAS RUNNING', 'CLEAN RESTART', 'POWER ON', 'KERNEL PANIC', 'HANG (WATCHDOG)', 'HANG (OS TIMER)',
-         'FORCED RESTART', 'FAULT (S-BOOT)', 'UNEXPLAINED RESET', 'WATCHDOG, NO OS', 'KERNEL OOPS']
+         'FORCED RESTART', 'FAULT (S-BOOT)', 'UNEXPLAINED RESET', 'WATCHDOG, NO OS', 'KERNEL OOPS',
+         'POWER LOSS (battery brownout)']
 RR_NAMES = {1: 'SPON (S-BOOT: FAULT)', 2: 'WPON WATCHDOG', 3: 'DPON (S-BOOT: DEBUG/UPLOAD)', 4: 'KPON KERNEL PANIC',
             5: 'MPON MANUAL RESET (KEYS)', 6: 'PPON (S-BOOT: FAULT)', 7: 'RPON REBOOT', 8: 'BPON', 9: 'NPON POWER ON',
             10: 'TPON'}

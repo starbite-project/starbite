@@ -86,7 +86,7 @@ never "$r" "readme\|notes/" "Files: no file name logged"
 r=$(limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 "$out/sbos-host" "$out" /dev/null $UNLOCK $FILES q 2>&1)
 want "$r" "files: the folder could not be read" "Files: no card is said, not a crash"
 # 1.2-alpha22: Heat > Last session (the heat log): none yet in a fresh run; after 20 s of High, its samples
-HEAT="t:1057,663 w:600"; DOWN="g:720,2400,-1500,600 w:600 g:720,2400,-1500,600 w:600"; LAST="t:720,2780 w:800"
+HEAT="t:1057,663 w:600"; DOWN="g:720,2400,-1500,600 w:600 g:720,2400,-1500,600 w:600 g:720,2400,-1500,600 w:600"; LAST="t:720,2780 w:800"   # alpha24: three drags (the guard's rows)
 r=$(run $UNLOCK $HEAT $DOWN $LAST)
 want "$r" "heat: the last session's log shown: samples 0" "Heat log: none before the first session"
 r=$(run $UNLOCK $HEAT t:720,670 w:400 g:720,1070,0,1900 w:20000 t:220,670 w:1500 $DOWN $LAST)

@@ -331,8 +331,20 @@ void cd_build(struct cd_doc *d, const struct cl_report *r, unsigned level, const
     tb_x(&t, r->reg[CR_SB_RST], 8);
     tb_s(&t, "   pwronsrc ");
     tb_x(&t, r->reg[CR_SB_PWRON], 2);
+    for (unsigned b = 0; b < 8; ++b)           /* 2026-11-10: the vendor's names */
+        if ((r->reg[CR_SB_PWRON] >> b & 1U) && sb_pwron_bit_name(b)) {
+            tb_s(&t, " ");
+            tb_s(&t, sb_pwron_bit_name(b));
+        }
     tb_s(&t, "   pwroffsrc ");
     tb_x(&t, r->reg[CR_SB_PWROFF], 2);
+    for (unsigned b = 0; b < 8; ++b)
+        if ((r->reg[CR_SB_PWROFF] >> b & 1U) && sb_pwroff_bit_name(b)) {
+            tb_s(&t, " ");
+            tb_s(&t, sb_pwroff_bit_name(b));
+        }
+    if (r->reg[CR_SB_PWROFF])
+        tb_s(&t, " (may be stale)");
     dl_end(&t, CD_MUTED);
     dl_begin(&t);
     tb_s(&t, "WATCHDOG ");

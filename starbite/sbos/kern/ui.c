@@ -48,7 +48,7 @@ struct el {
     int x, y, w, h;
     uint32_t hash;
 };
-#define EL_MAX 28
+#define EL_MAX 40                           /* 1.2-alpha24: was 28 (the Heat page outgrew it: its last rows were dropped) */
 static struct el cur[EL_MAX], shown[EL_MAX];
 static int ncur, nshown;
 static int screen = SCR_LOCK, shown_screen;
@@ -1387,8 +1387,13 @@ static void build_light(void)
     heater_status(&h);
     struct ub u;
     ub_init(&u);
-    if (h.all_out && h.level >= HEAT_SURVIVAL)
-        ub_s(&u, "ALL OUT  ");                  /* 1.2-alpha23: no hold, no throttle */
+    if (h.level >= HEAT_SURVIVAL && (h.unlimited || h.all_out))
+        ub_s(&u, h.unlimited ? "UNLIMITED  " : "ALL OUT  ");   /* 1.2-alpha23 / 24 */
+    if (h.level >= HEAT_SURVIVAL && h.fast_min_mv > 0) {
+        ub_s(&u, "min ");
+        ub_dec(&u, (uint64_t)h.fast_min_mv);
+        ub_s(&u, " mV  ");                      /* 1.2-alpha24: the 100 ms lowest */
+    }
     ub_s(&u, "SoC ");
     ub_c10s(&u, h.soc_c10);
     ub_s(&u, " \xc2\xb0" "C  battery ");

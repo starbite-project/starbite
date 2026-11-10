@@ -1077,6 +1077,16 @@ static void check_battery(void)
         check_end(POST_BATTERY, POST_FAIL, -1, "MAX77705 NO ANSWER", t0, 0);
         return;
     }
+    {
+        /* 2026-11-10: the charger's B2SOVRC back to 5.6 A if a Starbite OS Survival run left it off and the phone
+         * then lost power (batt.c batt_b2s_restore; the only register the loader writes there) */
+        uint8_t was = 0, now = 0;
+        int r = batt_b2s_restore(&was, &now);
+        if (r == 1)
+            star_pmsg("STARBITE: charger: B2SOVRC was off (a Survival run, then a power loss): put back to 5.6 A\n");
+        else if (r == 2)
+            star_pmsg("STARBITE: charger: B2SOVRC is off and the write did NOT read back\n");
+    }
     if (!batt_read(&b) || !b.valid) {
         check_end(POST_BATTERY, POST_FAIL, -1, "FUEL GAUGE UNREAD", t0, 0);
         return;

@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha23"
+#define SBOS_VERSION "1.2-alpha24"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -142,6 +142,18 @@ struct heat_ctl {
     int win_bat_c10, win_soc_c10;
     int bat_latched;
     char why[64];
+    /* 1.2-alpha24 (the user: "unlimited: bypass everything ... except battery temp"): heater.c also forces the trip
+     * off, All out, the 4.5 A and 3.5 A switches off (B2SOVRC off); here: a lost SoC reading no longer stops it.
+     * Kept: the battery's hold and stop, 2 %, the 6 / 6.5 A for 1 s backstop, the lost battery / gauge readings */
+    int unlimited;
+    /* 1.2-alpha24: the brownout guard: heater.c samples the gauge every 100 ms (heat_guard_sample); below the floor
+     * or on a fast drop, the next step sheds the smallest step (a clock trim, then the GPU, then one M3); nothing is
+     * added back until the cell stayed at the floor + 100 mV for 3 s. It also learns the cell's resistance and its
+     * open-circuit voltage, and keeps the fast minimum (logged, guard on or off) */
+    int guard_on, guard_mv;
+    int g_shed, g_last_mv, g_last_d, g_min_mv, g_max_d, g_r_mohm, g_ocv_mv;
+    uint64_t g_last_t, g_t_low;
+    uint32_t g_samples, g_sheds, g_fast;
     const struct heat_limits *lim;
 };
 void heat_ctl_init(struct heat_ctl *c, const struct heat_limits *lim);
@@ -183,6 +195,10 @@ extern uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;    /* 0.6.1: Manual's p
 extern int heat_reserve_pct, heat_target_c10, heat_no_current_stop;   /* 0.6.2 */
 extern int heat_no_high_stop;
 extern int heat_all_out;                   /* 1.2-alpha23: Survival "All out" (on by default): no hold, no throttle */
+extern int heat_unlimited;                 /* 1.2-alpha24: Survival "Unlimited": every software limit off but the battery's */
+extern int heat_guard_on, heat_guard_mv;   /* 1.2-alpha24: the brownout guard (on by default) and its floor */
+void heat_guard_sample(struct heat_ctl *c, int mv, int ma, uint64_t now);
+void heater_guard_live(void);
 extern int heat_screen_white;       /* 1.2-alpha19: Survival's screen white (1) or dark (0, default); remembered */
 extern int heat_b2s_note;           /* 1.2-alpha18: 0x100 | CHG_CNFG_05 as found while Survival has B2SOVRC off (slot) */
 void heater_boot_forensics(void);   /* 1.2-alpha18: read only, at every boot */       /* 1.2-alpha17: Survival's 4.5 A stop off (remembered) */

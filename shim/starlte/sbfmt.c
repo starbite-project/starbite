@@ -244,7 +244,37 @@ const char *sb_kind_name(unsigned kind)
     case CK_FAULT:     return "FAULT (S-BOOT)";
     case CK_LOADERWDT: return "WATCHDOG, NO OS";
     case CK_OOPS:      return "KERNEL OOPS";
+    case CK_POWERLOSS: return "POWER LOSS (battery brownout)";
     default:           return "UNEXPLAINED RESET";
+    }
+}
+
+/* the vendor's names (drivers/staging/samsung/sec_debug_reset_reason.c), the reserved bits 0; switches, not
+ * pointer tables (the loader links without absolute relocations) */
+const char *sb_pwron_bit_name(unsigned bit)
+{
+    switch (bit) {
+    case 0: return "PWRON";
+    case 1: return "JIGONB";
+    case 2: return "ACOKB";
+    case 3: return "MRST";
+    case 4: return "ALARM1";
+    case 5: return "ALARM2";
+    case 6: return "SMPL";
+    case 7: return "WTSR";
+    default: return 0;
+    }
+}
+
+const char *sb_pwroff_bit_name(unsigned bit)
+{
+    switch (bit) {
+    case 1: return "TSD";
+    case 2: return "TIMEOUT";
+    case 3: return "LDO3OK";
+    case 4: return "PWRHOLD";
+    case 7: return "UVLOB";
+    default: return 0;
     }
 }
 
@@ -268,6 +298,11 @@ unsigned sb_classify(const struct sb_evidence *e, unsigned *severity)
     } else if (e->sboot_rr == RR_K || e->inform3 == SEC_CAUSE_PANIC) {
         k = CK_PANIC;
         sev = SEV_CRASH;
+    } else if (e->sboot_pwron >= 0 && (e->sboot_pwron & 0x40)) {
+        /* 2026-11-10: SMPL (S2MPS18 PWRONSRC bit 6): the battery let go for a moment, a brownout, whatever
+         * S-Boot's code says (it calls Survival's brownouts SPON / PPON: "FAULT") */
+        k = CK_POWERLOSS;
+        sev = SEV_WARN;
     } else if (e->sboot_rr == RR_S || e->sboot_rr == RR_D || e->sboot_rr == RR_P) {
         k = CK_FAULT;
         sev = SEV_CRASH;
@@ -282,9 +317,7 @@ unsigned sb_classify(const struct sb_evidence *e, unsigned *severity)
         k = CK_FAULT;
         sev = SEV_WARN;
     } else if ((e->rst_stat & RST_PINRESET) || e->sboot_rr == RR_N) {
-        k = CK_POWER;
-        /* SMPL (S2MPS18 PWRONSRC bit 6): the battery let go for a moment */
-        sev = e->sboot_pwron >= 0 && (e->sboot_pwron & 0x40) ? SEV_WARN : SEV_INFO;
+        k = CK_POWER;                       /* (SMPL is CK_POWERLOSS above) */
     } else if ((e->rst_stat & RST_SWRESET) || e->sboot_rr == RR_R) {
         k = CK_CLEAN;
     } else {

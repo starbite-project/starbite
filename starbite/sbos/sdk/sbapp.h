@@ -150,6 +150,9 @@ struct sbos_heat {
     int32_t surv_bat_c10;       /* 1.1-beta5: Survival's battery limit (0.1 C) */
     int32_t no_high_stop;       /* 1.2-alpha17: Survival's 4.5 A stop turned off (a 6 A / 1 s backstop instead) */
     int32_t all_out;            /* 1.2-alpha23: Survival "All out" (this session's while it runs, else the setting) */
+    int32_t unlimited;          /* 1.2-alpha24: Survival "Unlimited" (as all_out) */
+    int32_t guard_on, guard_mv; /* 1.2-alpha24: the brownout guard and its floor (mV) */
+    int32_t fast_min_mv;        /* 1.2-alpha24: this session's lowest 100 ms cell voltage (0 none) */
 };
 
 /* 1.2-alpha22 (SBOS_P_HEAT): the last heating session's log (the state slot's heat log), summed up and in 60 time
@@ -257,6 +260,11 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
                                       readings (0, the default: the panel's ~1 W goes to the chips). Remembered */,
        SET_WIFI_AUTOJOIN = 27 /* 1.2-alpha21: join a known network the scan heard, once per power-on (1, the default)
                                   or never (0). Remembered */,
+       SET_HEAT_UNLIMITED = 29 /* 1.2-alpha24: Survival "Unlimited" (0 the default): the trip off, All out, the 3.5 / 4.5 A
+                                  switches off (B2SOVRC off), no SoC stop; 1 asks first (the kernel's confirmation).
+                                  Kept: the battery limit, 2 %, the 6 / 6.5 A for 1 s backstop. Remembered */,
+       SET_HEAT_GUARD = 30 /* 1.2-alpha24: the brownout guard on (1, the default) or off (0). Remembered */,
+       SET_HEAT_GUARD_MV = 31 /* 1.2-alpha24: the guard's floor: 3200, 3350 (the default) or 3500 mV. Remembered */,
        SET_HEAT_ALL_OUT = 28 /* 1.2-alpha23: Survival "All out" (1, the default): no hold at a temperature limit and no
                                 current / voltage throttle (a brownout may switch the phone off); 0 holds as before.
                                 Remembered */,

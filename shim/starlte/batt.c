@@ -10,8 +10,10 @@
  * BATT_FAILS readings in a row fail the reader stops touching the bus for the rest of the boot,
  * so a dead bus can never stall a menu.
  *
- * Never writes a MAX77705 register (S-Boot's charger watchdog is not fed: see batt.h); never reads
- * the clear-on-read interrupt registers (PMIC 0x22/0x24, charger 0xB0).
+ * Writes one MAX77705 register, and only to put back a protection (batt_b2s_restore, 2026-11-10): the
+ * charger's battery-to-system over-current limit when a Starbite OS Survival run left it off and the phone
+ * then lost power (a brownout) and booted something else. Never reads the clear-on-read interrupt
+ * registers (PMIC 0x22/0x24, charger 0xB0).
  */
 #include <stdint.h>
 #include "batt.h"
@@ -198,6 +200,29 @@ static int read_all(struct batt_info *b)
     if (fg_word(0x0a, &v))                             /* Current: 0.3125 mA per bit (5 mOhm) */
         b->ma = (int16_t)((int32_t)(int16_t)v * 5 / 16);
     return 1;
+}
+
+/* CHG_CNFG_05 (0xBC) [3:0] B2SOVRC: 0 = off (the vendor's max77705_charger.h: 6 4.5 A ... 0xC 5.6 A). Only
+ * Starbite OS's Survival ever sets 0 (the user's switch), and it puts the old value back at the stop and at its
+ * next boot; this covers a brownout followed by another OS. 0xC is the value this phone came with (0x3C read on
+ * 2026-11-09). Returns -1 bus, 0 nothing to do, 1 put back and read back, 2 the write did not read back.
+ * *was / *now: the register before / after. */
+int batt_b2s_restore(uint8_t *was, uint8_t *now)
+{
+    uint8_t v = 0, back = 0;
+    if (!batt_init() || !reg_read(BI_CHG, 0xbc, &v, 1))
+        return -1;
+    *was = *now = v;
+    if (v & 0xfU)
+        return 0;
+    uint8_t m[2] = { 0xbc, (uint8_t)((v & 0xf0U) | 0xcU) };
+    int ok = msg(BI_CHG, 0, m, 2, 1);
+    if (!ok)
+        bus_reset();
+    if (!reg_read(BI_CHG, 0xbc, &back, 1))
+        return 2;
+    *now = back;
+    return ok && back == m[1] ? 1 : 2;
 }
 
 int batt_read(struct batt_info *b)

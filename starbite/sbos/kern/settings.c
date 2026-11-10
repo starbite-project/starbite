@@ -53,7 +53,10 @@ static void fill(struct saved *s)
     s->pad[1] = 0x100U | (uint32_t)(look_emergency != 0) | (uint32_t)(em_set_auto != 0) << 1;    /* 0.6 */
     s->pad[2] = (uint32_t)(look_is_ready() ? look_style() : look_saved_style) + 1U;
     s->ext[0] = (uint32_t)heat_b2s_note;     /* 1.2-alpha18 */
+    s->ext[1] = 0x10000U | (uint32_t)(heat_guard_mv & 0xffff);   /* 1.2-alpha24: the brownout guard's floor */
     s->pad[3] = 0x10000U | (uint32_t)(heat_surv_stop_c10 & 0xffff) |  /* 1.2-alpha16: Survival's SoC limit (or none) */
+                (uint32_t)(heat_unlimited != 0) << 17 |               /* 1.2-alpha24: Unlimited */
+                (uint32_t)(heat_guard_on == 0) << 18 |                /* and the brownout guard OFF (0: on) */
                 (uint32_t)((heat_surv_bat_c10 / 10) & 0x7f) << 20 |  /* and its battery limit (55 / 58 / 60 / 65) */
                 (uint32_t)(heat_no_high_stop != 0) << 27 |            /* 1.2-alpha17: the 4.5 A stop off */
                 (uint32_t)(heat_no_current_stop != 0) << 28 |         /* and the 3.5 A limit off */
@@ -184,6 +187,11 @@ void settings_restore(void)
     }
     if (s.pad[2] >= 1 && s.pad[2] <= 4)
         look_saved_style = (int)s.pad[2] - 1;   /* main makes it once, after this */
+    if ((s.ext[1] & 0xffff0000U) == 0x10000U) {     /* 1.2-alpha24 */
+        int g = (int)(s.ext[1] & 0xffffU);
+        if (g == 3200 || g == 3350 || g == 3500)
+            heat_guard_mv = g;
+    }
     if ((s.ext[0] & ~0x1ffU) == 0 && (s.ext[0] & 0x100U))
         heat_b2s_note = (int)s.ext[0];      /* 1.2-alpha18: a Survival run left B2SOVRC raised: the boot puts it back */
     if (s.pad[3] & 0x10000U) {              /* 1.2-alpha16: Survival's SoC limit, as the user left it */
@@ -197,6 +205,11 @@ void settings_restore(void)
         heat_screen_white = (int)((s.pad[3] >> 29) & 1U);
         wifi_autojoin = !((s.pad[3] >> 30) & 1U);
         heat_all_out = !((s.pad[3] >> 31) & 1U);    /* 1.2-alpha23: older records: 0, so All out (the default) */
+        heat_unlimited = (int)((s.pad[3] >> 17) & 1U);  /* 1.2-alpha24: older records: 0 (off) */
+        heat_guard_on = !((s.pad[3] >> 18) & 1U);     /* older records: 0, so on (the default) */
+        if (heat_unlimited || !heat_guard_on)
+            sb_logx("settings: Survival restored (bit 0 Unlimited, bit 1 the brownout guard OFF): ",
+                    (uint64_t)(heat_unlimited | !heat_guard_on << 1));
         if (!heat_all_out)
             sb_log("settings: Survival's All out restored: off (Survival holds as before)");
         if (heat_no_high_stop || heat_no_current_stop)
