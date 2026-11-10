@@ -366,6 +366,7 @@ static void build_card(int g)
     head_content(&d, g, top);
     d = mk(&k->chev, "chev", k->chx, top + 27, 14, 14, 0, 0);
     d_icon(&d, "chev", k->chx, top + 27, 1);
+    k->chev_t = 1;
     tk_bmp_new(&k->chev0, k->chev.bmp.w, k->chev.bmp.h);
     tk_bmp_copy(&k->chev0, 0, 0, &k->chev.bmp, 0, 0, k->chev.bmp.w, k->chev.bmp.h);
     tk_layer_init(&k->members, "members");
@@ -666,6 +667,11 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     tk_layer_add(&focus, &fgrp);
     focus_sys = s;
     thumb_x = 0;
+    tk_layer_prepare(&scrim);
+    tk_layer_prepare(&fcard);
+    tk_layer_prepare(&ffill);
+    tk_layer_prepare(&flabel);
+    tk_layer_prepare(&fthumb);
 }
 static void set_thumb(float x)
 {
@@ -719,6 +725,7 @@ static void set_lock(float y)
 }
 
 /* ---- init and states --------------------------------------------------------------------------------------- */
+static void lap_us(const char *what, uint64_t us);
 static uint64_t tb;
 static void lap(const char *what)
 {
@@ -735,6 +742,21 @@ static void lap(const char *what)
     b[n++] = 'm'; b[n++] = 's'; b[n] = 0;
     tk_log(b);
     tb = t;
+}
+
+static void lap_us(const char *what, uint64_t us)
+{
+    char b[80];
+    int n = 0;
+    while (*what) b[n++] = *what++;
+    b[n++] = ' ';
+    uint64_t ms = us / 1000;
+    char d[20];
+    int k = 0;
+    do { d[k++] = (char)('0' + ms % 10); ms /= 10; } while (ms);
+    while (k) b[n++] = d[--k];
+    b[n++] = 'm'; b[n++] = 's'; b[n] = 0;
+    tk_log(b);
 }
 
 int sh_init(tk_comp *c)
@@ -964,7 +986,9 @@ void sh_touch(int phase, float x, float y, float t)
         const sys_t *s = &G[T.arg].it[T.arg2];
         if (s->self) break;           /* the concept's toast: "You are in Starbite OS" */
         tk_comp_frame(C, 0, 0);
+        uint64_t t0 = tk_us();
         build_focus(s, &G[T.arg]);
+        lap_us("focus: snapshot and bake", tk_us() - t0);
         focus_on = 1;
         focus_closing = 0;
         set_focus(0);
@@ -1119,7 +1143,9 @@ int sh_tick(float dt, float t)
 
 void sh_idle(void)
 {
-    if (!sh_moving() && locked && lockY == 0 && !focus_on) flatten_lock();
+    if (sh_moving()) return;
+    if (locked && lockY == 0 && !focus_on) flatten_lock();
+    tk_comp_prepare(C);
 }
 
 int sh_moving(void)

@@ -93,6 +93,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
     float t = 0, s0 = 0;
     int si = 0, phase = -1, frame = 0, rest_frames = 0;
     tk_comp_frame(c, 0, 1);
+    sh_idle();
     while (t < total || sh_moving()) {
         /* the finger: events at 120 Hz between frames (the touch controller's rate) */
         for (int sub = 1; sub <= 2; sub++) {
@@ -160,6 +161,26 @@ static void blend_rows(uint8_t *d, const uint8_t *s, uint32_t w, uint32_t y0, ui
         }
     }
 }
+static void up2x_rows(uint8_t *d, const uint8_t *s, uint32_t w, uint32_t y0, uint32_t y1)
+{
+    uint32_t sw = w / 2, sh = 2960 / 2;
+    for (uint32_t y = y0 & ~1U; y < y1; y += 2) {
+        uint32_t sy = y / 2, sy1 = sy + 1 < sh ? sy + 1 : sy;
+        const uint8_t *r0 = s + (size_t)sy * sw * 4, *r1 = s + (size_t)sy1 * sw * 4;
+        uint8_t *o0 = d + (size_t)y * w * 4, *o1 = o0 + (size_t)w * 4;
+        for (uint32_t x = 0; x + 4 < sw; x += 4) {
+            uint8x16_t a = vld1q_u8(r0 + x * 4), an = vld1q_u8(r0 + x * 4 + 4);
+            uint8x16_t b = vld1q_u8(r1 + x * 4), bn = vld1q_u8(r1 + x * 4 + 4);
+            uint8x16_t ah = vrhaddq_u8(a, an), bh = vrhaddq_u8(b, bn);
+            uint32x4x2_t top = vzipq_u32(vreinterpretq_u32_u8(a), vreinterpretq_u32_u8(ah));
+            uint8x16_t va = vrhaddq_u8(a, b), vh = vrhaddq_u8(ah, bh);
+            uint32x4x2_t mid = vzipq_u32(vreinterpretq_u32_u8(va), vreinterpretq_u32_u8(vh));
+            vst1q_u32((uint32_t *)(o0 + x * 8), top.val[0]);
+            vst1q_u32((uint32_t *)(o0 + x * 8 + 16), top.val[1]);
+            if (y + 1 < y1) { vst1q_u32((uint32_t *)(o1 + x * 8), mid.val[0]); vst1q_u32((uint32_t *)(o1 + x * 8 + 16), mid.val[1]); }
+        }
+    }
+}
 static void bench(void)
 {
     const uint32_t FW = 1440, FH = 2960, HW = 720, HH = 1480;
@@ -168,8 +189,9 @@ static void bench(void)
     for (size_t i = 0; i < (size_t)HW * HH; i++) { uint32_t a = 128 + (uint32_t)(i % 128); ((uint32_t *)h1)[i] = a << 24 | (a / 2) << 16 | (a / 3) << 8 | (a / 4); }
     for (size_t i = 0; i < (size_t)FW * FH; i++) ((uint32_t *)f1)[i] = 0xff000000u | (uint32_t)(i * 2654435761u >> 8);
     struct { const char *n; int k; } K[] = { { "fill, a full frame in RAM", 0 }, { "copy, a full frame RAM to RAM", 1 },
-        { "blend, a half-resolution layer over another", 2 }, { "blend, a full-resolution layer over another", 3 } };
-    for (int k = 0; k < 4; k++) {
+        { "blend, a half-resolution layer over another", 2 }, { "blend, a full-resolution layer over another", 3 },
+        { "2x upscale, half frame to a full frame in RAM", 4 } };
+    for (int k = 0; k < 5; k++) {
         uint64_t best = ~0ull, bytes = 0;
         for (int r = 0; r < 5; r++) {
             uint64_t t0 = tk_us();
@@ -178,6 +200,7 @@ static void bench(void)
             case 1: memcpy(f0, f1, (size_t)FW * FH * 4); bytes = (uint64_t)FW * FH * 8; break;
             case 2: blend_rows(h0, h1, HW, 0, HH); bytes = (uint64_t)HW * HH * 12; break;
             case 3: blend_rows(f0, f1, FW, 0, FH); bytes = (uint64_t)FW * FH * 12; break;
+            case 4: up2x_rows(f0, h0, FW, 0, FH); bytes = (uint64_t)FW * FH * 4 + (uint64_t)HW * HH * 4; break;
             }
             uint64_t t = tk_us() - t0;
             if (t < best) best = t;
@@ -204,6 +227,18 @@ int main(int argc, char **argv)
         tk_comp_frame(&c, 0, 1);
         fprintf(stderr, "frame: %.2f ms\n", c.last_us / 1000.0);
         write_ppm(argv[3], &c.fb);
+        return 0;
+    }
+    if (!strcmp(argv[2], "frames") && argc >= 3) {
+        /* the cost of one frame of a state with everything damaged: motion (half + present) and rest (full) */
+        for (int i = 3; i < argc; i++) apply_state(argv[i]);
+        for (int m = 1; m >= 0; m--) {
+            double tc = 0, tp = 0;
+            int n = 40;
+            tk_comp_frame(&c, m, 1);
+            for (int i = 0; i < n; i++) { tk_comp_frame(&c, m, 1); tc += c.us_comp; tp += c.us_present; }
+            printf("frames %s: %s compose %.2f present %.2f ms\n", argc > 3 ? argv[3] : "lock", m ? "motion" : "rest", tc / n / 1000, tp / n / 1000);
+        }
         return 0;
     }
     if (!strcmp(argv[2], "film") && argc >= 5) return film(&c, argv[3], argv[4], argc > 5 && !strcmp(argv[5], "half"));

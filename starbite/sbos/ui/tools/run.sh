@@ -4,6 +4,7 @@
 #   sh starbite/sbos/ui/tools/run.sh build       build/sbtk/sbtk-host
 #   sh starbite/sbos/ui/tools/run.sh compare     tools/states.json: Chrome and sbtk-host -> build/sbtk/compare/
 #   sh starbite/sbos/ui/tools/run.sh film NAME   a 60 fps film of tools/films.txt's NAME -> build/sbtk/films/NAME.mp4
+#                                                (UIBENCH=file with the phone's uibench: lines adds the A55 estimate)
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 ui=$(cd "$here/.." && pwd)
@@ -35,8 +36,10 @@ film)
     script=$(grep "^$name:" "$here/films.txt" | cut -d: -f2-)
     mkdir -p "$out/films"
     "$out/sbtk-host" "$out/sbtk.pak" film "$out/films/$name.bgra" "$script" half > "$out/films/$name.frames.txt"
-    swift "$here/encode.swift" "$out/films/$name.bgra" 720 1480 60 "$out/films/$name.mp4"
+    swift "$here/encode.swift" "$out/films/$name.bgra" 720 1480 60 "$out/films/$name.mp4" 2>/dev/null
     [ -n "${KEEP:-}" ] || rm -f "$out/films/$name.bgra"
-    "$py" "$here/frametimes.py" "$out/films/$name.frames.txt" ;;
+    "$out/sbtk-host" "$out/sbtk.pak" bench > "$out/hostbench.txt"
+    if [ -n "${UIBENCH:-}" ]; then "$py" "$here/frametimes.py" "$out/films/$name.frames.txt" "$out/hostbench.txt" "$UIBENCH"
+    else "$py" "$here/frametimes.py" "$out/films/$name.frames.txt"; fi ;;
 *) echo "usage: run.sh assets|build|compare|film NAME" >&2; exit 2 ;;
 esac

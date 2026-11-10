@@ -327,7 +327,28 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
                 }
             }
             if (gm) { if (umin < 0) mrow[0] = 0; if (umax >= src->w) mrow[src->w + 1] = 0; }
-            for (int q = 0; q < n; q++) {
+            int q = 0;
+            if (!gm && n >= 4 && colu[0] >= -1 && colu[n - 1] + 1 <= src->w) {
+                /* 4 px a step: the neighbours gathered into lanes, the lerp in NEON (16-bit weights) */
+                for (; q + 4 <= n; q += 4) {
+                    uint32x4_t P0 = vdupq_n_u32(0), P1 = vdupq_n_u32(0);
+                    P0 = vsetq_lane_u32(vb[colu[q]], P0, 0); P1 = vsetq_lane_u32(vb[colu[q] + 1], P1, 0);
+                    P0 = vsetq_lane_u32(vb[colu[q + 1]], P0, 1); P1 = vsetq_lane_u32(vb[colu[q + 1] + 1], P1, 1);
+                    P0 = vsetq_lane_u32(vb[colu[q + 2]], P0, 2); P1 = vsetq_lane_u32(vb[colu[q + 2] + 1], P1, 2);
+                    P0 = vsetq_lane_u32(vb[colu[q + 3]], P0, 3); P1 = vsetq_lane_u32(vb[colu[q + 3] + 1], P1, 3);
+                    uint16x4_t w4 = vld1_u16(colw + q);
+                    uint16x8_t W = vcombine_u16(vzip1_u16(w4, w4), vzip2_u16(w4, w4));          /* per px, x2 */
+                    uint8x16_t a = vreinterpretq_u8_u32(P0), b = vreinterpretq_u8_u32(P1);
+                    /* per byte: a + (b - a) x w / 256, done as a x (256 - w) + b x w in 16 bits */
+                    uint16x8_t wl = vzip1q_u16(W, W), wh = vzip2q_u16(W, W);                     /* per byte, 8 bytes each */
+                    uint16x8_t al = vmovl_u8(vget_low_u8(a)), ah = vmovl_u8(vget_high_u8(a));
+                    uint16x8_t bl = vmovl_u8(vget_low_u8(b)), bh = vmovl_u8(vget_high_u8(b));
+                    uint16x8_t rl = vmlaq_u16(vmulq_u16(al, vsubq_u16(vdupq_n_u16(256), wl)), bl, wl);
+                    uint16x8_t rh = vmlaq_u16(vmulq_u16(ah, vsubq_u16(vdupq_n_u16(256), wh)), bh, wh);
+                    vst1q_u8((uint8_t *)(rowbuf + q), vcombine_u8(vshrn_n_u16(rl, 8), vshrn_n_u16(rh, 8)));
+                }
+            }
+            for (; q < n; q++) {
                 int u0 = colu[q];
                 uint32_t p0 = u0 >= -1 && u0 < src->w ? vb[u0] : 0, p1 = u0 + 1 >= 0 && u0 + 1 <= src->w ? vb[u0 + 1] : 0;
                 if (u0 < -1 || u0 + 1 > src->w) { rowbuf[q] = 0; if (gm) maskbuf[q] = 0; continue; }
@@ -520,3 +541,14 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask)
 }
 
 void tk_layer_prepare(tk_layer *l) { if (l->bmp.px) half_of(l); }
+
+static void prep(tk_layer *l)
+{
+    for (; l; l = l->next) {
+        if (l->hidden) continue;
+        if (l->bmp.px && !l->half.px) half_of(l);
+        prep(l->child);
+    }
+}
+/* idle time: the half copies the next motion frame will need (else its first frame makes them) */
+void tk_comp_prepare(tk_comp *c) { prep(c->root); }
