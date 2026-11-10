@@ -1691,6 +1691,31 @@ Steps, each with its own unattended cycle:
 Exit criterion: a week of the user's normal use (Steam, Explorer, Settings, the keyboard) without a bluescreen.
 Every app failure must be a removed device that the app or DWM recovers from.
 
+### 6.44 T32c's A/B, and T33: dual-source blending (sb-patches/0127)
+
+- **T32c A/B** (`build/win/cycle-t32c-A`, `-B`): both passed (0 failures, no CANARY, no SetError).
+  - AFBC off: drag 57.8/57.3 moves/s against 42.0/41.4 with it on (present copy 46/36 against 238/291 ms/s). The
+    user's default became T32c with `--afbc 0`.
+  - TextInputHost's surfaces are identical in A and B, so AFBC is not the transparent keyboard.
+  - Every format the shell asks for is supported. GetCaps is only ever asked type 130.
+- **What the dumps show:** in TextInputHost, Explorer and SystemSettings, every pixel with colour > alpha lies in a
+  glyph box. There, RGB is 255 and alpha is the coverage, i.e. text drawn onto transparent surfaces is not
+  premultiplied. The keyboard's own surface holds only text and the acrylic noise tile; the key plates are the
+  compositor's.
+- **Cause:** `tgsi_to_nir` always maps a pixel shader's o1 to FRAG_RESULT_DATA1. Its dual-source branch is
+  hard-coded off. Yet Panfrost advertises one dual-source target, so SRC1 blend factors reached the blend shader,
+  which read r4-r7 that nothing wrote. Direct2D's text uses SRC1 blending.
+- **0127:**
+  - d3d10umd notes which pixel shaders write o1 and which blend states use SRC1 on RT0;
+  - while both are bound, it binds a variant of the shader built through `tgsi_to_nir` with o1 moved to DATA0
+    index 1, which Panfrost lowers to `blend2_pan`;
+  - log lines `blend state #n uses SRC1` and `dual-source pixel shader variant #n created|FAILED`.
+- **sbtext `transparent`:** white grayscale text on a transparent clear against WARP, all four channels, plus a
+  colour>alpha count.
+- **Stage:** `build/win/stage/sbwddm-t33` (sbumd 416c8caa, sbtext 8dbc65bd); run with `--afbc 0`.
+- **Open:** if dwm.exe logs no SRC1 and the keyboard stays see-through, the next diagnostic is a switch-gated DWM
+  frame dump while TabTip is up.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

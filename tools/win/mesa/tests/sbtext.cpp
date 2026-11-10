@@ -15,6 +15,10 @@
 // written as sbtext-hw.ppm and sbtext-warp.ppm. Lines "TEST name: PASS|FAIL ..."; exit code = failures
 // (100 + n: setup failed).
 //
+// T33 (sb-patches/0127): "transparent": white grayscale text on a transparent clear (0,0,0,0), as the shell's XAML
+// windows draw it (TextInputHost, Explorer, Settings in T32c's dumps: inside each glyph box RGB 255 with alpha = the
+// coverage, i.e. not premultiplied). All four channels against WARP, plus the pixels whose colour exceeds alpha.
+//
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
@@ -75,7 +79,7 @@ static IDXGIAdapter1 *mali_adapter(void)
 
 /* Draws the scene with Direct2D on `dev` and reads it back into px (BGRA). */
 /* T22: `mask` picks the elements (1 gray text, 2 ClearType text, 4 bitmap, 8 rounded rectangle, 16 ellipse);
- * the white clear is always drawn. */
+ * the white clear is always drawn. T33: 32 = clear transparent instead and draw the text white. */
 static bool render(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID2D1Factory *d2d, IDWriteFactory *dw,
                    IWICImagingFactory *wic, UINT *px, const char *who, unsigned mask = 31)
 {
@@ -130,10 +134,12 @@ static bool render(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID2D1Factory *d2
         out("%s: WIC bitmap 0x%08lx\n", who, (unsigned long)hr);
 
     rt->BeginDraw();
-    rt->Clear(D2D1::ColorF(1, 1, 1, 1));
+    ID2D1SolidColorBrush *white = nullptr;
+    rt->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 1), &white);
+    rt->Clear((mask & 32) ? D2D1::ColorF(0, 0, 0, 0) : D2D1::ColorF(1, 1, 1, 1));
     rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     if (mask & 1)
-        rt->DrawText(L"Starbite 0123 Text", 18, fmt, D2D1::RectF(8, 8, W - 8, 80), black);
+        rt->DrawText(L"Starbite 0123 Text", 18, fmt, D2D1::RectF(8, 8, W - 8, 80), (mask & 32) ? white : black);
     rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
     if (mask & 2)
         rt->DrawText(L"Starbite 0123 Text", 18, fmt, D2D1::RectF(8, 88, W - 8, 160), black);
@@ -168,6 +174,7 @@ static bool render(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID2D1Factory *d2
     fmt->Release();
     black->Release();
     blue->Release();
+    white->Release();
     rt->Release();
     surf->Release();
     tex->Release();
@@ -288,6 +295,35 @@ int main(int argc, char **argv)
                 ppm(n, ea);
             }
         }
+    }
+    /* T33: white text on transparent, all four channels against WARP, and premultiplication (colour <= alpha) */
+    {
+        static UINT ea[W * H], eb[W * H];
+        bool k1 = render(hw, hwc, d2d, dw, wic, ea, "mali", 32 | 1), k2 = render(sw, swc, d2d, dw, wic, eb, "warp", 32 | 1);
+        double s = 0;
+        int over_h = 0, over_s = 0, cov_h = 0, cov_s = 0;
+        for (int i = 0; i < W * H; i++) {
+            for (int c = 0; c < 32; c += 8)
+                s += fabs((double)(ea[i] >> c & 255) - (double)(eb[i] >> c & 255));
+            unsigned ah = ea[i] >> 24, as = eb[i] >> 24;
+            unsigned mh = 0, ms = 0;
+            for (int c = 0; c < 24; c += 8) {
+                if ((ea[i] >> c & 255) > mh) mh = ea[i] >> c & 255;
+                if ((eb[i] >> c & 255) > ms) ms = eb[i] >> c & 255;
+            }
+            over_h += mh > ah + 2;
+            over_s += ms > as + 2;
+            cov_h += ah != 0;
+            cov_s += as != 0;
+        }
+        double dd = s / (W * H * 4.0);
+        bool ok = k1 && k2 && cov_s > 200 && dd < 3.0 && over_h <= over_s + 16 && cov_h > cov_s * 7 / 10 &&
+                  cov_h < cov_s * 13 / 10;
+        out("TEST %-14s: %s  RGBA difference %.2f, colour>alpha mali %d warp %d, covered mali %d warp %d (centre "
+            "mali 0x%08x warp 0x%08x)\n", "transparent", ok ? "PASS" : "FAIL", dd, over_h, over_s, cov_h, cov_s,
+            ea[40 * W + 60], eb[40 * W + 60]);
+        failures += !ok;
+        ppm("sbtext-hw-transparent.ppm", ea);
     }
     struct { const char *name; int y0, y1, x0, x1; bool text; } r[] = {
         { "gray", 0, 80, 0, W, true }, { "cleartype", 80, 160, 0, W, true },

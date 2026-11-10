@@ -1,0 +1,260 @@
+diff --git a/src/gallium/frontends/d3d10umd/OutputMerger.cpp b/src/gallium/frontends/d3d10umd/OutputMerger.cpp
+index 33a1595..72fc0ab 100644
+--- a/src/gallium/frontends/d3d10umd/OutputMerger.cpp
++++ b/src/gallium/frontends/d3d10umd/OutputMerger.cpp
+@@ -33,6 +33,7 @@
+ 
+ #include "OutputMerger.h"
+ #include "State.h"
++#include "Shader.h"
+ 
+ #include "Debug.h"
+ #include "Format.h"
+@@ -467,6 +468,32 @@ translateBlendOp(D3D10_DDI_BLEND_OP op)
+ }
+ 
+ 
++/* sb-patches/0127: does RT0 blend with the second source (o1)? Logged for the first blend states of a process. */
++static unsigned sb_dual_blends;
++
++static bool
++sb_is_src1(unsigned f)
++{
++   return f == PIPE_BLENDFACTOR_SRC1_COLOR || f == PIPE_BLENDFACTOR_SRC1_ALPHA ||
++          f == PIPE_BLENDFACTOR_INV_SRC1_COLOR || f == PIPE_BLENDFACTOR_INV_SRC1_ALPHA;
++}
++
++static bool
++sb_blend_dual(const struct pipe_blend_state *s)
++{
++   const struct pipe_rt_blend_state *r = &s->rt[0];
++   bool dual = r->blend_enable && (sb_is_src1(r->rgb_src_factor) || sb_is_src1(r->rgb_dst_factor) ||
++                                   sb_is_src1(r->alpha_src_factor) || sb_is_src1(r->alpha_dst_factor));
++   if (dual) {
++      unsigned n = ++sb_dual_blends;
++      if (n <= 8 || !(n & (n - 1)))
++         DebugPrintf("sbumd: blend state #%u uses SRC1 (dual-source): rgb %u/%u alpha %u/%u mask 0x%x\n", n,
++                     r->rgb_src_factor, r->rgb_dst_factor, r->alpha_src_factor, r->alpha_dst_factor, r->colormask);
++   }
++   return dual;
++}
++
++
+ /*
+  * ----------------------------------------------------------------------
+  *
+@@ -609,6 +636,7 @@ CreateBlendState(D3D10DDI_HDEVICE hDevice,                     // IN
+    state.alpha_to_coverage = pBlendDesc->AlphaToCoverageEnable;
+ 
+    pBlendState->handle = pipe->create_blend_state(pipe, &state);
++   pBlendState->dual = sb_blend_dual(&state);
+ }
+ 
+ 
+@@ -668,6 +696,7 @@ CreateBlendState1(D3D10DDI_HDEVICE hDevice,                     // IN
+    }
+ 
+    pBlendState->handle = pipe->create_blend_state(pipe, &state);
++   pBlendState->dual = sb_blend_dual(&state);
+ }
+ 
+ 
+@@ -719,6 +748,16 @@ SetBlendState(D3D10DDI_HDEVICE hDevice,      // IN
+ 
+    pipe->bind_blend_state(pipe, state);
+ 
++   /* sb-patches/0127: switch the pixel shader to/from its dual-source variant when that changes */
++   Device *pDevice = CastDevice(hDevice);
++   BlendState *pBlendState = CastBlendState(hState);
++   bool dual = pBlendState && pBlendState->dual;
++   if (dual != pDevice->sb_blend_dual) {
++      pDevice->sb_blend_dual = dual;
++      if (pDevice->sb_ps && pDevice->sb_ps->writes_o1)
++         SbBindFs(pDevice);
++   }
++
+    struct pipe_blend_color color;
+    color.color[0] = pBlendFactor[0];
+    color.color[1] = pBlendFactor[1];
+diff --git a/src/gallium/frontends/d3d10umd/Shader.cpp b/src/gallium/frontends/d3d10umd/Shader.cpp
+index bf7ab58..41a86ba 100644
+--- a/src/gallium/frontends/d3d10umd/Shader.cpp
++++ b/src/gallium/frontends/d3d10umd/Shader.cpp
+@@ -47,6 +47,9 @@
+ #include "Format.h"
+ 
+ #include "tgsi/tgsi_ureg.h"
++#include "tgsi/tgsi_scan.h"
++#include "compiler/nir/nir.h"
++#include "nir/tgsi_to_nir.h"
+ #include "util/u_gen_mipmap.h"
+ #include "util/u_sampler.h"
+ #include "util/format/u_format.h"
+@@ -303,6 +306,14 @@ DestroyShader(D3D10DDI_HDEVICE hDevice,   // IN
+ 
+    struct pipe_context *pipe = CastPipeContext(hDevice);
+    Shader *pShader = CastShader(hShader);
++   Device *pDevice = CastDevice(hDevice);
++
++   if (pDevice->sb_ps == pShader)
++      pDevice->sb_ps = NULL;
++   if (pShader->dual_handle) {
++      pipe->delete_fs_state(pipe, pShader->dual_handle);
++      pShader->dual_handle = NULL;
++   }
+ 
+    if (pShader->handle) {
+       switch (pShader->type) {
+@@ -1011,6 +1022,76 @@ CreatePixelShader(D3D10DDI_HDEVICE hDevice,                                // IN
+ 
+    pShader->handle = pipe->create_fs_state(pipe, &pShader->state);
+ 
++   /* sb-patches/0127: does it write o1 (a possible dual-source blend input)? */
++   pShader->writes_o1 = false;
++   pShader->dual_tried = false;
++   pShader->dual_handle = NULL;
++   if (pShader->state.tokens) {
++      struct tgsi_shader_info info;
++      tgsi_scan_shader(pShader->state.tokens, &info);
++      for (unsigned i = 0; i < info.num_outputs; i++)
++         if (info.output_semantic_name[i] == TGSI_SEMANTIC_COLOR && info.output_semantic_index[i] == 1)
++            pShader->writes_o1 = true;
++   }
++}
++
++
++/*
++ * sb-patches/0127: the dual-source variant. The same TGSI through tgsi_to_nir, then o1 (FRAG_RESULT_DATA1) becomes
++ * FRAG_RESULT_DATA0 with index 1, which is how NIR and Panfrost spell the second blend source (blend2_pan).
++ */
++static unsigned sb_dual_variants;
++
++static void *
++SbCreateDualFs(Device *pDevice, Shader *pShader)
++{
++   nir_shader *nir = tgsi_to_nir(pShader->state.tokens, pDevice->screen, false);
++   if (!nir)
++      return NULL;
++   bool found = false;
++   nir_foreach_shader_out_variable(var, nir) {
++      if (var->data.location == FRAG_RESULT_DATA1) {
++         var->data.location = FRAG_RESULT_DATA0;
++         var->data.index = 1;
++         found = true;
++      }
++   }
++   if (!found) {
++      ralloc_free(nir);
++      return NULL;
++   }
++   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
++
++   struct pipe_shader_state state;
++   memset(&state, 0, sizeof state);
++   state.type = PIPE_SHADER_IR_NIR;
++   state.ir.nir = nir;
++   return pDevice->pipe->create_fs_state(pDevice->pipe, &state);
++}
++
++
++void
++SbBindFs(Device *pDevice)
++{
++   Shader *pShader = pDevice->sb_ps;
++   void *state = pShader ? pShader->handle : NULL;
++
++   if (pShader && pShader->writes_o1 && pDevice->sb_blend_dual) {
++      if (!pShader->dual_tried) {
++         pShader->dual_tried = true;
++         pShader->dual_handle = SbCreateDualFs(pDevice, pShader);
++         unsigned n = ++sb_dual_variants;
++         if (n <= 16 || !(n & (n - 1)))
++            DebugPrintf("sbumd: dual-source pixel shader variant #%u %s\n", n,
++                        pShader->dual_handle ? "created" : "FAILED (o1 stays a second render target)");
++      }
++      if (pShader->dual_handle)
++         state = pShader->dual_handle;
++   }
++
++   if (!state)
++      state = pDevice->empty_fs;
++   pDevice->pipe->bind_fs_state(pDevice->pipe, state);
+ }
+ 
+ 
+@@ -1032,14 +1113,10 @@ PsSetShader(D3D10DDI_HDEVICE hDevice,  // IN
+    LOG_ENTRYPOINT();
+ 
+    Device *pDevice = CastDevice(hDevice);
+-   struct pipe_context *pipe = pDevice->pipe;
+-   void *state = CastPipeShader(hShader);
+-
+-   if (!state) {
+-      state = pDevice->empty_fs;
+-   }
+ 
+-   pipe->bind_fs_state(pipe, state);
++   /* sb-patches/0127: SbBindFs picks the dual-source variant when the blend state needs it */
++   pDevice->sb_ps = CastShader(hShader);
++   SbBindFs(pDevice);
+ }
+ 
+ 
+diff --git a/src/gallium/frontends/d3d10umd/Shader.h b/src/gallium/frontends/d3d10umd/Shader.h
+index 0da6530..fc09c73 100644
+--- a/src/gallium/frontends/d3d10umd/Shader.h
++++ b/src/gallium/frontends/d3d10umd/Shader.h
+@@ -161,4 +161,7 @@ void APIENTRY DestroyShaderResourceView(D3D10DDI_HDEVICE hDevice,
+ void APIENTRY GenMips(D3D10DDI_HDEVICE hDevice,
+              D3D10DDI_HSHADERRESOURCEVIEW hShaderResourceView);
+ 
++/* sb-patches/0127: bind the bound pixel shader, or its dual-source variant while the blend state needs one */
++void SbBindFs(struct Device *pDevice);
++
+ #endif   /* SHADER_H */
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index f37ab87..698452c 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -63,6 +63,12 @@ struct Shader
+    struct pipe_shader_state state;
+    unsigned output_mapping[PIPE_MAX_SHADER_OUTPUTS];
+    bool output_resolved;
++   /* sb-patches/0127: a pixel shader writing o1 gets a second pipe shader whose o1 is the dual-source blend input
++    * (FRAG_RESULT_DATA0 index 1), bound while the blend state uses SRC1 factors. tgsi_to_nir cannot tell a dual-source
++    * o1 from a second render target and always makes it DATA1, so the blend read undefined registers. */
++   bool writes_o1;
++   bool dual_tried;
++   void *dual_handle;
+ };
+ 
+ struct Query;
+@@ -88,6 +94,9 @@ struct Device
+    void *empty_fs;
+    void *empty_vs;
+ 
++   struct Shader *sb_ps;               /* sb-patches/0127: the bound pixel shader */
++   bool sb_blend_dual;                 /* the bound blend state uses SRC1 factors */
++
+    enum mesa_prim primitive;
+ 
+    struct pipe_stream_output_target *so_targets[PIPE_MAX_SO_BUFFERS];
+@@ -324,6 +333,7 @@ CastPipeDepthStencilView(D3D10DDI_HDEPTHSTENCILVIEW hDepthStencilView)
+ struct BlendState
+ {
+    void *handle;
++   bool dual;                          /* sb-patches/0127: RT0 blends with SRC1 factors */
+ };
+ 
+ 
+diff --git a/src/gallium/frontends/d3d10umd/meson.build b/src/gallium/frontends/d3d10umd/meson.build
+index 614db91..ff46ccc 100644
+--- a/src/gallium/frontends/d3d10umd/meson.build
++++ b/src/gallium/frontends/d3d10umd/meson.build
+@@ -30,5 +30,5 @@ libd3d10umd = static_library(
+   include_directories : [
+     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_winddk,
+   ],
+-  dependencies: idep_mesautilformat,
++  dependencies: [idep_mesautilformat, idep_nir_headers],
+ )
