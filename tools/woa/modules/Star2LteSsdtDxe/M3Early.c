@@ -422,6 +422,10 @@ __asm__ (
   "  bl    60f\n"
   "  ldr   x9, [x19, #0xB8]\n"
   "  bl    60f\n"
+  "  ldr   x9, [x19, #0xE0]\n"            // v7: bugcheck parameters 2..4
+  "  bl    70f\n"
+  "  ldr   x9, [x19, #0xE8]\n"
+  "  bl    70f\n"
   "  mrs   x1, cntvct_el0\n"            // 120 s fallback (the loader's own watchdog is 82 s)
   "  sub   x1, x1, x23\n"
   "  movz  x2, #0xE400\n"
@@ -560,6 +564,25 @@ __asm__ (
   "  mov   x30, x17\n"
   "69:\n"
   "  ret\n"
+  // v7: "=M3B p20000000000000000 p30000000000000000 p40000000000000000" = KiBugCheckData[2..4]
+  "70:\n"
+  "  cbz   x9, 79f\n"
+  "  mov   x17, x30\n"
+  "  ldr   x3, [x19, #0xD8]\n"
+  "  cbz   x3, 78f\n"
+  "  ldr   x0, [x3, #16]\n  add x1, x9, #7\n   mov x2, #16\n  bl 30f\n"
+  "  ldr   x3, [x19, #0xD8]\n"
+  "  ldr   x0, [x3, #24]\n  add x1, x9, #26\n  mov x2, #16\n  bl 30f\n"
+  "  ldr   x3, [x19, #0xD8]\n"
+  "  ldr   x0, [x3, #32]\n  add x1, x9, #45\n  mov x2, #16\n  bl 30f\n"
+  "  dc    civac, x9\n"
+  "  add   x0, x9, #60\n"
+  "  dc    civac, x0\n"
+  "  dsb   sy\n"
+  "78:\n"
+  "  mov   x30, x17\n"
+  "79:\n"
+  "  ret\n"
   "30:\n"                               // x0 value, x1 first digit, x2 digits; clobbers x0-x2, x6-x8
   "  add   x1, x1, x2\n"
   "31:\n"
@@ -603,6 +626,7 @@ STATIC UINTN                   mEWatch[2][4];      // [ring][field] first digit:
 STATIC CONST CHAR8             mEWatchTag[] = "=M3E watch beat ";
 STATIC CONST CHAR8             mEKTag[]     = "=M3K b0000 e00 gd0 @00 fbn00 @00 h00000000";
 STATIC CONST CHAR8             mEUTag[]     = "=M3U u00000000 it00000000 tc00000000";
+STATIC CONST CHAR8             mEBTag[]     = "=M3B p20000000000000000 p30000000000000000 p40000000000000000";
 STATIC CONST CHAR8             mENTag[]     = "=M3N lb00000000 np00 ps00000000 bc00000000 p10000000000000000";
 STATIC UINT8                   mEMap[0x8000];      // v3: the memory map at ExitBootServices (static: no allocation)
 
@@ -760,6 +784,8 @@ M3EarlyA55Watch (
       ((volatile UINT64 *)(UINTN)mEGuard)[0x98 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mEUTag);
       ((volatile UINT64 *)(UINTN)mEGuard)[0xB0 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mENTag);
       ((volatile UINT64 *)(UINTN)mEGuard)[0xB8 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mENTag);
+      ((volatile UINT64 *)(UINTN)mEGuard)[0xE0 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mEBTag);
+      ((volatile UINT64 *)(UINTN)mEGuard)[0xE8 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mEBTag);
       EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x800);
       EClean (SB_EVLOG_BASE, SB_EVLOG_BASE + 12 + SB_EVLOG_CAP);
       EClean (SB_PMSG_BASE, SB_PMSG_BASE + 12 + SB_PMSG_CAP);
@@ -1093,6 +1119,38 @@ EFbLiterals (
   L[0x50 / 8] = Base;
   EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x80);
   SbLog ("=M3E fb %lx %ldx%ld ppsl %ld", Base, W, H, Ppsl);
+}
+
+//
+// v7: Windows' HAL cycle-counter setup (ntoskrnl 0x4AE830: PMCR.E|LC, PMCCFILTR = 1 << 27, PMCNTENSET bit 31),
+// replayed on this CPU: does PMCCNTR count? Two reads 1 ms apart (CNTVCT), then everything restored.
+//
+STATIC
+VOID
+EPmuReplay (
+  IN CONST CHAR8  *Who
+  )
+{
+  UINT64  Pmcr, Filt, En, C0, C1, T0, T;
+
+  __asm__ __volatile__ ("mrs %0, pmcr_el0" : "=r" (Pmcr));
+  __asm__ __volatile__ ("mrs %0, pmccfiltr_el0" : "=r" (Filt));
+  __asm__ __volatile__ ("mrs %0, pmcntenset_el0" : "=r" (En));
+  __asm__ __volatile__ ("msr pmcr_el0, %0\n msr pmccfiltr_el0, %1\n msr pmcntenset_el0, %2\n isb"
+                        : : "r" (Pmcr | 1 | (1u << 6)), "r" ((UINT64)1 << 27), "r" ((UINT64)1 << 31) : "memory");
+  __asm__ __volatile__ ("isb\n mrs %0, pmccntr_el0" : "=r" (C0));
+  __asm__ __volatile__ ("mrs %0, cntvct_el0" : "=r" (T0));
+  do {
+    __asm__ __volatile__ ("isb\n mrs %0, cntvct_el0" : "=r" (T));
+  } while (T - T0 < 26000);
+
+  __asm__ __volatile__ ("isb\n mrs %0, pmccntr_el0" : "=r" (C1));
+  if ((En & (1ull << 31)) == 0) {
+    __asm__ __volatile__ ("msr pmcntenclr_el0, %0" : : "r" ((UINT64)1 << 31));
+  }
+
+  __asm__ __volatile__ ("msr pmccfiltr_el0, %0\n msr pmcr_el0, %1\n isb" : : "r" (Filt), "r" (Pmcr) : "memory");
+  SbLog ("=M3E pmu %a: pmcr %lx filt %lx en %lx; cycles in 1 ms %ld (%lx -> %lx)", Who, Pmcr, Filt, En, C1 - C0, C0, C1);
 }
 
 //
@@ -1448,6 +1506,8 @@ M3EarlyEbsWrap (
     L[0x98 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mEUTag);
     L[0xB0 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mENTag);
     L[0xB8 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mENTag);
+    L[0xE0 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mEBTag);
+    L[0xE8 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mEBTag);
     SbLog ("=M3E ctl: guard released on M3 core 1; Windows continues on A55 0 (MADT as woa made it)");
     EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x800);
     EClean (SB_EVLOG_BASE, SB_EVLOG_BASE + 12 + SB_EVLOG_CAP);
@@ -1462,6 +1522,7 @@ M3EarlyEbsWrap (
   if (mEMoved) {
     ECommitTables ();
     EAcpiLine ("committed");
+    EPmuReplay ("M3 1");
     SbLog ("=M3E v2: returning into winload on the M3; kernel starts. A55 0 resets at the UFS driver's 1st pmsg line");
     EProgress (7);
     return Status;
@@ -1550,6 +1611,8 @@ M3EarlyOnReadyToBoot (
   SbLog ("%a", mEKTag);
   SbLog ("%a", mEUTag);
   SbLog ("%a", mENTag);
+  SbLog ("%a", mEBTag);
+  EPmuReplay ("A55 0");
  #endif
  #if STARBITE_M3_EARLY == 3
   SbLog ("=M3E ctl: no hand-off; Windows boots on the A55s, the guard runs on M3 core 1 from EBS");

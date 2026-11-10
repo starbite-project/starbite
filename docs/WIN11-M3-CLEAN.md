@@ -367,3 +367,24 @@ longer fit the release DXE slot by 0x10 bytes.
   sha256 `8cde87265a58c6c21f8309cd03265b4d1fad2f5483187e9d9dda66299e14f389`
 - **m3kern6** (= m3kern5 + v6 reset path): `starbite-uefi-m3kern6.bin`,
   sha256 `ff80e661f467de4a1033ebe0bee535a3e5370038dbff76c0974358cd7454d553`
+
+## 17. m3kern5 result (22:54): Windows bugchecks 0x5C on the M3; m3kern7 / a55ctl4
+
+m3kern5: `=M3N lb00000000 np01 ps00000000 bc0000005C p1000000000000020`, so **Windows bugchecked on the M3 with 0x5C
+HAL_INITIALIZATION_FAILED, parameter 1 = 0x20**. KeNumberProcessors had reached 1; KeLoaderBlock read 0 (cleared by the
+bugcheck path or not yet the exported copy); PsInitialSystemProcess 0 (phase 0 never reached the process manager).
+The screen hash changed (`h27765CEC`, whole screen) but fbn stayed 0, so the screen didn't change after the first
+sample: no BSOD drawn.
+
+Static search: every direct KeBugCheckEx / KeBugCheck2 (0x140269860) call with code 0x5C passes an immediate
+parameter 1 from {0x0, 0x104, 0x10C, 0x10E, 0x110, 0x113..0x115, 0x200..0x204, 0x300, 0x310, 0x400, 0x500, 0x2001,
+0x5000, 0x5001, 0x7000, 0x8000, 0x8100, 0x8200, 0x9000} or an ASCII tag ("Its ", "Gic3"). None passes 0x20, so 0x20
+is computed or the call is indirect. Parameters 2..4 should name it.
+
+**m3kern7** (`starbite-uefi-m3kern7.bin`, sha256 `89ccfa9996a5d54ec19775dea8653f7b61760e1dfa3900c70de88108a47cc54d`)
+and control **a55ctl4** (`starbite-uefi-a55ctl4.bin`, sha256 `b4d83a33002c9d58eb1e2f865b773b9113bec9a893c92626d219702faf671bdc`):
+- `=M3B p2.. p3.. p4..`: KiBugCheckData[2..4];
+- `=M3E pmu <cpu>: pmcr .. filt .. en ..; cycles in 1 ms N`: Windows' HAL cycle-counter setup (0x4AE830: PMCR E|LC,
+  PMCCFILTR 1<<27, PMCNTENSET bit 31) replayed and measured. A55 0 does it at ReadyToBoot; M3 core 1 does it right
+  before returning into winload, so on the exact CPU and state Windows inherits. Everything is restored afterwards.
+  N about 0 on the M3 and non-zero on the A55 would make the cycle counter the HAL failure (Fable's PMU candidate).
