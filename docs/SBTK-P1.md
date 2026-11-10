@@ -126,3 +126,28 @@ one A55): 30-50 s at boot and ~10 s per sheet as it is. The P2 work list below s
    samples the wallpaper only; Chrome's lock widgets see home behind them).
 
 Licences: Inter / Inter Tight and Outfit are OFL (`tools/brand/fonts`); stb_truetype is public domain / MIT.
+
+## P2 (the phone): Starbite OS Next
+
+`starbite-next.img` / `starbite-next-selftest.img`, built by `starbite/sbos/build.sh` when the phone's pack exists
+(`sbtk-pack.py build/sbtk --phone`, 8.4 MB: fonts and only the icons the shell draws). Catalog key `starbite-next`
+(method bare, as starbite-os). The regular `starbite-os.img` is byte for byte unchanged by any of this.
+
+- **Kernel glue** (`ui/kern_next.c`; `main.c` built with `SBOS_NEXT` maps the UI entry points to it): sbtk's heap on
+  one arena block (`ui/tk_heap.c`, 200 000 random operations under ASan / UBSan in `ui/tools/heaptest.c`), the bake
+  in steps from the loop (watchdog fed, the screen filling in), 60 Hz frames only while something moves, composed
+  into the old UI's back buffer and presented into the scanout buffer (motion frames 2x straight into it), the A55 at
+  1794 MHz while a finger is down or anything moves (back to 1053 MHz 400 ms later), the rows of each frame in 8
+  bands over cores 1-3 (workers from the first touch until 5 s without motion), slide to start through the loader's
+  one-shot next boot, the torch hold on the flashlight LED, the live clock, date, battery and temperature.
+- **Memory**: layers sized to content, the wallpaper / glass backdrop / unlock cache / focus scrim at half
+  resolution, an opened card's face and rows only while it is open, half copies only for what moves (the half canvas
+  follows each rest frame), solid-colour layers. Host figures: 56 MB of layers at rest, about 85-125 MB peaks in the
+  films (the self test logs the phone's).
+- **Self test**: the bake's steps, then the four films with synthetic touches through the real gesture code, each
+  film's frame count, mean, p90, max, frames over 16.7 ms, the A55 clock, the bands per core and the heap; recovery.
+- **Stages staged** (`build/store/`): P2a one core; P2b the four-core split; P2c plus exact span skipping in the
+  blend, the LED and the modem's status slot. Request: `sbos-ui-p2-request.md` in the shared notes.
+- **Host estimate** for P2c (uibench-1 ratios, four A55 at 1794 MHz, motion frames mean / p90): unlock 6.9 / 14.4 ms,
+  the list 4.1 / 4.6, the focus sheet 7.5 / 14.7, holds 1.8 / 2.7.
+- **Not yet**: the apps from home, the Control Centre, Spotlight, Emergency mode, the power menu on a long press.
