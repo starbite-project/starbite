@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+void sh_boot_os(const char *key) { fprintf(stderr, "slide to start: would restart into %s\n", key); }
+
 static uint8_t *readall(const char *p, uint32_t *len)
 {
     FILE *f = fopen(p, "rb");
@@ -79,6 +81,7 @@ static int parse(const char *s, step *st, int max)
     return n;
 }
 
+static double memwalk(tk_layer *l, int depth);
 static int film(tk_comp *c, const char *out, const char *script, int half)
 {
     step st[64];
@@ -139,6 +142,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
     }
     (void)rest_frames;
     if (f != stdout) fclose(f); else fflush(f);
+    if (getenv("SBTK_MEM")) fprintf(stderr, "mem: layers %.1f MB\n", memwalk(c->root, 0) / 1e6);
     fprintf(stderr, "film: %d frames; heap %.1f MB (peak %.1f MB)\n", frame, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
     return 0;
 }

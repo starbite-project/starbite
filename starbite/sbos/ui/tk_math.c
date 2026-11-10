@@ -76,5 +76,19 @@ int tk_strcmp(const char *a, const char *b)
     while (*a && *a == *b) { a++; b++; }
     return (unsigned char)*a - (unsigned char)*b;
 }
-void tk_memcpy(void *d, const void *s, size_t n) { uint8_t *o = d; const uint8_t *i = s; while (n--) *o++ = *i++; }
-void tk_memset(void *d, int v, size_t n) { uint8_t *o = d; while (n--) *o++ = (uint8_t)v; }
+#include <arm_neon.h>
+void tk_memcpy(void *d, const void *s, size_t n)
+{
+    uint8_t *o = d;
+    const uint8_t *i = s;
+    for (; n >= 64; n -= 64, o += 64, i += 64) vst1q_u8_x4(o, vld1q_u8_x4(i));
+    for (; n >= 16; n -= 16, o += 16, i += 16) vst1q_u8(o, vld1q_u8(i));
+    while (n--) *o++ = *i++;
+}
+void tk_memset(void *d, int v, size_t n)
+{
+    uint8_t *o = d;
+    uint8x16_t q = vdupq_n_u8((uint8_t)v);
+    for (; n >= 16; n -= 16, o += 16) vst1q_u8(o, q);
+    while (n--) *o++ = (uint8_t)v;
+}

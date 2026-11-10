@@ -99,9 +99,11 @@ static void d_ring(dc *d, float cx, float cy, float r, float sw, float frac, tk_
     tk_fm_free(&m);
 }
 
+static void relayer(tk_layer *l) { tk_layer_dirty(l); tk_bmp_free(&l->bmp); tk_a8_free(&l->glass); }
+
 /* ---- state ------------------------------------------------------------------------------------------------- */
-static tk_layer root, home, lockflat, lockg, lstatic, mark, glyph_c, glyph_o, list, etool, hint, homebar;
-static tk_layer focus, scrim, fgrp, fcard, ffill, flabel, fthumb, boot, bootbar;
+static tk_layer root, home, lockflat, lockg, mark, glyph_c, glyph_o, list, etool, hint, homebar;
+static tk_layer focus, scrim, fgrp, fcard, ffill, flabel, fthumb, boot, bootc, bootbar;
 typedef struct {
     tk_layer face, facelit, icon, iconlit, ring, grp;
     tk_bmp ringbuf;
@@ -188,22 +190,55 @@ static void ring_widget(dc *d, float x, float p, tk_col col, const char *num, co
     w = tw(TK_IT700, 9.5f, lbl, .38f, 0);
     d_text(d, TK_IT700, 9.5f, x + 36 - w / 2, 220 + 50 + 9, lbl, .38f, 0, W(.72f), 0);
 }
-static void build_lstatic(void)
+/* the live values (sh_status): the host's are the concept's */
+static struct { int h, mi, wday, day, mon, pct, temp; } ST = { 21, 5, 2, 10, 11, 87, 41 };
+static const char *const WD[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+static const char *const MO[12] = { "January", "February", "March", "April", "May", "June", "July", "August",
+                                    "September", "October", "November", "December" };
+static int put_dec(char *b, int v) { int n = 0; char t[12]; int k = 0; if (v < 0) { b[n++] = '-'; v = -v; }
+    do { t[k++] = (char)('0' + v % 10); v /= 10; } while (v); while (k) b[n++] = t[--k]; b[n] = 0; return n; }
+static void fmt_hm(char *b) { b[0] = (char)('0' + ST.h / 10); b[1] = (char)('0' + ST.h % 10); b[2] = ':';
+    b[3] = (char)('0' + ST.mi / 10); b[4] = (char)('0' + ST.mi % 10); b[5] = 0; }
+
+static tk_layer lstatus, lclock, lwidgets;
+static void build_lstatus(void)
 {
-    dc d = mk(&lstatic, "lock-static", 0, 0, 390, 300, 0, 1);
+    dc d = mk(&lstatus, "lock-status", 0, 0, 390, 48, 2, 0);
     status_bar(&d, "No SIM");
-    float w = tw(TK_IT600, 19, "Tuesday 10 November", 0, 0);
-    d_text(&d, TK_IT600, 19, (390 - w) / 2, 78 + 18, "Tuesday 10 November", 0, 0, W(.9f), 1);
-    /* the clock: 106 pt / 700 / -4 pt, tabular, gradient #fff -> #dfe9ff over its box (0, 96, 390 x 108.12) */
-    {
-        float cw = tw(TK_IT700, 106, "21:05", -4, TK_TNUM);
-        tk_stop s[2] = { { 0, tk_hex(0xffffff, 1) }, { 1, tk_hex(0xdfe9ff, 1) } };
-        tk_paint p = tk_linear(180, -d.ox, PT(96) - d.oy, PT(390), PT(108.12f), 2, s);
-        tk_text(d.b, TK_IT700, PT(106), PT((390 - cw) / 2) - d.ox, PT(base_of(TK_IT700, 106, 96, 108.12f)) - d.oy, "21:05",
-                PT(-4), TK_TNUM, &p, 0);
-    }
-    ring_widget(&d, 33, .87f, tk_hex(0x4cd964, 1), "87", "BATTERY");
-    ring_widget(&d, 285, .41f, tk_hex(0x6fb3ff, 1), "41\xc2\xb0", "TEMP");
+}
+static void build_lclock(void)
+{
+    /* the date (19 pt / 600) and the clock: 106 pt / 700 / -4 pt, tabular, gradient #fff -> #dfe9ff over its box */
+    relayer(&lclock);
+    dc d = mk(&lclock, "lock-clock", 0, 72, 390, 140, 2, 0);
+    char date[48];
+    int n = 0;
+    for (const char *p = WD[ST.wday % 7]; *p;) date[n++] = *p++;
+    date[n++] = ' ';
+    n += put_dec(date + n, ST.day);
+    date[n++] = ' ';
+    for (const char *p = MO[(ST.mon + 11) % 12]; *p;) date[n++] = *p++;
+    date[n] = 0;
+    float w = tw(TK_IT600, 19, date, 0, 0);
+    d_text(&d, TK_IT600, 19, (390 - w) / 2, 78 + 18, date, 0, 0, W(.9f), 1);
+    char hm[8];
+    fmt_hm(hm);
+    float cw = tw(TK_IT700, 106, hm, -4, TK_TNUM);
+    tk_stop s[2] = { { 0, tk_hex(0xffffff, 1) }, { 1, tk_hex(0xdfe9ff, 1) } };
+    tk_paint p = tk_linear(180, -d.ox, PT(96) - d.oy, PT(390), PT(108.12f), 2, s);
+    tk_text(d.b, TK_IT700, PT(106), PT((390 - cw) / 2) - d.ox, PT(base_of(TK_IT700, 106, 96, 108.12f)) - d.oy, hm,
+            PT(-4), TK_TNUM, &p, 0);
+}
+static void build_lwidgets(void)
+{
+    relayer(&lwidgets);
+    dc d = mk(&lwidgets, "lock-widgets", 0, 210, 390, 92, 0, 1);
+    char num[12];
+    put_dec(num, ST.pct);
+    ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), tk_hex(0x4cd964, 1), num, "BATTERY");
+    int n = put_dec(num, ST.temp);
+    num[n] = (char)0xc2; num[n + 1] = (char)0xb0; num[n + 2] = 0;
+    ring_widget(&d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), tk_hex(0x6fb3ff, 1), num, "TEMP");
     d_glass(&d, 115, 220, 160, 72, 22, 1, 1);
     d_icon(&d, "alarm", 129, 239.5f, 1);
     d_text(&d, TK_IT700, 11, 145, 238 + 11, "ALARM", .33f, 0, W(.7f), 0);
@@ -232,7 +267,6 @@ static void build_hold(int i)
 {
     hold_t *q = &Q[i];
     float x = i ? 292 : 46, y = 694;
-    tk_layer_init(&q->grp, i ? "q-em" : "q-light");
     q->grp.ox = PT(x + 26);
     q->grp.oy = PT(y + 26);
     dc d = mk(&q->face, "q-face", x, y, 52, 52, 44, 1);
@@ -252,7 +286,8 @@ static void build_hold(int i)
     int n = q->ring.bmp.w * q->ring.bmp.h;
     q->ang = tk_alloc((size_t)n * 4);
     q->cov = tk_alloc((size_t)n * 4);
-    for (int j = 0; j < q->ring.bmp.h; j++)
+    if (!q->ang || !q->cov) n = 0;
+    for (int j = 0; n && j < q->ring.bmp.h; j++)
         for (int k = 0; k < q->ring.bmp.w; k++) {
             float px = k + .5f + d.ox - PT(x + 26), py = j + .5f + d.oy - PT(y + 26);
             float a = tk_atan2f(px, -py);
@@ -264,15 +299,11 @@ static void build_hold(int i)
     q->scale_t = q->scale_from = q->scale_to = 1;
     q->facelit.hidden = q->iconlit.hidden = 1;
     q->ring.hidden = 1;
-    tk_layer_add(&q->grp, &q->face);
-    tk_layer_add(&q->grp, &q->facelit);
-    tk_layer_add(&q->grp, &q->icon);
-    tk_layer_add(&q->grp, &q->iconlit);
-    tk_layer_add(&q->grp, &q->ring);
 }
 static void hold_ring(hold_t *q, int i, float p)
 {
     tk_bmp *b = &q->ring.bmp;
+    if (!q->ang || !q->cov || !b->px) return;
     uint32_t col = i ? tk_premul(tk_hex(0xff8a7a, 1)) : 0xffffffffu;
     float sweep = 6.2831853f * p, aa = 1.0f / PT(28);       /* a px of arc in radians */
     for (int k = 0; k < b->w * b->h; k++) {
@@ -285,8 +316,6 @@ static void hold_ring(hold_t *q, int i, float p)
     q->ring.hidden = p <= 0;
     tk_layer_dirty(&q->ring);
 }
-
-static void relayer(tk_layer *l) { tk_layer_dirty(l); tk_bmp_free(&l->bmp); tk_a8_free(&l->glass); }
 
 /* ---- the Systems list ------------------------------------------------------------------------------------------ */
 #define FACE_MG 44.0f            /* the margin around a card's face (its shadow) */
@@ -384,9 +413,6 @@ static void build_card(int g)
     k->members.clip = 1;
     k->open.hidden = 1;
     k->chev.clip = 1;
-    tk_layer_add(&list, &k->closed);
-    tk_layer_add(&list, &k->open);
-    tk_layer_add(&list, &k->chev);
 }
 /* an opening card's face (at the open height: a 3-slice while it grows), its head and its member rows */
 static void build_open(int g)
@@ -516,15 +542,24 @@ static void toggle_group(int g, int instant)
     place_list();
 }
 
-/* ---- the home (P1: the concept's first page, drawn once; P2 builds the real one) --------------------------- */
 static tk_layer hparts[8];
+static void build_home_sb(void)
+{
+    relayer(&hparts[0]);
+    dc d = mk(&hparts[0], "home-sb", 0, 0, 390, 48, 0, 0);
+    char hm[8];
+    fmt_hm(hm);
+    status_bar(&d, hm);
+}
+
+/* ---- the home (P1: the concept's first page, drawn once; P2 builds the real one) --------------------------- */
 static void build_home(void)
 {
     static const char *P1[8] = { "calendar", "weather", "clock", "camera", "photos", "music", "notes", "calc" };
     static const char *P1N[8] = { "Calendar", "Weather", "Clock", "Camera", "Photos", "Music", "Notes", "Calculator" };
     static const char *DK[4] = { "phone", "messages", "browser", "settings" };
-    dc d = mk(&hparts[0], "home-sb", 0, 0, 390, 48, 0, 0);
-    status_bar(&d, "21:05");
+    build_home_sb();
+    dc d;
     d = mk(&hparts[1], "home-w", 0, 50, 390, 200, 44, 1);
     d_glass(&d, 24, 60, 158, 158, 24, 0, 1);
     d_glass(&d, 208, 60, 158, 158, 24, 0, 1);
@@ -584,13 +619,7 @@ static void build_home(void)
     }
     /* the parts stay separate layers under one group (they do not overlap, so the group's opacity per part is
      * exact); #home has will-change: opacity, a backdrop root in Chrome: its glass shows no wallpaper blur */
-    tk_layer_init(&home, "home");
-    for (int i = 0; i < 4; i++) {
-        tk_a8_free(&hparts[i].glass);
-        tk_layer_add(&home, &hparts[i]);
-    }
-    home.ox = PT(195);
-    home.oy = PT(401);
+    for (int i = 0; i < 4; i++) tk_a8_free(&hparts[i].glass);
 }
 
 static float focus_sy;
@@ -688,7 +717,6 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     tk_layer_add(&focus, &fgrp);
     focus_sys = s;
     thumb_x = 0;
-    tk_layer_prepare(&scrim);
     tk_layer_prepare(&fcard);
     tk_layer_prepare(&ffill);
     tk_layer_prepare(&flabel);
@@ -718,7 +746,6 @@ static void flatten_lock(void)
     tk_flatten(&lockg, &lockflat.bmp, &lockflat.glass, .5f);
     flat_ver = lock_ver;
     tk_layer_dirty(&lockflat);
-    tk_comp_prepare(C);
 }
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
@@ -779,62 +806,106 @@ static void lap_us(const char *what, uint64_t us)
     tk_log(b);
 }
 
-int sh_init(tk_comp *c)
+/* the tree, rebuilt from what exists (a layer re-made by mk() loses its links): called after every bake step */
+static void link(tk_layer *parent, tk_layer **kids, int n)
+{
+    parent->child = 0;
+    tk_layer *last = 0;
+    for (int i = 0; i < n; i++) {
+        tk_layer *k = kids[i];
+        k->next = 0;
+        if (last) last->next = k; else parent->child = k;
+        last = k;
+    }
+}
+static void relink(void)
+{
+    tk_layer *r[] = { &star, &home, &lockg, &lockflat, &focus, &boot, &homebar };
+    link(&root, r, 7);
+    tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &list, &Q[0].grp, &Q[1].grp, &hint };
+    link(&lockg, lk, 10);
+    tk_layer *ls[3 * NG + 1];
+    int n = 0;
+    for (int g = 0; g < NG; g++) { ls[n++] = &K[g].closed; ls[n++] = &K[g].open; ls[n++] = &K[g].chev; }
+    ls[n++] = &etool;
+    link(&list, ls, n);
+    for (int i = 0; i < 2; i++) {
+        tk_layer *q[] = { &Q[i].face, &Q[i].facelit, &Q[i].icon, &Q[i].iconlit, &Q[i].ring };
+        link(&Q[i].grp, q, 5);
+    }
+    tk_layer *h[] = { &hparts[0], &hparts[1], &hparts[2], &hparts[3] };
+    link(&home, h, 4);
+}
+
+/* the bake in steps (the kernel runs one per loop turn: the watchdog is fed and the screen fills in as it goes);
+ * returns 1 while steps remain */
+static int init_step;
+void sh_init_begin(tk_comp *c)
 {
     C = c;
     tb = tk_us();
-    build_wall();
-    lap("bake: wallpaper + glass backdrop");
+    init_step = 0;
     tk_layer_init(&root, "root");
-    build_home();
-    lap("bake: home");
-    build_lstatic();
-    build_marks();
-    lap("bake: lock static");
+    tk_layer_init(&home, "home");
+    home.ox = PT(195);
+    home.oy = PT(401);
+    tk_layer_init(&lockg, "lock");
     tk_layer_init(&list, "list");
     list.clip = 1;
     list.fade_top = PT(18);
     list.fade_bot = PT(14);
-    layout_list();
-    for (int g = 0; g < NG; g++) build_card(g);
-    build_etool();
-    lap("bake: cards");
-    tk_layer_add(&list, &etool);
-    build_hold(0);
-    build_hold(1);
-    lap("bake: holds");
-    tk_layer_init(&lockg, "lock");
-    tk_layer_add(&lockg, &lstatic);
-    tk_layer_add(&lockg, &mark);
-    tk_layer_add(&lockg, &glyph_c);
-    tk_layer_add(&lockg, &glyph_o);
-    tk_layer_add(&lockg, &list);
-    tk_layer_add(&lockg, &Q[0].grp);
-    tk_layer_add(&lockg, &Q[1].grp);
-    tk_layer_add(&lockg, &hint);
     tk_layer_init(&lockflat, "lock-flat");
-    /* the flattened lock is only ever seen moving (half-resolution frames): kept at half resolution, drawn 2x */
-    tk_bmp_new(&lockflat.bmp, TK_W / 2, TK_H / 2);
-    tk_a8_new(&lockflat.glass, TK_W / 2, TK_H / 2);
-    lockflat.sx = lockflat.sy = 2;
-    lockflat.glass_opaque_only = 1;
-    lockflat.hidden = 1;
     tk_layer_init(&focus, "focus");
     focus.hidden = 1;
     tk_layer_init(&boot, "boot");
     boot.hidden = 1;
-    tk_layer_add(&root, &star);
-    tk_layer_add(&root, &home);
-    tk_layer_add(&root, &lockg);
-    tk_layer_add(&root, &lockflat);
-    tk_layer_add(&root, &focus);
-    tk_layer_add(&root, &boot);
-    tk_layer_add(&root, &homebar);
+    for (int i = 0; i < 2; i++) tk_layer_init(&Q[i].grp, i ? "q-em" : "q-light");
+    layout_list();
+    relink();
     c->root = &root;
-    glyph_c.alpha = glyph_o.alpha = 0;
-    hint.alpha = 0;
+}
+
+int sh_init_step(void)
+{
+    switch (init_step++) {
+    case 0: build_wall(); lap("bake: wallpaper + glass backdrop"); break;
+    case 1:
+        build_lstatus();
+        build_lclock();
+        build_lwidgets();
+        build_marks();
+        glyph_c.alpha = glyph_o.alpha = 0;
+        hint.alpha = 0;
+        lap("bake: lock status, clock, widgets");
+        break;
+    case 2: case 3: case 4: case 5: case 6: build_card(init_step - 3); lap("bake: a card"); break;
+    case 7: build_etool(); build_hold(0); build_hold(1); lap("bake: tools and holds"); break;
+    case 8: build_home(); lap("bake: home"); break;
+    case 9: {
+        /* the flattened lock is only ever seen moving (half-resolution frames): kept at half resolution, drawn 2x */
+        tk_bmp_new(&lockflat.bmp, TK_W / 2, TK_H / 2);
+        tk_a8_new(&lockflat.glass, TK_W / 2, TK_H / 2);
+        lockflat.sx = lockflat.sy = 2;
+        lockflat.glass_opaque_only = 1;
+        lockflat.hidden = 1;
+        break;
+    }
+    default:
+        relink();
+        place_list();
+        set_lock(0);
+        return 0;
+    }
+    relink();
     place_list();
-    set_lock(0);
+    return 1;
+}
+
+int sh_init(tk_comp *c)
+{
+    sh_init_begin(c);
+    while (sh_init_step())
+        ;
     return 1;
 }
 
@@ -871,6 +942,18 @@ void sh_set(const char *what, const char *key, float v)
                     build_focus(&G[g].it[i], &G[g]);
                     set_focus(v);
                 }
+    } else if (!tk_strcmp(what, "reset")) {
+        /* back to the plain lock screen: the sheet and the boot overlay gone, every card closed, the top */
+        focus_on = 0; focus_closing = 0; focus.hidden = 1; sp_focus.live = sp_thumb.live = 0;
+        booting = 0; boot.hidden = 1;
+        for (int g = 0; g < NG; g++) if (K[g].isopen) toggle_group(g, 1);
+        scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
+        sp_lock.live = 0;
+        locked = 1;
+        set_lock(0);
+        mark_a = mark_t; glyph_a = glyph_t; hint_a = 0; hint_left = 0;
+        apply_tweens();
+        place_list();
     } else if (!tk_strcmp(what, "hint")) {
         hint_a = v;
         apply_tweens();
@@ -1136,9 +1219,13 @@ int sh_tick(float dt, float t)
     if (booting) {
         boot_t += dt * 1000;
         if (boot_t >= 0) {
-            if (!boot.bmp.px) {
-                dc d = mk(&boot, "boot", 0, 0, 390, H_PT, 0, 0);
-                tk_fill_rect_raw(d.b, 0, 0, d.b->w, d.b->h, 0xff000000u);
+            if (!boot.solid) {
+                /* the black ground is a solid layer (no 17 MB bitmap); the tile, the words and the bar's track
+                 * one small layer over it */
+                boot.solid = 0xff000000u;
+                boot.solid_w = TK_W;
+                boot.solid_h = TK_H;
+                dc d = mk(&bootc, "boot-content", 100, 300, 190, 175, 0, 0);
                 char tn[40] = "t66-";
                 tk_memcpy(tn + 4, focus_sys->k, tk_strlen(focus_sys->k) + 1);
                 d_icon(&d, tn, 162, 315, 1);
@@ -1151,7 +1238,8 @@ int sh_tick(float dt, float t)
                 d_rrect(&e, 120, 465, 4, 4, 2, W(1));
                 bootbar.slice = 2;
                 bootbar.slice_s0 = bootbar.slice_s1 = PT(2);
-                boot.child = &bootbar;
+                boot.child = &bootc;
+                bootc.next = &bootbar;
             }
             /* the bar: width 0 -> 100 % over 2.1 s, CSS ease, starting with the overlay */
             bootbar.slice_h = PT(4 + 146 * tk_bezier(.25f, .1f, .25f, 1, tk_minf(1, boot_t / 2100)));
@@ -1159,17 +1247,55 @@ int sh_tick(float dt, float t)
             boot_a = tk_minf(1, boot_t / 350);
             boot.alpha = boot_a;
             mv = 1;
-            if (boot_t > 2400) booting = 0;
+            if (boot_t > 2400) {
+                booting = 0;
+                sh_boot_os(focus_sys->k);       /* the loader's one-shot next boot (the kernel's driver) */
+            }
         }
     }
     return mv;
+}
+
+void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
+{
+    int tchange = h != ST.h || mi != ST.mi || wday != ST.wday || day != ST.day || mon != ST.mon;
+    int wchange = pct != ST.pct || temp != ST.temp;
+    ST.h = h; ST.mi = mi; ST.wday = wday; ST.day = day; ST.mon = mon; ST.pct = pct; ST.temp = temp;
+    if (tchange) {
+        /* the layers keep their place in the tree: rebuilt in place */
+        build_lclock();
+        build_home_sb();
+        relink();
+    }
+    if (wchange) {
+        build_lwidgets();
+        relink();
+    }
+    if (tchange || wchange) lock_ver++;
 }
 
 void sh_idle(void)
 {
     if (sh_moving()) return;
     if (locked && lockY == 0 && !focus_on) flatten_lock();
-    tk_comp_prepare(C);
+    /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
+     * rest frames) */
+    for (tk_layer *l = home.child; l; l = l->next) tk_layer_prepare(l);
+    for (int g = 0; g < NG; g++) {
+        tk_layer_prepare(&K[g].closed);
+        tk_layer_prepare(&K[g].chev);
+        if (K[g].face.bmp.px) {
+            tk_layer_prepare(&K[g].face);
+            tk_layer_prepare(&K[g].head);
+            for (int i = 0; i < G[g].n; i++) tk_layer_prepare(&K[g].rows[i]);
+        }
+    }
+    tk_layer_prepare(&etool);
+    for (int i = 0; i < 2; i++) {
+        tk_layer_prepare(&Q[i].face); tk_layer_prepare(&Q[i].facelit);
+        tk_layer_prepare(&Q[i].icon); tk_layer_prepare(&Q[i].iconlit);
+    }
+    tk_layer_prepare(&mark); tk_layer_prepare(&glyph_c); tk_layer_prepare(&glyph_o); tk_layer_prepare(&hint);
 }
 
 int sh_moving(void)

@@ -100,9 +100,10 @@ static void walk(tk_layer *l, float a, float b, float tx, float ty, float alpha,
                 fd = 1;
             }
         }
-        if (l->bmp.px && W->n < TK_MAXITEM) {
+        if ((l->bmp.px || l->solid) && W->n < TK_MAXITEM) {
             item *it = &W->it[W->n];
-            float h = l->slice == 1 ? l->slice_h : (float)l->bmp.h, w = l->slice == 2 ? l->slice_h : (float)l->bmp.w;
+            float h = l->solid ? l->solid_h : l->slice == 1 ? l->slice_h : (float)l->bmp.h;
+            float w = l->solid ? l->solid_w : l->slice == 2 ? l->slice_h : (float)l->bmp.w;
             it->l = l; it->a = A; it->b = B; it->tx = TX; it->ty = TY; it->alpha = AL;
             it->clip = c; it->fade = fd; it->ft0 = f0; it->ft1 = f1; it->fb0 = g0; it->fb1 = g1;
             it->r = isect(irect_of(TX, TY, TX + A * w, TY + B * h), c);
@@ -239,9 +240,31 @@ static uint8_t maskbuf[TK_W + 16], mrow[TK_W + 16];
 static int colu[TK_W + 16];
 static uint16_t colw[TK_W + 16];
 
+static void draw_solid(const tgt *T, const item *it, tk_irect R)
+{
+    /* a solid-colour layer (the boot overlay's black): its rect filled, or blended at its opacity */
+    float k = T->k;
+    tk_irect d = isect(R, irect_of(it->r.x0 * k, it->r.y0 * k, it->r.x1 * k, it->r.y1 * k));
+    if (iempty(d)) return;
+    uint32_t c = it->l->solid;
+    for (int y = d.y0; y < d.y1; y++) {
+        float f = fade_at(it, (y + .5f) / k);
+        unsigned al = (unsigned)(it->alpha * f * 255 + .5f);
+        uint32_t *dst = T->t->px + (size_t)y * T->t->stride + d.x0;
+        int n = d.x1 - d.x0;
+        if (al >= 255 && (c >> 24) == 255) { for (int i = 0; i < n; i++) dst[i] = c; continue; }
+        for (int i = 0; i < n; i += 64) {
+            int m = n - i < 64 ? n - i : 64;
+            for (int q = 0; q < m; q++) rowbuf[q] = c;
+            row_over(dst + i, rowbuf, m, al);
+        }
+    }
+}
+
 static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
 {
     tk_layer *l = it->l;
+    if (l->solid) { draw_solid(T, it, R); return; }
     float k = T->k, A = it->a * k, B = it->b * k, TX = it->tx * k, TY = it->ty * k;
     /* the source: the half copy when it is the closer size */
     const tk_bmp *src = &l->bmp;
@@ -427,6 +450,28 @@ static void up2x_out(tk_bmp *dst, const tk_bmp *h, tk_irect R)
     }
 }
 
+static void down2_rect(tk_bmp *h, const tk_bmp *f, tk_irect r)
+{
+    int x0 = r.x0 >> 1, x1 = tk_mini(h->w, (r.x1 + 1) >> 1), y0 = r.y0 >> 1, y1 = tk_mini(h->h, (r.y1 + 1) >> 1);
+    for (int j = y0; j < y1; j++) {
+        const uint32_t *a = f->px + (size_t)(2 * j) * f->stride, *b = a + f->stride;
+        uint32_t *o = h->px + (size_t)j * h->stride;
+        int i = x0;
+        for (; i + 4 <= x1; i += 4) {
+            uint32x4x2_t A = vld2q_u32(a + 2 * i), B = vld2q_u32(b + 2 * i);   /* even and odd px */
+            uint8x16_t t = vrhaddq_u8(vreinterpretq_u8_u32(A.val[0]), vreinterpretq_u8_u32(A.val[1]));
+            uint8x16_t u = vrhaddq_u8(vreinterpretq_u8_u32(B.val[0]), vreinterpretq_u8_u32(B.val[1]));
+            vst1q_u32(o + i, vreinterpretq_u32_u8(vrhaddq_u8(t, u)));
+        }
+        for (; i < x1; i++) {
+            uint32_t p0 = a[2 * i], p1 = a[2 * i + 1], p2 = b[2 * i], p3 = b[2 * i + 1], v = 0;
+            for (int sh = 0; sh < 32; sh += 8)
+                v |= (((p0 >> sh & 255) + (p1 >> sh & 255) + (p2 >> sh & 255) + (p3 >> sh & 255) + 2) >> 2) << sh;
+            o[i] = v;
+        }
+    }
+}
+
 /* ---- the frame -------------------------------------------------------------------------------------------- */
 int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel)
 {
@@ -455,7 +500,7 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     /* damage */
     tk_irect D[TK_MAXD];
     int nd = 0;
-    if (full || was_motion < 0 || (motion && !was_motion)) {
+    if (full || was_motion < 0) {
         D[nd++] = screen;
     } else {
         static tk_irect acc[TK_MAXITEM * 2 + 2];
@@ -534,6 +579,11 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
             for (int y = r.y0; y < r.y1; y++)
                 tk_memcpy(c->panel.px + (size_t)y * c->panel.stride + r.x0, c->fb.px + (size_t)y * c->fb.stride + r.x0, (size_t)(r.x1 - r.x0) * 4);
         }
+    }
+    if (!motion) {
+        /* the half canvas follows the rest frame (what changed, 2x2 averaged): a motion frame then only composes
+         * what moves, and layers that never move never need their half copies */
+        for (int q = 0; q < nd; q++) down2_rect(&c->half, &c->fb, D[q]);
     }
     uint64_t t2 = tk_us();
     c->nd = nd;

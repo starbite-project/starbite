@@ -147,6 +147,8 @@ struct tk_layer {
     float clip_radius;         /* rounded clip (px; 0 = square) */
     int slice;                 /* 3-slice stretch, 1 vertical / 2 horizontal: drawn slice_h long, the first s0 and last s1 px kept */
     float slice_h, slice_s0, slice_s1;
+    uint32_t solid;            /* a solid-colour layer (premultiplied; no bitmap) of solid_w x solid_h px at (x, y) */
+    float solid_w, solid_h;
     tk_layer *child, *next;
     uint32_t gen;              /* bumped when bmp changes (redraw its area) */
     /* compositor state */

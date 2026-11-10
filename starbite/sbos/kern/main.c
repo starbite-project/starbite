@@ -12,6 +12,15 @@
 #include <stdlib.h>
 #endif
 #include "kinput.h"
+#ifdef SBOS_NEXT
+/* "Starbite OS Next" (starbite-next images only): the sbtk shell is the UI (ui/kern_next.c) */
+void next_kinit(void), next_kdraw(void), next_kevent(const void *e), next_ktimer(unsigned id), next_kminute(void);
+#define ui_kinit next_kinit
+#define ui_kdraw next_kdraw
+#define ui_kevent next_kevent
+#define ui_ktimer next_ktimer
+#define ui_kminute next_kminute
+#endif
 
 struct kstate K;
 static uint64_t boot_ms;

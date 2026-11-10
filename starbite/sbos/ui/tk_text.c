@@ -161,6 +161,7 @@ void tk_text_fm(tk_fm *m, int font, float size, float x, float baseline, const c
         int w = x1 - x0, h = y1 - y0;
         if (w > 0 && h > 0) {
             uint8_t *bm = tk_alloc((size_t)w * h);
+            if (!bm) { pen += (adv + (i + 1 < n ? kern(f, g[i], g[i + 1]) : 0)) * sc + ls; continue; }
             stbtt_MakeGlyphBitmapSubpixel(&f->info, bm, w, h, w, sc, sc, fx, fy, g[i]);
             for (int j = 0; j < h; j++) {
                 int yy = by + y0 + j;

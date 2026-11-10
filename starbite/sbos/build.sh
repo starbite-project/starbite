@@ -156,6 +156,31 @@ uibobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_uib.o#")
 gpuobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_gpu.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_GPUALU "$here/kern/uitest.c" -o "$ob/k_uitest_gpualu.o"
 gpualuobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_gpualu.o#")
+# Starbite OS Next (P2 of the UI port plan, docs/SBTK-P1.md): the sbtk shell as the UI, its own images
+# starbite-next.img and starbite-next-selftest.img (catalog key starbite-next). Needs the phone's pack
+# (starbite/sbos/ui/tools/run.sh assets, then sbtk-pack.py BUILD/sbtk --phone, on the Mac: Chrome draws the icons).
+ui="$here/ui"
+PAK=""
+for c in "$root/build/sbtk/sbtk-phone.pak" "$root/../../../build/sbtk/sbtk-phone.pak"; do
+    if [ -f "$c" ]; then PAK=$c; break; fi
+done
+nobjs=""
+if [ -n "$PAK" ]; then
+    NFLAGS="$CFLAGS -I$ui -DSBOS_KERNEL"
+    nui=""
+    for f in tk_math tk_raster tk_text tk_glass tk_comp tk_motion tk_pack tk_heap shell_lock kern_next; do
+        "${CROSS}gcc" $NFLAGS "$ui/$f.c" -o "$ob/n_$f.o"
+        nui="$nui $ob/n_$f.o"
+    done
+    "${CROSS}gcc" $NFLAGS -DSBOS_SELFTEST_NEXT "$ui/kern_next.c" -o "$ob/n_kern_next_st.o"
+    "${CROSS}gcc" $CFLAGS -DSBTK_PACK="\"$PAK\"" "$ui/next_pack.S" -o "$ob/n_pack.o"
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_NEXT "$here/kern/main.c" -o "$ob/k_main_next.o"
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT "$here/kern/uitest.c" -o "$ob/k_uitest_next.o"
+    nobjs="$(echo "$objs" | sed "s#$ob/k_main_c.o#$ob/k_main_next.o#") $nui $ob/n_pack.o"
+    nstobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_next.o#; s#$ob/n_kern_next.o#$ob/n_kern_next_st.o#")
+else
+    echo "sbos: no build/sbtk/sbtk-phone.pak: the starbite-next images are not built" >&2
+fi
 if [ "$stobjs" = "$objs" ]; then
     echo "sbos: the self-test variant did not get k_uitest_on.o" >&2
     exit 1
@@ -239,6 +264,30 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
 "${CROSS}objcopy" -O binary "$out/starbite-os-gpualu.elf" "$out/starbite-os-gpualu.bin"
 "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
+if [ -n "$nobjs" ]; then
+    for v in next next-selftest; do
+        if [ "$v" = next ]; then vo=$nobjs; else vo=$nstobjs; fi
+        "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
+        und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)
+        if [ -n "$und" ]; then
+            echo "sbos: starbite-$v: undefined symbols:" >&2
+            echo "$und" >&2
+            exit 1
+        fi
+        relocs_only_relative "$out/starbite-$v.elf"
+        "${CROSS}objcopy" -O binary "$out/starbite-$v.elf" "$out/starbite-$v.bin"
+        "${CROSS}nm" "$out/starbite-$v.elf" | sort > "$out/starbite-$v.map"
+        python3 "$root/starbite/tools/check-image.py" "$out/starbite-$v.bin" "$out/starbite-$v.img" "$out/starbite-$v.map"
+        leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-$v.img" | head -3 || true)
+        if [ -n "$leak" ]; then
+            echo "sbos: starbite-$v.img contains build-host paths:" >&2
+            echo "$leak" >&2
+            exit 1
+        fi
+        sha256sum "$out/starbite-$v.img" | sed "s#  .*#  starbite-$v.img#" > "$out/starbite-$v.img.sha256"
+        echo "sbos: $(cat "$out/starbite-$v.img.sha256") (Starbite OS Next, $(wc -c < "$out/starbite-$v.img") bytes)"
+    done
+fi
 if ! "${CROSS}nm" "$out/starbite-os.elf" | grep -q ' sbos_selftest_enabled$'; then
     echo "sbos: no sbos_selftest_enabled in the image" >&2
     exit 1

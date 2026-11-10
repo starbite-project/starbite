@@ -149,6 +149,11 @@ static void logline(const char *what, int a)
     ++steps;
 }
 
+#ifdef SBOS_SELFTEST_NEXT
+void next_selftest_begin(void);
+int next_selftest_step(void), next_selftest_ready(void), next_selftest_failed(void);
+#endif
+
 void selftest_start(void)
 {
     if (!enabled())
@@ -235,6 +240,19 @@ void selftest_timer(unsigned id)
                         "selftest: GPU ladder H2: the watchdog could not be set (the loader's stays): ", w);
             phase = 50;
             kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
+#ifdef SBOS_SELFTEST_NEXT
+        {
+            /* Starbite OS Next (ui/kern_next.c): the bake's times, the four films with synthetic touches and every
+             * frame timed, then recovery (pmsg) */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: next: the watchdog at 30 s, fed by the films: seconds " :
+                        "selftest: next: the watchdog could not be set (the loader's stays): ", w);
+            next_selftest_begin();
+            phase = next_selftest_ready() ? 90 : 91;
+            kt_set(KT_SELFTEST, 0, sb_ms(), phase == 90 ? 8 : 2000, phase == 90);
             return;
         }
 #endif
@@ -490,6 +508,22 @@ void selftest_timer(unsigned id)
         kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
         return;
     case 51:
+        active = 0;
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_NEXT
+    case 90:
+        if (next_selftest_step())
+            return;
+        kt_cancel(KT_SELFTEST, 0);
+        sb_log(next_selftest_failed() ? "selftest: next: FAILED (see above); a restart into recovery (pmsg)" :
+               "selftest: next: PASSED: the bake and the four films ran (frame times above); a restart into recovery (pmsg)");
+        active = 0;
+        power_restart_recovery();
+        return;
+    case 91:
+        sb_log("selftest: FAILED: next: the new UI did not start; a restart into recovery (pmsg)");
         active = 0;
         power_restart_recovery();
         return;

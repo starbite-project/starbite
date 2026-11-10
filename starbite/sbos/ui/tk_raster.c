@@ -20,22 +20,23 @@ uint32_t tk_premul(tk_col c) { return pack(c.r * c.a, c.g * c.a, c.b * c.a, c.a)
 
 int tk_bmp_new(tk_bmp *b, int w, int h)
 {
-    b->w = w; b->h = h; b->stride = w;
+    /* on no memory: an empty bitmap (w = h = 0), which every drawing call skips */
     b->px = w > 0 && h > 0 ? tk_alloc((size_t)w * h * 4) : 0;
+    b->w = b->px ? w : 0; b->h = b->px ? h : 0; b->stride = b->w;
     return b->px != 0;
 }
 void tk_bmp_free(tk_bmp *b) { if (b->px) tk_free(b->px); b->px = 0; b->w = b->h = 0; }
 int tk_fm_new(tk_fm *m, int w, int h)
 {
-    m->w = w; m->h = h;
     m->v = w > 0 && h > 0 ? tk_alloc((size_t)w * h * 4) : 0;
+    m->w = m->v ? w : 0; m->h = m->v ? h : 0;
     return m->v != 0;
 }
 void tk_fm_free(tk_fm *m) { if (m->v) tk_free(m->v); m->v = 0; m->w = m->h = 0; }
 int tk_a8_new(tk_a8 *m, int w, int h)
 {
-    m->w = w; m->h = h;
     m->v = w > 0 && h > 0 ? tk_alloc((size_t)w * h) : 0;
+    m->w = m->v ? w : 0; m->h = m->v ? h : 0;
     return m->v != 0;
 }
 void tk_a8_free(tk_a8 *m) { if (m->v) tk_free(m->v); m->v = 0; m->w = m->h = 0; }
@@ -223,6 +224,7 @@ static void fm_blur_full(tk_fm *m, float sigma)
     boxes(sigma, r);
     int n = tk_maxi(m->w, m->h);
     float *t = tk_alloc((size_t)n * 4), *u = tk_alloc((size_t)n * 4);
+    if (!t || !u) { tk_free(t); tk_free(u); return; }
     for (int j = 0; j < m->h; j++) {
         float *row = m->v + j * m->w;
         for (int p = 0; p < 3; p++) {
@@ -416,6 +418,7 @@ static void bmp_blur_full(tk_bmp *b, float sigma)
     int n = tk_maxi(b->w, b->h);
     for (int k = 0; k < 3; k++) r[k] = tk_mini(r[k], n - 1);
     float *ch = tk_alloc((size_t)n * 4 * 4), *t = tk_alloc((size_t)n * 4);
+    if (!ch || !t) { tk_free(ch); tk_free(t); return; }
     for (int j = 0; j < b->h; j++) {
         uint32_t *row = b->px + j * b->stride;
         for (int c = 0; c < 4; c++) {
