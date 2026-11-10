@@ -135,3 +135,57 @@ What it does:
   power, NIDEN) has to be probed first in a log-only image.
 - Tables for M3-only: M3 1 first, M3 0/2/3 parked (parking v1) with the FlexPMU core/cluster steps Starbite OS
   uses for core 0, A55s disabled and parked in WFI, PPTT with UIDs 4..7, equal efficiency classes.
+
+## 6. m3diag1 result (2026-11-10 19:58, attended, PASSED)
+
+Log: `build/woa/cores/m3diag1-run1/pstore-pmsg-ramoops-0.txt` (main checkout; pmsg read in TWRP, because the warm
+reset landed in TWRP, not the menu; the pmsg ring wrapped and lost the first `=M3D` lines, so v2 repeats the
+dispatch snapshot at the end and drops most hex dumps).
+
+- **Cause #1 is out for every listed instruction.** M3 core 2: `crumb FE after 1 ms, el 1, EL1 exceptions 0`. ACTLR read
+  and write-back, PMCR/PMCEID0/PMUSERENR/PMCCFILTR/PMCCNTR/PMCNTENSET/PMSELR, OSLSR (A = OS lock set), MDSCR, DBGBCR0,
+  CCSIDR, DC CSW/CISW, AT, TLBI, CONTEXTIDR/MAIR write-back, GIC reads: all native (6..21 ticks; TLBI 50, first GICD
+  read 51, SMCs 49..157). Nothing was emulated by an EL2.
+- SMCCC_VERSION, PSCI_VERSION, SMCCC_ARCH_FEATURES from the M3: FFFFFFFF (Samsung EL3, PSCI 0.1).
+- **HVC is UNDEFINED at EL1 on the M3** (`!esr2000000`, EC 0): EL2 has HVC disabled (HCR_EL2.HCD or SCR). On A55 0
+  the woa payload swallows HVCs. ntoskrnl's HVC sites are a generic SMCCC-over-HVC wrapper (0x140200060, one caller)
+  and conduit pairs (`hvc;ret` / `smc;ret`), plus Hyper-V hypercall stubs: all selected by FADT PSCI_USE_HVC /
+  hypervisor presence, and FADT has neither. So a bare HVC on the boot path is unlikely; noted, not ranked up.
+- M3 IDs as in B3a (MIDR 531F0020, ISAR0 11120, MMFR1 0, PFR1 0, DFR0 10305116, CTR 84448004, CLIDR B200123,
+  DCZID 4); PMCR 53023000 (6 counters).
+- M3's banked GIC view at dispatch: GICD_CTLR 1, ISENABLER0 7FFF (SGIs only), ITARGETSR0 40404040 (interface 6 =
+  M3 2, as expected), IPRIORITYR6/7 = 0 (A55 0: 80808000/80808080, UEFI's), GICC_CTLR 1, PMR F0.
+- Live tables (same at ReadyToBoot, ebs-pre, ebs-post; the dispatch line was lost):
+  - FADT 276 bytes, flags 0x300400 (HW_REDUCED, LOW_POWER_S0, RESET_REG_SUP), reset register = memory 0x14060400
+    (PMU SWRESET) value 1, **ARM_BOOT_ARCH 0** (no PSCI, no HVC), minor 3, no hypervisor vendor.
+  - MADT 708 bytes: GICC UID 0..3 = A55, interfaces 0..3, enabled, MPIDR **0, 1, 2, 3** (the real A55 affinities are
+    0x000, 0x100, 0x200, 0x300), UID 0 parking v0, UIDs 1..3 parking v1 at BBC60000/61000/62000, efficiency class 1;
+    UID 4..7 = M3, interfaces 4..7, **disabled**, MPIDR 0x100..0x103, class 0; GICD 0x10101000 v2.
+  - GTDT: secure EL1 PPI 29, non-secure EL1 PPI 30, virtual PPI 27, EL2 PPI 26, all flags 6 (level, active low,
+    always-on); no memory-mapped counter.
+  - DSDT `_MAT`: **all eight processors enabled**, parking v0 at 0, M3 class 0, A55 class 1. The old solo builds did
+    not sync `_MAT` (only big mode did), so on the solo path Windows saw a MADT with one M3 and a DSDT with eight
+    enabled processors whose `_MAT` points at A55 0..3 and M3 0..3: a real inconsistency to fix in our tables.
+- A55 0 after ExitBootServices: GICD and GICC disabled (CTLR 0, PMR 0, UEFI's GIC driver), timers off, DAIF 2C0,
+  SCTLR 30C5183D, TCR 280803518.
+
+Updated ranking: #1 (unserved EL2 trap) is unlikely now; #2 (boot-CPU state made on the A55 before the hand-off)
+and #3 (an invisible early bugcheck, e.g. from the MADT/`_MAT` mismatch or a missing clock interrupt) lead. Seeing
+the hang's PC is the next lever, which m3diag2 prepares.
+
+## 7. Image m3diag2 (log only; Windows' kernel never starts)
+
+`starbite-uefi-m3diag2.bin`, sha256 `8996c62a285e51b300b668738244fcfc60ac08c2f0094e697ad77adaa011e733`
+(`SOLO=m3diag2 M3DIAG=1`). Phase 1 as v1 without HVC; then, each after the A55 logged the previous phase:
+- **phase 2 (timer interrupt on the M3):** priority 0x80 for INTID 27, enable it in the M3's banked ISENABLER0, the
+  virtual timer 100 us ahead, IRQ unmasked for up to 10 ms. `IRQ=1001B` = INTID 27 reached EL1 on the M3 (IAR +
+  0x10000); `IRQ=0` = never arrived (then cause #4 is real under UEFI's GIC setup); crumb stuck at 58 = the IRQ went
+  to an EL2 that never returned.
+- **phase 3 (CoreSight PC sampling):** the M3 (MMU off) reads A55 core 0's external debug block (0x1E810000, from
+  Samsung's DT): CIDR/PIDR/EDDEVARCH/EDDEVID/EDLSR/EDPRSR/MIDR/MPIDR, EDPCSR samples; then unlocks (EDLAR
+  C5ACCE55, OSLAR 0) and samples again. A55 0 is polling in `DiagWait`/`MicroSecondDelay` at that moment, and their
+  addresses are logged: a `csPCSR` close to them proves we can sample a hung core's PC from another core with no
+  change to Windows. `!esr...` = the access aborted (caught); crumb stuck at 61..80 = that access hung the M3 (the
+  A55 carries on and the image still resets).
+
+Run exactly as m3diag1 (row `win11-m3probe`, attended, reads from pmsg in TWRP or zone 0). Pass = `=M3D v2 done`.

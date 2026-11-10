@@ -13,7 +13,11 @@
          the failure mode that matches every silent hang of the old hand-off (catch 00, no exception at EL1);
        - a duration far above its siblings (tens of ticks at 26 MHz) means the instruction trapped to an EL2 that
          emulated it.
-     HVC (x0 = SMCCC_VERSION) runs last, only after the A55 has logged everything else.
+     v1 (run 2026-11-10 19:58): every test returned natively; HVC is UNDEFINED at EL1 on the M3 (HCD).
+     v2 drops the HVC test and adds, each after the A55 logged the previous phase:
+       phase 2: the virtual timer's PPI 27 delivered to the M3 at EL1 (priority, enable, a 100 us timer);
+       phase 3: CoreSight external debug of A55 core 0 read by the M3 (MMU off): IDs, EDPRSR, EDPCSR samples
+                before and after unlocking (EDLAR, OSLAR), to learn whether a hung core's PC can be sampled.
   2. ACPI snapshots at dispatch, ReadyToBoot, ExitBootServices before the inner (woa) hook, and after it: FADT
      ARM_BOOT_ARCH / flags / hash, MADT, GTDT, DSDT hashes, so the step that clears ARM_BOOT_ARCH is bracketed.
      After ExitBootServices: full hex dumps of the live FADT, MADT and GTDT, every DSDT _MAT GICC, and the A55's
@@ -51,14 +55,15 @@
 //   +0x00 crumb (index of the test started last; 0xFE = phase 1 done, waiting for Go; 0xFF = all done)
 //   +0x08 EL1 exceptions taken   +0x10 CurrentEL at entry
 //   +0x40 + i * 0x20: test i: value, ESR (0 = none), ticks, ELR of the exception
-//   +0x7C0 Go (the A55's only write after the CPU_ON, in a cache line of its own)
+//   +0xFC0 Go (the A55's only write after the CPU_ON, in a cache line of its own)
 //
 #define D_CRUMB  0x00
 #define D_EXC    0x08
 #define D_EL     0x10
 #define D_REC    0x40
-#define D_GO     0x7C0
-#define N_TESTS  56
+#define D_GO     0xFC0
+#define N_TESTS  80
+#define CS_A55_0 0x1E810000UL     // exynos9810.dtsi coresight@1e000000 cl0_cpu0 dbg-offset 0x810000
 
 extern UINT8  M3DiagBlob[];
 extern UINT8  M3DiagEntry[];
@@ -76,8 +81,12 @@ __asm__ (
   "  .globl M3DiagBlob\n"
   "M3DiagBlob:\n"
   ".Ldblob:\n"
-  "  .rept 16\n"
+  ".irp k, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n"
+  "  .if (\\k == 1) || (\\k == 5)\n"
+  "  b     .Ldirq\n"
+  "  .else\n"
   "  b     .Ldexc\n"
+  "  .endif\n"
   "  .skip 0x7C\n"
   "  .endr\n"
   "  .globl M3DiagEntry\n"
@@ -86,6 +95,7 @@ __asm__ (
   "  ldr   x19, [x9]\n"
   "  ldr   x20, [x9, #8]\n"
   "  ldr   x27, [x9, #16]\n"
+  "  ldr   x28, [x9, #24]\n"
   "  adr   x9, .Ldblob\n"
   "  msr   vbar_el1, x9\n"
   "  isb\n"
@@ -222,18 +232,104 @@ __asm__ (
   "  dsb   sy\n"
   "1:\n"
   "  wfe\n"
-  "  ldr   x9, [x19, #0x7C0]\n"
+  "  ldr   x9, [x19, #0xFC0]\n"
   "  cbz   x9, 1b\n"
-  "  DT 56\n"                            // HVC last, after the A55 logged phase 1
-  "  mov   w0, #0x80000000\n"
-  "  hvc   #0\n"
+  // phase 2: does the virtual timer's PPI 27 reach this M3 at EL1? (Linux says yes under Starbite OS)
+  "  DT 56\n"
+  "  mov   w1, #0x80\n"
+  "  strb  w1, [x20, #0x41B]\n"         // GICD_IPRIORITYR byte for INTID 27
+  "  ldr   w0, [x20, #0x418]\n"
   "  DE 56\n"
+  "  DT 57\n"
+  "  mov   w1, #0x08000000\n"
+  "  str   w1, [x20, #0x100]\n"         // GICD_ISENABLER0 (banked): INTID 27
+  "  ldr   w0, [x20, #0x100]\n"
+  "  DE 57\n"
+  "  DT 58\n"
+  "  str   xzr, [x19, #0x20]\n"
+  "  mrs   x1, cntvct_el0\n"
+  "  add   x1, x1, #2600\n"             // 100 us ahead
+  "  msr   cntv_cval_el0, x1\n"
+  "  mov   x1, #1\n"
+  "  msr   cntv_ctl_el0, x1\n"
+  "  isb\n"
+  "  mov   x3, #0x40000\n"              // give up after ~10 ms
+  "  msr   daifclr, #2\n"
+  "3:\n"
+  "  ldr   x0, [x19, #0x20]\n"
+  "  cbnz  x0, 4f\n"
+  "  mrs   x1, cntvct_el0\n"
+  "  sub   x1, x1, x22\n"
+  "  cmp   x1, x3\n"
+  "  b.lo  3b\n"
+  "4:\n"
+  "  msr   daifset, #2\n"
+  "  DE 58\n"
+  "  DT 59\n"
+  "  mrs   x0, cntv_ctl_el0\n"
+  "  mov   x1, #2\n"
+  "  msr   cntv_ctl_el0, x1\n"          // masked, off
+  "  isb\n"
+  "  DE 59\n"
+  "  DT 60\n"
+  "  mov   w1, #0x08000000\n"
+  "  str   w1, [x20, #0x180]\n"         // GICD_ICENABLER0: INTID 27 off again
+  "  mrs   x0, isr_el1\n"
+  "  DE 60\n"
+  "  mov   x21, #0xFD\n"
+  "  str   x21, [x19]\n"
+  "  dsb   sy\n"
+  "5:\n"
+  "  wfe\n"
+  "  ldr   x9, [x19, #0xFC0]\n"
+  "  cmp   x9, #2\n"
+  "  b.lo  5b\n"
+  // phase 3: CoreSight external debug of A55 core 0 (Samsung DT: cl0_cpu0 dbg 0x1E810000), read by this M3
+  "  LDG 61, x28, 0xFF0\n"              // CIDR0
+  "  LDG 62, x28, 0xFF4\n"              // CIDR1
+  "  LDG 63, x28, 0xFE0\n"              // PIDR0
+  "  LDG 64, x28, 0xFBC\n"              // EDDEVARCH
+  "  LDG 65, x28, 0xFC8\n"              // EDDEVID (PCSample [3:0])
+  "  LDG 66, x28, 0xFB4\n"              // EDLSR
+  "  LDG 67, x28, 0x314\n"              // EDPRSR
+  "  LDG 68, x28, 0xD00\n"              // MIDR
+  "  LDG 69, x28, 0xD20\n"              // MPIDR[31:0]
+  "  LDG 70, x28, 0x0A0\n"              // EDPCSR[31:0] (samples)
+  "  LDG 71, x28, 0x0AC\n"              // EDPCSR[63:32]
+  "  LDG 72, x28, 0x0A8\n"              // EDVIDSR
+  "  LDG 73, x28, 0x0A0\n"
+  "  LDG 74, x28, 0x0A0\n"
+  "  DT 75\n"                           // software lock off, OS lock off (A55 0 only; it resets before Windows)
+  "  movz  w1, #0xCE55\n"
+  "  movk  w1, #0xC5AC, lsl #16\n"
+  "  str   w1, [x28, #0xFB0]\n"
+  "  dsb   sy\n"
+  "  str   wzr, [x28, #0x300]\n"
+  "  dsb   sy\n"
+  "  isb\n"
+  "  ldr   w0, [x28, #0xFB4]\n"
+  "  DE 75\n"
+  "  LDG 76, x28, 0x314\n"
+  "  LDG 77, x28, 0x0A0\n"
+  "  LDG 78, x28, 0x0AC\n"
+  "  LDG 79, x28, 0x0A0\n"
+  "  LDG 80, x28, 0x0A0\n"
   "  mov   x21, #0xFF\n"
   "  str   x21, [x19]\n"
   "  dsb   sy\n"
   "2:\n"
   "  wfe\n"
   "  b     2b\n"
+  ".Ldirq:\n"
+  "  ldr   w25, [x27, #0x0C]\n"         // GICC_IAR
+  "  mov   x26, #2\n"
+  "  msr   cntv_ctl_el0, x26\n"         // mask the timer before EOI
+  "  isb\n"
+  "  str   w25, [x27, #0x10]\n"         // GICC_EOIR
+  "  add   x25, x25, #0x10000\n"
+  "  str   x25, [x19, #0x20]\n"
+  "  dsb   sy\n"
+  "  eret\n"
   ".Ldexc:\n"
   "  mrs   x25, esr_el1\n"
   "  add   x26, x19, #0x40\n"
@@ -253,7 +349,7 @@ __asm__ (
   "  .globl M3DiagLit\n"
   "M3DiagLit:\n"
   ".Ldlit:\n"
-  "  .quad 0, 0, 0\n"
+  "  .quad 0, 0, 0, 0\n"
   "  .globl M3DiagEnd\n"
   "M3DiagEnd:\n"
   );
@@ -266,7 +362,10 @@ STATIC CONST CHAR8  *mTestName[N_TESTS + 1] = {
   "ccsidr",   "DCCSW",   "DCCISW",  "ATs1e1r", "tlbi",    "ctxidr",  "ctxidrW", "mair",
   "mairW",    "isr",     "gicdCTLR","gicdTYPE","gicdIIDR","gicdEN0", "gicdTGT0","gicdPRI6",
   "gicdPRI7", "giccCTLR","giccPMR", "giccHPPI","giccIIDR","SMCCCver","PSCIver", "WA1feat",
-  "HVC"
+  "pri6w",    "en0w",    "IRQ",     "vctl",    "isr2",
+  "csCIDR0",  "csCIDR1", "csPIDR0", "csARCH",  "csDEVID", "csLSR",   "csPRSR",  "csMIDR",
+  "csMPIDR",  "csPCSR",  "csPCSRhi","csVIDSR", "csPCSR",  "csPCSR",  "csUNLK",  "csPRSR",
+  "csPCSR",   "csPCSRhi","csPCSR",  "csPCSR"
 };
 
 STATIC EFI_GUID  mDiagAcpi20Guid = {
@@ -286,6 +385,7 @@ STATIC UINTN                   mDiagGicc = GICC_FALLBACK;
 STATIC EFI_EXIT_BOOT_SERVICES  mDiagOrigEbs;
 STATIC EFI_EVENT               mDiagReadyToBoot;
 STATIC BOOLEAN                 mDiagPreDone;
+STATIC CHAR8                   mDiagSnap0[200];   // the dispatch snapshot, repeated after EBS
 
 STATIC
 UINT64
@@ -445,6 +545,7 @@ DiagAcpiSnap (
   UINT8                        *G;
   UINT8                        *D;
   UINTN                        nF;
+  CHAR8                        Snap[190];
 
   Xsdt = DiagXsdt ();
   if (Xsdt == NULL) {
@@ -456,8 +557,10 @@ DiagAcpiSnap (
   M = DiagFind (SIGNATURE_32 ('A', 'P', 'I', 'C'), NULL);
   G = DiagFind (SIGNATURE_32 ('G', 'T', 'D', 'T'), NULL);
   D = DiagDsdt (F);
-  SbLog (
-    "=M3D acpi %a: X n%d %08x | F x%d %lx ba%x fl%x mr%d hv%lx %08x | A %lx l%d %08x | G %lx %08x | D %lx %08x",
+  AsciiSPrint (
+    Snap,
+    sizeof (Snap),
+    " %a: X n%d %08x | F x%d %lx ba%x fl%x mr%d hv%lx %08x | A %lx l%d %08x | G %lx %08x | D %lx %08x",
     Tag,
     (Xsdt->Length - sizeof (*Xsdt)) / 8,
     DiagHash ((UINT8 *)Xsdt, Xsdt->Length),
@@ -476,6 +579,10 @@ DiagAcpiSnap (
     (UINT64)(UINTN)D,
     D ? DiagHash (D, DRd32 (D + 4)) : 0
     );
+  SbLog ("=M3D acpi%a", Snap);
+  if (AsciiStrCmp (Tag, "dispatch") == 0) {
+    AsciiStrCpyS (mDiagSnap0, sizeof (mDiagSnap0), Snap);
+  }
 }
 
 STATIC
@@ -681,6 +788,53 @@ DiagLogTests (
 }
 
 STATIC
+UINT64
+DiagWait (
+  IN  volatile UINT64  *P,
+  IN  UINT64           Want,
+  IN  UINTN            MaxMs,
+  OUT UINTN            *Ms
+  )
+{
+  for (*Ms = 0; *Ms < MaxMs; (*Ms)++) {
+    DiagCleanToPoc ((UINTN)P, (UINTN)P + 0xF80);
+    if (P[D_CRUMB / 8] == Want) {
+      break;
+    }
+
+    MicroSecondDelay (1000);
+  }
+
+  return P[D_CRUMB / 8];
+}
+
+STATIC
+VOID
+DiagGo (
+  IN volatile UINT64  *P,
+  IN UINT64           Go
+  )
+{
+  P[D_GO / 8] = Go;
+  DiagCleanToPoc ((UINTN)P + D_GO, (UINTN)P + D_GO + 8);
+  __asm__ __volatile__ ("sev" ::: "memory");
+}
+
+STATIC
+VOID
+DiagStopped (
+  IN UINT64  Crumb
+  )
+{
+  if ((Crumb >= 1) && (Crumb <= N_TESTS)) {
+    DiagLogTests (1, (UINTN)Crumb);
+    SbLog ("=M3D M3 core 2 STOPPED in test %ld (%a): that access never returned", Crumb, mTestName[Crumb]);
+  } else {
+    SbLog ("=M3D M3 core 2 never ran the stub (crumb %lx)", Crumb);
+  }
+}
+
+STATIC
 VOID
 DiagM3 (
   VOID
@@ -697,7 +851,7 @@ DiagM3 (
   UINTN             Ms;
 
   Ver = DiagSmc (0x84000000u, 0, 0) & 0xFFFFFFFFu;
-  SbLog ("=M3D v1 at dispatch: A55 PSCI_VERSION %lx (FFFFFFFF = no shim yet, CPU_ON goes to Samsung EL3)", Ver);
+  SbLog ("=M3D v2 at dispatch: A55 PSCI_VERSION %lx (FFFFFFFF = no shim yet, CPU_ON goes to Samsung EL3)", Ver);
   if (Ver != 0xFFFFFFFFu) {
     SbLog ("=M3D: the woa PSCI shim is already installed; no CPU_ON this boot (it would never reach our stub)");
     return;
@@ -718,6 +872,7 @@ DiagM3 (
   Lit[0] = mDiagPage;
   Lit[1] = mDiagGicd;
   Lit[2] = mDiagGicc;
+  Lit[3] = CS_A55_0;
   DiagCleanToPoc ((UINTN)mDiagPage, (UINTN)mDiagPage + 3 * EFI_PAGE_SIZE);
   __asm__ __volatile__ ("ic iallu\n dsb sy\n isb" ::: "memory");
   for (i = 0; i < ARRAY_SIZE (mDiagPmu); i++) {
@@ -727,55 +882,48 @@ DiagM3 (
 
   P  = (volatile UINT64 *)(UINTN)mDiagPage;
   Rc = DiagSmc (0xC4000003u, 0x102, Blob + (UINTN)(M3DiagEntry - M3DiagBlob));
-  for (Ms = 0; Ms < 500; Ms++) {
-    DiagCleanToPoc ((UINTN)mDiagPage, (UINTN)mDiagPage + 0x780);
-    if (P[D_CRUMB / 8] == 0xFE) {
-      break;
-    }
-
-    MicroSecondDelay (1000);
-  }
-
-  Crumb = P[D_CRUMB / 8];
+  Crumb = DiagWait (P, 0xFE, 500, &Ms);
   SbLog (
-    "=M3D M3 core 2: CPU_ON rc=%lx crumb %lx after %d ms (FE = all of phase 1; else the test that never returned), el %lx, EL1 exceptions %ld",
+    "=M3D M3 core 2: CPU_ON rc=%lx crumb %lx after %d ms (FE = all of phase 1), el %lx, EL1 exceptions %ld",
     Rc,
     Crumb,
     Ms,
     P[D_EL / 8] >> 2,
     P[D_EXC / 8]
     );
-  if ((Crumb >= 1) && (Crumb <= N_TESTS)) {
-    DiagLogTests (1, (Crumb == 0xFE) ? 55 : (UINTN)Crumb);
-    SbLog ("=M3D M3 core 2 STOPPED in test %ld (%a): it trapped to an EL2 that never returned", Crumb, mTestName[Crumb]);
-    return;
-  }
-
   if (Crumb != 0xFE) {
-    SbLog ("=M3D M3 core 2 never ran the stub (crumb %lx)", Crumb);
+    DiagStopped (Crumb);
     return;
   }
 
   DiagLogTests (1, 55);
 
   //
-  // Phase 2: HVC from the M3, only now that everything else is in the log.
+  // Phase 2: the virtual timer's PPI 27 on the M3 (priority, enable, a 100 us timer, IRQ unmasked for <= 10 ms).
   //
-  SbLog ("=M3D phase 2: HVC #0 (SMCCC_VERSION) on M3 core 2 now");
-  P[D_GO / 8] = 1;
-  DiagCleanToPoc ((UINTN)mDiagPage + D_GO, (UINTN)mDiagPage + D_GO + 8);
-  __asm__ __volatile__ ("sev" ::: "memory");
-  for (Ms = 0; Ms < 200; Ms++) {
-    DiagCleanToPoc ((UINTN)mDiagPage, (UINTN)mDiagPage + 0x780);
-    if (P[D_CRUMB / 8] == 0xFF) {
-      break;
-    }
-
-    MicroSecondDelay (1000);
+  DiagGo (P, 1);
+  Crumb = DiagWait (P, 0xFD, 200, &Ms);
+  SbLog ("=M3D phase 2 (timer IRQ on the M3): crumb %lx after %d ms; IRQ = 1001B means INTID 27 arrived at EL1", Crumb, Ms);
+  if (Crumb != 0xFD) {
+    DiagStopped (Crumb);
+    return;
   }
 
-  SbLog ("=M3D phase 2: crumb %lx after %d ms (FF = HVC returned; 38 = HVC went to an EL2 that never returned)", P[D_CRUMB / 8], Ms);
-  DiagLogTests (56, 56);
+  DiagLogTests (56, 60);
+
+  //
+  // Phase 3: CoreSight external debug of A55 core 0, read from the M3 (MMU off); A55 0 is in this poll loop now.
+  //
+  SbLog (
+    "=M3D phase 3: CoreSight of A55 0 at %lx; A55 0 polls in DiagWait %lx / MicroSecondDelay %lx (expect csPCSR near these)",
+    (UINT64)CS_A55_0,
+    (UINT64)(UINTN)DiagWait,
+    (UINT64)(UINTN)MicroSecondDelay
+    );
+  DiagGo (P, 2);
+  Crumb = DiagWait (P, 0xFF, 200, &Ms);
+  SbLog ("=M3D phase 3: crumb %lx after %d ms (FF = done; a number = that register access hung the M3)", Crumb, Ms);
+  DiagLogTests (61, (Crumb == 0xFF) ? 80 : ((Crumb >= 61 && Crumb <= 80) ? (UINTN)Crumb : 61));
 }
 
 //
@@ -848,10 +996,11 @@ DiagEbsWrap (
   M = DiagFind (SIGNATURE_32 ('A', 'P', 'I', 'C'), NULL);
   G = DiagFind (SIGNATURE_32 ('G', 'T', 'D', 'T'), NULL);
   DiagHexDump ("FACP", F, F ? DRd32 (F + 4) : 0);
-  DiagHexDump ("APIC", M, M ? DRd32 (M + 4) : 0);
-  DiagHexDump ("GTDT", G, G ? DRd32 (G + 4) : 0);
+  (VOID)M;
+  (VOID)G;
   DiagMatScan (DiagDsdt (F));
-  SbLog ("=M3D v1 done. Windows' kernel was NOT started. Resetting now (warm); if that fails the watchdog resets in ~2 min");
+  SbLog ("=M3D (repeat, pmsg wraps) acpi%a", mDiagSnap0);
+  SbLog ("=M3D v2 done. Windows' kernel was NOT started. Resetting now (warm); if that fails the watchdog resets in ~2 min");
   gST->RuntimeServices->ResetSystem (EfiResetWarm, EFI_SUCCESS, 0, NULL);
   SbLog ("=M3D ResetSystem returned; waiting for the watchdog");
   for ( ; ;) {
@@ -890,7 +1039,7 @@ M3DiagArm (
 {
   EFI_STATUS  Status;
 
-  SbLog ("=M3D v1 armed: log only; M3 core 2 instruction probe now, ACPI snapshots, reset after ExitBootServices");
+  SbLog ("=M3D v2 armed: log only; M3 core 2: instruction probe, timer IRQ, CoreSight of A55 0; reset after ExitBootServices");
   DiagAcpiSnap ("dispatch");
   DiagTableList ();
   DiagGicBases ();
