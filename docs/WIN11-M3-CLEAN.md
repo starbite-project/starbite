@@ -236,3 +236,28 @@ Fail-safe: no claim within 1 s, then the A55 stays the boot CPU and the image st
 
 What it answers: whether UEFI and winload work on an M3 boot CPU. That is cause #2 tested at the right layer: after
 this, every decision winload makes is made on the M3.
+
+## 10. m3early1 result (21:33, PASSED) and m3kern1: the first kernel attempt on the M3
+
+m3early1: `now on mpidr 80000101 (el 1)`, A55 GIC en0 6C007FFF (SGIs + PPIs 26/27/29/30), pri7 80808080, CPU
+interface ctlr 1 pmr F0 bpr 7, 479 SPIs moved to interface 5, CNTP on (UEFI's tick), and `a 10 ms timer event FIRED
+after 3 ms`. The boot manager and winload then ran on the M3; `ExitBootServices ... running on mpidr 80000101`,
+=EBSOK, `returned Success on mpidr 80000101`, done. **UEFI, the Windows Boot Manager and winload work on an M3 boot
+CPU.** (The watch line showed prog 04 because the reset came within its 0.5 s period.)
+
+**m3kern1** (`starbite-uefi-m3kern1.bin`, sha256 `31c0ebd387acb826c4f781eb04baf684338d5140f87b5c9bd938829b1408670b`,
+`SOLO=m3kern1 M3EARLY=2`): m3early1, plus:
+- at ExitBootServices, on the M3, after woa's rewrite: MADT with UID 5 (M3 1, MPIDR 0x101, interface 5) as the first
+  and only enabled GICC, no mailbox; every DSDT `_MAT` copy synced (only UID 5 enabled); checksums fixed; FADT left
+  as woa makes it (ARM_BOOT_ARCH 0: parking protocol, no PSCI). Then the M3 **returns into winload** and Windows'
+  kernel starts on the M3 (1 CPU). No Windows file or memory is changed by us (woa's existing CNTFRQ/PMU patches
+  in its EBS hook are unchanged, as on every A55 boot);
+- **the volume guard (outside Windows):** A55 0 (not in Windows' MADT, interrupts masked) jumps into reserved memory
+  with its own page tables and polls the pmsg ring header. The first line Windows' re-signed UFS driver logs as it
+  loads (=UFSENTRY/=UFSINIT/=UFSNORMAL, always before its first =UFSWRIT) changes the header. 2 ms later A55 0
+  cleans the ring and writes the FADT reset register (PMU SWRESET), the same reset Windows itself uses. With no
+  change for 90 s (kernel hung before storage), it resets the same way.
+
+Residual risk: if the UFS driver ever issued a disk write before its first pmsg line, up to ~2 ms of I/O could happen
+before the reset. Its logs show =UFSNORMAL before every =UFSWRIT, and file-system/registry writes come much later
+(volume mount, then hive flushes after smss), so the reset lands long before the registry is touched.

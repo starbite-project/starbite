@@ -66,7 +66,7 @@ if [ "$M3BOOT" = 3 ]; then
     # big cores (docs/WIN11-24H2-A55.md): the B3 hand-off to M3 1 plus Cores8's parked M3s, nothing else
     [ "$CORES8" -ge 1 ] && [ $((M3 + M3PARK + M3RUN)) = 0 ] || { echo "M3BOOT=3 needs CORES8=1|2 and no other M3 experiment" >&2; exit 1; }
 else
-    [ $((M3 + M3PARK + M3RUN + (M3BOOT > 0) + (CORES8 > 0) + M3DIAG + M3EARLY)) -le 1 ] || { echo "one M3 experiment per image (M3, M3PARK, M3RUN, M3BOOT, CORES8)" >&2; exit 1; }
+    [ $((M3 + M3PARK + M3RUN + (M3BOOT > 0) + (CORES8 > 0) + M3DIAG + (M3EARLY > 0))) -le 1 ] || { echo "one M3 experiment per image (M3, M3PARK, M3RUN, M3BOOT, CORES8)" >&2; exit 1; }
 fi
 [ $((PPTT_STATIC + PPTT_OEM)) -le 1 ] || { echo "PPTT_STATIC and PPTT_OEM exclude each other" >&2; exit 1; }
 [ "$PPTT_STATIC" = 0 ] || [ -n "$SUFFIX" ] || { echo "PPTT_STATIC=1 needs a SUFFIX so the plain images are kept" >&2; exit 1; }
@@ -160,8 +160,8 @@ flags_ok() {   # flags_ok FFS
     [ "$has" = "$((M3BOOT > 0))" ] || { echo "$1: M3 boot present=$has, wanted $M3BOOT" >&2; exit 1; }
     if [ "$M3BOOT" = 2 ]; then grep -aq "solo: M3 1 only" "$1" || { echo "$1: not the solo build" >&2; exit 1; }; fi
     if [ "$M3BOOT" = 3 ]; then grep -aq "big: M3 1 + parked M3s" "$1" && grep -aq "=C8 v1 big" "$1" || { echo "$1: not the big-core build" >&2; exit 1; }; fi
-    if grep -aq "=M3E v1 armed" "$1"; then has=1; else has=0; fi
-    [ "$has" = "$M3EARLY" ] || { echo "$1: M3 early present=$has, wanted $M3EARLY" >&2; exit 1; }
+    if grep -aq "=M3E v%d armed" "$1"; then has=1; else has=0; fi
+    [ "$has" = "$((M3EARLY > 0))" ] || { echo "$1: M3 early present=$has, wanted $M3EARLY" >&2; exit 1; }
     if grep -aq "=M3D v3 armed" "$1"; then has=1; else has=0; fi
     [ "$has" = "$M3DIAG" ] || { echo "$1: M3 diag present=$has, wanted $M3DIAG" >&2; exit 1; }
     if grep -aq "=C8 v1" "$1"; then has=1; else has=0; fi
