@@ -126,8 +126,17 @@ static void row_over(uint32_t *d, const uint32_t *s, int n, unsigned al)
 {
     int i = 0;
     if (al >= 255) {
+        /* cached layers are mostly empty or opaque: an 8 px block with no coverage is skipped, an opaque one copied
+         * (both exactly what the blend gives) */
         for (; i + 8 <= n; i += 8) {
-            uint8x8x4_t S = vld4_u8((const uint8_t *)(s + i)), D = vld4_u8((uint8_t *)(d + i));
+            uint8x8x4_t S = vld4_u8((const uint8_t *)(s + i));
+            if (!vmaxv_u8(S.val[3])) continue;
+            if (vminv_u8(S.val[3]) == 255) {
+                vst1q_u32(d + i, vld1q_u32(s + i));
+                vst1q_u32(d + i + 4, vld1q_u32(s + i + 4));
+                continue;
+            }
+            uint8x8x4_t D = vld4_u8((uint8_t *)(d + i));
             uint8x8_t ia = vmvn_u8(S.val[3]);
             for (int c = 0; c < 4; c++) D.val[c] = vqadd_u8(S.val[c], div255(vmull_u8(D.val[c], ia)));
             vst4_u8((uint8_t *)(d + i), D);
@@ -135,7 +144,9 @@ static void row_over(uint32_t *d, const uint32_t *s, int n, unsigned al)
     } else {
         uint8x8_t va = vdup_n_u8((uint8_t)al);
         for (; i + 8 <= n; i += 8) {
-            uint8x8x4_t S = vld4_u8((const uint8_t *)(s + i)), D = vld4_u8((uint8_t *)(d + i));
+            uint8x8x4_t S = vld4_u8((const uint8_t *)(s + i));
+            if (!vmaxv_u8(S.val[3])) continue;
+            uint8x8x4_t D = vld4_u8((uint8_t *)(d + i));
             for (int c = 0; c < 4; c++) S.val[c] = div255(vmull_u8(S.val[c], va));
             uint8x8_t ia = vmvn_u8(S.val[3]);
             for (int c = 0; c < 4; c++) D.val[c] = vqadd_u8(S.val[c], div255(vmull_u8(D.val[c], ia)));
