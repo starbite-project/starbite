@@ -238,6 +238,17 @@ void selftest_timer(unsigned id)
             return;
         }
 #endif
+#ifdef SBOS_SELFTEST_UIBENCH
+        {
+            /* 1.2-alpha26 P0: what the CPU can composite for the new UI (uibench.c), then recovery (pmsg) */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: uibench: the watchdog at 30 s, fed by the loop and the runs: seconds " :
+                        "selftest: uibench: the watchdog could not be set (the loader's stays): ", w);
+            phase = 60;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
 #ifdef SBOS_SELFTEST_VIB
         {
             /* 1.2-alpha7: the vibration motor, unattended: its reads, the PWM's rate, three buzzes, a stop in the
@@ -479,6 +490,46 @@ void selftest_timer(unsigned id)
         kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
         return;
     case 51:
+        active = 0;
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_UIBENCH
+    case 60:
+        if (!uibench_setup()) {
+            phase = 66;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
+            return;
+        }
+        phase = 61;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 500, 0);
+        return;
+    case 61:
+        uibench_set("one A55 (the boot core) at the screen-on clock", 0, 0, 0);
+        phase = 62;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 500, 0);
+        return;
+    case 62: {
+        static const unsigned a55[3] = { 1, 2, 3 };
+        uibench_set("four A55 at the screen-on clock", 3, a55, 0);
+        phase = 63;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 500, 0);
+        return;
+    }
+    case 63: {
+        static const unsigned a55[3] = { 1, 2, 3 };
+        if (!hw_dvfs(DVFS_A55, 1794000U))
+            sb_log("uibench: the A55 did not take 1794 MHz (ACPM): this set is at the screen-on clock");
+        sb_logx("uibench: A55 now, kHz: ", hw_a55_khz());
+        uibench_set("four A55 at the top step", 3, a55, 0);
+        (void)hw_dvfs(DVFS_A55, 1053000U);
+        sb_logx("uibench: A55 back, kHz: ", hw_a55_khz());
+        phase = 66;                         /* the M3s: not here (their FlexPMU path is the heater's; a later step) */
+        kt_set(KT_SELFTEST, 0, sb_ms(), 500, 0);
+        return;
+    }
+    case 66:
+        sb_log("selftest: uibench: done; a restart into recovery (pmsg)");
         active = 0;
         power_restart_recovery();
         return;
