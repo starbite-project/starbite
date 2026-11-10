@@ -88,7 +88,7 @@ int heat_max_cores(int level)
 
 int heat_surv_estop(const struct heat_ctl *c)
 {
-    if (c->surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10)
+    if (c->all_out || c->surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10)   /* 1.2-alpha23: All out: no limit either */
         return SBOS_HEAT_SOC_NOLIMIT_C10;  /* 1.2-alpha4: no stop of ours by temperature */
     int lim = c->surv_stop_c10 < SBOS_HEAT_SOC_HOLD_MAX_C10 ? c->surv_stop_c10 : SBOS_HEAT_SOC_HOLD_MAX_C10;
     int e = lim + 50;                       /* a stop 5 C past the held limit (the hold itself never above 145) */
@@ -98,9 +98,9 @@ int heat_surv_estop(const struct heat_ctl *c)
 int heat_surv_target(const struct heat_ctl *c)
 {
     if (c->level != HEAT_SURVIVAL_X)
-        return c->lim->surv_target_c10;
-    if (c->surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10)
-        return SBOS_HEAT_SOC_NOLIMIT_C10;  /* 1.2-alpha4: never held by temperature */
+        return c->lim->surv_target_c10;     /* the trip on: below the chip's own power cut, All out or not */
+    if (c->all_out || c->surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10)
+        return SBOS_HEAT_SOC_NOLIMIT_C10;  /* 1.2-alpha4: never held by temperature (1.2-alpha23: All out) */
     return c->surv_stop_c10 < SBOS_HEAT_SOC_HOLD_MAX_C10 ? c->surv_stop_c10 : SBOS_HEAT_SOC_HOLD_MAX_C10;  /* <= 148 C */
 }
 
@@ -285,7 +285,8 @@ int heat_ctl_request(struct heat_ctl *c, int level, int minutes, const struct he
         no = level == HEAT_LOW ? "Battery below 20 %" : "Battery below 30 % (try Low)";
     else if (surv && in->pct <= L->surv_floor_pct)
         no = "The battery is at 2 %: nothing left to turn into heat";
-    else if (surv && ((c->surv_bat_c10 != 550 && c->surv_bat_c10 != 580 && c->surv_bat_c10 != 600) ||
+    else if (surv && ((c->surv_bat_c10 != 550 && c->surv_bat_c10 != 580 && c->surv_bat_c10 != 600 &&
+                       c->surv_bat_c10 != 650) ||   /* 1.2-alpha23: 65 C (the user) */
                       c->surv_bat_c10 > SBOS_HEAT_BAT_HARD_C10))
         no = "Survival's battery limit is not 55, 58 or 60 \xc2\xb0" "C";
     else if (surv && in->bat_c10 >= c->surv_bat_c10 - 30)
@@ -536,13 +537,14 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
             int leak = in->soc_ok && in->soc_c10 >= HEAT_LEAK_C10;
             int gma = leak && GOV_MA(c) > HEAT_LEAK_MA ? HEAT_LEAK_MA : GOV_MA(c);
             int gmv = leak ? HEAT_LEAK_MV : HEAT_GOV_MV;
-            int gov = c->no_high_stop && in->gauge_ok && (iabs(in->ma) > gma || (in->mv > 0 && in->mv < gmv));
+            /* 1.2-alpha23 (the user): All out has no governor: a brownout may switch the phone off */
+            int gov = !c->all_out && c->no_high_stop && in->gauge_ok && (iabs(in->ma) > gma || (in->mv > 0 && in->mv < gmv));
             int hot = (in->soc_ok && in->soc_c10 >= lim) || bhot || ahi || gov;
             int very = (in->soc_ok && in->soc_c10 >= lim + 20) || (in->bat_ok && in->bat_c10 >= c->surv_bat_c10 - 15) ||
-                       (c->no_high_stop && in->gauge_ok && iabs(in->ma) > gma + 300) || (gov && leak);
+                       (!c->all_out && c->no_high_stop && in->gauge_ok && iabs(in->ma) > gma + 300) || (gov && leak);
             int cool = in->soc_ok && in->soc_c10 < lim - 10 && in->bat_ok && in->bat_c10 < c->surv_bat_c10 - 40 &&
                        (c->no_high_stop || !(in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 600)) &&
-                       (!c->no_high_stop || (in->gauge_ok && iabs(in->ma) < gma - 300 && in->mv >= gmv + 100));
+                       (!c->no_high_stop || c->all_out || (in->gauge_ok && iabs(in->ma) < gma - 300 && in->mv >= gmv + 100));
             if (surv_calibrate(c, in, now, hot)) {
                 c->state = HEAT_ST_RUNNING;
                 why(c, "Survival: measuring the big cores' combinations");
@@ -581,9 +583,15 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
             }
             c->m3_khz = c->cores > 3 ? flat_m3(c) : 0;
             c->state = c->cores || c->gpu_want ? HEAT_ST_RUNNING : HEAT_ST_HOLDING;
-            why(c, bhot ? "Survival: holding the battery below its limit" : hot ? "Survival, trip OFF: holding at your limit" :
-                   c->cores == c->max_cores && c->gpu_want ? "Survival, trip OFF: everything flat out" :
-                   "Survival, trip OFF: adding load");
+            if (c->all_out)                 /* 1.2-alpha23: only the battery and the 4.5 A switch's ceiling shed */
+                why(c, bhot ? "Survival: holding the battery below its limit" :
+                       hot ? "Survival, All out: at 4.2 A (4.5 A stop on)" :
+                       c->cores == c->max_cores && c->gpu_want ? "Survival, All out: everything flat out" :
+                       "Survival, All out: adding load");
+            else
+                why(c, bhot ? "Survival: holding the battery below its limit" : hot ? "Survival, trip OFF: holding at your limit" :
+                       c->cores == c->max_cores && c->gpu_want ? "Survival, trip OFF: everything flat out" :
+                       "Survival, trip OFF: adding load");
             return;
         }
         int target = heat_surv_target(c);
@@ -594,13 +602,13 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
         int ahi = !c->no_high_stop && in->gauge_ok && iabs(in->ma) > L->surv_stop_ma - 300;  /* 1.2-alpha16 */
         int leak = in->soc_ok && in->soc_c10 >= HEAT_LEAK_C10;                 /* 1.2-alpha19 */
         int gma = leak && GOV_MA(c) > HEAT_LEAK_MA ? HEAT_LEAK_MA : GOV_MA(c);
-        if (c->no_high_stop && in->gauge_ok && iabs(in->ma) > gma)
-            ahi = 1;                            /* 1.2-alpha18: the governor under the MAX77705's 5.6 A */
-        int low = in->gauge_ok && in->mv > 0 && in->mv < L->surv_shed_mv;
+        if (!c->all_out && c->no_high_stop && in->gauge_ok && iabs(in->ma) > gma)
+            ahi = 1;                            /* 1.2-alpha18: the governor under the MAX77705's 5.6 A (not All out) */
+        int low = !c->all_out && in->gauge_ok && in->mv > 0 && in->mv < L->surv_shed_mv;
         int cool = in->soc_ok && in->soc_c10 < target - L->surv_band_c10 && in->gauge_ok && in->bat_ok &&
                    in->bat_c10 < c->surv_bat_c10 - 40 &&
-                   (c->no_current_stop || iabs(in->ma) < L->hard_ma - 300) && in->mv >= L->surv_shed_mv + 50 &&
-                   (c->no_high_stop ? iabs(in->ma) < gma - 300 : iabs(in->ma) < L->surv_stop_ma - 600);
+                   (c->no_current_stop || iabs(in->ma) < L->hard_ma - 300) && (c->all_out || in->mv >= L->surv_shed_mv + 50) &&
+                   (c->no_high_stop ? c->all_out || iabs(in->ma) < gma - 300 : iabs(in->ma) < L->surv_stop_ma - 600);
         if (surv_calibrate(c, in, now, hot || amps || low)) {
             c->state = HEAT_ST_RUNNING;
             why(c, "Survival: measuring the big cores' combinations");
@@ -648,7 +656,10 @@ void heat_ctl_step(struct heat_ctl *c, const struct heat_in *in)
                hot ? (c->level == HEAT_SURVIVAL_X ? "Survival (trip off): holding below your stop" :
                                                     "Survival: holding just below the chip's power cut") :
                amps ? "Survival: at the battery's current limit" : low ? "Survival: the battery's voltage is low" :
-               c->cores == c->max_cores && c->gpu_want ? "Survival: everything flat out" : "Survival: adding load");
+               ahi && c->all_out ? "Survival, All out: at 4.2 A (4.5 A stop on)" :
+               c->cores == c->max_cores && c->gpu_want ? (c->all_out ? "Survival, All out: everything flat out" :
+                                                                       "Survival: everything flat out") :
+               "Survival: adding load");
         return;
     }
     if (flat) {

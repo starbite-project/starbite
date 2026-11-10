@@ -434,7 +434,7 @@ static void gpu_confirm_done(int ok)
 static int surv_bat_pending;
 static void surv_bat_done(int ok)
 {
-    if (ok && (surv_bat_pending == 580 || surv_bat_pending == 600)) {
+    if (ok && (surv_bat_pending == 580 || surv_bat_pending == 600 || surv_bat_pending == 650)) {
         heat_surv_bat_c10 = surv_bat_pending;
         settings_changed();                 /* 1.2-alpha16: remembered */
         sb_logx("settings: Survival's battery limit raised (confirmed), 0.1 C: ", (uint64_t)surv_bat_pending);
@@ -543,6 +543,12 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         sb_log(heat_screen_white ? "settings: Survival's screen: white at the top level (more heat from the panel)" :
                                    "settings: Survival's screen: dark (the budget to the chips)");
         return 0;
+    case SET_HEAT_ALL_OUT:                  /* 1.2-alpha23 (the user): on by default; Survival's start asks anyway */
+        heat_all_out = arg[1] != 0;
+        settings_changed();
+        sb_log(heat_all_out ? "settings: Survival All out: on (no hold at a limit, no current or voltage throttle)" :
+                              "settings: Survival All out: off (Survival holds at its limit and governs as before)");
+        return 0;
     case SET_HEAT_HIGH_STOP:
         if (arg[1]) {
             heat_no_high_stop = 0;
@@ -615,8 +621,8 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         }
         return 0;
     case SET_HEAT_SURV_BAT_C10:
-        if ((arg[1] != 550 && arg[1] != 580 && arg[1] != 600) || arg[1] > SBOS_HEAT_BAT_HARD_C10)
-            return SBOS_EINVAL;             /* 60 C: a Li-ion cell's usual discharge rating; never higher */
+        if ((arg[1] != 550 && arg[1] != 580 && arg[1] != 600 && arg[1] != 650) || arg[1] > SBOS_HEAT_BAT_HARD_C10)
+            return SBOS_EINVAL;             /* 1.2-alpha23 (the user): 65 C at most (was 60, a cell's usual rating) */
         if (heater_running_ui())
             return SBOS_EAGAIN;
         if (arg[1] == 550) {
@@ -626,9 +632,11 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
             return 0;
         }
         surv_bat_pending = (int)arg[1];
-        kui_confirm(arg[1] == 600 ? "Battery limit 60 \xc2\xb0" "C?" : "Battery limit 58 \xc2\xb0" "C?",
+        kui_confirm(arg[1] == 650 ? "Battery limit 65 \xc2\xb0" "C?" : arg[1] == 600 ? "Battery limit 60 \xc2\xb0" "C?" :
+                                                                       "Battery limit 58 \xc2\xb0" "C?",
                     "Survival heat stops when the battery reaches this; it holds the load back from 3 \xc2\xb0" "C below.",
-                    "Above 55 \xc2\xb0" "C a lithium cell ages faster. 60 \xc2\xb0" "C is the top of its usual discharge rating: never higher.",
+                    arg[1] == 650 ? "65 \xc2\xb0" "C is past a lithium cell's usual 60 \xc2\xb0" "C rating: it ages and swells faster. Never higher." :
+                                    "Above 55 \xc2\xb0" "C a lithium cell ages faster. 65 \xc2\xb0" "C is the most this phone allows.",
                     "Only for Survival heat; the other levels keep their own limits.", "Hold to raise it", surv_bat_done);
         return 0;
     case SET_HEAT_SURV_STOP_C10:
@@ -969,6 +977,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_HEAT_TARGET_C10: return heat_target_c10;
         case SET_HEAT_CURRENT_STOP: return !heat_no_current_stop;
         case SET_HEAT_HIGH_STOP: return !heat_no_high_stop;
+        case SET_HEAT_ALL_OUT: return heat_all_out;
         case SET_HEAT_SCREEN_WHITE: return heat_screen_white;
         case SET_WIFI_AUTOJOIN: return wifi_autojoin;
         case SET_HEAT_SOC_STOP_C10: return heat_soc_stop_c10;

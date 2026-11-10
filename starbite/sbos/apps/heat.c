@@ -292,7 +292,10 @@ static void show(void)
         ui_button(17, "Call / SOS reserve", f.b, 0);
         /* 1.1: the last resort (three confirmations; four with the chip's trip off) */
         fmt_init(&f);
-        if (surv_tripoff) {
+        if (h.all_out) {                    /* 1.2-alpha23 (the user): the default */
+            fmt_s(&f, surv_tripoff ? "ALL OUT, trip OFF: no hold, no throttle. Asks 4 times." :
+                                     "ALL OUT: no throttle, below the chip's cut. Asks 3 times.");
+        } else if (surv_tripoff) {
             if (h.surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10) {
                 fmt_s(&f, "Trip OFF, NO SoC LIMIT: flat out to the battery limit. Asks 4 times.");
             } else {
@@ -307,7 +310,7 @@ static void show(void)
         fmt_init(&f);
         fmt_s(&f, "Battery limit ");
         fmt_d(&f, h.surv_bat_c10 / 10);
-        fmt_s(&f, " \xc2\xb0" "C (tap: 55, 58, 60)");
+        fmt_s(&f, " \xc2\xb0" "C (tap: 55 to 65)");
         ui_button(26, f.b, 0, 0);
         /* 1.2-alpha4: the 3.5 A battery-current limit, as in Manual (one switch for both, until a restart) */
         if (!h.no_current_stop) {
@@ -321,8 +324,18 @@ static void show(void)
             ui_hold(31, "Hold: turn the 4.5 A stop off (asks once)", 1500, 0);
         else
             ui_button(32, "4.5 A stop: OFF", "6 A for 1 s still stops. Tap to turn it back on", 0);
+        /* 1.2-alpha23 (the user): All out, on by default: never held at a limit, never throttled for the current or
+         * the voltage (it may brown out); the battery's hold and stop, 2 % and the 4.5 A switch stay */
+        ui_toggle(33, "All out", h.all_out);
+        ui_textline(h.all_out ? (surv_tripoff ? "On: flat out to 2 %, no SoC limit, no current or voltage throttle; it may switch "
+                                                "itself off. The battery limit holds."
+                                              : "On: no current or voltage throttle (it may switch itself off); with the trip on it "
+                                                "keeps below the chip's power cut.")
+                              : "Off: Survival holds at its limit and throttles the current and voltage, as before.", GREY);
         ui_toggle(24, "Hardware trip OFF", surv_tripoff);
-        if (surv_tripoff) {
+        if (surv_tripoff && h.all_out) {
+            ui_textline("SoC limit: not used while All out is on.", GREY);
+        } else if (surv_tripoff) {
             fmt_init(&f);
             if (h.surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10) {
                 fmt_s(&f, "Limit: NONE (tap: back to 125)");
@@ -335,14 +348,19 @@ static void show(void)
             ui_button(25, f.b, 0, 0);
             if (h.surv_stop_c10 != SBOS_HEAT_SOC_NOLIMIT_C10) {
                 ui_hold(27, "Hold: remove the SoC limit (asks once)", 1500, 0);
-                ui_textline("Then nothing of ours holds the chip by temperature: only the battery limit and 2 % stop it. "
-                            "Readings past 199 \xc2\xb0" "C count as lost (a stop).", GREY);
+                ui_textline("Then nothing of ours holds the chip by temperature: the battery limit and 2 % stop it. "
+                            "A reading past 199 \xc2\xb0" "C stops it.", GREY);
             }
         }
     }
     if (on && h.level >= HEAT_SURVIVAL) {
         fmt_init(&f);
-        if (h.level == HEAT_SURVIVAL_X) {
+        if (h.all_out) {                    /* 1.2-alpha23 */
+            fmt_s(&f, h.level == HEAT_SURVIVAL_X ? (h.trip_off ? "SURVIVAL, ALL OUT, THE CHIP'S POWER CUT OFF: no SoC limit, "
+                                                                 "no throttle; battery limit and 2 % only." :
+                                                                 "SURVIVAL, ALL OUT (trip off asked): no SoC limit, no throttle.") :
+                                                   "SURVIVAL, ALL OUT: no throttle; held below 122 \xc2\xb0" "C (the chip cuts near 128).");
+        } else if (h.level == HEAT_SURVIVAL_X) {
             fmt_s(&f, h.trip_off ? "SURVIVAL, THE CHIP'S POWER CUT OFF: " : "SURVIVAL (trip off asked): ");
             if (h.surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10) {
                 fmt_s(&f, "NO SoC LIMIT, battery limit only.");
@@ -363,7 +381,8 @@ static void show(void)
     }
     fmt_init(&f);
     temp(&f, h.bat_c10);
-    ui_big(on ? (h.level >= HEAT_SURVIVAL ? (h.surv_bat_c10 >= 600 ? "BATTERY  (STOPS AT 60 \xc2\xb0" "C)" :
+    ui_big(on ? (h.level >= HEAT_SURVIVAL ? (h.surv_bat_c10 >= 650 ? "BATTERY  (STOPS AT 65 \xc2\xb0" "C)" :
+                                             h.surv_bat_c10 >= 600 ? "BATTERY  (STOPS AT 60 \xc2\xb0" "C)" :
                                              h.surv_bat_c10 >= 580 ? "BATTERY  (STOPS AT 58 \xc2\xb0" "C)" :
                                                                      "BATTERY  (STOPS AT 55 \xc2\xb0" "C)") :
                  flat ? "BATTERY  (STOPS AT 55 \xc2\xb0" "C)" : "BATTERY  (STOPS AT 42 \xc2\xb0" "C)") : "BATTERY",
@@ -518,6 +537,8 @@ void app_event(const struct sbos_event *ev)
             surv_tripoff = ev->value != 0;  /* the four warnings come at the start */
             save_state();                   /* 1.2-alpha16: remembered */
         }
+        if (ev->id == 33)                   /* 1.2-alpha23: remembered by the kernel */
+            setting_set(SET_HEAT_ALL_OUT, ev->value != 0);
         show();
         break;
     case EV_APP_HOLD:
@@ -548,7 +569,8 @@ void app_event(const struct sbos_event *ev)
         else if (ev->id == 23 && !running)
             heat_request(surv_tripoff ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0);
         else if (ev->id == 26 && !running)
-            setting_set(SET_HEAT_SURV_BAT_C10, h.surv_bat_c10 >= 600 ? 550 : h.surv_bat_c10 >= 580 ? 600 : 580);
+            setting_set(SET_HEAT_SURV_BAT_C10, h.surv_bat_c10 >= 650 ? 550 : h.surv_bat_c10 >= 600 ? 650 :
+                                               h.surv_bat_c10 >= 580 ? 600 : 580);     /* 1.2-alpha23: 65 */
         else if (ev->id == 25 && !running) {
             setting_set(SET_HEAT_SURV_STOP_C10, h.surv_stop_c10 >= SBOS_HEAT_SOC_HARD_C10 ? 1250 : (h.surv_stop_c10 / 50 + 1) * 50);
         } else if (ev->id == 29 && !running)

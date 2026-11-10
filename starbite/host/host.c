@@ -1809,6 +1809,16 @@ static void host_thermal(void)
     host_temp += (target - host_temp) * (k > 1 ? 1 : k);
     int t = (int)host_temp;
     int top[8] = { t - 4, t + 3, t + 2, t + 4, t + 1, t - 2, t, t - 3 }, sub[3] = { t - 5, t - 3, t - 7 };
+    /* 1.2-alpha23: SBOS_HOST_TMU_SPIKE=N: every Nth update (200 ms each) TOP probe 3 reads 40 C high for one update
+     * (the one bad conversion the heater's median of 3 must ignore) */
+    static int spike_every = -1;
+    static unsigned nupd;
+    if (spike_every < 0) {
+        const char *e = getenv("SBOS_HOST_TMU_SPIKE");
+        spike_every = e ? atoi(e) : 0;
+    }
+    if (spike_every > 0 && ++nupd % (unsigned)spike_every == 0)
+        top[3] += 40;
     w32(0x10070040, (uint32_t)(top[0] + 25) | (uint32_t)(top[1] + 25) << 9);
     w32(0x10070044, (uint32_t)(top[2] + 25) | (uint32_t)(top[3] + 25) << 9 | (uint32_t)(top[4] + 25) << 18);
     w32(0x10070048, (uint32_t)(top[5] + 25) | (uint32_t)(top[6] + 25) << 9 | (uint32_t)(top[7] + 25) << 18);

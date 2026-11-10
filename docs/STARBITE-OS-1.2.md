@@ -1,4 +1,40 @@
-# Starbite OS 1.2-alpha22: Heat's "Last session" (the heat log on the phone), tappable notifications (2026-11-10)
+# Starbite OS 1.2-alpha23: Survival "All out", on by default; a 65 C battery limit (2026-11-10)
+
+alpha22 passed its self test on the phone (15 apps, Wi-Fi joined) and is the user's image. The user (2026-11-10, ~07:05):
+"i dont want survival heat to hold at the limit at all, add the toggle so it can go all out even though it may brownout
+like it did once. its fine, but that should be the default". alpha23:
+- **All out** (`SET_HEAT_ALL_OUT` 28, `heat_ctl.all_out`; the state slot's pad[3] bit 31 = off, so older records read
+  as on): Heat > Survival's switch, on by default. On, Survival has no temperature hold at the user's limit (trip
+  off: `heat_surv_target` / `heat_surv_estop` read as "No limit") and no current / voltage governor (alpha18's 5.0 A /
+  3.35 V, alpha19's leakage steps from 165 C, trip on: the 3.4 V shed). Kept: the battery's hold (from its limit minus
+  3 C) and its stop (55 / 58 / 60 C), 2 %, a reading of 200 C or more (lost: a stop after 3 s), the 4.5 A switch as it
+  was (on: its 4.2 A ceiling and the 4.5 A stop; off: B2SOVRC off for the run, back at the stop and at the next boot,
+  the 6 / 6.5 A for 1 s backstop), the 3.5 A switch, no LED. With the trip ON, All out still holds below 122 C: past
+  the chip's own cut (~128 C) the phone switches off for certain. Off, Survival holds and governs as alpha22.
+  Shown on the Heat page (the Survival button's line, the switch's line, the running line), in the confirmations, on
+  the Survival screen's strip ("ALL OUT") and in the heat log (header pad 0x200, sample flag 128).
+- **A 65 C battery limit** (the user, ~07:15: "the battery limit should be raised too tbh a little bit like 65"):
+  Heat > Battery limit taps 55 -> 58 -> 60 -> 65 C; above 55 the kernel asks first (65 has its own warning);
+  `SBOS_HEAT_BAT_HARD_C10` 650, nothing above it is accepted anywhere (the setter, the controller's start check, the
+  slot's restore). The guard is unchanged relative to the limit: from the limit - 3 C (62 C) one step a second (the
+  clocks, then the loads), from the limit - 1.5 C (63.5 C) every 250 ms, back up only below the limit - 4 C (61 C),
+  the stop at the limit (65 C), All out or not; a start is refused within 3 C of it; the battery thermistor (the
+  AP's ADC channel 4, as always) lost for 3 s stops it. The pack's PCM is never touched.
+- **Isolated SoC jumps** (heater.c `soc_filter`): a reading 15 C or more away from the median of the last 3 (250 ms
+  apart) is replaced by that median, once; anything closer passes as it is with no delay, so real heat and its peaks
+  are never hidden (the 182 C run's saw was 6-8 C a second). libsb's per-probe median reads the same conversion three
+  times, so one bad conversion would otherwise pass. A replaced high reading is logged with its probe and code,
+  counted at the stop and flagged in the heat log (flag 64; heatlog.py shows S and A).
+- **The 182 C the user saw was a real reading, not a glitch.** The alpha22 run (sbos-state pulled 07:15, level 8:
+  trip off, No limit, battery limit 60 C, 4.5 A stop off): the SoC climbed 151 C (25 s) -> 165 (42 s) -> 170 (88 s)
+  -> 176-180 (121-148 s) at 4.7-5.8 A, the governor stepping the M3 2314 <-> 2106 <-> 2002 MHz every second or two
+  (a 5-8 C saw); the heat record's peak 182.0 C is 2 C over the highest 1 s sample (180 at 134 s), which a 250 ms
+  reading between samples easily is. "Holding at your limit" on the screen was the current / voltage governor (it
+  counts as "hot"), not a temperature limit. At 149 s the governor stepped down (3.356 V, under the 3.36 V floor
+  above 165 C); from 157 s the battery's hold (57 C of 60) shed load (SoC 135 C by 164 s); the session then ended without a stop (`running` still 1) at 2.8 A / 3.67 V, the AP thermistor at 90 C: not
+  the alpha18 brownout's signature; the next boot's `boot: MAX77705 ... / S2MPS18 PWRONSRC OFFSRC` lines tell why.
+
+## Starbite OS 1.2-alpha22: Heat's "Last session" (the heat log on the phone), tappable notifications (2026-11-10)
 
 alpha21 passed its self test on the phone (36 screens, 13 apps, Wi-Fi joined) and is the user's image; the modemsess
 run passed (camped emergency-only after 30 s, bars 4). alpha22 adds:

@@ -55,6 +55,8 @@ def main():
         names = {0: "off", 6: "4.5 A", 8: "4.8 A", 9: "5.0 A", 0xB: "5.4 A", 0xC: "5.6 A"}
         print("heatlog: MAX77705 CHG_CNFG_05 %#04x: B2SOVRC (battery to system over-current) %s" %
               (cnfg05 & 0xFF, names.get(cnfg05 & 0xF, "code %d" % (cnfg05 & 0xF))))
+    if cnfg05 & 0x200:
+        print("heatlog: (alpha23+) Survival All out: no temperature hold, no current / voltage governor")
     samples = []
     for i in range(min(n, HLOG_N)):
         samples.append(struct.unpack_from("<HhhhHHBBBB", blob, 24 + 16 * i))
@@ -62,17 +64,19 @@ def main():
         k = HLOG_FAST + (n - HLOG_FAST) % (HLOG_N - HLOG_FAST)
         samples = samples[:HLOG_FAST] + samples[k:] + samples[HLOG_FAST:k]
     csv = "--csv" in sys.argv
-    print("t_s,soc_c,bat_c,ma,mv,w,m3_mhz,cores,gpu,trip_off,white,hold,pause,ocp_d3,thr" if csv else
+    # flags: G GPU, T trip off, W white screen, H holding, P paused, S (alpha23) a SoC reading ignored that second
+    # (the median of 3 filter), A (alpha23) All out
+    print("t_s,soc_c,bat_c,ma,mv,w,m3_mhz,cores,gpu,trip_off,white,hold,pause,ocp_d3,thr,spike,all_out" if csv else
           "   t   SoC C  bat C     mA     mV     W   M3  cores flags        OCP_WARN1 thr")
     for t, soc, bat, ma, mv, m3, cores, fl, d3, thr in samples:
         w = -ma * mv / 1e6
         if csv:
-            print("%d,%.1f,%.1f,%d,%d,%.2f,%d,%d,%d,%d,%d,%d,%d,%#04x,%s" % (
+            print("%d,%.1f,%.1f,%d,%d,%.2f,%d,%d,%d,%d,%d,%d,%d,%#04x,%s,%d,%d" % (
                 t, soc / 10, bat / 10, ma, mv, w, m3, cores, fl & 1, fl >> 1 & 1, fl >> 2 & 1, fl >> 3 & 1, fl >> 4 & 1,
-                d3, thr if fl & 32 else ""))
+                d3, thr if fl & 32 else "", fl >> 6 & 1, fl >> 7 & 1))
         else:
-            f = "".join(c if fl & b else "-" for c, b in zip("GTWHP", (1, 2, 4, 8, 16)))
-            print("%5d %6.1f %6.1f %6d %6d %5.2f %4d %5d  %s       %#04x    %s" % (
+            f = "".join(c if fl & b else "-" for c, b in zip("GTWHPSA", (1, 2, 4, 8, 16, 64, 128)))
+            print("%5d %6.1f %6.1f %6d %6d %5.2f %4d %5d  %s     %#04x    %s" % (
                 t, soc / 10, bat / 10, ma, mv, w, m3, cores, f, d3, thr if fl & 32 else "-"))
     return 0
 

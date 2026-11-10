@@ -9,7 +9,7 @@ out="$root/starbite/out/sboshost"
 OPEN="w:300 g:1150,2310,0,700 w:400"
 HEAT="t:1057,663 w:600"
 SURV="t:723,1927 w:500"
-SURVX="g:720,2400,-1500,600 w:800 t:1184,1707 w:500 t:718,424 w:500"   # 1.2-alpha17: scrolled (the 4.5 A row); alpha22: 165 px up (Last session)
+SURVX="g:720,2400,-1500,600 w:800 t:1184,2226 w:500 t:718,424 w:500"   # 1.2-alpha17: scrolled (the 4.5 A row); alpha22: 165 px up (Last session); alpha23: the All out row
 BATLIM="t:723,2213 w:500"
 HOLD="g:720,1170,0,1900 w:400"
 OFF="t:720,330 w:600 t:220,670 w:600"   # 1.2-alpha5: the first tap leaves the white screen (on the Heat page: the title)
@@ -23,6 +23,7 @@ ENVS=SBOS_HOST_SMP=m3
 r=$(run $OPEN $HEAT $SURV $HOLD $HOLD $HOLD w:7000 $OFF w:3000)
 want "$r" "Survival heat confirmed three times" "Survival: three confirmations"
 want "$r" "heater: start, level 0x00000007" "Survival started"
+want "$r" "heater: All out: no current or voltage governor; held below the chip's power cut" "All out by default (trip on: still below the chip's cut)"
 want "$r" "heater: stopped: Stopped" "Off stopped Survival"
 never "$r" "notif: heat" "the user's Off posts no notification (1.2-alpha9)"
 never "$r" "trip is OFF" "Survival (default) never touches the trip"
@@ -39,6 +40,7 @@ never "$r" "heater: start, level" "two holds of three do not start it"
 r=$(run $OPEN $HEAT $SURVX $HOLD $HOLD $HOLD $HOLD w:9000 $OFF w:4000)
 want "$r" "four times" "trip off: four confirmations"
 want "$r" "heater: start, level 0x00000008" "trip off: started"
+want "$r" "heater: All out: no temperature hold, no current or voltage governor" "trip off: All out by default"
 want "$r" "heater: gpu on, 598 MHz" "trip off: the GPU runs its load"
 never "$r" "TMU_SUB) is not armed" "trip off: the GPU is not refused for the trip we switched off"
 never "$r" "holding" "trip off: flat out, nothing shed while it ran"
@@ -71,6 +73,11 @@ r=$(run $OPEN $HEAT $BATLIM $HOLD w:500)
 want "$r" "settings: Survival's battery limit raised (confirmed), 0.1 C: 0x00000244" "58 C after its confirmation"
 r=$(run $OPEN $HEAT $BATLIM w:300 k:p w:500)
 never "$r" "raised (confirmed)" "no raise without the hold"
+# 1.2-alpha23 (the user): 65 C, one tap and one hold past 60; then back to 55 (no question going down)
+r=$(run $OPEN $HEAT $BATLIM $HOLD w:500 $BATLIM $HOLD w:500 $BATLIM $HOLD w:500 s:bat65 $BATLIM w:500)
+want "$r" "settings: Survival's battery limit raised (confirmed), 0.1 C: 0x00000258" "60 C after its confirmation"
+want "$r" "settings: Survival's battery limit raised (confirmed), 0.1 C: 0x0000028A" "65 C after its confirmation (1.2-alpha23)"
+want "$r" "settings: Survival's battery limit: 55 C" "and from 65 back to 55"
 # 1.2-alpha5: no M3 measurement (every load at once, 4 @ 1794), never past Samsung's table; no LED; the screen white
 # with the status strip, a tap brings the Heat page back
 px() {  # px SHOT X Y: the pixel's RGB as rrggbb
@@ -116,11 +123,26 @@ want "$r" "ocp probe: the M3 core did not report" "no M3 core: reported, nothing
 ST=/tmp/sbos-survival-state.bin         # in the VM: the Mac-shared folder showed a just-written slot late
 limactl shell starbite rm -f "$ST"
 ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_STATE=$ST"
-r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 t:1184,1707 w:600 g:720,2400,-1500,600 w:800 g:718,1300,0,1700 w:800 g:720,1170,0,1900 w:1500 w:12000)
+# 1.2-alpha23: All out off first (the limit rows show only then), then the trip toggle, then the limit's hold
+r=$(run $OPEN $HEAT g:720,2400,-1500,600 w:800 t:1184,1709 w:600 t:1184,2148 w:600 g:720,2400,-1500,600 w:800 g:718,1295,0,1700 w:800 g:720,1170,0,1900 w:1500 w:12000)
+want "$r" "settings: Survival All out: off" "All out: the switch turns it off"
 want "$r" "settings: Survival (trip off): NO SoC LIMIT (confirmed; saved)" "No limit: one hold, one confirmation"
 r=$(run $OPEN $HEAT w:600 s:nl-after)
 want "$r" "settings: Survival's SoC limit restored, 0.1 C: 0x00002706" "No limit remembered across a restart"
+want "$r" "settings: Survival's All out restored: off" "All out off remembered across a restart"
+r=$(run $OPEN $HEAT $SURV $HOLD $HOLD $HOLD $HOLD w:3000 $OFF w:2000)    # the trip-off switch is remembered: 4 asks
+want "$r" "heater: All out off: Survival holds as before" "All out off: Survival holds as before"
 c=$(px nl-after 720 2000); echo "note: after the restart the Heat page was drawn ($c)"
+# 1.2-alpha23: one bad TMU conversion (TOP probe 3, 40 C high for one 200 ms update every 2 s) never reaches the
+# governor or the screen: 15 C or more off the median of 3 is replaced, once, and logged with its probe and code
+ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_TMU_SPIKE=10"
+r=$(run $OPEN $HEAT $SURV $HOLD $HOLD $HOLD w:12000 $OFF w:2000)
+want "$r" "heater: a SoC reading ignored (an isolated jump): " "a TMU spike: ignored and logged"
+want "$r" "C from TOP 3 (code " "and its probe and code named"
+want "$r" "heater: SoC readings ignored this session (15 C or more above the median of 3): " "the session's count at the stop"
+ENVS=SBOS_HOST_SMP=m3
+r=$(run $OPEN $HEAT $SURV $HOLD $HOLD $HOLD w:8000 $OFF w:2000)
+never "$r" "a SoC reading ignored" "no spike: nothing ignored"
 # 1.2-alpha17: the 4.5 A stop's switch: one hold, one confirmation, remembered
 limactl shell starbite rm -f "$ST"
 ENVS="SBOS_HOST_SMP=m3 SBOS_HOST_STATE=$ST"

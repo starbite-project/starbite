@@ -226,6 +226,93 @@ static int adc_c10(unsigned ch, unsigned table, int *raw)
     return sb_therm_convert(table, r);
 }
 
+/* 1.2-alpha23: an isolated jump in the SoC reading. Each probe is already the median of 3 samples 10 us apart
+ * (libsb tmu.c), but those three read the same CURRENT_TEMP conversion, so one bad conversion of one probe would pass
+ * and the hottest of the 8 zones would show it. (The 182 C the user saw on 2026-11-10 was NOT one: the log shows a
+ * real 169-180 C saw in step with the governor's M3 clock, 6-8 C a second.) So a reading 15 C or more away from the
+ * median of the last 3 (250 ms apart while heating) is replaced by that median, once; anything closer passes as it
+ * is, with no delay, so real heat and its peaks are never hidden. A real 15 C jump in 250 ms counts 250 ms later
+ * (the next reading confirms it). A replaced high reading is logged with its probe and code (the first 8 of a
+ * session, then every 50th) and marked in the heat log (flag 64) */
+static int sf_v[3];
+static unsigned sf_n;
+static uint64_t sf_t;
+static uint32_t sf_spikes;
+static int sf_spike_sec;                    /* a spike since the last heat log sample */
+
+static void soc_filter_reset(void)
+{
+    sf_n = 0;
+    sf_spikes = 0;
+    sf_spike_sec = 0;
+}
+
+static void soc_filter(struct heat_in *in, const struct sb_temps *t)
+{
+    if (!in->soc_ok || (sf_n && in->now - sf_t > 1500U))
+        sf_n = 0;                           /* lost, or old readings (not heating): start again */
+    if (!in->soc_ok)
+        return;
+    int raw = in->soc_c10;
+    if (sf_n == 3) {
+        sf_v[0] = sf_v[1];
+        sf_v[1] = sf_v[2];
+        sf_n = 2;
+    }
+    sf_v[sf_n++] = raw;
+    sf_t = in->now;
+    int v;
+    if (sf_n == 1) {
+        v = raw;
+    } else if (sf_n == 2) {
+        v = sf_v[0] < sf_v[1] ? sf_v[0] : sf_v[1];
+    } else {
+        int a = sf_v[0], b = sf_v[1], c = sf_v[2];
+        v = a > b ? (b > c ? b : a > c ? c : a) : (a > c ? a : b > c ? c : b);
+    }
+    if (raw - v < 150 && v - raw < 150)
+        return;                             /* not an isolated jump: the reading as it is */
+    in->soc_c10 = v;
+    if (raw - v < 150)
+        return;                             /* a jump down: replaced, not logged */
+    ++sf_spikes;
+    sf_spike_sec = 1;
+    if (sf_spikes > 8 && sf_spikes % 50U)
+        return;
+    /* which probe gave it (names: TOP 0..7, SUB 0..2; the code is its last accepted CURRENT_TEMP) */
+    int pb = -1, code = 0, sub = 0;
+    for (int i = 0; i < 8 && pb < 0; ++i)
+        if (t->top_all[i] * 10 == raw) {
+            pb = i;
+            code = t->code_top[i];
+        }
+    for (int i = 0; i < 3 && pb < 0; ++i)
+        if (t->sub_all[i] * 10 == raw) {
+            pb = i;
+            sub = 1;
+            code = t->code_sub[i];
+        }
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "heater: a SoC reading ignored (an isolated jump): ");
+    ub_sdec(&u, raw / 10);
+    ub_s(&u, " C from ");
+    if (pb < 0) {
+        ub_s(&u, "?");
+    } else {
+        ub_s(&u, sub ? "SUB " : "TOP ");
+        ub_dec(&u, (uint64_t)pb);
+        ub_s(&u, " (code ");
+        ub_hex(&u, (uint64_t)code, 3);
+        ub_s(&u, ")");
+    }
+    ub_s(&u, ", the median ");
+    ub_sdec(&u, v / 10);
+    ub_s(&u, " C; this session: ");
+    ub_dec(&u, sf_spikes);
+    sb_log(u.b);
+}
+
 static void read_inputs(struct heat_in *in)
 {
     memset(in, 0, sizeof(*in));
@@ -252,6 +339,7 @@ static void read_inputs(struct heat_in *in)
     gpu_probe_ok = t.sub == 1 && t.gpu > -30 && t.gpu < SBOS_TEMP_READ_MAX_C;
     if (gpuheat_on() && gpu_probe_ok && t.gpu * 10 > in->soc_c10)
         in->soc_c10 = t.gpu * 10;               /* the GPU's zone (TMU_SUB) counts while it heats */
+    soc_filter(in, &t);                         /* 1.2-alpha23: one bad reading never counts */
     in->trip_armed = (t.trip_armed & 1) && (!gpuheat_on() || (t.trip_armed & 2));   /* the GPU's zone too while it runs */
     trip_top_c = t.trip_c;
     struct sb_bat b;
@@ -926,6 +1014,13 @@ static void restore_and_check(void)
     for (unsigned w = 0; w < 8; ++w)
         parked_logged[w] = 0;
     sb_logf("heater: stopped: ", ctl.why[0] ? ctl.why : "?");
+    if (sf_spikes) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "heater: SoC readings ignored this session (15 C or more above the median of 3): ");
+        ub_dec(&u, sf_spikes);
+        sb_log(u.b);
+    }
     if (ctl.why[0] && !(ctl.why[0] == 'S' && ctl.why[1] == 't' && ctl.why[2] == 'o' && ctl.why[3] == 'p' &&
                         ctl.why[4] == 'p' && ctl.why[5] == 'e' && ctl.why[6] == 'd' && !ctl.why[7]))
         notif_post("heat", "Heat stopped", ctl.why);    /* 1.2-alpha9: by itself (not the user's Off) */
@@ -1268,6 +1363,7 @@ static void hlog_start(void)
     memset(&heat_log, 0, sizeof(heat_log));
     heat_log.magic = HLOG_MAGIC;
     hl_peak_ma = hl_min_mv = 0;
+    soc_filter_reset();                     /* 1.2-alpha23: the count is this session's */
     heat_log.level = (uint32_t)pending_level;
     heat_log.a55_mhz = ctl.a55_khz / 1000U;
     heat_log.m3_n = (uint16_t)ctl.m3_n;
@@ -1290,7 +1386,7 @@ static void hlog_start(void)
          * above our own current limits. Never written */
         uint8_t v = 0;
         if (sb_chg_read(0xbc, &v)) {
-            heat_log.pad = 0x100U | v;
+            heat_log.pad = 0x100U | v | (ctl.all_out ? 0x200U : 0U);     /* 1.2-alpha23: 0x200 All out */
             static const char *const nm[16] = { "off", "?", "?", "?", "?", "?", "4.5 A", "?", "4.8 A", "5.0 A", "?",
                                                 "5.4 A", "5.6 A", "?", "?", "?" };
             struct ub u;
@@ -1363,6 +1459,11 @@ static void hlog_tick(const struct heat_in *in)
         s->thr = (uint8_t)(c - hlog_thr0);
         s->flags |= 32;
     }
+    if (sf_spike_sec)
+        s->flags |= 64;                     /* 1.2-alpha23: a SoC reading ignored in this second */
+    if (ctl.all_out)
+        s->flags |= 128;                    /* 1.2-alpha23: All out */
+    sf_spike_sec = 0;
     heat_log.n = n + 1;
     if (secs % 10U == 0) {
         struct ub u;
@@ -1465,10 +1566,11 @@ uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;
 /* 0.6.2: the call / SOS reserve for Extreme / Manual / Keep warm (0 = overridden), Keep warm's battery target */
 int heat_reserve_pct = 15, heat_target_c10 = 200, heat_no_current_stop;
 int heat_no_high_stop;                      /* 1.2-alpha17 */
+int heat_all_out = 1;                       /* 1.2-alpha23 (the user): Survival All out, on by default */
 int heat_screen_white;                      /* 1.2-alpha19: off by default (the user: hotter chips without it) */
 int heat_reserve_override;                  /* 1.0-rc2 (review): the hold overrides the reserve for the next session only */
 int heat_soc_stop_c10;                      /* 0.6.3: Manual's SoC stop (0 off: the user's default) */
-int heat_surv_bat_c10 = 550;                /* 1.1-beta5: Survival's battery limit (55 C; 58 / 60 after a confirmation) */
+int heat_surv_bat_c10 = 550;                /* 1.1-beta5: Survival's battery limit (55 C; 58 / 60 / 65 after a confirmation) */
 int heat_surv_stop_c10 = 1350;              /* 1.1-beta4: Survival (trip off)'s SoC limit, held: 135 C (125..145) */
 struct heat_record heat_rec, heat_last;
 int heat_last_unclean;
@@ -1532,6 +1634,7 @@ static void extreme_confirm_done(int ok)
     ctl.no_current_stop = (pending_level == HEAT_MANUAL || pending_level == HEAT_SURVIVAL ||
                            pending_level == HEAT_SURVIVAL_X) && heat_no_current_stop;   /* 1.2-alpha4: Survival too */
     ctl.no_high_stop = pending_level >= HEAT_SURVIVAL && heat_no_high_stop;  /* 1.2-alpha17 */
+    ctl.all_out = pending_level >= HEAT_SURVIVAL && heat_all_out;           /* 1.2-alpha23 */
     ctl.t_over = 0;
     ctl.soc_stop_c10 = pending_level == HEAT_MANUAL ? heat_soc_stop_c10 : 0;
     if (pending_level == HEAT_KEEPWARM) {
@@ -1548,6 +1651,10 @@ static void extreme_confirm_done(int ok)
         sb_log(pending_level == HEAT_SURVIVAL_X ?
                "heater: Survival heat with the chip's trip OFF confirmed four times (the tables' tops, to the user's SoC stop)" :
                "heater: Survival heat confirmed three times (the tables' tops, just below the chip's power cut, to 2 %)");
+        sb_log(ctl.all_out ? (pending_level == HEAT_SURVIVAL_X ?
+                              "heater: All out: no temperature hold, no current or voltage governor (the battery's hold, the 4.5 A switch and 2 % stay)" :
+                              "heater: All out: no current or voltage governor; held below the chip's power cut (the trip is on)") :
+                             "heater: All out off: Survival holds as before (the limit, the governor)");
     } else if (pending_level == HEAT_MANUAL) {
         ctl.man_a55 = heat_man_a55;
         ctl.man_m3 = heat_man_m3;
@@ -1587,7 +1694,9 @@ static void survival_show(void)
     int x = pending_level == HEAT_SURVIVAL_X;
     static char stopl[160], batl[128];
     ub_init(&u);
-    if (heat_surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10) {   /* 1.2-alpha4 */
+    if (heat_all_out) {                     /* 1.2-alpha23 */
+        ub_s(&u, "ALL OUT: no SoC limit and no current or voltage throttle (a brownout may switch it off). Stops at ");
+    } else if (heat_surv_stop_c10 == SBOS_HEAT_SOC_NOLIMIT_C10) {   /* 1.2-alpha4 */
         ub_s(&u, "NO SoC LIMIT: nothing holds the chip by temperature (readings past 199 \xc2\xb0" "C stop it). Stops at ");
     } else {
         ub_s(&u, "Holds at your limit (");
@@ -1607,8 +1716,10 @@ static void survival_show(void)
         kui_confirm(x ? "Survival heat, trip OFF (1 of 4)?" : "Survival heat (1 of 3)?",
                     "A LAST RESORT for a survival situation: the most heat this phone can make.",
                     "Every core and the GPU at the chip's top table steps, the screen at its brightest and the LED.",
-                    x ? "The chip's own heat power cut will be switched OFF: flat out up to your limit, held there to 2 %." :
-                        "It holds the processor just below the chip's own power cut and runs to 2 % battery.",
+                    x ? (heat_all_out ? "The chip's own heat power cut will be switched OFF. ALL OUT: flat out to 2 %, never held by temperature." :
+                                        "The chip's own heat power cut will be switched OFF: flat out up to your limit, held there to 2 %.") :
+                        heat_all_out ? "ALL OUT: no current or voltage throttle; held only below the chip's own power cut, to 2 %." :
+                                       "It holds the processor just below the chip's own power cut and runs to 2 % battery.",
                     x ? "Hold: 1 of 4" : "Hold: 1 of 3", survival_done);
         break;
     case 1:
@@ -1848,6 +1959,7 @@ void heater_status(struct sbos_heat *h)
     h->target_c10 = heat_target_c10;
     h->no_current_stop = heat_no_current_stop;
     h->no_high_stop = heat_no_high_stop;
+    h->all_out = heater_running_ui() && ctl.level >= HEAT_SURVIVAL ? ctl.all_out : heat_all_out;
     h->trip_c = trip_top_c;
     h->soc_stop_c10 = heat_soc_stop_c10;
     h->last_unclean = heat_last_unclean;

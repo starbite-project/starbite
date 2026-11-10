@@ -149,6 +149,7 @@ struct sbos_heat {
     int32_t gpu_on;             /* 1.1: the GPU's share is running */
     int32_t surv_bat_c10;       /* 1.1-beta5: Survival's battery limit (0.1 C) */
     int32_t no_high_stop;       /* 1.2-alpha17: Survival's 4.5 A stop turned off (a 6 A / 1 s backstop instead) */
+    int32_t all_out;            /* 1.2-alpha23: Survival "All out" (this session's while it runs, else the setting) */
 };
 
 /* 1.2-alpha22 (SBOS_P_HEAT): the last heating session's log (the state slot's heat log), summed up and in 60 time
@@ -242,7 +243,7 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
        SET_PANEL_DUMP = 17 /* 0.6.5: write 1: read the panel's registers (read only, logged) */,
        SET_HEAT_RESERVE_ONCE = 18 /* 1.0-rc2: write 1: the next full-heat session runs without the reserve (once) */,
        SET_HEAT_SURV_STOP_C10 = 19 /* 1.1: Survival (trip off)'s SoC limit, 0.1 C: 1250..1500 (held there, 150 held at 148; default 1350) */,
-       SET_HEAT_SURV_BAT_C10 = 20 /* 1.1-beta5: Survival's battery limit, 0.1 C: 550 / 580 / 600; above 550 the kernel asks first */,
+       SET_HEAT_SURV_BAT_C10 = 20 /* 1.1-beta5: Survival's battery limit, 0.1 C: 550 / 580 / 600 / 650 (1.2-alpha23); above 550 the kernel asks first */,
        SET_OCP_PROBE = 21 /* 1.1-beta7: write 1: read the M3 OCP registers on one M3 core (read only, logged); reads the result:
                              0 not run, 1 readable, -1 trapped, -2 the core did not start */,
        SET_LINUX = 22 /* 1.2-alpha1: Linux apps on the big cores (a test): write 1 asks first (the kernel's
@@ -256,6 +257,9 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
                                       readings (0, the default: the panel's ~1 W goes to the chips). Remembered */,
        SET_WIFI_AUTOJOIN = 27 /* 1.2-alpha21: join a known network the scan heard, once per power-on (1, the default)
                                   or never (0). Remembered */,
+       SET_HEAT_ALL_OUT = 28 /* 1.2-alpha23: Survival "All out" (1, the default): no hold at a temperature limit and no
+                                current / voltage throttle (a brownout may switch the phone off); 0 holds as before.
+                                Remembered */,
        SET_VIBRATE = 24 /* 1.2-alpha7: write (count << 16) | ms: count pulses (0 = 1) of ms (<= 5000) with ms gaps; 0 stops.
                            Reads 1 when the motor works, 0 not tried yet, -1 refused */ };
 
@@ -273,11 +277,11 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
 #define SBOS_HEAT_SOC_HARD_C10 1500
 #define SBOS_HEAT_SOC_HOLD_MAX_C10 1480
 /* 1.2-alpha4 (the user, 2026-11-09): Survival (trip off) "No limit", behind 8 holds: nothing of ours holds or stops
- * the SoC by temperature; the battery limit (55/58/60 C) and 2 % still stop. A reading is trusted up to 199 C (the
+ * the SoC by temperature; the battery limit (55/58/60/65 C) and 2 % still stop. A reading is trusted up to 199 C (the
  * TMU is trimmed at 25 and 85 C; solder melts near 217 C): above it the reading counts as lost and Survival stops */
 #define SBOS_HEAT_SOC_NOLIMIT_C10 9990
 #define SBOS_TEMP_READ_MAX_C 200
-#define SBOS_HEAT_BAT_HARD_C10 600
+#define SBOS_HEAT_BAT_HARD_C10 650     /* 1.2-alpha23 (the user, 2026-11-10): 65 C, was 60; never higher */
 #define SBOS_HEAT_FULL_MA 2800
 #define SBOS_HEAT_MAH_PER_PCT 16
 

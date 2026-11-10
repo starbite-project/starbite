@@ -1387,6 +1387,8 @@ static void build_light(void)
     heater_status(&h);
     struct ub u;
     ub_init(&u);
+    if (h.all_out && h.level >= HEAT_SURVIVAL)
+        ub_s(&u, "ALL OUT  ");                  /* 1.2-alpha23: no hold, no throttle */
     ub_s(&u, "SoC ");
     ub_c10s(&u, h.soc_c10);
     ub_s(&u, " \xc2\xb0" "C  battery ");

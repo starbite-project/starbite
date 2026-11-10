@@ -705,8 +705,16 @@ static void t_survival(void)
         in = base_in(0);
         c.surv_bat_c10 = 610;
         CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == SBOS_EAGAIN, "hard limit: a 61 C battery limit is refused");
-        CHECK(SBOS_HEAT_SOC_HARD_C10 == 1500 && SBOS_HEAT_SOC_HOLD_MAX_C10 == 1480 && SBOS_HEAT_BAT_HARD_C10 == 600,
-              "hard limits: 150 C SoC (held at 148 at most), 60 C battery");
+        heat_ctl_init(&c, 0);
+        in = base_in(0);
+        c.surv_bat_c10 = 660;
+        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == SBOS_EAGAIN, "hard limit: a 66 C battery limit is refused");
+        heat_ctl_init(&c, 0);
+        in = base_in(0);
+        c.surv_bat_c10 = 650;
+        CHECK(heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in) == 0, "1.2-alpha23: a 65 C battery limit is accepted (%s)", c.why);
+        CHECK(SBOS_HEAT_SOC_HARD_C10 == 1500 && SBOS_HEAT_SOC_HOLD_MAX_C10 == 1480 && SBOS_HEAT_BAT_HARD_C10 == 650,
+              "hard limits: 150 C SoC (held at 148 at most), 65 C battery (1.2-alpha23)");
         /* 1.2-alpha4: "No limit": accepted, never held or stopped by the SoC's temperature; the battery still is */
         heat_ctl_init(&c, 0);
         in = base_in(0);
@@ -839,6 +847,104 @@ static void t_survival(void)
         in.ma = -4600;
         run(&c, &in, 10250, 300, 0);
         CHECK(stopped_with(&c, HEAT_ST_STOPPED, "above 4.5 A"), "the 4.5 A stop on (the default) still stops (%s)", c.why);
+        /* 1.2-alpha23 (the user): All out: never held at the SoC limit, no current / voltage governor; the battery's hold
+         * and stop, the 4.5 A switch (its 4.2 A ceiling on, the 6 A / 1 s backstop off) and 2 % stay */
+        {
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.all_out = 1;
+            c.surv_stop_c10 = 1350;             /* the user's limit is ignored */
+            heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+            c.trip_off = 1;
+            c.cal = 5;
+            CHECK(heat_surv_target(&c) == SBOS_HEAT_SOC_NOLIMIT_C10 && heat_surv_estop(&c) == SBOS_HEAT_SOC_NOLIMIT_C10,
+                  "All out, trip off: no SoC target and no SoC stop (%d, %d)", heat_surv_target(&c), heat_surv_estop(&c));
+            run(&c, &in, 0, 10000, 0);
+            int a0 = load_of(&c);
+            in.soc_c10 = 1650;
+            run(&c, &in, 10250, 3000, 0);
+            CHECK(c.state == HEAT_ST_RUNNING && load_of(&c) >= a0, "All out: 165 C over a 135 C limit neither sheds nor "
+                  "stops (%d -> %d, %s)", a0, load_of(&c), c.why);
+            CHECK(strstr(c.why, "All out") != 0, "All out: the status says so (%s)", c.why);
+            in.bat_c10 = c.surv_bat_c10 - 20;
+            run(&c, &in, 13500, 3000, 0);
+            CHECK(load_of(&c) < a0, "All out: the battery limit still holds (%d -> %d, %s)", a0, load_of(&c), c.why);
+            in.bat_c10 = c.surv_bat_c10;
+            run(&c, &in, 16750, 300, 0);
+            CHECK(stopped_with(&c, HEAT_ST_STOPPED, "battery limit"), "All out: the battery limit still stops (%s)", c.why);
+        }
+        for (int x = 0; x < 2; ++x) {           /* the 4.5 A stop off: no governor; the backstop stays */
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.all_out = 1;
+            c.no_current_stop = 1;
+            c.no_high_stop = 1;
+            c.gov_ma = 6000;
+            c.backstop_ma = 6500;
+            heat_ctl_request(&c, x ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0, &in);
+            c.trip_off = x;
+            c.cal = 5;
+            run(&c, &in, 0, 10000, 0);
+            int b0 = load_of(&c);
+            in.ma = -6100;
+            in.mv = 3300;
+            in.soc_c10 = x ? 1700 : 1100;       /* trip off: in the leakage range too */
+            run(&c, &in, 10250, 3000, 0);
+            CHECK(c.state == HEAT_ST_RUNNING && load_of(&c) >= b0, "All out %d: 6.1 A at 3.30 V is not throttled (%d -> "
+                  "%d, %s)", x, b0, load_of(&c), c.why);
+            in.ma = -6600;
+            run(&c, &in, 13500, 1250, 0);
+            CHECK(stopped_with(&c, HEAT_ST_STOPPED, "for 1 s"), "All out %d: the 6.5 A / 1 s backstop still stops (%s)", x,
+                  c.why);
+        }
+        for (int x = 0; x < 2; ++x) {           /* the 4.5 A stop on: its 4.2 A ceiling and the stop stay */
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.all_out = 1;
+            c.no_current_stop = 1;
+            heat_ctl_request(&c, x ? HEAT_SURVIVAL_X : HEAT_SURVIVAL, 0, &in);
+            c.trip_off = x;
+            c.cal = 5;
+            run(&c, &in, 0, 10000, 0);
+            int h0 = load_of(&c);
+            in.ma = -4300;
+            run(&c, &in, 10250, 2000, 0);
+            CHECK(c.state == HEAT_ST_RUNNING && load_of(&c) < h0, "All out %d, 4.5 A stop on: 4.3 A still steps down (%d "
+                  "-> %d)", x, h0, load_of(&c));
+            in.ma = -4600;
+            run(&c, &in, 12500, 300, 0);
+            CHECK(stopped_with(&c, HEAT_ST_STOPPED, "above 4.5 A"), "All out %d: the 4.5 A stop still stops (%s)", x, c.why);
+        }
+        {                                       /* the trip on: still below the chip's own power cut */
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.all_out = 1;
+            heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in);
+            c.cal = 5;
+            CHECK(heat_surv_target(&c) == 1220, "All out, trip on: the 122 C target stays (%d)", heat_surv_target(&c));
+            run(&c, &in, 0, 10000, 0);
+            int t0 = load_of(&c);
+            in.mv = 3300;                       /* below the 3.4 V shed: All out does not shed for it */
+            run(&c, &in, 10250, 2000, 0);
+            CHECK(load_of(&c) >= t0, "All out, trip on: 3.30 V sheds nothing (%d -> %d, %s)", t0, load_of(&c), c.why);
+            in.soc_c10 = 1240;
+            run(&c, &in, 12500, 1000, 0);
+            CHECK(load_of(&c) < t0, "All out, trip on: 124 C still sheds below the chip's cut (%d -> %d)", t0, load_of(&c));
+        }
+        {                                       /* All out off: the old hold (the user's switch) */
+            heat_ctl_init(&c, 0);
+            in = base_in(0);
+            c.all_out = 0;
+            c.surv_stop_c10 = 1350;
+            heat_ctl_request(&c, HEAT_SURVIVAL_X, 0, &in);
+            c.trip_off = 1;
+            c.cal = 5;
+            run(&c, &in, 0, 10000, 0);
+            int o0 = load_of(&c);
+            in.soc_c10 = 1360;
+            run(&c, &in, 10250, 2000, 0);
+            CHECK(load_of(&c) < o0, "All out off: 136 C over a 135 C limit is held as before (%d -> %d)", o0, load_of(&c));
+        }
         /* the 3.5 A limit in plain Survival: held there, or (the user's switch) not */
         for (int off = 0; off < 2; ++off) {
             heat_ctl_init(&c, 0);
@@ -995,7 +1101,7 @@ static void t_survival(void)
     CHECK(stopped_with(&c, HEAT_ST_STOPPED, "trip is not armed"), "Survival (trip on): the trip must stay armed (%s)", c.why);
     /* 1.1-beta5: the battery limit (55 default, 58, 60): held from 3 C below, a stop at it, both modes */
     for (int x = 0; x < 2; ++x)
-        for (int lim = 550; lim <= 600; lim += 50) {
+        for (int lim = 550; lim <= 650; lim += 50) {   /* 1.2-alpha23: 65 C too */
             in = base_in(0);
             heat_ctl_init(&c, 0);
             c.surv_bat_c10 = lim;
@@ -1018,8 +1124,8 @@ static void t_survival(void)
         }
     in = base_in(0);
     heat_ctl_init(&c, 0);
-    c.surv_bat_c10 = 650;
-    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == SBOS_EAGAIN, "Survival refuses a battery limit above 60 C");
+    c.surv_bat_c10 = 700;
+    CHECK(heat_ctl_request(&c, HEAT_SURVIVAL, 0, &in) == SBOS_EAGAIN, "Survival refuses a battery limit above 65 C");
     in = base_in(0);
     in.bat_c10 = 490;
     in.usb_c10 = in.chg_c10 = 490;

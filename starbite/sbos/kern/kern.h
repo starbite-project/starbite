@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 
-#define SBOS_VERSION "1.2-alpha22"
+#define SBOS_VERSION "1.2-alpha23"
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
@@ -110,6 +110,11 @@ struct heat_ctl {
     int no_current_stop;            /* 0.6.2: Manual only: the 3.5 A battery-current stop turned off by the user */
     int no_high_stop;               /* 1.2-alpha17: Survival's 4.5 A stop off (the user): a 6 A / 1 s backstop instead */
     uint64_t t_over;                /* when the current first went above the backstop (0 below) */
+    int all_out;                    /* 1.2-alpha23 (the user): Survival never holds at a temperature limit and never
+                                       throttles for the current or the voltage: every load at its top to the battery
+                                       limit or 2 %. Kept: the battery's hold and stop, the 4.5 A switch (its 4.2 A
+                                       ceiling while on, the 6 A / 1 s backstop while off), the 3.5 A switch, the chip's
+                                       own power cut in Survival with the trip on. A brownout may switch the phone off */
     int gov_ma, backstop_ma;        /* 1.2-alpha18: the governor's current and the backstop (0: the defaults) */
     int soc_stop_c10;               /* 0.6.3: Manual only: the user's SoC stop (0 off) */
     int gpu_want;                   /* 1.1: the GPU's share may run (Survival sheds it last, adds it last) */
@@ -177,6 +182,7 @@ extern uint32_t gpuheat_khz;        /* 0.6.1: the GPU's table step for the sessi
 extern uint32_t heat_man_a55, heat_man_m3, heat_man_gpu;    /* 0.6.1: Manual's picks (kHz) */
 extern int heat_reserve_pct, heat_target_c10, heat_no_current_stop;   /* 0.6.2 */
 extern int heat_no_high_stop;
+extern int heat_all_out;                   /* 1.2-alpha23: Survival "All out" (on by default): no hold, no throttle */
 extern int heat_screen_white;       /* 1.2-alpha19: Survival's screen white (1) or dark (0, default); remembered */
 extern int heat_b2s_note;           /* 1.2-alpha18: 0x100 | CHG_CNFG_05 as found while Survival has B2SOVRC off (slot) */
 void heater_boot_forensics(void);   /* 1.2-alpha18: read only, at every boot */       /* 1.2-alpha17: Survival's 4.5 A stop off (remembered) */
