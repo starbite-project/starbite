@@ -493,3 +493,13 @@ PMU steps, so **only with the user present** (a hang there needs a forced reset;
 the volume). Expect `=M3S core 0 rc 0 ...`, `on: 4Y 6Y 7Y`, `=M3N np04`, cpu.log 4 CPUs.
 The MADT then lists M3 0 (MPIDR 0x100) and the A55s stay disabled, so the 0x100 affinity collision with A55 core 1
 doesn't reach Windows.
+
+## 23. m3run1 result (23:46): Windows 11 runs on an Exynos M3 big core
+
+Booted 23:46:19 on M3 core 1 alone. It reached logon (sb-autotest.cmd ran at logon and restarted Windows by itself) and
+was back at the menu after 588 s. The registry hive is clean (179290/179290). zone 0: `=M3K b0444 e03 gd1 @01 fbn4B`
+(about 546 s alive, SPIs enabled by drivers, the screen changed 75 times), `=M3U it4543AAEF tc0000886C` (ticking),
+`=M3N np01 ps28A7A080 bc0`. Our Wi-Fi driver brought up the BCM4361 and sblinkd ran: drivers work on the M3. No cpu.log
+(the phone's autotest.ps1 is an older version), so there is no MIDR from inside Windows yet: `tools/woa/win-m3/sb-cpuproof.cmd`
+(one-shot Startup item, deletes itself) writes C:\starbite\auto\cpuproof.txt with NUMBER_OF_PROCESSORS,
+PROCESSOR_IDENTIFIER, the CentralProcessor registry keys (`CP 4000` = MIDR_EL1) and sbcpu-arm64's output.
