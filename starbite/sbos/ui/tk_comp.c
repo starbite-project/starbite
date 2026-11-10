@@ -564,6 +564,48 @@ static void up2x_out(tk_bmp *dst, const tk_bmp *h, tk_irect R, scr *S)
     }
 }
 
+/* motion frames' present: uibench's 2x (half px i at panel px 2i; the odd px and rows averages of their
+ * neighbours): half the work of the centred kernel; the half-px offset exists only while things move */
+static void up2x_fast(tk_bmp *dst, const tk_bmp *h, tk_irect R)
+{
+    R = isect(R, (tk_irect){ 0, 0, dst->w, dst->h });
+    if (iempty(R)) return;
+    int i0 = R.x0 >> 1, i1 = tk_mini(h->w, (R.x1 + 1) >> 1);
+    for (int Y = R.y0; Y < R.y1; Y++) {
+        int j = tk_mini(Y >> 1, h->h - 1), odd = Y & 1;
+        const uint32_t *a = h->px + (size_t)j * h->stride, *b = h->px + (size_t)tk_mini(h->h - 1, j + 1) * h->stride;
+        uint32_t *o = dst->px + (size_t)Y * dst->stride;
+        int i = i0;
+        for (; i + 5 <= i1 && i + 5 <= h->w; i += 4) {
+            uint8x16_t A = vld1q_u8((const uint8_t *)(a + i)), An = vld1q_u8((const uint8_t *)(a + i + 1));
+            if (odd) {
+                uint8x16_t Bv = vld1q_u8((const uint8_t *)(b + i)), Bn = vld1q_u8((const uint8_t *)(b + i + 1));
+                An = vrhaddq_u8(An, Bn);
+                A = vrhaddq_u8(A, Bv);
+            }
+            uint32x4x2_t t = vzipq_u32(vreinterpretq_u32_u8(A), vreinterpretq_u32_u8(vrhaddq_u8(A, An)));
+            vst1q_u32(o + 2 * i, t.val[0]);
+            vst1q_u32(o + 2 * i + 4, t.val[1]);
+        }
+        for (; i < i1; i++) {
+            int in = tk_mini(h->w - 1, i + 1);
+            uint32_t p = a[i], q = a[in];
+            if (odd) {
+                uint32_t p2 = 0, q2 = 0;
+                for (int sh = 0; sh < 32; sh += 8) {
+                    p2 |= (((p >> sh & 255) + (b[i] >> sh & 255) + 1) >> 1) << sh;
+                    q2 |= (((q >> sh & 255) + (b[in] >> sh & 255) + 1) >> 1) << sh;
+                }
+                p = p2; q = q2;
+            }
+            uint32_t m = 0;
+            for (int sh = 0; sh < 32; sh += 8) m |= (((p >> sh & 255) + (q >> sh & 255) + 1) >> 1) << sh;
+            if (2 * i >= R.x0 && 2 * i < R.x1) o[2 * i] = p;
+            if (2 * i + 1 >= R.x0 && 2 * i + 1 < R.x1) o[2 * i + 1] = m;
+        }
+    }
+}
+
 static void down2_rect(tk_bmp *h, const tk_bmp *f, tk_irect r)
 {
     int x0 = r.x0 >> 1, x1 = tk_mini(h->w, (r.x1 + 1) >> 1), y0 = r.y0 >> 1, y1 = tk_mini(h->h, (r.y1 + 1) >> 1);
@@ -602,6 +644,26 @@ int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel)
 }
 
 static int was_motion = -1;
+static tk_irect pend;                       /* what rest frames changed since the half canvas last followed */
+static int have_pend;
+typedef struct { tk_comp *c; tk_irect r; } djob;
+static void dband(void *a, int i)
+{
+    djob *J = a;
+    int h = J->r.y1 - J->r.y0, y0 = J->r.y0 + h * i / TK_NBAND, y1 = J->r.y0 + h * (i + 1) / TK_NBAND;
+    if (y1 <= y0) return;
+    down2_rect(&J->c->half, &J->c->fb, (tk_irect){ J->r.x0, y0 & ~1, J->r.x1, y1 + (y1 & 1) });
+}
+/* the half canvas follows the rest frames (what changed, 2x2 averaged), so a motion frame only composes what moves
+ * and layers that never move never need half copies: in idle time, or before the next motion frame */
+void tk_comp_idle(tk_comp *c)
+{
+    if (!have_pend) return;
+    have_pend = 0;
+    djob J = { c, (tk_irect){ pend.x0 & ~1, pend.y0, pend.x1, pend.y1 } };
+    if (c->par) c->par(dband, &J, TK_NBAND);
+    else for (int i = 0; i < TK_NBAND; i++) dband(&J, i);
+}
 
 /* a frame's work over bands of rows: phase 0 composes every damage rect, phase 1 presents it */
 typedef struct { tk_comp *c; const tgt *T; tk_irect *D; int nd, motion, phase; } job;
@@ -639,15 +701,12 @@ static void band(void *arg, int i)
             /* the damage 2x into the panel, a half px of margin for the bilinear neighbours (the margin rows only
              * by the first and last band) */
             tk_irect o = { 2 * b.x0 - 2, 2 * b.y0 - (i == 0 ? 2 : 0), 2 * b.x1 + 2, 2 * b.y1 + (i == TK_NBAND - 1 ? 2 : 0) };
-            up2x_out(&J->c->panel, &J->c->half, isect(o, (tk_irect){ 0, 0, TK_W, TK_H }), T.S);
+            up2x_fast(&J->c->panel, &J->c->half, isect(o, (tk_irect){ 0, 0, TK_W, TK_H }));
         } else {
             if (J->c->panel.px != J->c->fb.px)
                 for (int y = b.y0; y < b.y1; y++)
                     tk_memcpy(J->c->panel.px + (size_t)y * J->c->panel.stride + b.x0, J->c->fb.px + (size_t)y * J->c->fb.stride + b.x0, (size_t)(b.x1 - b.x0) * 4);
-            /* the half canvas follows the rest frame (what changed, 2x2 averaged): a motion frame then only composes
-             * what moves, and layers that never move never need their half copies */
-            tk_irect e = { b.x0, b.y0 & ~1, b.x1, b.y1 + (b.y1 & 1) };
-            down2_rect(&J->c->half, &J->c->fb, e);
+            /* the half canvas follows the rest frame later (tk_comp_idle), not in this frame */
         }
     }
 }
@@ -659,6 +718,7 @@ static void run_bands(tk_comp *c, job *J)
 
 int tk_comp_frame(tk_comp *c, int motion, int full)
 {
+    if (motion) tk_comp_idle(c);             /* a finger came before the idle time did */
     uint64_t t0 = tk_us();
     cur.n = 0;
     W = &cur;
@@ -744,6 +804,8 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     J.phase = 1;                                /* the present (and, at rest, the half canvas following) */
     run_bands(c, &J);
     uint64_t t2 = tk_us();
+    if (!motion)
+        for (int q = 0; q < nd; q++) { pend = have_pend ? iunion(pend, D[q]) : D[q]; have_pend = 1; }
     c->nd = nd;
     for (int q = 0; q < nd; q++) c->dmg[q] = motion ? (tk_irect){ 2 * D[q].x0, 2 * D[q].y0, 2 * D[q].x1, 2 * D[q].y1 } : D[q];
     prev = cur;
@@ -791,7 +853,7 @@ static void bband(void *a, int i)
     int y0 = TK_H * i / TK_NBAND, y1 = TK_H * (i + 1) / TK_NBAND;
     switch (B->kind) {
     case 0:                                         /* the motion present: the half canvas 2x into the panel */
-        up2x_out(&c->panel, &c->half, (tk_irect){ 0, y0, TK_W, y1 }, &SCR[i]);
+        up2x_fast(&c->panel, &c->half, (tk_irect){ 0, y0, TK_W, y1 });
         break;
     case 1:                                         /* the rest present: RAM to the panel, tk_memcpy per row */
         for (int y = y0; y < y1; y++) tk_memcpy(c->panel.px + (size_t)y * TK_W, c->fb.px + (size_t)y * TK_W, TK_W * 4);

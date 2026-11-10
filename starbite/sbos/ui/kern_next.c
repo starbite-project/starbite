@@ -193,7 +193,7 @@ static void stats_add(void)
     FS.n++;
     FS.nhalf += comp.last_half;
     FS.nboost += boosted;
-    if (frame_log) {
+    if (frame_log && us > 12000) {               /* only the slow frames (pmsg keeps the last 16 KB) */
         struct ub u;
         ub_init(&u);
         ub_s(&u, "next: f ");
@@ -434,7 +434,8 @@ static const step S_CC[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 22
 static const step S_APP[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 158, 290, 0, 0, 80 },
                               { 0, 0, 0, 0, 0, 1100 }, { 2, 195, 795, 200, 450, 260 }, { 0, 0, 0, 0, 0, 1200 } };
 static struct { const step *s; int n, i, down; uint64_t t0; float s0; int film; } F;
-static int st_started, st_failed;
+static int st_started, st_failed, clock_ok;
+int next_selftest_clock_ok(void) { return clock_ok; }
 static uint64_t st_t0;
 int next_selftest_failed(void) { return st_failed; }
 
@@ -445,7 +446,7 @@ static void film_start(int film)
     F.down = 0;
     F.s0 = 0;
     F.t0 = sb_ms();
-    frame_log = film == 0 || film == 2 || film == 6;          /* the unlock and the focus sheet: every frame's split */
+    frame_log = 1;                               /* every film: its slow frames */          /* the unlock and the focus sheet: every frame's split */
     switch (film) {
     case 0: F.s = S_UNLOCK; F.n = 3; break;
     case 1: F.s = S_GROUP; F.n = 9; break;
@@ -482,6 +483,7 @@ int next_selftest_step(void)
             present();
             sb_logx(comp.last_px ? "next: clock check: the new minute drawn, px: " : "selftest: FAILED: next: clock check: nothing redrawn ", (uint64_t)comp.last_px);
             if (!comp.last_px) st_failed = 1;
+            clock_ok = comp.last_px != 0;
             status_now();
         }
         sb_log("selftest: next: the seven films (unlock, group, focus, holds, pages, cc, app) with synthetic touches");

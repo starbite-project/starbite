@@ -199,6 +199,7 @@ void tk_flatten(tk_layer *group, tk_bmp *out, tk_a8 *mask, float scale);   /* sc
 /* draw a frame: motion = half resolution and 2x present; full = redraw everything; returns the drawn px */
 int tk_comp_frame(tk_comp *c, int motion, int full);
 void tk_comp_prepare(tk_comp *c);
+void tk_comp_idle(tk_comp *c);                            /* idle time: the half canvas follows the rest frames */
 uint64_t tk_comp_bench(tk_comp *c, int kind);      /* the present's kernels vs uibench's loops, us */                         /* idle: make the visible layers' half copies */
 
 /* ---- motion: springs, the velocity tracker, gestures (tk_motion.c) ------------------------------------------ */

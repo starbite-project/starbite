@@ -1844,6 +1844,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
 void sh_idle(void)
 {
     if (sh_moving()) return;
+    tk_comp_idle(C);
     if (locked && lockY == 0 && !focus_on) flatten_lock();
     /* home at rest: the Control Centre's snapshot and grid ready before the pull */
     if (!locked && !CCS.on && (!CCS.built || cc_stale)) { build_cc(); cc_stale = 0; }
