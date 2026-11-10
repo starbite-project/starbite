@@ -155,6 +155,7 @@ struct tk_layer {
 void tk_layer_init(tk_layer *l, const char *name);
 void tk_layer_add(tk_layer *parent, tk_layer *child);     /* appended on top */
 void tk_layer_dirty(tk_layer *l);                         /* its bitmap changed */
+void tk_layer_prepare(tk_layer *l);                       /* make its half copy now (idle time), not on first motion */
 
 typedef struct {
     tk_bmp fb;                 /* the panel (host: RAM; device: the framebuffer) */

@@ -51,6 +51,9 @@ tk_paint tk_linear(float angle, float bx, float by, float bw, float bh, int n, c
 {
     tk_paint p = tk_solid(TK_RGBA(0, 0, 0, 0));
     p.kind = TK_P_LINEAR; p.angle = angle; p.bx = bx; p.by = by; p.bw = bw; p.bh = bh;
+    float a = angle * 0.0174532925f;
+    p.rx = tk_sinf(a); p.ry = -tk_cosf(a);
+    p.cx = tk_fabsf(bw * p.rx) + tk_fabsf(bh * p.ry);
     stops(&p, n, s);
     return p;
 }
@@ -77,8 +80,7 @@ tk_col tk_paint_at(const tk_paint *p, float x, float y)
 {
     if (p->kind == TK_P_SOLID) { tk_col c = p->solid; return TK_RGBA(c.r * c.a, c.g * c.a, c.b * c.a, c.a); }
     if (p->kind == TK_P_LINEAR) {
-        float a = p->angle * 0.0174532925f, sx = tk_sinf(a), sy = -tk_cosf(a);
-        float L = tk_fabsf(p->bw * sx) + tk_fabsf(p->bh * sy);
+        float sx = p->rx, sy = p->ry, L = p->cx;      /* direction and length, made by tk_linear */
         float t = ((x - p->bx - p->bw / 2) * sx + (y - p->by - p->bh / 2) * sy) / L + 0.5f;
         return stop_at(p, t);
     }
@@ -114,12 +116,24 @@ void tk_fm_rrect(tk_fm *m, float ox, float oy, float x, float y, float w, float 
     if (w <= 0 || h <= 0) return;
     int y0 = tk_maxi(0, (int)tk_floorf(y - oy - 1)), y1 = tk_mini(m->h, (int)(y - oy + h) + 2);
     int x0 = tk_maxi(0, (int)tk_floorf(x - ox - 1)), x1 = tk_mini(m->w, (int)(x - ox + w) + 2);
-    for (int j = y0; j < y1; j++)
+    float rm = tk_use_r4 ? tk_maxf(tk_maxf(tk_corner.tl, tk_corner.tr), tk_maxf(tk_corner.br, tk_corner.bl)) : tk_minf(r, tk_minf(w, h) / 2);
+    for (int j = y0; j < y1; j++) {
+        float py = j + 0.5f + oy;
+        /* where the boundary can be on this row: within rm of a side (corners) or the row is near the top / bottom */
+        float in = 0;
+        if (py < y + rm) { float d = y + rm - py; in = rm - tk_sqrtf(tk_maxf(0, rm * rm - d * d)); }
+        else if (py > y + h - rm) { float d = py - (y + h - rm); in = rm - tk_sqrtf(tk_maxf(0, rm * rm - d * d)); }
+        int edge = py < y + 1.5f || py > y + h - 1.5f;
+        int a = edge ? x1 : tk_maxi(x0, (int)tk_floorf(x - ox + in + 1.5f)), b = edge ? x1 : tk_mini(x1, (int)tk_floorf(x - ox + w - in - 1.5f));
+        if (a > b) a = b = x1;
+        float *row = m->v + j * m->w;
+        for (int i = a; i < b; i++) row[i] = 1;
         for (int i = x0; i < x1; i++) {
-            float c = tk_clampf(0.5f - sd_rrect(i + 0.5f + ox, j + 0.5f + oy, x, y, w, h, r), 0, 1);
-            float *d = &m->v[j * m->w + i];
-            if (c > *d) *d = c;
+            if (i == a) { i = b - 1; continue; }
+            float c = tk_clampf(0.5f - sd_rrect(i + 0.5f + ox, py, x, y, w, h, r), 0, 1);
+            if (c > row[i]) row[i] = c;
         }
+    }
 }
 void tk_fm_circle(tk_fm *m, float ox, float oy, float cx, float cy, float r)
 {
@@ -176,9 +190,35 @@ static void box1(const float *in, float *out, int n, int stride, int r)   /* zer
         out[i * stride] = acc * inv;
     }
 }
+static void fm_blur_full(tk_fm *m, float sigma);
 void tk_fm_blur(tk_fm *m, float sigma)
 {
     if (sigma < 0.3f) return;
+    if (sigma < 8 || m->w < 16 || m->h < 16) { fm_blur_full(m, sigma); return; }
+    /* a wide gaussian loses nothing at a quarter of the resolution: box down 4x, blur sigma / 4, bilinear up */
+    tk_fm q;
+    int W = (m->w + 3) / 4, H = (m->h + 3) / 4;
+    if (!tk_fm_new(&q, W, H)) { fm_blur_full(m, sigma); return; }
+    for (int j = 0; j < m->h; j++)
+        for (int i = 0; i < m->w; i++) q.v[(j >> 2) * W + (i >> 2)] += m->v[j * m->w + i] * (1.0f / 16);
+    fm_blur_full(&q, sigma / 4);
+    for (int j = 0; j < m->h; j++) {
+        float fy = (j + .5f) / 4 - .5f;
+        int ya = (int)tk_floorf(fy);
+        float ty = fy - ya;
+        int y0 = tk_maxi(0, ya), y1 = tk_mini(H - 1, ya + 1);
+        for (int i = 0; i < m->w; i++) {
+            float fx = (i + .5f) / 4 - .5f;
+            int xa = (int)tk_floorf(fx);
+            float tx = fx - xa;
+            int x0 = tk_maxi(0, xa), x1 = tk_mini(W - 1, xa + 1);
+            m->v[j * m->w + i] = (q.v[y0 * W + x0] * (1 - tx) + q.v[y0 * W + x1] * tx) * (1 - ty) + (q.v[y1 * W + x0] * (1 - tx) + q.v[y1 * W + x1] * tx) * ty;
+        }
+    }
+    tk_fm_free(&q);
+}
+static void fm_blur_full(tk_fm *m, float sigma)
+{
     int r[3];
     boxes(sigma, r);
     int n = tk_maxi(m->w, m->h);
@@ -230,14 +270,16 @@ static inline void over_px(uint32_t *d, float r, float g, float b, float a)     
 }
 void tk_draw_fm(tk_bmp *b, const tk_fm *m, int ox, int oy, const tk_paint *p, float alpha)
 {
+    tk_col sc = tk_paint_at(p, 0, 0);
+    int solid = p->kind == TK_P_SOLID;
     for (int j = 0; j < m->h; j++) {
         int y = oy + j;
         if (y < 0 || y >= b->h) continue;
         for (int i = 0; i < m->w; i++) {
             int x = ox + i;
             float c = m->v[j * m->w + i] * alpha;
-            if (x < 0 || x >= b->w || c <= 0) continue;
-            tk_col s = tk_paint_at(p, x + 0.5f, y + 0.5f);
+            if (x < 0 || x >= b->w || c < 1.0f / 1024) continue;
+            tk_col s = solid ? sc : tk_paint_at(p, x + 0.5f, y + 0.5f);
             over_px(&b->px[y * b->stride + x], s.r * c, s.g * c, s.b * c, s.a * c);
         }
     }
@@ -334,9 +376,41 @@ static void box_mirror(float *v, float *t, int n, int r)
 #undef MIR
     tk_memcpy(v, t, (size_t)n * 4);
 }
+static void bmp_blur_full(tk_bmp *b, float sigma);
 void tk_bmp_blur(tk_bmp *b, float sigma)
 {
     if (sigma < 0.3f) return;
+    if (sigma < 8 || b->w < 16 || b->h < 16) { bmp_blur_full(b, sigma); return; }
+    /* as tk_fm_blur: a wide gaussian at a quarter of the resolution, then bilinear up */
+    tk_bmp a, q;
+    if (!tk_bmp_new(&a, (b->w + 1) / 2, (b->h + 1) / 2)) { bmp_blur_full(b, sigma); return; }
+    tk_bmp_new(&q, (a.w + 1) / 2, (a.h + 1) / 2);
+    tk_bmp_down2(&a, b);
+    tk_bmp_down2(&q, &a);
+    bmp_blur_full(&q, sigma / 4);
+    for (int j = 0; j < b->h; j++) {
+        float fy = (j + .5f) / 4 - .5f;
+        int ya = (int)tk_floorf(fy);
+        unsigned ty = (unsigned)((fy - ya) * 256);
+        int y0 = tk_maxi(0, ya), y1 = tk_mini(q.h - 1, ya + 1);
+        for (int i = 0; i < b->w; i++) {
+            float fx = (i + .5f) / 4 - .5f;
+            int xa = (int)tk_floorf(fx);
+            unsigned tx = (unsigned)((fx - xa) * 256);
+            int x0 = tk_maxi(0, xa), x1 = tk_mini(q.w - 1, xa + 1);
+            uint32_t p00 = q.px[y0 * q.w + x0], p01 = q.px[y0 * q.w + x1], p10 = q.px[y1 * q.w + x0], p11 = q.px[y1 * q.w + x1], o = 0;
+            for (int sh = 0; sh < 32; sh += 8) {
+                unsigned t0 = (p00 >> sh & 255) * (256 - tx) + (p01 >> sh & 255) * tx, t1 = (p10 >> sh & 255) * (256 - tx) + (p11 >> sh & 255) * tx;
+                o |= ((t0 * (256 - ty) + t1 * ty + 32768) >> 16) << sh;
+            }
+            b->px[j * b->stride + i] = o;
+        }
+    }
+    tk_bmp_free(&a);
+    tk_bmp_free(&q);
+}
+static void bmp_blur_full(tk_bmp *b, float sigma)
+{
     int r[3];
     boxes(sigma, r);
     int n = tk_maxi(b->w, b->h);

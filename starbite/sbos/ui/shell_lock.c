@@ -86,19 +86,22 @@ static void d_rrect(dc *d, float x, float y, float w, float h, float r, tk_col c
 }
 static void d_ring(dc *d, float cx, float cy, float r, float sw, float frac, tk_col c, int caps)
 {
-    float ox = d->ox, oy = d->oy;
+    /* only the ring's box */
+    int bx = (int)tk_floorf(PT(cx - r - sw) - d->ox) - 2, by = (int)tk_floorf(PT(cy - r - sw) - d->oy) - 2;
+    int n = (int)PT(2 * (r + sw)) + 5;
     tk_fm m;
-    tk_fm_new(&m, d->b->w, d->b->h);
+    tk_fm_new(&m, n, n);
+    float ox = d->ox + bx, oy = d->oy + by;
     if (frac >= 1) tk_fm_arc(&m, ox, oy, PT(cx), PT(cy), PT(r), PT(sw), 0, 6.2831853f, 0);
     else if (frac > 0) tk_fm_arc(&m, ox, oy, PT(cx), PT(cy), PT(r), PT(sw), 0, 6.2831853f * frac, caps);
     tk_paint p = tk_solid(c);
-    tk_draw_fm(d->b, &m, 0, 0, &p, 1);
+    tk_draw_fm(d->b, &m, bx, by, &p, 1);
     tk_fm_free(&m);
 }
 
 /* ---- state ------------------------------------------------------------------------------------------------- */
 static tk_layer root, home, lockflat, lockg, lstatic, mark, glyph_c, glyph_o, list, etool, hint, homebar;
-static tk_layer focus, scrim, fgrp, fcard, ffill, flabel, fthumb, boot;
+static tk_layer focus, scrim, fgrp, fcard, ffill, flabel, fthumb, boot, bootbar;
 typedef struct {
     tk_layer face, facelit, icon, iconlit, ring, grp;
     tk_bmp ringbuf;
@@ -243,6 +246,7 @@ static void build_hold(int i)
             q->cov[j * q->ring.bmp.w + k] = tk_clampf(.5f - (tk_fabsf(tk_sqrtf(px * px + py * py) - PT(28)) - PT(1)), 0, 1);
         }
     q->ms = i ? 700 : 420;
+    q->scale_t = q->scale_from = q->scale_to = 1;
     q->facelit.hidden = q->iconlit.hidden = 1;
     q->ring.hidden = 1;
     tk_layer_add(&q->grp, &q->face);
@@ -319,16 +323,22 @@ static void head_content(dc *d, int g, float top)
 }
 static void ghost(tk_bmp *G0, float ox, float oy, float x, float y, float w, float op)
 {
-    /* an .lg ghost: radius 0 0 22 22, its own backdrop the list content under it, then faded as one */
-    tk_bmp t;
-    tk_bmp_new(&t, G0->w, G0->h);
+    /* an .lg ghost: radius 0 0 22 22, its own backdrop the list content under it, then faded as one (worked in
+     * a box around it with room for its shadow) */
+    int X = tk_maxi(0, (int)tk_floorf(PT(x - 56) - ox)), Y = tk_maxi(0, (int)tk_floorf(PT(y - 56) - oy));
+    int W = tk_mini(G0->w - X, (int)PT(w + 112)), H = tk_mini(G0->h - Y, (int)PT(26 + 112));
+    tk_bmp t, g;
+    tk_bmp_new(&t, W, H);
+    tk_bmp_new(&g, W, H);
+    tk_bmp_copy(&g, 0, 0, G0, X, Y, W, H);
     tk_corner = (tk_r4){ 0, 0, PT(22), PT(22) };
     tk_use_r4 = 1;
-    tk_glass_local(&t, G0, PT(x) - ox, PT(y) - oy, PT(w), PT(26), PT(22));
-    tk_glass_bake(&t, 0, PT(x) - ox, PT(y) - oy, PT(w), PT(26), PT(22), 0, 1);
+    tk_glass_local(&t, &g, PT(x) - ox - X, PT(y) - oy - Y, PT(w), PT(26), PT(22));
+    tk_glass_bake(&t, 0, PT(x) - ox - X, PT(y) - oy - Y, PT(w), PT(26), PT(22), 0, 1);
     tk_use_r4 = 0;
-    tk_blit(G0, &t, 0, 0, op);
+    tk_blit(G0, &t, X, Y, op);
     tk_bmp_free(&t);
+    tk_bmp_free(&g);
 }
 static void build_card(int g)
 {
@@ -585,37 +595,42 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         tk_paint t = tk_solid(TK_RGBA(4, 8, 26, .28f));
         tk_fill_rrect(&scrim.bmp, -2, -2, TK_W + 4, TK_H + 4, 0, &t, 1);
     }
-    /* the card: its backdrop is the scrim filtered again (blur 14, saturate 1.9, brightness 1.06) */
-    relayer(&fcard);
-    dc d = mk(&fcard, "fcard", 14, 196, 362, 267, 56, 0);
-    {
-        tk_bmp crop;
-        tk_bmp_new(&crop, d.b->w, d.b->h);
-        tk_bmp_copy(&crop, 0, 0, &scrim.bmp, (int)d.ox, (int)d.oy, crop.w, crop.h);
-        tk_glass_local(d.b, &crop, PT(14) - d.ox, PT(196) - d.oy, PT(362), PT(267), PT(32));
-        tk_bmp_free(&crop);
+    /* the card: its backdrop is the scrim filtered again (blur 14, saturate 1.9, brightness 1.06), taken once at
+     * rest and moved with the card while it springs in (Chrome filters the live scene under it each frame) */
+    float sy = 0;
+    for (int pass = 0; pass < 1; pass++) {
+        tk_layer *L = &fcard;
+        relayer(L);
+        dc d = mk(L, pass ? "fcard-moving" : "fcard", 14, 196, 362, 267, 56, 0);
+        if (!pass) {
+            tk_bmp crop;
+            tk_bmp_new(&crop, d.b->w, d.b->h);
+            tk_bmp_copy(&crop, 0, 0, &scrim.bmp, (int)d.ox, (int)d.oy, crop.w, crop.h);
+            tk_glass_local(d.b, &crop, PT(14) - d.ox, PT(196) - d.oy, PT(362), PT(267), PT(32));
+            tk_bmp_free(&crop);
+        }
+        d_glass(&d, 14, 196, 362, 267, 32, 0, 1);
+        char tn[40] = "t66-";
+        tk_memcpy(tn + 4, s->k, tk_strlen(s->k) + 1);
+        d_icon(&d, tn, 34, 216, 1);
+        d_text(&d, TK_IT600, 13, 114, 225.16f + 13, gr->name, 0, 0, W(.62f), 0);
+        d_text(&d, TK_IT800, 27, 114, base_of(TK_IT800, 27, 243.16f, 29.7f), s->name, -.6f, 0, INK, 0);
+        int last = !tk_strcmp(s->k, LAST);
+        const char *dt[3] = { "Version", last ? "Last used" : "When it shuts down", "When it shuts down" };
+        const char *dd[3] = { s->meta, last ? "Today" : "Back to Starbite", "Back to Starbite" };
+        int nf = last ? 3 : 2;
+        float dtw = 0;
+        for (int i = 0; i < nf; i++) dtw = tk_maxf(dtw, tw(TK_IT400, 14.5f, dt[i], 0, 0));
+        for (int i = 0; i < nf; i++) {
+            float b = 298 + 24 * i + 14;
+            d_text(&d, TK_IT400, 14.5f, 34, b, dt[i], 0, 0, W(.55f), 0);
+            d_text(&d, TK_IT400, 14.5f, 34 + dtw + 14, b, dd[i], 0, TK_TNUM, INK, 0);
+        }
+        sy = 298 + 17 * nf + 7 * (nf - 1) + 18;
+        /* the slider: dark glass whose backdrop is the card under it */
+        tk_glass_local(d.b, d.b, PT(34) - d.ox, PT(sy) - d.oy, PT(322), PT(62), PT(31));
+        d_glass(&d, 34, sy, 322, 62, 31, 1, 1);
     }
-    d_glass(&d, 14, 196, 362, 267, 32, 0, 1);
-    char tn[40] = "t66-";
-    tk_memcpy(tn + 4, s->k, tk_strlen(s->k) + 1);
-    d_icon(&d, tn, 34, 216, 1);
-    d_text(&d, TK_IT600, 13, 114, 225.16f + 13, gr->name, 0, 0, W(.62f), 0);
-    d_text(&d, TK_IT800, 27, 114, base_of(TK_IT800, 27, 243.16f, 29.7f), s->name, -.6f, 0, INK, 0);
-    int last = !tk_strcmp(s->k, LAST);
-    const char *dt[3] = { "Version", last ? "Last used" : "When it shuts down", "When it shuts down" };
-    const char *dd[3] = { s->meta, last ? "Today" : "Back to Starbite", "Back to Starbite" };
-    int nf = last ? 3 : 2;
-    float dtw = 0;
-    for (int i = 0; i < nf; i++) dtw = tk_maxf(dtw, tw(TK_IT400, 14.5f, dt[i], 0, 0));
-    for (int i = 0; i < nf; i++) {
-        float b = 298 + 24 * i + 14;
-        d_text(&d, TK_IT400, 14.5f, 34, b, dt[i], 0, 0, W(.55f), 0);
-        d_text(&d, TK_IT400, 14.5f, 34 + dtw + 14, b, dd[i], 0, TK_TNUM, INK, 0);
-    }
-    float sy = 298 + 17 * nf + 7 * (nf - 1) + 18;
-    /* the slider: dark glass whose backdrop is the card under it */
-    tk_glass_local(d.b, d.b, PT(34) - d.ox, PT(sy) - d.oy, PT(322), PT(62), PT(31));
-    d_glass(&d, 34, sy, 322, 62, 31, 1, 1);
     relayer(&ffill);
     focus_sy = sy;
     dc f = mk(&ffill, "fill", 34, sy, 62, 62, 1, 0);
@@ -668,6 +683,18 @@ static void set_focus(float p)
     focus.hidden = !focus_on;
 }
 
+/* the lock as one cached layer for the unlock (its opacity applies to it as a whole, as CSS group opacity), made
+ * while nothing moves so the swipe's first frame does not pay for it */
+static void flatten_lock(void)
+{
+    if (flat_ver == lock_ver) return;
+    tk_flatten(&lockg, &lockflat.bmp, &lockflat.glass);
+    flat_ver = lock_ver;
+    tk_layer_dirty(&lockflat);
+    tk_layer_prepare(&lockflat);
+    tk_layer_prepare(&home);
+}
+
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
 {
@@ -683,11 +710,7 @@ static void set_lock(float y)
         lockg.hidden = 0;
         lockflat.hidden = 1;
     } else {
-        if (flat_ver != lock_ver) {
-            tk_flatten(&lockg, &lockflat.bmp, &lockflat.glass);
-            flat_ver = lock_ver;
-            tk_layer_dirty(&lockflat);
-        }
+        flatten_lock();
         lockg.hidden = 1;
         lockflat.hidden = la <= 0;
         lockflat.y = PT(y);
@@ -696,14 +719,36 @@ static void set_lock(float y)
 }
 
 /* ---- init and states --------------------------------------------------------------------------------------- */
+static uint64_t tb;
+static void lap(const char *what)
+{
+    uint64_t t = tk_us();
+    char b[64];
+    int n = 0;
+    while (*what) b[n++] = *what++;
+    b[n++] = ' ';
+    uint64_t ms = (t - tb) / 1000;
+    char d[20];
+    int k = 0;
+    do { d[k++] = (char)('0' + ms % 10); ms /= 10; } while (ms);
+    while (k) b[n++] = d[--k];
+    b[n++] = 'm'; b[n++] = 's'; b[n] = 0;
+    tk_log(b);
+    tb = t;
+}
+
 int sh_init(tk_comp *c)
 {
     C = c;
+    tb = tk_us();
     build_wall();
+    lap("bake: wallpaper + glass backdrop");
     tk_layer_init(&root, "root");
     build_home();
+    lap("bake: home");
     build_lstatic();
     build_marks();
+    lap("bake: lock static");
     tk_layer_init(&list, "list");
     list.clip = 1;
     list.fade_top = PT(18);
@@ -711,9 +756,11 @@ int sh_init(tk_comp *c)
     layout_list();
     for (int g = 0; g < NG; g++) build_card(g);
     build_etool();
+    lap("bake: cards");
     tk_layer_add(&list, &etool);
     build_hold(0);
     build_hold(1);
+    lap("bake: holds");
     tk_layer_init(&lockg, "lock");
     tk_layer_add(&lockg, &lstatic);
     tk_layer_add(&lockg, &mark);
@@ -1052,15 +1099,27 @@ int sh_tick(float dt, float t)
                 float w = tw(TK_IT700, 22, s, 0, 0);
                 d_text(&d, TK_IT700, 22, (390 - w) / 2, base_of(TK_IT700, 22, 416, 0), s, 0, 0, INK, 0);
                 d_rrect(&d, 120, 465, 150, 4, 2, tk_hex(0x222222, 1));
+                dc e = mk(&bootbar, "bootbar", 120, 465, 4, 4, 0, 0);
+                d_rrect(&e, 120, 465, 4, 4, 2, W(1));
+                bootbar.slice = 2;
+                bootbar.slice_s0 = bootbar.slice_s1 = PT(2);
+                boot.child = &bootbar;
             }
+            /* the bar: width 0 -> 100 % over 2.1 s, CSS ease, starting with the overlay */
+            bootbar.slice_h = PT(4 + 146 * tk_bezier(.25f, .1f, .25f, 1, tk_minf(1, boot_t / 2100)));
             boot.hidden = 0;
             boot_a = tk_minf(1, boot_t / 350);
             boot.alpha = boot_a;
             mv = 1;
-            if (boot_t > 2600) booting = 0;
+            if (boot_t > 2400) booting = 0;
         }
     }
     return mv;
+}
+
+void sh_idle(void)
+{
+    if (!sh_moving() && locked && lockY == 0 && !focus_on) flatten_lock();
 }
 
 int sh_moving(void)

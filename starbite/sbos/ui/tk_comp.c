@@ -225,8 +225,10 @@ static int slice_row(const tk_layer *l, int v, int srch, float res)
     return (int)(s0 + (v - s0) * (mid > 0 ? smid / mid : 0));
 }
 
-static uint32_t rowbuf[TK_W + 16];
-static uint8_t maskbuf[TK_W + 16];
+static uint32_t rowbuf[TK_W + 16], vrow[TK_W + 16];
+static uint8_t maskbuf[TK_W + 16], mrow[TK_W + 16];
+static int colu[TK_W + 16];
+static uint16_t colw[TK_W + 16];
 
 static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
 {
@@ -249,6 +251,7 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
     float ia = 1.0f / A, ib = 1.0f / B;
     int fast = tk_fabsf(A - 1) < 1e-4f && tk_fabsf(B - 1) < 1e-4f && l->slice != 2;
     int ox = (int)tk_floorf(TX + .5f), oy = (int)tk_floorf(TY + .5f);   /* snapped offset for the fast path */
+    int colok = 0, umin = 0, umax = 0;
     for (int y = d.y0; y < d.y1; y++) {
         float f = fade_at(it, (y + .5f) / k);
         unsigned al = (unsigned)(it->alpha * f * 255 + .5f);
@@ -271,43 +274,68 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
                 row_glass(dst + i0, T->bw->px + (size_t)y * T->bw->stride + d.x0 + i0, gm->v + (size_t)v * gm->w + u0 + i0, i1 - i0, al);
             row_over(dst + i0, src->px + (size_t)v * src->stride + u0 + i0, i1 - i0, al);
         } else {
-            /* bilinear: target px centre -> source px */
+            /* bilinear, separable: the two source rows blended once over the span, then each target px from two
+             * neighbours of that row (the columns' table is made once per item) */
             float sv = ((y + .5f) - TY) * ib - .5f;
             if (l->slice == 1) sv = (float)slice_row(l, (int)tk_floorf(sv + .5f), src->h, res);
             int v0 = (int)tk_floorf(sv);
-            float fy = sv - v0;
             if (v0 < -1 || v0 >= src->h) continue;
-            int va = tk_maxi(0, v0), vb = tk_mini(src->h - 1, v0 + 1);
-            unsigned wy = (unsigned)(fy * 256 + .5f);
-            if (v0 < 0) wy = 256;
-            if (v0 + 1 >= src->h) wy = 0;
-            const uint32_t *ra = src->px + (size_t)va * src->stride, *rb = src->px + (size_t)vb * src->stride;
-            for (int i = 0; i < n; i++) {
-                float su = ((d.x0 + i + .5f) - TX) * ia - .5f;
-                if (l->slice == 2) su = (float)slice_row(l, (int)tk_floorf(su + .5f), src->w, res);
-                int u0 = (int)tk_floorf(su);
-                unsigned wx = (unsigned)((su - u0) * 256 + .5f);
-                uint32_t p[4] = { 0, 0, 0, 0 };
-                uint8_t mk[4] = { 0, 0, 0, 0 };
-                for (int q = 0; q < 4; q++) {
-                    int uu = u0 + (q & 1), vv = q < 2 ? va : vb;
-                    if (uu < 0 || uu >= src->w) continue;
-                    if (q < 2 && v0 < 0) continue;
-                    if (q >= 2 && v0 + 1 >= src->h) continue;
-                    p[q] = (q < 2 ? ra : rb)[uu];
-                    if (gm) mk[q] = gm->v[(size_t)vv * gm->w + uu];
+            unsigned wy = (unsigned)((sv - v0) * 256 + .5f);
+            const uint32_t *ra = v0 >= 0 ? src->px + (size_t)v0 * src->stride : 0;
+            const uint32_t *rb = v0 + 1 < src->h ? src->px + (size_t)(v0 + 1) * src->stride : 0;
+            const uint8_t *ma = gm && ra ? gm->v + (size_t)v0 * gm->w : 0, *mb = gm && rb ? gm->v + (size_t)(v0 + 1) * gm->w : 0;
+            if (!colok) {
+                for (int q = 0; q < n; q++) {
+                    float su = ((d.x0 + q + .5f) - TX) * ia - .5f;
+                    if (l->slice == 2) su = (float)slice_row(l, (int)tk_floorf(su + .5f), src->w, res);
+                    int u0 = (int)tk_floorf(su);
+                    colu[q] = u0;
+                    colw[q] = (uint16_t)((su - u0) * 256 + .5f);
                 }
-                uint32_t o = 0;
-                for (int sh = 0; sh < 32; sh += 8) {
-                    unsigned t0 = (p[0] >> sh & 255) * (256 - wx) + (p[1] >> sh & 255) * wx;
-                    unsigned t1 = (p[2] >> sh & 255) * (256 - wx) + (p[3] >> sh & 255) * wx;
-                    o |= ((t0 * (256 - wy) + t1 * wy + 32768) >> 16) << sh;
+                umin = colu[0]; umax = colu[n - 1] + 1;
+                if (umin > umax) { int t = umin; umin = umax - 1; umax = t + 1; }
+                umin = tk_maxi(umin, -1); umax = tk_mini(umax, src->w);
+                colok = 1;
+            }
+            /* vblend[u + 1] for u in [umin, umax], zero outside the source */
+            uint32_t *vb = vrow + 1;
+            int ua = tk_maxi(umin, 0), ub = tk_mini(umax, src->w - 1);
+            if (umin < 0) vb[-1] = 0;
+            if (umax >= src->w) vb[src->w] = 0;
+            if (ra && rb) {
+                int u = ua;
+                uint8x8_t w1 = vdup_n_u8((uint8_t)(wy > 255 ? 255 : wy)), w0 = vdup_n_u8((uint8_t)(255 - (wy > 255 ? 255 : wy)));
+                for (; u + 2 <= ub + 1; u += 2) {
+                    uint8x8_t A8 = vld1_u8((const uint8_t *)(ra + u)), B8 = vld1_u8((const uint8_t *)(rb + u));
+                    vst1_u8((uint8_t *)(vb + u), div255(vmlal_u8(vmull_u8(A8, w0), B8, w1)));
                 }
-                rowbuf[i] = o;
-                if (gm) {
-                    unsigned t0 = mk[0] * (256 - wx) + mk[1] * wx, t1 = mk[2] * (256 - wx) + mk[3] * wx;
-                    maskbuf[i] = (uint8_t)((t0 * (256 - wy) + t1 * wy + 32768) >> 16);
+                for (; u <= ub; u++) {
+                    uint32_t a = ra[u], b = rb[u], o = 0;
+                    for (int sh = 0; sh < 32; sh += 8) o |= (((a >> sh & 255) * (256 - wy) + (b >> sh & 255) * wy + 128) >> 8) << sh;
+                    vb[u] = o;
                 }
+                if (gm) for (int u2 = ua; u2 <= ub; u2++) mrow[u2 + 1] = (uint8_t)((ma[u2] * (256 - wy) + mb[u2] * wy + 128) >> 8);
+            } else {
+                const uint32_t *r1 = ra ? ra : rb;
+                const uint8_t *m1 = ma ? ma : mb;
+                unsigned w = ra ? 256 - wy : wy;
+                for (int u = ua; u <= ub; u++) {
+                    uint32_t a = r1[u], o = 0;
+                    for (int sh = 0; sh < 32; sh += 8) o |= (((a >> sh & 255) * w + 128) >> 8) << sh;
+                    vb[u] = o;
+                    if (gm) mrow[u + 1] = (uint8_t)((m1[u] * w + 128) >> 8);
+                }
+            }
+            if (gm) { if (umin < 0) mrow[0] = 0; if (umax >= src->w) mrow[src->w + 1] = 0; }
+            for (int q = 0; q < n; q++) {
+                int u0 = colu[q];
+                uint32_t p0 = u0 >= -1 && u0 < src->w ? vb[u0] : 0, p1 = u0 + 1 >= 0 && u0 + 1 <= src->w ? vb[u0 + 1] : 0;
+                if (u0 < -1 || u0 + 1 > src->w) { rowbuf[q] = 0; if (gm) maskbuf[q] = 0; continue; }
+                uint32_t wx = colw[q], iw = 256 - wx;
+                uint32_t rb2 = ((p0 & 0x00ff00ffu) * iw + (p1 & 0x00ff00ffu) * wx) >> 8 & 0x00ff00ffu;
+                uint32_t ga = ((p0 >> 8 & 0x00ff00ffu) * iw + (p1 >> 8 & 0x00ff00ffu) * wx) & 0xff00ff00u;
+                rowbuf[q] = rb2 | ga;
+                if (gm) maskbuf[q] = (uint8_t)((mrow[u0 + 1] * iw + mrow[u0 + 2] * wx) >> 8);
             }
             if (glass && T->collect) {
                 uint8_t *cm = T->collect->v + (size_t)y * T->collect->w + d.x0;
@@ -320,43 +348,51 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
 }
 
 /* ---- the present: the half canvas's rect, 2x, into the panel (1/4 3/4 bilinear) -------------------------- */
+static uint32_t prT[TK_W / 2 + 32], prB[TK_W / 2 + 32];
 static void up2x_rect(tk_bmp *fb, const tk_bmp *h, tk_irect r)
 {
+    /* per half row: the two vertical blends (3/4 this row + 1/4 the row above / below) into padded temp rows,
+     * then each horizontally into two panel px (3/4 + 1/4 the left / right neighbour): 3 loads per 4 px */
+    int x0 = r.x0, x1 = r.x1, n = x1 - x0;
+    uint32_t *T = prT + 8, *B = prB + 8;
     for (int j = r.y0; j < r.y1; j++) {
         const uint32_t *c = h->px + (size_t)j * h->stride;
-        const uint32_t *nu = h->px + (size_t)tk_maxi(0, j - 1) * h->stride;     /* row above */
-        const uint32_t *nd = h->px + (size_t)tk_mini(h->h - 1, j + 1) * h->stride;
-        uint32_t *o0 = fb->px + (size_t)(2 * j) * fb->stride, *o1 = o0 + fb->stride;
-        int i = r.x0;
-        for (; i + 4 <= r.x1 && i >= 1 && i + 5 <= h->w; i += 4) {
-            uint8x16_t C = vld1q_u8((const uint8_t *)(c + i)), L = vld1q_u8((const uint8_t *)(c + i - 1)), Rr = vld1q_u8((const uint8_t *)(c + i + 1));
-            uint8x16_t U = vld1q_u8((const uint8_t *)(nu + i)), D = vld1q_u8((const uint8_t *)(nd + i));
-            uint8x16_t UL = vld1q_u8((const uint8_t *)(nu + i - 1)), UR = vld1q_u8((const uint8_t *)(nu + i + 1));
-            uint8x16_t DL = vld1q_u8((const uint8_t *)(nd + i - 1)), DR = vld1q_u8((const uint8_t *)(nd + i + 1));
-            /* vertical 3/4 1/4 first, then horizontal */
-            uint8x16_t cu = vrhaddq_u8(C, vrhaddq_u8(C, U)), cd = vrhaddq_u8(C, vrhaddq_u8(C, D));
-            uint8x16_t lu = vrhaddq_u8(L, vrhaddq_u8(L, UL)), ld = vrhaddq_u8(L, vrhaddq_u8(L, DL));
-            uint8x16_t ru = vrhaddq_u8(Rr, vrhaddq_u8(Rr, UR)), rd = vrhaddq_u8(Rr, vrhaddq_u8(Rr, DR));
-            uint8x16_t a0 = vrhaddq_u8(cu, vrhaddq_u8(cu, lu)), a1 = vrhaddq_u8(cu, vrhaddq_u8(cu, ru));
-            uint8x16_t b0 = vrhaddq_u8(cd, vrhaddq_u8(cd, ld)), b1 = vrhaddq_u8(cd, vrhaddq_u8(cd, rd));
-            uint32x4x2_t t = vzipq_u32(vreinterpretq_u32_u8(a0), vreinterpretq_u32_u8(a1));
-            uint32x4x2_t b = vzipq_u32(vreinterpretq_u32_u8(b0), vreinterpretq_u32_u8(b1));
-            vst1q_u32(o0 + 2 * i, t.val[0]); vst1q_u32(o0 + 2 * i + 4, t.val[1]);
-            vst1q_u32(o1 + 2 * i, b.val[0]); vst1q_u32(o1 + 2 * i + 4, b.val[1]);
+        const uint32_t *u = h->px + (size_t)tk_maxi(0, j - 1) * h->stride;
+        const uint32_t *d = h->px + (size_t)tk_mini(h->h - 1, j + 1) * h->stride;
+        int a0 = tk_maxi(0, x0 - 1), a1 = tk_mini(h->w, x1 + 1), i = a0;
+        for (; i + 4 <= a1; i += 4) {
+            uint8x16_t C = vld1q_u8((const uint8_t *)(c + i)), U = vld1q_u8((const uint8_t *)(u + i)), D = vld1q_u8((const uint8_t *)(d + i));
+            vst1q_u8((uint8_t *)(T + i - x0), vrhaddq_u8(C, vrhaddq_u8(C, U)));
+            vst1q_u8((uint8_t *)(B + i - x0), vrhaddq_u8(C, vrhaddq_u8(C, D)));
         }
-        for (; i < r.x1; i++) {
-            int il = tk_maxi(0, i - 1), ir = tk_mini(h->w - 1, i + 1);
-            for (int q = 0; q < 4; q++) {
-                const uint32_t *rv = q < 2 ? nu : nd;
-                int ih = q & 1 ? ir : il;
-                uint32_t o = 0;
-                for (int sh = 0; sh < 32; sh += 8) {
-                    unsigned v = 9 * (c[i] >> sh & 255) + 3 * (c[ih] >> sh & 255) + 3 * (rv[i] >> sh & 255) + (rv[ih] >> sh & 255);
-                    o |= ((v + 8) >> 4) << sh;
-                }
-                (q < 2 ? o0 : o1)[2 * i + (q & 1)] = o;
+        for (; i < a1; i++) {
+            uint32_t ot = 0, ob = 0;
+            for (int sh = 0; sh < 32; sh += 8) {
+                ot |= ((3 * (c[i] >> sh & 255) + (u[i] >> sh & 255) + 2) >> 2) << sh;
+                ob |= ((3 * (c[i] >> sh & 255) + (d[i] >> sh & 255) + 2) >> 2) << sh;
             }
+            T[i - x0] = ot;
+            B[i - x0] = ob;
         }
+        if (x0 == 0) { T[-1] = T[0]; B[-1] = B[0]; }
+        if (x1 == h->w) { T[n] = T[n - 1]; B[n] = B[n - 1]; }
+        uint32_t *o0 = fb->px + (size_t)(2 * j) * fb->stride + 2 * x0, *o1 = o0 + fb->stride;
+        int k = 0;
+        for (; k + 4 <= n; k += 4) {
+            uint8x16_t Tc = vld1q_u8((const uint8_t *)(T + k)), Tl = vld1q_u8((const uint8_t *)(T + k - 1)), Tr = vld1q_u8((const uint8_t *)(T + k + 1));
+            uint8x16_t Bc = vld1q_u8((const uint8_t *)(B + k)), Bl = vld1q_u8((const uint8_t *)(B + k - 1)), Br = vld1q_u8((const uint8_t *)(B + k + 1));
+            uint32x4x2_t t = vzipq_u32(vreinterpretq_u32_u8(vrhaddq_u8(Tc, vrhaddq_u8(Tc, Tl))), vreinterpretq_u32_u8(vrhaddq_u8(Tc, vrhaddq_u8(Tc, Tr))));
+            uint32x4x2_t b = vzipq_u32(vreinterpretq_u32_u8(vrhaddq_u8(Bc, vrhaddq_u8(Bc, Bl))), vreinterpretq_u32_u8(vrhaddq_u8(Bc, vrhaddq_u8(Bc, Br))));
+            vst1q_u32(o0 + 2 * k, t.val[0]); vst1q_u32(o0 + 2 * k + 4, t.val[1]);
+            vst1q_u32(o1 + 2 * k, b.val[0]); vst1q_u32(o1 + 2 * k + 4, b.val[1]);
+        }
+        for (; k < n; k++)
+            for (int q = 0; q < 4; q++) {
+                const uint32_t *R = q < 2 ? T : B;
+                uint32_t a = R[k], e = R[k + (q & 1 ? 1 : -1)], o = 0;
+                for (int sh = 0; sh < 32; sh += 8) o |= ((3 * (a >> sh & 255) + (e >> sh & 255) + 2) >> 2) << sh;
+                (q < 2 ? o0 : o1)[2 * k + (q & 1)] = o;
+            }
     }
 }
 
@@ -482,3 +518,5 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask)
     tgt T = { out, mask && mask->v ? mask : 0, 0, 1 };
     for (int i = 0; i < flist.n; i++) draw_item(&T, &flist.it[i], screen);
 }
+
+void tk_layer_prepare(tk_layer *l) { if (l->bmp.px) half_of(l); }

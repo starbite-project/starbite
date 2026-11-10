@@ -14,5 +14,6 @@ void sh_touch(int phase, float x, float y, float t_ms);
 /* advance time by dt s (the springs, holds, transitions); returns 1 while anything moves */
 int sh_tick(float dt, float t_ms);
 int sh_moving(void);
+void sh_idle(void);                       /* idle time: prepare the caches the next gesture needs */
 
 #endif

@@ -132,6 +132,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         t += dt;
         frame++;
         rest_frames = motion ? 0 : rest_frames + 1;
+        if (!motion) sh_idle();     /* between frames: on the phone, the time left in the frame */
         if (t > total + 8000) break;
     }
     (void)rest_frames;

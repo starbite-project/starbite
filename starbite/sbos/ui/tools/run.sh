@@ -36,7 +36,7 @@ film)
     mkdir -p "$out/films"
     "$out/sbtk-host" "$out/sbtk.pak" film "$out/films/$name.bgra" "$script" half > "$out/films/$name.frames.txt"
     swift "$here/encode.swift" "$out/films/$name.bgra" 720 1480 60 "$out/films/$name.mp4"
-    rm -f "$out/films/$name.bgra"
+    [ -n "${KEEP:-}" ] || rm -f "$out/films/$name.bgra"
     "$py" "$here/frametimes.py" "$out/films/$name.frames.txt" ;;
 *) echo "usage: run.sh assets|build|compare|film NAME" >&2; exit 2 ;;
 esac
