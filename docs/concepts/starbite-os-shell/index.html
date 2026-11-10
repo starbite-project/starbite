@@ -1,0 +1,901 @@
+<meta charset="utf-8">
+<title>Starbite OS Shell</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400..800&family=Outfit:wght@200..500&display=swap">
+<style>
+/* Layout: one phone (390 x 801.7 pt; x 3.6923 = the S9's 1440 x 2960) centred on a dark stage, notes beside it on wide screens.
+   Visual language: the Starbite boot menu (deep-blue ground, star, Inter Tight, vendor group cards) rendered in Liquid Glass.
+   Behaviour: iOS lock / home / Control Centre / app zoom, every motion a spring. */
+:root{
+  color-scheme: dark;
+  --stage:#03050c; --ink:#eef1f6; --dim:#8a93a3; --accent:#6fb3ff;
+  --tint:rgba(36,56,120,.20); --tint-dark:rgba(14,22,48,.42);
+  --em:#ff5a4e; --amber:#ffb547; --ok:#4cd964; --call:#34c759;
+  --f-ui:"Inter Tight", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --f-mark:"Outfit", "Inter Tight", system-ui, sans-serif;
+}
+html,body{height:100%}
+body{margin:0;background:var(--stage);color:var(--ink);font-family:var(--f-ui);-webkit-font-smoothing:antialiased;
+  padding-left:max(16px, env(safe-area-inset-left,0px));padding-right:max(16px, env(safe-area-inset-right,0px));padding-block:0;overflow:hidden}
+button{font-family:inherit;color:inherit}
+.stage{height:100%;display:flex;align-items:center;justify-content:center;gap:48px}
+.notes{width:300px;flex:none;font-size:14px;line-height:1.55;color:var(--dim)}
+.notes h1{font-size:22px;color:var(--ink);margin:0 0 4px;font-weight:700;letter-spacing:-.3px}
+.notes h2{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink);margin:20px 0 6px;font-weight:600}
+.notes ul{margin:0;padding-left:18px}.notes li{margin:3px 0}
+.notes b{color:var(--ink);font-weight:600}
+.notes code{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--accent)}
+@media (max-width:820px){.notes{display:none}.stage{gap:0}}
+
+.holder{position:relative;flex:none}
+.phone{position:absolute;left:0;top:0;width:390px;height:802px;transform-origin:0 0;border-radius:52px;overflow:hidden;background:#000;
+  box-shadow:0 0 0 10px #0b0e16,0 0 0 11px #1d2330,0 30px 80px rgba(0,0,0,.6);touch-action:none;user-select:none;-webkit-user-select:none;isolation:isolate}
+.phone.bare{border-radius:0;box-shadow:none}
+.layer{position:absolute;inset:0}
+.hidden{display:none!important}
+
+/* ---------- wallpaper: two grounds, crossfaded for Emergency ---------- */
+.wall{position:absolute;inset:-30px;transition:opacity .7s ease}
+.wall.n{background:radial-gradient(120% 70% at 92% 4%, rgba(70,120,255,.6), transparent 60%),radial-gradient(90% 60% at 8% 96%, rgba(40,80,210,.42), transparent 70%),radial-gradient(60% 40% at 50% 55%, rgba(30,60,160,.25), transparent 70%),linear-gradient(180deg,#071131 0%,#0b1a4c 45%,#050a1e 100%)}
+.wall.e{opacity:0;background:radial-gradient(120% 70% at 92% 4%, rgba(255,96,60,.5), transparent 60%),radial-gradient(90% 60% at 8% 96%, rgba(255,150,60,.3), transparent 70%),linear-gradient(180deg,#260807 0%,#2c0e08 45%,#0d0403 100%)}
+.em-mode .wall.e{opacity:1}
+.star{position:absolute;right:34px;top:56px;width:36px;height:36px;opacity:.9;filter:drop-shadow(0 0 18px rgba(170,200,255,.9));transition:filter .7s}
+.em-mode .star{filter:drop-shadow(0 0 18px rgba(255,170,120,.9))}
+
+/* ---------- Liquid Glass ---------- */
+.lg{position:relative;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.035) 46%,rgba(255,255,255,.06)),var(--tint);
+  backdrop-filter:blur(14px) saturate(1.9) brightness(1.06);-webkit-backdrop-filter:blur(14px) saturate(1.9) brightness(1.06);
+  box-shadow:inset 0 1.5px 0 rgba(255,255,255,.42),inset 0 -1px 0 rgba(255,255,255,.12),inset 0 0 22px rgba(255,255,255,.05),0 10px 28px rgba(0,0,0,.26)}
+.lg::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:radial-gradient(110% 70% at 18% -10%,rgba(255,255,255,.24),transparent 55%),radial-gradient(80% 50% at 100% 120%,rgba(160,200,255,.12),transparent 60%)}
+.lg::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;padding:1px;
+  background:linear-gradient(140deg,rgba(255,255,255,.65),rgba(255,255,255,.08) 28%,rgba(255,255,255,0) 50%,rgba(255,255,255,.08) 72%,rgba(255,255,255,.45));
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0)}
+.lg.dark{background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.02) 46%,rgba(255,255,255,.04)),var(--tint-dark)}
+.lg > *{position:relative;z-index:1}
+.shadowtxt{text-shadow:0 1px 3px rgba(0,0,0,.28)}
+
+/* ---------- status bar ---------- */
+.sb{position:absolute;left:0;right:0;top:0;height:48px;display:flex;align-items:center;justify-content:space-between;padding:0 30px 0 36px;font-size:15px;font-weight:600;z-index:5;pointer-events:none}
+.sb .r{display:flex;align-items:center;gap:6px}
+.sb svg{display:block}
+
+/* ---------- LOCK ---------- */
+#lock{z-index:20;will-change:transform}
+.mark{position:absolute;left:0;right:0;top:50px;text-align:center;font:300 16px var(--f-mark);letter-spacing:-.15px;color:rgba(255,255,255,.82);transition:opacity .3s}
+.mark svg{vertical-align:6px;margin-left:1px}
+.lockglyph{position:absolute;left:50%;top:50px;width:15px;height:20px;margin-left:-7.5px;opacity:0;transition:opacity .2s}
+.lockglyph.show{opacity:1}
+.lockglyph .shackle{transition:transform .25s ease;transform-origin:11px 9px}
+.lockglyph.open .shackle{transform:translateX(5px) translateY(-2px) rotate(25deg)}
+.date{position:absolute;left:0;right:0;top:78px;text-align:center;font-size:19px;font-weight:600;color:rgba(255,255,255,.9)}
+.clock{position:absolute;left:0;right:0;top:96px;text-align:center;font-size:106px;line-height:1.02;font-weight:700;letter-spacing:-4px;font-variant-numeric:tabular-nums;
+  background:linear-gradient(180deg,#ffffff 0%,#dfe9ff 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
+.empill{position:absolute;left:50%;top:50px;transform:translateX(-50%);display:none;align-items:center;gap:6px;padding:4px 11px;border-radius:99px;
+  background:rgba(255,90,78,.22);box-shadow:inset 0 0 0 1px rgba(255,140,120,.5);font-size:11px;font-weight:700;letter-spacing:.08em;color:#ffd7d2}
+.em-mode .empill{display:flex}.em-mode .mark{opacity:0}
+.widgets{position:absolute;left:0;right:0;top:220px;display:flex;justify-content:center;gap:10px}
+.w-circ{width:72px;height:72px;border-radius:50%;display:grid;place-items:center;font-size:17px;font-weight:700;font-variant-numeric:tabular-nums}
+.w-circ svg.ringsvg{position:absolute;inset:0;z-index:1}
+.w-circ .lbl{position:absolute;bottom:11px;left:0;right:0;text-align:center;font-size:9.5px;font-weight:700;color:rgba(255,255,255,.72);letter-spacing:.04em}
+.w-circ .num{margin-top:-8px}
+.w-rect{width:160px;height:72px;border-radius:22px;padding:11px 14px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center}
+.w-rect .k{font-size:11px;font-weight:700;color:rgba(255,255,255,.7);display:flex;gap:5px;align-items:center;letter-spacing:.03em}
+.w-rect .v{font-size:17px;font-weight:700;white-space:nowrap;margin-top:2px}
+
+.nwrap{position:absolute;left:0;right:0;top:310px;bottom:118px}
+.nscroll{position:absolute;inset:0;overflow-y:auto;scrollbar-width:none;padding:10px 14px 14px;box-sizing:border-box;
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 18px,#000 calc(100% - 14px),transparent);mask-image:linear-gradient(to bottom,transparent 0,#000 18px,#000 calc(100% - 14px),transparent)}
+.nscroll::-webkit-scrollbar{display:none}
+.vgroup{margin-bottom:10px;border-radius:26px;overflow:visible}
+.vgroup.stack{margin-bottom:22px}
+.vgroup{position:relative}
+.vcard{border-radius:26px;overflow:hidden;cursor:pointer;z-index:2}
+.ghosts{z-index:1}
+.vhead{display:grid;grid-template-columns:46px 1fr 18px;gap:12px;align-items:center;padding:11px 14px 11px 11px}
+.vhead .tile{width:46px;height:46px}
+.vhead b{display:block;font-size:21px;font-weight:800;letter-spacing:-.5px;line-height:1.1}
+.vhead .sub{font-size:13.5px;color:rgba(255,255,255,.82);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vhead .sub em{font-style:normal;color:rgba(255,255,255,.48)}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ok);margin-right:6px;vertical-align:1px}
+.chev{transition:transform .35s cubic-bezier(.3,1.4,.4,1)}
+.vgroup.open .chev{transform:rotate(90deg)}
+.members{height:0;overflow:hidden}
+.mrow{display:grid;grid-template-columns:38px 1fr auto;gap:12px;align-items:center;padding:9px 14px 9px 15px;margin:0 6px 4px;border-radius:18px;cursor:pointer;position:relative}
+.mrow::before{content:"";position:absolute;left:62px;right:10px;top:-2px;height:.5px;background:rgba(255,255,255,.14)}
+.mrow:first-child::before{display:none}
+.mrow:active{background:rgba(255,255,255,.08)}
+.mrow .tile{width:38px;height:38px}
+.mrow b{font-size:16.5px;font-weight:700;letter-spacing:-.2px;display:block}
+.mrow .sub{font-size:13px;color:rgba(255,255,255,.72);margin-top:1px}
+.tag{font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:3px 7px;border-radius:99px;background:rgba(111,179,255,.18);color:#cfe4ff;white-space:nowrap}
+.tag.run{background:rgba(76,217,100,.18);color:#c9f7d3}
+.ghosts{position:relative;height:0}
+.ghosts i{position:absolute;left:0;right:0;height:26px;border-radius:0 0 22px 22px}
+.ghosts i:nth-child(1){top:-18px;margin:0 9px;opacity:.7;z-index:2}
+.ghosts i:nth-child(2){top:-12px;margin:0 19px;opacity:.4;z-index:1}
+.open .ghosts{display:none}
+.etool{display:flex;gap:10px;justify-content:center;margin:12px 0 4px}
+.etool button{border:0;border-radius:99px;padding:8px 14px;font-size:13px;font-weight:600;display:flex;gap:6px;align-items:center;cursor:pointer}
+
+.qbtn{position:absolute;bottom:56px;width:52px;height:52px;border-radius:50%;border:0;display:grid;place-items:center;color:#fff;cursor:pointer;transition:transform .25s cubic-bezier(.3,1.5,.4,1)}
+.qbtn.hold{transform:scale(1.22)}
+.qbtn.lit{background:#fff;color:#111}
+.qbtn.emb.lit{background:var(--em);color:#fff}
+#q-light{left:46px}#q-em{right:46px}
+.qbtn .ring{position:absolute;inset:-4px;width:60px;height:60px;pointer-events:none;z-index:2}
+.hint{position:absolute;left:0;right:0;bottom:30px;text-align:center;font-size:13px;font-weight:600;color:rgba(255,255,255,.75);opacity:0;transition:opacity .3s}
+.hint.show{opacity:1}
+.homebar{position:absolute;left:50%;bottom:9px;width:136px;height:5px;margin-left:-68px;border-radius:3px;background:#fff;z-index:90;pointer-events:none;transition:background .3s}
+.homebar.darkbar{background:#111}
+.grab{position:absolute;left:0;right:0;bottom:0;height:30px;z-index:89}
+
+/* ---------- focus sheet ---------- */
+#focus{z-index:40;display:none}
+#focus .scrim{position:absolute;inset:0;background:rgba(4,8,26,.28);backdrop-filter:blur(22px) saturate(1.3);-webkit-backdrop-filter:blur(22px) saturate(1.3);opacity:0}
+#focus.on{display:block}
+.fcard{position:absolute;left:14px;right:14px;top:196px;border-radius:32px;padding:20px;transform-origin:50% 40%}
+.fcard .top{display:flex;gap:14px;align-items:center}
+.fcard .tile{width:66px;height:66px;flex:none}
+.fcard h4{margin:0;font-size:27px;font-weight:800;letter-spacing:-.6px;line-height:1.1}
+.fcard .vend{font-size:13px;color:rgba(255,255,255,.62);font-weight:600;margin-bottom:2px}
+.facts{margin:16px 0 18px;display:grid;grid-template-columns:auto 1fr;gap:7px 14px;font-size:14.5px}
+.facts dt{color:rgba(255,255,255,.55)}
+.facts dd{margin:0;font-variant-numeric:tabular-nums}
+.slider{position:relative;height:62px;border-radius:31px;overflow:hidden;touch-action:none}
+.slider .fill{position:absolute;left:0;top:0;bottom:0;width:62px;border-radius:31px;background:rgba(111,179,255,.28);z-index:1}
+.slider .thumb{position:absolute;left:5px;top:5px;width:52px;height:52px;border-radius:50%;background:#fff;display:grid;place-items:center;box-shadow:0 2px 12px rgba(0,0,0,.35);cursor:grab;z-index:3}
+.slider .lbl{position:absolute;inset:0;display:grid;place-items:center;padding-left:44px;font-size:16.5px;font-weight:600;z-index:2;
+  background:linear-gradient(90deg,rgba(255,255,255,.4) 0%,#fff 45%,rgba(255,255,255,.4) 60%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shine 2.6s linear 3}
+@keyframes shine{from{background-position:120% 0}to{background-position:-80% 0}}
+
+/* ---------- HOME ---------- */
+#home{z-index:10;opacity:0;will-change:transform,opacity}
+.pages{position:absolute;left:0;top:0;height:100%;width:780px;display:flex;will-change:transform}
+.page{position:relative;width:390px;height:100%}
+.wgrid{position:absolute;left:24px;right:24px;top:60px;display:grid;grid-template-columns:158px 158px;justify-content:space-between}
+.wbig{height:158px;border-radius:24px;padding:14px;box-sizing:border-box;overflow:hidden}
+.wbig .lab{font-size:11.5px;font-weight:700;color:rgba(255,255,255,.7);letter-spacing:.03em;display:flex;gap:6px;align-items:center}
+.wbig .big{font-size:38px;font-weight:800;letter-spacing:-1.2px;margin-top:4px;font-variant-numeric:tabular-nums}
+.wbig .row{display:flex;justify-content:space-between;font-size:12.5px;color:rgba(255,255,255,.82);margin-top:3px;font-variant-numeric:tabular-nums}
+.wbig .tiles{display:grid;grid-template-columns:repeat(2,52px);justify-content:space-between;gap:8px;margin-top:9px}
+.wbig .tiles i{display:block;width:52px;height:52px}
+.wcap{text-align:center;font-size:12px;font-weight:500;margin-top:6px}
+.apps{position:absolute;left:22px;right:22px;display:grid;grid-template-columns:repeat(4,1fr);row-gap:20px}
+.page .apps.p1{top:258px}.page .apps.p2{top:62px}
+.app{display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;border:0;background:none;font:500 12px var(--f-ui);padding:0;position:relative}
+.app .ai{width:62px;height:62px;transition:transform .2s cubic-bezier(.3,1.4,.4,1),filter .2s}
+.app:active .ai{transform:scale(.88);filter:brightness(.8)}
+.app .badge{position:absolute;top:-6px;right:2px;min-width:20px;height:20px;border-radius:10px;background:#ff3b30;font-size:12px;font-weight:700;display:grid;place-items:center;padding:0 5px;box-sizing:border-box;z-index:2}
+.search{position:absolute;left:50%;top:640px;transform:translateX(-50%);padding:7px 15px;border-radius:99px;border:0;font-size:13px;font-weight:600;display:flex;gap:6px;align-items:center;cursor:pointer;z-index:3}
+.search .dots{display:flex;gap:6px}
+.search .dots i{width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.4)}
+.search .dots i.on{background:#fff}
+.dock{position:absolute;left:12px;right:12px;bottom:18px;height:96px;border-radius:36px;display:grid;grid-template-columns:repeat(4,1fr);align-items:center;justify-items:center;padding:0 10px;z-index:3}
+.dock .app span{display:none}
+
+/* ---------- app window ---------- */
+#appwin{z-index:30;display:none;background:#0a0f1f;transform-origin:0 0;overflow:hidden}
+#appwin.on{display:block}
+.aw{position:absolute;inset:0;overflow-y:auto;scrollbar-width:none;padding:56px 0 40px;box-sizing:border-box}
+.aw::-webkit-scrollbar{display:none}
+.aw h1{font-size:34px;font-weight:800;letter-spacing:-.8px;margin:8px 20px 12px}
+.aw .sec{font-size:13px;color:rgba(255,255,255,.55);margin:18px 36px 6px;text-transform:uppercase;letter-spacing:.04em}
+.grp{border-radius:16px;background:#151c33;margin:0 16px;overflow:hidden}
+.row{display:flex;justify-content:space-between;align-items:center;padding:13px 16px;font-size:16px;border-bottom:.5px solid rgba(255,255,255,.08);gap:10px}
+.row:last-child{border-bottom:0}
+.row span{color:rgba(255,255,255,.55);font-variant-numeric:tabular-nums;text-align:right}
+.row .av{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:13px;font-weight:700;flex:none}
+.row .who{display:flex;gap:12px;align-items:center;min-width:0}
+.row .who div{min-width:0}
+.row .who small{display:block;font-size:13.5px;color:rgba(255,255,255,.55);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:230px}
+.cap{font-size:12.5px;color:rgba(255,255,255,.5);margin:8px 36px 0;line-height:1.4}
+.banner{margin:0 16px 14px;padding:10px 14px;border-radius:14px;background:rgba(255,181,71,.14);color:#ffd8a0;font-size:13.5px;line-height:1.35}
+/* phone keypad */
+.kp-num{height:64px;text-align:center;font-size:36px;font-weight:500;letter-spacing:1px;margin-top:30px;font-variant-numeric:tabular-nums}
+.keys{display:grid;grid-template-columns:repeat(3,78px);gap:18px 26px;justify-content:center;margin-top:16px}
+.key{width:78px;height:78px;border-radius:50%;border:0;background:rgba(255,255,255,.14);display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;color:#fff}
+.key:active{background:rgba(255,255,255,.34)}
+.key b{font-size:32px;font-weight:500;line-height:1}
+.key small{font-size:10px;font-weight:700;letter-spacing:.14em;color:rgba(255,255,255,.75);margin-top:2px;height:12px}
+.callbtn{width:78px;height:78px;border-radius:50%;border:0;background:var(--call);display:grid;place-items:center;margin:18px auto 0;cursor:pointer}
+.tabs{position:absolute;left:16px;right:16px;bottom:22px;height:62px;border-radius:31px;display:grid;grid-template-columns:repeat(4,1fr);align-items:center;z-index:3}
+.tabs button{border:0;background:none;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:10.5px;font-weight:600;color:rgba(255,255,255,.6);cursor:pointer}
+.tabs button.on{color:var(--accent)}
+/* messages */
+.thread{padding:6px 14px 90px;display:flex;flex-direction:column;gap:5px}
+.bub{max-width:74%;padding:9px 13px;border-radius:20px;font-size:16px;line-height:1.3}
+.bub.in{align-self:flex-start;background:#262c3e;border-bottom-left-radius:6px}
+.bub.out{align-self:flex-end;background:#2f7bf6;border-bottom-right-radius:6px}
+.ts{text-align:center;font-size:12px;color:rgba(255,255,255,.45);margin:10px 0 4px}
+.compose{position:absolute;left:12px;right:12px;bottom:28px;display:flex;gap:8px;align-items:center;z-index:3}
+.compose input{flex:1;height:40px;border-radius:20px;border:0;padding:0 16px;font:16px var(--f-ui);color:#fff;outline:none;background:transparent}
+.compose .field{flex:1;border-radius:22px}
+.sendb{width:36px;height:36px;border-radius:50%;border:0;background:#2f7bf6;display:grid;place-items:center;cursor:pointer}
+.navback{position:absolute;left:12px;top:52px;border:0;background:none;color:var(--accent);font-size:17px;display:flex;align-items:center;gap:2px;cursor:pointer;z-index:4}
+.threadhead{text-align:center;margin-top:4px}
+.threadhead .av{width:52px;height:52px;margin:0 auto 4px;font-size:18px}
+.photos{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;margin-top:8px}
+.photos i{aspect-ratio:1;display:block;max-width:100%}
+
+/* ---------- control centre ---------- */
+#cc{z-index:50;display:none}
+#cc .scrim{position:absolute;inset:0;background:rgba(4,8,24,.3);backdrop-filter:blur(26px) saturate(1.3);-webkit-backdrop-filter:blur(26px) saturate(1.3)}
+#cc.on{display:block}
+.ccg{position:absolute;left:24px;right:24px;top:92px;display:grid;grid-template-columns:repeat(4,70px);grid-auto-rows:70px;justify-content:space-between;row-gap:16px;
+  grid-template-areas:"conn conn bri vol" "conn conn bri vol" "light rot em save" "timer calc wifi2 cam";transform-origin:85% 0}
+.cct{border-radius:22px;display:grid;place-items:center;cursor:pointer;position:relative;color:#fff;border:0;padding:0}
+.cct.on{background:#fff;color:#0a0f1f}
+.cct.on::before,.cct.on::after{display:none}
+.cct.emt.on{background:var(--em);color:#fff}
+.cct small{position:absolute;bottom:-17px;left:-6px;right:-6px;text-align:center;font-size:10.5px;color:rgba(255,255,255,.8);font-weight:600}
+.conn{grid-area:conn;border-radius:28px;display:grid;grid-template-columns:1fr 1fr;place-items:center;padding:12px}
+.conn i{width:52px;height:52px;border-radius:50%;display:grid;place-items:center;background:rgba(255,255,255,.18);cursor:pointer;font-style:normal}
+.conn i.on{background:var(--accent)}
+.sl{border-radius:24px;overflow:hidden;cursor:ns-resize;touch-action:none;place-items:end center}
+.sl .lvl{position:absolute;left:0;right:0;bottom:0;background:#fff;z-index:1}
+.sl svg{position:relative;z-index:2;margin-bottom:14px}
+
+/* ---------- spotlight ---------- */
+#spot{z-index:45;display:none}
+#spot.on{display:block}
+#spot .scrim{position:absolute;inset:0;background:rgba(4,8,24,.35);backdrop-filter:blur(30px) saturate(1.3);-webkit-backdrop-filter:blur(30px) saturate(1.3)}
+.sfield{position:absolute;left:16px;right:16px;top:60px;height:44px;border-radius:22px;display:flex;align-items:center;gap:8px;padding:0 14px;box-sizing:border-box}
+.sfield input{flex:1;border:0;background:transparent;font:17px var(--f-ui);color:#fff;outline:none}
+.sres{position:absolute;left:16px;right:16px;top:118px;bottom:40px;overflow-y:auto;scrollbar-width:none}
+.sres h5{margin:14px 6px 8px;font-size:13px;color:rgba(255,255,255,.6);text-transform:uppercase;letter-spacing:.05em}
+.sres .hit{display:flex;gap:12px;align-items:center;padding:8px 6px;border-radius:14px;cursor:pointer}
+.sres .hit:active{background:rgba(255,255,255,.08)}
+.sres .hit .tile{width:40px;height:40px}
+.sres .hit small{display:block;color:rgba(255,255,255,.6);font-size:12.5px}
+
+/* ---------- boot overlay ---------- */
+#boot{z-index:80;display:none;background:#000;opacity:0;transition:opacity .35s}
+#boot.on{display:block}#boot.vis{opacity:1}
+.bt{position:absolute;left:0;right:0;top:300px;text-align:center}
+.bt .tile{width:96px;height:96px;margin:0 auto 20px}
+.bt b{font-size:22px;font-weight:700}
+.bar{width:150px;height:4px;border-radius:2px;background:#222;margin:22px auto 0;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:#fff;transition:width 2.1s ease}
+
+.toast{position:absolute;left:50%;top:52px;transform:translate(-50%,-90px);z-index:95;padding:9px 15px;border-radius:99px;font-size:13px;font-weight:600;white-space:nowrap;transition:transform .45s cubic-bezier(.2,1.3,.3,1)}
+.toast.show{transform:translate(-50%,0)}
+.tile{display:block}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition-duration:.01ms!important}}
+</style>
+
+<div class="stage">
+  <div class="holder" id="holder">
+    <div class="phone" id="phone" aria-label="Starbite OS concept, interactive">
+      <div class="wall n"></div><div class="wall e"></div>
+      <svg class="star" viewBox="0 0 100 100" aria-hidden="true"><path d="M50 0C54 34 66 46 100 50 66 54 54 66 50 100 46 66 34 54 0 50 34 46 46 34 50 0Z" fill="#e8f1ff"/></svg>
+
+      <!-- HOME -->
+      <div class="layer" id="home">
+        <div class="sb shadowtxt"><span class="sbtime">21:05</span><span class="r" data-sbicons></span></div>
+        <div class="pages" id="pages">
+          <div class="page">
+            <div class="wgrid">
+              <div><div class="wbig lg" id="wBattery"></div><div class="wcap shadowtxt">Battery</div></div>
+              <div><div class="wbig lg" id="wSystems" role="button" tabindex="0" aria-label="Systems: show all"></div><div class="wcap shadowtxt">Systems</div></div>
+            </div>
+            <div class="apps p1" id="apps1"></div>
+          </div>
+          <div class="page"><div class="apps p2" id="apps2"></div></div>
+        </div>
+        <button class="search lg dark shadowtxt" id="searchBtn" aria-label="Search"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span id="searchLbl">Search</span></button>
+        <div class="dock lg" id="dock"></div>
+      </div>
+
+      <!-- LOCK -->
+      <div class="layer" id="lock">
+        <div class="sb shadowtxt"><span>No SIM</span><span class="r" data-sbicons></span></div>
+        <div class="mark shadowtxt" id="mark">starbite<svg width="9" height="9" viewBox="0 0 100 100"><path d="M50 0C54 34 66 46 100 50 66 54 54 66 50 100 46 66 34 54 0 50 34 46 46 34 50 0Z" fill="#6fb3ff"/></svg></div>
+        <svg class="lockglyph" id="lockglyph" viewBox="0 0 22 30" aria-hidden="true"><path class="shackle" d="M5.5 13V8.5a5.5 5.5 0 0 1 11 0V13" fill="none" stroke="#fff" stroke-width="2.6"/><rect x="1.5" y="12.5" width="19" height="16" rx="4" fill="#fff"/></svg>
+        <div class="empill"><svg width="10" height="10" viewBox="0 0 24 24"><path d="M12 2c1 5 6 6 6 12a6 6 0 0 1-12 0c0-3 2-4 2-7 2 1 3 3 3 5 1-3 1-7 1-10z" fill="#ffb4a8"/></svg>EMERGENCY</div>
+        <div class="date shadowtxt" id="date">Tuesday 10 November</div>
+        <div class="clock" id="clock">21:05</div>
+        <div class="widgets" id="lockWidgets"></div>
+        <div class="nwrap"><div class="nscroll" id="nscroll"></div></div>
+        <button class="qbtn lg dark" id="q-light" aria-label="Flashlight: press and hold"><svg width="20" height="24" viewBox="0 0 20 26" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 2h14v4l-3 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V10L3 6z"/><path d="M10 13v3"/></svg><svg class="ring" viewBox="0 0 60 60"><circle cx="30" cy="30" r="28" fill="none" stroke="#fff" stroke-width="2" stroke-dasharray="176" stroke-dashoffset="176" transform="rotate(-90 30 30)"/></svg></button>
+        <button class="qbtn lg dark emb" id="q-em" aria-label="Emergency mode: press and hold"><svg width="20" height="24" viewBox="0 0 24 28" fill="currentColor"><path d="M12 1c1.3 6 7.5 8 7.5 15.5A7.5 7.5 0 0 1 4.5 16.5c0-4 2.5-5.5 2.5-9 2.6 1.4 4 4 4 6.5 1.4-4 1.5-8.5 1-13z"/></svg><svg class="ring" viewBox="0 0 60 60"><circle cx="30" cy="30" r="28" fill="none" stroke="#ff8a7a" stroke-width="2" stroke-dasharray="176" stroke-dashoffset="176" transform="rotate(-90 30 30)"/></svg></button>
+        <div class="hint shadowtxt" id="hint">Swipe up to open</div>
+      </div>
+
+      <div class="layer" id="appwin"><div class="aw" id="aw"></div></div>
+      <div class="layer" id="spot"><div class="scrim"></div><div class="sfield lg dark"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="sq" placeholder="Search" aria-label="Search apps and systems" autocomplete="off"></div><div class="sres" id="sres"></div></div>
+      <div class="layer" id="focus"><div class="scrim"></div><div class="fcard lg" id="fcard"></div></div>
+      <div class="layer" id="cc"><div class="scrim"></div><div class="sb shadowtxt"><span>No SIM</span><span class="r" data-sbicons></span></div><div class="ccg" id="ccg"></div></div>
+      <div class="layer" id="boot"><div class="bt" id="bt"></div></div>
+
+      <div class="toast lg dark" id="toast"></div>
+      <div class="grab" id="grab"></div>
+      <div class="homebar" id="homebar"></div>
+    </div>
+  </div>
+
+  <aside class="notes">
+    <h1>Starbite OS shell</h1>
+    <div>The lock screen and home screen in the boot menu's look, built from Liquid Glass. Everything on the phone works.</div>
+    <h2>Try</h2>
+    <ul>
+      <li><b>Swipe up</b> from the bottom to unlock. Let go early and it springs back.</li>
+      <li><b>Tap a vendor</b> to open it, then a system, then <b>slide to start</b>. The restart is a short demo here; tap to come back.</li>
+      <li><b>Hold</b> the flame for Emergency, the torch for the light.</li>
+      <li>Home: <b>swipe sideways</b> for page 2, <b>tap Search</b>, <b>pull down top right</b> for Control Centre, <b>top left</b> to lock.</li>
+      <li>Open <b>Phone</b> and <b>Messages</b>. Swipe up from the bar to close an app.</li>
+    </ul>
+    <h2>Port notes</h2>
+    <ul>
+      <li>Logical 390 × 801.7 pt; scale <code>1440/390 = 3.6923</code>.</li>
+      <li>Springs, mass 1: unlock k320 c32, app open k380 c34, close k360 c30, sheet k420 c36, rows k300 c30.</li>
+      <li>Glass samples a pre-blurred copy of the wallpaper only, plus tint, rim and highlight: no live blur of other layers.</li>
+      <li>Layers: wallpaper, home (cached), lock (cached), one overlay (frozen backdrop). Only transforms and alpha change per frame.</li>
+      <li>Systems come from the catalog's visible rows, grouped like the boot menu.</li>
+    </ul>
+  </aside>
+</div>
+
+<script>
+(() => {
+'use strict';
+const W = 390, H = 802;
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const phone = $('#phone'), holder = $('#holder');
+let scale = 1, rect = null;
+
+/* ---------- fit ---------- */
+function fit() {
+  const narrow = innerWidth < 520;
+  const availW = narrow ? innerWidth : Math.min(innerWidth - 400, 460);
+  const availH = innerHeight - (narrow ? 0 : 60);
+  scale = Math.min(availW / W, availH / H); if (!narrow) scale = Math.min(scale, 1.1);
+  phone.style.transform = `scale(${scale})`; phone.classList.toggle('bare', narrow);
+  holder.style.width = W * scale + 'px'; holder.style.height = H * scale + 'px'; rect = null;
+}
+addEventListener('resize', fit); fit();
+const pt = e => { rect = rect || phone.getBoundingClientRect(); return { x: (e.clientX - rect.left) / scale, y: (e.clientY - rect.top) / scale }; };
+addEventListener('scroll', () => rect = null, true);
+
+/* ---------- springs (mass 1; eps relative to the travel) ---------- */
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const SPR = { unlock: [320, 32], open: [380, 34], close: [360, 30], sheet: [420, 36], rows: [300, 30], cc: [400, 36] };
+function spring(from, to, v0, step, done, kind = 'unlock') {
+  const [k, c] = SPR[kind] || SPR.unlock;
+  if (reduce) { step(to); done && done(); return () => {}; }
+  const eps = Math.max(1e-3, Math.abs(to - from) * 0.002);
+  let x = from, v = v0 || 0, last = performance.now(), id, live = true;
+  const tick = now => {
+    if (!live) return;
+    let dt = (now - last) / 1000; last = now; dt = Math.min(dt, 0.05);
+    for (let s = 0; s < 4; s++) { const h = dt / 4, f = -k * (x - to) - c * v; v += f * h; x += v * h; }
+    if (Math.abs(x - to) < eps && Math.abs(v) < eps * 20) { step(to); done && done(); return; }
+    step(x); id = requestAnimationFrame(tick);
+  };
+  id = requestAnimationFrame(tick);
+  return () => { live = false; cancelAnimationFrame(id); };
+}
+function tracker() { const s = []; return {
+  add(y, t = performance.now()) { s.push([y, t]); while (s.length > 2 && t - s[0][1] > 100) s.shift(); },
+  v() { if (s.length < 2) return 0; const a = s[0], b = s[s.length - 1]; return (b[0] - a[0]) / Math.max(1, b[1] - a[1]); } }; }
+
+/* ---------- tiles: squircle + boot-menu tile map + sheen ---------- */
+const SQ = (() => { const n = 5, pts = []; for (let i = 0; i < 72; i++) { const a = i / 72 * Math.PI * 2, c = Math.cos(a), s = Math.sin(a);
+  pts.push([50 + 50 * Math.sign(c) * Math.abs(c) ** (2 / n), 50 + 50 * Math.sign(s) * Math.abs(s) ** (2 / n)]); }
+  return 'M' + pts.map(p => p.map(v => v.toFixed(2)).join(' ')).join('L') + 'Z'; })();
+let uid = 0;
+function T(a, b, inner, light) { const i = ++uid;
+  return `<svg class="tile" viewBox="0 0 100 100" width="100%" height="100%" aria-hidden="true"><defs><clipPath id="c${i}"><path d="${SQ}"/></clipPath><linearGradient id="g${i}" x1="0" y1="0" x2=".75" y2="1"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient><linearGradient id="s${i}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="${light ? .4 : .28}"/><stop offset=".45" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".14"/></linearGradient></defs><g clip-path="url(#c${i})"><rect width="100" height="100" fill="url(#g${i})"/>${inner}<rect width="100" height="100" fill="url(#s${i})"/></g><path d="${SQ}" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="1.6"/></svg>`; }
+const STAR = 'M50 0C54 34 66 46 100 50 66 54 54 66 50 100 46 66 34 54 0 50 34 46 46 34 50 0Z';
+const APPLE = 'M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5 0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9-42.8 61.6-87.5 123.1-155.5 123.1s-85.5-39.5-164-39.5c-76.5 0-103.7 40.8-165.9 40.8s-105.6-57-155.5-127C46.7 790.7 0 663 0 541.8c0-194.4 126.4-297.5 250.8-297.5 66.1 0 121.2 43.4 162.7 43.4 39.5 0 101.1-46 176.3-46 28.5 0 130.9 2.6 198.3 99.2zm-234-181.5c31.1-36.9 53.1-88.1 53.1-139.3 0-7.1-.6-14.3-1.9-20.1-50.6 1.9-110.8 33.7-147.1 75.8-28.5 32.4-55.1 83.6-55.1 135.5 0 7.8 1.3 15.6 1.9 18.1 3.2.6 8.4 1.3 13.6 1.3 45.4 0 102.5-30.4 135.5-71.3z';
+const appleMark = (s = .044, col = '#fff') => `<path transform="translate(${50 - 407 * s} ${48 - 500 * s}) scale(${s})" d="${APPLE}" fill="${col}"/>`;
+const GEAR = 'M77.25 38.71 L78.89 44.02 L86.67 45.07 L86.67 54.93 L78.89 55.98 L77.25 61.29 L74.66 66.20 L79.41 72.45 L72.45 79.41 L66.20 74.66 L61.29 77.25 L55.98 78.89 L54.93 86.67 L45.07 86.67 L44.02 78.89 L38.71 77.25 L33.80 74.66 L27.55 79.41 L20.59 72.45 L25.34 66.20 L22.75 61.29 L21.11 55.98 L13.33 54.93 L13.33 45.07 L21.11 44.02 L22.75 38.71 L25.34 33.80 L20.59 27.55 L27.55 20.59 L33.80 25.34 L38.71 22.75 L44.02 21.11 L45.07 13.33 L54.93 13.33 L55.98 21.11 L61.29 22.75 L66.20 25.34 L72.45 20.59 L79.41 27.55 L74.66 33.80 Z M50 33 A17 17 0 1 0 50 67 A17 17 0 1 0 50 33 Z';
+const ANDROID = 'M918.6 515.1h-918.6c14.7-155.7 103.7-288.7 235.1-359.9l-76.2-132c-4.3-7.4-1.8-16.8 5.6-21.1s16.8-1.8 21.1 5.6l77.2 133.7c58.9-26.9 125.2-41.9 196.5-41.9s137.6 15 196.5 41.9l77.2-133.7c4.2-7.4 13.7-9.9 21-5.6s9.9 13.7 5.6 21.1l-76.2 132c131.5 71.2 220.5 204.2 235.2 359.9zm-248.5-129c21.3 0 38.6-17.3 38.5-38.5 0-21.2-17.2-38.5-38.5-38.5-21.2 0-38.5 17.2-38.5 38.5 0 21.2 17.2 38.5 38.5 38.5zm-421.7 0c21.3 0 38.6-17.3 38.5-38.5 0-21.2-17.2-38.5-38.5-38.5-21.2 0-38.5 17.2-38.5 38.5 0 21.2 17.2 38.5 38.5 38.5z';
+const GOOG = '<g transform="translate(24 24) scale(2.17)"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></g>';
+const TUX = '<ellipse cx="50" cy="58" rx="20" ry="26" fill="#111"/><ellipse cx="50" cy="64" rx="13" ry="18" fill="#f4f1ea"/><circle cx="50" cy="36" r="13" fill="#111"/><circle cx="45.5" cy="34" r="3" fill="#fff"/><circle cx="54.5" cy="34" r="3" fill="#fff"/><path d="M44 41l6 4 6-4-6-2z" fill="#ffb627"/><ellipse cx="41" cy="84" rx="8" ry="3.5" fill="#ffb627"/><ellipse cx="59" cy="84" rx="8" ry="3.5" fill="#ffb627"/>';
+const FLAME = '<path transform="translate(26 18) scale(2)" d="M12 1c1.3 6 7.5 8 7.5 15.5A7.5 7.5 0 0 1 4.5 16.5c0-4 2.5-5.5 2.5-9 2.6 1.4 4 4 4 6.5 1.4-4 1.5-8.5 1-13z" fill="#fff"/>';
+const ICON = {
+  apple: () => T('#5b6478', '#262c3a', appleMark()),
+  microsoft: () => T('#1a3d78', '#0b1a38', '<g transform="translate(27 27)"><rect width="21" height="21" fill="#f35325"/><rect x="25" width="21" height="21" fill="#81bc06"/><rect y="25" width="21" height="21" fill="#05a6f0"/><rect x="25" y="25" width="21" height="21" fill="#ffba08"/></g>'),
+  google: () => T('#ffffff', '#dfe7f2', GOOG, true),
+  linux: () => T('#9a6a35', '#4d2f12', TUX),
+  starbite: () => T('#2f4396', '#141c45', `<path transform="translate(22 22) scale(.56)" d="${STAR}" fill="#d6e6ff"/>`),
+  ios16: () => T('#0a58d0', '#5ac8fa', appleMark(.04)),
+  mac13: () => T('#6a1d45', '#f7a03a', appleMark(.04)),
+  ios26: () => T('#0b2560', '#3d8cff', appleMark(.04)),
+  win11: () => T('#ffffff', '#dbe4f0', '<g transform="translate(28 28)"><rect width="21" height="21" fill="#0078d4"/><rect x="23" width="21" height="21" fill="#0078d4"/><rect y="23" width="21" height="21" fill="#0078d4"/><rect x="23" y="23" width="21" height="21" fill="#0078d4"/></g>', true),
+  android: () => T('#05202c', '#0b4a5e', `<path transform="translate(20 34) scale(.065)" d="${ANDROID}" fill="#3ddc84"/>`),
+  chromeos: () => T('#ffffff', '#e2eaf6', '<circle cx="50" cy="50" r="29" fill="#4b8bf5"/><path d="M50 21a29 29 0 0 1 25.1 14.5H50z" fill="#7ba7f8"/><path d="M75.1 35.5A29 29 0 0 1 62.5 76L50 50z" fill="#2f74ea"/><path d="M62.5 76A29 29 0 0 1 24.9 35.5L50 50z" fill="#1b5fd6"/><circle cx="50" cy="50" r="12" fill="#fff"/><circle cx="50" cy="50" r="8.5" fill="#2f74ea"/>', true),
+  'linux-ubuntu': () => T('#f26a2e', '#c9420f', '<g fill="#fff" transform="translate(50 50)"><circle r="17" fill="none" stroke="#fff" stroke-width="7"/><circle cx="-21" r="7.5"/><circle cx="10.5" cy="-18.2" r="7.5"/><circle cx="10.5" cy="18.2" r="7.5"/></g>'),
+  'linux-pmos': () => T('#0e2b12', '#061508', '<g transform="translate(20 20) scale(.6)"><polygon points="50,6 94,82 6,82" fill="none" stroke="#2fd24a" stroke-width="9" stroke-linejoin="round"/><polygon points="50,40 70,74 30,74" fill="#2fd24a"/></g>'),
+  engineer: () => T('#4a3a92', '#1c1440', `<g transform="translate(14 14) scale(.72)"><path fill="#dbe6ff" fill-rule="evenodd" d="${GEAR}"/><path transform="translate(36 36) scale(.28)" d="${STAR}" fill="#9fcbff"/></g>`),
+  utility: () => T('#137080', '#08262b', '<g fill="none" stroke="#c9fbf5" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><rect x="20" y="35" width="60" height="32" rx="16"/><path d="M35 45v12M29 51h12"/></g><circle cx="62" cy="47" r="3.6" fill="#c9fbf5"/><circle cx="69" cy="55" r="3.6" fill="#c9fbf5"/>'),
+  'starbite-os': () => T('#3a59d6', '#0e1640', `<path transform="translate(20 20) scale(.6)" d="${STAR}" fill="#fff"/>`),
+};
+
+/* ---------- systems: the catalog's visible rows, grouped like the boot menu ---------- */
+const LAST = 'win11';
+const GROUPS = [
+  { key: 'apple', name: 'Apple', items: [
+    { k: 'ios16', name: 'iOS 16', meta: 'Version 16.5' },
+    { k: 'mac13', name: 'macOS Ventura', meta: 'Version 13.5 · on the memory card' },
+    { k: 'ios26', name: 'iOS 26', meta: 'Version 26.6.2', tag: 'Beta' } ] },
+  { key: 'microsoft', name: 'Microsoft', items: [ { k: 'win11', name: 'Windows 11', meta: 'Version 23H2' } ] },
+  { key: 'google', name: 'Google', items: [
+    { k: 'android', name: 'One UI 8', meta: 'Android 16' },
+    { k: 'chromeos', name: 'ChromiumOS', meta: 'Version 158' } ] },
+  { key: 'linux', name: 'Linux', items: [
+    { k: 'linux-ubuntu', name: 'Ubuntu', meta: '26.04 LTS' },
+    { k: 'linux-pmos', name: 'postmarketOS', meta: 'Edge' } ] },
+  { key: 'starbite', name: 'Starbite', items: [
+    { k: 'starbite-os', name: 'Starbite OS', meta: 'This phone', self: true },
+    { k: 'engineer', name: 'Engineer OS', meta: 'Version 2.1 · hardware tests' },
+    { k: 'utility', name: 'Utility OS', meta: 'Version 2.0 · keys, gamepad, sensors' } ] },
+];
+const ALL = GROUPS.flatMap(g => g.items.map(i => ({ ...i, group: g })));
+const BOOTABLE = ALL.filter(i => !i.self);
+
+/* ---------- status bar, clock ---------- */
+const SBI = `<svg width="17" height="12" viewBox="0 0 17 12"><path d="M8.5 2.2c2.3 0 4.4.9 6 2.4l1.2-1.3A10.4 10.4 0 0 0 8.5.4 10.4 10.4 0 0 0 1.3 3.3l1.2 1.3a8.6 8.6 0 0 1 6-2.4zm0 3.5c1.4 0 2.6.5 3.6 1.4l1.2-1.3a7 7 0 0 0-9.6 0l1.2 1.3c1-.9 2.2-1.4 3.6-1.4zm0 3.4c.5 0 1 .2 1.3.5L8.5 11 7.2 9.6c.3-.3.8-.5 1.3-.5z" fill="#fff"/></svg><svg width="27" height="13" viewBox="0 0 27 13"><rect x=".5" y=".5" width="23" height="12" rx="3.6" fill="none" stroke="rgba(255,255,255,.45)"/><rect x="2" y="2" width="17.6" height="9" rx="2.2" fill="#fff"/><path d="M25 4.5v4c.8-.3 1.4-1.1 1.4-2s-.6-1.7-1.4-2z" fill="rgba(255,255,255,.45)"/></svg>`;
+$$('[data-sbicons]').forEach(e => e.innerHTML = SBI);
+const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+function tick() { const d = new Date(), t = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if ($('#clock').textContent !== t) { $('#clock').textContent = t; $$('.sbtime').forEach(e => e.textContent = t); }
+  $('#date').textContent = `${DAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}`; }
+tick(); setInterval(tick, 1000);
+
+let toastT;
+function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2000); }
+
+/* ---------- lock widgets ---------- */
+const ringW = (p, col, num, lbl) => `<div class="w-circ lg dark"><svg class="ringsvg" viewBox="0 0 72 72"><circle cx="36" cy="36" r="31" fill="none" stroke="rgba(255,255,255,.16)" stroke-width="4.5"/><circle cx="36" cy="36" r="31" fill="none" stroke="${col}" stroke-width="4.5" stroke-linecap="round" stroke-dasharray="${(194.8 * p).toFixed(1)} 194.8" transform="rotate(-90 36 36)"/></svg><span class="num">${num}</span><span class="lbl">${lbl}</span></div>`;
+let emergency = false;
+function lockWidgets() {
+  $('#lockWidgets').innerHTML = emergency
+    ? ringW(.87, '#ffb547', '87', 'BATTERY') + `<div class="w-rect lg dark"><div class="k">${'HEAT'}</div><div class="v">Ready · 41 °C</div></div>` + ringW(.0, '#ff5a4e', 'Off', 'SAVING')
+    : ringW(.87, '#4cd964', '87', 'BATTERY') + `<div class="w-rect lg dark"><div class="k"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M5 3 2 6M19 3l3 3"/></svg>ALARM</div><div class="v">07:00 · Vibrate</div></div>` + ringW(.41, '#6fb3ff', '41°', 'TEMP');
+}
+
+/* ---------- lock list: vendor cards, members spring open ---------- */
+const nscroll = $('#nscroll');
+const chev = '<svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.6)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 5 7 7-7 7"/></svg>';
+const openSet = new Set();
+const rowStops = new Map();
+function renderList() {
+  if (emergency) return renderEmergency();
+  nscroll.innerHTML = GROUPS.map(g => {
+    const n = g.items.length, names = g.items.map(i => i.name).join(', ');
+    const rows = g.items.map(i => `<div class="mrow" data-sys="${i.k}" role="button" tabindex="0"><span>${ICON[i.k]()}</span><div><b>${i.name}</b><div class="sub">${i.meta}</div></div>${i.self ? '<span class="tag run">RUNNING</span>' : i.k === LAST ? '<span class="tag">LAST USED</span>' : i.tag ? `<span class="tag">${i.tag.toUpperCase()}</span>` : ''}</div>`).join('');
+    return `<div class="vgroup ${n > 1 ? 'stack' : ''} ${openSet.has(g.key) ? 'open' : ''}" data-g="${g.key}">
+      <div class="vcard lg"><div class="vhead" role="button" tabindex="0" aria-expanded="${openSet.has(g.key)}"><span>${ICON[g.key]()}</span><div><b>${g.name}</b><div class="sub"><span class="dot"></span>${names} <em>· ${n} ${n > 1 ? 'Systems' : 'System'}</em></div></div>${chev}</div>
+      <div class="members">${rows}</div></div>${n > 1 ? '<div class="ghosts"><i class="lg"></i><i class="lg"></i></div>' : ''}</div>`;
+  }).join('') + `<div class="etool"><button class="lg dark" id="tRecovery"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="m5.6 5.6 3.6 3.6M14.8 14.8l3.6 3.6M18.4 5.6l-3.6 3.6M9.2 14.8l-3.6 3.6"/></svg>Recovery</button><button class="lg dark" id="tLab"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linejoin="round"><path d="M9 3h6M10 3v6L4.5 19a1.5 1.5 0 0 0 1.3 2h12.4a1.5 1.5 0 0 0 1.3-2L14 9V3"/></svg>Lab</button></div>`;
+  $$('.vgroup', nscroll).forEach(g => {
+    const m = $('.members', g); if (g.classList.contains('open')) m.style.height = 'auto';
+    $('.vhead', g).onclick = () => toggleGroup(g);
+  });
+  $$('.mrow', nscroll).forEach(r => r.onclick = e => { e.stopPropagation(); const i = ALL.find(x => x.k === r.dataset.sys); i.self ? toast('You are in Starbite OS') : openFocus(i, r); });
+  $('#tRecovery').onclick = () => toast('Recovery: hold to restart into it');
+  $('#tLab').onclick = () => toast('Lab: hidden test systems');
+  $$('[role=button]', nscroll).forEach(b => b.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); b.click(); } }));
+}
+function toggleGroup(g) {
+  const key = g.dataset.g, m = $('.members', g), open = !g.classList.contains('open');
+  g.classList.toggle('open', open); open ? openSet.add(key) : openSet.delete(key);
+  $('.vhead', g).setAttribute('aria-expanded', open);
+  const from = m.getBoundingClientRect().height / scale, to = open ? m.scrollHeight : 0;
+  const rows = $$('.mrow', m);
+  rowStops.get(key) && rowStops.get(key)();
+  rowStops.set(key, spring(from, to, 0, h => {
+    m.style.height = Math.max(0, h) + 'px';
+    const p = to ? h / to : h / (from || 1);
+    rows.forEach((r, i) => { r.style.opacity = Math.max(0, Math.min(1, p * 1.4 - i * .15)); r.style.transform = `translateY(${(1 - Math.min(1, p)) * -14 * (i + 1)}px)`; });
+    if (open && g.getBoundingClientRect().bottom / scale > (nscroll.getBoundingClientRect().bottom - (rect || phone.getBoundingClientRect()).top) / scale) {}
+  }, () => { if (open) { m.style.height = 'auto'; const top = g.offsetTop - 8; if (g.offsetTop + g.offsetHeight > nscroll.scrollTop + nscroll.clientHeight) spring(nscroll.scrollTop, Math.min(top, nscroll.scrollHeight - nscroll.clientHeight), 0, y => nscroll.scrollTop = y, null, 'rows'); } }, 'rows'));
+}
+function renderEmergency() {
+  const card = (ic, t, s, act) => `<div class="vgroup"><div class="vcard lg"><div class="vhead" role="button" tabindex="0" data-act="${act}"><span>${ic}</span><div><b style="font-size:19px">${t}</b><div class="sub">${s}</div></div>${chev}</div></div></div>`;
+  nscroll.innerHTML =
+    card(T('#ff7a45', '#b3261e', FLAME), 'Survival Heat', 'Warms your hands · stops at a 65 °C battery', 'Survival Heat') +
+    card(T('#ffd166', '#e09f1f', '<rect x="30" y="20" width="40" height="62" rx="8" fill="none" stroke="#3a2600" stroke-width="7"/><rect x="40" y="48" width="20" height="26" rx="3" fill="#3a2600"/>'), 'Power Saving', 'Dims the screen and turns off radios', 'Power Saving') +
+    card(T('#ff3b30', '#b3150c', '<text x="50" y="61" text-anchor="middle" font-family="Inter Tight,sans-serif" font-weight="800" font-size="27" fill="#fff">SOS</text>'), 'Emergency SOS', 'Siren, flashing light and your medical card', 'SOS') +
+    card(T('#ff6b6b', '#d62f3f', '<rect x="22" y="28" width="56" height="44" rx="8" fill="#fff"/><path d="M50 40v20M40 50h20" stroke="#d62f3f" stroke-width="7" stroke-linecap="round"/>'), 'Medical Card', 'Shown here without unlocking', 'Medical Card') +
+    `<div class="etool"><button class="lg dark" id="exitEm">Exit Emergency</button></div>`;
+  $('#exitEm').onclick = () => setEmergency(false);
+  $$('[data-act]', nscroll).forEach(c => c.onclick = () => { const a = APPS.find(x => x[1] === c.dataset.act) || ['sos', c.dataset.act]; openAppByName(c.dataset.act, c); });
+}
+
+/* ---------- focus sheet + slide to start ---------- */
+const focus = $('#focus'), fcard = $('#fcard'), fscrim = $('#focus .scrim');
+let fStop;
+function setFocus(p) { fscrim.style.opacity = Math.min(1, p); fcard.style.opacity = Math.min(1, p * 1.5); fcard.style.transform = `translateY(${(1 - p) * 40}px) scale(${.9 + .1 * p})`; }
+function openFocus(i) {
+  fcard.innerHTML = `<div class="top"><span style="width:66px;height:66px;flex:none">${ICON[i.k]()}</span><div><div class="vend">${i.group.name}</div><h4>${i.name}</h4></div></div>
+    <dl class="facts"><dt>Version</dt><dd>${i.meta}</dd>${i.k === LAST ? '<dt>Last used</dt><dd>Today</dd>' : ''}<dt>When it shuts down</dt><dd>Back to Starbite</dd></dl>
+    <div class="slider lg dark" id="slider"><div class="fill" id="sfill"></div><div class="lbl">slide to start ${i.name}</div><div class="thumb" id="thumb"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0a0f1f" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div></div>`;
+  focus.classList.add('on'); fStop && fStop(); fStop = spring(0, 1, 0, setFocus, null, 'sheet'); wireSlider(i);
+}
+function closeFocus(v = 0) { fStop && fStop(); fStop = spring(Number(fcard.style.opacity || 1), 0, v, p => setFocus(Math.max(0, p)), () => focus.classList.remove('on'), 'sheet'); }
+fscrim.addEventListener('pointerdown', () => closeFocus());
+function wireSlider(i) {
+  const s = $('#slider'), th = $('#thumb'), fill = $('#sfill'), max = () => s.clientWidth - 62;
+  let x0 = null, x = 0, stop;
+  const set = v => { x = v; th.style.transform = `translateX(${v}px)`; fill.style.width = 62 + v + 'px'; };
+  th.addEventListener('pointerdown', e => { e.stopPropagation(); stop && stop(); th.setPointerCapture(e.pointerId); x0 = pt(e).x - x; });
+  th.addEventListener('pointermove', e => { if (x0 !== null) set(Math.max(0, Math.min(max(), pt(e).x - x0))); });
+  const up = () => { if (x0 === null) return; x0 = null; if (x > max() * .86) { set(max()); setTimeout(() => boot(i), 100); } else stop = spring(x, 0, 0, set, null, 'sheet'); };
+  th.addEventListener('pointerup', up); th.addEventListener('pointercancel', up);
+}
+function boot(i) {
+  const b = $('#boot');
+  $('#bt').innerHTML = `<span class="tile" style="width:96px;height:96px;margin:0 auto 20px">${ICON[i.k]()}</span><b>Starting ${i.name}</b><div class="bar"><i id="bbar"></i></div>`;
+  b.classList.add('on'); requestAnimationFrame(() => { b.classList.add('vis'); requestAnimationFrame(() => $('#bbar').style.width = '100%'); });
+  const back = () => { b.removeEventListener('pointerdown', back); b.classList.remove('vis'); setTimeout(() => b.classList.remove('on'), 360); focus.classList.remove('on'); };
+  setTimeout(() => b.addEventListener('pointerdown', back), 2200);
+}
+
+/* ---------- press-and-hold buttons ---------- */
+function holdButton(btn, ms, action) {
+  const ringC = btn.querySelector('.ring circle'); let t0, raf, fired = false;
+  const run = () => { const p = Math.min(1, (performance.now() - t0) / ms); ringC.setAttribute('stroke-dashoffset', (176 * (1 - p)).toFixed(1));
+    if (p >= 1 && !fired) { fired = true; navigator.vibrate && navigator.vibrate(18); action(); ringC.setAttribute('stroke-dashoffset', 176); return; } raf = requestAnimationFrame(run); };
+  const end = () => { cancelAnimationFrame(raf); btn.classList.remove('hold'); ringC.setAttribute('stroke-dashoffset', 176); };
+  btn.addEventListener('pointerdown', e => { e.stopPropagation(); fired = false; t0 = performance.now(); btn.classList.add('hold'); raf = requestAnimationFrame(run); });
+  btn.addEventListener('pointerup', () => { if (!fired) toast('Press and hold'); end(); });
+  btn.addEventListener('pointerleave', end); btn.addEventListener('pointercancel', end);
+  btn.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); action(); } });
+}
+let light = false;
+holdButton($('#q-light'), 420, () => { light = !light; $('#q-light').classList.toggle('lit', light); toast(light ? 'Flashlight on' : 'Flashlight off'); });
+holdButton($('#q-em'), 700, () => setEmergency(!emergency));
+function setEmergency(on) {
+  emergency = on; phone.classList.toggle('em-mode', on); $('#q-em').classList.toggle('lit', on);
+  lockWidgets(); renderList(); buildHome(); if (ccOpen) buildCC(); toast(on ? 'Emergency mode on' : 'Emergency mode off');
+}
+
+/* ---------- unlock ---------- */
+const lock = $('#lock'), home = $('#home'), glyph = $('#lockglyph');
+let lockY = 0, locked = true, stopLock;
+function setLock(y) {
+  lockY = y; const p = Math.min(1, Math.max(0, -y / H));
+  lock.style.transform = `translateY(${y}px)`;
+  lock.style.opacity = String(1 - Math.max(0, p - .55) * 2.2);
+  home.style.opacity = String(Math.min(1, p * 1.6));
+  home.style.transform = `scale(${0.92 + 0.08 * Math.min(1, p * 1.3)})`;
+  glyph.classList.toggle('show', p > .02 && !emergency); glyph.classList.toggle('open', p > .06); $('#mark').style.opacity = p > .02 || emergency ? 0 : 1;
+}
+function settleLock(v) {
+  const projected = lockY + v * 200;
+  if (projected < -H * .38 && locked) { stopLock = spring(lockY, -H, v * 1000, setLock, () => { locked = false; lock.style.visibility = 'hidden'; home.style.transform = 'none'; }, 'unlock'); }
+  else stopLock = spring(lockY, 0, v * 1000, setLock, null, 'unlock');
+}
+function relock(listOpen) {
+  lock.style.visibility = 'visible'; locked = true; closeSpot(); closeCC(); if (appOpen) closeApp(0, true);
+  if (listOpen === 'all') GROUPS.forEach(g => openSet.add(g.key)); renderList();
+  stopLock && stopLock(); stopLock = spring(lockY, 0, 0, setLock, null, 'unlock');
+}
+let drag = null;
+lock.addEventListener('pointerdown', e => {
+  if (e.target.closest('.vhead,.mrow,.qbtn,.etool')) return;
+  if (e.target.closest('.nscroll') && nscroll.scrollHeight > nscroll.clientHeight + 1) return;
+  stopLock && stopLock(); const p = pt(e); drag = { y0: p.y, base: lockY, moved: false, tr: tracker() }; drag.tr.add(p.y); lock.setPointerCapture(e.pointerId);
+});
+lock.addEventListener('pointermove', e => { if (!drag) return; const p = pt(e); drag.tr.add(p.y);
+  let dy = p.y - drag.y0 + drag.base; if (Math.abs(p.y - drag.y0) > 5) drag.moved = true; if (dy > 0) dy *= .22; setLock(dy); });
+const endDrag = () => { if (!drag) return; const d = drag; drag = null;
+  if (!d.moved) { const h = $('#hint'); h.classList.add('show'); setTimeout(() => h.classList.remove('show'), 2200); stopLock = spring(0, 0, -700, setLock, null, 'unlock'); return; }
+  settleLock(d.tr.v()); };
+lock.addEventListener('pointerup', endDrag); lock.addEventListener('pointercancel', endDrag);
+
+/* ---------- bottom grab bar: unlock, close sheets and apps ---------- */
+const grab = $('#grab'); let gd = null;
+grab.addEventListener('pointerdown', e => {
+  grab.setPointerCapture(e.pointerId); const p = pt(e);
+  const target = focus.classList.contains('on') ? 'focus' : spotOn ? 'spot' : ccOpen ? 'cc' : appOpen ? 'app' : locked ? 'lock' : 'home';
+  gd = { y0: p.y, x0: p.x, target, base: lockY, tr: tracker() }; gd.tr.add(p.y); stopLock && stopLock(); stopApp && stopApp();
+});
+grab.addEventListener('pointermove', e => { if (!gd) return; const p = pt(e); gd.tr.add(p.y); const dy = Math.min(0, p.y - gd.y0);
+  if (gd.target === 'lock') setLock(gd.base + dy);
+  else if (gd.target === 'app') appFollow(p.x, p.y, dy);
+  else if (gd.target === 'focus') setFocus(Math.max(0, 1 + dy / 300)); });
+const gend = () => { if (!gd) return; const d = gd; gd = null; const v = d.tr.v();
+  if (d.target === 'lock') settleLock(v);
+  else if (d.target === 'app') { if (appTravel < -60 || v < -0.35) closeApp(v); else springAppBack(); }
+  else if (d.target === 'focus') closeFocus();
+  else if (d.target === 'spot') closeSpot();
+  else if (d.target === 'cc') closeCC(); };
+grab.addEventListener('pointerup', gend); grab.addEventListener('pointercancel', gend);
+
+/* ---------- home ---------- */
+const AI = {
+  phone: () => T('#5ef08a', '#16b34a', '<path transform="translate(25 25) scale(2.1)" d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1z" fill="#fff"/>'),
+  messages: () => T('#5ef08a', '#16b34a', '<path d="M50 22c-19 0-34 12-34 27 0 8 4 15 11 20-1 5-4 9-7 11 6 0 12-2 16-5 4 1 9 2 14 2 19 0 34-12 34-28S69 22 50 22z" fill="#fff"/>'),
+  contacts: () => T('#c9ccd3', '#8e939f', '<circle cx="50" cy="40" r="14" fill="#fff"/><path d="M24 78c3-14 14-21 26-21s23 7 26 21z" fill="#fff"/>', true),
+  camera: () => T('#e4e6ea', '#9fa4ad', '<rect x="20" y="32" width="60" height="42" rx="9" fill="#2c2f36"/><rect x="38" y="25" width="24" height="10" rx="3" fill="#2c2f36"/><circle cx="50" cy="53" r="13" fill="#7b8190"/><circle cx="50" cy="53" r="8" fill="#2c2f36"/>', true),
+  photos: () => T('#ffffff', '#eef1f5', ['#ff9f0a','#ffd60a','#30d158','#64d2ff','#5e5ce6','#bf5af2','#ff375f','#ff6b3d'].map((c, i) => `<ellipse cx="50" cy="31" rx="9" ry="17" fill="${c}" opacity=".85" transform="rotate(${i * 45} 50 50)"/>`).join(''), true),
+  music: () => T('#ff6b81', '#ff2d55', '<path d="M42 30v30a8 8 0 1 1-5-7V34l28-6v26a8 8 0 1 1-5-7V30z" fill="#fff"/>'),
+  calendar: () => T('#ffffff', '#f1f2f5', '<rect x="0" y="0" width="100" height="0" fill="#ff3b30"/><text x="50" y="35" text-anchor="middle" font-family="Inter Tight,sans-serif" font-weight="700" font-size="14" fill="#ff3b30" id="calDay">TUE</text><text x="50" y="74" text-anchor="middle" font-family="Inter Tight,sans-serif" font-weight="500" font-size="40" fill="#1c1c1e" id="calNum">10</text>', true),
+  weather: () => T('#4aa3ff', '#1d5fd6', '<circle cx="42" cy="42" r="14" fill="#ffd34d"/><path d="M38 72h30a12 12 0 0 0 0-24 16 16 0 0 0-30 4 10 10 0 0 0 0 20z" fill="#fff"/>'),
+  clock: () => T('#1b1b1f', '#000', '<circle cx="50" cy="50" r="32" fill="#fff"/><path d="M50 30v20l13 8" stroke="#111" stroke-width="5" stroke-linecap="round" fill="none"/><circle cx="50" cy="50" r="3.5" fill="#ff7a00"/>'),
+  calc: () => T('#3a3a3f', '#1d1d20', '<rect x="24" y="22" width="52" height="16" rx="4" fill="#9aa"/><g fill="#d8d8dc"><circle cx="32" cy="52" r="6"/><circle cx="50" cy="52" r="6"/><circle cx="32" cy="70" r="6"/><circle cx="50" cy="70" r="6"/></g><circle cx="68" cy="52" r="6" fill="#ff9f0a"/><circle cx="68" cy="70" r="6" fill="#ff9f0a"/>'),
+  notes: () => T('#fffdf2', '#f3e7b4', '<rect x="0" y="0" width="100" height="24" fill="#ffd54a"/><g stroke="#c9bd8c" stroke-width="3"><path d="M20 44h60M20 58h60M20 72h44"/></g>', true),
+  files: () => T('#4aa3ff', '#0b5fd6', '<path d="M18 34a6 6 0 0 1 6-6h17l7 7h28a6 6 0 0 1 6 6v29a6 6 0 0 1-6 6H24a6 6 0 0 1-6-6z" fill="#fff"/><path d="M18 44h64" stroke="#2b8cff" stroke-width="3"/>'),
+  settings: () => T('#9a9aa0', '#55555a', `<g transform="translate(14 14) scale(.72)"><path fill="#ececf1" fill-rule="evenodd" d="${GEAR}"/></g>`),
+  light: () => T('#ffcc4d', '#f59e0b', '<path d="M38 20h24v12l-6 8v36a3 3 0 0 1-3 3h-6a3 3 0 0 1-3-3V40l-6-8z" fill="#3a2600"/><circle cx="50" cy="56" r="4" fill="#ffcc4d"/>'),
+  battery: () => T('#34c759', '#14883a', '<rect x="22" y="34" width="50" height="32" rx="8" fill="none" stroke="#fff" stroke-width="6"/><rect x="31" y="43" width="26" height="14" rx="3" fill="#fff"/><rect x="74" y="44" width="6" height="12" rx="2" fill="#fff"/>'),
+  medical: () => T('#ff6b6b', '#d62f3f', '<rect x="22" y="28" width="56" height="44" rx="8" fill="#fff"/><path d="M50 40v20M40 50h20" stroke="#d62f3f" stroke-width="7" stroke-linecap="round"/>'),
+  sos: () => T('#ff3b30', '#b3150c', '<text x="50" y="61" text-anchor="middle" font-family="Inter Tight,sans-serif" font-weight="800" font-size="27" fill="#fff">SOS</text>'),
+  terminal: () => T('#2c2c31', '#0c0c0e', '<path d="M26 36l16 14-16 14M48 66h26" stroke="#8ef58b" stroke-width="7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'),
+  browser: () => T('#ffffff', '#e9eef6', '<circle cx="50" cy="50" r="30" fill="#2f7bf6"/><path d="M50 20v60M20 50h60M28 32c12 7 32 7 44 0M28 68c12-7 32-7 44 0" stroke="#fff" stroke-width="3" fill="none"/><ellipse cx="50" cy="50" rx="13" ry="30" stroke="#fff" stroke-width="3" fill="none"/>', true),
+  heat: () => T('#ff7a45', '#b3261e', FLAME),
+  power: () => T('#ffd166', '#e09f1f', '<rect x="30" y="20" width="40" height="62" rx="8" fill="none" stroke="#3a2600" stroke-width="7"/><rect x="40" y="48" width="20" height="26" rx="3" fill="#3a2600"/>'),
+};
+const APPS = [['phone','Phone'],['messages','Messages'],['contacts','Contacts'],['camera','Camera'],['photos','Photos'],['music','Music'],['calendar','Calendar'],['weather','Weather'],['clock','Clock'],['calc','Calculator'],['notes','Notes'],['files','Files'],['settings','Settings'],['light','Flashlight'],['battery','Battery'],['medical','Medical Card'],['sos','SOS'],['terminal','Terminal'],['browser','Browser'],['heat','Survival Heat'],['power','Power Saving']];
+const P1 = ['calendar','weather','clock','camera','photos','music','notes','calc'];
+const P2N = ['contacts','files','light','battery','terminal','browser','medical','sos'];
+const P2E = ['heat','power','sos','medical','light','battery','contacts','files'];
+const DOCK = ['phone','messages','browser','settings'];
+const BADGE = { messages: 2, phone: 1 };
+const appBtn = k => { const name = APPS.find(a => a[0] === k)[1]; return `<button class="app" data-k="${k}" aria-label="${name}"><span class="ai">${AI[k]()}</span>${BADGE[k] ? `<span class="badge">${BADGE[k]}</span>` : ''}<span class="shadowtxt">${name}</span></button>`; };
+function buildHome() {
+  $('#apps1').innerHTML = P1.map(appBtn).join('');
+  $('#apps2').innerHTML = (emergency ? P2E : P2N).map(appBtn).join('');
+  $('#dock').innerHTML = DOCK.map(appBtn).join('');
+  $('#wBattery').innerHTML = `<div class="lab"><svg width="12" height="12" viewBox="0 0 24 24" fill="${emergency ? '#ffb547' : '#4cd964'}"><rect x="2" y="7" width="17" height="10" rx="3"/><rect x="20" y="10" width="2" height="4" rx="1"/></svg>Galaxy S9</div><div class="big">87%</div><div class="row"><span>Battery</span><span>31 °C</span></div><div class="row"><span>Phone</span><span>41 °C</span></div><div class="row"><span>Lasts</span><span>${emergency ? '3 days' : '19 h'}</span></div>`;
+  $('#wSystems').innerHTML = `<div class="lab"><svg width="12" height="12" viewBox="0 0 100 100"><path d="${STAR}" fill="#cfe2ff"/></svg>Recent</div><div class="tiles">${['win11','ios26','engineer','ios16'].map(k => `<i>${ICON[k]()}</i>`).join('')}</div>`;
+  const d = new Date(); $$('#calDay').forEach(e => e.textContent = DAYS[d.getDay()].slice(0, 3).toUpperCase()); $$('#calNum').forEach(e => e.textContent = d.getDate());
+  $$('.app', home).forEach(a => a.onclick = () => { if (pageMoved) return; openApp(a.dataset.k, a); });
+}
+buildHome();
+$('#wSystems').onclick = () => openSpot('');
+
+/* home pages: sideways swipe */
+const pages = $('#pages'); let page = 0, pageX = 0, pd = null, pageMoved = false, pStop;
+function setPage(x) { pageX = x; pages.style.transform = `translateX(${x}px)`; updDots(); }
+function updDots() { const p = -pageX / W; $('#searchLbl').innerHTML = Math.abs(p - Math.round(p)) > .02 || pd ? `<span class="dots"><i class="${p < .5 ? 'on' : ''}"></i><i class="${p >= .5 ? 'on' : ''}"></i></span>` : 'Search'; }
+home.addEventListener('pointerdown', e => {
+  const p = pt(e); if (appOpen) return;
+  if (p.y < 56) { td = { side: p.x > W / 2 ? 'cc' : 'lock', y0: p.y, tr: tracker() }; td.tr.add(p.y); home.setPointerCapture(e.pointerId); return; }
+  if (e.target.closest('.dock,.search,.wbig')) return;
+  pStop && pStop(); pd = { x0: p.x, y0: p.y, base: pageX, tr: tracker(), dir: null }; pageMoved = false; pd.tr.add(p.x);
+});
+home.addEventListener('pointermove', e => {
+  const p = pt(e);
+  if (td) { const dy = Math.max(0, p.y - td.y0); td.tr.add(p.y);
+    if (td.side === 'lock') { lock.style.visibility = 'visible'; stopLock && stopLock(); setLock(-H + dy); } else { ccOpen = true; $('#cc').classList.add('on'); if (!ccBuilt) buildCC(); setCC(Math.min(1, dy / 260)); } return; }
+  if (!pd) return; pd.tr.add(p.x); const dx = p.x - pd.x0, dy = p.y - pd.y0;
+  if (!pd.dir && Math.hypot(dx, dy) > 8) { pd.dir = Math.abs(dx) > Math.abs(dy) ? 'x' : (dy > 0 ? 'down' : 'y'); if (pd.dir === 'x') home.setPointerCapture(e.pointerId); }
+  if (pd.dir === 'x') { pageMoved = true; let x = pd.base + dx; if (x > 0) x *= .3; if (x < -W) x = -W + (x + W) * .3; setPage(x); }
+  if (pd.dir === 'down' && dy > 40) { pd = null; openSpot(''); }
+});
+let td = null;
+const homeUp = () => {
+  if (td) { const t = td; td = null; const v = t.tr.v();
+    if (t.side === 'lock') { if (-lockY < H * .7 || v > .4) relock(); else stopLock = spring(lockY, -H, 0, setLock, () => lock.style.visibility = 'hidden', 'unlock'); }
+    else { if (ccP > .35 || v > .4) openCC(v); else closeCC(); } return; }
+  if (!pd) return; const d = pd; pd = null;
+  if (d.dir === 'x') { const v = d.tr.v(); const target = (pageX + v * 220) < -W / 2 ? -W : 0; page = target ? 1 : 0; pStop = spring(pageX, target, v * 1000, setPage, () => { setTimeout(() => pageMoved = false, 0); updDots(); }, 'rows'); }
+  setTimeout(() => pageMoved = false, 0);
+};
+home.addEventListener('pointerup', homeUp); home.addEventListener('pointercancel', homeUp);
+$('#searchBtn').onclick = () => openSpot('');
+
+/* ---------- app windows: rounded-rect clip from the icon, uniform scale ---------- */
+const appwin = $('#appwin'), aw = $('#aw');
+let appOpen = null, appIcon = null, appP = 1, stopApp, appTravel = 0, appRectNow = null;
+const lerp = (a, b, t) => a + (b - a) * t;
+function iconRect(el) { const r = (el.querySelector('.ai') || el).getBoundingClientRect(); rect = phone.getBoundingClientRect();
+  return { x: (r.left - rect.left) / scale, y: (r.top - rect.top) / scale, w: r.width / scale, h: r.height / scale, r: 15 }; }
+const FULL = { x: 0, y: 0, w: W, h: H, r: 52 };
+function setAppRect(R) {
+  appRectNow = R; const s = R.w / W, ch = R.h / s, inset = (H - ch) / 2;
+  appwin.style.transform = `translate(${R.x}px, ${R.y - inset * s}px) scale(${s})`;
+  appwin.style.clipPath = `inset(${Math.max(0, inset)}px 0 ${Math.max(0, inset)}px 0 round ${R.r / s}px)`;
+  const p = (R.w - 62) / (W - 62);
+  aw.style.opacity = String(Math.max(0, Math.min(1, p * 1.6 - .2)));
+  appwin.style.background = `color-mix(in srgb, #0a0f1f ${Math.round(Math.min(1, p * 2) * 100)}%, ${appTint} )`;
+  home.style.transform = `scale(${1 + .05 * p})`; home.style.opacity = String(1 - .4 * p);
+  $('#homebar').classList.toggle('darkbar', false);
+}
+let appTint = '#2f7bf6';
+function lerpRect(A, B, t) { return { x: lerp(A.x, B.x, t), y: lerp(A.y, B.y, t), w: lerp(A.w, B.w, t), h: lerp(A.h, B.h, t), r: lerp(A.r, B.r, t) }; }
+function openApp(k, el) {
+  const name = APPS.find(a => a[0] === k)[1]; appIcon = el; appOpen = k;
+  appTint = { phone: '#16b34a', messages: '#16b34a', browser: '#2f7bf6', settings: '#55555a' }[k] || '#1d2440';
+  aw.innerHTML = SCREENS[k] ? SCREENS[k](name) : genericScreen(name, k);
+  wireScreen(k);
+  appwin.classList.add('on'); aw.scrollTop = 0;
+  const from = iconRect(el); stopApp && stopApp();
+  stopApp = spring(0, 1, 0, t => setAppRect(lerpRect(from, FULL, t)), () => { appwin.style.clipPath = 'none'; appwin.style.transform = 'none'; }, 'open');
+}
+function openAppByName(name, el) { const a = APPS.find(x => x[1] === name); if (!a) return toast(name); if (locked) { toast('Opens ' + name); return; } openApp(a[0], el); }
+function appFollow(x, y, dy) { // finger drag from the bar
+  appTravel = dy; const s = Math.max(.35, 1 + dy / (H * .9));
+  const R = { w: W * s, h: H * s, r: lerp(52, 30, 1 - s) }; R.x = x - R.w / 2 + 0; R.y = (H + dy) - R.h * .92; setAppRect(R);
+}
+function springAppBack() { const start = { ...appRectNow }; stopApp && stopApp(); stopApp = spring(0, 1, 0, t => setAppRect(lerpRect(start, FULL, t)), () => { appwin.style.clipPath = 'none'; appwin.style.transform = 'none'; }, 'open'); }
+function closeApp(v = 0, instant) {
+  if (!appOpen) return; stopApp && stopApp(); const start = appRectNow && appwin.style.transform !== 'none' ? { ...appRectNow } : { ...FULL }, to = iconRect(appIcon);
+  const finish = () => { appwin.classList.remove('on'); appOpen = null; appTravel = 0; home.style.transform = 'none'; home.style.opacity = '1'; appwin.style.clipPath = ''; };
+  if (instant) return finish();
+  stopApp = spring(0, 1, Math.min(6, Math.abs(v) * 2), t => setAppRect(lerpRect(start, to, Math.min(1.04, t))), finish, 'close');
+}
+
+/* ---------- app screens ---------- */
+const AV = (n, c) => `<span class="av" style="background:${c}">${n.split(' ').map(s => s[0]).join('').slice(0, 2)}</span>`;
+const PEOPLE = [['Aino Virtanen', '#5e5ce6'], ['Mikko Laine', '#ff9f0a'], ['Sara Niemi', '#30d158'], ['Juho K.', '#64d2ff'], ['Mum', '#ff375f'], ['Ville Ojala', '#bf5af2']];
+const tabs = (on, items) => `<div class="tabs lg dark">${items.map(([k, l, svg]) => `<button class="${k === on ? 'on' : ''}" data-tab="${k}">${svg}${l}</button>`).join('')}</div>`;
+const SVG = {
+  star: '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="m12 2 3 6.5 7 .8-5.2 4.8 1.4 7L12 17.6 5.8 21l1.4-7L2 9.3l7-.8z"/></svg>',
+  recent: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  people: '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-5 4-7 8-7s7 2 8 7z"/></svg>',
+  pad: '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">' + [0,1,2].flatMap(r => [0,1,2].map(c => `<circle cx="${5 + c * 7}" cy="${4 + r * 7}" r="2.2"/>`)).join('') + '<circle cx="12" cy="22" r="2.2"/></svg>',
+};
+const phoneTabs = on => tabs(on, [['fav', 'Favourites', SVG.star], ['rec', 'Recents', SVG.recent], ['con', 'Contacts', SVG.people], ['pad', 'Keypad', SVG.pad]]);
+const SCREENS = {
+  phone: () => `<div id="phoneBody">${keypadHTML()}</div>${phoneTabs('pad')}`,
+  messages: name => `<h1>${name}</h1><div class="sfield lg dark" style="position:relative;left:auto;right:auto;top:auto;margin:0 16px 12px;width:auto"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input placeholder="Search" aria-label="Search messages"></div>
+    <div class="grp">${[['Aino Virtanen', 'Are you bringing the phone tomorrow?', '21:02', 1], ['Mum', 'Good luck with the exam!', '18:40', 1], ['Mikko Laine', 'That boot menu looks insane', 'Yesterday'], ['Sara Niemi', 'Ok see you at 9', 'Monday'], ['112 Info', 'Emergency number test message', 'Sunday']].map(([n, m, t, u], i) => `<div class="row" data-thread="${n}" style="cursor:pointer"><span class="who">${AV(n, (PEOPLE.find(p => p[0] === n) || [, '#8e8e93'])[1])}<div><b style="font-weight:${u ? 700 : 600}">${n}</b><small>${m}</small></div></span><span>${t}${u ? ' <i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#2f7bf6;margin-left:4px"></i>' : ''}</span></div>`).join('')}</div>`,
+  contacts: name => `<h1>${name}</h1><div class="grp">${PEOPLE.map(([n, c]) => `<div class="row"><span class="who">${AV(n, c)}<div><b style="font-weight:600">${n}</b></div></span><span></span></div>`).join('')}</div>`,
+  camera: name => `<h1>${name}</h1><div class="banner">The camera needs its driver first. It is on the roadmap after the GPU.</div>`,
+  photos: name => `<h1>${name}</h1><div class="photos">${Array.from({ length: 15 }, (_, i) => `<i style="background:linear-gradient(${i * 37}deg, hsl(${(i * 47) % 360} 60% 45%), hsl(${(i * 47 + 60) % 360} 70% 30%))"></i>`).join('')}</div><div class="cap">Screenshots from Starbite OS</div>`,
+};
+function keypadHTML() {
+  const K = [['1',''],['2','ABC'],['3','DEF'],['4','GHI'],['5','JKL'],['6','MNO'],['7','PQRS'],['8','TUV'],['9','WXYZ'],['*',''],['0','+'],['#','']];
+  return `<div class="kp-num" id="kpNum"></div><div style="text-align:center;font-size:13px;color:rgba(255,255,255,.5);height:16px" id="kpHint">No SIM · emergency calls only</div>
+    <div class="keys">${K.map(([d, l]) => `<button class="key" data-d="${d}"><b>${d}</b><small>${l}</small></button>`).join('')}</div>
+    <button class="callbtn" id="callBtn" aria-label="Call"><svg width="30" height="30" viewBox="0 0 24 24"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1z" fill="#fff"/></svg></button>`;
+}
+const GENERIC = {
+  Calendar: [['Today', [['Exam', '09:00'], ['Starbite: big cores', '19:00']]], ['Tomorrow', [['Nothing planned', '']]]],
+  Weather: [['Helsinki', [['Now', '3 °C · Cloudy'], ['Tonight', '−1 °C'], ['Tomorrow', '4 °C · Rain']]]],
+  Music: [['Library', [['Songs', '42'], ['Playlists', '3']]]],
+  Clock: [['World clock', [['Helsinki', 'Today'], ['Tokyo', '+7 h'], ['New York', '−7 h']]], ['Alarms', [['07:00', 'Vibrate'], ['08:30', 'Off']]]],
+  Calculator: [['Recent', [['12 × 7', '84'], ['230 ÷ 4', '57.5']]]],
+  Notes: [['Notes', [['Shopping list', 'Today'], ['Ideas', 'Yesterday']]]],
+  Files: [['Locations', [['On this phone', '12.4 GB free'], ['Memory card', '118 GB free']]], ['Recent', [['Photos', 'Folder'], ['Downloads', 'Folder']]]],
+  Settings: [['', [['Wi-Fi', 'Home'], ['Mobile Data', 'No SIM'], ['Battery', '87 %']]], ['', [['Display & Brightness', ''], ['Wallpaper', ''], ['Date & Time', 'Automatic'], ['Startup system', 'Starbite OS']]], ['', [['About', 'Galaxy S9']]]],
+  Flashlight: [['', [['Flashlight', light ? 'On' : 'Off'], ['Screen light', 'Full white']]]],
+  Battery: [['Now', [['Charge', '87 %'], ['Battery temperature', '31 °C'], ['Phone temperature', '41 °C']]], ['Last 24 hours', [['Screen on', '3 h 12 min'], ['Survival Heat', '2 min 45 s']]]],
+  'Medical Card': [['Shown on the lock screen', [['Blood type', 'Add'], ['Allergies', 'Add'], ['Emergency contacts', 'Add']]]],
+  SOS: [['', [['Call 112', 'Needs a SIM'], ['Siren', 'Off'], ['Flashing light', 'Off']]]],
+  Terminal: [['Linux apps', [['Terminal', 'Open'], ['Firefox', 'Get'], ['GIMP', 'Get']]]],
+  Browser: [['Favourites', [['Starbite', ''], ['Wikipedia', ''], ['Weather', '']]]],
+  'Survival Heat': [['Mode', [['Unlimited', 'Off'], ['Brownout guard', 'On'], ['Battery limit', '65 °C']]], ['Last session', [['Peak', '180 °C'], ['Length', '2 min 45 s']]]],
+  'Power Saving': [['', [['Extreme power saving', 'Off'], ['Radios', 'Off'], ['Screen', 'Dimmed']]]],
+};
+function genericScreen(name) {
+  const g = GENERIC[name] || [['', [['Coming soon', '']]]];
+  return `<h1>${name}</h1>` + g.map(([cap, rows]) => (cap ? `<div class="sec">${cap}</div>` : '<div style="height:18px"></div>') + `<div class="grp">${rows.map(([l, r]) => `<div class="row">${l}<span>${r}</span></div>`).join('')}</div>`).join('');
+}
+function wireScreen(k) {
+  if (k === 'phone') wirePhone('pad');
+  if (k === 'messages') $$('[data-thread]', aw).forEach(r => r.onclick = () => openThread(r.dataset.thread));
+}
+function wirePhone(tab) {
+  $$('[data-tab]', aw).forEach(b => b.onclick = () => {
+    const t = b.dataset.tab; $$('[data-tab]', aw).forEach(x => x.classList.toggle('on', x === b));
+    const body = $('#phoneBody', aw);
+    if (t === 'pad') { body.innerHTML = keypadHTML(); wirePad(); }
+    else if (t === 'rec') body.innerHTML = `<h1>Recents</h1><div class="grp">${[['Mum', 'Missed', '18:12', 1], ['Aino Virtanen', 'Outgoing', 'Yesterday'], ['Mikko Laine', 'Incoming', 'Monday']].map(([n, kind, t, miss]) => `<div class="row"><span class="who">${AV(n, (PEOPLE.find(p => p[0] === n) || [, '#8e8e93'])[1])}<div><b style="font-weight:600;color:${miss ? '#ff453a' : '#fff'}">${n}</b><small>${kind}</small></div></span><span>${t}</span></div>`).join('')}</div>`;
+    else if (t === 'con') body.innerHTML = SCREENS.contacts('Contacts');
+    else body.innerHTML = `<h1>Favourites</h1><div class="grp">${PEOPLE.slice(0, 3).map(([n, c]) => `<div class="row"><span class="who">${AV(n, c)}<div><b style="font-weight:600">${n}</b><small>mobile</small></div></span><span></span></div>`).join('')}</div>`;
+  });
+  wirePad();
+}
+function wirePad() {
+  const num = $('#kpNum', aw); if (!num) return;
+  $$('.key', aw).forEach(b => b.onclick = () => { if (num.textContent.length < 15) num.textContent += b.dataset.d; });
+  $('#callBtn', aw).onclick = () => { const n = num.textContent; toast(n === '112' ? 'Calling 112 needs the modem (receive-only today)' : n ? 'No SIM: only emergency calls' : 'Enter a number'); };
+}
+function openThread(n) {
+  const c = (PEOPLE.find(p => p[0] === n) || [, '#8e8e93'])[1];
+  const msgs = { 'Aino Virtanen': [['in', 'Hey! Did the big-core thing work?'], ['out', 'Getting closer, three tests passed tonight'], ['in', 'Are you bringing the phone tomorrow?']], 'Mum': [['in', 'Good luck with the exam!'], ['out', 'Thanks ❤️']] }[n] || [['in', 'Hi!']];
+  aw.innerHTML = `<button class="navback" id="back"><svg width="12" height="20" viewBox="0 0 12 20" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2 2 10l8 8"/></svg>Messages</button>
+    <div class="threadhead">${AV(n, c)}<div style="font-size:13px;font-weight:600">${n}</div></div><div class="ts">Today 20:55</div>
+    <div class="thread" id="thread">${msgs.map(([d, t]) => `<div class="bub ${d}">${t}</div>`).join('')}</div>
+    <div class="compose"><div class="field lg dark"><input id="msgIn" placeholder="Text message" aria-label="Message"></div><button class="sendb" id="send" aria-label="Send"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div>`;
+  $('#back', aw).onclick = () => { aw.innerHTML = SCREENS.messages('Messages'); wireScreen('messages'); };
+  const send = () => { const i = $('#msgIn', aw); if (!i.value.trim()) return; $('#thread', aw).insertAdjacentHTML('beforeend', `<div class="bub out">${i.value.replace(/[<&>]/g, s => ({ '<': '&lt;', '&': '&amp;', '>': '&gt;' }[s]))}</div>`); i.value = ''; toast('Not sent: no SIM'); };
+  $('#send', aw).onclick = send; $('#msgIn', aw).onkeydown = e => { if (e.key === 'Enter') send(); };
+}
+
+/* ---------- spotlight ---------- */
+const spot = $('#spot'); let spotOn = false;
+function openSpot(q) { spotOn = true; spot.classList.add('on'); $('#sq').value = q; renderSpot(q); spot.style.opacity = 0; spring(0, 1, 0, p => spot.style.opacity = p, null, 'sheet'); setTimeout(() => $('#sq').focus({ preventScroll: true }), 50); }
+function closeSpot() { if (!spotOn) return; spotOn = false; spring(Number(spot.style.opacity || 1), 0, 0, p => spot.style.opacity = Math.max(0, p), () => spot.classList.remove('on'), 'sheet'); }
+spot.querySelector('.scrim').addEventListener('pointerdown', closeSpot);
+$('#sq').addEventListener('input', e => renderSpot(e.target.value));
+function renderSpot(q) {
+  q = q.trim().toLowerCase(); const m = s => !q || s.toLowerCase().includes(q);
+  const sys = BOOTABLE.filter(i => m(i.name) || m(i.group.name)), apps = APPS.filter(a => m(a[1]) && (emergency || !['heat','power'].includes(a[0])));
+  $('#sres').innerHTML = (sys.length ? `<h5>Systems</h5>` + sys.map(i => `<div class="hit" data-sys="${i.k}"><span style="width:40px;height:40px">${ICON[i.k]()}</span><div><b>${i.name}</b><small>${i.group.name} · ${i.meta}</small></div></div>`).join('') : '') +
+    (apps.length ? `<h5>Apps</h5>` + apps.map(([k, n]) => `<div class="hit" data-app="${k}"><span style="width:40px;height:40px">${AI[k]()}</span><div><b>${n}</b></div></div>`).join('') : '') ||
+    `<div style="text-align:center;margin-top:40px;color:rgba(255,255,255,.6)">No results</div>`;
+  $$('#sres [data-sys]').forEach(h => h.onclick = () => { const i = ALL.find(x => x.k === h.dataset.sys); closeSpot(); openFocus(i); });
+  $$('#sres [data-app]').forEach(h => h.onclick = () => { closeSpot(); const icon = $(`.app[data-k="${h.dataset.app}"]`, home) || $('#searchBtn'); openApp(h.dataset.app, icon); });
+}
+
+/* ---------- control centre ---------- */
+const cc = $('#cc'), ccg = $('#ccg'), ccScrim = $('#cc .scrim'); let ccOpen = false, ccP = 0, ccBuilt = false, ccStop;
+const CC = { wifi: true, cell: false, bt: false, air: false, rot: true, save: false, bri: .62, vol: .4 };
+const CI = {
+  wifi: '<svg width="22" height="16" viewBox="0 0 17 12"><path d="M8.5 2.2c2.3 0 4.4.9 6 2.4l1.2-1.3A10.4 10.4 0 0 0 8.5.4 10.4 10.4 0 0 0 1.3 3.3l1.2 1.3a8.6 8.6 0 0 1 6-2.4zm0 3.5c1.4 0 2.6.5 3.6 1.4l1.2-1.3a7 7 0 0 0-9.6 0l1.2 1.3c1-.9 2.2-1.4 3.6-1.4zm0 3.4c.5 0 1 .2 1.3.5L8.5 11 7.2 9.6c.3-.3.8-.5 1.3-.5z" fill="currentColor"/></svg>',
+  cell: '<svg width="20" height="18" viewBox="0 0 20 18" fill="currentColor"><rect x="1" y="11" width="3" height="6" rx="1"/><rect x="6" y="8" width="3" height="9" rx="1"/><rect x="11" y="5" width="3" height="12" rx="1"/><rect x="16" y="1" width="3" height="16" rx="1"/></svg>',
+  bt: '<svg width="14" height="20" viewBox="0 0 14 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M2 5l10 10-5 4V1l5 4L2 15"/></svg>',
+  air: '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/></svg>',
+};
+function buildCC() {
+  ccBuilt = true;
+  const tile = (k, area, inner, label, on, extra = '') => `<button class="cct lg ${on ? 'on' : ''} ${extra}" style="grid-area:${area}" data-cc="${k}" aria-label="${label}">${inner}${label ? `<small>${label}</small>` : ''}</button>`;
+  ccg.innerHTML =
+    `<div class="conn lg">${['air','cell','wifi','bt'].map(k => `<i class="${CC[k] ? 'on' : ''}" data-cc="${k}" role="button" aria-label="${k}">${CI[k]}</i>`).join('')}</div>` +
+    `<div class="cct lg sl" style="grid-area:bri" data-sl="bri" aria-label="Brightness"><div class="lvl" style="height:${CC.bri * 100}%"></div><svg width="22" height="22" viewBox="0 0 24 24" fill="#777"><circle cx="12" cy="12" r="5"/><g stroke="#777" stroke-width="2" stroke-linecap="round"><path d="M12 1v3M12 20v3M1 12h3M20 12h3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></g></svg></div>` +
+    `<div class="cct lg sl" style="grid-area:vol" data-sl="vol" aria-label="Volume"><div class="lvl" style="height:${CC.vol * 100}%"></div><svg width="22" height="22" viewBox="0 0 24 24" fill="#777"><path d="M4 9h4l5-5v16l-5-5H4z"/><path d="M16 8a5 5 0 0 1 0 8" stroke="#777" stroke-width="2" fill="none"/></svg></div>` +
+    tile('light', 'light', '<svg width="16" height="24" viewBox="0 0 20 26" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M3 2h14v4l-3 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V10L3 6z"/></svg>', 'Flashlight', light) +
+    tile('rot', 'rot', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="8" y="10" width="8" height="7" rx="1.5"/><path d="M9.5 10V8a2.5 2.5 0 0 1 5 0v2"/><path d="M20 12a8 8 0 1 1-3-6.2"/></svg>', 'Rotation', CC.rot) +
+    `<button class="cct lg emt ${emergency ? 'on' : ''}" style="grid-area:em" id="ccEm" aria-label="Emergency: press and hold"><svg width="20" height="24" viewBox="0 0 24 28" fill="currentColor"><path d="M12 1c1.3 6 7.5 8 7.5 15.5A7.5 7.5 0 0 1 4.5 16.5c0-4 2.5-5.5 2.5-9 2.6 1.4 4 4 4 6.5 1.4-4 1.5-8.5 1-13z"/></svg><svg class="ring" viewBox="0 0 60 60" style="position:absolute;inset:5px;width:60px;height:60px"><circle cx="30" cy="30" r="28" fill="none" stroke="#ff8a7a" stroke-width="2" stroke-dasharray="176" stroke-dashoffset="176" transform="rotate(-90 30 30)"/></svg><small>Emergency</small></button>` +
+    tile('save', 'save', '<svg width="24" height="14" viewBox="0 0 27 13"><rect x=".5" y=".5" width="23" height="12" rx="3.6" fill="none" stroke="currentColor"/><rect x="2" y="2" width="6" height="9" rx="2" fill="currentColor"/></svg>', 'Saving', CC.save) +
+    tile('timer', 'timer', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="13" r="8"/><path d="M12 9v4M9 2h6"/></svg>', 'Timer', false) +
+    tile('calc', 'calc', AI.calc().replace('class="tile"', 'class="tile" style="width:30px;height:30px"'), '', false) +
+    tile('wifi2', 'wifi2', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8"/></svg>', 'Mirror', false) +
+    tile('cam', 'cam', AI.camera().replace('class="tile"', 'class="tile" style="width:30px;height:30px"'), '', false);
+  $$('[data-cc]', ccg).forEach(el => el.onclick = e => { e.stopPropagation(); const k = el.dataset.cc;
+    if (k === 'light') { light = !light; $('#q-light').classList.toggle('lit', light); }
+    else if (k === 'calc') { closeCC(); openApp('calc', $('.app[data-k="calc"]', home)); return; }
+    else if (k === 'cam') { closeCC(); openApp('camera', $('.app[data-k="camera"]', home)); return; }
+    else if (k in CC) CC[k] = !CC[k]; buildCC(); });
+  holdButton($('#ccEm'), 700, () => { setEmergency(!emergency); });
+  $$('[data-sl]', ccg).forEach(sl => { let on = false;
+    const set = e => { const r = sl.getBoundingClientRect(); const v = Math.max(0, Math.min(1, (r.bottom - e.clientY) / r.height)); CC[sl.dataset.sl] = v; sl.querySelector('.lvl').style.height = v * 100 + '%'; };
+    sl.addEventListener('pointerdown', e => { e.stopPropagation(); on = true; sl.setPointerCapture(e.pointerId); set(e); });
+    sl.addEventListener('pointermove', e => on && set(e)); sl.addEventListener('pointerup', () => on = false); sl.addEventListener('pointercancel', () => on = false); });
+}
+function setCC(p) { ccP = p; ccScrim.style.opacity = Math.min(1, p); ccg.style.opacity = Math.min(1, p * 1.3); ccg.style.transform = `translateY(${(1 - p) * -30}px) scale(${.86 + .14 * p})`; }
+function openCC(v = 0) { ccOpen = true; cc.classList.add('on'); if (!ccBuilt) buildCC(); ccStop && ccStop(); ccStop = spring(ccP, 1, v * 1000 / 260, setCC, null, 'cc'); }
+function closeCC() { if (!ccOpen) return; ccStop && ccStop(); ccStop = spring(ccP, 0, 0, p => setCC(Math.max(0, p)), () => { cc.classList.remove('on'); ccOpen = false; }, 'cc'); }
+ccScrim.addEventListener('pointerdown', closeCC);
+
+/* ---------- porting hooks: SB_SPEC, sbSet, sbIcons (for frame-by-frame diffs on the host) ---------- */
+const MEASURE = { clock: '#clock', date: '#date', mark: '#mark', widgets: '#lockWidgets', list: '.nwrap', vcard: '.vcard', vhead: '.vhead', mrow: '.mrow',
+  qLight: '#q-light', qEm: '#q-em', hint: '#hint', homebar: '#homebar', wBattery: '#wBattery', wSystems: '#wSystems', appIcon: '#apps1 .app .ai',
+  appLabel: '#apps1 .app span:last-child', search: '#searchBtn', dock: '#dock', dockIcon: '#dock .ai', fcard: '#fcard', slider: '#slider', ccGrid: '#ccg' };
+window.SB_SPEC = {
+  logical: { w: W, h: 2960 / (1440 / W) }, scale: 1440 / W,
+  springs: Object.fromEntries(Object.entries(SPR).map(([k, [kk, c]]) => [k, { stiffness: kk, damping: c, mass: 1, response_s: +(2 * Math.PI / Math.sqrt(kk)).toFixed(3), dampingRatio: +(c / (2 * Math.sqrt(kk))).toFixed(3) }])),
+  gestures: { unlockProjection_ms: 200, unlockThreshold: 0.38, overscrollDown: 0.22, velocityWindow_ms: 100, appCloseTravel_pt: 60, appCloseVelocity: -0.35, pageThreshold: 0.5, ccOpen: 0.35, lockPullOpen: 0.7, holdLight_ms: 420, holdEmergency_ms: 700, slideStart: 0.86 },
+  glass: { tint: 'rgba(36,56,120,.20)', tintDark: 'rgba(14,22,48,.42)', blur_pt: 14, saturate: 1.9, brightness: 1.06, fillTop: 'rgba(255,255,255,.12)', fillMid: 'rgba(255,255,255,.035) @46%', fillBottom: 'rgba(255,255,255,.06)',
+    rimTop: 'inset 0 1.5pt rgba(255,255,255,.42)', rimBottom: 'inset 0 -1pt rgba(255,255,255,.12)', glow: 'inset 0 0 22pt rgba(255,255,255,.05)', drop: '0 10pt 28pt rgba(0,0,0,.26)',
+    specular: 'radial 110%x70% at (18%,-10%) rgba(255,255,255,.24)->0 @55%', edge: 'linear 140deg 1pt ring: .65 / .08@28% / 0@50% / .08@72% / .45' },
+  colors: { ink: '#eef1f6', dim: '#8a93a3', accent: '#6fb3ff', ok: '#4cd964', em: '#ff5a4e', amber: '#ffb547', call: '#34c759' },
+  type: { family: 'Inter Tight (variable 400-800); wordmark Outfit 300', clock: '106pt/700/-4pt', date: '19pt/600', vendor: '21pt/800/-0.5pt', vendorSub: '13.5pt/400', row: '16.5pt/700', rowSub: '13pt', focusTitle: '27pt/800', appLabel: '12pt/500', largeTitle: '34pt/800' },
+  geometry() { rect = phone.getBoundingClientRect(); const out = {};
+    for (const [k, sel] of Object.entries(MEASURE)) { const el = document.querySelector(sel); if (!el) continue; const r = el.getBoundingClientRect(); if (!r.width) continue;
+      out[k] = { x: +((r.left - rect.left) / scale).toFixed(1), y: +((r.top - rect.top) / scale).toFixed(1), w: +(r.width / scale).toFixed(1), h: +(r.height / scale).toFixed(1) }; }
+    return out; },
+  systems: GROUPS.map(g => ({ vendor: g.name, items: g.items.map(i => ({ key: i.k, name: i.name, meta: i.meta, self: !!i.self, tag: i.k === LAST ? 'LAST USED' : i.tag || null })) })),
+};
+window.sbIcons = () => ({ systems: Object.fromEntries(Object.keys(ICON).map(k => [k, ICON[k]()])), apps: Object.fromEntries(Object.keys(AI).map(k => [k, AI[k]()])) });
+window.sbSet = (what, v) => { // deterministic states, no springs
+  switch (what) {
+    case 'unlock': stopLock && stopLock(); lock.style.visibility = 'visible'; setLock(-H * v); locked = v < 1; break;
+    case 'group': openSet.clear(); if (v) openSet.add(v); renderList(); break;
+    case 'focus': if (!v) { fStop && fStop(); focus.classList.remove('on'); break; } openFocus(ALL.find(i => i.k === v[0] || i.k === v)); fStop && fStop(); setFocus(Array.isArray(v) ? v[1] : 1); break;
+    case 'app': { const [k, p] = v; const el = $(`.app[data-k="${k}"]`, home); if (!appOpen) openApp(k, el); stopApp && stopApp(); setAppRect(lerpRect(iconRect(el), FULL, p)); break; }
+    case 'cc': ccStop && ccStop(); ccOpen = v > 0; cc.classList.toggle('on', v > 0); if (!ccBuilt) buildCC(); setCC(v); break;
+    case 'emergency': if (!!v !== emergency) setEmergency(!!v); break;
+    case 'page': pStop && pStop(); setPage(-W * v); break;
+    default: throw new Error('sbSet: unknown ' + what);
+  }
+  return window.SB_SPEC.geometry();
+};
+
+/* ---------- start ---------- */
+lockWidgets(); renderList(); setLock(0);
+setTimeout(() => { const h = $('#hint'); h.classList.add('show'); setTimeout(() => h.classList.remove('show'), 2400); }, 900);
+})();
+</script>

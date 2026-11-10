@@ -1,0 +1,14 @@
+[
+ {"name": "lock",            "js": "sbSet('unlock', 0)",                   "host": []},
+ {"name": "unlock-25",       "js": "sbSet('unlock', .25)",                 "host": ["unlock=:0.25"]},
+ {"name": "unlock-50",       "js": "sbSet('unlock', .5)",                  "host": ["unlock=:0.5"]},
+ {"name": "unlock-75",       "js": "sbSet('unlock', .75)",                 "host": ["unlock=:0.75"]},
+ {"name": "home",            "js": "sbSet('unlock', 1)",                   "host": ["unlock=:1"]},
+ {"name": "group-apple",     "js": "sbSet('group', 'apple')",              "host": ["group=apple"]},
+ {"name": "group-microsoft", "js": "sbSet('group', 'microsoft')",          "host": ["group=microsoft"]},
+ {"name": "group-starbite",  "js": "sbSet('group', 'starbite'); document.getElementById('nscroll').scrollTop = 304", "host": ["group=starbite", "scroll=:304"]},
+ {"name": "scroll-60",       "js": "document.getElementById('nscroll').scrollTop = 60", "host": ["scroll=:60"]},
+ {"name": "focus-win11",     "js": "sbSet('focus', ['win11', 1])",         "host": ["focus=win11:1"]},
+ {"name": "focus-ios26-50",  "js": "sbSet('focus', ['ios26', .5])",        "host": ["focus=ios26:0.5"]},
+ {"name": "hint",            "js": "window.__hint = 1",                    "host": ["hint=:1"]}
+]
