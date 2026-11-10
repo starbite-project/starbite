@@ -1,0 +1,258 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index 198fcfd..6d0796e 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -703,6 +703,7 @@ struct wbo {
+    HANDLE hres;
+    uint64_t used;       /* T15: the last submission that named it; WAIT_BO waits for that one */
+    int listed_once;     /* T25: in an allocation list at least once (made resident) */
++   uint32_t list_idx;   /* T30: its index in the allocation list of the submission being built */
+ };
+ 
+ /* Allocations whose BO is closed but which a job submitted earlier may still use. Linux's panfrost keeps a
+@@ -759,8 +760,19 @@ struct sbdev {
+    double st_blocked_ms, st_longest_ms;
+    unsigned submits_n;     /* T25 */
+    int list_all;           /* T25: SB_LIST_ALL=1, every live BO in every submission (as before) */
++   /* T30 (sb-patches/0124): a vertex/tiler chain held back to go to the KMD in one Render with the fragment chain
++    * that Panfrost submits right after it (SB_REQ_MERGE_NEXT). Its command, allocation-list entries (pend_n), the
++    * BOs it named and its out_sync wait in the runtime's buffers until then; any other call sends it alone. */
++   int pend;
++   uint32_t pend_n, pend_out_sync, pend_bo_n, pend_bo_cap;
++   uint32_t *pend_bos;
++   unsigned st_merged;
++   int no_merge;           /* SB_NO_MERGE=1 */
+ };
+ 
++/* T30: Panfrost's mark on a vertex/tiler submit whose fragment submit follows at once (pan_jm.c, sb-patches/0124) */
++#define SB_REQ_MERGE_NEXT (1u << 31)
++
+ static D3DKMT_HANDLE wadapter;
+ static MW_ESCAPE_GPU_INFO_DATA wgpu;
+ static int wddm = -1;
+@@ -1172,6 +1184,38 @@ w_render(struct sbdev *d, UINT commandLength, UINT allocations)
+    return 0;
+ }
+ 
++static struct wbo *wddm_bo(struct sbdev *d, uint32_t h);
++static uint64_t *sb_sync(struct sbdev *d, uint32_t h);
++
++/* T30: send a held-back vertex/tiler chain on its own (something else came between it and its fragment chain). */
++static int
++sb_flush_pend(struct sbdev *d)
++{
++   if (!d->pend)
++      return 0;
++   d->pend = 0;
++   uint64_t next = d->seq + 1;
++   NTSTATUS st = w_render(d, sizeof(MW_COMMAND), d->pend_n);
++   if (st < 0) {
++      fprintf(stderr, "malikm-wddm: Render failed 0x%08lx (device %u, %u allocations, held chain)\n",
++              (unsigned long)st, d->id, d->pend_n);
++      malikm_note_count(27);
++      return -MK_EIO;
++   }
++   for (uint32_t i = 0; i < d->pend_bo_n; i++) {
++      struct wbo *bo = wddm_bo(d, d->pend_bos[i]);
++      if (bo)
++         bo->used = next;
++   }
++   if (d->pend_out_sync) {
++      uint64_t *s = sb_sync(d, d->pend_out_sync);
++      if (s)
++         *s = next;
++   }
++   d->st_submits++;
++   return 0;
++}
++
+ /* Is everything the KMD was given complete (its fences agree, nothing queued or running)? Polls for up to
+  * Ms milliseconds. 0, or -MK_EBUSY / -MK_ETIMEDOUT. */
+ static int
+@@ -1228,6 +1272,8 @@ sb_wait_seq(struct sbdev *d, uint64_t seq, DWORD ms)
+ {
+    LARGE_INTEGER f, t0, t1;
+    int ret;
++   if (d->pend)
++      (void)sb_flush_pend(d);           /* T30: never wait for a submission still held back */
+    if (seq == 0 || seq <= d->done)
+       return 0;
+    QueryPerformanceFrequency(&f);
+@@ -1358,6 +1404,7 @@ malikm_present_d3dddi(const void *bgrx, unsigned w, unsigned h, void *dxgi_conte
+    if (!d || !d->on || !d->dxgi || !d->dxgi->pfnPresentCb)
+       return -1;
+    AcquireSRWLockExclusive(&d->lock);
++   (void)sb_flush_pend(d);              /* T30 */
+    if (d->present && (d->present_w != w || d->present_h != h)) {
+       w_unlock(d, d->present);
+       w_destroy(d, d->present);
+@@ -1425,6 +1472,8 @@ malikm_bind_d3dddi(HANDLE hRTAdapter, HANDLE hRTDevice, const void *pKTCallbacks
+    if (cb->pfnEscapeCb(hRTAdapter, &e) >= 0 && g.Count != 0 && g.Valid != 0 && (d = sb_new_dev()) != NULL) {
+       const char *la = getenv("SB_LIST_ALL");
+       d->list_all = la && *la == '1';
++      const char *nm = getenv("SB_NO_MERGE");
++      d->no_merge = nm && *nm == '1';   /* T30: SB_NO_MERGE=1, every chain its own Render */
+       D3DDDICB_CREATECONTEXT c = {0};
+       c.NodeOrdinal = 0;
+       c.EngineAffinity = 1;
+@@ -1513,6 +1562,11 @@ sb_sync(struct sbdev *d, uint32_t h)
+ static int
+ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+ {
++   if (d->pend && nr != MALIKM_NR_PANFROST_SUBMIT) {
++      int r = sb_flush_pend(d);         /* T30: anything else sends a held-back chain first */
++      if (r)
++         return r;
++   }
+    switch (nr) {
+    case MALIKM_NR_PANFROST_GET_PARAM: {
+       struct drm_panfrost_get_param *a = (void *)b;
+@@ -1624,20 +1678,35 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+    case MALIKM_NR_PANFROST_SUBMIT: {
+       struct drm_panfrost_submit *a = (void *)b;
+       const uint32_t *bos = (const uint32_t *)(b + a->bo_handles);
++      /* T30: join a held-back vertex/tiler chain when this is its fragment chain and both fit */
++      int joining = d->pend && (a->requirements & PANFROST_JD_REQ_FS) &&
++                    d->pend_n + a->bo_handle_count <= d->alloc_size && 2 * sizeof(MW_COMMAND) <= d->cmd_size;
++      if (d->pend && !joining) {
++         int r = sb_flush_pend(d);
++         if (r)
++            return r;
++      }
++      int hold = !joining && (a->requirements & SB_REQ_MERGE_NEXT) && !d->no_merge &&
++                 2 * sizeof(MW_COMMAND) <= d->cmd_size;
+       if (!a->jc)
+          return -MK_EINVAL;
+       if (a->bo_handle_count > d->alloc_size || sizeof(MW_COMMAND) > d->cmd_size)
+          return -MK_E2BIG;
+-      uint32_t n = 0;
++      uint32_t n = joining ? d->pend_n : 0;
+       uint64_t next = d->seq + 1;
+-      d->mark++;
++      if (!joining)
++         d->mark++;
+       for (uint32_t i = 0; i < a->bo_handle_count; i++) {
+          struct wbo *bo = wddm_bo(d, bos[i]);
+          if (!bo)
+             return -MK_ENOENT;
+-         if (bo->listed == d->mark)
++         if (bo->listed == d->mark) {
++            if (joining && bo->list_idx < n)
++               d->alloc[bo->list_idx].WriteOperation = 1;   /* listed by the held chain, maybe for residency */
+             continue;
++         }
+          bo->listed = d->mark;
++         bo->list_idx = n;
+          memset(&d->alloc[n], 0, sizeof(d->alloc[n]));
+          d->alloc[n].hAllocation = bo->h;
+          d->alloc[n].WriteOperation = 1;
+@@ -1664,6 +1733,7 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+             continue;
+          bo->listed = d->mark;
+          bo->listed_once = 1;
++         bo->list_idx = n;
+          memset(&d->alloc[n], 0, sizeof(d->alloc[n]));
+          d->alloc[n].hAllocation = bo->h;
+          n++;
+@@ -1671,11 +1741,33 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+       if (trace_on() && n != named)
+          fprintf(stderr, "malikm-wddm: submit names %u BOs, %u more listed for residency\n",
+                  named, n - named);
+-      MW_COMMAND *c = d->cmd;
++      MW_COMMAND *c = (MW_COMMAND *)d->cmd + (joining ? 1 : 0);
+       c->Type = MW_CMD_JOB;
+       c->Slot = (a->requirements & PANFROST_JD_REQ_FS) ? 0 : 1;
+       c->Jc = a->jc;
+-      NTSTATUS st = w_render(d, sizeof(*c), n);
++      if (hold) {
++         /* T30: keep it in the buffers; the fragment chain's submit sends both */
++         if (d->pend_bo_cap < a->bo_handle_count) {
++            uint32_t *p = realloc(d->pend_bos, a->bo_handle_count * sizeof(*p));
++            if (!p)
++               hold = 0;
++            else {
++               d->pend_bos = p;
++               d->pend_bo_cap = a->bo_handle_count;
++            }
++         }
++      }
++      if (hold) {
++         memcpy(d->pend_bos, bos, a->bo_handle_count * sizeof(*bos));
++         d->pend_bo_n = a->bo_handle_count;
++         d->pend_n = n;
++         d->pend_out_sync = a->out_sync;
++         d->pend = 1;
++         return 0;
++      }
++      if (joining)
++         d->pend = 0;
++      NTSTATUS st = w_render(d, (joining ? 2 : 1) * sizeof(*c), n);
+       if (st < 0) {
+          fprintf(stderr, "malikm-wddm: Render failed 0x%08lx (device %u, %u allocations)\n",
+                  (unsigned long)st, d->id, n);
+@@ -1687,6 +1779,19 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+          if (bo)
+             bo->used = next;
+       }
++      if (joining) {
++         for (uint32_t i = 0; i < d->pend_bo_n; i++) {
++            struct wbo *bo = wddm_bo(d, d->pend_bos[i]);
++            if (bo)
++               bo->used = next;
++         }
++         if (d->pend_out_sync) {
++            uint64_t *s = sb_sync(d, d->pend_out_sync);
++            if (s)
++               *s = next;
++         }
++         d->st_merged++;
++      }
+       d->st_submits++;
+       if (a->out_sync) {
+          uint64_t *s = sb_sync(d, a->out_sync);
+@@ -1862,6 +1967,8 @@ wddm_ioctl(int fd, DWORD code, void *buf, DWORD len)
+                  "%u answered busy), %u new CPU maps\n", s10, d->id, d->st_submits, d->st_waits, d->st_blocked,
+                  d->st_blocked_ms, d->st_longest_ms, d->st_busy, d->st_maps);
+          /* sb-patches/0122: this process's rotations (identities, of primaries, by copying), blits, flushes */
++         fprintf(stderr, "sbumd: stats merged %u (vertex/tiler + fragment in one Render)\n", d->st_merged);
++         d->st_merged = 0;
+          fprintf(stderr, "sbumd: stats rotate id %ld, primary %ld, copy %ld; blits %ld; flush-all %ld\n",
+                  InterlockedExchange(&sb_stat[0], 0), InterlockedExchange(&sb_stat[1], 0),
+                  InterlockedExchange(&sb_stat[2], 0), InterlockedExchange(&sb_stat[3], 0),
+@@ -2015,6 +2122,7 @@ malikm_present_allocs(unsigned src, unsigned dst, void *dxgi_context)
+    HRESULT hr = E_FAIL;
+    if (d && d->on && d->dxgi && d->dxgi->pfnPresentCb) {
+       AcquireSRWLockExclusive(&d->lock);
++      (void)sb_flush_pend(d);           /* T30: the frame's last chain before its present */
+       DXGIDDICB_PRESENT p = {0};
+       p.hSrcAllocation = src;
+       p.hDstAllocation = dst;
+@@ -2043,6 +2151,7 @@ malikm_set_display_mode(unsigned hPrimaryAllocation)
+    HRESULT hr = E_FAIL;
+    if (d && d->on && d->cb.pfnSetDisplayModeCb) {
+       AcquireSRWLockExclusive(&d->lock);
++      (void)sb_flush_pend(d);           /* T30 */
+       D3DDDICB_SETDISPLAYMODE m = {0};
+       m.hPrimaryAllocation = hPrimaryAllocation;
+       hr = d->cb.pfnSetDisplayModeCb(d->device, &m);
+diff --git a/src/gallium/drivers/panfrost/pan_jm.c b/src/gallium/drivers/panfrost/pan_jm.c
+index 57ba7b3..b0951e4 100644
+--- a/src/gallium/drivers/panfrost/pan_jm.c
++++ b/src/gallium/drivers/panfrost/pan_jm.c
+@@ -210,7 +210,15 @@ GENX(jm_submit_batch)(struct panfrost_batch *batch)
+       pthread_mutex_lock(&dev->submit_lock);
+ 
+    if (has_draws) {
+-      ret = jm_submit_jc(batch, batch->jm.jobs.vtc_jc.first_job, reqs,
++      /* Starbite (sbumd, sb-patches/0124, docs/WIN11-GPU.md 6.37): tell the Windows shim the fragment chain follows
++       * at once, so both go to the KMD in one Render (one runtime call, one scheduler submission, one fence) instead
++       * of two. Bit 31 is not a Panfrost requirement; the shim strips it. */
++#ifdef _WIN32
++      unsigned vreqs = reqs | (has_frag ? (1u << 31) : 0);
++#else
++      unsigned vreqs = reqs;
++#endif
++      ret = jm_submit_jc(batch, batch->jm.jobs.vtc_jc.first_job, vreqs,
+                          has_frag ? 0 : out_sync);
+ 
+       if (ret)

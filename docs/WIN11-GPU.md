@@ -1457,6 +1457,18 @@ much flickers or never draws, and it is slower than CPU rendering. Data: hive (c
   - sb-patches/0123 drops the flush after a blit (`SB_BLIT_FLUSH_AFTER=1` restores it), so a copy-forward blit and
     the frame drawn over it share one render pass.
 
+### 6.37 T29's result; T30 one Render per batch (2026-11-10)
+
+- **cycle-t29-1 (installed):** level with T28.
+  - sbdrag 44.0 / 42.8 moves/s, copy 224 ms/s.
+  - No bounding-box copies, but GDI's rectangles cover ~2.1 MPx per big blt anyway.
+  - DWM composes ~53 frames a second and submits ~16.7 job chains per frame.
+- **T30 (sb-patches/0124):**
+  - Panfrost marks a vertex/tiler submit followed by its fragment submit (requirements bit 31, Windows only). The
+    shim holds it and sends both chains in one Render.
+  - Any other call on the device sends a held chain first.
+  - `SB_NO_MERGE=1` restores one Render per chain. The umdlog stats count merges.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
