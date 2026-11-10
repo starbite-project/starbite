@@ -464,3 +464,19 @@ How it should end: a clean restart from inside Windows. The existing one-shot au
 Windows restarts itself after the test, dead man `shutdown /r /t 600`) gives a clean restart and `cpu.log` (MIDR
 531F0020 = Mongoose, 1 CPU). A restart of Windows on the M3 goes through the FADT reset register / UEFI
 ResetSystem, which reset the whole SoC (A55 0 included).
+
+## 21. m3all3: M3 core 1 boots, M3 cores 2 and 3 join as parked secondaries (3 big cores)
+
+Windows' HAL starts secondaries with the ACPI parking protocol when there is no PSCI: 0x140491F80 copies its AP
+startup code into the mailbox's OS half (+0x20, 0x6B0 bytes), writes JumpAddress (+8), then CpuId (+0) = what
+Cores8's parking stub (firmware half, +0x800) waits for: JumpAddress != 0 and CpuId == its UID, acknowledge, jump with
+x0 = the mailbox (MMU off, EL1). C2 kept parked M3s alive in this stub through a whole Windows session.
+
+**m3all3** (`starbite-uefi-m3all3.bin`, sha256 `695dda08955441c2eb3b6cf2ab4ce3377e832ac9e9682c88cee6d14d84efc5cf`,
+`SOLO=m3all3 M3EARLY=5 KILL_SERIAL=1`): m3run1 (free run, A55 0 as the outside liveness watchdog) plus, at
+dispatch, M3 cores 2 and 3 CPU_ON'd (PMU defaults first) into the parking stub in a reserved mailbox page each.
+The committed MADT enables UID 5 (boot, own mailbox), 6 and 7 (parking v1, their mailboxes), with A55s and M3 0
+disabled; DSDT `_MAT` synced. `=M3S core n rc .. mpidr .. mbox ..` lines show each park; `=M3E commit: ... on: 4n 6Y 7Y`.
+Expect `=M3N np03` and Task Manager / cpu.log with 3 CPUs, all MIDR 531F0020. M3 core 0 follows (its first CPU_ON
+needs the FlexPMU core-on steps Starbite OS uses). To make room in the release DXE slot, free-run builds compile out
+the PMU replay and the ACPI table lines (their results are known from the m3kern runs).

@@ -1106,6 +1106,7 @@ EAcpiLine (
   IN CONST CHAR8  *Tag
   )
 {
+ #if STARBITE_M3_EARLY < 4                // room in the DXE slot: the table lines are known from the m3kern runs
   EFI_ACPI_2_0_ROOT_SYSTEM_DESCRIPTION_POINTER  *Rsdp;
   EFI_ACPI_DESCRIPTION_HEADER                   *X;
   EFI_ACPI_DESCRIPTION_HEADER                   *T;
@@ -1113,6 +1114,7 @@ EAcpiLine (
   UINTN                                         i;
   UINT16                                        Ba;
   UINT32                                        Gicc;
+
 
   Rsdp = NULL;
   for (i = 0; i < gST->NumberOfTableEntries; i++) {
@@ -1153,6 +1155,9 @@ EAcpiLine (
   }
 
   SbLog ("=M3E acpi %a: ARM_BOOT_ARCH %x, MADT GICC enabled bits (UID 0 first) %x", Tag, Ba, Gicc);
+ #else
+  (VOID)Tag;
+ #endif
 }
 
 //
@@ -1212,7 +1217,9 @@ EPmuReplay (
   IN CONST CHAR8  *Who
   )
 {
+ #if STARBITE_M3_EARLY < 4                // room in the DXE slot: measured in m3kern8 (1066174 cycles/ms on M3 1)
   UINT64  Pmcr, Filt, En, C0, C1, T0, T;
+
 
   __asm__ __volatile__ ("mrs %0, pmcr_el0" : "=r" (Pmcr));
   __asm__ __volatile__ ("mrs %0, pmccfiltr_el0" : "=r" (Filt));
@@ -1232,6 +1239,9 @@ EPmuReplay (
 
   __asm__ __volatile__ ("msr pmccfiltr_el0, %0\n msr pmcr_el0, %1\n isb" : : "r" (Filt), "r" (Pmcr) : "memory");
   SbLog ("=M3P %ld cyc/ms %a pmcr %lx filt %lx en %lx", C1 - C0, Who, Pmcr, Filt, En);
+ #else
+  (VOID)Who;
+ #endif
 }
 
 //
@@ -1397,7 +1407,7 @@ ELoaderRanges (
   L[0x78 / 8] = n;
   EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x800);
   SbLog ("=M3E map: %ld entries, %d scan ranges, %d dropped", Size / DSize, n, Dropped);
-  for (t = 0; t < 17; t++) {
+  for (t = 0; t < ((STARBITE_M3_EARLY >= 4) ? 0u : 17u); t++) {
     if (Cnt[t] != 0) {
       SbLog ("=M3E mt %x n%ld p%lx %lx-%lx", (UINT32)t, Cnt[t], Pages[t], Lo[t], Hi[t]);
     }
@@ -1422,6 +1432,95 @@ EFixSum (
   }
 
   T[9] = (UINT8)(0 - Sum);
+}
+
+#include "Cores8ParkStub.h"
+
+STATIC UINT64  mESec[4];                  // v11: per M3 core n: its parking mailbox (0 = not parked)
+
+//
+// The mailbox the committed MADT gives a GICC UID, 0 = that entry stays disabled. UID 5 = M3 1 (the boot CPU, a
+// zeroed mailbox of its own); UIDs 4/6/7 = M3 0/2/3 when parked by EParkSecondaries.
+//
+STATIC
+UINT64
+EMboxForUid (
+  IN UINT32  Uid
+  )
+{
+  if (Uid == 5) {
+    return mEMailbox;
+  }
+
+  if ((Uid >= 4) && (Uid <= 7)) {
+    return mESec[Uid - 4];
+  }
+
+  return 0;
+}
+
+//
+// v11 (STARBITE_M3_EARLY >= 5): M3 cores 2 and 3 (>= 6: then core 0, last) parked for Windows in Cores8's ACPI
+// parking-protocol stub (C2: parked through a whole Windows session; the HAL's AP start, ntoskrnl 0x140491F80, copies
+// its startup code to mailbox +0x20, writes JumpAddress, then CpuId: what the stub waits for). During dispatch,
+// before woa's PSCI shim, one CPU_ON each with the six PMU defaults first; stop at the first core that doesn't
+// arrive within 200 ms.
+//
+STATIC
+VOID
+EParkSecondaries (
+  VOID
+  )
+{
+  STATIC CONST UINT32   Order[] = { 2, 3, 0 };
+  volatile UINT32       *Pmu    = (volatile UINT32 *)0x14060000UL;
+  EFI_PHYSICAL_ADDRESS  Page;
+  UINT64                *Lit;
+  UINT64                Rc;
+  UINTN                 k;
+  UINTN                 i;
+  UINTN                 Ms;
+  UINT32                Core;
+
+  for (k = 0; k < ((STARBITE_M3_EARLY >= 6) ? 3u : 2u); k++) {
+    Core = Order[k];
+    Page = 0xFFFFFFFFu;
+    if (EFI_ERROR (gBS->AllocatePages (AllocateMaxAddress, EfiReservedMemoryType, 1, &Page))) {
+      SbLog ("=M3S core %d: no page", Core);
+      return;
+    }
+
+    ZeroMem ((VOID *)(UINTN)Page, EFI_PAGE_SIZE);
+    CopyMem ((VOID *)(UINTN)(Page + 0x800), mCores8ParkStub, sizeof (mCores8ParkStub));
+    Lit    = (UINT64 *)(UINTN)(Page + 0x800 + CORES8_PARK_STUB_LIT);
+    Lit[0] = Page;
+    Lit[1] = 4 + Core;                  // its MADT GICC UID
+    Lit[2] = 0;                         // no state digit line
+    EClean ((UINTN)Page, (UINTN)Page + EFI_PAGE_SIZE);
+    __asm__ __volatile__ ("ic iallu\n dsb sy\n isb" ::: "memory");
+    for (i = 0; i < ARRAY_SIZE (mEPmu); i++) {
+      Pmu[mEPmu[i].Offset / 4] = (Pmu[mEPmu[i].Offset / 4] & ~mEPmu[i].Mask) | mEPmu[i].Value;
+      __asm__ __volatile__ ("dsb sy" ::: "memory");
+    }
+
+    Rc = ESmc (0xC4000003u, 0x100 + Core, Page + 0x800);
+    for (Ms = 0; Ms < 200; Ms++) {
+      EClean ((UINTN)Page + 0xFF8, (UINTN)Page + 0x1000);
+      if (*(volatile UINT64 *)(UINTN)(Page + 0xFF8) != 0) {
+        break;
+      }
+
+      MicroSecondDelay (1000);
+    }
+
+    SbLog ("=M3S core %d rc %lx mpidr %lx %dms mbox %lx", Core, Rc, *(volatile UINT64 *)(UINTN)(Page + 0xFF8), Ms, Page);
+    if ((Rc != 0) || (*(volatile UINT64 *)(UINTN)(Page + 0xFF8) == 0)) {
+      return;
+    }
+
+    mESec[Core] = Page;
+    MicroSecondDelay (50000);
+  }
 }
 
 STATIC
@@ -1500,8 +1599,16 @@ ECommitTables (
 
     CopyMem (&Uid, Madt + Off + 8, 4);
     CopyMem (&Fl, Madt + Off + 12, 4);
-    Fl = (Uid == 5) ? (Fl | 1) : (Fl & ~1u);
+    Fl = (EMboxForUid (Uid) != 0) ? (Fl | 1) : (Fl & ~1u);
     CopyMem (Madt + Off + 12, &Fl, 4);
+    if ((Uid != 5) && (EMboxForUid (Uid) != 0)) {
+      UINT32  One = 1;
+      UINT64  Mb  = EMboxForUid (Uid);
+
+      CopyMem (Madt + Off + 16, &One, 4);
+      CopyMem (Madt + Off + 24, &Mb, 8);
+    }
+
     if (Uid == 5) {
       Boot = Off;
       //
@@ -1543,13 +1650,14 @@ ECommitTables (
         if ((Dsdt[i] == 0x0B) && (Dsdt[i + 1] == 0x50)) {
           CopyMem (&Uid, Dsdt + i + 8, 4);
           CopyMem (&Fl, Dsdt + i + 12, 4);
-          Fl = (Uid == 5) ? (Fl | 1) : (Fl & ~1u);
+          Fl = (EMboxForUid (Uid) != 0) ? (Fl | 1) : (Fl & ~1u);
           CopyMem (Dsdt + i + 12, &Fl, 4);
-          if (Uid == 5) {
+          if (EMboxForUid (Uid) != 0) {
             UINT32  One = 1;
+            UINT64  Mb  = EMboxForUid (Uid);
 
             CopyMem (Dsdt + i + 16, &One, 4);
-            CopyMem (Dsdt + i + 24, &mEMailbox, 8);
+            CopyMem (Dsdt + i + 24, &Mb, 8);
           }
           Mats++;
           break;
@@ -1560,7 +1668,7 @@ ECommitTables (
     EFixSum (Dsdt);
   }
 
-  SbLog ("=M3E commit: UID 5 first, only one enabled, park v1 mbox %lx; %d _MAT synced", mEMailbox, Mats);
+  SbLog ("=M3E commit: UID5 first; on: 4%c 6%c 7%c; %d _MAT", mESec[0] ? 'Y' : 'n', mESec[2] ? 'Y' : 'n', mESec[3] ? 'Y' : 'n', Mats);
 }
 
 STATIC
@@ -1622,7 +1730,7 @@ M3EarlyEbsWrap (
     ECommitTables ();
     EAcpiLine ("committed");
     EPmuReplay ("M3 1");
-    SbLog ((STARBITE_M3_EARLY == 4) ? "=M3E v10: into winload on the M3; FREE RUN (no guard reset)" : "=M3E v2: returning into winload on the M3; kernel starts. A55 0 resets at the UFS driver's 1st pmsg line");
+    SbLog ((STARBITE_M3_EARLY >= 4) ? "=M3E v10: into winload on the M3; FREE RUN (no guard reset)" : "=M3E v2: returning into winload on the M3; kernel starts. A55 0 resets at the UFS driver's 1st pmsg line");
     EProgress (7);
     return Status;
   }
@@ -1828,7 +1936,7 @@ M3EarlyArm (
   Lit[1] = (UINT64)(Page + 3 * EFI_PAGE_SIZE + 0x800);      // control: the parked M3 runs the guard instead
  #endif
   mEGuard = Page + 3 * EFI_PAGE_SIZE;
- #if STARBITE_M3_EARLY == 4
+ #if STARBITE_M3_EARLY >= 4
   ((UINT64 *)(UINTN)mEGuard)[0x30 / 8] = 1;               // free run: the guard samples but never resets
  #endif
   mEMailbox = 0xFFFFFFFFu;
@@ -1884,6 +1992,12 @@ M3EarlyArm (
     (UINT64)(UINTN)mECtx,
     (UINT64)(UINTN)M3EarlyEntry
     );
+ #if STARBITE_M3_EARLY >= 5
+  if (*(volatile UINT64 *)(UINTN)(mEPark + 0x80) == 1) {
+    EParkSecondaries ();
+  }
+
+ #endif
   EAcpiLine ("dispatch");
   Status = gBS->CreateEventEx (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, M3EarlyOnReadyToBoot, NULL, &gEfiEventReadyToBootGuid, &mEReadyToBoot);
   SbLog ("=M3E ReadyToBoot event %r", Status);
