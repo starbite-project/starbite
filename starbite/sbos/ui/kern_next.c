@@ -495,6 +495,25 @@ int next_selftest_step(void)
     stats_log(FILM_NAME[F.film]);
     frame_log = 0;
     if (F.film < 3) { film_start(F.film + 1); return 1; }
+    {
+        /* the present's kernels against uibench's loops, on these buffers and cores (boosted, workers on) */
+        static const char *const BN[5] = { "the motion present (2x, centred)", "the rest copy (tk_memcpy rows)",
+                                           "uibench's copy", "uibench's 2x", "the half canvas following (2x2 down)" };
+        boost(1);
+        workers_start();
+        for (int k = 0; k < 5; k++) {
+            hw_wdt_feed();
+            uint64_t us = tk_comp_bench(&comp, k);
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "next: bench: ");
+            ub_s(&u, BN[k]);
+            ub_s(&u, ": ");
+            ub_dec(&u, us);
+            ub_s(&u, " us");
+            sb_log(u.b);
+        }
+    }
     return 0;
 }
 

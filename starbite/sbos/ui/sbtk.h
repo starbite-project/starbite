@@ -198,7 +198,8 @@ int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocate
 void tk_flatten(tk_layer *group, tk_bmp *out, tk_a8 *mask, float scale);   /* scale .5: a half-resolution cache */
 /* draw a frame: motion = half resolution and 2x present; full = redraw everything; returns the drawn px */
 int tk_comp_frame(tk_comp *c, int motion, int full);
-void tk_comp_prepare(tk_comp *c);                         /* idle: make the visible layers' half copies */
+void tk_comp_prepare(tk_comp *c);
+uint64_t tk_comp_bench(tk_comp *c, int kind);      /* the present's kernels vs uibench's loops, us */                         /* idle: make the visible layers' half copies */
 
 /* ---- motion: springs, the velocity tracker, gestures (tk_motion.c) ------------------------------------------ */
 enum { TK_SPR_UNLOCK, TK_SPR_OPEN, TK_SPR_CLOSE, TK_SPR_SHEET, TK_SPR_ROWS, TK_SPR_CC, TK_NSPR };

@@ -258,6 +258,7 @@ static int slice_row(const tk_layer *l, int v, int srch, float res)
 }
 
 
+static inline void up2x_hrow(uint32_t *o, const uint32_t *V, int X0, int X1);
 static void draw_solid(const tgt *T, const item *it, tk_irect R)
 {
     /* a solid-colour layer (the boot overlay's black): its rect filled, or blended at its opacity */
@@ -305,11 +306,40 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
     float ia = 1.0f / A, ib = 1.0f / B;
     int fast = tk_fabsf(A - 1) < 1e-4f && tk_fabsf(B - 1) < 1e-4f && l->slice != 2;
     int ox = (int)tk_floorf(TX + .5f), oy = (int)tk_floorf(TY + .5f);   /* snapped offset for the fast path */
+    /* exactly 2x on whole px (the half-resolution layers at rest: the scrim, the screen under the sheet): the
+     * present's 1/4 3/4 kernel, which is what the bilinear gives at that scale */
+    int two = tk_fabsf(A - 2) < 1e-4f && tk_fabsf(B - 2) < 1e-4f && !l->slice && !(glass && gm) &&
+              tk_fabsf(TX - ox) < 1e-3f && tk_fabsf(TY - oy) < 1e-3f;
     int colok = 0, umin = 0, umax = 0;
     for (int y = d.y0; y < d.y1; y++) {
         float f = fade_at(it, (y + .5f) / k);
         unsigned al = (unsigned)(it->alpha * f * 255 + .5f);
         if (!al) continue;
+        if (two) {
+            int yl = y - oy, j = yl >> 1;
+            if (yl < 0 || j >= src->h) continue;
+            int jn = yl & 1 ? tk_mini(src->h - 1, j + 1) : tk_maxi(0, j - 1);
+            const uint32_t *c = src->px + (size_t)j * src->stride, *nr = src->px + (size_t)jn * src->stride;
+            int X0 = tk_maxi(0, d.x0 - ox), X1 = tk_mini(2 * src->w, d.x1 - ox);
+            if (X1 <= X0) continue;
+            int i0 = tk_maxi(0, (X0 >> 1) - 1), i1 = tk_mini(src->w, ((X1 - 1) >> 1) + 2);
+            uint32_t *V = T->S->upV + 8 - i0;
+            int i = i0;
+            for (; i + 4 <= i1; i += 4) {
+                uint8x16_t C = vld1q_u8((const uint8_t *)(c + i)), N = vld1q_u8((const uint8_t *)(nr + i));
+                vst1q_u8((uint8_t *)(V + i), vrhaddq_u8(C, vrhaddq_u8(C, N)));
+            }
+            for (; i < i1; i++) {
+                uint32_t o = 0;
+                for (int sh = 0; sh < 32; sh += 8) o |= ((3 * (c[i] >> sh & 255) + (nr[i] >> sh & 255) + 2) >> 2) << sh;
+                V[i] = o;
+            }
+            V[i0 - 1] = V[i0];
+            V[i1] = V[i1 - 1];
+            up2x_hrow(rowbuf - X0, V, X0, X1);
+            row_over(T->t->px + (size_t)y * T->t->stride + ox + X0, rowbuf, X1 - X0, al);
+            continue;
+        }
         uint32_t *dst = T->t->px + (size_t)y * T->t->stride + d.x0;
         int n = d.x1 - d.x0;
         if (fast) {
@@ -725,3 +755,59 @@ static void prep(tk_layer *l)
 }
 /* idle time: the half copies the next motion frame will need (else its first frame makes them) */
 void tk_comp_prepare(tk_comp *c) { prep(c->root); }
+
+/* ---- a benchmark of the present's kernels against uibench's simplest loops, on the same buffers and cores ---- */
+typedef struct { tk_comp *c; int kind; } bjob;
+static void bband(void *a, int i)
+{
+    bjob *B = a;
+    tk_comp *c = B->c;
+    int y0 = TK_H * i / TK_NBAND, y1 = TK_H * (i + 1) / TK_NBAND;
+    switch (B->kind) {
+    case 0:                                         /* the motion present: the half canvas 2x into the panel */
+        up2x_out(&c->panel, &c->half, (tk_irect){ 0, y0, TK_W, y1 }, &SCR[i]);
+        break;
+    case 1:                                         /* the rest present: RAM to the panel, tk_memcpy per row */
+        for (int y = y0; y < y1; y++) tk_memcpy(c->panel.px + (size_t)y * TK_W, c->fb.px + (size_t)y * TK_W, TK_W * 4);
+        break;
+    case 2: {                                       /* uibench's copy: one stream of 64-byte loads and stores */
+        const uint8_t *s = (const uint8_t *)(c->fb.px + (size_t)y0 * TK_W);
+        uint8_t *d = (uint8_t *)(c->panel.px + (size_t)y0 * TK_W);
+        for (size_t x = 0; x < (size_t)(y1 - y0) * TK_W * 4; x += 64) vst1q_u8_x4(d + x, vld1q_u8_x4(s + x));
+        break;
+    }
+    case 3: {                                       /* uibench's 2x: no centring, 2 loads per 4 half px */
+        for (int y = y0 & ~1; y < y1; y += 2) {
+            const uint8_t *r0 = (const uint8_t *)(c->half.px + (size_t)(y / 2) * (TK_W / 2));
+            const uint8_t *r1 = (const uint8_t *)(c->half.px + (size_t)tk_mini(TK_H / 2 - 1, y / 2 + 1) * (TK_W / 2));
+            uint32_t *o0 = c->panel.px + (size_t)y * TK_W, *o1 = o0 + TK_W;
+            for (int x = 0; x + 4 < TK_W / 2; x += 4) {
+                uint8x16_t a = vld1q_u8(r0 + x * 4), an = vld1q_u8(r0 + x * 4 + 4), b = vld1q_u8(r1 + x * 4), bn = vld1q_u8(r1 + x * 4 + 4);
+                uint8x16_t ah = vrhaddq_u8(a, an), bh = vrhaddq_u8(b, bn);
+                uint32x4x2_t t = vzipq_u32(vreinterpretq_u32_u8(a), vreinterpretq_u32_u8(ah));
+                uint32x4x2_t m = vzipq_u32(vreinterpretq_u32_u8(vrhaddq_u8(a, b)), vreinterpretq_u32_u8(vrhaddq_u8(ah, bh)));
+                vst1q_u32(o0 + 2 * x, t.val[0]); vst1q_u32(o0 + 2 * x + 4, t.val[1]);
+                vst1q_u32(o1 + 2 * x, m.val[0]); vst1q_u32(o1 + 2 * x + 4, m.val[1]);
+            }
+        }
+        break;
+    }
+    default:                                        /* the half canvas following a rest frame */
+        down2_rect(&c->half, &c->fb, (tk_irect){ 0, y0, TK_W, y1 });
+        break;
+    }
+}
+/* best of 3 runs in us: 0 the motion present, 1 the rest copy, 2 uibench's copy, 3 uibench's 2x, 4 the 2x2 down */
+uint64_t tk_comp_bench(tk_comp *c, int kind)
+{
+    uint64_t best = ~0ULL;
+    for (int r = 0; r < 3; r++) {
+        bjob B = { c, kind };
+        uint64_t t0 = tk_us();
+        if (c->par) c->par(bband, &B, TK_NBAND);
+        else for (int i = 0; i < TK_NBAND; i++) bband(&B, i);
+        uint64_t t = tk_us() - t0;
+        if (t < best) best = t;
+    }
+    return best;
+}

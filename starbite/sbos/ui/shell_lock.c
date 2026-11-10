@@ -463,6 +463,10 @@ static void build_open(int g)
         }
         tk_layer_add(&k->members, &k->rows[i]);
     }
+    /* their half copies now (at the tap), not in the first frame of the card's spring */
+    tk_layer_prepare(&k->face);
+    tk_layer_prepare(&k->head);
+    for (int i = 0; i < gr->n; i++) tk_layer_prepare(&k->rows[i]);
     k->open.child = 0;
     tk_layer_add(&k->open, &k->face);
     tk_layer_add(&k->open, &k->head);
