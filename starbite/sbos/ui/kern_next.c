@@ -143,7 +143,8 @@ static tk_comp comp;
 static int ready, baking, need_full, ticking, boosted;
 static uint64_t last_tick, boot_t0;
 /* the frame statistics of the current gesture (logged per film in the self test, per gesture otherwise) */
-static struct { uint32_t n, nhalf, over16, maxus; uint64_t sumus; uint32_t hist[64]; } FS;
+static struct { uint32_t n, nhalf, over16, maxus, nboost; uint64_t sumus; uint32_t hist[64]; } FS;
+static int frame_log;                        /* the self test: one line per frame of the films it names */
 
 static void log_mb(const char *what, uint64_t v)
 {
@@ -191,6 +192,21 @@ static void stats_add(void)
     uint32_t us = (uint32_t)comp.last_us;
     FS.n++;
     FS.nhalf += comp.last_half;
+    FS.nboost += boosted;
+    if (frame_log) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: f ");
+        ub_dec(&u, FS.n);
+        ub_s(&u, comp.last_half ? " half " : " full ");
+        ub_dec(&u, (uint64_t)comp.last_px / 1000);
+        ub_s(&u, "k px compose ");
+        ub_dec(&u, comp.us_comp);
+        ub_s(&u, " us present ");
+        ub_dec(&u, comp.us_present);
+        ub_s(&u, " us");
+        sb_log(u.b);
+    }
     FS.sumus += us;
     if (us > FS.maxus) FS.maxus = us;
     if (us > 16700) FS.over16++;
@@ -220,6 +236,8 @@ static void stats_log(const char *what)
     ub_dec(&u, FS.maxus / 1000);
     ub_s(&u, " ms, over 16.7 ms: ");
     ub_dec(&u, FS.over16);
+    ub_s(&u, "; at the top step: ");
+    ub_dec(&u, FS.nboost);
     ub_s(&u, "; A55 kHz ");
     ub_dec(&u, hw_a55_khz());
     ub_s(&u, "; bands by core 0/1/2/3 ");
@@ -274,7 +292,7 @@ void next_kinit(void)
 {
     boot_t0 = sb_ms();
     log_mb("arena free before the UI heap: ", sb_arena_free());
-    heap_init(128ULL << 20);
+    heap_init(160ULL << 20);
     log_mb("UI heap: ", heap_size);
     if (!tk_pack_open(sbtk_pack_start, (uint32_t)(sbtk_pack_end - sbtk_pack_start))) {
         sb_log("next: the sbtk pack is missing or bad: the regular UI runs");
@@ -417,6 +435,7 @@ static void film_start(int film)
     F.down = 0;
     F.s0 = 0;
     F.t0 = sb_ms();
+    frame_log = film == 0 || film == 2;          /* the unlock and the focus sheet: every frame's split */
     switch (film) {
     case 0: F.s = S_UNLOCK; F.n = 3; break;
     case 1: F.s = S_GROUP; F.n = 9; break;
@@ -471,6 +490,7 @@ int next_selftest_step(void)
     }
     if (ticking || sh_moving()) return 1;          /* let it settle */
     stats_log(FILM_NAME[F.film]);
+    frame_log = 0;
     if (F.film < 3) { film_start(F.film + 1); return 1; }
     return 0;
 }

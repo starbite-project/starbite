@@ -202,6 +202,7 @@ static void fmt_hm(char *b) { b[0] = (char)('0' + ST.h / 10); b[1] = (char)('0' 
 
 static tk_layer lstatus, lclock, lwidgets;
 static void relink(void);
+static void lap_us(const char *what, uint64_t us);
 static char carrier[32] = "No SIM";
 static void build_lstatus(void)
 {
@@ -642,7 +643,7 @@ static float focus_sy;
 static void build_focus(const sys_t *s, const grp_t *gr)
 {
     /* the scrim: what is on the panel now, blurred 22 pt, saturated 1.3, under rgba(4, 8, 26, .28) */
-    tk_comp_frame(C, 0, 1);
+    tk_comp_frame(C, 0, 0);                  /* the frame in RAM is current (only what changed is drawn) */
     relayer(&scrim);
     tk_layer_init(&scrim, "scrim");
     /* half resolution, drawn 2x (it is a blur): 4 MB instead of 17 */
@@ -655,26 +656,34 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         tk_bmp_down2(&q, &scrim.bmp);
         tk_bmp_blur(&q, PT(22) / 4);
         tk_bmp_satbright(&q, 1.3f, 1);
+        /* the tint over it at this size (a constant over a smooth image: the same after the bilinear up) */
+        tk_bmp_tint(&q, TK_RGBA(4, 8, 26, .28f));
         tk_bmp_up(&scrim.bmp, &q, 0, 0, 2);
         tk_bmp_free(&q);
-        tk_paint t = tk_solid(TK_RGBA(4, 8, 26, .28f));
-        tk_fill_rrect(&scrim.bmp, -2, -2, TK_W / 2 + 4, TK_H / 2 + 4, 0, &t, 1);
     }
+    scrim.opaque = 1;                        /* nothing under it needs drawing once it is fully in */
     /* the card: its backdrop is the scrim filtered again (blur 14, saturate 1.9, brightness 1.06), taken once at
      * rest and moved with the card while it springs in (Chrome filters the live scene under it each frame) */
     float sy = 0;
+    uint64_t tb0 = tk_us();
     for (int pass = 0; pass < 1; pass++) {
         tk_layer *L = &fcard;
         relayer(L);
         dc d = mk(L, "fcard", 14, 196, 362, 267, 44, 0);
         if (!pass) {
-            tk_bmp crop;
-            tk_bmp_new(&crop, d.b->w, d.b->h);
-            tk_bmp_up(&crop, &scrim.bmp, (int)d.ox, (int)d.oy, 2);      /* the card's part of the scrim, 2x */
-            tk_glass_local(d.b, &crop, PT(14) - d.ox, PT(196) - d.oy, PT(362), PT(267), PT(32));
-            tk_bmp_free(&crop);
+            /* straight from the half-resolution scrim (it is already a blur) */
+            tk_glass_from_half(d.b, (int)d.ox, (int)d.oy, &scrim.bmp, PT(14) - d.ox, PT(196) - d.oy, PT(362), PT(267), PT(32));
         }
-        d_glass(&d, 14, 196, 362, 267, 32, 0, 1);
+        /* the card's glass (geometry only: the same for every system) is baked once and kept */
+        {
+            static tk_layer face;
+            if (!face.bmp.px) {
+                dc fd = mk(&face, "fcard-face", 14, 196, 362, 267, 44, 0);
+                d_glass(&fd, 14, 196, 362, 267, 32, 0, 1);
+            }
+            tk_blit(d.b, &face.bmp, (int)(face.x - d.ox), (int)(face.y - d.oy), 1);
+        }
+        lap_us("focus: the card's backdrop and glass", tk_us() - tb0);
         char tn[40] = "t66-";
         tk_memcpy(tn + 4, s->k, tk_strlen(s->k) + 1);
         d_icon(&d, tn, 34, 216, 1);
@@ -692,9 +701,17 @@ static void build_focus(const sys_t *s, const grp_t *gr)
             d_text(&d, TK_IT400, 14.5f, 34 + dtw + 14, b, dd[i], 0, TK_TNUM, INK, 0);
         }
         sy = 298 + 17 * nf + 7 * (nf - 1) + 18;
-        /* the slider: dark glass whose backdrop is the card under it */
+        /* the slider: dark glass whose backdrop is the card under it; its glass kept per position (2 or 3 facts) */
         tk_glass_local(d.b, d.b, PT(34) - d.ox, PT(sy) - d.oy, PT(322), PT(62), PT(31));
-        d_glass(&d, 34, sy, 322, 62, 31, 1, 1);
+        {
+            static tk_layer sface[2];
+            tk_layer *sf = &sface[nf == 3];
+            if (!sf->bmp.px) {
+                dc fd = mk(sf, "slider-face", 34, sy, 322, 62, 44, 0);
+                d_glass(&fd, 34, sy, 322, 62, 31, 1, 1);
+            }
+            tk_blit(d.b, &sf->bmp, (int)(sf->x - d.ox), (int)(sf->y - d.oy), 1);
+        }
     }
     relayer(&ffill);
     focus_sy = sy;
@@ -953,7 +970,9 @@ void sh_set(const char *what, const char *key, float v)
             for (int i = 0; i < G[g].n; i++)
                 if (!tk_strcmp(G[g].it[i].k, key)) {
                     focus_on = 1;
+                    uint64_t t0 = tk_us();
                     build_focus(&G[g].it[i], &G[g]);
+                    lap_us("focus: snapshot and bake", tk_us() - t0);
                     set_focus(v);
                 }
     } else if (!tk_strcmp(what, "reset")) {
@@ -1252,6 +1271,7 @@ int sh_tick(float dt, float t)
                 /* the black ground is a solid layer (no 17 MB bitmap); the tile, the words and the bar's track
                  * one small layer over it */
                 boot.solid = 0xff000000u;
+                boot.opaque = 1;
                 boot.solid_w = TK_W;
                 boot.solid_h = TK_H;
                 dc d = mk(&bootc, "boot-content", 100, 300, 190, 175, 0, 0);

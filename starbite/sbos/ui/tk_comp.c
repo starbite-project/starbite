@@ -328,6 +328,23 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
                 row_glass(dst + i0, bw_row(T, y, d.x0 + i0, i1 - i0), gm->v + (size_t)v * gm->w + u0 + i0, i1 - i0, al);
             row_over(dst + i0, src->px + (size_t)v * src->stride + u0 + i0, i1 - i0, al);
         } else {
+            if (T->k < 1 && !l->slice && !(glass && gm)) {
+                /* a motion frame: the nearest source px (a scaled layer moves; the frame at rest is bilinear) */
+                float sv0 = ((y + .5f) - TY) * ib;
+                int v = (int)tk_floorf(sv0);
+                if (v < 0 || v >= src->h) continue;
+                if (!colok) {
+                    for (int q = 0; q < n; q++) colu[q] = (int)tk_floorf(((d.x0 + q + .5f) - TX) * ia);
+                    colok = 1;
+                }
+                const uint32_t *sr = src->px + (size_t)v * src->stride;
+                for (int q = 0; q < n; q++) {
+                    int u = colu[q];
+                    rowbuf[q] = u >= 0 && u < src->w ? sr[u] : 0;
+                }
+                row_over(dst, rowbuf, n, al);
+                continue;
+            }
             /* bilinear, separable: the two source rows blended once over the span, then each target px from two
              * neighbours of that row (the columns' table is made once per item) */
             float sv = ((y + .5f) - TY) * ib - .5f;
@@ -524,6 +541,19 @@ static void band(void *arg, int i)
         if (y1 <= y0) continue;
         tk_irect b = { r.x0, y0, r.x1, y1 };
         if (J->phase == 0) {
+            /* the topmost opaque layer that covers the whole band at full opacity: nothing under it is drawn */
+            int first = 0;
+            float k = T.k;
+            for (int q2 = cur.n - 1; q2 >= 0; q2--) {
+                const item *it = &cur.it[q2];
+                if (!it->l->opaque || it->alpha < .999f || it->fade) continue;
+                tk_irect cv = { (int)(it->r.x0 * k + .999f), (int)(it->r.y0 * k + .999f), (int)(it->r.x1 * k), (int)(it->r.y1 * k) };
+                if (cv.x0 <= b.x0 && cv.y0 <= b.y0 && cv.x1 >= b.x1 && cv.y1 >= b.y1) { first = q2; break; }
+            }
+            if (first) {
+                for (int k2 = first; k2 < cur.n; k2++) draw_item(&T, &cur.it[k2], b);
+                continue;
+            }
             if (J->motion)
                 for (int y = b.y0; y < b.y1; y++)
                     tk_memcpy(T.t->px + (size_t)y * T.t->stride + b.x0, J->c->base_half.px + (size_t)y * J->c->base_half.stride + b.x0, (size_t)(b.x1 - b.x0) * 4);

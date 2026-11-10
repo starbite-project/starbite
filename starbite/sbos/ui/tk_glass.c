@@ -71,26 +71,39 @@ static void bilinear_up(tk_bmp *dst, const tk_bmp *src)
 
 void tk_bmp_up(tk_bmp *dst, const tk_bmp *src, int x0, int y0, float f)
 {
-    /* dst px (i, j) = the bilinear sample of src at the point (x0 + i, y0 + j) of a space f times src's */
+    /* dst px (i, j) = the bilinear sample of src at the point (x0 + i, y0 + j) of a space f times src's; fixed
+     * point (16.16), the columns' table made once */
+    if (!dst->px || !src->px) return;
+    int32_t *cu = tk_alloc((size_t)dst->w * 8);
+    if (!cu) return;
+    for (int i = 0; i < dst->w; i++) {
+        float fx = (x0 + i + .5f) / f - .5f;
+        int xa = (int)tk_floorf(fx);
+        cu[2 * i] = xa;
+        cu[2 * i + 1] = (int32_t)((fx - xa) * 256);
+    }
     for (int j = 0; j < dst->h; j++) {
         float fy = (y0 + j + .5f) / f - .5f;
         int ya = (int)tk_floorf(fy);
         unsigned ty = (unsigned)((fy - ya) * 256);
         int y_0 = tk_maxi(0, tk_mini(src->h - 1, ya)), y_1 = tk_maxi(0, tk_mini(src->h - 1, ya + 1));
+        const uint32_t *r0 = src->px + (size_t)y_0 * src->stride, *r1 = src->px + (size_t)y_1 * src->stride;
+        uint32_t *o = dst->px + (size_t)j * dst->stride;
         for (int i = 0; i < dst->w; i++) {
-            float fx = (x0 + i + .5f) / f - .5f;
-            int xa = (int)tk_floorf(fx);
-            unsigned tx = (unsigned)((fx - xa) * 256);
+            int xa = cu[2 * i];
+            unsigned tx = (unsigned)cu[2 * i + 1];
             int x_0 = tk_maxi(0, tk_mini(src->w - 1, xa)), x_1 = tk_maxi(0, tk_mini(src->w - 1, xa + 1));
-            uint32_t p00 = src->px[y_0 * src->stride + x_0], p01 = src->px[y_0 * src->stride + x_1];
-            uint32_t p10 = src->px[y_1 * src->stride + x_0], p11 = src->px[y_1 * src->stride + x_1], o = 0;
-            for (int sh = 0; sh < 32; sh += 8) {
-                unsigned t0 = (p00 >> sh & 255) * (256 - tx) + (p01 >> sh & 255) * tx, t1 = (p10 >> sh & 255) * (256 - tx) + (p11 >> sh & 255) * tx;
-                o |= ((t0 * (256 - ty) + t1 * ty + 32768) >> 16) << sh;
-            }
-            dst->px[j * dst->stride + i] = o;
+            uint32_t p00 = r0[x_0], p01 = r0[x_1], p10 = r1[x_0], p11 = r1[x_1];
+            /* two channels at once (the 0x00ff00ff trick), rows then the column */
+            uint32_t a_rb = ((p00 & 0xff00ffu) * (256 - tx) + (p01 & 0xff00ffu) * tx) >> 8 & 0xff00ffu;
+            uint32_t a_ag = ((p00 >> 8 & 0xff00ffu) * (256 - tx) + (p01 >> 8 & 0xff00ffu) * tx) >> 8 & 0xff00ffu;
+            uint32_t b_rb = ((p10 & 0xff00ffu) * (256 - tx) + (p11 & 0xff00ffu) * tx) >> 8 & 0xff00ffu;
+            uint32_t b_ag = ((p10 >> 8 & 0xff00ffu) * (256 - tx) + (p11 >> 8 & 0xff00ffu) * tx) >> 8 & 0xff00ffu;
+            uint32_t rb = (a_rb * (256 - ty) + b_rb * ty) >> 8 & 0xff00ffu, ag = (a_ag * (256 - ty) + b_ag * ty) & 0xff00ff00u;
+            o[i] = rb | ag;
         }
     }
+    tk_free(cu);
 }
 
 void tk_glass_backdrop(tk_bmp *dst, const tk_bmp *src)
@@ -169,6 +182,32 @@ void tk_glass_bake_ref(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float 
     }
 }
 
+void tk_glass_local_put(tk_bmp *b, const tk_bmp *t, int X, int Y, float x, float y, float w, float h, float r)
+{
+    /* t (the filtered backdrop, its px (0, 0) at b's (X, Y)) over b inside the rounded box */
+    int W = t->w, H = t->h;
+    tk_fm m;
+    if (!tk_fm_new(&m, W, H)) return;
+    tk_fm_rrect(&m, (float)X, (float)Y, x, y, w, h, r);
+    for (int j = 0; j < H; j++) {
+        int by = Y + j;
+        if (by < 0 || by >= b->h) continue;
+        for (int i = 0; i < W; i++) {
+            unsigned c = (unsigned)(m.v[j * W + i] * 255 + .5f);
+            int bx = X + i;
+            if (!c || bx < 0 || bx >= b->w) continue;
+            uint32_t sp = t->px[j * t->stride + i], *d = &b->px[by * b->stride + bx], o = *d, res = 0;
+            unsigned sa = ((sp >> 24) * c + 127) / 255;
+            for (int sh = 0; sh < 32; sh += 8) {
+                unsigned v = ((sp >> sh & 255) * c + (o >> sh & 255) * (255 - sa) + 127) / 255;
+                res |= (v > 255 ? 255 : v) << sh;
+            }
+            *d = res;
+        }
+    }
+    tk_fm_free(&m);
+}
+
 void tk_glass_local(tk_bmp *b, const tk_bmp *src, float x, float y, float w, float h, float r)
 {
     /* Chrome's backdrop-filter: the backdrop under the element's box (edges mirrored), blurred, saturated,
@@ -178,25 +217,7 @@ void tk_glass_local(tk_bmp *b, const tk_bmp *src, float x, float y, float w, flo
     if (!tk_bmp_new(&t, W, H)) return;
     tk_bmp_copy(&t, 0, 0, src, X, Y, W, H);
     tk_bmp_blur_sat(&t, PT(14), 1.9f, 1.06f);
-    tk_fm m;
-    if (tk_fm_new(&m, W, H)) {
-        tk_fm_rrect(&m, (float)X, (float)Y, x, y, w, h, r);
-        for (int j = 0; j < H; j++)
-            for (int i = 0; i < W; i++) {
-                float c = m.v[j * W + i];
-                int bx = X + i, by = Y + j;
-                if (c <= 0 || bx < 0 || by < 0 || bx >= b->w || by >= b->h) continue;
-                uint32_t s = t.px[j * W + i], *d = &b->px[by * b->stride + bx], o = *d, res = 0;
-                float sa = (s >> 24) / 255.0f * c;
-                for (int sh = 0; sh < 32; sh += 8) {
-                    float v = (s >> sh & 255) * c + (o >> sh & 255) * (1 - sa);
-                    int q = (int)(v + .5f);
-                    res |= (uint32_t)(q > 255 ? 255 : q) << sh;
-                }
-                *d = res;
-            }
-        tk_fm_free(&m);
-    }
+    tk_glass_local_put(b, &t, X, Y, x, y, w, h, r);
     tk_bmp_free(&t);
 }
 
@@ -356,4 +377,29 @@ void tk_glass_bake(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, f
             }
         }
     }
+}
+
+void tk_glass_from_half(tk_bmp *b, int box, int boy, const tk_bmp *half, float x, float y, float w, float h, float r)
+{
+    /* tk_glass_local for a backdrop that exists only at half resolution (the focus scrim): the element's region of
+     * it, down to a quarter, blurred 14 pt, saturated 1.9, brightened 1.06, then sampled up into b inside the shape.
+     * b's origin is the panel point (box, boy); (x, y, w, h) are in b's px */
+    int X0 = (int)tk_floorf(x), Y0 = (int)tk_floorf(y), X1 = (int)(x + w + .999f), Y1 = (int)(y + h + .999f);
+    int hx0 = (box + X0) >> 1, hy0 = (boy + Y0) >> 1, hx1 = (box + X1 + 1) >> 1, hy1 = (boy + Y1 + 1) >> 1;
+    hx0 = tk_maxi(0, hx0); hy0 = tk_maxi(0, hy0); hx1 = tk_mini(half->w, hx1); hy1 = tk_mini(half->h, hy1);
+    tk_bmp t, q;
+    if (!tk_bmp_new(&t, hx1 - hx0, hy1 - hy0)) return;
+    tk_bmp_copy(&t, 0, 0, half, hx0, hy0, t.w, t.h);
+    if (!tk_bmp_new(&q, (t.w + 1) / 2, (t.h + 1) / 2)) { tk_bmp_free(&t); return; }
+    tk_bmp_down2(&q, &t);
+    tk_bmp_free(&t);
+    tk_bmp_blur_sat(&q, PT(14) / 4, 1.9f, 1.06f);
+    /* q px (i, j) covers panel px [4 i, 4 i + 4) from (2 hx0, 2 hy0) */
+    tk_bmp up;
+    if (tk_bmp_new(&up, X1 - X0, Y1 - Y0)) {
+        tk_bmp_up(&up, &q, box + X0 - 2 * hx0, boy + Y0 - 2 * hy0, 4);
+        tk_glass_local_put(b, &up, X0, Y0, x, y, w, h, r);
+        tk_bmp_free(&up);
+    }
+    tk_bmp_free(&q);
 }

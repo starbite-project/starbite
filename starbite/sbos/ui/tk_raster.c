@@ -4,6 +4,7 @@
  * box passes, CSS box-shadow (outer clipped to outside the box, inset), images, and the backdrop filters. All of it
  * runs when a layer's content changes, never per frame, so it is float and plain C. */
 #include "sbtk.h"
+#include <arm_neon.h>
 
 tk_col tk_hex(uint32_t rgb, float a) { return TK_RGBA((float)(rgb >> 16 & 255), (float)(rgb >> 8 & 255), (float)(rgb & 255), a); }
 
@@ -336,24 +337,43 @@ void tk_box_shadow(tk_bmp *b, float x, float y, float w, float h, float r, float
     tk_fm_free(&box);
 }
 
+static inline uint8x8_t d255(uint16x8_t m) { return vrshrn_n_u16(vrsraq_n_u16(m, m, 8), 8); }
 void tk_blit(tk_bmp *dst, const tk_bmp *src, int x, int y, float alpha)
 {
-    int a = (int)(alpha * 256 + 0.5f);
-    for (int j = tk_maxi(0, -y); j < src->h && y + j < dst->h; j++)
-        for (int i = tk_maxi(0, -x); i < src->w && x + i < dst->w; i++) {
-            uint32_t s = src->px[j * src->stride + i];
-            if (!s) continue;
-            if (a < 256) {
-                s = ((s >> 24 & 255) * a >> 8) << 24 | ((s >> 16 & 255) * a >> 8) << 16 | ((s >> 8 & 255) * a >> 8) << 8 | ((s & 255) * a >> 8);
-            }
-            uint32_t *d = &dst->px[(y + j) * dst->stride + x + i], o = *d, ia = 255 - (s >> 24);
-            uint32_t r = 0;
+    /* premultiplied src over dst at (x, y) times alpha: 8 px a NEON step (empty blocks skipped) */
+    if (!dst->px || !src->px) return;
+    unsigned a = (unsigned)(alpha * 255 + 0.5f);
+    if (a > 255) a = 255;
+    int i0 = tk_maxi(0, -x), i1 = tk_mini(src->w, dst->w - x);
+    if (i1 <= i0) return;
+    uint8x8_t va = vdup_n_u8((uint8_t)a);
+    for (int j = tk_maxi(0, -y); j < src->h && y + j < dst->h; j++) {
+        const uint32_t *sp = src->px + (size_t)j * src->stride;
+        uint32_t *dp = dst->px + (size_t)(y + j) * dst->stride + x;
+        int i = i0;
+        for (; i + 8 <= i1; i += 8) {
+            uint8x8x4_t S = vld4_u8((const uint8_t *)(sp + i));
+            if (!vmaxv_u8(S.val[3])) continue;
+            if (a < 255)
+                for (int c = 0; c < 4; c++) S.val[c] = d255(vmull_u8(S.val[c], va));
+            uint8x8x4_t D = vld4_u8((uint8_t *)(dp + i));
+            uint8x8_t ia = vmvn_u8(S.val[3]);
+            for (int c = 0; c < 4; c++) D.val[c] = vqadd_u8(S.val[c], d255(vmull_u8(D.val[c], ia)));
+            vst4_u8((uint8_t *)(dp + i), D);
+        }
+        for (; i < i1; i++) {
+            uint32_t s0 = sp[i];
+            if (!s0) continue;
+            uint32_t sc = 0;
+            for (int sh = 0; sh < 32; sh += 8) sc |= (((s0 >> sh & 255) * a + 127) / 255) << sh;
+            uint32_t o = dp[i], ia = 255 - (sc >> 24), r = 0;
             for (int sh = 0; sh < 32; sh += 8) {
-                uint32_t v = (s >> sh & 255) + ((o >> sh & 255) * ia + 127) / 255;
+                uint32_t v = (sc >> sh & 255) + ((o >> sh & 255) * ia + 127) / 255;
                 r |= (v > 255 ? 255 : v) << sh;
             }
-            *d = r;
+            dp[i] = r;
         }
+    }
 }
 void tk_blit_tinted(tk_bmp *dst, const tk_bmp *src, int x, int y, tk_col tint)
 {
@@ -482,14 +502,42 @@ void tk_bmp_copy(tk_bmp *dst, int dx, int dy, const tk_bmp *src, int sx, int sy,
 }
 void tk_bmp_down2(tk_bmp *dst, const tk_bmp *src)
 {
-    for (int j = 0; j < dst->h; j++)
-        for (int i = 0; i < dst->w; i++) {
+    /* the 2x2 box ((a + b + c + d + 2) >> 2), 4 px a NEON step where both source rows and columns exist */
+    if (!dst->px || !src->px) return;
+    for (int j = 0; j < dst->h; j++) {
+        int y0 = tk_mini(2 * j, src->h - 1), y1 = tk_mini(2 * j + 1, src->h - 1);
+        const uint32_t *ra = src->px + (size_t)y0 * src->stride, *rb = src->px + (size_t)y1 * src->stride;
+        uint32_t *o = dst->px + (size_t)j * dst->stride;
+        int i = 0, full = src->w / 2;
+        for (; i + 4 <= full && i + 4 <= dst->w; i += 4) {
+            uint32x4x2_t A = vld2q_u32(ra + 2 * i), B = vld2q_u32(rb + 2 * i);
+            uint8x16_t ae = vreinterpretq_u8_u32(A.val[0]), ao = vreinterpretq_u8_u32(A.val[1]);
+            uint8x16_t be = vreinterpretq_u8_u32(B.val[0]), bo = vreinterpretq_u8_u32(B.val[1]);
+            uint16x8_t lo = vaddq_u16(vaddl_u8(vget_low_u8(ae), vget_low_u8(ao)), vaddl_u8(vget_low_u8(be), vget_low_u8(bo)));
+            uint16x8_t hi = vaddq_u16(vaddl_u8(vget_high_u8(ae), vget_high_u8(ao)), vaddl_u8(vget_high_u8(be), vget_high_u8(bo)));
+            vst1q_u8((uint8_t *)(o + i), vcombine_u8(vrshrn_n_u16(lo, 2), vrshrn_n_u16(hi, 2)));
+        }
+        for (; i < dst->w; i++) {
             int x0 = tk_mini(2 * i, src->w - 1), x1 = tk_mini(2 * i + 1, src->w - 1);
-            int y0 = tk_mini(2 * j, src->h - 1), y1 = tk_mini(2 * j + 1, src->h - 1);
-            uint32_t a = src->px[y0 * src->stride + x0], b = src->px[y0 * src->stride + x1];
-            uint32_t c = src->px[y1 * src->stride + x0], d = src->px[y1 * src->stride + x1], o = 0;
+            uint32_t a = ra[x0], b = ra[x1], c = rb[x0], d = rb[x1], v = 0;
             for (int sh = 0; sh < 32; sh += 8)
-                o |= (((a >> sh & 255) + (b >> sh & 255) + (c >> sh & 255) + (d >> sh & 255) + 2) >> 2) << sh;
-            dst->px[j * dst->stride + i] = o;
+                v |= (((a >> sh & 255) + (b >> sh & 255) + (c >> sh & 255) + (d >> sh & 255) + 2) >> 2) << sh;
+            o[i] = v;
+        }
+    }
+}
+
+void tk_bmp_tint(tk_bmp *b, tk_col c)
+{
+    /* a constant colour over the whole bitmap (premultiplied) */
+    uint32_t sp = tk_premul(c), ia = 255 - (sp >> 24);
+    for (int j = 0; j < b->h; j++)
+        for (int i = 0; i < b->w; i++) {
+            uint32_t *d = &b->px[j * b->stride + i], o = *d, r = 0;
+            for (int sh = 0; sh < 32; sh += 8) {
+                uint32_t v = (sp >> sh & 255) + ((o >> sh & 255) * ia + 127) / 255;
+                r |= (v > 255 ? 255 : v) << sh;
+            }
+            *d = r;
         }
 }

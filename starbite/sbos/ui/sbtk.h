@@ -85,6 +85,7 @@ void tk_blit_tinted(tk_bmp *dst, const tk_bmp *src, int x, int y, tk_col tint); 
 void tk_bmp_blur(tk_bmp *b, float sigma);
 void tk_bmp_blur_sat(tk_bmp *b, float sigma, float sat, float bright);
 void tk_bmp_satbright(tk_bmp *b, float sat, float bright);
+void tk_bmp_tint(tk_bmp *b, tk_col c);                 /* a constant colour over all of it */
 void tk_bmp_copy(tk_bmp *dst, int dx, int dy, const tk_bmp *src, int sx, int sy, int w, int h);
 void tk_bmp_down2(tk_bmp *dst, const tk_bmp *src);              /* 2x2 box (premultiplied) */
 /* bilinear up: dst px (i, j) samples src at the point (x0 + i, y0 + j) of a space f times src's size */
@@ -125,6 +126,9 @@ void tk_glass_bake_ref(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float 
 /* the glass's backdrop filter applied in place to what b already holds under the shape (glass inside a backdrop
  * root, as the lock list's cards: Chrome filters only the list's own content, not the wallpaper) */
 void tk_glass_local(tk_bmp *dst, const tk_bmp *src, float x, float y, float w, float h, float r);
+void tk_glass_local_put(tk_bmp *b, const tk_bmp *t, int X, int Y, float x, float y, float w, float h, float r);
+/* tk_glass_local over a backdrop held at half resolution (b's origin at the panel point (box, boy)) */
+void tk_glass_from_half(tk_bmp *b, int box, int boy, const tk_bmp *half, float x, float y, float w, float h, float r);
 /* rotate a small premultiplied bitmap about its centre (bilinear) into dst of the same size: a chevron's turn */
 void tk_bmp_rotate(tk_bmp *dst, const tk_bmp *src, float deg);
 /* CSS cubic-bezier(x1, y1, x2, y2) at t */
@@ -144,6 +148,7 @@ struct tk_layer {
     float sx, sy, ox, oy;      /* scale about (ox, oy) in the parent's space; 1 = none */
     float alpha;
     int hidden;
+    int opaque;                /* every px of bmp (or solid) is opaque: what is under it need not be drawn */
     int clip;                  /* clip children and self to clip_r (parent space) */
     tk_rect clip_r;
     float fade_top, fade_bot;  /* mask-image fades inside clip_r (px, 0 = none) */
