@@ -12,5 +12,7 @@
  {"name": "focus-ios26-50",  "js": "sbSet('focus', ['ios26', .5])",        "host": ["focus=ios26:0.5"]},
  {"name": "home-page2",      "js": "sbSet('unlock', 1); sbSet('page', 1)", "host": ["unlock=:1", "page=:1"]},
  {"name": "home-page-50",    "js": "sbSet('unlock', 1); sbSet('page', .5)", "host": ["unlock=:1", "page=:0.5"]},
+ {"name": "cc",              "js": "sbSet('unlock', 1); sbSet('cc', 1)", "host": ["unlock=:1", "cc=:1"]},
+ {"name": "cc-50",           "js": "sbSet('unlock', 1); sbSet('cc', .5)", "host": ["unlock=:1", "cc=:0.5"]},
  {"name": "hint",            "js": "window.__hint = 1",                    "host": ["hint=:1"]}
 ]

@@ -274,6 +274,17 @@ int main(int argc, char **argv)
         write_ppm(argv[3], &c.panel);
         return 0;
     }
+    if (!strcmp(argv[2], "clocktest")) {
+        /* a new minute must reach the panel through an ordinary (damage-only) frame */
+        tk_comp_frame(&c, 0, 1);
+        uint32_t before = 0, after = 0;
+        for (int y = PT(96); y < PT(204); y++) for (int x = 0; x < TK_W; x += 3) before = before * 31 + c.panel.px[y * TK_W + x];
+        sh_status(21, 6, 2, 10, 11, 87, 41);
+        int px = tk_comp_frame(&c, 0, 0);
+        for (int y = PT(96); y < PT(204); y++) for (int x = 0; x < TK_W; x += 3) after = after * 31 + c.panel.px[y * TK_W + x];
+        printf("clocktest: %s (%d px redrawn)\n", before != after && px > 0 ? "PASSED: the clock changed on the panel" : "FAILED: the panel kept the old minute", px);
+        return before != after && px > 0 ? 0 : 1;
+    }
     if (!strcmp(argv[2], "frames") && argc >= 3) {
         /* the cost of one frame of a state with everything damaged: motion (half + present) and rest (full) */
         for (int i = 3; i < argc; i++) apply_state(argv[i]);

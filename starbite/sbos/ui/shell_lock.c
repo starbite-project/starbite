@@ -202,6 +202,7 @@ static void fmt_hm(char *b) { b[0] = (char)('0' + ST.h / 10); b[1] = (char)('0' 
 
 static tk_layer lstatus, lclock, lwidgets;
 static void relink(void);
+static void link(tk_layer *parent, tk_layer **kids, int n);
 static void lap_us(const char *what, uint64_t us);
 static char carrier[32] = "No SIM";
 static void build_lstatus(void)
@@ -824,8 +825,10 @@ static void flatten_lock(void)
 static float page_x;                    /* pt: 0 page 1, -390 page 2 */
 static tk_spring sp_page;
 static int page_dir, page_dragging;
+static int cc_stale;
 static void set_page(float x)
 {
+    cc_stale = 1;
     page_x = x;
     pages.x = PT(x);
     float p = -x / 390;
@@ -834,6 +837,152 @@ static void set_page(float x)
     hsearch[0].hidden = moving;
     hsearch[1].hidden = !moving || p >= .5f;
     hsearch[2].hidden = !moving || p < .5f;
+}
+
+
+/* ---- the Control Centre (the concept's #cc): pulled down from home's top-right corner -------------------------
+ * A scrim (home blurred 26 pt, saturated 1.3, under rgba(4, 8, 24, .3)) and the grid: the connectivity tile (air,
+ * cellular, Wi-Fi, Bluetooth), brightness and volume sliders, eight tiles. The grid's glass, backdrops and contents
+ * are one bitmap baked while home is at rest (and again when a tile changes); the slider levels and their glyphs
+ * are layers over it. setCC: scrim min(1, p), grid opacity min(1, 1.3 p), translateY((1 - p) x -30) scale(.86 +
+ * .14 p) about 85 % 0 of the grid; spring cc 400 / 36; open past .35 or faster than .4 pt/ms. */
+static tk_layer ccl, ccscrim, ccsb, ccg, ccgrid, cclvl[2], ccic[2];
+static struct { int on, built, closing, wifi, cell, bt, air, rot, save; float p, lvl[2]; } CCS = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, { .62f, .4f } };
+static tk_spring sp_cc;
+static const float CCX[4] = { 24, 114.66f, 205.31f, 295.97f };
+static void cc_tile(dc *d, float x, float y, float w, float h, float r, int on)
+{
+    tk_glass_from_half(d->b, (int)d->ox, (int)d->oy, &ccscrim.bmp, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r));
+    d_glass(d, x, y, w, h, r, 0, 1);
+    if (on) d_rrect(d, x, y, w, h, r, W(1));
+}
+static void cc_glyph(dc *d, const char *name, float tx, float ty, float w, float h)
+{
+    d_icon(d, name, tx + (70 - w) / 2, ty + (70 - h) / 2, 1);
+}
+static void cc_label(dc *d, const char *t, float tx, float ty)
+{
+    float w = tw(TK_IT600, 10.5f, t, 0, 0);
+    d_text(d, TK_IT600, 10.5f, tx + 35 - w / 2, ty + 74 + 10, t, 0, 0, W(.8f), 0);
+}
+static void cc_link(void)
+{
+    tk_layer *g[] = { &ccgrid, &cclvl[0], &ccic[0], &cclvl[1], &ccic[1] };
+    link(&ccg, g, 5);
+    tk_layer *k[] = { &ccscrim, &ccsb, &ccg };
+    link(&ccl, k, 3);
+}
+static void build_cc_grid(void)
+{
+    relayer(&ccgrid);
+    dc d = mk(&ccgrid, "cc-grid", 24, 92, 342, 346, 44, 0);
+    /* the connectivity tile and its four circles (air, cell / Wi-Fi, Bluetooth) */
+    cc_tile(&d, 24, 92, 160.66f, 156, 28, 0);
+    static const char *CI[4] = { "cc-air", "cc-cell", "cc-wifi", "cc-bt" };
+    static const float CW[4][2] = { { 20, 20 }, { 20, 18 }, { 22, 16 }, { 14, 20 } };
+    int ons[4] = { CCS.air, CCS.cell, CCS.wifi, CCS.bt };
+    for (int i = 0; i < 4; i++) {
+        float cx = i & 1 ? 112.48f : 44.16f, cy = i >> 1 ? 177 : 111;
+        d_rrect(&d, cx, cy, 52, 52, 26, ons[i] ? tk_hex(0x6fb3ff, 1) : W(.18f));
+        d_icon(&d, CI[i], cx + (52 - CW[i][0]) / 2, cy + (52 - CW[i][1]) / 2, 1);
+    }
+    /* the sliders' glass (their level and glyph are layers above) */
+    cc_tile(&d, 205.31f, 92, 70, 156, 24, 0);
+    cc_tile(&d, 295.97f, 92, 70, 156, 24, 0);
+    /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Mirror, Camera */
+    int lit = Q[0].lit;
+    cc_tile(&d, CCX[0], 264, 70, 70, 22, lit); cc_glyph(&d, lit ? "cc-light-on" : "cc-light", CCX[0], 264, 16, 24); cc_label(&d, "Flashlight", CCX[0], 264);
+    cc_tile(&d, CCX[1], 264, 70, 70, 22, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], 264, 22, 22); cc_label(&d, "Rotation", CCX[1], 264);
+    cc_tile(&d, CCX[2], 264, 70, 70, 22, 0); cc_glyph(&d, "cc-flame", CCX[2], 264, 20, 24); cc_label(&d, "Emergency", CCX[2], 264);
+    cc_tile(&d, CCX[3], 264, 70, 70, 22, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], 264, 24, 14); cc_label(&d, "Saving", CCX[3], 264);
+    cc_tile(&d, CCX[0], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-timer", CCX[0], 350, 22, 22); cc_label(&d, "Timer", CCX[0], 350);
+    cc_tile(&d, CCX[1], 350, 70, 70, 22, 0); cc_glyph(&d, "a30-calc", CCX[1], 350, 30, 30);
+    cc_tile(&d, CCX[2], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-wifi2", CCX[2], 350, 22, 22); cc_label(&d, "Mirror", CCX[2], 350);
+    cc_tile(&d, CCX[3], 350, 70, 70, 22, 0); cc_glyph(&d, "a30-camera", CCX[3], 350, 30, 30);
+    tk_layer_prepare(&ccgrid);
+}
+static void cc_levels(void)
+{
+    for (int i = 0; i < 2; i++) {
+        float x = i ? 295.97f : 205.31f, v = CCS.lvl[i];
+        cclvl[i].clip_r = (tk_rect){ PT(x), PT(92 + 156 * (1 - v)), PT(70), PT(156 * v) };
+    }
+}
+static void build_cc(void)
+{
+    /* the scrim from home as it is now (half resolution, drawn 2x), then the grid over it */
+    tk_comp_frame(C, 0, 0);
+    relayer(&ccscrim);
+    tk_layer_init(&ccscrim, "cc-scrim");
+    if (tk_bmp_new(&ccscrim.bmp, TK_W / 2, TK_H / 2)) {
+        tk_bmp q;
+        tk_bmp_new(&q, TK_W / 4, TK_H / 4);
+        tk_bmp_down2(&ccscrim.bmp, &C->fb);
+        tk_bmp_down2(&q, &ccscrim.bmp);
+        tk_bmp_blur(&q, PT(26) / 4);
+        tk_bmp_satbright(&q, 1.3f, 1);
+        tk_bmp_tint(&q, TK_RGBA(4, 8, 24, .3f));
+        tk_bmp_up(&ccscrim.bmp, &q, 0, 0, 2);
+        tk_bmp_free(&q);
+        ccscrim.sx = ccscrim.sy = 2;
+        ccscrim.opaque = 1;
+    }
+    if (!ccsb.bmp.px) {
+        dc d = mk(&ccsb, "cc-status", 0, 0, 390, 48, 2, 0);
+        status_bar(&d, carrier);
+        for (int i = 0; i < 2; i++) {
+            float x = i ? 295.97f : 205.31f;
+            dc l = mk(&cclvl[i], "cc-level", x, 92, 70, 156, 0, 0);
+            d_rrect(&l, x, 92, 70, 156, 24, W(1));
+            cclvl[i].clip = 1;
+            dc g = mk(&ccic[i], "cc-glyph", x + 24, 212, 22, 22, 1, 0);
+            d_icon(&g, i ? "cc-vol" : "cc-sun", x + 24, 212, 1);
+        }
+    }
+    build_cc_grid();
+    tk_layer_init(&ccg, "cc-grid-group");
+    ccg.ox = PT(24 + .85f * 342);
+    ccg.oy = PT(92);
+    cc_link();
+    cc_levels();
+    CCS.built = 1;
+}
+static void set_cc(float p)
+{
+    CCS.p = p;
+    ccscrim.alpha = tk_clampf(p, 0, 1);
+    ccg.alpha = tk_clampf(p * 1.3f, 0, 1);
+    ccg.sx = ccg.sy = .86f + .14f * p;
+    ccg.y = PT((1 - p) * -30) / ccg.sy;
+    ccl.hidden = !CCS.on;
+}
+static void cc_close(void)
+{
+    CCS.closing = 1;
+    tk_spring_start(&sp_cc, CCS.p, 0, 0, TK_SPR_CC);
+}
+/* a tap on the open Control Centre: a tile, a circle, or outside (close); 1 if it was on the grid */
+static int cc_tap(float x, float y)
+{
+    float ex = 0, ey = 0;
+    (void)ex; (void)ey;
+    if (x >= 24 && x < 184.66f && y >= 92 && y < 248) {
+        int i = (x >= 104) + 2 * (y >= 170);
+        int *f[4] = { &CCS.air, &CCS.cell, &CCS.wifi, &CCS.bt };
+        *f[i] = !*f[i];
+    } else if (y >= 264 && y < 334) {
+        int c = x < 94 ? 0 : x < 184.66f ? 1 : x < 275.31f ? 2 : 3;
+        if (c == 0) { Q[0].lit = !Q[0].lit; Q[0].facelit.hidden = Q[0].iconlit.hidden = !Q[0].lit; Q[0].face.hidden = Q[0].icon.hidden = Q[0].lit; sh_torch(Q[0].lit); lock_ver++; }
+        else if (c == 1) CCS.rot = !CCS.rot;
+        else if (c == 3) CCS.save = !CCS.save;
+        else return 1;                       /* Emergency: a hold in the concept; not in Next yet */
+    } else if (y >= 350 && y < 420 && x >= 24 && x < 366) {
+        return 1;                            /* Timer, Calculator, Mirror, Camera: the apps come later */
+    } else
+        return 0;
+    build_cc_grid();
+    cc_link();
+    return 1;
 }
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
@@ -908,8 +1057,8 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 }
 static void relink(void)
 {
-    tk_layer *r[] = { &star, &home, &lockg, &lockflat, &focus, &boot, &homebar };
-    link(&root, r, 7);
+    tk_layer *r[] = { &star, &home, &lockg, &lockflat, &focus, &ccl, &boot, &homebar };
+    link(&root, r, 8);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &list, &Q[0].grp, &Q[1].grp, &hint };
     link(&lockg, lk, 10);
     tk_layer *ls[3 * NG + 1];
@@ -940,6 +1089,8 @@ void sh_init_begin(tk_comp *c)
     home.ox = PT(195);
     home.oy = PT(401);
     tk_layer_init(&pages, "pages");
+    tk_layer_init(&ccl, "cc");
+    ccl.hidden = 1;
     tk_layer_init(&lockg, "lock");
     tk_layer_init(&list, "list");
     list.clip = 1;
@@ -1044,11 +1195,18 @@ void sh_set(const char *what, const char *key, float v)
         sp_lock.live = 0;
         sp_page.live = 0; page_dragging = 0;
         set_page(0);
+        CCS.on = 0; sp_cc.live = 0; set_cc(0);
         locked = 1;
         set_lock(0);
         mark_a = mark_t; glyph_a = glyph_t; hint_a = 0; hint_left = 0;
         apply_tweens();
         place_list();
+    } else if (!tk_strcmp(what, "cc")) {
+        if (!CCS.built || cc_stale) { build_cc(); cc_stale = 0; }
+        sp_cc.live = 0;
+        CCS.on = v > 0;
+        CCS.closing = 0;
+        set_cc(v);
     } else if (!tk_strcmp(what, "page")) {
         sp_page.live = 0;
         set_page(-390 * v);
@@ -1064,7 +1222,7 @@ void sh_set(const char *what, const char *key, float v)
 }
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
-enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE };
+enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL };
 static struct {
     int kind, arg, arg2, moved;
     float x0, y0, base, t0;
@@ -1115,7 +1273,23 @@ void sh_touch(int phase, float x, float y, float t)
             else if (y < 196 || y > 463) T.kind = G_SCRIM;
             return;
         }
+        if (!locked && CCS.on && !CCS.closing) {
+            /* the open Control Centre: a slider, a tile, or outside it (closes it) */
+            for (int i = 0; i < 2; i++) {
+                float sx = i ? 295.97f : 205.31f;
+                if (x >= sx && x < sx + 70 && y >= 92 && y < 248) { T.kind = G_CCSL; T.arg = i; sh_touch(1, x, y, t); return; }
+            }
+            T.kind = G_CCTAP;
+            return;
+        }
         if (!locked) {
+            if (y < 56 && x >= 195) {           /* the top-right corner: the Control Centre */
+                T.kind = G_CC;
+                sp_cc.live = 0;
+                if (!CCS.built) build_cc();
+                tk_tracker_add(&T.tr, y, t);
+                return;
+            }
             /* home: a pull down from the top-left corner brings the lock back (the concept's re-lock) */
             if (y < 56 && x < 195) { T.kind = G_RELOCK; sp_lock.live = 0; tk_tracker_add(&T.tr, y, t); return; }
             /* elsewhere but the dock, Search and the widgets: the pages (direction decided after 8 pt) */
@@ -1172,6 +1346,16 @@ void sh_touch(int phase, float x, float y, float t)
         case G_RELOCK:
             tk_tracker_add(&T.tr, y, t);
             set_lock(-H_PT + tk_maxf(0, dy));
+            break;
+        case G_CC:
+            tk_tracker_add(&T.tr, y, t);
+            CCS.on = 1;
+            CCS.closing = 0;
+            set_cc(tk_minf(1, tk_maxf(0, dy) / 260));
+            break;
+        case G_CCSL:
+            CCS.lvl[T.arg] = tk_clampf((248 - y) / 156, 0, 1);
+            cc_levels();
             break;
         case G_PAGE: {
             float dx = x - T.x0;
@@ -1235,6 +1419,15 @@ void sh_touch(int phase, float x, float y, float t)
         else { scroll_v = -tk_tracker_v(&T.tr); scroll_momentum = tk_fabsf(scroll_v) > .02f; }
         break;
     }
+    case G_CC: {
+        float v = tk_tracker_v(&T.tr);
+        if (CCS.p > .35f || v > .4f) tk_spring_start(&sp_cc, CCS.p, 1, v * 1000 / 260, TK_SPR_CC);
+        else cc_close();
+        break;
+    }
+    case G_CCTAP:
+        if (!T.moved && !cc_tap(x, y)) cc_close();
+        break;
     case G_PAGE:
         if (page_dir == 1) {
             float v = tk_tracker_v(&T.tr), target = page_x + v * 220 < -195 ? -390 : 0;
@@ -1285,6 +1478,13 @@ int sh_tick(float dt, float t)
     if (sp_page.live) {
         tk_spring_step(&sp_page, dt);
         set_page(sp_page.x);
+        mv = 1;
+    }
+    if (T.kind == G_CC || T.kind == G_CCSL) mv = 1;
+    if (sp_cc.live) {
+        int live = tk_spring_step(&sp_cc, dt);
+        set_cc(tk_maxf(0, sp_cc.x));
+        if (!live && CCS.closing) { CCS.on = 0; CCS.closing = 0; set_cc(0); }
         mv = 1;
     }
     /* the mark (.3 s), the glyph (.2 s) and the hint (.3 s): linear stand-ins for their CSS ease */
@@ -1426,6 +1626,8 @@ void sh_idle(void)
 {
     if (sh_moving()) return;
     if (locked && lockY == 0 && !focus_on) flatten_lock();
+    /* home at rest: the Control Centre's snapshot and grid ready before the pull */
+    if (!locked && !CCS.on && (!CCS.built || cc_stale)) { build_cc(); cc_stale = 0; }
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
     for (tk_layer *l = home.child; l; l = l->next) tk_layer_prepare(l);
@@ -1449,7 +1651,7 @@ void sh_idle(void)
 int sh_moving(void)
 {
     int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB ||
-            T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || booting;
+            T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || T.kind == G_CC || T.kind == G_CCSL || sp_cc.live || booting;
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live;
     return m;

@@ -20,11 +20,13 @@
 
 void tk_layer_init(tk_layer *l, const char *name)
 {
+    /* a layer made again keeps counting its generation: the compositor must see its new content as a change */
+    uint32_t g = l->gen;
     tk_memset(l, 0, sizeof *l);
+    l->gen = g + 1;
     l->name = name;
     l->sx = l->sy = 1;
     l->alpha = 1;
-    l->gen = 1;
 }
 void tk_layer_add(tk_layer *p, tk_layer *c)
 {

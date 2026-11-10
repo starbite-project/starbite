@@ -35,6 +35,22 @@ add('search', q('#searchBtn svg'), 13, 13);
 try {
   await c.ev(`sbSet('focus', 'win11')`);
   add('arrow', q('#thumb svg'), 22, 22);
+  await c.ev(`sbSet('focus', ''); sbSet('unlock', 1); sbSet('cc', 1)`);
+  /* the Control Centre's glyphs, in the colours the tiles give them (white; dark #0a0f1f on a lit tile) */
+  const cc = sel => q(`#ccg ${sel}`);
+  add('cc-air', cc('[data-cc=air] svg'), 20, 20, 'color:#fff');
+  add('cc-cell', cc('[data-cc=cell] svg'), 20, 18, 'color:#fff');
+  add('cc-wifi', cc('[data-cc=wifi] svg'), 22, 16, 'color:#fff');
+  add('cc-bt', cc('[data-cc=bt] svg'), 14, 20, 'color:#fff');
+  add('cc-sun', cc('[data-sl=bri] svg'), 22, 22);
+  add('cc-vol', cc('[data-sl=vol] svg'), 22, 22);
+  for (const [k, w, h] of [['light', 16, 24], ['rot', 22, 22], ['save', 24, 14], ['timer', 22, 22], ['wifi2', 22, 22]]) {
+    add('cc-' + k, cc(`[data-cc=${k}] svg`), w, h, 'color:#fff');
+    add('cc-' + k + '-on', cc(`[data-cc=${k}] svg`), w, h, 'color:#0a0f1f');
+  }
+  add('cc-flame', q('#ccEm svg'), 20, 24, 'color:#fff');
+  add('a30-calc', `sbIcons().apps.calc`, 30, 30);
+  add('a30-camera', `sbIcons().apps.camera`, 30, 30);
   await c.send('Emulation.setDefaultBackgroundColorOverride', { color: { r: 0, g: 0, b: 0, a: 0 } });
   await c.ev(`(() => { document.documentElement.style.background = 'transparent'; document.body.style.background = 'transparent';
     document.querySelector('.stage').style.visibility = 'hidden';
