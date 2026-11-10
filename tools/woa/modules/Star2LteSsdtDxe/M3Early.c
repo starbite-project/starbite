@@ -418,6 +418,28 @@ __asm__ (
   "  bl    50f\n"
   "  ldr   x9, [x19, #0x98]\n"
   "  bl    50f\n"
+  // v10 free run: A55 0 is the liveness watchdog outside Windows. It pets the loader's WDT1 (WTCNT = WTDAT) only
+  // while Windows' InterruptTime (KUSER +0x8) advances, or during the first 60 s before KUSER is found. A Windows
+  // that stops ticking is reset by the loader's watchdog within its 82 s, as before.
+  "  ldr   x1, [x19, #0x30]\n"
+  "  cbz   x1, 95f\n"
+  "  cbz   x29, 92f\n"
+  "  ldr   w2, [x29, #0x8]\n"
+  "  ldr   w3, [x19, #0x38]\n"
+  "  cmp   w2, w3\n"
+  "  b.eq  95f\n"
+  "  str   w2, [x19, #0x38]\n"
+  "  b     93f\n"
+  "92:\n"
+  "  cmp   x26, #120\n"
+  "  b.hs  95f\n"
+  "93:\n"
+  "  movz  x1, #0x0000\n"
+  "  movk  x1, #0x1006, lsl #16\n"
+  "  ldr   w2, [x1, #4]\n"
+  "  str   w2, [x1, #8]\n"
+  "  dsb   sy\n"
+  "95:\n"
   "  ldr   x9, [x19, #0xB0]\n"            // v5: ntoskrnl globals line, zone 0 and pmsg
   "  bl    60f\n"
   "  ldr   x9, [x19, #0xB8]\n"
@@ -437,6 +459,15 @@ __asm__ (
   "  cmp   x1, x2\n"
   "  b.lo  1b\n"
   "2:\n"                                // Windows' UFS driver logged (or 120 s): 2 ms, flush both rings, reset
+  "  ldr   x1, [x19, #0x30]\n"            // v10 free run (STARBITE_M3_EARLY=4): never reset; new baseline, keep sampling
+  "  cbz   x1, 21f\n"
+  "  dc    civac, x20\n"
+  "  dsb   sy\n"
+  "  ldr   w21, [x20, #4]\n"
+  "  ldr   w22, [x20, #8]\n"
+  "  mrs   x23, cntvct_el0\n"
+  "  b     1b\n"
+  "21:\n"
   "  mov   w5, #0x54\n"                  // v6: mark the =M3K line: 'U' = the UFS driver's line, 'T' = timeout
   "  dc    civac, x20\n"
   "  dsb   sy\n"
@@ -1591,7 +1622,7 @@ M3EarlyEbsWrap (
     ECommitTables ();
     EAcpiLine ("committed");
     EPmuReplay ("M3 1");
-    SbLog ("=M3E v2: returning into winload on the M3; kernel starts. A55 0 resets at the UFS driver's 1st pmsg line");
+    SbLog ((STARBITE_M3_EARLY == 4) ? "=M3E v10: into winload on the M3; FREE RUN (no guard reset)" : "=M3E v2: returning into winload on the M3; kernel starts. A55 0 resets at the UFS driver's 1st pmsg line");
     EProgress (7);
     return Status;
   }
@@ -1797,6 +1828,9 @@ M3EarlyArm (
   Lit[1] = (UINT64)(Page + 3 * EFI_PAGE_SIZE + 0x800);      // control: the parked M3 runs the guard instead
  #endif
   mEGuard = Page + 3 * EFI_PAGE_SIZE;
+ #if STARBITE_M3_EARLY == 4
+  ((UINT64 *)(UINTN)mEGuard)[0x30 / 8] = 1;               // free run: the guard samples but never resets
+ #endif
   mEMailbox = 0xFFFFFFFFu;
   if (EFI_ERROR (gBS->AllocatePages (AllocateMaxAddress, EfiReservedMemoryType, 1, &mEMailbox))) {
     mEMailbox = 0;

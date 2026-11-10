@@ -444,3 +444,23 @@ stubs, mailboxes in the MADT).
 **m3kern9** (`starbite-uefi-m3kern9.bin`, sha256 `7f4f05e95dc6bfe074f8d45123b891b0b6baa6b4c38848f4eed0409c810a00e8`):
 m3kern8 + this fix. Same guard: if Windows now gets as far as its storage driver, A55 0 resets through the watchdog
 before any disk write (`=M3KU`).
+
+## 20. m3kern9 result (23:34): Windows' kernel runs on M3 core 1; m3run1 (free run)
+
+m3kern9: `=M3K U0002 ... fbn01 @02` (the storage driver at beat 2 = 1 s, the spinner animated), `=M3U uBB725000
+it0070BEDA tc0000002F` (the clock ticks on the M3), `=M3N np01 psBD2AE080 bc0` (1 CPU, process manager, no bugcheck),
+`=M3T s16 st0` (timer init as on the A55), `=M3P 1066174 cyc/ms` on M3 1. **The parking v1 mailbox was the fix.** The
+guard stopped Windows at its storage driver as designed (nothing written).
+
+**m3run1** (`starbite-uefi-m3run1.bin`, sha256 `2512f52ad407cdf9d4bdf81bf05aa25036032c5aca94dbb1824d665b846c5e0b`,
+`SOLO=m3run1 M3EARLY=4`): m3kern9 with the volume guard turned into a **free run**. A55 0 never resets; it keeps
+sampling the =M3K/=M3U/=M3N/=M3B/=M3T lines and is the **liveness watchdog** outside Windows: it pets the loader's
+WDT1 (WTCNT = WTDAT) only while Windows' InterruptTime advances (or during the first 60 s before KUSER is found). A
+Windows that stops ticking is reset by the loader watchdog within 82 s; a live one never is. Windows runs on M3
+core 1 alone (1 CPU). The image is a SOLO build (no SBGPU/USB/WLAN blobs): Basic Display, no USB link.
+
+How it should end: a clean restart from inside Windows. The existing one-shot autotest
+(`tools/win/autotest-cycle.sh OUTDIR --key win11-m3probe --cpu build/win/sbcpu`, which arms C:\starbite\auto\enabled;
+Windows restarts itself after the test, dead man `shutdown /r /t 600`) gives a clean restart and `cpu.log` (MIDR
+531F0020 = Mongoose, 1 CPU). A restart of Windows on the M3 goes through the FADT reset register / UEFI
+ResetSystem, which reset the whole SoC (A55 0 included).
