@@ -349,7 +349,7 @@ static void session(const char *key)
     static struct sbm_modem mo;
     char s[COLS];
     int cyc = sb_streq(key, "modemsess-cycle"), lng = sb_streq(key, "modemsess-long");
-    unsigned secs = arg("modem_hold", cyc ? 40 : lng ? 1500 : 120), cycles = cyc ? arg("modem_cycles", 3) : 1;
+    unsigned secs = arg("modem_hold", cyc ? 40 : lng ? 1500 : 120), cycles = arg("modem_cycles", cyc ? 3 : 1);
     if (secs > 3600)
         secs = 3600;
     if (cycles < 1 || cycles > 5)
@@ -373,18 +373,19 @@ static void session(const char *key)
     for (unsigned c = 1; c <= cycles; ++c) {
         uint64_t t = sb_ms();
         int r = sbm_modem_start(&mo, &park_plat, &im);
-        sbm_fmt(s, sizeof(s), "modemsess: cycle %u start: %s in %u ms (%s, streamed %u KiB)", c,
-                r == 0 ? "online" : sbm_strerror(r), (unsigned)(sb_ms() - t), mo.b.restart ? "restart: reset release"
-                : "first start: cp_init", mo.b.streamed >> 10);
+        sbm_fmt(s, sizeof(s), "modemsess: cycle %u start: %s in %u ms (%s, streamed %u KiB; check %u ms, copy %u ms,"
+                " link %u ms)", c, r == 0 ? "online" : sbm_strerror(r), (unsigned)(sb_ms() - t), mo.b.restart ?
+                "restart: reset release" : "first start: cp_init", mo.b.streamed >> 10, mo.b.check_ms, mo.b.copy_ms,
+                mo.b.link_ms);
         line(s);
         if (r != 0)
             break;
         r = session_run(&mo, secs, c);
         snap_line(&mo, "SESSION: end", secs);
         sbm_fmt(s, sizeof(s), "SESSION: end cycle %u: FMT %u RFS %u queries %u answers %u (unanswered %u stale %u"
-                " unmatched %u bad %u) stalls %u crashes %u", c, mo.b.fmt_rx, mo.b.rfs_rx, mo.b.fmt_tx,
+                " unmatched %u by-command %u bad %u) stalls %u crashes %u", c, mo.b.fmt_rx, mo.b.rfs_rx, mo.b.fmt_tx,
                 mo.b.fmt_resp + mo.b.fmt_gen_res, mo.b.fmt_tx - mo.b.fmt_resp - mo.b.fmt_gen_res, mo.b.fmt_stale,
-                mo.b.fmt_unmatched, mo.b.bad_rx, mo.stalls, mo.crashes);
+                mo.b.fmt_unmatched, mo.b.fmt_seq_fixed, mo.b.bad_rx, mo.stalls, mo.crashes);
         line(s);
         sbm_modem_stop(&mo);
         line(mo.b.parked ? "modemsess: parked" : "modemsess: the park reported an error");

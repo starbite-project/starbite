@@ -24,7 +24,8 @@ struct fakesoc {
     /* faults to inject */
     int refuse_el3_write, refuse_carve, never_status, started_before, warm_pwron;
     int cp_mute;
-    int nosim_plmn;                     /* passed to the fake CP: camped without a SIM, the PLMN reported */                        /* the CP stops answering (no RESP, no NOTI): a stall */
+    int nosim_plmn;                     /* passed to the fake CP: camped without a SIM, the PLMN reported */
+    int regist_seq_quirk;               /* passed to the fake CP: NET_REGIST (CS) answered with the next seq */                        /* the CP stops answering (no RESP, no NOTI): a stall */
     int release_stuck;                  /* reset release: the central sequencer never leaves 0x80 */
     unsigned asserts, releases, mbox_resets;
     /* the RADIO partition for streamed loads (plat->radio_read): reads count; from read radio_flip_at on, one byte

@@ -393,7 +393,9 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
              ? "the CP's first status (then parked)" : want == SBM_BOOT_LINK
              ? "stage 4: the link up to PHONE_START (no INIT_END; then parked)"
              : "stage 5a: INIT_END, receive only, then parked");
+    uint64_t tc = now(p);
     int r = sbm_image_check(p, im);
+    b->check_ms = (uint32_t)((now(p) - tc) / 1000);
     if (r < 0)
         return stop(p, b, r, "image check");
     b->checked = 1;
@@ -456,7 +458,9 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     if (b->sec2 != SBM_SEC_NOT_WORKING)
         sbm_logf(p, "boot: (mode 2 answered 0x%02x, Android got 0x0b; going on as cbd does)", b->sec2);
 
+    tc = now(p);
     r = copy_in(p, im);
+    b->copy_ms = (uint32_t)((now(p) - tc) / 1000);
     if (r < 0)
         return stop(p, b, r, "copy");
     b->copied = 1;
@@ -476,7 +480,9 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     r = power_on(p, b);
     if (r < 0 || want == SBM_BOOT_RUN)
         return stop(p, b, r, r < 0 ? "power on" : "done (first status, parked)");
+    tc = now(p);
     r = sbm_link_boot(p, im, b);
+    b->link_ms = (uint32_t)((now(p) - tc) / 1000);
     if (want == SBM_BOOT_ONLINE && b->keep_running == SBM_KEEP_RUNNING && r == 0 && b->init_end_sent) {
         b->stopped_at = "online (session: running, not parked)";
         return 0;                             /* the session owns the CP now; sbm_modem_stop parks it */
@@ -493,6 +499,7 @@ void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
     sbm_logf(p, "BOOT: %s: %s (stopped at: %s)", b->err ? "FAILED" : "ok", sbm_strerror(b->err), b->stopped_at);
     sbm_logf(p, "BOOT: checked %u inited %u copied %u validated %u released %u parked %u restart %u streamed %u KiB",
              b->checked, b->inited, b->copied, b->validated, b->released, b->parked, b->restart, b->streamed >> 10);
+    sbm_logf(p, "BOOT: times: check %u ms, copy %u ms, link %u ms", b->check_ms, b->copy_ms, b->link_ms);
     if (b->inited)
         sbm_logf(p, "BOOT: EL3 mode 2 0x%02x, mode 0 0x%02x in %u ms; CP_CTRL_S 0x%08x NS 0x%08x", b->sec2, b->sec0,
                  (unsigned)(b->sec0_us / 1000), b->ctrl_s, b->ctrl_ns);
@@ -512,8 +519,9 @@ void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
         sbm_logf(p, "ONLINE: %s", line);
         if (b->fmt_query)
             sbm_logf(p, "ONLINE: queries sent %u (refused by the allow-list %u), answered %u RESP + %u GEN_PHONE_RES;"
-                     " unanswered %u, stale %u, unmatched %u", b->fmt_tx, b->fmt_tx_refused, b->fmt_resp, b->fmt_gen_res,
-                     b->fmt_tx - b->fmt_resp - b->fmt_gen_res, b->fmt_stale, b->fmt_unmatched);
+                     " unanswered %u, stale %u, unmatched %u, matched by command %u", b->fmt_tx, b->fmt_tx_refused,
+                     b->fmt_resp, b->fmt_gen_res, b->fmt_tx - b->fmt_resp - b->fmt_gen_res, b->fmt_stale,
+                     b->fmt_unmatched, b->fmt_seq_fixed);
         if (b->rfs_serve || b->big_frames || b->big_dropped)
             sbm_logf(p, "ONLINE: RFS served %u replies (%u frames, %u bytes); joined %u long messages from %u pieces; big frames %u, dropped %u",
                      b->rfs_tx, b->rfs_tx_frames, b->rfs_tx_bytes, b->rfs_joined, b->rfs_parts, b->big_frames, b->big_dropped);

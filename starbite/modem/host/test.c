@@ -1205,6 +1205,7 @@ static void test_session(uint32_t boot_crc, uint32_t main_crc)
     s.radio_size = sizeof(t_radio);
     s.rfs_mode = 1;
     s.nosim_plmn = 1;
+    s.regist_seq_quirk = 1;                                      /* night-1110: CS answered with PS's seq */
     s.nv_ref = nv_pristine;
     fakesoc_plat(&s, &p, tlog);
     memset(&mo, 0, sizeof(mo));
@@ -1222,6 +1223,7 @@ static void test_session(uint32_t boot_crc, uint32_t main_crc)
     CHECKEQ(mo.b.fmt_tx, 121);
     CHECKEQ(mo.b.fmt_resp + mo.b.fmt_gen_res, 121);
     CHECKEQ(mo.b.fmt_unmatched, 0);
+    CHECKEQ(mo.b.fmt_seq_fixed, 11);                             /* one per round, matched by command */
     CHECKEQ(s.rfs_read_ok, 1);
     CHECKEQ(s.rfs_write_ok, 1);
     CHECKEQ(t_nv[0x80001], (uint8_t)(0x5A ^ 1));                 /* the CP's NV write: the RAM copy only */

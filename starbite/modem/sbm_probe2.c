@@ -11,19 +11,40 @@
 #include "sbm.h"
 
 /* zlib's CRC-32, four bits at a time (a 16-entry table: no static data to set up, ~4x the bitwise speed) */
+/* zlib's CRC-32, slicing-by-8 (8 KiB of tables built on first use): the streamed start CRCs about 126 MiB (the check,
+ * the copy and the read-back), and the nibble version took seconds of it (night-1110: a 5.6 s start) */
 uint32_t sbm_crc32(uint32_t crc, const void *buf, size_t n)
 {
-    static const uint32_t t[16] = {
-        0x00000000, 0x1DB71064, 0x3B6E20C8, 0x26D930AC, 0x76DC4190, 0x6B6B51F4, 0x4DB26158, 0x5005713C,
-        0xEDB88320, 0xF00F9344, 0xD6D6A3E8, 0xCB61B38C, 0x9B64C2B0, 0x86D3D2D4, 0xA00AE278, 0xBDBDF21C,
-    };
+    static uint32_t t[8][256];
+    static int ready;
+    if (!ready) {
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k)
+                c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            t[0][i] = c;
+        }
+        for (uint32_t i = 0; i < 256; ++i)
+            for (int s = 1; s < 8; ++s)
+                t[s][i] = (t[s - 1][i] >> 8) ^ t[0][t[s - 1][i] & 0xFF];
+        ready = 1;
+    }
     const uint8_t *b = buf;
     crc = ~crc;
-    while (n--) {
-        crc ^= *b++;
-        crc = (crc >> 4) ^ t[crc & 15];
-        crc = (crc >> 4) ^ t[crc & 15];
+    while (n && ((uintptr_t)b & 7)) {
+        crc = (crc >> 8) ^ t[0][(crc ^ *b++) & 0xFF];
+        --n;
     }
+    while (n >= 8) {
+        uint32_t lo = crc ^ ((uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24);
+        uint32_t hi = (uint32_t)b[4] | (uint32_t)b[5] << 8 | (uint32_t)b[6] << 16 | (uint32_t)b[7] << 24;
+        crc = t[7][lo & 0xFF] ^ t[6][(lo >> 8) & 0xFF] ^ t[5][(lo >> 16) & 0xFF] ^ t[4][lo >> 24] ^
+              t[3][hi & 0xFF] ^ t[2][(hi >> 8) & 0xFF] ^ t[1][(hi >> 16) & 0xFF] ^ t[0][hi >> 24];
+        b += 8;
+        n -= 8;
+    }
+    while (n--)
+        crc = (crc >> 8) ^ t[0][(crc ^ *b++) & 0xFF];
     return ~crc;
 }
 

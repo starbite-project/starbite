@@ -22,7 +22,8 @@ struct fakecp {
     uint32_t n_call;            /* CALL-group frames seen from the AP: must stay 0 */
     uint32_t n_forbidden;       /* anything sbm_ipc_allowed() refuses, seen on the wire: must stay 0 */
     uint8_t last_ch;
-    int nosim_plmn;             /* no SIM but camped (the phone: "PLMN set"): SERVING_NETWORK carries 00101 */
+    int nosim_plmn;
+    int regist_seq_quirk;       /* as the phone: NET_REGIST (CS) answered with the next query's seq */             /* no SIM but camped (the phone: "PLMN set"): SERVING_NETWORK carries 00101 */
 };
 
 int fakecp_attach(struct fakecp *fc, uint8_t *ipc, uint32_t size, enum fake_scenario sc);

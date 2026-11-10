@@ -655,6 +655,7 @@ struct sbm_boot {
     int checked, inited, copied, validated, released, parked;
     int restart;                         /* output: a CP parked earlier in this boot was restarted (reset release) */
     uint32_t streamed;                   /* output: bytes read from RADIO straight into the carve-out */
+    uint32_t check_ms, copy_ms, link_ms; /* output: how long the image check, the copy and the link took */
     uint32_t sec2, sec0;                 /* EL3's answers */
     uint32_t ctrl_s, ctrl_ns;            /* after cp_init */
     uint32_t reset_seq_before, reset_seq_after;
@@ -674,7 +675,8 @@ struct sbm_boot {
     uint32_t keep_running;             /* input (session API only): SBM_KEEP_RUNNING = return online after INIT_END,
                                         * not parked. Any other value (0, or stack garbage) parks: soak 2ecf7cd */
     uint32_t fmt_tx, fmt_tx_refused, fmt_resp, fmt_gen_res;
-    uint32_t fmt_unmatched;            /* RESPs whose seq has no open query of ours (a duplicate or a stray) */
+    uint32_t fmt_unmatched;            /* RESPs matching no open query of ours, by seq or by command */
+    uint32_t fmt_seq_fixed;            /* RESPs with a seq that was not open, matched by command (NET_REGIST CS) */
     uint32_t fmt_stale;                /* a seq came round again (188 queries later) while its query was still open */
     struct sbm_cell_state cell;        /* what the CP reported (decoded, identity-free) */
     uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;

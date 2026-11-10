@@ -596,10 +596,12 @@ emergency-only, reports live status a UI can show, and parks cleanly on every ex
 
   This path is only taken for sequencer 5 + central sequencer 0x80 (in reset) + CP_START: a CP parked earlier in
   this boot. A CP that runs is still never touched. If the release never completes, the restart fails and parks.
-- *sess-1's 11 missing answers* (121 queries, 110 counted): not explained yet. The host replay of the same 11 rounds
-  gets every answer. The rings are drained on every poll, so a missed doorbell can't lose frames. FMT 149 − 121
-  answers = 28 other messages, close to soak-2's 29, so the answers may have arrived and gone uncounted. The
-  modemsess image now logs q / a before each round and unanswered / stale / unmatched / bad at the end.
+- *sess-1's 11 missing answers* (121 queries, 110 counted): **explained by night-1110** (3c195c2, `build/modem/
+  night-1110-sess/pmsg.txt`). The phone's CP answers NET_REGIST (CS) with the seq of the NET_REGIST (PS) query sent
+  right after it: both RESPs carry 69 for queries 68 and 69, in every round. So one query per round looked
+  unanswered and one answer unmatched (unanswered 11, unmatched 11). The answers did arrive; the domain is in the
+  body, so the status was right all along. Fixed in the next commit: an answer whose seq is not open is matched to
+  an open query for the same command (the "by command" count), and the fake CP now has the quirk.
 
 **The small footprint.** The old loader kept all of RADIO's BOOT + MAIN + VSS in RAM (about 41 MiB) plus NV.
 Starbite OS refused to start below 64 MiB free, which is why the modem and the new UI's ~70 MB couldn't coexist.
@@ -609,8 +611,10 @@ Now:
 - BOOT/MAIN/VSS are read from RADIO (read only) at each start, twice. The first pass CRC-checks against the TOC; the
   second copies into the carve-out and must CRC the same (RADIO read differently: refused before EL3), then the
   read-back from DRAM is checked as before.
-- That costs a second read of about 41 MiB per start (well under a second on UFS; to be measured: the start line
-  gives the time).
+- That costs a second read of about 41 MiB per start. night-1110: a start took **5.6 s** (2304 KiB footprint,
+  42334 KiB streamed; INIT_START itself is about 1 s of it). The CRC-32 was nibble-wise, two lookups per byte,
+  over about 126 MiB (check, copy, read-back). It is now slicing-by-8 (8 KiB of tables built on first use), and
+  the BOOT line gives the check / copy / link times, so the next run shows what is left.
 - The core's fixed buffers are in the image's BSS: about 1.8 MiB for the link and RFS (big_rfs 640 KiB, rfs_acc
   512 KiB, o_reply 512 KiB, big_fmt 128 KiB, rings 24 KiB). The glue's EFS reader adds about 420 KiB.
 - The CP's own memory is the reserved carve-out at 0xF0000000, outside the arena, and unchanged.
@@ -621,11 +625,11 @@ Now:
 | When | Call | Notes |
 |---|---|---|
 | once, first start | `sbm_sb_plat(&plat, log)`, `sbm_sb_load_image_stream(&im, log)`, `sbm_sb_plat_stage4(&plat, im.mm.ipc_off)` | 2.25 MiB arena, once. Drop alpha21's 64 MiB `MIN_ARENA` and its own `nv_pristine`: the image carries `im.nv_pristine` and the core restores NV before every start. |
-| user's hold (Start) | `sbm_modem_start(&mo, &plat, &im)` | Blocking about 2-3 s: call it from a timer after the Starting page is drawn. 0 = online. Otherwise it is parked; the snapshot says FAILED and `last_err` why. `mo` is `static`, zeroed once, **never memset between starts**: it holds the counters and the restart window. |
+| user's hold (Start) | `sbm_modem_start(&mo, &plat, &im)` | Blocking: 5.6 s on the phone with the old CRC (night-1110), less now (to be measured); call it from a timer after the Starting page is drawn. 0 = online. Otherwise it is parked; the snapshot says FAILED and `last_err` why. `mo` is `static`, zeroed once, **never memset between starts**: it holds the counters and the restart window. |
 | every 2 ms (1-10 ms) | `r = sbm_modem_poll(&mo, elapsed_ms)` | Non-blocking. 0 nothing new; 1 new data from the CP (take a snapshot); < 0 it went down and is parked: `SBM_ETIME` stall, `SBM_EIO` crash, `SBM_EPERM` a guard (a SIM that is not absent, a registration) or the flood guard. |
 | every 10 s while up | `sbm_modem_query(&mo)` | The allow-listed GETs (no SET, no call/SMS/SS). **Required**: stall detection is "a query sent and not one word from the CP for 20 s". Not more often than every 5 s. |
 | on poll = 1, and at the UI's own refresh (1 Hz is plenty) | `sbm_modem_snapshot(&mo, &snap)` | No I/O, a few hundred bytes copied. Redraw only when `snap.gen` changed (it ignores the clocks and counters). |
-| state STALLED or CRASHED | `sbm_modem_recover(&mo, elapsed_ms)` from a 1 s timer | 1 = wait (5 s parked first); 0 = online again (blocking 2-3 s, as a start); `SBM_EPERM` = stays off: 3 restarts in 30 min used up. A GUARD, a FAILED start and a user's Stop never restart by themselves. |
+| state STALLED or CRASHED | `sbm_modem_recover(&mo, elapsed_ms)` from a 1 s timer | 1 = wait (5 s parked first); 0 = online again (blocking, as a start); `SBM_EPERM` = stays off: 3 restarts in 30 min used up. A GUARD, a FAILED start and a user's Stop never restart by themselves. |
 | Stop, before Heat / Linux, every restart / power-off path | `sbm_modem_stop(&mo)` | Parks. Keep the reset hook (`sb_before_reset` → `sbm_cp_park`) as alpha21 has it. |
 
 Snapshot fields (`struct sbm_modem_snap`, sbm.h) and what the UI says:

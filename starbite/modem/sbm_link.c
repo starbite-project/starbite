@@ -354,6 +354,10 @@ static int put_wait(const struct sbm_plat *p, struct sbm_sbd *sbd, const uint8_t
  * 2ecf7cd counted aseq > 0x40 only, and the u8 seq wrapped through 0x00..0x40 (soak-2: 130 answers uncounted). */
 static uint8_t o_mseq = 0x40;
 static uint32_t o_open[8];
+/* the command each open seq asked for: the phone's CP answers NET_REGIST (CS) with the seq of the NET_REGIST (PS)
+ * query sent right after it (night-1110: both RESPs carry 69 for 68 + 69), so an answer whose seq is not open is
+ * matched to an open query for the same command (the domain is in the body, so the state was right all along) */
+static uint16_t o_qcmd[256];
 #define SBM_QSEQ_FIRST 0x41u
 #define SBM_QSEQ_LAST  0xFEu
 
@@ -387,6 +391,7 @@ static int fmt_queries(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
             return r;
         b->fmt_tx++;
         o_open[mseq >> 5] |= 1u << (mseq & 31);
+        o_qcmd[mseq] = q[i].cmd;
         if (logit)
             sbm_logf(p, "FMT: +%u TX ch235 | %s GET seq %u", ms, sbm_ipc_name(q[i].cmd, nb), mseq);
     }
@@ -583,10 +588,22 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
                     sbm_cell_update(&b->cell, &m);
                     if (m.type == SBM_IPC_RESP && m.aseq >= SBM_QSEQ_FIRST && m.aseq <= SBM_QSEQ_LAST) {
                         uint32_t bit = 1u << (m.aseq & 31);
-                        if (!(o_open[m.aseq >> 5] & bit)) {
+                        int seq = m.aseq;
+                        if (!(o_open[seq >> 5] & bit)) {
+                            uint16_t want = m.cmd == SBM_GEN_PHONE_RES && m.data_len >= 2
+                                            ? (uint16_t)(m.data[0] << 8 | m.data[1]) : m.cmd;
+                            seq = -1;
+                            for (unsigned k = SBM_QSEQ_FIRST; k <= SBM_QSEQ_LAST && seq < 0; ++k)
+                                if ((o_open[k >> 5] & (1u << (k & 31))) && o_qcmd[k] == want)
+                                    seq = (int)k;
+                            if (seq >= 0)
+                                b->fmt_seq_fixed++;
+                            bit = seq >= 0 ? 1u << (seq & 31) : 0;
+                        }
+                        if (seq < 0) {
                             b->fmt_unmatched++;
                         } else {                           /* an answer to one of our queries */
-                            o_open[m.aseq >> 5] &= ~bit;
+                            o_open[seq >> 5] &= ~bit;
                             if (m.cmd == SBM_GEN_PHONE_RES)
                                 b->fmt_gen_res++;
                             else

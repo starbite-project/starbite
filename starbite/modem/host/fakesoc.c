@@ -172,6 +172,7 @@ static void ap_msg(struct fakesoc *s)
         s->link = L_ONLINE;
         fakecp_attach(&s->fcp, s->ipc, s->ipc_size, s->sim_present ? FAKE_HOME : FAKE_NOSIM);
         s->fcp.nosim_plmn = s->nosim_plmn;
+        s->fcp.regist_seq_quirk = s->regist_seq_quirk;
         fakecp_boot_notis(&s->fcp);
         static const uint8_t rd1[] = { 0xf8, 0xf5, 18, 0, 14, 0, 0, 0, 0x01, 1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00 };
         static const uint8_t rd2[] = { 0xf8, 0xf5, 18, 0, 14, 0, 0, 0, 0x01, 2, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00 };
