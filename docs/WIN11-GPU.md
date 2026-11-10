@@ -1730,6 +1730,13 @@ Every app failure must be a removed device that the app or DWM recovers from.
   - dwm.exe dumps its composed frame (half size, up to 8 per boot) whenever `umdlog\dwmframe` gets a new
     last-write time during the boot. The gputest rewrites it after opening Explorer, Settings and TabTip.
   - Stage: `build/win/stage/sbwddm-t33b` (sbumd 6c78df1c). The user's default stays T32c `--afbc 0`.
+- **T33b's run** (`build/win/cycle-t33b-1`): passed, with no new WER reports (the LogonUI crash is gone).
+  - Only two DWM dumps came out. Settings renders correctly; the Explorer dump shows the gputest's console.
+  - The keyboard step was never reached: the `--keys-selftest 360` restart cut every gputest since T32c short before
+    TabTip. Starting TabTip.exe alone doesn't show the Windows 11 keyboard anyway.
+- **T33c:** `sbshow.exe` (tools/win/mesa/tests/sbshow.cpp) minimises the console, maximises Explorer and Settings,
+  toggles the keyboard through `ITipInvocation`, lists the visible windows, and triggers each DWM dump. Run with
+  `--full-sec 540` and no keys self-test. Stage `build/win/stage/sbwddm-t33c`.
 
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
