@@ -347,3 +347,23 @@ as m3kern4 / a55ctl1, plus a third line read through ntoskrnl's physical image (
 - `bc`/`p1` KiBugCheckData[0]/[1] (CFE0A0): **the bugcheck code and first parameter if Windows bugchecked**.
 The screen hash now covers the whole screen (every 32nd row and pixel). `=M3E ntos <base> ...` logs the values
 before the kernel runs (all 0 expected).
+
+## 16. a55ctl1 result (22:50): logs lost to the SWRESET path; a55ctl3 / m3kern6
+
+a55ctl1: Windows on the A55s reached the storage driver and the guard's PMU SWRESET fired (back in TWRP after
+~23 s, so the trigger works on a healthy kernel and nothing was written). But TWRP's /sys/fs/pstore was empty and
+zone 0 read 0 bytes afterwards: that reset path loses both rings. The m3kern runs end by the loader's watchdog
+and land in the menu with zone 0 intact (5/5).
+
+**v6 reset path:** on the trigger (or the 120 s timeout) the guard marks the `=M3K` line (`=M3KU` = the UFS driver's
+line fired it, `=M3KT` = timeout). It flushes both rings, then reloads the loader's own watchdog (WDT1 0x10060000,
+WTCON 0xFF39, PMU WDT disable/mask bit 23 cleared, as `shim/starlte/wdt.c wdt_arm`) with count 0x10. It keeps
+re-forcing that count in a loop, because Windows' UFS driver pets this watchdog as it starts. If no reset has come
+after 0.2 s, PMU SWRESET follows (the volume first, logs second).
+Both images are built with `KILL_SERIAL=1` (the release SerialDxe dropped, which nothing consumes) because v6 no
+longer fit the release DXE slot by 0x10 bytes.
+
+- **a55ctl3** (control, replaces a55ctl1/a55ctl2, which must not be run again): `starbite-uefi-a55ctl3.bin`,
+  sha256 `8cde87265a58c6c21f8309cd03265b4d1fad2f5483187e9d9dda66299e14f389`
+- **m3kern6** (= m3kern5 + v6 reset path): `starbite-uefi-m3kern6.bin`,
+  sha256 `ff80e661f467de4a1033ebe0bee535a3e5370038dbff76c0974358cd7454d553`
