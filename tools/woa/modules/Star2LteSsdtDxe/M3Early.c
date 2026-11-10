@@ -662,6 +662,7 @@ STATIC M3E_CTX                 *mECtx;
 STATIC EFI_PHYSICAL_ADDRESS    mEPark;
 STATIC EFI_PHYSICAL_ADDRESS    mEWatchStack;
 STATIC EFI_PHYSICAL_ADDRESS    mEGuard;            // v2: the A55's guard page (L1 table at +0, code at +0x800)
+STATIC EFI_PHYSICAL_ADDRESS    mEMailbox;          // v9: the boot M3's ACPI parking-protocol mailbox (reserved, 4 KiB)
 STATIC EFI_EXIT_BOOT_SERVICES  mEOrigEbs;
 STATIC EFI_EVENT               mEReadyToBoot;
 STATIC BOOLEAN                 mEMoved;
@@ -1472,8 +1473,18 @@ ECommitTables (
     CopyMem (Madt + Off + 12, &Fl, 4);
     if (Uid == 5) {
       Boot = Off;
-      ZeroMem (Madt + Off + 16, 4);     // parking protocol version 0
-      ZeroMem (Madt + Off + 24, 8);     // no mailbox (boot CPU)
+      //
+      // v9: parking protocol version 1 with a mailbox of its own. Without PSCI (Samsung's EL3 answers the M3 with
+      // FFFFFFFF; woa's EL2 shim answers only on A55 0) Windows' HAL MADT parser (ntoskrnl 0x14049B98C) requires
+      // every enabled GICC, the boot CPU's included, to carry parking v1 and a non-zero mailbox, else
+      // STATUS_INVALID_PARAMETER -> HAL_INITIALIZATION_FAILED (0x5C, 0x200, 0x05250631, 1, C000000D) as m3kern5/7.
+      //
+      {
+        UINT32  One = 1;
+
+        CopyMem (Madt + Off + 16, &One, 4);
+        CopyMem (Madt + Off + 24, &mEMailbox, 8);
+      }
     }
   }
 
@@ -1503,6 +1514,12 @@ ECommitTables (
           CopyMem (&Fl, Dsdt + i + 12, 4);
           Fl = (Uid == 5) ? (Fl | 1) : (Fl & ~1u);
           CopyMem (Dsdt + i + 12, &Fl, 4);
+          if (Uid == 5) {
+            UINT32  One = 1;
+
+            CopyMem (Dsdt + i + 16, &One, 4);
+            CopyMem (Dsdt + i + 24, &mEMailbox, 8);
+          }
           Mats++;
           break;
         }
@@ -1512,7 +1529,7 @@ ECommitTables (
     EFixSum (Dsdt);
   }
 
-  SbLog ("=M3E commit: MADT GICC UID 5 (M3 1, mpidr 101, if 5) first and the only one enabled; %d DSDT _MAT copies synced", Mats);
+  SbLog ("=M3E commit: UID 5 first, only one enabled, park v1 mbox %lx; %d _MAT synced", mEMailbox, Mats);
 }
 
 STATIC
@@ -1780,6 +1797,13 @@ M3EarlyArm (
   Lit[1] = (UINT64)(Page + 3 * EFI_PAGE_SIZE + 0x800);      // control: the parked M3 runs the guard instead
  #endif
   mEGuard = Page + 3 * EFI_PAGE_SIZE;
+  mEMailbox = 0xFFFFFFFFu;
+  if (EFI_ERROR (gBS->AllocatePages (AllocateMaxAddress, EfiReservedMemoryType, 1, &mEMailbox))) {
+    mEMailbox = 0;
+  } else {
+    ZeroMem ((VOID *)(UINTN)mEMailbox, EFI_PAGE_SIZE);
+    EClean ((UINTN)mEMailbox, (UINTN)mEMailbox + EFI_PAGE_SIZE);
+  }
   ((UINT64 *)(UINTN)mEGuard)[0] = 0x0000000000000401ull;     // 0..1 GiB Device-nGnRnE (PMU), AF
   ((UINT64 *)(UINTN)mEGuard)[1] = 0x0000000040000401ull;
   ((UINT64 *)(UINTN)mEGuard)[2] = 0x0000000080000705ull;     // 2..3 GiB Normal WB, inner shareable, AF

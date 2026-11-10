@@ -412,3 +412,35 @@ control **a55ctl5** (`starbite-uefi-a55ctl5.bin`, sha256 `c7c26417acc1171bc02304
   (file value 0x14024AF30), then o = the RVA of the timer object at nt+D18A18, f = the RVA of its init routine
   (+0x68), s = HAL step byte nt+C0F710, st = the full status;
 - `=M3P <cycles per ms> cyc/ms <cpu> ...`: the number first now.
+
+## 19. Root cause of the M3 bugcheck, and the firmware fix (m3kern9)
+
+**p1 was cut by the print width:** `p1000000000000020` holds 15 digits after the `p1` label, so p1 = **0x200**. That's site B,
+0x140A61114 (HAL phase-0 init): `KeBugCheckEx(0x5C, 0x200, 0x05250631, problem 1, status)`. The status comes from
+0x14049B590, which finds the MADT ('APIC') and parses it in 0x14049B648 (problem code 1 recorded at line 0x10C).
+p4 = 0xC000000D, STATUS_INVALID_PARAMETER, returned at 0x14049BA74. For every **enabled GICC**:
+
+```
+14049b978  ldr  w8, [x19, #0xc]          ; GICC flags
+14049b97c  tbz  w8, #0, skip             ; disabled entries are skipped
+14049b980  ldr  x0, [x19, #0x18]         ; parked address
+14049b984  ldr  w9, [x19, #0x10]         ; parking protocol version
+14049b988  ldr  w8, [nt+D168E0]          ; "start processors with PSCI" (HalStartDynamicProcessor needs it)
+14049b98c  tbnz w8, #0, ok
+14049b990  cmp  w9, #1 ; ccmp x0, #0, #4, eq
+14049b998  b.eq -> C000000D               ; no PSCI: version must be 1 AND the mailbox non-zero
+```
+
+On A55 0 the woa EL2 shim answers PSCI_VERSION 0x10000, the PSCI flag is set, and the boot GICC with parking v0 and no
+mailbox is accepted. On the M3, Samsung's EL3 answers FFFFFFFF (m3diag1), so the flag stays clear and **every** enabled
+GICC, the boot CPU's included, must use ACPI parking protocol v1 with a mailbox. Our commit (and the whole old solo
+track's MADT) gave M3 core 1 parking v0 / address 0.
+
+**Fix (ACPI tables only, standards-conformant):** M3 core 1's GICC carries parking protocol version 1 and its own
+reserved, zeroed 4 KiB mailbox page, also in its DSDT `_MAT` copy. This is the ACPI parking protocol (ACPI 6.x 5.2.12.14)
+that a platform without PSCI is expected to use. It is also the path for adding M3 2, 3, 0 later (parked in our
+stubs, mailboxes in the MADT).
+
+**m3kern9** (`starbite-uefi-m3kern9.bin`, sha256 `7f4f05e95dc6bfe074f8d45123b891b0b6baa6b4c38848f4eed0409c810a00e8`):
+m3kern8 + this fix. Same guard: if Windows now gets as far as its storage driver, A55 0 resets through the watchdog
+before any disk write (`=M3KU`).
