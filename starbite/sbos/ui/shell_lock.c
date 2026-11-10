@@ -966,7 +966,7 @@ void sh_set(const char *what, const char *key, float v)
 }
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
-enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM };
+enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK };
 static struct {
     int kind, arg, arg2, moved;
     float x0, y0, base, t0;
@@ -1017,7 +1017,11 @@ void sh_touch(int phase, float x, float y, float t)
             else if (y < 196 || y > 463) T.kind = G_SCRIM;
             return;
         }
-        if (!locked) return;
+        if (!locked) {
+            /* home: a pull down from the top-left corner brings the lock back (the concept's re-lock) */
+            if (y < 56 && x < 195) { T.kind = G_RELOCK; sp_lock.live = 0; tk_tracker_add(&T.tr, y, t); }
+            return;
+        }
         for (int i = 0; i < 2; i++) {
             float bx = i ? 292 : 46;
             if (x >= bx && x <= bx + 52 && y >= 694 && y <= 746) {
@@ -1058,6 +1062,10 @@ void sh_touch(int phase, float x, float y, float t)
             place_list();
             break;
         }
+        case G_RELOCK:
+            tk_tracker_add(&T.tr, y, t);
+            set_lock(-H_PT + tk_maxf(0, dy));
+            break;
         case G_LOCK: {
             tk_tracker_add(&T.tr, y, t);
             float d = dy + T.base;
@@ -1107,6 +1115,12 @@ void sh_touch(int phase, float x, float y, float t)
         else { scroll_v = -tk_tracker_v(&T.tr); scroll_momentum = tk_fabsf(scroll_v) > .02f; }
         break;
     }
+    case G_RELOCK: {
+        float v = tk_tracker_v(&T.tr);
+        if (-lockY < H_PT * .7f || v > .4f) { locked = 1; tk_spring_start(&sp_lock, lockY, 0, 0, TK_SPR_UNLOCK); }
+        else tk_spring_start(&sp_lock, lockY, -H_PT, 0, TK_SPR_UNLOCK);
+        break;
+    }
     case G_LOCK:
         if (!T.moved) {
             hint_left = 2200;
@@ -1140,7 +1154,7 @@ int sh_tick(float dt, float t)
         if (!live && sp_lock.to <= -H_PT + .01f) { locked = 0; lockflat.hidden = 1; home.sx = home.sy = 1; }
         mv = 1;
     }
-    if (T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB) mv = 1;
+    if (T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB || T.kind == G_RELOCK) mv = 1;
     /* the mark (.3 s), the glyph (.2 s) and the hint (.3 s): linear stand-ins for their CSS ease */
     mv |= tween(&mark_a, mark_t, .3f, dt);
     mv |= tween(&glyph_a, glyph_t, .2f, dt);
@@ -1300,7 +1314,8 @@ void sh_idle(void)
 
 int sh_moving(void)
 {
-    int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB || booting;
+    int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB ||
+            T.kind == G_RELOCK || booting;
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live;
     return m;
