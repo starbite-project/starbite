@@ -294,6 +294,7 @@ __asm__ (
   "  mov   x28, #0\n"                    // framebuffer changes
   "  mov   x15, #0\n"                    // beat of the first change
   "  mov   x16, #0\n"                    // last hash
+  "  mov   x29, #0\n"                    // v3: KUSER_SHARED_DATA's physical page once found
   "1:\n"
   "  dc    civac, x20\n"
   "  dsb   sy\n"
@@ -365,6 +366,43 @@ __asm__ (
   "  bl    20f\n"
   "  ldr   x9, [x19, #0x48]\n"
   "  bl    20f\n"
+  // v3: KUSER_SHARED_DATA (NtMajorVersion 10 at +0x26C, ImageNumberLow/High 0xAA64 at +0x2C) in winload's
+  // EfiLoaderData ranges (+0x100: base, pages; +0x78 count); then InterruptTime (+0x8) and TickCount (+0x320)
+  "  cbnz  x29, 41f\n"
+  "  ldr   x3, [x19, #0x78]\n"
+  "  add   x4, x19, #0x100\n"
+  "40:\n"
+  "  cbz   x3, 42f\n"
+  "  ldp   x5, x6, [x4], #16\n"
+  "44:\n"
+  "  cbz   x6, 43f\n"
+  "  ldr   w7, [x5, #0x26C]\n"
+  "  cmp   w7, #10\n"
+  "  b.ne  45f\n"
+  "  ldr   w7, [x5, #0x2C]\n"
+  "  movz  w8, #0xAA64\n"
+  "  movk  w8, #0xAA64, lsl #16\n"
+  "  cmp   w7, w8\n"
+  "  b.ne  45f\n"
+  "  mov   x29, x5\n"
+  "  b     41f\n"
+  "45:\n"
+  "  add   x5, x5, #0x1000\n"
+  "  sub   x6, x6, #1\n"
+  "  b     44b\n"
+  "43:\n"
+  "  sub   x3, x3, #1\n"
+  "  b     40b\n"
+  "41:\n"
+  "  ldr   w7, [x29, #0x8]\n"
+  "  str   x7, [x19, #0x80]\n"
+  "  ldr   w7, [x29, #0x320]\n"
+  "  str   x7, [x19, #0x88]\n"
+  "42:\n"
+  "  ldr   x9, [x19, #0x90]\n"
+  "  bl    50f\n"
+  "  ldr   x9, [x19, #0x98]\n"
+  "  bl    50f\n"
   "  mrs   x1, cntvct_el0\n"            // 120 s fallback (the loader's own watchdog is 82 s)
   "  sub   x1, x1, x23\n"
   "  movz  x2, #0xE400\n"
@@ -414,6 +452,20 @@ __asm__ (
   "  mov   x30, x17\n"
   "29:\n"
   "  ret\n"
+  // "=M3U u00000000 it00000000 tc00000000" at x9 (skip if 0)
+  "50:\n"
+  "  cbz   x9, 59f\n"
+  "  mov   x17, x30\n"
+  "  mov   x0, x29\n          add x1, x9, #6\n   mov x2, #8\n  bl 30f\n"
+  "  ldr   x0, [x19, #0x80]\n add x1, x9, #17\n  mov x2, #8\n  bl 30f\n"
+  "  ldr   x0, [x19, #0x88]\n add x1, x9, #28\n  mov x2, #8\n  bl 30f\n"
+  "  dc    civac, x9\n"
+  "  add   x0, x9, #35\n"
+  "  dc    civac, x0\n"
+  "  dsb   sy\n"
+  "  mov   x30, x17\n"
+  "59:\n"
+  "  ret\n"
   "30:\n"                               // x0 value, x1 first digit, x2 digits; clobbers x0-x2, x6-x8
   "  add   x1, x1, x2\n"
   "31:\n"
@@ -456,6 +508,8 @@ STATIC UINT64                  mEPctl, mEPcval, mEVctl, mEVcval;
 STATIC UINTN                   mEWatch[2][4];      // [ring][field] first digit: beat prog pmsg; [3] the line's start
 STATIC CONST CHAR8             mEWatchTag[] = "=M3E watch beat ";
 STATIC CONST CHAR8             mEKTag[]     = "=M3K b0000 e00 gd0 @00 fbn00 @00 h00000000";
+STATIC CONST CHAR8             mEUTag[]     = "=M3U u00000000 it00000000 tc00000000";
+STATIC UINT8                   mEMap[0x8000];      // v3: the memory map at ExitBootServices (static: no allocation)
 
 STATIC
 UINT64
@@ -607,7 +661,9 @@ M3EarlyA55Watch (
       //
       ((volatile UINT64 *)(UINTN)mEGuard)[0x40 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mEKTag);
       ((volatile UINT64 *)(UINTN)mEGuard)[0x48 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mEKTag);
-      EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x80);
+      ((volatile UINT64 *)(UINTN)mEGuard)[0x90 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mEUTag);
+      ((volatile UINT64 *)(UINTN)mEGuard)[0x98 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mEUTag);
+      EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x800);
       EClean (SB_EVLOG_BASE, SB_EVLOG_BASE + 12 + SB_EVLOG_CAP);
       EClean (SB_PMSG_BASE, SB_PMSG_BASE + 12 + SB_PMSG_CAP);
       __asm__ __volatile__ ("mov x0, %0\n br %1" : : "r" ((UINT64)mEGuard), "r" ((UINT64)mEGuard + 0x800) : "x0", "memory");
@@ -942,6 +998,54 @@ EFbLiterals (
   SbLog ("=M3E fb %lx %ldx%ld ppsl %ld", Base, W, H, Ppsl);
 }
 
+//
+// v3: winload's EfiLoaderData ranges (2..4 GiB, inside the guard's map) for its KUSER_SHARED_DATA scan, read with
+// GetMemoryMap into a static buffer (no allocation, so winload's map key stays valid). Up to 112 ranges at +0x100.
+//
+STATIC
+VOID
+ELoaderRanges (
+  VOID
+  )
+{
+  volatile UINT64        *L = (volatile UINT64 *)(UINTN)mEGuard;
+  EFI_MEMORY_DESCRIPTOR  *D;
+  UINTN                  Size;
+  UINTN                  Key;
+  UINTN                  DSize;
+  UINT32                 DVer;
+  UINTN                  n;
+  UINTN                  Pages;
+  EFI_STATUS             Status;
+
+  Size   = sizeof (mEMap);
+  Status = gBS->GetMemoryMap (&Size, (EFI_MEMORY_DESCRIPTOR *)mEMap, &Key, &DSize, &DVer);
+  L[0x78 / 8] = 0;
+  if (EFI_ERROR (Status) || (DSize == 0)) {
+    SbLog ("=M3E map: %r", Status);
+    return;
+  }
+
+  n     = 0;
+  Pages = 0;
+  for (D = (EFI_MEMORY_DESCRIPTOR *)mEMap; (UINT8 *)D < mEMap + Size; D = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)D + DSize)) {
+    if ((D->Type != EfiLoaderData) || (D->PhysicalStart < 0x80000000ull) ||
+        (D->PhysicalStart + EFI_PAGES_TO_SIZE (D->NumberOfPages) > 0x100000000ull) || (n >= 112))
+    {
+      continue;
+    }
+
+    L[(0x100 / 8) + 2 * n]     = D->PhysicalStart;
+    L[(0x100 / 8) + 2 * n + 1] = D->NumberOfPages;
+    Pages                     += D->NumberOfPages;
+    n++;
+  }
+
+  L[0x78 / 8] = n;
+  EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x800);
+  SbLog ("=M3E map: %d LoaderData ranges, %d pages", n, Pages);
+}
+
 STATIC
 VOID
 EFixSum (
@@ -1100,6 +1204,9 @@ M3EarlyEbsWrap (
     EProgress (5);
     SbLog ("=M3E ExitBootServices called from %lx, running on mpidr %lx (80000101 = the M3)", (UINT64)(UINTN)__builtin_return_address (0), EMpidr ());
     EAcpiLine ("ebs-pre");
+ #if STARBITE_M3_EARLY >= 2
+    ELoaderRanges ();
+ #endif
   }
 
   Status = mEOrigEbs (ImageHandle, MapKey);
@@ -1201,6 +1308,7 @@ M3EarlyOnReadyToBoot (
  #if STARBITE_M3_EARLY >= 2
   EFbLiterals ();
   SbLog ("%a", mEKTag);
+  SbLog ("%a", mEUTag);
  #endif
   Old = gBS->RaiseTPL (TPL_HIGH_LEVEL);
   ESaveA55Gic ();

@@ -282,3 +282,21 @@ m3kern1 + the guard records how far the kernel got, from outside Windows, every 
   beat of the first change; `h` the last hash. Many changes = the spinner animates (kernel phase 1 running with a
   working clock); 1-2 = a static redraw (e.g. a bugcheck screen); 0 = the screen never changed after winload.
 Fallback reset 120 s (the loader's 82 s watchdog comes first and lands in the menu, where zone 0 is readable).
+
+## 12. m3kern2 result (22:02) and m3kern3
+
+m3kern2: `=M3K b00A5 e00 gd1 @01 fbn00 @00 h00000000`. Windows' HAL re-enabled the GIC distributor within 0.5 s of
+kernel entry (phase 0 reaches interrupt-controller init on the M3), then nothing visible from outside for 82 s: no
+SPI enabled, and the sampled screen band (rows 1850..2590 of 2960 at 0xCC000000) stayed black and unchanged. The
+watchdog reset as before; nothing was written. woa's EBS hook applied the same ntoskrnl patches on the M3 path as on
+the A55 path (NTCFQ n=03, NTCMP n=05, NTPATCH n=08; m3early1 vs m3diag3 pmsg).
+
+**m3kern3** (`starbite-uefi-m3kern3.bin`, sha256 `d0cc76a245a664ba21efd013ad240f5fa05f4f8f60b0af589ae0f8911e5e02c4`):
+m3kern2 + the guard finds the kernel's KUSER_SHARED_DATA page by reading winload's EfiLoaderData ranges (memory
+map taken at ExitBootServices into a static buffer, 2..4 GiB). The page is recognised by NtMajorVersion 10 at +0x26C
+and ImageNumber 0xAA64AA64 at +0x2C. The guard then samples InterruptTime (+0x8) and TickCount (+0x320) every 0.5 s
+into `=M3U uPPPPPPPP itIIIIIIII tcTTTTTTTT`. Read-only. Reading:
+- u 00000000: the shared page was never initialised (or lies above 4 GiB): the kernel stopped very early in phase 0;
+- it/tc growing (InterruptTime in 100 ns units, ~0x4C4B40 per 0.5 s): clock interrupts run on the M3, so the kernel
+  is alive and waiting on something else (a device, a CPU, a DPC);
+- it/tc frozen at a small value: the clock stopped or never ticked; the HAL timer path on the M3 is the suspect.
