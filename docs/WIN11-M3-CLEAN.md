@@ -524,3 +524,21 @@ services WpnUserService/DiagTrack/OneSyncSvc; M3-specific, binary still to be pu
 - ACPM sharing: the Windows-side ACPM user is sbwddm (GPU, domain 4 only; it isn't loaded by these SOLO images).
   The guard and that driver would share channel 0's queue, so a combined image needs one owner.
 Free-run builds no longer carry the =M3B/=M3T/watch lines, the framebuffer hash or the PMU replay (room in the DXE slot).
+
+## 25. winsqlite3.dll 3.51.1.0 needs ARMv8.1 LSE and ARMv8.3 RCpc unconditionally
+
+`build/woa/cores/m3all3-run1/winsqlite3.dll` (pulled read-only from the phone): at +0xEC614 `casal w8, w19, [x9]`,
+inline in an ordinary function, with no CPU-feature check. In the whole image: 8 CASAL, 10 CASP, 2 SWPAL, and
+**92 LDAPR/LDAPRH** (ARMv8.3 RCpc). The Exynos M3 is ARMv8.0 (ISAR0 0x11120 = no atomics, ISAR1 0 = no LRCPC), so every
+process that reaches these paths dies with c000001d (WpnUserService, DiagTrack, OneSyncSvc on m3all3). This
+Microsoft build is compiled for a newer architecture level than 23H2's baseline.
+
+- Firmware can't fix it: an undefined instruction at EL0 is taken to EL1 (Windows). Trapping it would need EL2 with
+  HCR_EL2.TGE, which breaks EL1, and Samsung's EL3 keeps EL2 from us on the M3 (HVC undefined, m3diag1).
+- Windows-side options are the user's decision: leave those services failing (they are non-essential: push
+  notifications, telemetry, mail/calendar sync), or disable them. Replacing the DLL would modify a Windows file
+  (excluded).
+- More Windows components may be built this way over time. `tools/woa/win-m3/lse-scan.py FILE_OR_DIR...` counts LSE
+  (CAS/CASP/LD<op>/SWP) and LDAPR encodings in ARM64 PE code sections. ntoskrnl, ntdll and kernelbase contain LSE
+  too, but only in their checked outline-atomics helpers (they run fine on the M3). A large LDAPR count, like
+  winsqlite3's 92, is the red flag. Run it on a read-only copy of C:\Windows\System32 to list the candidates.
