@@ -33,6 +33,7 @@
 #include <Library/TimerLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Guid/EventGroup.h>
+#include <Protocol/GraphicsOutput.h>
 
 #ifndef STARBITE_M3_EARLY
 #define STARBITE_M3_EARLY 0
@@ -264,9 +265,9 @@ __asm__ (
   "  tlbi  vmalle1\n"
   "  dsb   sy\n"
   "  isb\n"
-  "  mov   x1, #0xFF00\n"               // MAIR: idx0 Device-nGnRnE, idx1 Normal WB
+  "  mov   x1, #0xFF00\n"
   "  msr   mair_el1, x1\n"
-  "  movz  x1, #0x3520\n"               // TCR: T0SZ 32, WB WA inner/outer, inner shareable, 4K, EPD1
+  "  movz  x1, #0x3520\n"
   "  movk  x1, #0x80, lsl #16\n"
   "  msr   tcr_el1, x1\n"
   "  msr   ttbr0_el1, x19\n"
@@ -274,7 +275,7 @@ __asm__ (
   "  tlbi  vmalle1\n"
   "  dsb   sy\n"
   "  isb\n"
-  "  movz  x1, #0x183D\n"               // UEFI's SCTLR (M, C, I on; no WXN)
+  "  movz  x1, #0x183D\n"
   "  movk  x1, #0x30C5, lsl #16\n"
   "  msr   sctlr_el1, x1\n"
   "  isb\n"
@@ -284,9 +285,15 @@ __asm__ (
   "  dsb   sy\n"
   "  ldr   w21, [x20, #4]\n"
   "  ldr   w22, [x20, #8]\n"
-  "  mrs   x23, cntvct_el0\n"
-  "  movz  x24, #0x8F80\n"              // 90 s at 26 MHz
-  "  movk  x24, #0x8B79, lsl #16\n"
+  "  mrs   x23, cntvct_el0\n"            // t0
+  "  movz  x24, #0x5D40\n"              // 0.5 s = 13,000,000 ticks
+  "  movk  x24, #0xC6, lsl #16\n"
+  "  mov   x25, x23\n"                   // last beat
+  "  mov   x26, #0\n"                    // beat
+  "  mov   x27, #0\n"                    // beat GICD_CTLR first seen enabled (0 = never)
+  "  mov   x28, #0\n"                    // framebuffer changes
+  "  mov   x15, #0\n"                    // beat of the first change
+  "  mov   x16, #0\n"                    // last hash
   "1:\n"
   "  dc    civac, x20\n"
   "  dsb   sy\n"
@@ -297,26 +304,91 @@ __asm__ (
   "  cmp   w1, w22\n"
   "  b.ne  2f\n"
   "  mrs   x1, cntvct_el0\n"
-  "  sub   x1, x1, x23\n"
-  "  cmp   x1, x24\n"
+  "  sub   x2, x1, x25\n"
+  "  cmp   x2, x24\n"
   "  b.lo  1b\n"
-  "2:\n"
-  "  mrs   x23, cntvct_el0\n"           // ~2 ms
+  "  mov   x25, x1\n"
+  "  add   x26, x26, #1\n"
+  // framebuffer hash (sampled band, see the C side's literals at +0x50..+0x70)
+  "  mov   x14, #0\n"
+  "  ldr   x9, [x19, #0x50]\n"
+  "  cbz   x9, 13f\n"
+  "  ldr   x10, [x19, #0x58]\n"
+  "  ldr   x11, [x19, #0x60]\n"
+  "  ldr   x13, [x19, #0x70]\n"
+  "10:\n"
+  "  mov   x7, x9\n"
+  "  ldr   x12, [x19, #0x68]\n"
+  "11:\n"
+  "  dc    civac, x7\n"
+  "  dsb   ish\n"
+  "  ldr   w1, [x7]\n"
+  "  eor   x14, x1, x14, ror #7\n"
+  "  add   x7, x7, x13\n"
+  "  subs  x12, x12, #1\n"
+  "  b.ne  11b\n"
+  "  add   x9, x9, x10\n"
+  "  subs  x11, x11, #1\n"
+  "  b.ne  10b\n"
+  "  cmp   x26, #1\n"
+  "  b.eq  12f\n"
+  "  cmp   x14, x16\n"
+  "  b.eq  12f\n"
+  "  add   x28, x28, #1\n"
+  "  cbnz  x15, 12f\n"
+  "  mov   x15, x26\n"
+  "12:\n"
+  "  mov   x16, x14\n"
+  "13:\n"
+  // GIC distributor as Windows' HAL leaves it
+  "  movz  x3, #0x1000\n"
+  "  movk  x3, #0x1010, lsl #16\n"
+  "  ldr   w10, [x3]\n"
+  "  and   x10, x10, #1\n"
+  "  cbz   x10, 14f\n"
+  "  cbnz  x27, 14f\n"
+  "  mov   x27, x26\n"
+  "14:\n"
+  "  mov   x11, #0\n"
+  "  mov   x6, #1\n"
+  "  add   x8, x3, #0x100\n"
+  "15:\n"
+  "  ldr   w7, [x8, x6, lsl #2]\n"
+  "  cbz   w7, 16f\n"
+  "  add   x11, x11, #1\n"
+  "16:\n"
+  "  add   x6, x6, #1\n"
+  "  cmp   x6, #16\n"
+  "  b.lo  15b\n"
+  // the line "=M3K b0000 e00 gd0 @00 fbn00 @00 h00000000" in zone 0 (+0x40) and pmsg (+0x48)
+  "  ldr   x9, [x19, #0x40]\n"
+  "  bl    20f\n"
+  "  ldr   x9, [x19, #0x48]\n"
+  "  bl    20f\n"
+  "  mrs   x1, cntvct_el0\n"            // 120 s fallback (the loader's own watchdog is 82 s)
+  "  sub   x1, x1, x23\n"
+  "  movz  x2, #0xE400\n"
+  "  movk  x2, #0xB9F8, lsl #16\n"
+  "  cmp   x1, x2\n"
+  "  b.lo  1b\n"
+  "2:\n"                                // Windows' UFS driver logged (or 120 s): 2 ms, flush both rings, reset
+  "  mrs   x23, cntvct_el0\n"
   "3:\n"
   "  mrs   x1, cntvct_el0\n"
   "  sub   x1, x1, x23\n"
   "  mov   x4, #52000\n"
   "  cmp   x1, x4\n"
   "  b.lo  3b\n"
-  "  mov   x2, x20\n"
-  "  add   x3, x20, #0x4000\n"
+  "  movz  x2, #0x0000\n"
+  "  movk  x2, #0xFED1, lsl #16\n"
+  "  add   x3, x2, #0x8000\n"
   "4:\n"
   "  dc    civac, x2\n"
   "  add   x2, x2, #64\n"
   "  cmp   x2, x3\n"
   "  b.lo  4b\n"
   "  dsb   sy\n"
-  "  movz  x1, #0x0400\n"               // PMU SWRESET
+  "  movz  x1, #0x0400\n"
   "  movk  x1, #0x1406, lsl #16\n"
   "  mov   w2, #1\n"
   "  str   w2, [x1]\n"
@@ -324,6 +396,38 @@ __asm__ (
   "5:\n"
   "  wfi\n"
   "  b     5b\n"
+  // write the fields at line x9 (skip if 0); keeps x19..x28, x14..x16, x10, x11
+  "20:\n"
+  "  cbz   x9, 29f\n"
+  "  mov   x17, x30\n"
+  "  mov   x0, x26\n  add x1, x9, #6\n   mov x2, #4\n  bl 30f\n"
+  "  mov   x0, x11\n  add x1, x9, #12\n  mov x2, #2\n  bl 30f\n"
+  "  mov   x0, x10\n  add x1, x9, #17\n  mov x2, #1\n  bl 30f\n"
+  "  mov   x0, x27\n  add x1, x9, #20\n  mov x2, #2\n  bl 30f\n"
+  "  mov   x0, x28\n  add x1, x9, #26\n  mov x2, #2\n  bl 30f\n"
+  "  mov   x0, x15\n  add x1, x9, #30\n  mov x2, #2\n  bl 30f\n"
+  "  mov   x0, x14\n  add x1, x9, #34\n  mov x2, #8\n  bl 30f\n"
+  "  dc    civac, x9\n"
+  "  add   x0, x9, #41\n"
+  "  dc    civac, x0\n"
+  "  dsb   sy\n"
+  "  mov   x30, x17\n"
+  "29:\n"
+  "  ret\n"
+  "30:\n"                               // x0 value, x1 first digit, x2 digits; clobbers x0-x2, x6-x8
+  "  add   x1, x1, x2\n"
+  "31:\n"
+  "  sub   x1, x1, #1\n"
+  "  and   x6, x0, #0xF\n"
+  "  add   x7, x6, #0x30\n"
+  "  add   x8, x6, #0x37\n"
+  "  cmp   x6, #10\n"
+  "  csel  x7, x7, x8, lo\n"
+  "  strb  w7, [x1]\n"
+  "  lsr   x0, x0, #4\n"
+  "  subs  x2, x2, #1\n"
+  "  b.ne  31b\n"
+  "  ret\n"
   "  .globl M3EarlyGuardEnd\n"
   "M3EarlyGuardEnd:\n"
   );
@@ -351,6 +455,7 @@ STATIC UINT32                  mEEn0, mEPri[8], mECtlr, mEPmr, mEBpr;
 STATIC UINT64                  mEPctl, mEPcval, mEVctl, mEVcval;
 STATIC UINTN                   mEWatch[2][4];      // [ring][field] first digit: beat prog pmsg; [3] the line's start
 STATIC CONST CHAR8             mEWatchTag[] = "=M3E watch beat ";
+STATIC CONST CHAR8             mEKTag[]     = "=M3K b0000 e00 gd0 @00 fbn00 @00 h00000000";
 
 STATIC
 UINT64
@@ -500,6 +605,9 @@ M3EarlyA55Watch (
       // The M3 is about to return into winload with the committed tables: from here on Windows may reclaim
       // boot-services memory (this code, UEFI's page tables). Into the guard in reserved memory, own tables.
       //
+      ((volatile UINT64 *)(UINTN)mEGuard)[0x40 / 8] = ERingFind (SB_EVLOG_BASE, SB_EVLOG_CAP, mEKTag);
+      ((volatile UINT64 *)(UINTN)mEGuard)[0x48 / 8] = ERingFind (SB_PMSG_BASE, SB_PMSG_CAP, mEKTag);
+      EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x80);
       EClean (SB_EVLOG_BASE, SB_EVLOG_BASE + 12 + SB_EVLOG_CAP);
       EClean (SB_PMSG_BASE, SB_PMSG_BASE + 12 + SB_PMSG_CAP);
       __asm__ __volatile__ ("mov x0, %0\n br %1" : : "r" ((UINT64)mEGuard), "r" ((UINT64)mEGuard + 0x800) : "x0", "memory");
@@ -793,6 +901,47 @@ EAcpiLine (
 // every DSDT _MAT GICC gets the same Enabled bit as its MADT twin. Checksums fixed. ARM_BOOT_ARCH stays 0
 // (parking protocol, one CPU). Logged.
 //
+//
+// v3: a band of the GOP framebuffer for the guard's hash (rows 5/8..7/8 of the height every 8th row, every 32nd
+// pixel): +0x50 first address, +0x58 row step, +0x60 rows, +0x68 columns, +0x70 column step. 0 = no framebuffer.
+//
+STATIC
+VOID
+EFbLiterals (
+  VOID
+  )
+{
+  EFI_GRAPHICS_OUTPUT_PROTOCOL  *Gop;
+  volatile UINT64               *L = (volatile UINT64 *)(UINTN)mEGuard;
+  UINT64                        Base;
+  UINT64                        Ppsl;
+  UINT64                        H;
+  UINT64                        W;
+
+  L[0x50 / 8] = 0;
+  if (EFI_ERROR (gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&Gop)) || (Gop->Mode == NULL) || (Gop->Mode->Info == NULL)) {
+    SbLog ("=M3E fb: no GOP");
+    return;
+  }
+
+  Base = Gop->Mode->FrameBufferBase;
+  Ppsl = Gop->Mode->Info->PixelsPerScanLine;
+  H    = Gop->Mode->Info->VerticalResolution;
+  W    = Gop->Mode->Info->HorizontalResolution;
+  if ((Base < 0x80000000ull) || (Base + Ppsl * H * 4 > 0x100000000ull) || (H < 64) || (W < 64)) {
+    SbLog ("=M3E fb: %lx %ldx%ld outside the guard's map, no hash", Base, W, H);
+    return;
+  }
+
+  L[0x58 / 8] = Ppsl * 4 * 8;
+  L[0x60 / 8] = (H / 4) / 8;
+  L[0x68 / 8] = W / 32;
+  L[0x70 / 8] = 32 * 4;
+  L[0x50 / 8] = Base + (H * 5 / 8) * Ppsl * 4;
+  EClean ((UINTN)mEGuard, (UINTN)mEGuard + 0x80);
+  SbLog ("=M3E fb %lx %ldx%ld ppsl %ld", Base, W, H, Ppsl);
+}
+
 STATIC
 VOID
 EFixSum (
@@ -966,7 +1115,7 @@ M3EarlyEbsWrap (
   if (mEMoved) {
     ECommitTables ();
     EAcpiLine ("committed");
-    SbLog ("=M3E v2: returning into winload on the M3; Windows' kernel starts now. A55 0 resets the phone at the first pmsg line from Windows' UFS driver (before any disk write) or after 90 s");
+    SbLog ("=M3E v2: returning into winload on the M3; kernel starts. A55 0 resets at the UFS driver's 1st pmsg line");
     EProgress (7);
     return Status;
   }
@@ -1049,6 +1198,10 @@ M3EarlyOnReadyToBoot (
   }
 
   EWatchLine ();
+ #if STARBITE_M3_EARLY >= 2
+  EFbLiterals ();
+  SbLog ("%a", mEKTag);
+ #endif
   Old = gBS->RaiseTPL (TPL_HIGH_LEVEL);
   ESaveA55Gic ();
   ZeroMem (mECtx, sizeof (*mECtx));

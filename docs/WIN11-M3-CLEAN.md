@@ -261,3 +261,24 @@ CPU.** (The watch line showed prog 04 because the reset came within its 0.5 s pe
 Residual risk: if the UFS driver ever issued a disk write before its first pmsg line, up to ~2 ms of I/O could happen
 before the reset. Its logs show =UFSNORMAL before every =UFSWRIT, and file-system/registry writes come much later
 (volume mount, then hive flushes after smss), so the reset lands long before the registry is touched.
+
+## 11. m3kern1 result (21:45, no write) and m3kern2
+
+m3kern1: every =M3E line up to "returning into winload on the M3" (zone 0 at the menu). Then no =UFS line, no
+=UFSBUGCHECK: the kernel never reached the storage driver. The loader's own row watchdog (82 s) reset first ("HANG
+(WATCHDOG)" at ~91 s), before the guard's 90 s fallback. Nothing was written (registry backup
+backup/20261110-pre-m3kern1).
+
+**m3kern2** (`starbite-uefi-m3kern2.bin`, sha256 `bec3abbd763ded7123903f062410639d84e8367e617fde13eedf41b927dfb9d2`):
+m3kern1 + the guard records how far the kernel got, from outside Windows, every 0.5 s into a 42-character line
+(fits the menu's ~70-char `oem log dmesg` print), in zone 0 and pmsg:
+
+`=M3K bBBBB eEE gdG @GG fbnNN @FF hHHHHHHHH`
+- `b` beats (0.5 s) since the kernel was entered;
+- `e` how many GICD_ISENABLER words 1..15 are non-zero (Windows enabling SPIs as the HAL/drivers come up);
+- `gd` GICD_CTLR enable bit now, `@` the beat it first read 1 (Windows' HAL re-enabled the distributor, which
+  UEFI's ExitBootServices had turned off). gd0 throughout = the kernel never got to HAL interrupt init;
+- `fbn` how many times a sampled band of the framebuffer (lower middle: the boot spinner's area) changed, `@` the
+  beat of the first change; `h` the last hash. Many changes = the spinner animates (kernel phase 1 running with a
+  working clock); 1-2 = a static redraw (e.g. a bugcheck screen); 0 = the screen never changed after winload.
+Fallback reset 120 s (the loader's 82 s watchdog comes first and lands in the menu, where zone 0 is readable).
