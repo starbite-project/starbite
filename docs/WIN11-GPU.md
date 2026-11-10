@@ -2031,6 +2031,27 @@ registers are unresearched, and reads of clock-gated channels wedge the SoC), an
 mode gains nothing without that scaler, so both wait. Page flips remove tearing but copy the same bytes,
 so they come after this.
 
+### 8.6 Big-core boots: the guard owns ACPM DVFS (T34, 2026-11-11)
+
+- **The decision** (main session, side-session notes `acpm-arbiter.md`): on boots where Windows runs on the M3s, the
+  A55 guard owns the ACPM DVFS queue (channel 0) and governs the M3 cluster.
+- **sbwddm:** never wrote that queue. Its only ACPM traffic is BUCK6 on the PMIC channel (id 2), once at GPU start
+  and once at stop, and it sends no GPU DVFS.
+- **sbthermal:** its A55 boost (`set_a55`, domain 2) was the one Windows writer on the queue, so it was the one to
+  fix.
+- **T34 (sbthermal db7ef111, `build/win/stage/sbthermal-t34`):** once per boot, before the first reading,
+  sbthermal decides whether this is a big-core boot:
+  - **reason 1:** the CPU it runs on is not a Cortex-A55 (MIDR_EL1);
+  - **reason 2:** the arbiter page 0xFED1F000 is live (magic 'SBAR', version 1, and a heartbeat that moves within
+    1.2 s; a magic alone can be stale after a warm reset).
+
+  On a big-core boot it sends nothing on the DVFS queue for the whole boot. Its TMU readings, the watchdog gate and
+  the ACPM lock for other drivers are unchanged.
+- **Logged in `State`:** `Acpm` (the text), `BigCore`, `Midr`, `Arbiter`, `ArbiterHeartbeat`.
+- **Host tests:** 12 new checks in `starbite/win/tests/host_test.c`.
+- **Installing:** a file swap from TWRP (gpu-cycle.sh never pushes sbthermal); the steps are in the stage's
+  INSTALL.md.
+
 ## 9. What can be tested off the phone
 
 | What | How | Where |

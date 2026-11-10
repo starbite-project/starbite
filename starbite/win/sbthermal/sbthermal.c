@@ -7,6 +7,10 @@
  * machine of sbth_core.c. The TMU and CMU registers are only read, and the hardware over-temperature
  * trip S-Boot armed at 115 C is only reported, never changed. Its one write path is ACPM (below).
  *
+ * Big-core boots (docs/WIN11-GPU.md 8.6): when Windows runs on the M3s (MIDR not an A55) or the guard's ACPM
+ * arbiter page is live, the guard owns the ACPM DVFS queue and sbthermal sends nothing on it (State\Acpm says
+ * which). Everything else below is unchanged.
+ *
  * CPU boost (docs/WIN11-GPU.md 8.4): the four A55s Windows runs on get Parameters\CpuKhz (default 1690000,
  * what XNU sets; 0 = never touch) at Normal, 1456000 at Warm, S-Boot's 1053000 from Hot up, through ACPM
  * DVFS domain 2 only (a level machine on the hottest probe). sbthermal owns ACPM in Windows: every ACPM
@@ -53,6 +57,7 @@ static struct {
     struct sbth_levels cpulv;             /* thread only: levels from the hottest probe */
     struct sbth_cpu cpu;                  /* under lock */
     sbth_u32 boost_khz;                   /* Parameters\CpuKhz (default 1690000; 0 = never touch the clock) */
+    volatile LONG bigcore;                /* SBTH_BIG_* reasons; nonzero = nothing on the ACPM DVFS queue */
     PCALLBACK_OBJECT cb;
     PVOID cb_reg;
     HANDLE thread;
@@ -89,6 +94,13 @@ static void put_dword(HANDLE h, PCWSTR name, ULONG v)
     UNICODE_STRING n;
     RtlInitUnicodeString(&n, name);
     (void)ZwSetValueKey(h, &n, 0, REG_DWORD, &v, sizeof(v));
+}
+
+static void put_sz(HANDLE h, PCWSTR name, PCWSTR v)
+{
+    UNICODE_STRING n;
+    RtlInitUnicodeString(&n, name);
+    (void)ZwSetValueKey(h, &n, 0, REG_SZ, (PVOID)v, (ULONG)((wcslen(v) + 1) * sizeof(WCHAR)));
 }
 
 static ULONG get_dword(HANDLE h, PCWSTR name, ULONG dflt)
@@ -250,7 +262,7 @@ static void cpu_step(const struct sbth_reading *r)
     g.cpu.level = g.cpulv.level;
     c = g.cpu;
     KeReleaseSpinLock(&g.lock, irql);
-    if (target && target != c.target_khz && c.failures < 3) {
+    if (target && target != c.target_khz && c.failures < 3 && !g.bigcore) {   /* big-core boot: the guard's */
         BOOLEAN ok = set_a55(target);
         sbth_u32 now;
         KeStallExecutionProcessor(1000);  /* let the PLL settle before reading it back */
@@ -268,6 +280,59 @@ static void cpu_step(const struct sbth_reading *r)
     }
     if (changed)
         write_cpu(&c, TRUE);
+}
+
+/* ---- big-core boots: who owns the ACPM DVFS queue (sbth_core.h) --------------------------- */
+
+static sbth_u32 read_midr(void)
+{
+    unsigned long long v;
+    __asm__ volatile("mrs %0, midr_el1" : "=r"(v));
+    return (sbth_u32)v;
+}
+
+/* Once, in the thread before the first reading (so before any DVFS request). Up to 1.2 s only when a magic is
+ * there; the page is only read. */
+static void detect_bigcore(void)
+{
+    sbth_u32 midr = read_midr(), magic = 0, version = 0, hb0 = 0, hb1 = 0;
+    unsigned arb = SBTH_ARB_NONE, reason;
+    PHYSICAL_ADDRESS pa;
+    volatile ULONG *p;
+    HANDLE h;
+
+    pa.QuadPart = (LONGLONG)SBTH_ARB_PA;
+    p = (volatile ULONG *)MmMapIoSpaceEx(pa, SBTH_ARB_SIZE, PAGE_READONLY | PAGE_NOCACHE);
+    if (p) {
+        magic = READ_REGISTER_ULONG(p);
+        version = READ_REGISTER_ULONG(p + 1);
+        hb0 = hb1 = READ_REGISTER_ULONG(p + 2);
+        if (magic == SBTH_ARB_MAGIC && version == SBTH_ARB_VERSION) {
+            LARGE_INTEGER d;
+            d.QuadPart = -10000LL * 50;
+            for (unsigned t = 0; t < SBTH_ARB_WAIT_MS && hb1 == hb0; t += 50) {
+                KeDelayExecutionThread(KernelMode, FALSE, &d);
+                hb1 = READ_REGISTER_ULONG(p + 2);
+            }
+        }
+        MmUnmapIoSpace((PVOID)p, SBTH_ARB_SIZE);
+    }
+    arb = sbth_arb_state(magic, version, hb0, hb1);
+    reason = sbth_bigcore_reason(midr, arb);
+    InterlockedExchange(&g.bigcore, (LONG)reason);
+
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, reason ? "sbthermal: big-core boot, the guard owns ACPM "
+               "(reason %u, MIDR 0x%08x, arbiter %u)\n" : "sbthermal: A55 boot, ACPM DVFS direct (reason %u, MIDR "
+               "0x%08x, arbiter %u)\n", reason, midr, arb);
+    if (NT_SUCCESS(open_key(L"State", &h))) {
+        put_sz(h, L"Acpm", reason ? L"sbthermal: big-core boot, the guard owns ACPM" : L"sbthermal: A55 boot, ACPM DVFS direct");
+        put_dword(h, L"BigCore", reason);     /* 1 Windows not on A55s, 2 the arbiter is live, 3 both */
+        put_dword(h, L"Midr", midr);
+        put_dword(h, L"Arbiter", arb);        /* 0 no page, 1 stale magic (heartbeat still), 2 live */
+        put_dword(h, L"ArbiterHeartbeat", hb1);
+        (void)ZwFlushKey(h);
+        ZwClose(h);
+    }
 }
 
 /* ---- the watchdog thread ----------------------------------------------------------------- */
@@ -293,6 +358,7 @@ static VOID SbthThread(PVOID ctx)
     ObReferenceObject(KeGetCurrentThread());
     g.thread_obj = KeGetCurrentThread();
     KeSetEvent(&g.started, IO_NO_INCREMENT, FALSE);
+    detect_bigcore();                     /* before the first reading, so before any DVFS request */
 
     period.QuadPart = -10000LL * SBTH_PERIOD_MS;
     for (;;) {

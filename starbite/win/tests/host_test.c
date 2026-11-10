@@ -629,10 +629,28 @@ static void test_display(void)
     CHECK(f.nsent == 0, "stuck link: no packet pushed into a full queue (%u)", f.nsent);
 }
 
+static void test_bigcore(void)
+{
+    const uint32_t a55 = 0x412fd050U, a55r1 = 0x411fd051U, m3 = 0x531f0020U, a75 = 0x412fd0a0U;
+    CHECK(sbth_midr_is_a55(a55) && sbth_midr_is_a55(a55r1), "A55 MIDRs");
+    CHECK(!sbth_midr_is_a55(m3) && !sbth_midr_is_a55(a75) && !sbth_midr_is_a55(0), "M3, A75, 0 are not A55");
+    CHECK(sbth_arb_state(0, 0, 0, 0) == SBTH_ARB_NONE, "empty page");
+    CHECK(sbth_arb_state(SBTH_ARB_MAGIC, 2, 5, 6) == SBTH_ARB_NONE, "other version");
+    CHECK(sbth_arb_state(0x52414254U, 1, 5, 6) == SBTH_ARB_NONE, "other magic");
+    CHECK(sbth_arb_state(SBTH_ARB_MAGIC, 1, 7, 7) == SBTH_ARB_STALE, "heartbeat still: stale");
+    CHECK(sbth_arb_state(SBTH_ARB_MAGIC, 1, 0xffffffffU, 0) == SBTH_ARB_LIVE, "heartbeat wraps: live");
+    CHECK(sbth_bigcore_reason(a55, SBTH_ARB_NONE) == 0, "A55 boot, no page: direct");
+    CHECK(sbth_bigcore_reason(a55, SBTH_ARB_STALE) == 0, "A55 boot after a big-core warm reset: direct");
+    CHECK(sbth_bigcore_reason(a55, SBTH_ARB_LIVE) == SBTH_BIG_ARBITER, "live arbiter: guard owns ACPM");
+    CHECK(sbth_bigcore_reason(m3, SBTH_ARB_NONE) == SBTH_BIG_NOT_A55, "Windows on M3: never A55 DVFS");
+    CHECK(sbth_bigcore_reason(m3, SBTH_ARB_LIVE) == (SBTH_BIG_NOT_A55 | SBTH_BIG_ARBITER), "both");
+}
+
 int main(void)
 {
     test_thermal();
     test_display();
+    test_bigcore();
     printf("%d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

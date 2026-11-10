@@ -251,3 +251,20 @@ sbth_u32 sbth_cpu_target(enum sbth_level cpu_level, sbth_u32 boost_khz)
         return boost_khz < SBTH_A55_WARM_KHZ ? boost_khz : SBTH_A55_WARM_KHZ;
     return SBTH_A55_SBOOT_KHZ;
 }
+
+int sbth_midr_is_a55(sbth_u32 midr)
+{
+    return ((midr >> 24) & 0xffU) == 0x41U && ((midr >> 4) & 0xfffU) == 0xd05U;
+}
+
+unsigned sbth_arb_state(sbth_u32 magic, sbth_u32 version, sbth_u32 hb0, sbth_u32 hb1)
+{
+    if (magic != SBTH_ARB_MAGIC || version != SBTH_ARB_VERSION)
+        return SBTH_ARB_NONE;
+    return hb0 != hb1 ? SBTH_ARB_LIVE : SBTH_ARB_STALE;
+}
+
+unsigned sbth_bigcore_reason(sbth_u32 midr, unsigned arb_state)
+{
+    return (sbth_midr_is_a55(midr) ? 0U : SBTH_BIG_NOT_A55) | (arb_state == SBTH_ARB_LIVE ? SBTH_BIG_ARBITER : 0U);
+}

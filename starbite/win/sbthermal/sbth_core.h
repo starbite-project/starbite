@@ -182,6 +182,31 @@ int sbth_a55_allowed(sbth_u32 khz);
  * at most SBTH_A55_WARM_KHZ at Warm, S-Boot's clock from Hot up. 0 = boost off: never touch the clock. */
 sbth_u32 sbth_cpu_target(enum sbth_level cpu_level, sbth_u32 boost_khz);
 
+/* ---- big-core boots (side-session notes acpm-arbiter.md; docs/WIN11-GPU.md 8.6) -------------------------
+ * When Windows runs on the M3 big cores, the A55s run the guard (our firmware outside Windows), which owns the ACPM
+ * DVFS queue (channel 0) and governs the M3 cluster. sbthermal then sends NOTHING on that queue: the A55 governor
+ * has no Windows CPU to govern, and a second writer would race the guard. It still reads the TMUs and answers the
+ * watchdog queries, and it still serialises other drivers' ACPM transactions (sbwddm's BUCK6 on the PMIC channel).
+ * Detected once per boot, before any DVFS request:
+ *   - Windows' CPU is not a Cortex-A55 (MIDR_EL1 implementer 0x41, part 0xD05), or
+ *   - the guard's arbiter page 0xFED1F000 is live: magic 'SBAR', version 1 and a heartbeat that moves within
+ *     1.2 s. A magic alone is not enough: the page survives warm resets, so an A55 boot after a big-core boot
+ *     can see a stale one. */
+#define SBTH_ARB_PA 0xFED1F000ULL
+#define SBTH_ARB_SIZE 0x1000U
+#define SBTH_ARB_MAGIC 0x52414253U        /* 'SBAR' */
+#define SBTH_ARB_VERSION 1U
+#define SBTH_ARB_WAIT_MS 1200U
+enum { SBTH_ARB_NONE = 0, SBTH_ARB_STALE = 1, SBTH_ARB_LIVE = 2 };
+#define SBTH_BIG_NOT_A55 1U               /* reason bits */
+#define SBTH_BIG_ARBITER 2U
+
+int sbth_midr_is_a55(sbth_u32 midr);
+/* What the page says: NONE (no magic/version), STALE (magic, heartbeat hb0 == hb1), LIVE (it moved). */
+unsigned sbth_arb_state(sbth_u32 magic, sbth_u32 version, sbth_u32 hb0, sbth_u32 hb1);
+/* 0 = an A55 boot (DVFS as before); else SBTH_BIG_* bits: send nothing on the DVFS queue this boot. */
+unsigned sbth_bigcore_reason(sbth_u32 midr, unsigned arb_state);
+
 /* \\.\StarbiteThermal: METHOD_BUFFERED, FILE_READ_ACCESS, returns struct sbth_state. */
 #define SBTH_DEVICE_TYPE 0x8253U
 #define SBTH_IOCTL_GET_STATE (((sbth_u32)SBTH_DEVICE_TYPE << 16) | (1U << 14) | (0x801U << 2) | 0U)
