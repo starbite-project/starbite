@@ -480,3 +480,16 @@ disabled; DSDT `_MAT` synced. `=M3S core n rc .. mpidr .. mbox ..` lines show ea
 Expect `=M3N np03` and Task Manager / cpu.log with 3 CPUs, all MIDR 531F0020. M3 core 0 follows (its first CPU_ON
 needs the FlexPMU core-on steps Starbite OS uses). To make room in the release DXE slot, free-run builds compile out
 the PMU replay and the ACPI table lines (their results are known from the m3kern runs).
+
+## 22. m3all4: all four M3 cores (ATTENDED ONLY)
+
+`starbite-uefi-m3all4.bin`, sha256 `351d738f29769c256c57766a984d12ae08f9ab6438bb8f93848b82f843112c15`
+(`SOLO=m3all4 M3EARLY=6 KILL_SERIAL=1`): m3all3 plus M3 core 0 (target 0x100, MADT UID 4) parked last. Before its
+CPU_ON come Samsung's FlexPMU core-on steps that Starbite OS applies before every M3 start (libsb `m3_fp_on`):
+CPU_INFORM(4) = 0, bit 0 cleared in GRP2_INTR_BID_ENABLE (0x14070200) and PMU_EVENT_INTERRUPT_ENABLE_GRP2
+(0x14067F08). The cluster is already on, so the APM2AP mailbox bit stays. Starbite OS starts 0x100 this way
+reliably. In the UEFI context this core's first CPU_ON is still new, and woa saw it take the SoC down without the
+PMU steps, so **only with the user present** (a hang there needs a forced reset; it is before Windows, so safe for
+the volume). Expect `=M3S core 0 rc 0 ...`, `on: 4Y 6Y 7Y`, `=M3N np04`, cpu.log 4 CPUs.
+The MADT then lists M3 0 (MPIDR 0x100) and the A55s stay disabled, so the 0x100 affinity collision with A55 core 1
+doesn't reach Windows.

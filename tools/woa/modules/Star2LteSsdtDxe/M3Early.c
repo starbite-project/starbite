@@ -1503,6 +1503,19 @@ EParkSecondaries (
       __asm__ __volatile__ ("dsb sy" ::: "memory");
     }
 
+    if (Core == 0) {
+      //
+      // M3 core 0's first CPU_ON (woa: without the PMU steps it never returned and took the SoC down). Samsung's
+      // FlexPMU core-on bookkeeping first, as Starbite OS does before every M3 start (libsb smp.c m3_fp_on):
+      // CPU_INFORM(4) = 0, bit 0 cleared in GRP2_INTR_BID_ENABLE and PMU_EVENT_INTERRUPT_ENABLE_GRP2. The cluster is
+      // already on (M3 1..3 were started first), so APM2AP bit 24 is left alone.
+      //
+      *(volatile UINT32 *)0x14060870UL = 0;
+      *(volatile UINT32 *)0x14070200UL &= ~1u;
+      *(volatile UINT32 *)0x14067F08UL &= ~1u;
+      __asm__ __volatile__ ("dsb sy" ::: "memory");
+    }
+
     Rc = ESmc (0xC4000003u, 0x100 + Core, Page + 0x800);
     for (Ms = 0; Ms < 200; Ms++) {
       EClean ((UINTN)Page + 0xFF8, (UINTN)Page + 0x1000);
