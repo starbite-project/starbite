@@ -602,3 +602,22 @@ up through the M3 table (1794 -> 2002 -> 2314 MHz) while the hottest probe stays
 with hysteresis and at most one ACPM request per few seconds. It needs one ACPM owner: sbwddm (GPU session) sends on
 the same channel-0 queue, so either the guard owns ACPM and sbwddm asks it (shared word), or sbwddm gains a domain-3
 policy. Load-driven scaling (from Windows' idle time) would need a Windows-side driver.
+
+## 29. ACPM arbiter and the temperature step governor (guard v15): m3all3g, windows-big3g
+
+Decision (main session): on big-core boots the A55 guard owns the ACPM DVFS queue; sbwddm posts its GPU requests to
+the guard. Interface: side-session-notes `acpm-arbiter.md` (sent to the GPU session): page 0xFED1F000 ('SBAR', v1,
+heartbeat every 0.5 s, one request slot req_seq/domain/kHz, ack_seq/status, allowed-domain mask 0x10 = G3D, M3 kHz and C).
+sbwddm detects it by magic + a moving heartbeat (the page survives warm resets); else direct mode.
+
+Guard v15 (free-run builds only):
+- the code moved to its own page (literal page, code page, table page; 6 reserved pages), 0x9B8 bytes now;
+- the ACPM routine first drops stale replies (libsb acpm_send), so fire-and-forget requests never fill the reply
+  queue, and returns 1 sent / 0 queue full;
+- arbiter: page initialised at guard entry (magic written last), heartbeat and M3 kHz/C each beat, the request slot
+  polled every loop iteration and forwarded (status 1/2/3);
+- governor each beat: steps 1794 / 2002 / 2314 MHz (index in `=M3H ... gN`), up below 70 C, down above 80 C, at most one
+  change per 3 s; 85 C throttle to 1066 MHz (s1) and back to 1794 below 70 C; 100 C watchdog reset (s2).
+
+Images: `starbite-uefi-m3all3g.bin` (SOLO, 0f038088...) and **`windows-big3g.uefi`** (e5000b31...: the win11 row's
+firmware with only Star2LteSsdtDxe swapped, outer FV grown as big3-1794).
