@@ -16,6 +16,24 @@ const sys = await c.ev('Object.keys(sbIcons().systems)');
 const apps = await c.ev('Object.keys(sbIcons().apps)');
 for (const k of sys) for (const s of [46, 38, 66, 52]) add(`t${s}-${k}`, `sbIcons().systems[${JSON.stringify(k)}]`, s, s);
 for (const k of apps) add(`a62-${k}`, `sbIcons().apps[${JSON.stringify(k)}]`, 62, 62);
+/* P3p: Calendar's tile without its text: the shell draws today's weekday and date on it (as iOS does) */
+add('a62-calendar-bg', 'sbIcons().calendarBg', 62, 62);
+/* P3p: white monochrome glyphs (SF Symbols-like) for the Control Centre, the keyboard and the lock's widgets */
+const mono = (name, w, h, body) => add(name, JSON.stringify(`<svg viewBox="0 0 ${w} ${h}" fill="none">${body}</svg>`), w, h, 'color:#fff');
+/* a filled calculator with its display and keys cut out (as the old hand-drawn one; the outline read too thin) */
+const rr = (x, y, w, h, r) => `M${x + r} ${y}H${x + w - r}A${r} ${r} 0 0 1 ${x + w} ${y + r}V${y + h - r}A${r} ${r} 0 0 1 ${x + w - r} ${y + h}H${x + r}A${r} ${r} 0 0 1 ${x} ${y + h - r}V${y + r}A${r} ${r} 0 0 1 ${x + r} ${y}Z`;
+mono('cc-calc', 24, 24, `<path fill="currentColor" fill-rule="evenodd" d="${rr(4.5, 1.5, 15, 21, 3.6)}${rr(7.3, 4.3, 9.4, 4.4, 1.1)}` +
+  [8.6, 12, 15.4].flatMap(x => [12.6, 15.9, 19.2].map(y => rr(x - 1.25, y - 1.25, 2.5, 2.5, 1.25))).join('') + '"/>');
+mono('cc-camera', 24, 24, '<path fill="currentColor" fill-rule="evenodd" d="M5 6H19A3.5 3.5 0 0 1 22.5 9.5V17.5A3.5 3.5 0 0 1 19 21H5A3.5 3.5 0 0 1 1.5 17.5V9.5A3.5 3.5 0 0 1 5 6Z' +
+  'M8 6L9.2 3.9A1.6 1.6 0 0 1 10.6 3H13.4A1.6 1.6 0 0 1 14.8 3.9L16 6Z' +
+  'M7.4 13.5a4.6 4.6 0 1 0 9.2 0a4.6 4.6 0 1 0-9.2 0Z' + 'M9.1 13.5a2.9 2.9 0 1 0 5.8 0a2.9 2.9 0 1 0-5.8 0Z"/>');
+const SHIFT = 'M10 1.6L18.4 10H14V16.4H6V10H1.6Z';
+mono('kb-shift', 20, 18, `<path d="${SHIFT}" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>`);
+mono('kb-shift-on', 20, 18, `<path d="${SHIFT}" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>`);
+mono('kb-delete', 24, 18, '<path d="M8.2 2.2H20.4A2.4 2.4 0 0 1 22.8 4.6V13.4A2.4 2.4 0 0 1 20.4 15.8H8.2L1.6 9Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>' +
+  '<path d="M11.6 6.2L17.2 11.8M17.2 6.2L11.6 11.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>');
+mono('thermometer', 12, 12, '<path d="M4.6 7V2A1.4 1.4 0 0 1 7.4 2V7A2.4 2.4 0 1 1 4.6 7Z" stroke="currentColor" stroke-width="1"/>' +
+  '<circle cx="6" cy="8.95" r="1.35" fill="currentColor"/><path d="M6 8.4V3.6" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>');
 add('sb-wifi', q('[data-sbicons] svg', 0), 17, 12);
 add('sb-batt', q('[data-sbicons] svg', 1), 27, 13);
 add('mark-star', q('#mark svg'), 9, 9);
