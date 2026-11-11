@@ -3,21 +3,27 @@
 # it without the menu and clears it, shim/starlte/menu.c boot_next), reboot, wait for TWRP to come
 # back (an XNU test kernel with sweetreboot=1 resets into TWRP after its panic), save pstore.
 #   tools/store/boot-next.sh KEY [WAIT_S]     -> build/test-boots/<time>-KEY/{pmsg.txt,dmesg*}
-# Writes one 4 KiB block: the settings record at USERDATA +16 GiB + 2 blocks, read back.
+# Writes one 4 KiB block: the settings record the installed loader reads, read back: card p2 block 2 once BOOT
+# is the card-only loader (tools/store/live-store.sh, docs/STORE-ON-CARD.md), else USERDATA +16 GiB + 2 blocks.
+# Without TWRP, from the loader's fastboot: python3 tools/store/sbfb.py boot KEY (RAM mailbox, no store write).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 key=${1:?usage: boot-next.sh KEY [WAIT_S]}
 wait_s=${2:-600}
 [ "$(adb get-state 2>/dev/null)" = recovery ] || { echo "phone not in TWRP"; exit 1; }
 grep -q "^key = \"$key\"" build/store/catalog-live.toml || { echo "'$key' is not a catalog key (the loader would show the menu): refusing"; exit 1; }
-dev=$(adb shell readlink -f /dev/block/by-name/USERDATA | tr -d '\r')
-SET=$(( 4194304 + 2 ))
+if [ "$(tools/store/live-store.sh)" = card ]; then
+    dev=/dev/block/mmcblk0p2; base=0; where="card p2"
+else
+    dev=$(adb shell readlink -f /dev/block/by-name/USERDATA | tr -d '\r'); base=4194304; where="USERDATA +16 GiB"
+fi
+SET=$(( base + 2 ))
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-adb exec-out "dd if=$dev bs=4096 skip=4194305 count=2 2>/dev/null" > "$tmp/head"
-python3 - "$tmp/head" <<'PY'
+adb exec-out "dd if=$dev bs=4096 skip=$((base + 1)) count=2 2>/dev/null" > "$tmp/head"
+python3 - "$tmp/head" "$where" <<'PY'
 import sys
 d = open(sys.argv[1], 'rb').read()
-assert len(d) == 8192 and d[:8] == b'SBSTORE2', 'no SBSTORE2 header at USERDATA +16 GiB + 1: refusing'
+assert len(d) == 8192 and d[:8] == b'SBSTORE2', f'no SBSTORE2 header at {sys.argv[2]} + 1: refusing'
 PY
 dd if="$tmp/head" of="$tmp/cur.bin" bs=4096 skip=1 count=1 2>/dev/null
 if head -c 8 "$tmp/cur.bin" | grep -q SBSETTNG; then from=(--from "$tmp/cur.bin"); else from=(); fi
@@ -33,7 +39,7 @@ if [ "$(adb shell cat /sys/block/mmcblk0/size 2>/dev/null | tr -d '\r')" = 24999
     adb push "$tmp/time.bin" /tmp/sbtime.bin >/dev/null
     adb shell "dd if=/tmp/sbtime.bin of=/dev/block/mmcblk0 bs=512 seek=249999359 count=1 conv=notrunc,fsync 2>/dev/null; sync"
 fi
-echo "next = $key; rebooting"
+echo "next = $key ($where settings); rebooting"
 adb reboot
 sleep 20
 out=build/test-boots/$(date +%Y%m%d-%H%M%S)-$key

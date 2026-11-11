@@ -9,6 +9,12 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 img=${1:-build/store/ufs-store.img}
 [ "$(adb get-state 2>/dev/null)" = recovery ] || { echo "phone not in TWRP"; exit 1; }
+# The store moved to the card (docs/STORE-ON-CARD.md): once BOOT is the card-only loader (sbstore=card), USERDATA
+# is iOS 27's and nothing is ever written at +16 GiB again. Until then the installed loader reads THIS store.
+# tools/store/store-update.sh picks the live store by itself (and keeps the card copy in step).
+if [ "$(tools/store/live-store.sh)" = card ]; then
+    echo "REFUSED: BOOT is the card-only loader (sbstore=card): the OS store is the microSD's: use tools/store/store-update.sh"; exit 1
+fi
 dev=$(adb shell readlink -f /dev/block/by-name/USERDATA | tr -d '\r')
 [ -n "$dev" ] || { echo "no USERDATA"; exit 1; }
 STORE=4194304           # 16 GiB in 4 KiB blocks

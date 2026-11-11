@@ -734,7 +734,12 @@ def main():
     c2 = sub.add_parser('crashlog')
     c2.add_argument('src', help='store image, the raw 64 KiB entry, or "live" (the loader\'s fastboot)')
     c2.add_argument('--level', type=int, choices=range(1, 4), default=2)
-    a = p.parse_args()
+    a, extra = p.parse_known_args()
+    # NAME=FILE[:TYPE] after the options (argparse takes positionals only before them): files too
+    if extra and getattr(a, 'cmd', None) == 'build' and all('=' in x and not x.startswith('-') for x in extra):
+        a.files += extra
+    elif extra:
+        p.error('unrecognized arguments: ' + ' '.join(extra))
     if a.cmd == 'build':
         if a.capacity is None:
             if not a.medium:

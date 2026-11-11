@@ -12,6 +12,8 @@
 #                                       `store-pull.sh OUT sd` (same capacity and data block); the card's own
 #                                       settings record is kept; only changed 16 MiB pieces are written.
 #   card-store.sh verify IMG            card == IMG, piece by piece (SHA-256), read only.
+#   card-store.sh settings [OPTIONS]    the card store's settings record: shown, or changed with sbstore2.py
+#                                       settings options (e.g. --next '' clears a one-shot next), read back.
 #   card-store.sh release --i-mean-it   USERDATA is given to iOS: the OLD UFS store's blocks 0..6 (views,
 #                                       header, settings, directory) are saved to WORKDIR-less ./build/store/
 #                                       and zeroed, so no loader, Engineer OS, Starbite OS or tool finds a
@@ -238,6 +240,19 @@ verify)
     check_fit "$cap" "$used" "$data_at"
     verify_img "$img" "$used" "$data_at" && echo "card == $img" || die "card differs from $img"
     ;;
+settings)
+    # the card store's settings record: show it, or change it with sbstore2.py settings options (read back)
+    twrp
+    case "$(card_head)" in home*|plain) ;; *) die "no store on the card" ;; esac
+    adb exec-out "dd if=$dev bs=4096 skip=2 count=1 2>/dev/null" > "$tmp/cur.bin"
+    if [ $# = 0 ]; then python3 -I -B $SB settings-show "$tmp/cur.bin"; exit 0; fi
+    from=(); python3 -I -B $SB settings-show "$tmp/cur.bin" >/dev/null 2>&1 && from=(--from "$tmp/cur.bin")
+    python3 -I -B $SB settings "$tmp/new.bin" "${from[@]}" "$@" >/dev/null
+    adb push "$tmp/new.bin" /tmp/cs.set >/dev/null
+    psh "dd if=/tmp/cs.set of=$dev bs=4096 seek=2 count=1 conv=notrunc,fsync 2>/dev/null; sync; rm /tmp/cs.set"
+    [ "$(sha_card 2 1)" = "$(sha_host "$tmp/new.bin" 0 1)" ] || die "settings read back wrong"
+    python3 -I -B $SB settings-show "$tmp/new.bin"
+    ;;
 release)
     [ "${1:-}" = --i-mean-it ] || die "usage: card-store.sh release --i-mean-it (gives USERDATA to iOS)"
     twrp
@@ -248,7 +263,7 @@ release)
     echo "== 2. BOOT's loader has sbstore=card"
     boot=$(psh "readlink -f /dev/block/by-name/BOOT")
     adb exec-out "dd if=$boot bs=1048576 2>/dev/null" > "$tmp/boot.img"
-    grep -a -q 'sbstore=card' "$tmp/boot.img" || die "BOOT has no sbstore=card: flash the card-only BOOT first"
+    grep -a -q ' sbstore=card' "$tmp/boot.img" || die "BOOT has no sbstore=card: flash the card-only BOOT first"
     rm -f "$tmp/boot.img" "$tmp/card.img"
     echo "== 3. the old UFS store's blocks 0..6"
     ud=$(psh "readlink -f /dev/block/by-name/USERDATA")
