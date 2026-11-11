@@ -15,9 +15,7 @@ export const SCALE = 1440 / 390;
  * badges; the app pages' ".row" rule (padding 13 16, 16 px, a border) also lands on the Battery widget's rows. */
 const CONCEPT_FIXES = `.dock .app span.ai{display:block!important} .dock .app span.badge{display:grid!important}
 .wbig .row{padding:0!important;font-size:12.5px!important;border-bottom:0!important;gap:0!important}
-.row .who{color:var(--ink);text-align:left} .row .who small{color:rgba(255,255,255,.55)} .row .av{color:#fff}
-.row > span:last-child{white-space:nowrap;flex:none}
-.threadhead .av{display:grid;place-items:center;border-radius:50%;font-weight:700;color:#fff}`;
+.row > span:last-child{white-space:nowrap;flex:none}`;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 export async function openConcept({ transitions = false } = {}) {
