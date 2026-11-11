@@ -252,6 +252,9 @@ struct g7_stats {
     uint32_t bake_part[4];          /* g7_bake: field, wallpaper, blur planes, BG8 (us) */
 };
 void g7_get_stats(struct g7_stats *s);
+/* Panel rows y0 .. G7_H are left alone by every present (the firmware layer's debug console:
+ * sbfw.h); G7_H = the whole panel is the menu's (the default). */
+void g7_set_reserve(int y0);
 
 /* ---- the other A55 cores (glass_smp.c) ---- */
 /* Start up to want - 1 worker cores (PSCI CPU_ON); returns the cores rendering now (1 = core 0 alone).

@@ -2217,6 +2217,11 @@ static void present_rows(void *ctx, int c0, int c1, int core)
         present_band(J, yb, ye, core);
     }
 }
+static int reserve_y = GH;          /* panel rows from here on belong to someone else (the debug console) */
+void g7_set_reserve(int y0)
+{
+    reserve_y = y0 < 0 ? 0 : y0 > GH ? GH : y0;
+}
 static uint32_t present_c(int i0, int j0, int i1, int j1)
 {
     int X0 = 2 * i0 - 1, X1 = 2 * i1 + 1, Y0 = 2 * j0 - 1, Y1 = 2 * j1 + 1;
@@ -2224,6 +2229,7 @@ static uint32_t present_c(int i0, int j0, int i1, int j1)
     if (Y0 < 0) Y0 = 0;
     if (X1 > GW) X1 = GW;
     if (Y1 > GH) Y1 = GH;
+    if (Y1 > reserve_y) Y1 = reserve_y;
     if (X0 >= X1 || Y0 >= Y1)
         return 0;
     PROF0;

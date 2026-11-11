@@ -21,6 +21,9 @@
 #include "catalog.h"
 #include "store.h"
 #include "fbtext.h"
+#ifndef M7_PREVIEW
+#include "sbfw.h"
+#endif
 #include "batt.h"
 #include "crash.h"
 #include "fbbg.h"
@@ -202,7 +205,7 @@ enum { F_NONE, F_P, F_R, F_T, F_M, F_A, F_SH, F_E };
 enum { T_RECOVERY, T_DOWNLOAD, T_LAB, T_POWER };                      /* t:* */
 enum { MI_START, MI_DEFAULT, MI_AUTO0, MI_AUTO3, MI_AUTO5, MI_AUTO10, MI_DETAILS };  /* m:* */
 enum { A_OFF, A_RESTART, A_CANCEL, A_RECOVERY, A_DOWNLOAD };          /* a:* */
-enum { SH_CLOSE, SH_DEF, SH_START };                                  /* sh:* */
+enum { SH_CLOSE, SH_DEF, SH_START, SH_FW };                           /* sh:* (SH_FW: Firmware Options) */
 enum { E_RETRY, E_BACK };                                             /* e:* */
 
 enum { MD_BOOT, MD_SPLASH, MD_INTRO, MD_MENU, MD_LAUNCH, MD_END };
@@ -225,7 +228,7 @@ enum { AL_POWER, AL_RECOVERY, AL_DOWNLOAD };
 enum { EN_HANDOFF, EN_OFF, EN_RESTART, EN_RECOVERY, EN_DOWNLOAD, EN_OFF_FAILED };
 enum { ST_READY, ST_MISSING, ST_COMING };
 enum { SRC_NONE, SRC_ROW, SRC_PILL, SRC_RECT };
-enum { RES_NONE, RES_PICK, RES_DOWNLOAD, RES_LAB };
+enum { RES_NONE, RES_PICK, RES_DOWNLOAD, RES_LAB, RES_FW };
 
 struct rc { float x, y, w, h; };
 /* a CSS transform with a uniform scale: p' = s p + (bx, by) */
@@ -319,6 +322,7 @@ static struct st {
     char end_det[64];
     /* the loader's side */
     int result, result_pick;
+    int fw_cat;                     /* RES_FW: the firmware page's catalog entry */
     int no_menu;                    /* boot-next: the launch card over the wallpaper only */
     int refreeze, full;
     float menu_sc;
@@ -1005,13 +1009,16 @@ static float sheet_ty(void) { return (1 - SP.sheet.x) * 1960; }
 
 static unsigned sheet_nrows(void);
 
+static unsigned sheet_fw(void);
 static struct rc sheet_el(unsigned b)
 {
     float ty = sheet_ty();
     if (b == SH_CLOSE)
         return rcv(1220, 1132 + ty, 136, 136);
     if (b == SH_DEF)
-        return rcv(96, 1470 + (float)(sheet_nrows() - 2) * 138 + ty, 1248, 138);
+        return rcv(96, 1470 + (float)(sheet_nrows() - 2 - sheet_fw()) * 138 + ty, 1248, 138);
+    if (b == SH_FW)
+        return rcv(96, 1470 + (float)(sheet_nrows() - 1) * 138 + ty, 1248, 138);
     return rcv(96, 2688 + ty, 1248, 176);
 }
 
@@ -1127,7 +1134,7 @@ static int lens_target(uint32_t k, struct ltarget *T)
         ix = 16;
         iy = 4;
         rad = 58;
-    } else if (kind == F_SH && b == SH_DEF) {
+    } else if (kind == F_SH && (b == SH_DEF || b == SH_FW)) {
         ix = 10;
         iy = 8;
         rad = 56;
@@ -1809,6 +1816,8 @@ static unsigned sheet_keys(uint32_t *k)
     k[n++] = FK(F_SH, 0, SH_CLOSE);
     if (R[S.sheet_row].st == ST_READY && R[S.sheet_row].cat >= 0)
         k[n++] = FK(F_SH, 0, SH_DEF);
+    if (sheet_fw())
+        k[n++] = FK(F_SH, 0, SH_FW);
     k[n++] = FK(F_SH, 0, SH_START);
     return n;
 }
@@ -1838,6 +1847,10 @@ static void sheet_activate(uint32_t k)
     } else if (FB(k) == SH_START && R[r].st == ST_READY) {
         close_sheet(1);
         tmr_add(60, T_SHEET_START, r, 0);
+    } else if (FB(k) == SH_FW && R[r].cat >= 0) {
+        close_sheet(0);
+        S.fw_cat = R[r].cat;
+        S.result = RES_FW;          /* run_loop opens the page (as Lab) */
     }
 }
 
@@ -2597,7 +2610,7 @@ static unsigned SRn;
 
 static void sr_add(const char *l, const char *v, int mono)
 {
-    if (SRn >= 6)
+    if (SRn >= 5)                   /* 5 + Default + Start Automatically + Firmware Options fit above Start */
         return;
     SRW[SRn].l = l;
     scopy(SRW[SRn].v, sizeof(SRW[SRn].v), v);
@@ -2696,7 +2709,9 @@ static void sheet_info(int r)
 }
 
 static unsigned sheet_ok(void) { return R[S.sheet_row].st == ST_READY && R[S.sheet_row].cat >= 0; }
-static unsigned sheet_nrows(void) { return SRn + (sheet_ok() ? 2 : 0); }
+/* the firmware layer's row (docs/STARBITE-FIRMWARE-LAYER.md): every catalog system, installed or not */
+static unsigned sheet_fw(void) { return R[S.sheet_row].cat >= 0 ? 1U : 0U; }
+static unsigned sheet_nrows(void) { return SRn + (sheet_ok() ? 2 : 0) + sheet_fw(); }
 
 /* ================================================================================================
  * timers' callbacks
@@ -3752,6 +3767,10 @@ static void sheet_items(void)
             t_text(kk + 1, SB7_F_IN400_50, SRW[i].l, 148, y + 87, 0, C_WHITE, 1, 0, 0);
             unsigned f = SRW[i].mono ? SB7_F_JB500_40 : SB7_F_IN400_46;
             t_text(kk + 2, f, SRW[i].v, 1292 - tw(f, SRW[i].v, 0), y + (SRW[i].mono ? 83.5f : 86), 0, M7_L2, 1, 0, 0);
+        } else if (sheet_fw() && i == n - 1) {
+            t_text(kk + 1, SB7_F_IN400_50, "Firmware Options", 148, y + 87, 0, C_WHITE, 1, 0, 0);
+            const char *v = "Debug · Health · Tools";
+            t_text(kk + 2, SB7_F_IN400_46, v, 1292 - tw(SB7_F_IN400_46, v, 0), y + 86, 0, M7_L2, 1, 0, 0);
         } else if (i == SRn) {
             t_text(kk + 1, SB7_F_IN400_50, "Default System", 148, y + 87, 0, C_WHITE, 1, 0, 0);
             float p = S.sw_on ? cubic_bezier(0.3f, 1.4f, 0.5f, 1, c01((float)((S.now - S.sw_t) / 380))) : 0;
@@ -4704,6 +4723,40 @@ static void run_lab(void)
     }
 }
 
+/* the firmware layer's per-OS page (sbfw.c): the worker cores off while it runs (it reads UFS and
+ * draws on the panel itself), then the menu and the debug console come back */
+static void m7_console_apply(void);
+static void run_fw(void)
+{
+#ifndef M7_PREVIEW
+    if (g7_smp_stop())
+        m7_cores_bad();
+    (void)sbfw_page(S.fw_cat);
+    g7_smp_start(m_cores);
+#endif
+    in_ignore_held();
+    m7_console_apply();
+    g7_present_all();
+    S.full = 1;
+    S.now = now_ms();
+}
+
+/* the debug console (docs/STARBITE-FIRMWARE-LAYER.md 4): at High / Highest the renderer leaves the
+ * bottom rows alone and the console draws the loader's log there */
+static void m7_console_apply(void)
+{
+#ifndef M7_PREVIEW
+    g7_set_reserve(sbfw_console_y0(sbfw_level()));
+    sbfw_console_draw(1);
+#endif
+}
+static void m7_console_tick(void)
+{
+#ifndef M7_PREVIEW
+    sbfw_console_draw(0);
+#endif
+}
+
 static void end_action(int kind)
 {
     switch (kind) {
@@ -4773,6 +4826,12 @@ static int run_loop(void)
             last = now_ms();
             continue;
         }
+        if (S.result == RES_FW) {
+            S.result = RES_NONE;
+            run_fw();
+            last = now_ms();
+            continue;
+        }
         if (S.result == RES_DOWNLOAD) {
             IN.render = 0;
             star_fb_mute(1);
@@ -4801,6 +4860,10 @@ static int run_loop(void)
             frame_out();
         else
             (void)g7_idle();        /* at rest: motion frames' half-resolution glass to full */
+        m7_console_tick();
+#ifndef M7_PREVIEW
+        sbfw_wdt_feed();
+#endif
         first = 0;
         frame_wait(t0);
     }
@@ -4940,6 +5003,7 @@ static int menu7_main_in(const struct star_info *in, char *cmdline, unsigned len
 #if defined(M7_BENCH) && !defined(M7_PREVIEW)
         star_pmsg("STARBITE v7 bench: bake done\n");
 #endif
+        m7_console_apply();         /* the debug console's rows, before the first frame */
         /* Speed check (nothing drawn yet: S-Boot's splash is still on the panel, so v6 can take
          * over with its own intro). The bake is per-pixel float work like a frame's glass. */
         struct g7_stats gb;
@@ -5027,6 +5091,9 @@ int menu7_main(const struct star_info *in, char *cmdline, unsigned len)
     int r = menu7_main_in(in, cmdline, len);
     if (g7_smp_stop())
         m7_cores_bad();                 /* never hand a core that is not cleanly off to an OS or a USB image */
+#ifndef M7_PREVIEW
+    sbfw_wdt_release();             /* (test builds: the chain stub's dead-man ends with the menu) */
+#endif
     log_put(157, g7_smp_report());
     return r;
 }
@@ -5074,6 +5141,10 @@ void menu7_progress(unsigned stage, unsigned n, const char *title, const char *d
     phase_sync = M7_PH_PROGRESS;
     sync_frames(S.now + 120);
     phase_sync = -1;
+#ifndef M7_PREVIEW
+    sbfw_console_note(title, detail);
+#endif
+    m7_console_tick();
 }
 
 void menu7_handoff(const char *detail)
@@ -5089,6 +5160,10 @@ void menu7_handoff(const char *detail)
     phase_sync = M7_PH_END;
     sync_frames(S.now + 520);
     phase_sync = -1;    m7_report("handoff");
+#ifndef M7_PREVIEW
+    sbfw_console_note("Handing off", detail);
+#endif
+    m7_console_tick();              /* the console's last state stays on the panel at the jump */
 }
 
 /* ================================================================================================

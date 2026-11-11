@@ -17,7 +17,7 @@ CFLAGS_V7='-c -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno
 V7=\"\$(ls glass*.c) menu7.c intro7.c sb7.c\"
 USB='usb_dwc3.c usb_phy.c usb_desc.c max77705_muic.c fastboot.c fastboot_dev.c'
 objs=''
-for src in xnu_boot.S xnu_boot.c mmu.c anim.c menu.c menu6.c ui.c em.c em_vec.S batt.c ufs.c store.c sd.c catalog.c fbtext.c ../fdt.c recovery.c post.c sbfmt.c dtmerge.c crash.c crashdoc.c wdt.c \$USB \$V7; do
+for src in xnu_boot.S xnu_boot.c mmu.c anim.c menu.c menu6.c ui.c em.c em_vec.S batt.c ufs.c store.c sd.c catalog.c fbtext.c ../fdt.c recovery.c post.c sbfmt.c dtmerge.c crash.c crashdoc.c wdt.c sbfw.c sbfwfs.c \$USB \$V7; do
     obj=\"\$O/\$(basename \$src | tr . _).o\"
     case \"\$(basename \$src)\" in
     glass*.c|menu7.c|intro7.c|sb7.c) gcc \$CFLAGS_V7 \$src -o \$obj ;;
