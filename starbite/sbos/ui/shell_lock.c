@@ -17,6 +17,13 @@
 
 #define H_PT TK_HPT
 static tk_comp *C;
+/* the frame on the panel now, for screen snapshots (scrims, blurs): the GPU row draws into the scanout buffer, so its
+ * RAM frame can be stale; its sbtk.h defines TK_COMP_SHOWN with tk_comp_shown(). On the CPU path it is the RAM frame */
+#ifdef TK_COMP_SHOWN
+static const tk_bmp *shown_frame(void) { return tk_comp_shown(C); }
+#else
+static const tk_bmp *shown_frame(void) { return &C->fb; }
+#endif
 
 /* P3p (audit 15): the safe margins. The S9's long edges curve away from x < 72 px and x > 1368 px (rims and
  * highlights bend and dim there): every card, group, dock and sheet keeps MARGIN pt from the sides (iOS: 16 pt on a
@@ -1283,7 +1290,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     {
         tk_bmp q;
         tk_bmp_new(&q, TK_W / 4, TK_H / 4);
-        tk_bmp_down2(&scrim.bmp, &C->fb);
+        tk_bmp_down2(&scrim.bmp, shown_frame());
         tk_bmp_down2(&q, &scrim.bmp);
         tk_bmp_blur(&q, PT(22) / 4);
         tk_bmp_satbright(&q, 1.3f, 1);
@@ -1574,7 +1581,7 @@ static void build_cc(void)
     if (tk_bmp_new(&ccscrim.bmp, TK_W / 2, TK_H / 2)) {
         tk_bmp q;
         tk_bmp_new(&q, TK_W / 4, TK_H / 4);
-        tk_bmp_down2(&ccscrim.bmp, &C->fb);
+        tk_bmp_down2(&ccscrim.bmp, shown_frame());
         tk_bmp_down2(&q, &ccscrim.bmp);
         /* P3p (P3j-20): the blur and the dim grow with the pull: an 8 pt level (dim .12, quarter resolution, 1 MB)
          * comes in first, the 26 pt one (neutral dim .25, not a blue tint) over it */
