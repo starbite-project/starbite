@@ -6,10 +6,15 @@
 #                                     would free, the pagefile / hibernation / Windows.old state. Changes nothing.
 #   tools/win/c-cleanup.sh --delete   the survey, then deletes ONLY caches and our own test leftovers (list below),
 #                                     after copying the Geometry Dash crash reports and our driver logs to the Mac.
+#   --lkr                             also Windows\LiveKernelReports (off by default: on 2026-11-11 22:57 deleting
+#                                     its 1.8 MB hung TWRP's mount.ntfs for 20+ min and needed a TWRP restart)
+# Hardened after that hang: files are deleted 20 at a time, biggest folder first, each `rm` under a 30 s timeout
+# in TWRP and a 45 s deadline on the Mac; the first one that does not return stops all deleting (the mount is then
+# suspect: restart TWRP before the next phone job), and the script says so and exits 4.
 #
 # Deleted with --delete (contents only; the folders stay):
-#   Windows\Temp, every user's AppData\Local\Temp, ProgramData\Microsoft\Windows\WER\{ReportArchive,ReportQueue,
-#   Temp}, Windows\LiveKernelReports, Windows\Minidump, Windows\MEMORY.DMP, Windows\SoftwareDistribution\Download
+#   every user's AppData\Local\Temp, Windows\Temp, ProgramData\Microsoft\Windows\WER\{ReportArchive,ReportQueue,
+#   Temp}, Windows\LiveKernelReports (only with --lkr), Windows\Minidump, Windows\MEMORY.DMP, Windows\SoftwareDistribution\Download
 #   (Windows Update's download cache), C:\starbite\auto\gpu (gpu-cycle's test files; it recreates them), and in
 #   ProgramData\Starbite\umdlog only *.log, dump-*, shot-*, sweep-* (the flag files there stay).
 # Never touched, only reported: pagefile.sys / swapfile.sys / hiberfil.sys and their settings, Windows.old,
@@ -22,7 +27,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 main=$(cd "$here/../.." && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's#/\.git$##')
 [ -d "$main/build" ] || main=/Users/dev/project-starbite
 out=$main/build/win/cleanup-$(date +%Y%m%d-%H%M)
-del=0; [ "${1:-}" = --delete ] && del=1
+del=0; lkr=0
+for a in "$@"; do case $a in --delete) del=1 ;; --lkr) lkr=1 ;; *) echo "usage: c-cleanup.sh [--delete [--lkr]]"; exit 64 ;; esac; done
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$out/cleanup.log"; }
 mkdir -p "$out"
 
@@ -35,28 +41,31 @@ mounted() {  # $1 = ro|rw: is C: mounted at $W with that mode?
 }
 mount_ro() { adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o ro $NTFS $W" >/dev/null; mounted ro || { echo "C: did not mount read-only"; exit 2; }; }
 mount_rw() { adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null; mounted rw || { echo "C: did not mount read-write (dirty NTFS? boot Windows once and shut down cleanly)"; exit 2; }; }
-umount_w() { adb shell "sync; umount $W 2>/dev/null" >/dev/null || true; }
+umount_w() { adb shell "timeout -s KILL 60 sync; timeout -s KILL 30 umount $W 2>/dev/null" >/dev/null 2>&1 || true; }
 trap umount_w EXIT
 free_mb() { adb shell "df -m $W | tail -1" | tr -d '\r' | awk '{print $4}'; }
 kb() { adb shell "du -sk \"$W/$1\" 2>/dev/null | tail -1" | tr -d '\r' | awk '{print $1+0}'; }
 
-# ---- the deletable set: path under C:, how its contents are matched -----------------------------------------
+# ---- the deletable set (contents only), in this order after the users' Temp folders ---------------------------
 TARGETS=(
 "Windows/Temp"
 "ProgramData/Microsoft/Windows/WER/ReportArchive"
 "ProgramData/Microsoft/Windows/WER/ReportQueue"
 "ProgramData/Microsoft/Windows/WER/Temp"
-"Windows/LiveKernelReports"
 "Windows/Minidump"
 "Windows/SoftwareDistribution/Download"
 "starbite/auto/gpu"
 )
+[ "$lkr" = 1 ] && TARGETS+=("Windows/LiveKernelReports")
 
 mount_ro
 log "SURVEY (read-only). C: free: $(free_mb) MB"
 adb shell "df -h $W | tail -1" | tr -d '\r' | tee -a "$out/cleanup.log"
 log "top level of C: (MB):"
 adb shell "cd $W && for d in *; do du -sm \"\$d\" 2>/dev/null; done | sort -rn | head -14" | tr -d '\r' | tee -a "$out/cleanup.log"
+log "Program Files (x86) and Windows, the biggest parts (MB, report only):"
+adb shell "cd '$W/Program Files (x86)' && for d in *; do du -sm \"\$d\" 2>/dev/null; done | sort -rn | head -6" | tr -d '\r' | sed 's/^/  x86: /' | tee -a "$out/cleanup.log"
+adb shell "cd $W/Windows && for d in WinSxS SoftwareDistribution Installer System32 SysWOW64 SyChpe32 Temp LiveKernelReports; do du -sm \"\$d\" 2>/dev/null; done | sort -rn" | tr -d '\r' | sed 's/^/  Windows: /' | tee -a "$out/cleanup.log"
 log "users (MB):"
 adb shell "cd $W/Users && for d in *; do du -sm \"\$d\" 2>/dev/null; done | sort -rn | head -8" | tr -d '\r' | tee -a "$out/cleanup.log"
 total=0
@@ -100,17 +109,56 @@ done
 log "copied: $(ls "$out/wer" | wc -l | tr -d ' ') GD reports, $(ls "$out/umdlog" | wc -l | tr -d ' ') logs"
 before=$(free_mb)
 mount_rw
-clear_dir() {  # the contents of C:\$1, never the folder itself; refuses anything outside $W or too short
-    case "$1" in ""|/*|*..*) log "refused: '$1'"; return ;; esac
-    adb shell "d=\"$W/$1\"; [ -d \"\$d\" ] && cd \"\$d\" && [ \"\$(pwd)\" != \"$W\" ] && rm -rf -- ./* ./.[!.]* 2>/dev/null; true" >/dev/null
-    log "cleared C:/$1"
+# one remote command under a deadline on the Mac too (an rm stuck in the FUSE driver ignores TWRP's timeout)
+rsh() {  # rsh SECONDS 'command' -> its output; exit 124 if the Mac-side deadline passed
+    local t=$1; shift
+    local f; f=$(mktemp)
+    adb shell "$1" < /dev/null > "$f" 2>&1 & local p=$!
+    local i=0
+    while kill -0 $p 2>/dev/null; do
+        sleep 1; i=$((i + 1))
+        if [ $i -ge "$t" ]; then kill $p 2>/dev/null; cat "$f"; rm -f "$f"; return 124; fi
+    done
+    wait $p; local rc=$?
+    tr -d '\r' < "$f"; rm -f "$f"; return $rc
 }
-for t in "${TARGETS[@]}"; do clear_dir "$t"; done
+stuck() {
+    log "STUCK: '$1' did not return in time. Stopped deleting. The mount is suspect: restart TWRP before the next phone job."
+    exit 4
+}
+clear_dir() {  # the contents of C:\$1, one file at a time; never the folder itself
+    case "$1" in ""|/*|*..*) log "refused: '$1'"; return ;; esac
+    local d="$W/$1" n=0 f
+    rsh 30 "[ -d \"$d\" ]" >/dev/null || { log "C:/$1: not there"; return; }
+    local list; list=$(mktemp)
+    rsh 60 "cd \"$d\" && find . -mindepth 1 \\( -type f -o -type l \\) 2>/dev/null" > "$list" || stuck "find in C:/$1"
+    # batches of 20 names per timed rm: one adb round trip per file would take half an hour for a big Temp
+    local batch="" nb=0 first=""
+    flush() {
+        [ -n "$batch" ] || return 0
+        local r; r=$(rsh 45 "cd \"$d\" && timeout -s KILL 30 rm -f --$batch; echo rc=\$?") || stuck "rm in C:/$1 (from ${first#./})"
+        case "$r" in *rc=137*) stuck "rm in C:/$1 (from ${first#./})" ;; *rc=0*) ;; *) log "  some files in C:/$1 could not be deleted (batch from ${first#./}: $r)" ;; esac
+        batch=""; nb=0; first=""
+    }
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        case "$f" in ./*) ;; *) continue ;; esac
+        local q; q=$(printf '%s' "$f" | sed "s/'/'\\\\''/g")   # single-quoted for TWRP's shell
+        batch="$batch '$q'"; nb=$((nb + 1)); n=$((n + 1)); [ -n "$first" ] || first=$f
+        [ $nb -lt 20 ] || flush
+    done < "$list"
+    flush
+    rm -f "$list"
+    rsh 60 "cd \"$d\" && find . -mindepth 1 -depth -type d -empty -exec rmdir {} \\; 2>/dev/null; true" >/dev/null || stuck "rmdir in C:/$1"
+    log "cleared C:/$1 ($n files)"
+}
 for u in "${users[@]}"; do
     case $u in "All Users"|Default|"Default User"|Public|desktop.ini) continue ;; esac
     clear_dir "Users/$u/AppData/Local/Temp"
 done
-adb shell "rm -f $W/Windows/MEMORY.DMP; cd $W/ProgramData/Starbite/umdlog 2>/dev/null && rm -f *.log dump-* shot-* sweep-*; true" >/dev/null
+for t in "${TARGETS[@]}"; do clear_dir "$t"; done
+rsh 45 "timeout -s KILL 30 rm -f $W/Windows/MEMORY.DMP; true" >/dev/null || stuck "rm MEMORY.DMP"
+rsh 45 "cd $W/ProgramData/Starbite/umdlog 2>/dev/null && timeout -s KILL 30 rm -f *.log dump-* shot-* sweep-*; true" >/dev/null || stuck "rm in umdlog"
 log "cleared Windows/MEMORY.DMP and umdlog's logs and dumps (its flag files stay)"
 umount_w; mount_ro
 after=$(free_mb)
