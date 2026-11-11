@@ -1,0 +1,399 @@
+# Starbite S9 board description (Samsung Galaxy S9 SM-G960F, Exynos 9810): ONE file that every Apple device
+# tree (ADT) is generated from (tools/board/mkadt-board.py). docs/APPLE-S9-DRIVERS.md 2.3 and 2.7, milestone H1.
+# TOML. Addresses are absolute physical; arm-io children get them relative to [soc].base in the ADT.
+# Sources, per block: "dts" = device/dtb/starlte.dts (the stock DTB in TWRP), "drv" = a constant in today's
+# XNU driver (build/xnu-12377 bsd/dev/starlte_*.c, herolte_ufs.c), "phone" = measured on the phone.
+# Interrupts are GIC SPI numbers as the DTS writes them (<0 spi flags>); INTID = spi + 32.
+
+[board]
+name = "starbite,s9"                 # root compatible, LAST: Apple's AppleARMPE (matches "AppleARM") never can
+soc = "samsung,exynos9810"
+kernel = "STARLTE"                   # XNU board config
+page_size = 16384                    # target (M3): both clusters have TGran16 (phone: ID_AA64MMFR0 0x101122)
+monitor = "none"                     # no PPL / SPTM / TXM (GXF, SPRR, APRR do not exist on these cores)
+timebase = 26000000                  # CNTFRQ_EL0 reads 0 at hand-off (set only at EL3); OSCCLK 26 MHz
+
+[soc]
+base = 0x10000000                    # arm-io "ranges": child reg is relative to this
+size = 0xf0000000
+
+[memory]                             # what XNU may own; carve-outs below are never XNU RAM
+window_low = [0x92000000, 0x1d800000]      # 472 MiB below the RKP region 0xaf800000 (loader RAM_BASE..RAM_END)
+bank2 = [0x880000000, 0x80000000]          # second DRAM bank, 2 GiB (TWRP /proc/iomem), no reserved-memory
+framebuffer = [0xcc000000, 0x1043000]      # 1440 x 2960 x 4, S-Boot's (decon_f) scan-out
+pram = [0x8f8000000, 0x100000]             # panic region (/pram, embedded-panic-log-size 0x80000)
+sbfw = [0x91ffe000, 0x1000]                # Starbite firmware hand-off page (docs/STARBITE-FIRMWARE-LAYER.md)
+loader_log = [0x91fff000, 0x1000]          # loader status page (LOG_BASE)
+pmsg = [0xfed14000, 0x4000]                # ramoops pmsg ring (TWRP /sys/fs/pstore/pmsg-ramoops-0)
+
+# The eight cores. MPIDR as the hardware reports it; psci = the CPU_ON target (SMC, PSCI 0.1).
+# Cluster 0 = E (Cortex-A55, ARMv8.2: LSE, RCpc, FP16, DotProd; no PAC), cluster 1 = P (Exynos M3,
+# ARMv8.0: no LSE, no PAC). The M3s need their PMU CAL values before CPU_ON (StarbitePMGR).
+[[cpu]]
+logical = 0
+mpidr = 0x81000000
+psci = 0x0
+cluster = 0
+core = "arm,cortex-a55"
+[[cpu]]
+logical = 1
+mpidr = 0x81000100
+psci = 0x1
+cluster = 0
+core = "arm,cortex-a55"
+[[cpu]]
+logical = 2
+mpidr = 0x81000200
+psci = 0x2
+cluster = 0
+core = "arm,cortex-a55"
+[[cpu]]
+logical = 3
+mpidr = 0x81000300
+psci = 0x3
+cluster = 0
+core = "arm,cortex-a55"
+[[cpu]]
+logical = 4
+mpidr = 0x80000100                   # Aff1:Aff0 = 1:0, no MT bit; XNU's reset vector adds bit 16 (reg 0x10100)
+psci = 0x100
+cluster = 1
+core = "samsung,mongoose-m3"
+[[cpu]]
+logical = 5
+mpidr = 0x80000101
+psci = 0x101
+cluster = 1
+core = "samsung,mongoose-m3"
+[[cpu]]
+logical = 6
+mpidr = 0x80000102
+psci = 0x102
+cluster = 1
+core = "samsung,mongoose-m3"
+[[cpu]]
+logical = 7
+mpidr = 0x80000103
+psci = 0x103
+cluster = 1
+core = "samsung,mongoose-m3"
+
+[[cluster]]
+id = 0
+kind = "E"
+cores = 4
+clock_hz = 1794000000
+l2 = 0
+[[cluster]]
+id = 1
+kind = "P"
+cores = 4
+clock_hz = 2704000000
+l2 = 1
+
+[psci]                               # dts psci {}: PSCI 0.1 only (PSCI_VERSION answers -1); HVC is UNDEFINED at EL1
+method = "smc"
+cpu_suspend = 0xc4000001
+cpu_off = 0x84000002
+cpu_on = 0xc4000003
+
+# arm-io children. One entry per hardware block; "driver" = the Starbite driver that will own it
+# (docs/APPLE-S9-DRIVERS.md Part 3), "today" = what drives it now. reg = [addr, size, addr, size, ...].
+[[block]]
+name = "gic"
+compatible = ["ARM,gicv2", "arm,cortex-a15-gic"]
+reg = [0x10101000, 0x1000, 0x10102000, 0x2000]
+spi = []
+driver = "StarbiteGICv2"
+today = "pexpert pe_fiq.c (0017, 0086, 0114)"
+source = "dts interrupt-controller@10100000"
+[[block]]
+name = "wdt-cl0"
+compatible = ["starbite,wdt", "samsung,exynos8-wdt"]
+reg = [0x10050000, 0x100]
+spi = [0x1d0]
+driver = "StarbiteWatchdog"
+today = "unused"
+source = "dts watchdog_cl0"
+[[block]]
+name = "wdt-cl1"
+compatible = ["starbite,wdt", "samsung,exynos7-wdt"]
+reg = [0x10060000, 0x100]
+spi = [0x1d1]
+driver = "StarbiteWatchdog"
+today = "herolte_ufs.c sbwdt feeder (0399, 0421)"
+source = "dts watchdog_cl1"
+[[block]]
+name = "mct"
+compatible = ["starbite,mct", "samsung,exynos4210-mct"]
+reg = [0x10040000, 0x800]
+spi = []
+driver = "none (generic timer is used)"
+today = "unused"
+source = "dts mct@10040000"
+[[block]]
+name = "chipid"
+compatible = ["starbite,chipid", "samsung,exynos9810-chipid"]
+reg = [0x10000000, 0x100]
+spi = []
+driver = "StarbitePE"
+today = "unused"
+source = "dts chipid@10000000"
+[[block]]
+name = "pmu"
+compatible = ["starbite,pmu", "samsung,exynos9810-pmu"]
+reg = [0x14060000, 0x10000]
+spi = []
+driver = "StarbitePMGR / StarbiteFirmware (INFORM2/3, SWRESET)"
+today = "herolte_ufs.c (SBH_PMU_PA), starlte_gpu.c"
+source = "dts system-controller@14060000"
+[[block]]
+name = "acpm"
+compatible = ["starbite,acpm", "samsung,exynos-acpm"]
+reg = [0x14020000, 0x1000]
+spi = []
+driver = "StarbiteACPM"
+today = "unused"
+source = "dts acpm"
+[[block]]
+name = "acpm-ipc"
+compatible = ["starbite,acpm-ipc", "samsung,exynos-acpm-ipc"]
+reg = [0x14100000, 0x1000]
+spi = [0x44]
+driver = "StarbiteACPM"
+today = "starlte_touch.c ACPM_MBOX_PA (0302)"
+source = "dts acpm_ipc, drv"
+[[block]]
+name = "tmu-cpu"
+compatible = ["starbite,tmu", "samsung,exynos9810-tmu"]
+reg = [0x10070000, 0x700]
+spi = [0x1de]
+driver = "StarbiteTMU"
+today = "starcpugov (0411)"
+source = "dts BIG/LITTLE tmu"
+[[block]]
+name = "tmu-gpu"
+compatible = ["starbite,tmu", "samsung,exynos9810-tmu"]
+reg = [0x10074000, 0x700]
+spi = [0x1df]
+driver = "StarbiteTMU"
+today = "unused"
+source = "dts G3D/ISP tmu"
+[[block]]
+name = "pinctrl-alive"
+compatible = ["starbite,gpio", "samsung,exynos9810-pinctrl"]
+reg = [0x14050000, 0x1000]
+spi = [0x24, 0x25]
+driver = "StarbiteGPIO"
+today = "a5xelte_keys.c, starlte_touch.c (ALIVE_PA)"
+source = "dts pinctrl@14050000, drv"
+[[block]]
+name = "pinctrl-aud"
+compatible = ["starbite,gpio", "samsung,exynos9810-pinctrl"]
+reg = [0x14220000, 0x1000]
+spi = [0x09, 0x0a]
+driver = "StarbiteGPIO"
+today = "unused"
+source = "dts pinctrl@14220000"
+[[block]]
+name = "pinctrl-fsys0"
+compatible = ["starbite,gpio", "samsung,exynos9810-pinctrl"]
+reg = [0x11050000, 0x1000]
+spi = [0xf3]
+driver = "StarbiteGPIO"
+today = "unused"
+source = "dts pinctrl@11050000"
+[[block]]
+name = "pinctrl-fsys1"
+compatible = ["starbite,gpio", "samsung,exynos9810-pinctrl"]
+reg = [0x11430000, 0x1000]
+spi = [0xfa]
+driver = "StarbiteGPIO"
+today = "starlte_sd.c PINCTRL_PA"
+source = "dts pinctrl@11430000, drv"
+[[block]]
+name = "pinctrl-peric0"
+compatible = ["starbite,gpio", "samsung,exynos9810-pinctrl"]
+reg = [0x10430000, 0x1000]
+spi = [0x18c]
+driver = "StarbiteGPIO"
+today = "starlte_touch.c ST_GPIO_PERIC0_PA"
+source = "dts pinctrl@10430000, drv"
+[[block]]
+name = "pinctrl-peric1"
+compatible = ["starbite,gpio", "samsung,exynos9810-pinctrl"]
+reg = [0x10830000, 0x1000]
+spi = [0x1a5]
+driver = "StarbiteGPIO"
+today = "unused"
+source = "dts pinctrl@10830000"
+[[block]]
+name = "pinctrl-vts"
+compatible = ["starbite,gpio", "samsung,exynos9810-pinctrl"]
+reg = [0x13880000, 0x1000]
+spi = []
+driver = "StarbiteGPIO"
+today = "unused"
+source = "dts pinctrl@13880000"
+[[block]]
+name = "sysreg-peric0"
+compatible = ["starbite,sysreg"]
+reg = [0x10411000, 0x1000]
+spi = []
+driver = "StarbiteHSI2C (USI mode)"
+today = "starlte_touch.c ST_SYSREG_PERIC0_PA"
+source = "drv"
+[[block]]
+name = "sysreg-fsys1"
+compatible = ["starbite,sysreg", "samsung,exynos8895-sysreg"]
+reg = [0x11400000, 0x1000]
+spi = []
+driver = "StarbiteSD / StarbitePCIe"
+today = "starlte_sd.c FSYS1_PA"
+source = "drv (dts sysreg-controller@11410000 is the PCIe part)"
+[[block]]
+name = "cmu-peric0"
+compatible = ["starbite,cmu"]
+reg = [0x10400000, 0x1000]
+spi = []
+driver = "StarbiteHSI2C"
+today = "starlte_touch.c ST_CMU_PERIC0_PA"
+source = "drv"
+[[block]]
+name = "cmu-g3d"
+compatible = ["starbite,cmu"]
+reg = [0x17400000, 0x1000]
+spi = []
+driver = "StarbiteMali"
+today = "starlte_gpu.c SG_CMU_PA"
+source = "drv"
+[[block]]
+name = "cmu-fsys1"
+compatible = ["starbite,cmu"]
+reg = [0x1a240000, 0x1000]
+spi = []
+driver = "StarbiteSD"
+today = "starlte_sd.c CMU_PA"
+source = "drv"
+[[block]]
+name = "hsi2c-touch"
+compatible = ["starbite,hsi2c", "samsung,exynos5-hsi2c"]
+reg = [0x104b0000, 0x1000]
+spi = []
+driver = "StarbiteHSI2C + StarbiteTouch (S6SY761 @0x48, INT GPA1-0)"
+today = "starlte_touch.c ST_HSI2C_PA"
+source = "drv"
+[[block]]
+name = "hsi2c-pmic"
+compatible = ["starbite,hsi2c", "samsung,exynos5-hsi2c"]
+reg = [0x14360000, 0x1000]
+spi = [0x06]
+driver = "StarbiteHSI2C + StarbiteBattery (MAX77705 fuel gauge 0x36, charger 0x69)"
+today = "SweetBattery (fixed 100 %)"
+source = "dts hsi2c@14360000"
+[[block]]
+name = "uart"
+compatible = ["starbite,uart", "samsung,exynos-uart"]
+reg = [0x10840000, 0x100]
+spi = [0x1a6]
+driver = "none (no serial console wired)"
+today = "unused"
+source = "dts uart@10840000"
+[[block]]
+name = "adc"
+compatible = ["starbite,adc", "samsung,exynos-adc-v3"]
+reg = [0x14230000, 0x100]
+spi = [0x08]
+driver = "StarbiteBattery (thermistors)"
+today = "unused"
+source = "dts adc@14230000"
+[[block]]
+name = "ufs"
+compatible = ["starbite,ufs", "samsung,exynos-ufs"]
+reg = [0x11120000, 0x200, 0x11121100, 0x200, 0x11110000, 0x8000, 0x11130000, 0x100]
+spi = [0xf2]
+driver = "StarbiteUFS (IOBlockStorageDevice, fenced)"
+today = "herolte_ufs.c (herolte-ufs node, STARLTE_UFSP_PA)"
+source = "dts ufs@0x11120000"
+[[block]]
+name = "sdhc"
+compatible = ["starbite,sd", "samsung,exynos-dw-mshc"]
+reg = [0x11500000, 0x2000]
+spi = [0xf9]
+driver = "StarbiteSD (IOBlockStorageDevice)"
+today = "starlte_sd.c SD_PA"
+source = "dts dwmmc2@11500000, drv"
+[[block]]
+name = "decon"
+compatible = ["starbite,decon", "samsung,exynos9-decon"]
+reg = [0x16030000, 0x10000]
+spi = [0xb6, 0xb7, 0xbc, 0x1a5]
+driver = "StarbiteDisplay"
+today = "SweetFramebuffer / AppleCLCD (disp0, S-Boot's scan-out)"
+source = "dts decon_f@0x16030000"
+[[block]]
+name = "dsim"
+compatible = ["starbite,dsim", "samsung,exynos9-dsim"]
+reg = [0x16080000, 0x100, 0x16160000, 0x4000]
+spi = [0xbd]
+driver = "StarbiteDisplay (S6E3HA8 panel)"
+today = "loader em.c only"
+source = "dts dsim@0x16080000"
+[[block]]
+name = "gpu"
+compatible = ["starbite,mali", "arm,mali"]
+reg = [0x17500000, 0x5000]
+spi = [0x11a, 0x119]
+driver = "StarbiteMali (Mali-G72 MP18)"
+today = "starlte_gpu.c SG_GPU_PA, StarbiteMali (0305...)"
+source = "dts mali@17500000, drv"
+[[block]]
+name = "usb-drd"
+compatible = ["starbite,dwc3", "samsung,exynos-dwusb"]
+reg = [0x10c00000, 0x10000]
+spi = []
+driver = "StarbiteUSB"
+today = "none in XNU"
+source = "dts usb@10C00000"
+[[block]]
+name = "usb-phy"
+compatible = ["starbite,usb-phy", "samsung,exynos-usbdrd-phy"]
+reg = [0x11100000, 0x200]
+spi = [0x5f, 0x60]
+driver = "StarbiteUSB"
+today = "none in XNU"
+source = "dts phy@11100000"
+[[block]]
+name = "pcie0"
+compatible = ["starbite,pcie", "samsung,exynos-pcie"]
+reg = [0x116a0000, 0x1000, 0x116d0000, 0x1000, 0x11700000, 0x1000, 0x116c0000, 0x1fc, 0x127fe000, 0x2000, 0x11680000, 0x1000]
+spi = [0xfd]
+driver = "StarbitePCIe (BCM4361 Wi-Fi)"
+today = "none in XNU"
+source = "dts pcie0@116A0000"
+[[block]]
+name = "pcie1"
+compatible = ["starbite,pcie", "samsung,exynos-pcie"]
+reg = [0x116b0000, 0x1000, 0x116f0000, 0x1000, 0x11710000, 0x1000, 0x116e0000, 0x1fc, 0x137fe000, 0x2000]
+spi = [0xfe]
+driver = "StarbitePCIe"
+today = "none in XNU"
+source = "dts pcie1@116B0000"
+[[block]]
+name = "modem-mbox"
+compatible = ["starbite,mcu-ipc", "samsung,exynos-shd-ipc-mailbox"]
+reg = [0x14170000, 0x180]
+spi = [0x45]
+driver = "modem (later)"
+today = "unused in XNU"
+source = "dts mcu_ipc@14170000"
+
+[identity.ios26]                     # tools/mkadt_starlte.py --iphone11 (N104AP /product from Apple's ADT)
+model = "iPhone12,1"
+target = "N104AP"
+canvas = [828, 1792]
+scale = 2
+
+[identity.macos]                     # Ventura / Sequoia (tools/macos), open question Q5
+model = "MacBookAir10,1"
+target = "J313AP"
