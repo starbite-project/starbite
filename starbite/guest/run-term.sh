@@ -6,7 +6,7 @@
 # the panel against the guest's frame row by row and that it shows text, then stops the guest; RUNS times.
 #   limactl shell starbite -- /Users/dev/project-starbite/starbite/guest/run-term.sh
 # Environment: WORK (/mnt/build/sbguest), IMAGE ($WORK/Image-guest), KOUT ($WORK/gout), RUNS (2), TIMEOUT (900 s),
-# SURF (720x1440), EXTRA (guest bootargs), MODE (term | wayland).
+# SURF (720x1440), EXTRA (guest bootargs), MODE (term | wayland), FLAGS (sbsim's: 10 TERM|STRICT, 34 POPUP|STRICT).
 # guestd, sbguest.ko and the initramfs come from run-qemu.sh BUILD_ONLY=1 (one recipe).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -37,7 +37,7 @@ rdsize=$(stat -c %s $RD)
 python3 "$here/mk-guest-dts.py" --profile qemu --psci01 $DTSARGS --rd-size "$rdsize" --db-guest $DB_GUEST \
     --bootargs-extra "$EXTRA" out/term.dts
 dtc -q -I dts -O dtb -o out/term.dtb out/term.dts
-python3 - "$IMAGE" out/term.dtb $RD out/store-term.bin 10 "$RUNS" "$DB_GUEST" "$DB_HOST" "$SURF" <<'EOF'
+python3 - "$IMAGE" out/term.dtb $RD out/store-term.bin "${FLAGS:-10}" "$RUNS" "$DB_GUEST" "$DB_HOST" "$SURF" <<'EOF'
 import struct, sys
 img, dtb, rd, out, flags, runs, dbg, dbh, surf = sys.argv[1:]
 w, h = (int(x) for x in surf.split('x'))

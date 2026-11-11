@@ -32,7 +32,7 @@
 #define PSCI_SYSTEM_OFF    0x84000008UL
 #define PSCI_VERSION       0x84000000UL
 
-enum { F_REPAIR = 1, F_STRICT = 2, F_STUB = 4, F_TERM = 8 };
+enum { F_REPAIR = 1, F_STRICT = 2, F_STUB = 4, F_TERM = 8, F_POPUP = 32 };
 
 struct manifest {
     uint64_t magic;                     /* "SBSTORE1" */
@@ -401,6 +401,27 @@ static int run_guest(unsigned run)
             last_comp = t;
             composite(px, stride, seq);
             frames++;
+        }
+        if (mf->flags & F_POPUP) {          /* L2: popuptest's window (blue) and its popup (yellow) composited */
+            if (s->state == SBG_RUNNING && !t_touch)
+                t_touch = t;
+            if (tstep == 0 && t_touch && px && seq == h->surf_seq) {
+                uint32_t pop = panel_px(150, BAR + 150) & 0xffffffU, win = panel_px(500, BAR + 500) & 0xffffffU;
+                if ((pop == 0xffd700U && win == 0x2040c0U) || t - t_touch > 20000) {
+                    puts_("sbsim: the popup check: at the popup ");
+                    putx(pop);
+                    puts_(", in the window ");
+                    putx(win);
+                    touch_ok = pop == 0xffd700U && win == 0x2040c0U;
+                    puts_(touch_ok ? " (popup over its window: PASS)\n" : " (NOT as expected)\n");
+                    char name[] = "sbsim-term-run0.ppm";
+                    name[14] = (char)('0' + run % 10);
+                    write_ppm(name);
+                    tstep = 5;
+                    sbg_stop();
+                }
+            }
+            continue;
         }
         if (mf->flags & F_TERM) {           /* the terminal: type a command, the shell runs it */
             static const char cmd[] = "echo STARBITE-TERM-OK > /dev/kmsg\n";

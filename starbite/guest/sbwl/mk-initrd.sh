@@ -17,8 +17,9 @@ cp -a "$WORK/rd" "$R"
 cp "$WORK/sbwl/sbwl" "$R/sbwl"
 mkdir -p "$R/usr/bin" "$R/etc" "$R/run" "$R/root" "$R/tmp"
 cp /usr/bin/foot "$R/usr/bin/foot"
+cp "$WORK/sbwl/popuptest" "$R/usr/bin/popuptest"         # sbwl.app=popuptest: the popup check
 # the shared libraries, at their own paths, and the loader
-for f in $( (ldd "$R/sbwl"; ldd /usr/bin/foot) | awk '/=> \//{print $3} /^\t\/lib/{print $1}' | sort -u); do
+for f in $( (ldd "$R/sbwl"; ldd /usr/bin/foot; ldd "$R/usr/bin/popuptest") | awk '/=> \//{print $3} /^\t\/lib/{print $1}' | sort -u); do
     mkdir -p "$R$(dirname "$f")"
     cp -L "$f" "$R$f"
 done

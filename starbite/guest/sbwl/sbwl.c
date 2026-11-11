@@ -48,6 +48,7 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 #include <drm_fourcc.h>
+#include <pixman.h>
 #include <xkbcommon/xkbcommon.h>
 
 #include "../sbshm.h"
@@ -188,61 +189,78 @@ static struct {
 	struct wlr_surface *touch_surface;
 } S;
 
-/* the toplevel's committed buffer into the slot: 1 published (or nothing changed), 0 no window to show */
+/* L2: the window = its whole surface tree (the toplevel, subsurfaces, popups) composited here with pixman over an
+ * opaque black slot, at the positions wlroots keeps for them, minus the window geometry's offset (client-side
+ * shadows stay outside). Replaces L1's single-buffer copy; wlroots' own scene render left client textures out of
+ * the headless output in 0.17 (docs/STARBITE-LINUX-APPS.md 3). 1: a frame went out (or nothing changed), 0 none */
 static uint32_t *winframe;
-static int publish_window(void)
+static pixman_image_t *winimg;
+static int win_surfaces, win_skipped;
+static struct wlr_box win_geo;
+
+static void comp_surface(struct wlr_surface *surface, int sx, int sy, void *data)
 {
-	static int why_logged;
-	if (!S.top)
-		return 0;
-	/* the window's buffer as the scene holds it (the client buffer's source: the client's wl_shm buffer) */
-	double sx, sy;
-	struct wlr_scene_node *n = wlr_scene_node_at(&S.scene->tree.node, W / 2.0, H / 2.0, &sx, &sy);
-	struct wlr_scene_buffer *sb = n && n->type == WLR_SCENE_NODE_BUFFER ? wlr_scene_buffer_from_node(n) : NULL;
-	struct wlr_client_buffer *cb = sb && sb->buffer ? wlr_client_buffer_get(sb->buffer) : NULL;
-	struct wlr_buffer *src = cb ? cb->source : (sb ? sb->buffer : NULL);
-	if (!src) {
-		if (!why_logged++)
-			say("publish_window: no buffer under the window's centre (node %p, scene buffer %p, client buffer %p)",
-			    (void *)n, (void *)sb, (void *)cb);
-		return 0;
+	(void)data;
+	if (!surface->buffer || !surface->buffer->source) {
+		win_skipped++;
+		return;
 	}
+	struct wlr_buffer *src = surface->buffer->source;
 	void *dp;
 	uint32_t f;
 	size_t bs;
 	if (!wlr_buffer_begin_data_ptr_access(src, WLR_BUFFER_DATA_PTR_ACCESS_READ, &dp, &f, &bs)) {
-		if (!why_logged++)
-			say("publish_window: the window's buffer has no CPU access");
-		return 0;
+		win_skipped++;
+		return;
 	}
-	int ok = (f == DRM_FORMAT_ARGB8888 || f == DRM_FORMAT_XRGB8888);
-	if (!ok && !why_logged++)
-		say("publish_window: format %#x not copied", f);
-	if (ok) {
-		if (!winframe)
-			winframe = calloc((size_t)W * H, 4);
-		uint32_t w = (uint32_t)src->width < W ? (uint32_t)src->width : W;
-		uint32_t h = (uint32_t)src->height < H ? (uint32_t)src->height : H;
-		if (winframe) {
-			for (uint32_t y = 0; y < H; ++y) {
-				uint32_t *d = winframe + (size_t)y * W;
-				if (y < h) {
-					memcpy(d, (const uint8_t *)dp + (size_t)y * bs, (size_t)w * 4);
-					for (uint32_t x = 0; x < w; ++x)
-						d[x] |= 0xff000000U;          /* opaque: Starbite composites XRGB */
-					for (uint32_t x = w; x < W; ++x)
-						d[x] = 0xff000000U;
-				} else {
-					for (uint32_t x = 0; x < W; ++x)
-						d[x] = 0xff000000U;
-				}
+	pixman_format_code_t pf = f == DRM_FORMAT_ARGB8888 ? PIXMAN_a8r8g8b8 : f == DRM_FORMAT_XRGB8888 ? PIXMAN_x8r8g8b8 : 0;
+	if (pf) {
+		pixman_image_t *si = pixman_image_create_bits_no_clear(pf, src->width, src->height, dp, (int)bs);
+		if (si) {
+			/* the buffer's size vs the surface's (a client with a buffer scale): drawn at the surface's size */
+			int dw = surface->current.width, dh = surface->current.height;
+			if (dw > 0 && dh > 0 && (dw != src->width || dh != src->height)) {
+				pixman_transform_t t;
+				pixman_transform_init_scale(&t, pixman_double_to_fixed((double)src->width / dw),
+							    pixman_double_to_fixed((double)src->height / dh));
+				pixman_image_set_transform(si, &t);
+				pixman_image_set_filter(si, PIXMAN_FILTER_BILINEAR, NULL, 0);
+			} else {
+				dw = src->width, dh = src->height;
 			}
-			last_px = winframe[(size_t)(H / 8) * W + W / 8];
-			publish((const uint8_t *)winframe, W * 4);
+			pixman_image_composite32(PIXMAN_OP_OVER, si, NULL, winimg, 0, 0, 0, 0, sx - win_geo.x, sy - win_geo.y,
+						 dw, dh);
+			pixman_image_unref(si);
+			win_surfaces++;
 		}
+	} else {
+		win_skipped++;
 	}
 	wlr_buffer_end_data_ptr_access(src);
-	return ok;
+}
+
+static int publish_window(void)
+{
+	if (!S.top || !S.top->base->surface->mapped)
+		return 0;
+	if (!winframe) {
+		winframe = calloc((size_t)W * H, 4);
+		winimg = winframe ? pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8, (int)W, (int)H, winframe, (int)W * 4) : NULL;
+		if (!winimg)
+			return 0;
+	}
+	for (size_t i = 0; i < (size_t)W * H; ++i)
+		winframe[i] = 0xff000000U;
+	wlr_xdg_surface_get_geometry(S.top->base, &win_geo);
+	win_surfaces = win_skipped = 0;
+	wlr_xdg_surface_for_each_surface(S.top->base, comp_surface, NULL);
+	if (!win_surfaces)
+		return 0;
+	for (size_t i = 0; i < (size_t)W * H; ++i)
+		winframe[i] |= 0xff000000U;                        /* opaque: Starbite composites XRGB */
+	last_px = winframe[(size_t)(H / 8) * W + W / 8];
+	publish((const uint8_t *)winframe, W * 4);
+	return 1;
 }
 
 static void output_frame(struct wl_listener *l, void *data)
@@ -375,6 +393,20 @@ static void new_xdg_surface(struct wl_listener *l, void *data)
 		struct wlr_xdg_surface *parent = wlr_xdg_surface_try_from_wlr_surface(xdg->popup->parent);
 		struct wlr_scene_tree *pt = parent ? parent->data : &S.scene->tree;
 		v->tree = wlr_scene_xdg_surface_create(pt, xdg);
+		/* a popup stays inside the window (the slot): the box in the popup's parent's coordinates */
+		struct wlr_box box = {0, 0, (int)W, (int)H};
+		if (parent) {
+			int px = 0, py = 0;
+			struct wlr_xdg_surface *p = parent;
+			while (p && p->role == WLR_XDG_SURFACE_ROLE_POPUP) {
+				px += p->popup->current.geometry.x;
+				py += p->popup->current.geometry.y;
+				p = wlr_xdg_surface_try_from_wlr_surface(p->popup->parent);
+			}
+			box.x = -px;
+			box.y = -py;
+		}
+		wlr_xdg_popup_unconstrain_from_box(xdg->popup, &box);
 	} else {
 		v->tree = wlr_scene_xdg_surface_create(&S.scene->tree, xdg);
 		wlr_xdg_toplevel_set_size(xdg->toplevel, (int32_t)W, (int32_t)H);
@@ -569,7 +601,20 @@ static int doorbell(int fd, uint32_t mask, void *data)
 int main(int argc, char **argv)
 {
 	static char *def[] = {"foot", "-o", "csd.preferred=none", NULL};
+	static char *one[2];
 	S.argv = argc > 1 ? argv + 1 : def;
+	if (argc <= 1) {                                       /* sbwl.app=NAME on the kernel command line */
+		static char cmd[512], app[64];
+		int cf = open("/proc/cmdline", O_RDONLY);
+		ssize_t n = cf >= 0 ? read(cf, cmd, sizeof(cmd) - 1) : -1;
+		if (cf >= 0)
+			close(cf);
+		char *a = n > 0 ? (cmd[n] = 0, strstr(cmd, "sbwl.app=")) : NULL;
+		if (a && sscanf(a + 9, "%63s", app) == 1) {
+			one[0] = app;
+			S.argv = one;
+		}
+	}
 	kfd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
 	wlr_log_init(WLR_ERROR, NULL);
 	if (map_shm() < 0) {
