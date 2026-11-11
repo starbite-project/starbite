@@ -802,6 +802,40 @@ After simtest-a2 the user asked for cellular in Next. The transmit path is now i
   reasons.
 - **P3o:** the toolkit's next release, now the known-good fallback.
 
+### 7.11 Voice calls and SMS (2026-11-11 night, offline; not yet run on the phone)
+The user asked for full calling in Next. What was built tonight, with no SIM and nothing transmitted:
+- **Voice:** CS (circuit-switched) calls; on LTE the CP falls back to 2G/3G for the call (CSFB). The CP does all of
+  that itself. VoLTE needs Samsung's IMS stack on the AP (SIP/IMS), so it is out of reach for now.
+- **Layouts:** read from libsec-ril (notes: modem-ril-call-sms-layouts.md).
+  - Dial: `0x0201` EXEC, 92 bytes. The CS voice type is `00 01`; the emergency types `07xx` / `0801` are never
+    built.
+  - Answer `0x0204`, release `0x0203`, release one call id: SS `0x0C07` action 3.
+  - DTMF `0x0208`. The call list `0x0206`, refreshed on the CP's incoming / waiting / status / list NOTIs. Status
+    `0x0205`: how a call ended. The CP's own emergency list: `0x0216`.
+  - SMS: ready `0x0407`, the SIM's SMSC `0x040A`, send `0x0401` per part (RESP: result, TP-MR), incoming `0x0402`
+    acknowledged at once with `0x0406` (the CP's tpid echoed).
+  - Call audio, the CP's side: SND path / volume / mute.
+- **Locks (no switch):**
+  - **Who may be dialled or messaged:** only what the user typed and confirmed with a hold (policy
+    `user_confirmed`). Emergency numbers (the world list, any of them behind +CC / 00CC, and the CP's own list) and
+    short codes are always refused.
+  - **Checked three times:** in kern/modem.c (with words for the keypad), by sbm_dial_check, and by the builder on
+    the frame itself.
+  - **Privacy:** numbers and text never reach the log.
+- **SMS text:** GSM 7-bit (default + extension table) when it fits, else UCS-2; up to 4 concatenated parts. The
+  incoming inbox (RAM, 32 messages) joins parts by sender + reference + count.
+- **Host tests (attended build):** the locks; an outgoing call to active with DTMF and the audio settings; an
+  incoming call answered; a two-part SMS decoded back from what reached the CP; a refused send; an incoming SMS
+  reassembled and acknowledged.
+- **Starbite OS Next:** the kernel API (kmodem_call_* / kmodem_sms_*, KMODEM_CALLS) is on claude/sbos-calls. The
+  toolkit builds the Phone / Messages UI (ui/shell_comms.inc).
+- **Not yet: in-call audio.**
+  - The CP's voice codec (VSS) runs on ABOX's Calliope firmware, so the earpiece and the mic need the ABOX boot
+    (power, clocks, SysMMU, Calliope, VSS start), the MAX98512's receiver mode and the CS47L93's mics. About 2-3k
+    lines and 8-15 attended phone cycles (notes: modem-call-audio-plan.md).
+  - Calls therefore connect without sound until then; kcall.audio_ok says so.
+  - The CP also asks RFS for `CP_AUDIO_SLSI.bin`, which One UI probably serves from VENDOR; we answer ENOENT.
+
 ## 8. Later stages (not started)
 
 
