@@ -674,6 +674,30 @@ Not available yet, and why:
 Rules unchanged: GET-only, no call / SMS / SS frame exists, no transmit without the user and a SIM, the PLMN and
 IMEI never in git or a log, EFS never written (RAM copy, restored from the pristine copy at every start).
 
+### 7.8 The attended real-SIM test (`modemsim`, 2026-11-11)
+The user asked for cellular in Starbite OS and is at the phone with their own SIM. This is the first test that
+transmits, so it has its own image, gated twice:
+- **Build gate:** `SBM_ATTENDED_TX` is defined only for `modemsim.img` (probe/build.sh builds it beside
+  `modemprobe.img` and refuses either image if the attended symbols are where they should not be). Starbite OS and
+  every other image are built without it: their guards and their GET-only builder are unchanged.
+- **Session gate:** the path is live only for a session started with `mo.attended = SBM_ATTENDED_MAGIC` (the key
+  `modemsim`). Then the SIM and registration guards are off and `sbm_modem_radio` may send exactly two frames:
+  `PWR_PHONE_STATE EXEC 02 02` (radio normal, as libsec-ril's RadioPowerUpHandler) and `EXEC 01 00` (low power
+  mode: the CP detaches, then RF off). `sbm_ipc_frame_attended` checks the data byte for byte; CALL, SMS, SS, SAT,
+  IMEI and RFS are refused by the same group check as before. No PIN is ever sent.
+- **Log:** as before, the PLMN, LAC/cell id and identities never reach the log. MISC_TIME_INFO (NITZ, carries the
+  PLMN) is no longer printed. The operator's name comes from a small MCC-MNC table (`sbm_operator_name`) and is
+  drawn on the screen only.
+- **Flow** (probe/main.c `simtest`): start (streamed); wait for the SIM (60 s): absent = FAIL, PIN/PUK = STOP (no
+  PIN entry); radio normal; wait for CS or PS home/roaming (`sim_reg_s`, 180 s); hold `sim_hold` s (60) with the
+  signal; low power; wait until not registered (20 s); park. Pass line `SIMTEST: PASS: ...`.
+- **Host test:** the attended build runs the whole suite plus `test_attended`: exactly 12 (cmd, type) pairs pass the
+  attended builder (the 11 GETs + the radio EXEC), wrong data is refused, a non-attended session with a SIM still
+  parks on the guard, the attended one registers after radio normal and detaches after low power, no PLMN in the
+  log, a PIN-locked SIM reports LOCK_SC and nothing is sent.
+- **Not in this image:** data (PDP). It needs the GPRS layouts from libsec-ril, the zero-copy downlink pool and a
+  small raw-IP stack (sbnet is Ethernet-based); that is the next image.
+
 ## 8. Later stages (not started)
 
 

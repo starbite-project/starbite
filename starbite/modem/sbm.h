@@ -397,6 +397,12 @@ int sbm_ipc_allowed(uint16_t cmd, uint8_t type);
 int sbm_ipc_build(uint8_t *out, uint32_t cap, uint8_t mseq, uint16_t cmd, uint8_t type,
                   const uint8_t *data, uint16_t dlen);
 /* Request + SIPC5 frame in one go (the FMT payload carries one IPC message). */
+#ifdef SBM_ATTENDED_TX
+/* the attended SIM test's builder (sbm_ipc.c): the status GETs plus the radio on / off EXECs, nothing else */
+int sbm_ipc_attended_allowed(uint16_t cmd, uint8_t type, const uint8_t *data, uint16_t dlen);
+int sbm_ipc_frame_attended(uint8_t *out, uint32_t cap, uint8_t ch, uint8_t mseq, uint16_t cmd, uint8_t type,
+                           const uint8_t *data, uint16_t dlen);
+#endif
 int sbm_ipc_frame(uint8_t *out, uint32_t cap, uint8_t ch, uint8_t mseq, uint16_t cmd, uint8_t type,
                   const uint8_t *data, uint16_t dlen);
 /* Names: caller buffers, so these are reentrant. */
@@ -473,6 +479,7 @@ void sbm_cell_line(const struct sbm_cell_state *st, char *out, size_t cap);
 void sbm_cell_line_masked(const struct sbm_cell_state *st, char *out, size_t cap);
 const char *sbm_sim_name(uint8_t status);
 const char *sbm_reg_name(uint8_t state);
+const char *sbm_operator_name(const char *plmn);   /* SCREEN ONLY: MCC-MNC -> a name, 0 if not listed */
 const char *sbm_act_name(uint8_t act);
 
 /* ------------------------------------------------------------------------------------------------ */
@@ -677,6 +684,11 @@ struct sbm_boot {
     uint32_t fmt_tx, fmt_tx_refused, fmt_resp, fmt_gen_res;
     uint32_t fmt_unmatched;            /* RESPs matching no open query of ours, by seq or by command */
     uint32_t fmt_seq_fixed;            /* RESPs with a seq that was not open, matched by command (NET_REGIST CS) */
+    /* the attended SIM test (only with SBM_ATTENDED_TX and attended == SBM_ATTENDED_MAGIC): the guards for a SIM and a
+     * registration are off, and the radio EXEC's answer is kept */
+    uint32_t attended;
+    uint8_t radio_seq, radio_res_seen;
+    uint16_t radio_res;                /* GEN_PHONE_RES code for the last radio EXEC (0x80xx accepted) */
     uint32_t fmt_stale;                /* a seq came round again (188 queries later) while its query was still open */
     struct sbm_cell_state cell;        /* what the CP reported (decoded, identity-free) */
     uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;
@@ -822,6 +834,7 @@ struct sbm_modem {
     uint32_t restart_at[SBM_RECOVER_MAX];     /* total_ms of the recent restarts */
     uint32_t rx_seen;      /* fmt_rx + rfs_rx at the last poll (to see new traffic) */
     int32_t last_err;
+    uint32_t attended;     /* SBM_ATTENDED_MAGIC: the attended SIM test (honoured only in an SBM_ATTENDED_TX build) */
     struct sbm_modem_snap last_snap;          /* for gen: what changed since */
 };
 int sbm_modem_start(struct sbm_modem *m, const struct sbm_plat *p, struct sbm_image *im);
@@ -837,6 +850,12 @@ void sbm_modem_snapshot(struct sbm_modem *m, struct sbm_modem_snap *s);
  * SBM_EPERM not allowed (state, or the window is used up), else the start's SBM_E*. */
 int sbm_modem_recover(struct sbm_modem *m, uint32_t elapsed_ms);
 int sbm_modem_stop(struct sbm_modem *m);
+#define SBM_ATTENDED_MAGIC 0x41545444u   /* "ATTD" */
+#ifdef SBM_ATTENDED_TX
+/* the attended SIM test: radio normal (on = 1) or low power mode (on = 0; the CP detaches, then RF off). The answer
+ * lands in m->b.radio_res / radio_res_seen. SBM_EPERM unless the session is attended. */
+int sbm_modem_radio(struct sbm_modem *m, int on);
+#endif
 
 /* Park: Android's power-off. Safe to call more than once and when nothing was started. */
 int sbm_cp_park(const struct sbm_plat *p);

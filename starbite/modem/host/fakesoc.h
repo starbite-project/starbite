@@ -39,7 +39,8 @@ struct fakesoc {
     uint32_t ipc_size;
     enum { L_IDLE, L_UDL, L_INIT_SOON, L_WAIT_PIF, L_PHONE_SOON, L_DONE, L_ONLINE } link;
     struct fakecp fcp;                 /* the CP's online side: FMT NOTIs, RFS requests */
-    int sim_present, online_crash, crashed_no_magic;
+    int sim_present, online_crash, crashed_no_magic;   /* sim_present 2: FAKE_SIM (the attended test) */
+    int sim_pin;                       /* FAKE_SIM: the SIM wants its PIN */
     /* T10: the CP's RFS side (requests out, replies checked) */
     int rfs_mode;
     const uint8_t *nv_ref;              /* what NV reads must return (the test's RAM copy before the write) */

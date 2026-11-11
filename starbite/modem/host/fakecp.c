@@ -83,6 +83,10 @@ static void regist(struct fakecp *fc, uint8_t ch, uint8_t aseq, uint8_t type, ui
         d[0] = SBM_ACT_GSM;
         d[2] = SBM_REG_SEARCHING;
         break;
+    case FAKE_SIM:
+        d[0] = fc->radio_normal ? SBM_ACT_LTE : SBM_ACT_GSM;
+        d[2] = fc->radio_normal && !fc->pin_lock ? SBM_REG_HOME : fc->radio_normal ? SBM_REG_EMERGENCY : SBM_REG_NONE;
+        break;
     }
     d[1] = domain;
     d[4] = 0x12; d[5] = 0x34;                       /* test LAC / cell id */
@@ -92,7 +96,9 @@ static void regist(struct fakecp *fc, uint8_t ch, uint8_t aseq, uint8_t type, ui
 
 static void pin_status(struct fakecp *fc, uint8_t ch, uint8_t aseq, uint8_t type)
 {
-    uint8_t d[2] = { fc->sc == FAKE_NOSIM ? SBM_SIM_ABSENT : SBM_SIM_INIT_COMPLETE, 0 };
+    uint8_t d[2] = { fc->sc == FAKE_NOSIM ? SBM_SIM_ABSENT : fc->sc == FAKE_SIM && fc->pin_lock ? SBM_SIM_LOCK_SC
+                                                                                                : SBM_SIM_INIT_COMPLETE,
+                     (uint8_t)(fc->sc == FAKE_SIM && fc->pin_lock ? 0x01 : 0) };
     fakecp_send(fc, ch, aseq, SBM_SEC_PIN_STATUS, type, d, 2);
 }
 
@@ -126,6 +132,16 @@ static void answer(struct fakecp *fc, uint8_t ch, const struct sbm_ipc_msg *m)
     fc->n_req++;
     if ((m->cmd >> 8) == SBM_G_CALL)
         fc->n_call++;
+    if (m->cmd == SBM_PWR_PHONE_STATE && m->type == SBM_IPC_EXEC && m->data_len == 2 &&
+        ((m->data[0] == 0x02 && m->data[1] == 0x02) || (m->data[0] == 0x01 && m->data[1] == 0x00))) {
+        fc->n_radio_exec++;
+        if (fc->sc == FAKE_SIM)
+            fc->radio_normal = m->data[0] == 0x02;
+        gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        regist(fc, SBM_CH_FMT0, 0, SBM_IPC_NOTI, SBM_DOMAIN_CS);
+        regist(fc, SBM_CH_FMT0, 0, SBM_IPC_NOTI, SBM_DOMAIN_PS);
+        return;
+    }
     if (!sbm_ipc_allowed(m->cmd, m->type))
         fc->n_forbidden++;
     if (m->type != SBM_IPC_GET) {
@@ -155,7 +171,7 @@ static void answer(struct fakecp *fc, uint8_t ch, const struct sbm_ipc_msg *m)
     case SBM_NET_SERVING_NETWORK: {
         /* u8, state, u8, plmn[6] ASCII ('#' padding), lac, then zeros to this firmware's 26 bytes */
         uint8_t d[26] = { 0x02, 0x01, 0xff, '#', '#', '#', '#', '#', '#' };
-        if (fc->sc == FAKE_HOME || fc->nosim_plmn)
+        if (fc->sc == FAKE_HOME || fc->nosim_plmn || (fc->sc == FAKE_SIM && fc->radio_normal))
             memcpy(d + 3, "00101#", 6);
         fakecp_send(fc, ch, m->mseq, m->cmd, SBM_IPC_RESP, d, sizeof(d));
         break;
@@ -166,7 +182,7 @@ static void answer(struct fakecp *fc, uint8_t ch, const struct sbm_ipc_msg *m)
         break;
     }
     case SBM_DISP_ICON_INFO: {
-        uint8_t d[12] = { 0x01, fc->sc == FAKE_HOME ? 3 : 0 };
+        uint8_t d[12] = { 0x01, fc->sc == FAKE_HOME || (fc->sc == FAKE_SIM && fc->radio_normal && !fc->pin_lock) ? 3 : 0 };
         fakecp_send(fc, ch, m->mseq, m->cmd, SBM_IPC_RESP, d, sizeof(d));
         break;
     }

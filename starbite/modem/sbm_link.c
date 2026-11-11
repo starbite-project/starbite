@@ -604,6 +604,14 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
                             b->fmt_unmatched++;
                         } else {                           /* an answer to one of our queries */
                             o_open[seq >> 5] &= ~bit;
+                            if (m.cmd == SBM_GEN_PHONE_RES && b->radio_seq && seq == b->radio_seq) {
+                                struct sbm_gen_res gr;
+                                if (sbm_gen_res_decode(&m, &gr) == 0) {
+                                    b->radio_res = gr.code;
+                                    b->radio_res_seen = 1;
+                                }
+                                b->radio_seq = 0;
+                            }
                             if (m.cmd == SBM_GEN_PHONE_RES)
                                 b->fmt_gen_res++;
                             else
@@ -673,7 +681,14 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
             }
         }
     }
-    /* the guards: a SIM that is not absent, any registration */
+    /* the guards: a SIM that is not absent, any registration. Off only in the attended SIM test. */
+#ifdef SBM_ATTENDED_TX
+    if (b->attended == SBM_ATTENDED_MAGIC) {
+        if (b->cell.have_sim)
+            b->sim_status = b->cell.sim_status;
+        goto guards_done;
+    }
+#endif
     if (b->cell.have_sim) {
         b->sim_status = b->cell.sim_status;
         if (b->cell.sim_status != SBM_SIM_ABSENT && b->cell.sim_status != SBM_SIM_ERROR) {
@@ -690,6 +705,9 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
         g_online_ms = 0xFFFFFFFFu;
         return 1;
     }
+#ifdef SBM_ATTENDED_TX
+guards_done:
+#endif
     if (b->fmt_query && ms >= 3000 &&
         (ms == 3000 || (b->query_period_ms && (ms - 3000) % b->query_period_ms == 0))) {
         int e = fmt_queries(p, b, sbd, ms, ms == 3000);
@@ -765,6 +783,9 @@ static int start_core(struct sbm_modem *m)
     m->b.stop = SBM_BOOT_ONLINE;
     m->b.rfs_serve = 1;
     m->b.keep_running = SBM_KEEP_RUNNING;
+#ifdef SBM_ATTENDED_TX
+    m->b.attended = m->attended == SBM_ATTENDED_MAGIC ? SBM_ATTENDED_MAGIC : 0;
+#endif
     m->ms = 0;
     m->last_rx_ms = NONE;
     m->rx_seen = 0;
@@ -833,6 +854,35 @@ int sbm_modem_query(struct sbm_modem *m)
         s_silent_since = m->ms;
     return r;
 }
+
+#ifdef SBM_ATTENDED_TX
+int sbm_modem_radio(struct sbm_modem *m, int on)
+{
+    static const uint8_t normal[2] = { 0x02, 0x02 }, low[2] = { 0x01, 0x00 };
+    if (!m->up || m->b.attended != SBM_ATTENDED_MAGIC)
+        return SBM_EPERM;
+    uint8_t fr[32];
+    o_mseq = o_mseq >= SBM_QSEQ_LAST || o_mseq < SBM_QSEQ_FIRST ? (uint8_t)SBM_QSEQ_FIRST : (uint8_t)(o_mseq + 1u);
+    uint8_t mseq = o_mseq;
+    int l = sbm_ipc_frame_attended(fr, sizeof(fr), SBM_CH_FMT0, mseq, SBM_PWR_PHONE_STATE, SBM_IPC_EXEC,
+                                   on ? normal : low, 2);
+    if (l < 0)
+        return l;
+    int r = put_wait_ch(m->p, o_sbd, SBM_CH_FMT0, fr, (uint32_t)l);
+    if (r < 0)
+        return r;
+    m->b.fmt_tx++;
+    o_open[mseq >> 5] |= 1u << (mseq & 31);
+    o_qcmd[mseq] = SBM_PWR_PHONE_STATE;
+    m->b.radio_seq = mseq;
+    m->b.radio_res_seen = 0;
+    if (s_silent_since == NONE)
+        s_silent_since = m->ms;
+    sbm_logf(m->p, "FMT: +%u TX ch235 | PWR_PHONE_STATE EXEC seq %u (%s)", m->ms, mseq,
+             on ? "radio normal" : "low power: detach, RF off");
+    return 0;
+}
+#endif
 
 void sbm_modem_status(const struct sbm_modem *m, char *out, size_t cap)
 {

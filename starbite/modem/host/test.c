@@ -1186,6 +1186,117 @@ static void stream_image(struct sbm_image *im, uint8_t *chunk, uint32_t chunk_si
     im->nv_pristine = nv_pristine;
 }
 
+#ifdef SBM_ATTENDED_TX
+/* the attended SIM test (modemsim.img only): what the builder allows, the guards off only for an attended session,
+ * radio normal -> registered, low power -> detached, parked; nothing else on the wire; no PLMN in the log */
+static void test_attended(struct fakesoc *s, struct sbm_image *im, struct sbm_modem *mo, uint32_t boot_crc,
+                          uint32_t main_crc)
+{
+    static const uint8_t dn[2] = { 0x02, 0x02 }, dl[2] = { 0x01, 0x00 }, bad1[2] = { 0x02, 0x01 }, bad3[3] = { 1, 0, 0 };
+    struct sbm_plat p;
+    struct sbm_modem_snap sn;
+    uint8_t f[64];
+    unsigned pass = 0, wrong = 0;
+    for (unsigned g = 0; g < 256; ++g)
+        for (unsigned i = 0; i < 256; ++i)
+            for (unsigned t = 0; t < 8; ++t) {
+                uint16_t c = SBM_CMD(g, i);
+                int a = sbm_ipc_attended_allowed(c, (uint8_t)t, dn, 2) || sbm_ipc_attended_allowed(c, (uint8_t)t, dl, 2) ||
+                        sbm_ipc_attended_allowed(c, (uint8_t)t, 0, 0);
+                pass += a;
+                wrong += a && (g == SBM_G_CALL || g == SBM_G_SMS || g == SBM_G_SS || g == SBM_G_SAT || g == SBM_G_IMEI ||
+                               g == SBM_G_RFS);
+            }
+    CHECKEQ(pass, 12);                     /* the 11 status GETs + PWR_PHONE_STATE EXEC */
+    CHECKEQ(wrong, 0);
+    CHECK(!sbm_ipc_attended_allowed(SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, bad1, 2));
+    CHECK(!sbm_ipc_attended_allowed(SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, bad3, 3));
+    CHECK(!sbm_ipc_attended_allowed(SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, 0, 2));
+    CHECK(!sbm_ipc_attended_allowed(SBM_PWR_PHONE_STATE, SBM_IPC_SET, dn, 2));
+    CHECKEQ(sbm_ipc_frame_attended(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_CMD(SBM_G_CALL, 1), SBM_IPC_EXEC, dn, 2), SBM_EPERM);
+    CHECKEQ(sbm_ipc_frame(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, dn, 2), SBM_EPERM);
+    CHECKEQ(sbm_ipc_frame_attended(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, dn, 2), 4 + 7 + 2);
+    CHECK(sbm_operator_name("00101#") && !strcmp(sbm_operator_name("00101#"), "Test network"));
+    CHECK(sbm_operator_name("24405F") && !strcmp(sbm_operator_name("24405F"), "Elisa"));
+    CHECK(!sbm_operator_name("99999") && !sbm_operator_name("1234") && !sbm_operator_name(0));
+
+    /* a SIM in, but the session is not attended: the guard parks, the radio call is refused */
+    boot_image(im, 0);
+    fakesoc_init(s, &im->plan, boot_crc, main_crc);
+    s->sim_present = 2;
+    fakesoc_plat(s, &p, tlog);
+    memset(mo, 0, sizeof(*mo));
+    mo->attended = 0x41545445u;            /* not the magic */
+    CHECKEQ(sbm_modem_start(mo, &p, im), 0);
+    CHECKEQ(sbm_modem_radio(mo, 1), SBM_EPERM);
+    CHECKEQ(sess_run(mo, &p, 2000, 0, 0), SBM_EPERM);
+    CHECKEQ(mo->state, SBM_MS_GUARD);
+    CHECKEQ(s->fcp.n_radio_exec, 0);
+    check_parked(s);
+    fakesoc_free(s);
+
+    /* attended: SIM ready, no guard; radio normal -> home on LTE; low power -> detached; parked */
+    boot_image(im, 0);
+    fakesoc_init(s, &im->plan, boot_crc, main_crc);
+    s->sim_present = 2;
+    fakesoc_plat(s, &p, tlog);
+    memset(mo, 0, sizeof(*mo));
+    mo->attended = SBM_ATTENDED_MAGIC;
+    unsigned log0 = nlog;
+    CHECKEQ(sbm_modem_start(mo, &p, im), 0);
+    CHECKEQ(mo->b.attended, SBM_ATTENDED_MAGIC);
+    CHECKEQ(sess_run(mo, &p, 3000, 1000, 0), 0);
+    sbm_modem_snapshot(mo, &sn);
+    CHECKEQ(sn.sim, SBM_SIM_INIT_COMPLETE);
+    CHECK(sn.cs != SBM_REG_HOME && sn.ps != SBM_REG_HOME && mo->state == SBM_MS_ONLINE);
+    CHECKEQ(sbm_modem_radio(mo, 1), 0);
+    CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
+    CHECK(mo->b.radio_res_seen);
+    CHECKEQ(mo->b.radio_res, 0x8000);
+    sbm_modem_snapshot(mo, &sn);
+    CHECK(sn.cs == SBM_REG_HOME && sn.ps == SBM_REG_HOME);
+    CHECKEQ(sn.rat, SBM_ACT_LTE);
+    CHECKEQ(sn.bars, 3);
+    CHECK(sn.have_plmn && !sn.emergency_only);
+    CHECK(sbm_operator_name(sn.plmn) && !strcmp(sbm_operator_name(sn.plmn), "Test network"));
+    CHECKEQ(sbm_modem_radio(mo, 0), 0);
+    CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
+    CHECK(mo->b.radio_res_seen);
+    sbm_modem_snapshot(mo, &sn);
+    CHECK(sn.cs != SBM_REG_HOME && sn.ps != SBM_REG_HOME && sn.cs != SBM_REG_ROAMING);
+    CHECKEQ(sbm_modem_stop(mo), 0);
+    CHECK(mo->b.parked);
+    check_parked(s);
+    CHECKEQ(s->fcp.n_radio_exec, 2);
+    CHECKEQ(s->fcp.n_call, 0);
+    CHECKEQ(s->fcp.n_forbidden, 0);
+    unsigned leak = 0;
+    for (unsigned k = log0; k < nlog; ++k)
+        leak += strstr(loglines[k % 256], "00101") != 0;
+    CHECKEQ(leak, 0);
+    fakesoc_free(s);
+
+    /* attended, but the SIM wants its PIN: the CP reports LOCK_SC (the probe stops there; nothing is sent) */
+    boot_image(im, 0);
+    fakesoc_init(s, &im->plan, boot_crc, main_crc);
+    s->sim_present = 2;
+    s->sim_pin = 1;
+    fakesoc_plat(s, &p, tlog);
+    memset(mo, 0, sizeof(*mo));
+    mo->attended = SBM_ATTENDED_MAGIC;
+    CHECKEQ(sbm_modem_start(mo, &p, im), 0);
+    CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
+    sbm_modem_snapshot(mo, &sn);
+    CHECKEQ(sn.sim, SBM_SIM_LOCK_SC);
+    CHECKEQ(mo->b.cell.sim_key, 0x01);
+    CHECKEQ(sbm_modem_stop(mo), 0);
+    CHECKEQ(s->fcp.n_radio_exec, 0);
+    check_parked(s);
+    fakesoc_free(s);
+    boot_image(im, 0);
+}
+#endif
+
 static void test_session(uint32_t boot_crc, uint32_t main_crc)
 {
     static struct fakesoc s;
@@ -1368,6 +1479,9 @@ static void test_session(uint32_t boot_crc, uint32_t main_crc)
     check_parked(&s);
     fakesoc_free(&s);
     boot_image(&im, 0);
+#ifdef SBM_ATTENDED_TX
+    test_attended(&s, &im, &mo, boot_crc, main_crc);
+#endif
 }
 
 static void test_boot(void)

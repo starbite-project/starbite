@@ -88,6 +88,63 @@ int sbm_ipc_build(uint8_t *out, uint32_t cap, uint8_t mseq, uint16_t cmd, uint8_
     return (int)l;
 }
 
+#ifdef SBM_ATTENDED_TX
+/* The attended SIM test only (an image built with SBM_ATTENDED_TX, and then only for a session started with
+ * SBM_ATTENDED_MAGIC): the requests a registration test needs beyond the status GETs. Each is pinned to its exact
+ * data. CALL, SMS, SS, SAT, IMEI and RFS stay refused by allowed_idx's group check, which runs first. */
+static const struct { uint16_t cmd; uint8_t type; uint8_t n; uint8_t d[2]; } attended[] = {
+    { SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, 2, { 0x02, 0x02 } },   /* radio normal (libsec-ril IpcTxRadioPower 0x0202) */
+    { SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, 2, { 0x01, 0x00 } },   /* low power mode: RF off, the CP detaches first */
+};
+
+int sbm_ipc_attended_allowed(uint16_t cmd, uint8_t type, const uint8_t *data, uint16_t dlen)
+{
+    switch (cmd >> 8) {
+    case SBM_G_CALL:
+    case SBM_G_SMS:
+    case SBM_G_SS:
+    case SBM_G_SAT:
+    case SBM_G_IMEI:
+    case SBM_G_RFS:
+        return 0;
+    default:
+        break;
+    }
+    if (allowed_idx(cmd, type) >= 0)
+        return 1;
+    for (unsigned i = 0; i < sizeof(attended) / sizeof(attended[0]); ++i)
+        if (attended[i].cmd == cmd && attended[i].type == type && attended[i].n == dlen && data &&
+            sbm_memcmp(attended[i].d, data, dlen) == 0)
+            return 1;
+    return 0;
+}
+
+int sbm_ipc_frame_attended(uint8_t *out, uint32_t cap, uint8_t ch, uint8_t mseq, uint16_t cmd, uint8_t type,
+                           const uint8_t *data, uint16_t dlen)
+{
+    if (allowed_idx(cmd, type) >= 0)
+        return sbm_ipc_frame(out, cap, ch, mseq, cmd, type, data, dlen);
+    if (!sbm_ipc_attended_allowed(cmd, type, data, dlen))
+        return SBM_EPERM;
+    if (!sbm_ch_is_fmt(ch))
+        return SBM_EINVAL;
+    uint32_t l = SBM_IPC_HDR + (uint32_t)dlen;
+    if (!out || l + 4 > cap)
+        return SBM_ENOSPC;
+    sbm_put16(out + 4, (uint16_t)l);
+    out[6] = mseq;
+    out[7] = 0;
+    out[8] = (uint8_t)(cmd >> 8);
+    out[9] = (uint8_t)cmd;
+    out[10] = type;
+    sbm_memcpy(out + 4 + SBM_IPC_HDR, data, dlen);
+    out[0] = SBM_SIPC5_START;
+    out[1] = ch;
+    sbm_put16(out + 2, (uint16_t)(l + 4));
+    return (int)l + 4;
+}
+#endif
+
 int sbm_ipc_frame(uint8_t *out, uint32_t cap, uint8_t ch, uint8_t mseq, uint16_t cmd, uint8_t type,
                   const uint8_t *data, uint16_t dlen)
 {
@@ -126,7 +183,7 @@ static const struct { uint16_t cmd; const char *name; uint8_t loggable; } names[
     { SBM_MISC_ME_VERSION,     "MISC_ME_VERSION", 0 },
     { SBM_MISC_ME_IMSI,        "MISC_ME_IMSI", 0 },
     { SBM_MISC_ME_SN,          "MISC_ME_SN", 0 },            /* IMEI / serial */
-    { SBM_MISC_TIME_INFO,      "MISC_TIME_INFO", 1 },
+    { SBM_MISC_TIME_INFO,      "MISC_TIME_INFO", 0 },      /* NITZ: time zone and the PLMN */
     { SBM_GEN_PHONE_RES,       "GEN_PHONE_RES", 1 },
 };
 

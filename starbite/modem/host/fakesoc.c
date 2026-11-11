@@ -170,7 +170,8 @@ static void ap_msg(struct fakesoc *s)
     } else if (s->link == L_DONE && v == SBM_CMD2INT(SBM_CMD_INIT_END)) {
         /* online: the NOTIs this phone's CP sent under Android, then RFS requests (read, read, write) */
         s->link = L_ONLINE;
-        fakecp_attach(&s->fcp, s->ipc, s->ipc_size, s->sim_present ? FAKE_HOME : FAKE_NOSIM);
+        fakecp_attach(&s->fcp, s->ipc, s->ipc_size, s->sim_present == 2 ? FAKE_SIM : s->sim_present ? FAKE_HOME : FAKE_NOSIM);
+        s->fcp.pin_lock = s->sim_pin;
         s->fcp.nosim_plmn = s->nosim_plmn;
         s->fcp.regist_seq_quirk = s->regist_seq_quirk;
         fakecp_boot_notis(&s->fcp);

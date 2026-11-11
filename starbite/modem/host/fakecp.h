@@ -12,6 +12,8 @@ enum fake_scenario {
     FAKE_NOSIM,     /* this phone today: SIM absent, CS/PS emergency-only on GSM */
     FAKE_HOME,      /* SIM ready, registered home on LTE, PLMN 00101, 3 bars */
     FAKE_SEARCH,    /* SIM ready, searching, no PLMN */
+    FAKE_SIM,       /* the attended test: SIM ready (or PIN-locked), searching until PWR_PHONE_STATE EXEC normal, then
+                     * home on LTE (00101, 3 bars); EXEC low power: the registration goes (detached) */
 };
 
 struct fakecp {
@@ -23,6 +25,9 @@ struct fakecp {
     uint32_t n_forbidden;       /* anything sbm_ipc_allowed() refuses, seen on the wire: must stay 0 */
     uint8_t last_ch;
     int nosim_plmn;
+    int radio_normal;           /* FAKE_SIM: 1 after EXEC 02 02, 0 after EXEC 01 00 */
+    int pin_lock;               /* FAKE_SIM: SEC_PIN_STATUS says LOCK_SC (PIN) */
+    uint32_t n_radio_exec;      /* the attended radio EXECs (exact data); not counted in n_forbidden */
     int regist_seq_quirk;       /* as the phone: NET_REGIST (CS) answered with the next query's seq */             /* no SIM but camped (the phone: "PLMN set"): SERVING_NETWORK carries 00101 */
 };
 

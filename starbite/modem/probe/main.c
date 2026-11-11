@@ -152,7 +152,7 @@ static const char *launched_key(char key[24])
             for (; i < 23 && blk[48 + i]; i++)
                 key[i] = (char)blk[48 + i];
             key[i] = 0;
-            if (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_streq(key, "modemsess"))
+            if (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_prefix(key, "modemsess") || sb_streq(key, "modemsim"))
                 return "the loader's launch record";
         }
     }
@@ -177,7 +177,7 @@ static const char *launched_key(char key[24])
                     at++;
                 }
                 key[i] = 0;
-                found = i > 0 && (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_streq(key, "modemsess"));
+                found = i > 0 && (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_prefix(key, "modemsess") || sb_streq(key, "modemsim"));
             }
         }
         if (found)
@@ -400,6 +400,269 @@ static void session(const char *key)
     park_armed = 0;
 }
 
+/* modemsim: the ATTENDED real-SIM test (docs/MODEM.md 7.8). Only in modemsim.img, the one image built with
+ * SBM_ATTENDED_TX; the session is marked attended, so the SIM and registration guards are off and the radio EXECs
+ * are allowed. Nothing else is: no call, SMS, SS, SAT or identity request can be built in any image. The user is at
+ * the phone with their SIM in. Steps: start (streamed), wait for the SIM, radio normal, wait for a registration,
+ * hold sim_hold s with the signal, then low power mode (the CP detaches) and park. The log is masked (no PLMN, no
+ * cell, no identity); the operator's name is drawn on the screen only. */
+#ifdef SBM_ATTENDED_TX
+static char sim_foot[COLS];
+
+static int sim_registered(const struct sbm_modem_snap *sn)
+{
+    return sn->cs == SBM_REG_HOME || sn->cs == SBM_REG_ROAMING || sn->ps == SBM_REG_HOME || sn->ps == SBM_REG_ROAMING;
+}
+
+static int sim_ready(uint8_t s)
+{
+    return s == SBM_SIM_READY || s == SBM_SIM_INIT_COMPLETE || s == SBM_SIM_PB_INIT_COMPLETE;
+}
+
+/* the event loop for one phase: poll every 1 ms, the status GETs every q_ms, a masked SNAP line every 10 s, the
+ * screen every second; returns 1 when done(sn) says so, 0 at max_ms, < 0 when the session went down */
+static int sim_phase(struct sbm_modem *mo, const char *tag, uint32_t max_ms, uint32_t q_ms,
+                     int (*done)(const struct sbm_modem *, const struct sbm_modem_snap *), uint32_t *took)
+{
+    uint64_t t0 = sb_ms(), last = t0, last_q = 0, last_snap = 0, last_draw = 0;
+    struct sbm_modem_snap sn;
+    char s[COLS];
+    int first = 1;
+    for (;;) {
+        uint64_t t = sb_ms();
+        uint32_t el = (uint32_t)(t - last), now = (uint32_t)(t - t0);
+        last = t;
+        int r = sbm_modem_poll(mo, el ? el : 1);
+        if (r < 0) {
+            sbm_fmt(s, sizeof(s), "modemsim: %s: the session went down (%s); parked", tag, sbm_strerror(r));
+            line(s);
+            return r;
+        }
+        if (first || now - last_q >= q_ms) {
+            first = 0;
+            last_q = now;
+            if (sbm_modem_query(mo) < 0) {
+                sbm_fmt(s, sizeof(s), "modemsim: %s: a status query could not be sent", tag);
+                line(s);
+            }
+        }
+        sbm_modem_snapshot(mo, &sn);
+        if (done && done(mo, &sn)) {
+            *took = now;
+            return 1;
+        }
+        if (now - last_snap >= 10000) {
+            last_snap = now;
+            sbm_fmt(s, sizeof(s), "SIM: %s +%u s: %s | bars %d | rssi %d dBm | q %u a %u", tag, now / 1000, sn.line,
+                    sn.bars == 0xFF ? -1 : (int)sn.bars, sn.rssi_dbm, sn.queries, sn.answers);
+            line(s);
+        }
+        if (now - last_draw >= 1000) {
+            last_draw = now;
+            const char *op = sn.have_plmn ? sbm_operator_name(sn.plmn) : 0;
+            if (sn.have_plmn && !op)
+                sbm_fmt(sim_foot, sizeof(sim_foot), "%s | network %s | %s | bars %d", tag, sn.plmn,
+                        sbm_act_name(sn.rat), sn.bars == 0xFF ? -1 : (int)sn.bars);
+            else
+                sbm_fmt(sim_foot, sizeof(sim_foot), "%s | %s | %s | bars %d", tag, op ? op : "no network yet",
+                        sbm_act_name(sn.rat), sn.bars == 0xFF ? -1 : (int)sn.bars);
+            draw(sim_foot);                 /* the screen only: never logged */
+            sb_wdt_feed(0);
+        }
+        if (now >= max_ms) {
+            *took = now;
+            return 0;
+        }
+        sb_udelay(1000);
+    }
+}
+
+static int done_sim(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)mo;
+    return sn->sim != 0xFF && (sim_ready(sn->sim) || sn->sim == SBM_SIM_LOCK_SC || sn->sim == SBM_SIM_LOCK_PN ||
+                               sn->sim == SBM_SIM_ERROR);
+}
+static int done_radio(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)sn;
+    return mo->b.radio_res_seen;
+}
+static int done_reg(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)mo;
+    return sim_registered(sn);
+}
+static int done_detached(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    return mo->b.radio_res_seen && !sim_registered(sn);
+}
+#endif
+
+static void simtest(const char *key)
+{
+#ifndef SBM_ATTENDED_TX
+    (void)key;
+    line("modemsim: this image has no attended transmit path: boot modemsim.img for the SIM test");
+#else
+    static struct sbm_image im;
+    static struct sbm_modem mo;
+    struct sbm_modem_snap sn;
+    char s[COLS];
+    uint32_t took = 0, reg_ms = 0, det_ms = 0;
+    int registered = 0;
+    uint8_t rat_reg = 0;
+    unsigned reg_s = arg("sim_reg_s", 180), hold_s = arg("sim_hold", 60), bmin = 99, bmax = 0;
+    const char *fail = 0;
+    if (reg_s > 600)
+        reg_s = 600;
+    if (hold_s > 600)
+        hold_s = 600;
+    sb_storage_hold("modem SIM test: no storage writes");
+    sbm_fmt(s, sizeof(s), "modemsim: ATTENDED SIM TEST (%s): SIM, radio on, registration, signal, then detach and park;"
+            " watchdog %u s", key, sb_wdt_arm(30));
+    line(s);
+    line("modemsim: no call, no SMS, no data, no PIN entry. The log is masked: no PLMN, cell or identity.");
+    sbm_sb_plat(&park_plat, plog);
+    if (sbm_sb_load_image_stream(&im, line) < 0) {
+        line("SIMTEST: FAIL at load: reading RADIO / EFS failed");
+        return;
+    }
+    sbm_sb_plat_stage4(&park_plat, im.mm.ipc_off);
+    park_armed = 1;
+    sb_before_reset = park_hook;
+    mo.attended = SBM_ATTENDED_MAGIC;
+    uint64_t t = sb_ms();
+    int r = sbm_modem_start(&mo, &park_plat, &im);
+    sbm_fmt(s, sizeof(s), "modemsim: start: %s in %u ms (attended %s)", r == 0 ? "online" : sbm_strerror(r),
+            (unsigned)(sb_ms() - t), mo.b.attended == SBM_ATTENDED_MAGIC ? "yes" : "NO");
+    line(s);
+    if (r != 0 || mo.b.attended != SBM_ATTENDED_MAGIC) {
+        fail = r != 0 ? "start" : "attended mode";
+        goto out;
+    }
+
+    /* 1. the SIM: ready, PIN, absent */
+    r = sim_phase(&mo, "SIM", 60000, 5000, done_sim, &took);
+    sbm_modem_snapshot(&mo, &sn);
+    sbm_fmt(s, sizeof(s), "SIM: status 0x%02x (%s), key 0x%02x, after %u ms", sn.sim, sbm_sim_name(sn.sim),
+            mo.b.cell.sim_key, took);
+    line(s);
+    if (r < 0) {
+        fail = "SIM (down)";
+        goto out;
+    }
+    if (sn.sim == SBM_SIM_ABSENT || sn.sim == 0xFF) {
+        line("SIMTEST: FAIL at SIM: no SIM seen. Power off, insert the SIM, boot this test again.");
+        fail = "";
+        goto out;
+    }
+    if (sn.sim == SBM_SIM_LOCK_SC) {
+        line("SIMTEST: STOP at SIM: the SIM wants its PIN (or PUK). This image enters no PIN: turn the PIN off in"
+             " another phone or One UI, then run it again. Nothing was sent to the network.");
+        fail = "";
+        goto out;
+    }
+    if (!sim_ready(sn.sim)) {
+        line("SIMTEST: STOP at SIM: the SIM is not ready (see the status above); nothing was sent to the network");
+        fail = "";
+        goto out;
+    }
+    line("SIM: ready");
+
+    /* 2. radio normal (RIL's RadioPowerUpHandler) */
+    if ((r = sbm_modem_radio(&mo, 1)) < 0) {
+        sbm_fmt(s, sizeof(s), "modemsim: radio normal could not be sent (%s)", sbm_strerror(r));
+        line(s);
+        fail = "radio on";
+        goto out;
+    }
+    r = sim_phase(&mo, "RADIO", 10000, 5000, done_radio, &took);
+    sbm_fmt(s, sizeof(s), "RADIO: normal: %s 0x%04x after %u ms", mo.b.radio_res_seen ? "answered" : "no answer",
+            mo.b.radio_res, took);
+    line(s);
+    if (r < 0) {
+        fail = "radio on (down)";
+        goto out;
+    }
+
+    /* 3. registration */
+    r = sim_phase(&mo, "REG", reg_s * 1000u, 5000, done_reg, &reg_ms);
+    sbm_modem_snapshot(&mo, &sn);
+    if (r < 0) {
+        fail = "registration (down)";
+        goto out;
+    }
+    registered = r == 1;
+    rat_reg = sn.rat;
+    sbm_fmt(s, sizeof(s), "REG: %s after %u ms: CS %s, PS %s, %s", r == 1 ? "registered" : "NOT registered", reg_ms,
+            sn.cs == 0xFF ? "?" : sbm_reg_name(sn.cs), sn.ps == 0xFF ? "?" : sbm_reg_name(sn.ps), sbm_act_name(sn.rat));
+    line(s);
+    if (r == 1) {
+        /* 4. hold: the signal while registered */
+        uint64_t h0 = sb_ms();
+        while (sb_ms() - h0 < hold_s * 1000ull) {
+            r = sim_phase(&mo, "HOLD", 10000, 10000, 0, &took);
+            if (r < 0)
+                break;
+            sbm_modem_snapshot(&mo, &sn);
+            if (sn.bars != 0xFF) {
+                bmin = sn.bars < bmin ? sn.bars : bmin;
+                bmax = sn.bars > bmax ? sn.bars : bmax;
+            }
+        }
+        if (r < 0) {
+            fail = "hold (down)";
+            goto out;
+        }
+        sbm_modem_snapshot(&mo, &sn);
+        sbm_fmt(s, sizeof(s), "HOLD: %u s registered: CS %s, PS %s, %s, bars %u..%u, rssi %d dBm, still registered: %s",
+                hold_s, sn.cs == 0xFF ? "?" : sbm_reg_name(sn.cs), sn.ps == 0xFF ? "?" : sbm_reg_name(sn.ps),
+                sbm_act_name(sn.rat), bmin == 99 ? 0 : bmin, bmax, sn.rssi_dbm, sim_registered(&sn) ? "yes" : "no");
+        line(s);
+        line(sn.have_plmn ? (sbm_operator_name(sn.plmn) ? "HOLD: operator name known (on the screen only)"
+                                                        : "HOLD: operator not in the table (its code is on the screen only)")
+                          : "HOLD: no serving network reported");
+    }
+
+    /* 5. detach: low power mode, then park */
+    if ((r = sbm_modem_radio(&mo, 0)) < 0) {
+        sbm_fmt(s, sizeof(s), "modemsim: low power could not be sent (%s): parking", sbm_strerror(r));
+        line(s);
+        fail = "detach";
+        goto out;
+    }
+    r = sim_phase(&mo, "DETACH", 20000, 3000, done_detached, &det_ms);
+    sbm_modem_snapshot(&mo, &sn);
+    sbm_fmt(s, sizeof(s), "DETACH: low power %s 0x%04x; %s after %u ms (CS %s, PS %s)",
+            mo.b.radio_res_seen ? "answered" : "no answer", mo.b.radio_res,
+            sim_registered(&sn) ? "STILL registered" : "not registered", det_ms, sn.cs == 0xFF ? "?" : sbm_reg_name(sn.cs),
+            sn.ps == 0xFF ? "?" : sbm_reg_name(sn.ps));
+    line(s);
+    if (r != 1)
+        fail = r < 0 ? "detach (down)" : "detach (timeout)";
+    else if (!registered || bmax == 0)
+        fail = registered ? "signal" : "registration";
+out:
+    sbm_fmt(s, sizeof(s), "SIM: totals: FMT %u RFS %u queries %u answers %u (unanswered %u, by-command %u) stalls %u"
+            " crashes %u", mo.b.fmt_rx, mo.b.rfs_rx, mo.b.fmt_tx, mo.b.fmt_resp + mo.b.fmt_gen_res,
+            mo.b.fmt_tx - mo.b.fmt_resp - mo.b.fmt_gen_res, mo.b.fmt_seq_fixed, mo.stalls, mo.crashes);
+    line(s);
+    sbm_modem_stop(&mo);
+    sbm_cp_park(&park_plat);                 /* safe again */
+    line(mo.b.parked ? "modemsim: parked" : "modemsim: the park reported an error");
+    if (!fail) {
+        sbm_fmt(s, sizeof(s), "SIMTEST: PASS: SIM ready; registered in %u ms (%s); bars %u..%u; detached in %u ms;"
+                " parked", reg_ms, sbm_act_name(rat_reg), bmin, bmax, det_ms);
+        line(s);
+    } else if (*fail) {
+        sbm_fmt(s, sizeof(s), "SIMTEST: FAIL at %s; parked", fail);
+        line(s);
+    }
+    park_armed = 0;
+#endif
+}
+
 static void stage3(const char *key)
 {
     static struct sbm_image im;
@@ -498,7 +761,8 @@ void sb_main(void)
         step = 1;
     autostart = arg("modem_auto", 0);
     ret = arg("modem_return", autostart ? 30 : 0);
-    is_load = sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_prefix(key, "modemsess");
+    is_load = sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_prefix(key, "modemsess") ||
+              sb_streq(key, "modemsim");
     if (is_load) {
         line("modemload: stage 3 test (docs/MODEM.md 6). RADIO and EFS are only read; every partition write is held.");
         line("modemload: -sec / -run start the CP's power sequence through EL3 and always end with the CP parked.");
@@ -517,6 +781,10 @@ void sb_main(void)
     selftest();
     if (sb_prefix(key, "modemsess")) {
         session(key);
+        goto end;
+    }
+    if (sb_streq(key, "modemsim")) {
+        simtest(key);
         goto end;
     }
     if (is_load) {

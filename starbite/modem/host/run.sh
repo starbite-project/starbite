@@ -25,6 +25,10 @@ for f in $src; do
     $CC -std=c99 -O2 -Wall -Wextra -Werror -Wshadow -Wcast-align -ffreestanding -fno-builtin -c -I"$core" "$f" \
         -o "$OUT/$(basename "$f" .c).o"
 done
+for f in $src; do
+    $CC -std=c99 -O2 -Wall -Wextra -Werror -Wshadow -Wcast-align -ffreestanding -fno-builtin -DSBM_ATTENDED_TX -c \
+        -I"$core" "$f" -o "$OUT/att_$(basename "$f" .c).o"
+done
 # and for the phone: bare-metal aarch64 as libsb builds it (strict alignment, no FP/SIMD registers)
 if $CC --target=aarch64-none-elf -E -x c /dev/null >/dev/null 2>&1; then
     for f in $src; do
@@ -47,6 +51,11 @@ $CC $flags -o "$OUT/sbm-test" $src "$here/fakecp.c" "$here/fakesoc.c" "$here/tes
 # shellcheck disable=SC2086
 $CC $flags -o "$OUT/sbm-lnk" $src "$here/lnk.c"
 if [ -n "$radio" ]; then "$OUT/sbm-test" "$radio"; else "$OUT/sbm-test"; fi
+# the attended SIM test's build (modemsim.img): the same tests plus the attended path (SBM_ATTENDED_TX)
+# shellcheck disable=SC2086
+$CC $flags -DSBM_ATTENDED_TX -o "$OUT/sbm-test-attended" $src "$here/fakecp.c" "$here/fakesoc.c" "$here/test.c"
+echo "attended build (SBM_ATTENDED_TX):"
+if [ -n "$radio" ]; then "$OUT/sbm-test-attended" "$radio"; else "$OUT/sbm-test-attended"; fi
 # EFS: the glue's ext4 reader + in-memory journal replay, on images from mk-efs-fixture.sh (made in the VM)
 $CC -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all \
     -o "$OUT/efs-test" "$core/sb/ext4.c" "$core/sb/jbd2.c" "$here/efs-test.c"
