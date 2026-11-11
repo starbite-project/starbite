@@ -218,4 +218,45 @@ void sh_lastos(const char *key);
 typedef struct { int lat_e6, lon_e6, acc_dm, sats; long long utc; char src[12]; } sh_gnss_t;   /* acc_dm, sats: -1 unknown */
 int sh_gnss(sh_gnss_t *f);
 
+/* helper I (shell_comms.inc): calls and SMS, on the modem session's kernel API (kern.h's kmodem_call_* and
+ * kmodem_sms_*; the kernel's KCALL_* / KAUDIO_* orders). The platform pushes the call with sh_call (on any change,
+ * also each second while connected) and sh_sms_changed (its kmodem_sms_gen bumped); the shell asks with the calls
+ * below, and only at the end of the user's own action: the call button's 0.6 s hold, Answer (a tap or the slide),
+ * Send's tap. Each returns < 0 when refused, with the kernel's reason in why (SH_WHY bytes, plain words: an
+ * emergency number, Cellular off, a dry run in the self test). Numbers and message text go to the screen only:
+ * nothing here logs them. */
+enum { SH_CALL_IDLE, SH_CALL_DIALING, SH_CALL_ALERTING, SH_CALL_INCOMING, SH_CALL_ACTIVE, SH_CALL_HELD, SH_CALL_ENDING,
+       SH_CALL_ENDED };
+enum { SH_AUDIO_NONE, SH_AUDIO_EARPIECE, SH_AUDIO_SPEAKER };
+#define SH_WHY 48
+typedef struct {
+    int state, outgoing, secs;          /* SH_CALL_*; 1 we dialled; seconds since connected (ACTIVE) */
+    int audio, muted, audio_ok;         /* SH_AUDIO_*; audio_ok 0: connected, but no audio path yet */
+    char number[24];                    /* "" withheld */
+    char why[SH_WHY];                   /* how it ended, in words */
+} sh_call_t;
+#define SH_SMS_MAX 32
+enum { SH_SMS_RECEIVED, SH_SMS_SENDING, SH_SMS_SENT, SH_SMS_FAILED };
+typedef struct {
+    int id, incoming, state;            /* SH_SMS_* */
+    long long utc;
+    char number[24];
+    char text[512];                     /* UTF-8 */
+    char why[SH_WHY];                   /* a failure in words */
+} sh_sms_t;
+/* the shell, called by the platform */
+void sh_call(const sh_call_t *c);
+void sh_sms_changed(unsigned gen);
+/* the platform */
+int sh_comms_ok(void);                  /* 1: this build has the kernel's calls and SMS (else every call refuses) */
+int sh_dial(const char *number, char *why);
+int sh_answer(char *why);
+int sh_hangup(void);                    /* also declines an incoming call */
+int sh_route(int audio, char *why);     /* SH_AUDIO_EARPIECE / SH_AUDIO_SPEAKER */
+int sh_mute(int on, char *why);
+int sh_dtmf(char digit);                /* 0-9 * # while connected */
+int sh_sms_send(const char *number, const char *utf8, char *why);
+int sh_sms_count(void);                 /* in RAM, newest last */
+int sh_sms_get(int i, sh_sms_t *m);     /* 0 ok */
+
 #endif

@@ -22,6 +22,7 @@
 
 #define KT_SURV_USB 1U
 #define KT_SURV_TICK 2U                     /* the slow tick (last 2 %'s keeper), 5 s */
+#define KT_SURV_SHUB 3U                     /* 1.2-alpha28: the sensor hub's bring-up steps, then its 50 ms poll */
 #define CHG 0x69U
 #define R_INT_OK 0xb2U
 #define R_DTLS0 0xb3U
@@ -251,6 +252,7 @@ static void before_reset(void)
 {
     if (U.written)
         usb_back();
+    shub_leave();                           /* 1.2-alpha28: the hub in standby, its pins and clocks as found */
     if (prev_before_reset)
         prev_before_reset();
 }
@@ -555,6 +557,7 @@ static void last2_keep(void)
         kmodem_stop("Last 2 % mode");
     if (guest_owns_m3())
         (void)guest_stop();
+    surv_sensors_on(0);
 }
 
 static const char *last2_why;
@@ -617,16 +620,79 @@ int surv_last2_battery(int pct, int avg_mv, int charger)
 }
 
 /* ---- sensors ------------------------------------------------------------------------------------------------- */
+/* 1.2-alpha28: the hub on demand (it passed on the phone at 22:3x: shub-4aa8cd3). A start takes about 4 s (the
+ * firmware from the card, its 452 writes, SSP); then the 50 ms poll. It stops 60 s after the last keep-alive, at
+ * Last 2 % and before a restart */
+#define SHUB_IDLE_MS 60000U
+static uint64_t shub_last_use;
+static int shub_on;
+
+int surv_sensors_on(int on)
+{
+    if (!on) {
+        if (shub_on) {
+            shub_on = 0;
+            kt_cancel(KT_SURV, KT_SURV_SHUB);
+            shub_leave();
+            sb_log("survival: the sensor hub off");
+        }
+        return 0;
+    }
+    if (last2)
+        return -1;
+    shub_last_use = sb_ms();
+    if (shub_on && shub_state() != SHUB_FAILED)
+        return 0;
+    shub_on = 1;
+    shub_begin(0);
+    sb_log("survival: the sensor hub starting (compass, level, steps)");
+    kt_set(KT_SURV, KT_SURV_SHUB, sb_ms(), 20, 0);
+    return 0;
+}
+
+int surv_sensors_state(void)
+{
+    return shub_on ? shub_state() : SHUB_OFF;
+}
+
+static void shub_tick(void)
+{
+    if (!shub_on)
+        return;
+    if (last2 || sb_ms() - shub_last_use > SHUB_IDLE_MS) {
+        surv_sensors_on(0);
+        return;
+    }
+    if (shub_state() == SHUB_STARTING) {
+        if (!shub_step()) {
+            kt_set(KT_SURV, KT_SURV_SHUB, sb_ms(), shub_wait_ms(), 0);
+            return;
+        }
+        if (shub_state() != SHUB_RUNNING) {
+            sb_logf("survival: the sensor hub did not start: ", shub_why());
+            return;                         /* failed: left as found; the next keep-alive tries again */
+        }
+        sb_log("survival: the sensor hub runs");
+    }
+    if (shub_state() == SHUB_RUNNING) {
+        shub_poll();
+        kt_set(KT_SURV, KT_SURV_SHUB, sb_ms(), 50, 0);
+    }
+}
+
 const char *surv_sensors_why(void)
 {
     /* 1.2-alpha28: the driver exists (shub.c) but this image does not start the hub: its firmware must come from the
      * card (it is never in the image); the test images start it */
-    if (shub_state() == SHUB_RUNNING)
+    if (shub_on && shub_state() == SHUB_RUNNING)
         return "The sensor hub is running.";
+    if (shub_on && shub_state() == SHUB_STARTING)
+        return "Starting the sensor hub (about 4 seconds).";
     if (shub_state() == SHUB_FAILED)
         return shub_why();
-    return "The compass and the level need the sensor hub inside the GNSS chip: its driver is being tested, "
-           "not started in this version yet.";
+    if (last2)
+        return "Off in Last 2 % mode.";
+    return "The compass, the level and the step counter start when this page opens.";
 }
 
 /* ---- the kernel ---------------------------------------------------------------------------------------------- */
@@ -646,6 +712,8 @@ void surv_timer(unsigned id)
         usb_tick();
     else if (id == KT_SURV_TICK && last2)
         last2_keep();
+    else if (id == KT_SURV_SHUB)
+        shub_tick();
 }
 
 /* the saved options (settings.c's "sbos.surv" record): v1, sos options, last-2 auto, the location */
@@ -824,10 +892,48 @@ int surv_selftest_step(void)
         sos_set(0);
         surv_sos_opts = SURV_SOS_TORCH | SURV_SOS_VIB;
         st_check("the torch off after SOS", !torch_on());
+        /* 1.2-alpha28: the sensor hub on demand, as the Compass page starts it (the firmware from the card) */
+        sb_log("selftest: survival: the sensor hub on demand (compass): its firmware from the card, about 4 s");
+        surv_sensors_on(1);
+        st_t = sb_ms();
+        st_phase = 5;
+        return 0;
+    case 5: {
+        int s5 = surv_sensors_state();
+        if (s5 == SHUB_STARTING && sb_ms() - st_t < 12000U)
+            return 0;
+        if (s5 == SHUB_RUNNING && sb_ms() - st_t < 6000U) {
+            surv_sensors_on(1);             /* a few seconds of samples */
+            return 0;
+        }
+        int h = 0, a = 0, pi = 0, ro = 0;
+        int hv = surv_heading(&h, &a), tv = surv_tilt(&pi, &ro);
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "selftest: survival: sensors: state ");
+        ub_dec(&u, (uint64_t)s5);
+        ub_s(&u, ", heading x10 ");
+        ub_dec(&u, (uint64_t)(hv ? h : 0));
+        ub_s(&u, " accuracy ");
+        ub_dec(&u, (uint64_t)a);
+        ub_s(&u, ", pitch x10 ");
+        ub_dec(&u, (uint64_t)(uint32_t)pi);
+        ub_s(&u, " roll x10 ");
+        ub_dec(&u, (uint64_t)(uint32_t)ro);
+        ub_s(&u, "; ");
+        ub_s(&u, surv_sensors_why());
+        sb_log(u.b);
+        if (s5 == SHUB_FAILED && shub_why() && !memcmp(shub_why(), "the sensor hub's firmware is not on the card", 44))
+            sb_log("selftest: survival: (not counted: the firmware file is not on this card yet)");
+        else
+            st_check("the sensor hub ran on demand and gave a level reading", s5 == SHUB_RUNNING && tv);
+        surv_sensors_on(0);
+        st_check("the sensor hub off again", surv_sensors_state() == SHUB_OFF);
         sb_logx(st_fails ? "selftest: survival: done, FAILED checks: " : "selftest: survival: done, every check passed ",
                 st_fails);
-        st_phase = 5;
+        st_phase = 6;
         return 1;
+    }
     default:
         return 1;
     }

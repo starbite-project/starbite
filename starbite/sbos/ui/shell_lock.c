@@ -1900,7 +1900,7 @@ static int wrapn(char lines[4][96], int maxl, int f, float size, const char *s, 
 }
 static int wrap(char lines[4][96], int f, float size, const char *s, float maxw, float *wmax) { return wrapn(lines, 4, f, size, s, maxw, wmax); }
 /* Liquid Glass over the app's own ground (#0a0f1f) and what is drawn so far under it (Chrome's backdrop) */
-static void d_lg_app(dc *d, float x, float y, float w, float h, float r, int dark)
+__attribute__((unused)) static void d_lg_app(dc *d, float x, float y, float w, float h, float r, int dark)
 {
     float bx = PT(x) - d->ox, by = PT(y) - d->oy;
     if (by + PT(h + 48) < 0 || by - PT(8) > d->b->h) return;          /* its shadow included */
@@ -2020,27 +2020,10 @@ __attribute__((unused)) static void d_group(dc *d, float y, int n, int sub) { d_
 
 static const char *const KD[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#" };
 static const char *const KL[12] = { "", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ", "", "+", "" };
-static struct { int tab; char num[16]; int thread, sub; } AS;   /* the phone's tab (0 fav .. 3 pad), the dialled number, the open
+static struct { int tab; char num[24]; int thread, sub; } AS;   /* the phone's tab (0 fav .. 3 pad), the dialled number, the open
                                                                  * thread; sub: Settings' Display & Brightness page (P3d) */
 static char cell_hint[48] = "No SIM \xc2\xb7 emergency calls only";
 
-static void phone_tabs(dc *d)
-{
-    static const char *const TK[4] = { "fav", "rec", "con", "pad" };
-    static const char *const TL[4] = { "Favourites", "Recents", "Contacts", "Keypad" };
-    d_lg_flat(d, GROUP_X, 718, GROUP_W, 62, 31, 1);   /* P3i: over the flat ground (the backdrop's blur cost ~40 ms a build) */
-    for (int i = 0; i < 4; i++) {
-        float bx = GROUP_X + TAB_W * i;
-        char n[16] = "tab-";
-        int k = 4;
-        for (const char *c = TK[i]; *c; c++) n[k++] = *c;
-        if (i == AS.tab) { n[k++] = '-'; n[k++] = 'o'; n[k++] = 'n'; }
-        n[k] = 0;
-        d_icon(d, n, bx + (TAB_W - 22) / 2, 730.5f, 1);
-        float w = tw(TK_IT600, 10.5f, TL[i], 0, 0);
-        d_text(d, TK_IT600, 10.5f, bx + (TAB_W - w) / 2, bl(TK_IT600, 10.5f, 754.5f), TL[i], 0, 0, i == AS.tab ? ACCENT() : W(.6f), 0);
-    }
-}
 /* P2y: an honest empty state (iOS's ContentUnavailableView): a title and up to three lines, centred, grey. P3p
  * (P3j-18): centred in its area (between the header and the bottom or a bar), not at a fixed top */
 #define EMPTY_BOT 780.0f              /* the area's bottom without a bar */
@@ -2062,82 +2045,16 @@ static void page_contacts(dc *d)
     d_h1(d, "Contacts");
     d_empty(d, CONTENT_TOP, AP.on && !tk_strcmp(APPS[AP.a].k, "phone") ? EMPTY_TAB : EMPTY_BOT, "No Contacts", "Contacts can't be added on this phone yet.");
 }
-static void page_phone(dc *d)
-{
-    if (AS.tab == 3) {
-        float w = tw(TK_IT400, 13, cell_hint, 0, 0);
-        d_text(d, TK_IT400, 13, (390 - w) / 2, bl(TK_IT400, 13, 150), cell_hint, 0, 0, W(.5f), 0);
-        for (int i = 0; i < 12; i++) {
-            float x = 52 + 104.0f * (i % 3), y = 182 + 96.0f * (i / 3);
-            d_rrect(d, x, y, 78, 78, 39, W(.14f));
-            float dw = tw(TK_IT500, 32, KD[i], 0, 0);
-            d_text(d, TK_IT500, 32, x + (78 - dw) / 2, y + 12 + tk_floorf(tk_ascent(TK_IT500, PT(32)) / TK_PT + .5f), KD[i], 0, 0, W(1), 0);
-            if (KL[i][0]) {
-                float lw = tw(TK_IT700, 10, KL[i], 1.4f, 0);
-                d_text(d, TK_IT700, 10, x + (78 - lw) / 2, bl(TK_IT700, 10, y + 50), KL[i], 1.4f, 0, W(.75f), 0);
-            }
-        }
-        d_rrect(d, 156, 566, 78, 78, 39, tk_hex(0x34c759, 1));
-        d_icon(d, "call", 180, 590, 1);
-    } else if (AS.tab == 1) {
-        d_h1(d, "Recents");
-        d_empty(d, CONTENT_TOP, EMPTY_TAB, "No Recent Calls", cell_hint);
-    } else if (AS.tab == 2) {
-        page_contacts(d);
-    } else {
-        d_h1(d, "Favourites");
-        d_empty(d, CONTENT_TOP, EMPTY_TAB, "No Favourites", cell_hint);
-    }
-    phone_tabs(d);
-}
-typedef struct { const char *n, *m, *t; int unread; } thread_t;
-static const thread_t THREADS[5] = {
-    { "Aino Virtanen", "Are you bringing the phone tomorrow?", "21:02", 1 }, { "Mum", "Good luck with the exam!", "18:40", 1 },
-    { "Mikko Laine", "That boot menu looks insane", "Yesterday", 0 }, { "Sara Niemi", "Ok see you at 9", "Monday", 0 },
-    { "112 Info", "Emergency number test message", "Sunday", 0 } };
-static void page_messages(dc *d)
-{
-    if (AS.thread < 0) {
-        d_h1(d, "Messages");
-        d_lg_flat(d, GROUP_X, CONTENT_TOP, GROUP_W, 44, 22, 1);   /* P3i: over the flat ground (the backdrop's blur cost ~40 ms a build) */
-        d_icon(d, "search15", GROUP_X + 14, CONTENT_TOP + 14.5f, 1);
-        d_text(d, TK_IT400, 17, GROUP_X + 37, CONTENT_TOP + 11 + 1 + tk_floorf(tk_ascent(TK_IT400, PT(17)) / TK_PT + .5f), "Search", 0, 0, tk_hex(0xa9a9a9, 1), 0);
-        d_empty(d, CONTENT_TOP + 44, EMPTY_BOT, "No Messages", "Text messages need a SIM card. This phone doesn't send or receive any yet.");
-        return;
-    }
-    const thread_t *th = &THREADS[AS.thread];
-    d_back(d, W(1));                               /* P3p (P3j-13): the glass back, the name inline */
-    d_navtitle(d, th->n);
-    float w = tw(TK_IT400, 12, "Today 20:55", 0, 0);
-    d_text(d, TK_IT400, 12, (390 - w) / 2, bl(TK_IT400, 12, PUSHED_TOP), "Today 20:55", 0, 0, W(.45f), 0);
-    static const char *const AINO[3] = { "Hey! Did the big-core thing work?", "Getting closer, three tests passed tonight",
-                                         "Are you bringing the phone tomorrow?" };
-    static const char *const MUM[2] = { "Good luck with the exam!", "Thanks" };
-    const char *const *msg = AS.thread == 0 ? AINO : AS.thread == 1 ? MUM : 0;
-    int nm = AS.thread == 0 ? 3 : AS.thread == 1 ? 2 : 1;
-    float y = PUSHED_TOP + 26;
-    for (int i = 0; i < nm; i++) {
-        const char *s = msg ? msg[i] : "Hi!";
-        int out = i % 2 == 1;
-        char ln[4][96];
-        float wmax;
-        int n = wrap(ln, TK_IT400, 16, s, 267.88f, &wmax);
-        int heart = AS.thread == 1 && i == 1;
-        if (heart) wmax += tw(TK_IT400, 16, " ", 0, 0) + 20;
-        float bw = (n > 1 ? 267.88f : wmax) + 26, bh = 18 + 20.8f * n, bx = out ? CONTENT_R - bw : MARGIN;
-        tk_corner = (tk_r4){ PT(20), PT(20), PT(out ? 6 : 20), PT(out ? 20 : 6) };
-        tk_use_r4 = 1;
-        d_rrect(d, bx, y, bw, bh, 20, tk_hex(out ? 0x2f7bf6 : 0x262c3e, 1));
-        tk_use_r4 = 0;
-        for (int k = 0; k < n; k++) d_text(d, TK_IT400, 16, bx + 13, bl(TK_IT400, 16, y + 9 + 20.8f * k), ln[k], 0, 0, INK, 0);
-        if (heart) d_icon(d, "heart", bx + 13 + tw(TK_IT400, 16, "Thanks ", 0, 0), y + 9, 1);
-        y += bh + 5;
-    }
-    d_lg_app(d, MARGIN, 734, CONTENT_W - 44, 40, 20, 1);
-    d_text(d, TK_IT400, 16, MARGIN + 16, 734 + 10 + tk_floorf(tk_ascent(TK_IT400, PT(16)) / TK_PT + .5f), "Text message", 0, 0, tk_hex(0xa9a9a9, 1), 0);
-    d_rrect(d, CONTENT_R - 36, 736, 36, 36, 18, tk_hex(0x2f7bf6, 1));
-    d_icon(d, "send", CONTENT_R - 26, 746, 1);
-}
+/* helper I: Phone and Messages (shell_comms.inc, included after the other parts) */
+static void page_phone(dc *d);
+static void page_messages(dc *d);
+static int cm_app_tap(float x, float y);
+static void cm_extras(const char *k);
+static void cm_opened(int a);
+static void cm_closed(void);
+static float cm_next_update(float t);
+static int cm_refresh(float t);
+static void cm_nc_launch(const char *who, const char *title, int a);
 __attribute__((unused)) static void hsl(float h, float s, float l, float *r, float *g, float *b)
 {
     float c = (1 - tk_fabsf(2 * l - 1)) * s, hp = h / 60, x = c * (1 - tk_fabsf(tk_fmodf(hp, 2) - 1)), m = l - c / 2;
@@ -2314,6 +2231,8 @@ int sh_next_update(float t)
     if (sv >= 0 && (best < 0 || sv < best)) best = sv;
     float nb = nc_next_update(t);                       /* helper D: the banner's 4 s */
     if (nb >= 0 && (best < 0 || nb < best)) best = nb;
+    float cb = cm_next_update(t);                       /* helper I: an ended call's screen */
+    if (cb >= 0 && (best < 0 || cb < best)) best = cb;
     return (int)best;
 }
 int sh_refresh(float t)
@@ -2321,7 +2240,7 @@ int sh_refresh(float t)
     now_ms = t;
     int ch = clk_update(t);
     if (med_pending() && !sh_moving()) ch |= med_work(10000, 1);
-    ch |= sv_refresh(t) | nc_refresh(t);               /* survival-next: SOS's beacon, USB power's state; helper D: the banner */
+    ch |= sv_refresh(t) | nc_refresh(t) | cm_refresh(t);               /* survival-next: SOS's beacon, USB power's state; helper D: the banner */
     if (ch && AP.on) sw_dirty = 1;                     /* helper D: the switcher's snapshot is old now */
     return ch;
 }
@@ -2583,10 +2502,10 @@ static void kb_key(dc *d, float x, float y, float w, const char *t, int special)
 }
 /* the keyboard (Notes, Search): iOS's dark layout from y 540; kb_hit: 1 a character (*c), 2 shift, 3 123/ABC,
  * 4 delete, 5 return (also *c = '\n'), 0 nothing */
-static void kb_draw(dc *d, int shift, int num)
+/* helper I: the rows passed in (Messages' To: field has its own 123 layer, with +) */
+static void kb_draw_r(dc *d, const char *const *R, int shift, int num)
 {
     d_rrect(d, 0, 540, 390, 262, 0, tk_hex(0x1e2030, 1));
-    const char *const *R = KR[num];
     for (int r = 0; r < 3; r++) {
         int n = (int)tk_strlen(R[r]);
         float x0 = r == 2 && !num ? 61.5f : 3 + (10 - n) * 19.5f;
@@ -2607,9 +2526,11 @@ static void kb_draw(dc *d, int shift, int num)
     kb_key(d, 97, 712, 196, "space", 1);           /* P3i: 16 pt like the other function keys */
     kb_key(d, 299, 712, 88, "return", 1);
 }
-static int kb_hit(float x, float y, int shift, int num, char *c)
+static void kb_draw(dc *d, int shift, int num) { kb_draw_r(d, KR[num], shift, num); }
+static int kb_hit_r(float x, float y, const char *const *R, int shift, int num, char *c);
+static int kb_hit(float x, float y, int shift, int num, char *c) { return kb_hit_r(x, y, KR[num], shift, num, c); }
+static int kb_hit_r(float x, float y, const char *const *R, int shift, int num, char *c)
 {
-    const char *const *R = KR[num];
     for (int r = 0; r < 3; r++) {
         int n = (int)tk_strlen(R[r]);
         float x0 = r == 2 && !num ? 61.5f : 3 + (10 - n) * 19.5f, ky = 550 + 54 * r;
@@ -2983,6 +2904,7 @@ static void own_extras(int a)
     if (lx_is(k)) lx_build();
     if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
     sv_extras(k);                                    /* survival-next: the tools' live layers */
+    cm_extras(k);                                    /* helper I */
     relink();
 }
 /* P3i: an opening app's own page drawn over its first frames (two strips a frame, then the extras) instead of all
@@ -3177,6 +3099,7 @@ static void app_open(int a)
     AS.num[0] = 0;
     AS.thread = -1;
     AS.sub = 0;
+    cm_opened(a);                              /* helper I: Settings > Cellular, a notification's thread */
     sv_opened();
     apkey.hidden = 1;
     if (app_own(a)) {
@@ -3220,6 +3143,7 @@ static void app_finish_close(void)
     relayer(&apcalc); apcalc.hidden = 1;
     relayer(&apnote); apnote.hidden = 1;
     relayer(&apsrch); apsrch.hidden = 1;
+    cm_closed();                                 /* helper I */
     med_close();
     tk_bmp_free(&sfield);
     relayer(&apsb); apsb.hidden = 1;
@@ -3486,28 +3410,8 @@ static void app_tap(float x, float y)
 {
     if (lx_tap(x, y)) return;                    /* L3: a Linux app's keyboard, the App Store */
     if (sv_tap(x, y)) return;                                   /* survival-next: the tools, Settings > Medical Card */
-    if (is_app("phone")) {
-        if (y >= 718 && y <= 780 && x >= GROUP_X && x < GROUP_X + GROUP_W) {
-            int t = tk_mini(3, (int)((x - GROUP_X) / TAB_W));
-            if (t != AS.tab) { AS.tab = t; if (t != 3) AS.num[0] = 0; build_app_page(AP.a); }
-            return;
-        }
-        if (AS.tab != 3) return;
-        int i = key_hit(x, y);
-        if (i >= 0) {
-            sh_haptic();
-            int n = (int)tk_strlen(AS.num);
-            if (n < 15) { AS.num[n] = KD[i][0]; AS.num[n + 1] = 0; build_apnum(); }
-            return;
-        }
-        float ex = x - 299, ey = y - 605;
-        int n0 = (int)tk_strlen(AS.num);
-        if (n0 && ex * ex + ey * ey <= 30 * 30) { sh_haptic(); AS.num[n0 - 1] = 0; build_apnum(); return; }   /* P3j: delete */
-        float dx = x - 195, dy = y - 605;
-        if (dx * dx + dy * dy <= 39 * 39)
-            toast(!tk_strcmp(AS.num, "112") ? "Calling 112 needs the modem (receive-only today)" :
-                  AS.num[0] ? "No SIM: only emergency calls" : "Enter a number");
-    } else if (is_app("clock")) {
+    if (cm_app_tap(x, y)) return;                             /* helper I: Phone and Messages (shell_comms.inc) */
+    if (is_app("clock")) {
         clk_tap(x, y);
     } else if (is_app("calc")) {
         calc_tap(x, y);
@@ -3541,13 +3445,7 @@ static void app_tap(float x, float y)
         if (x >= GROUP_X && x < CONTENT_R && y >= yd && y < yd + 47) { AS.sub = 1; build_app_page(AP.a); return; }
         if (x >= GROUP_X && x < CONTENT_R && y >= yw && y < yw + 47) { AS.sub = 2; build_app_page(AP.a); return; }   /* Wi-Fi */
         if (x >= GROUP_X && x < CONTENT_R && y >= yw + 47 && y < yw + 94) { AS.sub = 3; build_app_page(AP.a); return; }   /* Cellular */
-    } else if (is_app("messages")) {
-        if (AS.thread < 0) {
-            (void)x; (void)y;                         /* P2y: no conversations (no SIM): nothing to open */
-        } else if (BACK_HIT(x, y)) {
-            AS.thread = -1;
-            build_app_page(AP.a);
-        }
+
     }
 }
 
@@ -3615,7 +3513,7 @@ void sh_cell(const sh_cell_t *c)
     cell_hint[n] = 0;
     build_lstatus();
     build_home_sb();
-    if (is_app("phone") || is_app("settings") || is_app("maps")) build_app_page(AP.a);     /* (it rebuilds the app's status bar too) */
+    if (is_app("phone") || is_app("messages") || is_app("settings") || is_app("maps")) build_app_page(AP.a);     /* (it rebuilds the app's status bar too) */
     else if (AP.on && !AP.closing) build_apsb();     /* P3l: every app's status bar shows the bars */
     relayer(&ccsb);                                  /* P3l: the CC's status bar again at its next build */
     cc_stale = 1;
@@ -3632,6 +3530,7 @@ void sh_cell(const sh_cell_t *c)
 #include "shell_survival.inc"
 #include "shell_nc.inc"                             /* helper D: notifications, the Notification Centre, the banner */
 #include "shell_switcher.inc"                       /* helper D: the app switcher */
+#include "shell_comms.inc"                          /* helper I: Phone and Messages, the call screen */
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
@@ -3705,16 +3604,18 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 }
 static void relink(void)
 {
-    tk_layer *r[] = { &star, &star_e, &home, &swg, &lockg, &lockflat, &appg, &apicon, &swcover, &ncl, &focus, &ccl, &bnl, &cfl, &boot, &homebar,
-                      &toastl, &slp };
+    tk_layer *r[] = { &star, &star_e, &home, &swg, &lockg, &lockflat, &appg, &apicon, &swcover, &ncl, &focus, &ccl, &bnl, &cfl, &cvl, &boot,
+                      &homebar, &toastl, &slp };
     nc_link();                                       /* helper D: the Notification Centre (ncl), the banner (bnl) */
     sw_link();                                       /* helper D: the switcher's cards (swg), a card's snapshot over its opening window */
-    link(&root, r, 18);
+    cm_link();                                       /* helper I: the call screen (cvl) */
+    link(&root, r, 19);
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb, &apphl };
     link(&appg, ag, 13);
     tk_layer *st[NST + 64] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     int na = NST + med_layers(st + NST);
-    link(&appc, st, na + lx_layers(st + na));    /* L3: shell_linux.inc's */
+    na += lx_layers(st + na);                        /* L3: shell_linux.inc's */
+    link(&appc, st, na + cm_layers(st + na));    /* helper I: the keypad's line and ring, Messages' fields */
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
     link(&lockg, lk, 12);
     tk_layer *ls[4 * NG + 2 + NEC];
@@ -3915,12 +3816,14 @@ void sh_set(const char *what, const char *key, float v)
                     set_focus(v);
                 }
     } else if (!tk_strcmp(what, "reset")) {
+        cm_reset();                                /* helper I: a film's start: no call screen */
         back_to_lock(1);
     } else if (!tk_strcmp(what, "sleep")) {        /* the films: the Power key's fade (v 1) and the wake (v 0) */
         if (v > 0) sh_sleep(0); else sh_wake();
     } else if (lx_set(what, key, v)) {            /* L3: lapp=, store=, storeq= (shell_linux.inc) */
     } else if (nc_set(what, key, v)) {            /* helper D: notify=, banner=, nc=, ncgroup=, ncswipe= (shell_nc.inc) */
     } else if (sw_set(what, key, v)) {            /* helper D: switcher=, swsnap= (shell_switcher.inc) */
+    } else if (cm_set(what, key, v)) {            /* helper I: thread=, compose=, to=, dial=, recent=, callpad=, ... */
     } else if (!tk_strcmp(what, "app")) {
         if (!key[0] && AP.on) app_finish_close();       /* L2: "app=" closes the open app at once */
         for (int a = 0; a < NAPPS; a++)
@@ -3947,14 +3850,6 @@ void sh_set(const char *what, const char *key, float v)
     } else if (!tk_strcmp(what, "tab")) {
         static const char *const TK[4] = { "fav", "rec", "con", "pad" };
         for (int t = 0; t < 4; t++) if (!tk_strcmp(TK[t], key)) { AS.tab = t; build_app_page(AP.a); }
-    } else if (!tk_strcmp(what, "dial")) {
-        int n = 0;
-        while (key[n] && n < 15) { AS.num[n] = key[n]; n++; }
-        AS.num[n] = 0;
-        build_apnum();
-    } else if (!tk_strcmp(what, "thread")) {
-        AS.thread = key[0] - '0';
-        build_app_page(AP.a);
     } else if (!tk_strcmp(what, "sub")) {
         /* the stills: a Settings page (display, wifi, cell; nothing is switched on) */
         AS.sub = !tk_strcmp(key, "display") ? 1 : !tk_strcmp(key, "wifi") ? 2 : !tk_strcmp(key, "cell") ? 3 : 0;
@@ -4135,6 +4030,7 @@ static void app_press(float x, float y)
     int pushed = (is_app("settings") && AS.sub && !(AS.sub == 2 && WV.view == 1) && !(AS.sub == 4 && SV.cf >= 0)) ||
                  (is_app("messages") && AS.thread >= 0) || (is_app("notes") && NS.view);
     if (sv_press(x, y, &r, &g, &rad, &c)) ok = 1;                 /* survival-next (E's bands): Emergency's tools, Settings > Medical Card */
+    else if (cm_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* helper I: Recents, Messages */
     else if (pushed && BACK_HIT(x, y)) {
         r = g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D };   /* the glass back lights */
         rad = BACK_D / 2; c = W(.16f); ok = 1;
@@ -4192,6 +4088,7 @@ static void app_press(float x, float y)
 void sh_touch(int phase, float x, float y, float t)
 {
     now_ms = t;
+    if (cm_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* helper I: the call screen, the call button's hold */
     if (sv_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* survival-next: SOS's beacon, a tool's hold */
     if (phase == 0) {
         tk_tracker_reset(&T.tr);
@@ -4822,6 +4719,7 @@ int sh_tick(float dt, float t)
     mv |= sv_tick(dt, t);                       /* survival-next: a tool's hold, its polls */
     mv |= nc_tick(dt, t);                       /* helper D: the Notification Centre, the banner */
     mv |= sw_tick(dt, t);                       /* helper D: the app switcher */
+    mv |= cm_tick(dt, t);                       /* helper I: the call button's hold, the call screen */
     if (mv && AP.on) sw_dirty = 1;              /* helper D: the page moved or changed: a new snapshot at the next rest */
     return mv;
 }
@@ -4854,6 +4752,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
         if (AP.on && !AP.closing) build_apsb();
         nc_minute();                             /* helper D: the platters' "5m ago" */
         build_wclock();                          /* helper D: the Clock widget's hands */
+        cm_minute();                             /* helper I: the call screen's status bar */
         relink();
     }
     if (wchange) {
@@ -4881,6 +4780,7 @@ void sh_idle(void)
     tk_comp_idle(C);
     sw_idle();                                   /* helper D: the open app's snapshot for the switcher (when it changed) */
     mp_idle();                                   /* helper D: Maps' last GPS fix (it may read the card: idle only) */
+    cm_idle();                                   /* helper I: the call screen's static parts while Cellular is on */
     if (!EMG && cards_pending > 0) {
         /* after Emergency: the vendor cards again, one per idle turn (the platform calls again while
          * sh_idle_pending); the half copies below are made in the same turn (P2w: an unlock right after
@@ -4931,5 +4831,6 @@ int sh_moving(void)
     m |= sp_focus.live || sp_thumb.live || med_moving() || lx_moving();
     m |= IP.on && IP.t < 1;
     m |= nc_moving() || sw_moving();             /* helper D */
+    m |= cm_moving();                            /* helper I */
     return m;
 }
