@@ -14,6 +14,7 @@
 #include "sb.h"
 #include "kern.h"
 #include "gpucomp.h"
+#include "lens.h"
 
 #define VA(o) (GPUCOMP_VA_BASE + (uint64_t)(o))
 #define CPU(o) ((volatile uint32_t *)(uintptr_t)(SB_GPU_DATA + (uint64_t)(o)))
@@ -360,7 +361,7 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         q[5] = fbits(s->dy0);
         q[6] = fbits(s->isx);
         q[7] = fbits(s->isy);
-        q[8] = (s->flags & 63U) | (rad > 0 ? 128U : 0);
+        q[8] = (s->flags & 63U) | (rad > 0 ? 128U : 0) | (s->flags & GC_LENS);
         q[9] = fbits(s->alpha);
         q[10] = fbits((float)s->w);
         q[11] = fbits((float)s->h);
@@ -724,8 +725,18 @@ static unsigned check_scene(const volatile uint32_t *fb, uint32_t bg, const char
 #define MASK_CARD (VA_POOL + 0xa50000ULL)                   /* 600 x 300 A8: the card's glass mask (rounded) */
 #define TEX_PILL (VA_POOL + 0xa80000ULL)                    /* 200 x 60: a pill drawn 3-sliced to 500 wide */
 #define TEX_SPARSE (VA_POOL + 0xb00000ULL)                  /* 256 x 256: only its top-left 32 x 32 block shows */
+#define LENS_CARD (VA_POOL + 0xb40000ULL)                   /* 600 x 300 lens map (lens.h): v6's Liquid Glass card */
 static struct gc_quad G[8];
 static unsigned ng;
+
+/* the signed distance to a w x h box with corners of radius r (negative inside) */
+static float sd_rr(float px, float py, float w, float h, float r)
+{
+    float qx = (px < w * .5f ? w * .5f - px : px - w * .5f) - (w * .5f - r);
+    float qy = (py < h * .5f ? h * .5f - py : py - h * .5f) - (h * .5f - r);
+    float mx = qx > 0 ? qx : 0, my = qy > 0 ? qy : 0, mm = qx > qy ? qx : qy;
+    return lens_sqrt(mx * mx + my * my) + (mm < 0 ? mm : 0) - r;
+}
 
 static void make_comp2_scene(void)
 {
@@ -735,6 +746,16 @@ static void make_comp2_scene(void)
             int dx = (int)x < 40 ? 40 - (int)x : (int)x > 559 ? (int)x - 559 : 0;
             int dy = (int)y < 40 ? 40 - (int)y : (int)y > 259 ? (int)y - 259 : 0;
             m[y * 600U + x] = (uint8_t)(dx * dx + dy * dy <= 1600 ? 255 : 0);
+        }
+    /* the lens card's map, as the toolkit makes one for a rounded box: the distance in, the inward offset */
+    uint32_t *lm = POOL_CPU(LENS_CARD);
+    for (unsigned y = 0; y < 300U; ++y)
+        for (unsigned x = 0; x < 600U; ++x) {
+            float px = (float)x + .5f, py = (float)y + .5f, sd = sd_rr(px, py, 600, 300, 40);
+            float gx = sd_rr(px + .5f, py, 600, 300, 40) - sd_rr(px - .5f, py, 600, 300, 40);
+            float gy = sd_rr(px, py + .5f, 600, 300, 40) - sd_rr(px, py - .5f, 600, 300, 40);
+            float d = sd < 0 ? -sd : 0, o = lens_disp(d, LENS_B);
+            lm[y * 600U + x] = sd < .5f ? lens_word(.5f - sd, -gx * o, -gy * o, d) : 0;
         }
     uint32_t *pl = POOL_CPU(TEX_PILL);
     for (unsigned y = 0; y < 60U; ++y)
@@ -753,6 +774,9 @@ static void make_comp2_scene(void)
     G[ng++] = (struct gc_quad){ pl, 200, 200, 60, GC_SLICE_H, 0, 1, 300, 2300, 1, 1, 300, 2300, 800, 2360, 0, 0, 0, 0, 0,
                                 500, 30, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     G[ng++] = (struct gc_quad){ 0, 0, 200, 100, GC_SOLID, 0xccffffffU, 1, 1000, 2500, 1, 1, 900, 2450, 1250, 2650, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    /* v6: a Liquid Glass card (the lens map over the blurred half buffer), its card at .8 on top */
+    G[ng++] = (struct gc_quad){ cd, 600, 600, 300, GC_GLASS | GC_LENS, 0, .8f, 760, 60, 1, 1, 760, 60, 1360, 360, 0, 0, 0, 0, 0, 0, 0, 0,
+                                POOL_CPU(LENS_CARD), 600, half, 720, .5f, 720, 1480, 0, 0, 0, 0 };
 }
 
 static float slice_c(float v, float len, float s0, float s1, float srch)
@@ -809,7 +833,33 @@ static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
             unpack_f(q->solid, s);
         } else {
             int iu = (int)u, iv = (int)v;
-            if (q->flags & GC_GLASS) {
+            if ((q->flags & (GC_GLASS | GC_LENS)) == (GC_GLASS | GC_LENS)) {
+                uint32_t M = ((const uint32_t *)q->mask)[(unsigned)iv * q->mstride + (unsigned)iu];
+                float cov, ox, oy, d, bc[4], rgb[3];
+                lens_unword(M, &cov, &ox, &oy, &d);
+                float m = cov * al;
+                if (m > 0) {
+                    /* comp2's lens_px: green bilinear at p + o, red and blue nearest at o x (1 +- D) */
+                    float uu = (fx + ox) * q->bk - .5f, vv = (fy + oy) * q->bk - .5f, u0 = fl(uu), v0 = fl(vv);
+                    float tu = uu - u0, tv = vv - v0, t[4][4];
+                    for (int k = 0; k < 4; ++k)
+                        fetch_c((const uint32_t *)q->bd, q->bstride, (int)q->bw, (int)q->bh, (int)u0 + (k & 1), (int)v0 + (k >> 1), t[k]);
+                    for (int c = 0; c < 3; ++c) {
+                        float top = t[0][c] + (t[1][c] - t[0][c]) * tu, bot = t[2][c] + (t[3][c] - t[2][c]) * tu;
+                        rgb[c] = top + (bot - top) * tv;
+                    }
+                    fetch_c((const uint32_t *)q->bd, q->bstride, (int)q->bw, (int)q->bh, (int)fl((fx + ox * (1 + LENS_D)) * q->bk),
+                            (int)fl((fy + oy * (1 + LENS_D)) * q->bk), bc);
+                    rgb[0] = bc[0];
+                    fetch_c((const uint32_t *)q->bd, q->bstride, (int)q->bw, (int)q->bh, (int)fl((fx + ox * (1 - LENS_D)) * q->bk),
+                            (int)fl((fy + oy * (1 - LENS_D)) * q->bk), bc);
+                    rgb[2] = bc[2];
+                    lens_shade(rgb, ox, oy, d);
+                    for (int c = 0; c < 3; ++c)
+                        acc[c] = acc[c] + (rgb[c] - acc[c]) * m;
+                    acc[3] = acc[3] + (1 - acc[3]) * m;
+                }
+            } else if (q->flags & GC_GLASS) {
                 float m = (float)((const uint8_t *)q->mask)[(unsigned)iv * q->mstride + (unsigned)iu] / 255.0f * al, bc[4];
                 fetch_c((const uint32_t *)q->bd, q->bstride, (int)q->bw, (int)q->bh, (int)((fx - .5f) * q->bk),
                         (int)((fy - .5f) * q->bk), bc);
@@ -977,7 +1027,9 @@ int gpucomp_selftest_step(void)
         log_us("comp2 (the UI's items: glass, fade, 3-slice, solid), full scanout", us);
         static const unsigned pt[][2] = { { 500, 600 }, { 405, 505 }, { 700, 650 }, { 300, 1550 }, { 300, 1950 },
                                            { 700, 1800 }, { 310, 2330 }, { 550, 2330 }, { 790, 2330 }, { 1100, 2550 },
-                                           { 905, 2455 }, { 1240, 2640 }, { 20, 20 }, { 999, 799 } };
+                                           { 905, 2455 }, { 1240, 2640 }, { 20, 20 }, { 999, 799 },
+                                           { 761, 210 }, { 1000, 61 }, { 1000, 358 }, { 775, 75 }, { 1060, 210 },
+                                           { 790, 210 } };
         unsigned bad = 0;
         for (unsigned i = 0; i < sizeof pt / sizeof pt[0]; ++i) {
             uint32_t want = cpu_px2(pt[i][0], pt[i][1], bg), got = fb[pt[i][1] * SB_FB_W + pt[i][0]];
@@ -999,10 +1051,10 @@ int gpucomp_selftest_step(void)
             }
         }
         if (bad) {
-            sb_logx("gpucomp: FAILED: comp2: points off by more than 3 levels, of 14: ", bad);
+            sb_logx("gpucomp: FAILED: comp2: points off by more than 3 levels, of 20: ", bad);
             ++fails;
         } else {
-            sb_log("gpucomp: comp2: 14 points within 3 levels of the CPU's (glass, fade, 3-slice, solid)");
+            sb_log("gpucomp: comp2: 20 points within 3 levels of the CPU's (glass, Liquid Glass, fade, 3-slice, solid)");
         }
         st = 13;
         return 0;
