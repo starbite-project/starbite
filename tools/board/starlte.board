@@ -97,7 +97,8 @@ cpu_suspend = 0xc4000001
 cpu_off = 0x84000002
 cpu_on = 0xc4000003
 
-# arm-io children. One entry per hardware block; "driver" = the Starbite driver that will own it
+# arm-io children. One entry per hardware block; optional u64 = { name = [..] } / u32 = { name = .. } add raw
+# properties (absolute values, not relocated by arm-io's ranges); "driver" = the Starbite driver that will own it
 # (docs/APPLE-S9-DRIVERS.md Part 3), "today" = what drives it now. reg = [addr, size, addr, size, ...].
 [[block]]
 name = "gic"
@@ -160,6 +161,8 @@ name = "acpm-ipc"
 compatible = ["starbite,acpm-ipc", "samsung,exynos-acpm-ipc"]
 reg = [0x14100000, 0x1000]
 spi = [0x44]
+u64 = { sram = [0x02039000, 0x30000] }     # APM SRAM (absolute; below arm-io's ranges), dts acpm_ipc reg 1
+u32 = { initdata-base = 0x7f00 }           # dts acpm_ipc initdata-base
 driver = "StarbiteACPM"
 today = "starlte_touch.c ACPM_MBOX_PA (0302)"
 source = "dts acpm_ipc, drv"

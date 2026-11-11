@@ -126,6 +126,10 @@ def build(base, board, topology):
         reg = b''.join(u64(a - soc['base'], s) for a, s in ranges(blk))
         props = [('compatible', cstrs(blk['compatible'])), ('reg', reg),
                  ('starbite,driver', cstr(blk['driver']))]
+        for k, v in blk.get('u64', {}).items():
+            props.append((k, u64(*(v if isinstance(v, list) else [v]))))
+        for k, v in blk.get('u32', {}).items():
+            props.append((k, u32(*(v if isinstance(v, list) else [v]))))
         if blk['spi']:
             props += [('interrupts', u32(*(s + 32 for s in blk['spi']))),
                       ('interrupt-parent', u32(gic_ph))]
