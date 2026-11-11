@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT
- * sbtk text: stb_truetype (public domain, third_party/) rasterising static instances of Inter Tight 400..800 and
- * Outfit 300 (OFL; tools/brand/fonts) into layer bitmaps when the text changes. The little layout Chrome does for
- * the concept is reproduced from the .lay tables (tools/sbtk-fonts.py): pair kerning, tabular figures, and the
- * raised colon between figures. Line boxes follow Blink: ascent and descent rounded to whole CSS px (pt here),
+ * sbtk text: stb_truetype (public domain, third_party/) rasterising static instances of Inter (Text and Display
+ * optical sizes, SF Pro's stand-ins; P3p) and Outfit 300 (OFL; tools/brand/fonts) into layer bitmaps when the text
+ * changes. The little layout Chrome does for the concept is reproduced from the .lay tables (tools/sbtk-fonts.py):
+ * pair kerning, tabular figures, and the raised colon between figures. Line boxes follow Blink: ascent and descent rounded to whole CSS px (pt here),
  * half-leading around them. */
 #include "sbtk.h"
 
@@ -37,9 +37,34 @@ static struct font {
     const uint8_t *pairs;          /* npairs x (u32 key, i32 adj) */
     uint32_t npairs, colon_case;
     uint32_t tn_cp[16], tn_g[16], ntn;
-} F[TK_NFONT];
+} F[TK_NFACE];
 
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+
+/* P3p (audit P3j-1): the packed face a caller's font and size draw with, and SF Pro's tracking for it (px per gap
+ * between glyphs). Text (Inter opsz 14) below 20 pt, Display (opsz 32) from 20 pt, as iOS switches SF Pro Text to
+ * Display. Tracking, fitted from Inter against SF Pro with its 'trak' table (HarfBuzz vs SFNS):
+ *   Text     0.063 - 0.0053 pt + 0.016 (w - 400) / 300 em: +.010 at 10 pt, 0 at 12, -.017 at 15, -.027 at 17 (400),
+ *            -.011 at 17 (700); flat above 17 pt, as SF's own table is;
+ *   Display  0.0045 (w - 400) / 300 em.
+ * Outfit (the wordmark) has none. */
+static const struct font *face(int font, float size, float *track)
+{
+    static const short WG[TK_NFONT] = { 400, 500, 600, 700, 700, 300 };   /* 800: nothing looks ExtraBold */
+    float pt = size / TK_PT, em;
+    int fo = font >= 0 && font < TK_NFONT ? font : TK_IT400, w = WG[fo], id;
+    if (fo == TK_OF300) { *track = 0; return &F[TK_FOF300]; }
+    if (pt < 19.99f) {
+        id = w == 400 ? TK_TX400 : w == 500 ? TK_TX500 : w == 600 ? TK_TX600 : TK_TX700;
+        em = .063f - .0053f * (pt < 17 ? pt : 17) + .016f * (w - 400) / 300;
+    } else {
+        if (w == 500) w = 400;                 /* Display has no 500 (iOS's big figures are Regular) */
+        id = w == 400 ? TK_DP400 : w == 600 ? TK_DP600 : TK_DP700;
+        em = .0045f * (w - 400) / 300;
+    }
+    *track = em * size;
+    return &F[id];
+}
 
 int tk_font_load(int id, const uint8_t *ttf, const uint8_t *lay, uint32_t laylen)
 {
@@ -67,17 +92,20 @@ int tk_font_load(int id, const uint8_t *ttf, const uint8_t *lay, uint32_t laylen
 static float pt_round(float v) { return tk_floorf(v + 0.5f); }
 float tk_ascent(int font, float size)
 {
-    const struct font *f = &F[font];
+    float tr;
+    const struct font *f = face(font, size, &tr);
     return pt_round((float)f->asc / f->upm * size / TK_PT) * TK_PT;
 }
 float tk_descent(int font, float size)
 {
-    const struct font *f = &F[font];
+    float tr;
+    const struct font *f = face(font, size, &tr);
     return pt_round((float)-f->desc / f->upm * size / TK_PT) * TK_PT;
 }
 float tk_normal_lh(int font, float size)
 {
-    const struct font *f = &F[font];
+    float tr;
+    const struct font *f = face(font, size, &tr);
     return tk_ascent(font, size) + tk_descent(font, size) + pt_round((float)f->gap / f->upm * size / TK_PT) * TK_PT;
 }
 float tk_baseline(int font, float size, float top, float lh)
@@ -129,10 +157,12 @@ static int kern(const struct font *f, int a, int b)
 
 float tk_text_w(int font, float size, const char *s, float ls, int flags)
 {
-    const struct font *f = &F[font];
+    float tr;
+    const struct font *f = face(font, size, &tr);
     int g[256];
     uint32_t cp[256];
-    int n = run(f, s, flags, ls, g, cp, 256);
+    int n = run(f, s, flags, ls, g, cp, 256);   /* the caller's ls: 0 keeps the raised colon (SF's tracking does) */
+    if (ls == 0) ls = tr;
     float sc = size / f->upm, w = 0;
     for (int i = 0; i < n; i++) {
         int adv, lsb;
@@ -144,10 +174,12 @@ float tk_text_w(int font, float size, const char *s, float ls, int flags)
 
 void tk_text_fm(tk_fm *m, int font, float size, float x, float baseline, const char *s, float ls, int flags)
 {
-    const struct font *f = &F[font];
+    float tr;
+    const struct font *f = face(font, size, &tr);
     int g[256];
     uint32_t cp[256];
     int n = run(f, s, flags, ls, g, cp, 256);
+    if (ls == 0) ls = tr;
     float sc = size / f->upm, pen = x;
     baseline = tk_floorf(baseline + .5f);
     int by = (int)tk_floorf(baseline);

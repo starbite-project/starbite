@@ -97,9 +97,15 @@ void tk_bmp_down2(tk_bmp *dst, const tk_bmp *src);              /* 2x2 box (prem
 void tk_bmp_up(tk_bmp *dst, const tk_bmp *src, int x0, int y0, float f);
 
 /* ---- text (stb_truetype on static instances; tk_text.c) ----------------------------------------------------- */
+/* the faces callers name: a weight (the names are Inter Tight's, the faces before P3p). The size picks the packed
+ * face as iOS picks SF Pro: Inter's Text cut (opsz 14) below 20 pt, its Display cut (opsz 32) from 20 pt; Display
+ * has 400 / 600 / 700 (500 draws as 400), and 800 draws as 700 everywhere. With ls == 0 the text gets SF's
+ * size-dependent tracking (tk_text.c); a non-zero ls (px after each glyph) replaces it. */
 enum { TK_IT400, TK_IT500, TK_IT600, TK_IT700, TK_IT800, TK_OF300, TK_NFONT };
+/* the packed faces, in tools/sbtk-fonts.py's / sbtk-pack.py's order (a pack entry's aux) */
+enum { TK_TX400, TK_TX500, TK_TX600, TK_TX700, TK_DP400, TK_DP600, TK_DP700, TK_FOF300, TK_NFACE };
 #define TK_TNUM 1          /* tabular figures (font-variant-numeric: tabular-nums) */
-int tk_font_load(int id, const uint8_t *ttf, const uint8_t *lay, uint32_t laylen);
+int tk_font_load(int face, const uint8_t *ttf, const uint8_t *lay, uint32_t laylen);
 float tk_ascent(int font, float size);                 /* hhea ascent / descent (> 0) in px for a size in px */
 float tk_descent(int font, float size);
 float tk_text_w(int font, float size, const char *s, float ls, int flags);   /* advance incl. ls after each */
