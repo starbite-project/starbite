@@ -139,9 +139,10 @@ void tk_glass_from_half(tk_bmp *b, int box, int boy, const tk_bmp *half, float x
  * a layer's glass mask and by tk_glass_local_put for glass baked into a layer; the bake then draws only the drop
  * shadow (and .lg.dark's tint). Off: the concept's .lg recipe (the tint, rims and specular radials baked). */
 extern int tk_glass_lens;
-/* a lens map for a glass mask (lens.h's words, the mask's size; k: screen px per mask px), tk_alloc'ed: NULL if
- * out of memory */
-uint32_t *tk_lens_build(const tk_a8 *m, float k);
+/* a lens map for a layer's glass mask (lens.h's words, the mask's size; k: screen px per mask px), tk_alloc'ed:
+ * NULL if out of memory */
+struct tk_layer;
+uint32_t *tk_lens_build(const struct tk_layer *l, float k);   /* v8: from its shapes (exact); the rest of its mask flat */
 /* rotate a small premultiplied bitmap about its centre (bilinear) into dst of the same size: a chevron's turn */
 void tk_bmp_rotate(tk_bmp *dst, const tk_bmp *src, float deg);
 /* CSS cubic-bezier(x1, y1, x2, y2) at t */
@@ -174,6 +175,8 @@ struct tk_layer {
     tk_layer *child, *next;
     uint32_t gen;              /* bumped when bmp changes (redraw its area) */
     /* compositor state */
+    float gsh[24][5];          /* v8: the glass shapes in its mask (x, y, w, h, r in bitmap px): the lens's geometry */
+    int ngsh;
     uint32_t gpu_gen;          /* P4: gen + 1 when the GPU last had this layer's bitmap and mask flushed to it */
     uint8_t *gpu_occ;          /* P4 v4: per 32 px block of bmp 0 empty / 1 partial / 2 opaque (the GPU's bins skip and cull) */
     uint32_t gpu_occ_w, gpu_occ_h, gpu_occ_cap, gpu_occ_frame;
@@ -186,6 +189,7 @@ void tk_layer_init(tk_layer *l, const char *name);
 void tk_layer_add(tk_layer *parent, tk_layer *child);     /* appended on top */
 void tk_layer_dirty(tk_layer *l);                         /* its bitmap changed */
 void tk_layer_prepare(tk_layer *l);                       /* make its half copy now (idle time), not on first motion */
+void tk_layer_glass_shape(tk_layer *l, float x, float y, float w, float h, float r);   /* v8: a rounded box of its mask */
 
 /* P4, the GPU compositor (kernel gpucomp.c): one draw item as the GPU takes it, the layout of the kernel's struct
  * gc_quad (a bitmap or a solid of w x h, isx / isy source px per screen px from (dx0, dy0), alpha, the clip rect with
@@ -258,6 +262,7 @@ int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocate
 /* render a group's children (as if the group were at identity) into a screen-sized transparent bitmap and their
  * glass masks into mask: one cached layer for a group that moves or fades as one (CALayer's shouldRasterize) */
 void tk_flatten(tk_layer *group, tk_bmp *out, tk_a8 *mask, float scale);   /* scale .5: a half-resolution cache */
+void tk_flatten_shapes(tk_layer *dst);    /* v8: the last tk_flatten's glass shapes (its mask's frame) into dst */
 /* draw a frame: motion = half resolution and 2x present; full = redraw everything; returns the drawn px */
 int tk_comp_frame(tk_comp *c, int motion, int full);
 void tk_comp_prepare(tk_comp *c);

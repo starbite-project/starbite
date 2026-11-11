@@ -30,6 +30,14 @@ void tk_layer_init(tk_layer *l, const char *name)
     l->sx = l->sy = 1;
     l->alpha = 1;
 }
+void tk_layer_glass_shape(tk_layer *l, float x, float y, float w, float h, float r)
+{
+    for (int i = 0; i < l->ngsh; i++)       /* the same box baked again (a redraw without tk_layer_init) */
+        if (l->gsh[i][0] == x && l->gsh[i][1] == y && l->gsh[i][2] == w && l->gsh[i][3] == h && l->gsh[i][4] == r) return;
+    if (l->ngsh >= 24) return;
+    float *g = l->gsh[l->ngsh++];
+    g[0] = x; g[1] = y; g[2] = w; g[3] = h; g[4] = r;
+}
 void tk_layer_add(tk_layer *p, tk_layer *c)
 {
     c->next = 0;
@@ -330,11 +338,11 @@ static void row_lens(const tgt *T, const item *it, uint32_t *d, int x0, int y, i
         float sx = x0 + i + .5f;
         int u = (int)tk_floorf((sx - it->tx) * ia);
         if (u < 0 || u >= l->glass.w || !L[u]) continue;
-        float cov, ox, oy, dd, rgb[3];
-        lens_unword(L[u], &cov, &ox, &oy, &dd);
+        float cov, ox, oy, e, rgb[3];
+        lens_unword(L[u], &cov, &ox, &oy, &e);
         float m = cov * (float)al * (1.0f / 255);
         if (m <= 0) continue;
-        /* green bilinear at p + o, red and blue nearest at o x (1 +- D) (the backdrop: half resolution) */
+        /* the backdrop (half resolution) bilinear at p + o */
         float bu = (sx + ox) * .5f - .5f, bv = (sy + oy) * .5f - .5f, uf = tk_floorf(bu), vf = tk_floorf(bv);
         float tu = bu - uf, tv = bv - vf;
         uint32_t p[4];
@@ -348,13 +356,7 @@ static void row_lens(const tgt *T, const item *it, uint32_t *d, int x0, int y, i
             float top = a0 + (a1 - a0) * tu, bot = b0 + (b1 - b0) * tu;
             rgb[c] = (top + (bot - top) * tv) * (1.0f / 255);
         }
-        for (int c = 0; c < 3; c += 2) {
-            float f = c ? 1 - LENS_D : 1 + LENS_D;
-            int X = tk_mini(tk_maxi((int)tk_floorf((sx + ox * f) * .5f), 0), bw->w - 1);
-            int Y = tk_mini(tk_maxi((int)tk_floorf((sy + oy * f) * .5f), 0), bw->h - 1);
-            rgb[c] = (float)(bw->px[(size_t)Y * bw->stride + X] >> (16 - 8 * c) & 255) * (1.0f / 255);
-        }
-        lens_shade(rgb, ox, oy, dd);
+        lens_shade(rgb, e);
         uint32_t D = d[i], o = 0;
         for (int c = 0; c < 3; c++) {
             int sh = 16 - 8 * c;
@@ -1065,7 +1067,7 @@ static const uint32_t *lens_of(tk_comp *c, const tk_layer *l, float a)
     }
     if (slot < 0) return 0;                     /* all in this frame: this layer's glass stays plain */
     tk_free(LC[slot].map);
-    LC[slot].map = tk_lens_build(&l->glass, (float)k);
+    LC[slot].map = tk_lens_build(l, (float)k);
     if (!LC[slot].map) return 0;
     LC[slot].l = l; LC[slot].gen = l->gen; LC[slot].mv = l->glass.v; LC[slot].k = k; LC[slot].used = lc_clock;
     LC[slot].frame = lc_frame;
@@ -1301,6 +1303,13 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     return c->last_px;
 }
 
+static float fsh[24][5];
+static int nfsh;
+void tk_flatten_shapes(tk_layer *dst)
+{
+    dst->ngsh = 0;
+    for (int i = 0; i < nfsh; i++) tk_layer_glass_shape(dst, fsh[i][0], fsh[i][1], fsh[i][2], fsh[i][3], fsh[i][4]);
+}
 void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
 {
     flist.n = 0;
@@ -1311,7 +1320,18 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
     tk_memset(out->px, 0, (size_t)out->stride * out->h * 4);
     if (mask && mask->v) tk_memset(mask->v, 0, (size_t)mask->w * mask->h);
     tgt T = { &SCR[0], out, mask && mask->v ? mask : 0, 0, 1, 0 };
-    for (int i = 0; i < flist.n; i++) draw_item(&T, &flist.it[i], screen);
+    nfsh = 0;
+    for (int i = 0; i < flist.n; i++) {
+        const item *it = &flist.it[i];
+        draw_item(&T, it, screen);
+        /* v8: its glass shapes into the flat frame (the item's transform) */
+        if (mask && it->l->glass.v && !(it->l->glass_opaque_only && it->alpha < .999f))
+            for (int q = 0; q < it->l->ngsh && nfsh < 24; q++, nfsh++) {
+                const float *s = it->l->gsh[q];
+                fsh[nfsh][0] = s[0] * it->a + it->tx; fsh[nfsh][1] = s[1] * it->b + it->ty;
+                fsh[nfsh][2] = s[2] * it->a; fsh[nfsh][3] = s[3] * it->b; fsh[nfsh][4] = s[4] * it->a;
+            }
+    }
 }
 
 void tk_layer_prepare(tk_layer *l) { if (l->bmp.px) half_of(l); }

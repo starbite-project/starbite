@@ -38,7 +38,7 @@ static tk_col W(float a) { return TK_RGBA(255, 255, 255, a); }
 static const tk_shadow SHTXT = { 0, 3.6923077f, 11.076923f, { 0, 0, 0, .28f } };   /* 0 1px 3px rgba(0,0,0,.28) */
 
 /* ---- drawing in pt into a layer's bitmap -------------------------------------------------------------------- */
-typedef struct { tk_bmp *b; tk_a8 *m; float ox, oy; } dc;   /* ox, oy: the bitmap's origin in screen px */
+typedef struct { tk_bmp *b; tk_a8 *m; float ox, oy; tk_layer *l; } dc;   /* ox, oy: the bitmap's origin in screen px; l: v8 */
 
 /* a layer whose bitmap covers the pt rect (plus a margin), placed at its rest position */
 static dc mk(tk_layer *l, const char *name, float x, float y, float w, float h, float mg, int glass)
@@ -51,7 +51,7 @@ static dc mk(tk_layer *l, const char *name, float x, float y, float w, float h, 
     if (glass) tk_a8_new(&l->glass, l->bmp.w, l->bmp.h);
     l->x = l->bx = (float)X;
     l->y = l->by = (float)Y;
-    dc d = { &l->bmp, glass ? &l->glass : 0, (float)X, (float)Y };
+    dc d = { &l->bmp, glass ? &l->glass : 0, (float)X, (float)Y, l };
     return d;
 }
 static void d_text(dc *d, int f, float size, float x, float base, const char *s, float ls, int fl, tk_col c, int shadow)
@@ -79,7 +79,11 @@ static void d_icon(dc *d, const char *name, float x, float y, float alpha)
 static void d_glass(dc *d, float x, float y, float w, float h, float r, int dark, int shadow)
 {
     /* the bake works in the bitmap's px: shift the rect */
+    if (tk_glass_lens && !d->m)              /* v8: glass over its own layer only (a lock card's face): the lens's tone
+                                              * and light baked over what the layer holds there */
+        tk_glass_local(d->b, d->b, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r));
     tk_glass_bake(d->b, d->m, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), dark, shadow);
+    if (d->m && d->l) tk_layer_glass_shape(d->l, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r));   /* v8: the lens */
 }
 static void d_rrect(dc *d, float x, float y, float w, float h, float r, tk_col c)
 {
@@ -1021,6 +1025,7 @@ static void flatten_lock(void)
 {
     if (flat_ver == lock_ver) return;
     tk_flatten(&lockg, &lockflat.bmp, &lockflat.glass, .5f);
+    tk_flatten_shapes(&lockflat);            /* v8: the lens's geometry in the flat frame */
     flat_ver = lock_ver;
     tk_layer_dirty(&lockflat);
 }
@@ -1297,7 +1302,7 @@ static dc strip_dc(int i, const char *name)
     tk_bmp_new(&l->bmp, TK_W, y1 - y0);
     l->x = l->bx = 0;
     l->y = l->by = (float)y0;
-    dc d = { &l->bmp, 0, 0, (float)y0 };
+    dc d = { &l->bmp, 0, 0, (float)y0, 0 };
     return d;
 }
 static struct { int on, closing, following, a; arect icon, R, from, to; float travel; } AP;
@@ -2123,7 +2128,7 @@ static void build_search(void)
     if (!sfield.px || sfield.w != d.b->w) {
         tk_bmp_free(&sfield);
         if (tk_bmp_new(&sfield, d.b->w, (int)PT(56 + 40 + 44 - 52))) {
-            dc f = { &sfield, 0, d.ox, d.oy };
+            dc f = { &sfield, 0, d.ox, d.oy, 0 };
             d_lg_flat(&f, 16, 56, 288, 40, 20, 1);
         }
     }
