@@ -22,3 +22,4 @@ with git apply). Test kernel: out/kernel.development.starlte-12377-seq1 = 0003-0
 SweetFramebuffer and SweetPlatformExpert + 0361, compiled with the tree's own flags, linked from link.filelist without
 0428-0432's objects; the same recipe without 0361 reproduces sd427 except the three objects' N_OSO mtimes), then the
 tree was restored and relinked to sd432's sha256.
+| 0433-starbite-m8b-display-fb-from-adt.patch | Fix to 0428 (boot framebuffer from the ADT); sits on 0432 | with 0428 |

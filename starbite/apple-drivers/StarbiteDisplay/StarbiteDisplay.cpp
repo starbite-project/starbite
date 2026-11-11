@@ -580,6 +580,30 @@ AppleCLCD::start(IOService *provider)
 	fHeight = (uint32_t)video.v_height;
 	fRowBytes = (uint32_t)video.v_rowBytes;
 	if (fPhys == 0 || fWidth == 0 || fHeight == 0 || fRowBytes < fWidth * 4) {
+		/*
+		 * Our loader leaves boot_args.Video zero (M8a, 2026-11-11: "no boot framebuffer"). The ADT names the scan-out
+		 * S-Boot left: /a5xelte-fbcon (reg = base + size, width, height, stride), the node the console already uses
+		 * (tools/mkadt_starlte.py, kept in the board ADT).
+		 */
+		IORegistryEntry *fb = IORegistryEntry::fromPath("/a5xelte-fbcon", gIODTPlane);
+		if (fb != NULL) {
+			OSData *reg = OSDynamicCast(OSData, fb->getProperty("reg"));
+			OSData *w = OSDynamicCast(OSData, fb->getProperty("width"));
+			OSData *h = OSDynamicCast(OSData, fb->getProperty("height"));
+			OSData *st = OSDynamicCast(OSData, fb->getProperty("stride"));
+			if (reg != NULL && reg->getLength() >= 16 && w != NULL && w->getLength() >= 4 &&
+			    h != NULL && h->getLength() >= 4 && st != NULL && st->getLength() >= 4) {
+				fPhys = ((const uint64_t *)reg->getBytesNoCopy())[0];
+				fWidth = *(const uint32_t *)w->getBytesNoCopy();
+				fHeight = *(const uint32_t *)h->getBytesNoCopy();
+				fRowBytes = *(const uint32_t *)st->getBytesNoCopy();
+				IOLog("StarbiteDisplay: AppleCLCD: boot framebuffer from the ADT's a5xelte-fbcon: 0x%llx %ux%u stride %u\n",
+				    (unsigned long long)fPhys, fWidth, fHeight, fRowBytes);
+			}
+			fb->release();
+		}
+	}
+	if (fPhys == 0 || fWidth == 0 || fHeight == 0 || fRowBytes < fWidth * 4) {
 		IOLog("StarbiteDisplay: AppleCLCD: no boot framebuffer\n");
 		return false;
 	}
