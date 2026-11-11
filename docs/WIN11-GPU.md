@@ -1889,6 +1889,22 @@ Every app failure must be a removed device that the app or DWM recovers from.
   - **DMA_FAULTED instead of DMA_COMPLETED for faulted work** (Phase 1);
   - the GPU-fault fix (0133) once hangs are survivable.
 
+### 6.51 T42: T41 + 0133 (null vertex buffers), and the user's big-core feedback (2026-11-11 afternoon)
+
+- **The user (big-core entry, on T41):**
+  - "seems smooth, theres the occasional graphical bug"; File Explorer works;
+  - Geometry Dash still crashes on launch, and more generally "the graphics driver is simply not advanced enough".
+  - The big-core entry is now their main Windows. Unattended cycles keep using the normal entry, since the driver
+    is shared.
+- **T42** (`build/win/stage/sbwddm-t42`): T41's kernel (sbwddm 21950bef, sbwdog 65d05c1c, sbkeys 4660b7c4) with
+  **sbumd b7694ea2**, Mesa 0126-0134 *with* 0133, built from the VM branch `sb-with-0133` (master keeps the revert).
+- **Why now:** T39's bugcheck came from our TDR handling, not from 0133 (6.49, 6.50). With T41 a hang that 0133
+  might expose (e.g. `sbtex vertexid` reaching the GPU) costs a recovered timeout.
+- **What it should show:** Explorer's header drawn (DWM dumps `07-*`, `08-*`), and fewer `Live_FaultCount` and
+  `Live_JobsTimedOut` than T41's run.
+- **Geometry Dash:** see docs/WIN11-GPU-CAPS.md §2. In short, it is an x64 OpenGL app (cocos2d-x via glew) and
+  Windows has no OpenGL driver for our GPU, so it gets GDI's GL 1.1 and crashes in libcocos2d.dll.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
