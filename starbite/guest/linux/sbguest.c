@@ -11,12 +11,17 @@
  *   2. /dev/sbshm: mmap of the shared region (write-combine), poll/read = the host's doorbell SPI count,
  *      write = pend the host's doorbell SPI (GICD_ISPENDR, a write-1-to-set register: safe to share).
  *   3. the header's guest_cpuif (the guest CPUs' GIC CPU-interface bits, ORed), for the host's routing checks.
+ *   4. sbblk (contract v2, sbshm.h "v2: sbblk"): the block devices the host serves (/dev/sbblk0 the base image,
+ *      sbblk1 the overlay, sbblk2 the repo), a blk-mq driver over the request / completion rings and the data
+ *      window. Doorbells only; the message rings belong to user space (sbwl).
  *
  * DT: compatible "starbite,guest-shm", reg = the header page, interrupts = the host->guest doorbell SPI
  * (optional); /chosen/starbite,shm = <base size> of the whole region.
  */
 #include <asm/cputype.h>
 #include <linux/arm-smccc.h>
+#include <linux/blk-mq.h>
+#include <linux/blkdev.h>
 #include <linux/cpu.h>
 #include <linux/fs.h>
 #include <linux/interrupt.h>
@@ -29,7 +34,9 @@
 #include <linux/poll.h>
 #include <linux/reboot.h>
 #include <linux/slab.h>
+#include <linux/timer.h>
 #include <linux/vmalloc.h>
+#include <linux/workqueue.h>
 #include <uapi/linux/psci.h>
 
 #include "../sbshm.h"
@@ -137,10 +144,13 @@ static struct notifier_block sbg_restart_nb = {
 };
 
 /* ---- /dev/sbshm ------------------------------------------------------------------------------------ */
+static void sbblk_kick(void);
+
 static irqreturn_t sbg_db_irq(int irq, void *dev)
 {
 	atomic_inc(&db_count);
 	wake_up_interruptible(&db_wait);
+	sbblk_kick();				/* the doorbell is shared: completions may be waiting */
 	return IRQ_HANDLED;
 }
 
@@ -193,6 +203,330 @@ static struct miscdevice sbg_misc = {
 	.fops = &sbg_fops,
 };
 
+/* ---- sbblk: the host's block devices (sbshm.h "v2: sbblk") -------------------------------------------
+ * One gendisk per PRESENT device, one tag set (64 tags) shared by all of them: at most SBSHM_BLK_SLOTS
+ * requests are in flight, so every request gets a data slot and the 64-entry rings can never overflow.
+ * A request is at most one slot (max_hw_sectors = SBSHM_BLK_SLOT / 512): the block layer does the splitting.
+ * The logical block size is 4096, so every request is whole 4 KiB blocks (file systems on these devices need
+ * 4 KiB blocks: EROFS's default, mkfs.ext4 -b 4096).
+ *
+ * Submit (any context, sbblk_lock): take a free slot from the bitmap, copy a write's payload into it, write the
+ * request entry, dmb, req_head (sbshm.h's order: payload, barrier, index), then pend the host's doorbell.
+ * Reap (one work item, so the completion ring has one consumer; kicked by the doorbell interrupt and by a
+ * timer): read done_head, dmb, copy the entry, copy a read's payload out of the slot, free the slot, dmb,
+ * done_tail, end the request. The timer is the only wake-up when there is no doorbell (every jiffy while
+ * requests are in flight) and a safety net when there is one (every 50 ms).
+ * The id of a request is its slot plus a per-slot generation in the high bits: a completion for a slot that is
+ * free, or with an old generation, is logged and dropped.
+ */
+#define SBBLK_SLOT_MASK	0xffU
+
+struct sbblk_dev {
+	struct gendisk *disk;
+	u32 idx;
+};
+
+struct sbblk_cmd {
+	u32 id;
+};
+
+static struct sbshm_blk *sbblk;			/* write-combine vmap: devices + rings */
+static u8 *sbblk_data;				/* write-combine vmap: the data window */
+static struct blk_mq_tag_set sbblk_set;
+static struct sbblk_dev sbblk_devs[SBSHM_BLK_DEVS];
+static DEFINE_SPINLOCK(sbblk_lock);		/* the slots and the request ring (producer) */
+static DECLARE_BITMAP(sbblk_busy, SBSHM_BLK_SLOTS);
+static struct request *sbblk_rq[SBSHM_BLK_SLOTS];
+static u32 sbblk_gen[SBSHM_BLK_SLOTS];
+static u32 sbblk_req_head, sbblk_done_tail;	/* this side's own indices (never read back from the region) */
+static struct workqueue_struct *sbblk_wq;
+static struct timer_list sbblk_timer;
+static unsigned long sbblk_period = 1;		/* jiffies between timer polls */
+static bool sbblk_ready, sbblk_polled;
+static int sbblk_major;
+
+static void sbblk_reap(struct work_struct *w);
+static DECLARE_WORK(sbblk_work, sbblk_reap);
+
+static void sbblk_kick(void)
+{
+	if (READ_ONCE(sbblk_ready))
+		queue_work(sbblk_wq, &sbblk_work);
+}
+
+static void sbblk_timer_fn(struct timer_list *t)
+{
+	sbblk_kick();
+	if (!bitmap_empty(sbblk_busy, SBSHM_BLK_SLOTS))
+		mod_timer(&sbblk_timer, jiffies + sbblk_period);
+}
+
+static void sbblk_slot_free(unsigned int slot)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sbblk_lock, flags);
+	sbblk_rq[slot] = NULL;
+	__clear_bit(slot, sbblk_busy);
+	spin_unlock_irqrestore(&sbblk_lock, flags);
+}
+
+static blk_status_t sbblk_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
+{
+	struct request *rq = bd->rq;
+	struct sbblk_dev *d = rq->q->queuedata;
+	struct sbblk_cmd *cmd = blk_mq_rq_to_pdu(rq);
+	struct sbshm_blkreq r = { .dev = d->idx };
+	struct req_iterator it;
+	struct bio_vec bv;
+	unsigned long flags;
+	unsigned int slot, off = 0;
+	bool full;
+
+	switch (req_op(rq)) {
+	case REQ_OP_READ:
+		r.op = SBG_BLK_READ;
+		break;
+	case REQ_OP_WRITE:
+		r.op = SBG_BLK_WRITE;
+		break;
+	case REQ_OP_FLUSH:
+		r.op = SBG_BLK_FLUSH;
+		break;
+	default:
+		return BLK_STS_NOTSUPP;
+	}
+	if (r.op != SBG_BLK_FLUSH) {
+		if (blk_rq_bytes(rq) > SBSHM_BLK_SLOT)		/* the queue limits forbid it */
+			return BLK_STS_IOERR;
+		r.sector = blk_rq_pos(rq);
+		r.count = blk_rq_sectors(rq);
+	}
+	spin_lock_irqsave(&sbblk_lock, flags);
+	slot = find_first_zero_bit(sbblk_busy, SBSHM_BLK_SLOTS);
+	if (slot >= SBSHM_BLK_SLOTS) {
+		spin_unlock_irqrestore(&sbblk_lock, flags);
+		return BLK_STS_RESOURCE;			/* blk-mq runs the queue again */
+	}
+	__set_bit(slot, sbblk_busy);
+	sbblk_rq[slot] = rq;
+	cmd->id = r.id = slot | (++sbblk_gen[slot] << 8);
+	spin_unlock_irqrestore(&sbblk_lock, flags);
+	r.data_slot = slot;
+
+	blk_mq_start_request(rq);
+	if (r.op == SBG_BLK_WRITE)				/* the payload first (the slot is ours alone) */
+		rq_for_each_segment(bv, rq, it) {
+			memcpy_from_bvec(sbblk_data + (size_t)slot * SBSHM_BLK_SLOT + off, &bv);
+			off += bv.bv_len;
+		}
+
+	spin_lock_irqsave(&sbblk_lock, flags);
+	full = sbblk_req_head - READ_ONCE(sbblk->req_tail) >= SBSHM_BLK_RING;
+	if (!full) {
+		memcpy(&sbblk->req[sbblk_req_head & (SBSHM_BLK_RING - 1)], &r, sizeof(r));
+		sbshm_dmb();
+		WRITE_ONCE(sbblk->req_head, ++sbblk_req_head);
+		sbshm_dmb();
+	}
+	spin_unlock_irqrestore(&sbblk_lock, flags);
+	if (full) {
+		/* 64 slots, 64 entries: only a host that completes without advancing req_tail gets here */
+		pr_err_ratelimited("sbblk: the request ring is full (the host's req_tail stands still)\n");
+		sbblk_slot_free(slot);
+		blk_mq_end_request(rq, BLK_STS_IOERR);
+		return BLK_STS_OK;
+	}
+	if (!timer_pending(&sbblk_timer))
+		mod_timer(&sbblk_timer, jiffies + sbblk_period);
+	if (bd->last)
+		sbg_ring_host();
+	return BLK_STS_OK;
+}
+
+static void sbblk_commit_rqs(struct blk_mq_hw_ctx *hctx)
+{
+	sbg_ring_host();
+}
+
+static enum blk_eh_timer_return sbblk_timeout(struct request *rq)
+{
+	struct sbblk_dev *d = rq->q->queuedata;
+	struct sbblk_cmd *cmd = blk_mq_rq_to_pdu(rq);
+
+	/* the slot stays the host's until it completes the request: nothing to take back, keep waiting */
+	pr_warn_ratelimited("sbblk%u: request %#x (%s sector %llu) waits on the host: req %u/%u done %u/%u\n",
+			    d->idx, cmd->id, blk_op_str(req_op(rq)), (u64)blk_rq_pos(rq), sbblk_req_head,
+			    READ_ONCE(sbblk->req_tail), READ_ONCE(sbblk->done_head), sbblk_done_tail);
+	sbg_ring_host();
+	sbblk_kick();
+	return BLK_EH_RESET_TIMER;
+}
+
+static void sbblk_reap(struct work_struct *w)
+{
+	for (;;) {
+		struct sbshm_blkreq c;
+		struct request *rq = NULL;
+		struct req_iterator it;
+		struct bio_vec bv;
+		unsigned int slot, off = 0;
+		blk_status_t sts = BLK_STS_OK;
+
+		if (READ_ONCE(sbblk->done_head) == sbblk_done_tail)
+			break;
+		sbshm_dmb();
+		memcpy(&c, &sbblk->done[sbblk_done_tail & (SBSHM_BLK_RING - 1)], sizeof(c));
+		slot = c.id & SBBLK_SLOT_MASK;
+		if (slot < SBSHM_BLK_SLOTS)
+			rq = READ_ONCE(sbblk_rq[slot]);
+		if (rq && ((struct sbblk_cmd *)blk_mq_rq_to_pdu(rq))->id != c.id)
+			rq = NULL;
+		if (!rq) {
+			pr_err_ratelimited("sbblk: completion for request %#x that is not in flight\n", c.id);
+		} else {
+			if (c.status > 0 || c.status < -MAX_ERRNO)
+				c.status = -EIO;
+			sts = errno_to_blk_status(c.status);	/* -EROFS and the like: BLK_STS_IOERR */
+			if (c.status)
+				pr_err_ratelimited("sbblk: %s sector %llu + %u: the host says %d\n",
+						   blk_op_str(req_op(rq)), (u64)blk_rq_pos(rq), blk_rq_sectors(rq),
+						   c.status);
+			else if (req_op(rq) == REQ_OP_READ)	/* the host filled the slot before the completion */
+				rq_for_each_segment(bv, rq, it) {
+					memcpy_to_bvec(&bv, sbblk_data + (size_t)slot * SBSHM_BLK_SLOT + off);
+					off += bv.bv_len;
+				}
+			sbblk_slot_free(slot);
+		}
+		sbshm_dmb();
+		WRITE_ONCE(sbblk->done_tail, ++sbblk_done_tail);
+		if (rq)
+			blk_mq_end_request(rq, sts);
+		cond_resched();
+	}
+}
+
+static const struct blk_mq_ops sbblk_mq_ops = {
+	.queue_rq = sbblk_queue_rq,
+	.commit_rqs = sbblk_commit_rqs,
+	.timeout = sbblk_timeout,
+};
+
+static const struct block_device_operations sbblk_fops = {
+	.owner = THIS_MODULE,
+};
+
+/* a write-combine mapping of part of the shared region (RAM reserved without no-map: ioremap refuses it) */
+static void *sbg_vmap_wc(u64 off, size_t len)
+{
+	unsigned int i, n = PAGE_ALIGN(len) >> PAGE_SHIFT;
+	struct page **pages = kvmalloc_array(n, sizeof(*pages), GFP_KERNEL);
+	void *p;
+
+	if (!pages)
+		return NULL;
+	for (i = 0; i < n; i++)
+		pages[i] = pfn_to_page(PHYS_PFN(shm_base + off) + i);
+	p = vmap(pages, n, VM_MAP, pgprot_writecombine(PAGE_KERNEL));
+	kvfree(pages);
+	return p;
+}
+
+static void sbblk_init(struct device *dev, bool irq_ok)
+{
+	struct sbshm_blkdev bd[SBSHM_BLK_DEVS];
+	unsigned int i, n = 0;
+	int ret;
+
+	if (READ_ONCE(hdr->version) < SBSHM_VERSION_V2)
+		return;
+	BUILD_BUG_ON(SBSHM_BLK_SLOTS > SBBLK_SLOT_MASK + 1 || SBSHM_BLK_SLOTS > SBSHM_BLK_RING);
+	BUILD_BUG_ON(SBSHM_BLK_OFF + sizeof(struct sbshm_blk) > SBSHM_BLKDATA_OFF);
+	if (shm_size < SBSHM_BLKDATA_OFF + (u64)SBSHM_BLK_SLOTS * SBSHM_BLK_SLOT) {
+		dev_warn(dev, "sbblk: the shared region is too small for the block window\n");
+		return;
+	}
+	sbblk = sbg_vmap_wc(SBSHM_BLK_OFF, sizeof(*sbblk));
+	if (!sbblk)
+		return;
+	memcpy(bd, sbblk->dev, sizeof(bd));
+	for (i = 0; i < SBSHM_BLK_DEVS; i++)
+		n += (bd[i].flags & SBSHM_BLKDEV_PRESENT) && bd[i].sectors;
+	if (!n) {
+		dev_info(dev, "sbblk: the host offers no block device\n");
+		return;
+	}
+	sbblk_data = sbg_vmap_wc(SBSHM_BLKDATA_OFF, (size_t)SBSHM_BLK_SLOTS * SBSHM_BLK_SLOT);
+	sbblk_wq = alloc_workqueue("sbblk", WQ_MEM_RECLAIM | WQ_HIGHPRI, 1);
+	if (!sbblk_data || !sbblk_wq)
+		return;
+	sbblk_major = register_blkdev(0, "sbblk");
+	if (sbblk_major < 0)
+		return;
+	sbblk_set.ops = &sbblk_mq_ops;
+	sbblk_set.nr_hw_queues = 1;
+	sbblk_set.queue_depth = SBSHM_BLK_SLOTS;
+	sbblk_set.numa_node = NUMA_NO_NODE;
+	sbblk_set.cmd_size = sizeof(struct sbblk_cmd);
+	ret = blk_mq_alloc_tag_set(&sbblk_set);
+	if (ret) {
+		dev_warn(dev, "sbblk: tag set: %d\n", ret);
+		return;
+	}
+	/* completions: the doorbell interrupt when both sides have one, else the timer alone */
+	sbblk_polled = !irq_ok || !READ_ONCE(hdr->db_to_guest) || !READ_ONCE(hdr->db_to_host);
+	sbblk_period = sbblk_polled ? 1 : max(1, HZ / 20);
+	timer_setup(&sbblk_timer, sbblk_timer_fn, 0);
+	WRITE_ONCE(sbblk_ready, true);
+	for (i = 0; i < SBSHM_BLK_DEVS; i++) {
+		bool ro = bd[i].flags & SBSHM_BLKDEV_RO;
+		struct queue_limits lim = {
+			/* whole 4 KiB blocks only: the host's storage (the store, UFS, the card) is in 4 KiB
+			 * blocks and must never read-modify-write for us; sector / count stay in 512s */
+			.logical_block_size = 4096,
+			.physical_block_size = 4096,
+			.io_min = 4096,
+			/* read-ahead of 1 MiB (2 x io_opt): a sequential reader keeps about 16 requests in
+			 * flight, so the host's poll (8 requests by default) always finds a full batch */
+			.io_opt = 8 * SBSHM_BLK_SLOT,
+			.max_hw_sectors = SBSHM_BLK_SLOT >> SECTOR_SHIFT,
+			.features = ro ? 0 : BLK_FEAT_WRITE_CACHE,	/* REQ_OP_FLUSH -> SBG_BLK_FLUSH */
+		};
+		struct sbblk_dev *d = &sbblk_devs[i];
+		struct gendisk *disk;
+
+		if (!(bd[i].flags & SBSHM_BLKDEV_PRESENT) || !bd[i].sectors)
+			continue;
+		d->idx = i;
+		disk = blk_mq_alloc_disk(&sbblk_set, &lim, d);
+		if (IS_ERR(disk)) {
+			dev_warn(dev, "sbblk%u: %ld\n", i, PTR_ERR(disk));
+			continue;
+		}
+		disk->major = sbblk_major;
+		disk->first_minor = i;
+		disk->minors = 1;
+		disk->flags |= GENHD_FL_NO_PART;
+		disk->fops = &sbblk_fops;
+		disk->private_data = d;
+		snprintf(disk->disk_name, sizeof(disk->disk_name), "sbblk%u", i);
+		set_capacity(disk, bd[i].sectors & ~7ULL);
+		set_disk_ro(disk, ro);
+		ret = add_disk(disk);
+		if (ret) {
+			dev_warn(dev, "sbblk%u: add_disk: %d\n", i, ret);
+			put_disk(disk);
+			continue;
+		}
+		d->disk = disk;
+		bd[i].name[sizeof(bd[i].name) - 1] = 0;
+		dev_info(dev, "sbblk%u: \"%s\", %llu MiB, %s, completions by %s\n", i, bd[i].name,
+			 bd[i].sectors >> 11, ro ? "read-only" : "read-write",
+			 sbblk_polled ? "timer poll" : "doorbell");
+	}
+}
+
 static atomic_t cpuif_mask = ATOMIC_INIT(0);
 
 static void sbg_read_cpuif(void *unused)
@@ -207,6 +541,7 @@ static int sbg_probe(struct platform_device *pdev)
 	struct page *page;
 	u64 r[2];
 	int irq, ret;
+	bool irq_ok = false;
 
 	chosen = of_find_node_by_path("/chosen");
 	if (!chosen || of_property_read_u64_array(chosen, "starbite,shm", r, 2))
@@ -252,6 +587,7 @@ static int sbg_probe(struct platform_device *pdev)
 		ret = devm_request_irq(&pdev->dev, irq, sbg_db_irq, 0, "sbshm-doorbell", NULL);
 		if (ret)
 			dev_warn(&pdev->dev, "doorbell irq %d: %d (polling)\n", irq, ret);
+		irq_ok = !ret;
 	}
 	ret = misc_register(&sbg_misc);
 	if (ret)
@@ -262,6 +598,7 @@ static int sbg_probe(struct platform_device *pdev)
 	dev_info(&pdev->dev, "shared region %pa + %#llx, PSCI %s, doorbell irq %d, GIC CPU interface %#x%s\n",
 		 &shm_base, shm_size, use_hvc ? "hvc" : "smc", irq, hdr->guest_cpuif,
 		 fp_mbox ? ", FlexPMU cluster off" : "");
+	sbblk_init(&pdev->dev, irq_ok);		/* contract v2; the module works without it */
 	return 0;
 }
 
@@ -281,5 +618,5 @@ static struct platform_driver sbg_driver = {
 };
 module_platform_driver(sbg_driver);
 
-MODULE_DESCRIPTION("Starbite OS guest: shared region, doorbells, power off without SYSTEM_OFF");
+MODULE_DESCRIPTION("Starbite OS guest: shared region, doorbells, power off without SYSTEM_OFF, sbblk");
 MODULE_LICENSE("GPL");

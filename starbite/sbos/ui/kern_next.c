@@ -826,9 +826,16 @@ static void bake_step(void)
     log_mb("UI heap with the caches: ", tk_heap_used());
 }
 
+int gwin_now(void);                                  /* L2 + L3: starbite/guest/next/gwin.c */
+int next_ready(void) { return ready; }               /* L2: the shell baked (uitest.c's next-linux variant) */
 void next_kdraw(void)
 {
     if (!ready && !baking) { ui_kdraw(); return; }
+    /* L2 + L3: Linux apps: a state change, the catalog or the store, or a new frame (rows copied) drawn at once */
+    if (ready && gwin_now() && !ticking && K.screen_on) {
+        tk_comp_frame(&comp, 0, 0);
+        present();
+    }
     if (!K.screen_on) return;
     if (need_full) {
         need_full = 0;

@@ -410,6 +410,19 @@ void sb_fence_store(unsigned medium, uint64_t base, uint64_t used, uint64_t capa
 int sb_volatile_grant(unsigned medium, uint64_t first, uint64_t count, const char *name);
 /* A write inside the granted range: FUA, then a cache flush. 0, SB_W_DRYRUN, SB_W_RANGE, SB_W_AUTH or SB_W_IO. */
 int sb_write_volatile(unsigned medium, uint64_t lba, uint64_t n, const void *src);
+/* A second standing write permission, separate from the volatile entry's: ONE FILE's extent on the microSD
+ * card (Linux apps: /starbite/linux/overlay.img, the guest's overlay; starbite/guest/sbos/guest-card.h resolves
+ * the file and proves it contiguous). first / count are 4 KiB blocks of the card, any size. The fence reads the
+ * card's MBR and the exFAT boot sector itself and refuses a range that is not wholly inside the cluster heap of
+ * the exFAT partition (type 0x07): never another partition (the OS store's p2), never the card's live OS store,
+ * never the partition table, the boot region or the FAT. It remembers the card (CID): another card in the slot
+ * voids it. One at a time; count 0 (or sb_card_grant_clear) drops it; a reboot clears it. 1 granted. */
+int sb_card_grant(uint64_t first, uint64_t count, const char *name);
+void sb_card_grant_clear(void);
+/* A write inside that grant, through the card driver (which returns when the card has programmed the blocks:
+ * busy released, CMD13 back in tran). 0, SB_W_AUTH (no grant, another card), SB_W_RANGE, SB_W_HOLD, SB_W_DRYRUN,
+ * SB_W_IO. Never reaches UFS. */
+int sb_write_card(uint64_t lba, uint64_t n, const void *src);
 /* 1 while sb_write runs a write (the storage drivers refuse otherwise). */
 int sb_fence_active(void);
 void sb_fence_dry_run(int on);

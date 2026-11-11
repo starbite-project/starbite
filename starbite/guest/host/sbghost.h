@@ -25,7 +25,16 @@ struct sbg_os {
     int64_t (*cpu_on)(uint64_t mpidr, uint64_t entry, uint64_t ctx);   /* PSCI CPU_ON, the 32-bit answer */
     int (*cluster_off)(void);                       /* 1 every guest core off, 0 not, < 0 unknown */
     int (*m3_prep)(void);                           /* the vendor PMU defaults before CPU_ON (NULL: none); 1 ok */
+    /* sbblk (contract v2; optional: NULL = no block device is offered). One request of the guest: op SBG_BLK_READ /
+     * SBG_BLK_WRITE of `count` sectors (512 bytes; count <= SBSHM_BLK_SLOT / 512) at `sector` of device `dev`
+     * (cfg.blk[dev]), to / from buf (the request's slot in the data window: non-cacheable shared memory), or
+     * SBG_BLK_FLUSH (count 0, buf NULL: everything written before is on the storage when it returns). sbghost has
+     * checked the device (PRESENT, a write only when not RO) and the range. 0, or a negative Linux errno (SBG_E*).
+     * Called from sbg_poll: it should take about a millisecond (see cfg.blk_per_poll / blk_poll_ms). */
+    int (*blk_io)(uint32_t dev, uint32_t op, uint64_t sector, uint32_t count, void *buf);
 };
+/* the Linux errno values sbblk's completions use */
+enum { SBG_EIO = 5, SBG_ENODEV = 19, SBG_EINVAL = 22, SBG_ENOSPC = 28, SBG_EROFS = 30 };
 
 struct sbg_cfg {
     uint64_t linux_base, linux_size;                /* the carve-out (sbshm.h profile) */
@@ -39,7 +48,15 @@ struct sbg_cfg {
     uint32_t host_lines[8];                         /* INTIDs the host owns (checked + repaired), 0-terminated */
     uint32_t repair;                                /* 1: re-assert host_lines when a guest GIC init took them */
     uint32_t boot_timeout_ms, stop_timeout_ms;
+    /* contract v2 (sbshm.h): 1 = hdr.version 2, the v2 tables cleared at load, the block devices below offered */
+    uint32_t v2;
+    struct sbshm_blkdev blk[SBSHM_BLK_DEVS];       /* PRESENT ones are served through sbg_os.blk_io (sbblk) */
+    /* sbblk's work per sbg_poll, so the host's tick stays short: at most blk_per_poll requests (0: 8, that is
+     * 512 KiB), and no new request once blk_poll_ms have passed in this poll (0: 4 ms; at least one is served) */
+    uint32_t blk_per_poll, blk_poll_ms;
 };
+#define SBG_BLK_PER_POLL 8U
+#define SBG_BLK_POLL_MS  4U
 
 enum { SBG_OFF = 0, SBG_LOADED, SBG_BOOTING, SBG_RUNNING, SBG_STOPPING, SBG_FAILED };
 
@@ -49,6 +66,13 @@ struct sbg_stats {
     uint32_t hello_ncpus;                           /* CPUs online at HELLO (guest_ncpus: at the last update) */
     uint64_t t_cpu_on, t_hello, t_first_frame, t_stop, t_off;  /* ms since sbg_start (t_off: since sbg_stop) */
     const char *why;                                /* SBG_FAILED: the reason */
+    /* sbblk */
+    uint32_t blk_reads, blk_writes, blk_flushes, blk_errors;   /* requests completed (errors: status != 0) */
+    uint32_t blk_doorbells;                         /* completion batches (one doorbell each) */
+    uint32_t blk_batch_max;                         /* the most requests served in one poll */
+    uint32_t blk_capped;                            /* polls that stopped at a bound with requests left */
+    uint32_t blk_poll_ms_max;                       /* the longest time one poll spent on blocks */
+    uint64_t blk_rd_sectors, blk_wr_sectors;
 };
 
 void sbg_init(const struct sbg_os *os, const struct sbg_cfg *cfg, uint8_t host_cpuif);
@@ -63,6 +87,10 @@ int sbg_load(const void *image, uint64_t image_size, const void *dtb, uint64_t d
  * the initrd at + SBG_RD_OFF. Checks the Image's header, then the shared region and the header as sbg_load. */
 #define SBG_IMAGE_AT 0x80000ULL
 int sbg_load_placed(uint64_t image_size, uint64_t dtb_size, uint64_t initrd_size);
+/* The block devices for the next sbg_load, for a host that learns them after sbg_init (Starbite OS: the card's
+ * files, resolved at each guest start): SBSHM_BLK_DEVS entries replace cfg.blk; a PRESENT one also selects
+ * contract v2. NULL: none (cfg.v2 stays as sbg_init got it). */
+void sbg_set_blk(const struct sbshm_blkdev *blk);
 int sbg_start(void);
 /* From the host's tick: the guest's messages and log, state changes, timeouts, the line checks. */
 void sbg_poll(void);
@@ -81,5 +109,22 @@ int sbg_send(uint16_t type, uint32_t a, uint32_t b);
 int sbg_stop(void);
 const struct sbg_stats *sbg_stats(void);
 volatile struct sbshm_hdr *sbg_hdr(void);
+
+/* ---- contract v2 (sbshm.h; docs/STARBITE-LINUX-APPS.md L3-L7) ----------------------------------------------
+ * The guest's tables are read in place with the seqlock helpers (sbshm_seq_begin / sbshm_seq_ok); the icons are
+ * SBSHM_ICON_PX square premultiplied ARGB. sbg_changes() tells the platform's poll what to look at again. */
+enum { SBG_CH_CATALOG = 1, SBG_CH_STORE = 2, SBG_CH_WINDOW = 4, SBG_CH_TEXT = 8, SBG_CH_PKG = 16 };
+unsigned sbg_changes(void);                         /* the SBG_CH_* bits since the last call (then cleared) */
+const volatile struct sbshm_cat *sbg_cat(void);
+const volatile struct sbshm_store *sbg_store(void);
+const volatile uint32_t *sbg_icon(uint32_t i);      /* NULL for SBSHM_NONE / out of range */
+uint32_t sbg_window(int *has_window);               /* the catalog index in the surface (SBSHM_NONE: none) */
+int sbg_text_focus(uint32_t *purpose);              /* 1: a text field wants the keyboard */
+int sbg_launch(uint32_t idx, uint32_t cat_seq);
+int sbg_activate(uint32_t idx);                     /* SBSHM_NONE: no window in the surface (home) */
+int sbg_app_close(uint32_t idx);
+int sbg_viewport(uint32_t rows, uint32_t width);
+int sbg_text(const char *utf8);                     /* commit text (split at characters, 8 bytes a message) */
+int sbg_pkg(uint32_t idx, uint32_t op, uint32_t store_seq);
 
 #endif

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=GTK3 Test
+Comment=hostsim's GTK 3 client: an entry and a button
+Exec=sbwl-gtk3test
+Icon=accessories-text-editor

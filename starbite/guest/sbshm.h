@@ -64,9 +64,18 @@
 #define SBSHM_OOPS_OFF      0x100000U           /* pstore/ramoops console zone (the guest's kernel log) */
 #define SBSHM_OOPS_SIZE     0x080000U           /* 512 KiB */
 #define SBSHM_SURF_OFF      0x200000U           /* surface buffers, each surf_stride * surf_h */
+/* contract v2 (docs/STARBITE-LINUX-APPS.md L3-L7; sections "v2" below). The surfaces end below 16 MiB (two buffers
+ * of at most 720 x 1440 x 4 = 4 MiB each from 2 MiB). */
+#define SBSHM_CAT_OFF       0x1000000U          /* struct sbshm_cat: the apps the guest can show (guest writes) */
+#define SBSHM_STORE_OFF     0x1020000U          /* struct sbshm_store: the App Store's packages (guest writes) */
+#define SBSHM_ICON_OFF      0x1040000U          /* the icon pool: SBSHM_ICONS_MAX x 160 x 160 ARGB (guest writes) */
+#define SBSHM_BLK_OFF       0x2000000U          /* struct sbshm_blk: devices + request / completion rings */
+#define SBSHM_BLKDATA_OFF   0x2010000U          /* the block data window: SBSHM_BLK_SLOTS x SBSHM_BLK_SLOT bytes */
+#define SBSHM_NET_OFF       0x2800000U          /* (L5, reserved: the packet rings) */
 
 #define SBSHM_MAGIC         0x31764d4853425353ULL   /* "SSBSHMv1" */
 #define SBSHM_VERSION       1U
+#define SBSHM_VERSION_V2    2U                  /* hdr.version = 2: the host serves the v2 regions (blk devices) */
 
 /* host_state (Starbite) */
 enum {
@@ -143,11 +152,36 @@ enum {
     SBG_MSG_STOP = 4,       /* power the cluster off (a = reason) */
     SBG_MSG_FOCUS = 5,      /* a = 1: the surface is shown full screen / 0: in the background */
     SBG_MSG_LOAD = 6,       /* test load: a = threads spinning for b seconds (P2d: the M3s under load) */
+    /* host -> guest, v2 */
+    SBG_MSG_VIEWPORT = 7,   /* a = the rows of the surface the host shows (the keyboard up: fewer), b = the
+                             * width: the guest configures the active window to b x a */
+    SBG_MSG_LAUNCH = 8,     /* a = catalog index, b = the catalog's layout_seq it was read at: start the app (or
+                             * raise it); a stale layout_seq is ignored */
+    SBG_MSG_ACTIVATE = 9,   /* a = catalog index whose window goes into the surface; SBSHM_NONE = none (home) */
+    SBG_MSG_APP_CLOSE = 10, /* a = catalog index: close its windows (then SIGTERM, SIGKILL after 3 s) */
+    SBG_MSG_TEXT = 11,      /* commit text to the focused text-input-v3 field: c bytes (1..8) of UTF-8 in a, b
+                             * (little-endian, a first); a character never splits across two messages */
+    SBG_MSG_PKG = 12,       /* a = store index, b = SBG_PKG_OP_*, c = the store seq it was read at */
+    SBG_MSG_BLK_DONE = 13,  /* (reserved: sbblk uses the doorbells alone, see "sbblk") */
     /* guest -> host */
     SBG_MSG_HELLO = 64,     /* a = ncpus, b = surface ready */
     SBG_MSG_BYE = 65,       /* user space done; the kernel powers the CPUs off next */
     SBG_MSG_TITLE = 66,     /* hdr.title changed */
+    /* guest -> host, v2 */
+    SBG_MSG_CATALOG = 67,   /* the catalog (apps, icons) changed: a = its new seq */
+    SBG_MSG_WINDOW = 68,    /* a = catalog index whose window is in the surface now (SBSHM_NONE: none), b = 1 the
+                             * app has a window at all / 0 it has none (closed, or still starting) */
+    SBG_MSG_TEXT_FOCUS = 69,/* a = 1 a text field wants the keyboard / 0 not; b = text-input-v3 content purpose */
+    SBG_MSG_PKG_STATUS = 70,/* a = store index, b = SBG_PKG_*, c = percent: also in the store entry */
+    SBG_MSG_BLK = 71,       /* (reserved: sbblk uses the doorbells alone) */
+    SBG_MSG_STORE = 72,     /* the store index changed: a = its new seq */
 };
+#define SBSHM_NONE 0xffffffffU
+/* v2, who uses the rings in the guest: the rings are single-producer single-consumer, so ONE guest process owns
+ * them: sbwl (the compositor). Other guest daemons talk to sbwl over the unix socket /run/sbwl.sock, one text line
+ * per message: sbpkg -> sbwl "store SEQ" (the store table changed), "pkg IDX STATE PCT", "rescan" (the .desktop
+ * files changed); sbwl -> sbpkg "op IDX OP SEQ" (an SBG_MSG_PKG from the host). The kernel (sbguest.ko: sbblk)
+ * never uses the message rings. */
 enum { SBG_TOUCH_DOWN = 0, SBG_TOUCH_MOVE = 1, SBG_TOUCH_UP = 2 };
 
 struct sbshm_msg {
@@ -241,6 +275,149 @@ static inline unsigned sbshm_ascii_key(char ch, int *shift)
     return 0;
 }
 #define SBSHM_KEY_LEFTSHIFT 42U
+
+/* ==== contract v2 (docs/STARBITE-LINUX-APPS.md L3-L7) ================================================== */
+
+/* ---- v2: seqlocked tables (catalog, store) ------------------------------------------------------------
+ * One writer (the guest). It sets seq odd, dmb, writes the table (and the icons it points at), dmb, seq + 1 (even).
+ * A reader reads seq (even, else retry later), dmb, copies what it needs, dmb, reads seq again: equal = the copy is
+ * whole. Indices are valid for one seq: messages that carry an index also carry the seq it was read at, and the
+ * guest ignores a stale one. */
+static inline uint32_t sbshm_seq_begin(const volatile uint32_t *seq)
+{
+    uint32_t s = *seq;
+    sbshm_dmb();
+    return s;
+}
+static inline int sbshm_seq_ok(const volatile uint32_t *seq, uint32_t begun)
+{
+    sbshm_dmb();
+    return !(begun & 1U) && *seq == begun;
+}
+
+/* ---- v2: the icon pool (catalog apps and store packages share it) ---------------------------------------
+ * Icon i at SBSHM_ICON_OFF + i * SBSHM_ICON_BYTES: SBSHM_ICON_PX x SBSHM_ICON_PX, premultiplied ARGB words
+ * (0xAARRGGBB, sbtk's tk_bmp format), rows packed. The shell scales it to its 62 pt (229 px) icon. */
+#define SBSHM_ICON_PX       160U
+#define SBSHM_ICON_BYTES    (SBSHM_ICON_PX * SBSHM_ICON_PX * 4U)
+#define SBSHM_ICONS_MAX     160U                /* 15.6 MiB, to SBSHM_BLK_OFF */
+#define SBSHM_ICONS_CAT     64U                 /* 0..63: the catalog's (written by sbwl); 64..159: the store's
+                                                 * (written by sbpkg, under the store seq) */
+
+/* ---- v2: the catalog: what the home screen shows for Linux --------------------------------------------- */
+#define SBSHM_APPS_MAX      96U
+enum {
+    SBSHM_APP_RUNNING = 1U << 0,    /* a process of it runs */
+    SBSHM_APP_WINDOW = 1U << 1,     /* it has a mapped toplevel */
+    SBSHM_APP_TERMINAL = 1U << 2,   /* Terminal=true in its .desktop: run inside foot */
+    SBSHM_APP_KEYBOARD = 1U << 3,   /* keep the keyboard up (terminals: no text-input-v3) */
+    SBSHM_APP_SYSTEM = 1U << 4,     /* in the base image (cannot be removed) */
+};
+struct sbshm_app {
+    char id[40];                    /* the desktop id ("org.gnome.Calculator"), NUL-terminated */
+    char name[32];                  /* Name= (the home's label), NUL-terminated UTF-8 */
+    uint32_t flags;                 /* SBSHM_APP_* */
+    uint32_t icon;                  /* pool index, or SBSHM_NONE */
+    uint32_t pkg;                   /* store index of the package that brought it, or SBSHM_NONE */
+    uint32_t rss_kb;                /* resident memory of its processes (0 while not running) */
+    uint32_t pad[2];
+};                                  /* 96 bytes */
+struct sbshm_cat {
+    volatile uint32_t seq;
+    uint32_t n;                     /* apps[0..n) */
+    uint32_t active;                /* the index whose window is in the surface, or SBSHM_NONE */
+    uint32_t mem_total_kb, mem_avail_kb;   /* the guest's /proc/meminfo (MemTotal, MemAvailable) */
+    uint32_t swap_total_kb, swap_free_kb;  /* zram */
+    uint32_t layout_seq;            /* changes only when the apps' ids or order change (seq also moves with rss
+                                     * and flags every ~2 s): SBG_MSG_LAUNCH carries this one */
+    uint32_t pad[8];
+    struct sbshm_app app[SBSHM_APPS_MAX];
+};
+
+/* ---- v2: the App Store's packages (a curated index from the repo device, see L6) ------------------------ */
+#define SBSHM_PKGS_MAX      160U
+enum {                              /* sbshm_pkg.state */
+    SBG_PKG_IDLE = 0, SBG_PKG_QUEUED, SBG_PKG_INSTALLING, SBG_PKG_REMOVING, SBG_PKG_FAILED,
+};
+enum { SBG_PKG_OP_INSTALL = 1, SBG_PKG_OP_REMOVE = 2, SBG_PKG_OP_CANCEL = 3 };
+enum {                              /* sbshm_pkg.flags */
+    SBSHM_PKG_INSTALLED = 1U << 0,
+    SBSHM_PKG_SYSTEM = 1U << 1,     /* part of the base image */
+    SBSHM_PKG_TOO_BIG = 1U << 2,    /* ram_mb above what the guest can give it: install allowed, with a warning */
+    SBSHM_PKG_NO_SPACE = 1U << 3,   /* inst_kb above the overlay's free space: install refused */
+    SBSHM_PKG_FEATURED = 1U << 4,
+};
+struct sbshm_pkg {
+    char pkg[40];                   /* the Debian package (or a meta name), NUL-terminated */
+    char name[32];                  /* the store's title */
+    char summary[96];               /* one line */
+    char category[16];              /* "Internet", "Office", "Graphics", "Utilities", "Games", "Development" */
+    char err[32];                   /* SBG_PKG_FAILED: why, in words */
+    uint32_t dl_kb;                 /* to read from the repo (all missing dependencies) */
+    uint32_t inst_kb;               /* the overlay space it takes */
+    uint32_t ram_mb;                /* honest typical resident memory while in use */
+    uint32_t flags;                 /* SBSHM_PKG_* */
+    uint32_t state;                 /* SBG_PKG_* */
+    uint32_t pct;                   /* progress 0..100 of the current operation */
+    uint32_t icon;                  /* pool index, or SBSHM_NONE */
+    uint32_t pad;
+};                                  /* 248 bytes */
+struct sbshm_store {
+    volatile uint32_t seq;
+    uint32_t n;
+    uint32_t overlay_total_kb, overlay_free_kb;
+    uint32_t repo_ok;               /* 1: the repo device is there and its index read */
+    uint32_t pad[11];
+    struct sbshm_pkg pkg[SBSHM_PKGS_MAX];
+};
+
+/* ---- v2: sbblk: block devices served by the host ----------------------------------------------------------
+ * The host fills dev[] before CPU_ON (hdr.version = 2). The guest's kernel (sbguest.ko) submits requests to the
+ * request ring (it is the producer: req_head; the host advances req_tail) and pends the host's doorbell (db_to_host;
+ * no message: the rings belong to sbwl and blocks are needed before sbwl runs, for the root). The host serves them in
+ * order at every poll, writes each completion (same id, status) to the completion ring and pends the guest's doorbell
+ * (db_to_guest); the guest's doorbell handler reaps completions. Data lives in the data window:
+ * a request's buffer is slot data_slot (SBSHM_BLK_SLOT bytes each), so count <= SBSHM_BLK_SLOT / 512. Reads: the
+ * host fills the slot before the completion. Writes: the guest fills it before the request. Flush: everything
+ * completed before it is on the host's storage when it completes. Sector = 512 bytes, but the guest uses 4096-byte
+ * logical blocks: every request starts at a multiple of 8 sectors and is a multiple of 8 sectors long (the phone's
+ * storage is 4 KiB blocks; a host may refuse anything else with -EINVAL). Overlay file systems: mkfs with -b 4096. */
+#define SBSHM_BLK_DEVS      4U
+#define SBSHM_BLK_RING      64U             /* power of two */
+#define SBSHM_BLK_SLOT      0x10000U        /* 64 KiB */
+#define SBSHM_BLK_SLOTS     64U             /* the data window: 4 MiB */
+enum { SBSHM_BLK_BASE = 0, SBSHM_BLK_OVERLAY = 1, SBSHM_BLK_REPO = 2 };   /* conventional device numbers */
+enum { SBSHM_BLKDEV_PRESENT = 1U << 0, SBSHM_BLKDEV_RO = 1U << 1 };
+enum { SBG_BLK_READ = 1, SBG_BLK_WRITE = 2, SBG_BLK_FLUSH = 3 };
+struct sbshm_blkdev {
+    uint64_t sectors;
+    uint32_t flags;                 /* SBSHM_BLKDEV_* */
+    char name[20];                  /* "base", "overlay", "repo": what the host serves it from, for logs */
+};                                  /* 32 bytes */
+struct sbshm_blkreq {
+    uint32_t id;                    /* the guest's tag, echoed in the completion */
+    uint16_t op;                    /* SBG_BLK_* */
+    uint16_t dev;
+    uint64_t sector;
+    uint32_t count;                 /* sectors */
+    uint32_t data_slot;
+    int32_t status;                 /* completion: 0 ok, < 0 a Linux errno (-EIO, -EROFS, -ENOSPC) */
+    uint32_t pad;
+};                                  /* 32 bytes */
+struct sbshm_blk {
+    struct sbshm_blkdev dev[SBSHM_BLK_DEVS];
+    uint32_t pad0[32];
+    volatile uint32_t req_head;     /* guest */
+    uint32_t pad1[15];
+    volatile uint32_t req_tail;     /* host */
+    uint32_t pad2[15];
+    volatile uint32_t done_head;    /* host */
+    uint32_t pad3[15];
+    volatile uint32_t done_tail;    /* guest */
+    uint32_t pad4[15];
+    struct sbshm_blkreq req[SBSHM_BLK_RING];
+    struct sbshm_blkreq done[SBSHM_BLK_RING];
+};                                  /* 4 KiB + 0.5 KiB: fits before SBSHM_BLKDATA_OFF */
 
 /* ---- pstore/ramoops console zone (fs/pstore/ram_core.c, ECC off) ----------------------------------- */
 #define SBSHM_PRZ_SIG 0x43474244U   /* "DBGC" */

@@ -36,6 +36,17 @@ int sh_cellular(int on)
 void sh_brightness(int level) { fprintf(stderr, "brightness: level %d\n", level); }
 void sh_vibrate(void) { fprintf(stderr, "vibrate: the timer ran out\n"); }
 void sh_haptic(void) { }
+/* L2 + L3: Linux apps and the App Store (the kernel's platform is starbite/guest/next/gwin.c): host/linux_fake.inc,
+ * a pretend Linux with a catalog and a store. SBTK_NO_LINUX_FAKE: none (starbite/guest/next/host/gwin-host.c links
+ * gwin.c itself and drives the shell) */
+#ifndef SBTK_NO_LINUX_FAKE
+#include "linux_fake.inc"
+#else
+static void lin_fake_init(void) {}
+static void lin_fake_poll(float t) { (void)t; }
+static void lin_fake_settle(void) {}
+static void lin_fake_state(const char *st) { (void)st; }
+#endif
 /* wifi-sbos-next: a pretend Wi-Fi for the previews (made-up network names; nothing is joined): on lists four
  * networks, a join connects, the Internet test answers 200 */
 static sh_wifi_t HW;
@@ -216,6 +227,7 @@ static void apply_state(const char *st)
     float v = 1;
     const char *eq = strchr(st, '=');
     if (!eq) return;
+    if (!strncmp(st, "lx=", 3)) { lin_fake_state(st + 3); return; }   /* L3: the pretend Linux's own states */
     memcpy(what, st, (size_t)(eq - st));
     const char *colon = strchr(eq + 1, ':');
     if (colon) { memcpy(key, eq + 1, (size_t)(colon - eq - 1)); v = (float)atof(colon + 1); }
@@ -301,6 +313,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
                 sh_touch(1, p->x0 + (p->x1 - p->x0) * e, p->y0 + (p->y1 - p->y0) * e, te);
             }
         }
+        lin_fake_poll(t);                     /* L3: the pretend Linux (gwin_now's part on the phone) */
         int mv = sh_tick(dt / 1000, t);
         double shell_ms = (tk_us() - sh0) / 1000.0;
         int motion = mv || sh_moving();
@@ -465,8 +478,9 @@ int main(int argc, char **argv)
     sh_init(&c);
     fprintf(stderr, "bake: %.1f ms; heap %.1f MB (peak %.1f MB)\n", (tk_us() - t0) / 1000.0, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
     if (getenv("SBTK_MEM")) fprintf(stderr, "mem: layers %.1f MB\n", memwalk(c.root, 0) / 1e6);
+    lin_fake_init();
     if (!strcmp(argv[2], "still") && argc >= 4) {
-        for (int i = 4; i < argc; i++) apply_state(argv[i]);
+        for (int i = 4; i < argc; i++) { apply_state(argv[i]); lin_fake_settle(); }
         tk_comp_frame(&c, 0, 1);
         fprintf(stderr, "frame: %.2f ms; heap %.1f MB (peak %.1f MB)\n", c.last_us / 1000.0, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
         write_ppm(argv[3], &c.panel);

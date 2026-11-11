@@ -20,14 +20,22 @@
 #define GUEST_TERM_RD     "guest-term-rd.img"
 #define GUEST_TERM_W 720U
 #define GUEST_TERM_H 1060U
-enum { GUEST_APP = 0, GUEST_TERM = 1 };
+/* L2 + L3 (docs/STARBITE-LINUX-APPS.md): Linux apps for Starbite OS Next: the guest kernel of its own with sbwl (our
+ * Wayland compositor), the apps' catalog and the App Store (contract v2); the window between Next's status bar and
+ * the home bar: 720 x 1344 = 1440 x 2688 at 2x (the guest's viewport 916 rows with the keyboard up) */
+#define GUEST_WL_IMAGE    "guest-wl.img"
+#define GUEST_WL_DTB      "guest-wl.dtb"
+#define GUEST_WL_RD       "guest-wl-rd.img"
+#define GUEST_WL_W 720U
+#define GUEST_WL_H 1344U
+enum { GUEST_APP = 0, GUEST_TERM = 1, GUEST_WL = 2 };
 
 enum { GUEST_OFF = 0, GUEST_STARTING, GUEST_RUNNING, GUEST_STOPPING, GUEST_FAILED };
 
 void guest_init(void);                     /* once, after hw_irq_init (routes the host doorbell) */
 int guest_available(void);                 /* 1: the three store entries exist */
 int guest_start(void);                     /* 0 started, < 0 refused (heater busy, no files, a load error) */
-int guest_start_mode(int mode);            /* GUEST_APP (= guest_start) or GUEST_TERM */
+int guest_start_mode(int mode);            /* GUEST_APP (= guest_start), GUEST_TERM or GUEST_WL */
 int guest_available_mode(int mode);
 int guest_mode(void);                      /* the last started */
 int guest_scale(void);                     /* the view's scale: 2 (both; the blit also does 4) */
@@ -49,6 +57,11 @@ int guest_shown(void);
 int guest_frame_new(void);                 /* 1 when the guest published a frame since the last blit */
 /* the rows newer than the frame drawn (damage per row) at 2x / 4x: the rows copied; *py0..*py1 the panel rows */
 int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0, int *py1);
+/* L3: the same at 2x into a row table (rows[y]: the target's row y, 2 surf_w px; 2 surf_h rows), *py0..*py1 rows */
+int guest_blit_rows(uint32_t *const *rows, int *py0, int *py1);
+/* L3: 1 while something of Linux runs without a window shown (the App Store open, a package being installed):
+ * no idle stop; 0: the 60 s count starts again (while hidden) */
+void guest_keep(int on);
 int guest_input(int kin_type, int x, int y);  /* KIN_PRESS/MOVE/RELEASE in panel pixels: 1 taken */
 int guest_key(unsigned linux_code, int down);
 

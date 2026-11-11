@@ -108,4 +108,58 @@ int sh_card_mount(void);
 int sh_card_list(const char *path, sh_dirent_t *out, int max, int first);
 int sh_card_read(const char *path, uint64_t off, void *dst, uint32_t len);                      /* P3c: the year (the Calendar's month) */      /* the next alarm for the lock's widget (on 0: "No alarm") */
 
+/* Linux apps (docs/STARBITE-LINUX-APPS.md 5, 7, 8; L2 + L3): every Linux app's window (an app under sbwl on the M3
+ * cores) is a layer of its app page: SH_LINUX_W x SH_LINUX_H surface px at 2x from y 162 (44 pt) to 2850 (772 pt);
+ * with the keyboard up the guest's viewport is SH_LINUX_HKB rows (44 to 540 pt) and the rest is under the keyboard.
+ * The platform (the kernel: starbite/guest/next/gwin.c on kern/guest.c and sbghost's contract v2) starts the guest,
+ * keeps the catalog (the home's Linux page) and the App Store's packages, copies the active window's new rows into
+ * the shell's bitmap and takes the input. Apps are named by their desktop id ("org.gnome.TextEditor"); the shell's
+ * Terminal (page 2) is the catalog's foot, SH_LINUX_TERMINAL. States are the kernel's GUEST_* order. */
+enum { SH_LINUX_OFF, SH_LINUX_STARTING, SH_LINUX_RUNNING, SH_LINUX_STOPPING, SH_LINUX_FAILED };
+#define SH_LINUX_W 720
+#define SH_LINUX_H 1344                                   /* the surface: 44 to 772 pt at 2x */
+#define SH_LINUX_HKB 916                                  /* the rows shown with the keyboard up: 44 to 540 pt */
+#define SH_LINUX_Y 162                                    /* the window's first panel row (44 pt) */
+#define SH_LINUX_ICON 160                                 /* catalog and store icons: 160 x 160 premultiplied ARGB */
+#define SH_LINUX_TERMINAL "org.codeberg.dnkl.foot"        /* the Terminal app's desktop id (also "foot") */
+/* the catalog (the guest's .desktop apps): flags as sbshm.h's SBSHM_APP_* */
+enum { SH_LAPP_RUNNING = 1, SH_LAPP_WINDOW = 2, SH_LAPP_TERMINAL = 4, SH_LAPP_KEYBOARD = 8, SH_LAPP_SYSTEM = 16 };
+#define SH_LAPPS 64
+typedef struct { char id[40], name[32]; unsigned flags; int icon, pkg; unsigned rss_kb; } sh_lapp_t;   /* icon, pkg: -1 none */
+typedef struct { unsigned seq; int n; unsigned mem_total_kb, mem_avail_kb; sh_lapp_t app[SH_LAPPS]; } sh_lcat_t;
+/* the App Store's packages: state, flags and ops as sbshm.h's SBG_PKG_*, SBSHM_PKG_*, SBG_PKG_OP_* */
+enum { SH_PKG_IDLE, SH_PKG_QUEUED, SH_PKG_INSTALLING, SH_PKG_REMOVING, SH_PKG_FAILED };
+enum { SH_PKG_INSTALLED = 1, SH_PKG_SYSTEM = 2, SH_PKG_TOO_BIG = 4, SH_PKG_NO_SPACE = 8, SH_PKG_FEATURED = 16 };
+enum { SH_PKG_OP_INSTALL = 1, SH_PKG_OP_REMOVE = 2, SH_PKG_OP_CANCEL = 3 };
+#define SH_LPKGS 160
+typedef struct {
+    char pkg[40], name[32], summary[96], category[16], err[32];
+    unsigned dl_kb, inst_kb, ram_mb, flags, state, pct;
+    int icon;                                             /* -1 none */
+} sh_lpkg_t;
+typedef struct { unsigned seq; int n, repo_ok; unsigned overlay_total_kb, overlay_free_kb, mem_total_kb; sh_lpkg_t pkg[SH_LPKGS]; } sh_lstore_t;
+
+/* the platform */
+int sh_linux_open(const char *id);       /* start Linux if off, launch the app (once the catalog has it), put its window
+                                          * in the surface; < 0 refused (sh_linux_state says why) */
+void sh_linux_hide(void);                /* home: no window in the surface (ACTIVATE none); the apps keep running */
+/* the active app's rows newer than the last copy, at 2x (pixel-doubled), into the shell's window: rows[y] is its
+ * bitmap row y (2 SH_LINUX_W px; 2 SH_LINUX_H rows, kept in strips); *y0..*y1 the bitmap rows written; returns the
+ * surface rows copied (0: nothing new, or not the app's window yet). first: copy every row. */
+int sh_linux_blit(uint32_t *const *rows, int first, int *y0, int *y1);
+int sh_linux_touch(int phase, int x, int y);   /* surface px, phase 0 down / 1 move / 2 up */
+int sh_linux_char(char c);               /* one character typed: committed text for a focused text field, else keys
+                                          * (Shift around capitals); '\n' Return and '\b' BackSpace are always keys */
+int sh_linux_viewport(int rows);         /* the rows the shell shows (SH_LINUX_H, or SH_LINUX_HKB with the keyboard) */
+int sh_linux_icon(int icon, uint32_t *px);     /* a pool icon into px (SH_LINUX_ICON squared); 0: none */
+int sh_linux_hold(int on);               /* 1: the App Store is open: Linux started if off and not stopped while idle */
+int sh_linux_pkg(int pkg, int op);       /* install / remove / cancel a store package; < 0 refused */
+/* the shell, called by the platform */
+void sh_linux_state(int state, const char *why);   /* the guest's state changed (why: the reason when FAILED) */
+int sh_linux_frame(void);                /* the active window has new rows; 1 when the window took them (draw) */
+void sh_linux_catalog(const sh_lcat_t *c);         /* the catalog changed (also its RUNNING flags); copied */
+void sh_linux_store(const sh_lstore_t *s);         /* the packages changed (progress too); the platform's copy,
+                                                    * kept by the shell: valid until the next call */
+void sh_linux_textfocus(int on);         /* the active app's text field wants the keyboard (1) or not (0) */
+
 #endif

@@ -1,6 +1,6 @@
 #!/bin/sh
 # guest-probe P1 and P2 (docs/STARBITE-OS-LINUX-M3.md 10): bare libsb payloads for the OS store / catalog.
-#   limactl shell starbite -- /Users/dev/project-starbite/starbite/guest/probe/build.sh [p1|p2|p4|all|bundle]
+#   limactl shell starbite -- /Users/dev/project-starbite/starbite/guest/probe/build.sh [p1|p2|p4|p5|all|bundle]
 # bundle: guest-linux.img / .dtb / -rd.img for the OS store (P3, Starbite OS kern/guest.c), in $OUT/bundle.
 # libsb comes from git at LIBSB_REF (default aed0ce1, Starbite OS 1.0-rc2's libsb, proven on the phone), never
 # from a working tree other sessions edit. Outputs in $OUT: guest-probe.img (P1), guest-p2.img (P2), + .sha256.
@@ -85,6 +85,18 @@ p2_name=guest-p2
 p2_kout=""
 p2_dts=""
 p2_defs=""
+p2_rd_make="BUILD_ONLY=1 WORK=$WORK"
+p2_rd=$WORK/out/initrd.cpio.gz
+if [ "$what" = p5 ]; then               # P5 = L1: sbwl + foot (docs/STARBITE-LINUX-APPS.md 11)
+    P2_IMAGE=${P5_IMAGE:-$WORK/Image-guest}
+    p2_name=guest-p5
+    p2_dts="--bootargs-extra sbguest.mode=wayland"
+    p2_defs="-DP2_TERM=1 -DP2_CYCLES=2U"
+    "$here/../sbwl/mk-initrd.sh" >/dev/null
+    p2_rd=$WORK/out/initrd-wl.cpio.gz
+    p2_rd_make=""
+    what=p2
+fi
 if [ "$what" = p4 ]; then               # P4: the terminal on the guest kernel of its own (docs 12 steps 2 + 3)
     P2_IMAGE=${P4_IMAGE:-$WORK/Image-guest}
     p2_name=guest-p4
@@ -95,8 +107,8 @@ if [ "$what" = p4 ]; then               # P4: the terminal on the guest kernel o
 fi
 if [ "$what" = p2 ] || [ "$what" = all ]; then
     [ -f "$P2_IMAGE" ] || { echo "$p2_name: no $P2_IMAGE (starbite/guest/linux/build-patched.sh)" >&2; exit 1; }
-    env BUILD_ONLY=1 WORK="$WORK" $p2_kout "$here/../run-qemu.sh" >/dev/null
-    rdf="$WORK/out/initrd.cpio.gz"
+    [ -z "$p2_rd_make" ] || env $p2_rd_make $p2_kout "$here/../run-qemu.sh" >/dev/null
+    rdf="$p2_rd"
     python3 "$here/../mk-guest-dts.py" --profile s9 --rd-size "$(stat -c %s "$rdf")" --db-guest "$P2_DB_GUEST" \
         $p2_dts "$OUT/s9-guest.dts" >/dev/null
     dtc -q -I dts -O dtb -o "$OUT/s9-guest.dtb" "$OUT/s9-guest.dts"
