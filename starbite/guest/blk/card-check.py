@@ -4,6 +4,13 @@ written again here from the exFAT specification, so the phone's resolver and thi
 
     card-check.py --adb [--dev /dev/block/mmcblk0] [--verify DIR]     the card in the phone (TWRP, p1 UNMOUNTED)
     card-check.py --image CARD.img [--verify DIR] [NAME ...]          a card image (the host test's fake card)
+    card-check.py --adb --free BYTES                                   where a new file of BYTES would land in ONE run
+
+--free (read-only): the allocation bitmap's free runs. The kernel's exFAT driver allocates first-fit from the start of
+the volume after a mount and then continues after the last cluster it gave (next-fit), so a new file written right
+after a mount fills the first free holes first. Printed: the first free run of at least BYTES and how many free
+clusters lie before it (in holes): writing a plug file of exactly that many clusters first, in the same mount, makes
+the next file start at the run's first cluster. Also prints the exact TWRP commands.
 
 Reads only: the MBR, p1's exFAT boot sector, the folders /starbite/linux and the files' FAT entries (over adb:
 `dd if=DEV bs=512 skip=N count=M`). Per file: PASS with its first sector, sector count, how it is known to be
@@ -18,6 +25,7 @@ ap.add_argument('--adb', action='store_true')
 ap.add_argument('--dev', default='/dev/block/mmcblk0')
 ap.add_argument('--image')
 ap.add_argument('--verify')
+ap.add_argument('--free', type=int, help='bytes: where a new file of that size would land in one run')
 ap.add_argument('names', nargs='*')
 a = ap.parse_args()
 names = a.names or ['base.erofs', 'overlay.img', 'repo.erofs']
@@ -116,6 +124,72 @@ def listdir(first, nofat, size):
         else:
             i += 32
     return out
+
+if a.free:
+    # the root folder's allocation bitmap entry (type 0x81: first cluster at +20, length at +24)
+    raw, c = b'', root
+    for _ in range(64):
+        if not valid(c):
+            break
+        raw += rd(cl_sector(c), spc)
+        c = fat(c)
+    bm = None
+    for i in range(0, len(raw) - 31, 32):
+        if raw[i] == 0:
+            break
+        if raw[i] == 0x81 and not (raw[i + 1] & 1):
+            bm = struct.unpack_from('<IQ', raw, i + 20)
+            break
+    if not bm:
+        sys.exit('card-check: FAIL no allocation bitmap entry in the root folder')
+    bfirst, blen = bm
+    nb = (blen + 511) // 512
+    data = b''
+    c, left = bfirst, nb
+    while left > 0 and valid(c):       # the bitmap is contiguous in practice; follow the FAT to be safe
+        k = min(left, spc)
+        data += rd(cl_sector(c), k)
+        left -= k
+        c = fat(c) if fat(c) != 0 else c + 1
+    def used(i):
+        return (data[i >> 3] >> (i & 7)) & 1
+    need = (a.free + cb - 1) // cb
+    before, run_start, run_len, i = 0, None, 0, 0
+    total_free, best = 0, (0, 0)
+    while i < clusters:
+        if used(i):
+            i += 1
+            continue
+        j = i
+        while j < clusters and not used(j):
+            j += 1
+        n = j - i
+        total_free += n
+        if n > best[1]:
+            best = (i, n)
+        if run_start is None:
+            if n >= need:
+                run_start, run_len = i, n
+            else:
+                before += n
+        i = j
+    print(f'card-check: free clusters {total_free} ({total_free * cb >> 20} MiB); largest free run {best[1]} clusters '
+          f'({best[1] * cb >> 20} MiB) at cluster {best[0] + 2}')
+    if run_start is None:
+        sys.exit(f'card-check: FAIL no free run of {need} clusters ({a.free >> 20} MiB): use a smaller file '
+                 f'(at most {best[1] * cb >> 20} MiB here)')
+    print(f'card-check: a file of {a.free} bytes ({need} clusters) fits the free run at cluster {run_start + 2} '
+          f'({run_len} clusters, sector {cl_sector(run_start + 2)}); {before} free clusters lie before it in holes')
+    print('card-check: in TWRP, ONE mount for all of it (the driver\'s next-fit pointer resets at each mount):')
+    print(f'  adb shell "twrp mount /external_sd; mkdir -p /external_sd/starbite/linux"')
+    if before:
+        print(f'  adb shell "dd if=/dev/zero of=/external_sd/starbite/linux/plug.bin bs={cb} count={before} && sync"')
+    print('  adb push build/store/linuxcard/overlay.img /external_sd/starbite/linux/overlay.img')
+    print('  adb shell "sync; umount /external_sd"')
+    print('  python3 starbite/guest/blk/card-check.py --adb --verify build/store/linuxcard overlay.img')
+    if before:
+        print('  (plug.bin may stay: it only holds the holes; or delete it later in another mount)')
+    sys.exit(0)
 
 d = listdir(root, False, 0)
 for part in ('starbite', 'linux'):
