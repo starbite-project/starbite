@@ -621,6 +621,12 @@ Now:
   PMUCAL's reset_release sets it again). d50bb6f wanted CP_START set to call it a restart, so the second start
   was refused as "a CP that runs". From 4f93087 a restart is: reset sequencer 5 and central sequencer 0x80 (held
   in reset). Any other started state is still refused.
+  **Proven on the phone (night-1111, 4f93087):** three cycles in one boot; cycles 2 and 3 took the restart path
+  (reset assert, CP_START, central 0x00, mailbox reset; no cp_init) and were online in about 5.3 s (check 616,
+  copy 998, link 1967 ms). Each cycle: 33 queries, 33 answers, unanswered 0, by-command 3, emergency-only GSM,
+  bars 4, -54 dBm, parked. On a restart EL3's mode 2 answers 0x00 (0x0b on the first start); mode 0 still
+  accepts the image. The restart is about 0.9 s slower than a first start outside the timed phases (the 100 ms
+  GIC wait that never shows is part of it; the rest is not yet timed).
 - The core's fixed buffers are in the image's BSS: about 1.8 MiB for the link and RFS (big_rfs 640 KiB, rfs_acc
   512 KiB, o_reply 512 KiB, big_fmt 128 KiB, rings 24 KiB). The glue's EFS reader adds about 420 KiB.
 - The CP's own memory is the reserved carve-out at 0xF0000000, outside the arena, and unchanged.
