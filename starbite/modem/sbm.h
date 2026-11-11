@@ -298,6 +298,13 @@ struct sbm_sbd {
     uint8_t ch2id[256];    /* 0xFF = none */
     uint32_t errors;       /* rejected ring entries (bad index, size or address) */
     uint32_t last_size_v;  /* the raw size word of the entry sbm_sbd_get looked at last (diagnostics) */
+    /* the zero-copy DL ring (multipdp, ch 11) once filled (the attended data test): the AP owns the DL rp as the
+     * producer of empty cells and keeps its own read index; cells are SBM_ZC_CELL bytes in ZMB, right after the IPC
+     * region, and a slot holds a u64 offset from the IPC base (data = ipc + offset) */
+    uint16_t zc_pre_rp;
+    uint8_t zc_on;
+    uint32_t zc_errors, zc_zmb_rel;
+    uint16_t zc_cell[2048];    /* the cell each DL slot holds (the AP's own record; the slot's offset is checked) */
 };
 /* Lays out the descriptor region and buffer pool for chans[0..n) the way Samsung's AP does on CMD_INIT_START
  * (the CP reads this layout). Clears the descriptor region only. 0 or SBM_E*. */
@@ -312,6 +319,14 @@ int sbm_sbd_put(struct sbm_sbd *s, uint16_t ch, unsigned dir, const uint8_t *fra
  * at it in shared memory; sbm_sbd_get_done releases it. */
 int sbm_sbd_get(struct sbm_sbd *s, unsigned id, unsigned dir, const uint8_t **f, const struct sbm_plat *p);
 void sbm_sbd_get_done(struct sbm_sbd *s, unsigned id, unsigned dir, const struct sbm_plat *p);
+#define SBM_ZC_CELL      2560u       /* One UI's mif_buff cell size (dmesg: cell_size 2560, 4505 cells) */
+#define SBM_ZC_HEADROOM  64u         /* NET_HEADROOM: where the data starts in a cell */
+/* fill every free slot of ch's DL ring with a ZMB cell (zmb_rel: ZMB's offset from the IPC base, mem: ZMB's size) */
+int sbm_sbd_zc_fill(struct sbm_sbd *s, uint16_t ch, uint32_t zmb_rel, uint32_t zmb_size, const struct sbm_plat *p);
+/* the next filled DL entry: its packet (in ZMB) and length; 0 none; then sbm_sbd_zc_done gives the cell back */
+int sbm_sbd_zc_get(struct sbm_sbd *s, uint16_t ch, uint32_t zmb_rel, uint32_t zmb_size, const uint8_t **pkt,
+                   uint16_t *iod_ch, const struct sbm_plat *p);
+void sbm_sbd_zc_done(struct sbm_sbd *s, uint16_t ch, const struct sbm_plat *p);
 uint16_t sbm_sbd_rp(const struct sbm_sbd *s, unsigned id, unsigned dir);
 uint16_t sbm_sbd_wp(const struct sbm_sbd *s, unsigned id, unsigned dir);
 int sbm_sbd_id(const struct sbm_sbd *s, uint16_t ch);   /* ring id of a channel, -1 = none */
@@ -352,6 +367,19 @@ int sbm_sbd_id(const struct sbm_sbd *s, uint16_t ch);   /* ring id of a channel,
 #define SBM_CMD(g, i) ((uint16_t)(((g) << 8) | (i)))
 #define SBM_PWR_PHONE_PWR_UP     SBM_CMD(SBM_G_PWR, 0x01)
 #define SBM_PWR_PHONE_STATE      SBM_CMD(SBM_G_PWR, 0x07)
+/* GPRS (libsec-ril IPC 4.1 layouts, read 2026-11-11; docs/MODEM.md 7.9) */
+#define SBM_GPRS_DEFINE_PDP      SBM_CMD(SBM_G_GPRS, 0x01)   /* SET, 149 bytes: 01, cid, type (02 IPv4), APN[101] */
+#define SBM_GPRS_PS              SBM_CMD(SBM_G_GPRS, 0x03)   /* SET 01 00 00 = attach */
+#define SBM_GPRS_PDP_CONTEXT     SBM_CMD(SBM_G_GPRS, 0x04)   /* SET 112 (or 248) bytes: act, cid, flags=0, ...  */
+#define SBM_GPRS_IP_CONFIG       SBM_CMD(SBM_G_GPRS, 0x09)   /* NOTI: cid, u16 flags, ip, dns1, dns2, gw, mask */
+#define SBM_GPRS_CALL_STATUS     SBM_CMD(SBM_G_GPRS, 0x10)   /* NOTI: cid, status (1 connected), cause */
+#define SBM_GPRS_LTE_ATTACH      SBM_CMD(SBM_G_GPRS, 0x14)   /* SET 201 (or 337): the LTE initial-attach APN */
+#define SBM_GPRS_ATTACH_LEN      194
+#define SBM_GPRS_ATTACH_LONG_LEN 330
+#define SBM_GPRS_DEFINE_LEN      149
+#define SBM_GPRS_ACT_LEN         112
+#define SBM_GPRS_ACT_LONG_LEN    248
+#define SBM_APN_MAX              100
 #define SBM_SEC_PIN_STATUS       SBM_CMD(SBM_G_SEC, 0x01)
 #define SBM_SEC_PHONE_LOCK       SBM_CMD(SBM_G_SEC, 0x02)
 #define SBM_SEC_RSIM_ACCESS      SBM_CMD(SBM_G_SEC, 0x05)
@@ -397,6 +425,12 @@ int sbm_ipc_allowed(uint16_t cmd, uint8_t type);
 int sbm_ipc_build(uint8_t *out, uint32_t cap, uint8_t mseq, uint16_t cmd, uint8_t type,
                   const uint8_t *data, uint16_t dlen);
 /* Request + SIPC5 frame in one go (the FMT payload carries one IPC message). */
+#ifdef SBM_ATTENDED_TX
+/* the attended SIM test's builder (sbm_ipc.c): the status GETs plus the radio on / off EXECs, nothing else */
+int sbm_ipc_attended_allowed(uint16_t cmd, uint8_t type, const uint8_t *data, uint16_t dlen);
+int sbm_ipc_frame_attended(uint8_t *out, uint32_t cap, uint8_t ch, uint8_t mseq, uint16_t cmd, uint8_t type,
+                           const uint8_t *data, uint16_t dlen);
+#endif
 int sbm_ipc_frame(uint8_t *out, uint32_t cap, uint8_t ch, uint8_t mseq, uint16_t cmd, uint8_t type,
                   const uint8_t *data, uint16_t dlen);
 /* Names: caller buffers, so these are reentrant. */
@@ -445,7 +479,8 @@ static inline int sbm_gen_res_ok(const struct sbm_gen_res *r) { return (r->code 
 #define SBM_ACT_GPRS        0x02
 #define SBM_ACT_EDGE        0x03
 #define SBM_ACT_UMTS        0x04
-#define SBM_ACT_LTE         0x07       /* (newer firmwares; confirm on a capture with a SIM) */
+#define SBM_ACT_LTE         0x21       /* libsec-ril's NET_REGIST decode (2026-11-11): 0x21 LTE, 0x24 NR; 7 = unknown */
+#define SBM_ACT_NR          0x24
 
 struct sbm_reg {
     uint8_t act, domain, state, edge, reject;
@@ -473,6 +508,7 @@ void sbm_cell_line(const struct sbm_cell_state *st, char *out, size_t cap);
 void sbm_cell_line_masked(const struct sbm_cell_state *st, char *out, size_t cap);
 const char *sbm_sim_name(uint8_t status);
 const char *sbm_reg_name(uint8_t state);
+const char *sbm_operator_name(const char *plmn);   /* SCREEN ONLY: MCC-MNC -> a name, 0 if not listed */
 const char *sbm_act_name(uint8_t act);
 
 /* ------------------------------------------------------------------------------------------------ */
@@ -677,6 +713,25 @@ struct sbm_boot {
     uint32_t fmt_tx, fmt_tx_refused, fmt_resp, fmt_gen_res;
     uint32_t fmt_unmatched;            /* RESPs matching no open query of ours, by seq or by command */
     uint32_t fmt_seq_fixed;            /* RESPs with a seq that was not open, matched by command (NET_REGIST CS) */
+    /* the attended SIM test (only with SBM_ATTENDED_TX and attended == SBM_ATTENDED_MAGIC): the guards for a SIM and a
+     * registration are off, and the radio EXEC's answer is kept */
+    uint32_t attended;
+    uint8_t radio_seq, radio_res_seen;
+    uint16_t radio_res;                /* GEN_PHONE_RES code for the last radio EXEC (0x80xx accepted) */
+    /* the attended data test: the PDP context (cid 1) as the CP reports it; addresses never logged */
+    struct sbm_pdp {
+        uint8_t define_seq, act_seq, define_seen, act_seen;
+        uint16_t define_res, act_res;  /* GEN_PHONE_RES codes */
+        uint8_t have_status, status, cause, have_ip;
+        uint16_t ip_flags, mtu;
+        uint8_t ip[4], dns1[4], dns2[4], gw[4];
+        uint32_t status_notis, ip_notis;
+    } pdp;
+    uint32_t data_tx, data_rx, data_rx_zc, data_rx_bad, data_tx_err;
+    /* the attended registration helpers (attach APN, network selection automatic, PS attach): the last one's answer */
+    uint8_t ctl_seq, ctl_seen;
+    uint16_t ctl_cmd, ctl_res;
+    uint32_t noti_logged;              /* attended: unsolicited frames logged after the first ONLINE_LOG_MAX */
     uint32_t fmt_stale;                /* a seq came round again (188 queries later) while its query was still open */
     struct sbm_cell_state cell;        /* what the CP reported (decoded, identity-free) */
     uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;
@@ -822,6 +877,7 @@ struct sbm_modem {
     uint32_t restart_at[SBM_RECOVER_MAX];     /* total_ms of the recent restarts */
     uint32_t rx_seen;      /* fmt_rx + rfs_rx at the last poll (to see new traffic) */
     int32_t last_err;
+    uint32_t attended;     /* SBM_ATTENDED_MAGIC: the attended SIM test (honoured only in an SBM_ATTENDED_TX build) */
     struct sbm_modem_snap last_snap;          /* for gen: what changed since */
 };
 int sbm_modem_start(struct sbm_modem *m, const struct sbm_plat *p, struct sbm_image *im);
@@ -837,6 +893,60 @@ void sbm_modem_snapshot(struct sbm_modem *m, struct sbm_modem_snap *s);
  * SBM_EPERM not allowed (state, or the window is used up), else the start's SBM_E*. */
 int sbm_modem_recover(struct sbm_modem *m, uint32_t elapsed_ms);
 int sbm_modem_stop(struct sbm_modem *m);
+#define SBM_ATTENDED_MAGIC 0x41545444u   /* "ATTD": SIM, radio, registration */
+#define SBM_ATTENDED_DATA  0x4154544Eu   /* "ATTN": the same plus the data test (the zero-copy ring filled, GPRS) */
+#define SBM_IS_ATTENDED(x) ((x) == SBM_ATTENDED_MAGIC || (x) == SBM_ATTENDED_DATA)
+#ifdef SBM_ATTENDED_TX
+/* the attended SIM test: radio normal (on = 1) or low power mode (on = 0; the CP detaches, then RF off). The answer
+ * lands in m->b.radio_res / radio_res_seen. SBM_EPERM unless the session is attended. */
+int sbm_modem_radio(struct sbm_modem *m, int on);
+/* the attended data test: define the PDP context (cid 1, IPv4, apn); activate (on 1) or deactivate it (long: the
+ * 248-byte form); answers and NOTIs land in m->b.pdp */
+/* registration helpers (SBM_ATTENDED_MAGIC or _DATA); the answer lands in m->b.ctl_res / ctl_seen:
+ * the LTE initial-attach APN (pdp_type 2 IPv4 / 6 IPv4v6, profile 1, no credentials), network selection
+ * automatic, PS attach */
+int sbm_modem_attach_apn(struct sbm_modem *m, const char *apn, uint8_t pdp_type, int long_form);
+int sbm_modem_net_auto(struct sbm_modem *m);
+int sbm_modem_ps_attach(struct sbm_modem *m);
+int sbm_modem_pdp_define(struct sbm_modem *m, const char *apn);
+int sbm_modem_pdp_activate(struct sbm_modem *m, int on, int long_form);
+/* raw IPv4 out on the PDP channel (rmnet0, ch 10), and the receive callback for packets from either PS ring */
+int sbm_modem_ip_tx(struct sbm_modem *m, const uint8_t *pkt, uint32_t len);
+void sbm_modem_ip_rx_cb(void (*cb)(void *ctx, const uint8_t *pkt, uint32_t len), void *ctx);
+#endif
+
+/* sbm_net.c: the data test's IPv4 client (DNS A query, one HTTP GET over minimal TCP), no allocation, no logging */
+enum { SBM_NET_IDLE = 0, SBM_NET_WAITING, SBM_NET_DONE, SBM_NET_FAILED };
+#define SBM_NET_WINDOW 8192
+struct sbm_net {
+    uint8_t ip[4], dns[4], peer[4];
+    uint16_t mtu, ip_id;
+    int (*tx)(void *ctx, const uint8_t *pkt, uint32_t len);
+    void *ctx;
+    uint32_t seed;
+    /* DNS */
+    int dns_state;
+    char dns_name[128];
+    uint16_t dns_id, dns_port;
+    uint8_t dns_answer[4], dns_rcode;
+    uint32_t dns_at, dns_tries, dns_sent;
+    /* TCP + HTTP */
+    int tcp_state, http_state, http_code, tcp_connected, tcp_reset;
+    uint16_t sport, dport, req_len;
+    uint32_t iss, snd_nxt, snd_una, rcv_nxt, tcp_at, tcp_tries, tcp_sent, tcp_ooo;
+    uint8_t req[256];
+    char http_head[192];
+    uint32_t http_hdr_len, http_bytes;
+    /* counters */
+    uint32_t tx_packets, tx_errors, rx_packets, rx_other, rx_bad_csum;
+    uint8_t pkt[1600];
+};
+void sbm_net_init(struct sbm_net *n, const uint8_t ip[4], const uint8_t dns[4], uint16_t mtu,
+                  int (*tx)(void *ctx, const uint8_t *pkt, uint32_t len), void *ctx, uint32_t seed);
+int sbm_net_dns(struct sbm_net *n, const char *name, uint32_t now_ms);
+int sbm_net_http_get(struct sbm_net *n, const uint8_t ip[4], const char *host, const char *path, uint32_t now_ms);
+void sbm_net_rx(struct sbm_net *n, const uint8_t *pkt, uint32_t len);
+void sbm_net_tick(struct sbm_net *n, uint32_t now_ms);
 
 /* Park: Android's power-off. Safe to call more than once and when nothing was started. */
 int sbm_cp_park(const struct sbm_plat *p);
@@ -859,6 +969,7 @@ const char *sbm_strerror(int e);
 void sbm_memcpy(void *d, const void *s, size_t n);
 void sbm_memset(void *d, int c, size_t n);
 int sbm_memcmp(const void *a, const void *b, size_t n);
+uint32_t sbm_strlen(const char *s);
 size_t sbm_strlcpy(char *d, const char *s, size_t cap);
 /* tiny formatter: %s %u %d %x %c %% with width / zero pad, l / ll; returns the full length */
 int sbm_fmt(char *out, size_t cap, const char *fmt, ...);

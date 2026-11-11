@@ -148,6 +148,43 @@ bad:
     return 0;
 }
 
+/* The operator's name for MCC-MNC, for the SCREEN only (never logged): no SIM SPN or NITZ name is read yet. A small
+ * table of the Nordic and Baltic networks plus the large ones nearby; 0 when not listed (show the code on screen). */
+const char *sbm_operator_name(const char *plmn)
+{
+    static const struct { char code[7]; const char *name; } t[] = {
+        { "24403", "DNA" },      { "24412", "DNA" },     { "24405", "Elisa" },   { "24421", "Elisa" },
+        { "24491", "Telia" },    { "24436", "Telia / DNA" }, { "24414", "Alcom" },
+        { "24001", "Telia" },    { "24002", "3" },       { "24007", "Tele2" },   { "24008", "Telenor" },
+        { "24201", "Telenor" },  { "24202", "Telia" },   { "24214", "ice" },     { "23801", "TDC" },
+        { "23802", "Telenor" },  { "23806", "3" },       { "23820", "Telia" },   { "24801", "Telia" },
+        { "24802", "Elisa" },    { "24803", "Tele2" },   { "24701", "LMT" },     { "24702", "Tele2" },
+        { "24705", "Bite" },     { "24601", "Telia" },   { "24602", "Bite" },    { "24603", "Tele2" },
+        { "26201", "Telekom" },  { "26202", "Vodafone" }, { "26203", "O2" },     { "23410", "O2" },
+        { "23415", "Vodafone" }, { "23420", "Three" },   { "23430", "EE" },      { "20404", "Vodafone" },
+        { "20408", "KPN" },      { "20416", "Odido" },   { "25001", "MTS" },     { "25002", "MegaFon" },
+        { "25099", "Beeline" },  { "00101", "Test network" },
+    };
+    char c[7];
+    unsigned n = 0;
+    if (!plmn)
+        return 0;
+    for (unsigned i = 0; plmn[i] && n < 6; ++i)       /* digits only: "24405#" / "24405F" padding dropped */
+        if (plmn[i] >= '0' && plmn[i] <= '9')
+            c[n++] = plmn[i];
+    c[n] = 0;
+    if (n < 5)
+        return 0;
+    for (unsigned i = 0; i < sizeof(t) / sizeof(t[0]); ++i) {
+        unsigned k = 0;
+        while (t[i].code[k] && t[i].code[k] == c[k])
+            ++k;
+        if (!t[i].code[k] && !c[k])
+            return t[i].name;
+    }
+    return 0;
+}
+
 const char *sbm_sim_name(uint8_t s)
 {
     switch (s) {
@@ -187,6 +224,7 @@ const char *sbm_act_name(uint8_t a)
     case SBM_ACT_EDGE: return "EDGE";
     case SBM_ACT_UMTS: return "UMTS";
     case SBM_ACT_LTE: return "LTE";
+    case SBM_ACT_NR: return "5G";
     case 0xFF: return "any";
     default: return "?";
     }
@@ -335,7 +373,9 @@ void sbm_frame_line(const uint8_t *fr, uint32_t len, int from_cp, char *out, siz
     if (sbm_ch_is_fmt(f.ch) && !f.multi && sbm_ipc_parse(f.payload, f.payload_len, &m) == 0) {
         char nb[12];
         ADD(" | %s %s seq %u/%u", sbm_ipc_name(m.cmd, nb), sbm_ipc_type_name(m.type, from_cp), m.mseq, m.aseq);
-        if (m.data_len && sbm_ipc_payload_loggable(m.cmd)) {
+        if (m.cmd == SBM_NET_REGIST && m.data_len >= 11) {   /* no LAC / cell id: act, domain, state, reject */
+            ADD(" | act 0x%02x dom %u state %u rej %u", m.data[0], m.data[1], m.data[2], m.data[10]);
+        } else if (m.data_len && sbm_ipc_payload_loggable(m.cmd)) {
             ADD(" |");
             for (unsigned i = 0; i < m.data_len && i < 16; ++i)
                 ADD(" %02x", m.data[i]);

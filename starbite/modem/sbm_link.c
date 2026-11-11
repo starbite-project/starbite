@@ -541,6 +541,76 @@ static int online_enter(const struct sbm_plat *p, struct sbm_boot *b, struct sbm
     return 0;
 }
 
+/* the PDP context's NOTIs (libsec-ril layouts): IP_CONFIGURATION [0] cid, [1..2] u16 flags (bit0 IPv4, bit13 MTU),
+ * ip [3..6], dns1 [7..10], dns2 [11..14], gw [15..18], MTU v4 [152..153]; CALL_STATUS [0] cid, [1] status, [2] cause */
+static void gprs_noti(struct sbm_boot *b, const struct sbm_ipc_msg *m)
+{
+    const uint8_t *d = m->data;
+    if (m->cmd == SBM_GPRS_IP_CONFIG && m->data_len >= 19 && d[0] == 1) {
+        b->pdp.ip_notis++;
+        b->pdp.ip_flags = sbm_le16(d + 1);
+        sbm_memcpy(b->pdp.ip, d + 3, 4);
+        sbm_memcpy(b->pdp.dns1, d + 7, 4);
+        sbm_memcpy(b->pdp.dns2, d + 11, 4);
+        sbm_memcpy(b->pdp.gw, d + 15, 4);
+        b->pdp.mtu = (b->pdp.ip_flags & (1u << 13)) && m->data_len >= 154 ? sbm_le16(d + 152) : 1500;
+        b->pdp.have_ip = (b->pdp.ip_flags & 1u) != 0;
+    } else if (m->cmd == SBM_GPRS_CALL_STATUS && m->data_len >= 3 && d[0] == 1) {
+        b->pdp.status_notis++;
+        b->pdp.have_status = 1;
+        b->pdp.status = d[1];
+        b->pdp.cause = d[2];
+    }
+}
+
+#ifdef SBM_ATTENDED_TX
+static void (*o_ip_cb)(void *ctx, const uint8_t *pkt, uint32_t len);
+static void *o_ip_ctx;
+
+void sbm_modem_ip_rx_cb(void (*cb)(void *ctx, const uint8_t *pkt, uint32_t len), void *ctx)
+{
+    o_ip_cb = cb;
+    o_ip_ctx = ctx;
+}
+
+/* the PS rings: ch 10 (plain buffers) and ch 11 (zero-copy, ZMB cells); raw IPv4, len | iod ch << 16 */
+static void data_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd)
+{
+    int id = sbm_sbd_id(sbd, SBM_CH_PDP0);
+    const uint8_t *f;
+    int n;
+    for (unsigned k = 0; id >= 0 && k < 64 && (n = sbm_sbd_get(sbd, (unsigned)id, SBM_DL, &f, p)) != 0; ++k) {
+        if (n > 0) {
+            b->data_rx++;
+            if (o_ip_cb)
+                o_ip_cb(o_ip_ctx, f, (uint32_t)n);
+        } else {
+            b->data_rx_bad++;
+            if (n == SBM_EIO)
+                break;
+            continue;
+        }
+        sbm_sbd_get_done(sbd, (unsigned)id, SBM_DL, p);
+    }
+    for (unsigned k = 0; sbd->zc_on && k < 64; ++k) {
+        uint16_t ch = 0;
+        n = sbm_sbd_zc_get(sbd, SBM_CH_PDP_HI, sbd->zc_zmb_rel, SBM_DT_ZMB_SIZE, &f, &ch, p);
+        if (n == 0)
+            break;
+        if (n > 0) {
+            b->data_rx_zc++;
+            if (o_ip_cb)
+                o_ip_cb(o_ip_ctx, f, (uint32_t)n);
+        } else {
+            b->data_rx_bad++;
+            if (n == SBM_EIO)
+                break;
+        }
+        sbm_sbd_zc_done(sbd, SBM_CH_PDP_HI, p);
+    }
+}
+#endif
+
 /* One pass at time ms since INIT_END: the mailbox, the FMT/RFS rings (RFS answered when serving), the guards, the
  * periodic queries. 0 = go on, 1 = stopped by a guard (b->stopped_by), SBM_E* = an error or a crash command. */
 static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, uint32_t ms)
@@ -586,6 +656,7 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
                 b->fmt_rx++;
                 if (sbm_ipc_parse(msg, ml, &m) == 0) {
                     sbm_cell_update(&b->cell, &m);
+                    gprs_noti(b, &m);
                     if (m.type == SBM_IPC_RESP && m.aseq >= SBM_QSEQ_FIRST && m.aseq <= SBM_QSEQ_LAST) {
                         uint32_t bit = 1u << (m.aseq & 31);
                         int seq = m.aseq;
@@ -604,17 +675,53 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
                             b->fmt_unmatched++;
                         } else {                           /* an answer to one of our queries */
                             o_open[seq >> 5] &= ~bit;
+                            if (m.cmd == SBM_GEN_PHONE_RES && (seq == b->pdp.define_seq || seq == b->pdp.act_seq)) {
+                                struct sbm_gen_res gr;
+                                if (sbm_gen_res_decode(&m, &gr) == 0) {
+                                    if (seq == b->pdp.define_seq) {
+                                        b->pdp.define_res = gr.code;
+                                        b->pdp.define_seen = 1;
+                                        b->pdp.define_seq = 0;
+                                    } else {
+                                        b->pdp.act_res = gr.code;
+                                        b->pdp.act_seen = 1;
+                                        b->pdp.act_seq = 0;
+                                    }
+                                }
+                            }
+                            if (m.cmd == SBM_GEN_PHONE_RES && b->ctl_seq && seq == b->ctl_seq) {
+                                struct sbm_gen_res gr;
+                                if (sbm_gen_res_decode(&m, &gr) == 0) {
+                                    b->ctl_res = gr.code;
+                                    b->ctl_seen = 1;
+                                }
+                                b->ctl_seq = 0;
+                            }
+                            if (m.cmd == SBM_GEN_PHONE_RES && b->radio_seq && seq == b->radio_seq) {
+                                struct sbm_gen_res gr;
+                                if (sbm_gen_res_decode(&m, &gr) == 0) {
+                                    b->radio_res = gr.code;
+                                    b->radio_res_seen = 1;
+                                }
+                                b->radio_seq = 0;
+                            }
                             if (m.cmd == SBM_GEN_PHONE_RES)
                                 b->fmt_gen_res++;
                             else
                                 b->fmt_resp++;
                         }
                     }
-                    if (o_logged < ONLINE_LOG_MAX) {
+                    int unsolicited = m.type != SBM_IPC_RESP;
+                    if (o_logged < ONLINE_LOG_MAX ||
+                        (SBM_IS_ATTENDED(b->attended) && unsolicited && b->noti_logged < 120 &&
+                         (m.cmd != SBM_DISP_RSSI_INFO && m.cmd != SBM_DISP_ICON_INFO))) {
                         char line[200];
                         sbm_frame_line(fb, fl, 1, line, sizeof(line));
                         sbm_logf(p, "FMT: +%u %s", ms, line);
-                        o_logged++;
+                        if (o_logged < ONLINE_LOG_MAX)
+                            o_logged++;
+                        else
+                            b->noti_logged++;
                     }
                 } else {
                     b->bad_rx++;
@@ -673,7 +780,15 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
             }
         }
     }
-    /* the guards: a SIM that is not absent, any registration */
+    /* the guards: a SIM that is not absent, any registration. Off only in the attended SIM test. */
+#ifdef SBM_ATTENDED_TX
+    if (SBM_IS_ATTENDED(b->attended)) {
+        data_poll(p, b, sbd);
+        if (b->cell.have_sim)
+            b->sim_status = b->cell.sim_status;
+        goto guards_done;
+    }
+#endif
     if (b->cell.have_sim) {
         b->sim_status = b->cell.sim_status;
         if (b->cell.sim_status != SBM_SIM_ABSENT && b->cell.sim_status != SBM_SIM_ERROR) {
@@ -690,6 +805,9 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
         g_online_ms = 0xFFFFFFFFu;
         return 1;
     }
+#ifdef SBM_ATTENDED_TX
+guards_done:
+#endif
     if (b->fmt_query && ms >= 3000 &&
         (ms == 3000 || (b->query_period_ms && (ms - 3000) % b->query_period_ms == 0))) {
         int e = fmt_queries(p, b, sbd, ms, ms == 3000);
@@ -765,6 +883,9 @@ static int start_core(struct sbm_modem *m)
     m->b.stop = SBM_BOOT_ONLINE;
     m->b.rfs_serve = 1;
     m->b.keep_running = SBM_KEEP_RUNNING;
+#ifdef SBM_ATTENDED_TX
+    m->b.attended = SBM_IS_ATTENDED(m->attended) ? m->attended : 0;
+#endif
     m->ms = 0;
     m->last_rx_ms = NONE;
     m->rx_seen = 0;
@@ -833,6 +954,146 @@ int sbm_modem_query(struct sbm_modem *m)
         s_silent_since = m->ms;
     return r;
 }
+
+#ifdef SBM_ATTENDED_TX
+int sbm_modem_radio(struct sbm_modem *m, int on)
+{
+    static const uint8_t normal[2] = { 0x02, 0x02 }, low[2] = { 0x01, 0x00 };
+    if (!m->up || !SBM_IS_ATTENDED(m->b.attended))
+        return SBM_EPERM;
+    uint8_t fr[32];
+    o_mseq = o_mseq >= SBM_QSEQ_LAST || o_mseq < SBM_QSEQ_FIRST ? (uint8_t)SBM_QSEQ_FIRST : (uint8_t)(o_mseq + 1u);
+    uint8_t mseq = o_mseq;
+    int l = sbm_ipc_frame_attended(fr, sizeof(fr), SBM_CH_FMT0, mseq, SBM_PWR_PHONE_STATE, SBM_IPC_EXEC,
+                                   on ? normal : low, 2);
+    if (l < 0)
+        return l;
+    int r = put_wait_ch(m->p, o_sbd, SBM_CH_FMT0, fr, (uint32_t)l);
+    if (r < 0)
+        return r;
+    m->b.fmt_tx++;
+    o_open[mseq >> 5] |= 1u << (mseq & 31);
+    o_qcmd[mseq] = SBM_PWR_PHONE_STATE;
+    m->b.radio_seq = mseq;
+    m->b.radio_res_seen = 0;
+    if (s_silent_since == NONE)
+        s_silent_since = m->ms;
+    sbm_logf(m->p, "FMT: +%u TX ch235 | PWR_PHONE_STATE EXEC seq %u (%s)", m->ms, mseq,
+             on ? "radio normal" : "low power: detach, RF off");
+    return 0;
+}
+#endif
+
+#ifdef SBM_ATTENDED_TX
+static int send_tracked(struct sbm_modem *m, uint16_t cmd, uint8_t type, const uint8_t *d, uint16_t n, uint8_t *seq_out)
+{
+    static uint8_t fr[SBM_GPRS_ACT_LONG_LEN + 16];
+    o_mseq = o_mseq >= SBM_QSEQ_LAST || o_mseq < SBM_QSEQ_FIRST ? (uint8_t)SBM_QSEQ_FIRST : (uint8_t)(o_mseq + 1u);
+    uint8_t mseq = o_mseq;
+    int l = sbm_ipc_frame_attended(fr, sizeof(fr), SBM_CH_FMT0, mseq, cmd, type, d, n);
+    if (l < 0)
+        return l;
+    int r = put_wait_ch(m->p, o_sbd, SBM_CH_FMT0, fr, (uint32_t)l);
+    if (r < 0)
+        return r;
+    m->b.fmt_tx++;
+    o_open[mseq >> 5] |= 1u << (mseq & 31);
+    o_qcmd[mseq] = cmd;
+    *seq_out = mseq;
+    if (s_silent_since == NONE)
+        s_silent_since = m->ms;
+    return 0;
+}
+
+static int ctl_send(struct sbm_modem *m, uint16_t cmd, const uint8_t *d, uint16_t n, const char *what)
+{
+    if (!m->up || !SBM_IS_ATTENDED(m->b.attended))
+        return SBM_EPERM;
+    m->b.ctl_seen = 0;
+    m->b.ctl_cmd = cmd;
+    int r = send_tracked(m, cmd, SBM_IPC_SET, d, n, &m->b.ctl_seq);
+    sbm_logf(m->p, "FMT: +%u TX ch235 | %s (%s)", m->ms, what, r == 0 ? "sent" : sbm_strerror(r));
+    return r;
+}
+
+int sbm_modem_attach_apn(struct sbm_modem *m, const char *apn, uint8_t pdp_type, int long_form)
+{
+    static uint8_t d[SBM_GPRS_ATTACH_LONG_LEN];
+    uint32_t l = sbm_strlen(apn);
+    uint16_t n = long_form ? SBM_GPRS_ATTACH_LONG_LEN : SBM_GPRS_ATTACH_LEN;
+    if (l == 0 || l > SBM_APN_MAX || (pdp_type != 0x02 && pdp_type != 0x06))
+        return SBM_EINVAL;
+    sbm_memset(d, 0, sizeof(d));
+    d[0] = 1;
+    d[1] = 1;                            /* profile 1 */
+    d[2] = pdp_type;
+    sbm_memcpy(d + 3, apn, l);
+    d[long_form ? 328 : 192] = pdp_type; /* roaming PDP type */
+    return ctl_send(m, SBM_GPRS_LTE_ATTACH, d, n, long_form ? "GPRS_LTE_ATTACH SET (initial-attach APN, long form)"
+                                                            : "GPRS_LTE_ATTACH SET (initial-attach APN)");
+}
+
+int sbm_modem_net_auto(struct sbm_modem *m)
+{
+    static const uint8_t d[8] = { 0x02, 0, 0, 0, 0, 0, 0, 0xff };
+    return ctl_send(m, SBM_NET_PLMN_SEL, d, 8, "NET_PLMN_SEL SET automatic");
+}
+
+int sbm_modem_ps_attach(struct sbm_modem *m)
+{
+    static const uint8_t d[3] = { 1, 0, 0 };
+    return ctl_send(m, SBM_GPRS_PS, d, 3, "GPRS_PS SET attach");
+}
+
+int sbm_modem_pdp_define(struct sbm_modem *m, const char *apn)
+{
+    uint8_t d[SBM_GPRS_DEFINE_LEN];
+    uint32_t l = sbm_strlen(apn);
+    if (!m->up || m->b.attended != SBM_ATTENDED_DATA)
+        return SBM_EPERM;
+    if (l == 0 || l > SBM_APN_MAX)
+        return SBM_EINVAL;
+    sbm_memset(d, 0, sizeof(d));
+    d[0] = 1;
+    d[1] = 1;                            /* cid 1 = rmnet0 */
+    d[2] = 0x02;                         /* IPv4 */
+    sbm_memcpy(d + 3, apn, l);
+    m->b.pdp.define_seen = 0;
+    int r = send_tracked(m, SBM_GPRS_DEFINE_PDP, SBM_IPC_SET, d, sizeof(d), &m->b.pdp.define_seq);
+    sbm_logf(m->p, "FMT: +%u TX ch235 | GPRS_DEFINE_PDP SET cid 1 IPv4 (%s)", m->ms, r == 0 ? "sent" : sbm_strerror(r));
+    return r;
+}
+
+int sbm_modem_pdp_activate(struct sbm_modem *m, int on, int long_form)
+{
+    static uint8_t d[SBM_GPRS_ACT_LONG_LEN];
+    if (!m->up || m->b.attended != SBM_ATTENDED_DATA)
+        return SBM_EPERM;
+    sbm_memset(d, 0, sizeof(d));
+    d[0] = on ? 1 : 0;
+    d[1] = 1;
+    m->b.pdp.act_seen = 0;
+    int r = send_tracked(m, SBM_GPRS_PDP_CONTEXT, SBM_IPC_SET, d,
+                         long_form ? SBM_GPRS_ACT_LONG_LEN : SBM_GPRS_ACT_LEN, &m->b.pdp.act_seq);
+    sbm_logf(m->p, "FMT: +%u TX ch235 | GPRS_PDP_CONTEXT SET cid 1 %s (%s form, %s)", m->ms, on ? "activate" : "deactivate",
+             long_form ? "long" : "short", r == 0 ? "sent" : sbm_strerror(r));
+    return r;
+}
+
+int sbm_modem_ip_tx(struct sbm_modem *m, const uint8_t *pkt, uint32_t len)
+{
+    if (!m->up || m->b.attended != SBM_ATTENDED_DATA || !m->b.pdp.have_ip)
+        return SBM_EPERM;
+    if (!pkt || len < 20 || (pkt[0] >> 4) != 4 || len > 2048)
+        return SBM_EINVAL;
+    int r = put_wait_ch(m->p, o_sbd, SBM_CH_PDP0, pkt, len);   /* rmnet0's ring; size_v carries ch 10 */
+    if (r < 0)
+        m->b.data_tx_err++;
+    else
+        m->b.data_tx++;
+    return r;
+}
+#endif
 
 void sbm_modem_status(const struct sbm_modem *m, char *out, size_t cap)
 {
@@ -999,6 +1260,15 @@ int sbm_link_boot(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boo
     r = sbm_sbd_init(&sbd, p->ipc, im->mm.ipc_size, sbm_starlte_chans, sbm_starlte_nchans);
     if (r < 0)
         return r;
+#ifdef SBM_ATTENDED_TX
+    /* the attended test: the zero-copy DL ring gets its ZMB cells now, as Android's setup_zerocopy_adaptor does at
+     * the link's setup (ZMB must follow the IPC region: offsets are from the IPC base) */
+    if (b->attended == SBM_ATTENDED_DATA && im->mm.zmb_off == im->mm.ipc_off + im->mm.ipc_size && im->mm.zmb_size) {
+        int z = sbm_sbd_zc_fill(&sbd, SBM_CH_PDP_HI, im->mm.ipc_size, im->mm.zmb_size, p);
+        sbm_logf(p, "link: zero-copy DL ring (ch %u): %d ZMB cells of %u bytes handed to the CP", SBM_CH_PDP_HI, z,
+                 SBM_ZC_CELL);
+    }
+#endif
     bar(p);
     if (!msg_send(p, SBM_CMD2INT(SBM_CMD_PIF_INIT_DONE)))
         return SBM_EPERM;

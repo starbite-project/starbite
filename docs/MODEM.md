@@ -627,6 +627,10 @@ Now:
   bars 4, -54 dBm, parked. On a restart EL3's mode 2 answers 0x00 (0x0b on the first start); mode 0 still
   accepts the image. The restart is about 0.9 s slower than a first start outside the timed phases (the 100 ms
   GIC wait that never shows is part of it; the rest is not yet timed).
+- **25-minute run (night-1111, 4f93087):** 1500 s, 1639 queries, 1639 answers (149 matched by command, one per
+  round), stalls 0, crashes 0, parked. Emergency-only GSM, bars 4, -56 to -58 dBm throughout the surviving snapshots.
+- **Starbite OS on v2:** kern/modem.c ported on branch claude/sbos-modem-v2 (60cbc74, on the Next UI branch):
+  streamed image, MIN_ARENA 4 MiB, automatic restart after a stall or crash. Not yet run on the phone.
 - The core's fixed buffers are in the image's BSS: about 1.8 MiB for the link and RFS (big_rfs 640 KiB, rfs_acc
   512 KiB, o_reply 512 KiB, big_fmt 128 KiB, rings 24 KiB). The glue's EFS reader adds about 420 KiB.
 - The CP's own memory is the reserved carve-out at 0xF0000000, outside the arena, and unchanged.
@@ -669,6 +673,98 @@ Not available yet, and why:
 
 Rules unchanged: GET-only, no call / SMS / SS frame exists, no transmit without the user and a SIM, the PLMN and
 IMEI never in git or a log, EFS never written (RAM copy, restored from the pristine copy at every start).
+
+### 7.8 The attended real-SIM test (`modemsim`, 2026-11-11)
+The user asked for cellular in Starbite OS and is at the phone with their own SIM. This is the first test that
+transmits, so it has its own image, gated twice:
+- **Build gate:** `SBM_ATTENDED_TX` is defined only for `modemsim.img` (probe/build.sh builds it beside
+  `modemprobe.img` and refuses either image if the attended symbols are where they should not be). Starbite OS and
+  every other image are built without it: their guards and their GET-only builder are unchanged.
+- **Session gate:** the path is live only for a session started with `mo.attended = SBM_ATTENDED_MAGIC` (the key
+  `modemsim`). Then the SIM and registration guards are off and `sbm_modem_radio` may send exactly two frames:
+  `PWR_PHONE_STATE EXEC 02 02` (radio normal, as libsec-ril's RadioPowerUpHandler) and `EXEC 01 00` (low power
+  mode: the CP detaches, then RF off). `sbm_ipc_frame_attended` checks the data byte for byte; CALL, SMS, SS, SAT,
+  IMEI and RFS are refused by the same group check as before. No PIN is ever sent.
+- **Log:** as before, the PLMN, LAC/cell id and identities never reach the log. MISC_TIME_INFO (NITZ, carries the
+  PLMN) is no longer printed. The operator's name comes from a small MCC-MNC table (`sbm_operator_name`) and is
+  drawn on the screen only.
+- **Flow** (probe/main.c `simtest`): start (streamed); wait for the SIM (60 s): absent = FAIL, PIN/PUK = STOP (no
+  PIN entry); radio normal; wait for CS or PS home/roaming (`sim_reg_s`, 180 s); hold `sim_hold` s (60) with the
+  signal; low power; wait until not registered (20 s); park. Pass line `SIMTEST: PASS: ...`.
+- **Host test:** the attended build runs the whole suite plus `test_attended`: exactly 12 (cmd, type) pairs pass the
+  attended builder (the 11 GETs + the radio EXEC), wrong data is refused, a non-attended session with a SIM still
+  parks on the guard, the attended one registers after radio normal and detaches after low power, no PLMN in the
+  log, a PIN-locked SIM reports LOCK_SC and nothing is sent.
+- **Not in this image:** data (PDP). It needs the GPRS layouts from libsec-ril, the zero-copy downlink pool and a
+  small raw-IP stack (sbnet is Ethernet-based); that is the next image.
+
+#### Result simtest-a1 (2026-11-11 15:40, 4c4b544, the user's SIM, no PIN; `build/modem/simtest-a1/pmsg.txt`)
+- **SIM:** status `00` (ready) after 5 s. With a SIM in, PWR_PHONE_PWR_UP reads `aa` (`53` without).
+- **Not registered.** For 180 s: CS state 1 (not registered, not searching) on LTE (act 0x21), PLMN set,
+  bars 2..4, -65..-108 dBm, reject cause 0; PS never answered as PS.
+- **Answer codes:**
+  - radio normal answered `0x8005` at once. That is the same code every PWR_PHONE_STATE GET gets with a SIM in, so
+    probably not a refusal of the radio.
+  - low power answered `0x8000`, then parked.
+- **Reading:** the CP camps but never starts the LTE attach and the network sends no reject. libsec-ril sends the LTE
+  initial-attach APN (`0x0D14`) at IMSI-ready and after radio-up; we did not.
+- **A2 (modemsim 2nd image):**
+  - after radio-on: `GPRS_LTE_ATTACH 0x0D14 SET` (legacy 194 bytes, the long 330 if refused): `01`, profile 1,
+    IPv4v6 (`sim_ia_type=2` for IPv4), the APN, the roaming type = the type, no credentials;
+  - then registration with escalation while not registered: 60 s; network selection automatic
+    (`NET_PLMN_SEL SET 02 00x6 ff`) and 40 s; PS attach (`0x0D03 SET 01 00 00`) and 40 s; a radio off/on cycle
+    plus the attach APN again and 60 s;
+  - FMT lines decode NET_REGIST as act/domain/state/reject (never LAC/cell); attended runs log up to 120 more
+    unsolicited frames.
+
+#### Result simtest-a2 (2026-11-11 16:25, 2ec1b73, the test SIM, `build/modem/simtest-a2/pmsg.txt`): PASS
+- **The attach APN was the missing piece.** It was answered `0x8000`. NET_REGIST then went state 7 -> 1 -> 2 (home)
+  on LTE within 2.8 s, and REG passed at the first check (5 s).
+- **Hold:** CS and PS home for 60 s, bars 2..3, -77 dBm. The network's name arrived as `0x080C NOTI` (142 bytes,
+  NITZ) right after the registration.
+- **Data:**
+  - define and activate both answered `0x8000`; IPv4, DNS and MTU 1500 came at once;
+  - DNS answered in 117 ms; HTTP GET `/generate_204` returned 204 in 38 ms;
+  - all 5 downlink packets arrived through the zero-copy ring; 0 errors;
+  - deactivate: status 3.
+- **Detach:** low power `0x8000`, not registered after 286 ms, parked. 292 of 292 queries answered, no stalls or
+  crashes.
+- **The CS registration arrives with domain 1** (dom 1), not 2.
+
+### 7.9 The attended data test (`modemsim`, part B, 2026-11-11)
+Same image and gates as 7.8, with a second session magic: `SBM_ATTENDED_DATA` ("ATTN", `sim_data=1`, the default)
+also fills the zero-copy ring at link setup and allows the GPRS frames and the IP channel. `SBM_ATTENDED_MAGIC`
+(`sim_data=0`) is part A exactly: the link is laid out as before and no GPRS frame can be built. After the 60 s hold:
+- **GPRS frames** (libsec-ril IPC 4.1, read from the binary; the attended builder checks each byte):
+  - `DEFINE_PDP 0x0D01 SET` (149 bytes): `01`, cid 1, `02` IPv4, the APN (1..100 of `[A-Za-z0-9.-]`), zeros.
+  - `PDP_CONTEXT 0x0D04 SET` (112 bytes; 248 is the long form, sent only if the short one is refused):
+    act 1 / 0, cid 1, zeros: no user, password or auth.
+  - `PS 0x0D03 SET 01 00 00` (attach): allowed but not sent unless needed. The CP attaches by itself on LTE.
+  - From the CP: `IP_CONFIGURATION 0x0D09 NOTI` (cid, u16 flags, IPv4 [3..6], DNS1 [7..10], DNS2 [11..14],
+    gateway [15..18], MTU [152..153] when flag bit 13) and `CALL_STATUS 0x0D10 NOTI` (cid, status 1 = up, cause).
+    Neither payload is printed; the log says "assigned" / "given" only.
+- **Packets** (link_device_memory_sbd.c, One UI's dmesg): raw IPv4, no link header.
+  - Uplink goes on the hi-prio PS ring (ch 10, `size_v = len | 10 << 16`: rmnet0, cid 1), as the kernel does
+    without CONFIG_MODEM_IF_QOS.
+  - Downlink comes on ch 10 (plain buffers) or on the zero-copy ring ch 11. There the AP owns the DL `rp` as the
+    producer of empty cells, and each 8-byte slot holds a u64 offset from the IPC base to a 2560-byte ZMB cell
+    (+64 headroom).
+  - The ZMB pool follows the 5 MiB IPC region. No smapper on this phone: One UI never logs "Smapper is activated".
+  - `sbm_sbd_zc_fill` hands 2047 cells to the CP when the rings are laid out (attended sessions only).
+    `sbm_sbd_zc_get` checks every offset against our own per-slot record, and `zc_done` hands the same cell back
+    at once.
+- **sbm_net.c**: a freestanding IPv4 client.
+  - One DNS A query to the context's DNS server, then one HTTP/1.1 GET over a minimal TCP client: in-order receive,
+    MSS option, retransmission of the SYN, the request and the FIN.
+  - The test fetches `http://connectivitycheck.gstatic.com/generate_204`, Android's own connectivity check, and
+    passes on `204`.
+  - No TLS. The phone's address and the DNS servers are never logged; the resolved public address is.
+- **Host test**:
+  - The fake CP answers the GPRS frames and runs a small network behind the PS rings: DNS on ch 10, TCP on the
+    zero-copy ring.
+  - Both rounds run define -> activate -> IP config -> DNS -> HTTP 204 -> deactivate -> detach -> park. The second
+    round also refuses the short activate form (the long-form fallback) and loses the first SYN.
+  - The builder surface is pinned (APN charset, no user/password, cid 1 only), and no address reaches the log.
 
 ## 8. Later stages (not started)
 
