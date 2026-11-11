@@ -717,6 +717,20 @@ transmits, so it has its own image, gated twice:
   - FMT lines decode NET_REGIST as act/domain/state/reject (never LAC/cell); attended runs log up to 120 more
     unsolicited frames.
 
+#### Result simtest-a2 (2026-11-11 16:25, 2ec1b73, the test SIM, `build/modem/simtest-a2/pmsg.txt`): PASS
+- **The attach APN was the missing piece.** It was answered `0x8000`. NET_REGIST then went state 7 -> 1 -> 2 (home)
+  on LTE within 2.8 s, and REG passed at the first check (5 s).
+- **Hold:** CS and PS home for 60 s, bars 2..3, -77 dBm. The network's name arrived as `0x080C NOTI` (142 bytes,
+  NITZ) right after the registration.
+- **Data:**
+  - define and activate both answered `0x8000`; IPv4, DNS and MTU 1500 came at once;
+  - DNS answered in 117 ms; HTTP GET `/generate_204` returned 204 in 38 ms;
+  - all 5 downlink packets arrived through the zero-copy ring; 0 errors;
+  - deactivate: status 3.
+- **Detach:** low power `0x8000`, not registered after 286 ms, parked. 292 of 292 queries answered, no stalls or
+  crashes.
+- **The CS registration arrives with domain 1** (dom 1), not 2.
+
 ### 7.9 The attended data test (`modemsim`, part B, 2026-11-11)
 Same image and gates as 7.8, with a second session magic: `SBM_ATTENDED_DATA` ("ATTN", `sim_data=1`, the default)
 also fills the zero-copy ring at link setup and allows the GPRS frames and the IP channel. `SBM_ATTENDED_MAGIC`
