@@ -90,6 +90,15 @@ if exist %D%\glx86\sbgl32.exe pushd %D%\glx86
 if exist %D%\glx86\sbgl32.exe sbgl32.exe hw %D%\glx86\sbgl.log C:\ProgramData\Starbite\umdlog\sbgl-x86.ppm >> %D%\gputest.log 2>&1
 if exist %D%\glx86\sbgl32.exe echo sbgl x86 exit %errorlevel% >> %D%\gputest.log
 if exist %D%\glx86\sbgl32.exe popd
+rem UMDX (docs/WIN11-GPU-CAPS.md 5c): does Windows load the ARM64X sbumd (one file, an ARM64 view for native
+rem processes and an ARM64EC view for x64 ones) and the ARM64EC one? Load only, from this folder: nothing is
+rem installed, DWM keeps the T44 sbumd.dll, and no DDI entry point is called.
+if exist %D%\sbumd-arm64x.dll sbload.exe %D%\sbumd-arm64x.dll OpenAdapter10 OpenAdapter10_2 >> %D%\gputest.log 2>&1
+if exist %D%\sbumd-arm64x.dll echo sbload arm64 arm64x exit %errorlevel% >> %D%\gputest.log
+if exist %D%\sbumd-arm64x.dll sbload64.exe %D%\sbumd-arm64x.dll OpenAdapter10 OpenAdapter10_2 >> %D%\gputest.log 2>&1
+if exist %D%\sbumd-arm64x.dll echo sbload x64 arm64x exit %errorlevel% >> %D%\gputest.log
+if exist %D%\sbumd-ec.dll sbload64.exe %D%\sbumd-ec.dll OpenAdapter10 OpenAdapter10_2 >> %D%\gputest.log 2>&1
+if exist %D%\sbumd-ec.dll echo sbload x64 ec exit %errorlevel% >> %D%\gputest.log
 rem T37: the sweep (sb-sweep.bat: ~27 surfaces, each as a GDI shot and a DWM dump, then the event logs); it replaces
 rem T36's shell steps (the keyboard A/B and the hit grids are in it). Run with --full-sec 900 and no keys self-test.
 if exist %D%\sb-sweep.bat call %D%\sb-sweep.bat

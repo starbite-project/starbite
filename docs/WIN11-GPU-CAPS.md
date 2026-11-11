@@ -265,8 +265,25 @@ FL 11_0 and D3D12 need tessellation, which the G72 doesn't have.
   - it is in T44 as `glec\`, and in the GD kit as `gd-gl-on.cmd ec`.
 - **The x86 (32-bit) ICD builds too** (`~/sbmesa/build-wgl-x86`, `cross-x86.ini` + `-mfxsr`: clang-cl declares
   `_fxsave`, used by `u_cpu_detect.c`, only with FXSR enabled). In T44 as `glx86\` with `sbgl32.exe`.
-- **ARM64X sbumd** (D3D11 for x64 games): being built (patches 0141+, `build/win/umd-arm64x/`). It needs a careful
-  phone test, since installing it replaces the UMD for DWM too.
+- **ARM64X sbumd (D3D11 for x64 games) builds** (`build/win/umd-arm64x/`: BUILD.md, `link-arm64x.sh`,
+  `verify_arm64x.py`; 35 static checks pass):
+  - **The build:** the ARM64EC sbumd needed only 0140; the ARM64X file is linked by lld-link 20.1.2 with four
+    workarounds:
+    - two EC `/alternatename` and export fixes, as for the GL ICD;
+    - lld 20 writes one TLS directory for both views, and its template started one byte late (fixed by listing the
+      ARM64 `tlssup.obj` first);
+    - the EC `_tls_index` was never set (`tlsindex_ec.c` copies it in the EC `_pRawDllMain`).
+  - **The experimental ARM64X `libgallium_wgl.dll`** from the first ARM64EC run has those TLS defects. Don't use it
+    until it is relinked the same way.
+  - **Verified offline:**
+    - both views export the same 49 names as T44's sbumd;
+    - the native view's export RVAs, entry point, imports (177) and `.pdata` (5016 functions) equal the plain ARM64
+      build's, and `.text` differs only in ADRP/imm12 page offsets;
+    - the EC view's `OpenAdapter10*` are x64 thunks into ARM64EC code with entry thunks;
+    - the runtime callbacks go through `__os_arm64x_check_icall` with exit thunks.
+  - **Unknown:** whether the loader accepts lld's ARM64X image, and DDI behaviour across the EC boundary.
+  - **T44 load-tests it** with `sbload.exe`/`sbload64.exe` (`tools/win/mesa/tests/sbload.cpp`) without installing
+    it. Only if both load does a guarded stage install it as sbumd.dll.
 - **Stage `sbwddm-t44`:** T42 + the KMD hang forensics (WIN11-GPU.md §6.52) + the GL tests on ARM64 and x64.
 - **The attended GD kit `build/win/gl-kit`:**
   - `gd-gl-on.cmd` copies the x64 ICD into the Geometry Dash folder and marks it; `gd-gl-off.cmd` removes exactly
