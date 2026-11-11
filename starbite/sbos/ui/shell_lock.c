@@ -1157,9 +1157,9 @@ static void under_rows(void *v, int y0, int y1)
         }
     }
 }
-static void flatten_lock(void)
+static void flatten_lock(int ground)          /* ground: also when the wallpaper changed (idle; not mid-swipe) */
 {
-    if (flat_ver == lock_ver && flat_ground == C->ground_gen) return;
+    if (flat_ver == lock_ver && (!ground || flat_ground == C->ground_gen)) return;
     tk_flatten(&lockg, &lockflat.bmp, &flatmask, .5f);
     under_ctx U = { &lockflat.bmp, &flatmask };
     tk_par_rows(0, lockflat.bmp.h, under_rows, &U);
@@ -3302,7 +3302,7 @@ static void set_lock(float y)
         lockg.hidden = 0;
         lockflat.hidden = 1;
     } else {
-        flatten_lock();
+        flatten_lock(0);
         lockg.hidden = 1;
         lockflat.hidden = 0;
         lockflat.y = PT(y) / 2;           /* the layer's offset is scaled with it */
@@ -4477,7 +4477,7 @@ void sh_idle(void)
         relink();
         place_list();
     }
-    if (locked && lockY == 0 && !focus_on) flatten_lock();
+    if (locked && lockY == 0 && !focus_on) flatten_lock(1);
     /* home at rest: the Control Centre's snapshot and grid ready before the pull */
     if (!locked && !CCS.on && !AP.on && (!CCS.built || cc_stale)) { build_cc(); cc_stale = 0; }
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
