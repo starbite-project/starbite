@@ -651,3 +651,10 @@ works. 2314 MHz heats the cluster faster than a 0.5 s beat can follow.
 (throttle 80 C, down > 75 C, up < 65 C). `windows-big3i.uefi` (dca74622...), SOLO `starbite-uefi-m3all3i.bin` (b6a726f7...).
 Fixed 1794 MHz peaked at 73 C (big3-1794), so 2002 MHz should stay below the 80 C throttle under the same autotest load.
 If big3i shows n0 and hi < 0x50, it can replace big3-1794 as the daily image (+12% clock).
+
+## 32. big3i passes daily-use criteria (02:09)
+
+`=M3H t3C hi4E s0 c2 g1 n0`: peak 78 C, no throttle, ended at 2002 MHz; np03, clean restart, hive clean. The main session
+makes `windows-big3i.uefi` a visible catalog row "Windows 11 (big cores)" beside the unchanged win11 row. User-facing
+status: side-session-notes `win-m3-clean-user-status.md`. Known limits on that row: x86/x64 emulation (section 28) and
+the winsqlite3 services (section 25). Next: m3all4 (attended), then a big4i variant.
