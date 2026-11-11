@@ -523,7 +523,8 @@ int gpucomp_selftest_step(void);        /* P4: the GPU compositor's test (gpucom
  * rect with a rounded edge, faded by screen y, 3-sliced, and glass (the backdrop bd through the 8-bit mask) under it */
 #define GPUCOMP_MAX_QUADS 127U
 enum { GC_SOLID = 1, GC_BILINEAR = 2, GC_GLASS = 4, GC_FADE = 8, GC_SLICE_V = 16, GC_SLICE_H = 32,
-       GC_OPAQUE = 64 };                /* (CPU only) every px of src is opaque: what is under it is culled */
+       GC_OPAQUE = 64,                  /* (CPU only) every px of src is opaque: what is under it is culled */
+       GC_LENS = 256 };                 /* v6, with GC_GLASS: mask is a lens map (lens.h; mstride in px): Liquid Glass */
 #define GC_OCC_PX 32                    /* gc_quad.occ: per 32 x 32 px block of src, 0 empty, 1 partial, 2 opaque */
 struct gc_quad {
     const void *src;
