@@ -281,12 +281,13 @@ static void build_comp(nir_builder *b)
  *   screen px; nearest, as bw_row), +124 backdrop w | h << 16 ------------------------------------------------- */
 /* ---- COMP2 v3 (the UI's frame): 4 pixels a thread (x0 .. x0 + 3, one 128-bit store), 8 x 16 threads a workgroup
  * (32 x 16 px: half a bin). A header at O_C2 ([0..7] dst, [8] stride px, [12] w, [16] h, [20] n, [24] bg), then n
- * quads of C2_QB bytes the CPU precomputed (gpucomp_compose), read as 128-bit loads once per 4 pixels:
- *   +0   cx0 cy0 cx1 cy1        the clip                    +16  ccx ccy ex ey     its centre, half size - radius
- *   +32  radius flags alpha solid                           +48  dx0 dy0 isx isy   screen -> source px
- *   +64  ft it fb ib            fade = sat((fy-ft)*it) * sat((fb-fy)*ib)  (none: always 1)
- *   +80  wf hf len k            source extent, 3-slice len and middle scale
- *   +96  s0 s1 src(64)          +112 stride w h mstride     +128 mask(64) backdrop(64)   +144 bstride bk bw bh
+ * quads of C2_QB bytes the CPU precomputed (gpucomp_compose), read as 128-bit loads once per pixel group. v5's
+ * order: what every quad needs first (one load each), the rest loaded only by a quad whose flags use it:
+ *   +0   cx0 cy0 cx1 cy1        the clip                    +16  dx0 dy0 isx isy   screen -> source px
+ *   +32  flags alpha wf hf      wf x hf: the source extent  +48  src(64) stride solid
+ *   +64  radius ccx ccy ex      (flag 128) the rounded clip: centre, half size - radius   +80  ey ft it fb
+ *   +96  ib len k s0            (flag 8) fade = sat((fy-ft)*it) * sat((fb-fy)*ib); (16 / 32) the 3-slice
+ *   +112 s1 mstride mask(64)    +128 backdrop(64) bstride bk   +144 bw bh -  -     (flag 4) glass
  * and the bins at O_BIN: one per 32 x 32 px (BIN_W per row), BIN_B bytes: [0] count (255: not damaged, the pixels
  * keep what the buffer holds), [1..] quad indices bottom to top. A pixel only visits its bin's quads. */
 #ifndef C2_PX
@@ -358,22 +359,24 @@ static void build_comp2(nir_builder *b)
                                   nir_iand(b, nir_flt(b, fx[0], ch(b, c, 2)), nir_fge(b, fx[C2_PX - 1], ch(b, c, 0))));
          nir_push_if(b, span);
          {
-            nir_def *v2 = ld4(b, nir_iadd_imm(b, q, 32)), *v3 = ld4(b, nir_iadd_imm(b, q, 48));
-            nir_def *v4 = ld4(b, nir_iadd_imm(b, q, 64)), *v5 = ld4(b, nir_iadd_imm(b, q, 80));
-            nir_def *rad = ch(b, v2, 0), *flags = ch(b, v2, 1);
-            /* the rounded clip's coverage per pixel (an AA edge), only for a quad with a radius */
+            /* v5: the common path loads v1-v3 once per pixel group; the rest only for a quad that uses it */
+            nir_def *v1 = ld4(b, nir_iadd_imm(b, q, 16)), *v2 = ld4(b, nir_iadd_imm(b, q, 32));
+            nir_def *v3 = ld4(b, nir_iadd_imm(b, q, 48));
+            nir_def *flags = ch(b, v2, 0), *wf = ch(b, v2, 2), *hf = ch(b, v2, 3);
+            /* the rounded clip's coverage per pixel (an AA edge), only for a quad with a radius (flag 128) */
             nir_variable *cv[C2_PX];
             for (unsigned k = 0; k < C2_PX; ++k) {
                cv[k] = nir_local_variable_create(b->impl, glsl_float_type(), "cov");
                nir_store_var(b, cv[k], nir_imm_float(b, 1), 1);
             }
-            nir_push_if(b, nir_flt(b, nir_imm_float(b, 0), rad));
+            nir_push_if(b, flag(b, flags, 128));
             {
-               nir_def *v1 = ld4(b, nir_iadd_imm(b, q, 16));
-               nir_def *qy = nir_fsub(b, nir_fabs(b, nir_fsub(b, fy, ch(b, v1, 1))), ch(b, v1, 3));
+               nir_def *v4 = ld4(b, nir_iadd_imm(b, q, 64)), *v5 = ld4(b, nir_iadd_imm(b, q, 80));
+               nir_def *rad = ch(b, v4, 0);
+               nir_def *qy = nir_fsub(b, nir_fabs(b, nir_fsub(b, fy, ch(b, v4, 2))), ch(b, v5, 0));
                nir_def *my = nir_fmax(b, qy, nir_imm_float(b, 0)), *my2 = nir_fmul(b, my, my);
                for (unsigned k = 0; k < C2_PX; ++k) {
-                  nir_def *qx = nir_fsub(b, nir_fabs(b, nir_fsub(b, fx[k], ch(b, v1, 0))), ch(b, v1, 2));
+                  nir_def *qx = nir_fsub(b, nir_fabs(b, nir_fsub(b, fx[k], ch(b, v4, 1))), ch(b, v4, 3));
                   nir_def *mx = nir_fmax(b, qx, nir_imm_float(b, 0));
                   nir_def *d = nir_fsub(b, nir_fadd(b, nir_fsqrt(b, nir_ffma(b, mx, mx, my2)),
                                                     nir_fmin(b, nir_fmax(b, qx, qy), nir_imm_float(b, 0))), rad);
@@ -381,60 +384,70 @@ static void build_comp2(nir_builder *b)
                }
             }
             nir_pop_if(b, NULL);
-            nir_def *fade = nir_fmul(b, nir_fsat(b, nir_fmul(b, nir_fsub(b, fy, ch(b, v4, 0)), ch(b, v4, 1))),
-                                     nir_fsat(b, nir_fmul(b, nir_fsub(b, ch(b, v4, 2), fy), ch(b, v4, 3))));
-            nir_def *afade = nir_fmul(b, ch(b, v2, 2), fade);
-            /* (u, v) per pixel; a 3-slice maps them (its s0, s1 loaded only then) */
+            /* the fade (flag 8): sat((fy - ft) * it) * sat((fb - fy) * ib) */
+            nir_variable *fv = nir_local_variable_create(b->impl, glsl_float_type(), "fade");
+            nir_store_var(b, fv, ch(b, v2, 1), 1);
+            nir_push_if(b, flag(b, flags, 8));
+            {
+               nir_def *v5 = ld4(b, nir_iadd_imm(b, q, 80)), *v6 = ld4(b, nir_iadd_imm(b, q, 96));
+               nir_def *fade = nir_fmul(b, nir_fsat(b, nir_fmul(b, nir_fsub(b, fy, ch(b, v5, 1)), ch(b, v5, 2))),
+                                        nir_fsat(b, nir_fmul(b, nir_fsub(b, ch(b, v5, 3), fy), ch(b, v6, 0))));
+               nir_store_var(b, fv, nir_fmul(b, ch(b, v2, 1), fade), 1);
+            }
+            nir_pop_if(b, NULL);
+            nir_def *afade = nir_load_var(b, fv);
+            /* (u, v) per pixel; a 3-slice maps them (flags 16 / 32: its len, k, s0, s1 loaded only then) */
             nir_variable *uk[C2_PX], *vvar = nir_local_variable_create(b->impl, glsl_float_type(), "v");
-            nir_store_var(b, vvar, nir_fmul(b, nir_fsub(b, fy, ch(b, v3, 1)), ch(b, v3, 3)), 1);
-            nir_def *u0 = nir_fmul(b, nir_fsub(b, fx[0], ch(b, v3, 0)), ch(b, v3, 2));
+            nir_store_var(b, vvar, nir_fmul(b, nir_fsub(b, fy, ch(b, v1, 1)), ch(b, v1, 3)), 1);
+            nir_def *u0 = nir_fmul(b, nir_fsub(b, fx[0], ch(b, v1, 0)), ch(b, v1, 2));
             for (unsigned k = 0; k < C2_PX; ++k) {
                uk[k] = nir_local_variable_create(b->impl, glsl_float_type(), "u");
-               nir_store_var(b, uk[k], k ? nir_ffma(b, ch(b, v3, 2), nir_imm_float(b, (float)k), u0) : u0, 1);
+               nir_store_var(b, uk[k], k ? nir_ffma(b, ch(b, v1, 2), nir_imm_float(b, (float)k), u0) : u0, 1);
             }
             nir_push_if(b, flag(b, flags, 48));
             {
-               nir_def *v6 = ld4(b, nir_iadd_imm(b, q, 96));
-               nir_def *len = ch(b, v5, 2), *ks = ch(b, v5, 3), *s0 = ch(b, v6, 0), *s1 = ch(b, v6, 1);
+               nir_def *v6 = ld4(b, nir_iadd_imm(b, q, 96)), *v7 = ld4(b, nir_iadd_imm(b, q, 112));
+               nir_def *len = ch(b, v6, 1), *ks = ch(b, v6, 2), *s0 = ch(b, v6, 3), *s1 = ch(b, v7, 0);
                nir_def *vv0 = nir_load_var(b, vvar);
-               nir_store_var(b, vvar, nir_bcsel(b, flag(b, flags, 16), slice2(b, vv0, len, s0, s1, ch(b, v5, 1), ks), vv0), 1);
+               nir_store_var(b, vvar, nir_bcsel(b, flag(b, flags, 16), slice2(b, vv0, len, s0, s1, hf, ks), vv0), 1);
                for (unsigned k = 0; k < C2_PX; ++k) {
                   nir_def *u = nir_load_var(b, uk[k]);
-                  nir_store_var(b, uk[k], nir_bcsel(b, flag(b, flags, 32), slice2(b, u, len, s0, s1, ch(b, v5, 0), ks), u), 1);
+                  nir_store_var(b, uk[k], nir_bcsel(b, flag(b, flags, 32), slice2(b, u, len, s0, s1, wf, ks), u), 1);
                }
             }
             nir_pop_if(b, NULL);
             nir_def *v = nir_load_var(b, vvar);
-            nir_def *vin = nir_iand(b, nir_fge_imm(b, v, 0), nir_flt(b, v, ch(b, v5, 1)));
+            nir_def *vin = nir_iand(b, nir_fge_imm(b, v, 0), nir_flt(b, v, hf));
             for (unsigned k = 0; k < C2_PX; ++k) {
                nir_def *u = nir_load_var(b, uk[k]);
                nir_def *alpha = nir_fmul(b, afade, nir_load_var(b, cv[k]));
                nir_def *in = nir_iand(b, nir_iand(b, nir_fge(b, fx[k], ch(b, c, 0)), nir_flt(b, fx[k], ch(b, c, 2))),
-                                      nir_iand(b, nir_iand(b, nir_fge_imm(b, u, 0), nir_flt(b, u, ch(b, v5, 0))), vin));
+                                      nir_iand(b, nir_iand(b, nir_fge_imm(b, u, 0), nir_flt(b, u, wf)), vin));
                nir_push_if(b, nir_iand(b, in, nir_flt(b, nir_imm_float(b, 0), alpha)));
                {
                   nir_variable *src = nir_local_variable_create(b->impl, glsl_vec4_type(), "src");
                   nir_push_if(b, flag(b, flags, 1));
                   {
-                     nir_store_var(b, src, unpack(b, ch(b, v2, 3)), 0xf);
+                     nir_store_var(b, src, unpack(b, ch(b, v3, 3)), 0xf);
                   }
                   nir_push_else(b, NULL);
                   {
-                     nir_def *v6 = ld4(b, nir_iadd_imm(b, q, 96)), *v7 = ld4(b, nir_iadd_imm(b, q, 112));
-                     nir_def *base = p64(b, v6, 2), *stride = ch(b, v7, 0), *sw = ch(b, v7, 1), *sh = ch(b, v7, 2);
+                     nir_def *base = p64(b, v3, 0), *stride = ch(b, v3, 2);
+                     nir_def *sw = nir_f2u32(b, wf), *sh = nir_f2u32(b, hf);
                      nir_def *iu = nir_f2i32(b, u), *iv = nir_f2i32(b, v);
                      /* glass: the backdrop (nearest, its own scale) through the mask (nearest, the bitmap's px) */
                      nir_push_if(b, flag(b, flags, 4));
                      {
-                        nir_def *v8 = ld4(b, nir_iadd_imm(b, q, 128)), *v9 = ld4(b, nir_iadd_imm(b, q, 144));
-                        nir_def *off = nir_iadd(b, nir_imul(b, iv, ch(b, v7, 3)), iu);
-                        nir_def *mw = ld32(b, nir_iadd(b, p64(b, v8, 0), nir_u2u64(b, nir_iand_imm(b, off, ~3))));
+                        nir_def *v7 = ld4(b, nir_iadd_imm(b, q, 112)), *v8 = ld4(b, nir_iadd_imm(b, q, 128));
+                        nir_def *v9 = ld4(b, nir_iadd_imm(b, q, 144));
+                        nir_def *off = nir_iadd(b, nir_imul(b, iv, ch(b, v7, 1)), iu);
+                        nir_def *mw = ld32(b, nir_iadd(b, p64(b, v7, 2), nir_u2u64(b, nir_iand_imm(b, off, ~3))));
                         nir_def *m = nir_iand_imm(b, nir_ushr(b, mw, nir_ishl_imm(b, nir_iand_imm(b, off, 3), 3)), 0xff);
                         nir_def *wv = nir_fmul(b, nir_fmul_imm(b, nir_u2f32(b, m), 1.0 / 255.0), alpha);
-                        nir_def *bk = ch(b, v9, 1);
+                        nir_def *bk = ch(b, v8, 3);
                         nir_def *bx = nir_f2i32(b, nir_fmul(b, nir_fadd_imm(b, fx[k], -0.5), bk));
                         nir_def *by = nir_f2i32(b, nir_fmul(b, nir_fadd_imm(b, fy, -0.5), bk));
-                        nir_def *bc = fetch(b, p64(b, v8, 2), ch(b, v9, 0), ch(b, v9, 2), ch(b, v9, 3), bx, by);
+                        nir_def *bc = fetch(b, p64(b, v8, 0), ch(b, v8, 2), ch(b, v9, 0), ch(b, v9, 1), bx, by);
                         nir_store_var(b, acc[k], nir_flrp(b, nir_load_var(b, acc[k]), bc, wv), 0xf);
                      }
                      nir_pop_if(b, NULL);

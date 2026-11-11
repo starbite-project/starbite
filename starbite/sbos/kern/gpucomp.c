@@ -341,24 +341,8 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
             }
             return 0;
         }
-        /* the shader's precomputed record (mesa-compjob.c, COMP2 v2) */
+        /* the shader's precomputed record (mesa-compjob.c, COMP2 v5's order: the common fields first) */
         float rad = s->radius >= .01f ? s->radius : 0, hx = (s->cx1 - s->cx0) * .5f, hy = (s->cy1 - s->cy0) * .5f;
-        q[0] = fbits(s->cx0);
-        q[1] = fbits(s->cy0);
-        q[2] = fbits(s->cx1);
-        q[3] = fbits(s->cy1);
-        q[4] = fbits(s->cx0 + hx);
-        q[5] = fbits(s->cy0 + hy);
-        q[6] = fbits(hx - rad);
-        q[7] = fbits(hy - rad);
-        q[8] = fbits(rad);
-        q[9] = s->flags;
-        q[10] = fbits(s->alpha);
-        q[11] = s->solid;
-        q[12] = fbits(s->dx0);
-        q[13] = fbits(s->dy0);
-        q[14] = fbits(s->isx);
-        q[15] = fbits(s->isy);
         /* the fade as two ramps: sat((fy - ft) * it) * sat((fb - fy) * ib); a ramp of no height is a step */
         float ft = -1e6f, it = 1, fb = 1e6f, ib = 1;
         if (s->flags & GC_FADE) {
@@ -367,28 +351,43 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
             if (s->fb0 < s->fb1) { fb = s->fb1; ib = 1.0f / (s->fb1 - s->fb0); }
             else { fb = s->fb0 + .01f; ib = 100; }
         }
-        q[16] = fbits(ft);
-        q[17] = fbits(it);
-        q[18] = fbits(fb);
-        q[19] = fbits(ib);
         float mid = s->len - s->s0 - s->s1, srch = (float)((s->flags & GC_SLICE_H) ? s->w : s->h);
-        q[20] = fbits((float)s->w);
-        q[21] = fbits((float)s->h);
-        q[22] = fbits(s->len);
-        q[23] = fbits(mid < 1e-3f ? 0 : (srch - s->s0 - s->s1) / mid);
-        q[24] = fbits(s->s0);
-        q[25] = fbits(s->s1);
-        put64(q + 26, sva);
-        q[28] = s->stride;
-        q[29] = s->w;
-        q[30] = s->h;
-        q[31] = s->mstride;
-        put64(q + 32, mva);
-        put64(q + 34, bva);
-        q[36] = s->bstride;
-        q[37] = fbits(s->bk);
-        q[38] = s->bw;
-        q[39] = s->bh;
+        q[0] = fbits(s->cx0);
+        q[1] = fbits(s->cy0);
+        q[2] = fbits(s->cx1);
+        q[3] = fbits(s->cy1);
+        q[4] = fbits(s->dx0);
+        q[5] = fbits(s->dy0);
+        q[6] = fbits(s->isx);
+        q[7] = fbits(s->isy);
+        q[8] = (s->flags & 63U) | (rad > 0 ? 128U : 0);
+        q[9] = fbits(s->alpha);
+        q[10] = fbits((float)s->w);
+        q[11] = fbits((float)s->h);
+        put64(q + 12, sva);
+        q[14] = s->stride;
+        q[15] = s->solid;
+        q[16] = fbits(rad);
+        q[17] = fbits(s->cx0 + hx);
+        q[18] = fbits(s->cy0 + hy);
+        q[19] = fbits(hx - rad);
+        q[20] = fbits(hy - rad);
+        q[21] = fbits(ft);
+        q[22] = fbits(it);
+        q[23] = fbits(fb);
+        q[24] = fbits(ib);
+        q[25] = fbits(s->len);
+        q[26] = fbits(mid < 1e-3f ? 0 : (srch - s->s0 - s->s1) / mid);
+        q[27] = fbits(s->s0);
+        q[28] = fbits(s->s1);
+        q[29] = s->mstride;
+        put64(q + 30, mva);
+        put64(q + 32, bva);
+        q[34] = s->bstride;
+        q[35] = fbits(s->bk);
+        q[36] = s->bw;
+        q[37] = s->bh;
+        q[38] = q[39] = 0;
         /* its bins: the clip, within the source's extent on screen (u in [0, w or len), v in [0, h or len)) */
         if (!(s->alpha > 0))
             continue;
