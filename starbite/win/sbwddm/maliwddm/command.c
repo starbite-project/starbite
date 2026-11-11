@@ -1035,6 +1035,33 @@ static BOOLEAN Reap(MW_ADAPTER *A, BOOLEAN CheckTimeout)
     }
     A->LastFaultStatus = gpu->LastMmuFault;
     A->LastFaultAddress = gpu->LastFaultAddress;
+    {
+        /* T39: this failure against the newest freed ranges (newest first) */
+        LONG n = A->FaultCount;
+        ULONG ms = (ULONG)((KeQueryInterruptTime() - A->StartTime) / 10000);
+        ULONG64 va = gpu->MmuIrqStatus != 0 ? gpu->LastFaultAddress : 0;
+        LONG next = A->FreedNext;
+        A->Faults[n & 15].Va = va;
+        A->Faults[n & 15].Status = gpu->MmuIrqStatus != 0 ? gpu->LastMmuFault : 0;
+        A->Faults[n & 15].Js = A->LastJsStatus;
+        A->Faults[n & 15].Ms = ms;
+        A->Faults[n & 15].Submits = A->Submits;
+        A->Faults[n & 15].Kind = va ? 1 : 0;      /* 0 not an MMU fault, 1 not in a recently freed range */
+        for (LONG k = 1; va && k <= 256 && k <= next; k++) {
+            LONG i = (next - k) & 255;
+            ULONG64 base = A->Freed[i].Va, end = base + ((ULONG64)A->Freed[i].Pages << PAGE_SHIFT);
+            if (base && va >= (base & ~0xFFFULL) && va < end) {
+                A->Faults[n & 15].Kind = 2;       /* inside a range freed before */
+                A->Faults[n & 15].FreedVa = base;
+                A->Faults[n & 15].FreedPages = A->Freed[i].Pages;
+                A->Faults[n & 15].Creator[0] = A->Freed[i].Creator[0];
+                A->Faults[n & 15].Creator[1] = A->Freed[i].Creator[1];
+                A->Faults[n & 15].AgoMs = ms - A->Freed[i].Ms;
+                break;
+            }
+        }
+        A->FaultCount = n + 1;
+    }
     A->Queue[A->QHead].Next = A->Queue[A->QHead].Count;
     gpu->Resets++;
     if (!MkGpuBringup(gpu))

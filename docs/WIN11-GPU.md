@@ -1801,6 +1801,31 @@ Every app failure must be a removed device that the app or DWM recovers from.
   UTC, when the M3 boots of the same install began.
 - **Stage:** `build/win/stage/sbwddm-t38` (= T37 + sbumd 4828e13d).
 
+### 6.48 T38's run and T39: the GPU faults' root cause (sb-patches/0133), the ledger moved, the disk
+
+- **GPU faults in every cycle** (KMD counters in `Enum\ACPI\STRB0072\0\Device Parameters\sbwddm`): 51 resets in
+  T32c-B, 27 in T33b, 8 in T34, 57 in T38's sweep. Every one is a translation fault on a read (MMU 0x289002c3).
+- **The cause:** T38's canary fired in File Explorer: `panfrost_draw_vbo+0x8fc` handed it "resource 0x7FF9…" with
+  magic "alwa", on a draw with a NULL input layout.
+  - d3d10umd binds empty/NULL vertex buffer slots as user buffers pointing at a static `dummy[4]` in the DLL (svga
+    takes user buffers; this path bypasses u_vbuf).
+  - Panfrost reads `buffer.resource` as a `panfrost_resource`, so the draw's attribute address is garbage.
+  - **0133:** empty slots get a real 4 KiB zero buffer (`Device::sb_null_vb`). `sbtex vertexid` (crashing since
+    T13m) uses the same path.
+- **File Explorer:** the list and navigation render; the XAML header (tabs, address bar, command bar) is black,
+  because its draws are the ones above.
+- **The disk:** C: had 432-482 MiB free (97 MiB at the end of the reference sweep). DWM got OUTOFVIDEOMEMORY 7 times
+  while the KMD held at most 826 of 1536 MiB, so commit ran out.
+  - **0132:** no dumps below 300 MiB free, and quarter-size DWM dumps.
+  - **sbshow:** the same guard, plus memory figures before each shot.
+- **The ledger:** 0xFED1E000 is cleared between boots (T38 `post/`: "no record"). It moved to 0xFED13C00, the last
+  KiB of ramoops zone 0, which the loader only snapshots.
+- **The reference:** it ran at 2220x1080 landscape. `--reference` now sets sbdisplay Modes=1 DefaultMode=0
+  Rotation=0 (1440x2960 portrait).
+- **KMD diagnostics:** rings of freed GPU ranges (256) and failed jobs (16), with each fault address matched against
+  the freed ranges. Output: `Live_FaultLog` and `Live_FaultCount`.
+- **Stage:** `build/win/stage/sbwddm-t39`.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

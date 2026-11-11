@@ -1,0 +1,39 @@
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index 18db6c4..a4b1049 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -274,13 +274,20 @@ sb_sample_present(struct pipe_context *pipe, Resource *res, unsigned alloc, unsi
+                   !_stricmp(e, "SystemSettings.exe") || !_stricmp(e, "StartMenuExperienceHost.exe") ||
+                   !_stricmp(e, "ShellExperienceHost.exe") || !_stricmp(e, "SearchHost.exe"));
+       }
+-      if ((shell && dumps < 3 && (n == 2 || n == 8 || n == 20)) || force) {
++      /* sb-patches/0132 (T39): no dump below 300 MiB free on C: (T38's sweep took the user's disk from 482 to
++       * 97 MiB, and DWM's commit ran out), and DWM's named dumps at quarter size (0.8 MB each, was 3.2) */
++      ULARGE_INTEGER dfree, dtot;
++      bool room = GetDiskFreeSpaceExA("C:\\", &dfree, &dtot, NULL) && (dfree.QuadPart >> 20) >= 300;
++      if (!room && ((shell && dumps < 3 && (n == 2 || n == 8 || n == 20)) || force))
++         DebugPrintf("sbumd:   dump skipped: C: has %llu MiB free\n", (unsigned long long)(dfree.QuadPart >> 20));
++      if (room && ((shell && dumps < 3 && (n == 2 || n == 8 || n == 20)) || force)) {
+          char path[MAX_PATH];
+          if (force)
+             dwm_dumps++;
+          else
+             dumps++;
+-         const unsigned w2 = W / 2, h2 = H / 2;
++         const unsigned step = force && dwm_name[0] ? 4 : 2;
++         const unsigned w2 = W / step, h2 = H / step;
+          FILE *f, *fa;
+          if (force && dwm_name[0]) {
+             /* sb-patches/0130: dump-dwm-<surface>-p<n>.ppm, colour only (DWM's frame is opaque) */
+@@ -299,9 +306,9 @@ sb_sample_present(struct pipe_context *pipe, Resource *res, unsigned alloc, unsi
+             fprintf(fa, "P5\n%u %u\n255\n", w2, h2);
+             uint8_t *line = (uint8_t *)malloc((size_t)w2 * 4);
+             for (unsigned y = 0; line && y < h2; y++) {
+-               const uint32_t *row = (const uint32_t *)(map + (size_t)(2 * y) * stride);
++               const uint32_t *row = (const uint32_t *)(map + (size_t)(step * y) * stride);
+                for (unsigned x = 0; x < w2; x++) {
+-                  uint32_t v = row[2 * x];
++                  uint32_t v = row[step * x];
+                   uint8_t r = bgra ? (v >> 16) & 0xff : v & 0xff, b = bgra ? v & 0xff : (v >> 16) & 0xff;
+                   line[3 * x] = r;
+                   line[3 * x + 1] = (v >> 8) & 0xff;

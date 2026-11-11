@@ -264,8 +264,28 @@ static int write_dwmframe(const char *name, const SYSTEMTIME &t)
     return 0;
 }
 
+/* T39: free space on C: (MiB) and the memory figures, printed with every snap; shots stop below 300 MiB */
+static unsigned long long free_mib(void)
+{
+    ULARGE_INTEGER fr, tot;
+    return GetDiskFreeSpaceExA("C:\\", &fr, &tot, nullptr) ? fr.QuadPart >> 20 : 0;
+}
+
+static void mem_line(void)
+{
+    MEMORYSTATUSEX m = { sizeof(m) };
+    GlobalMemoryStatusEx(&m);
+    printf("sbshow:   memory load %lu%%, RAM free %llu of %llu MiB, commit free %llu of %llu MiB; C: %llu MiB free\n",
+           m.dwMemoryLoad, m.ullAvailPhys >> 20, m.ullTotalPhys >> 20, m.ullAvailPageFile >> 20,
+           m.ullTotalPageFile >> 20, free_mib());
+}
+
 static int shot(const char *name)
 {
+    if (free_mib() < 300) {
+        printf("sbshow: shot %s SKIPPED: C: has %llu MiB free (< 300)\n", name, free_mib());
+        return 1;
+    }
     int w = GetSystemMetrics(SM_CXSCREEN), h = GetSystemMetrics(SM_CYSCREEN);
     HDC sdc = GetDC(nullptr), mdc = CreateCompatibleDC(sdc);
     BITMAPINFO bi = {};
@@ -508,7 +528,10 @@ int main(int argc, char **argv)
     if (!strcmp(argv[1], "shot") && argc >= 3)
         return shot(argv[2]);
     if (!strcmp(argv[1], "snap") && argc >= 3) {
+        mem_line();
         int r = shot(argv[2]);
+        if (free_mib() < 300)
+            return 1;                     /* DWM's dump too (sbumd also checks) */
         return write_dwmframe(argv[2], t) | r;
     }
     if (!strcmp(argv[1], "keys") && argc >= 3)
@@ -541,6 +564,10 @@ int main(int argc, char **argv)
         CreateThread(nullptr, 0, dialog_close, (LPVOID)(UINT_PTR)(sec > 0 ? sec : 10), 0, nullptr);
         MessageBoxW(nullptr, L"Starbite sweep: a standard Windows message box (closes by itself).",
                     L"Starbite sweep", MB_OKCANCEL | MB_ICONWARNING | MB_SETFOREGROUND);
+        return 0;
+    }
+    if (!strcmp(argv[1], "mem")) {
+        mem_line();
         return 0;
     }
     if (!strcmp(argv[1], "disk")) {

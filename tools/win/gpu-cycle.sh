@@ -210,7 +210,11 @@ install() {
         python3 "$HS" "$tmp/SYSTEM" "$tmp/S0" param sbwddm --root FullGuardBoots=0 >/dev/null
         # unattended cycles: the guard never clears itself (each install resets it); --install-default sets 1
         # T17: Live_ logging rate and hive flushes (1 s / every second in test cycles; the user's install 10 s / 60 s)
-        python3 "$HS" "$tmp/S0" "$tmp/S1" param sbwddm FullMode="$([ "${reference:-0}" = 1 ] && echo 0 || echo 1)" GuardAutoClear="${guard_auto:-0}" \
+        # T39: --reference also pins the display-only mode to the panel's own 1440x2960 portrait (sbdisplay Modes=1,
+        # DefaultMode=0, Rotation=0: T38's reference ran 2220x1080 landscape); other installs write the defaults
+        if [ "${reference:-0}" = 1 ]; then dmodes="Modes=1 DefaultMode=0 Rotation=0"; else dmodes="Modes=7 DefaultMode=1 Rotation=1"; fi
+        # shellcheck disable=SC2086
+        python3 "$HS" "$tmp/S0" "$tmp/S1" param sbwddm $dmodes FullMode="$([ "${reference:-0}" = 1 ] && echo 0 || echo 1)" GuardAutoClear="${guard_auto:-0}" \
             LiveSec="${live_sec:-1}" LiveFlushSec="${live_flush:-1}" ScanFlip="${scan_flip:-1}" CachedBltReads="${cached_blt:-1}" ParallelBlt="${par_blt:-1}" BltNoDrain="${no_drain:-1}" >/dev/null
     else cp "$tmp/SYSTEM" "$tmp/S1"; fi
     if python3 tools/woa/hive.py "$tmp/S1" 'ControlSet001\Services\sbwdog' 2>/dev/null | grep -q "Start"; then cp "$tmp/S1" "$tmp/S2"

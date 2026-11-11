@@ -306,10 +306,20 @@ struct _MW_ADAPTER {
     ULONG Patches, PatchAllocations, PatchPatchLocations, PatchSegment0;
     ULONG PresentBlts, PresentFills, PresentSkips;
     ULONG64 PatchAddress0;
+    /* T39: GPU fault diagnosis. Every freed GPU range (newest 256) and every failed job (newest 16) with its fault
+     * address checked against them: an address in a range freed moments before = a buffer freed while the GPU
+     * still used it. Read racily from the ISR (diagnostics only). Live_FaultLog (REG_SZ) has the text. */
+    struct { ULONG64 Va; ULONG Pages; ULONG Creator[2]; ULONG Ms; } Freed[256];
+    volatile LONG FreedNext;
+    struct { ULONG64 Va, FreedVa; ULONG Status, Js, Ms, AgoMs, FreedPages, Creator[2], Kind, Submits; } Faults[16];
+    volatile LONG FaultCount;
+    LONG FaultLogged;
 };
 
 /* ---- trace: Seen_<ddi>, Fail_<ddi> in the device's registry key ---- */
 void MwLog(MW_ADAPTER *A, PCWSTR Name, ULONG Value);
+void MwLogSz(MW_ADAPTER *A, PCWSTR Name, const char *Text);   /* T39 */
+void MwFaultLog(MW_ADAPTER *A);                                /* T39: Live_FaultLog when new faults came */
 void MwLogFlush(MW_ADAPTER *A);
 void MwCopyStart(MW_ADAPTER *A);  /* T27 */
 void MwScanFallback(MW_ADAPTER *A, MW_ALLOCATION **Owners, ULONG N);

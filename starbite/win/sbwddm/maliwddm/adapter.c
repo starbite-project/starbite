@@ -4,6 +4,7 @@
  * escapes, and the registry trace that found every M5.1 bug.
  */
 #include "maliwddm.h"
+#include <ntstrsafe.h>
 
 /* ---- trace ---- */
 
@@ -53,6 +54,65 @@ void MwLog(MW_ADAPTER *A, PCWSTR Name, ULONG Value)
         ZwClose(sub);
     }
     ZwClose(key);
+}
+
+/* T39: a text value in the same trace key (REG_SZ; the ASCII text widened). */
+void MwLogSz(MW_ADAPTER *A, PCWSTR Name, const char *Text)
+{
+    HANDLE key, sub;
+    UNICODE_STRING name, subName = RTL_CONSTANT_STRING(L"sbwddm");
+    OBJECT_ATTRIBUTES oa;
+    static WCHAR w[2048];                 /* the guard thread only */
+    ULONG n = 0;
+
+    if (A == NULL || A->Pdo == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return;
+    for (; Text[n] && n < RTL_NUMBER_OF(w) - 1; n++)
+        w[n] = (WCHAR)(UCHAR)Text[n];
+    w[n] = 0;
+    if (!NT_SUCCESS(IoOpenDeviceRegistryKey(A->Pdo, PLUGPLAY_REGKEY_DEVICE, KEY_WRITE, &key)))
+        return;
+    InitializeObjectAttributes(&oa, &subName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, key, NULL);
+    if (NT_SUCCESS(ZwCreateKey(&sub, KEY_WRITE, &oa, 0, NULL, REG_OPTION_NON_VOLATILE, NULL))) {
+        RtlInitUnicodeString(&name, Name);
+        (void)ZwSetValueKey(sub, &name, 0, REG_SZ, w, (n + 1) * sizeof(WCHAR));
+        if (!A->LogBatch)
+            (void)ZwFlushKey(sub);
+        ZwClose(sub);
+    }
+    ZwClose(key);
+}
+
+/* T39: the newest 16 failed jobs as text, when there are new ones (guard thread, once a second). */
+void MwFaultLog(MW_ADAPTER *A)
+{
+    static char t[2048];
+    LONG n = A->FaultCount, first = n > 16 ? n - 16 : 0;
+    size_t used = 0;
+    if (n == A->FaultLogged)
+        return;
+    A->FaultLogged = n;
+    t[0] = 0;
+    for (LONG k = first; k < n && used + 160 < sizeof(t); k++) {
+        const char *cr = (const char *)A->Faults[k & 15].Creator;
+        char c[9] = { 0 };
+        for (int j = 0; j < 8; j++)
+            c[j] = cr[j] >= 32 && cr[j] < 127 ? cr[j] : (cr[j] ? '?' : 0);
+        if (A->Faults[k & 15].Kind == 2)
+            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used,
+                "#%ld %lu.%03lus js 0x%02lx mmu 0x%08lx va 0x%llx IN A FREED RANGE 0x%llx+%lu pages of %s, freed %lu ms before; ",
+                k + 1, A->Faults[k & 15].Ms / 1000, A->Faults[k & 15].Ms % 1000, A->Faults[k & 15].Js,
+                A->Faults[k & 15].Status, A->Faults[k & 15].Va, A->Faults[k & 15].FreedVa, A->Faults[k & 15].FreedPages,
+                c, A->Faults[k & 15].AgoMs);
+        else
+            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, "#%ld %lu.%03lus js 0x%02lx mmu 0x%08lx va 0x%llx %s; ",
+                k + 1, A->Faults[k & 15].Ms / 1000, A->Faults[k & 15].Ms % 1000, A->Faults[k & 15].Js,
+                A->Faults[k & 15].Status, A->Faults[k & 15].Va,
+                A->Faults[k & 15].Kind ? "not in a recently freed range" : "no MMU fault");
+        used = strlen(t);
+    }
+    MwLogSz(A, L"Live_FaultLog", t);
+    MwLog(A, L"Live_FaultCount", (ULONG)n);
 }
 
 /* S9 port (T13c): delete the previous boot's trace subkey, so nothing stale is read as this boot's (T13b's

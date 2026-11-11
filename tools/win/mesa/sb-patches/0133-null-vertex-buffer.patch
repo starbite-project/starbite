@@ -1,0 +1,111 @@
+diff --git a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+index 50958ad..7a9366f 100644
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -403,6 +403,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
+    }
+ 
+    pipe_resource_reference(&pDevice->index_buffer, NULL);
++   pipe_resource_reference(&pDevice->sb_null_vb, NULL);   /* sb-patches/0133 */
+ 
+    static struct pipe_sampler_view * sampler_views[PIPE_MAX_SHADER_SAMPLER_VIEWS];
+    memset(sampler_views, 0, sizeof sampler_views);
+diff --git a/src/gallium/frontends/d3d10umd/InputAssembly.cpp b/src/gallium/frontends/d3d10umd/InputAssembly.cpp
+index 0f9b5d3..e958eff 100644
+--- a/src/gallium/frontends/d3d10umd/InputAssembly.cpp
++++ b/src/gallium/frontends/d3d10umd/InputAssembly.cpp
+@@ -35,6 +35,7 @@
+ 
+ #include "InputAssembly.h"
+ #include "State.h"
++#include "util/u_inlines.h"
+ 
+ #include "Debug.h"
+ #include "Format.h"
+@@ -113,6 +114,25 @@ IaSetTopology(D3D10DDI_HDEVICE hDevice,                        // IN
+  * ----------------------------------------------------------------------
+  */
+ 
++
++/* Starbite (sb-patches/0133, docs/WIN11-GPU.md 6.48): d3d10umd bound every empty or NULL vertex buffer slot as a USER
++ * buffer pointing at a static dummy[4] in this DLL (svga takes user buffers; Panfrost does not: no u_vbuf on this
++ * path, and it reads buffer.resource as a panfrost_resource). A draw whose layout referenced such a slot (XAML,
++ * DComp: SV_VertexID quads with a NULL input layout keep the last layout) handed Panfrost a pointer into sbumd's
++ * .rdata: T38's canary saw "magic 'alwa'" from panfrost_draw_vbo, and the GPU read a garbage address (8-57 MMU
++ * faults and resets per cycle since T32c). Empty slots now hold a real 4 KiB zero buffer, which is what D3D defines
++ * an unbound slot to read (zero stride, zero offset). */
++static struct pipe_resource *
++SbNullVb(Device *pDevice)
++{
++   if (!pDevice->sb_null_vb) {
++      static const uint32_t zeros[1024] = { 0 };
++      pDevice->sb_null_vb = pipe_buffer_create_with_data(pDevice->pipe, PIPE_BIND_VERTEX_BUFFER,
++                                                         PIPE_USAGE_IMMUTABLE, sizeof(zeros), zeros);
++   }
++   return pDevice->sb_null_vb;
++}
++
+ void APIENTRY
+ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,                                     // IN
+                    UINT StartBuffer,                                             // IN
+@@ -153,13 +173,22 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,
+          pipe_resource_reference(&vb->buffer.resource, resource);
+       }
+       else {
++         struct pipe_resource *nvb = SbNullVb(pDevice);
+          pDevice->vertex_strides[StartBuffer + i] = 0;
+          vb->buffer_offset = 0;
+-         if (!vb->is_user_buffer) {
+-            pipe_resource_reference(&vb->buffer.resource, NULL);
+-            vb->is_user_buffer = true;
++         if (nvb) {
++            if (vb->is_user_buffer) {
++               vb->buffer.resource = NULL;
++               vb->is_user_buffer = false;
++            }
++            pipe_resource_reference(&vb->buffer.resource, nvb);
++         } else {
++            if (!vb->is_user_buffer) {
++               pipe_resource_reference(&vb->buffer.resource, NULL);
++               vb->is_user_buffer = true;
++            }
++            vb->buffer.user = dummy;
+          }
+-         vb->buffer.user = dummy;
+       }
+    }
+ 
+@@ -167,11 +196,18 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,
+       struct pipe_vertex_buffer *vb = &pDevice->vertex_buffers[i];
+ 
+       /* XXX this is odd... */
+-      if (!vb->is_user_buffer && !vb->buffer.resource) {
++      if ((!vb->is_user_buffer && !vb->buffer.resource) || vb->is_user_buffer) {
++         struct pipe_resource *nvb = SbNullVb(pDevice);
+          pDevice->vertex_strides[i] = 0;
+          vb->buffer_offset = 0;
+-         vb->is_user_buffer = true;
+-         vb->buffer.user = dummy;
++         if (nvb) {
++            vb->is_user_buffer = false;
++            vb->buffer.resource = NULL;
++            pipe_resource_reference(&vb->buffer.resource, nvb);
++         } else {
++            vb->is_user_buffer = true;
++            vb->buffer.user = dummy;
++         }
+       }
+    }
+ 
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index 698452c..74c500f 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -85,6 +85,7 @@ struct Device
+    struct pipe_vertex_buffer vertex_buffers[PIPE_MAX_ATTRIBS];
+    unsigned vertex_strides[PIPE_MAX_ATTRIBS];
+    struct pipe_resource *index_buffer;
++   struct pipe_resource *sb_null_vb;   /* sb-patches/0133: what an unbound vertex buffer slot reads (4 KiB of zeros) */
+    unsigned restart_index;
+    unsigned index_size;
+    unsigned ib_offset;

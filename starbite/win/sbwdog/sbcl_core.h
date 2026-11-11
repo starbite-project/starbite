@@ -20,7 +20,11 @@ typedef unsigned int sbcl_u32;
 typedef unsigned long long sbcl_u64;
 #endif
 
-#define SBCL_PA 0xFED1E000ULL
+/* T39: T35-T38 used 0xFED1E000, which does not survive the restart (T38: the clean boot found no record; the
+ * loader keeps only the ramoops zones 0xFED10000..0xFED18000, which it snapshots and never writes). The record now
+ * sits in the last KiB of zone 0 (the dmesg zone; Windows boots never write it, Linux writes it only on a panic). */
+#define SBCL_PA 0xFED13000ULL             /* the page mapped */
+#define SBCL_OFF 0xC00U                   /* the record's offset in it */
 #define SBCL_SIZE 0x1000U
 #define SBCL_MAGIC 0x4C434253U            /* 'SBCL' */
 #define SBCL_VERSION 1U

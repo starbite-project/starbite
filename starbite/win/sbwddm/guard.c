@@ -276,6 +276,7 @@ static VOID GuardThread(PVOID Ctx)
             a->RateJobs10 = (a->JobsDone - rateJobs) * 10 / span;
             rateBusy = busy; rateWait = wait; rateCpu = cpu; ratePres = a->Presents; rateJobs = a->JobsDone; rateSec = secs;
             LiveCounters(a, prev);
+            MwFaultLog(a);                    /* T39 */
             MwLog(a, L"Live_Seconds", secs);
         }
         /* T13f: a visible probe of the framebuffer path, independent of DWM and the GPU: a magenta band over

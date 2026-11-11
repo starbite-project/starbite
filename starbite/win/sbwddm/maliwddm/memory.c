@@ -131,6 +131,14 @@ static void FreeAllocation(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
         Alloc->CpuMap = NULL;
     }
     ExAcquireFastMutex(&A->MmuLock);
+    if (Alloc->GpuVa != 0) {             /* T39: the freed range, for matching GPU faults */
+        LONG i = (InterlockedIncrement(&A->FreedNext) - 1) & 255;
+        A->Freed[i].Va = Alloc->GpuVa;
+        A->Freed[i].Pages = Alloc->Pages;
+        A->Freed[i].Creator[0] = Alloc->Creator[0];
+        A->Freed[i].Creator[1] = Alloc->Creator[1];
+        A->Freed[i].Ms = (ULONG)((KeQueryInterruptTime() - A->StartTime) / 10000);
+    }
     if (Alloc->Mapped && A->GpuUp)
         MkMmuUnmapPages(&A->Gpu, Alloc->GpuVa, Alloc->Pages);
     if (Alloc->GpuVa != 0 && A->GpuUp)

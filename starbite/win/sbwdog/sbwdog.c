@@ -36,7 +36,7 @@
  * driver cannot see files yet, and the test boot restarted cleanly instead.
  *
  * T35, the crash ledger (sbcl_core.h, docs/WIN11-GPU.md 6.45): every boot, user boots included. The page
- * 0xFED1E000 survives warm resets; sbwdog marks the boot running, keeps its uptime, writes the stop code and its
+ * 0xFED13C00 (ramoops zone 0's last KiB, T39; 0xFED1E000 in T35-T38 did not survive) survives warm resets; sbwdog marks the boot running, keeps its uptime, writes the stop code and its
  * parameters (each resolved to module+offset against a snapshot of the loaded modules taken at 20/60/180 s and
  * every 10 min) from a bugcheck callback, and marks a clean shutdown (IRP_MJ_SHUTDOWN). The next boot reports the
  * previous one in State: PrevBootText (REG_SZ), PrevBootEnd (0 none, 1 no shutdown/bugcheck, 2 clean, 3 bugcheck),
@@ -417,9 +417,10 @@ static void ClInit(PDRIVER_OBJECT Drv)
     g.T0 = KeQueryInterruptTime();
     pa.QuadPart = (LONGLONG)SBCL_PA;
     g.Cl = (volatile ULONG *)MmMapIoSpaceEx(pa, SBCL_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
-    State(L"CrashLedger", g.Cl != NULL, FALSE);
+    State(L"CrashLedger", g.Cl != NULL ? 2 : 0, FALSE);   /* T39: 2 = the zone-0 location */
     if (!g.Cl)
         return;
+    g.Cl = (volatile ULONG *)((volatile UCHAR *)g.Cl + SBCL_OFF);
     for (ULONG i = 0; i < sizeof(g.Prev) / 4; i++)
         w[i] = READ_REGISTER_ULONG(&g.Cl[i]);
     valid = sbcl_valid(&g.Prev) != 0;
