@@ -67,7 +67,8 @@ static void page_cell(dc *d)
                                         "Connecting\xe2\x80\xa6" : "Searching\xe2\x80\xa6", 1);
         y = CL_NET + 47 * 4 + 8;
     }
-    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, y + 14), "Calls and SMS are not available yet.", 0, 0, W(.4f), 0);
+    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, y + 14), sh_comms_ok() ? "Calls and SMS work while Cellular is on (no call audio yet)." :
+                                                       "Calls and SMS are not available yet.", 0, 0, W(.4f), 0);
     d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, y + 32), "Cellular Data is off at every start.", 0, 0, W(.4f), 0);
 }
 
