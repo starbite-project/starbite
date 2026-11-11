@@ -897,7 +897,7 @@ void kmodem_cell(struct kcell *c)
 static struct sbm_dial_policy c_pol = { { 0 }, 0, 0, 0, SBM_DIAL_USER_CONFIRMED };
 static struct {
     int pending, audio, muted, ended, dtmf_on;
-    uint64_t t_dial, t_active, t_ended;
+    uint64_t t_dial, t_active, t_ended, t_buzz;
     uint32_t gen_seen;
     int ring_seen;
     char number[24], why[48];
@@ -976,6 +976,8 @@ static void kinbox_take(void)
         sb_strcpy(k->number, sizeof(k->number), m->from);
         sb_strcpy(k->text, sizeof(k->text), m->text);
         sb_log("comms: an SMS received (sender and text not logged)");
+        if (vib_ready())
+            vib_pulse(300);                          /* a short buzz for a new message */
         ui_mark_dirty();
     }
 }
@@ -1014,6 +1016,8 @@ static void comms_tick(void)
                 power_screen_set(1);                 /* the incoming-call screen, over the lock too */
             }
         } else {
+            if (kc.ring_seen)
+                vib_off();                           /* answered, declined or gone: stop the ringing buzz */
             kc.ring_seen = 0;
         }
         if (c->n && c->c[0].state == SBM_CALL_ACTIVE && !kc.t_active)
@@ -1036,6 +1040,12 @@ static void comms_tick(void)
             sb_strcpy(kc.why, sizeof(kc.why), "The call could not be placed");
         }
         ui_mark_dirty();
+    }
+    /* an incoming call rings as a buzz (no ringtone yet: no audio path): 1 s on, 2 s off while it rings */
+    if (kc.ring_seen && now - kc.t_buzz >= 3000) {
+        kc.t_buzz = now;
+        if (vib_ready())
+            vib_pulse(1000);
     }
     if (kc.pending && now - kc.t_dial > 30000) {
         kc.pending = 0;                              /* no answer from the CP at all */
