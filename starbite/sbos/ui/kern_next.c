@@ -145,7 +145,8 @@ static tk_comp comp;
 static int ready, baking, need_full, ticking, boosted;
 static uint64_t last_tick, boot_t0;
 /* the frame statistics of the current gesture (logged per film in the self test, per gesture otherwise) */
-static struct { uint32_t n, nhalf, over16, maxus, nboost, nwait; uint64_t sumus, sumwait; uint32_t hist[64]; uint8_t ms[120]; } FS;
+static struct { uint32_t n, nhalf, over16, maxus, nboost, nwait; uint64_t sumus, sumwait; uint32_t hist[64]; uint8_t ms[120];
+                 uint32_t shmax, shover; } FS;   /* P3i: the shell's own time (a touch's handling, a tick) */
 
 static void log_mb(const char *what, uint64_t v)
 {
@@ -437,7 +438,10 @@ static void stats_log(const char *what)
     ub_dec(&u, tk_heap_peak() >> 20);
     ub_s(&u, "), largest free ");
     ub_dec(&u, tk_heap_largest() >> 20);
-    ub_s(&u, " MiB");
+    ub_s(&u, " MiB; shell max ");
+    ub_dec(&u, FS.shmax / 1000);
+    ub_s(&u, " ms, over 8 ms: ");
+    ub_dec(&u, FS.shover);
     sb_log(u.b);
     /* every frame's work in ms, in order (P2r: the numbers the main session sends back; 60 a line), then the
      * waits for the display (the last flip latching at the panel's TE) */
@@ -494,6 +498,23 @@ void sh_haptic(void)
     (void)vib_pulse(10);
 #endif
 }
+/* P3i: the shell's time outside the compositor (a tap that builds a page runs before the next frame: the pause
+ * the user sees is this, not the frame's own time); logged when over 8 ms, counted per gesture */
+static void shell_time(const char *what, uint64_t t0)
+{
+    uint32_t us = (uint32_t)(tk_us() - t0);
+    if (us > FS.shmax) FS.shmax = us;
+    if (us <= 8000) return;
+    FS.shover++;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: shell ");
+    ub_s(&u, what);
+    ub_c(&u, ' ');
+    ub_dec(&u, us / 1000);
+    ub_s(&u, " ms");
+    sb_log(u.b);
+}
 static uint64_t tick3;                      /* the next frame's time in thirds of a ms: 16.67 ms apart (the TE's) */
 static void frame(void)
 {
@@ -510,7 +531,9 @@ static void frame(void)
     uint64_t now = sb_ms();
     float dt = last_tick ? (float)(now - last_tick) / 1000.0f : 1.0f / 60;
     last_tick = now;
+    uint64_t st0 = tk_us();
     int mv = sh_tick(dt, (float)now);
+    shell_time("tick", st0);
     int motion = mv || sh_moving();
     tk_comp_frame(&comp, motion, 0);
     present();
@@ -682,7 +705,9 @@ void next_kevent(const void *evp)
     const struct kin *e = evp;
     int ph = e->type == KIN_PRESS ? 0 : e->type == KIN_MOVE ? 1 : e->type == KIN_RELEASE ? 2 : -1;
     if (ph < 0) return;
+    uint64_t st0 = tk_us();
     sh_touch(ph, e->x / TK_PT, e->y / TK_PT, (float)sb_ms());
+    shell_time(ph == 0 ? "touch down" : ph == 1 ? "touch move" : "touch up", st0);
     start_ticking();
 }
 
@@ -877,7 +902,7 @@ int next_selftest_step(void)
         const step *p = &F.s[F.i];
         if (F.down && p->kind == 5) F.down = 0;
         else if (F.down) {
-            sh_touch(2, p->kind == 2 ? p->x1 : p->x0, p->kind == 2 ? p->y1 : p->y0, (float)sb_ms());
+            { uint64_t st0 = tk_us(); sh_touch(2, p->kind == 2 ? p->x1 : p->x0, p->kind == 2 ? p->y1 : p->y0, (float)sb_ms()); shell_time("touch up", st0); }
             F.down = 0;
             start_ticking();
         }
@@ -893,7 +918,7 @@ int next_selftest_step(void)
                 power_key_short();
             }
         } else if (p->kind) {
-            if (!F.down) { sh_touch(0, p->x0, p->y0, (float)sb_ms()); F.down = 1; start_ticking(); }
+            if (!F.down) { uint64_t st0 = tk_us(); sh_touch(0, p->x0, p->y0, (float)sb_ms()); shell_time("touch down", st0); F.down = 1; start_ticking(); }
             else if (p->kind == 2) {
                 float u = (t - F.s0) / p->ms;
                 sh_touch(1, p->x0 + (p->x1 - p->x0) * u, p->y0 + (p->y1 - p->y0) * u, (float)sb_ms());

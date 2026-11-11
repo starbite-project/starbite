@@ -141,6 +141,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
     sh_idle();
     while (t < total || sh_moving()) {
         /* the finger: events at 120 Hz between frames (the touch controller's rate) */
+        uint64_t sh0 = tk_us();          /* P3i: the shell's own time in the frame (touch handling + tick) */
         for (int sub = 1; sub <= 2; sub++) {
             float te = t + dt * sub / 2;
             while (si < n && te >= s0 + st[si].ms) {
@@ -174,11 +175,12 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
             }
         }
         int mv = sh_tick(dt / 1000, t);
+        double shell_ms = (tk_us() - sh0) / 1000.0;
         int motion = mv || sh_moving();
         tk_comp_frame(c, motion, 0);
         fprintf(log, "F %d %.1f %s px %d comp %.2f present %.2f total %.2f", frame, t, c->last_half ? "half" : "full",
                c->last_px, c->us_comp / 1000.0, c->us_present / 1000.0, c->last_us / 1000.0);
-        fprintf(log, " idle %.2f halfs %.2f", c->us_idle / 1000.0, c->us_halfs / 1000.0);
+        fprintf(log, " idle %.2f halfs %.2f shell %.2f", c->us_idle / 1000.0, c->us_halfs / 1000.0, shell_ms);
         if (getenv("SBTK_HASH")) {             /* what the display shows now (two buffers: the one just presented) */
             uint64_t hh = 1469598103934665603ULL;
             for (size_t i = 0; i < (size_t)TK_W * TK_H; i++) hh = (hh ^ c->panel.px[i]) * 1099511628211ULL;
