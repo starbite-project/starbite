@@ -1,0 +1,9 @@
+#!/bin/sh
+# meson 1.6 reads clang-cl's "Target: arm64ec-..." as machine "arm" and passes /MACHINE:arm.
+# ARM64EC archives need /machine:arm64ec (it also makes llvm-lib write the EC symbol map).
+for a in "$@"; do
+  shift
+  case "$a" in /MACHINE:arm|/machine:arm) a=/machine:arm64ec ;; esac
+  set -- "$@" "$a"
+done
+exec /usr/bin/llvm-lib-20 "$@"

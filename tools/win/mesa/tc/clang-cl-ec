@@ -1,0 +1,3 @@
+#!/bin/sh
+# ARM64EC clang-cl (LLVM 20). clang-18 stays the system default; this wrapper names -20 explicitly.
+exec clang-20 --driver-mode=cl -fuse-ld=lld --target=arm64ec-pc-windows-msvc -fms-compatibility-version=19.44 -imsvc /Users/dev/sbwin/msvc/include -imsvc /Users/dev/sbwin/kit/Include/10.0.26100.0/ucrt -imsvc /Users/dev/sbwin/kit/Include/10.0.26100.0/shared -imsvc /Users/dev/sbwin/kit/Include/10.0.26100.0/um -imsvc /Users/dev/sbwin/kit/Include/10.0.26100.0/winrt "$@"

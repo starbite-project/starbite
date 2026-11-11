@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /home/dev.guest/sbmesa/tc/clang-cl-ec "$@"

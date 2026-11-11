@@ -1,0 +1,2 @@
+#!/bin/sh
+exec clang --driver-mode=cl -fuse-ld=lld --target=x86_64-pc-windows-msvc -fms-compatibility-version=19.44 -imsvc /Users/dev/sbwin/msvc/include -imsvc /Users/dev/sbwin/kit/Include/10.0.26100.0/ucrt -imsvc /Users/dev/sbwin/kit/Include/10.0.26100.0/shared -imsvc /Users/dev/sbwin/kit/Include/10.0.26100.0/um -imsvc /Users/dev/sbwin/kit/Include/10.0.26100.0/winrt "$@"

@@ -1,0 +1,4 @@
+#!/bin/sh
+# lld-link 20 for ARM64EC links (meson finds it by the name lld-link).
+# asan_noop_ec.obj: see asan_noop_ec.c (libcpmt alternatename that lld 20 does not resolve for ARM64EC).
+exec /usr/bin/lld-link-20 "$@" /home/dev.guest/sbmesa/tc/ec/asan_noop_ec.obj
