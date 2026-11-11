@@ -48,5 +48,8 @@ void sh_slept(void);
 /* P2r: the Control Centre's brightness slider (the panel's levels 1 dim .. 4 bright), and the level at start */
 void sh_brightness(int level);
 void sh_bright_now(int level);
+/* P2y: the apps' live values besides sh_status: charging or not, the software's name and version */
+void sh_sysinfo(int charging, const char *version);
+void sh_alarm(int on, int h, int m);      /* the next alarm for the lock's widget (on 0: "No alarm") */
 
 #endif
