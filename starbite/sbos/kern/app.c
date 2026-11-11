@@ -663,6 +663,8 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
     case SET_SURV_LAST2_AUTO:
         surv_last2_auto = arg[1] != 0;
         return 0;
+    case SET_SURV_SENSORS:              /* 1.2-alpha28: the sensor hub on demand */
+        return surv_sensors_on(arg[1] != 0) < 0 ? SBOS_EAGAIN : 0;
     case SET_SURV_GNSS: {               /* 1.2-alpha28: the card's last fix as the location */
         struct gnss_fix f;
         if (!arg[1] || gnss_lastfix(&f, 1) != 1)
@@ -1102,6 +1104,19 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         }
         case SET_SURV_LAST2: return surv_last2();
         case SET_SURV_LAST2_AUTO: return surv_last2_auto;
+        case SET_SURV_SENSORS: return surv_sensors_state();
+        case SET_SURV_HEADING: {
+            int h = 0, a = 0;
+            return surv_heading(&h, &a) ? (int64_t)(h | (a & 3) << 16) : -1;
+        }
+        case SET_SURV_TILT: {
+            int pi = 0, ro = 0;
+            return surv_tilt(&pi, &ro) ? (int64_t)((pi + 1000) | (ro + 1000) << 16) : -1;
+        }
+        case SET_SURV_STEPS: {
+            uint32_t n = 0;
+            return surv_steps(&n) ? (int64_t)n : -1;
+        }
         case SET_SURV_GNSS: {
             struct gnss_fix f;
             struct sbos_time t;
@@ -1121,7 +1136,8 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         if (!front)
             return SBOS_EPERM;
         int64_t r = setting_set_k(arg[0], arg[1]);
-        if (r == 0 && arg[0] != SET_GPU_HEAT && arg[0] != SET_SURV_USB && arg[0] != SET_SURV_LAST2)
+        if (r == 0 && arg[0] != SET_GPU_HEAT && arg[0] != SET_SURV_USB && arg[0] != SET_SURV_LAST2 &&
+            arg[0] != SET_SURV_SENSORS)
             settings_changed();             /* saved in 3 s where there is a state slot (the GPU never is) */
         return r;
     }

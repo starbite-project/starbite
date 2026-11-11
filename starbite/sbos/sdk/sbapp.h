@@ -286,7 +286,13 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
        SET_SURV_LAST2 = 38 /* Last 2 % mode: 1 on, 0 off */,
        SET_SURV_LAST2_AUTO = 39 /* Last 2 % at 3 % instead of switching off: 1 (the default) or 0. Remembered */,
        SET_SURV_GNSS = 40 /* 1.2-alpha28: read: the age in minutes of the GPS fix Android left on the card
-                             (/STARBITE/GNSS/LASTFIX.TXT), -1 none, -2 no card; write 1: use it as the location */ };
+                             (/STARBITE/GNSS/LASTFIX.TXT), -1 none, -2 no card; write 1: use it as the location */,
+       SET_SURV_SENSORS = 41 /* write 1: start the sensor hub or keep it running (stops 60 s after the last 1), 0: stop.
+                                Reads 0 off, 1 starting, 2 running, 3 failed (the reason as a notification) */,
+       SET_SURV_HEADING = 42 /* read: the heading in 0.1 degrees from magnetic north | the calibration (0..3) << 16;
+                                -1 not valid now */,
+       SET_SURV_TILT = 43 /* read: (pitch + 1000) | (roll + 1000) << 16, 0.1 degrees; -1 not valid now */,
+       SET_SURV_STEPS = 44 /* read: steps since the hub started; -1 not running */ };
 
 /* 1.0-rc3: the full-heat battery data for the minutes-left estimates (Heat's confirmation and its live readout).
  * Measured on the phone (rc2, 2026-11-08, Manual flat out, 7 cores + GPU): 2.8 A at 3.67 V (about 10 W; peak 2.86 A),

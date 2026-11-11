@@ -15,7 +15,7 @@ SBAPP_DEFINE("emergency", "Emergency", SBOS_P_ALARM | SBOS_P_LIGHT, 0xffff453aU,
 #define ORANGE 0xffff9f0aU
 #define GREEN 0xff30d158U
 
-enum { P_MAIN, P_USB, P_SOS, P_SUN, P_LAST2 };
+enum { P_MAIN, P_USB, P_SOS, P_SUN, P_LAST2, P_COMPASS };
 static int page;
 static int loc_field;                       /* 1 latitude, 2 longitude being typed */
 
@@ -159,6 +159,69 @@ static void show_last2(void)
     ui_textline("Instead of switching off at 3 %, the phone runs on to 1 %.", 0xffffffffU);
 }
 
+/* 1.2-alpha28: the sensor hub (compass, level, steps); started while this page is open */
+static void dec1(struct fmt *f, int v_x10)
+{
+    if (v_x10 < 0) {
+        fmt_c(f, '-');
+        v_x10 = -v_x10;
+    }
+    fmt_u(f, (uint64_t)(v_x10 / 10));
+    fmt_c(f, '.');
+    fmt_c(f, (char)('0' + v_x10 % 10));
+}
+
+static void show_compass(void)
+{
+    static const char *const pt[8] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+    int st = setting_get(SET_SURV_SENSORS), h = setting_get(SET_SURV_HEADING), t = setting_get(SET_SURV_TILT),
+        n = setting_get(SET_SURV_STEPS);
+    struct fmt f;
+    ui_title("Compass and level");
+    if (st == 1) {
+        ui_big("COMPASS", "Starting...", ORANGE);
+        ui_textline("The sensor hub is starting (about 4 seconds).", GREY);
+        return;
+    }
+    if (st == 3 || st == 0) {
+        ui_big("COMPASS", "Not running", ORANGE);
+        ui_textline("The sensor hub did not start: the reason is in the notifications.", GREY);
+        ui_textline("It needs its firmware on the card: /STARBITE/FW/BCM4775.BIN.", GREY);
+        ui_button(9, "Try again", 0, 0);
+        return;
+    }
+    fmt_init(&f);
+    if (h >= 0) {
+        int d = h & 0xffff;
+        fmt_u(&f, (uint64_t)((d + 5) / 10 % 360));
+        fmt_s(&f, "\xc2\xb0  ");
+        fmt_s(&f, pt[((d + 225) / 450) % 8]);
+        ui_big("HEADING (MAGNETIC)", f.b, 0xffffffffU);
+        if (((h >> 16) & 3) < 2)
+            ui_textline("Calibrate: move the phone in a figure 8 a few times, away from metal.", ORANGE);
+        ui_textline("Where the top of the phone points. Hold it flat for the best reading.", GREY);
+    } else {
+        ui_big("HEADING (MAGNETIC)", "--", 0xffffffffU);
+        ui_textline("No heading yet (a magnet or metal nearby, or still starting).", GREY);
+    }
+    if (t >= 0) {
+        int pitch = (t & 0xffff) - 1000, roll = ((t >> 16) & 0xffff) - 1000;
+        fmt_init(&f);
+        fmt_s(&f, "Level: front ");
+        dec1(&f, pitch);
+        fmt_s(&f, "\xc2\xb0, side ");
+        dec1(&f, roll);
+        fmt_s(&f, "\xc2\xb0");
+        ui_textline(f.b, (pitch > -10 && pitch < 10 && roll > -10 && roll < 10) ? GREEN : 0xffffffffU);
+    }
+    if (n >= 0) {
+        fmt_init(&f);
+        fmt_s(&f, "Steps since this page opened: ");
+        fmt_u(&f, (uint64_t)n);
+        ui_textline(f.b, 0xffffffffU);
+    }
+}
+
 static void show(void)
 {
     ui_begin();
@@ -167,6 +230,7 @@ static void show(void)
     case P_SOS: show_sos(); break;
     case P_SUN: show_sun(); break;
     case P_LAST2: show_last2(); break;
+    case P_COMPASS: show_compass(); break;
     default:
         break;
     }
@@ -184,7 +248,7 @@ static void show(void)
         ui_button(32, "Sun", "Sunrise, sunset", UI_HALF);
         ui_button(33, "Last 2 %", "Only the essentials", UI_HALF);
         ui_button(34, "Survival guide", "First aid, water, shelter, signals", 0);
-        ui_textline("Compass and level: the sensor hub driver is being tested; not in this version yet.", GREY);
+        ui_button(35, "Compass and level", "Heading, tilt, steps", 0);
         ui_textline("Calls and messages: emergency calls need the modem; nothing here calls or sends.", GREY);
     }
     ui_end();
@@ -232,6 +296,17 @@ void app_event(const struct sbos_event *ev)
         show();
         break;
     case EV_APP_TIMER:
+        if (ev->id == 2) {                  /* the compass page: 5 redraws a second; a keep-alive each second */
+            static unsigned k;
+            if (page != P_COMPASS) {
+                timer_cancel(2);
+                break;
+            }
+            if (++k % 5 == 0)
+                setting_set(SET_SURV_SENSORS, 1);
+            show();
+            break;
+        }
         if (ev->id == 1) {
             if (page != P_USB || setting_get(SET_SURV_USB) == 0)
                 timer_cancel(1);
@@ -263,10 +338,22 @@ void app_event(const struct sbos_event *ev)
             app_open("info");
         else if (ev->id == 34)
             app_open("guide");              /* 1.2-alpha28 */
-        else if (ev->id >= 30 && ev->id <= 33) {
+        else if (ev->id == 35 || (ev->id == 9 && page == P_COMPASS)) {
+            page = P_COMPASS;
+            setting_set(SET_SURV_SENSORS, 1);
+            timer_set(2, 200, 1);
+        } else if (ev->id >= 30 && ev->id <= 33) {
             page = P_USB + (int)(ev->id - 30);
             if (page == P_USB && setting_get(SET_SURV_USB) > 0)
                 timer_set(1, 500, 1);
+        } else if (ev->id == 40) {          /* Back to Emergency */
+            if (page == P_COMPASS) {
+                timer_cancel(2);
+                setting_set(SET_SURV_SENSORS, 0);
+            }
+            page = P_MAIN;
+            loc_field = 0;
+            timer_cancel(1);
         } else if (ev->id == 2 && page == P_USB)
             setting_set(SET_SURV_USB, 0);
         else if (ev->id == 6 || ev->id == 7)
@@ -288,6 +375,10 @@ void app_event(const struct sbos_event *ev)
         show();
         break;
     case EV_APP_BACK:                       /* the kernel closes the app: start at the main page next time */
+        if (page == P_COMPASS) {
+            timer_cancel(2);
+            setting_set(SET_SURV_SENSORS, 0);
+        }
         page = P_MAIN;
         loc_field = 0;
         timer_cancel(1);
