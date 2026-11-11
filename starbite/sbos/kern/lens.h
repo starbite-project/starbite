@@ -90,4 +90,27 @@ static inline void lens_shade(float rgb[3], float ox, float oy, float d)
         }
     }
 }
+/* the same shading for a premultiplied backdrop with alpha (c[3]; glass baked into a layer over its own content,
+ * which may be transparent): each step is a white or a black layer over it (for c[3] = 1, lens_shade exactly), so
+ * glass over nothing is its veil, its inner shadow and its rim over whatever lies under the layer */
+static inline void lens_shade_pm(float c[4], float ox, float oy, float d)
+{
+    float Y = .2126f * c[0] + .7152f * c[1] + .0722f * c[2];
+    float wv = .10f * lens_sat((.62f - Y) * 2.0f), kv = .12f * lens_sat((Y - .62f) * 2.5f);
+    float sh = 0, sp = 0;
+    if (d < LENS_SHW) {
+        float m2 = ox * ox + oy * oy, f = 0;
+        if (m2 > 1e-6f) f = -(ox * LENS_LX + oy * LENS_LY) / lens_sqrt(m2);
+        float e = 1 - d * (1.0f / LENS_SHW), fp = f > 0 ? f : 0, fn = f < 0 ? -f : 0;
+        float e1 = lens_sat(1 - d * (1.0f / LENS_RIM)), g = lens_sat(1 - d * (1.0f / LENS_GLOW));
+        sh = .20f * e * e * (.55f - .45f * f);
+        sp = e1 * (.16f + .62f * fp * fp + .30f * fn * fn) + .14f * fp * g * g;
+    }
+    float w[4] = { wv, kv, sh, sp }, white[4] = { 1, 0, 0, 1 };
+    for (int k = 0; k < 4; ++k) {
+        float a = w[k];
+        for (int q = 0; q < 3; ++q) c[q] = c[q] * (1 - a) + white[k] * a;
+        c[3] = c[3] * (1 - a) + a;
+    }
+}
 #endif
